@@ -46,12 +46,10 @@ static func load_texture(texture_path: String) -> ImageTexture:
 	if data.size() >= 4:
 		var magic := data.decode_u32(0)
 		if magic == 0x20534444:  # "DDS " magic
-			# DDS file - try Godot's loader first, fall back to custom loader
-			image = Image.new()
-			var err := image.load_dds_from_buffer(data)
-			if err != OK or image.is_empty():
-				# Godot's loader failed (likely truncated mipmaps) - use custom loader
-				image = DDS.load_from_buffer(data, true)  # base_mip_only=true
+			# Use custom DDS loader directly - Morrowind DDS files have truncated
+			# mipmap chains that cause Godot's loader to spam error messages even
+			# when it partially succeeds. Our custom loader handles this gracefully.
+			image = DDS.load_from_buffer(data, true)  # base_mip_only=true
 
 	# If not DDS or DDS loading failed, try other formats
 	if image == null or image.is_empty():

@@ -30,6 +30,99 @@ far = 50000.0
 
 [node name="UI" type="CanvasLayer" parent="."]
 
+[node name="LoadingOverlay" type="ColorRect" parent="UI"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.1, 0.1, 0.15, 0.9)
+
+[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -50.0
+offset_right = 200.0
+offset_bottom = 50.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="LoadingLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+layout_mode = 2
+horizontal_alignment = 1
+text = "Loading..."
+
+[node name="ProgressBar" type="ProgressBar" parent="UI/LoadingOverlay/VBox"]
+custom_minimum_size = Vector2(400, 25)
+layout_mode = 2
+max_value = 100.0
+value = 0.0
+show_percentage = true
+
+[node name="StatusLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+layout_mode = 2
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Initializing..."
+
+[node name="LeftPanel" type="Panel" parent="UI"]
+anchors_preset = 0
+offset_right = 300.0
+offset_bottom = 720.0
+
+[node name="VBox" type="VBoxContainer" parent="UI/LeftPanel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="BrowserTitle" type="Label" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "Cell Browser"
+
+[node name="HSeparator" type="HSeparator" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+
+[node name="SearchEdit" type="LineEdit" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+placeholder_text = "Search cells..."
+clear_button_enabled = true
+
+[node name="FilterContainer" type="HBoxContainer" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+
+[node name="InteriorBtn" type="Button" parent="UI/LeftPanel/VBox/FilterContainer"]
+layout_mode = 2
+toggle_mode = true
+button_pressed = true
+text = "Interior"
+
+[node name="ExteriorBtn" type="Button" parent="UI/LeftPanel/VBox/FilterContainer"]
+layout_mode = 2
+toggle_mode = true
+text = "Exterior"
+
+[node name="AllBtn" type="Button" parent="UI/LeftPanel/VBox/FilterContainer"]
+layout_mode = 2
+toggle_mode = true
+text = "All"
+
+[node name="ResultCount" type="Label" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+text = "0 cells"
+
+[node name="CellList" type="ItemList" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+allow_search = true
+
 [node name="Panel" type="Panel" parent="UI"]
 anchors_preset = 1
 anchor_left = 1.0

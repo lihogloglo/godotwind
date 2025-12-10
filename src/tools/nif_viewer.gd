@@ -5,6 +5,7 @@ extends Node3D
 # Preload NIF reader/converter
 const NIFReader := preload("res://src/core/nif/nif_reader.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
+const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
 const BSAReader := preload("res://src/core/bsa/bsa_reader.gd")
 const TextureLoader := preload("res://src/core/texture/texture_loader.gd")
 
@@ -422,10 +423,14 @@ func _load_nif_mesh(nif_path: String) -> void:
 
 	# Convert to Godot scene
 	var converter := NIFConverter.new()
+	converter.load_animations = true  # Enable animation extraction
 	var converted_node := converter.convert_buffer(nif_data)
 	if converted_node == null:
 		_log("[color=red]Error: Failed to convert NIF to Godot scene[/color]")
 		return
+
+	# NOTE: Coordinate conversion (Z-up to Y-up) is now done internally by nif_converter
+	# Do NOT apply additional rotation here!
 
 	# Clear previous mesh
 	for child in mesh_container.get_children():
@@ -434,6 +439,45 @@ func _load_nif_mesh(nif_path: String) -> void:
 	# Add new mesh
 	mesh_container.add_child(converted_node)
 	converted_node.owner = mesh_container
+
+	# Find and start playing animations if present
+	var anim_player := _find_animation_player(converted_node)
+	var skeleton := _find_skeleton(converted_node)
+
+	# Try to load animations from KF file if model has a skeleton but no animations
+	if skeleton and (anim_player == null or anim_player.get_animation_list().is_empty()):
+		var kf_animations := _try_load_kf_animations(normalized, skeleton)
+		if not kf_animations.is_empty():
+			# Create AnimationPlayer if needed
+			if anim_player == null:
+				anim_player = AnimationPlayer.new()
+				anim_player.name = "AnimationPlayer"
+				converted_node.add_child(anim_player)
+				anim_player.owner = converted_node
+
+			# Add loaded animations
+			var anim_lib := AnimationLibrary.new()
+			for anim_name: String in kf_animations:
+				anim_lib.add_animation(anim_name, kf_animations[anim_name])
+			anim_player.add_animation_library("", anim_lib)
+			_log("  Loaded %d animations from .kf file" % kf_animations.size())
+
+	if anim_player:
+		var anim_list := anim_player.get_animation_list()
+		if not anim_list.is_empty():
+			_log("  Animations available: %s" % ", ".join(anim_list.slice(0, 10)))
+			if anim_list.size() > 10:
+				_log("    ... and %d more" % (anim_list.size() - 10))
+			# Play the first animation (or "Idle" if available)
+			var anim_to_play := anim_list[0]
+			for name in ["Idle", "idle", "Idle1"]:
+				if name in anim_list:
+					anim_to_play = name
+					break
+			anim_player.play(anim_to_play)
+			_log("  Playing animation: %s" % anim_to_play)
+		else:
+			_log("  AnimationPlayer present but no animations")
 
 	# Center the mesh and frame camera
 	var aabb := _get_combined_aabb(converted_node)
@@ -549,3 +593,72 @@ func _log(text: String) -> void:
 	for tag in ["[b]", "[/b]", "[u]", "[/u]", "[color=red]", "[color=green]", "[color=yellow]", "[/color]"]:
 		plain = plain.replace(tag, "")
 	print("[NIFViewer] %s" % plain)
+
+
+## Find AnimationPlayer in node tree (searches children recursively)
+func _find_animation_player(node: Node) -> AnimationPlayer:
+	if node is AnimationPlayer:
+		return node as AnimationPlayer
+
+	for child in node.get_children():
+		var found := _find_animation_player(child)
+		if found:
+			return found
+
+	return null
+
+
+## Find Skeleton3D in node tree (searches children recursively)
+func _find_skeleton(node: Node) -> Skeleton3D:
+	if node is Skeleton3D:
+		return node as Skeleton3D
+
+	for child in node.get_children():
+		var found := _find_skeleton(child)
+		if found:
+			return found
+
+	return null
+
+
+## Try to load animations from a .kf file for the given mesh path
+## Returns Dictionary of anim_name -> Animation
+func _try_load_kf_animations(mesh_path: String, skeleton: Skeleton3D) -> Dictionary:
+	# Determine which .kf file to load based on the mesh path
+	# For character models (meshes\b\ or meshes\r\), use xbase_anim.kf
+	var kf_paths: Array[String] = []
+
+	if mesh_path.find("\\b\\") >= 0 or mesh_path.find("\\r\\") >= 0:
+		# Character body/head parts use the main character animation file
+		kf_paths.append("meshes\\xbase_anim.kf")
+		kf_paths.append("meshes\\xbase_anim_female.kf")
+	elif mesh_path.find("\\c\\") >= 0:
+		# Creature - try to find creature-specific .kf file
+		var base_name := mesh_path.get_basename()
+		kf_paths.append(base_name + ".kf")
+	else:
+		# Try same-name .kf file
+		var kf_path := mesh_path.get_basename() + ".kf"
+		kf_paths.append(kf_path)
+
+	# Try each potential .kf file
+	for kf_path in kf_paths:
+		var normalized_kf := kf_path.to_lower().replace("/", "\\")
+		if _bsa_file_index.has(normalized_kf):
+			_log("  Found animation file: %s" % kf_path)
+			var cached: Dictionary = _bsa_file_index[normalized_kf]
+			var reader: BSAReader = cached["reader"]
+			var entry = cached["entry"]
+
+			var kf_data: PackedByteArray = reader.extract_file_entry(entry)
+			if kf_data.is_empty():
+				continue
+
+			var kf_loader := NIFKFLoader.new()
+			kf_loader.debug_mode = false
+			var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
+
+			if not animations.is_empty():
+				return animations
+
+	return {}

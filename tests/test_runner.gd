@@ -23,6 +23,7 @@ func _init() -> void:
 	_run_test_suite("ESM Manager Tests", _test_esm_manager)
 	_run_test_suite("BSA Archive Tests", _test_bsa_archive)
 	_run_test_suite("NIF Model Tests", _test_nif_model)
+	_run_test_suite("NIF Collision Tests", _test_nif_collision)
 
 	# Print summary
 	_print_summary()
@@ -342,6 +343,7 @@ func _test_nif_model() -> void:
 		print("  SKIP: Morrowind.bsa not found - skipping NIF integration tests")
 	else:
 		_test_nif_integration(morrowind_bsa, reader_script, converter_script, defs_script)
+		_test_skinned_nif(morrowind_bsa)
 
 
 func _test_nif_integration(bsa_path: String, reader_script: GDScript, converter_script: GDScript, defs_script: GDScript) -> void:
@@ -441,6 +443,281 @@ func _count_mesh_instances(node: Node) -> int:
 	for child in node.get_children():
 		count += _count_mesh_instances(child)
 	return count
+
+
+func _test_skinned_nif(bsa_path: String) -> void:
+	# Test skinned NIF loading with skeleton builder
+	var bsa_reader_script: GDScript = load("res://src/core/bsa/bsa_reader.gd")
+	var nif_reader_script: GDScript = load("res://src/core/nif/nif_reader.gd")
+	var nif_defs_script: GDScript = load("res://src/core/nif/nif_defs.gd")
+	var skeleton_builder_script: GDScript = load("res://src/core/nif/nif_skeleton_builder.gd")
+
+	_assert_not_null(skeleton_builder_script, "NIFSkeletonBuilder script loads")
+	if skeleton_builder_script == null:
+		return
+
+	var bsa: RefCounted = bsa_reader_script.new()
+	if bsa.open(bsa_path) != OK:
+		print("  SKIP: Failed to open BSA for skinned NIF test")
+		return
+
+	# Try to find a skinned model - character heads have skinning
+	var skinned_models: Array[String] = [
+		"meshes\\b\\b_n_dark elf_m_head_01.nif",
+		"meshes\\b\\b_n_breton_m_head_01.nif",
+		"meshes\\b\\b_n_nord_m_head_01.nif",
+	]
+
+	var nif_data: PackedByteArray
+	var model_path: String = ""
+	for path in skinned_models:
+		if bsa.has_file(path):
+			nif_data = bsa.extract_file(path)
+			if not nif_data.is_empty():
+				model_path = path
+				break
+
+	if nif_data.is_empty():
+		print("  SKIP: No skinned NIF models found in BSA")
+		return
+
+	print("  INFO: Testing skinned model: %s" % model_path)
+
+	# Parse NIF
+	var reader: RefCounted = nif_reader_script.new()
+	var result: Error = reader.load_buffer(nif_data)
+	_assert_eq(result, OK, "Skinned NIF parses successfully")
+	if result != OK:
+		return
+
+	# Find skin instance - check by record_type string
+	var skin_instance = null
+	for record in reader.records:
+		if record.record_type == "NiSkinInstance":
+			skin_instance = record
+			break
+
+	_assert_not_null(skin_instance, "Skinned NIF has NiSkinInstance")
+	if skin_instance == null:
+		return
+
+	print("  INFO: Found NiSkinInstance with %d bones" % skin_instance.bone_indices.size())
+
+	# Test skeleton builder
+	var builder: RefCounted = skeleton_builder_script.new()
+	builder.init(reader)
+
+	var skeleton: Skeleton3D = builder.build_skeleton(skin_instance)
+	_assert_not_null(skeleton, "SkeletonBuilder creates Skeleton3D")
+	if skeleton == null:
+		return
+
+	var bone_count: int = skeleton.get_bone_count()
+	_assert(bone_count > 0, "Skeleton has bones")
+	_assert_eq(bone_count, skin_instance.bone_indices.size(), "Skeleton bone count matches NiSkinInstance")
+
+	print("  INFO: Created Skeleton3D with %d bones" % bone_count)
+
+	# Print first few bones
+	for i in range(mini(bone_count, 5)):
+		var bone_name: String = skeleton.get_bone_name(i)
+		var parent_idx: int = skeleton.get_bone_parent(i)
+		var parent_name: String = skeleton.get_bone_name(parent_idx) if parent_idx >= 0 else "(root)"
+		print("    Bone %d: %s -> %s" % [i, bone_name, parent_name])
+
+	if bone_count > 5:
+		print("    ... and %d more bones" % (bone_count - 5))
+
+	# Cleanup
+	skeleton.free()
+	bsa.close()
+
+
+func _test_nif_collision() -> void:
+	# Test NIFCollisionBuilder
+	var collision_builder_script: GDScript = load("res://src/core/nif/nif_collision_builder.gd")
+	_assert_not_null(collision_builder_script, "NIFCollisionBuilder script loads")
+
+	if collision_builder_script == null:
+		return
+
+	# Test NIFDefs bounding volume constants and classes
+	var defs_script: GDScript = load("res://src/core/nif/nif_defs.gd")
+	_assert_eq(defs_script.BV_SPHERE, 0, "BV_SPHERE constant = 0")
+	_assert_eq(defs_script.BV_BOX, 1, "BV_BOX constant = 1")
+	_assert_eq(defs_script.BV_CAPSULE, 2, "BV_CAPSULE constant = 2")
+
+	# Test collision flags
+	_assert_eq(defs_script.FLAG_MESH_COLLISION, 0x0002, "FLAG_MESH_COLLISION = 0x0002")
+	_assert_eq(defs_script.FLAG_BBOX_COLLISION, 0x0004, "FLAG_BBOX_COLLISION = 0x0004")
+
+	# Test BoundingVolume class instantiation
+	var bv = defs_script.BoundingVolume.new()
+	_assert_not_null(bv, "BoundingVolume class instantiates")
+	_assert_eq(bv.type, defs_script.BV_BASE, "BoundingVolume default type is BASE")
+
+	# Test BoundingSphere instantiation
+	var sphere = defs_script.BoundingSphere.new()
+	_assert_not_null(sphere, "BoundingSphere class instantiates")
+	_assert_eq(sphere.radius, 0.0, "BoundingSphere default radius is 0")
+
+	# Test BoundingBox instantiation
+	var box = defs_script.BoundingBox.new()
+	_assert_not_null(box, "BoundingBox class instantiates")
+	_assert_eq(box.extents, Vector3.ONE, "BoundingBox default extents")
+
+	# Test BoundingCapsule instantiation
+	var capsule = defs_script.BoundingCapsule.new()
+	_assert_not_null(capsule, "BoundingCapsule class instantiates")
+	_assert_eq(capsule.radius, 0.0, "BoundingCapsule default radius is 0")
+
+	# Test with actual BSA if available
+	var morrowind_bsa: String = _find_morrowind_bsa()
+	if morrowind_bsa.is_empty():
+		print("  SKIP: Morrowind.bsa not found - skipping collision integration tests")
+	else:
+		_test_collision_integration(morrowind_bsa)
+
+
+func _test_collision_integration(bsa_path: String) -> void:
+	print("  INFO: Testing NIF collision with BSA: %s" % bsa_path)
+
+	var bsa_reader_script: GDScript = load("res://src/core/bsa/bsa_reader.gd")
+	var nif_reader_script: GDScript = load("res://src/core/nif/nif_reader.gd")
+	var nif_converter_script: GDScript = load("res://src/core/nif/nif_converter.gd")
+	var collision_builder_script: GDScript = load("res://src/core/nif/nif_collision_builder.gd")
+
+	var bsa: RefCounted = bsa_reader_script.new()
+	if bsa.open(bsa_path) != OK:
+		print("  SKIP: Failed to open BSA for collision test")
+		return
+
+	# Create instance to access enum values
+	var builder_instance: RefCounted = collision_builder_script.new()
+
+	# Test CollisionMode enum exists (access via instance)
+	_assert(builder_instance.CollisionMode.TRIMESH == 0, "CollisionMode.TRIMESH = 0")
+	_assert(builder_instance.CollisionMode.CONVEX == 1, "CollisionMode.CONVEX = 1")
+	_assert(builder_instance.CollisionMode.AUTO_PRIMITIVE == 2, "CollisionMode.AUTO_PRIMITIVE = 2")
+
+	# Test get_recommended_mode static function
+	var arch_mode: int = collision_builder_script.get_recommended_mode("meshes\\x\\test.nif")
+	_assert_eq(arch_mode, builder_instance.CollisionMode.TRIMESH, "Architecture uses TRIMESH")
+
+	var item_mode: int = collision_builder_script.get_recommended_mode("meshes\\m\\test.nif")
+	_assert_eq(item_mode, builder_instance.CollisionMode.AUTO_PRIMITIVE, "Items use AUTO_PRIMITIVE")
+
+	# Test with various NIF types to demonstrate collision modes
+	var test_models: Array[Dictionary] = [
+		{"path": "meshes\\m\\misc_potion_bargain_01.nif", "type": "potion", "expected_mode": "auto_primitive"},
+		{"path": "meshes\\m\\misc_dwrv_coin00.nif", "type": "coin", "expected_mode": "auto_primitive"},
+		{"path": "meshes\\x\\ex_hlaalu_b_01.nif", "type": "architecture", "expected_mode": "trimesh"},
+		{"path": "meshes\\f\\furn_de_p_table_01.nif", "type": "furniture", "expected_mode": "convex"},
+	]
+
+	for test_model in test_models:
+		var path: String = test_model["path"]
+		if not bsa.has_file(path):
+			print("  SKIP: %s not found in BSA" % path)
+			continue
+
+		var nif_data: PackedByteArray = bsa.extract_file(path)
+		if nif_data.is_empty():
+			print("  SKIP: Failed to extract %s" % path)
+			continue
+
+		print("  INFO: Testing %s (%s)" % [path.get_file(), test_model["type"]])
+
+		# Test collision builder with different modes
+		var reader: RefCounted = nif_reader_script.new()
+		var result: Error = reader.load_buffer(nif_data)
+		if result != OK:
+			print("  SKIP: Failed to parse %s" % path)
+			continue
+
+		# Test with AUTO_PRIMITIVE mode
+		var builder: RefCounted = collision_builder_script.new()
+		builder.init(reader)
+		builder.collision_mode = builder_instance.CollisionMode.AUTO_PRIMITIVE
+		builder.debug_mode = true
+
+		var collision_result = builder.build_collision()
+		_assert_not_null(collision_result, "Collision builder returns result for %s" % path.get_file())
+
+		if collision_result:
+			print("    has_collision: %s" % collision_result.has_collision)
+			print("    detected_shapes: %s" % ", ".join(collision_result.detected_shapes))
+			print("    collision_shapes: %d" % collision_result.collision_shapes.size())
+
+			# Report shape types created
+			for shape_data in collision_result.collision_shapes:
+				var shape = shape_data.get("shape")
+				_assert(shape is Shape3D, "Collision shape is Shape3D type")
+				var shape_type: String = shape_data.get("type", "unknown")
+				print("      Shape: %s" % shape_type)
+
+				# Verify primitive shapes are actual primitives
+				if shape_type == "sphere":
+					_assert(shape is SphereShape3D, "Sphere shape is SphereShape3D")
+				elif shape_type == "cylinder":
+					_assert(shape is CylinderShape3D, "Cylinder shape is CylinderShape3D")
+				elif shape_type == "box":
+					_assert(shape is BoxShape3D, "Box shape is BoxShape3D")
+				elif shape_type == "capsule":
+					_assert(shape is CapsuleShape3D, "Capsule shape is CapsuleShape3D")
+				elif shape_type == "convex":
+					_assert(shape is ConvexPolygonShape3D, "Convex shape is ConvexPolygonShape3D")
+				elif shape_type == "trimesh":
+					_assert(shape is ConcavePolygonShape3D, "Trimesh shape is ConcavePolygonShape3D")
+
+		# Test converter with auto collision mode
+		var converter: RefCounted = nif_converter_script.new()
+		converter.auto_collision_mode = true
+		converter._source_path = path
+		converter._reader = nif_reader_script.new()
+		converter._reader.load_buffer(nif_data)
+
+		var collision_info: Dictionary = converter.get_collision_info()
+		_assert(collision_info.has("collision_mode"), "Collision info has collision_mode key")
+		_assert(collision_info.has("detected_shapes"), "Collision info has detected_shapes key")
+		_assert(collision_info.has("shape_types"), "Collision info has shape_types key")
+
+		print("    get_collision_info() returned:")
+		print("      collision_mode: %s" % collision_info.get("collision_mode", "unknown"))
+		print("      detected_shapes: " + str(collision_info.get("detected_shapes", [])))
+		print("      shape_types: " + str(collision_info.get("shape_types", [])))
+
+		# Verify auto mode selected correctly
+		var expected_mode: String = test_model.get("expected_mode", "auto_primitive")
+		_assert_eq(collision_info.get("collision_mode", ""), expected_mode,
+			"Auto mode for %s is %s" % [test_model["type"], expected_mode])
+
+		# Test full conversion with collision
+		converter.load_collision = true
+		converter.debug_collision = true
+		var scene: Node3D = converter.convert_buffer(nif_data, path)
+
+		if scene:
+			var static_body: StaticBody3D = _find_static_body(scene)
+			if collision_info.get("has_collision", false):
+				_assert_not_null(static_body, "Scene has StaticBody3D for %s" % path.get_file())
+				if static_body:
+					var shape_count: int = 0
+					for child in static_body.get_children():
+						if child is CollisionShape3D:
+							shape_count += 1
+					print("    StaticBody3D has %d CollisionShape3D children" % shape_count)
+			scene.queue_free()
+
+
+func _find_static_body(node: Node) -> StaticBody3D:
+	if node is StaticBody3D:
+		return node as StaticBody3D
+	for child in node.get_children():
+		var result: StaticBody3D = _find_static_body(child)
+		if result:
+			return result
+	return null
 
 
 func _print_summary() -> void:

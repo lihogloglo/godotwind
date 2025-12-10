@@ -158,10 +158,14 @@ func _read_record(index: int) -> Defs.NIFRecord:
 			record = _read_ni_tri_shape()
 		Defs.RT_NI_TRI_STRIPS:
 			record = _read_ni_tri_strips()
+		Defs.RT_NI_LINES:
+			record = _read_ni_lines()
 		Defs.RT_NI_TRI_SHAPE_DATA:
 			record = _read_ni_tri_shape_data()
 		Defs.RT_NI_TRI_STRIPS_DATA:
 			record = _read_ni_tri_strips_data()
+		Defs.RT_NI_LINES_DATA:
+			record = _read_ni_lines_data()
 
 		# Particles
 		Defs.RT_NI_AUTO_NORMAL_PARTICLES, Defs.RT_NI_ROTATE_PARTICLES, Defs.RT_NI_PARTICLES:
@@ -196,13 +200,20 @@ func _read_record(index: int) -> Defs.NIFRecord:
 		# Textures
 		Defs.RT_NI_SOURCE_TEXTURE:
 			record = _read_ni_source_texture()
+		Defs.RT_NI_PIXEL_DATA:
+			record = _read_ni_pixel_data()
+		Defs.RT_NI_PALETTE:
+			record = _read_ni_palette()
 
 		# Extra Data
 		Defs.RT_NI_STRING_EXTRA_DATA:
 			record = _read_ni_string_extra_data()
 		Defs.RT_NI_TEXT_KEY_EXTRA_DATA:
 			record = _read_ni_text_key_extra_data()
-		Defs.RT_NI_EXTRA_DATA:
+		Defs.RT_NI_EXTRA_DATA, Defs.RT_NI_BINARY_EXTRA_DATA, Defs.RT_NI_BOOLEAN_EXTRA_DATA, \
+		Defs.RT_NI_COLOR_EXTRA_DATA, Defs.RT_NI_FLOAT_EXTRA_DATA, Defs.RT_NI_FLOATS_EXTRA_DATA, \
+		Defs.RT_NI_INTEGER_EXTRA_DATA, Defs.RT_NI_INTEGERS_EXTRA_DATA, \
+		Defs.RT_NI_VECTOR_EXTRA_DATA, Defs.RT_NI_STRINGS_EXTRA_DATA:
 			record = _read_ni_extra_data()
 		Defs.RT_NI_VERT_WEIGHTS_EXTRA_DATA:
 			record = _read_ni_vert_weights_extra_data()
@@ -270,6 +281,8 @@ func _read_record(index: int) -> Defs.NIFRecord:
 			record = _read_ni_skin_instance()
 		Defs.RT_NI_SKIN_DATA:
 			record = _read_ni_skin_data()
+		Defs.RT_NI_SKIN_PARTITION:
+			record = _read_ni_skin_partition()
 
 		# Particle Modifiers (these are embedded in controller, but can appear as separate records)
 		Defs.RT_NI_GRAVITY:
@@ -298,9 +311,19 @@ func _read_record(index: int) -> Defs.NIFRecord:
 			record = _read_ni_sequence_stream_helper()
 
 		_:
-			# Unknown record type
-			push_warning("NIFReader: Unknown record type '%s' at index %d" % [record_type, index])
-			record = Defs.NIFRecord.new()
+			# Unknown record type - try to handle gracefully
+			if record_type.ends_with("ExtraData"):
+				# All ExtraData types in Morrowind have the same header structure:
+				# next_extra_data_index (s32) + bytes_remaining (u32) + data
+				# We can safely skip them using the bytes_remaining field
+				push_warning("NIFReader: Unknown ExtraData type '%s' at index %d (skipping)" % [record_type, index])
+				record = _read_ni_extra_data()
+			else:
+				# Truly unknown type - we cannot safely skip without knowing structure
+				push_error("NIFReader: Unknown record type '%s' at index %d - cannot parse" % [record_type, index])
+				record = Defs.NIFRecord.new()
+				# Mark as invalid so converter knows to skip
+				record.is_valid = false
 
 	if record:
 		record.record_type = record_type
@@ -393,6 +416,12 @@ func _read_ni_tri_strips() -> Defs.NiTriStrips:
 	_read_ni_geometry(strips)
 	return strips
 
+## Read NiLines
+func _read_ni_lines() -> Defs.NiLines:
+	var lines := Defs.NiLines.new()
+	_read_ni_geometry(lines)
+	return lines
+
 ## Read NiParticles
 func _read_ni_particles() -> Defs.NiParticles:
 	var particles := Defs.NiParticles.new()
@@ -429,7 +458,7 @@ func _read_ni_av_object(obj: Defs.NiAVObject) -> void:
 	# Bool is read as int32 for versions < 4.1.0.0
 	obj.has_bounding_volume = _read_u32() != 0
 	if obj.has_bounding_volume:
-		_read_bounding_volume(obj)
+		obj.bounding_volume = _read_bounding_volume(obj)
 
 ## Read NiObjectNET fields
 func _read_ni_object_net(obj: Defs.NiObjectNET) -> void:
@@ -517,6 +546,33 @@ func _read_ni_particles_data() -> Defs.NiParticlesData:
 		for i in range(data.num_vertices):
 			data.sizes[i] = _read_float()
 
+	return data
+
+## Read NiLinesData
+func _read_ni_lines_data() -> Defs.NiLinesData:
+	var data := Defs.NiLinesData.new()
+	_read_ni_geometry_data(data)
+
+	# Line connectivity flags - one byte per vertex
+	# If flag & 1, there's a line from vertex i to vertex i+1
+	var flags := PackedByteArray()
+	flags.resize(data.num_vertices)
+	for i in range(data.num_vertices):
+		flags[i] = _read_u8()
+
+	# Build line indices from connectivity flags
+	var lines := PackedInt32Array()
+	for i in range(data.num_vertices - 1):
+		if flags[i] & 1:
+			lines.append(i)
+			lines.append(i + 1)
+
+	# Check for wrap-around (last vertex connects to first)
+	if data.num_vertices > 0 and (flags[data.num_vertices - 1] & 1):
+		lines.append(data.num_vertices - 1)
+		lines.append(0)
+
+	data.lines = lines
 	return data
 
 ## Read NiGeometryData fields
@@ -772,6 +828,83 @@ func _read_ni_source_texture() -> Defs.NiSourceTexture:
 
 	return tex
 
+## Read NiPixelData - internal texture data
+func _read_ni_pixel_data() -> Defs.NiPixelData:
+	var pixel_data := Defs.NiPixelData.new()
+
+	# Read pixel format (Morrowind uses old format)
+	pixel_data.pixel_format = Defs.NiPixelFormat.new()
+	pixel_data.pixel_format.format = _read_u32()
+
+	# Morrowind format (version <= 10.4.0.1)
+	# Read color masks (4 uint32)
+	pixel_data.pixel_format.color_masks[0] = _read_u32()
+	pixel_data.pixel_format.color_masks[1] = _read_u32()
+	pixel_data.pixel_format.color_masks[2] = _read_u32()
+	pixel_data.pixel_format.color_masks[3] = _read_u32()
+	pixel_data.pixel_format.bits_per_pixel = _read_u32()
+	pixel_data.pixel_format.compare_bits[0] = _read_u32()
+	pixel_data.pixel_format.compare_bits[1] = _read_u32()
+
+	# Palette reference
+	pixel_data.palette_index = _read_s32()
+
+	# Mipmaps
+	var num_mipmaps := _read_u32()
+	pixel_data.bytes_per_pixel = _read_u32()
+
+	for i in range(num_mipmaps):
+		var mipmap := {
+			"width": _read_u32(),
+			"height": _read_u32(),
+			"offset": _read_u32()
+		}
+		pixel_data.mipmaps.append(mipmap)
+
+	# num_faces only for version >= 10.4.0.2, Morrowind is 4.0.0.2
+	# So we skip this and use default of 1
+
+	# Read pixel data
+	var num_pixels := _read_u32()
+	pixel_data.pixel_data = _buffer.slice(_pos, _pos + num_pixels)
+	_pos += num_pixels
+
+	return pixel_data
+
+## Read NiPalette - color palette for paletted textures
+func _read_ni_palette() -> Defs.NiPalette:
+	var palette := Defs.NiPalette.new()
+
+	# Alpha flag
+	var use_alpha := _read_u8()
+	palette.has_alpha = use_alpha != 0
+
+	# Number of entries
+	var num_entries := _read_u32()
+
+	# Always allocate 256 colors
+	palette.colors.resize(256)
+
+	# Alpha mask for non-alpha palettes (force opaque)
+	var alpha_mask := 0x00 if palette.has_alpha else 0xFF
+
+	# Read color entries
+	for i in range(num_entries):
+		var rgba := _read_u32()
+		var r := (rgba & 0xFF) / 255.0
+		var g := ((rgba >> 8) & 0xFF) / 255.0
+		var b := ((rgba >> 16) & 0xFF) / 255.0
+		var a := ((rgba >> 24) & 0xFF) / 255.0
+		if not palette.has_alpha:
+			a = 1.0  # Force opaque
+		palette.colors[i] = Color(r, g, b, a)
+
+	# Fill remaining entries with black
+	for i in range(num_entries, 256):
+		palette.colors[i] = Color(0, 0, 0, 1.0 if not palette.has_alpha else 0.0)
+
+	return palette
+
 # =============================================================================
 # EXTRA DATA READERS
 # =============================================================================
@@ -1019,13 +1152,25 @@ func _read_ni_keyframe_data() -> Defs.NiKeyframeData:
 		data.rotation_type = _read_u32()
 		data.rotation_keys = _read_key_group(num_rot_keys, data.rotation_type, 4)
 
-		# XYZ rotation keys
+		# XYZ rotation keys - store separately for each axis
 		if data.rotation_type == Defs.InterpolationType.XYZ:
-			for _axis in range(3):
-				var num_axis_keys := _read_u32()
-				if num_axis_keys > 0:
-					var axis_type := _read_u32()
-					_read_key_group(num_axis_keys, axis_type, 1)
+			# X axis
+			var num_x_keys := _read_u32()
+			if num_x_keys > 0:
+				var x_type := _read_u32()
+				data.x_rotation_keys = _read_key_group(num_x_keys, x_type, 1)
+
+			# Y axis
+			var num_y_keys := _read_u32()
+			if num_y_keys > 0:
+				var y_type := _read_u32()
+				data.y_rotation_keys = _read_key_group(num_y_keys, y_type, 1)
+
+			# Z axis
+			var num_z_keys := _read_u32()
+			if num_z_keys > 0:
+				var z_type := _read_u32()
+				data.z_rotation_keys = _read_key_group(num_z_keys, z_type, 1)
 
 	# Translation keys
 	var num_trans_keys := _read_u32()
@@ -1113,10 +1258,10 @@ func _read_ni_morph_data() -> Defs.NiMorphData:
 		var morph := {}
 
 		# Float keys for this morph
+		# Note: For morph data, interpolation type is ALWAYS read (even if num_keys==0)
+		# This differs from regular keyframes where type is only read if count > 0
 		var num_keys := _read_u32()
-		var key_type := 0
-		if num_keys > 0:
-			key_type = _read_u32()
+		var key_type := _read_u32()  # Always read for morph keyframes
 		morph["keys"] = _read_key_group(num_keys, key_type, 1) if num_keys > 0 else []
 
 		# Vertex offsets
@@ -1180,10 +1325,17 @@ func _read_key_group(num_keys: int, key_type: int, value_size: int) -> Array:
 # LIGHT READERS
 # =============================================================================
 
-## Read NiLight (base)
+## Read NiDynamicEffect fields (shared by lights and texture effects)
+func _read_ni_dynamic_effect(obj: Defs.NiAVObject) -> void:
+	_read_ni_av_object(obj)
+	# Morrowind version reads affected nodes list
+	var num_affected_nodes := _read_u32()
+	_skip(num_affected_nodes * 4)  # Skip affected node indices
+
+## Read NiLight (base) - NiAmbientLight, NiDirectionalLight
 func _read_ni_light() -> Defs.NiLight:
 	var light := Defs.NiLight.new()
-	_read_ni_av_object(light)
+	_read_ni_dynamic_effect(light)
 
 	light.dimmer = _read_float()
 	light.ambient_color = _read_color3()
@@ -1195,7 +1347,7 @@ func _read_ni_light() -> Defs.NiLight:
 ## Read NiPointLight
 func _read_ni_point_light() -> Defs.NiPointLight:
 	var light := Defs.NiPointLight.new()
-	_read_ni_av_object(light)
+	_read_ni_dynamic_effect(light)
 
 	light.dimmer = _read_float()
 	light.ambient_color = _read_color3()
@@ -1211,7 +1363,7 @@ func _read_ni_point_light() -> Defs.NiPointLight:
 ## Read NiSpotLight
 func _read_ni_spot_light() -> Defs.NiSpotLight:
 	var light := Defs.NiSpotLight.new()
-	_read_ni_av_object(light)
+	_read_ni_dynamic_effect(light)
 
 	light.dimmer = _read_float()
 	light.ambient_color = _read_color3()
@@ -1253,11 +1405,12 @@ func _read_ni_camera() -> Defs.NiCamera:
 
 	return camera
 
-## Read NiTextureEffect
+## Read NiTextureEffect - inherits from NiDynamicEffect
 func _read_ni_texture_effect() -> Defs.NiTextureEffect:
 	var effect := Defs.NiTextureEffect.new()
-	_read_ni_av_object(effect)
+	_read_ni_dynamic_effect(effect)
 
+	# NiTextureEffect fields
 	effect.model_projection_matrix = _read_matrix3()
 	effect.model_projection_translation = _read_vector3()
 	effect.texture_filtering = _read_u32()
@@ -1268,8 +1421,11 @@ func _read_ni_texture_effect() -> Defs.NiTextureEffect:
 	effect.clipping_plane_enable = _read_u8() != 0
 	effect.clipping_plane = Plane(_read_vector3(), _read_float())
 
-	# PS2 specific (skip)
+	# PS2 specific (skip) - version <= 10.2.0.0
 	_skip(4)
+
+	# Unknown short - version <= 4.1.0.12 (includes Morrowind 4.0.0.2)
+	_skip(2)
 
 	return effect
 
@@ -1301,6 +1457,13 @@ func _read_ni_skin_data() -> Defs.NiSkinData:
 
 	var num_bones := _read_u32()
 
+	# Morrowind version: read partition reference (version <= 10.1.0.0)
+	# This is a ref to NiSkinPartition
+	if _version == Defs.VER_MW:
+		data.partition_index = _read_s32()
+		# Note: hasVertexWeights is NOT read for Morrowind (version < 4.2.1.0)
+		# It defaults to true
+
 	for _i in range(num_bones):
 		var bone := {}
 
@@ -1328,6 +1491,87 @@ func _read_ni_skin_data() -> Defs.NiSkinData:
 		data.bones.append(bone)
 
 	return data
+
+## Read NiSkinPartition - optimized skin partition data
+func _read_ni_skin_partition() -> Defs.NiSkinPartition:
+	var partition := Defs.NiSkinPartition.new()
+
+	var num_partitions := _read_u32()
+
+	for _p in range(num_partitions):
+		var part := {}
+
+		var num_vertices := _read_u16()
+		var num_triangles := _read_u16()
+		var num_bones := _read_u16()
+		var num_strips := _read_u16()
+		var bones_per_vertex := _read_u16()
+
+		# Bone indices for this partition
+		var bones := PackedInt32Array()
+		bones.resize(num_bones)
+		for i in range(num_bones):
+			bones[i] = _read_u16()
+		part["bones"] = bones
+
+		# For Morrowind (version 4.0.0.2), we don't have presence flags
+		# All data is always present if counts are non-zero
+
+		# Vertex map
+		var vertex_map := PackedInt32Array()
+		vertex_map.resize(num_vertices)
+		for i in range(num_vertices):
+			vertex_map[i] = _read_u16()
+		part["vertex_map"] = vertex_map
+
+		# Weights (bones_per_vertex floats per vertex)
+		var weights := PackedFloat32Array()
+		weights.resize(num_vertices * bones_per_vertex)
+		for i in range(num_vertices * bones_per_vertex):
+			weights[i] = _read_float()
+		part["weights"] = weights
+
+		# Strip lengths
+		var strip_lengths := PackedInt32Array()
+		strip_lengths.resize(num_strips)
+		for i in range(num_strips):
+			strip_lengths[i] = _read_u16()
+
+		# Strips or triangles
+		if num_strips > 0:
+			var strips: Array[PackedInt32Array] = []
+			for i in range(num_strips):
+				var strip := PackedInt32Array()
+				strip.resize(strip_lengths[i])
+				for j in range(strip_lengths[i]):
+					strip[j] = _read_u16()
+				strips.append(strip)
+			part["strips"] = strips
+		else:
+			# Direct triangle list
+			var triangles := PackedInt32Array()
+			triangles.resize(num_triangles * 3)
+			for i in range(num_triangles * 3):
+				triangles[i] = _read_u16()
+			part["triangles"] = triangles
+
+		# Bone indices per vertex (optional)
+		var has_bone_indices := _read_u8()
+		if has_bone_indices != 0:
+			var bone_indices := PackedByteArray()
+			bone_indices.resize(num_vertices * bones_per_vertex)
+			for i in range(num_vertices * bones_per_vertex):
+				bone_indices[i] = _read_u8()
+			part["bone_indices"] = bone_indices
+
+		part["num_vertices"] = num_vertices
+		part["num_triangles"] = num_triangles
+		part["num_bones"] = num_bones
+		part["bones_per_vertex"] = bones_per_vertex
+
+		partition.partitions.append(part)
+
+	return partition
 
 # =============================================================================
 # PARTICLE MODIFIER READERS
@@ -1415,70 +1659,92 @@ func _read_ni_range_lod_data() -> Defs.NiRangeLODData:
 
 	return data
 
-## Read NiAlphaAccumulator/NiClusterAccumulator (just skip)
+## Read NiAlphaAccumulator/NiClusterAccumulator
+## These inherit from Record (not NiObjectNET) and have no data - empty read
 func _read_ni_accumulator() -> Defs.NIFRecord:
 	var record := Defs.NIFRecord.new()
-	# NiObject fields (name, extra, controller)
-	_skip(4)  # name length (0)
-	_skip(4)  # extra data index
-	_skip(4)  # controller index
+	# NiAccumulator::read() is empty in OpenMW - no data to read
 	return record
 
-## Read NiSequenceStreamHelper
-func _read_ni_sequence_stream_helper() -> Defs.NIFRecord:
-	var record := Defs.NIFRecord.new()
-	_read_ni_object_net(Defs.NiObjectNET.new())  # Just consume the fields
+## Read NiSequenceStreamHelper - inherits from NiObjectNET
+func _read_ni_sequence_stream_helper() -> Defs.NiObjectNET:
+	var record := Defs.NiObjectNET.new()
+	_read_ni_object_net(record)
 	return record
 
 # =============================================================================
 # BOUNDING VOLUME READER
 # =============================================================================
 
-## Read a BoundingVolume structure
-## Morrowind uses different bounding volume types
-func _read_bounding_volume(obj: Defs.NiAVObject) -> void:
-	var bv_type := _read_u32()
+## Read a BoundingVolume structure and return it
+## Morrowind uses different bounding volume types for collision
+func _read_bounding_volume(obj: Defs.NiAVObject) -> Defs.BoundingVolume:
+	var bv := Defs.BoundingVolume.new()
+	bv.type = _read_u32()
 
-	match bv_type:
+	match bv.type:
 		Defs.BV_BASE:
 			# No additional data
 			pass
+
 		Defs.BV_SPHERE:
-			obj.bounding_sphere.center = _read_vector3()
-			obj.bounding_sphere.radius = _read_float()
+			var sphere := Defs.BoundingSphere.new()
+			sphere.center = _read_vector3()
+			sphere.radius = _read_float()
+			bv.sphere = sphere
+			# Also set on obj for backward compatibility
+			obj.bounding_sphere.center = sphere.center
+			obj.bounding_sphere.radius = sphere.radius
+
 		Defs.BV_BOX:
-			# Box bounding volume: center, axes (3x3), extents (3)
-			var _center := _read_vector3()
-			var _axes := _read_matrix3()
-			var _extents := _read_vector3()
+			var box := Defs.BoundingBox.new()
+			box.center = _read_vector3()
+			box.axes = _read_matrix3()
+			box.extents = _read_vector3()
+			bv.box = box
+
 		Defs.BV_CAPSULE:
-			# Capsule: center, axis, extent, radius
-			var _center := _read_vector3()
-			var _axis := _read_vector3()
-			var _extent := _read_float()
-			var _radius := _read_float()
+			var capsule := Defs.BoundingCapsule.new()
+			capsule.center = _read_vector3()
+			capsule.axis = _read_vector3()
+			capsule.extent = _read_float()
+			capsule.radius = _read_float()
+			bv.capsule = capsule
+
 		Defs.BV_LOZENGE:
-			# Lozenge: radius, extent0, extent1, center, axis0, axis1
-			var _radius := _read_float()
-			var _extent0 := _read_float()
-			var _extent1 := _read_float()
-			var _center := _read_vector3()
-			var _axis0 := _read_vector3()
-			var _axis1 := _read_vector3()
+			var lozenge := Defs.BoundingLozenge.new()
+			lozenge.radius = _read_float()
+			lozenge.extent0 = _read_float()
+			lozenge.extent1 = _read_float()
+			lozenge.center = _read_vector3()
+			lozenge.axis0 = _read_vector3()
+			lozenge.axis1 = _read_vector3()
+			bv.lozenge = lozenge
+
 		Defs.BV_UNION:
 			# Union of child bounding volumes
 			var num_children := _read_u32()
 			for _i in range(num_children):
 				# Recursively read child bounding volumes
-				# For simplicity, we create a dummy object just to consume the data
 				var dummy := Defs.NiAVObject.new()
-				_read_bounding_volume(dummy)
+				var child_bv := _read_bounding_volume(dummy)
+				bv.children.append(child_bv)
+
 		Defs.BV_HALFSPACE:
-			# Halfspace: plane (4 floats) + origin
-			_skip(4 * 4)  # Plane equation
-			var _origin := _read_vector3()
+			var hs := Defs.BoundingHalfSpace.new()
+			# Plane equation: normal.x, normal.y, normal.z, distance
+			var plane_x := _read_float()
+			var plane_y := _read_float()
+			var plane_z := _read_float()
+			var plane_d := _read_float()
+			hs.plane = Plane(Vector3(plane_x, plane_y, plane_z), plane_d)
+			hs.origin = _read_vector3()
+			bv.half_space = hs
+
 		_:
-			push_warning("NIFReader: Unknown bounding volume type %d" % bv_type)
+			push_warning("NIFReader: Unknown bounding volume type %d" % bv.type)
+
+	return bv
 
 # =============================================================================
 # LOW-LEVEL READ FUNCTIONS

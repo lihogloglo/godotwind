@@ -104,6 +104,16 @@ const RT_NI_STRING_EXTRA_DATA := "NiStringExtraData"
 const RT_NI_TEXT_KEY_EXTRA_DATA := "NiTextKeyExtraData"
 const RT_NI_EXTRA_DATA := "NiExtraData"
 const RT_NI_VERT_WEIGHTS_EXTRA_DATA := "NiVertWeightsExtraData"
+# Additional Extra Data types (use generic reader - they all have bytes_remaining field)
+const RT_NI_BINARY_EXTRA_DATA := "NiBinaryExtraData"
+const RT_NI_BOOLEAN_EXTRA_DATA := "NiBooleanExtraData"
+const RT_NI_COLOR_EXTRA_DATA := "NiColorExtraData"
+const RT_NI_FLOAT_EXTRA_DATA := "NiFloatExtraData"
+const RT_NI_FLOATS_EXTRA_DATA := "NiFloatsExtraData"
+const RT_NI_INTEGER_EXTRA_DATA := "NiIntegerExtraData"
+const RT_NI_INTEGERS_EXTRA_DATA := "NiIntegersExtraData"
+const RT_NI_VECTOR_EXTRA_DATA := "NiVectorExtraData"
+const RT_NI_STRINGS_EXTRA_DATA := "NiStringsExtraData"
 
 # Other
 const RT_NI_CAMERA := "NiCamera"
@@ -185,15 +195,57 @@ class NIFTransform:
 	func to_transform3d() -> Transform3D:
 		return Transform3D(rotation * scale, translation)
 
-## Bounding sphere
+## Bounding sphere (used in BoundingVolume)
 class BoundingSphere:
 	var center: Vector3 = Vector3.ZERO
 	var radius: float = 0.0
+
+## Bounding box with orientation axes (used in BoundingVolume)
+class BoundingBox:
+	var center: Vector3 = Vector3.ZERO
+	var axes: Basis = Basis.IDENTITY  # 3x3 matrix of orientation axes
+	var extents: Vector3 = Vector3.ONE  # Half-extents along each axis
+
+## Bounding capsule (used in BoundingVolume)
+class BoundingCapsule:
+	var center: Vector3 = Vector3.ZERO
+	var axis: Vector3 = Vector3.UP
+	var extent: float = 0.0  # Half-length along axis
+	var radius: float = 0.0
+
+## Bounding lozenge - like a capsule with flat ends (rare)
+class BoundingLozenge:
+	var center: Vector3 = Vector3.ZERO
+	var axis0: Vector3 = Vector3.RIGHT
+	var axis1: Vector3 = Vector3.FORWARD
+	var radius: float = 0.0
+	var extent0: float = 0.0
+	var extent1: float = 0.0
+
+## Bounding half-space (plane)
+class BoundingHalfSpace:
+	var plane: Plane = Plane()
+	var origin: Vector3 = Vector3.ZERO
+
+## BoundingVolume - represents various collision primitives in NIF files
+## Morrowind uses these for basic collision detection
+class BoundingVolume:
+	var type: int = BV_BASE  # One of the BV_* constants
+	var sphere: BoundingSphere = null
+	var box: BoundingBox = null
+	var capsule: BoundingCapsule = null
+	var lozenge: BoundingLozenge = null
+	var half_space: BoundingHalfSpace = null
+	var children: Array = []  # For UNION_BV type, array of child BoundingVolumes
+
+	func is_valid() -> bool:
+		return type != BV_BASE
 
 ## Base record class - all NIF records inherit from this
 class NIFRecord:
 	var record_type: String = ""
 	var record_index: int = -1
+	var is_valid: bool = true  # Set to false for unknown/unparseable records
 
 	func _to_string() -> String:
 		return "[%d] %s" % [record_index, record_type]
@@ -211,10 +263,20 @@ class NiAVObject extends NiObjectNET:
 	var velocity: Vector3 = Vector3.ZERO
 	var property_indices: Array[int] = []
 	var has_bounding_volume: bool = false
-	var bounding_sphere: BoundingSphere = BoundingSphere.new()
+	var bounding_volume: BoundingVolume = null  # Full bounding volume data
+	var bounding_sphere: BoundingSphere = BoundingSphere.new()  # Kept for backward compat
 
 	func is_hidden() -> bool:
 		return (flags & FLAG_HIDDEN) != 0
+
+	func has_mesh_collision() -> bool:
+		return (flags & FLAG_MESH_COLLISION) != 0
+
+	func has_bbox_collision() -> bool:
+		return (flags & FLAG_BBOX_COLLISION) != 0
+
+	func collision_active() -> bool:
+		return (flags & FLAG_ACTIVE_COLLISION) != 0
 
 ## NiNode - parent node with children
 class NiNode extends NiAVObject:
@@ -233,6 +295,10 @@ class NiTriShape extends NiGeometry:
 
 ## NiTriStrips - triangle strip geometry
 class NiTriStrips extends NiGeometry:
+	pass
+
+## NiLines - line geometry
+class NiLines extends NiGeometry:
 	pass
 
 ## NiGeometryData - geometry data (vertices, normals, etc.)
@@ -260,6 +326,35 @@ class NiTriShapeData extends NiGeometryData:
 class NiTriStripsData extends NiGeometryData:
 	var num_triangles: int = 0
 	var strips: Array[PackedInt32Array] = []  # Each strip is a list of indices
+
+## NiLinesData - line geometry data
+class NiLinesData extends NiGeometryData:
+	var lines: PackedInt32Array = PackedInt32Array()  # Line indices (pairs of vertices)
+
+## NiPixelFormat - pixel format description for internal textures
+class NiPixelFormat:
+	var format: int = 0  # 0=RGB, 1=RGBA, 2=Palette, 3=PaletteAlpha, 4=BGR, 5=BGRA, 6=DXT1, 7=DXT3, 8=DXT5
+	var color_masks: PackedInt32Array = PackedInt32Array([0, 0, 0, 0])  # RGBA masks
+	var bits_per_pixel: int = 0
+	var compare_bits: PackedInt32Array = PackedInt32Array([0, 0])
+
+## NiPixelData - internal texture data
+class NiPixelData extends NIFRecord:
+	var pixel_format: NiPixelFormat = NiPixelFormat.new()
+	var palette_index: int = -1
+	var bytes_per_pixel: int = 0
+	var mipmaps: Array[Dictionary] = []  # Array of {width, height, offset}
+	var num_faces: int = 1
+	var pixel_data: PackedByteArray = PackedByteArray()
+
+## NiPalette - color palette for paletted textures
+class NiPalette extends NIFRecord:
+	var has_alpha: bool = false
+	var colors: PackedColorArray = PackedColorArray()  # 256 color entries
+
+## NiSkinPartition - optimized skin partition data
+class NiSkinPartition extends NIFRecord:
+	var partitions: Array[Dictionary] = []  # Array of partition data
 
 ## NiProperty - base property class
 class NiProperty extends NiObjectNET:
@@ -402,6 +497,12 @@ class NiKeyframeController extends NiTimeController:
 class NiKeyframeData extends NIFRecord:
 	var rotation_type: int = 0
 	var rotation_keys: Array = []
+	# XYZ rotation keys - used when rotation_type == InterpolationType.XYZ
+	# Contains separate key arrays for each axis (x_keys, y_keys, z_keys)
+	# Each array contains keys with {time: float, value: float, ...}
+	var x_rotation_keys: Array = []
+	var y_rotation_keys: Array = []
+	var z_rotation_keys: Array = []
 	var translation_type: int = 0
 	var translation_keys: Array = []
 	var scale_type: int = 0
@@ -608,6 +709,7 @@ class NiSkinInstance extends NIFRecord:
 ## NiSkinData - skinning data
 class NiSkinData extends NIFRecord:
 	var skin_transform: NIFTransform = NIFTransform.new()
+	var partition_index: int = -1  # Reference to NiSkinPartition (Morrowind)
 	var bones: Array = []  # Array of bone info dictionaries
 
 ## NiRangeLODData - LOD range data

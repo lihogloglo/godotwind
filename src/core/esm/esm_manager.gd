@@ -633,6 +633,117 @@ func get_leveled_item(id: String) -> LeveledItemRecord:
 func get_leveled_creature(id: String) -> LeveledCreatureRecord:
 	return leveled_creatures.get(id.to_lower())
 
+## Generic record lookup - tries all stores to find any record by ID
+## Returns the record or null if not found
+## Also returns the record type name via the optional out parameter
+func get_any_record(id: String, out_type: Array = []) -> ESMRecord:
+	var key := id.to_lower()
+	var record: ESMRecord = null
+
+	# Check each store in order of likelihood for cell references
+	# Statics are most common in cells
+	record = statics.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "static"
+		return record
+
+	record = doors.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "door"
+		return record
+
+	record = containers.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "container"
+		return record
+
+	record = lights.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "light"
+		return record
+
+	record = activators.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "activator"
+		return record
+
+	record = npcs.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "npc"
+		return record
+
+	record = creatures.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "creature"
+		return record
+
+	record = misc_items.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "misc"
+		return record
+
+	record = weapons.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "weapon"
+		return record
+
+	record = armors.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "armor"
+		return record
+
+	record = clothing.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "clothing"
+		return record
+
+	record = books.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "book"
+		return record
+
+	record = potions.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "potion"
+		return record
+
+	record = ingredients.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "ingredient"
+		return record
+
+	record = apparatus.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "apparatus"
+		return record
+
+	record = lockpicks.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "lockpick"
+		return record
+
+	record = probes.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "probe"
+		return record
+
+	record = repair_items.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "repair"
+		return record
+
+	record = leveled_items.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "leveled_item"
+		return record
+
+	record = leveled_creatures.get(key)
+	if record:
+		if out_type.size() > 0: out_type[0] = "leveled_creature"
+		return record
+
+	return null
+
 #endregion
 
 #region Statistics

@@ -1,0 +1,222 @@
+[gd_scene load_steps=4 format=3 uid="uid://terrain_viewer_scene"]
+
+[ext_resource type="Script" path="res://src/tools/terrain_viewer.gd" id="1_viewer"]
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 1
+background_color = Color(0.4, 0.5, 0.7, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.4, 0.45, 0.5, 1)
+ambient_light_energy = 0.6
+tonemap_mode = 2
+fog_enabled = true
+fog_light_color = Color(0.6, 0.65, 0.75, 1)
+fog_density = 0.0005
+fog_sky_affect = 0.3
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.3, 0.45, 0.75, 1)
+sky_horizon_color = Color(0.55, 0.6, 0.7, 1)
+ground_bottom_color = Color(0.2, 0.17, 0.13, 1)
+ground_horizon_color = Color(0.55, 0.6, 0.7, 1)
+
+[node name="TerrainViewer" type="Node3D"]
+script = ExtResource("1_viewer")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 500, 1000, 500)
+light_energy = 1.2
+shadow_enabled = true
+shadow_opacity = 0.7
+directional_shadow_max_distance = 2000.0
+
+[node name="FlyCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 200, 300)
+fov = 75.0
+far = 10000.0
+
+[node name="Terrain3D" type="Terrain3D" parent="."]
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="LoadingOverlay" type="ColorRect" parent="UI"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.1, 0.1, 0.15, 0.9)
+
+[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -50.0
+offset_right = 200.0
+offset_bottom = 50.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="LoadingLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+layout_mode = 2
+horizontal_alignment = 1
+text = "Loading..."
+
+[node name="ProgressBar" type="ProgressBar" parent="UI/LoadingOverlay/VBox"]
+custom_minimum_size = Vector2(400, 25)
+layout_mode = 2
+max_value = 100.0
+value = 0.0
+show_percentage = true
+
+[node name="StatusLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+layout_mode = 2
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Initializing..."
+
+[node name="Panel" type="Panel" parent="UI"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -350.0
+offset_bottom = 700.0
+grow_horizontal = 0
+
+[node name="VBox" type="VBoxContainer" parent="UI/Panel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="Title" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Terrain Viewer"
+
+[node name="HSeparator" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="CoordsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Cell Coordinates:"
+
+[node name="CoordsContainer" type="HBoxContainer" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="XLabel" type="Label" parent="UI/Panel/VBox/CoordsContainer"]
+layout_mode = 2
+text = "X:"
+
+[node name="CellXSpin" type="SpinBox" parent="UI/Panel/VBox/CoordsContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = -100.0
+max_value = 100.0
+value = -2.0
+
+[node name="YLabel" type="Label" parent="UI/Panel/VBox/CoordsContainer"]
+layout_mode = 2
+text = "Y:"
+
+[node name="CellYSpin" type="SpinBox" parent="UI/Panel/VBox/CoordsContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = -100.0
+max_value = 100.0
+value = -9.0
+
+[node name="RadiusContainer" type="HBoxContainer" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="RadiusLabel" type="Label" parent="UI/Panel/VBox/RadiusContainer"]
+layout_mode = 2
+text = "Radius:"
+
+[node name="RadiusSpin" type="SpinBox" parent="UI/Panel/VBox/RadiusContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 0.0
+max_value = 10.0
+value = 2.0
+
+[node name="LoadTerrainButton" type="Button" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Load Terrain"
+
+[node name="HSeparator2" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="QuickLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Quick Load:"
+
+[node name="QuickButtons" type="GridContainer" parent="UI/Panel/VBox"]
+layout_mode = 2
+columns = 2
+
+[node name="SeydaNeenBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Seyda Neen"
+
+[node name="BalmoraBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Balmora"
+
+[node name="VivecBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Vivec"
+
+[node name="OriginBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Origin (0,0)"
+
+[node name="HSeparator3" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="StatsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Statistics:"
+
+[node name="StatsText" type="RichTextLabel" parent="UI/Panel/VBox"]
+custom_minimum_size = Vector2(0, 140)
+layout_mode = 2
+bbcode_enabled = true
+text = "No terrain loaded"
+
+[node name="HSeparator4" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="ControlsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Controls:"
+
+[node name="ControlsText" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Hold Right Click to look
+WASD to move
+Space/Shift for up/down
+Ctrl for speed boost"
+
+[node name="HSeparator5" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="LogLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Log:"
+
+[node name="LogText" type="RichTextLabel" parent="UI/Panel/VBox"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_following = true
+text = "Initializing..."

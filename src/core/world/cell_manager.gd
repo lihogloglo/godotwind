@@ -1,7 +1,11 @@
 ## Cell Manager - Loads and instantiates Morrowind cells in Godot
 ## Handles loading cells from ESM data and placing objects using NIF models
+## Ported from OpenMW apps/openmw/mwworld/cellstore.cpp and scene.cpp
 class_name CellManager
 extends RefCounted
+
+# Preload coordinate utilities
+const MWCoords := preload("res://src/core/morrowind_coords.gd")
 
 # Cache for loaded models to avoid re-parsing NIFs
 var _model_cache: Dictionary = {}  # model_path (lowercase) -> Node3D prototype
@@ -12,7 +16,19 @@ var _stats: Dictionary = {
 	"models_from_cache": 0,
 	"objects_instantiated": 0,
 	"objects_failed": 0,
+	"lights_created": 0,
+	"npcs_loaded": 0,
+	"creatures_loaded": 0,
 }
+
+# Configuration
+var create_lights: bool = true   # Whether to create OmniLight3D for light refs
+var load_npcs: bool = true       # Whether to load NPC models
+var load_creatures: bool = true  # Whether to load creature models
+
+# Morrowind light radius to Godot light range conversion factor
+# MW units are roughly 1/128th of a meter, so radius 256 ~= 2 meters
+const MW_LIGHT_SCALE: float = 1.0 / 70.0  # Tuned for visual appearance
 
 
 ## Load an interior cell by name and return a Node3D containing all objects
@@ -67,12 +83,42 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 
 ## Instantiate a single cell reference as a Node3D
 func _instantiate_reference(ref: CellReference) -> Node3D:
-	# Look up the base record by ID
-	var base_record = _get_base_record(ref.ref_id)
+	# Use generic lookup to find the base record and its type
+	var record_type: Array = [""]
+	var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+
 	if not base_record:
-		# Not an error - some refs are for types we don't render (scripts, etc)
+		# Not an error - some refs are for types we don't handle yet
 		return null
 
+	var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+	# Handle different record types
+	match type_name:
+		"light":
+			return _instantiate_light(ref, base_record as LightRecord)
+		"npc":
+			if not load_npcs:
+				return null
+			return _instantiate_actor(ref, base_record as NPCRecord, "npc")
+		"creature":
+			if not load_creatures:
+				return null
+			return _instantiate_actor(ref, base_record as CreatureRecord, "creature")
+		"leveled_creature":
+			# Leveled creatures need to be resolved at runtime
+			# For now, skip them
+			return null
+		"leveled_item":
+			# Leveled items need to be resolved at runtime
+			return null
+		_:
+			# Standard model-based object
+			return _instantiate_model_object(ref, base_record)
+
+
+## Instantiate a standard object with a NIF model
+func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
 	# Get model path
 	var model_path: String = _get_model_path(base_record)
 	if model_path.is_empty():
@@ -88,83 +134,155 @@ func _instantiate_reference(ref: CellReference) -> Node3D:
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	# Apply transform - convert Morrowind coordinates to Godot
-	# Morrowind: Z-up, Y-north, X-east
-	# Godot: Y-up, Z-south, X-east
-	instance.position = _mw_to_godot_position(ref.position)
-	instance.rotation = _mw_to_godot_rotation(ref.rotation)
-	instance.scale = Vector3.ONE * ref.scale
+	# Apply transform
+	_apply_transform(instance, ref, true)
 
 	return instance
 
 
-## Get the base record for a reference ID
-## Returns the ESM record or null if not found/not renderable
-func _get_base_record(ref_id: StringName):
-	var id := str(ref_id)
+## Instantiate a light object (model + OmniLight3D)
+func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D:
+	# Create container node
+	var light_node := Node3D.new()
+	light_node.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	# Try each record type that has a model
-	var record = ESMManager.get_static(id)
-	if record: return record
+	# Load the model if it has one
+	if not light_record.model.is_empty():
+		var model_prototype := _get_model(light_record.model)
+		if model_prototype:
+			var model_instance: Node3D = model_prototype.duplicate()
+			model_instance.name = "Model"
+			light_node.add_child(model_instance)
 
-	record = ESMManager.get_door(id)
-	if record: return record
+	# Create the actual light source
+	if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
+		var omni := OmniLight3D.new()
+		omni.name = "Light"
 
-	record = ESMManager.get_container(id)
-	if record: return record
+		# Convert MW radius to Godot range
+		# MW radius is in game units, Godot uses meters
+		omni.omni_range = light_record.radius * MW_LIGHT_SCALE
 
-	record = ESMManager.get_light(id)
-	if record: return record
+		# Set light color
+		omni.light_color = light_record.color
 
-	record = ESMManager.get_activator(id)
-	if record: return record
+		# Negative lights subtract light (Morrowind feature)
+		if light_record.is_negative():
+			omni.light_negative = true
 
-	record = ESMManager.get_misc_item(id)
-	if record: return record
+		# Set energy based on whether it's a fire/torch light
+		# Fire lights tend to be brighter
+		omni.light_energy = 1.0 if light_record.is_fire() else 0.8
 
-	record = ESMManager.get_weapon(id)
-	if record: return record
+		# Enable shadows for dynamic lights only (performance)
+		omni.shadow_enabled = light_record.is_dynamic()
 
-	record = ESMManager.get_armor(id)
-	if record: return record
+		# Set attenuation for softer falloff
+		omni.omni_attenuation = 1.0
 
-	record = ESMManager.get_clothing(id)
-	if record: return record
+		light_node.add_child(omni)
+		_stats["lights_created"] += 1
 
-	record = ESMManager.get_book(id)
-	if record: return record
+	# Apply transform to the container
+	_apply_transform(light_node, ref, false)
 
-	record = ESMManager.get_potion(id)
-	if record: return record
+	return light_node
 
-	record = ESMManager.get_ingredient(id)
-	if record: return record
 
-	record = ESMManager.get_apparatus(id)
-	if record: return record
+## Instantiate an NPC or Creature
+## Note: Full body assembly from body parts is complex - for now just load the base model
+func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) -> Node3D:
+	var model_path: String = ""
 
-	record = ESMManager.get_lockpick(id)
-	if record: return record
+	if actor_record is CreatureRecord:
+		model_path = actor_record.model
+		_stats["creatures_loaded"] += 1
+	elif actor_record is NPCRecord:
+		# NPCs are complex - they use body parts assembled together
+		# For now, use the base model if available, otherwise skip
+		model_path = actor_record.model
+		_stats["npcs_loaded"] += 1
 
-	record = ESMManager.get_probe(id)
-	if record: return record
+	if model_path.is_empty():
+		# NPC without direct model - would need body part assembly
+		# Create a simple placeholder for now
+		return _create_actor_placeholder(ref, actor_record, actor_type)
 
-	record = ESMManager.get_repair_item(id)
-	if record: return record
+	var model_prototype := _get_model(model_path)
+	if not model_prototype:
+		return _create_actor_placeholder(ref, actor_record, actor_type)
 
-	# NPCs and creatures would need special handling for body parts
-	# For now, skip them
-	# record = ESMManager.get_npc(id)
-	# record = ESMManager.get_creature(id)
+	var instance: Node3D = model_prototype.duplicate()
+	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	return null
+	# Apply transform
+	_apply_transform(instance, ref, true)
+
+	return instance
+
+
+## Create a placeholder for actors without models (NPCs using body parts)
+func _create_actor_placeholder(ref: CellReference, actor_record, actor_type: String) -> Node3D:
+	var placeholder := MeshInstance3D.new()
+	placeholder.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+
+	# Capsule mesh for humanoid shape
+	var capsule := CapsuleMesh.new()
+	capsule.radius = 25.0  # Roughly human-sized in MW units
+	capsule.height = 128.0
+	placeholder.mesh = capsule
+
+	# Color based on type
+	var mat := StandardMaterial3D.new()
+	if actor_type == "npc":
+		mat.albedo_color = Color(0.2, 0.6, 1.0, 0.7)  # Blue for NPCs
+	else:
+		mat.albedo_color = Color(1.0, 0.4, 0.2, 0.7)  # Orange for creatures
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	placeholder.material_override = mat
+
+	# Apply transform (no model rotation needed for placeholder)
+	_apply_transform(placeholder, ref, false)
+
+	return placeholder
+
+
+## Apply position, rotation, and scale to a node
+## If apply_model_rotation is true, applies the Z-up to Y-up conversion
+func _apply_transform(node: Node3D, ref: CellReference, apply_model_rotation: bool) -> void:
+	# Position conversion: MW(x,y,z) -> Godot(x, z, -y)
+	node.position = MWCoords.position_to_godot(ref.position)
+	node.scale = MWCoords.scale_to_godot(ref.scale)
+
+	if apply_model_rotation:
+		# Build the complete rotation:
+		# 1. Base rotation: -90 around X to convert Z-up model to Y-up world
+		# 2. Object rotation: converted from MW to Godot coordinates
+		var base_rotation := Basis(Vector3(1, 0, 0), -PI / 2.0)
+
+		# Convert MW rotation to Godot axes
+		# MW: X=pitch, Y=roll, Z=yaw (around vertical)
+		var object_rotation := Basis.from_euler(Vector3(
+			ref.rotation.x,   # Pitch
+			ref.rotation.z,   # MW Z-yaw -> Godot Y-yaw
+			-ref.rotation.y   # MW Y-roll -> Godot -Z-roll
+		), EULER_ORDER_YXZ)
+
+		# Combine: apply base rotation first, then object rotation
+		node.basis = object_rotation * base_rotation
+	else:
+		# Just rotation conversion, no model orientation fix needed
+		var object_rotation := Basis.from_euler(Vector3(
+			ref.rotation.x,
+			ref.rotation.z,
+			-ref.rotation.y
+		), EULER_ORDER_YXZ)
+		node.basis = object_rotation
 
 
 ## Get the model path from a base record
 func _get_model_path(record) -> String:
-	if record.has_method("get") and record.get("model"):
-		return record.model
-	if "model" in record:
+	if "model" in record and record.model:
 		return record.model
 	return ""
 
@@ -177,17 +295,24 @@ func _get_model(model_path: String) -> Node3D:
 		_stats["models_from_cache"] += 1
 		return _model_cache[normalized]
 
-	# Try to load from BSA
-	var nif_data := BSAManager.extract_file(model_path)
-	if nif_data.is_empty():
-		# Try with meshes\ prefix if not already there
-		if not model_path.to_lower().begins_with("meshes"):
-			nif_data = BSAManager.extract_file("meshes\\" + model_path)
+	# Build the full path - ESM stores paths relative to meshes/
+	var full_path := model_path
+	if not model_path.to_lower().begins_with("meshes"):
+		full_path = "meshes\\" + model_path
 
-		if nif_data.is_empty():
-			push_warning("CellManager: Model not found in BSA: '%s'" % model_path)
-			_model_cache[normalized] = null
-			return null
+	# Try to load from BSA - check first to avoid error spam
+	var nif_data := PackedByteArray()
+	if BSAManager.has_file(full_path):
+		nif_data = BSAManager.extract_file(full_path)
+	elif BSAManager.has_file(model_path):
+		nif_data = BSAManager.extract_file(model_path)
+
+	if nif_data.is_empty():
+		# Only warn once per model, don't spam
+		if not normalized in _model_cache:
+			push_warning("CellManager: Model not found in BSA: '%s' (tried meshes\\ prefix too)" % model_path)
+		_model_cache[normalized] = null
+		return null
 
 	# Convert NIF to Godot scene
 	var converter := NIFConverter.new()
@@ -208,7 +333,7 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 	var placeholder := MeshInstance3D.new()
 	placeholder.name = str(ref.ref_id) + "_placeholder"
 
-	# Simple box mesh
+	# Simple box mesh (in Godot Y-up coordinates)
 	var box := BoxMesh.new()
 	box.size = Vector3(50, 50, 50)  # Roughly human-sized in Morrowind units
 	placeholder.mesh = box
@@ -219,24 +344,9 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	placeholder.material_override = mat
 
-	placeholder.position = _mw_to_godot_position(ref.position)
-	placeholder.rotation = _mw_to_godot_rotation(ref.rotation)
-	placeholder.scale = Vector3.ONE * ref.scale
+	_apply_transform(placeholder, ref, false)
 
 	return placeholder
-
-
-## Convert Morrowind position to Godot position
-## Morrowind: X-east, Y-north, Z-up
-## Godot: X-east, Y-up, Z-south (which is -north)
-func _mw_to_godot_position(mw_pos: Vector3) -> Vector3:
-	return Vector3(mw_pos.x, mw_pos.z, -mw_pos.y)
-
-
-## Convert Morrowind rotation (Euler radians) to Godot rotation
-## The rotation axes follow the same swap as position
-func _mw_to_godot_rotation(mw_rot: Vector3) -> Vector3:
-	return Vector3(mw_rot.x, mw_rot.z, -mw_rot.y)
 
 
 ## Clear the model cache
@@ -251,6 +361,9 @@ func clear_cache() -> void:
 		"models_from_cache": 0,
 		"objects_instantiated": 0,
 		"objects_failed": 0,
+		"lights_created": 0,
+		"npcs_loaded": 0,
+		"creatures_loaded": 0,
 	}
 
 
