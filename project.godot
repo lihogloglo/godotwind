@@ -1,0 +1,36 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Godotwind"
+config/description="OpenMW port to Godot Engine"
+run/main_scene="uid://dwn8v3kxp6yql"
+config/features=PackedStringArray("4.5", "Forward Plus")
+config/icon="res://icon.svg"
+
+[autoload]
+
+ESMManager="*res://src/core/esm/esm_manager.gd"
+BSAManager="*res://src/core/bsa/bsa_manager.gd"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+
+[filesystem]
+
+import/blender/enabled=false
+
+[morrowind]
+
+data_path="C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files"
+esm_file="Morrowind.esm"

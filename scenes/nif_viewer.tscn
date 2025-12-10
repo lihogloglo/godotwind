@@ -1,0 +1,236 @@
+[gd_scene load_steps=3 format=3 uid="uid://dwn8v3kxp6yql"]
+
+[ext_resource type="Script" path="res://src/tools/nif_viewer.gd" id="1_viewer"]
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 1
+background_color = Color(0.2, 0.2, 0.25, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.4, 0.4, 0.45, 1)
+ambient_light_energy = 0.5
+tonemap_mode = 2
+
+[node name="NIFViewer" type="Node3D"]
+script = ExtResource("1_viewer")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 5, 10, 5)
+light_energy = 1.2
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.94, 0.342, 0, -0.342, 0.94, 0, 2, 5)
+fov = 60.0
+
+[node name="MeshContainer" type="Node3D" parent="."]
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="LeftPanel" type="Panel" parent="UI"]
+anchors_preset = 0
+offset_right = 300.0
+offset_bottom = 720.0
+
+[node name="VBox" type="VBoxContainer" parent="UI/LeftPanel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="BrowserTitle" type="Label" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "Model Browser"
+
+[node name="HSeparator" type="HSeparator" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+
+[node name="SearchLabel" type="Label" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+text = "Search:"
+
+[node name="SearchEdit" type="LineEdit" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+placeholder_text = "Type to filter models..."
+clear_button_enabled = true
+
+[node name="ResultCount" type="Label" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "0 models"
+
+[node name="ModelList" type="ItemList" parent="UI/LeftPanel/VBox"]
+custom_minimum_size = Vector2(0, 400)
+layout_mode = 2
+size_flags_vertical = 3
+allow_reselect = true
+auto_height = false
+
+[node name="HSeparator2" type="HSeparator" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+
+[node name="CategoryLabel" type="Label" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+text = "Filter by Category:"
+
+[node name="CategoryButtons" type="HFlowContainer" parent="UI/LeftPanel/VBox"]
+layout_mode = 2
+
+[node name="AllBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+button_pressed = true
+text = "All"
+
+[node name="FloraBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+text = "Flora"
+
+[node name="ArchBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+text = "Arch"
+
+[node name="FurnBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+text = "Furn"
+
+[node name="ContainBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+text = "Contain"
+
+[node name="NPCBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+text = "NPC"
+
+[node name="CreatureBtn" type="Button" parent="UI/LeftPanel/VBox/CategoryButtons"]
+layout_mode = 2
+toggle_mode = true
+text = "Creature"
+
+[node name="Panel" type="Panel" parent="UI"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
+offset_bottom = 720.0
+grow_horizontal = 0
+
+[node name="VBox" type="VBoxContainer" parent="UI/Panel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="Title" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "NIF Mesh Viewer"
+
+[node name="HSeparator" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="DataPathLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Morrowind Data Path:"
+
+[node name="DataPathEdit" type="LineEdit" parent="UI/Panel/VBox"]
+layout_mode = 2
+placeholder_text = "Path to Data Files folder..."
+
+[node name="LoadBSAButton" type="Button" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Load BSA Archives"
+
+[node name="HSeparator2" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="NIFPathLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "NIF Mesh Path:"
+
+[node name="NIFPathEdit" type="LineEdit" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "meshes\\x\\ex_common_door_01.nif"
+placeholder_text = "e.g. meshes\\f\\flora_coll_...nif"
+
+[node name="LoadNIFButton" type="Button" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Load NIF Mesh"
+
+[node name="HSeparator3" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="QuickLoadLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Quick Load Examples:"
+
+[node name="QuickButtons" type="GridContainer" parent="UI/Panel/VBox"]
+layout_mode = 2
+columns = 2
+
+[node name="DoorBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Door"
+
+[node name="ChestBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Chest"
+
+[node name="BarrelBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Barrel"
+
+[node name="TreeBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Tree"
+
+[node name="RockBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Rock"
+
+[node name="PillarBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Pillar"
+
+[node name="HSeparator4" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="StatsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Mesh Statistics:"
+
+[node name="StatsText" type="RichTextLabel" parent="UI/Panel/VBox"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+text = "No mesh loaded"
+
+[node name="HSeparator5" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="LogLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Log:"
+
+[node name="LogText" type="RichTextLabel" parent="UI/Panel/VBox"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_following = true
+text = "Ready. Load BSA archives first."

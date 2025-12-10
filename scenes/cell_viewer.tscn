@@ -1,0 +1,139 @@
+[gd_scene load_steps=3 format=3 uid="uid://cxyz123cellviewer"]
+
+[ext_resource type="Script" path="res://src/tools/cell_viewer.gd" id="1_viewer"]
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 1
+background_color = Color(0.15, 0.15, 0.2, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.3, 0.3, 0.35, 1)
+ambient_light_energy = 0.8
+tonemap_mode = 2
+
+[node name="CellViewer" type="Node3D"]
+script = ExtResource("1_viewer")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 500, 1000, 500)
+light_energy = 1.5
+shadow_enabled = true
+
+[node name="FlyCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.94, 0.342, 0, -0.342, 0.94, 0, 200, 500)
+fov = 70.0
+far = 50000.0
+
+[node name="CellContainer" type="Node3D" parent="."]
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="Panel" parent="UI"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -350.0
+offset_bottom = 600.0
+grow_horizontal = 0
+
+[node name="VBox" type="VBoxContainer" parent="UI/Panel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="Title" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Cell Viewer"
+
+[node name="HSeparator" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="CellNameLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Cell Name:"
+
+[node name="CellNameEdit" type="LineEdit" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Seyda Neen, Census and Excise Office"
+placeholder_text = "Enter interior cell name..."
+
+[node name="LoadCellButton" type="Button" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Load Cell"
+
+[node name="HSeparator2" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="QuickCellsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Quick Load:"
+
+[node name="QuickButtons" type="GridContainer" parent="UI/Panel/VBox"]
+layout_mode = 2
+columns = 2
+
+[node name="CensusBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Census Office"
+
+[node name="LightHouseBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Lighthouse"
+
+[node name="TradeHouseBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Trade House"
+
+[node name="BalmoreraBtn" type="Button" parent="UI/Panel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Balmora"
+
+[node name="HSeparator3" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="StatsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Statistics:"
+
+[node name="StatsText" type="RichTextLabel" parent="UI/Panel/VBox"]
+custom_minimum_size = Vector2(0, 120)
+layout_mode = 2
+bbcode_enabled = true
+text = "No cell loaded"
+
+[node name="HSeparator4" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="ControlsLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Controls:"
+
+[node name="ControlsText" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Hold Right Click to look
+WASD to move
+Space/Shift for up/down
+Ctrl for speed boost"
+
+[node name="HSeparator5" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="LogLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Log:"
+
+[node name="LogText" type="RichTextLabel" parent="UI/Panel/VBox"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_following = true
+text = "Initializing..."
