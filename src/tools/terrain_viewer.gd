@@ -152,18 +152,18 @@ func _init_terrain3d() -> void:
 
 	# Create Terrain3DData if not present
 	if not terrain_3d.data:
-		terrain_3d.data = Terrain3DData.new()
+		terrain_3d.set_data(Terrain3DData.new())
 		_log("Created new Terrain3DData")
 
 	# Create Terrain3DMaterial if not present
 	if not terrain_3d.material:
-		terrain_3d.material = Terrain3DMaterial.new()
+		terrain_3d.set_material(Terrain3DMaterial.new())
 		terrain_3d.material.show_colormap = true
 		_log("Created new Terrain3DMaterial with colormap display")
 
 	# Create Terrain3DAssets if not present
 	if not terrain_3d.assets:
-		terrain_3d.assets = Terrain3DAssets.new()
+		terrain_3d.set_assets(Terrain3DAssets.new())
 		_log("Created new Terrain3DAssets")
 
 	_log("[color=green]Terrain3D initialized successfully[/color]")
@@ -269,9 +269,9 @@ func _import_cell_to_terrain3d(land: LandRecord) -> void:
 		return
 
 	# Generate maps from LAND record
-	var heightmap := terrain_manager.generate_heightmap(land)
-	var colormap := terrain_manager.generate_color_map(land)
-	var controlmap := terrain_manager.generate_control_map(land)
+	var heightmap: Image = terrain_manager.generate_heightmap(land)
+	var colormap: Image = terrain_manager.generate_color_map(land)
+	var controlmap: Image = terrain_manager.generate_control_map(land)
 
 	# Calculate world position for this cell
 	# Terrain3D uses XZ plane, Morrowind cell coords map to world position
@@ -296,7 +296,7 @@ func _import_cell_to_terrain3d(land: LandRecord) -> void:
 
 ## Update statistics display
 func _update_stats(loaded: int, skipped: int, elapsed: int) -> void:
-	var terrain_stats := terrain_manager.get_stats()
+	var terrain_stats: Dictionary = terrain_manager.get_stats()
 	stats_text.text = """[b]Terrain Stats:[/b]
 Cells loaded: %d
 Cells skipped: %d
