@@ -11,6 +11,8 @@ var _buffer: PackedByteArray
 var _pos: int = 0
 var _version: int = 0
 var _num_records: int = 0
+var _parse_failed: bool = false  # Set when unrecoverable error encountered
+var _source_path: String = ""  # Source file path (for error messages)
 
 # Parsed data
 var records: Array = []  # Array of NIFRecord objects
@@ -58,17 +60,20 @@ func load_file(path: String) -> Error:
 	return _parse()
 
 ## Load NIF from buffer (e.g., from BSA)
-func load_buffer(data: PackedByteArray) -> Error:
+## path_hint is optional but helps identify the file in error messages
+func load_buffer(data: PackedByteArray, path_hint: String = "") -> Error:
 	if data.size() == 0:
 		push_error("NIFReader: Empty buffer")
 		return ERR_INVALID_DATA
 
 	_buffer = data
+	_source_path = path_hint
 	return _parse()
 
 ## Main parse function
 func _parse() -> Error:
 	_pos = 0
+	_parse_failed = false
 	records.clear()
 	roots.clear()
 
@@ -109,7 +114,9 @@ func _parse() -> Error:
 
 		var record := _read_record(i)
 		if record == null:
-			push_error("NIFReader: Failed to read record %d" % i)
+			# Don't spam errors - _read_record already logged the specific failure
+			if not _parse_failed:
+				push_error("NIFReader: Failed to read record %d" % i)
 			return ERR_FILE_CORRUPT
 		records[i] = record
 
@@ -320,10 +327,11 @@ func _read_record(index: int) -> Defs.NIFRecord:
 				record = _read_ni_extra_data()
 			else:
 				# Truly unknown type - we cannot safely skip without knowing structure
-				push_error("NIFReader: Unknown record type '%s' at index %d - cannot parse" % [record_type, index])
-				record = Defs.NIFRecord.new()
-				# Mark as invalid so converter knows to skip
-				record.is_valid = false
+				# Log once and abort to prevent cascading errors
+				var path_info := " in '%s'" % _source_path if not _source_path.is_empty() else ""
+				push_error("NIFReader: Unknown record type '%s' at index %d%s - aborting" % [record_type, index, path_info])
+				_parse_failed = true
+				return null  # This will cause _parse() to return ERR_FILE_CORRUPT
 
 	if record:
 		record.record_type = record_type
@@ -886,6 +894,7 @@ func _read_ni_palette() -> Defs.NiPalette:
 	palette.colors.resize(256)
 
 	# Alpha mask for non-alpha palettes (force opaque)
+	@warning_ignore("unused_variable")
 	var alpha_mask := 0x00 if palette.has_alpha else 0xFF
 
 	# Read color entries
@@ -1830,8 +1839,9 @@ func _read_string() -> String:
 	# Safety check: NIF strings should never be longer than 65535 chars
 	# If we get a huge length, the parser is likely out of sync
 	if length == 0 or length > 65535 or _pos + length > _buffer.size():
-		if length > 65535:
-			push_error("NIFReader: Invalid string length %d at pos %d - parser may be out of sync" % [length, _pos])
+		if length > 65535 and not _parse_failed:
+			push_error("NIFReader: Invalid string length %d at pos %d - parser out of sync" % [length, _pos])
+			_parse_failed = true
 		return ""
 	var bytes := _buffer.slice(_pos, _pos + length)
 	_pos += length

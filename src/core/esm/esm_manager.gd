@@ -124,8 +124,8 @@ func load_file(path: String) -> Error:
 			records_parsed += 1
 		else:
 			# Track skipped record types
-			var type_name := ESMDefs.four_cc_to_string(rec_name)
-			skipped_types[type_name] = skipped_types.get(type_name, 0) + 1
+			var skipped_type_name := ESMDefs.four_cc_to_string(rec_name)
+			skipped_types[skipped_type_name] = skipped_types.get(skipped_type_name, 0) + 1
 
 		# Safety: Always ensure we're at record end position
 		# This handles cases where parsers don't read all subrecords
@@ -530,8 +530,8 @@ func _remove_record(record: ESMRecord, rec_type: int) -> void:
 # World
 func get_static(id: String) -> StaticRecord:
 	return statics.get(id.to_lower())
-func get_cell(name: String) -> CellRecord:
-	return cells.get(name.to_lower())
+func get_cell(cell_name: String) -> CellRecord:
+	return cells.get(cell_name.to_lower())
 func get_exterior_cell(x: int, y: int) -> CellRecord:
 	return exterior_cells.get("%d,%d" % [x, y])
 func get_land(x: int, y: int) -> LandRecord:
@@ -620,10 +620,10 @@ func get_sound_generator(id: String) -> SoundGenRecord:
 # Scripts & Settings
 func get_script_record(id: String) -> ScriptRecord:
 	return scripts.get(id.to_lower())
-func get_game_setting(name: String) -> GameSettingRecord:
-	return game_settings.get(name.to_lower())
-func get_global(name: String) -> GlobalRecord:
-	return globals.get(name.to_lower())
+func get_game_setting(setting_name: String) -> GameSettingRecord:
+	return game_settings.get(setting_name.to_lower())
+func get_global(global_name: String) -> GlobalRecord:
+	return globals.get(global_name.to_lower())
 func get_start_scripts() -> Array[String]:
 	return start_scripts
 

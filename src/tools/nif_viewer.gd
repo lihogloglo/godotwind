@@ -3,11 +3,11 @@
 extends Node3D
 
 # Preload NIF reader/converter
-const NIFReader := preload("res://src/core/nif/nif_reader.gd")
-const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
-const BSAReader := preload("res://src/core/bsa/bsa_reader.gd")
-const TextureLoader := preload("res://src/core/texture/texture_loader.gd")
+const NIFReaderScript := preload("res://src/core/nif/nif_reader.gd")
+const NIFConverterScript := preload("res://src/core/nif/nif_converter.gd")
+const NIFKFLoaderScript := preload("res://src/core/nif/nif_kf_loader.gd")
+const BSAReaderScript := preload("res://src/core/bsa/bsa_reader.gd")
+const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
 
 # UI references - Right panel
 @onready var data_path_edit: LineEdit = $UI/Panel/VBox/DataPathEdit
@@ -241,7 +241,7 @@ func _load_bsa_archives(data_path: String) -> void:
 	# Load each BSA
 	var total_files := 0
 	for bsa_path in bsa_files:
-		var reader := BSAReader.new()
+		var reader := BSAReaderScript.new()
 		var result := reader.open(bsa_path)
 		if result == OK:
 			_bsa_readers.append(reader)
@@ -396,7 +396,7 @@ func _load_nif_mesh(nif_path: String) -> void:
 	_log("  Extracted %d bytes" % nif_data.size())
 
 	# Parse NIF
-	var nif_reader := NIFReader.new()
+	var nif_reader := NIFReaderScript.new()
 	nif_reader.debug_mode = false
 	var parse_result := nif_reader.load_buffer(nif_data)
 	if parse_result != OK:
@@ -422,7 +422,7 @@ func _load_nif_mesh(nif_path: String) -> void:
 		_log("    %s: %d" % [rt, record_types[rt]])
 
 	# Convert to Godot scene
-	var converter := NIFConverter.new()
+	var converter := NIFConverterScript.new()
 	converter.load_animations = true  # Enable animation extraction
 	var converted_node := converter.convert_buffer(nif_data)
 	if converted_node == null:
@@ -470,9 +470,9 @@ func _load_nif_mesh(nif_path: String) -> void:
 				_log("    ... and %d more" % (anim_list.size() - 10))
 			# Play the first animation (or "Idle" if available)
 			var anim_to_play := anim_list[0]
-			for name in ["Idle", "idle", "Idle1"]:
-				if name in anim_list:
-					anim_to_play = name
+			for anim_name in ["Idle", "idle", "Idle1"]:
+				if anim_name in anim_list:
+					anim_to_play = anim_name
 					break
 			anim_player.play(anim_to_play)
 			_log("  Playing animation: %s" % anim_to_play)
@@ -492,7 +492,7 @@ func _load_nif_mesh(nif_path: String) -> void:
 		_update_camera()
 
 	# Log texture loading results
-	var tex_stats := TextureLoader.get_stats()
+	var tex_stats := TextureLoaderScript.get_stats()
 	var tex_info: Array = converter.get_mesh_info()["textures"]
 	if not tex_info.is_empty():
 		_log("  Textures: %d referenced, %d loaded" % [tex_info.size(), tex_stats["loaded"]])
@@ -522,7 +522,7 @@ func _update_stats(_reader: NIFReader, converter: NIFConverter, _node: Node3D) -
 			stats += "  %s\n" % tex
 
 	# Texture loader stats
-	var tex_stats := TextureLoader.get_stats()
+	var tex_stats := TextureLoaderScript.get_stats()
 	stats += "\n[b]Texture Cache:[/b]\n"
 	stats += "  Loaded: %d\n" % tex_stats["loaded"]
 	stats += "  Cached: %d\n" % tex_stats["cached"]
@@ -654,7 +654,7 @@ func _try_load_kf_animations(mesh_path: String, skeleton: Skeleton3D) -> Diction
 			if kf_data.is_empty():
 				continue
 
-			var kf_loader := NIFKFLoader.new()
+			var kf_loader := NIFKFLoaderScript.new()
 			kf_loader.debug_mode = false
 			var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
 

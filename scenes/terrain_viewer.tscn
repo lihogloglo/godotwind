@@ -40,6 +40,8 @@ far = 10000.0
 
 [node name="Terrain3D" type="Terrain3D" parent="."]
 
+[node name="CellObjects" type="Node3D" parent="."]
+
 [node name="UI" type="CanvasLayer" parent="."]
 
 [node name="LoadingOverlay" type="ColorRect" parent="UI"]
@@ -146,6 +148,11 @@ size_flags_horizontal = 3
 min_value = 0.0
 max_value = 10.0
 value = 2.0
+
+[node name="LoadObjectsCheck" type="CheckBox" parent="UI/Panel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "Load Cell Objects (statics, doors, etc.)"
 
 [node name="LoadTerrainButton" type="Button" parent="UI/Panel/VBox"]
 layout_mode = 2

@@ -46,6 +46,7 @@ func load(esm: ESMReader) -> void:
 			cell_x = esm.get_s32()
 			cell_y = esm.get_s32()
 			granularity = esm.get_u16()
+			@warning_ignore("unused_variable")
 			var point_count := esm.get_u16()
 			if cell_name.is_empty():
 				record_id = "%d,%d" % [cell_x, cell_y]
@@ -62,6 +63,7 @@ func load(esm: ESMReader) -> void:
 func _load_points(esm: ESMReader) -> void:
 	esm.get_sub_header()
 	var size := esm.get_sub_size()
+	@warning_ignore("integer_division")
 	var point_count := size / 16  # Each point is 16 bytes
 
 	for i in range(point_count):
@@ -78,6 +80,7 @@ func _load_points(esm: ESMReader) -> void:
 func _load_edges(esm: ESMReader) -> void:
 	esm.get_sub_header()
 	var size := esm.get_sub_size()
+	@warning_ignore("integer_division")
 	var edge_count := size / 4  # Each edge is 4 bytes (2x u16 indices)
 
 	for i in range(edge_count):

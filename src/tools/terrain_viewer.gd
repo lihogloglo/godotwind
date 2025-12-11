@@ -14,6 +14,7 @@ extends Node3D
 const MWCoords := preload("res://src/core/morrowind_coords.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 
 # Pre-processed terrain data directory
 const TERRAIN_DATA_DIR := "user://terrain_data/"
@@ -45,6 +46,8 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 # Terrain3D node reference
 @onready var terrain_3d: Terrain3D = $Terrain3D
 @onready var camera: Camera3D = $FlyCamera
+@onready var cell_objects: Node3D = $CellObjects
+@onready var load_objects_check: CheckBox = $UI/Panel/VBox/LoadObjectsCheck
 
 # Camera movement
 var camera_speed: float = 200.0  # Meters per second
@@ -54,6 +57,7 @@ var mouse_captured: bool = false
 # Terrain manager instance
 var terrain_manager: RefCounted  # TerrainManager
 var texture_loader: RefCounted  # TerrainTextureLoader
+var cell_manager: CellManager  # For loading cell objects
 
 # Track loaded cells
 var _loaded_cells: Array[Vector2i] = []
@@ -64,9 +68,12 @@ var _data_path: String = ""
 
 
 func _ready() -> void:
-	# Initialize terrain manager and texture loader
+	# Initialize terrain manager, texture loader, and cell manager
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
+	cell_manager = CellManagerScript.new()
+	cell_manager.load_npcs = false  # Skip NPCs for now (need body assembly)
+	cell_manager.load_creatures = true
 
 	# Connect UI signals
 	load_terrain_button.pressed.connect(_on_load_terrain_pressed)
@@ -260,6 +267,7 @@ func _init_terrain3d() -> void:
 
 	# Use region_size = 128, each region spans 2x2 MW cells
 	# This doubles our world coverage compared to region_size=64
+	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
 	terrain_3d.change_region_size(128)  # 128x128 vertices per region
 
 	# Set vertex_spacing so that a 64-vertex span equals one MW cell
@@ -294,9 +302,13 @@ func _quick_load_or_teleport(center_x: int, center_y: int, radius: int) -> void:
 
 ## Teleport camera to a specific cell
 func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
+	# Calculate cell center position in Godot coordinates
+	# X: cell origin is west edge, add half to get center
+	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
+	#    To get center, we need to move NORTH (decrease Z), so subtract half
 	var region_world_size := 64.0 * terrain_3d.get_vertex_spacing()
 	var world_x := float(cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-cell_y) * region_world_size + region_world_size * 0.5
+	var world_z := float(-cell_y) * region_world_size - region_world_size * 0.5
 
 	var height := terrain_3d.data.get_height(Vector3(world_x, 0, world_z)) if terrain_3d.data else 50.0
 	if is_nan(height) or height > 10000:
@@ -434,7 +446,7 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 	var loaded_count := 0
 	var skipped_count := 0
 
-	# Clear existing terrain data
+	# Clear existing terrain data and cell objects
 	_update_loading(5, "Clearing existing terrain...")
 	await get_tree().process_frame
 
@@ -444,6 +456,10 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 		for region in terrain_3d.data.get_regions_active():
 			terrain_3d.data.remove_region(region, false)
 		terrain_3d.data.update_maps(Terrain3DRegion.TYPE_MAX, true, false)
+
+	# Clear cell objects
+	for child in cell_objects.get_children():
+		child.queue_free()
 
 	_loaded_cells.clear()
 
@@ -540,11 +556,16 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 
 	var elapsed := Time.get_ticks_msec() - start_time
 
-	# Update stats
-	_update_stats(loaded_count, skipped_count, elapsed)
-
 	_log("[color=green]Terrain loaded in %d ms[/color]" % elapsed)
 	_log("Loaded: %d cells, Skipped: %d cells" % [loaded_count, skipped_count])
+
+	# Load cell objects if enabled
+	var objects_loaded := 0
+	if load_objects_check and load_objects_check.button_pressed:
+		objects_loaded = await _load_cell_objects_async(sorted_cells)
+
+	# Update stats
+	_update_stats(loaded_count, skipped_count, elapsed, objects_loaded)
 
 	# Position camera
 	if not _loaded_cells.is_empty():
@@ -609,8 +630,11 @@ func _import_cell_to_terrain3d(land: LandRecord) -> bool:
 
 	# MW Y axis is North, Godot Z axis is South, so negate Y
 	# Position at the center of the region for proper snapping
+	# X: cell origin is west edge, add half to get center
+	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
+	#    To get center, we need to move NORTH (decrease Z), so subtract half
 	var world_x := float(land.cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-land.cell_y) * region_world_size + region_world_size * 0.5
+	var world_z := float(-land.cell_y) * region_world_size - region_world_size * 0.5
 
 	# Create import array [heightmap, controlmap, colormap]
 	var imported_images: Array[Image] = []
@@ -626,14 +650,76 @@ func _import_cell_to_terrain3d(land: LandRecord) -> bool:
 	return true
 
 
+## Load cell objects (statics, containers, doors, etc.) for the given cells
+func _load_cell_objects_async(cells: Array[Vector2i]) -> int:
+	_log("\n[b]Loading cell objects...[/b]")
+	_update_loading(96, "Loading cell objects...")
+	await get_tree().process_frame
+
+	# Clear existing objects
+	for child in cell_objects.get_children():
+		child.queue_free()
+
+	var total_objects := 0
+	var cells_processed := 0
+
+	for cell_coord: Vector2i in cells:
+		var cell_record: CellRecord = ESMManager.get_exterior_cell(cell_coord.x, cell_coord.y)
+		if not cell_record:
+			continue
+
+		# Skip cells with no references
+		if cell_record.references.is_empty():
+			continue
+
+		var progress := 96.0 + (3.0 * float(cells_processed) / float(cells.size()))
+		_update_loading(progress, "Loading objects in cell (%d, %d)..." % [cell_coord.x, cell_coord.y])
+
+		# Load cell objects using CellManager
+		var cell_node := cell_manager.load_exterior_cell(cell_coord.x, cell_coord.y)
+		if cell_node:
+			cell_objects.add_child(cell_node)
+			total_objects += cell_node.get_child_count()
+
+		cells_processed += 1
+
+		# Yield occasionally to keep UI responsive
+		if cells_processed % 3 == 0:
+			await get_tree().process_frame
+
+	var stats := cell_manager.get_stats()
+	_log("Objects loaded: %d (%d models, %d lights)" % [
+		total_objects,
+		stats.get("models_loaded", 0),
+		stats.get("lights_created", 0)
+	])
+
+	return total_objects
+
+
 ## Update statistics display (live mode)
-func _update_stats(loaded: int, skipped: int, elapsed: int) -> void:
+func _update_stats(loaded: int, skipped: int, elapsed: int, objects_loaded: int = 0) -> void:
 	var terrain_stats: Dictionary = terrain_manager.get_stats()
+	var cell_stats: Dictionary = cell_manager.get_stats() if cell_manager else {}
+
+	var objects_text := ""
+	if objects_loaded > 0:
+		objects_text = """
+[b]Objects:[/b]
+Total: %d
+Models: %d (cached: %d)
+Lights: %d""" % [
+			objects_loaded,
+			cell_stats.get("models_loaded", 0),
+			cell_stats.get("models_from_cache", 0),
+			cell_stats.get("lights_created", 0)
+		]
+
 	stats_text.text = """[b]Live Mode Stats:[/b]
 Cells loaded: %d
 Cells skipped: %d
 Heightmaps generated: %d
-Load time: %d ms
+Load time: %d ms%s
 
 [b]Camera:[/b]
 %.1f, %.1f, %.1f""" % [
@@ -641,6 +727,7 @@ Load time: %d ms
 		skipped,
 		terrain_stats.get("heightmaps_generated", 0),
 		elapsed,
+		objects_text,
 		camera.position.x, camera.position.y, camera.position.z
 	]
 
@@ -758,7 +845,7 @@ func _log(message: String) -> void:
 
 
 ## Debug: Compare edge heights between adjacent cells to find discontinuities
-func _debug_edge_heights(lands: Array, grid_width: int, grid_height: int, min_x: int, min_y: int) -> void:
+func _debug_edge_heights(lands: Array, grid_width: int, grid_height: int, _min_x: int, _min_y: int) -> void:
 	_log("[b]Edge Height Analysis:[/b]")
 
 	var total_horizontal := 0

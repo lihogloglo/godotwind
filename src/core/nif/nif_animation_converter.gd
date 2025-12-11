@@ -4,6 +4,7 @@ class_name NIFAnimationConverter
 extends RefCounted
 
 const Defs := preload("res://src/core/nif/nif_defs.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 # Reference to the NIF reader for accessing records
 var _reader: RefCounted = null
@@ -278,31 +279,15 @@ func _collect_xyz_key_times(data: Defs.NiKeyframeData) -> Array:
 
 
 ## Convert quaternion from Morrowind to Godot coordinate system
-## Morrowind/NIF: X-right, Y-forward, Z-up
-## Godot: X-right, Y-up, Z-back
-##
-## For quaternions, the conversion is different from matrices.
-## A quaternion q = (w, x, y, z) represents rotation around axis (x,y,z) by angle 2*acos(w)
-##
-## The coordinate conversion swaps Y<->Z and negates the new Z:
-## axis: (x, y, z) -> (x, z, -y)
-## But we also need to account for the handedness - both systems are right-handed,
-## but the axis swap changes the rotation direction.
+## Delegates to unified CoordinateSystem
 func _convert_quaternion_coords(quat: Quaternion) -> Quaternion:
-	# Direct component conversion for quaternion:
-	# NIF quaternion (w, x, y, z) -> Godot quaternion (w, x, z, -y)
-	#
-	# This is equivalent to: q' = C * q * C^-1 where C is the coordinate transform
-	# For the specific swap (y<->z, negate z), this works out to swapping y,z components
-	# and negating the original y (which becomes new z)
-	return Quaternion(quat.x, quat.z, -quat.y, quat.w)
+	return CS.quaternion_to_godot(quat)
 
 
 ## Convert position from Morrowind to Godot coordinate system
+## Delegates to unified CoordinateSystem - outputs in meters
 func _convert_position(pos: Vector3) -> Vector3:
-	# Morrowind: X-right, Y-forward, Z-up
-	# Godot: X-right, Y-up, Z-back
-	return Vector3(pos.x, pos.z, -pos.y)
+	return CS.vector_to_godot(pos)  # Converts to meters
 
 
 ## Get Godot interpolation type from NIF interpolation type

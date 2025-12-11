@@ -13,7 +13,7 @@
 class_name TerrainTextureLoader
 extends RefCounted
 
-const TextureLoader := preload("res://src/core/texture/texture_loader.gd")
+const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
 
 ## Default texture path for index 0 (when no LTEX specified)
 const DEFAULT_TEXTURE_PATH := "textures\\_land_default.dds"
@@ -145,8 +145,8 @@ func _add_default_texture(terrain_assets: Terrain3DAssets) -> void:
 	asset.name = "Default"
 
 	# Try to load default texture
-	var texture := TextureLoader.load_texture(DEFAULT_TEXTURE_PATH)
-	if texture and texture != TextureLoader._get_fallback_texture():
+	var texture := TextureLoaderScript.load_texture(DEFAULT_TEXTURE_PATH)
+	if texture and texture != TextureLoaderScript._get_fallback_texture():
 		# Ensure texture has mipmaps for proper terrain rendering
 		texture = _ensure_mipmaps(texture)
 		asset.albedo_texture = texture
@@ -176,8 +176,8 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 		return false
 
 	# Load the texture from BSA
-	var texture := TextureLoader.load_texture(ltex.texture_path)
-	if not texture or texture == TextureLoader._get_fallback_texture():
+	var texture := TextureLoaderScript.load_texture(ltex.texture_path)
+	if not texture or texture == TextureLoaderScript._get_fallback_texture():
 		push_warning("TerrainTextureLoader: Failed to load texture '%s' for LTEX %d" % [ltex.texture_path, ltex_index])
 		_stats["textures_failed"] += 1
 		return false
@@ -268,27 +268,43 @@ func _ensure_mipmaps(texture: ImageTexture) -> ImageTexture:
 
 	var img := texture.get_image()
 	if not img:
+		push_warning("TerrainTextureLoader: Cannot get image from texture for mipmap generation")
 		return texture
 
 	# If already has mipmaps, we're good
 	if img.has_mipmaps():
 		return texture
 
+	var original_format := img.get_format()
+	var was_compressed := img.is_compressed()
+
 	# If compressed, decompress first before generating mipmaps
-	if img.is_compressed():
-		var err := img.decompress()
-		if err != OK:
-			push_warning("TerrainTextureLoader: Failed to decompress image for mipmap generation")
+	if was_compressed:
+		var decompress_err := img.decompress()
+		if decompress_err != OK:
+			push_warning("TerrainTextureLoader: Failed to decompress image (format=%d) for mipmap generation" % original_format)
 			return texture
 
 	# Now generate mipmaps
 	var err := img.generate_mipmaps()
 	if err != OK:
-		push_warning("TerrainTextureLoader: Failed to generate mipmaps")
+		push_warning("TerrainTextureLoader: Failed to generate mipmaps (format=%d, was_compressed=%s)" % [original_format, was_compressed])
+		return texture
+
+	# Verify mipmaps were created
+	if not img.has_mipmaps():
+		push_warning("TerrainTextureLoader: generate_mipmaps() succeeded but image still has no mipmaps")
 		return texture
 
 	# Create new texture from the mipmapped image
-	return ImageTexture.create_from_image(img)
+	var new_texture := ImageTexture.create_from_image(img)
+
+	# Double-check the new texture
+	var verify_img := new_texture.get_image()
+	if verify_img and not verify_img.has_mipmaps():
+		push_warning("TerrainTextureLoader: Mipmaps lost when creating ImageTexture")
+
+	return new_texture
 
 
 ## Print debug summary of loaded textures

@@ -8,9 +8,11 @@ extends RefCounted
 const Defs := preload("res://src/core/nif/nif_defs.gd")
 const Reader := preload("res://src/core/nif/nif_reader.gd")
 const TexLoader := preload("res://src/core/texture/texture_loader.gd")
+const MatLib := preload("res://src/core/texture/material_library.gd")
 const SkeletonBuilder := preload("res://src/core/nif/nif_skeleton_builder.gd")
 const AnimationConverter := preload("res://src/core/nif/nif_animation_converter.gd")
 const CollisionBuilder := preload("res://src/core/nif/nif_collision_builder.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 # The NIFReader instance
 var _reader: Reader = null
@@ -32,6 +34,11 @@ var load_animations: bool = true
 
 # Whether to generate collision shapes during conversion
 var load_collision: bool = true
+
+## Whether to use global material library for deduplication
+## When true, materials with the same properties share a single instance
+## This reduces VRAM usage and improves batching
+var use_material_library: bool = true
 
 ## Collision mode for geometry-based collision
 ## See CollisionBuilder.CollisionMode for options:
@@ -78,11 +85,11 @@ func convert_file(path: String) -> Node3D:
 	return _convert()
 
 ## Convert a NIF buffer to a Godot Node3D scene
-## path_hint is optional but helps auto-detect collision mode
+## path_hint is optional but helps auto-detect collision mode and error messages
 func convert_buffer(data: PackedByteArray, path_hint: String = "") -> Node3D:
 	_source_path = path_hint
 	_reader = Reader.new()
-	var result := _reader.load_buffer(data)
+	var result := _reader.load_buffer(data, path_hint)
 	if result != OK:
 		return null
 	return _convert()
@@ -244,29 +251,35 @@ func _convert_record(record: Defs.NIFRecord, skeleton: Skeleton3D = null) -> Nod
 	if record == null:
 		return null
 
-	if record is Defs.NiNode:
+	# Node types (order matters - check derived types before base types)
+	if record is Defs.NiLODNode:
+		return _convert_ni_lod_node(record as Defs.NiLODNode, skeleton)
+	elif record is Defs.NiSwitchNode:
+		return _convert_ni_switch_node(record as Defs.NiSwitchNode, skeleton)
+	elif record is Defs.NiNode:
 		return _convert_ni_node(record as Defs.NiNode, skeleton)
+	# Geometry types
 	elif record is Defs.NiTriShape:
 		return _convert_ni_tri_shape(record as Defs.NiTriShape, skeleton)
 	elif record is Defs.NiTriStrips:
 		return _convert_ni_tri_strips(record as Defs.NiTriStrips, skeleton)
+	# Particle types
+	elif record is Defs.NiParticles:
+		return _convert_ni_particles(record as Defs.NiParticles)
+	# Light types (order matters - check derived types before base types)
+	elif record is Defs.NiSpotLight:
+		return _convert_ni_spot_light(record as Defs.NiSpotLight)
+	elif record is Defs.NiPointLight:
+		return _convert_ni_point_light(record as Defs.NiPointLight)
+	elif record is Defs.NiLight:
+		return _convert_ni_light(record as Defs.NiLight)
 	else:
 		return null
 
 ## Convert a Transform3D from NIF coordinates to Godot coordinates
+## Delegates to unified CoordinateSystem - outputs in meters
 static func _convert_nif_transform(transform: Transform3D) -> Transform3D:
-	# Convert origin
-	var converted_origin := _convert_nif_vector3(transform.origin)
-
-	# Convert basis using C * R * C^T where C is the coordinate conversion
-	var basis := transform.basis
-	var converted_basis := Basis(
-		Vector3(basis.x.x, basis.x.z, -basis.x.y),   # First column
-		Vector3(basis.z.x, basis.z.z, -basis.z.y),   # Second column (was Z)
-		Vector3(-basis.y.x, -basis.y.z, basis.y.y)   # Third column (was -Y)
-	)
-
-	return Transform3D(converted_basis, converted_origin)
+	return CS.transform_to_godot(transform)  # Converts to meters
 
 
 ## Convert NiNode to Node3D
@@ -280,6 +293,11 @@ func _convert_ni_node(ni_node: Defs.NiNode, skeleton: Skeleton3D = null) -> Node
 	# Hide if flagged
 	if ni_node.is_hidden():
 		node.visible = false
+
+	# Handle NiBillboardNode - mark with billboard metadata
+	if ni_node.record_type == Defs.RT_NI_BILLBOARD_NODE:
+		node.set_meta("nif_billboard", true)
+		node.set_meta("nif_record_type", ni_node.record_type)
 
 	# Convert children
 	for child_idx in ni_node.children_indices:
@@ -409,20 +427,15 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 	return mesh_instance
 
 ## Convert a Vector3 from NIF coordinates (Z-up) to Godot coordinates (Y-up)
+## Delegates to unified CoordinateSystem - outputs in meters
 static func _convert_nif_vector3(v: Vector3) -> Vector3:
-	# NIF: X-right, Y-forward, Z-up
-	# Godot: X-right, Y-up, Z-back
-	# Transform: x' = x, y' = z, z' = -y
-	return Vector3(v.x, v.z, -v.y)
+	return CS.vector_to_godot(v)  # Converts to meters
 
 
 ## Convert a PackedVector3Array from NIF to Godot coordinates
+## Delegates to unified CoordinateSystem - outputs in meters
 static func _convert_nif_vertices(vertices: PackedVector3Array) -> PackedVector3Array:
-	var result := PackedVector3Array()
-	result.resize(vertices.size())
-	for i in range(vertices.size()):
-		result[i] = _convert_nif_vector3(vertices[i])
-	return result
+	return CS.vectors_to_godot(vertices)  # Converts to meters
 
 
 ## Create ArrayMesh from NiTriShapeData
@@ -651,7 +664,48 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 	if mat_prop == null and tex_prop == null:
 		return null
 
-	# Create material
+	# Get texture path if available
+	var texture_path := ""
+	if tex_prop and not tex_prop.textures.is_empty():
+		var base_tex := tex_prop.textures[0] if tex_prop.textures.size() > 0 else null
+		if base_tex and base_tex.has_texture and base_tex.source_index >= 0:
+			var tex_source := _reader.get_record(base_tex.source_index)
+			if tex_source is Defs.NiSourceTexture:
+				var source := tex_source as Defs.NiSourceTexture
+				texture_path = source.filename
+
+	# Use MaterialLibrary for deduplication if enabled
+	if use_material_library and load_textures:
+		var props := MatLib.MaterialProperties.new()
+
+		# Texture
+		props.texture_path = texture_path
+
+		# Material properties
+		if mat_prop:
+			props.albedo_color = mat_prop.diffuse
+			props.specular = mat_prop.glossiness / 128.0
+			props.roughness = 1.0 - props.specular
+			if mat_prop.emissive.r > 0.01 or mat_prop.emissive.g > 0.01 or mat_prop.emissive.b > 0.01:
+				props.has_emission = true
+				props.emission_color = mat_prop.emissive
+				props.emission_energy = 1.0
+
+		# Alpha properties
+		if alpha_prop:
+			if alpha_prop.test_enabled():
+				props.transparency_mode = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+				props.alpha_scissor_threshold = alpha_prop.threshold / 255.0
+			elif alpha_prop.blend_enabled():
+				props.transparency_mode = BaseMaterial3D.TRANSPARENCY_ALPHA
+
+		# Vertex colors
+		if vc_prop:
+			props.use_vertex_colors = true
+
+		return MatLib.get_or_create_material(props)
+
+	# Fallback: Create new material (legacy behavior)
 	var material := StandardMaterial3D.new()
 
 	# Apply material properties
@@ -674,20 +728,14 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 		material.vertex_color_use_as_albedo = true
 
 	# Texture loading
-	if tex_prop and not tex_prop.textures.is_empty():
-		var base_tex := tex_prop.textures[0] if tex_prop.textures.size() > 0 else null
-		if base_tex and base_tex.has_texture and base_tex.source_index >= 0:
-			var tex_source := _reader.get_record(base_tex.source_index)
-			if tex_source is Defs.NiSourceTexture:
-				var source := tex_source as Defs.NiSourceTexture
-				if load_textures and not source.filename.is_empty():
-					# Load texture from BSA
-					var texture := TexLoader.load_texture(source.filename)
-					if texture:
-						material.albedo_texture = texture
-				else:
-					# Store texture path in metadata for later loading
-					material.set_meta("texture_path", source.filename)
+	if not texture_path.is_empty():
+		if load_textures:
+			var texture := TexLoader.load_texture(texture_path)
+			if texture:
+				material.albedo_texture = texture
+		else:
+			# Store texture path in metadata for later loading
+			material.set_meta("texture_path", texture_path)
 
 	return material
 
@@ -920,3 +968,404 @@ func _bv_type_to_string(bv_type: int) -> String:
 			return "halfspace"
 		_:
 			return "unknown"
+
+
+# =============================================================================
+# PARTICLE CONVERSION
+# =============================================================================
+
+## Convert NiParticles to a GPUParticles3D node
+## This handles NiParticles, NiAutoNormalParticles, and NiRotatingParticles
+func _convert_ni_particles(particles: Defs.NiParticles) -> Node3D:
+	var node := GPUParticles3D.new()
+	node.name = particles.name if particles.name else "Particles_%d" % particles.record_index
+
+	# Apply transform
+	var nif_transform := particles.transform.to_transform3d()
+	node.transform = _convert_nif_transform(nif_transform)
+
+	# Get particle data
+	var particles_data: Defs.NiParticlesData = null
+	if particles.data_index >= 0 and particles.data_index < _reader.records.size():
+		var data_record = _reader.records[particles.data_index]
+		if data_record is Defs.NiParticlesData:
+			particles_data = data_record as Defs.NiParticlesData
+
+	# Create process material for particle behavior
+	var material := ParticleProcessMaterial.new()
+
+	# Look for particle system controller to get emission parameters
+	var controller: Defs.NiParticleSystemController = null
+	if particles.controller_index >= 0:
+		controller = _find_particle_controller(particles.controller_index)
+
+	if controller:
+		# Set emission parameters from controller
+		material.initial_velocity_min = controller.speed - controller.speed_variation
+		material.initial_velocity_max = controller.speed + controller.speed_variation
+
+		# Convert direction (declination is angle from up vector)
+		var direction := controller.initial_normal.normalized()
+		material.direction = CS.vector_to_godot(direction, false)  # Direction, no scale
+		material.spread = rad_to_deg(controller.declination_variation) * 2.0
+
+		# Lifetime
+		node.lifetime = controller.lifetime if controller.lifetime > 0 else 1.0
+
+		# Emission timing
+		if controller.birth_rate > 0:
+			node.amount = int(controller.birth_rate * node.lifetime)
+		else:
+			node.amount = 8  # Default
+
+		# Emitter shape (box emitter if dimensions are set)
+		if controller.emitter_dimensions.length() > 0.001:
+			var extents: Vector3 = CS.vector_to_godot(controller.emitter_dimensions) * 0.5
+			material.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+			material.emission_box_extents = extents.abs()
+		else:
+			material.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_POINT
+
+		# Initial color
+		material.color = controller.initial_color
+
+		# Look for particle modifiers (gravity, grow/fade, color)
+		_apply_particle_modifiers(controller, material, node)
+	else:
+		# Default particle settings
+		node.amount = 8
+		node.lifetime = 1.0
+		material.direction = Vector3.UP
+		material.initial_velocity_min = 1.0
+		material.initial_velocity_max = 2.0
+
+	# Set particle size from data
+	if particles_data:
+		var base_size: float = particles_data.particle_radius * CS.SCALE_FACTOR
+		if base_size > 0:
+			material.scale_min = base_size
+			material.scale_max = base_size
+
+		# If we have vertex colors in the particle data, use the first one
+		if particles_data.colors.size() > 0:
+			material.color = particles_data.colors[0]
+
+	node.process_material = material
+
+	# Create a simple quad mesh for particles (billboard)
+	var quad_mesh := QuadMesh.new()
+	quad_mesh.size = Vector2(0.1, 0.1)  # Will be scaled by material
+	node.draw_pass_1 = quad_mesh
+
+	# Look for texturing property for particle texture
+	var tex_material := _get_particle_texture_material(particles)
+	if tex_material:
+		quad_mesh.material = tex_material
+
+	# Set billboard mode
+	var draw_material := quad_mesh.material
+	if draw_material == null:
+		draw_material = StandardMaterial3D.new()
+		quad_mesh.material = draw_material
+	if draw_material is StandardMaterial3D:
+		draw_material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		draw_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+
+	# Store metadata
+	node.set_meta("nif_record_type", particles.record_type)
+	node.set_meta("nif_record_index", particles.record_index)
+
+	return node
+
+
+## Find particle system controller in controller chain
+func _find_particle_controller(controller_index: int) -> Defs.NiParticleSystemController:
+	var current_index := controller_index
+	while current_index >= 0 and current_index < _reader.records.size():
+		var record = _reader.records[current_index]
+		if record is Defs.NiParticleSystemController:
+			return record as Defs.NiParticleSystemController
+		elif record is Defs.NiTimeController:
+			current_index = (record as Defs.NiTimeController).next_controller_index
+		else:
+			break
+	return null
+
+
+## Apply particle modifiers (gravity, grow/fade, color) to the particle material
+func _apply_particle_modifiers(controller: Defs.NiParticleSystemController, material: ParticleProcessMaterial, node: GPUParticles3D) -> void:
+	# The controller has references to modifiers through extra data chain
+	# For now, look through all records for modifiers that might apply
+	for record in _reader.records:
+		if record is Defs.NiGravity:
+			var gravity := record as Defs.NiGravity
+			# Convert gravity direction and force
+			var gravity_dir: Vector3 = CS.vector_to_godot(gravity.direction, false)  # Direction, no scale
+			material.gravity = gravity_dir * gravity.force * CS.SCALE_FACTOR
+		elif record is Defs.NiParticleGrowFade:
+			var grow_fade := record as Defs.NiParticleGrowFade
+			# Set up scale curve for grow/fade
+			if grow_fade.grow_time > 0 or grow_fade.fade_time > 0:
+				var curve := Curve.new()
+				var grow_t := grow_fade.grow_time / node.lifetime if node.lifetime > 0 else 0.0
+				var fade_t := 1.0 - (grow_fade.fade_time / node.lifetime if node.lifetime > 0 else 0.0)
+
+				curve.add_point(Vector2(0.0, 0.0))
+				if grow_t > 0:
+					curve.add_point(Vector2(grow_t, 1.0))
+				else:
+					curve.set_point_value(0, 1.0)
+				if fade_t < 1.0:
+					curve.add_point(Vector2(fade_t, 1.0))
+				curve.add_point(Vector2(1.0, 0.0))
+
+				var curve_tex := CurveTexture.new()
+				curve_tex.curve = curve
+				material.scale_curve = curve_tex
+
+
+## Get texture material for particles from NiTexturingProperty
+func _get_particle_texture_material(particles: Defs.NiParticles) -> Material:
+	for prop_index in particles.property_indices:
+		if prop_index < 0 or prop_index >= _reader.records.size():
+			continue
+		var prop = _reader.records[prop_index]
+		if prop is Defs.NiTexturingProperty:
+			var tex_prop := prop as Defs.NiTexturingProperty
+			if tex_prop.textures.size() > 0 and tex_prop.textures[0].has_texture:
+				var tex_desc := tex_prop.textures[0]
+				if tex_desc.source_index >= 0 and tex_desc.source_index < _reader.records.size():
+					var source = _reader.records[tex_desc.source_index]
+					if source is Defs.NiSourceTexture:
+						var source_tex := source as Defs.NiSourceTexture
+						if source_tex.is_external and source_tex.filename:
+							var mat := StandardMaterial3D.new()
+							mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+							mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+							# Store texture path for later loading
+							mat.set_meta("nif_texture_path", source_tex.filename)
+							return mat
+	return null
+
+
+# =============================================================================
+# LIGHT CONVERSION
+# =============================================================================
+
+## Convert NiLight (ambient/directional) to Godot light
+func _convert_ni_light(light: Defs.NiLight) -> Node3D:
+	# Check record type for specific light type
+	if light.record_type == Defs.RT_NI_AMBIENT_LIGHT:
+		# Godot doesn't have an ambient light node, store as metadata on a Node3D
+		var node := Node3D.new()
+		node.name = light.name if light.name else "AmbientLight_%d" % light.record_index
+
+		var nif_transform := light.transform.to_transform3d()
+		node.transform = _convert_nif_transform(nif_transform)
+
+		node.set_meta("nif_record_type", light.record_type)
+		node.set_meta("nif_light_type", "ambient")
+		node.set_meta("nif_ambient_color", light.ambient_color)
+		node.set_meta("nif_dimmer", light.dimmer)
+
+		return node
+	elif light.record_type == Defs.RT_NI_DIRECTIONAL_LIGHT:
+		var dir_light := DirectionalLight3D.new()
+		dir_light.name = light.name if light.name else "DirectionalLight_%d" % light.record_index
+
+		var nif_transform := light.transform.to_transform3d()
+		dir_light.transform = _convert_nif_transform(nif_transform)
+
+		# Use diffuse color as light color
+		dir_light.light_color = Color(light.diffuse_color.r, light.diffuse_color.g, light.diffuse_color.b)
+		dir_light.light_energy = light.dimmer
+
+		dir_light.set_meta("nif_record_type", light.record_type)
+		dir_light.set_meta("nif_record_index", light.record_index)
+
+		return dir_light
+
+	# Fallback for base NiLight
+	var node := Node3D.new()
+	node.name = light.name if light.name else "Light_%d" % light.record_index
+	node.set_meta("nif_record_type", light.record_type)
+	return node
+
+
+## Convert NiPointLight to OmniLight3D
+func _convert_ni_point_light(light: Defs.NiPointLight) -> OmniLight3D:
+	var omni_light := OmniLight3D.new()
+	omni_light.name = light.name if light.name else "PointLight_%d" % light.record_index
+
+	var nif_transform := light.transform.to_transform3d()
+	omni_light.transform = _convert_nif_transform(nif_transform)
+
+	# Use diffuse color as light color
+	omni_light.light_color = Color(light.diffuse_color.r, light.diffuse_color.g, light.diffuse_color.b)
+	omni_light.light_energy = light.dimmer
+
+	# Calculate range from attenuation
+	# NIF uses: attenuation = 1 / (constant + linear*d + quadratic*d^2)
+	# We need to estimate a reasonable range
+	var range := _calculate_light_range(light.constant_atten, light.linear_atten, light.quadratic_atten)
+	omni_light.omni_range = range * CS.SCALE_FACTOR
+
+	# Set attenuation curve (Godot uses inverse square by default which is close)
+	if light.quadratic_atten > 0:
+		omni_light.omni_attenuation = 1.0  # Quadratic falloff
+	elif light.linear_atten > 0:
+		omni_light.omni_attenuation = 0.5  # Linear-ish falloff
+	else:
+		omni_light.omni_attenuation = 0.0  # Constant (no falloff)
+
+	omni_light.set_meta("nif_record_type", light.record_type)
+	omni_light.set_meta("nif_record_index", light.record_index)
+	omni_light.set_meta("nif_constant_atten", light.constant_atten)
+	omni_light.set_meta("nif_linear_atten", light.linear_atten)
+	omni_light.set_meta("nif_quadratic_atten", light.quadratic_atten)
+
+	return omni_light
+
+
+## Convert NiSpotLight to SpotLight3D
+func _convert_ni_spot_light(light: Defs.NiSpotLight) -> SpotLight3D:
+	var spot_light := SpotLight3D.new()
+	spot_light.name = light.name if light.name else "SpotLight_%d" % light.record_index
+
+	var nif_transform := light.transform.to_transform3d()
+	spot_light.transform = _convert_nif_transform(nif_transform)
+
+	# Use diffuse color as light color
+	spot_light.light_color = Color(light.diffuse_color.r, light.diffuse_color.g, light.diffuse_color.b)
+	spot_light.light_energy = light.dimmer
+
+	# Calculate range from attenuation
+	var range := _calculate_light_range(light.constant_atten, light.linear_atten, light.quadratic_atten)
+	spot_light.spot_range = range * CS.SCALE_FACTOR
+
+	# Spot angle (NIF uses outer angle, Godot uses half-angle)
+	spot_light.spot_angle = rad_to_deg(light.outer_spot_angle)
+
+	# Spot attenuation based on inner/outer angle difference
+	if light.outer_spot_angle > 0 and light.inner_spot_angle > 0:
+		var angle_ratio := light.inner_spot_angle / light.outer_spot_angle
+		spot_light.spot_angle_attenuation = 1.0 - angle_ratio
+	else:
+		spot_light.spot_angle_attenuation = 1.0
+
+	# Distance attenuation
+	if light.quadratic_atten > 0:
+		spot_light.spot_attenuation = 1.0
+	elif light.linear_atten > 0:
+		spot_light.spot_attenuation = 0.5
+	else:
+		spot_light.spot_attenuation = 0.0
+
+	spot_light.set_meta("nif_record_type", light.record_type)
+	spot_light.set_meta("nif_record_index", light.record_index)
+	spot_light.set_meta("nif_outer_spot_angle", light.outer_spot_angle)
+	spot_light.set_meta("nif_inner_spot_angle", light.inner_spot_angle)
+	spot_light.set_meta("nif_exponent", light.exponent)
+
+	return spot_light
+
+
+## Calculate effective light range from NIF attenuation parameters
+## Returns range in NIF units
+func _calculate_light_range(constant: float, linear: float, quadratic: float) -> float:
+	# Find distance where light intensity drops to ~1% (0.01)
+	# attenuation = 1 / (c + l*d + q*d^2)
+	# We want: 1 / (c + l*d + q*d^2) = 0.01
+	# So: c + l*d + q*d^2 = 100
+
+	if quadratic > 0.0001:
+		# Solve quadratic: q*d^2 + l*d + (c - 100) = 0
+		var a := quadratic
+		var b := linear
+		var c := constant - 100.0
+		var discriminant := b * b - 4.0 * a * c
+		if discriminant >= 0:
+			return (-b + sqrt(discriminant)) / (2.0 * a)
+	elif linear > 0.0001:
+		# Linear case: l*d = 100 - c
+		return (100.0 - constant) / linear
+
+	# Default range if no attenuation (or constant only)
+	return 500.0  # 500 NIF units
+
+
+# =============================================================================
+# LOD AND SWITCH NODE CONVERSION
+# =============================================================================
+
+## Convert NiLODNode to Node3D with LOD metadata
+func _convert_ni_lod_node(lod_node: Defs.NiLODNode, skeleton: Skeleton3D = null) -> Node3D:
+	var node := Node3D.new()
+	node.name = lod_node.name if lod_node.name else "LODNode_%d" % lod_node.record_index
+
+	# Apply transform
+	var nif_transform := lod_node.transform.to_transform3d()
+	node.transform = _convert_nif_transform(nif_transform)
+
+	# Store LOD data as metadata
+	node.set_meta("nif_record_type", lod_node.record_type)
+	node.set_meta("nif_record_index", lod_node.record_index)
+	node.set_meta("nif_lod_center", CS.vector_to_godot(lod_node.lod_center))
+
+	# Convert LOD levels (convert distances to meters)
+	var converted_levels: Array = []
+	for level in lod_node.lod_levels:
+		converted_levels.append({
+			"min_range": level.get("min_range", 0.0) * CS.SCALE_FACTOR,
+			"max_range": level.get("max_range", 0.0) * CS.SCALE_FACTOR
+		})
+	node.set_meta("nif_lod_levels", converted_levels)
+
+	# Convert children
+	for child_index in lod_node.children_indices:
+		if child_index < 0 or child_index >= _reader.records.size():
+			continue
+		var child_record = _reader.records[child_index]
+		var child_node := _convert_record(child_record, skeleton)
+		if child_node:
+			node.add_child(child_node)
+			# Store LOD level index on child
+			var lod_index := lod_node.children_indices.find(child_index)
+			child_node.set_meta("nif_lod_level", lod_index)
+
+	return node
+
+
+## Convert NiSwitchNode to Node3D with switch metadata
+func _convert_ni_switch_node(switch_node: Defs.NiSwitchNode, skeleton: Skeleton3D = null) -> Node3D:
+	var node := Node3D.new()
+	node.name = switch_node.name if switch_node.name else "SwitchNode_%d" % switch_node.record_index
+
+	# Apply transform
+	var nif_transform := switch_node.transform.to_transform3d()
+	node.transform = _convert_nif_transform(nif_transform)
+
+	# Store switch data as metadata
+	node.set_meta("nif_record_type", switch_node.record_type)
+	node.set_meta("nif_record_index", switch_node.record_index)
+	node.set_meta("nif_switch_flags", switch_node.switch_flags)
+	node.set_meta("nif_initial_index", switch_node.initial_index)
+
+	# Convert children
+	var child_index_counter := 0
+	for child_index in switch_node.children_indices:
+		if child_index < 0 or child_index >= _reader.records.size():
+			child_index_counter += 1
+			continue
+		var child_record = _reader.records[child_index]
+		var child_node := _convert_record(child_record, skeleton)
+		if child_node:
+			node.add_child(child_node)
+			# Store switch index on child
+			child_node.set_meta("nif_switch_index", child_index_counter)
+			# Hide all children except the initial one
+			if child_index_counter != switch_node.initial_index:
+				child_node.visible = false
+		child_index_counter += 1
+
+	return node

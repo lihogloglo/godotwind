@@ -4,6 +4,7 @@ class_name NIFSkeletonBuilder
 extends RefCounted
 
 const Defs := preload("res://src/core/nif/nif_defs.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 # Reference to the NIF reader for accessing records
 var _reader: RefCounted = null
@@ -172,42 +173,14 @@ func _setup_bone_rest_poses(skeleton: Skeleton3D, skin_instance: Defs.NiSkinInst
 
 
 ## Convert a NIF transform from Morrowind to Godot coordinate system
-## Morrowind/NIF: X-right, Y-forward, Z-up (right-handed)
-## Godot: X-right, Y-up, Z-back (right-handed, but different orientation)
-##
-## The conversion is: x' = x, y' = z, z' = -y
-## This swaps Y and Z, then negates the new Z axis
+## Delegates to unified CoordinateSystem - outputs in meters
 func _convert_nif_transform(transform: Transform3D) -> Transform3D:
-	# Conversion matrix that transforms NIF coords to Godot coords:
-	# | 1  0  0 |
-	# | 0  0  1 |
-	# | 0 -1  0 |
-	#
-	# To convert a full transform T, we need: T' = C * T * C^-1
-	# where C is the conversion matrix
-	#
-	# For the origin (point): p' = C * p
-	var origin := transform.origin
-	var converted_origin := Vector3(origin.x, origin.z, -origin.y)
-
-	# For the basis (rotation matrix): R' = C * R * C^T (since C is orthogonal, C^-1 = C^T)
-	var basis := transform.basis
-
-	# Apply C * R * C^T
-	# First compute R * C^T where C^T swaps columns 1,2 and negates column 2
-	# Then multiply by C which swaps rows 1,2 and negates row 2
-	var converted_basis := Basis(
-		Vector3(basis.x.x, basis.x.z, -basis.x.y),   # First column
-		Vector3(basis.z.x, basis.z.z, -basis.z.y),   # Second column (was Z)
-		Vector3(-basis.y.x, -basis.y.z, basis.y.y)   # Third column (was -Y)
-	)
-
-	return Transform3D(converted_basis, converted_origin)
+	return CS.transform_to_godot(transform)  # Converts to meters
 
 
 ## Convert a bone transform from Morrowind to Godot coordinate system (legacy alias)
 func _convert_bone_transform(transform: Transform3D) -> Transform3D:
-	return _convert_nif_transform(transform)
+	return CS.transform_to_godot(transform)  # Converts to meters
 
 
 ## Get bone index by name (case-insensitive)

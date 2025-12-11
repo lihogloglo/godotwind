@@ -68,10 +68,10 @@ func _on_loading_started(file_path: String) -> void:
 	progress_bar.value = 0
 	load_button.disabled = true
 
-func _on_loading_progress(file_path: String, progress: float) -> void:
+func _on_loading_progress(_file_path: String, progress: float) -> void:
 	progress_bar.value = progress * 100
 
-func _on_loading_completed(file_path: String, record_count: int) -> void:
+func _on_loading_completed(_file_path: String, record_count: int) -> void:
 	status_label.text = "Status: Loaded %d records" % record_count
 	progress_bar.value = 100
 	load_button.disabled = false

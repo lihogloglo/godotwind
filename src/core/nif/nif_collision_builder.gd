@@ -18,6 +18,7 @@ extends RefCounted
 # Preload dependencies
 const Defs := preload("res://src/core/nif/nif_defs.gd")
 const Reader := preload("res://src/core/nif/nif_reader.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Collision generation mode
 ## Controls how geometry is converted to physics shapes
@@ -646,17 +647,15 @@ func _convert_strips_to_triangles(strips: Array) -> PackedInt32Array:
 
 
 ## Convert a NIF vector (Z-up) to Godot vector (Y-up)
+## Delegates to unified CoordinateSystem - outputs in meters
 func _convert_nif_vector(v: Vector3) -> Vector3:
-	return Vector3(v.x, v.z, -v.y)
+	return CS.vector_to_godot(v)  # Converts to meters
 
 
 ## Convert a NIF basis/rotation to Godot
+## Delegates to unified CoordinateSystem
 func _convert_nif_basis(b: Basis) -> Basis:
-	return Basis(
-		Vector3(b.x.x, b.x.z, -b.x.y),
-		Vector3(b.z.x, b.z.z, -b.z.y),
-		Vector3(-b.y.x, -b.y.z, b.y.y)
-	)
+	return CS.basis_to_godot(b)
 
 
 ## Create a basis that orients Y axis along the given direction

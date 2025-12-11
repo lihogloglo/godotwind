@@ -150,10 +150,13 @@ func _import_cell(terrain: Terrain3D, land: LandRecord) -> void:
 	colormap.resize(REGION_SIZE, REGION_SIZE, Image.INTERPOLATE_BILINEAR)
 	controlmap.resize(REGION_SIZE, REGION_SIZE, Image.INTERPOLATE_NEAREST)
 
-	# Calculate world position
+	# Calculate world position for region center
+	# X: cell origin is west edge, add half to get center
+	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
+	#    To get center, we need to move NORTH (decrease Z), so subtract half
 	var region_world_size := float(REGION_SIZE) * terrain.get_vertex_spacing()
 	var world_x := float(land.cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-land.cell_y) * region_world_size + region_world_size * 0.5
+	var world_z := float(-land.cell_y) * region_world_size - region_world_size * 0.5
 
 	# Create import array
 	var imported_images: Array[Image] = []

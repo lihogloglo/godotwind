@@ -5,21 +5,22 @@ class_name TerrainManager
 extends RefCounted
 
 # Preload coordinate utilities
-const MWCoords := preload("res://src/core/morrowind_coords.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
-# Morrowind terrain constants
-const MW_CELL_SIZE: float = 8192.0     # Cell size in Morrowind units
-const MW_LAND_SIZE: int = 65           # Vertices per cell side
-const MW_TEXTURE_SIZE: int = 16        # Texture tiles per cell side
+# Morrowind terrain constants (from CoordinateSystem)
+const MW_CELL_SIZE: float = CS.CELL_SIZE_MW  # Cell size in Morrowind units
+const MW_LAND_SIZE: int = 65                  # Vertices per cell side
+const MW_TEXTURE_SIZE: int = 16               # Texture tiles per cell side
 
 # Terrain3D region size (should match Terrain3D settings)
 # Default Terrain3D region = 256m, we'll use 1 MW cell = 1 region for simplicity
 var region_size: int = 256
 
 # Height scale for converting MW heights to Godot
-# MW heights are in game units, typically ranging from -2000 to +8000
-# Godot/Terrain3D expects meters, and we use our standard conversion
-var height_scale: float = 1.0 / 70.0  # Same as MWCoords
+# MW heights are in game units, Terrain3D expects meters
+# This ALWAYS applies scale regardless of CS.APPLY_SCALE because
+# terrain must be in consistent Godot units for proper rendering
+var height_scale: float = 1.0 / CS.UNITS_PER_METER
 
 # Statistics
 var _stats: Dictionary = {
@@ -201,54 +202,67 @@ func generate_control_map(land: LandRecord) -> Image:
 			var mw_tex_idx := land.get_texture_index(tex_x, tex_y)
 			var base_slot := _get_terrain3d_texture_slot(mw_tex_idx)
 
-			# Calculate blend with neighboring textures
-			var frac_x := tex_x_f - float(tex_x)  # 0.0-1.0 within cell
+			# Calculate position within cell (0.0-1.0)
+			var frac_x := tex_x_f - float(tex_x)
 			var frac_y := tex_y_f - float(tex_y)
 
+			# Use bilinear-style blending for smoother transitions
+			# Sample the 4 corners of the current position and blend based on distance
 			var overlay_slot := base_slot
-			var blend := 0
-
-			# Determine which neighbor to blend with based on position in cell
-			# Blend zone is the outer 40% of each cell edge
-			var blend_threshold := 0.3
 			var blend_strength := 0.0
 
-			# Check if we're near an edge and should blend
-			if frac_x > (1.0 - blend_threshold) and tex_x < MW_TEXTURE_SIZE - 1:
-				# Near right edge - blend with right neighbor
-				var neighbor_idx := land.get_texture_index(tex_x + 1, tex_y)
-				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
-				if neighbor_slot != base_slot:
-					overlay_slot = neighbor_slot
-					blend_strength = (frac_x - (1.0 - blend_threshold)) / blend_threshold
-			elif frac_x < blend_threshold and tex_x > 0:
-				# Near left edge - blend with left neighbor
-				var neighbor_idx := land.get_texture_index(tex_x - 1, tex_y)
-				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
-				if neighbor_slot != base_slot:
-					overlay_slot = neighbor_slot
-					blend_strength = (blend_threshold - frac_x) / blend_threshold
+			# Get neighboring texture slots
+			var slot_right := base_slot
+			var slot_top := base_slot
+			var slot_diag := base_slot  # top-right diagonal
 
-			# Y-axis blending (combine with X if applicable)
-			if frac_y > (1.0 - blend_threshold) and tex_y < MW_TEXTURE_SIZE - 1:
-				var neighbor_idx := land.get_texture_index(tex_x, tex_y + 1)
-				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
-				if neighbor_slot != base_slot:
-					var y_blend := (frac_y - (1.0 - blend_threshold)) / blend_threshold
-					if y_blend > blend_strength:
-						overlay_slot = neighbor_slot
-						blend_strength = y_blend
-			elif frac_y < blend_threshold and tex_y > 0:
-				var neighbor_idx := land.get_texture_index(tex_x, tex_y - 1)
-				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
-				if neighbor_slot != base_slot:
-					var y_blend := (blend_threshold - frac_y) / blend_threshold
-					if y_blend > blend_strength:
-						overlay_slot = neighbor_slot
-						blend_strength = y_blend
+			if tex_x < MW_TEXTURE_SIZE - 1:
+				slot_right = _get_terrain3d_texture_slot(land.get_texture_index(tex_x + 1, tex_y))
+			if tex_y < MW_TEXTURE_SIZE - 1:
+				slot_top = _get_terrain3d_texture_slot(land.get_texture_index(tex_x, tex_y + 1))
+			if tex_x < MW_TEXTURE_SIZE - 1 and tex_y < MW_TEXTURE_SIZE - 1:
+				slot_diag = _get_terrain3d_texture_slot(land.get_texture_index(tex_x + 1, tex_y + 1))
+
+			# Determine dominant blend direction using smooth interpolation
+			# Weight blend by distance to cell edges (wider blend zone)
+			var blend_x := frac_x  # 0 at left edge, 1 at right edge
+			var blend_y := frac_y  # 0 at bottom edge, 1 at top edge
+
+			# Apply smoothstep for smoother transitions
+			blend_x = blend_x * blend_x * (3.0 - 2.0 * blend_x)
+			blend_y = blend_y * blend_y * (3.0 - 2.0 * blend_y)
+
+			# Determine which neighbor has the strongest influence
+			# Priority: diagonal > vertical > horizontal (for corners)
+			var max_blend := 0.0
+
+			# Check diagonal (corner) blending first
+			if slot_diag != base_slot:
+				var diag_blend := blend_x * blend_y
+				if diag_blend > max_blend:
+					max_blend = diag_blend
+					overlay_slot = slot_diag
+					blend_strength = diag_blend
+
+			# Check horizontal blending
+			if slot_right != base_slot:
+				var h_blend := blend_x * (1.0 - blend_y)
+				if h_blend > max_blend:
+					max_blend = h_blend
+					overlay_slot = slot_right
+					blend_strength = h_blend
+
+			# Check vertical blending
+			if slot_top != base_slot:
+				var v_blend := blend_y * (1.0 - blend_x)
+				if v_blend > max_blend:
+					max_blend = v_blend
+					overlay_slot = slot_top
+					blend_strength = v_blend
 
 			# Convert blend strength (0-1) to 8-bit value (0-255)
-			blend = int(blend_strength * 255.0)
+			# Scale up blend for more visible transitions
+			var blend := int(clampf(blend_strength * 2.0, 0.0, 1.0) * 255.0)
 
 			# FLIP Y axis to match heightmap orientation
 			var img_y := MW_LAND_SIZE - 1 - y

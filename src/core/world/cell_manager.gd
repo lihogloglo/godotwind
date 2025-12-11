@@ -6,9 +6,13 @@ extends RefCounted
 
 # Preload coordinate utilities
 const MWCoords := preload("res://src/core/morrowind_coords.gd")
+const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 
 # Cache for loaded models to avoid re-parsing NIFs
 var _model_cache: Dictionary = {}  # model_path (lowercase) -> Node3D prototype
+
+# Object pool for frequently used models
+var _object_pool: RefCounted = null  # ObjectPool
 
 # Statistics
 var _stats: Dictionary = {
@@ -25,6 +29,7 @@ var _stats: Dictionary = {
 var create_lights: bool = true   # Whether to create OmniLight3D for light refs
 var load_npcs: bool = true       # Whether to load NPC models
 var load_creatures: bool = true  # Whether to load creature models
+var use_object_pool: bool = true # Whether to use object pooling for common models
 
 # Morrowind light radius to Godot light range conversion factor
 # MW units are roughly 1/128th of a meter, so radius 256 ~= 2 meters
@@ -124,11 +129,26 @@ func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
 	if model_path.is_empty():
 		return null
 
+	# Try to get from object pool first (if enabled)
+	if use_object_pool and _object_pool:
+		var pooled: Node3D = _object_pool.acquire(model_path)
+		if pooled:
+			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+			_apply_transform(pooled, ref, true)
+			_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
+			return pooled
+
 	# Load or get cached model
 	var model_prototype := _get_model(model_path)
 	if not model_prototype:
 		# Create a placeholder for missing models
 		return _create_placeholder(ref)
+
+	# Register with pool if pooling enabled and this is a common model
+	if use_object_pool and _object_pool and not _object_pool.has_model(model_path):
+		var common_models := ObjectPoolScript.identify_common_models(self)
+		if model_path.to_lower().replace("/", "\\") in common_models:
+			_object_pool.register_model(model_path, model_prototype, 0, common_models[model_path.to_lower().replace("/", "\\")])
 
 	# Create instance
 	var instance: Node3D = model_prototype.duplicate()
@@ -222,7 +242,7 @@ func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) ->
 
 
 ## Create a placeholder for actors without models (NPCs using body parts)
-func _create_actor_placeholder(ref: CellReference, actor_record, actor_type: String) -> Node3D:
+func _create_actor_placeholder(ref: CellReference, _actor_record, actor_type: String) -> Node3D:
 	var placeholder := MeshInstance3D.new()
 	placeholder.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
@@ -248,36 +268,17 @@ func _create_actor_placeholder(ref: CellReference, actor_record, actor_type: Str
 
 
 ## Apply position, rotation, and scale to a node
-## If apply_model_rotation is true, applies the Z-up to Y-up conversion
-func _apply_transform(node: Node3D, ref: CellReference, apply_model_rotation: bool) -> void:
-	# Position conversion: MW(x,y,z) -> Godot(x, z, -y)
+## Uses unified CoordinateSystem for all conversions
+func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: bool) -> void:
+	# Position conversion via CoordinateSystem (outputs in meters)
 	node.position = MWCoords.position_to_godot(ref.position)
 	node.scale = MWCoords.scale_to_godot(ref.scale)
 
-	if apply_model_rotation:
-		# Build the complete rotation:
-		# 1. Base rotation: -90 around X to convert Z-up model to Y-up world
-		# 2. Object rotation: converted from MW to Godot coordinates
-		var base_rotation := Basis(Vector3(1, 0, 0), -PI / 2.0)
-
-		# Convert MW rotation to Godot axes
-		# MW: X=pitch, Y=roll, Z=yaw (around vertical)
-		var object_rotation := Basis.from_euler(Vector3(
-			ref.rotation.x,   # Pitch
-			ref.rotation.z,   # MW Z-yaw -> Godot Y-yaw
-			-ref.rotation.y   # MW Y-roll -> Godot -Z-roll
-		), EULER_ORDER_YXZ)
-
-		# Combine: apply base rotation first, then object rotation
-		node.basis = object_rotation * base_rotation
-	else:
-		# Just rotation conversion, no model orientation fix needed
-		var object_rotation := Basis.from_euler(Vector3(
-			ref.rotation.x,
-			ref.rotation.z,
-			-ref.rotation.y
-		), EULER_ORDER_YXZ)
-		node.basis = object_rotation
+	# Rotation conversion via CoordinateSystem
+	# NIF models are already converted to Y-up in nif_converter, so we only
+	# need to apply the object's rotation from the cell reference
+	var godot_euler := MWCoords.rotation_to_godot(ref.rotation)
+	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_YXZ)
 
 
 ## Get the model path from a base record
@@ -316,10 +317,12 @@ func _get_model(model_path: String) -> Node3D:
 
 	# Convert NIF to Godot scene
 	var converter := NIFConverter.new()
-	var node := converter.convert_buffer(nif_data)
+	var node := converter.convert_buffer(nif_data, full_path)
 
 	if not node:
-		push_warning("CellManager: Failed to convert NIF: '%s'" % model_path)
+		# Only warn once per failed model
+		if not normalized in _model_cache:
+			push_warning("CellManager: Failed to convert NIF: '%s'" % full_path)
 		_model_cache[normalized] = null
 		return null
 
@@ -364,6 +367,7 @@ func clear_cache() -> void:
 		"lights_created": 0,
 		"npcs_loaded": 0,
 		"creatures_loaded": 0,
+		"objects_from_pool": 0,
 	}
 
 
@@ -371,4 +375,30 @@ func clear_cache() -> void:
 func get_stats() -> Dictionary:
 	var stats := _stats.duplicate()
 	stats["cached_models"] = _model_cache.size()
+
+	# Add pool stats if available
+	if _object_pool and _object_pool.has_method("get_stats"):
+		var pool_stats: Dictionary = _object_pool.get_stats()
+		stats["pool_available"] = pool_stats.get("total_available", 0)
+		stats["pool_in_use"] = pool_stats.get("total_in_use", 0)
+		stats["pool_hit_rate"] = pool_stats.get("hit_rate", 0.0)
+
 	return stats
+
+
+## Set the object pool to use for common models
+func set_object_pool(pool: RefCounted) -> void:
+	_object_pool = pool
+
+
+## Get the object pool
+func get_object_pool() -> RefCounted:
+	return _object_pool
+
+
+## Initialize a new object pool with default common models
+func init_object_pool(pool_parent: Node3D = null) -> RefCounted:
+	_object_pool = ObjectPoolScript.new()
+	if pool_parent:
+		_object_pool.init(pool_parent)
+	return _object_pool
