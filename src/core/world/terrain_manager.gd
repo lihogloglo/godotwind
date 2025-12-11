@@ -31,6 +31,9 @@ var _stats: Dictionary = {
 # Cached texture mapping: LTEX index -> texture slot in Terrain3D
 var _texture_map: Dictionary = {}
 
+# External texture slot mapper (TerrainTextureLoader)
+var _texture_slot_mapper: RefCounted = null
+
 
 ## Generate a heightmap Image from a single LAND record
 ## Returns: Image in FORMAT_RF (32-bit float per pixel)
@@ -127,7 +130,7 @@ func generate_color_map(land: LandRecord) -> Image:
 
 
 ## Generate a control map for Terrain3D from LAND texture indices
-## This creates a simple control map mapping MW textures to Terrain3D texture slots
+## This creates a control map with texture blending at boundaries
 ## Returns: Image in FORMAT_RF (Terrain3D control map format)
 ##
 ## Note: Terrain3D control maps use a packed uint32 format:
@@ -135,7 +138,10 @@ func generate_color_map(land: LandRecord) -> Image:
 ## - Overlay texture ID (5 bits)
 ## - Blend value (8 bits)
 ## - etc.
-## For simplicity, we only set the base texture with no blending.
+##
+## We implement smooth blending between adjacent texture cells:
+## - At the center of a texture cell, blend = 0 (100% base texture)
+## - Near texture cell boundaries, blend increases toward neighboring texture
 func generate_control_map(land: LandRecord) -> Image:
 	# Terrain3D expects control map at same resolution as heightmap
 	# MW texture grid is 16x16, so we need to upscale
@@ -148,21 +154,74 @@ func generate_control_map(land: LandRecord) -> Image:
 		_stats["control_maps_generated"] += 1
 		return img
 
-	# Map each height vertex to its corresponding texture cell
-	# 65 vertices map to 16 texture cells, so ~4 vertices per texture
+	# Each MW texture cell covers ~4 height vertices
+	# We blend at the boundaries between texture cells
+	var vertices_per_tex := float(MW_LAND_SIZE - 1) / float(MW_TEXTURE_SIZE)  # ~4.0
+
 	for y in range(MW_LAND_SIZE):
 		for x in range(MW_LAND_SIZE):
-			# Convert vertex position to texture grid position
-			var tex_x := mini(x * MW_TEXTURE_SIZE / MW_LAND_SIZE, MW_TEXTURE_SIZE - 1)
-			var tex_y := mini(y * MW_TEXTURE_SIZE / MW_LAND_SIZE, MW_TEXTURE_SIZE - 1)
+			# Calculate fractional position within texture grid
+			var tex_x_f := float(x) / vertices_per_tex
+			var tex_y_f := float(y) / vertices_per_tex
 
+			# Integer texture cell coordinates
+			var tex_x := mini(int(tex_x_f), MW_TEXTURE_SIZE - 1)
+			var tex_y := mini(int(tex_y_f), MW_TEXTURE_SIZE - 1)
+
+			# Get base texture
 			var mw_tex_idx := land.get_texture_index(tex_x, tex_y)
+			var base_slot := _get_terrain3d_texture_slot(mw_tex_idx)
 
-			# Convert MW texture index to Terrain3D slot
-			var terrain3d_slot := _get_terrain3d_texture_slot(mw_tex_idx)
+			# Calculate blend with neighboring textures
+			var frac_x := tex_x_f - float(tex_x)  # 0.0-1.0 within cell
+			var frac_y := tex_y_f - float(tex_y)
 
-			# Encode control value (base texture only, no blend)
-			var control := _encode_control_value(terrain3d_slot, 0, 0)
+			var overlay_slot := base_slot
+			var blend := 0
+
+			# Determine which neighbor to blend with based on position in cell
+			# Blend zone is the outer 40% of each cell edge
+			var blend_threshold := 0.3
+			var blend_strength := 0.0
+
+			# Check if we're near an edge and should blend
+			if frac_x > (1.0 - blend_threshold) and tex_x < MW_TEXTURE_SIZE - 1:
+				# Near right edge - blend with right neighbor
+				var neighbor_idx := land.get_texture_index(tex_x + 1, tex_y)
+				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
+				if neighbor_slot != base_slot:
+					overlay_slot = neighbor_slot
+					blend_strength = (frac_x - (1.0 - blend_threshold)) / blend_threshold
+			elif frac_x < blend_threshold and tex_x > 0:
+				# Near left edge - blend with left neighbor
+				var neighbor_idx := land.get_texture_index(tex_x - 1, tex_y)
+				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
+				if neighbor_slot != base_slot:
+					overlay_slot = neighbor_slot
+					blend_strength = (blend_threshold - frac_x) / blend_threshold
+
+			# Y-axis blending (combine with X if applicable)
+			if frac_y > (1.0 - blend_threshold) and tex_y < MW_TEXTURE_SIZE - 1:
+				var neighbor_idx := land.get_texture_index(tex_x, tex_y + 1)
+				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
+				if neighbor_slot != base_slot:
+					var y_blend := (frac_y - (1.0 - blend_threshold)) / blend_threshold
+					if y_blend > blend_strength:
+						overlay_slot = neighbor_slot
+						blend_strength = y_blend
+			elif frac_y < blend_threshold and tex_y > 0:
+				var neighbor_idx := land.get_texture_index(tex_x, tex_y - 1)
+				var neighbor_slot := _get_terrain3d_texture_slot(neighbor_idx)
+				if neighbor_slot != base_slot:
+					var y_blend := (blend_threshold - frac_y) / blend_threshold
+					if y_blend > blend_strength:
+						overlay_slot = neighbor_slot
+						blend_strength = y_blend
+
+			# Convert blend strength (0-1) to 8-bit value (0-255)
+			blend = int(blend_strength * 255.0)
+
+			var control := _encode_control_value(base_slot, overlay_slot, blend)
 			img.set_pixel(x, y, Color(control, 0, 0, 1))
 
 	_stats["control_maps_generated"] += 1
@@ -198,6 +257,12 @@ func _encode_control_value(base_tex: int, overlay_tex: int, blend: int) -> float
 	return bytes.decode_float(0)
 
 
+## Set the texture slot mapper (TerrainTextureLoader instance)
+## This allows proper mapping of MW texture indices to Terrain3D slots
+func set_texture_slot_mapper(mapper: RefCounted) -> void:
+	_texture_slot_mapper = mapper
+
+
 ## Get the Terrain3D texture slot for a Morrowind texture index
 ## MW texture index 0 = default texture
 ## MW texture index N > 0 = LTEX record with index N-1
@@ -205,22 +270,17 @@ func _get_terrain3d_texture_slot(mw_tex_idx: int) -> int:
 	if mw_tex_idx == 0:
 		return 0  # Default texture
 
-	# Check cache
+	# Use external mapper if available (proper texture loading)
+	if _texture_slot_mapper and _texture_slot_mapper.has_method("get_slot_for_mw_index"):
+		return _texture_slot_mapper.get_slot_for_mw_index(mw_tex_idx)
+
+	# Check cache for fallback mapping
 	if mw_tex_idx in _texture_map:
 		return _texture_map[mw_tex_idx]
 
-	# Look up the LTEX record
-	# MW stores texture_index in LTEX, and VTEX stores texture_index + 1
+	# Fallback: simple modulo mapping (Terrain3D supports 32 textures)
+	# This is used when no texture loader is configured
 	var ltex_index := mw_tex_idx - 1
-
-	# For now, just use a simple mapping
-	# In a full implementation, we'd need to:
-	# 1. Look up the LTEX record by index
-	# 2. Get the texture path
-	# 3. Map it to a Terrain3D texture slot
-	# 4. Load the texture into Terrain3D's texture array
-
-	# Simple modulo mapping for now (Terrain3D supports 32 textures)
 	var slot := (ltex_index % 31) + 1  # Slot 0 is default, 1-31 are LTEX
 	_texture_map[mw_tex_idx] = slot
 	return slot
@@ -274,3 +334,56 @@ func clear_cache() -> void:
 		"heightmaps_generated": 0,
 		"control_maps_generated": 0,
 	}
+
+
+## Stitch adjacent cell heights at shared edges
+## This ensures seamless terrain between cells
+## call_order: Array of LandRecords in row-major order for a grid
+## grid_width: Number of cells wide
+## Returns: True if stitching was applied
+func stitch_cell_edges(lands: Array, grid_width: int) -> bool:
+	if lands.size() < 2:
+		return false
+
+	var grid_height := lands.size() / grid_width
+	var stitched := false
+
+	for i in range(lands.size()):
+		var land: LandRecord = lands[i]
+		if not land or not land.has_heights():
+			continue
+
+		var gx := i % grid_width
+		var gy := i / grid_width
+
+		# Stitch right edge with left edge of neighbor to the right
+		if gx < grid_width - 1:
+			var right_idx := i + 1
+			if right_idx < lands.size():
+				var right_land: LandRecord = lands[right_idx]
+				if right_land and right_land.has_heights():
+					for y in range(MW_LAND_SIZE):
+						# Average the shared edge
+						var h1 := land.get_height(MW_LAND_SIZE - 1, y)
+						var h2 := right_land.get_height(0, y)
+						var avg := (h1 + h2) * 0.5
+						land.heights[(MW_LAND_SIZE - 1) + y * MW_LAND_SIZE] = avg
+						right_land.heights[0 + y * MW_LAND_SIZE] = avg
+					stitched = true
+
+		# Stitch bottom edge with top edge of neighbor below
+		if gy < grid_height - 1:
+			var below_idx := i + grid_width
+			if below_idx < lands.size():
+				var below_land: LandRecord = lands[below_idx]
+				if below_land and below_land.has_heights():
+					for x in range(MW_LAND_SIZE):
+						# Average the shared edge
+						var h1 := land.get_height(x, MW_LAND_SIZE - 1)
+						var h2 := below_land.get_height(x, 0)
+						var avg := (h1 + h2) * 0.5
+						land.heights[x + (MW_LAND_SIZE - 1) * MW_LAND_SIZE] = avg
+						below_land.heights[x + 0 * MW_LAND_SIZE] = avg
+					stitched = true
+
+	return stitched

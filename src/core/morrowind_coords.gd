@@ -26,6 +26,12 @@ extends RefCounted
 ## Morrowind uses roughly 70 units per meter (1.4 units per inch)
 const UNITS_PER_METER: float = 70.0
 
+## Morrowind cell size in game units
+const CELL_SIZE_MW: float = 8192.0
+
+## Morrowind cell size in Godot meters (8192/70 ≈ 117.03)
+const CELL_SIZE_GODOT: float = CELL_SIZE_MW / UNITS_PER_METER
+
 ## Scale factor to convert Morrowind units to Godot meters
 ## Set to 1.0 to keep original scale (Morrowind units)
 ## Set to 1.0/70.0 to convert to meters

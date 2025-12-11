@@ -1,10 +1,22 @@
 ## Terrain Viewer - Test tool for visualizing Morrowind terrain with Terrain3D
-## Loads LAND records and imports them into Terrain3D for visualization
+##
+## Supports two modes:
+## 1. Live conversion: Load individual cells from ESM on demand
+## 2. Pre-processed: Use native Terrain3D region files for LOD/streaming
+##
+## The pre-processed mode enables next-gen features:
+## - Geometric clipmap LOD (detail reduces with distance)
+## - Native region streaming (load/unload automatically)
+## - Distant lands (see terrain to the horizon)
 extends Node3D
 
 # Preload dependencies
 const MWCoords := preload("res://src/core/morrowind_coords.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
+const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+
+# Pre-processed terrain data directory
+const TERRAIN_DATA_DIR := "user://terrain_data/"
 
 # UI references - Main panel
 @onready var cell_x_spin: SpinBox = $UI/Panel/VBox/CoordsContainer/CellXSpin
@@ -13,6 +25,10 @@ const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 @onready var load_terrain_button: Button = $UI/Panel/VBox/LoadTerrainButton
 @onready var stats_text: RichTextLabel = $UI/Panel/VBox/StatsText
 @onready var log_text: RichTextLabel = $UI/Panel/VBox/LogText
+
+# Pre-processing UI
+@onready var preprocess_btn: Button = $UI/Panel/VBox/PreprocessBtn
+@onready var preprocess_status: Label = $UI/Panel/VBox/PreprocessStatus
 
 # Quick load buttons
 @onready var seyda_neen_btn: Button = $UI/Panel/VBox/QuickButtons/SeydaNeenBtn
@@ -37,36 +53,43 @@ var mouse_captured: bool = false
 
 # Terrain manager instance
 var terrain_manager: RefCounted  # TerrainManager
+var texture_loader: RefCounted  # TerrainTextureLoader
 
 # Track loaded cells
 var _loaded_cells: Array[Vector2i] = []
 
+# Mode tracking
+var _using_preprocessed := false
+var _data_path: String = ""
+
 
 func _ready() -> void:
-	# Initialize terrain manager
+	# Initialize terrain manager and texture loader
 	terrain_manager = TerrainManagerScript.new()
+	texture_loader = TerrainTextureLoaderScript.new()
 
 	# Connect UI signals
 	load_terrain_button.pressed.connect(_on_load_terrain_pressed)
+	preprocess_btn.pressed.connect(_on_preprocess_pressed)
 
-	# Connect quick load buttons
-	seyda_neen_btn.pressed.connect(func(): _load_preset_area(-2, -9, 2))  # Seyda Neen area
-	balmora_btn.pressed.connect(func(): _load_preset_area(-3, -2, 2))     # Balmora area
-	vivec_btn.pressed.connect(func(): _load_preset_area(5, -6, 2))        # Vivec area
-	origin_btn.pressed.connect(func(): _load_preset_area(0, 0, 1))        # Origin
+	# Connect quick load buttons - teleport in preprocessed mode, load area in live mode
+	seyda_neen_btn.pressed.connect(func(): _quick_load_or_teleport(-2, -9, 2))
+	balmora_btn.pressed.connect(func(): _quick_load_or_teleport(-3, -2, 2))
+	vivec_btn.pressed.connect(func(): _quick_load_or_teleport(5, -6, 2))
+	origin_btn.pressed.connect(func(): _quick_load_or_teleport(0, 0, 1))
 
 	# Get Morrowind data path from project settings
-	var data_path: String = ProjectSettings.get_setting("morrowind/data_path", "")
-	if data_path.is_empty():
+	_data_path = ProjectSettings.get_setting("morrowind/data_path", "")
+	if _data_path.is_empty():
 		_hide_loading()
 		_log("[color=red]ERROR: Morrowind data path not configured in project.godot[/color]")
 		return
 
-	_log("Morrowind data path: " + data_path)
+	_log("Morrowind data path: " + _data_path)
 
 	# Load ESM and BSA files with progress updates
 	_show_loading("Loading Game Data", "Initializing...")
-	call_deferred("_load_game_data_async", data_path)
+	call_deferred("_load_game_data_async")
 
 
 ## Show the loading overlay with a title and status
@@ -91,24 +114,22 @@ func _update_loading(progress: float, status: String) -> void:
 
 
 ## Async version of game data loading with progress updates
-func _load_game_data_async(data_path: String) -> void:
+func _load_game_data_async() -> void:
 	_log("Loading BSA archives...")
-	_update_loading(10, "Loading BSA archives...")
-	await get_tree().process_frame
+	await _update_loading(10, "Loading BSA archives...")
 
 	# Load BSA files
-	var bsa_count := BSAManager.load_archives_from_directory(data_path)
+	var bsa_count := BSAManager.load_archives_from_directory(_data_path)
 	_log("Loaded %d BSA archives" % bsa_count)
 
 	if bsa_count == 0:
 		_log("[color=yellow]Warning: No BSA archives found.[/color]")
 
-	_update_loading(40, "Loading ESM file...")
-	await get_tree().process_frame
+	await _update_loading(40, "Loading ESM file...")
 
 	# Load ESM file
 	var esm_file: String = ProjectSettings.get_setting("morrowind/esm_file", "Morrowind.esm")
-	var esm_path := data_path.path_join(esm_file)
+	var esm_path := _data_path.path_join(esm_file)
 
 	_log("Loading ESM: " + esm_path)
 	var error := ESMManager.load_file(esm_path)
@@ -122,24 +143,79 @@ func _load_game_data_async(data_path: String) -> void:
 	_log("LAND records: %d" % ESMManager.lands.size())
 	_log("LTEX records: %d" % ESMManager.land_textures.size())
 
-	_update_loading(90, "Initializing Terrain3D...")
-	await get_tree().process_frame
+	await _update_loading(70, "Checking for pre-processed terrain...")
+	_check_preprocessed_status()
+
+	await _update_loading(90, "Initializing Terrain3D...")
 
 	# Initialize Terrain3D if needed
 	_init_terrain3d()
 
-	_update_loading(100, "Done!")
-	await get_tree().process_frame
+	# Load pre-processed terrain if available
+	if _using_preprocessed:
+		await _update_loading(95, "Loading pre-processed terrain...")
+		_load_preprocessed_terrain()
+
+	await _update_loading(100, "Done!")
 
 	# Hide loading overlay after a brief delay
 	await get_tree().create_timer(0.3).timeout
 	_hide_loading()
 
-	_log("[color=green]Ready to load terrain![/color]")
-	_log("Use the controls to select cell coordinates and load terrain.")
+	_log("[color=green]Ready![/color]")
+	if _using_preprocessed:
+		_log("[color=cyan]Using pre-processed terrain (Next-Gen mode)[/color]")
+		_log("Terrain3D handles LOD and streaming automatically.")
+		_log("Use quick buttons to teleport around the world.")
+	else:
+		_log("Use controls to load terrain, or 'Preprocess ALL' for next-gen mode.")
+
+
+## Check if pre-processed terrain data exists and update status
+func _check_preprocessed_status() -> void:
+	var dir := DirAccess.open(TERRAIN_DATA_DIR)
+	if dir:
+		var count := 0
+		var total_size := 0
+		dir.list_dir_begin()
+		var file_name := dir.get_next()
+		while file_name != "":
+			if file_name.ends_with(".res"):
+				count += 1
+				var f := FileAccess.open(TERRAIN_DATA_DIR.path_join(file_name), FileAccess.READ)
+				if f:
+					total_size += f.get_length()
+					f.close()
+			file_name = dir.get_next()
+		dir.list_dir_end()
+
+		if count > 0:
+			_using_preprocessed = true
+			var size_mb := total_size / (1024.0 * 1024.0)
+			preprocess_status.text = "Ready: %d regions (%.1f MB)" % [count, size_mb]
+			preprocess_status.add_theme_color_override("font_color", Color.GREEN)
+			_log("Found %d pre-processed terrain regions (%.1f MB)" % [count, size_mb])
+			return
+
+	preprocess_status.text = "No pre-processed data"
+	preprocess_status.add_theme_color_override("font_color", Color.YELLOW)
+
+
+## Load pre-processed terrain data from disk
+func _load_preprocessed_terrain() -> void:
+	if not terrain_3d or not terrain_3d.data:
+		return
+
+	var path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
+	terrain_3d.data.load_directory(path)
+
+	var region_count := terrain_3d.data.get_region_count()
+	_log("Loaded %d terrain regions from pre-processed data" % region_count)
+	_update_stats_preprocessed()
 
 
 ## Initialize Terrain3D with required resources
+## Configures region size and vertex spacing to match Morrowind cell dimensions
 func _init_terrain3d() -> void:
 	if not terrain_3d:
 		_log("[color=red]ERROR: Terrain3D node not found![/color]")
@@ -166,15 +242,149 @@ func _init_terrain3d() -> void:
 		terrain_3d.set_assets(Terrain3DAssets.new())
 		_log("Created new Terrain3DAssets")
 
+	# Configure Terrain3D to match Morrowind cell dimensions
+	# MW cell = 8192 game units = ~117 meters (8192/70)
+	# We use region_size=128 (closest power of 2) with vertex_spacing adjusted
+	# so that each region covers exactly one MW cell in world space
+	#
+	# With region_size=128: region world size = 128 * vertex_spacing
+	# We want region world size = MW_CELL_SIZE_GODOT = 8192/70 ≈ 117.03m
+	# So vertex_spacing = 117.03 / 128 ≈ 0.914
+	#
+	# But we also need heightmap to be 65x65 (MW) vs 128x128 (Terrain3D region)
+	# So we'll use region_size=64 which is closer to 65, and upscale our heightmap slightly
+	# vertex_spacing = 117.03 / 64 ≈ 1.828
+
+	var mw_cell_size_godot := MWCoords.CELL_SIZE_GODOT  # ~117.03m
+
+	# Use region_size = 64, closest to MW's 65x65 grid
+	# Terrain3D RegionSize enum: SIZE_64 = 0, SIZE_128 = 1, SIZE_256 = 2, etc.
+	terrain_3d.change_region_size(64)  # 64x64 vertices per region
+
+	# Set vertex_spacing so that a 64-vertex region spans exactly one MW cell
+	var vertex_spacing := mw_cell_size_godot / 64.0  # ≈ 1.828m between vertices
+	terrain_3d.vertex_spacing = vertex_spacing
+
+	_log("Terrain3D configured:")
+	_log("  Region size: 64 vertices")
+	_log("  Vertex spacing: %.4f m" % vertex_spacing)
+	_log("  Region world size: %.2f m (MW cell)" % (64.0 * vertex_spacing))
+
 	_log("[color=green]Terrain3D initialized successfully[/color]")
 
 
-## Load a preset area
-func _load_preset_area(center_x: int, center_y: int, radius: int) -> void:
+## Quick load or teleport depending on mode
+func _quick_load_or_teleport(center_x: int, center_y: int, radius: int) -> void:
 	cell_x_spin.value = center_x
 	cell_y_spin.value = center_y
 	radius_spin.value = radius
-	_on_load_terrain_pressed()
+
+	if _using_preprocessed:
+		_teleport_to_cell(center_x, center_y)
+	else:
+		_on_load_terrain_pressed()
+
+
+## Teleport camera to a specific cell
+func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
+	var region_world_size := 64.0 * terrain_3d.get_vertex_spacing()
+	var world_x := float(cell_x) * region_world_size + region_world_size * 0.5
+	var world_z := float(-cell_y) * region_world_size + region_world_size * 0.5
+
+	var height := terrain_3d.data.get_height(Vector3(world_x, 0, world_z)) if terrain_3d.data else 50.0
+	if is_nan(height) or height > 10000:
+		height = 50.0
+
+	camera.position = Vector3(world_x, height + 100.0, world_z + 50.0)
+	camera.look_at(Vector3(world_x, height, world_z))
+	_log("Teleported to cell (%d, %d)" % [cell_x, cell_y])
+	_update_stats_preprocessed()
+
+
+## Handle preprocess button press
+func _on_preprocess_pressed() -> void:
+	_log("\n[b]Starting terrain pre-processing...[/b]")
+	_log("Converting ALL Morrowind terrain to Terrain3D format.")
+	_log("This enables: LOD, streaming, distant lands.")
+
+	_show_loading("Pre-Processing Terrain", "Preparing...")
+	await get_tree().process_frame
+
+	await _preprocess_all_terrain()
+
+	_hide_loading()
+	_check_preprocessed_status()
+
+	if _using_preprocessed:
+		_load_preprocessed_terrain()
+
+
+## Pre-process all Morrowind terrain to Terrain3D region files
+func _preprocess_all_terrain() -> void:
+	var start_time := Time.get_ticks_msec()
+
+	# Ensure output directory exists
+	var dir := DirAccess.open("user://")
+	if not dir.dir_exists("terrain_data"):
+		dir.make_dir("terrain_data")
+
+	# Clear existing terrain data
+	await _update_loading(5, "Clearing existing data...")
+	for region in terrain_3d.data.get_regions_active():
+		terrain_3d.data.remove_region(region, false)
+	terrain_3d.data.update_maps(Terrain3DRegion.TYPE_MAX, true, false)
+
+	# Load LTEX textures into Terrain3D
+	await _update_loading(8, "Loading terrain textures...")
+	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
+	_log("Loaded %d terrain textures" % textures_loaded)
+
+	# Configure terrain manager to use proper texture slot mapping
+	terrain_manager.set_texture_slot_mapper(texture_loader)
+
+	var total_cells := ESMManager.lands.size()
+	var processed := 0
+	var skipped := 0
+
+	_log("Processing %d LAND records..." % total_cells)
+
+	# Process all LAND records
+	var cell_keys := ESMManager.lands.keys()
+	for key in cell_keys:
+		var land: LandRecord = ESMManager.lands[key]
+
+		if not land or not land.has_heights():
+			skipped += 1
+			continue
+
+		var percent := 5.0 + (85.0 * float(processed) / float(total_cells))
+		await _update_loading(percent, "Processing (%d, %d)..." % [land.cell_x, land.cell_y])
+
+		_import_cell_to_terrain3d(land)
+		processed += 1
+
+		if processed % 100 == 0:
+			await get_tree().process_frame
+
+	# Calculate height range
+	await _update_loading(92, "Calculating height range...")
+	terrain_3d.data.calc_height_range(true)
+
+	# Save to disk
+	await _update_loading(95, "Saving terrain data...")
+	var save_path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
+	terrain_3d.data.save_directory(save_path)
+
+	var elapsed := Time.get_ticks_msec() - start_time
+	var region_count := terrain_3d.data.get_region_count()
+
+	_log("[color=green]Pre-processing complete![/color]")
+	_log("  Processed: %d cells" % processed)
+	_log("  Skipped: %d cells" % skipped)
+	_log("  Regions: %d" % region_count)
+	_log("  Time: %.2f seconds" % (elapsed / 1000.0))
+
+	_using_preprocessed = true
 
 
 ## Handle load terrain button press
@@ -200,6 +410,8 @@ func _on_load_terrain_pressed() -> void:
 
 
 ## Load terrain cells asynchronously
+## First pre-loads all LAND records, stitches edges for seamless terrain,
+## then imports each cell into Terrain3D
 func _load_terrain_async(cells: Array[Vector2i]) -> void:
 	var start_time := Time.get_ticks_msec()
 	var total_cells := cells.size()
@@ -219,22 +431,71 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 
 	_loaded_cells.clear()
 
-	# Process each cell
-	for i in range(total_cells):
-		var cell_coord := cells[i]
-		var progress := 10.0 + (80.0 * float(i) / float(total_cells))
-		_update_loading(progress, "Loading cell (%d, %d)..." % [cell_coord.x, cell_coord.y])
+	# Phase 0: Load LTEX textures if not already loaded
+	if terrain_3d.assets and terrain_3d.assets.get_texture_count() == 0:
+		_update_loading(8, "Loading terrain textures...")
+		await get_tree().process_frame
+		var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
+		_log("Loaded %d terrain textures" % textures_loaded)
+		terrain_manager.set_texture_slot_mapper(texture_loader)
+
+	# Phase 1: Pre-load all LAND records
+	_update_loading(10, "Loading LAND records...")
+	await get_tree().process_frame
+
+	# Sort cells for proper grid ordering (row-major, Y ascending then X ascending)
+	var sorted_cells := cells.duplicate()
+	sorted_cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		if a.y != b.y:
+			return a.y < b.y
+		return a.x < b.x
+	)
+
+	# Find grid bounds
+	var min_x: int = sorted_cells[0].x
+	var max_x: int = sorted_cells[0].x
+	var min_y: int = sorted_cells[0].y
+	var max_y: int = sorted_cells[0].y
+	for cell in sorted_cells:
+		min_x = mini(min_x, cell.x)
+		max_x = maxi(max_x, cell.x)
+		min_y = mini(min_y, cell.y)
+		max_y = maxi(max_y, cell.y)
+	var grid_width: int = max_x - min_x + 1
+	var grid_height: int = max_y - min_y + 1
+
+	# Load all LAND records into grid array
+	var lands: Array = []
+	lands.resize(grid_width * grid_height)
+	for cell: Vector2i in sorted_cells:
+		var gx: int = cell.x - min_x
+		var gy: int = cell.y - min_y
+		var idx: int = gy * grid_width + gx
+		var land: LandRecord = ESMManager.get_land(cell.x, cell.y)
+		if land and land.has_heights():
+			lands[idx] = land
+
+	# Phase 2: Stitch adjacent cell edges for seamless terrain
+	_update_loading(30, "Stitching terrain edges...")
+	await get_tree().process_frame
+
+	if terrain_manager.stitch_cell_edges(lands, grid_width):
+		_log("Applied edge stitching to %d x %d cell grid" % [grid_width, grid_height])
+
+	# Phase 3: Import each cell into Terrain3D
+	for i in range(sorted_cells.size()):
+		var cell_coord: Vector2i = sorted_cells[i]
+		var progress := 35.0 + (55.0 * float(i) / float(total_cells))
+		_update_loading(progress, "Importing cell (%d, %d)..." % [cell_coord.x, cell_coord.y])
 		await get_tree().process_frame
 
-		# Get LAND record for this cell
-		var land: LandRecord = ESMManager.get_land(cell_coord.x, cell_coord.y)
+		var gx: int = cell_coord.x - min_x
+		var gy: int = cell_coord.y - min_y
+		var idx: int = gy * grid_width + gx
+		var land: LandRecord = lands[idx]
+
 		if not land:
 			_log("[color=yellow]No LAND data for cell (%d, %d)[/color]" % [cell_coord.x, cell_coord.y])
-			skipped_count += 1
-			continue
-
-		if not land.has_heights():
-			_log("[color=yellow]Cell (%d, %d) has no height data[/color]" % [cell_coord.x, cell_coord.y])
 			skipped_count += 1
 			continue
 
@@ -264,23 +525,35 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 
 
 ## Import a single LAND record into Terrain3D
+## The heightmap is resized from 65x65 to 64x64 to match Terrain3D's region size
 func _import_cell_to_terrain3d(land: LandRecord) -> void:
 	if not terrain_3d or not terrain_3d.data:
 		return
 
-	# Generate maps from LAND record
+	# Generate maps from LAND record (65x65)
 	var heightmap: Image = terrain_manager.generate_heightmap(land)
 	var colormap: Image = terrain_manager.generate_color_map(land)
 	var controlmap: Image = terrain_manager.generate_control_map(land)
 
+	# Resize from 65x65 to 64x64 to match Terrain3D region size
+	# Use INTERPOLATE_BILINEAR for smooth height transitions
+	heightmap.resize(64, 64, Image.INTERPOLATE_BILINEAR)
+	colormap.resize(64, 64, Image.INTERPOLATE_BILINEAR)
+	controlmap.resize(64, 64, Image.INTERPOLATE_NEAREST)  # Nearest for control map to preserve texture IDs
+
 	# Calculate world position for this cell
-	# Terrain3D uses XZ plane, Morrowind cell coords map to world position
-	# MW cell (0,0) starts at world origin, each cell is ~117 meters (8192/70)
-	var cell_size_godot := LandRecord.CELL_SIZE / MWCoords.UNITS_PER_METER
+	# With vertex_spacing configured, each region represents one MW cell
+	# The region grid is aligned so that cell (x, y) maps to region (x, -y)
+	#
+	# Important: Terrain3D rounds positions to nearest region boundary
+	# With region_size=64 and vertex_spacing=1.828, region world size = 117.03m
+	# So we position each cell at its grid position * region_world_size
+	var region_world_size := 64.0 * terrain_3d.get_vertex_spacing()
 
 	# MW Y axis is North, Godot Z axis is South, so negate Y
-	var world_x := float(land.cell_x) * cell_size_godot
-	var world_z := float(-land.cell_y) * cell_size_godot  # Negate for coordinate conversion
+	# Position at the center of the region for proper snapping
+	var world_x := float(land.cell_x) * region_world_size + region_world_size * 0.5
+	var world_z := float(-land.cell_y) * region_world_size + region_world_size * 0.5
 
 	# Create import array [heightmap, controlmap, colormap]
 	var imported_images: Array[Image] = []
@@ -290,28 +563,45 @@ func _import_cell_to_terrain3d(land: LandRecord) -> void:
 	imported_images[Terrain3DRegion.TYPE_COLOR] = colormap
 
 	# Import into Terrain3D at the calculated position
+	# import_images will snap to the nearest region boundary
 	var import_pos := Vector3(world_x, 0, world_z)
 	terrain_3d.data.import_images(imported_images, import_pos, 0.0, 1.0)
 
 
-## Update statistics display
+## Update statistics display (live mode)
 func _update_stats(loaded: int, skipped: int, elapsed: int) -> void:
 	var terrain_stats: Dictionary = terrain_manager.get_stats()
-	stats_text.text = """[b]Terrain Stats:[/b]
+	stats_text.text = """[b]Live Mode Stats:[/b]
 Cells loaded: %d
 Cells skipped: %d
 Heightmaps generated: %d
-Control maps generated: %d
 Load time: %d ms
 
-[b]Camera Position:[/b]
-%s""" % [
+[b]Camera:[/b]
+%.1f, %.1f, %.1f""" % [
 		loaded,
 		skipped,
 		terrain_stats.get("heightmaps_generated", 0),
-		terrain_stats.get("control_maps_generated", 0),
 		elapsed,
-		"%.1f, %.1f, %.1f" % [camera.position.x, camera.position.y, camera.position.z]
+		camera.position.x, camera.position.y, camera.position.z
+	]
+
+
+## Update statistics display (pre-processed mode)
+func _update_stats_preprocessed() -> void:
+	var region_count := terrain_3d.data.get_region_count() if terrain_3d.data else 0
+	stats_text.text = """[b]Next-Gen Mode[/b]
+Regions: %d
+LOD: Automatic (clipmap)
+Streaming: Native
+
+[b]Camera:[/b]
+%.1f, %.1f, %.1f
+
+[color=cyan]Terrain3D handles
+LOD/streaming![/color]""" % [
+		region_count,
+		camera.position.x, camera.position.y, camera.position.z
 	]
 
 
@@ -326,10 +616,10 @@ func _position_camera_for_terrain() -> void:
 		center += Vector2(cell.x, cell.y)
 	center /= _loaded_cells.size()
 
-	# Convert to Godot world position
-	var cell_size_godot := LandRecord.CELL_SIZE / MWCoords.UNITS_PER_METER
-	var world_x := center.x * cell_size_godot + cell_size_godot * 0.5
-	var world_z := -center.y * cell_size_godot - cell_size_godot * 0.5  # Negate Y
+	# Convert to Godot world position using the configured region size
+	var region_world_size := 64.0 * terrain_3d.get_vertex_spacing()
+	var world_x := center.x * region_world_size + region_world_size * 0.5
+	var world_z := -center.y * region_world_size - region_world_size * 0.5  # Negate Y
 
 	# Get approximate terrain height at center
 	var terrain_height := 0.0
@@ -339,7 +629,7 @@ func _position_camera_for_terrain() -> void:
 			terrain_height = 50.0  # Fallback height
 
 	# Position camera above center, looking down at terrain
-	var view_distance := cell_size_godot * (_loaded_cells.size() ** 0.5) * 0.8
+	var view_distance := region_world_size * (_loaded_cells.size() ** 0.5) * 0.8
 	camera.position = Vector3(world_x, terrain_height + view_distance * 0.5, world_z + view_distance * 0.3)
 	camera.look_at(Vector3(world_x, terrain_height, world_z))
 

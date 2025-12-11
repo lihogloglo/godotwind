@@ -151,6 +151,23 @@ value = 2.0
 layout_mode = 2
 text = "Load Terrain"
 
+[node name="HSeparator1b" type="HSeparator" parent="UI/Panel/VBox"]
+layout_mode = 2
+
+[node name="PreprocessLabel" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Pre-Processing (Next-Gen):"
+
+[node name="PreprocessBtn" type="Button" parent="UI/Panel/VBox"]
+layout_mode = 2
+text = "Preprocess ALL Terrain"
+tooltip_text = "Convert all Morrowind terrain to Terrain3D format for native LOD/streaming"
+
+[node name="PreprocessStatus" type="Label" parent="UI/Panel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+text = "Status: Not checked"
+
 [node name="HSeparator2" type="HSeparator" parent="UI/Panel/VBox"]
 layout_mode = 2
 
