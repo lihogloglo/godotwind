@@ -166,6 +166,9 @@ func generate_color_map(land: LandRecord) -> Image:
 ## - At the center of a texture cell, blend = 0 (100% base texture)
 ## - Near texture cell boundaries, blend increases toward neighboring texture
 ##
+## Debug flag to print control map encoding details (set to true to diagnose)
+var _debug_control_map: bool = false
+
 func generate_control_map(land: LandRecord) -> Image:
 	# Terrain3D expects control map at same resolution as heightmap
 	# MW texture grid is 16x16, so we need to upscale
@@ -176,6 +179,8 @@ func generate_control_map(land: LandRecord) -> Image:
 		var default_control := _encode_control_value(0, 0, 0)
 		img.fill(Color(default_control, 0, 0, 1))
 		_stats["control_maps_generated"] += 1
+		if _debug_control_map:
+			print("TerrainManager: Cell (%d,%d) has NO texture data - using default" % [land.cell_x, land.cell_y])
 		return img
 
 	# Each MW texture cell covers ~4 height vertices
@@ -250,8 +255,70 @@ func generate_control_map(land: LandRecord) -> Image:
 			var control := _encode_control_value(base_slot, overlay_slot, blend)
 			img.set_pixel(x, img_y, Color(control, 0, 0, 1))
 
+	# Debug: Print texture usage for first few control maps
+	if _debug_control_map and _stats["control_maps_generated"] < 5:
+		var tex_usage: Dictionary = {}
+		var mw_indices: Dictionary = {}
+		for y in range(MW_TEXTURE_SIZE):
+			for x in range(MW_TEXTURE_SIZE):
+				var mw_idx := land.get_texture_index(x, y)
+				var slot := _get_terrain3d_texture_slot(mw_idx)
+				if not tex_usage.has(slot):
+					tex_usage[slot] = 0
+				tex_usage[slot] += 1
+				if not mw_indices.has(mw_idx):
+					mw_indices[mw_idx] = slot
+		print("TerrainManager: Cell (%d,%d) MW->Slot mappings: %s" % [land.cell_x, land.cell_y, mw_indices])
+		print("TerrainManager: Cell (%d,%d) slot usage counts: %s" % [land.cell_x, land.cell_y, tex_usage])
+		# Sample control values from different slots to verify encoding
+		for mw_idx: int in mw_indices.keys():
+			var slot: int = mw_indices[mw_idx]
+			var sample_ctrl := _encode_control_value(slot, 0, 0)
+			var decoded_slot := (_float_to_bits(sample_ctrl) >> 27) & 0x1F
+			print("TerrainManager: Verify encoding - MW idx %d -> slot %d -> bits %d -> decoded %d [%s]" % [
+				mw_idx, slot, _float_to_bits(sample_ctrl), decoded_slot,
+				"OK" if decoded_slot == slot else "MISMATCH!"])
+
+	# Verify the control map image actually stored correct values
+	if _debug_control_map and _stats["control_maps_generated"] < 3:
+		print("TerrainManager: Verifying control map image values for cell (%d,%d):" % [land.cell_x, land.cell_y])
+		# Sample a few pixels and decode them
+		for sample_y in [0, 32, 63]:
+			for sample_x in [0, 32, 63]:
+				var pixel_color := img.get_pixel(sample_x, sample_y)
+				var stored_float := pixel_color.r
+				var stored_bits := _float_to_bits(stored_float)
+				var decoded_base := (stored_bits >> 27) & 0x1F
+				var decoded_overlay := (stored_bits >> 22) & 0x1F
+				var decoded_blend := (stored_bits >> 14) & 0xFF
+				print("  Pixel (%d,%d): base_slot=%d, overlay=%d, blend=%d (bits=0x%08X)" % [
+					sample_x, sample_y, decoded_base, decoded_overlay, decoded_blend, stored_bits])
+
 	_stats["control_maps_generated"] += 1
 	return img
+
+
+## Debug: Enable/disable control map debug output
+func set_debug_control_map(enabled: bool) -> void:
+	_debug_control_map = enabled
+
+
+## Convert float back to int bits for debugging
+func _float_to_bits(f: float) -> int:
+	var bytes := PackedByteArray()
+	bytes.resize(4)
+	bytes.encode_float(0, f)
+	return bytes.decode_u32(0)
+
+
+## Debug: Print binary representation of control value
+func _debug_control_bits(bits: int) -> String:
+	var s := ""
+	for i in range(31, -1, -1):
+		if i == 26 or i == 21 or i == 13 or i == 9 or i == 6 or i == 2 or i == 1:
+			s += "_"
+		s += "1" if (bits >> i) & 1 else "0"
+	return s
 
 
 ## Encode a Terrain3D control map value
@@ -309,7 +376,10 @@ func _get_terrain3d_texture_slot(mw_tex_idx: int) -> int:
 
 	# Use external mapper if available (proper texture loading)
 	if _texture_slot_mapper and _texture_slot_mapper.has_method("get_slot_for_mw_index"):
-		return _texture_slot_mapper.get_slot_for_mw_index(mw_tex_idx)
+		var slot: int = _texture_slot_mapper.get_slot_for_mw_index(mw_tex_idx)
+		if _debug_control_map and _stats["control_maps_generated"] < 3:
+			print("TerrainManager: _get_terrain3d_texture_slot(%d) -> slot %d (via mapper)" % [mw_tex_idx, slot])
+		return slot
 
 	# Check cache for fallback mapping
 	if mw_tex_idx in _texture_map:
@@ -320,6 +390,8 @@ func _get_terrain3d_texture_slot(mw_tex_idx: int) -> int:
 	var ltex_index := mw_tex_idx - 1
 	var slot := (ltex_index % 31) + 1  # Slot 0 is default, 1-31 are LTEX
 	_texture_map[mw_tex_idx] = slot
+	if _debug_control_map:
+		push_warning("TerrainManager: Using fallback mapping for MW index %d -> slot %d (no mapper!)" % [mw_tex_idx, slot])
 	return slot
 
 

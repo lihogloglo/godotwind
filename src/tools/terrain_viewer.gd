@@ -247,36 +247,35 @@ func _init_terrain3d() -> void:
 	# MW cell = 8192 game units = ~117 meters (8192/70)
 	#
 	# Terrain3D limits: 32 regions on each axis (-16 to +15)
-	# Morrowind cells: roughly -30 to +30 on each axis (60x60 cells)
+	# Morrowind actual bounds: X: -18 to 23, Y: -19 to 27 (47 cells max dimension)
 	#
-	# Strategy: Use region_size=256 so each region holds 4 MW cells (2x2)
-	# This gives us 32 * 4 = 128 MW cells coverage, enough for all of Vvardenfell
+	# Strategy: Use region_size=128 so each Terrain3D region holds 2x2 MW cells
+	# This gives us: 32 regions * 2 cells = 64 cells per axis
+	# Range: -32 to +31 cells, which covers Morrowind's -19 to +27 easily
 	#
-	# With 256 vertices per region at vertex_spacing = 117.03/64 = 1.828:
-	#   Region world size = 256 * 1.828 ≈ 468m = 4 MW cells
-	#
-	# But we import 1 cell at a time, so we use region_size=64 but center the world
-	# at Vvardenfell's center (around cell 0,0) to fit within Terrain3D's bounds
+	# With 128 vertices per region at vertex_spacing = 117.03/64 = 1.828:
+	#   Region world size = 128 * 1.828 ≈ 234m = 2 MW cells
 
 	var mw_cell_size_godot := MWCoords.CELL_SIZE_GODOT  # ~117.03m
 
-	# Use region_size = 64, closest to MW's 65x65 grid
-	# Terrain3D RegionSize enum: SIZE_64 = 0, SIZE_128 = 1, SIZE_256 = 2, etc.
-	terrain_3d.change_region_size(64)  # 64x64 vertices per region
+	# Use region_size = 128, each region spans 2x2 MW cells
+	# This doubles our world coverage compared to region_size=64
+	terrain_3d.change_region_size(128)  # 128x128 vertices per region
 
-	# Set vertex_spacing so that a 64-vertex region spans exactly one MW cell
+	# Set vertex_spacing so that a 64-vertex span equals one MW cell
+	# With 128 vertices, one region = 2 MW cells
 	var vertex_spacing := mw_cell_size_godot / 64.0  # ≈ 1.828m between vertices
 	terrain_3d.vertex_spacing = vertex_spacing
 
-	# World bounds: 32 regions * 117m = 3744m total, or ±1872m from center
-	# This covers MW cells roughly -16 to +15 on each axis
-	# Vvardenfell is roughly centered around (0,0) so this should be fine
+	# World bounds: 32 regions * 234m = 7488m total, or ±3744m from center
+	# This covers MW cells roughly -32 to +31 on each axis
+	# Morrowind needs -19 to +27 so this provides plenty of margin
 
 	_log("Terrain3D configured:")
-	_log("  Region size: 64 vertices")
+	_log("  Region size: 128 vertices (2x2 MW cells per region)")
 	_log("  Vertex spacing: %.4f m" % vertex_spacing)
-	_log("  Region world size: %.2f m (MW cell)" % (64.0 * vertex_spacing))
-	_log("  Max world bounds: ±%.0f m (cells -16 to +15)" % (16.0 * 64.0 * vertex_spacing))
+	_log("  Region world size: %.2f m (2 MW cells)" % (128.0 * vertex_spacing))
+	_log("  Max world bounds: ±%.0f m (cells -32 to +31)" % (32.0 * 64.0 * vertex_spacing))
 
 	_log("[color=green]Terrain3D initialized successfully[/color]")
 
@@ -349,6 +348,11 @@ func _preprocess_all_terrain() -> void:
 
 	# Configure terrain manager to use proper texture slot mapping
 	terrain_manager.set_texture_slot_mapper(texture_loader)
+	terrain_manager.set_debug_control_map(true)  # Enable debug output for first few cells
+
+	# Print debug summary of texture loading
+	texture_loader.print_debug_summary()
+	texture_loader.verify_terrain_assets(terrain_3d.assets)
 
 	var total_cells := ESMManager.lands.size()
 	var processed := 0
@@ -450,6 +454,9 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 		var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
 		_log("Loaded %d terrain textures" % textures_loaded)
 		terrain_manager.set_texture_slot_mapper(texture_loader)
+		terrain_manager.set_debug_control_map(true)  # Enable debug output
+		texture_loader.print_debug_summary()
+		texture_loader.verify_terrain_assets(terrain_3d.assets)
 
 	# Phase 1: Pre-load all LAND records
 	_update_loading(10, "Loading LAND records...")
@@ -563,17 +570,16 @@ func _import_cell_to_terrain3d(land: LandRecord) -> bool:
 	if not terrain_3d or not terrain_3d.data:
 		return false
 
-	# Terrain3D region bounds with region_size=64 and vertex_spacing=1.828:
-	#   - Each region spans 64 * 1.828 ≈ 117 meters (1 MW cell)
+	# Terrain3D region bounds with region_size=128 and vertex_spacing=1.828:
+	#   - Each region spans 128 * 1.828 ≈ 234 meters (2 MW cells)
 	#   - Valid region indices: -16 to +15 (32 regions per axis)
-	#   - World range: ±16 * 117 ≈ ±1872 meters
+	#   - World range: ±32 * 117 ≈ ±3744 meters (in MW cell units: -32 to +31)
 	#
-	# Morrowind world extends roughly from cells (-30, -30) to (+30, +30)
-	# This exceeds our bounds, so we only support the core area around (0,0)
+	# Morrowind actual bounds: X: -18 to 23, Y: -19 to 27
+	# All cells fit within the expanded -32 to +31 range
 	#
-	# TODO: To support full world, use region_size=256 (4 cells per region)
-	#       or offset the world center to Vvardenfell's geographic center
-	if land.cell_x < -16 or land.cell_x > 15 or land.cell_y < -16 or land.cell_y > 15:
+	# We use -31 to +30 to leave margin for the half-region offset in positioning
+	if land.cell_x < -31 or land.cell_x > 30 or land.cell_y < -31 or land.cell_y > 30:
 		return false
 
 	# Generate maps from LAND record (65x65)

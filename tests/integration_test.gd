@@ -94,7 +94,7 @@ func _run_integration_test(esm_path: String) -> void:
 	print("Load time: %.2f seconds" % (duration / 1000.0))
 	print("")
 
-	var stats := manager.get_statistics()
+	var stats: Dictionary = manager.get_statistics()
 	print("Records loaded:")
 	for key in stats:
 		if stats[key] > 0:
@@ -105,12 +105,12 @@ func _run_integration_test(esm_path: String) -> void:
 	# Sample some data
 	print("Sample data:")
 
-	var cells := manager.get_all_cells()
+	var cells: Dictionary = manager.get_all_cells()
 	if cells.size() > 0:
 		var sample_cell = cells.values()[0]
 		print("  First cell: %s" % sample_cell.name if sample_cell.has("name") else "  First cell: (unnamed)")
 
-	var statics := manager.get_all_statics()
+	var statics: Dictionary = manager.get_all_statics()
 	if statics.size() > 0:
 		var sample_static = statics.values()[0]
 		print("  First static: %s → %s" % [statics.keys()[0], sample_static.model if sample_static.has("model") else "?"])

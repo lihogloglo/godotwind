@@ -4,12 +4,20 @@
 class_name LandRecord
 extends ESMRecord
 
-# Land data flags
-const DATA_VNML: int = 0x01  # Has vertex normals
+# Land data flags (DATA subrecord value) - what data TYPES are present
+# NOTE: These are NOT the same as the Flag_* constants in OpenMW which indicate
+# what data the record actually contains. See loadland.hpp lines 69-74
+const DATA_VNML: int = 0x01  # Has vertex normals (used internally to track loaded data)
 const DATA_VHGT: int = 0x02  # Has vertex heights
 const DATA_WNAM: int = 0x04  # Has world map data
 const DATA_VCLR: int = 0x08  # Has vertex colors
 const DATA_VTEX: int = 0x10  # Has texture indices
+
+# OpenMW Flag_* constants - these are what the DATA subrecord value actually contains
+# These indicate what data types should be considered valid
+const FLAG_HEIGHTS_NORMALS: int = 0x01  # Heights and normals are valid
+const FLAG_COLORS: int = 0x02           # Vertex colors are valid
+const FLAG_TEXTURES: int = 0x04         # Texture indices are valid
 
 # Constants - matches OpenMW LandRecordData
 const LAND_SIZE: int = 65          # Vertices per side (sLandSize)
@@ -70,6 +78,9 @@ func load(esm: ESMReader) -> void:
 	var VTEX := ESMDefs.four_cc("VTEX")
 	var WNAM := ESMDefs.four_cc("WNAM")
 
+	# Track subrecords found for debugging
+	var _found_vtex := false
+
 	while esm.has_more_subs():
 		esm.get_sub_name()
 		var sub_name := esm.get_current_sub_name()
@@ -91,6 +102,7 @@ func load(esm: ESMReader) -> void:
 			esm.get_sub_header()
 			vertex_colors = esm.get_exact(esm.get_sub_size())
 		elif sub_name == VTEX:
+			_found_vtex = true
 			_load_textures(esm)
 		elif sub_name == WNAM:
 			esm.get_sub_header()
@@ -101,19 +113,36 @@ func load(esm: ESMReader) -> void:
 		else:
 			esm.skip_h_sub()
 
+	# Track VTEX loading statistics (some cells have FLAG_TEXTURES but no VTEX subrecord)
+	if _found_vtex:
+		_vtex_count += 1
+
+
+# Static counter for VTEX loading statistics
+static var _vtex_count: int = 0
+
 
 ## Load heightmap data using OpenMW's delta decoding algorithm
 ## Reference: OpenMW loadland.cpp lines 315-345
+## VHGT subrecord format:
+##   float heightOffset (4 bytes)
+##   int8_t heightData[4225] (4225 bytes)
+##   char padding[3] (3 bytes) - see OpenMW decompose() template
+##   Total: 4232 bytes
 func _load_heights(esm: ESMReader) -> void:
 	esm.get_sub_header()
+	var sub_size := esm.get_sub_size()
 
-	# VHGT format: float heightOffset + 4225 int8 deltas + 1 padding byte
+	# VHGT format: float heightOffset + 4225 int8 deltas + padding
 	var height_offset := esm.get_float()
 
 	# Read all height deltas as raw bytes
 	var height_data := esm.get_exact(LAND_NUM_VERTS)
-	# Skip padding byte
-	esm.get_byte()
+
+	# Skip any remaining padding bytes (typically 3 bytes: 4232 - 4 - 4225 = 3)
+	var padding_bytes := sub_size - 4 - LAND_NUM_VERTS
+	if padding_bytes > 0:
+		esm.skip(padding_bytes)
 
 	heights.resize(LAND_NUM_VERTS)
 	min_height = INF

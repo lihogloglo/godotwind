@@ -21,6 +21,11 @@ config/icon="res://icon.svg"
 ESMManager="*res://src/core/esm/esm_manager.gd"
 BSAManager="*res://src/core/bsa/bsa_manager.gd"
 
+[debug]
+
+file_logging/enable_file_logging=true
+file_logging/log_path="res://../godot_log.txt"
+
 [display]
 
 window/size/viewport_width=1280
