@@ -37,6 +37,28 @@ var _texture_slot_mapper: RefCounted = null
 
 ## Generate a heightmap Image from a single LAND record
 ## Returns: Image in FORMAT_RF (32-bit float per pixel)
+##
+## Morrowind height grid: 65x65 vertices
+##   - In Morrowind: x=0 is west edge, x=64 is east edge
+##   - In Morrowind: y=0 is south edge, y=64 is north edge
+##
+## Godot/Terrain3D Image coordinates:
+##   - Image x=0 is left (west), x increases east
+##   - Image y=0 is top, y increases downward
+##
+## Terrain3D world Z-axis: -Z is north, +Z is south
+## So when we look at terrain from above:
+##   - Image row 0 should correspond to the NORTH edge (negative Z)
+##   - Image row 63 should correspond to the SOUTH edge (positive Z)
+##
+## This means we need to FLIP the Y axis:
+##   - MW y=64 (north) -> Image y=0 (top) -> Terrain3D -Z (north)
+##   - MW y=0 (south) -> Image y=63 (bottom) -> Terrain3D +Z (south)
+##
+## Adjacent cells share edges: Cell A's east edge (x=64) == Cell B's west edge (x=0)
+## When we crop to 64x64, we keep [0-63] and discard [64].
+## After Y-flip: we keep what was MW y=[1-64] and discard y=0 (south edge).
+## The cell to the south provides the south edge for this cell in Terrain3D.
 func generate_heightmap(land: LandRecord) -> Image:
 	if not land.has_heights():
 		push_warning("TerrainManager: LAND record %d,%d has no height data" % [land.cell_x, land.cell_y])
@@ -51,8 +73,10 @@ func generate_heightmap(land: LandRecord) -> Image:
 			var mw_height := land.get_height(x, y)
 			var godot_height := mw_height * height_scale
 
-			# Store as single float in red channel (FORMAT_RF)
-			img.set_pixel(x, y, Color(godot_height, 0, 0, 1))
+			# FLIP Y axis: MW y=0 (south) goes to image y=64 (bottom)
+			#              MW y=64 (north) goes to image y=0 (top)
+			var img_y := MW_LAND_SIZE - 1 - y
+			img.set_pixel(x, img_y, Color(godot_height, 0, 0, 1))
 
 	_stats["heightmaps_generated"] += 1
 	return img
@@ -113,6 +137,7 @@ func generate_combined_heightmap(cell_coords: Array[Vector2i]) -> Image:
 
 ## Generate a color map from LAND vertex colors
 ## Returns: Image in FORMAT_RGB8
+## Note: Y-axis is flipped to match heightmap orientation (see generate_heightmap)
 func generate_color_map(land: LandRecord) -> Image:
 	var img := Image.create(MW_LAND_SIZE, MW_LAND_SIZE, false, Image.FORMAT_RGB8)
 
@@ -124,7 +149,9 @@ func generate_color_map(land: LandRecord) -> Image:
 	for y in range(MW_LAND_SIZE):
 		for x in range(MW_LAND_SIZE):
 			var color := land.get_color(x, y)
-			img.set_pixel(x, y, color)
+			# FLIP Y axis to match heightmap orientation
+			var img_y := MW_LAND_SIZE - 1 - y
+			img.set_pixel(x, img_y, color)
 
 	return img
 
@@ -133,15 +160,12 @@ func generate_color_map(land: LandRecord) -> Image:
 ## This creates a control map with texture blending at boundaries
 ## Returns: Image in FORMAT_RF (Terrain3D control map format)
 ##
-## Note: Terrain3D control maps use a packed uint32 format:
-## - Base texture ID (5 bits)
-## - Overlay texture ID (5 bits)
-## - Blend value (8 bits)
-## - etc.
+## Note: Y-axis is flipped to match heightmap orientation (see generate_heightmap)
 ##
 ## We implement smooth blending between adjacent texture cells:
 ## - At the center of a texture cell, blend = 0 (100% base texture)
 ## - Near texture cell boundaries, blend increases toward neighboring texture
+##
 func generate_control_map(land: LandRecord) -> Image:
 	# Terrain3D expects control map at same resolution as heightmap
 	# MW texture grid is 16x16, so we need to upscale
@@ -221,8 +245,10 @@ func generate_control_map(land: LandRecord) -> Image:
 			# Convert blend strength (0-1) to 8-bit value (0-255)
 			blend = int(blend_strength * 255.0)
 
+			# FLIP Y axis to match heightmap orientation
+			var img_y := MW_LAND_SIZE - 1 - y
 			var control := _encode_control_value(base_slot, overlay_slot, blend)
-			img.set_pixel(x, y, Color(control, 0, 0, 1))
+			img.set_pixel(x, img_y, Color(control, 0, 0, 1))
 
 	_stats["control_maps_generated"] += 1
 	return img
@@ -233,24 +259,35 @@ func generate_control_map(land: LandRecord) -> Image:
 ## overlay_tex: Overlay texture slot (0-31)
 ## blend: Blend amount (0-255)
 ## Returns: Float representation of packed uint32
+##
+## Terrain3D Control Map Format (from documentation):
+## https://terrain3d.readthedocs.io/en/stable/docs/controlmap_format.html
+##
+## | Field              | Range   | Bits | Position | Decode Formula    |
+## |--------------------|---------|------|----------|-------------------|
+## | Base texture ID    | 0-31    | 5    | 32-28    | x >> 27 & 0x1F    |
+## | Overlay texture ID | 0-31    | 5    | 27-23    | x >> 22 & 0x1F    |
+## | Texture blend      | 0-255   | 8    | 22-15    | x >> 14 & 0xFF    |
+## | UV angle           | 0-15    | 4    | 14-11    | x >> 10 & 0xF     |
+## | UV scale           | 0-7     | 3    | 10-8     | x >> 7 & 0x7      |
+## | (unused)           | -       | 4    | 7-4      | -                 |
+## | Hole flag          | 0-1     | 1    | 3        | x >> 2 & 0x1      |
+## | Navigation flag    | 0-1     | 1    | 2        | x >> 1 & 0x1      |
+## | Autoshader flag    | 0-1     | 1    | 1        | x & 0x1           |
+##
 func _encode_control_value(base_tex: int, overlay_tex: int, blend: int) -> float:
-	# Terrain3D control map format (32-bit):
-	# Bits 0-4: Base texture ID
-	# Bits 5-9: Overlay texture ID
-	# Bits 10-17: Blend value
-	# Bits 18-21: UV angle
-	# Bits 22-24: UV scale
-	# Bit 25: Hole flag
-	# Bit 26: Navigation flag
-	# Bit 27: Autoshader flag
-
 	var value: int = 0
-	value |= (base_tex & 0x1F)           # 5 bits for base
-	value |= (overlay_tex & 0x1F) << 5   # 5 bits for overlay
-	value |= (blend & 0xFF) << 10        # 8 bits for blend
+	value |= (base_tex & 0x1F) << 27      # Bits 27-31: Base texture ID
+	value |= (overlay_tex & 0x1F) << 22   # Bits 22-26: Overlay texture ID
+	value |= (blend & 0xFF) << 14         # Bits 14-21: Blend value
+	# UV angle = 0 (bits 10-13)
+	# UV scale = 0 (bits 7-9)
+	# Hole = 0 (bit 2)
+	# Navigation = 0 (bit 1)
+	# Autoshader = 0 (bit 0)
 
 	# Convert to float for storage in FORMAT_RF image
-	# We need to reinterpret the bits, not convert numerically
+	# We need to reinterpret the bits as float, not convert numerically
 	var bytes := PackedByteArray()
 	bytes.resize(4)
 	bytes.encode_u32(0, value)
@@ -336,11 +373,74 @@ func clear_cache() -> void:
 	}
 
 
+## Debug: Compare edge heights between adjacent cells
+## Returns a dictionary with comparison results
+static func debug_compare_cell_edges(land_a: LandRecord, land_b: LandRecord, edge: String) -> Dictionary:
+	var result := {
+		"edge": edge,
+		"cell_a": Vector2i(land_a.cell_x, land_a.cell_y),
+		"cell_b": Vector2i(land_b.cell_x, land_b.cell_y),
+		"matches": 0,
+		"mismatches": 0,
+		"max_diff": 0.0,
+		"samples": []
+	}
+
+	if not land_a.has_heights() or not land_b.has_heights():
+		result["error"] = "Missing height data"
+		return result
+
+	# Compare edges based on adjacency type
+	# edge = "horizontal" means A is west of B (A's east edge vs B's west edge)
+	# edge = "vertical" means A is south of B (A's north edge vs B's south edge)
+
+	for i in range(MW_LAND_SIZE):
+		var h_a: float
+		var h_b: float
+
+		if edge == "horizontal":
+			# A's east edge (x=64) vs B's west edge (x=0)
+			h_a = land_a.get_height(MW_LAND_SIZE - 1, i)  # x=64, y=i
+			h_b = land_b.get_height(0, i)                  # x=0, y=i
+		else:  # vertical
+			# A's north edge (y=64) vs B's south edge (y=0)
+			h_a = land_a.get_height(i, MW_LAND_SIZE - 1)  # x=i, y=64
+			h_b = land_b.get_height(i, 0)                  # x=i, y=0
+
+		var diff := absf(h_a - h_b)
+		if diff < 0.01:
+			result["matches"] += 1
+		else:
+			result["mismatches"] += 1
+			result["max_diff"] = maxf(result["max_diff"], diff)
+
+		# Store some samples
+		if i % 16 == 0:
+			result["samples"].append({
+				"idx": i,
+				"h_a": h_a,
+				"h_b": h_b,
+				"diff": diff
+			})
+
+	return result
+
+
 ## Stitch adjacent cell heights at shared edges
 ## This ensures seamless terrain between cells
-## call_order: Array of LandRecords in row-major order for a grid
+## lands: Array of LandRecords in row-major order for a grid (Y ascending = south to north)
 ## grid_width: Number of cells wide
 ## Returns: True if stitching was applied
+##
+## Grid layout (MW coordinate system, Y increases north):
+##   gy=2: [cell(-1,1)] [cell(0,1)] [cell(1,1)]   <- northmost row
+##   gy=1: [cell(-1,0)] [cell(0,0)] [cell(1,0)]
+##   gy=0: [cell(-1,-1)][cell(0,-1)][cell(1,-1)]  <- southmost row
+##         gx=0         gx=1        gx=2
+##
+## Shared edges:
+##   - Horizontal: Cell's east edge (x=64) matches cell-to-east's west edge (x=0)
+##   - Vertical: Cell's north edge (y=64) matches cell-to-north's south edge (y=0)
 func stitch_cell_edges(lands: Array, grid_width: int) -> bool:
 	if lands.size() < 2:
 		return false
@@ -356,34 +456,35 @@ func stitch_cell_edges(lands: Array, grid_width: int) -> bool:
 		var gx := i % grid_width
 		var gy := i / grid_width
 
-		# Stitch right edge with left edge of neighbor to the right
+		# Stitch east edge with west edge of cell to the east
 		if gx < grid_width - 1:
-			var right_idx := i + 1
-			if right_idx < lands.size():
-				var right_land: LandRecord = lands[right_idx]
-				if right_land and right_land.has_heights():
+			var east_idx := i + 1
+			if east_idx < lands.size():
+				var east_land: LandRecord = lands[east_idx]
+				if east_land and east_land.has_heights():
 					for y in range(MW_LAND_SIZE):
-						# Average the shared edge
+						# Average the shared edge: this cell's x=64 with east cell's x=0
 						var h1 := land.get_height(MW_LAND_SIZE - 1, y)
-						var h2 := right_land.get_height(0, y)
+						var h2 := east_land.get_height(0, y)
 						var avg := (h1 + h2) * 0.5
 						land.heights[(MW_LAND_SIZE - 1) + y * MW_LAND_SIZE] = avg
-						right_land.heights[0 + y * MW_LAND_SIZE] = avg
+						east_land.heights[0 + y * MW_LAND_SIZE] = avg
 					stitched = true
 
-		# Stitch bottom edge with top edge of neighbor below
+		# Stitch north edge with south edge of cell to the north
+		# In our grid, gy+1 is to the north (higher Y in MW coords)
 		if gy < grid_height - 1:
-			var below_idx := i + grid_width
-			if below_idx < lands.size():
-				var below_land: LandRecord = lands[below_idx]
-				if below_land and below_land.has_heights():
+			var north_idx := i + grid_width
+			if north_idx < lands.size():
+				var north_land: LandRecord = lands[north_idx]
+				if north_land and north_land.has_heights():
 					for x in range(MW_LAND_SIZE):
-						# Average the shared edge
+						# Average the shared edge: this cell's y=64 with north cell's y=0
 						var h1 := land.get_height(x, MW_LAND_SIZE - 1)
-						var h2 := below_land.get_height(x, 0)
+						var h2 := north_land.get_height(x, 0)
 						var avg := (h1 + h2) * 0.5
 						land.heights[x + (MW_LAND_SIZE - 1) * MW_LAND_SIZE] = avg
-						below_land.heights[x + 0 * MW_LAND_SIZE] = avg
+						north_land.heights[x + 0 * MW_LAND_SIZE] = avg
 					stitched = true
 
 	return stitched
