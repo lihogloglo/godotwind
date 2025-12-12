@@ -459,6 +459,86 @@ func clear_cache() -> void:
 	}
 
 
+## Import a single LAND record into Terrain3D at a specific local coordinate
+## This is the unified method for terrain importing used by:
+##   - terrain_preprocessor.gd (single-terrain mode)
+##   - multi_terrain_preprocessor.gd (multi-terrain/chunked mode)
+##   - terrain_viewer.gd (live conversion mode)
+##   - streaming_demo.gd (runtime terrain generation)
+##
+## Parameters:
+##   terrain: The Terrain3D node to import into
+##   land: The LAND record containing height/color/texture data
+##   local_coord: Optional local coordinate within a chunk (-16 to +15).
+##                If Vector2i.ZERO, uses the cell's world coordinates directly.
+##   use_local_coord: If true, uses local_coord for positioning (chunk mode).
+##                    If false, uses land.cell_x/cell_y (global mode).
+##
+## Returns: true if import succeeded, false if cell is out of bounds
+func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: Vector2i = Vector2i.ZERO, use_local_coord: bool = false) -> bool:
+	if not terrain or not terrain.data:
+		return false
+
+	# Determine the cell coordinate to use for positioning
+	var cell_x: int
+	var cell_y: int
+
+	if use_local_coord:
+		cell_x = local_coord.x
+		cell_y = local_coord.y
+	else:
+		cell_x = land.cell_x
+		cell_y = land.cell_y
+
+	# Terrain3D region bounds with region_size=64:
+	#   - Valid region indices: -16 to +15 (32 regions per axis)
+	if cell_x < -16 or cell_x > 15 or cell_y < -16 or cell_y > 15:
+		return false
+
+	# Generate maps from LAND record (65x65)
+	var heightmap: Image = generate_heightmap(land)
+	var colormap: Image = generate_color_map(land)
+	var controlmap: Image = generate_control_map(land)
+
+	# Crop from 65x65 to 64x64 by keeping pixels [0-63] and discarding pixel 64
+	# This preserves exact edge values - the east/north edges we discard will be
+	# provided by the adjacent cell's west/south edges (which are their pixel 0)
+	const REGION_SIZE := 64
+	var cropped_heightmap := Image.create(REGION_SIZE, REGION_SIZE, false, Image.FORMAT_RF)
+	var cropped_colormap := Image.create(REGION_SIZE, REGION_SIZE, false, Image.FORMAT_RGB8)
+	var cropped_controlmap := Image.create(REGION_SIZE, REGION_SIZE, false, Image.FORMAT_RF)
+
+	cropped_heightmap.blit_rect(heightmap, Rect2i(0, 0, REGION_SIZE, REGION_SIZE), Vector2i(0, 0))
+	cropped_colormap.blit_rect(colormap, Rect2i(0, 0, REGION_SIZE, REGION_SIZE), Vector2i(0, 0))
+	cropped_controlmap.blit_rect(controlmap, Rect2i(0, 0, REGION_SIZE, REGION_SIZE), Vector2i(0, 0))
+
+	# Calculate world position for this cell
+	# With vertex_spacing configured, each region represents one MW cell
+	var region_world_size := float(REGION_SIZE) * terrain.get_vertex_spacing()
+
+	# MW Y axis is North, Godot Z axis is South, so negate Y
+	# Position at the center of the region for proper snapping
+	# X: cell origin is west edge, add half to get center
+	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
+	#    To get center, we need to move NORTH (decrease Z), so subtract half
+	var world_x := float(cell_x) * region_world_size + region_world_size * 0.5
+	var world_z := float(-cell_y) * region_world_size - region_world_size * 0.5
+
+	# Create import array [heightmap, controlmap, colormap]
+	var imported_images: Array[Image] = []
+	imported_images.resize(Terrain3DRegion.TYPE_MAX)
+	imported_images[Terrain3DRegion.TYPE_HEIGHT] = cropped_heightmap
+	imported_images[Terrain3DRegion.TYPE_CONTROL] = cropped_controlmap
+	imported_images[Terrain3DRegion.TYPE_COLOR] = cropped_colormap
+
+	# Import into Terrain3D at the calculated position
+	var import_pos := Vector3(world_x, 0, world_z)
+	terrain.data.import_images(imported_images, import_pos, 0.0, 1.0)
+
+	_stats["regions_created"] += 1
+	return true
+
+
 ## Debug: Compare edge heights between adjacent cells
 ## Returns a dictionary with comparison results
 static func debug_compare_cell_edges(land_a: LandRecord, land_b: LandRecord, edge: String) -> Dictionary:

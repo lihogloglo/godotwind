@@ -376,6 +376,10 @@ func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 
 	var visible_cells := _get_visible_cells(new_cell)
 
+	# Load terrain for visible cells (either from pre-processed data or generate on-the-fly)
+	if load_terrain:
+		_load_terrain_for_cells(visible_cells)
+
 	# Unload cells that are no longer visible
 	var cells_to_unload: Array[Vector2i] = []
 	for cell_grid: Vector2i in _loaded_cells.keys():
@@ -460,6 +464,19 @@ func _unload_cell_internal(grid: Vector2i) -> void:
 	_loaded_cells.erase(grid)
 
 	if cell_node and is_instance_valid(cell_node):
+		# Release pooled objects back to the pool before freeing the cell
+		# This dramatically improves performance by reusing Node3D instances
+		if cell_manager:
+			var pool = cell_manager.get_object_pool()
+			if pool and pool.has_method("release_cell_objects"):
+				var released: int = pool.release_cell_objects(cell_node)
+				if released > 0:
+					_debug("Released %d objects to pool from cell %s" % [released, grid])
+
+		# Unregister from LOD manager before freeing
+		if _lod_manager and _lod_manager.has_method("unregister_cell_objects"):
+			_lod_manager.unregister_cell_objects(cell_node)
+
 		cell_node.queue_free()
 
 	cell_unloaded.emit(grid)
@@ -581,16 +598,75 @@ func _cell_to_godot_position(grid: Vector2i) -> Vector3:
 
 #region Terrain Integration
 
+## Whether to generate terrain on-the-fly if no preprocessed data exists
+@export var generate_terrain_on_fly: bool = true
+
+## Track which cells have had terrain generated
+var _terrain_generated_cells: Dictionary = {}
+
 ## Load terrain regions for visible cells
 ## Called automatically when terrain_manager is set and load_terrain is true
 func _load_terrain_for_cells(cells: Array[Vector2i]) -> void:
 	if not terrain_manager or not terrain_3d or not load_terrain:
 		return
 
-	# Terrain3D handles its own streaming via regions
-	# We just need to ensure the data is available
-	# This is a placeholder for future Terrain3D region pre-loading
-	pass
+	if not generate_terrain_on_fly:
+		return
+
+	# Generate terrain on-the-fly for cells that don't have pre-processed data
+	for cell_grid in cells:
+		if cell_grid in _terrain_generated_cells:
+			continue
+
+		# Check if terrain region already exists at this cell location
+		if _terrain_region_exists(cell_grid):
+			_terrain_generated_cells[cell_grid] = true
+			continue
+
+		# Generate terrain for this cell
+		_generate_terrain_cell(cell_grid)
+
+
+## Check if a terrain region exists for the given cell
+func _terrain_region_exists(cell_grid: Vector2i) -> bool:
+	if not terrain_3d or not terrain_3d.data:
+		return false
+
+	# Calculate world position for this cell
+	var region_world_size: float = 64.0 * float(terrain_3d.get_vertex_spacing())
+	var world_x: float = float(cell_grid.x) * region_world_size + region_world_size * 0.5
+	var world_z: float = float(-cell_grid.y) * region_world_size - region_world_size * 0.5
+
+	# Check if a region exists at this position
+	var pos := Vector3(world_x, 0, world_z)
+	return terrain_3d.data.has_region(pos)
+
+
+## Generate terrain for a single cell on-the-fly
+func _generate_terrain_cell(cell_grid: Vector2i) -> bool:
+	if not terrain_manager or not terrain_3d:
+		return false
+
+	# Get LAND record for this cell
+	var land: LandRecord = ESMManager.get_land(cell_grid.x, cell_grid.y)
+	if not land or not land.has_heights():
+		_terrain_generated_cells[cell_grid] = true  # Mark as processed (even if no data)
+		return false
+
+	# Use the unified import method from TerrainManager
+	var success: bool = terrain_manager.import_cell_to_terrain(terrain_3d, land)
+	if success:
+		_terrain_generated_cells[cell_grid] = true
+		terrain_region_loaded.emit(cell_grid)
+		_debug("Generated terrain for cell: %s" % cell_grid)
+
+	return success
+
+
+## Clear terrain generation cache (e.g., when switching areas)
+func clear_terrain_cache() -> void:
+	_terrain_generated_cells.clear()
+	_debug("Terrain generation cache cleared")
 
 #endregion
 

@@ -32,6 +32,11 @@ var _version: int = BSAVersion.UNKNOWN
 var _file_count: int = 0
 var _data_offset: int = 0  # Where the actual file data begins
 
+# Persistent file handle - kept open to avoid repeated open/close overhead
+# This is a major performance optimization: opening a file is expensive (1-5ms)
+# and with 100+ objects per cell, this adds up to seconds of I/O overhead
+var _file_handle: FileAccess = null
+
 # File entries indexed by normalized path
 var _files_by_path: Dictionary = {}  # String -> FileEntry
 # File entries indexed by hash for fast lookup
@@ -131,7 +136,11 @@ func open(path: String) -> Error:
 
 	# Read directory
 	var result := _read_directory(file, num_files, dir_size, file_size)
-	file.close()
+
+	# Keep file handle open for fast extraction (don't close!)
+	# This dramatically improves performance by avoiding file open/close per extraction
+	_file_handle = file
+
 	return result
 
 ## Read the directory section of an uncompressed BSA
@@ -242,10 +251,21 @@ func extract_file(path: String) -> PackedByteArray:
 	return extract_file_entry(entry)
 
 ## Extract file data using a FileEntry
+## Uses persistent file handle for performance (avoids open/close per call)
 func extract_file_entry(entry: FileEntry) -> PackedByteArray:
 	if entry == null:
 		return PackedByteArray()
 
+	# Use persistent file handle if available (fast path)
+	if _file_handle != null:
+		_file_handle.seek(entry.absolute_offset)
+		var data := _file_handle.get_buffer(entry.size)
+		if data.size() != entry.size:
+			push_error("BSAReader: Failed to read file data for: %s" % entry.name)
+			return PackedByteArray()
+		return data
+
+	# Fallback: reopen file if handle was closed (shouldn't happen in normal use)
 	var file := FileAccess.open(_file_path, FileAccess.READ)
 	if file == null:
 		push_error("BSAReader: Failed to reopen archive: %s" % _file_path)
@@ -260,6 +280,13 @@ func extract_file_entry(entry: FileEntry) -> PackedByteArray:
 		return PackedByteArray()
 
 	return data
+
+
+## Close the persistent file handle (call when done with archive)
+func close() -> void:
+	if _file_handle != null:
+		_file_handle.close()
+		_file_handle = null
 
 ## List all files matching a glob pattern (e.g., "meshes/*.nif")
 func find_files(pattern: String) -> Array:

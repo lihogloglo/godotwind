@@ -15,9 +15,11 @@ const MWCoords := preload("res://src/core/morrowind_coords.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const MultiTerrainPreprocessorScript := preload("res://src/core/world/multi_terrain_preprocessor.gd")
 
-# Pre-processed terrain data directory
-const TERRAIN_DATA_DIR := "user://terrain_data/"
+# Pre-processed terrain data directories
+const TERRAIN_DATA_DIR := "user://terrain_data/"         # Single-terrain mode
+const TERRAIN_CHUNKS_DIR := "user://terrain_chunks/"     # Multi-terrain mode (infinite worlds)
 
 # UI references - Main panel
 @onready var cell_x_spin: SpinBox = $UI/Panel/VBox/CoordsContainer/CellXSpin
@@ -27,9 +29,13 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 @onready var stats_text: RichTextLabel = $UI/Panel/VBox/StatsText
 @onready var log_text: RichTextLabel = $UI/Panel/VBox/LogText
 
-# Pre-processing UI
+# Pre-processing UI (Single-terrain)
 @onready var preprocess_btn: Button = $UI/Panel/VBox/PreprocessBtn
 @onready var preprocess_status: Label = $UI/Panel/VBox/PreprocessStatus
+
+# Pre-processing UI (Multi-terrain / Infinite worlds)
+@onready var multi_preprocess_btn: Button = $UI/Panel/VBox/MultiPreprocessBtn
+@onready var multi_preprocess_status: Label = $UI/Panel/VBox/MultiPreprocessStatus
 
 # Quick load buttons
 @onready var seyda_neen_btn: Button = $UI/Panel/VBox/QuickButtons/SeydaNeenBtn
@@ -78,6 +84,8 @@ func _ready() -> void:
 	# Connect UI signals
 	load_terrain_button.pressed.connect(_on_load_terrain_pressed)
 	preprocess_btn.pressed.connect(_on_preprocess_pressed)
+	if multi_preprocess_btn:
+		multi_preprocess_btn.pressed.connect(_on_multi_preprocess_pressed)
 
 	# Connect quick load buttons - teleport in preprocessed mode, load area in live mode
 	seyda_neen_btn.pressed.connect(func(): _quick_load_or_teleport(-2, -9, 2))
@@ -180,6 +188,7 @@ func _load_game_data_async() -> void:
 
 ## Check if pre-processed terrain data exists and update status
 func _check_preprocessed_status() -> void:
+	# Check single-terrain data
 	var dir := DirAccess.open(TERRAIN_DATA_DIR)
 	if dir:
 		var count := 0
@@ -202,10 +211,30 @@ func _check_preprocessed_status() -> void:
 			preprocess_status.text = "Ready: %d regions (%.1f MB)" % [count, size_mb]
 			preprocess_status.add_theme_color_override("font_color", Color.GREEN)
 			_log("Found %d pre-processed terrain regions (%.1f MB)" % [count, size_mb])
-			return
+		else:
+			preprocess_status.text = "No pre-processed data"
+			preprocess_status.add_theme_color_override("font_color", Color.YELLOW)
+	else:
+		preprocess_status.text = "No pre-processed data"
+		preprocess_status.add_theme_color_override("font_color", Color.YELLOW)
 
-	preprocess_status.text = "No pre-processed data"
-	preprocess_status.add_theme_color_override("font_color", Color.YELLOW)
+	# Check multi-terrain (chunked) data
+	_check_multi_terrain_status()
+
+
+## Check if multi-terrain (chunked) data exists and update status
+func _check_multi_terrain_status() -> void:
+	if not multi_preprocess_status:
+		return
+
+	var chunks := MultiTerrainPreprocessorScript.get_available_chunks()
+	if chunks.size() > 0:
+		multi_preprocess_status.text = "Ready: %d chunks" % chunks.size()
+		multi_preprocess_status.add_theme_color_override("font_color", Color.GREEN)
+		_log("Found %d multi-terrain chunks for infinite world streaming" % chunks.size())
+	else:
+		multi_preprocess_status.text = "No chunked data"
+		multi_preprocess_status.add_theme_color_override("font_color", Color.YELLOW)
 
 
 ## Load pre-processed terrain data from disk
@@ -233,10 +262,9 @@ func _init_terrain3d() -> void:
 		_log("[color=red]ERROR: Terrain3D GDExtension not loaded! Make sure the plugin is enabled.[/color]")
 		return
 
-	# Create Terrain3DData if not present
+	# Terrain3DData is read-only and created automatically by Terrain3D
 	if not terrain_3d.data:
-		terrain_3d.set_data(Terrain3DData.new())
-		_log("Created new Terrain3DData")
+		_log("[color=yellow]Warning: Terrain3D data not yet initialized[/color]")
 
 	# Create Terrain3DMaterial if not present
 	if not terrain_3d.material:
@@ -254,36 +282,30 @@ func _init_terrain3d() -> void:
 	# MW cell = 8192 game units = ~117 meters (8192/70)
 	#
 	# Terrain3D limits: 32 regions on each axis (-16 to +15)
-	# Morrowind actual bounds: X: -18 to 23, Y: -19 to 27 (47 cells max dimension)
+	# With region_size=64, each region = one MW cell, range -16 to +15
+	# Morrowind actual bounds: X: -18 to 23, Y: -19 to 27
+	# This means cells outside -16 to +15 won't appear (Solstheim, far edges)
 	#
-	# Strategy: Use region_size=128 so each Terrain3D region holds 2x2 MW cells
-	# This gives us: 32 regions * 2 cells = 64 cells per axis
-	# Range: -32 to +31 cells, which covers Morrowind's -19 to +27 easily
-	#
-	# With 128 vertices per region at vertex_spacing = 117.03/64 = 1.828:
-	#   Region world size = 128 * 1.828 ≈ 234m = 2 MW cells
+	# TODO: Implement 2x2 cell combining with region_size=128 for full map coverage
 
 	var mw_cell_size_godot := MWCoords.CELL_SIZE_GODOT  # ~117.03m
 
-	# Use region_size = 128, each region spans 2x2 MW cells
-	# This doubles our world coverage compared to region_size=64
+	# Use region_size = 64, each region = one MW cell
 	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
-	terrain_3d.change_region_size(128)  # 128x128 vertices per region
+	terrain_3d.change_region_size(64)  # 64x64 vertices per region
 
-	# Set vertex_spacing so that a 64-vertex span equals one MW cell
-	# With 128 vertices, one region = 2 MW cells
+	# Set vertex_spacing so that 64 vertices = one MW cell
 	var vertex_spacing := mw_cell_size_godot / 64.0  # ≈ 1.828m between vertices
 	terrain_3d.vertex_spacing = vertex_spacing
 
-	# World bounds: 32 regions * 234m = 7488m total, or ±3744m from center
-	# This covers MW cells roughly -32 to +31 on each axis
-	# Morrowind needs -19 to +27 so this provides plenty of margin
+	# World bounds: 32 regions * 117m = 3744m total, or ±1872m from center
+	# This covers MW cells -16 to +15 on each axis
 
 	_log("Terrain3D configured:")
-	_log("  Region size: 128 vertices (2x2 MW cells per region)")
+	_log("  Region size: 64 vertices (1 MW cell per region)")
 	_log("  Vertex spacing: %.4f m" % vertex_spacing)
-	_log("  Region world size: %.2f m (2 MW cells)" % (128.0 * vertex_spacing))
-	_log("  Max world bounds: ±%.0f m (cells -32 to +31)" % (32.0 * 64.0 * vertex_spacing))
+	_log("  Region world size: %.2f m (1 MW cell)" % (64.0 * vertex_spacing))
+	_log("  Valid cell range: -16 to +15")
 
 	_log("[color=green]Terrain3D initialized successfully[/color]")
 
@@ -320,11 +342,12 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 	_update_stats_preprocessed()
 
 
-## Handle preprocess button press
+## Handle preprocess button press (single-terrain mode)
 func _on_preprocess_pressed() -> void:
-	_log("\n[b]Starting terrain pre-processing...[/b]")
+	_log("\n[b]Starting terrain pre-processing (single-terrain)...[/b]")
 	_log("Converting ALL Morrowind terrain to Terrain3D format.")
 	_log("This enables: LOD, streaming, distant lands.")
+	_log("[color=yellow]Note: Limited to cells -16 to +15 (32x32 region limit)[/color]")
 
 	_show_loading("Pre-Processing Terrain", "Preparing...")
 	await get_tree().process_frame
@@ -336,6 +359,54 @@ func _on_preprocess_pressed() -> void:
 
 	if _using_preprocessed:
 		_load_preprocessed_terrain()
+
+
+## Handle multi-terrain preprocess button press (infinite worlds mode)
+func _on_multi_preprocess_pressed() -> void:
+	_log("\n[b]Starting MULTI-TERRAIN pre-processing (infinite worlds)...[/b]")
+	_log("Dividing world into chunks for runtime streaming.")
+	_log("This enables: Unlimited world size, chunk-based LOD, memory-efficient streaming.")
+
+	_show_loading("Multi-Terrain Pre-Processing", "Preparing...")
+	await get_tree().process_frame
+
+	await _preprocess_multi_terrain()
+
+	_hide_loading()
+	_check_multi_terrain_status()
+
+
+## Pre-process terrain into chunks for multi-terrain streaming
+func _preprocess_multi_terrain() -> void:
+	var preprocessor := MultiTerrainPreprocessorScript.new()
+
+	# IMPORTANT: MultiTerrainPreprocessor now extends Node and must be in scene tree
+	# This is required because Terrain3D nodes need a scene tree for proper initialization
+	add_child(preprocessor)
+
+	# Connect progress signals
+	preprocessor.progress_updated.connect(func(percent: float, message: String):
+		_update_loading(percent, message)
+	)
+	preprocessor.chunk_complete.connect(func(chunk_coord: Vector2i, cell_count: int):
+		_log("  Chunk (%d, %d): %d cells" % [chunk_coord.x, chunk_coord.y, cell_count])
+	)
+	preprocessor.processing_complete.connect(func(stats: Dictionary):
+		_log("\n[color=green]Multi-terrain pre-processing complete![/color]")
+		_log("  Chunks created: %d" % stats.get("chunks_created", 0))
+		_log("  Cells processed: %d" % stats.get("processed_cells", 0))
+		_log("  Cells skipped: %d" % stats.get("skipped_cells", 0))
+		_log("  Time: %.2f seconds" % (stats.get("elapsed_ms", 0) / 1000.0))
+		_log("  Output: %s" % MultiTerrainPreprocessorScript.get_output_path())
+	)
+
+	# Run the preprocessor
+	var err := await preprocessor.preprocess_all_terrain(_data_path)
+	if err != OK:
+		_log("[color=red]Multi-terrain pre-processing failed: %s[/color]" % error_string(err))
+
+	# Clean up the preprocessor node
+	preprocessor.queue_free()
 
 
 ## Pre-process all Morrowind terrain to Terrain3D region files
@@ -573,81 +644,11 @@ func _load_terrain_async(cells: Array[Vector2i]) -> void:
 
 
 ## Import a single LAND record into Terrain3D
-## The heightmap is cropped from 65x65 to 64x64 to match Terrain3D's region size
-##
-## IMPORTANT: MW cells have 65x65 vertices (64 quads) where adjacent cells share
-## edge vertices. We crop rather than resize to preserve the exact edge values.
-## With Y-axis flipped: we keep image rows [0-63] which are MW rows [1-64].
-## The cell to the SOUTH provides the missing row 0 (south edge).
-## The cell to the EAST provides the missing column 64 (east edge).
-##
-## Coordinate mapping after Y-flip:
-##   - Image row 0 = MW row 64 (north edge of cell)
-##   - Image row 63 = MW row 1 (one row north of south edge)
-##   - Image row 64 = MW row 0 (south edge) - DISCARDED by crop
+## Uses TerrainManager.import_cell_to_terrain() for unified logic
 ##
 ## Returns true if import succeeded, false if cell is out of bounds
 func _import_cell_to_terrain3d(land: LandRecord) -> bool:
-	if not terrain_3d or not terrain_3d.data:
-		return false
-
-	# Terrain3D region bounds with region_size=128 and vertex_spacing=1.828:
-	#   - Each region spans 128 * 1.828 ≈ 234 meters (2 MW cells)
-	#   - Valid region indices: -16 to +15 (32 regions per axis)
-	#   - World range: ±32 * 117 ≈ ±3744 meters (in MW cell units: -32 to +31)
-	#
-	# Morrowind actual bounds: X: -18 to 23, Y: -19 to 27
-	# All cells fit within the expanded -32 to +31 range
-	#
-	# We use -31 to +30 to leave margin for the half-region offset in positioning
-	if land.cell_x < -31 or land.cell_x > 30 or land.cell_y < -31 or land.cell_y > 30:
-		return false
-
-	# Generate maps from LAND record (65x65)
-	var heightmap: Image = terrain_manager.generate_heightmap(land)
-	var colormap: Image = terrain_manager.generate_color_map(land)
-	var controlmap: Image = terrain_manager.generate_control_map(land)
-
-	# Crop from 65x65 to 64x64 by keeping pixels [0-63] and discarding pixel 64
-	# This preserves exact edge values - the east/north edges we discard will be
-	# provided by the adjacent cell's west/south edges (which are their pixel 0)
-	var cropped_heightmap := Image.create(64, 64, false, Image.FORMAT_RF)
-	var cropped_colormap := Image.create(64, 64, false, Image.FORMAT_RGB8)
-	var cropped_controlmap := Image.create(64, 64, false, Image.FORMAT_RF)
-
-	cropped_heightmap.blit_rect(heightmap, Rect2i(0, 0, 64, 64), Vector2i(0, 0))
-	cropped_colormap.blit_rect(colormap, Rect2i(0, 0, 64, 64), Vector2i(0, 0))
-	cropped_controlmap.blit_rect(controlmap, Rect2i(0, 0, 64, 64), Vector2i(0, 0))
-
-	# Calculate world position for this cell
-	# With vertex_spacing configured, each region represents one MW cell
-	# The region grid is aligned so that cell (x, y) maps to region (x, -y)
-	#
-	# Important: Terrain3D rounds positions to nearest region boundary
-	# With region_size=64 and vertex_spacing=1.828, region world size = 117.03m
-	# So we position each cell at its grid position * region_world_size
-	var region_world_size := 64.0 * terrain_3d.get_vertex_spacing()
-
-	# MW Y axis is North, Godot Z axis is South, so negate Y
-	# Position at the center of the region for proper snapping
-	# X: cell origin is west edge, add half to get center
-	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
-	#    To get center, we need to move NORTH (decrease Z), so subtract half
-	var world_x := float(land.cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-land.cell_y) * region_world_size - region_world_size * 0.5
-
-	# Create import array [heightmap, controlmap, colormap]
-	var imported_images: Array[Image] = []
-	imported_images.resize(Terrain3DRegion.TYPE_MAX)
-	imported_images[Terrain3DRegion.TYPE_HEIGHT] = cropped_heightmap
-	imported_images[Terrain3DRegion.TYPE_CONTROL] = cropped_controlmap
-	imported_images[Terrain3DRegion.TYPE_COLOR] = cropped_colormap
-
-	# Import into Terrain3D at the calculated position
-	# import_images will snap to the nearest region boundary
-	var import_pos := Vector3(world_x, 0, world_z)
-	terrain_3d.data.import_images(imported_images, import_pos, 0.0, 1.0)
-	return true
+	return terrain_manager.import_cell_to_terrain(terrain_3d, land)
 
 
 ## Load cell objects (statics, containers, doors, etc.) for the given cells

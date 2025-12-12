@@ -116,6 +116,19 @@ func register_cell_objects(cell_node: Node3D) -> void:
 	_register_recursive(cell_node)
 
 
+## Unregister all tracked objects from a cell node (call before freeing the cell)
+func unregister_cell_objects(cell_node: Node3D) -> void:
+	_unregister_recursive(cell_node)
+
+
+func _unregister_recursive(node: Node) -> void:
+	if node is MeshInstance3D:
+		unregister_object(node as MeshInstance3D)
+
+	for child in node.get_children():
+		_unregister_recursive(child)
+
+
 func _register_recursive(node: Node) -> void:
 	if node is MeshInstance3D:
 		var mesh_instance := node as MeshInstance3D

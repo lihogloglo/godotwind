@@ -22,8 +22,8 @@ const FLAG_FLIES: int = 0x20
 const FLAG_WALKS: int = 0x40
 const FLAG_ESSENTIAL: int = 0x80
 
-# Inventory item
-class InventoryItem:
+# Inventory item (named CreatureInventoryItem to avoid conflict with gloot's InventoryItem)
+class CreatureInventoryItem:
 	var count: int
 	var item_id: String
 
@@ -62,7 +62,7 @@ var gold: int
 var ai_data: AIData
 
 # Inventory and spells
-var inventory: Array[InventoryItem]
+var inventory: Array[CreatureInventoryItem]
 var spells: Array[String]  # Spell IDs
 
 # Sound generator type
@@ -186,7 +186,7 @@ func _load_creature_data(esm: ESMReader) -> void:
 func _load_inventory_item(esm: ESMReader) -> void:
 	esm.get_sub_header()
 
-	var item := InventoryItem.new()
+	var item := CreatureInventoryItem.new()
 	item.count = esm.get_s32()
 	item.item_id = esm.get_string(32).strip_edges()
 	inventory.append(item)

@@ -22,15 +22,21 @@ const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 ## Output directory for pre-processed terrain data
 const OUTPUT_DIR := "user://terrain_data/"
 
-## Terrain3D configuration matching MW cell dimensions
-const REGION_SIZE := 64  # Terrain3D region size (vertices)
-const MW_LAND_SIZE := 65  # Morrowind heightmap size
+## Terrain3D configuration
+## Terrain3D has a 32x32 region grid limit (-16 to +15 indices)
+## With region_size=64, each region = one MW cell, giving range -16 to +15
+## Morrowind actual bounds: X: -18 to 23, Y: -19 to 27
+## This covers most of Vvardenfell but clips edges and Solstheim (Y > 15)
+## TODO: Implement 2x2 cell combining for region_size=128 to cover full map
+const REGION_SIZE := 64  # Terrain3D region size (vertices) - one MW cell per region
+const MW_LAND_SIZE := 65  # Morrowind heightmap size per cell
 
 ## Progress tracking
 signal progress_updated(percent: float, message: String)
 signal processing_complete(stats: Dictionary)
 
 var terrain_manager: RefCounted
+var texture_loader: RefCounted  # Optional TerrainTextureLoader for proper texture mapping
 var _stats: Dictionary = {
 	"total_cells": 0,
 	"processed_cells": 0,
@@ -78,15 +84,21 @@ func preprocess_all_terrain(data_path: String) -> Error:
 	print("Found %d LAND records to process" % _stats["total_cells"])
 
 	# Create a temporary Terrain3D for configuration
+	# Note: Terrain3D.data is read-only and created automatically
 	var terrain := Terrain3D.new()
-	terrain.set_data(Terrain3DData.new())
 	terrain.set_material(Terrain3DMaterial.new())
 	terrain.set_assets(Terrain3DAssets.new())
 
-	# Configure to match MW cell dimensions
+	# Configure for full Morrowind map coverage (see REGION_SIZE constant)
 	var cell_size_godot := MWCoords.CELL_SIZE_GODOT
-	terrain.change_region_size(64)
+	terrain.change_region_size(REGION_SIZE)
 	terrain.vertex_spacing = cell_size_godot / 64.0
+
+	# Load terrain textures if texture_loader is available
+	if texture_loader and texture_loader.has_method("load_terrain_textures"):
+		var textures_loaded: int = texture_loader.load_terrain_textures(terrain.assets)
+		print("Loaded %d terrain textures" % textures_loaded)
+		terrain_manager.set_texture_slot_mapper(texture_loader)
 
 	# Process all LAND records
 	var processed := 0
@@ -139,35 +151,10 @@ func preprocess_all_terrain(data_path: String) -> Error:
 
 
 ## Import a single LAND record into the Terrain3D data
+## Uses TerrainManager.import_cell_to_terrain() for unified logic
 func _import_cell(terrain: Terrain3D, land: LandRecord) -> void:
-	# Generate maps from LAND record (65x65)
-	var heightmap: Image = terrain_manager.generate_heightmap(land)
-	var colormap: Image = terrain_manager.generate_color_map(land)
-	var controlmap: Image = terrain_manager.generate_control_map(land)
-
-	# Resize to match Terrain3D region size (64x64)
-	heightmap.resize(REGION_SIZE, REGION_SIZE, Image.INTERPOLATE_BILINEAR)
-	colormap.resize(REGION_SIZE, REGION_SIZE, Image.INTERPOLATE_BILINEAR)
-	controlmap.resize(REGION_SIZE, REGION_SIZE, Image.INTERPOLATE_NEAREST)
-
-	# Calculate world position for region center
-	# X: cell origin is west edge, add half to get center
-	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
-	#    To get center, we need to move NORTH (decrease Z), so subtract half
-	var region_world_size := float(REGION_SIZE) * terrain.get_vertex_spacing()
-	var world_x := float(land.cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-land.cell_y) * region_world_size - region_world_size * 0.5
-
-	# Create import array
-	var imported_images: Array[Image] = []
-	imported_images.resize(Terrain3DRegion.TYPE_MAX)
-	imported_images[Terrain3DRegion.TYPE_HEIGHT] = heightmap
-	imported_images[Terrain3DRegion.TYPE_CONTROL] = controlmap
-	imported_images[Terrain3DRegion.TYPE_COLOR] = colormap
-
-	# Import into Terrain3D
-	var import_pos := Vector3(world_x, 0, world_z)
-	terrain.data.import_images(imported_images, import_pos, 0.0, 1.0)
+	if not terrain_manager.import_cell_to_terrain(terrain, land):
+		_stats["skipped_cells"] += 1
 
 
 ## Get the output directory path (globalized)

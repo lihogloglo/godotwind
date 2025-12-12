@@ -70,6 +70,10 @@ const QUICK_MESHES := {
 	"pillar": "meshes\\x\\ex_hlaalu_pillar_01.nif",
 }
 
+# Collision visualization
+var _show_collision: bool = false
+var _collision_debug_nodes: Array[Node3D] = []
+
 # Category filters (path patterns)
 const CATEGORY_FILTERS := {
 	"flora": ["flora_", "\\f\\flora"],
@@ -125,6 +129,12 @@ func _process(delta: float) -> void:
 		_update_camera()
 
 func _input(event: InputEvent) -> void:
+	# Toggle collision visualization with C key
+	if event is InputEventKey and event.pressed and event.keycode == KEY_C:
+		_show_collision = not _show_collision
+		_update_collision_visibility()
+		_log("Collision display: %s" % ("ON" if _show_collision else "OFF"))
+
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_orbit_distance = max(0.5, _orbit_distance * 0.9)  # Zoom in (multiplicative for smooth feel)
@@ -498,6 +508,11 @@ func _load_nif_mesh(nif_path: String) -> void:
 		_log("  Textures: %d referenced, %d loaded" % [tex_info.size(), tex_stats["loaded"]])
 
 	_log("[color=green]Successfully loaded mesh![/color]")
+	_log("Press [b]C[/b] to toggle collision visualization")
+
+	# Update collision display if enabled
+	if _show_collision:
+		_update_collision_visibility()
 
 	# Update stats
 	_update_stats(nif_reader, converter, converted_node)
@@ -529,6 +544,18 @@ func _update_stats(_reader: NIFReader, converter: NIFConverter, _node: Node3D) -
 	stats += "  Cache hits: %d\n" % tex_stats["cache_hits"]
 	if tex_stats["failures"] > 0:
 		stats += "  [color=yellow]Failures: %d[/color]\n" % tex_stats["failures"]
+
+	# Collision info
+	var collision_info := converter.get_collision_info()
+	stats += "\n[b]Collision:[/b]\n"
+	stats += "  Has collision: %s\n" % ("Yes" if collision_info["has_collision"] else "No")
+	stats += "  Mode: %s\n" % collision_info["collision_mode"]
+	stats += "  Shapes: %d\n" % collision_info["collision_shape_count"]
+	if not collision_info["shape_types"].is_empty():
+		stats += "  Types: %s\n" % ", ".join(collision_info["shape_types"])
+	if not collision_info["detected_shapes"].is_empty():
+		stats += "  Detected: %s\n" % ", ".join(collision_info["detected_shapes"])
+	stats += "\n[color=gray]Press C to show/hide collision[/color]\n"
 
 	stats_text.text = stats
 
@@ -619,6 +646,118 @@ func _find_skeleton(node: Node) -> Skeleton3D:
 			return found
 
 	return null
+
+
+## Update collision shape visibility
+func _update_collision_visibility() -> void:
+	# Clear old debug visualizations
+	for node in _collision_debug_nodes:
+		if is_instance_valid(node):
+			node.queue_free()
+	_collision_debug_nodes.clear()
+
+	if not _show_collision or mesh_container.get_child_count() == 0:
+		return
+
+	# Find and visualize collision shapes in the loaded mesh
+	var root := mesh_container.get_child(0)
+	if root:
+		_create_collision_debug_visuals(root)
+
+
+## Recursively find collision shapes and create debug visuals
+func _create_collision_debug_visuals(node: Node) -> void:
+	if node is CollisionShape3D:
+		var debug_mesh := _create_shape_debug_mesh(node as CollisionShape3D)
+		if debug_mesh:
+			mesh_container.add_child(debug_mesh)
+			_collision_debug_nodes.append(debug_mesh)
+
+	for child in node.get_children():
+		_create_collision_debug_visuals(child)
+
+
+## Create a debug mesh for a collision shape
+func _create_shape_debug_mesh(coll_shape: CollisionShape3D) -> MeshInstance3D:
+	if coll_shape.shape == null:
+		return null
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "CollisionDebug_" + coll_shape.name
+
+	# Get global transform of the collision shape
+	mesh_inst.global_transform = coll_shape.global_transform
+
+	# Create appropriate mesh for the shape type
+	var shape := coll_shape.shape
+	if shape is BoxShape3D:
+		var box := BoxMesh.new()
+		box.size = shape.size
+		mesh_inst.mesh = box
+	elif shape is SphereShape3D:
+		var sphere := SphereMesh.new()
+		sphere.radius = shape.radius
+		sphere.height = shape.radius * 2.0
+		mesh_inst.mesh = sphere
+	elif shape is CylinderShape3D:
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = shape.radius
+		cyl.bottom_radius = shape.radius
+		cyl.height = shape.height
+		mesh_inst.mesh = cyl
+	elif shape is CapsuleShape3D:
+		var cap := CapsuleMesh.new()
+		cap.radius = shape.radius
+		cap.height = shape.height
+		mesh_inst.mesh = cap
+	elif shape is ConvexPolygonShape3D:
+		# For convex shapes, create a mesh from the points
+		var points: PackedVector3Array = shape.points
+		if points.size() >= 4:
+			# Use ArrayMesh to visualize points as a rough hull
+			var arr_mesh := ArrayMesh.new()
+			# Just create a bounding box visualization for simplicity
+			var aabb := _calculate_points_aabb(points)
+			var box := BoxMesh.new()
+			box.size = aabb.size
+			mesh_inst.mesh = box
+			mesh_inst.position += aabb.get_center()
+	elif shape is ConcavePolygonShape3D:
+		# Trimesh - create mesh from faces
+		var faces: PackedVector3Array = shape.get_faces()
+		if faces.size() >= 3:
+			var arr_mesh := ArrayMesh.new()
+			var arrays := []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = faces
+			arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			mesh_inst.mesh = arr_mesh
+	else:
+		# Unknown shape type
+		return null
+
+	# Semi-transparent green material for collision visualization
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.0, 1.0, 0.0, 0.3)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED  # See both sides
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mesh_inst.material_override = mat
+
+	return mesh_inst
+
+
+## Calculate AABB from point array
+func _calculate_points_aabb(points: PackedVector3Array) -> AABB:
+	if points.is_empty():
+		return AABB()
+
+	var min_v := points[0]
+	var max_v := points[0]
+	for p in points:
+		min_v = min_v.min(p)
+		max_v = max_v.max(p)
+	return AABB(min_v, max_v - min_v)
 
 
 ## Try to load animations from a .kf file for the given mesh path

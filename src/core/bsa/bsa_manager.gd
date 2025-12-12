@@ -17,9 +17,18 @@ var _file_cache: Dictionary = {}
 # Load order (later archives override earlier ones)
 var _load_order: Array[String] = []
 
+# Extracted data cache - stores frequently accessed file data in memory
+# This avoids repeated disk reads for common models/textures
+var _extracted_cache: Dictionary = {}  # normalized_path -> PackedByteArray
+var _extracted_cache_size: int = 0     # Current cache size in bytes
+const MAX_EXTRACTED_CACHE_SIZE := 256 * 1024 * 1024  # 256MB max cache
+const MAX_CACHEABLE_FILE_SIZE := 2 * 1024 * 1024      # Only cache files < 2MB
+
 # Statistics
 var total_archives_loaded: int = 0
 var total_files_indexed: int = 0
+var cache_hits: int = 0
+var cache_misses: int = 0
 
 ## Normalize a file path for BSA lookup (lowercase, backslashes)
 static func _normalize_path(path: String) -> String:
@@ -112,8 +121,17 @@ func get_file_info(path: String) -> Dictionary:
 
 ## Extract a file from the archives
 ## Returns the raw file data as PackedByteArray
+## Uses extracted data cache for frequently accessed files
 func extract_file(path: String) -> PackedByteArray:
 	var normalized := _normalize_path(path)
+
+	# Check extracted data cache first (fast path)
+	if normalized in _extracted_cache:
+		cache_hits += 1
+		return _extracted_cache[normalized]
+
+	cache_misses += 1
+
 	if not _file_cache.has(normalized):
 		push_error("BSAManager: File not found: %s" % path)
 		return PackedByteArray()
@@ -126,7 +144,50 @@ func extract_file(path: String) -> PackedByteArray:
 	if data.size() > 0:
 		file_extracted.emit(cached["archive_path"], entry.name, data.size())
 
+		# Cache small-to-medium files that are likely to be reused
+		# (textures, common models, etc.)
+		if data.size() <= MAX_CACHEABLE_FILE_SIZE:
+			_cache_extracted_data(normalized, data)
+
 	return data
+
+
+## Cache extracted file data for fast reuse
+func _cache_extracted_data(normalized_path: String, data: PackedByteArray) -> void:
+	# Don't cache if already at limit
+	if _extracted_cache_size >= MAX_EXTRACTED_CACHE_SIZE:
+		return
+
+	# Don't duplicate cache
+	if normalized_path in _extracted_cache:
+		return
+
+	_extracted_cache[normalized_path] = data
+	_extracted_cache_size += data.size()
+
+
+## Clear the extracted data cache (frees memory)
+func clear_extracted_cache() -> void:
+	_extracted_cache.clear()
+	_extracted_cache_size = 0
+	cache_hits = 0
+	cache_misses = 0
+
+
+## Get extracted cache statistics
+func get_cache_stats() -> Dictionary:
+	var hit_rate := 0.0
+	var total := cache_hits + cache_misses
+	if total > 0:
+		hit_rate = float(cache_hits) / float(total)
+
+	return {
+		"cache_size_mb": _extracted_cache_size / (1024.0 * 1024.0),
+		"cached_files": _extracted_cache.size(),
+		"cache_hits": cache_hits,
+		"cache_misses": cache_misses,
+		"hit_rate": hit_rate,
+	}
 
 ## Find all files matching a pattern across all archives
 func find_files(pattern: String) -> Array[Dictionary]:
@@ -190,6 +251,10 @@ func get_all_directories() -> Array[String]:
 func get_loaded_archives() -> Array[String]:
 	return _load_order.duplicate()
 
+## Get number of loaded archives
+func get_archive_count() -> int:
+	return total_archives_loaded
+
 ## Get a specific archive reader
 func get_archive(path: String) -> RefCounted:
 	return _archives.get(path)
@@ -215,7 +280,12 @@ func get_stats() -> Dictionary:
 		"total_files": total_files_indexed,
 		"total_size": total_size,
 		"extensions": extensions,
-		"load_order": _load_order.duplicate()
+		"load_order": _load_order.duplicate(),
+		# Include extraction cache stats
+		"extracted_cache_size_mb": _extracted_cache_size / (1024.0 * 1024.0),
+		"extracted_cache_files": _extracted_cache.size(),
+		"cache_hits": cache_hits,
+		"cache_misses": cache_misses,
 	}
 
 ## Load all BSA files from a directory
@@ -239,10 +309,20 @@ func load_archives_from_directory(dir_path: String, pattern: String = "*.bsa") -
 	dir.list_dir_end()
 	return loaded_count
 
-## Clear all loaded archives
+## Clear all loaded archives and caches
 func clear() -> void:
+	# Close all archive file handles
+	for archive_path in _archives:
+		var reader: RefCounted = _archives[archive_path]
+		if reader.has_method("close"):
+			reader.close()
+
 	_archives.clear()
 	_file_cache.clear()
 	_load_order.clear()
+	_extracted_cache.clear()
+	_extracted_cache_size = 0
 	total_archives_loaded = 0
 	total_files_indexed = 0
+	cache_hits = 0
+	cache_misses = 0

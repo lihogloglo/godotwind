@@ -20,6 +20,11 @@ config/icon="res://icon.svg"
 
 ESMManager="*res://src/core/esm/esm_manager.gd"
 BSAManager="*res://src/core/bsa/bsa_manager.gd"
+BeehaveGlobalMetrics="*res://addons/beehave/metrics/beehave_global_metrics.gd"
+BeehaveGlobalDebugger="*res://addons/beehave/debug/global_debugger.gd"
+Pandora="*res://addons/pandora/api.gd"
+Questify="*res://addons/questify/quest_manager.gd"
+SaveSystem="*res://addons/save_system/save_system.gd"
 
 [debug]
 
@@ -33,7 +38,7 @@ window/size/viewport_height=720
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/terrain_3d/plugin.cfg")
+enabled=PackedStringArray("res://addons/beehave/plugin.cfg", "res://addons/dialogue_manager/plugin.cfg", "res://addons/gloot/plugin.cfg", "res://addons/open-world-database/plugin.cfg", "res://addons/pandora/plugin.cfg", "res://addons/questify/plugin.cfg", "res://addons/save_system/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
 
 [filesystem]
 
@@ -43,3 +48,9 @@ import/blender/enabled=false
 
 data_path="C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files"
 esm_file="Morrowind.esm"
+
+[questify]
+
+general/update_polling=true
+general/update_interval=0.5
+general/add_quests_to_pot_generation=false

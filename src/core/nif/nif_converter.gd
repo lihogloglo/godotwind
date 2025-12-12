@@ -67,6 +67,10 @@ var debug_collision: bool = false
 # Source path for auto collision mode detection
 var _source_path: String = ""
 
+## Item ID for collision shape library lookups (e.g., "misc_com_bottle_01")
+## Set this before converting to enable YAML-based collision shape overrides
+var collision_item_id: String = ""
+
 # Cache for converted resources
 var _mesh_cache: Dictionary = {}  # record_index -> ArrayMesh
 var _material_cache: Dictionary = {}  # hash -> StandardMaterial3D
@@ -84,6 +88,15 @@ func convert_file(path: String) -> Node3D:
 		return null
 	return _convert()
 
+
+## Convert a NIF file with item ID for collision shape library lookup
+## item_id: The ESM record ID (e.g., "misc_com_bottle_01") for YAML shape matching
+## Returns the root Node3D or null on failure
+func convert_file_with_item_id(path: String, item_id: String) -> Node3D:
+	collision_item_id = item_id
+	return convert_file(path)
+
+
 ## Convert a NIF buffer to a Godot Node3D scene
 ## path_hint is optional but helps auto-detect collision mode and error messages
 func convert_buffer(data: PackedByteArray, path_hint: String = "") -> Node3D:
@@ -93,6 +106,14 @@ func convert_buffer(data: PackedByteArray, path_hint: String = "") -> Node3D:
 	if result != OK:
 		return null
 	return _convert()
+
+
+## Convert a NIF buffer with item ID for collision shape library lookup
+## item_id: The ESM record ID (e.g., "misc_com_bottle_01") for YAML shape matching
+## Returns the root Node3D or null on failure
+func convert_buffer_with_item_id(data: PackedByteArray, item_id: String, path_hint: String = "") -> Node3D:
+	collision_item_id = item_id
+	return convert_buffer(data, path_hint)
 
 ## Internal conversion after parsing
 func _convert() -> Node3D:
@@ -110,6 +131,7 @@ func _convert() -> Node3D:
 	_collision_builder.init(_reader)
 	_collision_builder.debug_mode = debug_collision
 	_collision_builder.detection_tolerance = collision_detection_tolerance
+	_collision_builder.item_id = collision_item_id  # For YAML-based shape lookups
 
 	# Set collision mode - auto-detect from path or use configured mode
 	if auto_collision_mode and not _source_path.is_empty():

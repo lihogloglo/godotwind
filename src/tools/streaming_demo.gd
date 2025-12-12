@@ -17,11 +17,15 @@ const WorldStreamingManagerScript := preload("res://src/core/world/world_streami
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const MWCoords := preload("res://src/core/morrowind_coords.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
+const MultiTerrainManagerScript := preload("res://src/core/world/multi_terrain_manager.gd")
+const TerrainPreprocessorScript := preload("res://src/tools/terrain_preprocessor.gd")
 
-# Pre-processed terrain data directory (shared with terrain_viewer)
-const TERRAIN_DATA_DIR := "user://terrain_data/"
+# Pre-processed terrain data directories
+const TERRAIN_DATA_DIR := "user://terrain_data/"          # Single-terrain mode
+const TERRAIN_CHUNKS_DIR := "user://terrain_chunks/"      # Multi-terrain mode
 
 # Node references
 @onready var camera: Camera3D = $FlyCamera
@@ -40,8 +44,13 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 @onready var vivec_btn: Button = $UI/StatsPanel/VBox/QuickButtons/VivecBtn
 @onready var origin_btn: Button = $UI/StatsPanel/VBox/QuickButtons/OriginBtn
 
+# Terrain preprocessing UI
+@onready var preprocess_btn: Button = $UI/StatsPanel/VBox/PreprocessBtn
+@onready var preprocess_status: Label = $UI/StatsPanel/VBox/PreprocessStatus
+
 # Managers
 var world_streaming_manager: Node3D = null  # WorldStreamingManager
+var multi_terrain_manager: Node3D = null    # MultiTerrainManager (for infinite worlds)
 var terrain_manager: RefCounted = null  # TerrainManager
 var texture_loader: RefCounted = null  # TerrainTextureLoader
 var cell_manager: RefCounted = null  # CellManager
@@ -56,8 +65,9 @@ var mouse_captured: bool = false
 var _data_path: String = ""
 var _initialized: bool = false
 var _using_preprocessed: bool = false
+var _using_multi_terrain: bool = false  # True = multi-terrain chunked mode
 var _perf_overlay_visible: bool = true
-var _current_view_distance: int = 2
+var _current_view_distance: int = 5
 
 
 func _ready() -> void:
@@ -65,7 +75,7 @@ func _ready() -> void:
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
 	cell_manager = CellManagerScript.new()
-	cell_manager.load_npcs = false  # Skip NPCs for now
+	cell_manager.load_npcs = true   # Enable NPCs
 	cell_manager.load_creatures = true
 
 	# Initialize object pool for frequently used models
@@ -81,6 +91,9 @@ func _ready() -> void:
 	vivec_btn.pressed.connect(func(): _teleport_to_cell(5, -6))
 	origin_btn.pressed.connect(func(): _teleport_to_cell(0, 0))
 
+	# Connect preprocess button
+	preprocess_btn.pressed.connect(_on_preprocess_pressed)
+
 	# Get Morrowind data path
 	_data_path = ProjectSettings.get_setting("morrowind/data_path", "")
 	if _data_path.is_empty():
@@ -95,9 +108,13 @@ func _ready() -> void:
 
 func _init_async() -> void:
 	# Load BSA archives
-	await _update_loading(10, "Loading BSA archives...")
+	await _update_loading(5, "Loading BSA archives...")
 	var bsa_count := BSAManager.load_archives_from_directory(_data_path)
 	_log("Loaded %d BSA archives" % bsa_count)
+
+	# Pre-warm BSA cache with common files (improves cell loading performance)
+	await _update_loading(10, "Pre-warming file cache...")
+	_prewarm_bsa_cache()
 
 	# Load ESM file
 	await _update_loading(30, "Loading ESM file...")
@@ -121,13 +138,16 @@ func _init_async() -> void:
 	await _update_loading(60, "Initializing Terrain3D...")
 	_init_terrain3d()
 
-	# Load pre-processed terrain if available
+	# Load pre-processed terrain if available, or enable on-the-fly generation
 	if _using_preprocessed:
 		await _update_loading(70, "Loading terrain data...")
 		_load_preprocessed_terrain()
 	else:
 		_log("[color=yellow]No pre-processed terrain found.[/color]")
-		_log("Run TerrainViewer and click 'Preprocess ALL Terrain' first.")
+		_log("[color=cyan]Using infinite terrain with on-the-fly generation.[/color]")
+		_log("(For better performance, click 'Preprocess ALL Terrain')")
+		await _update_loading(70, "Initializing infinite terrain...")
+		_init_multi_terrain_on_the_fly()
 
 	# Create and setup WorldStreamingManager
 	await _update_loading(85, "Setting up streaming system...")
@@ -140,7 +160,7 @@ func _init_async() -> void:
 
 	_initialized = true
 	_log("[color=green]World streaming initialized![/color]")
-	_log("Use WASD to move, Right-click to look")
+	_log("Use ZQSD to move, Right-click to look")
 	_log("Cells stream automatically based on camera position")
 
 	# Start at Seyda Neen
@@ -148,6 +168,26 @@ func _init_async() -> void:
 
 
 func _check_preprocessed_terrain() -> void:
+	# First check for multi-terrain (chunked) data - preferred for large worlds
+	var chunks_dir := DirAccess.open(TERRAIN_CHUNKS_DIR)
+	if chunks_dir:
+		var chunk_count := 0
+		chunks_dir.list_dir_begin()
+		var dir_name := chunks_dir.get_next()
+		while dir_name != "":
+			if chunks_dir.current_is_dir() and dir_name.begins_with("chunk_"):
+				chunk_count += 1
+			dir_name = chunks_dir.get_next()
+		chunks_dir.list_dir_end()
+
+		if chunk_count > 0:
+			_using_preprocessed = true
+			_using_multi_terrain = true
+			_log("Found %d terrain chunks (multi-terrain mode)" % chunk_count)
+			_update_preprocess_status()
+			return
+
+	# Fall back to single-terrain data
 	var dir := DirAccess.open(TERRAIN_DATA_DIR)
 	if dir:
 		var count := 0
@@ -161,39 +201,80 @@ func _check_preprocessed_terrain() -> void:
 
 		if count > 0:
 			_using_preprocessed = true
-			_log("Found %d pre-processed terrain regions" % count)
+			_using_multi_terrain = false
+			_log("Found %d pre-processed terrain regions (single-terrain mode)" % count)
+
+	_update_preprocess_status()
 
 
 func _init_terrain3d() -> void:
-	if not terrain_3d:
-		_log("[color=red]ERROR: Terrain3D node not found[/color]")
-		return
-
 	if not ClassDB.class_exists("Terrain3DData"):
 		_log("[color=red]ERROR: Terrain3D addon not loaded[/color]")
 		return
 
-	# Create resources if needed
-	if not terrain_3d.data:
-		terrain_3d.set_data(Terrain3DData.new())
+	if _using_multi_terrain:
+		# Multi-terrain mode: use MultiTerrainManager instead of single Terrain3D
+		_init_multi_terrain()
+		return
 
+	# Single-terrain mode: configure the scene's Terrain3D node
+	if not terrain_3d:
+		_log("[color=red]ERROR: Terrain3D node not found[/color]")
+		return
+
+	# Terrain3DData is read-only and created automatically by Terrain3D
+	# Create material/assets if needed
 	if not terrain_3d.material:
 		terrain_3d.set_material(Terrain3DMaterial.new())
 
 	if not terrain_3d.assets:
 		terrain_3d.set_assets(Terrain3DAssets.new())
 
-	# Configure for Morrowind (same as terrain_viewer)
+	# Configure for Morrowind - must match terrain_preprocessor settings
+	# Terrain3D has a 32x32 region limit (-16 to +15 indices)
+	# With region_size=64, each region = one MW cell, range -16 to +15
+	# This covers most of Vvardenfell but clips edges (Solstheim at Y>15 won't appear)
 	var mw_cell_size_godot := MWCoords.CELL_SIZE_GODOT
 	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
-	terrain_3d.change_region_size(128)
+	terrain_3d.change_region_size(64)
 	var vertex_spacing := mw_cell_size_godot / 64.0
 	terrain_3d.vertex_spacing = vertex_spacing
 
-	_log("Terrain3D configured: region_size=128, vertex_spacing=%.4f" % vertex_spacing)
+	_log("Terrain3D configured: region_size=64, vertex_spacing=%.4f" % vertex_spacing)
+
+
+func _init_multi_terrain() -> void:
+	# Hide the single Terrain3D node - we'll use MultiTerrainManager instead
+	if terrain_3d:
+		terrain_3d.visible = false
+
+	# Create MultiTerrainManager
+	multi_terrain_manager = Node3D.new()
+	multi_terrain_manager.set_script(MultiTerrainManagerScript)
+	multi_terrain_manager.name = "MultiTerrainManager"
+
+	# Configure for Morrowind
+	multi_terrain_manager.chunk_size_cells = 32
+	multi_terrain_manager.load_radius = 1  # 3x3 chunks loaded
+	multi_terrain_manager.terrain_data_base_path = TERRAIN_CHUNKS_DIR
+	multi_terrain_manager.region_size = 64
+	multi_terrain_manager.lod_enabled = true
+
+	add_child(multi_terrain_manager)
+
+	# Connect signals
+	multi_terrain_manager.chunk_loaded.connect(_on_terrain_chunk_loaded)
+	multi_terrain_manager.chunk_unloaded.connect(_on_terrain_chunk_unloaded)
+	multi_terrain_manager.player_chunk_changed.connect(_on_player_chunk_changed)
+
+	_log("MultiTerrainManager configured: 32x32 cells per chunk, load_radius=1")
 
 
 func _load_preprocessed_terrain() -> void:
+	if _using_multi_terrain:
+		_load_multi_terrain()
+		return
+
 	if not terrain_3d or not terrain_3d.data:
 		return
 
@@ -209,6 +290,181 @@ func _load_preprocessed_terrain() -> void:
 	_log("Loaded %d terrain regions" % region_count)
 
 
+func _load_multi_terrain() -> void:
+	if not multi_terrain_manager:
+		return
+
+	# Load terrain textures into shared assets
+	var shared_assets := Terrain3DAssets.new()
+	var textures_loaded: int = texture_loader.load_terrain_textures(shared_assets)
+	_log("Loaded %d terrain textures for multi-terrain" % textures_loaded)
+	terrain_manager.set_texture_slot_mapper(texture_loader)
+
+	# Apply shared assets to all chunks
+	multi_terrain_manager.set_shared_assets(shared_assets)
+
+	# Initialize the manager (it will start loading chunks when tracked node is set)
+	multi_terrain_manager.initialize()
+
+	_log("MultiTerrainManager initialized and ready")
+
+
+## Initialize multi-terrain manager for on-the-fly terrain generation
+## This enables infinite terrain without pre-processed data
+func _init_multi_terrain_on_the_fly() -> void:
+	# Hide the single Terrain3D node - we'll use MultiTerrainManager instead
+	if terrain_3d:
+		terrain_3d.visible = false
+
+	# Create MultiTerrainManager
+	multi_terrain_manager = Node3D.new()
+	multi_terrain_manager.set_script(MultiTerrainManagerScript)
+	multi_terrain_manager.name = "MultiTerrainManager"
+
+	# Configure for Morrowind
+	multi_terrain_manager.chunk_size_cells = 32
+	multi_terrain_manager.load_radius = 1  # 3x3 chunks loaded
+	multi_terrain_manager.terrain_data_base_path = TERRAIN_CHUNKS_DIR
+	multi_terrain_manager.region_size = 64
+	multi_terrain_manager.lod_enabled = true
+
+	# Enable on-the-fly generation
+	multi_terrain_manager.generate_on_fly = true
+	multi_terrain_manager.terrain_manager = terrain_manager
+
+	add_child(multi_terrain_manager)
+
+	# Load terrain textures into shared assets
+	var shared_assets := Terrain3DAssets.new()
+	var textures_loaded: int = texture_loader.load_terrain_textures(shared_assets)
+	_log("Loaded %d terrain textures for infinite terrain" % textures_loaded)
+	terrain_manager.set_texture_slot_mapper(texture_loader)
+
+	# Apply shared assets to all chunks
+	multi_terrain_manager.set_shared_assets(shared_assets)
+
+	# Connect signals
+	multi_terrain_manager.chunk_loaded.connect(_on_terrain_chunk_loaded)
+	multi_terrain_manager.chunk_unloaded.connect(_on_terrain_chunk_unloaded)
+	multi_terrain_manager.player_chunk_changed.connect(_on_player_chunk_changed)
+	multi_terrain_manager.terrain_generated.connect(_on_terrain_generated)
+
+	# Initialize the manager (it will start loading chunks when tracked node is set)
+	multi_terrain_manager.initialize()
+
+	_using_multi_terrain = true
+	_log("Infinite terrain (on-the-fly generation) initialized")
+	_log("  Chunk size: 32x32 cells, Load radius: 1 (3x3 = 9 chunks)")
+
+
+func _on_terrain_generated(chunk_coord: Vector2i, cells_generated: int) -> void:
+	_log("Generated terrain chunk (%d, %d): %d cells" % [chunk_coord.x, chunk_coord.y, cells_generated])
+
+
+## Load terrain textures for on-the-fly terrain generation (no pre-processed data)
+func _load_terrain_textures_for_generation() -> void:
+	if not terrain_3d:
+		return
+
+	# Ensure Terrain3D has assets for textures
+	if not terrain_3d.assets:
+		terrain_3d.set_assets(Terrain3DAssets.new())
+
+	# Load LTEX textures into Terrain3D assets
+	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
+	_log("Loaded %d terrain textures for on-the-fly generation" % textures_loaded)
+
+	# Configure terrain manager to use proper texture slot mapping
+	terrain_manager.set_texture_slot_mapper(texture_loader)
+
+
+## Update the preprocess status label
+func _update_preprocess_status() -> void:
+	if not preprocess_status:
+		return
+
+	if _using_preprocessed:
+		if _using_multi_terrain:
+			preprocess_status.text = "Using multi-terrain chunks"
+			preprocess_status.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
+		else:
+			preprocess_status.text = "Using pre-processed terrain"
+			preprocess_status.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
+		preprocess_btn.text = "Re-preprocess Terrain"
+	else:
+		preprocess_status.text = "On-the-fly generation (slower)"
+		preprocess_status.add_theme_color_override("font_color", Color(1.0, 0.8, 0.3))
+		preprocess_btn.text = "Preprocess ALL Terrain"
+
+
+## Handle preprocess button press
+func _on_preprocess_pressed() -> void:
+	_log("[color=cyan]Starting terrain preprocessing...[/color]")
+	preprocess_btn.disabled = true
+	preprocess_status.text = "Preprocessing..."
+
+	# Use TerrainPreprocessor to preprocess all terrain
+	# TerrainPreprocessor extends Node, so we need to add it to the scene tree
+	var preprocessor := TerrainPreprocessorScript.new()
+	add_child(preprocessor)
+
+	# The preprocessor creates its own terrain_manager internally
+	# But we can provide texture_loader if it supports it
+	if "texture_loader" in preprocessor:
+		preprocessor.texture_loader = texture_loader
+
+	# Connect progress signal
+	preprocessor.progress_updated.connect(_on_preprocess_progress)
+
+	# Run preprocessing with data path
+	var result: int = await preprocessor.preprocess_all_terrain(_data_path)
+
+	# Cleanup preprocessor
+	preprocessor.queue_free()
+
+	if result == OK:
+		_log("[color=green]Terrain preprocessing complete![/color]")
+		_using_preprocessed = true
+		_using_multi_terrain = false
+
+		# Reload the terrain data
+		if terrain_3d and terrain_3d.data:
+			var save_path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
+			terrain_3d.data.load_directory(save_path)
+			var region_count: int = terrain_3d.data.get_region_count()
+			_log("Loaded %d terrain regions" % region_count)
+
+		# Disable on-the-fly generation since we now have pre-processed data
+		if world_streaming_manager:
+			world_streaming_manager.generate_terrain_on_fly = false
+	else:
+		_log("[color=red]Terrain preprocessing failed![/color]")
+
+	preprocess_btn.disabled = false
+	_update_preprocess_status()
+
+
+func _on_preprocess_progress(percent: float, message: String) -> void:
+	preprocess_status.text = "%s (%.0f%%)" % [message, percent]
+
+
+## Signal handlers for multi-terrain mode
+func _on_terrain_chunk_loaded(chunk_coord: Vector2i, _terrain: Node) -> void:
+	_log("Terrain chunk loaded: (%d, %d)" % [chunk_coord.x, chunk_coord.y])
+	_update_stats()
+
+
+func _on_terrain_chunk_unloaded(chunk_coord: Vector2i) -> void:
+	_log("Terrain chunk unloaded: (%d, %d)" % [chunk_coord.x, chunk_coord.y])
+	_update_stats()
+
+
+func _on_player_chunk_changed(old_chunk: Vector2i, new_chunk: Vector2i) -> void:
+	_log("Player moved from chunk (%d,%d) to (%d,%d)" % [
+		old_chunk.x, old_chunk.y, new_chunk.x, new_chunk.y
+	])
+
+
 func _setup_world_streaming_manager() -> void:
 	# Create WorldStreamingManager
 	world_streaming_manager = Node3D.new()
@@ -218,8 +474,17 @@ func _setup_world_streaming_manager() -> void:
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = true
-	world_streaming_manager.load_terrain = true
 	world_streaming_manager.debug_enabled = true
+
+	# When using multi-terrain manager, let it handle terrain
+	# Otherwise, WorldStreamingManager handles terrain with single Terrain3D
+	if _using_multi_terrain:
+		world_streaming_manager.load_terrain = false
+		world_streaming_manager.generate_terrain_on_fly = false
+	else:
+		world_streaming_manager.load_terrain = true
+		# Enable on-the-fly terrain generation when no pre-processed data exists
+		world_streaming_manager.generate_terrain_on_fly = not _using_preprocessed
 
 	# OWDB configuration for Morrowind objects
 	# Use typed array to match the @export Array[float] type
@@ -234,6 +499,10 @@ func _setup_world_streaming_manager() -> void:
 	world_streaming_manager.cell_loaded.connect(_on_cell_loaded)
 	world_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
 
+	# Connect terrain generation signal for logging
+	if world_streaming_manager.has_signal("terrain_region_loaded"):
+		world_streaming_manager.terrain_region_loaded.connect(_on_terrain_region_loaded)
+
 	# Provide managers
 	world_streaming_manager.set_cell_manager(cell_manager)
 	world_streaming_manager.set_terrain_manager(terrain_manager)
@@ -242,10 +511,24 @@ func _setup_world_streaming_manager() -> void:
 	# Track camera
 	world_streaming_manager.set_tracked_node(camera)
 
+	# Also set tracked node on multi-terrain manager if active
+	if multi_terrain_manager:
+		multi_terrain_manager.set_tracked_node(camera)
+
 	# Initialize after all configuration is set
 	world_streaming_manager.initialize()
 
 	_log("WorldStreamingManager created and configured")
+	if _using_multi_terrain:
+		if _using_preprocessed:
+			_log("Multi-terrain streaming active (pre-processed)")
+		else:
+			_log("[color=cyan]Infinite terrain active (on-the-fly generation)[/color]")
+
+
+func _on_terrain_region_loaded(region: Vector2i) -> void:
+	_log("Terrain generated: (%d, %d)" % [region.x, region.y])
+	_update_stats()
 
 
 func _on_cell_loaded(grid: Vector2i, node: Node3D) -> void:
@@ -266,9 +549,6 @@ func _on_cell_unloaded(grid: Vector2i) -> void:
 
 
 func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
-	if not terrain_3d:
-		return
-
 	# Clear load queue for faster response when teleporting
 	if world_streaming_manager and world_streaming_manager.has_method("clear_load_queue"):
 		world_streaming_manager.clear_load_queue()
@@ -277,12 +557,19 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 	# X: cell origin is west edge, add half to get center
 	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
 	#    To get center, we need to move NORTH (decrease Z), so subtract half
-	var region_world_size := 64.0 * terrain_3d.get_vertex_spacing()
-	var world_x := float(cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-cell_y) * region_world_size - region_world_size * 0.5
+	var cell_world_size := MWCoords.CELL_SIZE_GODOT
+	var world_x := float(cell_x) * cell_world_size + cell_world_size * 0.5
+	var world_z := float(-cell_y) * cell_world_size - cell_world_size * 0.5
 
 	var height := 50.0
-	if terrain_3d.data:
+
+	# Get terrain height - works for both single and multi-terrain modes
+	if _using_multi_terrain and multi_terrain_manager:
+		# In multi-terrain mode, we need to find the active chunk's terrain
+		# For now, use a default height since chunks may not be loaded yet
+		# The multi_terrain_manager.teleport_to() handles chunk loading
+		await multi_terrain_manager.teleport_to(Vector3(world_x, 0, world_z))
+	elif terrain_3d and terrain_3d.data:
 		height = terrain_3d.data.get_height(Vector3(world_x, 0, world_z))
 		if is_nan(height) or height > 10000:
 			height = 50.0
@@ -297,8 +584,6 @@ func _update_stats() -> void:
 		return
 
 	var stats: Dictionary = world_streaming_manager.get_stats()
-	@warning_ignore("unused_variable")
-	var region_count: int = terrain_3d.data.get_region_count() if terrain_3d and terrain_3d.data else 0
 
 	# Get profiler data
 	var fps := 0.0
@@ -325,6 +610,19 @@ func _update_stats() -> void:
 	var lod_culled: int = stats.get("lod_objects_culled", 0)
 	var lod_total: int = stats.get("lod_total_tracked", 0)
 
+	# Get multi-terrain stats if active
+	var terrain_mode := "Single"
+	var active_chunks := 0
+	var total_regions := 0
+
+	if _using_multi_terrain and multi_terrain_manager:
+		terrain_mode = "Multi"
+		var mt_stats: Dictionary = multi_terrain_manager.get_stats()
+		active_chunks = mt_stats.get("active_chunks", 0)
+		total_regions = mt_stats.get("total_regions", 0)
+	elif terrain_3d and terrain_3d.data:
+		total_regions = terrain_3d.data.get_region_count()
+
 	stats_text.text = """[b]Performance[/b]
 FPS: %.1f (%.2f ms)
 P95: %.2f ms
@@ -336,6 +634,9 @@ Memory: %.1f MB
 Loaded cells: %d
 Queue: %d (peak: %d)
 View dist: %d cells [+/-]
+
+[b]Terrain (%s)[/b]
+Chunks: %d | Regions: %d
 
 [b]LOD[/b]
 Full/Low/Culled: %d/%d/%d
@@ -354,6 +655,8 @@ Cell: (%d, %d)
 		stats.get("load_queue_size", 0),
 		stats.get("queue_high_water_mark", 0),
 		_current_view_distance,
+		terrain_mode,
+		active_chunks, total_regions,
 		lod_full, lod_low, lod_culled,
 		lod_total,
 		stats.get("camera_cell", Vector2i(0, 0)).x,
@@ -434,13 +737,13 @@ func _process(delta: float) -> void:
 	if not mouse_captured:
 		return
 
-	# WASD movement
+	# ZQSD movement (AZERTY layout)
 	var input_dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_W):
+	if Input.is_key_pressed(KEY_Z):
 		input_dir.z -= 1
 	if Input.is_key_pressed(KEY_S):
 		input_dir.z += 1
-	if Input.is_key_pressed(KEY_A):
+	if Input.is_key_pressed(KEY_Q):
 		input_dir.x -= 1
 	if Input.is_key_pressed(KEY_D):
 		input_dir.x += 1
@@ -533,6 +836,20 @@ func _dump_profiling_report() -> void:
 			_log("  From pool: %d" % cell_stats.get("objects_from_pool", 0))
 			_log("  Hit rate: %.1f%%" % (cell_stats.get("pool_hit_rate", 0.0) * 100.0))
 
+	# Add BSA cache stats
+	var bsa_cache_stats: Dictionary = BSAManager.get_cache_stats()
+	_log("")
+	_log("[b]BSA Extraction Cache[/b]")
+	_log("  Size: %.1f MB (%d files)" % [
+		bsa_cache_stats.get("cache_size_mb", 0.0),
+		bsa_cache_stats.get("cached_files", 0)
+	])
+	_log("  Hits: %d | Misses: %d | Rate: %.1f%%" % [
+		bsa_cache_stats.get("cache_hits", 0),
+		bsa_cache_stats.get("cache_misses", 0),
+		bsa_cache_stats.get("hit_rate", 0.0) * 100.0
+	])
+
 	if not report.slowest_models.is_empty():
 		_log("")
 		_log("[b]Slowest Models[/b]")
@@ -543,3 +860,45 @@ func _dump_profiling_report() -> void:
 
 	# Also print full report to console for easy copying
 	print("\n" + JSON.stringify(report, "  "))
+
+
+## Pre-warm the BSA extraction cache with commonly used files
+## This dramatically reduces cell loading time by having common models/textures in memory
+func _prewarm_bsa_cache() -> void:
+	var common_models := ObjectPoolScript.identify_common_models(null)
+	var prewarmed := 0
+
+	for model_path in common_models:
+		# Try both with and without meshes\ prefix
+		var full_path: String = "meshes\\" + model_path if not model_path.begins_with("meshes") else model_path
+		if BSAManager.has_file(full_path):
+			BSAManager.extract_file(full_path)  # This populates the extraction cache
+			prewarmed += 1
+
+	# Also pre-warm common textures
+	var common_textures := [
+		"textures\\tx_ai_clover_01.dds",
+		"textures\\tx_ai_clover_02.dds",
+		"textures\\tx_ai_grass_01.dds",
+		"textures\\tx_ai_grass_02.dds",
+		"textures\\tx_bc_fern_01.dds",
+		"textures\\tx_bc_fern_02.dds",
+		"textures\\tx_rock_ai_01.dds",
+		"textures\\tx_rock_bc_01.dds",
+		"textures\\tx_wood_brown_01.dds",
+		"textures\\tx_wood_brown_02.dds",
+	]
+
+	for tex_path in common_textures:
+		if BSAManager.has_file(tex_path):
+			BSAManager.extract_file(tex_path)
+			prewarmed += 1
+
+	_log("Pre-warmed %d common files into cache" % prewarmed)
+
+	# Log cache stats
+	var cache_stats: Dictionary = BSAManager.get_cache_stats()
+	_log("BSA cache: %.1f MB, %d files" % [
+		cache_stats.get("cache_size_mb", 0.0),
+		cache_stats.get("cached_files", 0)
+	])

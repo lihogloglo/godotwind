@@ -1,0 +1,34 @@
+[gd_scene load_steps=3 format=3 uid="uid://dxe5sd7isdrfa"]
+
+[ext_resource type="Script" uid="uid://cci7w2cqgpqu6" path="res://addons/questify/scripts/graph_nodes/quest_exclusive_branch_connector_node.gd" id="1_tuynp"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_pl7w6"]
+content_margin_left = 4.0
+content_margin_top = 4.0
+content_margin_right = 4.0
+content_margin_bottom = 4.0
+bg_color = Color(0.980392, 0.666667, 0.203922, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+
+[node name="QuestExclusiveBranchConnectorNode" type="GraphNode"]
+offset_right = 207.0
+offset_bottom = 78.0
+theme_override_styles/titlebar = SubResource("StyleBoxFlat_pl7w6")
+title = "Exclusive Branch Connector"
+slot/0/left_enabled = true
+slot/0/left_type = 0
+slot/0/left_color = Color(1, 1, 1, 1)
+slot/0/left_icon = null
+slot/0/right_enabled = false
+slot/0/right_type = 0
+slot/0/right_color = Color(1, 1, 1, 1)
+slot/0/right_icon = null
+slot/0/draw_stylebox = true
+script = ExtResource("1_tuynp")
+label_color = Color(0, 0, 0, 1)
+
+[node name="InputLabel" type="Label" parent="."]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Input"

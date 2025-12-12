@@ -2,9 +2,16 @@
 ## Based on OpenMW's BulletNifLoader (components/nifbullet/bulletnifloader.cpp)
 ##
 ## Enhanced with smart collision shape detection for better Jolt physics performance:
+## - Uses CollisionShapeLibrary for explicit item shape mappings (YAML-based)
 ## - Auto-detects optimal primitive shapes (sphere, cylinder, box, capsule)
 ## - Supports convex hull for complex objects (faster than trimesh)
 ## - Falls back to trimesh only for architecture/terrain
+##
+## Priority for shape selection:
+## 1. Explicit item ID match from CollisionShapeLibrary (YAML)
+## 2. Pattern match from CollisionShapeLibrary (YAML wildcards)
+## 3. Auto-detection from geometry (vertex analysis)
+## 4. Fallback to convex hull or trimesh
 ##
 ## Morrowind collision detection works as follows:
 ## 1. If a NIF has a "RootCollisionNode", geometry under it is used for collision
@@ -19,6 +26,7 @@ extends RefCounted
 const Defs := preload("res://src/core/nif/nif_defs.gd")
 const Reader := preload("res://src/core/nif/nif_reader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const ShapeLib := preload("res://src/core/nif/collision_shape_library.gd")
 
 ## Collision generation mode
 ## Controls how geometry is converted to physics shapes
@@ -61,6 +69,13 @@ var force_trimesh_for_collision_nodes: bool = true
 ## Example: {"meshes/m/misc_potion*.nif": CollisionMode.AUTO_PRIMITIVE}
 var collision_overrides: Dictionary = {}
 
+## Item ID for shape library lookups (e.g., "misc_com_bottle_01")
+## Set this before calling build_collision() for YAML-based shape overrides
+var item_id: String = ""
+
+## Reference to the shape library singleton
+var _shape_library: ShapeLib = null
+
 ## Collision result structure
 class CollisionResult:
 	var has_collision: bool = false
@@ -75,6 +90,8 @@ class CollisionResult:
 ## Initialize with a NIFReader
 func init(reader: Reader) -> void:
 	_reader = reader
+	# Get shape library singleton (may or may not be loaded)
+	_shape_library = ShapeLib.get_instance()
 
 ## Build collision from NIF data
 ## Returns a CollisionResult with shapes and metadata
@@ -334,7 +351,42 @@ func _create_shape_from_geometry(geom: Defs.NiGeometry, transform: Transform3D, 
 	for i in range(vertices.size()):
 		converted_vertices[i] = _convert_nif_vector(vertices[i])
 
-	# Choose shape based on mode
+	# Calculate bounds for shape creation
+	var bounds := _calculate_bounds(converted_vertices)
+
+	# Priority 1: Check CollisionShapeLibrary for explicit shape mapping
+	if not item_id.is_empty() and _shape_library != null and _shape_library.is_loaded():
+		var library_shape = _shape_library.get_shape_for_item(item_id)
+		if library_shape != null:
+			var shape_type: int = library_shape
+			result.detected_shapes.append("LIBRARY:" + ShapeLib.shape_type_name(shape_type))
+
+			# If the library specifies a primitive shape, create it from bounds
+			if not ShapeLib.requires_geometry(shape_type):
+				var shape := ShapeLib.create_shape_from_type(shape_type, bounds)
+				if shape != null:
+					var shape_transform := Transform3D.IDENTITY
+					shape_transform.origin = bounds.get_center()
+					if debug_mode:
+						print("NIFCollisionBuilder: Using library shape '%s' for '%s'" % [
+							ShapeLib.shape_type_name(shape_type), item_id
+						])
+					return {
+						"shape": shape,
+						"transform": transform * shape_transform,
+						"type": ShapeLib.shape_type_name(shape_type).to_lower(),
+						"source": "library"
+					}
+
+			# Library says to use geometry-based shape (CONVEX, TRIMESH, AUTO)
+			match shape_type:
+				ShapeLib.ShapeType.CONVEX:
+					return _create_convex_shape(converted_vertices, transform)
+				ShapeLib.ShapeType.TRIMESH:
+					return _create_trimesh_shape(converted_vertices, triangles, transform)
+				# ShapeLib.ShapeType.AUTO falls through to normal auto-detection
+
+	# Priority 2: Choose shape based on collision mode
 	match mode:
 		CollisionMode.TRIMESH:
 			return _create_trimesh_shape(converted_vertices, triangles, transform)

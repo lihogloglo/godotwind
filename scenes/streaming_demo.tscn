@@ -1,6 +1,6 @@
-[gd_scene load_steps=4 format=3 uid="uid://streaming_demo_scene"]
+[gd_scene load_steps=10 format=3 uid="uid://clb74pwrqrgok"]
 
-[ext_resource type="Script" path="res://src/tools/streaming_demo.gd" id="1_demo"]
+[ext_resource type="Script" uid="uid://b7a7hpfrolm85" path="res://src/tools/streaming_demo.gd" id="1_demo"]
 
 [sub_resource type="Environment" id="Environment_env"]
 background_mode = 1
@@ -11,14 +11,71 @@ ambient_light_energy = 0.6
 tonemap_mode = 2
 fog_enabled = true
 fog_light_color = Color(0.6, 0.65, 0.75, 1)
-fog_density = 0.00005
+fog_density = 5e-05
 fog_sky_affect = 0.1
 
-[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
-sky_top_color = Color(0.3, 0.45, 0.75, 1)
-sky_horizon_color = Color(0.55, 0.6, 0.7, 1)
-ground_bottom_color = Color(0.2, 0.17, 0.13, 1)
-ground_horizon_color = Color(0.55, 0.6, 0.7, 1)
+[sub_resource type="Gradient" id="Gradient_6hfgm"]
+offsets = PackedFloat32Array(0.2, 1)
+colors = PackedColorArray(1, 1, 1, 1, 0, 0, 0, 1)
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_e0ybk"]
+noise_type = 2
+frequency = 0.03
+cellular_jitter = 3.0
+cellular_return_type = 0
+domain_warp_enabled = true
+domain_warp_type = 1
+domain_warp_amplitude = 50.0
+domain_warp_fractal_type = 2
+domain_warp_fractal_lacunarity = 1.5
+domain_warp_fractal_gain = 1.0
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_lv7bm"]
+noise = SubResource("FastNoiseLite_e0ybk")
+color_ramp = SubResource("Gradient_6hfgm")
+seamless = true
+
+[sub_resource type="Terrain3DMaterial" id="Terrain3DMaterial_w14db"]
+_shader_parameters = {
+&"bias_distance": 512.0,
+&"blend_sharpness": 0.5,
+&"depth_blur": 0.0,
+&"enable_macro_variation": true,
+&"enable_projection": true,
+&"flat_terrain_normals": false,
+&"macro_variation1": Color(1, 1, 1, 1),
+&"macro_variation2": Color(1, 1, 1, 1),
+&"macro_variation_slope": 0.333,
+&"mipmap_bias": 1.0,
+&"noise1_angle": 0.0,
+&"noise1_offset": Vector2(0.5, 0.5),
+&"noise1_scale": 0.04,
+&"noise2_scale": 0.076,
+&"noise_texture": SubResource("NoiseTexture2D_lv7bm"),
+&"projection_threshold": 0.8
+}
+show_checkered = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_786sq"]
+transparency = 4
+cull_mode = 2
+vertex_color_use_as_albedo = true
+backlight_enabled = true
+backlight = Color(0.5, 0.5, 0.5, 1)
+distance_fade_mode = 1
+distance_fade_min_distance = 128.0
+distance_fade_max_distance = 96.0
+
+[sub_resource type="Terrain3DMeshAsset" id="Terrain3DMeshAsset_mrdvh"]
+generated_type = 1
+height_offset = 0.5
+material_override = SubResource("StandardMaterial3D_786sq")
+last_lod = 0
+last_shadow_lod = 0
+lod0_range = 128.0
+
+[sub_resource type="Terrain3DAssets" id="Terrain3DAssets_8gw3e"]
+mesh_list = Array[Terrain3DMeshAsset]([SubResource("Terrain3DMeshAsset_mrdvh")])
 
 [node name="StreamingDemo" type="Node3D"]
 script = ExtResource("1_demo")
@@ -35,10 +92,14 @@ directional_shadow_max_distance = 5000.0
 
 [node name="FlyCamera" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 200, 300)
-fov = 75.0
 far = 10000.0
 
 [node name="Terrain3D" type="Terrain3D" parent="."]
+material = SubResource("Terrain3DMaterial_w14db")
+assets = SubResource("Terrain3DAssets_8gw3e")
+show_checkered = true
+top_level = true
+metadata/_edit_lock_ = true
 
 [node name="UI" type="CanvasLayer" parent="."]
 
@@ -49,7 +110,7 @@ anchor_bottom = 1.0
 color = Color(0.1, 0.1, 0.15, 0.9)
 
 [node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay"]
-anchors_preset = 8
+layout_mode = 0
 anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
@@ -63,30 +124,29 @@ grow_vertical = 2
 
 [node name="LoadingLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
 layout_mode = 2
-horizontal_alignment = 1
 text = "Loading..."
+horizontal_alignment = 1
 
 [node name="ProgressBar" type="ProgressBar" parent="UI/LoadingOverlay/VBox"]
 custom_minimum_size = Vector2(400, 25)
 layout_mode = 2
-max_value = 100.0
 
 [node name="StatusLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
 layout_mode = 2
-horizontal_alignment = 1
 theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
 text = "Initializing..."
+horizontal_alignment = 1
 
 [node name="StatsPanel" type="Panel" parent="UI"]
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
 offset_left = -300.0
-offset_bottom = 400.0
+offset_bottom = 480.0
 grow_horizontal = 0
 
 [node name="VBox" type="VBoxContainer" parent="UI/StatsPanel"]
-anchors_preset = 15
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 10.0
@@ -138,6 +198,22 @@ text = "Origin (0,0)"
 [node name="HSeparator3" type="HSeparator" parent="UI/StatsPanel/VBox"]
 layout_mode = 2
 
+[node name="TerrainLabel" type="Label" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+text = "Terrain:"
+
+[node name="PreprocessBtn" type="Button" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+text = "Preprocess ALL Terrain"
+
+[node name="PreprocessStatus" type="Label" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "No pre-processed data"
+
+[node name="HSeparator4" type="HSeparator" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+
 [node name="ControlsLabel" type="Label" parent="UI/StatsPanel/VBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
@@ -158,7 +234,7 @@ offset_bottom = -10.0
 grow_vertical = 0
 
 [node name="VBox" type="VBoxContainer" parent="UI/LogPanel"]
-anchors_preset = 15
+layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 10.0
@@ -174,5 +250,5 @@ text = "Log:"
 layout_mode = 2
 size_flags_vertical = 3
 bbcode_enabled = true
-scroll_following = true
 text = "Starting..."
+scroll_following = true

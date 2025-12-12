@@ -1,0 +1,33 @@
+[gd_scene load_steps=3 format=3 uid="uid://clrd8l50ltvur"]
+
+[ext_resource type="Script" uid="uid://o4ebqc8dojmb" path="res://addons/questify/scripts/graph_nodes/quest_end_node.gd" id="1_k6nao"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_v07vs"]
+content_margin_left = 4.0
+content_margin_top = 4.0
+content_margin_right = 4.0
+content_margin_bottom = 4.0
+bg_color = Color(0.901961, 0.380392, 0.380392, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+
+[node name="QuestEndNode" type="GraphNode"]
+offset_right = 141.0
+offset_bottom = 78.0
+mouse_filter = 1
+theme_override_styles/titlebar = SubResource("StyleBoxFlat_v07vs")
+title = "End"
+slot/0/left_enabled = true
+slot/0/left_type = 0
+slot/0/left_color = Color(1, 1, 1, 1)
+slot/0/left_icon = null
+slot/0/right_enabled = false
+slot/0/right_type = 0
+slot/0/right_color = Color(1, 1, 1, 1)
+slot/0/right_icon = null
+slot/0/draw_stylebox = true
+script = ExtResource("1_k6nao")
+
+[node name="Label" type="Label" parent="."]
+layout_mode = 2
+text = "Input"

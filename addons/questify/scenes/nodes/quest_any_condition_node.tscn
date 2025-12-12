@@ -1,0 +1,40 @@
+[gd_scene load_steps=3 format=3 uid="uid://ce2n8hf7d72cm"]
+
+[ext_resource type="Script" uid="uid://qbagdyptf6a3" path="res://addons/questify/scripts/graph_nodes/quest_any_condition_node.gd" id="1_qsymm"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_y08gr"]
+content_margin_left = 4.0
+content_margin_top = 4.0
+content_margin_right = 4.0
+content_margin_bottom = 4.0
+bg_color = Color(0, 0.317647, 0.564706, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+
+[node name="QuestAnyConditionNode" type="GraphNode"]
+offset_right = 207.0
+offset_bottom = 78.0
+theme_override_styles/titlebar = SubResource("StyleBoxFlat_y08gr")
+title = "Any Condition"
+slot/0/left_enabled = true
+slot/0/left_type = 1
+slot/0/left_color = Color(0, 0.584314, 1, 1)
+slot/0/left_icon = null
+slot/0/right_enabled = true
+slot/0/right_type = 1
+slot/0/right_color = Color(0, 0.584314, 1, 1)
+slot/0/right_icon = null
+slot/0/draw_stylebox = true
+script = ExtResource("1_qsymm")
+
+[node name="HBoxContainer" type="HBoxContainer" parent="."]
+layout_mode = 2
+
+[node name="InputLabel" type="Label" parent="HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Input"
+
+[node name="OutputLabel" type="Label" parent="HBoxContainer"]
+layout_mode = 2
+text = "Output"

@@ -111,11 +111,16 @@ func _instantiate_reference(ref: CellReference) -> Node3D:
 				return null
 			return _instantiate_actor(ref, base_record as CreatureRecord, "creature")
 		"leveled_creature":
-			# Leveled creatures need to be resolved at runtime
-			# For now, skip them
+			if not load_creatures:
+				return null
+			# Resolve leveled creature to an actual creature
+			var resolved := _resolve_leveled_creature(base_record as LeveledCreatureRecord)
+			if resolved:
+				return _instantiate_actor(ref, resolved, "creature")
 			return null
 		"leveled_item":
 			# Leveled items need to be resolved at runtime
+			# Could spawn random items here if needed
 			return null
 		_:
 			# Standard model-based object
@@ -124,10 +129,15 @@ func _instantiate_reference(ref: CellReference) -> Node3D:
 
 ## Instantiate a standard object with a NIF model
 func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
-	# Get model path
+	# Get model path and record ID
 	var model_path: String = _get_model_path(base_record)
 	if model_path.is_empty():
 		return null
+
+	# Get record_id for collision shape library lookup
+	var record_id: String = ""
+	if "record_id" in base_record:
+		record_id = base_record.record_id
 
 	# Try to get from object pool first (if enabled)
 	if use_object_pool and _object_pool:
@@ -138,8 +148,8 @@ func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
 			_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
 			return pooled
 
-	# Load or get cached model
-	var model_prototype := _get_model(model_path)
+	# Load or get cached model (with item_id for collision shape lookup)
+	var model_prototype := _get_model(model_path, record_id)
 	if not model_prototype:
 		# Create a placeholder for missing models
 		return _create_placeholder(ref)
@@ -235,21 +245,86 @@ func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) ->
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
+	# Check if model has actor collision metadata (from NIF "Bounding Box" node)
+	# If so, ensure it has a capsule collision shape for proper physics
+	if instance.has_meta("actor_collision_extents"):
+		_ensure_actor_collision(instance, actor_type)
+
 	# Apply transform
 	_apply_transform(instance, ref, true)
 
 	return instance
 
 
+## Ensure actor has proper capsule collision for CharacterBody3D compatibility
+func _ensure_actor_collision(instance: Node3D, actor_type: String) -> void:
+	# Get collision data from metadata (set by NIFConverter)
+	var extents: Vector3 = instance.get_meta("actor_collision_extents", Vector3(0.3, 0.9, 0.3))
+	var center: Vector3 = instance.get_meta("actor_collision_center", Vector3.ZERO)
+
+	# Convert extents to Godot coordinates (Y-up) and meters
+	extents = MWCoords.position_to_godot(extents).abs()
+	center = MWCoords.position_to_godot(center)
+
+	# Calculate dimensions
+	var width := maxf(extents.x, extents.z) * 2.0
+	var height := extents.y * 2.0
+
+	# Create collision shape - capsule for humanoids, box for squat creatures
+	var coll_shape := CollisionShape3D.new()
+	coll_shape.name = "ActorCollision"
+
+	if height > width * 1.2:
+		# Capsule for humanoid shapes
+		var capsule := CapsuleShape3D.new()
+		capsule.radius = width / 2.0
+		capsule.height = height
+		coll_shape.shape = capsule
+	else:
+		# Box for squat creatures (crabs, rats, etc.)
+		var box := BoxShape3D.new()
+		box.size = Vector3(width, height, width)
+		coll_shape.shape = box
+
+	# Position at center
+	coll_shape.position = center
+
+	# Find or create StaticBody3D for the collision
+	# (In the future this could be CharacterBody3D for NPCs that move)
+	var body: StaticBody3D = null
+	for child in instance.get_children():
+		if child is StaticBody3D:
+			body = child
+			break
+
+	if body == null:
+		body = StaticBody3D.new()
+		body.name = "ActorBody"
+		instance.add_child(body)
+
+	body.add_child(coll_shape)
+
+	# Set collision layer/mask for actors (layer 2 = actors)
+	body.collision_layer = 2
+	body.collision_mask = 1  # Collide with world
+
+	# Store actor type for later reference
+	instance.set_meta("actor_type", actor_type)
+
+
 ## Create a placeholder for actors without models (NPCs using body parts)
 func _create_actor_placeholder(ref: CellReference, _actor_record, actor_type: String) -> Node3D:
-	var placeholder := MeshInstance3D.new()
-	placeholder.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+	var container := Node3D.new()
+	container.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	# Capsule mesh for humanoid shape
+	# Visual placeholder mesh
+	var placeholder := MeshInstance3D.new()
+	placeholder.name = "Visual"
+
+	# Capsule mesh for humanoid shape (in meters)
 	var capsule := CapsuleMesh.new()
-	capsule.radius = 25.0  # Roughly human-sized in MW units
-	capsule.height = 128.0
+	capsule.radius = 0.35  # ~35cm radius
+	capsule.height = 1.8   # ~1.8m tall
 	placeholder.mesh = capsule
 
 	# Color based on type
@@ -261,10 +336,81 @@ func _create_actor_placeholder(ref: CellReference, _actor_record, actor_type: St
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	placeholder.material_override = mat
 
-	# Apply transform (no model rotation needed for placeholder)
-	_apply_transform(placeholder, ref, false)
+	# Offset visual so bottom is at origin (feet at ground level)
+	placeholder.position.y = capsule.height / 2.0
 
-	return placeholder
+	container.add_child(placeholder)
+
+	# Add collision body with capsule shape
+	var body := StaticBody3D.new()
+	body.name = "ActorBody"
+	body.collision_layer = 2  # Actor layer
+	body.collision_mask = 1   # World collision
+
+	var coll_shape := CollisionShape3D.new()
+	coll_shape.name = "ActorCollision"
+	var coll_capsule := CapsuleShape3D.new()
+	coll_capsule.radius = 0.35
+	coll_capsule.height = 1.8
+	coll_shape.shape = coll_capsule
+	coll_shape.position.y = capsule.height / 2.0  # Match visual
+
+	body.add_child(coll_shape)
+	container.add_child(body)
+
+	# Store metadata
+	container.set_meta("actor_type", actor_type)
+	container.set_meta("is_placeholder", true)
+
+	# Apply transform (no model rotation needed for placeholder)
+	_apply_transform(container, ref, false)
+
+	return container
+
+
+## Resolve a leveled creature list to an actual creature record
+## Uses a simplified algorithm: pick a random creature from valid level range
+## player_level defaults to 10 for now (could be passed in later)
+func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int = 10) -> CreatureRecord:
+	if leveled.creatures.is_empty():
+		return null
+
+	# Check chance_none - random chance to spawn nothing
+	if leveled.chance_none > 0 and randi() % 100 < leveled.chance_none:
+		return null
+
+	# Filter creatures by level (creatures spawn if player_level >= creature_level)
+	var valid_creatures: Array[Dictionary] = []
+	for entry in leveled.creatures:
+		if entry.level <= player_level:
+			valid_creatures.append(entry)
+
+	if valid_creatures.is_empty():
+		# No valid creatures for this level, pick lowest level one
+		var lowest_entry: Dictionary = leveled.creatures[0]
+		for entry in leveled.creatures:
+			if entry.level < lowest_entry.level:
+				lowest_entry = entry
+		valid_creatures.append(lowest_entry)
+
+	# Pick random creature from valid list
+	var chosen: Dictionary = valid_creatures[randi() % valid_creatures.size()]
+	var creature_id: String = chosen.creature_id
+
+	# Look up the actual creature record
+	var creature: CreatureRecord = ESMManager.get_creature(creature_id)
+	if creature:
+		return creature
+
+	# Might be a nested leveled list - try to resolve recursively
+	var nested_leveled: LeveledCreatureRecord = ESMManager.get_leveled_creature(creature_id)
+	if nested_leveled:
+		return _resolve_leveled_creature(nested_leveled, player_level)
+
+	push_warning("CellManager: Could not resolve creature '%s' from leveled list '%s'" % [
+		creature_id, leveled.record_id
+	])
+	return null
 
 
 ## Apply position, rotation, and scale to a node
@@ -277,8 +423,11 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 	# Rotation conversion via CoordinateSystem
 	# NIF models are already converted to Y-up in nif_converter, so we only
 	# need to apply the object's rotation from the cell reference
+	#
+	# Morrowind uses ZYX Euler order (yaw around Z, then pitch around Y, then roll around X)
+	# After coordinate conversion (Z->Y, Y->-Z), this becomes YZX order in Godot
 	var godot_euler := MWCoords.rotation_to_godot(ref.rotation)
-	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_YXZ)
+	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_YZX)
 
 
 ## Get the model path from a base record
@@ -289,12 +438,18 @@ func _get_model_path(record) -> String:
 
 
 ## Get or load a model prototype
-func _get_model(model_path: String) -> Node3D:
+## item_id: Optional ESM record ID for collision shape library lookup
+func _get_model(model_path: String, item_id: String = "") -> Node3D:
 	var normalized := model_path.to_lower().replace("/", "\\")
 
-	if normalized in _model_cache:
+	# Cache key includes item_id since same model may need different collision for different items
+	var cache_key := normalized
+	if not item_id.is_empty():
+		cache_key = normalized + ":" + item_id.to_lower()
+
+	if cache_key in _model_cache:
 		_stats["models_from_cache"] += 1
-		return _model_cache[normalized]
+		return _model_cache[cache_key]
 
 	# Build the full path - ESM stores paths relative to meshes/
 	var full_path := model_path
@@ -310,23 +465,25 @@ func _get_model(model_path: String) -> Node3D:
 
 	if nif_data.is_empty():
 		# Only warn once per model, don't spam
-		if not normalized in _model_cache:
+		if not cache_key in _model_cache:
 			push_warning("CellManager: Model not found in BSA: '%s' (tried meshes\\ prefix too)" % model_path)
-		_model_cache[normalized] = null
+		_model_cache[cache_key] = null
 		return null
 
-	# Convert NIF to Godot scene
+	# Convert NIF to Godot scene with item_id for collision shape lookup
 	var converter := NIFConverter.new()
+	if not item_id.is_empty():
+		converter.collision_item_id = item_id
 	var node := converter.convert_buffer(nif_data, full_path)
 
 	if not node:
 		# Only warn once per failed model
-		if not normalized in _model_cache:
+		if not cache_key in _model_cache:
 			push_warning("CellManager: Failed to convert NIF: '%s'" % full_path)
-		_model_cache[normalized] = null
+		_model_cache[cache_key] = null
 		return null
 
-	_model_cache[normalized] = node
+	_model_cache[cache_key] = node
 	_stats["models_loaded"] += 1
 	return node
 

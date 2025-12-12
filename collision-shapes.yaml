@@ -1,0 +1,446 @@
+# Collision shape mappings for dynamic objects
+# Shapes: box, sphere, capsule, cylinder
+# Default shape (if not listed): box
+
+# Pattern matching rules (applied first, before exact matches)
+# Use * for wildcard matching
+patterns:
+  # Bottles and flasks are cylindrical
+  - pattern: "misc_com_bottle_*"
+    shape: cylinder
+  - pattern: "misc_flask_*"
+    shape: cylinder
+  - pattern: "misc_lw_flask*"
+    shape: cylinder
+  - pattern: "misc_com_redware_flask*"
+    shape: cylinder
+
+  # Bowls are short cylinders
+  - pattern: "misc_*_bowl_*"
+    shape: cylinder
+  - pattern: "misc_*bowl*"
+    shape: cylinder
+
+  # Cups and goblets are cylindrical
+  - pattern: "misc_*_cup_*"
+    shape: cylinder
+  - pattern: "misc_*goblet*"
+    shape: cylinder
+  - pattern: "misc_*tankard*"
+    shape: cylinder
+  - pattern: "misc_*_glass_*"
+    shape: cylinder
+
+  # Pitchers are cylindrical
+  - pattern: "misc_*pitcher*"
+    shape: cylinder
+
+  # Pots are cylindrical
+  - pattern: "misc_*_pot_*"
+    shape: cylinder
+
+  # Vases are cylindrical
+  - pattern: "misc_*vase*"
+    shape: cylinder
+
+  # Plates and platters are flat cylinders
+  - pattern: "misc_*plate*"
+    shape: cylinder
+  - pattern: "misc_*platter*"
+    shape: cylinder
+
+  # Dwemer items
+  - pattern: "misc_dwrv_goblet*"
+    shape: cylinder
+  - pattern: "misc_dwrv_bowl*"
+    shape: cylinder
+  - pattern: "misc_dwrv_pitcher*"
+    shape: cylinder
+  - pattern: "misc_dwrv_mug*"
+    shape: cylinder
+  - pattern: "misc_dwrv_coin*"
+    shape: cylinder
+
+  # Coins are flat cylinders
+  - pattern: "gold_*"
+    shape: cylinder
+
+  # Skulls are roughly spherical
+  - pattern: "misc_skull*"
+    shape: sphere
+
+  # Eggs are spherical/capsule
+  - pattern: "food_kwama_egg_*"
+    shape: sphere
+  - pattern: "ingred_*_egg_*"
+    shape: sphere
+
+  # Round ingredients
+  - pattern: "ingred_pearl_*"
+    shape: sphere
+  - pattern: "ingred_diamond_*"
+    shape: sphere
+  - pattern: "ingred_emerald_*"
+    shape: sphere
+  - pattern: "ingred_ruby_*"
+    shape: sphere
+
+  # Salts and powders in containers (cylindrical)
+  - pattern: "ingred_*_salts_*"
+    shape: cylinder
+  - pattern: "ingred_bonemeal_*"
+    shape: cylinder
+  - pattern: "ingred_gravedust_*"
+    shape: cylinder
+  - pattern: "ingred_moon_sugar_*"
+    shape: cylinder
+
+  # Mushrooms and fungi (capsule shaped)
+  - pattern: "ingred_bc_*"
+    shape: capsule
+  - pattern: "ingred_russula_*"
+    shape: capsule
+  - pattern: "ingred_coprinus_*"
+    shape: capsule
+
+  # Round organic items
+  - pattern: "ingred_comberry_*"
+    shape: sphere
+  - pattern: "ingred_hackle-lo_leaf_*"
+    shape: sphere
+  - pattern: "ingred_marshmerrow_*"
+    shape: capsule
+  - pattern: "ingred_corkbulb_root_*"
+    shape: capsule
+
+  # Hearts are roughly spherical
+  - pattern: "ingred_*_heart_*"
+    shape: sphere
+
+  # Scrolls and paper are boxes
+  - pattern: "sc_paper*"
+    shape: box
+  - pattern: "text_paper*"
+    shape: cylinder
+
+  # Buckets are cylindrical
+  - pattern: "misc_*bucket*"
+    shape: cylinder
+
+  # Drums are cylindrical
+  - pattern: "misc_*drum*"
+    shape: cylinder
+
+  # Inkwells are cylindrical
+  - pattern: "misc_inkwell*"
+    shape: cylinder
+
+  # Beakers are cylindrical
+  - pattern: "misc_beaker*"
+    shape: cylinder
+
+  # Skooma vials are cylindrical
+  - pattern: "misc_skooma_vial*"
+    shape: cylinder
+
+# Exact item ID matches (override patterns if needed)
+items:
+  # Miscellaneous valuables
+  misc_dwrv_coin00: cylinder
+  misc_dwrv_cursed_coin00: cylinder
+  Gold_001: cylinder
+  Gold_005: cylinder
+  Gold_010: cylinder
+  Gold_025: cylinder
+  Gold_100: cylinder
+  Gold_Dae_cursed_001: cylinder
+  Gold_Dae_cursed_005: cylinder
+
+  # Dwemer artifacts - various shapes
+  misc_dwrv_artifact00: cylinder      # Dwemer Cylinder
+  misc_dwrv_artifact60: cylinder      # Dwemer Tube
+  misc_dwrv_gear00: cylinder          # Rusty Dwemer Cog
+  misc_dwrv_mug00: cylinder           # Dwemer Mug
+  misc_dwrv_bowl00: cylinder          # Ornate Dwemer Bowl
+  misc_dwrv_goblet00: cylinder        # Ornate Dwemer Goblet
+  misc_dwrv_goblet10: cylinder        # Ornate Dwemer Goblet
+  misc_dwrv_goblet10_tgcp: cylinder   # Large Dwemer Goblet
+  misc_dwrv_pitcher00: cylinder       # Ornate Dwemer Pitcher
+
+  # Quest items - boxes (irregular shapes)
+  misc_uni_pillow_unique: box         # Extra-Comfy Pillow
+  misc_uni_pillow_01: box             # Pillow
+  Misc_Uni_Pillow_02: box             # Pillow
+  lucky_coin: cylinder                # Old Man's Lucky Coin
+  misc_vivec_ashmask_01: box          # Vivec Ashmask
+  misc_vivec_ashmask_01_fake: box     # Vivec Ashmask (Fake)
+  misc_argonianhead_01: sphere        # The Head of Scourge
+
+  # Tribute items - boxes (irregular ashes containers)
+  devote_bone_Pop00: box
+  devote_Brinne_Dust_00: cylinder
+  devote_Lyngas_Dust_00: cylinder
+  devote_Nan_Dust_00: cylinder
+
+  # General clutter
+  misc_6th_ash_statue_01: box         # Ash Statue
+  misc_com_basket_01: cylinder        # Basket
+  misc_com_basket_02: cylinder        # Basket
+  misc_de_basket_01: cylinder         # Basket
+  misc_de_bellows10: box              # Bellows
+  misc_clothbolt_01: cylinder         # Bolt of Cloth
+  misc_clothbolt_02: cylinder         # Bolt of Cloth
+  misc_clothbolt_03: cylinder         # Bolt of Cloth
+  misc_com_broom_01: capsule          # Broom
+  misc_de_cloth10: box                # Cloth
+  misc_de_cloth11: box                # Cloth
+  misc_de_foldedcloth00: box          # Folded Cloth
+  misc_de_lute_01: box                # Lute
+  misc_de_lute_01_phat: box           # Fat Lute
+  misc_de_fishing_pole: capsule       # Fishing Pole
+  misc_hook: box                      # Hook
+  Misc_Quill: capsule                 # Quill Pen
+  misc_rollingpin_01: cylinder        # Rolling Pin
+  misc_shears_01: box                 # Shears
+  misc_spool_01: cylinder             # Spool
+  misc_de_muck_shovel_01: box         # Muck Shovel
+
+  # Dishes - cylinders
+  misc_beaker_01: cylinder
+  misc_de_pot_blue_02: cylinder
+  misc_de_pot_blue_01: cylinder
+  misc_com_bottle_01: cylinder
+  misc_com_bottle_02: cylinder
+  Misc_Com_Bottle_04: cylinder
+  misc_com_bottle_05: cylinder
+  misc_com_bottle_06: cylinder
+  Misc_Com_Bottle_08: cylinder
+  misc_com_bottle_09: cylinder
+  misc_com_bottle_10: cylinder
+  misc_com_bottle_11: cylinder
+  misc_com_bottle_13: cylinder
+  Misc_Com_Bottle_14: cylinder
+  misc_com_bottle_15: cylinder
+  misc_com_bottle_03: cylinder        # Jug
+  misc_com_bottle_07: cylinder        # Jug
+  misc_com_bottle_12: cylinder        # Jug
+  misc_com_bottle_14_float: cylinder
+  misc_com_bottle_07_float: cylinder
+  misc_skooma_vial: cylinder
+
+  # Bowls
+  misc_com_redware_bowl: cylinder
+  misc_com_redware_bowl_01: cylinder
+  Misc_Com_Wood_Bowl_01: cylinder
+  misc_com_wood_bowl_02: cylinder
+  misc_com_wood_bowl_03: cylinder
+  misc_com_wood_bowl_04: cylinder
+  Misc_Com_Wood_Bowl_05: cylinder
+  misc_de_bowl_01: cylinder
+  misc_de_bowl_white_01: cylinder
+  misc_de_bowl_orange_green_01: cylinder
+  misc_de_bowl_bugdesign_01: cylinder
+  misc_de_bowl_redware_01: cylinder
+  misc_de_bowl_redware_02: cylinder
+  misc_de_bowl_redware_03: cylinder
+  misc_de_bowl_glass_peach_01: cylinder
+  misc_de_bowl_glass_yellow_01: cylinder
+  misc_lw_bowl: cylinder
+  Misc_Imp_Silverware_Bowl: cylinder
+
+  # Cups
+  Misc_Com_Redware_Cup: cylinder
+  misc_com_wood_cup_01: cylinder
+  misc_com_wood_cup_02: cylinder
+  misc_lw_cup: cylinder
+  misc_imp_silverware_cup: cylinder
+  Misc_Imp_Silverware_Cup_01: cylinder
+
+  # Goblets
+  misc_com_metal_goblet_01: cylinder
+  misc_com_metal_goblet_02: cylinder
+  misc_de_goblet_01: cylinder
+  misc_de_goblet_02: cylinder
+  misc_de_goblet_03: cylinder
+  misc_de_goblet_04: cylinder
+  misc_de_goblet_05: cylinder
+  misc_de_goblet_06: cylinder
+  misc_de_goblet_07: cylinder
+  misc_de_goblet_08: cylinder
+  misc_de_goblet_09: cylinder
+  misc_de_goblet_04_dagoth: cylinder  # House Dagoth cup
+
+  # Glasses
+  Misc_DE_glass_green_01: cylinder
+  misc_de_glass_yellow_01: cylinder
+
+  # Pots
+  misc_de_pot_mottled_01: cylinder
+  misc_de_pot_green_01: cylinder
+  misc_de_pot_redware_01: cylinder
+  misc_de_pot_redware_02: cylinder
+  Misc_DE_pot_redware_03: cylinder
+  misc_de_pot_redware_04: cylinder
+  misc_de_pot_glass_peach_01: cylinder
+  misc_de_pot_glass_peach_02: cylinder
+
+  # Pitchers
+  Misc_Com_Pitcher_Metal_01: cylinder
+  misc_com_redware_pitcher: cylinder
+  misc_de_pitcher_01: cylinder
+  misc_imp_silverware_pitcher: cylinder
+
+  # Plates
+  misc_com_metal_plate_03: cylinder
+  misc_com_metal_plate_04: cylinder
+  misc_com_metal_plate_05: cylinder
+  misc_com_metal_plate_07: cylinder
+  misc_com_metal_plate_07_UNI1: cylinder
+  misc_com_metal_plate_07_UNI2: cylinder
+  misc_com_plate_01: cylinder
+  misc_com_plate_02: cylinder
+  misc_com_plate_03: cylinder
+  misc_com_plate_04: cylinder
+  misc_com_plate_05: cylinder
+  misc_com_plate_06: cylinder
+  misc_com_plate_07: cylinder
+  misc_com_plate_08: cylinder
+  misc_com_plate_02_tgrc: cylinder    # Commemorative Plate
+  misc_com_plate_06_tgrc: cylinder    # Commemorative Plate
+  misc_com_redware_plate: cylinder
+  misc_imp_silverware_plate_01: cylinder
+  misc_imp_silverware_plate_02: cylinder
+  misc_imp_silverware_plate_03: cylinder
+
+  # Platters
+  misc_com_redware_platter: cylinder
+  misc_lw_platter: cylinder
+
+  # Tankards
+  misc_com_tankard_01: cylinder
+  misc_de_tankard_01: cylinder
+
+  # Flasks
+  misc_com_redware_flask: cylinder
+  misc_flask_01: cylinder
+  misc_flask_02: cylinder
+  misc_flask_03: cylinder
+  misc_flask_04: cylinder
+  misc_lw_flask: cylinder
+
+  # Vases
+  misc_com_redware_vase: cylinder
+
+  # Buckets
+  misc_com_bucket_01: cylinder
+  misc_com_bucket_boe_UNI: cylinder
+  misc_com_bucket_boe_UNIa: cylinder
+  misc_com_bucket_boe_UNIb: cylinder
+  misc_com_bucket_01_float: cylinder
+  Misc_Com_Bucket_Metal: cylinder
+
+  # Flatware - boxes (flat irregular)
+  misc_com_silverware_fork: box
+  misc_com_wood_fork: box
+  misc_com_wood_fork_UNI1: box
+  misc_com_wood_fork_UNI2: box
+  misc_com_silverware_knife: box
+  misc_com_wood_knife: box
+  misc_com_wood_knife_UNI1: box
+  misc_com_wood_knife_UNI2: box
+  misc_com_silverware_spoon: box
+  misc_com_wood_spoon_01: box
+  misc_com_wood_spoon_01_UNI1: box
+  misc_com_wood_spoon_01_UNI2: box
+  misc_com_wood_spoon_02: box
+  misc_com_iron_ladle: box
+
+  # Skulls
+  misc_skull00: sphere
+  misc_skull10: sphere
+
+  # Drums
+  misc_de_drum_01: cylinder
+  misc_de_drum_02: cylinder
+
+  # Inkwell
+  Misc_Inkwell: cylinder
+
+  # Paper
+  sc_paper plain: box
+  sc_paper_plain_01_canodia: box
+  text_paper_roll_01: cylinder        # Rolled Paper
+
+  # Ingredients - various shapes based on appearance
+  ingred_alit_hide_01: box            # Hide - flat
+  ingred_bc_ampoule_pod: sphere       # Pod
+  ingred_ash_salts_01: cylinder       # Container
+  ingred_ash_yam_01: sphere           # Root vegetable
+  ingred_bittergreen_petals_01: box   # Petals - flat
+  ingred_black_anther_01: capsule     # Flower part
+  ingred_black_lichen_01: box         # Flat
+  ingred_bloat_01: sphere             # Bloated organ
+  ingred_bonemeal_01: cylinder        # Container
+  ingred_bread_01: box                # Loaf
+  ingred_bc_bungler's_bane: capsule   # Mushroom
+  ingred_chokeweed_01: box            # Plant
+  ingred_bc_coda_flower: capsule      # Mushroom/flower
+  ingred_comberry_01: sphere          # Berry
+  ingred_corkbulb_root_01: capsule    # Root
+  ingred_corprus_weepings_01: box     # Organic matter
+  ingred_crab_meat_01: box            # Meat chunk
+  ingred_daedra_skin_01: box          # Hide - flat
+  ingred_daedras_heart_01: sphere     # Heart
+  ingred_diamond_01: sphere           # Gem
+  ingred_dreugh_wax_01: cylinder      # Wax container
+  ingred_ectoplasm_01: sphere         # Blob
+  ingred_emerald_01: sphere           # Gem
+  ingred_fire_petal_01: box           # Petal - flat
+  ingred_fire_salts_01: cylinder      # Container
+  ingred_frost_salts_01: cylinder     # Container
+  ingred_ghoul_heart_01: sphere       # Heart
+  ingred_gold_kanet_01: capsule       # Flower
+  ingred_gravedust_01: cylinder       # Container
+  ingred_green_lichen_01: box         # Flat
+  ingred_guar_hide_01: box            # Hide - flat
+  ingred_hackle-lo_leaf_01: box       # Leaf - flat
+  ingred_heather_01: capsule          # Plant
+  ingred_hound_meat_01: box           # Meat chunk
+  ingred_bc_hypha_facia: capsule      # Mushroom
+  ingred_kagouti_hide_01: box         # Hide - flat
+  ingred_kresh_fiber_01: box          # Fiber
+  ingred_kwama_cuttle_01: capsule     # Organic
+  food_kwama_egg_02: sphere           # Large Kwama Egg
+  ingred_russula_01: capsule          # Mushroom
+  ingred_marshmerrow_01: capsule      # Root
+  ingred_moon_sugar_01: cylinder      # Container
+  ingred_muck_01: sphere              # Blob
+  ingred_netch_leather_01: box        # Hide - flat
+  ingred_pearl_01: sphere             # Pearl
+  ingred_racer_plumes_01: box         # Feathers - flat
+  ingred_rat_meat_01: box             # Meat chunk
+  ingred_raw_ebony_01: box            # Rock chunk
+  ingred_raw_glass_01: box            # Crystal chunk
+  ingred_red_lichen_01: box           # Flat
+  ingred_resin_01: sphere             # Blob
+  ingred_roobrush_01: capsule         # Plant
+  ingred_ruby_01: sphere              # Gem
+  ingred_saltrice_01: box             # Grain
+  ingred_scales_01: box               # Flat
+  ingred_scamp_skin_01: box           # Hide - flat
+  ingred_scathecraw_01: capsule       # Plant
+  ingred_scrap_metal_01: box          # Metal chunk
+  ingred_scrib_jelly_01: sphere       # Blob
+  ingred_scrib_jerky_01: box          # Dried meat
+  ingred_scuttle_01: cylinder         # Container
+  ingred_shalk_resin_01: sphere       # Blob
+  ingred_sload_soap_01: box           # Soap bar
+  food_kwama_egg_01: sphere           # Small Kwama Egg
+  ingred_bc_spore_pod: sphere         # Pod
+  ingred_stoneflower_petals_01: box   # Petals - flat
+  ingred_trama_root_01: capsule       # Root
+  ingred_vampire_dust_01: cylinder    # Container
+  ingred_coprinus_01: capsule         # Mushroom
+  ingred_void_salts_01: cylinder      # Container
+  ingred_wickwheat_01: box            # Grain
+  ingred_willow_anther_01: capsule    # Flower part
