@@ -12,12 +12,13 @@ config_version=5
 
 config/name="Godotwind"
 config/description="OpenMW port to Godot Engine"
-run/main_scene="uid://dwn8v3kxp6yql"
+run/main_scene="uid://clb74pwrqrgok"
 config/features=PackedStringArray("4.5", "Forward Plus")
 config/icon="res://icon.svg"
 
 [autoload]
 
+SettingsManager="*res://src/core/settings_manager.gd"
 ESMManager="*res://src/core/esm/esm_manager.gd"
 BSAManager="*res://src/core/bsa/bsa_manager.gd"
 BeehaveGlobalMetrics="*res://addons/beehave/metrics/beehave_global_metrics.gd"
@@ -38,7 +39,7 @@ window/size/viewport_height=720
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/beehave/plugin.cfg", "res://addons/dialogue_manager/plugin.cfg", "res://addons/gloot/plugin.cfg", "res://addons/open-world-database/plugin.cfg", "res://addons/pandora/plugin.cfg", "res://addons/questify/plugin.cfg", "res://addons/save_system/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
+enabled=PackedStringArray("res://addons/beehave/plugin.cfg", "res://addons/dialogue_manager/plugin.cfg", "res://addons/gloot/plugin.cfg", "res://addons/save_system/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
 
 [filesystem]
 

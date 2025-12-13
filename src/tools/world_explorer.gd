@@ -1,15 +1,21 @@
-## Streaming Demo - Demonstrates unified terrain + object streaming
+## World Explorer - Complete Morrowind world exploration tool
 ##
-## This demo showcases the WorldStreamingManager which coordinates:
-## - Terrain3D for terrain LOD and streaming
-## - OWDB for object streaming (statics, lights, NPCs, etc.)
+## Features:
+## - WORLD MODE: Infinite terrain streaming with multi-region support
+##   - Terrain3D for terrain LOD and streaming
+##   - OWDB for object streaming (statics, lights, NPCs, etc.)
+##   - Free-fly camera navigation
 ##
-## Both systems work together based on camera/player position.
+## - INTERIOR MODE: Browse and explore interior cells
+##   - Cell browser with search
+##   - Interior/exterior filtering
+##   - Quick load for common locations
 ##
-## Performance Profiling:
-## Press F3 to toggle performance overlay
-## Press F4 to dump detailed profiling report
-## Use +/- to adjust view distance for testing
+## Controls:
+## - Press F3 to toggle performance overlay
+## - Press F4 to dump detailed profiling report
+## - Press TAB to toggle between World and Interior modes
+## - Use +/- to adjust view distance
 extends Node3D
 
 # Preload dependencies
@@ -48,6 +54,16 @@ const TERRAIN_CHUNKS_DIR := "user://terrain_chunks/"      # Multi-terrain mode
 @onready var preprocess_btn: Button = $UI/StatsPanel/VBox/PreprocessBtn
 @onready var preprocess_status: Label = $UI/StatsPanel/VBox/PreprocessStatus
 
+# Interior cell browser UI (will be added to scene)
+@onready var interior_panel: Panel = $UI/InteriorPanel if has_node("UI/InteriorPanel") else null
+@onready var cell_search_edit: LineEdit = $UI/InteriorPanel/VBox/SearchEdit if has_node("UI/InteriorPanel/VBox/SearchEdit") else null
+@onready var cell_list: ItemList = $UI/InteriorPanel/VBox/CellList if has_node("UI/InteriorPanel/VBox/CellList") else null
+@onready var interior_filter_btn: Button = $UI/InteriorPanel/VBox/FilterButtons/InteriorBtn if has_node("UI/InteriorPanel/VBox/FilterButtons/InteriorBtn") else null
+@onready var exterior_filter_btn: Button = $UI/InteriorPanel/VBox/FilterButtons/ExteriorBtn if has_node("UI/InteriorPanel/VBox/FilterButtons/ExteriorBtn") else null
+@onready var all_filter_btn: Button = $UI/InteriorPanel/VBox/FilterButtons/AllBtn if has_node("UI/InteriorPanel/VBox/FilterButtons/AllBtn") else null
+@onready var mode_toggle_btn: Button = $UI/StatsPanel/VBox/ModeToggleBtn if has_node("UI/StatsPanel/VBox/ModeToggleBtn") else null
+@onready var interior_container: Node3D = $InteriorContainer if has_node("InteriorContainer") else null
+
 # Managers
 var world_streaming_manager: Node3D = null  # WorldStreamingManager
 var multi_terrain_manager: Node3D = null    # MultiTerrainManager (for infinite worlds)
@@ -68,6 +84,16 @@ var _using_preprocessed: bool = false
 var _using_multi_terrain: bool = false  # True = multi-terrain chunked mode
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = 5
+
+# Interior cell browser state
+enum ExplorerMode { WORLD, INTERIOR }
+var _current_mode: ExplorerMode = ExplorerMode.WORLD
+var _all_cells: Array[Dictionary] = []  # {name, is_interior, record, ref_count, grid_x, grid_y}
+var _filtered_cells: Array[Dictionary] = []
+var _current_filter: String = "interior"  # "interior", "exterior", "all"
+var _search_timer: Timer = null
+var _max_display_items: int = 500
+var _loaded_interior_cell: Node3D = null
 
 
 func _ready() -> void:
@@ -94,11 +120,14 @@ func _ready() -> void:
 	# Connect preprocess button
 	preprocess_btn.pressed.connect(_on_preprocess_pressed)
 
+	# Setup interior cell browser
+	_setup_interior_browser()
+
 	# Get Morrowind data path
-	_data_path = ProjectSettings.get_setting("morrowind/data_path", "")
+	_data_path = SettingsManager.get_data_path()
 	if _data_path.is_empty():
 		_hide_loading()
-		_log("[color=red]ERROR: Morrowind data path not configured[/color]")
+		_log("[color=red]ERROR: Morrowind data path not configured. Set MORROWIND_DATA_PATH environment variable or use settings UI.[/color]")
 		return
 
 	# Start async initialization
@@ -118,7 +147,7 @@ func _init_async() -> void:
 
 	# Load ESM file
 	await _update_loading(30, "Loading ESM file...")
-	var esm_file: String = ProjectSettings.get_setting("morrowind/esm_file", "Morrowind.esm")
+	var esm_file: String = SettingsManager.get_esm_file()
 	var esm_path := _data_path.path_join(esm_file)
 	var error := ESMManager.load_file(esm_path)
 
@@ -705,9 +734,12 @@ func _input(event: InputEvent) -> void:
 		camera.rotate_y(-event.relative.x * mouse_sensitivity)
 		camera.rotate_object_local(Vector3.RIGHT, -event.relative.y * mouse_sensitivity)
 
-	# Profiling hotkeys
+	# Hotkeys
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
+			KEY_TAB:
+				# Toggle between World and Interior modes
+				_toggle_explorer_mode()
 			KEY_F3:
 				# Toggle performance overlay
 				_perf_overlay_visible = not _perf_overlay_visible
@@ -769,6 +801,301 @@ func _adjust_view_distance(delta: int) -> void:
 		world_streaming_manager.refresh_cells()
 	_log("View distance: %d cells (~%dm)" % [_current_view_distance, _current_view_distance * 117])
 	_update_stats()
+
+
+# ==================== Interior Cell Browser ====================
+
+## Setup interior cell browser UI and signals
+func _setup_interior_browser() -> void:
+	# Create search debounce timer
+	_search_timer = Timer.new()
+	_search_timer.one_shot = true
+	_search_timer.wait_time = 0.2
+	_search_timer.timeout.connect(_apply_cell_filter)
+	add_child(_search_timer)
+
+	# Create interior container if it doesn't exist
+	if not interior_container:
+		interior_container = Node3D.new()
+		interior_container.name = "InteriorContainer"
+		add_child(interior_container)
+
+	# Connect UI signals if elements exist
+	if mode_toggle_btn:
+		mode_toggle_btn.pressed.connect(_toggle_explorer_mode)
+
+	if cell_search_edit:
+		cell_search_edit.text_changed.connect(_on_cell_search_changed)
+
+	if cell_list:
+		cell_list.item_selected.connect(_on_cell_list_selected)
+		cell_list.item_activated.connect(_on_cell_list_activated)
+
+	if interior_filter_btn:
+		interior_filter_btn.pressed.connect(func(): _set_cell_filter("interior"))
+
+	if exterior_filter_btn:
+		exterior_filter_btn.pressed.connect(func(): _set_cell_filter("exterior"))
+
+	if all_filter_btn:
+		all_filter_btn.pressed.connect(func(): _set_cell_filter("all"))
+
+	# Hide interior panel by default
+	if interior_panel:
+		interior_panel.visible = false
+
+
+## Toggle between World and Interior modes
+func _toggle_explorer_mode() -> void:
+	if _current_mode == ExplorerMode.WORLD:
+		_switch_to_interior_mode()
+	else:
+		_switch_to_world_mode()
+
+
+## Switch to interior cell browsing mode
+func _switch_to_interior_mode() -> void:
+	_current_mode = ExplorerMode.INTERIOR
+	_log("[color=cyan]Switched to INTERIOR mode[/color]")
+
+	# Hide world streaming elements
+	if terrain_3d:
+		terrain_3d.visible = false
+	if multi_terrain_manager:
+		multi_terrain_manager.visible = false
+
+	# Pause world streaming
+	if world_streaming_manager:
+		world_streaming_manager.set_process(false)
+
+	# Show interior panel
+	if interior_panel:
+		interior_panel.visible = true
+
+	# Update mode button text
+	if mode_toggle_btn:
+		mode_toggle_btn.text = "Switch to World Mode"
+
+	# Build cell list if not already built
+	if _all_cells.is_empty() and ESMManager.cells.size() > 0:
+		_build_cell_list()
+		_apply_cell_filter()
+
+
+## Switch back to world streaming mode
+func _switch_to_world_mode() -> void:
+	_current_mode = ExplorerMode.WORLD
+	_log("[color=cyan]Switched to WORLD mode[/color]")
+
+	# Clear loaded interior cell
+	if _loaded_interior_cell:
+		_loaded_interior_cell.queue_free()
+		_loaded_interior_cell = null
+
+	# Show world streaming elements
+	if terrain_3d and not _using_multi_terrain:
+		terrain_3d.visible = true
+	if multi_terrain_manager:
+		multi_terrain_manager.visible = true
+
+	# Resume world streaming
+	if world_streaming_manager:
+		world_streaming_manager.set_process(true)
+
+	# Hide interior panel
+	if interior_panel:
+		interior_panel.visible = false
+
+	# Update mode button text
+	if mode_toggle_btn:
+		mode_toggle_btn.text = "Switch to Interior Mode"
+
+
+## Build list of all cells for browser
+func _build_cell_list() -> void:
+	_all_cells.clear()
+
+	for cell_id in ESMManager.cells:
+		var cell: CellRecord = ESMManager.cells[cell_id]
+		var cell_info := {
+			"name": cell.name if cell.is_interior() else "Exterior (%d, %d)" % [cell.grid_x, cell.grid_y],
+			"is_interior": cell.is_interior(),
+			"record": cell,
+			"ref_count": cell.references.size(),
+			"grid_x": cell.grid_x,
+			"grid_y": cell.grid_y,
+		}
+		_all_cells.append(cell_info)
+
+	# Sort: interiors by name, exteriors by grid
+	_all_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if a["is_interior"] != b["is_interior"]:
+			return a["is_interior"]  # Interiors first
+		if a["is_interior"]:
+			return a["name"].naturalnocasecmp_to(b["name"]) < 0
+		else:
+			if a["grid_x"] != b["grid_x"]:
+				return a["grid_x"] < b["grid_x"]
+			return a["grid_y"] < b["grid_y"]
+	)
+
+	_log("Built cell list: %d cells (%d interior, %d exterior)" % [
+		_all_cells.size(),
+		_all_cells.filter(func(c: Dictionary): return c["is_interior"]).size(),
+		_all_cells.filter(func(c: Dictionary): return not c["is_interior"]).size()
+	])
+
+
+## Handle cell search text changed
+func _on_cell_search_changed(_new_text: String) -> void:
+	if _search_timer:
+		_search_timer.start()
+
+
+## Set cell filter type (interior/exterior/all)
+func _set_cell_filter(filter: String) -> void:
+	_current_filter = filter
+
+	# Update button states
+	if interior_filter_btn:
+		interior_filter_btn.button_pressed = filter == "interior"
+	if exterior_filter_btn:
+		exterior_filter_btn.button_pressed = filter == "exterior"
+	if all_filter_btn:
+		all_filter_btn.button_pressed = filter == "all"
+
+	_apply_cell_filter()
+
+
+## Apply search and filter to cell list
+func _apply_cell_filter() -> void:
+	if not cell_list or _all_cells.is_empty():
+		return
+
+	_filtered_cells.clear()
+
+	var search_text := ""
+	if cell_search_edit:
+		search_text = cell_search_edit.text.strip_edges().to_lower()
+
+	for cell_info: Dictionary in _all_cells:
+		# Apply type filter
+		if _current_filter == "interior" and not cell_info["is_interior"]:
+			continue
+		if _current_filter == "exterior" and cell_info["is_interior"]:
+			continue
+
+		# Apply search filter
+		if not search_text.is_empty():
+			var name_lower: String = cell_info["name"].to_lower()
+			if name_lower.find(search_text) < 0:
+				continue
+
+		_filtered_cells.append(cell_info)
+
+	_populate_cell_list()
+
+
+## Populate the cell list UI with filtered cells
+func _populate_cell_list() -> void:
+	if not cell_list:
+		return
+
+	cell_list.clear()
+
+	var display_count := mini(_filtered_cells.size(), _max_display_items)
+	for i in display_count:
+		var cell_info: Dictionary = _filtered_cells[i]
+		var display_name: String = cell_info["name"]
+		if cell_info["ref_count"] > 0:
+			display_name += " (%d objects)" % cell_info["ref_count"]
+
+		cell_list.add_item(display_name)
+		cell_list.set_item_metadata(i, cell_info)
+
+		# Color code: interiors white, exteriors light blue
+		if not cell_info["is_interior"]:
+			cell_list.set_item_custom_fg_color(i, Color(0.7, 0.85, 1.0))
+
+
+## Handle cell list item selected
+func _on_cell_list_selected(_index: int) -> void:
+	pass  # Could show preview or details
+
+
+## Handle cell list item activated (double-clicked)
+func _on_cell_list_activated(index: int) -> void:
+	if not cell_list:
+		return
+
+	var cell_info: Dictionary = cell_list.get_item_metadata(index)
+	_load_interior_cell(cell_info)
+
+
+## Load an interior cell for viewing
+func _load_interior_cell(cell_info: Dictionary) -> void:
+	var cell_record: CellRecord = cell_info["record"]
+
+	_log("\n[b]Loading cell: '%s'[/b]" % cell_info["name"])
+
+	# Clear existing interior cell
+	if _loaded_interior_cell:
+		_loaded_interior_cell.queue_free()
+		_loaded_interior_cell = null
+
+	if not interior_container:
+		return
+
+	# Clear interior container
+	for child in interior_container.get_children():
+		child.queue_free()
+
+	var start_time := Time.get_ticks_msec()
+	var cell_node: Node3D = null
+
+	# Load the cell
+	if cell_info["is_interior"]:
+		cell_node = cell_manager.load_cell(cell_record.name)
+	else:
+		cell_node = cell_manager.load_exterior_cell(cell_info["grid_x"], cell_info["grid_y"])
+
+	if not cell_node:
+		_log("[color=red]Failed to load cell[/color]")
+		return
+
+	var elapsed := Time.get_ticks_msec() - start_time
+	interior_container.add_child(cell_node)
+	_loaded_interior_cell = cell_node
+
+	_log("[color=green]Cell loaded in %d ms[/color]" % elapsed)
+	_log("Objects: %d" % cell_node.get_child_count())
+
+	# Position camera for cell
+	_position_camera_for_interior_cell(cell_record)
+
+
+## Position camera to view an interior cell
+func _position_camera_for_interior_cell(cell: CellRecord) -> void:
+	if not cell:
+		return
+
+	# Calculate center of all objects
+	var center := Vector3.ZERO
+	var count := 0
+
+	for ref in cell.references:
+		var pos := MWCoords.position_to_godot(ref.position)
+		center += pos
+		count += 1
+
+	if count > 0:
+		center /= count
+
+	# Position camera above center, looking down slightly
+	camera.position = center + Vector3(0, 300, 500)
+	camera.look_at(center)
+
+	_log("Camera positioned at: %s" % camera.position)
 
 
 ## Dump detailed profiling report to console and log
