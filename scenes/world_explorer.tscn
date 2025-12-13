@@ -1,6 +1,6 @@
 [gd_scene load_steps=10 format=3 uid="uid://clb74pwrqrgok"]
 
-[ext_resource type="Script" uid="uid://b7a7hpfrolm85" path="res://src/tools/world_explorer.gd" id="1_demo"]
+[ext_resource type="Script" uid="uid://bseqvng0pt5o2" path="res://src/tools/world_explorer.gd" id="1_demo"]
 
 [sub_resource type="Environment" id="Environment_env"]
 background_mode = 1

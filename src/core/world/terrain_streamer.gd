@@ -491,21 +491,9 @@ func _unload_chunk(chunk_coord: Vector2i) -> void:
 
 ## Update LOD based on distance from center chunk
 func _update_chunk_lod(center_chunk: Vector2i) -> void:
-	for chunk: Vector2i in active_chunks:
-		var terrain: Terrain3D = active_chunks[chunk]
-		var distance := int(center_chunk.distance_to(chunk))
-
-		# Apply LOD bias based on distance
-		var lod_bias := 0.0
-		if distance == 0:
-			lod_bias = 0.0  # Player's chunk - full detail
-		elif distance <= 1:
-			lod_bias = 1.0  # Adjacent chunks
-		else:
-			lod_bias = 2.0  # Distant chunks
-
-		terrain.mesh_lods = 6
-		terrain.mesh_vertex_spacing = lod_bias
+	# Terrain3D handles LOD automatically based on camera distance
+	# No manual LOD adjustment needed per chunk
+	pass
 
 
 # ==================== CHUNK LIFECYCLE ====================

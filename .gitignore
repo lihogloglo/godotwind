@@ -1,6 +1,9 @@
 # Godot 4+ specific ignores
 .godot/
 
+
+openmw-master/
+
 # Godot-specific ignores
 *.translation
 

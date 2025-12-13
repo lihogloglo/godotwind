@@ -516,13 +516,32 @@ func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: V
 	# With vertex_spacing configured, each region represents one MW cell
 	var region_world_size := float(REGION_SIZE) * terrain.get_vertex_spacing()
 
-	# MW Y axis is North, Godot Z axis is South, so negate Y
-	# Position at the center of the region for proper snapping
-	# X: cell origin is west edge, add half to get center
-	# Z: cell origin (SW corner) is at (-cell_y * size), which is the SOUTH edge
-	#    To get center, we need to move NORTH (decrease Z), so subtract half
-	var world_x := float(cell_x) * region_world_size + region_world_size * 0.5
-	var world_z := float(-cell_y) * region_world_size - region_world_size * 0.5
+	# Calculate the import position
+	# CRITICAL: Terrain3D's import_images() uses ABSOLUTE world coordinates,
+	# NOT coordinates relative to the terrain node's position!
+	# When terrain.position = (1000, 0, 0) and we import at (100, 0, 0),
+	# Terrain3D creates the region at WORLD position (100, 0, 0), not (1100, 0, 0).
+	# Therefore, we must ALWAYS add the terrain node's position to get absolute coords.
+	var world_x: float
+	var world_z: float
+
+	if use_local_coord:
+		# In local coord mode, cell_x/cell_y are in range [-16, +15]
+		# We need to:
+		# 1. Convert local coords [-16, +15] to chunk offset [0, 31] by adding 16
+		# 2. Calculate position relative to chunk's origin (southwest corner)
+		# 3. Add the terrain node's world position to get absolute world coords
+		var offset_x := float(cell_x + 16) * region_world_size + region_world_size * 0.5
+		var offset_z := float(-(cell_y + 16)) * region_world_size - region_world_size * 0.5
+		# Add terrain node's position to get absolute world coordinates
+		world_x = terrain.global_position.x + offset_x
+		world_z = terrain.global_position.z + offset_z
+	else:
+		# In global mode, cell_x/cell_y are absolute cell coordinates
+		# MW Y axis is North, Godot Z axis is South, so negate Y
+		# Position at the center of the region for proper snapping
+		world_x = float(cell_x) * region_world_size + region_world_size * 0.5
+		world_z = float(-cell_y) * region_world_size - region_world_size * 0.5
 
 	# Create import array [heightmap, controlmap, colormap]
 	var imported_images: Array[Image] = []
@@ -533,6 +552,17 @@ func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: V
 
 	# Import into Terrain3D at the calculated position
 	var import_pos := Vector3(world_x, 0, world_z)
+
+	# DEBUG: Log import position for verification
+	if use_local_coord and (cell_x == 0 and cell_y == 0) or (cell_x == -8 and cell_y == -8):
+		print("[TerrainManager] Importing cell (%d,%d) at world pos: (%.1f, %.1f, %.1f)" % [
+			cell_x, cell_y, import_pos.x, import_pos.y, import_pos.z
+		])
+		print("  Terrain global_position: (%.1f, %.1f, %.1f)" % [
+			terrain.global_position.x, terrain.global_position.y, terrain.global_position.z
+		])
+		print("  use_local_coord: %s, region_world_size: %.2f" % [use_local_coord, region_world_size])
+
 	terrain.data.import_images(imported_images, import_pos, 0.0, 1.0)
 
 	_stats["regions_created"] += 1
