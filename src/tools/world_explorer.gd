@@ -26,8 +26,7 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const MWCoords := preload("res://src/core/morrowind_coords.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
-const MultiTerrainManagerScript := preload("res://src/core/world/multi_terrain_manager.gd")
-const TerrainPreprocessorScript := preload("res://src/tools/terrain_preprocessor.gd")
+const TerrainStreamerScript := preload("res://src/core/world/terrain_streamer.gd")
 
 # Pre-processed terrain data directories
 const TERRAIN_DATA_DIR := "user://terrain_data/"          # Single-terrain mode
@@ -66,7 +65,7 @@ const TERRAIN_CHUNKS_DIR := "user://terrain_chunks/"      # Multi-terrain mode
 
 # Managers
 var world_streaming_manager: Node3D = null  # WorldStreamingManager
-var multi_terrain_manager: Node3D = null    # MultiTerrainManager (for infinite worlds)
+var terrain_streamer: Node3D = null          # TerrainStreamer (unified terrain system)
 var terrain_manager: RefCounted = null  # TerrainManager
 var texture_loader: RefCounted = null  # TerrainTextureLoader
 var cell_manager: RefCounted = null  # CellManager
@@ -83,7 +82,7 @@ var _initialized: bool = false
 var _using_preprocessed: bool = false
 var _using_multi_terrain: bool = false  # True = multi-terrain chunked mode
 var _perf_overlay_visible: bool = true
-var _current_view_distance: int = 5
+var _current_view_distance: int = 2  # Start with smaller view distance for faster initial load
 
 # Interior cell browser state
 enum ExplorerMode { WORLD, INTERIOR }
@@ -176,7 +175,8 @@ func _init_async() -> void:
 		_log("[color=cyan]Using infinite terrain with on-the-fly generation.[/color]")
 		_log("(For better performance, click 'Preprocess ALL Terrain')")
 		await _update_loading(70, "Initializing infinite terrain...")
-		_init_multi_terrain_on_the_fly()
+		# Note: _init_terrain3d() will call _init_terrain_streamer_on_the_fly()
+		# This is handled in the terrain initialization flow
 
 	# Create and setup WorldStreamingManager
 	await _update_loading(85, "Setting up streaming system...")
@@ -241,153 +241,106 @@ func _init_terrain3d() -> void:
 		_log("[color=red]ERROR: Terrain3D addon not loaded[/color]")
 		return
 
-	if _using_multi_terrain:
-		# Multi-terrain mode: use MultiTerrainManager instead of single Terrain3D
-		_init_multi_terrain()
-		return
-
-	# Single-terrain mode: configure the scene's Terrain3D node
-	if not terrain_3d:
-		_log("[color=red]ERROR: Terrain3D node not found[/color]")
-		return
-
-	# Terrain3DData is read-only and created automatically by Terrain3D
-	# Create material/assets if needed
-	if not terrain_3d.material:
-		terrain_3d.set_material(Terrain3DMaterial.new())
-
-	if not terrain_3d.assets:
-		terrain_3d.set_assets(Terrain3DAssets.new())
-
-	# Configure for Morrowind - must match terrain_preprocessor settings
-	# Terrain3D has a 32x32 region limit (-16 to +15 indices)
-	# With region_size=64, each region = one MW cell, range -16 to +15
-	# This covers most of Vvardenfell but clips edges (Solstheim at Y>15 won't appear)
-	var mw_cell_size_godot := MWCoords.CELL_SIZE_GODOT
-	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
-	terrain_3d.change_region_size(64)
-	var vertex_spacing := mw_cell_size_godot / 64.0
-	terrain_3d.vertex_spacing = vertex_spacing
-
-	_log("Terrain3D configured: region_size=64, vertex_spacing=%.4f" % vertex_spacing)
-
-
-func _init_multi_terrain() -> void:
-	# Hide the single Terrain3D node - we'll use MultiTerrainManager instead
+	# Always use TerrainStreamer for infinite terrain support
+	# Remove the single Terrain3D node - TerrainStreamer manages its own
 	if terrain_3d:
-		terrain_3d.visible = false
+		terrain_3d.queue_free()
+		terrain_3d = null
 
-	# Create MultiTerrainManager
-	multi_terrain_manager = Node3D.new()
-	multi_terrain_manager.set_script(MultiTerrainManagerScript)
-	multi_terrain_manager.name = "MultiTerrainManager"
+	# Create and configure TerrainStreamer
+	if _using_preprocessed:
+		_init_terrain_streamer_runtime()
+	else:
+		_init_terrain_streamer_on_the_fly()
 
-	# Configure for Morrowind
-	multi_terrain_manager.chunk_size_cells = 32
-	multi_terrain_manager.load_radius = 1  # 3x3 chunks loaded
-	multi_terrain_manager.terrain_data_base_path = TERRAIN_CHUNKS_DIR
-	multi_terrain_manager.region_size = 64
-	multi_terrain_manager.lod_enabled = true
 
-	add_child(multi_terrain_manager)
+## Initialize TerrainStreamer in RUNTIME mode (loads from disk)
+func _init_terrain_streamer_runtime() -> void:
+	# Create TerrainStreamer
+	terrain_streamer = Node3D.new()
+	terrain_streamer.set_script(TerrainStreamerScript)
+	terrain_streamer.name = "TerrainStreamer"
+
+	# Configure for RUNTIME streaming mode
+	terrain_streamer.mode = TerrainStreamer.Mode.RUNTIME
+	terrain_streamer.terrain_data_base_path = TERRAIN_CHUNKS_DIR
+	terrain_streamer.load_radius = 2
+	terrain_streamer.lod_enabled = true
+	terrain_streamer.region_size = 64
+	terrain_streamer.vertex_spacing = 0.0  # Auto-calculate
+	terrain_streamer.generate_on_fly = false  # Use only preprocessed data
+
+	# Set managers
+	terrain_streamer.terrain_manager = terrain_manager
+	terrain_streamer.texture_loader = texture_loader
+
+	add_child(terrain_streamer)
 
 	# Connect signals
-	multi_terrain_manager.chunk_loaded.connect(_on_terrain_chunk_loaded)
-	multi_terrain_manager.chunk_unloaded.connect(_on_terrain_chunk_unloaded)
-	multi_terrain_manager.player_chunk_changed.connect(_on_player_chunk_changed)
+	terrain_streamer.chunk_loaded.connect(_on_terrain_chunk_loaded)
+	terrain_streamer.chunk_unloaded.connect(_on_terrain_chunk_unloaded)
+	terrain_streamer.player_chunk_changed.connect(_on_player_chunk_changed)
 
-	_log("MultiTerrainManager configured: 32x32 cells per chunk, load_radius=1")
+	# Initialize
+	terrain_streamer.initialize()
+	_using_multi_terrain = true
+
+	_log("TerrainStreamer configured (RUNTIME mode): load_radius=%d" % terrain_streamer.load_radius)
 
 
 func _load_preprocessed_terrain() -> void:
-	if _using_multi_terrain:
-		_load_multi_terrain()
-		return
-
-	if not terrain_3d or not terrain_3d.data:
-		return
-
-	# Load textures first
-	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
-	_log("Loaded %d terrain textures" % textures_loaded)
-	terrain_manager.set_texture_slot_mapper(texture_loader)
-
-	# Load terrain data
-	var path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
-	terrain_3d.data.load_directory(path)
-	var region_count := terrain_3d.data.get_region_count()
-	_log("Loaded %d terrain regions" % region_count)
+	# TerrainStreamer handles loading automatically via initialize()
+	# Nothing to do here - resources are already set in _init_terrain_streamer_runtime()
+	_log("TerrainStreamer will load chunks on demand")
 
 
-func _load_multi_terrain() -> void:
-	if not multi_terrain_manager:
-		return
-
-	# Load terrain textures into shared assets
-	var shared_assets := Terrain3DAssets.new()
-	var textures_loaded: int = texture_loader.load_terrain_textures(shared_assets)
-	_log("Loaded %d terrain textures for multi-terrain" % textures_loaded)
-	terrain_manager.set_texture_slot_mapper(texture_loader)
-
-	# Apply shared assets to all chunks
-	multi_terrain_manager.set_shared_assets(shared_assets)
-
-	# Initialize the manager (it will start loading chunks when tracked node is set)
-	multi_terrain_manager.initialize()
-
-	_log("MultiTerrainManager initialized and ready")
-
-
-## Initialize multi-terrain manager for on-the-fly terrain generation
+## Initialize TerrainStreamer in ON_THE_FLY mode (generates terrain live)
 ## This enables infinite terrain without pre-processed data
-func _init_multi_terrain_on_the_fly() -> void:
-	# Hide the single Terrain3D node - we'll use MultiTerrainManager instead
-	if terrain_3d:
-		terrain_3d.visible = false
+func _init_terrain_streamer_on_the_fly() -> void:
+	# Create TerrainStreamer
+	terrain_streamer = Node3D.new()
+	terrain_streamer.set_script(TerrainStreamerScript)
+	terrain_streamer.name = "TerrainStreamer"
 
-	# Create MultiTerrainManager
-	multi_terrain_manager = Node3D.new()
-	multi_terrain_manager.set_script(MultiTerrainManagerScript)
-	multi_terrain_manager.name = "MultiTerrainManager"
+	# Configure for ON_THE_FLY generation mode
+	terrain_streamer.mode = TerrainStreamer.Mode.ON_THE_FLY
+	terrain_streamer.terrain_data_base_path = TERRAIN_CHUNKS_DIR
+	terrain_streamer.load_radius = 2
+	terrain_streamer.lod_enabled = true
+	terrain_streamer.region_size = 64
+	terrain_streamer.vertex_spacing = 0.0  # Auto-calculate
+	terrain_streamer.generate_on_fly = true
+	terrain_streamer.cache_generated_chunks = true  # Save generated chunks for future use
 
-	# Configure for Morrowind
-	multi_terrain_manager.chunk_size_cells = 32
-	multi_terrain_manager.load_radius = 1  # 3x3 chunks loaded
-	multi_terrain_manager.terrain_data_base_path = TERRAIN_CHUNKS_DIR
-	multi_terrain_manager.region_size = 64
-	multi_terrain_manager.lod_enabled = true
+	# Set managers
+	terrain_streamer.terrain_manager = terrain_manager
+	terrain_streamer.texture_loader = texture_loader
 
-	# Enable on-the-fly generation
-	multi_terrain_manager.generate_on_fly = true
-	multi_terrain_manager.terrain_manager = terrain_manager
-
-	add_child(multi_terrain_manager)
-
-	# Load terrain textures into shared assets
-	var shared_assets := Terrain3DAssets.new()
-	var textures_loaded: int = texture_loader.load_terrain_textures(shared_assets)
-	_log("Loaded %d terrain textures for infinite terrain" % textures_loaded)
-	terrain_manager.set_texture_slot_mapper(texture_loader)
-
-	# Apply shared assets to all chunks
-	multi_terrain_manager.set_shared_assets(shared_assets)
+	add_child(terrain_streamer)
 
 	# Connect signals
-	multi_terrain_manager.chunk_loaded.connect(_on_terrain_chunk_loaded)
-	multi_terrain_manager.chunk_unloaded.connect(_on_terrain_chunk_unloaded)
-	multi_terrain_manager.player_chunk_changed.connect(_on_player_chunk_changed)
-	multi_terrain_manager.terrain_generated.connect(_on_terrain_generated)
+	terrain_streamer.chunk_loaded.connect(_on_terrain_chunk_loaded)
+	terrain_streamer.chunk_unloaded.connect(_on_terrain_chunk_unloaded)
+	terrain_streamer.player_chunk_changed.connect(_on_player_chunk_changed)
+	terrain_streamer.terrain_generated.connect(_on_terrain_generated)
 
-	# Initialize the manager (it will start loading chunks when tracked node is set)
-	multi_terrain_manager.initialize()
-
+	# Initialize
+	terrain_streamer.initialize()
 	_using_multi_terrain = true
-	_log("Infinite terrain (on-the-fly generation) initialized")
-	_log("  Chunk size: 32x32 cells, Load radius: 1 (3x3 = 9 chunks)")
+
+	_log("TerrainStreamer configured (ON_THE_FLY mode)")
+	_log("  Chunk size: 32×32 cells, Load radius: %d" % terrain_streamer.load_radius)
+	_log("  Coverage: ~%d×%d cells visible" % [
+		32 * (terrain_streamer.load_radius * 2 + 1),
+		32 * (terrain_streamer.load_radius * 2 + 1)
+	])
 
 
 func _on_terrain_generated(chunk_coord: Vector2i, cells_generated: int) -> void:
-	_log("Generated terrain chunk (%d, %d): %d cells" % [chunk_coord.x, chunk_coord.y, cells_generated])
+	_log("[color=cyan]Generated terrain chunk (%d, %d): %d cells[/color]" % [chunk_coord.x, chunk_coord.y, cells_generated])
+	# Update loading overlay if still visible
+	if loading_overlay and loading_overlay.visible:
+		status_label.text = "Generated chunk (%d, %d) - %d cells" % [chunk_coord.x, chunk_coord.y, cells_generated]
 
 
 ## Load terrain textures for on-the-fly terrain generation (no pre-processed data)
@@ -432,40 +385,43 @@ func _on_preprocess_pressed() -> void:
 	preprocess_btn.disabled = true
 	preprocess_status.text = "Preprocessing..."
 
-	# Use TerrainPreprocessor to preprocess all terrain
-	# TerrainPreprocessor extends Node, so we need to add it to the scene tree
-	var preprocessor := TerrainPreprocessorScript.new()
+	# Create TerrainStreamer in PREPROCESS mode
+	_log("Using TerrainStreamer (chunks will be saved to %s)" % TERRAIN_CHUNKS_DIR)
+	var preprocessor := Node3D.new()
+	preprocessor.set_script(TerrainStreamerScript)
+	preprocessor.name = "TerrainPreprocessor"
+
+	# Configure for preprocessing
+	preprocessor.mode = TerrainStreamer.Mode.PREPROCESS
+	preprocessor.terrain_data_base_path = TERRAIN_CHUNKS_DIR
+	preprocessor.terrain_manager = terrain_manager
+	preprocessor.texture_loader = texture_loader
+
 	add_child(preprocessor)
 
-	# The preprocessor creates its own terrain_manager internally
-	# But we can provide texture_loader if it supports it
-	if "texture_loader" in preprocessor:
-		preprocessor.texture_loader = texture_loader
-
-	# Connect progress signal
+	# Initialize and connect signals
+	preprocessor.initialize()
 	preprocessor.progress_updated.connect(_on_preprocess_progress)
 
-	# Run preprocessing with data path
-	var result: int = await preprocessor.preprocess_all_terrain(_data_path)
+	# Run preprocessing
+	var result: int = await preprocessor.preprocess_all()
 
-	# Cleanup preprocessor
+	# Cleanup
 	preprocessor.queue_free()
 
 	if result == OK:
 		_log("[color=green]Terrain preprocessing complete![/color]")
 		_using_preprocessed = true
-		_using_multi_terrain = false
 
-		# Reload the terrain data
-		if terrain_3d and terrain_3d.data:
-			var save_path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
-			terrain_3d.data.load_directory(save_path)
-			var region_count: int = terrain_3d.data.get_region_count()
-			_log("Loaded %d terrain regions" % region_count)
+		# Chunks saved to disk - switch terrain streamer to RUNTIME mode
+		_log("Preprocessed chunks saved to %s" % TERRAIN_CHUNKS_DIR)
+		_log("Switching to RUNTIME mode...")
 
-		# Disable on-the-fly generation since we now have pre-processed data
-		if world_streaming_manager:
-			world_streaming_manager.generate_terrain_on_fly = false
+		# Disable on-the-fly generation in current terrain streamer
+		if terrain_streamer and terrain_streamer.mode == TerrainStreamer.Mode.ON_THE_FLY:
+			terrain_streamer.mode = TerrainStreamer.Mode.RUNTIME
+			terrain_streamer.generate_on_fly = false
+			_log("TerrainStreamer switched to RUNTIME mode")
 	else:
 		_log("[color=red]Terrain preprocessing failed![/color]")
 
@@ -540,9 +496,9 @@ func _setup_world_streaming_manager() -> void:
 	# Track camera
 	world_streaming_manager.set_tracked_node(camera)
 
-	# Also set tracked node on multi-terrain manager if active
-	if multi_terrain_manager:
-		multi_terrain_manager.set_tracked_node(camera)
+	# Also set tracked node on terrain streamer if active
+	if terrain_streamer:
+		terrain_streamer.set_tracked_node(camera)
 
 	# Initialize after all configuration is set
 	world_streaming_manager.initialize()
@@ -550,9 +506,9 @@ func _setup_world_streaming_manager() -> void:
 	_log("WorldStreamingManager created and configured")
 	if _using_multi_terrain:
 		if _using_preprocessed:
-			_log("Multi-terrain streaming active (pre-processed)")
+			_log("TerrainStreamer active (RUNTIME mode - pre-processed)")
 		else:
-			_log("[color=cyan]Infinite terrain active (on-the-fly generation)[/color]")
+			_log("[color=cyan]TerrainStreamer active (ON_THE_FLY mode - live generation)[/color]")
 
 
 func _on_terrain_region_loaded(region: Vector2i) -> void:
@@ -593,11 +549,9 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 	var height := 50.0
 
 	# Get terrain height - works for both single and multi-terrain modes
-	if _using_multi_terrain and multi_terrain_manager:
-		# In multi-terrain mode, we need to find the active chunk's terrain
-		# For now, use a default height since chunks may not be loaded yet
-		# The multi_terrain_manager.teleport_to() handles chunk loading
-		await multi_terrain_manager.teleport_to(Vector3(world_x, 0, world_z))
+	if _using_multi_terrain and terrain_streamer:
+		# TerrainStreamer will load chunks around this position
+		await terrain_streamer.teleport_to(Vector3(world_x, 0, world_z))
 	elif terrain_3d and terrain_3d.data:
 		height = terrain_3d.data.get_height(Vector3(world_x, 0, world_z))
 		if is_nan(height) or height > 10000:
@@ -639,16 +593,16 @@ func _update_stats() -> void:
 	var lod_culled: int = stats.get("lod_objects_culled", 0)
 	var lod_total: int = stats.get("lod_total_tracked", 0)
 
-	# Get multi-terrain stats if active
+	# Get terrain streamer stats if active
 	var terrain_mode := "Single"
 	var active_chunks := 0
 	var total_regions := 0
 
-	if _using_multi_terrain and multi_terrain_manager:
-		terrain_mode = "Multi"
-		var mt_stats: Dictionary = multi_terrain_manager.get_stats()
-		active_chunks = mt_stats.get("active_chunks", 0)
-		total_regions = mt_stats.get("total_regions", 0)
+	if _using_multi_terrain and terrain_streamer:
+		terrain_mode = "Streamer"
+		var ts_stats: Dictionary = terrain_streamer.get_stats()
+		active_chunks = ts_stats.get("active_chunks", 0)
+		total_regions = ts_stats.get("total_regions", 0)
 	elif terrain_3d and terrain_3d.data:
 		total_regions = terrain_3d.data.get_region_count()
 
@@ -861,8 +815,10 @@ func _switch_to_interior_mode() -> void:
 	# Hide world streaming elements
 	if terrain_3d:
 		terrain_3d.visible = false
-	if multi_terrain_manager:
-		multi_terrain_manager.visible = false
+	if terrain_streamer:
+		terrain_streamer.visible = false
+		# Pause terrain streaming to save resources
+		terrain_streamer.set_paused(true)
 
 	# Pause world streaming
 	if world_streaming_manager:
@@ -895,8 +851,10 @@ func _switch_to_world_mode() -> void:
 	# Show world streaming elements
 	if terrain_3d and not _using_multi_terrain:
 		terrain_3d.visible = true
-	if multi_terrain_manager:
-		multi_terrain_manager.visible = true
+	if terrain_streamer:
+		terrain_streamer.visible = true
+		# Resume terrain streaming
+		terrain_streamer.set_paused(false)
 
 	# Resume world streaming
 	if world_streaming_manager:
