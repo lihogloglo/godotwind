@@ -184,26 +184,12 @@ func _reset_camera() -> void:
 	_update_camera()
 
 func _try_find_morrowind() -> void:
-	# Check project settings first
-	var configured_path: String = ProjectSettings.get_setting("morrowind/data_path", "")
-	if not configured_path.is_empty() and DirAccess.dir_exists_absolute(configured_path):
-		data_path_edit.text = configured_path
-		_log("Found configured Morrowind path: %s" % configured_path)
+	# Use SettingsManager's auto-detection
+	var detected_path := SettingsManager.auto_detect_installation()
+	if not detected_path.is_empty():
+		data_path_edit.text = detected_path
+		_log("Found Morrowind at: %s (via %s)" % [detected_path, SettingsManager.get_data_path_source()])
 		return
-
-	# Common Morrowind installation paths
-	var common_paths := [
-		"C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files",
-		"C:/Program Files (x86)/Bethesda Softworks/Morrowind/Data Files",
-		"C:/GOG Games/Morrowind/Data Files",
-		"D:/Games/Morrowind/Data Files",
-	]
-
-	for path in common_paths:
-		if DirAccess.dir_exists_absolute(path):
-			data_path_edit.text = path
-			_log("Found Morrowind at: %s" % path)
-			return
 
 	_log("[color=yellow]Morrowind not found. Please enter path manually.[/color]")
 

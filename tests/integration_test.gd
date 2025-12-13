@@ -25,29 +25,34 @@ func _init() -> void:
 
 
 func _get_esm_path() -> String:
-	# Check command line arguments
+	# Check command line arguments (highest priority for testing)
 	var args := OS.get_cmdline_args()
 	for i in range(args.size()):
 		if args[i] == "--" and i + 1 < args.size():
 			return args[i + 1]
 
-	# Check environment variable
-	var env_path := OS.get_environment("MORROWIND_ESM")
-	if not env_path.is_empty() and FileAccess.file_exists(env_path):
-		return env_path
+	# Check MORROWIND_ESM environment variable (legacy support)
+	var env_esm := OS.get_environment("MORROWIND_ESM")
+	if not env_esm.is_empty() and FileAccess.file_exists(env_esm):
+		return env_esm
 
-	# Try common paths
-	var common_paths := [
-		"C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files/Morrowind.esm",
-		"C:/Program Files/Steam/steamapps/common/Morrowind/Data Files/Morrowind.esm",
-		"C:/GOG Games/Morrowind/Data Files/Morrowind.esm",
-		"D:/Games/Morrowind/Data Files/Morrowind.esm",
-		"D:/SteamLibrary/steamapps/common/Morrowind/Data Files/Morrowind.esm",
-	]
+	# Check MORROWIND_DATA_PATH environment variable + esm file
+	var env_data_path := OS.get_environment("MORROWIND_DATA_PATH")
+	if not env_data_path.is_empty():
+		var esm_file := SettingsManager.get_esm_file()
+		var full_path := env_data_path.path_join(esm_file)
+		if FileAccess.file_exists(full_path):
+			return full_path
 
-	for path in common_paths:
-		if FileAccess.file_exists(path):
-			return path
+	# Use SettingsManager's configured/detected path
+	var esm_path := SettingsManager.get_esm_path()
+	if not esm_path.is_empty() and FileAccess.file_exists(esm_path):
+		return esm_path
+
+	# Fallback: try auto-detection
+	var detected_path := SettingsManager.auto_detect_installation()
+	if not detected_path.is_empty():
+		return detected_path.path_join(SettingsManager.get_esm_file())
 
 	return ""
 

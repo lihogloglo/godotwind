@@ -101,10 +101,10 @@ func initialize(data_path: String = "") -> Error:
 
 	# No pre-processed data - need to generate or use live mode
 	if data_path.is_empty():
-		data_path = ProjectSettings.get_setting("morrowind/data_path", "")
+		data_path = SettingsManager.get_data_path()
 
 	if data_path.is_empty():
-		push_error("WorldTerrain: No data path provided and morrowind/data_path not set")
+		push_error("WorldTerrain: No data path provided. Set MORROWIND_DATA_PATH environment variable or use settings UI.")
 		return ERR_UNCONFIGURED
 
 	print("WorldTerrain: No pre-processed data found. Use preprocess_terrain() to generate.")
