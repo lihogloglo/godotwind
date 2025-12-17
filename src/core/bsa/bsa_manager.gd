@@ -24,11 +24,19 @@ var _extracted_cache_size: int = 0     # Current cache size in bytes
 const MAX_EXTRACTED_CACHE_SIZE := 256 * 1024 * 1024  # 256MB max cache
 const MAX_CACHEABLE_FILE_SIZE := 2 * 1024 * 1024      # Only cache files < 2MB
 
+# Thread safety: Mutex for extracted cache access
+# This protects against concurrent access when async loading is enabled
+var _cache_mutex: Mutex = null
+
 # Statistics
 var total_archives_loaded: int = 0
 var total_files_indexed: int = 0
 var cache_hits: int = 0
 var cache_misses: int = 0
+
+
+func _init() -> void:
+	_cache_mutex = Mutex.new()
 
 ## Normalize a file path for BSA lookup (lowercase, backslashes)
 static func _normalize_path(path: String) -> String:
@@ -122,15 +130,20 @@ func get_file_info(path: String) -> Dictionary:
 ## Extract a file from the archives
 ## Returns the raw file data as PackedByteArray
 ## Uses extracted data cache for frequently accessed files
+## Thread-safe: Uses mutex to protect cache access
 func extract_file(path: String) -> PackedByteArray:
 	var normalized := _normalize_path(path)
 
-	# Check extracted data cache first (fast path)
+	# Check extracted data cache first (fast path) - with mutex protection
+	_cache_mutex.lock()
 	if normalized in _extracted_cache:
 		cache_hits += 1
-		return _extracted_cache[normalized]
+		var cached_data: PackedByteArray = _extracted_cache[normalized]
+		_cache_mutex.unlock()
+		return cached_data
 
 	cache_misses += 1
+	_cache_mutex.unlock()
 
 	if not _file_cache.has(normalized):
 		push_error("BSAManager: File not found: %s" % path)
@@ -153,41 +166,54 @@ func extract_file(path: String) -> PackedByteArray:
 
 
 ## Cache extracted file data for fast reuse
+## Thread-safe: Uses mutex to protect cache access
 func _cache_extracted_data(normalized_path: String, data: PackedByteArray) -> void:
+	_cache_mutex.lock()
+
 	# Don't cache if already at limit
 	if _extracted_cache_size >= MAX_EXTRACTED_CACHE_SIZE:
+		_cache_mutex.unlock()
 		return
 
 	# Don't duplicate cache
 	if normalized_path in _extracted_cache:
+		_cache_mutex.unlock()
 		return
 
 	_extracted_cache[normalized_path] = data
 	_extracted_cache_size += data.size()
+	_cache_mutex.unlock()
 
 
 ## Clear the extracted data cache (frees memory)
+## Thread-safe: Uses mutex to protect cache access
 func clear_extracted_cache() -> void:
+	_cache_mutex.lock()
 	_extracted_cache.clear()
 	_extracted_cache_size = 0
 	cache_hits = 0
 	cache_misses = 0
+	_cache_mutex.unlock()
 
 
 ## Get extracted cache statistics
+## Thread-safe: Uses mutex to protect cache access
 func get_cache_stats() -> Dictionary:
+	_cache_mutex.lock()
 	var hit_rate := 0.0
 	var total := cache_hits + cache_misses
 	if total > 0:
 		hit_rate = float(cache_hits) / float(total)
 
-	return {
+	var stats := {
 		"cache_size_mb": _extracted_cache_size / (1024.0 * 1024.0),
 		"cached_files": _extracted_cache.size(),
 		"cache_hits": cache_hits,
 		"cache_misses": cache_misses,
 		"hit_rate": hit_rate,
 	}
+	_cache_mutex.unlock()
+	return stats
 
 ## Find all files matching a pattern across all archives
 func find_files(pattern: String) -> Array[Dictionary]:
@@ -310,6 +336,7 @@ func load_archives_from_directory(dir_path: String, pattern: String = "*.bsa") -
 	return loaded_count
 
 ## Clear all loaded archives and caches
+## Thread-safe: Uses mutex to protect cache access
 func clear() -> void:
 	# Close all archive file handles
 	for archive_path in _archives:
@@ -320,9 +347,14 @@ func clear() -> void:
 	_archives.clear()
 	_file_cache.clear()
 	_load_order.clear()
+
+	# Clear extraction cache with mutex protection
+	_cache_mutex.lock()
 	_extracted_cache.clear()
 	_extracted_cache_size = 0
-	total_archives_loaded = 0
-	total_files_indexed = 0
 	cache_hits = 0
 	cache_misses = 0
+	_cache_mutex.unlock()
+
+	total_archives_loaded = 0
+	total_files_indexed = 0

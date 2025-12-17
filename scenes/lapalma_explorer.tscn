@@ -1,0 +1,238 @@
+[gd_scene load_steps=10 format=3 uid="uid://dndox8fpbhekx"]
+
+[ext_resource type="Script" uid="uid://d0hoxkgtiabvi" path="res://src/tools/lapalma_explorer.gd" id="1_lapalma"]
+
+[sub_resource type="Environment" id="Environment_lapalma"]
+background_mode = 1
+background_color = Color(0.45, 0.55, 0.75, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.55, 0.6, 1)
+ambient_light_energy = 0.7
+tonemap_mode = 2
+fog_enabled = true
+fog_light_color = Color(0.65, 0.7, 0.8, 1)
+fog_density = 2e-05
+fog_sky_affect = 0.3
+
+[sub_resource type="Gradient" id="Gradient_noise"]
+offsets = PackedFloat32Array(0.2, 1)
+colors = PackedColorArray(1, 1, 1, 1, 0, 0, 0, 1)
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_noise"]
+noise_type = 2
+frequency = 0.03
+cellular_jitter = 3.0
+cellular_return_type = 0
+domain_warp_enabled = true
+domain_warp_type = 1
+domain_warp_amplitude = 50.0
+domain_warp_fractal_type = 2
+domain_warp_fractal_lacunarity = 1.5
+domain_warp_fractal_gain = 1.0
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_noise"]
+noise = SubResource("FastNoiseLite_noise")
+color_ramp = SubResource("Gradient_noise")
+seamless = true
+
+[sub_resource type="Terrain3DMaterial" id="Terrain3DMaterial_lapalma"]
+_shader_parameters = {
+&"bias_distance": 1024.0,
+&"blend_sharpness": 0.5,
+&"depth_blur": 0.0,
+&"enable_macro_variation": true,
+&"enable_projection": true,
+&"flat_terrain_normals": false,
+&"macro_variation1": Color(0.95, 0.9, 0.85, 1),
+&"macro_variation2": Color(0.85, 0.8, 0.75, 1),
+&"macro_variation_slope": 0.333,
+&"mipmap_bias": 1.0,
+&"noise1_angle": 0.0,
+&"noise1_offset": Vector2(0.5, 0.5),
+&"noise1_scale": 0.04,
+&"noise2_scale": 0.076,
+&"noise_texture": SubResource("NoiseTexture2D_noise"),
+&"projection_threshold": 0.8
+}
+show_checkered = false
+show_colormap = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tsohu"]
+transparency = 4
+cull_mode = 2
+vertex_color_use_as_albedo = true
+backlight_enabled = true
+backlight = Color(0.5, 0.5, 0.5, 1)
+distance_fade_mode = 1
+distance_fade_min_distance = 128.0
+distance_fade_max_distance = 96.0
+
+[sub_resource type="Terrain3DMeshAsset" id="Terrain3DMeshAsset_5ud2a"]
+generated_type = 1
+height_offset = 0.5
+material_override = SubResource("StandardMaterial3D_tsohu")
+last_lod = 0
+last_shadow_lod = 0
+lod0_range = 128.0
+
+[sub_resource type="Terrain3DAssets" id="Terrain3DAssets_lapalma"]
+mesh_list = Array[Terrain3DMeshAsset]([SubResource("Terrain3DMeshAsset_5ud2a")])
+
+[node name="LaPalmaExplorer" type="Node3D"]
+script = ExtResource("1_lapalma")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_lapalma")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 10000, 5000, -20000)
+light_energy = 1.3
+shadow_enabled = true
+shadow_opacity = 0.6
+directional_shadow_max_distance = 2000.0
+
+[node name="FlyCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 1000, 0)
+far = 50000.0
+
+[node name="Terrain3D" type="Terrain3D" parent="."]
+material = SubResource("Terrain3DMaterial_lapalma")
+assets = SubResource("Terrain3DAssets_lapalma")
+show_checkered = false
+metadata/_edit_lock_ = true
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="LoadingOverlay" type="ColorRect" parent="UI"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.1, 0.12, 0.18, 0.95)
+
+[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay"]
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -50.0
+offset_right = 200.0
+offset_bottom = 50.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="LoadingLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+layout_mode = 2
+text = "Loading La Palma..."
+horizontal_alignment = 1
+
+[node name="ProgressBar" type="ProgressBar" parent="UI/LoadingOverlay/VBox"]
+custom_minimum_size = Vector2(400, 25)
+layout_mode = 2
+
+[node name="StatusLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Initializing..."
+horizontal_alignment = 1
+
+[node name="StatsPanel" type="Panel" parent="UI"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -280.0
+offset_bottom = 420.0
+grow_horizontal = 0
+
+[node name="VBox" type="VBoxContainer" parent="UI/StatsPanel"]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+
+[node name="Title" type="Label" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "🌋 La Palma Explorer"
+
+[node name="HSeparator" type="HSeparator" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+
+[node name="StatsText" type="RichTextLabel" parent="UI/StatsPanel/VBox"]
+custom_minimum_size = Vector2(0, 200)
+layout_mode = 2
+bbcode_enabled = true
+text = "Initializing..."
+
+[node name="HSeparator2" type="HSeparator" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+
+[node name="QuickLabel" type="Label" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+text = "Quick Teleport:"
+
+[node name="QuickButtons" type="GridContainer" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+columns = 2
+
+[node name="RoqueBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Roque (Peak)"
+
+[node name="CalderaBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Caldera"
+
+[node name="CoastBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+layout_mode = 2
+text = "East Coast"
+
+[node name="OriginBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Origin (0,0)"
+
+[node name="HSeparator3" type="HSeparator" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+
+[node name="ControlsLabel" type="Label" parent="UI/StatsPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Controls:
+Hold Right Click to look
+WASD/ZQSD to move
+Space/Shift for up/down
+Ctrl for speed boost"
+
+[node name="LogPanel" type="Panel" parent="UI"]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = -180.0
+offset_right = 450.0
+offset_bottom = -10.0
+grow_vertical = 0
+
+[node name="VBox" type="VBoxContainer" parent="UI/LogPanel"]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 5.0
+offset_right = -10.0
+offset_bottom = -5.0
+
+[node name="LogLabel" type="Label" parent="UI/LogPanel/VBox"]
+layout_mode = 2
+text = "Log:"
+
+[node name="LogText" type="RichTextLabel" parent="UI/LogPanel/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+text = "Starting La Palma explorer..."
+scroll_following = true

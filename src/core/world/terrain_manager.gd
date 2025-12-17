@@ -13,8 +13,36 @@ const MW_LAND_SIZE: int = 65                  # Vertices per cell side
 const MW_TEXTURE_SIZE: int = 16               # Texture tiles per cell side
 
 # Terrain3D region size (should match Terrain3D settings)
-# Default Terrain3D region = 256m, we'll use 1 MW cell = 1 region for simplicity
+# With region_size=256, we can fit 4x4 MW cells per region
+# This allows 32 regions × 4 cells = 128 cells per axis = ~15km coverage
 var region_size: int = 256
+
+## Number of MW cells per Terrain3D region axis (4 = 4x4 cells per region)
+## With cells_per_region=4 and region_size=256:
+##   - Each MW cell contributes 64 vertices (cropped from 65)
+##   - 4 cells × 64 = 256 vertices = perfect fit for region_size=256
+##   - Coverage: 32 regions × 4 cells × 117m = ~15km per axis
+const CELLS_PER_REGION: int = 4
+
+## Calculate which Terrain3D region a cell belongs to
+## Returns the region index (each region holds CELLS_PER_REGION x CELLS_PER_REGION cells)
+static func cell_to_region(cell_coord: Vector2i) -> Vector2i:
+	# Integer division to get region index
+	# Note: Python-style floor division for negative numbers
+	var region_x: int = floori(float(cell_coord.x) / float(CELLS_PER_REGION))
+	var region_y: int = floori(float(cell_coord.y) / float(CELLS_PER_REGION))
+	return Vector2i(region_x, region_y)
+
+## Calculate the local position of a cell within its region (0 to CELLS_PER_REGION-1)
+static func cell_local_in_region(cell_coord: Vector2i) -> Vector2i:
+	# Use positive modulo for consistent results with negative numbers
+	var local_x: int = posmod(cell_coord.x, CELLS_PER_REGION)
+	var local_y: int = posmod(cell_coord.y, CELLS_PER_REGION)
+	return Vector2i(local_x, local_y)
+
+## Get the southwest corner cell of a region (minimum x, minimum y)
+static func region_to_sw_cell(region_coord: Vector2i) -> Vector2i:
+	return Vector2i(region_coord.x * CELLS_PER_REGION, region_coord.y * CELLS_PER_REGION)
 
 # Height scale for converting MW heights to Godot
 # MW heights are in game units, Terrain3D expects meters
@@ -170,6 +198,10 @@ func generate_color_map(land: LandRecord) -> Image:
 ## Debug flag to print control map encoding details (set to true to diagnose)
 var _debug_control_map: bool = false
 
+## Fast mode skips expensive per-pixel blending for better performance
+## Set to false for higher quality texture transitions
+var fast_control_map: bool = true
+
 func generate_control_map(land: LandRecord) -> Image:
 	# Terrain3D expects control map at same resolution as heightmap
 	# MW texture grid is 16x16, so we need to upscale
@@ -185,9 +217,25 @@ func generate_control_map(land: LandRecord) -> Image:
 		return img
 
 	# Each MW texture cell covers ~4 height vertices
-	# We blend at the boundaries between texture cells
 	var vertices_per_tex := float(MW_LAND_SIZE - 1) / float(MW_TEXTURE_SIZE)  # ~4.0
 
+	# FAST MODE: Simple nearest-neighbor texture mapping (no blending)
+	# This is ~10x faster than full blending and looks acceptable
+	if fast_control_map:
+		for y in range(MW_LAND_SIZE):
+			for x in range(MW_LAND_SIZE):
+				var tex_x := mini(int(float(x) / vertices_per_tex), MW_TEXTURE_SIZE - 1)
+				var tex_y := mini(int(float(y) / vertices_per_tex), MW_TEXTURE_SIZE - 1)
+				var mw_tex_idx := land.get_texture_index(tex_x, tex_y)
+				var slot := _get_terrain3d_texture_slot(mw_tex_idx)
+				var img_y := MW_LAND_SIZE - 1 - y
+				var control := _encode_control_value(slot, 0, 0)
+				img.set_pixel(x, img_y, Color(control, 0, 0, 1))
+
+		_stats["control_maps_generated"] += 1
+		return img
+
+	# QUALITY MODE: Full per-pixel blending (expensive but prettier)
 	for y in range(MW_LAND_SIZE):
 		for x in range(MW_LAND_SIZE):
 			# Calculate fractional position within texture grid
@@ -490,8 +538,14 @@ func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: V
 		cell_x = land.cell_x
 		cell_y = land.cell_y
 
-	# Terrain3D region bounds with region_size=64:
-	#   - Valid region indices: -16 to +15 (32 regions per axis)
+	# LEGACY MODE (region_size=64, 1 cell per region):
+	#   - Valid cell indices: -16 to +15 (32 cells per axis = ~3.7km)
+	# NEW COMBINED MODE (region_size=256, 4x4 cells per region):
+	#   - Use import_combined_region() instead for larger terrain support
+	#   - Valid cell indices: -64 to +63 (128 cells per axis = ~15km)
+	#
+	# This function is kept for backward compatibility but the combined mode
+	# is recommended for large terrains like Morrowind's Vvardenfell.
 	if cell_x < -16 or cell_x > 15 or cell_y < -16 or cell_y > 15:
 		return false
 
@@ -567,6 +621,125 @@ func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: V
 
 	_stats["regions_created"] += 1
 	return true
+
+
+## Import a combined region (CELLS_PER_REGION x CELLS_PER_REGION cells) into a single Terrain3D region
+## This is the NEW method for large terrain support (region_size=256, 4x4 cells per region)
+##
+## With this approach:
+##   - Each Terrain3D region holds 4x4 = 16 MW cells
+##   - 32 regions × 4 cells = 128 cells per axis = ~15km coverage
+##   - Morrowind's Vvardenfell (~100x100 cells = ~12km) fits easily!
+##
+## Parameters:
+##   terrain: The Terrain3D node to import into
+##   region_coord: The region coordinate (-16 to +15 for each axis)
+##   get_land_func: Callable that takes (cell_x, cell_y) and returns LandRecord or null
+##
+## Returns: true if any terrain data was imported, false if region is empty
+func import_combined_region(terrain: Terrain3D, region_coord: Vector2i, get_land_func: Callable) -> bool:
+	if not terrain or not terrain.data:
+		return false
+
+	# Terrain3D region bounds: -16 to +15 (32 regions per axis)
+	if region_coord.x < -16 or region_coord.x > 15 or region_coord.y < -16 or region_coord.y > 15:
+		return false
+
+	# Combined region size: CELLS_PER_REGION × 64 pixels = 256 pixels
+	const CELL_SIZE := 64  # Cropped cell size
+	var region_size_pixels: int = CELLS_PER_REGION * CELL_SIZE  # 256
+
+	# Create combined images for the entire region
+	var combined_heightmap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RF)
+	var combined_colormap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RGB8)
+	var combined_controlmap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RF)
+
+	# Fill with defaults
+	combined_heightmap.fill(Color(0, 0, 0, 1))  # Flat terrain
+	combined_colormap.fill(Color.WHITE)          # White vertex color
+	var default_control := _encode_control_value(0, 0, 0)
+	combined_controlmap.fill(Color(default_control, 0, 0, 1))
+
+	# Get the southwest corner cell of this region
+	var sw_cell := region_to_sw_cell(region_coord)
+	var any_data := false
+
+	# Iterate through all cells in this region (from SW to NE)
+	for local_y in range(CELLS_PER_REGION):
+		for local_x in range(CELLS_PER_REGION):
+			var cell_x := sw_cell.x + local_x
+			var cell_y := sw_cell.y + local_y
+
+			# Get LAND record for this cell
+			var land: LandRecord = get_land_func.call(cell_x, cell_y)
+			if not land or not land.has_heights():
+				continue
+
+			any_data = true
+
+			# Generate maps from LAND record (65x65)
+			var cell_heightmap: Image = generate_heightmap(land)
+			var cell_colormap: Image = generate_color_map(land)
+			var cell_controlmap: Image = generate_control_map(land)
+
+			# Calculate pixel offset within the combined image
+			# Note: In the combined image, local_y=0 (south cells) go to the BOTTOM (higher y in image)
+			# because we flipped Y in generate_heightmap to match Terrain3D convention
+			# So local_y=0 -> img_y = (CELLS_PER_REGION - 1 - 0) * CELL_SIZE = highest y
+			# And local_y=3 -> img_y = (CELLS_PER_REGION - 1 - 3) * CELL_SIZE = 0 (top)
+			var img_offset_x := local_x * CELL_SIZE
+			var img_offset_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE
+
+			# Blit the 64x64 cropped cell data into the combined image
+			combined_heightmap.blit_rect(cell_heightmap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+			combined_colormap.blit_rect(cell_colormap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+			combined_controlmap.blit_rect(cell_controlmap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+
+	if not any_data:
+		return false
+
+	# Calculate world position for this region
+	# Each cell is (64 vertices × vertex_spacing) meters wide
+	# Each region is (CELLS_PER_REGION × 64 × vertex_spacing) meters wide
+	var vertex_spacing := terrain.get_vertex_spacing()
+	var cell_world_size := float(CELL_SIZE) * vertex_spacing
+	var region_world_size := float(CELLS_PER_REGION) * cell_world_size
+
+	# Position at the center of the region for proper Terrain3D snapping
+	# SW cell corner is at (sw_cell.x * cell_world_size, -sw_cell.y * cell_world_size)
+	# Region center offset from SW corner: (region_world_size/2, -region_world_size/2)
+	var world_x := float(sw_cell.x) * cell_world_size + region_world_size * 0.5
+	var world_z := float(-sw_cell.y) * cell_world_size - region_world_size * 0.5
+
+	# Create import array [heightmap, controlmap, colormap]
+	var imported_images: Array[Image] = []
+	imported_images.resize(Terrain3DRegion.TYPE_MAX)
+	imported_images[Terrain3DRegion.TYPE_HEIGHT] = combined_heightmap
+	imported_images[Terrain3DRegion.TYPE_CONTROL] = combined_controlmap
+	imported_images[Terrain3DRegion.TYPE_COLOR] = combined_colormap
+
+	# Import into Terrain3D at the calculated position
+	var import_pos := Vector3(world_x, 0, world_z)
+	terrain.data.import_images(imported_images, import_pos, 0.0, 1.0)
+
+	_stats["regions_created"] += 1
+	return true
+
+
+## Check if a combined region contains any terrain data
+## Useful for determining which regions need to be loaded
+func region_has_terrain_data(region_coord: Vector2i, get_land_func: Callable) -> bool:
+	var sw_cell := region_to_sw_cell(region_coord)
+
+	for local_y in range(CELLS_PER_REGION):
+		for local_x in range(CELLS_PER_REGION):
+			var cell_x := sw_cell.x + local_x
+			var cell_y := sw_cell.y + local_y
+			var land: LandRecord = get_land_func.call(cell_x, cell_y)
+			if land and land.has_heights():
+				return true
+
+	return false
 
 
 ## Debug: Compare edge heights between adjacent cells
@@ -684,3 +857,165 @@ func stitch_cell_edges(lands: Array, grid_width: int) -> bool:
 					stitched = true
 
 	return stitched
+
+
+# =============================================================================
+# ASYNC TERRAIN GENERATION API
+# =============================================================================
+# These methods separate image generation from Terrain3D import.
+# generate_region_data() is THREAD-SAFE and can run on WorkerThreadPool.
+# import_region_data() MUST run on main thread (accesses Terrain3D).
+# =============================================================================
+
+## Container for pre-generated terrain region data
+## Can be safely passed between threads
+class RegionData:
+	extends RefCounted
+
+	var region_coord: Vector2i
+	var heightmap: Image
+	var controlmap: Image
+	var colormap: Image
+	var has_data: bool = false
+	var vertex_spacing: float = 1.0  # For world position calculation
+
+	func _init(coord: Vector2i = Vector2i.ZERO) -> void:
+		region_coord = coord
+
+
+## Generate terrain region data without importing (THREAD-SAFE)
+## This can be called from a worker thread via BackgroundProcessor.
+##
+## Parameters:
+##   region_coord: The region coordinate (-16 to +15 for each axis)
+##   lands: Array of LandRecord objects for the 4x4 cells in this region
+##          Expected order: SW corner first, then east, then next row north
+##          Array size should be CELLS_PER_REGION * CELLS_PER_REGION = 16
+##   vertex_spacing: The Terrain3D vertex spacing (for world position calculation)
+##
+## Returns: RegionData containing the generated images
+func generate_region_data(region_coord: Vector2i, lands: Array, vertex_spacing: float = 1.0) -> RegionData:
+	var result := RegionData.new(region_coord)
+	result.vertex_spacing = vertex_spacing
+
+	# Terrain3D region bounds check
+	if region_coord.x < -16 or region_coord.x > 15 or region_coord.y < -16 or region_coord.y > 15:
+		return result
+
+	# Combined region size: CELLS_PER_REGION × 64 pixels = 256 pixels
+	const CELL_SIZE := 64
+	var region_size_pixels: int = CELLS_PER_REGION * CELL_SIZE  # 256
+
+	# Create combined images for the entire region
+	var combined_heightmap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RF)
+	var combined_colormap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RGB8)
+	var combined_controlmap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RF)
+
+	# Fill with defaults
+	combined_heightmap.fill(Color(0, 0, 0, 1))
+	combined_colormap.fill(Color.WHITE)
+	var default_control := _encode_control_value(0, 0, 0)
+	combined_controlmap.fill(Color(default_control, 0, 0, 1))
+
+	var any_data := false
+
+	# Iterate through all cells in this region
+	for local_y in range(CELLS_PER_REGION):
+		for local_x in range(CELLS_PER_REGION):
+			var land_idx := local_y * CELLS_PER_REGION + local_x
+
+			# Get LAND record from array
+			var land: LandRecord = null
+			if land_idx < lands.size() and lands[land_idx] != null:
+				land = lands[land_idx] as LandRecord
+
+			if not land or not land.has_heights():
+				continue
+
+			any_data = true
+
+			# Generate maps from LAND record (65x65)
+			var cell_heightmap: Image = generate_heightmap(land)
+			var cell_colormap: Image = generate_color_map(land)
+			var cell_controlmap: Image = generate_control_map(land)
+
+			# Calculate pixel offset within the combined image
+			var img_offset_x := local_x * CELL_SIZE
+			var img_offset_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE
+
+			# Blit the 64x64 cropped cell data into the combined image
+			combined_heightmap.blit_rect(cell_heightmap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+			combined_colormap.blit_rect(cell_colormap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+			combined_controlmap.blit_rect(cell_controlmap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+
+	result.heightmap = combined_heightmap
+	result.colormap = combined_colormap
+	result.controlmap = combined_controlmap
+	result.has_data = any_data
+
+	return result
+
+
+## Import pre-generated region data into Terrain3D (MAIN THREAD ONLY)
+## This uses data generated by generate_region_data().
+##
+## Parameters:
+##   terrain: The Terrain3D node to import into
+##   region_data: The RegionData from generate_region_data()
+##
+## Returns: true if import succeeded
+func import_region_data(terrain: Terrain3D, region_data: RegionData) -> bool:
+	if not terrain or not terrain.data:
+		return false
+
+	if not region_data or not region_data.has_data:
+		return false
+
+	# Calculate world position for this region
+	const CELL_SIZE := 64
+	var sw_cell := region_to_sw_cell(region_data.region_coord)
+
+	var vertex_spacing := region_data.vertex_spacing
+	if vertex_spacing <= 0:
+		vertex_spacing = terrain.get_vertex_spacing()
+
+	var cell_world_size := float(CELL_SIZE) * vertex_spacing
+	var region_world_size := float(CELLS_PER_REGION) * cell_world_size
+
+	# Position at the center of the region
+	var world_x := float(sw_cell.x) * cell_world_size + region_world_size * 0.5
+	var world_z := float(-sw_cell.y) * cell_world_size - region_world_size * 0.5
+
+	# Create import array [heightmap, controlmap, colormap]
+	var imported_images: Array[Image] = []
+	imported_images.resize(Terrain3DRegion.TYPE_MAX)
+	imported_images[Terrain3DRegion.TYPE_HEIGHT] = region_data.heightmap
+	imported_images[Terrain3DRegion.TYPE_CONTROL] = region_data.controlmap
+	imported_images[Terrain3DRegion.TYPE_COLOR] = region_data.colormap
+
+	# Import into Terrain3D at the calculated position
+	var import_pos := Vector3(world_x, 0, world_z)
+	terrain.data.import_images(imported_images, import_pos, 0.0, 1.0)
+
+	_stats["regions_created"] += 1
+	return true
+
+
+## Collect LAND records for a region (helper for async loading)
+## Returns an array of CELLS_PER_REGION * CELLS_PER_REGION elements
+## in row-major order from SW corner
+static func collect_lands_for_region(region_coord: Vector2i, get_land_func: Callable) -> Array:
+	var lands: Array = []
+	lands.resize(CELLS_PER_REGION * CELLS_PER_REGION)
+
+	var sw_cell := region_to_sw_cell(region_coord)
+
+	for local_y in range(CELLS_PER_REGION):
+		for local_x in range(CELLS_PER_REGION):
+			var cell_x := sw_cell.x + local_x
+			var cell_y := sw_cell.y + local_y
+			var land_idx := local_y * CELLS_PER_REGION + local_x
+
+			lands[land_idx] = get_land_func.call(cell_x, cell_y)
+
+	return lands

@@ -1,12 +1,18 @@
 ## Cell Manager - Loads and instantiates Morrowind cells in Godot
 ## Handles loading cells from ESM data and placing objects using NIF models
 ## Ported from OpenMW apps/openmw/mwworld/cellstore.cpp and scene.cpp
+##
+## Supports both synchronous and asynchronous cell loading:
+## - load_exterior_cell() / load_cell() - Synchronous, blocks until complete
+## - request_cell_async() - Async, uses BackgroundProcessor for NIF parsing
 class_name CellManager
 extends RefCounted
 
 # Preload coordinate utilities
-const MWCoords := preload("res://src/core/morrowind_coords.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
+const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
+const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 
 # Cache for loaded models to avoid re-parsing NIFs
 var _model_cache: Dictionary = {}  # model_path (lowercase) -> Node3D prototype
@@ -263,8 +269,8 @@ func _ensure_actor_collision(instance: Node3D, actor_type: String) -> void:
 	var center: Vector3 = instance.get_meta("actor_collision_center", Vector3.ZERO)
 
 	# Convert extents to Godot coordinates (Y-up) and meters
-	extents = MWCoords.position_to_godot(extents).abs()
-	center = MWCoords.position_to_godot(center)
+	extents = CS.vector_to_godot(extents).abs()
+	center = CS.vector_to_godot(center)
 
 	# Calculate dimensions
 	var width := maxf(extents.x, extents.z) * 2.0
@@ -417,8 +423,8 @@ func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int
 ## Uses unified CoordinateSystem for all conversions
 func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: bool) -> void:
 	# Position conversion via CoordinateSystem (outputs in meters)
-	node.position = MWCoords.position_to_godot(ref.position)
-	node.scale = MWCoords.scale_to_godot(ref.scale)
+	node.position = CS.vector_to_godot(ref.position)
+	node.scale = CS.scale_to_godot(ref.scale)
 
 	# Rotation conversion via CoordinateSystem
 	# NIF models are already converted to Y-up in nif_converter, so we only
@@ -426,7 +432,7 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 	#
 	# Morrowind uses ZYX Euler order (yaw around Z, then pitch around Y, then roll around X)
 	# After coordinate conversion (Z->Y, Y->-Z), this becomes YZX order in Godot
-	var godot_euler := MWCoords.rotation_to_godot(ref.rotation)
+	var godot_euler := CS.euler_to_godot(ref.rotation)
 	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_YZX)
 
 
@@ -559,3 +565,459 @@ func init_object_pool(pool_parent: Node3D = null) -> RefCounted:
 	if pool_parent:
 		_object_pool.init(pool_parent)
 	return _object_pool
+
+
+# =============================================================================
+# ASYNC CELL LOADING API
+# =============================================================================
+# Uses BackgroundProcessor to parse NIFs on worker threads.
+# The main thread then instantiates from parsed data within time budget.
+# =============================================================================
+
+## Maximum concurrent async cell requests (prevents memory buildup)
+const MAX_ASYNC_REQUESTS := 8
+
+## Maximum items in instantiation queue (prevents memory buildup)
+const MAX_INSTANTIATION_QUEUE := 1000
+
+## Maximum retries for failed async requests
+const MAX_ASYNC_RETRIES := 2
+
+## Async cell request tracking
+class AsyncCellRequest:
+	var cell_record: CellRecord
+	var grid: Vector2i  # For exterior cells
+	var is_interior: bool
+	var request_id: int
+	var pending_parses: Dictionary = {}  # model_path -> task_id
+	var parsed_results: Dictionary = {}  # model_path -> NIFParseResult
+	var references_to_process: Array = []  # CellReference objects awaiting instantiation
+	var cell_node: Node3D = null  # The cell node being built
+	var started: bool = false
+	var completed: bool = false
+	var failed: bool = false  # Whether the request failed
+	var error_message: String = ""  # Error description if failed
+	var retry_count: int = 0  # Number of retries attempted
+	var failed_models: Array[String] = []  # Models that failed to parse
+
+## Next async request ID
+var _next_async_id: int = 1
+
+## Active async requests
+var _async_requests: Dictionary = {}  # request_id -> AsyncCellRequest
+
+## BackgroundProcessor reference (must be set via set_background_processor)
+var _background_processor: Node = null
+
+## Instantiation queue for time-budgeted processing
+var _instantiation_queue: Array = []  # Array of {request_id, ref, model_path}
+
+## Parsed model prototypes waiting to be cached (from async results)
+var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
+
+
+## Set the background processor to use for async loading
+func set_background_processor(processor: Node) -> void:
+	if _background_processor and _background_processor.task_completed.is_connected(_on_parse_completed):
+		_background_processor.task_completed.disconnect(_on_parse_completed)
+
+	_background_processor = processor
+
+	if _background_processor:
+		_background_processor.task_completed.connect(_on_parse_completed)
+
+
+## Request async loading of an exterior cell
+## Returns request_id for tracking, or -1 if async not available or at capacity
+func request_exterior_cell_async(x: int, y: int) -> int:
+	if not _background_processor:
+		push_warning("CellManager: No background processor set, falling back to sync load")
+		return -1
+
+	# Check concurrent request limit
+	if _async_requests.size() >= MAX_ASYNC_REQUESTS:
+		push_warning("CellManager: Async request limit reached (%d), rejecting cell (%d, %d)" % [MAX_ASYNC_REQUESTS, x, y])
+		return -1
+
+	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	if not cell_record:
+		return -1
+
+	return _start_async_request(cell_record, Vector2i(x, y), false)
+
+
+## Request async loading of an interior cell
+## Returns request_id for tracking, or -1 if async not available or at capacity
+func request_cell_async(cell_name: String) -> int:
+	if not _background_processor:
+		push_warning("CellManager: No background processor set, falling back to sync load")
+		return -1
+
+	# Check concurrent request limit
+	if _async_requests.size() >= MAX_ASYNC_REQUESTS:
+		push_warning("CellManager: Async request limit reached (%d), rejecting cell '%s'" % [MAX_ASYNC_REQUESTS, cell_name])
+		return -1
+
+	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
+	if not cell_record:
+		return -1
+
+	return _start_async_request(cell_record, Vector2i.ZERO, true)
+
+
+## Check if an async request is complete
+func is_async_complete(request_id: int) -> bool:
+	if request_id not in _async_requests:
+		return true  # Not found = already completed or invalid
+	return _async_requests[request_id].completed
+
+
+## Check if an async request has failed (some models couldn't be parsed)
+func has_async_failed(request_id: int) -> bool:
+	if request_id not in _async_requests:
+		return false
+	var request: AsyncCellRequest = _async_requests[request_id]
+	return not request.failed_models.is_empty()
+
+
+## Get the error message for a failed request
+func get_async_error(request_id: int) -> String:
+	if request_id not in _async_requests:
+		return ""
+	return _async_requests[request_id].error_message
+
+
+## Get number of failed models in an async request
+func get_async_failed_count(request_id: int) -> int:
+	if request_id not in _async_requests:
+		return 0
+	return _async_requests[request_id].failed_models.size()
+
+
+## Get the result of a completed async request
+## Returns the cell Node3D, or null if not ready
+func get_async_result(request_id: int) -> Node3D:
+	if request_id not in _async_requests:
+		return null
+
+	var request: AsyncCellRequest = _async_requests[request_id]
+	if not request.completed:
+		return null
+
+	# Remove from tracking and return result
+	_async_requests.erase(request_id)
+	return request.cell_node
+
+
+## Cancel an async request
+func cancel_async_request(request_id: int) -> void:
+	if request_id not in _async_requests:
+		return
+
+	var request: AsyncCellRequest = _async_requests[request_id]
+
+	# Cancel pending parse tasks
+	for task_id in request.pending_parses.values():
+		_background_processor.cancel_task(task_id)
+
+	# Clean up cell node if started
+	if request.cell_node:
+		request.cell_node.queue_free()
+
+	_async_requests.erase(request_id)
+
+
+## Process async instantiation within time budget (call from _process)
+## Returns number of objects instantiated this frame
+func process_async_instantiation(budget_ms: float) -> int:
+	if _instantiation_queue.is_empty():
+		return 0
+
+	var start_time := Time.get_ticks_usec()
+	var budget_usec := budget_ms * 1000.0
+	var instantiated := 0
+
+	while not _instantiation_queue.is_empty():
+		var elapsed := Time.get_ticks_usec() - start_time
+		if elapsed >= budget_usec:
+			break
+
+		var entry: Dictionary = _instantiation_queue.pop_front()
+		var request_id: int = entry.request_id
+		var ref: CellReference = entry.ref
+		var model_path: String = entry.model_path
+		var item_id: String = entry.get("item_id", "")
+
+		# Check if request still exists
+		if request_id not in _async_requests:
+			continue
+
+		var request: AsyncCellRequest = _async_requests[request_id]
+
+		# Instantiate this reference
+		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
+		if obj:
+			request.cell_node.add_child(obj)
+			instantiated += 1
+
+		# Check if this was the last reference
+		if _is_request_complete(request):
+			request.completed = true
+
+	return instantiated
+
+
+## Internal: Start an async request
+func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -> int:
+	var request := AsyncCellRequest.new()
+	request.cell_record = cell
+	request.grid = grid
+	request.is_interior = is_interior
+	request.request_id = _next_async_id
+	_next_async_id += 1
+
+	# Create the cell node
+	request.cell_node = Node3D.new()
+	if is_interior:
+		request.cell_node.name = cell.name.replace(" ", "_").replace(",", "")
+	else:
+		request.cell_node.name = "Cell_%d_%d" % [grid.x, grid.y]
+
+	# Collect all unique model paths that need loading
+	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
+
+	for ref in cell.references:
+		var record_type: Array = [""]
+		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		if not base_record:
+			continue
+
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+		# Skip types that don't use models or are disabled
+		if type_name == "leveled_item":
+			continue
+		if type_name == "npc" and not load_npcs:
+			continue
+		if type_name == "creature" and not load_creatures:
+			continue
+		if type_name == "leveled_creature" and not load_creatures:
+			continue
+
+		var model_path: String = _get_model_path(base_record)
+		if model_path.is_empty():
+			# Light without model, or actor placeholder - queue for direct instantiation
+			request.references_to_process.append(ref)
+			continue
+
+		var item_id: String = ""
+		if "record_id" in base_record:
+			item_id = base_record.record_id
+
+		var cache_key := _get_cache_key(model_path, item_id)
+
+		# Check if already cached
+		if cache_key in _model_cache:
+			# Already have this model, queue reference for instantiation
+			_queue_instantiation(request.request_id, ref, model_path, item_id)
+			continue
+
+		# Need to load this model
+		if model_path not in models_to_load:
+			models_to_load[model_path] = {"item_ids": []}
+		if item_id and item_id not in models_to_load[model_path].item_ids:
+			models_to_load[model_path].item_ids.append(item_id)
+
+		# Queue reference for later (after model is parsed)
+		request.references_to_process.append(ref)
+
+	# Submit parse tasks for models that need loading
+	for model_path in models_to_load:
+		var item_ids: Array = models_to_load[model_path].item_ids
+		var item_id: String = item_ids[0] if item_ids.size() > 0 else ""
+
+		var task_id := _submit_parse_task(model_path, item_id, request.request_id)
+		if task_id >= 0:
+			request.pending_parses[model_path] = task_id
+
+	request.started = true
+	_async_requests[request.request_id] = request
+
+	# If no pending parses, mark as complete immediately
+	if request.pending_parses.is_empty() and request.references_to_process.is_empty():
+		request.completed = true
+
+	return request.request_id
+
+
+## Internal: Submit a NIF parse task to background processor
+func _submit_parse_task(model_path: String, item_id: String, request_id: int) -> int:
+	# Build full path
+	var full_path := model_path
+	if not model_path.to_lower().begins_with("meshes"):
+		full_path = "meshes\\" + model_path
+
+	# Extract from BSA (this is I/O but relatively fast)
+	var nif_data := PackedByteArray()
+	if BSAManager.has_file(full_path):
+		nif_data = BSAManager.extract_file(full_path)
+	elif BSAManager.has_file(model_path):
+		nif_data = BSAManager.extract_file(model_path)
+		full_path = model_path
+
+	if nif_data.is_empty():
+		return -1
+
+	# Submit parse task
+	var task_id: int = _background_processor.submit_task(func():
+		return NIFConverter.parse_buffer_only(nif_data, full_path, item_id)
+	)
+
+	return task_id
+
+
+## Internal: Handle parse completion from background processor
+func _on_parse_completed(task_id: int, result: Variant) -> void:
+	# Find which request this belongs to
+	for request_id in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+
+		for model_path in request.pending_parses:
+			if request.pending_parses[model_path] == task_id:
+				# Found it - store result
+				request.pending_parses.erase(model_path)
+
+				var parse_success := false
+				if result is NIFParseResult:
+					var parse_result: NIFParseResult = result
+					if parse_result.is_valid():
+						request.parsed_results[model_path] = parse_result
+						parse_success = true
+
+						# Convert to prototype and cache (main thread)
+						var converter := NIFConverter.new()
+						var prototype := converter.convert_from_parsed(parse_result)
+						if prototype:
+							var cache_key := _get_cache_key(model_path, parse_result.item_id)
+							_model_cache[cache_key] = prototype
+							_stats["models_loaded"] += 1
+						else:
+							# Conversion failed
+							parse_success = false
+							request.failed_models.append(model_path)
+					else:
+						# Parse returned invalid result
+						request.failed_models.append(model_path)
+				else:
+					# Result wasn't a NIFParseResult (unexpected)
+					request.failed_models.append(model_path)
+
+				# Queue all references waiting for this model (even if failed, they'll get placeholders)
+				_queue_references_for_model(request, model_path)
+
+				# Check if request is now complete
+				if _is_request_complete(request):
+					request.completed = true
+					# Mark as failed if any models failed to parse
+					if not request.failed_models.is_empty():
+						request.error_message = "Failed to parse %d models" % request.failed_models.size()
+
+				return
+
+
+## Internal: Queue references that were waiting for a model to be parsed
+func _queue_references_for_model(request: AsyncCellRequest, model_path: String) -> void:
+	var remaining: Array = []
+
+	for ref in request.references_to_process:
+		var record_type: Array = [""]
+		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		if not base_record:
+			continue
+
+		var ref_model_path: String = _get_model_path(base_record)
+		var item_id: String = ""
+		if "record_id" in base_record:
+			item_id = base_record.record_id
+
+		if ref_model_path.to_lower().replace("/", "\\") == model_path.to_lower().replace("/", "\\"):
+			# This reference uses the model that was just parsed
+			_queue_instantiation(request.request_id, ref, model_path, item_id)
+		else:
+			remaining.append(ref)
+
+	request.references_to_process = remaining
+
+
+## Internal: Check if an async request is complete
+func _is_request_complete(request: AsyncCellRequest) -> bool:
+	return request.pending_parses.is_empty() and request.references_to_process.is_empty()
+
+
+## Internal: Instantiate a reference from parsed data
+func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> Node3D:
+	# Get the cached model prototype
+	var cache_key := _get_cache_key(model_path, item_id)
+
+	# Try object pool first
+	if use_object_pool and _object_pool:
+		var pooled: Node3D = _object_pool.acquire(model_path)
+		if pooled:
+			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+			_apply_transform(pooled, ref, true)
+			_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
+			return pooled
+
+	# Get from cache
+	if cache_key not in _model_cache or _model_cache[cache_key] == null:
+		return _create_placeholder(ref)
+
+	var model_prototype: Node3D = _model_cache[cache_key]
+
+	# Create instance
+	var instance: Node3D = model_prototype.duplicate()
+	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+
+	# Apply transform
+	_apply_transform(instance, ref, true)
+
+	_stats["objects_instantiated"] += 1
+	return instance
+
+
+## Internal: Queue an object for instantiation with limit checking
+func _queue_instantiation(request_id: int, ref: CellReference, model_path: String, item_id: String) -> bool:
+	# Check queue limit to prevent memory buildup
+	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
+		push_warning("CellManager: Instantiation queue full (%d items), dropping object" % MAX_INSTANTIATION_QUEUE)
+		return false
+
+	_instantiation_queue.append({
+		"request_id": request_id,
+		"ref": ref,
+		"model_path": model_path,
+		"item_id": item_id
+	})
+	return true
+
+
+## Internal: Get cache key for a model
+func _get_cache_key(model_path: String, item_id: String) -> String:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	if not item_id.is_empty():
+		return normalized + ":" + item_id.to_lower()
+	return normalized
+
+
+## Get count of pending async requests
+func get_async_pending_count() -> int:
+	var count := 0
+	for request_id in _async_requests:
+		if not _async_requests[request_id].completed:
+			count += 1
+	return count
+
+
+## Get total objects waiting in instantiation queue
+func get_instantiation_queue_size() -> int:
+	return _instantiation_queue.size()

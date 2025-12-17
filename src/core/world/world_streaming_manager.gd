@@ -18,7 +18,6 @@ extends Node3D
 
 # Preload dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
-const ObjectLODManagerScript := preload("res://src/core/world/object_lod_manager.gd")
 
 ## Emitted when a cell starts loading
 signal cell_loading(grid: Vector2i)
@@ -60,21 +59,14 @@ signal terrain_region_loaded(region: Vector2i)
 
 ## Time budget for cell loading per frame (ms)
 ## Higher = faster loading but more frame hitches
-@export var cell_load_budget_ms: float = 8.0
+## Keep low to maintain 60fps
+@export var cell_load_budget_ms: float = 2.0
 
 ## Maximum cells to queue for loading
 @export var max_load_queue_size: int = 16
 
 ## Enable async/time-budgeted cell loading
 @export var async_loading_enabled: bool = true
-
-## Enable object LOD for distance-based detail levels
-@export var object_lod_enabled: bool = true
-
-## LOD distance thresholds (meters)
-@export var lod_full_distance: float = 50.0
-@export var lod_low_distance: float = 150.0
-@export var lod_cull_distance: float = 500.0
 
 #endregion
 
@@ -95,8 +87,8 @@ var cell_manager: RefCounted = null  # CellManager
 ## Reference to TerrainManager for terrain data
 var terrain_manager: RefCounted = null  # TerrainManager
 
-## LOD manager for distance-based detail levels
-var _lod_manager: Node = null  # ObjectLODManager
+## Reference to BackgroundProcessor for async operations
+var background_processor: Node = null  # BackgroundProcessor
 
 #endregion
 
@@ -110,6 +102,9 @@ var _loaded_cells: Dictionary = {}
 
 ## Cells currently being loaded (async)
 var _loading_cells: Dictionary = {}
+
+## Async request tracking: request_id -> Vector2i grid
+var _async_cell_requests: Dictionary = {}
 
 ## Last known camera cell position
 var _last_camera_cell: Vector2i = Vector2i(999999, 999999)
@@ -141,7 +136,6 @@ func initialize() -> void:
 	if _initialized:
 		return
 	_setup_owdb()
-	_setup_lod_manager()
 	_initialized = true
 	_debug("WorldStreamingManager initialized")
 
@@ -159,7 +153,14 @@ func _process(_delta: float) -> void:
 		_last_camera_cell = current_cell
 		_on_camera_cell_changed(current_cell)
 
-	# Process load queue with time budget
+	# Process terrain generation queue with time budget
+	if load_terrain and not _terrain_generation_queue.is_empty():
+		_process_terrain_queue()
+
+	# Poll for completed async cell requests
+	_poll_async_completions()
+
+	# Process object load queue with time budget
 	if async_loading_enabled and not _load_queue.is_empty():
 		_process_load_queue()
 
@@ -177,18 +178,6 @@ func set_tracked_node(node: Node3D) -> void:
 		if owdb_position.get_parent() != node:
 			owdb_position.reparent(node)
 		owdb_position.position = Vector3.ZERO
-
-	# Update LOD manager camera reference
-	if _lod_manager and node:
-		# If tracked node is a Camera3D, use it directly
-		# Otherwise try to find a camera in the viewport
-		var cam: Camera3D = null
-		if node is Camera3D:
-			cam = node
-		elif node.get_viewport():
-			cam = node.get_viewport().get_camera_3d()
-		if cam:
-			_lod_manager.set_camera(cam)
 
 	# Force immediate update
 	if node:
@@ -255,6 +244,12 @@ func set_terrain_manager(manager: RefCounted) -> void:
 	_debug("TerrainManager set")
 
 
+## Set the BackgroundProcessor for async loading
+func set_background_processor(processor: Node) -> void:
+	background_processor = processor
+	_debug("BackgroundProcessor set")
+
+
 ## Set the Terrain3D node reference
 func set_terrain_3d(terrain: Node) -> void:
 	terrain_3d = terrain
@@ -273,20 +268,16 @@ func get_stats() -> Dictionary:
 		"load_time_ms": _stats_load_time_ms,
 		"cells_loaded_this_frame": _stats_cells_loaded_this_frame,
 		"queue_high_water_mark": _stats_queue_high_water_mark,
+		"async_pending": _async_cell_requests.size(),
 	}
 
 	if owdb and owdb.has_method("get_currently_loaded_nodes"):
 		stats["owdb_loaded_nodes"] = owdb.get_currently_loaded_nodes()
 		stats["owdb_total_nodes"] = owdb.get_total_database_nodes()
 
-	# Add LOD stats
-	if _lod_manager and _lod_manager.has_method("get_stats"):
-		var lod_stats: Dictionary = _lod_manager.get_stats()
-		stats["lod_objects_full"] = lod_stats.get("objects_full", 0)
-		stats["lod_objects_low"] = lod_stats.get("objects_low", 0)
-		stats["lod_objects_billboard"] = lod_stats.get("objects_billboard", 0)
-		stats["lod_objects_culled"] = lod_stats.get("objects_culled", 0)
-		stats["lod_total_tracked"] = lod_stats.get("objects_tracked", 0)
+	# Add cell manager async stats if available
+	if cell_manager and cell_manager.has_method("get_instantiation_queue_size"):
+		stats["instantiation_queue"] = cell_manager.get_instantiation_queue_size()
 
 	return stats
 
@@ -345,25 +336,6 @@ func _find_terrain3d() -> void:
 			terrain_3d = child
 			_debug("Found Terrain3D (child): %s" % child.name)
 			return
-
-## Set up LOD manager for object distance-based detail levels
-func _setup_lod_manager() -> void:
-	if not object_lod_enabled:
-		return
-
-	_lod_manager = Node3D.new()
-	_lod_manager.set_script(ObjectLODManagerScript)
-	_lod_manager.name = "ObjectLODManager"
-
-	# Configure LOD distances
-	_lod_manager.lod_full_distance = lod_full_distance
-	_lod_manager.lod_low_distance = lod_low_distance
-	_lod_manager.lod_cull_distance = lod_cull_distance
-
-	add_child(_lod_manager)
-	_debug("LOD manager created (full=%dm, low=%dm, cull=%dm)" % [
-		int(lod_full_distance), int(lod_low_distance), int(lod_cull_distance)
-	])
 
 #endregion
 
@@ -444,10 +416,6 @@ func _load_cell_internal(grid: Vector2i) -> Node3D:
 	# Store grid reference for later lookup
 	cell_node.set_meta("cell_grid", grid)
 
-	# Register objects with LOD manager for distance-based detail
-	if _lod_manager and object_lod_enabled:
-		_lod_manager.register_cell_objects(cell_node)
-
 	_loaded_cells[grid] = cell_node
 	cell_loaded.emit(grid, cell_node)
 	_debug("Cell loaded: %s with %d children" % [grid, cell_node.get_child_count()])
@@ -472,10 +440,6 @@ func _unload_cell_internal(grid: Vector2i) -> void:
 				var released: int = pool.release_cell_objects(cell_node)
 				if released > 0:
 					_debug("Released %d objects to pool from cell %s" % [released, grid])
-
-		# Unregister from LOD manager before freeing
-		if _lod_manager and _lod_manager.has_method("unregister_cell_objects"):
-			_lod_manager.unregister_cell_objects(cell_node)
 
 		cell_node.queue_free()
 
@@ -526,6 +490,7 @@ func _queue_cell_load(grid: Vector2i, camera_cell: Vector2i) -> void:
 
 ## Process the load queue with time budgeting
 ## Called every frame to load cells without causing hitches
+## Uses async loading when background processor is available
 func _process_load_queue() -> void:
 	if _load_queue.is_empty():
 		return
@@ -533,6 +498,9 @@ func _process_load_queue() -> void:
 	var start_time := Time.get_ticks_usec()
 	var budget_usec := cell_load_budget_ms * 1000.0
 	_stats_cells_loaded_this_frame = 0
+
+	# Check if we can use async loading (background processor available)
+	var use_async := background_processor != null and cell_manager != null
 
 	while not _load_queue.is_empty():
 		# Check time budget
@@ -549,27 +517,77 @@ func _process_load_queue() -> void:
 			_loading_cells.erase(grid)
 			continue
 
-		# Actually load the cell
-		var cell_node: Node3D = cell_manager.load_exterior_cell(grid.x, grid.y)
+		# Skip if already has pending async request
+		if grid in _async_cell_requests.values():
+			continue
+
+		if use_async:
+			# Submit async request - actual loading happens in background
+			var request_id: int = cell_manager.request_exterior_cell_async(grid.x, grid.y)
+			if request_id >= 0:
+				_async_cell_requests[request_id] = grid
+				_debug("Async cell request submitted: %s (id=%d)" % [grid, request_id])
+			else:
+				# Fallback to sync if async not available (e.g., cell not found)
+				_loading_cells.erase(grid)
+				_debug("Cell %s has no data (async returned -1)" % grid)
+		else:
+			# Fallback to sync loading (no background processor)
+			var cell_node: Node3D = cell_manager.load_exterior_cell(grid.x, grid.y)
+			_loading_cells.erase(grid)
+
+			if cell_node:
+				add_child(cell_node)
+				cell_node.set_meta("cell_grid", grid)
+
+				_loaded_cells[grid] = cell_node
+				cell_loaded.emit(grid, cell_node)
+				_stats_cells_loaded_this_frame += 1
+				_debug("Cell loaded (sync): %s with %d children" % [grid, cell_node.get_child_count()])
+			else:
+				_debug("Cell %s has no data (ocean/empty)" % grid)
+
+	# Update timing stats
+	_stats_load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
+
+
+## Poll for completed async cell requests and integrate them
+func _poll_async_completions() -> void:
+	if _async_cell_requests.is_empty() or not cell_manager:
+		return
+
+	var completed_requests: Array[int] = []
+
+	for request_id: int in _async_cell_requests:
+		if cell_manager.is_async_complete(request_id):
+			completed_requests.append(request_id)
+
+	for request_id in completed_requests:
+		var grid: Vector2i = _async_cell_requests[request_id]
+		_async_cell_requests.erase(request_id)
 		_loading_cells.erase(grid)
+
+		# Skip if cell was unloaded while loading (e.g., camera moved away)
+		if grid not in _loading_cells and grid in _loaded_cells:
+			continue
+
+		# Check for partial failures (some models failed to parse)
+		if cell_manager.has_async_failed(request_id):
+			var failed_count: int = cell_manager.get_async_failed_count(request_id)
+			_debug("Cell %s had %d models fail to parse (will use placeholders)" % [grid, failed_count])
+
+		var cell_node: Node3D = cell_manager.get_async_result(request_id)
 
 		if cell_node:
 			add_child(cell_node)
 			cell_node.set_meta("cell_grid", grid)
 
-			# Register objects with LOD manager for distance-based detail
-			if _lod_manager and object_lod_enabled:
-				_lod_manager.register_cell_objects(cell_node)
-
 			_loaded_cells[grid] = cell_node
 			cell_loaded.emit(grid, cell_node)
 			_stats_cells_loaded_this_frame += 1
-			_debug("Cell loaded (queued): %s with %d children" % [grid, cell_node.get_child_count()])
+			_debug("Cell loaded (async): %s with %d children" % [grid, cell_node.get_child_count()])
 		else:
-			_debug("Cell %s has no data (ocean/empty)" % grid)
-
-	# Update timing stats
-	_stats_load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
+			_debug("Cell %s has no data (async result null)" % grid)
 
 
 ## Clear the load queue (e.g., when teleporting)
@@ -577,6 +595,13 @@ func clear_load_queue() -> void:
 	for entry in _load_queue:
 		_loading_cells.erase(entry.grid)
 	_load_queue.clear()
+
+	# Cancel pending async requests
+	if cell_manager:
+		for request_id in _async_cell_requests:
+			cell_manager.cancel_async_request(request_id)
+	_async_cell_requests.clear()
+
 	_debug("Load queue cleared")
 
 #endregion
@@ -601,11 +626,28 @@ func _cell_to_godot_position(grid: Vector2i) -> Vector3:
 ## Whether to generate terrain on-the-fly if no preprocessed data exists
 @export var generate_terrain_on_fly: bool = true
 
-## Track which cells have had terrain generated
-var _terrain_generated_cells: Dictionary = {}
+## Track which combined regions (4x4 cells each) have been generated
+var _terrain_generated_regions: Dictionary = {}
+
+## Priority queue of terrain regions to generate (sorted by distance)
+## Each entry: { "region": Vector2i, "priority": float }
+var _terrain_generation_queue: Array = []
+
+## Time budget for terrain generation per frame (ms)
+## Keep low to maintain 60fps (combined with cell_load_budget_ms should be < 8ms)
+@export var terrain_generation_budget_ms: float = 4.0
+
+## Terrain view distance in regions (limits how far terrain generates)
+## Each region is 4x4 cells = ~468m, so 8 regions = ~3.7km
+@export var terrain_view_distance_regions: int = 8
+
+## Enable view frustum culling for terrain generation
+## When enabled, terrain behind the camera loads with lower priority
+@export var terrain_frustum_priority: bool = true
 
 ## Load terrain regions for visible cells
-## Called automatically when terrain_manager is set and load_terrain is true
+## Uses combined regions (4x4 cells per Terrain3D region) for large terrain support
+## This allows ~15km × 15km terrain coverage (128 cells per axis)
 func _load_terrain_for_cells(cells: Array[Vector2i]) -> void:
 	if not terrain_manager or not terrain_3d or not load_terrain:
 		return
@@ -613,59 +655,161 @@ func _load_terrain_for_cells(cells: Array[Vector2i]) -> void:
 	if not generate_terrain_on_fly:
 		return
 
-	# Generate terrain on-the-fly for cells that don't have pre-processed data
+	# Get camera position for priority calculation
+	var camera_cell := _last_camera_cell
+	var camera_region: Vector2i = terrain_manager.cell_to_region(camera_cell)
+
+	# Get camera forward direction for frustum priority
+	var camera_forward := Vector3.FORWARD
+	if _tracked_node and _tracked_node is Camera3D:
+		camera_forward = -(_tracked_node as Camera3D).global_transform.basis.z
+
+	# Collect unique regions that need loading
+	var regions_to_queue: Dictionary = {}  # region_coord -> priority
+
 	for cell_grid in cells:
-		if cell_grid in _terrain_generated_cells:
+		# Convert cell coordinate to combined region coordinate
+		var region_coord: Vector2i = terrain_manager.cell_to_region(cell_grid)
+
+		# Skip if already generated
+		if region_coord in _terrain_generated_regions:
 			continue
 
-		# Check if terrain region already exists at this cell location
-		if _terrain_region_exists(cell_grid):
-			_terrain_generated_cells[cell_grid] = true
+		# Skip if already in queue (will update priority below)
+		var already_queued := false
+		for entry in _terrain_generation_queue:
+			if entry.region == region_coord:
+				already_queued = true
+				break
+		if already_queued:
 			continue
 
-		# Generate terrain for this cell
-		_generate_terrain_cell(cell_grid)
+		# Check if terrain region already exists at this location
+		if _terrain_region_exists(region_coord):
+			_terrain_generated_regions[region_coord] = true
+			continue
+
+		# Calculate distance from camera region
+		var dx: int = region_coord.x - camera_region.x
+		var dy: int = region_coord.y - camera_region.y
+		var distance := sqrt(dx * dx + dy * dy)
+
+		# Skip regions beyond view distance
+		if distance > terrain_view_distance_regions:
+			continue
+
+		# Calculate priority (lower = higher priority)
+		var priority := distance
+
+		# Apply frustum priority bonus for regions in front of camera
+		if terrain_frustum_priority and _tracked_node:
+			var region_dir := Vector3(dx, 0, -dy).normalized()
+			var dot := camera_forward.dot(region_dir)
+			# Regions behind camera get penalty (dot < 0)
+			# Regions in front get bonus (dot > 0)
+			priority -= dot * 2.0  # Bonus/penalty of up to 2 priority levels
+
+		regions_to_queue[region_coord] = priority
+
+	# Add to priority queue (sorted by priority)
+	for region_coord: Vector2i in regions_to_queue:
+		var priority: float = regions_to_queue[region_coord]
+		_queue_terrain_region(region_coord, priority)
 
 
-## Check if a terrain region exists for the given cell
-func _terrain_region_exists(cell_grid: Vector2i) -> bool:
+## Add a terrain region to the priority queue
+func _queue_terrain_region(region_coord: Vector2i, priority: float) -> void:
+	# Insert in sorted order (priority queue - lower priority value = higher priority)
+	var entry := { "region": region_coord, "priority": priority }
+
+	var inserted := false
+	for i in range(_terrain_generation_queue.size()):
+		if priority < _terrain_generation_queue[i].priority:
+			_terrain_generation_queue.insert(i, entry)
+			inserted = true
+			break
+
+	if not inserted:
+		_terrain_generation_queue.append(entry)
+
+	_debug("Queued terrain region: %s (priority %.2f)" % [region_coord, priority])
+
+
+## Check if a terrain region exists for the given combined region coordinate
+func _terrain_region_exists(region_coord: Vector2i) -> bool:
 	if not terrain_3d or not terrain_3d.data:
 		return false
 
-	# Calculate world position for this cell
-	var region_world_size: float = 64.0 * float(terrain_3d.get_vertex_spacing())
-	var world_x: float = float(cell_grid.x) * region_world_size + region_world_size * 0.5
-	var world_z: float = float(-cell_grid.y) * region_world_size - region_world_size * 0.5
+	# Calculate world position for this combined region
+	# Each cell is 64 vertices × vertex_spacing meters
+	# Each region is 4 cells × 64 vertices × vertex_spacing meters
+	var vertex_spacing: float = terrain_3d.get_vertex_spacing()
+	var cell_world_size: float = 64.0 * vertex_spacing
+	var region_world_size: float = 4.0 * cell_world_size  # CELLS_PER_REGION = 4
 
-	# Check if a region exists at this position
+	# Get the southwest cell of this region
+	var sw_cell: Vector2i = terrain_manager.region_to_sw_cell(region_coord)
+
+	# Position at the center of the region
+	var world_x: float = float(sw_cell.x) * cell_world_size + region_world_size * 0.5
+	var world_z: float = float(-sw_cell.y) * cell_world_size - region_world_size * 0.5
+
+	# Check if a region exists at this world position
 	var pos := Vector3(world_x, 0, world_z)
-	return terrain_3d.data.has_region(pos)
+	return terrain_3d.data.has_regionp(pos)
 
 
-## Generate terrain for a single cell on-the-fly
-func _generate_terrain_cell(cell_grid: Vector2i) -> bool:
+## Generate terrain for a combined region (4x4 cells) on-the-fly
+func _generate_terrain_region(region_coord: Vector2i) -> bool:
 	if not terrain_manager or not terrain_3d:
 		return false
 
-	# Get LAND record for this cell
-	var land: LandRecord = ESMManager.get_land(cell_grid.x, cell_grid.y)
-	if not land or not land.has_heights():
-		_terrain_generated_cells[cell_grid] = true  # Mark as processed (even if no data)
-		return false
+	# Use the new combined region import method from TerrainManager
+	# Pass ESMManager.get_land as the callable to fetch LAND records
+	var get_land_func := func(cell_x: int, cell_y: int) -> LandRecord:
+		return ESMManager.get_land(cell_x, cell_y)
 
-	# Use the unified import method from TerrainManager
-	var success: bool = terrain_manager.import_cell_to_terrain(terrain_3d, land)
+	var success: bool = terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func)
+
+	# Mark as processed regardless of success (empty ocean regions are valid)
+	_terrain_generated_regions[region_coord] = true
+
 	if success:
-		_terrain_generated_cells[cell_grid] = true
-		terrain_region_loaded.emit(cell_grid)
-		_debug("Generated terrain for cell: %s" % cell_grid)
+		terrain_region_loaded.emit(region_coord)
+		_debug("Generated combined terrain region: %s (4x4 cells)" % region_coord)
 
 	return success
 
 
+## Process terrain generation queue with time budgeting
+## Called every frame from _process() to generate terrain without blocking
+func _process_terrain_queue() -> void:
+	if _terrain_generation_queue.is_empty():
+		return
+
+	var start_time := Time.get_ticks_usec()
+	var budget_usec := terrain_generation_budget_ms * 1000.0
+
+	while not _terrain_generation_queue.is_empty():
+		# Check time budget
+		var elapsed := Time.get_ticks_usec() - start_time
+		if elapsed >= budget_usec:
+			break
+
+		var entry: Dictionary = _terrain_generation_queue.pop_front()
+		var region_coord: Vector2i = entry.region
+
+		# Skip if already generated (race condition check)
+		if region_coord in _terrain_generated_regions:
+			continue
+
+		_generate_terrain_region(region_coord)
+
+
 ## Clear terrain generation cache (e.g., when switching areas)
 func clear_terrain_cache() -> void:
-	_terrain_generated_cells.clear()
+	_terrain_generated_regions.clear()
+	_terrain_generation_queue.clear()
 	_debug("Terrain generation cache cleared")
 
 #endregion

@@ -13,6 +13,7 @@ const SkeletonBuilder := preload("res://src/core/nif/nif_skeleton_builder.gd")
 const AnimationConverter := preload("res://src/core/nif/nif_animation_converter.gd")
 const CollisionBuilder := preload("res://src/core/nif/nif_collision_builder.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const MeshSimplifier := preload("res://src/core/nif/mesh_simplifier.gd")
 
 # The NIFReader instance
 var _reader: Reader = null
@@ -30,7 +31,8 @@ var _collision_builder: CollisionBuilder = null
 var load_textures: bool = true
 
 # Whether to extract animations during conversion
-var load_animations: bool = true
+# DISABLED by default: Most world objects are statics. Enable for NPCs/creatures.
+var load_animations: bool = false
 
 # Whether to generate collision shapes during conversion
 var load_collision: bool = true
@@ -63,6 +65,23 @@ var debug_animations: bool = false
 
 # Debug mode for collision output
 var debug_collision: bool = false
+
+## LOD Generation Settings
+## When enabled, generates simplified LOD meshes during conversion
+## DISABLED: Using Godot's native VisibilityRange for LOD instead
+var generate_lods: bool = false
+
+## Triangle ratio for LOD1 (0.5 = 50% of original triangles)
+var lod1_ratio: float = 0.5
+
+## Triangle ratio for LOD2 (0.25 = 25% of original triangles)
+var lod2_ratio: float = 0.25
+
+## Minimum triangles to generate LODs (skip simple meshes)
+var min_triangles_for_lod: int = 100
+
+## Debug mode for LOD generation
+var debug_lod: bool = false
 
 # Source path for auto collision mode detection
 var _source_path: String = ""
@@ -114,6 +133,69 @@ func convert_buffer(data: PackedByteArray, path_hint: String = "") -> Node3D:
 func convert_buffer_with_item_id(data: PackedByteArray, item_id: String, path_hint: String = "") -> Node3D:
 	collision_item_id = item_id
 	return convert_buffer(data, path_hint)
+
+
+# =============================================================================
+# ASYNC CONVERSION API
+# =============================================================================
+# These methods separate parsing from instantiation for background thread use.
+# parse_buffer_only() is THREAD-SAFE and can run on WorkerThreadPool.
+# convert_from_parsed() MUST run on main thread (creates scene tree nodes).
+# =============================================================================
+
+const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
+
+## Parse a NIF buffer without creating scene nodes (THREAD-SAFE)
+## This can be called from a worker thread via BackgroundProcessor.
+## Returns NIFParseResult containing the parsed reader, or error info.
+##
+## Example usage with BackgroundProcessor:
+##   var task_id = background_processor.submit_task(func():
+##       var converter = NIFConverter.new()
+##       return converter.parse_buffer_only(data, path, item_id)
+##   )
+static func parse_buffer_only(data: PackedByteArray, path_hint: String = "", item_id: String = "") -> NIFParseResult:
+	if data.is_empty():
+		return NIFParseResult.create_failure(path_hint, "Empty buffer")
+
+	var reader := Reader.new()
+	var parse_result := reader.load_buffer(data, path_hint)
+
+	if parse_result != OK:
+		return NIFParseResult.create_failure(path_hint, "Parse failed with error %d" % parse_result)
+
+	if reader.roots.is_empty():
+		return NIFParseResult.create_failure(path_hint, "No root nodes in NIF")
+
+	var result := NIFParseResult.create_success(reader, path_hint)
+	result.item_id = item_id
+	result.buffer_hash = data.size()  # Simple hash for now
+	return result
+
+
+## Convert a pre-parsed NIF to a Godot Node3D scene (MAIN THREAD ONLY)
+## parse_result: The result from parse_buffer_only()
+## Returns the root Node3D or null on failure
+func convert_from_parsed(parse_result: NIFParseResult) -> Node3D:
+	if not parse_result.is_valid():
+		push_error("NIFConverter: Invalid parse result for %s: %s" % [parse_result.path, parse_result.error])
+		return null
+
+	# Transfer parsed data to this converter instance
+	_reader = parse_result.reader as Reader
+	_source_path = parse_result.path
+	collision_item_id = parse_result.item_id
+
+	# Apply configuration from parse result if set
+	if parse_result.load_textures != load_textures:
+		load_textures = parse_result.load_textures
+	if parse_result.load_animations != load_animations:
+		load_animations = parse_result.load_animations
+	if parse_result.load_collision != load_collision:
+		load_collision = parse_result.load_collision
+
+	return _convert()
+
 
 ## Internal conversion after parsing
 func _convert() -> Node3D:
@@ -378,6 +460,12 @@ func _convert_ni_tri_shape(shape: Defs.NiTriShape, skeleton: Skeleton3D = null) 
 	if mesh:
 		mesh_instance.mesh = mesh
 
+		# Generate LOD meshes for non-skinned meshes
+		if not is_skinned:
+			var lod_meshes := _generate_lod_meshes(mesh)
+			if not lod_meshes.is_empty():
+				mesh_instance.set_meta("lod_meshes", lod_meshes)
+
 		# Apply material from properties
 		var material := _get_material_for_shape(shape)
 		if material:
@@ -437,6 +525,12 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 	if mesh:
 		mesh_instance.mesh = mesh
 
+		# Generate LOD meshes for non-skinned meshes
+		if not is_skinned:
+			var lod_meshes := _generate_lod_meshes(mesh)
+			if not lod_meshes.is_empty():
+				mesh_instance.set_meta("lod_meshes", lod_meshes)
+
 		# Apply material from properties
 		var material := _get_material_for_shape(strips)
 		if material:
@@ -458,6 +552,59 @@ static func _convert_nif_vector3(v: Vector3) -> Vector3:
 ## Delegates to unified CoordinateSystem - outputs in meters
 static func _convert_nif_vertices(vertices: PackedVector3Array) -> PackedVector3Array:
 	return CS.vectors_to_godot(vertices)  # Converts to meters
+
+
+## Generate LOD meshes for a given mesh
+## Returns dictionary with "lod1" and "lod2" keys, or empty if LOD generation skipped
+func _generate_lod_meshes(mesh: ArrayMesh) -> Dictionary:
+	if not generate_lods or mesh == null:
+		return {}
+
+	if mesh.get_surface_count() == 0:
+		return {}
+
+	var arrays := mesh.surface_get_arrays(0)
+	if arrays.is_empty():
+		return {}
+
+	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	if indices == null or indices.is_empty():
+		return {}
+
+	var num_triangles: int = indices.size() / 3
+	if num_triangles < min_triangles_for_lod:
+		if debug_lod:
+			print("NIFConverter: Skipping LOD for mesh with %d triangles (min: %d)" % [num_triangles, min_triangles_for_lod])
+		return {}
+
+	var simplifier := MeshSimplifier.new()
+	var result := {}
+
+	# Generate LOD1
+	var lod1_arrays := simplifier.simplify(arrays, lod1_ratio)
+	if not lod1_arrays.is_empty() and lod1_arrays[Mesh.ARRAY_VERTEX] != null:
+		var lod1_mesh := ArrayMesh.new()
+		lod1_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod1_arrays)
+		result["lod1"] = lod1_mesh
+
+		if debug_lod:
+			var lod1_indices: PackedInt32Array = lod1_arrays[Mesh.ARRAY_INDEX]
+			var lod1_tris: int = lod1_indices.size() / 3 if lod1_indices else 0
+			print("NIFConverter: LOD1 %d -> %d triangles (%.1f%%)" % [num_triangles, lod1_tris, 100.0 * lod1_tris / num_triangles])
+
+	# Generate LOD2
+	var lod2_arrays := simplifier.simplify(arrays, lod2_ratio)
+	if not lod2_arrays.is_empty() and lod2_arrays[Mesh.ARRAY_VERTEX] != null:
+		var lod2_mesh := ArrayMesh.new()
+		lod2_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod2_arrays)
+		result["lod2"] = lod2_mesh
+
+		if debug_lod:
+			var lod2_indices: PackedInt32Array = lod2_arrays[Mesh.ARRAY_INDEX]
+			var lod2_tris: int = lod2_indices.size() / 3 if lod2_indices else 0
+			print("NIFConverter: LOD2 %d -> %d triangles (%.1f%%)" % [num_triangles, lod2_tris, 100.0 * lod2_tris / num_triangles])
+
+	return result
 
 
 ## Create ArrayMesh from NiTriShapeData

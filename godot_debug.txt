@@ -1,5 +1,5 @@
 ========================================
-Godot Debug Log - Sat Dec 13 03:43:21 PM +07 2025
+Godot Debug Log - Tue Dec 16 10:35:04 PM +07 2025
 ========================================
 
 Godot Engine v4.5.1.stable.official.f62fdbde1 - https://godotengine.org
@@ -7,16 +7,524 @@ Vulkan 1.4.305 - Forward+ - Using Device #0: AMD - AMD Radeon Graphics (RADV REN
 
 WARNING: instance_reset_physics_interpolation() is deprecated.
      at: _instance_reset_physics_interpolation_bind_compat_104269 (servers/rendering_server.compat.inc:58)
-WARNING: Terrain3D#1116:_notification:869: free_editor_textures requires `Assets` be saved to a file. Do so, or disable the former to turn off this warning
+WARNING: Terrain3D#2938:_notification:869: free_editor_textures requires `Assets` be saved to a file. Do so, or disable the former to turn off this warning
      at: push_warning (core/variant/variant_utility.cpp:1034)
 PerformanceProfiler: Session started
+[WaveGenerator] Using Gerstner fallback (map size: 256)
+--Main Shader--
+    1 | shader_type spatial;
+    2 | render_mode world_vertex_coords, depth_draw_always;
+    3 | 
+    4 | 
+    5 | 
+    6 | 
+    7 | 
+    8 | 
+    9 | 
+   10 | 
+   11 | 
+   12 | 
+   13 | 
+   14 | uniform vec4 water_color : source_color = vec4(0.02, 0.08, 0.15, 1.0);
+   15 | uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
+   16 | uniform vec3 depth_color_consumption = vec3(7.5, 22.0, 38.0);
+   17 | 
+   18 | 
+   19 | uniform float roughness : hint_range(0.0, 1.0) = 0.4;
+   20 | uniform float normal_strength : hint_range(0.0, 1.0) = 1.0;
+   21 | 
+   22 | 
+   23 | uniform float time = 0.0;
+   24 | 
+   25 | 
+   26 | uniform sampler2D foam_noise_tex : repeat_enable, filter_linear_mipmap;
+   27 | uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
+   28 | uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
+   29 | 
+   30 | 
+   31 | uniform sampler2D shore_mask : filter_linear;
+   32 | uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+   33 | 
+   34 | 
+   35 | uniform vec4 map_scales[ 8 ];
+   36 | uniform uint num_cascades = 3u;
+   37 | uniform sampler2DArray displacements;
+   38 | uniform sampler2DArray normals : hint_normal;
+   39 | 
+   40 | 
+   41 | varying float wave_height;
+   42 | varying float foam_factor;
+   43 | varying float fresnel;
+   44 | varying float shore_factor;
+   45 | 
+   46 | 
+   47 | float sample_shore_mask(vec2 world_xz) {
+   48 |  vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+   49 |  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+   50 |  return 0.0; 
+   51 |  }
+   52 |  return texture(shore_mask, uv).r;
+   53 | }
+   54 | 
+   55 | 
+   56 | vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, float t) {
+   57 |  float k = 2.0 * PI / wavelength;
+   58 |  float c = sqrt(9.81 / k);
+   59 |  vec2 d = normalize(direction);
+   60 |  float f = k * (dot(d, pos) - c * t);
+   61 |  float a = steepness / k;
+   62 |  return vec3(
+   63 |  d.x * (a * cos(f)),
+   64 |  a * sin(f),
+   65 |  d.y * (a * cos(f))
+   66 |  );
+   67 | }
+   68 | 
+   69 | void vertex() {
+   70 |  UV = VERTEX.xz;
+   71 | 
+   72 |  
+   73 |  shore_factor = sample_shore_mask(VERTEX.xz);
+   74 | 
+   75 |  
+   76 |  wave_height = 0.0;
+   77 | 
+   78 |  
+   79 |  if (shore_factor >= 0.01) {
+   80 |  float distance_cam = length(VERTEX.xz - CAMERA_POSITION_WORLD.xz);
+   81 | 
+   82 |  if (distance_cam < 1024.0) {
+   83 |  float distance_factor = min(exp(-(distance_cam - 512.0) * 0.007), 1.0);
+   84 |  vec3 displacement = vec3(0);
+   85 | 
+   86 |  
+   87 |  if (num_cascades > 0u && textureSize(displacements, 0).x > 1) {
+   88 |  
+   89 |  for (uint i = 0u; i < num_cascades; ++i) {
+   90 |  vec4 scales = map_scales[i];
+   91 |  displacement += texture(displacements, vec3(UV * scales.xy, float(i))).xyz * scales.z;
+   92 |  }
+   93 |  } else {
+   94 |  
+   95 |  displacement += gerstner_wave(UV, 60.0, 0.25, vec2(1.0, 0.0), time);
+   96 |  displacement += gerstner_wave(UV, 31.0, 0.25, vec2(1.0, 0.6), time);
+   97 |  displacement += gerstner_wave(UV, 18.0, 0.25, vec2(1.0, 1.3), time);
+   98 |  displacement += gerstner_wave(UV, 8.0, 0.15, vec2(0.5, 1.0), time);
+   99 |  }
+  100 | 
+  101 |  
+  102 |  displacement *= shore_factor;
+  103 | 
+  104 |  VERTEX += displacement * distance_factor;
+  105 |  wave_height = displacement.y;
+  106 |  }
+  107 |  }
+  108 | }
+  109 | 
+  110 | 
+  111 | vec4 cubic_weights(float a) {
+  112 |  float a2 = a * a;
+  113 |  float a3 = a2 * a;
+  114 |  float w0 = -a3 + a2 * 3.0 - a * 3.0 + 1.0;
+  115 |  float w1 = a3 * 3.0 - a2 * 6.0 + 4.0;
+  116 |  float w2 = -a3 * 3.0 + a2 * 3.0 + a * 3.0 + 1.0;
+  117 |  float w3 = a3;
+  118 |  return vec4(w0, w1, w2, w3) / 6.0;
+  119 | }
+  120 | 
+  121 | 
+  122 | vec4 texture_bicubic(in sampler2DArray sampler, in vec3 uvw) {
+  123 |  vec2 dims = vec2(textureSize(sampler, 0).xy);
+  124 |  vec2 dims_inv = 1.0 / dims;
+  125 |  uvw.xy = uvw.xy * dims + 0.5;
+  126 |  vec2 fuv = fract(uvw.xy);
+  127 |  vec4 wx = cubic_weights(fuv.x);
+  128 |  vec4 wy = cubic_weights(fuv.y);
+  129 |  vec4 g = vec4(wx.xz + wx.yw, wy.xz + wy.yw);
+  130 |  vec4 h = (vec4(wx.yw, wy.yw) / g + vec2(-1.5, 0.5).xyxy + floor(uvw.xy).xxyy) * dims_inv.xxyy;
+  131 |  vec2 w = g.xz / (g.xz + g.yw);
+  132 |  return mix(
+  133 |  mix(texture(sampler, vec3(h.yw, uvw.z)), texture(sampler, vec3(h.xw, uvw.z)), w.x),
+  134 |  mix(texture(sampler, vec3(h.yz, uvw.z)), texture(sampler, vec3(h.xz, uvw.z)), w.x), w.y);
+  135 | }
+  136 | 
+  137 | void fragment() {
+  138 |  
+  139 |  if (shore_factor < 0.01) {
+  140 |  ALPHA = 0.0;
+E 141->  return;
+  142 |  }
+  143 | 
+  144 |  float map_size = float(textureSize(normals, 0).x);
+  145 |  float dist = length(VERTEX.xz);
+  146 |  vec3 gradient = vec3(0);
+  147 |  float foam_alpha = 0.0;
+  148 | 
+  149 |  
+  150 |  if (num_cascades > 0u && map_size > 1.0) {
+  151 |  for (uint i = 0u; i < num_cascades; ++i) {
+  152 |  vec4 scales = map_scales[i];
+  153 |  vec3 coords = vec3(UV * scales.xy, float(i));
+  154 |  float ppm = map_size * min(scales.x, scales.y);
+  155 |  gradient += mix(texture_bicubic(normals, coords), texture(normals, coords), min(1.0, ppm * 0.1)).xyw * vec3(scales.ww, 1.0);
+  156 |  foam_alpha += texture(foam_noise_tex, UV * scales.xy * 1.0).r;
+  157 |  }
+  158 |  } else {
+  159 |  
+  160 |  float eps = 0.5;
+  161 |  vec3 wave0 = gerstner_wave(UV, 60.0, 0.25, vec2(1.0, 0.0), time);
+  162 |  vec3 wave_dx = gerstner_wave(UV + vec2(eps, 0), 60.0, 0.25, vec2(1.0, 0.0), time);
+  163 |  vec3 wave_dz = gerstner_wave(UV + vec2(0, eps), 60.0, 0.25, vec2(1.0, 0.0), time);
+  164 |  gradient = vec3((wave_dx.y - wave0.y) / eps, 1.0, (wave_dz.y - wave0.y) / eps);
+  165 |  }
+  166 | 
+  167 |  foam_factor = smoothstep(0.0, 1.0, gradient.z * 0.75) * exp(-dist * 0.0075);
+  168 | 
+  169 |  
+  170 |  foam_factor += (1.0 - shore_factor) * 0.5;
+  171 |  foam_factor = clamp(foam_factor, 0.0, 1.0);
+  172 | 
+  173 |  
+  174 |  float depth_tex = texture(depth_texture, SCREEN_UV).r;
+  175 |  vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth_tex, 1.0);
+  176 |  world_pos.xyz /= world_pos.w;
+  177 |  float smooth_alpha = 1.0 - smoothstep(world_pos.z + 0.66, world_pos.z, VERTEX.z);
+  178 |  ALPHA = clamp(smooth_alpha * shore_factor, 0.0, 1.0);
+  179 | 
+  180 |  if (ALPHA < 0.9) {
+  181 |  foam_factor = clamp(foam_factor + 0.5 - ALPHA, 0.0, 1.0);
+  182 |  }
+  183 | 
+  184 |  
+  185 |  float depth_visibility_range = clamp(max(depth_color_consumption.r, max(depth_color_consumption.g, depth_color_consumption.b)), 0.0, 200.0);
+  186 |  float factor_translucency = 1.0 - smoothstep(world_pos.z + depth_visibility_range, world_pos.z, VERTEX.z);
+  187 |  factor_translucency = clamp(factor_translucency, 0.35, 1.0);
+  188 |  vec3 screen_albedo = texture(screen_texture, SCREEN_UV, 0.0).rgb;
+  189 |  vec3 depth_water_color = mix(screen_albedo, water_color.rgb, factor_translucency);
+  190 | 
+  191 |  
+  192 |  float smooth_red = smoothstep(world_pos.z + depth_color_consumption.r, world_pos.z, VERTEX.z);
+  193 |  float smooth_green = smoothstep(world_pos.z + depth_color_consumption.g, world_pos.z, VERTEX.z);
+  194 |  float smooth_blue = smoothstep(world_pos.z + depth_color_consumption.b, world_pos.z, VERTEX.z);
+  195 |  vec3 color_shallow = max(vec3(smooth_red, smooth_green, smooth_blue) * depth_water_color, water_color.rgb);
+  196 | 
+  197 |  depth_water_color = mix(color_shallow, water_color.rgb, factor_translucency);
+  198 |  ALBEDO = mix(depth_water_color, foam_color.rgb, foam_factor * foam_alpha * foam_alpha);
+  199 | 
+  200 |  
+  201 |  fresnel = mix(pow(1.0 - dot(VIEW, NORMAL), 5.0 * exp(-2.69 * roughness)) / (1.0 + 22.7 * pow(roughness, 1.5)), 1.0,  0.02 );
+  202 |  ROUGHNESS = (1.0 - fresnel) * foam_factor + 0.4;
+  203 | 
+  204 |  
+  205 |  gradient *= mix(0.015, normal_strength, exp(-dist * 0.0175));
+  206 |  NORMAL = (VIEW_MATRIX * vec4(normalize(vec3(-gradient.x, 1.0, -gradient.y)), 0.0)).xyz;
+  207 | }
+  208 | 
+  209 | 
+  210 | float smith_masking_shadowing(in float cos_theta, in float alpha) {
+  211 |  float a = cos_theta / (alpha * sqrt(1.0 - cos_theta * cos_theta));
+  212 |  float a_sq = a * a;
+  213 |  return a < 1.6 ? (1.0 - 1.259 * a + 0.396 * a_sq) / (3.535 * a + 2.181 * a_sq) : 0.0;
+  214 | }
+  215 | 
+  216 | 
+  217 | float ggx_distribution(in float cos_theta, in float alpha) {
+  218 |  float a_sq = alpha * alpha;
+  219 |  float d = 1.0 + (a_sq - 1.0) * cos_theta * cos_theta;
+  220 |  return a_sq / (PI * d * d);
+  221 | }
+  222 | 
+  223 | void light() {
+  224 |  vec3 halfway = normalize(LIGHT + VIEW);
+  225 |  float dot_nl = max(dot(NORMAL, LIGHT), 2e-5);
+  226 |  float dot_nv = max(dot(NORMAL, VIEW), 2e-5);
+  227 | 
+  228 |  
+  229 |  float light_mask = smith_masking_shadowing(roughness, dot_nv);
+  230 |  float view_mask = smith_masking_shadowing(roughness, dot_nl);
+  231 |  float microfacet_distribution = ggx_distribution(dot(NORMAL, halfway), roughness);
+  232 |  float geometric_attenuation = 1.0 / (1.0 + light_mask + view_mask);
+  233 |  SPECULAR_LIGHT += fresnel * microfacet_distribution * geometric_attenuation / (4.0 * dot_nv + 0.1) * ATTENUATION;
+  234 | 
+  235 |  
+  236 |  const vec3 sss_modifier = vec3(0.9, 1.15, 0.85);
+  237 |  float sss_height = 1.0 * max(0.0, wave_height + 2.5) * pow(max(dot(LIGHT, -VIEW), 0.0), 4.0) * pow(0.5 - 0.5 * dot(LIGHT, NORMAL), 3.0);
+  238 |  float sss_near = 0.5 * pow(dot_nv, 2.0);
+  239 |  float lambertian = 0.5 * dot_nl;
+  240 |  DIFFUSE_LIGHT += mix((sss_height + sss_near) * sss_modifier / (1.0 + light_mask) + lambertian, foam_color.rgb, foam_factor) * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR;
+  241 | }
+  242 | 
+SHADER ERROR: Using 'return' in the 'fragment' processor function is incorrect.
+          at: (null) (:141)
+          GDScript backtrace (most recent call first):
+              [0] _create_material (res://src/core/water/ocean_mesh.gd:91)
+              [1] initialize (res://src/core/water/ocean_mesh.gd:28)
+              [2] _deferred_init (res://src/core/water/ocean_manager.gd:76)
+ERROR: Shader compilation failed.
+   at: set_code (servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.cpp:181)
+   GDScript backtrace (most recent call first):
+       [0] _create_material (res://src/core/water/ocean_mesh.gd:91)
+       [1] initialize (res://src/core/water/ocean_mesh.gd:28)
+       [2] _deferred_init (res://src/core/water/ocean_manager.gd:76)
+[OceanMesh] Initialized with 6 LOD rings, radius: 8000m
+[ShoreMaskGenerator] Generating shore mask 2048x2048 at sea level 0.0...
+[ShoreMaskGenerator] Shore mask generated, bounds: (-8000, -8000) to (8000, 8000)
+[OceanManager] Initialized - sea level: 0.0, radius: 8000m
 BSAManager: Loaded Tribunal.bsa (1174 files)
 BSAManager: Loaded Morrowind.bsa (11090 files)
 BSAManager: Loaded Bloodmoon.bsa (1545 files)
 Loaded 3 BSA archives
+[OceanManager] Auto-detected camera: FlyCamera
 Pre-warmed 15 common files into cache
 BSA cache: 0.3 MB, 15 files
 Loading: /home/leo/.steam/steam/steamapps/common/Morrowind/Data Files/Morrowind.esm
   Author: Bethesda Softworks
   Description: The main data file For Morrowind
   Records: 48295
+  Loaded 48295 records in 11620 ms
+ESM loaded successfully
+LAND records: 1390, CELL records: 2538
+Found 94 pre-processed terrain regions
+TerrainTextureLoader: Loading 107 LTEX textures...
+TerrainTextureLoader: Default texture added to slot 0
+TerrainTextureLoader: Cells with VTEX data: 1292, without: 98
+TerrainTextureLoader: Total unique texture indices: 100
+TerrainTextureLoader: Top 32 textures by usage: idx38:85928, idx94:25892, idx10:25294, idx16:23863, idx4:18267, idx58:13477, idx15:12494, idx66:8757, idx8:8683, idx22:8673, idx9:7111, idx73:6006, idx0:5813, idx67:5235, idx33:5020, idx19:4758, idx31:4129, idx11:3918, idx12:3228, idx72:3066, idx21:2935, idx92:2769, idx2:2566, idx14:2206, idx51:2175, idx46:2071, idx55:2055, idx49:2030, idx70:1802, idx78:1336, idx99:1307, idx37:1210
+TerrainTextureLoader: WARNING - 68 textures won't get slots. First overflow: idx20:1200, idx32:1188, idx35:1029, idx54:1012, idx42:997, idx62:990, idx91:903, idx39:872
+TerrainTextureLoader: Found 100 unique texture indices in use
+TerrainTextureLoader: Loaded 'Tx_sand_02.tga' (MW idx 38) -> slot 1
+TerrainTextureLoader: Loaded 'Tx_BC_mud.tga' (MW idx 94) -> slot 2
+TerrainTextureLoader: Loaded 'Tx_land_darkstone02.tga' (MW idx 10) -> slot 3
+TerrainTextureLoader: Loaded 'Tx_RM_grayrock_01.tga' (MW idx 16) -> slot 4
+TerrainTextureLoader: Loaded 'Tx_RM_rock_01.tga' (MW idx 4) -> slot 5
+TerrainTextureLoader: Loaded 'Tx_AI_mudflats_01.tga' (MW idx 58) -> slot 6
+TerrainTextureLoader: Loaded 'Tx_rock_WG_01.tga' (MW idx 15) -> slot 7
+TerrainTextureLoader: Loaded 'Tx_MA_rock04.tga' (MW idx 66) -> slot 8
+TerrainTextureLoader: Loaded 'Tx_scrubplain_01.tga' (MW idx 8) -> slot 9
+TerrainTextureLoader: Loaded 'Tx_ashlands_08.tga' (MW idx 22) -> slot 10
+TerrainTextureLoader: Loaded 'Tx_land_darkstone01.tga' (MW idx 9) -> slot 11
+TerrainTextureLoader: Loaded 'Tx_MA_lava03.tga' (MW idx 73) -> slot 12
+TerrainTextureLoader: Loaded 'Tx_MA_crackedearth.tga' (MW idx 67) -> slot 13
+TerrainTextureLoader: Loaded 'Tx_grass_01.tga' (MW idx 33) -> slot 14
+TerrainTextureLoader: Loaded 'Tx_ashlands_04.tga' (MW idx 19) -> slot 15
+TerrainTextureLoader: Loaded 'Tx_WG_rockydirt_01.tga' (MW idx 31) -> slot 16
+TerrainTextureLoader: Loaded 'Tx_land_darkgravel.tga' (MW idx 11) -> slot 17
+TerrainTextureLoader: Loaded 'Tx_land_darkstone_grass.tga' (MW idx 12) -> slot 18
+TerrainTextureLoader: Loaded 'Tx_MA_lavaflow.tga' (MW idx 72) -> slot 19
+TerrainTextureLoader: Loaded 'Tx_ashlands_07.tga' (MW idx 21) -> slot 20
+TerrainTextureLoader: Loaded 'Tx_BC_moss.tga' (MW idx 92) -> slot 21
+TerrainTextureLoader: Loaded 'Tx_coastal_rock_01.tga' (MW idx 2) -> slot 22
+TerrainTextureLoader: Loaded 'Tx_rockyscrub_01.tga' (MW idx 14) -> slot 23
+TerrainTextureLoader: Loaded 'Tx_GL_grass_07.tga' (MW idx 51) -> slot 24
+TerrainTextureLoader: Loaded 'Tx_GL_dirt_grass_01.tga' (MW idx 46) -> slot 25
+TerrainTextureLoader: Loaded 'Tx_GL_rock_02.tga' (MW idx 55) -> slot 26
+TerrainTextureLoader: Loaded 'Tx_GL_grass_01.tga' (MW idx 49) -> slot 27
+TerrainTextureLoader: Loaded 'Tx_MA_lavarock.tga' (MW idx 70) -> slot 28
+TerrainTextureLoader: Loaded 'Tx_MA_sulphur_rock02.tga' (MW idx 78) -> slot 29
+TerrainTextureLoader: Loaded 'Tx_BC_muck_01.tga' (MW idx 99) -> slot 30
+TerrainTextureLoader: Loaded 'Tx_AI_grass_dirt_01.tga' (MW idx 37) -> slot 31
+WARNING: TerrainTextureLoader: Maximum texture slots reached (32)
+     at: push_warning (core/variant/variant_utility.cpp:1034)
+     GDScript backtrace (most recent call first):
+         [0] load_terrain_textures (res://src/core/world/terrain_texture_loader.gd:65)
+         [1] _init_terrain3d (res://src/tools/world_explorer.gd:264)
+         [2] _init_async (res://src/tools/world_explorer.gd:172)
+         [3] _update_loading (res://src/tools/world_explorer.gd:646)
+TerrainTextureLoader: Loaded 31 textures (0 failed)
+Loaded 31 terrain textures
+Terrain3D configured: region_size=256 (4x4 cells/region), vertex_spacing=1.829
+Loaded preprocessed terrain from user://terrain_data/
+WorldStreamingManager: Found Terrain3D: Terrain3D
+WorldStreamingManager: WorldStreamingManager ready - call initialize() to start streaming
+WorldStreamingManager: CellManager set
+WorldStreamingManager: TerrainManager set
+WorldStreamingManager: Terrain3D set: Terrain3D
+1: SYNCER: OWDB registered - integration active
+1: Created local Syncer instance
+1: OWDB: Network mode changing from 2 to 0
+1: ChunkManager: Network mode set to 0
+WorldStreamingManager: OWDB created and configured
+1: ChunkManager: Registered OWDBPosition with ID: 6949374931220
+1: Registered OWDBPosition for peer: 1
+WorldStreamingManager: OWDBPosition created
+WorldStreamingManager: LOD manager created (full=50m, low=150m, cull=500m)
+WorldStreamingManager: WorldStreamingManager initialized
+WorldStreamingManager created and configured
+Using pre-processed terrain data
+1: Updating visibility for peer 1 due to position change...
+1: Triggered visibility update for peer: 1
+World streaming initialized!
+Use ZQSD to move, Right-click to look
+Cells stream automatically based on camera position
+WorldStreamingManager: Load queue cleared
+Teleported to cell (-2, -9)
+WorldStreamingManager: Tracking node: FlyCamera
+1: ChunkManager: Unregistered OWDBPosition with ID: 6949374931220
+1: Unregistered OWDBPosition for peer: 1
+WorldStreamingManager: Camera cell changed to: (-2, -9)
+CellManager: Loading cell 'Seyda Neen (-2, -9)' with 316 references...
+ERROR: NIFReader: Invalid string length 1073741824 at pos 25553 - parser out of sync
+   at: push_error (core/variant/variant_utility.cpp:1024)
+   GDScript backtrace (most recent call first):
+       [0] _read_string (res://src/core/nif/nif_reader.gd:1843)
+       [1] _read_record (res://src/core/nif/nif_reader.gd:144)
+       [2] _parse (res://src/core/nif/nif_reader.gd:115)
+       [3] load_buffer (res://src/core/nif/nif_reader.gd:71)
+       [4] convert_buffer (res://src/core/nif/nif_converter.gd:122)
+       [5] _get_model (res://src/core/world/cell_manager.gd:477)
+       [6] _instantiate_light (res://src/core/world/cell_manager.gd:181)
+       [7] _instantiate_reference (res://src/core/world/cell_manager.gd:104)
+       [8] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [9] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [10] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [11] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: NIFReader: Unknown record type '' at index 64 in 'meshes\l\Light_Com_Lantern_02.NIF' - aborting
+   at: push_error (core/variant/variant_utility.cpp:1024)
+   GDScript backtrace (most recent call first):
+       [0] _read_record (res://src/core/nif/nif_reader.gd:332)
+       [1] _parse (res://src/core/nif/nif_reader.gd:115)
+       [2] load_buffer (res://src/core/nif/nif_reader.gd:71)
+       [3] convert_buffer (res://src/core/nif/nif_converter.gd:122)
+       [4] _get_model (res://src/core/world/cell_manager.gd:477)
+       [5] _instantiate_light (res://src/core/world/cell_manager.gd:181)
+       [6] _instantiate_reference (res://src/core/world/cell_manager.gd:104)
+       [7] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [8] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [9] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [10] _process (res://src/core/world/world_streaming_manager.gd:168)
+WARNING: CellManager: Failed to convert NIF: 'meshes\l\Light_Com_Lantern_02.NIF'
+     at: push_warning (core/variant/variant_utility.cpp:1034)
+     GDScript backtrace (most recent call first):
+         [0] _get_model (res://src/core/world/cell_manager.gd:482)
+         [1] _instantiate_light (res://src/core/world/cell_manager.gd:181)
+         [2] _instantiate_reference (res://src/core/world/cell_manager.gd:104)
+         [3] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+         [4] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+         [5] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+         [6] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: NIFReader: Invalid string length 1065353216 at pos 3877 - parser out of sync
+   at: push_error (core/variant/variant_utility.cpp:1024)
+   GDScript backtrace (most recent call first):
+       [0] _read_string (res://src/core/nif/nif_reader.gd:1843)
+       [1] _read_record (res://src/core/nif/nif_reader.gd:144)
+       [2] _parse (res://src/core/nif/nif_reader.gd:115)
+       [3] load_buffer (res://src/core/nif/nif_reader.gd:71)
+       [4] convert_buffer (res://src/core/nif/nif_converter.gd:122)
+       [5] _get_model (res://src/core/world/cell_manager.gd:477)
+       [6] _instantiate_model_object (res://src/core/world/cell_manager.gd:152)
+       [7] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [8] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [9] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [10] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [11] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: NIFReader: Unknown record type '' at index 13 in 'meshes\chimney_smoke02.NIF' - aborting
+   at: push_error (core/variant/variant_utility.cpp:1024)
+   GDScript backtrace (most recent call first):
+       [0] _read_record (res://src/core/nif/nif_reader.gd:332)
+       [1] _parse (res://src/core/nif/nif_reader.gd:115)
+       [2] load_buffer (res://src/core/nif/nif_reader.gd:71)
+       [3] convert_buffer (res://src/core/nif/nif_converter.gd:122)
+       [4] _get_model (res://src/core/world/cell_manager.gd:477)
+       [5] _instantiate_model_object (res://src/core/world/cell_manager.gd:152)
+       [6] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [7] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [8] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [9] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [10] _process (res://src/core/world/world_streaming_manager.gd:168)
+WARNING: CellManager: Failed to convert NIF: 'meshes\chimney_smoke02.NIF'
+     at: push_warning (core/variant/variant_utility.cpp:1034)
+     GDScript backtrace (most recent call first):
+         [0] _get_model (res://src/core/world/cell_manager.gd:482)
+         [1] _instantiate_model_object (res://src/core/world/cell_manager.gd:152)
+         [2] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+         [3] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+         [4] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+         [5] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+         [6] _process (res://src/core/world/world_streaming_manager.gd:168)
+CellManager: Loaded 316 objects, 0 failed
+Cell loaded: (-2, -9) - 316 objects
+WorldStreamingManager: Cell loaded (queued): (-2, -9) with 316 children
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+Models: OFF
+Models: ON
+Models: OFF
+Models: ON
+CellManager: Loading cell 'Seyda Neen (-2, -10)' with 207 references...
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+   GDScript backtrace (most recent call first):
+       [0] _instantiate_model_object (res://src/core/world/cell_manager.gd:164)
+       [1] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [2] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [3] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [4] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [5] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+   GDScript backtrace (most recent call first):
+       [0] _instantiate_model_object (res://src/core/world/cell_manager.gd:164)
+       [1] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [2] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [3] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [4] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [5] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+   GDScript backtrace (most recent call first):
+       [0] _instantiate_model_object (res://src/core/world/cell_manager.gd:164)
+       [1] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [2] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [3] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [4] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [5] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+   GDScript backtrace (most recent call first):
+       [0] _instantiate_model_object (res://src/core/world/cell_manager.gd:164)
+       [1] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [2] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [3] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [4] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [5] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: Condition "bs > sbs" is true. Continuing.
+   at: mesh_get_aabb (servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:730)
+   GDScript backtrace (most recent call first):
+       [0] _instantiate_model_object (res://src/core/world/cell_manager.gd:164)
+       [1] _instantiate_reference (res://src/core/world/cell_manager.gd:127)
+       [2] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [3] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [4] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [5] _process (res://src/core/world/world_streaming_manager.gd:168)
+ERROR: NIFReader: Unknown record type '' at index 28 in 'meshes\l\light_logpile10.nif' - aborting
+   at: push_error (core/variant/variant_utility.cpp:1024)
+   GDScript backtrace (most recent call first):
+       [0] _read_record (res://src/core/nif/nif_reader.gd:332)
+       [1] _parse (res://src/core/nif/nif_reader.gd:115)
+       [2] load_buffer (res://src/core/nif/nif_reader.gd:71)
+       [3] convert_buffer (res://src/core/nif/nif_converter.gd:122)
+       [4] _get_model (res://src/core/world/cell_manager.gd:477)
+       [5] _instantiate_light (res://src/core/world/cell_manager.gd:181)
+       [6] _instantiate_reference (res://src/core/world/cell_manager.gd:104)
+       [7] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+       [8] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+       [9] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+       [10] _process (res://src/core/world/world_streaming_manager.gd:168)
+WARNING: CellManager: Failed to convert NIF: 'meshes\l\light_logpile10.nif'
+     at: push_warning (core/variant/variant_utility.cpp:1034)
+     GDScript backtrace (most recent call first):
+         [0] _get_model (res://src/core/world/cell_manager.gd:482)
+         [1] _instantiate_light (res://src/core/world/cell_manager.gd:181)
+         [2] _instantiate_reference (res://src/core/world/cell_manager.gd:104)
+         [3] _instantiate_cell (res://src/core/world/cell_manager.gd:75)
+         [4] load_exterior_cell (res://src/core/world/cell_manager.gd:56)
+         [5] _process_load_queue (res://src/core/world/world_streaming_manager.gd:557)
+         [6] _process (res://src/core/world/world_streaming_manager.gd:168)

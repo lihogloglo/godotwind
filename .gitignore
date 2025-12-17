@@ -3,7 +3,8 @@
 
 
 openmw-master/
-
+lapalma_map/
+lapalma_processed/
 # Godot-specific ignores
 *.translation
 
