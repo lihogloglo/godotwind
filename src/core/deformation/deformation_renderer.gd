@@ -80,6 +80,8 @@ func _setup_stamp_mesh():
 	_viewport.add_child(_stamp_mesh)
 
 # Render a deformation stamp to region texture
+# Note: This queues a render request, actual rendering happens on next frame
+# The caller should handle this properly via the pending queue system
 func render_stamp(
 	region_data,
 	region_uv: Vector2,
@@ -90,7 +92,7 @@ func render_stamp(
 		push_error("[DeformationRenderer] Stamp material not initialized")
 		return
 
-	# Set shader parameters
+	# Set shader parameters for this stamp
 	_stamp_material.set_shader_parameter("previous_deformation", region_data.texture)
 	_stamp_material.set_shader_parameter("stamp_center_uv", region_uv)
 	_stamp_material.set_shader_parameter("stamp_radius", STAMP_RADIUS_DEFAULT)
@@ -98,13 +100,14 @@ func render_stamp(
 	_stamp_material.set_shader_parameter("material_type", _get_material_type_value(material_type))
 	_stamp_material.set_shader_parameter("region_size_meters", DeformationManager.REGION_SIZE_METERS)
 
-	# Render viewport
+	# Request viewport render
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
-	# Wait for render to complete (next frame)
-	await get_tree().process_frame
+	# Force immediate rendering by accessing the render pipeline
+	# This ensures the stamp is rendered synchronously within the current frame
+	RenderingServer.force_draw(false, 0.0)
 
-	# Get rendered result
+	# Get rendered result immediately after forced draw
 	var rendered_texture = _viewport.get_texture()
 	if rendered_texture != null:
 		# Update region image from viewport

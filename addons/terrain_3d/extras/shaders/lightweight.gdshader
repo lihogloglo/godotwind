@@ -54,6 +54,14 @@ uniform highp sampler2DArray _color_maps : source_color, filter_linear_mipmap_an
 uniform highp sampler2DArray _texture_array_albedo : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform highp sampler2DArray _texture_array_normal : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 
+// Deformation system uniforms (RTT deformation)
+uniform highp sampler2DArray deformation_texture_array : filter_linear, repeat_disable;
+uniform bool deformation_enabled = false;
+uniform float deformation_depth_scale = 0.1; // Max deformation depth in meters
+uniform bool deformation_affect_normals = true;
+// Simple approach: reuse the same region UVs and layer indices as Terrain3D
+// The deformation system aligns its texture array with Terrain3D's region system
+
 // Public uniforms
 uniform bool enable_texturing = true;
 uniform float blend_sharpness : hint_range(0, 1) = 0.5;
@@ -166,6 +174,48 @@ void vertex() {
 			texelFetch(_height_maps, get_index_coord(end_pos + vec2(0,1), VERTEX_PASS), 0).r, vertex_lerp);
 
 		v_normal = normalize(vec3(h - u, _vertex_spacing, h - v));
+
+		// Apply deformation (RTT deformation system)
+		if (deformation_enabled) {
+			// Get region UV for current vertex position
+			// Note: We reuse the same region-based coordinate system as Terrain3D
+			vec2 region_coord_scaled = floor(uv2);  // This gives us integer region coordinates
+			vec3 deform_region_uv = get_index_uv(uv2);
+
+			// Only apply deformation if we're in a valid terrain region
+			// Note: The deformation texture array is synced with Terrain3D's region system
+			// When deform_region_uv.z >= 0, we have a valid Terrain3D region at this layer index
+			if (deform_region_uv.z >= 0.0) {
+				// Sample deformation texture using the same layer index as Terrain3D
+				// The deformation system maintains textures at matching layer indices
+				vec4 deformation = texture(deformation_texture_array, deform_region_uv);
+				float deform_depth = deformation.r;
+				float material_type = deformation.g;
+
+				// Apply vertex displacement along normal (negative to push down into terrain)
+				v_vertex -= v_normal * deform_depth * deformation_depth_scale;
+
+				// Optionally adjust normals based on deformation gradient
+				if (deformation_affect_normals && deform_depth > 0.01) {
+					// Sample neighboring texels to calculate gradient
+					vec2 texel_size = vec2(_region_texel_size);
+					float depth_right = texture(deformation_texture_array,
+						vec3(deform_region_uv.xy + vec2(texel_size.x, 0.0), deform_region_uv.z)).r;
+					float depth_up = texture(deformation_texture_array,
+						vec3(deform_region_uv.xy + vec2(0.0, texel_size.y), deform_region_uv.z)).r;
+
+					// Calculate gradient in world space
+					vec3 gradient = vec3(
+						(deform_depth - depth_right) * deformation_depth_scale,
+						0.0,
+						(deform_depth - depth_up) * deformation_depth_scale
+					);
+
+					// Perturb normal (subtle effect)
+					v_normal = normalize(v_normal + gradient * 0.5);
+				}
+			}
+		}
 	}
 
 	// Convert model space to view space w/ skip_vertex_transform render mode

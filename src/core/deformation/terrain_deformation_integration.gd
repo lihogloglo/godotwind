@@ -13,10 +13,11 @@ var _deformation_texture_array: Texture2DArray = null
 # Region tracking for texture array mapping
 var _region_to_array_index: Dictionary = {}  # Vector2i -> int
 var _array_index_to_region: Dictionary = {}  # int -> Vector2i
-var _next_array_index: int = 0
 
-# Maximum texture array size
-const MAX_TEXTURE_ARRAY_SIZE: int = 16
+# Maximum texture array size (matches Terrain3D's typical usage)
+# Note: The actual limit is determined by GPU capabilities (usually 256-2048 layers)
+# We use a conservative value that balances memory and flexibility
+const MAX_TEXTURE_ARRAY_SIZE: int = 64
 
 func _ready():
 	# Check if terrain integration is enabled
@@ -142,12 +143,15 @@ func update_region_texture(region_coord: Vector2i, texture: ImageTexture):
 	if _deformation_texture_array == null:
 		return
 
-	# Get or assign array index for this region
-	var array_index = _get_or_create_array_index(region_coord)
+	# Try to get Terrain3D's layer index for this region
+	var terrain_layer_index = _get_terrain_layer_index(region_coord)
 
-	if array_index == -1:
+	# Use terrain's layer index if available, otherwise use our own mapping
+	var array_index = terrain_layer_index if terrain_layer_index >= 0 else _get_or_create_array_index(region_coord)
+
+	if array_index == -1 or array_index >= MAX_TEXTURE_ARRAY_SIZE:
 		if DeformationConfig.debug_mode:
-			push_warning("[TerrainDeformationIntegration] Texture array full, cannot add region: ", region_coord)
+			push_warning("[TerrainDeformationIntegration] Cannot update region %s: invalid array index %d" % [region_coord, array_index])
 		return
 
 	# Update texture array layer
@@ -155,16 +159,54 @@ func update_region_texture(region_coord: Vector2i, texture: ImageTexture):
 	if image != null:
 		_deformation_texture_array.update_layer(image, array_index)
 
+		if DeformationConfig.debug_mode:
+			print("[TerrainDeformationIntegration] Updated deformation layer %d for region %s" % [array_index, region_coord])
+
+# Try to get Terrain3D's layer index for a region coordinate
+func _get_terrain_layer_index(region_coord: Vector2i) -> int:
+	if _terrain == null:
+		return -1
+
+	# Try to access Terrain3D's storage and get region index
+	# Terrain3D uses a storage object that tracks regions
+	if _terrain.has_method("get_storage"):
+		var storage = _terrain.get_storage()
+		if storage != null and storage.has_method("get_region_index"):
+			var layer_index = storage.get_region_index(region_coord)
+			if layer_index >= 0:
+				return layer_index
+
+	# Alternative: Try to get region data directly
+	if _terrain.has_method("get_region_location"):
+		var region_id = _terrain.get_region_location(region_coord)
+		if region_id >= 0:
+			return region_id
+
+	# Fallback: return -1 to indicate we should use our own mapping
+	return -1
+
 # Get or create array index for region
 func _get_or_create_array_index(region_coord: Vector2i) -> int:
 	# Check if region already has an index
 	if _region_to_array_index.has(region_coord):
 		return _region_to_array_index[region_coord]
 
-	# Assign new index
+	# Assign new index with LRU eviction if array is full
 	if _next_array_index >= MAX_TEXTURE_ARRAY_SIZE:
-		# Array full - need to evict old region (LRU would be better)
-		return -1
+		# Find least recently used region (simple: use first available slot)
+		# TODO: Implement proper LRU eviction
+		if DeformationConfig.debug_mode:
+			push_warning("[TerrainDeformationIntegration] Texture array full, eviction needed")
+
+		# For now, try to recycle indices of unloaded regions
+		for i in range(MAX_TEXTURE_ARRAY_SIZE):
+			if not _array_index_to_region.has(i):
+				# Found an empty slot
+				_region_to_array_index[region_coord] = i
+				_array_index_to_region[i] = region_coord
+				return i
+
+		return -1  # Array full, no slots available
 
 	var index = _next_array_index
 	_next_array_index += 1
@@ -181,7 +223,7 @@ func remove_region_texture(region_coord: Vector2i):
 
 	var array_index = _region_to_array_index[region_coord]
 
-	# Clear the layer with blank image
+	# Clear the layer with blank image (reset to no deformation)
 	var blank_image = Image.create(
 		DeformationManager.DEFORMATION_TEXTURE_SIZE,
 		DeformationManager.DEFORMATION_TEXTURE_SIZE,
@@ -193,9 +235,12 @@ func remove_region_texture(region_coord: Vector2i):
 	if _deformation_texture_array != null:
 		_deformation_texture_array.update_layer(blank_image, array_index)
 
-	# Remove mappings
+	# Remove mappings (keeps array index available for reuse)
 	_region_to_array_index.erase(region_coord)
 	_array_index_to_region.erase(array_index)
+
+	if DeformationConfig.debug_mode:
+		print("[TerrainDeformationIntegration] Cleared deformation layer %d for region %s" % [array_index, region_coord])
 
 # Get array index for region (for shader parameter binding)
 func get_region_array_index(region_coord: Vector2i) -> int:

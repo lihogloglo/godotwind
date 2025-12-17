@@ -201,6 +201,7 @@ func add_deformation(world_pos: Vector3, material_type: int, strength: float):
 	})
 
 # Process pending deformations with time budget
+# Groups stamps by region for batch processing
 func _process_pending_deformations():
 	if _pending_deformations.is_empty():
 		return
@@ -208,13 +209,42 @@ func _process_pending_deformations():
 	var start_time = Time.get_ticks_usec()
 	var budget_us = DEFORMATION_UPDATE_BUDGET_MS * 1000.0
 
+	# Group pending deformations by region for batch processing
+	var stamps_by_region: Dictionary = {}  # Vector2i -> Array[Dictionary]
+
+	# Collect stamps within budget
+	var stamps_to_process: Array = []
 	while not _pending_deformations.is_empty():
 		var elapsed = Time.get_ticks_usec() - start_time
-		if elapsed > budget_us:
-			break  # Defer to next frame
+		if elapsed > budget_us * 0.5:  # Use half budget for collection
+			break  # Save remaining budget for actual rendering
 
 		var deform = _pending_deformations.pop_front()
-		_apply_deformation_stamp(deform)
+		stamps_to_process.append(deform)
+
+	# Group stamps by region
+	for deform in stamps_to_process:
+		var world_pos: Vector3 = deform["position"]
+		var region_coord = world_to_region_coord(world_pos)
+
+		if not stamps_by_region.has(region_coord):
+			stamps_by_region[region_coord] = []
+		stamps_by_region[region_coord].append(deform)
+
+	# Process each region's stamps (potentially in batch)
+	for region_coord in stamps_by_region.keys():
+		var elapsed = Time.get_ticks_usec() - start_time
+		if elapsed > budget_us:
+			# Out of budget, re-queue remaining stamps
+			for remaining_deform in stamps_by_region[region_coord]:
+				_pending_deformations.push_front(remaining_deform)
+			break
+
+		var region_stamps = stamps_by_region[region_coord]
+
+		# Apply all stamps for this region
+		for deform in region_stamps:
+			_apply_deformation_stamp(deform)
 
 # Apply a single deformation stamp
 func _apply_deformation_stamp(deform: Dictionary):
