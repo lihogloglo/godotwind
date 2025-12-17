@@ -65,3 +65,9 @@ enabled=false
 general/update_polling=true
 general/update_interval=0.5
 general/add_quests_to_pot_generation=false
+
+[rendering]
+
+textures/canvas_textures/default_texture_filter=2
+textures/default_filters/anisotropic_filtering_level=4
+environment/defaults/default_clear_color=Color(0.15, 0.17, 0.2, 1)

@@ -84,6 +84,10 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 	mat.roughness = props.roughness
 	mat.albedo_color = props.albedo_color
 
+	# Texture filtering - critical for visual quality at distance
+	# Use anisotropic filtering with mipmaps for sharp textures at oblique angles
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+
 	# Vertex colors
 	if props.use_vertex_colors:
 		mat.vertex_color_use_as_albedo = true

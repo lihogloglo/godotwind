@@ -12,6 +12,8 @@
 ## - +/- to adjust view distance
 ## - Press F3 to toggle stats overlay
 ## - Press F4 to force cleanup distant regions
+##
+## Resolution: 2m vertex spacing (native MDT02), 512m per region
 extends Node3D
 
 const LaPalmaDataProviderScript := preload("res://src/core/world/lapalma_data_provider.gd")
@@ -23,6 +25,7 @@ const DATA_DIR := "res://lapalma_processed"
 # Node references
 @onready var camera: Camera3D = $FlyCamera
 @onready var terrain_3d: Terrain3D = $Terrain3D
+@onready var sky_3d: Node = $Sky3D
 @onready var loading_overlay: ColorRect = $UI/LoadingOverlay
 @onready var loading_label: Label = $UI/LoadingOverlay/VBox/LoadingLabel
 @onready var progress_bar: ProgressBar = $UI/LoadingOverlay/VBox/ProgressBar
@@ -36,6 +39,7 @@ const DATA_DIR := "res://lapalma_processed"
 @onready var caldera_btn: Button = $UI/StatsPanel/VBox/QuickButtons/CalderaBtn
 @onready var coast_btn: Button = $UI/StatsPanel/VBox/QuickButtons/CoastBtn
 @onready var origin_btn: Button = $UI/StatsPanel/VBox/QuickButtons/OriginBtn
+@onready var overview_btn: Button = $UI/StatsPanel/VBox/QuickButtons/OverviewBtn
 
 # Managers
 var _provider: RefCounted = null  # LaPalmaDataProvider
@@ -46,12 +50,21 @@ var camera_speed: float = 300.0
 var mouse_sensitivity: float = 0.003
 var mouse_captured: bool = false
 
+# Sky toggle
+var _show_sky_toggle: CheckBox = null
+var _show_sky: bool = false  # Default OFF - enable for day/night cycle
+
+# Fallback light for when Sky3D is disabled (provides basic illumination)
+var _fallback_light: DirectionalLight3D = null
+
 # State
 var _initialized: bool = false
 var _stats_visible: bool = true
-# REDUCED from 6 to 3 for much better performance!
-# Each region = 1.536km, so 3 regions = ~4.6km view distance
-var _current_view_distance: int = 3
+# At 2m vertex spacing: each region = 512m
+# 6 regions = ~3km view distance (good balance of quality and performance)
+# Overview mode uses 50 regions (~25km) to see the whole island
+var _current_view_distance: int = 6
+var _overview_mode: bool = false
 
 
 func _ready() -> void:
@@ -63,6 +76,10 @@ func _ready() -> void:
 	caldera_btn.pressed.connect(func(): _teleport_to_position(Vector3(-3000, 1500, -12000)))  # Caldera de Taburiente
 	coast_btn.pressed.connect(func(): _teleport_to_position(Vector3(8000, 200, -8000)))  # East coast
 	origin_btn.pressed.connect(func(): _teleport_to_position(Vector3(0, 500, 0)))  # Origin (center)
+	overview_btn.pressed.connect(_toggle_overview_mode)  # Bird's eye view of entire island
+
+	# Setup sky toggle
+	_setup_sky_toggle()
 
 	# Start async initialization
 	_show_loading("Initializing La Palma World", "Loading terrain data...")
@@ -104,6 +121,9 @@ func _init_async() -> void:
 	_log("Use WASD/ZQSD to move, Right-click to look")
 	_log("Press F3 for stats, F4 to force cleanup")
 
+	# Sync sky state with toggle to ensure consistent initial state
+	_sync_sky_state()
+
 	# Start at a scenic location - center of island
 	_teleport_to_position(Vector3(0, 1000, 0))
 
@@ -120,8 +140,9 @@ func _init_terrain3d() -> void:
 	terrain_3d.change_region_size(_provider.region_size)
 
 	# Configure LOD for large terrain - optimized settings
-	terrain_3d.mesh_lods = 8  # Maximum LOD levels for distant terrain
-	terrain_3d.mesh_size = 32  # Reduced from 48 for better performance
+	# With 2m resolution we have smaller regions, so we can use smaller mesh chunks
+	terrain_3d.mesh_lods = 7  # LOD levels for distant terrain
+	terrain_3d.mesh_size = 32  # Mesh chunk size (must be power of 2)
 
 	# Setup material - use the scene's material if it exists, otherwise create one
 	if not terrain_3d.material:
@@ -130,13 +151,13 @@ func _init_terrain3d() -> void:
 	else:
 		_log("Using existing Terrain3DMaterial from scene")
 
-	# Show colormap (white/gray terrain) since we don't have painted textures
+	# Show colormap with procedural height-based colors
 	# NOTE: show_checkered is on both the node AND the material
 	terrain_3d.show_checkered = false  # Node property
 	terrain_3d.material.show_checkered = false  # Material property
-	terrain_3d.material.show_colormap = true  # Use vertex colors (white)
+	terrain_3d.material.show_colormap = true  # Use procedural height colors
 
-	_log("Material settings: checkered=false, colormap=true")
+	_log("Material settings: checkered=false, colormap=true (procedural)")
 
 	# Setup assets
 	if not terrain_3d.assets:
@@ -152,11 +173,12 @@ func _setup_streamer() -> void:
 	_streamer.name = "TerrainStreamer"
 
 	# Configure streaming parameters
+	# At 2m resolution: regions are 512m, so we need more regions for same view distance
 	_streamer.view_distance_regions = _current_view_distance
-	_streamer.unload_distance_regions = _current_view_distance + 2  # Unload 2 regions beyond view
-	_streamer.max_loads_per_frame = 2  # Allow 2 regions per frame for faster initial loading
-	_streamer.max_unloads_per_frame = 2
-	_streamer.generation_budget_ms = 16.0  # Allow more time for loading
+	_streamer.unload_distance_regions = _current_view_distance + 3  # Unload 3 regions beyond view
+	_streamer.max_loads_per_frame = 4  # Allow 4 regions per frame (smaller regions = faster to load)
+	_streamer.max_unloads_per_frame = 4
+	_streamer.generation_budget_ms = 20.0  # Allow more time for loading
 	_streamer.frustum_priority = true
 	_streamer.skip_behind_camera = true  # Don't load regions behind camera
 	_streamer.debug_enabled = true  # Enable debug to diagnose issues
@@ -189,6 +211,79 @@ func _on_region_unloaded(_region: Vector2i) -> void:
 
 func _on_load_complete() -> void:
 	pass  # Silent - don't spam log
+
+
+## Setup sky toggle checkbox in the UI
+func _setup_sky_toggle() -> void:
+	# Find the VBox container in stats panel
+	var vbox: VBoxContainer = stats_panel.get_node_or_null("VBox")
+	if not vbox:
+		return
+
+	# Find or create a container for toggles (before QuickLabel)
+	var quick_label: Label = vbox.get_node_or_null("QuickLabel")
+	var insert_idx: int = quick_label.get_index() if quick_label else vbox.get_child_count()
+
+	# Create a container for the toggle
+	var toggle_container := HBoxContainer.new()
+	toggle_container.name = "SkyToggle"
+
+	# Create "Sky" checkbox
+	_show_sky_toggle = CheckBox.new()
+	_show_sky_toggle.text = "Sky/Day-Night [K]"
+	_show_sky_toggle.button_pressed = _show_sky
+	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
+	toggle_container.add_child(_show_sky_toggle)
+
+	vbox.add_child(toggle_container)
+	vbox.move_child(toggle_container, insert_idx)
+
+	# Create fallback directional light for when Sky3D is disabled
+	_setup_fallback_light()
+
+
+## Toggle sky visibility and day/night cycle
+func _on_show_sky_toggled(enabled: bool) -> void:
+	_show_sky = enabled
+
+	if sky_3d:
+		sky_3d.sky3d_enabled = enabled
+
+	# Toggle fallback light (inverse of sky state)
+	if _fallback_light:
+		_fallback_light.visible = not enabled
+
+	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
+	_update_stats()
+
+
+## Setup fallback directional light for when Sky3D is disabled
+func _setup_fallback_light() -> void:
+	_fallback_light = DirectionalLight3D.new()
+	_fallback_light.name = "FallbackLight"
+
+	# Soft daylight-like settings
+	_fallback_light.light_color = Color(1.0, 0.98, 0.95)
+	_fallback_light.light_energy = 0.8
+	_fallback_light.shadow_enabled = true
+	_fallback_light.shadow_bias = 0.03
+
+	# Point downward at an angle (like midday sun)
+	_fallback_light.rotation_degrees = Vector3(-45, -30, 0)
+
+	# Start visible only if sky is disabled
+	_fallback_light.visible = not _show_sky
+
+	add_child(_fallback_light)
+
+
+## Sync sky state with toggle on initialization
+func _sync_sky_state() -> void:
+	if sky_3d:
+		sky_3d.sky3d_enabled = _show_sky
+
+	if _fallback_light:
+		_fallback_light.visible = not _show_sky
 
 
 func _teleport_to_position(pos: Vector3) -> void:
@@ -234,6 +329,11 @@ func _update_stats() -> void:
 	# Color code FPS
 	var fps_color := "green" if fps >= 50 else ("yellow" if fps >= 30 else "red")
 
+	# Get time info from Sky3D
+	var time_str := "N/A"
+	if sky_3d and _show_sky:
+		time_str = sky_3d.game_time if sky_3d.game_time else "N/A"
+
 	stats_text.text = """[b]Performance[/b]
 FPS: [color=%s]%.1f[/color] (%.2f ms)
 
@@ -247,13 +347,14 @@ Loaded/Unloaded: %d / %d
 [b]Settings[/b]
 View distance: %d [+/-]
 Unload distance: %d
+Sky [K]: %s %s
 
 [b]Camera[/b]
 Position: (%.0f, %.0f, %.0f)
 Above terrain: %.0f m
 
 [color=gray]F3: Stats | F4: Cleanup
-+/-: View distance[/color]""" % [
++/-: View distance | K: Sky[/color]""" % [
 		fps_color, fps, frame_ms,
 		stats.get("loaded_regions", 0),
 		t3d_regions,
@@ -262,7 +363,9 @@ Above terrain: %.0f m
 		stats.get("total_loaded", 0),
 		stats.get("total_unloaded", 0),
 		stats.get("view_distance", _current_view_distance),
-		stats.get("unload_distance", _current_view_distance + 2),
+		stats.get("unload_distance", _current_view_distance + 3),
+		"ON" if _show_sky else "OFF",
+		("(" + time_str + ")") if _show_sky else "",
 		camera.position.x, camera.position.y, camera.position.z,
 		height_above_terrain,
 	]
@@ -322,6 +425,9 @@ func _input(event: InputEvent) -> void:
 				_adjust_view_distance(1)
 			KEY_MINUS, KEY_KP_SUBTRACT:
 				_adjust_view_distance(-1)
+			KEY_K:  # Toggle sky/day-night cycle
+				if _show_sky_toggle:
+					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
 
 
 func _process(delta: float) -> void:
@@ -360,15 +466,38 @@ func _process(delta: float) -> void:
 
 
 func _adjust_view_distance(delta: int) -> void:
-	_current_view_distance = clampi(_current_view_distance + delta, 1, 8)
+	var max_dist := 50 if _overview_mode else 15
+	_current_view_distance = clampi(_current_view_distance + delta, 1, max_dist)
 	if _streamer:
 		_streamer.view_distance_regions = _current_view_distance
-		_streamer.unload_distance_regions = _current_view_distance + 2
+		_streamer.unload_distance_regions = _current_view_distance + 3
 
 	var km_distance: float = 0.0
 	if _provider:
 		km_distance = _current_view_distance * _provider.region_size * _provider.vertex_spacing / 1000.0
 	_log("View distance: %d regions (~%.1f km)" % [_current_view_distance, km_distance])
+	_update_stats()
+
+
+func _toggle_overview_mode() -> void:
+	_overview_mode = not _overview_mode
+
+	if _overview_mode:
+		# Enable overview: high altitude, large view distance
+		_current_view_distance = 50  # ~25km, covers most of island
+		camera.position = Vector3(0, 25000, 5000)  # 25km altitude, slightly south
+		camera.look_at(Vector3(0, 0, -10000))  # Look at island center
+		_log("[color=yellow]Overview mode ON - Loading entire island...[/color]")
+	else:
+		# Return to normal exploration mode
+		_current_view_distance = 6
+		_teleport_to_position(Vector3(0, 1000, 0))
+		_log("[color=yellow]Overview mode OFF[/color]")
+
+	if _streamer:
+		_streamer.view_distance_regions = _current_view_distance
+		_streamer.unload_distance_regions = _current_view_distance + 5
+
 	_update_stats()
 
 

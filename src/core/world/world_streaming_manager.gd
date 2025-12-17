@@ -58,9 +58,8 @@ signal terrain_region_loaded(region: Vector2i)
 @export var debug_enabled: bool = false
 
 ## Time budget for cell loading per frame (ms)
-## Higher = faster loading but more frame hitches
-## 4ms allows reasonable loading speed while maintaining smooth framerate
-@export var cell_load_budget_ms: float = 4.0
+## This is for submitting async requests, should be low as actual parsing is async
+@export var cell_load_budget_ms: float = 2.0
 
 ## Maximum cells to queue for loading
 @export var max_load_queue_size: int = 64
@@ -89,6 +88,9 @@ var terrain_manager: RefCounted = null  # TerrainManager
 
 ## Reference to BackgroundProcessor for async operations
 var background_processor: Node = null  # BackgroundProcessor
+
+## Static object renderer for fast flora rendering
+var static_renderer: Node3D = null  # StaticObjectRenderer
 
 #endregion
 
@@ -136,9 +138,15 @@ func initialize() -> void:
 	if _initialized:
 		return
 	_setup_owdb()
+	_setup_static_renderer()
 	_initialized = true
 	_debug("WorldStreamingManager initialized")
 
+
+## Time budget for async object instantiation per frame (ms)
+## This is the main bottleneck - Node3D.duplicate() is expensive
+## Priority over terrain to show objects quickly
+@export var instantiation_budget_ms: float = 3.0
 
 func _process(_delta: float) -> void:
 	if not _initialized:
@@ -159,6 +167,11 @@ func _process(_delta: float) -> void:
 
 	# Poll for completed async cell requests
 	_poll_async_completions()
+
+	# Process async object instantiation with time budget
+	# This is CRITICAL - without this, objects parsed in background never get created!
+	if cell_manager and cell_manager.has_method("process_async_instantiation"):
+		cell_manager.process_async_instantiation(instantiation_budget_ms)
 
 	# Process object load queue with time budget
 	if async_loading_enabled and not _load_queue.is_empty():
@@ -302,6 +315,23 @@ func get_stats() -> Dictionary:
 
 	return stats
 
+
+## Preload common models to reduce initial loading delays
+## Call this after initialize() but before the player starts moving
+## sync: If true, blocks until complete. If false, loads in background.
+func preload_common_models(sync: bool = false) -> void:
+	if not cell_manager:
+		push_warning("WorldStreamingManager: No CellManager set - cannot preload models")
+		return
+
+	if sync:
+		cell_manager.preload_common_models()
+	else:
+		if cell_manager.has_method("preload_common_models_async"):
+			cell_manager.preload_common_models_async()
+		else:
+			cell_manager.preload_common_models()
+
 #endregion
 
 
@@ -338,6 +368,26 @@ func _setup_owdb() -> void:
 		owdb_position.name = "StreamingPosition"
 		add_child(owdb_position)
 		_debug("OWDBPosition created")
+
+
+## Set up StaticObjectRenderer for fast flora rendering
+func _setup_static_renderer() -> void:
+	var renderer_class = load("res://src/core/world/static_object_renderer.gd")
+	if not renderer_class:
+		push_warning("WorldStreamingManager: StaticObjectRenderer not found - flora will use Node3D (slower)")
+		return
+
+	static_renderer = Node3D.new()
+	static_renderer.set_script(renderer_class)
+	static_renderer.name = "StaticObjectRenderer"
+	add_child(static_renderer)
+
+	# Connect to cell_manager
+	if cell_manager and cell_manager.has_method("set_static_renderer"):
+		cell_manager.set_static_renderer(static_renderer)
+		_debug("StaticObjectRenderer created and connected to CellManager")
+	else:
+		_debug("StaticObjectRenderer created (CellManager not available)")
 
 
 ## Find Terrain3D in the scene tree
@@ -384,6 +434,21 @@ func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 
 	# Also remove from load queue if no longer needed
 	_load_queue = _load_queue.filter(func(entry): return entry.grid in visible_cells)
+
+	# Cancel async requests for cells no longer in view (prevents wasted work)
+	var requests_to_cancel: Array[int] = []
+	for request_id: int in _async_cell_requests:
+		var grid: Vector2i = _async_cell_requests[request_id]
+		if grid not in visible_cells:
+			requests_to_cancel.append(request_id)
+
+	for request_id in requests_to_cancel:
+		var grid: Vector2i = _async_cell_requests[request_id]
+		if cell_manager:
+			cell_manager.cancel_async_request(request_id)
+		_async_cell_requests.erase(request_id)
+		_loading_cells.erase(grid)
+		_debug("Cancelled async request for out-of-view cell: %s" % grid)
 
 	# Queue new visible cells for loading
 	if load_objects and cell_manager:
@@ -464,6 +529,12 @@ func _unload_cell_internal(grid: Vector2i) -> void:
 
 		cell_node.queue_free()
 
+	# Clean up static renderer instances (flora, small rocks rendered via RenderingServer)
+	if cell_manager and cell_manager.has_method("cleanup_cell_static_instances"):
+		var static_removed: int = cell_manager.cleanup_cell_static_instances(grid)
+		if static_removed > 0:
+			_debug("Removed %d static instances from cell %s" % [static_removed, grid])
+
 	cell_unloaded.emit(grid)
 	_debug("Cell unloaded: %s" % grid)
 
@@ -472,8 +543,13 @@ func _unload_cell_internal(grid: Vector2i) -> void:
 
 #region Async Loading Queue
 
+## Enable frustum-based priority for cell loading
+## When enabled, cells in front of camera load first, reducing perceived pop-in
+@export var frustum_priority_enabled: bool = true
+
 ## Add a cell to the priority load queue
 ## Cells closer to the camera have higher priority (lower priority value)
+## When frustum_priority_enabled, cells in front of camera get bonus priority
 func _queue_cell_load(grid: Vector2i, camera_cell: Vector2i) -> void:
 	# Check if already in queue
 	for entry in _load_queue:
@@ -485,12 +561,34 @@ func _queue_cell_load(grid: Vector2i, camera_cell: Vector2i) -> void:
 		_debug("Load queue full, dropping cell: %s" % grid)
 		return
 
-	# Calculate priority based on distance to camera (Manhattan distance)
-	var dx := absi(grid.x - camera_cell.x)
-	var dy := absi(grid.y - camera_cell.y)
-	var priority := dx + dy  # Lower = higher priority
+	# Calculate base priority from distance (Manhattan distance)
+	var dx := grid.x - camera_cell.x
+	var dy := grid.y - camera_cell.y
+	var distance := absf(dx) + absf(dy)
+	var priority: float = distance  # Lower = higher priority
 
-	# Insert in sorted order (priority queue)
+	# Apply frustum priority: cells in front of camera load first
+	if frustum_priority_enabled and _tracked_node:
+		var camera_forward := Vector3.FORWARD
+		if _tracked_node is Camera3D:
+			camera_forward = -(_tracked_node as Camera3D).global_transform.basis.z
+		elif _tracked_node.has_method("get_camera_3d"):
+			var cam: Camera3D = _tracked_node.get_camera_3d()
+			if cam:
+				camera_forward = -cam.global_transform.basis.z
+
+		# Direction to cell (in XZ plane, Y is up in Godot)
+		# Cell grid: +X is east, +Y is north in Morrowind
+		# In Godot: +X is east, -Z is north (after coordinate conversion)
+		var cell_dir := Vector3(dx, 0, -dy).normalized()
+		var dot := camera_forward.dot(cell_dir)
+
+		# dot = 1 means cell is directly in front, -1 means behind
+		# Apply penalty of up to 3 priority levels for cells behind camera
+		# This ensures cells in front load first even if slightly further
+		priority -= dot * 2.0  # In front gets bonus (lower priority), behind gets penalty
+
+	# Insert in sorted order (priority queue - lower = higher priority)
 	var inserted := false
 	for i in range(_load_queue.size()):
 		if priority < _load_queue[i].priority:
@@ -547,7 +645,15 @@ func _process_load_queue() -> void:
 			var request_id: int = cell_manager.request_exterior_cell_async(grid.x, grid.y)
 			if request_id >= 0:
 				_async_cell_requests[request_id] = grid
-				_debug("Async cell request submitted: %s (id=%d)" % [grid, request_id])
+
+				# PROGRESSIVE LOADING: Add cell node to scene immediately
+				# Objects will appear as they're instantiated by process_async_instantiation
+				var cell_node: Node3D = cell_manager.get_async_cell_node(request_id)
+				if cell_node and not cell_node.is_inside_tree():
+					add_child(cell_node)
+					cell_node.set_meta("cell_grid", grid)
+					_loaded_cells[grid] = cell_node
+					_debug("Async cell added early for progressive loading: %s (id=%d)" % [grid, request_id])
 			else:
 				# Fallback to sync if async not available (e.g., cell not found)
 				_loading_cells.erase(grid)
@@ -588,25 +694,29 @@ func _poll_async_completions() -> void:
 		_async_cell_requests.erase(request_id)
 		_loading_cells.erase(grid)
 
-		# Skip if cell was unloaded while loading (e.g., camera moved away)
-		if grid not in _loading_cells and grid in _loaded_cells:
-			continue
-
 		# Check for partial failures (some models failed to parse)
 		if cell_manager.has_async_failed(request_id):
 			var failed_count: int = cell_manager.get_async_failed_count(request_id)
 			_debug("Cell %s had %d models fail to parse (will use placeholders)" % [grid, failed_count])
 
+		# With progressive loading, cell_node was already added to scene in _process_load_queue
+		# Just clean up tracking and emit signal
 		var cell_node: Node3D = cell_manager.get_async_result(request_id)
 
 		if cell_node:
-			add_child(cell_node)
-			cell_node.set_meta("cell_grid", grid)
-
-			_loaded_cells[grid] = cell_node
-			cell_loaded.emit(grid, cell_node)
-			_stats_cells_loaded_this_frame += 1
-			_debug("Cell loaded (async): %s with %d children" % [grid, cell_node.get_child_count()])
+			# Cell was already added via progressive loading - just emit signal
+			if grid in _loaded_cells and _loaded_cells[grid] == cell_node:
+				cell_loaded.emit(grid, cell_node)
+				_stats_cells_loaded_this_frame += 1
+				_debug("Cell async complete: %s with %d children" % [grid, cell_node.get_child_count()])
+			elif not cell_node.is_inside_tree():
+				# Fallback: add if not already in tree (shouldn't happen normally)
+				add_child(cell_node)
+				cell_node.set_meta("cell_grid", grid)
+				_loaded_cells[grid] = cell_node
+				cell_loaded.emit(grid, cell_node)
+				_stats_cells_loaded_this_frame += 1
+				_debug("Cell loaded (async fallback): %s with %d children" % [grid, cell_node.get_child_count()])
 		else:
 			_debug("Cell %s has no data (async result null)" % grid)
 
@@ -655,8 +765,8 @@ var _terrain_generated_regions: Dictionary = {}
 var _terrain_generation_queue: Array = []
 
 ## Time budget for terrain generation per frame (ms)
-## Keep low to maintain 60fps (combined with cell_load_budget_ms should be < 8ms)
-@export var terrain_generation_budget_ms: float = 4.0
+## Terrain can lag behind objects slightly - prioritize object visibility
+@export var terrain_generation_budget_ms: float = 2.0
 
 ## Terrain view distance in regions (limits how far terrain generates)
 ## Each region is 4x4 cells = ~468m, so 8 regions = ~3.7km

@@ -36,6 +36,7 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 # Node references
 @onready var camera: Camera3D = $FlyCamera
 @onready var terrain_3d: Terrain3D = $Terrain3D
+@onready var sky_3d: Node = $Sky3D
 @onready var loading_overlay: ColorRect = $UI/LoadingOverlay
 @onready var loading_label: Label = $UI/LoadingOverlay/VBox/LoadingLabel
 @onready var progress_bar: ProgressBar = $UI/LoadingOverlay/VBox/ProgressBar
@@ -57,9 +58,14 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 # Visibility toggles (will be created dynamically)
 var _show_models_toggle: CheckBox = null
 var _show_ocean_toggle: CheckBox = null
+var _show_sky_toggle: CheckBox = null
 var _water_quality_btn: OptionButton = null
 var _show_models: bool = false  # Default OFF for performance
 var _show_ocean: bool = false   # Default OFF for performance
+var _show_sky: bool = false     # Default OFF - enable for day/night cycle
+
+# Fallback light for when Sky3D is disabled (provides basic illumination)
+var _fallback_light: DirectionalLight3D = null
 
 # Interior cell browser UI (will be added to scene)
 @onready var interior_panel: Panel = $UI/InteriorPanel if has_node("UI/InteriorPanel") else null
@@ -212,6 +218,10 @@ func _init_async() -> void:
 	_log("Use ZQSD to move, Right-click to look")
 	_log("Cells stream automatically based on camera position")
 
+	# Sync sky state with toggle to ensure consistent initial state
+	# This ensures the sky visibility matches what the toggle shows
+	_sync_sky_state()
+
 	# First teleport camera to Seyda Neen BEFORE starting to track
 	_teleport_to_cell(-2, -9)
 
@@ -341,6 +351,17 @@ func _setup_visibility_toggles() -> void:
 	_show_ocean_toggle.toggled.connect(_on_show_ocean_toggled)
 	toggle_container.add_child(_show_ocean_toggle)
 
+	# Create "Sky" checkbox
+	_show_sky_toggle = CheckBox.new()
+	_show_sky_toggle.text = "Sky"
+	_show_sky_toggle.button_pressed = _show_sky
+	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
+	toggle_container.add_child(_show_sky_toggle)
+
+	# Create fallback directional light for when Sky3D is disabled
+	# This ensures the scene is never completely dark
+	_setup_fallback_light()
+
 	# Create water quality dropdown
 	_water_quality_btn = OptionButton.new()
 	_water_quality_btn.add_item("Auto", -1)
@@ -374,10 +395,10 @@ func _on_show_models_toggled(enabled: bool) -> void:
 				cell_node.visible = enabled
 
 		if enabled:
-			# When enabling, force load all visible cells immediately
-			# (cells weren't loaded when load_objects was false)
-			# Use force_load to bypass async queue and load synchronously
-			world_streaming_manager.force_load_visible_cells()
+			# When enabling, refresh cells to trigger loading via async queue
+			# This loads progressively without blocking the main thread
+			# Models are preloaded in background so this should be fast
+			world_streaming_manager.refresh_cells()
 
 	_log("Models: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
@@ -407,6 +428,56 @@ func _on_water_quality_changed(index: int) -> void:
 	var quality_name: String = ocean_manager.get_water_quality_name()
 	_log("Water quality: %s" % quality_name)
 	_update_stats()
+
+
+## Toggle sky/day-night cycle visibility
+func _on_show_sky_toggled(enabled: bool) -> void:
+	_show_sky = enabled
+
+	if sky_3d:
+		sky_3d.sky3d_enabled = enabled
+
+	# Toggle fallback light (inverse of sky state)
+	# When sky is ON, fallback light is OFF (Sky3D provides lighting)
+	# When sky is OFF, fallback light is ON (provides basic illumination)
+	if _fallback_light:
+		_fallback_light.visible = not enabled
+
+	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
+	_update_stats()
+
+
+## Setup fallback directional light for when Sky3D is disabled
+## This provides basic illumination so the scene isn't completely dark
+func _setup_fallback_light() -> void:
+	_fallback_light = DirectionalLight3D.new()
+	_fallback_light.name = "FallbackLight"
+
+	# Soft daylight-like settings
+	_fallback_light.light_color = Color(1.0, 0.98, 0.95)  # Slightly warm white
+	_fallback_light.light_energy = 0.8
+	_fallback_light.shadow_enabled = true
+	_fallback_light.shadow_bias = 0.03
+
+	# Point downward at an angle (like midday sun)
+	_fallback_light.rotation_degrees = Vector3(-45, -30, 0)
+
+	# Start visible only if sky is disabled
+	_fallback_light.visible = not _show_sky
+
+	add_child(_fallback_light)
+
+
+## Sync sky state with toggle on initialization
+## Call this after Sky3D is ready to ensure consistent state
+func _sync_sky_state() -> void:
+	if sky_3d:
+		# Force the sky state to match the toggle
+		sky_3d.sky3d_enabled = _show_sky
+
+	# Ensure fallback light matches
+	if _fallback_light:
+		_fallback_light.visible = not _show_sky
 
 
 ## Handle preprocess button press
@@ -565,6 +636,10 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Initialize after all configuration is set
 	world_streaming_manager.initialize()
 
+	# Preload common models in background (reduces delay when models are enabled)
+	# This happens async so it doesn't block initialization
+	world_streaming_manager.preload_common_models(false)
+
 	_log("WorldStreamingManager created and configured")
 	if _using_preprocessed:
 		_log("Using pre-processed terrain data")
@@ -670,13 +745,13 @@ View dist: %d cells [+/-]
 Regions: %d
 
 [b]Visibility[/b]
-Models [M]: %s | Ocean [O]: %s
+Models [M]: %s | Ocean [O]: %s | Sky [K]: %s
 Water quality: %s
 
 [b]Camera[/b]
 Cell: (%d, %d)
 
-[color=gray]F3: Overlay | F4: Report | M/O: Toggle[/color]""" % [
+[color=gray]F3: Overlay | F4: Report | M/O/K: Toggle[/color]""" % [
 		fps, frame_ms,
 		p95_ms,
 		draw_calls,
@@ -691,6 +766,7 @@ Cell: (%d, %d)
 		total_regions,
 		"ON" if _show_models else "OFF",
 		"ON" if _show_ocean else "OFF",
+		"ON" if _show_sky else "OFF",
 		ocean_manager.get_water_quality_name() if ocean_manager else "N/A",
 		stats.get("camera_cell", Vector2i(0, 0)).x,
 		stats.get("camera_cell", Vector2i(0, 0)).y,
@@ -762,6 +838,9 @@ func _input(event: InputEvent) -> void:
 			KEY_O:  # Toggle ocean
 				if _show_ocean_toggle:
 					_show_ocean_toggle.button_pressed = not _show_ocean_toggle.button_pressed
+			KEY_K:  # Toggle sky/day-night cycle
+				if _show_sky_toggle:
+					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
 
 
 func _process(delta: float) -> void:

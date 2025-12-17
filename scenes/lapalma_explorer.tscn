@@ -1,18 +1,7 @@
 [gd_scene load_steps=10 format=3 uid="uid://dndox8fpbhekx"]
 
 [ext_resource type="Script" uid="uid://d0hoxkgtiabvi" path="res://src/tools/lapalma_explorer.gd" id="1_lapalma"]
-
-[sub_resource type="Environment" id="Environment_lapalma"]
-background_mode = 1
-background_color = Color(0.45, 0.55, 0.75, 1)
-ambient_light_source = 2
-ambient_light_color = Color(0.5, 0.55, 0.6, 1)
-ambient_light_energy = 0.7
-tonemap_mode = 2
-fog_enabled = true
-fog_light_color = Color(0.65, 0.7, 0.8, 1)
-fog_density = 2e-05
-fog_sky_affect = 0.3
+[ext_resource type="Script" path="res://addons/sky_3d/src/Sky3D.gd" id="2_sky3d"]
 
 [sub_resource type="Gradient" id="Gradient_noise"]
 offsets = PackedFloat32Array(0.2, 1)
@@ -37,24 +26,24 @@ seamless = true
 
 [sub_resource type="Terrain3DMaterial" id="Terrain3DMaterial_lapalma"]
 _shader_parameters = {
-&"bias_distance": 1024.0,
-&"blend_sharpness": 0.5,
+&"bias_distance": 2048.0,
+&"blend_sharpness": 0.87,
 &"depth_blur": 0.0,
 &"enable_macro_variation": true,
 &"enable_projection": true,
 &"flat_terrain_normals": false,
-&"macro_variation1": Color(0.95, 0.9, 0.85, 1),
-&"macro_variation2": Color(0.85, 0.8, 0.75, 1),
-&"macro_variation_slope": 0.333,
-&"mipmap_bias": 1.0,
+&"macro_variation1": Color(1.05, 1.02, 1.0, 1),
+&"macro_variation2": Color(0.92, 0.90, 0.88, 1),
+&"macro_variation_slope": 0.25,
+&"mipmap_bias": 0.5,
 &"noise1_angle": 0.0,
 &"noise1_offset": Vector2(0.5, 0.5),
-&"noise1_scale": 0.04,
-&"noise2_scale": 0.076,
+&"noise1_scale": 0.02,
+&"noise2_scale": 0.05,
 &"noise_texture": SubResource("NoiseTexture2D_noise"),
 &"projection_threshold": 0.8
 }
-show_checkered = true
+show_checkered = false
 show_colormap = true
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tsohu"]
@@ -81,15 +70,12 @@ mesh_list = Array[Terrain3DMeshAsset]([SubResource("Terrain3DMeshAsset_5ud2a")])
 [node name="LaPalmaExplorer" type="Node3D"]
 script = ExtResource("1_lapalma")
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
-environment = SubResource("Environment_lapalma")
-
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 10000, 5000, -20000)
-light_energy = 1.3
-shadow_enabled = true
-shadow_opacity = 0.6
-directional_shadow_max_distance = 2000.0
+[node name="Sky3D" type="WorldEnvironment" parent="."]
+script = ExtResource("2_sky3d")
+sky3d_enabled = false
+current_time = 10.0
+minutes_per_day = 60.0
+fog_enabled = true
 
 [node name="FlyCamera" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 1000, 0)
@@ -98,7 +84,7 @@ far = 50000.0
 [node name="Terrain3D" type="Terrain3D" parent="."]
 material = SubResource("Terrain3DMaterial_lapalma")
 assets = SubResource("Terrain3DAssets_lapalma")
-show_checkered = true
+show_checkered = false
 show_colormap = true
 top_level = true
 metadata/_edit_lock_ = true
@@ -196,6 +182,10 @@ text = "East Coast"
 [node name="OriginBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
 layout_mode = 2
 text = "Origin (0,0)"
+
+[node name="OverviewBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+layout_mode = 2
+text = "Overview"
 
 [node name="HSeparator3" type="HSeparator" parent="UI/StatsPanel/VBox"]
 layout_mode = 2

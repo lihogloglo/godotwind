@@ -116,15 +116,20 @@ static func quaternion_to_mw(godot: Quaternion) -> Quaternion:
 ## Convert Euler angles (radians) from Morrowind to Godot
 ## Use for: ESM cell reference rotations
 ##
-## Morrowind Euler convention:
-##   X = pitch (tilt forward/back)
-##   Y = roll (tilt left/right)
-##   Z = yaw (turn around vertical axis)
+## Morrowind Euler convention (intrinsic XYZ order):
+##   X = pitch (tilt forward/back around X/East axis)
+##   Y = roll (tilt left/right around Y/North axis)
+##   Z = yaw (turn around Z/Up vertical axis)
+##   Order: First X, then Y, then Z (intrinsic XYZ)
+##   Reference: OpenMW apps/openmw/mwworld/worldimp.cpp
 ##
 ## Godot Euler (after coordinate conversion):
-##   X = pitch (stays same)
-##   Y = yaw (MW Z -> Godot Y because vertical axis changes)
-##   Z = roll (MW Y -> Godot -Z because forward axis changes)
+##   X = pitch (MW X -> Godot X, stays same)
+##   Y = yaw (MW Z -> Godot Y, because vertical axis Z->Y)
+##   Z = roll (MW Y -> Godot -Z, because forward axis Y->-Z)
+##   Order: Intrinsic XYZ in MW becomes intrinsic XZY in Godot
+##
+## IMPORTANT: When applying, use Basis.from_euler(euler, EULER_ORDER_XZY)
 static func euler_to_godot(mw: Vector3) -> Vector3:
 	return Vector3(mw.x, mw.z, -mw.y)
 

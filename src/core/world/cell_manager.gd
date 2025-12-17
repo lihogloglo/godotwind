@@ -13,12 +13,16 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
+const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 
 # Cache for loaded models to avoid re-parsing NIFs
 var _model_cache: Dictionary = {}  # model_path (lowercase) -> Node3D prototype
 
 # Object pool for frequently used models
 var _object_pool: RefCounted = null  # ObjectPool
+
+# Static object renderer for fast flora rendering (uses RenderingServer directly)
+var _static_renderer: Node = null  # StaticObjectRenderer
 
 # Statistics
 var _stats: Dictionary = {
@@ -29,6 +33,7 @@ var _stats: Dictionary = {
 	"lights_created": 0,
 	"npcs_loaded": 0,
 	"creatures_loaded": 0,
+	"static_renderer_instances": 0,
 }
 
 # Configuration
@@ -36,6 +41,7 @@ var create_lights: bool = true   # Whether to create OmniLight3D for light refs
 var load_npcs: bool = true       # Whether to load NPC models
 var load_creatures: bool = true  # Whether to load creature models
 var use_object_pool: bool = true # Whether to use object pooling for common models
+var use_static_renderer: bool = true  # Use RenderingServer for flora (much faster)
 
 # Morrowind light radius to Godot light range conversion factor
 # MW units are roughly 1/128th of a meter, so radius 256 ~= 2 meters
@@ -66,6 +72,9 @@ func load_exterior_cell(x: int, y: int) -> Node3D:
 func _instantiate_cell(cell: CellRecord) -> Node3D:
 	var cell_node := Node3D.new()
 
+	# Get cell grid for static renderer tracking
+	var cell_grid := Vector2i(cell.grid_x, cell.grid_y) if not cell.is_interior() else Vector2i.ZERO
+
 	# Name the cell node
 	if cell.is_interior():
 		cell_node.name = cell.name.replace(" ", "_").replace(",", "")
@@ -76,16 +85,20 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 
 	var loaded := 0
 	var failed := 0
+	var static_count := 0
 
 	for ref in cell.references:
-		var obj := _instantiate_reference(ref)
+		var obj := _instantiate_reference(ref, cell_grid)
 		if obj:
 			cell_node.add_child(obj)
 			loaded += 1
+		elif use_static_renderer and _static_renderer:
+			# Object may have been added to static renderer (returns null)
+			static_count += 1
 		else:
 			failed += 1
 
-	print("CellManager: Loaded %d objects, %d failed" % [loaded, failed])
+	print("CellManager: Loaded %d objects, %d static, %d failed" % [loaded, static_count, failed])
 	_stats["objects_instantiated"] += loaded
 	_stats["objects_failed"] += failed
 
@@ -93,7 +106,8 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 
 
 ## Instantiate a single cell reference as a Node3D
-func _instantiate_reference(ref: CellReference) -> Node3D:
+## cell_grid: Used for tracking static renderer instances for cleanup
+func _instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
 	var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
@@ -130,11 +144,12 @@ func _instantiate_reference(ref: CellReference) -> Node3D:
 			return null
 		_:
 			# Standard model-based object
-			return _instantiate_model_object(ref, base_record)
+			return _instantiate_model_object(ref, base_record, cell_grid)
 
 
 ## Instantiate a standard object with a NIF model
-func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
+## For flora/rocks, uses StaticObjectRenderer for ~10x faster instantiation
+func _instantiate_model_object(ref: CellReference, base_record, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	# Get model path and record ID
 	var model_path: String = _get_model_path(base_record)
 	if model_path.is_empty():
@@ -144,6 +159,11 @@ func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
 	var record_id: String = ""
 	if "record_id" in base_record:
 		record_id = base_record.record_id
+
+	# Check if this model should use static rendering (flora, small rocks)
+	# Static rendering is ~10x faster but has no physics/interaction
+	if use_static_renderer and _static_renderer and _is_static_render_model(model_path):
+		return _instantiate_static_object(ref, model_path, cell_grid)
 
 	# Try to get from object pool first (if enabled)
 	if use_object_pool and _object_pool:
@@ -174,6 +194,40 @@ func _instantiate_model_object(ref: CellReference, base_record) -> Node3D:
 	_apply_transform(instance, ref, true)
 
 	return instance
+
+
+## Instantiate a flora/rock using StaticObjectRenderer (RenderingServer direct)
+## Returns null (no Node3D created) - the instance exists only in RenderingServer
+## This is ~10x faster than Node3D.duplicate()
+func _instantiate_static_object(ref: CellReference, model_path: String, cell_grid: Vector2i) -> Node3D:
+	var normalized := model_path.to_lower().replace("/", "\\")
+
+	# Ensure model is loaded and registered with static renderer
+	if not _static_renderer.has_type(normalized):
+		# Load prototype to get mesh
+		var prototype := _get_model(model_path)
+		if prototype:
+			_static_renderer.register_from_prototype(normalized, prototype)
+		else:
+			return null
+
+	# Calculate transform
+	# Morrowind uses intrinsic XYZ Euler order -> XZY in Godot after coordinate conversion
+	var pos := CS.vector_to_godot(ref.position)
+	var scale := CS.scale_to_godot(ref.scale)
+	var euler := CS.euler_to_godot(ref.rotation)
+	var basis := Basis.from_euler(euler, EULER_ORDER_XZY)
+	basis = basis.scaled(scale)
+	var transform := Transform3D(basis, pos)
+
+	# Add instance to static renderer
+	var instance_id: int = _static_renderer.add_instance(normalized, transform, cell_grid)
+	if instance_id >= 0:
+		_stats["static_renderer_instances"] += 1
+
+	# Return null - no Node3D created, exists only in RenderingServer
+	# The cell_grid parameter lets us clean up when the cell unloads
+	return null
 
 
 ## Instantiate a light object (model + OmniLight3D)
@@ -430,10 +484,11 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 	# NIF models are already converted to Y-up in nif_converter, so we only
 	# need to apply the object's rotation from the cell reference
 	#
-	# Morrowind uses ZYX Euler order (yaw around Z, then pitch around Y, then roll around X)
-	# After coordinate conversion (Z->Y, Y->-Z), this becomes YZX order in Godot
+	# Morrowind uses intrinsic XYZ Euler order (pitch around X, then roll around Y, then yaw around Z)
+	# See: https://github.com/OpenMW/openmw - apps/openmw/mwworld/worldimp.cpp
+	# After coordinate conversion (MW Z->Godot Y, MW Y->Godot -Z), XYZ becomes XZY in Godot
 	var godot_euler := CS.euler_to_godot(ref.rotation)
-	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_YZX)
+	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_XZY)
 
 
 ## Get the model path from a base record
@@ -515,6 +570,19 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 	return placeholder
 
 
+## Clean up static renderer instances for a cell
+## Call this when unloading a cell to free RenderingServer resources
+## Returns the number of instances removed
+func cleanup_cell_static_instances(cell_grid: Vector2i) -> int:
+	if not _static_renderer:
+		return 0
+
+	var removed: int = _static_renderer.remove_cell_instances(cell_grid)
+	if removed > 0:
+		_stats["static_renderer_instances"] -= removed
+	return removed
+
+
 ## Clear the model cache
 func clear_cache() -> void:
 	for key in _model_cache:
@@ -565,6 +633,165 @@ func init_object_pool(pool_parent: Node3D = null) -> RefCounted:
 	if pool_parent:
 		_object_pool.init(pool_parent)
 	return _object_pool
+
+
+## Set the static object renderer for fast flora rendering
+func set_static_renderer(renderer: Node) -> void:
+	_static_renderer = renderer
+
+
+## Get the static object renderer
+func get_static_renderer() -> Node:
+	return _static_renderer
+
+
+## Check if a model should use static rendering (flora, rocks - no physics/interaction)
+## These objects are purely visual and benefit from RenderingServer optimization
+func _is_static_render_model(model_path: String) -> bool:
+	var lower := model_path.to_lower()
+
+	# Flora - grass, kelp, flowers, ferns (visual only, no interaction)
+	if "flora_" in lower:
+		# Exclude trees (need collision) and harvestable plants
+		if "tree" in lower:
+			return false
+		if "comberry" in lower or "marshmerrow" in lower or "wickwheat" in lower:
+			return false  # Harvestable
+		return true
+
+	# Small rocks (purely decorative)
+	if "rock_" in lower and "_small" in lower:
+		return true
+
+	return false
+
+
+## Preload common models into cache to reduce initial loading delays
+## Call this during game initialization for smoother first-cell loading
+## Also pre-warms the object pool with initial instances for instant acquire()
+## Returns number of models successfully preloaded
+func preload_common_models() -> int:
+	var common_models := ObjectPoolScript.identify_common_models(self)
+	var loaded := 0
+	var pool_instances := 0
+
+	print("CellManager: Preloading %d common models..." % common_models.size())
+
+	for model_path: String in common_models:
+		# Skip if already cached
+		var normalized := model_path.to_lower().replace("/", "\\")
+		if normalized in _model_cache:
+			continue
+
+		# Skip flora that will use StaticObjectRenderer instead
+		if use_static_renderer and _static_renderer and _is_static_render_model(model_path):
+			continue
+
+		# Try to load the model
+		var prototype := _get_model(model_path)
+		if prototype:
+			loaded += 1
+
+			# Register with pool AND pre-warm with initial instances
+			# Pre-warming means acquire() returns instantly without duplicate()
+			if _object_pool and not _object_pool.has_model(model_path):
+				var pool_size: int = common_models[model_path]
+				# Pre-create 20% of max pool size (enough for initial cells)
+				var initial_count: int = maxi(5, pool_size / 5)
+				_object_pool.register_model(model_path, prototype, initial_count, pool_size)
+				pool_instances += initial_count
+
+	print("CellManager: Preloaded %d models, pre-warmed pool with %d instances" % [loaded, pool_instances])
+	return loaded
+
+
+## Preload models asynchronously using the background processor
+## Emits preload_complete signal when done
+## Returns immediately - check preload_progress for status
+signal preload_progress(loaded: int, total: int)
+signal preload_complete(loaded: int, failed: int)
+
+var _preload_pending: Dictionary = {}  # model_path -> task_id
+var _preload_loaded: int = 0
+var _preload_failed: int = 0
+var _preload_total: int = 0
+
+func preload_common_models_async() -> void:
+	if not _background_processor:
+		push_warning("CellManager: No background processor, falling back to sync preload")
+		preload_common_models()
+		return
+
+	var common_models := ObjectPoolScript.identify_common_models(self)
+	_preload_loaded = 0
+	_preload_failed = 0
+	_preload_total = 0
+	_preload_pending.clear()
+
+	for model_path: String in common_models:
+		# Skip if already cached
+		var normalized := model_path.to_lower().replace("/", "\\")
+		if normalized in _model_cache:
+			continue
+
+		_preload_total += 1
+
+		# Submit parse task
+		var task_id := _submit_parse_task(model_path, "", -1)  # -1 = preload, not tied to a cell request
+		if task_id >= 0:
+			_preload_pending[model_path] = task_id
+
+	if _preload_pending.is_empty():
+		preload_complete.emit(0, 0)
+		return
+
+	print("CellManager: Preloading %d models asynchronously..." % _preload_pending.size())
+
+
+func _check_preload_completion(task_id: int, result: Variant) -> bool:
+	# Check if this task is a preload task
+	var model_path := ""
+	for path in _preload_pending:
+		if _preload_pending[path] == task_id:
+			model_path = path
+			break
+
+	if model_path.is_empty():
+		return false  # Not a preload task
+
+	_preload_pending.erase(model_path)
+
+	if result is NIFParseResult:
+		var parse_result: NIFParseResult = result
+		if parse_result.is_valid():
+			# Convert to prototype and cache
+			var converter := NIFConverter.new()
+			var prototype := converter.convert_from_parsed(parse_result)
+			if prototype:
+				var cache_key := _get_cache_key(model_path, "")
+				_model_cache[cache_key] = prototype
+				_stats["models_loaded"] += 1
+				_preload_loaded += 1
+
+				# Register with pool
+				if _object_pool and not _object_pool.has_model(model_path):
+					var common_models := ObjectPoolScript.identify_common_models(self)
+					var pool_size: int = common_models.get(model_path, 50)
+					_object_pool.register_model(model_path, prototype, 0, pool_size)
+			else:
+				_preload_failed += 1
+		else:
+			_preload_failed += 1
+	else:
+		_preload_failed += 1
+
+	preload_progress.emit(_preload_loaded, _preload_total)
+
+	if _preload_pending.is_empty():
+		print("CellManager: Preload complete - %d loaded, %d failed" % [_preload_loaded, _preload_failed])
+		preload_complete.emit(_preload_loaded, _preload_failed)
+
+	return true
 
 
 # =============================================================================
@@ -710,6 +937,15 @@ func get_async_result(request_id: int) -> Node3D:
 	# Remove from tracking and return result
 	_async_requests.erase(request_id)
 	return request.cell_node
+
+
+## Get the cell node for an in-progress async request (for progressive loading)
+## Returns the cell Node3D even if not complete - objects will appear as instantiated
+## Returns null if request_id is invalid
+func get_async_cell_node(request_id: int) -> Node3D:
+	if request_id not in _async_requests:
+		return null
+	return _async_requests[request_id].cell_node
 
 
 ## Cancel an async request
@@ -886,7 +1122,11 @@ func _submit_parse_task(model_path: String, item_id: String, request_id: int) ->
 
 ## Internal: Handle parse completion from background processor
 func _on_parse_completed(task_id: int, result: Variant) -> void:
-	# Find which request this belongs to
+	# First check if this is a preload task
+	if _check_preload_completion(task_id, result):
+		return  # Was handled as preload
+
+	# Find which cell request this belongs to
 	for request_id in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 

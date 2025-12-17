@@ -885,6 +885,9 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 	# Fallback: Create new material (legacy behavior)
 	var material := StandardMaterial3D.new()
 
+	# Texture filtering - critical for visual quality at distance
+	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+
 	# Apply material properties
 	if mat_prop:
 		material.albedo_color = mat_prop.diffuse
@@ -1475,6 +1478,16 @@ func _calculate_light_range(constant: float, linear: float, quadratic: float) ->
 # LOD AND SWITCH NODE CONVERSION
 # =============================================================================
 
+## Recursively apply visibility range to all GeometryInstance3D nodes in a subtree
+func _apply_visibility_range(node: Node, begin: float, end: float) -> void:
+	if node is GeometryInstance3D:
+		node.visibility_range_begin = begin
+		node.visibility_range_end = end
+		node.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+	for child in node.get_children():
+		_apply_visibility_range(child, begin, end)
+
+
 ## Convert NiLODNode to Node3D with LOD metadata
 func _convert_ni_lod_node(lod_node: Defs.NiLODNode, skeleton: Skeleton3D = null) -> Node3D:
 	var node := Node3D.new()
@@ -1509,6 +1522,27 @@ func _convert_ni_lod_node(lod_node: Defs.NiLODNode, skeleton: Skeleton3D = null)
 			# Store LOD level index on child
 			var lod_index := lod_node.children_indices.find(child_index)
 			child_node.set_meta("nif_lod_level", lod_index)
+
+	# Apply Godot visibility ranges to each LOD level
+	for i in node.get_child_count():
+		var child = node.get_child(i)
+		var lod_index = child.get_meta("nif_lod_level", -1)
+		if lod_index < 0 or lod_index >= converted_levels.size():
+			continue
+
+		# Calculate visibility range for this LOD level
+		var begin: float = 0.0
+		var end: float = converted_levels[lod_index]["max_range"]
+
+		# LOD levels after 0 start where the previous one ends
+		if lod_index > 0:
+			begin = converted_levels[lod_index - 1]["max_range"]
+
+		# Last LOD level extends to infinity (0 = no limit in Godot)
+		if lod_index == converted_levels.size() - 1:
+			end = 0.0
+
+		_apply_visibility_range(child, begin, end)
 
 	return node
 

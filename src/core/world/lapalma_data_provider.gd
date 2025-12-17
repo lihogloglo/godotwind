@@ -146,9 +146,59 @@ func get_controlmap_for_region(region_coord: Vector2i) -> Image:
 
 
 func get_colormap_for_region(region_coord: Vector2i) -> Image:
-	# Return null to use white vertex colors (much faster)
-	# TODO: Precompute color maps in preprocessing script for shading
-	return null
+	# Generate procedural height-based colors for the terrain
+	var heightmap := get_heightmap_for_region(region_coord)
+	if not heightmap:
+		return null
+
+	var colormap := Image.create(region_size, region_size, false, Image.FORMAT_RGB8)
+
+	# Height color gradient (La Palma: sea level to ~2426m)
+	# Sea level: sandy/coastal
+	# Low: green vegetation
+	# Mid: darker green/brown
+	# High: volcanic rock/gray
+	# Peak: light gray/snow-like
+
+	for y in range(region_size):
+		for x in range(region_size):
+			var height: float = heightmap.get_pixel(x, y).r
+			var color := _height_to_color(height)
+			colormap.set_pixel(x, y, color)
+
+	return colormap
+
+
+## Convert height to terrain color
+func _height_to_color(height: float) -> Color:
+	# Height ranges for La Palma (0 to ~2426m)
+	if height <= 0:
+		# Sea level / beaches - sandy
+		return Color(0.76, 0.70, 0.50)
+	elif height < 100:
+		# Coastal - light green with brown
+		var t := height / 100.0
+		return Color(0.45, 0.55, 0.35).lerp(Color(0.35, 0.50, 0.25), t)
+	elif height < 500:
+		# Low vegetation - rich green
+		var t := (height - 100) / 400.0
+		return Color(0.35, 0.50, 0.25).lerp(Color(0.30, 0.42, 0.22), t)
+	elif height < 1200:
+		# Mid elevation - pine forest, darker green
+		var t := (height - 500) / 700.0
+		return Color(0.30, 0.42, 0.22).lerp(Color(0.35, 0.32, 0.25), t)
+	elif height < 1800:
+		# High elevation - sparse vegetation, brown/gray
+		var t := (height - 1200) / 600.0
+		return Color(0.35, 0.32, 0.25).lerp(Color(0.45, 0.42, 0.40), t)
+	elif height < 2200:
+		# Very high - volcanic rock, gray
+		var t := (height - 1800) / 400.0
+		return Color(0.45, 0.42, 0.40).lerp(Color(0.55, 0.52, 0.50), t)
+	else:
+		# Peak - light gray (Roque de los Muchachos)
+		var t := clampf((height - 2200) / 300.0, 0, 1)
+		return Color(0.55, 0.52, 0.50).lerp(Color(0.65, 0.62, 0.60), t)
 
 
 func has_terrain_at_region(region_coord: Vector2i) -> bool:
