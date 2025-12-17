@@ -30,6 +30,13 @@ var dirty_chunks: Array[DeformationChunk] = []
 var camera: Camera3D
 var last_camera_chunk: Vector2i = Vector2i(-9999, -9999)
 
+## Terrain3D Integration
+var terrain_3d: Terrain3D = null  ## Reference to Terrain3D node
+var terrain_material: ShaderMaterial = null  ## Terrain3D's shader material
+var deformation_texture_array: Texture2DArray = null  ## Combined deformation textures
+var deformation_map: Array[int] = []  ## Terrain region index -> deformation texture layer (-1 = no deformation)
+var texture_array_dirty: bool = false  ## Needs texture array rebuild
+
 ## Persistence
 var save_timer: float = 0.0
 var persistence_path: String = "user://deformation_cache/"
@@ -38,6 +45,7 @@ var persistence_path: String = "user://deformation_cache/"
 signal chunk_created(chunk: DeformationChunk)
 signal chunk_unloaded(chunk_coord: Vector2i)
 signal chunk_texture_updated(chunk: DeformationChunk)
+signal terrain_shader_updated()
 
 
 func _ready() -> void:
@@ -54,6 +62,11 @@ func _ready() -> void:
 
 	# Initialize viewport pool
 	_initialize_viewport_pool(5)  ## Start with 5 pooled viewports
+
+	# Initialize deformation map (1024 regions max in Terrain3D)
+	deformation_map.resize(1024)
+	for i in range(1024):
+		deformation_map[i] = -1  # No deformation by default
 
 	print("[DeformationManager] Initialized - chunk size: %.0fm, resolution: %d" % [chunk_size, texture_resolution])
 
@@ -85,6 +98,11 @@ func _process(delta: float) -> void:
 		if save_timer >= persistence_save_interval:
 			save_dirty_chunks()
 			save_timer = 0.0
+
+	# Update Terrain3D shader if texture array changed
+	if texture_array_dirty and terrain_3d and terrain_material:
+		_update_terrain_shader()
+		texture_array_dirty = false
 
 
 ## Update active chunks based on camera position
@@ -161,6 +179,9 @@ func _create_chunk(chunk_coord: Vector2i) -> DeformationChunk:
 	active_chunks[chunk_coord] = chunk
 	chunk_created.emit(chunk)
 
+	# Mark texture array as dirty for shader update
+	texture_array_dirty = true
+
 	return chunk
 
 
@@ -186,6 +207,9 @@ func _unload_chunk(chunk_coord: Vector2i) -> void:
 	chunk.queue_free()
 	active_chunks.erase(chunk_coord)
 	chunk_unloaded.emit(chunk_coord)
+
+	# Mark texture array as dirty for shader update
+	texture_array_dirty = true
 
 
 ## Render all dirty chunks
@@ -286,12 +310,131 @@ func clear_all_deformations() -> void:
 	dirty_chunks.clear()
 
 
+## Set Terrain3D reference for shader integration
+func set_terrain_3d(terrain: Terrain3D) -> void:
+	terrain_3d = terrain
+
+	if terrain_3d and terrain_3d.material:
+		terrain_material = terrain_3d.material as ShaderMaterial
+
+		if not terrain_material:
+			push_warning("[DeformationManager] Terrain3D material is not a ShaderMaterial. Deformation will not be visible.")
+		else:
+			print("[DeformationManager] Connected to Terrain3D with ShaderMaterial")
+			_update_terrain_shader()
+
+
+## Build Texture2DArray from all active chunk textures
+func _build_deformation_texture_array() -> Texture2DArray:
+	if active_chunks.is_empty():
+		return null
+
+	# Sort chunks by coordinate for consistent ordering
+	var sorted_coords := active_chunks.keys()
+	sorted_coords.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		if a.y != b.y:
+			return a.y < b.y
+		return a.x < b.x
+	)
+
+	# Collect images from chunks
+	var images: Array[Image] = []
+	var coord_to_layer: Dictionary = {}  # Vector2i -> texture layer index
+
+	for i in range(sorted_coords.size()):
+		var coord: Vector2i = sorted_coords[i]
+		var chunk: DeformationChunk = active_chunks[coord]
+
+		# Get chunk's deformation texture as image
+		var img: Image = chunk.get_deformation_texture().get_image()
+		if img:
+			images.append(img)
+			coord_to_layer[coord] = i
+
+	# Create Texture2DArray from images
+	if images.is_empty():
+		return null
+
+	var texture_array := Texture2DArray.new()
+	texture_array.create_from_images(images)
+
+	# Update deformation_map: terrain region index -> texture layer
+	# This maps Terrain3D's region indices to our deformation texture layers
+	_update_deformation_map(coord_to_layer)
+
+	return texture_array
+
+
+## Update deformation map: Terrain3D region index -> deformation texture layer
+func _update_deformation_map(coord_to_layer: Dictionary) -> void:
+	# Reset all to -1 (no deformation)
+	for i in range(1024):
+		deformation_map[i] = -1
+
+	if not terrain_3d or not terrain_3d.data:
+		return
+
+	# Map each deformation chunk to its Terrain3D region index
+	for coord in coord_to_layer.keys():
+		var layer: int = coord_to_layer[coord]
+
+		# Calculate world position of this chunk
+		var world_pos := Vector3(
+			coord.x * chunk_size + chunk_size / 2.0,
+			0.0,
+			coord.y * chunk_size + chunk_size / 2.0
+		)
+
+		# Get Terrain3D region index at this position
+		var region_loc: Vector2i = terrain_3d.data.get_region_location(world_pos)
+
+		# Calculate region index in _region_map (Terrain3D uses 32x32 grid)
+		# Region indices are offset by +16 to center the grid
+		var region_map_x := region_loc.x + 16
+		var region_map_y := region_loc.y + 16
+
+		if region_map_x >= 0 and region_map_x < 32 and region_map_y >= 0 and region_map_y < 32:
+			var region_index := region_map_y * 32 + region_map_x
+			deformation_map[region_index] = layer
+
+
+## Update Terrain3D shader uniforms with deformation data
+func _update_terrain_shader() -> void:
+	if not terrain_material:
+		return
+
+	# Build texture array from active chunks
+	deformation_texture_array = _build_deformation_texture_array()
+
+	# Update shader parameters
+	terrain_material.set_shader_parameter("enable_deformation", enabled and deformation_texture_array != null)
+	terrain_material.set_shader_parameter("deformation_textures", deformation_texture_array)
+	terrain_material.set_shader_parameter("deformation_region_count", active_chunks.size())
+	terrain_material.set_shader_parameter("deformation_scale", deformation_depth_max)
+	terrain_material.set_shader_parameter("deformation_normal_strength", current_preset.normal_strength if current_preset else 0.8)
+
+	# Update deformation map (array of 1024 ints)
+	# Note: Godot shaders require arrays to be passed as shader parameters
+	# We need to convert our Array[int] to a PackedInt32Array or pass individual values
+	for i in range(min(1024, deformation_map.size())):
+		terrain_material.set_shader_parameter("deformation_map[%d]" % i, deformation_map[i])
+
+	terrain_shader_updated.emit()
+
+	print("[DeformationManager] Updated Terrain3D shader: %d chunks, array=%s" % [
+		active_chunks.size(),
+		"valid" if deformation_texture_array else "null"
+	])
+
+
 ## Print debug statistics
 func print_stats() -> void:
 	print("=== Deformation System Stats ===")
 	print("Active chunks: %d" % active_chunks.size())
 	print("Pooled viewports: %d" % viewport_pool.size())
 	print("Dirty chunks: %d" % dirty_chunks.size())
+	print("Texture array: %s" % ("valid" if deformation_texture_array else "null"))
+	print("Terrain3D: %s" % ("connected" if terrain_3d else "not connected"))
 	print("Memory (est): %.1f MB" % _estimate_memory_mb())
 
 func _estimate_memory_mb() -> float:
