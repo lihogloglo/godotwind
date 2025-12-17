@@ -19,6 +19,11 @@ var _next_array_index: int = 0
 const MAX_TEXTURE_ARRAY_SIZE: int = 16
 
 func _ready():
+	# Check if terrain integration is enabled
+	if not DeformationConfig.enable_terrain_integration:
+		print("[TerrainDeformationIntegration] Terrain integration disabled in config")
+		return
+
 	print("[TerrainDeformationIntegration] Initializing Terrain3D integration...")
 
 	# Wait for scene tree to be ready
@@ -28,6 +33,8 @@ func _ready():
 
 	if _terrain != null:
 		_setup_terrain_integration()
+	else:
+		print("[TerrainDeformationIntegration] No Terrain3D found - deformations will not be visible on terrain")
 
 # Find Terrain3D node in scene
 func _find_terrain():
@@ -125,19 +132,27 @@ func _inject_deformation_parameters():
 
 # Update deformation texture for a specific region
 func update_region_texture(region_coord: Vector2i, texture: ImageTexture):
+	# Safety checks
+	if not DeformationConfig.enable_terrain_integration:
+		return
+	if _terrain == null or _terrain_material == null:
+		return
 	if texture == null:
+		return
+	if _deformation_texture_array == null:
 		return
 
 	# Get or assign array index for this region
 	var array_index = _get_or_create_array_index(region_coord)
 
 	if array_index == -1:
-		print("[TerrainDeformationIntegration] Warning: Texture array full, cannot add region: ", region_coord)
+		if DeformationConfig.debug_mode:
+			push_warning("[TerrainDeformationIntegration] Texture array full, cannot add region: ", region_coord)
 		return
 
 	# Update texture array layer
 	var image = texture.get_image()
-	if image != null and _deformation_texture_array != null:
+	if image != null:
 		_deformation_texture_array.update_layer(image, array_index)
 
 # Get or create array index for region

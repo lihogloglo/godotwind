@@ -1,8 +1,24 @@
 # RTT Deformation System - Implementation Guide
 
+## ⚠️ Important: This System is OPTIONAL and DISABLED by Default
+
+The deformation system is **completely optional** and adds zero overhead when disabled. You must explicitly enable it to use it.
+
+**Quick Enable:**
+```gdscript
+# Add to project.godot or enable at runtime:
+DeformationConfig.enable_system()
+```
+
+See [CONFIGURATION.md](CONFIGURATION.md) for full configuration options.
+
+---
+
 ## Overview
 
 The RTT (Render-to-Texture) deformation system provides dynamic ground deformation for snow, mud, ash, and sand. It integrates with Terrain3D and supports streaming, persistence, and recovery.
+
+**Status:** Core system implemented, disabled by default for safety.
 
 ## Components
 
@@ -19,9 +35,29 @@ The RTT (Render-to-Texture) deformation system provides dynamic ground deformati
 
 ## Quick Start
 
-### 1. Basic Usage (Already Configured)
+### 0. Enable the System First!
 
-The DeformationManager is already registered as an autoload. To add deformation from any script:
+**The system is disabled by default.** Enable it before use:
+
+```gdscript
+# Method 1: Enable at runtime (in your game's initialization)
+func _ready():
+    DeformationConfig.enable_system()
+```
+
+Or add to `project.godot`:
+```ini
+[deformation]
+enabled=true
+```
+
+**See [CONFIGURATION.md](CONFIGURATION.md) for all configuration options.**
+
+---
+
+### 1. Basic Usage
+
+Once enabled, the DeformationManager is available as an autoload. To add deformation from any script:
 
 ```gdscript
 # Add deformation at a world position
