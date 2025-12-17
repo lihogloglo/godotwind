@@ -1,334 +1,293 @@
-## WaveGenerator - FFT-based ocean wave simulation
-## Uses GPU compute shaders to generate displacement and normal maps
-## Provides CPU-accessible sampling for buoyancy
+## WaveGenerator - GPU compute shader-based ocean wave simulation
+## Uses FFT for realistic wave generation on capable hardware
+## Falls back to flat plane for systems without compute shader support
+## Based on: https://github.com/2Retr0/GodotOceanWaves (MIT License)
 class_name WaveGenerator
 extends Node
 
-# Wave cascade parameters
-const MAX_CASCADES: int = 3
-const DEFAULT_MAP_SIZE: int = 128  # Reduced from 256 for better CPU performance
+const G := 9.81
+const DEPTH := 20.0
+const MAX_CASCADES := 8
 
-# Cascade configuration (tile_length, scale for each cascade)
-var _cascade_params: Array[Dictionary] = [
-	{ "tile_length": 250.0, "scale": 1.0 },
-	{ "tile_length": 67.0, "scale": 0.5 },
-	{ "tile_length": 17.0, "scale": 0.25 }
-]
+var map_size: int = 256
+var context: RenderingContext = null
+var pipelines: Dictionary = {}
+var descriptors: Dictionary = {}
 
-# GPU resources
-var _rd: RenderingDevice = null
+# Generator state per invocation of update()
+var pass_parameters: Array[WaveCascadeParameters] = []
+var pass_num_cascades_remaining: int = 0
+
+# Whether GPU compute is available
 var _use_compute: bool = false
+var _initialized: bool = false
 
-# Compute shader pipelines
-var _spectrum_shader: RID
-var _modulate_shader: RID
-var _fft_shader: RID
-var _butterfly_shader: RID
-var _transpose_shader: RID
-var _unpack_shader: RID
-
-# Textures and buffers
-var _spectrum_texture: RID
-var _displacement_texture: RID
-var _normal_texture: RID
-var _fft_buffer: RID
-var _butterfly_buffer: RID
-
-# CPU-accessible data
-var _displacement_images: Array[Image] = []
-var _normal_images: Array[Image] = []
-var _map_size: int = DEFAULT_MAP_SIZE
-
-# Wind parameters
-var _wind_speed: float = 10.0
-var _wind_direction: float = 0.0
-
-# Timing
-var _last_update_time: float = 0.0
-
-# Fallback: Simple Gerstner waves when compute not available
-var _use_gerstner_fallback: bool = true
-
-# Pre-computed wave data for optimization
-var _wave_data: Array[Dictionary] = []
-var _cos_wind: float = 1.0
-var _sin_wind: float = 0.0
+# Displacement/normal textures for shader use (GPU mode)
+var displacement_maps := Texture2DArrayRD.new()
+var normal_maps := Texture2DArrayRD.new()
 
 
-func initialize(map_size: int = DEFAULT_MAP_SIZE) -> void:
-	_map_size = map_size
+func initialize(size: int = 256) -> void:
+	map_size = size
 
-	# Try to initialize compute shaders
-	_rd = RenderingServer.get_rendering_device()
-	if _rd:
-		_use_compute = _init_compute_pipeline()
+	# Check if compute shaders are available
+	var rd := RenderingServer.get_rendering_device()
+	if rd == null:
+		print("[WaveGenerator] No RenderingDevice available - using flat plane fallback")
+		_use_compute = false
+		return
 
+	# Check if compute shader files exist
+	var shader_path := "res://src/core/water/shaders/compute/spectrum_compute.glsl"
+	if not FileAccess.file_exists(shader_path):
+		print("[WaveGenerator] Compute shaders not found - using flat plane fallback")
+		_use_compute = false
+		return
+
+	_use_compute = true
+	print("[WaveGenerator] GPU compute shaders available, map size: %d" % map_size)
+
+
+func init_gpu(num_cascades: int) -> void:
+	if not _use_compute or _initialized:
+		return
+
+	# Create rendering context using the main rendering device
+	if not context:
+		context = RenderingContext.create(RenderingServer.get_rendering_device())
+
+	# Load compute shaders
+	var spectrum_compute_shader := context.load_shader("res://src/core/water/shaders/compute/spectrum_compute.glsl")
+	var fft_butterfly_shader := context.load_shader("res://src/core/water/shaders/compute/fft_butterfly.glsl")
+	var spectrum_modulate_shader := context.load_shader("res://src/core/water/shaders/compute/spectrum_modulate.glsl")
+	var fft_compute_shader := context.load_shader("res://src/core/water/shaders/compute/fft_compute.glsl")
+	var transpose_shader := context.load_shader("res://src/core/water/shaders/compute/transpose.glsl")
+	var fft_unpack_shader := context.load_shader("res://src/core/water/shaders/compute/fft_unpack.glsl")
+
+	# Verify shaders loaded
+	if not spectrum_compute_shader.is_valid():
+		push_error("[WaveGenerator] Failed to load compute shaders - falling back to flat plane")
+		_use_compute = false
+		return
+
+	# Descriptor preparation
+	var dims := Vector2i(map_size, map_size)
+	var num_fft_stages := int(log(map_size) / log(2))
+
+	# Create GPU resources
+	descriptors[&"spectrum"] = context.create_texture(
+		dims,
+		RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT,
+		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT,
+		num_cascades
+	)
+
+	descriptors[&"butterfly_factors"] = context.create_storage_buffer(
+		num_fft_stages * map_size * 4 * 4  # #FFT stages * map size * sizeof(vec4)
+	)
+
+	descriptors[&"fft_buffer"] = context.create_storage_buffer(
+		num_cascades * map_size * map_size * 4 * 2 * 2 * 4  # map_size^2 * 4 FFTs * 2 temp buffers * sizeof(vec2)
+	)
+
+	descriptors[&"displacement_map"] = context.create_texture(
+		dims,
+		RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
+		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT,
+		num_cascades
+	)
+
+	descriptors[&"normal_map"] = context.create_texture(
+		dims,
+		RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
+		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT,
+		num_cascades
+	)
+
+	# Create descriptor sets
+	# Note: Each shader needs its own descriptor set validated against that shader's bindings
+	var spectrum_compute_set := context.create_descriptor_set(
+		[descriptors[&"spectrum"]], spectrum_compute_shader, 0
+	)
+	# spectrum_modulate expects readonly image at set 0 - create separate descriptor set
+	var spectrum_modulate_set := context.create_descriptor_set(
+		[descriptors[&"spectrum"]], spectrum_modulate_shader, 0
+	)
+	var fft_butterfly_set := context.create_descriptor_set(
+		[descriptors[&"butterfly_factors"]], fft_butterfly_shader, 0
+	)
+	var fft_compute_set := context.create_descriptor_set(
+		[descriptors[&"butterfly_factors"], descriptors[&"fft_buffer"]], fft_compute_shader, 0
+	)
+	var fft_buffer_set := context.create_descriptor_set(
+		[descriptors[&"fft_buffer"]], spectrum_modulate_shader, 1
+	)
+	var unpack_set := context.create_descriptor_set(
+		[descriptors[&"displacement_map"], descriptors[&"normal_map"]], fft_unpack_shader, 0
+	)
+
+	# Create compute pipelines
+	pipelines[&"spectrum_compute"] = context.create_pipeline(
+		[map_size / 16, map_size / 16, 1], [spectrum_compute_set], spectrum_compute_shader
+	)
+	pipelines[&"spectrum_modulate"] = context.create_pipeline(
+		[map_size / 16, map_size / 16, 1], [spectrum_modulate_set, fft_buffer_set], spectrum_modulate_shader
+	)
+	pipelines[&"fft_butterfly"] = context.create_pipeline(
+		[map_size / 2 / 64, num_fft_stages, 1], [fft_butterfly_set], fft_butterfly_shader
+	)
+	pipelines[&"fft_compute"] = context.create_pipeline(
+		[1, map_size, 4], [fft_compute_set], fft_compute_shader
+	)
+	pipelines[&"transpose"] = context.create_pipeline(
+		[map_size / 32, map_size / 32, 4], [fft_compute_set], transpose_shader
+	)
+	pipelines[&"fft_unpack"] = context.create_pipeline(
+		[map_size / 16, map_size / 16, 1], [unpack_set, fft_buffer_set], fft_unpack_shader
+	)
+
+	# Generate butterfly factors once
+	var compute_list := context.compute_list_begin()
+	pipelines[&"fft_butterfly"].call(context, compute_list)
+	context.compute_list_end()
+
+	# Setup texture references for shader use
+	displacement_maps.texture_rd_rid = descriptors[&"displacement_map"].rid
+	normal_maps.texture_rd_rid = descriptors[&"normal_map"].rid
+
+	_initialized = true
+	print("[WaveGenerator] GPU compute initialized with %d cascades" % num_cascades)
+
+
+func _process(_delta: float) -> void:
+	if not _use_compute or not context:
+		return
+
+	# Update one cascade each frame for load balancing
+	if pass_num_cascades_remaining == 0:
+		return
+	pass_num_cascades_remaining -= 1
+
+	var compute_list := context.compute_list_begin()
+	_update_cascade(compute_list, pass_num_cascades_remaining, pass_parameters)
+	context.compute_list_end()
+
+
+func _update_cascade(compute_list: int, cascade_index: int, parameters: Array[WaveCascadeParameters]) -> void:
+	var params := parameters[cascade_index]
+
+	# Wave spectra update
+	if params.should_generate_spectrum:
+		var alpha := _jonswap_alpha(params.wind_speed, params.fetch_length * 1e3)
+		var omega := _jonswap_peak_angular_frequency(params.wind_speed, params.fetch_length * 1e3)
+		pipelines[&"spectrum_compute"].call(context, compute_list, RenderingContext.create_push_constant([
+			params.spectrum_seed.x, params.spectrum_seed.y,
+			params.tile_length.x, params.tile_length.y,
+			alpha, omega, params.wind_speed, deg_to_rad(params.wind_direction),
+			DEPTH, params.swell, params.detail, params.spread, cascade_index
+		]))
+		params.should_generate_spectrum = false
+
+	pipelines[&"spectrum_modulate"].call(context, compute_list, RenderingContext.create_push_constant([
+		params.tile_length.x, params.tile_length.y, DEPTH, params.time, cascade_index
+	]))
+
+	# Wave spectra inverse Fourier transform
+	var fft_push_constant := RenderingContext.create_push_constant([cascade_index])
+	pipelines[&"fft_compute"].call(context, compute_list, fft_push_constant)
+	pipelines[&"transpose"].call(context, compute_list, fft_push_constant)
+	context.compute_list_add_barrier(compute_list)
+	pipelines[&"fft_compute"].call(context, compute_list, fft_push_constant)
+
+	# Displacement/normal map update
+	pipelines[&"fft_unpack"].call(context, compute_list, RenderingContext.create_push_constant([
+		cascade_index, params.whitecap, params.foam_grow_rate, params.foam_decay_rate
+	]))
+
+
+## Begins updating wave cascades. Updates one cascade per frame for load balancing.
+func update(delta: float, parameters: Array[WaveCascadeParameters]) -> void:
 	if not _use_compute:
-		print("[WaveGenerator] Using Gerstner fallback (map size: %d)" % _map_size)
-		_init_fallback()
-	else:
-		print("[WaveGenerator] Using FFT compute shaders, map size: %d" % _map_size)
+		return
 
-	# Initialize CPU-accessible images
-	for i in range(MAX_CASCADES):
-		var disp_img := Image.create(_map_size, _map_size, false, Image.FORMAT_RGBAF)
-		disp_img.fill(Color(0, 0, 0, 0))
-		_displacement_images.append(disp_img)
+	assert(parameters.size() != 0)
 
-		var norm_img := Image.create(_map_size, _map_size, false, Image.FORMAT_RGBAF)
-		norm_img.fill(Color(0, 1, 0, 0))  # Default normal pointing up
-		_normal_images.append(norm_img)
+	if not _initialized:
+		init_gpu(maxi(2, len(parameters)))
+		if not _initialized:
+			return  # Failed to initialize
 
+	if pass_num_cascades_remaining != 0:
+		# Update remaining cascades from previous invocation
+		var compute_list := context.compute_list_begin()
+		for i in range(pass_num_cascades_remaining):
+			_update_cascade(compute_list, i, pass_parameters)
+		context.compute_list_end()
 
-func _init_compute_pipeline() -> bool:
-	# Check if compute shaders exist
-	var spectrum_path := "res://src/core/water/shaders/compute/spectrum_compute.glsl"
-	if not FileAccess.file_exists(spectrum_path):
-		return false
+	# Update time-dependent parameters
+	for i in len(parameters):
+		var params := parameters[i]
+		params.time += delta
+		params.foam_grow_rate = delta * params.foam_amount * 7.5
+		params.foam_decay_rate = delta * maxf(0.5, 10.0 - params.foam_amount) * 1.15
 
-	# TODO: Full compute shader initialization
-	# For now, return false to use Gerstner fallback
-	# This will be implemented in Phase 2
-	return false
-
-
-func _init_fallback() -> void:
-	_use_gerstner_fallback = true
-	_precompute_wave_data()
+	pass_parameters = parameters
+	pass_num_cascades_remaining = len(parameters)
 
 
-func _precompute_wave_data() -> void:
-	# Pre-compute wave parameters to avoid per-pixel dictionary lookups
-	_wave_data.clear()
-
-	var base_waves := [
-		{ "wavelength": 60.0, "steepness": 0.25, "direction": Vector2(1.0, 0.0) },
-		{ "wavelength": 31.0, "steepness": 0.25, "direction": Vector2(1.0, 0.6).normalized() },
-		{ "wavelength": 18.0, "steepness": 0.25, "direction": Vector2(1.0, 1.3).normalized() },
-		{ "wavelength": 8.0, "steepness": 0.15, "direction": Vector2(0.5, 1.0).normalized() },
-	]
-
-	_cos_wind = cos(_wind_direction)
-	_sin_wind = sin(_wind_direction)
-
-	for wave in base_waves:
-		var wavelength: float = wave["wavelength"]
-		var steepness: float = wave["steepness"]
-		var d: Vector2 = wave["direction"]
-
-		var k: float = TAU / wavelength
-		var c: float = sqrt(9.81 / k)
-		var a: float = steepness / k
-
-		# Pre-rotate direction
-		var rotated_d := Vector2(
-			d.x * _cos_wind - d.y * _sin_wind,
-			d.x * _sin_wind + d.y * _cos_wind
-		)
-
-		_wave_data.append({
-			"k": k,
-			"c": c,
-			"a": a,
-			"dx": rotated_d.x,
-			"dy": rotated_d.y,
-		})
-
-
-func update(time: float) -> void:
-	_last_update_time = time
-
-	if _use_compute:
-		_update_fft(time)
-	else:
-		_update_gerstner_optimized(time)
-
-
-func _update_fft(_time: float) -> void:
-	# TODO: Implement FFT pipeline in Phase 2
+## Legacy update method for compatibility
+func update_time(time: float) -> void:
+	# For flat plane fallback, nothing to do
 	pass
 
 
-func _update_gerstner_optimized(time: float) -> void:
-	# Optimized Gerstner wave update
-	# - Uses pre-computed wave parameters
-	# - Calculates normals from gradient in single pass
-	# - Reduced map size and simplified calculations
-
-	var wind_factor := _wind_speed / 10.0
-	var eps := 1.0 / float(_map_size)  # Gradient epsilon
-
-	for cascade_idx in range(MAX_CASCADES):
-		var params := _cascade_params[cascade_idx]
-		var tile_length: float = params["tile_length"]
-
-		var img := _displacement_images[cascade_idx]
-		var norm_img := _normal_images[cascade_idx]
-		var inv_size := 1.0 / float(_map_size)
-		var grad_scale := tile_length * eps
-
-		for y in range(_map_size):
-			var v := float(y) * inv_size * tile_length
-			for x in range(_map_size):
-				var u := float(x) * inv_size * tile_length
-
-				# Calculate displacement and gradient in one pass
-				var disp := Vector3.ZERO
-				var grad_x := 0.0
-				var grad_z := 0.0
-
-				for wd in _wave_data:
-					var k: float = wd["k"]
-					var c: float = wd["c"]
-					var a: float = wd["a"]
-					var dx: float = wd["dx"]
-					var dy: float = wd["dy"]
-
-					var phase: float = k * (dx * u + dy * v - c * time)
-					var cos_p := cos(phase)
-					var sin_p := sin(phase)
-
-					disp.x += dx * a * cos_p
-					disp.y += a * sin_p
-					disp.z += dy * a * cos_p
-
-					# Analytical gradient (derivative of sin is cos)
-					var grad_contrib := a * k * cos_p
-					grad_x += dx * grad_contrib
-					grad_z += dy * grad_contrib
-
-				disp *= wind_factor
-				grad_x *= wind_factor
-				grad_z *= wind_factor
-
-				# Calculate normal from gradient
-				var normal := Vector3(-grad_x, 1.0, -grad_z).normalized()
-
-				img.set_pixel(x, y, Color(disp.x, disp.y, disp.z, 0.0))
-				norm_img.set_pixel(x, y, Color(normal.x, normal.y, normal.z, 0.0))
+## Sample wave displacement at world position (for buoyancy)
+## Returns Vector3.ZERO for flat plane fallback
+func sample_displacement(_world_pos: Vector3) -> Vector3:
+	# For GPU compute, displacement is done entirely in shader
+	# CPU sampling would require readback which is expensive
+	# Return zero - buoyancy will use sea_level directly
+	return Vector3.ZERO
 
 
-func sample_displacement(world_pos: Vector3) -> Vector3:
-	if _displacement_images.is_empty():
-		return Vector3.ZERO
-
-	var total_displacement := Vector3.ZERO
-
-	for cascade_idx in range(MAX_CASCADES):
-		var params := _cascade_params[cascade_idx]
-		var tile_length: float = params["tile_length"]
-		var scale: float = params["scale"]
-
-		# Convert world position to UV
-		var u := fmod(world_pos.x, tile_length) / tile_length
-		var v := fmod(world_pos.z, tile_length) / tile_length
-		if u < 0: u += 1.0
-		if v < 0: v += 1.0
-
-		# Sample displacement image with bilinear interpolation
-		var displacement := _sample_image_bilinear(_displacement_images[cascade_idx], u, v)
-		total_displacement += Vector3(displacement.r, displacement.g, displacement.b) * scale
-
-	return total_displacement
+## Sample wave normal at world position
+func sample_normal(_world_pos: Vector3) -> Vector3:
+	return Vector3.UP
 
 
-func sample_normal(world_pos: Vector3) -> Vector3:
-	if _normal_images.is_empty():
-		return Vector3.UP
-
-	var total_normal := Vector3.ZERO
-
-	for cascade_idx in range(MAX_CASCADES):
-		var params := _cascade_params[cascade_idx]
-		var tile_length: float = params["tile_length"]
-		var scale: float = params["scale"]
-
-		# Convert world position to UV
-		var u := fmod(world_pos.x, tile_length) / tile_length
-		var v := fmod(world_pos.z, tile_length) / tile_length
-		if u < 0: u += 1.0
-		if v < 0: v += 1.0
-
-		# Sample normal image
-		var normal_color := _sample_image_bilinear(_normal_images[cascade_idx], u, v)
-		total_normal += Vector3(normal_color.r, normal_color.g, normal_color.b) * scale
-
-	return total_normal.normalized() if total_normal.length() > 0.001 else Vector3.UP
-
-
-func _sample_image_bilinear(img: Image, u: float, v: float) -> Color:
-	var size := img.get_size()
-	var x := u * (size.x - 1)
-	var y := v * (size.y - 1)
-
-	var x0: int = int(floor(x))
-	var y0: int = int(floor(y))
-	var x1: int = mini(x0 + 1, size.x - 1)
-	var y1: int = mini(y0 + 1, size.y - 1)
-
-	var fx := x - x0
-	var fy := y - y0
-
-	var c00 := img.get_pixel(x0, y0)
-	var c10 := img.get_pixel(x1, y0)
-	var c01 := img.get_pixel(x0, y1)
-	var c11 := img.get_pixel(x1, y1)
-
-	var c0 := c00.lerp(c10, fx)
-	var c1 := c01.lerp(c11, fx)
-
-	return c0.lerp(c1, fy)
-
-
-func set_wind(speed: float, direction: float) -> void:
-	_wind_speed = speed
-	_wind_direction = direction
-	# Recompute wave data when wind changes
-	if _use_gerstner_fallback:
-		_precompute_wave_data()
-
-
-func get_wind_speed() -> float:
-	return _wind_speed
-
-
-func get_wind_direction() -> float:
-	return _wind_direction
-
-
-func get_map_size() -> int:
-	return _map_size
+func set_wind(_speed: float, _direction: float) -> void:
+	# For GPU compute, wind is set per-cascade via WaveCascadeParameters
+	pass
 
 
 func is_using_compute() -> bool:
 	return _use_compute
 
 
-func get_displacement_images() -> Array[Image]:
-	return _displacement_images
+func get_map_size() -> int:
+	return map_size
 
 
-func get_normal_images() -> Array[Image]:
-	return _normal_images
+func get_displacement_texture() -> Texture2DArrayRD:
+	return displacement_maps
+
+
+func get_normal_texture() -> Texture2DArrayRD:
+	return normal_maps
 
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
-		_cleanup_gpu_resources()
+		displacement_maps.texture_rd_rid = RID()
+		normal_maps.texture_rd_rid = RID()
+		context = null  # RefCounted will clean up
 
 
-func _cleanup_gpu_resources() -> void:
-	if not _rd:
-		return
+# JONSWAP spectrum calculations
+# Source: https://wikiwaves.org/Ocean-Wave_Spectra#JONSWAP_Spectrum
+static func _jonswap_alpha(wind_speed := 20.0, fetch_length := 550e3) -> float:
+	return 0.076 * pow(wind_speed ** 2 / (fetch_length * G), 0.22)
 
-	# Free GPU resources
-	if _spectrum_texture.is_valid():
-		_rd.free_rid(_spectrum_texture)
-	if _displacement_texture.is_valid():
-		_rd.free_rid(_displacement_texture)
-	if _normal_texture.is_valid():
-		_rd.free_rid(_normal_texture)
-	if _fft_buffer.is_valid():
-		_rd.free_rid(_fft_buffer)
-	if _butterfly_buffer.is_valid():
-		_rd.free_rid(_butterfly_buffer)
+
+static func _jonswap_peak_angular_frequency(wind_speed := 20.0, fetch_length := 550e3) -> float:
+	return 22.0 * pow(G * G / (wind_speed * fetch_length), 1.0 / 3.0)

@@ -1,74 +1,120 @@
 shader_type spatial;
-render_mode world_vertex_coords, depth_draw_always;
+render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
 
 /**
- * Low quality water shader
- * Simple Gerstner waves with basic lighting
- * No screen/depth texture sampling
- * For old or low-end GPUs
+ * Low quality water shader - 2 Gerstner waves
+ * Simpler than MEDIUM (4 waves) for better performance on weak GPUs
+ * Still has proper GGX lighting and SSS
  */
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.08, 0.15, 0.9);
+#define REFLECTANCE 0.02
+
+uniform vec4 water_color : source_color = vec4(0.02, 0.12, 0.22, 1.0);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
-uniform float time = 0.0;
+uniform float time : hint_range(0.0, 1000.0) = 0.0;
+uniform float wave_scale : hint_range(0.0, 2.0) = 1.0;
+uniform float roughness : hint_range(0.0, 1.0) = 0.3;
 
-varying vec3 world_normal;
 varying float wave_height;
+varying float foam_factor;
+varying float fresnel;
 
-// Simple Gerstner wave
-vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, float t) {
-	float k = 2.0 * PI / wavelength;
+// Gerstner wave with tangent/binormal output
+vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, float time_val, out vec3 tangent, out vec3 binormal) {
+	float k = 6.28318 / wavelength;
 	float c = sqrt(9.81 / k);
 	vec2 d = normalize(direction);
-	float f = k * (dot(d, pos) - c * t);
+	float f = k * (dot(d, pos) - c * time_val);
 	float a = steepness / k;
+
+	float cos_f = cos(f);
+	float sin_f = sin(f);
+
+	tangent = vec3(
+		1.0 - d.x * d.x * steepness * sin_f,
+		d.x * steepness * cos_f,
+		-d.x * d.y * steepness * sin_f
+	);
+	binormal = vec3(
+		-d.x * d.y * steepness * sin_f,
+		d.y * steepness * cos_f,
+		1.0 - d.y * d.y * steepness * sin_f
+	);
+
 	return vec3(
-		d.x * (a * cos(f)),
-		a * sin(f),
-		d.y * (a * cos(f))
+		d.x * a * cos_f,
+		a * sin_f,
+		d.y * a * cos_f
 	);
 }
 
 void vertex() {
 	vec2 pos = VERTEX.xz;
 
-	// Only 2 waves for performance
-	vec3 displacement = vec3(0.0);
-	displacement += gerstner_wave(pos, 50.0, 0.2, vec2(1.0, 0.3), time);
-	displacement += gerstner_wave(pos, 25.0, 0.15, vec2(0.7, 1.0), time);
-
-	// Distance-based fade to reduce popping
+	// Distance-based LOD
 	float dist = length(pos - CAMERA_POSITION_WORLD.xz);
-	float fade = 1.0 - smoothstep(300.0, 500.0, dist);
+	float distance_fade = 1.0 - smoothstep(200.0, 400.0, dist);
 
-	VERTEX += displacement * fade;
-	wave_height = displacement.y * fade;
+	// Only 2 waves for LOW quality (vs 4 for MEDIUM)
+	vec3 displacement = vec3(0.0);
+	vec3 tangent_sum = vec3(1.0, 0.0, 0.0);
+	vec3 binormal_sum = vec3(0.0, 0.0, 1.0);
+	vec3 t, b;
 
-	// Calculate normal analytically
-	float eps = 0.5;
-	vec3 dx = gerstner_wave(pos + vec2(eps, 0), 50.0, 0.2, vec2(1.0, 0.3), time)
-			+ gerstner_wave(pos + vec2(eps, 0), 25.0, 0.15, vec2(0.7, 1.0), time);
-	vec3 dz = gerstner_wave(pos + vec2(0, eps), 50.0, 0.2, vec2(1.0, 0.3), time)
-			+ gerstner_wave(pos + vec2(0, eps), 25.0, 0.15, vec2(0.7, 1.0), time);
+	// Wave 1: Large swell
+	displacement += gerstner_wave(pos, 60.0, 0.18 * wave_scale, vec2(1.0, 0.3), time, t, b);
+	tangent_sum += t - vec3(1.0, 0.0, 0.0);
+	binormal_sum += b - vec3(0.0, 0.0, 1.0);
 
-	vec3 tangent = vec3(eps, dx.y - displacement.y, 0.0);
-	vec3 bitangent = vec3(0.0, dz.y - displacement.y, eps);
-	world_normal = normalize(cross(bitangent, tangent));
+	// Wave 2: Secondary wave
+	displacement += gerstner_wave(pos, 28.0, 0.14 * wave_scale, vec2(0.8, 1.0), time * 1.1, t, b);
+	tangent_sum += t - vec3(1.0, 0.0, 0.0);
+	binormal_sum += b - vec3(0.0, 0.0, 1.0);
+
+	VERTEX += displacement * distance_fade;
+	wave_height = displacement.y * distance_fade;
+	NORMAL = normalize(cross(binormal_sum, tangent_sum));
+
+	UV = pos * 0.01;
 }
 
 void fragment() {
-	// Simple fresnel
-	float fresnel = pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 3.0);
+	foam_factor = smoothstep(1.0, 2.5, abs(wave_height));
+	foam_factor = clamp(foam_factor, 0.0, 0.5);
 
-	// Mix water color with sky reflection approximation
-	vec3 sky_color = vec3(0.6, 0.7, 0.9);
-	ALBEDO = mix(water_color.rgb, sky_color, fresnel * 0.4);
+	float NdotV = max(dot(VIEW, NORMAL), 0.001);
+	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
 
-	// Simple foam from wave height
-	float foam = smoothstep(0.3, 0.8, wave_height);
-	ALBEDO = mix(ALBEDO, foam_color.rgb, foam * 0.3);
-
-	ROUGHNESS = mix(0.1, 0.4, foam);
+	ALBEDO = mix(water_color.rgb, foam_color.rgb, foam_factor);
+	ROUGHNESS = mix(roughness, 0.6, foam_factor);
 	METALLIC = 0.0;
-	ALPHA = water_color.a;
+}
+
+// Simplified GGX for LOW quality - skip smith masking for performance
+float ggx_distribution(in float cos_theta, in float alpha) {
+	float a_sq = alpha * alpha;
+	float d = 1.0 + (a_sq - 1.0) * cos_theta * cos_theta;
+	return a_sq / (PI * d * d);
+}
+
+void light() {
+	vec3 halfway = normalize(LIGHT + VIEW);
+	float dot_nl = max(dot(NORMAL, LIGHT), 0.001);
+	float dot_nv = max(dot(NORMAL, VIEW), 0.001);
+	float dot_nh = max(dot(NORMAL, halfway), 0.001);
+
+	// Simplified specular (no smith masking for performance)
+	float D = ggx_distribution(dot_nh, roughness);
+	float spec = fresnel * D * 0.25; // Simplified geometric term
+	SPECULAR_LIGHT += spec * ATTENUATION * LIGHT_COLOR;
+
+	// Simplified SSS
+	const vec3 sss_color = vec3(0.1, 0.4, 0.35);
+	float backlit = pow(max(dot(LIGHT, -VIEW), 0.0), 4.0);
+	float sss = max(0.0, wave_height + 1.0) * backlit * 0.5;
+
+	vec3 diff_color = mix(water_color.rgb, sss_color, sss * 0.4);
+	diff_color = mix(diff_color, foam_color.rgb, foam_factor);
+
+	DIFFUSE_LIGHT += diff_color * dot_nl * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR;
 }

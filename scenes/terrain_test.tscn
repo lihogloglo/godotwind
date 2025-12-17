@@ -1,6 +1,6 @@
-[gd_scene load_steps=8 format=3 uid="uid://ctest123"]
+[gd_scene load_steps=10 format=3 uid="uid://ctest123"]
 
-[ext_resource type="Script" path="res://scenes/terrain_test.gd" id="1_test"]
+[ext_resource type="Script" uid="uid://byipjflsibnlr" path="res://scenes/terrain_test.gd" id="1_test"]
 
 [sub_resource type="Environment" id="Environment_test"]
 background_mode = 1
@@ -56,7 +56,26 @@ _shader_parameters = {
 }
 show_checkered = true
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w3uoq"]
+transparency = 4
+cull_mode = 2
+vertex_color_use_as_albedo = true
+backlight_enabled = true
+backlight = Color(0.5, 0.5, 0.5, 1)
+distance_fade_mode = 1
+distance_fade_min_distance = 128.0
+distance_fade_max_distance = 96.0
+
+[sub_resource type="Terrain3DMeshAsset" id="Terrain3DMeshAsset_o3i6r"]
+generated_type = 1
+height_offset = 0.5
+material_override = SubResource("StandardMaterial3D_w3uoq")
+last_lod = 0
+last_shadow_lod = 0
+lod0_range = 128.0
+
 [sub_resource type="Terrain3DAssets" id="Terrain3DAssets_test"]
+mesh_list = Array[Terrain3DMeshAsset]([SubResource("Terrain3DMeshAsset_o3i6r")])
 
 [node name="TerrainTest" type="Node3D"]
 script = ExtResource("1_test")
@@ -103,6 +122,8 @@ offset_left = 10.0
 offset_top = 10.0
 offset_right = -10.0
 offset_bottom = -10.0
+grow_horizontal = 2
+grow_vertical = 2
 
 [node name="Title" type="Label" parent="UI/InfoPanel/VBox"]
 layout_mode = 2
@@ -123,4 +144,5 @@ text = "Controls:
 Hold Right Click to look
 WASD to move
 Space/Shift for up/down
-Ctrl for speed boost"
+Ctrl for speed boost
+O to toggle ocean"

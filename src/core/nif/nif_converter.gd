@@ -584,6 +584,7 @@ func _generate_lod_meshes(mesh: ArrayMesh) -> Dictionary:
 	var lod1_arrays := simplifier.simplify(arrays, lod1_ratio)
 	if not lod1_arrays.is_empty() and lod1_arrays[Mesh.ARRAY_VERTEX] != null:
 		var lod1_mesh := ArrayMesh.new()
+		lod1_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 		lod1_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod1_arrays)
 		result["lod1"] = lod1_mesh
 
@@ -596,6 +597,7 @@ func _generate_lod_meshes(mesh: ArrayMesh) -> Dictionary:
 	var lod2_arrays := simplifier.simplify(arrays, lod2_ratio)
 	if not lod2_arrays.is_empty() and lod2_arrays[Mesh.ARRAY_VERTEX] != null:
 		var lod2_mesh := ArrayMesh.new()
+		lod2_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 		lod2_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod2_arrays)
 		result["lod2"] = lod2_mesh
 
@@ -639,8 +641,9 @@ func _create_tri_shape_mesh(data: Defs.NiTriShapeData) -> ArrayMesh:
 		flipped_triangles[i + 2] = data.triangles[i + 1]
 	arrays[Mesh.ARRAY_INDEX] = flipped_triangles
 
-	# Create mesh
+	# Create mesh with explicit blend shape count of 0 to avoid AABB errors on duplicate
 	var mesh := ArrayMesh.new()
+	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return mesh
@@ -688,7 +691,9 @@ func _create_tri_strips_mesh(data: Defs.NiTriStripsData) -> ArrayMesh:
 
 	arrays[Mesh.ARRAY_INDEX] = triangles
 
+	# Create mesh with explicit blend shape count of 0 to avoid AABB errors on duplicate
 	var mesh := ArrayMesh.new()
+	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return mesh
@@ -739,8 +744,9 @@ func _create_skinned_tri_shape_mesh(data: Defs.NiTriShapeData, skin_instance: De
 				skin_arrays["weights"].size()
 			])
 
-	# Create mesh
+	# Create mesh with explicit blend shape count of 0 to avoid AABB errors on duplicate
 	var mesh := ArrayMesh.new()
+	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return mesh
@@ -802,7 +808,9 @@ func _create_skinned_tri_strips_mesh(data: Defs.NiTriStripsData, skin_instance: 
 				skin_arrays["weights"].size()
 			])
 
+	# Create mesh with explicit blend shape count of 0 to avoid AABB errors on duplicate
 	var mesh := ArrayMesh.new()
+	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return mesh

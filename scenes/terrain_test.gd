@@ -169,8 +169,7 @@ func _load_test_terrain() -> void:
 		# Check if we have LAND records for any of these cells
 		var has_land := false
 		for cell_coord in cell_coords:
-			var land_id := "LAND_%d_%d" % [cell_coord.x, cell_coord.y]
-			if ESMManager.lands.has(land_id):
+			if ESMManager.get_land(cell_coord.x, cell_coord.y) != null:
 				has_land = true
 				break
 
@@ -178,9 +177,8 @@ func _load_test_terrain() -> void:
 			continue  # Skip regions with no terrain data
 
 		# Generate and import the combined region
-		var get_land_func := func(x: int, y: int) -> Dictionary:
-			var land_id := "LAND_%d_%d" % [x, y]
-			return ESMManager.lands.get(land_id, {})
+		var get_land_func := func(x: int, y: int) -> LandRecord:
+			return ESMManager.get_land(x, y)
 
 		terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func)
 
@@ -197,8 +195,8 @@ func _load_test_terrain() -> void:
 			await get_tree().process_frame
 
 	# Position camera at test center
-	var center_pos := CS.cell_to_godot(TEST_CENTER_CELL)
-	camera.position = Vector3(center_pos.x, 200, center_pos.y)
+	var center_pos := CS.cell_grid_to_center_godot(TEST_CENTER_CELL)
+	camera.position = Vector3(center_pos.x, 200, center_pos.z)
 	_log("Camera positioned at %s" % camera.position)
 
 
@@ -255,3 +253,14 @@ func _log(message: String) -> void:
 	print(message)
 	if status_label:
 		status_label.append_text(message + "\n")
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_O:
+			# Toggle ocean
+			if OceanManager:
+				var enabled := OceanManager.toggle_ocean()
+				_log("Ocean: %s" % ("ON" if enabled else "OFF"))
+			else:
+				_log("OceanManager not available")

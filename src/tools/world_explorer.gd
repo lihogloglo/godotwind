@@ -367,11 +367,17 @@ func _on_show_models_toggled(enabled: bool) -> void:
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
 
-		# Hide/show existing loaded cell objects
+		# Show/hide existing loaded cell objects
 		for cell_grid in world_streaming_manager.get_loaded_cell_coordinates():
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
 			if cell_node:
 				cell_node.visible = enabled
+
+		if enabled:
+			# When enabling, force load all visible cells immediately
+			# (cells weren't loaded when load_objects was false)
+			# Use force_load to bypass async queue and load synchronously
+			world_streaming_manager.force_load_visible_cells()
 
 	_log("Models: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
@@ -766,9 +772,10 @@ func _process(delta: float) -> void:
 	if profiler:
 		profiler.record_frame(delta)
 
-	# Process async cell instantiation with time budget (2ms)
+	# Process async cell instantiation with time budget (4ms)
+	# Higher budget = faster object loading while still maintaining smooth framerate
 	if cell_manager:
-		cell_manager.process_async_instantiation(2.0)
+		cell_manager.process_async_instantiation(4.0)
 
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:

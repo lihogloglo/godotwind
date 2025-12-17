@@ -30,7 +30,7 @@ func _setup_recovery_viewport():
 
 	# Orthographic camera
 	_recovery_camera = Camera3D.new()
-	_recovery_camera.projection = Camera3D.PROJECTION_ORTHOGRAPHIC
+	_recovery_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
 	_recovery_camera.size = DeformationManager.REGION_SIZE_METERS
 	_recovery_camera.near = 0.1
 	_recovery_camera.far = 10.0

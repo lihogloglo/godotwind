@@ -5,6 +5,8 @@
 openmw-master/
 lapalma_map/
 lapalma_processed/
+godotoceanbuoyancy/
+GodotOceanWaves/
 # Godot-specific ignores
 *.translation
 

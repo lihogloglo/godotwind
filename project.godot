@@ -52,9 +52,13 @@ import/blender/enabled=false
 data_path="C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files"
 esm_file="Morrowind.esm"
 
+[ocean]
+
+enabled=false
+
 [physics]
 
-3d/physics_engine="JoltPhysics3D"
+3d/physics_engine="Jolt Physics"
 
 [questify]
 

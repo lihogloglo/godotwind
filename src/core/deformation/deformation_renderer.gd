@@ -35,7 +35,7 @@ func _setup_viewport():
 # Setup orthographic camera for top-down view
 func _setup_camera():
 	_camera = Camera3D.new()
-	_camera.projection = Camera3D.PROJECTION_ORTHOGRAPHIC
+	_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
 	_camera.size = DeformationManager.REGION_SIZE_METERS
 	_camera.near = 0.1
 	_camera.far = 10.0

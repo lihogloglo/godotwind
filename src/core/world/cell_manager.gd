@@ -575,10 +575,12 @@ func init_object_pool(pool_parent: Node3D = null) -> RefCounted:
 # =============================================================================
 
 ## Maximum concurrent async cell requests (prevents memory buildup)
-const MAX_ASYNC_REQUESTS := 8
+## With view_distance 3, we can have ~28 cells in view, so need higher limit
+const MAX_ASYNC_REQUESTS := 32
 
 ## Maximum items in instantiation queue (prevents memory buildup)
-const MAX_INSTANTIATION_QUEUE := 1000
+## Morrowind cells can have 200+ objects each, 32 cells × 200 = 6400 objects max
+const MAX_INSTANTIATION_QUEUE := 8000
 
 ## Maximum retries for failed async requests
 const MAX_ASYNC_RETRIES := 2
@@ -592,6 +594,7 @@ class AsyncCellRequest:
 	var pending_parses: Dictionary = {}  # model_path -> task_id
 	var parsed_results: Dictionary = {}  # model_path -> NIFParseResult
 	var references_to_process: Array = []  # CellReference objects awaiting instantiation
+	var pending_instantiations: int = 0  # Count of items queued for instantiation
 	var cell_node: Node3D = null  # The cell node being built
 	var started: bool = false
 	var completed: bool = false
@@ -754,6 +757,9 @@ func process_async_instantiation(budget_ms: float) -> int:
 
 		var request: AsyncCellRequest = _async_requests[request_id]
 
+		# Decrement pending count
+		request.pending_instantiations -= 1
+
 		# Instantiate this reference
 		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
 		if obj:
@@ -782,6 +788,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 		request.cell_node.name = cell.name.replace(" ", "_").replace(",", "")
 	else:
 		request.cell_node.name = "Cell_%d_%d" % [grid.x, grid.y]
+
+	# Store request BEFORE processing so _queue_instantiation can find it
+	_async_requests[request.request_id] = request
 
 	# Collect all unique model paths that need loading
 	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
@@ -841,10 +850,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 			request.pending_parses[model_path] = task_id
 
 	request.started = true
-	_async_requests[request.request_id] = request
 
-	# If no pending parses, mark as complete immediately
-	if request.pending_parses.is_empty() and request.references_to_process.is_empty():
+	# Mark as complete if nothing to do (all models cached and instantiated)
+	if _is_request_complete(request):
 		request.completed = true
 
 	return request.request_id
@@ -951,7 +959,7 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 
 ## Internal: Check if an async request is complete
 func _is_request_complete(request: AsyncCellRequest) -> bool:
-	return request.pending_parses.is_empty() and request.references_to_process.is_empty()
+	return request.pending_parses.is_empty() and request.references_to_process.is_empty() and request.pending_instantiations <= 0
 
 
 ## Internal: Instantiate a reference from parsed data
@@ -998,6 +1006,11 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 		"model_path": model_path,
 		"item_id": item_id
 	})
+
+	# Track pending instantiation count for completion checking
+	if request_id in _async_requests:
+		_async_requests[request_id].pending_instantiations += 1
+
 	return true
 
 

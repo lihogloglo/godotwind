@@ -54,7 +54,7 @@ _shader_parameters = {
 &"noise_texture": SubResource("NoiseTexture2D_noise"),
 &"projection_threshold": 0.8
 }
-show_checkered = false
+show_checkered = true
 show_colormap = true
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tsohu"]
@@ -98,7 +98,9 @@ far = 50000.0
 [node name="Terrain3D" type="Terrain3D" parent="."]
 material = SubResource("Terrain3DMaterial_lapalma")
 assets = SubResource("Terrain3DAssets_lapalma")
-show_checkered = false
+show_checkered = true
+show_colormap = true
+top_level = true
 metadata/_edit_lock_ = true
 
 [node name="UI" type="CanvasLayer" parent="."]

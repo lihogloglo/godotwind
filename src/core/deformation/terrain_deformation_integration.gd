@@ -19,6 +19,9 @@ var _array_index_to_region: Dictionary = {}  # int -> Vector2i
 # We use a conservative value that balances memory and flexibility
 const MAX_TEXTURE_ARRAY_SIZE: int = 64
 
+# Next available array index for region assignment
+var _next_array_index: int = 0
+
 func _ready():
 	# Check if terrain integration is enabled
 	if not DeformationConfig.enable_terrain_integration:
@@ -61,12 +64,12 @@ func _find_terrain():
 		print("[TerrainDeformationIntegration] Found Terrain3D node")
 
 # Recursive node search by class name
-func _find_node_by_class(node: Node, class_name: String) -> Node:
-	if node.get_class() == class_name:
+func _find_node_by_class(node: Node, target_class: String) -> Node:
+	if node.get_class() == target_class:
 		return node
 
 	for child in node.get_children():
-		var result = _find_node_by_class(child, class_name)
+		var result = _find_node_by_class(child, target_class)
 		if result != null:
 			return result
 

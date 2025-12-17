@@ -21,6 +21,9 @@ var _quality_override: int = -1  # -1 = auto, otherwise forced quality
 var _map_scales: Array[Vector4] = []
 var _num_cascades: int = 3
 
+# Whether using GPU compute or flat plane
+var _use_compute: bool = false
+
 
 func _init() -> void:
 	# Use world vertex coords for proper wave displacement
@@ -30,11 +33,29 @@ func _init() -> void:
 func initialize(radius: float, quality_override: int = -1) -> void:
 	_quality_override = quality_override
 	_select_quality()
+
+	# Determine if we use compute based on quality
+	# ONLY HIGH uses GPU FFT compute (requires dedicated GPU)
+	# MEDIUM/LOW use vertex Gerstner (works on any GPU including integrated)
+	# ULTRA_LOW uses flat plane (no animation, minimal GPU use)
+	_use_compute = _quality == HardwareDetection.WaterQuality.HIGH
+
 	_create_shader()
 	_create_material()
 	_create_clipmap_mesh(radius)
-	print("[OceanMesh] Initialized with %d LOD rings, radius: %.0fm, quality: %s" % [
-		NUM_LOD_RINGS, radius, HardwareDetection.quality_name(_quality)])
+
+	var mode: String
+	match _quality:
+		HardwareDetection.WaterQuality.HIGH:
+			mode = "GPU FFT (3 cascades)"
+		HardwareDetection.WaterQuality.MEDIUM:
+			mode = "Gerstner (4 waves, full GGX)"
+		HardwareDetection.WaterQuality.LOW:
+			mode = "Gerstner (2 waves, simplified)"
+		HardwareDetection.WaterQuality.ULTRA_LOW:
+			mode = "Flat Plane"
+	print("[OceanMesh] Initialized - radius: %.0fm, quality: %s, mode: %s" % [
+		radius, HardwareDetection.quality_name(_quality), mode])
 
 
 func _select_quality() -> void:
@@ -51,68 +72,264 @@ func _select_quality() -> void:
 func _create_shader() -> void:
 	var shader_path: String
 
+	# Select shader based on quality level
 	match _quality:
-		HardwareDetection.WaterQuality.ULTRA_LOW:
-			shader_path = "res://src/core/water/shaders/ocean_ultra_low.gdshader"
-		HardwareDetection.WaterQuality.LOW:
-			shader_path = "res://src/core/water/shaders/ocean_low.gdshader"
-		HardwareDetection.WaterQuality.MEDIUM:
-			shader_path = "res://src/core/water/shaders/ocean_medium.gdshader"
 		HardwareDetection.WaterQuality.HIGH:
-			shader_path = "res://src/core/water/shaders/ocean.gdshader"
+			# GPU FFT compute shader - only for HIGH quality
+			shader_path = "res://src/core/water/shaders/ocean_compute.gdshader"
+			_shader = load(shader_path) as Shader
+			if not _shader:
+				push_warning("[OceanMesh] Compute shader not found, falling back to Gerstner")
+				_shader = _create_gerstner_shader()
+			else:
+				print("[OceanMesh] Using GPU FFT compute shader")
 
-	_shader = load(shader_path) as Shader
-	if not _shader:
-		push_warning("[OceanMesh] Shader not found: %s, using fallback" % shader_path)
-		_shader = _create_fallback_shader()
-	else:
-		print("[OceanMesh] Loaded shader: %s" % shader_path)
+		HardwareDetection.WaterQuality.MEDIUM:
+			# 4 Gerstner waves with full GGX + SSS lighting
+			shader_path = "res://src/core/water/shaders/ocean_gerstner.gdshader"
+			_shader = load(shader_path) as Shader
+			if not _shader:
+				push_warning("[OceanMesh] Gerstner shader not found, using inline")
+				_shader = _create_gerstner_shader()
+			else:
+				print("[OceanMesh] Using MEDIUM quality shader (4 waves)")
+
+		HardwareDetection.WaterQuality.LOW:
+			# 2 Gerstner waves with simplified lighting for weak GPUs
+			shader_path = "res://src/core/water/shaders/ocean_low.gdshader"
+			_shader = load(shader_path) as Shader
+			if not _shader:
+				push_warning("[OceanMesh] Low shader not found, using inline gerstner")
+				_shader = _create_gerstner_shader()
+			else:
+				print("[OceanMesh] Using LOW quality shader (2 waves)")
+
+		HardwareDetection.WaterQuality.ULTRA_LOW, _:
+			# Flat plane - no animation, minimal GPU use
+			shader_path = "res://src/core/water/shaders/ocean_flat.gdshader"
+			_shader = load(shader_path) as Shader
+			if not _shader:
+				push_warning("[OceanMesh] Flat shader not found, using inline")
+				_shader = _create_flat_shader()
+			else:
+				print("[OceanMesh] Using flat plane shader")
+
+
+func _create_flat_shader() -> Shader:
+	# Simple flat plane shader with improved lighting - no wave computation
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
+
+#define REFLECTANCE 0.02
+
+uniform vec4 water_color : source_color = vec4(0.02, 0.15, 0.25, 1.0);
+uniform float roughness = 0.3;
+
+varying float fresnel;
+
+void vertex() {
+	UV = VERTEX.xz * 0.01;
+}
+
+void fragment() {
+	fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0), 1.0, REFLECTANCE);
+	ALBEDO = water_color.rgb;
+	ROUGHNESS = roughness;
+	METALLIC = 0.0;
+}
+
+void light() {
+	vec3 halfway = normalize(LIGHT + VIEW);
+	float dot_nl = max(dot(NORMAL, LIGHT), 0.0);
+	float dot_nv = max(dot(NORMAL, VIEW), 0.0);
+	float dot_nh = max(dot(NORMAL, halfway), 0.0);
+	float spec_power = 64.0 * (1.0 - roughness);
+	float specular = pow(dot_nh, spec_power) * fresnel;
+	SPECULAR_LIGHT += specular * ATTENUATION;
+	float lambertian = 0.5 * dot_nl;
+	DIFFUSE_LIGHT += (lambertian * water_color.rgb + vec3(0.02, 0.04, 0.06) * dot_nv) * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR;
+}
+"""
+	return shader
+
+
+func _create_gerstner_shader() -> Shader:
+	# Vertex shader Gerstner waves with proper lighting - works on any GPU
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
+
+#define REFLECTANCE 0.02
+
+uniform vec4 water_color : source_color = vec4(0.02, 0.12, 0.22, 1.0);
+uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
+uniform float time = 0.0;
+uniform float wave_scale = 1.0;
+uniform float roughness = 0.3;
+
+varying float wave_height;
+varying float foam_factor;
+varying float fresnel;
+
+vec3 gerstner_wave(vec2 pos, float wl, float st, vec2 dir, float t, out vec3 tan, out vec3 bin) {
+	float k = 6.28318 / wl;
+	float c = sqrt(9.81 / k);
+	vec2 d = normalize(dir);
+	float f = k * (dot(d, pos) - c * t);
+	float a = st / k;
+	float cf = cos(f), sf = sin(f);
+	tan = vec3(1.0 - d.x*d.x*st*sf, d.x*st*cf, -d.x*d.y*st*sf);
+	bin = vec3(-d.x*d.y*st*sf, d.y*st*cf, 1.0 - d.y*d.y*st*sf);
+	return vec3(d.x*a*cf, a*sf, d.y*a*cf);
+}
+
+void vertex() {
+	vec2 pos = VERTEX.xz;
+	vec3 disp = vec3(0.0), t, b;
+	vec3 tsum = vec3(1,0,0), bsum = vec3(0,0,1);
+	disp += gerstner_wave(pos, 60.0, 0.15*wave_scale, vec2(1.0,0.3), time, t, b);
+	tsum += t - vec3(1,0,0); bsum += b - vec3(0,0,1);
+	disp += gerstner_wave(pos, 31.0, 0.12*wave_scale, vec2(1.0,0.8), time*1.1, t, b);
+	tsum += t - vec3(1,0,0); bsum += b - vec3(0,0,1);
+	disp += gerstner_wave(pos, 18.0, 0.10*wave_scale, vec2(0.8,1.0), time*1.2, t, b);
+	tsum += t - vec3(1,0,0); bsum += b - vec3(0,0,1);
+	VERTEX += disp;
+	wave_height = disp.y;
+	NORMAL = normalize(cross(bsum, tsum));
+	UV = pos * 0.01;
+}
+
+void fragment() {
+	foam_factor = smoothstep(0.8, 2.0, abs(wave_height));
+	foam_factor = clamp(foam_factor, 0.0, 0.6);
+	float NdotV = max(dot(VIEW, NORMAL), 0.001);
+	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
+	ALBEDO = mix(water_color.rgb, foam_color.rgb, foam_factor);
+	ROUGHNESS = mix(roughness, 0.6, foam_factor);
+	METALLIC = 0.0;
+}
+
+float smith_masking_shadowing(in float cos_theta, in float alpha) {
+	float a = cos_theta / (alpha * sqrt(1.0 - cos_theta * cos_theta));
+	float a_sq = a * a;
+	return a < 1.6 ? (1.0 - 1.259 * a + 0.396 * a_sq) / (3.535 * a + 2.181 * a_sq) : 0.0;
+}
+
+float ggx_distribution(in float cos_theta, in float alpha) {
+	float a_sq = alpha * alpha;
+	float d = 1.0 + (a_sq - 1.0) * cos_theta * cos_theta;
+	return a_sq / (PI * d * d);
+}
+
+void light() {
+	vec3 halfway = normalize(LIGHT + VIEW);
+	float dot_nl = max(dot(NORMAL, LIGHT), 0.001);
+	float dot_nv = max(dot(NORMAL, VIEW), 0.001);
+	float dot_nh = max(dot(NORMAL, halfway), 0.001);
+	float view_mask = smith_masking_shadowing(dot_nv, roughness);
+	float light_mask = smith_masking_shadowing(dot_nl, roughness);
+	float D = ggx_distribution(dot_nh, roughness);
+	float G = 1.0 / (1.0 + view_mask + light_mask);
+	SPECULAR_LIGHT += fresnel * D * G / (4.0 * dot_nv + 0.1) * ATTENUATION * LIGHT_COLOR;
+	const vec3 sss_color = vec3(0.1, 0.4, 0.35);
+	float backlit = pow(max(dot(LIGHT, -VIEW), 0.0), 4.0);
+	float wrap = pow(0.5 - 0.5 * dot(LIGHT, NORMAL), 2.0);
+	float sss = max(0.0, wave_height + 1.0) * backlit * wrap;
+	vec3 diff_color = mix(water_color.rgb, sss_color, sss * 0.5);
+	diff_color = mix(diff_color, foam_color.rgb, foam_factor);
+	DIFFUSE_LIGHT += diff_color * dot_nl * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR;
+}
+"""
+	return shader
 
 
 func _create_fallback_shader() -> Shader:
+	# Gerstner fallback with proper lighting for when quality shader doesn't exist
 	var shader := Shader.new()
 	shader.code = """
 shader_type spatial;
 render_mode world_vertex_coords, depth_draw_always;
 
+#define REFLECTANCE 0.02
+
 uniform vec4 water_color : source_color = vec4(0.02, 0.08, 0.15, 1.0);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
 uniform float time = 0.0;
+uniform float roughness = 0.3;
 
-// Simple Gerstner wave for fallback
-vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, float time_val) {
-	float k = 2.0 * PI / wavelength;
+varying float wave_height;
+varying float foam_factor;
+varying float fresnel;
+
+vec3 gerstner_wave(vec2 pos, float wl, float st, vec2 dir, float t, out vec3 tan, out vec3 bin) {
+	float k = 6.28318 / wl;
 	float c = sqrt(9.81 / k);
-	vec2 d = normalize(direction);
-	float f = k * (dot(d, pos) - c * time_val);
-	float a = steepness / k;
-	return vec3(
-		d.x * (a * cos(f)),
-		a * sin(f),
-		d.y * (a * cos(f))
-	);
+	vec2 d = normalize(dir);
+	float f = k * (dot(d, pos) - c * t);
+	float a = st / k;
+	float cf = cos(f), sf = sin(f);
+	tan = vec3(1.0 - d.x*d.x*st*sf, d.x*st*cf, -d.x*d.y*st*sf);
+	bin = vec3(-d.x*d.y*st*sf, d.y*st*cf, 1.0 - d.y*d.y*st*sf);
+	return vec3(d.x*a*cf, a*sf, d.y*a*cf);
 }
 
 void vertex() {
 	vec2 pos = VERTEX.xz;
-
-	// Sum multiple Gerstner waves
-	vec3 displacement = vec3(0.0);
-	displacement += gerstner_wave(pos, 60.0, 0.25, vec2(1.0, 0.0), time);
-	displacement += gerstner_wave(pos, 31.0, 0.25, vec2(1.0, 0.6), time);
-	displacement += gerstner_wave(pos, 18.0, 0.25, vec2(1.0, 1.3), time);
-
-	VERTEX += displacement;
+	vec3 disp = vec3(0.0), t, b;
+	vec3 tsum = vec3(1,0,0), bsum = vec3(0,0,1);
+	disp += gerstner_wave(pos, 60.0, 0.15, vec2(1.0,0.3), time, t, b);
+	tsum += t - vec3(1,0,0); bsum += b - vec3(0,0,1);
+	disp += gerstner_wave(pos, 31.0, 0.12, vec2(1.0,0.8), time*1.1, t, b);
+	tsum += t - vec3(1,0,0); bsum += b - vec3(0,0,1);
+	disp += gerstner_wave(pos, 18.0, 0.10, vec2(0.8,1.0), time*1.2, t, b);
+	tsum += t - vec3(1,0,0); bsum += b - vec3(0,0,1);
+	VERTEX += disp;
+	wave_height = disp.y;
+	NORMAL = normalize(cross(bsum, tsum));
 }
 
 void fragment() {
-	ALBEDO = water_color.rgb;
-	ROUGHNESS = 0.1;
+	foam_factor = smoothstep(0.8, 2.0, abs(wave_height));
+	foam_factor = clamp(foam_factor, 0.0, 0.6);
+	float NdotV = max(dot(VIEW, NORMAL), 0.001);
+	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
+	ALBEDO = mix(water_color.rgb, foam_color.rgb, foam_factor);
+	ROUGHNESS = mix(roughness, 0.6, foam_factor);
 	METALLIC = 0.0;
+}
 
-	// Simple fresnel
-	float fresnel = pow(1.0 - dot(VIEW, NORMAL), 3.0);
-	ALBEDO = mix(ALBEDO, vec3(0.8, 0.9, 1.0), fresnel * 0.3);
+float smith_masking_shadowing(in float cos_theta, in float alpha) {
+	float a = cos_theta / (alpha * sqrt(1.0 - cos_theta * cos_theta));
+	float a_sq = a * a;
+	return a < 1.6 ? (1.0 - 1.259 * a + 0.396 * a_sq) / (3.535 * a + 2.181 * a_sq) : 0.0;
+}
+
+float ggx_distribution(in float cos_theta, in float alpha) {
+	float a_sq = alpha * alpha;
+	float d = 1.0 + (a_sq - 1.0) * cos_theta * cos_theta;
+	return a_sq / (PI * d * d);
+}
+
+void light() {
+	vec3 halfway = normalize(LIGHT + VIEW);
+	float dot_nl = max(dot(NORMAL, LIGHT), 0.001);
+	float dot_nv = max(dot(NORMAL, VIEW), 0.001);
+	float dot_nh = max(dot(NORMAL, halfway), 0.001);
+	float view_mask = smith_masking_shadowing(dot_nv, roughness);
+	float light_mask = smith_masking_shadowing(dot_nl, roughness);
+	float D = ggx_distribution(dot_nh, roughness);
+	float G = 1.0 / (1.0 + view_mask + light_mask);
+	SPECULAR_LIGHT += fresnel * D * G / (4.0 * dot_nv + 0.1) * ATTENUATION * LIGHT_COLOR;
+	const vec3 sss_color = vec3(0.1, 0.4, 0.35);
+	float backlit = pow(max(dot(LIGHT, -VIEW), 0.0), 4.0);
+	float wrap = pow(0.5 - 0.5 * dot(LIGHT, NORMAL), 2.0);
+	float sss = max(0.0, wave_height + 1.0) * backlit * wrap;
+	vec3 diff_color = mix(water_color.rgb, sss_color, sss * 0.5);
+	diff_color = mix(diff_color, foam_color.rgb, foam_factor);
+	DIFFUSE_LIGHT += diff_color * dot_nl * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR;
 }
 """
 	return shader
@@ -122,14 +339,28 @@ func _create_material() -> void:
 	_material = ShaderMaterial.new()
 	_material.shader = _shader
 
-	# Set default uniform values
-	_material.set_shader_parameter("water_color", Color(0.02, 0.08, 0.15, 1.0))
-	_material.set_shader_parameter("foam_color", Color(0.9, 0.9, 0.9, 1.0))
+	if not _shader:
+		push_error("[OceanMesh] No shader set!")
+		return
+
+	# Set default uniform values for all shader types
+	_material.set_shader_parameter("water_color", Color(0.02, 0.12, 0.22, 1.0))
 	_material.set_shader_parameter("time", 0.0)
-	_material.set_shader_parameter("roughness", 0.4)
-	_material.set_shader_parameter("normal_strength", 1.0)
+	_material.set_shader_parameter("roughness", 0.3)
+	_material.set_shader_parameter("wave_scale", 1.0)
+
+	# Foam color for Gerstner and compute shaders (not used by flat shader)
+	if _quality != HardwareDetection.WaterQuality.ULTRA_LOW:
+		_material.set_shader_parameter("foam_color", Color(0.9, 0.9, 0.9, 1.0))
+
+	# GPU compute shader specific
+	if _use_compute:
+		_material.set_shader_parameter("normal_strength", 1.0)
 
 	material_override = _material
+	print("[OceanMesh] Material created - shader: %s, material_override set: %s" % [
+		_shader.resource_path if _shader else "NONE",
+		material_override != null])
 
 
 func _create_clipmap_mesh(radius: float) -> void:
@@ -143,19 +374,31 @@ func _create_clipmap_mesh(radius: float) -> void:
 	var vertex_offset := 0
 
 	# Create concentric rings with increasing quad sizes
+	var prev_outer_radius := 0.0
 	for ring in range(NUM_LOD_RINGS):
 		var quad_size := BASE_QUAD_SIZE * pow(2.0, float(ring))
-		var inner_radius := 0.0 if ring == 0 else BASE_QUAD_SIZE * pow(2.0, float(ring)) * RING_VERTEX_COUNT * 0.5
+		var inner_radius := prev_outer_radius
 		var outer_radius := quad_size * RING_VERTEX_COUNT * 0.5
 
 		# Clamp to max radius
 		outer_radius = minf(outer_radius, radius)
+
+		# Skip if this ring would be empty
+		if outer_radius <= inner_radius:
+			continue
 
 		var ring_data := _create_ring(inner_radius, outer_radius, quad_size, vertex_offset)
 		vertices.append_array(ring_data.vertices)
 		uvs.append_array(ring_data.uvs)
 		indices.append_array(ring_data.indices)
 		vertex_offset += ring_data.vertices.size()
+		prev_outer_radius = outer_radius
+
+	print("[OceanMesh] Created mesh with %d vertices, %d triangles" % [vertices.size(), indices.size() / 3])
+
+	if vertices.size() == 0:
+		push_error("[OceanMesh] ERROR: No vertices created! Radius: %.0f" % radius)
+		return
 
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
@@ -171,6 +414,10 @@ func _create_clipmap_mesh(radius: float) -> void:
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	mesh = array_mesh
+
+	# Debug: print AABB
+	var aabb := array_mesh.get_aabb()
+	print("[OceanMesh] Mesh AABB: position=%s, size=%s" % [aabb.position, aabb.size])
 
 
 func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, vertex_offset: int) -> Dictionary:
@@ -277,6 +524,32 @@ func set_displacement_textures(displacements: Texture2DArray, normals: Texture2D
 		_material.set_shader_parameter("normals", normals)
 
 
+## Set wave textures from GPU compute (Texture2DArrayRD)
+## These are set as global shader parameters for the GPU compute shader approach
+func set_wave_textures(displacements: Texture2DArrayRD, normals: Texture2DArrayRD) -> void:
+	if not _use_compute:
+		return
+
+	# Set as global shader parameters (matching GodotOceanWaves approach)
+	RenderingServer.global_shader_parameter_set(&"displacements", displacements)
+	RenderingServer.global_shader_parameter_set(&"normals", normals)
+	RenderingServer.global_shader_parameter_set(&"num_cascades", _num_cascades)
+
+	# Update map scales
+	var scales: PackedVector4Array
+	scales.resize(_num_cascades)
+	# Default scales for 3 cascades
+	var default_scales := [
+		Vector4(0.004, 0.004, 1.0, 1.0),  # 250m tile -> 1/250 = 0.004
+		Vector4(0.015, 0.015, 0.5, 0.5),  # 67m tile -> ~0.015
+		Vector4(0.059, 0.059, 0.25, 0.25) # 17m tile -> ~0.059
+	]
+	for i in range(mini(_num_cascades, 3)):
+		scales[i] = default_scales[i]
+	if _material:
+		_material.set_shader_parameter("map_scales", scales)
+
+
 func set_cascade_scales(scales: Array[Vector4], num_cascades: int) -> void:
 	_map_scales = scales
 	_num_cascades = num_cascades
@@ -305,10 +578,16 @@ func get_quality() -> HardwareDetection.WaterQuality:
 	return _quality
 
 
+## Check if using GPU compute shaders
+func is_using_compute() -> bool:
+	return _use_compute
+
+
 ## Set water quality (requires re-initialization)
 func set_quality(quality: HardwareDetection.WaterQuality, radius: float) -> void:
 	_quality_override = quality
 	_select_quality()
+	_use_compute = _quality == HardwareDetection.WaterQuality.HIGH
 	_create_shader()
 	_create_material()
 	# Mesh doesn't need to be recreated for quality change

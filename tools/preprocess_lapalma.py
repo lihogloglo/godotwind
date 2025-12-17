@@ -161,39 +161,37 @@ def main():
         tile_x = int(tile_x_m / vertex_spacing)
         tile_y = int(tile_y_m / vertex_spacing)
 
-        # Calculate source pixel scale in meters
-        src_pixel_m, _ = deg_to_meters(tile['pixel_scale'][0], tile['pixel_scale'][1], ref_lat)
+        # Calculate source pixel scale in meters (lon and lat have different scales!)
+        src_pixel_x_m, src_pixel_y_m = deg_to_meters(tile['pixel_scale'][0], tile['pixel_scale'][1], ref_lat)
 
         # Resample tile to output resolution
         src_h, src_w = tile['shape']
-        dst_w = int(src_w * src_pixel_m / vertex_spacing)
-        dst_h = int(src_h * src_pixel_m / vertex_spacing)
+        dst_w = int(src_w * src_pixel_x_m / vertex_spacing)
+        dst_h = int(src_h * src_pixel_y_m / vertex_spacing)
 
-        # Simple nearest-neighbor resampling (good enough for 2m -> 6m)
+        # Simple resampling (good enough for 2m -> 6m)
         data = tile['data']
 
         # Replace nodata values
         data = np.where(data < -1000, np.nan, data)
 
-        # Resample using stride/repeat
-        scale_factor = src_pixel_m / vertex_spacing
+        # Calculate scale factors for x and y separately
+        scale_factor_x = src_pixel_x_m / vertex_spacing
+        scale_factor_y = src_pixel_y_m / vertex_spacing
 
-        if scale_factor < 1:
-            # Downsampling: use block averaging
-            block_size = int(1 / scale_factor)
-            new_h = src_h // block_size
-            new_w = src_w // block_size
-            resampled = np.nanmean(
-                data[:new_h * block_size, :new_w * block_size].reshape(new_h, block_size, new_w, block_size),
-                axis=(1, 3)
-            )
-        else:
-            # Upsampling: use nearest neighbor
-            y_indices = (np.arange(dst_h) / scale_factor).astype(int)
-            x_indices = (np.arange(dst_w) / scale_factor).astype(int)
-            y_indices = np.clip(y_indices, 0, src_h - 1)
-            x_indices = np.clip(x_indices, 0, src_w - 1)
-            resampled = data[y_indices][:, x_indices]
+        # Use proper resampling that produces exactly dst_h x dst_w output
+        if dst_h <= 0 or dst_w <= 0:
+            continue
+
+        # Create index arrays that map output pixels to source pixels
+        y_indices = (np.arange(dst_h) * vertex_spacing / src_pixel_y_m).astype(int)
+        x_indices = (np.arange(dst_w) * vertex_spacing / src_pixel_x_m).astype(int)
+        y_indices = np.clip(y_indices, 0, src_h - 1)
+        x_indices = np.clip(x_indices, 0, src_w - 1)
+
+        # Use nearest neighbor sampling (fast and produces exact size needed)
+        # Block averaging was causing size mismatches
+        resampled = data[y_indices][:, x_indices]
 
         # Copy to mosaic (handling bounds)
         dst_y1 = tile_y

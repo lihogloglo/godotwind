@@ -59,11 +59,11 @@ signal terrain_region_loaded(region: Vector2i)
 
 ## Time budget for cell loading per frame (ms)
 ## Higher = faster loading but more frame hitches
-## Keep low to maintain 60fps
-@export var cell_load_budget_ms: float = 2.0
+## 4ms allows reasonable loading speed while maintaining smooth framerate
+@export var cell_load_budget_ms: float = 4.0
 
 ## Maximum cells to queue for loading
-@export var max_load_queue_size: int = 16
+@export var max_load_queue_size: int = 64
 
 ## Enable async/time-budgeted cell loading
 @export var async_loading_enabled: bool = true
@@ -230,6 +230,27 @@ func refresh_cells() -> void:
 	if _tracked_node:
 		var cell := _get_cell_from_godot_position(_tracked_node.global_position)
 		_on_camera_cell_changed(cell)
+
+
+## Force load all visible cells synchronously (bypasses async queue)
+## Use this when toggling objects on to ensure immediate loading
+func force_load_visible_cells() -> void:
+	if not _tracked_node or not cell_manager:
+		return
+
+	var camera_cell := _get_cell_from_godot_position(_tracked_node.global_position)
+	var visible_cells := _get_visible_cells(camera_cell)
+
+	_debug("Force loading %d visible cells around %s" % [visible_cells.size(), camera_cell])
+
+	for cell_grid in visible_cells:
+		if cell_grid not in _loaded_cells:
+			# Remove from loading/queue state if present
+			_loading_cells.erase(cell_grid)
+			_load_queue = _load_queue.filter(func(entry): return entry.grid != cell_grid)
+
+			# Load synchronously
+			_load_cell_internal(cell_grid)
 
 
 ## Set the CellManager instance to use
