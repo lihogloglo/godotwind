@@ -42,6 +42,8 @@ var load_npcs: bool = true       # Whether to load NPC models
 var load_creatures: bool = true  # Whether to load creature models
 var use_object_pool: bool = true # Whether to use object pooling for common models
 var use_static_renderer: bool = true  # Use RenderingServer for flora (much faster)
+var use_multimesh_instancing: bool = true  # Use MultiMesh for batching identical objects
+var min_instances_for_multimesh: int = 10  # Minimum instances to use MultiMesh instead of individual nodes
 
 # Morrowind light radius to Godot light range conversion factor
 # MW units are roughly 1/128th of a meter, so radius 256 ~= 2 meters
@@ -86,23 +88,240 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 	var loaded := 0
 	var failed := 0
 	var static_count := 0
+	var multimesh_count := 0
 
-	for ref in cell.references:
-		var obj := _instantiate_reference(ref, cell_grid)
-		if obj:
-			cell_node.add_child(obj)
-			loaded += 1
-		elif use_static_renderer and _static_renderer:
-			# Object may have been added to static renderer (returns null)
-			static_count += 1
-		else:
-			failed += 1
+	# Phase 1: Group references by model for potential MultiMesh batching
+	if use_multimesh_instancing:
+		var instance_groups := _group_references_for_instancing(cell.references, cell_grid)
 
-	print("CellManager: Loaded %d objects, %d static, %d failed" % [loaded, static_count, failed])
+		# Phase 2: Create MultiMesh instances for suitable groups
+		multimesh_count = _create_multimesh_instances(instance_groups, cell_node)
+
+		# Phase 3: Instantiate remaining objects normally
+		for ref in instance_groups.get("individual_refs", []):
+			var obj := _instantiate_reference(ref, cell_grid)
+			if obj:
+				cell_node.add_child(obj)
+				loaded += 1
+			elif use_static_renderer and _static_renderer:
+				static_count += 1
+			else:
+				failed += 1
+	else:
+		# Original path: no batching
+		for ref in cell.references:
+			var obj := _instantiate_reference(ref, cell_grid)
+			if obj:
+				cell_node.add_child(obj)
+				loaded += 1
+			elif use_static_renderer and _static_renderer:
+				static_count += 1
+			else:
+				failed += 1
+
+	var total_objects := loaded + static_count + multimesh_count
+	print("CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
+		total_objects, loaded, static_count, multimesh_count, failed
+	])
 	_stats["objects_instantiated"] += loaded
 	_stats["objects_failed"] += failed
+	_stats["multimesh_instances"] = _stats.get("multimesh_instances", 0) + multimesh_count
 
 	return cell_node
+
+
+## Group cell references for MultiMesh instancing
+## Returns dictionary with:
+## - "multimesh_groups": Dictionary of model_path -> Array of {ref, transform, base_record}
+## - "individual_refs": Array of references that should be instantiated individually
+func _group_references_for_instancing(references: Array, cell_grid: Vector2i) -> Dictionary:
+	var multimesh_candidates: Dictionary = {}  # model_path -> Array of {ref, base_record}
+	var individual_refs: Array = []
+
+	for ref in references:
+		# Get base record and type
+		var record_type: Array = [""]
+		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+
+		if not base_record:
+			continue
+
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+		# Skip non-model objects (lights, NPCs, creatures, leveled items)
+		if type_name in ["light", "npc", "creature", "leveled_creature", "leveled_item"]:
+			individual_refs.append(ref)
+			continue
+
+		# Get model path
+		var model_path: String = _get_model_path(base_record)
+		if model_path.is_empty():
+			continue
+
+		# Check if suitable for MultiMesh
+		if not _is_multimesh_candidate(model_path, base_record):
+			individual_refs.append(ref)
+			continue
+
+		# Check if would use static renderer (skip those - already optimized)
+		if use_static_renderer and _static_renderer and _is_static_render_model(model_path):
+			individual_refs.append(ref)
+			continue
+
+		# Add to candidates
+		var normalized := model_path.to_lower().replace("/", "\\")
+		if normalized not in multimesh_candidates:
+			multimesh_candidates[normalized] = []
+
+		multimesh_candidates[normalized].append({
+			"ref": ref,
+			"base_record": base_record,
+			"model_path": model_path
+		})
+
+	# Filter groups: only keep those with enough instances
+	var multimesh_groups: Dictionary = {}
+	for model_path in multimesh_candidates:
+		var candidates: Array = multimesh_candidates[model_path]
+		if candidates.size() >= min_instances_for_multimesh:
+			multimesh_groups[model_path] = candidates
+		else:
+			# Too few instances - instantiate individually
+			for candidate in candidates:
+				individual_refs.append(candidate.ref)
+
+	return {
+		"multimesh_groups": multimesh_groups,
+		"individual_refs": individual_refs
+	}
+
+
+## Check if a model is suitable for MultiMesh instancing
+## MultiMesh candidates are: small repeated objects like rocks, pots, bottles, flora
+func _is_multimesh_candidate(model_path: String, base_record) -> bool:
+	var lower := model_path.to_lower()
+
+	# Small rocks (already filtered by _is_static_render_model for flora)
+	if "terrain_rock" in lower:
+		# Only small rocks (rm_ prefix = rock medium/small)
+		if "_rm_" in lower or "small" in lower:
+			return true
+		return false
+
+	# Containers - pots, urns, barrels, crates
+	if "contain_" in lower:
+		if "barrel" in lower or "sack" in lower or "crate" in lower or "chest" in lower:
+			return true
+		# Redware pots, urns
+		if "redware" in lower or "urn" in lower or "pot_" in lower:
+			return true
+		return false
+
+	# Misc clutter - bottles, cups, plates, etc.
+	if "misc_com" in lower or "misc_de" in lower:
+		if "bottle" in lower or "cup" in lower or "plate" in lower or "bowl" in lower:
+			return true
+		if "lantern" in lower or "candle" in lower:
+			return true
+		return false
+
+	# Light fixtures (the model, not the light itself)
+	if "light_" in lower and "com_" in lower:
+		return true
+
+	# Dwemer items (gears, pipes, etc.)
+	if "dwrv_" in lower:
+		if "gear" in lower or "pipe" in lower or "scrap" in lower:
+			return true
+
+	return false
+
+
+## Create MultiMeshInstance3D nodes for batched groups
+## Returns total count of instances created
+func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3D) -> int:
+	var multimesh_groups: Dictionary = instance_groups.get("multimesh_groups", {})
+	var total_count := 0
+
+	for model_path in multimesh_groups:
+		var candidates: Array = multimesh_groups[model_path]
+		var count := candidates.size()
+
+		if count == 0:
+			continue
+
+		# Get/load prototype model
+		var first_candidate: Dictionary = candidates[0]
+		var record_id: String = first_candidate.base_record.get("record_id", "")
+		var prototype := _get_model(first_candidate.model_path, record_id)
+
+		if not prototype:
+			# Failed to load - fall back to individual instantiation
+			for candidate in candidates:
+				var obj := _instantiate_reference(candidate.ref)
+				if obj:
+					parent_node.add_child(obj)
+			continue
+
+		# Find first MeshInstance3D in prototype
+		var mesh_instance := _find_first_mesh_instance(prototype)
+		if not mesh_instance or not mesh_instance.mesh:
+			# No mesh found - fall back
+			for candidate in candidates:
+				var obj := _instantiate_reference(candidate.ref)
+				if obj:
+					parent_node.add_child(obj)
+			continue
+
+		# Create MultiMesh
+		var multimesh := MultiMesh.new()
+		multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		multimesh.instance_count = count
+		multimesh.mesh = mesh_instance.mesh
+
+		# Set transforms for each instance
+		for i in range(count):
+			var candidate: Dictionary = candidates[i]
+			var ref: CellReference = candidate.ref
+			var transform := _calculate_transform(ref)
+			multimesh.set_instance_transform(i, transform)
+
+		# Create MultiMeshInstance3D node
+		var mmi := MultiMeshInstance3D.new()
+		mmi.name = "MultiMesh_%s_%d" % [model_path.get_file().get_basename(), count]
+		mmi.multimesh = multimesh
+		mmi.material_override = mesh_instance.material_override
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		parent_node.add_child(mmi)
+		total_count += count
+
+		print("  MultiMesh: %d × %s" % [count, model_path.get_file()])
+
+	return total_count
+
+
+## Find first MeshInstance3D in a node hierarchy
+func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
+	if node is MeshInstance3D:
+		return node as MeshInstance3D
+
+	for child in node.get_children():
+		var found := _find_first_mesh_instance(child)
+		if found:
+			return found
+
+	return null
+
+
+## Calculate transform for a cell reference
+func _calculate_transform(ref: CellReference) -> Transform3D:
+	var pos := CS.vector_to_godot(ref.position)
+	var scale := CS.scale_to_godot(ref.scale)
+	var euler := CS.euler_to_godot(ref.rotation)
+	var basis := Basis.from_euler(euler, EULER_ORDER_XZY)
+	basis = basis.scaled(scale)
+	return Transform3D(basis, pos)
 
 
 ## Instantiate a single cell reference as a Node3D
