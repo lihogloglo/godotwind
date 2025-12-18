@@ -59,9 +59,65 @@ Three different terrain streaming implementations existed:
 
 ---
 
-## Phase 2: Separation (RECOMMENDED - Not Implemented)
+## Phase 2: Separation (IN PROGRESS ✅)
 
-### 2.1 Split CellManager God Object (1,602 lines)
+### 2.0 Progress Summary
+
+**Status:** Step 1 of 3 completed
+- ✅ **ModelLoader extracted** (153 lines) - COMPLETED
+- ⏳ ReferenceInstantiator (442 lines) - PLANNED
+- ⏳ MultiMeshBatcher (208 lines) - PLANNED
+
+**Metrics:**
+- CellManager: 1,602 → 1,545 lines (-57 lines)
+- New ModelLoader: +153 lines (properly documented)
+- Net: +96 lines (acceptable for better separation)
+
+**Commit:** `edcbf18` - "Refactor: Extract ModelLoader from CellManager (Phase 2, Step 1)"
+
+---
+
+## Phase 2.1: ModelLoader Extraction (COMPLETED ✅)
+
+**What Was Done:**
+Created `src/core/world/model_loader.gd` (153 lines) to handle NIF model loading and caching.
+
+**Responsibilities Moved:**
+- NIF model loading from BSA archives
+- Model caching with item_id support (for collision variations)
+- Cache statistics tracking
+- Async model cache management
+
+**Public API:**
+```gdscript
+class ModelLoader extends RefCounted:
+    func get_model(path: String, item_id: String = "") -> Node3D
+    func has_model(path: String, item_id: String = "") -> bool
+    func add_to_cache(path: String, model: Node3D, item_id: String = "")
+    func get_cached(path: String, item_id: String = "") -> Node3D
+    func clear_cache()
+    func get_stats() -> Dictionary
+```
+
+**Benefits Achieved:**
+- ✅ Single responsibility: ModelLoader does ONE thing (load and cache models)
+- ✅ Better testability: Can mock ModelLoader for CellManager tests
+- ✅ Foundation for future async improvements (can add async loading to ModelLoader)
+- ✅ Clearer separation between data loading and object instantiation
+
+**CellManager Changes:**
+- Removed `_model_cache` dictionary and model stats
+- Replaced `_get_model()` with delegation to `_model_loader.get_model()`
+- Updated `clear_cache()` and `get_stats()` to use ModelLoader
+- Updated async/preload code to use new ModelLoader API
+
+**Files Changed:**
+- NEW: `src/core/world/model_loader.gd` (+153 lines)
+- MODIFIED: `src/core/world/cell_manager.gd` (-57 lines: 1,602 → 1,545)
+
+---
+
+### 2.1 Split CellManager God Object (1,602 lines) - ORIGINAL PLAN
 
 **Current Problems:**
 - Violates Single Responsibility Principle
@@ -286,17 +342,28 @@ const ClassName := preload("path/to/class_name.gd")
 
 ## Conclusion
 
-**Phase 1 Achievements:**
+**Phase 1 Achievements:** (COMPLETED ✅)
 - ✅ Eliminated 238 lines of redundant code
 - ✅ Separated terrain and object streaming
 - ✅ Improved architectural clarity
 - ✅ Zero functionality lost
 
+**Phase 2 Progress:** (IN PROGRESS ⏳)
+- ✅ Extracted ModelLoader (153 lines) from CellManager
+- ✅ CellManager: 1,602 → 1,545 lines (-57 lines)
+- ⏳ Next: Extract ReferenceInstantiator (442 lines) - HIGH VALUE
+- ⏳ Next: Extract MultiMeshBatcher (208 lines) - OPTIONAL
+
+**Total Impact So Far:**
+- Lines removed from god objects: -295 lines (238 + 57)
+- New focused classes created: 2 (GenericTerrainStreamer used, ModelLoader created)
+- Architecture violations fixed: 2 (terrain/object separation, model loading separation)
+
 **Next Steps:**
-- Review this document with team
-- Prioritize Phase 2 refactoring based on current needs
-- Create feature branches for each major refactoring
-- Maintain test coverage throughout
+- Continue with ReferenceInstantiator extraction (biggest remaining win)
+- Test all changes with world_explorer.gd
+- Consider MultiMeshBatcher extraction
+- Update tests to use new classes
 
 **Philosophy:**
 > "Everything is a special case of something simpler."
@@ -305,5 +372,5 @@ const ClassName := preload("path/to/class_name.gd")
 ---
 
 **Maintained by:** Claude (AI Assistant)
-**Last Updated:** 2025-12-18
-**Status:** Phase 1 Complete, Phases 2-3 Planned
+**Last Updated:** 2025-12-18 (Phase 2, Step 1)
+**Status:** Phase 1 Complete ✅, Phase 2 In Progress (1/3 steps done)
