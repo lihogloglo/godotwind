@@ -25,7 +25,6 @@ const DATA_DIR := "res://lapalma_processed"
 # Node references
 @onready var camera: Camera3D = $FlyCamera
 @onready var terrain_3d: Terrain3D = $Terrain3D
-@onready var sky_3d: Node = $Sky3D
 @onready var loading_overlay: ColorRect = $UI/LoadingOverlay
 @onready var loading_label: Label = $UI/LoadingOverlay/VBox/LoadingLabel
 @onready var progress_bar: ProgressBar = $UI/LoadingOverlay/VBox/ProgressBar
@@ -54,7 +53,12 @@ var mouse_captured: bool = false
 var _show_sky_toggle: CheckBox = null
 var _show_sky: bool = false  # Default OFF - enable for day/night cycle
 
-# Fallback light for when Sky3D is disabled (provides basic illumination)
+# Sky3D is created lazily - only on first toggle
+var sky_3d: Node = null  # Sky3D node (created on demand)
+var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
+
+# Fallback environment for when Sky3D is disabled (Godot default-like sky)
+var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
 
 # State
@@ -238,50 +242,130 @@ func _setup_sky_toggle() -> void:
 	vbox.add_child(toggle_container)
 	vbox.move_child(toggle_container, insert_idx)
 
-	# Create fallback directional light for when Sky3D is disabled
-	_setup_fallback_light()
+	# Create fallback environment and light for when Sky3D is disabled
+	_setup_fallback_environment()
 
 
 ## Toggle sky visibility and day/night cycle
 func _on_show_sky_toggled(enabled: bool) -> void:
 	_show_sky = enabled
 
-	if sky_3d:
-		sky_3d.sky3d_enabled = enabled
+	if enabled:
+		# Create Sky3D lazily on first enable
+		if not _sky3d_initialized:
+			_create_sky3d()
 
-	# Toggle fallback light (inverse of sky state)
-	if _fallback_light:
-		_fallback_light.visible = not enabled
+		# Enable Sky3D, remove fallback from tree (WorldEnvironment has no visible property)
+		if sky_3d:
+			sky_3d.sky3d_enabled = true
+		if _fallback_world_env and _fallback_world_env.is_inside_tree():
+			remove_child(_fallback_world_env)
+		if _fallback_light:
+			_fallback_light.visible = false
+	else:
+		# Disable Sky3D (if it exists), add fallback back to tree
+		if sky_3d:
+			sky_3d.sky3d_enabled = false
+		if _fallback_world_env and not _fallback_world_env.is_inside_tree():
+			add_child(_fallback_world_env)
+		if _fallback_light:
+			_fallback_light.visible = true
 
 	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
 
 
-## Setup fallback directional light for when Sky3D is disabled
-func _setup_fallback_light() -> void:
+## Create Sky3D node lazily (only called on first toggle)
+func _create_sky3d() -> void:
+	if _sky3d_initialized:
+		return
+
+	_log("Initializing Sky3D...")
+
+	# Load and instantiate Sky3D
+	var Sky3DScript = load("res://addons/sky_3d/src/Sky3D.gd")
+	sky_3d = WorldEnvironment.new()
+	sky_3d.set_script(Sky3DScript)
+	sky_3d.name = "Sky3D"
+
+	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
+	add_child(sky_3d)
+
+	# Configure AFTER adding to tree so _initialize() has run and environment exists
+	sky_3d.current_time = 10.0
+	sky_3d.minutes_per_day = 60.0
+
+	# Start enabled
+	sky_3d.sky3d_enabled = true
+
+	_sky3d_initialized = true
+	_log("Sky3D initialized")
+
+
+## Setup fallback environment and light for when Sky3D is disabled
+## This provides a Godot default-like appearance instead of black sky
+func _setup_fallback_environment() -> void:
+	# Create fallback WorldEnvironment with procedural sky (like Godot's default)
+	_fallback_world_env = WorldEnvironment.new()
+	_fallback_world_env.name = "FallbackEnvironment"
+
+	# Create environment with procedural sky material (Godot's default look)
+	var env := Environment.new()
+	env.background_mode = Environment.BG_SKY
+
+	# Create procedural sky (similar to Godot's default new scene sky)
+	var sky := Sky.new()
+	var sky_material := ProceduralSkyMaterial.new()
+
+	# Configure for a pleasant daytime look (similar to Godot's default)
+	sky_material.sky_top_color = Color(0.385, 0.454, 0.55)  # Godot default blue
+	sky_material.sky_horizon_color = Color(0.646, 0.656, 0.67)
+	sky_material.ground_bottom_color = Color(0.2, 0.169, 0.133)
+	sky_material.ground_horizon_color = Color(0.646, 0.656, 0.67)
+	sky_material.sun_angle_max = 30.0
+	sky_material.sun_curve = 0.15
+
+	sky.sky_material = sky_material
+	env.sky = sky
+
+	# Ambient lighting from sky
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.ambient_light_sky_contribution = 1.0
+	env.ambient_light_energy = 1.0
+
+	# Reflected light from sky
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+
+	# Tonemapping (ACES for better contrast)
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.tonemap_exposure = 1.0
+	env.tonemap_white = 6.0
+
+	_fallback_world_env.environment = env
+	add_child(_fallback_world_env)
+
+	# Create fallback directional light
 	_fallback_light = DirectionalLight3D.new()
 	_fallback_light.name = "FallbackLight"
 
-	# Soft daylight-like settings
-	_fallback_light.light_color = Color(1.0, 0.98, 0.95)
-	_fallback_light.light_energy = 0.8
+	# Strong daylight settings
+	_fallback_light.light_color = Color(1.0, 0.98, 0.95)  # Slightly warm white
+	_fallback_light.light_energy = 1.2  # Stronger light
 	_fallback_light.shadow_enabled = true
 	_fallback_light.shadow_bias = 0.03
+	_fallback_light.directional_shadow_max_distance = 5000.0  # Larger for La Palma
 
 	# Point downward at an angle (like midday sun)
 	_fallback_light.rotation_degrees = Vector3(-45, -30, 0)
-
-	# Start visible only if sky is disabled
-	_fallback_light.visible = not _show_sky
 
 	add_child(_fallback_light)
 
 
 ## Sync sky state with toggle on initialization
+## Since Sky3D is lazily created, this just ensures fallback is in tree
 func _sync_sky_state() -> void:
-	if sky_3d:
-		sky_3d.sky3d_enabled = _show_sky
-
+	# Sky3D is not created yet (lazy init), so fallback should be in tree
+	# WorldEnvironment doesn't have visible property - it's controlled by being in tree
 	if _fallback_light:
 		_fallback_light.visible = not _show_sky
 

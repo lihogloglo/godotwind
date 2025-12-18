@@ -51,14 +51,16 @@ Sky3D plugin is installed but not integrated.
 ## Gameplay Foundation
 
 ### 5. Player Controller
-Replace fly camera with proper character controller.
+Toggle between fly camera and proper character controller with P key.
 
 **Tasks:**
-- [ ] CharacterBody3D setup
-- [ ] Movement (walk, run, jump)
-- [ ] Camera (1st/3rd person)
+- [x] CharacterBody3D setup (`src/core/player/player_controller.gd`)
+- [x] Movement (walk, run, jump)
+- [x] First-person camera
+- [x] FlyCamera script (`src/core/player/fly_camera.gd`)
+- [x] Toggle between modes (P key in world_explorer)
 - [ ] Swimming (water Area3D detection)
-- [ ] Collision with world
+- [ ] Third-person camera option
 
 ### 6. Basic NPC Presence
 NPCs are loaded but static.

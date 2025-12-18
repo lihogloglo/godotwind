@@ -1,7 +1,6 @@
-[gd_scene load_steps=10 format=3 uid="uid://dndox8fpbhekx"]
+[gd_scene load_steps=8 format=3 uid="uid://dndox8fpbhekx"]
 
 [ext_resource type="Script" uid="uid://d0hoxkgtiabvi" path="res://src/tools/lapalma_explorer.gd" id="1_lapalma"]
-[ext_resource type="Script" path="res://addons/sky_3d/src/Sky3D.gd" id="2_sky3d"]
 
 [sub_resource type="Gradient" id="Gradient_noise"]
 offsets = PackedFloat32Array(0.2, 1)
@@ -69,13 +68,6 @@ mesh_list = Array[Terrain3DMeshAsset]([SubResource("Terrain3DMeshAsset_5ud2a")])
 
 [node name="LaPalmaExplorer" type="Node3D"]
 script = ExtResource("1_lapalma")
-
-[node name="Sky3D" type="WorldEnvironment" parent="."]
-script = ExtResource("2_sky3d")
-sky3d_enabled = false
-current_time = 10.0
-minutes_per_day = 60.0
-fog_enabled = true
 
 [node name="FlyCamera" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 1000, 0)

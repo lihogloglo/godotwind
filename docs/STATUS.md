@@ -40,12 +40,13 @@
 | **NIF Viewer** | ✅ Production | Model browser, animations, collision viz |
 | **La Palma Explorer** | ⚠️ WIP | Terrain-only, minimal features |
 | **Settings Tool** | ✅ Production | Morrowind path config |
+| **Developer Console** | ✅ New | Object picking, commands, scripting foundation |
 
 ## Gameplay Systems (Not Implemented)
 
 | System | Status |
 |--------|--------|
-| Player Controller | ❌ Using fly camera |
+| Player Controller | ✅ Basic FPS controller, toggle with P key |
 | Character Creation | ❌ |
 | Stats/Skills | ❌ |
 | Combat | ❌ |
@@ -81,6 +82,15 @@ src/core/
 │   └── dds_loader.gd
 ├── streaming/              # ✅ Async processing
 │   └── background_processor.gd
+├── console/                # ✅ Developer console
+│   ├── console.gd          # Main controller
+│   ├── console_ui.gd       # UI overlay
+│   ├── command_registry.gd # Command system
+│   ├── object_picker.gd    # Click-to-select objects
+│   └── shaders/            # Selection outline
+├── player/                 # ✅ Player/camera systems
+│   ├── fly_camera.gd       # Free-fly camera
+│   └── player_controller.gd # FPS CharacterBody3D
 ├── water/                  # ⚠️ Framework ready, not integrated
 │   ├── ocean_manager.gd
 │   ├── ocean_mesh.gd

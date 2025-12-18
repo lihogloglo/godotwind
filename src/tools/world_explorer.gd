@@ -4,18 +4,28 @@
 ## - WORLD MODE: Infinite terrain streaming with multi-region support
 ##   - Terrain3D for terrain LOD and streaming
 ##   - OWDB for object streaming (statics, lights, NPCs, etc.)
-##   - Free-fly camera navigation
+##   - Free-fly camera OR player controller with physics
 ##
 ## - INTERIOR MODE: Browse and explore interior cells
 ##   - Cell browser with search
 ##   - Interior/exterior filtering
 ##   - Quick load for common locations
 ##
+## - DEVELOPER CONSOLE: Click-to-select objects, commands, scripting
+##   - Press ~ (tilde) to toggle console
+##   - Click objects to inspect them
+##   - Type 'help' for available commands
+##
 ## Controls:
+## - Press ~ (tilde) to toggle developer console
+## - Press P to toggle between Fly Camera and Player Controller
 ## - Press F3 to toggle performance overlay
 ## - Press F4 to dump detailed profiling report
 ## - Press TAB to toggle between World and Interior modes
 ## - Use +/- to adjust view distance
+##
+## Fly Camera: Hold Right-click to look, WASD to move, Space/Shift for up/down
+## Player: WASD to move, Space to jump, Shift to run, mouse to look
 extends Node3D
 
 # Preload dependencies
@@ -28,6 +38,9 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
 const OceanManagerScript := preload("res://src/core/water/ocean_manager.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
+const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
+const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
+const ConsoleScript := preload("res://src/core/console/console.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 # Pre-processed terrain data directory
@@ -36,7 +49,6 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 # Node references
 @onready var camera: Camera3D = $FlyCamera
 @onready var terrain_3d: Terrain3D = $Terrain3D
-@onready var sky_3d: Node = $Sky3D
 @onready var loading_overlay: ColorRect = $UI/LoadingOverlay
 @onready var loading_label: Label = $UI/LoadingOverlay/VBox/LoadingLabel
 @onready var progress_bar: ProgressBar = $UI/LoadingOverlay/VBox/ProgressBar
@@ -64,7 +76,15 @@ var _show_models: bool = false  # Default OFF for performance
 var _show_ocean: bool = false   # Default OFF for performance
 var _show_sky: bool = false     # Default OFF - enable for day/night cycle
 
-# Fallback light for when Sky3D is disabled (provides basic illumination)
+# Sky3D is created lazily - only on first toggle
+var sky_3d: Node = null  # Sky3D node (created on demand)
+var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
+
+# Ocean is created lazily - only on first toggle
+var _ocean_initialized: bool = false  # Track if ocean has ever been created
+
+# Fallback environment for when Sky3D is disabled (Godot default-like sky)
+var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
 
 # Interior cell browser UI (will be added to scene)
@@ -85,11 +105,7 @@ var cell_manager: RefCounted = null  # CellManager
 var profiler: RefCounted = null  # PerformanceProfiler
 var ocean_manager: Node = null  # OceanManager
 var background_processor: Node = null  # BackgroundProcessor for async loading
-
-# Camera controls
-var camera_speed: float = 200.0
-var mouse_sensitivity: float = 0.003
-var mouse_captured: bool = false
+var console: Node = null  # Developer console
 
 # State
 var _data_path: String = ""
@@ -108,6 +124,12 @@ var _search_timer: Timer = null
 var _max_display_items: int = 500
 var _loaded_interior_cell: Node3D = null
 
+# Camera mode state
+enum CameraMode { FLY_CAMERA, PLAYER_CONTROLLER }
+var _camera_mode: CameraMode = CameraMode.FLY_CAMERA
+var fly_camera: Camera3D = null  # FlyCamera instance (with script)
+var player_controller: CharacterBody3D = null  # PlayerController instance
+
 
 func _ready() -> void:
 	# Initialize managers
@@ -123,6 +145,12 @@ func _ready() -> void:
 	# Initialize profiler
 	profiler = PerformanceProfilerScript.new()
 	profiler.start_session()
+
+	# Setup camera systems
+	_setup_cameras()
+
+	# Setup developer console
+	_setup_console()
 
 	# Connect quick teleport buttons
 	seyda_neen_btn.pressed.connect(func(): _teleport_to_cell(-2, -9))
@@ -200,9 +228,7 @@ func _init_async() -> void:
 		_log("(For better performance, click 'Preprocess ALL Terrain')")
 		await _update_loading(70, "Configuring terrain...")
 
-	# Setup ocean system
-	await _update_loading(80, "Setting up ocean...")
-	_setup_ocean()
+	# Ocean system is now lazy-loaded - created on first toggle
 
 	# Create and setup WorldStreamingManager (but don't start tracking yet)
 	await _update_loading(85, "Setting up streaming system...")
@@ -311,6 +337,209 @@ func _load_preprocessed_terrain() -> void:
 		_log("[color=yellow]Preprocessed terrain directory not found[/color]")
 
 
+# ==================== Camera System ====================
+
+## Setup fly camera and player controller
+func _setup_cameras() -> void:
+	# Get existing fly camera from scene and attach script
+	fly_camera = $FlyCamera
+	if fly_camera:
+		fly_camera.set_script(FlyCameraScript)
+		# Manually enable processing since _ready() isn't called when script is attached dynamically
+		fly_camera.set_process(true)
+		fly_camera.set_process_input(true)
+		fly_camera.enabled = true
+		fly_camera.current = true
+		camera = fly_camera  # Set the camera reference
+
+	# Create player controller (hidden by default)
+	player_controller = CharacterBody3D.new()
+	player_controller.set_script(PlayerControllerScript)
+	player_controller.name = "PlayerController"
+	add_child(player_controller)
+	# Ensure processing is enabled (belt and suspenders)
+	player_controller.set_physics_process(true)
+	player_controller.set_process_input(true)
+
+	# Start in fly camera mode
+	_camera_mode = CameraMode.FLY_CAMERA
+	player_controller.disable()
+
+	_log("Camera systems initialized (P to toggle)")
+
+
+## Setup developer console
+func _setup_console() -> void:
+	console = ConsoleScript.new()
+	console.name = "Console"
+	add_child(console)
+
+	# Set initial camera for picker
+	console.set_camera(fly_camera)
+
+	# Register context - these will be accessible from console commands
+	console.register_context("camera", fly_camera)
+	console.register_context("profiler", profiler)
+	console.register_context("cell_manager", cell_manager)
+	console.register_context("esm", ESMManager)
+	console.register_context("bsa", BSAManager)
+
+	# Register custom teleport command
+	var coc_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("cell_name", TYPE_STRING, "Interior cell name")
+	]
+	console.register_command(
+		"coc", _cmd_center_on_cell,
+		"Teleport to interior cell by name (Morrowind command)",
+		"navigation",
+		PackedStringArray(["centeroncell"]),
+		coc_params,
+		PackedStringArray(["coc \"Seyda Neen, Census and Excise Office\""])
+	)
+
+	var coe_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("x", TYPE_INT, "Cell X coordinate"),
+		CommandRegistry.ParameterInfo.new("y", TYPE_INT, "Cell Y coordinate")
+	]
+	console.register_command(
+		"coe", _cmd_center_on_exterior,
+		"Teleport to exterior cell by grid (Morrowind command)",
+		"navigation",
+		PackedStringArray(["centeronexterior"]),
+		coe_params,
+		PackedStringArray(["coe -2 -9"])
+	)
+
+	_log("Console initialized (~ to toggle)")
+
+
+## Console command: Center on cell (interior)
+func _cmd_center_on_cell(args: Dictionary) -> CommandRegistry.CommandResult:
+	var cell_name: String = args.get("cell_name", "")
+	if cell_name.is_empty():
+		return CommandRegistry.CommandResult.error("Cell name required")
+
+	# TODO: Actually teleport to interior cell
+	return CommandRegistry.CommandResult.ok("Would teleport to: %s" % cell_name)
+
+
+## Console command: Center on exterior cell
+func _cmd_center_on_exterior(args: Dictionary) -> CommandRegistry.CommandResult:
+	var x: int = args.get("x", 0)
+	var y: int = args.get("y", 0)
+
+	_teleport_to_cell(x, y)
+	return CommandRegistry.CommandResult.ok("Teleported to cell (%d, %d)" % [x, y])
+
+
+## Toggle between fly camera and player controller
+func _toggle_camera_mode() -> void:
+	if _camera_mode == CameraMode.FLY_CAMERA:
+		_switch_to_player_controller()
+	else:
+		_switch_to_fly_camera()
+
+
+## Switch to player controller mode
+func _switch_to_player_controller() -> void:
+	if not player_controller or not fly_camera:
+		return
+
+	_camera_mode = CameraMode.PLAYER_CONTROLLER
+
+	# Get current fly camera position for teleport
+	var current_pos := fly_camera.global_position
+
+	# Calculate ground position (raycast down to find terrain)
+	var ground_y := _get_ground_height(current_pos)
+	var player_pos := Vector3(current_pos.x, ground_y, current_pos.z)
+
+	# Disable fly camera
+	fly_camera.disable()
+	fly_camera.current = false
+
+	# Enable and position player controller
+	player_controller.teleport_to(player_pos)
+	player_controller.enable()
+
+	# Update camera reference for systems that need it
+	camera = player_controller.get_camera()
+
+	# Update tracked node for streaming
+	if world_streaming_manager:
+		world_streaming_manager.set_tracked_node(player_controller)
+
+	# Update ocean camera
+	if ocean_manager and ocean_manager.has_method("set_camera"):
+		ocean_manager.set_camera(camera)
+
+	# Update console camera for object picking
+	if console:
+		console.set_camera(camera)
+		console.register_context("camera", camera)
+
+	_log("[color=cyan]Switched to PLAYER mode[/color]")
+	_log("WASD to move, Space to jump, Shift to run")
+
+
+## Switch to fly camera mode
+func _switch_to_fly_camera() -> void:
+	if not player_controller or not fly_camera:
+		return
+
+	_camera_mode = CameraMode.FLY_CAMERA
+
+	# Get player position
+	var player_camera_pos: Vector3 = player_controller.get_camera_position()
+
+	# Disable player controller
+	player_controller.disable()
+
+	# Enable fly camera at player's camera position
+	fly_camera.position = player_camera_pos
+	fly_camera.enable()
+	fly_camera.current = true
+
+	# Update camera reference
+	camera = fly_camera
+
+	# Update tracked node for streaming
+	if world_streaming_manager:
+		world_streaming_manager.set_tracked_node(fly_camera)
+
+	# Update ocean camera
+	if ocean_manager and ocean_manager.has_method("set_camera"):
+		ocean_manager.set_camera(camera)
+
+	# Update console camera for object picking
+	if console:
+		console.set_camera(camera)
+		console.register_context("camera", camera)
+
+	_log("[color=cyan]Switched to FLY CAMERA mode[/color]")
+	_log("Hold Right-click to look, WASD to move")
+
+
+## Get ground height at a position using terrain data
+func _get_ground_height(pos: Vector3) -> float:
+	var height := 0.0
+
+	# Try to get height from Terrain3D
+	if terrain_3d and terrain_3d.data:
+		height = terrain_3d.data.get_height(pos)
+		if is_nan(height) or height > 10000 or height < -1000:
+			height = 0.0
+
+	return height
+
+
+## Get the currently active camera
+func _get_active_camera() -> Camera3D:
+	if _camera_mode == CameraMode.PLAYER_CONTROLLER and player_controller:
+		return player_controller.get_camera()
+	return fly_camera
+
+
 ## Update the preprocess status label
 func _update_preprocess_status() -> void:
 	if not preprocess_status:
@@ -358,9 +587,9 @@ func _setup_visibility_toggles() -> void:
 	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
 	toggle_container.add_child(_show_sky_toggle)
 
-	# Create fallback directional light for when Sky3D is disabled
-	# This ensures the scene is never completely dark
-	_setup_fallback_light()
+	# Create fallback environment and light for when Sky3D is disabled
+	# This provides a Godot default-like sky instead of black
+	_setup_fallback_environment()
 
 	# Create water quality dropdown
 	_water_quality_btn = OptionButton.new()
@@ -408,12 +637,67 @@ func _on_show_models_toggled(enabled: bool) -> void:
 func _on_show_ocean_toggled(enabled: bool) -> void:
 	_show_ocean = enabled
 
-	# Use local ocean_manager reference
-	if ocean_manager and ocean_manager.has_method("set_enabled"):
-		ocean_manager.set_enabled(enabled)
+	if enabled:
+		# Create ocean lazily on first enable
+		if not _ocean_initialized:
+			_create_ocean()
+
+		# Enable ocean
+		if ocean_manager and ocean_manager.has_method("set_enabled"):
+			ocean_manager.set_enabled(true)
+	else:
+		# Disable ocean (if it exists)
+		if ocean_manager and ocean_manager.has_method("set_enabled"):
+			ocean_manager.set_enabled(false)
 
 	_log("Ocean: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
+
+
+## Create ocean system lazily (only called on first toggle)
+func _create_ocean() -> void:
+	if _ocean_initialized:
+		return
+
+	_log("Initializing ocean system...")
+
+	if OceanManagerScript == null:
+		_log("[color=yellow]Warning: OceanManager script not found[/color]")
+		return
+
+	# Run hardware detection and log GPU info
+	HardwareDetection.detect()
+	_log("[b]GPU Detection:[/b] %s" % HardwareDetection.get_gpu_name())
+	if HardwareDetection.is_integrated_gpu():
+		_log("[color=yellow]Integrated GPU detected - using optimized water[/color]")
+	_log("Recommended water quality: %s" % HardwareDetection.quality_name(HardwareDetection.get_recommended_quality()))
+
+	# Create ocean manager
+	ocean_manager = OceanManagerScript.new()
+	ocean_manager.name = "OceanManager"
+
+	# Configure for Morrowind
+	ocean_manager.ocean_radius = 8000.0  # 8km radius
+	ocean_manager.sea_level = 0.0  # Sea level at Y=0 in Godot coords
+	ocean_manager.water_quality = -1  # Auto-detect quality based on hardware
+
+	# Add to scene
+	add_child(ocean_manager)
+
+	# Set camera for ocean to follow
+	var active_camera := _get_active_camera()
+	if active_camera:
+		ocean_manager.set_camera(active_camera)
+
+	# Set terrain reference if available (for shore mask)
+	if terrain_3d:
+		ocean_manager.set_terrain(terrain_3d)
+
+	# Start enabled
+	ocean_manager.set_enabled(true)
+
+	_ocean_initialized = true
+	_log("Ocean system initialized (quality: %s)" % ocean_manager.get_water_quality_name())
 
 
 ## Handle water quality change
@@ -434,48 +718,122 @@ func _on_water_quality_changed(index: int) -> void:
 func _on_show_sky_toggled(enabled: bool) -> void:
 	_show_sky = enabled
 
-	if sky_3d:
-		sky_3d.sky3d_enabled = enabled
+	if enabled:
+		# Create Sky3D lazily on first enable
+		if not _sky3d_initialized:
+			_create_sky3d()
 
-	# Toggle fallback light (inverse of sky state)
-	# When sky is ON, fallback light is OFF (Sky3D provides lighting)
-	# When sky is OFF, fallback light is ON (provides basic illumination)
-	if _fallback_light:
-		_fallback_light.visible = not enabled
+		# Enable Sky3D, remove fallback from tree (WorldEnvironment has no visible property)
+		if sky_3d:
+			sky_3d.sky3d_enabled = true
+		if _fallback_world_env and _fallback_world_env.is_inside_tree():
+			remove_child(_fallback_world_env)
+		if _fallback_light:
+			_fallback_light.visible = false
+	else:
+		# Disable Sky3D (if it exists), add fallback back to tree
+		if sky_3d:
+			sky_3d.sky3d_enabled = false
+		if _fallback_world_env and not _fallback_world_env.is_inside_tree():
+			add_child(_fallback_world_env)
+		if _fallback_light:
+			_fallback_light.visible = true
 
 	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
 
 
-## Setup fallback directional light for when Sky3D is disabled
-## This provides basic illumination so the scene isn't completely dark
-func _setup_fallback_light() -> void:
+## Create Sky3D node lazily (only called on first toggle)
+func _create_sky3d() -> void:
+	if _sky3d_initialized:
+		return
+
+	_log("Initializing Sky3D...")
+
+	# Load and instantiate Sky3D
+	var Sky3DScript = load("res://addons/sky_3d/src/Sky3D.gd")
+	sky_3d = WorldEnvironment.new()
+	sky_3d.set_script(Sky3DScript)
+	sky_3d.name = "Sky3D"
+
+	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
+	add_child(sky_3d)
+
+	# Configure AFTER adding to tree so _initialize() has run and environment exists
+	sky_3d.current_time = 12.0
+	sky_3d.ambient_energy = 0.5
+
+	# Start enabled
+	sky_3d.sky3d_enabled = true
+
+	_sky3d_initialized = true
+	_log("Sky3D initialized")
+
+
+## Setup fallback environment and light for when Sky3D is disabled
+## This provides a Godot default-like appearance instead of black sky
+func _setup_fallback_environment() -> void:
+	# Create fallback WorldEnvironment with procedural sky (like Godot's default)
+	_fallback_world_env = WorldEnvironment.new()
+	_fallback_world_env.name = "FallbackEnvironment"
+
+	# Create environment with procedural sky material (Godot's default look)
+	var env := Environment.new()
+	env.background_mode = Environment.BG_SKY
+
+	# Create procedural sky (similar to Godot's default new scene sky)
+	var sky := Sky.new()
+	var sky_material := ProceduralSkyMaterial.new()
+
+	# Configure for a pleasant daytime look (similar to Godot's default)
+	sky_material.sky_top_color = Color(0.385, 0.454, 0.55)  # Godot default blue
+	sky_material.sky_horizon_color = Color(0.646, 0.656, 0.67)
+	sky_material.ground_bottom_color = Color(0.2, 0.169, 0.133)
+	sky_material.ground_horizon_color = Color(0.646, 0.656, 0.67)
+	sky_material.sun_angle_max = 30.0
+	sky_material.sun_curve = 0.15
+
+	sky.sky_material = sky_material
+	env.sky = sky
+
+	# Ambient lighting from sky
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.ambient_light_sky_contribution = 1.0
+	env.ambient_light_energy = 1.0
+
+	# Reflected light from sky
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+
+	# Tonemapping (ACES for better contrast)
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.tonemap_exposure = 1.0
+	env.tonemap_white = 6.0
+
+	_fallback_world_env.environment = env
+	add_child(_fallback_world_env)
+
+	# Create fallback directional light
 	_fallback_light = DirectionalLight3D.new()
 	_fallback_light.name = "FallbackLight"
 
-	# Soft daylight-like settings
+	# Strong daylight settings (brighter than before)
 	_fallback_light.light_color = Color(1.0, 0.98, 0.95)  # Slightly warm white
-	_fallback_light.light_energy = 0.8
+	_fallback_light.light_energy = 1.2  # Stronger light
 	_fallback_light.shadow_enabled = true
 	_fallback_light.shadow_bias = 0.03
+	_fallback_light.directional_shadow_max_distance = 500.0
 
 	# Point downward at an angle (like midday sun)
 	_fallback_light.rotation_degrees = Vector3(-45, -30, 0)
-
-	# Start visible only if sky is disabled
-	_fallback_light.visible = not _show_sky
 
 	add_child(_fallback_light)
 
 
 ## Sync sky state with toggle on initialization
-## Call this after Sky3D is ready to ensure consistent state
+## Since Sky3D is lazily created, this just ensures fallback is in tree
 func _sync_sky_state() -> void:
-	if sky_3d:
-		# Force the sky state to match the toggle
-		sky_3d.sky3d_enabled = _show_sky
-
-	# Ensure fallback light matches
+	# Sky3D is not created yet (lazy init), so fallback should be in tree
+	# WorldEnvironment doesn't have visible property - it's controlled by being in tree
 	if _fallback_light:
 		_fallback_light.visible = not _show_sky
 
@@ -547,48 +905,6 @@ func _on_preprocess_pressed() -> void:
 	_update_preprocess_status()
 
 
-## Setup the ocean water system
-func _setup_ocean() -> void:
-	if OceanManagerScript == null:
-		_log("[color=yellow]Warning: OceanManager script not found[/color]")
-		return
-
-	# Run hardware detection and log GPU info
-	HardwareDetection.detect()
-	_log("[b]GPU Detection:[/b] %s" % HardwareDetection.get_gpu_name())
-	if HardwareDetection.is_integrated_gpu():
-		_log("[color=yellow]Integrated GPU detected - using optimized water[/color]")
-	_log("Recommended water quality: %s" % HardwareDetection.quality_name(HardwareDetection.get_recommended_quality()))
-
-	# Create ocean manager
-	ocean_manager = OceanManagerScript.new()
-	ocean_manager.name = "OceanManager"
-
-	# Configure for Morrowind
-	ocean_manager.ocean_radius = 8000.0  # 8km radius
-	ocean_manager.sea_level = 0.0  # Sea level at Y=0 in Godot coords
-	ocean_manager.water_quality = -1  # Auto-detect quality based on hardware
-
-	# Add to scene
-	add_child(ocean_manager)
-
-	# Set camera for ocean to follow
-	if camera:
-		ocean_manager.set_camera(camera)
-
-	# Set terrain reference if available (for shore mask)
-	if terrain_3d:
-		ocean_manager.set_terrain(terrain_3d)
-
-	# Start disabled by default (user can toggle on)
-	ocean_manager.set_enabled(_show_ocean)
-
-	_log("Ocean system initialized (default: %s, quality: %s)" % [
-		"ON" if _show_ocean else "OFF",
-		ocean_manager.get_water_quality_name()
-	])
-
-
 func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Create WorldStreamingManager
 	world_streaming_manager = Node3D.new()
@@ -646,6 +962,11 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	else:
 		_log("[color=cyan]Using on-the-fly terrain generation[/color]")
 
+	# Register world streaming manager with console
+	if console:
+		console.register_context("world", world_streaming_manager)
+		console.register_context("player", player_controller)
+
 
 func _on_terrain_region_loaded(region: Vector2i) -> void:
 	_log("Terrain generated: (%d, %d)" % [region.x, region.y])
@@ -690,8 +1011,15 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 		if is_nan(height) or height > 10000:
 			height = 50.0
 
-	camera.position = Vector3(world_x, height + 100.0, world_z + 50.0)
-	camera.look_at(Vector3(world_x, height, world_z))
+	# Teleport based on current camera mode
+	if _camera_mode == CameraMode.PLAYER_CONTROLLER and player_controller:
+		# Teleport player to ground level
+		player_controller.teleport_to(Vector3(world_x, height + 2.0, world_z))
+	elif fly_camera:
+		# Teleport fly camera above the cell
+		fly_camera.position = Vector3(world_x, height + 100.0, world_z + 50.0)
+		fly_camera.look_at(Vector3(world_x, height, world_z))
+
 	_log("Teleported to cell (%d, %d)" % [cell_x, cell_y])
 
 
@@ -728,6 +1056,8 @@ func _update_stats() -> void:
 	var async_pending: int = stats.get("async_pending", 0)
 	var inst_queue: int = stats.get("instantiation_queue", 0)
 
+	var camera_mode_str := "Fly" if _camera_mode == CameraMode.FLY_CAMERA else "Player"
+
 	stats_text.text = """[b]Performance[/b]
 FPS: %.1f (%.2f ms)
 P95: %.2f ms
@@ -749,9 +1079,10 @@ Models [M]: %s | Ocean [O]: %s | Sky [K]: %s
 Water quality: %s
 
 [b]Camera[/b]
+Mode [P]: %s
 Cell: (%d, %d)
 
-[color=gray]F3: Overlay | F4: Report | M/O/K: Toggle[/color]""" % [
+[color=gray]F3: Overlay | F4: Report | P: Toggle Camera[/color]""" % [
 		fps, frame_ms,
 		p95_ms,
 		draw_calls,
@@ -768,6 +1099,7 @@ Cell: (%d, %d)
 		"ON" if _show_ocean else "OFF",
 		"ON" if _show_sky else "OFF",
 		ocean_manager.get_water_quality_name() if ocean_manager else "N/A",
+		camera_mode_str,
 		stats.get("camera_cell", Vector2i(0, 0)).x,
 		stats.get("camera_cell", Vector2i(0, 0)).y,
 	]
@@ -798,25 +1130,15 @@ func _log(message: String) -> void:
 	print(message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
 
 
-# ==================== Camera Controls ====================
+# ==================== Input Handling ====================
 
 func _input(event: InputEvent) -> void:
-	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_RIGHT:
-			if event.pressed:
-				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-				mouse_captured = true
-			else:
-				Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
-				mouse_captured = false
-
-	if event is InputEventMouseMotion and mouse_captured:
-		camera.rotate_y(-event.relative.x * mouse_sensitivity)
-		camera.rotate_object_local(Vector3.RIGHT, -event.relative.y * mouse_sensitivity)
-
-	# Hotkeys
+	# Hotkeys (these work regardless of camera mode)
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
+			KEY_P:
+				# Toggle between fly camera and player controller
+				_toggle_camera_mode()
 			KEY_TAB:
 				# Toggle between World and Interior modes
 				_toggle_explorer_mode()
@@ -859,32 +1181,6 @@ func _process(delta: float) -> void:
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:
 		_update_stats()
-
-	if not mouse_captured:
-		return
-
-	# ZQSD movement (AZERTY layout)
-	var input_dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_Z):
-		input_dir.z -= 1
-	if Input.is_key_pressed(KEY_S):
-		input_dir.z += 1
-	if Input.is_key_pressed(KEY_Q):
-		input_dir.x -= 1
-	if Input.is_key_pressed(KEY_D):
-		input_dir.x += 1
-	if Input.is_key_pressed(KEY_SPACE):
-		input_dir.y += 1
-	if Input.is_key_pressed(KEY_SHIFT):
-		input_dir.y -= 1
-
-	var speed := camera_speed
-	if Input.is_key_pressed(KEY_CTRL):
-		speed *= 3.0
-
-	if input_dir != Vector3.ZERO:
-		var move_dir := camera.global_transform.basis * input_dir.normalized()
-		camera.position += move_dir * speed * delta
 
 
 ## Adjust view distance and update streaming manager
@@ -1189,11 +1485,14 @@ func _position_camera_for_interior_cell(cell: CellRecord) -> void:
 	if count > 0:
 		center /= count
 
-	# Position camera above center, looking down slightly
-	camera.position = center + Vector3(0, 300, 500)
-	camera.look_at(center)
+	# Position based on camera mode
+	if _camera_mode == CameraMode.PLAYER_CONTROLLER and player_controller:
+		player_controller.teleport_to(center + Vector3(0, 2, 0))
+	elif fly_camera:
+		fly_camera.position = center + Vector3(0, 300, 500)
+		fly_camera.look_at(center)
 
-	_log("Camera positioned at: %s" % camera.position)
+	_log("Camera positioned at: %s" % (player_controller.global_position if _camera_mode == CameraMode.PLAYER_CONTROLLER else fly_camera.position))
 
 
 ## Dump detailed profiling report to console and log

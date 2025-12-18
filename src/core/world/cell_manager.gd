@@ -193,6 +193,9 @@ func _instantiate_model_object(ref: CellReference, base_record, cell_grid: Vecto
 	# Apply transform
 	_apply_transform(instance, ref, true)
 
+	# Add metadata for console object picker
+	_apply_metadata(instance, ref, base_record, model_path)
+
 	return instance
 
 
@@ -276,6 +279,14 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 	# Apply transform to the container
 	_apply_transform(light_node, ref, false)
 
+	# Add metadata for console object picker
+	light_node.set_meta("form_id", light_record.record_id if "record_id" in light_record else str(ref.ref_id))
+	light_node.set_meta("record_type", "LIGH")
+	light_node.set_meta("model_path", light_record.model if not light_record.model.is_empty() else "")
+	light_node.set_meta("ref_id", str(ref.ref_id))
+	light_node.set_meta("ref_num", ref.ref_num)
+	light_node.set_meta("instance_id", ref.ref_num)
+
 	return light_node
 
 
@@ -312,6 +323,16 @@ func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) ->
 
 	# Apply transform
 	_apply_transform(instance, ref, true)
+
+	# Add metadata for console object picker
+	var record_type := "NPC_" if actor_type == "npc" else "CREA"
+	instance.set_meta("form_id", actor_record.record_id if "record_id" in actor_record else str(ref.ref_id))
+	instance.set_meta("record_type", record_type)
+	instance.set_meta("model_path", model_path)
+	instance.set_meta("ref_id", str(ref.ref_id))
+	instance.set_meta("ref_num", ref.ref_num)
+	instance.set_meta("instance_id", ref.ref_num)
+	instance.set_meta("actor_type", actor_type)
 
 	return instance
 
@@ -489,6 +510,62 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 	# After coordinate conversion (MW Z->Godot Y, MW Y->Godot -Z), XYZ becomes XZY in Godot
 	var godot_euler := CS.euler_to_godot(ref.rotation)
 	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_XZY)
+
+
+## Apply metadata to an object for console object picker identification
+func _apply_metadata(node: Node3D, ref: CellReference, base_record, model_path: String) -> void:
+	# Form ID / record ID
+	if "record_id" in base_record:
+		node.set_meta("form_id", base_record.record_id)
+
+	# Model path
+	if not model_path.is_empty():
+		node.set_meta("model_path", model_path)
+
+	# Reference info
+	node.set_meta("ref_id", str(ref.ref_id))
+	node.set_meta("ref_num", ref.ref_num)
+
+	# Record type - determine from base_record class
+	var record_type := "UNKNOWN"
+	var class_name_str: String = base_record.get_class() if base_record.has_method("get_class") else ""
+
+	# Use class name to determine type
+	if base_record is StaticRecord:
+		record_type = "STAT"
+	elif base_record is ActivatorRecord:
+		record_type = "ACTI"
+	elif base_record is ContainerRecord:
+		record_type = "CONT"
+	elif base_record is DoorRecord:
+		record_type = "DOOR"
+	elif base_record is LightRecord:
+		record_type = "LIGH"
+	elif base_record is NPCRecord:
+		record_type = "NPC_"
+	elif base_record is CreatureRecord:
+		record_type = "CREA"
+	elif base_record is MiscRecord:
+		record_type = "MISC"
+	elif base_record is WeaponRecord:
+		record_type = "WEAP"
+	elif base_record is ArmorRecord:
+		record_type = "ARMO"
+	elif base_record is ClothingRecord:
+		record_type = "CLOT"
+	elif base_record is BookRecord:
+		record_type = "BOOK"
+	elif base_record is IngredientRecord:
+		record_type = "INGR"
+	elif base_record is ApparatusRecord:
+		record_type = "APPA"
+	elif base_record is PotionRecord:
+		record_type = "ALCH"
+
+	node.set_meta("record_type", record_type)
+
+	# Instance ID (unique per cell)
+	node.set_meta("instance_id", ref.ref_num)
 
 
 ## Get the model path from a base record
@@ -1226,7 +1303,37 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	# Apply transform
+	# Check if this is a light record - needs OmniLight3D in addition to model
+	var record_type: Array = [""]
+	var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+	if base_record and record_type[0] == "light":
+		var light_record: LightRecord = base_record as LightRecord
+		if light_record:
+			# Wrap model in container and add light
+			var container := Node3D.new()
+			container.name = instance.name
+			instance.name = "Model"
+			container.add_child(instance)
+
+			# Create the actual light source (same logic as _instantiate_light)
+			if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
+				var omni := OmniLight3D.new()
+				omni.name = "Light"
+				omni.omni_range = light_record.radius * MW_LIGHT_SCALE
+				omni.light_color = light_record.color
+				if light_record.is_negative():
+					omni.light_negative = true
+				omni.light_energy = 1.0 if light_record.is_fire() else 0.8
+				omni.shadow_enabled = light_record.is_dynamic()
+				omni.omni_attenuation = 1.0
+				container.add_child(omni)
+				_stats["lights_created"] += 1
+
+			_apply_transform(container, ref, false)
+			_stats["objects_instantiated"] += 1
+			return container
+
+	# Apply transform for non-light objects
 	_apply_transform(instance, ref, true)
 
 	_stats["objects_instantiated"] += 1
