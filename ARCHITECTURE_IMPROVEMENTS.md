@@ -63,17 +63,20 @@ Three different terrain streaming implementations existed:
 
 ### 2.0 Progress Summary
 
-**Status:** Step 1 of 3 completed
+**Status:** Step 2 of 3 completed
 - ✅ **ModelLoader extracted** (153 lines) - COMPLETED
-- ⏳ ReferenceInstantiator (442 lines) - PLANNED
-- ⏳ MultiMeshBatcher (208 lines) - PLANNED
+- ✅ **ReferenceInstantiator extracted** (564 lines) - COMPLETED
+- ⏳ MultiMeshBatcher (208 lines) - OPTIONAL (may defer)
 
 **Metrics:**
-- CellManager: 1,602 → 1,545 lines (-57 lines)
-- New ModelLoader: +153 lines (properly documented)
-- Net: +96 lines (acceptable for better separation)
+- CellManager: 1,602 → 984 lines (-618 lines cumulative)
+- New ModelLoader: +153 lines (Phase 2.1)
+- New ReferenceInstantiator: +564 lines (Phase 2.2)
+- Net: +99 lines (acceptable for better separation and maintainability)
 
-**Commit:** `edcbf18` - "Refactor: Extract ModelLoader from CellManager (Phase 2, Step 1)"
+**Commits:**
+- Phase 2.1: `edcbf18` - "Refactor: Extract ModelLoader from CellManager"
+- Phase 2.2: (pending) - "Refactor: Extract ReferenceInstantiator from CellManager"
 
 ---
 
@@ -114,6 +117,90 @@ class ModelLoader extends RefCounted:
 **Files Changed:**
 - NEW: `src/core/world/model_loader.gd` (+153 lines)
 - MODIFIED: `src/core/world/cell_manager.gd` (-57 lines: 1,602 → 1,545)
+
+---
+
+## Phase 2.2: ReferenceInstantiator Extraction (COMPLETED ✅)
+
+**What Was Done:**
+Created `src/core/world/reference_instantiator.gd` (564 lines) to handle all object instantiation from ESM cell references.
+
+**Responsibilities Moved:**
+- Reference type dispatch (lights, NPCs, creatures, statics, leveled lists)
+- Light object creation (model + OmniLight3D)
+- Actor instantiation (NPCs and creatures with collision)
+- Static object instantiation via StaticObjectRenderer
+- Leveled creature list resolution
+- Transform application (position, rotation, scale conversion)
+- Metadata attachment (for console object picker)
+- Placeholder creation for missing models
+- Model path extraction from records
+
+**Public API:**
+```gdscript
+class ReferenceInstantiator extends RefCounted:
+    # Configuration (injected by CellManager)
+    var model_loader: RefCounted
+    var object_pool: RefCounted
+    var static_renderer: Node
+    var create_lights: bool
+    var load_npcs: bool
+    var load_creatures: bool
+
+    # Main instantiation method
+    func instantiate_reference(ref: CellReference, cell_grid: Vector2i) -> Node3D
+
+    # Statistics
+    func get_stats() -> Dictionary
+    func reset_stats() -> void
+```
+
+**Benefits Achieved:**
+- ✅ Single responsibility: ReferenceInstantiator does ONE thing (create objects from references)
+- ✅ Better testability: Can test instantiation logic independently of cell management
+- ✅ Clearer separation: Cell batching/streaming vs. individual object creation
+- ✅ Reduced CellManager complexity: 1,545 → 984 lines (-561 lines!)
+- ✅ Reusable: Can be used by async loading, preloading, or direct instantiation
+
+**CellManager Changes:**
+- Removed 13 instantiation-related methods (~600 lines)
+- Added `ReferenceInstantiator` as a dependency
+- Added `_sync_instantiator_config()` to pass configuration/dependencies
+- Updated `_instantiate_cell()` to use `_instantiator.instantiate_reference()`
+- Added thin wrapper methods for async code path (temporary, until Phase 3)
+- Merged instantiator stats in `get_stats()`
+
+**Files Changed:**
+- NEW: `src/core/world/reference_instantiator.gd` (+564 lines)
+- MODIFIED: `src/core/world/cell_manager.gd` (-561 net lines: 1,545 → 984)
+
+**Extracted Methods:**
+- `_instantiate_reference()` → `instantiate_reference()`
+- `_instantiate_model_object()` → `_instantiate_model_object()`
+- `_instantiate_static_object()` → `_instantiate_static_object()`
+- `_instantiate_light()` → `_instantiate_light()`
+- `_instantiate_actor()` → `_instantiate_actor()`
+- `_ensure_actor_collision()` → `_ensure_actor_collision()`
+- `_create_actor_placeholder()` → `_create_actor_placeholder()`
+- `_resolve_leveled_creature()` → `_resolve_leveled_creature()`
+- `_apply_transform()` → `_apply_transform()`
+- `_apply_metadata()` → `_apply_metadata()`
+- `_get_model_path()` → `_get_model_path()`
+- `_create_placeholder()` → `_create_placeholder()`
+- `_is_static_render_model()` → `_is_static_render_model()`
+
+**Statistics Tracking:**
+Instantiation stats moved to ReferenceInstantiator:
+- `objects_instantiated`
+- `objects_failed`
+- `objects_from_pool`
+- `lights_created`
+- `npcs_loaded`
+- `creatures_loaded`
+- `static_renderer_instances`
+
+CellManager retains only:
+- `multimesh_instances` (batching-specific)
 
 ---
 
@@ -290,16 +377,19 @@ const ClassName := preload("path/to/class_name.gd")
 ### Success Metrics
 
 **Question:** "How many things can we delete?"
-**Answer:** 238 lines removed in Phase 1, with potential for 700+ more in Phase 2-3
+**Answer:** 856 lines removed from god objects (Phase 1 + Phase 2.1 + Phase 2.2)
+- Phase 1: -238 lines (terrain streaming)
+- Phase 2.1: -57 lines (model loading)
+- Phase 2.2: -561 lines (reference instantiation)
 
 ### Industry Standards Achieved
 
-✅ **Separation of Concerns**: Terrain and object streaming are now separate
-✅ **Single Responsibility Principle**: Each class has one clear purpose
+✅ **Separation of Concerns**: Terrain, object streaming, and instantiation are now separate
+✅ **Single Responsibility Principle**: Each class has ONE clear purpose
 ✅ **DRY (Don't Repeat Yourself)**: Eliminated terrain streaming duplication
-⚠️ **Dependency Injection**: Partially achieved, more work needed
+✅ **Dependency Injection**: ReferenceInstantiator and ModelLoader use constructor injection
 ⚠️ **Interface Segregation**: WorldDataProvider interface is good, expand usage
-❌ **God Objects Eliminated**: CellManager still needs splitting
+✅ **God Objects Reduced**: CellManager reduced from 1,602 → 984 lines (39% reduction!)
 
 ---
 
@@ -350,20 +440,19 @@ const ClassName := preload("path/to/class_name.gd")
 
 **Phase 2 Progress:** (IN PROGRESS ⏳)
 - ✅ Extracted ModelLoader (153 lines) from CellManager
-- ✅ CellManager: 1,602 → 1,545 lines (-57 lines)
-- ⏳ Next: Extract ReferenceInstantiator (442 lines) - HIGH VALUE
-- ⏳ Next: Extract MultiMeshBatcher (208 lines) - OPTIONAL
+- ✅ Extracted ReferenceInstantiator (564 lines) from CellManager
+- ✅ CellManager: 1,602 → 984 lines (-618 lines cumulative)
+- ⏳ Next: Extract MultiMeshBatcher (208 lines) - OPTIONAL/DEFERRED
 
 **Total Impact So Far:**
-- Lines removed from god objects: -295 lines (238 + 57)
-- New focused classes created: 2 (GenericTerrainStreamer used, ModelLoader created)
-- Architecture violations fixed: 2 (terrain/object separation, model loading separation)
+- Lines removed from god objects: -856 lines (238 terrain + 618 cell manager)
+- New focused classes created: 3 (GenericTerrainStreamer, ModelLoader, ReferenceInstantiator)
+- Architecture violations fixed: 3 (terrain/object separation, model loading separation, instantiation separation)
 
 **Next Steps:**
-- Continue with ReferenceInstantiator extraction (biggest remaining win)
 - Test all changes with world_explorer.gd
-- Consider MultiMeshBatcher extraction
-- Update tests to use new classes
+- Consider MultiMeshBatcher extraction (lower priority - current batching code is clean)
+- Consider Phase 3 refactoring (async system unification, terrain provider base class)
 
 **Philosophy:**
 > "Everything is a special case of something simpler."
@@ -372,5 +461,5 @@ const ClassName := preload("path/to/class_name.gd")
 ---
 
 **Maintained by:** Claude (AI Assistant)
-**Last Updated:** 2025-12-18 (Phase 2, Step 1)
-**Status:** Phase 1 Complete ✅, Phase 2 In Progress (1/3 steps done)
+**Last Updated:** 2025-12-18 (Phase 2, Step 2)
+**Status:** Phase 1 Complete ✅, Phase 2 In Progress (2/3 steps done, Step 3 optional)
