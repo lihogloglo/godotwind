@@ -1,18 +1,23 @@
-## WorldStreamingManager - Unified world streaming coordinator
-## Coordinates terrain (Terrain3D) and object (OWDB) streaming together
+## WorldStreamingManager - Cell/Object streaming coordinator
 ##
-## This is the central controller for world content loading in Godotwind.
-## It provides a single point of control for both terrain and cell objects,
-## ensuring they load/unload together based on camera position.
+## **SIMPLIFIED ARCHITECTURE** - This now handles ONLY cell/object streaming.
+## For terrain, use GenericTerrainStreamer separately.
+##
+## This follows the simplification-cascades principle: "Terrain and objects
+## are separate concerns" - they should be independent streaming systems.
 ##
 ## Architecture:
-##   WorldStreamingManager
-##   ├── Terrain3D (handles terrain LOD/streaming natively)
+##   WorldStreamingManager (objects only)
 ##   ├── OpenWorldDatabase (handles object streaming via OWDB addon)
 ##   │   └── [Cell nodes parented here for automatic streaming]
 ##   └── OWDBPosition (tracks camera position for streaming)
 ##
-## Reference: ARCHITECTURE_SIMPLIFICATION_AUDIT.md Phase 2-3
+## For terrain streaming, use:
+##   GenericTerrainStreamer (terrain only)
+##   ├── Works with any WorldDataProvider (Morrowind, LaPalma, etc.)
+##   └── Handles Terrain3D population and streaming
+##
+## Reference: Simplification-cascades refactoring - Phase 1
 class_name WorldStreamingManager
 extends Node3D
 
@@ -28,9 +33,6 @@ signal cell_loaded(grid: Vector2i, node: Node3D)
 ## Emitted when a cell is unloaded
 signal cell_unloaded(grid: Vector2i)
 
-## Emitted when terrain region is loaded
-signal terrain_region_loaded(region: Vector2i)
-
 #region Configuration
 
 ## View distance in cells (radius around camera)
@@ -39,8 +41,8 @@ signal terrain_region_loaded(region: Vector2i)
 ## Whether to load objects (can disable for terrain-only view)
 @export var load_objects: bool = true
 
-## Whether to load terrain
-@export var load_terrain: bool = true
+## NOTE: Terrain streaming removed - use GenericTerrainStreamer separately
+## This manager now focuses ONLY on cell/object streaming
 
 ## OWDB chunk sizes optimized for Morrowind object scales (in Godot units)
 ## Small: candles, cups, books (~8 units)
@@ -75,9 +77,6 @@ signal terrain_region_loaded(region: Vector2i)
 
 #region Node References
 
-## Reference to Terrain3D node (optional - can work without terrain)
-var terrain_3d: Node = null  # Terrain3D type
-
 ## Reference to OpenWorldDatabase node (created automatically)
 var owdb: Node = null  # OpenWorldDatabase type
 
@@ -86,9 +85,6 @@ var owdb_position: Node3D = null  # OWDBPosition type
 
 ## Reference to CellManager for loading cell data
 var cell_manager: RefCounted = null  # CellManager
-
-## Reference to TerrainManager for terrain data
-var terrain_manager: RefCounted = null  # TerrainManager
 
 ## Reference to BackgroundProcessor for async operations
 var background_processor: Node = null  # BackgroundProcessor
@@ -132,7 +128,6 @@ var _stats_queue_high_water_mark: int = 0
 
 func _ready() -> void:
 	# Note: OWDB setup is deferred - call initialize() after setting properties
-	_find_terrain3d()
 	_debug("WorldStreamingManager ready - call initialize() to start streaming")
 
 
@@ -165,10 +160,6 @@ func _process(_delta: float) -> void:
 	if current_cell != _last_camera_cell:
 		_last_camera_cell = current_cell
 		_on_camera_cell_changed(current_cell)
-
-	# Process terrain generation queue with time budget
-	if load_terrain and not _terrain_generation_queue.is_empty():
-		_process_terrain_queue()
 
 	# Poll for completed async cell requests
 	_poll_async_completions()
@@ -277,22 +268,10 @@ func set_cell_manager(manager: RefCounted) -> void:
 	_debug("CellManager set")
 
 
-## Set the TerrainManager instance to use
-func set_terrain_manager(manager: RefCounted) -> void:
-	terrain_manager = manager
-	_debug("TerrainManager set")
-
-
 ## Set the BackgroundProcessor for async loading
 func set_background_processor(processor: Node) -> void:
 	background_processor = processor
 	_debug("BackgroundProcessor set")
-
-
-## Set the Terrain3D node reference
-func set_terrain_3d(terrain: Node) -> void:
-	terrain_3d = terrain
-	_debug("Terrain3D set: %s" % terrain.name if terrain else "null")
 
 
 ## Get statistics about loaded content
@@ -409,25 +388,6 @@ func _setup_occlusion_culling() -> void:
 	else:
 		_debug("StaticObjectRenderer created (CellManager not available)")
 
-
-## Find Terrain3D in the scene tree
-func _find_terrain3d() -> void:
-	# Look for Terrain3D as a sibling or child
-	var parent := get_parent()
-	if parent:
-		for child in parent.get_children():
-			if child.get_class() == "Terrain3D" or child.name == "Terrain3D":
-				terrain_3d = child
-				_debug("Found Terrain3D: %s" % child.name)
-				return
-
-	# Also check children
-	for child in get_children():
-		if child.get_class() == "Terrain3D" or child.name == "Terrain3D":
-			terrain_3d = child
-			_debug("Found Terrain3D (child): %s" % child.name)
-			return
-
 #endregion
 
 
@@ -438,10 +398,6 @@ func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 	_debug("Camera cell changed to: %s" % new_cell)
 
 	var visible_cells := _get_visible_cells(new_cell)
-
-	# Load terrain for visible cells (either from pre-processed data or generate on-the-fly)
-	if load_terrain:
-		_load_terrain_for_cells(visible_cells)
 
 	# Unload cells that are no longer visible
 	var cells_to_unload: Array[Vector2i] = []
@@ -768,200 +724,6 @@ func _get_cell_from_godot_position(godot_pos: Vector3) -> Vector2i:
 ## Convert cell grid to Godot world position (center of cell)
 func _cell_to_godot_position(grid: Vector2i) -> Vector3:
 	return CS.cell_grid_to_center_godot(grid)
-
-#endregion
-
-
-#region Terrain Integration
-
-## Whether to generate terrain on-the-fly if no preprocessed data exists
-@export var generate_terrain_on_fly: bool = true
-
-## Track which combined regions (4x4 cells each) have been generated
-var _terrain_generated_regions: Dictionary = {}
-
-## Priority queue of terrain regions to generate (sorted by distance)
-## Each entry: { "region": Vector2i, "priority": float }
-var _terrain_generation_queue: Array = []
-
-## Time budget for terrain generation per frame (ms)
-## Terrain can lag behind objects slightly - prioritize object visibility
-@export var terrain_generation_budget_ms: float = 2.0
-
-## Terrain view distance in regions (limits how far terrain generates)
-## Each region is 4x4 cells = ~468m, so 8 regions = ~3.7km
-@export var terrain_view_distance_regions: int = 8
-
-## Enable view frustum culling for terrain generation
-## When enabled, terrain behind the camera loads with lower priority
-@export var terrain_frustum_priority: bool = true
-
-## Load terrain regions for visible cells
-## Uses combined regions (4x4 cells per Terrain3D region) for large terrain support
-## This allows ~15km × 15km terrain coverage (128 cells per axis)
-func _load_terrain_for_cells(cells: Array[Vector2i]) -> void:
-	if not terrain_manager or not terrain_3d or not load_terrain:
-		return
-
-	if not generate_terrain_on_fly:
-		return
-
-	# Get camera position for priority calculation
-	var camera_cell := _last_camera_cell
-	var camera_region: Vector2i = terrain_manager.cell_to_region(camera_cell)
-
-	# Get camera forward direction for frustum priority
-	var camera_forward := Vector3.FORWARD
-	if _tracked_node and _tracked_node is Camera3D:
-		camera_forward = -(_tracked_node as Camera3D).global_transform.basis.z
-
-	# Collect unique regions that need loading
-	var regions_to_queue: Dictionary = {}  # region_coord -> priority
-
-	for cell_grid in cells:
-		# Convert cell coordinate to combined region coordinate
-		var region_coord: Vector2i = terrain_manager.cell_to_region(cell_grid)
-
-		# Skip if already generated
-		if region_coord in _terrain_generated_regions:
-			continue
-
-		# Skip if already in queue (will update priority below)
-		var already_queued := false
-		for entry in _terrain_generation_queue:
-			if entry.region == region_coord:
-				already_queued = true
-				break
-		if already_queued:
-			continue
-
-		# Check if terrain region already exists at this location
-		if _terrain_region_exists(region_coord):
-			_terrain_generated_regions[region_coord] = true
-			continue
-
-		# Calculate distance from camera region
-		var dx: int = region_coord.x - camera_region.x
-		var dy: int = region_coord.y - camera_region.y
-		var distance := sqrt(dx * dx + dy * dy)
-
-		# Skip regions beyond view distance
-		if distance > terrain_view_distance_regions:
-			continue
-
-		# Calculate priority (lower = higher priority)
-		var priority := distance
-
-		# Apply frustum priority bonus for regions in front of camera
-		if terrain_frustum_priority and _tracked_node:
-			var region_dir := Vector3(dx, 0, -dy).normalized()
-			var dot := camera_forward.dot(region_dir)
-			# Regions behind camera get penalty (dot < 0)
-			# Regions in front get bonus (dot > 0)
-			priority -= dot * 2.0  # Bonus/penalty of up to 2 priority levels
-
-		regions_to_queue[region_coord] = priority
-
-	# Add to priority queue (sorted by priority)
-	for region_coord: Vector2i in regions_to_queue:
-		var priority: float = regions_to_queue[region_coord]
-		_queue_terrain_region(region_coord, priority)
-
-
-## Add a terrain region to the priority queue
-func _queue_terrain_region(region_coord: Vector2i, priority: float) -> void:
-	# Insert in sorted order (priority queue - lower priority value = higher priority)
-	var entry := { "region": region_coord, "priority": priority }
-
-	var inserted := false
-	for i in range(_terrain_generation_queue.size()):
-		if priority < _terrain_generation_queue[i].priority:
-			_terrain_generation_queue.insert(i, entry)
-			inserted = true
-			break
-
-	if not inserted:
-		_terrain_generation_queue.append(entry)
-
-	_debug("Queued terrain region: %s (priority %.2f)" % [region_coord, priority])
-
-
-## Check if a terrain region exists for the given combined region coordinate
-func _terrain_region_exists(region_coord: Vector2i) -> bool:
-	if not terrain_3d or not terrain_3d.data:
-		return false
-
-	# Calculate world position for this combined region
-	# Each cell is 64 vertices × vertex_spacing meters
-	# Each region is 4 cells × 64 vertices × vertex_spacing meters
-	var vertex_spacing: float = terrain_3d.get_vertex_spacing()
-	var cell_world_size: float = 64.0 * vertex_spacing
-	var region_world_size: float = 4.0 * cell_world_size  # CELLS_PER_REGION = 4
-
-	# Get the southwest cell of this region
-	var sw_cell: Vector2i = terrain_manager.region_to_sw_cell(region_coord)
-
-	# Position at the center of the region
-	var world_x: float = float(sw_cell.x) * cell_world_size + region_world_size * 0.5
-	var world_z: float = float(-sw_cell.y) * cell_world_size - region_world_size * 0.5
-
-	# Check if a region exists at this world position
-	var pos := Vector3(world_x, 0, world_z)
-	return terrain_3d.data.has_regionp(pos)
-
-
-## Generate terrain for a combined region (4x4 cells) on-the-fly
-func _generate_terrain_region(region_coord: Vector2i) -> bool:
-	if not terrain_manager or not terrain_3d:
-		return false
-
-	# Use the new combined region import method from TerrainManager
-	# Pass ESMManager.get_land as the callable to fetch LAND records
-	var get_land_func := func(cell_x: int, cell_y: int) -> LandRecord:
-		return ESMManager.get_land(cell_x, cell_y)
-
-	var success: bool = terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func)
-
-	# Mark as processed regardless of success (empty ocean regions are valid)
-	_terrain_generated_regions[region_coord] = true
-
-	if success:
-		terrain_region_loaded.emit(region_coord)
-		_debug("Generated combined terrain region: %s (4x4 cells)" % region_coord)
-
-	return success
-
-
-## Process terrain generation queue with time budgeting
-## Called every frame from _process() to generate terrain without blocking
-func _process_terrain_queue() -> void:
-	if _terrain_generation_queue.is_empty():
-		return
-
-	var start_time := Time.get_ticks_usec()
-	var budget_usec := terrain_generation_budget_ms * 1000.0
-
-	while not _terrain_generation_queue.is_empty():
-		# Check time budget
-		var elapsed := Time.get_ticks_usec() - start_time
-		if elapsed >= budget_usec:
-			break
-
-		var entry: Dictionary = _terrain_generation_queue.pop_front()
-		var region_coord: Vector2i = entry.region
-
-		# Skip if already generated (race condition check)
-		if region_coord in _terrain_generated_regions:
-			continue
-
-		_generate_terrain_region(region_coord)
-
-
-## Clear terrain generation cache (e.g., when switching areas)
-func clear_terrain_cache() -> void:
-	_terrain_generated_regions.clear()
-	_terrain_generation_queue.clear()
-	_debug("Terrain generation cache cleared")
 
 #endregion
 

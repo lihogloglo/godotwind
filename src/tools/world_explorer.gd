@@ -30,6 +30,8 @@ extends Node3D
 
 # Preload dependencies
 const WorldStreamingManagerScript := preload("res://src/core/world/world_streaming_manager.gd")
+const GenericTerrainStreamerScript := preload("res://src/core/world/generic_terrain_streamer.gd")
+const MorrowindDataProviderScript := preload("res://src/core/world/morrowind_data_provider.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
@@ -98,8 +100,10 @@ var _fallback_light: DirectionalLight3D = null
 @onready var interior_container: Node3D = $InteriorContainer if has_node("InteriorContainer") else null
 
 # Managers
-var world_streaming_manager: Node3D = null  # WorldStreamingManager
-var terrain_manager: RefCounted = null  # TerrainManager
+var world_streaming_manager: Node3D = null  # WorldStreamingManager (objects only)
+var terrain_streamer: Node = null  # GenericTerrainStreamer (terrain only)
+var terrain_data_provider: RefCounted = null  # MorrowindDataProvider
+var terrain_manager: RefCounted = null  # TerrainManager (kept for legacy compatibility)
 var texture_loader: RefCounted = null  # TerrainTextureLoader
 var cell_manager: RefCounted = null  # CellManager
 var profiler: RefCounted = null  # PerformanceProfiler
@@ -253,6 +257,8 @@ func _init_async() -> void:
 
 	# NOW start tracking the camera - terrain/cells will generate around Seyda Neen
 	world_streaming_manager.set_tracked_node(camera)
+	if terrain_streamer:
+		terrain_streamer.set_tracked_node(camera)
 
 
 func _check_preprocessed_terrain() -> void:
@@ -468,6 +474,8 @@ func _switch_to_player_controller() -> void:
 	# Update tracked node for streaming
 	if world_streaming_manager:
 		world_streaming_manager.set_tracked_node(player_controller)
+	if terrain_streamer:
+		terrain_streamer.set_tracked_node(player_controller)
 
 	# Update ocean camera
 	if ocean_manager and ocean_manager.has_method("set_camera"):
@@ -506,6 +514,8 @@ func _switch_to_fly_camera() -> void:
 	# Update tracked node for streaming
 	if world_streaming_manager:
 		world_streaming_manager.set_tracked_node(fly_camera)
+	if terrain_streamer:
+		terrain_streamer.set_tracked_node(fly_camera)
 
 	# Update ocean camera
 	if ocean_manager and ocean_manager.has_method("set_camera"):
@@ -906,7 +916,12 @@ func _on_preprocess_pressed() -> void:
 
 
 func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
-	# Create WorldStreamingManager
+	# ========== NEW SIMPLIFIED ARCHITECTURE ==========
+	# WorldStreamingManager: Objects ONLY
+	# GenericTerrainStreamer: Terrain ONLY
+	# =================================================
+
+	# Create WorldStreamingManager (objects only)
 	world_streaming_manager = Node3D.new()
 	world_streaming_manager.set_script(WorldStreamingManagerScript)
 	world_streaming_manager.name = "WorldStreamingManager"
@@ -916,13 +931,7 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
 	world_streaming_manager.debug_enabled = true
 
-	# WorldStreamingManager handles terrain with single Terrain3D
-	world_streaming_manager.load_terrain = true
-	# Enable on-the-fly terrain generation when no pre-processed data exists
-	world_streaming_manager.generate_terrain_on_fly = not _using_preprocessed
-
 	# OWDB configuration for Morrowind objects
-	# Use typed array to match the @export Array[float] type
 	var chunk_sizes: Array[float] = [8.0, 16.0, 64.0]
 	world_streaming_manager.owdb_chunk_sizes = chunk_sizes
 	world_streaming_manager.owdb_chunk_load_range = 3
@@ -934,27 +943,47 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	world_streaming_manager.cell_loaded.connect(_on_cell_loaded)
 	world_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
 
-	# Connect terrain generation signal for logging
-	if world_streaming_manager.has_signal("terrain_region_loaded"):
-		world_streaming_manager.terrain_region_loaded.connect(_on_terrain_region_loaded)
-
 	# Provide managers
 	world_streaming_manager.set_cell_manager(cell_manager)
-	world_streaming_manager.set_terrain_manager(terrain_manager)
-	world_streaming_manager.set_terrain_3d(terrain_3d)
 	if background_processor:
 		world_streaming_manager.set_background_processor(background_processor)
-
-	# Only start tracking if requested (allows teleporting BEFORE streaming starts)
-	if start_tracking:
-		world_streaming_manager.set_tracked_node(camera)
 
 	# Initialize after all configuration is set
 	world_streaming_manager.initialize()
 
-	# Preload common models in background (reduces delay when models are enabled)
-	# This happens async so it doesn't block initialization
+	# Preload common models in background
 	world_streaming_manager.preload_common_models(false)
+
+	# ========== TERRAIN STREAMING (SEPARATE) ==========
+	# Create terrain data provider
+	terrain_data_provider = MorrowindDataProviderScript.new()
+	var init_error := terrain_data_provider.initialize()
+	if init_error != OK:
+		push_warning("Failed to initialize MorrowindDataProvider: %s" % error_string(init_error))
+	else:
+		# Set terrain assets for texture mapping
+		if terrain_3d and terrain_3d.assets:
+			terrain_data_provider.set_terrain_assets(terrain_3d.assets)
+
+	# Create GenericTerrainStreamer (terrain only)
+	terrain_streamer = GenericTerrainStreamerScript.new()
+	terrain_streamer.name = "GenericTerrainStreamer"
+	terrain_streamer.view_distance_regions = 3  # Reduced for performance
+	terrain_streamer.debug_enabled = true
+	terrain_streamer.set_provider(terrain_data_provider)
+	terrain_streamer.set_terrain_3d(terrain_3d)
+	if background_processor:
+		terrain_streamer.set_background_processor(background_processor)
+
+	add_child(terrain_streamer)
+	terrain_streamer.terrain_region_loaded.connect(_on_terrain_region_loaded)
+
+	_log("[color=green]Simplified architecture: WorldStreamingManager (objects) + GenericTerrainStreamer (terrain)[/color]")
+
+	# Only start tracking if requested (allows teleporting BEFORE streaming starts)
+	if start_tracking:
+		world_streaming_manager.set_tracked_node(camera)
+		terrain_streamer.set_tracked_node(camera)
 
 	_log("WorldStreamingManager created and configured")
 	if _using_preprocessed:
