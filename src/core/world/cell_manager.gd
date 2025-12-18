@@ -10,13 +10,14 @@ extends RefCounted
 
 # Preload coordinate utilities
 const CS := preload("res://src/core/coordinate_system.gd")
+const ModelLoader := preload("res://src/core/world/model_loader.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 
-# Cache for loaded models to avoid re-parsing NIFs
-var _model_cache: Dictionary = {}  # model_path (lowercase) -> Node3D prototype
+# Model loader for NIF loading and caching
+var _model_loader: ModelLoader = ModelLoader.new()
 
 # Object pool for frequently used models
 var _object_pool: RefCounted = null  # ObjectPool
@@ -24,10 +25,8 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
-# Statistics
+# Statistics (model stats now in ModelLoader)
 var _stats: Dictionary = {
-	"models_loaded": 0,
-	"models_from_cache": 0,
 	"objects_instantiated": 0,
 	"objects_failed": 0,
 	"lights_created": 0,
@@ -795,54 +794,10 @@ func _get_model_path(record) -> String:
 
 
 ## Get or load a model prototype
+## Delegates to ModelLoader for loading and caching.
 ## item_id: Optional ESM record ID for collision shape library lookup
 func _get_model(model_path: String, item_id: String = "") -> Node3D:
-	var normalized := model_path.to_lower().replace("/", "\\")
-
-	# Cache key includes item_id since same model may need different collision for different items
-	var cache_key := normalized
-	if not item_id.is_empty():
-		cache_key = normalized + ":" + item_id.to_lower()
-
-	if cache_key in _model_cache:
-		_stats["models_from_cache"] += 1
-		return _model_cache[cache_key]
-
-	# Build the full path - ESM stores paths relative to meshes/
-	var full_path := model_path
-	if not model_path.to_lower().begins_with("meshes"):
-		full_path = "meshes\\" + model_path
-
-	# Try to load from BSA - check first to avoid error spam
-	var nif_data := PackedByteArray()
-	if BSAManager.has_file(full_path):
-		nif_data = BSAManager.extract_file(full_path)
-	elif BSAManager.has_file(model_path):
-		nif_data = BSAManager.extract_file(model_path)
-
-	if nif_data.is_empty():
-		# Only warn once per model, don't spam
-		if not cache_key in _model_cache:
-			push_warning("CellManager: Model not found in BSA: '%s' (tried meshes\\ prefix too)" % model_path)
-		_model_cache[cache_key] = null
-		return null
-
-	# Convert NIF to Godot scene with item_id for collision shape lookup
-	var converter := NIFConverter.new()
-	if not item_id.is_empty():
-		converter.collision_item_id = item_id
-	var node := converter.convert_buffer(nif_data, full_path)
-
-	if not node:
-		# Only warn once per failed model
-		if not cache_key in _model_cache:
-			push_warning("CellManager: Failed to convert NIF: '%s'" % full_path)
-		_model_cache[cache_key] = null
-		return null
-
-	_model_cache[cache_key] = node
-	_stats["models_loaded"] += 1
-	return node
+	return _model_loader.get_model(model_path, item_id)
 
 
 ## Create a placeholder for missing models
@@ -881,14 +836,8 @@ func cleanup_cell_static_instances(cell_grid: Vector2i) -> int:
 
 ## Clear the model cache
 func clear_cache() -> void:
-	for key in _model_cache:
-		var node = _model_cache[key]
-		if node and is_instance_valid(node):
-			node.queue_free()
-	_model_cache.clear()
+	_model_loader.clear_cache()
 	_stats = {
-		"models_loaded": 0,
-		"models_from_cache": 0,
 		"objects_instantiated": 0,
 		"objects_failed": 0,
 		"lights_created": 0,
@@ -901,7 +850,10 @@ func clear_cache() -> void:
 ## Get loading statistics
 func get_stats() -> Dictionary:
 	var stats := _stats.duplicate()
-	stats["cached_models"] = _model_cache.size()
+
+	# Merge model loader stats
+	var model_stats := _model_loader.get_stats()
+	stats.merge(model_stats)
 
 	# Add pool stats if available
 	if _object_pool and _object_pool.has_method("get_stats"):
@@ -975,8 +927,7 @@ func preload_common_models() -> int:
 
 	for model_path: String in common_models:
 		# Skip if already cached
-		var normalized := model_path.to_lower().replace("/", "\\")
-		if normalized in _model_cache:
+		if _model_loader.has_model(model_path):
 			continue
 
 		# Skip flora that will use StaticObjectRenderer instead
@@ -1026,8 +977,7 @@ func preload_common_models_async() -> void:
 
 	for model_path: String in common_models:
 		# Skip if already cached
-		var normalized := model_path.to_lower().replace("/", "\\")
-		if normalized in _model_cache:
+		if _model_loader.has_model(model_path):
 			continue
 
 		_preload_total += 1
@@ -1064,9 +1014,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 			var converter := NIFConverter.new()
 			var prototype := converter.convert_from_parsed(parse_result)
 			if prototype:
-				var cache_key := _get_cache_key(model_path, "")
-				_model_cache[cache_key] = prototype
-				_stats["models_loaded"] += 1
+				_model_loader.add_to_cache(model_path, prototype, "")
 				_preload_loaded += 1
 
 				# Register with pool
@@ -1355,10 +1303,8 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 		if "record_id" in base_record:
 			item_id = base_record.record_id
 
-		var cache_key := _get_cache_key(model_path, item_id)
-
 		# Check if already cached
-		if cache_key in _model_cache:
+		if _model_loader.has_model(model_path, item_id):
 			# Already have this model, queue reference for instantiation
 			_queue_instantiation(request.request_id, ref, model_path, item_id)
 			continue
@@ -1442,9 +1388,7 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 						var converter := NIFConverter.new()
 						var prototype := converter.convert_from_parsed(parse_result)
 						if prototype:
-							var cache_key := _get_cache_key(model_path, parse_result.item_id)
-							_model_cache[cache_key] = prototype
-							_stats["models_loaded"] += 1
+							_model_loader.add_to_cache(model_path, prototype, parse_result.item_id)
 						else:
 							# Conversion failed
 							parse_success = false
@@ -1512,11 +1456,10 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 			_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
 			return pooled
 
-	# Get from cache
-	if cache_key not in _model_cache or _model_cache[cache_key] == null:
+	# Get from cache (async system should have already cached this)
+	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
+	if not model_prototype:
 		return _create_placeholder(ref)
-
-	var model_prototype: Node3D = _model_cache[cache_key]
 
 	# Create instance
 	var instance: Node3D = model_prototype.duplicate()
