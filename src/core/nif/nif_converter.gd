@@ -1272,36 +1272,212 @@ func _find_particle_controller(controller_index: int) -> Defs.NiParticleSystemCo
 	return null
 
 
-## Apply particle modifiers (gravity, grow/fade, color) to the particle material
+## Apply particle modifiers (gravity, grow/fade, color, rotation, colliders) to the particle material
 func _apply_particle_modifiers(controller: Defs.NiParticleSystemController, material: ParticleProcessMaterial, node: GPUParticles3D) -> void:
 	# The controller has references to modifiers through extra data chain
 	# For now, look through all records for modifiers that might apply
 	for record in _reader.records:
 		if record is Defs.NiGravity:
-			var gravity := record as Defs.NiGravity
-			# Convert gravity direction and force
-			var gravity_dir: Vector3 = CS.vector_to_godot(gravity.direction, false)  # Direction, no scale
-			material.gravity = gravity_dir * gravity.force * CS.SCALE_FACTOR
+			_apply_gravity_modifier(record as Defs.NiGravity, material)
 		elif record is Defs.NiParticleGrowFade:
-			var grow_fade := record as Defs.NiParticleGrowFade
-			# Set up scale curve for grow/fade
-			if grow_fade.grow_time > 0 or grow_fade.fade_time > 0:
-				var curve := Curve.new()
-				var grow_t := grow_fade.grow_time / node.lifetime if node.lifetime > 0 else 0.0
-				var fade_t := 1.0 - (grow_fade.fade_time / node.lifetime if node.lifetime > 0 else 0.0)
+			_apply_grow_fade_modifier(record as Defs.NiParticleGrowFade, material, node)
+		elif record is Defs.NiParticleColorModifier:
+			_apply_color_modifier(record as Defs.NiParticleColorModifier, material, node)
+		elif record is Defs.NiParticleRotation:
+			_apply_rotation_modifier(record as Defs.NiParticleRotation, material)
+		elif record is Defs.NiPlanarCollider:
+			_apply_planar_collider(record as Defs.NiPlanarCollider, node)
+		elif record is Defs.NiSphericalCollider:
+			_apply_spherical_collider(record as Defs.NiSphericalCollider, node)
+		elif record is Defs.NiParticleBomb:
+			_apply_particle_bomb(record as Defs.NiParticleBomb, material, node)
 
-				curve.add_point(Vector2(0.0, 0.0))
-				if grow_t > 0:
-					curve.add_point(Vector2(grow_t, 1.0))
-				else:
-					curve.set_point_value(0, 1.0)
-				if fade_t < 1.0:
-					curve.add_point(Vector2(fade_t, 1.0))
-				curve.add_point(Vector2(1.0, 0.0))
 
-				var curve_tex := CurveTexture.new()
-				curve_tex.curve = curve
-				material.scale_curve = curve_tex
+## Apply NiGravity modifier to particle material
+func _apply_gravity_modifier(gravity: Defs.NiGravity, material: ParticleProcessMaterial) -> void:
+	var gravity_dir: Vector3 = CS.vector_to_godot(gravity.direction, false)  # Direction, no scale
+	material.gravity = gravity_dir * gravity.force * CS.SCALE_FACTOR
+
+
+## Apply NiParticleGrowFade modifier to particle material
+func _apply_grow_fade_modifier(grow_fade: Defs.NiParticleGrowFade, material: ParticleProcessMaterial, node: GPUParticles3D) -> void:
+	if grow_fade.grow_time > 0 or grow_fade.fade_time > 0:
+		var curve := Curve.new()
+		var grow_t := grow_fade.grow_time / node.lifetime if node.lifetime > 0 else 0.0
+		var fade_t := 1.0 - (grow_fade.fade_time / node.lifetime if node.lifetime > 0 else 0.0)
+
+		curve.add_point(Vector2(0.0, 0.0))
+		if grow_t > 0:
+			curve.add_point(Vector2(grow_t, 1.0))
+		else:
+			curve.set_point_value(0, 1.0)
+		if fade_t < 1.0:
+			curve.add_point(Vector2(fade_t, 1.0))
+		curve.add_point(Vector2(1.0, 0.0))
+
+		var curve_tex := CurveTexture.new()
+		curve_tex.curve = curve
+		material.scale_curve = curve_tex
+
+
+## Apply NiParticleColorModifier to particle material (color gradient over lifetime)
+func _apply_color_modifier(color_mod: Defs.NiParticleColorModifier, material: ParticleProcessMaterial, node: GPUParticles3D) -> void:
+	if color_mod.color_data_index < 0 or color_mod.color_data_index >= _reader.records.size():
+		return
+
+	var color_data = _reader.records[color_mod.color_data_index]
+	if not color_data is Defs.NiColorData:
+		return
+
+	var ni_color_data := color_data as Defs.NiColorData
+	if ni_color_data.keys.size() == 0:
+		return
+
+	# Find the time range of the keys
+	var min_time: float = ni_color_data.keys[0]["time"]
+	var max_time: float = ni_color_data.keys[-1]["time"]
+	var time_range := max_time - min_time
+
+	# If time range is zero or keys use absolute times greater than lifetime,
+	# normalize based on particle lifetime
+	if time_range <= 0.001:
+		time_range = node.lifetime if node.lifetime > 0 else 1.0
+		min_time = 0.0
+
+	# Build arrays for gradient
+	var offsets := PackedFloat32Array()
+	var colors := PackedColorArray()
+
+	for key in ni_color_data.keys:
+		var t: float = (key["time"] - min_time) / time_range if time_range > 0 else 0.0
+		t = clampf(t, 0.0, 1.0)
+		var color: Color = key["value"]
+		offsets.append(t)
+		colors.append(color)
+
+	# Create gradient with our data (this replaces the default points)
+	var gradient := Gradient.new()
+	gradient.offsets = offsets
+	gradient.colors = colors
+
+	var gradient_tex := GradientTexture1D.new()
+	gradient_tex.gradient = gradient
+	material.color_ramp = gradient_tex
+
+
+## Apply NiParticleRotation modifier to particle material (spinning particles)
+func _apply_rotation_modifier(rotation: Defs.NiParticleRotation, material: ParticleProcessMaterial) -> void:
+	# Convert rotation speed from radians/sec to degrees for Godot
+	var rotation_speed_deg := rad_to_deg(rotation.rotation_speed)
+
+	# Set angular velocity (Godot uses degrees)
+	material.angular_velocity_min = rotation_speed_deg
+	material.angular_velocity_max = rotation_speed_deg
+
+	# If random initial axis, add some randomness to the rotation
+	if rotation.random_initial_axis:
+		material.angular_velocity_min = -abs(rotation_speed_deg)
+		material.angular_velocity_max = abs(rotation_speed_deg)
+
+
+## Apply NiPlanarCollider to particle system
+## Note: Godot's GPUParticles3D doesn't have built-in collision, so we store metadata
+## and create a collision attractor that can approximate the behavior
+func _apply_planar_collider(collider: Defs.NiPlanarCollider, node: GPUParticles3D) -> void:
+	# Store collider info as metadata for potential runtime use
+	var plane_normal: Vector3 = CS.vector_to_godot(collider.plane_normal, false)
+	var plane_distance: float = collider.plane_distance * CS.SCALE_FACTOR
+
+	node.set_meta("particle_planar_collider", {
+		"normal": plane_normal,
+		"distance": plane_distance,
+		"bounce": collider.bounce
+	})
+
+	# Create a GPUParticlesCollisionSDF or GPUParticlesAttractorBox to approximate
+	# For now, we'll use an attractor to push particles away from the plane
+	# This is an approximation since Godot doesn't have exact plane colliders for GPU particles
+	var attractor := GPUParticlesAttractorBox3D.new()
+	attractor.name = "PlaneCollider"
+
+	# Position the attractor at the plane
+	attractor.position = plane_normal * plane_distance
+
+	# Make it a thin box aligned with the plane
+	# The attractor will push particles away when they get close
+	attractor.size = Vector3(100.0, 0.1, 100.0)  # Large thin plane
+
+	# Negative strength pushes particles away (bounce effect)
+	attractor.strength = -collider.bounce * 10.0
+
+	# Orient the box to align with the plane normal
+	if plane_normal != Vector3.UP and plane_normal != Vector3.DOWN:
+		attractor.look_at(attractor.position + plane_normal)
+
+	node.add_child(attractor)
+
+
+## Apply NiSphericalCollider to particle system
+func _apply_spherical_collider(collider: Defs.NiSphericalCollider, node: GPUParticles3D) -> void:
+	# Store collider info as metadata
+	var center: Vector3 = CS.vector_to_godot(collider.center)
+	var radius: float = collider.radius * CS.SCALE_FACTOR
+
+	node.set_meta("particle_spherical_collider", {
+		"center": center,
+		"radius": radius,
+		"bounce": collider.bounce
+	})
+
+	# Create a spherical attractor to approximate collision behavior
+	var attractor := GPUParticlesAttractorSphere3D.new()
+	attractor.name = "SphereCollider"
+	attractor.position = center
+	attractor.radius = radius
+
+	# Negative strength pushes particles away (bounce effect)
+	attractor.strength = -collider.bounce * 10.0
+
+	node.add_child(attractor)
+
+
+## Apply NiParticleBomb modifier (explosion/force effect)
+## This creates a radial or directional force that affects particles
+func _apply_particle_bomb(bomb: Defs.NiParticleBomb, material: ParticleProcessMaterial, node: GPUParticles3D) -> void:
+	# Store bomb info as metadata for potential runtime use
+	var position: Vector3 = CS.vector_to_godot(bomb.position)
+	var direction: Vector3 = CS.vector_to_godot(bomb.direction, false)
+
+	node.set_meta("particle_bomb", {
+		"position": position,
+		"direction": direction,
+		"decay": bomb.decay,
+		"duration": bomb.duration,
+		"delta_v": bomb.delta_v * CS.SCALE_FACTOR,
+		"start_time": bomb.start_time,
+		"decay_type": bomb.decay_type,
+		"symmetry_type": bomb.symmetry_type
+	})
+
+	# Create an attractor to simulate the bomb effect
+	# Symmetry type: 0=spherical, 1=cylindrical, 2=planar
+	match bomb.symmetry_type:
+		0:  # Spherical - use sphere attractor
+			var attractor := GPUParticlesAttractorSphere3D.new()
+			attractor.name = "ParticleBomb"
+			attractor.position = position
+			attractor.radius = bomb.delta_v * CS.SCALE_FACTOR * 10.0  # Estimate radius from force
+			attractor.strength = bomb.delta_v * CS.SCALE_FACTOR
+			node.add_child(attractor)
+		1, 2:  # Cylindrical or Planar - use box attractor aligned with direction
+			var attractor := GPUParticlesAttractorBox3D.new()
+			attractor.name = "ParticleBomb"
+			attractor.position = position
+			attractor.size = Vector3(10.0, 10.0, 10.0)  # Large area
+			attractor.strength = bomb.delta_v * CS.SCALE_FACTOR
+			if direction != Vector3.ZERO:
+				attractor.look_at(attractor.position + direction)
+			node.add_child(attractor)
 
 
 ## Get texture material for particles from NiTexturingProperty

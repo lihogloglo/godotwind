@@ -177,8 +177,10 @@ func _read_record(index: int) -> Defs.NIFRecord:
 		# Particles
 		Defs.RT_NI_AUTO_NORMAL_PARTICLES, Defs.RT_NI_ROTATE_PARTICLES, Defs.RT_NI_PARTICLES:
 			record = _read_ni_particles()
-		Defs.RT_NI_AUTO_NORMAL_PARTICLES_DATA, Defs.RT_NI_ROTATE_PARTICLES_DATA, Defs.RT_NI_PARTICLES_DATA:
+		Defs.RT_NI_AUTO_NORMAL_PARTICLES_DATA, Defs.RT_NI_PARTICLES_DATA:
 			record = _read_ni_particles_data()
+		Defs.RT_NI_ROTATE_PARTICLES_DATA:
+			record = _read_ni_rotating_particles_data()
 
 		# Properties
 		Defs.RT_NI_TEXTURING_PROPERTY:
@@ -304,10 +306,14 @@ func _read_record(index: int) -> Defs.NIFRecord:
 			record = _read_ni_planar_collider()
 		Defs.RT_NI_SPHERICAL_COLLIDER:
 			record = _read_ni_spherical_collider()
+		Defs.RT_NI_PARTICLE_BOMB:
+			record = _read_ni_particle_bomb()
 
 		# LOD Data
 		Defs.RT_NI_RANGE_LOD_DATA:
 			record = _read_ni_range_lod_data()
+		Defs.RT_NI_SCREEN_LOD_DATA:
+			record = _read_ni_screen_lod_data()
 
 		# Accumulators (just skip for now)
 		Defs.RT_NI_ALPHA_ACCUMULATOR, Defs.RT_NI_CLUSTER_ACCUMULATOR:
@@ -525,17 +531,15 @@ func _read_ni_tri_strips_data() -> Defs.NiTriStripsData:
 	for i in range(num_strips):
 		strip_lengths[i] = _read_u16()
 
-	# Has points flag
-	var has_points := _read_u8() != 0
-
-	# Strip indices
-	if has_points:
-		for i in range(num_strips):
-			var strip := PackedInt32Array()
-			strip.resize(strip_lengths[i])
-			for j in range(strip_lengths[i]):
-				strip[j] = _read_u16()
-			data.strips[i] = strip
+	# For Morrowind (version <= VER_OB_OLD), strips are always present
+	# The has_points flag only exists in newer versions
+	# Morrowind unconditionally reads all strips
+	for i in range(num_strips):
+		var strip := PackedInt32Array()
+		strip.resize(strip_lengths[i])
+		for j in range(strip_lengths[i]):
+			strip[j] = _read_u16()
+		data.strips[i] = strip
 
 	return data
 
@@ -548,13 +552,40 @@ func _read_ni_particles_data() -> Defs.NiParticlesData:
 	data.num_particles = _read_u16()
 	data.particle_radius = _read_float()
 	data.num_active = _read_u16()
-	data.has_sizes = _read_u8() != 0
+	data.has_sizes = _read_bool()  # Bool is 4 bytes for Morrowind
 	if data.has_sizes:
 		data.sizes.resize(data.num_vertices)
 		for i in range(data.num_vertices):
 			data.sizes[i] = _read_float()
 
 	return data
+
+
+## Read NiRotatingParticlesData - has additional rotation data
+func _read_ni_rotating_particles_data() -> Defs.NiParticlesData:
+	var data := Defs.NiParticlesData.new()
+	_read_ni_geometry_data(data)
+
+	# Base particle data (same as NiParticlesData)
+	data.num_particles = _read_u16()
+	data.particle_radius = _read_float()
+	data.num_active = _read_u16()
+	data.has_sizes = _read_bool()  # Bool is 4 bytes for Morrowind
+	if data.has_sizes:
+		data.sizes.resize(data.num_vertices)
+		for i in range(data.num_vertices):
+			data.sizes[i] = _read_float()
+
+	# NiRotatingParticlesData specific: rotations array
+	# For Morrowind (version <= 4.2.2.0), read has_rotations bool and rotation array
+	var has_rotations := _read_bool()  # Bool is 4 bytes for Morrowind
+	if has_rotations:
+		# Skip rotation quaternions (16 bytes each = 4 floats)
+		# We don't use these for Godot particles, but must read them to stay in sync
+		_skip(data.num_vertices * 16)
+
+	return data
+
 
 ## Read NiLinesData
 func _read_ni_lines_data() -> Defs.NiLinesData:
@@ -775,7 +806,7 @@ func _read_ni_stencil_property() -> Defs.NiStencilProperty:
 
 	# Morrowind version
 	prop.flags = _read_u16()
-	prop.enabled = _read_u8() != 0
+	prop.enabled = _read_u8() != 0  # Explicit uint8, not version-dependent bool
 	prop.test_function = _read_u32()
 	prop.stencil_ref = _read_u32()
 	prop.stencil_mask = _read_u32()
@@ -820,7 +851,7 @@ func _read_ni_source_texture() -> Defs.NiSourceTexture:
 	var tex := Defs.NiSourceTexture.new()
 	_read_ni_object_net(tex)
 
-	tex.is_external = _read_u8() != 0
+	tex.is_external = _read_u8() != 0  # Explicit byte field, not version-dependent bool
 	if tex.is_external:
 		tex.filename = _read_string()
 	else:
@@ -832,7 +863,7 @@ func _read_ni_source_texture() -> Defs.NiSourceTexture:
 	tex.alpha_format = _read_u32()
 
 	# Is static flag
-	tex.is_static = _read_u8() != 0
+	tex.is_static = _read_u8() != 0  # Explicit byte field, not version-dependent bool
 
 	return tex
 
@@ -1240,9 +1271,32 @@ func _read_ni_color_data() -> Defs.NiColorData:
 	var num_keys := _read_u32()
 	if num_keys > 0:
 		data.key_type = _read_u32()
-		data.keys = _read_key_group(num_keys, data.key_type, 4)
+		data.keys = _read_color_key_group(num_keys, data.key_type)
 
 	return data
+
+
+## Helper to read color animation key groups (separate from regular keys because colors are RGBA, not WXYZ quaternions)
+func _read_color_key_group(num_keys: int, key_type: int) -> Array:
+	var keys := []
+	for _i in range(num_keys):
+		var key := {}
+		key["time"] = _read_float()
+		key["value"] = _read_color4()
+
+		# Additional data based on key type
+		match key_type:
+			Defs.InterpolationType.QUADRATIC:
+				key["forward"] = _read_color4()
+				key["backward"] = _read_color4()
+			Defs.InterpolationType.TCB:
+				key["tension"] = _read_float()
+				key["continuity"] = _read_float()
+				key["bias"] = _read_float()
+
+		keys.append(key)
+
+	return keys
 
 ## Read NiPosData
 func _read_ni_pos_data() -> Defs.NiPosData:
@@ -1427,7 +1481,7 @@ func _read_ni_texture_effect() -> Defs.NiTextureEffect:
 	effect.texture_type = _read_u32()
 	effect.coord_gen_type = _read_u32()
 	effect.source_texture_index = _read_s32()
-	effect.clipping_plane_enable = _read_u8() != 0
+	effect.clipping_plane_enable = _read_bool()  # Bool is 4 bytes for Morrowind
 	effect.clipping_plane = Plane(_read_vector3(), _read_float())
 
 	# PS2 specific (skip) - version <= 10.2.0.0
@@ -1589,8 +1643,9 @@ func _read_ni_skin_partition() -> Defs.NiSkinPartition:
 ## Read NiGravity
 func _read_ni_gravity() -> Defs.NiGravity:
 	var gravity := Defs.NiGravity.new()
-	# Next modifier link
-	_skip(4)
+	# NiParticleModifier base: next link + controller link (for Morrowind version >= 3.3.0.13)
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
 	gravity.decay = _read_float()
 	gravity.force = _read_float()
 	gravity.gravity_type = _read_u32()
@@ -1601,8 +1656,9 @@ func _read_ni_gravity() -> Defs.NiGravity:
 ## Read NiParticleGrowFade
 func _read_ni_particle_grow_fade() -> Defs.NiParticleGrowFade:
 	var gf := Defs.NiParticleGrowFade.new()
-	# Next modifier link
-	_skip(4)
+	# NiParticleModifier base: next link + controller link
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
 	gf.grow_time = _read_float()
 	gf.fade_time = _read_float()
 	return gf
@@ -1610,17 +1666,19 @@ func _read_ni_particle_grow_fade() -> Defs.NiParticleGrowFade:
 ## Read NiParticleColorModifier
 func _read_ni_particle_color_modifier() -> Defs.NiParticleColorModifier:
 	var cm := Defs.NiParticleColorModifier.new()
-	# Next modifier link
-	_skip(4)
+	# NiParticleModifier base: next link + controller link
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
 	cm.color_data_index = _read_s32()
 	return cm
 
 ## Read NiParticleRotation
 func _read_ni_particle_rotation() -> Defs.NiParticleRotation:
 	var rot := Defs.NiParticleRotation.new()
-	# Next modifier link
-	_skip(4)
-	rot.random_initial_axis = _read_u8() != 0
+	# NiParticleModifier base: next link + controller link
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
+	rot.random_initial_axis = _read_u8() != 0  # Explicit uint8, not version-dependent bool
 	rot.initial_axis = _read_vector3()
 	rot.rotation_speed = _read_float()
 	return rot
@@ -1628,26 +1686,52 @@ func _read_ni_particle_rotation() -> Defs.NiParticleRotation:
 ## Read NiPlanarCollider
 func _read_ni_planar_collider() -> Defs.NiPlanarCollider:
 	var col := Defs.NiPlanarCollider.new()
-	# Next collider link
-	_skip(4)
+	# NiParticleModifier base: next link + controller link
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
+	# NiParticleCollider fields
 	col.bounce = _read_float()
-	# Spawn on collide flag, die on collide flag
-	_skip(2)
-	# Plane normal in world space
-	_skip(4 * 4)  # plane equation (4 floats)
+	# Note: spawn/die flags only exist for version >= 4.2.0.2, Morrowind is 4.0.0.2
+	# so we do NOT read them
+	# NiPlanarCollider specific fields
+	_skip(8)   # Extents (Vec2f - half-width, half-height)
+	_skip(12)  # Position (Vec3f)
+	_skip(12)  # X axis vector (Vec3f)
+	_skip(12)  # Y axis vector (Vec3f)
+	col.plane_normal = _read_vector3()
+	col.plane_distance = _read_float()
 	return col
 
 ## Read NiSphericalCollider
 func _read_ni_spherical_collider() -> Defs.NiSphericalCollider:
 	var col := Defs.NiSphericalCollider.new()
-	# Next collider link
-	_skip(4)
+	# NiParticleModifier base: next link + controller link
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
+	# NiParticleCollider fields
 	col.bounce = _read_float()
-	# Spawn on collide flag, die on collide flag
-	_skip(2)
+	# Note: spawn/die flags only exist for version >= 4.2.0.2, Morrowind is 4.0.0.2
+	# so we do NOT read them
+	# NiSphericalCollider specific fields
 	col.radius = _read_float()
 	col.center = _read_vector3()
 	return col
+
+## Read NiParticleBomb
+func _read_ni_particle_bomb() -> Defs.NiParticleBomb:
+	var bomb := Defs.NiParticleBomb.new()
+	# NiParticleModifier base: next link + controller link
+	_skip(4)  # Next modifier link
+	_skip(4)  # Controller link
+	bomb.decay = _read_float()
+	bomb.duration = _read_float()
+	bomb.delta_v = _read_float()
+	bomb.start_time = _read_float()
+	bomb.decay_type = _read_u32()
+	bomb.symmetry_type = _read_u32()
+	bomb.position = _read_vector3()
+	bomb.direction = _read_vector3()
+	return bomb
 
 # =============================================================================
 # OTHER READERS
@@ -1665,6 +1749,22 @@ func _read_ni_range_lod_data() -> Defs.NiRangeLODData:
 			"min_range": _read_float(),
 			"max_range": _read_float()
 		})
+
+	return data
+
+## Read NiScreenLODData
+func _read_ni_screen_lod_data() -> Defs.NiScreenLODData:
+	var data := Defs.NiScreenLODData.new()
+
+	data.bound_center = _read_vector3()
+	data.bound_radius = _read_float()
+	data.world_center = _read_vector3()
+	data.world_radius = _read_float()
+
+	var num_proportions := _read_u32()
+	data.proportions.resize(num_proportions)
+	for i in range(num_proportions):
+		data.proportions[i] = _read_float()
 
 	return data
 

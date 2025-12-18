@@ -7,7 +7,7 @@
 ##   lapalma_processed/
 ##     metadata.json       # World configuration and region list
 ##     regions/
-##       region_X_Y.raw    # 256x256 float32 heightmaps
+##       region_X_Y.raw    # 1024x1024 float32 heightmaps (region_size from metadata)
 class_name LaPalmaDataProvider
 extends "res://src/core/world/world_data_provider.gd"
 

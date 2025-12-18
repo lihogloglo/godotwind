@@ -700,6 +700,17 @@ class NiSphericalCollider extends NIFRecord:
 	var radius: float = 0.0
 	var center: Vector3 = Vector3.ZERO
 
+## NiParticleBomb - particle bomb/explosion force modifier
+class NiParticleBomb extends NIFRecord:
+	var decay: float = 0.0
+	var duration: float = 0.0
+	var delta_v: float = 0.0
+	var start_time: float = 0.0
+	var decay_type: int = 0  # 0=none, 1=linear, 2=exponential
+	var symmetry_type: int = 0  # 0=spherical, 1=cylindrical, 2=planar
+	var position: Vector3 = Vector3.ZERO
+	var direction: Vector3 = Vector3.UP
+
 ## NiSkinInstance - skinning instance
 class NiSkinInstance extends NIFRecord:
 	var data_index: int = -1
@@ -716,6 +727,14 @@ class NiSkinData extends NIFRecord:
 class NiRangeLODData extends NIFRecord:
 	var lod_center: Vector3 = Vector3.ZERO
 	var lod_levels: Array = []  # Array of {min_range: float, max_range: float}
+
+## NiScreenLODData - screen-space LOD data
+class NiScreenLODData extends NIFRecord:
+	var bound_center: Vector3 = Vector3.ZERO
+	var bound_radius: float = 0.0
+	var world_center: Vector3 = Vector3.ZERO
+	var world_radius: float = 0.0
+	var proportions: PackedFloat32Array = PackedFloat32Array()  # Screen proportions for LOD levels
 
 ## NiLODNode - LOD node
 class NiLODNode extends NiNode:

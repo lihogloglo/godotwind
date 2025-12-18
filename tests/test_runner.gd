@@ -24,6 +24,7 @@ func _init() -> void:
 	_run_test_suite("BSA Archive Tests", _test_bsa_archive)
 	_run_test_suite("NIF Model Tests", _test_nif_model)
 	_run_test_suite("NIF Collision Tests", _test_nif_collision)
+	_run_test_suite("NIF Particle Tests", _test_nif_particles)
 
 	# Print summary
 	_print_summary()
@@ -715,6 +716,217 @@ func _find_static_body(node: Node) -> StaticBody3D:
 		return node as StaticBody3D
 	for child in node.get_children():
 		var result: StaticBody3D = _find_static_body(child)
+		if result:
+			return result
+	return null
+
+
+func _test_nif_particles() -> void:
+	# Test NIF particle system support
+	var defs_script: GDScript = load("res://src/core/nif/nif_defs.gd")
+	_assert_not_null(defs_script, "NIFDefs script loads")
+
+	if defs_script == null:
+		return
+
+	# Test particle-related class instantiation
+	var particles := defs_script.NiParticles.new()
+	_assert_not_null(particles, "NiParticles class instantiates")
+
+	var particles_data := defs_script.NiParticlesData.new()
+	_assert_not_null(particles_data, "NiParticlesData class instantiates")
+
+	var controller := defs_script.NiParticleSystemController.new()
+	_assert_not_null(controller, "NiParticleSystemController class instantiates")
+	_assert_eq(controller.lifetime, 0.0, "Controller default lifetime is 0")
+	_assert_eq(controller.birth_rate, 0.0, "Controller default birth_rate is 0")
+
+	var gravity := defs_script.NiGravity.new()
+	_assert_not_null(gravity, "NiGravity class instantiates")
+	_assert_eq(gravity.direction, Vector3.DOWN, "Gravity default direction is DOWN")
+
+	var grow_fade := defs_script.NiParticleGrowFade.new()
+	_assert_not_null(grow_fade, "NiParticleGrowFade class instantiates")
+	_assert_eq(grow_fade.grow_time, 0.0, "GrowFade default grow_time is 0")
+	_assert_eq(grow_fade.fade_time, 0.0, "GrowFade default fade_time is 0")
+
+	var color_mod := defs_script.NiParticleColorModifier.new()
+	_assert_not_null(color_mod, "NiParticleColorModifier class instantiates")
+	_assert_eq(color_mod.color_data_index, -1, "ColorModifier default index is -1")
+
+	var rotation := defs_script.NiParticleRotation.new()
+	_assert_not_null(rotation, "NiParticleRotation class instantiates")
+	_assert_eq(rotation.random_initial_axis, false, "Rotation default random_axis is false")
+	_assert_eq(rotation.rotation_speed, 0.0, "Rotation default speed is 0")
+
+	var planar_col := defs_script.NiPlanarCollider.new()
+	_assert_not_null(planar_col, "NiPlanarCollider class instantiates")
+	_assert_eq(planar_col.plane_normal, Vector3.UP, "PlanarCollider default normal is UP")
+
+	var spherical_col := defs_script.NiSphericalCollider.new()
+	_assert_not_null(spherical_col, "NiSphericalCollider class instantiates")
+	_assert_eq(spherical_col.radius, 0.0, "SphericalCollider default radius is 0")
+
+	var bomb := defs_script.NiParticleBomb.new()
+	_assert_not_null(bomb, "NiParticleBomb class instantiates")
+	_assert_eq(bomb.decay_type, 0, "ParticleBomb default decay_type is 0")
+	_assert_eq(bomb.symmetry_type, 0, "ParticleBomb default symmetry_type is 0")
+
+	var screen_lod := defs_script.NiScreenLODData.new()
+	_assert_not_null(screen_lod, "NiScreenLODData class instantiates")
+	_assert_eq(screen_lod.bound_radius, 0.0, "ScreenLODData default bound_radius is 0")
+
+	# Test NiColorData for particle color gradients
+	var color_data := defs_script.NiColorData.new()
+	_assert_not_null(color_data, "NiColorData class instantiates")
+	_assert_eq(color_data.keys.size(), 0, "ColorData starts with no keys")
+
+	# Test with actual BSA if available
+	var morrowind_bsa: String = _find_morrowind_bsa()
+	if morrowind_bsa.is_empty():
+		print("  SKIP: Morrowind.bsa not found - skipping particle integration tests")
+	else:
+		_test_particle_integration(morrowind_bsa)
+
+
+func _test_particle_integration(bsa_path: String) -> void:
+	print("  INFO: Testing NIF particle system with BSA: %s" % bsa_path)
+
+	var bsa_reader_script: GDScript = load("res://src/core/bsa/bsa_reader.gd")
+	var nif_reader_script: GDScript = load("res://src/core/nif/nif_reader.gd")
+	var nif_converter_script: GDScript = load("res://src/core/nif/nif_converter.gd")
+	var defs_script: GDScript = load("res://src/core/nif/nif_defs.gd")
+
+	var bsa: RefCounted = bsa_reader_script.new()
+	if bsa.open(bsa_path) != OK:
+		print("  SKIP: Failed to open BSA for particle test")
+		return
+
+	# Look for particle effect NIFs - common naming patterns in Morrowind
+	var particle_models: Array[String] = [
+		"meshes\\vfx\\vfx_ashstorm.nif",
+		"meshes\\vfx\\vfx_blightstorm.nif",
+		"meshes\\e\\vfx_firesmall01.nif",
+		"meshes\\e\\vfx_firebig01.nif",
+		"meshes\\e\\vfx_lightning01.nif",
+		"meshes\\vfx\\vfx_ghost.nif",
+		"meshes\\e\\vfx_mark.nif",
+		"meshes\\e\\vfx_recall.nif",
+	]
+
+	var nif_data: PackedByteArray
+	var model_path: String = ""
+	for path in particle_models:
+		if bsa.has_file(path):
+			nif_data = bsa.extract_file(path)
+			if not nif_data.is_empty():
+				model_path = path
+				break
+
+	if nif_data.is_empty():
+		# Try to find any file with "vfx" in the path
+		var vfx_files: Array = bsa.find_files("meshes\\*vfx*.nif")
+		if vfx_files.size() > 0:
+			model_path = vfx_files[0].name
+			nif_data = bsa.extract_file(model_path)
+
+	if nif_data.is_empty():
+		print("  SKIP: No particle effect NIFs found in BSA")
+		return
+
+	print("  INFO: Testing particle model: %s" % model_path)
+
+	# Parse NIF
+	var reader: RefCounted = nif_reader_script.new()
+	var result: Error = reader.load_buffer(nif_data)
+	_assert_eq(result, OK, "Particle NIF parses successfully")
+	if result != OK:
+		return
+
+	# Look for particle-related records
+	var has_particles := false
+	var has_controller := false
+	var has_gravity := false
+	var has_grow_fade := false
+	var has_color_mod := false
+	var has_rotation := false
+	var has_bomb := false
+
+	for record in reader.records:
+		match record.record_type:
+			"NiParticles", "NiAutoNormalParticles", "NiRotatingParticles":
+				has_particles = true
+			"NiParticleSystemController":
+				has_controller = true
+			"NiGravity":
+				has_gravity = true
+			"NiParticleGrowFade":
+				has_grow_fade = true
+			"NiParticleColorModifier":
+				has_color_mod = true
+			"NiParticleRotation":
+				has_rotation = true
+			"NiParticleBomb":
+				has_bomb = true
+
+	print("  INFO: Particle records found:")
+	print("    NiParticles: %s" % has_particles)
+	print("    NiParticleSystemController: %s" % has_controller)
+	print("    NiGravity: %s" % has_gravity)
+	print("    NiParticleGrowFade: %s" % has_grow_fade)
+	print("    NiParticleColorModifier: %s" % has_color_mod)
+	print("    NiParticleRotation: %s" % has_rotation)
+	print("    NiParticleBomb: %s" % has_bomb)
+
+	_assert(has_particles or has_controller, "Particle NIF has particle records")
+
+	# Test conversion to Godot scene
+	var converter: RefCounted = nif_converter_script.new()
+	var scene: Node3D = converter.convert_buffer(nif_data, model_path)
+	_assert_not_null(scene, "NIFConverter creates Node3D from particle NIF")
+
+	if scene:
+		print("  INFO: Created scene with %d children" % scene.get_child_count())
+
+		# Check for GPUParticles3D instances
+		var particle_count := _count_particles(scene)
+		if has_particles:
+			_assert(particle_count > 0, "Scene contains GPUParticles3D nodes")
+		print("  INFO: Scene has %d GPUParticles3D nodes" % particle_count)
+
+		# Check particle properties if we have particles
+		if particle_count > 0:
+			var particles_node: GPUParticles3D = _find_particles(scene)
+			if particles_node:
+				_assert_not_null(particles_node.process_material, "Particles have process material")
+				print("    Lifetime: %.2f" % particles_node.lifetime)
+				print("    Amount: %d" % particles_node.amount)
+
+				var mat: ParticleProcessMaterial = particles_node.process_material as ParticleProcessMaterial
+				if mat:
+					print("    Has color_ramp: %s" % (mat.color_ramp != null))
+					print("    Has scale_curve: %s" % (mat.scale_curve != null))
+					print("    Angular velocity: %.2f - %.2f" % [mat.angular_velocity_min, mat.angular_velocity_max])
+					print("    Gravity: %s" % mat.gravity)
+
+		# Clean up
+		scene.queue_free()
+
+
+func _count_particles(node: Node) -> int:
+	var count := 0
+	if node is GPUParticles3D:
+		count += 1
+	for child in node.get_children():
+		count += _count_particles(child)
+	return count
+
+
+func _find_particles(node: Node) -> GPUParticles3D:
+	if node is GPUParticles3D:
+		return node as GPUParticles3D
+	for child in node.get_children():
+		var result: GPUParticles3D = _find_particles(child)
 		if result:
 			return result
 	return null
