@@ -67,21 +67,35 @@ var debug_animations: bool = false
 var debug_collision: bool = false
 
 ## LOD Generation Settings
-## When enabled, generates simplified LOD meshes during conversion
-## DISABLED: Using Godot's native VisibilityRange for LOD instead
-var generate_lods: bool = false
+## When enabled, generates simplified LOD meshes during conversion using VisibilityRange
+var generate_lods: bool = true
 
-## Triangle ratio for LOD1 (0.5 = 50% of original triangles)
-var lod1_ratio: float = 0.5
+## Number of LOD levels to generate (excluding original LOD0)
+var lod_levels: int = 3
 
-## Triangle ratio for LOD2 (0.25 = 25% of original triangles)
-var lod2_ratio: float = 0.25
+## Triangle reduction ratios for each LOD level
+var lod_reduction_ratios: Array[float] = [0.75, 0.5, 0.25]
+
+## Distance thresholds for LOD switching (in meters)
+## LOD0 (full detail) visible from 0 to lod_distances[0]
+## LOD1 visible from lod_distances[0] to lod_distances[1], etc.
+var lod_distances: Array[float] = [20.0, 50.0, 150.0, 500.0]
+
+## Fade margin for LOD transitions (prevents popping)
+var lod_fade_margin: float = 5.0
 
 ## Minimum triangles to generate LODs (skip simple meshes)
 var min_triangles_for_lod: int = 100
 
 ## Debug mode for LOD generation
 var debug_lod: bool = false
+
+## Occlusion Culling Settings
+## When enabled, adds OccluderInstance3D to large buildings for better performance
+var generate_occluders: bool = true
+
+## Debug mode for occluder generation
+var debug_occluders: bool = false
 
 # Source path for auto collision mode detection
 var _source_path: String = ""
@@ -288,7 +302,116 @@ func _convert() -> Node3D:
 				root.set_meta("actor_collision_center", collision_result.bounding_box_center)
 				root.set_meta("actor_collision_extents", collision_result.bounding_box_extents)
 
+	# Post-process: Add LOD systems to appropriate meshes
+	if generate_lods and _should_generate_lods():
+		_add_lods_to_scene(root)
+
+	# Post-process: Add occluders to large buildings for occlusion culling
+	if generate_occluders and _should_generate_occluders():
+		_add_occluders_to_scene(root)
+
 	return root
+
+
+## Recursively traverse scene and add LOD systems to appropriate meshes
+func _add_lods_to_scene(node: Node) -> void:
+	# Process MeshInstance3D nodes
+	if node is MeshInstance3D:
+		var mesh_instance := node as MeshInstance3D
+		# Skip if already has LOD metadata (from old system) or is a skeleton
+		if not mesh_instance.has_meta("_has_skeleton") and mesh_instance.mesh != null:
+			var mesh := mesh_instance.mesh as ArrayMesh
+			if mesh:
+				_add_visibility_range_lods(mesh_instance, mesh)
+
+	# Recurse into children
+	for child in node.get_children():
+		_add_lods_to_scene(child)
+
+
+## Check if this NIF should generate occluders based on model path
+## Generates occluders for: large buildings, towers, cantons, manors
+func _should_generate_occluders() -> bool:
+	if _source_path.is_empty():
+		return false
+
+	var lower := _source_path.to_lower()
+
+	# Large exterior buildings
+	if "ex_" in lower:
+		# Towers, cantons, large manors
+		if "tower" in lower or "canton" in lower or "manor" in lower or "palace" in lower:
+			return true
+		# Large stronghold/fortress pieces
+		if "stronghold" in lower or "fortress" in lower:
+			return true
+		# Hlaalu, Redoran, Telvanni large structures
+		if ("hlaalu" in lower or "redoran" in lower or "telvanni" in lower) and "_l" in lower:
+			return true
+
+	# Large interior spaces
+	if "in_" in lower:
+		# Large hall/chamber pieces
+		if "hall" in lower or "chamber" in lower or "cavern" in lower:
+			return true
+
+	# Dwemer ruins (large pieces)
+	if "dwrv_" in lower:
+		if "hall" in lower or "tower" in lower or "building" in lower:
+			return true
+
+	return false
+
+
+## Recursively traverse scene and add occluders to large meshes
+func _add_occluders_to_scene(node: Node) -> void:
+	# Process MeshInstance3D nodes
+	if node is MeshInstance3D:
+		var mesh_instance := node as MeshInstance3D
+		if mesh_instance.mesh:
+			var mesh := mesh_instance.mesh as ArrayMesh
+			if mesh and mesh.get_surface_count() > 0:
+				_add_occluder_to_mesh(mesh_instance)
+
+	# Recurse into children
+	for child in node.get_children():
+		_add_occluders_to_scene(child)
+
+
+## Add an OccluderInstance3D to a MeshInstance3D based on its bounding box
+func _add_occluder_to_mesh(mesh_instance: MeshInstance3D) -> void:
+	var mesh := mesh_instance.mesh
+	if not mesh or mesh.get_surface_count() == 0:
+		return
+
+	# Calculate AABB (axis-aligned bounding box) for the mesh
+	var aabb: AABB = mesh.get_aabb()
+
+	# Only add occluders for large meshes (> 2m in any dimension)
+	var size := aabb.size
+	if size.x < 2.0 and size.y < 2.0 and size.z < 2.0:
+		return
+
+	# Create box occluder
+	var occluder := OccluderInstance3D.new()
+	occluder.name = "Occluder"
+
+	var box_occluder := BoxOccluder3D.new()
+	# Make occluder slightly smaller than mesh (90%) to avoid edge artifacts
+	box_occluder.size = size * 0.9
+
+	occluder.occluder = box_occluder
+	occluder.position = aabb.get_center()
+
+	# Add as sibling to mesh instance
+	var parent := mesh_instance.get_parent()
+	if parent:
+		parent.add_child(occluder)
+
+		if debug_occluders:
+			print("NIFConverter: Added occluder to '%s' (size: %v)" % [
+				_source_path.get_file(), size
+			])
 
 
 ## Recursively find skinned meshes and link them to the skeleton
@@ -460,12 +583,6 @@ func _convert_ni_tri_shape(shape: Defs.NiTriShape, skeleton: Skeleton3D = null) 
 	if mesh:
 		mesh_instance.mesh = mesh
 
-		# Generate LOD meshes for non-skinned meshes
-		if not is_skinned:
-			var lod_meshes := _generate_lod_meshes(mesh)
-			if not lod_meshes.is_empty():
-				mesh_instance.set_meta("lod_meshes", lod_meshes)
-
 		# Apply material from properties
 		var material := _get_material_for_shape(shape)
 		if material:
@@ -525,12 +642,6 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 	if mesh:
 		mesh_instance.mesh = mesh
 
-		# Generate LOD meshes for non-skinned meshes
-		if not is_skinned:
-			var lod_meshes := _generate_lod_meshes(mesh)
-			if not lod_meshes.is_empty():
-				mesh_instance.set_meta("lod_meshes", lod_meshes)
-
 		# Apply material from properties
 		var material := _get_material_for_shape(strips)
 		if material:
@@ -554,59 +665,138 @@ static func _convert_nif_vertices(vertices: PackedVector3Array) -> PackedVector3
 	return CS.vectors_to_godot(vertices)  # Converts to meters
 
 
-## Generate LOD meshes for a given mesh
-## Returns dictionary with "lod1" and "lod2" keys, or empty if LOD generation skipped
-func _generate_lod_meshes(mesh: ArrayMesh) -> Dictionary:
-	if not generate_lods or mesh == null:
-		return {}
+## Check if this NIF should generate LODs based on model path
+## Generates LODs for: buildings, trees, large rocks, and other complex static objects
+func _should_generate_lods() -> bool:
+	if _source_path.is_empty():
+		return false
 
-	if mesh.get_surface_count() == 0:
-		return {}
+	var lower := _source_path.to_lower()
 
-	var arrays := mesh.surface_get_arrays(0)
+	# Architecture (buildings, structures)
+	if "ex_" in lower or "in_" in lower:
+		return true
+
+	# Trees and large flora
+	if "flora_tree" in lower or "flora_plant" in lower:
+		return true
+
+	# Large rocks and terrain features
+	if "terrain_rock" in lower:
+		# Skip small rocks
+		if "small" in lower or "_rm_" in lower:
+			return false
+		return true
+
+	# Furniture and clutter (larger pieces)
+	if "furn_" in lower:
+		# Skip small items like plates, cups
+		if "de_p" in lower or "misc_" in lower:
+			return false
+		return true
+
+	# Containers (chests, crates, urns)
+	if "contain_" in lower:
+		return true
+
+	# Dwemer ruins and Daedric architecture
+	if "dwrv_" in lower or "dae_" in lower:
+		return true
+
+	return false
+
+
+## Add VisibilityRange-based LOD system to a MeshInstance3D
+## Creates LOD hierarchy by generating simplified meshes and wrapping them in visibility range nodes
+func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh) -> void:
+	if original_mesh.get_surface_count() == 0:
+		return
+
+	var arrays := original_mesh.surface_get_arrays(0)
 	if arrays.is_empty():
-		return {}
+		return
 
 	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
 	if indices == null or indices.is_empty():
-		return {}
+		return
 
 	var num_triangles: int = indices.size() / 3
 	if num_triangles < min_triangles_for_lod:
 		if debug_lod:
-			print("NIFConverter: Skipping LOD for mesh with %d triangles (min: %d)" % [num_triangles, min_triangles_for_lod])
-		return {}
+			print("NIFConverter: Skipping LOD for '%s' with %d triangles (min: %d)" % [
+				_source_path.get_file(), num_triangles, min_triangles_for_lod
+			])
+		return
+
+	# Set visibility range for LOD0 (original mesh)
+	mesh_instance.visibility_range_end = lod_distances[0]
+	mesh_instance.visibility_range_end_margin = lod_fade_margin
+	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+
+	if debug_lod:
+		print("NIFConverter: Generating %d LOD levels for '%s' (%d triangles)" % [
+			lod_levels, _source_path.get_file(), num_triangles
+		])
+
+	# Get material to apply to all LOD levels
+	var material := mesh_instance.material_override
 
 	var simplifier := MeshSimplifier.new()
-	var result := {}
+	var parent := mesh_instance.get_parent()
 
-	# Generate LOD1
-	var lod1_arrays := simplifier.simplify(arrays, lod1_ratio)
-	if not lod1_arrays.is_empty() and lod1_arrays[Mesh.ARRAY_VERTEX] != null:
-		var lod1_mesh := ArrayMesh.new()
-		lod1_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
-		lod1_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod1_arrays)
-		result["lod1"] = lod1_mesh
+	# Generate each LOD level
+	for lod_idx in range(lod_levels):
+		if lod_idx >= lod_reduction_ratios.size():
+			break
+
+		var reduction := lod_reduction_ratios[lod_idx]
+		var lod_arrays := simplifier.simplify(arrays, reduction)
+
+		if lod_arrays.is_empty() or lod_arrays[Mesh.ARRAY_VERTEX] == null:
+			if debug_lod:
+				print("  LOD%d: Failed to generate" % (lod_idx + 1))
+			continue
+
+		# Create LOD mesh
+		var lod_mesh := ArrayMesh.new()
+		lod_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
+		lod_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod_arrays)
+
+		# Create LOD mesh instance
+		var lod_instance := MeshInstance3D.new()
+		lod_instance.name = "%s_LOD%d" % [mesh_instance.name, lod_idx + 1]
+		lod_instance.mesh = lod_mesh
+		lod_instance.material_override = material
+
+		# Copy transform from original
+		lod_instance.transform = mesh_instance.transform
+
+		# Set visibility range
+		lod_instance.visibility_range_begin = lod_distances[lod_idx]
+		lod_instance.visibility_range_begin_margin = lod_fade_margin
+
+		if lod_idx + 1 < lod_distances.size():
+			lod_instance.visibility_range_end = lod_distances[lod_idx + 1]
+			lod_instance.visibility_range_end_margin = lod_fade_margin
+		else:
+			# Last LOD extends to infinity
+			lod_instance.visibility_range_end = 0.0
+			lod_instance.visibility_range_end_margin = 0.0
+
+		lod_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+
+		# Add as sibling to original mesh
+		if parent:
+			parent.add_child(lod_instance)
 
 		if debug_lod:
-			var lod1_indices: PackedInt32Array = lod1_arrays[Mesh.ARRAY_INDEX]
-			var lod1_tris: int = lod1_indices.size() / 3 if lod1_indices else 0
-			print("NIFConverter: LOD1 %d -> %d triangles (%.1f%%)" % [num_triangles, lod1_tris, 100.0 * lod1_tris / num_triangles])
-
-	# Generate LOD2
-	var lod2_arrays := simplifier.simplify(arrays, lod2_ratio)
-	if not lod2_arrays.is_empty() and lod2_arrays[Mesh.ARRAY_VERTEX] != null:
-		var lod2_mesh := ArrayMesh.new()
-		lod2_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
-		lod2_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod2_arrays)
-		result["lod2"] = lod2_mesh
-
-		if debug_lod:
-			var lod2_indices: PackedInt32Array = lod2_arrays[Mesh.ARRAY_INDEX]
-			var lod2_tris: int = lod2_indices.size() / 3 if lod2_indices else 0
-			print("NIFConverter: LOD2 %d -> %d triangles (%.1f%%)" % [num_triangles, lod2_tris, 100.0 * lod2_tris / num_triangles])
-
-	return result
+			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
+			var lod_tris: int = lod_indices.size() / 3 if lod_indices else 0
+			print("  LOD%d: %d -> %d triangles (%.1f%%), visible %gm-%gm" % [
+				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles,
+				lod_instance.visibility_range_begin,
+				lod_instance.visibility_range_end if lod_instance.visibility_range_end > 0 else INF
+			])
 
 
 ## Create ArrayMesh from NiTriShapeData
