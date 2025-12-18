@@ -90,6 +90,13 @@ var min_triangles_for_lod: int = 100
 ## Debug mode for LOD generation
 var debug_lod: bool = false
 
+## Occlusion Culling Settings
+## When enabled, adds OccluderInstance3D to large buildings for better performance
+var generate_occluders: bool = true
+
+## Debug mode for occluder generation
+var debug_occluders: bool = false
+
 # Source path for auto collision mode detection
 var _source_path: String = ""
 
@@ -299,6 +306,10 @@ func _convert() -> Node3D:
 	if generate_lods and _should_generate_lods():
 		_add_lods_to_scene(root)
 
+	# Post-process: Add occluders to large buildings for occlusion culling
+	if generate_occluders and _should_generate_occluders():
+		_add_occluders_to_scene(root)
+
 	return root
 
 
@@ -316,6 +327,91 @@ func _add_lods_to_scene(node: Node) -> void:
 	# Recurse into children
 	for child in node.get_children():
 		_add_lods_to_scene(child)
+
+
+## Check if this NIF should generate occluders based on model path
+## Generates occluders for: large buildings, towers, cantons, manors
+func _should_generate_occluders() -> bool:
+	if _source_path.is_empty():
+		return false
+
+	var lower := _source_path.to_lower()
+
+	# Large exterior buildings
+	if "ex_" in lower:
+		# Towers, cantons, large manors
+		if "tower" in lower or "canton" in lower or "manor" in lower or "palace" in lower:
+			return true
+		# Large stronghold/fortress pieces
+		if "stronghold" in lower or "fortress" in lower:
+			return true
+		# Hlaalu, Redoran, Telvanni large structures
+		if ("hlaalu" in lower or "redoran" in lower or "telvanni" in lower) and "_l" in lower:
+			return true
+
+	# Large interior spaces
+	if "in_" in lower:
+		# Large hall/chamber pieces
+		if "hall" in lower or "chamber" in lower or "cavern" in lower:
+			return true
+
+	# Dwemer ruins (large pieces)
+	if "dwrv_" in lower:
+		if "hall" in lower or "tower" in lower or "building" in lower:
+			return true
+
+	return false
+
+
+## Recursively traverse scene and add occluders to large meshes
+func _add_occluders_to_scene(node: Node) -> void:
+	# Process MeshInstance3D nodes
+	if node is MeshInstance3D:
+		var mesh_instance := node as MeshInstance3D
+		if mesh_instance.mesh:
+			var mesh := mesh_instance.mesh as ArrayMesh
+			if mesh and mesh.get_surface_count() > 0:
+				_add_occluder_to_mesh(mesh_instance)
+
+	# Recurse into children
+	for child in node.get_children():
+		_add_occluders_to_scene(child)
+
+
+## Add an OccluderInstance3D to a MeshInstance3D based on its bounding box
+func _add_occluder_to_mesh(mesh_instance: MeshInstance3D) -> void:
+	var mesh := mesh_instance.mesh
+	if not mesh or mesh.get_surface_count() == 0:
+		return
+
+	# Calculate AABB (axis-aligned bounding box) for the mesh
+	var aabb: AABB = mesh.get_aabb()
+
+	# Only add occluders for large meshes (> 2m in any dimension)
+	var size := aabb.size
+	if size.x < 2.0 and size.y < 2.0 and size.z < 2.0:
+		return
+
+	# Create box occluder
+	var occluder := OccluderInstance3D.new()
+	occluder.name = "Occluder"
+
+	var box_occluder := BoxOccluder3D.new()
+	# Make occluder slightly smaller than mesh (90%) to avoid edge artifacts
+	box_occluder.size = size * 0.9
+
+	occluder.occluder = box_occluder
+	occluder.position = aabb.get_center()
+
+	# Add as sibling to mesh instance
+	var parent := mesh_instance.get_parent()
+	if parent:
+		parent.add_child(occluder)
+
+		if debug_occluders:
+			print("NIFConverter: Added occluder to '%s' (size: %v)" % [
+				_source_path.get_file(), size
+			])
 
 
 ## Recursively find skinned meshes and link them to the skeleton

@@ -67,6 +67,10 @@ signal terrain_region_loaded(region: Vector2i)
 ## Enable async/time-budgeted cell loading
 @export var async_loading_enabled: bool = true
 
+## Enable occlusion culling (don't render objects behind other objects)
+## Significant performance boost in dense cities and interiors
+@export var occlusion_culling_enabled: bool = true
+
 #endregion
 
 #region Node References
@@ -139,6 +143,7 @@ func initialize() -> void:
 		return
 	_setup_owdb()
 	_setup_static_renderer()
+	_setup_occlusion_culling()
 	_initialized = true
 	_debug("WorldStreamingManager initialized")
 
@@ -381,6 +386,21 @@ func _setup_static_renderer() -> void:
 	static_renderer.set_script(renderer_class)
 	static_renderer.name = "StaticObjectRenderer"
 	add_child(static_renderer)
+
+
+## Enable occlusion culling for massive performance boost in cities/interiors
+func _setup_occlusion_culling() -> void:
+	if not occlusion_culling_enabled:
+		return
+
+	# Enable occlusion culling on the viewport
+	var viewport := get_viewport()
+	if viewport:
+		# Use RenderingServer to enable occlusion culling globally
+		RenderingServer.viewport_set_use_occlusion_culling(viewport.get_viewport_rid(), true)
+		_debug("Occlusion culling enabled - objects behind other objects won't render")
+	else:
+		push_warning("WorldStreamingManager: No viewport found, occlusion culling not enabled")
 
 	# Connect to cell_manager
 	if cell_manager and cell_manager.has_method("set_static_renderer"):
