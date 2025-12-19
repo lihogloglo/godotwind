@@ -10,7 +10,10 @@
 ##   WorldStreamingManager (objects only)
 ##   ├── OpenWorldDatabase (handles object streaming via OWDB addon)
 ##   │   └── [Cell nodes parented here for automatic streaming]
-##   └── OWDBPosition (tracks camera position for streaming)
+##   ├── OWDBPosition (tracks camera position for streaming)
+##   ├── DistanceTierManager (determines NEAR/MID/FAR/HORIZON tiers)
+##   ├── DistantStaticRenderer (merged meshes for MID tier, 500m-2km)
+##   └── ImpostorManager (impostors for FAR tier, 2km-5km)
 ##
 ## For terrain streaming, use:
 ##   GenericTerrainStreamer (terrain only)
@@ -18,11 +21,13 @@
 ##   └── Handles Terrain3D population and streaming
 ##
 ## Reference: Simplification-cascades refactoring - Phase 1
+## Extended: Distant rendering system (Phases 1-3)
 class_name WorldStreamingManager
 extends Node3D
 
 # Preload dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
+const DistanceTierManagerScript := preload("res://src/core/world/distance_tier_manager.gd")
 
 ## Emitted when a cell starts loading
 signal cell_loading(grid: Vector2i)
@@ -35,11 +40,19 @@ signal cell_unloaded(grid: Vector2i)
 
 #region Configuration
 
-## View distance in cells (radius around camera)
+## View distance in cells (radius around camera) - NEAR tier only
+## Extended tiers (MID/FAR/HORIZON) are managed by DistanceTierManager
 @export var view_distance_cells: int = 3
 
 ## Whether to load objects (can disable for terrain-only view)
 @export var load_objects: bool = true
+
+## Enable distant rendering (MID/FAR/HORIZON tiers beyond NEAR)
+## When disabled, only NEAR tier is used (original behavior ~351m)
+## WARNING: Distant rendering is currently EXPERIMENTAL and causes performance issues.
+## The system tries to load ~23,000 cells which overflows the queue.
+## Keep disabled until the tier system is properly rate-limited.
+@export var distant_rendering_enabled: bool = false
 
 ## NOTE: Terrain streaming removed - use GenericTerrainStreamer separately
 ## This manager now focuses ONLY on cell/object streaming
@@ -63,11 +76,16 @@ signal cell_unloaded(grid: Vector2i)
 ## This is for submitting async requests, should be low as actual parsing is async
 @export var cell_load_budget_ms: float = 2.0
 
-## Maximum cells to queue for loading
-@export var max_load_queue_size: int = 64
+## Maximum cells to queue for loading (NEAR tier uses queue, other tiers should NOT use queue)
+## If distant_rendering_enabled, this needs to be much larger, but that's experimental
+@export var max_load_queue_size: int = 128
 
 ## Enable async/time-budgeted cell loading
 @export var async_loading_enabled: bool = true
+
+## Maximum cell async requests to submit per frame
+## Industry standard: 1-2 per frame to avoid I/O saturation and queue flooding
+@export var max_cell_submits_per_frame: int = 2
 
 ## Enable occlusion culling (don't render objects behind other objects)
 ## Significant performance boost in dense cities and interiors
@@ -92,6 +110,15 @@ var background_processor: Node = null  # BackgroundProcessor
 ## Static object renderer for fast flora rendering
 var static_renderer: Node3D = null  # StaticObjectRenderer
 
+## Distance tier manager for multi-tier rendering
+var tier_manager: RefCounted = null  # DistanceTierManager
+
+## Distant static renderer for MID tier (merged meshes, 500m-2km)
+var distant_renderer: Node3D = null  # DistantStaticRenderer
+
+## Impostor manager for FAR tier (impostors, 2km-5km)
+var impostor_manager: Node = null  # ImpostorManager
+
 #endregion
 
 #region State
@@ -115,13 +142,27 @@ var _last_camera_cell: Vector2i = Vector2i(999999, 999999)
 var _initialized: bool = false
 
 ## Priority queue for cells to load (sorted by distance to camera)
-## Each entry: { "grid": Vector2i, "priority": float (lower = higher priority) }
+## Each entry: { "grid": Vector2i, "priority": float (lower = higher priority), "tier": Tier }
 var _load_queue: Array = []
+
+## Loaded cells by tier: Tier -> Dictionary[Vector2i -> variant]
+## NEAR tier stores Node3D, MID/FAR tiers store RID or instance data
+var _loaded_cells_by_tier: Dictionary = {}
+
+## Cells being loaded by tier: Tier -> Dictionary[Vector2i -> true]
+var _loading_cells_by_tier: Dictionary = {}
 
 ## Performance stats
 var _stats_load_time_ms: float = 0.0
 var _stats_cells_loaded_this_frame: int = 0
 var _stats_queue_high_water_mark: int = 0
+
+## Stats per tier
+var _stats_cells_per_tier: Dictionary = {}
+
+## Throttle for "queue full" debug messages (don't spam the log)
+var _queue_full_message_count: int = 0
+var _queue_full_message_throttle: int = 100  # Only print every N dropped cells
 
 #endregion
 
@@ -138,9 +179,11 @@ func initialize() -> void:
 		return
 	_setup_owdb()
 	_setup_static_renderer()
+	_setup_tier_manager()
+	_setup_distant_renderers()
 	_setup_occlusion_culling()
 	_initialized = true
-	_debug("WorldStreamingManager initialized")
+	_debug("WorldStreamingManager initialized (distant rendering: %s)" % ("enabled" if distant_rendering_enabled else "disabled"))
 
 
 ## Time budget for async object instantiation per frame (ms)
@@ -287,7 +330,18 @@ func get_stats() -> Dictionary:
 		"cells_loaded_this_frame": _stats_cells_loaded_this_frame,
 		"queue_high_water_mark": _stats_queue_high_water_mark,
 		"async_pending": _async_cell_requests.size(),
+		"distant_rendering_enabled": distant_rendering_enabled,
 	}
+
+	# Add tier-specific stats if distant rendering is enabled
+	if distant_rendering_enabled and tier_manager:
+		stats["cells_by_tier"] = {
+			"NEAR": _loaded_cells_by_tier.get(DistanceTierManagerScript.Tier.NEAR, {}).size(),
+			"MID": _loaded_cells_by_tier.get(DistanceTierManagerScript.Tier.MID, {}).size(),
+			"FAR": _loaded_cells_by_tier.get(DistanceTierManagerScript.Tier.FAR, {}).size(),
+			"HORIZON": _loaded_cells_by_tier.get(DistanceTierManagerScript.Tier.HORIZON, {}).size(),
+		}
+		stats["tier_distances"] = tier_manager.get_debug_info()
 
 	if owdb and owdb.has_method("get_currently_loaded_nodes"):
 		stats["owdb_loaded_nodes"] = owdb.get_currently_loaded_nodes()
@@ -388,6 +442,85 @@ func _setup_occlusion_culling() -> void:
 	else:
 		_debug("StaticObjectRenderer created (CellManager not available)")
 
+
+## Set up DistanceTierManager for multi-tier rendering
+func _setup_tier_manager() -> void:
+	tier_manager = DistanceTierManagerScript.new()
+	tier_manager.distant_rendering_enabled = distant_rendering_enabled
+
+	# Initialize tier tracking dictionaries
+	for tier in [
+		DistanceTierManagerScript.Tier.NEAR,
+		DistanceTierManagerScript.Tier.MID,
+		DistanceTierManagerScript.Tier.FAR,
+		DistanceTierManagerScript.Tier.HORIZON,
+	]:
+		_loaded_cells_by_tier[tier] = {}
+		_loading_cells_by_tier[tier] = {}
+		_stats_cells_per_tier[tier] = 0
+
+	_debug("DistanceTierManager created")
+
+
+## Set up distant renderers for MID/FAR tiers
+func _setup_distant_renderers() -> void:
+	if not distant_rendering_enabled:
+		_debug("Distant rendering disabled - skipping distant renderer setup")
+		return
+
+	# Try to load DistantStaticRenderer for MID tier
+	var distant_renderer_class = load("res://src/core/world/distant_static_renderer.gd")
+	if distant_renderer_class:
+		distant_renderer = Node3D.new()
+		distant_renderer.set_script(distant_renderer_class)
+		distant_renderer.name = "DistantStaticRenderer"
+		add_child(distant_renderer)
+
+		# Create and configure StaticMeshMerger
+		var merger_class = load("res://src/core/world/static_mesh_merger.gd")
+		if merger_class:
+			var mesh_merger = merger_class.new()
+
+			# Connect mesh simplifier if available
+			var simplifier_class = load("res://src/core/nif/mesh_simplifier.gd")
+			if simplifier_class:
+				mesh_merger.mesh_simplifier = simplifier_class.new()
+
+			# Connect model loader from cell_manager if available
+			if cell_manager and cell_manager.has_method("get_model_loader"):
+				mesh_merger.model_loader = cell_manager.get_model_loader()
+			elif cell_manager and "_model_loader" in cell_manager:
+				mesh_merger.model_loader = cell_manager._model_loader
+
+			distant_renderer.set_mesh_merger(mesh_merger)
+			distant_renderer.set_cell_manager(cell_manager)
+
+		_debug("DistantStaticRenderer created for MID tier (500m-2km)")
+
+	# Try to load ImpostorManager for FAR tier
+	var impostor_manager_class = load("res://src/core/world/impostor_manager.gd")
+	if impostor_manager_class:
+		impostor_manager = Node3D.new()
+		impostor_manager.set_script(impostor_manager_class)
+		impostor_manager.name = "ImpostorManager"
+		add_child(impostor_manager)
+
+		# Create and connect ImpostorCandidates
+		var candidates_class = load("res://src/core/world/impostor_candidates.gd")
+		if candidates_class:
+			var candidates = candidates_class.new()
+			impostor_manager.set_impostor_candidates(candidates)
+
+		_debug("ImpostorManager created for FAR tier (2km-5km)")
+
+
+## Configure tier manager for a specific world
+## Call this after initialize() if using a custom world data provider
+func configure_for_world(world_provider) -> void:
+	if tier_manager:
+		tier_manager.configure_for_world(world_provider)
+		_debug("Tier manager configured for world")
+
 #endregion
 
 
@@ -397,6 +530,15 @@ func _setup_occlusion_culling() -> void:
 func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 	_debug("Camera cell changed to: %s" % new_cell)
 
+	# Reset dropped cell counter for this update cycle
+	_queue_full_message_count = 0
+
+	# Use tiered loading if enabled and tier manager exists
+	if distant_rendering_enabled and tier_manager:
+		_on_camera_cell_changed_tiered(new_cell)
+		return
+
+	# Original behavior: NEAR tier only
 	var visible_cells := _get_visible_cells(new_cell)
 
 	# Unload cells that are no longer visible
@@ -434,6 +576,107 @@ func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 					_queue_cell_load(cell_grid, new_cell)
 				else:
 					_load_cell_internal(cell_grid)
+
+
+## Tiered camera cell change handler
+## Manages cells across all tiers (NEAR, MID, FAR, HORIZON)
+func _on_camera_cell_changed_tiered(new_cell: Vector2i) -> void:
+	# Get cells organized by tier
+	var cells_by_tier: Dictionary = tier_manager.get_visible_cells_by_tier(new_cell)
+
+	# Process each tier
+	for tier in cells_by_tier:
+		var visible_cells: Array = cells_by_tier[tier]
+		_update_tier_cells(tier, visible_cells, new_cell)
+
+	# Update stats
+	for tier in cells_by_tier:
+		_stats_cells_per_tier[tier] = _loaded_cells_by_tier[tier].size()
+
+
+## Update cells for a specific tier
+func _update_tier_cells(tier: int, visible_cells: Array, camera_cell: Vector2i) -> void:
+	var loaded_cells: Dictionary = _loaded_cells_by_tier[tier]
+	var loading_cells: Dictionary = _loading_cells_by_tier[tier]
+
+	# Build set for fast lookup
+	var visible_set := {}
+	for cell in visible_cells:
+		visible_set[cell] = true
+
+	# Unload cells that are no longer in this tier
+	var cells_to_unload: Array[Vector2i] = []
+	for cell_grid: Vector2i in loaded_cells.keys():
+		if cell_grid not in visible_set:
+			cells_to_unload.append(cell_grid)
+
+	for cell_grid in cells_to_unload:
+		_unload_cell_for_tier(tier, cell_grid)
+
+	# Remove from load queue if no longer needed in this tier
+	_load_queue = _load_queue.filter(func(entry):
+		return entry.get("tier", DistanceTierManagerScript.Tier.NEAR) != tier or entry.grid in visible_set
+	)
+
+	# Cancel async requests for cells no longer in view (NEAR tier only)
+	if tier == DistanceTierManagerScript.Tier.NEAR:
+		var requests_to_cancel: Array[int] = []
+		for request_id: int in _async_cell_requests:
+			var grid: Vector2i = _async_cell_requests[request_id]
+			if grid not in visible_set:
+				requests_to_cancel.append(request_id)
+
+		for request_id in requests_to_cancel:
+			var grid: Vector2i = _async_cell_requests[request_id]
+			if cell_manager:
+				cell_manager.cancel_async_request(request_id)
+			_async_cell_requests.erase(request_id)
+			loading_cells.erase(grid)
+			_loading_cells.erase(grid)  # Also update legacy tracking
+			_debug("Cancelled async request for out-of-tier cell: %s" % grid)
+
+	# Queue new visible cells for loading
+	if load_objects:
+		for cell_grid in visible_cells:
+			if cell_grid not in loaded_cells and cell_grid not in loading_cells:
+				_queue_cell_load_tiered(cell_grid, camera_cell, tier)
+
+
+## Unload a cell from a specific tier
+func _unload_cell_for_tier(tier: int, grid: Vector2i) -> void:
+	match tier:
+		DistanceTierManagerScript.Tier.NEAR:
+			_unload_cell_internal(grid)
+		DistanceTierManagerScript.Tier.MID:
+			_unload_mid_tier_cell(grid)
+		DistanceTierManagerScript.Tier.FAR:
+			_unload_far_tier_cell(grid)
+		DistanceTierManagerScript.Tier.HORIZON:
+			_unload_horizon_tier_cell(grid)
+
+	# Remove from tier tracking
+	_loaded_cells_by_tier[tier].erase(grid)
+	tier_manager.forget_cell(grid)
+
+
+## Unload MID tier cell (merged mesh)
+func _unload_mid_tier_cell(grid: Vector2i) -> void:
+	if distant_renderer and distant_renderer.has_method("remove_cell"):
+		distant_renderer.remove_cell(grid)
+		_debug("Unloaded MID tier cell: %s" % grid)
+
+
+## Unload FAR tier cell (impostors)
+func _unload_far_tier_cell(grid: Vector2i) -> void:
+	if impostor_manager and impostor_manager.has_method("remove_impostors_for_cell"):
+		impostor_manager.remove_impostors_for_cell(grid)
+		_debug("Unloaded FAR tier cell: %s" % grid)
+
+
+## Unload HORIZON tier cell (skybox layer - usually no-op)
+func _unload_horizon_tier_cell(_grid: Vector2i) -> void:
+	# HORIZON tier is typically static skybox, no per-cell unloading needed
+	pass
 
 
 ## Get list of cells that should be visible around a center cell
@@ -532,9 +775,11 @@ func _queue_cell_load(grid: Vector2i, camera_cell: Vector2i) -> void:
 		if entry.grid == grid:
 			return
 
-	# Check queue size limit
+	# Check queue size limit - throttle debug messages to prevent log spam
 	if _load_queue.size() >= max_load_queue_size:
-		_debug("Load queue full, dropping cell: %s" % grid)
+		_queue_full_message_count += 1
+		if _queue_full_message_count == 1 or _queue_full_message_count % _queue_full_message_throttle == 0:
+			_debug("Load queue full, dropped %d cells (latest: %s)" % [_queue_full_message_count, grid])
 		return
 
 	# Calculate base priority from distance (Manhattan distance)
@@ -583,9 +828,75 @@ func _queue_cell_load(grid: Vector2i, camera_cell: Vector2i) -> void:
 	cell_loading.emit(grid)
 
 
+## Add a cell to the priority load queue with tier information
+## Tier priority is factored in: NEAR loads before MID, MID before FAR
+func _queue_cell_load_tiered(grid: Vector2i, camera_cell: Vector2i, tier: int) -> void:
+	# Check if already in queue for this tier
+	for entry in _load_queue:
+		if entry.grid == grid and entry.get("tier", DistanceTierManagerScript.Tier.NEAR) == tier:
+			return
+
+	# Check queue size limit - throttle debug messages to prevent log spam
+	if _load_queue.size() >= max_load_queue_size:
+		_queue_full_message_count += 1
+		if _queue_full_message_count == 1 or _queue_full_message_count % _queue_full_message_throttle == 0:
+			_debug("Load queue full, dropped %d cells (latest: %s, tier %d)" % [_queue_full_message_count, grid, tier])
+		return
+
+	# Calculate base priority from distance (Manhattan distance)
+	var dx := grid.x - camera_cell.x
+	var dy := grid.y - camera_cell.y
+	var distance := absf(dx) + absf(dy)
+
+	# Start with tier priority (NEAR=0, MID=1000, FAR=2000)
+	# This ensures NEAR cells always load before MID, MID before FAR
+	var tier_priority_offset: int = tier_manager.get_tier_priority(tier)
+	tier_priority_offset = 100 - tier_priority_offset  # Invert so NEAR (100) becomes 0, MID (50) becomes 50, etc.
+	var priority: float = tier_priority_offset * 100 + distance
+
+	# Apply frustum priority: cells in front of camera load first (NEAR tier only)
+	if frustum_priority_enabled and _tracked_node and tier == DistanceTierManagerScript.Tier.NEAR:
+		var camera_forward := Vector3.FORWARD
+		if _tracked_node is Camera3D:
+			camera_forward = -(_tracked_node as Camera3D).global_transform.basis.z
+		elif _tracked_node.has_method("get_camera_3d"):
+			var cam: Camera3D = _tracked_node.get_camera_3d()
+			if cam:
+				camera_forward = -cam.global_transform.basis.z
+
+		var cell_dir := Vector3(dx, 0, -dy).normalized()
+		var dot := camera_forward.dot(cell_dir)
+		priority -= dot * 2.0
+
+	# Insert in sorted order (priority queue - lower = higher priority)
+	var entry_dict := { "grid": grid, "priority": priority, "tier": tier }
+	var inserted := false
+	for i in range(_load_queue.size()):
+		if priority < _load_queue[i].priority:
+			_load_queue.insert(i, entry_dict)
+			inserted = true
+			break
+
+	if not inserted:
+		_load_queue.append(entry_dict)
+
+	# Track high water mark
+	if _load_queue.size() > _stats_queue_high_water_mark:
+		_stats_queue_high_water_mark = _load_queue.size()
+
+	# Track in tier-specific loading dictionary
+	_loading_cells_by_tier[tier][grid] = true
+
+	# Also track in legacy dict for NEAR tier compatibility
+	if tier == DistanceTierManagerScript.Tier.NEAR:
+		_loading_cells[grid] = true
+		cell_loading.emit(grid)
+
+
 ## Process the load queue with time budgeting
 ## Called every frame to load cells without causing hitches
 ## Uses async loading when background processor is available
+## Industry standard: Throttle submissions to avoid I/O saturation
 func _process_load_queue() -> void:
 	if _load_queue.is_empty():
 		return
@@ -597,61 +908,162 @@ func _process_load_queue() -> void:
 	# Check if we can use async loading (background processor available)
 	var use_async := background_processor != null and cell_manager != null
 
+	# Track submissions this frame for throttling
+	var async_submits_this_frame := 0
+
 	while not _load_queue.is_empty():
 		# Check time budget
 		var elapsed := Time.get_ticks_usec() - start_time
 		if elapsed >= budget_usec:
 			break
 
+		# Throttle async submissions per frame to avoid queue flooding
+		if use_async and async_submits_this_frame >= max_cell_submits_per_frame:
+			break
+
 		# Pop highest priority cell (front of queue)
 		var entry: Dictionary = _load_queue.pop_front()
 		var grid: Vector2i = entry.grid
+		var tier: int = entry.get("tier", DistanceTierManagerScript.Tier.NEAR)
 
-		# Skip if already loaded (race condition prevention)
-		if grid in _loaded_cells:
-			_loading_cells.erase(grid)
-			continue
-
-		# Skip if already has pending async request
-		if grid in _async_cell_requests.values():
-			continue
-
-		if use_async:
-			# Submit async request - actual loading happens in background
-			var request_id: int = cell_manager.request_exterior_cell_async(grid.x, grid.y)
-			if request_id >= 0:
-				_async_cell_requests[request_id] = grid
-
-				# PROGRESSIVE LOADING: Add cell node to scene immediately
-				# Objects will appear as they're instantiated by process_async_instantiation
-				var cell_node: Node3D = cell_manager.get_async_cell_node(request_id)
-				if cell_node and not cell_node.is_inside_tree():
-					add_child(cell_node)
-					cell_node.set_meta("cell_grid", grid)
-					_loaded_cells[grid] = cell_node
-					_debug("Async cell added early for progressive loading: %s (id=%d)" % [grid, request_id])
-			else:
-				# Fallback to sync if async not available (e.g., cell not found)
-				_loading_cells.erase(grid)
-				_debug("Cell %s has no data (async returned -1)" % grid)
-		else:
-			# Fallback to sync loading (no background processor)
-			var cell_node: Node3D = cell_manager.load_exterior_cell(grid.x, grid.y)
-			_loading_cells.erase(grid)
-
-			if cell_node:
-				add_child(cell_node)
-				cell_node.set_meta("cell_grid", grid)
-
-				_loaded_cells[grid] = cell_node
-				cell_loaded.emit(grid, cell_node)
-				_stats_cells_loaded_this_frame += 1
-				_debug("Cell loaded (sync): %s with %d children" % [grid, cell_node.get_child_count()])
-			else:
-				_debug("Cell %s has no data (ocean/empty)" % grid)
+		# Route to tier-specific loader
+		match tier:
+			DistanceTierManagerScript.Tier.NEAR:
+				async_submits_this_frame += _process_near_tier_cell(grid, use_async)
+			DistanceTierManagerScript.Tier.MID:
+				_process_mid_tier_cell(grid)
+			DistanceTierManagerScript.Tier.FAR:
+				_process_far_tier_cell(grid)
+			DistanceTierManagerScript.Tier.HORIZON:
+				_process_horizon_tier_cell(grid)
 
 	# Update timing stats
 	_stats_load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
+
+
+## Process NEAR tier cell (full geometry)
+## Returns 1 if an async request was submitted, 0 otherwise
+func _process_near_tier_cell(grid: Vector2i, use_async: bool) -> int:
+	# Skip if already loaded (race condition prevention)
+	if grid in _loaded_cells:
+		_loading_cells.erase(grid)
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.NEAR].erase(grid)
+		return 0
+
+	# Skip if already has pending async request
+	if grid in _async_cell_requests.values():
+		return 0
+
+	if use_async:
+		# Submit async request - actual loading happens in background
+		var request_id: int = cell_manager.request_exterior_cell_async(grid.x, grid.y)
+		if request_id >= 0:
+			_async_cell_requests[request_id] = grid
+
+			# PROGRESSIVE LOADING: Add cell node to scene immediately
+			# Objects will appear as they're instantiated by process_async_instantiation
+			var cell_node: Node3D = cell_manager.get_async_cell_node(request_id)
+			if cell_node and not cell_node.is_inside_tree():
+				add_child(cell_node)
+				cell_node.set_meta("cell_grid", grid)
+				_loaded_cells[grid] = cell_node
+				_loaded_cells_by_tier[DistanceTierManagerScript.Tier.NEAR][grid] = cell_node
+				_debug("Async NEAR cell added for progressive loading: %s (id=%d)" % [grid, request_id])
+			return 1
+		else:
+			# Fallback to sync if async not available (e.g., cell not found)
+			_loading_cells.erase(grid)
+			_loading_cells_by_tier[DistanceTierManagerScript.Tier.NEAR].erase(grid)
+			_debug("NEAR cell %s has no data (async returned -1)" % grid)
+	else:
+		# Fallback to sync loading (no background processor)
+		var cell_node: Node3D = cell_manager.load_exterior_cell(grid.x, grid.y)
+		_loading_cells.erase(grid)
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.NEAR].erase(grid)
+
+		if cell_node:
+			add_child(cell_node)
+			cell_node.set_meta("cell_grid", grid)
+
+			_loaded_cells[grid] = cell_node
+			_loaded_cells_by_tier[DistanceTierManagerScript.Tier.NEAR][grid] = cell_node
+			cell_loaded.emit(grid, cell_node)
+			_stats_cells_loaded_this_frame += 1
+			_debug("NEAR cell loaded (sync): %s with %d children" % [grid, cell_node.get_child_count()])
+		else:
+			_debug("NEAR cell %s has no data (ocean/empty)" % grid)
+
+	return 0
+
+
+## Process MID tier cell (merged static geometry)
+func _process_mid_tier_cell(grid: Vector2i) -> void:
+	# Skip if already loaded
+	if grid in _loaded_cells_by_tier[DistanceTierManagerScript.Tier.MID]:
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.MID].erase(grid)
+		return
+
+	# Use DistantStaticRenderer if available
+	if distant_renderer and distant_renderer.has_method("add_cell"):
+		# Get cell references
+		var cell_record = ESMManager.get_exterior_cell(grid.x, grid.y)
+		if not cell_record:
+			# Cell doesn't exist - mark as "loaded" (empty)
+			_loading_cells_by_tier[DistanceTierManagerScript.Tier.MID].erase(grid)
+			_loaded_cells_by_tier[DistanceTierManagerScript.Tier.MID][grid] = true
+			return
+
+		# Add cell to distant renderer (creates merged mesh)
+		var success: bool = distant_renderer.add_cell(grid, cell_record.references)
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.MID].erase(grid)
+		_loaded_cells_by_tier[DistanceTierManagerScript.Tier.MID][grid] = true
+
+		if success:
+			_debug("MID tier cell loaded: %s (merged mesh)" % grid)
+		else:
+			_debug("MID tier cell loaded: %s (no mergeable objects)" % grid)
+	else:
+		# No distant renderer - skip this tier
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.MID].erase(grid)
+
+
+## Process FAR tier cell (impostors)
+func _process_far_tier_cell(grid: Vector2i) -> void:
+	# Skip if already loaded
+	if grid in _loaded_cells_by_tier[DistanceTierManagerScript.Tier.FAR]:
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.FAR].erase(grid)
+		return
+
+	# Use ImpostorManager if available
+	if impostor_manager and impostor_manager.has_method("add_cell_impostors"):
+		# Get cell references
+		var cell_record = ESMManager.get_exterior_cell(grid.x, grid.y)
+		if not cell_record:
+			# Cell doesn't exist - mark as "loaded" (empty)
+			_loading_cells_by_tier[DistanceTierManagerScript.Tier.FAR].erase(grid)
+			_loaded_cells_by_tier[DistanceTierManagerScript.Tier.FAR][grid] = true
+			return
+
+		# Add cell impostors (only for landmark objects)
+		var count: int = impostor_manager.add_cell_impostors(grid, cell_record.references)
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.FAR].erase(grid)
+		_loaded_cells_by_tier[DistanceTierManagerScript.Tier.FAR][grid] = true
+
+		if count > 0:
+			_debug("FAR tier cell loaded: %s (%d impostors)" % [grid, count])
+		else:
+			_debug("FAR tier cell loaded: %s (no impostors)" % grid)
+	else:
+		# No impostor manager - skip this tier
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.FAR].erase(grid)
+
+
+## Process HORIZON tier cell (skybox - usually no-op per cell)
+func _process_horizon_tier_cell(grid: Vector2i) -> void:
+	# HORIZON tier is typically handled by static skybox, not per-cell
+	# Just mark as "loaded" to prevent re-queueing
+	_loading_cells_by_tier[DistanceTierManagerScript.Tier.HORIZON].erase(grid)
+	_loaded_cells_by_tier[DistanceTierManagerScript.Tier.HORIZON][grid] = true
 
 
 ## Poll for completed async cell requests and integrate them

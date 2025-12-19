@@ -99,10 +99,12 @@ func _ready() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	# Toggle console with tilde key
-	if event is InputEventKey and event.pressed and event.keycode == TOGGLE_KEY:
-		toggle()
-		get_viewport().set_input_as_handled()
+	# Toggle console with tilde key (or ² on AZERTY keyboards)
+	if event is InputEventKey and event.pressed:
+		# KEY_QUOTELEFT is tilde on QWERTY, check physical key or unicode for AZERTY ²
+		if event.keycode == TOGGLE_KEY or event.physical_keycode == KEY_QUOTELEFT or event.unicode == 178:  # 178 = ²
+			toggle()
+			get_viewport().set_input_as_handled()
 
 
 ## Toggle console visibility
@@ -373,6 +375,18 @@ func _register_builtin_commands() -> void:
 	registry.register("vars", _cmd_vars, "List all variables", "system",
 		PackedStringArray(["variables"]))
 
+	# Distant rendering debug commands
+	registry.register("tier_debug", _cmd_tier_debug, "Show distance tier debug info", "debug",
+		PackedStringArray(["tiers"]),
+		[CommandRegistry.ParameterInfo.new("verbose", TYPE_STRING, "Show detailed cell info (on/off)", false, "off")])
+
+	registry.register("distant_toggle", _cmd_distant_toggle, "Toggle distant rendering on/off", "debug",
+		PackedStringArray(["distant", "far_render"]),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on/off/toggle", false, "toggle")])
+
+	registry.register("distant_stats", _cmd_distant_stats, "Show distant rendering statistics", "debug",
+		PackedStringArray(["far_stats"]))
+
 
 #endregion
 
@@ -563,5 +577,147 @@ func _cmd_vars(_args: Dictionary) -> CommandRegistry.CommandResult:
 		lines.append("  %s = %s" % [name, _variables[name]])
 
 	return CommandRegistry.CommandResult.ok("\n".join(lines))
+
+
+func _cmd_tier_debug(args: Dictionary) -> CommandRegistry.CommandResult:
+	var world = _context.get("world")
+	var verbose: String = args.get("verbose", "off")
+
+	if not world:
+		return CommandRegistry.CommandResult.error("No world streaming manager in context")
+
+	# Try to get tier manager from world
+	var tier_manager = null
+	if world.has_method("get_tier_manager"):
+		tier_manager = world.get_tier_manager()
+	elif "tier_manager" in world:
+		tier_manager = world.tier_manager
+
+	if not tier_manager:
+		return CommandRegistry.CommandResult.error("No distance tier manager found")
+
+	var lines: PackedStringArray = ["[b]Distance Tier Debug Info[/b]"]
+
+	# Get debug info from tier manager
+	if tier_manager.has_method("get_debug_info"):
+		var debug_info: Dictionary = tier_manager.get_debug_info()
+
+		lines.append("Distant rendering: %s" % ("enabled" if debug_info.get("enabled", false) else "disabled"))
+		lines.append("Max view distance: %.0fm" % debug_info.get("max_view_distance", 0))
+		lines.append("Cell size: %.1fm" % debug_info.get("cell_size_meters", 117))
+		lines.append("Tracked cells: %d" % debug_info.get("tracked_cells", 0))
+
+		lines.append("")
+		lines.append("[b]Tier Distances:[/b]")
+		var distances: Dictionary = debug_info.get("tier_distances", {})
+		for tier in distances:
+			var tier_name := _tier_to_string(tier)
+			lines.append("  %s: %.0fm" % [tier_name, distances[tier]])
+
+	# Show cell counts by tier if verbose
+	if verbose.to_lower() == "on":
+		lines.append("")
+		lines.append("[b]Cells by Tier:[/b]")
+
+		if tier_manager.has_method("get_tier_cell_counts"):
+			var camera = _context.get("camera")
+			if camera and camera is Camera3D:
+				# Get camera cell (would need coordinate system)
+				var counts: Dictionary = tier_manager.get_tier_cell_counts(Vector2i.ZERO)
+				for tier in counts:
+					var tier_name := _tier_to_string(tier)
+					lines.append("  %s: %d cells" % [tier_name, counts[tier]])
+
+	return CommandRegistry.CommandResult.ok("\n".join(lines))
+
+
+func _cmd_distant_toggle(args: Dictionary) -> CommandRegistry.CommandResult:
+	var world = _context.get("world")
+	var state: String = args.get("state", "toggle")
+
+	if not world:
+		return CommandRegistry.CommandResult.error("No world streaming manager in context")
+
+	# Try to get tier manager
+	var tier_manager = null
+	if world.has_method("get_tier_manager"):
+		tier_manager = world.get_tier_manager()
+	elif "tier_manager" in world:
+		tier_manager = world.tier_manager
+
+	if not tier_manager:
+		return CommandRegistry.CommandResult.error("No distance tier manager found")
+
+	# Determine new state
+	var new_enabled: bool
+	match state.to_lower():
+		"on", "true", "1", "enabled":
+			new_enabled = true
+		"off", "false", "0", "disabled":
+			new_enabled = false
+		_:  # toggle
+			new_enabled = not tier_manager.distant_rendering_enabled
+
+	# Apply state
+	tier_manager.distant_rendering_enabled = new_enabled
+
+	return CommandRegistry.CommandResult.ok("Distant rendering: %s" % ("enabled" if new_enabled else "disabled"))
+
+
+func _cmd_distant_stats(args: Dictionary) -> CommandRegistry.CommandResult:
+	var world = _context.get("world")
+
+	if not world:
+		return CommandRegistry.CommandResult.error("No world streaming manager in context")
+
+	var lines: PackedStringArray = ["[b]Distant Rendering Statistics[/b]"]
+
+	# Try to get distant static renderer
+	var distant_renderer = null
+	if world.has_method("get_distant_renderer"):
+		distant_renderer = world.get_distant_renderer()
+	elif "distant_renderer" in world:
+		distant_renderer = world.distant_renderer
+
+	if distant_renderer and distant_renderer.has_method("get_stats"):
+		var stats: Dictionary = distant_renderer.get_stats()
+		lines.append("")
+		lines.append("[color=cyan]MID Tier (Merged Meshes):[/color]")
+		lines.append("  Loaded cells: %d" % stats.get("loaded_cells", 0))
+		lines.append("  Visible cells: %d" % stats.get("visible_cells", 0))
+		lines.append("  Total vertices: %d" % stats.get("total_vertices", 0))
+		lines.append("  Total objects: %d" % stats.get("total_objects", 0))
+
+	# Try to get impostor manager
+	var impostor_manager = null
+	if world.has_method("get_impostor_manager"):
+		impostor_manager = world.get_impostor_manager()
+	elif "impostor_manager" in world:
+		impostor_manager = world.impostor_manager
+
+	if impostor_manager and impostor_manager.has_method("get_stats"):
+		var stats: Dictionary = impostor_manager.get_stats()
+		lines.append("")
+		lines.append("[color=yellow]FAR Tier (Impostors):[/color]")
+		lines.append("  Total impostors: %d" % stats.get("total_impostors", 0))
+		lines.append("  Visible impostors: %d" % stats.get("visible_impostors", 0))
+		lines.append("  Texture cache: %d" % stats.get("texture_cache_size", 0))
+		lines.append("  Cells with impostors: %d" % stats.get("cells_with_impostors", 0))
+
+	if lines.size() == 1:
+		lines.append("No distant rendering components found in world")
+
+	return CommandRegistry.CommandResult.ok("\n".join(lines))
+
+
+## Helper to convert tier enum to string
+func _tier_to_string(tier: int) -> String:
+	match tier:
+		0: return "NEAR"
+		1: return "MID"
+		2: return "FAR"
+		3: return "HORIZON"
+		4: return "NONE"
+		_: return "UNKNOWN(%d)" % tier
 
 #endregion

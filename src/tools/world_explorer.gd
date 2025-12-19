@@ -620,6 +620,8 @@ func _setup_visibility_toggles() -> void:
 
 
 ## Toggle models visibility
+## Industry standard: Toggle should only change visibility, not trigger mass loading
+## New cells will load naturally via _process() streaming - no need to force refresh
 func _on_show_models_toggled(enabled: bool) -> void:
 	_show_models = enabled
 
@@ -633,11 +635,9 @@ func _on_show_models_toggled(enabled: bool) -> void:
 			if cell_node:
 				cell_node.visible = enabled
 
-		if enabled:
-			# When enabling, refresh cells to trigger loading via async queue
-			# This loads progressively without blocking the main thread
-			# Models are preloaded in background so this should be fast
-			world_streaming_manager.refresh_cells()
+		# DON'T call refresh_cells() here - it floods the queue with all visible cells
+		# The streaming manager's _process() will naturally pick up missing cells
+		# This prevents the game from grinding to a halt when toggling models on
 
 	_log("Models: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
@@ -733,17 +733,24 @@ func _on_show_sky_toggled(enabled: bool) -> void:
 		if not _sky3d_initialized:
 			_create_sky3d()
 
-		# Enable Sky3D, remove fallback from tree (WorldEnvironment has no visible property)
+		# Enable Sky3D - add to tree if not already there
 		if sky_3d:
+			if not sky_3d.is_inside_tree():
+				add_child(sky_3d)
 			sky_3d.sky3d_enabled = true
+		# Remove fallback from tree (only one WorldEnvironment can be active)
 		if _fallback_world_env and _fallback_world_env.is_inside_tree():
 			remove_child(_fallback_world_env)
 		if _fallback_light:
 			_fallback_light.visible = false
 	else:
-		# Disable Sky3D (if it exists), add fallback back to tree
+		# Disable and remove Sky3D from tree so fallback can take over
+		# (WorldEnvironment nodes only work when in tree, and only one is active)
 		if sky_3d:
 			sky_3d.sky3d_enabled = false
+			if sky_3d.is_inside_tree():
+				remove_child(sky_3d)
+		# Add fallback back to tree
 		if _fallback_world_env and not _fallback_world_env.is_inside_tree():
 			add_child(_fallback_world_env)
 		if _fallback_light:
@@ -957,7 +964,7 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# ========== TERRAIN STREAMING (SEPARATE) ==========
 	# Create terrain data provider
 	terrain_data_provider = MorrowindDataProviderScript.new()
-	var init_error := terrain_data_provider.initialize()
+	var init_error: Error = terrain_data_provider.initialize()
 	if init_error != OK:
 		push_warning("Failed to initialize MorrowindDataProvider: %s" % error_string(init_error))
 	else:
@@ -1202,10 +1209,21 @@ func _process(delta: float) -> void:
 	if profiler:
 		profiler.record_frame(delta)
 
-	# Process async cell instantiation with time budget (4ms)
-	# Higher budget = faster object loading while still maintaining smooth framerate
+	# Process async cell instantiation with dynamic time budget
+	# Industry standard: Spend more time when queue is large to drain backlog faster
 	if cell_manager:
-		cell_manager.process_async_instantiation(4.0)
+		var queue_size: int = cell_manager.get_instantiation_queue_size()
+		var budget_ms: float = 4.0  # Default budget
+
+		# Adaptive budget based on queue size
+		if queue_size > 2000:
+			budget_ms = 12.0  # Burst mode - large backlog
+		elif queue_size > 500:
+			budget_ms = 8.0   # Catch-up mode - moderate backlog
+		elif queue_size > 100:
+			budget_ms = 6.0   # Slightly elevated
+
+		cell_manager.process_async_instantiation(budget_ms)
 
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:

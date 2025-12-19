@@ -1,4 +1,4 @@
-[gd_scene load_steps=8 format=3 uid="uid://dndox8fpbhekx"]
+[gd_scene load_steps=9 format=3 uid="uid://dndox8fpbhekx"]
 
 [ext_resource type="Script" uid="uid://d0hoxkgtiabvi" path="res://src/tools/lapalma_explorer.gd" id="1_lapalma"]
 
@@ -31,8 +31,8 @@ _shader_parameters = {
 &"enable_macro_variation": true,
 &"enable_projection": true,
 &"flat_terrain_normals": false,
-&"macro_variation1": Color(1.05, 1.02, 1.0, 1),
-&"macro_variation2": Color(0.92, 0.90, 0.88, 1),
+&"macro_variation1": Color(1.05, 1.02, 1, 1),
+&"macro_variation2": Color(0.92, 0.9, 0.88, 1),
 &"macro_variation_slope": 0.25,
 &"mipmap_bias": 0.5,
 &"noise1_angle": 0.0,
@@ -42,7 +42,7 @@ _shader_parameters = {
 &"noise_texture": SubResource("NoiseTexture2D_noise"),
 &"projection_threshold": 0.8
 }
-show_checkered = false
+show_checkered = true
 show_colormap = true
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tsohu"]
@@ -74,9 +74,10 @@ transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 1000, 0)
 far = 50000.0
 
 [node name="Terrain3D" type="Terrain3D" parent="."]
+data_directory = "res://lapalma_terrain"
 material = SubResource("Terrain3DMaterial_lapalma")
 assets = SubResource("Terrain3DAssets_lapalma")
-show_checkered = false
+show_checkered = true
 show_colormap = true
 top_level = true
 metadata/_edit_lock_ = true

@@ -112,7 +112,7 @@ func _instantiate_model_object(ref: CellReference, base_record, cell_grid: Vecto
 			return pooled
 
 	# Load or get cached model (with item_id for collision shape lookup)
-	var model_prototype := model_loader.get_model(model_path, record_id)
+	var model_prototype: Node3D = model_loader.get_model(model_path, record_id)
 	if not model_prototype:
 		# Create a placeholder for missing models
 		return _create_placeholder(ref)
@@ -143,7 +143,7 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 	# Ensure model is loaded and registered with static renderer
 	if not static_renderer.has_type(normalized):
 		# Load prototype to get mesh
-		var prototype := model_loader.get_model(model_path)
+		var prototype: Node3D = model_loader.get_model(model_path)
 		if prototype:
 			static_renderer.register_from_prototype(normalized, prototype)
 		else:
@@ -176,7 +176,7 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 
 	# Load the model if it has one
 	if not light_record.model.is_empty():
-		var model_prototype := model_loader.get_model(light_record.model)
+		var model_prototype: Node3D = model_loader.get_model(light_record.model)
 		if model_prototype:
 			var model_instance: Node3D = model_prototype.duplicate()
 			model_instance.name = "Model"
@@ -244,7 +244,7 @@ func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) ->
 		# Create a simple placeholder for now
 		return _create_actor_placeholder(ref, actor_record, actor_type)
 
-	var model_prototype := model_loader.get_model(model_path)
+	var model_prototype: Node3D = model_loader.get_model(model_path)
 	if not model_prototype:
 		return _create_actor_placeholder(ref, actor_record, actor_type)
 

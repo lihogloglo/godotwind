@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where:*)",
+      "Bash(dir \"C:\\\\Program Files\\\\Godot\\\\*.exe\")",
+      "Bash(dir \"C:\\\\Godot\\\\*.exe\")",
+      "Bash(dir:*)",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\")",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --editor)",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --quit)",
+      "Bash(xxd:*)",
+      "Bash(cat:*)"
+    ]
+  }
+}

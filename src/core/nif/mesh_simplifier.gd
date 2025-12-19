@@ -117,6 +117,29 @@ func simplify(arrays: Array, target_ratio: float) -> Array:
 	return result
 
 
+## Aggressive simplification for distant rendering (95% polygon reduction)
+## Used by MID tier (500m-2km) for merged static meshes.
+## Strips most detail while preserving overall silhouette.
+## Returns simplified arrays, or original if mesh is already very simple.
+func simplify_aggressive(arrays: Array) -> Array:
+	return simplify(arrays, 0.05)  # 5% of original = 95% reduction
+
+
+## Simplify to specific vertex count (useful for impostor LODs)
+## Returns simplified arrays, or original if target cannot be achieved
+func simplify_to_vertex_count(arrays: Array, max_vertices: int) -> Array:
+	if arrays.size() < Mesh.ARRAY_MAX:
+		return arrays
+
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	if vertices.size() <= max_vertices:
+		return arrays  # Already under limit
+
+	# Calculate ratio to achieve target vertex count
+	var ratio := float(max_vertices) / float(vertices.size())
+	return simplify(arrays, ratio)
+
+
 ## Internal simplification algorithm
 func _simplify_mesh(
 	vertices: PackedVector3Array,

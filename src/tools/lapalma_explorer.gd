@@ -1,26 +1,18 @@
 ## La Palma Explorer - Explore the volcanic island of La Palma
 ##
 ## Features:
-## - Terrain streaming from preprocessed GeoTIFF heightmaps
-## - Proper region unloading to prevent memory leaks
+## - Uses preprocessed Terrain3D region files for fast loading
 ## - Free-fly camera navigation
 ##
 ## Controls:
 ## - ZQSD/WASD to move, Right-click to look
 ## - Space/Shift for up/down
 ## - Ctrl for speed boost
-## - +/- to adjust view distance
 ## - Press F3 to toggle stats overlay
-## - Press F4 to force cleanup distant regions
 ##
-## Resolution: 2m vertex spacing (native MDT02), 512m per region
+## The terrain data is loaded from preprocessed .res files in res://lapalma_terrain/
+## These are native Terrain3D region files that load much faster than raw heightmaps.
 extends Node3D
-
-const LaPalmaDataProviderScript := preload("res://src/core/world/lapalma_data_provider.gd")
-const GenericTerrainStreamerScript := preload("res://src/core/world/generic_terrain_streamer.gd")
-
-# Preprocessed data directory
-const DATA_DIR := "res://lapalma_processed"
 
 # Node references
 @onready var camera: Camera3D = $FlyCamera
@@ -39,10 +31,6 @@ const DATA_DIR := "res://lapalma_processed"
 @onready var coast_btn: Button = $UI/StatsPanel/VBox/QuickButtons/CoastBtn
 @onready var origin_btn: Button = $UI/StatsPanel/VBox/QuickButtons/OriginBtn
 @onready var overview_btn: Button = $UI/StatsPanel/VBox/QuickButtons/OverviewBtn
-
-# Managers
-var _provider: RefCounted = null  # LaPalmaDataProvider
-var _streamer: Node = null  # GenericTerrainStreamer
 
 # Camera controls
 var camera_speed: float = 300.0
@@ -64,11 +52,6 @@ var _fallback_light: DirectionalLight3D = null
 # State
 var _initialized: bool = false
 var _stats_visible: bool = true
-# At 2m vertex spacing: each region = 512m
-# 6 regions = ~3km view distance (good balance of quality and performance)
-# Overview mode uses 50 regions (~25km) to see the whole island
-var _current_view_distance: int = 6
-var _overview_mode: bool = false
 
 
 func _ready() -> void:
@@ -91,30 +74,30 @@ func _ready() -> void:
 
 
 func _init_async() -> void:
-	await _update_loading(10, "Creating data provider...")
+	await _update_loading(10, "Loading Terrain3D regions...")
 
-	# Create La Palma data provider
-	_provider = LaPalmaDataProviderScript.new(DATA_DIR)
-	var err: Error = _provider.initialize()
-
-	if err != OK:
-		_log("[color=red]ERROR: Failed to initialize La Palma data[/color]")
-		_log("Run 'python3 tools/preprocess_lapalma.py' first")
+	# Terrain3D automatically loads preprocessed regions from data_directory
+	# configured in the scene (res://lapalma_terrain/)
+	if not terrain_3d:
+		_log("[color=red]ERROR: Terrain3D node not found[/color]")
 		_hide_loading()
 		return
 
-	_log("[color=green]La Palma data loaded[/color]")
-	_log("World: %.1f x %.1f km" % [
-		_provider.world_bounds.size.x / 1000.0,
-		_provider.world_bounds.size.y / 1000.0
-	])
-	_log("Regions: %d terrain regions" % _provider.get_all_terrain_regions().size())
+	# Wait for Terrain3D to be ready
+	if not terrain_3d.is_inside_tree():
+		await terrain_3d.ready
 
 	await _update_loading(40, "Configuring Terrain3D...")
 	_init_terrain3d()
 
-	await _update_loading(60, "Setting up terrain streamer...")
-	_setup_streamer()
+	# Get region count from Terrain3D data
+	var region_count := 0
+	if terrain_3d.data:
+		region_count = terrain_3d.data.get_region_count()
+
+	_log("[color=green]Terrain3D data loaded[/color]")
+	_log("Regions: %d terrain regions" % region_count)
+	_log("Data directory: %s" % terrain_3d.data_directory)
 
 	await _update_loading(90, "Ready!")
 	await get_tree().create_timer(0.3).timeout
@@ -123,7 +106,7 @@ func _init_async() -> void:
 	_initialized = true
 	_log("[color=green]La Palma explorer ready![/color]")
 	_log("Use WASD/ZQSD to move, Right-click to look")
-	_log("Press F3 for stats, F4 to force cleanup")
+	_log("Press F3 for stats")
 
 	# Sync sky state with toggle to ensure consistent initial state
 	_sync_sky_state()
@@ -137,14 +120,10 @@ func _init_terrain3d() -> void:
 		_log("[color=red]ERROR: Terrain3D node not found[/color]")
 		return
 
-	# Configure from provider
-	terrain_3d.vertex_spacing = _provider.vertex_spacing
-
-	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
-	terrain_3d.change_region_size(_provider.region_size)
+	# Terrain3D loads configuration from the preprocessed region files
+	# The data_directory is set in the scene to res://lapalma_terrain/
 
 	# Configure LOD for large terrain - optimized settings
-	# With 2m resolution we have smaller regions, so we can use smaller mesh chunks
 	terrain_3d.mesh_lods = 7  # LOD levels for distant terrain
 	terrain_3d.mesh_size = 32  # Mesh chunk size (must be power of 2)
 
@@ -168,53 +147,8 @@ func _init_terrain3d() -> void:
 		terrain_3d.set_assets(Terrain3DAssets.new())
 
 	_log("Terrain3D configured: vertex_spacing=%.1fm, mesh_size=%d, lods=%d" % [
-		_provider.vertex_spacing, terrain_3d.mesh_size, terrain_3d.mesh_lods
+		terrain_3d.vertex_spacing, terrain_3d.mesh_size, terrain_3d.mesh_lods
 	])
-
-
-func _setup_streamer() -> void:
-	_streamer = GenericTerrainStreamerScript.new()
-	_streamer.name = "TerrainStreamer"
-
-	# Configure streaming parameters
-	# At 2m resolution: regions are 512m, so we need more regions for same view distance
-	_streamer.view_distance_regions = _current_view_distance
-	_streamer.unload_distance_regions = _current_view_distance + 3  # Unload 3 regions beyond view
-	_streamer.max_loads_per_frame = 4  # Allow 4 regions per frame (smaller regions = faster to load)
-	_streamer.max_unloads_per_frame = 4
-	_streamer.generation_budget_ms = 20.0  # Allow more time for loading
-	_streamer.frustum_priority = true
-	_streamer.skip_behind_camera = true  # Don't load regions behind camera
-	_streamer.debug_enabled = true  # Enable debug to diagnose issues
-
-	add_child(_streamer)
-
-	# Connect signals
-	_streamer.terrain_region_loaded.connect(_on_region_loaded)
-	_streamer.terrain_region_unloaded.connect(_on_region_unloaded)
-	_streamer.terrain_load_complete.connect(_on_load_complete)
-
-	# Configure streamer
-	_streamer.set_provider(_provider)
-	_streamer.set_terrain_3d(terrain_3d)
-	_streamer.set_tracked_node(camera)
-	_streamer.start()
-
-	_log("Terrain streamer started (view: %d, unload: %d regions)" % [
-		_current_view_distance, _streamer.unload_distance_regions
-	])
-
-
-func _on_region_loaded(_region: Vector2i) -> void:
-	_update_stats()
-
-
-func _on_region_unloaded(_region: Vector2i) -> void:
-	_update_stats()
-
-
-func _on_load_complete() -> void:
-	pass  # Silent - don't spam log
 
 
 ## Setup sky toggle checkbox in the UI
@@ -371,14 +305,10 @@ func _sync_sky_state() -> void:
 
 
 func _teleport_to_position(pos: Vector3) -> void:
-	# Disabled for debugging - uncomment once unloading is confirmed working
-	#if _streamer:
-	#	_streamer.force_cleanup()
-
-	# Get terrain height at position
+	# Get terrain height at position using Terrain3D
 	var height := pos.y
-	if _provider:
-		var terrain_height: float = _provider.get_height_at_position(pos)
+	if terrain_3d and terrain_3d.data:
+		var terrain_height: float = terrain_3d.data.get_height(Vector3(pos.x, 0, pos.z))
 		if not is_nan(terrain_height):
 			height = terrain_height + 100.0  # 100m above terrain
 
@@ -388,27 +318,30 @@ func _teleport_to_position(pos: Vector3) -> void:
 
 
 func _update_stats() -> void:
-	if not _streamer:
+	if not terrain_3d:
 		return
 
-	var stats: Dictionary = _streamer.get_stats()
 	var fps := Engine.get_frames_per_second()
 	var frame_ms := 1000.0 / maxf(fps, 1.0)
 
 	# Get terrain height at camera position
 	var cam_height := camera.position.y
 	var terrain_height := 0.0
-	if _provider:
-		terrain_height = _provider.get_height_at_position(camera.position)
+	if terrain_3d.data:
+		terrain_height = terrain_3d.data.get_height(camera.position)
 		if is_nan(terrain_height):
 			terrain_height = 0.0
 
 	var height_above_terrain := cam_height - terrain_height
 
+	# Get region count from Terrain3D
+	var region_count := 0
+	if terrain_3d.data:
+		region_count = terrain_3d.data.get_region_count()
+
 	# Calculate estimated VRAM usage (rough estimate)
 	# Each region: 256x256 * 4 bytes * 3 maps (height, control, color) + GPU overhead
-	var t3d_regions: int = stats.get("terrain3d_regions", 0)
-	var estimated_vram_mb := t3d_regions * 256 * 256 * 4 * 3 / 1024.0 / 1024.0 * 1.5  # 1.5x for GPU overhead
+	var estimated_vram_mb := region_count * 256 * 256 * 4 * 3 / 1024.0 / 1024.0 * 1.5  # 1.5x for GPU overhead
 
 	# Color code FPS
 	var fps_color := "green" if fps >= 50 else ("yellow" if fps >= 30 else "red")
@@ -421,33 +354,21 @@ func _update_stats() -> void:
 	stats_text.text = """[b]Performance[/b]
 FPS: [color=%s]%.1f[/color] (%.2f ms)
 
-[b]Terrain Streaming[/b]
-Active regions: %d
-Terrain3D regions: %d
-Queue: %d
+[b]Terrain[/b]
+Regions loaded: %d
 Est. VRAM: %.1f MB
-Loaded/Unloaded: %d / %d
 
 [b]Settings[/b]
-View distance: %d [+/-]
-Unload distance: %d
 Sky [K]: %s %s
 
 [b]Camera[/b]
 Position: (%.0f, %.0f, %.0f)
 Above terrain: %.0f m
 
-[color=gray]F3: Stats | F4: Cleanup
-+/-: View distance | K: Sky[/color]""" % [
+[color=gray]F3: Stats | K: Sky[/color]""" % [
 		fps_color, fps, frame_ms,
-		stats.get("loaded_regions", 0),
-		t3d_regions,
-		stats.get("queue_size", 0),
+		region_count,
 		estimated_vram_mb,
-		stats.get("total_loaded", 0),
-		stats.get("total_unloaded", 0),
-		stats.get("view_distance", _current_view_distance),
-		stats.get("unload_distance", _current_view_distance + 3),
 		"ON" if _show_sky else "OFF",
 		("(" + time_str + ")") if _show_sky else "",
 		camera.position.x, camera.position.y, camera.position.z,
@@ -503,12 +424,6 @@ func _input(event: InputEvent) -> void:
 				_stats_visible = not _stats_visible
 				stats_panel.visible = _stats_visible
 				_log("Stats: %s" % ("ON" if _stats_visible else "OFF"))
-			KEY_F4:
-				_force_cleanup()
-			KEY_EQUAL, KEY_KP_ADD:
-				_adjust_view_distance(1)
-			KEY_MINUS, KEY_KP_SUBTRACT:
-				_adjust_view_distance(-1)
 			KEY_K:  # Toggle sky/day-night cycle
 				if _show_sky_toggle:
 					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
@@ -549,44 +464,9 @@ func _process(delta: float) -> void:
 		camera.position += move_dir * speed * delta
 
 
-func _adjust_view_distance(delta: int) -> void:
-	var max_dist := 50 if _overview_mode else 15
-	_current_view_distance = clampi(_current_view_distance + delta, 1, max_dist)
-	if _streamer:
-		_streamer.view_distance_regions = _current_view_distance
-		_streamer.unload_distance_regions = _current_view_distance + 3
-
-	var km_distance: float = 0.0
-	if _provider:
-		km_distance = _current_view_distance * _provider.region_size * _provider.vertex_spacing / 1000.0
-	_log("View distance: %d regions (~%.1f km)" % [_current_view_distance, km_distance])
-	_update_stats()
-
-
 func _toggle_overview_mode() -> void:
-	_overview_mode = not _overview_mode
-
-	if _overview_mode:
-		# Enable overview: high altitude, large view distance
-		_current_view_distance = 50  # ~25km, covers most of island
-		camera.position = Vector3(0, 25000, 5000)  # 25km altitude, slightly south
-		camera.look_at(Vector3(0, 0, -10000))  # Look at island center
-		_log("[color=yellow]Overview mode ON - Loading entire island...[/color]")
-	else:
-		# Return to normal exploration mode
-		_current_view_distance = 6
-		_teleport_to_position(Vector3(0, 1000, 0))
-		_log("[color=yellow]Overview mode OFF[/color]")
-
-	if _streamer:
-		_streamer.view_distance_regions = _current_view_distance
-		_streamer.unload_distance_regions = _current_view_distance + 5
-
+	# Teleport to bird's eye view of the island
+	camera.position = Vector3(0, 25000, 5000)  # 25km altitude, slightly south
+	camera.look_at(Vector3(0, 0, -10000))  # Look at island center
+	_log("[color=yellow]Overview mode - Bird's eye view[/color]")
 	_update_stats()
-
-
-func _force_cleanup() -> void:
-	if _streamer:
-		_streamer.force_cleanup()
-		_log("[color=yellow]Forced cleanup of distant regions[/color]")
-		_update_stats()

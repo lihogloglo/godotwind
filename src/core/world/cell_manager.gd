@@ -34,6 +34,9 @@ var _static_renderer: Node = null  # StaticObjectRenderer
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
 	"multimesh_instances": 0,
+	"objects_instantiated": 0,
+	"lights_created": 0,
+	"objects_from_pool": 0,
 }
 
 # Configuration
@@ -53,6 +56,18 @@ const MW_LIGHT_SCALE: float = 1.0 / 70.0  # Tuned for visual appearance
 ## Initialize instantiator with current configuration and dependencies
 func _init() -> void:
 	_sync_instantiator_config()
+
+
+## Initialize object pool for frequently used models
+func init_object_pool() -> void:
+	if _object_pool == null:
+		_object_pool = ObjectPoolScript.new()
+		_sync_instantiator_config()
+
+
+## Get the object pool (for releasing objects back when unloading cells)
+func get_object_pool() -> RefCounted:
+	return _object_pool
 
 
 ## Sync configuration to instantiator
@@ -179,7 +194,7 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 			continue
 
 		# Check if would use static renderer (skip those - already optimized)
-		if use_static_renderer and _static_renderer and _is_static_render_model(model_path):
+		if use_static_renderer and _static_renderer and _instantiator._is_static_render_model(model_path):
 			individual_refs.append(ref)
 			continue
 
@@ -268,7 +283,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		# Get/load prototype model
 		var first_candidate: Dictionary = candidates[0]
 		var record_id: String = first_candidate.base_record.get("record_id", "")
-		var prototype := _get_model(first_candidate.model_path, record_id)
+		var prototype: Node3D = _model_loader.get_model(first_candidate.model_path, record_id)
 
 		if not prototype:
 			# Failed to load - fall back to individual instantiation
@@ -357,20 +372,21 @@ func preload_common_models() -> int:
 			continue
 
 		# Skip flora that will use StaticObjectRenderer instead
-		if use_static_renderer and _static_renderer and _is_static_render_model(model_path):
+		if use_static_renderer and _static_renderer and _instantiator._is_static_render_model(model_path):
 			continue
 
 		# Try to load the model
-		var prototype := _get_model(model_path)
+		var prototype: Node3D = _model_loader.get_model(model_path)
 		if prototype:
 			loaded += 1
 
 			# Register with pool AND pre-warm with initial instances
 			# Pre-warming means acquire() returns instantly without duplicate()
+			# Industry standard: Pre-create 33% to reduce duplicate() calls during gameplay
 			if _object_pool and not _object_pool.has_model(model_path):
 				var pool_size: int = common_models[model_path]
-				# Pre-create 20% of max pool size (enough for initial cells)
-				var initial_count: int = maxi(5, pool_size / 5)
+				# Pre-create 33% of max pool size (better coverage for initial cells)
+				var initial_count: int = maxi(8, pool_size / 3)
 				_object_pool.register_model(model_path, prototype, initial_count, pool_size)
 				pool_instances += initial_count
 
@@ -438,7 +454,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 		if parse_result.is_valid():
 			# Convert to prototype and cache
 			var converter := NIFConverter.new()
-			var prototype := converter.convert_from_parsed(parse_result)
+			var prototype: Node3D = converter.convert_from_parsed(parse_result)
 			if prototype:
 				_model_loader.add_to_cache(model_path, prototype, "")
 				_preload_loaded += 1
@@ -472,8 +488,9 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 # =============================================================================
 
 ## Maximum concurrent async cell requests (prevents memory buildup)
-## With view_distance 3, we can have ~28 cells in view, so need higher limit
-const MAX_ASYNC_REQUESTS := 32
+## Industry standard: 4-8 concurrent operations max to avoid I/O saturation
+## Higher values cause queue flooding and frame drops during mass loading
+const MAX_ASYNC_REQUESTS := 8
 
 ## Maximum items in instantiation queue (prevents memory buildup)
 ## Morrowind cells can have 200+ objects each, 32 cells × 200 = 6400 objects max
@@ -812,7 +829,7 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 
 						# Convert to prototype and cache (main thread)
 						var converter := NIFConverter.new()
-						var prototype := converter.convert_from_parsed(parse_result)
+						var prototype: Node3D = converter.convert_from_parsed(parse_result)
 						if prototype:
 							_model_loader.add_to_cache(model_path, prototype, parse_result.item_id)
 						else:

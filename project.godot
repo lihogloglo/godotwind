@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Godotwind"
 config/description="OpenMW port to Godot Engine"
-run/main_scene="uid://clb74pwrqrgok"
+run/main_scene="res://scenes/world_explorer.tscn"
 config/features=PackedStringArray("4.5", "Forward Plus")
 config/icon="res://icon.svg"
 
@@ -32,7 +32,7 @@ SaveSystem="*res://addons/save_system/save_system.gd"
 [debug]
 
 file_logging/enable_file_logging=true
-file_logging/log_path="res://../godot_log.txt"
+file_logging/log_path="user://godot_log.txt"
 
 [display]
 
