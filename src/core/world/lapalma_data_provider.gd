@@ -262,3 +262,76 @@ func get_cache_stats() -> Dictionary:
 		"cached_regions": _heightmap_cache.size(),
 		"max_cache_size": _max_cache_size,
 	}
+
+
+#region Distant Rendering Configuration
+
+
+## Get tier unit counts optimized for La Palma's large 1536m regions
+func get_tier_unit_counts() -> Dictionary:
+	# La Palma regions are HUGE (1536m), so we need far fewer per tier
+	# These prevent loading too much data while still providing good coverage
+	const DistanceTier := preload("res://src/core/world/distance_tier_manager.gd")
+	return {
+		DistanceTier.Tier.NEAR: 5,       # ~7.7km radius (5 large regions)
+		DistanceTier.Tier.MID: 10,       # ~15.4km radius (simplified)
+		DistanceTier.Tier.FAR: 20,       # ~30.8km radius (impostors)
+		DistanceTier.Tier.HORIZON: 0,    # Ocean skybox (no per-region processing)
+	}
+
+
+## La Palma max view distance (clear island, can see far)
+func get_max_view_distance() -> float:
+	return 10000.0  # 10km max view distance (island is ~40km tall)
+
+
+## Distant rendering support for La Palma
+func supports_distant_rendering() -> bool:
+	# La Palma doesn't need pre-baked assets (real-world GeoTIFF data)
+	# But we still want to check if the system is ready
+	return false  # TODO: Enable when distant rendering system is tested
+
+
+## Get impostor candidates for La Palma landmarks
+func get_impostor_candidates() -> Array[String]:
+	# Real-world landmarks on La Palma island
+	return [
+		# Observatories (Roque de los Muchachos)
+		"models/observatory_roque.glb",
+		"models/observatory_magic.glb",
+		"models/observatory_herschel.glb",
+
+		# Lighthouses
+		"models/lighthouse_fuencaliente.glb",
+		"models/lighthouse_punta_cumplida.glb",
+
+		# Major buildings from OSM data
+		"models/building_large_01.glb",
+		"models/building_large_02.glb",
+
+		# Volcanic features
+		"models/volcano_teneguia.glb",
+		"models/volcano_san_juan.glb",
+
+		# Churches/landmarks
+		"models/church_las_nieves.glb",
+		"models/church_santa_cruz.glb",
+	]
+
+
+## Get horizon layer for La Palma ocean view
+func get_horizon_layer_path() -> String:
+	return "res://assets/horizons/la_palma_ocean_horizon.png"
+
+
+## La Palma uses large 1536m regions
+func get_cell_size_meters() -> float:
+	return cell_size  # 1536m regions
+
+
+## No tier distance overrides for La Palma (clear weather)
+func get_tier_distances() -> Dictionary:
+	return {}  # Use defaults
+
+
+#endregion

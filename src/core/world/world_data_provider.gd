@@ -116,3 +116,70 @@ func get_config() -> Dictionary:
 		"vertex_spacing": vertex_spacing,
 		"sea_level": sea_level,
 	}
+
+
+#region Distant Rendering Configuration
+
+
+## Get maximum cell/region counts per rendering tier
+## This allows worlds with different cell sizes to specify appropriate limits
+## Returns: Dictionary mapping Tier enum to max unit count
+##
+## Example for Morrowind (small 117m cells):
+##   { Tier.NEAR: 50, Tier.MID: 100, Tier.FAR: 200, Tier.HORIZON: 0 }
+##
+## Example for La Palma (large 1536m regions):
+##   { Tier.NEAR: 5, Tier.MID: 10, Tier.FAR: 20, Tier.HORIZON: 0 }
+##
+## Returns empty dict to use DistanceTierManager defaults
+func get_tier_unit_counts() -> Dictionary:
+	return {}  # Use defaults
+
+
+## Get maximum view distance for this world (in meters)
+## Used to configure DistanceTierManager.max_view_distance
+## Returns: Distance in meters, or 0.0 to use default (5000m)
+func get_max_view_distance() -> float:
+	return 0.0  # Use default
+
+
+## Check if this world supports distant rendering (MID/FAR/HORIZON tiers)
+## When false, only NEAR tier (0-500m) is used
+## Returns: true if distant rendering should be enabled
+func supports_distant_rendering() -> bool:
+	return false  # Disabled by default
+
+
+## Get list of landmark models for impostor generation
+## These are important objects that should have pre-baked impostors
+## Returns: Array of model paths (e.g., ["meshes/x/ex_vivec_canton_00.nif"])
+func get_impostor_candidates() -> Array[String]:
+	return []  # No impostors by default
+
+
+## Get path to horizon layer texture for skybox integration
+## Used for HORIZON tier (5km+) to render distant silhouettes
+## Returns: Resource path to texture, or empty string if not available
+func get_horizon_layer_path() -> String:
+	return ""  # No horizon layer by default
+
+
+## Get cell size in meters for distance calculations
+## This is used by DistanceTierManager to convert cell counts to distances
+## Most worlds can use the cell_size property directly
+## Returns: Size of one streaming unit (cell/region) in meters
+func get_cell_size_meters() -> float:
+	return cell_size
+
+
+## Get tier distance overrides for this world
+## Allows customizing tier thresholds (e.g., foggy worlds have shorter distances)
+## Returns: Dictionary mapping Tier enum to distance in meters, or empty for defaults
+##
+## Example for foggy Morrowind:
+##   { Tier.FAR: 3000.0 }  # Reduce FAR tier from 5km to 3km
+func get_tier_distances() -> Dictionary:
+	return {}  # Use defaults
+
+
+#endregion
