@@ -82,9 +82,10 @@ signal cell_unloaded(grid: Vector2i)
 ## This is for submitting async requests, should be low as actual parsing is async
 @export var cell_load_budget_ms: float = 2.0
 
-## Maximum cells to queue for loading (NEAR tier uses queue, other tiers should NOT use queue)
-## If distant_rendering_enabled, this needs to be much larger, but that's experimental
-@export var max_load_queue_size: int = 128
+## Maximum cells to queue for loading (NEAR tier uses queue, other tiers process directly)
+## With increased cell limits (NEAR=80), queue size increased to accommodate
+## MID/FAR tiers process directly and don't use the queue significantly
+@export var max_load_queue_size: int = 192
 
 ## Enable async/time-budgeted cell loading
 @export var async_loading_enabled: bool = true
@@ -195,7 +196,11 @@ func initialize() -> void:
 ## Time budget for async object instantiation per frame (ms)
 ## This is the main bottleneck - Node3D.duplicate() is expensive
 ## Priority over terrain to show objects quickly
-@export var instantiation_budget_ms: float = 3.0
+##
+## TUNING NOTE (2025-12-19): Increased from 3.0 to 5.0ms to reduce visible pop-in
+## Large cells (500+ objects) felt sluggish at 3ms/frame. 5ms still maintains
+## 60 FPS (16.67ms frame budget) while providing smoother object appearance.
+@export var instantiation_budget_ms: float = 5.0
 
 func _process(_delta: float) -> void:
 	if not _initialized:

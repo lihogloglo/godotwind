@@ -45,10 +45,16 @@ const TIER_PRIORITY := {
 ## CRITICAL: Maximum cells per tier to prevent queue overflow
 ## These are HARD LIMITS - never exceed regardless of distance calculation
 ## Without these limits, enabling distant rendering queues ~23,000 cells and freezes
+##
+## TUNING NOTES (based on 2025-12-19 audit):
+## - NEAR: Increased from 50 to 80 to allow 5-cell radius (9×9 = 81 cells)
+##   Previous limit caused pop-in at large view distances
+## - MID: Increased from 100 to 150 - pre-merged meshes are cheap once prebaked
+## - FAR: Increased from 200 to 300 - impostors are very cheap
 const MAX_CELLS_PER_TIER := {
-	Tier.NEAR: 50,       # Full 3D geometry - expensive, keep low
-	Tier.MID: 100,       # Pre-merged meshes only - medium cost
-	Tier.FAR: 200,       # Impostors only - cheap but still limited
+	Tier.NEAR: 80,       # Full 3D geometry - allows 5-cell radius (was 50)
+	Tier.MID: 150,       # Pre-merged meshes only - cheap (was 100)
+	Tier.FAR: 300,       # Impostors only - very cheap (was 200)
 	Tier.HORIZON: 0,     # Skybox only - no per-cell processing
 }
 
