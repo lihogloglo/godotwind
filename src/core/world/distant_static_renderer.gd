@@ -74,7 +74,58 @@ func set_cell_manager(manager: RefCounted) -> void:
 	cell_manager = manager
 
 
-## Add a cell with merged distant geometry
+## Add a cell from a pre-baked merged mesh (fast path)
+## This is the preferred method - uses pre-generated meshes from mesh_prebaker.gd
+## cell_grid: The cell grid coordinates
+## mesh: Pre-baked ArrayMesh from res://assets/merged_cells/
+## Returns true if cell was successfully added
+func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
+	# Skip if already loaded
+	if cell_grid in _cells:
+		return true
+
+	if not _scenario.is_valid():
+		push_warning("DistantStaticRenderer: Not in scene tree, cannot add cells")
+		return false
+
+	if not mesh:
+		return false
+
+	# Create RenderingServer resources
+	var cell_instance := CellInstance.new()
+	cell_instance.grid = cell_grid
+	cell_instance.mesh_rid = mesh.get_rid()
+	cell_instance.owns_mesh = false  # Mesh is owned by resource
+
+	# Create instance
+	cell_instance.instance_rid = RenderingServer.instance_create()
+	RenderingServer.instance_set_base(cell_instance.instance_rid, cell_instance.mesh_rid)
+	RenderingServer.instance_set_scenario(cell_instance.instance_rid, _scenario)
+
+	# Get mesh info for stats
+	cell_instance.aabb = mesh.get_aabb() if mesh.get_surface_count() > 0 else AABB()
+	cell_instance.vertex_count = 0
+	cell_instance.object_count = 1
+	for i in range(mesh.get_surface_count()):
+		var arrays := mesh.surface_get_arrays(i)
+		if arrays.size() > 0 and arrays[Mesh.ARRAY_VERTEX]:
+			cell_instance.vertex_count += (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+	cell_instance.visible = true
+
+	# Store cell
+	_cells[cell_grid] = cell_instance
+
+	# Update stats
+	_stats["loaded_cells"] += 1
+	_stats["total_vertices"] += cell_instance.vertex_count
+	_stats["total_objects"] += cell_instance.object_count
+	_stats["visible_cells"] += 1
+
+	return true
+
+
+## Add a cell with merged distant geometry (runtime merging - SLOW)
+## WARNING: Runtime merging takes 50-100ms per cell. Use add_cell_prebaked instead.
 ## cell_grid: The cell grid coordinates
 ## references: Array of CellReference objects in this cell
 ## Returns true if cell was successfully added

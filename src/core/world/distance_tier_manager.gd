@@ -42,6 +42,17 @@ const TIER_PRIORITY := {
 }
 
 
+## CRITICAL: Maximum cells per tier to prevent queue overflow
+## These are HARD LIMITS - never exceed regardless of distance calculation
+## Without these limits, enabling distant rendering queues ~23,000 cells and freezes
+const MAX_CELLS_PER_TIER := {
+	Tier.NEAR: 50,       # Full 3D geometry - expensive, keep low
+	Tier.MID: 100,       # Pre-merged meshes only - medium cost
+	Tier.FAR: 200,       # Impostors only - cheap but still limited
+	Tier.HORIZON: 0,     # Skybox only - no per-cell processing
+}
+
+
 ## Default distance thresholds (in meters)
 ## These can be overridden per-world via configure_for_world()
 var tier_distances := {
@@ -89,6 +100,15 @@ var distant_rendering_enabled: bool = true
 
 ## Maximum view distance in meters
 var max_view_distance: float = 5000.0
+
+
+## Camera reference for view frustum culling (set by WorldStreamingManager)
+var camera: Camera3D = null
+
+
+## Whether to use view frustum culling for MID/FAR tiers
+## Significantly reduces cell count by only processing visible cells
+var use_frustum_culling: bool = true
 
 
 #region Configuration
@@ -249,6 +269,10 @@ func is_horizon_only(tier: Tier) -> bool:
 ## Get all visible cells organized by tier
 ## camera_cell: The cell the camera is in
 ## Returns: Dictionary mapping Tier -> Array[Vector2i]
+##
+## CRITICAL: This function now enforces hard cell limits per tier to prevent
+## queue overflow. Cells are sorted by distance so closest are prioritized.
+## View frustum culling is applied to MID/FAR tiers to reduce processing.
 func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 	var result := {
 		Tier.NEAR: [] as Array[Vector2i],
@@ -261,20 +285,92 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 	var near_radius := ceili(tier_end_distances[Tier.NEAR] / cell_size_meters)
 	var mid_radius := ceili(tier_end_distances[Tier.MID] / cell_size_meters) if distant_rendering_enabled else 0
 	var far_radius := ceili(tier_end_distances[Tier.FAR] / cell_size_meters) if distant_rendering_enabled else 0
-	var horizon_radius := ceili(max_view_distance / cell_size_meters) if distant_rendering_enabled else 0
+	# HORIZON tier doesn't need per-cell processing - skip it entirely
+	var horizon_radius := 0  # Was: ceili(max_view_distance / cell_size_meters)
 
-	var max_radius := maxi(near_radius, maxi(mid_radius, maxi(far_radius, horizon_radius)))
+	var max_radius := maxi(near_radius, maxi(mid_radius, far_radius))
+
+	# Collect cells with their distances for sorting
+	var cells_with_distance: Array[Dictionary] = []
 
 	# Iterate over all cells within max radius
 	for dy in range(-max_radius, max_radius + 1):
 		for dx in range(-max_radius, max_radius + 1):
 			var cell := Vector2i(camera_cell.x + dx, camera_cell.y + dy)
-			var tier := get_tier_for_cell(camera_cell, cell)
+			var distance := _cell_distance_meters(camera_cell, cell)
+			var tier := _get_tier_from_distance_raw(distance)
 
-			if tier != Tier.NONE and tier in result:
-				result[tier].append(cell)
+			if tier == Tier.NONE or tier == Tier.HORIZON:
+				continue
+
+			# Apply view frustum culling for MID/FAR tiers
+			if use_frustum_culling and camera and tier != Tier.NEAR:
+				if not _is_cell_in_frustum(cell):
+					continue
+
+			cells_with_distance.append({
+				"cell": cell,
+				"distance": distance,
+				"tier": tier
+			})
+
+	# Sort by distance (closest first)
+	cells_with_distance.sort_custom(func(a, b): return a.distance < b.distance)
+
+	# Distribute to tiers respecting hard limits
+	var tier_counts := {
+		Tier.NEAR: 0,
+		Tier.MID: 0,
+		Tier.FAR: 0,
+	}
+
+	for entry in cells_with_distance:
+		var tier: int = entry.tier
+		var max_for_tier: int = MAX_CELLS_PER_TIER.get(tier, 0)
+
+		if tier_counts[tier] < max_for_tier:
+			result[tier].append(entry.cell)
+			tier_counts[tier] += 1
 
 	return result
+
+
+## Check if a cell is within the camera's view frustum
+## Uses a simple AABB check against the frustum planes
+func _is_cell_in_frustum(cell: Vector2i) -> bool:
+	if not camera:
+		return true  # No camera = assume visible
+
+	# Calculate cell center in world coordinates
+	var cell_center := Vector3(
+		cell.x * cell_size_meters + cell_size_meters * 0.5,
+		0.0,  # Y will be terrain height, use 0 for simplicity
+		-cell.y * cell_size_meters - cell_size_meters * 0.5  # Z is flipped in Godot
+	)
+
+	# Create cell AABB (assuming ~100m height for buildings)
+	var half_size := cell_size_meters * 0.5
+	var cell_aabb := AABB(
+		cell_center - Vector3(half_size, 0, half_size),
+		Vector3(cell_size_meters, 100.0, cell_size_meters)
+	)
+
+	# Check against camera frustum
+	var frustum := camera.get_frustum()
+	for plane in frustum:
+		# Check if AABB is completely behind this plane
+		var corner := cell_aabb.position
+		if plane.normal.x >= 0:
+			corner.x += cell_aabb.size.x
+		if plane.normal.y >= 0:
+			corner.y += cell_aabb.size.y
+		if plane.normal.z >= 0:
+			corner.z += cell_aabb.size.z
+
+		if plane.distance_to(corner) < 0:
+			return false  # Completely outside this plane
+
+	return true
 
 
 ## Get cells that should be loaded at a specific tier
@@ -397,7 +493,15 @@ func get_debug_info() -> Dictionary:
 		"tier_distances": tier_distances.duplicate(),
 		"tier_end_distances": tier_end_distances.duplicate(),
 		"tier_hysteresis": tier_hysteresis.duplicate(),
+		"max_cells_per_tier": MAX_CELLS_PER_TIER.duplicate(),
+		"frustum_culling": use_frustum_culling,
+		"has_camera": camera != null,
 	}
+
+
+## Set the camera for frustum culling
+func set_camera(cam: Camera3D) -> void:
+	camera = cam
 
 
 #endregion
