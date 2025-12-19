@@ -42,15 +42,19 @@ const TIER_PRIORITY := {
 }
 
 
-## CRITICAL: Maximum cells per tier to prevent queue overflow
+## DEFAULT maximum cells per tier to prevent queue overflow
+## These are fallback values - worlds can override via get_tier_unit_counts()
 ## These are HARD LIMITS - never exceed regardless of distance calculation
 ## Without these limits, enabling distant rendering queues ~23,000 cells and freezes
-const MAX_CELLS_PER_TIER := {
+const DEFAULT_MAX_CELLS_PER_TIER := {
 	Tier.NEAR: 50,       # Full 3D geometry - expensive, keep low
 	Tier.MID: 100,       # Pre-merged meshes only - medium cost
 	Tier.FAR: 200,       # Impostors only - cheap but still limited
 	Tier.HORIZON: 0,     # Skybox only - no per-cell processing
 }
+
+## Actual maximum cells per tier (configured per-world or using defaults)
+var max_cells_per_tier: Dictionary = DEFAULT_MAX_CELLS_PER_TIER.duplicate()
 
 
 ## Default distance thresholds (in meters)
@@ -122,7 +126,9 @@ func configure_for_world(world_provider) -> void:
 
 	# Get max view distance from provider
 	if world_provider.has_method("get_max_view_distance"):
-		max_view_distance = world_provider.get_max_view_distance()
+		var world_max_distance := world_provider.get_max_view_distance()
+		if world_max_distance > 0.0:
+			max_view_distance = world_max_distance
 
 	# Check if world supports distant rendering
 	if world_provider.has_method("supports_distant_rendering"):
@@ -130,9 +136,24 @@ func configure_for_world(world_provider) -> void:
 
 	# Get cell size if available
 	if world_provider.has_method("get_cell_size_meters"):
-		cell_size_meters = world_provider.get_cell_size_meters()
+		var world_cell_size := world_provider.get_cell_size_meters()
+		if world_cell_size > 0.0:
+			cell_size_meters = world_cell_size
 
-	# Allow world-specific tier overrides
+	# Get per-world tier unit counts (CRITICAL for different region sizes)
+	if world_provider.has_method("get_tier_unit_counts"):
+		var world_tier_counts: Dictionary = world_provider.get_tier_unit_counts()
+		if not world_tier_counts.is_empty():
+			# Override defaults with world-specific counts
+			for tier in world_tier_counts:
+				max_cells_per_tier[tier] = world_tier_counts[tier]
+			print("DistanceTierManager: Using world-specific tier counts - NEAR: %d, MID: %d, FAR: %d" % [
+				max_cells_per_tier.get(Tier.NEAR, 0),
+				max_cells_per_tier.get(Tier.MID, 0),
+				max_cells_per_tier.get(Tier.FAR, 0)
+			])
+
+	# Allow world-specific tier distance overrides
 	if world_provider.has_method("get_tier_distances"):
 		var overrides: Dictionary = world_provider.get_tier_distances()
 		for tier in overrides:
@@ -142,8 +163,8 @@ func configure_for_world(world_provider) -> void:
 	# Recalculate end distances from start distances
 	_recalculate_end_distances()
 
-	print("DistanceTierManager: Configured for world - max distance: %.0fm, distant rendering: %s" % [
-		max_view_distance, "enabled" if distant_rendering_enabled else "disabled"
+	print("DistanceTierManager: Configured for world - cell size: %.0fm, max distance: %.0fm, distant rendering: %s" % [
+		cell_size_meters, max_view_distance, "enabled" if distant_rendering_enabled else "disabled"
 	])
 
 
@@ -326,7 +347,7 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 
 	for entry in cells_with_distance:
 		var tier: int = entry.tier
-		var max_for_tier: int = MAX_CELLS_PER_TIER.get(tier, 0)
+		var max_for_tier: int = max_cells_per_tier.get(tier, 0)
 
 		if tier_counts[tier] < max_for_tier:
 			result[tier].append(entry.cell)
@@ -493,7 +514,7 @@ func get_debug_info() -> Dictionary:
 		"tier_distances": tier_distances.duplicate(),
 		"tier_end_distances": tier_end_distances.duplicate(),
 		"tier_hysteresis": tier_hysteresis.duplicate(),
-		"max_cells_per_tier": MAX_CELLS_PER_TIER.duplicate(),
+		"max_cells_per_tier": max_cells_per_tier.duplicate(),
 		"frustum_culling": use_frustum_culling,
 		"has_camera": camera != null,
 	}

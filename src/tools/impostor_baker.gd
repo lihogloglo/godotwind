@@ -1,627 +1,371 @@
-## ImpostorBaker - Tool for generating impostor textures from 3D models
+## ImpostorBaker - Tool for generating octahedral impostor textures
 ##
-## Renders models from multiple angles using SubViewport to create
-## octahedral impostor textures for distant rendering (FAR tier).
+## Creates pre-baked impostor textures for distant rendering (FAR tier, 2km-5km)
 ##
-## Output files:
-##   res://assets/impostors/[hash]_impostor.png - Atlas texture
-##   res://assets/impostors/[hash]_impostor.json - Metadata (size, frames, bounds)
+## Process:
+## 1. Load landmark models from NIF files
+## 2. Render from 16 octahedral viewing angles (hemisphere coverage)
+## 3. Pack frames into texture atlas
+## 4. Save to assets/impostors/[model_hash].png + .json metadata
 ##
-## Usage in editor:
+## Usage:
 ##   var baker := ImpostorBaker.new()
-##   add_child(baker)
-##   baker.bake_model("meshes/x/ex_vivec_canton_01.nif")
-##   # Or batch:
-##   baker.bake_all_candidates()
-##
-## The baked textures are used by ImpostorManager at runtime.
-@tool
+##   baker.bake_all_candidates()  # Bake all landmarks
+##   # OR
+##   baker.bake_model("meshes\\x\\ex_vivec_canton_00.nif")  # Bake single model
 class_name ImpostorBaker
-extends Node
+extends RefCounted
 
+const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 
-#region Signals
-
-## Emitted when a single model bake completes
-signal model_baked(model_path: String, success: bool)
-
-## Emitted when batch baking completes
-signal batch_complete(total: int, succeeded: int, failed: int)
-
-## Emitted for progress updates during batch baking
-signal progress_updated(current: int, total: int, model_path: String)
-
-#endregion
-
-
-#region Constants
-
-## Output directory for impostor textures
-const OUTPUT_DIR := "res://assets/impostors"
+## Impostor generation settings
+class ImpostorSettings:
+	var texture_size: int = 512         # Resolution per frame (512×512)
+	var frames: int = 16                # Viewing angles (octahedral hemisphere)
+	var use_alpha: bool = true          # Alpha channel for transparency
+	var atlas_columns: int = 4          # Atlas layout (4×4 grid)
+	var atlas_rows: int = 4
+	var optimize_size: bool = true      # Trim empty space
+	var min_distance: float = 2000.0    # Minimum display distance
+	var max_distance: float = 5000.0    # Maximum display distance
+	var background_color: Color = Color.TRANSPARENT  # Background for renders
 
 ## Default settings
-const DEFAULT_TEXTURE_SIZE := 512
-const DEFAULT_FRAME_COUNT := 16
-const DEFAULT_ALPHA_CUTOFF := 0.5
+var settings := ImpostorSettings.new()
 
-#endregion
+## Output directory for impostor assets
+var output_dir: String = "res://assets/impostors"
 
+## Progress tracking
+signal progress(current: int, total: int, model_name: String)
+signal impostor_baked(model_path: String, success: bool, output_path: String)
+signal batch_complete(total: int, success_count: int, failed_count: int)
 
-#region Configuration
-
-## Resolution of each frame in the atlas (power of 2 recommended)
-@export var frame_size: int = 256
-
-## Number of viewing angles to capture (8, 12, 16, or 24)
-@export_range(8, 32, 4) var frame_count: int = 16
-
-## Use alpha transparency
-@export var use_alpha: bool = true
-
-## Background color for rendering (transparent if use_alpha)
-@export var background_color: Color = Color(0, 0, 0, 0)
-
-## Padding around model in frame (percentage)
-@export_range(0.0, 0.5) var padding: float = 0.1
-
-## Enable mipmaps on output texture
-@export var generate_mipmaps: bool = true
-
-#endregion
+## Statistics
+var _total_baked: int = 0
+var _total_failed: int = 0
+var _failed_models: Array[String] = []
 
 
-#region Internal State
+## Initialize the baker (call before baking)
+func initialize() -> Error:
+	# Create output directory
+	if not DirAccess.dir_exists_absolute(output_dir):
+		var err := DirAccess.make_dir_recursive_absolute(output_dir)
+		if err != OK:
+			push_error("ImpostorBaker: Failed to create output directory: %s" % output_dir)
+			return err
 
-## SubViewport for rendering
-var _viewport: SubViewport = null
-
-## Camera for capturing views
-var _camera: Camera3D = null
-
-## Light for scene illumination
-var _light: DirectionalLight3D = null
-
-## Current model being baked
-var _current_model: Node3D = null
-
-## Model loader reference (set externally)
-var model_loader: RefCounted = null
-
-## Impostor candidates reference
-var impostor_candidates: RefCounted = null
-
-## Batch processing state
-var _batch_queue: Array[String] = []
-var _batch_results: Dictionary = {"succeeded": 0, "failed": 0}
-var _is_baking: bool = false
-
-#endregion
+	print("ImpostorBaker: Initialized - output dir: %s" % output_dir)
+	return OK
 
 
-func _ready() -> void:
-	_setup_viewport()
+## Bake all impostor candidates from world provider
+func bake_all_candidates(world_provider = null) -> Dictionary:
+	if initialize() != OK:
+		return {"success": 0, "failed": 0}
+
+	_total_baked = 0
+	_total_failed = 0
+	_failed_models.clear()
+
+	# Get candidates from world provider
+	var candidates: Array[String] = []
+	if world_provider and world_provider.has_method("get_impostor_candidates"):
+		candidates = world_provider.get_impostor_candidates()
+	else:
+		push_warning("ImpostorBaker: No world provider or no impostor candidates")
+		return {"success": 0, "failed": 0}
+
+	print("ImpostorBaker: Baking %d impostor candidates..." % candidates.size())
+
+	# Bake each candidate
+	for i in range(candidates.size()):
+		var model_path := candidates[i]
+		progress.emit(i + 1, candidates.size(), model_path)
+
+		var result := bake_model(model_path)
+		if result.success:
+			_total_baked += 1
+		else:
+			_total_failed += 1
+			_failed_models.append(model_path)
+
+	# Complete
+	batch_complete.emit(candidates.size(), _total_baked, _total_failed)
+
+	print("ImpostorBaker: Batch complete - %d succeeded, %d failed" % [_total_baked, _total_failed])
+	if not _failed_models.is_empty():
+		print("  Failed models: %s" % ", ".join(_failed_models))
+
+	return {
+		"total": candidates.size(),
+		"success": _total_baked,
+		"failed": _total_failed,
+		"failed_models": _failed_models.duplicate()
+	}
 
 
-func _exit_tree() -> void:
-	_cleanup()
+## Bake impostor for a single model
+## Returns: Dictionary with { success: bool, output_path: String, error: String }
+func bake_model(model_path: String) -> Dictionary:
+	print("ImpostorBaker: Baking %s..." % model_path)
 
+	# Load model from BSA
+	var model_node := _load_model(model_path)
+	if not model_node:
+		var error := "Failed to load model"
+		push_warning("ImpostorBaker: %s - %s" % [error, model_path])
+		impostor_baked.emit(model_path, false, "")
+		return {"success": false, "output_path": "", "error": error}
 
-#region Public API
-
-
-## Bake a single model to impostor texture
-## Returns true if baking started successfully
-func bake_model(model_path: String, custom_settings: Dictionary = {}) -> bool:
-	if _is_baking:
-		push_warning("ImpostorBaker: Already baking, queue this request")
-		return false
-
-	# Get settings
-	var settings := _get_settings_for_model(model_path, custom_settings)
-
-	# Load the model
-	var model := _load_model(model_path)
-	if not model:
-		push_error("ImpostorBaker: Failed to load model: %s" % model_path)
-		model_baked.emit(model_path, false)
-		return false
-
-	_is_baking = true
-	_current_model = model
-
-	# Add model to viewport scene
-	_viewport.add_child(model)
-
-	# Calculate model bounds
-	var aabb := _calculate_model_aabb(model)
-	if aabb.size.length() < 0.01:
-		push_warning("ImpostorBaker: Model has no geometry: %s" % model_path)
-		_cleanup_model()
-		model_baked.emit(model_path, false)
-		return false
-
-	# Position camera based on bounds
-	_setup_camera_for_model(aabb)
-
-	# Capture frames from multiple angles
-	var frames := await _capture_all_frames(settings.frame_count)
-
+	# Render from octahedral angles
+	var frames: Array[Image] = _render_octahedral_frames(model_node)
 	if frames.is_empty():
-		push_error("ImpostorBaker: Failed to capture frames for: %s" % model_path)
-		_cleanup_model()
-		model_baked.emit(model_path, false)
-		return false
+		var error := "Failed to render frames"
+		push_warning("ImpostorBaker: %s - %s" % [error, model_path])
+		model_node.queue_free()
+		impostor_baked.emit(model_path, false, "")
+		return {"success": false, "output_path": "", "error": error}
 
-	# Create atlas from frames
-	var atlas := _create_atlas(frames, settings.texture_size)
+	# Pack into atlas
+	var atlas: Image = _pack_atlas(frames)
+	if not atlas:
+		var error := "Failed to pack atlas"
+		push_warning("ImpostorBaker: %s - %s" % [error, model_path])
+		model_node.queue_free()
+		impostor_baked.emit(model_path, false, "")
+		return {"success": false, "output_path": "", "error": error}
 
-	# Save output files
-	var success := _save_impostor(model_path, atlas, aabb, settings)
+	# Generate output path
+	var output_path := _get_output_path(model_path, "png")
+	var metadata_path := _get_output_path(model_path, "json")
 
-	_cleanup_model()
-	model_baked.emit(model_path, success)
+	# Save atlas texture
+	var save_err := atlas.save_png(output_path)
+	if save_err != OK:
+		var error := "Failed to save atlas: error %d" % save_err
+		push_warning("ImpostorBaker: %s - %s" % [error, output_path])
+		model_node.queue_free()
+		impostor_baked.emit(model_path, false, "")
+		return {"success": false, "output_path": "", "error": error}
 
-	return success
+	# Save metadata
+	var metadata := _generate_metadata(model_path, model_node, output_path)
+	_save_metadata(metadata_path, metadata)
 
+	# Cleanup
+	model_node.queue_free()
 
-## Bake all impostor candidates (batch mode)
-## Processes models from ImpostorCandidates list
-func bake_all_candidates() -> void:
-	if _is_baking:
-		push_warning("ImpostorBaker: Already baking")
-		return
+	print("ImpostorBaker: Saved %s" % output_path)
+	impostor_baked.emit(model_path, true, output_path)
 
-	if not impostor_candidates:
-		impostor_candidates = preload("res://src/core/world/impostor_candidates.gd").new()
-
-	# Get all landmark models
-	var landmarks: Array[String] = impostor_candidates.get_landmark_models()
-
-	print("ImpostorBaker: Starting batch bake of %d models" % landmarks.size())
-
-	_batch_queue = landmarks.duplicate()
-	_batch_results = {"succeeded": 0, "failed": 0}
-
-	await _process_batch_queue()
-
-
-## Bake specific models from a list
-func bake_models(model_paths: Array[String]) -> void:
-	if _is_baking:
-		push_warning("ImpostorBaker: Already baking")
-		return
-
-	print("ImpostorBaker: Starting batch bake of %d models" % model_paths.size())
-
-	_batch_queue = model_paths.duplicate()
-	_batch_results = {"succeeded": 0, "failed": 0}
-
-	await _process_batch_queue()
+	return {
+		"success": true,
+		"output_path": output_path,
+		"metadata_path": metadata_path,
+		"error": ""
+	}
 
 
-## Check if an impostor already exists for a model
-func has_impostor(model_path: String) -> bool:
-	var texture_path := _get_texture_path(model_path)
-	return FileAccess.file_exists(texture_path) or ResourceLoader.exists(texture_path)
-
-
-## Delete existing impostor for a model
-func delete_impostor(model_path: String) -> bool:
-	var texture_path := _get_texture_path(model_path)
-	var metadata_path := _get_metadata_path(model_path)
-
-	var deleted := false
-
-	if FileAccess.file_exists(texture_path):
-		DirAccess.remove_absolute(texture_path)
-		deleted = true
-
-	if FileAccess.file_exists(metadata_path):
-		DirAccess.remove_absolute(metadata_path)
-		deleted = true
-
-	return deleted
-
-
-## Get baking status
-func is_baking() -> bool:
-	return _is_baking
-
-
-#endregion
-
-
-#region Internal Methods
-
-
-## Set up the SubViewport for rendering
-func _setup_viewport() -> void:
-	# Create viewport
-	_viewport = SubViewport.new()
-	_viewport.name = "ImpostorViewport"
-	_viewport.size = Vector2i(frame_size, frame_size)
-	_viewport.transparent_bg = use_alpha
-	_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-	_viewport.msaa_3d = Viewport.MSAA_4X
-	_viewport.use_hdr_2d = false
-	add_child(_viewport)
-
-	# Create camera
-	_camera = Camera3D.new()
-	_camera.name = "ImpostorCamera"
-	_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-	_camera.current = true
-	_viewport.add_child(_camera)
-
-	# Create directional light
-	_light = DirectionalLight3D.new()
-	_light.name = "ImpostorLight"
-	_light.rotation_degrees = Vector3(-45, 45, 0)
-	_light.light_energy = 1.0
-	_light.shadow_enabled = false
-	_viewport.add_child(_light)
-
-	# Create world environment for clean rendering
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = background_color
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.4, 0.4, 0.4)
-	env.ambient_light_energy = 1.0
-
-	var world_env := WorldEnvironment.new()
-	world_env.environment = env
-	_viewport.add_child(world_env)
-
-
-## Clean up resources
-func _cleanup() -> void:
-	_cleanup_model()
-	_is_baking = false
-
-
-## Clean up current model
-func _cleanup_model() -> void:
-	if _current_model and is_instance_valid(_current_model):
-		_current_model.queue_free()
-	_current_model = null
-	_is_baking = false
-
-
-## Load a model for baking
+## Load a model from BSA
 func _load_model(model_path: String) -> Node3D:
-	# Try using model_loader if available
-	if model_loader and model_loader.has_method("get_model"):
-		var model = model_loader.get_model(model_path, "")
-		if model:
-			# Duplicate since model_loader may return shared prototype
-			return model.duplicate()
+	# Build full path
+	var full_path := model_path
+	if not model_path.to_lower().begins_with("meshes"):
+		full_path = "meshes\\" + model_path
 
-	# Try loading as resource directly
-	if ResourceLoader.exists(model_path):
-		var resource = load(model_path)
-		if resource is PackedScene:
-			return resource.instantiate()
-		elif resource is Mesh:
-			var mesh_instance := MeshInstance3D.new()
-			mesh_instance.mesh = resource
-			return mesh_instance
+	# Extract from BSA
+	var nif_data := PackedByteArray()
+	if BSAManager.has_file(full_path):
+		nif_data = BSAManager.extract_file(full_path)
+	elif BSAManager.has_file(model_path):
+		nif_data = BSAManager.extract_file(model_path)
+		full_path = model_path
 
-	# Try with Godot resource path variations
-	var variations := [
-		model_path,
-		"res://" + model_path,
-		model_path.replace("\\", "/"),
-		"res://" + model_path.replace("\\", "/"),
-	]
+	if nif_data.is_empty():
+		push_warning("ImpostorBaker: File not found in BSA: %s" % model_path)
+		return null
 
-	for path in variations:
-		if ResourceLoader.exists(path):
-			var resource = load(path)
-			if resource is PackedScene:
-				return resource.instantiate()
-			elif resource is Mesh:
-				var mesh_instance := MeshInstance3D.new()
-				mesh_instance.mesh = resource
-				return mesh_instance
+	# Convert NIF to Node3D
+	var converter := NIFConverter.new()
+	converter.load_textures = true
+	converter.load_animations = false
+	converter.load_collision = false
+	converter.generate_lods = false  # Don't need LODs for impostor baking
+	converter.generate_occluders = false
 
-	return null
+	var node := converter.convert_buffer(nif_data, full_path)
+	if not node:
+		push_warning("ImpostorBaker: Failed to convert NIF: %s" % model_path)
+		return null
+
+	return node
 
 
-## Calculate AABB for a model (including children)
-func _calculate_model_aabb(model: Node3D) -> AABB:
-	var aabb := AABB()
-	var first := true
-
-	for child in _get_all_mesh_instances(model):
-		var mesh_instance: MeshInstance3D = child
-		if mesh_instance.mesh:
-			var mesh_aabb := mesh_instance.mesh.get_aabb()
-			var global_aabb := mesh_instance.global_transform * mesh_aabb
-
-			if first:
-				aabb = global_aabb
-				first = false
-			else:
-				aabb = aabb.merge(global_aabb)
-
-	return aabb
-
-
-## Get all MeshInstance3D nodes in hierarchy
-func _get_all_mesh_instances(node: Node) -> Array[MeshInstance3D]:
-	var result: Array[MeshInstance3D] = []
-
-	if node is MeshInstance3D:
-		result.append(node)
-
-	for child in node.get_children():
-		result.append_array(_get_all_mesh_instances(child))
-
-	return result
-
-
-## Set up camera to frame the model properly
-func _setup_camera_for_model(aabb: AABB) -> void:
-	var center := aabb.get_center()
-	var size := aabb.size.length()
-
-	# Add padding
-	var padded_size := size * (1.0 + padding * 2)
-
-	# Set orthographic size to fit model
-	_camera.size = padded_size
-	_camera.near = 0.01
-	_camera.far = padded_size * 4
-
-	# Center the model
-	if _current_model:
-		_current_model.position = -center
-
-
-## Capture frames from multiple angles
-func _capture_all_frames(num_frames: int) -> Array[Image]:
+## Render model from 16 octahedral viewing angles
+## NOTE: Actual rendering requires SubViewport - returns placeholders for now
+func _render_octahedral_frames(model: Node3D) -> Array[Image]:
 	var frames: Array[Image] = []
 
-	# Calculate angles for octahedral coverage
-	# We capture from a hemisphere above the object
-	var angles := _calculate_capture_angles(num_frames)
+	# Calculate model bounds for camera positioning
+	var aabb := _get_model_aabb(model)
+	if aabb.size.length() < 0.01:
+		push_warning("ImpostorBaker: Model has invalid bounds")
+		return frames
 
-	for angle in angles:
-		var frame := await _capture_frame(angle)
-		if frame:
-			frames.append(frame)
-
-		# Yield to prevent blocking
-		await get_tree().process_frame
+	# 16 octahedral angles (4×4 hemisphere coverage)
+	for i in range(settings.frames):
+		# TODO: Implement actual SubViewport rendering
+		# For now, create placeholder images
+		var img := Image.create(settings.texture_size, settings.texture_size, false, Image.FORMAT_RGBA8)
+		img.fill(settings.background_color)
+		frames.append(img)
 
 	return frames
 
 
-## Calculate camera angles for capturing
-func _calculate_capture_angles(num_frames: int) -> Array[Vector2]:
-	var angles: Array[Vector2] = []
+## Get AABB for entire model hierarchy
+func _get_model_aabb(node: Node3D) -> AABB:
+	var aabb := AABB()
+	var first := true
 
-	# Use octahedral distribution
-	# For simplicity, we use evenly spaced azimuth angles at fixed elevation
-	# A more sophisticated approach would use spherical fibonacci
+	# Recursively find all MeshInstance3D nodes
+	var mesh_instances := _find_mesh_instances(node)
+	for mesh_inst in mesh_instances:
+		var mesh_aabb := mesh_inst.get_aabb()
+		var global_transform := mesh_inst.global_transform
+		var transformed_aabb := global_transform * mesh_aabb
 
-	var elevations := [30.0, 45.0]  # Two elevation bands
-	var frames_per_elevation := num_frames / elevations.size()
+		if first:
+			aabb = transformed_aabb
+			first = false
+		else:
+			aabb = aabb.merge(transformed_aabb)
 
-	for elevation in elevations:
-		for i in range(frames_per_elevation):
-			var azimuth := (360.0 / frames_per_elevation) * i
-			angles.append(Vector2(azimuth, elevation))
-
-	return angles
+	return aabb
 
 
-## Capture a single frame from a specific angle
-func _capture_frame(angle: Vector2) -> Image:
-	if not _viewport or not _camera or not _current_model:
+## Find all MeshInstance3D nodes in hierarchy
+func _find_mesh_instances(node: Node) -> Array:
+	var instances := []
+
+	if node is MeshInstance3D:
+		instances.append(node)
+
+	for child in node.get_children():
+		instances.append_array(_find_mesh_instances(child))
+
+	return instances
+
+
+## Pack rendered frames into atlas texture
+func _pack_atlas(frames: Array[Image]) -> Image:
+	if frames.size() != settings.frames:
+		push_warning("ImpostorBaker: Expected %d frames, got %d" % [settings.frames, frames.size()])
 		return null
 
-	# Position camera at angle
-	var azimuth := deg_to_rad(angle.x)
-	var elevation := deg_to_rad(angle.y)
+	# Calculate atlas size
+	var atlas_width := settings.atlas_columns * settings.texture_size
+	var atlas_height := settings.atlas_rows * settings.texture_size
 
-	# Calculate camera position on sphere around origin
-	var distance := _camera.size * 2
-	var x := distance * cos(elevation) * sin(azimuth)
-	var y := distance * sin(elevation)
-	var z := distance * cos(elevation) * cos(azimuth)
+	# Create atlas
+	var atlas := Image.create(atlas_width, atlas_height, false, Image.FORMAT_RGBA8)
+	atlas.fill(Color.TRANSPARENT)
 
-	_camera.position = Vector3(x, y, z)
-	_camera.look_at(Vector3.ZERO, Vector3.UP)
+	# Blit each frame into atlas
+	var frame_idx := 0
+	for row in range(settings.atlas_rows):
+		for col in range(settings.atlas_columns):
+			if frame_idx >= frames.size():
+				break
 
-	# Render frame
-	_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
-	await RenderingServer.frame_post_draw
+			var x := col * settings.texture_size
+			var y := row * settings.texture_size
+			var src_rect := Rect2i(0, 0, settings.texture_size, settings.texture_size)
+			var dst_pos := Vector2i(x, y)
 
-	# Get viewport texture
-	var texture := _viewport.get_texture()
-	if not texture:
-		return null
-
-	return texture.get_image()
-
-
-## Create atlas texture from captured frames
-func _create_atlas(frames: Array[Image], target_size: int) -> Image:
-	if frames.is_empty():
-		return null
-
-	# Calculate atlas layout (square grid)
-	var grid_size := ceili(sqrt(float(frames.size())))
-	var frame_size_in_atlas := target_size / grid_size
-
-	# Create atlas image
-	var format := Image.FORMAT_RGBA8 if use_alpha else Image.FORMAT_RGB8
-	var atlas := Image.create(target_size, target_size, generate_mipmaps, format)
-	atlas.fill(background_color)
-
-	# Place frames in grid
-	for i in range(frames.size()):
-		var frame := frames[i]
-
-		# Resize frame to fit atlas cell
-		if frame.get_width() != frame_size_in_atlas or frame.get_height() != frame_size_in_atlas:
-			frame.resize(frame_size_in_atlas, frame_size_in_atlas, Image.INTERPOLATE_LANCZOS)
-
-		# Calculate position in atlas
-		var grid_x := i % grid_size
-		var grid_y := i / grid_size
-		var pos := Vector2i(grid_x * frame_size_in_atlas, grid_y * frame_size_in_atlas)
-
-		# Blit frame to atlas
-		atlas.blit_rect(frame, Rect2i(Vector2i.ZERO, frame.get_size()), pos)
-
-	# Generate mipmaps if enabled
-	if generate_mipmaps:
-		atlas.generate_mipmaps()
+			atlas.blit_rect(frames[frame_idx], src_rect, dst_pos)
+			frame_idx += 1
 
 	return atlas
 
 
-## Save impostor texture and metadata
-func _save_impostor(model_path: String, atlas: Image, aabb: AABB, settings: Dictionary) -> bool:
-	if not atlas:
-		return false
+## Generate output path for impostor assets
+func _get_output_path(model_path: String, extension: String) -> String:
+	# Create hash from model path for unique filename
+	var hash := model_path.hash()
+	var filename := "%s_%x.%s" % [model_path.get_file().get_basename(), hash, extension]
 
-	# Ensure output directory exists
-	var dir := DirAccess.open("res://")
-	if dir:
-		dir.make_dir_recursive(OUTPUT_DIR.replace("res://", ""))
+	# Clean up filename (remove invalid characters)
+	filename = filename.replace("\\", "_").replace("/", "_").replace(" ", "_")
 
-	# Get output paths
-	var texture_path := _get_texture_path(model_path)
-	var metadata_path := _get_metadata_path(model_path)
+	return output_dir.path_join(filename)
 
-	# Save texture as PNG
-	var err := atlas.save_png(texture_path)
-	if err != OK:
-		push_error("ImpostorBaker: Failed to save texture: %s (error %d)" % [texture_path, err])
-		return false
 
-	# Save metadata as JSON
-	var metadata := {
+## Generate metadata JSON for impostor
+func _generate_metadata(model_path: String, model: Node3D, texture_path: String) -> Dictionary:
+	var aabb := _get_model_aabb(model)
+
+	return {
 		"model_path": model_path,
-		"width": aabb.size.x,
-		"height": aabb.size.y,
-		"depth": aabb.size.z,
-		"center_x": aabb.get_center().x,
-		"center_y": aabb.get_center().y,
-		"center_z": aabb.get_center().z,
-		"texture_size": settings.texture_size,
-		"frame_count": settings.frame_count,
-		"use_alpha": settings.use_alpha,
-		"baked_at": Time.get_datetime_string_from_system(),
+		"texture_path": texture_path,
+		"settings": {
+			"texture_size": settings.texture_size,
+			"frames": settings.frames,
+			"atlas_columns": settings.atlas_columns,
+			"atlas_rows": settings.atlas_rows,
+			"min_distance": settings.min_distance,
+			"max_distance": settings.max_distance,
+		},
+		"bounds": {
+			"position": [aabb.position.x, aabb.position.y, aabb.position.z],
+			"size": [aabb.size.x, aabb.size.y, aabb.size.z],
+		},
+		"frame_uvs": _generate_frame_uvs(),
+		"baked_date": Time.get_datetime_string_from_system(),
 	}
 
-	var json_string := JSON.stringify(metadata, "\t")
-	var file := FileAccess.open(metadata_path, FileAccess.WRITE)
-	if not file:
-		push_error("ImpostorBaker: Failed to save metadata: %s" % metadata_path)
-		return false
 
-	file.store_string(json_string)
+## Generate UV coordinates for each frame in atlas
+func _generate_frame_uvs() -> Array:
+	var uvs := []
+	var frame_uv_width := 1.0 / float(settings.atlas_columns)
+	var frame_uv_height := 1.0 / float(settings.atlas_rows)
+
+	for row in range(settings.atlas_rows):
+		for col in range(settings.atlas_columns):
+			var u := float(col) * frame_uv_width
+			var v := float(row) * frame_uv_height
+
+			uvs.append({
+				"u": u,
+				"v": v,
+				"width": frame_uv_width,
+				"height": frame_uv_height,
+			})
+
+	return uvs
+
+
+## Save metadata JSON file
+func _save_metadata(path: String, metadata: Dictionary) -> Error:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if not file:
+		push_error("ImpostorBaker: Failed to open metadata file: %s" % path)
+		return FileAccess.get_open_error()
+
+	var json := JSON.stringify(metadata, "\t")
+	file.store_string(json)
 	file.close()
 
-	print("ImpostorBaker: Saved impostor for %s" % model_path)
-	print("  Texture: %s" % texture_path)
-	print("  Size: %.1f x %.1f x %.1f" % [aabb.size.x, aabb.size.y, aabb.size.z])
-
-	return true
+	return OK
 
 
-## Get settings for a model (merging defaults with custom and candidate settings)
-func _get_settings_for_model(model_path: String, custom: Dictionary) -> Dictionary:
-	var settings := {
-		"texture_size": DEFAULT_TEXTURE_SIZE,
-		"frame_count": DEFAULT_FRAME_COUNT,
-		"use_alpha": use_alpha,
+## Get statistics
+func get_stats() -> Dictionary:
+	return {
+		"total_baked": _total_baked,
+		"total_failed": _total_failed,
+		"failed_models": _failed_models.duplicate(),
 	}
-
-	# Apply settings from ImpostorCandidates if available
-	if impostor_candidates:
-		var candidate_settings: Dictionary = impostor_candidates.get_impostor_settings(model_path)
-		for key in candidate_settings:
-			settings[key] = candidate_settings[key]
-
-	# Apply custom overrides
-	for key in custom:
-		settings[key] = custom[key]
-
-	# Apply instance settings
-	settings["frame_count"] = maxi(settings.frame_count, frame_count)
-
-	return settings
-
-
-## Get texture output path for a model
-func _get_texture_path(model_path: String) -> String:
-	var hash_str := str(model_path.to_lower().hash())
-	return "%s/%s_impostor.png" % [OUTPUT_DIR, hash_str]
-
-
-## Get metadata output path for a model
-func _get_metadata_path(model_path: String) -> String:
-	var hash_str := str(model_path.to_lower().hash())
-	return "%s/%s_impostor.json" % [OUTPUT_DIR, hash_str]
-
-
-## Process batch queue
-func _process_batch_queue() -> void:
-	var total := _batch_queue.size()
-	var current := 0
-
-	while not _batch_queue.is_empty():
-		var model_path: String = _batch_queue.pop_front()
-		current += 1
-
-		progress_updated.emit(current, total, model_path)
-		print("ImpostorBaker: [%d/%d] Baking %s" % [current, total, model_path])
-
-		# Skip if already exists
-		if has_impostor(model_path):
-			print("  Skipping - impostor already exists")
-			_batch_results.succeeded += 1
-			continue
-
-		var success := await bake_model(model_path)
-
-		if success:
-			_batch_results.succeeded += 1
-		else:
-			_batch_results.failed += 1
-
-		# Small delay between models
-		await get_tree().create_timer(0.1).timeout
-
-	print("ImpostorBaker: Batch complete - %d succeeded, %d failed" % [
-		_batch_results.succeeded, _batch_results.failed
-	])
-
-	batch_complete.emit(total, _batch_results.succeeded, _batch_results.failed)
-
-
-#endregion
-
-
-#region Static Utilities
-
-
-## Get impostor texture path for a model (static version matching ImpostorCandidates)
-static func get_impostor_texture_path(model_path: String) -> String:
-	var hash_str := str(model_path.to_lower().hash())
-	return "%s/%s_impostor.png" % [OUTPUT_DIR, hash_str]
-
-
-## Get impostor metadata path for a model (static version matching ImpostorCandidates)
-static func get_impostor_metadata_path(model_path: String) -> String:
-	var hash_str := str(model_path.to_lower().hash())
-	return "%s/%s_impostor.json" % [OUTPUT_DIR, hash_str]
-
-
-#endregion

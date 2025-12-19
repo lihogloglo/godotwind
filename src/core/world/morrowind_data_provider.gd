@@ -285,3 +285,103 @@ func _encode_control_value(base_tex: int, overlay_tex: int, blend: int) -> float
 	bytes.resize(4)
 	bytes.encode_u32(0, value)
 	return bytes.decode_float(0)
+
+
+#region Distant Rendering Configuration
+
+
+## Get tier unit counts optimized for Morrowind's small 117m cells
+func get_tier_unit_counts() -> Dictionary:
+	# Morrowind cells are small (117m), so we can have more per tier
+	# These limits prevent queue overflow while providing good view distance
+	const DistanceTier := preload("res://src/core/world/distance_tier_manager.gd")
+	return {
+		DistanceTier.Tier.NEAR: 50,      # ~585m radius (full 3D geometry)
+		DistanceTier.Tier.MID: 100,      # ~1170m radius (pre-merged meshes)
+		DistanceTier.Tier.FAR: 200,      # ~2340m radius (impostors)
+		DistanceTier.Tier.HORIZON: 0,    # Skybox only (no per-cell processing)
+	}
+
+
+## Morrowind max view distance (foggy volcanic island aesthetic)
+func get_max_view_distance() -> float:
+	return 5000.0  # 5km max view distance
+
+
+## Distant rendering support (requires pre-baked assets)
+func supports_distant_rendering() -> bool:
+	# Check if pre-baked assets exist
+	var has_impostors := DirAccess.dir_exists_absolute("res://assets/impostors")
+	var has_merged := DirAccess.dir_exists_absolute("res://assets/merged_cells")
+
+	# Only enable if assets are ready (or return true to force enable for testing)
+	# For now, return false until preprocessing is complete
+	return false  # TODO: Enable after running MorrowindPreprocessor
+
+
+## Get impostor candidates for Morrowind landmarks
+func get_impostor_candidates() -> Array[String]:
+	# Major landmarks that should be visible from distance
+	return [
+		# Vivec cantons (massive)
+		"meshes\\x\\ex_vivec_canton_00.nif",
+		"meshes\\x\\ex_vivec_canton_01.nif",
+		"meshes\\x\\ex_vivec_canton_02.nif",
+		"meshes\\x\\ex_vivec_plaza_01.nif",
+
+		# Strongholds
+		"meshes\\x\\ex_stronghold_01.nif",
+		"meshes\\x\\ex_stronghold_02.nif",
+		"meshes\\x\\ex_hlaalu_b_21.nif",  # Hlaalu manor
+		"meshes\\x\\ex_redoran_b_21.nif",  # Redoran manor
+
+		# Telvanni towers
+		"meshes\\x\\ex_t_tower_01.nif",
+		"meshes\\x\\ex_t_tower_02.nif",
+		"meshes\\x\\ex_t_tower_03.nif",
+
+		# Dwemer ruins
+		"meshes\\x\\ex_dwrv_ruin00.nif",
+		"meshes\\x\\ex_dwrv_ruin01.nif",
+		"meshes\\x\\ex_dwrv_tower00.nif",
+
+		# Ghostfence
+		"meshes\\x\\ex_ghostfence_01.nif",
+		"meshes\\x\\ex_ghostfence_02.nif",
+
+		# Daedric shrines
+		"meshes\\x\\ex_dae_shrine_01.nif",
+		"meshes\\x\\ex_dae_shrine_02.nif",
+
+		# Large trees (for forest visibility)
+		"meshes\\f\\flora_tree_02.nif",
+		"meshes\\f\\flora_tree_03.nif",
+		"meshes\\f\\flora_tree_04.nif",
+		"meshes\\f\\flora_tree_06.nif",
+
+		# Red Mountain features
+		"meshes\\x\\ex_redmtn_plant_01.nif",
+		"meshes\\x\\ex_redmtn_rock_01.nif",
+	]
+
+
+## Get horizon layer for Vvardenfell silhouette
+func get_horizon_layer_path() -> String:
+	return "res://assets/horizons/vvardenfell_horizon.png"
+
+
+## Morrowind uses standard 117m cells
+func get_cell_size_meters() -> float:
+	return CS.CELL_SIZE_GODOT
+
+
+## Override tier distances for foggy Morrowind atmosphere
+func get_tier_distances() -> Dictionary:
+	# Reduce FAR tier slightly due to volcanic fog
+	const DistanceTier := preload("res://src/core/world/distance_tier_manager.gd")
+	return {
+		DistanceTier.Tier.FAR: 4000.0,  # 4km instead of default 5km
+	}
+
+
+#endregion
