@@ -14,10 +14,9 @@ A modern open-world framework for Godot 4.5+ using Morrowind as a reference impl
 
 ## What Doesn't Work Yet
 
-- Player controller (using fly camera)
 - Combat, magic, AI, dialogue, quests, inventory
-- Weather and day/night cycle
-- Water rendering (framework exists, not integrated)
+- Weather and day/night cycle (Sky3D ready)
+- Water rendering (OceanManager exists, not integrated)
 
 ## Quick Start
 
@@ -27,11 +26,11 @@ A modern open-world framework for Godot 4.5+ using Morrowind as a reference impl
 
 **Controls:**
 - ZQSD/WASD - Move
-- Mouse - Look
-- Shift - Fast
-- Space/Ctrl - Up/Down
-- M - Toggle models
-- O - Toggle ocean
+- Mouse - Look (Right-click to capture)
+- Shift/Space - Down/Up
+- Ctrl - Speed boost
+- P - Toggle player/fly camera
+- TAB - Switch to Interior mode
 - F3 - Stats overlay
 
 ## Project Structure
@@ -44,6 +43,9 @@ src/core/
 ├── texture/    # DDS/TGA loading
 ├── streaming/  # Async background processing
 ├── water/      # Ocean system (framework ready)
+├── deformation/# RTT deformation system
+├── player/     # Fly camera + FPS controller
+├── console/    # Developer console
 └── world/      # Streaming, terrain, cells
 
 src/tools/

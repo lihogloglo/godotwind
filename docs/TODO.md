@@ -2,22 +2,7 @@
 
 ## High Impact Features
 
-### 1. RTT Ground Deformation System
-Production-ready ground deformation (snow, mud, ash) with grass integration.
-
-**Tasks:**
-- [ ] Implement core RTT system (DeformationManager, DeformationRenderer)
-- [ ] Create deformation stamp and recovery shaders
-- [ ] Integrate with GenericTerrainStreamer (region streaming)
-- [ ] Modify Terrain3D shader for vertex displacement
-- [ ] Implement grass system with deformation support
-- [ ] Add persistence (save/load deformation textures)
-- [ ] Optimize with LOD and batching
-
-**Files:** See `docs/RTT_DEFORMATION_SYSTEM_DESIGN.md` for full details
-**Quick Start:** See `docs/RTT_DEFORMATION_QUICK_START.md`
-
-### 2. Water System Integration
+### 1. Water System Integration
 The ocean framework exists in `src/core/water/` but isn't connected to the main scene.
 
 **Tasks:**
@@ -28,7 +13,7 @@ The ocean framework exists in `src/core/water/` but isn't connected to the main 
 
 **Files:** `ocean_manager.gd`, `wave_generator.gd`, `shore_mask_generator.gd`
 
-### 3. Seamless Interior Transitions
+### 2. Seamless Interior Transitions
 Currently interiors are separate. Goal: walk through doors with no loading screen.
 
 **Tasks:**
@@ -39,7 +24,7 @@ Currently interiors are separate. Goal: walk through doors with no loading scree
 
 **Files:** `cell_manager.gd`, `world_streaming_manager.gd`
 
-### 4. Weather & Day/Night
+### 3. Weather & Day/Night
 Sky3D plugin is installed but not integrated.
 
 **Tasks:**
@@ -50,7 +35,7 @@ Sky3D plugin is installed but not integrated.
 
 ## Gameplay Foundation
 
-### 5. Player Controller
+### 4. Player Controller
 Toggle between fly camera and proper character controller with P key.
 
 **Tasks:**
@@ -62,7 +47,7 @@ Toggle between fly camera and proper character controller with P key.
 - [ ] Swimming (water Area3D detection)
 - [ ] Third-person camera option
 
-### 6. Basic NPC Presence
+### 5. Basic NPC Presence
 NPCs are loaded but static.
 
 **Tasks:**
@@ -71,7 +56,7 @@ NPCs are loaded but static.
 - [ ] NavMesh generation for cells
 - [ ] Dialogue initiation (click to talk)
 
-### 7. Dialogue UI
+### 6. Dialogue UI
 Records are parsed, need UI.
 
 **Tasks:**
@@ -82,7 +67,7 @@ Records are parsed, need UI.
 
 ## Performance & Polish
 
-### 8. Draw Call Reduction
+### 7. Draw Call Reduction
 Currently ~8000 draw calls with full objects.
 
 **Tasks:**
@@ -90,7 +75,7 @@ Currently ~8000 draw calls with full objects.
 - [ ] Mesh merging for static objects per cell
 - [ ] Verify Terrain3D LOD settings optimal
 
-### 9. Occlusion Culling
+### 8. Occlusion Culling
 Godot's baked occlusion has limitations.
 
 **Tasks:**
@@ -100,7 +85,7 @@ Godot's baked occlusion has limitations.
 
 ## Technical Debt
 
-### 10. Testing
+### 9. Testing
 No automated tests currently.
 
 **Tasks:**
@@ -108,7 +93,7 @@ No automated tests currently.
 - [ ] Integration tests for cell loading
 - [ ] Performance benchmarks
 
-### 11. NIF Edge Cases
+### 10. NIF Edge Cases
 Some NIF features not fully supported.
 
 **Tasks:**
@@ -132,6 +117,7 @@ These were in previous TODOs but are now done:
 - [x] La Palma terrain demo
 - [x] Terrain edge stitching
 - [x] Combined regions (4x4 cells per Terrain3D region)
+- [x] RTT deformation system (DeformationManager, shaders, streaming)
 
 ---
 
@@ -139,7 +125,6 @@ These were in previous TODOs but are now done:
 
 | Task | Primary Files |
 |------|---------------|
-| RTT Deformation | See `docs/RTT_DEFORMATION_SYSTEM_DESIGN.md` |
 | Water integration | `world_explorer.gd`, `ocean_manager.gd` |
 | Interior transitions | `cell_manager.gd`, `world_streaming_manager.gd` |
 | Weather | `world_explorer.gd`, need new sky controller |

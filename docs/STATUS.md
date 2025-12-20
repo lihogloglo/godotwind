@@ -6,6 +6,7 @@
 |--------|--------|-------|
 | **World Streaming** | ✅ Complete | Time-budgeted async, priority queues, no hitches |
 | **Terrain** | ✅ Complete | Terrain3D integration, multi-region, edge stitching |
+| **Deformation System** | ✅ Complete | RTT-based ground deformation (snow, mud, ash) |
 | **Cell Loading** | ✅ Complete | Async API, object instantiation, pooling |
 | **ESM Parsing** | ✅ Complete | 47 record types, all game data accessible |
 | **NIF Conversion** | ✅ 90% | Geometry, materials, skeletons, collision, animations |
@@ -97,6 +98,12 @@ src/core/
 │   ├── wave_generator.gd
 │   ├── shore_mask_generator.gd
 │   └── buoyant_body.gd
+├── deformation/            # ✅ RTT deformation system
+│   ├── deformation_manager.gd  # Autoload singleton
+│   ├── deformation_renderer.gd
+│   ├── deformation_streamer.gd
+│   ├── deformation_compositor.gd
+│   └── terrain_deformation_integration.gd
 ├── world/                  # ✅ World streaming
 │   ├── world_streaming_manager.gd
 │   ├── cell_manager.gd
@@ -109,13 +116,11 @@ src/core/
 └── coordinate_system.gd    # ✅ Global utility
 ```
 
-## Deleted Systems (Removed in Recent Cleanup)
+## System Evolution
 
-These files are referenced in old docs but no longer exist:
-- `object_lod_manager.gd` - Replaced by native VisibilityRange
-- `morrowind_coords.gd` - Thin wrapper, merged into CoordinateSystem
-- `terrain_streamer.gd` - Replaced by GenericTerrainStreamer
-- `multi_terrain_manager.gd` - Never existed, functionality in GenericTerrainStreamer
+- Object LOD now uses native Godot VisibilityRange nodes
+- Coordinate conversion consolidated in CoordinateSystem.gd
+- Terrain streaming via GenericTerrainStreamer (multi-world support)
 
 ## Known Issues
 

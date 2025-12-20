@@ -7,7 +7,7 @@ OpenMW port to Godot Engine - Exploring the world of Morrowind in Godot 4.
 1. **Configure Morrowind Data Path**
    - Run the Settings Tool: `scenes/settings_tool.tscn`
    - Click "Auto-Detect" or browse to your Morrowind installation
-   - See [SETTINGS.md](SETTINGS.md) for detailed configuration options
+   - See [docs/SETTINGS.md](docs/SETTINGS.md) for configuration
 
 2. **Run the Project**
    - Main scene: `scenes/world_explorer.tscn`
@@ -87,7 +87,7 @@ godotwind/
 
 ## Configuration
 
-See [SETTINGS.md](SETTINGS.md) for detailed configuration options.
+See [docs/SETTINGS.md](docs/SETTINGS.md) for configuration.
 
 **Priority order:**
 1. Environment variable: `MORROWIND_DATA_PATH`
@@ -126,9 +126,8 @@ See LICENSE file for details.
 
 ## Recent Changes
 
-**v2.0 - Simplification Update**
 - Consolidated into 2 main tools (World Explorer, NIF Viewer)
 - Added interior cell browsing to World Explorer
 - Removed redundant tools (cell_viewer, terrain_viewer, main)
-- Improved project structure and clarity
-- See [SIMPLIFICATION_AUDIT.md](SIMPLIFICATION_AUDIT.md) for details
+- Added RTT deformation system
+- Developer console with object picking
