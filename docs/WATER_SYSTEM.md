@@ -36,7 +36,38 @@ The ocean system provides an infinite water plane that follows the camera, with 
 
 ### Setup
 
-#### 1. Enable Ocean in Project Settings
+#### 1. Required Global Shader Parameters
+
+**CRITICAL**: For FFT ocean waves (HIGH quality) to work, you must define global shader parameters in `project.godot`:
+
+\`\`\`ini
+[shader_globals]
+
+displacements={
+"type": "sampler2DArray",
+"value": ""
+}
+normals={
+"type": "sampler2DArray",
+"value": ""
+}
+num_cascades={
+"type": "uint",
+"value": 3
+}
+water_color={
+"type": "color",
+"value": Color(0.02, 0.12, 0.22, 1)
+}
+foam_color={
+"type": "color",
+"value": Color(0.9, 0.9, 0.9, 1)
+}
+\`\`\`
+
+These are automatically set by the project and should already be configured. If FFT waves don't appear, verify this section exists.
+
+#### 2. Enable Ocean in Project Settings
 
 Edit `project.godot`:
 
@@ -48,7 +79,7 @@ radius=8000.0
 quality=-1  # -1 = auto-detect, 0-3 = specific quality
 \`\`\`
 
-#### 2. Ocean Auto-Initializes
+#### 3. Ocean Auto-Initializes
 
 The OceanManager is an autoload singleton that initializes automatically when enabled. It will:
 - Detect your GPU and select appropriate quality level
@@ -56,7 +87,7 @@ The OceanManager is an autoload singleton that initializes automatically when en
 - Generate shore masks from Terrain3D if available
 - Create the ocean mesh and position it at sea level
 
-#### 3. Manual Control (Optional)
+#### 4. Manual Control (Optional)
 
 \`\`\`gdscript
 # Force initialization (if ocean/enabled=false but you want it in specific scene)
