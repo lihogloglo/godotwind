@@ -16,6 +16,7 @@ extends RefCounted
 
 const ImpostorBaker := preload("res://src/tools/impostor_baker.gd")
 const MeshPrebaker := preload("res://src/tools/mesh_prebaker.gd")
+const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const MorrowindDataProvider := preload("res://src/core/world/morrowind_data_provider.gd")
 
 ## Preprocessing steps
@@ -35,7 +36,7 @@ signal preprocessing_complete(results: Dictionary)
 var enable_impostors: bool = true
 var enable_merged_meshes: bool = true
 var enable_texture_atlases: bool = false  # Future enhancement
-var enable_navmeshes: bool = false        # Future enhancement
+var enable_navmeshes: bool = true         # Now implemented!
 
 ## Output directory
 var output_base_dir: String = "res://assets"
@@ -177,23 +178,40 @@ func _preprocess_texture_atlases() -> Dictionary:
 	}
 
 
-## Internal: Bake navmeshes (future)
+## Internal: Bake navmeshes
 func _preprocess_navmeshes() -> Dictionary:
 	print("\n" + "=" * 80)
-	print("STEP 4: Baking Navmeshes (Not Implemented)")
+	print("STEP 4: Baking Navmeshes")
 	print("=" * 80)
 
-	# TODO: Implement navmesh baking
-	# 1. Load terrain + architecture collision meshes per cell
-	# 2. Use NavigationMesh.create_from_mesh()
-	# 3. Save to assets/navmesh/cell_X_Y.res
+	var baker := NavMeshBaker.new()
+	baker.output_dir = output_base_dir.path_join("navmeshes")
 
-	return {
-		"total": 0,
-		"success": 0,
-		"failed": 0,
-		"error": "Not implemented yet"
-	}
+	# Configure what to bake
+	baker.bake_exterior_cells = true
+	baker.bake_interior_cells = false  # Disable interior for now (can enable later)
+	baker.skip_existing = true
+
+	# Connect progress signals
+	baker.progress.connect(func(current, total, cell_id):
+		preprocessing_progress.emit("Navmeshes", current, total)
+		print("  [%d/%d] %s" % [current, total, cell_id])
+	)
+
+	# Bake all cells
+	var result := baker.bake_all_cells()
+
+	step_complete.emit("Navmeshes", result.success, result.failed)
+
+	print("\nNavmesh Baking Complete:")
+	print("  Total: %d" % result.total)
+	print("  Baked: %d" % result.success)
+	print("  Skipped: %d (already exist)" % result.skipped)
+	print("  Failed: %d" % result.failed)
+	if result.success > 0:
+		print("  Avg bake time: %.2fs per cell" % result.avg_bake_time)
+
+	return result
 
 
 ## Print summary of results
