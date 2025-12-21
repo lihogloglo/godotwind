@@ -3,15 +3,26 @@
 ## Creates pre-baked NavigationMesh resources for runtime loading (similar to OpenMW's approach)
 ##
 ## Process:
-## 1. Parse cell geometry (terrain LAND, static objects, buildings)
+## 1. Parse cell geometry (terrain LAND/Terrain3D, static objects, buildings)
 ## 2. Convert to NavigationMeshSourceGeometryData3D
 ## 3. Bake using NavigationServer3D.bake_from_source_geometry_data()
 ## 4. Save to assets/navmeshes/[cell_id].res
 ##
-## Usage:
+## Terrain3D Integration:
+## - If terrain_3d is set, uses Terrain3D's optimized generate_nav_mesh_source_geometry()
+## - Otherwise, falls back to manual LAND heightmap processing
+## - Terrain3D method matches RuntimeNavigationBaker for consistency
+##
+## Usage (Offline Prebaking):
 ##   var baker := NavMeshBaker.new()
 ##   baker.output_dir = "res://assets/navmeshes"
-##   baker.bake_all_cells()  # Bake all exterior cells
+##   baker.bake_all_cells()  # Uses LAND heightmap (no Terrain3D needed)
+##
+## Usage (Runtime/Editor with Terrain3D):
+##   var baker := NavMeshBaker.new()
+##   baker.terrain_3d = get_node("Terrain3D")  # Use Terrain3D's optimized method
+##   baker.simplify_terrain = true  # Reduce polygon count
+##   baker.bake_all_cells()
 class_name NavMeshBaker
 extends RefCounted
 
@@ -22,10 +33,19 @@ const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 ## Output directory for navmesh assets
 var output_dir: String = "res://assets/navmeshes"
 
+## Optional Terrain3D instance for runtime baking (when available)
+## If set, uses Terrain3D's optimized generate_nav_mesh_source_geometry()
+## If null, falls back to manual LAND heightmap processing (for offline prebaking)
+var terrain_3d: Node = null
+
 ## Filter settings
 var bake_exterior_cells: bool = true
 var bake_interior_cells: bool = false  # Interior cells off by default (can be large)
 var skip_existing: bool = true         # Skip cells that already have baked navmesh
+
+## Simplify terrain mesh for navmesh (reduces polygon count)
+## Only used when terrain_3d is available, ignored for LAND-based generation
+var simplify_terrain: bool = true
 
 ## Progress tracking
 signal progress(current: int, total: int, cell_id: String)
@@ -38,6 +58,34 @@ var _total_failed: int = 0
 var _total_skipped: int = 0
 var _failed_cells: Array[String] = []
 var _bake_times: Array[float] = []  # Track baking time per cell
+
+
+## Set Terrain3D instance from scene tree (helper method)
+## Searches for Terrain3D node in the main scene
+func set_terrain3d_from_scene(root: Node) -> bool:
+	var terrain := _find_terrain3d_recursive(root)
+	if terrain:
+		terrain_3d = terrain
+		print("NavMeshBaker: Found Terrain3D instance, will use optimized navmesh generation")
+		return true
+	else:
+		print("NavMeshBaker: No Terrain3D found, will use LAND heightmap fallback")
+		return false
+
+
+## Recursively search for Terrain3D node
+func _find_terrain3d_recursive(node: Node) -> Node:
+	# Check if this node is Terrain3D
+	if node.get_class() == "Terrain3D":
+		return node
+
+	# Search children
+	for child in node.get_children():
+		var result := _find_terrain3d_recursive(child)
+		if result:
+			return result
+
+	return null
 
 
 ## Initialize the baker
@@ -229,8 +277,44 @@ func _parse_cell_geometry(cell: CellRecord, source_geometry: NavigationMeshSourc
 	}
 
 
-## Add terrain geometry from LAND record
+## Add terrain geometry from LAND record or Terrain3D
 func _add_terrain_geometry(cell: CellRecord, cell_origin: Vector3, source_geometry: NavigationMeshSourceGeometryData3D) -> Dictionary:
+	# Use Terrain3D's optimized method if available
+	if terrain_3d and _has_terrain3d_method():
+		return _add_terrain3d_geometry(cell, cell_origin, source_geometry)
+	else:
+		# Fallback to LAND heightmap processing (for offline prebaking)
+		return _add_land_heightmap_geometry(cell, cell_origin, source_geometry)
+
+
+## Add terrain geometry using Terrain3D's optimized method
+func _add_terrain3d_geometry(cell: CellRecord, cell_origin: Vector3, source_geometry: NavigationMeshSourceGeometryData3D) -> Dictionary:
+	if not terrain_3d:
+		return {"success": false}
+
+	# Calculate AABB for this cell (117m × 117m cell)
+	var cell_aabb := AABB(
+		cell_origin,
+		Vector3(CS.CELL_SIZE_GODOT, 1000.0, CS.CELL_SIZE_GODOT)  # Height generous for mountains
+	)
+
+	# Use Terrain3D's optimized navmesh source geometry generation
+	# This is the same method used by RuntimeNavigationBaker
+	var faces: PackedVector3Array = terrain_3d.generate_nav_mesh_source_geometry(cell_aabb, simplify_terrain)
+
+	if faces.is_empty():
+		# No terrain in this cell, or all non-navigable
+		return {"success": false}
+
+	# Add faces to source geometry
+	source_geometry.add_faces(faces, Transform3D.IDENTITY)
+
+	print("    Using Terrain3D optimized geometry: %d triangles" % (faces.size() / 9))
+	return {"success": true}
+
+
+## Add terrain geometry from LAND heightmap (offline prebaking fallback)
+func _add_land_heightmap_geometry(cell: CellRecord, cell_origin: Vector3, source_geometry: NavigationMeshSourceGeometryData3D) -> Dictionary:
 	var land: LandRecord = ESMManager.get_land(cell.grid_x, cell.grid_y)
 	if not land or not land.has_heights():
 		return {"success": false}
@@ -245,6 +329,13 @@ func _add_terrain_geometry(cell: CellRecord, cell_origin: Vector3, source_geomet
 	source_geometry.add_mesh(terrain_mesh, transform)
 
 	return {"success": true}
+
+
+## Check if Terrain3D has the navmesh generation method
+func _has_terrain3d_method() -> bool:
+	if not terrain_3d:
+		return false
+	return terrain_3d.has_method("generate_nav_mesh_source_geometry")
 
 
 ## Create mesh from LAND record heightmap
