@@ -163,6 +163,16 @@ Morrowind stores animations in separate .kf files:
 - `meshes/xbase_animkna.kf` - Beast race animations
 - `meshes/<creature_id>.kf` - Creature-specific animations
 
+**KF Loading Implementation:**
+The CharacterFactory automatically loads .kf animation files using NIFKFLoader:
+1. Loads .kf file from BSA based on character type (gender, beast race)
+2. Parses NiSequenceStreamHelper structure with text key markers
+3. Extracts bone animations from NiKeyframeController data
+4. Creates separate Animation resources for each text key range (Idle, Walk, Run, etc.)
+5. Adds all animations to the character's AnimationPlayer
+
+See `src/core/nif/nif_kf_loader.gd` and `src/core/character/character_factory.gd` for implementation.
+
 ### Animation Text Keys
 
 Morrowind animations use text keys to mark animation segments:
@@ -229,8 +239,12 @@ Uses Godot's AnimationTree with AnimationNodeStateMachine for smooth transitions
 ## TODO / Future Improvements
 
 ### High Priority
-- [ ] Load .kf animation files and apply to characters
-- [ ] Test with actual Morrowind data (currently untested)
+- [x] **Load .kf animation files and apply to characters** ✅ **IMPLEMENTED**
+  - Uses NIFKFLoader to load xbase_anim.kf, xbase_anim_female.kf, xbase_animkna.kf
+  - Extracts animations using text key markers (Idle, Walk, Run, etc.)
+  - Automatically adds all animations to AnimationPlayer
+- [ ] Test with actual Morrowind data in-game
+- [ ] Fix any animation track path issues with bone names
 - [ ] Dynamic body part swapping for equipment changes
 - [ ] Equipment attachment (weapons, shields, arrows)
 

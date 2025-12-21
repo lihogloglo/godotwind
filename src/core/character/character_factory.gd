@@ -5,10 +5,13 @@
 class_name CharacterFactory
 extends RefCounted
 
+# Preload dependencies
+const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
+
 # Dependencies
 var model_loader: RefCounted  # ModelLoader
 var body_part_assembler: BodyPartAssembler
-var kf_loader: RefCounted  # NIFKFLoader
+var kf_loader: NIFKFLoader
 
 # Configuration
 var enable_movement: bool = true
@@ -18,6 +21,8 @@ var debug_characters: bool = false
 
 func _init() -> void:
 	body_part_assembler = BodyPartAssembler.new()
+	kf_loader = NIFKFLoader.new()
+	kf_loader.debug_mode = false
 
 
 ## Set model loader dependency
@@ -123,32 +128,116 @@ func create_creature(creature_record: CreatureRecord, ref_num: int = 0) -> Chara
 func _load_character_animations(character_root: Node3D, is_female: bool, is_beast: bool) -> void:
 	var anim_path := BodyPartAssembler.get_animation_path(is_female, is_beast)
 
-	# Find AnimationPlayer
+	# Find AnimationPlayer and Skeleton
 	var anim_player := _find_animation_player(character_root)
 	if not anim_player:
 		if debug_characters:
 			print("CharacterFactory: No AnimationPlayer found in character root")
 		return
 
-	# TODO: Load .kf file and add animations to AnimationPlayer
-	# For now, animations should be loaded from the base skeleton NIF
+	var skeleton := _find_skeleton(character_root)
+	if not skeleton:
+		if debug_characters:
+			print("CharacterFactory: No Skeleton3D found in character root")
+		return
+
+	# Load .kf file from BSA
+	var full_path := anim_path
+	if not anim_path.to_lower().begins_with("meshes"):
+		full_path = "meshes\\" + anim_path
+
+	if not BSAManager.has_file(full_path):
+		if debug_characters:
+			print("CharacterFactory: Animation file not found in BSA: '%s'" % full_path)
+		return
+
+	var kf_data := BSAManager.extract_file(full_path)
+	if kf_data.is_empty():
+		push_warning("CharacterFactory: Failed to extract animation file: '%s'" % full_path)
+		return
+
+	# Load animations using NIFKFLoader
+	var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
+	if animations.is_empty():
+		if debug_characters:
+			print("CharacterFactory: No animations extracted from '%s'" % full_path)
+		return
+
+	# Add animations to AnimationPlayer
+	var added_count := 0
+	for anim_name: String in animations:
+		var anim: Animation = animations[anim_name]
+		if anim_player.has_animation(anim_name):
+			# Animation already exists, skip or replace
+			continue
+
+		anim_player.add_animation(anim_name, anim)
+		added_count += 1
+
 	if debug_characters:
-		print("CharacterFactory: Would load animations from '%s'" % anim_path)
+		print("CharacterFactory: Loaded %d animations from '%s'" % [added_count, anim_path])
+		for anim_name in animations:
+			print("  - '%s': %.2fs, %d tracks" % [
+				anim_name,
+				animations[anim_name].length,
+				animations[anim_name].get_track_count()
+			])
 
 
 ## Load creature-specific animations
 func _load_creature_animations(character_root: Node3D, creature_record: CreatureRecord) -> void:
 	# Creature animations are typically in <creature_id>.kf
-	var anim_path := creature_record.model.get_basename() + ".kf"
+	var model_path := creature_record.model
+	if model_path.is_empty():
+		return
 
-	# Find AnimationPlayer
+	# Get base name and add .kf extension
+	var base_path := model_path.get_base_dir() + "/" + model_path.get_file().get_basename()
+	var anim_path := base_path + ".kf"
+
+	# Find AnimationPlayer and Skeleton
 	var anim_player := _find_animation_player(character_root)
 	if not anim_player:
 		return
 
-	# TODO: Load .kf file if it exists
+	var skeleton := _find_skeleton(character_root)
+
+	# Try to load .kf file from BSA
+	if not BSAManager.has_file(anim_path):
+		# Try with meshes prefix
+		anim_path = "meshes\\" + anim_path
+		if not BSAManager.has_file(anim_path):
+			if debug_characters:
+				print("CharacterFactory: No creature animation file found for '%s'" % creature_record.record_id)
+			return
+
+	var kf_data := BSAManager.extract_file(anim_path)
+	if kf_data.is_empty():
+		return
+
+	# Load animations using NIFKFLoader
+	var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
+	if animations.is_empty():
+		return
+
+	# Add animations to AnimationPlayer
+	var added_count := 0
+	for anim_name: String in animations:
+		var anim: Animation = animations[anim_name]
+		if anim_player.has_animation(anim_name):
+			continue
+
+		anim_player.add_animation(anim_name, anim)
+		added_count += 1
+
 	if debug_characters:
-		print("CharacterFactory: Would load creature animations from '%s'" % anim_path)
+		print("CharacterFactory: Loaded %d creature animations from '%s'" % [added_count, anim_path])
+		for anim_name in animations:
+			print("  - '%s': %.2fs, %d tracks" % [
+				anim_name,
+				animations[anim_name].length,
+				animations[anim_name].get_track_count()
+			])
 
 
 ## Set up collision for NPC
@@ -211,6 +300,19 @@ func _find_animation_player(node: Node) -> AnimationPlayer:
 
 	for child in node.get_children():
 		var result := _find_animation_player(child)
+		if result:
+			return result
+
+	return null
+
+
+## Find Skeleton3D in scene tree
+func _find_skeleton(node: Node) -> Skeleton3D:
+	if node is Skeleton3D:
+		return node as Skeleton3D
+
+	for child in node.get_children():
+		var result := _find_skeleton(child)
 		if result:
 			return result
 
