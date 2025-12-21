@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode world_vertex_coords, shadows_disabled;
+render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 /**
  * Water lighting model roughly follows the 2019 GDC talk: "Wakes, Explosions and Lighting: Interactive Water Simulation in Atlas".
  * Source: https://gpuopen.com/gdc-presentations/2019/gdc-2019-agtd6-interactive-water-simulation-in-atlas.pdf
@@ -13,6 +13,13 @@ global uniform vec4 foam_color : source_color;
 
 uniform float roughness : hint_range(0.0, 1.0) = 0.4;
 uniform float normal_strength : hint_range(0.0, 1.0) = 1.0; // Global normal strength
+uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05; // Refraction distortion amount
+uniform float water_clarity : hint_range(0.0, 1.0) = 0.4; // How clear/transparent the water is
+uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0; // Distance for depth fade
+
+// Shore mask for fading ocean on land
+uniform sampler2D shore_mask : filter_linear;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0); // x, y, width, height
 
 group_uniforms cascade_data;
 uniform vec4 map_scales[MAX_CASCADES];               // Scales for displacement/normal maps. Packed: [uv scale, displacement scale, normal scale]
@@ -23,10 +30,23 @@ global uniform sampler2DArray normals : hint_normal; // Each layer represents on
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
+varying float shore_factor;
+
+// Sample shore mask - 1.0 = ocean, 0.0 = land
+float sample_shore_mask(vec2 world_xz) {
+	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0; // Outside mask bounds = assume ocean
+	}
+	return texture(shore_mask, uv).r;
+}
 
 void vertex() {
 	UV = VERTEX.xz;
 	float distance_factor = min(exp(-(length(VERTEX.xz - CAMERA_POSITION_WORLD.xz) - 150.0)*0.007), 1.0); // Displacement amonut falls off after 150m.
+
+	// Sample shore mask
+	shore_factor = sample_shore_mask(VERTEX.xz);
 
 	// Read displacements from displacement maps.
 	vec3 displacement = vec3(0);
@@ -34,7 +54,8 @@ void vertex() {
 		vec4 scales = map_scales[i];
 		displacement += texture(displacements, vec3(UV*scales.xy, float(i))).xyz * scales.z;
 	}
-	VERTEX += displacement * distance_factor;
+	// Dampen waves on shore
+	VERTEX += displacement * distance_factor * shore_factor;
 	wave_height = displacement.y;
 }
 
@@ -82,15 +103,38 @@ void fragment() {
 		// This is dependent on the tile size as well as displacement/normal map resolution.
 		gradient += mix(texture_bicubic(normals, coords), texture(normals, coords), min(1.0, ppm*0.1)).xyw * vec3(scales.ww, 1.0);
 	}
-		
+
 	foam_factor = smoothstep(0.0, 1.0, gradient.z*0.75) * exp(-dist*0.0075);
-	ALBEDO = mix(water_color.rgb, foam_color.rgb, foam_factor);
 
 	gradient *= mix(0.015, normal_strength, exp(-dist*0.0175)); // Blend normal with terrain normal as distance increases.
 	NORMAL = (VIEW_MATRIX * vec4(normalize(vec3(-gradient.x, 1.0, -gradient.y)), 0.0)).xyz;
 
 	fresnel = mix(pow(1.0 - dot(VIEW, NORMAL), 5.0*exp(-2.69*roughness)) / (1.0 + 22.7*pow(roughness, 1.5)), 1.0, REFLECTANCE);
-	ROUGHNESS = (1.0 - fresnel) * foam_factor + 0.4; // Roughness is proportional to foam/fog amount and fresnel.
+
+	// Refraction using screen texture
+	vec2 refraction_offset = NORMAL.xy * refraction_strength;
+	vec3 refracted_color = textureLod(SCREEN_TEXTURE, SCREEN_UV + refraction_offset, 0.0).rgb;
+
+	// Depth-based transparency
+	float depth = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
+	float depth_diff = world_pos.z / world_pos.w - VERTEX.z;
+	float water_depth_fade = 1.0 - exp(-depth_diff / depth_fade_distance);
+
+	// Mix refracted color with water color based on depth
+	vec3 water_with_refraction = mix(refracted_color, water_color.rgb, water_depth_fade * (1.0 - water_clarity));
+	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
+
+	// Alpha for transparency (less transparent at steep viewing angles due to fresnel)
+	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5) * shore_factor;
+
+	ROUGHNESS = mix(0.05, 0.6, foam_factor); // Smoother water, rougher foam
+	METALLIC = 0.0;
+	SPECULAR = 0.5;
+
+	// Enable SSR for reflections
+	SSS_STRENGTH = 0.05;
 }
 
 float smith_masking_shadowing(in float cos_theta, in float alpha) {

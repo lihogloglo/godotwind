@@ -1,0 +1,25 @@
+[gd_scene load_steps=2 format=3 uid="uid://lake001"]
+
+[ext_resource type="Script" path="res://src/core/water/water_volume.gd" id="1"]
+
+[node name="Lake" type="Node3D"]
+
+[node name="WaterVolume" type="Node3D" parent="."]
+script = ExtResource("1")
+water_type = 0
+size = Vector3(50, 10, 50)
+water_surface_height = 0.0
+water_color = Color(0.02, 0.15, 0.22, 1)
+clarity = 0.5
+roughness = 0.1
+refraction_strength = 0.05
+use_ssr = true
+enable_waves = true
+wave_scale = 0.3
+wave_speed = 1.0
+enable_swimming = true
+enable_buoyancy = true
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.433013, 0.25, 0, 0.5, 0.866025, -0.5, -0.75, 0.433013, 0, 10, 0)
+shadow_enabled = true

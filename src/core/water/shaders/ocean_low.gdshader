@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
+render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 
 /**
  * Low quality water shader - 2 Gerstner waves
@@ -14,10 +14,27 @@ uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
 uniform float time : hint_range(0.0, 1000.0) = 0.0;
 uniform float wave_scale : hint_range(0.0, 2.0) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0) = 0.3;
+uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05;
+uniform float water_clarity : hint_range(0.0, 1.0) = 0.4;
+uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0;
+
+// Shore mask for fading ocean on land
+uniform sampler2D shore_mask : filter_linear;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
 
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
+varying float shore_factor;
+
+// Sample shore mask - 1.0 = ocean, 0.0 = land
+float sample_shore_mask(vec2 world_xz) {
+	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0; // Outside mask bounds = assume ocean
+	}
+	return texture(shore_mask, uv).r;
+}
 
 // Gerstner wave with tangent/binormal output
 vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, float time_val, out vec3 tangent, out vec3 binormal) {
@@ -55,6 +72,9 @@ void vertex() {
 	float dist = length(pos - CAMERA_POSITION_WORLD.xz);
 	float distance_fade = 1.0 - smoothstep(200.0, 400.0, dist);
 
+	// Sample shore mask
+	shore_factor = sample_shore_mask(pos);
+
 	// Only 2 waves for LOW quality (vs 4 for MEDIUM)
 	vec3 displacement = vec3(0.0);
 	vec3 tangent_sum = vec3(1.0, 0.0, 0.0);
@@ -71,7 +91,8 @@ void vertex() {
 	tangent_sum += t - vec3(1.0, 0.0, 0.0);
 	binormal_sum += b - vec3(0.0, 0.0, 1.0);
 
-	VERTEX += displacement * distance_fade;
+	// Apply displacement with distance fade and shore dampening
+	VERTEX += displacement * distance_fade * shore_factor;
 	wave_height = displacement.y * distance_fade;
 	NORMAL = normalize(cross(binormal_sum, tangent_sum));
 
@@ -85,9 +106,28 @@ void fragment() {
 	float NdotV = max(dot(VIEW, NORMAL), 0.001);
 	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
 
-	ALBEDO = mix(water_color.rgb, foam_color.rgb, foam_factor);
-	ROUGHNESS = mix(roughness, 0.6, foam_factor);
+	// Refraction using screen texture
+	vec2 refraction_offset = NORMAL.xy * refraction_strength;
+	vec3 refracted_color = textureLod(SCREEN_TEXTURE, SCREEN_UV + refraction_offset, 0.0).rgb;
+
+	// Depth-based transparency
+	float depth = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
+	float depth_diff = world_pos.z / world_pos.w - VERTEX.z;
+	float water_depth_fade = 1.0 - exp(-depth_diff / depth_fade_distance);
+
+	// Mix refracted color with water color based on depth
+	vec3 water_with_refraction = mix(refracted_color, water_color.rgb, water_depth_fade * (1.0 - water_clarity));
+	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
+
+	// Alpha for transparency (less transparent at steep viewing angles due to fresnel)
+	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5) * shore_factor;
+
+	ROUGHNESS = mix(0.05, 0.6, foam_factor);
 	METALLIC = 0.0;
+	SPECULAR = 0.5;
+	SSS_STRENGTH = 0.05;
 }
 
 // Simplified GGX for LOW quality - skip smith masking for performance
