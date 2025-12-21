@@ -18,12 +18,16 @@ const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
+const CharacterFactory := preload("res://src/core/character/character_factory.gd")
 
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
 
 # Reference instantiator for creating Node3D objects from cell references
 var _instantiator: ReferenceInstantiator = ReferenceInstantiator.new()
+
+# Character factory for creating animated NPCs and creatures
+var _character_factory: CharacterFactory = CharacterFactory.new()
 
 # Object pool for frequently used models
 var _object_pool: RefCounted = null  # ObjectPool
@@ -72,9 +76,14 @@ func get_object_pool() -> RefCounted:
 
 ## Sync configuration to instantiator
 func _sync_instantiator_config() -> void:
+	# Set up character factory
+	_character_factory.set_model_loader(_model_loader)
+
+	# Configure instantiator
 	_instantiator.model_loader = _model_loader
 	_instantiator.object_pool = _object_pool
 	_instantiator.static_renderer = _static_renderer
+	_instantiator.character_factory = _character_factory
 	_instantiator.create_lights = create_lights
 	_instantiator.load_npcs = load_npcs
 	_instantiator.load_creatures = load_creatures
