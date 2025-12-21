@@ -14,11 +14,13 @@ extends RefCounted
 # Dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
+const CharacterFactory := preload("res://src/core/character/character_factory.gd")
 
 # Injected dependencies (set by CellManager)
 var model_loader: RefCounted  # ModelLoader
 var object_pool: RefCounted  # ObjectPool (optional)
 var static_renderer: Node  # StaticObjectRenderer (optional)
+var character_factory: CharacterFactory  # CharacterFactory for NPCs/creatures
 
 # Configuration
 var create_lights: bool = true
@@ -226,8 +228,37 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 
 
 ## Instantiate an NPC or Creature
-## Note: Full body assembly from body parts is complex - for now just load the base model
+## Uses CharacterFactory to create fully animated and functional characters
 func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) -> Node3D:
+	# Use CharacterFactory if available (new system)
+	if character_factory:
+		var character: CharacterBody3D = null
+
+		if actor_record is CreatureRecord:
+			character = character_factory.create_creature(actor_record, ref.ref_num)
+			stats["creatures_loaded"] += 1
+		elif actor_record is NPCRecord:
+			character = character_factory.create_npc(actor_record, ref.ref_num)
+			stats["npcs_loaded"] += 1
+
+		if character:
+			# Apply transform to the CharacterBody3D
+			_apply_transform(character, ref, true)
+
+			# Add additional metadata for console object picker
+			character.set_meta("form_id", actor_record.record_id if "record_id" in actor_record else str(ref.ref_id))
+			character.set_meta("ref_id", str(ref.ref_id))
+			character.set_meta("instance_id", ref.ref_num)
+			character.set_meta("actor_type", actor_type)
+
+			return character
+
+	# Fallback to old system if CharacterFactory not available
+	return _instantiate_actor_legacy(ref, actor_record, actor_type)
+
+
+## Legacy actor instantiation (old system - basic model loading)
+func _instantiate_actor_legacy(ref: CellReference, actor_record, actor_type: String) -> Node3D:
 	var model_path: String = ""
 
 	if actor_record is CreatureRecord:
