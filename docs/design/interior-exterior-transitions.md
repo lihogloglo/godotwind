@@ -592,6 +592,198 @@ func _create_portal(door_node: Node3D, destination_cell: Node3D) -> void:
 
 ---
 
+### The Window Problem: Seeing Outside from Inside
+
+**The Challenge:** Windows are one of the hardest unsolved problems in seamless interiors. If portals work bidirectionally (you can see in from outside), you should also be able to see out from inside - but this is **extremely difficult** to implement properly.
+
+#### **Why Windows Are Hard**
+
+1. **Multiple render passes:** Each window = 1 SubViewport = 1 extra camera render
+   - A room with 4 windows = 4 additional render passes
+   - Building with 20 rooms × 4 windows each = 80 render passes (impossible)
+
+2. **Spatial incoherence:** Morrowind interiors are **not** positioned where they appear to be
+   - Interior is often larger than exterior ("bigger on the inside")
+   - Interior may be rotated/offset from exterior door location
+   - No canonical "correct" view to show through windows
+
+3. **Dynamic exteriors:** What if exterior cell isn't loaded while you're inside?
+   - Need to keep exterior loaded (memory cost)
+   - Or show outdated/frozen view (breaks immersion)
+   - Or fake it (see solutions below)
+
+#### **Industry Solutions: How Games Handle Windows**
+
+| Game | Approach | Details | Quality |
+|------|----------|---------|---------|
+| **World of Warcraft (2025)** | **Fake/No windows** | Housing windows are "frosted over", can't see outside. Players use skybox textures on walls to fake outdoor views | ⭐ Poor |
+| **GTA San Andreas** | **No windows** | Interiors teleported to sky, windows show void or have curtain textures | ⭐ Poor |
+| **GTA V** | **Curtains + Emissive** | Windows use curtain textures and emissive lighting to hide mismatch. Portals/occlusions block rendering | ⭐⭐ Acceptable |
+| **Spider-Man (PS4/5)** | **Interior Mapping** | Shader-based fake interiors - raycast trick, no actual geometry. Perspectively correct but not real | ⭐⭐⭐⭐ Good |
+| **Modern Games (General)** | **Cubemap/Skybox** | Baked cubemap texture shows static view of exterior. Low overhead, high quality, but not dynamic | ⭐⭐⭐ Good |
+| **True Portal (Rare)** | **Real-time render** | Actually render exterior through window. Only viable for 1-2 showcase windows | ⭐⭐⭐⭐⭐ Excellent |
+
+Sources: [WoW Housing Windows](https://us.forums.blizzard.com/en/wow/t/can-we-look-outside-of-our-houses-through-windows/2183637), [GTA Interior Techniques](https://gta.fandom.com/wiki/Hidden_Interiors_Universe), [Interior Mapping](https://www.gamedeveloper.com/programming/interior-mapping-rendering-real-rooms-without-geometry), [Cubemap Windows](https://www.artstation.com/artwork/W290vD)
+
+#### **Recommended Solutions for Godotwind**
+
+##### **Option 1: Fake Static Windows (Recommended for Most Interiors)**
+
+Use pre-baked cubemap textures on window surfaces:
+
+```gdscript
+func _create_fake_window(window_mesh: MeshInstance3D, exterior_cell: Vector2i) -> void:
+    # Render exterior view to cubemap at build/bake time
+    var cubemap = _bake_exterior_cubemap(exterior_cell)
+
+    # Apply to window material
+    var mat = StandardMaterial3D.new()
+    mat.albedo_texture = cubemap
+    mat.emission_enabled = true
+    mat.emission_energy = 0.3  # Slight glow for realism
+    window_mesh.material_override = mat
+```
+
+**Pros:**
+- Near-zero runtime cost
+- Looks good for static exteriors
+- Works even when exterior cell unloaded
+
+**Cons:**
+- Not dynamic (weather/time of day frozen)
+- Pre-computation required
+- Doesn't match current exterior state
+
+##### **Option 2: Skybox/Generic View (Cheapest)**
+
+Use generic sky texture or solid color:
+
+```gdscript
+func _create_skybox_window(window_mesh: MeshInstance3D, cell: CellRecord) -> void:
+    var mat = StandardMaterial3D.new()
+
+    if cell.is_quasi_exterior():
+        # Show actual sky
+        mat.albedo_texture = world_sky_texture
+    else:
+        # Solid color or generic outdoor texture
+        mat.albedo_color = Color(0.6, 0.7, 0.9)  # Light blue
+        mat.emission_enabled = true
+        mat.emission_energy = 0.5
+
+    window_mesh.material_override = mat
+```
+
+**Pros:**
+- Instant, no pre-baking
+- Minimal memory/CPU cost
+- Works for all interiors
+
+**Cons:**
+- Not realistic
+- Same view for all windows
+- No sense of location
+
+##### **Option 3: Interior Mapping Shader (Advanced)**
+
+Shader trick that raycasts fake geometry - see [Interior Mapping technique](https://80.lv/articles/interior-mapping-rendering-real-rooms-without-geometry):
+
+```gdscript
+# Custom shader for windows
+shader_type spatial;
+
+uniform sampler2D room_texture;
+uniform vec3 room_size = vec3(4.0, 3.0, 4.0);  // Interior room dimensions
+
+void fragment() {
+    // Raycast from camera through window surface
+    vec3 ray_dir = normalize(VIEW);
+
+    // Intersect with fake room bounds
+    // ... (complex shader math here)
+
+    ALBEDO = texture(room_texture, fake_uv).rgb;
+}
+```
+
+**Pros:**
+- Perspectively correct depth
+- Looks real from any angle
+- Low geometry cost
+
+**Cons:**
+- Complex shader development
+- Still not truly dynamic
+- Doesn't match actual exterior
+
+##### **Option 4: True Portal Windows (Showcase Only)**
+
+For 1-2 special interiors (e.g., Telvanni towers, Guild of Mages observatory):
+
+```gdscript
+func _create_portal_window(window_node: Node3D, exterior_cell: Vector2i) -> void:
+    # Same as door portal, but always active
+    var viewport = SubViewport.new()
+    viewport.size = Vector2i(256, 256)  # Lower res than doors
+
+    var camera = Camera3D.new()
+    # Position camera to look at exterior
+    camera.global_position = window_node.global_position
+    camera.rotation = window_node.rotation
+
+    # Add exterior cell to viewport
+    var exterior_scene = await load_exterior_cell(exterior_cell)
+    viewport.add_child(camera)
+    viewport.add_child(exterior_scene)
+
+    # Apply to window material
+    var mat = StandardMaterial3D.new()
+    mat.albedo_texture = viewport.get_texture()
+    window_node.get_child(0).material_override = mat
+```
+
+**Performance budget:** Max 2 portal windows per scene (4-6ms per window)
+
+**Pros:**
+- True real-time view
+- Fully dynamic (weather, time, NPCs)
+- Actual bidirectional portal
+
+**Cons:**
+- Very expensive (5-10ms per window)
+- Requires exterior stay loaded
+- Only viable for handful of locations
+
+---
+
+#### **Hybrid Strategy for Morrowind**
+
+**Tier 1 - Generic windows (90% of interiors):**
+- Small houses, shops: **Skybox/solid color** (Option 2)
+- Cost: ~0ms, instant
+
+**Tier 2 - Atmospheric windows (9% of interiors):**
+- Guild halls, manor houses: **Pre-baked cubemap** (Option 1)
+- Cost: Pre-computation, ~0.1ms runtime
+
+**Tier 3 - Showcase windows (1% of interiors):**
+- Tel Fyr exterior view, Guild of Mages observatory: **True portal** (Option 4)
+- Cost: 5-10ms per window, max 2 simultaneously
+
+**Why NOT everywhere:**
+- Most Morrowind interiors are windowless or have tiny slits
+- Players rarely stare out windows for long periods
+- Better to spend performance budget on other features (AI, physics, particles)
+
+#### **Implementation Notes**
+
+1. **Window detection:** During cell load, identify objects with "window" in name or specific texture
+2. **Auto-assignment:** Apply tier based on cell importance (script or manual tagging)
+3. **Fallback:** If performance drops, disable portal windows and use cubemap fallback
+4. **User setting:** "Window Quality" option (Low=skybox, Medium=cubemap, High=portal)
+
+---
+
 ### Morrowind-Specific Adaptations
 
 #### **1. Cell Type Detection**
