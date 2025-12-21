@@ -20,10 +20,24 @@ uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05;
 uniform float water_clarity : hint_range(0.0, 1.0) = 0.4;
 uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0;
 
+// Shore mask for fading ocean on land
+uniform sampler2D shore_mask : filter_linear;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+
 // Varyings for lighting
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
+varying float shore_factor;
+
+// Sample shore mask - 1.0 = ocean, 0.0 = land
+float sample_shore_mask(vec2 world_xz) {
+	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0; // Outside mask bounds = assume ocean
+	}
+	return texture(shore_mask, uv).r;
+}
 
 // Gerstner wave function
 // Returns displacement and contributes to normal calculation
@@ -63,6 +77,9 @@ void vertex() {
 	float dist = length(pos - CAMERA_POSITION_WORLD.xz);
 	float distance_fade = 1.0 - smoothstep(300.0, 600.0, dist);
 
+	// Sample shore mask
+	shore_factor = sample_shore_mask(pos);
+
 	// Sum multiple Gerstner waves with different parameters
 	vec3 displacement = vec3(0.0);
 	vec3 tangent_sum = vec3(1.0, 0.0, 0.0);
@@ -89,8 +106,8 @@ void vertex() {
 	tangent_sum += t - vec3(1.0, 0.0, 0.0);
 	binormal_sum += b - vec3(0.0, 0.0, 1.0);
 
-	// Apply displacement with distance fade
-	VERTEX += displacement * distance_fade;
+	// Apply displacement with distance fade and shore dampening
+	VERTEX += displacement * distance_fade * shore_factor;
 	wave_height = displacement.y * distance_fade;
 
 	// Calculate normal from tangent and binormal
@@ -125,7 +142,8 @@ void fragment() {
 	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
 
 	// Alpha for transparency (less transparent at steep viewing angles due to fresnel)
-	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5);
+	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5) * shore_factor;
 
 	// Roughness increases with foam
 	ROUGHNESS = mix(0.05, 0.6, foam_factor);

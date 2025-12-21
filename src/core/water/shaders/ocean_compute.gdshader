@@ -17,6 +17,10 @@ uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05; // Refraction d
 uniform float water_clarity : hint_range(0.0, 1.0) = 0.4; // How clear/transparent the water is
 uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0; // Distance for depth fade
 
+// Shore mask for fading ocean on land
+uniform sampler2D shore_mask : filter_linear;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0); // x, y, width, height
+
 group_uniforms cascade_data;
 uniform vec4 map_scales[MAX_CASCADES];               // Scales for displacement/normal maps. Packed: [uv scale, displacement scale, normal scale]
 global uniform uint num_cascades;
@@ -26,10 +30,23 @@ global uniform sampler2DArray normals : hint_normal; // Each layer represents on
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
+varying float shore_factor;
+
+// Sample shore mask - 1.0 = ocean, 0.0 = land
+float sample_shore_mask(vec2 world_xz) {
+	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0; // Outside mask bounds = assume ocean
+	}
+	return texture(shore_mask, uv).r;
+}
 
 void vertex() {
 	UV = VERTEX.xz;
 	float distance_factor = min(exp(-(length(VERTEX.xz - CAMERA_POSITION_WORLD.xz) - 150.0)*0.007), 1.0); // Displacement amonut falls off after 150m.
+
+	// Sample shore mask
+	shore_factor = sample_shore_mask(VERTEX.xz);
 
 	// Read displacements from displacement maps.
 	vec3 displacement = vec3(0);
@@ -37,7 +54,8 @@ void vertex() {
 		vec4 scales = map_scales[i];
 		displacement += texture(displacements, vec3(UV*scales.xy, float(i))).xyz * scales.z;
 	}
-	VERTEX += displacement * distance_factor;
+	// Dampen waves on shore
+	VERTEX += displacement * distance_factor * shore_factor;
 	wave_height = displacement.y;
 }
 
@@ -108,7 +126,8 @@ void fragment() {
 	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
 
 	// Alpha for transparency (less transparent at steep viewing angles due to fresnel)
-	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5);
+	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5) * shore_factor;
 
 	ROUGHNESS = mix(0.05, 0.6, foam_factor); // Smoother water, rougher foam
 	METALLIC = 0.0;
