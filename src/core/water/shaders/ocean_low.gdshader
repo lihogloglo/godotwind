@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
+render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 
 /**
  * Low quality water shader - 2 Gerstner waves
@@ -14,6 +14,9 @@ uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
 uniform float time : hint_range(0.0, 1000.0) = 0.0;
 uniform float wave_scale : hint_range(0.0, 2.0) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0) = 0.3;
+uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05;
+uniform float water_clarity : hint_range(0.0, 1.0) = 0.4;
+uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0;
 
 varying float wave_height;
 varying float foam_factor;
@@ -85,9 +88,27 @@ void fragment() {
 	float NdotV = max(dot(VIEW, NORMAL), 0.001);
 	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
 
-	ALBEDO = mix(water_color.rgb, foam_color.rgb, foam_factor);
-	ROUGHNESS = mix(roughness, 0.6, foam_factor);
+	// Refraction using screen texture
+	vec2 refraction_offset = NORMAL.xy * refraction_strength;
+	vec3 refracted_color = textureLod(SCREEN_TEXTURE, SCREEN_UV + refraction_offset, 0.0).rgb;
+
+	// Depth-based transparency
+	float depth = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
+	float depth_diff = world_pos.z / world_pos.w - VERTEX.z;
+	float water_depth_fade = 1.0 - exp(-depth_diff / depth_fade_distance);
+
+	// Mix refracted color with water color based on depth
+	vec3 water_with_refraction = mix(refracted_color, water_color.rgb, water_depth_fade * (1.0 - water_clarity));
+	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
+
+	// Alpha for transparency
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5);
+
+	ROUGHNESS = mix(0.05, 0.6, foam_factor);
 	METALLIC = 0.0;
+	SPECULAR = 0.5;
+	SSS_STRENGTH = 0.05;
 }
 
 // Simplified GGX for LOW quality - skip smith masking for performance

@@ -1,0 +1,28 @@
+[gd_scene load_steps=2 format=3 uid="uid://river001"]
+
+[ext_resource type="Script" path="res://src/core/water/water_volume.gd" id="1"]
+
+[node name="River" type="Node3D"]
+
+[node name="WaterVolume" type="Node3D" parent="."]
+script = ExtResource("1")
+water_type = 1
+size = Vector3(10, 5, 100)
+water_surface_height = 0.0
+water_color = Color(0.02, 0.12, 0.18, 1)
+clarity = 0.6
+roughness = 0.15
+refraction_strength = 0.04
+use_ssr = true
+enable_waves = true
+wave_scale = 0.2
+wave_speed = 1.5
+flow_direction = Vector2(0, 1)
+flow_speed = 2.0
+enable_swimming = true
+enable_buoyancy = true
+current_strength = 1.5
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.433013, 0.25, 0, 0.5, 0.866025, -0.5, -0.75, 0.433013, 0, 10, 0)
+shadow_enabled = true

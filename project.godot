@@ -54,7 +54,7 @@ esm_file="Morrowind.esm"
 
 [ocean]
 
-enabled=false
+enabled=true
 
 [physics]
 
