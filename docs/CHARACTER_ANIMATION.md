@@ -238,27 +238,47 @@ Uses Godot's AnimationTree with AnimationNodeStateMachine for smooth transitions
 
 ## TODO / Future Improvements
 
-### High Priority
+### ✅ Phase 1 Complete (2025-12-21)
 - [x] **Load .kf animation files and apply to characters** ✅ **IMPLEMENTED**
   - Uses NIFKFLoader to load xbase_anim.kf, xbase_anim_female.kf, xbase_animkna.kf
   - Extracts animations using text key markers (Idle, Walk, Run, etc.)
   - Automatically adds all animations to AnimationPlayer
+- [x] **IK (Inverse Kinematics) for foot placement** ✅ **IMPLEMENTED**
+  - FootIKController with SkeletonIK3D for bipedal characters
+  - Automatic raycast-based ground detection
+  - See `docs/PHASE1_ANIMATION_ENHANCEMENTS.md`
+- [x] **Slope detection and terrain adaptation** ✅ **IMPLEMENTED**
+  - Character body tilt on slopes
+  - Speed modulation (slower uphill, faster downhill)
+  - See `docs/PHASE1_ANIMATION_ENHANCEMENTS.md`
+- [x] **Animation LOD optimization** ✅ **IMPLEMENTED**
+  - Distance-based update rate throttling (5-10x performance gain)
+  - Frustum culling support
+  - See `docs/PHASE1_ANIMATION_ENHANCEMENTS.md`
+- [x] **NavMesh pathfinding integration** ✅ **IMPLEMENTED**
+  - NavigationAgent3D support for intelligent NPC movement
+  - Obstacle avoidance
+  - See `docs/PHASE1_ANIMATION_ENHANCEMENTS.md`
+
+### Phase 2 - High Priority
 - [ ] Test with actual Morrowind data in-game
 - [ ] Fix any animation track path issues with bone names
 - [ ] Dynamic body part swapping for equipment changes
 - [ ] Equipment attachment (weapons, shields, arrows)
+- [ ] Proper swimming state detection (water level)
 
-### Medium Priority
+### Phase 2 - Medium Priority
 - [ ] Clothing/armor layering system with priority
 - [ ] First-person skeleton (xbase_anim_1st.nif)
-- [ ] Proper swimming state detection (water level)
 - [ ] Animation bone groups for upper/lower body blending
+- [ ] Beehave behavior tree integration
+- [ ] Combat system integration (hit reactions, damage)
 
-### Low Priority
-- [ ] IK (Inverse Kinematics) for foot placement
+### Phase 2 - Low Priority
 - [ ] Facial animations (blinking, talking)
 - [ ] Werewolf transformation support
 - [ ] Vampire visual effects
+- [ ] Ragdoll physics
 
 ## Example Usage
 
