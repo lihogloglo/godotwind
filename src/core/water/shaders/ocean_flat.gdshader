@@ -14,10 +14,25 @@ uniform vec4 water_color : source_color = vec4(0.02, 0.15, 0.25, 1.0);
 uniform float roughness : hint_range(0.0, 1.0) = 0.3;
 uniform float water_clarity : hint_range(0.0, 1.0) = 0.5;
 
+// Shore mask for fading ocean on land
+uniform sampler2D shore_mask : filter_linear;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+
 varying float fresnel;
+varying float shore_factor;
+
+// Sample shore mask - 1.0 = ocean, 0.0 = land
+float sample_shore_mask(vec2 world_xz) {
+	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0; // Outside mask bounds = assume ocean
+	}
+	return texture(shore_mask, uv).r;
+}
 
 void vertex() {
 	UV = VERTEX.xz * 0.01;
+	shore_factor = sample_shore_mask(VERTEX.xz);
 }
 
 void fragment() {
@@ -29,7 +44,8 @@ void fragment() {
 	ALBEDO = mix(refracted_color, water_color.rgb, 0.6);
 
 	// Alpha for transparency
-	ALPHA = mix(water_clarity, 1.0, fresnel * 0.3);
+	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.3) * shore_factor;
 
 	// Roughness
 	ROUGHNESS = roughness;

@@ -18,9 +18,23 @@ uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05;
 uniform float water_clarity : hint_range(0.0, 1.0) = 0.4;
 uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0;
 
+// Shore mask for fading ocean on land
+uniform sampler2D shore_mask : filter_linear;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
+varying float shore_factor;
+
+// Sample shore mask - 1.0 = ocean, 0.0 = land
+float sample_shore_mask(vec2 world_xz) {
+	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+		return 1.0; // Outside mask bounds = assume ocean
+	}
+	return texture(shore_mask, uv).r;
+}
 
 // Gerstner wave with tangent/binormal output
 vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, float time_val, out vec3 tangent, out vec3 binormal) {
@@ -58,6 +72,9 @@ void vertex() {
 	float dist = length(pos - CAMERA_POSITION_WORLD.xz);
 	float distance_fade = 1.0 - smoothstep(200.0, 400.0, dist);
 
+	// Sample shore mask
+	shore_factor = sample_shore_mask(pos);
+
 	// Only 2 waves for LOW quality (vs 4 for MEDIUM)
 	vec3 displacement = vec3(0.0);
 	vec3 tangent_sum = vec3(1.0, 0.0, 0.0);
@@ -74,7 +91,8 @@ void vertex() {
 	tangent_sum += t - vec3(1.0, 0.0, 0.0);
 	binormal_sum += b - vec3(0.0, 0.0, 1.0);
 
-	VERTEX += displacement * distance_fade;
+	// Apply displacement with distance fade and shore dampening
+	VERTEX += displacement * distance_fade * shore_factor;
 	wave_height = displacement.y * distance_fade;
 	NORMAL = normalize(cross(binormal_sum, tangent_sum));
 
@@ -102,8 +120,9 @@ void fragment() {
 	vec3 water_with_refraction = mix(refracted_color, water_color.rgb, water_depth_fade * (1.0 - water_clarity));
 	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
 
-	// Alpha for transparency
-	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5);
+	// Alpha for transparency (less transparent at steep viewing angles due to fresnel)
+	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
+	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5) * shore_factor;
 
 	ROUGHNESS = mix(0.05, 0.6, foam_factor);
 	METALLIC = 0.0;
