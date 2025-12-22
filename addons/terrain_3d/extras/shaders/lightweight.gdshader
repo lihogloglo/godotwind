@@ -51,6 +51,7 @@ uniform float _texture_ao_affect_array[32];
 uniform float _texture_roughness_mod_array[32];
 uniform float _texture_uv_scale_array[32];
 uniform vec4 _texture_color_array[32];
+uniform float _texture_deform_rest_array[32]; // Per-texture deformation rest heights (godotwind)
 uniform highp sampler2DArray _height_maps : repeat_disable;
 uniform highp sampler2DArray _control_maps : repeat_disable;
 uniform highp sampler2DArray _color_maps : source_color, filter_linear_mipmap_anisotropic, repeat_disable;
@@ -260,11 +261,31 @@ void vertex() {
 				float deform_depth = deformation.r;  // 0.0 to 1.0
 				float material_type = deformation.g; // Material type (0.0=snow, 0.25=mud, etc.)
 
-				// RAISE+CARVE METHOD (Industry Standard)
-				// 1. Raise terrain by REST_HEIGHT
-				// 2. Deformation "carves" it back down
-				// This prevents vertices from going below base terrain level
-				float rest_height = deformation_rest_height;
+				// RAISE+CARVE METHOD (Industry Standard) with PER-TEXTURE REST HEIGHTS
+				// 1. Sample control map to get base/overlay texture indices
+				// 2. Blend rest heights based on texture blend factor
+				// 3. Raise terrain by blended rest height
+				// 4. Deformation "carves" it back down
+
+				// Get texture indices from control map
+				uint control = floatBitsToUint(texelFetch(_control_maps, v_region, 0)).r;
+				int base_id = DECODE_BASE(control);
+				int over_id = DECODE_OVER(control);
+				float blend = DECODE_BLEND(control);
+
+				// Get per-texture rest heights (default 0.0 if not set)
+				float base_rest = _texture_deform_rest_array[base_id];
+				float over_rest = _texture_deform_rest_array[over_id];
+
+				// Blend rest heights smoothly between textures
+				// This ensures smooth transitions (e.g., snow 0.3m → rock 0.0m)
+				float rest_height = mix(base_rest, over_rest, blend);
+
+				// Fallback to global rest height if per-texture is 0.0 (not configured)
+				if (rest_height < 0.001) {
+					rest_height = deformation_rest_height;
+				}
+
 				float carve_amount = deform_depth * deformation_depth_scale;
 
 				// Final displacement = raised amount - carved amount
