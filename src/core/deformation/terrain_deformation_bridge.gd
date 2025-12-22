@@ -11,6 +11,9 @@ extends Node
 ## Terrain3D node (auto-detected if not set)
 @export var terrain_node: Terrain3D
 
+## Auto-parse texture names if no config provided
+@export var auto_parse_textures: bool = true
+
 ## Auto-update when config changes
 @export var auto_update: bool = true
 
@@ -25,6 +28,12 @@ func _ready():
 	if terrain_node == null:
 		push_warning("[TerrainDeformationBridge] No Terrain3D node found!")
 		return
+
+	# Auto-parse texture names if no config provided
+	if texture_config == null and auto_parse_textures:
+		if debug:
+			print("[TerrainDeformationBridge] Auto-parsing texture names...")
+		texture_config = auto_parse_terrain_textures()
 
 	# Apply configuration
 	apply_deformation_heights()
@@ -161,3 +170,22 @@ func print_configuration() -> void:
 		print("  [%2d] %-20s: %6.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
 
 	print("=================================================")
+
+## Auto-parse texture names using TerrainTextureNameParser
+func auto_parse_terrain_textures() -> TerrainDeformationTextureConfig:
+	if terrain_node == null:
+		push_error("[TerrainDeformationBridge] Cannot auto-parse: no Terrain3D node!")
+		return null
+
+	var parser = TerrainTextureNameParser.new()
+	parser.debug = debug
+
+	if debug:
+		parser.print_rules()
+
+	var config = parser.create_config_from_terrain(terrain_node)
+
+	if debug:
+		print("[TerrainDeformationBridge] Auto-parsed %d textures" % config.texture_heights.size())
+
+	return config
