@@ -7,7 +7,8 @@
 ## 2. Filter: keep buildings/rocks, skip clutter/NPCs
 ## 3. Apply aggressive mesh simplification (95% reduction)
 ## 4. Merge into single mesh with baked transforms
-## 5. Save to assets/merged_cells/cell_X_Y.res
+## 5. Save to {cache}/merged_cells/cell_X_Y.res
+## Default cache: Documents/Godotwind/cache/
 ##
 ## Usage:
 ##   var baker := MeshPrebaker.new()
@@ -21,8 +22,8 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const MeshSimplifier := preload("res://src/core/nif/mesh_simplifier.gd")
 
-## Output directory for merged cell meshes
-var output_dir: String = "res://assets/merged_cells"
+## Output directory for merged cell meshes (set in initialize from SettingsManager)
+var output_dir: String = ""
 
 ## Mesh simplification ratio for MID tier (aggressive)
 var simplification_ratio: float = 0.05  # 5% of original (95% reduction)
@@ -43,12 +44,15 @@ var _failed_cells: Array[Vector2i] = []
 
 ## Initialize the baker
 func initialize() -> Error:
-	# Create output directory
-	if not DirAccess.dir_exists_absolute(output_dir):
-		var err := DirAccess.make_dir_recursive_absolute(output_dir)
-		if err != OK:
-			push_error("MeshPrebaker: Failed to create output directory: %s" % output_dir)
-			return err
+	# Get output directory from settings manager
+	if output_dir.is_empty():
+		output_dir = SettingsManager.get_merged_cells_path()
+
+	# Ensure cache directories exist
+	var err := SettingsManager.ensure_cache_directories()
+	if err != OK:
+		push_error("MeshPrebaker: Failed to create cache directories")
+		return err
 
 	print("MeshPrebaker: Initialized - output dir: %s" % output_dir)
 	return OK

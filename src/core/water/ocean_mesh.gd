@@ -504,13 +504,20 @@ func set_shader_time(time: float) -> void:
 
 
 func set_water_color(color: Color) -> void:
+	# Set both material parameter and global parameter
+	# Global is needed for ocean_compute.gdshader which uses global uniforms
 	if _material:
 		_material.set_shader_parameter("water_color", color)
+	# Set global parameter with sRGB to linear conversion (matching GodotOceanWaves)
+	RenderingServer.global_shader_parameter_set(&"water_color", color.srgb_to_linear())
 
 
 func set_foam_color(color: Color) -> void:
+	# Set both material parameter and global parameter
 	if _material:
 		_material.set_shader_parameter("foam_color", color)
+	# Set global parameter with sRGB to linear conversion
+	RenderingServer.global_shader_parameter_set(&"foam_color", color.srgb_to_linear())
 
 
 func set_depth_absorption(absorption: Vector3) -> void:
@@ -526,14 +533,27 @@ func set_displacement_textures(displacements: Texture2DArray, normals: Texture2D
 
 ## Set wave textures from GPU compute (Texture2DArrayRD)
 ## These are set as global shader parameters for the GPU compute shader approach
-func set_wave_textures(displacements: Texture2DArrayRD, normals: Texture2DArrayRD) -> void:
+func set_wave_textures(displacements: Texture2DArrayRD, normals: Texture2DArrayRD, num_cascades: int = -1) -> void:
 	if not _use_compute:
 		return
+
+	# Verify textures have valid RIDs before setting global parameters
+	if not displacements or not displacements.texture_rd_rid.is_valid():
+		push_warning("[OceanMesh] Displacement texture RID is invalid, skipping global parameter set")
+		return
+	if not normals or not normals.texture_rd_rid.is_valid():
+		push_warning("[OceanMesh] Normal texture RID is invalid, skipping global parameter set")
+		return
+
+	# Update num_cascades if provided
+	if num_cascades > 0:
+		_num_cascades = num_cascades
 
 	# Set as global shader parameters (matching GodotOceanWaves approach)
 	RenderingServer.global_shader_parameter_set(&"displacements", displacements)
 	RenderingServer.global_shader_parameter_set(&"normals", normals)
 	RenderingServer.global_shader_parameter_set(&"num_cascades", _num_cascades)
+	print("[OceanMesh] Global shader parameters set - cascades: %d" % _num_cascades)
 
 	# Update map scales
 	var scales: PackedVector4Array

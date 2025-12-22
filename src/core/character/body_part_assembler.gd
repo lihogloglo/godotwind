@@ -162,7 +162,7 @@ func _attach_body_parts(skeleton: Skeleton3D, npc: NPCRecord, race: RaceRecord,
 ## Get all body parts for a race
 func _get_race_body_parts(race: RaceRecord, is_female: bool, is_beast: bool) -> Dictionary:
 	var parts := {}
-	var all_body_parts := ESMManager.get_all_body_parts()
+	var all_body_parts: Dictionary = ESMManager.get_all_body_parts()
 
 	if not all_body_parts:
 		return parts
@@ -185,7 +185,7 @@ func _get_race_body_parts(race: RaceRecord, is_female: bool, is_beast: bool) -> 
 			continue
 
 		# Check if part belongs to this race
-		var part_id_lower := part_id.to_lower()
+		var part_id_lower: String = part_id.to_lower()
 		if race_id_lower in part_id_lower:
 			parts[part.part_type] = part
 

@@ -1,5 +1,8 @@
 shader_type spatial;
-render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_disabled, diffuse_burley, specular_schlick_ggx;
+
+// Godot 4.3+ requires explicit screen texture samplers
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
 
 /**
  * Simple flat water shader for ultra-low-end hardware
@@ -40,7 +43,7 @@ void fragment() {
 	fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0), 1.0, REFLECTANCE);
 
 	// Simple refraction (minimal for ultra-low quality)
-	vec3 refracted_color = textureLod(SCREEN_TEXTURE, SCREEN_UV, 0.0).rgb;
+	vec3 refracted_color = textureLod(screen_texture, SCREEN_UV, 0.0).rgb;
 	ALBEDO = mix(refracted_color, water_color.rgb, 0.6);
 
 	// Alpha for transparency

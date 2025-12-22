@@ -264,6 +264,10 @@ func is_using_compute() -> bool:
 	return _use_compute
 
 
+func is_initialized() -> bool:
+	return _initialized
+
+
 func get_map_size() -> int:
 	return map_size
 

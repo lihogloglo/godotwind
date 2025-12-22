@@ -25,7 +25,7 @@ extends SceneTree
 ##   --interior-only     Bake only interior cells
 ##   --exterior-only     Bake only exterior cells (default)
 ##   --skip-existing     Skip cells that already have baked navmesh (default: true)
-##   --output DIR        Output directory (default: res://assets/navmeshes)
+##   --output DIR        Output directory (default: Documents/Godotwind/cache/navmeshes)
 
 const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 
@@ -51,7 +51,10 @@ func _init() -> void:
 
 	# Create baker
 	baker = NavMeshBaker.new()
-	baker.output_dir = args.get("output", "res://assets/navmeshes")
+	# Use settings manager default unless --output is explicitly provided
+	if args.has("output"):
+		baker.output_dir = args.get("output")
+	# Otherwise leave empty and let initialize() use SettingsManager
 	baker.bake_exterior_cells = args.get("bake_exterior", true)
 	baker.bake_interior_cells = args.get("bake_interior", false)
 	baker.skip_existing = args.get("skip_existing", true)
@@ -118,7 +121,7 @@ func _parse_arguments() -> void:
 	print("  Exterior cells: %s" % args.get("bake_exterior", false))
 	print("  Interior cells: %s" % args.get("bake_interior", false))
 	print("  Skip existing: %s" % args.get("skip_existing", true))
-	print("  Output: %s" % args.get("output", "res://assets/navmeshes"))
+	print("  Output: %s" % (args.get("output") if args.has("output") else "(using SettingsManager default)"))
 	if args.has("specific_cell"):
 		print("  Specific cell: %s" % args.specific_cell)
 	print()

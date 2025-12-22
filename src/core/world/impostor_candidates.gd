@@ -28,43 +28,41 @@ const DEFAULT_SETTINGS := {
 	"max_distance": 5000.0,    # Stop showing at 5km
 }
 
-## High-priority landmarks (large, distinctive, always visible from distance)
-const LANDMARK_MODELS := [
+## High-priority landmark patterns (matched against actual BSA files)
+## These patterns identify large, distinctive structures visible from distance
+const LANDMARK_PATTERNS := [
 	# Morrowind cantons and major structures
-	"meshes/x/ex_vivec_canton_01.nif",
-	"meshes/x/ex_vivec_canton_02.nif",
-	"meshes/x/ex_vivec_canton_03.nif",
-	"meshes/x/ex_vivec_canton_04.nif",
-	"meshes/x/ex_vivec_canton_05.nif",
-	"meshes/x/ex_vivec_palace.nif",
+	"ex_vivec",
+	"ex_mournhold",
 
 	# Strongholds and fortresses
-	"meshes/x/ex_stronghold_01.nif",
-	"meshes/x/ex_stronghold_02.nif",
-	"meshes/x/ex_stronghold_03.nif",
-	"meshes/x/ex_hlaalu_stronghold.nif",
-	"meshes/x/ex_redoran_stronghold.nif",
-	"meshes/x/ex_telvanni_stronghold.nif",
+	"ex_stronghold",
+	"ex_hlaalu_b",  # Hlaalu buildings
+	"ex_redoran_b", # Redoran buildings
 
 	# Dwemer ruins (large exterior structures)
-	"meshes/x/ex_dwrv_ruin_01.nif",
-	"meshes/x/ex_dwrv_ruin_02.nif",
-	"meshes/x/ex_dwrv_ruin_03.nif",
-	"meshes/x/ex_dwrv_tower_01.nif",
-	"meshes/x/ex_dwrv_tower_02.nif",
+	"ex_dwe_",      # Dwemer exterior
+	"ex_dwrv_",     # Dwemer ruins
 
 	# Ghostfence
-	"meshes/x/ex_ghostfence_pillar.nif",
-	"meshes/x/ex_ghostfence_tower.nif",
+	"ex_ghostfence",
 
 	# Daedric shrines
-	"meshes/x/ex_daedric_ruin_01.nif",
-	"meshes/x/ex_daedric_ruin_02.nif",
-	"meshes/x/ex_daedric_ruin_tower.nif",
+	"ex_dae_",      # Daedric exterior
 
-	# Red Mountain features
-	"meshes/x/ex_red_tower.nif",
+	# Imperial forts
+	"ex_imp_",
+
+	# Velothi towers
+	"ex_velothi",
+
+	# Telvanni towers
+	"ex_t_",
 ]
+
+## Cached landmark models (populated on first call)
+var _cached_landmark_models: Array[String] = []
+var _landmark_cache_built: bool = false
 
 ## Large buildings that should have impostors
 const LARGE_BUILDING_PATTERNS := [
@@ -132,9 +130,9 @@ func _check_impostor_candidate(lower_path: String) -> bool:
 	if lower_path in _custom_candidates:
 		return true
 
-	# Check landmark models
-	for landmark in LANDMARK_MODELS:
-		if landmark.to_lower() in lower_path:
+	# Check landmark patterns
+	for pattern in LANDMARK_PATTERNS:
+		if pattern in lower_path:
 			return true
 
 	# Check building patterns
@@ -171,8 +169,8 @@ func get_impostor_settings(model_path: String) -> Dictionary:
 	var settings := DEFAULT_SETTINGS.duplicate()
 
 	# Landmarks get higher resolution
-	for landmark in LANDMARK_MODELS:
-		if landmark.to_lower() in lower:
+	for pattern in LANDMARK_PATTERNS:
+		if pattern in lower:
 			settings["texture_size"] = 1024
 			settings["frames"] = 24
 			return settings
@@ -220,18 +218,44 @@ func remove_custom_candidate(model_path: String) -> void:
 	_impostor_cache.erase(lower)
 
 
-## Get all landmark model paths
+## Get all landmark model paths by scanning BSA for matching files
 func get_landmark_models() -> Array[String]:
-	var result: Array[String] = []
-	for model in LANDMARK_MODELS:
-		result.append(model)
-	return result
+	# Return cached results if already built
+	if _landmark_cache_built:
+		return _cached_landmark_models.duplicate()
+
+	_cached_landmark_models.clear()
+
+	# Scan BSA for files matching landmark patterns
+	if BSAManager.get_archive_count() == 0:
+		push_warning("ImpostorCandidates: BSA archives not loaded, cannot scan for landmarks")
+		return _cached_landmark_models
+
+	# Get all NIF files from BSA
+	var nif_files := BSAManager.get_files_by_extension(".nif")
+
+	for file_info in nif_files:
+		var file_path: String = file_info["path"].to_lower()
+
+		# Only check meshes in the x/ folder (exterior meshes)
+		if not "\\x\\" in file_path and not "/x/" in file_path:
+			continue
+
+		# Check against landmark patterns
+		for pattern in LANDMARK_PATTERNS:
+			if pattern in file_path:
+				_cached_landmark_models.append(file_info["path"])
+				break
+
+	_landmark_cache_built = true
+	print("ImpostorCandidates: Found %d landmark models in BSA" % _cached_landmark_models.size())
+	return _cached_landmark_models.duplicate()
 
 
 ## Get all impostor candidate patterns
 func get_all_patterns() -> Dictionary:
 	return {
-		"landmarks": LANDMARK_MODELS.duplicate(),
+		"landmarks": LANDMARK_PATTERNS.duplicate(),
 		"buildings": LARGE_BUILDING_PATTERNS.duplicate(),
 		"terrain": TERRAIN_FEATURE_PATTERNS.duplicate(),
 		"trees": TREE_PATTERNS.duplicate(),
@@ -242,6 +266,8 @@ func get_all_patterns() -> Dictionary:
 ## Clear the cache (call after modifying candidates)
 func clear_cache() -> void:
 	_impostor_cache.clear()
+	_cached_landmark_models.clear()
+	_landmark_cache_built = false
 
 
 ## Check if a model path matches any pattern in a list
@@ -253,15 +279,27 @@ static func matches_any_pattern(model_path: String, patterns: Array) -> bool:
 	return false
 
 
+## Get the impostors cache directory from SettingsManager
+## Static helper that accesses the autoloaded singleton
+static func _get_impostors_dir() -> String:
+	var settings: Node = Engine.get_main_loop().root.get_node_or_null("/root/SettingsManager")
+	if settings and settings.has_method("get_impostors_path"):
+		return settings.get_impostors_path()
+	# Fallback if SettingsManager not available (e.g., in editor without autoloads)
+	push_warning("ImpostorCandidates: SettingsManager not found, using default path")
+	var documents := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	return documents.path_join("Godotwind").path_join("cache").path_join("impostors")
+
+
 ## Get the impostor texture path for a model
 ## Returns expected path where impostor texture would be stored
 static func get_impostor_texture_path(model_path: String) -> String:
 	# Hash the model path for unique filename
 	var hash_str := str(model_path.to_lower().hash())
-	return "res://assets/impostors/%s_impostor.png" % hash_str
+	return _get_impostors_dir().path_join("%s_impostor.png" % hash_str)
 
 
 ## Get the impostor metadata path for a model
 static func get_impostor_metadata_path(model_path: String) -> String:
 	var hash_str := str(model_path.to_lower().hash())
-	return "res://assets/impostors/%s_impostor.json" % hash_str
+	return _get_impostors_dir().path_join("%s_impostor.json" % hash_str)

@@ -171,12 +171,19 @@ func _ready() -> void:
 	# Setup visibility toggles
 	_setup_visibility_toggles()
 
-	# Get Morrowind data path
+	# Get Morrowind data path (try auto-detection if not configured)
 	_data_path = SettingsManager.get_data_path()
 	if _data_path.is_empty():
-		_hide_loading()
-		_log("[color=red]ERROR: Morrowind data path not configured. Set MORROWIND_DATA_PATH environment variable or use settings UI.[/color]")
-		return
+		_log("No data path configured, attempting auto-detection...")
+		_data_path = SettingsManager.auto_detect_installation()
+		if not _data_path.is_empty():
+			_log("[color=green]Auto-detected Morrowind at: %s[/color]" % _data_path)
+			SettingsManager.set_data_path(_data_path)
+		else:
+			_hide_loading()
+			_log("[color=red]ERROR: Morrowind data path not configured and auto-detection failed.[/color]")
+			_log("[color=yellow]Set MORROWIND_DATA_PATH environment variable or use settings UI.[/color]")
+			return
 
 	# Start async initialization
 	_show_loading("Initializing World Streaming", "Loading game data...")
@@ -625,19 +632,34 @@ func _setup_visibility_toggles() -> void:
 func _on_show_models_toggled(enabled: bool) -> void:
 	_show_models = enabled
 
+	_log("[DIAG] Models toggle: %s" % ("ON" if enabled else "OFF"))
+
 	# Toggle object loading in WorldStreamingManager
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
 
+		var loaded_coords = world_streaming_manager.get_loaded_cell_coordinates()
+		_log("[DIAG] Currently loaded cells: %d" % loaded_coords.size())
+
 		# Show/hide existing loaded cell objects
-		for cell_grid in world_streaming_manager.get_loaded_cell_coordinates():
+		var visible_count := 0
+		for cell_grid in loaded_coords:
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
 			if cell_node:
 				cell_node.visible = enabled
+				visible_count += 1
+
+		_log("[DIAG] Set visibility for %d cell nodes" % visible_count)
 
 		# DON'T call refresh_cells() here - it floods the queue with all visible cells
 		# The streaming manager's _process() will naturally pick up missing cells
 		# This prevents the game from grinding to a halt when toggling models on
+
+		# Log current queue states
+		if cell_manager:
+			var inst_queue: int = cell_manager.get_instantiation_queue_size() if cell_manager.has_method("get_instantiation_queue_size") else 0
+			var async_pending: int = cell_manager.get_async_pending_count() if cell_manager.has_method("get_async_pending_count") else 0
+			_log("[DIAG] After toggle: inst_queue=%d, async_pending=%d" % [inst_queue, async_pending])
 
 	_log("Models: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()

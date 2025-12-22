@@ -448,7 +448,8 @@ func _add_state_transitions() -> void:
 		var to: String = trans[1]
 
 		if state_machine.has_node(from) and state_machine.has_node(to):
-			state_machine.add_transition(from, to, &"")
+			var transition := AnimationNodeStateMachineTransition.new()
+			state_machine.add_transition(from, to, transition)
 
 	# Set start node
 	if state_machine.has_node("Idle"):

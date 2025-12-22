@@ -6,7 +6,8 @@
 ## 1. Parse cell geometry (terrain LAND/Terrain3D, static objects, buildings)
 ## 2. Convert to NavigationMeshSourceGeometryData3D
 ## 3. Bake using NavigationServer3D.bake_from_source_geometry_data()
-## 4. Save to assets/navmeshes/[cell_id].res
+## 4. Save to {cache}/navmeshes/[cell_id].res
+## Default cache: Documents/Godotwind/cache/
 ##
 ## Terrain3D Integration:
 ## - If terrain_3d is set, uses Terrain3D's optimized generate_nav_mesh_source_geometry()
@@ -15,8 +16,8 @@
 ##
 ## Usage (Offline Prebaking):
 ##   var baker := NavMeshBaker.new()
-##   baker.output_dir = "res://assets/navmeshes"
 ##   baker.bake_all_cells()  # Uses LAND heightmap (no Terrain3D needed)
+##   # Output dir defaults to Documents/Godotwind/cache/navmeshes
 ##
 ## Usage (Runtime/Editor with Terrain3D):
 ##   var baker := NavMeshBaker.new()
@@ -30,8 +31,8 @@ const NavMeshConfig := preload("res://src/core/navigation/navmesh_config.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 
-## Output directory for navmesh assets
-var output_dir: String = "res://assets/navmeshes"
+## Output directory for navmesh assets (set in initialize from SettingsManager)
+var output_dir: String = ""
 
 ## Optional Terrain3D instance for runtime baking (when available)
 ## If set, uses Terrain3D's optimized generate_nav_mesh_source_geometry()
@@ -99,12 +100,15 @@ func initialize() -> Error:
 	if not validation.warnings.is_empty():
 		push_warning("NavMeshBaker: Config warnings: %s" % ", ".join(validation.warnings))
 
-	# Create output directory
-	if not DirAccess.dir_exists_absolute(output_dir):
-		var err := DirAccess.make_dir_recursive_absolute(output_dir)
-		if err != OK:
-			push_error("NavMeshBaker: Failed to create output directory: %s" % output_dir)
-			return err
+	# Get output directory from settings manager
+	if output_dir.is_empty():
+		output_dir = SettingsManager.get_navmeshes_path()
+
+	# Ensure cache directories exist
+	var err := SettingsManager.ensure_cache_directories()
+	if err != OK:
+		push_error("NavMeshBaker: Failed to create cache directories")
+		return err
 
 	print("NavMeshBaker: Initialized")
 	print(NavMeshConfig.get_config_summary())
@@ -207,7 +211,7 @@ func bake_cell(cell: CellRecord) -> Dictionary:
 	var parse_result := _parse_cell_geometry(cell, source_geometry)
 
 	if not parse_result.success:
-		var error := parse_result.error
+		var error: String = parse_result.error
 		push_warning("NavMeshBaker: Failed to parse geometry - %s: %s" % [cell_id, error])
 		cell_baked.emit(cell_id, false, "", 0)
 		return {"success": false, "output_path": "", "polygon_count": 0, "error": error, "bake_time": 0.0}
@@ -392,10 +396,6 @@ func _create_terrain_mesh_from_land(land: LandRecord, cell_origin: Vector3) -> A
 func _add_object_geometry(cell: CellRecord, cell_origin: Vector3, source_geometry: NavigationMeshSourceGeometryData3D) -> Dictionary:
 	var mesh_count := 0
 
-	# Load cell references if needed
-	if cell.references.is_empty():
-		ESMManager.load_cell_references(cell)
-
 	# Process each reference
 	for ref in cell.references:
 		# Skip disabled/deleted references
@@ -450,7 +450,7 @@ func _is_walkable_object(ref) -> bool:
 		return false
 
 	# Get record type
-	var rec_type := base_obj.get_record_type() if base_obj.has_method("get_record_type") else -1
+	var rec_type: int = base_obj.get_record_type() if base_obj.has_method("get_record_type") else -1
 
 	# Include static objects, buildings, misc items
 	const ESMDefs := preload("res://src/core/esm/esm_defs.gd")
@@ -463,7 +463,7 @@ func _is_walkable_object(ref) -> bool:
 ## Load collision mesh from NIF file
 func _load_nif_collision_mesh(nif_path: String) -> ArrayMesh:
 	# Load NIF file from BSA/filesystem
-	var bsa_data := BSAManager.load_file(nif_path)
+	var bsa_data: PackedByteArray = BSAManager.load_file(nif_path)
 	if bsa_data.is_empty():
 		return null
 
@@ -556,7 +556,7 @@ func _get_reference_transform(ref, cell_origin: Vector3) -> Transform3D:
 
 	# Position
 	if ref.has("position"):
-		var pos := ref.position
+		var pos: Vector3 = ref.position
 		transform.origin = Vector3(
 			pos.x / CS.UNITS_PER_METER,
 			pos.z / CS.UNITS_PER_METER,  # Z-up in MW, Y-up in Godot
@@ -565,7 +565,7 @@ func _get_reference_transform(ref, cell_origin: Vector3) -> Transform3D:
 
 	# Rotation (Euler angles in radians)
 	if ref.has("rotation"):
-		var rot := ref.rotation
+		var rot: Vector3 = ref.rotation
 		# Convert MW rotation (XYZ Euler) to Godot
 		var basis := Basis.from_euler(Vector3(rot.x, rot.y, rot.z))
 		transform.basis = basis

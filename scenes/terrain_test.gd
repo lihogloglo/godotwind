@@ -51,12 +51,18 @@ func _ready() -> void:
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
 
-	# Get Morrowind data path
+	# Get Morrowind data path (try auto-detection if not configured)
 	_data_path = SettingsManager.get_data_path()
 	if _data_path.is_empty():
-		_log("[color=red]ERROR: Morrowind data path not configured[/color]")
-		_log("[color=yellow]Set MORROWIND_DATA_PATH environment variable[/color]")
-		return
+		_log("No data path configured, attempting auto-detection...")
+		_data_path = SettingsManager.auto_detect_installation()
+		if not _data_path.is_empty():
+			_log("[color=green]Auto-detected Morrowind at: %s[/color]" % _data_path)
+			SettingsManager.set_data_path(_data_path)
+		else:
+			_log("[color=red]ERROR: Morrowind data path not configured and auto-detection failed.[/color]")
+			_log("[color=yellow]Set MORROWIND_DATA_PATH environment variable or use settings UI.[/color]")
+			return
 
 	# Start initialization
 	call_deferred("_init_async")

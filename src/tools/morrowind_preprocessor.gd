@@ -254,17 +254,35 @@ static func estimate_time() -> Dictionary:
 	}
 
 
+## Get cache paths from SettingsManager (helper for static functions)
+static func _get_cache_paths() -> Dictionary:
+	var settings := Engine.get_main_loop().root.get_node_or_null("/root/SettingsManager")
+	if settings:
+		return {
+			"impostors": settings.get_impostors_path(),
+			"merged_cells": settings.get_merged_cells_path(),
+		}
+	# Fallback if SettingsManager not available
+	var documents := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	var base := documents.path_join("Godotwind").path_join("cache")
+	return {
+		"impostors": base.path_join("impostors"),
+		"merged_cells": base.path_join("merged_cells"),
+	}
+
+
 ## Check if preprocessing is complete
 static func is_preprocessing_complete() -> bool:
-	var has_impostors := DirAccess.dir_exists_absolute("res://assets/impostors")
-	var has_merged := DirAccess.dir_exists_absolute("res://assets/merged_cells")
+	var paths := _get_cache_paths()
+	var has_impostors := DirAccess.dir_exists_absolute(paths.impostors)
+	var has_merged := DirAccess.dir_exists_absolute(paths.merged_cells)
 
 	# Check for at least some files in each directory
 	if not has_impostors or not has_merged:
 		return false
 
-	var impostor_count := _count_files("res://assets/impostors", "png")
-	var merged_count := _count_files("res://assets/merged_cells", "res")
+	var impostor_count := _count_files(paths.impostors, "png")
+	var merged_count := _count_files(paths.merged_cells, "res")
 
 	# Need at least some assets
 	return impostor_count > 0 and merged_count > 0
@@ -291,14 +309,15 @@ static func _count_files(dir_path: String, extension: String) -> int:
 
 ## Get preprocessing status
 static func get_preprocessing_status() -> Dictionary:
+	var paths := _get_cache_paths()
 	return {
 		"complete": is_preprocessing_complete(),
 		"impostors": {
-			"exists": DirAccess.dir_exists_absolute("res://assets/impostors"),
-			"count": _count_files("res://assets/impostors", "png"),
+			"exists": DirAccess.dir_exists_absolute(paths.impostors),
+			"count": _count_files(paths.impostors, "png"),
 		},
 		"merged_meshes": {
-			"exists": DirAccess.dir_exists_absolute("res://assets/merged_cells"),
-			"count": _count_files("res://assets/merged_cells", "res"),
+			"exists": DirAccess.dir_exists_absolute(paths.merged_cells),
+			"count": _count_files(paths.merged_cells, "res"),
 		},
 	}

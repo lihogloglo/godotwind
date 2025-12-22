@@ -169,7 +169,7 @@ func _update_foot_targets() -> void:
 	# Left foot raycast
 	var left_hit := _raycast_from_foot(space_state, left_foot_global)
 	if left_hit:
-		var target_pos := left_hit.position + Vector3.UP * foot_offset
+		var target_pos: Vector3 = left_hit.position + Vector3.UP * foot_offset
 		left_foot_target.global_position = _clamp_foot_position(left_foot_global, target_pos)
 	else:
 		left_foot_target.global_position = left_foot_global
@@ -177,7 +177,7 @@ func _update_foot_targets() -> void:
 	# Right foot raycast
 	var right_hit := _raycast_from_foot(space_state, right_foot_global)
 	if right_hit:
-		var target_pos := right_hit.position + Vector3.UP * foot_offset
+		var target_pos: Vector3 = right_hit.position + Vector3.UP * foot_offset
 		right_foot_target.global_position = _clamp_foot_position(right_foot_global, target_pos)
 	else:
 		right_foot_target.global_position = right_foot_global

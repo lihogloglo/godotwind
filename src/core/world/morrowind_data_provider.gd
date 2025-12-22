@@ -310,9 +310,9 @@ func get_max_view_distance() -> float:
 
 ## Distant rendering support (requires pre-baked assets)
 func supports_distant_rendering() -> bool:
-	# Check if pre-baked assets exist
-	var has_impostors := DirAccess.dir_exists_absolute("res://assets/impostors")
-	var has_merged := DirAccess.dir_exists_absolute("res://assets/merged_cells")
+	# Check if pre-baked assets exist in cache directory
+	var has_impostors := DirAccess.dir_exists_absolute(SettingsManager.get_impostors_path())
+	var has_merged := DirAccess.dir_exists_absolute(SettingsManager.get_merged_cells_path())
 
 	# Only enable if assets are ready (or return true to force enable for testing)
 	# For now, return false until preprocessing is complete

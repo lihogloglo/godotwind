@@ -11,11 +11,16 @@ const SETTING_SEA_LEVEL := "ocean/sea_level"
 const SETTING_RADIUS := "ocean/radius"
 const SETTING_QUALITY := "ocean/quality"
 
+## Get prebaked shore mask path from SettingsManager
+func _get_shore_mask_path() -> String:
+	return SettingsManager.get_ocean_path().path_join("shore_mask.png")
+
 # Ocean configuration
 @export var ocean_radius: float = 8000.0  # 8km clipmap radius
 @export var wave_update_rate: int = 30    # Wave updates per second
 @export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore
 @export var shore_mask_resolution: int = 2048  # Shore mask texture size
+@export var use_prebaked_shore_mask: bool = true  # Try to load prebaked shore mask first
 
 # Sea level - can be configured per world
 @export var sea_level: float = 0.0
@@ -169,10 +174,20 @@ func _deferred_init() -> void:
 
 		if _wave_generator.is_using_compute():
 			_setup_wave_cascades(actual_quality)
-			_ocean_mesh.set_wave_textures(
-				_wave_generator.get_displacement_texture(),
-				_wave_generator.get_normal_texture()
-			)
+			# Initialize GPU resources BEFORE trying to get textures
+			# This creates the displacement/normal map textures
+			_wave_generator.init_gpu(maxi(2, _wave_parameters.size()))
+
+			if _wave_generator.is_initialized():
+				_ocean_mesh.set_wave_textures(
+					_wave_generator.get_displacement_texture(),
+					_wave_generator.get_normal_texture(),
+					_wave_parameters.size()
+				)
+			else:
+				# GPU init failed
+				_use_compute = false
+				push_warning("[OceanManager] GPU compute init failed, using vertex Gerstner")
 		else:
 			# Compute failed to init - fall back to Gerstner
 			_use_compute = false
@@ -180,9 +195,31 @@ func _deferred_init() -> void:
 
 	_update_shader_parameters()
 
-	# Generate initial shore mask if terrain available
-	if _terrain:
+	# Load or generate shore mask
+	var shore_mask_loaded := false
+
+	# Try prebaked shore mask first
+	var shore_mask_path := _get_shore_mask_path()
+	if use_prebaked_shore_mask and FileAccess.file_exists(shore_mask_path):
+		var prebaked := ShoreMaskBaker.load_prebaked(shore_mask_path)
+		if not prebaked.is_empty():
+			_ocean_mesh.set_shore_mask(prebaked.texture, prebaked.bounds)
+			shore_mask_loaded = true
+			print("[OceanManager] Using prebaked shore mask from %s" % shore_mask_path)
+
+	# Fall back to runtime generation if terrain available
+	if not shore_mask_loaded and _terrain:
+		print("[OceanManager] Generating shore mask at runtime...")
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
+		# Pass shore mask to ocean mesh shader
+		_ocean_mesh.set_shore_mask(
+			_shore_mask.get_shore_mask_texture(),
+			_shore_mask.get_world_bounds()
+		)
+		shore_mask_loaded = true
+
+	if not shore_mask_loaded:
+		print("[OceanManager] Warning: No shore mask available - ocean will appear everywhere")
 
 	_system_initialized = true
 	ocean_initialized.emit()
@@ -410,6 +447,11 @@ func set_terrain(terrain: Terrain3D) -> void:
 		return
 	if _shore_mask and _terrain:
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
+		if _ocean_mesh:
+			_ocean_mesh.set_shore_mask(
+				_shore_mask.get_shore_mask_texture(),
+				_shore_mask.get_world_bounds()
+			)
 
 
 ## Regenerate shore mask (call after terrain changes)
@@ -418,6 +460,11 @@ func regenerate_shore_mask() -> void:
 		return
 	if _shore_mask and _terrain:
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
+		if _ocean_mesh:
+			_ocean_mesh.set_shore_mask(
+				_shore_mask.get_shore_mask_texture(),
+				_shore_mask.get_world_bounds()
+			)
 
 
 ## Enable/disable ocean rendering

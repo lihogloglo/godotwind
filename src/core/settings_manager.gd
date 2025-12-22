@@ -32,16 +32,36 @@ static func _get_linux_common_paths() -> Array[String]:
 	]
 	return paths
 
-## Windows common installation paths for Morrowind
-const WINDOWS_COMMON_PATHS := [
-	"C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files",
-	"C:/Program Files/Steam/steamapps/common/Morrowind/Data Files",
-	"C:/Program Files (x86)/Bethesda Softworks/Morrowind/Data Files",
-	"C:/GOG Games/Morrowind/Data Files",
-	"D:/Games/Morrowind/Data Files",
-	"D:/SteamLibrary/steamapps/common/Morrowind/Data Files",
-	"E:/SteamLibrary/steamapps/common/Morrowind/Data Files",
-]
+## Returns Windows common installation paths for Morrowind
+static func _get_windows_common_paths() -> Array[String]:
+	var paths: Array[String] = [
+		# Classic Steam installation (most common)
+		"C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files",
+		"C:/Program Files/Steam/steamapps/common/Morrowind/Data Files",
+		# Bethesda retail
+		"C:/Program Files (x86)/Bethesda Softworks/Morrowind/Data Files",
+		"C:/Program Files/Bethesda Softworks/Morrowind/Data Files",
+		# GOG
+		"C:/GOG Games/Morrowind/Data Files",
+		"C:/Program Files (x86)/GOG Galaxy/Games/Morrowind/Data Files",
+		"C:/Program Files/GOG Galaxy/Games/Morrowind/Data Files",
+		# Common game drive locations
+		"D:/Games/Morrowind/Data Files",
+		"D:/SteamLibrary/steamapps/common/Morrowind/Data Files",
+		"E:/SteamLibrary/steamapps/common/Morrowind/Data Files",
+		"F:/SteamLibrary/steamapps/common/Morrowind/Data Files",
+		# Steam in root of drives
+		"D:/Steam/steamapps/common/Morrowind/Data Files",
+		"E:/Steam/steamapps/common/Morrowind/Data Files",
+	]
+
+	# Add user-specific Steam library path if available
+	var local_app_data := OS.get_environment("LOCALAPPDATA")
+	if not local_app_data.is_empty():
+		# Some users have Steam in AppData
+		paths.append(local_app_data + "/Steam/steamapps/common/Morrowind/Data Files")
+
+	return paths
 
 func _ready() -> void:
 	_load_config()
@@ -113,10 +133,10 @@ func get_common_paths() -> Array[String]:
 	if OS.get_name() == "Linux":
 		paths.append_array(_get_linux_common_paths())
 		# Also include Windows paths for Wine/Proton compatibility
-		paths.append_array(WINDOWS_COMMON_PATHS)
+		paths.append_array(_get_windows_common_paths())
 	else:
 		# Windows, macOS, etc.
-		paths.append_array(WINDOWS_COMMON_PATHS)
+		paths.append_array(_get_windows_common_paths())
 
 	return paths
 
@@ -170,3 +190,87 @@ func get_data_path_source() -> String:
 			return "user config"
 
 	return "project settings"
+
+
+# =============================================================================
+# Cache Path Management
+# =============================================================================
+# Prebaked/cached data (impostors, merged meshes, navmeshes, etc.) is stored
+# outside the project folder to keep the repo clean and allow configurable paths.
+
+## Returns the default cache base path (Documents/Godotwind/cache)
+func get_default_cache_path() -> String:
+	var documents := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	return documents.path_join("Godotwind").path_join("cache")
+
+
+## Gets the cache base path (configurable, defaults to Documents/Godotwind/cache)
+func get_cache_base_path() -> String:
+	# Check environment variable first
+	var env_path := OS.get_environment("GODOTWIND_CACHE_PATH")
+	if not env_path.is_empty():
+		return env_path
+
+	# Check user config
+	_load_config()
+	if _config.has_section_key("cache", "base_path"):
+		var config_path: String = _config.get_value("cache", "base_path")
+		if not config_path.is_empty():
+			return config_path
+
+	# Default to Documents folder
+	return get_default_cache_path()
+
+
+## Sets a custom cache base path
+func set_cache_base_path(path: String) -> void:
+	_load_config()
+	_config.set_value("cache", "base_path", path)
+	_save_config()
+
+
+## Gets the impostors cache path
+func get_impostors_path() -> String:
+	return get_cache_base_path().path_join("impostors")
+
+
+## Gets the merged cells cache path
+func get_merged_cells_path() -> String:
+	return get_cache_base_path().path_join("merged_cells")
+
+
+## Gets the navmeshes cache path
+func get_navmeshes_path() -> String:
+	return get_cache_base_path().path_join("navmeshes")
+
+
+## Gets the ocean data cache path (shore mask, etc.)
+func get_ocean_path() -> String:
+	return get_cache_base_path().path_join("ocean")
+
+
+## Gets the prebaked models cache path (individual NIF->Godot conversions)
+func get_models_path() -> String:
+	return get_cache_base_path().path_join("models")
+
+
+## Creates all cache subdirectories if they don't exist
+## Returns OK on success, or the first error encountered
+func ensure_cache_directories() -> Error:
+	var paths := [
+		get_cache_base_path(),
+		get_impostors_path(),
+		get_merged_cells_path(),
+		get_navmeshes_path(),
+		get_ocean_path(),
+		get_models_path(),
+	]
+
+	for path in paths:
+		if not DirAccess.dir_exists_absolute(path):
+			var err := DirAccess.make_dir_recursive_absolute(path)
+			if err != OK:
+				push_error("SettingsManager: Failed to create cache directory: %s (error: %d)" % [path, err])
+				return err
+
+	return OK

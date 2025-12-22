@@ -9,7 +9,18 @@
       "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --editor)",
       "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --quit)",
       "Bash(xxd:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(curl:*)",
+      "Bash(rm:*)",
+      "Bash(unzip:*)",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --editor --headless --quit)",
+      "Bash(findstr:*)",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/prebaking/prebaking_ui.tscn\")",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/world_explorer.tscn\")",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://scenes/world_explorer.tscn\")"
     ]
   }
 }

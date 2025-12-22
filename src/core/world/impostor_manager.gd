@@ -10,9 +10,10 @@
 ## - Handles impostor→mesh transition when player approaches
 ## - Batches impostors into atlas for draw call reduction
 ##
-## Impostor textures are expected at:
-##   res://assets/impostors/[model_hash]_impostor.png
-##   res://assets/impostors/[model_hash]_impostor.json (metadata)
+## Impostor textures are expected in the cache directory:
+##   {cache}/impostors/[model_hash]_impostor.png
+##   {cache}/impostors/[model_hash]_impostor.json (metadata)
+## Default cache location: Documents/Godotwind/cache/
 ##
 ## Usage:
 ##   var manager := ImpostorManager.new()
@@ -87,48 +88,93 @@ func _process(_delta: float) -> void:
 	_update_impostor_billboards()
 
 
-## Set up the billboard material (simple unshaded alpha cutout for now)
-## TODO: Implement octahedral shader for multi-angle impostors
+## Set up the billboard material with octahedral impostor shader
 func _setup_billboard_material() -> void:
-	# Create simple billboard shader
-	var shader := Shader.new()
-	shader.code = """
+	# Try to load the prebaked octahedral shader
+	var shader_path := "res://src/tools/prebaking/shaders/octahedral_impostor.gdshader"
+	var shader: Shader = null
+
+	if ResourceLoader.exists(shader_path):
+		shader = load(shader_path) as Shader
+
+	if not shader:
+		# Fallback to inline shader if file not found
+		shader = Shader.new()
+		shader.code = _get_fallback_shader_code()
+
+	_billboard_material = ShaderMaterial.new()
+	_billboard_material.shader = shader
+	_billboard_material.set_shader_parameter("atlas_columns", 4)
+	_billboard_material.set_shader_parameter("atlas_rows", 2)
+	_billboard_material.set_shader_parameter("interpolate_frames", true)
+
+
+## Fallback shader code if external file not found
+func _get_fallback_shader_code() -> String:
+	return """
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_opaque;
 
-uniform sampler2D albedo_texture : source_color, filter_linear_mipmap;
+uniform sampler2D albedo_atlas : source_color, filter_linear_mipmap;
 uniform float alpha_cutoff : hint_range(0.0, 1.0) = 0.5;
-uniform vec2 uv_offset = vec2(0.0, 0.0);
-uniform vec2 uv_scale = vec2(1.0, 1.0);
+uniform int atlas_columns = 4;
+uniform int atlas_rows = 2;
+uniform bool interpolate_frames = true;
+
+varying vec3 view_direction;
 
 void vertex() {
-	// Billboard: rotate to face camera
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
-		vec4(normalize(cross(vec3(0.0, 1.0, 0.0), INV_VIEW_MATRIX[2].xyz)), 0.0),
-		vec4(0.0, 1.0, 0.0, 0.0),
-		vec4(normalize(INV_VIEW_MATRIX[2].xyz), 0.0),
+	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+	vec3 world_pos = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+	view_direction = normalize(camera_pos - world_pos);
+
+	vec3 look_dir = normalize(vec3(view_direction.x, 0.0, view_direction.z));
+	vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), look_dir));
+	vec3 up = vec3(0.0, 1.0, 0.0);
+
+	mat4 billboard = mat4(
+		vec4(right, 0.0),
+		vec4(up, 0.0),
+		vec4(look_dir, 0.0),
 		MODEL_MATRIX[3]
 	);
-	MODELVIEW_MATRIX = MODELVIEW_MATRIX * mat4(
-		vec4(length(MODEL_MATRIX[0].xyz), 0.0, 0.0, 0.0),
-		vec4(0.0, length(MODEL_MATRIX[1].xyz), 0.0, 0.0),
-		vec4(0.0, 0.0, length(MODEL_MATRIX[2].xyz), 0.0),
-		vec4(0.0, 0.0, 0.0, 1.0)
-	);
+
+	float scale_x = length(MODEL_MATRIX[0].xyz);
+	float scale_y = length(MODEL_MATRIX[1].xyz);
+	float scale_z = length(MODEL_MATRIX[2].xyz);
+
+	billboard[0] *= scale_x;
+	billboard[1] *= scale_y;
+	billboard[2] *= scale_z;
+
+	MODELVIEW_MATRIX = VIEW_MATRIX * billboard;
+}
+
+int get_frame_index(vec3 view_dir) {
+	float angle = atan(view_dir.x, view_dir.z);
+	float normalized = (angle + PI) / (2.0 * PI);
+	return int(normalized * 8.0) % 8;
+}
+
+vec2 get_frame_uv(int frame_index, vec2 uv) {
+	float col = float(frame_index % atlas_columns);
+	float row = float(frame_index / atlas_columns);
+	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
+	return vec2(col, row) * frame_size + uv * frame_size;
 }
 
 void fragment() {
-	vec2 uv = UV * uv_scale + uv_offset;
-	vec4 tex = texture(albedo_texture, uv);
+	int frame = get_frame_index(view_direction);
+	vec2 atlas_uv = get_frame_uv(frame, UV);
+	vec4 tex = texture(albedo_atlas, atlas_uv);
+
 	ALBEDO = tex.rgb;
 	if (tex.a < alpha_cutoff) {
 		discard;
 	}
+	ALPHA = tex.a;
 }
 """
-
-	_billboard_material = ShaderMaterial.new()
-	_billboard_material.shader = shader
 
 
 ## Set the impostor candidates reference
@@ -163,8 +209,14 @@ func add_impostor(
 	var metadata := _get_or_load_impostor_metadata(model_path)
 	var impostor_size := Vector2(10.0, 10.0)  # Default size
 	if not metadata.is_empty():
-		impostor_size.x = metadata.get("width", 10.0)
-		impostor_size.y = metadata.get("height", 10.0)
+		# Try new format first (bounds.width/height), then old format
+		var bounds: Dictionary = metadata.get("bounds", {})
+		if not bounds.is_empty():
+			impostor_size.x = bounds.get("width", 10.0)
+			impostor_size.y = bounds.get("height", 10.0)
+		else:
+			impostor_size.x = metadata.get("width", 10.0)
+			impostor_size.y = metadata.get("height", 10.0)
 
 	# Create billboard quad mesh
 	var quad_mesh := QuadMesh.new()
@@ -182,7 +234,7 @@ func add_impostor(
 
 	# Apply material with texture
 	var mat := _billboard_material.duplicate() as ShaderMaterial
-	mat.set_shader_parameter("albedo_texture", texture)
+	mat.set_shader_parameter("albedo_atlas", texture)  # Octahedral atlas texture
 	RenderingServer.instance_geometry_set_material_override(instance_rid, mat.get_rid())
 
 	# Create impostor instance

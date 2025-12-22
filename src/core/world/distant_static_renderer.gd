@@ -77,7 +77,7 @@ func set_cell_manager(manager: RefCounted) -> void:
 ## Add a cell from a pre-baked merged mesh (fast path)
 ## This is the preferred method - uses pre-generated meshes from mesh_prebaker.gd
 ## cell_grid: The cell grid coordinates
-## mesh: Pre-baked ArrayMesh from res://assets/merged_cells/
+## mesh: Pre-baked ArrayMesh from {cache}/merged_cells/
 ## Returns true if cell was successfully added
 func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 	# Skip if already loaded

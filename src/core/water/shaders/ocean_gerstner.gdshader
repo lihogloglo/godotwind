@@ -1,5 +1,9 @@
 shader_type spatial;
-render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_disabled, diffuse_burley, specular_schlick_ggx;
+
+// Godot 4.3+ requires explicit screen texture samplers
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
 
 /**
  * Vertex shader Gerstner waves for LOW/MEDIUM quality setting
@@ -129,10 +133,10 @@ void fragment() {
 
 	// Refraction using screen texture
 	vec2 refraction_offset = NORMAL.xy * refraction_strength;
-	vec3 refracted_color = textureLod(SCREEN_TEXTURE, SCREEN_UV + refraction_offset, 0.0).rgb;
+	vec3 refracted_color = textureLod(screen_texture, SCREEN_UV + refraction_offset, 0.0).rgb;
 
 	// Depth-based transparency
-	float depth = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	float depth = texture(depth_texture, SCREEN_UV).r;
 	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
 	float depth_diff = world_pos.z / world_pos.w - VERTEX.z;
 	float water_depth_fade = 1.0 - exp(-depth_diff / depth_fade_distance);

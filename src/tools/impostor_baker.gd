@@ -6,7 +6,8 @@
 ## 1. Load landmark models from NIF files
 ## 2. Render from 16 octahedral viewing angles (hemisphere coverage)
 ## 3. Pack frames into texture atlas
-## 4. Save to assets/impostors/[model_hash].png + .json metadata
+## 4. Save to {cache}/impostors/[model_hash].png + .json metadata
+## Default cache: Documents/Godotwind/cache/
 ##
 ## Usage:
 ##   var baker := ImpostorBaker.new()
@@ -33,8 +34,8 @@ class ImpostorSettings:
 ## Default settings
 var settings := ImpostorSettings.new()
 
-## Output directory for impostor assets
-var output_dir: String = "res://assets/impostors"
+## Output directory for impostor assets (set in initialize from SettingsManager)
+var output_dir: String = ""
 
 ## Progress tracking
 signal progress(current: int, total: int, model_name: String)
@@ -49,12 +50,15 @@ var _failed_models: Array[String] = []
 
 ## Initialize the baker (call before baking)
 func initialize() -> Error:
-	# Create output directory
-	if not DirAccess.dir_exists_absolute(output_dir):
-		var err := DirAccess.make_dir_recursive_absolute(output_dir)
-		if err != OK:
-			push_error("ImpostorBaker: Failed to create output directory: %s" % output_dir)
-			return err
+	# Get output directory from settings manager
+	if output_dir.is_empty():
+		output_dir = SettingsManager.get_impostors_path()
+
+	# Ensure cache directories exist
+	var err := SettingsManager.ensure_cache_directories()
+	if err != OK:
+		push_error("ImpostorBaker: Failed to create cache directories")
+		return err
 
 	print("ImpostorBaker: Initialized - output dir: %s" % output_dir)
 	return OK

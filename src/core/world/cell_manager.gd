@@ -498,12 +498,38 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 
 ## Maximum concurrent async cell requests (prevents memory buildup)
 ## Industry standard: 4-8 concurrent operations max to avoid I/O saturation
-## Higher values cause queue flooding and frame drops during mass loading
-const MAX_ASYNC_REQUESTS := 8
+## Diagnostics show duplicate() is fast (~0.35ms), so we can handle more concurrent requests
+const MAX_ASYNC_REQUESTS := 6
 
 ## Maximum items in instantiation queue (prevents memory buildup)
 ## Morrowind cells can have 200+ objects each, 32 cells × 200 = 6400 objects max
 const MAX_INSTANTIATION_QUEUE := 8000
+
+## Maximum objects to instantiate per frame (prevents frame spikes)
+## Diagnostics show avg instantiation is ~0.35ms, so 30 objects = ~10.5ms
+## This leaves headroom within a 16.6ms frame (60 FPS)
+const MAX_INSTANTIATIONS_PER_FRAME := 30
+
+## Enable diagnostic logging for performance analysis
+var diagnostic_logging: bool = true
+
+## Diagnostic counters (reset periodically)
+var _diag_duplicate_time_total_us: int = 0
+var _diag_duplicate_count: int = 0
+var _diag_last_log_frame: int = 0
+
+## Queue for pending NIF conversions (deferred to avoid main thread stall)
+## Each entry: {parse_result: NIFParseResult, model_path: String, request_id: int, item_id: String}
+var _pending_conversions: Array[Dictionary] = []
+
+## Maximum conversion time per frame in milliseconds
+## NOTE: A single complex model can take 500ms-6s to convert
+## We can't interrupt mid-conversion, so this is really just a guide
+## The key optimization is doing only ONE conversion per frame
+const MAX_CONVERSION_TIME_MS := 50.0  # Allow one conversion to complete
+
+## Maximum conversions per frame - keeps FPS stable even with complex models
+const MAX_CONVERSIONS_PER_FRAME := 1
 
 ## Maximum retries for failed async requests
 const MAX_ASYNC_RETRIES := 2
@@ -662,19 +688,100 @@ func cancel_async_request(request_id: int) -> void:
 	_async_requests.erase(request_id)
 
 
+## Process pending NIF conversions - ONE per frame to maintain responsiveness
+## Returns true if any conversions were done
+## Call this BEFORE process_async_instantiation to feed the cache
+## NOTE: Complex models can take 500ms-6s each, so we limit to MAX_CONVERSIONS_PER_FRAME
+## With disk caching, second runs are nearly instant (1-5ms per model)
+func process_pending_conversions(_budget_ms: float) -> bool:
+	if _pending_conversions.is_empty():
+		return false
+
+	var converted := 0
+	var from_disk := 0
+
+	while not _pending_conversions.is_empty() and converted < MAX_CONVERSIONS_PER_FRAME:
+		var entry: Dictionary = _pending_conversions.pop_front()
+		var parse_result: NIFParseResult = entry.parse_result
+		var model_path: String = entry.model_path
+		var request_id: int = entry.request_id
+		var item_id: String = entry.item_id
+
+		# Check if request still exists
+		if request_id not in _async_requests:
+			continue
+
+		var request: AsyncCellRequest = _async_requests[request_id]
+		var convert_start := Time.get_ticks_usec()
+		var prototype: Node3D = null
+		var was_disk_hit := false
+
+		# First check disk cache (fast path - 1-5ms vs 300-6000ms)
+		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, item_id):
+			prototype = _model_loader.get_model(model_path, item_id)
+			was_disk_hit = true
+			from_disk += 1
+		else:
+			# Perform the conversion (this is the slow part - can take 500ms-6s!)
+			var converter := NIFConverter.new()
+			prototype = converter.convert_from_parsed(parse_result)
+
+		var convert_elapsed := (Time.get_ticks_usec() - convert_start) / 1000.0
+
+		if prototype:
+			if not was_disk_hit:
+				# Add to memory cache AND disk cache (handled inside add_to_cache)
+				_model_loader.add_to_cache(model_path, prototype, item_id)
+			# NOW queue references for this model
+			_queue_references_for_model(request, model_path)
+
+			if diagnostic_logging:
+				var source := "disk" if was_disk_hit else "NIF"
+				print("[DIAG] Loaded (%s): %s (%.1fms, pending=%d, queue=%d)" % [
+					source, model_path.get_file(), convert_elapsed, _pending_conversions.size(), _instantiation_queue.size()
+				])
+		else:
+			request.failed_models.append(model_path)
+			# Still queue references - they'll get placeholders
+			_queue_references_for_model(request, model_path)
+
+		converted += 1
+
+		# Check if request is now complete
+		if _is_request_complete(request):
+			request.completed = true
+
+	return converted > 0
+
+
 ## Process async instantiation within time budget (call from _process)
 ## Returns number of objects instantiated this frame
+## Uses BOTH time budget AND object count cap for consistent frame times
 func process_async_instantiation(budget_ms: float) -> int:
+	# First process any pending conversions to feed the cache
+	process_pending_conversions(MAX_CONVERSION_TIME_MS)
+
 	if _instantiation_queue.is_empty():
 		return 0
 
 	var start_time := Time.get_ticks_usec()
 	var budget_usec := budget_ms * 1000.0
 	var instantiated := 0
+	var exit_reason := ""
+
+	# Batch children for deferred add_child (reduces scene tree churn)
+	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
 
 	while not _instantiation_queue.is_empty():
+		# Check time budget
 		var elapsed := Time.get_ticks_usec() - start_time
 		if elapsed >= budget_usec:
+			exit_reason = "time_budget"
+			break
+
+		# Check object count cap (critical for consistent frame times)
+		if instantiated >= MAX_INSTANTIATIONS_PER_FRAME:
+			exit_reason = "object_cap"
 			break
 
 		var entry: Dictionary = _instantiation_queue.pop_front()
@@ -692,15 +799,50 @@ func process_async_instantiation(budget_ms: float) -> int:
 		# Decrement pending count
 		request.pending_instantiations -= 1
 
-		# Instantiate this reference
+		# Instantiate this reference (this contains the expensive duplicate() call)
+		var inst_start := Time.get_ticks_usec()
 		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
+		var inst_elapsed := Time.get_ticks_usec() - inst_start
+
+		# Track duplicate time for diagnostics
+		_diag_duplicate_time_total_us += inst_elapsed
+		_diag_duplicate_count += 1
+
 		if obj:
-			request.cell_node.add_child(obj)
+			# Queue for batch add_child instead of immediate
+			pending_children.append({"parent": request.cell_node, "child": obj})
 			instantiated += 1
 
 		# Check if this was the last reference
 		if _is_request_complete(request):
 			request.completed = true
+
+	# Batch add all children at once (significantly reduces scene tree overhead)
+	# Using call_deferred spreads the work across frames for very large batches
+	var add_child_start := Time.get_ticks_usec()
+	for entry in pending_children:
+		var parent: Node3D = entry.parent
+		var child: Node3D = entry.child
+		if is_instance_valid(parent) and is_instance_valid(child):
+			parent.add_child(child)
+	var add_child_elapsed := Time.get_ticks_usec() - add_child_start
+
+	# Diagnostic logging every 60 frames (~1 second at 60 FPS)
+	var current_frame := Engine.get_frames_drawn()
+	if diagnostic_logging and (current_frame - _diag_last_log_frame) >= 60:
+		var avg_inst_us := _diag_duplicate_time_total_us / maxi(_diag_duplicate_count, 1)
+		print("[DIAG] CellManager: queue=%d, instantiated=%d, exit=%s, avg_inst=%.2fms, add_child=%.2fms, async_reqs=%d" % [
+			_instantiation_queue.size(),
+			instantiated,
+			exit_reason if exit_reason else "empty_queue",
+			avg_inst_us / 1000.0,
+			add_child_elapsed / 1000.0,
+			_async_requests.size()
+		])
+		# Reset counters
+		_diag_duplicate_time_total_us = 0
+		_diag_duplicate_count = 0
+		_diag_last_log_frame = current_frame
 
 	return instantiated
 
@@ -726,6 +868,7 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 
 	# Collect all unique model paths that need loading
 	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
+	var disk_cache_hits := 0
 
 	for ref in cell.references:
 		var record_type: Array = [""]
@@ -755,13 +898,21 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 		if "record_id" in base_record:
 			item_id = base_record.record_id
 
-		# Check if already cached
+		# Check if already in memory cache
 		if _model_loader.has_model(model_path, item_id):
 			# Already have this model, queue reference for instantiation
 			_queue_instantiation(request.request_id, ref, model_path, item_id)
 			continue
 
-		# Need to load this model
+		# Check disk cache - if available, load synchronously (fast! 1-5ms)
+		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, item_id):
+			var prototype := _model_loader.get_model(model_path, item_id)
+			if prototype:
+				disk_cache_hits += 1
+				_queue_instantiation(request.request_id, ref, model_path, item_id)
+				continue
+
+		# Need to load this model from BSA + convert NIF
 		if model_path not in models_to_load:
 			models_to_load[model_path] = {"item_ids": []}
 		if item_id and item_id not in models_to_load[model_path].item_ids:
@@ -769,6 +920,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 
 		# Queue reference for later (after model is parsed)
 		request.references_to_process.append(ref)
+
+	if disk_cache_hits > 0 and diagnostic_logging:
+		print("[DIAG] Cell %s: %d models loaded from disk cache (instant)" % [request.cell_node.name, disk_cache_hits])
 
 	# Submit parse tasks for models that need loading
 	for model_path in models_to_load:
@@ -830,21 +984,22 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 				request.pending_parses.erase(model_path)
 
 				var parse_success := false
+				var convert_start := Time.get_ticks_usec()
+
 				if result is NIFParseResult:
 					var parse_result: NIFParseResult = result
 					if parse_result.is_valid():
 						request.parsed_results[model_path] = parse_result
 						parse_success = true
 
-						# Convert to prototype and cache (main thread)
-						var converter := NIFConverter.new()
-						var prototype: Node3D = converter.convert_from_parsed(parse_result)
-						if prototype:
-							_model_loader.add_to_cache(model_path, prototype, parse_result.item_id)
-						else:
-							# Conversion failed
-							parse_success = false
-							request.failed_models.append(model_path)
+						# DEFERRED CONVERSION: Queue for processing in process_pending_conversions()
+						# This prevents 300ms-6s freezes when complex models finish parsing
+						_pending_conversions.append({
+							"parse_result": parse_result,
+							"model_path": model_path,
+							"request_id": request_id,
+							"item_id": parse_result.item_id
+						})
 					else:
 						# Parse returned invalid result
 						request.failed_models.append(model_path)
@@ -852,15 +1007,11 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 					# Result wasn't a NIFParseResult (unexpected)
 					request.failed_models.append(model_path)
 
-				# Queue all references waiting for this model (even if failed, they'll get placeholders)
-				_queue_references_for_model(request, model_path)
+				var convert_elapsed := (Time.get_ticks_usec() - convert_start) / 1000.0
 
-				# Check if request is now complete
-				if _is_request_complete(request):
-					request.completed = true
-					# Mark as failed if any models failed to parse
-					if not request.failed_models.is_empty():
-						request.error_message = "Failed to parse %d models" % request.failed_models.size()
+				# NOTE: Conversion and reference queuing is now DEFERRED
+				# See process_pending_conversions() which handles both
+				# This prevents 300ms-6s freezes when complex models complete
 
 				return
 

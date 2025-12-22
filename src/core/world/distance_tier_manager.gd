@@ -53,6 +53,19 @@ const DEFAULT_MAX_CELLS_PER_TIER := {
 	Tier.HORIZON: 0,     # Skybox only - no per-cell processing
 }
 
+## Chunk sizes for quadtree paging (when enabled)
+## MID tier uses 4x4 cell chunks (~468m each)
+## FAR tier uses 8x8 cell chunks (~936m each)
+const MID_CHUNK_SIZE := 4
+const FAR_CHUNK_SIZE := 8
+
+## Maximum chunks per tier (for chunk-based paging)
+## These limits apply when use_chunk_paging is enabled
+const DEFAULT_MAX_CHUNKS_PER_TIER := {
+	Tier.MID: 50,        # 4x4 chunks = up to 800 cells worth
+	Tier.FAR: 60,        # 8x8 chunks = up to 3840 cells worth
+}
+
 ## Actual maximum cells per tier (configured per-world or using defaults)
 var max_cells_per_tier: Dictionary = DEFAULT_MAX_CELLS_PER_TIER.duplicate()
 
@@ -126,7 +139,7 @@ func configure_for_world(world_provider) -> void:
 
 	# Get max view distance from provider
 	if world_provider.has_method("get_max_view_distance"):
-		var world_max_distance := world_provider.get_max_view_distance()
+		var world_max_distance: float = world_provider.get_max_view_distance()
 		if world_max_distance > 0.0:
 			max_view_distance = world_max_distance
 
@@ -136,7 +149,7 @@ func configure_for_world(world_provider) -> void:
 
 	# Get cell size if available
 	if world_provider.has_method("get_cell_size_meters"):
-		var world_cell_size := world_provider.get_cell_size_meters()
+		var world_cell_size: float = world_provider.get_cell_size_meters()
 		if world_cell_size > 0.0:
 			cell_size_meters = world_cell_size
 
