@@ -26,7 +26,7 @@ uniform float wind_strength : hint_range(0.0, 1.0, 0.01) = 1.0;
 uniform float wind_dithering = 4.0;
 uniform vec2 wind_direction = vec2(1.0,1.0);
 
-group_uniforms shapeing;
+group_uniforms shaping;
 uniform float clod_scale_boost = 3.0;
 uniform float clod_min_threshold : hint_range(0.0, 1.0, 0.001) = 0.2;
 uniform float clod_max_threshold : hint_range(0.0, 1.0, 0.001) = 0.5;
@@ -114,7 +114,7 @@ mat3 align_to_vector(vec3 normal) {
 
 void start() {
 	// Create centered a grid
-	vec3 pos = vec3(float(INDEX % instance_rows), 0.0, float(INDEX / instance_rows)) - float(instance_rows >> 1u);
+	vec3 pos = vec3(float(INDEX % instance_rows), 0.0, float(INDEX / instance_rows)) - float(instance_rows >>1u);
 
 	// Apply spcaing
 	pos *= instance_spacing;
@@ -231,12 +231,23 @@ void start() {
 
 	COLOR = color_map;
 
-	// Read control map
-	uint control = floatBitsToUint(texelFetch(_control_maps, index[3], 0).r);
-	bool auto = bool(control & 0x1u);
-	int base = int(control >>27u & 0x1Fu);
-	int over = int(control >> 22u & 0x1Fu);
-	float blend = float(control >> 14u & 0xFFu) * 0.003921568627450; // 1. / 255.
+	// Read control maps
+	uvec4 control = uvec4(
+		floatBitsToUint(texelFetch(_control_maps, index[0], 0).r),
+		floatBitsToUint(texelFetch(_control_maps, index[1], 0).r),
+		floatBitsToUint(texelFetch(_control_maps, index[2], 0).r),
+		floatBitsToUint(texelFetch(_control_maps, index[3], 0).r));
+	bool hole = any(bvec4(control >> uvec4(2u) & uvec4(0x1u)));
+	bool auto = any(bvec4(control & uvec4(0x1u)));
+	int base = int(control[3] >> 27u & 0x1Fu);
+	int over = int(control[3] >> 22u & 0x1Fu);
+	float blend = float(control[3] >> 14u & 0xFFu) * 0.003921568627450; // 1. / 255.
+
+	// Filter out holes
+	if (hole) {
+		pos.y = 0. / 0.;
+		pos.xz = vec2(100000.0);
+	}
 
 	// Hardcoded example, hand painted texture id 0 is filtered out.
 	if (!auto && ((base == 0 && blend < 0.7) || (over == 0 && blend >= 0.3))) {
