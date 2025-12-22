@@ -9,7 +9,8 @@ enum MaterialType {
 	SNOW = 0,
 	MUD = 1,
 	ASH = 2,
-	SAND = 3
+	SAND = 3,
+	ROCK = 4  # No deformation
 }
 
 # Configuration constants
@@ -200,6 +201,13 @@ func add_deformation(world_pos: Vector3, material_type: int, strength: float):
 		"timestamp": Time.get_ticks_msec()
 	})
 
+# Main API: Set player node for camera following (only used in player-following mode)
+func set_player(player: Node3D) -> void:
+	if _renderer != null:
+		_renderer.set_player(player)
+	else:
+		push_warning("[DeformationManager] Cannot set player: renderer not initialized")
+
 # Process pending deformations with time budget
 # Groups stamps by region for batch processing
 func _process_pending_deformations():
@@ -274,7 +282,8 @@ func _apply_deformation_stamp(deform: Dictionary):
 		region_data,
 		region_uv,
 		material_type,
-		strength
+		strength,
+		world_pos  # Pass world position for player-following mode
 	)
 
 	region_data.dirty = true

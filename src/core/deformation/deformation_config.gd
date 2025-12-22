@@ -13,6 +13,10 @@ static var enable_recovery: bool = false
 static var enable_persistence: bool = true
 static var enable_streaming: bool = true
 
+# Camera settings
+static var camera_follow_player: bool = false
+static var camera_follow_radius: float = 40.0  # Meters (only used when camera_follow_player = true)
+
 # Performance settings
 static var update_budget_ms: float = 2.0
 static var max_active_regions: int = 9
@@ -37,6 +41,9 @@ static func load_from_project_settings() -> void:
 	enable_recovery = _get_project_setting("deformation/enable_recovery", false)
 	enable_persistence = _get_project_setting("deformation/enable_persistence", true)
 	enable_streaming = _get_project_setting("deformation/enable_streaming", true)
+
+	camera_follow_player = _get_project_setting("deformation/camera/follow_player", false)
+	camera_follow_radius = _get_project_setting("deformation/camera/follow_radius", 40.0)
 
 	update_budget_ms = _get_project_setting("deformation/performance/update_budget_ms", 2.0)
 	max_active_regions = _get_project_setting("deformation/performance/max_active_regions", 9)
@@ -82,6 +89,12 @@ static func register_project_settings() -> void:
 
 	_register_setting("deformation/enable_streaming", true, TYPE_BOOL,
 		"Enable automatic region streaming with terrain")
+
+	_register_setting("deformation/camera/follow_player", false, TYPE_BOOL,
+		"Make RTT camera follow the player instead of using static region cameras")
+
+	_register_setting("deformation/camera/follow_radius", 40.0, TYPE_FLOAT,
+		"Camera viewport radius when following player (meters, only used if camera_follow_player = true)")
 
 	_register_setting("deformation/performance/update_budget_ms", 2.0, TYPE_FLOAT,
 		"Time budget per frame for deformation updates (milliseconds)")

@@ -9,7 +9,7 @@ uniform sampler2D previous_deformation : hint_default_black;
 uniform vec2 stamp_center_uv = vec2(0.5, 0.5);
 uniform float stamp_radius = 0.5;  // Meters
 uniform float stamp_strength = 1.0;  // 0.0 to 1.0
-uniform float material_type = 0.0;  // 0.0=snow, 0.25=mud, 0.5=ash, 0.75=sand
+uniform float material_type = 0.0;  // 0.0=snow, 0.25=mud, 0.5=ash, 0.75=sand, 1.0=rock
 uniform float region_size_meters = 469.0;
 
 varying vec2 world_uv;
@@ -54,9 +54,13 @@ void fragment() {
 		// Ash: similar to snow but less depth
 		final_depth = min(prev_depth + deformation * 0.5, 0.8);
 	}
-	else {
+	else if (material_type < 0.9) {
 		// Sand: minimal accumulation, recovers quickly
 		final_depth = max(prev_depth, deformation * 0.5);
+	}
+	else {
+		// Rock: no deformation at all
+		final_depth = 0.0;
 	}
 
 	// Only update material type where we're actually deforming

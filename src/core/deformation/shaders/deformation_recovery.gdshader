@@ -33,9 +33,13 @@ void fragment() {
 		// Ash: recovers normally (wind can fill in)
 		recovery_speed *= 1.0;
 	}
-	else {
+	else if (material_type < 0.9) {
 		// Sand: recovers quickly (flows back easily)
 		recovery_speed *= 2.0;
+	}
+	else {
+		// Rock: no recovery needed (no deformation in first place)
+		recovery_speed = 0.0;
 	}
 
 	// Apply recovery (exponential decay toward zero)
