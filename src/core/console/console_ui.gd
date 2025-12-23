@@ -152,6 +152,7 @@ func _build_ui() -> void:
 	# Main panel container
 	panel = PanelContainer.new()
 	panel.name = "ConsolePanel"
+	panel.visible = false  # Hidden by default
 
 	# Style the panel
 	var panel_style := StyleBoxFlat.new()

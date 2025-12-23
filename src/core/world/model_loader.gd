@@ -227,10 +227,18 @@ func _get_disk_cache_dir() -> String:
 
 ## Get the disk cache path for a cache key
 ## Converts cache_key to a valid filename and returns full path
+## NOTE: Strips item_id suffix since prebaked models don't include it
 func _get_disk_cache_path(cache_key: String) -> String:
-	# Convert cache key to safe filename
-	# Example: "meshes\x\ex_door.nif:door_01" -> "meshes_x_ex_door_nif_door_01.res"
-	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
+	# Strip item_id suffix if present (e.g., "meshes\x\ex_door.nif:door_01" -> "meshes\x\ex_door.nif")
+	# Prebaked models are saved without item_id since collision is already baked in
+	var base_key := cache_key
+	var colon_pos := cache_key.rfind(":")
+	if colon_pos > 0:
+		base_key = cache_key.substr(0, colon_pos)
+
+	# Convert to safe filename
+	# Example: "meshes\x\ex_door.nif" -> "meshes_x_ex_door_nif.res"
+	var safe_name := base_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
 	return _get_disk_cache_dir().path_join(safe_name + ".res")
 
 
@@ -256,7 +264,7 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 
 
 ## Save a model to disk cache
-## Saves each mesh as a separate .mesh file, then the scene structure as .tscn
+## Saves each mesh as a separate .mesh file, then the scene structure as .res
 func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 	if not node:
 		return
@@ -276,6 +284,10 @@ func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 
 	if mesh_count == 0:
 		return  # Nothing to cache
+
+	# CRITICAL: Set owner on all children so PackedScene.pack() includes them
+	# Without this, pack() only saves the root node when not in scene tree
+	_set_owner_recursive(node, node)
 
 	# Now save the scene (meshes will be referenced by path)
 	var scene_path := base_path + ".res"
@@ -311,6 +323,13 @@ func _save_meshes_to_disk(node: Node, base_path: String, start_idx: int) -> int:
 		count = _save_meshes_to_disk(child, base_path, count)
 
 	return count
+
+
+## Recursively set owner on all descendants for PackedScene.pack()
+func _set_owner_recursive(node: Node, owner_node: Node) -> void:
+	for child in node.get_children():
+		child.owner = owner_node
+		_set_owner_recursive(child, owner_node)
 
 
 ## Prepare resources for saving by giving them unique paths within the scene file

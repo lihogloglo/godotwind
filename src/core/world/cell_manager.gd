@@ -891,7 +891,11 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 		var model_path: String = _get_model_path(base_record)
 		if model_path.is_empty():
 			# Light without model, or actor placeholder - queue for direct instantiation
-			request.references_to_process.append(ref)
+			# NOTE: These must be queued immediately, NOT added to references_to_process
+			# references_to_process is for refs waiting on async model parsing
+			# If we add model-less refs there, they'll never be processed when all models
+			# come from disk cache (no parsing = no _queue_references_for_model calls)
+			_queue_instantiation(request.request_id, ref, "", "")
 			continue
 
 		var item_id: String = ""
@@ -1060,11 +1064,17 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 
 ## Internal: Instantiate a reference from parsed data
 func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> Node3D:
+	# Handle model-less references (lights without models, etc.)
+	# These were queued with empty model_path and should use the instantiator directly
+	if model_path.is_empty():
+		var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
+		return _instantiator.instantiate_reference(ref, cell_grid)
+
 	# Get the cached model prototype
 	var cache_key := _get_cache_key(model_path, item_id)
 
 	# Try object pool first
-	if use_object_pool and _object_pool:
+	if use_object_pool and _object_pool and not model_path.is_empty():
 		var pooled: Node3D = _object_pool.acquire(model_path)
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
@@ -1075,7 +1085,9 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 	# Get from cache (async system should have already cached this)
 	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
 	if not model_prototype:
-		return _create_placeholder(ref)
+		# Model not in cache - use full instantiator path which can load from disk
+		var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
+		return _instantiator.instantiate_reference(ref, cell_grid)
 
 	# Create instance
 	var instance: Node3D = model_prototype.duplicate()

@@ -66,6 +66,7 @@ class ComponentState:
 
 
 ## Component states
+var terrain := ComponentState.new()
 var models := ComponentState.new()
 var impostors := ComponentState.new()
 var merged_meshes := ComponentState.new()
@@ -91,6 +92,7 @@ func load_state() -> bool:
 	last_save_time = config.get_value("global", "last_save_time", 0)
 	is_running = config.get_value("global", "is_running", false)
 
+	_load_component(config, "terrain", terrain)
 	_load_component(config, "models", models)
 	_load_component(config, "impostors", impostors)
 	_load_component(config, "merged_meshes", merged_meshes)
@@ -111,6 +113,7 @@ func save_state() -> bool:
 	config.set_value("global", "last_save_time", Time.get_unix_time_from_system())
 	config.set_value("global", "is_running", is_running)
 
+	_save_component(config, "terrain", terrain)
 	_save_component(config, "models", models)
 	_save_component(config, "impostors", impostors)
 	_save_component(config, "merged_meshes", merged_meshes)
@@ -129,6 +132,8 @@ func save_state() -> bool:
 
 ## Clear all state (start fresh)
 func clear_state() -> void:
+	terrain.reset()
+	models.reset()
 	impostors.reset()
 	merged_meshes.reset()
 	navmeshes.reset()
@@ -146,6 +151,8 @@ func clear_state() -> void:
 ## Check if any component has pending work
 func has_pending_work() -> bool:
 	return (
+		not terrain.pending.is_empty() or
+		not models.pending.is_empty() or
 		not impostors.pending.is_empty() or
 		not merged_meshes.pending.is_empty() or
 		not navmeshes.pending.is_empty() or
@@ -156,7 +163,7 @@ func has_pending_work() -> bool:
 
 ## Get overall progress (0.0 - 1.0)
 func get_overall_progress() -> float:
-	var components := [impostors, merged_meshes, navmeshes, shore_mask, texture_atlases]
+	var components := [terrain, models, impostors, merged_meshes, navmeshes, shore_mask, texture_atlases]
 	var enabled_components := components.filter(func(c): return c.enabled)
 
 	if enabled_components.is_empty():
@@ -172,6 +179,8 @@ func get_overall_progress() -> float:
 ## Get summary dictionary
 func get_summary() -> Dictionary:
 	return {
+		"terrain": terrain.to_dict(),
+		"models": models.to_dict(),
 		"impostors": impostors.to_dict(),
 		"merged_meshes": merged_meshes.to_dict(),
 		"navmeshes": navmeshes.to_dict(),
@@ -209,6 +218,10 @@ func _save_component(config: ConfigFile, section: String, state: ComponentState)
 
 
 func _print_summary() -> void:
+	print("  Terrain: %d completed, %d pending, %d failed" % [
+		terrain.completed.size(), terrain.pending.size(), terrain.failed.size()])
+	print("  Models: %d completed, %d pending, %d failed" % [
+		models.completed.size(), models.pending.size(), models.failed.size()])
 	print("  Impostors: %d completed, %d pending, %d failed" % [
 		impostors.completed.size(), impostors.pending.size(), impostors.failed.size()])
 	print("  Merged Meshes: %d completed, %d pending, %d failed" % [

@@ -24,6 +24,15 @@ var _num_cascades: int = 3
 # Whether using GPU compute or flat plane
 var _use_compute: bool = false
 
+# Cached state for quality switching
+var _cached_shore_mask: Texture2D = null
+var _cached_shore_bounds: Rect2 = Rect2()
+var _cached_water_color: Color = Color(0.1, 0.15, 0.18, 1.0)
+var _cached_foam_color: Color = Color(0.9, 0.9, 0.9, 1.0)
+var _cached_depth_absorption: Vector3 = Vector3(7.5, 22.0, 38.0)
+var _cached_wave_scale: float = 1.0
+var _debug_shore_mask: bool = false
+
 
 func _init() -> void:
 	# Use world vertex coords for proper wave displacement
@@ -124,7 +133,7 @@ render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
 
 #define REFLECTANCE 0.02
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.15, 0.25, 1.0);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform float roughness = 0.3;
 
 varying float fresnel;
@@ -164,7 +173,7 @@ render_mode world_vertex_coords, depth_draw_opaque, cull_disabled;
 
 #define REFLECTANCE 0.02
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.12, 0.22, 1.0);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
 uniform float time = 0.0;
 uniform float wave_scale = 1.0;
@@ -255,7 +264,7 @@ render_mode world_vertex_coords, depth_draw_always;
 
 #define REFLECTANCE 0.02
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.08, 0.15, 1.0);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
 uniform float time = 0.0;
 uniform float roughness = 0.3;
@@ -337,14 +346,29 @@ void light() {
 
 func _create_material() -> void:
 	_material = ShaderMaterial.new()
-	_material.shader = _shader
 
 	if not _shader:
 		push_error("[OceanMesh] No shader set!")
 		return
 
-	# Set default uniform values for all shader types
-	_material.set_shader_parameter("water_color", Color(0.02, 0.12, 0.22, 1.0))
+	# CRITICAL: For ocean_compute.gdshader which uses global uniforms,
+	# we must set global shader parameters BEFORE assigning the shader.
+	# This prevents "global parameter was removed" warnings.
+	if _use_compute:
+		# Initialize global shader parameters with proper values
+		# Use brighter colors matching original GodotOceanWaves (0.1, 0.15, 0.18)
+		var water_col := Color(0.1, 0.15, 0.18, 1.0)
+		var foam_col := Color(0.9, 0.9, 0.9, 1.0)
+		RenderingServer.global_shader_parameter_set(&"water_color", water_col.srgb_to_linear())
+		RenderingServer.global_shader_parameter_set(&"foam_color", foam_col.srgb_to_linear())
+		# num_cascades, displacements, normals are set later by set_wave_textures()
+		print("[OceanMesh] Initialized global shader parameters for compute shader")
+
+	_material.shader = _shader
+
+	# Set default uniform values for all shader types (non-global uniforms)
+	# Use brighter water color matching original GodotOceanWaves
+	_material.set_shader_parameter("water_color", Color(0.1, 0.15, 0.18, 1.0))
 	_material.set_shader_parameter("time", 0.0)
 	_material.set_shader_parameter("roughness", 0.3)
 	_material.set_shader_parameter("wave_scale", 1.0)
@@ -503,7 +527,18 @@ func set_shader_time(time: float) -> void:
 		_material.set_shader_parameter("time", time)
 
 
+func set_wave_scale(scale: float) -> void:
+	# Cache for quality switching
+	_cached_wave_scale = scale
+
+	if _material:
+		_material.set_shader_parameter("wave_scale", scale)
+
+
 func set_water_color(color: Color) -> void:
+	# Cache for quality switching
+	_cached_water_color = color
+
 	# Set both material parameter and global parameter
 	# Global is needed for ocean_compute.gdshader which uses global uniforms
 	if _material:
@@ -513,6 +548,9 @@ func set_water_color(color: Color) -> void:
 
 
 func set_foam_color(color: Color) -> void:
+	# Cache for quality switching
+	_cached_foam_color = color
+
 	# Set both material parameter and global parameter
 	if _material:
 		_material.set_shader_parameter("foam_color", color)
@@ -521,6 +559,9 @@ func set_foam_color(color: Color) -> void:
 
 
 func set_depth_absorption(absorption: Vector3) -> void:
+	# Cache for quality switching
+	_cached_depth_absorption = absorption
+
 	if _material:
 		_material.set_shader_parameter("depth_color_consumption", absorption)
 
@@ -579,14 +620,25 @@ func set_cascade_scales(scales: Array[Vector4], num_cascades: int) -> void:
 
 
 func set_shore_mask(mask: Texture2D, world_bounds: Rect2) -> void:
+	# Cache for quality switching
+	_cached_shore_mask = mask
+	_cached_shore_bounds = world_bounds
+
 	if _material:
 		_material.set_shader_parameter("shore_mask", mask)
-		_material.set_shader_parameter("shore_mask_bounds", Vector4(
+		var bounds_vec := Vector4(
 			world_bounds.position.x,
 			world_bounds.position.y,
 			world_bounds.size.x,
 			world_bounds.size.y
-		))
+		)
+		_material.set_shader_parameter("shore_mask_bounds", bounds_vec)
+		print("[OceanMesh] Shore mask set - texture: %s, bounds: %s" % [
+			mask.get_size() if mask else "null",
+			bounds_vec
+		])
+	else:
+		push_warning("[OceanMesh] Cannot set shore mask - material is null")
 
 
 func get_material() -> ShaderMaterial:
@@ -604,10 +656,79 @@ func is_using_compute() -> bool:
 
 
 ## Set water quality (requires re-initialization)
-func set_quality(quality: HardwareDetection.WaterQuality, radius: float) -> void:
+## Returns true if quality changed and HIGH quality needs wave texture setup
+func set_quality(quality: HardwareDetection.WaterQuality, radius: float) -> bool:
+	var old_quality := _quality
 	_quality_override = quality
 	_select_quality()
+
+	# Check if quality actually changed
+	if _quality == old_quality:
+		return false
+
 	_use_compute = _quality == HardwareDetection.WaterQuality.HIGH
 	_create_shader()
 	_create_material()
-	# Mesh doesn't need to be recreated for quality change
+
+	# Restore all cached state after material recreation
+	_restore_cached_state()
+
+	print("[OceanMesh] Quality changed: %s -> %s, use_compute: %s" % [
+		HardwareDetection.quality_name(old_quality),
+		HardwareDetection.quality_name(_quality),
+		_use_compute])
+
+	# Return true if switching to HIGH (caller needs to reconnect wave textures)
+	return _use_compute
+
+
+## Restore all cached shader parameters after quality change
+func _restore_cached_state() -> void:
+	if not _material:
+		return
+
+	# Restore shore mask
+	if _cached_shore_mask:
+		_material.set_shader_parameter("shore_mask", _cached_shore_mask)
+		_material.set_shader_parameter("shore_mask_bounds", Vector4(
+			_cached_shore_bounds.position.x,
+			_cached_shore_bounds.position.y,
+			_cached_shore_bounds.size.x,
+			_cached_shore_bounds.size.y
+		))
+
+	# Restore colors
+	_material.set_shader_parameter("water_color", _cached_water_color)
+	_material.set_shader_parameter("foam_color", _cached_foam_color)
+
+	# Restore depth absorption (only for shaders that have this uniform)
+	if _quality != HardwareDetection.WaterQuality.ULTRA_LOW:
+		_material.set_shader_parameter("depth_color_consumption", _cached_depth_absorption)
+
+	# Restore wave scale
+	_material.set_shader_parameter("wave_scale", _cached_wave_scale)
+
+	# Re-set global parameters for compute shader
+	if _use_compute:
+		RenderingServer.global_shader_parameter_set(&"water_color", _cached_water_color.srgb_to_linear())
+		RenderingServer.global_shader_parameter_set(&"foam_color", _cached_foam_color.srgb_to_linear())
+
+	print("[OceanMesh] Restored cached state: shore_mask=%s, water_color=%s" % [
+		_cached_shore_mask != null, _cached_water_color])
+
+	# Restore debug mode
+	_material.set_shader_parameter("debug_shore_mask", _debug_shore_mask)
+
+
+## Toggle debug visualization of shore mask damping
+## Returns the new debug state
+func set_debug_shore_mask(enabled: bool) -> void:
+	_debug_shore_mask = enabled
+	if _material:
+		_material.set_shader_parameter("debug_shore_mask", enabled)
+		print("[OceanMesh] Debug shore mask: %s" % enabled)
+
+
+## Get current debug shore mask state
+func is_debug_shore_mask() -> bool:
+	return _debug_shore_mask

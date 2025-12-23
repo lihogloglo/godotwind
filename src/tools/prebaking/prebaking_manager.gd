@@ -22,9 +22,13 @@ const ModelPrebaker := preload("res://src/tools/prebaking/model_prebaker.gd")
 const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const ShoreMaskBaker := preload("res://src/tools/shore_mask_baker.gd")
 const ImpostorCandidates := preload("res://src/core/world/impostor_candidates.gd")
+const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
+const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Baking components
 enum Component {
+	TERRAIN,       # Preprocessed Terrain3D regions (heightmaps, textures)
 	MODELS,        # Individual NIF->Godot conversions (NEAR tier)
 	IMPOSTORS,     # Octahedral impostor textures (FAR tier)
 	MERGED_MESHES, # Simplified merged cell meshes (MID tier)
@@ -56,6 +60,7 @@ var _navmesh_baker: RefCounted = null
 var _shore_baker: RefCounted = null
 
 ## Component enable flags
+var enable_terrain: bool = true
 var enable_models: bool = true
 var enable_impostors: bool = true
 var enable_merged_meshes: bool = true
@@ -63,7 +68,7 @@ var enable_navmeshes: bool = true
 var enable_shore_mask: bool = true
 
 ## Current component being processed
-var _current_component: Component = Component.MODELS
+var _current_component: Component = Component.TERRAIN
 var _is_processing: bool = false
 var _should_stop: bool = false
 
@@ -165,7 +170,12 @@ func start_prebaking() -> void:
 	# Process components in order
 	var results := {}
 
-	# Models first - this is the most impactful for load times
+	# Terrain first - required for shore mask and provides base terrain data
+	if enable_terrain and not _should_stop:
+		_current_component = Component.TERRAIN
+		results["terrain"] = await _bake_terrain()
+
+	# Models - most impactful for load times
 	if enable_models and not _should_stop:
 		_current_component = Component.MODELS
 		results["models"] = await _bake_models()
@@ -209,15 +219,61 @@ func stop_prebaking() -> void:
 
 
 ## Reset all progress and start fresh
-func reset_all() -> void:
+## If clear_cache is true, also deletes all cached files from disk
+func reset_all(clear_cache: bool = true) -> void:
 	if _is_processing:
 		push_warning("PrebakingManager: Cannot reset while processing")
 		return
 
 	_state_manager.clear_state()
+
+	if clear_cache:
+		_clear_cache_directories()
+
 	status = Status.IDLE
 	status_changed.emit(status)
-	print("PrebakingManager: Reset all progress")
+	print("PrebakingManager: Reset all progress%s" % (" and cleared cache" if clear_cache else ""))
+
+
+## Clear all cached files from disk
+func _clear_cache_directories() -> void:
+	var directories := [
+		SettingsManager.get_terrain_path(),
+		SettingsManager.get_models_path(),
+		SettingsManager.get_impostors_path(),
+		SettingsManager.get_merged_cells_path(),
+		SettingsManager.get_navmeshes_path(),
+		SettingsManager.get_ocean_path(),
+	]
+
+	for dir_path in directories:
+		if DirAccess.dir_exists_absolute(dir_path):
+			var deleted := _delete_directory_contents(dir_path)
+			print("PrebakingManager: Cleared %d files from %s" % [deleted, dir_path])
+
+
+## Delete all files in a directory (not subdirectories)
+func _delete_directory_contents(dir_path: String) -> int:
+	var dir := DirAccess.open(dir_path)
+	if not dir:
+		push_warning("PrebakingManager: Cannot open directory: %s" % dir_path)
+		return 0
+
+	var deleted := 0
+	dir.list_dir_begin()
+	var file_name := dir.get_next()
+	while file_name != "":
+		if not dir.current_is_dir():
+			var full_path := dir_path.path_join(file_name)
+			var err := DirAccess.remove_absolute(full_path)
+			if err == OK:
+				deleted += 1
+			else:
+				push_warning("PrebakingManager: Failed to delete: %s" % full_path)
+		file_name = dir.get_next()
+	dir.list_dir_end()
+
+	return deleted
 
 
 ## Get current state summary
@@ -228,6 +284,124 @@ func get_state_summary() -> Dictionary:
 ## Check if there's pending work to resume
 func has_pending_work() -> bool:
 	return _state_manager.has_pending_work()
+
+
+## Bake terrain (heightmaps, textures -> Terrain3D regions)
+func _bake_terrain() -> Dictionary:
+	print("\n" + "=".repeat(80))
+	print("TERRAIN: Preprocessing Terrain3D regions")
+	print("=".repeat(80))
+
+	component_started.emit("Terrain")
+
+	# Get terrain state
+	var state: PrebakeState.ComponentState = _state_manager.terrain
+
+	# Check if already completed
+	if state.is_complete() and not state.pending.is_empty():
+		print("  Terrain already preprocessed, skipping")
+		component_completed.emit("Terrain", state.completed.size(), 0, 0)
+		return {"success": state.completed.size(), "failed": 0, "skipped": 0}
+
+	# Create or get Terrain3D
+	if not terrain_3d:
+		# Create a temporary Terrain3D for preprocessing
+		if not ClassDB.class_exists("Terrain3D"):
+			error_occurred.emit("Terrain", "Terrain3D addon not loaded")
+			return {"success": 0, "failed": 1, "error": "Terrain3D addon not loaded"}
+
+		terrain_3d = Terrain3D.new()
+		terrain_3d.name = "PrebakingTerrain3D"
+		add_child(terrain_3d)
+
+		# Use shared configuration from CoordinateSystem (single source of truth)
+		CS.configure_terrain3d(terrain_3d)
+
+		# Wait a frame for initialization
+		await get_tree().process_frame
+
+	# Create terrain manager and texture loader
+	var terrain_manager := TerrainManagerScript.new()
+	var texture_loader := TerrainTextureLoaderScript.new()
+
+	# Load terrain textures
+	var textures_loaded := texture_loader.load_terrain_textures(terrain_3d.assets)
+	print("  Loaded %d terrain textures" % textures_loaded)
+	terrain_manager.set_texture_slot_mapper(texture_loader)
+
+	# Collect all unique regions that have terrain data
+	var regions_with_data: Dictionary = {}  # region_coord -> true
+
+	for key in ESMManager.lands:
+		var land: LandRecord = ESMManager.lands[key]
+		if not land or not land.has_heights():
+			continue
+		var region_coord: Vector2i = terrain_manager.cell_to_region(Vector2i(land.cell_x, land.cell_y))
+		regions_with_data[region_coord] = true
+
+	# Initialize pending list if needed
+	if state.pending.is_empty() and state.completed.is_empty():
+		for region_coord: Vector2i in regions_with_data.keys():
+			state.pending.append("%d,%d" % [region_coord.x, region_coord.y])
+		state.start_time = Time.get_unix_time_from_system()
+		_state_manager.save_state()
+
+	print("  Found %d regions (%d pending, %d completed)" % [
+		regions_with_data.size(), state.pending.size(), state.completed.size()])
+
+	# Process each combined region
+	var total := state.pending.size() + state.completed.size()
+	var processed := 0
+	var failed := 0
+
+	# Create callable for getting LAND records
+	var get_land_func := func(cell_x: int, cell_y: int) -> LandRecord:
+		return ESMManager.get_land(cell_x, cell_y)
+
+	var pending_copy := state.pending.duplicate()
+	for region_key: String in pending_copy:
+		if _should_stop:
+			break
+
+		# Parse region coordinate
+		var parts := region_key.split(",")
+		var region_coord := Vector2i(int(parts[0]), int(parts[1]))
+
+		# Import combined region (4x4 cells at once)
+		if terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func):
+			processed += 1
+			state.completed.append(region_key)
+			state.last_baked = region_key
+			item_baked.emit("Terrain", region_key, true)
+		else:
+			failed += 1
+			state.failed.append(region_key)
+			item_baked.emit("Terrain", region_key, false)
+
+		state.pending.erase(region_key)
+
+		# Update progress
+		var current := state.completed.size() + state.failed.size()
+		component_progress.emit("Terrain", current, total, region_key)
+
+		# Yield periodically to keep UI responsive
+		if current % 10 == 0:
+			_state_manager.save_state()
+			await get_tree().process_frame
+
+	# Save terrain data to disk
+	if processed > 0:
+		var terrain_data_dir := SettingsManager.get_terrain_path()
+		DirAccess.make_dir_recursive_absolute(terrain_data_dir)
+		terrain_3d.data.save_directory(terrain_data_dir)
+		print("  Saved terrain to: %s" % terrain_data_dir)
+
+	state.end_time = Time.get_unix_time_from_system()
+	_state_manager.save_state()
+
+	component_completed.emit("Terrain", processed, failed, 0)
+
+	return {"success": processed, "failed": failed, "skipped": 0}
 
 
 ## Bake individual models (NIF -> Godot conversion)
@@ -307,9 +481,9 @@ func _bake_impostors() -> Dictionary:
 		_state_manager.save_state()
 	)
 
-	# Bake pending items
+	# Bake pending items (must await since bake_models is now async)
 	var pending: Array = state.pending.duplicate()
-	var result: Dictionary = baker.bake_models(pending)
+	var result: Dictionary = await baker.bake_models(pending)
 
 	state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
@@ -363,8 +537,8 @@ func _bake_merged_meshes() -> Dictionary:
 		_state_manager.save_state()
 	)
 
-	# Bake
-	var result: Dictionary = baker.bake_all_cells()
+	# Bake (must await since bake_all_cells is now async)
+	var result: Dictionary = await baker.bake_all_cells()
 
 	state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
@@ -424,8 +598,8 @@ func _bake_navmeshes() -> Dictionary:
 		_state_manager.save_state()
 	)
 
-	# Bake
-	var result: Dictionary = baker.bake_all_cells()
+	# Bake (must await since bake_all_cells is now async)
+	var result: Dictionary = await baker.bake_all_cells()
 
 	state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
@@ -440,11 +614,16 @@ func _bake_shore_mask() -> Dictionary:
 	print("\n" + "=".repeat(80))
 	print("SHORE MASK: Baking ocean visibility mask")
 	print("=".repeat(80))
+	print("PrebakingManager: terrain_3d = %s" % [terrain_3d])
+	if terrain_3d:
+		print("PrebakingManager: terrain_3d path = %s" % terrain_3d.get_path())
+		print("PrebakingManager: terrain_3d.data = %s" % [terrain_3d.data])
 
 	component_started.emit("Shore Mask")
 
 	if not terrain_3d:
 		push_warning("PrebakingManager: No Terrain3D set, skipping shore mask")
+		error_occurred.emit("Shore Mask", "No Terrain3D found in scene")
 		component_completed.emit("Shore Mask", 0, 1, 0)
 		return {"success": 0, "failed": 1, "error": "No terrain"}
 
@@ -518,6 +697,8 @@ func bake_component(component: Component) -> void:
 	var result: Dictionary
 
 	match component:
+		Component.TERRAIN:
+			result = await _bake_terrain()
 		Component.MODELS:
 			result = await _bake_models()
 		Component.IMPOSTORS:
@@ -537,6 +718,7 @@ func bake_component(component: Component) -> void:
 
 func _component_name(component: Component) -> String:
 	match component:
+		Component.TERRAIN: return "terrain"
 		Component.MODELS: return "models"
 		Component.IMPOSTORS: return "impostors"
 		Component.MERGED_MESHES: return "merged_meshes"

@@ -7,7 +7,7 @@ render_mode world_vertex_coords, depth_draw_always, cull_disabled;
  * For software renderers and systems without GPU
  */
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.15, 0.25, 0.85);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 0.85);
 uniform float time = 0.0;
 
 void vertex() {

@@ -11,9 +11,9 @@ render_mode world_vertex_coords, depth_draw_always;
 #define REFLECTANCE  0.02
 
 // Water appearance
-uniform vec4 water_color : source_color = vec4(0.02, 0.08, 0.15, 1.0);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
-uniform vec3 depth_color_consumption = vec3(7.5, 22.0, 38.0);
+uniform vec3 depth_color_consumption = vec3(1.5, 4.0, 8.0); // RGB absorption depths in meters (murky water)
 
 // Material properties
 uniform float roughness : hint_range(0.0, 1.0) = 0.4;
@@ -67,17 +67,23 @@ vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, 
 }
 
 void vertex() {
-	UV = VERTEX.xz;
+	// Compute world position for shore mask (needs to be fixed to terrain, not camera)
+	// With world_vertex_coords, VERTEX is in local space. NODE_POSITION_WORLD gives mesh origin.
+	vec3 world_pos = NODE_POSITION_WORLD + VERTEX;
 
-	// Sample shore mask
-	shore_factor = sample_shore_mask(VERTEX.xz);
+	// UV uses world coordinates so waves tile correctly in world space (not camera-relative)
+	UV = world_pos.xz;
+
+	// Sample shore mask using world coordinates (fixed to terrain, not camera)
+	shore_factor = sample_shore_mask(world_pos.xz);
 
 	// Initialize wave_height
 	wave_height = 0.0;
 
 	// Only apply displacement if in ocean area
 	if (shore_factor >= 0.01) {
-		float distance_cam = length(VERTEX.xz - CAMERA_POSITION_WORLD.xz);
+		// Distance uses local coords (relative to camera/mesh center) for LOD falloff
+		float distance_cam = length(VERTEX.xz);
 
 		if (distance_cam < 1024.0) {
 			float distance_factor = min(exp(-(distance_cam - 512.0) * 0.007), 1.0);
@@ -181,17 +187,21 @@ void fragment() {
 	}
 
 	// Depth-based color absorption
+	// water_depth: positive value = how far below water surface the floor is
+	float water_depth = VERTEX.z - world_pos.z;
 	float depth_visibility_range = clamp(max(depth_color_consumption.r, max(depth_color_consumption.g, depth_color_consumption.b)), 0.0, 200.0);
-	float factor_translucency = 1.0 - smoothstep(world_pos.z + depth_visibility_range, world_pos.z, VERTEX.z);
-	factor_translucency = clamp(factor_translucency, 0.35, 1.0);
+
+	// factor_translucency: 0 = transparent (shallow), 1 = opaque water_color (deep)
+	float factor_translucency = smoothstep(0.0, depth_visibility_range, water_depth);
 	vec3 screen_albedo = texture(screen_texture, SCREEN_UV, 0.0).rgb;
 	vec3 depth_water_color = mix(screen_albedo, water_color.rgb, factor_translucency);
 
-	// Color absorption per channel
-	float smooth_red = smoothstep(world_pos.z + depth_color_consumption.r, world_pos.z, VERTEX.z);
-	float smooth_green = smoothstep(world_pos.z + depth_color_consumption.g, world_pos.z, VERTEX.z);
-	float smooth_blue = smoothstep(world_pos.z + depth_color_consumption.b, world_pos.z, VERTEX.z);
-	vec3 color_shallow = max(vec3(smooth_red, smooth_green, smooth_blue) * depth_water_color, water_color.rgb);
+	// Color absorption per channel (red fades first, then green, blue last)
+	float shallow_red = 1.0 - smoothstep(0.0, depth_color_consumption.r, water_depth);
+	float shallow_green = 1.0 - smoothstep(0.0, depth_color_consumption.g, water_depth);
+	float shallow_blue = 1.0 - smoothstep(0.0, depth_color_consumption.b, water_depth);
+	vec3 color_absorbed = vec3(shallow_red, shallow_green, shallow_blue) * screen_albedo;
+	vec3 color_shallow = max(color_absorbed, water_color.rgb);
 
 	depth_water_color = mix(color_shallow, water_color.rgb, factor_translucency);
 	ALBEDO = mix(depth_water_color, foam_color.rgb, foam_factor * foam_alpha * foam_alpha);
@@ -200,8 +210,9 @@ void fragment() {
 	fresnel = mix(pow(1.0 - dot(VIEW, NORMAL), 5.0 * exp(-2.69 * roughness)) / (1.0 + 22.7 * pow(roughness, 1.5)), 1.0, REFLECTANCE);
 	ROUGHNESS = (1.0 - fresnel) * foam_factor + 0.4;
 
-	// Normal
-	gradient *= mix(0.015, normal_strength, exp(-dist * 0.0175));
+	// Normal with shore damping - prevents wavy normals on flat geometry near shore
+	float effective_normal_strength = mix(0.015, normal_strength, exp(-dist * 0.0175)) * shore_factor;
+	gradient *= effective_normal_strength;
 	NORMAL = (VIEW_MATRIX * vec4(normalize(vec3(-gradient.x, 1.0, -gradient.y)), 0.0)).xyz;
 }
 

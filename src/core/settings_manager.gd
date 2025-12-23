@@ -1,3 +1,4 @@
+@tool
 extends Node
 ## Manages application settings with priority: env var > user config > ProjectSettings
 ##
@@ -254,6 +255,11 @@ func get_models_path() -> String:
 	return get_cache_base_path().path_join("models")
 
 
+## Gets the preprocessed terrain data cache path (Terrain3D regions)
+func get_terrain_path() -> String:
+	return get_cache_base_path().path_join("terrain")
+
+
 ## Creates all cache subdirectories if they don't exist
 ## Returns OK on success, or the first error encountered
 func ensure_cache_directories() -> Error:
@@ -264,6 +270,7 @@ func ensure_cache_directories() -> Error:
 		get_navmeshes_path(),
 		get_ocean_path(),
 		get_models_path(),
+		get_terrain_path(),
 	]
 
 	for path in paths:

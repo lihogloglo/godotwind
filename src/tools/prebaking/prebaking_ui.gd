@@ -9,6 +9,7 @@
 extends Control
 
 const PrebakingManager := preload("res://src/tools/prebaking/prebaking_manager.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 ## References
 @onready var manager: Node = $PrebakingManager
@@ -19,6 +20,7 @@ var _header_label: Label
 var _status_label: Label
 
 # Component sections
+var _terrain_section: Dictionary = {}
 var _model_section: Dictionary = {}
 var _impostor_section: Dictionary = {}
 var _mesh_section: Dictionary = {}
@@ -49,6 +51,127 @@ func _ready() -> void:
 	_build_ui()
 	_connect_signals()
 	_update_ui_state()
+
+	# Find and assign Terrain3D to manager (required for shore mask baking)
+	# Done after UI is built so we can show status, and deferred to allow terrain init
+	call_deferred("_find_and_assign_terrain")
+
+
+
+## Our own Terrain3D instance (created if not found in scene)
+var _own_terrain: Terrain3D = null
+
+
+## Find Terrain3D in the scene tree and assign it to the manager
+## If not found, creates one and loads preprocessed terrain data
+func _find_and_assign_terrain() -> void:
+	print("PrebakingUI: _find_and_assign_terrain() called")
+
+	# First check if already assigned
+	if manager.terrain_3d:
+		print("PrebakingUI: Terrain3D already assigned: %s" % manager.terrain_3d.get_path())
+		return
+
+	print("PrebakingUI: Searching for Terrain3D in scene tree...")
+
+	# Try to find Terrain3D in the scene tree
+	var tree := get_tree()
+	if tree:
+		var terrain := _find_terrain_recursive(tree.root)
+		if terrain:
+			manager.terrain_3d = terrain
+			print("PrebakingUI: Found existing Terrain3D: %s" % terrain.get_path())
+			return
+
+	# No Terrain3D found - create our own and load preprocessed data
+	print("PrebakingUI: No Terrain3D in scene, creating one with preprocessed data...")
+	await _create_terrain_with_preprocessed_data()
+
+
+## Create our own Terrain3D and load preprocessed terrain data
+func _create_terrain_with_preprocessed_data() -> void:
+	# Check if Terrain3D addon is available
+	if not ClassDB.class_exists("Terrain3D"):
+		push_error("PrebakingUI: Terrain3D addon not loaded!")
+		_log("ERROR: Terrain3D addon not loaded!", Color.RED)
+		return
+
+	# Check if preprocessed terrain data exists in cache folder
+	var terrain_data_dir := SettingsManager.get_terrain_path()
+	print("PrebakingUI: Looking for terrain data at: %s" % terrain_data_dir)
+
+	if not DirAccess.dir_exists_absolute(terrain_data_dir):
+		push_warning("PrebakingUI: No preprocessed terrain data found at %s" % terrain_data_dir)
+		_log("No preprocessed terrain at %s" % terrain_data_dir, Color.YELLOW)
+		_log("Shore mask will use default world bounds", Color.YELLOW)
+		# Still create terrain so baker has something to work with
+		_create_empty_terrain()
+		return
+
+	# Create Terrain3D node
+	_own_terrain = Terrain3D.new()
+	_own_terrain.name = "PrebakingTerrain3D"
+	add_child(_own_terrain)
+	print("PrebakingUI: Created Terrain3D node")
+
+	# Use shared configuration from CoordinateSystem (single source of truth)
+	CS.configure_terrain3d(_own_terrain)
+
+	print("PrebakingUI: Terrain3D configured, waiting for data initialization...")
+
+	# Wait a frame for Terrain3D to initialize its data
+	# Guard against null tree (can happen if node isn't fully in scene yet)
+	var tree := get_tree()
+	if tree:
+		await tree.process_frame
+	else:
+		# Fallback: wait for tree to be available
+		await ready
+		tree = get_tree()
+		if tree:
+			await tree.process_frame
+
+	# Load preprocessed terrain data from cache folder
+	if _own_terrain.data:
+		print("PrebakingUI: Loading terrain data from: %s" % terrain_data_dir)
+		_own_terrain.data.load_directory(terrain_data_dir)
+		var region_count := _own_terrain.data.get_region_count()
+		print("PrebakingUI: Loaded %d terrain regions" % region_count)
+
+		manager.terrain_3d = _own_terrain
+		_log("Loaded %d terrain regions for shore mask" % region_count, Color.GREEN)
+		print("PrebakingUI: Terrain3D ready for shore mask baking")
+	else:
+		push_error("PrebakingUI: Terrain3D.data not initialized after frame wait")
+		_log("ERROR: Terrain3D.data not initialized", Color.RED)
+		# Assign anyway so baker can use default bounds
+		manager.terrain_3d = _own_terrain
+
+
+## Create an empty terrain (no data) for when preprocessed data doesn't exist
+func _create_empty_terrain() -> void:
+	_own_terrain = Terrain3D.new()
+	_own_terrain.name = "PrebakingTerrain3D"
+	add_child(_own_terrain)
+
+	# Use shared configuration from CoordinateSystem (single source of truth)
+	CS.configure_terrain3d(_own_terrain)
+
+	manager.terrain_3d = _own_terrain
+	print("PrebakingUI: Created empty Terrain3D (no data)")
+
+
+## Recursively search for a Terrain3D node
+func _find_terrain_recursive(node: Node) -> Terrain3D:
+	if not node:
+		return null
+	if node is Terrain3D:
+		return node
+	for child in node.get_children():
+		var found := _find_terrain_recursive(child)
+		if found:
+			return found
+	return null
 
 
 func _build_ui() -> void:
@@ -102,6 +225,7 @@ func _build_ui() -> void:
 	_main_container.add_child(HSeparator.new())
 
 	# Component sections
+	_terrain_section = _create_component_section("Terrain", "Preprocess Morrowind heightmaps to Terrain3D format - Required for world exploration!")
 	_model_section = _create_component_section("Models", "Pre-convert NIF models to Godot resources (NEAR tier) - Most impactful for load times!")
 	_impostor_section = _create_component_section("Impostors", "Octahedral impostor textures for distant landmarks (FAR tier)")
 	_mesh_section = _create_component_section("Merged Meshes", "Simplified cell meshes for mid-distance rendering (MID tier)")
@@ -234,6 +358,9 @@ func _connect_signals() -> void:
 	manager.error_occurred.connect(_on_error_occurred)
 
 	# Component checkboxes
+	_terrain_section.checkbox.toggled.connect(func(pressed):
+		manager.enable_terrain = pressed
+	)
 	_model_section.checkbox.toggled.connect(func(pressed):
 		manager.enable_models = pressed
 	)
@@ -251,6 +378,9 @@ func _connect_signals() -> void:
 	)
 
 	# Bake only buttons
+	_terrain_section.bake_button.pressed.connect(func():
+		manager.bake_component(PrebakingManager.Component.TERRAIN)
+	)
 	_model_section.bake_button.pressed.connect(func():
 		manager.bake_component(PrebakingManager.Component.MODELS)
 	)
@@ -287,6 +417,7 @@ func _update_ui_state() -> void:
 		_start_button.text = "Bake Selected"
 
 	# Update component sections
+	_update_component_section(_terrain_section, summary.get("terrain", {}), is_running)
 	_update_component_section(_model_section, summary.get("models", {}), is_running)
 	_update_component_section(_impostor_section, summary.get("impostors", {}), is_running)
 	_update_component_section(_mesh_section, summary.get("merged_meshes", {}), is_running)
@@ -379,6 +510,7 @@ func _on_component_progress(component: String, current: int, total: int, item_na
 	# Update the specific component's progress bar
 	var section: Dictionary
 	match component:
+		"Terrain": section = _terrain_section
 		"Models": section = _model_section
 		"Impostors": section = _impostor_section
 		"Merged Meshes": section = _mesh_section

@@ -45,8 +45,6 @@ const PlayerControllerScript := preload("res://src/core/player/player_controller
 const ConsoleScript := preload("res://src/core/console/console.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
-# Pre-processed terrain data directory
-const TERRAIN_DATA_DIR := "user://terrain_data/"
 
 # Node references
 @onready var camera: Camera3D = $FlyCamera
@@ -71,10 +69,20 @@ const TERRAIN_DATA_DIR := "user://terrain_data/"
 
 # Visibility toggles (will be created dynamically)
 var _show_models_toggle: CheckBox = null
+var _show_characters_toggle: CheckBox = null
 var _show_ocean_toggle: CheckBox = null
 var _show_sky_toggle: CheckBox = null
 var _water_quality_btn: OptionButton = null
+var _resolution_btn: OptionButton = null
+# Ocean parameter sliders
+var _wind_speed_slider: HSlider = null
+var _wind_dir_slider: HSlider = null
+var _wave_scale_slider: HSlider = null
+var _choppiness_slider: HSlider = null
+var _debug_shore_toggle: CheckBox = null
+var _ocean_controls_container: VBoxContainer = null
 var _show_models: bool = false  # Default OFF for performance
+var _show_characters: bool = false  # Default OFF - separate from static models
 var _show_ocean: bool = false   # Default OFF for performance
 var _show_sky: bool = false     # Default OFF - enable for day/night cycle
 
@@ -140,8 +148,9 @@ func _ready() -> void:
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
 	cell_manager = CellManagerScript.new()
-	cell_manager.load_npcs = true   # Enable NPCs
-	cell_manager.load_creatures = true
+	# NPCs/creatures controlled by _show_characters toggle (default OFF for testing)
+	cell_manager.load_npcs = _show_characters
+	cell_manager.load_creatures = _show_characters
 
 	# Initialize object pool for frequently used models
 	cell_manager.init_object_pool()
@@ -269,8 +278,9 @@ func _init_async() -> void:
 
 
 func _check_preprocessed_terrain() -> void:
-	# Check for pre-processed terrain data
-	var dir := DirAccess.open(TERRAIN_DATA_DIR)
+	# Check for pre-processed terrain data in cache folder
+	var terrain_data_dir := SettingsManager.get_terrain_path()
+	var dir := DirAccess.open(terrain_data_dir)
 	if dir:
 		var count := 0
 		dir.list_dir_begin()
@@ -293,38 +303,14 @@ func _init_terrain3d() -> void:
 		_log("[color=red]ERROR: Terrain3D addon not loaded[/color]")
 		return
 
-	# Configure the single Terrain3D node
-	# Terrain3D handles up to 1024 regions (32x32 grid), each up to 2048m
-	# This gives us 65km x 65km max terrain - far more than Vvardenfell needs
 	if not terrain_3d:
 		_log("[color=red]ERROR: Terrain3D node not found in scene[/color]")
 		return
 
-	# Calculate vertex spacing: MW cell = 117m with 64 vertices = 1.83m per vertex
-	var vertex_spacing := CS.CELL_SIZE_GODOT / 64.0
-	terrain_3d.vertex_spacing = vertex_spacing
-
-	# Use region_size of 256 to fit 4x4 MW cells per Terrain3D region
-	# Each MW cell = 64 vertices (cropped from 65), so 4 cells × 64 = 256 vertices
-	# 32 regions × 4 cells × 117m = ~15km coverage per axis
-	# This covers cells from -64 to +63 in each direction - enough for all of Vvardenfell!
-	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
-	terrain_3d.change_region_size(256)
-
-	# Configure mesh LOD settings for performance
-	# mesh_lods: 7 is default, more LODs = smoother distance transitions
-	# mesh_size: 48 is default, larger = fewer draw calls but more complex meshes
-	terrain_3d.mesh_lods = 7
-	terrain_3d.mesh_size = 48
-
-	# Setup material
-	if not terrain_3d.material:
-		terrain_3d.set_material(Terrain3DMaterial.new())
-	terrain_3d.material.show_checkered = false
-
-	# Setup assets and load textures
-	if not terrain_3d.assets:
-		terrain_3d.set_assets(Terrain3DAssets.new())
+	# Use shared configuration from CoordinateSystem (single source of truth)
+	if not CS.configure_terrain3d(terrain_3d):
+		_log("[color=red]ERROR: Failed to configure Terrain3D[/color]")
+		return
 
 	# Load terrain textures
 	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
@@ -333,19 +319,19 @@ func _init_terrain3d() -> void:
 	# Configure terrain manager to use proper texture slot mapping
 	terrain_manager.set_texture_slot_mapper(texture_loader)
 
-	_log("Terrain3D configured: region_size=256 (4x4 cells/region), vertex_spacing=%.3f" % vertex_spacing)
+	_log("Terrain3D configured: region_size=%d, vertex_spacing=%.3f" % [CS.TERRAIN_REGION_SIZE, CS.TERRAIN_VERTEX_SPACING])
 
 
 func _load_preprocessed_terrain() -> void:
-	# Load pre-processed terrain data from disk
+	# Load pre-processed terrain data from cache folder
 	if not terrain_3d or not terrain_3d.data:
 		_log("[color=yellow]Warning: Terrain3D not ready for loading preprocessed data[/color]")
 		return
 
-	var global_path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
-	if DirAccess.dir_exists_absolute(global_path):
-		terrain_3d.data.load_directory(global_path)
-		_log("Loaded preprocessed terrain from %s" % TERRAIN_DATA_DIR)
+	var terrain_data_dir := SettingsManager.get_terrain_path()
+	if DirAccess.dir_exists_absolute(terrain_data_dir):
+		terrain_3d.data.load_directory(terrain_data_dir)
+		_log("Loaded preprocessed terrain from %s" % terrain_data_dir)
 	else:
 		_log("[color=yellow]Preprocessed terrain directory not found[/color]")
 
@@ -579,51 +565,208 @@ func _setup_visibility_toggles() -> void:
 	if not vbox:
 		return
 
-	# Create a container for the toggles
-	var toggle_container := HBoxContainer.new()
-	toggle_container.name = "VisibilityToggles"
+	# Row 1: Basic visibility toggles (Models, NPCs, Ocean, Sky)
+	var toggle_row1 := HBoxContainer.new()
+	toggle_row1.name = "VisibilityToggles"
 
-	# Create "Show Models" checkbox
 	_show_models_toggle = CheckBox.new()
 	_show_models_toggle.text = "Models"
 	_show_models_toggle.button_pressed = _show_models
 	_show_models_toggle.toggled.connect(_on_show_models_toggled)
-	toggle_container.add_child(_show_models_toggle)
+	_show_models_toggle.tooltip_text = "Toggle static models"
+	toggle_row1.add_child(_show_models_toggle)
 
-	# Create "Show Ocean" checkbox
+	_show_characters_toggle = CheckBox.new()
+	_show_characters_toggle.text = "NPCs"
+	_show_characters_toggle.button_pressed = _show_characters
+	_show_characters_toggle.toggled.connect(_on_show_characters_toggled)
+	_show_characters_toggle.tooltip_text = "Toggle NPCs and creatures"
+	toggle_row1.add_child(_show_characters_toggle)
+
 	_show_ocean_toggle = CheckBox.new()
 	_show_ocean_toggle.text = "Ocean"
 	_show_ocean_toggle.button_pressed = _show_ocean
 	_show_ocean_toggle.toggled.connect(_on_show_ocean_toggled)
-	toggle_container.add_child(_show_ocean_toggle)
+	toggle_row1.add_child(_show_ocean_toggle)
 
-	# Create "Sky" checkbox
 	_show_sky_toggle = CheckBox.new()
 	_show_sky_toggle.text = "Sky"
 	_show_sky_toggle.button_pressed = _show_sky
 	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
-	toggle_container.add_child(_show_sky_toggle)
+	toggle_row1.add_child(_show_sky_toggle)
 
 	# Create fallback environment and light for when Sky3D is disabled
-	# This provides a Godot default-like sky instead of black
 	_setup_fallback_environment()
 
-	# Create water quality dropdown
+	# Row 2: Resolution and Water Quality dropdowns
+	var settings_row := HBoxContainer.new()
+	settings_row.name = "SettingsRow"
+
+	var res_label := Label.new()
+	res_label.text = "Res:"
+	res_label.custom_minimum_size.x = 30
+	settings_row.add_child(res_label)
+
+	_resolution_btn = OptionButton.new()
+	_resolution_btn.add_item("720p", 0)
+	_resolution_btn.add_item("900p", 1)
+	_resolution_btn.add_item("1080p", 2)
+	_resolution_btn.add_item("1440p", 3)
+	_resolution_btn.add_item("Full", 4)
+	_resolution_btn.selected = 2
+	_resolution_btn.item_selected.connect(_on_resolution_changed)
+	_resolution_btn.tooltip_text = "Window resolution"
+	_resolution_btn.custom_minimum_size.x = 70
+	settings_row.add_child(_resolution_btn)
+
+	var water_label := Label.new()
+	water_label.text = "Water:"
+	water_label.custom_minimum_size.x = 45
+	settings_row.add_child(water_label)
+
 	_water_quality_btn = OptionButton.new()
 	_water_quality_btn.add_item("Auto", -1)
-	_water_quality_btn.add_item("Ultra Low", 0)
+	_water_quality_btn.add_item("ULow", 0)
 	_water_quality_btn.add_item("Low", 1)
-	_water_quality_btn.add_item("Medium", 2)
+	_water_quality_btn.add_item("Med", 2)
 	_water_quality_btn.add_item("High", 3)
-	_water_quality_btn.selected = 0  # Auto by default
+	_water_quality_btn.selected = 0
 	_water_quality_btn.item_selected.connect(_on_water_quality_changed)
-	_water_quality_btn.tooltip_text = "Water quality level (Auto detects GPU)"
-	toggle_container.add_child(_water_quality_btn)
+	_water_quality_btn.tooltip_text = "Water quality level"
+	_water_quality_btn.custom_minimum_size.x = 65
+	settings_row.add_child(_water_quality_btn)
 
-	# Insert after the quick buttons (before preprocess button)
+	# Ocean controls container (shown/hidden with ocean toggle)
+	_ocean_controls_container = VBoxContainer.new()
+	_ocean_controls_container.name = "OceanControls"
+	_ocean_controls_container.visible = false  # Hidden until ocean is enabled
+
+	var ocean_label := Label.new()
+	ocean_label.text = "Ocean Settings:"
+	ocean_label.add_theme_font_size_override("font_size", 12)
+	_ocean_controls_container.add_child(ocean_label)
+
+	# Wind Speed slider
+	_wind_speed_slider = _create_slider_row(_ocean_controls_container, "Wind:", 0.0, 40.0, 10.0, _on_wind_speed_changed)
+	_wind_speed_slider.tooltip_text = "Wind speed (m/s) - affects wave steepness"
+
+	# Wind Direction slider
+	_wind_dir_slider = _create_slider_row(_ocean_controls_container, "Dir:", -180.0, 180.0, 0.0, _on_wind_dir_changed)
+	_wind_dir_slider.tooltip_text = "Wind direction (degrees)"
+
+	# Wave Scale slider
+	_wave_scale_slider = _create_slider_row(_ocean_controls_container, "Scale:", 0.0, 3.0, 1.0, _on_wave_scale_changed)
+	_wave_scale_slider.step = 0.1
+	_wave_scale_slider.tooltip_text = "Wave height multiplier"
+
+	# Choppiness slider
+	_choppiness_slider = _create_slider_row(_ocean_controls_container, "Chop:", 0.0, 2.0, 1.0, _on_choppiness_changed)
+	_choppiness_slider.step = 0.1
+	_choppiness_slider.tooltip_text = "Wave choppiness/sharpness"
+
+	# Debug shore mask toggle
+	_debug_shore_toggle = CheckBox.new()
+	_debug_shore_toggle.text = "Debug Shore Mask"
+	_debug_shore_toggle.button_pressed = false
+	_debug_shore_toggle.toggled.connect(_on_debug_shore_toggled)
+	_debug_shore_toggle.tooltip_text = "Visualize shore damping: Magenta=shore, Cyan=deep water"
+	_ocean_controls_container.add_child(_debug_shore_toggle)
+
+	# Insert controls into the panel
 	var preprocess_idx := preprocess_btn.get_index() if preprocess_btn else vbox.get_child_count()
-	vbox.add_child(toggle_container)
-	vbox.move_child(toggle_container, preprocess_idx)
+	vbox.add_child(toggle_row1)
+	vbox.move_child(toggle_row1, preprocess_idx)
+	vbox.add_child(settings_row)
+	vbox.move_child(settings_row, preprocess_idx + 1)
+	vbox.add_child(_ocean_controls_container)
+	vbox.move_child(_ocean_controls_container, preprocess_idx + 2)
+
+	# Apply initial resolution (1920x1080)
+	_apply_resolution(2)
+
+
+## Helper to create a labeled slider row
+func _create_slider_row(parent: Control, label_text: String, min_val: float, max_val: float, default_val: float, callback: Callable) -> HSlider:
+	var row := HBoxContainer.new()
+
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size.x = 40
+	label.add_theme_font_size_override("font_size", 11)
+	row.add_child(label)
+
+	var slider := HSlider.new()
+	slider.min_value = min_val
+	slider.max_value = max_val
+	slider.value = default_val
+	slider.step = 1.0
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.custom_minimum_size.x = 120
+	slider.value_changed.connect(callback)
+	row.add_child(slider)
+
+	var value_label := Label.new()
+	value_label.name = "Value"
+	value_label.text = "%.1f" % default_val
+	value_label.custom_minimum_size.x = 35
+	value_label.add_theme_font_size_override("font_size", 11)
+	row.add_child(value_label)
+
+	parent.add_child(row)
+	return slider
+
+
+## Update value label next to slider
+func _update_slider_label(slider: HSlider, value: float) -> void:
+	var row: HBoxContainer = slider.get_parent()
+	var value_label: Label = row.get_node_or_null("Value")
+	if value_label:
+		value_label.text = "%.1f" % value
+
+
+## Ocean parameter callbacks
+func _on_wind_speed_changed(value: float) -> void:
+	_update_slider_label(_wind_speed_slider, value)
+	if ocean_manager:
+		ocean_manager.wind_speed = value
+		_update_ocean_wave_params()
+
+func _on_wind_dir_changed(value: float) -> void:
+	_update_slider_label(_wind_dir_slider, value)
+	if ocean_manager:
+		ocean_manager.wind_direction = deg_to_rad(value)
+		_update_ocean_wave_params()
+
+func _on_wave_scale_changed(value: float) -> void:
+	_update_slider_label(_wave_scale_slider, value)
+	if ocean_manager:
+		ocean_manager.wave_scale = value
+		if ocean_manager.has_method("_update_shader_parameters"):
+			ocean_manager._update_shader_parameters()
+
+func _on_choppiness_changed(value: float) -> void:
+	_update_slider_label(_choppiness_slider, value)
+	if ocean_manager:
+		ocean_manager.choppiness = value
+		_update_ocean_wave_params()
+
+
+## Toggle debug shore mask visualization
+func _on_debug_shore_toggled(enabled: bool) -> void:
+	if ocean_manager and ocean_manager._ocean_mesh:
+		ocean_manager._ocean_mesh.set_debug_shore_mask(enabled)
+		_log("Debug shore mask: %s" % ("ON" if enabled else "OFF"))
+
+
+## Update wave cascade parameters when ocean settings change
+func _update_ocean_wave_params() -> void:
+	if not ocean_manager:
+		return
+	# Update wave parameters in cascades if they exist
+	if ocean_manager._wave_parameters and ocean_manager._wave_parameters.size() > 0:
+		for params in ocean_manager._wave_parameters:
+			params.wind_speed = ocean_manager.wind_speed
+			params.wind_direction = ocean_manager.wind_direction
 
 
 ## Toggle models visibility
@@ -665,9 +808,45 @@ func _on_show_models_toggled(enabled: bool) -> void:
 	_update_stats()
 
 
+## Toggle characters (NPCs/creatures) visibility
+## Separate from models for isolated character/animation testing
+func _on_show_characters_toggled(enabled: bool) -> void:
+	_show_characters = enabled
+
+	_log("[DIAG] Characters toggle: %s" % ("ON" if enabled else "OFF"))
+
+	# Update cell_manager loading flags
+	if cell_manager:
+		cell_manager.load_npcs = enabled
+		cell_manager.load_creatures = enabled
+
+	# Show/hide existing character nodes in loaded cells
+	if world_streaming_manager:
+		var loaded_coords = world_streaming_manager.get_loaded_cell_coordinates()
+		var char_count := 0
+
+		for cell_grid in loaded_coords:
+			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
+			if cell_node:
+				# Find and toggle character nodes (they have is_character metadata)
+				for child in cell_node.get_children():
+					if child.has_meta("is_character"):
+						child.visible = enabled
+						char_count += 1
+
+		_log("[DIAG] Toggled visibility for %d characters" % char_count)
+
+	_log("NPCs/Creatures: %s" % ("ON" if enabled else "OFF"))
+	_update_stats()
+
+
 ## Toggle ocean visibility
 func _on_show_ocean_toggled(enabled: bool) -> void:
 	_show_ocean = enabled
+
+	# Show/hide ocean controls panel
+	if _ocean_controls_container:
+		_ocean_controls_container.visible = enabled
 
 	if enabled:
 		# Create ocean lazily on first enable
@@ -677,6 +856,9 @@ func _on_show_ocean_toggled(enabled: bool) -> void:
 		# Enable ocean
 		if ocean_manager and ocean_manager.has_method("set_enabled"):
 			ocean_manager.set_enabled(true)
+
+		# Sync sliders with ocean manager values
+		_sync_ocean_sliders()
 	else:
 		# Disable ocean (if it exists)
 		if ocean_manager and ocean_manager.has_method("set_enabled"):
@@ -684,6 +866,24 @@ func _on_show_ocean_toggled(enabled: bool) -> void:
 
 	_log("Ocean: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
+
+
+## Sync ocean slider values with current ocean manager settings
+func _sync_ocean_sliders() -> void:
+	if not ocean_manager:
+		return
+	if _wind_speed_slider:
+		_wind_speed_slider.value = ocean_manager.wind_speed
+		_update_slider_label(_wind_speed_slider, ocean_manager.wind_speed)
+	if _wind_dir_slider:
+		_wind_dir_slider.value = rad_to_deg(ocean_manager.wind_direction)
+		_update_slider_label(_wind_dir_slider, rad_to_deg(ocean_manager.wind_direction))
+	if _wave_scale_slider:
+		_wave_scale_slider.value = ocean_manager.wave_scale
+		_update_slider_label(_wave_scale_slider, ocean_manager.wave_scale)
+	if _choppiness_slider:
+		_choppiness_slider.value = ocean_manager.choppiness
+		_update_slider_label(_choppiness_slider, ocean_manager.choppiness)
 
 
 ## Create ocean system lazily (only called on first toggle)
@@ -744,6 +944,36 @@ func _on_water_quality_changed(index: int) -> void:
 	var quality_name: String = ocean_manager.get_water_quality_name()
 	_log("Water quality: %s" % quality_name)
 	_update_stats()
+
+
+## Handle resolution change
+func _on_resolution_changed(index: int) -> void:
+	_apply_resolution(index)
+
+
+## Apply a resolution setting
+func _apply_resolution(index: int) -> void:
+	var resolutions: Array[Vector2i] = [
+		Vector2i(1280, 720),
+		Vector2i(1600, 900),
+		Vector2i(1920, 1080),
+		Vector2i(2560, 1440),
+	]
+
+	if index == 4:
+		# Fullscreen
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		_log("Resolution: Fullscreen")
+	else:
+		# Windowed with specific resolution
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		var res: Vector2i = resolutions[index]
+		DisplayServer.window_set_size(res)
+		# Center the window on screen
+		var screen_size: Vector2i = DisplayServer.screen_get_size()
+		var window_pos: Vector2i = (screen_size - res) / 2
+		DisplayServer.window_set_position(window_pos)
+		_log("Resolution: %dx%d" % [res.x, res.y])
 
 
 ## Toggle sky/day-night cycle visibility
@@ -929,15 +1159,15 @@ func _on_preprocess_pressed() -> void:
 		if (processed + skipped) % 10 == 0:
 			await get_tree().process_frame
 
-	# Save to disk
-	var global_path := ProjectSettings.globalize_path(TERRAIN_DATA_DIR)
-	DirAccess.make_dir_recursive_absolute(global_path)
-	terrain_3d.data.save_directory(global_path)
+	# Save to disk (cache folder)
+	var terrain_data_dir := SettingsManager.get_terrain_path()
+	DirAccess.make_dir_recursive_absolute(terrain_data_dir)
+	terrain_3d.data.save_directory(terrain_data_dir)
 
 	_log("[color=green]Terrain preprocessing complete![/color]")
 	_log("  Processed: %d combined regions (4x4 cells each)" % processed)
 	_log("  Skipped: %d regions (no height data)" % skipped)
-	_log("  Saved to: %s" % TERRAIN_DATA_DIR)
+	_log("  Saved to: %s" % terrain_data_dir)
 
 	_using_preprocessed = true
 	preprocess_btn.disabled = false
@@ -1133,7 +1363,7 @@ View dist: %d cells [+/-]
 Regions: %d
 
 [b]Visibility[/b]
-Models [M]: %s | Ocean [O]: %s | Sky [K]: %s
+Models [M]: %s | NPCs [N]: %s | Ocean [O]: %s | Sky [K]: %s
 Water quality: %s
 
 [b]Camera[/b]
@@ -1154,6 +1384,7 @@ Cell: (%d, %d)
 		_current_view_distance,
 		total_regions,
 		"ON" if _show_models else "OFF",
+		"ON" if _show_characters else "OFF",
 		"ON" if _show_ocean else "OFF",
 		"ON" if _show_sky else "OFF",
 		ocean_manager.get_water_quality_name() if ocean_manager else "N/A",
@@ -1215,6 +1446,9 @@ func _input(event: InputEvent) -> void:
 			KEY_M:  # Toggle models
 				if _show_models_toggle:
 					_show_models_toggle.button_pressed = not _show_models_toggle.button_pressed
+			KEY_N:  # Toggle NPCs/characters
+				if _show_characters_toggle:
+					_show_characters_toggle.button_pressed = not _show_characters_toggle.button_pressed
 			KEY_O:  # Toggle ocean
 				if _show_ocean_toggle:
 					_show_ocean_toggle.button_pressed = not _show_ocean_toggle.button_pressed

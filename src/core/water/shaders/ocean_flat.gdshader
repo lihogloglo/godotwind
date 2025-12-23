@@ -1,21 +1,23 @@
 shader_type spatial;
-render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_disabled, diffuse_burley, specular_schlick_ggx;
+render_mode world_vertex_coords, depth_draw_always, cull_disabled;
 
 // Godot 4.3+ requires explicit screen texture samplers
 uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
 
 /**
- * Simple flat water shader for ultra-low-end hardware
- * No wave displacement, basic water color with improved lighting
+ * ULTRA_LOW quality water shader - flat plane
+ * No wave displacement, basic water color with depth-based absorption
  * Extremely lightweight - no compute, minimal texture sampling
- * Includes simplified specular for better appearance
+ * For software renderers and very weak hardware
  */
 
 #define REFLECTANCE 0.02
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.15, 0.25, 1.0);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
+uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
+uniform vec3 depth_color_consumption = vec3(1.5, 4.0, 8.0); // RGB absorption depths in meters (murky water)
 uniform float roughness : hint_range(0.0, 1.0) = 0.3;
-uniform float water_clarity : hint_range(0.0, 1.0) = 0.5;
 
 // Shore mask for fading ocean on land
 uniform sampler2D shore_mask : filter_linear;
@@ -39,18 +41,51 @@ void vertex() {
 }
 
 void fragment() {
+	// Discard if not in ocean
+	if (shore_factor < 0.01) {
+		discard;
+	}
+
 	// Physically-based fresnel
 	fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0), 1.0, REFLECTANCE);
 
-	// Simple refraction (minimal for ultra-low quality)
-	vec3 refracted_color = textureLod(screen_texture, SCREEN_UV, 0.0).rgb;
-	ALBEDO = mix(refracted_color, water_color.rgb, 0.6);
+	// Depth-based effects
+	float depth_tex = texture(depth_texture, SCREEN_UV).r;
+	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth_tex, 1.0);
+	world_pos.xyz /= world_pos.w;
 
-	// Alpha for transparency
-	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
-	ALPHA = mix(water_clarity, 1.0, fresnel * 0.3) * shore_factor;
+	// Alpha based on depth
+	float smooth_alpha = 1.0 - smoothstep(world_pos.z + 0.66, world_pos.z, VERTEX.z);
+	ALPHA = clamp(smooth_alpha * shore_factor, 0.0, 1.0);
 
-	// Roughness
+	// ============ DEPTH-BASED COLOR ABSORPTION ============
+	// water_depth: positive value = how far below water surface the floor is
+	float water_depth = VERTEX.z - world_pos.z;
+	float depth_visibility_range = clamp(max(depth_color_consumption.r, max(depth_color_consumption.g, depth_color_consumption.b)), 0.0, 200.0);
+
+	// factor_translucency: 0 = transparent (shallow), 1 = opaque water_color (deep)
+	float factor_translucency = smoothstep(0.0, depth_visibility_range, water_depth);
+
+	// Sample what's behind the water
+	vec3 screen_albedo = texture(screen_texture, SCREEN_UV).rgb;
+
+	// Base water color mixed with background
+	vec3 depth_water_color = mix(screen_albedo, water_color.rgb, factor_translucency);
+
+	// Per-channel color absorption (red fades first, then green, blue last)
+	float shallow_red = 1.0 - smoothstep(0.0, depth_color_consumption.r, water_depth);
+	float shallow_green = 1.0 - smoothstep(0.0, depth_color_consumption.g, water_depth);
+	float shallow_blue = 1.0 - smoothstep(0.0, depth_color_consumption.b, water_depth);
+	vec3 color_absorbed = vec3(shallow_red, shallow_green, shallow_blue) * screen_albedo;
+	vec3 color_shallow = max(color_absorbed, water_color.rgb);
+
+	// Final water color with depth absorption
+	ALBEDO = mix(color_shallow, water_color.rgb, factor_translucency);
+
+	// Shore foam (even for flat water)
+	float shore_foam = (1.0 - shore_factor) * 0.3;
+	ALBEDO = mix(ALBEDO, foam_color.rgb, shore_foam);
+
 	ROUGHNESS = roughness;
 	METALLIC = 0.0;
 	SPECULAR = 0.5;

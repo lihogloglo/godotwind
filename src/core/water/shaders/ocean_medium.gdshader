@@ -8,7 +8,7 @@ render_mode world_vertex_coords, depth_draw_always;
  * For integrated GPUs (Intel, AMD APU, etc.)
  */
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.08, 0.15, 0.95);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 0.95);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
 uniform float roughness : hint_range(0.0, 1.0) = 0.4;
 uniform float normal_strength : hint_range(0.0, 1.0) = 1.0;
@@ -90,9 +90,10 @@ void vertex() {
 			displacement += gerstner_wave(pos, 8.0, 0.15, vec2(0.5, 1.0), time);
 			gradient += gerstner_gradient(pos, 8.0, 0.15, vec2(0.5, 1.0), time);
 
-			// Apply shore dampening
-			displacement *= shore_factor * fade;
-			gradient *= shore_factor * fade;
+			// Apply shore dampening to both displacement and gradient (for normals)
+			float shore_fade = shore_factor * fade;
+			displacement *= shore_fade;
+			gradient *= shore_fade;
 
 			VERTEX += displacement;
 			wave_height = displacement.y;

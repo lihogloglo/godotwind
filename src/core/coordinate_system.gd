@@ -47,6 +47,14 @@ const CELL_SIZE_MW: float = 8192.0
 ## Morrowind cell size in Godot meters
 const CELL_SIZE_GODOT: float = CELL_SIZE_MW / UNITS_PER_METER  # ~117.03
 
+## Terrain3D configuration constants (for consistent setup across tools)
+## Morrowind LAND records have 65x65 vertices per cell (we crop to 64 to avoid overlap)
+const TERRAIN_VERTICES_PER_CELL: int = 64
+## Vertex spacing in Godot meters (cell size / vertices = ~1.83m per vertex)
+const TERRAIN_VERTEX_SPACING: float = CELL_SIZE_GODOT / TERRAIN_VERTICES_PER_CELL
+## Terrain3D region size: 256 vertices = 4x4 MW cells per region
+const TERRAIN_REGION_SIZE: int = 256
+
 ## Whether to apply unit scaling when converting positions
 ## TRUE: All positions converted to meters (RECOMMENDED - framework standard)
 ## FALSE: Keep raw MW units (legacy mode, requires manual scaling)
@@ -257,5 +265,48 @@ static func height_to_godot(mw_height: float) -> float:
 ## This flips the Y axis for heightmap images
 static func terrain_y_to_image_y(mw_y: int, size: int = 65) -> int:
 	return size - 1 - mw_y
+
+#endregion
+
+
+#region Terrain3D Configuration
+
+## Configure a Terrain3D node with Morrowind-appropriate settings
+## This is the single source of truth for terrain configuration.
+## Use this instead of repeating configuration in multiple files.
+##
+## Parameters:
+##   terrain: The Terrain3D node to configure
+##   create_material: Whether to create a new Terrain3DMaterial if missing (default: true)
+##   create_assets: Whether to create new Terrain3DAssets if missing (default: true)
+##
+## Returns: true if configuration succeeded, false otherwise
+static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true, create_assets: bool = true) -> bool:
+	if not terrain:
+		push_error("CoordinateSystem.configure_terrain3d: terrain is null")
+		return false
+
+	# Set vertex spacing for Morrowind cells
+	terrain.vertex_spacing = TERRAIN_VERTEX_SPACING
+
+	# Set region size (256 = 4x4 MW cells per region)
+	# Suppressing warnings because Godot's enum handling is strict
+	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
+	terrain.change_region_size(TERRAIN_REGION_SIZE)
+
+	# Configure mesh LOD settings for performance
+	terrain.mesh_lods = 7
+	terrain.mesh_size = 48
+
+	# Create material if needed
+	if create_material and not terrain.material:
+		terrain.set_material(Terrain3DMaterial.new())
+		terrain.material.show_checkered = false
+
+	# Create assets if needed
+	if create_assets and not terrain.assets:
+		terrain.set_assets(Terrain3DAssets.new())
+
+	return true
 
 #endregion

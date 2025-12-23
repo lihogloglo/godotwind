@@ -1,26 +1,24 @@
 shader_type spatial;
-render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_disabled, diffuse_burley, specular_schlick_ggx;
+render_mode world_vertex_coords, depth_draw_always, cull_disabled;
 
 // Godot 4.3+ requires explicit screen texture samplers
 uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
 uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
 
 /**
- * Low quality water shader - 2 Gerstner waves
+ * LOW quality water shader - 2 Gerstner waves
  * Simpler than MEDIUM (4 waves) for better performance on weak GPUs
- * Still has proper GGX lighting and SSS
+ * Still has GGX lighting, SSS, and depth-based color absorption
  */
 
 #define REFLECTANCE 0.02
 
-uniform vec4 water_color : source_color = vec4(0.02, 0.12, 0.22, 1.0);
+uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform vec4 foam_color : source_color = vec4(0.9, 0.9, 0.9, 1.0);
+uniform vec3 depth_color_consumption = vec3(1.5, 4.0, 8.0); // RGB absorption depths in meters (murky water)
 uniform float time : hint_range(0.0, 1000.0) = 0.0;
-uniform float wave_scale : hint_range(0.0, 2.0) = 1.0;
+uniform float wave_scale : hint_range(0.0, 4.0) = 2.5; // Default to strong waves for testing
 uniform float roughness : hint_range(0.0, 1.0) = 0.3;
-uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05;
-uniform float water_clarity : hint_range(0.0, 1.0) = 0.4;
-uniform float depth_fade_distance : hint_range(0.0, 100.0) = 10.0;
 
 // Shore mask for fading ocean on land
 uniform sampler2D shore_mask : filter_linear;
@@ -71,8 +69,9 @@ vec3 gerstner_wave(vec2 pos, float wavelength, float steepness, vec2 direction, 
 
 void vertex() {
 	vec2 pos = VERTEX.xz;
+	UV = pos;
 
-	// Distance-based LOD
+	// Distance-based LOD (more aggressive for LOW quality)
 	float dist = length(pos - CAMERA_POSITION_WORLD.xz);
 	float distance_fade = 1.0 - smoothstep(200.0, 400.0, dist);
 
@@ -85,48 +84,81 @@ void vertex() {
 	vec3 binormal_sum = vec3(0.0, 0.0, 1.0);
 	vec3 t, b;
 
-	// Wave 1: Large swell
-	displacement += gerstner_wave(pos, 60.0, 0.18 * wave_scale, vec2(1.0, 0.3), time, t, b);
+	// Wave 1: Large swell (steepness increased for dramatic waves)
+	displacement += gerstner_wave(pos, 60.0, 0.40 * wave_scale, vec2(1.0, 0.3), time, t, b);
 	tangent_sum += t - vec3(1.0, 0.0, 0.0);
 	binormal_sum += b - vec3(0.0, 0.0, 1.0);
 
 	// Wave 2: Secondary wave
-	displacement += gerstner_wave(pos, 28.0, 0.14 * wave_scale, vec2(0.8, 1.0), time * 1.1, t, b);
+	displacement += gerstner_wave(pos, 28.0, 0.30 * wave_scale, vec2(0.8, 1.0), time * 1.1, t, b);
 	tangent_sum += t - vec3(1.0, 0.0, 0.0);
 	binormal_sum += b - vec3(0.0, 0.0, 1.0);
 
 	// Apply displacement with distance fade and shore dampening
-	VERTEX += displacement * distance_fade * shore_factor;
-	wave_height = displacement.y * distance_fade;
-	NORMAL = normalize(cross(binormal_sum, tangent_sum));
+	float total_fade = distance_fade * shore_factor;
+	VERTEX += displacement * total_fade;
+	wave_height = displacement.y * total_fade;  // FIXED: Apply shore_factor to wave_height too
 
-	UV = pos * 0.01;
+	// Damp normals near shore to match damped geometry
+	vec3 wave_normal = normalize(cross(binormal_sum, tangent_sum));
+	NORMAL = normalize(mix(vec3(0.0, 1.0, 0.0), wave_normal, shore_factor));
 }
 
 void fragment() {
+	// Discard if not in ocean
+	if (shore_factor < 0.01) {
+		discard;
+	}
+
+	// Calculate foam from wave height
 	foam_factor = smoothstep(1.0, 2.5, abs(wave_height));
-	foam_factor = clamp(foam_factor, 0.0, 0.5);
+	// Add shore foam
+	foam_factor += (1.0 - shore_factor) * 0.5;
+	foam_factor = clamp(foam_factor, 0.0, 1.0);
 
 	float NdotV = max(dot(VIEW, NORMAL), 0.001);
 	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
 
-	// Refraction using screen texture
-	vec2 refraction_offset = NORMAL.xy * refraction_strength;
-	vec3 refracted_color = textureLod(screen_texture, SCREEN_UV + refraction_offset, 0.0).rgb;
+	// Depth-based effects
+	float depth_tex = texture(depth_texture, SCREEN_UV).r;
+	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth_tex, 1.0);
+	world_pos.xyz /= world_pos.w;
 
-	// Depth-based transparency
-	float depth = texture(depth_texture, SCREEN_UV).r;
-	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
-	float depth_diff = world_pos.z / world_pos.w - VERTEX.z;
-	float water_depth_fade = 1.0 - exp(-depth_diff / depth_fade_distance);
+	// Alpha based on depth
+	float smooth_alpha = 1.0 - smoothstep(world_pos.z + 0.66, world_pos.z, VERTEX.z);
+	ALPHA = clamp(smooth_alpha * shore_factor, 0.0, 1.0);
 
-	// Mix refracted color with water color based on depth
-	vec3 water_with_refraction = mix(refracted_color, water_color.rgb, water_depth_fade * (1.0 - water_clarity));
-	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
+	// Increase foam in shallow areas
+	if (ALPHA < 0.9) {
+		foam_factor = clamp(foam_factor + 0.5 - ALPHA, 0.0, 1.0);
+	}
 
-	// Alpha for transparency (less transparent at steep viewing angles due to fresnel)
-	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
-	ALPHA = mix(water_clarity, 1.0, fresnel * 0.5) * shore_factor;
+	// ============ DEPTH-BASED COLOR ABSORPTION ============
+	// water_depth: positive value = how far below water surface the floor is
+	float water_depth = VERTEX.z - world_pos.z;
+	float depth_visibility_range = clamp(max(depth_color_consumption.r, max(depth_color_consumption.g, depth_color_consumption.b)), 0.0, 200.0);
+
+	// factor_translucency: 0 = transparent (shallow), 1 = opaque water_color (deep)
+	float factor_translucency = smoothstep(0.0, depth_visibility_range, water_depth);
+
+	// Sample what's behind the water
+	vec3 screen_albedo = texture(screen_texture, SCREEN_UV).rgb;
+
+	// Base water color mixed with background
+	vec3 depth_water_color = mix(screen_albedo, water_color.rgb, factor_translucency);
+
+	// Per-channel color absorption (red fades first, then green, blue last)
+	float shallow_red = 1.0 - smoothstep(0.0, depth_color_consumption.r, water_depth);
+	float shallow_green = 1.0 - smoothstep(0.0, depth_color_consumption.g, water_depth);
+	float shallow_blue = 1.0 - smoothstep(0.0, depth_color_consumption.b, water_depth);
+	vec3 color_absorbed = vec3(shallow_red, shallow_green, shallow_blue) * screen_albedo;
+	vec3 color_shallow = max(color_absorbed, water_color.rgb);
+
+	// Final water color with depth absorption
+	depth_water_color = mix(color_shallow, water_color.rgb, factor_translucency);
+
+	// Mix in foam
+	ALBEDO = mix(depth_water_color, foam_color.rgb, foam_factor);
 
 	ROUGHNESS = mix(0.05, 0.6, foam_factor);
 	METALLIC = 0.0;

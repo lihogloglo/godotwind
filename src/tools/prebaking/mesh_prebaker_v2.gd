@@ -67,7 +67,7 @@ func initialize() -> Error:
 	return OK
 
 
-## Bake all exterior cells from ESM data
+## Bake all exterior cells from ESM data (async to prevent UI freeze)
 func bake_all_cells() -> Dictionary:
 	if initialize() != OK:
 		return {"success": 0, "failed": 0, "skipped": 0}
@@ -97,6 +97,9 @@ func bake_all_cells() -> Dictionary:
 		else:
 			_total_failed += 1
 			_failed_cells.append(cell_grid)
+
+		# Yield every cell to keep UI responsive
+		await Engine.get_main_loop().process_frame
 
 	batch_complete.emit(cells.size(), _total_baked, _total_failed, _total_skipped)
 

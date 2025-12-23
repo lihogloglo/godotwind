@@ -116,7 +116,7 @@ func initialize() -> Error:
 	return OK
 
 
-## Bake all cells from ESMManager
+## Bake all cells from ESMManager (async to prevent UI freeze)
 func bake_all_cells() -> Dictionary:
 	if initialize() != OK:
 		return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
@@ -164,6 +164,9 @@ func bake_all_cells() -> Dictionary:
 		else:
 			_total_failed += 1
 			_failed_cells.append(cell_id)
+
+		# Yield every cell to keep UI responsive
+		await Engine.get_main_loop().process_frame
 
 	# Complete
 	var total := cells_to_bake.size()

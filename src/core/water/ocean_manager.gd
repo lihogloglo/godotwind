@@ -39,7 +39,7 @@ func _get_shore_mask_path() -> String:
 
 # Visual settings
 @export_group("Visual Settings")
-@export var water_color: Color = Color(0.02, 0.08, 0.15, 1.0)
+@export var water_color: Color = Color(0.1, 0.15, 0.18, 1.0)
 @export var foam_color: Color = Color(0.9, 0.9, 0.9, 1.0)
 @export var depth_color_absorption: Vector3 = Vector3(7.5, 22.0, 38.0)
 
@@ -362,6 +362,7 @@ func _update_shader_parameters() -> void:
 	_ocean_mesh.set_water_color(water_color)
 	_ocean_mesh.set_foam_color(foam_color)
 	_ocean_mesh.set_depth_absorption(depth_color_absorption)
+	_ocean_mesh.set_wave_scale(wave_scale)
 
 
 ## Get the wave height at a world position (for buoyancy)
@@ -441,11 +442,26 @@ func get_sea_level() -> float:
 
 
 ## Set the terrain for shore mask generation
+## Prefers prebaked shore mask if available, falls back to runtime generation
 func set_terrain(terrain: Terrain3D) -> void:
 	_terrain = terrain
 	if not _system_enabled:
 		return
-	if _shore_mask and _terrain:
+
+	# Try to use prebaked shore mask first (same logic as _deferred_init)
+	var shore_mask_loaded := false
+	var shore_mask_path := _get_shore_mask_path()
+	if use_prebaked_shore_mask and FileAccess.file_exists(shore_mask_path):
+		var prebaked := ShoreMaskBaker.load_prebaked(shore_mask_path)
+		if not prebaked.is_empty():
+			if _ocean_mesh:
+				_ocean_mesh.set_shore_mask(prebaked.texture, prebaked.bounds)
+			shore_mask_loaded = true
+			print("[OceanManager] Using prebaked shore mask from %s" % shore_mask_path)
+
+	# Fall back to runtime generation if no prebaked mask
+	if not shore_mask_loaded and _shore_mask and _terrain:
+		print("[OceanManager] No prebaked shore mask, generating at runtime...")
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
 		if _ocean_mesh:
 			_ocean_mesh.set_shore_mask(
@@ -591,9 +607,40 @@ func set_water_quality(quality: int) -> void:
 	water_quality = quality
 	if not _system_enabled:
 		return
-	if _ocean_mesh:
-		_ocean_mesh.set_quality(quality as HardwareDetection.WaterQuality, ocean_radius)
-		print("[OceanManager] Quality changed to: %s" % HardwareDetection.quality_name(_ocean_mesh.get_quality()))
+	if not _ocean_mesh:
+		return
+
+	var needs_wave_textures := _ocean_mesh.set_quality(quality as HardwareDetection.WaterQuality, ocean_radius)
+	var actual_quality := _ocean_mesh.get_quality()
+
+	# Update compute mode flag
+	_use_compute = actual_quality == HardwareDetection.WaterQuality.HIGH
+
+	# If switching to HIGH quality, need to reconnect wave textures
+	if needs_wave_textures and _wave_generator and _wave_generator.is_initialized():
+		_ocean_mesh.set_wave_textures(
+			_wave_generator.get_displacement_texture(),
+			_wave_generator.get_normal_texture(),
+			_wave_parameters.size()
+		)
+		print("[OceanManager] Reconnected wave textures for HIGH quality")
+	elif needs_wave_textures:
+		# Need to initialize wave generator for HIGH quality
+		if not _wave_generator.is_initialized():
+			_setup_wave_cascades(actual_quality)
+			_wave_generator.initialize(256)
+			if _wave_generator.is_using_compute():
+				_wave_generator.init_gpu(maxi(2, _wave_parameters.size()))
+				if _wave_generator.is_initialized():
+					_ocean_mesh.set_wave_textures(
+						_wave_generator.get_displacement_texture(),
+						_wave_generator.get_normal_texture(),
+						_wave_parameters.size()
+					)
+					print("[OceanManager] Initialized wave generator for HIGH quality switch")
+
+	print("[OceanManager] Quality changed to: %s (use_compute: %s)" % [
+		HardwareDetection.quality_name(actual_quality), _use_compute])
 
 
 ## Get water quality name as string

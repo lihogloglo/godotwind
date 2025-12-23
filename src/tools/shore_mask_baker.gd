@@ -27,7 +27,9 @@ var resolution: int = 2048
 var sea_level: float = 0.0
 
 ## Distance above sea level where ocean fades out completely
-var fade_distance: float = 50.0
+## Smaller values = sharper shoreline, larger = more gradual transition
+## Note: Morrowind uses 128 units per meter, so 20m = ~2560 Morrowind units
+var fade_distance: float = 20.0
 
 ## World bounds to cover (auto-calculated from terrain if not set)
 var world_bounds: Rect2 = Rect2()
@@ -171,18 +173,35 @@ func _calculate_world_bounds() -> void:
 		print("ShoreMaskBaker: Using default world bounds (no regions)")
 		return
 
-	# Use terrain's AABB if available
-	var aabb: AABB = terrain.get_aabb()
-	if aabb.size != Vector3.ZERO:
-		world_bounds = Rect2(
-			aabb.position.x,
-			aabb.position.z,
-			aabb.size.x,
-			aabb.size.z
-		)
-	else:
-		# Fallback to reasonable defaults
+	# Calculate bounds from region locations
+	var region_size: float = terrain.get_region_size() * terrain.get_vertex_spacing()
+	var region_locations: Array[Vector2i] = terrain.data.get_region_locations()
+
+	if region_locations.is_empty():
 		world_bounds = Rect2(-8000, -8000, 16000, 16000)
+		print("ShoreMaskBaker: Using default world bounds (no region locations)")
+		return
+
+	# Find min/max region coordinates
+	var min_loc := region_locations[0]
+	var max_loc := region_locations[0]
+	for loc in region_locations:
+		min_loc.x = mini(min_loc.x, loc.x)
+		min_loc.y = mini(min_loc.y, loc.y)
+		max_loc.x = maxi(max_loc.x, loc.x)
+		max_loc.y = maxi(max_loc.y, loc.y)
+
+	# Convert region coordinates to world bounds
+	# Each region location represents the center of a region tile
+	var world_min := Vector2(min_loc.x, min_loc.y) * region_size
+	var world_max := Vector2(max_loc.x + 1, max_loc.y + 1) * region_size
+
+	world_bounds = Rect2(
+		world_min.x,
+		world_min.y,
+		world_max.x - world_min.x,
+		world_max.y - world_min.y
+	)
 
 	# Add padding
 	var padding := 500.0

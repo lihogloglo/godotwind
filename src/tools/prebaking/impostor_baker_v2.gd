@@ -139,10 +139,17 @@ func initialize() -> Error:
 	return OK
 
 
-## Bake impostor for a single model
+## Bake impostor for a single model (async to allow UI updates)
 ## Returns: Dictionary with { success: bool, output_path: String, error: String }
 func bake_model(model_path: String) -> Dictionary:
 	print("ImpostorBakerV2: Baking %s..." % model_path)
+
+	# Ensure we're in the scene tree before proceeding
+	if not is_inside_tree():
+		var error := "ImpostorBaker not in scene tree"
+		push_warning("ImpostorBakerV2: %s - %s" % [error, model_path])
+		model_baked.emit(model_path, false, "")
+		return {"success": false, "output_path": "", "error": error}
 
 	# Load model
 	var model := _load_model(model_path)
@@ -155,6 +162,9 @@ func bake_model(model_path: String) -> Dictionary:
 	# Add model to viewport scene
 	_model_container.add_child(model)
 
+	# Wait a frame for the model to be properly added to the scene tree
+	await get_tree().process_frame
+
 	# Calculate model bounds
 	var aabb := _get_model_aabb(model)
 	if aabb.size.length() < 0.01:
@@ -164,12 +174,14 @@ func bake_model(model_path: String) -> Dictionary:
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "output_path": "", "error": error}
 
-	# Center model at origin
+	# Center model at origin by offsetting its position
 	var center := aabb.get_center()
 	model.position = -center
 
-	# Recalculate AABB after centering
-	aabb = _get_model_aabb(model)
+	# Wait for transform to apply
+	await get_tree().process_frame
+
+	# The model is now centered at origin, so camera should look at origin
 	var size := aabb.size
 	var max_extent := maxf(maxf(size.x, size.y), size.z) * padding_factor
 
@@ -182,7 +194,7 @@ func bake_model(model_path: String) -> Dictionary:
 	var frames: Array[Image] = []
 	for i in range(OCTAHEDRAL_DIRECTIONS.size()):
 		var direction: Vector3 = OCTAHEDRAL_DIRECTIONS[i].normalized()
-		var frame := _render_from_direction(direction, camera_distance, aabb)
+		var frame := await _render_from_direction_async(direction, camera_distance)
 		if frame:
 			frames.append(frame)
 		else:
@@ -230,7 +242,7 @@ func bake_model(model_path: String) -> Dictionary:
 	}
 
 
-## Bake all models in a list
+## Bake all models in a list (async to allow UI updates)
 func bake_models(model_paths: Array) -> Dictionary:
 	if initialize() != OK:
 		return {"success": 0, "failed": 0, "total": 0}
@@ -243,12 +255,15 @@ func bake_models(model_paths: Array) -> Dictionary:
 		var model_path: String = model_paths[i]
 		progress.emit(i + 1, model_paths.size(), model_path)
 
-		var result := bake_model(model_path)
+		var result := await bake_model(model_path)
 		if result.success:
 			_total_baked += 1
 		else:
 			_total_failed += 1
 			_failed_models.append(model_path)
+
+		# Yield every model to keep UI responsive
+		await get_tree().process_frame
 
 	batch_complete.emit(model_paths.size(), _total_baked, _total_failed)
 
@@ -260,18 +275,19 @@ func bake_models(model_paths: Array) -> Dictionary:
 	}
 
 
-## Render model from a specific direction
-func _render_from_direction(direction: Vector3, distance: float, aabb: AABB) -> Image:
-	# Position camera
-	var center := aabb.get_center()
-	_camera.position = center + direction * distance
-	_camera.look_at(center, Vector3.UP)
+## Render model from a specific direction (async for proper rendering)
+## Model is assumed to be centered at origin
+func _render_from_direction_async(direction: Vector3, distance: float) -> Image:
+	# Position camera looking at origin (where the model is centered)
+	_camera.position = direction * distance
+	_camera.look_at(Vector3.ZERO, Vector3.UP)
 
 	# Trigger render
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
-	# Force rendering
-	RenderingServer.force_draw(false, 0.0)
+	# Wait for the render to complete (2 frames to be safe)
+	await get_tree().process_frame
+	await get_tree().process_frame
 
 	# Get rendered image
 	var texture := _viewport.get_texture()

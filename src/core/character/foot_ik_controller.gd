@@ -68,30 +68,89 @@ func setup(char_skeleton: Skeleton3D, char_body: CharacterBody3D) -> void:
 
 
 ## Find foot and leg bone indices
+## Supports multiple naming conventions:
+## - Standard: "Left Foot", "Right Foot"
+## - Morrowind/Bip01: "Bip01 L Foot", "Bip01 R Foot"
+## - Blender: "foot.L", "foot.R"
 func _find_bone_indices() -> void:
 	if not skeleton:
 		return
 
-	# Try common bone naming patterns (case-insensitive)
 	var bone_count := skeleton.get_bone_count()
 	for i in bone_count:
 		var bone_name := skeleton.get_bone_name(i).to_lower()
 
-		# Left foot
-		if "left" in bone_name and "foot" in bone_name:
+		# Left foot - check multiple naming patterns
+		if _is_left_foot_bone(bone_name):
 			left_foot_bone_idx = i
 
 		# Right foot
-		if "right" in bone_name and "foot" in bone_name:
+		if _is_right_foot_bone(bone_name):
 			right_foot_bone_idx = i
 
 		# Left upper leg (for IK chain root)
-		if "left" in bone_name and ("upper" in bone_name or "thigh" in bone_name) and "leg" in bone_name:
+		if _is_left_upper_leg_bone(bone_name):
 			left_upper_leg_bone_idx = i
 
 		# Right upper leg
-		if "right" in bone_name and ("upper" in bone_name or "thigh" in bone_name) and "leg" in bone_name:
+		if _is_right_upper_leg_bone(bone_name):
 			right_upper_leg_bone_idx = i
+
+
+## Check if bone name matches left foot patterns
+func _is_left_foot_bone(bone_name: String) -> bool:
+	# Standard: "left foot", "leftfoot"
+	if "left" in bone_name and "foot" in bone_name:
+		return true
+	# Bip01 style: "bip01 l foot", "l foot"
+	if ("l foot" in bone_name or "l_foot" in bone_name) and "l calf" not in bone_name:
+		return true
+	# Blender style: "foot.l"
+	if bone_name.ends_with(".l") and "foot" in bone_name:
+		return true
+	return false
+
+
+## Check if bone name matches right foot patterns
+func _is_right_foot_bone(bone_name: String) -> bool:
+	# Standard: "right foot", "rightfoot"
+	if "right" in bone_name and "foot" in bone_name:
+		return true
+	# Bip01 style: "bip01 r foot", "r foot"
+	if ("r foot" in bone_name or "r_foot" in bone_name) and "r calf" not in bone_name:
+		return true
+	# Blender style: "foot.r"
+	if bone_name.ends_with(".r") and "foot" in bone_name:
+		return true
+	return false
+
+
+## Check if bone name matches left upper leg patterns
+func _is_left_upper_leg_bone(bone_name: String) -> bool:
+	# Standard: "left upper leg", "left thigh"
+	if "left" in bone_name and ("upper" in bone_name or "thigh" in bone_name) and "leg" in bone_name:
+		return true
+	# Bip01 style: "bip01 l thigh"
+	if ("l thigh" in bone_name or "l_thigh" in bone_name):
+		return true
+	# Blender style: "thigh.l"
+	if bone_name.ends_with(".l") and "thigh" in bone_name:
+		return true
+	return false
+
+
+## Check if bone name matches right upper leg patterns
+func _is_right_upper_leg_bone(bone_name: String) -> bool:
+	# Standard: "right upper leg", "right thigh"
+	if "right" in bone_name and ("upper" in bone_name or "thigh" in bone_name) and "leg" in bone_name:
+		return true
+	# Bip01 style: "bip01 r thigh"
+	if ("r thigh" in bone_name or "r_thigh" in bone_name):
+		return true
+	# Blender style: "thigh.r"
+	if bone_name.ends_with(".r") and "thigh" in bone_name:
+		return true
+	return false
 
 
 ## Setup SkeletonIK3D chains for both feet
@@ -126,17 +185,22 @@ func _setup_ik_chains() -> void:
 
 
 ## Setup target nodes for IK
+## NOTE: Target nodes are added as siblings to IK nodes (children of skeleton)
+## to ensure get_path_to() works correctly in Godot 4.5
 func _setup_targets() -> void:
+	# Add targets as children of skeleton (same parent as IK nodes)
+	# This ensures they share a common ancestor for get_path_to()
+
 	# Left foot target
 	left_foot_target = Node3D.new()
 	left_foot_target.name = "LeftFootTarget"
-	add_child(left_foot_target)
+	skeleton.add_child(left_foot_target)
 	left_foot_ik.target_node = left_foot_ik.get_path_to(left_foot_target)
 
 	# Right foot target
 	right_foot_target = Node3D.new()
 	right_foot_target.name = "RightFootTarget"
-	add_child(right_foot_target)
+	skeleton.add_child(right_foot_target)
 	right_foot_ik.target_node = right_foot_ik.get_path_to(right_foot_target)
 
 

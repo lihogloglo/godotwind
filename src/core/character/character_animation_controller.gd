@@ -350,10 +350,14 @@ func _create_animation_tree(character_root: Node3D) -> void:
 
 	# Assign state machine to tree
 	animation_tree.tree_root = state_machine
-	animation_tree.anim_player = animation_tree.get_path_to(animation_player)
 
-	# Add to scene
+	# IMPORTANT: Add to scene tree FIRST, before calling get_path_to()
+	# In Godot 4.5, get_path_to() requires both nodes to share a common ancestor
 	character_root.add_child(animation_tree)
+
+	# Now that both nodes are in the tree, we can compute the path
+	# Use deferred call to ensure tree structure is fully resolved
+	animation_tree.anim_player = animation_tree.get_path_to(animation_player)
 
 	# Activate tree
 	animation_tree.active = true
@@ -451,6 +455,9 @@ func _add_state_transitions() -> void:
 			var transition := AnimationNodeStateMachineTransition.new()
 			state_machine.add_transition(from, to, transition)
 
-	# Set start node
+	# Set start node - In Godot 4.x, we create a transition from the built-in "Start" node
+	# instead of using the deprecated set_start_node() method
 	if state_machine.has_node("Idle"):
-		state_machine.set_start_node("Idle")
+		var start_transition := AnimationNodeStateMachineTransition.new()
+		start_transition.advance_mode = AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO
+		state_machine.add_transition("Start", "Idle", start_transition)
