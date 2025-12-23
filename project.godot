@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Godotwind"
-run/main_scene="res://scenes/terrain_test.tscn"
+run/main_scene="uid://clb74pwrqrgok"
 config/features=PackedStringArray("4.5")
 config/icon="res://icon.png"
 
@@ -24,6 +24,8 @@ OceanManager="*res://src/core/water/ocean_manager.gd"
 
 [display]
 
+window/size/viewport_width=1920
+window/size/viewport_height=1080
 window/vsync/vsync_mode=0
 
 [editor_plugins]

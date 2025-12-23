@@ -27,7 +27,7 @@ class ImpostorSettings:
 	var atlas_columns: int = 4          # Atlas layout (4×4 grid)
 	var atlas_rows: int = 4
 	var optimize_size: bool = true      # Trim empty space
-	var min_distance: float = 2000.0    # Minimum display distance
+	var min_distance: float = 1000.0    # Minimum display distance (was 2km)
 	var max_distance: float = 5000.0    # Maximum display distance
 	var background_color: Color = Color.TRANSPARENT  # Background for renders
 

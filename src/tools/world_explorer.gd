@@ -409,6 +409,101 @@ func _setup_console() -> void:
 		PackedStringArray(["coe -2 -9"])
 	)
 
+	# Register cloud control commands
+	var cloud_scale_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("scale", TYPE_FLOAT, "Cloud scale (0.1-5.0, smaller = larger clouds)")
+	]
+	console.register_command(
+		"cloudscale", _cmd_cloud_scale,
+		"Set volumetric cloud scale (smaller values = larger clouds)",
+		"sky",
+		PackedStringArray(["cs"]),
+		cloud_scale_params,
+		PackedStringArray(["cloudscale 0.3", "cs 1.0"])
+	)
+
+	var cloud_coverage_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("coverage", TYPE_FLOAT, "Cloud coverage (0.0-1.0)")
+	]
+	console.register_command(
+		"cloudcoverage", _cmd_cloud_coverage,
+		"Set cloud coverage (0 = clear, 1 = overcast)",
+		"sky",
+		PackedStringArray(["cc"]),
+		cloud_coverage_params,
+		PackedStringArray(["cloudcoverage 0.5", "cc 0.8"])
+	)
+
+	var cloud_height_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("height", TYPE_FLOAT, "Cloud base height (1.0-20.0)")
+	]
+	console.register_command(
+		"cloudheight", _cmd_cloud_height,
+		"Set cloud base height",
+		"sky",
+		PackedStringArray(["ch"]),
+		cloud_height_params,
+		PackedStringArray(["cloudheight 5.0", "ch 10.0"])
+	)
+
+	var cloud_density_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("density", TYPE_FLOAT, "Cloud density multiplier (0.1-3.0)")
+	]
+	console.register_command(
+		"clouddensity", _cmd_cloud_density,
+		"Set cloud density multiplier",
+		"sky",
+		PackedStringArray(["cd"]),
+		cloud_density_params,
+		PackedStringArray(["clouddensity 1.5", "cd 2.0"])
+	)
+
+	var cloud_thickness_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("thickness", TYPE_FLOAT, "Cloud layer thickness (1.0-20.0)")
+	]
+	console.register_command(
+		"cloudthickness", _cmd_cloud_thickness,
+		"Set cloud layer vertical thickness",
+		"sky",
+		PackedStringArray(["ct"]),
+		cloud_thickness_params,
+		PackedStringArray(["cloudthickness 8.0", "ct 12.0"])
+	)
+
+	var cloud_speed_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("speed", TYPE_FLOAT, "Wind speed in m/s (0-120)")
+	]
+	console.register_command(
+		"cloudspeed", _cmd_cloud_speed,
+		"Set cloud wind speed",
+		"sky",
+		PackedStringArray(["cspd"]),
+		cloud_speed_params,
+		PackedStringArray(["cloudspeed 1.0", "cspd 0.5"])
+	)
+
+	var cloud_detail_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("strength", TYPE_FLOAT, "Detail erosion strength (0.0-1.0)")
+	]
+	console.register_command(
+		"clouddetail", _cmd_cloud_detail,
+		"Set cloud detail erosion strength (makes clouds wispier)",
+		"sky",
+		PackedStringArray(["cdet"]),
+		cloud_detail_params,
+		PackedStringArray(["clouddetail 0.2", "cdet 0.5"])
+	)
+
+	var cloud_info_params: Array[CommandRegistry.ParameterInfo] = []
+	console.register_command(
+		"cloudinfo", _cmd_cloud_info,
+		"Show current cloud parameters",
+		"sky",
+		PackedStringArray(["ci"]),
+		cloud_info_params,
+		PackedStringArray(["cloudinfo"])
+	)
+
 	_log("Console initialized (~ to toggle)")
 
 
@@ -429,6 +524,100 @@ func _cmd_center_on_exterior(args: Dictionary) -> CommandRegistry.CommandResult:
 
 	_teleport_to_cell(x, y)
 	return CommandRegistry.CommandResult.ok("Teleported to cell (%d, %d)" % [x, y])
+
+
+## Console command: Set cloud scale
+func _cmd_cloud_scale(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var scale: float = args.get("scale", 1.0)
+	scale = clampf(scale, 0.1, 5.0)
+	sky_3d.sky.vol_cloud_scale = scale
+	return CommandRegistry.CommandResult.ok("Cloud scale set to %.2f" % scale)
+
+
+## Console command: Set cloud coverage
+func _cmd_cloud_coverage(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var coverage: float = args.get("coverage", 0.5)
+	coverage = clampf(coverage, 0.0, 1.0)
+	sky_3d.sky.vol_cloud_coverage = coverage
+	return CommandRegistry.CommandResult.ok("Cloud coverage set to %.2f" % coverage)
+
+
+## Console command: Set cloud height
+func _cmd_cloud_height(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var height: float = args.get("height", 3.0)
+	height = clampf(height, 1.0, 20.0)
+	sky_3d.sky.vol_cloud_base_height = height
+	return CommandRegistry.CommandResult.ok("Cloud base height set to %.2f" % height)
+
+
+## Console command: Set cloud density
+func _cmd_cloud_density(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var density: float = args.get("density", 1.0)
+	density = clampf(density, 0.1, 3.0)
+	sky_3d.sky.vol_cloud_density = density
+	return CommandRegistry.CommandResult.ok("Cloud density set to %.2f" % density)
+
+
+## Console command: Set cloud thickness
+func _cmd_cloud_thickness(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var thickness: float = args.get("thickness", 5.0)
+	thickness = clampf(thickness, 1.0, 20.0)
+	sky_3d.sky.vol_cloud_thickness = thickness
+	return CommandRegistry.CommandResult.ok("Cloud thickness set to %.2f" % thickness)
+
+
+## Console command: Set cloud wind speed
+func _cmd_cloud_speed(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var speed: float = args.get("speed", 1.0)
+	speed = clampf(speed, 0.0, 120.0)
+	sky_3d.sky.wind_speed = speed
+	return CommandRegistry.CommandResult.ok("Cloud wind speed set to %.2f m/s" % speed)
+
+
+## Console command: Set cloud detail erosion
+func _cmd_cloud_detail(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var strength: float = args.get("strength", 0.4)
+	strength = clampf(strength, 0.0, 1.0)
+	sky_3d.sky.vol_cloud_detail_strength = strength
+	return CommandRegistry.CommandResult.ok("Cloud detail strength set to %.2f" % strength)
+
+
+## Console command: Show cloud info
+func _cmd_cloud_info(_args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	if not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("SkyDome not available.")
+
+	var dome = sky_3d.sky
+	var info := "Volumetric Cloud Parameters:\n"
+	info += "  Enabled: %s\n" % str(dome.volumetric_clouds_enabled)
+	info += "  Scale: %.2f (smaller = larger clouds)\n" % dome.vol_cloud_scale
+	info += "  Coverage: %.2f\n" % dome.vol_cloud_coverage
+	info += "  Density: %.2f\n" % dome.vol_cloud_density
+	info += "  Base Height: %.2f\n" % dome.vol_cloud_base_height
+	info += "  Thickness: %.2f\n" % dome.vol_cloud_thickness
+	info += "  Detail Strength: %.2f\n" % dome.vol_cloud_detail_strength
+	info += "  Wind Speed: %.2f m/s\n" % dome.wind_speed
+	info += "  March Steps: %d\n" % dome.vol_cloud_march_steps
+	info += "\nCommands: cloudscale (cs), cloudcoverage (cc), cloudheight (ch),"
+	info += "\n          clouddensity (cd), cloudthickness (ct), cloudspeed (cspd),"
+	info += "\n          clouddetail (cdet)"
+	return CommandRegistry.CommandResult.ok(info)
 
 
 ## Toggle between fly camera and player controller
@@ -626,13 +815,11 @@ func _setup_visibility_toggles() -> void:
 
 	_water_quality_btn = OptionButton.new()
 	_water_quality_btn.add_item("Auto", -1)
-	_water_quality_btn.add_item("ULow", 0)
-	_water_quality_btn.add_item("Low", 1)
-	_water_quality_btn.add_item("Med", 2)
-	_water_quality_btn.add_item("High", 3)
+	_water_quality_btn.add_item("Flat", 0)
+	_water_quality_btn.add_item("FFT", 1)
 	_water_quality_btn.selected = 0
 	_water_quality_btn.item_selected.connect(_on_water_quality_changed)
-	_water_quality_btn.tooltip_text = "Water quality level"
+	_water_quality_btn.tooltip_text = "Water quality: Flat (simple) or FFT (GPU waves)"
 	_water_quality_btn.custom_minimum_size.x = 65
 	settings_row.add_child(_water_quality_btn)
 
@@ -999,12 +1186,16 @@ func _on_show_sky_toggled(enabled: bool) -> void:
 		# Disable and remove Sky3D from tree so fallback can take over
 		# (WorldEnvironment nodes only work when in tree, and only one is active)
 		if sky_3d:
-			sky_3d.sky3d_enabled = false
+			# First remove from tree to stop rendering, then disable
 			if sky_3d.is_inside_tree():
 				remove_child(sky_3d)
-		# Add fallback back to tree
-		if _fallback_world_env and not _fallback_world_env.is_inside_tree():
-			add_child(_fallback_world_env)
+			sky_3d.sky3d_enabled = false
+		# Add fallback back to tree AFTER Sky3D is removed
+		if _fallback_world_env:
+			if not _fallback_world_env.is_inside_tree():
+				add_child(_fallback_world_env)
+			# Force the environment to be current
+			_fallback_world_env.environment = _fallback_world_env.environment
 		if _fallback_light:
 			_fallback_light.visible = true
 
@@ -1017,12 +1208,18 @@ func _create_sky3d() -> void:
 	if _sky3d_initialized:
 		return
 
-	_log("Initializing Sky3D...")
+	_log("Initializing Sky3D with volumetric clouds...")
 
-	# Load and instantiate Sky3D
-	var Sky3DScript = load("res://addons/sky_3d/src/Sky3D.gd")
+	# Remove fallback environment BEFORE adding Sky3D (only one WorldEnvironment can be active)
+	if _fallback_world_env and _fallback_world_env.is_inside_tree():
+		remove_child(_fallback_world_env)
+	if _fallback_light:
+		_fallback_light.visible = false
+
+	# Load and instantiate Sky3DVolumetric for raymarched volumetric clouds
+	var Sky3DVolumetricScript = load("res://addons/sky_3d/src/Sky3DVolumetric.gd")
 	sky_3d = WorldEnvironment.new()
-	sky_3d.set_script(Sky3DScript)
+	sky_3d.set_script(Sky3DVolumetricScript)
 	sky_3d.name = "Sky3D"
 
 	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
@@ -1036,7 +1233,7 @@ func _create_sky3d() -> void:
 	sky_3d.sky3d_enabled = true
 
 	_sky3d_initialized = true
-	_log("Sky3D initialized")
+	_log("Sky3D initialized with volumetric clouds")
 
 
 ## Setup fallback environment and light for when Sky3D is disabled
@@ -1072,6 +1269,13 @@ func _setup_fallback_environment() -> void:
 
 	# Reflected light from sky
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+
+	# Screen-Space Reflections for water
+	env.ssr_enabled = true
+	env.ssr_max_steps = 64
+	env.ssr_fade_in = 0.15
+	env.ssr_fade_out = 2.0
+	env.ssr_depth_tolerance = 0.2
 
 	# Tonemapping (ACES for better contrast)
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
@@ -1188,6 +1392,7 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
+	world_streaming_manager.distant_rendering_enabled = true  # Enable impostors (FAR tier)
 	world_streaming_manager.debug_enabled = true
 
 	# OWDB configuration for Morrowind objects
@@ -1422,6 +1627,10 @@ func _log(message: String) -> void:
 # ==================== Input Handling ====================
 
 func _input(event: InputEvent) -> void:
+	# Don't process shortcuts when console is open (let user type in the console)
+	if console and console.is_visible():
+		return
+
 	# Hotkeys (these work regardless of camera mode)
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
@@ -1851,9 +2060,8 @@ func _dump_profiling_report() -> void:
 		_log("  Cache hits: %d" % report.textures.get("cache_hits", 0))
 
 	# Add object pool stats
-	if cell_manager:
-		var cell_stats: Dictionary = cell_manager.get_stats()
-		if cell_stats.get("pool_available", 0) > 0 or cell_stats.get("pool_in_use", 0) > 0:
+	var cell_stats: Dictionary = cell_manager.get_stats()
+	if cell_stats.get("pool_available", 0) > 0 or cell_stats.get("pool_in_use", 0) > 0:
 			_log("")
 			_log("[b]Object Pool[/b]")
 			_log("  Available: %d | In use: %d" % [

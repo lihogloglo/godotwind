@@ -1,0 +1,69 @@
+#!/usr/bin/env python
+"""
+SConstruct for MeshOptimizer GDExtension
+Build with: scons platform=windows target=template_debug
+"""
+
+import os
+import sys
+
+# Try to find godot-cpp
+godot_cpp_path = os.environ.get('GODOT_CPP_PATH', '../../../godot-cpp')
+if not os.path.exists(godot_cpp_path):
+    # Try common locations
+    for path in ['../../../godot-cpp', '../../godot-cpp', 'godot-cpp', os.path.expanduser('~/godot-cpp')]:
+        if os.path.exists(path):
+            godot_cpp_path = path
+            break
+
+if not os.path.exists(godot_cpp_path):
+    print("ERROR: godot-cpp not found!")
+    print("Please set GODOT_CPP_PATH environment variable or place godot-cpp in project root")
+    Exit(1)
+
+# Import godot-cpp build environment
+env = SConscript(godot_cpp_path + '/SConstruct')
+
+# Extension name
+extension_name = 'meshoptimizer'
+
+# Add source paths
+env.Append(CPPPATH=['src/', 'thirdparty/'])
+
+# Meshoptimizer source files (only the ones we need for simplification)
+meshopt_sources = [
+    'thirdparty/allocator.cpp',
+    'thirdparty/simplifier.cpp',
+    'thirdparty/indexgenerator.cpp',
+    'thirdparty/vcacheoptimizer.cpp',
+    'thirdparty/vfetchoptimizer.cpp',
+    'thirdparty/overdrawoptimizer.cpp',
+    'thirdparty/spatialorder.cpp',
+    'thirdparty/clusterizer.cpp',
+]
+
+# GDExtension wrapper sources
+gdext_sources = [
+    'src/meshoptimizer_gdext.cpp',
+    'src/register_types.cpp',
+]
+
+sources = meshopt_sources + gdext_sources
+
+# Build library
+if env["platform"] == "macos":
+    library = env.SharedLibrary(
+        "bin/lib{}.{}.{}.framework/lib{}.{}.{}".format(
+            extension_name, env["platform"], env["target"],
+            extension_name, env["platform"], env["target"]
+        ),
+        source=sources,
+    )
+else:
+    library = env.SharedLibrary(
+        "bin/lib{}{}{}".format(extension_name, env["suffix"], env["SHLIBSUFFIX"]),
+        source=sources,
+    )
+
+env.NoCache(library)
+Default(library)

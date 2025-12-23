@@ -70,6 +70,8 @@ class ImpostorInstance:
 	var cell_grid: Vector2i
 	var instance_rid: RID      ## RenderingServer instance
 	var mesh_rid: RID          ## Billboard quad mesh
+	var mesh: QuadMesh         ## Keep reference to prevent GC
+	var material: ShaderMaterial  ## Keep reference to prevent GC
 	var visible: bool = true
 	var texture_size: Vector2  ## Size of impostor in world units
 
@@ -247,6 +249,8 @@ func add_impostor(
 	impostor.cell_grid = cell_grid
 	impostor.instance_rid = instance_rid
 	impostor.mesh_rid = quad_mesh.get_rid()
+	impostor.mesh = quad_mesh  # Keep reference to prevent GC
+	impostor.material = mat    # Keep reference to prevent GC
 	impostor.visible = true
 	impostor.texture_size = impostor_size
 
@@ -270,6 +274,8 @@ func add_impostor(
 ## Returns number of impostors added
 func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
 	var count := 0
+	var candidates_checked := 0
+	var textures_found := 0
 
 	for ref in references:
 		if not ref is CellReference:
@@ -295,15 +301,54 @@ func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
 		if impostor_candidates and not impostor_candidates.should_have_impostor(model_path):
 			continue
 
-		# Calculate world position/rotation/scale
+		candidates_checked += 1
+
+		# DEBUG: Check if texture exists
+		var texture_path := ImpostorCandidatesScript.get_impostor_texture_path(model_path)
+		if FileAccess.file_exists(texture_path):
+			textures_found += 1
+
+		# Calculate world position/rotation/scale using proper ESM rotation conversion
 		var pos := CS.vector_to_godot(ref.position)
-		var rot := CS.euler_to_godot(ref.rotation)
+		var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
 		var scl := CS.scale_to_godot(ref.scale)
 
-		# Add impostor
-		var id := add_impostor(model_path, pos, rot, scl, cell_grid)
+		# Add impostor (pass Euler angles extracted from corrected basis)
+		var id := add_impostor(model_path, pos, basis.get_euler(), scl, cell_grid)
 		if id >= 0:
 			count += 1
+
+	# DEBUG: Log impostor loading stats for this cell
+	if candidates_checked > 0:
+		print("ImpostorManager: Cell %s - checked %d candidates, %d textures found, %d impostors created" % [
+			cell_grid, candidates_checked, textures_found, count
+		])
+		# DEBUG: Show first few expected texture paths if none found
+		if textures_found == 0 and candidates_checked > 0:
+			var sample_count := 0
+			for ref2 in references:
+				if sample_count >= 3:
+					break
+				if not ref2 is CellReference:
+					continue
+				var record_type2: Array = [""]
+				var base_record2 = ESMManager.get_any_record(str(ref2.ref_id), record_type2)
+				if not base_record2:
+					continue
+				var model_path2: String = ""
+				if "model" in base_record2:
+					model_path2 = base_record2.model
+				elif "model_path" in base_record2:
+					model_path2 = base_record2.model_path
+				if model_path2.is_empty():
+					continue
+				if impostor_candidates and not impostor_candidates.should_have_impostor(model_path2):
+					continue
+				var expected_path := ImpostorCandidatesScript.get_impostor_texture_path(model_path2)
+				var hash_val := model_path2.to_lower().hash()
+				print("  Expected texture: %s" % expected_path)
+				print("    Model path: %s (hash: %x)" % [model_path2, hash_val])
+				sample_count += 1
 
 	return count
 
@@ -398,14 +443,27 @@ func _get_or_load_impostor_texture(model_path: String) -> Texture2D:
 	if hash_key in _impostor_textures:
 		return _impostor_textures[hash_key]
 
-	# Try to load from disk
+	# Try to load from disk (external file path, not res://)
 	var texture_path := ImpostorCandidatesScript.get_impostor_texture_path(model_path)
-	if ResourceLoader.exists(texture_path):
-		var texture := load(texture_path) as Texture2D
-		if texture:
-			_impostor_textures[hash_key] = texture
-			_stats["texture_cache_size"] += 1
-			return texture
+	if FileAccess.file_exists(texture_path):
+		var image := Image.load_from_file(texture_path)
+		if image:
+			var texture := ImageTexture.create_from_image(image)
+			if texture:
+				_impostor_textures[hash_key] = texture
+				_stats["texture_cache_size"] += 1
+				print("ImpostorManager: Loaded texture for %s -> %s" % [model_path.get_file(), texture_path.get_file()])
+				return texture
+			else:
+				push_warning("ImpostorManager: Failed to create ImageTexture from %s" % texture_path)
+		else:
+			push_warning("ImpostorManager: Failed to load image from %s" % texture_path)
+	else:
+		# DEBUG: Print expected path when texture not found
+		if _stats.get("texture_cache_size", 0) == 0 and _stats.get("_debug_missing_logged", 0) < 5:
+			print("ImpostorManager: Texture not found: %s" % texture_path)
+			print("  Model path: %s" % model_path)
+			_stats["_debug_missing_logged"] = _stats.get("_debug_missing_logged", 0) + 1
 
 	# No pre-baked impostor available
 	return null

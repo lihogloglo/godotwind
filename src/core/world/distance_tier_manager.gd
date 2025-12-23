@@ -2,8 +2,8 @@
 ##
 ## Determines which rendering tier a cell belongs to based on distance:
 ## - NEAR: Full 3D meshes with existing LOD system (0-500m)
-## - MID: Simplified merged meshes (500m-2km)
-## - FAR: Octahedral impostors (2km-5km)
+## - MID: Simplified merged meshes (500m-1km)
+## - FAR: Octahedral impostors (1km-5km)
 ## - HORIZON: Skybox integration (5km+)
 ##
 ## Provides loading strategy for each tier and coordinates between
@@ -25,8 +25,8 @@ extends RefCounted
 ## Distance tiers for rendering detail levels
 enum Tier {
 	NEAR,      ## Full 3D meshes with LOD (0-500m)
-	MID,       ## Simplified merged geometry (500m-2km)
-	FAR,       ## Octahedral impostors (2km-5km)
+	MID,       ## Simplified merged geometry (500m-1km)
+	FAR,       ## Octahedral impostors (1km-5km)
 	HORIZON,   ## Skybox/billboard only (5km+)
 	NONE,      ## Beyond all tiers (don't load)
 }
@@ -72,19 +72,23 @@ var max_cells_per_tier: Dictionary = DEFAULT_MAX_CELLS_PER_TIER.duplicate()
 
 ## Default distance thresholds (in meters)
 ## These can be overridden per-world via configure_for_world()
+## NOTE: MID tier reduced (500m-1km) since prebaking is slow
+##       FAR tier (impostors) starts at 1km for better performance
+## TESTING: Impostors at 500m, bypassing merged models
 var tier_distances := {
 	Tier.NEAR: 0.0,        # 0m start
-	Tier.MID: 500.0,       # 500m start
-	Tier.FAR: 2000.0,      # 2km start
+	Tier.MID: 500.0,       # 500m start (effectively skipped - same as FAR)
+	Tier.FAR: 500.0,       # 500m start - TESTING: impostors start right after NEAR
 	Tier.HORIZON: 5000.0,  # 5km start
 }
 
 
 ## Default tier end distances (in meters)
 ## MID ends where FAR starts, etc.
+## TESTING: MID tier effectively 0 width (500m-500m)
 var tier_end_distances := {
 	Tier.NEAR: 500.0,      # NEAR ends at 500m
-	Tier.MID: 2000.0,      # MID ends at 2km
+	Tier.MID: 500.0,       # MID ends at 500m - TESTING: no MID tier
 	Tier.FAR: 5000.0,      # FAR ends at 5km
 	Tier.HORIZON: 10000.0, # HORIZON ends at 10km
 }

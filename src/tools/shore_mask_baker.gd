@@ -1,15 +1,14 @@
-## ShoreMaskBaker - Tool for pre-generating shore mask texture from terrain
+## ShoreMaskBaker - Tool for pre-generating shore distance mask from terrain
 ##
-## Generates a shore mask texture based on terrain height relative to sea level.
-## The shore mask controls ocean visibility:
-## - 1.0 = full ocean (below sea level)
-## - 0.0 = no ocean (above sea level + fade distance)
+## Generates a shore distance texture where each pixel stores the distance to the nearest shoreline:
+## - 0.0 = at shore or on land (full wave dampening)
+## - 1.0 = far from shore (full waves, beyond fade_distance)
+##
+## This is used for wave dampening near coastlines (OpenMW-style approach).
 ##
 ## Usage:
 ##   var baker := ShoreMaskBaker.new()
 ##   baker.terrain = $Terrain3D
-##   baker.bake_shore_mask()  # Saves to default path
-##   # OR
 ##   baker.bake_shore_mask()  # Saves to cache/ocean/shore_mask.png
 class_name ShoreMaskBaker
 extends RefCounted
@@ -26,10 +25,9 @@ var resolution: int = 2048
 ## Sea level height in world units
 var sea_level: float = 0.0
 
-## Distance above sea level where ocean fades out completely
-## Smaller values = sharper shoreline, larger = more gradual transition
-## Note: Morrowind uses 128 units per meter, so 20m = ~2560 Morrowind units
-var fade_distance: float = 20.0
+## Horizontal distance from shore where waves fully return (in meters)
+## Smaller values = smaller calm zone, larger = waves calm further out
+var fade_distance: float = 50.0
 
 ## World bounds to cover (auto-calculated from terrain if not set)
 var world_bounds: Rect2 = Rect2()
@@ -77,46 +75,118 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	if world_bounds.size == Vector2.ZERO:
 		_calculate_world_bounds()
 
-	progress.emit(5.0, "Creating shore mask image...")
+	progress.emit(5.0, "Creating binary water/land mask...")
 
-	# Create image
-	var image := Image.create(resolution, resolution, false, Image.FORMAT_R8)
+	# Step 1: Create binary mask (1 = water, 0 = land)
+	var binary_mask := Image.create(resolution, resolution, false, Image.FORMAT_R8)
 
-	var total_pixels := resolution * resolution
-	var pixels_done := 0
-	var last_progress := 0.0
-
-	progress.emit(10.0, "Sampling terrain heights...")
-
-	# Sample terrain heights
 	for y in range(resolution):
 		for x in range(resolution):
 			var world_pos := _pixel_to_world(x, y)
 			var terrain_height := _get_terrain_height(world_pos)
 
-			# Calculate shore factor
-			var height_above_sea := terrain_height - sea_level
-			var shore_factor: float
+			# Water = below sea level, Land = above sea level
+			var is_water := terrain_height < sea_level
+			binary_mask.set_pixel(x, y, Color(1.0 if is_water else 0.0, 0, 0, 1))
 
-			if height_above_sea < 0:
-				# Below sea level - full ocean
-				shore_factor = 1.0
-			elif height_above_sea > fade_distance:
-				# Above fade distance - no ocean
-				shore_factor = 0.0
+		if y % 100 == 0:
+			progress.emit(5.0 + (float(y) / float(resolution)) * 15.0, "Creating binary mask... %d%%" % int((float(y) / float(resolution)) * 100))
+
+	progress.emit(20.0, "Finding shore pixels...")
+
+	# Step 2: Find shore pixels (water pixels adjacent to land)
+	var shore_pixels: Array[Vector2i] = []
+
+	for y in range(resolution):
+		for x in range(resolution):
+			var is_water := binary_mask.get_pixel(x, y).r > 0.5
+			if is_water:
+				# Check if adjacent to land (4-connected)
+				var adjacent_to_land := false
+				for offset in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+					var nx: int = x + offset.x
+					var ny: int = y + offset.y
+					if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
+						if binary_mask.get_pixel(nx, ny).r < 0.5:
+							adjacent_to_land = true
+							break
+				if adjacent_to_land:
+					shore_pixels.append(Vector2i(x, y))
+
+	print("ShoreMaskBaker: Found %d shore pixels" % shore_pixels.size())
+	progress.emit(30.0, "Computing distance field...")
+
+	# Step 3: Compute distance transform using iterative flood fill
+	var meters_per_pixel := world_bounds.size.x / float(resolution)
+	var fade_pixels := fade_distance / meters_per_pixel
+
+	# Create distance image (float format for precision)
+	var distance_image := Image.create(resolution, resolution, false, Image.FORMAT_RF)
+
+	# Initialize: water pixels get large distance, land pixels get 0
+	for y in range(resolution):
+		for x in range(resolution):
+			var is_water := binary_mask.get_pixel(x, y).r > 0.5
+			if is_water:
+				distance_image.set_pixel(x, y, Color(999999.0, 0, 0, 1))
 			else:
-				# Transition zone - smooth fade
-				shore_factor = 1.0 - _smoothstep(0.0, fade_distance, height_above_sea)
+				# Land = 0 distance (will be masked out anyway)
+				distance_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
 
-			image.set_pixel(x, y, Color(shore_factor, 0, 0, 1))
+	# Set shore pixels to 0 distance
+	for shore_px in shore_pixels:
+		distance_image.set_pixel(shore_px.x, shore_px.y, Color(0.0, 0, 0, 1))
 
-			pixels_done += 1
+	progress.emit(40.0, "Propagating distances...")
 
-		# Update progress every row
-		var current_progress := 10.0 + (float(pixels_done) / float(total_pixels)) * 80.0
-		if current_progress - last_progress >= 5.0:
-			progress.emit(current_progress, "Sampling terrain... %d%%" % int((float(y) / float(resolution)) * 100))
-			last_progress = current_progress
+	# Propagate distances using iterative approach
+	var max_iterations := int(fade_pixels * 1.5) + 10
+	for iteration in range(max_iterations):
+		var changed := false
+		for y in range(resolution):
+			for x in range(resolution):
+				var current_dist := distance_image.get_pixel(x, y).r
+				if current_dist <= 0.0:
+					continue  # Already at shore or land
+
+				# Check neighbors
+				var best_dist := current_dist
+				for offset in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+					var nx: int = x + offset.x
+					var ny: int = y + offset.y
+					if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
+						var neighbor_dist := distance_image.get_pixel(nx, ny).r + 1.0
+						if neighbor_dist < best_dist:
+							best_dist = neighbor_dist
+							changed = true
+
+				if best_dist < current_dist:
+					distance_image.set_pixel(x, y, Color(best_dist, 0, 0, 1))
+
+		if not changed:
+			print("ShoreMaskBaker: Distance propagation converged at iteration %d" % iteration)
+			break
+
+		if iteration % 10 == 0:
+			progress.emit(40.0 + (float(iteration) / float(max_iterations)) * 40.0, "Propagating distances... iteration %d" % iteration)
+
+	progress.emit(80.0, "Converting to shore factor...")
+
+	# Step 4: Convert to shore factor: 0 = at shore, 1 = far from shore
+	var result_image := Image.create(resolution, resolution, false, Image.FORMAT_R8)
+
+	for y in range(resolution):
+		for x in range(resolution):
+			var is_water := binary_mask.get_pixel(x, y).r > 0.5
+			if not is_water:
+				# Land = 0 (no ocean)
+				result_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
+			else:
+				var dist_pixels := distance_image.get_pixel(x, y).r
+				var dist_meters := dist_pixels * meters_per_pixel
+				# Smoothstep from 0 (at shore) to 1 (at fade_distance)
+				var shore_factor := _smoothstep(0.0, fade_distance, dist_meters)
+				result_image.set_pixel(x, y, Color(shore_factor, 0, 0, 1))
 
 	progress.emit(90.0, "Saving shore mask...")
 
@@ -126,7 +196,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 		output_path = output_dir.path_join(output_filename)
 
 	# Save as PNG
-	var save_err := image.save_png(output_path)
+	var save_err := result_image.save_png(output_path)
 	if save_err != OK:
 		var error := "Failed to save image: error %d" % save_err
 		push_error("ShoreMaskBaker: %s - %s" % [error, output_path])
@@ -140,13 +210,14 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 
 	progress.emit(100.0, "Complete!")
 
-	print("ShoreMaskBaker: Saved shore mask to %s" % output_path)
+	print("ShoreMaskBaker: Saved shore distance mask to %s" % output_path)
 	print("  Resolution: %dx%d" % [resolution, resolution])
 	print("  World bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
 		world_bounds.position.x, world_bounds.position.y,
 		world_bounds.end.x, world_bounds.end.y
 	])
-	print("  Sea level: %.1f, Fade distance: %.1f" % [sea_level, fade_distance])
+	print("  Sea level: %.1f, Fade distance: %.1fm" % [sea_level, fade_distance])
+	print("  Shore pixels found: %d" % shore_pixels.size())
 
 	bake_complete.emit(true, output_path)
 	return {
@@ -166,7 +237,6 @@ func _calculate_world_bounds() -> void:
 		return
 
 	# Try to get bounds from terrain data
-	# Terrain3D stores data in regions, we need to find the extent
 	var region_count := terrain.data.get_region_count()
 	if region_count == 0:
 		world_bounds = Rect2(-8000, -8000, 16000, 16000)
@@ -192,7 +262,6 @@ func _calculate_world_bounds() -> void:
 		max_loc.y = maxi(max_loc.y, loc.y)
 
 	# Convert region coordinates to world bounds
-	# Each region location represents the center of a region tile
 	var world_min := Vector2(min_loc.x, min_loc.y) * region_size
 	var world_max := Vector2(max_loc.x + 1, max_loc.y + 1) * region_size
 
@@ -242,7 +311,6 @@ func _smoothstep(edge0: float, edge1: float, x: float) -> float:
 
 ## Save metadata alongside the image
 func _save_metadata(image_path: String) -> void:
-	# Create a simple resource to store metadata
 	var config := ConfigFile.new()
 	config.set_value("shore_mask", "resolution", resolution)
 	config.set_value("shore_mask", "sea_level", sea_level)
@@ -251,6 +319,7 @@ func _save_metadata(image_path: String) -> void:
 	config.set_value("shore_mask", "bounds_y", world_bounds.position.y)
 	config.set_value("shore_mask", "bounds_width", world_bounds.size.x)
 	config.set_value("shore_mask", "bounds_height", world_bounds.size.y)
+	config.set_value("shore_mask", "type", "distance")  # Mark as distance-based
 
 	var cfg_path := image_path.replace(".png", ".cfg")
 	config.save(cfg_path)
@@ -258,7 +327,7 @@ func _save_metadata(image_path: String) -> void:
 
 
 ## Load prebaked shore mask from file
-## Returns: Dictionary with { texture: ImageTexture, bounds: Rect2 } or null on failure
+## Returns: Dictionary with { texture: ImageTexture, bounds: Rect2 } or empty on failure
 static func load_prebaked(image_path: String) -> Dictionary:
 	if not FileAccess.file_exists(image_path):
 		push_warning("ShoreMaskBaker: Prebaked shore mask not found: %s" % image_path)
@@ -285,6 +354,8 @@ static func load_prebaked(image_path: String) -> Dictionary:
 				config.get_value("shore_mask", "bounds_width", 16000.0),
 				config.get_value("shore_mask", "bounds_height", 16000.0)
 			)
+			var mask_type: String = config.get_value("shore_mask", "type", "height")
+			print("ShoreMaskBaker: Loaded %s-based shore mask" % mask_type)
 
 	print("ShoreMaskBaker: Loaded prebaked shore mask from %s" % image_path)
 	print("  Bounds: %s" % bounds)

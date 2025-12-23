@@ -309,11 +309,10 @@ func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
 
 
 ## Calculate world transform for a cell reference
-func _calculate_transform(ref: CellReference, cell_grid: Vector2i) -> Transform3D:
+func _calculate_transform(ref: CellReference, _cell_grid: Vector2i) -> Transform3D:
 	var pos := CS.vector_to_godot(ref.position)
 	var scale := CS.scale_to_godot(ref.scale)
-	var euler := CS.euler_to_godot(ref.rotation)
-	var basis := Basis.from_euler(euler, EULER_ORDER_XZY)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
 	basis = basis.scaled(scale)
 
 	return Transform3D(basis, pos)

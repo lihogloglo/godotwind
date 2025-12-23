@@ -39,9 +39,9 @@ var _mouse_captured: bool = false
 
 
 func _ready() -> void:
-	# Ensure far plane is adequate for world exploration
-	if far < 2000.0:
-		far = 2000.0
+	# Ensure far plane is adequate for world exploration (20km for distant impostors)
+	if far < 20000.0:
+		far = 20000.0
 
 	# Ensure processing is enabled (needed when script is attached dynamically)
 	set_process(true)

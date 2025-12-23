@@ -55,16 +55,16 @@ func configure(p_tier_manager: RefCounted) -> void:
 		_tier_distances = tier_manager.tier_distances.duplicate()
 		_tier_end_distances = tier_manager.tier_end_distances.duplicate()
 	else:
-		# Default distances
+		# Default distances (FAR tier starts at 1km for faster impostor trigger)
 		_tier_distances = {
 			DistanceTierManagerScript.Tier.NEAR: 0.0,
 			DistanceTierManagerScript.Tier.MID: 500.0,
-			DistanceTierManagerScript.Tier.FAR: 2000.0,
+			DistanceTierManagerScript.Tier.FAR: 1000.0,
 			DistanceTierManagerScript.Tier.HORIZON: 5000.0,
 		}
 		_tier_end_distances = {
 			DistanceTierManagerScript.Tier.NEAR: 500.0,
-			DistanceTierManagerScript.Tier.MID: 2000.0,
+			DistanceTierManagerScript.Tier.MID: 1000.0,
 			DistanceTierManagerScript.Tier.FAR: 5000.0,
 			DistanceTierManagerScript.Tier.HORIZON: 10000.0,
 		}

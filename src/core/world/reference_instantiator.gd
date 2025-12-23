@@ -151,12 +151,10 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 		else:
 			return null
 
-	# Calculate transform
-	# Morrowind uses intrinsic XYZ Euler order -> XZY in Godot after coordinate conversion
+	# Calculate transform using CoordinateSystem's ESM rotation conversion
 	var pos := CS.vector_to_godot(ref.position)
 	var scale := CS.scale_to_godot(ref.scale)
-	var euler := CS.euler_to_godot(ref.rotation)
-	var basis := Basis.from_euler(euler, EULER_ORDER_XZY)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
 	basis = basis.scaled(scale)
 	var transform := Transform3D(basis, pos)
 
@@ -463,14 +461,8 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 	node.scale = CS.scale_to_godot(ref.scale)
 
 	# Rotation conversion via CoordinateSystem
-	# NIF models are already converted to Y-up in nif_converter, so we only
-	# need to apply the object's rotation from the cell reference
-	#
-	# Morrowind uses intrinsic XYZ Euler order (pitch around X, then roll around Y, then yaw around Z)
-	# See: https://github.com/OpenMW/openmw - apps/openmw/mwworld/worldimp.cpp
-	# After coordinate conversion (MW Z->Godot Y, MW Y->Godot -Z), XYZ becomes XZY in Godot
-	var godot_euler := CS.euler_to_godot(ref.rotation)
-	node.basis = Basis.from_euler(godot_euler, EULER_ORDER_XZY)
+	# Uses esm_rotation_to_godot_basis() which matches OpenMW's makeOsgQuat
+	node.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
 
 
 ## Apply metadata to an object for console object picker identification

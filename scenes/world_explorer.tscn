@@ -192,15 +192,6 @@ text = "No pre-processed data"
 [node name="HSeparator4" type="HSeparator" parent="UI/StatsPanel/VBox"]
 layout_mode = 2
 
-[node name="ControlsLabel" type="Label" parent="UI/StatsPanel/VBox"]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
-text = "Controls:
-Hold Right Click to look
-WASD to move
-Space/Shift for up/down
-Ctrl for speed boost"
-
 [node name="LogPanel" type="Panel" parent="UI"]
 anchors_preset = 2
 anchor_top = 1.0

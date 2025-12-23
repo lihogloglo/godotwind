@@ -122,6 +122,16 @@ func update_chunks(camera_cell: Vector2i) -> void:
 	# Get visible chunks for each tier
 	var visible_by_tier: Dictionary = chunk_manager.get_visible_chunks_by_tier(camera_cell)
 
+	# DEBUG: Log chunk manager distances
+	var debug_info: Dictionary = chunk_manager.get_debug_info(camera_cell)
+	if debug_info.get("visible_far_chunks", 0) > 0 or debug_info.get("visible_mid_chunks", 0) > 0:
+		print("ChunkRenderer: update_chunks at %s - MID chunks: %d, FAR chunks: %d" % [
+			camera_cell,
+			debug_info.get("visible_mid_chunks", 0),
+			debug_info.get("visible_far_chunks", 0)
+		])
+		print("  Tier distances: %s" % debug_info.get("tier_distances", {}))
+
 	# Process MID tier chunks
 	_update_tier_chunks(
 		DistanceTierManagerScript.Tier.MID,
@@ -151,16 +161,28 @@ func update_chunks(camera_cell: Vector2i) -> void:
 
 ## Update chunks for a specific tier
 func _update_tier_chunks(tier: int, visible_chunks: Array, camera_cell: Vector2i) -> void:
+	var tier_name := "MID" if tier == DistanceTierManagerScript.Tier.MID else "FAR"
+	if visible_chunks.size() > 0:
+		print("ChunkRenderer: _update_tier_chunks %s - %d visible chunks around %s (frustum_culling=%s, camera=%s)" % [
+			tier_name, visible_chunks.size(), camera_cell, use_frustum_culling, camera != null
+		])
+
 	var chunk_size: int = chunk_manager.get_chunk_size_for_tier(tier)
 	var current_dict: Dictionary = _current_mid_chunks if tier == DistanceTierManagerScript.Tier.MID else _current_far_chunks
 	var loaded_dict: Dictionary = _loaded_mid_chunks if tier == DistanceTierManagerScript.Tier.MID else _loaded_far_chunks
+
+	var culled_count := 0
+	var loaded_count := 0
+	var already_loaded_count := 0
 
 	for chunk_grid in visible_chunks:
 		var identifier: String = chunk_manager.get_chunk_identifier(chunk_grid, tier)
 
 		# Apply frustum culling if enabled
-		if use_frustum_culling and camera:
+		# TESTING: Disable frustum culling for FAR tier - it's culling everything incorrectly
+		if use_frustum_culling and camera and tier != DistanceTierManagerScript.Tier.FAR:
 			if not chunk_manager.is_chunk_in_frustum(chunk_grid, chunk_size, camera):
+				culled_count += 1
 				continue
 
 		# Mark as current (for stale detection)
@@ -168,7 +190,10 @@ func _update_tier_chunks(tier: int, visible_chunks: Array, camera_cell: Vector2i
 
 		# Skip if already loaded
 		if identifier in loaded_dict:
+			already_loaded_count += 1
 			continue
+
+		loaded_count += 1
 
 		# Load new chunk
 		match tier:
@@ -176,6 +201,11 @@ func _update_tier_chunks(tier: int, visible_chunks: Array, camera_cell: Vector2i
 				_load_mid_chunk(chunk_grid, identifier)
 			DistanceTierManagerScript.Tier.FAR:
 				_load_far_chunk(chunk_grid, identifier)
+
+	if visible_chunks.size() > 0:
+		print("ChunkRenderer: %s result - culled=%d, already_loaded=%d, new_loaded=%d" % [
+			tier_name, culled_count, already_loaded_count, loaded_count
+		])
 
 
 ## Remove chunks that are no longer visible
@@ -265,7 +295,10 @@ func _unload_mid_chunk(identifier: String) -> void:
 
 ## Load a FAR tier chunk (aggregates impostors per cell)
 func _load_far_chunk(chunk_grid: Vector2i, identifier: String) -> void:
+	print("ChunkRenderer: _load_far_chunk called for chunk %s" % chunk_grid)
+
 	if not impostor_manager:
+		print("ChunkRenderer: ERROR - impostor_manager is null!")
 		return
 
 	var start_time := Time.get_ticks_usec()
@@ -275,6 +308,7 @@ func _load_far_chunk(chunk_grid: Vector2i, identifier: String) -> void:
 
 	# Get all cells in this chunk
 	var cells: Array[Vector2i] = chunk_manager.get_cells_in_chunk(chunk_grid, QuadtreeChunkManagerScript.FAR_CHUNK_SIZE)
+	print("ChunkRenderer: FAR chunk %s contains %d cells" % [chunk_grid, cells.size()])
 
 	# Load impostors for each cell
 	for cell_grid in cells:

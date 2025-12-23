@@ -267,6 +267,17 @@ func _process(delta: float) -> void:
 	if async_loading_enabled and not _load_queue.is_empty():
 		_process_load_queue()
 
+	# Update impostor visibility based on camera distance
+	if impostor_manager and impostor_manager.has_method("update_impostor_visibility"):
+		var camera_pos := _tracked_node.global_position
+		# Impostors visible from FAR tier start (500m) to FAR tier end (5km)
+		var min_dist := 500.0  # Match tier_distances[FAR]
+		var max_dist := 5000.0  # Match tier_end_distances[FAR]
+		if tier_manager:
+			min_dist = tier_manager.tier_distances.get(DistanceTierManagerScript.Tier.FAR, 500.0)
+			max_dist = tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.FAR, 5000.0)
+		impostor_manager.update_impostor_visibility(camera_pos, min_dist, max_dist)
+
 	# Diagnostic logging every ~1 second
 	var current_frame := Engine.get_frames_drawn()
 	if diagnostic_logging and (current_frame - _diag_last_log_frame) >= 60:
@@ -951,6 +962,12 @@ func _unload_cell_internal(grid: Vector2i) -> void:
 
 	var cell_node: Node3D = _loaded_cells[grid]
 	_loaded_cells.erase(grid)
+
+	# Clean up all loading state to allow re-loading when player returns
+	_loading_cells.erase(grid)
+	_deferred_cells.erase(grid)
+	if _loading_cells_by_tier.has(DistanceTierManagerScript.Tier.NEAR):
+		_loading_cells_by_tier[DistanceTierManagerScript.Tier.NEAR].erase(grid)
 
 	if cell_node and is_instance_valid(cell_node):
 		# Release pooled objects back to the pool before freeing the cell

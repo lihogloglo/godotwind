@@ -42,7 +42,7 @@ var camera_fov: float = 45.0       ## Camera FOV for perspective rendering
 var use_orthographic: bool = true  ## Use orthographic projection (better for impostors)
 var padding_factor: float = 1.2    ## Extra space around model
 var background_color: Color = Color(0, 0, 0, 0)
-var min_distance: float = 2000.0   ## Start showing impostor
+var min_distance: float = 1000.0   ## Start showing impostor (was 2km)
 var max_distance: float = 5000.0   ## Stop showing impostor
 var output_dir: String = ""        ## Set in initialize from SettingsManager
 
@@ -405,11 +405,18 @@ func _find_all_mesh_instances(node: Node) -> Array[MeshInstance3D]:
 
 
 ## Generate output path for impostor files
+## NOTE: Must match impostor_candidates.gd get_impostor_texture_path() normalization
 func _get_output_path(model_path: String, extension: String) -> String:
-	var hash_val := model_path.to_lower().hash()
-	var base_name := model_path.get_file().get_basename()
-	# Clean filename
-	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_")
+	# Normalize path to match loader expectations (remove meshes\ prefix)
+	var normalized := model_path
+	var lower := normalized.to_lower()
+	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
+		normalized = normalized.substr(7)  # Remove "meshes\" or "meshes/"
+
+	var hash_val := normalized.to_lower().hash()
+	var base_name := normalized.get_file().get_basename()
+	# Clean filename and lowercase to match loader
+	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
 	var filename := "%s_%x.%s" % [base_name, hash_val, extension]
 	return output_dir.path_join(filename)
 

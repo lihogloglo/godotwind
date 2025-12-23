@@ -557,21 +557,13 @@ func _recursively_extract_meshes(node: Node, parent_transform: Transform3D, vert
 func _get_reference_transform(ref, cell_origin: Vector3) -> Transform3D:
 	var transform := Transform3D.IDENTITY
 
-	# Position
+	# Position - use CoordinateSystem for proper conversion
 	if ref.has("position"):
-		var pos: Vector3 = ref.position
-		transform.origin = Vector3(
-			pos.x / CS.UNITS_PER_METER,
-			pos.z / CS.UNITS_PER_METER,  # Z-up in MW, Y-up in Godot
-			-pos.y / CS.UNITS_PER_METER  # Y in MW = -Z in Godot
-		) + cell_origin
+		transform.origin = CS.vector_to_godot(ref.position) + cell_origin
 
-	# Rotation (Euler angles in radians)
+	# Rotation - use proper ESM rotation conversion matching OpenMW
 	if ref.has("rotation"):
-		var rot: Vector3 = ref.rotation
-		# Convert MW rotation (XYZ Euler) to Godot
-		var basis := Basis.from_euler(Vector3(rot.x, rot.y, rot.z))
-		transform.basis = basis
+		transform.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
 
 	# Scale
 	if ref.has("scale"):

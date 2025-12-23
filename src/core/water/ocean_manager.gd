@@ -18,7 +18,7 @@ func _get_shore_mask_path() -> String:
 # Ocean configuration
 @export var ocean_radius: float = 8000.0  # 8km clipmap radius
 @export var wave_update_rate: int = 30    # Wave updates per second
-@export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore
+@export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore (horizontal distance)
 @export var shore_mask_resolution: int = 2048  # Shore mask texture size
 @export var use_prebaked_shore_mask: bool = true  # Try to load prebaked shore mask first
 
@@ -37,11 +37,16 @@ func _get_shore_mask_path() -> String:
 @export var wave_scale: float = 1.0
 @export var choppiness: float = 1.0
 
-# Visual settings
+# Visual settings - based on OpenMW water shader for realistic Morrowind-style ocean
+# OpenMW uses WATER_COLOR = vec3(0.090195, 0.115685, 0.12745) and VISIBILITY = 2500.0
 @export_group("Visual Settings")
-@export var water_color: Color = Color(0.1, 0.15, 0.18, 1.0)
+@export var water_color: Color = Color(0.090, 0.116, 0.127, 1.0)  # OpenMW blue-green
 @export var foam_color: Color = Color(0.9, 0.9, 0.9, 1.0)
-@export var depth_color_absorption: Vector3 = Vector3(7.5, 22.0, 38.0)
+# Depth absorption distances in meters for each RGB channel
+# Higher values = clearer water (light travels further before being absorbed)
+# OpenMW VISIBILITY = 2500m, but we scale it per-channel for realistic color shift
+# Red absorbs first (shortest distance), blue absorbs last (longest distance)
+@export var depth_color_absorption: Vector3 = Vector3(15.0, 40.0, 80.0)
 
 # System state
 var _system_initialized: bool = false
@@ -161,21 +166,18 @@ func _deferred_init() -> void:
 
 	# Initialize ocean mesh first - it determines quality and mode
 	_ocean_mesh.initialize(ocean_radius, water_quality)
-	var actual_quality := _ocean_mesh.get_quality()
 
-	# Determine if we use compute based on quality level
-	# ONLY HIGH uses GPU FFT compute, MEDIUM/LOW use vertex Gerstner
-	_use_compute = actual_quality == HardwareDetection.WaterQuality.HIGH
+	# Check if using FFT mode (compute shaders)
+	_use_compute = _ocean_mesh.is_using_compute()
 
 	if _use_compute:
-		# Initialize wave generator for compute mode (HIGH quality only)
+		# Initialize wave generator for FFT mode
 		var map_size := 256
 		_wave_generator.initialize(map_size)
 
 		if _wave_generator.is_using_compute():
-			_setup_wave_cascades(actual_quality)
+			_setup_wave_cascades()
 			# Initialize GPU resources BEFORE trying to get textures
-			# This creates the displacement/normal map textures
 			_wave_generator.init_gpu(maxi(2, _wave_parameters.size()))
 
 			if _wave_generator.is_initialized():
@@ -185,13 +187,13 @@ func _deferred_init() -> void:
 					_wave_parameters.size()
 				)
 			else:
-				# GPU init failed
+				# GPU init failed - fall back to flat
 				_use_compute = false
-				push_warning("[OceanManager] GPU compute init failed, using vertex Gerstner")
+				push_warning("[OceanManager] GPU compute init failed, falling back to flat plane")
 		else:
-			# Compute failed to init - fall back to Gerstner
+			# Compute failed to init - fall back to flat
 			_use_compute = false
-			push_warning("[OceanManager] GPU compute failed, using vertex Gerstner")
+			push_warning("[OceanManager] GPU compute failed, falling back to flat plane")
 
 	_update_shader_parameters()
 
@@ -224,41 +226,24 @@ func _deferred_init() -> void:
 	_system_initialized = true
 	ocean_initialized.emit()
 
-	var mode: String
-	match actual_quality:
-		HardwareDetection.WaterQuality.HIGH:
-			mode = "GPU FFT (3 cascades)"
-		HardwareDetection.WaterQuality.MEDIUM:
-			mode = "Vertex Gerstner (high detail)"
-		HardwareDetection.WaterQuality.LOW:
-			mode = "Vertex Gerstner (low detail)"
-		_:
-			mode = "Flat Plane"
-	print("[OceanManager] Initialized - sea level: %.1f, radius: %.0fm, quality: %s, mode: %s" % [
-		sea_level, ocean_radius, HardwareDetection.quality_name(actual_quality), mode])
+	var mode := "GPU FFT (3 cascades)" if _use_compute else "Flat Plane"
+	print("[OceanManager] Initialized - sea level: %.1f, radius: %.0fm, mode: %s" % [
+		sea_level, ocean_radius, mode])
 	print("[OceanManager] Ocean mesh visible: %s, vertices: %d" % [
 		_ocean_mesh.visible,
 		_ocean_mesh.mesh.get_faces().size() / 3 if _ocean_mesh.mesh else 0])
 
 
-func _setup_wave_cascades(quality: HardwareDetection.WaterQuality) -> void:
+func _setup_wave_cascades() -> void:
 	_wave_parameters.clear()
 	_rng.seed = 1234  # Consistent seed for reproducible waves
 
-	# Configure cascades based on quality level
-	var cascade_configs: Array
-	if quality == HardwareDetection.WaterQuality.HIGH:
-		# HIGH: 3 cascades for full detail
-		cascade_configs = [
-			{ "tile_length": Vector2(250, 250), "displacement_scale": 1.0, "normal_scale": 1.0 },
-			{ "tile_length": Vector2(67, 67), "displacement_scale": 0.5, "normal_scale": 0.5 },
-			{ "tile_length": Vector2(17, 17), "displacement_scale": 0.25, "normal_scale": 0.25 }
-		]
-	else:
-		# MEDIUM: 1 cascade for lighter GPU load
-		cascade_configs = [
-			{ "tile_length": Vector2(100, 100), "displacement_scale": 1.0, "normal_scale": 1.0 }
-		]
+	# FFT mode always uses 3 cascades for full detail
+	var cascade_configs: Array = [
+		{ "tile_length": Vector2(250, 250), "displacement_scale": 1.0, "normal_scale": 1.0 },
+		{ "tile_length": Vector2(67, 67), "displacement_scale": 0.5, "normal_scale": 0.5 },
+		{ "tile_length": Vector2(17, 17), "displacement_scale": 0.25, "normal_scale": 0.25 }
+	]
 
 	for i in range(cascade_configs.size()):
 		var config: Dictionary = cascade_configs[i]
@@ -308,6 +293,11 @@ func _process(delta: float) -> void:
 	if _camera:
 		var cam_pos := _camera.global_position
 		var new_pos := Vector3(cam_pos.x, sea_level, cam_pos.z)
+		
+		# Pass smooth camera position for distance-based fades/LODs
+		_ocean_mesh.set_camera_position(new_pos)
+		
+		# Move mesh smoothly with camera (local-space shaders will handle precision)
 		_ocean_mesh.update_position(new_pos)
 		# Debug: print position once
 		if _time < 0.1:
@@ -595,14 +585,14 @@ func force_initialize() -> void:
 		print("[OceanManager] Ocean mesh visible: %s, position: %s" % [_ocean_mesh.visible, _ocean_mesh.global_position])
 
 
-## Get current water quality level
-func get_water_quality() -> HardwareDetection.WaterQuality:
+## Get current water quality mode
+func get_water_quality() -> OceanMesh.QualityMode:
 	if _ocean_mesh:
 		return _ocean_mesh.get_quality()
-	return HardwareDetection.get_recommended_quality()
+	return OceanMesh.QualityMode.FFT
 
 
-## Set water quality level (-1 = auto, 0-3 = specific level)
+## Set water quality mode (0 = flat, 1 = FFT, -1 = auto)
 func set_water_quality(quality: int) -> void:
 	water_quality = quality
 	if not _system_enabled:
@@ -610,24 +600,35 @@ func set_water_quality(quality: int) -> void:
 	if not _ocean_mesh:
 		return
 
-	var needs_wave_textures := _ocean_mesh.set_quality(quality as HardwareDetection.WaterQuality, ocean_radius)
-	var actual_quality := _ocean_mesh.get_quality()
+	# Map input to QualityMode
+	var target_quality: OceanMesh.QualityMode
+	if quality == 0:
+		target_quality = OceanMesh.QualityMode.FLAT
+	elif quality == 1:
+		target_quality = OceanMesh.QualityMode.FFT
+	else:
+		# Auto-detect
+		HardwareDetection.detect()
+		var recommended := HardwareDetection.get_recommended_quality()
+		target_quality = OceanMesh.QualityMode.FFT if recommended == HardwareDetection.WaterQuality.HIGH else OceanMesh.QualityMode.FLAT
+
+	var needs_wave_textures := _ocean_mesh.set_quality(target_quality, ocean_radius)
 
 	# Update compute mode flag
-	_use_compute = actual_quality == HardwareDetection.WaterQuality.HIGH
+	_use_compute = _ocean_mesh.is_using_compute()
 
-	# If switching to HIGH quality, need to reconnect wave textures
+	# If switching to FFT, need to reconnect wave textures
 	if needs_wave_textures and _wave_generator and _wave_generator.is_initialized():
 		_ocean_mesh.set_wave_textures(
 			_wave_generator.get_displacement_texture(),
 			_wave_generator.get_normal_texture(),
 			_wave_parameters.size()
 		)
-		print("[OceanManager] Reconnected wave textures for HIGH quality")
+		print("[OceanManager] Reconnected wave textures for FFT mode")
 	elif needs_wave_textures:
-		# Need to initialize wave generator for HIGH quality
+		# Need to initialize wave generator for FFT mode
 		if not _wave_generator.is_initialized():
-			_setup_wave_cascades(actual_quality)
+			_setup_wave_cascades()
 			_wave_generator.initialize(256)
 			if _wave_generator.is_using_compute():
 				_wave_generator.init_gpu(maxi(2, _wave_parameters.size()))
@@ -637,15 +638,16 @@ func set_water_quality(quality: int) -> void:
 						_wave_generator.get_normal_texture(),
 						_wave_parameters.size()
 					)
-					print("[OceanManager] Initialized wave generator for HIGH quality switch")
+					print("[OceanManager] Initialized wave generator for FFT mode switch")
 
-	print("[OceanManager] Quality changed to: %s (use_compute: %s)" % [
-		HardwareDetection.quality_name(actual_quality), _use_compute])
+	print("[OceanManager] Quality changed to: %s" % get_water_quality_name())
 
 
 ## Get water quality name as string
 func get_water_quality_name() -> String:
-	return HardwareDetection.quality_name(get_water_quality())
+	if _ocean_mesh:
+		return "FFT" if _ocean_mesh.get_quality() == OceanMesh.QualityMode.FFT else "Flat"
+	return "Unknown"
 
 
 ## Check if running on integrated GPU

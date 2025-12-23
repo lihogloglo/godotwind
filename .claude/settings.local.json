@@ -25,7 +25,16 @@
       "Bash(grep:*)",
       "Bash(cmd /c \"dir %USERPROFILE%\\\\Documents\\\\Godowind /s\")",
       "Bash(cmd /c \"if exist %USERPROFILE%\\\\Documents\\\\Godowind \\(dir %USERPROFILE%\\\\Documents\\\\Godowind /s /b\\) else \\(echo NOT FOUND\\)\")",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(tasklist:*)",
+      "Bash(find:*)",
+      "Bash(scons --version:*)",
+      "Bash(pip --version:*)",
+      "Bash(pip install:*)",
+      "Bash(export PATH=\"$PATH:/c/Users/metzo/AppData/Roaming/Python/Python314/Scripts\")",
+      "Bash(git clone:*)",
+      "Bash(git submodule update:*)",
+      "Bash(cmd /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\"\" && cd /d d:\\\\Gamedev\\\\Godotwind\\\\godot-cpp && set PATH=%PATH%;C:\\\\Users\\\\metzo\\\\AppData\\\\Roaming\\\\Python\\\\Python314\\\\Scripts && scons platform=windows target=template_debug -j8\")"
     ]
   }
 }

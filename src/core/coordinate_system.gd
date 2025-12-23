@@ -121,23 +121,31 @@ static func quaternion_to_mw(godot: Quaternion) -> Quaternion:
 	return Quaternion(godot.x, -godot.z, godot.y, godot.w)
 
 
-## Convert Euler angles (radians) from Morrowind to Godot
-## Use for: ESM cell reference rotations
+## Convert ESM cell reference rotation to Godot basis
+## Use for: Placing objects from ESM CELL records
 ##
-## Morrowind Euler convention (intrinsic XYZ order):
-##   X = pitch (tilt forward/back around X/East axis)
-##   Y = roll (tilt left/right around Y/North axis)
-##   Z = yaw (turn around Z/Up vertical axis)
-##   Order: First X, then Y, then Z (intrinsic XYZ)
-##   Reference: OpenMW apps/openmw/mwworld/worldimp.cpp
+## This matches OpenMW's makeOsgQuat in components/misc/convert.hpp:
+##   Quat(rot[2], (0,0,-1)) * Quat(rot[1], (0,-1,0)) * Quat(rot[0], (-1,0,0))
 ##
-## Godot Euler (after coordinate conversion):
-##   X = pitch (MW X -> Godot X, stays same)
-##   Y = yaw (MW Z -> Godot Y, because vertical axis Z->Y)
-##   Z = roll (MW Y -> Godot -Z, because forward axis Y->-Z)
-##   Order: Intrinsic XYZ in MW becomes intrinsic XZY in Godot
+## OpenMW applies rotations around NEGATIVE axes in ZYX order.
+## We replicate this exactly, then convert the result to Godot space.
 ##
-## IMPORTANT: When applying, use Basis.from_euler(euler, EULER_ORDER_XZY)
+## MW coordinate system: X=East, Y=North (forward), Z=Up
+## ESM rotation: rot.x=pitch, rot.y=roll, rot.z=yaw (all in radians)
+static func esm_rotation_to_godot_basis(rot: Vector3) -> Basis:
+	# Build quaternion in MW space exactly like OpenMW does
+	var mw_quat_z := Quaternion(Vector3(0, 0, -1), rot.z)  # Around -Z (down)
+	var mw_quat_y := Quaternion(Vector3(0, -1, 0), rot.y)  # Around -Y (south)
+	var mw_quat_x := Quaternion(Vector3(-1, 0, 0), rot.x)  # Around -X (west)
+	var mw_quat := mw_quat_z * mw_quat_y * mw_quat_x
+
+	# Convert from MW space to Godot space
+	return Basis(quaternion_to_godot(mw_quat))
+
+
+## Convert simple Euler angles from Morrowind to Godot (axis swap only)
+## Use for: NIF node rotations that are already in standard Euler format
+## NOTE: For ESM cell reference rotations, use esm_rotation_to_godot_basis() instead!
 static func euler_to_godot(mw: Vector3) -> Vector3:
 	return Vector3(mw.x, mw.z, -mw.y)
 

@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS := {
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
 	"optimize_size": true,     # Compress texture
-	"min_distance": 2000.0,    # Start showing impostor at 2km
+	"min_distance": 1000.0,    # Start showing impostor at 1km (was 2km)
 	"max_distance": 5000.0,    # Stop showing at 5km
 }
 
@@ -293,13 +293,34 @@ static func _get_impostors_dir() -> String:
 
 ## Get the impostor texture path for a model
 ## Returns expected path where impostor texture would be stored
+## Format matches impostor_baker_v2: {base_name}_{hash_hex}.png
+## NOTE: The baker receives paths WITHOUT the "meshes\" prefix (e.g., "x\Ex_T_menhir_L_01.nif")
+## We must normalize the path the same way for hash consistency
 static func get_impostor_texture_path(model_path: String) -> String:
-	# Hash the model path for unique filename
-	var hash_str := str(model_path.to_lower().hash())
-	return _get_impostors_dir().path_join("%s_impostor.png" % hash_str)
+	# Normalize path to match baker input format
+	var normalized := model_path
+	# Remove meshes\ prefix if present (baker doesn't include it in hash)
+	var lower := normalized.to_lower()
+	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
+		normalized = normalized.substr(7)  # Remove "meshes\" or "meshes/"
+
+	var hash_val := normalized.to_lower().hash()
+	var base_name := normalized.get_file().get_basename()
+	# Clean filename and lowercase (match baker output format which is lowercase on disk)
+	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
+	return _get_impostors_dir().path_join("%s_%x.png" % [base_name, hash_val])
 
 
 ## Get the impostor metadata path for a model
+## Format matches impostor_baker_v2: {base_name}_{hash_hex}.json
 static func get_impostor_metadata_path(model_path: String) -> String:
-	var hash_str := str(model_path.to_lower().hash())
-	return _get_impostors_dir().path_join("%s_impostor.json" % hash_str)
+	# Normalize path to match baker input format (same as texture path)
+	var normalized := model_path
+	var lower := normalized.to_lower()
+	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
+		normalized = normalized.substr(7)
+
+	var hash_val := normalized.to_lower().hash()
+	var base_name := normalized.get_file().get_basename()
+	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
+	return _get_impostors_dir().path_join("%s_%x.json" % [base_name, hash_val])

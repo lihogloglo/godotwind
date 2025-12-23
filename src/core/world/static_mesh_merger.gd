@@ -392,8 +392,7 @@ func _calculate_mesh_aabb(arrays: Array) -> AABB:
 func _calculate_transform(ref: CellReference) -> Transform3D:
 	var pos := CS.vector_to_godot(ref.position)
 	var scale := CS.scale_to_godot(ref.scale)
-	var euler := CS.euler_to_godot(ref.rotation)
-	var basis := Basis.from_euler(euler, EULER_ORDER_XZY)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
 	basis = basis.scaled(scale)
 	return Transform3D(basis, pos)
 

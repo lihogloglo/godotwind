@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode world_vertex_coords, blend_mix, depth_draw_opaque, cull_disabled, diffuse_burley, specular_schlick_ggx;
+render_mode blend_mix, depth_draw_opaque, cull_disabled, diffuse_burley, specular_schlick_ggx;
 
 // Godot 4.3+ requires explicit screen texture samplers
 uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
@@ -18,9 +18,9 @@ global uniform vec4 foam_color : source_color;
 uniform float roughness : hint_range(0.0, 1.0) = 0.4;
 uniform float normal_strength : hint_range(0.0, 1.0) = 1.0; // Global normal strength
 uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05; // Refraction distortion amount
-uniform float water_clarity : hint_range(0.0, 1.0) = 0.15; // How clear/transparent the water is (lower = murkier)
-uniform float depth_fade_distance : hint_range(0.0, 100.0) = 2.0; // Distance for depth fade (lower = faster opacity)
+uniform float shore_depth_scale : hint_range(0.0, 100.0) = 50.0; // Depth at which shore effect fades (OpenMW-style)
 uniform bool debug_shore_mask = false; // Debug: visualize shore damping factor
+uniform vec3 camera_position_world; // True camera position for smooth LOD/fade
 
 // Shore mask for fading ocean on land
 uniform sampler2D shore_mask : filter_linear;
@@ -36,6 +36,7 @@ varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
 varying float shore_factor;
+varying vec3 world_pos_val;
 
 // Sample shore mask - 1.0 = ocean, 0.0 = land
 float sample_shore_mask(vec2 world_xz) {
@@ -47,33 +48,41 @@ float sample_shore_mask(vec2 world_xz) {
 }
 
 void vertex() {
-	// Compute world position for shore mask (needs to be fixed to terrain, not camera)
-	// With world_vertex_coords, VERTEX is in local space. NODE_POSITION_WORLD gives mesh origin.
-	vec3 world_pos = NODE_POSITION_WORLD + VERTEX;
+	// Standard Mode: VERTEX is local.
+	// Calculate world position explicitly for sampling waves/shore.
+	vec3 world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_pos_val = world_pos;
 
-	// UV uses world coordinates so waves tile correctly in world space (not camera-relative)
+	// UV uses absolute world coordinates so wave patterns stay fixed in the world.
 	UV = world_pos.xz;
 
-	// Distance factor uses local coords (relative to camera) for LOD falloff
-	float distance_factor = min(exp(-(length(VERTEX.xz) - 150.0)*0.007), 1.0); // Displacement amount falls off after 150m.
+	// Distance factor uses distance from camera for smooth LOD falloff.
+	float dist_to_cam = length(world_pos.xz - camera_position_world.xz);
+	float distance_factor = min(exp(-(dist_to_cam - 150.0)*0.007), 1.0);
 
-	// Sample shore mask using world coordinates (fixed to terrain, not camera)
+	// Sample shore mask using world coordinates (fixed to terrain).
+	// Note: Vertex shader only has shore mask, no depth buffer access.
+	// Fragment shader will refine with dual-factor detection.
 	shore_factor = sample_shore_mask(world_pos.xz);
 
-	// Read displacements from displacement maps.
+	// Read displacements from displacement maps with cascade-specific shore weights.
+	// OpenMW-style: large swells (cascade 0) suppressed more than small ripples (cascade 2+)
 	vec3 displacement = vec3(0);
 	for (uint i = 0U; i < num_cascades; ++i) {
 		vec4 scales = map_scales[i];
-		displacement += texture(displacements, vec3(UV*scales.xy, float(i))).xyz * scales.z;
+		vec3 cascade_disp = texture(displacements, vec3(UV*scales.xy, float(i))).xyz * scales.z;
+
+		// All cascades fully suppressed at shore (shore_factor=0 means flat)
+		displacement += cascade_disp * shore_factor;
 	}
-	// Dampen waves on shore
-	float total_fade = distance_factor * shore_factor;
+
+	// Apply distance fade
+	float total_fade = distance_factor;
 	wave_height = displacement.y * total_fade;
 
-	// CRITICAL FIX: With world_vertex_coords, VERTEX output must be in world space.
-	// We set VERTEX to world_pos + displacement so the ocean stays fixed in place
-	// while the mesh center follows the camera for LOD purposes.
-	VERTEX = world_pos + displacement * total_fade;
+	// Displacement is applied to local VERTEX.
+	// This prevents geometry jitter since local coordinates are small.
+	VERTEX += displacement * total_fade;
 }
 
 /** Filter weights for a cubic B-spline. */
@@ -109,28 +118,40 @@ vec4 texture_bicubic(in sampler2DArray sampler, in vec3 uvw) {
 
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
-	float dist = length(VERTEX.xz);
+	float dist_to_cam = length(world_pos_val.xz - camera_position_world.xz);
+
+	// ============ DUAL-FACTOR SHORE DETECTION (OpenMW-style) ============
+	// Factor 1: Shore mask (pre-baked texture)
+	float shore_map_factor = sample_shore_mask(world_pos_val.xz);
+
+	// Factor 2: Depth buffer (runtime, for more accurate detection near shore)
+	float depth_raw = texture(depth_texture, SCREEN_UV).r;
+	vec4 floor_pos_view = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth_raw, 1.0);
+	float floor_depth = floor_pos_view.z / floor_pos_view.w;
+	float early_water_depth = max(VERTEX.z - floor_depth, 0.0);
+	float depth_buffer_factor = smoothstep(0.0, shore_depth_scale, early_water_depth);
+
+	// Conservative blend: take MINIMUM so waves calm when EITHER detects shore
+	float frag_shore_factor = min(shore_map_factor, depth_buffer_factor);
+
 	// Read foam and normal information from normal maps.
+	// All cascades fully suppressed at shore for completely flat water
 	vec3 gradient = vec3(0);
 	for (uint i = 0U; i < num_cascades; ++i) {
 		vec4 scales = map_scales[i];
 		vec3 coords = vec3(UV*scales.xy, float(i));
 		float ppm = map_size * min(scales.x, scales.y); // Pixels per meter
 		// Mix between bicubic and bilinear filtering depending on the world space pixels per meter.
-		// This is dependent on the tile size as well as displacement/normal map resolution.
-		gradient += mix(texture_bicubic(normals, coords), texture(normals, coords), min(1.0, ppm*0.1)).xyw * vec3(scales.ww, 1.0);
+		vec4 normal_sample = mix(texture_bicubic(normals, coords), texture(normals, coords), min(1.0, ppm*0.1));
+
+		// All cascades use same shore weight - fully flat at shore
+		gradient += normal_sample.xyw * vec3(scales.ww * frag_shore_factor, 1.0);
 	}
 
-	// FIXED: Dampen gradient by shore_factor so normals/foam match damped displacement
-	gradient *= shore_factor;
-
-	foam_factor = smoothstep(0.0, 1.0, gradient.z*0.75) * exp(-dist*0.0075);
-	// Add shore foam (gentle foam at the shoreline)
-	foam_factor += (1.0 - shore_factor) * 0.3;
-	foam_factor = clamp(foam_factor, 0.0, 1.0);
+	foam_factor = smoothstep(0.0, 1.0, gradient.z*0.75) * exp(-dist_to_cam*0.0075);
 
 	// Blend normal with flat normal as distance increases, and damp near shore
-	float effective_normal_strength = mix(0.015, normal_strength, exp(-dist*0.0175)) * shore_factor;
+	float effective_normal_strength = mix(0.015, normal_strength, exp(-dist_to_cam*0.0175)) * frag_shore_factor;
 	gradient *= effective_normal_strength;
 	NORMAL = (VIEW_MATRIX * vec4(normalize(vec3(-gradient.x, 1.0, -gradient.y)), 0.0)).xyz;
 
@@ -141,38 +162,50 @@ void fragment() {
 	vec3 refracted_color = textureLod(screen_texture, SCREEN_UV + refraction_offset, 0.0).rgb;
 
 	// Depth-based transparency
-	// In view space, both values are negative (into screen)
-	// water_depth: positive when floor is below water surface
-	float depth = texture(depth_texture, SCREEN_UV).r;
-	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
-	float floor_depth = world_pos.z / world_pos.w;
-	float water_depth = VERTEX.z - floor_depth; // Positive when floor is deeper than surface
+	// Reuse water_depth from dual-factor shore detection (already calculated above)
+	float water_depth = early_water_depth;
 
-	// Opacity increases with depth - murky water becomes opaque quickly
-	// water_clarity controls how much of the floor shows through in shallow water
-	// depth_fade_distance controls how quickly the water becomes opaque
-	float depth_opacity = 1.0 - exp(-water_depth / depth_fade_distance);
+	// ============ SHALLOW WATER COLOR ============
+	// Key insight: Real water ALWAYS has color, even at 0 depth, due to:
+	// 1. Scattering from suspended particles
+	// 2. Surface reflection of the sky
+	// 3. The water surface itself has color
 
-	// Mix refracted color with water color based on depth
-	// At depth 0: show refracted_color * water_clarity + water_color * (1-water_clarity)
-	// At max depth: show water_color
-	vec3 shallow_color = mix(water_color.rgb, refracted_color, water_clarity);
-	vec3 water_with_refraction = mix(shallow_color, water_color.rgb, depth_opacity);
-	ALBEDO = mix(water_with_refraction, foam_color.rgb, foam_factor);
+	// Minimum water color blend - even at depth 0, water is not invisible
+	const float MIN_WATER_BLEND = 0.35; // 35% water color minimum in shallows
+	const float DEPTH_SCALE = 8.0; // Depth in meters where water becomes mostly opaque
 
-	// Alpha: mostly opaque, only slightly transparent at shallow depths and glancing angles
-	// CRITICAL: Multiply by shore_factor to hide ocean on land (0.0 = land, 1.0 = ocean)
-	float base_alpha = mix(0.85, 1.0, depth_opacity); // 85% opaque minimum, 100% in deep water
-	ALPHA = mix(base_alpha, 1.0, fresnel * 0.3) * shore_factor;
+	// Exponential falloff - water color increases rapidly with depth
+	float depth_blend = 1.0 - exp(-water_depth / DEPTH_SCALE);
+	// Ensure minimum water presence even at zero depth
+	float water_amount = MIN_WATER_BLEND + (1.0 - MIN_WATER_BLEND) * depth_blend;
 
-	// Debug mode: visualize shore_factor as color gradient
+	// Blend refraction with water color additively in shallows for that "tinted" look
+	// In deep water, transition to pure water color
+	vec3 shallow_tint = mix(refracted_color, refracted_color * water_color.rgb * 1.5 + water_color.rgb * 0.4, 0.7);
+	vec3 water_with_refraction = mix(shallow_tint, water_color.rgb, water_amount);
+
+	// Fresnel: at glancing angles, show more reflection (water_color), less refraction
+	// This gives water its characteristic "solid" look when viewed at low angles
+	vec3 final_water = mix(water_with_refraction, water_color.rgb, fresnel * 0.6);
+
+	ALBEDO = mix(final_water, foam_color.rgb, foam_factor);
+
+	// Alpha: Water should be mostly opaque - transparency is handled through
+	// the color blend above (refracted_color mixed with water_color).
+	// Minimum alpha of 0.7 even at depth=0 gives water its inherent "presence"
+	// Only fade alpha at shore mask boundaries (frag_shore_factor).
+	float depth_alpha = mix(0.7, 1.0, smoothstep(0.0, 2.0, water_depth)); // 70% min, 100% at 2m depth
+	ALPHA = depth_alpha * frag_shore_factor;
+
+	// Debug mode: visualize frag_shore_factor as color gradient
 	// Magenta/pink (1,0,1) = shore (low damping), Cyan (0,1,1) = deep water (no damping)
 	if (debug_shore_mask) {
-		// shore_factor: 0 = land, 1 = ocean
-		// We want: near shore (low shore_factor) = magenta, deep (high shore_factor) = cyan
+		// frag_shore_factor: 0 = land, 1 = ocean
+		// We want: near shore (low frag_shore_factor) = magenta, deep (high frag_shore_factor) = cyan
 		vec3 shore_color = vec3(1.0, 0.0, 1.0);  // Magenta for shore
 		vec3 ocean_color = vec3(0.0, 1.0, 1.0);  // Cyan for deep ocean
-		ALBEDO = mix(shore_color, ocean_color, shore_factor);
+		ALBEDO = mix(shore_color, ocean_color, frag_shore_factor);
 		ALPHA = 0.9;
 		ROUGHNESS = 0.5;
 		METALLIC = 0.0;
