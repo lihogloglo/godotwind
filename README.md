@@ -1,107 +1,96 @@
 # Godotwind
 
-OpenMW-inspired framework for open-world games in Godot 4.5. Uses Morrowind assets as reference implementation.
+An open-world framework for Godot 4.5+. Uses Morrowind assets as its reference implementation to demonstrate seamless world streaming, terrain rendering, and game data integration at scale.
+
+So far, 100% vibe coded with Claude Opus 4.5.
+
+The long-term goal is to continue where Skelerealms stopped. ( https://github.com/SlashScreen/skelerealms )
+
+**A world streaming and rendering showcase** - all visual/technical systems are okay-ish. Player interaction systems (combat, dialogue, quests) are not yet implemented.
+
 
 ## Quick Start
 
 1. **Configure Morrowind Path**
-   - Run `scenes/settings_tool.tscn` → Auto-Detect or Browse
+   - Run `scenes/settings_tool.tscn` - Auto-Detect or Browse
    - Or set env: `export MORROWIND_DATA_PATH="/path/to/Data Files"`
 
+2. **Prebake the assets**
+   - Run `prebaking_ui.tscn` and generate the Terrain (fast), the impostors (kinda fast), the shore mask (kinda fast) and the merged meshes (a bit slow, but it's better thanks to our custom wrapper for meshoptimizer https://github.com/zeux/meshoptimizer )
+
 3. **Run World Explorer**
-   - Main scene: `scenes/world_explorer.tscn`
-   - Press F5 or run from editor
+   - Main scene for Morrowind : `scenes/world_explorer.tscn`
+   - La Palma island in 1:1 resolution. Heightmap generated thanks to the data of Centro de descargas https://centrodedescargas.cnig.es/CentroDescargas/ 
 
 ## Controls
 
-**World Mode:**
-- Right Mouse - Capture camera
-- ZQSD/WASD - Move
-- Space/Shift - Up/Down
-- Ctrl - Speed boost
-- P - Toggle player/fly camera
-- TAB - Switch to Interior browser
-- F3 - Performance overlay
+| Key | Action |
+|-----|--------|
+| Right Mouse | Capture camera |
+| WASD/ZQSD | Move |
+| Space/Shift | Up/Down |
+| Ctrl | Speed boost |
+| Scroll | Adjust speed |
+| M | Toggle models |
+| N | Toggle NPCs |
+| O | Toggle ocean |
+| K | Toggle sky/day-night |
+| P | Toggle player/fly camera |
+| TAB | Interior browser |
+| F3 | Performance overlay |
+| \` (Backtick) | Developer console |
 
-**Interior Mode:**
-- Browse/search all cells
-- Double-click to load
+## Implementation Status
 
-## Tools
+### Complete Systems
 
-| Tool | Scene | Purpose |
-|------|-------|---------|
-| World Explorer | `scenes/world_explorer.tscn` | Terrain streaming, object loading, cell browsing |
-| NIF Viewer | `scenes/nif_viewer.tscn` | 3D model browser with animation playback |
-| Settings | `scenes/settings_tool.tscn` | Configure Morrowind data path |
+| System | Description |
+|--------|-------------|
+| **World Streaming** | Infinite terrain, time-budgeted async loading, no loading screens |
+| **Terrain** | Morrowind LAND to Terrain3D, heightmaps, texture splatting, multi-region |
+| **Object Streaming** | Cell references, async NIF parsing, object pooling, MultiMesh batching |
+| **ESM/ESP Parsing** | 44 record types with thread-safe global access and grid indexing |
+| **NIF Conversion** | Geometry, materials, skeletons (buggy), animations  (buggy), collision, auto-LOD (3 levels) |
+| **BSA Management** | Archive reading, 256MB LRU cache, thread-safe extraction |
+| **Texture Loading** | DDS/TGA with material library deduplication |
+| **Ocean** | FFT waves from this project : https://github.com/2Retr0/GodotOceanWaves/ , shore dampening, choppiness controls, buoyancy queries |
+| **Sky/Weather** | Volumetric clouds, day/night cycle, sun/moon, ambient lighting |
+| **Character Assembly** | NPC body parts combined from race + head + hair meshes |
+| **Character Animation** | Full state machine (idle, walk, run, jump, swim, combat, death, spell cast) |
+| **Character Movement** | Slope adaptation, foot IK, wander behavior, speed modulation |
+| **Deformation** | RTT-based ground deformation with recovery (snow, mud, ash) |
+| **Console** | Command registry, object picking, selection outline |
+| **Distant Rendering** | MID tier merged meshes (500m-2km), FAR tier impostors (2km-5km) |
 
-## Architecture
+### Not Implemented (Addons Installed But Not Wired)
 
-```
-src/core/
-├── esm/        # ESM/ESP parsing (47 record types)
-├── bsa/        # BSA archive extraction
-├── nif/        # NIF model conversion (geometry, materials, animations)
-├── world/      # Streaming manager, terrain, cells
-├── water/      # Ocean system (framework ready)
-├── deformation/# RTT deformation (snow, mud, ash)
-├── player/     # Fly camera + FPS controller
-└── console/    # Developer console
-```
+| System | Addon | Status |
+|--------|-------|--------|
+| Dialogue UI | dialogue_manager | Data parses, no UI to display conversations |
+| Player Inventory | gloot | NPC inventories load, player has no inventory |
+| Quest System | questify | No quest tracking or journal |
+| AI Behaviors | beehave | Wander works, behavior trees not integrated |
+| Combat | - | No attack/defense/damage system |
+| Magic/Spells | - | Spell records parsed, no casting |
+| Save/Load | save_system | Addon installed, not wired |
+| NPC Interaction | - | Can't click NPCs to initiate dialogue |
 
-## Features
+## Performance Optimizations
 
-**Working:**
-- ✅ Infinite terrain streaming (no loading screens)
-- ✅ Multi-region support via Terrain3D
-- ✅ Object streaming (NPCs, statics, lights)
-- ✅ Interior cell viewing
-- ✅ NIF loading (animations, collision, skeletons)
-- ✅ ESM/BSA reading (all 47 record types)
-- ✅ LOD system, object pooling
-- ✅ Developer console with object picking
-- ✅ RTT deformation system
-- ✅ Weather, day/night (Sky3D ready)
-- ✅ Ocean that dampens next to the shore
+All verified in source code:
 
-**Not Implemented:**
-- ❌ Combat, magic, dialogue, quests
-- ❌ NPCs, animations
-- AI (Beehave installed)
+| Optimization | Location | Effect |
+|--------------|----------|--------|
+| MultiMesh Batching | cell_manager.gd | 10+ identical objects → single draw call |
+| Object Pooling | object_pool.gd | Reuses nodes, reduces allocations |
+| Auto-LOD Generation | nif_converter.gd | 3 levels (75%, 50%, 25% reduction) |
+| Material Deduplication | material_library.gd | Shared materials reduce VRAM |
+| Async NIF Parsing | background_processor.gd | Worker threads prevent frame spikes |
+| Time Budgeting | world_streaming_manager.gd | 2ms/frame cell load, 8ms terrain gen |
+| Frustum Culling | Native Godot + occlusion | Skips off-screen objects |
+| Adaptive Submit Rate | world_streaming_manager.gd | Throttles under queue pressure |
 
-## Configuration
-
-Priority order:
-1. `MORROWIND_DATA_PATH` env variable
-2. `user://settings.cfg`
-3. `project.godot` settings
-
-See `docs/SETTINGS.md` for details.
-
-## Documentation
-
-| File | Content |
-|------|---------|
-| [docs/STATUS.md](docs/STATUS.md) | Implementation status |
-| [docs/STREAMING.md](docs/STREAMING.md) | Streaming architecture |
-| [docs/TODO.md](docs/TODO.md) | Prioritized tasks |
-| [docs/05_ESM_SYSTEM.md](docs/05_ESM_SYSTEM.md) | ESM parsing |
-| [docs/06_NIF_SYSTEM.md](docs/06_NIF_SYSTEM.md) | NIF conversion |
-
-## Tech Stack
-
-- Godot 4.5 (Forward+)
-- Terrain3D addon
-- Jolt Physics 3D
-- Custom ESM/BSA/NIF readers
-
-## Performance
-
-- 60+ FPS during streaming
-- 585m+ view distance
-- 2ms/frame load budget
-- Multi-threaded asset loading
 
 ## License
 
-See LICENSE file.
+I don't know, I'm just vibing here.
