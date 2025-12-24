@@ -8,7 +8,7 @@ OpenMW-inspired framework for open-world games in Godot 4.5. Uses Morrowind asse
    - Run `scenes/settings_tool.tscn` → Auto-Detect or Browse
    - Or set env: `export MORROWIND_DATA_PATH="/path/to/Data Files"`
 
-2. **Run World Explorer**
+3. **Run World Explorer**
    - Main scene: `scenes/world_explorer.tscn`
    - Press F5 or run from editor
 
@@ -61,12 +61,13 @@ src/core/
 - ✅ LOD system, object pooling
 - ✅ Developer console with object picking
 - ✅ RTT deformation system
+- ✅ Weather, day/night (Sky3D ready)
+- ✅ Ocean that dampens next to the shore
 
 **Not Implemented:**
 - ❌ Combat, magic, dialogue, quests
-- ❌ Weather, day/night (Sky3D ready)
-- ❌ Water integration (OceanManager exists)
-- ❌ NPC AI (Beehave installed)
+- ❌ NPCs, animations
+- AI (Beehave installed)
 
 ## Configuration
 
