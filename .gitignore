@@ -1,7 +1,7 @@
 # Godot 4+ specific ignores
 .godot/
 inspos/
-
+.claude/
 openmw-master/
 lapalma_map/
 lapalma_processed/
