@@ -6,6 +6,15 @@ extends ESMRecord
 
 const CellReferenceScript = preload("res://src/core/esm/records/cell_reference.gd")
 
+# Pre-computed FourCC constants for performance (avoid repeated four_cc() calls)
+const FOURCC_RGNN: int = 0x4E4E4752  # "RGNN"
+const FOURCC_NAM5: int = 0x354D414E  # "NAM5"
+const FOURCC_WHGT: int = 0x54474857  # "WHGT"
+const FOURCC_AMBI: int = 0x49424D41  # "AMBI"
+const FOURCC_NAM0: int = 0x304D414E  # "NAM0"
+const FOURCC_FRMR: int = 0x524D5246  # "FRMR"
+const FOURCC_MVRF: int = 0x4652564D  # "MVRF"
+
 # Cell data
 var name: String           # Display name (interior cells use this as ID)
 var region_id: String      # Region reference for exterior cells
@@ -92,46 +101,37 @@ func _load_name_and_data(esm: ESMReader) -> void:
 		record_id = "%d,%d" % [grid_x, grid_y]
 
 func _load_cell_data(esm: ESMReader) -> void:
-	# Pre-compute FourCC values as constants
-	var RGNN := ESMDefs.four_cc("RGNN")  # Region name
-	var NAM5 := ESMDefs.four_cc("NAM5")  # Map color
-	var WHGT := ESMDefs.four_cc("WHGT")  # Water height
-	var AMBI := ESMDefs.four_cc("AMBI")  # Ambient lighting
-	var NAM0 := ESMDefs.four_cc("NAM0")  # Reference counter
-	var FRMR := ESMDefs.four_cc("FRMR")  # Cell reference
-	var MVRF := ESMDefs.four_cc("MVRF")  # Moved reference
-
 	while esm.has_more_subs():
 		esm.get_sub_name()
-		var sub_name := esm.get_current_sub_name()
+		var sub_name: int = esm.get_current_sub_name()
 
-		if sub_name == RGNN:
+		if sub_name == FOURCC_RGNN:
 			region_id = esm.get_h_string()
-		elif sub_name == NAM5:
-			var data := esm.get_h_t(4)
+		elif sub_name == FOURCC_NAM5:
+			var data: PackedByteArray = esm.get_h_t(4)
 			map_color = data.decode_s32(0)
-		elif sub_name == WHGT:
-			var data := esm.get_h_t(4)
+		elif sub_name == FOURCC_WHGT:
+			var data: PackedByteArray = esm.get_h_t(4)
 			water_height = data.decode_float(0)
 			has_water_height = true
-		elif sub_name == AMBI:
+		elif sub_name == FOURCC_AMBI:
 			_load_ambient(esm)
-		elif sub_name == NAM0:
-			var data := esm.get_h_t(4)
+		elif sub_name == FOURCC_NAM0:
+			var data: PackedByteArray = esm.get_h_t(4)
 			ref_num_counter = data.decode_s32(0)
 		elif sub_name == ESMDefs.SubRecordType.SREC_DELE:
 			esm.skip_h_sub()
 			is_deleted = true
-		elif sub_name == MVRF:
+		elif sub_name == FOURCC_MVRF:
 			# Moved reference - skip for now (handled by plugin system)
 			# MVRF contains ref_num (4 bytes) + CNDT target cell (8 bytes)
 			esm.skip_h_sub()
 			# The following FRMR belongs to the moved ref, skip it too
-			if esm.is_next_sub(FRMR):
+			if esm.is_next_sub(FOURCC_FRMR):
 				_skip_cell_ref(esm)
-		elif sub_name == FRMR:
+		elif sub_name == FOURCC_FRMR:
 			# Cell reference - parse it
-			var ref = CellReferenceScript.new()
+			var ref: CellReference = CellReferenceScript.new()
 			ref.load(esm)
 			if not ref.is_deleted:
 				references.append(ref)
@@ -146,14 +146,11 @@ func _skip_cell_ref(esm: ESMReader) -> void:
 	esm.skip_h_sub()
 
 	# Skip remaining subrecords until next FRMR/MVRF or end of record
-	var FRMR := ESMDefs.four_cc("FRMR")
-	var MVRF := ESMDefs.four_cc("MVRF")
-
 	while esm.has_more_subs():
 		esm.get_sub_name()
-		var sub_name := esm.get_current_sub_name()
+		var sub_name: int = esm.get_current_sub_name()
 
-		if sub_name == FRMR or sub_name == MVRF:
+		if sub_name == FOURCC_FRMR or sub_name == FOURCC_MVRF:
 			esm.cache_sub_name()
 			break
 

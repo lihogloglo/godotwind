@@ -205,7 +205,9 @@ func _deferred_init() -> void:
 	if use_prebaked_shore_mask and FileAccess.file_exists(shore_mask_path):
 		var prebaked := ShoreMaskBaker.load_prebaked(shore_mask_path)
 		if not prebaked.is_empty():
-			_ocean_mesh.set_shore_mask(prebaked.texture, prebaked.bounds)
+			var tex: Texture2D = prebaked.texture
+			var bounds: Rect2 = prebaked.bounds
+			_ocean_mesh.set_shore_mask(tex, bounds)
 			shore_mask_loaded = true
 			print("[OceanManager] Using prebaked shore mask from %s" % shore_mask_path)
 
@@ -445,7 +447,9 @@ func set_terrain(terrain: Terrain3D) -> void:
 		var prebaked := ShoreMaskBaker.load_prebaked(shore_mask_path)
 		if not prebaked.is_empty():
 			if _ocean_mesh:
-				_ocean_mesh.set_shore_mask(prebaked.texture, prebaked.bounds)
+				var tex: Texture2D = prebaked.texture
+				var bounds: Rect2 = prebaked.bounds
+				_ocean_mesh.set_shore_mask(tex, bounds)
 			shore_mask_loaded = true
 			print("[OceanManager] Using prebaked shore mask from %s" % shore_mask_path)
 

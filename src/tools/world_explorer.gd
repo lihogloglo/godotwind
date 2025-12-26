@@ -43,6 +43,7 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 const ConsoleScript := preload("res://src/core/console/console.gd")
+const AutomatedTestRunnerScript := preload("res://src/tools/automated_test_runner.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -87,7 +88,7 @@ var _show_ocean: bool = false   # Default OFF for performance
 var _show_sky: bool = false     # Default OFF - enable for day/night cycle
 
 # Sky3D is created lazily - only on first toggle
-var sky_3d: Node = null  # Sky3D node (created on demand)
+var sky_3d: Sky3D = null  # Sky3D node (created on demand)
 var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
 
 # Ocean is created lazily - only on first toggle
@@ -108,16 +109,17 @@ var _fallback_light: DirectionalLight3D = null
 @onready var interior_container: Node3D = $InteriorContainer if has_node("InteriorContainer") else null
 
 # Managers
-var world_streaming_manager: Node3D = null  # WorldStreamingManager (objects only)
-var terrain_streamer: Node = null  # GenericTerrainStreamer (terrain only)
-var terrain_data_provider: RefCounted = null  # MorrowindDataProvider
-var terrain_manager: RefCounted = null  # TerrainManager (kept for legacy compatibility)
-var texture_loader: RefCounted = null  # TerrainTextureLoader
-var cell_manager: RefCounted = null  # CellManager
-var profiler: RefCounted = null  # PerformanceProfiler
-var ocean_manager: Node = null  # OceanManager
-var background_processor: Node = null  # BackgroundProcessor for async loading
-var console: Node = null  # Developer console
+var world_streaming_manager: WorldStreamingManager = null  # WorldStreamingManager (objects only)
+var terrain_streamer: GenericTerrainStreamer = null  # GenericTerrainStreamer (terrain only)
+var terrain_data_provider: MorrowindDataProvider = null  # MorrowindDataProvider
+var terrain_manager: TerrainManager = null  # TerrainManager (kept for legacy compatibility)
+var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
+var cell_manager: CellManager = null  # CellManager
+var profiler: PerformanceProfiler = null  # PerformanceProfiler
+var ocean_manager: OceanManagerClass = null  # OceanManager
+var background_processor: BackgroundProcessor = null  # BackgroundProcessor for async loading
+var console: Console = null  # Developer console
+var test_runner: Node = null  # Automated test runner (AutomatedTestRunner)
 
 # State
 var _data_path: String = ""
@@ -139,8 +141,8 @@ var _loaded_interior_cell: Node3D = null
 # Camera mode state
 enum CameraMode { FLY_CAMERA, PLAYER_CONTROLLER }
 var _camera_mode: CameraMode = CameraMode.FLY_CAMERA
-var fly_camera: Camera3D = null  # FlyCamera instance (with script)
-var player_controller: CharacterBody3D = null  # PlayerController instance
+var fly_camera: FlyCamera = null  # FlyCamera instance (with script)
+var player_controller: PlayerController = null  # PlayerController instance
 
 
 func _ready() -> void:
@@ -165,11 +167,14 @@ func _ready() -> void:
 	# Setup developer console
 	_setup_console()
 
+	# Setup automated test runner
+	_setup_test_runner()
+
 	# Connect quick teleport buttons
-	seyda_neen_btn.pressed.connect(func(): _teleport_to_cell(-2, -9))
-	balmora_btn.pressed.connect(func(): _teleport_to_cell(-3, -2))
-	vivec_btn.pressed.connect(func(): _teleport_to_cell(5, -6))
-	origin_btn.pressed.connect(func(): _teleport_to_cell(0, 0))
+	seyda_neen_btn.pressed.connect(func() -> void: _teleport_to_cell(-2, -9))
+	balmora_btn.pressed.connect(func() -> void: _teleport_to_cell(-3, -2))
+	vivec_btn.pressed.connect(func() -> void: _teleport_to_cell(5, -6))
+	origin_btn.pressed.connect(func() -> void: _teleport_to_cell(0, 0))
 
 	# Connect preprocess button
 	preprocess_btn.pressed.connect(_on_preprocess_pressed)
@@ -253,6 +258,14 @@ func _init_async() -> void:
 	# Create and setup WorldStreamingManager (but don't start tracking yet)
 	await _update_loading(85, "Setting up streaming system...")
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
+
+	# Preload common models in background for faster initial cell loading
+	# This starts async loading of ~100 common models (flora, rocks, containers, etc.)
+	# Models will be ready when user first loads cells, reducing visible pop-in
+	await _update_loading(90, "Preloading common models...")
+	if world_streaming_manager:
+		world_streaming_manager.preload_common_models(false)  # false = async
+		_log("Started async preload of common models")
 
 	# Done
 	await _update_loading(100, "Ready!")
@@ -341,9 +354,10 @@ func _load_preprocessed_terrain() -> void:
 ## Setup fly camera and player controller
 func _setup_cameras() -> void:
 	# Get existing fly camera from scene and attach script
-	fly_camera = $FlyCamera
-	if fly_camera:
-		fly_camera.set_script(FlyCameraScript)
+	var fly_camera_node: Camera3D = $FlyCamera
+	if fly_camera_node:
+		fly_camera_node.set_script(FlyCameraScript)
+		fly_camera = fly_camera_node as FlyCamera
 		# Manually enable processing since _ready() isn't called when script is attached dynamically
 		fly_camera.set_process(true)
 		fly_camera.set_process_input(true)
@@ -352,10 +366,11 @@ func _setup_cameras() -> void:
 		camera = fly_camera  # Set the camera reference
 
 	# Create player controller (hidden by default)
-	player_controller = CharacterBody3D.new()
-	player_controller.set_script(PlayerControllerScript)
-	player_controller.name = "PlayerController"
-	add_child(player_controller)
+	var player_node := CharacterBody3D.new()
+	player_node.set_script(PlayerControllerScript)
+	player_node.name = "PlayerController"
+	add_child(player_node)
+	player_controller = player_node as PlayerController
 	# Ensure processing is enabled (belt and suspenders)
 	player_controller.set_physics_process(true)
 	player_controller.set_process_input(true)
@@ -507,6 +522,32 @@ func _setup_console() -> void:
 	_log("Console initialized (~ to toggle)")
 
 
+## Setup automated test runner
+func _setup_test_runner() -> void:
+	var runner: Node = AutomatedTestRunnerScript.new()
+	runner.name = "AutomatedTestRunner"
+	add_child(runner)
+	test_runner = runner
+	
+	# Connect signals using signal objects
+	runner.connect("test_completed", _on_test_completed)
+	runner.connect("error_captured", _on_test_error_captured)
+	
+	_log("Test runner initialized (F6=start, F7=stop, F8=report)")
+
+
+## Handle test completion
+func _on_test_completed(report: Dictionary) -> void:
+	var errors: Dictionary = report.get("errors", {})
+	var total_count: int = errors.get("total_count", 0)
+	_log("[color=green]Test completed with %d errors[/color]" % total_count)
+
+
+## Handle test error capture
+func _on_test_error_captured(error: String) -> void:
+	_log("[color=red]TEST ERROR: %s[/color]" % error.substr(0, 100))
+
+
 ## Console command: Center on cell (interior)
 func _cmd_center_on_cell(args: Dictionary) -> CommandRegistry.CommandResult:
 	var cell_name: String = args.get("cell_name", "")
@@ -530,9 +571,12 @@ func _cmd_center_on_exterior(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_scale(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var scale: float = args.get("scale", 1.0)
 	scale = clampf(scale, 0.1, 5.0)
-	sky_3d.sky.vol_cloud_scale = scale
+	dome.vol_cloud_scale = scale
 	return CommandRegistry.CommandResult.ok("Cloud scale set to %.2f" % scale)
 
 
@@ -540,9 +584,12 @@ func _cmd_cloud_scale(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_coverage(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var coverage: float = args.get("coverage", 0.5)
 	coverage = clampf(coverage, 0.0, 1.0)
-	sky_3d.sky.vol_cloud_coverage = coverage
+	dome.vol_cloud_coverage = coverage
 	return CommandRegistry.CommandResult.ok("Cloud coverage set to %.2f" % coverage)
 
 
@@ -550,9 +597,12 @@ func _cmd_cloud_coverage(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_height(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var height: float = args.get("height", 3.0)
 	height = clampf(height, 1.0, 20.0)
-	sky_3d.sky.vol_cloud_base_height = height
+	dome.vol_cloud_base_height = height
 	return CommandRegistry.CommandResult.ok("Cloud base height set to %.2f" % height)
 
 
@@ -560,9 +610,12 @@ func _cmd_cloud_height(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_density(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var density: float = args.get("density", 1.0)
 	density = clampf(density, 0.1, 3.0)
-	sky_3d.sky.vol_cloud_density = density
+	dome.vol_cloud_density = density
 	return CommandRegistry.CommandResult.ok("Cloud density set to %.2f" % density)
 
 
@@ -570,9 +623,12 @@ func _cmd_cloud_density(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_thickness(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var thickness: float = args.get("thickness", 5.0)
 	thickness = clampf(thickness, 1.0, 20.0)
-	sky_3d.sky.vol_cloud_thickness = thickness
+	dome.vol_cloud_thickness = thickness
 	return CommandRegistry.CommandResult.ok("Cloud thickness set to %.2f" % thickness)
 
 
@@ -580,9 +636,12 @@ func _cmd_cloud_thickness(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_speed(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var speed: float = args.get("speed", 1.0)
 	speed = clampf(speed, 0.0, 120.0)
-	sky_3d.sky.wind_speed = speed
+	dome.wind_speed = speed
 	return CommandRegistry.CommandResult.ok("Cloud wind speed set to %.2f m/s" % speed)
 
 
@@ -590,9 +649,12 @@ func _cmd_cloud_speed(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_cloud_detail(args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d or not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var strength: float = args.get("strength", 0.4)
 	strength = clampf(strength, 0.0, 1.0)
-	sky_3d.sky.vol_cloud_detail_strength = strength
+	dome.vol_cloud_detail_strength = strength
 	return CommandRegistry.CommandResult.ok("Cloud detail strength set to %.2f" % strength)
 
 
@@ -603,7 +665,9 @@ func _cmd_cloud_info(_args: Dictionary) -> CommandRegistry.CommandResult:
 	if not sky_3d.sky:
 		return CommandRegistry.CommandResult.error("SkyDome not available.")
 
-	var dome = sky_3d.sky
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
 	var info := "Volumetric Cloud Parameters:\n"
 	info += "  Enabled: %s\n" % str(dome.volumetric_clouds_enabled)
 	info += "  Scale: %.2f (smaller = larger clouds)\n" % dome.vol_cloud_scale
@@ -950,8 +1014,9 @@ func _update_ocean_wave_params() -> void:
 	if not ocean_manager:
 		return
 	# Update wave parameters in cascades if they exist
-	if ocean_manager._wave_parameters and ocean_manager._wave_parameters.size() > 0:
-		for params in ocean_manager._wave_parameters:
+	var wave_params: Array[WaveCascadeParameters] = ocean_manager._wave_parameters
+	if wave_params.size() > 0:
+		for params: WaveCascadeParameters in wave_params:
 			params.wind_speed = ocean_manager.wind_speed
 			params.wind_direction = ocean_manager.wind_direction
 
@@ -967,13 +1032,15 @@ func _on_show_models_toggled(enabled: bool) -> void:
 	# Toggle object loading in WorldStreamingManager
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
+		# Also control distant rendering (impostors) with the Models toggle
+		world_streaming_manager.distant_rendering_enabled = enabled
 
-		var loaded_coords = world_streaming_manager.get_loaded_cell_coordinates()
+		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		_log("[DIAG] Currently loaded cells: %d" % loaded_coords.size())
 
 		# Show/hide existing loaded cell objects
 		var visible_count := 0
-		for cell_grid in loaded_coords:
+		for cell_grid: Vector2i in loaded_coords:
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
 			if cell_node:
 				cell_node.visible = enabled
@@ -981,9 +1048,18 @@ func _on_show_models_toggled(enabled: bool) -> void:
 
 		_log("[DIAG] Set visibility for %d cell nodes" % visible_count)
 
-		# DON'T call refresh_cells() here - it floods the queue with all visible cells
-		# The streaming manager's _process() will naturally pick up missing cells
-		# This prevents the game from grinding to a halt when toggling models on
+		# Toggle impostor visibility
+		var impostor_mgr: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
+		if impostor_mgr and impostor_mgr.has_method("set_all_visible"):
+			impostor_mgr.call("set_all_visible", enabled)
+			_log("[DIAG] Impostors visibility: %s" % ("ON" if enabled else "OFF"))
+
+		# When enabling, clear tier state and trigger fresh loading
+		if enabled:
+			# Clear stale tier tracking that may have accumulated
+			if world_streaming_manager.has_method("clear_tier_state"):
+				world_streaming_manager.clear_tier_state()
+			world_streaming_manager.refresh_cells()
 
 		# Log current queue states
 		if cell_manager:
@@ -1009,16 +1085,16 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 
 	# Show/hide existing character nodes in loaded cells
 	if world_streaming_manager:
-		var loaded_coords = world_streaming_manager.get_loaded_cell_coordinates()
+		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		var char_count := 0
 
-		for cell_grid in loaded_coords:
+		for cell_grid: Vector2i in loaded_coords:
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
 			if cell_node:
 				# Find and toggle character nodes (they have is_character metadata)
-				for child in cell_node.get_children():
-					if child.has_meta("is_character"):
-						child.visible = enabled
+				for child: Node in cell_node.get_children():
+					if child.has_meta("is_character") and child is Node3D:
+						(child as Node3D).visible = enabled
 						char_count += 1
 
 		_log("[DIAG] Toggled visibility for %d characters" % char_count)
@@ -1216,10 +1292,8 @@ func _create_sky3d() -> void:
 	if _fallback_light:
 		_fallback_light.visible = false
 
-	# Load and instantiate Sky3DVolumetric for raymarched volumetric clouds
-	var Sky3DVolumetricScript = load("res://addons/sky_3d/src/Sky3DVolumetric.gd")
-	sky_3d = WorldEnvironment.new()
-	sky_3d.set_script(Sky3DVolumetricScript)
+	# Instantiate Sky3DVolumetric for raymarched volumetric clouds
+	sky_3d = Sky3DVolumetric.new()
 	sky_3d.name = "Sky3D"
 
 	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
@@ -1328,7 +1402,7 @@ func _on_preprocess_pressed() -> void:
 	# First, collect all unique regions that have terrain data
 	var regions_with_data: Dictionary = {}  # region_coord -> true
 
-	for key in ESMManager.lands:
+	for key: String in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
 		if not land or not land.has_heights():
 			continue
@@ -1385,14 +1459,15 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# =================================================
 
 	# Create WorldStreamingManager (objects only)
-	world_streaming_manager = Node3D.new()
-	world_streaming_manager.set_script(WorldStreamingManagerScript)
-	world_streaming_manager.name = "WorldStreamingManager"
+	var wsm_node := Node3D.new()
+	wsm_node.set_script(WorldStreamingManagerScript)
+	wsm_node.name = "WorldStreamingManager"
+	world_streaming_manager = wsm_node as WorldStreamingManager
 
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
-	world_streaming_manager.distant_rendering_enabled = true  # Enable impostors (FAR tier)
+	world_streaming_manager.distant_rendering_enabled = _show_models  # Impostors follow Models toggle
 	world_streaming_manager.debug_enabled = true
 
 	# OWDB configuration for Morrowind objects
@@ -1473,7 +1548,8 @@ func _on_cell_loaded(grid: Vector2i, node: Node3D) -> void:
 	# Record cell load in profiler
 	if profiler and world_streaming_manager:
 		var stats: Dictionary = world_streaming_manager.get_stats()
-		profiler.record_cell_load(stats.get("load_time_ms", 0.0), obj_count)
+		var load_time: float = stats.get("load_time_ms", 0.0)
+		profiler.record_cell_load(load_time, obj_count)
 
 	_update_stats()
 
@@ -1534,12 +1610,16 @@ func _update_stats() -> void:
 		fps = profiler.get_fps()
 		frame_ms = profiler.get_avg_frame_time_ms()
 		var render: Dictionary = profiler.get_render_stats()
-		draw_calls = int(render.draw_calls)
-		primitives = int(render.primitives)
+		var render_draw_calls: int = render.draw_calls
+		var render_primitives: int = render.primitives
+		draw_calls = render_draw_calls
+		primitives = render_primitives
 		var mem: Dictionary = profiler.get_memory_stats()
-		mem_mb = float(mem.static_memory_mb)
+		var static_mem: float = mem.static_memory_mb
+		mem_mb = static_mem
 		var percentiles: Dictionary = profiler.get_frame_time_percentiles()
-		p95_ms = float(percentiles.p95)
+		var p95_val: float = percentiles.p95
+		p95_ms = p95_val
 
 	# Get terrain stats
 	var total_regions := 0
@@ -1632,8 +1712,11 @@ func _input(event: InputEvent) -> void:
 		return
 
 	# Hotkeys (these work regardless of camera mode)
-	if event is InputEventKey and event.pressed:
-		match event.keycode:
+	if event is InputEventKey:
+		var key_event := event as InputEventKey
+		if not key_event.pressed:
+			return
+		match key_event.keycode:
 			KEY_P:
 				# Toggle between fly camera and player controller
 				_toggle_camera_mode()
@@ -1734,13 +1817,13 @@ func _setup_interior_browser() -> void:
 		cell_list.item_activated.connect(_on_cell_list_activated)
 
 	if interior_filter_btn:
-		interior_filter_btn.pressed.connect(func(): _set_cell_filter("interior"))
+		interior_filter_btn.pressed.connect(func() -> void: _set_cell_filter("interior"))
 
 	if exterior_filter_btn:
-		exterior_filter_btn.pressed.connect(func(): _set_cell_filter("exterior"))
+		exterior_filter_btn.pressed.connect(func() -> void: _set_cell_filter("exterior"))
 
 	if all_filter_btn:
-		all_filter_btn.pressed.connect(func(): _set_cell_filter("all"))
+		all_filter_btn.pressed.connect(func() -> void: _set_cell_filter("all"))
 
 	# Hide interior panel by default
 	if interior_panel:
@@ -1821,7 +1904,7 @@ func _switch_to_world_mode() -> void:
 func _build_cell_list() -> void:
 	_all_cells.clear()
 
-	for cell_id in ESMManager.cells:
+	for cell_id: String in ESMManager.cells:
 		var cell: CellRecord = ESMManager.cells[cell_id]
 		var cell_info := {
 			"name": cell.name if cell.is_interior() else "Exterior (%d, %d)" % [cell.grid_x, cell.grid_y],
@@ -1834,21 +1917,27 @@ func _build_cell_list() -> void:
 		_all_cells.append(cell_info)
 
 	# Sort: interiors by name, exteriors by grid
-	_all_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+	_all_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> int:
 		if a["is_interior"] != b["is_interior"]:
-			return a["is_interior"]  # Interiors first
+			return -1 if a["is_interior"] else 1  # Interiors first
 		if a["is_interior"]:
-			return a["name"].naturalnocasecmp_to(b["name"]) < 0
+			var name_a: String = a["name"]
+			var name_b: String = b["name"]
+			return name_a.naturalnocasecmp_to(name_b)
 		else:
-			if a["grid_x"] != b["grid_x"]:
-				return a["grid_x"] < b["grid_x"]
-			return a["grid_y"] < b["grid_y"]
+			var grid_x_a: int = a["grid_x"]
+			var grid_x_b: int = b["grid_x"]
+			if grid_x_a != grid_x_b:
+				return grid_x_a - grid_x_b
+			var grid_y_a: int = a["grid_y"]
+			var grid_y_b: int = b["grid_y"]
+			return grid_y_a - grid_y_b
 	)
 
 	_log("Built cell list: %d cells (%d interior, %d exterior)" % [
 		_all_cells.size(),
-		_all_cells.filter(func(c: Dictionary): return c["is_interior"]).size(),
-		_all_cells.filter(func(c: Dictionary): return not c["is_interior"]).size()
+		_all_cells.filter(func(c: Dictionary) -> bool: return c["is_interior"]).size(),
+		_all_cells.filter(func(c: Dictionary) -> bool: return not c["is_interior"]).size()
 	])
 
 
@@ -1893,7 +1982,8 @@ func _apply_cell_filter() -> void:
 
 		# Apply search filter
 		if not search_text.is_empty():
-			var name_lower: String = cell_info["name"].to_lower()
+			var cell_name: String = cell_info["name"]
+			var name_lower: String = cell_name.to_lower()
 			if name_lower.find(search_text) < 0:
 				continue
 
@@ -1963,7 +2053,9 @@ func _load_interior_cell(cell_info: Dictionary) -> void:
 	if cell_info["is_interior"]:
 		cell_node = cell_manager.load_cell(cell_record.name)
 	else:
-		cell_node = cell_manager.load_exterior_cell(cell_info["grid_x"], cell_info["grid_y"])
+		var grid_x: int = cell_info["grid_x"]
+		var grid_y: int = cell_info["grid_y"]
+		cell_node = cell_manager.load_exterior_cell(grid_x, grid_y)
 
 	if not cell_node:
 		_log("[color=red]Failed to load cell[/color]")
@@ -1989,7 +2081,7 @@ func _position_camera_for_interior_cell(cell: CellRecord) -> void:
 	var center := Vector3.ZERO
 	var count := 0
 
-	for ref in cell.references:
+	for ref: CellReference in cell.references:
 		var pos := CS.vector_to_godot(ref.position)
 		center += pos
 		count += 1
@@ -2046,22 +2138,29 @@ func _dump_profiling_report() -> void:
 	_log("[b]Lights[/b]")
 	_log("  Total: %d | With shadows: %d" % [report.lights.total, report.lights.with_shadows])
 
-	if report.materials and not report.materials.is_empty():
+	var materials_data: Dictionary = report.get("materials", {})
+	if not materials_data.is_empty():
 		_log("")
 		_log("[b]Materials[/b]")
-		_log("  Unique materials: %d" % report.materials.get("cached_materials", 0))
-		_log("  Cache hits: %d" % report.materials.get("cache_hits", 0))
-		_log("  Hit rate: %.1f%%" % (report.materials.get("hit_rate", 0.0) * 100.0))
+		_log("  Unique materials: %d" % materials_data.get("cached_materials", 0))
+		_log("  Cache hits: %d" % materials_data.get("cache_hits", 0))
+		var mat_hit_rate: float = materials_data.get("hit_rate", 0.0)
+		_log("  Hit rate: %.1f%%" % (mat_hit_rate * 100.0))
 
-	if report.textures and not report.textures.is_empty():
+	var textures_data: Dictionary = report.get("textures", {})
+	if not textures_data.is_empty():
 		_log("")
 		_log("[b]Textures[/b]")
-		_log("  Loaded: %d" % report.textures.get("textures_loaded", 0))
-		_log("  Cache hits: %d" % report.textures.get("cache_hits", 0))
+		_log("  Loaded: %d" % textures_data.get("textures_loaded", 0))
+		_log("  Cache hits: %d" % textures_data.get("cache_hits", 0))
 
 	# Add object pool stats
-	var cell_stats: Dictionary = cell_manager.get_stats()
-	if cell_stats.get("pool_available", 0) > 0 or cell_stats.get("pool_in_use", 0) > 0:
+	var cell_stats: Dictionary = {}
+	if cell_manager.has_method("get_stats"):
+		cell_stats = cell_manager.call("get_stats")
+	var pool_available: int = cell_stats.get("pool_available", 0)
+	var pool_in_use: int = cell_stats.get("pool_in_use", 0)
+	if pool_available > 0 or pool_in_use > 0:
 			_log("")
 			_log("[b]Object Pool[/b]")
 			_log("  Available: %d | In use: %d" % [
@@ -2085,11 +2184,15 @@ func _dump_profiling_report() -> void:
 		bsa_cache_stats.get("hit_rate", 0.0) * 100.0
 	])
 
-	if not report.slowest_models.is_empty():
+	var slowest_models: Array = report.get("slowest_models", [])
+	if not slowest_models.is_empty():
 		_log("")
 		_log("[b]Slowest Models[/b]")
-		for model in report.slowest_models:
-			_log("  %.2f ms - %s (x%d)" % [model.avg_ms, model.path.get_file(), model.count])
+		for model: Dictionary in slowest_models:
+			var avg_ms: float = model.get("avg_ms", 0.0)
+			var model_path: String = model.get("path", "")
+			var model_count: int = model.get("count", 0)
+			_log("  %.2f ms - %s (x%d)" % [avg_ms, model_path.get_file(), model_count])
 
 	_log("[b]==============================[/b]")
 
@@ -2103,7 +2206,7 @@ func _prewarm_bsa_cache() -> void:
 	var common_models := ObjectPoolScript.identify_common_models(null)
 	var prewarmed := 0
 
-	for model_path in common_models:
+	for model_path: String in common_models:
 		# Try both with and without meshes\ prefix
 		var full_path: String = "meshes\\" + model_path if not model_path.begins_with("meshes") else model_path
 		if BSAManager.has_file(full_path):
@@ -2124,7 +2227,7 @@ func _prewarm_bsa_cache() -> void:
 		"textures\\tx_wood_brown_02.dds",
 	]
 
-	for tex_path in common_textures:
+	for tex_path: String in common_textures:
 		if BSAManager.has_file(tex_path):
 			BSAManager.extract_file(tex_path)
 			prewarmed += 1

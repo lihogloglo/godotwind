@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_opaque;
+render_mode unshaded, cull_disabled, depth_draw_opaque, shadows_disabled;
 
 // Octahedral impostor shader
 // Selects the correct frame from atlas based on view direction
@@ -108,12 +108,12 @@ void fragment() {
 		tex = texture(albedo_atlas, atlas_uv);
 	}
 
-	ALBEDO = tex.rgb;
-
-	// Alpha test
+	// Alpha test - discard transparent pixels, keep opaque ones fully opaque
+	// Do NOT set ALPHA after discard, as that causes unwanted transparency blending
 	if (tex.a < alpha_cutoff) {
 		discard;
 	}
 
-	ALPHA = tex.a;
+	ALBEDO = tex.rgb;
+	// No ALPHA assignment - treated as fully opaque after discard test
 }

@@ -58,8 +58,8 @@ var _stats: Dictionary = {
 }
 
 ## Default pool size limits
-var default_pool_size: int = 50
-var max_total_instances: int = 5000  ## Global cap across all pools
+var default_pool_size: int = 80
+var max_total_instances: int = 10000  ## Global cap across all pools (increased for 100+ model types)
 
 
 ## Initialize the pool with a parent node for storing inactive instances
@@ -223,7 +223,7 @@ func get_stats() -> Dictionary:
 	var total_available := 0
 	var total_in_use := 0
 
-	for path in _pools:
+	for path: String in _pools:
 		var entry: PoolEntry = _pools[path]
 		total_available += entry.get_available_count()
 		total_in_use += entry.get_in_use_count()
@@ -233,8 +233,10 @@ func get_stats() -> Dictionary:
 	stats["total_in_use"] = total_in_use
 	stats["total_instances"] = total_available + total_in_use
 
-	if _stats["acquires"] > 0:
-		stats["hit_rate"] = float(_stats["cache_hits"]) / float(_stats["acquires"])
+	var acquires_count: int = _stats["acquires"]
+	if acquires_count > 0:
+		var hits_count: int = _stats["cache_hits"]
+		stats["hit_rate"] = float(hits_count) / float(acquires_count)
 	else:
 		stats["hit_rate"] = 0.0
 
@@ -244,24 +246,24 @@ func get_stats() -> Dictionary:
 ## Get list of registered model paths
 func get_registered_models() -> Array[String]:
 	var models: Array[String] = []
-	for path in _pools:
+	for path: String in _pools:
 		models.append(path)
 	return models
 
 
 ## Clear all pools and free all instances
 func clear() -> void:
-	for path in _pools:
+	for path: String in _pools:
 		var entry: PoolEntry = _pools[path]
 
 		# Free all available instances
-		for instance in entry.available:
+		for instance: Node3D in entry.available:
 			if is_instance_valid(instance):
 				instance.queue_free()
 		entry.available.clear()
 
 		# Free all in-use instances
-		for instance in entry.in_use:
+		for instance: Node3D in entry.in_use:
 			if is_instance_valid(instance):
 				instance.queue_free()
 		entry.in_use.clear()
@@ -297,7 +299,8 @@ func _create_instance(entry: PoolEntry) -> Node3D:
 ## Internal: Preload multiple instances
 func _preload_instances(entry: PoolEntry, count: int) -> void:
 	var to_create := mini(count, entry.max_pool_size - entry.total_created)
-	to_create = mini(to_create, max_total_instances - _stats["total_instances"])
+	var total_inst: int = _stats["total_instances"]
+	to_create = mini(to_create, max_total_instances - total_inst)
 
 	for i in range(to_create):
 		var instance := _create_instance(entry)
@@ -321,43 +324,165 @@ func _normalize_path(path: String) -> String:
 
 ## Identify common objects that should be pooled
 ## Returns a dictionary of model_path -> recommended_pool_size
-static func identify_common_models(cell_manager) -> Dictionary:
-	# This would analyze loaded cells to find frequently used models
-	# For now, return known common Morrowind objects
+## Expanded to 100+ models for better cache hit rate (targeting 70%+ hit rate)
+static func identify_common_models(cell_manager: Variant) -> Dictionary:
+	# Expanded from ~25 to 100+ models for much better cache hit rate
 	return {
-		# Flora
-		"meshes/f/flora_kelp_01.nif": 100,
-		"meshes/f/flora_kelp_02.nif": 100,
-		"meshes/f/flora_kelp_03.nif": 100,
-		"meshes/f/flora_kelp_04.nif": 100,
-		"meshes/f/flora_comberry_01.nif": 50,
-		"meshes/f/flora_marshmerrow_01.nif": 50,
-		"meshes/f/flora_wickwheat_01.nif": 50,
-		"meshes/f/flora_gold_kanet_01.nif": 50,
-		"meshes/f/flora_heather_01.nif": 80,
-		"meshes/f/flora_black_anther_01.nif": 50,
-		"meshes/f/flora_stoneflower_01.nif": 50,
-		"meshes/f/flora_bc_fern_02.nif": 60,
-		"meshes/f/flora_bc_fern_03.nif": 60,
-		"meshes/f/flora_grass_01.nif": 100,
-		"meshes/f/flora_grass_02.nif": 100,
-		"meshes/f/flora_grass_03.nif": 100,
+		# ====== FLORA - High frequency (100+ instances each) ======
+		"meshes/f/flora_kelp_01.nif": 150,
+		"meshes/f/flora_kelp_02.nif": 150,
+		"meshes/f/flora_kelp_03.nif": 150,
+		"meshes/f/flora_kelp_04.nif": 150,
+		"meshes/f/flora_grass_01.nif": 200,
+		"meshes/f/flora_grass_02.nif": 200,
+		"meshes/f/flora_grass_03.nif": 200,
+		"meshes/f/flora_grass_04.nif": 150,
+		"meshes/f/flora_heather_01.nif": 100,
+		"meshes/f/flora_ash_grass_r_01.nif": 100,
+		"meshes/f/flora_ash_grass_b_01.nif": 100,
+		"meshes/f/flora_ash_grass_w_01.nif": 100,
 
-		# Trees
-		"meshes/f/flora_tree_ai_01.nif": 30,
-		"meshes/f/flora_tree_ai_02.nif": 30,
-		"meshes/f/flora_tree_bc_01.nif": 30,
+		# Flora - Medium frequency (50-100 instances)
+		"meshes/f/flora_comberry_01.nif": 80,
+		"meshes/f/flora_marshmerrow_01.nif": 80,
+		"meshes/f/flora_marshmerrow_02.nif": 80,
+		"meshes/f/flora_marshmerrow_03.nif": 80,
+		"meshes/f/flora_wickwheat_01.nif": 80,
+		"meshes/f/flora_wickwheat_02.nif": 80,
+		"meshes/f/flora_gold_kanet_01.nif": 80,
+		"meshes/f/flora_gold_kanet_02.nif": 80,
+		"meshes/f/flora_black_anther_01.nif": 80,
+		"meshes/f/flora_stoneflower_01.nif": 80,
+		"meshes/f/flora_stoneflower_02.nif": 80,
+		"meshes/f/flora_bc_fern_01.nif": 80,
+		"meshes/f/flora_bc_fern_02.nif": 80,
+		"meshes/f/flora_bc_fern_03.nif": 80,
+		"meshes/f/flora_saltrice_01.nif": 80,
+		"meshes/f/flora_saltrice_02.nif": 80,
+		"meshes/f/flora_coda_flower_01.nif": 60,
+		"meshes/f/flora_corkbulb_01.nif": 60,
+		"meshes/f/flora_hackle-lo_01.nif": 60,
+		"meshes/f/flora_hackle-lo_02.nif": 60,
+		"meshes/f/flora_scathecraw_01.nif": 60,
+		"meshes/f/flora_scathecraw_02.nif": 60,
+		"meshes/f/flora_willow_flower_01.nif": 60,
 
-		# Rocks
-		"meshes/r/rock_ai_small_01.nif": 80,
-		"meshes/r/rock_ai_small_02.nif": 80,
-		"meshes/r/rock_bc_small_01.nif": 80,
-		"meshes/r/rock_bc_small_02.nif": 80,
-		"meshes/r/rock_gl_small_01.nif": 80,
-		"meshes/r/rock_ai_medium_01.nif": 50,
-		"meshes/r/rock_bc_medium_01.nif": 50,
+		# ====== TREES - Medium frequency (30-50 instances) ======
+		"meshes/f/flora_tree_ai_01.nif": 50,
+		"meshes/f/flora_tree_ai_02.nif": 50,
+		"meshes/f/flora_tree_ai_03.nif": 50,
+		"meshes/f/flora_tree_bc_01.nif": 50,
+		"meshes/f/flora_tree_bc_02.nif": 50,
+		"meshes/f/flora_tree_gl_01.nif": 40,
+		"meshes/f/flora_tree_gl_02.nif": 40,
+		"meshes/f/flora_tree_wg_01.nif": 40,
+		"meshes/f/flora_tree_wg_02.nif": 40,
+		"meshes/f/flora_ash_log_01.nif": 40,
+		"meshes/f/flora_ash_log_02.nif": 40,
 
-		# Common statics
-		"meshes/x/ex_common_pillar_01.nif": 40,
-		"meshes/x/ex_common_plat_01.nif": 40,
+		# ====== ROCKS - High frequency (80+ instances) ======
+		"meshes/r/rock_ai_small_01.nif": 100,
+		"meshes/r/rock_ai_small_02.nif": 100,
+		"meshes/r/rock_ai_small_03.nif": 100,
+		"meshes/r/rock_bc_small_01.nif": 100,
+		"meshes/r/rock_bc_small_02.nif": 100,
+		"meshes/r/rock_bc_small_03.nif": 100,
+		"meshes/r/rock_gl_small_01.nif": 100,
+		"meshes/r/rock_gl_small_02.nif": 100,
+		"meshes/r/rock_ai_medium_01.nif": 60,
+		"meshes/r/rock_ai_medium_02.nif": 60,
+		"meshes/r/rock_bc_medium_01.nif": 60,
+		"meshes/r/rock_bc_medium_02.nif": 60,
+		"meshes/r/rock_gl_medium_01.nif": 60,
+		"meshes/r/terrain_rock_ai_01.nif": 80,
+		"meshes/r/terrain_rock_ai_02.nif": 80,
+		"meshes/r/terrain_rock_bc_01.nif": 80,
+		"meshes/r/terrain_rock_bc_02.nif": 80,
+		"meshes/r/terrain_rock_gl_01.nif": 80,
+		"meshes/r/terrain_rock_rm_01.nif": 80,
+		"meshes/r/terrain_rock_rm_02.nif": 80,
+		"meshes/r/terrain_rock_wg_01.nif": 80,
+
+		# ====== CONTAINERS - Medium frequency (40-60 instances) ======
+		"meshes/c/contain_barrel_01.nif": 60,
+		"meshes/c/contain_barrel_02.nif": 60,
+		"meshes/c/contain_barrel_03.nif": 50,
+		"meshes/c/contain_sack_01.nif": 60,
+		"meshes/c/contain_sack_02.nif": 60,
+		"meshes/c/contain_crate_01.nif": 50,
+		"meshes/c/contain_crate_02.nif": 50,
+		"meshes/c/contain_crate_03.nif": 50,
+		"meshes/c/contain_chest_02.nif": 40,
+		"meshes/c/contain_chest_03.nif": 40,
+		"meshes/c/contain_urn_01.nif": 50,
+		"meshes/c/contain_urn_02.nif": 50,
+		"meshes/c/contain_pot_redware_01.nif": 50,
+		"meshes/c/contain_pot_redware_02.nif": 50,
+
+		# ====== LIGHTS - High frequency in interiors (60+ instances) ======
+		"meshes/l/light_com_candle_01.nif": 80,
+		"meshes/l/light_com_candle_02.nif": 80,
+		"meshes/l/light_com_candle_03.nif": 80,
+		"meshes/l/light_com_candle_04.nif": 60,
+		"meshes/l/light_com_candle_05.nif": 60,
+		"meshes/l/light_com_lantern_01.nif": 80,
+		"meshes/l/light_com_lantern_02.nif": 80,
+		"meshes/l/light_com_sconce_01.nif": 60,
+		"meshes/l/light_com_sconce_02.nif": 60,
+		"meshes/l/light_de_lantern_01.nif": 60,
+		"meshes/l/light_de_lantern_02.nif": 60,
+
+		# ====== FURNITURE - Medium frequency (30-50 instances) ======
+		"meshes/f/furn_com_chair_01.nif": 50,
+		"meshes/f/furn_com_chair_02.nif": 50,
+		"meshes/f/furn_com_chair_03.nif": 40,
+		"meshes/f/furn_com_bench_01.nif": 50,
+		"meshes/f/furn_com_bench_02.nif": 50,
+		"meshes/f/furn_com_table_01.nif": 40,
+		"meshes/f/furn_com_table_02.nif": 40,
+		"meshes/f/furn_com_table_03.nif": 40,
+		"meshes/f/furn_de_bed_01.nif": 40,
+		"meshes/f/furn_de_bed_02.nif": 40,
+		"meshes/f/furn_de_chair_01.nif": 40,
+		"meshes/f/furn_de_table_01.nif": 40,
+		"meshes/f/furn_de_shelf_01.nif": 50,
+		"meshes/f/furn_de_shelf_02.nif": 50,
+		"meshes/f/furn_de_p_shelf_01.nif": 40,
+		"meshes/f/furn_com_rm_bookshelf.nif": 40,
+
+		# ====== MISC CLUTTER - Medium frequency (30-50 instances) ======
+		"meshes/m/misc_com_bottle_01.nif": 60,
+		"meshes/m/misc_com_bottle_02.nif": 60,
+		"meshes/m/misc_com_bottle_03.nif": 50,
+		"meshes/m/misc_com_bottle_04.nif": 50,
+		"meshes/m/misc_com_bottle_05.nif": 50,
+		"meshes/m/misc_com_bucket_01.nif": 50,
+		"meshes/m/misc_com_bucket_02.nif": 50,
+		"meshes/m/misc_com_plate_01.nif": 40,
+		"meshes/m/misc_com_plate_02.nif": 40,
+		"meshes/m/misc_com_bowl_01.nif": 40,
+		"meshes/m/misc_com_bowl_02.nif": 40,
+		"meshes/m/misc_com_cup_01.nif": 40,
+		"meshes/m/misc_com_cup_02.nif": 40,
+		"meshes/m/misc_com_goblet_01.nif": 40,
+		"meshes/m/misc_de_bowl_01.nif": 40,
+		"meshes/m/misc_de_cup_01.nif": 40,
+		"meshes/m/misc_6th_bell_01.nif": 30,
+		"meshes/m/misc_de_tankard_01.nif": 40,
+
+		# ====== ARCHITECTURE STATICS - Medium frequency (30-50 instances) ======
+		"meshes/x/ex_common_pillar_01.nif": 50,
+		"meshes/x/ex_common_pillar_02.nif": 50,
+		"meshes/x/ex_common_plat_01.nif": 50,
+		"meshes/x/ex_common_plat_02.nif": 40,
+		"meshes/x/ex_common_plat_small.nif": 40,
+		"meshes/x/ex_hlaalu_fence_01.nif": 50,
+		"meshes/x/ex_hlaalu_post_01.nif": 50,
+		"meshes/x/ex_de_docks_plank_01.nif": 50,
+		"meshes/x/ex_de_docks_plank_02.nif": 50,
+		"meshes/x/ex_de_docks_post_01.nif": 40,
+		"meshes/x/ex_de_docks_ladder_01.nif": 40,
+		"meshes/x/ex_de_shack_plat_01.nif": 40,
+		"meshes/x/ex_de_shack_post_01.nif": 40,
+		"meshes/x/ex_de_ship_plank_01.nif": 40,
 	}

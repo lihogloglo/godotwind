@@ -5,7 +5,11 @@ class_name NIFParseResult
 extends RefCounted
 
 ## The parsed NIFReader instance with records and roots populated
+## Can be either GDScript Reader or C# NIFReader (native)
 var reader: RefCounted = null  # NIFReader type, using RefCounted for forward reference
+
+## Whether the reader is the native C# NIFReader (faster) or GDScript Reader
+var is_native: bool = false
 
 ## Original file path (for caching and error messages)
 var path: String = ""
@@ -31,11 +35,12 @@ var auto_collision_mode: bool = true
 
 
 ## Create a successful parse result
-static func create_success(nif_reader: RefCounted, file_path: String) -> NIFParseResult:
+static func create_success(nif_reader: RefCounted, file_path: String, native: bool = false) -> NIFParseResult:
 	var result := NIFParseResult.new()
 	result.reader = nif_reader
 	result.path = file_path
 	result.success = true
+	result.is_native = native
 	return result
 
 

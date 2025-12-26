@@ -20,12 +20,13 @@ extends RefCounted
 
 # Preload dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
+const MeshOptimizer := preload("res://addons/meshoptimizer/mesh_optimizer.gd")
 
-## Reference to MeshSimplifier for aggressive LOD generation
-var mesh_simplifier: RefCounted = null  # MeshSimplifier
+## Reference to MeshOptimizer for aggressive LOD generation (native meshoptimizer with GDScript fallback)
+var mesh_simplifier: MeshOptimizer = null
 
 ## Reference to ModelLoader for loading prototype meshes
-var model_loader: RefCounted = null  # ModelLoader
+var model_loader: ModelLoader = null
 
 ## Target simplification ratio for distant meshes (0.05 = 95% reduction)
 var simplification_target: float = 0.05
@@ -41,7 +42,7 @@ var max_vertices_per_mesh: int = 65535
 var _merge_cache: Dictionary = {}
 
 ## Stats
-var _stats := {
+var _stats: Dictionary[String, int] = {
 	"cells_merged": 0,
 	"objects_merged": 0,
 	"objects_skipped": 0,
@@ -60,7 +61,7 @@ class MergedCellData:
 
 
 ## Object types that should be merged (static, non-interactive)
-const MERGEABLE_TYPES := [
+const MERGEABLE_TYPES: Array[String] = [
 	"static",
 	"activator",  # Signs, markers
 	"container",  # Barrels, crates (visual only at distance)
@@ -69,7 +70,7 @@ const MERGEABLE_TYPES := [
 ]
 
 ## Model path patterns that should NOT be merged
-const SKIP_PATTERNS := [
+const SKIP_PATTERNS: Array[String] = [
 	"\\f\\flora_",     # Flora uses StaticObjectRenderer
 	"\\f\\furn_",      # Some furniture is interactive
 	"\\n\\",           # NPCs
@@ -79,7 +80,7 @@ const SKIP_PATTERNS := [
 ]
 
 ## Model path patterns for large objects that should be included
-const INCLUDE_LARGE_PATTERNS := [
+const INCLUDE_LARGE_PATTERNS: Array[String] = [
 	"\\x\\ex_",        # Exterior buildings
 	"\\x\\in_",        # Interior structures visible from outside
 	"terrain_rock",    # Large rocks
@@ -95,30 +96,30 @@ const INCLUDE_LARGE_PATTERNS := [
 ## Returns MergedCellData with the combined mesh, or null if no objects to merge
 func merge_cell(cell_grid: Vector2i, references: Array) -> MergedCellData:
 	# Check cache first
-	var cache_key := "%d_%d" % [cell_grid.x, cell_grid.y]
+	var cache_key: String = "%d_%d" % [cell_grid.x, cell_grid.y]
 	if cache_key in _merge_cache:
 		_stats["cache_hits"] += 1
 		return _merge_cache[cache_key]
 
 	# Filter references to only mergeable objects
-	var mergeable_refs := _filter_mergeable_references(references)
+	var mergeable_refs: Array[Dictionary] = _filter_mergeable_references(references)
 
 	if mergeable_refs.is_empty():
 		return null
 
 	# Merge meshes using SurfaceTool
-	var surface_tool := SurfaceTool.new()
+	var surface_tool: SurfaceTool = SurfaceTool.new()
 	surface_tool.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	var merged_count := 0
-	var total_vertices := 0
-	var combined_aabb := AABB()
+	var merged_count: int = 0
+	var total_vertices: int = 0
+	var combined_aabb: AABB = AABB()
 	var first_material: Material = null
 
-	for ref_data in mergeable_refs:
-		var ref: CellReference = ref_data.ref
+	for ref_data: Dictionary in mergeable_refs:
+		var _ref: CellReference = ref_data.ref
 		var mesh_arrays: Array = ref_data.mesh_arrays
-		var transform: Transform3D = ref_data.transform
+		var xform: Transform3D = ref_data.transform
 
 		if mesh_arrays.is_empty():
 			continue
@@ -130,11 +131,11 @@ func merge_cell(cell_grid: Vector2i, references: Array) -> MergedCellData:
 			break
 
 		# Add mesh to surface tool with baked transform
-		_append_mesh_transformed(surface_tool, mesh_arrays, transform)
+		_append_mesh_transformed(surface_tool, mesh_arrays, xform)
 
 		# Update AABB
-		for vertex in vertices:
-			var world_pos := transform * vertex
+		for vertex: Vector3 in vertices:
+			var world_pos: Vector3 = xform * vertex
 			if merged_count == 0:
 				combined_aabb = AABB(world_pos, Vector3.ZERO)
 			else:
@@ -152,13 +153,13 @@ func merge_cell(cell_grid: Vector2i, references: Array) -> MergedCellData:
 
 	# Generate merged mesh
 	surface_tool.generate_normals()
-	var merged_mesh := surface_tool.commit()
+	var merged_mesh: ArrayMesh = surface_tool.commit()
 
 	# Create simplified material for distant rendering
-	var distant_material := _create_distant_material(first_material)
+	var distant_material: StandardMaterial3D = _create_distant_material(first_material)
 
 	# Build result
-	var result := MergedCellData.new()
+	var result: MergedCellData = MergedCellData.new()
 	result.cell_grid = cell_grid
 	result.mesh = merged_mesh
 	result.material = distant_material
@@ -178,16 +179,17 @@ func merge_cell(cell_grid: Vector2i, references: Array) -> MergedCellData:
 
 ## Filter references to only those suitable for merging
 ## Returns array of { ref: CellReference, mesh_arrays: Array, transform: Transform3D }
-func _filter_mergeable_references(references: Array) -> Array:
-	var result := []
+func _filter_mergeable_references(references: Array) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
 
-	for ref in references:
+	for ref: Variant in references:
 		if not ref is CellReference:
 			continue
+		var cell_ref: CellReference = ref as CellReference
 
 		# Get base record
-		var record_type: Array = [""]
-		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var record_type: Array[String] = [""]
+		var base_record: RefCounted = ESMManager.get_any_record(str(cell_ref.ref_id), record_type)
 		if not base_record:
 			_stats["objects_skipped"] += 1
 			continue
@@ -206,9 +208,9 @@ func _filter_mergeable_references(references: Array) -> Array:
 			continue
 
 		# Check skip patterns
-		var should_skip := false
-		var lower_path := model_path.to_lower()
-		for pattern in SKIP_PATTERNS:
+		var should_skip: bool = false
+		var lower_path: String = model_path.to_lower()
+		for pattern: String in SKIP_PATTERNS:
 			if pattern in lower_path:
 				should_skip = true
 				break
@@ -218,21 +220,21 @@ func _filter_mergeable_references(references: Array) -> Array:
 			continue
 
 		# Check if this is a large object we want to include
-		var is_large := false
-		for pattern in INCLUDE_LARGE_PATTERNS:
+		var is_large: bool = false
+		for pattern: String in INCLUDE_LARGE_PATTERNS:
 			if pattern in lower_path:
 				is_large = true
 				break
 
 		# Get mesh from model loader
-		var mesh_data := _get_simplified_mesh_arrays(model_path, base_record)
+		var mesh_data: Array = _get_simplified_mesh_arrays(model_path, base_record)
 		if mesh_data.is_empty():
 			_stats["objects_skipped"] += 1
 			continue
 
 		# Check object size
-		var aabb := _calculate_mesh_aabb(mesh_data)
-		var size := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+		var aabb: AABB = _calculate_mesh_aabb(mesh_data)
+		var size: float = maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
 
 		# Skip small objects unless they're specifically marked as large
 		if size < min_object_size and not is_large:
@@ -240,12 +242,12 @@ func _filter_mergeable_references(references: Array) -> Array:
 			continue
 
 		# Calculate world transform
-		var transform := _calculate_transform(ref)
+		var xform: Transform3D = _calculate_transform(cell_ref)
 
 		result.append({
-			"ref": ref,
+			"ref": cell_ref,
 			"mesh_arrays": mesh_data,
-			"transform": transform,
+			"transform": xform,
 			"material": _get_mesh_material(model_path, base_record),
 		})
 
@@ -254,21 +256,19 @@ func _filter_mergeable_references(references: Array) -> Array:
 
 ## Get simplified mesh arrays for a model
 ## Applies aggressive simplification if mesh_simplifier is available
-func _get_simplified_mesh_arrays(model_path: String, base_record) -> Array:
+func _get_simplified_mesh_arrays(model_path: String, base_record: RefCounted) -> Array:
 	if not model_loader:
 		return []
 
 	# Get prototype from model loader
-	var item_id: String = ""
-	if "record_id" in base_record:
-		item_id = base_record.record_id
+	var item_id: String = base_record.get("record_id") if base_record.get("record_id") else ""
 
 	var prototype: Node3D = model_loader.get_model(model_path, item_id)
 	if not prototype:
 		return []
 
 	# Find first MeshInstance3D
-	var mesh_instance := _find_mesh_instance(prototype)
+	var mesh_instance: MeshInstance3D = _find_mesh_instance(prototype)
 	if not mesh_instance or not mesh_instance.mesh:
 		return []
 
@@ -277,13 +277,13 @@ func _get_simplified_mesh_arrays(model_path: String, base_record) -> Array:
 		return []
 
 	# Get surface arrays
-	var arrays := mesh.surface_get_arrays(0)
+	var arrays: Array = mesh.surface_get_arrays(0)
 	if arrays.is_empty():
 		return []
 
 	# Apply aggressive simplification if available
-	if mesh_simplifier and mesh_simplifier.has_method("simplify"):
-		var simplified: Array = mesh_simplifier.simplify(arrays, simplification_target)
+	if mesh_simplifier:
+		var simplified: Array = mesh_simplifier.simplify_arrays(arrays, simplification_target)
 		if not simplified.is_empty():
 			return simplified
 
@@ -291,19 +291,17 @@ func _get_simplified_mesh_arrays(model_path: String, base_record) -> Array:
 
 
 ## Get material from mesh
-func _get_mesh_material(model_path: String, base_record) -> Material:
+func _get_mesh_material(model_path: String, base_record: RefCounted) -> Material:
 	if not model_loader:
 		return null
 
-	var item_id: String = ""
-	if "record_id" in base_record:
-		item_id = base_record.record_id
+	var item_id: String = base_record.get("record_id") if base_record.get("record_id") else ""
 
 	var prototype: Node3D = model_loader.get_model(model_path, item_id)
 	if not prototype:
 		return null
 
-	var mesh_instance := _find_mesh_instance(prototype)
+	var mesh_instance: MeshInstance3D = _find_mesh_instance(prototype)
 	if not mesh_instance:
 		return null
 
@@ -321,8 +319,8 @@ func _find_mesh_instance(node: Node) -> MeshInstance3D:
 	if node is MeshInstance3D:
 		return node
 
-	for child in node.get_children():
-		var found := _find_mesh_instance(child)
+	for child: Node in node.get_children():
+		var found: MeshInstance3D = _find_mesh_instance(child)
 		if found:
 			return found
 
@@ -330,7 +328,7 @@ func _find_mesh_instance(node: Node) -> MeshInstance3D:
 
 
 ## Append mesh arrays to SurfaceTool with transform baked into vertices
-func _append_mesh_transformed(surface_tool: SurfaceTool, arrays: Array, transform: Transform3D) -> void:
+func _append_mesh_transformed(surface_tool: SurfaceTool, arrays: Array, xform: Transform3D) -> void:
 	if arrays.size() < Mesh.ARRAY_MAX:
 		return
 
@@ -344,26 +342,26 @@ func _append_mesh_transformed(surface_tool: SurfaceTool, arrays: Array, transfor
 
 	# If no indices, create sequential indices
 	if indices.is_empty():
-		for i in range(vertices.size()):
+		for i: int in range(vertices.size()):
 			indices.append(i)
 
 	# Transform basis for normals (rotation only, no scale/translation)
-	var normal_basis := transform.basis.inverse().transposed()
+	var normal_basis: Basis = xform.basis.inverse().transposed()
 
 	# Add vertices with baked transform
-	for i in range(indices.size()):
-		var idx := indices[i]
+	for i: int in range(indices.size()):
+		var idx: int = indices[i]
 
 		# Transform vertex position
-		var pos := transform * vertices[idx]
+		var pos: Vector3 = xform * vertices[idx]
 
 		# Transform normal
-		var normal := Vector3.UP
+		var normal: Vector3 = Vector3.UP
 		if idx < normals.size():
 			normal = (normal_basis * normals[idx]).normalized()
 
 		# UV (no transform needed)
-		var uv := Vector2.ZERO
+		var uv: Vector2 = Vector2.ZERO
 		if idx < uvs.size():
 			uv = uvs[idx]
 
@@ -381,8 +379,8 @@ func _calculate_mesh_aabb(arrays: Array) -> AABB:
 	if vertices.is_empty():
 		return AABB()
 
-	var aabb := AABB(vertices[0], Vector3.ZERO)
-	for i in range(1, vertices.size()):
+	var aabb: AABB = AABB(vertices[0], Vector3.ZERO)
+	for i: int in range(1, vertices.size()):
 		aabb = aabb.expand(vertices[i])
 
 	return aabb
@@ -390,17 +388,17 @@ func _calculate_mesh_aabb(arrays: Array) -> AABB:
 
 ## Calculate world transform for a cell reference
 func _calculate_transform(ref: CellReference) -> Transform3D:
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
+	var pos: Vector3 = CS.vector_to_godot(ref.position)
+	var scl: Vector3 = CS.scale_to_godot(ref.scale)
+	var basis: Basis = CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scl)
 	return Transform3D(basis, pos)
 
 
 ## Create simplified material for distant rendering
 ## Removes normal maps, specular, and other expensive features
 func _create_distant_material(source_material: Material) -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
+	var mat: StandardMaterial3D = StandardMaterial3D.new()
 
 	# Basic settings for distant objects
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX  # Faster than per-pixel
@@ -430,11 +428,13 @@ func _create_distant_material(source_material: Material) -> StandardMaterial3D:
 
 
 ## Get model path from record
-func _get_model_path(record) -> String:
-	if "model" in record:
-		return record.model
-	if "model_path" in record:
-		return record.model_path
+func _get_model_path(record: RefCounted) -> String:
+	var model: Variant = record.get("model")
+	if model:
+		return model as String
+	var model_path: Variant = record.get("model_path")
+	if model_path:
+		return model_path as String
 	return ""
 
 
@@ -445,12 +445,12 @@ func clear_cache() -> void:
 
 ## Remove a specific cell from cache
 func remove_from_cache(cell_grid: Vector2i) -> void:
-	var cache_key := "%d_%d" % [cell_grid.x, cell_grid.y]
+	var cache_key: String = "%d_%d" % [cell_grid.x, cell_grid.y]
 	_merge_cache.erase(cache_key)
 
 
 ## Get statistics
-func get_stats() -> Dictionary:
-	var stats := _stats.duplicate()
+func get_stats() -> Dictionary[String, int]:
+	var stats: Dictionary[String, int] = _stats.duplicate()
 	stats["cache_size"] = _merge_cache.size()
 	return stats

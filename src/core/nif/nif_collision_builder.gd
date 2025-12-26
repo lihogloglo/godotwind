@@ -356,7 +356,7 @@ func _create_shape_from_geometry(geom: Defs.NiGeometry, transform: Transform3D, 
 
 	# Priority 1: Check CollisionShapeLibrary for explicit shape mapping
 	if not item_id.is_empty() and _shape_library != null and _shape_library.is_loaded():
-		var library_shape = _shape_library.get_shape_for_item(item_id)
+		var library_shape: Variant = _shape_library.get_shape_for_item(item_id)
 		if library_shape != null:
 			var shape_type: int = library_shape
 			result.detected_shapes.append("LIBRARY:" + ShapeLib.shape_type_name(shape_type))
@@ -672,14 +672,15 @@ func _create_trimesh_shape(vertices: PackedVector3Array, triangles: PackedInt32A
 func _convert_strips_to_triangles(strips: Array) -> PackedInt32Array:
 	var triangles := PackedInt32Array()
 
-	for strip in strips:
-		if strip.size() < 3:
+	for strip: PackedInt32Array in strips:
+		var typed_strip: PackedInt32Array = strip
+		if typed_strip.size() < 3:
 			continue
 
-		for i in range(2, strip.size()):
-			var a: int = strip[i - 2]
-			var b: int = strip[i - 1]
-			var c: int = strip[i]
+		for i in range(2, typed_strip.size()):
+			var a: int = typed_strip[i - 2]
+			var b: int = typed_strip[i - 1]
+			var c: int = typed_strip[i]
 
 			# Skip degenerate triangles
 			if a == b or b == c or a == c:

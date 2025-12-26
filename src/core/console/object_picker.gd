@@ -143,15 +143,19 @@ func _input(event: InputEvent) -> void:
 		return
 
 	# Handle escape to cancel picker mode
-	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		exit_picker_mode()
-		get_viewport().set_input_as_handled()
-		return
+	if event is InputEventKey:
+		var key: InputEventKey = event as InputEventKey
+		if key.pressed and key.keycode == KEY_ESCAPE:
+			exit_picker_mode()
+			get_viewport().set_input_as_handled()
+			return
 
 	# Handle left click to pick
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var mouse_pos: Vector2 = event.position
-		_do_pick(mouse_pos)
+	if event is InputEventMouseButton:
+		var mb: InputEventMouseButton = event as InputEventMouseButton
+		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
+			var mouse_pos: Vector2 = mb.position
+			_do_pick(mouse_pos)
 		get_viewport().set_input_as_handled()
 
 
@@ -300,15 +304,24 @@ func _create_selection_from_node(node: Node3D, hit_pos: Vector3) -> Selection:
 		sel.cell_name = str(node.get_meta("cell_name"))
 
 	if node.has_meta("cell_grid"):
-		var grid = node.get_meta("cell_grid")
+		var grid: Variant = node.get_meta("cell_grid")
 		if grid is Vector2i:
 			sel.cell_grid = grid
 
 	if node.has_meta("is_interior"):
-		sel.is_interior = bool(node.get_meta("is_interior"))
+		var is_int_val: Variant = node.get_meta("is_interior")
+		if is_int_val is bool:
+			sel.is_interior = is_int_val
+		elif is_int_val is int:
+			sel.is_interior = is_int_val != 0
 
 	if node.has_meta("instance_id"):
-		sel.instance_id = int(node.get_meta("instance_id"))
+		var inst_id_val: Variant = node.get_meta("instance_id")
+		if inst_id_val is int:
+			sel.instance_id = inst_id_val
+		elif inst_id_val is float:
+			var f_val: float = inst_id_val as float
+			sel.instance_id = int(f_val)
 
 	# Try to find cell reference in parent chain
 	var parent := node.get_parent()
@@ -316,11 +329,15 @@ func _create_selection_from_node(node: Node3D, hit_pos: Vector3) -> Selection:
 		if parent.has_meta("cell_name") and sel.cell_name.is_empty():
 			sel.cell_name = str(parent.get_meta("cell_name"))
 		if parent.has_meta("cell_grid") and sel.cell_grid == Vector2i.ZERO:
-			var grid = parent.get_meta("cell_grid")
+			var grid: Variant = parent.get_meta("cell_grid")
 			if grid is Vector2i:
 				sel.cell_grid = grid
 		if parent.has_meta("is_interior"):
-			sel.is_interior = bool(parent.get_meta("is_interior"))
+			var is_int_val: Variant = parent.get_meta("is_interior")
+			if is_int_val is bool:
+				sel.is_interior = is_int_val
+			elif is_int_val is int:
+				sel.is_interior = is_int_val != 0
 		parent = parent.get_parent()
 
 	# If still no form_id, try to extract from node name
@@ -441,7 +458,8 @@ func _find_mesh_instances(node: Node3D) -> Array[MeshInstance3D]:
 
 	for child in node.get_children():
 		if child is Node3D:
-			result.append_array(_find_mesh_instances(child))
+			var child_3d: Node3D = child as Node3D
+			result.append_array(_find_mesh_instances(child_3d))
 
 	return result
 

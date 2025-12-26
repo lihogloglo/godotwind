@@ -19,6 +19,7 @@ const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const CharacterFactory := preload("res://src/core/character/character_factory.gd")
+const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
@@ -27,7 +28,8 @@ var _model_loader: ModelLoader = ModelLoader.new()
 var _instantiator: ReferenceInstantiator = ReferenceInstantiator.new()
 
 # Character factory for creating animated NPCs and creatures
-var _character_factory: CharacterFactory = CharacterFactory.new()
+# Use V2 factory for new animation system with IK, procedural animation, and LOD
+var _character_factory: CharacterFactoryV2 = CharacterFactoryV2.new()
 
 # Object pool for frequently used models
 var _object_pool: RefCounted = null  # ObjectPool
@@ -139,7 +141,7 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 		multimesh_count = _create_multimesh_instances(instance_groups, cell_node)
 
 		# Phase 3: Instantiate remaining objects normally
-		for ref in instance_groups.get("individual_refs", []):
+		for ref: CellReference in instance_groups.get("individual_refs", []):
 			var obj := _instantiator.instantiate_reference(ref, cell_grid)
 			if obj:
 				cell_node.add_child(obj)
@@ -150,7 +152,7 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 				failed += 1
 	else:
 		# Original path: no batching
-		for ref in cell.references:
+		for ref: CellReference in cell.references:
 			var obj := _instantiator.instantiate_reference(ref, cell_grid)
 			if obj:
 				cell_node.add_child(obj)
@@ -177,10 +179,10 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 	var multimesh_candidates: Dictionary = {}  # model_path -> Array of {ref, base_record}
 	var individual_refs: Array = []
 
-	for ref in references:
+	for ref: CellReference in references:
 		# Get base record and type
 		var record_type: Array = [""]
-		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 
 		if not base_record:
 			continue
@@ -212,7 +214,8 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 		if normalized not in multimesh_candidates:
 			multimesh_candidates[normalized] = []
 
-		multimesh_candidates[normalized].append({
+		var candidates_array: Array = multimesh_candidates[normalized]
+		candidates_array.append({
 			"ref": ref,
 			"base_record": base_record,
 			"model_path": model_path
@@ -220,13 +223,13 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 
 	# Filter groups: only keep those with enough instances
 	var multimesh_groups: Dictionary = {}
-	for model_path in multimesh_candidates:
+	for model_path: String in multimesh_candidates:
 		var candidates: Array = multimesh_candidates[model_path]
 		if candidates.size() >= min_instances_for_multimesh:
 			multimesh_groups[model_path] = candidates
 		else:
 			# Too few instances - instantiate individually
-			for candidate in candidates:
+			for candidate: Dictionary in candidates:
 				individual_refs.append(candidate.ref)
 
 	return {
@@ -237,7 +240,7 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 
 ## Check if a model is suitable for MultiMesh instancing
 ## MultiMesh candidates are: small repeated objects like rocks, pots, bottles, flora
-func _is_multimesh_candidate(model_path: String, base_record) -> bool:
+func _is_multimesh_candidate(model_path: String, base_record: Variant) -> bool:
 	var lower := model_path.to_lower()
 
 	# Small rocks (already filtered by _is_static_render_model for flora)
@@ -279,35 +282,38 @@ func _is_multimesh_candidate(model_path: String, base_record) -> bool:
 ## Create MultiMeshInstance3D nodes for batched groups
 ## Returns total count of instances created
 func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3D) -> int:
-	var multimesh_groups: Dictionary = instance_groups.get("multimesh_groups", {})
+	var multimesh_groups := instance_groups.get("multimesh_groups", {}) as Dictionary
 	var total_count := 0
 
-	for model_path in multimesh_groups:
+	for model_path: String in multimesh_groups:
 		var candidates: Array = multimesh_groups[model_path]
 		var count := candidates.size()
-
 		if count == 0:
 			continue
 
 		# Get/load prototype model
 		var first_candidate: Dictionary = candidates[0]
-		var record_id: String = first_candidate.base_record.get("record_id", "")
-		var prototype: Node3D = _model_loader.get_model(first_candidate.model_path, record_id)
+		var base_record: Variant = first_candidate.get("base_record", {})
+		var record_id: String = ""
+		if base_record is Dictionary:
+			var base_dict: Dictionary = base_record
+			record_id = base_dict.get("record_id", "")
+		var first_model_path: String = first_candidate.get("model_path", "")
+		var prototype: Node3D = _model_loader.get_model(first_model_path, record_id)
 
 		if not prototype:
 			# Failed to load - fall back to individual instantiation
-			for candidate in candidates:
-				var obj := _instantiator.instantiate_reference(candidate.ref)
+			for candidate: Dictionary in candidates:
+				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
 				if obj:
 					parent_node.add_child(obj)
 			continue
 
 		# Find first MeshInstance3D in prototype
-		var mesh_instance := _find_first_mesh_instance(prototype)
+		var mesh_instance: MeshInstance3D = _find_first_mesh_instance(prototype)
 		if not mesh_instance or not mesh_instance.mesh:
-			# No mesh found - fall back
-			for candidate in candidates:
-				var obj := _instantiator.instantiate_reference(candidate.ref)
+			for candidate: Dictionary in candidates:
+				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
 				if obj:
 					parent_node.add_child(obj)
 			continue
@@ -320,10 +326,8 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 
 		# Set transforms for each instance
 		for i in range(count):
-			var candidate: Dictionary = candidates[i]
-			var ref: CellReference = candidate.ref
-			var transform := _calculate_transform(ref)
-			multimesh.set_instance_transform(i, transform)
+			var ref := candidates[i].ref as CellReference
+			multimesh.set_instance_transform(i, _calculate_transform(ref))
 
 		# Create MultiMeshInstance3D node
 		var mmi := MultiMeshInstance3D.new()
@@ -390,12 +394,12 @@ func preload_common_models() -> int:
 
 			# Register with pool AND pre-warm with initial instances
 			# Pre-warming means acquire() returns instantly without duplicate()
-			# Industry standard: Pre-create 33% to reduce duplicate() calls during gameplay
-			if _object_pool and not _object_pool.has_model(model_path):
+			# Increased from 33% to 50% for better cache hit rate (targeting 70%+)
+			if _object_pool and not _object_pool.call("has_model", model_path):
 				var pool_size: int = common_models[model_path]
-				# Pre-create 33% of max pool size (better coverage for initial cells)
-				var initial_count: int = maxi(8, pool_size / 3)
-				_object_pool.register_model(model_path, prototype, initial_count, pool_size)
+				# Pre-create 50% of max pool size for higher cache hit rate
+				var initial_count: int = maxi(10, pool_size / 2)
+				_object_pool.call("register_model", model_path, prototype, initial_count, pool_size)
 				pool_instances += initial_count
 
 	print("CellManager: Preloaded %d models, pre-warmed pool with %d instances" % [loaded, pool_instances])
@@ -447,7 +451,7 @@ func preload_common_models_async() -> void:
 func _check_preload_completion(task_id: int, result: Variant) -> bool:
 	# Check if this task is a preload task
 	var model_path := ""
-	for path in _preload_pending:
+	for path: String in _preload_pending:
 		if _preload_pending[path] == task_id:
 			model_path = path
 			break
@@ -460,18 +464,16 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 	if result is NIFParseResult:
 		var parse_result: NIFParseResult = result
 		if parse_result.is_valid():
-			# Convert to prototype and cache
-			var converter := NIFConverter.new()
+			var converter: NIFConverter = NIFConverter.new()
 			var prototype: Node3D = converter.convert_from_parsed(parse_result)
 			if prototype:
 				_model_loader.add_to_cache(model_path, prototype, "")
 				_preload_loaded += 1
 
 				# Register with pool
-				if _object_pool and not _object_pool.has_model(model_path):
-					var common_models := ObjectPoolScript.identify_common_models(self)
-					var pool_size: int = common_models.get(model_path, 50)
-					_object_pool.register_model(model_path, prototype, 0, pool_size)
+				if _object_pool and not _object_pool.call("has_model", model_path):
+					var common_models: Dictionary = ObjectPoolScript.identify_common_models(self)
+					_object_pool.call("register_model", model_path, prototype, 0, common_models.get(model_path, 50))
 			else:
 				_preload_failed += 1
 		else:
@@ -569,13 +571,17 @@ var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
 
 ## Set the background processor to use for async loading
 func set_background_processor(processor: Node) -> void:
-	if _background_processor and _background_processor.task_completed.is_connected(_on_parse_completed):
-		_background_processor.task_completed.disconnect(_on_parse_completed)
+	if _background_processor:
+		var task_completed_signal: Signal = _background_processor.get("task_completed")
+		if task_completed_signal and task_completed_signal.is_connected(_on_parse_completed):
+			task_completed_signal.disconnect(_on_parse_completed)
 
 	_background_processor = processor
 
 	if _background_processor:
-		_background_processor.task_completed.connect(_on_parse_completed)
+		var task_completed_signal: Signal = _background_processor.get("task_completed")
+		if task_completed_signal:
+			task_completed_signal.connect(_on_parse_completed)
 
 
 ## Request async loading of an exterior cell
@@ -642,7 +648,9 @@ func get_async_error(request_id: int) -> String:
 func get_async_failed_count(request_id: int) -> int:
 	if request_id not in _async_requests:
 		return 0
-	return _async_requests[request_id].failed_models.size()
+	var request: AsyncCellRequest = _async_requests[request_id]
+	var failed_models_array: Array = request.failed_models
+	return failed_models_array.size()
 
 
 ## Get the result of a completed async request
@@ -677,8 +685,8 @@ func cancel_async_request(request_id: int) -> void:
 	var request: AsyncCellRequest = _async_requests[request_id]
 
 	# Cancel pending parse tasks
-	for task_id in request.pending_parses.values():
-		_background_processor.cancel_task(task_id)
+	for task_id: int in request.pending_parses.values():
+		_background_processor.call("cancel_task", task_id)
 
 	# Clean up cell node if started
 	if request.cell_node:
@@ -869,9 +877,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
 	var disk_cache_hits := 0
 
-	for ref in cell.references:
+	for ref: CellReference in cell.references:
 		var record_type: Array = [""]
-		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 		if not base_record:
 			continue
 
@@ -918,8 +926,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 		# Need to load this model from BSA + convert NIF
 		if model_path not in models_to_load:
 			models_to_load[model_path] = {"item_ids": []}
-		if item_id and item_id not in models_to_load[model_path].item_ids:
-			models_to_load[model_path].item_ids.append(item_id)
+		var item_ids_array: Array = models_to_load[model_path].item_ids
+		if item_id and item_id not in item_ids_array:
+			item_ids_array.append(item_id)
 
 		# Queue reference for later (after model is parsed)
 		request.references_to_process.append(ref)
@@ -928,11 +937,12 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 		print("[DIAG] Cell %s: %d models loaded from disk cache (instant)" % [request.cell_node.name, disk_cache_hits])
 
 	# Submit parse tasks for models that need loading
-	for model_path in models_to_load:
-		var item_ids: Array = models_to_load[model_path].item_ids
+	for model_path: String in models_to_load:
+		var model_info: Variant = models_to_load[model_path]
+		var item_ids: Array = model_info.item_ids if model_info is Dictionary else []
 		var item_id: String = item_ids[0] if item_ids.size() > 0 else ""
 
-		var task_id := _submit_parse_task(model_path, item_id, request.request_id)
+		var task_id := _submit_parse_task(str(model_path), item_id, request.request_id)
 		if task_id >= 0:
 			request.pending_parses[model_path] = task_id
 
@@ -964,7 +974,7 @@ func _submit_parse_task(model_path: String, item_id: String, request_id: int) ->
 		return -1
 
 	# Submit parse task
-	var task_id: int = _background_processor.submit_task(func():
+	var task_id: int = _background_processor.call("submit_task", func() -> Variant:
 		return NIFConverter.parse_buffer_only(nif_data, full_path, item_id)
 	)
 
@@ -978,10 +988,10 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 		return  # Was handled as preload
 
 	# Find which cell request this belongs to
-	for request_id in _async_requests:
+	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 
-		for model_path in request.pending_parses:
+		for model_path: String in request.pending_parses:
 			if request.pending_parses[model_path] == task_id:
 				# Found it - store result
 				request.pending_parses.erase(model_path)
@@ -1023,9 +1033,9 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 func _queue_references_for_model(request: AsyncCellRequest, model_path: String) -> void:
 	var remaining: Array = []
 
-	for ref in request.references_to_process:
+	for ref: CellReference in request.references_to_process:
 		var record_type: Array = [""]
-		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 		if not base_record:
 			continue
 
@@ -1051,7 +1061,7 @@ func _is_request_complete(request: AsyncCellRequest) -> bool:
 ## Helper methods delegated to ReferenceInstantiator
 ## These are thin wrappers used by async loading code
 
-func _get_model_path(record) -> String:
+func _get_model_path(record: Variant) -> String:
 	return _instantiator._get_model_path(record)
 
 func _apply_transform(node: Node3D, ref: CellReference, apply_model_rotation: bool) -> void:
@@ -1074,7 +1084,7 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 
 	# Try object pool first
 	if use_object_pool and _object_pool and not model_path.is_empty():
-		var pooled: Node3D = _object_pool.acquire(model_path)
+		var pooled: Node3D = _object_pool.call("acquire", model_path)
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 			_apply_transform(pooled, ref, true)
@@ -1094,7 +1104,7 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 
 	# Check if this is a light record - needs OmniLight3D in addition to model
 	var record_type: Array = [""]
-	var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+	var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 	if base_record and record_type[0] == "light":
 		var light_record: LightRecord = base_record as LightRecord
 		if light_record:
@@ -1161,7 +1171,7 @@ func _get_cache_key(model_path: String, item_id: String) -> String:
 ## Get count of pending async requests
 func get_async_pending_count() -> int:
 	var count := 0
-	for request_id in _async_requests:
+	for request_id: int in _async_requests:
 		if not _async_requests[request_id].completed:
 			count += 1
 	return count

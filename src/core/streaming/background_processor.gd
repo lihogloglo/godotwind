@@ -73,15 +73,8 @@ func submit_task(callable: Callable, priority: float = 0.0) -> int:
 	task.callable = callable
 	task.priority = priority
 
-	# Insert in priority order (lower priority value first)
-	var inserted := false
-	for i in range(_pending_tasks.size()):
-		if priority < _pending_tasks[i].priority:
-			_pending_tasks.insert(i, task)
-			inserted = true
-			break
-	if not inserted:
-		_pending_tasks.append(task)
+	# Binary heap insertion - O(log n) instead of O(n) linear search
+	_heap_push(task)
 
 	return task.id
 
@@ -106,7 +99,7 @@ func cancel_task(task_id: int) -> bool:
 ## Cancel all tasks with IDs in the given array
 func cancel_tasks(task_ids: Array) -> int:
 	var cancelled := 0
-	for task_id in task_ids:
+	for task_id: int in task_ids:
 		if cancel_task(task_id):
 			cancelled += 1
 	return cancelled
@@ -143,7 +136,9 @@ func clear_pending() -> void:
 ## Internal: Start pending tasks up to concurrent limit
 func _start_pending_tasks() -> void:
 	while _active_tasks.size() < _concurrent_limit and not _pending_tasks.is_empty():
-		var task := _pending_tasks.pop_front() as TaskEntry
+		var task: TaskEntry = _heap_pop()
+		if task == null:
+			continue
 		if task.cancelled:
 			continue
 
@@ -188,7 +183,7 @@ func _dispatch_completed_results() -> void:
 	_results_mutex.unlock()
 
 	# Dispatch each result
-	for entry in results:
+	for entry: Dictionary in results:
 		var task_id: int = entry.task_id
 		var result: Variant = entry.result
 		var error: String = entry.error
@@ -206,3 +201,69 @@ func _dispatch_completed_results() -> void:
 			task_completed.emit(task_id, result)
 		else:
 			task_failed.emit(task_id, error)
+
+
+#region Binary Heap Operations
+
+## Push a task onto the min-heap - O(log n)
+func _heap_push(task: TaskEntry) -> void:
+	_pending_tasks.append(task)
+	_heap_sift_up(_pending_tasks.size() - 1)
+
+
+## Pop the minimum priority task from the heap - O(log n)
+func _heap_pop() -> TaskEntry:
+	if _pending_tasks.is_empty():
+		return null
+
+	var result: TaskEntry = _pending_tasks[0]
+
+	# Move last element to root and sift down
+	var last_idx := _pending_tasks.size() - 1
+	if last_idx > 0:
+		_pending_tasks[0] = _pending_tasks[last_idx]
+	_pending_tasks.pop_back()
+
+	if not _pending_tasks.is_empty():
+		_heap_sift_down(0)
+
+	return result
+
+
+## Sift element up to maintain heap property
+func _heap_sift_up(idx: int) -> void:
+	while idx > 0:
+		var parent_idx := (idx - 1) >> 1  # Integer division by 2
+		if _pending_tasks[idx].priority < _pending_tasks[parent_idx].priority:
+			# Swap with parent
+			var tmp: TaskEntry = _pending_tasks[idx]
+			_pending_tasks[idx] = _pending_tasks[parent_idx]
+			_pending_tasks[parent_idx] = tmp
+			idx = parent_idx
+		else:
+			break
+
+
+## Sift element down to maintain heap property
+func _heap_sift_down(idx: int) -> void:
+	var size := _pending_tasks.size()
+	while true:
+		var smallest := idx
+		var left := (idx << 1) + 1  # 2*idx + 1
+		var right := left + 1
+
+		if left < size and _pending_tasks[left].priority < _pending_tasks[smallest].priority:
+			smallest = left
+		if right < size and _pending_tasks[right].priority < _pending_tasks[smallest].priority:
+			smallest = right
+
+		if smallest != idx:
+			# Swap and continue
+			var tmp: TaskEntry = _pending_tasks[idx]
+			_pending_tasks[idx] = _pending_tasks[smallest]
+			_pending_tasks[smallest] = tmp
+			idx = smallest
+		else:
+			break
+
+#endregion

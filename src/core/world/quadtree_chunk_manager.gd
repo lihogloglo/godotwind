@@ -52,8 +52,10 @@ var _tier_end_distances: Dictionary = {}
 func configure(p_tier_manager: RefCounted) -> void:
 	tier_manager = p_tier_manager
 	if tier_manager:
-		_tier_distances = tier_manager.tier_distances.duplicate()
-		_tier_end_distances = tier_manager.tier_end_distances.duplicate()
+		var tier_distances_dict: Dictionary = tier_manager.get("tier_distances")
+		var tier_end_distances_dict: Dictionary = tier_manager.get("tier_end_distances")
+		_tier_distances = tier_distances_dict.duplicate()
+		_tier_end_distances = tier_end_distances_dict.duplicate()
 	else:
 		# Default distances (FAR tier starts at 1km for faster impostor trigger)
 		_tier_distances = {
@@ -170,7 +172,7 @@ func get_visible_chunks(camera_cell: Vector2i, tier: int) -> Array[Vector2i]:
 				})
 
 	# Sort by distance (closest first)
-	chunks_with_distance.sort_custom(func(a, b): return a.distance < b.distance)
+	chunks_with_distance.sort_custom(func(a: Variant, b: Variant) -> bool: return a.distance < b.distance)
 
 	# Apply hard limit
 	var max_chunks := MAX_MID_CHUNKS if tier == DistanceTierManagerScript.Tier.MID else MAX_FAR_CHUNKS

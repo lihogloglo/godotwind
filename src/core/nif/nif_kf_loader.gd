@@ -203,17 +203,20 @@ func _create_animations_from_kf(
 
 	# Create an animation for each range
 	for anim_range in anim_ranges:
+		var name: String = anim_range["name"]
+		var start: float = anim_range["start_time"]
+		var end: float = anim_range["end_time"]
 		var anim := _create_single_animation(
 			reader,
-			anim_range["name"],
-			anim_range["start_time"],
-			anim_range["end_time"],
+			name,
+			start,
+			end,
 			bone_controllers,
 			bone_name_to_idx,
 			skeleton
 		)
 		if anim and anim.get_track_count() > 0:
-			animations[anim_range["name"]] = anim
+			animations[name] = anim
 
 	# If no animations were created from ranges, create one "default" animation
 	if animations.is_empty() and not bone_controllers.is_empty():
@@ -274,7 +277,7 @@ func _create_single_animation(
 				animation.track_set_path(track_idx, track_path)
 				animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
 
-				for key in trimmed:
+				for key: Dictionary in trimmed:
 					var time: float = key["time"] - start_time
 					var quat := _convert_rotation(key)
 					animation.rotation_track_insert_key(track_idx, time, quat)
@@ -287,9 +290,10 @@ func _create_single_animation(
 				animation.track_set_path(track_idx, track_path)
 				animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
 
-				for key in trimmed:
+				for key: Dictionary in trimmed:
 					var time: float = key["time"] - start_time
-					var pos := _convert_position(key["value"])
+					var pos_val: Vector3 = key["value"]
+					var pos := _convert_position(pos_val)
 					animation.position_track_insert_key(track_idx, time, pos)
 
 		# Add scale track
@@ -300,7 +304,7 @@ func _create_single_animation(
 				animation.track_set_path(track_idx, track_path)
 				animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
 
-				for key in trimmed:
+				for key: Dictionary in trimmed:
 					var time: float = key["time"] - start_time
 					var scale_val: float = key["value"]
 					animation.scale_track_insert_key(track_idx, time, Vector3(scale_val, scale_val, scale_val))
@@ -324,7 +328,7 @@ func _extract_regular_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dic
 ## Trim keyframes to a time range
 func _trim_keys(keys: Array, start_time: float, end_time: float) -> Array:
 	var result: Array = []
-	for key in keys:
+	for key: Dictionary in keys:
 		var time: float = key["time"]
 		if time >= start_time and time <= end_time:
 			result.append(key)
@@ -333,7 +337,7 @@ func _trim_keys(keys: Array, start_time: float, end_time: float) -> Array:
 	if result.is_empty() and not keys.is_empty():
 		var before: Dictionary = {}
 		var after: Dictionary = {}
-		for key in keys:
+		for key: Dictionary in keys:
 			var time: float = key["time"]
 			if time < start_time:
 				before = key

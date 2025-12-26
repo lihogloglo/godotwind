@@ -45,7 +45,7 @@ func initialize() -> Error:
 
 	# Create terrain manager
 	_terrain_manager = TerrainManagerScript.new()
-	_terrain_manager.region_size = region_size
+	_terrain_manager.set("region_size", region_size)
 
 	# Create texture loader
 	_texture_loader = TerrainTextureLoaderScript.new()
@@ -61,10 +61,10 @@ func initialize() -> Error:
 func set_terrain_assets(assets: Terrain3DAssets) -> void:
 	_terrain_assets = assets
 	if _texture_loader and assets:
-		var loaded: int = _texture_loader.load_terrain_textures(assets)
+		var loaded: int = _texture_loader.call("load_terrain_textures", assets)
 		print("MorrowindDataProvider: Loaded %d terrain textures" % loaded)
 		if _terrain_manager:
-			_terrain_manager.set_texture_slot_mapper(_texture_loader)
+			_terrain_manager.call("set_texture_slot_mapper", _texture_loader)
 
 
 func get_heightmap_for_region(region_coord: Vector2i) -> Image:
@@ -96,7 +96,7 @@ func get_heightmap_for_region(region_coord: Vector2i) -> Image:
 			any_data = true
 
 			# Generate 65x65 heightmap
-			var cell_hm: Image = _terrain_manager.generate_heightmap(land)
+			var cell_hm: Image = _terrain_manager.call("generate_heightmap", land)
 
 			# Calculate offset in combined image
 			# Y is flipped: local_y=0 (south) goes to bottom of image
@@ -134,7 +134,7 @@ func get_controlmap_for_region(region_coord: Vector2i) -> Image:
 				continue
 
 			any_data = true
-			var cell_cm: Image = _terrain_manager.generate_control_map(land)
+			var cell_cm: Image = _terrain_manager.call("generate_control_map", land)
 
 			var img_x := local_x * CELL_SIZE_PX
 			var img_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE_PX
@@ -167,7 +167,7 @@ func get_colormap_for_region(region_coord: Vector2i) -> Image:
 				continue
 
 			any_data = true
-			var cell_colm: Image = _terrain_manager.generate_color_map(land)
+			var cell_colm: Image = _terrain_manager.call("generate_color_map", land)
 
 			var img_x := local_x * CELL_SIZE_PX
 			var img_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE_PX
@@ -224,7 +224,7 @@ func get_all_terrain_regions() -> Array[Vector2i]:
 	var regions: Array[Vector2i] = []
 	var seen: Dictionary = {}
 
-	for key in ESMManager.lands:
+	for key: Variant in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
 		if land and land.has_heights():
 			var region := _cell_to_region(Vector2i(land.cell_x, land.cell_y))
@@ -254,7 +254,7 @@ func _calculate_world_bounds() -> void:
 	var min_y := 999999
 	var max_y := -999999
 
-	for key in ESMManager.lands:
+	for key: Variant in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
 		if land:
 			min_x = mini(min_x, land.cell_x)

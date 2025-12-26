@@ -177,14 +177,18 @@ func set_tracked_node(node: Node3D) -> void:
 ## Set the BackgroundProcessor for async terrain generation
 ## When set, terrain generation runs on worker threads instead of main thread
 func set_background_processor(processor: Node) -> void:
-	if _background_processor and _background_processor.task_completed.is_connected(_on_generation_completed):
-		_background_processor.task_completed.disconnect(_on_generation_completed)
+	if _background_processor:
+		var old_signal: Variant = _background_processor.get("task_completed")
+		if old_signal is Signal and (old_signal as Signal).is_connected(_on_generation_completed):
+			(old_signal as Signal).disconnect(_on_generation_completed)
 
 	_background_processor = processor
 	_async_enabled = processor != null
 
 	if _background_processor:
-		_background_processor.task_completed.connect(_on_generation_completed)
+		var new_signal: Variant = _background_processor.get("task_completed")
+		if new_signal is Signal:
+			(new_signal as Signal).connect(_on_generation_completed)
 		_debug("Async mode enabled with BackgroundProcessor")
 	else:
 		_debug("Async mode disabled")
@@ -207,8 +211,9 @@ func stop() -> void:
 
 	# Cancel pending async tasks
 	if _async_enabled and _background_processor:
-		for task_id in _pending_generation.values():
-			_background_processor.cancel_task(task_id)
+		for task_id: int in _pending_generation.values():
+			if _background_processor.has_method("cancel_task"):
+				_background_processor.call("cancel_task", task_id)
 	_pending_generation.clear()
 	_pending_import.clear()
 
@@ -340,7 +345,7 @@ func _on_region_changed(new_region: Vector2i) -> void:
 
 			# Skip if already queued
 			var already_queued := false
-			for entry in _generation_queue:
+			for entry: Dictionary in _generation_queue:
 				if entry.region == region:
 					already_queued = true
 					break
@@ -496,7 +501,7 @@ func _load_region_async(region_coord: Vector2i) -> void:
 	var region_size := _provider.region_size
 
 	# Submit generation task
-	var task_id: int = _background_processor.submit_task(func():
+	var task_id: int = _background_processor.call("submit_task", func() -> Dictionary:
 		return _generate_region_on_worker(region_coord, vertex_spacing, region_size)
 	)
 
@@ -543,7 +548,7 @@ func _on_generation_completed(task_id: int, result: Variant) -> void:
 	var region_coord: Vector2i = Vector2i.ZERO
 	var found := false
 
-	for coord in _pending_generation:
+	for coord: Vector2i in _pending_generation:
 		if _pending_generation[coord] == task_id:
 			region_coord = coord
 			found = true

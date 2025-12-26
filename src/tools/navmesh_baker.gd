@@ -94,11 +94,15 @@ func initialize() -> Error:
 	# Validate NavMeshConfig
 	var validation := NavMeshConfig.validate_config()
 	if not validation.valid:
-		push_error("NavMeshBaker: Invalid NavMeshConfig: %s" % ", ".join(validation.errors))
+		var errors_arr: Array = validation.errors
+		var errors_array: PackedStringArray = PackedStringArray(errors_arr)
+		push_error("NavMeshBaker: Invalid NavMeshConfig: %s" % ", ".join(errors_array))
 		return ERR_INVALID_PARAMETER
 
-	if not validation.warnings.is_empty():
-		push_warning("NavMeshBaker: Config warnings: %s" % ", ".join(validation.warnings))
+	var warnings_arr: Array = validation.warnings
+	if not warnings_arr.is_empty():
+		var warnings_psa: PackedStringArray = PackedStringArray(warnings_arr)
+		push_warning("NavMeshBaker: Config warnings: %s" % ", ".join(warnings_psa))
 
 	# Get output directory from settings manager
 	if output_dir.is_empty():
@@ -129,7 +133,7 @@ func bake_all_cells() -> Dictionary:
 
 	# Get all cells from ESMManager
 	var cells_to_bake: Array[CellRecord] = []
-	for cell_id in ESMManager.cells:
+	for cell_id: String in ESMManager.cells:
 		var cell: CellRecord = ESMManager.cells[cell_id]
 		if not cell:
 			continue
@@ -166,7 +170,9 @@ func bake_all_cells() -> Dictionary:
 			_failed_cells.append(cell_id)
 
 		# Yield every cell to keep UI responsive
-		await Engine.get_main_loop().process_frame
+		var main_loop: SceneTree = Engine.get_main_loop() as SceneTree
+		if main_loop:
+			await main_loop.process_frame
 
 	# Complete
 	var total := cells_to_bake.size()
@@ -175,7 +181,7 @@ func bake_all_cells() -> Dictionary:
 	# Statistics
 	var avg_time := 0.0
 	if not _bake_times.is_empty():
-		avg_time = _bake_times.reduce(func(sum, t): return sum + t, 0.0) / _bake_times.size()
+		avg_time = _bake_times.reduce(func(sum: float, t: float) -> float: return sum + t, 0.0) / _bake_times.size()
 
 	print("\nNavMeshBaker: Batch complete")
 	print("  Total: %d" % total)
@@ -307,7 +313,8 @@ func _add_terrain3d_geometry(cell: CellRecord, cell_origin: Vector3, source_geom
 
 	# Use Terrain3D's optimized navmesh source geometry generation
 	# This is the same method used by RuntimeNavigationBaker
-	var faces: PackedVector3Array = terrain_3d.generate_nav_mesh_source_geometry(cell_aabb, simplify_terrain)
+	var terrain_node: Terrain3D = terrain_3d as Terrain3D
+	var faces: PackedVector3Array = terrain_node.generate_nav_mesh_source_geometry(cell_aabb, simplify_terrain)
 
 	if faces.is_empty():
 		# No terrain in this cell, or all non-navigable
@@ -400,9 +407,9 @@ func _add_object_geometry(cell: CellRecord, cell_origin: Vector3, source_geometr
 	var mesh_count := 0
 
 	# Process each reference
-	for ref in cell.references:
+	for ref: CellReference in cell.references:
 		# Skip disabled/deleted references
-		if ref.deleted:
+		if ref.is_deleted:
 			continue
 
 		# Get object type (NIF path or base object)
@@ -432,23 +439,27 @@ func _add_object_geometry(cell: CellRecord, cell_origin: Vector3, source_geometr
 
 
 ## Get NIF path from cell reference
-func _get_reference_nif_path(ref) -> String:
+func _get_reference_nif_path(ref: CellReference) -> String:
 	# Try to get base object
-	var base_obj = ESMManager.get_object(ref.ref_id)
+	var base_obj: ESMRecord = ESMManager.get_any_record(str(ref.ref_id))
 	if not base_obj:
 		return ""
 
-	# Get model path from base object
-	if base_obj.has("model") and not base_obj.model.is_empty():
-		return base_obj.model
+	# Get model path from base object (use get() since ESMRecord is base class)
+	if "model" in base_obj:
+		var model_val: Variant = base_obj.get("model")
+		if model_val is String:
+			var model_str: String = model_val
+			if not model_str.is_empty():
+				return model_str
 
 	return ""
 
 
 ## Check if object should be included in navmesh
-func _is_walkable_object(ref) -> bool:
+func _is_walkable_object(ref: CellReference) -> bool:
 	# Get base object
-	var base_obj = ESMManager.get_object(ref.ref_id)
+	var base_obj: ESMRecord = ESMManager.get_any_record(str(ref.ref_id))
 	if not base_obj:
 		return false
 
@@ -466,7 +477,7 @@ func _is_walkable_object(ref) -> bool:
 ## Load collision mesh from NIF file
 func _load_nif_collision_mesh(nif_path: String) -> ArrayMesh:
 	# Load NIF file from BSA/filesystem
-	var bsa_data: PackedByteArray = BSAManager.load_file(nif_path)
+	var bsa_data: PackedByteArray = BSAManager.extract_file(nif_path)
 	if bsa_data.is_empty():
 		return null
 
@@ -518,7 +529,8 @@ func _recursively_extract_meshes(node: Node, parent_transform: Transform3D, vert
 	var current_transform := parent_transform
 
 	if node is Node3D:
-		current_transform = parent_transform * node.transform
+		var node_3d: Node3D = node as Node3D
+		current_transform = parent_transform * node_3d.transform
 
 	# Extract mesh if this is a MeshInstance3D
 	if node is MeshInstance3D:
@@ -554,20 +566,17 @@ func _recursively_extract_meshes(node: Node, parent_transform: Transform3D, vert
 
 
 ## Get reference transform in world space
-func _get_reference_transform(ref, cell_origin: Vector3) -> Transform3D:
+func _get_reference_transform(ref: CellReference, cell_origin: Vector3) -> Transform3D:
 	var transform := Transform3D.IDENTITY
 
-	# Position - use CoordinateSystem for proper conversion
-	if ref.has("position"):
-		transform.origin = CS.vector_to_godot(ref.position) + cell_origin
+	# Position - use CoordinateSystem for proper conversion (always present in CellReference)
+	transform.origin = CS.vector_to_godot(ref.position) + cell_origin
 
 	# Rotation - use proper ESM rotation conversion matching OpenMW
-	if ref.has("rotation"):
-		transform.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
+	transform.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
 
 	# Scale
-	if ref.has("scale"):
-		transform = transform.scaled(Vector3.ONE * ref.scale)
+	transform = transform.scaled(Vector3.ONE * ref.scale)
 
 	return transform
 

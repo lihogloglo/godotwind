@@ -19,8 +19,7 @@ extends RefCounted
 
 const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-const MeshSimplifier := preload("res://src/core/nif/mesh_simplifier.gd")
-const MeshOptimizerClass := preload("res://addons/meshoptimizer/mesh_optimizer.gd")
+const MeshOptimizer := preload("res://addons/meshoptimizer/mesh_optimizer.gd")
 
 ## Output directory for merged cell meshes (set in initialize from SettingsManager)
 var output_dir: String = ""
@@ -100,7 +99,9 @@ func bake_all_cells() -> Dictionary:
 			_failed_cells.append(cell_grid)
 
 		# Yield every cell to keep UI responsive
-		await Engine.get_main_loop().process_frame
+		var main_loop: SceneTree = Engine.get_main_loop() as SceneTree
+		if main_loop:
+			await main_loop.process_frame
 
 	batch_complete.emit(cells.size(), _total_baked, _total_failed, _total_skipped)
 
@@ -140,14 +141,15 @@ func bake_cell(cell_grid: Vector2i) -> Dictionary:
 
 	# Collect all mesh data
 	var mesh_data := _collect_mesh_data(static_refs, cell_grid)
-	if mesh_data.surfaces.is_empty():
+	var surfaces_arr: Array = mesh_data.surfaces
+	if surfaces_arr.is_empty():
 		var error := "No valid meshes found"
 		push_warning("MeshPrebakerV2: %s - %s" % [error, cell_grid])
 		cell_baked.emit(cell_grid, false, "", {})
 		return {"success": false, "output_path": "", "error": error}
 
 	# Merge and simplify
-	var merged_mesh := _merge_surfaces(mesh_data.surfaces)
+	var merged_mesh := _merge_surfaces(surfaces_arr)
 	if not merged_mesh:
 		var error := "Failed to merge meshes"
 		push_warning("MeshPrebakerV2: %s - %s" % [error, cell_grid])
@@ -189,9 +191,9 @@ func _collect_mesh_data(references: Array, cell_grid: Vector2i) -> Dictionary:
 	var surfaces := []  # Array of { arrays: Array, transform: Transform3D }
 	var total_vertices := 0
 
-	for ref in references:
+	for ref: CellReference in references:
 		var record_type: Array = [""]
-		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 		if not base_record:
 			continue
 
@@ -261,13 +263,13 @@ func _merge_surfaces(surfaces: Array) -> ArrayMesh:
 		return null
 
 	# Use fast native MeshOptimizer if available, fallback to GDScript
-	var optimizer := MeshOptimizerClass.new()
+	var optimizer := MeshOptimizer.new()
 	var surface_tool := SurfaceTool.new()
 	var current_vertex_count := 0
 	var mesh := ArrayMesh.new()
 	var surface_index := 0
 
-	for surface_data in surfaces:
+	for surface_data: Dictionary in surfaces:
 		var arrays: Array = surface_data.arrays
 		var transform: Transform3D = surface_data.transform
 
@@ -390,8 +392,9 @@ func _find_all_mesh_instances(node: Node) -> Array[MeshInstance3D]:
 func _get_accumulated_transform(node: Node3D) -> Transform3D:
 	var accumulated := node.transform
 	var parent := node.get_parent()
-	while parent is Node3D:
-		accumulated = parent.transform * accumulated
+	while parent != null and parent is Node3D:
+		var parent_3d: Node3D = parent as Node3D
+		accumulated = parent_3d.transform * accumulated
 		parent = parent.get_parent()
 	return accumulated
 
@@ -401,7 +404,7 @@ func _get_all_exterior_cells() -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
 	var seen: Dictionary = {}
 
-	for key in ESMManager.cells:
+	for key: String in ESMManager.cells:
 		var cell: CellRecord = ESMManager.cells[key]
 		if cell and not cell.is_interior():
 			var grid := Vector2i(cell.grid_x, cell.grid_y)
@@ -409,7 +412,7 @@ func _get_all_exterior_cells() -> Array[Vector2i]:
 				seen[grid] = true
 				cells.append(grid)
 
-	cells.sort_custom(func(a, b): return a.x < b.x or (a.x == b.x and a.y < b.y))
+	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.x < b.x or (a.x == b.x and a.y < b.y))
 	return cells
 
 
@@ -417,9 +420,9 @@ func _get_all_exterior_cells() -> Array[Vector2i]:
 func _filter_static_references(references: Array) -> Array:
 	var filtered := []
 
-	for ref in references:
+	for ref: CellReference in references:
 		var record_type: Array = [""]
-		var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 		if not base_record:
 			continue
 
@@ -502,7 +505,8 @@ func _count_mesh_vertices(mesh: ArrayMesh) -> int:
 	for i in range(mesh.get_surface_count()):
 		var arrays := mesh.surface_get_arrays(i)
 		if arrays[Mesh.ARRAY_VERTEX]:
-			count += arrays[Mesh.ARRAY_VERTEX].size()
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			count += verts.size()
 	return count
 
 

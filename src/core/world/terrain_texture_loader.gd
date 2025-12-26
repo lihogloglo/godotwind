@@ -82,7 +82,7 @@ func _collect_used_texture_indices() -> Array[int]:
 	var cells_with_textures := 0
 	var cells_without_textures := 0
 
-	for key in ESMManager.lands.keys():
+	for key: Variant in ESMManager.lands.keys():
 		var land: LandRecord = ESMManager.lands[key]
 		if not land:
 			continue
@@ -109,17 +109,17 @@ func _collect_used_texture_indices() -> Array[int]:
 	for idx: int in usage_counts.keys():
 		indices_by_usage.append({"idx": idx, "count": usage_counts[idx]})
 
-	indices_by_usage.sort_custom(func(a, b): return a["count"] > b["count"])
+	indices_by_usage.sort_custom(func(a: Variant, b: Variant) -> bool: return a["count"] > b["count"])
 
 	# Convert to array of indices (sorted by frequency, most used first)
 	var result: Array[int] = []
-	for entry in indices_by_usage:
+	for entry: Variant in indices_by_usage:
 		result.append(entry["idx"])
 
 	# Print usage statistics
 	if result.size() <= 20:
 		var details := []
-		for entry in indices_by_usage:
+		for entry: Variant in indices_by_usage:
 			details.append("idx%d:%d" % [entry["idx"], entry["count"]])
 		print("TerrainTextureLoader: Texture usage (idx:count): %s" % ", ".join(details))
 	else:
@@ -207,7 +207,7 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 func _find_ltex_by_index(ltex_index: int) -> LandTextureRecord:
 	# ESMManager stores LTEX records by record_id (name), not by index
 	# We need to search through all records to find the one with matching index
-	for key in ESMManager.land_textures.keys():
+	for key: Variant in ESMManager.land_textures.keys():
 		var ltex: LandTextureRecord = ESMManager.land_textures[key]
 		if ltex and ltex.texture_index == ltex_index:
 			return ltex

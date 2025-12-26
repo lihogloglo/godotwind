@@ -8,11 +8,11 @@
 @tool
 extends Control
 
-const PrebakingManager := preload("res://src/tools/prebaking/prebaking_manager.gd")
+const PrebakingManagerScript := preload("res://src/tools/prebaking/prebaking_manager.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
-## References
-@onready var manager: Node = $PrebakingManager
+## References - use the preloaded script type for proper typing
+@onready var manager: PrebakingManagerScript = $PrebakingManager
 
 ## UI Elements - will be created in _ready
 var _main_container: VBoxContainer
@@ -358,43 +358,43 @@ func _connect_signals() -> void:
 	manager.error_occurred.connect(_on_error_occurred)
 
 	# Component checkboxes
-	_terrain_section.checkbox.toggled.connect(func(pressed):
+	(_terrain_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_terrain = pressed
 	)
-	_model_section.checkbox.toggled.connect(func(pressed):
+	(_model_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_models = pressed
 	)
-	_impostor_section.checkbox.toggled.connect(func(pressed):
+	(_impostor_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_impostors = pressed
 	)
-	_mesh_section.checkbox.toggled.connect(func(pressed):
+	(_mesh_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_merged_meshes = pressed
 	)
-	_navmesh_section.checkbox.toggled.connect(func(pressed):
+	(_navmesh_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_navmeshes = pressed
 	)
-	_shore_section.checkbox.toggled.connect(func(pressed):
+	(_shore_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_shore_mask = pressed
 	)
 
 	# Bake only buttons
-	_terrain_section.bake_button.pressed.connect(func():
-		manager.bake_component(PrebakingManager.Component.TERRAIN)
+	(_terrain_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.TERRAIN)
 	)
-	_model_section.bake_button.pressed.connect(func():
-		manager.bake_component(PrebakingManager.Component.MODELS)
+	(_model_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.MODELS)
 	)
-	_impostor_section.bake_button.pressed.connect(func():
-		manager.bake_component(PrebakingManager.Component.IMPOSTORS)
+	(_impostor_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.IMPOSTORS)
 	)
-	_mesh_section.bake_button.pressed.connect(func():
-		manager.bake_component(PrebakingManager.Component.MERGED_MESHES)
+	(_mesh_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.MERGED_MESHES)
 	)
-	_navmesh_section.bake_button.pressed.connect(func():
-		manager.bake_component(PrebakingManager.Component.NAVMESHES)
+	(_navmesh_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.NAVMESHES)
 	)
-	_shore_section.bake_button.pressed.connect(func():
-		manager.bake_component(PrebakingManager.Component.SHORE_MASK)
+	(_shore_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.SHORE_MASK)
 	)
 
 
@@ -402,8 +402,8 @@ func _update_ui_state() -> void:
 	if not manager:
 		return
 
-	var summary := manager.get_state_summary() as Dictionary
-	var is_running: bool = manager.status == PrebakingManager.Status.RUNNING
+	var summary: Dictionary = manager.get_state_summary()
+	var is_running: bool = manager.status == PrebakingManagerScript.Status.RUNNING
 
 	# Update buttons
 	_start_button.disabled = is_running
@@ -417,12 +417,12 @@ func _update_ui_state() -> void:
 		_start_button.text = "Bake Selected"
 
 	# Update component sections
-	_update_component_section(_terrain_section, summary.get("terrain", {}), is_running)
-	_update_component_section(_model_section, summary.get("models", {}), is_running)
-	_update_component_section(_impostor_section, summary.get("impostors", {}), is_running)
-	_update_component_section(_mesh_section, summary.get("merged_meshes", {}), is_running)
-	_update_component_section(_navmesh_section, summary.get("navmeshes", {}), is_running)
-	_update_component_section(_shore_section, summary.get("shore_mask", {}), is_running)
+	_update_component_section(_terrain_section, summary.get("terrain", {}) as Dictionary, is_running)
+	_update_component_section(_model_section, summary.get("models", {}) as Dictionary, is_running)
+	_update_component_section(_impostor_section, summary.get("impostors", {}) as Dictionary, is_running)
+	_update_component_section(_mesh_section, summary.get("merged_meshes", {}) as Dictionary, is_running)
+	_update_component_section(_navmesh_section, summary.get("navmeshes", {}) as Dictionary, is_running)
+	_update_component_section(_shore_section, summary.get("shore_mask", {}) as Dictionary, is_running)
 
 	# Update overall progress
 	_overall_progress.value = summary.get("overall_progress", 0.0) * 100.0
@@ -432,9 +432,12 @@ func _update_component_section(section: Dictionary, data: Dictionary, is_running
 	if data.is_empty():
 		return
 
-	var completed: int = data.get("completed", []).size()
-	var pending: int = data.get("pending", []).size()
-	var failed: int = data.get("failed", []).size()
+	var completed_arr: Array = data.get("completed", []) as Array
+	var pending_arr: Array = data.get("pending", []) as Array
+	var failed_arr: Array = data.get("failed", []) as Array
+	var completed: int = completed_arr.size()
+	var pending: int = pending_arr.size()
+	var failed: int = failed_arr.size()
 	var total := completed + pending + failed
 
 	section.checkbox.disabled = is_running
@@ -468,13 +471,13 @@ func _on_stop_pressed() -> void:
 func _on_reset_pressed() -> void:
 	var dialog := ConfirmationDialog.new()
 	dialog.dialog_text = "This will clear all progress and start fresh. Are you sure?"
-	dialog.confirmed.connect(func():
+	dialog.confirmed.connect(func() -> void:
 		manager.reset_all()
 		_log("Reset all progress", Color.ORANGE)
 		_update_ui_state()
 		dialog.queue_free()
 	)
-	dialog.canceled.connect(func():
+	dialog.canceled.connect(func() -> void:
 		dialog.queue_free()
 	)
 	add_child(dialog)
@@ -483,19 +486,19 @@ func _on_reset_pressed() -> void:
 
 func _on_status_changed(new_status: int) -> void:
 	match new_status:
-		PrebakingManager.Status.IDLE:
+		PrebakingManagerScript.Status.IDLE:
 			_status_label.text = "Idle"
 			_status_label.add_theme_color_override("font_color", Color.GRAY)
-		PrebakingManager.Status.RUNNING:
+		PrebakingManagerScript.Status.RUNNING:
 			_status_label.text = "Running"
 			_status_label.add_theme_color_override("font_color", Color.GREEN)
-		PrebakingManager.Status.PAUSED:
+		PrebakingManagerScript.Status.PAUSED:
 			_status_label.text = "Paused"
 			_status_label.add_theme_color_override("font_color", Color.YELLOW)
-		PrebakingManager.Status.COMPLETED:
+		PrebakingManagerScript.Status.COMPLETED:
 			_status_label.text = "Completed"
 			_status_label.add_theme_color_override("font_color", Color.CYAN)
-		PrebakingManager.Status.ERROR:
+		PrebakingManagerScript.Status.ERROR:
 			_status_label.text = "Error"
 			_status_label.add_theme_color_override("font_color", Color.RED)
 

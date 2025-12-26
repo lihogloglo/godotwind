@@ -9,6 +9,15 @@ const DDS := preload("res://src/core/texture/dds_loader.gd")
 # Texture cache: normalized_path -> ImageTexture
 static var _cache: Dictionary = {}
 
+# LRU tracking: Array of normalized paths in access order (oldest first)
+static var _lru_order: Array[String] = []
+
+# Maximum textures to keep in cache (prevents unbounded memory growth)
+const MAX_CACHE_SIZE: int = 2000
+
+# Resolved path cache: input_path -> resolved_full_path (avoids re-probing BSA)
+static var _path_cache: Dictionary = {}
+
 # Fallback texture for missing textures
 static var _fallback_texture: ImageTexture = null
 
@@ -16,6 +25,7 @@ static var _fallback_texture: ImageTexture = null
 static var textures_loaded: int = 0
 static var cache_hits: int = 0
 static var load_failures: int = 0
+static var lru_evictions: int = 0
 
 
 ## Load a texture from BSA archives
@@ -30,6 +40,11 @@ static func load_texture(texture_path: String) -> ImageTexture:
 	# Check cache first
 	if _cache.has(normalized):
 		cache_hits += 1
+		# Update LRU - move to end (most recently used)
+		var idx := _lru_order.find(normalized)
+		if idx >= 0:
+			_lru_order.remove_at(idx)
+			_lru_order.append(normalized)
 		return _cache[normalized]
 
 	# Try to find the texture with various extensions
@@ -78,8 +93,15 @@ static func load_texture(texture_path: String) -> ImageTexture:
 		load_failures += 1
 		return _get_fallback_texture()
 
-	# Cache the texture
+	# LRU eviction if cache is full
+	while _cache.size() >= MAX_CACHE_SIZE and not _lru_order.is_empty():
+		var oldest: String = _lru_order.pop_front()
+		_cache.erase(oldest)
+		lru_evictions += 1
+
+	# Cache the texture and add to LRU
 	_cache[normalized] = texture
+	_lru_order.append(normalized)
 	textures_loaded += 1
 
 	return texture
@@ -90,7 +112,15 @@ static func load_texture(texture_path: String) -> ImageTexture:
 ## 1. If path contains "textures\" or "textures/", strip everything before it
 ## 2. If path doesn't start with "textures\", prepend it
 ## 3. Try multiple extensions (.dds, .tga, .bmp)
+## Results are cached to avoid repeated BSA probing
 static func _extract_texture_data(normalized_path: String) -> PackedByteArray:
+	# Check path cache first - avoid re-probing BSA for known paths
+	if _path_cache.has(normalized_path):
+		var cached_path: String = _path_cache[normalized_path]
+		if cached_path.is_empty():
+			return PackedByteArray()  # Known failure
+		return BSAManager.extract_file(cached_path)
+
 	# Extensions to try - DDS is most common in Morrowind BSAs
 	var extensions := [".dds", ".tga", ".bmp"]
 
@@ -117,7 +147,12 @@ static func _extract_texture_data(normalized_path: String) -> PackedByteArray:
 			var full_path: String = path_base + try_ext
 			var data: PackedByteArray = BSAManager.extract_file(full_path)
 			if not data.is_empty():
+				# Cache the successful path
+				_path_cache[normalized_path] = full_path
 				return data
+
+	# Cache the failure (empty string) to avoid re-probing
+	_path_cache[normalized_path] = ""
 
 	# Debug: Log the failure for troubleshooting
 	if OS.is_debug_build():
@@ -182,7 +217,7 @@ static func apply_textures_to_node(node: Node3D) -> int:
 
 		# Check material override
 		if mesh_instance.material_override is StandardMaterial3D:
-			if apply_texture_to_material(mesh_instance.material_override):
+			if apply_texture_to_material(mesh_instance.material_override as StandardMaterial3D):
 				count += 1
 
 		# Check surface materials
@@ -190,13 +225,13 @@ static func apply_textures_to_node(node: Node3D) -> int:
 			for i in mesh_instance.mesh.get_surface_count():
 				var mat := mesh_instance.get_surface_override_material(i)
 				if mat is StandardMaterial3D:
-					if apply_texture_to_material(mat):
+					if apply_texture_to_material(mat as StandardMaterial3D):
 						count += 1
 
 	# Recurse into children
 	for child in node.get_children():
 		if child is Node3D:
-			count += apply_textures_to_node(child)
+			count += apply_textures_to_node(child as Node3D)
 
 	return count
 
@@ -235,9 +270,12 @@ static func _normalize_path(path: String) -> String:
 ## Clear the texture cache
 static func clear_cache() -> void:
 	_cache.clear()
+	_lru_order.clear()
+	_path_cache.clear()
 	textures_loaded = 0
 	cache_hits = 0
 	load_failures = 0
+	lru_evictions = 0
 
 
 ## Get cache statistics
@@ -246,7 +284,10 @@ static func get_stats() -> Dictionary:
 		"cached": _cache.size(),
 		"loaded": textures_loaded,
 		"cache_hits": cache_hits,
-		"failures": load_failures
+		"failures": load_failures,
+		"lru_evictions": lru_evictions,
+		"path_cache_size": _path_cache.size(),
+		"max_cache_size": MAX_CACHE_SIZE
 	}
 
 
@@ -285,7 +326,8 @@ static func debug_find_texture(texture_path: String) -> Dictionary:
 	for path_base: String in path_variants:
 		for try_ext: String in extensions:
 			var full_path: String = path_base + try_ext
-			result["paths_tried"].append(full_path)
+			var paths_tried: Array = result["paths_tried"]
+			paths_tried.append(full_path)
 			if BSAManager.has_file(full_path):
 				result["found"] = true
 				result["found_path"] = full_path

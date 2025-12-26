@@ -363,8 +363,17 @@ func _create_animation_tree(character_root: Node3D) -> void:
 	animation_tree.active = true
 
 	if debug_animations:
-		print("CharacterAnimationController: AnimationTree created with %d states" %
-			state_machine.get_node_count())
+		# Note: AnimationNodeStateMachine in Godot 4 doesn't have get_node_count()
+		# Count added states from the states array in _add_animation_states()
+		var node_count := 0
+		var state_list: Array[AnimState] = [AnimState.IDLE, AnimState.WALK, AnimState.RUN, AnimState.JUMP,
+					  AnimState.SWIM_IDLE, AnimState.SWIM_FORWARD, AnimState.COMBAT_IDLE,
+					  AnimState.ATTACK, AnimState.HIT, AnimState.DEATH, AnimState.SPELL_CAST,
+					  AnimState.BLOCK]
+		for state: AnimState in state_list:
+			if state_machine.has_node(_get_state_name(state)):
+				node_count += 1
+		print("CharacterAnimationController: AnimationTree created with %d states" % node_count)
 
 
 ## Add animation states to state machine
@@ -447,7 +456,7 @@ func _add_state_transitions() -> void:
 		["Death", "Idle"],  # For resurrection
 	]
 
-	for trans in transitions:
+	for trans: Array in transitions:
 		var from: String = trans[0]
 		var to: String = trans[1]
 

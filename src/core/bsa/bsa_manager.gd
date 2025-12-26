@@ -49,7 +49,7 @@ func load_archive(path: String) -> Error:
 		push_warning("BSAManager: Archive already loaded: %s" % path)
 		return OK
 
-	var reader: RefCounted = BSAReaderScript.new()
+	var reader: BSAReader = BSAReaderScript.new()
 	var result: Error = reader.open(path)
 
 	if result != OK:
@@ -64,7 +64,7 @@ func load_archive(path: String) -> Error:
 
 	# Index files from this archive
 	var file_count := 0
-	for entry in reader.get_file_list():
+	for entry: BSAReader.FileEntry in reader.get_file_list():
 		var normalized := _normalize_path(entry.name)
 		# Later archives override earlier ones
 		_file_cache[normalized] = {
@@ -96,9 +96,9 @@ func unload_archive(path: String) -> void:
 func _rebuild_file_cache() -> void:
 	_file_cache.clear()
 
-	for archive_path in _load_order:
-		var reader: RefCounted = _archives[archive_path]
-		for entry in reader.get_file_list():
+	for archive_path: String in _load_order:
+		var reader: BSAReader = _archives[archive_path]
+		for entry: BSAReader.FileEntry in reader.get_file_list():
 			var normalized := _normalize_path(entry.name)
 			_file_cache[normalized] = {
 				"archive": reader,
@@ -120,7 +120,7 @@ func get_file_info(path: String) -> Dictionary:
 		return {}
 
 	var cached: Dictionary = _file_cache[normalized]
-	var entry: RefCounted = cached["entry"]
+	var entry: BSAReader.FileEntry = cached["entry"]
 	return {
 		"path": entry.name,
 		"size": entry.size,
@@ -150,8 +150,8 @@ func extract_file(path: String) -> PackedByteArray:
 		return PackedByteArray()
 
 	var cached: Dictionary = _file_cache[normalized]
-	var reader: RefCounted = cached["archive"]
-	var entry: RefCounted = cached["entry"]
+	var reader: BSAReader = cached["archive"]
+	var entry: BSAReader.FileEntry = cached["entry"]
 
 	var data: PackedByteArray = reader.extract_file_entry(entry)
 	if data.size() > 0:
@@ -220,10 +220,10 @@ func find_files(pattern: String) -> Array[Dictionary]:
 	var results: Array[Dictionary] = []
 	var normalized_pattern := _normalize_path(pattern)
 
-	for path in _file_cache.keys():
+	for path: String in _file_cache.keys():
 		if path.match(normalized_pattern):
 			var cached: Dictionary = _file_cache[path]
-			var entry: RefCounted = cached["entry"]
+			var entry: BSAReader.FileEntry = cached["entry"]
 			results.append({
 				"path": entry.name,
 				"size": entry.size,
@@ -239,10 +239,10 @@ func get_files_by_extension(ext: String) -> Array[Dictionary]:
 	if not target_ext.begins_with("."):
 		target_ext = "." + target_ext
 
-	for path in _file_cache.keys():
+	for path: String in _file_cache.keys():
 		if path.ends_with(target_ext):
 			var cached: Dictionary = _file_cache[path]
-			var entry: RefCounted = cached["entry"]
+			var entry: BSAReader.FileEntry = cached["entry"]
 			results.append({
 				"path": entry.name,
 				"size": entry.size,
@@ -290,12 +290,12 @@ func get_stats() -> Dictionary:
 	var total_size: int = 0
 	var extensions: Dictionary = {}
 
-	for archive_path in _archives:
-		var reader: RefCounted = _archives[archive_path]
+	for archive_path: String in _archives:
+		var reader: BSAReader = _archives[archive_path]
 		var stats: Dictionary = reader.get_stats()
 		total_size += stats["total_size"]
 
-		for ext in stats["extensions"]:
+		for ext: String in stats["extensions"]:
 			if ext not in extensions:
 				extensions[ext] = {"count": 0, "size": 0}
 			extensions[ext]["count"] += stats["extensions"][ext]["count"]
@@ -339,8 +339,8 @@ func load_archives_from_directory(dir_path: String, pattern: String = "*.bsa") -
 ## Thread-safe: Uses mutex to protect cache access
 func clear() -> void:
 	# Close all archive file handles
-	for archive_path in _archives:
-		var reader: RefCounted = _archives[archive_path]
+	for archive_path: String in _archives:
+		var reader: BSAReader = _archives[archive_path]
 		if reader.has_method("close"):
 			reader.close()
 

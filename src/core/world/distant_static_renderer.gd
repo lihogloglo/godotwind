@@ -22,19 +22,19 @@ extends Node3D
 const StaticMeshMergerScript := preload("res://src/core/world/static_mesh_merger.gd")
 
 ## Reference to StaticMeshMerger for creating merged meshes
-var mesh_merger: RefCounted = null  # StaticMeshMerger
+var mesh_merger: StaticMeshMerger = null
 
 ## Reference to CellManager for loading cell data
-var cell_manager: RefCounted = null  # CellManager
+var cell_manager: CellManager = null
 
 ## World scenario RID (set when entering tree)
 var _scenario: RID = RID()
 
 ## Loaded cells: Vector2i -> CellInstance
-var _cells: Dictionary = {}
+var _cells: Dictionary[Vector2i, CellInstance] = {}
 
 ## Stats
-var _stats := {
+var _stats: Dictionary[String, int] = {
 	"loaded_cells": 0,
 	"total_vertices": 0,
 	"total_objects": 0,
@@ -65,12 +65,12 @@ func _exit_tree() -> void:
 
 
 ## Set the mesh merger to use
-func set_mesh_merger(merger: RefCounted) -> void:
+func set_mesh_merger(merger: StaticMeshMerger) -> void:
 	mesh_merger = merger
 
 
 ## Set the cell manager for loading cell data
-func set_cell_manager(manager: RefCounted) -> void:
+func set_cell_manager(manager: CellManager) -> void:
 	cell_manager = manager
 
 
@@ -92,7 +92,7 @@ func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 		return false
 
 	# Create RenderingServer resources
-	var cell_instance := CellInstance.new()
+	var cell_instance: CellInstance = CellInstance.new()
 	cell_instance.grid = cell_grid
 	cell_instance.mesh_rid = mesh.get_rid()
 	cell_instance.owns_mesh = false  # Mesh is owned by resource
@@ -106,8 +106,8 @@ func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 	cell_instance.aabb = mesh.get_aabb() if mesh.get_surface_count() > 0 else AABB()
 	cell_instance.vertex_count = 0
 	cell_instance.object_count = 1
-	for i in range(mesh.get_surface_count()):
-		var arrays := mesh.surface_get_arrays(i)
+	for i: int in range(mesh.get_surface_count()):
+		var arrays: Array = mesh.surface_get_arrays(i)
 		if arrays.size() > 0 and arrays[Mesh.ARRAY_VERTEX]:
 			cell_instance.vertex_count += (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
 	cell_instance.visible = true
@@ -140,7 +140,7 @@ func add_cell(cell_grid: Vector2i, references: Array = []) -> bool:
 
 	# Get references if not provided
 	if references.is_empty() and cell_manager:
-		var cell_record = ESMManager.get_exterior_cell(cell_grid.x, cell_grid.y)
+		var cell_record: CellRecord = ESMManager.get_exterior_cell(cell_grid.x, cell_grid.y)
 		if cell_record:
 			references = cell_record.references
 
@@ -153,13 +153,13 @@ func add_cell(cell_grid: Vector2i, references: Array = []) -> bool:
 		push_warning("DistantStaticRenderer: No mesh merger set")
 		return false
 
-	var merged_data = mesh_merger.merge_cell(cell_grid, references)
+	var merged_data: StaticMeshMerger.MergedCellData = mesh_merger.merge_cell(cell_grid, references)
 	if not merged_data:
 		# No mergeable objects in this cell
 		return false
 
 	# Create RenderingServer resources
-	var cell_instance := CellInstance.new()
+	var cell_instance: CellInstance = CellInstance.new()
 	cell_instance.grid = cell_grid
 
 	# Get mesh RID from ArrayMesh
@@ -230,18 +230,18 @@ func remove_cell(cell_grid: Vector2i) -> void:
 
 
 ## Set cell visibility
-func set_cell_visible(cell_grid: Vector2i, visible: bool) -> void:
+func set_cell_visible(cell_grid: Vector2i, is_visible: bool) -> void:
 	if cell_grid not in _cells:
 		return
 
 	var cell_instance: CellInstance = _cells[cell_grid]
-	if cell_instance.visible == visible:
+	if cell_instance.visible == is_visible:
 		return
 
-	cell_instance.visible = visible
-	RenderingServer.instance_set_visible(cell_instance.instance_rid, visible)
+	cell_instance.visible = is_visible
+	RenderingServer.instance_set_visible(cell_instance.instance_rid, is_visible)
 
-	if visible:
+	if is_visible:
 		_stats["visible_cells"] += 1
 	else:
 		_stats["visible_cells"] -= 1
@@ -251,17 +251,17 @@ func set_cell_visible(cell_grid: Vector2i, visible: bool) -> void:
 ## max_distance: Maximum distance for MID tier visibility
 ## Returns number of visibility changes made
 func update_visibility(camera_pos: Vector3, max_distance: float) -> int:
-	var changes := 0
-	var max_dist_sq := max_distance * max_distance
+	var changes: int = 0
+	var max_dist_sq: float = max_distance * max_distance
 
-	for grid in _cells:
+	for grid: Vector2i in _cells:
 		var cell_instance: CellInstance = _cells[grid]
 
 		# Calculate distance to cell center
-		var cell_center := cell_instance.aabb.get_center()
-		var dist_sq := camera_pos.distance_squared_to(cell_center)
+		var cell_center: Vector3 = cell_instance.aabb.get_center()
+		var dist_sq: float = camera_pos.distance_squared_to(cell_center)
 
-		var should_be_visible := dist_sq <= max_dist_sq
+		var should_be_visible: bool = dist_sq <= max_dist_sq
 
 		if cell_instance.visible != should_be_visible:
 			set_cell_visible(grid, should_be_visible)
@@ -282,7 +282,10 @@ func get_cell_count() -> int:
 
 ## Clear all cells
 func clear() -> void:
-	for grid in _cells.keys():
+	var grids: Array[Vector2i] = []
+	for grid: Vector2i in _cells:
+		grids.append(grid)
+	for grid: Vector2i in grids:
 		remove_cell(grid)
 
 	_cells.clear()
@@ -294,14 +297,14 @@ func clear() -> void:
 
 
 ## Get statistics
-func get_stats() -> Dictionary:
+func get_stats() -> Dictionary[String, int]:
 	return _stats.duplicate()
 
 
 ## Get all loaded cell coordinates
 func get_loaded_cells() -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
-	for grid in _cells.keys():
+	for grid: Vector2i in _cells:
 		cells.append(grid)
 	return cells
 

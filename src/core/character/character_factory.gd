@@ -164,23 +164,32 @@ func _load_character_animations(character_root: Node3D, is_female: bool, is_beas
 		return
 
 	# Add animations to AnimationPlayer
+	# Get AnimationLibrary (Godot 4.x uses libraries)
+	var lib: AnimationLibrary
+	if anim_player.has_animation_library(""):
+		lib = anim_player.get_animation_library("")
+	else:
+		lib = AnimationLibrary.new()
+		anim_player.add_animation_library("", lib)
+
 	var added_count := 0
 	for anim_name: String in animations:
 		var anim: Animation = animations[anim_name]
-		if anim_player.has_animation(anim_name):
+		if lib.has_animation(anim_name):
 			# Animation already exists, skip or replace
 			continue
 
-		anim_player.add_animation(anim_name, anim)
+		lib.add_animation(anim_name, anim)
 		added_count += 1
 
 	if debug_characters:
 		print("CharacterFactory: Loaded %d animations from '%s'" % [added_count, anim_path])
-		for anim_name in animations:
+		for anim_name_dbg: String in animations:
+			var anim_dbg: Animation = animations[anim_name_dbg]
 			print("  - '%s': %.2fs, %d tracks" % [
-				anim_name,
-				animations[anim_name].length,
-				animations[anim_name].get_track_count()
+				anim_name_dbg,
+				anim_dbg.length,
+				anim_dbg.get_track_count()
 			])
 
 
@@ -221,22 +230,31 @@ func _load_creature_animations(character_root: Node3D, creature_record: Creature
 		return
 
 	# Add animations to AnimationPlayer
+	# Get AnimationLibrary (Godot 4.x uses libraries)
+	var lib2: AnimationLibrary
+	if anim_player.has_animation_library(""):
+		lib2 = anim_player.get_animation_library("")
+	else:
+		lib2 = AnimationLibrary.new()
+		anim_player.add_animation_library("", lib2)
+
 	var added_count := 0
 	for anim_name: String in animations:
 		var anim: Animation = animations[anim_name]
-		if anim_player.has_animation(anim_name):
+		if lib2.has_animation(anim_name):
 			continue
 
-		anim_player.add_animation(anim_name, anim)
+		lib2.add_animation(anim_name, anim)
 		added_count += 1
 
 	if debug_characters:
 		print("CharacterFactory: Loaded %d creature animations from '%s'" % [added_count, anim_path])
-		for anim_name in animations:
+		for anim_name_dbg2: String in animations:
+			var anim_dbg2: Animation = animations[anim_name_dbg2]
 			print("  - '%s': %.2fs, %d tracks" % [
-				anim_name,
-				animations[anim_name].length,
-				animations[anim_name].get_track_count()
+				anim_name_dbg2,
+				anim_dbg2.length,
+				anim_dbg2.get_track_count()
 			])
 
 
@@ -320,7 +338,7 @@ func _find_skeleton(node: Node) -> Skeleton3D:
 
 
 ## Create a placeholder character for testing
-func _create_placeholder_character(record, type: String, ref_num: int) -> CharacterBody3D:
+func _create_placeholder_character(record: ESMRecord, type: String, ref_num: int) -> CharacterBody3D:
 	var movement_controller := CharacterMovementController.new()
 	movement_controller.name = record.record_id + "_" + str(ref_num) + "_placeholder"
 
@@ -353,7 +371,7 @@ func _create_placeholder_character(record, type: String, ref_num: int) -> Charac
 	# Metadata
 	movement_controller.set_meta("is_placeholder", true)
 	movement_controller.set_meta("record_type", "NPC_" if type == "npc" else "CREA")
-	movement_controller.set_meta("record_id", record.record_id if "record_id" in record else "unknown")
+	movement_controller.set_meta("record_id", record.record_id)
 	movement_controller.set_meta("ref_num", ref_num)
 
 	return movement_controller

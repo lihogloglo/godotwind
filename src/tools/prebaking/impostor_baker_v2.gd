@@ -193,7 +193,7 @@ func bake_model(model_path: String) -> Dictionary:
 	# Render from all octahedral directions
 	var frames: Array[Image] = []
 	for i in range(OCTAHEDRAL_DIRECTIONS.size()):
-		var direction: Vector3 = OCTAHEDRAL_DIRECTIONS[i].normalized()
+		var direction: Vector3 = (OCTAHEDRAL_DIRECTIONS[i] as Vector3).normalized()
 		var frame := await _render_from_direction_async(direction, camera_distance)
 		if frame:
 			frames.append(frame)
@@ -473,7 +473,7 @@ func _generate_frame_uvs() -> Array:
 func _generate_direction_data() -> Array:
 	var directions := []
 	for i in range(OCTAHEDRAL_DIRECTIONS.size()):
-		var dir: Vector3 = OCTAHEDRAL_DIRECTIONS[i].normalized()
+		var dir: Vector3 = (OCTAHEDRAL_DIRECTIONS[i] as Vector3).normalized()
 		directions.append({
 			"index": i,
 			"direction": [dir.x, dir.y, dir.z],

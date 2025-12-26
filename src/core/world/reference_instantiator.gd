@@ -14,13 +14,13 @@ extends RefCounted
 # Dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-const CharacterFactory := preload("res://src/core/character/character_factory.gd")
+const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 
 # Injected dependencies (set by CellManager)
-var model_loader: RefCounted  # ModelLoader
-var object_pool: RefCounted  # ObjectPool (optional)
-var static_renderer: Node  # StaticObjectRenderer (optional)
-var character_factory: CharacterFactory  # CharacterFactory for NPCs/creatures
+var model_loader: RefCounted = null  # ModelLoader
+var object_pool: RefCounted = null  # ObjectPool (optional)
+var static_renderer: Node = null  # StaticObjectRenderer (optional)
+var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
 
 # Configuration
 var create_lights: bool = true
@@ -49,7 +49,7 @@ const MW_LIGHT_SCALE: float = 1.0 / 70.0
 func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
-	var base_record = ESMManager.get_any_record(str(ref.ref_id), record_type)
+	var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 
 	if not base_record:
 		# Not an error - some refs are for types we don't handle yet
@@ -88,7 +88,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 
 ## Instantiate a standard object with a NIF model
 ## For flora/rocks, uses StaticObjectRenderer for ~10x faster instantiation
-func _instantiate_model_object(ref: CellReference, base_record, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	# Get model path and record ID
 	var model_path: String = _get_model_path(base_record)
 	if model_path.is_empty():
@@ -106,7 +106,7 @@ func _instantiate_model_object(ref: CellReference, base_record, cell_grid: Vecto
 
 	# Try to get from object pool first (if enabled)
 	if use_object_pool and object_pool:
-		var pooled: Node3D = object_pool.acquire(model_path)
+		var pooled: Node3D = object_pool.call("acquire", model_path)
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 			_apply_transform(pooled, ref, true)
@@ -114,7 +114,7 @@ func _instantiate_model_object(ref: CellReference, base_record, cell_grid: Vecto
 			return pooled
 
 	# Load or get cached model (with item_id for collision shape lookup)
-	var model_prototype: Node3D = model_loader.get_model(model_path, record_id)
+	var model_prototype: Node3D = model_loader.call("get_model", model_path, record_id)
 	if not model_prototype:
 		# Create a placeholder for missing models
 		return _create_placeholder(ref)
@@ -143,11 +143,11 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 	var normalized := model_path.to_lower().replace("/", "\\")
 
 	# Ensure model is loaded and registered with static renderer
-	if not static_renderer.has_type(normalized):
+	if not static_renderer.call("has_type", normalized):
 		# Load prototype to get mesh
-		var prototype: Node3D = model_loader.get_model(model_path)
+		var prototype: Node3D = model_loader.call("get_model", model_path)
 		if prototype:
-			static_renderer.register_from_prototype(normalized, prototype)
+			static_renderer.call("register_from_prototype", normalized, prototype)
 		else:
 			return null
 
@@ -159,7 +159,7 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 	var transform := Transform3D(basis, pos)
 
 	# Add instance to static renderer
-	var instance_id: int = static_renderer.add_instance(normalized, transform, cell_grid)
+	var instance_id: int = static_renderer.call("add_instance", normalized, transform, cell_grid)
 	if instance_id >= 0:
 		stats["static_renderer_instances"] += 1
 
@@ -176,7 +176,7 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 
 	# Load the model if it has one
 	if not light_record.model.is_empty():
-		var model_prototype: Node3D = model_loader.get_model(light_record.model)
+		var model_prototype: Node3D = model_loader.call("get_model", light_record.model)
 		if model_prototype:
 			var model_instance: Node3D = model_prototype.duplicate()
 			model_instance.name = "Model"
@@ -227,16 +227,18 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 
 ## Instantiate an NPC or Creature
 ## Uses CharacterFactory to create fully animated and functional characters
-func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) -> Node3D:
+func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
 	# Use CharacterFactory if available (new system)
 	if character_factory:
 		var character: CharacterBody3D = null
 
 		if actor_record is CreatureRecord:
-			character = character_factory.create_creature(actor_record, ref.ref_num)
+			var creature_rec: CreatureRecord = actor_record as CreatureRecord
+			character = character_factory.create_creature(creature_rec, ref.ref_num)
 			stats["creatures_loaded"] += 1
 		elif actor_record is NPCRecord:
-			character = character_factory.create_npc(actor_record, ref.ref_num)
+			var npc_rec: NPCRecord = actor_record as NPCRecord
+			character = character_factory.create_npc(npc_rec, ref.ref_num)
 			stats["npcs_loaded"] += 1
 
 		if character:
@@ -256,7 +258,7 @@ func _instantiate_actor(ref: CellReference, actor_record, actor_type: String) ->
 
 
 ## Legacy actor instantiation (old system - basic model loading)
-func _instantiate_actor_legacy(ref: CellReference, actor_record, actor_type: String) -> Node3D:
+func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
 	var model_path: String = ""
 
 	if actor_record is CreatureRecord:
@@ -273,7 +275,7 @@ func _instantiate_actor_legacy(ref: CellReference, actor_record, actor_type: Str
 		# Create a simple placeholder for now
 		return _create_actor_placeholder(ref, actor_record, actor_type)
 
-	var model_prototype: Node3D = model_loader.get_model(model_path)
+	var model_prototype: Node3D = model_loader.call("get_model", model_path)
 	if not model_prototype:
 		return _create_actor_placeholder(ref, actor_record, actor_type)
 
@@ -353,7 +355,7 @@ func _ensure_actor_collision(instance: Node3D, actor_type: String) -> void:
 
 
 ## Create a placeholder for actors without models
-func _create_actor_placeholder(ref: CellReference, _actor_record, actor_type: String) -> Node3D:
+func _create_actor_placeholder(ref: CellReference, _actor_record: Variant, actor_type: String) -> Node3D:
 	var container := Node3D.new()
 	container.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
@@ -466,7 +468,7 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 
 
 ## Apply metadata to an object for console object picker identification
-func _apply_metadata(node: Node3D, ref: CellReference, base_record, model_path: String) -> void:
+func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, model_path: String) -> void:
 	# Form ID / record ID
 	if "record_id" in base_record:
 		node.set_meta("form_id", base_record.record_id)
@@ -521,7 +523,7 @@ func _apply_metadata(node: Node3D, ref: CellReference, base_record, model_path: 
 
 
 ## Get the model path from a base record
-func _get_model_path(record) -> String:
+func _get_model_path(record: Variant) -> String:
 	if "model" in record and record.model:
 		return record.model
 	return ""

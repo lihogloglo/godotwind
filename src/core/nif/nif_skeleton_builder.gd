@@ -34,7 +34,7 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 		push_error("NIFSkeletonBuilder: Null skin instance")
 		return null
 
-	var skin_data := _reader.get_record(skin_instance.data_index) as Defs.NiSkinData
+	var skin_data := _reader.call("get_record", skin_instance.data_index) as Defs.NiSkinData
 	if skin_data == null:
 		push_error("NIFSkeletonBuilder: Could not find NiSkinData at index %d" % skin_instance.data_index)
 		return null
@@ -46,7 +46,7 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 	# Get the skeleton root node
 	var root_node: Defs.NiNode = null
 	if skin_instance.root_index >= 0:
-		root_node = _reader.get_record(skin_instance.root_index) as Defs.NiNode
+		root_node = _reader.call("get_record", skin_instance.root_index) as Defs.NiNode
 
 	if debug_mode:
 		print("NIFSkeletonBuilder: Building skeleton with %d bones" % skin_instance.bone_indices.size())
@@ -57,7 +57,7 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 	# Each bone index points to an NiNode in the scene graph
 	for i in range(skin_instance.bone_indices.size()):
 		var bone_node_idx := skin_instance.bone_indices[i]
-		var bone_node := _reader.get_record(bone_node_idx) as Defs.NiNode
+		var bone_node := _reader.call("get_record", bone_node_idx) as Defs.NiNode
 
 		if bone_node == null:
 			push_warning("NIFSkeletonBuilder: Bone %d references invalid node %d" % [i, bone_node_idx])
@@ -136,7 +136,7 @@ func _build_parent_map_recursive(node: Defs.NiNode, parent_map: Dictionary) -> v
 			continue
 		parent_map[child_idx] = node.record_index
 
-		var child: Defs.NIFRecord = _reader.get_record(child_idx)
+		var child: Defs.NIFRecord = _reader.call("get_record", child_idx)
 		if child is Defs.NiNode:
 			_build_parent_map_recursive(child as Defs.NiNode, parent_map)
 
@@ -219,19 +219,20 @@ func build_skin_arrays(geom_data: Defs.NiGeometryData, skin_instance: Defs.NiSki
 		var bone_data: Dictionary = skin_data.bones[bone_idx]
 		var weights: Array = bone_data["weights"]
 
-		for weight_info in weights:
+		for weight_info: Dictionary in weights:
 			var vertex_idx: int = weight_info["vertex"]
 			var weight: float = weight_info["weight"]
 
 			if vertex_idx < num_vertices and weight > 0.0:
-				vertex_weights[vertex_idx].append([bone_idx, weight])
+				var vert_weights: Array = vertex_weights[vertex_idx]
+				vert_weights.append([bone_idx, weight])
 
 	# Convert to Godot format (4 bones per vertex, sorted by weight)
 	for vert_idx in range(num_vertices):
 		var weights: Array = vertex_weights[vert_idx]
 
 		# Sort by weight descending
-		weights.sort_custom(func(a, b): return a[1] > b[1])
+		weights.sort_custom(func(a: Variant, b: Variant) -> bool: return a[1] > b[1])
 
 		# Take top 4 influences
 		var total_weight := 0.0
@@ -266,7 +267,7 @@ func build_skin_arrays(geom_data: Defs.NiGeometryData, skin_instance: Defs.NiSki
 
 ## Check if NiSkinPartition data should be used instead of NiSkinData weights
 func has_skin_partition(skin_instance: Defs.NiSkinInstance) -> bool:
-	var skin_data := _reader.get_record(skin_instance.data_index) as Defs.NiSkinData
+	var skin_data := _reader.call("get_record", skin_instance.data_index) as Defs.NiSkinData
 	if skin_data == null:
 		return false
 

@@ -21,11 +21,18 @@ extends RefCounted
 ## Global material cache: material_key -> StandardMaterial3D
 static var _cache: Dictionary = {}
 
+## LRU tracking: Array of keys in access order (oldest first)
+static var _lru_order: Array[String] = []
+
+## Maximum materials to keep in cache (prevents unbounded memory growth)
+const MAX_CACHE_SIZE: int = 1000
+
 ## Statistics
 static var _stats: Dictionary = {
 	"materials_created": 0,
 	"cache_hits": 0,
 	"cache_misses": 0,
+	"lru_evictions": 0,
 }
 
 ## Material properties that affect the cache key
@@ -44,7 +51,15 @@ class MaterialProperties:
 	var metallic: float = 0.0
 	var albedo_color: Color = Color.WHITE
 
+	## Cached key - generated once, reused on subsequent calls
+	var _cached_key: String = ""
+	var _key_valid: bool = false
+
 	func get_key() -> String:
+		# Return cached key if valid (avoid regenerating string every lookup)
+		if _key_valid:
+			return _cached_key
+
 		# Create a unique key based on all properties that affect appearance
 		var parts := PackedStringArray()
 		parts.append(texture_path.to_lower())
@@ -57,7 +72,14 @@ class MaterialProperties:
 			parts.append("as%.2f" % alpha_scissor_threshold)
 		if albedo_color != Color.WHITE:
 			parts.append("c_%s" % albedo_color.to_html())
-		return "|".join(parts)
+
+		_cached_key = "|".join(parts)
+		_key_valid = true
+		return _cached_key
+
+	## Invalidate cached key (call if properties change after creation)
+	func invalidate_key() -> void:
+		_key_valid = false
 
 
 ## Get or create a material with the specified properties
@@ -67,6 +89,11 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 
 	if key in _cache:
 		_stats["cache_hits"] += 1
+		# Update LRU - move to end (most recently used)
+		var idx := _lru_order.find(key)
+		if idx >= 0:
+			_lru_order.remove_at(idx)
+			_lru_order.append(key)
 		return _cache[key]
 
 	_stats["cache_misses"] += 1
@@ -111,8 +138,15 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 			# Use fallback color for missing textures
 			mat.albedo_color = Color(1.0, 0.0, 1.0)  # Magenta
 
-	# Cache the material
+	# LRU eviction if cache is full
+	while _cache.size() >= MAX_CACHE_SIZE and not _lru_order.is_empty():
+		var oldest: String = _lru_order.pop_front()
+		_cache.erase(oldest)
+		_stats["lru_evictions"] += 1
+
+	# Cache the material and add to LRU
 	_cache[key] = mat
+	_lru_order.append(key)
 	_stats["materials_created"] += 1
 
 	return mat
@@ -185,10 +219,12 @@ static func get_colored_material(color: Color, transparent: bool = false) -> Sta
 ## Clear the material cache (useful for reloading)
 static func clear_cache() -> void:
 	_cache.clear()
+	_lru_order.clear()
 	_stats = {
 		"materials_created": 0,
 		"cache_hits": 0,
 		"cache_misses": 0,
+		"lru_evictions": 0,
 	}
 
 
@@ -196,8 +232,11 @@ static func clear_cache() -> void:
 static func get_stats() -> Dictionary:
 	var stats := _stats.duplicate()
 	stats["cached_materials"] = _cache.size()
+	stats["max_cache_size"] = MAX_CACHE_SIZE
 	if _stats["cache_hits"] + _stats["cache_misses"] > 0:
-		stats["hit_rate"] = float(_stats["cache_hits"]) / float(_stats["cache_hits"] + _stats["cache_misses"])
+		var cache_hits: int = _stats["cache_hits"]
+		var cache_misses: int = _stats["cache_misses"]
+		stats["hit_rate"] = float(cache_hits) / float(cache_hits + cache_misses)
 	else:
 		stats["hit_rate"] = 0.0
 	return stats
@@ -211,7 +250,7 @@ static func get_cache_size() -> int:
 ## Debug: Print all cached materials
 static func print_cache_contents() -> void:
 	print("MaterialLibrary Cache (%d materials):" % _cache.size())
-	for key in _cache:
+	for key: String in _cache:
 		var mat: StandardMaterial3D = _cache[key]
 		var tex_name := mat.albedo_texture.resource_path.get_file() if mat.albedo_texture else "none"
 		print("  %s -> %s" % [key.substr(0, 50), tex_name])

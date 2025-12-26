@@ -140,11 +140,12 @@ func _input(event: InputEvent) -> void:
 
 	# Mouse look
 	if event is InputEventMouseMotion and Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
+		var mm: InputEventMouseMotion = event as InputEventMouseMotion
 		# Horizontal rotation on player body
-		rotate_y(-event.relative.x * mouse_sensitivity)
+		rotate_y(-mm.relative.x * mouse_sensitivity)
 
 		# Vertical rotation on camera pivot
-		camera_pivot.rotate_x(-event.relative.y * mouse_sensitivity)
+		camera_pivot.rotate_x(-mm.relative.y * mouse_sensitivity)
 		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x, -PI / 2 + 0.1, PI / 2 - 0.1)
 
 

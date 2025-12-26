@@ -132,8 +132,9 @@ func register(
 	# Add to category
 	if not _categories.has(category):
 		_categories[category] = []
-	if cmd.name not in _categories[category]:
-		_categories[category].append(cmd.name)
+	var cat_arr: Array = _categories[category]
+	if cmd.name not in cat_arr:
+		cat_arr.append(cmd.name)
 
 
 ## Unregister a command
@@ -155,7 +156,8 @@ func unregister(name: String) -> void:
 
 	# Remove from category
 	if _categories.has(cmd.category):
-		_categories[cmd.category].erase(cmd.name)
+		var cat_arr: Array = _categories[cmd.category]
+		cat_arr.erase(cmd.name)
 
 	# Remove command
 	_commands.erase(lower_name)
@@ -200,7 +202,8 @@ func get_categories() -> PackedStringArray:
 func get_commands_in_category(category: String) -> Array[CommandInfo]:
 	var result: Array[CommandInfo] = []
 	if _categories.has(category):
-		for cmd_name in _categories[category]:
+		var cat_arr: Array = _categories[category]
+		for cmd_name: String in cat_arr:
 			if _commands.has(cmd_name):
 				result.append(_commands[cmd_name])
 	return result
@@ -212,12 +215,12 @@ func find_commands_by_prefix(prefix: String) -> Array[CommandInfo]:
 	var result: Array[CommandInfo] = []
 
 	# Check primary names
-	for cmd_name in _commands:
+	for cmd_name: String in _commands:
 		if cmd_name.begins_with(lower_prefix):
 			result.append(_commands[cmd_name])
 
 	# Check aliases
-	for alias in _aliases:
+	for alias: String in _aliases:
 		if alias.begins_with(lower_prefix):
 			var cmd: CommandInfo = _commands[_aliases[alias]]
 			if cmd not in result:
@@ -231,7 +234,7 @@ func find_commands_fuzzy(query: String, max_results: int = 10) -> Array[CommandI
 	var lower_query := query.to_lower()
 	var scored: Array[Dictionary] = []  # [{cmd: CommandInfo, score: float}]
 
-	for cmd_name in _commands:
+	for cmd_name: String in _commands:
 		var cmd: CommandInfo = _commands[cmd_name]
 		var score := _fuzzy_score(lower_query, cmd_name)
 
@@ -311,7 +314,8 @@ func parse_arguments(cmd: CommandInfo, args_string: String) -> Dictionary:
 			# Collect remaining as "rest" if last param exists
 			if not cmd.parameters.is_empty():
 				var last_param := cmd.parameters[-1]
-				if result.args.has(last_param.name):
+				var args_d: Dictionary = result.args
+				if args_d.has(last_param.name):
 					result.args[last_param.name] += " " + token
 				else:
 					result.args[last_param.name] = token
@@ -330,15 +334,16 @@ func parse_arguments(cmd: CommandInfo, args_string: String) -> Dictionary:
 		param_idx += 1
 
 	# Check required parameters
+	var args_dict: Dictionary = result.args
 	for param in cmd.parameters:
-		if param.required and not result.args.has(param.name):
+		if param.required and not args_dict.has(param.name):
 			result.success = false
 			result.error = "Missing required parameter: %s" % param.name
 			return result
 
 	# Fill in defaults
 	for param in cmd.parameters:
-		if not result.args.has(param.name) and param.default_value != null:
+		if not args_dict.has(param.name) and param.default_value != null:
 			result.args[param.name] = param.default_value
 
 	return result

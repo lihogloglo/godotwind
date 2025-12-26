@@ -193,10 +193,13 @@ func _create_clipmap_mesh(radius: float) -> void:
 			continue
 
 		var ring_data := _create_ring(inner_radius, outer_radius, quad_size, vertex_offset)
-		vertices.append_array(ring_data.vertices)
-		uvs.append_array(ring_data.uvs)
-		indices.append_array(ring_data.indices)
-		vertex_offset += ring_data.vertices.size()
+		var ring_verts: PackedVector3Array = ring_data.vertices
+		var ring_uvs: PackedVector2Array = ring_data.uvs
+		var ring_indices: PackedInt32Array = ring_data.indices
+		vertices.append_array(ring_verts)
+		uvs.append_array(ring_uvs)
+		indices.append_array(ring_indices)
+		vertex_offset += ring_verts.size()
 		prev_outer_radius = outer_radius
 
 	print("[OceanMesh] Created mesh with %d vertices, %d triangles" % [vertices.size(), indices.size() / 3])

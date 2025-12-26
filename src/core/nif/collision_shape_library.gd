@@ -69,7 +69,7 @@ static func get_instance() -> CollisionShapeLibrary:
 
 ## Try to auto-load from default/search paths
 func _try_auto_load() -> void:
-	for path in YAML_SEARCH_PATHS:
+	for path: String in YAML_SEARCH_PATHS:
 		if FileAccess.file_exists(path):
 			if load_from_file(path):
 				if debug_mode:
@@ -117,7 +117,7 @@ func _parse_yaml(content: String) -> bool:
 	var current_pattern := ""
 	var current_shape := ""
 
-	for line in lines:
+	for line: String in lines:
 		# Skip comments and empty lines
 		var trimmed := line.strip_edges()
 		if trimmed.is_empty() or trimmed.begins_with("#"):
@@ -247,7 +247,7 @@ func _add_pattern(pattern: String, shape_type: ShapeType) -> void:
 ## Convert glob pattern to regex pattern
 func _glob_to_regex(glob: String) -> String:
 	var result := ""
-	for c in glob:
+	for c: String in glob:
 		match c:
 			"*":
 				result += ".*"
@@ -279,7 +279,7 @@ func get_shape_for_item(item_id: String) -> Variant:  ## Returns ShapeType or nu
 		return _item_shapes[lower_id]
 
 	# Check patterns (first match wins)
-	for compiled in _patterns:
+	for compiled: CompiledPattern in _patterns:
 		if _pattern_matches(compiled, lower_id):
 			if debug_mode:
 				print("CollisionShapeLibrary: Pattern '%s' matched '%s' -> %s" % [

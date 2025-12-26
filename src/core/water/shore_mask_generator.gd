@@ -87,7 +87,7 @@ func _compute_shore_distance(binary_mask: Image, fade_distance: float) -> Image:
 			if is_water:
 				# Check if adjacent to land (4-connected)
 				var adjacent_to_land := false
-				for offset in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
 					var nx: int = x + offset.x
 					var ny: int = y + offset.y
 					if nx >= 0 and nx < size and ny >= 0 and ny < size:
@@ -129,7 +129,7 @@ func _compute_shore_distance(binary_mask: Image, fade_distance: float) -> Image:
 
 				# Check neighbors
 				var best_dist := current_dist
-				for offset in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
 					var nx: int = x + offset.x
 					var ny: int = y + offset.y
 					if nx >= 0 and nx < size and ny >= 0 and ny < size:

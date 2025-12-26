@@ -119,20 +119,20 @@ uniform vec4 cloud_horizon_tint: source_color = vec4(1.0, 0.85, 0.7, 1.0);
 uniform vec4 cloud_night_tint: source_color = vec4(0.12, 0.14, 0.18, 1.0);
 
 group_uniforms volumetric_clouds.density;
-uniform float cloud_coverage: hint_range(0.0, 1.0) = 0.35;
+uniform float cloud_coverage: hint_range(0.0, 1.0) = 0.5;
 uniform float cloud_density_mult: hint_range(0.1, 3.0) = 1.0;
 uniform float cloud_smoothness: hint_range(0.0, 0.2) = 0.05;
 
 group_uniforms volumetric_clouds.shape;
 uniform float cloud_base_height = 3.0;
 uniform float cloud_layer_thickness = 10.0;
-uniform float cloud_scale = 0.15;
+uniform float cloud_scale = 1.0;
 uniform vec3 cloud_offset = vec3(0.0);
 uniform float cloud_detail_strength: hint_range(0.0, 1.0) = 0.2;
 
 group_uniforms volumetric_clouds.raymarching;
-uniform int cloud_march_steps: hint_range(8, 64) = 32;
-uniform int cloud_light_steps: hint_range(2, 12) = 6;
+uniform int cloud_march_steps: hint_range(8, 64) = 16;
+uniform int cloud_light_steps: hint_range(2, 12) = 4;
 uniform float cloud_falloff_power: hint_range(0.1, 1.0) = 0.4;
 uniform bool cloud_temporal_jitter = false;
 uniform float cloud_jitter_amount: hint_range(0.0, 1.0) = 0.5;
@@ -145,7 +145,7 @@ uniform float cloud_absorption_coeff: hint_range(0.1, 2.0) = 0.7;
 uniform float cloud_powder_strength: hint_range(0.0, 1.0) = 0.5;
 
 group_uniforms volumetric_clouds.textures;
-uniform bool use_procedural_noise = true;
+uniform bool use_procedural_noise = false;
 uniform sampler3D cloud_shape_texture: filter_linear_mipmap, repeat_enable;
 uniform sampler3D cloud_detail_texture: filter_linear_mipmap, repeat_enable;
 uniform float cloud_shape_scale = 1.0;

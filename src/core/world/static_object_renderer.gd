@@ -210,12 +210,12 @@ func remove_instance(id: int) -> void:
 func remove_cell_instances(cell_grid: Vector2i) -> int:
 	var to_remove: Array[int] = []
 
-	for id in _instances:
+	for id: int in _instances:
 		var data: InstanceData = _instances[id]
 		if data.cell_grid == cell_grid:
 			to_remove.append(id)
 
-	for id in to_remove:
+	for id: int in to_remove:
 		remove_instance(id)
 
 	return to_remove.size()
@@ -262,13 +262,13 @@ func update_visibility_by_distance(camera_pos: Vector3, max_distance: float) -> 
 	var changes := 0
 	var max_dist_sq := max_distance * max_distance
 
-	for id in _instances:
+	for id: int in _instances:
 		var data: InstanceData = _instances[id]
 		var dist_sq := camera_pos.distance_squared_to(data.transform.origin)
 		var should_be_visible := dist_sq <= max_dist_sq
 
 		if data.visible != should_be_visible:
-			set_instance_visible(id, should_be_visible)
+			set_instance_visible(data.id, should_be_visible)
 			changes += 1
 
 	return changes
@@ -289,14 +289,15 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 	var mesh_type: MeshType = _mesh_types[type_name]
 	var rs := RenderingServer
 
-	for transform in transforms:
-		if not transform is Transform3D:
+	for transform_var: Variant in transforms:
+		if not transform_var is Transform3D:
 			continue
 
+		var xform: Transform3D = transform_var as Transform3D
 		var instance_rid := rs.instance_create()
 		rs.instance_set_base(instance_rid, mesh_type.mesh_rid)
 		rs.instance_set_scenario(instance_rid, _scenario)
-		rs.instance_set_transform(instance_rid, transform)
+		rs.instance_set_transform(instance_rid, xform)
 
 		if mesh_type.material_rid.is_valid():
 			rs.instance_geometry_set_material_override(instance_rid, mesh_type.material_rid)
@@ -308,7 +309,7 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 		data.id = id
 		data.type_name = type_name
 		data.instance_rid = instance_rid
-		data.transform = transform
+		data.transform = xform
 		data.visible = true
 		data.cell_grid = cell_grid
 
@@ -327,7 +328,7 @@ func clear(clear_mesh_types: bool = true) -> void:
 	var rs := RenderingServer
 
 	# Free all instances
-	for id in _instances:
+	for id: int in _instances:
 		var data: InstanceData = _instances[id]
 		if data.instance_rid.is_valid():
 			rs.free_rid(data.instance_rid)
@@ -335,7 +336,7 @@ func clear(clear_mesh_types: bool = true) -> void:
 
 	# Free mesh types if requested
 	if clear_mesh_types:
-		for type_name in _mesh_types:
+		for type_name: String in _mesh_types:
 			var mesh_type: MeshType = _mesh_types[type_name]
 			if mesh_type.owns_mesh and mesh_type.mesh_rid.is_valid():
 				rs.free_rid(mesh_type.mesh_rid)
@@ -369,7 +370,7 @@ func get_mesh_type_stats(type_name: String) -> Dictionary:
 ## Get all registered mesh type names
 func get_registered_types() -> Array[String]:
 	var types: Array[String] = []
-	for type_name in _mesh_types:
+	for type_name: String in _mesh_types:
 		types.append(type_name)
 	return types
 

@@ -148,7 +148,8 @@ func init_gpu(num_cascades: int) -> void:
 
 	# Generate butterfly factors once
 	var compute_list := context.compute_list_begin()
-	pipelines[&"fft_butterfly"].call(context, compute_list)
+	var fft_butterfly: Callable = pipelines[&"fft_butterfly"]
+	fft_butterfly.call(context, compute_list)
 	context.compute_list_end()
 
 	# Setup texture references for shader use
@@ -180,7 +181,8 @@ func _update_cascade(compute_list: int, cascade_index: int, parameters: Array[Wa
 	if params.should_generate_spectrum:
 		var alpha := _jonswap_alpha(params.wind_speed, params.fetch_length * 1e3)
 		var omega := _jonswap_peak_angular_frequency(params.wind_speed, params.fetch_length * 1e3)
-		pipelines[&"spectrum_compute"].call(context, compute_list, RenderingContext.create_push_constant([
+		var spectrum_compute: Callable = pipelines[&"spectrum_compute"]
+		spectrum_compute.call(context, compute_list, RenderingContext.create_push_constant([
 			params.spectrum_seed.x, params.spectrum_seed.y,
 			params.tile_length.x, params.tile_length.y,
 			alpha, omega, params.wind_speed, deg_to_rad(params.wind_direction),
@@ -188,19 +190,23 @@ func _update_cascade(compute_list: int, cascade_index: int, parameters: Array[Wa
 		]))
 		params.should_generate_spectrum = false
 
-	pipelines[&"spectrum_modulate"].call(context, compute_list, RenderingContext.create_push_constant([
+	var spectrum_modulate: Callable = pipelines[&"spectrum_modulate"]
+	spectrum_modulate.call(context, compute_list, RenderingContext.create_push_constant([
 		params.tile_length.x, params.tile_length.y, DEPTH, params.time, cascade_index
 	]))
 
 	# Wave spectra inverse Fourier transform
 	var fft_push_constant := RenderingContext.create_push_constant([cascade_index])
-	pipelines[&"fft_compute"].call(context, compute_list, fft_push_constant)
-	pipelines[&"transpose"].call(context, compute_list, fft_push_constant)
+	var fft_compute: Callable = pipelines[&"fft_compute"]
+	var transpose: Callable = pipelines[&"transpose"]
+	fft_compute.call(context, compute_list, fft_push_constant)
+	transpose.call(context, compute_list, fft_push_constant)
 	context.compute_list_add_barrier(compute_list)
-	pipelines[&"fft_compute"].call(context, compute_list, fft_push_constant)
+	fft_compute.call(context, compute_list, fft_push_constant)
 
 	# Displacement/normal map update
-	pipelines[&"fft_unpack"].call(context, compute_list, RenderingContext.create_push_constant([
+	var fft_unpack: Callable = pipelines[&"fft_unpack"]
+	fft_unpack.call(context, compute_list, RenderingContext.create_push_constant([
 		cascade_index, params.whitecap, params.foam_grow_rate, params.foam_decay_rate
 	]))
 

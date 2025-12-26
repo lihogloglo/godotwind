@@ -104,10 +104,11 @@ func count_lights(root: Node) -> Dictionary:
 
 func _count_lights_recursive(node: Node) -> void:
 	if node is Light3D:
+		var light: Light3D = node as Light3D
 		_light_count += 1
-		if node.shadow_enabled:
+		if light.shadow_enabled:
 			_shadow_light_count += 1
-	for child in node.get_children():
+	for child: Node in node.get_children():
 		_count_lights_recursive(child)
 
 
@@ -162,16 +163,16 @@ func get_avg_cell_load_time_ms() -> float:
 ## Get slowest models (for optimization targeting)
 func get_slowest_models(top_n: int = 5) -> Array:
 	var avg_times: Array = []
-	for model_path in _model_times:
+	for model_path: String in _model_times:
 		var times: Array = _model_times[model_path]
 		if times.is_empty():
 			continue
 		var sum := 0.0
-		for t in times:
+		for t: float in times:
 			sum += t
 		avg_times.append({"path": model_path, "avg_ms": sum / times.size(), "count": times.size()})
 
-	avg_times.sort_custom(func(a, b): return a.avg_ms > b.avg_ms)
+	avg_times.sort_custom(func(a: Variant, b: Variant) -> bool: return a.avg_ms > b.avg_ms)
 	return avg_times.slice(0, top_n)
 
 
@@ -199,17 +200,17 @@ func get_render_stats() -> Dictionary:
 
 ## Get material library stats if available
 func get_material_library_stats() -> Dictionary:
-	var MatLib = load("res://src/core/texture/material_library.gd")
+	var MatLib: GDScript = load("res://src/core/texture/material_library.gd")
 	if MatLib:
-		return MatLib.get_stats()
+		return MatLib.call("get_stats")
 	return {}
 
 
 ## Get texture loader stats if available
 func get_texture_stats() -> Dictionary:
-	var TexLoader = load("res://src/core/texture/texture_loader.gd")
+	var TexLoader: GDScript = load("res://src/core/texture/texture_loader.gd")
 	if TexLoader:
-		return TexLoader.get_stats()
+		return TexLoader.call("get_stats")
 	return {}
 
 

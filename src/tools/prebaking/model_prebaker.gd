@@ -82,7 +82,9 @@ func bake_all_models() -> Dictionary:
 
 		# Yield every 10 models to prevent UI freeze
 		if i % 10 == 0:
-			await Engine.get_main_loop().process_frame
+			var main_loop: SceneTree = Engine.get_main_loop() as SceneTree
+			if main_loop:
+				await main_loop.process_frame
 
 	batch_complete.emit(model_paths.size(), _total_baked, _total_failed, _total_skipped)
 
@@ -158,11 +160,11 @@ func _collect_unique_models() -> Array[String]:
 		ESMManager.potions,
 	]
 
-	for source in record_sources:
+	for source: Dictionary in record_sources:
 		if source == null:
 			continue
-		for key in source:
-			var record = source[key]
+		for key: String in source:
+			var record: Variant = source[key]
 			var model_path := _get_model_path_from_record(record)
 			if not model_path.is_empty():
 				var normalized := model_path.to_lower()
@@ -171,12 +173,12 @@ func _collect_unique_models() -> Array[String]:
 					models.append(model_path)
 
 	# Also scan NPCs and creatures for body part models
-	for key in ESMManager.npcs:
-		var npc = ESMManager.npcs[key]
+	for key: String in ESMManager.npcs:
+		var npc: Variant = ESMManager.npcs[key]
 		# NPCs use body parts, not direct models - skip for now
 
-	for key in ESMManager.creatures:
-		var creature = ESMManager.creatures[key]
+	for key: String in ESMManager.creatures:
+		var creature: Variant = ESMManager.creatures[key]
 		var model_path := _get_model_path_from_record(creature)
 		if not model_path.is_empty():
 			var normalized := model_path.to_lower()
@@ -190,7 +192,7 @@ func _collect_unique_models() -> Array[String]:
 
 
 ## Extract model path from a record
-func _get_model_path_from_record(record) -> String:
+func _get_model_path_from_record(record: Variant) -> String:
 	if record == null:
 		return ""
 	if "model" in record and record.model is String:

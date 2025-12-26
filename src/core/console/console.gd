@@ -80,19 +80,19 @@ func _ready() -> void:
 
 	# Connect signals
 	ui.command_submitted.connect(_on_command_submitted)
-	ui.console_visibility_changed.connect(func(v: bool): visibility_changed.emit(v))
+	ui.console_visibility_changed.connect(func(v: bool) -> void: visibility_changed.emit(v))
 	ui.autocomplete_requested.connect(_on_autocomplete_requested)
 
 	picker.object_selected.connect(_on_object_selected)
 	picker.selection_cleared.connect(_on_selection_cleared)
-	picker.picker_mode_entered.connect(func(): ui.print_line("[color=yellow]Click on an object to select it...[/color]"))
-	picker.picker_mode_exited.connect(func(): pass)
+	picker.picker_mode_entered.connect(func() -> void: ui.print_line("[color=yellow]Click on an object to select it...[/color]"))
+	picker.picker_mode_exited.connect(func() -> void: pass)
 
 	# Register built-in commands
 	_register_builtin_commands()
 
 	# Print welcome message when first shown
-	ui.console_visibility_changed.connect(func(visible: bool):
+	ui.console_visibility_changed.connect(func(visible: bool) -> void:
 		if visible and ui.output_text.get_total_character_count() == 0:
 			_print_welcome()
 	, CONNECT_ONE_SHOT)
@@ -100,11 +100,13 @@ func _ready() -> void:
 
 func _input(event: InputEvent) -> void:
 	# Toggle console with tilde key (or ² on AZERTY keyboards)
-	if event is InputEventKey and event.pressed:
-		# KEY_QUOTELEFT is tilde on QWERTY, check physical key or unicode for AZERTY ²
-		if event.keycode == TOGGLE_KEY or event.physical_keycode == KEY_QUOTELEFT or event.unicode == 178:  # 178 = ²
-			toggle()
-			get_viewport().set_input_as_handled()
+	if event is InputEventKey:
+		var key: InputEventKey = event as InputEventKey
+		if key.pressed:
+			# KEY_QUOTELEFT is tilde on QWERTY, check physical key or unicode for AZERTY ²
+			if key.keycode == TOGGLE_KEY or key.physical_keycode == KEY_QUOTELEFT or key.unicode == 178:  # 178 = ²
+				toggle()
+				get_viewport().set_input_as_handled()
 
 
 ## Toggle console visibility
@@ -268,7 +270,8 @@ func _on_command_submitted(cmd_string: String) -> void:
 	# Parse arguments
 	var parsed := registry.parse_arguments(cmd, args_string)
 	if not parsed.success:
-		ui.print_error(parsed.error)
+		var error_msg: String = parsed.error
+		ui.print_error(error_msg)
 		ui.print_line("[color=gray]Usage: %s[/color]" % cmd.get_usage())
 		return
 
@@ -394,14 +397,14 @@ func _register_builtin_commands() -> void:
 #region Built-in Command Implementations
 
 func _cmd_help(args: Dictionary) -> CommandRegistry.CommandResult:
-	if args.has("command") and not args.command.is_empty():
-		var cmd := registry.get_command(args.command)
-		if cmd:
-			return CommandRegistry.CommandResult.ok(registry.get_help_text(cmd))
-		else:
-			return CommandRegistry.CommandResult.error("Unknown command: %s" % args.command)
+	var cmd_name: String = args.get("command", "")
+	if cmd_name.is_empty():
+		return CommandRegistry.CommandResult.ok(registry.get_full_help())
 
-	return CommandRegistry.CommandResult.ok(registry.get_full_help())
+	var cmd := registry.get_command(cmd_name)
+	if cmd:
+		return CommandRegistry.CommandResult.ok(registry.get_help_text(cmd))
+	return CommandRegistry.CommandResult.error("Unknown command: %s" % cmd_name)
 
 
 func _cmd_clear(_args: Dictionary) -> CommandRegistry.CommandResult:
@@ -414,7 +417,8 @@ func _cmd_version(_args: Dictionary) -> CommandRegistry.CommandResult:
 
 
 func _cmd_echo(args: Dictionary) -> CommandRegistry.CommandResult:
-	return CommandRegistry.CommandResult.ok(args.get("message", ""))
+	var message: String = args.get("message", "")
+	return CommandRegistry.CommandResult.ok(message)
 
 
 func _cmd_select(_args: Dictionary) -> CommandRegistry.CommandResult:
@@ -458,43 +462,45 @@ func _cmd_teleport(args: Dictionary) -> CommandRegistry.CommandResult:
 			return CommandRegistry.CommandResult.error("Nothing selected")
 
 		# Teleport to selection - needs camera/player context
-		var player = _context.get("player")
-		var camera = _context.get("camera")
+		var player: Variant = _context.get("player")
+		var camera: Variant = _context.get("camera")
 
-		if player and player.has_method("teleport_to"):
-			player.teleport_to(sel.hit_position + Vector3(0, 2, 0))
-			return CommandRegistry.CommandResult.ok("Teleported to selection")
-		elif camera:
-			if camera is Camera3D:
-				camera.global_position = sel.hit_position + Vector3(0, 50, 50)
-				camera.look_at(sel.hit_position)
-				return CommandRegistry.CommandResult.ok("Teleported camera to selection")
+		if player is Object:
+			var player_obj: Object = player
+			if player_obj.has_method("teleport_to"):
+				player_obj.call("teleport_to", sel.hit_position + Vector3(0, 2, 0))
+				return CommandRegistry.CommandResult.ok("Teleported to selection")
+		if camera is Camera3D:
+			var cam: Camera3D = camera
+			cam.global_position = sel.hit_position + Vector3(0, 50, 50)
+			cam.look_at(sel.hit_position)
+			return CommandRegistry.CommandResult.ok("Teleported camera to selection")
 
 		return CommandRegistry.CommandResult.error("No player or camera in context")
 
 	# Check for coordinates (x,y or x,y,z)
 	if "," in target:
-		var parts := target.split(",")
+		var parts: PackedStringArray = target.split(",")
 		if parts.size() >= 2:
-			var x := parts[0].strip_edges().to_float()
-			var y := parts[1].strip_edges().to_float()
-			var z := parts[2].strip_edges().to_float() if parts.size() > 2 else 0.0
+			var x: float = parts[0].strip_edges().to_float()
+			var y: float = parts[1].strip_edges().to_float()
+			var z: float = parts[2].strip_edges().to_float() if parts.size() > 2 else 0.0
 
-			# If only 2 coords, assume cell coordinates
 			if parts.size() == 2:
-				# Cell coordinates - need to convert
-				# This would need the coordinate system module
 				return CommandRegistry.CommandResult.ok("Would teleport to cell (%d, %d)" % [int(x), int(y)])
 
 			# World coordinates
-			var player = _context.get("player")
-			var camera = _context.get("camera")
+			var player2: Variant = _context.get("player")
+			var camera2: Variant = _context.get("camera")
 
-			if player and player.has_method("teleport_to"):
-				player.teleport_to(Vector3(x, y, z))
-				return CommandRegistry.CommandResult.ok("Teleported to (%.1f, %.1f, %.1f)" % [x, y, z])
-			elif camera and camera is Camera3D:
-				camera.global_position = Vector3(x, y, z)
+			if player2 is Object:
+				var player2_obj: Object = player2
+				if player2_obj.has_method("teleport_to"):
+					player2_obj.call("teleport_to", Vector3(x, y, z))
+					return CommandRegistry.CommandResult.ok("Teleported to (%.1f, %.1f, %.1f)" % [x, y, z])
+			if camera2 is Camera3D:
+				var cam: Camera3D = camera2
+				cam.global_position = Vector3(x, y, z)
 				return CommandRegistry.CommandResult.ok("Teleported camera to (%.1f, %.1f, %.1f)" % [x, y, z])
 
 			return CommandRegistry.CommandResult.error("No player or camera in context")
@@ -504,15 +510,14 @@ func _cmd_teleport(args: Dictionary) -> CommandRegistry.CommandResult:
 
 
 func _cmd_pos(_args: Dictionary) -> CommandRegistry.CommandResult:
-	var player = _context.get("player")
-	var camera = _context.get("camera")
+	var player: Variant = _context.get("player")
+	var camera: Variant = _context.get("camera")
 
 	var pos: Vector3
-
 	if player and player is Node3D:
-		pos = player.global_position
+		pos = (player as Node3D).global_position
 	elif camera and camera is Camera3D:
-		pos = camera.global_position
+		pos = (camera as Camera3D).global_position
 	else:
 		return CommandRegistry.CommandResult.error("No player or camera in context")
 
@@ -520,22 +525,23 @@ func _cmd_pos(_args: Dictionary) -> CommandRegistry.CommandResult:
 
 
 func _cmd_cells(_args: Dictionary) -> CommandRegistry.CommandResult:
-	var world = _context.get("world")
-
+	var world: Variant = _context.get("world")
 	if not world:
 		return CommandRegistry.CommandResult.error("No world streaming manager in context")
 
-	if world.has_method("get_loaded_cell_coordinates"):
-		var coords: Array = world.get_loaded_cell_coordinates()
-		var lines: PackedStringArray = ["Loaded cells (%d):" % coords.size()]
+	if not world is Object:
+		return CommandRegistry.CommandResult.error("World manager is not a valid object")
 
-		for coord in coords:
-			if coord is Vector2i:
-				lines.append("  (%d, %d)" % [coord.x, coord.y])
+	var world_obj: Object = world
+	if not world_obj.has_method("get_loaded_cell_coordinates"):
+		return CommandRegistry.CommandResult.error("World manager doesn't support cell listing")
 
-		return CommandRegistry.CommandResult.ok("\n".join(lines))
-
-	return CommandRegistry.CommandResult.error("World manager doesn't support cell listing")
+	var coords: Array = world_obj.call("get_loaded_cell_coordinates")
+	var lines: PackedStringArray = ["Loaded cells (%d):" % coords.size()]
+	for coord: Variant in coords:
+		if coord is Vector2i:
+			lines.append("  (%d, %d)" % [coord.x, coord.y])
+	return CommandRegistry.CommandResult.ok("\n".join(lines))
 
 
 func _cmd_stats(args: Dictionary) -> CommandRegistry.CommandResult:
@@ -573,34 +579,37 @@ func _cmd_vars(_args: Dictionary) -> CommandRegistry.CommandResult:
 		return CommandRegistry.CommandResult.ok("No variables set")
 
 	var lines: PackedStringArray = ["Variables:"]
-	for name in _variables:
+	for name: String in _variables:
 		lines.append("  %s = %s" % [name, _variables[name]])
 
 	return CommandRegistry.CommandResult.ok("\n".join(lines))
 
 
 func _cmd_tier_debug(args: Dictionary) -> CommandRegistry.CommandResult:
-	var world = _context.get("world")
+	var world: Variant = _context.get("world")
 	var verbose: String = args.get("verbose", "off")
 
-	if not world:
+	if not world or not world is Object:
 		return CommandRegistry.CommandResult.error("No world streaming manager in context")
 
-	# Try to get tier manager from world
-	var tier_manager = null
-	if world.has_method("get_tier_manager"):
-		tier_manager = world.get_tier_manager()
-	elif "tier_manager" in world:
-		tier_manager = world.tier_manager
+	var world_obj: Object = world as Object
 
-	if not tier_manager:
+	# Try to get tier manager from world
+	var tier_manager: Variant = null
+	if world_obj.has_method("get_tier_manager"):
+		tier_manager = world_obj.call("get_tier_manager")
+	elif "tier_manager" in world_obj:
+		tier_manager = world_obj.get("tier_manager")
+
+	if not tier_manager or not tier_manager is Object:
 		return CommandRegistry.CommandResult.error("No distance tier manager found")
 
+	var tier_obj: Object = tier_manager as Object
 	var lines: PackedStringArray = ["[b]Distance Tier Debug Info[/b]"]
 
 	# Get debug info from tier manager
-	if tier_manager.has_method("get_debug_info"):
-		var debug_info: Dictionary = tier_manager.get_debug_info()
+	if tier_obj.has_method("get_debug_info"):
+		var debug_info: Dictionary = tier_obj.call("get_debug_info")
 
 		lines.append("Distant rendering: %s" % ("enabled" if debug_info.get("enabled", false) else "disabled"))
 		lines.append("Max view distance: %.0fm" % debug_info.get("max_view_distance", 0))
@@ -610,7 +619,7 @@ func _cmd_tier_debug(args: Dictionary) -> CommandRegistry.CommandResult:
 		lines.append("")
 		lines.append("[b]Tier Distances:[/b]")
 		var distances: Dictionary = debug_info.get("tier_distances", {})
-		for tier in distances:
+		for tier: int in distances:
 			var tier_name := _tier_to_string(tier)
 			lines.append("  %s: %.0fm" % [tier_name, distances[tier]])
 
@@ -619,12 +628,12 @@ func _cmd_tier_debug(args: Dictionary) -> CommandRegistry.CommandResult:
 		lines.append("")
 		lines.append("[b]Cells by Tier:[/b]")
 
-		if tier_manager.has_method("get_tier_cell_counts"):
-			var camera = _context.get("camera")
+		if tier_obj.has_method("get_tier_cell_counts"):
+			var camera: Variant = _context.get("camera")
 			if camera and camera is Camera3D:
 				# Get camera cell (would need coordinate system)
-				var counts: Dictionary = tier_manager.get_tier_cell_counts(Vector2i.ZERO)
-				for tier in counts:
+				var counts: Dictionary = tier_obj.call("get_tier_cell_counts", Vector2i.ZERO)
+				for tier: int in counts:
 					var tier_name := _tier_to_string(tier)
 					lines.append("  %s: %d cells" % [tier_name, counts[tier]])
 
@@ -632,21 +641,25 @@ func _cmd_tier_debug(args: Dictionary) -> CommandRegistry.CommandResult:
 
 
 func _cmd_distant_toggle(args: Dictionary) -> CommandRegistry.CommandResult:
-	var world = _context.get("world")
+	var world: Variant = _context.get("world")
 	var state: String = args.get("state", "toggle")
 
-	if not world:
+	if not world or not world is Object:
 		return CommandRegistry.CommandResult.error("No world streaming manager in context")
 
-	# Try to get tier manager
-	var tier_manager = null
-	if world.has_method("get_tier_manager"):
-		tier_manager = world.get_tier_manager()
-	elif "tier_manager" in world:
-		tier_manager = world.tier_manager
+	var world_obj: Object = world as Object
 
-	if not tier_manager:
+	# Try to get tier manager
+	var tier_manager: Variant = null
+	if world_obj.has_method("get_tier_manager"):
+		tier_manager = world_obj.call("get_tier_manager")
+	elif "tier_manager" in world_obj:
+		tier_manager = world_obj.get("tier_manager")
+
+	if not tier_manager or not tier_manager is Object:
 		return CommandRegistry.CommandResult.error("No distance tier manager found")
+
+	var tier_obj: Object = tier_manager as Object
 
 	# Determine new state
 	var new_enabled: bool
@@ -656,53 +669,58 @@ func _cmd_distant_toggle(args: Dictionary) -> CommandRegistry.CommandResult:
 		"off", "false", "0", "disabled":
 			new_enabled = false
 		_:  # toggle
-			new_enabled = not tier_manager.distant_rendering_enabled
+			new_enabled = not tier_obj.get("distant_rendering_enabled")
 
 	# Apply state
-	tier_manager.distant_rendering_enabled = new_enabled
+	tier_obj.set("distant_rendering_enabled", new_enabled)
 
 	return CommandRegistry.CommandResult.ok("Distant rendering: %s" % ("enabled" if new_enabled else "disabled"))
 
 
-func _cmd_distant_stats(args: Dictionary) -> CommandRegistry.CommandResult:
-	var world = _context.get("world")
+func _cmd_distant_stats(_args: Dictionary) -> CommandRegistry.CommandResult:
+	var world: Variant = _context.get("world")
 
-	if not world:
+	if not world or not world is Object:
 		return CommandRegistry.CommandResult.error("No world streaming manager in context")
 
+	var world_obj: Object = world as Object
 	var lines: PackedStringArray = ["[b]Distant Rendering Statistics[/b]"]
 
 	# Try to get distant static renderer
-	var distant_renderer = null
-	if world.has_method("get_distant_renderer"):
-		distant_renderer = world.get_distant_renderer()
-	elif "distant_renderer" in world:
-		distant_renderer = world.distant_renderer
+	var distant_renderer: Variant = null
+	if world_obj.has_method("get_distant_renderer"):
+		distant_renderer = world_obj.call("get_distant_renderer")
+	elif "distant_renderer" in world_obj:
+		distant_renderer = world_obj.get("distant_renderer")
 
-	if distant_renderer and distant_renderer.has_method("get_stats"):
-		var stats: Dictionary = distant_renderer.get_stats()
-		lines.append("")
-		lines.append("[color=cyan]MID Tier (Merged Meshes):[/color]")
-		lines.append("  Loaded cells: %d" % stats.get("loaded_cells", 0))
-		lines.append("  Visible cells: %d" % stats.get("visible_cells", 0))
-		lines.append("  Total vertices: %d" % stats.get("total_vertices", 0))
-		lines.append("  Total objects: %d" % stats.get("total_objects", 0))
+	if distant_renderer is Object:
+		var renderer_obj: Object = distant_renderer as Object
+		if renderer_obj.has_method("get_stats"):
+			var stats: Dictionary = renderer_obj.call("get_stats")
+			lines.append("")
+			lines.append("[color=cyan]MID Tier (Merged Meshes):[/color]")
+			lines.append("  Loaded cells: %d" % stats.get("loaded_cells", 0))
+			lines.append("  Visible cells: %d" % stats.get("visible_cells", 0))
+			lines.append("  Total vertices: %d" % stats.get("total_vertices", 0))
+			lines.append("  Total objects: %d" % stats.get("total_objects", 0))
 
 	# Try to get impostor manager
-	var impostor_manager = null
-	if world.has_method("get_impostor_manager"):
-		impostor_manager = world.get_impostor_manager()
-	elif "impostor_manager" in world:
-		impostor_manager = world.impostor_manager
+	var impostor_manager: Variant = null
+	if world_obj.has_method("get_impostor_manager"):
+		impostor_manager = world_obj.call("get_impostor_manager")
+	elif "impostor_manager" in world_obj:
+		impostor_manager = world_obj.get("impostor_manager")
 
-	if impostor_manager and impostor_manager.has_method("get_stats"):
-		var stats: Dictionary = impostor_manager.get_stats()
-		lines.append("")
-		lines.append("[color=yellow]FAR Tier (Impostors):[/color]")
-		lines.append("  Total impostors: %d" % stats.get("total_impostors", 0))
-		lines.append("  Visible impostors: %d" % stats.get("visible_impostors", 0))
-		lines.append("  Texture cache: %d" % stats.get("texture_cache_size", 0))
-		lines.append("  Cells with impostors: %d" % stats.get("cells_with_impostors", 0))
+	if impostor_manager is Object:
+		var impostor_obj: Object = impostor_manager as Object
+		if impostor_obj.has_method("get_stats"):
+			var stats: Dictionary = impostor_obj.call("get_stats")
+			lines.append("")
+			lines.append("[color=yellow]FAR Tier (Impostors):[/color]")
+			lines.append("  Total impostors: %d" % stats.get("total_impostors", 0))
+			lines.append("  Visible impostors: %d" % stats.get("visible_impostors", 0))
+			lines.append("  Texture cache: %d" % stats.get("texture_cache_size", 0))
+			lines.append("  Cells with impostors: %d" % stats.get("cells_with_impostors", 0))
 
 	if lines.size() == 1:
 		lines.append("No distant rendering components found in world")

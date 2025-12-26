@@ -59,10 +59,10 @@ func _ready() -> void:
 	# World bounds: ~34km x 48km, centered at origin
 	# X range: -16896 to +16896, Z range: -23808 to +23808
 	# Highest point (Roque) is around region (1, 6) -> world pos ~(2300, 0, -10000)
-	roque_btn.pressed.connect(func(): _teleport_to_position(Vector3(2000, 2500, -10000)))  # Roque de los Muchachos
-	caldera_btn.pressed.connect(func(): _teleport_to_position(Vector3(-3000, 1500, -12000)))  # Caldera de Taburiente
-	coast_btn.pressed.connect(func(): _teleport_to_position(Vector3(8000, 200, -8000)))  # East coast
-	origin_btn.pressed.connect(func(): _teleport_to_position(Vector3(0, 500, 0)))  # Origin (center)
+	roque_btn.pressed.connect(func() -> void: _teleport_to_position(Vector3(2000, 2500, -10000)))  # Roque de los Muchachos
+	caldera_btn.pressed.connect(func() -> void: _teleport_to_position(Vector3(-3000, 1500, -12000)))  # Caldera de Taburiente
+	coast_btn.pressed.connect(func() -> void: _teleport_to_position(Vector3(8000, 200, -8000)))  # East coast
+	origin_btn.pressed.connect(func() -> void: _teleport_to_position(Vector3(0, 500, 0)))  # Origin (center)
 	overview_btn.pressed.connect(_toggle_overview_mode)  # Bird's eye view of entire island
 
 	# Setup sky toggle
@@ -191,7 +191,7 @@ func _on_show_sky_toggled(enabled: bool) -> void:
 
 		# Enable Sky3D, remove fallback from tree (WorldEnvironment has no visible property)
 		if sky_3d:
-			sky_3d.sky3d_enabled = true
+			sky_3d.set("sky3d_enabled", true)
 		if _fallback_world_env and _fallback_world_env.is_inside_tree():
 			remove_child(_fallback_world_env)
 		if _fallback_light:
@@ -199,7 +199,7 @@ func _on_show_sky_toggled(enabled: bool) -> void:
 	else:
 		# Disable Sky3D (if it exists), add fallback back to tree
 		if sky_3d:
-			sky_3d.sky3d_enabled = false
+			sky_3d.set("sky3d_enabled", false)
 		if _fallback_world_env and not _fallback_world_env.is_inside_tree():
 			add_child(_fallback_world_env)
 		if _fallback_light:
@@ -217,7 +217,7 @@ func _create_sky3d() -> void:
 	_log("Initializing Sky3D...")
 
 	# Load and instantiate Sky3D
-	var Sky3DScript = load("res://addons/sky_3d/src/Sky3D.gd")
+	var Sky3DScript: GDScript = load("res://addons/sky_3d/src/Sky3D.gd") as GDScript
 	sky_3d = WorldEnvironment.new()
 	sky_3d.set_script(Sky3DScript)
 	sky_3d.name = "Sky3D"
@@ -226,11 +226,11 @@ func _create_sky3d() -> void:
 	add_child(sky_3d)
 
 	# Configure AFTER adding to tree so _initialize() has run and environment exists
-	sky_3d.current_time = 10.0
-	sky_3d.minutes_per_day = 60.0
+	sky_3d.set("current_time", 10.0)
+	sky_3d.set("minutes_per_day", 60.0)
 
 	# Start enabled
-	sky_3d.sky3d_enabled = true
+	sky_3d.set("sky3d_enabled", true)
 
 	_sky3d_initialized = true
 	_log("Sky3D initialized")
@@ -349,7 +349,8 @@ func _update_stats() -> void:
 	# Get time info from Sky3D
 	var time_str := "N/A"
 	if sky_3d and _show_sky:
-		time_str = sky_3d.game_time if sky_3d.game_time else "N/A"
+		var game_time_val: Variant = sky_3d.get("game_time")
+		time_str = str(game_time_val) if game_time_val else "N/A"
 
 	stats_text.text = """[b]Performance[/b]
 FPS: [color=%s]%.1f[/color] (%.2f ms)
@@ -405,8 +406,9 @@ func _log(message: String) -> void:
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_RIGHT:
-			if event.pressed:
+		var mouse_event := event as InputEventMouseButton
+		if mouse_event.button_index == MOUSE_BUTTON_RIGHT:
+			if mouse_event.pressed:
 				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 				mouse_captured = true
 			else:
@@ -414,19 +416,22 @@ func _input(event: InputEvent) -> void:
 				mouse_captured = false
 
 	if event is InputEventMouseMotion and mouse_captured:
-		camera.rotate_y(-event.relative.x * mouse_sensitivity)
-		camera.rotate_object_local(Vector3.RIGHT, -event.relative.y * mouse_sensitivity)
+		var motion_event := event as InputEventMouseMotion
+		camera.rotate_y(-motion_event.relative.x * mouse_sensitivity)
+		camera.rotate_object_local(Vector3.RIGHT, -motion_event.relative.y * mouse_sensitivity)
 
 	# Hotkeys
-	if event is InputEventKey and event.pressed:
-		match event.keycode:
-			KEY_F3:
-				_stats_visible = not _stats_visible
-				stats_panel.visible = _stats_visible
-				_log("Stats: %s" % ("ON" if _stats_visible else "OFF"))
-			KEY_K:  # Toggle sky/day-night cycle
-				if _show_sky_toggle:
-					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
+	if event is InputEventKey:
+		var key_event := event as InputEventKey
+		if key_event.pressed:
+			match key_event.keycode:
+				KEY_F3:
+					_stats_visible = not _stats_visible
+					stats_panel.visible = _stats_visible
+					_log("Stats: %s" % ("ON" if _stats_visible else "OFF"))
+				KEY_K:  # Toggle sky/day-night cycle
+					if _show_sky_toggle:
+						_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
 
 
 func _process(delta: float) -> void:

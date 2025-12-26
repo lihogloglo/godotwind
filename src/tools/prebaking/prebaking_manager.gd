@@ -50,14 +50,14 @@ var status: Status = Status.IDLE
 
 ## State persistence
 var state: PrebakeState.ComponentState = null
-var _state_manager: RefCounted = null
+var _state_manager: PrebakeState = null
 
 ## Bakers
-var _model_baker: RefCounted = null
-var _impostor_baker: Node = null
-var _mesh_baker: RefCounted = null
-var _navmesh_baker: RefCounted = null
-var _shore_baker: RefCounted = null
+var _model_baker: ModelPrebaker = null
+var _impostor_baker: ImpostorBakerV2 = null
+var _mesh_baker: MeshPrebakerV2 = null
+var _navmesh_baker: NavMeshBaker = null
+var _shore_baker: ShoreMaskBaker = null
 
 ## Component enable flags
 var enable_terrain: bool = true
@@ -246,7 +246,7 @@ func _clear_cache_directories() -> void:
 		SettingsManager.get_ocean_path(),
 	]
 
-	for dir_path in directories:
+	for dir_path: String in directories:
 		if DirAccess.dir_exists_absolute(dir_path):
 			var deleted := _delete_directory_contents(dir_path)
 			print("PrebakingManager: Cleared %d files from %s" % [deleted, dir_path])
@@ -315,7 +315,7 @@ func _bake_terrain() -> Dictionary:
 		add_child(terrain_3d)
 
 		# Use shared configuration from CoordinateSystem (single source of truth)
-		CS.configure_terrain3d(terrain_3d)
+		CS.configure_terrain3d(terrain_3d as Terrain3D)
 
 		# Wait a frame for initialization
 		await get_tree().process_frame
@@ -325,14 +325,15 @@ func _bake_terrain() -> Dictionary:
 	var texture_loader := TerrainTextureLoaderScript.new()
 
 	# Load terrain textures
-	var textures_loaded := texture_loader.load_terrain_textures(terrain_3d.assets)
+	var terrain_assets: Terrain3DAssets = (terrain_3d as Terrain3D).assets
+	var textures_loaded := texture_loader.load_terrain_textures(terrain_assets)
 	print("  Loaded %d terrain textures" % textures_loaded)
 	terrain_manager.set_texture_slot_mapper(texture_loader)
 
 	# Collect all unique regions that have terrain data
 	var regions_with_data: Dictionary = {}  # region_coord -> true
 
-	for key in ESMManager.lands:
+	for key: String in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
 		if not land or not land.has_heights():
 			continue
@@ -368,7 +369,7 @@ func _bake_terrain() -> Dictionary:
 		var region_coord := Vector2i(int(parts[0]), int(parts[1]))
 
 		# Import combined region (4x4 cells at once)
-		if terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func):
+		if terrain_manager.import_combined_region(terrain_3d as Terrain3D, region_coord, get_land_func):
 			processed += 1
 			state.completed.append(region_key)
 			state.last_baked = region_key
@@ -393,7 +394,8 @@ func _bake_terrain() -> Dictionary:
 	if processed > 0:
 		var terrain_data_dir := SettingsManager.get_terrain_path()
 		DirAccess.make_dir_recursive_absolute(terrain_data_dir)
-		terrain_3d.data.save_directory(terrain_data_dir)
+		var terrain_node := terrain_3d as Terrain3D
+		terrain_node.data.save_directory(terrain_data_dir)
 		print("  Saved terrain to: %s" % terrain_data_dir)
 
 	state.end_time = Time.get_unix_time_from_system()
@@ -413,22 +415,21 @@ func _bake_models() -> Dictionary:
 	component_started.emit("Models")
 
 	_model_baker = ModelPrebaker.new()
-	var baker: RefCounted = _model_baker
 
-	if baker.initialize() != OK:
+	if _model_baker.initialize() != OK:
 		error_occurred.emit("Models", "Failed to initialize model baker")
 		return {"success": 0, "failed": 0, "skipped": 0, "error": "Initialization failed"}
 
 	# Connect progress signals
-	baker.progress.connect(func(current, total, name):
+	_model_baker.progress.connect(func(current: int, total: int, name: String) -> void:
 		component_progress.emit("Models", current, total, name)
 	)
-	baker.model_baked.connect(func(path, success, mesh_count):
+	_model_baker.model_baked.connect(func(path: String, success: bool, mesh_count: int) -> void:
 		item_baked.emit("Models", path, success)
 	)
 
 	# Bake all models
-	var result: Dictionary = await baker.bake_all_models()
+	var result: Dictionary = await _model_baker.bake_all_models()
 
 	component_completed.emit("Models", result.success, result.failed, result.skipped)
 
@@ -448,44 +449,42 @@ func _bake_impostors() -> Dictionary:
 		_impostor_baker = ImpostorBakerV2.new()
 		add_child(_impostor_baker)
 
-	var baker: Node = _impostor_baker
-
 	# Get pending items
-	var state: PrebakeState.ComponentState = _state_manager.impostors
-	if state.pending.is_empty():
+	var impostor_state: PrebakeState.ComponentState = _state_manager.impostors
+	if impostor_state.pending.is_empty():
 		# Build initial pending list from impostor candidates
 		var candidates := ImpostorCandidates.new()
-		state.pending = candidates.get_landmark_models().duplicate()
-		state.start_time = Time.get_unix_time_from_system()
+		impostor_state.pending = candidates.get_landmark_models().duplicate()
+		impostor_state.start_time = Time.get_unix_time_from_system()
 
 	print("  %d pending, %d completed, %d failed" % [
-		state.pending.size(), state.completed.size(), state.failed.size()])
+		impostor_state.pending.size(), impostor_state.completed.size(), impostor_state.failed.size()])
 
-	if baker.initialize() != OK:
+	if _impostor_baker.initialize() != OK:
 		error_occurred.emit("Impostors", "Failed to initialize impostor baker")
 		return {"success": 0, "failed": 0, "error": "Initialization failed"}
 
 	# Connect progress
-	baker.progress.connect(func(current, total, name):
+	_impostor_baker.progress.connect(func(current: int, total: int, name: String) -> void:
 		component_progress.emit("Impostors", current, total, name)
 	)
-	baker.model_baked.connect(func(path, success, output):
+	_impostor_baker.model_baked.connect(func(path: String, success: bool, output: String) -> void:
 		item_baked.emit("Impostors", path, success)
 		if success:
-			state.completed.append(path)
-			state.pending.erase(path)
-			state.last_baked = path
+			impostor_state.completed.append(path)
+			impostor_state.pending.erase(path)
+			impostor_state.last_baked = path
 		else:
-			state.failed.append(path)
-			state.pending.erase(path)
+			impostor_state.failed.append(path)
+			impostor_state.pending.erase(path)
 		_state_manager.save_state()
 	)
 
 	# Bake pending items (must await since bake_models is now async)
-	var pending: Array = state.pending.duplicate()
-	var result: Dictionary = await baker.bake_models(pending)
+	var pending: Array = impostor_state.pending.duplicate()
+	var result: Dictionary = await _impostor_baker.bake_models(pending)
 
-	state.end_time = Time.get_unix_time_from_system()
+	impostor_state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
 
 	component_completed.emit("Impostors", result.success, result.failed, 0)
@@ -502,45 +501,44 @@ func _bake_merged_meshes() -> Dictionary:
 	component_started.emit("Merged Meshes")
 
 	_mesh_baker = MeshPrebakerV2.new()
-	var baker: RefCounted = _mesh_baker
 
 	# Get pending items
-	var state: PrebakeState.ComponentState = _state_manager.merged_meshes
-	if state.pending.is_empty():
+	var mesh_state: PrebakeState.ComponentState = _state_manager.merged_meshes
+	if mesh_state.pending.is_empty():
 		# Build initial pending list from ESM cells
 		var cells := _get_all_exterior_cells()
-		for cell in cells:
-			state.pending.append("%d,%d" % [cell.x, cell.y])
-		state.start_time = Time.get_unix_time_from_system()
+		for cell: Vector2i in cells:
+			mesh_state.pending.append("%d,%d" % [cell.x, cell.y])
+		mesh_state.start_time = Time.get_unix_time_from_system()
 
 	print("  %d pending, %d completed, %d failed" % [
-		state.pending.size(), state.completed.size(), state.failed.size()])
+		mesh_state.pending.size(), mesh_state.completed.size(), mesh_state.failed.size()])
 
-	if baker.initialize() != OK:
+	if _mesh_baker.initialize() != OK:
 		error_occurred.emit("Merged Meshes", "Failed to initialize mesh baker")
 		return {"success": 0, "failed": 0, "error": "Initialization failed"}
 
 	# Connect progress
-	baker.progress.connect(func(current, total, name):
+	_mesh_baker.progress.connect(func(current: int, total: int, name: String) -> void:
 		component_progress.emit("Merged Meshes", current, total, name)
 	)
-	baker.cell_baked.connect(func(cell_grid, success, output, stats):
+	_mesh_baker.cell_baked.connect(func(cell_grid: Vector2i, success: bool, output: String, stats: Dictionary) -> void:
 		var cell_key := "%d,%d" % [cell_grid.x, cell_grid.y]
 		item_baked.emit("Merged Meshes", cell_key, success)
 		if success:
-			state.completed.append(cell_key)
-			state.pending.erase(cell_key)
-			state.last_baked = cell_key
+			mesh_state.completed.append(cell_key)
+			mesh_state.pending.erase(cell_key)
+			mesh_state.last_baked = cell_key
 		else:
-			state.failed.append(cell_key)
-			state.pending.erase(cell_key)
+			mesh_state.failed.append(cell_key)
+			mesh_state.pending.erase(cell_key)
 		_state_manager.save_state()
 	)
 
 	# Bake (must await since bake_all_cells is now async)
-	var result: Dictionary = await baker.bake_all_cells()
+	var result: Dictionary = await _mesh_baker.bake_all_cells()
 
-	state.end_time = Time.get_unix_time_from_system()
+	mesh_state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
 
 	component_completed.emit("Merged Meshes", result.success, result.failed, result.skipped)
@@ -557,51 +555,50 @@ func _bake_navmeshes() -> Dictionary:
 	component_started.emit("Navmeshes")
 
 	_navmesh_baker = NavMeshBaker.new()
-	var baker: RefCounted = _navmesh_baker
 
 	# Configure
-	baker.bake_exterior_cells = true
-	baker.bake_interior_cells = false
-	baker.skip_existing = true
+	_navmesh_baker.bake_exterior_cells = true
+	_navmesh_baker.bake_interior_cells = false
+	_navmesh_baker.skip_existing = true
 
-	if terrain_3d:
-		baker.terrain_3d = terrain_3d
+	if terrain_3d and terrain_3d is Terrain3D:
+		_navmesh_baker.terrain_3d = terrain_3d as Terrain3D
 
 	# Get pending items
-	var state: PrebakeState.ComponentState = _state_manager.navmeshes
-	if state.pending.is_empty():
+	var nav_state: PrebakeState.ComponentState = _state_manager.navmeshes
+	if nav_state.pending.is_empty():
 		var cells := _get_all_exterior_cells()
-		for cell in cells:
-			state.pending.append("%d,%d" % [cell.x, cell.y])
-		state.start_time = Time.get_unix_time_from_system()
+		for cell: Vector2i in cells:
+			nav_state.pending.append("%d,%d" % [cell.x, cell.y])
+		nav_state.start_time = Time.get_unix_time_from_system()
 
 	print("  %d pending, %d completed, %d failed" % [
-		state.pending.size(), state.completed.size(), state.failed.size()])
+		nav_state.pending.size(), nav_state.completed.size(), nav_state.failed.size()])
 
-	if baker.initialize() != OK:
+	if _navmesh_baker.initialize() != OK:
 		error_occurred.emit("Navmeshes", "Failed to initialize navmesh baker")
 		return {"success": 0, "failed": 0, "error": "Initialization failed"}
 
 	# Connect progress
-	baker.progress.connect(func(current, total, cell_id):
+	_navmesh_baker.progress.connect(func(current: int, total: int, cell_id: String) -> void:
 		component_progress.emit("Navmeshes", current, total, cell_id)
 	)
-	baker.cell_baked.connect(func(cell_id, success, output, polygons):
+	_navmesh_baker.cell_baked.connect(func(cell_id: String, success: bool, output: String, polygons: int) -> void:
 		item_baked.emit("Navmeshes", cell_id, success)
 		if success:
-			state.completed.append(cell_id)
-			state.pending.erase(cell_id)
-			state.last_baked = cell_id
+			nav_state.completed.append(cell_id)
+			nav_state.pending.erase(cell_id)
+			nav_state.last_baked = cell_id
 		else:
-			state.failed.append(cell_id)
-			state.pending.erase(cell_id)
+			nav_state.failed.append(cell_id)
+			nav_state.pending.erase(cell_id)
 		_state_manager.save_state()
 	)
 
 	# Bake (must await since bake_all_cells is now async)
-	var result: Dictionary = await baker.bake_all_cells()
+	var result: Dictionary = await _navmesh_baker.bake_all_cells()
 
-	state.end_time = Time.get_unix_time_from_system()
+	nav_state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
 
 	component_completed.emit("Navmeshes", result.success, result.failed, result.skipped)
@@ -615,9 +612,10 @@ func _bake_shore_mask() -> Dictionary:
 	print("SHORE MASK: Baking ocean visibility mask")
 	print("=".repeat(80))
 	print("PrebakingManager: terrain_3d = %s" % [terrain_3d])
-	if terrain_3d:
-		print("PrebakingManager: terrain_3d path = %s" % terrain_3d.get_path())
-		print("PrebakingManager: terrain_3d.data = %s" % [terrain_3d.data])
+	if terrain_3d and terrain_3d is Terrain3D:
+		var terrain_node := terrain_3d as Terrain3D
+		print("PrebakingManager: terrain_3d path = %s" % terrain_node.get_path())
+		print("PrebakingManager: terrain_3d.data = %s" % [terrain_node.data])
 
 	component_started.emit("Shore Mask")
 
@@ -628,16 +626,15 @@ func _bake_shore_mask() -> Dictionary:
 		return {"success": 0, "failed": 1, "error": "No terrain"}
 
 	_shore_baker = ShoreMaskBaker.new()
-	var baker: RefCounted = _shore_baker
-	baker.terrain = terrain_3d
+	_shore_baker.terrain = terrain_3d as Terrain3D
 
 	# Connect progress
-	baker.progress.connect(func(percent, message):
+	_shore_baker.progress.connect(func(percent: float, message: String) -> void:
 		component_progress.emit("Shore Mask", int(percent), 100, message)
 	)
 
 	# Bake
-	var result: Dictionary = baker.bake_shore_mask()
+	var result: Dictionary = _shore_baker.bake_shore_mask()
 
 	var state: PrebakeState.ComponentState = _state_manager.shore_mask
 	if result.success:
@@ -664,7 +661,7 @@ func _get_all_exterior_cells() -> Array[Vector2i]:
 	if not ESMManager:
 		return cells
 
-	for key in ESMManager.cells:
+	for key: String in ESMManager.cells:
 		var cell: CellRecord = ESMManager.cells[key]
 		if cell and not cell.is_interior():
 			var grid := Vector2i(cell.grid_x, cell.grid_y)
@@ -672,7 +669,7 @@ func _get_all_exterior_cells() -> Array[Vector2i]:
 				seen[grid] = true
 				cells.append(grid)
 
-	cells.sort_custom(func(a, b): return a.x < b.x or (a.x == b.x and a.y < b.y))
+	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.x < b.x or (a.x == b.x and a.y < b.y))
 	return cells
 
 

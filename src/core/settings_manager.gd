@@ -273,7 +273,7 @@ func ensure_cache_directories() -> Error:
 		get_terrain_path(),
 	]
 
-	for path in paths:
+	for path: String in paths:
 		if not DirAccess.dir_exists_absolute(path):
 			var err := DirAccess.make_dir_recursive_absolute(path)
 			if err != OK:

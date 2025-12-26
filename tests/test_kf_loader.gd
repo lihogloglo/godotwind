@@ -9,7 +9,7 @@ const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
 var _bsa: BSAReader
 
 
-func _init():
+func _init() -> void:
 	print("=" .repeat(60))
 	print("KF LOADER TEST")
 	print("=" .repeat(60))
@@ -42,7 +42,7 @@ func _init():
 	# Also search for any .kf files
 	print("Searching for .kf files in BSA...")
 	var found_kf_files: Array[String] = []
-	for entry in _bsa.get_file_list():
+	for entry: BSAReader.FileEntry in _bsa.get_file_list():
 		if entry.name.to_lower().ends_with(".kf"):
 			found_kf_files.append(entry.name)
 			if found_kf_files.size() <= 10:
@@ -55,7 +55,7 @@ func _init():
 	var failed := 0
 
 	# Test each KF file
-	for kf_path in kf_files:
+	for kf_path: String in kf_files:
 		if _test_kf_file(kf_path):
 			passed += 1
 		else:
@@ -137,7 +137,7 @@ func _find_morrowind_bsa() -> String:
 		"D:/SteamLibrary/steamapps/common/Morrowind/Data Files/Morrowind.bsa",
 	]
 
-	for path in possible_paths:
+	for path: String in possible_paths:
 		if FileAccess.file_exists(path):
 			return path
 

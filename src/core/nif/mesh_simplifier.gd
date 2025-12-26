@@ -212,9 +212,9 @@ func _simplify_mesh(
 
 	# Create priority queue (simple sorted array for now)
 	var collapse_queue: Array[EdgeCollapse] = []
-	for key in edges:
+	for key: int in edges:
 		collapse_queue.append(edges[key])
-	collapse_queue.sort_custom(func(a, b): return a.cost < b.cost)
+	collapse_queue.sort_custom(func(a: Variant, b: Variant) -> bool: return a.cost < b.cost)
 
 	# Iteratively collapse edges
 	while current_triangles > target_triangles and not collapse_queue.is_empty():
@@ -277,12 +277,12 @@ func _simplify_mesh(
 		current_triangles -= triangles_removed
 
 		# Invalidate edges involving v2 and update edges involving v1
-		for key in vertex_edges[v2]:
+		for key: int in vertex_edges[v2]:
 			if edges.has(key):
 				edges[key].valid = false
 
 		# Recompute costs for edges involving v1
-		for key in vertex_edges[v1]:
+		for key: int in vertex_edges[v1]:
 			if edges.has(key) and edges[key].valid:
 				var edge: EdgeCollapse = edges[key]
 				var ev1 := _get_root_vertex(vertex_map, edge.v1)
@@ -294,10 +294,23 @@ func _simplify_mesh(
 
 		# Resort queue periodically
 		if collapse_queue.size() > 100:
-			collapse_queue.sort_custom(func(a, b): return a.cost < b.cost)
+			collapse_queue.sort_custom(func(a: Variant, b: Variant) -> bool: return a.cost < b.cost)
 
 	# Build output arrays
 	return _build_output_arrays(vertices, indices, normals, uvs, colors, vertex_map, active_triangles)
+
+
+## Create integer key for edge (faster than string formatting)
+## Uses Cantor pairing function for unique key from two ordered integers
+func _make_edge_key(v1: int, v2: int) -> int:
+	# Ensure v1 <= v2 for consistent key
+	if v1 > v2:
+		var tmp := v1
+		v1 = v2
+		v2 = tmp
+	# Cantor pairing: maps (v1, v2) to unique integer
+	# For meshes < 65536 vertices, simple bit packing works too
+	return (v1 << 20) | v2  # Supports up to ~1M vertices each
 
 
 ## Add edge to edge set
@@ -314,7 +327,7 @@ func _add_edge(
 		v1 = v2
 		v2 = tmp
 
-	var key := "%d_%d" % [v1, v2]
+	var key := _make_edge_key(v1, v2)
 	if edges.has(key):
 		return
 
@@ -416,7 +429,7 @@ func _build_output_arrays(
 	var new_colors: PackedColorArray = []
 
 	var new_idx := 0
-	for old_idx in used_vertices:
+	for old_idx: Variant in used_vertices:
 		vertex_remap[old_idx] = new_idx
 		new_vertices.append(vertices[old_idx])
 
@@ -432,7 +445,8 @@ func _build_output_arrays(
 	# Remap indices
 	var final_indices: PackedInt32Array = []
 	for i in range(new_indices.size()):
-		final_indices.append(vertex_remap[new_indices[i]])
+		var remapped_idx: int = vertex_remap[new_indices[i]]
+		final_indices.append(remapped_idx)
 
 	# Recalculate normals if we had them
 	if not new_normals.is_empty():

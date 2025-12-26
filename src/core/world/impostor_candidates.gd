@@ -19,7 +19,7 @@ extends RefCounted
 
 
 ## Impostor generation settings
-const DEFAULT_SETTINGS := {
+const DEFAULT_SETTINGS: Dictionary = {
 	"texture_size": 512,       # Resolution per impostor (512-2048)
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
@@ -30,7 +30,7 @@ const DEFAULT_SETTINGS := {
 
 ## High-priority landmark patterns (matched against actual BSA files)
 ## These patterns identify large, distinctive structures visible from distance
-const LANDMARK_PATTERNS := [
+const LANDMARK_PATTERNS: Array[String] = [
 	# Morrowind cantons and major structures
 	"ex_vivec",
 	"ex_mournhold",
@@ -65,7 +65,7 @@ var _cached_landmark_models: Array[String] = []
 var _landmark_cache_built: bool = false
 
 ## Large buildings that should have impostors
-const LARGE_BUILDING_PATTERNS := [
+const LARGE_BUILDING_PATTERNS: Array[String] = [
 	"ex_hlaalu_tower",
 	"ex_hlaalu_manor",
 	"ex_redoran_tower",
@@ -84,7 +84,7 @@ const LARGE_BUILDING_PATTERNS := [
 ]
 
 ## Large rock formations visible from distance
-const TERRAIN_FEATURE_PATTERNS := [
+const TERRAIN_FEATURE_PATTERNS: Array[String] = [
 	"terrain_rock_rm_",  # Large rocks only
 	"terrain_rock_big_",
 	"terrain_arch_",
@@ -92,7 +92,7 @@ const TERRAIN_FEATURE_PATTERNS := [
 ]
 
 ## Large trees that should have impostors
-const TREE_PATTERNS := [
+const TREE_PATTERNS: Array[String] = [
 	"flora_tree_gl",     # Grazelands trees
 	"flora_tree_ai",     # Ascadian Isles trees
 	"flora_tree_bc",     # Bitter Coast trees
@@ -102,7 +102,7 @@ const TREE_PATTERNS := [
 ]
 
 ## Minimum size (meters) for an object to be considered for impostors
-const MIN_SIZE_FOR_IMPOSTOR := 5.0
+const MIN_SIZE_FOR_IMPOSTOR: float = 5.0
 
 ## Cache for checked model paths
 var _impostor_cache: Dictionary = {}  # model_path -> bool
@@ -113,13 +113,13 @@ var _custom_candidates: Dictionary = {}  # model_path -> settings
 
 ## Check if a model should have an impostor generated
 func should_have_impostor(model_path: String) -> bool:
-	var lower := model_path.to_lower().replace("/", "\\")
+	var lower: String = model_path.to_lower().replace("/", "\\")
 
 	# Check cache
 	if lower in _impostor_cache:
 		return _impostor_cache[lower]
 
-	var result := _check_impostor_candidate(lower)
+	var result: bool = _check_impostor_candidate(lower)
 	_impostor_cache[lower] = result
 	return result
 
@@ -131,22 +131,22 @@ func _check_impostor_candidate(lower_path: String) -> bool:
 		return true
 
 	# Check landmark patterns
-	for pattern in LANDMARK_PATTERNS:
+	for pattern: String in LANDMARK_PATTERNS:
 		if pattern in lower_path:
 			return true
 
 	# Check building patterns
-	for pattern in LARGE_BUILDING_PATTERNS:
+	for pattern: String in LARGE_BUILDING_PATTERNS:
 		if pattern in lower_path:
 			return true
 
 	# Check terrain features
-	for pattern in TERRAIN_FEATURE_PATTERNS:
+	for pattern: String in TERRAIN_FEATURE_PATTERNS:
 		if pattern in lower_path:
 			return true
 
 	# Check large trees
-	for pattern in TREE_PATTERNS:
+	for pattern: String in TREE_PATTERNS:
 		if pattern in lower_path:
 			return true
 
@@ -159,38 +159,39 @@ func get_impostor_settings(model_path: String) -> Dictionary:
 	if not should_have_impostor(model_path):
 		return {}
 
-	var lower := model_path.to_lower().replace("/", "\\")
+	var lower: String = model_path.to_lower().replace("/", "\\")
 
 	# Check custom settings
 	if lower in _custom_candidates:
-		return _custom_candidates[lower].duplicate()
+		var custom_dict: Dictionary = _custom_candidates[lower]
+		return custom_dict.duplicate()
 
 	# Default settings based on model type
-	var settings := DEFAULT_SETTINGS.duplicate()
+	var settings: Dictionary = DEFAULT_SETTINGS.duplicate()
 
 	# Landmarks get higher resolution
-	for pattern in LANDMARK_PATTERNS:
+	for pattern: String in LANDMARK_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 1024
 			settings["frames"] = 24
 			return settings
 
 	# Large buildings
-	for pattern in LARGE_BUILDING_PATTERNS:
+	for pattern: String in LARGE_BUILDING_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 512
 			settings["frames"] = 16
 			return settings
 
 	# Trees get smaller textures (many of them)
-	for pattern in TREE_PATTERNS:
+	for pattern: String in TREE_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 256
 			settings["frames"] = 8
 			return settings
 
 	# Terrain features
-	for pattern in TERRAIN_FEATURE_PATTERNS:
+	for pattern: String in TERRAIN_FEATURE_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 512
 			settings["frames"] = 12
@@ -201,10 +202,10 @@ func get_impostor_settings(model_path: String) -> Dictionary:
 
 ## Add a custom impostor candidate with specific settings
 func add_custom_candidate(model_path: String, settings: Dictionary = {}) -> void:
-	var lower := model_path.to_lower().replace("/", "\\")
-	var custom_settings := DEFAULT_SETTINGS.duplicate()
+	var lower: String = model_path.to_lower().replace("/", "\\")
+	var custom_settings: Dictionary = DEFAULT_SETTINGS.duplicate()
 
-	for key in settings:
+	for key: String in settings:
 		custom_settings[key] = settings[key]
 
 	_custom_candidates[lower] = custom_settings
@@ -213,7 +214,7 @@ func add_custom_candidate(model_path: String, settings: Dictionary = {}) -> void
 
 ## Remove a custom candidate
 func remove_custom_candidate(model_path: String) -> void:
-	var lower := model_path.to_lower().replace("/", "\\")
+	var lower: String = model_path.to_lower().replace("/", "\\")
 	_custom_candidates.erase(lower)
 	_impostor_cache.erase(lower)
 
@@ -232,19 +233,19 @@ func get_landmark_models() -> Array[String]:
 		return _cached_landmark_models
 
 	# Get all NIF files from BSA
-	var nif_files := BSAManager.get_files_by_extension(".nif")
+	var nif_files: Array = BSAManager.get_files_by_extension(".nif")
 
-	for file_info in nif_files:
-		var file_path: String = file_info["path"].to_lower()
+	for file_info: Dictionary in nif_files:
+		var file_path: String = str(file_info["path"]).to_lower()
 
 		# Only check meshes in the x/ folder (exterior meshes)
 		if not "\\x\\" in file_path and not "/x/" in file_path:
 			continue
 
 		# Check against landmark patterns
-		for pattern in LANDMARK_PATTERNS:
+		for pattern: String in LANDMARK_PATTERNS:
 			if pattern in file_path:
-				_cached_landmark_models.append(file_info["path"])
+				_cached_landmark_models.append(str(file_info["path"]))
 				break
 
 	_landmark_cache_built = true
@@ -272,8 +273,8 @@ func clear_cache() -> void:
 
 ## Check if a model path matches any pattern in a list
 static func matches_any_pattern(model_path: String, patterns: Array) -> bool:
-	var lower := model_path.to_lower()
-	for pattern in patterns:
+	var lower: String = model_path.to_lower()
+	for pattern: String in patterns:
 		if pattern in lower:
 			return true
 	return false
@@ -282,12 +283,17 @@ static func matches_any_pattern(model_path: String, patterns: Array) -> bool:
 ## Get the impostors cache directory from SettingsManager
 ## Static helper that accesses the autoloaded singleton
 static func _get_impostors_dir() -> String:
-	var settings: Node = Engine.get_main_loop().root.get_node_or_null("/root/SettingsManager")
-	if settings and settings.has_method("get_impostors_path"):
-		return settings.get_impostors_path()
+	var main_loop: SceneTree = Engine.get_main_loop() as SceneTree
+	if main_loop == null:
+		push_warning("ImpostorCandidates: Main loop not available, using default path")
+		var documents_fallback: String = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+		return documents_fallback.path_join("Godotwind").path_join("cache").path_join("impostors")
+	var settings_node: Node = main_loop.root.get_node_or_null("/root/SettingsManager")
+	if settings_node and settings_node.has_method("get_impostors_path"):
+		return str(settings_node.call("get_impostors_path"))
 	# Fallback if SettingsManager not available (e.g., in editor without autoloads)
 	push_warning("ImpostorCandidates: SettingsManager not found, using default path")
-	var documents := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	var documents: String = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
 	return documents.path_join("Godotwind").path_join("cache").path_join("impostors")
 
 
@@ -298,14 +304,14 @@ static func _get_impostors_dir() -> String:
 ## We must normalize the path the same way for hash consistency
 static func get_impostor_texture_path(model_path: String) -> String:
 	# Normalize path to match baker input format
-	var normalized := model_path
+	var normalized: String = model_path
 	# Remove meshes\ prefix if present (baker doesn't include it in hash)
-	var lower := normalized.to_lower()
+	var lower: String = normalized.to_lower()
 	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
 		normalized = normalized.substr(7)  # Remove "meshes\" or "meshes/"
 
-	var hash_val := normalized.to_lower().hash()
-	var base_name := normalized.get_file().get_basename()
+	var hash_val: int = normalized.to_lower().hash()
+	var base_name: String = normalized.get_file().get_basename()
 	# Clean filename and lowercase (match baker output format which is lowercase on disk)
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
 	return _get_impostors_dir().path_join("%s_%x.png" % [base_name, hash_val])
@@ -315,12 +321,12 @@ static func get_impostor_texture_path(model_path: String) -> String:
 ## Format matches impostor_baker_v2: {base_name}_{hash_hex}.json
 static func get_impostor_metadata_path(model_path: String) -> String:
 	# Normalize path to match baker input format (same as texture path)
-	var normalized := model_path
-	var lower := normalized.to_lower()
+	var normalized: String = model_path
+	var lower: String = normalized.to_lower()
 	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
 		normalized = normalized.substr(7)
 
-	var hash_val := normalized.to_lower().hash()
-	var base_name := normalized.get_file().get_basename()
+	var hash_val: int = normalized.to_lower().hash()
+	var base_name: String = normalized.get_file().get_basename()
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
 	return _get_impostors_dir().path_join("%s_%x.json" % [base_name, hash_val])

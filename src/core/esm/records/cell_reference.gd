@@ -3,6 +3,27 @@
 class_name CellReference
 extends RefCounted
 
+# Pre-computed FourCC constants for performance (avoid repeated four_cc() calls)
+const FOURCC_UNAM: int = 0x4D414E55  # "UNAM"
+const FOURCC_XSCL: int = 0x4C435358  # "XSCL"
+const FOURCC_ANAM: int = 0x4D414E41  # "ANAM"
+const FOURCC_BNAM: int = 0x4D414E42  # "BNAM"
+const FOURCC_XSOL: int = 0x4C4F5358  # "XSOL"
+const FOURCC_CNAM: int = 0x4D414E43  # "CNAM"
+const FOURCC_INDX: int = 0x58444E49  # "INDX"
+const FOURCC_XCHG: int = 0x47484358  # "XCHG"
+const FOURCC_INTV: int = 0x56544E49  # "INTV"
+const FOURCC_NAM9: int = 0x394D414E  # "NAM9"
+const FOURCC_DODT: int = 0x54444F44  # "DODT"
+const FOURCC_DNAM: int = 0x4D414E44  # "DNAM"
+const FOURCC_FLTV: int = 0x56544C46  # "FLTV"
+const FOURCC_KNAM: int = 0x4D414E4B  # "KNAM"
+const FOURCC_TNAM: int = 0x4D414E54  # "TNAM"
+const FOURCC_DATA: int = 0x41544144  # "DATA"
+const FOURCC_NAM0: int = 0x304D414E  # "NAM0"
+const FOURCC_FRMR: int = 0x524D5246  # "FRMR"
+const FOURCC_MVRF: int = 0x4652564D  # "MVRF"
+
 # Core identity
 var ref_num: int = 0           # FRMR - unique reference number
 var ref_id: StringName         # NAME - base object ID (e.g., "barrel_01")
@@ -62,83 +83,61 @@ func load(esm: ESMReader) -> void:
 
 ## Load data subrecords after NAME
 func _load_data(esm: ESMReader) -> void:
-	# Pre-compute FourCC values
-	var UNAM := ESMDefs.four_cc("UNAM")
-	var XSCL := ESMDefs.four_cc("XSCL")
-	var ANAM := ESMDefs.four_cc("ANAM")
-	var BNAM := ESMDefs.four_cc("BNAM")
-	var XSOL := ESMDefs.four_cc("XSOL")
-	var CNAM := ESMDefs.four_cc("CNAM")
-	var INDX := ESMDefs.four_cc("INDX")
-	var XCHG := ESMDefs.four_cc("XCHG")
-	var INTV := ESMDefs.four_cc("INTV")
-	var NAM9 := ESMDefs.four_cc("NAM9")
-	var DODT := ESMDefs.four_cc("DODT")
-	var DNAM := ESMDefs.four_cc("DNAM")
-	var FLTV := ESMDefs.four_cc("FLTV")
-	var KNAM := ESMDefs.four_cc("KNAM")
-	var TNAM := ESMDefs.four_cc("TNAM")
-	var DATA := ESMDefs.four_cc("DATA")
-	var NAM0 := ESMDefs.four_cc("NAM0")
-	var DELE := ESMDefs.SubRecordType.SREC_DELE
-	var FRMR := ESMDefs.four_cc("FRMR")
-	var MVRF := ESMDefs.four_cc("MVRF")
-
 	while esm.has_more_subs():
 		esm.get_sub_name()
-		var sub_name := esm.get_current_sub_name()
+		var sub_name: int = esm.get_current_sub_name()
 
 		# Check if we've reached the next reference
-		if sub_name == FRMR or sub_name == MVRF:
+		if sub_name == FOURCC_FRMR or sub_name == FOURCC_MVRF:
 			# Put the subrecord back so the cell can read it
 			esm.cache_sub_name()
 			break
 
-		if sub_name == UNAM:
+		if sub_name == FOURCC_UNAM:
 			esm.get_sub_header()
 			reference_blocked = esm.get_s8()
-		elif sub_name == XSCL:
+		elif sub_name == FOURCC_XSCL:
 			esm.get_sub_header()
 			scale = esm.get_float()
 			# Clamp scale to valid range per OpenMW
 			scale = clampf(scale, 0.5, 2.0)
-		elif sub_name == ANAM:
+		elif sub_name == FOURCC_ANAM:
 			owner_id = StringName(esm.get_h_string())
-		elif sub_name == BNAM:
+		elif sub_name == FOURCC_BNAM:
 			global_variable = esm.get_h_string()
-		elif sub_name == XSOL:
+		elif sub_name == FOURCC_XSOL:
 			soul_id = StringName(esm.get_h_string())
-		elif sub_name == CNAM:
+		elif sub_name == FOURCC_CNAM:
 			faction_id = StringName(esm.get_h_string())
-		elif sub_name == INDX:
+		elif sub_name == FOURCC_INDX:
 			esm.get_sub_header()
 			faction_rank = esm.get_s32()
-		elif sub_name == XCHG:
+		elif sub_name == FOURCC_XCHG:
 			esm.get_sub_header()
 			enchantment_charge = esm.get_float()
-		elif sub_name == INTV:
+		elif sub_name == FOURCC_INTV:
 			esm.get_sub_header()
 			charge_int = esm.get_s32()
-		elif sub_name == NAM9:
+		elif sub_name == FOURCC_NAM9:
 			esm.get_sub_header()
 			count = esm.get_s32()
-		elif sub_name == DODT:
+		elif sub_name == FOURCC_DODT:
 			_load_door_destination(esm)
-		elif sub_name == DNAM:
+		elif sub_name == FOURCC_DNAM:
 			teleport_cell = esm.get_h_string()
-		elif sub_name == FLTV:
+		elif sub_name == FOURCC_FLTV:
 			esm.get_sub_header()
 			lock_level = esm.get_s32()
-		elif sub_name == KNAM:
+		elif sub_name == FOURCC_KNAM:
 			key_id = StringName(esm.get_h_string())
-		elif sub_name == TNAM:
+		elif sub_name == FOURCC_TNAM:
 			trap_id = StringName(esm.get_h_string())
-		elif sub_name == DATA:
+		elif sub_name == FOURCC_DATA:
 			_load_position(esm)
-		elif sub_name == NAM0:
+		elif sub_name == FOURCC_NAM0:
 			# Temp refs marker - skip
 			esm.skip_h_sub()
-		elif sub_name == DELE:
+		elif sub_name == ESMDefs.SubRecordType.SREC_DELE:
 			esm.skip_h_sub()
 			is_deleted = true
 		else:

@@ -77,7 +77,7 @@ func compute_list_add_barrier(compute_list: int) -> void:
 # --- HELPER FUNCTIONS ---
 func load_shader(path: String) -> RID:
 	if not shader_cache.has(path):
-		var shader_file := load(path)
+		var shader_file: RDShaderFile = load(path) as RDShaderFile
 		if not shader_file:
 			push_error("[RenderingContext] Failed to load shader: %s" % path)
 			return RID()
@@ -91,8 +91,9 @@ func create_storage_buffer(size: int, data: PackedByteArray = [], usage := 0) ->
 		var padding := PackedByteArray()
 		padding.resize(size - len(data))
 		data += padding
+	var buffer_size: int = max(size, len(data))
 	return Descriptor.new(
-		deletion_queue.push(device.storage_buffer_create(max(size, len(data)), data, usage)),
+		deletion_queue.push(device.storage_buffer_create(buffer_size, data, usage)),
 		RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
 	)
 
@@ -133,8 +134,12 @@ func create_pipeline(block_dimensions: Array, descriptor_sets: Array, shader: RI
 		if push_constant.size() > 0:
 			dev.compute_list_set_push_constant(compute_list, push_constant, push_constant.size())
 		for i in range(len(descriptor_sets)):
-			dev.compute_list_bind_uniform_set(compute_list, descriptor_sets[i], i)
-		dev.compute_list_dispatch(compute_list, block_dimensions[0], block_dimensions[1], block_dimensions[2])
+			var desc_set: RID = descriptor_sets[i]
+			dev.compute_list_bind_uniform_set(compute_list, desc_set, i)
+		var dim_x: int = block_dimensions[0]
+		var dim_y: int = block_dimensions[1]
+		var dim_z: int = block_dimensions[2]
+		dev.compute_list_dispatch(compute_list, dim_x, dim_y, dim_z)
 
 
 ## Returns a PackedByteArray from the provided data, size rounded to nearest multiple of 16
@@ -150,7 +155,9 @@ static func create_push_constant(data: Array) -> PackedByteArray:
 	for i in range(len(data)):
 		match typeof(data[i]):
 			TYPE_INT, TYPE_BOOL:
-				packed_data.encode_s32(i * 4, data[i])
+				var int_val: int = data[i]
+				packed_data.encode_s32(i * 4, int_val)
 			TYPE_FLOAT:
-				packed_data.encode_float(i * 4, data[i])
+				var float_val: float = data[i]
+				packed_data.encode_float(i * 4, float_val)
 	return packed_data

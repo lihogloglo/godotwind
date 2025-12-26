@@ -46,7 +46,7 @@ func convert_to_animation(animation_name: String = "default") -> Animation:
 	var max_time := 0.0
 
 	# Find all keyframe controllers
-	for record in _reader.records:
+	for record: Defs.NIFRecord in _reader.get("records"):
 		if record is Defs.NiKeyframeController:
 			var controller := record as Defs.NiKeyframeController
 			var added := _add_controller_tracks(animation, controller)
@@ -75,7 +75,7 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 	if target_idx < 0:
 		return false
 
-	var target: Defs.NIFRecord = _reader.get_record(target_idx)
+	var target: Defs.NIFRecord = _reader.call("get_record", target_idx)
 	if target == null or not (target is Defs.NiObjectNET):
 		return false
 
@@ -87,7 +87,7 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 	if controller.data_index < 0:
 		return false
 
-	var data := _reader.get_record(controller.data_index) as Defs.NiKeyframeData
+	var data := _reader.call("get_record", controller.data_index) as Defs.NiKeyframeData
 	if data == null:
 		return false
 
@@ -124,9 +124,10 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 
 			# Collect all unique time values from all three axes
 			var times := _collect_xyz_key_times(data)
-			for time in times:
-				var quat := _sample_xyz_rotation_at_time(data, time)
-				animation.rotation_track_insert_key(track_idx, time, quat)
+			for time: float in times:
+				var time_val: float = time
+				var quat := _sample_xyz_rotation_at_time(data, time_val)
+				animation.rotation_track_insert_key(track_idx, time_val, quat)
 
 			added_any = true
 
@@ -143,10 +144,10 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 		animation.track_set_path(track_idx, track_path)
 		animation.track_set_interpolation_type(track_idx, _get_interpolation_type(data.rotation_type))
 
-		for key in data.rotation_keys:
-			var time: float = key["time"]
+		for key: Dictionary in data.rotation_keys:
+			var time_val: float = key["time"]
 			var quat: Quaternion = _convert_rotation(key)
-			animation.rotation_track_insert_key(track_idx, time, quat)
+			animation.rotation_track_insert_key(track_idx, time_val, quat)
 
 		added_any = true
 
@@ -156,10 +157,11 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 		animation.track_set_path(track_idx, track_path)
 		animation.track_set_interpolation_type(track_idx, _get_interpolation_type(data.translation_type))
 
-		for key in data.translation_keys:
-			var time: float = key["time"]
-			var pos: Vector3 = _convert_position(key["value"])
-			animation.position_track_insert_key(track_idx, time, pos)
+		for key: Dictionary in data.translation_keys:
+			var time_val: float = key["time"]
+			var value_vec: Vector3 = key["value"]
+			var pos: Vector3 = _convert_position(value_vec)
+			animation.position_track_insert_key(track_idx, time_val, pos)
 
 		added_any = true
 
@@ -169,11 +171,11 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 		animation.track_set_path(track_idx, track_path)
 		animation.track_set_interpolation_type(track_idx, _get_interpolation_type(data.scale_type))
 
-		for key in data.scale_keys:
-			var time: float = key["time"]
+		for key: Dictionary in data.scale_keys:
+			var time_val: float = key["time"]
 			var scale_val: float = key["value"]
 			# NIF uses uniform scale, Godot uses Vector3
-			animation.scale_track_insert_key(track_idx, time, Vector3(scale_val, scale_val, scale_val))
+			animation.scale_track_insert_key(track_idx, time_val, Vector3(scale_val, scale_val, scale_val))
 
 		added_any = true
 
@@ -243,7 +245,7 @@ func _sample_float_key_at_time(keys: Array, time: float) -> float:
 	var prev_key: Dictionary = keys[0]
 	var next_key: Dictionary = keys[0]
 
-	for key in keys:
+	for key: Dictionary in keys:
 		var key_time: float = key["time"]
 		if key_time <= time:
 			prev_key = key
@@ -258,19 +260,23 @@ func _sample_float_key_at_time(keys: Array, time: float) -> float:
 		return next_key["value"]
 
 	# Linear interpolation between keys
-	var t: float = (time - prev_key["time"]) / (next_key["time"] - prev_key["time"])
-	return lerpf(prev_key["value"], next_key["value"], t)
+	var prev_time: float = prev_key["time"]
+	var next_time: float = next_key["time"]
+	var prev_value: float = prev_key["value"]
+	var next_value: float = next_key["value"]
+	var t: float = (time - prev_time) / (next_time - prev_time)
+	return lerpf(prev_value, next_value, t)
 
 
 ## Collect all unique time values from XYZ rotation keys
 func _collect_xyz_key_times(data: Defs.NiKeyframeData) -> Array:
 	var times_set := {}
 
-	for key in data.x_rotation_keys:
+	for key: Dictionary in data.x_rotation_keys:
 		times_set[key["time"]] = true
-	for key in data.y_rotation_keys:
+	for key: Dictionary in data.y_rotation_keys:
 		times_set[key["time"]] = true
-	for key in data.z_rotation_keys:
+	for key: Dictionary in data.z_rotation_keys:
 		times_set[key["time"]] = true
 
 	var times: Array = times_set.keys()
@@ -311,7 +317,7 @@ func _get_interpolation_type(nif_type: int) -> int:
 func get_text_keys() -> Array:
 	var keys: Array = []
 
-	for record in _reader.records:
+	for record: Defs.NIFRecord in _reader.get("records"):
 		if record is Defs.NiTextKeyExtraData:
 			var text_key := record as Defs.NiTextKeyExtraData
 			for key in text_key.keys:
@@ -321,7 +327,7 @@ func get_text_keys() -> Array:
 				})
 
 	# Sort by time
-	keys.sort_custom(func(a, b): return a["time"] < b["time"])
+	keys.sort_custom(func(a: Variant, b: Variant) -> bool: return a["time"] < b["time"])
 
 	return keys
 
@@ -385,7 +391,7 @@ func _create_animation_for_range(name: String, start_time: float, end_time: floa
 	var found_any := false
 
 	# Find all keyframe controllers and extract keys within range
-	for record in _reader.records:
+	for record: Defs.NIFRecord in _reader.get("records"):
 		if record is Defs.NiKeyframeController:
 			var controller := record as Defs.NiKeyframeController
 			var added := _add_controller_tracks_for_range(animation, controller, start_time, end_time)
@@ -410,7 +416,7 @@ func _add_controller_tracks_for_range(animation: Animation, controller: Defs.NiK
 	if target_idx < 0:
 		return false
 
-	var target: Defs.NIFRecord = _reader.get_record(target_idx)
+	var target: Defs.NIFRecord = _reader.call("get_record", target_idx)
 	if target == null or not (target is Defs.NiObjectNET):
 		return false
 
@@ -422,7 +428,7 @@ func _add_controller_tracks_for_range(animation: Animation, controller: Defs.NiK
 	if controller.data_index < 0:
 		return false
 
-	var data := _reader.get_record(controller.data_index) as Defs.NiKeyframeData
+	var data := _reader.call("get_record", controller.data_index) as Defs.NiKeyframeData
 	if data == null:
 		return false
 
@@ -445,10 +451,11 @@ func _add_controller_tracks_for_range(animation: Animation, controller: Defs.NiK
 			animation.track_set_path(track_idx, track_path)
 			animation.track_set_interpolation_type(track_idx, _get_interpolation_type(data.rotation_type))
 
-			for key in trimmed_keys:
-				var time: float = key["time"] - start_time  # Offset to start at 0
+			for key: Dictionary in trimmed_keys:
+				var key_time: float = key["time"]
+				var time_val: float = key_time - start_time  # Offset to start at 0
 				var quat: Quaternion = _convert_rotation(key)
-				animation.rotation_track_insert_key(track_idx, time, quat)
+				animation.rotation_track_insert_key(track_idx, time_val, quat)
 
 			added_any = true
 
@@ -460,10 +467,12 @@ func _add_controller_tracks_for_range(animation: Animation, controller: Defs.NiK
 			animation.track_set_path(track_idx, track_path)
 			animation.track_set_interpolation_type(track_idx, _get_interpolation_type(data.translation_type))
 
-			for key in trimmed_keys:
-				var time: float = key["time"] - start_time
-				var pos: Vector3 = _convert_position(key["value"])
-				animation.position_track_insert_key(track_idx, time, pos)
+			for key: Dictionary in trimmed_keys:
+				var key_time: float = key["time"]
+				var time_val: float = key_time - start_time
+				var value_vec: Vector3 = key["value"]
+				var pos: Vector3 = _convert_position(value_vec)
+				animation.position_track_insert_key(track_idx, time_val, pos)
 
 			added_any = true
 
@@ -475,10 +484,11 @@ func _add_controller_tracks_for_range(animation: Animation, controller: Defs.NiK
 			animation.track_set_path(track_idx, track_path)
 			animation.track_set_interpolation_type(track_idx, _get_interpolation_type(data.scale_type))
 
-			for key in trimmed_keys:
-				var time: float = key["time"] - start_time
+			for key: Dictionary in trimmed_keys:
+				var key_time: float = key["time"]
+				var time_val: float = key_time - start_time
 				var scale_val: float = key["value"]
-				animation.scale_track_insert_key(track_idx, time, Vector3(scale_val, scale_val, scale_val))
+				animation.scale_track_insert_key(track_idx, time_val, Vector3(scale_val, scale_val, scale_val))
 
 			added_any = true
 
@@ -497,7 +507,7 @@ func _trim_keys_to_range(keys: Array, start_time: float, end_time: float) -> Arr
 	var last_before_start: Dictionary = {}
 	var first_after_end: Dictionary = {}
 
-	for key in keys:
+	for key: Dictionary in keys:
 		var time: float = key["time"]
 
 		if time < start_time:

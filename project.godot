@@ -12,8 +12,8 @@ config_version=5
 
 config/name="Godotwind"
 run/main_scene="uid://clb74pwrqrgok"
-config/features=PackedStringArray("4.5")
-config/icon="res://icon.png"
+config/features=PackedStringArray("4.5", "C#")
+config/icon="res://icon.svg"
 
 [autoload]
 
@@ -22,11 +22,26 @@ BSAManager="*res://src/core/bsa/bsa_manager.gd"
 ESMManager="*res://src/core/esm/esm_manager.gd"
 OceanManager="*res://src/core/water/ocean_manager.gd"
 
+[debug]
+
+# Default to warnings - use per-file @warning_ignore for relaxed scripts
+# Core/performance code should maintain strict typing manually
+gdscript/warnings/untyped_declaration=1
+gdscript/warnings/inferred_declaration=0
+gdscript/warnings/unsafe_property_access=1
+gdscript/warnings/unsafe_method_access=1
+gdscript/warnings/unsafe_cast=1
+gdscript/warnings/unsafe_call_argument=1
+
 [display]
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
 window/vsync/vsync_mode=0
+
+[dotnet]
+
+project/assembly_name="Godotwind"
 
 [editor_plugins]
 

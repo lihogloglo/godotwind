@@ -143,7 +143,7 @@ func _attach_body_parts(skeleton: Skeleton3D, npc: NPCRecord, race: RaceRecord,
 	var race_parts := _get_race_body_parts(race, is_female, is_beast)
 
 	# Attach each body part
-	for part_type in race_parts:
+	for part_type: int in race_parts:
 		var part_record: BodyPartRecord = race_parts[part_type]
 		_attach_body_part(skeleton, part_record, part_type)
 
@@ -162,7 +162,7 @@ func _attach_body_parts(skeleton: Skeleton3D, npc: NPCRecord, race: RaceRecord,
 ## Get all body parts for a race
 func _get_race_body_parts(race: RaceRecord, is_female: bool, is_beast: bool) -> Dictionary:
 	var parts := {}
-	var all_body_parts: Dictionary = ESMManager.get_all_body_parts()
+	var all_body_parts: Dictionary = ESMManager.call("get_all_body_parts") as Dictionary
 
 	if not all_body_parts:
 		return parts
@@ -173,7 +173,7 @@ func _get_race_body_parts(race: RaceRecord, is_female: bool, is_beast: bool) -> 
 	var race_id_lower := race.record_id.to_lower().replace(" ", " ")
 	var gender_tag := "f" if is_female else "m"
 
-	for part_id in all_body_parts:
+	for part_id: String in all_body_parts:
 		var part: BodyPartRecord = all_body_parts[part_id]
 
 		# Skip if not a skin type (we want base body, not clothing/armor)
@@ -198,7 +198,7 @@ func _attach_body_part(skeleton: Skeleton3D, part: BodyPartRecord, part_type: in
 		return
 
 	# Get bone name(s) for this part type
-	var bone_info = PART_BONE_MAP.get(part_type)
+	var bone_info: Variant = PART_BONE_MAP.get(part_type)
 	if not bone_info:
 		return
 
@@ -209,13 +209,17 @@ func _attach_body_part(skeleton: Skeleton3D, part: BodyPartRecord, part_type: in
 
 	# Handle single bone or multiple bones (left/right)
 	if bone_info is String:
-		_attach_to_bone(skeleton, part_model, bone_info)
+		_attach_to_bone(skeleton, part_model, bone_info as String)
 	elif bone_info is Array:
 		# For paired parts (hands, feet, etc.), attach to right bone
 		# TODO: Proper left/right detection based on part ID
-		var bone_name: String = bone_info[1]  # Default to right
+		var bone_array: Array = bone_info as Array
+		if bone_array.size() < 2:
+			push_warning("BodyPartAssembler: Invalid bone array for part type %d" % part_type)
+			return
+		var bone_name: String = str(bone_array[1])  # Default to right
 		if "left" in part.record_id.to_lower():
-			bone_name = bone_info[0]
+			bone_name = str(bone_array[0])
 		_attach_to_bone(skeleton, part_model, bone_name)
 
 

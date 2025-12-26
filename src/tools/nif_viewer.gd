@@ -90,12 +90,12 @@ func _ready() -> void:
 	load_nif_button.pressed.connect(_on_load_nif_pressed)
 
 	# Quick load buttons
-	door_btn.pressed.connect(func(): _quick_load("door"))
-	chest_btn.pressed.connect(func(): _quick_load("chest"))
-	barrel_btn.pressed.connect(func(): _quick_load("barrel"))
-	tree_btn.pressed.connect(func(): _quick_load("tree"))
-	rock_btn.pressed.connect(func(): _quick_load("rock"))
-	pillar_btn.pressed.connect(func(): _quick_load("pillar"))
+	door_btn.pressed.connect(func() -> void: _quick_load("door"))
+	chest_btn.pressed.connect(func() -> void: _quick_load("chest"))
+	barrel_btn.pressed.connect(func() -> void: _quick_load("barrel"))
+	tree_btn.pressed.connect(func() -> void: _quick_load("tree"))
+	rock_btn.pressed.connect(func() -> void: _quick_load("rock"))
+	pillar_btn.pressed.connect(func() -> void: _quick_load("pillar"))
 
 	# Connect UI signals - Left panel (model browser)
 	search_edit.text_changed.connect(_on_search_text_changed)
@@ -103,13 +103,13 @@ func _ready() -> void:
 	model_list.item_activated.connect(_on_model_activated)
 
 	# Category buttons
-	cat_all_btn.pressed.connect(func(): _set_category(""))
-	cat_flora_btn.pressed.connect(func(): _set_category("flora"))
-	cat_arch_btn.pressed.connect(func(): _set_category("arch"))
-	cat_furn_btn.pressed.connect(func(): _set_category("furn"))
-	cat_contain_btn.pressed.connect(func(): _set_category("contain"))
-	cat_npc_btn.pressed.connect(func(): _set_category("npc"))
-	cat_creature_btn.pressed.connect(func(): _set_category("creature"))
+	cat_all_btn.pressed.connect(func() -> void: _set_category(""))
+	cat_flora_btn.pressed.connect(func() -> void: _set_category("flora"))
+	cat_arch_btn.pressed.connect(func() -> void: _set_category("arch"))
+	cat_furn_btn.pressed.connect(func() -> void: _set_category("furn"))
+	cat_contain_btn.pressed.connect(func() -> void: _set_category("contain"))
+	cat_npc_btn.pressed.connect(func() -> void: _set_category("npc"))
+	cat_creature_btn.pressed.connect(func() -> void: _set_category("creature"))
 
 	# Create search debounce timer
 	_search_timer = Timer.new()
@@ -130,24 +130,28 @@ func _process(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	# Toggle collision visualization with C key
-	if event is InputEventKey and event.pressed and event.keycode == KEY_C:
-		_show_collision = not _show_collision
-		_update_collision_visibility()
-		_log("Collision display: %s" % ("ON" if _show_collision else "OFF"))
+	if event is InputEventKey:
+		var key_event := event as InputEventKey
+		if key_event.pressed and key_event.keycode == KEY_C:
+			_show_collision = not _show_collision
+			_update_collision_visibility()
+			_log("Collision display: %s" % ("ON" if _show_collision else "OFF"))
 
 	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+		var mouse_event := event as InputEventMouseButton
+		if mouse_event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_orbit_distance = max(0.5, _orbit_distance * 0.9)  # Zoom in (multiplicative for smooth feel)
 			_update_camera()
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+		elif mouse_event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_orbit_distance = min(50.0, _orbit_distance * 1.1)  # Zoom out
 			_update_camera()
 	elif event is InputEventMouseMotion:
+		var motion_event := event as InputEventMouseMotion
 		if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 			# Orbit: left mouse drag rotates camera around target
 			_auto_orbit = false
-			_orbit_yaw -= event.relative.x * 0.005
-			_orbit_pitch -= event.relative.y * 0.005
+			_orbit_yaw -= motion_event.relative.x * 0.005
+			_orbit_pitch -= motion_event.relative.y * 0.005
 			# Clamp pitch to avoid flipping (just under 90 degrees)
 			_orbit_pitch = clamp(_orbit_pitch, -PI * 0.49, PI * 0.49)
 			_update_camera()
@@ -156,14 +160,14 @@ func _input(event: InputEvent) -> void:
 			_auto_orbit = false
 			var right := camera.global_transform.basis.x
 			var up := camera.global_transform.basis.y
-			_orbit_target -= right * event.relative.x * 0.01 * _orbit_distance * 0.1
-			_orbit_target += up * event.relative.y * 0.01 * _orbit_distance * 0.1
+			_orbit_target -= right * motion_event.relative.x * 0.01 * _orbit_distance * 0.1
+			_orbit_target += up * motion_event.relative.y * 0.01 * _orbit_distance * 0.1
 			_update_camera()
 		elif Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 			# Alternative orbit with right mouse (for laptops without middle button)
 			_auto_orbit = false
-			_orbit_yaw -= event.relative.x * 0.005
-			_orbit_pitch -= event.relative.y * 0.005
+			_orbit_yaw -= motion_event.relative.x * 0.005
+			_orbit_pitch -= motion_event.relative.y * 0.005
 			_orbit_pitch = clamp(_orbit_pitch, -PI * 0.49, PI * 0.49)
 			_update_camera()
 
@@ -246,7 +250,7 @@ func _load_bsa_archives(data_path: String) -> void:
 			_log("  Loaded: %s (%d files)" % [bsa_path.get_file(), file_count])
 
 			# Index files
-			for entry in reader.get_file_list():
+			for entry: BSAReader.FileEntry in reader.get_file_list():
 				var normalized: String = entry.name.to_lower().replace("/", "\\")
 				_bsa_file_index[normalized] = {"reader": reader, "entry": entry}
 
@@ -379,7 +383,7 @@ func _load_nif_mesh(nif_path: String) -> void:
 
 	var cached: Dictionary = _bsa_file_index[normalized]
 	var reader: BSAReader = cached["reader"]
-	var entry = cached["entry"]
+	var entry: BSAReader.FileEntry = cached["entry"] as BSAReader.FileEntry
 
 	_log("Extracting: %s (%d bytes)" % [entry.name, entry.size])
 
@@ -407,7 +411,7 @@ func _load_nif_mesh(nif_path: String) -> void:
 
 	# Show record types
 	var record_types: Dictionary = {}
-	for record in nif_reader.records:
+	for record: NIFReader.NIFRecord in nif_reader.records:
 		var rt: String = record.record_type
 		if rt not in record_types:
 			record_types[rt] = 0
@@ -454,19 +458,21 @@ func _load_nif_mesh(nif_path: String) -> void:
 			# Add loaded animations
 			var anim_lib := AnimationLibrary.new()
 			for anim_name: String in kf_animations:
-				anim_lib.add_animation(anim_name, kf_animations[anim_name])
+				var anim: Animation = kf_animations[anim_name] as Animation
+				anim_lib.add_animation(anim_name, anim)
 			anim_player.add_animation_library("", anim_lib)
 			_log("  Loaded %d animations from .kf file" % kf_animations.size())
 
 	if anim_player:
-		var anim_list := anim_player.get_animation_list()
+		var anim_list: PackedStringArray = anim_player.get_animation_list()
 		if not anim_list.is_empty():
-			_log("  Animations available: %s" % ", ".join(anim_list.slice(0, 10)))
+			var anim_list_slice: PackedStringArray = anim_list.slice(0, 10)
+			_log("  Animations available: %s" % ", ".join(anim_list_slice))
 			if anim_list.size() > 10:
 				_log("    ... and %d more" % (anim_list.size() - 10))
 			# Play the first animation (or "Idle" if available)
-			var anim_to_play := anim_list[0]
-			for anim_name in ["Idle", "idle", "Idle1"]:
+			var anim_to_play: String = anim_list[0]
+			for anim_name: String in ["Idle", "idle", "Idle1"]:
 				if anim_name in anim_list:
 					anim_to_play = anim_name
 					break
@@ -549,21 +555,24 @@ func _get_combined_aabb(node: Node3D) -> AABB:
 	var combined := AABB()
 	var first := true
 
-	for child in node.get_children():
-		if child is MeshInstance3D and child.mesh:
-			var mesh_aabb: AABB = child.mesh.get_aabb()
-			mesh_aabb = child.transform * mesh_aabb
-			if first:
-				combined = mesh_aabb
-				first = false
-			else:
-				combined = combined.merge(mesh_aabb)
+	for child: Node in node.get_children():
+		if child is MeshInstance3D:
+			var mesh_child := child as MeshInstance3D
+			if mesh_child.mesh:
+				var mesh_aabb: AABB = mesh_child.mesh.get_aabb()
+				mesh_aabb = mesh_child.transform * mesh_aabb
+				if first:
+					combined = mesh_aabb
+					first = false
+				else:
+					combined = combined.merge(mesh_aabb)
 
 		# Recurse into children
 		if child is Node3D:
-			var child_aabb := _get_combined_aabb(child)
+			var child_3d := child as Node3D
+			var child_aabb := _get_combined_aabb(child_3d)
 			if child_aabb.size.length() > 0:
-				child_aabb = child.transform * child_aabb
+				child_aabb = child_3d.transform * child_aabb
 				if first:
 					combined = child_aabb
 					first = false
@@ -603,7 +612,7 @@ func _log(text: String) -> void:
 	log_text.append_text(text + "\n")
 	# Also print to console (strip bbcode)
 	var plain := text
-	for tag in ["[b]", "[/b]", "[u]", "[/u]", "[color=red]", "[color=green]", "[color=yellow]", "[/color]"]:
+	for tag: String in ["[b]", "[/b]", "[u]", "[/u]", "[color=red]", "[color=green]", "[color=yellow]", "[/color]"]:
 		plain = plain.replace(tag, "")
 	print("[NIFViewer] %s" % plain)
 
@@ -675,30 +684,35 @@ func _create_shape_debug_mesh(coll_shape: CollisionShape3D) -> MeshInstance3D:
 	mesh_inst.global_transform = coll_shape.global_transform
 
 	# Create appropriate mesh for the shape type
-	var shape := coll_shape.shape
+	var shape: Shape3D = coll_shape.shape
 	if shape is BoxShape3D:
+		var box_shape := shape as BoxShape3D
 		var box := BoxMesh.new()
-		box.size = shape.size
+		box.size = box_shape.size
 		mesh_inst.mesh = box
 	elif shape is SphereShape3D:
+		var sphere_shape := shape as SphereShape3D
 		var sphere := SphereMesh.new()
-		sphere.radius = shape.radius
-		sphere.height = shape.radius * 2.0
+		sphere.radius = sphere_shape.radius
+		sphere.height = sphere_shape.radius * 2.0
 		mesh_inst.mesh = sphere
 	elif shape is CylinderShape3D:
+		var cyl_shape := shape as CylinderShape3D
 		var cyl := CylinderMesh.new()
-		cyl.top_radius = shape.radius
-		cyl.bottom_radius = shape.radius
-		cyl.height = shape.height
+		cyl.top_radius = cyl_shape.radius
+		cyl.bottom_radius = cyl_shape.radius
+		cyl.height = cyl_shape.height
 		mesh_inst.mesh = cyl
 	elif shape is CapsuleShape3D:
+		var cap_shape := shape as CapsuleShape3D
 		var cap := CapsuleMesh.new()
-		cap.radius = shape.radius
-		cap.height = shape.height
+		cap.radius = cap_shape.radius
+		cap.height = cap_shape.height
 		mesh_inst.mesh = cap
 	elif shape is ConvexPolygonShape3D:
+		var convex_shape := shape as ConvexPolygonShape3D
 		# For convex shapes, create a mesh from the points
-		var points: PackedVector3Array = shape.points
+		var points: PackedVector3Array = convex_shape.points
 		if points.size() >= 4:
 			# Use ArrayMesh to visualize points as a rough hull
 			var arr_mesh := ArrayMesh.new()
@@ -709,8 +723,9 @@ func _create_shape_debug_mesh(coll_shape: CollisionShape3D) -> MeshInstance3D:
 			mesh_inst.mesh = box
 			mesh_inst.position += aabb.get_center()
 	elif shape is ConcavePolygonShape3D:
+		var concave_shape := shape as ConcavePolygonShape3D
 		# Trimesh - create mesh from faces
-		var faces: PackedVector3Array = shape.get_faces()
+		var faces: PackedVector3Array = concave_shape.get_faces()
 		if faces.size() >= 3:
 			var arr_mesh := ArrayMesh.new()
 			var arrays := []
@@ -767,13 +782,13 @@ func _try_load_kf_animations(mesh_path: String, skeleton: Skeleton3D) -> Diction
 		kf_paths.append(kf_path)
 
 	# Try each potential .kf file
-	for kf_path in kf_paths:
+	for kf_path: String in kf_paths:
 		var normalized_kf := kf_path.to_lower().replace("/", "\\")
 		if _bsa_file_index.has(normalized_kf):
 			_log("  Found animation file: %s" % kf_path)
 			var cached: Dictionary = _bsa_file_index[normalized_kf]
 			var reader: BSAReader = cached["reader"]
-			var entry = cached["entry"]
+			var entry: BSAReader.FileEntry = cached["entry"] as BSAReader.FileEntry
 
 			var kf_data: PackedByteArray = reader.extract_file_entry(entry)
 			if kf_data.is_empty():

@@ -54,8 +54,9 @@ func _input(event: InputEvent) -> void:
 
 	# Mouse capture for looking
 	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_RIGHT:
-			if event.pressed:
+		var mb: InputEventMouseButton = event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_RIGHT:
+			if mb.pressed:
 				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 				_mouse_captured = true
 			else:
@@ -63,15 +64,16 @@ func _input(event: InputEvent) -> void:
 				_mouse_captured = false
 
 		# Scroll wheel speed adjustment
-		elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
+		elif mb.button_index == MOUSE_BUTTON_WHEEL_UP:
 			move_speed = clampf(move_speed * speed_scale, min_speed, max_speed)
-		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			move_speed = clampf(move_speed / speed_scale, min_speed, max_speed)
 
 	# Mouse look
 	if event is InputEventMouseMotion and _mouse_captured:
-		rotate_y(-event.relative.x * mouse_sensitivity)
-		rotate_object_local(Vector3.RIGHT, -event.relative.y * mouse_sensitivity)
+		var mm: InputEventMouseMotion = event as InputEventMouseMotion
+		rotate_y(-mm.relative.x * mouse_sensitivity)
+		rotate_object_local(Vector3.RIGHT, -mm.relative.y * mouse_sensitivity)
 		# Clamp vertical rotation
 		rotation.x = clampf(rotation.x, -PI / 2 + 0.1, PI / 2 - 0.1)
 

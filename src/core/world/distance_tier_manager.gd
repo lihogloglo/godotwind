@@ -137,32 +137,32 @@ var use_frustum_culling: bool = true
 
 ## Configure tier distances for a specific world
 ## world_provider: Should implement get_max_view_distance() and tier overrides
-func configure_for_world(world_provider) -> void:
+func configure_for_world(world_provider: Object) -> void:
 	if not world_provider:
 		return
 
 	# Get max view distance from provider
 	if world_provider.has_method("get_max_view_distance"):
-		var world_max_distance: float = world_provider.get_max_view_distance()
+		var world_max_distance: float = world_provider.call("get_max_view_distance")
 		if world_max_distance > 0.0:
 			max_view_distance = world_max_distance
 
 	# Check if world supports distant rendering
 	if world_provider.has_method("supports_distant_rendering"):
-		distant_rendering_enabled = world_provider.supports_distant_rendering()
+		distant_rendering_enabled = world_provider.call("supports_distant_rendering")
 
 	# Get cell size if available
 	if world_provider.has_method("get_cell_size_meters"):
-		var world_cell_size: float = world_provider.get_cell_size_meters()
+		var world_cell_size: float = world_provider.call("get_cell_size_meters")
 		if world_cell_size > 0.0:
 			cell_size_meters = world_cell_size
 
 	# Get per-world tier unit counts (CRITICAL for different region sizes)
 	if world_provider.has_method("get_tier_unit_counts"):
-		var world_tier_counts: Dictionary = world_provider.get_tier_unit_counts()
+		var world_tier_counts: Dictionary = world_provider.call("get_tier_unit_counts")
 		if not world_tier_counts.is_empty():
 			# Override defaults with world-specific counts
-			for tier in world_tier_counts:
+			for tier: Variant in world_tier_counts:
 				max_cells_per_tier[tier] = world_tier_counts[tier]
 			print("DistanceTierManager: Using world-specific tier counts - NEAR: %d, MID: %d, FAR: %d" % [
 				max_cells_per_tier.get(Tier.NEAR, 0),
@@ -172,8 +172,8 @@ func configure_for_world(world_provider) -> void:
 
 	# Allow world-specific tier distance overrides
 	if world_provider.has_method("get_tier_distances"):
-		var overrides: Dictionary = world_provider.get_tier_distances()
-		for tier in overrides:
+		var overrides: Dictionary = world_provider.call("get_tier_distances")
+		for tier: Variant in overrides:
 			if tier in tier_distances:
 				tier_distances[tier] = overrides[tier]
 
@@ -320,26 +320,41 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 	}
 
 	# Calculate cell radius for each tier
-	var near_radius := ceili(tier_end_distances[Tier.NEAR] / cell_size_meters)
-	var mid_radius := ceili(tier_end_distances[Tier.MID] / cell_size_meters) if distant_rendering_enabled else 0
-	var far_radius := ceili(tier_end_distances[Tier.FAR] / cell_size_meters) if distant_rendering_enabled else 0
+	var near_end_dist: float = tier_end_distances[Tier.NEAR]
+	var near_radius := ceili(near_end_dist / cell_size_meters)
+	var mid_end_dist: float = tier_end_distances[Tier.MID]
+	var mid_radius := ceili(mid_end_dist / cell_size_meters) if distant_rendering_enabled else 0
+	var far_end_dist: float = tier_end_distances[Tier.FAR]
+	var far_radius := ceili(far_end_dist / cell_size_meters) if distant_rendering_enabled else 0
 	# HORIZON tier doesn't need per-cell processing - skip it entirely
 	var horizon_radius := 0  # Was: ceili(max_view_distance / cell_size_meters)
 
 	var max_radius := maxi(near_radius, maxi(mid_radius, far_radius))
 
-	# Collect cells with their distances for sorting
+	# Collect cells with their squared distances for sorting (avoid sqrt)
 	var cells_with_distance: Array[Dictionary] = []
+
+	# Pre-compute squared tier thresholds for comparison without sqrt
+	var near_end_sq := near_end_dist * near_end_dist
+	var mid_end_sq := mid_end_dist * mid_end_dist
+	var far_end_sq := far_end_dist * far_end_dist
 
 	# Iterate over all cells within max radius
 	for dy in range(-max_radius, max_radius + 1):
 		for dx in range(-max_radius, max_radius + 1):
 			var cell := Vector2i(camera_cell.x + dx, camera_cell.y + dy)
-			var distance := _cell_distance_meters(camera_cell, cell)
-			var tier := _get_tier_from_distance_raw(distance)
+			var distance_sq := _cell_distance_squared(camera_cell, cell)
 
-			if tier == Tier.NONE or tier == Tier.HORIZON:
-				continue
+			# Determine tier using squared distance thresholds
+			var tier: Tier
+			if distance_sq < near_end_sq:
+				tier = Tier.NEAR
+			elif distance_sq < mid_end_sq:
+				tier = Tier.MID
+			elif distance_sq < far_end_sq:
+				tier = Tier.FAR
+			else:
+				continue  # Skip HORIZON and beyond
 
 			# Apply view frustum culling for MID/FAR tiers
 			if use_frustum_culling and camera and tier != Tier.NEAR:
@@ -348,12 +363,12 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 
 			cells_with_distance.append({
 				"cell": cell,
-				"distance": distance,
+				"distance_sq": distance_sq,  # Store squared distance
 				"tier": tier
 			})
 
-	# Sort by distance (closest first)
-	cells_with_distance.sort_custom(func(a, b): return a.distance < b.distance)
+	# Sort by squared distance (closest first) - same ordering, no sqrt needed
+	cells_with_distance.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.distance_sq < b.distance_sq)
 
 	# Distribute to tiers respecting hard limits
 	var tier_counts := {
@@ -362,12 +377,13 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 		Tier.FAR: 0,
 	}
 
-	for entry in cells_with_distance:
+	for entry: Dictionary in cells_with_distance:
 		var tier: int = entry.tier
 		var max_for_tier: int = max_cells_per_tier.get(tier, 0)
 
 		if tier_counts[tier] < max_for_tier:
-			result[tier].append(entry.cell)
+			var cells_array: Array = result[tier]
+			cells_array.append(entry.cell)
 			tier_counts[tier] += 1
 
 	return result
@@ -441,8 +457,9 @@ func get_tier_cell_counts(camera_cell: Vector2i) -> Dictionary:
 	var counts := {}
 	var by_tier := get_visible_cells_by_tier(camera_cell)
 
-	for tier in by_tier:
-		counts[tier] = by_tier[tier].size()
+	for tier: Variant in by_tier:
+		var tier_array: Array = by_tier[tier]
+		counts[tier] = tier_array.size()
 
 	return counts
 
@@ -460,6 +477,13 @@ func _cell_distance_meters(from_cell: Vector2i, to_cell: Vector2i) -> float:
 	return sqrt(dx * dx + dy * dy)
 
 
+## Calculate squared distance in meters (faster - no sqrt)
+func _cell_distance_squared(from_cell: Vector2i, to_cell: Vector2i) -> float:
+	var dx := (to_cell.x - from_cell.x) * cell_size_meters
+	var dy := (to_cell.y - from_cell.y) * cell_size_meters
+	return dx * dx + dy * dy
+
+
 ## Convert cell count to approximate distance in meters
 func cells_to_meters(cell_count: int) -> float:
 	return cell_count * cell_size_meters
@@ -472,10 +496,9 @@ func meters_to_cells(meters: float) -> int:
 
 ## Get distance range for a tier (min, max) in meters
 func get_tier_distance_range(tier: Tier) -> Vector2:
-	return Vector2(
-		tier_distances.get(tier, 0.0),
-		tier_end_distances.get(tier, 0.0)
-	)
+	var min_dist: float = tier_distances.get(tier, 0.0)
+	var max_dist: float = tier_end_distances.get(tier, 0.0)
+	return Vector2(min_dist, max_dist)
 
 
 #endregion

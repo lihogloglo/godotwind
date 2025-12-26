@@ -56,9 +56,12 @@ class ComponentState:
 
 	func from_dict(data: Dictionary) -> void:
 		enabled = data.get("enabled", true)
-		completed = data.get("completed", []).duplicate()
-		pending = data.get("pending", []).duplicate()
-		failed = data.get("failed", []).duplicate()
+		var completed_arr: Array = data.get("completed", [])
+		completed = completed_arr.duplicate()
+		var pending_arr: Array = data.get("pending", [])
+		pending = pending_arr.duplicate()
+		var failed_arr: Array = data.get("failed", [])
+		failed = failed_arr.duplicate()
 		last_baked = data.get("last_baked", "")
 		start_time = data.get("start_time", 0)
 		end_time = data.get("end_time", 0)
@@ -164,13 +167,13 @@ func has_pending_work() -> bool:
 ## Get overall progress (0.0 - 1.0)
 func get_overall_progress() -> float:
 	var components := [terrain, models, impostors, merged_meshes, navmeshes, shore_mask, texture_atlases]
-	var enabled_components := components.filter(func(c): return c.enabled)
+	var enabled_components := components.filter(func(c: ComponentState) -> bool: return c.enabled)
 
 	if enabled_components.is_empty():
 		return 0.0
 
 	var total_progress := 0.0
-	for c in enabled_components:
+	for c: ComponentState in enabled_components:
 		total_progress += c.get_progress()
 
 	return total_progress / float(enabled_components.size())

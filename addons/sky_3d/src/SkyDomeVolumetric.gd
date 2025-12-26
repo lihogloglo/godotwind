@@ -74,8 +74,8 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 @export_subgroup("Density")
 
 ## How much of the sky is covered by clouds (0 = clear, 1 = overcast)
-## Sky++ default is 0.35 for partly cloudy skies
-@export_range(0.0, 1.0, 0.01) var vol_cloud_coverage: float = 0.35 :
+## 0.5 gives nice visible clouds, 0.35 for partly cloudy
+@export_range(0.0, 1.0, 0.01) var vol_cloud_coverage: float = 0.5 :
 	set(value):
 		vol_cloud_coverage = value
 		if is_scene_built:
@@ -113,8 +113,8 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 			sky_material.set_shader_parameter("cloud_layer_thickness", value)
 
 ## Scale of cloud formations (smaller = larger clouds)
-## Lower values create larger, more natural looking cloud formations
-@export_range(0.1, 5.0, 0.1) var vol_cloud_scale: float = 0.15 :
+## 0.8-1.2 works well for visible clouds
+@export_range(0.1, 5.0, 0.1) var vol_cloud_scale: float = 1.0 :
 	set(value):
 		vol_cloud_scale = value
 		if is_scene_built:
@@ -131,14 +131,16 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 @export_subgroup("Raymarching")
 
 ## Number of raymarching steps (higher = better quality, lower performance)
-@export_range(8, 64, 1) var vol_cloud_march_steps: int = 32 :
+## 16 is a good balance for real-time, 32+ for quality screenshots
+@export_range(8, 64, 1) var vol_cloud_march_steps: int = 16 :
 	set(value):
 		vol_cloud_march_steps = value
 		if is_scene_built:
 			sky_material.set_shader_parameter("cloud_march_steps", value)
 
 ## Number of light marching steps (higher = better shadows)
-@export_range(2, 12, 1) var vol_cloud_light_steps: int = 6 :
+## 4 is good for real-time, 6+ for quality
+@export_range(2, 12, 1) var vol_cloud_light_steps: int = 4 :
 	set(value):
 		vol_cloud_light_steps = value
 		if is_scene_built:
@@ -201,9 +203,10 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 @export_subgroup("Textures")
 
 ## Use procedural noise instead of 3D textures.
-## Procedural noise works out of the box with no setup required.
-## Disable this to use pre-generated 3D textures for potentially better quality.
-@export var vol_use_procedural_noise: bool = true :
+## Procedural noise is SLOW - only use for testing without prebaked textures.
+## For production, run the prebake script and disable this option.
+## Prebake: res://addons/sky_3d/tools/prebake_cloud_noise.gd (Script > Run in editor)
+@export var vol_use_procedural_noise: bool = false :
 	set(value):
 		vol_use_procedural_noise = value
 		if is_scene_built:
@@ -332,25 +335,73 @@ func _init_volumetric_shader_params() -> void:
 
 ## Load pre-generated 3D noise textures, or generate them if not found
 func _load_or_generate_noise_textures() -> void:
-	# Check if pre-generated textures exist
-	var shape_path := "res://addons/sky_3d/assets/resources/cloud_shape_noise.tres"
-	var detail_path := "res://addons/sky_3d/assets/resources/cloud_detail_noise.tres"
+	# Check if prebaked slices exist
+	var slice_dir := "res://addons/sky_3d/assets/resources/cloud_noise/"
+	var shape_meta_path := slice_dir + "shape_meta.json"
+	var detail_meta_path := slice_dir + "detail_meta.json"
 
+	if FileAccess.file_exists(shape_meta_path) and FileAccess.file_exists(detail_meta_path):
+		print("Sky3D: Loading prebaked cloud noise from slices...")
+		vol_cloud_shape_texture = _load_texture_from_slices(slice_dir, "shape")
+		vol_cloud_detail_texture = _load_texture_from_slices(slice_dir, "detail")
+		if vol_cloud_shape_texture and vol_cloud_detail_texture:
+			print("Sky3D: Loaded prebaked cloud noise textures")
+			return
+
+	# Fallback: check for binary .res format
+	var shape_path := "res://addons/sky_3d/assets/resources/cloud_shape_noise.res"
+	var detail_path := "res://addons/sky_3d/assets/resources/cloud_detail_noise.res"
 	if ResourceLoader.exists(shape_path) and ResourceLoader.exists(detail_path):
 		vol_cloud_shape_texture = load(shape_path)
 		vol_cloud_detail_texture = load(detail_path)
-		print("Sky3D: Loaded pre-generated cloud noise textures")
+		print("Sky3D: Loaded pre-generated cloud noise textures (.res)")
 		return
 
-	# Generate new 3D noise textures (this can be slow!)
-	print("Sky3D: Generating 3D cloud noise textures (this may take a moment)...")
-	print("Sky3D: Tip: Enable 'Use Procedural Noise' for instant clouds without textures")
+	# No prebaked textures found - fall back to procedural (slower but works)
+	push_warning("Sky3D: No prebaked cloud textures found. Using procedural noise (slower).")
+	push_warning("Sky3D: Run 'godot --headless --script res://prebake_clouds.gd' to prebake textures.")
+	vol_use_procedural_noise = true
+	sky_material.set_shader_parameter("use_procedural_noise", true)
 
-	# Use smaller resolution for faster runtime generation
-	vol_cloud_shape_texture = CloudNoiseGenerator.generate_shape_noise(32)
-	vol_cloud_detail_texture = CloudNoiseGenerator.generate_detail_noise(16)
 
-	print("Sky3D: Cloud noise textures generated")
+## Load a 3D texture from prebaked image slices
+func _load_texture_from_slices(dir: String, name: String) -> ImageTexture3D:
+	var meta_path := dir + name + "_meta.json"
+	if not FileAccess.file_exists(meta_path):
+		return null
+
+	var meta_file := FileAccess.open(meta_path, FileAccess.READ)
+	var meta_json := JSON.parse_string(meta_file.get_as_text())
+	meta_file.close()
+
+	if not meta_json:
+		push_error("Sky3D: Failed to parse %s" % meta_path)
+		return null
+
+	var size: int = meta_json.get("size", 0)
+	var slices: int = meta_json.get("slices", 0)
+
+	if size == 0 or slices == 0:
+		push_error("Sky3D: Invalid metadata in %s" % meta_path)
+		return null
+
+	var images: Array[Image] = []
+	for z in range(slices):
+		var slice_path := dir + "%s_%03d.exr" % [name, z]
+		if not FileAccess.file_exists(slice_path):
+			push_error("Sky3D: Missing slice %s" % slice_path)
+			return null
+
+		var img := Image.load_from_file(slice_path)
+		if not img:
+			push_error("Sky3D: Failed to load %s" % slice_path)
+			return null
+
+		images.append(img)
+
+	var tex := ImageTexture3D.new()
+	tex.create(images[0].get_format(), size, size, slices, false, images)
+	return tex
 
 
 ## Override cloud processing to also update volumetric cloud offset

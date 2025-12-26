@@ -104,8 +104,11 @@ func _input(event: InputEvent) -> void:
 		return
 
 	# Handle input when console is visible
-	if event is InputEventKey and event.pressed:
-		match event.keycode:
+	if event is InputEventKey:
+		var key: InputEventKey = event as InputEventKey
+		if not key.pressed:
+			return
+		match key.keycode:
 			KEY_ESCAPE:
 				if suggestion_panel.visible:
 					hide_suggestions()

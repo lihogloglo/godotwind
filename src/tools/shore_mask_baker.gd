@@ -103,7 +103,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 			if is_water:
 				# Check if adjacent to land (4-connected)
 				var adjacent_to_land := false
-				for offset in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
 					var nx: int = x + offset.x
 					var ny: int = y + offset.y
 					if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
@@ -151,7 +151,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 
 				# Check neighbors
 				var best_dist := current_dist
-				for offset in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
 					var nx: int = x + offset.x
 					var ny: int = y + offset.y
 					if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
@@ -348,12 +348,11 @@ static func load_prebaked(image_path: String) -> Dictionary:
 	if FileAccess.file_exists(cfg_path):
 		var config := ConfigFile.new()
 		if config.load(cfg_path) == OK:
-			bounds = Rect2(
-				config.get_value("shore_mask", "bounds_x", -8000.0),
-				config.get_value("shore_mask", "bounds_y", -8000.0),
-				config.get_value("shore_mask", "bounds_width", 16000.0),
-				config.get_value("shore_mask", "bounds_height", 16000.0)
-			)
+			var bounds_x: float = config.get_value("shore_mask", "bounds_x", -8000.0)
+			var bounds_y: float = config.get_value("shore_mask", "bounds_y", -8000.0)
+			var bounds_w: float = config.get_value("shore_mask", "bounds_width", 16000.0)
+			var bounds_h: float = config.get_value("shore_mask", "bounds_height", 16000.0)
+			bounds = Rect2(bounds_x, bounds_y, bounds_w, bounds_h)
 			var mask_type: String = config.get_value("shore_mask", "type", "height")
 			print("ShoreMaskBaker: Loaded %s-based shore mask" % mask_type)
 

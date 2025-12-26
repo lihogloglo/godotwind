@@ -293,7 +293,7 @@ func find_files(pattern: String) -> Array:
 	var results: Array = []
 	var normalized_pattern := _normalize_path(pattern)
 
-	for entry in _file_list:
+	for entry: FileEntry in _file_list:
 		var normalized_name := _normalize_path(entry.name)
 		if normalized_name.match(normalized_pattern):
 			results.append(entry)
@@ -307,7 +307,7 @@ func list_directory(dir_path: String) -> Array:
 	if not normalized_dir.ends_with("\\"):
 		normalized_dir += "\\"
 
-	for entry in _file_list:
+	for entry: FileEntry in _file_list:
 		var normalized_name := _normalize_path(entry.name)
 		if normalized_name.begins_with(normalized_dir):
 			# Check if it's directly in this directory (no more backslashes after dir prefix)
@@ -320,7 +320,7 @@ func list_directory(dir_path: String) -> Array:
 ## Get all unique directory paths in the archive
 func get_directories() -> Array[String]:
 	var dirs: Dictionary = {}
-	for entry in _file_list:
+	for entry: FileEntry in _file_list:
 		var path := _normalize_path(entry.name)
 		var last_slash := path.rfind("\\")
 		if last_slash > 0:
@@ -335,7 +335,7 @@ func get_directories() -> Array[String]:
 					break
 
 	var result: Array[String] = []
-	for dir in dirs.keys():
+	for dir: String in dirs.keys():
 		result.append(dir)
 	result.sort()
 	return result
@@ -345,7 +345,7 @@ func get_stats() -> Dictionary:
 	var total_size: int = 0
 	var extensions: Dictionary = {}
 
-	for entry in _file_list:
+	for entry: FileEntry in _file_list:
 		total_size += entry.size
 		var ext: String = entry.name.get_extension().to_lower()
 		if ext not in extensions:
