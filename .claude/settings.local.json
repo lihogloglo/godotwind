@@ -64,7 +64,12 @@
       "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/prebaking/prebaking_ui.tscn\")",
       "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --script \"res://test_animation_system.gd\")",
       "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --check-only)",
-      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --script \"res://prebake_clouds.gd\")"
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --script \"res://prebake_clouds.gd\")",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://scenes/world_explorer.tscn\")",
+      "Bash(cmd /c \"dir C:\\\\Users\\\\metzo\\\\Documents\\\\Godotwind\\\\cache /s /b 2>nul | findstr /i \"\".png .json\"\" | head -20\")",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless --script \"res://test_npc_system.gd\")",
+      "Bash(\"d:/Gamedev/Godotwind/Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" --headless \"res://test_npc_system.tscn\")",
+      "Bash(tree:*)"
     ]
   }
 }

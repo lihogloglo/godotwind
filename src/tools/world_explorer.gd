@@ -519,6 +519,28 @@ func _setup_console() -> void:
 		PackedStringArray(["cloudinfo"])
 	)
 
+	var cloud_color_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new("color", TYPE_STRING, "Color name: red, green, blue, pink, white")
+	]
+	console.register_command(
+		"cloudcolor", _cmd_cloud_color,
+		"Set cloud color for debugging (red, green, blue, pink, white)",
+		"sky",
+		PackedStringArray(["ccol"]),
+		cloud_color_params,
+		PackedStringArray(["cloudcolor red", "ccol pink"])
+	)
+
+	var cloud_procedural_params: Array[CommandRegistry.ParameterInfo] = []
+	console.register_command(
+		"cloudprocedural", _cmd_cloud_procedural,
+		"Toggle procedural noise (bypasses 3D textures for debugging)",
+		"sky",
+		PackedStringArray(["cproc"]),
+		cloud_procedural_params,
+		PackedStringArray(["cloudprocedural", "cproc"])
+	)
+
 	_log("Console initialized (~ to toggle)")
 
 
@@ -678,10 +700,60 @@ func _cmd_cloud_info(_args: Dictionary) -> CommandRegistry.CommandResult:
 	info += "  Detail Strength: %.2f\n" % dome.vol_cloud_detail_strength
 	info += "  Wind Speed: %.2f m/s\n" % dome.wind_speed
 	info += "  March Steps: %d\n" % dome.vol_cloud_march_steps
+	info += "  Procedural Noise: %s\n" % str(dome.vol_use_procedural_noise)
+	info += "  Shape Texture: %s\n" % ("loaded" if dome.vol_cloud_shape_texture else "MISSING")
+	info += "  Detail Texture: %s\n" % ("loaded" if dome.vol_cloud_detail_texture else "MISSING")
 	info += "\nCommands: cloudscale (cs), cloudcoverage (cc), cloudheight (ch),"
 	info += "\n          clouddensity (cd), cloudthickness (ct), cloudspeed (cspd),"
-	info += "\n          clouddetail (cdet)"
+	info += "\n          clouddetail (cdet), cloudcolor (ccol), cloudprocedural (cproc)"
 	return CommandRegistry.CommandResult.ok(info)
+
+
+## Console command: Set cloud debug color (for visibility testing)
+func _cmd_cloud_color(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
+
+	var color_name: String = args.get("color", "white")
+	var base_color: Color
+	var shadow_color: Color
+
+	match color_name.to_lower():
+		"red":
+			base_color = Color(1.0, 0.2, 0.2)
+			shadow_color = Color(0.5, 0.1, 0.1)
+		"green":
+			base_color = Color(0.2, 1.0, 0.2)
+			shadow_color = Color(0.1, 0.5, 0.1)
+		"blue":
+			base_color = Color(0.2, 0.2, 1.0)
+			shadow_color = Color(0.1, 0.1, 0.5)
+		"pink":
+			base_color = Color(1.0, 0.4, 0.8)
+			shadow_color = Color(0.5, 0.2, 0.4)
+		"white", _:
+			base_color = Color(0.95, 0.95, 1.0)
+			shadow_color = Color(0.4, 0.45, 0.55)
+
+	dome.vol_cloud_base_color = base_color
+	dome.vol_cloud_shadow_color = shadow_color
+	return CommandRegistry.CommandResult.ok("Cloud color set to: %s" % color_name)
+
+
+## Console command: Toggle procedural noise (for debugging texture issues)
+func _cmd_cloud_procedural(args: Dictionary) -> CommandRegistry.CommandResult:
+	if not sky_3d or not sky_3d.sky:
+		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
+	var dome := sky_3d.sky as SkyDomeVolumetric
+	if not dome:
+		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
+
+	dome.vol_use_procedural_noise = not dome.vol_use_procedural_noise
+	var status: String = "ON (slow but works without textures)" if dome.vol_use_procedural_noise else "OFF (uses 3D textures)"
+	return CommandRegistry.CommandResult.ok("Procedural noise: %s" % status)
 
 
 ## Toggle between fly camera and player controller
@@ -1087,16 +1159,38 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 	if world_streaming_manager:
 		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		var char_count := 0
+		var loaded_count := 0
+
+		_log("[DIAG] Found %d loaded cells to process for NPC toggle" % loaded_coords.size())
 
 		for cell_grid: Vector2i in loaded_coords:
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
 			if cell_node:
-				# Find and toggle character nodes (they have is_character metadata)
-				for child: Node in cell_node.get_children():
-					if child.has_meta("is_character") and child is Node3D:
-						(child as Node3D).visible = enabled
-						char_count += 1
+				if enabled:
+					# Check if cell has characters already
+					var has_chars := false
+					for child: Node in cell_node.get_children():
+						if child.has_meta("is_character"):
+							has_chars = true
+							(child as Node3D).visible = true
+							char_count += 1
 
+					# If no characters exist, load them now
+					if not has_chars and cell_manager:
+						_log("[DIAG] Loading characters into cell %s (no existing chars)" % str(cell_grid))
+						var new_chars: int = cell_manager.load_characters_into_cell(cell_grid.x, cell_grid.y, cell_node)
+						loaded_count += new_chars
+						if new_chars > 0:
+							_log("[DIAG] Loaded %d characters into cell %s" % [new_chars, str(cell_grid)])
+				else:
+					# Hide existing characters
+					for child: Node in cell_node.get_children():
+						if child.has_meta("is_character") and child is Node3D:
+							(child as Node3D).visible = false
+							char_count += 1
+
+		if enabled and loaded_count > 0:
+			_log("[DIAG] Total loaded %d new characters into cells" % loaded_count)
 		_log("[DIAG] Toggled visibility for %d characters" % char_count)
 
 	_log("NPCs/Creatures: %s" % ("ON" if enabled else "OFF"))

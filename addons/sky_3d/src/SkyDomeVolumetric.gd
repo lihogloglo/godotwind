@@ -35,15 +35,15 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 
 @export_subgroup("Colors")
 
-## Base color of lit cloud surfaces
-@export var vol_cloud_base_color := Color(0.95, 0.95, 1.0) :
+## Base color of lit cloud surfaces (Sky++ default: 0.85, 0.85, 0.9)
+@export var vol_cloud_base_color := Color(0.85, 0.85, 0.9) :
 	set(value):
 		vol_cloud_base_color = value
 		if is_scene_built:
 			sky_material.set_shader_parameter("cloud_base_color", Vector3(value.r, value.g, value.b))
 
-## Color of shadowed cloud areas
-@export var vol_cloud_shadow_color := Color(0.4, 0.45, 0.55) :
+## Color of shadowed cloud areas (Sky++ default: 0.35, 0.4, 0.45)
+@export var vol_cloud_shadow_color := Color(0.35, 0.4, 0.45) :
 	set(value):
 		vol_cloud_shadow_color = value
 		if is_scene_built:
@@ -74,7 +74,7 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 @export_subgroup("Density")
 
 ## How much of the sky is covered by clouds (0 = clear, 1 = overcast)
-## 0.5 gives nice visible clouds, 0.35 for partly cloudy
+## Higher values = more clouds. 0.5 gives good visibility.
 @export_range(0.0, 1.0, 0.01) var vol_cloud_coverage: float = 0.5 :
 	set(value):
 		vol_cloud_coverage = value
@@ -82,14 +82,14 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 			sky_material.set_shader_parameter("cloud_coverage", value)
 
 ## Overall density multiplier for clouds
-@export_range(0.1, 3.0, 0.1) var vol_cloud_density: float = 1.0 :
+@export_range(0.1, 3.0, 0.1) var vol_cloud_density: float = 1.5 :
 	set(value):
 		vol_cloud_density = value
 		if is_scene_built:
 			sky_material.set_shader_parameter("cloud_density_mult", value)
 
 ## Smoothness of cloud edges
-@export_range(0.0, 0.2, 0.01) var vol_cloud_smoothness: float = 0.05 :
+@export_range(0.0, 0.2, 0.01) var vol_cloud_smoothness: float = 0.1 :
 	set(value):
 		vol_cloud_smoothness = value
 		if is_scene_built:
@@ -131,23 +131,23 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 @export_subgroup("Raymarching")
 
 ## Number of raymarching steps (higher = better quality, lower performance)
-## 16 is a good balance for real-time, 32+ for quality screenshots
-@export_range(8, 64, 1) var vol_cloud_march_steps: int = 16 :
+## Sky++ default: 64 for quality. 32 is good balance for real-time.
+@export_range(8, 128, 1) var vol_cloud_march_steps: int = 64 :
 	set(value):
 		vol_cloud_march_steps = value
 		if is_scene_built:
 			sky_material.set_shader_parameter("cloud_march_steps", value)
 
 ## Number of light marching steps (higher = better shadows)
-## 4 is good for real-time, 6+ for quality
-@export_range(2, 12, 1) var vol_cloud_light_steps: int = 4 :
+## Sky++ default: 8 for quality shadows
+@export_range(2, 16, 1) var vol_cloud_light_steps: int = 8 :
 	set(value):
 		vol_cloud_light_steps = value
 		if is_scene_built:
 			sky_material.set_shader_parameter("cloud_light_steps", value)
 
-## Falloff power for horizon blending
-@export_range(0.1, 1.0, 0.05) var vol_cloud_falloff: float = 0.4 :
+## Falloff power for horizon blending (Sky++ default: 0.3)
+@export_range(0.1, 1.0, 0.05) var vol_cloud_falloff: float = 0.3 :
 	set(value):
 		vol_cloud_falloff = value
 		if is_scene_built:
@@ -163,8 +163,8 @@ const VOLUMETRIC_SHADER: String = "res://addons/sky_3d/shaders/SkyMaterialVolume
 
 @export_subgroup("Lighting")
 
-## Strength of direct sunlight on clouds
-@export_range(0.0, 30.0, 0.5) var vol_cloud_light_strength: float = 10.0 :
+## Strength of direct sunlight on clouds (Sky++ default: 15.0)
+@export_range(0.0, 30.0, 0.5) var vol_cloud_light_strength: float = 15.0 :
 	set(value):
 		vol_cloud_light_strength = value
 		if is_scene_built:
@@ -269,6 +269,7 @@ func _ready() -> void:
 
 
 func _setup_volumetric_clouds() -> void:
+	print("Sky3D: _setup_volumetric_clouds called, is_scene_built=%s" % is_scene_built)
 	if not is_scene_built:
 		return
 
@@ -278,6 +279,7 @@ func _setup_volumetric_clouds() -> void:
 	_init_volumetric_shader_params()
 
 	# If not using procedural noise, load or generate 3D textures
+	print("Sky3D: vol_use_procedural_noise=%s, shape_tex=%s, detail_tex=%s" % [vol_use_procedural_noise, vol_cloud_shape_texture, vol_cloud_detail_texture])
 	if not vol_use_procedural_noise:
 		if not vol_cloud_shape_texture or not vol_cloud_detail_texture:
 			_load_or_generate_noise_textures()
@@ -335,10 +337,39 @@ func _init_volumetric_shader_params() -> void:
 
 ## Load pre-generated 3D noise textures, or generate them if not found
 func _load_or_generate_noise_textures() -> void:
-	# Check if prebaked slices exist
+	print("Sky3D: _load_or_generate_noise_textures called")
+
+	# First check user cache directory (from SettingsManager)
+	var cache_dir := ""
+	if Engine.has_singleton("SettingsManager"):
+		var settings := Engine.get_singleton("SettingsManager")
+		if settings.has_method("get_cache_base_path"):
+			cache_dir = settings.call("get_cache_base_path").path_join("cloud_noise") + "/"
+			print("Sky3D: Checking cache dir: %s" % cache_dir)
+	else:
+		# Fallback to Documents/Godotwind/cache if SettingsManager not available
+		var documents := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+		cache_dir = documents.path_join("Godotwind").path_join("cache").path_join("cloud_noise") + "/"
+		print("Sky3D: Checking fallback cache dir: %s" % cache_dir)
+
+	# Try loading from cache directory first
+	var cache_shape_meta := cache_dir + "shape_meta.json"
+	var cache_detail_meta := cache_dir + "detail_meta.json"
+	if cache_dir and FileAccess.file_exists(cache_shape_meta) and FileAccess.file_exists(cache_detail_meta):
+		print("Sky3D: Found prebaked cloud noise in cache...")
+		vol_cloud_shape_texture = _load_texture_from_slices(cache_dir, "shape")
+		vol_cloud_detail_texture = _load_texture_from_slices(cache_dir, "detail")
+		if vol_cloud_shape_texture and vol_cloud_detail_texture:
+			print("Sky3D: Loaded cloud noise from cache")
+			sky_material.set_shader_parameter("cloud_shape_texture", vol_cloud_shape_texture)
+			sky_material.set_shader_parameter("cloud_detail_texture", vol_cloud_detail_texture)
+			return
+
+	# Check res:// directory (embedded in project)
 	var slice_dir := "res://addons/sky_3d/assets/resources/cloud_noise/"
 	var shape_meta_path := slice_dir + "shape_meta.json"
 	var detail_meta_path := slice_dir + "detail_meta.json"
+	print("Sky3D: Checking res:// dir, shape_meta exists=%s, detail_meta exists=%s" % [FileAccess.file_exists(shape_meta_path), FileAccess.file_exists(detail_meta_path)])
 
 	if FileAccess.file_exists(shape_meta_path) and FileAccess.file_exists(detail_meta_path):
 		print("Sky3D: Loading prebaked cloud noise from slices...")
@@ -346,7 +377,11 @@ func _load_or_generate_noise_textures() -> void:
 		vol_cloud_detail_texture = _load_texture_from_slices(slice_dir, "detail")
 		if vol_cloud_shape_texture and vol_cloud_detail_texture:
 			print("Sky3D: Loaded prebaked cloud noise textures")
+			sky_material.set_shader_parameter("cloud_shape_texture", vol_cloud_shape_texture)
+			sky_material.set_shader_parameter("cloud_detail_texture", vol_cloud_detail_texture)
 			return
+		else:
+			print("Sky3D: Failed to create 3D textures from slices")
 
 	# Fallback: check for binary .res format
 	var shape_path := "res://addons/sky_3d/assets/resources/cloud_shape_noise.res"
@@ -355,11 +390,13 @@ func _load_or_generate_noise_textures() -> void:
 		vol_cloud_shape_texture = load(shape_path)
 		vol_cloud_detail_texture = load(detail_path)
 		print("Sky3D: Loaded pre-generated cloud noise textures (.res)")
+		sky_material.set_shader_parameter("cloud_shape_texture", vol_cloud_shape_texture)
+		sky_material.set_shader_parameter("cloud_detail_texture", vol_cloud_detail_texture)
 		return
 
 	# No prebaked textures found - fall back to procedural (slower but works)
 	push_warning("Sky3D: No prebaked cloud textures found. Using procedural noise (slower).")
-	push_warning("Sky3D: Run 'godot --headless --script res://prebake_clouds.gd' to prebake textures.")
+	push_warning("Sky3D: Use the Prebaking UI to generate cloud noise textures.")
 	vol_use_procedural_noise = true
 	sky_material.set_shader_parameter("use_procedural_noise", true)
 
@@ -386,18 +423,29 @@ func _load_texture_from_slices(dir: String, name: String) -> ImageTexture3D:
 		return null
 
 	var images: Array[Image] = []
+	var is_res_path := dir.begins_with("res://")
+	print("Sky3D: Loading %d slices from %s (is_res_path=%s)" % [slices, dir, is_res_path])
+
 	for z in range(slices):
 		var slice_path := dir + "%s_%03d.exr" % [name, z]
-		if not FileAccess.file_exists(slice_path):
-			push_error("Sky3D: Missing slice %s" % slice_path)
-			return null
+		var img: Image = null
 
-		var img := Image.load_from_file(slice_path)
-		if not img:
-			push_error("Sky3D: Failed to load %s" % slice_path)
-			return null
+		if is_res_path:
+			# For res:// paths, use ResourceLoader (handles imported textures)
+			if ResourceLoader.exists(slice_path):
+				var loaded_tex: Texture2D = ResourceLoader.load(slice_path) as Texture2D
+				if loaded_tex:
+					img = loaded_tex.get_image()
+		else:
+			# For absolute paths (cache dir), use direct file load
+			if FileAccess.file_exists(slice_path):
+				img = Image.load_from_file(slice_path)
 
-		images.append(img)
+		if img:
+			images.append(img)
+		else:
+			push_error("Sky3D: Failed to load slice %s" % slice_path)
+			return null
 
 	var tex := ImageTexture3D.new()
 	tex.create(images[0].get_format(), size, size, slices, false, images)

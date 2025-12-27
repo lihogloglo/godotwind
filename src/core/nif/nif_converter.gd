@@ -1194,22 +1194,35 @@ func _create_skinned_tri_shape_mesh(data: Defs.NiTriShapeData, skin_instance: De
 	# Build bone indices and weights
 	var skin_arrays := _skeleton_builder.build_skin_arrays(data, skin_instance, skin_data)
 	if not skin_arrays.is_empty():
-		var indices_arr: Array = skin_arrays["indices"]
-		var weights_arr: Array = skin_arrays["weights"]
-		arrays[Mesh.ARRAY_BONES] = indices_arr
-		arrays[Mesh.ARRAY_WEIGHTS] = weights_arr
+		# Godot requires PackedInt32Array for bones and PackedFloat32Array for weights
+		var indices_arr: PackedInt32Array = skin_arrays["indices"] as PackedInt32Array
+		var weights_arr: PackedFloat32Array = skin_arrays["weights"] as PackedFloat32Array
 
-		if debug_skinning:
-			print("  Added bone weights: %d vertices, %d indices, %d weights" % [
-				data.num_vertices,
-				indices_arr.size(),
-				weights_arr.size()
-			])
+		if indices_arr and weights_arr and indices_arr.size() > 0:
+			arrays[Mesh.ARRAY_BONES] = indices_arr
+			arrays[Mesh.ARRAY_WEIGHTS] = weights_arr
+
+			if debug_skinning:
+				print("  Added bone weights: %d vertices, %d indices, %d weights" % [
+					data.num_vertices,
+					indices_arr.size(),
+					weights_arr.size()
+				])
 
 	# Create mesh with explicit blend shape count of 0 to avoid AABB errors on duplicate
 	var mesh := ArrayMesh.new()
 	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
+
+	# Try to add surface - if it fails (e.g., invalid bones array), try without skinning
+	var surface_count_before := mesh.get_surface_count()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	if mesh.get_surface_count() == surface_count_before:
+		# Surface wasn't added - try without skinning data
+		push_warning("NIFConverter: Failed to create skinned mesh surface, trying without skin")
+		arrays[Mesh.ARRAY_BONES] = null
+		arrays[Mesh.ARRAY_WEIGHTS] = null
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return mesh
 
@@ -1260,22 +1273,35 @@ func _create_skinned_tri_strips_mesh(data: Defs.NiTriStripsData, skin_instance: 
 	# Build bone indices and weights
 	var skin_arrays := _skeleton_builder.build_skin_arrays(data, skin_instance, skin_data)
 	if not skin_arrays.is_empty():
-		var indices_arr: Array = skin_arrays["indices"]
-		var weights_arr: Array = skin_arrays["weights"]
-		arrays[Mesh.ARRAY_BONES] = indices_arr
-		arrays[Mesh.ARRAY_WEIGHTS] = weights_arr
+		# Godot requires PackedInt32Array for bones and PackedFloat32Array for weights
+		var indices_arr: PackedInt32Array = skin_arrays["indices"] as PackedInt32Array
+		var weights_arr: PackedFloat32Array = skin_arrays["weights"] as PackedFloat32Array
 
-		if debug_skinning:
-			print("  Added bone weights: %d vertices, %d indices, %d weights" % [
-				data.num_vertices,
-				indices_arr.size(),
-				weights_arr.size()
-			])
+		if indices_arr and weights_arr and indices_arr.size() > 0:
+			arrays[Mesh.ARRAY_BONES] = indices_arr
+			arrays[Mesh.ARRAY_WEIGHTS] = weights_arr
+
+			if debug_skinning:
+				print("  Added bone weights: %d vertices, %d indices, %d weights" % [
+					data.num_vertices,
+					indices_arr.size(),
+					weights_arr.size()
+				])
 
 	# Create mesh with explicit blend shape count of 0 to avoid AABB errors on duplicate
 	var mesh := ArrayMesh.new()
 	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
+
+	# Try to add surface - if it fails (e.g., invalid bones array), try without skinning
+	var surface_count_before := mesh.get_surface_count()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	if mesh.get_surface_count() == surface_count_before:
+		# Surface wasn't added - try without skinning data
+		push_warning("NIFConverter: Failed to create skinned strips mesh surface, trying without skin")
+		arrays[Mesh.ARRAY_BONES] = null
+		arrays[Mesh.ARRAY_WEIGHTS] = null
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
 	return mesh
 

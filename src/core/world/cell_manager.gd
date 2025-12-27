@@ -47,8 +47,14 @@ var _stats: Dictionary = {
 
 # Configuration
 var create_lights: bool = true   # Whether to create OmniLight3D for light refs
-var load_npcs: bool = true       # Whether to load NPC models
-var load_creatures: bool = true  # Whether to load creature models
+var load_npcs: bool = true:      # Whether to load NPC models
+	set(value):
+		load_npcs = value
+		_sync_instantiator_config()
+var load_creatures: bool = true: # Whether to load creature models
+	set(value):
+		load_creatures = value
+		_sync_instantiator_config()
 var use_object_pool: bool = true # Whether to use object pooling for common models
 var use_static_renderer: bool = true  # Use RenderingServer for flora (much faster)
 var use_multimesh_instancing: bool = true  # Use MultiMesh for batching identical objects
@@ -111,6 +117,53 @@ func load_exterior_cell(x: int, y: int) -> Node3D:
 		return null
 
 	return _instantiate_cell(cell_record)
+
+
+## Load only NPCs/creatures into an existing cell node
+## Used when toggling NPCs on after cells were loaded without them
+func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
+	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	if not cell_record:
+		push_warning("CellManager: Cannot load characters - cell not found: %d, %d" % [x, y])
+		return 0
+
+	var cell_grid := Vector2i(x, y)
+	var loaded := 0
+	var npc_refs := 0
+
+	# Temporarily enable NPC/creature loading
+	var was_loading_npcs := load_npcs
+	var was_loading_creatures := load_creatures
+	load_npcs = true
+	load_creatures = true
+
+	for ref: CellReference in cell_record.references:
+		# Get base record and type
+		var record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		if not base_record:
+			continue
+
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+		# Only handle NPCs and creatures
+		if type_name in ["npc", "creature", "leveled_creature"]:
+			npc_refs += 1
+			var obj: Node3D = _instantiator.instantiate_reference(ref, cell_grid)
+			if obj:
+				cell_node.add_child(obj)
+				loaded += 1
+			else:
+				print("CellManager: Failed to instantiate %s '%s'" % [type_name, ref.ref_id])
+
+	# Restore original loading settings
+	load_npcs = was_loading_npcs
+	load_creatures = was_loading_creatures
+
+	if npc_refs > 0:
+		print("CellManager: Cell %d,%d has %d NPC/creature refs, loaded %d" % [x, y, npc_refs, loaded])
+
+	return loaded
 
 
 ## Instantiate a cell from its record

@@ -200,13 +200,19 @@ func _load_file_native_cached(path: String) -> Error:
 	# Populate GDScript dictionaries from native data
 	_populate_from_native(loader)
 
+	# Supplement with GDScript loading for record types not handled by C# loader
+	# (NPCs, creatures, races, body_parts, etc.)
+	var supplement_start := Time.get_ticks_msec()
+	_supplement_actor_data(path)
+	var supplement_time := Time.get_ticks_msec() - supplement_start
+
 	var total_time := Time.get_ticks_msec() - start_time
 	var stats: Dictionary = bridge.get_esm_stats(loader)
 	total_records_loaded += stats.get("total_records", 0) as int
 	load_time_ms += total_time as float
 	loaded_files.append(path)
 
-	print("ESMManager: Loaded %s in %d ms (C# + populate)" % [path, total_time])
+	print("ESMManager: Loaded %s in %d ms (C# + populate + %d ms actor supplement)" % [path, total_time, supplement_time])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
 	return OK
@@ -416,6 +422,52 @@ func _populate_from_native(loader: RefCounted) -> void:
 			rec.texture_path = str(native_rec.get("Texture"))
 			land_textures[key] = rec
 			_all_records[key] = {"record": rec, "type": "land_texture"}
+
+
+## Supplement native C# load with actor data not handled by native loader
+## This loads NPCs, creatures, races, body parts, and other actor-related records
+## using GDScript parsing (slower but comprehensive)
+func _supplement_actor_data(path: String) -> void:
+	var reader := ESMReader.new()
+	var err := reader.open(path)
+	if err != OK:
+		push_warning("ESMManager: Failed to open ESM for actor supplement: %s" % path)
+		return
+
+	var records_loaded := 0
+	var target_types := [
+		ESMDefs.RecordType.REC_NPC_,
+		ESMDefs.RecordType.REC_CREA,
+		ESMDefs.RecordType.REC_RACE,
+		ESMDefs.RecordType.REC_BODY,
+		ESMDefs.RecordType.REC_CLAS,
+		ESMDefs.RecordType.REC_FACT,
+		ESMDefs.RecordType.REC_SKIL,
+		ESMDefs.RecordType.REC_BSGN,
+		ESMDefs.RecordType.REC_LEVC,  # Leveled creatures
+	]
+
+	while reader.has_more_recs():
+		var rec_name := reader.get_rec_name()
+		reader.get_rec_header()
+
+		# Only parse actor-related record types
+		if rec_name in target_types:
+			var record := _load_record(reader, rec_name)
+			if record != null:
+				_store_record(record, rec_name)
+				records_loaded += 1
+
+		# Always skip to ensure we're at the correct position for the next record
+		# This handles cases where parsers don't read all subrecords
+		reader.skip_record()
+
+	reader.close()
+
+	if records_loaded > 0:
+		print("ESMManager: Supplemented %d actor records (NPCs: %d, Creatures: %d, Races: %d, BodyParts: %d)" % [
+			records_loaded, npcs.size(), creatures.size(), races.size(), body_parts.size()
+		])
 
 
 ## Load using GDScript (fallback path)

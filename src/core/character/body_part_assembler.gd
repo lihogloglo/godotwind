@@ -18,22 +18,24 @@ var model_loader: RefCounted  # ModelLoader
 
 # Body part type to bone name mapping
 # Based on OpenMW's PartBoneMap in npcanimation.cpp
+# Morrowind uses "Bip01" prefix for Biped bones
+# Format: "Bip01 L/R <Part>" for left/right variants
 const PART_BONE_MAP := {
-	BodyPartRecord.PartType.HEAD: "Head",
-	BodyPartRecord.PartType.HAIR: "Head",
-	BodyPartRecord.PartType.NECK: "Neck",
-	BodyPartRecord.PartType.CHEST: "Chest",
-	BodyPartRecord.PartType.GROIN: "Groin",
-	BodyPartRecord.PartType.HAND: ["Left Hand", "Right Hand"],  # Two bones
-	BodyPartRecord.PartType.WRIST: ["Left Wrist", "Right Wrist"],
-	BodyPartRecord.PartType.FOREARM: ["Left Forearm", "Right Forearm"],
-	BodyPartRecord.PartType.UPPER_ARM: ["Left Upper Arm", "Right Upper Arm"],
-	BodyPartRecord.PartType.FOOT: ["Left Foot", "Right Foot"],
-	BodyPartRecord.PartType.ANKLE: ["Left Ankle", "Right Ankle"],
-	BodyPartRecord.PartType.KNEE: ["Left Knee", "Right Knee"],
-	BodyPartRecord.PartType.UPPER_LEG: ["Left Upper Leg", "Right Upper Leg"],
-	BodyPartRecord.PartType.CLAVICLE: ["Left Clavicle", "Right Clavicle"],
-	BodyPartRecord.PartType.TAIL: "Tail"
+	BodyPartRecord.PartType.HEAD: "Bip01 Head",
+	BodyPartRecord.PartType.HAIR: "Bip01 Head",
+	BodyPartRecord.PartType.NECK: "Bip01 Neck",
+	BodyPartRecord.PartType.CHEST: "Bip01 Spine2",  # Chest attaches to upper spine
+	BodyPartRecord.PartType.GROIN: "Bip01 Pelvis",  # Groin attaches to pelvis
+	BodyPartRecord.PartType.HAND: ["Bip01 L Hand", "Bip01 R Hand"],
+	BodyPartRecord.PartType.WRIST: ["Bip01 L Forearm", "Bip01 R Forearm"],  # Wrist uses forearm bone
+	BodyPartRecord.PartType.FOREARM: ["Bip01 L Forearm", "Bip01 R Forearm"],
+	BodyPartRecord.PartType.UPPER_ARM: ["Bip01 L UpperArm", "Bip01 R UpperArm"],
+	BodyPartRecord.PartType.FOOT: ["Bip01 L Foot", "Bip01 R Foot"],
+	BodyPartRecord.PartType.ANKLE: ["Bip01 L Calf", "Bip01 R Calf"],  # Ankle uses calf bone
+	BodyPartRecord.PartType.KNEE: ["Bip01 L Calf", "Bip01 R Calf"],
+	BodyPartRecord.PartType.UPPER_LEG: ["Bip01 L Thigh", "Bip01 R Thigh"],
+	BodyPartRecord.PartType.CLAVICLE: ["Bip01 L Clavicle", "Bip01 R Clavicle"],
+	BodyPartRecord.PartType.TAIL: "Bip01 Tail"  # Beast races only
 }
 
 # Base skeleton paths for different character types
@@ -160,21 +162,26 @@ func _attach_body_parts(skeleton: Skeleton3D, npc: NPCRecord, race: RaceRecord,
 
 
 ## Get all body parts for a race
-func _get_race_body_parts(race: RaceRecord, is_female: bool, is_beast: bool) -> Dictionary:
+func _get_race_body_parts(race: RaceRecord, is_female: bool, _is_beast: bool) -> Dictionary:
 	var parts := {}
-	var all_body_parts: Dictionary = ESMManager.call("get_all_body_parts") as Dictionary
 
-	if not all_body_parts:
+	# Access body_parts dictionary directly from ESMManager
+	var all_body_parts: Dictionary = ESMManager.body_parts
+
+	if all_body_parts.is_empty():
+		push_warning("BodyPartAssembler: No body parts loaded in ESMManager")
 		return parts
 
 	# Search for body parts matching this race
 	# Body parts are named like: "b_n_<race>_<gender>_<part>"
-	# Example: "b_n_dark elf_m_chest"
-	var race_id_lower := race.record_id.to_lower().replace(" ", " ")
-	var gender_tag := "f" if is_female else "m"
+	# Example: "b_n_dark elf_m_chest", "b_n_argonian_m_chest"
+	# Beast races use: "b_n_khajiit_m_chest", etc.
+	var race_id_lower := race.record_id.to_lower()
 
 	for part_id: String in all_body_parts:
 		var part: BodyPartRecord = all_body_parts[part_id]
+		if not part:
+			continue
 
 		# Skip if not a skin type (we want base body, not clothing/armor)
 		if part.mesh_type != BodyPartRecord.MeshType.SKIN:
@@ -184,10 +191,19 @@ func _get_race_body_parts(race: RaceRecord, is_female: bool, is_beast: bool) -> 
 		if is_female != part.is_female():
 			continue
 
-		# Check if part belongs to this race
+		# Skip vampire parts for non-vampires (vampire parts have "vampire" in name)
+		if part.is_vampire:
+			continue
+
+		# Check if part belongs to this race by looking for race name in part ID
 		var part_id_lower: String = part_id.to_lower()
+
+		# Match race ID in body part name
+		# Body parts typically named: b_n_<race>_<gender>_<part>
 		if race_id_lower in part_id_lower:
-			parts[part.part_type] = part
+			# Only add if we don't already have this part type, or replace with better match
+			if not parts.has(part.part_type):
+				parts[part.part_type] = part
 
 	return parts
 
@@ -226,19 +242,38 @@ func _attach_body_part(skeleton: Skeleton3D, part: BodyPartRecord, part_type: in
 ## Attach a model to a specific bone
 func _attach_to_bone(skeleton: Skeleton3D, model: Node3D, bone_name: String) -> void:
 	var bone_idx := skeleton.find_bone(bone_name)
+
+	# Try case-insensitive search if exact match fails
 	if bone_idx == -1:
-		push_warning("BodyPartAssembler: Bone '%s' not found in skeleton" % bone_name)
+		bone_idx = _find_bone_case_insensitive(skeleton, bone_name)
+
+	if bone_idx == -1:
+		# Don't spam warnings for common missing bones - skeleton may not have all parts
+		if not bone_name.contains("Tail"):  # Tails only on beast races
+			push_warning("BodyPartAssembler: Bone '%s' not found in skeleton" % bone_name)
 		return
+
+	# Get the actual bone name from the skeleton (for correct casing)
+	var actual_bone_name := skeleton.get_bone_name(bone_idx)
 
 	# Create BoneAttachment3D
 	var bone_attachment := BoneAttachment3D.new()
-	bone_attachment.name = bone_name + "_Attachment"
-	bone_attachment.bone_name = bone_name
+	bone_attachment.name = actual_bone_name + "_Attachment"
+	bone_attachment.bone_name = actual_bone_name
 
 	skeleton.add_child(bone_attachment)
 
 	# Find all mesh instances in the part model and attach them
 	_attach_meshes_recursive(bone_attachment, model)
+
+
+## Find bone by name (case-insensitive)
+func _find_bone_case_insensitive(skeleton: Skeleton3D, bone_name: String) -> int:
+	var target := bone_name.to_lower()
+	for i in skeleton.get_bone_count():
+		if skeleton.get_bone_name(i).to_lower() == target:
+			return i
+	return -1
 
 
 ## Recursively find and attach mesh instances

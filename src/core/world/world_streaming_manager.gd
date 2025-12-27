@@ -281,8 +281,8 @@ func _process(delta: float) -> void:
 	if async_loading_enabled and not _load_queue.is_empty():
 		_process_load_queue()
 
-	# Update impostor visibility based on camera distance
-	if impostor_manager and impostor_manager.has_method("update_impostor_visibility"):
+	# Update impostor visibility based on camera distance (only when distant rendering is active)
+	if distant_rendering_enabled and impostor_manager and impostor_manager.has_method("update_impostor_visibility"):
 		var camera_pos := _tracked_node.global_position
 		# Use cached tier distances (updated in _cache_tier_distances)
 		if not _tier_distances_cached:

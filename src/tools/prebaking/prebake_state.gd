@@ -75,6 +75,7 @@ var impostors := ComponentState.new()
 var merged_meshes := ComponentState.new()
 var navmeshes := ComponentState.new()
 var shore_mask := ComponentState.new()
+var cloud_noise := ComponentState.new()
 var texture_atlases := ComponentState.new()
 
 ## Global state
@@ -101,6 +102,7 @@ func load_state() -> bool:
 	_load_component(config, "merged_meshes", merged_meshes)
 	_load_component(config, "navmeshes", navmeshes)
 	_load_component(config, "shore_mask", shore_mask)
+	_load_component(config, "cloud_noise", cloud_noise)
 	_load_component(config, "texture_atlases", texture_atlases)
 
 	print("PrebakeState: Loaded state from %s" % STATE_FILE)
@@ -122,6 +124,7 @@ func save_state() -> bool:
 	_save_component(config, "merged_meshes", merged_meshes)
 	_save_component(config, "navmeshes", navmeshes)
 	_save_component(config, "shore_mask", shore_mask)
+	_save_component(config, "cloud_noise", cloud_noise)
 	_save_component(config, "texture_atlases", texture_atlases)
 
 	var err := config.save(STATE_FILE)
@@ -141,6 +144,7 @@ func clear_state() -> void:
 	merged_meshes.reset()
 	navmeshes.reset()
 	shore_mask.reset()
+	cloud_noise.reset()
 	texture_atlases.reset()
 	is_running = false
 
@@ -160,13 +164,14 @@ func has_pending_work() -> bool:
 		not merged_meshes.pending.is_empty() or
 		not navmeshes.pending.is_empty() or
 		not shore_mask.pending.is_empty() or
+		not cloud_noise.pending.is_empty() or
 		not texture_atlases.pending.is_empty()
 	)
 
 
 ## Get overall progress (0.0 - 1.0)
 func get_overall_progress() -> float:
-	var components := [terrain, models, impostors, merged_meshes, navmeshes, shore_mask, texture_atlases]
+	var components := [terrain, models, impostors, merged_meshes, navmeshes, shore_mask, cloud_noise, texture_atlases]
 	var enabled_components := components.filter(func(c: ComponentState) -> bool: return c.enabled)
 
 	if enabled_components.is_empty():
@@ -188,6 +193,7 @@ func get_summary() -> Dictionary:
 		"merged_meshes": merged_meshes.to_dict(),
 		"navmeshes": navmeshes.to_dict(),
 		"shore_mask": shore_mask.to_dict(),
+		"cloud_noise": cloud_noise.to_dict(),
 		"texture_atlases": texture_atlases.to_dict(),
 		"overall_progress": get_overall_progress(),
 		"has_pending": has_pending_work(),
@@ -232,3 +238,4 @@ func _print_summary() -> void:
 	print("  Navmeshes: %d completed, %d pending, %d failed" % [
 		navmeshes.completed.size(), navmeshes.pending.size(), navmeshes.failed.size()])
 	print("  Shore Mask: %s" % ("complete" if shore_mask.is_complete() else "pending"))
+	print("  Cloud Noise: %s" % ("complete" if cloud_noise.is_complete() else "pending"))

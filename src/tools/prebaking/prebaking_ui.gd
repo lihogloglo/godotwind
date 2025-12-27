@@ -26,6 +26,7 @@ var _impostor_section: Dictionary = {}
 var _mesh_section: Dictionary = {}
 var _navmesh_section: Dictionary = {}
 var _shore_section: Dictionary = {}
+var _cloud_section: Dictionary = {}
 
 # Buttons
 var _start_button: Button
@@ -231,6 +232,7 @@ func _build_ui() -> void:
 	_mesh_section = _create_component_section("Merged Meshes", "Simplified cell meshes for mid-distance rendering (MID tier)")
 	_navmesh_section = _create_component_section("Navigation Meshes", "Pathfinding meshes for AI navigation")
 	_shore_section = _create_component_section("Shore Mask", "Ocean visibility mask based on terrain height")
+	_cloud_section = _create_component_section("Cloud Noise", "3D noise textures for volumetric raymarched clouds")
 
 	# Separator
 	_main_container.add_child(HSeparator.new())
@@ -376,6 +378,9 @@ func _connect_signals() -> void:
 	(_shore_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_shore_mask = pressed
 	)
+	(_cloud_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
+		manager.enable_cloud_noise = pressed
+	)
 
 	# Bake only buttons
 	(_terrain_section.bake_button as Button).pressed.connect(func() -> void:
@@ -395,6 +400,9 @@ func _connect_signals() -> void:
 	)
 	(_shore_section.bake_button as Button).pressed.connect(func() -> void:
 		manager.bake_component(PrebakingManagerScript.Component.SHORE_MASK)
+	)
+	(_cloud_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.CLOUD_NOISE)
 	)
 
 
@@ -423,6 +431,7 @@ func _update_ui_state() -> void:
 	_update_component_section(_mesh_section, summary.get("merged_meshes", {}) as Dictionary, is_running)
 	_update_component_section(_navmesh_section, summary.get("navmeshes", {}) as Dictionary, is_running)
 	_update_component_section(_shore_section, summary.get("shore_mask", {}) as Dictionary, is_running)
+	_update_component_section(_cloud_section, summary.get("cloud_noise", {}) as Dictionary, is_running)
 
 	# Update overall progress
 	_overall_progress.value = summary.get("overall_progress", 0.0) * 100.0
@@ -519,6 +528,7 @@ func _on_component_progress(component: String, current: int, total: int, item_na
 		"Merged Meshes": section = _mesh_section
 		"Navmeshes": section = _navmesh_section
 		"Shore Mask": section = _shore_section
+		"Cloud Noise": section = _cloud_section
 
 	if not section.is_empty():
 		section.progress.value = float(current) / float(total) * 100.0

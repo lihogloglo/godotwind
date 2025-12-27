@@ -112,33 +112,33 @@ group_uniforms volumetric_clouds;
 uniform bool volumetric_clouds_enabled = true;
 
 group_uniforms volumetric_clouds.colors;
-uniform vec3 cloud_base_color: source_color = vec3(0.95, 0.95, 1.0);
-uniform vec3 cloud_shadow_color: source_color = vec3(0.4, 0.45, 0.55);
+uniform vec3 cloud_base_color: source_color = vec3(0.85, 0.85, 0.9);  // Sky++ default
+uniform vec3 cloud_shadow_color: source_color = vec3(0.35, 0.4, 0.45);  // Sky++ cloud_overcast_color
 uniform vec4 cloud_day_tint: source_color = vec4(1.0, 1.0, 1.0, 1.0);
 uniform vec4 cloud_horizon_tint: source_color = vec4(1.0, 0.85, 0.7, 1.0);
 uniform vec4 cloud_night_tint: source_color = vec4(0.12, 0.14, 0.18, 1.0);
 
 group_uniforms volumetric_clouds.density;
-uniform float cloud_coverage: hint_range(0.0, 1.0) = 0.5;
-uniform float cloud_density_mult: hint_range(0.1, 3.0) = 1.0;
-uniform float cloud_smoothness: hint_range(0.0, 0.2) = 0.05;
+uniform float cloud_coverage: hint_range(0.0, 1.0) = 0.5;  // Increased from 0.35 for better visibility
+uniform float cloud_density_mult: hint_range(0.1, 3.0) = 1.5;  // Increased from 1.0
+uniform float cloud_smoothness: hint_range(0.0, 0.2) = 0.1;  // Increased from 0.05 for smoother falloff
 
 group_uniforms volumetric_clouds.shape;
-uniform float cloud_base_height = 3.0;
-uniform float cloud_layer_thickness = 10.0;
+uniform float cloud_base_height = 3.0;  // Sky++ LOWER_PLANE_HEIGHT
+uniform float cloud_layer_thickness = 10.0;  // Sky++ cloud_base_march_dist
 uniform float cloud_scale = 1.0;
 uniform vec3 cloud_offset = vec3(0.0);
 uniform float cloud_detail_strength: hint_range(0.0, 1.0) = 0.2;
 
 group_uniforms volumetric_clouds.raymarching;
-uniform int cloud_march_steps: hint_range(8, 64) = 16;
-uniform int cloud_light_steps: hint_range(2, 12) = 4;
-uniform float cloud_falloff_power: hint_range(0.1, 1.0) = 0.4;
+uniform int cloud_march_steps: hint_range(8, 128) = 64;  // Sky++ default
+uniform int cloud_light_steps: hint_range(2, 16) = 8;  // Sky++ default
+uniform float cloud_falloff_power: hint_range(0.1, 1.0) = 0.3;  // Sky++ default
 uniform bool cloud_temporal_jitter = false;
 uniform float cloud_jitter_amount: hint_range(0.0, 1.0) = 0.5;
 
 group_uniforms volumetric_clouds.lighting;
-uniform float cloud_light_strength = 10.0;
+uniform float cloud_light_strength = 15.0;  // Sky++ default
 uniform float cloud_ambient_strength = 0.35;
 uniform float cloud_anisotropy: hint_range(0.0, 0.95) = 0.25;
 uniform float cloud_absorption_coeff: hint_range(0.1, 2.0) = 0.7;
@@ -430,7 +430,9 @@ float henyey_greenstein(float cos_theta, float g) {
 
 // Sample cloud density - uses procedural noise or 3D textures
 float take_cloud_sample(vec3 coord) {
-	vec3 sample_coord = coord * 0.01 + cloud_offset;
+	// Scale factor for sky shader coordinates (positions typically 0-20 range)
+	// Using 0.1 instead of 0.01 so texture tiles ~2x across typical cloud layer
+	vec3 sample_coord = coord * 0.1 + cloud_offset;
 
 	float shape_sample;
 	float noise_sample;
@@ -453,7 +455,7 @@ float take_cloud_sample(vec3 coord) {
 
 // Get detail noise for erosion
 float get_detail_noise(vec3 coord) {
-	vec3 detail_coord = coord * cloud_detail_scale * 2.0 * 0.01 + cloud_offset * 2.0;
+	vec3 detail_coord = coord * cloud_detail_scale * 2.0 * 0.1 + cloud_offset * 2.0;
 
 	if (use_procedural_noise) {
 		return cloud_detail_procedural(detail_coord, 1.0);

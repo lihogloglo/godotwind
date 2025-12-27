@@ -34,6 +34,7 @@ enum Component {
 	MERGED_MESHES, # Simplified merged cell meshes (MID tier)
 	NAVMESHES,     # Navigation meshes
 	SHORE_MASK,    # Ocean visibility mask
+	CLOUD_NOISE,   # 3D noise textures for volumetric clouds
 }
 
 ## Baking status
@@ -66,6 +67,7 @@ var enable_impostors: bool = true
 var enable_merged_meshes: bool = true
 var enable_navmeshes: bool = true
 var enable_shore_mask: bool = true
+var enable_cloud_noise: bool = true
 
 ## Current component being processed
 var _current_component: Component = Component.TERRAIN
@@ -195,6 +197,10 @@ func start_prebaking() -> void:
 	if enable_shore_mask and not _should_stop:
 		_current_component = Component.SHORE_MASK
 		results["shore_mask"] = await _bake_shore_mask()
+
+	if enable_cloud_noise and not _should_stop:
+		_current_component = Component.CLOUD_NOISE
+		results["cloud_noise"] = await _bake_cloud_noise()
 
 	# Complete
 	_is_processing = false
@@ -706,6 +712,8 @@ func bake_component(component: Component) -> void:
 			result = await _bake_navmeshes()
 		Component.SHORE_MASK:
 			result = await _bake_shore_mask()
+		Component.CLOUD_NOISE:
+			result = await _bake_cloud_noise()
 
 	_is_processing = false
 	status = Status.COMPLETED if not _should_stop else Status.PAUSED
@@ -721,4 +729,191 @@ func _component_name(component: Component) -> String:
 		Component.MERGED_MESHES: return "merged_meshes"
 		Component.NAVMESHES: return "navmeshes"
 		Component.SHORE_MASK: return "shore_mask"
+		Component.CLOUD_NOISE: return "cloud_noise"
 	return "unknown"
+
+
+## Bake cloud noise textures for volumetric clouds
+func _bake_cloud_noise() -> Dictionary:
+	print("\n" + "=".repeat(80))
+	print("CLOUD NOISE: Generating 3D noise textures for volumetric clouds")
+	print("=".repeat(80))
+
+	component_started.emit("Cloud Noise")
+
+	# Use cache directory from SettingsManager
+	var output_path: String = SettingsManager.get_cache_base_path().path_join("cloud_noise") + "/"
+	const SHAPE_RESOLUTION := 64
+	const DETAIL_RESOLUTION := 32
+
+	print("CLOUD NOISE: Output path: %s" % output_path)
+
+	# Ensure output directory exists
+	DirAccess.make_dir_recursive_absolute(output_path)
+
+	var start_time := Time.get_ticks_msec()
+	var total_slices := SHAPE_RESOLUTION + DETAIL_RESOLUTION
+	var current_slice := 0
+
+	# Generate shape noise
+	component_progress.emit("Cloud Noise", 0, total_slices, "Generating shape noise...")
+
+	var num_cells := 4
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 12345
+
+	var points := []
+	var total_cells := num_cells * num_cells * num_cells
+	for i in range(total_cells):
+		var cell_x := i % num_cells
+		var cell_y := (i / num_cells) % num_cells
+		var cell_z := i / (num_cells * num_cells)
+		var base := Vector3(cell_x, cell_y, cell_z) / float(num_cells)
+		var offset := Vector3(rng.randf(), rng.randf(), rng.randf()) / float(num_cells)
+		points.append(base + offset)
+
+	# Generate shape noise slices
+	for z in range(SHAPE_RESOLUTION):
+		if _should_stop:
+			component_completed.emit("Cloud Noise", 0, 0, current_slice)
+			return {"success": 0, "failed": 0, "skipped": current_slice}
+
+		var img := Image.create(SHAPE_RESOLUTION, SHAPE_RESOLUTION, false, Image.FORMAT_RF)
+
+		for y in range(SHAPE_RESOLUTION):
+			for x in range(SHAPE_RESOLUTION):
+				var pos := Vector3(x, y, z) / float(SHAPE_RESOLUTION)
+
+				var worley1 := _worley_noise_3d(pos * 4.0, points, num_cells)
+				var worley2 := _worley_noise_3d(pos * 8.0, points, num_cells)
+				var worley3 := _worley_noise_3d(pos * 16.0, points, num_cells)
+
+				var perlin := _perlin_noise_3d(pos * 8.0)
+				var worley := worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125
+
+				var value := _remap(perlin, worley - 1.0, 1.0, 0.0, 1.0)
+				value = clamp(value, 0.0, 1.0)
+
+				img.set_pixel(x, y, Color(value, value, value, 1.0))
+
+		var slice_path := output_path + "shape_%03d.exr" % z
+		img.save_exr(slice_path)
+
+		current_slice += 1
+		if z % 8 == 0:
+			component_progress.emit("Cloud Noise", current_slice, total_slices, "Shape noise: %d%%" % [int(float(z) / float(SHAPE_RESOLUTION) * 100.0)])
+			await get_tree().process_frame
+
+	# Save shape metadata
+	var shape_meta := {"size": SHAPE_RESOLUTION, "slices": SHAPE_RESOLUTION, "format": "exr"}
+	var shape_meta_file := FileAccess.open(output_path + "shape_meta.json", FileAccess.WRITE)
+	shape_meta_file.store_string(JSON.stringify(shape_meta))
+	shape_meta_file.close()
+
+	# Generate detail noise slices
+	component_progress.emit("Cloud Noise", current_slice, total_slices, "Generating detail noise...")
+
+	for z in range(DETAIL_RESOLUTION):
+		if _should_stop:
+			component_completed.emit("Cloud Noise", 0, 0, current_slice)
+			return {"success": 0, "failed": 0, "skipped": current_slice}
+
+		var img := Image.create(DETAIL_RESOLUTION, DETAIL_RESOLUTION, false, Image.FORMAT_RF)
+
+		for y in range(DETAIL_RESOLUTION):
+			for x in range(DETAIL_RESOLUTION):
+				var pos := Vector3(x, y, z) / float(DETAIL_RESOLUTION)
+
+				var worley1 := _worley_noise_3d(pos * 8.0, points, num_cells)
+				var worley2 := _worley_noise_3d(pos * 16.0, points, num_cells)
+				var worley3 := _worley_noise_3d(pos * 32.0, points, num_cells)
+
+				var value := worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125
+				value = clamp(value, 0.0, 1.0)
+
+				img.set_pixel(x, y, Color(value, value, value, 1.0))
+
+		var slice_path := output_path + "detail_%03d.exr" % z
+		img.save_exr(slice_path)
+
+		current_slice += 1
+		if z % 4 == 0:
+			component_progress.emit("Cloud Noise", current_slice, total_slices, "Detail noise: %d%%" % [int(float(z) / float(DETAIL_RESOLUTION) * 100.0)])
+			await get_tree().process_frame
+
+	# Save detail metadata
+	var detail_meta := {"size": DETAIL_RESOLUTION, "slices": DETAIL_RESOLUTION, "format": "exr"}
+	var detail_meta_file := FileAccess.open(output_path + "detail_meta.json", FileAccess.WRITE)
+	detail_meta_file.store_string(JSON.stringify(detail_meta))
+	detail_meta_file.close()
+
+	var elapsed := (Time.get_ticks_msec() - start_time) / 1000.0
+	print("Cloud noise generation complete in %.1f seconds" % elapsed)
+
+	component_completed.emit("Cloud Noise", 2, 0, 0)  # 2 textures: shape and detail
+	return {"success": 2, "failed": 0}
+
+
+# Cloud noise generation helper functions
+
+func _worley_noise_3d(pos: Vector3, points: Array, num_cells: int) -> float:
+	pos = Vector3(fposmod(pos.x, 1.0), fposmod(pos.y, 1.0), fposmod(pos.z, 1.0))
+	var min_dist := 1.0
+	var cell := Vector3i(int(pos.x * num_cells), int(pos.y * num_cells), int(pos.z * num_cells))
+
+	for dz in range(-1, 2):
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				var neighbor := Vector3i(
+					(cell.x + dx + num_cells) % num_cells,
+					(cell.y + dy + num_cells) % num_cells,
+					(cell.z + dz + num_cells) % num_cells
+				)
+				var idx := neighbor.x + neighbor.y * num_cells + neighbor.z * num_cells * num_cells
+				if idx >= 0 and idx < points.size():
+					var point: Vector3 = points[idx]
+					var wrapped_point := point + Vector3(dx, dy, dz) / float(num_cells)
+					if dx == -1 and cell.x == 0: wrapped_point.x -= 1.0
+					elif dx == 1 and cell.x == num_cells - 1: wrapped_point.x += 1.0
+					if dy == -1 and cell.y == 0: wrapped_point.y -= 1.0
+					elif dy == 1 and cell.y == num_cells - 1: wrapped_point.y += 1.0
+					if dz == -1 and cell.z == 0: wrapped_point.z -= 1.0
+					elif dz == 1 and cell.z == num_cells - 1: wrapped_point.z += 1.0
+					min_dist = min(min_dist, pos.distance_to(wrapped_point))
+
+	return 1.0 - min_dist * num_cells
+
+
+func _perlin_noise_3d(pos: Vector3) -> float:
+	var p := Vector3(floorf(pos.x), floorf(pos.y), floorf(pos.z))
+	var f := Vector3(pos.x - p.x, pos.y - p.y, pos.z - p.z)
+	f = f * f * (Vector3.ONE * 3.0 - f * 2.0)
+	var n: float = p.x + p.y * 157.0 + p.z * 113.0
+
+	var h000: float = _hash_noise(n)
+	var h100: float = _hash_noise(n + 1.0)
+	var h010: float = _hash_noise(n + 157.0)
+	var h110: float = _hash_noise(n + 158.0)
+	var h001: float = _hash_noise(n + 113.0)
+	var h101: float = _hash_noise(n + 114.0)
+	var h011: float = _hash_noise(n + 270.0)
+	var h111: float = _hash_noise(n + 271.0)
+
+	var x00: float = lerpf(h000, h100, f.x)
+	var x10: float = lerpf(h010, h110, f.x)
+	var x01: float = lerpf(h001, h101, f.x)
+	var x11: float = lerpf(h011, h111, f.x)
+
+	var y0: float = lerpf(x00, x10, f.y)
+	var y1: float = lerpf(x01, x11, f.y)
+
+	return lerpf(y0, y1, f.z)
+
+
+func _hash_noise(n: float) -> float:
+	var v := sin(n) * 43758.5453123
+	return v - floor(v)
+
+
+func _remap(value: float, old_min: float, old_max: float, new_min: float, new_max: float) -> float:
+	return new_min + (value - old_min) * (new_max - new_min) / (old_max - old_min)
