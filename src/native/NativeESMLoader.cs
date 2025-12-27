@@ -34,6 +34,13 @@ public partial class NativeESMLoader : RefCounted
     private const uint REC_CELL = 0x4C4C4543;
     private const uint REC_LAND = 0x444E414C;
     private const uint REC_LTEX = 0x5845544C;
+    private const uint REC_NPC_ = 0x5F43504E;  // "NPC_"
+    private const uint REC_CREA = 0x41455243;  // "CREA"
+    private const uint REC_RACE = 0x45434152;  // "RACE"
+    private const uint REC_BODY = 0x59444F42;  // "BODY"
+    private const uint REC_WEAP = 0x50414557;  // "WEAP"
+    private const uint REC_ARMO = 0x4F4D5241;  // "ARMO"
+    private const uint REC_CLOT = 0x544F4C43;  // "CLOT"
 
     // FourCC constants for subrecord types
     private const uint SUB_NAME = 0x454D414E;
@@ -64,6 +71,18 @@ public partial class NativeESMLoader : RefCounted
     private const uint SUB_WNAM = 0x4D414E57;
     private const uint SUB_VCLR = 0x524C4356;
     private const uint SUB_VTEX = 0x58455456;
+    private const uint SUB_RNAM = 0x4D414E52;  // "RNAM" - Race name
+    private const uint SUB_CNAM = 0x4D414E43;  // "CNAM" - Class name (NPC) / Original (Creature) / Female part
+    private const uint SUB_BNAM = 0x4D414E42;  // "BNAM" - Head (NPC) / Male part
+    private const uint SUB_KNAM = 0x4D414E4B;  // "KNAM" - Hair
+    private const uint SUB_NPDT = 0x5444504E;  // "NPDT" - NPC/Creature data
+    private const uint SUB_BYDT = 0x54445942;  // "BYDT" - Body part data
+    private const uint SUB_WPDT = 0x54445057;  // "WPDT" - Weapon data
+    private const uint SUB_AODT = 0x54444F41;  // "AODT" - Armor data
+    private const uint SUB_CTDT = 0x54445443;  // "CTDT" - Clothing data
+    private const uint SUB_RADT = 0x54444152;  // "RADT" - Race data
+    private const uint SUB_DESC = 0x43534544;  // "DESC" - Description
+    private const uint SUB_ENAM = 0x4D414E45;  // "ENAM" - Enchantment
 
     // Record storage - accessible from GDScript
     public Godot.Collections.Dictionary<string, NativeStaticRecord> Statics { get; } = new();
@@ -75,6 +94,15 @@ public partial class NativeESMLoader : RefCounted
     public Godot.Collections.Dictionary<string, NativeCellRecord> ExteriorCells { get; } = new();
     public Godot.Collections.Dictionary<string, NativeLandRecord> Lands { get; } = new();
     public Godot.Collections.Dictionary<string, NativeLandTextureRecord> LandTextures { get; } = new();
+
+    // Actor/item record storage
+    public Godot.Collections.Dictionary<string, NativeNPCRecord> NPCs { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeCreatureRecord> Creatures { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeRaceRecord> Races { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeBodyPartRecord> BodyParts { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeWeaponRecord> Weapons { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeArmorRecord> Armors { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeClothingRecord> Clothing { get; } = new();
 
     // Statistics
     public int TotalRecordsLoaded { get; private set; } = 0;
@@ -142,6 +170,27 @@ public partial class NativeESMLoader : RefCounted
                 case REC_LTEX:
                     LoadLandTextureRecord(reader);
                     break;
+                case REC_NPC_:
+                    LoadNPCRecord(reader);
+                    break;
+                case REC_CREA:
+                    LoadCreatureRecord(reader);
+                    break;
+                case REC_RACE:
+                    LoadRaceRecord(reader);
+                    break;
+                case REC_BODY:
+                    LoadBodyPartRecord(reader);
+                    break;
+                case REC_WEAP:
+                    LoadWeaponRecord(reader);
+                    break;
+                case REC_ARMO:
+                    LoadArmorRecord(reader);
+                    break;
+                case REC_CLOT:
+                    LoadClothingRecord(reader);
+                    break;
                 default:
                     // Skip unknown record types
                     reader.SkipRecord();
@@ -159,6 +208,8 @@ public partial class NativeESMLoader : RefCounted
         GD.Print($"  Statics: {Statics.Count}, Doors: {Doors.Count}, Activators: {Activators.Count}");
         GD.Print($"  Containers: {Containers.Count}, Lights: {Lights.Count}");
         GD.Print($"  Cells: {Cells.Count} ({ExteriorCells.Count} exterior), Lands: {Lands.Count}");
+        GD.Print($"  NPCs: {NPCs.Count}, Creatures: {Creatures.Count}, Races: {Races.Count}, BodyParts: {BodyParts.Count}");
+        GD.Print($"  Weapons: {Weapons.Count}, Armors: {Armors.Count}, Clothing: {Clothing.Count}");
 
         return Error.Ok;
     }
@@ -769,11 +820,466 @@ public partial class NativeESMLoader : RefCounted
     }
 
     // =========================================================================
+    // ACTOR/ITEM RECORD LOADERS
+    // =========================================================================
+
+    private void LoadNPCRecord(NativeESMReader reader)
+    {
+        var record = new NativeNPCRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_SCRI:
+                    record.ScriptId = reader.GetHString();
+                    break;
+                case SUB_RNAM:
+                    record.RaceId = reader.GetHString();
+                    break;
+                case SUB_CNAM:
+                    record.ClassId = reader.GetHString();
+                    break;
+                case SUB_ANAM:
+                    record.FactionId = reader.GetHString();
+                    break;
+                case SUB_BNAM:
+                    record.HeadId = reader.GetHString();
+                    break;
+                case SUB_KNAM:
+                    record.HairId = reader.GetHString();
+                    break;
+                case SUB_NPDT:
+                    LoadNPCData(reader, record);
+                    break;
+                case SUB_FLAG:
+                    reader.GetSubHeader();
+                    record.NpcFlags = reader.GetS32();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            NPCs[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    private void LoadNPCData(NativeESMReader reader, NativeNPCRecord record)
+    {
+        reader.GetSubHeader();
+        int size = reader.SubSize;
+
+        if (size == 52)
+        {
+            // Full NPC data
+            record.Level = reader.GetS16();
+
+            // Skip 8 attributes (bytes) + 27 skills (bytes) + 1 padding = 36 bytes
+            reader.Skip(36);
+
+            record.Health = reader.GetU16();
+            record.Mana = reader.GetU16();
+            record.Fatigue = reader.GetU16();
+
+            record.Disposition = reader.GetS8();
+            record.Reputation = reader.GetS8();
+            record.Rank = reader.GetS8();
+
+            // Skip 1 padding byte
+            reader.Skip(1);
+
+            record.Gold = reader.GetS32();
+        }
+        else if (size == 12)
+        {
+            // Autocalculated NPC
+            record.Level = reader.GetS16();
+            record.Disposition = reader.GetS8();
+            record.Reputation = reader.GetS8();
+            record.Rank = reader.GetS8();
+            // Skip 3 bytes padding
+            reader.Skip(3);
+            record.Gold = reader.GetS32();
+        }
+        else
+        {
+            // Unknown size, skip
+            reader.Skip(size);
+        }
+    }
+
+    private void LoadCreatureRecord(NativeESMReader reader)
+    {
+        var record = new NativeCreatureRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_SCRI:
+                    record.ScriptId = reader.GetHString();
+                    break;
+                case SUB_CNAM:
+                    record.OriginalId = reader.GetHString();
+                    break;
+                case SUB_NPDT:
+                    LoadCreatureData(reader, record);
+                    break;
+                case SUB_FLAG:
+                    reader.GetSubHeader();
+                    record.CreatureFlags = reader.GetS32();
+                    break;
+                case SUB_XSCL:
+                    reader.GetSubHeader();
+                    record.Scale = Mathf.Clamp(reader.GetFloat(), 0.5f, 10.0f);
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            Creatures[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    private void LoadCreatureData(NativeESMReader reader, NativeCreatureRecord record)
+    {
+        reader.GetSubHeader();
+
+        record.CreatureType = reader.GetS32();
+        record.Level = reader.GetS32();
+
+        // Skip 8 attributes (32-bit each) = 32 bytes
+        reader.Skip(32);
+
+        record.Health = reader.GetS32();
+        record.Mana = reader.GetS32();
+        record.Fatigue = reader.GetS32();
+        record.Soul = reader.GetS32();
+        record.Combat = reader.GetS32();
+        record.Magic = reader.GetS32();
+        record.Stealth = reader.GetS32();
+
+        // 3 attacks (min/max pairs)
+        for (int i = 0; i < 3; i++)
+        {
+            record.AttackMin[i] = reader.GetS32();
+            record.AttackMax[i] = reader.GetS32();
+        }
+
+        record.Gold = reader.GetS32();
+    }
+
+    private void LoadRaceRecord(NativeESMReader reader)
+    {
+        var record = new NativeRaceRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_DESC:
+                    record.Description = reader.GetHString();
+                    break;
+                case SUB_RADT:
+                    LoadRaceData(reader, record);
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            Races[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    private void LoadRaceData(NativeESMReader reader, NativeRaceRecord record)
+    {
+        reader.GetSubHeader();
+
+        // Skip 7 skill bonuses (skill_id + bonus = 8 bytes each) = 56 bytes
+        reader.Skip(56);
+
+        // Skip 8 male attributes + 8 female attributes = 64 bytes
+        reader.Skip(64);
+
+        record.MaleHeight = reader.GetFloat();
+        record.FemaleHeight = reader.GetFloat();
+        record.MaleWeight = reader.GetFloat();
+        record.FemaleWeight = reader.GetFloat();
+
+        record.Flags = reader.GetS32();
+    }
+
+    private void LoadBodyPartRecord(NativeESMReader reader)
+    {
+        var record = new NativeBodyPartRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_BYDT:
+                    reader.GetSubHeader();
+                    record.PartType = reader.GetS8();
+                    record.IsVampire = reader.GetS8() != 0;
+                    record.Flags = reader.GetS8();
+                    record.MeshType = reader.GetS8();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            BodyParts[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    private void LoadWeaponRecord(NativeESMReader reader)
+    {
+        var record = new NativeWeaponRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_SCRI:
+                    record.ScriptId = reader.GetHString();
+                    break;
+                case SUB_ITEX:
+                    record.Icon = reader.GetHString();
+                    break;
+                case SUB_ENAM:
+                    record.EnchantId = reader.GetHString();
+                    break;
+                case SUB_WPDT:
+                    reader.GetSubHeader();
+                    record.Weight = reader.GetFloat();
+                    record.Value = reader.GetS32();
+                    record.WeaponType = reader.GetS16();
+                    record.Health = reader.GetU16();
+                    record.Speed = reader.GetFloat();
+                    record.Reach = reader.GetFloat();
+                    record.EnchantPoints = reader.GetU16();
+                    record.ChopMin = reader.GetS8();
+                    record.ChopMax = reader.GetS8();
+                    record.SlashMin = reader.GetS8();
+                    record.SlashMax = reader.GetS8();
+                    record.ThrustMin = reader.GetS8();
+                    record.ThrustMax = reader.GetS8();
+                    record.Flags = reader.GetS32();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            Weapons[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    private void LoadArmorRecord(NativeESMReader reader)
+    {
+        var record = new NativeArmorRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_SCRI:
+                    record.ScriptId = reader.GetHString();
+                    break;
+                case SUB_ITEX:
+                    record.Icon = reader.GetHString();
+                    break;
+                case SUB_ENAM:
+                    record.EnchantId = reader.GetHString();
+                    break;
+                case SUB_AODT:
+                    reader.GetSubHeader();
+                    record.ArmorType = reader.GetS32();
+                    record.Weight = reader.GetFloat();
+                    record.Value = reader.GetS32();
+                    record.Health = reader.GetS32();
+                    record.EnchantPoints = reader.GetS32();
+                    record.ArmorRating = reader.GetS32();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            Armors[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    private void LoadClothingRecord(NativeESMReader reader)
+    {
+        var record = new NativeClothingRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_SCRI:
+                    record.ScriptId = reader.GetHString();
+                    break;
+                case SUB_ITEX:
+                    record.Icon = reader.GetHString();
+                    break;
+                case SUB_ENAM:
+                    record.EnchantId = reader.GetHString();
+                    break;
+                case SUB_CTDT:
+                    reader.GetSubHeader();
+                    record.ClothingType = reader.GetS32();
+                    record.Weight = reader.GetFloat();
+                    record.Value = reader.GetU16();
+                    record.EnchantPoints = reader.GetU16();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+        {
+            Clothing[record.RecordId.ToLowerInvariant()] = record;
+        }
+    }
+
+    // =========================================================================
     // HELPER METHODS FOR GDSCRIPT ACCESS
     // =========================================================================
 
     /// <summary>
-    /// Get a model record by ID (searches statics, doors, activators, containers, lights).
+    /// Get a model record by ID (searches all record types with models).
     /// Returns null if not found.
     /// </summary>
     public NativeModelRecord? GetModelRecord(string recordId)
@@ -785,6 +1291,12 @@ public partial class NativeESMLoader : RefCounted
         if (Activators.TryGetValue(key, out var acti)) return acti;
         if (Containers.TryGetValue(key, out var cont)) return cont;
         if (Lights.TryGetValue(key, out var ligh)) return ligh;
+        if (NPCs.TryGetValue(key, out var npc)) return npc;
+        if (Creatures.TryGetValue(key, out var crea)) return crea;
+        if (BodyParts.TryGetValue(key, out var body)) return body;
+        if (Weapons.TryGetValue(key, out var weap)) return weap;
+        if (Armors.TryGetValue(key, out var armo)) return armo;
+        if (Clothing.TryGetValue(key, out var clot)) return clot;
 
         return null;
     }

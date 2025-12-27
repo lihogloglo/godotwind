@@ -108,7 +108,10 @@ func update(delta: float) -> void:
 		return
 
 	if enable_foot_ik:
-		_update_foot_ik(delta)
+		if _is_quadruped:
+			_update_quadruped_ik(delta)
+		else:
+			_update_foot_ik(delta)
 
 	if enable_look_at and _has_look_target:
 		_update_look_at(delta)
@@ -518,3 +521,135 @@ func _is_left_bone(name: String) -> bool:
 func _is_right_bone(name: String) -> bool:
 	return "right" in name or " r " in name or name.ends_with(" r") or \
 		   "r " in name.substr(0, 10) or ".r" in name or "_r" in name
+
+
+# =============================================================================
+# QUADRUPED IK
+# =============================================================================
+
+# Quadruped IK state
+var _is_quadruped: bool = false
+var _front_left_ik: SkeletonIK3D = null
+var _front_right_ik: SkeletonIK3D = null
+var _back_left_ik: SkeletonIK3D = null
+var _back_right_ik: SkeletonIK3D = null
+var _front_left_target: Node3D = null
+var _front_right_target: Node3D = null
+var _back_left_target: Node3D = null
+var _back_right_target: Node3D = null
+
+
+## Configure IK for quadruped (4-legged) creatures
+## Each leg_bones dict should have "upper", "lower", "foot" keys with bone indices
+func configure_quadruped_mode(front_left: Dictionary, front_right: Dictionary,
+		back_left: Dictionary, back_right: Dictionary) -> void:
+	_is_quadruped = true
+
+	# Clear existing humanoid foot IK
+	if _left_foot_ik:
+		_left_foot_ik.queue_free()
+		_left_foot_ik = null
+	if _right_foot_ik:
+		_right_foot_ik.queue_free()
+		_right_foot_ik = null
+
+	# Setup front left leg IK
+	if front_left.get("foot", -1) >= 0:
+		_front_left_ik = _create_leg_ik("FrontLeftIK", front_left)
+		_front_left_target = _create_ik_target("FrontLeftTarget", _front_left_ik)
+
+	# Setup front right leg IK
+	if front_right.get("foot", -1) >= 0:
+		_front_right_ik = _create_leg_ik("FrontRightIK", front_right)
+		_front_right_target = _create_ik_target("FrontRightTarget", _front_right_ik)
+
+	# Setup back left leg IK
+	if back_left.get("foot", -1) >= 0:
+		_back_left_ik = _create_leg_ik("BackLeftIK", back_left)
+		_back_left_target = _create_ik_target("BackLeftTarget", _back_left_ik)
+
+	# Setup back right leg IK
+	if back_right.get("foot", -1) >= 0:
+		_back_right_ik = _create_leg_ik("BackRightIK", back_right)
+		_back_right_target = _create_ik_target("BackRightTarget", _back_right_ik)
+
+
+## Create a leg IK chain
+func _create_leg_ik(ik_name: String, leg_bones: Dictionary) -> SkeletonIK3D:
+	var ik := SkeletonIK3D.new()
+	ik.name = ik_name
+
+	var upper_idx: int = leg_bones.get("upper", -1)
+	var foot_idx: int = leg_bones.get("foot", -1)
+
+	if upper_idx >= 0:
+		ik.root_bone = skeleton.get_bone_name(upper_idx)
+	if foot_idx >= 0:
+		ik.tip_bone = skeleton.get_bone_name(foot_idx)
+
+	ik.use_magnet = false
+	ik.override_tip_basis = false
+
+	skeleton.add_child(ik)
+	return ik
+
+
+## Create an IK target for a leg
+func _create_ik_target(target_name: String, ik: SkeletonIK3D) -> Node3D:
+	var target := Node3D.new()
+	target.name = target_name
+	skeleton.add_child(target)
+
+	if ik:
+		ik.target_node = ik.get_path_to(target)
+
+	return target
+
+
+## Update quadruped foot IK each physics frame
+func _update_quadruped_ik(delta: float) -> void:
+	if not _is_quadruped or not character_body:
+		return
+
+	var space_state := character_body.get_world_3d().direct_space_state
+
+	# Update each leg
+	if _front_left_ik and _front_left_target:
+		_update_leg_ik(_front_left_ik, _front_left_target, space_state, delta)
+	if _front_right_ik and _front_right_target:
+		_update_leg_ik(_front_right_ik, _front_right_target, space_state, delta)
+	if _back_left_ik and _back_left_target:
+		_update_leg_ik(_back_left_ik, _back_left_target, space_state, delta)
+	if _back_right_ik and _back_right_target:
+		_update_leg_ik(_back_right_ik, _back_right_target, space_state, delta)
+
+
+## Update a single leg's IK
+func _update_leg_ik(ik: SkeletonIK3D, target: Node3D,
+		space_state: PhysicsDirectSpaceState3D, delta: float) -> void:
+	# Get foot bone index
+	var foot_idx := skeleton.find_bone(ik.tip_bone)
+	if foot_idx < 0:
+		return
+
+	# Get current foot position
+	var foot_global := skeleton.global_transform * skeleton.get_bone_global_pose(foot_idx).origin
+
+	# Raycast for ground
+	var hit := _raycast_ground(space_state, foot_global)
+
+	if hit:
+		var hit_pos: Vector3 = hit.position
+		var target_pos: Vector3 = hit_pos + Vector3.UP * foot_offset
+		target_pos = _clamp_ik_position(foot_global, target_pos, max_foot_adjustment)
+
+		# Smooth interpolation
+		target.global_position = target.global_position.lerp(target_pos, foot_ik_smoothing * delta)
+
+	# Start IK solving
+	ik.start()
+
+
+## Check if configured for quadruped
+func is_quadruped() -> bool:
+	return _is_quadruped

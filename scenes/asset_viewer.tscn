@@ -1,0 +1,5 @@
+[gd_scene load_steps=2 format=3 uid="uid://dgvr5nlkp0qxw"]
+
+[ext_resource type="PackedScene" uid="uid://b0fwxlv3yqm2u" path="res://src/tools/asset_viewer/asset_viewer.tscn" id="1_scene"]
+
+[node name="AssetViewerScene" instance=ExtResource("1_scene")]

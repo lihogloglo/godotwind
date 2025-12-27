@@ -6,12 +6,23 @@
 ## - Blend parameters (direction, speed)
 ## - Animation layers (locomotion, action, additive)
 ## - One-shot animations
+## - Text key event handling for footsteps, hit timing, etc.
 class_name AnimationManager
 extends Node
+
+# Preload TextKeyHandler, BlendMask, and Priority
+const _TextKeyHandler := preload("res://src/core/animation/text_key_handler.gd")
+const _BlendMask := preload("res://src/core/animation/animation_blend_mask.gd")
+const _Priority := preload("res://src/core/animation/animation_priority.gd")
 
 # Signals
 signal state_changed(old_state: StringName, new_state: StringName)
 signal animation_finished(animation_name: StringName)
+
+# Text key signals (forwarded from TextKeyHandler)
+signal sound_triggered(sound_id: String, position: Vector3)
+signal hit_triggered(position: Vector3)
+signal footstep_triggered(foot: String, position: Vector3)
 
 # Animation states enum (can be extended by subclasses)
 enum State {
@@ -57,6 +68,17 @@ const LAYER_ADDITIVE := &"additive"
 var skeleton: Skeleton3D = null
 var animation_player: AnimationPlayer = null
 var animation_tree: AnimationTree = null
+var character_node: Node3D = null  # For position in sound emission
+
+# Text key handler
+var _text_key_handler: RefCounted = null  # TextKeyHandler
+
+# Blend masks for layered animation
+var _blend_masks: RefCounted = null  # AnimationBlendMask
+var _upper_body_filter: PackedInt32Array = PackedInt32Array()
+
+# Animation priority system
+var _priority_system: RefCounted = null  # AnimationPriority
 
 # State machine
 var _state_machine: AnimationNodeStateMachinePlayback = null
@@ -86,8 +108,9 @@ func _ready() -> void:
 
 
 ## Setup the animation manager
-func setup(p_skeleton: Skeleton3D) -> void:
+func setup(p_skeleton: Skeleton3D, p_character_node: Node3D = null) -> void:
 	skeleton = p_skeleton
+	character_node = p_character_node
 	if not skeleton:
 		push_error("AnimationManager: Skeleton is required")
 		return
@@ -104,8 +127,84 @@ func setup(p_skeleton: Skeleton3D) -> void:
 	# Build state-to-animation mapping
 	_build_animation_map()
 
+	# Setup text key handler
+	_setup_text_key_handler()
+
+	# Setup blend masks
+	_setup_blend_masks()
+
+	# Setup priority system
+	_priority_system = _Priority.new()
+
 	_is_setup = true
 	set_process(true)
+
+
+## Setup blend masks for layered animation
+func _setup_blend_masks() -> void:
+	_blend_masks = _BlendMask.new()
+	var masks: _BlendMask = _blend_masks as _BlendMask
+	masks.build_masks(skeleton)
+
+	# Create upper body filter for action layer
+	_upper_body_filter = masks.create_filter_array(_BlendMask.MaskType.TORSO)
+
+	if debug_state_changes:
+		print(masks.get_debug_info())
+
+
+## Setup text key handler for animation events
+func _setup_text_key_handler() -> void:
+	_text_key_handler = _TextKeyHandler.new()
+
+	var handler: _TextKeyHandler = _text_key_handler as _TextKeyHandler
+	handler.setup(animation_player, character_node)
+
+	# Connect signals
+	handler.sound_triggered.connect(_on_sound_triggered)
+	handler.hit_triggered.connect(_on_hit_triggered)
+	handler.soundgen_triggered.connect(_on_soundgen_triggered)
+
+
+## Register text keys for an animation (call from animation loading)
+func register_animation_text_keys(animation_name: String, text_keys: Array) -> void:
+	if _text_key_handler:
+		var handler: _TextKeyHandler = _text_key_handler as _TextKeyHandler
+		handler.register_text_keys(animation_name, text_keys)
+
+
+## Get hit timing for an attack animation
+func get_hit_time(animation_name: String) -> float:
+	if _text_key_handler:
+		var handler: _TextKeyHandler = _text_key_handler as _TextKeyHandler
+		return handler.get_hit_time(animation_name)
+	return -1.0
+
+
+## Get loop points for an animation
+func get_loop_points(animation_name: String) -> Variant:
+	if _text_key_handler:
+		var handler: _TextKeyHandler = _text_key_handler as _TextKeyHandler
+		return handler.get_loop_points(animation_name)
+	return null
+
+
+# Text key signal handlers
+func _on_sound_triggered(sound_id: String, position: Vector3) -> void:
+	sound_triggered.emit(sound_id, position)
+
+
+func _on_hit_triggered(position: Vector3) -> void:
+	hit_triggered.emit(position)
+
+
+func _on_soundgen_triggered(sound_type: String, position: Vector3) -> void:
+	# Map soundgen types to footstep signals
+	var lower := sound_type.to_lower()
+	if "left" in lower:
+		footstep_triggered.emit("left", position)
+	elif "right" in lower:
+		footstep_triggered.emit("right", position)
 
 
 func _process(_delta: float) -> void:
@@ -115,9 +214,26 @@ func _process(_delta: float) -> void:
 	# Update blend parameters in AnimationTree
 	_sync_blend_parameters()
 
+	# Process text key events based on current animation time
+	_process_text_keys()
+
 	# Check for one-shot completion
 	if _oneshot_active:
 		_check_oneshot_completion()
+
+
+## Process text keys for current animation frame
+func _process_text_keys() -> void:
+	if not _text_key_handler or not animation_player:
+		return
+
+	var current_anim := animation_player.current_animation
+	if current_anim.is_empty():
+		return
+
+	var current_time := animation_player.current_animation_position
+	var handler: _TextKeyHandler = _text_key_handler as _TextKeyHandler
+	handler.process_animation_time(current_anim, current_time)
 
 
 ## Transition to a new state
@@ -127,6 +243,13 @@ func transition_to(state: StringName, force: bool = false) -> void:
 
 	if state == _current_state and not force:
 		return
+
+	# Check priority system - can this transition happen?
+	if _priority_system and not force:
+		var prio: _Priority = _priority_system as _Priority
+		if not prio.request_animation(state, force):
+			# Blocked by higher priority animation
+			return
 
 	# Check if state exists
 	if not _state_machine.get_current_node():
@@ -289,24 +412,38 @@ func _create_animation_tree() -> void:
 	# Get state machine playback
 	_state_machine = animation_tree.get("parameters/locomotion/playback")
 
+	# Apply blend mask filters to upper body blend node
+	_apply_blend_mask_filters()
+
 
 ## Create the animation tree structure
+## Uses a layered approach:
+## - Locomotion layer (state machine for idle/walk/run/jump)
+## - Upper body action layer (attacks, spellcasting - blended on upper body only)
+## - Additive layer (breathing, hit reactions)
 func _create_tree_structure() -> AnimationNodeBlendTree:
 	var root := AnimationNodeBlendTree.new()
 
-	# Create locomotion state machine
+	# Create locomotion state machine (base layer - full body)
 	var locomotion_sm := _create_locomotion_state_machine()
 	root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
 
-	# Create action oneshot layer
-	var action_oneshot := AnimationNodeOneShot.new()
-	root.add_node(&"action_oneshot", action_oneshot, Vector2(300, 0))
+	# Create upper body action layer using Blend2 with filter
+	# This allows actions to only affect upper body while legs continue locomotion
+	var upper_body_blend := AnimationNodeBlend2.new()
+	upper_body_blend.filter_enabled = true  # Enable bone filtering
+	root.add_node(&"upper_body_blend", upper_body_blend, Vector2(300, 0))
 
-	# Create action animation node
+	# Create action animation node for upper body
 	var action_anim := AnimationNodeAnimation.new()
 	root.add_node(&"action_animation", action_anim, Vector2(300, 100))
 
-	# Create additive blend
+	# Create action oneshot (wraps upper body blend for on-demand playback)
+	var action_oneshot := AnimationNodeOneShot.new()
+	action_oneshot.mix_mode = AnimationNodeOneShot.MIX_MODE_BLEND
+	root.add_node(&"action_oneshot", action_oneshot, Vector2(450, 0))
+
+	# Create additive layer for procedural animations (breathing, hit reactions)
 	var additive := AnimationNodeAdd2.new()
 	root.add_node(&"additive", additive, Vector2(600, 0))
 
@@ -314,9 +451,19 @@ func _create_tree_structure() -> AnimationNodeBlendTree:
 	var additive_anim := AnimationNodeAnimation.new()
 	root.add_node(&"additive_animation", additive_anim, Vector2(600, 100))
 
-	# Connect nodes
-	root.connect_node(&"action_oneshot", 0, &"locomotion")
+	# Connect nodes:
+	# locomotion -> upper_body_blend (input 0 = base)
+	# action_animation -> upper_body_blend (input 1 = action, filtered to upper body)
+	root.connect_node(&"upper_body_blend", 0, &"locomotion")
+	root.connect_node(&"upper_body_blend", 1, &"action_animation")
+
+	# upper_body_blend -> action_oneshot (input 0 = main)
+	# action_animation -> action_oneshot (input 1 = oneshot, for non-filtered actions)
+	root.connect_node(&"action_oneshot", 0, &"upper_body_blend")
 	root.connect_node(&"action_oneshot", 1, &"action_animation")
+
+	# action_oneshot -> additive (input 0 = main)
+	# additive_anim -> additive (input 1 = add)
 	root.connect_node(&"additive", 0, &"action_oneshot")
 	root.connect_node(&"additive", 1, &"additive_animation")
 
@@ -435,6 +582,50 @@ func _build_animation_map() -> void:
 			_state_animation_map[state] = anim
 
 
+## Apply blend mask filters to AnimationTree nodes
+func _apply_blend_mask_filters() -> void:
+	if not animation_tree or not _blend_masks or not skeleton:
+		return
+
+	var masks: _BlendMask = _blend_masks as _BlendMask
+	if not masks.is_valid():
+		return
+
+	# Get the tree root
+	var root: AnimationNodeBlendTree = animation_tree.tree_root as AnimationNodeBlendTree
+	if not root:
+		return
+
+	# Apply upper body filter to the blend node
+	# In Godot 4.x, we need to set filters via the tree parameters
+	# The filter path is: parameters/<node_name>/filters/<bone_path>
+
+	# Get upper body bones (torso + arms)
+	var upper_bones: Array[int] = masks.get_mask_bones(_BlendMask.MaskType.TORSO)
+	var left_arm: Array[int] = masks.get_mask_bones(_BlendMask.MaskType.LEFT_ARM)
+	var right_arm: Array[int] = masks.get_mask_bones(_BlendMask.MaskType.RIGHT_ARM)
+
+	# Combine for upper body
+	for bone_idx: int in left_arm:
+		if bone_idx not in upper_bones:
+			upper_bones.append(bone_idx)
+	for bone_idx: int in right_arm:
+		if bone_idx not in upper_bones:
+			upper_bones.append(bone_idx)
+
+	# Set filter for upper_body_blend node
+	# In AnimationTree, we need to enable filters per-bone using the skeleton path
+	for bone_idx: int in upper_bones:
+		var bone_name := skeleton.get_bone_name(bone_idx)
+		var filter_path := "parameters/upper_body_blend/filters/%s:%s" % [
+			skeleton.get_path(), bone_name
+		]
+		animation_tree.set(filter_path, true)
+
+	if debug_state_changes:
+		print("AnimationManager: Applied upper body filter to %d bones" % upper_bones.size())
+
+
 ## Sync blend parameters to AnimationTree
 func _sync_blend_parameters() -> void:
 	if not animation_tree:
@@ -444,8 +635,12 @@ func _sync_blend_parameters() -> void:
 	var speed: float = _blend_parameters.get(&"movement_speed", 0.0)
 	var direction: Vector2 = _blend_parameters.get(&"movement_direction", Vector2.ZERO)
 
-	# These paths depend on tree structure - adjust as needed
-	# animation_tree.set("parameters/locomotion_blend/blend_position", direction)
+	# Sync upper body blend weight for action animations
+	# When action is active, blend to 1.0; when not, blend to 0.0
+	var upper_blend_weight: float = 0.0
+	if _oneshot_active and _oneshot_layer == LAYER_ACTION:
+		upper_blend_weight = 1.0
+	animation_tree.set("parameters/upper_body_blend/blend_amount", upper_blend_weight)
 
 
 ## Check if one-shot animation is complete

@@ -168,7 +168,8 @@ func _init() -> void:
 
 
 ## Load an ESM or ESP file
-## Automatically uses native C# loader with caching if available (<50ms on cache hit)
+## Uses native C# loader with caching for performance (<50ms on cache hit)
+## Falls back to GDScript if C# unavailable (significantly slower, ~10-30x)
 func load_file(path: String) -> Error:
 	loading_started.emit(path)
 
@@ -178,7 +179,13 @@ func load_file(path: String) -> Error:
 		if result == OK:
 			return OK
 		# Fall through to GDScript if native failed
-		print("ESMManager: Native loader failed, falling back to GDScript")
+		push_warning("ESMManager: Native C# loader failed, falling back to GDScript (10-30x slower)")
+
+	# GDScript fallback - functional but slow
+	# Consider using Godot Mono build for better performance
+	if not NativeBridgeScript.is_csharp_available():
+		push_warning("ESMManager: C# not available. Using GDScript loader (slow). " +
+			"For better performance, use Godot Mono build.")
 
 	return _load_file_gdscript(path)
 
@@ -188,8 +195,13 @@ func _load_file_native_cached(path: String) -> Error:
 	var bridge := NativeBridgeScript.new()
 	var start_time := Time.get_ticks_msec()
 
+	# Get cache path from SettingsManager (supports custom cache locations)
+	var esm_name := path.get_file().get_basename() + ".esmcache"
+	var cache_path := SettingsManager.get_cache_base_path().path_join(esm_name)
+
 	# Use cached loading - will use cache if valid, otherwise load and create cache
-	var loader: RefCounted = bridge.load_esm_file_cached(path)
+	var loader: RefCounted = bridge.load_esm_file_cached(path, cache_path)
+	var csharp_time := Time.get_ticks_msec() - start_time
 
 	if loader == null:
 		return ERR_CANT_OPEN
@@ -198,7 +210,9 @@ func _load_file_native_cached(path: String) -> Error:
 	_use_native = true
 
 	# Populate GDScript dictionaries from native data
+	var populate_start := Time.get_ticks_msec()
 	_populate_from_native(loader)
+	var populate_time := Time.get_ticks_msec() - populate_start
 
 	# Supplement with GDScript loading for record types not handled by C# loader
 	# (NPCs, creatures, races, body_parts, etc.)
@@ -212,7 +226,9 @@ func _load_file_native_cached(path: String) -> Error:
 	load_time_ms += total_time as float
 	loaded_files.append(path)
 
-	print("ESMManager: Loaded %s in %d ms (C# + populate + %d ms actor supplement)" % [path, total_time, supplement_time])
+	# Detailed timing breakdown for optimization
+	print("ESMManager: Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
+		path.get_file(), total_time, csharp_time, populate_time, supplement_time])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
 	return OK
@@ -243,87 +259,104 @@ func _load_file_native(path: String) -> Error:
 	return OK
 
 
+## Helper: Populate records from native loader using a converter function
+## Reduces boilerplate for simple record types
+@warning_ignore("unsafe_method_access")
+@warning_ignore("unsafe_property_access")
+func _populate_simple_records(
+	loader: RefCounted,
+	native_property: String,
+	target_dict: Dictionary,
+	type_name: String,
+	converter: Callable
+) -> void:
+	var native_dict: Variant = loader.get(native_property)
+	if native_dict is Dictionary:
+		for key: Variant in native_dict:
+			var native_rec: RefCounted = native_dict[key]
+			var rec: ESMRecord = converter.call(native_rec)
+			target_dict[key] = rec
+			_all_records[key] = {"record": rec, "type": type_name}
+
+
+## Helper: Copy common base fields from native record to GDScript record
+@warning_ignore("unsafe_method_access")
+static func _copy_base_fields(native_rec: RefCounted, rec: ESMRecord) -> void:
+	rec.record_id = native_rec.get("RecordId")
+	rec.is_deleted = native_rec.get("IsDeleted")
+
+
+## Helper: Copy model record fields (record_id, model, is_deleted)
+@warning_ignore("unsafe_method_access")
+static func _copy_model_fields(native_rec: RefCounted, rec: ESMRecord) -> void:
+	_copy_base_fields(native_rec, rec)
+	rec.set("model", native_rec.get("Model"))
+
+
+## Helper: Copy named model record fields (adds name, script_id)
+@warning_ignore("unsafe_method_access")
+static func _copy_named_model_fields(native_rec: RefCounted, rec: ESMRecord) -> void:
+	_copy_model_fields(native_rec, rec)
+	rec.set("name", native_rec.get("Name"))
+	rec.set("script_id", native_rec.get("ScriptId"))
+
+
+## Enable verbose timing output for population phase (for profiling)
+const VERBOSE_POPULATE_TIMING := false
+
+
 ## Populate GDScript record dictionaries from native C# loader
 @warning_ignore("unsafe_method_access")
 @warning_ignore("unsafe_property_access")
 func _populate_from_native(loader: RefCounted) -> void:
-	# Copy statics
-	var native_statics: Variant = loader.get("Statics")
-	if native_statics is Dictionary:
-		for key: Variant in native_statics:
-			var native_rec: RefCounted = native_statics[key]
+	var t0 := Time.get_ticks_msec()
+
+	# Copy statics (simplest: just ID + model)
+	_populate_simple_records(loader, "Statics", statics, "static",
+		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := StaticRecord.new()
-			rec.record_id = native_rec.get("RecordId")
-			rec.model = native_rec.get("Model")
-			rec.is_deleted = native_rec.get("IsDeleted")
-			statics[key] = rec
-			_all_records[key] = {"record": rec, "type": "static"}
+			_copy_model_fields(native_rec, rec)
+			return rec)
+	var t1 := Time.get_ticks_msec()
 
 	# Copy doors
-	var native_doors: Variant = loader.get("Doors")
-	if native_doors is Dictionary:
-		for key: Variant in native_doors:
-			var native_rec: RefCounted = native_doors[key]
+	_populate_simple_records(loader, "Doors", doors, "door",
+		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := DoorRecord.new()
-			rec.record_id = native_rec.get("RecordId")
-			rec.model = native_rec.get("Model")
-			rec.name = native_rec.get("Name")
-			rec.script_id = native_rec.get("ScriptId")
+			_copy_named_model_fields(native_rec, rec)
 			rec.open_sound = native_rec.get("OpenSound")
 			rec.close_sound = native_rec.get("CloseSound")
-			rec.is_deleted = native_rec.get("IsDeleted")
-			doors[key] = rec
-			_all_records[key] = {"record": rec, "type": "door"}
+			return rec)
 
 	# Copy activators
-	var native_activators: Variant = loader.get("Activators")
-	if native_activators is Dictionary:
-		for key: Variant in native_activators:
-			var native_rec: RefCounted = native_activators[key]
+	_populate_simple_records(loader, "Activators", activators, "activator",
+		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := ActivatorRecord.new()
-			rec.record_id = native_rec.get("RecordId")
-			rec.model = native_rec.get("Model")
-			rec.name = native_rec.get("Name")
-			rec.script_id = native_rec.get("ScriptId")
-			rec.is_deleted = native_rec.get("IsDeleted")
-			activators[key] = rec
-			_all_records[key] = {"record": rec, "type": "activator"}
+			_copy_named_model_fields(native_rec, rec)
+			return rec)
 
 	# Copy containers
-	var native_containers: Variant = loader.get("Containers")
-	if native_containers is Dictionary:
-		for key: Variant in native_containers:
-			var native_rec: RefCounted = native_containers[key]
+	_populate_simple_records(loader, "Containers", containers, "container",
+		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := ContainerRecord.new()
-			rec.record_id = native_rec.get("RecordId")
-			rec.model = native_rec.get("Model")
-			rec.name = native_rec.get("Name")
-			rec.script_id = native_rec.get("ScriptId")
+			_copy_named_model_fields(native_rec, rec)
 			rec.weight = native_rec.get("Weight")
 			rec.flags = native_rec.get("Flags")
-			rec.is_deleted = native_rec.get("IsDeleted")
-			containers[key] = rec
-			_all_records[key] = {"record": rec, "type": "container"}
+			return rec)
 
 	# Copy lights
-	var native_lights: Variant = loader.get("Lights")
-	if native_lights is Dictionary:
-		for key: Variant in native_lights:
-			var native_rec: RefCounted = native_lights[key]
+	_populate_simple_records(loader, "Lights", lights, "light",
+		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := LightRecord.new()
-			rec.record_id = native_rec.get("RecordId")
-			rec.model = native_rec.get("Model")
-			rec.name = native_rec.get("Name")
-			rec.script_id = native_rec.get("ScriptId")
+			_copy_named_model_fields(native_rec, rec)
 			rec.weight = native_rec.get("Weight")
 			rec.value = native_rec.get("Value")
 			rec.time = native_rec.get("Time")
 			rec.radius = native_rec.get("Radius")
 			rec.color = native_rec.get("LightColor")
 			rec.flags = native_rec.get("Flags")
-			rec.is_deleted = native_rec.get("IsDeleted")
-			lights[key] = rec
-			_all_records[key] = {"record": rec, "type": "light"}
+			return rec)
+	var t2 := Time.get_ticks_msec()
 
 	# Copy cells
 	var native_cells: Variant = loader.get("Cells")
@@ -411,21 +444,155 @@ func _populate_from_native(loader: RefCounted) -> void:
 			lands[key] = rec
 			_all_records[key] = {"record": rec, "type": "land"}
 
+	var t3 := Time.get_ticks_msec()
+
 	# Copy land textures
-	var native_ltex: Variant = loader.get("LandTextures")
-	if native_ltex is Dictionary:
-		for key: Variant in native_ltex:
-			var native_rec: RefCounted = native_ltex[key]
+	_populate_simple_records(loader, "LandTextures", land_textures, "land_texture",
+		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := LandTextureRecord.new()
 			rec.record_id = str(native_rec.get("RecordId"))
 			rec.texture_index = native_rec.get("Index") as int
 			rec.texture_path = str(native_rec.get("Texture"))
-			land_textures[key] = rec
-			_all_records[key] = {"record": rec, "type": "land_texture"}
+			return rec)
+	var t4 := Time.get_ticks_msec()
+
+	# Copy NPCs
+	_populate_simple_records(loader, "NPCs", npcs, "npc",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := NPCRecord.new()
+			_copy_model_fields(native_rec, rec)
+			rec.name = str(native_rec.get("Name"))
+			rec.script_id = str(native_rec.get("ScriptId"))
+			rec.race_id = str(native_rec.get("RaceId"))
+			rec.class_id = str(native_rec.get("ClassId"))
+			rec.faction_id = str(native_rec.get("FactionId"))
+			rec.head_id = str(native_rec.get("HeadId"))
+			rec.hair_id = str(native_rec.get("HairId"))
+			rec.npc_flags = native_rec.get("NpcFlags") as int
+			rec.level = native_rec.get("Level") as int
+			rec.health = native_rec.get("Health") as int
+			rec.mana = native_rec.get("Mana") as int
+			rec.fatigue = native_rec.get("Fatigue") as int
+			rec.disposition = native_rec.get("Disposition") as int
+			rec.reputation = native_rec.get("Reputation") as int
+			rec.rank = native_rec.get("Rank") as int
+			rec.gold = native_rec.get("Gold") as int
+			return rec)
+
+	# Copy Creatures
+	_populate_simple_records(loader, "Creatures", creatures, "creature",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := CreatureRecord.new()
+			_copy_model_fields(native_rec, rec)
+			rec.name = str(native_rec.get("Name"))
+			rec.script_id = str(native_rec.get("ScriptId"))
+			rec.original_id = str(native_rec.get("OriginalId"))
+			rec.creature_flags = native_rec.get("CreatureFlags") as int
+			rec.scale = native_rec.get("Scale") as float
+			rec.creature_type = native_rec.get("CreatureType") as int
+			rec.level = native_rec.get("Level") as int
+			rec.health = native_rec.get("Health") as int
+			rec.mana = native_rec.get("Mana") as int
+			rec.fatigue = native_rec.get("Fatigue") as int
+			rec.soul = native_rec.get("Soul") as int
+			rec.combat = native_rec.get("Combat") as int
+			rec.magic = native_rec.get("Magic") as int
+			rec.stealth = native_rec.get("Stealth") as int
+			rec.gold = native_rec.get("Gold") as int
+			return rec)
+
+	# Copy Races
+	_populate_simple_records(loader, "Races", races, "race",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := RaceRecord.new()
+			rec.record_id = str(native_rec.get("RecordId"))
+			rec.is_deleted = native_rec.get("IsDeleted") as bool
+			rec.name = str(native_rec.get("Name"))
+			rec.description = str(native_rec.get("Description"))
+			rec.male_height = native_rec.get("MaleHeight") as float
+			rec.female_height = native_rec.get("FemaleHeight") as float
+			rec.male_weight = native_rec.get("MaleWeight") as float
+			rec.female_weight = native_rec.get("FemaleWeight") as float
+			rec.flags = native_rec.get("Flags") as int
+			return rec)
+
+	# Copy BodyParts
+	_populate_simple_records(loader, "BodyParts", body_parts, "body_part",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := BodyPartRecord.new()
+			_copy_model_fields(native_rec, rec)
+			rec.part_type = native_rec.get("PartType") as int
+			rec.is_vampire = native_rec.get("IsVampire") as bool
+			rec.flags = native_rec.get("Flags") as int
+			rec.mesh_type = native_rec.get("MeshType") as int
+			return rec)
+
+	# Copy Weapons
+	_populate_simple_records(loader, "Weapons", weapons, "weapon",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := WeaponRecord.new()
+			_copy_named_model_fields(native_rec, rec)
+			rec.icon = str(native_rec.get("Icon"))
+			rec.enchant_id = str(native_rec.get("EnchantId"))
+			rec.weight = native_rec.get("Weight") as float
+			rec.value = native_rec.get("Value") as int
+			rec.weapon_type = native_rec.get("WeaponType") as int
+			rec.health = native_rec.get("Health") as int
+			rec.speed = native_rec.get("Speed") as float
+			rec.reach = native_rec.get("Reach") as float
+			rec.enchant_points = native_rec.get("EnchantPoints") as int
+			rec.chop_min = native_rec.get("ChopMin") as int
+			rec.chop_max = native_rec.get("ChopMax") as int
+			rec.slash_min = native_rec.get("SlashMin") as int
+			rec.slash_max = native_rec.get("SlashMax") as int
+			rec.thrust_min = native_rec.get("ThrustMin") as int
+			rec.thrust_max = native_rec.get("ThrustMax") as int
+			rec.flags = native_rec.get("Flags") as int
+			return rec)
+
+	# Copy Armors
+	_populate_simple_records(loader, "Armors", armors, "armor",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := ArmorRecord.new()
+			_copy_named_model_fields(native_rec, rec)
+			rec.icon = str(native_rec.get("Icon"))
+			rec.enchant_id = str(native_rec.get("EnchantId"))
+			rec.armor_type = native_rec.get("ArmorType") as int
+			rec.weight = native_rec.get("Weight") as float
+			rec.value = native_rec.get("Value") as int
+			rec.health = native_rec.get("Health") as int
+			rec.enchant_points = native_rec.get("EnchantPoints") as int
+			rec.armor_rating = native_rec.get("ArmorRating") as int
+			return rec)
+
+	# Copy Clothing
+	_populate_simple_records(loader, "Clothing", clothing, "clothing",
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := ClothingRecord.new()
+			_copy_named_model_fields(native_rec, rec)
+			rec.icon = str(native_rec.get("Icon"))
+			rec.enchant_id = str(native_rec.get("EnchantId"))
+			rec.clothing_type = native_rec.get("ClothingType") as int
+			rec.weight = native_rec.get("Weight") as float
+			rec.value = native_rec.get("Value") as int
+			rec.enchant_points = native_rec.get("EnchantPoints") as int
+			return rec)
+
+	var t5 := Time.get_ticks_msec()
+
+	# Output timing breakdown if verbose profiling enabled
+	if VERBOSE_POPULATE_TIMING:
+		var ref_count := 0
+		for cell_key: Variant in cells:
+			var cell_rec: CellRecord = cells[cell_key]
+			ref_count += cell_rec.references.size()
+		print("  Populate timing: statics=%dms, simple=%dms, cells+refs=%dms (%d refs), lands+ltex=%dms, actors+items=%dms" % [
+			t1 - t0, t2 - t1, t3 - t2, ref_count, t4 - t3, t5 - t4])
 
 
 ## Supplement native C# load with actor data not handled by native loader
-## This loads NPCs, creatures, races, body parts, and other actor-related records
+## This loads classes, factions, skills, birthsigns, and leveled creatures
+## that are not yet implemented in the C# loader
 ## using GDScript parsing (slower but comprehensive)
 func _supplement_actor_data(path: String) -> void:
 	var reader := ESMReader.new()
@@ -435,11 +602,8 @@ func _supplement_actor_data(path: String) -> void:
 		return
 
 	var records_loaded := 0
+	# Note: NPC_, CREA, RACE, BODY, WEAP, ARMO, CLOT are now handled by C# loader
 	var target_types := [
-		ESMDefs.RecordType.REC_NPC_,
-		ESMDefs.RecordType.REC_CREA,
-		ESMDefs.RecordType.REC_RACE,
-		ESMDefs.RecordType.REC_BODY,
 		ESMDefs.RecordType.REC_CLAS,
 		ESMDefs.RecordType.REC_FACT,
 		ESMDefs.RecordType.REC_SKIL,
@@ -465,8 +629,8 @@ func _supplement_actor_data(path: String) -> void:
 	reader.close()
 
 	if records_loaded > 0:
-		print("ESMManager: Supplemented %d actor records (NPCs: %d, Creatures: %d, Races: %d, BodyParts: %d)" % [
-			records_loaded, npcs.size(), creatures.size(), races.size(), body_parts.size()
+		print("ESMManager: Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d)" % [
+			records_loaded, classes.size(), factions.size(), skills.size(), birthsigns.size()
 		])
 
 

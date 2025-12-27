@@ -67,59 +67,44 @@ func set_terrain_assets(assets: Terrain3DAssets) -> void:
 			_terrain_manager.call("set_texture_slot_mapper", _texture_loader)
 
 
+## Map types for unified generation
+enum MapType { HEIGHT, CONTROL, COLOR }
+
+
 func get_heightmap_for_region(region_coord: Vector2i) -> Image:
-	if not _terrain_manager:
-		return null
-
-	# Combined region size (4x4 cells = 256 pixels)
-	const CELL_SIZE_PX := 64
-	var region_size_px: int = CELLS_PER_REGION * CELL_SIZE_PX
-
-	# Create combined heightmap
-	var combined := Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
-	combined.fill(Color(0, 0, 0, 1))  # Flat default
-
-	# Get SW corner cell of this region
-	var sw_cell := _region_to_sw_cell(region_coord)
-	var any_data := false
-
-	# Fill in each cell
-	for local_y in range(CELLS_PER_REGION):
-		for local_x in range(CELLS_PER_REGION):
-			var cell_x := sw_cell.x + local_x
-			var cell_y := sw_cell.y + local_y
-
-			var land: LandRecord = ESMManager.get_land(cell_x, cell_y)
-			if not land or not land.has_heights():
-				continue
-
-			any_data = true
-
-			# Generate 65x65 heightmap
-			var cell_hm: Image = _terrain_manager.call("generate_heightmap", land)
-
-			# Calculate offset in combined image
-			# Y is flipped: local_y=0 (south) goes to bottom of image
-			var img_x := local_x * CELL_SIZE_PX
-			var img_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE_PX
-
-			# Blit 64x64 (crop the shared edge)
-			combined.blit_rect(cell_hm, Rect2i(0, 0, CELL_SIZE_PX, CELL_SIZE_PX), Vector2i(img_x, img_y))
-
-	return combined if any_data else null
+	return _get_combined_map(region_coord, MapType.HEIGHT)
 
 
 func get_controlmap_for_region(region_coord: Vector2i) -> Image:
+	return _get_combined_map(region_coord, MapType.CONTROL)
+
+
+func get_colormap_for_region(region_coord: Vector2i) -> Image:
+	return _get_combined_map(region_coord, MapType.COLOR)
+
+
+## Unified map generation for heightmap, controlmap, and colormap
+## Eliminates code duplication across the three map types
+func _get_combined_map(region_coord: Vector2i, map_type: MapType) -> Image:
 	if not _terrain_manager:
 		return null
 
 	const CELL_SIZE_PX := 64
 	var region_size_px: int = CELLS_PER_REGION * CELL_SIZE_PX
 
-	# Default control value (texture slot 0)
-	var default_control := _encode_control_value(0, 0, 0)
-	var combined := Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
-	combined.fill(Color(default_control, 0, 0, 1))
+	# Create combined image with appropriate format and fill
+	var combined: Image
+	match map_type:
+		MapType.HEIGHT:
+			combined = Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
+			combined.fill(Color(0, 0, 0, 1))
+		MapType.CONTROL:
+			combined = Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
+			var default_control := _encode_control_value(0, 0, 0)
+			combined.fill(Color(default_control, 0, 0, 1))
+		MapType.COLOR:
+			combined = Image.create(region_size_px, region_size_px, false, Image.FORMAT_RGB8)
+			combined.fill(Color.WHITE)
 
 	var sw_cell := _region_to_sw_cell(region_coord)
 	var any_data := false
@@ -133,46 +118,35 @@ func get_controlmap_for_region(region_coord: Vector2i) -> Image:
 			if not land:
 				continue
 
-			any_data = true
-			var cell_cm: Image = _terrain_manager.call("generate_control_map", land)
+			# Check data availability based on map type
+			match map_type:
+				MapType.HEIGHT:
+					if not land.has_heights():
+						continue
+				MapType.COLOR:
+					if not land.has_colors():
+						continue
+				# CONTROL doesn't require specific data check
 
+			any_data = true
+
+			# Generate cell map using appropriate method
+			var cell_map: Image
+			match map_type:
+				MapType.HEIGHT:
+					cell_map = _terrain_manager.call("generate_heightmap", land)
+				MapType.CONTROL:
+					cell_map = _terrain_manager.call("generate_control_map", land)
+				MapType.COLOR:
+					cell_map = _terrain_manager.call("generate_color_map", land)
+
+			# Calculate offset in combined image
+			# Y is flipped: local_y=0 (south) goes to bottom of image
 			var img_x := local_x * CELL_SIZE_PX
 			var img_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE_PX
 
-			combined.blit_rect(cell_cm, Rect2i(0, 0, CELL_SIZE_PX, CELL_SIZE_PX), Vector2i(img_x, img_y))
-
-	return combined if any_data else null
-
-
-func get_colormap_for_region(region_coord: Vector2i) -> Image:
-	if not _terrain_manager:
-		return null
-
-	const CELL_SIZE_PX := 64
-	var region_size_px: int = CELLS_PER_REGION * CELL_SIZE_PX
-
-	var combined := Image.create(region_size_px, region_size_px, false, Image.FORMAT_RGB8)
-	combined.fill(Color.WHITE)
-
-	var sw_cell := _region_to_sw_cell(region_coord)
-	var any_data := false
-
-	for local_y in range(CELLS_PER_REGION):
-		for local_x in range(CELLS_PER_REGION):
-			var cell_x := sw_cell.x + local_x
-			var cell_y := sw_cell.y + local_y
-
-			var land: LandRecord = ESMManager.get_land(cell_x, cell_y)
-			if not land or not land.has_colors():
-				continue
-
-			any_data = true
-			var cell_colm: Image = _terrain_manager.call("generate_color_map", land)
-
-			var img_x := local_x * CELL_SIZE_PX
-			var img_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE_PX
-
-			combined.blit_rect(cell_colm, Rect2i(0, 0, CELL_SIZE_PX, CELL_SIZE_PX), Vector2i(img_x, img_y))
+			# Blit 64x64 (crop the shared edge)
+			combined.blit_rect(cell_map, Rect2i(0, 0, CELL_SIZE_PX, CELL_SIZE_PX), Vector2i(img_x, img_y))
 
 	return combined if any_data else null
 

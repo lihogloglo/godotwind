@@ -12,6 +12,10 @@ var _reader: RefCounted = null
 # Bone name to index mapping (case-insensitive)
 var _bone_name_to_index: Dictionary = {}
 
+# Validation results
+var _validation_errors: Array[String] = []
+var _validation_warnings: Array[String] = []
+
 # Debug output
 var debug_mode: bool = false
 
@@ -20,6 +24,8 @@ var debug_mode: bool = false
 func init(reader: RefCounted) -> void:
 	_reader = reader
 	_bone_name_to_index.clear()
+	_validation_errors.clear()
+	_validation_warnings.clear()
 
 
 ## Check if a geometry node has skinning data
@@ -30,13 +36,20 @@ func has_skin(geom: Defs.NiGeometry) -> bool:
 ## Build a Skeleton3D from NiSkinInstance
 ## Returns the skeleton and populates bone mapping for later use
 func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
+	_validation_errors.clear()
+	_validation_warnings.clear()
+
 	if skin_instance == null:
-		push_error("NIFSkeletonBuilder: Null skin instance")
+		_add_error("Null skin instance provided")
 		return null
 
 	var skin_data := _reader.call("get_record", skin_instance.data_index) as Defs.NiSkinData
 	if skin_data == null:
-		push_error("NIFSkeletonBuilder: Could not find NiSkinData at index %d" % skin_instance.data_index)
+		_add_error("Could not find NiSkinData at index %d" % skin_instance.data_index)
+		return null
+
+	if skin_instance.bone_indices.is_empty():
+		_add_error("Skin instance has no bones")
 		return null
 
 	var skeleton := Skeleton3D.new()
@@ -48,10 +61,17 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 	if skin_instance.root_index >= 0:
 		root_node = _reader.call("get_record", skin_instance.root_index) as Defs.NiNode
 
+	if root_node == null:
+		_add_warning("No root node found for skeleton, hierarchy may be incorrect")
+
 	if debug_mode:
 		print("NIFSkeletonBuilder: Building skeleton with %d bones" % skin_instance.bone_indices.size())
 		if root_node:
 			print("  Root node: '%s'" % root_node.name)
+
+	# Track missing bones for error reporting
+	var missing_bones: Array[int] = []
+	var duplicate_names: Dictionary = {}
 
 	# Build bones from the bone list in NiSkinInstance
 	# Each bone index points to an NiNode in the scene graph
@@ -60,10 +80,23 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 		var bone_node := _reader.call("get_record", bone_node_idx) as Defs.NiNode
 
 		if bone_node == null:
-			push_warning("NIFSkeletonBuilder: Bone %d references invalid node %d" % [i, bone_node_idx])
+			missing_bones.append(bone_node_idx)
+			# Create placeholder bone to maintain index alignment
+			var bone_name := "Missing_Bone_%d" % i
+			skeleton.add_bone(bone_name)
+			_bone_name_to_index[bone_name.to_lower()] = skeleton.get_bone_count() - 1
 			continue
 
 		var bone_name := bone_node.name if bone_node.name else "Bone_%d" % i
+
+		# Check for duplicate bone names
+		var lower_name := bone_name.to_lower()
+		if lower_name in _bone_name_to_index:
+			if lower_name not in duplicate_names:
+				duplicate_names[lower_name] = 1
+			duplicate_names[lower_name] += 1
+			bone_name = "%s_%d" % [bone_name, duplicate_names[lower_name]]
+
 		var bone_idx := skeleton.get_bone_count()
 
 		# Add bone to skeleton
@@ -75,13 +108,99 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 		if debug_mode:
 			print("  Bone %d: '%s' (node %d)" % [bone_idx, bone_name, bone_node_idx])
 
+	# Report missing bones
+	if not missing_bones.is_empty():
+		_add_warning("Missing %d bone nodes: %s" % [missing_bones.size(), str(missing_bones)])
+
+	# Report duplicate names
+	if not duplicate_names.is_empty():
+		_add_warning("Renamed %d duplicate bone names" % duplicate_names.size())
+
 	# Set up bone hierarchy by finding parent relationships
 	_setup_bone_hierarchy(skeleton, skin_instance, root_node)
 
 	# Set bone rest poses from NiSkinData inverse bind matrices
 	_setup_bone_rest_poses(skeleton, skin_instance, skin_data)
 
+	# Validate final skeleton
+	_validate_skeleton(skeleton)
+
+	# Print validation results if any
+	if debug_mode or not _validation_errors.is_empty():
+		_print_validation_results()
+
 	return skeleton
+
+
+## Validate the built skeleton
+func _validate_skeleton(skeleton: Skeleton3D) -> void:
+	if skeleton.get_bone_count() == 0:
+		_add_error("Skeleton has no bones")
+		return
+
+	# Check for expected Morrowind bones
+	var expected_bones := ["bip01", "bip01 spine", "bip01 head"]
+	var found_expected := 0
+	for bone_name: String in expected_bones:
+		if bone_name in _bone_name_to_index:
+			found_expected += 1
+
+	if found_expected == 0:
+		_add_warning("No expected Morrowind bones found (Bip01, Bip01 Spine, etc.)")
+
+	# Check for orphan bones (bones with no parent that aren't root)
+	var orphan_count := 0
+	var root_count := 0
+	for i in skeleton.get_bone_count():
+		var parent := skeleton.get_bone_parent(i)
+		if parent < 0:
+			root_count += 1
+			if root_count > 1 and "bip01" not in skeleton.get_bone_name(i).to_lower():
+				orphan_count += 1
+
+	if orphan_count > 0:
+		_add_warning("Found %d potentially orphaned bones (multiple roots)" % orphan_count)
+
+
+## Add a validation error
+func _add_error(message: String) -> void:
+	_validation_errors.append(message)
+	push_error("NIFSkeletonBuilder: %s" % message)
+
+
+## Add a validation warning
+func _add_warning(message: String) -> void:
+	_validation_warnings.append(message)
+	if debug_mode:
+		push_warning("NIFSkeletonBuilder: %s" % message)
+
+
+## Print validation results
+func _print_validation_results() -> void:
+	if not _validation_errors.is_empty():
+		print("NIFSkeletonBuilder: %d errors:" % _validation_errors.size())
+		for error: String in _validation_errors:
+			print("  ERROR: %s" % error)
+
+	if not _validation_warnings.is_empty():
+		print("NIFSkeletonBuilder: %d warnings:" % _validation_warnings.size())
+		for warning: String in _validation_warnings:
+			print("  WARNING: %s" % warning)
+
+
+## Get validation errors
+func get_errors() -> Array[String]:
+	return _validation_errors
+
+
+## Get validation warnings
+func get_warnings() -> Array[String]:
+	return _validation_warnings
+
+
+## Check if skeleton build had errors
+func has_errors() -> bool:
+	return not _validation_errors.is_empty()
 
 
 ## Set up parent-child relationships between bones

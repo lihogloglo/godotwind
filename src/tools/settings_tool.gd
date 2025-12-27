@@ -1,5 +1,5 @@
 extends Control
-## Settings Tool for configuring Morrowind data path
+## Settings Tool for configuring Morrowind data path and cache location
 
 @onready var current_path_label: Label = %CurrentPathLabel
 @onready var path_source_label: Label = %PathSourceLabel
@@ -11,6 +11,13 @@ extends Control
 @onready var validate_label: Label = %ValidateLabel
 @onready var file_dialog: FileDialog = %FileDialog
 @onready var output_text: RichTextLabel = %OutputText
+
+# Cache path UI elements
+@onready var cache_path_edit: LineEdit = %CachePathEdit
+@onready var cache_browse_button: Button = %CacheBrowseButton
+@onready var cache_reset_button: Button = %CacheResetButton
+@onready var current_cache_label: Label = %CurrentCacheLabel
+@onready var cache_file_dialog: FileDialog = %CacheFileDialog
 
 func _ready() -> void:
 	# Connect signals
@@ -25,16 +32,25 @@ func _ready() -> void:
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
 	file_dialog.access = FileDialog.ACCESS_FILESYSTEM
 
+	# Connect cache path signals
+	cache_browse_button.pressed.connect(_on_cache_browse_pressed)
+	cache_reset_button.pressed.connect(_on_cache_reset_pressed)
+	cache_file_dialog.dir_selected.connect(_on_cache_dir_selected)
+
+	# Configure cache file dialog
+	cache_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	cache_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+
 	# Load current settings
 	_load_current_settings()
 
-	_log("[b]Morrowind Settings Tool[/b]")
-	_log("Configure your Morrowind installation path here.")
+	_log("[b]Godotwind Settings Tool[/b]")
+	_log("Configure your Morrowind installation and cache paths here.")
 	_log("")
 	_log("[b]Priority order:[/b]")
-	_log("1. MORROWIND_DATA_PATH environment variable")
+	_log("1. Environment variables (MORROWIND_DATA_PATH, GODOTWIND_CACHE_PATH)")
 	_log("2. User config file (user://settings.cfg)")
-	_log("3. Project settings (project.godot)")
+	_log("3. Project settings / defaults")
 	_log("")
 	_log("Settings saved here will be stored in your user config.")
 	_log("")
@@ -58,6 +74,19 @@ func _load_current_settings() -> void:
 	# Set edit fields
 	data_path_edit.text = current_path
 	esm_file_edit.text = esm_file
+
+	# Load cache path settings
+	var cache_path := SettingsManager.get_cache_base_path()
+	var default_cache := SettingsManager.get_default_cache_path()
+	cache_path_edit.text = cache_path
+
+	# Show cache path with indicator if it's custom or default
+	if cache_path == default_cache:
+		current_cache_label.text = cache_path + " (default)"
+		current_cache_label.add_theme_color_override("font_color", Color.GRAY)
+	else:
+		current_cache_label.text = cache_path + " (custom)"
+		current_cache_label.add_theme_color_override("font_color", Color.GREEN)
 
 	# Validate
 	_validate_settings()
@@ -135,10 +164,20 @@ func _on_save_pressed() -> void:
 
 	var data_path := data_path_edit.text.strip_edges()
 	var esm_file := esm_file_edit.text.strip_edges()
+	var cache_path := cache_path_edit.text.strip_edges()
 
 	_log("Saving settings...")
 	SettingsManager.set_data_path(data_path)
 	SettingsManager.set_esm_file(esm_file)
+
+	# Save cache path (empty means use default)
+	if cache_path.is_empty() or cache_path == SettingsManager.get_default_cache_path():
+		# Clear custom cache path to use default
+		SettingsManager.set_cache_base_path("")
+		_log("  Cache path: %s (default)" % SettingsManager.get_default_cache_path())
+	else:
+		SettingsManager.set_cache_base_path(cache_path)
+		_log("  Cache path: %s (custom)" % cache_path)
 
 	_log("[color=green]Settings saved successfully![/color]")
 	_log("  Data path: %s" % data_path)
@@ -153,3 +192,32 @@ func _on_save_pressed() -> void:
 func _log(text: String) -> void:
 	output_text.append_text(text + "\n")
 	print(text.replace("[b]", "").replace("[/b]", "").replace("[color=red]", "").replace("[color=green]", "").replace("[color=yellow]", "").replace("[color=orange]", "").replace("[/color]", ""))
+
+
+# =============================================================================
+# Cache Path Configuration
+# =============================================================================
+
+func _on_cache_browse_pressed() -> void:
+	# Set initial directory if current path is valid
+	var current_cache := cache_path_edit.text.strip_edges()
+	if not current_cache.is_empty() and DirAccess.dir_exists_absolute(current_cache):
+		cache_file_dialog.current_dir = current_cache
+	else:
+		# Default to Documents folder
+		cache_file_dialog.current_dir = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+
+	cache_file_dialog.popup_centered_ratio(0.7)
+
+
+func _on_cache_dir_selected(dir: String) -> void:
+	cache_path_edit.text = dir
+	_log("Cache path set to: %s" % dir)
+	_log("[color=yellow]Click 'Save Settings' to apply changes.[/color]")
+
+
+func _on_cache_reset_pressed() -> void:
+	var default_path := SettingsManager.get_default_cache_path()
+	cache_path_edit.text = default_path
+	_log("Cache path reset to default: %s" % default_path)
+	_log("[color=yellow]Click 'Save Settings' to apply changes.[/color]")

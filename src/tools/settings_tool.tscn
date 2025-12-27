@@ -112,12 +112,65 @@ layout_mode = 2
 theme_override_font_sizes/font_size = 14
 text = "⚠ Not validated"
 
-[node name="SaveButton" type="Button" parent="MarginContainer/VBoxContainer/ConfigPanel/VBoxContainer"]
+[node name="HSeparator3" type="HSeparator" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="CachePanel" type="PanelContainer" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="MarginContainer/VBoxContainer/CachePanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Label" type="Label" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "Cache Location"
+
+[node name="CachePathLabel" type="Label" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer"]
+layout_mode = 2
+text = "Cache Directory (impostors, models, terrain, etc.):"
+
+[node name="CurrentCacheLabel" type="Label" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Save Settings"
+theme_override_font_sizes/font_size = 12
+text = "Not configured"
 
-[node name="HSeparator3" type="HSeparator" parent="MarginContainer/VBoxContainer"]
+[node name="CachePathHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="CachePathEdit" type="LineEdit" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer/CachePathHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "e.g., D:/Games/GodotwindCache"
+
+[node name="CacheBrowseButton" type="Button" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer/CachePathHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Browse..."
+
+[node name="CacheResetButton" type="Button" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer/CachePathHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Reset to Default"
+
+[node name="CacheInfoLabel" type="Label" parent="MarginContainer/VBoxContainer/CachePanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 11
+text = "Subdirectories: impostors/, models/, merged_cells/, navmeshes/, ocean/, terrain/"
+
+[node name="HSeparator4" type="HSeparator" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="SaveButton" type="Button" parent="MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Save All Settings"
+
+[node name="HSeparator5" type="HSeparator" parent="MarginContainer/VBoxContainer"]
 layout_mode = 2
 
 [node name="OutputLabel" type="Label" parent="MarginContainer/VBoxContainer"]
@@ -134,5 +187,11 @@ scroll_following = true
 [node name="FileDialog" type="FileDialog" parent="."]
 unique_name_in_owner = true
 title = "Select Morrowind Data Files Directory"
+size = Vector2i(800, 500)
+ok_button_text = "Select"
+
+[node name="CacheFileDialog" type="FileDialog" parent="."]
+unique_name_in_owner = true
+title = "Select Cache Directory"
 size = Vector2i(800, 500)
 ok_button_text = "Select"

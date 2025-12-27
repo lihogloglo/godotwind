@@ -328,7 +328,7 @@ func _setup_controllers() -> void:
 	# Setup Animation Manager
 	var anim: _AnimationManager = animation_manager as _AnimationManager
 	if anim:
-		anim.setup(skeleton)
+		anim.setup(skeleton, character_body)
 		anim.state_changed.connect(_on_animation_state_changed)
 		anim.animation_finished.connect(_on_animation_finished)
 

@@ -114,10 +114,12 @@ func _configure_creature_ik() -> void:
 			ik_ctrl.enable_hand_ik = false  # Creatures don't have hands
 
 		CreatureType.QUADRUPED:
-			# Need 4-foot IK (not yet implemented)
-			ik_ctrl.enable_foot_ik = false  # TODO: Implement quadruped IK
+			# Enable quadruped IK for 4-legged creatures
+			ik_ctrl.enable_foot_ik = true
 			ik_ctrl.enable_look_at = true
 			ik_ctrl.enable_hand_ik = false
+			# Configure quadruped mode
+			_setup_quadruped_ik()
 
 		CreatureType.FLYING:
 			# No ground IK for flying creatures
@@ -134,6 +136,85 @@ func _configure_creature_ik() -> void:
 		_:
 			# Unknown - disable IK to be safe
 			ik_ctrl.set_all_enabled(false)
+
+
+## Setup quadruped IK for 4-legged creatures
+func _setup_quadruped_ik() -> void:
+	if not skeleton:
+		return
+
+	# Find front and back leg bones
+	var front_left := _find_leg_bones("front", "left")
+	var front_right := _find_leg_bones("front", "right")
+	var back_left := _find_leg_bones("back", "left")
+	var back_right := _find_leg_bones("back", "right")
+
+	if debug_mode:
+		print("CreatureAnimationSystem: Quadruped IK setup:")
+		print("  Front Left: %s" % str(front_left))
+		print("  Front Right: %s" % str(front_right))
+		print("  Back Left: %s" % str(back_left))
+		print("  Back Right: %s" % str(back_right))
+
+	# Configure IK chains for each leg
+	var ik_ctrl: _IKControllerScript = ik_controller as _IKControllerScript
+	if ik_ctrl:
+		ik_ctrl.configure_quadruped_mode(front_left, front_right, back_left, back_right)
+
+
+## Find leg bones for quadruped creatures
+## Returns dictionary with "upper", "lower", "foot" bone indices
+func _find_leg_bones(position: String, side: String) -> Dictionary:
+	var result := {"upper": -1, "lower": -1, "foot": -1}
+
+	if not skeleton:
+		return result
+
+	var pos_terms: Array[String] = []
+	var side_terms: Array[String] = []
+
+	# Position terms
+	if position == "front":
+		pos_terms = ["front", "fore", "f ", " f"]
+	else:  # back
+		pos_terms = ["back", "rear", "hind", "b ", " b"]
+
+	# Side terms
+	if side == "left":
+		side_terms = ["left", " l ", "_l", ".l", "l_"]
+	else:  # right
+		side_terms = ["right", " r ", "_r", ".r", "r_"]
+
+	# Search for leg bones
+	for i in skeleton.get_bone_count():
+		var name_lower := skeleton.get_bone_name(i).to_lower()
+
+		# Check if this is the correct position and side
+		var is_position := false
+		var is_side := false
+
+		for term: String in pos_terms:
+			if term in name_lower:
+				is_position = true
+				break
+
+		for term: String in side_terms:
+			if term in name_lower:
+				is_side = true
+				break
+
+		if not (is_position and is_side):
+			continue
+
+		# Identify bone type
+		if "thigh" in name_lower or "upperleg" in name_lower or "upper" in name_lower:
+			result["upper"] = i
+		elif "calf" in name_lower or "shin" in name_lower or "lowerleg" in name_lower or "lower" in name_lower:
+			result["lower"] = i
+		elif "foot" in name_lower or "paw" in name_lower or "hoof" in name_lower:
+			result["foot"] = i
+
+	return result
 
 
 ## Get creature type name for debugging

@@ -29,7 +29,7 @@ namespace Godotwind.Native;
 public partial class ESMCache : RefCounted
 {
     private const string CACHE_MAGIC = "ESMCACHE";
-    private const int CACHE_VERSION = 1;
+    private const int CACHE_VERSION = 2;  // Bumped for actor/item record support
 
     // Statistics
     public float LoadTimeMs { get; private set; } = 0f;
@@ -122,6 +122,14 @@ public partial class ESMCache : RefCounted
             writer.Write(loader.Cells.Count);
             writer.Write(loader.Lands.Count);
             writer.Write(loader.LandTextures.Count);
+            // New actor/item counts (v2)
+            writer.Write(loader.NPCs.Count);
+            writer.Write(loader.Creatures.Count);
+            writer.Write(loader.Races.Count);
+            writer.Write(loader.BodyParts.Count);
+            writer.Write(loader.Weapons.Count);
+            writer.Write(loader.Armors.Count);
+            writer.Write(loader.Clothing.Count);
 
             // Write statics
             WriteModelRecords(writer, loader.Statics);
@@ -146,6 +154,15 @@ public partial class ESMCache : RefCounted
 
             // Write land textures
             WriteLandTextures(writer, loader.LandTextures);
+
+            // Write actor/item records (v2)
+            WriteNPCs(writer, loader.NPCs);
+            WriteCreatures(writer, loader.Creatures);
+            WriteRaces(writer, loader.Races);
+            WriteBodyParts(writer, loader.BodyParts);
+            WriteWeapons(writer, loader.Weapons);
+            WriteArmors(writer, loader.Armors);
+            WriteClothing(writer, loader.Clothing);
 
             sw.Stop();
             SaveTimeMs = (float)sw.Elapsed.TotalMilliseconds;
@@ -203,6 +220,14 @@ public partial class ESMCache : RefCounted
             int cellsCount = reader.ReadInt32();
             int landsCount = reader.ReadInt32();
             int landTexturesCount = reader.ReadInt32();
+            // New actor/item counts (v2)
+            int npcsCount = reader.ReadInt32();
+            int creaturesCount = reader.ReadInt32();
+            int racesCount = reader.ReadInt32();
+            int bodyPartsCount = reader.ReadInt32();
+            int weaponsCount = reader.ReadInt32();
+            int armorsCount = reader.ReadInt32();
+            int clothingCount = reader.ReadInt32();
 
             // Read statics
             ReadStatics(reader, loader.Statics, staticsCount);
@@ -227,6 +252,15 @@ public partial class ESMCache : RefCounted
 
             // Read land textures
             ReadLandTextures(reader, loader.LandTextures, landTexturesCount);
+
+            // Read actor/item records (v2)
+            ReadNPCs(reader, loader.NPCs, npcsCount);
+            ReadCreatures(reader, loader.Creatures, creaturesCount);
+            ReadRaces(reader, loader.Races, racesCount);
+            ReadBodyParts(reader, loader.BodyParts, bodyPartsCount);
+            ReadWeapons(reader, loader.Weapons, weaponsCount);
+            ReadArmors(reader, loader.Armors, armorsCount);
+            ReadClothing(reader, loader.Clothing, clothingCount);
 
             sw.Stop();
             LoadTimeMs = (float)sw.Elapsed.TotalMilliseconds;
@@ -406,6 +440,173 @@ public partial class ESMCache : RefCounted
             WriteString(writer, kvp.Value.RecordId);
             writer.Write(kvp.Value.Index);
             WriteString(writer, kvp.Value.Texture);
+        }
+    }
+
+    private static void WriteNPCs(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeNPCRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.ScriptId);
+            WriteString(writer, r.RaceId);
+            WriteString(writer, r.ClassId);
+            WriteString(writer, r.FactionId);
+            WriteString(writer, r.HeadId);
+            WriteString(writer, r.HairId);
+            writer.Write(r.NpcFlags);
+            writer.Write(r.Level);
+            writer.Write(r.Health);
+            writer.Write(r.Mana);
+            writer.Write(r.Fatigue);
+            writer.Write(r.Disposition);
+            writer.Write(r.Reputation);
+            writer.Write(r.Rank);
+            writer.Write(r.Gold);
+        }
+    }
+
+    private static void WriteCreatures(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeCreatureRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.ScriptId);
+            WriteString(writer, r.OriginalId);
+            writer.Write(r.CreatureFlags);
+            writer.Write(r.Scale);
+            writer.Write(r.CreatureType);
+            writer.Write(r.Level);
+            writer.Write(r.Health);
+            writer.Write(r.Mana);
+            writer.Write(r.Fatigue);
+            writer.Write(r.Soul);
+            writer.Write(r.Combat);
+            writer.Write(r.Magic);
+            writer.Write(r.Stealth);
+            writer.Write(r.Gold);
+            // Attack values
+            for (int i = 0; i < 3; i++)
+            {
+                writer.Write(r.AttackMin[i]);
+                writer.Write(r.AttackMax[i]);
+            }
+        }
+    }
+
+    private static void WriteRaces(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeRaceRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.Description);
+            writer.Write(r.MaleHeight);
+            writer.Write(r.FemaleHeight);
+            writer.Write(r.MaleWeight);
+            writer.Write(r.FemaleWeight);
+            writer.Write(r.Flags);
+        }
+    }
+
+    private static void WriteBodyParts(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeBodyPartRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            writer.Write(r.PartType);
+            writer.Write(r.IsVampire);
+            writer.Write(r.Flags);
+            writer.Write(r.MeshType);
+        }
+    }
+
+    private static void WriteWeapons(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeWeaponRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.ScriptId);
+            WriteString(writer, r.Icon);
+            WriteString(writer, r.EnchantId);
+            writer.Write(r.Weight);
+            writer.Write(r.Value);
+            writer.Write(r.WeaponType);
+            writer.Write(r.Health);
+            writer.Write(r.Speed);
+            writer.Write(r.Reach);
+            writer.Write(r.EnchantPoints);
+            writer.Write(r.ChopMin);
+            writer.Write(r.ChopMax);
+            writer.Write(r.SlashMin);
+            writer.Write(r.SlashMax);
+            writer.Write(r.ThrustMin);
+            writer.Write(r.ThrustMax);
+            writer.Write(r.Flags);
+        }
+    }
+
+    private static void WriteArmors(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeArmorRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.ScriptId);
+            WriteString(writer, r.Icon);
+            WriteString(writer, r.EnchantId);
+            writer.Write(r.ArmorType);
+            writer.Write(r.Weight);
+            writer.Write(r.Value);
+            writer.Write(r.Health);
+            writer.Write(r.EnchantPoints);
+            writer.Write(r.ArmorRating);
+        }
+    }
+
+    private static void WriteClothing(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeClothingRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.ScriptId);
+            WriteString(writer, r.Icon);
+            WriteString(writer, r.EnchantId);
+            writer.Write(r.ClothingType);
+            writer.Write(r.Weight);
+            writer.Write(r.Value);
+            writer.Write(r.EnchantPoints);
         }
     }
 
@@ -638,6 +839,194 @@ public partial class ESMCache : RefCounted
                 Texture = ReadString(reader)
             };
             dict[key] = tex;
+        }
+    }
+
+    private static void ReadNPCs(BinaryReader reader, Godot.Collections.Dictionary<string, NativeNPCRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeNPCRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                ScriptId = ReadString(reader),
+                RaceId = ReadString(reader),
+                ClassId = ReadString(reader),
+                FactionId = ReadString(reader),
+                HeadId = ReadString(reader),
+                HairId = ReadString(reader),
+                NpcFlags = reader.ReadInt32(),
+                Level = reader.ReadInt32(),
+                Health = reader.ReadInt32(),
+                Mana = reader.ReadInt32(),
+                Fatigue = reader.ReadInt32(),
+                Disposition = reader.ReadInt32(),
+                Reputation = reader.ReadInt32(),
+                Rank = reader.ReadInt32(),
+                Gold = reader.ReadInt32()
+            };
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadCreatures(BinaryReader reader, Godot.Collections.Dictionary<string, NativeCreatureRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeCreatureRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                ScriptId = ReadString(reader),
+                OriginalId = ReadString(reader),
+                CreatureFlags = reader.ReadInt32(),
+                Scale = reader.ReadSingle(),
+                CreatureType = reader.ReadInt32(),
+                Level = reader.ReadInt32(),
+                Health = reader.ReadInt32(),
+                Mana = reader.ReadInt32(),
+                Fatigue = reader.ReadInt32(),
+                Soul = reader.ReadInt32(),
+                Combat = reader.ReadInt32(),
+                Magic = reader.ReadInt32(),
+                Stealth = reader.ReadInt32(),
+                Gold = reader.ReadInt32()
+            };
+            // Attack values
+            for (int a = 0; a < 3; a++)
+            {
+                rec.AttackMin[a] = reader.ReadInt32();
+                rec.AttackMax[a] = reader.ReadInt32();
+            }
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadRaces(BinaryReader reader, Godot.Collections.Dictionary<string, NativeRaceRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeRaceRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                Description = ReadString(reader),
+                MaleHeight = reader.ReadSingle(),
+                FemaleHeight = reader.ReadSingle(),
+                MaleWeight = reader.ReadSingle(),
+                FemaleWeight = reader.ReadSingle(),
+                Flags = reader.ReadInt32()
+            };
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadBodyParts(BinaryReader reader, Godot.Collections.Dictionary<string, NativeBodyPartRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeBodyPartRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                PartType = reader.ReadInt32(),
+                IsVampire = reader.ReadBoolean(),
+                Flags = reader.ReadInt32(),
+                MeshType = reader.ReadInt32()
+            };
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadWeapons(BinaryReader reader, Godot.Collections.Dictionary<string, NativeWeaponRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeWeaponRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                ScriptId = ReadString(reader),
+                Icon = ReadString(reader),
+                EnchantId = ReadString(reader),
+                Weight = reader.ReadSingle(),
+                Value = reader.ReadInt32(),
+                WeaponType = reader.ReadInt32(),
+                Health = reader.ReadInt32(),
+                Speed = reader.ReadSingle(),
+                Reach = reader.ReadSingle(),
+                EnchantPoints = reader.ReadInt32(),
+                ChopMin = reader.ReadInt32(),
+                ChopMax = reader.ReadInt32(),
+                SlashMin = reader.ReadInt32(),
+                SlashMax = reader.ReadInt32(),
+                ThrustMin = reader.ReadInt32(),
+                ThrustMax = reader.ReadInt32(),
+                Flags = reader.ReadInt32()
+            };
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadArmors(BinaryReader reader, Godot.Collections.Dictionary<string, NativeArmorRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeArmorRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                ScriptId = ReadString(reader),
+                Icon = ReadString(reader),
+                EnchantId = ReadString(reader),
+                ArmorType = reader.ReadInt32(),
+                Weight = reader.ReadSingle(),
+                Value = reader.ReadInt32(),
+                Health = reader.ReadInt32(),
+                EnchantPoints = reader.ReadInt32(),
+                ArmorRating = reader.ReadInt32()
+            };
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadClothing(BinaryReader reader, Godot.Collections.Dictionary<string, NativeClothingRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeClothingRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                ScriptId = ReadString(reader),
+                Icon = ReadString(reader),
+                EnchantId = ReadString(reader),
+                ClothingType = reader.ReadInt32(),
+                Weight = reader.ReadSingle(),
+                Value = reader.ReadInt32(),
+                EnchantPoints = reader.ReadInt32()
+            };
+            dict[key] = rec;
         }
     }
 

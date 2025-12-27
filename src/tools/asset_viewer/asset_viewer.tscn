@@ -1,0 +1,75 @@
+[gd_scene load_steps=2 format=3 uid="uid://b0fwxlv3yqm2u"]
+
+[ext_resource type="Script" path="res://src/tools/asset_viewer/asset_viewer.gd" id="1_script"]
+
+[node name="AssetViewer" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="VBox" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="TopBar" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="VBox/TopBar"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Asset Viewer"
+
+[node name="HSeparator" type="VSeparator" parent="VBox/TopBar"]
+layout_mode = 2
+
+[node name="ProviderLabel" type="Label" parent="VBox/TopBar"]
+layout_mode = 2
+text = "Provider:"
+
+[node name="ProviderDropdown" type="OptionButton" parent="VBox/TopBar"]
+custom_minimum_size = Vector2(150, 0)
+layout_mode = 2
+
+[node name="LoadBtn" type="Button" parent="VBox/TopBar"]
+layout_mode = 2
+text = "Load"
+
+[node name="Spacer" type="Control" parent="VBox/TopBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="HSplit" type="HSplitContainer" parent="VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+split_offset = 300
+
+[node name="LeftPanel" type="Panel" parent="VBox/HSplit"]
+custom_minimum_size = Vector2(280, 0)
+layout_mode = 2
+
+[node name="RightPanel" type="Panel" parent="VBox/HSplit"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="StatusBar" type="Panel" parent="VBox"]
+custom_minimum_size = Vector2(0, 30)
+layout_mode = 2
+
+[node name="StatusLabel" type="Label" parent="VBox/StatusBar"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+grow_horizontal = 2
+grow_vertical = 2
+text = "Ready"
+vertical_alignment = 1
