@@ -216,7 +216,7 @@ func _collect_mesh_data(references: Array, cell_grid: Vector2i) -> Dictionary:
 		converter.load_animations = false
 		converter.load_collision = false
 		converter.generate_lods = false
-		converter.generate_occluders = false
+		converter.generate_occluders = true
 
 		var model := converter.convert_buffer(nif_data, model_path)
 		if not model:

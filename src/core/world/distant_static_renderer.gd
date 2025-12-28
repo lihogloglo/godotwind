@@ -30,6 +30,9 @@ var cell_manager: CellManager = null
 ## World scenario RID (set when entering tree)
 var _scenario: RID = RID()
 
+## Default material for distant meshes (simple gray for visibility)
+var _default_material: StandardMaterial3D = null
+
 ## Loaded cells: Vector2i -> CellInstance
 var _cells: Dictionary[Vector2i, CellInstance] = {}
 
@@ -40,6 +43,9 @@ var _stats: Dictionary[String, int] = {
 	"total_objects": 0,
 	"visible_cells": 0,
 }
+
+## Track first cell load for one-time diagnostic
+var _first_cell_logged: bool = false
 
 
 ## Cell instance data
@@ -57,11 +63,26 @@ class CellInstance:
 
 func _enter_tree() -> void:
 	_scenario = get_viewport().get_world_3d().scenario
+	_create_default_material()
 
 
 func _exit_tree() -> void:
 	# Clean up all RenderingServer resources
 	clear()
+
+
+## Create default material for distant meshes
+func _create_default_material() -> void:
+	if _default_material:
+		return
+	_default_material = StandardMaterial3D.new()
+	_default_material.albedo_color = Color(0.6, 0.55, 0.5)  # Neutral gray-brown
+	_default_material.roughness = 0.9
+	_default_material.metallic = 0.0
+	# Disable features for performance
+	_default_material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
+	# Enable vertex colors if the mesh has them
+	_default_material.vertex_color_use_as_albedo = true
 
 
 ## Set the mesh merger to use
@@ -80,6 +101,17 @@ func set_cell_manager(manager: CellManager) -> void:
 ## mesh: Pre-baked ArrayMesh from {cache}/merged_cells/
 ## Returns true if cell was successfully added
 func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
+	# One-time diagnostic on first cell
+	if not _first_cell_logged:
+		_first_cell_logged = true
+		print("[DistantStaticRenderer] === FIRST add_cell_prebaked CALL ===")
+		print("[DistantStaticRenderer]   Cell: %s" % cell_grid)
+		print("[DistantStaticRenderer]   Mesh: %s, surfaces: %d" % [
+			"OK" if mesh else "NULL",
+			mesh.get_surface_count() if mesh else 0
+		])
+		print("[DistantStaticRenderer]   Scenario valid: %s" % _scenario.is_valid())
+
 	# Skip if already loaded
 	if cell_grid in _cells:
 		return true
@@ -102,6 +134,16 @@ func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 	RenderingServer.instance_set_base(cell_instance.instance_rid, cell_instance.mesh_rid)
 	RenderingServer.instance_set_scenario(cell_instance.instance_rid, _scenario)
 
+	# Apply default material to all surfaces if mesh has no material
+	# This ensures the mesh is visible even if prebaked without materials
+	if _default_material and mesh.get_surface_count() > 0:
+		for surf_idx: int in range(mesh.get_surface_count()):
+			var existing_material: Material = mesh.surface_get_material(surf_idx)
+			if not existing_material:
+				RenderingServer.instance_geometry_set_material_override(
+					cell_instance.instance_rid, _default_material.get_rid())
+				break  # Material override applies to whole instance
+
 	# Get mesh info for stats
 	cell_instance.aabb = mesh.get_aabb() if mesh.get_surface_count() > 0 else AABB()
 	cell_instance.vertex_count = 0
@@ -120,6 +162,23 @@ func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 	_stats["total_vertices"] += cell_instance.vertex_count
 	_stats["total_objects"] += cell_instance.object_count
 	_stats["visible_cells"] += 1
+
+	# Log first successful add
+	if _stats["loaded_cells"] == 1:
+		print("[DistantStaticRenderer] First cell added successfully: %s (%d verts)" % [
+			cell_grid, cell_instance.vertex_count])
+		# Debug: log mesh AABB to verify position
+		print("[DistantStaticRenderer]   AABB: pos=%s, size=%s" % [cell_instance.aabb.position, cell_instance.aabb.size])
+		print("[DistantStaticRenderer]   Instance RID valid: %s, Mesh RID valid: %s" % [
+			cell_instance.instance_rid.is_valid(), cell_instance.mesh_rid.is_valid()])
+		# Check if scenario is in the right world
+		print("[DistantStaticRenderer]   Scenario RID: %s" % _scenario)
+		print("[DistantStaticRenderer]   Self global_position: %s" % global_position)
+
+	# Every 10th cell, log a progress update
+	if _stats["loaded_cells"] % 10 == 0:
+		print("[DistantStaticRenderer] Loaded %d cells total (%d vertices)" % [
+			_stats["loaded_cells"], _stats["total_vertices"]])
 
 	return true
 

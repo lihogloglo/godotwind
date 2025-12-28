@@ -5,13 +5,17 @@
 ## - Character assembly from body parts
 ## - Animation playback
 ## - Skeleton/bone inspection
+## - Mixamo skeleton for modern animation features
 @warning_ignore("untyped_declaration", "unsafe_method_access", "unsafe_cast", "unsafe_call_argument")
 class_name NPCProvider
 extends AssetProvider
 
-# Dependencies
-var character_factory: CharacterFactoryV2 = null
+# Dependencies - now using only Mixamo character factory
+var mixamo_factory: MixamoCharacterFactory = null
 var model_loader: ModelLoader = null
+
+# Always use Mixamo skeleton (legacy mode removed)
+var use_mixamo_skeleton: bool = true
 
 # Data
 var _all_characters: Array[Dictionary] = []  # {id, name, type, record}
@@ -40,38 +44,47 @@ func initialize() -> Error:
 		return ERR_FILE_NOT_FOUND
 
 	_log("Loading data from: %s" % _data_path)
-	_progress(0, 100, "Loading BSA archives...")
 
-	# Load BSA archives
-	var bsa_count := BSAManager.load_archives_from_directory(_data_path)
-	_log("Loaded %d BSA archives" % bsa_count)
+	# Check if BSA archives are already loaded (by another provider or tool)
+	if BSAManager.get_archive_count() == 0:
+		_progress(0, 100, "Loading BSA archives...")
+		var bsa_count := BSAManager.load_archives_from_directory(_data_path)
+		_log("Loaded %d BSA archives" % bsa_count)
+	else:
+		_log("BSA archives already loaded (%d)" % BSAManager.get_archive_count())
 
-	_progress(30, 100, "Loading ESM...")
+	# Check if ESM is already loaded
+	if ESMManager.npcs.is_empty():
+		_progress(30, 100, "Loading ESM...")
+		var esm_file := SettingsManager.get_esm_file()
+		var esm_path := _data_path.path_join(esm_file)
+		var error := ESMManager.load_file(esm_path)
 
-	# Load ESM
-	var esm_file := SettingsManager.get_esm_file()
-	var esm_path := _data_path.path_join(esm_file)
-	var error := ESMManager.load_file(esm_path)
+		if error != OK:
+			loading_failed.emit("Failed to load ESM: %s" % error_string(error))
+			return error
+	else:
+		_log("ESM already loaded (%d NPCs)" % ESMManager.npcs.size())
 
-	if error != OK:
-		loading_failed.emit("Failed to load ESM: %s" % error_string(error))
-		return error
+	_progress(70, 100, "Initializing character factory...")
 
-	_progress(60, 100, "Initializing character factory...")
-
-	# Initialize model loader and character factory
+	# Initialize model loader
 	model_loader = ModelLoader.new()
-	character_factory = CharacterFactoryV2.new()
-	character_factory.set_model_loader(model_loader)
-	character_factory.debug_characters = false
-	character_factory.debug_animations = false
 
-	_progress(80, 100, "Building character list...")
+	# Initialize Mixamo character factory
+	mixamo_factory = MixamoCharacterFactory.new()
+	mixamo_factory.debug_mode = true
+	_log("MixamoCharacterFactory initialized")
 
-	# Build character list
+	_progress(85, 100, "Building character list...")
+
+	# Build character list (fast - just iterating existing dictionaries)
 	_build_character_list()
 
 	_log("[color=green]Loaded %d characters[/color]" % _all_characters.size())
+
+	# Note: Skeleton and animation preloading is now done lazily on first NPC load
+	# This makes the initial list loading much faster
 
 	loading_completed.emit()
 	return OK
@@ -113,7 +126,7 @@ func _build_character_list() -> void:
 
 
 func is_ready() -> bool:
-	return character_factory != null and not _all_characters.is_empty()
+	return mixamo_factory != null and not _all_characters.is_empty()
 
 
 func get_categories() -> Array[String]:
@@ -132,14 +145,26 @@ func load_item(item: Dictionary) -> Node3D:
 		_log("[color=red]Error: No record in item[/color]")
 		return null
 
-	_log("Loading: %s" % item.get("name", "Unknown"))
+	_log("Loading: %s [Mixamo]" % item.get("name", "Unknown"))
 
+	var start_time := Time.get_ticks_msec()
 	var character: CharacterBody3D = null
 
 	if item_type == "npc":
-		character = character_factory.create_npc(record as NPCRecord, 0)
+		var npc_rec := record as NPCRecord
+		var race_rec: RaceRecord = ESMManager.get_race(npc_rec.race_id) if npc_rec else null
+		if race_rec:
+			character = mixamo_factory.create_npc(npc_rec, race_rec)
+		else:
+			_log("[color=red]Error: Race '%s' not found[/color]" % npc_rec.race_id)
+			return null
 	elif item_type == "creature":
-		character = character_factory.create_creature(record as CreatureRecord, 0)
+		# Creatures not yet supported by MixamoCharacterFactory
+		_log("[color=yellow]Creatures not yet supported - needs implementation[/color]")
+		return null
+
+	var load_time := Time.get_ticks_msec() - start_time
+	_log("[color=yellow]Character creation took %d ms[/color]" % load_time)
 
 	if character == null:
 		_log("[color=red]Error: Failed to create character[/color]")
@@ -150,7 +175,11 @@ func load_item(item: Dictionary) -> Node3D:
 	_last_record = record
 	_last_item = item
 
-	# Auto-play an idle animation to prevent falling through ground
+	# Disable physics processing for asset viewer (prevents falling through ground)
+	character.set_physics_process(false)
+	character.set_process(false)
+
+	# Auto-play an idle animation
 	_auto_play_idle_animation(character)
 
 	_log("[color=green]Successfully loaded character![/color]")
@@ -199,9 +228,43 @@ func get_info_text(item: Dictionary) -> String:
 
 func get_custom_tabs() -> Array[Dictionary]:
 	return [
+		{"name": "Settings", "build_func": _build_settings_tab},
 		{"name": "Animations", "build_func": _build_animations_tab},
 		{"name": "Bones", "build_func": _build_bones_tab},
 	]
+
+
+func _build_settings_tab(container: Control, _item: Dictionary) -> void:
+	var vbox := VBoxContainer.new()
+	container.add_child(vbox)
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 8
+	vbox.offset_top = 8
+	vbox.offset_right = -8
+	vbox.offset_bottom = -8
+
+	# Title
+	var title := Label.new()
+	title.text = "Character System Info"
+	title.add_theme_font_size_override("font_size", 16)
+	vbox.add_child(title)
+
+	vbox.add_child(HSeparator.new())
+
+	var desc := Label.new()
+	desc.text = "Using Mixamo-compatible skeleton for:\n• AnimationTree support\n• Inverse Kinematics (IK)\n• Motion matching\n• Thousands of free Mixamo animations"
+	desc.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(desc)
+
+	vbox.add_child(HSeparator.new())
+
+	# Status info
+	var status_label := Label.new()
+	if _last_character and _last_character.has_meta("is_mixamo"):
+		status_label.text = "Current character: Mixamo skeleton"
+	else:
+		status_label.text = "Current character: None loaded"
+	vbox.add_child(status_label)
 
 
 func _build_animations_tab(container: Control, _item: Dictionary) -> void:
@@ -213,43 +276,104 @@ func _build_animations_tab(container: Control, _item: Dictionary) -> void:
 	vbox.offset_right = -8
 	vbox.offset_bottom = -8
 
+	# Info label
+	var info_label := Label.new()
+	info_label.add_theme_font_size_override("font_size", 11)
+	vbox.add_child(info_label)
+
 	var anim_list := ItemList.new()
 	anim_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(anim_list)
 
+	# Button row
+	var btn_row := HBoxContainer.new()
+	vbox.add_child(btn_row)
+
 	var play_btn := Button.new()
-	play_btn.text = "Play Animation"
-	vbox.add_child(play_btn)
+	play_btn.text = "Play"
+	play_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_row.add_child(play_btn)
+
+	var stop_btn := Button.new()
+	stop_btn.text = "Stop"
+	btn_row.add_child(stop_btn)
 
 	# Populate animations
+	var anim_player: AnimationPlayer = null
 	if _last_character:
-		var anim_player := _find_animation_player(_last_character)
+		anim_player = _find_animation_player(_last_character)
 		if anim_player:
-			var animations := anim_player.get_animation_list()
-			for anim_name: String in animations:
-				anim_list.add_item(anim_name)
+			# Get all animation libraries
+			var lib_names := anim_player.get_animation_library_list()
+			var total_anims := 0
+
+			for lib_name in lib_names:
+				var library := anim_player.get_animation_library(lib_name)
+				if library:
+					var lib_label: String = lib_name if lib_name else "(default)"
+					for anim_name in library.get_animation_list():
+						var full_name: String = "%s/%s" % [lib_name, anim_name] if lib_name else anim_name
+						var display := "[%s] %s" % [lib_label, anim_name]
+						anim_list.add_item(display)
+						anim_list.set_item_metadata(anim_list.item_count - 1, full_name)
+						total_anims += 1
+
+			info_label.text = "%d animations from %d libraries" % [total_anims, lib_names.size()]
 
 			play_btn.pressed.connect(func() -> void:
 				var selected := anim_list.get_selected_items()
 				if not selected.is_empty():
-					var name_to_play: String = anim_list.get_item_text(selected[0])
-					anim_player.play(name_to_play)
-					_log("Playing: %s" % name_to_play)
+					var full_name: String = anim_list.get_item_metadata(selected[0])
+					anim_player.play(full_name)
+					_log("Playing: %s" % full_name)
+			)
+
+			stop_btn.pressed.connect(func() -> void:
+				anim_player.stop()
+				_log("Animation stopped")
 			)
 
 	if anim_list.item_count == 0:
 		anim_list.add_item("(No animations loaded)")
+		info_label.text = "No animations - add GLB files to assets/animations/mixamo/"
 		play_btn.disabled = true
+		stop_btn.disabled = true
 
 
 func _build_bones_tab(container: Control, _item: Dictionary) -> void:
+	var vbox := VBoxContainer.new()
+	container.add_child(vbox)
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 8
+	vbox.offset_top = 8
+	vbox.offset_right = -8
+	vbox.offset_bottom = -8
+
+	# Controls row
+	var controls := HBoxContainer.new()
+	vbox.add_child(controls)
+
+	var show_skeleton_btn := CheckButton.new()
+	show_skeleton_btn.text = "Show Skeleton"
+	show_skeleton_btn.button_pressed = false
+	controls.add_child(show_skeleton_btn)
+
+	var bone_size_label := Label.new()
+	bone_size_label.text = "  Size:"
+	controls.add_child(bone_size_label)
+
+	var bone_size_slider := HSlider.new()
+	bone_size_slider.min_value = 0.001
+	bone_size_slider.max_value = 0.05
+	bone_size_slider.step = 0.001
+	bone_size_slider.value = 0.01
+	bone_size_slider.custom_minimum_size.x = 100
+	controls.add_child(bone_size_slider)
+
+	# Bone tree
 	var bone_tree := Tree.new()
-	container.add_child(bone_tree)
-	bone_tree.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bone_tree.offset_left = 8
-	bone_tree.offset_top = 8
-	bone_tree.offset_right = -8
-	bone_tree.offset_bottom = -8
+	bone_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(bone_tree)
 
 	if not _last_character:
 		var root: TreeItem = bone_tree.create_item()
@@ -262,7 +386,31 @@ func _build_bones_tab(container: Control, _item: Dictionary) -> void:
 		root.set_text(0, "(No skeleton)")
 		return
 
-	# Build bone hierarchy
+	# Create skeleton visualizer
+	var visualizer: Node3D = null
+
+	show_skeleton_btn.toggled.connect(func(pressed: bool) -> void:
+		if pressed:
+			visualizer = _create_skeleton_visualizer(skeleton, bone_size_slider.value)
+			if visualizer:
+				skeleton.add_child(visualizer)
+				_log("Skeleton visualization enabled")
+		else:
+			if visualizer and is_instance_valid(visualizer):
+				visualizer.queue_free()
+				visualizer = null
+				_log("Skeleton visualization disabled")
+	)
+
+	bone_size_slider.value_changed.connect(func(value: float) -> void:
+		if show_skeleton_btn.button_pressed and visualizer and is_instance_valid(visualizer):
+			visualizer.queue_free()
+			visualizer = _create_skeleton_visualizer(skeleton, value)
+			if visualizer:
+				skeleton.add_child(visualizer)
+	)
+
+	# Build bone hierarchy tree
 	var tree_root: TreeItem = bone_tree.create_item()
 	tree_root.set_text(0, "Skeleton (%d bones)" % skeleton.get_bone_count())
 
@@ -273,7 +421,10 @@ func _build_bones_tab(container: Control, _item: Dictionary) -> void:
 		var parent_idx := skeleton.get_bone_parent(i)
 		if parent_idx == -1:
 			var item: TreeItem = bone_tree.create_item(tree_root)
-			item.set_text(0, skeleton.get_bone_name(i))
+			var rest := skeleton.get_bone_rest(i)
+			item.set_text(0, "%s [pos: %.2f, %.2f, %.2f]" % [
+				skeleton.get_bone_name(i), rest.origin.x, rest.origin.y, rest.origin.z
+			])
 			bone_items[i] = item
 
 	# Add child bones (multiple passes for deep hierarchies)
@@ -285,8 +436,84 @@ func _build_bones_tab(container: Control, _item: Dictionary) -> void:
 			if parent_idx in bone_items:
 				var parent_item: TreeItem = bone_items[parent_idx]
 				var item: TreeItem = bone_tree.create_item(parent_item)
-				item.set_text(0, skeleton.get_bone_name(i))
+				var rest := skeleton.get_bone_rest(i)
+				item.set_text(0, "%s [pos: %.2f, %.2f, %.2f]" % [
+					skeleton.get_bone_name(i), rest.origin.x, rest.origin.y, rest.origin.z
+				])
 				bone_items[i] = item
+
+
+## Create a visual representation of the skeleton using spheres and cylinders
+func _create_skeleton_visualizer(skeleton: Skeleton3D, bone_size: float) -> Node3D:
+	var root := Node3D.new()
+	root.name = "SkeletonVisualizer"
+
+	# Create materials
+	var bone_mat := StandardMaterial3D.new()
+	bone_mat.albedo_color = Color(1.0, 0.3, 0.3, 0.8)  # Red for bones
+	bone_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bone_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	var joint_mat := StandardMaterial3D.new()
+	joint_mat.albedo_color = Color(0.3, 1.0, 0.3, 0.9)  # Green for joints
+	joint_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	joint_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	# Create sphere mesh for joints
+	var sphere_mesh := SphereMesh.new()
+	sphere_mesh.radius = bone_size
+	sphere_mesh.height = bone_size * 2
+
+	# Create cylinder mesh for bones (will be scaled per-bone)
+	var cylinder_mesh := CylinderMesh.new()
+	cylinder_mesh.top_radius = bone_size * 0.5
+	cylinder_mesh.bottom_radius = bone_size * 0.5
+	cylinder_mesh.height = 1.0  # Will be scaled
+
+	for i in skeleton.get_bone_count():
+		var bone_name := skeleton.get_bone_name(i)
+		var global_pose := skeleton.get_bone_global_pose(i)
+		var bone_pos := global_pose.origin
+
+		# Create joint sphere at bone position
+		var joint := MeshInstance3D.new()
+		joint.name = "Joint_%s" % bone_name
+		joint.mesh = sphere_mesh
+		joint.material_override = joint_mat
+		joint.position = bone_pos
+		root.add_child(joint)
+
+		# Create bone cylinder to parent
+		var parent_idx := skeleton.get_bone_parent(i)
+		if parent_idx >= 0:
+			var parent_pose := skeleton.get_bone_global_pose(parent_idx)
+			var parent_pos := parent_pose.origin
+			var direction := bone_pos - parent_pos
+			var length := direction.length()
+
+			if length > 0.001:
+				var bone_vis := MeshInstance3D.new()
+				bone_vis.name = "Bone_%s" % bone_name
+				bone_vis.mesh = cylinder_mesh
+				bone_vis.material_override = bone_mat
+
+				# Position at midpoint
+				bone_vis.position = (bone_pos + parent_pos) / 2.0
+
+				# Scale to bone length
+				bone_vis.scale = Vector3(1, length, 1)
+
+				# Rotate to point from parent to child using look_at_from_position
+				# (can't use look_at() since node isn't in tree yet)
+				var up := Vector3.UP
+				if abs(direction.normalized().dot(up)) > 0.99:
+					up = Vector3.FORWARD
+				bone_vis.look_at_from_position(bone_vis.position, bone_vis.position + direction, up)
+				bone_vis.rotate_object_local(Vector3.RIGHT, PI / 2)
+
+				root.add_child(bone_vis)
+
+	return root
 
 
 func _find_animation_player(node: Node) -> AnimationPlayer:
@@ -354,8 +581,12 @@ func _get_creature_type_name(creature_type: int) -> String:
 
 
 func cleanup() -> void:
+	if mixamo_factory:
+		_log("MixamoFactory stats: %s" % str(mixamo_factory.get_stats()))
+		mixamo_factory.clear_cache()
+
 	_all_characters.clear()
 	_last_character = null
 	_last_record = null
-	character_factory = null
+	mixamo_factory = null
 	model_loader = null

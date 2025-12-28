@@ -44,7 +44,8 @@ signal cell_unloaded(grid: Vector2i)
 
 ## View distance in cells (radius around camera) - NEAR tier only
 ## Extended tiers (MID/FAR/HORIZON) are managed by DistanceTierManager
-@export var view_distance_cells: int = 3
+## With 117m cells, 2 cells = ~234m (NEAR tier ends at 150m, so this provides buffer)
+@export var view_distance_cells: int = 2
 
 ## Whether to load objects (can disable for terrain-only view)
 @export var load_objects: bool = true
@@ -60,7 +61,7 @@ signal cell_unloaded(grid: Vector2i)
 ## NOTE: Distant content won't appear until you run the prebaking tools:
 ## - mesh_prebaker.gd for MID tier (merged meshes)
 ## - impostor_baker.gd for FAR tier (impostors)
-@export var distant_rendering_enabled: bool = false:
+@export var distant_rendering_enabled: bool = true:
 	set(value):
 		distant_rendering_enabled = value
 		# Sync to tier_manager when changed at runtime
@@ -244,6 +245,9 @@ func initialize() -> void:
 		"enabled" if distant_rendering_enabled else "disabled",
 		"enabled" if use_chunk_paging else "disabled"
 	])
+
+	# Log diagnostic info about distant rendering setup
+	_log_distant_rendering_status()
 
 
 ## Time budget for async object instantiation per frame (ms)
@@ -506,6 +510,10 @@ func clear_tier_state() -> void:
 	if tier_manager and tier_manager.has_method("clear"):
 		tier_manager.call("clear")
 
+	# Clear ChunkRenderer state so it reloads MID/FAR chunks
+	if chunk_renderer and chunk_renderer.has_method("clear"):
+		chunk_renderer.clear()
+
 
 ## Set the CellManager instance to use
 func set_cell_manager(manager: CellManager) -> void:
@@ -729,6 +737,8 @@ func _setup_distant_renderers() -> void:
 		impostor_manager = Node3D.new()
 		impostor_manager.set_script(impostor_manager_class)
 		impostor_manager.name = "ImpostorManager"
+		# Sync debug mode with WSM
+		impostor_manager.set("debug_enabled", debug_enabled)
 		add_child(impostor_manager)
 
 		# Create and connect ImpostorCandidates
@@ -738,7 +748,7 @@ func _setup_distant_renderers() -> void:
 			if impostor_manager.has_method("set_impostor_candidates"):
 				impostor_manager.call("set_impostor_candidates", candidates)
 
-		_debug("ImpostorManager created for FAR tier (2km-5km)")
+		_debug("ImpostorManager created for FAR tier (500m-5km)")
 
 
 ## Configure tier manager for a specific world
@@ -785,6 +795,7 @@ func _setup_chunk_paging() -> void:
 #region Cell Loading
 
 ## Called when camera moves to a different cell
+var _cell_change_log_count: int = 0
 func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 	_debug("Camera cell changed to: %s" % new_cell)
 
@@ -792,6 +803,10 @@ func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 	_queue_full_message_count = 0
 
 	# Use tiered loading if enabled and tier manager exists
+	_cell_change_log_count += 1
+	if _cell_change_log_count <= 3:
+		print("[WSM] _on_camera_cell_changed: distant_rendering_enabled=%s, tier_manager=%s, chunk_renderer=%s" % [
+			distant_rendering_enabled, "OK" if tier_manager else "NULL", "OK" if chunk_renderer else "NULL"])
 	if distant_rendering_enabled and tier_manager:
 		_on_camera_cell_changed_tiered(new_cell)
 		return
@@ -1347,14 +1362,23 @@ func _process_mid_tier_cell(grid: Vector2i) -> void:
 
 	# Try to load pre-baked merged mesh (fast path)
 	var prebaked_path := _get_merged_cells_path().path_join("cell_%d_%d.res" % [grid.x, grid.y])
-	if ResourceLoader.exists(prebaked_path):
+
+	# Check with both ResourceLoader.exists and FileAccess for robustness
+	var res_exists := ResourceLoader.exists(prebaked_path)
+	var file_exists := FileAccess.file_exists(prebaked_path)
+
+	if res_exists or file_exists:
 		var mesh := load(prebaked_path) as ArrayMesh
 		if mesh and distant_renderer and distant_renderer.has_method("add_cell_prebaked"):
-			distant_renderer.call("add_cell_prebaked", grid, mesh)
+			var success: bool = distant_renderer.call("add_cell_prebaked", grid, mesh)
 			mid_loading.erase(grid)
 			mid_loaded[grid] = true
-			_debug("MID tier cell loaded: %s (pre-baked)" % grid)
+			_debug("MID tier cell loaded: %s (pre-baked, success=%s)" % [grid, success])
 			return
+		elif mesh:
+			push_warning("MID tier: mesh loaded but renderer not ready for %s" % grid)
+		else:
+			push_warning("MID tier: pre-baked file exists but mesh is null for %s" % grid)
 
 	# Fallback to runtime merging if enabled (SLOW - development only)
 	if allow_runtime_mesh_merging and distant_renderer and distant_renderer.has_method("add_cell"):
@@ -1366,9 +1390,12 @@ func _process_mid_tier_cell(grid: Vector2i) -> void:
 			_debug("MID tier cell loaded: %s (runtime merge - SLOW)" % grid)
 			return
 
-	# No pre-baked data and runtime disabled - skip gracefully
+	# No pre-baked data and runtime disabled - mark as loaded but don't create anything
 	mid_loading.erase(grid)
 	mid_loaded[grid] = true
+	# Only log missing pre-baked data once per unique path to reduce spam
+	if not file_exists:
+		_debug("MID tier cell skipped: %s (no pre-baked file)" % grid)
 
 
 ## Process FAR tier cell (impostors)
@@ -1613,6 +1640,37 @@ func _cell_to_godot_position(grid: Vector2i) -> Vector3:
 func _debug(msg: String) -> void:
 	if debug_enabled:
 		print("WorldStreamingManager: %s" % msg)
+
+
+## Log diagnostic info about distant rendering setup
+func _log_distant_rendering_status() -> void:
+	print("\n[WSM] === DISTANT RENDERING STATUS ===")
+	print("[WSM] distant_rendering_enabled: %s" % distant_rendering_enabled)
+	print("[WSM] use_chunk_paging: %s" % use_chunk_paging)
+	print("[WSM] tier_manager: %s" % ("OK" if tier_manager else "NULL"))
+	print("[WSM] distant_renderer: %s" % ("OK" if distant_renderer else "NULL"))
+	print("[WSM] impostor_manager: %s" % ("OK" if impostor_manager else "NULL"))
+	print("[WSM] chunk_manager: %s" % ("OK" if chunk_manager else "NULL"))
+	print("[WSM] chunk_renderer: %s" % ("OK" if chunk_renderer else "NULL"))
+
+	if tier_manager:
+		print("[WSM] Tier distances:")
+		print("[WSM]   NEAR: 0m - %.0fm" % tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.NEAR, 0))
+		print("[WSM]   MID: %.0fm - %.0fm" % [
+			tier_manager.tier_distances.get(DistanceTierManagerScript.Tier.MID, 0),
+			tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.MID, 0)
+		])
+		print("[WSM]   FAR: %.0fm - %.0fm" % [
+			tier_manager.tier_distances.get(DistanceTierManagerScript.Tier.FAR, 0),
+			tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.FAR, 0)
+		])
+
+	# Check cache paths
+	var impostors_path := _get_impostors_path()
+	var merged_cells_path := _get_merged_cells_path()
+	print("[WSM] Impostors path: %s (exists: %s)" % [impostors_path, DirAccess.dir_exists_absolute(impostors_path)])
+	print("[WSM] Merged cells path: %s (exists: %s)" % [merged_cells_path, DirAccess.dir_exists_absolute(merged_cells_path)])
+	print("[WSM] ================================\n")
 
 
 ## Cache tier distances to avoid dictionary lookups every frame

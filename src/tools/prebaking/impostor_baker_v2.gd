@@ -52,19 +52,12 @@ var background_color: Color = Color(0, 0, 0, 0)
 var min_distance: float = 500.0    ## Start showing impostor
 var max_distance: float = 5000.0   ## Stop showing impostor
 var output_dir: String = ""        ## Set in initialize from SettingsManager
-var bake_depth: bool = true        ## Bake depth into alpha channel
 
 ## Rendering setup
 var _viewport: SubViewport = null
-var _depth_viewport: SubViewport = null
 var _camera: Camera3D = null
-var _depth_camera: Camera3D = null
 var _light: DirectionalLight3D = null
 var _model_container: Node3D = null
-var _depth_model_container: Node3D = null
-
-## Depth rendering material
-var _depth_material: ShaderMaterial = null
 
 ## Progress tracking
 signal progress(current: int, total: int, model_name: String)
@@ -132,72 +125,8 @@ func _setup_rendering_viewport() -> void:
 	_model_container.name = "ModelContainer"
 	_viewport.add_child(_model_container)
 
-	# Create depth viewport if depth baking is enabled
-	if bake_depth:
-		_setup_depth_viewport()
-
 	_is_initialized = true
-	print("ImpostorBakerV2: Initialized (16-frame, %dx%d atlas, depth=%s)" % [texture_size, texture_size, bake_depth])
-
-
-## Set up depth rendering viewport
-func _setup_depth_viewport() -> void:
-	_depth_viewport = SubViewport.new()
-	_depth_viewport.size = Vector2i(frame_size, frame_size)
-	_depth_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	_depth_viewport.transparent_bg = true
-	_depth_viewport.msaa_3d = Viewport.MSAA_DISABLED  # Depth doesn't need MSAA
-	_depth_viewport.use_hdr_2d = false
-	_depth_viewport.own_world_3d = true
-	add_child(_depth_viewport)
-
-	# Create depth camera (matches main camera)
-	_depth_camera = Camera3D.new()
-	if use_orthographic:
-		_depth_camera.projection = Camera3D.PROJECTION_ORTHOGONAL
-		_depth_camera.size = 10.0
-	else:
-		_depth_camera.projection = Camera3D.PROJECTION_PERSPECTIVE
-		_depth_camera.fov = camera_fov
-	_depth_camera.near = 0.1
-	_depth_camera.far = 1000.0
-	_depth_viewport.add_child(_depth_camera)
-
-	# Depth environment (no lighting needed)
-	var depth_world_env := WorldEnvironment.new()
-	var depth_env := Environment.new()
-	depth_env.background_mode = Environment.BG_COLOR
-	depth_env.background_color = Color(1, 1, 1, 0)  # White = far
-	depth_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	depth_env.ambient_light_color = Color.WHITE
-	depth_env.ambient_light_energy = 1.0
-	depth_world_env.environment = depth_env
-	_depth_viewport.add_child(depth_world_env)
-
-	# Container for depth model
-	_depth_model_container = Node3D.new()
-	_depth_model_container.name = "DepthModelContainer"
-	_depth_viewport.add_child(_depth_model_container)
-
-	# Create depth material
-	_depth_material = ShaderMaterial.new()
-	var depth_shader := Shader.new()
-	depth_shader.code = """
-shader_type spatial;
-render_mode unshaded, depth_draw_always, cull_back;
-
-uniform float near_plane = 0.1;
-uniform float far_plane = 100.0;
-
-void fragment() {
-	// Linearize depth and output as grayscale
-	float depth = FRAGCOORD.z;
-	float linear_depth = (2.0 * near_plane) / (far_plane + near_plane - depth * (far_plane - near_plane));
-	ALBEDO = vec3(linear_depth);
-	ALPHA = 1.0;
-}
-"""
-	_depth_material.shader = depth_shader
+	print("ImpostorBakerV2: Initialized (16-frame, %dx%d atlas)" % [texture_size, texture_size])
 
 
 ## Initialize output directory
@@ -236,14 +165,6 @@ func bake_model(model_path: String) -> Dictionary:
 	# Add model to viewport scene
 	_model_container.add_child(model)
 
-	# Create depth model copy if baking depth
-	var depth_model: Node3D = null
-	if bake_depth and _depth_model_container:
-		depth_model = _load_model(model_path)
-		if depth_model:
-			_apply_depth_material(depth_model)
-			_depth_model_container.add_child(depth_model)
-
 	await get_tree().process_frame
 
 	# Calculate model bounds
@@ -252,16 +173,12 @@ func bake_model(model_path: String) -> Dictionary:
 		var error := "Model has invalid bounds"
 		push_warning("ImpostorBakerV2: %s - %s" % [error, model_path])
 		model.queue_free()
-		if depth_model:
-			depth_model.queue_free()
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "output_path": "", "error": error}
 
 	# Center model at origin
 	var center := aabb.get_center()
 	model.position = -center
-	if depth_model:
-		depth_model.position = -center
 
 	await get_tree().process_frame
 
@@ -271,19 +188,11 @@ func bake_model(model_path: String) -> Dictionary:
 
 	if use_orthographic:
 		_camera.size = max_extent
-		if _depth_camera:
-			_depth_camera.size = max_extent
 
 	var camera_distance := max_extent * 2.0
 
-	# Update depth material uniforms
-	if _depth_material:
-		_depth_material.set_shader_parameter("near_plane", _camera.near)
-		_depth_material.set_shader_parameter("far_plane", camera_distance * 2.0)
-
 	# Render from all 16 directions
 	var color_frames: Array[Image] = []
-	var depth_frames: Array[Image] = []
 
 	for i in range(OCTAHEDRAL_DIRECTIONS.size()):
 		var direction: Vector3 = OCTAHEDRAL_DIRECTIONS[i].normalized()
@@ -297,23 +206,11 @@ func bake_model(model_path: String) -> Dictionary:
 			blank.fill(background_color)
 			color_frames.append(blank)
 
-		# Render depth frame if enabled
-		if bake_depth and _depth_camera and _depth_viewport:
-			var depth_frame := await _render_from_direction_async(_depth_camera, _depth_viewport, direction, camera_distance)
-			if depth_frame:
-				depth_frames.append(depth_frame)
-			else:
-				var blank := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
-				blank.fill(Color.WHITE)
-				depth_frames.append(blank)
-
-	# Clean up models
+	# Clean up model
 	model.queue_free()
-	if depth_model:
-		depth_model.queue_free()
 
-	# Combine color and depth into final atlas
-	var atlas := _pack_atlas_with_depth(color_frames, depth_frames)
+	# Pack frames into final atlas
+	var atlas := _pack_atlas(color_frames)
 	if not atlas:
 		var error := "Failed to pack atlas"
 		push_warning("ImpostorBakerV2: %s - %s" % [error, model_path])
@@ -345,16 +242,6 @@ func bake_model(model_path: String) -> Dictionary:
 		"bounds": aabb,
 		"error": ""
 	}
-
-
-## Apply depth material to all meshes in a node hierarchy
-func _apply_depth_material(node: Node) -> void:
-	if node is MeshInstance3D:
-		var mesh_inst: MeshInstance3D = node
-		mesh_inst.material_override = _depth_material
-
-	for child in node.get_children():
-		_apply_depth_material(child)
 
 
 ## Bake all models in a list
@@ -400,7 +287,7 @@ func _render_from_direction_async(cam: Camera3D, vp: SubViewport, direction: Vec
 	await get_tree().process_frame
 
 	var texture := vp.get_texture()
-	if not texture:
+	if not texture or not texture.get_rid().is_valid():
 		return null
 
 	var image := texture.get_image()
@@ -410,8 +297,8 @@ func _render_from_direction_async(cam: Camera3D, vp: SubViewport, direction: Vec
 	return image.duplicate()
 
 
-## Pack frames into atlas with depth in alpha channel
-func _pack_atlas_with_depth(color_frames: Array[Image], depth_frames: Array[Image]) -> Image:
+## Pack color frames into atlas
+func _pack_atlas(color_frames: Array[Image]) -> Image:
 	var expected_frames := atlas_columns * atlas_rows
 	if color_frames.size() < expected_frames:
 		push_warning("ImpostorBakerV2: Expected %d frames, got %d" % [expected_frames, color_frames.size()])
@@ -429,31 +316,18 @@ func _pack_atlas_with_depth(color_frames: Array[Image], depth_frames: Array[Imag
 			var x := col * frame_size
 			var y := row * frame_size
 
-			# Get color frame
+			# Get color frame and binarize alpha for clean cutout
 			var color_frame: Image = color_frames[frame_idx]
-
-			# Get depth frame if available
-			var depth_frame: Image = null
-			if frame_idx < depth_frames.size():
-				depth_frame = depth_frames[frame_idx]
-
-			# Combine color RGB with depth in alpha (or use color alpha if no depth)
-			var combined := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
+			var processed := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
 
 			for py in range(frame_size):
 				for px in range(frame_size):
 					var color := color_frame.get_pixel(px, py)
+					# Binary alpha: solid or transparent (prevents half-transparent artifacts)
+					color.a = 1.0 if color.a > 0.5 else 0.0
+					processed.set_pixel(px, py, color)
 
-					if depth_frame and color.a > 0.5:  # Only apply depth to non-transparent pixels
-						var depth_color := depth_frame.get_pixel(px, py)
-						# Use depth as alpha (inverted: close = 1, far = 0)
-						# But preserve original alpha for transparency
-						color.a = 1.0 - depth_color.r  # Invert so closer = higher alpha
-					# Else keep original alpha for transparency masking
-
-					combined.set_pixel(px, py, color)
-
-			atlas.blit_rect(combined, Rect2i(0, 0, frame_size, frame_size), Vector2i(x, y))
+			atlas.blit_rect(processed, Rect2i(0, 0, frame_size, frame_size), Vector2i(x, y))
 			frame_idx += 1
 
 	return atlas
@@ -533,6 +407,10 @@ func _get_output_path(model_path: String, extension: String) -> String:
 	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
 		normalized = normalized.substr(7)
 
+	# CRITICAL: Normalize slashes BEFORE hashing to match loader
+	# This ensures ESM paths (forward slash) and BSA paths (backslash) produce same hash
+	normalized = normalized.replace("/", "\\")
+
 	var hash_val := normalized.to_lower().hash()
 	var base_name := normalized.get_file().get_basename()
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
@@ -557,7 +435,6 @@ func _generate_metadata(model_path: String, aabb: AABB, texture_path: String) ->
 			"min_distance": min_distance,
 			"max_distance": max_distance,
 			"use_orthographic": use_orthographic,
-			"has_depth": bake_depth,
 		},
 		"bounds": {
 			"center": [aabb.get_center().x, aabb.get_center().y, aabb.get_center().z],

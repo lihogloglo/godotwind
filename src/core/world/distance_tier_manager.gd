@@ -1,9 +1,9 @@
 ## DistanceTierManager - Manages multi-tier distance rendering
 ##
 ## Determines which rendering tier a cell belongs to based on distance:
-## - NEAR: Full 3D meshes with existing LOD system (0-500m)
-## - MID: Simplified merged meshes (500m-1km)
-## - FAR: Octahedral impostors (1km-5km)
+## - NEAR: Full 3D meshes with existing LOD system (0-150m)
+## - MID: Simplified merged meshes (150m-500m)
+## - FAR: Octahedral impostors (500m-5km)
 ## - HORIZON: Skybox integration (5km+)
 ##
 ## Provides loading strategy for each tier and coordinates between
@@ -13,6 +13,7 @@
 ## - Hysteresis to prevent tier flickering at boundaries
 ## - Per-world configurable distances
 ## - Priority-based loading (NEAR > MID > FAR)
+## - Uses DistanceUtils for all distance calculations (single source of truth)
 ##
 ## Usage:
 ##   var tier_manager := DistanceTierManager.new()
@@ -21,12 +22,14 @@
 class_name DistanceTierManager
 extends RefCounted
 
+## Use centralized distance utilities
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 ## Distance tiers for rendering detail levels
 enum Tier {
-	NEAR,      ## Full 3D meshes with LOD (0-500m)
-	MID,       ## Simplified merged geometry (500m-1km)
-	FAR,       ## Octahedral impostors (1km-5km)
+	NEAR,      ## Full 3D meshes with LOD (0-150m)
+	MID,       ## Simplified merged geometry (150m-500m)
+	FAR,       ## Octahedral impostors (500m-5km)
 	HORIZON,   ## Skybox/billboard only (5km+)
 	NONE,      ## Beyond all tiers (don't load)
 }
@@ -46,9 +49,14 @@ const TIER_PRIORITY := {
 ## These are fallback values - worlds can override via get_tier_unit_counts()
 ## These are HARD LIMITS - never exceed regardless of distance calculation
 ## Without these limits, enabling distant rendering queues ~23,000 cells and freezes
+##
+## With 117m cells:
+## - NEAR 150m = ~1.3 cells radius → ~9 cells in circle (use 13 for buffer)
+## - MID 150-500m = ~4.3 cells radius → ~50 cells in ring
+## - FAR 500-5000m = ~43 cells radius → thousands of cells (cap at 200)
 const DEFAULT_MAX_CELLS_PER_TIER := {
-	Tier.NEAR: 50,       # Full 3D geometry - expensive, keep low
-	Tier.MID: 100,       # Pre-merged meshes only - medium cost
+	Tier.NEAR: 13,       # Full 3D geometry - expensive (~150m radius)
+	Tier.MID: 50,        # Pre-merged meshes only (~500m radius)
 	Tier.FAR: 200,       # Impostors only - cheap but still limited
 	Tier.HORIZON: 0,     # Skybox only - no per-cell processing
 }
@@ -72,23 +80,24 @@ var max_cells_per_tier: Dictionary = DEFAULT_MAX_CELLS_PER_TIER.duplicate()
 
 ## Default distance thresholds (in meters)
 ## These can be overridden per-world via configure_for_world()
-## NOTE: MID tier reduced (500m-1km) since prebaking is slow
-##       FAR tier (impostors) starts at 1km for better performance
-## TESTING: Impostors at 500m, bypassing merged models
+##
+## Modern game standards:
+## - NEAR (full geometry): 0-150m for detailed interaction
+## - MID (merged/simplified): 150-500m for medium detail
+## - FAR (impostors): 500-5km for distant landmarks
 var tier_distances := {
-	Tier.NEAR: 0.0,        # 0m start
-	Tier.MID: 500.0,       # 500m start (effectively skipped - same as FAR)
-	Tier.FAR: 500.0,       # 500m start - TESTING: impostors start right after NEAR
-	Tier.HORIZON: 5000.0,  # 5km start
+	Tier.NEAR: 0.0,        # 0m start - full 3D geometry
+	Tier.MID: 150.0,       # 150m start - merged simplified meshes
+	Tier.FAR: 500.0,       # 500m start - impostors/billboards
+	Tier.HORIZON: 5000.0,  # 5km start - skybox only
 }
 
 
 ## Default tier end distances (in meters)
 ## MID ends where FAR starts, etc.
-## TESTING: MID tier effectively 0 width (500m-500m)
 var tier_end_distances := {
-	Tier.NEAR: 500.0,      # NEAR ends at 500m
-	Tier.MID: 500.0,       # MID ends at 500m - TESTING: no MID tier
+	Tier.NEAR: 150.0,      # NEAR ends at 150m
+	Tier.MID: 500.0,       # MID ends at 500m
 	Tier.FAR: 5000.0,      # FAR ends at 5km
 	Tier.HORIZON: 10000.0, # HORIZON ends at 10km
 }
@@ -98,16 +107,15 @@ var tier_end_distances := {
 ## When transitioning from tier A to B, require distance to be
 ## threshold ± margin depending on direction
 var tier_hysteresis := {
-	Tier.NEAR: 50.0,       # ±50m at NEAR/MID boundary
-	Tier.MID: 100.0,       # ±100m at MID/FAR boundary
-	Tier.FAR: 200.0,       # ±200m at FAR/HORIZON boundary
+	Tier.NEAR: 20.0,       # ±20m at NEAR/MID boundary (150m)
+	Tier.MID: 50.0,        # ±50m at MID/FAR boundary (500m)
+	Tier.FAR: 100.0,       # ±100m at FAR/HORIZON boundary (5km)
 	Tier.HORIZON: 0.0,     # No hysteresis at edge of world
 }
 
 
-## Cell size in meters (Morrowind default: ~117m)
-## Used to convert cell counts to distances
-var cell_size_meters: float = 117.0
+## Cell size in meters (from DistanceUtils - single source of truth)
+var cell_size_meters: float = DU.CELL_SIZE_METERS
 
 
 ## Currently tracked tiers for cells (for hysteresis)
@@ -471,27 +479,25 @@ func get_tier_cell_counts(camera_cell: Vector2i) -> Dictionary:
 
 
 ## Calculate distance in meters between two cells (center to center)
+## Uses DistanceUtils for centralized distance calculations
 func _cell_distance_meters(from_cell: Vector2i, to_cell: Vector2i) -> float:
-	var dx := (to_cell.x - from_cell.x) * cell_size_meters
-	var dy := (to_cell.y - from_cell.y) * cell_size_meters
-	return sqrt(dx * dx + dy * dy)
+	return DU.cell_distance(from_cell, to_cell)
 
 
 ## Calculate squared distance in meters (faster - no sqrt)
+## Uses DistanceUtils for centralized distance calculations
 func _cell_distance_squared(from_cell: Vector2i, to_cell: Vector2i) -> float:
-	var dx := (to_cell.x - from_cell.x) * cell_size_meters
-	var dy := (to_cell.y - from_cell.y) * cell_size_meters
-	return dx * dx + dy * dy
+	return DU.cell_distance_squared(from_cell, to_cell)
 
 
 ## Convert cell count to approximate distance in meters
 func cells_to_meters(cell_count: int) -> float:
-	return cell_count * cell_size_meters
+	return DU.cell_radius_to_distance(cell_count)
 
 
 ## Convert distance in meters to approximate cell count
 func meters_to_cells(meters: float) -> int:
-	return ceili(meters / cell_size_meters)
+	return DU.distance_to_cell_radius(meters)
 
 
 ## Get distance range for a tier (min, max) in meters

@@ -1041,6 +1041,41 @@ func get_creature(id: String) -> CreatureRecord:
 func get_body_part(id: String) -> BodyPartRecord:
 	return body_parts.get(id.to_lower())
 
+## Get all body parts for a race and gender
+## Morrowind body parts use naming convention: b_n_<race>_<gender>_<part>
+## e.g., "b_n_dark elf_m_chest", "b_n_wood elf_f_hand"
+func get_body_parts_for_race(race_id: String, is_female: bool) -> Array[BodyPartRecord]:
+	var result: Array[BodyPartRecord] = []
+
+	# Normalize race name for matching (lowercase, spaces)
+	var race_lower := race_id.to_lower().strip_edges()
+	var gender_char := "f" if is_female else "m"
+
+	# Match pattern: b_n_<race>_<gender>_
+	var prefix := "b_n_%s_%s_" % [race_lower, gender_char]
+
+	for part_id: String in body_parts:
+		var part: BodyPartRecord = body_parts[part_id]
+
+		# Skip non-skin parts (clothing/armor overlays)
+		if part.mesh_type != BodyPartRecord.MeshType.SKIN:
+			continue
+
+		# Skip vampire parts
+		if part.is_vampire:
+			continue
+
+		# Check gender match via flags (more reliable than name parsing)
+		if part.is_female() != is_female:
+			continue
+
+		# Check if this part belongs to the race
+		# Body parts are named like "b_n_dark elf_m_chest"
+		if part_id.begins_with(prefix):
+			result.append(part)
+
+	return result
+
 # Items
 func get_weapon(id: String) -> WeaponRecord:
 	return weapons.get(id.to_lower())

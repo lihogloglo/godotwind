@@ -102,6 +102,12 @@ func _setup_camera() -> void:
 
 
 func _setup_ground() -> void:
+	# Create ground with physics collision for CharacterBody3D characters
+	var ground_body := StaticBody3D.new()
+	ground_body.name = "GroundBody"
+	ground_body.collision_layer = 1  # World layer
+	ground_body.collision_mask = 0   # Don't detect anything
+
 	ground_plane = MeshInstance3D.new()
 	ground_plane.name = "Ground"
 
@@ -113,8 +119,22 @@ func _setup_ground() -> void:
 	mat.albedo_color = ground_color
 	ground_plane.material_override = mat
 
-	ground_plane.visible = show_ground
-	viewport.add_child(ground_plane)
+	# Add collision shape matching the plane
+	var collision_shape := CollisionShape3D.new()
+	collision_shape.name = "GroundCollision"
+	var box_shape := BoxShape3D.new()
+	box_shape.size = Vector3(ground_size, 0.1, ground_size)
+	collision_shape.shape = box_shape
+	collision_shape.position = Vector3(0, -0.05, 0)  # Slightly below surface
+
+	ground_body.add_child(ground_plane)
+	ground_body.add_child(collision_shape)
+
+	ground_body.visible = show_ground
+	viewport.add_child(ground_body)
+
+	# Keep reference to ground_plane for visibility toggling
+	# Note: ground_plane is now a child of ground_body
 
 
 func _setup_object_container() -> void:
@@ -195,7 +215,12 @@ func _collect_mesh_aabbs(node: Node, base_transform: Transform3D, out_aabbs: Arr
 func set_ground_visible(visible: bool) -> void:
 	show_ground = visible
 	if ground_plane:
-		ground_plane.visible = visible
+		# Ground plane is now child of StaticBody3D, toggle parent visibility
+		var parent := ground_plane.get_parent()
+		if parent:
+			parent.visible = visible
+		else:
+			ground_plane.visible = visible
 
 
 ## Set background color

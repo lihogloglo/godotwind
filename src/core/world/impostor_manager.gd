@@ -19,6 +19,7 @@ extends Node3D
 # Preload dependencies
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 ## Reference to ImpostorCandidates for checking impostor eligibility
 var impostor_candidates: ImpostorCandidates = null
@@ -52,8 +53,8 @@ var _impostors_by_cell: Dictionary = {}
 
 ## Visible cells cache (updated when camera moves significantly)
 var _visible_cells: Dictionary = {}  # Vector2i -> true
-var _last_visibility_check_pos: Vector3 = Vector3.INF
-var _visibility_check_threshold: float = 50.0  # Re-check every 50 meters
+var _last_visibility_check_pos: Vector3 = Vector3.INF  # INF ensures first check always runs
+var _visibility_check_threshold: float = 25.0  # Re-check every 25 meters (more responsive)
 
 ## Next impostor ID
 var _next_id: int = 0
@@ -65,9 +66,20 @@ var _billboard_material: ShaderMaterial = null
 var _texture_array: Texture2DArray = null
 var _texture_index_map: Dictionary = {}  # texture_hash -> array_index
 var _texture_array_dirty: bool = false
-var _pending_array_textures: Array[Image] = []
+var _all_array_images: Array[Image] = []  # Keep all images in memory for rebuilds
 var _texture_array_size: int = 0
-const MAX_TEXTURE_ARRAY_LAYERS: int = 256
+const MAX_TEXTURE_ARRAY_LAYERS: int = 512  # Increased from 256 - most GPUs support this
+
+## Background texture loading thread
+var _texture_load_thread: Thread = null
+var _texture_load_mutex: Mutex = null
+var _texture_load_queue: Array = []  # Array of {hash_key: String, path: String}
+var _loaded_images_queue: Array = []  # Thread-safe results: {hash_key: String, image: Image}
+var _thread_should_exit: bool = false
+
+## Texture array rebuild batching - wait for loading to stabilize before rebuilding
+var _last_texture_add_time: float = 0.0
+const TEXTURE_ARRAY_REBUILD_DELAY: float = 0.3  # Wait 300ms after last texture before rebuilding
 
 ## Stats
 var _stats: Dictionary = {
@@ -82,6 +94,19 @@ var _stats: Dictionary = {
 
 ## Debug logging enabled
 var debug_enabled: bool = false
+
+## Global visibility flag - controlled by Models toggle in world_explorer
+## When false, impostors are hidden regardless of individual visibility
+var _globally_visible: bool = false
+
+## Track first texture load for one-time diagnostic
+var _first_texture_logged: bool = false
+
+## Track first add_cell call for one-time diagnostic
+var _first_cell_logged: bool = false
+
+## Track missing textures count (for summary logging, not spam)
+var _missing_texture_count: int = 0
 
 ## Dirty tracking for efficient rebuilds
 var _dirty_cells: Dictionary = {}  # Vector2i -> true (cells needing rebuild)
@@ -122,26 +147,201 @@ func _enter_tree() -> void:
 	_scenario = get_viewport().get_world_3d().scenario
 	_setup_master_multimesh()
 	_setup_billboard_material()
+	_start_texture_load_thread()
+	# Start hidden - visibility controlled by Models toggle in world_explorer
+	if _master_instance:
+		_master_instance.visible = false
 
 
 func _exit_tree() -> void:
+	_stop_texture_load_thread()
 	clear()
 
 
-func _process(delta: float) -> void:
-	# Poll async texture loads
-	_poll_pending_textures()
+## Start the background texture loading thread
+func _start_texture_load_thread() -> void:
+	if _texture_load_thread != null:
+		return
+	_texture_load_mutex = Mutex.new()
+	_thread_should_exit = false
+	_texture_load_thread = Thread.new()
+	_texture_load_thread.start(_texture_load_worker)
+	print("[ImpostorManager] Background texture loading thread started")
 
-	# Rebuild texture array if needed
+
+## Stop the background texture loading thread
+func _stop_texture_load_thread() -> void:
+	if _texture_load_thread == null:
+		return
+	_thread_should_exit = true
+	_texture_load_thread.wait_to_finish()
+	_texture_load_thread = null
+	_texture_load_mutex = null
+	print("[ImpostorManager] Background texture loading thread stopped")
+
+
+## Background thread worker - loads images from disk without blocking main thread
+var _thread_work_count: int = 0
+
+func _texture_load_worker() -> void:
+	# NOTE: Don't access Node properties (self) from thread - causes error
+	# Just do the work silently
+	while not _thread_should_exit:
+		# Check if there's work to do
+		_texture_load_mutex.lock()
+		var has_work := not _texture_load_queue.is_empty()
+		var work_item: Dictionary = {}
+		if has_work:
+			work_item = _texture_load_queue.pop_front()
+		_texture_load_mutex.unlock()
+
+		if not has_work:
+			# Sleep briefly to avoid busy-waiting
+			OS.delay_msec(5)
+			continue
+
+		_thread_work_count += 1
+		if _thread_work_count <= 3:
+			print("[ImpostorManager] Thread processing item %d: %s" % [_thread_work_count, work_item.path])
+
+		# Load the image (this is the slow I/O operation we're offloading)
+		var image := Image.new()
+		var path_str: String = work_item.path
+		if path_str.is_empty():
+			print("[ImpostorManager] Thread: ERROR - empty path!")
+			continue
+
+		var err := image.load(path_str)
+
+		if err == OK:
+			# Queue the result for main thread processing
+			_texture_load_mutex.lock()
+			_loaded_images_queue.append({
+				"hash_key": work_item.hash_key,
+				"image": image
+			})
+			var queue_len := _loaded_images_queue.size()
+			_texture_load_mutex.unlock()
+			# Log first few successful loads to verify thread is working
+			if queue_len <= 3:
+				print("[ImpostorManager] Thread: Loaded %s (%dx%d), queue=%d" % [
+					work_item.path.get_file(), image.get_width(), image.get_height(), queue_len])
+		else:
+			# Log error but don't crash
+			print("[ImpostorManager] Thread: Failed to load texture %s (error %d)" % [work_item.path, err])
+
+
+var _process_log_counter: int = 0
+var _textures_loaded_this_frame: int = 0
+const TEXTURES_PER_FRAME: int = 10  # Process up to 10 loaded textures per frame from thread
+
+var _first_process_logged: bool = false
+
+func _process(delta: float) -> void:
+	# One-time diagnostic on first _process call
+	if not _first_process_logged:
+		_first_process_logged = true
+		var queue_size := 0
+		var loaded_size := 0
+		if _texture_load_mutex:
+			_texture_load_mutex.lock()
+			queue_size = _texture_load_queue.size()
+			loaded_size = _loaded_images_queue.size()
+			_texture_load_mutex.unlock()
+		print("[ImpostorManager] === FIRST _process CALL ===")
+		print("[ImpostorManager]   Thread queue: %d, loaded queue: %d" % [queue_size, loaded_size])
+		print("[ImpostorManager]   Pending impostors: %d, pending loads: %d" % [_pending_impostors.size(), _pending_texture_loads.size()])
+
+	# Log periodic summary (every 300 frames ~ 5 seconds)
+	_process_log_counter += 1
+	if _process_log_counter >= 300:
+		_process_log_counter = 0
+		# Always log summary if we have impostors or pending loads (helps diagnose issues)
+		var pending_count := _pending_texture_loads.size()
+		var queue_size := 0
+		var loaded_size := 0
+		if _texture_load_mutex:
+			_texture_load_mutex.lock()
+			pending_count += _texture_load_queue.size()
+			queue_size = _texture_load_queue.size()
+			loaded_size = _loaded_images_queue.size()
+			_texture_load_mutex.unlock()
+		if _impostors.size() > 0 or pending_count > 0 or _pending_impostors.size() > 0:
+			print("[ImpostorManager] STATUS: impostors=%d, visible=%d, pending=%d, textures=%d, missing=%d, queue=%d, loaded=%d" % [
+				_impostors.size(), _visible_cells.size(), pending_count,
+				_texture_array_size, _missing_texture_count, queue_size, loaded_size])
+
+	# Poll for textures loaded by background thread (non-blocking)
+	_poll_loaded_images_from_thread()
+
+	# Rebuild texture array if dirty AND enough time has passed since last texture add
+	# This batches multiple texture additions into a single rebuild
 	if _texture_array_dirty:
-		_rebuild_texture_array()
+		var time_since_last_add := Time.get_ticks_msec() / 1000.0 - _last_texture_add_time
+		# Check if there are still textures being loaded (in pending dict OR thread queue)
+		var still_loading := not _pending_texture_loads.is_empty() or not _pending_impostors.is_empty()
+		if _texture_load_mutex:
+			_texture_load_mutex.lock()
+			still_loading = still_loading or not _texture_load_queue.is_empty() or not _loaded_images_queue.is_empty()
+			_texture_load_mutex.unlock()
+		if time_since_last_add >= TEXTURE_ARRAY_REBUILD_DELAY or not still_loading:
+			_rebuild_texture_array()
 
 	# Deferred batch rebuild with timer (coalesce multiple changes)
+	# Rebuild progressively during loading to show impostors as they become available
+	# IMPORTANT: Only rebuild multimesh if texture array is up to date, otherwise
+	# impostors would reference non-existent texture layers and render as garbage/white
 	if not _dirty_cells.is_empty() or _full_rebuild_needed:
-		_rebuild_timer += delta
-		if _rebuild_timer >= REBUILD_DELAY:
-			_rebuild_multimesh()
-			_rebuild_timer = 0.0
+		if _texture_array_dirty:
+			# Texture array needs rebuild first - skip multimesh rebuild this frame
+			pass
+		else:
+			_rebuild_timer += delta
+			# Use shorter delay during active loading for progressive display
+			var rebuild_delay := REBUILD_DELAY if _pending_texture_loads.is_empty() else 0.2
+			if _rebuild_timer >= rebuild_delay:
+				_rebuild_multimesh()
+				_rebuild_timer = 0.0
+
+
+## Poll for images loaded by the background thread and process them
+var _poll_call_count: int = 0
+
+func _poll_loaded_images_from_thread() -> void:
+	if _texture_load_mutex == null:
+		print("[ImpostorManager] _poll: mutex is NULL!")
+		return
+
+	_poll_call_count += 1
+
+	_textures_loaded_this_frame = 0
+
+	# Check queue size before polling
+	_texture_load_mutex.lock()
+	var queue_size := _loaded_images_queue.size()
+	_texture_load_mutex.unlock()
+
+	# Log first few poll calls to verify polling is happening
+	if _poll_call_count <= 5 or (queue_size > 0 and _poll_call_count <= 20):
+		var queue_hash: int = hash(_loaded_images_queue)
+		print("[ImpostorManager] _poll #%d: loaded_queue=%d, self=%s, queue_hash=%d" % [_poll_call_count, queue_size, self, queue_hash])
+
+	while _textures_loaded_this_frame < TEXTURES_PER_FRAME:
+		# Get one loaded image from the thread's result queue
+		_texture_load_mutex.lock()
+		var has_result := not _loaded_images_queue.is_empty()
+		var result: Dictionary = {}
+		if has_result:
+			result = _loaded_images_queue.pop_front()
+		_texture_load_mutex.unlock()
+
+		if not has_result:
+			break
+
+		print("[ImpostorManager] _poll: Processing texture %s" % result.hash_key)
+		# Process the loaded image on main thread
+		_on_texture_loaded(result.hash_key, result.image)
+		_textures_loaded_this_frame += 1
 
 
 ## Set up the master MultiMesh for single draw call rendering
@@ -168,54 +368,48 @@ func _setup_billboard_material() -> void:
 
 	_billboard_material = ShaderMaterial.new()
 	_billboard_material.shader = shader
+	# Use 4x4 to match prebaked impostor textures (16 frames)
 	_billboard_material.set_shader_parameter("atlas_columns", 4)
 	_billboard_material.set_shader_parameter("atlas_rows", 4)
-	_billboard_material.set_shader_parameter("use_parallax", true)
-	_billboard_material.set_shader_parameter("parallax_depth", 0.15)
+
+	# Create initial empty texture array (will be replaced when textures load)
+	var default_img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
+	default_img.fill(Color(0, 0, 0, 0))
+	var default_array := Texture2DArray.new()
+	default_array.create_from_images([default_img])
+	_billboard_material.set_shader_parameter("texture_atlas", default_array)
+	print("[ImpostorManager] Billboard material created with default texture array")
 
 	_master_instance.material_override = _billboard_material
 
 
-## Optimized shader with texture array, 16-frame atlas, and parallax
+## Simplified working shader - proven to work in test_impostor_minimal.gd
 func _get_optimized_shader_code() -> String:
 	return """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_opaque, shadows_disabled;
+render_mode unshaded, cull_disabled;
 
-// Texture array containing all impostor atlases
-uniform sampler2DArray texture_atlas : source_color, filter_linear_mipmap;
-uniform float alpha_cutoff : hint_range(0.0, 1.0) = 0.5;
-
-// Atlas configuration (4x4 = 16 frames for smooth rotation)
+uniform sampler2DArray texture_atlas : source_color;
 uniform int atlas_columns = 4;
 uniform int atlas_rows = 4;
-
-// Parallax settings
-uniform bool use_parallax = true;
-uniform float parallax_depth : hint_range(0.0, 0.5) = 0.15;
-
-// Frame interpolation
-uniform bool interpolate_frames = true;
-uniform float interpolation_sharpness = 4.0;
 
 varying vec3 view_direction;
 varying flat float texture_layer;
 
 void vertex() {
-	// Get texture layer from instance custom data (x component)
+	// Get texture layer from instance custom data
 	texture_layer = INSTANCE_CUSTOM.x;
 
-	// Get view direction in world space
+	// Calculate view direction
 	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	vec3 world_pos = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	view_direction = normalize(camera_pos - world_pos);
 
-	// Billboard: rotate to face camera (Y-axis only for upright billboards)
+	// Y-axis billboard
 	vec3 look_dir = normalize(vec3(view_direction.x, 0.0, view_direction.z));
 	vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), look_dir));
 	vec3 up = vec3(0.0, 1.0, 0.0);
 
-	// Build billboard matrix
 	mat4 billboard = mat4(
 		vec4(right, 0.0),
 		vec4(up, 0.0),
@@ -223,7 +417,6 @@ void vertex() {
 		MODEL_MATRIX[3]
 	);
 
-	// Apply scale from model matrix
 	float scale_x = length(MODEL_MATRIX[0].xyz);
 	float scale_y = length(MODEL_MATRIX[1].xyz);
 	float scale_z = length(MODEL_MATRIX[2].xyz);
@@ -235,74 +428,23 @@ void vertex() {
 	MODELVIEW_MATRIX = VIEW_MATRIX * billboard;
 }
 
-// Convert view direction to frame index (0-15 for 4x4 atlas)
-int get_frame_index(vec3 view_dir) {
-	float angle = atan(view_dir.x, view_dir.z);  // -PI to PI
-	float normalized = (angle + PI) / (2.0 * PI);  // 0-1
-	int frame = int(normalized * float(atlas_columns * atlas_rows)) % (atlas_columns * atlas_rows);
-	return frame;
-}
-
-// Get UV offset for a frame index
-vec2 get_frame_uv(int frame_index, vec2 uv) {
-	float col = float(frame_index % atlas_columns);
-	float row = float(frame_index / atlas_columns);
-	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-	return vec2(col, row) * frame_size + uv * frame_size;
-}
-
-// Sample with parallax offset
-vec4 sample_with_parallax(vec3 view_dir, vec2 uv, int frame, float layer) {
-	vec2 atlas_uv = get_frame_uv(frame, uv);
-
-	if (!use_parallax) {
-		return texture(texture_atlas, vec3(atlas_uv, layer));
-	}
-
-	// Simple parallax offset based on view angle
-	vec2 parallax_offset = vec2(view_dir.x, -view_dir.y) * parallax_depth * (1.0 - uv.y);
-	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-
-	// Clamp offset to stay within frame bounds
-	vec2 offset_uv = atlas_uv + parallax_offset * frame_size;
-	vec2 frame_min = get_frame_uv(frame, vec2(0.0, 0.0));
-	vec2 frame_max = get_frame_uv(frame, vec2(1.0, 1.0));
-	offset_uv = clamp(offset_uv, frame_min, frame_max);
-
-	return texture(texture_atlas, vec3(offset_uv, layer));
-}
-
-// Smoothly blend between two frames
-vec4 sample_interpolated(vec3 view_dir, vec2 uv, float layer) {
-	float angle = atan(view_dir.x, view_dir.z) + PI;  // 0 to 2*PI
-	float total_frames = float(atlas_columns * atlas_rows);
-	float frame_angle = angle / (2.0 * PI) * total_frames;  // 0 to 16
-
-	int frame_a = int(floor(frame_angle)) % int(total_frames);
-	int frame_b = (frame_a + 1) % int(total_frames);
-	float blend = fract(frame_angle);
-
-	// Sharpen the blend for less ghosting
-	blend = smoothstep(0.5 - 0.5/interpolation_sharpness, 0.5 + 0.5/interpolation_sharpness, blend);
-
-	vec4 color_a = sample_with_parallax(view_dir, uv, frame_a, layer);
-	vec4 color_b = sample_with_parallax(view_dir, uv, frame_b, layer);
-
-	return mix(color_a, color_b, blend);
-}
-
 void fragment() {
-	vec4 tex;
+	// Get frame based on view angle
+	float angle = atan(view_direction.x, view_direction.z);
+	float normalized = (angle + PI) / (2.0 * PI);
+	int total_frames = atlas_columns * atlas_rows;
+	int frame = int(normalized * float(total_frames)) % total_frames;
 
-	if (interpolate_frames) {
-		tex = sample_interpolated(view_direction, UV, texture_layer);
-	} else {
-		int frame = get_frame_index(view_direction);
-		tex = sample_with_parallax(view_direction, UV, frame, texture_layer);
-	}
+	// Calculate UV within the atlas
+	float col = float(frame % atlas_columns);
+	float row = float(frame / atlas_columns);
+	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
+	vec2 atlas_uv = vec2(col, row) * frame_size + UV * frame_size;
 
-	// Alpha test
-	if (tex.a < alpha_cutoff) {
+	// Sample from texture array
+	vec4 tex = texture(texture_atlas, vec3(atlas_uv, texture_layer));
+
+	if (tex.a < 0.1) {
 		discard;
 	}
 
@@ -333,7 +475,9 @@ func add_impostor(
 	if impostor_candidates and not impostor_candidates.should_have_impostor(model_path):
 		return -1
 
-	var hash_key: String = str(model_path.to_lower().hash())
+	# CRITICAL: Use the centralized hash key function to ensure consistency
+	# with the impostor baker's path normalization (forward/back slashes, meshes\ prefix)
+	var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
 
 	# Get impostor metadata for size
 	var metadata: Dictionary = _get_or_load_impostor_metadata(model_path)
@@ -351,8 +495,8 @@ func add_impostor(
 	if hash_key in _impostor_textures:
 		return _create_impostor_instance(model_path, hash_key, world_position, world_rotation, world_scale, cell_grid, impostor_size)
 
-	# Check if texture is pending load
-	if hash_key in _pending_texture_loads:
+	# Check if texture is already pending (in dict or thread queue)
+	if hash_key in _pending_texture_loads or hash_key in _pending_impostors:
 		# Queue this impostor to be created when texture loads
 		_queue_pending_impostor(hash_key, model_path, world_position, world_rotation, world_scale, cell_grid, impostor_size)
 		return -1
@@ -360,19 +504,24 @@ func add_impostor(
 	# Start async texture load
 	var texture_path: String = ImpostorCandidatesScript.get_impostor_texture_path(model_path)
 	if not FileAccess.file_exists(texture_path):
+		# Track missing textures for summary (don't spam per-model)
+		_missing_texture_count += 1
+		if debug_enabled:
+			print("ImpostorManager: Texture not found for '%s' -> '%s'" % [model_path, texture_path.get_file()])
 		return -1
 
-	# Use ResourceLoader for async loading
-	var err := ResourceLoader.load_threaded_request(texture_path, "Image", false, ResourceLoader.CACHE_MODE_IGNORE)
-	if err == OK:
-		_pending_texture_loads[hash_key] = texture_path
-		_stats["pending_loads"] = _pending_texture_loads.size()
+	# Mark as pending before queueing to avoid duplicate loads
+	_pending_texture_loads[hash_key] = texture_path
+	_stats["pending_loads"] = _pending_texture_loads.size()
 
-		# Queue this impostor
-		_queue_pending_impostor(hash_key, model_path, world_position, world_rotation, world_scale, cell_grid, impostor_size)
+	# Queue this impostor to be created when texture loads
+	_queue_pending_impostor(hash_key, model_path, world_position, world_rotation, world_scale, cell_grid, impostor_size)
 
-		if debug_enabled:
-			print("ImpostorManager: Started async load for %s" % texture_path.get_file())
+	# Queue texture for background thread loading (non-blocking)
+	_queue_texture_for_background_load(hash_key, texture_path)
+
+	if debug_enabled:
+		print("ImpostorManager: Queued background load for %s" % texture_path.get_file())
 
 	return -1
 
@@ -393,40 +542,57 @@ func _queue_pending_impostor(hash_key: String, model_path: String, pos: Vector3,
 	(_pending_impostors[hash_key] as Array).append(pending)
 
 
-## Poll for completed async texture loads
-func _poll_pending_textures() -> void:
-	if _pending_texture_loads.is_empty():
+## Queue pending texture loads to the background thread
+## Called when add_impostor discovers a texture needs loading
+func _queue_texture_for_background_load(hash_key: String, texture_path: String) -> void:
+	if _texture_load_mutex == null:
+		# Fallback to synchronous load if thread not available
+		var image := Image.new()
+		if image.load(texture_path) == OK:
+			_on_texture_loaded(hash_key, image)
+		else:
+			print("[ImpostorManager] Fallback load failed for %s" % texture_path.get_file())
+			_pending_impostors.erase(hash_key)
+		_pending_texture_loads.erase(hash_key)
 		return
 
-	var completed: Array[String] = []
+	# Queue for background thread
+	_texture_load_mutex.lock()
+	_texture_load_queue.append({
+		"hash_key": hash_key,
+		"path": texture_path
+	})
+	var queue_len := _texture_load_queue.size()
+	_texture_load_mutex.unlock()
 
-	for hash_key: String in _pending_texture_loads:
-		var texture_path: String = _pending_texture_loads[hash_key]
-		var status := ResourceLoader.load_threaded_get_status(texture_path)
+	# Log first few queued textures to verify queueing works
+	if queue_len <= 3:
+		print("[ImpostorManager] Queued for thread: %s (queue=%d)" % [texture_path.get_file(), queue_len])
 
-		if status == ResourceLoader.THREAD_LOAD_LOADED:
-			var image: Image = ResourceLoader.load_threaded_get(texture_path) as Image
-			if image:
-				_on_texture_loaded(hash_key, image)
-			completed.append(hash_key)
-		elif status == ResourceLoader.THREAD_LOAD_FAILED:
-			if debug_enabled:
-				push_warning("ImpostorManager: Failed to load %s" % texture_path)
-			completed.append(hash_key)
-			# Clean up pending impostors for this texture
-			_pending_impostors.erase(hash_key)
-
-	for hash_key: String in completed:
-		_pending_texture_loads.erase(hash_key)
-
-	_stats["pending_loads"] = _pending_texture_loads.size()
+	# Remove from pending dict since it's now in the thread queue
+	_pending_texture_loads.erase(hash_key)
 
 
 ## Called when a texture finishes loading
 func _on_texture_loaded(hash_key: String, image: Image) -> void:
+	# One-time diagnostic on first texture load
+	if not _first_texture_logged:
+		_first_texture_logged = true
+		print("[ImpostorManager] === FIRST TEXTURE LOADED ===")
+		print("[ImpostorManager]   Image size: %dx%d, format: %d (%s)" % [
+			image.get_width(), image.get_height(), image.get_format(),
+			_format_name(image.get_format())])
+		print("[ImpostorManager]   Hash key: %s" % hash_key)
+		print("[ImpostorManager]   Pending textures remaining: %d" % _pending_texture_loads.size())
+		# Check image content
+		var has_alpha := image.detect_alpha() != Image.ALPHA_NONE
+		var sample_color := image.get_pixel(image.get_width() / 2, image.get_height() / 2)
+		print("[ImpostorManager]   Has alpha: %s, center pixel: %s" % [has_alpha, sample_color])
+
 	# Create texture and cache it
 	var texture := ImageTexture.create_from_image(image)
 	if not texture:
+		print("ImpostorManager: Failed to create texture from image for hash %s" % hash_key)
 		return
 
 	_impostor_textures[hash_key] = texture
@@ -436,8 +602,10 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 	var texture_index := _add_to_texture_array(hash_key, image)
 
 	# Create all pending impostors for this texture
+	var pending_count: int = 0
 	if hash_key in _pending_impostors:
 		var pending_list: Array = _pending_impostors[hash_key]
+		pending_count = pending_list.size()
 		for pending: PendingImpostor in pending_list:
 			_create_impostor_instance(
 				pending.model_path,
@@ -451,7 +619,8 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 		_pending_impostors.erase(hash_key)
 
 	if debug_enabled:
-		print("ImpostorManager: Texture loaded, index %d" % texture_index)
+		print("ImpostorManager: Texture loaded - index=%d, pending_created=%d, total_impostors=%d" % [
+			texture_index, pending_count, _impostors.size()])
 
 
 ## Add texture to the texture array
@@ -460,63 +629,102 @@ func _add_to_texture_array(hash_key: String, image: Image) -> int:
 		return _texture_index_map[hash_key]
 
 	if _texture_array_size >= MAX_TEXTURE_ARRAY_LAYERS:
-		push_warning("ImpostorManager: Texture array full (%d layers)" % MAX_TEXTURE_ARRAY_LAYERS)
-		return 0
+		# Array is full - find an existing texture to reuse (LRU would be better but this is simpler)
+		# For now, just cycle through existing indices
+		var fallback_index := hash_key.hash() % MAX_TEXTURE_ARRAY_LAYERS
+		if debug_enabled:
+			push_warning("ImpostorManager: Texture array full (%d), reusing index %d for %s" % [MAX_TEXTURE_ARRAY_LAYERS, fallback_index, hash_key])
+		_texture_index_map[hash_key] = fallback_index
+		return fallback_index
 
 	var index := _texture_array_size
 	_texture_index_map[hash_key] = index
 	_texture_array_size += 1
 
-	# Resize image to standard size if needed
-	var target_size := Vector2i(512, 512)  # 4x4 atlas of 128x128 frames
-	if image.get_size() != target_size:
-		image.resize(target_size.x, target_size.y, Image.INTERPOLATE_LANCZOS)
+	# Resize image to standard size if needed (4x4 atlas of 128x128 frames = 512x512)
+	var target_size := Vector2i(512, 512)
+	var img_copy := image.duplicate() as Image
+	if img_copy.get_size() != target_size:
+		img_copy.resize(target_size.x, target_size.y, Image.INTERPOLATE_LANCZOS)
 
-	_pending_array_textures.append(image)
+	# Store image for future rebuilds
+	_all_array_images.append(img_copy)
 	_texture_array_dirty = true
+
+	# Track when we last added a texture (for batched rebuilds)
+	_last_texture_add_time = Time.get_ticks_msec() / 1000.0
 
 	_stats["texture_array_layers"] = _texture_array_size
 
 	return index
 
 
-## Rebuild the texture array from pending images
+## Track first texture array rebuild for one-time diagnostic
+var _first_array_rebuild_logged: bool = false
+
+## Rebuild the texture array from stored images
 func _rebuild_texture_array() -> void:
-	if _pending_array_textures.is_empty() and _texture_array != null:
+	if _all_array_images.is_empty():
 		_texture_array_dirty = false
 		return
 
-	# Collect all images
+	# Use all stored images directly (no need to extract from texture array)
 	var images: Array[Image] = []
-
-	# Get existing images from current texture array
-	if _texture_array != null:
-		for i in range(_texture_array.get_layers()):
-			var layer_image := _texture_array.get_layer_data(i)
-			if layer_image:
-				images.append(layer_image)
-
-	# Add pending images
-	images.append_array(_pending_array_textures)
-	_pending_array_textures.clear()
+	for img: Image in _all_array_images:
+		# Make sure format is correct
+		if img.get_format() != Image.FORMAT_RGBA8:
+			img.convert(Image.FORMAT_RGBA8)
+		images.append(img)
 
 	if images.is_empty():
 		_texture_array_dirty = false
 		return
 
-	# Ensure all images have same format
-	var target_format := Image.FORMAT_RGBA8
-	for i in range(images.size()):
-		if images[i].get_format() != target_format:
-			images[i].convert(target_format)
-
 	# Create new texture array
-	var size: Vector2i = images[0].get_size()
 	_texture_array = Texture2DArray.new()
-	_texture_array.create_from_images(images)
+	var err := _texture_array.create_from_images(images)
+	if err != OK:
+		push_error("ImpostorManager: Failed to create texture array from %d images (error %d)" % [images.size(), err])
+		_texture_array_dirty = false
+		return
 
 	# Update material
+	if _billboard_material == null:
+		push_error("[ImpostorManager] _billboard_material is NULL during texture array rebuild!")
+		_texture_array_dirty = false
+		return
+
 	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
+
+	# Verify the texture was set
+	var verify: Variant = _billboard_material.get_shader_parameter("texture_atlas")
+	print("[ImpostorManager] Texture array set on material. Verify: %s, layers: %d" % [
+		"OK" if verify == _texture_array else "MISMATCH",
+		_texture_array.get_layers()])
+
+	# Also verify material is still on the instance
+	if _master_instance and _master_instance.material_override != _billboard_material:
+		print("[ImpostorManager] WARNING: material_override mismatch! Re-assigning...")
+		_master_instance.material_override = _billboard_material
+
+	# One-time diagnostic on first rebuild
+	if not _first_array_rebuild_logged:
+		_first_array_rebuild_logged = true
+		print("[ImpostorManager] === FIRST TEXTURE ARRAY REBUILD ===")
+		print("[ImpostorManager]   Layers: %d" % images.size())
+		if images.size() > 0:
+			var first_img: Image = images[0]
+			print("[ImpostorManager]   First image: %dx%d, format=%d" % [first_img.get_width(), first_img.get_height(), first_img.get_format()])
+			# Check if image has actual content (not all transparent)
+			var non_transparent_pixels := 0
+			for y in range(mini(32, first_img.get_height())):
+				for x in range(mini(32, first_img.get_width())):
+					if first_img.get_pixel(x, y).a > 0.1:
+						non_transparent_pixels += 1
+			print("[ImpostorManager]   Non-transparent pixels in 32x32 sample: %d" % non_transparent_pixels)
+		print("[ImpostorManager]   Material assigned: %s" % ("YES" if _billboard_material else "NO"))
+		print("[ImpostorManager]   Texture array valid: %s, layers: %d" % [
+			_texture_array != null, _texture_array.get_layers() if _texture_array else 0])
 
 	_texture_array_dirty = false
 
@@ -557,6 +765,8 @@ func _create_impostor_instance(
 	if cell_grid not in _impostors_by_cell:
 		_impostors_by_cell[cell_grid] = []
 		_stats["cells_with_impostors"] = _impostors_by_cell.size()
+		# New cells default to visible (will be culled by update_impostor_visibility if out of range)
+		_visible_cells[cell_grid] = true
 	(_impostors_by_cell[cell_grid] as Array).append(impostor.id)
 
 	# Update stats
@@ -566,13 +776,27 @@ func _create_impostor_instance(
 	# Mark cell as dirty for rebuild
 	_dirty_cells[cell_grid] = true
 
+	# Force visibility update on first impostor to ensure proper distance culling
+	if _impostors.size() == 1:
+		_last_visibility_check_pos = Vector3.INF
+
 	return impostor.id
 
 
 ## Add impostors for all eligible objects in a cell
 ## Returns number of impostors added (may be 0 if textures are loading async)
 func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
+	# One-time diagnostic on first cell
+	if not _first_cell_logged:
+		_first_cell_logged = true
+		print("[ImpostorManager] === FIRST add_cell_impostors CALL ===")
+		print("[ImpostorManager]   Cell: %s, references: %d" % [cell_grid, references.size()])
+		print("[ImpostorManager]   impostor_candidates: %s" % ("OK" if impostor_candidates else "NULL"))
+
 	var count: int = 0
+	var checked_count: int = 0
+	var eligible_count: int = 0
+	var missing_texture_count: int = 0
 
 	for ref: Variant in references:
 		if not ref is CellReference:
@@ -598,9 +822,13 @@ func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
 		if model_path.is_empty():
 			continue
 
+		checked_count += 1
+
 		# Check if should have impostor (fast path - check before doing anything else)
 		if impostor_candidates and not impostor_candidates.should_have_impostor(model_path):
 			continue
+
+		eligible_count += 1
 
 		# Calculate world position/rotation/scale
 		var pos: Vector3 = CS.vector_to_godot(cell_ref.position)
@@ -611,23 +839,36 @@ func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
 		var id: int = add_impostor(model_path, pos, rot_basis.get_euler(), scl, cell_grid)
 		if id >= 0:
 			count += 1
+		elif id == -1:
+			# Track if this was a missing texture (async loading returns -1 too)
+			var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
+			if hash_key not in _pending_texture_loads and hash_key not in _impostor_textures:
+				missing_texture_count += 1
+
+	# Only log if something interesting happened (reduce spam)
+	if eligible_count > 0:
+		# Log summary every 10 cells or if there are issues
+		var frame := Engine.get_frames_drawn()
+		if missing_texture_count > 0 or (frame % 10 == 0 and debug_enabled):
+			print("[ImpostorManager] Cell %s: %d eligible, %d created, %d missing textures, %d pending" % [
+				cell_grid, eligible_count, count, missing_texture_count, _pending_texture_loads.size()])
 
 	return count
 
 
 ## Remove an impostor by ID
 func remove_impostor(impostor_id: int) -> void:
-	if impostor_id not in _impostors:
+	var impostor: Variant = _impostors.get(impostor_id)
+	if impostor == null:
 		return
 
-	var impostor: ImpostorInstance = _impostors[impostor_id]
 	var cell_grid: Vector2i = impostor.cell_grid
 
 	# Remove from cell tracking
-	if cell_grid in _impostors_by_cell:
-		var cell_arr: Array = _impostors_by_cell[cell_grid]
-		cell_arr.erase(impostor_id)
-		if cell_arr.is_empty():
+	var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
+	if cell_arr != null:
+		(cell_arr as Array).erase(impostor_id)
+		if (cell_arr as Array).is_empty():
 			_impostors_by_cell.erase(cell_grid)
 
 	_impostors.erase(impostor_id)
@@ -642,14 +883,13 @@ func remove_impostor(impostor_id: int) -> void:
 
 ## Remove all impostors for a cell
 func remove_impostors_for_cell(cell_grid: Vector2i) -> void:
-	if cell_grid not in _impostors_by_cell:
+	var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
+	if cell_arr == null:
 		return
 
-	# Copy array since we're modifying it
-	var impostor_ids: Array = (_impostors_by_cell[cell_grid] as Array).duplicate()
-	for id: int in impostor_ids:
-		if id in _impostors:
-			_impostors.erase(id)
+	# Erase all impostors in this cell
+	for id: int in cell_arr:
+		_impostors.erase(id)
 
 	_impostors_by_cell.erase(cell_grid)
 
@@ -669,8 +909,14 @@ func update_impostor_visibility(camera_pos: Vector3, min_distance: float, max_di
 	_max_distance_sq = max_distance * max_distance
 
 	# Check if we need to recalculate visible cells
+	# Note: _last_visibility_check_pos starts as INF, so first call always passes
 	var dist_moved := camera_pos.distance_squared_to(_last_visibility_check_pos)
-	if dist_moved < _visibility_check_threshold * _visibility_check_threshold:
+	var threshold_sq := _visibility_check_threshold * _visibility_check_threshold
+
+	# Also force update if we have impostors but no visible cells (initial state)
+	var needs_initial_update := not _impostors_by_cell.is_empty() and _visible_cells.is_empty()
+
+	if dist_moved < threshold_sq and not needs_initial_update:
 		return 0  # Haven't moved enough, skip update
 
 	_last_visibility_check_pos = camera_pos
@@ -681,9 +927,8 @@ func update_impostor_visibility(camera_pos: Vector3, min_distance: float, max_di
 
 	# Only check cells that have impostors
 	for cell_grid: Vector2i in _impostors_by_cell:
-		# Calculate cell center distance (approximate)
-		# Cell size is ~117m in Morrowind
-		var cell_center := Vector3(cell_grid.x * 117.0 + 58.5, camera_pos.y, -cell_grid.y * 117.0 - 58.5)
+		# Calculate cell center distance using centralized utility
+		var cell_center := DU.cell_to_world_center(cell_grid, camera_pos.y)
 		var dist_sq := camera_pos.distance_squared_to(cell_center)
 
 		var cell_visible := dist_sq >= _min_distance_sq and dist_sq <= _max_distance_sq
@@ -697,8 +942,8 @@ func update_impostor_visibility(camera_pos: Vector3, min_distance: float, max_di
 			# Update all impostors in this cell
 			var cell_impostors: Array = _impostors_by_cell[cell_grid]
 			for impostor_id: int in cell_impostors:
-				if impostor_id in _impostors:
-					var impostor: ImpostorInstance = _impostors[impostor_id]
+				var impostor: Variant = _impostors.get(impostor_id)
+				if impostor != null:
 					impostor.visible = cell_visible
 					changes += 1
 
@@ -710,12 +955,16 @@ func update_impostor_visibility(camera_pos: Vector3, min_distance: float, max_di
 	# Update stats
 	var visible_count: int = 0
 	for cell_grid: Vector2i in _visible_cells:
-		if cell_grid in _impostors_by_cell:
-			visible_count += (_impostors_by_cell[cell_grid] as Array).size()
+		var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
+		if cell_arr != null:
+			visible_count += (cell_arr as Array).size()
 	_stats["visible_impostors"] = visible_count
 
 	return changes
 
+
+## Track first multimesh rebuild for one-time diagnostic
+var _first_multimesh_rebuild_logged: bool = false
 
 ## Rebuild the master MultiMesh with current impostor data
 func _rebuild_multimesh() -> void:
@@ -723,18 +972,22 @@ func _rebuild_multimesh() -> void:
 	var visible_impostors: Array[ImpostorInstance] = []
 
 	for cell_grid: Vector2i in _visible_cells:
-		if cell_grid not in _impostors_by_cell:
+		var cell_impostors: Variant = _impostors_by_cell.get(cell_grid)
+		if cell_impostors == null:
 			continue
 
-		var cell_impostors: Array = _impostors_by_cell[cell_grid]
 		for impostor_id: int in cell_impostors:
-			if impostor_id in _impostors:
-				var impostor: ImpostorInstance = _impostors[impostor_id]
-				if impostor.visible:
-					visible_impostors.append(impostor)
+			var impostor: Variant = _impostors.get(impostor_id)
+			if impostor != null and impostor.visible:
+				visible_impostors.append(impostor)
 
 	# Resize MultiMesh
 	var count := visible_impostors.size()
+
+	if debug_enabled:
+		print("ImpostorManager: _rebuild_multimesh - total=%d, visible_cells=%d, visible_impostors=%d, texture_layers=%d" % [
+			_impostors.size(), _visible_cells.size(), count, _texture_array_size])
+
 	if count == 0:
 		_master_multimesh.instance_count = 0
 		_master_instance.visible = false
@@ -742,7 +995,8 @@ func _rebuild_multimesh() -> void:
 		_full_rebuild_needed = false
 		return
 
-	_master_instance.visible = true
+	# Only show if globally visible (controlled by Models toggle)
+	_master_instance.visible = _globally_visible
 	_master_multimesh.instance_count = count
 
 	# Set transforms and custom data
@@ -766,6 +1020,17 @@ func _rebuild_multimesh() -> void:
 		# Set custom data (texture layer index)
 		_master_multimesh.set_instance_custom_data(i, Color(float(impostor.texture_index), 0, 0, 1))
 
+	# One-time diagnostic on first rebuild with visible impostors
+	if not _first_multimesh_rebuild_logged and count > 0:
+		_first_multimesh_rebuild_logged = true
+		var first := visible_impostors[0]
+		print("[ImpostorManager] === FIRST MULTIMESH REBUILD ===")
+		print("[ImpostorManager]   Visible impostors: %d" % count)
+		print("[ImpostorManager]   First impostor: pos=%s, size=%s, tex_idx=%d" % [
+			first.position, first.texture_size, first.texture_index])
+		print("[ImpostorManager]   Master instance visible: %s" % _master_instance.visible)
+		print("[ImpostorManager]   Material: %s" % ("OK" if _billboard_material else "NULL"))
+
 	_dirty_cells.clear()
 	_full_rebuild_needed = false
 
@@ -775,7 +1040,7 @@ func _rebuild_multimesh() -> void:
 
 ## Get or load impostor metadata for a model
 func _get_or_load_impostor_metadata(model_path: String) -> Dictionary:
-	var hash_key: String = str(model_path.to_lower().hash())
+	var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
 
 	# Check cache
 	if hash_key in _impostor_metadata:
@@ -800,6 +1065,12 @@ func _get_or_load_impostor_metadata(model_path: String) -> Dictionary:
 
 ## Set visibility for all impostors at once
 func set_all_visible(is_visible: bool) -> void:
+	print("[ImpostorManager] set_all_visible(%s) - impostors=%d, cells=%d" % [
+		is_visible, _impostors.size(), _impostors_by_cell.size()])
+
+	# Update global visibility flag
+	_globally_visible = is_visible
+
 	for cell_grid: Vector2i in _impostors_by_cell:
 		if is_visible:
 			_visible_cells[cell_grid] = true
@@ -808,11 +1079,18 @@ func set_all_visible(is_visible: bool) -> void:
 
 		var cell_impostors: Array = _impostors_by_cell[cell_grid]
 		for impostor_id: int in cell_impostors:
-			if impostor_id in _impostors:
-				(_impostors[impostor_id] as ImpostorInstance).visible = is_visible
+			var impostor: Variant = _impostors.get(impostor_id)
+			if impostor != null:
+				(impostor as ImpostorInstance).visible = is_visible
+
+	# Also set master instance visibility directly
+	if _master_instance:
+		_master_instance.visible = is_visible
 
 	if is_visible:
 		_stats["visible_impostors"] = _stats["total_impostors"]
+		# Force visibility re-check on next update to apply distance culling
+		_last_visibility_check_pos = Vector3.INF
 	else:
 		_stats["visible_impostors"] = 0
 
@@ -830,9 +1108,16 @@ func clear() -> void:
 	_impostor_textures.clear()
 	_impostor_metadata.clear()
 	_texture_index_map.clear()
-	_pending_array_textures.clear()
+	_all_array_images.clear()
 	_texture_array_size = 0
 	_texture_array = null
+
+	# Clear thread queues if thread is running
+	if _texture_load_mutex:
+		_texture_load_mutex.lock()
+		_texture_load_queue.clear()
+		_loaded_images_queue.clear()
+		_texture_load_mutex.unlock()
 
 	if _master_multimesh:
 		_master_multimesh.instance_count = 0
@@ -862,3 +1147,24 @@ func get_cell_impostor_count(cell_grid: Vector2i) -> int:
 	if cell_grid not in _impostors_by_cell:
 		return 0
 	return (_impostors_by_cell[cell_grid] as Array).size()
+
+
+## Helper to get human-readable image format name
+func _format_name(format: int) -> String:
+	match format:
+		Image.FORMAT_L8: return "L8"
+		Image.FORMAT_LA8: return "LA8"
+		Image.FORMAT_R8: return "R8"
+		Image.FORMAT_RG8: return "RG8"
+		Image.FORMAT_RGB8: return "RGB8"
+		Image.FORMAT_RGBA8: return "RGBA8"
+		Image.FORMAT_RGBA4444: return "RGBA4444"
+		Image.FORMAT_RGB565: return "RGB565"
+		Image.FORMAT_RF: return "RF"
+		Image.FORMAT_RGF: return "RGF"
+		Image.FORMAT_RGBF: return "RGBF"
+		Image.FORMAT_RGBAF: return "RGBAF"
+		Image.FORMAT_DXT1: return "DXT1"
+		Image.FORMAT_DXT3: return "DXT3"
+		Image.FORMAT_DXT5: return "DXT5"
+		_: return "FORMAT_%d" % format

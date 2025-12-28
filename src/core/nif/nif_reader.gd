@@ -1921,12 +1921,19 @@ func _read_quaternion() -> Quaternion:
 	return Quaternion(x, y, z, w)
 
 func _read_matrix3() -> Basis:
-	# Read 3x3 rotation matrix (row-major)
-	var m := Basis()
-	m.x = Vector3(_read_float(), _read_float(), _read_float())
-	m.y = Vector3(_read_float(), _read_float(), _read_float())
-	m.z = Vector3(_read_float(), _read_float(), _read_float())
-	return m
+	# Read 3x3 rotation matrix from NIF file.
+	# NIF stores matrices in ROW-MAJOR order: [row0, row1, row2]
+	# Godot Basis stores COLUMNS in x, y, z properties.
+	# We must transpose: each column = values at same index from each row.
+	var r0 := Vector3(_read_float(), _read_float(), _read_float())  # Row 0
+	var r1 := Vector3(_read_float(), _read_float(), _read_float())  # Row 1
+	var r2 := Vector3(_read_float(), _read_float(), _read_float())  # Row 2
+	# Transpose: column[i] = (r0[i], r1[i], r2[i])
+	return Basis(
+		Vector3(r0.x, r1.x, r2.x),  # Column 0
+		Vector3(r0.y, r1.y, r2.y),  # Column 1
+		Vector3(r0.z, r1.z, r2.z)   # Column 2
+	)
 
 func _read_color3() -> Color:
 	return Color(_read_float(), _read_float(), _read_float(), 1.0)

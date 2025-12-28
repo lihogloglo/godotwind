@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS: Dictionary = {
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
 	"optimize_size": true,     # Compress texture
-	"min_distance": 1000.0,    # Start showing impostor at 1km (was 2km)
+	"min_distance": 500.0,     # Start showing impostor at 500m (matches FAR tier start)
 	"max_distance": 5000.0,    # Stop showing at 5km
 }
 
@@ -63,6 +63,10 @@ const LANDMARK_PATTERNS: Array[String] = [
 ## Cached landmark models (populated on first call)
 var _cached_landmark_models: Array[String] = []
 var _landmark_cache_built: bool = false
+
+## Cached all impostor models (all categories)
+var _cached_all_models: Array[String] = []
+var _all_cache_built: bool = false
 
 ## Large buildings that should have impostors
 const LARGE_BUILDING_PATTERNS: Array[String] = [
@@ -253,6 +257,113 @@ func get_landmark_models() -> Array[String]:
 	return _cached_landmark_models.duplicate()
 
 
+## Get all impostor candidate models by scanning BSA for all matching patterns
+## This includes landmarks, buildings, terrain features, and trees
+func get_all_impostor_models() -> Array[String]:
+	# Return cached results if already built
+	if _all_cache_built:
+		return _cached_all_models.duplicate()
+
+	_cached_all_models.clear()
+
+	# Scan BSA for files matching all impostor patterns
+	if BSAManager.get_archive_count() == 0:
+		push_warning("ImpostorCandidates: BSA archives not loaded, cannot scan for impostors")
+		return _cached_all_models
+
+	# Get all NIF files from BSA
+	var nif_files: Array = BSAManager.get_files_by_extension(".nif")
+	var seen: Dictionary = {}  # Avoid duplicates
+
+	for file_info: Dictionary in nif_files:
+		var file_path: String = str(file_info["path"]).to_lower()
+
+		# Skip if already added
+		if file_path in seen:
+			continue
+
+		# Check landmarks (in x/ folder - exterior meshes)
+		if "\\x\\" in file_path or "/x/" in file_path:
+			for pattern: String in LANDMARK_PATTERNS:
+				if pattern in file_path:
+					_cached_all_models.append(str(file_info["path"]))
+					seen[file_path] = true
+					break
+
+			# Check buildings (also in x/ folder)
+			if file_path not in seen:
+				for pattern: String in LARGE_BUILDING_PATTERNS:
+					if pattern in file_path:
+						_cached_all_models.append(str(file_info["path"]))
+						seen[file_path] = true
+						break
+
+			# Check terrain features (also in x/ folder)
+			if file_path not in seen:
+				for pattern: String in TERRAIN_FEATURE_PATTERNS:
+					if pattern in file_path:
+						_cached_all_models.append(str(file_info["path"]))
+						seen[file_path] = true
+						break
+
+		# Trees can be in various folders (flora is usually not in x/)
+		if file_path not in seen:
+			for pattern: String in TREE_PATTERNS:
+				if pattern in file_path:
+					_cached_all_models.append(str(file_info["path"]))
+					seen[file_path] = true
+					break
+
+	_all_cache_built = true
+
+	# Count by category for logging
+	var landmark_count := 0
+	var building_count := 0
+	var terrain_count := 0
+	var tree_count := 0
+
+	for model_path: String in _cached_all_models:
+		var lower: String = model_path.to_lower()
+		var categorized := false
+
+		for pattern: String in LANDMARK_PATTERNS:
+			if pattern in lower:
+				landmark_count += 1
+				categorized = true
+				break
+		if categorized:
+			continue
+
+		for pattern: String in LARGE_BUILDING_PATTERNS:
+			if pattern in lower:
+				building_count += 1
+				categorized = true
+				break
+		if categorized:
+			continue
+
+		for pattern: String in TERRAIN_FEATURE_PATTERNS:
+			if pattern in lower:
+				terrain_count += 1
+				categorized = true
+				break
+		if categorized:
+			continue
+
+		for pattern: String in TREE_PATTERNS:
+			if pattern in lower:
+				tree_count += 1
+				break
+
+	print("ImpostorCandidates: Found %d impostor candidates in BSA:" % _cached_all_models.size())
+	print("  - Landmarks: %d" % landmark_count)
+	print("  - Buildings: %d" % building_count)
+	print("  - Terrain: %d" % terrain_count)
+	print("  - Trees: %d" % tree_count)
+
+	return _cached_all_models.duplicate()
+
+
 ## Get all impostor candidate patterns
 func get_all_patterns() -> Dictionary:
 	return {
@@ -269,6 +380,8 @@ func clear_cache() -> void:
 	_impostor_cache.clear()
 	_cached_landmark_models.clear()
 	_landmark_cache_built = false
+	_cached_all_models.clear()
+	_all_cache_built = false
 
 
 ## Check if a model path matches any pattern in a list
@@ -297,20 +410,39 @@ static func _get_impostors_dir() -> String:
 	return documents.path_join("Godotwind").path_join("cache").path_join("impostors")
 
 
+## Normalize a model path for consistent hashing
+## CRITICAL: This must match the baker's normalization exactly!
+## - Removes "meshes\" or "meshes/" prefix
+## - Converts forward slashes to backslashes
+## - Lowercases the result
+## Returns the normalized path (not the hash)
+static func normalize_model_path(model_path: String) -> String:
+	var normalized: String = model_path
+	var lower: String = normalized.to_lower()
+	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
+		normalized = normalized.substr(7)  # Remove "meshes\" or "meshes/"
+	# CRITICAL: Normalize slashes BEFORE hashing - forward slashes become backslashes
+	# This ensures ESM paths (forward slash) and BSA paths (backslash) produce same hash
+	normalized = normalized.replace("/", "\\")
+	return normalized.to_lower()
+
+
+## Get the hash key for a model path (used for texture lookups)
+## This is the single source of truth for hash key generation.
+## MUST be used everywhere that needs to match impostor textures to model paths.
+static func get_hash_key(model_path: String) -> String:
+	var normalized: String = normalize_model_path(model_path)
+	return str(normalized.hash())
+
+
 ## Get the impostor texture path for a model
 ## Returns expected path where impostor texture would be stored
 ## Format matches impostor_baker_v2: {base_name}_{hash_hex}.png
 ## NOTE: The baker receives paths WITHOUT the "meshes\" prefix (e.g., "x\Ex_T_menhir_L_01.nif")
 ## We must normalize the path the same way for hash consistency
 static func get_impostor_texture_path(model_path: String) -> String:
-	# Normalize path to match baker input format
-	var normalized: String = model_path
-	# Remove meshes\ prefix if present (baker doesn't include it in hash)
-	var lower: String = normalized.to_lower()
-	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
-		normalized = normalized.substr(7)  # Remove "meshes\" or "meshes/"
-
-	var hash_val: int = normalized.to_lower().hash()
+	var normalized: String = normalize_model_path(model_path)
+	var hash_val: int = normalized.hash()
 	var base_name: String = normalized.get_file().get_basename()
 	# Clean filename and lowercase (match baker output format which is lowercase on disk)
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
@@ -320,13 +452,8 @@ static func get_impostor_texture_path(model_path: String) -> String:
 ## Get the impostor metadata path for a model
 ## Format matches impostor_baker_v2: {base_name}_{hash_hex}.json
 static func get_impostor_metadata_path(model_path: String) -> String:
-	# Normalize path to match baker input format (same as texture path)
-	var normalized: String = model_path
-	var lower: String = normalized.to_lower()
-	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
-		normalized = normalized.substr(7)
-
-	var hash_val: int = normalized.to_lower().hash()
+	var normalized: String = normalize_model_path(model_path)
+	var hash_val: int = normalized.hash()
 	var base_name: String = normalized.get_file().get_basename()
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
 	return _get_impostors_dir().path_join("%s_%x.json" % [base_name, hash_val])

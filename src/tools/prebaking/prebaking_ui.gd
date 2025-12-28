@@ -68,6 +68,11 @@ var _own_terrain: Terrain3D = null
 func _find_and_assign_terrain() -> void:
 	print("PrebakingUI: _find_and_assign_terrain() called")
 
+	# Safety check - ensure we're in the scene tree (required for @tool scripts in editor)
+	if not is_inside_tree():
+		push_warning("PrebakingUI: Not in scene tree yet, skipping terrain setup")
+		return
+
 	# First check if already assigned
 	if manager.terrain_3d:
 		print("PrebakingUI: Terrain3D already assigned: %s" % manager.terrain_3d.get_path())
@@ -77,12 +82,15 @@ func _find_and_assign_terrain() -> void:
 
 	# Try to find Terrain3D in the scene tree
 	var tree := get_tree()
-	if tree:
-		var terrain := _find_terrain_recursive(tree.root)
-		if terrain:
-			manager.terrain_3d = terrain
-			print("PrebakingUI: Found existing Terrain3D: %s" % terrain.get_path())
-			return
+	if not tree:
+		push_warning("PrebakingUI: get_tree() returned null, skipping terrain creation")
+		return
+
+	var terrain := _find_terrain_recursive(tree.root)
+	if terrain:
+		manager.terrain_3d = terrain
+		print("PrebakingUI: Found existing Terrain3D: %s" % terrain.get_path())
+		return
 
 	# No Terrain3D found - create our own and load preprocessed data
 	print("PrebakingUI: No Terrain3D in scene, creating one with preprocessed data...")
@@ -106,7 +114,7 @@ func _create_terrain_with_preprocessed_data() -> void:
 		_log("No preprocessed terrain at %s" % terrain_data_dir, Color.YELLOW)
 		_log("Shore mask will use default world bounds", Color.YELLOW)
 		# Still create terrain so baker has something to work with
-		_create_empty_terrain()
+		await _create_empty_terrain()
 		return
 
 	# Create Terrain3D node
@@ -115,22 +123,20 @@ func _create_terrain_with_preprocessed_data() -> void:
 	add_child(_own_terrain)
 	print("PrebakingUI: Created Terrain3D node")
 
+	# Wait a frame for Terrain3D to fully initialize in the scene tree
+	# This prevents "data.tree is null" errors from Terrain3D's internal code
+	var tree := get_tree()
+	if tree:
+		await tree.process_frame
+
 	# Use shared configuration from CoordinateSystem (single source of truth)
 	CS.configure_terrain3d(_own_terrain)
 
 	print("PrebakingUI: Terrain3D configured, waiting for data initialization...")
 
-	# Wait a frame for Terrain3D to initialize its data
-	# Guard against null tree (can happen if node isn't fully in scene yet)
-	var tree := get_tree()
+	# Wait another frame for Terrain3D to initialize its internal data
 	if tree:
 		await tree.process_frame
-	else:
-		# Fallback: wait for tree to be available
-		await ready
-		tree = get_tree()
-		if tree:
-			await tree.process_frame
 
 	# Load preprocessed terrain data from cache folder
 	if _own_terrain.data:
@@ -154,6 +160,12 @@ func _create_empty_terrain() -> void:
 	_own_terrain = Terrain3D.new()
 	_own_terrain.name = "PrebakingTerrain3D"
 	add_child(_own_terrain)
+
+	# Wait a frame for Terrain3D to fully initialize in the scene tree
+	# This prevents "data.tree is null" errors from Terrain3D's internal code
+	var tree := get_tree()
+	if tree:
+		await tree.process_frame
 
 	# Use shared configuration from CoordinateSystem (single source of truth)
 	CS.configure_terrain3d(_own_terrain)

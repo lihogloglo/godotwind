@@ -229,6 +229,8 @@ func _on_item_selected(item: Dictionary) -> void:
 	_current_item = item
 	if _current_provider:
 		_current_provider.on_item_selected(item)
+	# Also load the item on single click
+	_on_item_activated(item)
 
 
 func _on_item_activated(item: Dictionary) -> void:

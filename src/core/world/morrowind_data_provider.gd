@@ -288,9 +288,8 @@ func supports_distant_rendering() -> bool:
 	var has_impostors := DirAccess.dir_exists_absolute(SettingsManager.get_impostors_path())
 	var has_merged := DirAccess.dir_exists_absolute(SettingsManager.get_merged_cells_path())
 
-	# Only enable if assets are ready (or return true to force enable for testing)
-	# For now, return false until preprocessing is complete
-	return false  # TODO: Enable after running MorrowindPreprocessor
+	# Enable if either impostors or merged cells exist
+	return has_impostors or has_merged
 
 
 ## Get impostor candidates for Morrowind landmarks

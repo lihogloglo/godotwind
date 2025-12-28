@@ -18,7 +18,6 @@ const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
-const CharacterFactory := preload("res://src/core/character/character_factory.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 
 # Model loader for NIF loading and caching

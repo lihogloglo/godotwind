@@ -17,6 +17,7 @@ extends RefCounted
 const NIFReader := preload("res://src/core/nif/nif_reader.gd")
 const NIFAnimationConverter := preload("res://src/core/nif/nif_animation_converter.gd")
 const Defs := preload("res://src/core/nif/nif_defs.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 # Debug output
 var debug_mode: bool = false
@@ -261,11 +262,15 @@ func _create_single_animation(
 			continue
 
 		# Determine track path
+		# Animation tracks for skeleton bones use the format "path/to/Skeleton3D:BoneName"
+		# When AnimationPlayer is a child of Skeleton3D with default root_node (".."),
+		# the skeleton is "." and bone tracks are ".:BoneName"
 		var track_path: String
 		var bone_idx: int = bone_name_to_idx.get(bone_name.to_lower(), -1)
 
 		if bone_idx >= 0 and skeleton:
-			track_path = "%s:%s" % [skeleton.name, bone_name]
+			# Skeleton3D bone tracks use "." (skeleton itself) + ":" + bone_name
+			track_path = ".:%s" % bone_name
 		else:
 			track_path = bone_name
 
@@ -353,6 +358,7 @@ func _trim_keys(keys: Array, start_time: float, end_time: float) -> Array:
 
 
 ## Convert rotation key to Godot quaternion with coordinate system conversion
+## Uses unified CoordinateSystem for consistency with skeleton rest poses
 func _convert_rotation(key: Dictionary) -> Quaternion:
 	var quat: Quaternion
 	if key.has("value") and key["value"] is Quaternion:
@@ -362,12 +368,13 @@ func _convert_rotation(key: Dictionary) -> Quaternion:
 	else:
 		quat = Quaternion.IDENTITY
 
-	# Convert from Morrowind (Z-up) to Godot (Y-up)
-	return Quaternion(quat.x, quat.z, -quat.y, quat.w)
+	# Use unified coordinate system conversion
+	return CS.quaternion_to_godot(quat)
 
 
 ## Convert position with coordinate system conversion
+## Uses unified CoordinateSystem for consistency with skeleton rest poses
+## IMPORTANT: Applies scale factor to convert to meters
 func _convert_position(pos: Vector3) -> Vector3:
-	# Morrowind: X-right, Y-forward, Z-up
-	# Godot: X-right, Y-up, Z-back
-	return Vector3(pos.x, pos.z, -pos.y)
+	# Use unified coordinate system (includes scale to meters)
+	return CS.vector_to_godot(pos)

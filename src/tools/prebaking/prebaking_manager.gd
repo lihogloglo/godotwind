@@ -320,11 +320,12 @@ func _bake_terrain() -> Dictionary:
 		terrain_3d.name = "PrebakingTerrain3D"
 		add_child(terrain_3d)
 
+		# Wait a frame for Terrain3D to fully initialize in the scene tree
+		# This prevents "data.tree is null" errors from Terrain3D's internal code
+		await get_tree().process_frame
+
 		# Use shared configuration from CoordinateSystem (single source of truth)
 		CS.configure_terrain3d(terrain_3d as Terrain3D)
-
-		# Wait a frame for initialization
-		await get_tree().process_frame
 
 	# Create terrain manager and texture loader
 	var terrain_manager := TerrainManagerScript.new()
@@ -458,9 +459,9 @@ func _bake_impostors() -> Dictionary:
 	# Get pending items
 	var impostor_state: PrebakeState.ComponentState = _state_manager.impostors
 	if impostor_state.pending.is_empty():
-		# Build initial pending list from impostor candidates
+		# Build initial pending list from ALL impostor candidates (landmarks, buildings, terrain, trees)
 		var candidates := ImpostorCandidates.new()
-		impostor_state.pending = candidates.get_landmark_models().duplicate()
+		impostor_state.pending = candidates.get_all_impostor_models().duplicate()
 		impostor_state.start_time = Time.get_unix_time_from_system()
 
 	print("  %d pending, %d completed, %d failed" % [

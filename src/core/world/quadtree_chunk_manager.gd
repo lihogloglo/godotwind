@@ -18,6 +18,7 @@ class_name QuadtreeChunkManager
 extends RefCounted
 
 const DistanceTierManagerScript := preload("res://src/core/world/distance_tier_manager.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 ## Chunk size in cells for MID tier (4x4 = 16 cells per chunk)
 const MID_CHUNK_SIZE := 4
@@ -25,8 +26,8 @@ const MID_CHUNK_SIZE := 4
 ## Chunk size in cells for FAR tier (8x8 = 64 cells per chunk)
 const FAR_CHUNK_SIZE := 8
 
-## Cell size in meters (Morrowind standard)
-const CELL_SIZE_METERS := 117.0
+## Cell size in meters (from DistanceUtils - single source of truth)
+const CELL_SIZE_METERS := DU.CELL_SIZE_METERS
 
 ## MID chunk size in meters (4 * 117 = 468m)
 const MID_CHUNK_SIZE_METERS := MID_CHUNK_SIZE * CELL_SIZE_METERS
@@ -49,6 +50,7 @@ var _tier_end_distances: Dictionary = {}
 #region Configuration
 
 ## Configure the chunk manager with tier distance information
+## tier_manager is REQUIRED - distances come from DistanceTierManager (single source of truth)
 func configure(p_tier_manager: RefCounted) -> void:
 	tier_manager = p_tier_manager
 	if tier_manager:
@@ -56,20 +58,11 @@ func configure(p_tier_manager: RefCounted) -> void:
 		var tier_end_distances_dict: Dictionary = tier_manager.get("tier_end_distances")
 		_tier_distances = tier_distances_dict.duplicate()
 		_tier_end_distances = tier_end_distances_dict.duplicate()
+		print("[QuadtreeChunkManager] Configured with tier_distances: %s, tier_end_distances: %s" % [_tier_distances, _tier_end_distances])
 	else:
-		# Default distances (FAR tier starts at 1km for faster impostor trigger)
-		_tier_distances = {
-			DistanceTierManagerScript.Tier.NEAR: 0.0,
-			DistanceTierManagerScript.Tier.MID: 500.0,
-			DistanceTierManagerScript.Tier.FAR: 1000.0,
-			DistanceTierManagerScript.Tier.HORIZON: 5000.0,
-		}
-		_tier_end_distances = {
-			DistanceTierManagerScript.Tier.NEAR: 500.0,
-			DistanceTierManagerScript.Tier.MID: 1000.0,
-			DistanceTierManagerScript.Tier.FAR: 5000.0,
-			DistanceTierManagerScript.Tier.HORIZON: 10000.0,
-		}
+		push_warning("QuadtreeChunkManager: tier_manager is required - using empty distances")
+		_tier_distances = {}
+		_tier_end_distances = {}
 
 #endregion
 
@@ -123,9 +116,32 @@ func get_chunk_size_for_tier(tier: int) -> int:
 
 ## Generate a unique identifier string for a chunk
 ## Used as dictionary key for tracking loaded chunks
+## Note: For performance, prefer get_chunk_key() which returns an int
 func get_chunk_identifier(chunk_grid: Vector2i, tier: int) -> String:
 	var tier_prefix := "M" if tier == DistanceTierManagerScript.Tier.MID else "F"
 	return "%s_%d_%d" % [tier_prefix, chunk_grid.x, chunk_grid.y]
+
+
+## Generate a unique integer key for a chunk (faster than string identifier)
+## Packs tier (2 bits) + x (15 bits, signed) + y (15 bits, signed) into int
+## Supports chunk coordinates from -16384 to +16383
+func get_chunk_key(chunk_grid: Vector2i, tier: int) -> int:
+	# Offset coordinates to make them positive (add 16384)
+	var offset_x := (chunk_grid.x + 16384) & 0x7FFF  # 15 bits
+	var offset_y := (chunk_grid.y + 16384) & 0x7FFF  # 15 bits
+	var tier_bits := tier & 0x3  # 2 bits
+	return (tier_bits << 30) | (offset_x << 15) | offset_y
+
+
+## Decode a chunk key back to grid and tier (for debugging)
+func decode_chunk_key(key: int) -> Dictionary:
+	var tier := (key >> 30) & 0x3
+	var offset_x := (key >> 15) & 0x7FFF
+	var offset_y := key & 0x7FFF
+	return {
+		"tier": tier,
+		"grid": Vector2i(offset_x - 16384, offset_y - 16384)
+	}
 
 #endregion
 
@@ -136,16 +152,26 @@ func get_chunk_identifier(chunk_grid: Vector2i, tier: int) -> String:
 ## camera_cell: The cell the camera is currently in
 ## tier: The tier to get chunks for (MID or FAR)
 ## Returns: Array of chunk grid coordinates that should be loaded
+var _get_visible_call_count: int = 0
 func get_visible_chunks(camera_cell: Vector2i, tier: int) -> Array[Vector2i]:
+	_get_visible_call_count += 1
+	if _get_visible_call_count <= 4:
+		print("[QuadtreeChunkManager] get_visible_chunks CALLED #%d - tier=%d, camera=%s" % [_get_visible_call_count, tier, camera_cell])
+
 	var visible_chunks: Array[Vector2i] = []
 
 	# Only MID and FAR tiers use chunks
 	if tier != DistanceTierManagerScript.Tier.MID and tier != DistanceTierManagerScript.Tier.FAR:
+		if _get_visible_call_count <= 4:
+			print("[QuadtreeChunkManager]   SKIP - tier %d not MID(1) or FAR(2)" % tier)
 		return visible_chunks
 
 	var chunk_size := get_chunk_size_for_tier(tier)
 	var min_dist: float = _tier_distances.get(tier, 0.0)
 	var max_dist: float = _tier_end_distances.get(tier, 0.0)
+
+	if _get_visible_call_count <= 4:
+		print("[QuadtreeChunkManager]   Processing tier=%d, min_dist=%.1f, max_dist=%.1f, chunk_size=%d" % [tier, min_dist, max_dist, chunk_size])
 
 	# Calculate chunk radius from distance
 	# Add 1 to ensure we cover edge cases
@@ -193,10 +219,8 @@ func _chunk_intersects_tier_range(chunk: Vector2i, camera_cell: Vector2i,
 	# Get chunk center for distance calculation
 	var chunk_center := get_chunk_center_cell(chunk, chunk_size)
 
-	# Calculate distance to chunk center
-	var dx := (chunk_center.x - camera_cell.x) * CELL_SIZE_METERS
-	var dy := (chunk_center.y - camera_cell.y) * CELL_SIZE_METERS
-	var distance := sqrt(dx * dx + dy * dy)
+	# Calculate distance to chunk center using centralized utility
+	var distance := DU.cell_distance(chunk_center, camera_cell)
 
 	# Add margin for chunk's diagonal extent
 	# sqrt(2)/2 * chunk_size * cell_size = half-diagonal
@@ -210,9 +234,7 @@ func _chunk_intersects_tier_range(chunk: Vector2i, camera_cell: Vector2i,
 ## Calculate distance from chunk center to a cell (in meters)
 func _chunk_distance_to_cell(chunk: Vector2i, cell: Vector2i, chunk_size: int) -> float:
 	var chunk_center := get_chunk_center_cell(chunk, chunk_size)
-	var dx := (chunk_center.x - cell.x) * CELL_SIZE_METERS
-	var dy := (chunk_center.y - cell.y) * CELL_SIZE_METERS
-	return sqrt(dx * dx + dy * dy)
+	return DU.cell_distance(chunk_center, cell)
 
 
 ## Get visible chunks for both MID and FAR tiers at once
@@ -235,10 +257,12 @@ func get_chunk_aabb(chunk_grid: Vector2i, chunk_size: int) -> AABB:
 	var origin_z := -chunk_grid.y * chunk_size * CELL_SIZE_METERS  # Z is flipped in Godot
 	var size := chunk_size * CELL_SIZE_METERS
 
-	# Create AABB with reasonable height for terrain + buildings
+	# Create AABB with conservative height bounds to avoid over-culling
+	# -500m to +1000m covers underwater, terrain, buildings, and mountains
+	# Using generous bounds is better than culling valid chunks
 	return AABB(
-		Vector3(origin_x, -100.0, origin_z - size),  # Position
-		Vector3(size, 500.0, size)  # Size (500m height for tall structures)
+		Vector3(origin_x, -500.0, origin_z - size),  # Position (generous min Y)
+		Vector3(size, 1500.0, size)  # Size (1500m total height for any structure)
 	)
 
 

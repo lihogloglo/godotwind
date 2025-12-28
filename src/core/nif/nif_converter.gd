@@ -217,6 +217,24 @@ func convert_file_with_item_id(path: String, item_id: String) -> Node3D:
 	return convert_file(path)
 
 
+## Parse a NIF buffer without converting to scene nodes
+## Use this when you need to access NIF data (e.g., build skeleton from hierarchy)
+## Returns true on success, false on failure
+func parse_buffer(data: PackedByteArray, path_hint: String = "") -> bool:
+	_source_path = path_hint
+	_reader = Reader.new()
+	var result := _reader.load_buffer(data, path_hint)
+	if result != OK:
+		return false
+
+	# Initialize skeleton builder for hierarchy access
+	_skeleton_builder = SkeletonBuilder.new()
+	_skeleton_builder.init(_reader)
+	_skeleton_builder.debug_mode = debug_skinning
+
+	return true
+
+
 ## Convert a NIF buffer to a Godot Node3D scene
 ## path_hint is optional but helps auto-detect collision mode and error messages
 func convert_buffer(data: PackedByteArray, path_hint: String = "") -> Node3D:
@@ -600,35 +618,61 @@ func _add_lods_to_scene(node: Node) -> void:
 
 
 ## Check if this NIF should generate occluders based on model path
-## Generates occluders for: large buildings, towers, cantons, manors
+## Generates occluders for: large buildings, towers, cantons, walls, rocks
 func _should_generate_occluders() -> bool:
 	if _source_path.is_empty():
 		return false
 
 	var lower := _source_path.to_lower()
 
-	# Large exterior buildings
-	if "ex_" in lower:
-		# Towers, cantons, large manors
-		if "tower" in lower or "canton" in lower or "manor" in lower or "palace" in lower:
-			return true
-		# Large stronghold/fortress pieces
-		if "stronghold" in lower or "fortress" in lower:
-			return true
-		# Hlaalu, Redoran, Telvanni large structures
-		if ("hlaalu" in lower or "redoran" in lower or "telvanni" in lower) and "_l" in lower:
-			return true
+	# Skip small objects that shouldn't occlude
+	if "furn_" in lower or "contain_" in lower or "light_" in lower:
+		return false
+	if "flora_" in lower or "grass_" in lower or "kelp" in lower:
+		return false
+	if "clutter" in lower or "misc_" in lower or "food_" in lower:
+		return false
 
-	# Large interior spaces
+	# Exterior buildings (ex_ prefix)
+	if "ex_" in lower:
+		return true  # All exterior building pieces are potential occluders
+
+	# Interior pieces (in_ prefix) - walls, halls
 	if "in_" in lower:
 		# Large hall/chamber pieces
 		if "hall" in lower or "chamber" in lower or "cavern" in lower:
 			return true
-
-	# Dwemer ruins (large pieces)
-	if "dwrv_" in lower:
-		if "hall" in lower or "tower" in lower or "building" in lower:
+		if "wall" in lower or "pillar" in lower or "column" in lower:
 			return true
+
+	# Dwemer ruins
+	if "dwrv_" in lower or "dwemer" in lower:
+		return true
+
+	# Daedric ruins
+	if "dae_" in lower or "daedric" in lower:
+		return true
+
+	# Velothi towers and tombs
+	if "velothi" in lower:
+		return true
+
+	# Large terrain features
+	if "terrain_rock" in lower or "rock_" in lower:
+		# Only large rocks (check size in _add_occluder_to_mesh)
+		return true
+
+	# Ships and boats (large wooden structures)
+	if "ship" in lower or "boat" in lower:
+		return true
+
+	# Bridges
+	if "bridge" in lower:
+		return true
+
+	# Walls and gates
+	if "wall" in lower or "gate" in lower or "fence" in lower:
+		return true
 
 	return false
 
@@ -656,10 +700,22 @@ func _add_occluder_to_mesh(mesh_instance: MeshInstance3D) -> void:
 
 	# Calculate AABB (axis-aligned bounding box) for the mesh
 	var aabb: AABB = mesh.get_aabb()
-
-	# Only add occluders for large meshes (> 2m in any dimension)
 	var size := aabb.size
-	if size.x < 2.0 and size.y < 2.0 and size.z < 2.0:
+
+	# Minimum size thresholds - objects smaller than this won't occlude much
+	# Buildings need at least 3m, rocks need 4m to be worthwhile occluders
+	var min_size: float = 3.0
+	if "rock" in _source_path.to_lower():
+		min_size = 4.0  # Rocks need to be larger to be effective occluders
+
+	# Check if mesh is large enough in at least one dimension
+	var max_dim: float = maxf(size.x, maxf(size.y, size.z))
+	if max_dim < min_size:
+		return
+
+	# Skip very thin meshes (walls thinner than 0.3m aren't good occluders)
+	var min_dim: float = minf(size.x, minf(size.y, size.z))
+	if min_dim < 0.3:
 		return
 
 	# Create box occluder
@@ -667,8 +723,9 @@ func _add_occluder_to_mesh(mesh_instance: MeshInstance3D) -> void:
 	occluder.name = "Occluder"
 
 	var box_occluder := BoxOccluder3D.new()
-	# Make occluder slightly smaller than mesh (90%) to avoid edge artifacts
-	box_occluder.size = size * 0.9
+	# Make occluder slightly smaller than mesh (85%) to avoid edge artifacts
+	# and prevent popping when camera is near edges
+	box_occluder.size = size * 0.85
 
 	occluder.occluder = box_occluder
 	occluder.position = aabb.get_center()
@@ -741,6 +798,51 @@ func _create_skeleton_for_nif() -> Skeleton3D:
 				return skeleton
 
 	return null
+
+
+## Create a skeleton from NIF node hierarchy (for skeleton-only files like base_anim.nif)
+## This builds a skeleton from ALL bone nodes, not just those with vertex weights.
+func create_skeleton_from_hierarchy() -> Skeleton3D:
+	if _skeleton_builder == null:
+		push_error("NIFConverter: Skeleton builder not initialized")
+		return null
+
+	# Find the root NiNode
+	var root_node: Defs.NiNode = null
+	for record: Defs.NIFRecord in _reader.records:
+		if record is Defs.NiNode:
+			# Check if this is a root by name (Bip01 is the typical root)
+			var node := record as Defs.NiNode
+			var name_lower := node.name.to_lower() if node.name else ""
+			if name_lower == "bip01" or name_lower == "root bone":
+				root_node = node
+				break
+
+	# If no Bip01 root found, try finding the first root NiNode
+	if root_node == null:
+		# Find all NiNode indices that are referenced as children
+		var child_indices := {}
+		for record: Defs.NIFRecord in _reader.records:
+			if record is Defs.NiNode:
+				for child_idx in (record as Defs.NiNode).children_indices:
+					if child_idx >= 0:
+						child_indices[child_idx] = true
+
+		# Find an NiNode that isn't a child of anything (root)
+		for record: Defs.NIFRecord in _reader.records:
+			if record is Defs.NiNode:
+				if not child_indices.has(record.record_index):
+					root_node = record as Defs.NiNode
+					break
+
+	if root_node == null:
+		push_error("NIFConverter: No root NiNode found for skeleton hierarchy")
+		return null
+
+	if debug_skinning:
+		print("NIFConverter: Building skeleton from hierarchy, root='%s'" % root_node.name)
+
+	return _skeleton_builder.build_skeleton_from_hierarchy(root_node)
 
 
 ## Convert a record to a Godot node
@@ -830,12 +932,13 @@ func _convert_ni_tri_shape(shape: Defs.NiTriShape, skeleton: Skeleton3D = null) 
 
 	var data := data_record as Defs.NiTriShapeData
 
-	# Check if this is a skinned mesh
-	var is_skinned := shape.skin_index >= 0 and skeleton != null
+	# Check if this mesh has skin data (regardless of whether we have a skeleton)
+	# We need to extract skin data for body parts even when no skeleton is passed
+	var has_skin_data := shape.skin_index >= 0
 	var skin_instance: Defs.NiSkinInstance = null
 	var skin_data: Defs.NiSkinData = null
 
-	if is_skinned:
+	if has_skin_data:
 		skin_instance = _reader.get_record(shape.skin_index) as Defs.NiSkinInstance
 		if skin_instance and skin_instance.data_index >= 0:
 			skin_data = _reader.get_record(skin_instance.data_index) as Defs.NiSkinData
@@ -843,9 +946,9 @@ func _convert_ni_tri_shape(shape: Defs.NiTriShape, skeleton: Skeleton3D = null) 
 		if debug_skinning:
 			print("NIFConverter: Converting skinned mesh '%s'" % mesh_instance.name)
 
-	# Create mesh (with or without skinning data)
+	# Create mesh (with skinning data if available)
 	var mesh: ArrayMesh
-	if is_skinned and skin_instance and skin_data:
+	if has_skin_data and skin_instance and skin_data:
 		mesh = _create_skinned_tri_shape_mesh(data, skin_instance, skin_data)
 	else:
 		mesh = _create_tri_shape_mesh(data)
@@ -858,12 +961,46 @@ func _convert_ni_tri_shape(shape: Defs.NiTriShape, skeleton: Skeleton3D = null) 
 		if material:
 			mesh_instance.material_override = material
 
-		# Link to skeleton for skinned meshes
-		if is_skinned and skeleton:
+		# Link to skeleton for skinned meshes (when skeleton is provided)
+		if has_skin_data and skeleton:
 			# The skeleton path is relative from the mesh to the skeleton
 			# Since both are children of NIFRoot (or skeleton contains mesh),
 			# we need to set this after the scene tree is built
 			mesh_instance.set_meta("_has_skeleton", true)
+
+		# Store bone names and INVERSE bind poses for later Skin resource creation
+		# This is critical for body parts that need to be attached to base_anim skeleton
+		# Godot's Skin.add_bind() expects the INVERSE bind pose (not bind pose)
+		if has_skin_data and skin_instance and skin_data:
+			var bone_names: Array[String] = []
+			var inv_bind_poses: Array[Transform3D] = []
+
+			for i in range(skin_instance.bone_indices.size()):
+				var bone_idx: int = skin_instance.bone_indices[i]
+				var bone_node := _reader.get_record(bone_idx) as Defs.NiNode
+				if bone_node and bone_node.name:
+					bone_names.append(bone_node.name)
+				else:
+					bone_names.append("Bone_%d" % bone_idx)
+
+				# Get inverse bind matrix from NIF and convert to Godot space
+				# NIF stores inverse bind matrices directly in NiSkinData.bones[].transform
+				if i < skin_data.bones.size():
+					var bone_info: Dictionary = skin_data.bones[i]
+					var bone_transform: Defs.NIFTransform = bone_info["transform"]
+					var inv_bind_nif := bone_transform.to_transform3d()
+					var inv_bind_godot := CS.transform_to_godot(inv_bind_nif)
+					inv_bind_poses.append(inv_bind_godot)
+				else:
+					inv_bind_poses.append(Transform3D.IDENTITY)
+
+			# Store metadata on BOTH the MeshInstance3D and the ArrayMesh
+			# The ArrayMesh needs it for skin building when body parts are extracted
+			mesh_instance.set_meta("bone_names", bone_names)
+			mesh_instance.set_meta("inv_bind_poses", inv_bind_poses)
+			if mesh:
+				mesh.set_meta("bone_names", bone_names)
+				mesh.set_meta("inv_bind_poses", inv_bind_poses)
 
 	return mesh_instance
 
@@ -889,12 +1026,13 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 
 	var data := data_record as Defs.NiTriStripsData
 
-	# Check if this is a skinned mesh
-	var is_skinned := strips.skin_index >= 0 and skeleton != null
+	# Check if this mesh has skin data (regardless of whether we have a skeleton)
+	# We need to extract skin data for body parts even when no skeleton is passed
+	var has_skin_data := strips.skin_index >= 0
 	var skin_instance: Defs.NiSkinInstance = null
 	var skin_data: Defs.NiSkinData = null
 
-	if is_skinned:
+	if has_skin_data:
 		skin_instance = _reader.get_record(strips.skin_index) as Defs.NiSkinInstance
 		if skin_instance and skin_instance.data_index >= 0:
 			skin_data = _reader.get_record(skin_instance.data_index) as Defs.NiSkinData
@@ -902,9 +1040,9 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 		if debug_skinning:
 			print("NIFConverter: Converting skinned strip mesh '%s'" % mesh_instance.name)
 
-	# Create mesh (with or without skinning data)
+	# Create mesh (with skinning data if available)
 	var mesh: ArrayMesh
-	if is_skinned and skin_instance and skin_data:
+	if has_skin_data and skin_instance and skin_data:
 		mesh = _create_skinned_tri_strips_mesh(data, skin_instance, skin_data)
 	else:
 		mesh = _create_tri_strips_mesh(data)
@@ -917,9 +1055,43 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 		if material:
 			mesh_instance.material_override = material
 
-		# Link to skeleton for skinned meshes
-		if is_skinned and skeleton:
+		# Link to skeleton for skinned meshes (when skeleton is provided)
+		if has_skin_data and skeleton:
 			mesh_instance.set_meta("_has_skeleton", true)
+
+		# Store bone names and INVERSE bind poses for later Skin resource creation
+		# This is critical for body parts that need to be attached to base_anim skeleton
+		# Godot's Skin.add_bind() expects the INVERSE bind pose (not bind pose)
+		if has_skin_data and skin_instance and skin_data:
+			var bone_names: Array[String] = []
+			var inv_bind_poses: Array[Transform3D] = []
+
+			for i in range(skin_instance.bone_indices.size()):
+				var bone_idx: int = skin_instance.bone_indices[i]
+				var bone_node := _reader.get_record(bone_idx) as Defs.NiNode
+				if bone_node and bone_node.name:
+					bone_names.append(bone_node.name)
+				else:
+					bone_names.append("Bone_%d" % bone_idx)
+
+				# Get inverse bind matrix from NIF and convert to Godot space
+				# NIF stores inverse bind matrices directly in NiSkinData.bones[].transform
+				if i < skin_data.bones.size():
+					var bone_info: Dictionary = skin_data.bones[i]
+					var bone_transform: Defs.NIFTransform = bone_info["transform"]
+					var inv_bind_nif := bone_transform.to_transform3d()
+					var inv_bind_godot := CS.transform_to_godot(inv_bind_nif)
+					inv_bind_poses.append(inv_bind_godot)
+				else:
+					inv_bind_poses.append(Transform3D.IDENTITY)
+
+			# Store metadata on BOTH the MeshInstance3D and the ArrayMesh
+			# The ArrayMesh needs it for skin building when body parts are extracted
+			mesh_instance.set_meta("bone_names", bone_names)
+			mesh_instance.set_meta("inv_bind_poses", inv_bind_poses)
+			if mesh:
+				mesh.set_meta("bone_names", bone_names)
+				mesh.set_meta("inv_bind_poses", inv_bind_poses)
 
 	return mesh_instance
 

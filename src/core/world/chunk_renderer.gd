@@ -44,18 +44,20 @@ var tier_manager: RefCounted = null
 var camera: Camera3D = null
 
 ## Enable frustum culling for chunks
-var use_frustum_culling: bool = true
+## NOTE: Disabled by default - the camera reference is often not set correctly,
+## and the AABB-based culling can be overly aggressive. Enable only after testing.
+var use_frustum_culling: bool = false
 
 ## Enable debug output
 var debug_enabled: bool = false
 
-## Loaded MID tier chunks: chunk_identifier -> LoadedChunkData
+## Loaded MID tier chunks: chunk_key (int) -> LoadedChunkData
 var _loaded_mid_chunks: Dictionary = {}
 
-## Loaded FAR tier chunks: chunk_identifier -> LoadedChunkData
+## Loaded FAR tier chunks: chunk_key (int) -> LoadedChunkData
 var _loaded_far_chunks: Dictionary = {}
 
-## Current frame's visible chunks (for diffing)
+## Current frame's visible chunks (for diffing): chunk_key (int) -> chunk_grid
 var _current_mid_chunks: Dictionary = {}
 var _current_far_chunks: Dictionary = {}
 
@@ -113,6 +115,16 @@ func update_chunks(camera_cell: Vector2i) -> void:
 		push_warning("ChunkRenderer: No chunk manager configured")
 		return
 
+	# Log first call for diagnostics
+	var is_first_call: bool = _stats["last_update_ms"] == 0.0
+	if is_first_call:
+		print("[ChunkRenderer] First update_chunks call at camera_cell=%s" % camera_cell)
+		print("[ChunkRenderer]   distant_renderer: %s" % ("OK" if distant_renderer else "NULL"))
+		print("[ChunkRenderer]   impostor_manager: %s" % ("OK" if impostor_manager else "NULL"))
+		print("[ChunkRenderer]   tier_manager: %s" % ("OK" if tier_manager else "NULL"))
+		print("[ChunkRenderer]   chunk_manager: %s" % ("OK" if chunk_manager else "NULL"))
+		print("[ChunkRenderer]   use_frustum_culling: %s, camera: %s" % [use_frustum_culling, "OK" if camera else "NULL"])
+
 	var start_time := Time.get_ticks_usec()
 
 	# Clear current frame tracking
@@ -121,6 +133,15 @@ func update_chunks(camera_cell: Vector2i) -> void:
 
 	# Get visible chunks for each tier
 	var visible_by_tier: Dictionary = chunk_manager.call("get_visible_chunks_by_tier", camera_cell)
+
+	if is_first_call:
+		var mid_chunks: Array = visible_by_tier.get(DistanceTierManagerScript.Tier.MID, [])
+		var far_chunks: Array = visible_by_tier.get(DistanceTierManagerScript.Tier.FAR, [])
+		print("[ChunkRenderer]   Visible MID chunks: %d, FAR chunks: %d" % [mid_chunks.size(), far_chunks.size()])
+		if tier_manager:
+			@warning_ignore("unsafe_method_access")
+			var debug_info: Dictionary = tier_manager.get_debug_info()
+			print("[ChunkRenderer]   Tier distances: %s" % debug_info.get("tier_distances", {}))
 
 	# DEBUG: Log chunk manager distances (guarded to avoid string formatting overhead)
 	if debug_enabled:
@@ -134,16 +155,20 @@ func update_chunks(camera_cell: Vector2i) -> void:
 			print("  Tier distances: %s" % debug_info.get("tier_distances", {}))
 
 	# Process MID tier chunks
+	@warning_ignore("unsafe_cast")
+	var mid_chunks_to_process: Array = visible_by_tier.get(DistanceTierManagerScript.Tier.MID, []) as Array
 	_update_tier_chunks(
 		DistanceTierManagerScript.Tier.MID,
-		visible_by_tier.get(DistanceTierManagerScript.Tier.MID, []) as Array,
+		mid_chunks_to_process,
 		camera_cell
 	)
 
 	# Process FAR tier chunks
+	@warning_ignore("unsafe_cast")
+	var far_chunks_to_process: Array = visible_by_tier.get(DistanceTierManagerScript.Tier.FAR, []) as Array
 	_update_tier_chunks(
 		DistanceTierManagerScript.Tier.FAR,
-		visible_by_tier.get(DistanceTierManagerScript.Tier.FAR, []) as Array,
+		far_chunks_to_process,
 		camera_cell
 	)
 
@@ -154,6 +179,14 @@ func update_chunks(camera_cell: Vector2i) -> void:
 	_stats["last_update_ms"] = (Time.get_ticks_usec() - start_time) / 1000.0
 	_stats["mid_chunks_loaded"] = _loaded_mid_chunks.size()
 	_stats["far_chunks_loaded"] = _loaded_far_chunks.size()
+
+	# Log periodic summary (every 60 frames)
+	var frame := Engine.get_frames_drawn()
+	if frame % 60 == 0 and (_loaded_mid_chunks.size() > 0 or _loaded_far_chunks.size() > 0):
+		print("[ChunkRenderer] MID chunks: %d (%d cells), FAR chunks: %d (%d cells)" % [
+			_loaded_mid_chunks.size(), _stats["mid_cells_loaded"],
+			_loaded_far_chunks.size(), _stats["far_cells_loaded"]
+		])
 
 #endregion
 
@@ -178,20 +211,21 @@ func _update_tier_chunks(tier: int, visible_chunks: Array, camera_cell: Vector2i
 	var already_loaded_count := 0
 
 	for chunk_grid: Vector2i in visible_chunks:
-		var identifier: String = chunk_manager.call("get_chunk_identifier", chunk_grid, tier)
+		# Use integer key for faster dictionary operations
+		var chunk_key: int = chunk_manager.call("get_chunk_key", chunk_grid, tier)
 
-		# Apply frustum culling if enabled
-		# TESTING: Disable frustum culling for FAR tier - it's culling everything incorrectly
-		if use_frustum_culling and camera and tier != DistanceTierManagerScript.Tier.FAR:
+		# Frustum culling - skip chunks outside camera view
+		# AABB uses conservative height bounds (-500 to +1000m) to avoid over-culling
+		if use_frustum_culling and camera:
 			if not chunk_manager.call("is_chunk_in_frustum", chunk_grid, chunk_size, camera):
 				culled_count += 1
 				continue
 
 		# Mark as current (for stale detection)
-		current_dict[identifier] = chunk_grid
+		current_dict[chunk_key] = chunk_grid
 
 		# Skip if already loaded
-		if identifier in loaded_dict:
+		if chunk_key in loaded_dict:
 			already_loaded_count += 1
 			continue
 
@@ -200,9 +234,9 @@ func _update_tier_chunks(tier: int, visible_chunks: Array, camera_cell: Vector2i
 		# Load new chunk
 		match tier:
 			DistanceTierManagerScript.Tier.MID:
-				_load_mid_chunk(chunk_grid as Vector2i, identifier)
+				_load_mid_chunk(chunk_grid as Vector2i, chunk_key)
 			DistanceTierManagerScript.Tier.FAR:
-				_load_far_chunk(chunk_grid as Vector2i, identifier)
+				_load_far_chunk(chunk_grid as Vector2i, chunk_key)
 
 	# Guard debug logging
 	if debug_enabled and visible_chunks.size() > 0:
@@ -215,22 +249,22 @@ func _update_tier_chunks(tier: int, visible_chunks: Array, camera_cell: Vector2i
 ## Remove chunks that are no longer visible
 func _remove_stale_chunks() -> void:
 	# Check MID chunks
-	var stale_mid: Array[String] = []
-	for identifier: String in _loaded_mid_chunks:
-		if identifier not in _current_mid_chunks:
-			stale_mid.append(identifier)
+	var stale_mid: Array[int] = []
+	for chunk_key: int in _loaded_mid_chunks:
+		if chunk_key not in _current_mid_chunks:
+			stale_mid.append(chunk_key)
 
-	for identifier: String in stale_mid:
-		_unload_mid_chunk(identifier)
+	for chunk_key: int in stale_mid:
+		_unload_mid_chunk(chunk_key)
 
 	# Check FAR chunks
-	var stale_far: Array[String] = []
-	for identifier: String in _loaded_far_chunks:
-		if identifier not in _current_far_chunks:
-			stale_far.append(identifier)
+	var stale_far: Array[int] = []
+	for chunk_key: int in _loaded_far_chunks:
+		if chunk_key not in _current_far_chunks:
+			stale_far.append(chunk_key)
 
-	for identifier: String in stale_far:
-		_unload_far_chunk(identifier)
+	for chunk_key: int in stale_far:
+		_unload_far_chunk(chunk_key)
 
 #endregion
 
@@ -238,8 +272,9 @@ func _remove_stale_chunks() -> void:
 #region MID Tier Loading
 
 ## Load a MID tier chunk (aggregates per-cell pre-baked meshes)
-func _load_mid_chunk(chunk_grid: Vector2i, identifier: String) -> void:
+func _load_mid_chunk(chunk_grid: Vector2i, chunk_key: int) -> void:
 	if not distant_renderer:
+		print("[ChunkRenderer] ERROR: distant_renderer is null!")
 		return
 
 	var start_time := Time.get_ticks_usec()
@@ -250,19 +285,44 @@ func _load_mid_chunk(chunk_grid: Vector2i, identifier: String) -> void:
 	# Get all cells in this chunk
 	var cells: Array[Vector2i] = chunk_manager.call("get_cells_in_chunk", chunk_grid, QuadtreeChunkManagerScript.MID_CHUNK_SIZE)
 
+	# Log first chunk load for diagnostics
+	var is_first_chunk := _loaded_mid_chunks.is_empty()
+	if is_first_chunk:
+		print("[ChunkRenderer] === FIRST MID CHUNK LOAD ===")
+		print("[ChunkRenderer]   Chunk grid: %s, key: %d" % [chunk_grid, chunk_key])
+		print("[ChunkRenderer]   Cells in chunk: %d" % cells.size())
+		print("[ChunkRenderer]   Merged cells path: %s" % _get_merged_cells_path())
+
+	var cells_found := 0
+	var cells_loaded := 0
+
 	# Load pre-baked mesh for each cell
 	for cell_grid in cells:
 		var prebaked_path := _get_merged_cells_path().path_join("cell_%d_%d.res" % [cell_grid.x, cell_grid.y])
 
 		if ResourceLoader.exists(prebaked_path):
+			cells_found += 1
 			var mesh := load(prebaked_path) as ArrayMesh
 			if mesh:
 				if distant_renderer.has_method("add_cell_prebaked"):
-					distant_renderer.call("add_cell_prebaked", cell_grid, mesh)
-					chunk_data.cells_loaded.append(cell_grid)
+					var success: bool = distant_renderer.call("add_cell_prebaked", cell_grid, mesh)
+					if success:
+						chunk_data.cells_loaded.append(cell_grid)
+						cells_loaded += 1
+					elif is_first_chunk:
+						print("[ChunkRenderer]   Cell %s: add_cell_prebaked returned false" % cell_grid)
+				elif is_first_chunk:
+					print("[ChunkRenderer]   ERROR: distant_renderer missing add_cell_prebaked method!")
+			elif is_first_chunk:
+				print("[ChunkRenderer]   Cell %s: mesh loaded as null" % cell_grid)
+		elif is_first_chunk:
+			print("[ChunkRenderer]   Cell %s: file not found (%s)" % [cell_grid, prebaked_path.get_file()])
+
+	if is_first_chunk:
+		print("[ChunkRenderer]   Result: %d cells found, %d loaded successfully" % [cells_found, cells_loaded])
 
 	chunk_data.load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
-	_loaded_mid_chunks[identifier] = chunk_data
+	_loaded_mid_chunks[chunk_key] = chunk_data
 
 	# Update stats
 	_stats["mid_cells_loaded"] += chunk_data.cells_loaded.size()
@@ -273,11 +333,11 @@ func _load_mid_chunk(chunk_grid: Vector2i, identifier: String) -> void:
 
 
 ## Unload a MID tier chunk
-func _unload_mid_chunk(identifier: String) -> void:
-	if identifier not in _loaded_mid_chunks:
+func _unload_mid_chunk(chunk_key: int) -> void:
+	if chunk_key not in _loaded_mid_chunks:
 		return
 
-	var chunk_data: LoadedChunkData = _loaded_mid_chunks[identifier]
+	var chunk_data: LoadedChunkData = _loaded_mid_chunks[chunk_key]
 
 	# Remove each cell from distant renderer
 	if distant_renderer:
@@ -288,7 +348,7 @@ func _unload_mid_chunk(identifier: String) -> void:
 	# Update stats
 	_stats["mid_cells_loaded"] -= chunk_data.cells_loaded.size()
 
-	_loaded_mid_chunks.erase(identifier)
+	_loaded_mid_chunks.erase(chunk_key)
 
 	_debug("Unloaded MID chunk %s: %d cells" % [chunk_data.chunk_grid, chunk_data.cells_loaded.size()])
 
@@ -298,7 +358,7 @@ func _unload_mid_chunk(identifier: String) -> void:
 #region FAR Tier Loading
 
 ## Load a FAR tier chunk (aggregates impostors per cell)
-func _load_far_chunk(chunk_grid: Vector2i, identifier: String) -> void:
+func _load_far_chunk(chunk_grid: Vector2i, chunk_key: int) -> void:
 	if debug_enabled:
 		print("ChunkRenderer: _load_far_chunk called for chunk %s" % chunk_grid)
 
@@ -327,7 +387,7 @@ func _load_far_chunk(chunk_grid: Vector2i, identifier: String) -> void:
 					chunk_data.cells_loaded.append(cell_grid)
 
 	chunk_data.load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
-	_loaded_far_chunks[identifier] = chunk_data
+	_loaded_far_chunks[chunk_key] = chunk_data
 
 	# Update stats
 	_stats["far_cells_loaded"] += chunk_data.cells_loaded.size()
@@ -338,11 +398,11 @@ func _load_far_chunk(chunk_grid: Vector2i, identifier: String) -> void:
 
 
 ## Unload a FAR tier chunk
-func _unload_far_chunk(identifier: String) -> void:
-	if identifier not in _loaded_far_chunks:
+func _unload_far_chunk(chunk_key: int) -> void:
+	if chunk_key not in _loaded_far_chunks:
 		return
 
-	var chunk_data: LoadedChunkData = _loaded_far_chunks[identifier]
+	var chunk_data: LoadedChunkData = _loaded_far_chunks[chunk_key]
 
 	# Remove impostors for each cell
 	if impostor_manager:
@@ -353,7 +413,7 @@ func _unload_far_chunk(identifier: String) -> void:
 	# Update stats
 	_stats["far_cells_loaded"] -= chunk_data.cells_loaded.size()
 
-	_loaded_far_chunks.erase(identifier)
+	_loaded_far_chunks.erase(chunk_key)
 
 	_debug("Unloaded FAR chunk %s: %d cells" % [chunk_data.chunk_grid, chunk_data.cells_loaded.size()])
 
@@ -362,46 +422,18 @@ func _unload_far_chunk(identifier: String) -> void:
 
 #region Public API
 
-## Check if a chunk is loaded
-func is_chunk_loaded(chunk_grid: Vector2i, tier: int) -> bool:
-	var identifier: String = chunk_manager.call("get_chunk_identifier", chunk_grid, tier) if chunk_manager else ""
-	match tier:
-		DistanceTierManagerScript.Tier.MID:
-			return identifier in _loaded_mid_chunks
-		DistanceTierManagerScript.Tier.FAR:
-			return identifier in _loaded_far_chunks
-	return false
-
-
-## Get list of loaded chunk grids for a tier
-func get_loaded_chunks(tier: int) -> Array[Vector2i]:
-	var chunks: Array[Vector2i] = []
-	var loaded_dict: Dictionary
-
-	match tier:
-		DistanceTierManagerScript.Tier.MID:
-			loaded_dict = _loaded_mid_chunks
-		DistanceTierManagerScript.Tier.FAR:
-			loaded_dict = _loaded_far_chunks
-		_:
-			return chunks
-
-	for identifier: String in loaded_dict:
-		var data: LoadedChunkData = loaded_dict[identifier]
-		chunks.append(data.chunk_grid)
-
-	return chunks
-
 
 ## Clear all loaded chunks
 func clear() -> void:
 	# Unload all MID chunks
-	for identifier: String in _loaded_mid_chunks.keys():
-		_unload_mid_chunk(identifier as String)
+	var mid_keys: Array = _loaded_mid_chunks.keys()
+	for chunk_key: int in mid_keys:
+		_unload_mid_chunk(chunk_key)
 
 	# Unload all FAR chunks
-	for identifier: String in _loaded_far_chunks.keys():
-		_unload_far_chunk(identifier as String)
+	var far_keys: Array = _loaded_far_chunks.keys()
+	for chunk_key: int in far_keys:
+		_unload_far_chunk(chunk_key)
 
 	_loaded_mid_chunks.clear()
 	_loaded_far_chunks.clear()

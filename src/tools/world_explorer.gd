@@ -30,8 +30,6 @@ extends Node3D
 
 # Preload dependencies
 const WorldStreamingManagerScript := preload("res://src/core/world/world_streaming_manager.gd")
-const GenericTerrainStreamerScript := preload("res://src/core/world/generic_terrain_streamer.gd")
-const MorrowindDataProviderScript := preload("res://src/core/world/morrowind_data_provider.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
@@ -110,9 +108,7 @@ var _fallback_light: DirectionalLight3D = null
 
 # Managers
 var world_streaming_manager: WorldStreamingManager = null  # WorldStreamingManager (objects only)
-var terrain_streamer: GenericTerrainStreamer = null  # GenericTerrainStreamer (terrain only)
-var terrain_data_provider: MorrowindDataProvider = null  # MorrowindDataProvider
-var terrain_manager: TerrainManager = null  # TerrainManager (kept for legacy compatibility)
+var terrain_manager: TerrainManager = null  # TerrainManager (for prebaking)
 var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
 var profiler: PerformanceProfiler = null  # PerformanceProfiler
@@ -124,7 +120,6 @@ var test_runner: Node = null  # Automated test runner (AutomatedTestRunner)
 # State
 var _data_path: String = ""
 var _initialized: bool = false
-var _using_preprocessed: bool = false
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = 2  # Start with smaller view distance for faster initial load
 
@@ -235,23 +230,13 @@ func _init_async() -> void:
 	_log("[color=green]ESM loaded successfully[/color]")
 	_log("LAND records: %d, CELL records: %d" % [ESMManager.lands.size(), ESMManager.cells.size()])
 
-	# Check for pre-processed terrain
-	await _update_loading(50, "Checking terrain data...")
-	_check_preprocessed_terrain()
-
 	# Initialize Terrain3D
-	await _update_loading(60, "Initializing Terrain3D...")
+	await _update_loading(50, "Initializing Terrain3D...")
 	_init_terrain3d()
 
-	# Load pre-processed terrain if available, or enable on-the-fly generation
-	if _using_preprocessed:
-		await _update_loading(70, "Loading terrain data...")
-		_load_preprocessed_terrain()
-	else:
-		_log("[color=yellow]No pre-processed terrain found.[/color]")
-		_log("[color=cyan]Using on-the-fly terrain generation.[/color]")
-		_log("(For better performance, click 'Preprocess ALL Terrain')")
-		await _update_loading(70, "Configuring terrain...")
+	# Load pre-processed terrain (terrain is always prebaked)
+	await _update_loading(70, "Loading terrain data...")
+	_load_preprocessed_terrain()
 
 	# Ocean system is now lazy-loaded - created on first toggle
 
@@ -284,31 +269,8 @@ func _init_async() -> void:
 	# First teleport camera to Seyda Neen BEFORE starting to track
 	_teleport_to_cell(-2, -9)
 
-	# NOW start tracking the camera - terrain/cells will generate around Seyda Neen
+	# NOW start tracking the camera - cells will generate around Seyda Neen
 	world_streaming_manager.set_tracked_node(camera)
-	if terrain_streamer:
-		terrain_streamer.set_tracked_node(camera)
-
-
-func _check_preprocessed_terrain() -> void:
-	# Check for pre-processed terrain data in cache folder
-	var terrain_data_dir := SettingsManager.get_terrain_path()
-	var dir := DirAccess.open(terrain_data_dir)
-	if dir:
-		var count := 0
-		dir.list_dir_begin()
-		var file_name := dir.get_next()
-		while file_name != "":
-			if file_name.ends_with(".res"):
-				count += 1
-			file_name = dir.get_next()
-		dir.list_dir_end()
-
-		if count > 0:
-			_using_preprocessed = true
-			_log("Found %d pre-processed terrain regions" % count)
-
-	_update_preprocess_status()
 
 
 func _init_terrain3d() -> void:
@@ -792,8 +754,6 @@ func _switch_to_player_controller() -> void:
 	# Update tracked node for streaming
 	if world_streaming_manager:
 		world_streaming_manager.set_tracked_node(player_controller)
-	if terrain_streamer:
-		terrain_streamer.set_tracked_node(player_controller)
 
 	# Update ocean camera
 	if ocean_manager and ocean_manager.has_method("set_camera"):
@@ -832,8 +792,6 @@ func _switch_to_fly_camera() -> void:
 	# Update tracked node for streaming
 	if world_streaming_manager:
 		world_streaming_manager.set_tracked_node(fly_camera)
-	if terrain_streamer:
-		terrain_streamer.set_tracked_node(fly_camera)
 
 	# Update ocean camera
 	if ocean_manager and ocean_manager.has_method("set_camera"):
@@ -873,13 +831,17 @@ func _update_preprocess_status() -> void:
 	if not preprocess_status:
 		return
 
-	if _using_preprocessed:
+	# Check if terrain data exists
+	var terrain_data_dir := SettingsManager.get_terrain_path()
+	var has_terrain := DirAccess.dir_exists_absolute(terrain_data_dir)
+
+	if has_terrain:
 		preprocess_status.text = "Using pre-processed terrain"
 		preprocess_status.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
 		preprocess_btn.text = "Re-preprocess Terrain"
 	else:
-		preprocess_status.text = "On-the-fly generation"
-		preprocess_status.add_theme_color_override("font_color", Color(1.0, 0.8, 0.3))
+		preprocess_status.text = "No terrain data - click to generate"
+		preprocess_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
 		preprocess_btn.text = "Preprocess ALL Terrain"
 
 
@@ -1104,13 +1066,13 @@ func _on_show_models_toggled(enabled: bool) -> void:
 	# Toggle object loading in WorldStreamingManager
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
-		# Also control distant rendering (impostors) with the Models toggle
-		world_streaming_manager.distant_rendering_enabled = enabled
+		# NOTE: Don't change distant_rendering_enabled here - it controls the tier system behavior,
+		# not visibility. The visibility is controlled by set_all_visible on ImpostorManager.
 
 		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
-		_log("[DIAG] Currently loaded cells: %d" % loaded_coords.size())
+		_log("[DIAG] Currently loaded cells in dictionary: %d" % loaded_coords.size())
 
-		# Show/hide existing loaded cell objects
+		# Show/hide existing loaded cell objects from dictionary
 		var visible_count := 0
 		for cell_grid: Vector2i in loaded_coords:
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
@@ -1118,7 +1080,15 @@ func _on_show_models_toggled(enabled: bool) -> void:
 				cell_node.visible = enabled
 				visible_count += 1
 
-		_log("[DIAG] Set visibility for %d cell nodes" % visible_count)
+		# Also iterate direct children to catch any cells not in the dictionary
+		# (cells are added as children of WorldStreamingManager)
+		var child_count := 0
+		for child in world_streaming_manager.get_children():
+			if child is Node3D and child.has_meta("cell_grid"):
+				child.visible = enabled
+				child_count += 1
+
+		_log("[DIAG] Set visibility for %d cell nodes (dict), %d children with cell_grid meta" % [visible_count, child_count])
 
 		# Toggle impostor visibility
 		var impostor_mgr: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
@@ -1126,12 +1096,34 @@ func _on_show_models_toggled(enabled: bool) -> void:
 			impostor_mgr.call("set_all_visible", enabled)
 			_log("[DIAG] Impostors visibility: %s" % ("ON" if enabled else "OFF"))
 
+		# Log impostor manager stats
+		if impostor_mgr and impostor_mgr.has_method("get_stats"):
+			var imp_stats: Dictionary = impostor_mgr.call("get_stats")
+			_log("[DIAG] Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
+				imp_stats.get("total_impostors", 0),
+				imp_stats.get("visible_impostors", 0),
+				imp_stats.get("texture_cache_size", 0),
+				imp_stats.get("pending_loads", 0),
+				imp_stats.get("texture_array_layers", 0),
+			])
+
 		# When enabling, clear tier state and trigger fresh loading
 		if enabled:
 			# Clear stale tier tracking that may have accumulated
 			if world_streaming_manager.has_method("clear_tier_state"):
 				world_streaming_manager.clear_tier_state()
 			world_streaming_manager.refresh_cells()
+
+			# Log chunk renderer stats
+			var chunk_renderer: Node = world_streaming_manager.get_node_or_null("ChunkRenderer")
+			if chunk_renderer and chunk_renderer.has_method("get_stats"):
+				var cr_stats: Dictionary = chunk_renderer.call("get_stats")
+				_log("[DIAG] ChunkRenderer: mid_chunks=%d, far_chunks=%d, mid_cells=%d, far_cells=%d" % [
+					cr_stats.get("mid_chunks_loaded", 0),
+					cr_stats.get("far_chunks_loaded", 0),
+					cr_stats.get("mid_cells_loaded", 0),
+					cr_stats.get("far_cells_loaded", 0),
+				])
 
 		# Log current queue states
 		if cell_manager:
@@ -1141,6 +1133,30 @@ func _on_show_models_toggled(enabled: bool) -> void:
 
 	_log("Models: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
+
+	# Log stats again after a delay to see if chunks loaded
+	if enabled and world_streaming_manager:
+		await get_tree().create_timer(2.0).timeout
+		_log("[DIAG] After 2s delay:")
+		var impostor_mgr_delayed: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
+		if impostor_mgr_delayed and impostor_mgr_delayed.has_method("get_stats"):
+			var imp_stats: Dictionary = impostor_mgr_delayed.call("get_stats")
+			_log("[DIAG]   Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
+				imp_stats.get("total_impostors", 0),
+				imp_stats.get("visible_impostors", 0),
+				imp_stats.get("texture_cache_size", 0),
+				imp_stats.get("pending_loads", 0),
+				imp_stats.get("texture_array_layers", 0),
+			])
+		var chunk_renderer: Node = world_streaming_manager.get_node_or_null("ChunkRenderer")
+		if chunk_renderer and chunk_renderer.has_method("get_stats"):
+			var cr_stats: Dictionary = chunk_renderer.call("get_stats")
+			_log("[DIAG]   ChunkRenderer: mid_chunks=%d, far_chunks=%d, mid_cells=%d, far_cells=%d" % [
+				cr_stats.get("mid_chunks_loaded", 0),
+				cr_stats.get("far_chunks_loaded", 0),
+				cr_stats.get("mid_cells_loaded", 0),
+				cr_stats.get("far_cells_loaded", 0),
+			])
 
 
 ## Toggle characters (NPCs/creatures) visibility
@@ -1541,18 +1557,12 @@ func _on_preprocess_pressed() -> void:
 	_log("  Skipped: %d regions (no height data)" % skipped)
 	_log("  Saved to: %s" % terrain_data_dir)
 
-	_using_preprocessed = true
 	preprocess_btn.disabled = false
 	_update_preprocess_status()
 
 
 func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
-	# ========== NEW SIMPLIFIED ARCHITECTURE ==========
-	# WorldStreamingManager: Objects ONLY
-	# GenericTerrainStreamer: Terrain ONLY
-	# =================================================
-
-	# Create WorldStreamingManager (objects only)
+	# Create WorldStreamingManager (objects only - terrain is prebaked)
 	var wsm_node := Node3D.new()
 	wsm_node.set_script(WorldStreamingManagerScript)
 	wsm_node.name = "WorldStreamingManager"
@@ -1561,7 +1571,7 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
-	world_streaming_manager.distant_rendering_enabled = _show_models  # Impostors follow Models toggle
+	world_streaming_manager.distant_rendering_enabled = true  # Always enable tiered system
 	world_streaming_manager.debug_enabled = true
 
 	# OWDB configuration for Morrowind objects
@@ -1587,52 +1597,16 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Preload common models in background
 	world_streaming_manager.preload_common_models(false)
 
-	# ========== TERRAIN STREAMING (SEPARATE) ==========
-	# Create terrain data provider
-	terrain_data_provider = MorrowindDataProviderScript.new()
-	var init_error: Error = terrain_data_provider.initialize()
-	if init_error != OK:
-		push_warning("Failed to initialize MorrowindDataProvider: %s" % error_string(init_error))
-	else:
-		# Set terrain assets for texture mapping
-		if terrain_3d and terrain_3d.assets:
-			terrain_data_provider.set_terrain_assets(terrain_3d.assets)
-
-	# Create GenericTerrainStreamer (terrain only)
-	terrain_streamer = GenericTerrainStreamerScript.new()
-	terrain_streamer.name = "GenericTerrainStreamer"
-	terrain_streamer.view_distance_regions = 3  # Reduced for performance
-	terrain_streamer.debug_enabled = true
-	terrain_streamer.set_provider(terrain_data_provider)
-	terrain_streamer.set_terrain_3d(terrain_3d)
-	if background_processor:
-		terrain_streamer.set_background_processor(background_processor)
-
-	add_child(terrain_streamer)
-	terrain_streamer.terrain_region_loaded.connect(_on_terrain_region_loaded)
-
-	_log("[color=green]Simplified architecture: WorldStreamingManager (objects) + GenericTerrainStreamer (terrain)[/color]")
-
 	# Only start tracking if requested (allows teleporting BEFORE streaming starts)
 	if start_tracking:
 		world_streaming_manager.set_tracked_node(camera)
-		terrain_streamer.set_tracked_node(camera)
 
-	_log("WorldStreamingManager created and configured")
-	if _using_preprocessed:
-		_log("Using pre-processed terrain data")
-	else:
-		_log("[color=cyan]Using on-the-fly terrain generation[/color]")
+	_log("WorldStreamingManager created and configured (terrain is prebaked)")
 
 	# Register world streaming manager with console
 	if console:
 		console.register_context("world", world_streaming_manager)
 		console.register_context("player", player_controller)
-
-
-func _on_terrain_region_loaded(region: Vector2i) -> void:
-	_log("Terrain generated: (%d, %d)" % [region.x, region.y])
-	_update_stats()
 
 
 func _on_cell_loaded(grid: Vector2i, node: Node3D) -> void:

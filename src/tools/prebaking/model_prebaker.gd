@@ -16,9 +16,13 @@ class_name ModelPrebaker
 extends RefCounted
 
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
+const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
 
 ## Output directory (set from SettingsManager)
 var output_dir: String = ""
+
+## Animation output directory
+var animation_output_dir: String = ""
 
 ## Skip models that already exist in cache
 var skip_existing: bool = true
@@ -26,6 +30,7 @@ var skip_existing: bool = true
 ## Progress tracking
 signal progress(current: int, total: int, model_name: String)
 signal model_baked(model_path: String, success: bool, mesh_count: int)
+signal animation_baked(anim_path: String, success: bool, anim_count: int)
 signal batch_complete(total: int, success: int, failed: int, skipped: int)
 
 ## Statistics
@@ -108,13 +113,22 @@ func bake_model(model_path: String) -> Dictionary:
 		model_baked.emit(model_path, false, 0)
 		return {"success": false, "error": "NIF not found in BSA"}
 
+	# Check if this is a skeleton or body part (needs animations enabled)
+	var path_lower := model_path.to_lower()
+	var is_character_model := (
+		path_lower.contains("base_anim") or
+		path_lower.begins_with("b_") or
+		path_lower.contains("/b_") or
+		path_lower.contains("\\b_")
+	)
+
 	# Convert NIF to Godot scene
 	var converter := NIFConverter.new()
 	converter.load_textures = true
-	converter.load_animations = false
-	converter.load_collision = true
+	converter.load_animations = is_character_model  # Enable for skeletons/body parts
+	converter.load_collision = not is_character_model  # Body parts don't need collision
 	converter.generate_lods = false
-	converter.generate_occluders = false
+	converter.generate_occluders = not is_character_model
 
 	var model := converter.convert_buffer(nif_data, model_path)
 	if not model:
@@ -172,10 +186,26 @@ func _collect_unique_models() -> Array[String]:
 					seen[normalized] = true
 					models.append(model_path)
 
-	# Also scan NPCs and creatures for body part models
-	for key: String in ESMManager.npcs:
-		var npc: Variant = ESMManager.npcs[key]
-		# NPCs use body parts, not direct models - skip for now
+	# Add body part models (for NPC assembly)
+	for key: String in ESMManager.body_parts:
+		var body_part: BodyPartRecord = ESMManager.body_parts[key]
+		if body_part and not body_part.model.is_empty():
+			var normalized := body_part.model.to_lower()
+			if normalized not in seen:
+				seen[normalized] = true
+				models.append(body_part.model)
+
+	# Add base skeleton NIFs (critical for NPC loading)
+	var skeleton_paths := [
+		"meshes/base_anim.nif",
+		"meshes/base_anim_female.nif",
+		"meshes/base_animkna.nif",
+	]
+	for skel_path: String in skeleton_paths:
+		var normalized: String = skel_path.to_lower()
+		if normalized not in seen:
+			seen[normalized] = true
+			models.append(skel_path)
 
 	for key: String in ESMManager.creatures:
 		var creature: Variant = ESMManager.creatures[key]
@@ -360,3 +390,135 @@ func get_stats() -> Dictionary:
 		"total_skipped": _total_skipped,
 		"failed_models": _failed_models.duplicate(),
 	}
+
+
+# =============================================================================
+# ANIMATION PREBAKING
+# =============================================================================
+
+## Bake all character animation files (.kf) to Godot AnimationLibrary resources
+## This eliminates the 10-12 second KF parsing time at runtime
+func bake_all_animations() -> Dictionary:
+	if animation_output_dir.is_empty():
+		animation_output_dir = SettingsManager.get_models_path()
+
+	var err := SettingsManager.ensure_cache_directories()
+	if err != OK:
+		push_error("ModelPrebaker: Failed to create cache directories for animations")
+		return {"success": 0, "failed": 0, "skipped": 0}
+
+	var anim_paths := _collect_animation_files()
+	print("ModelPrebaker: Found %d animation files to bake" % anim_paths.size())
+
+	var success := 0
+	var failed := 0
+	var skipped := 0
+
+	for i in range(anim_paths.size()):
+		var anim_path: String = anim_paths[i]
+		progress.emit(i + 1, anim_paths.size(), anim_path.get_file())
+
+		# Check if already cached
+		if skip_existing and _animation_cached(anim_path):
+			skipped += 1
+			continue
+
+		var result := bake_animation(anim_path)
+		if result.success:
+			success += 1
+		else:
+			failed += 1
+
+	print("ModelPrebaker: Animations complete - %d baked, %d skipped, %d failed" % [
+		success, skipped, failed])
+
+	return {
+		"total": anim_paths.size(),
+		"success": success,
+		"failed": failed,
+		"skipped": skipped,
+	}
+
+
+## Bake a single animation file
+func bake_animation(anim_path: String) -> Dictionary:
+	# Load KF file from BSA
+	var kf_data := _load_nif(anim_path)  # KF files are in same location as NIFs
+	if kf_data.is_empty():
+		animation_baked.emit(anim_path, false, 0)
+		return {"success": false, "error": "KF not found in BSA"}
+
+	# Parse animations
+	var kf_loader := NIFKFLoader.new()
+	var animations: Dictionary = kf_loader.load_kf_buffer(kf_data, null)
+
+	if animations.is_empty():
+		animation_baked.emit(anim_path, false, 0)
+		return {"success": false, "error": "No animations parsed from KF"}
+
+	# Create AnimationLibrary and add all animations
+	var lib := AnimationLibrary.new()
+	for anim_name: String in animations:
+		var anim: Animation = animations[anim_name]
+		lib.add_animation(anim_name, anim)
+
+	# Save to cache
+	var cache_key := anim_path.to_lower().replace("/", "\\")
+	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
+	var lib_path := animation_output_dir.path_join(safe_name + ".animlib")
+
+	var save_result := ResourceSaver.save(lib, lib_path)
+	if save_result != OK:
+		animation_baked.emit(anim_path, false, 0)
+		return {"success": false, "error": "Failed to save AnimationLibrary"}
+
+	animation_baked.emit(anim_path, true, animations.size())
+	return {"success": true, "anim_count": animations.size()}
+
+
+## Collect all animation (.kf) files to prebake
+func _collect_animation_files() -> Array[String]:
+	var anim_paths: Array[String] = []
+
+	# Character animation files
+	anim_paths.append("meshes/xbase_anim.kf")
+	anim_paths.append("meshes/xbase_anim_female.kf")
+	anim_paths.append("meshes/xbase_animkna.kf")
+
+	# Creature animation files (derived from creature models)
+	var seen: Dictionary = {}
+	for key: String in ESMManager.creatures:
+		var creature: CreatureRecord = ESMManager.creatures[key]
+		if creature and not creature.model.is_empty():
+			# Creature animations are <model_base>.kf
+			var base_path := creature.model.get_base_dir() + "/" + creature.model.get_file().get_basename()
+			var kf_path := "meshes/" + base_path + ".kf"
+			var normalized := kf_path.to_lower()
+			if normalized not in seen:
+				# Check if file actually exists in BSA
+				if BSAManager.has_file(kf_path) or BSAManager.has_file(normalized):
+					seen[normalized] = true
+					anim_paths.append(kf_path)
+
+	return anim_paths
+
+
+## Check if an animation is already cached
+func _animation_cached(anim_path: String) -> bool:
+	var cache_key := anim_path.to_lower().replace("/", "\\")
+	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
+	var lib_path := animation_output_dir.path_join(safe_name + ".animlib")
+	return FileAccess.file_exists(lib_path)
+
+
+## Load a cached AnimationLibrary (for use by CharacterFactoryV2)
+static func load_cached_animations(anim_path: String) -> AnimationLibrary:
+	var cache_dir: String = SettingsManager.get_models_path()
+	var cache_key := anim_path.to_lower().replace("/", "\\")
+	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
+	var lib_path := cache_dir.path_join(safe_name + ".animlib")
+
+	if not FileAccess.file_exists(lib_path):
+		return null
+
+	return ResourceLoader.load(lib_path, "AnimationLibrary") as AnimationLibrary

@@ -260,35 +260,41 @@ func _build_parent_map_recursive(node: Defs.NiNode, parent_map: Dictionary) -> v
 			_build_parent_map_recursive(child as Defs.NiNode, parent_map)
 
 
-## Set bone rest poses from inverse bind matrices
-func _setup_bone_rest_poses(skeleton: Skeleton3D, skin_instance: Defs.NiSkinInstance, skin_data: Defs.NiSkinData) -> void:
-	# The NiSkinData contains inverse bind matrices for each bone
-	# These transforms go from mesh space to bone space
-	#
-	# In Godot's skeletal animation system:
-	# - bone_rest is the bone's transform in its parent's space (or skeleton space for root bones)
-	# - For skinning, Godot internally computes the inverse bind matrix
-	#
-	# NIF stores the inverse bind matrix directly in NiSkinData.bones[i].transform
-	# We need to invert it to get the rest pose, then convert coordinates
+## Set bone rest poses from NiNode transforms (OpenMW-compatible approach)
+##
+## IMPORTANT: Rest poses must come from the NiNode transforms in the hierarchy,
+## NOT from inverting NiSkinData's inverse bind matrices. The skin data is used
+## for GPU skinning (stored separately), while rest poses define the bind pose
+## in parent-relative space.
+##
+## OpenMW's approach (from npcanimation.cpp and skeleton.cpp):
+## - Rest pose = NiNode.transform (local transform in parent space)
+## - Inverse bind matrix (from NiSkinData) is used during skinning, not for rest pose
+func _setup_bone_rest_poses(skeleton: Skeleton3D, skin_instance: Defs.NiSkinInstance, _skin_data: Defs.NiSkinData) -> void:
+	# Get rest poses from the actual NiNode transforms, not from skin data
+	# This matches how build_skeleton_from_hierarchy() works and is correct
 
-	for i in range(mini(skin_instance.bone_indices.size(), skin_data.bones.size())):
-		var bone_data: Dictionary = skin_data.bones[i]
-		var bone_transform: Defs.NIFTransform = bone_data["transform"]
+	for i in range(skin_instance.bone_indices.size()):
+		var bone_node_idx := skin_instance.bone_indices[i]
+		var bone_node := _reader.call("get_record", bone_node_idx) as Defs.NiNode
 
-		# Get the inverse bind matrix from NiSkinData
-		var inverse_bind := bone_transform.to_transform3d()
+		if bone_node == null:
+			# Missing bone - use identity
+			skeleton.set_bone_rest(i, Transform3D.IDENTITY)
+			continue
 
-		# Invert to get the bind pose (bone position in mesh space)
-		var bind_pose := inverse_bind.affine_inverse()
+		# Get the node's local transform (in parent space) - this is the rest pose
+		var node_transform := bone_node.transform.to_transform3d()
 
 		# Convert from Morrowind coordinates (Z-up, Y-forward) to Godot (Y-up, Z-back)
-		var rest_pose := _convert_nif_transform(bind_pose)
+		var rest_pose := _convert_nif_transform(node_transform)
 
 		skeleton.set_bone_rest(i, rest_pose)
 
 		if debug_mode:
-			print("  Bone %d rest: pos=%s rot=%s" % [i, rest_pose.origin, rest_pose.basis.get_euler()])
+			print("  Bone %d '%s' rest: pos=%s rot=%s" % [
+				i, bone_node.name, rest_pose.origin, rest_pose.basis.get_euler()
+			])
 
 
 ## Convert a NIF transform from Morrowind to Godot coordinate system
@@ -382,6 +388,186 @@ func build_skin_arrays(geom_data: Defs.NiGeometryData, skin_instance: Defs.NiSki
 		"indices": bone_indices,
 		"weights": bone_weights
 	}
+
+
+## Build a Skin resource from NiSkinData inverse bind matrices
+## This is the KEY to correct skinning in Godot:
+## - Skeleton rest poses come from base_anim.nif (the T-pose at standing height)
+## - Skin bind poses come from body part NiSkinData (inverse bind matrices)
+## - Godot's GPU skinning formula: vertex' = boneWorld * skinInvBind * vertex
+##
+## Parameters:
+##   skin_instance: The NiSkinInstance from the body part NIF
+##   skin_data: The NiSkinData containing inverse bind matrices
+##   target_skeleton: The skeleton to bind to (for bone name matching)
+##   mirror: If true, remap bone names for left-side mirroring
+##
+## Returns: A Skin resource ready to assign to MeshInstance3D.skin
+func build_skin_resource(skin_instance: Defs.NiSkinInstance, skin_data: Defs.NiSkinData,
+		target_skeleton: Skeleton3D, mirror: bool = false) -> Skin:
+	if skin_instance == null or skin_data == null or target_skeleton == null:
+		push_error("NIFSkeletonBuilder.build_skin_resource: null parameters")
+		return null
+
+	var skin := Skin.new()
+
+	# Bone mirror map for left-side body parts
+	const BONE_MIRROR_MAP := {
+		"bip01 l thigh": "bip01 r thigh",
+		"bip01 l calf": "bip01 r calf",
+		"bip01 l foot": "bip01 r foot",
+		"bip01 l toe0": "bip01 r toe0",
+		"bip01 l clavicle": "bip01 r clavicle",
+		"bip01 l upperarm": "bip01 r upperarm",
+		"bip01 l forearm": "bip01 r forearm",
+		"bip01 l hand": "bip01 r hand",
+		"bip01 l finger0": "bip01 r finger0",
+		"bip01 l finger01": "bip01 r finger01",
+		"bip01 l finger02": "bip01 r finger02",
+		"bip01 l finger1": "bip01 r finger1",
+		"bip01 l finger11": "bip01 r finger11",
+		"bip01 l finger12": "bip01 r finger12",
+		"bip01 l finger2": "bip01 r finger2",
+		"bip01 l finger21": "bip01 r finger21",
+		"bip01 l finger22": "bip01 r finger22",
+		"bip01 l finger3": "bip01 r finger3",
+		"bip01 l finger31": "bip01 r finger31",
+		"bip01 l finger32": "bip01 r finger32",
+		"bip01 l finger4": "bip01 r finger4",
+		"bip01 l finger41": "bip01 r finger41",
+		"bip01 l finger42": "bip01 r finger42",
+	}
+
+	# Build target skeleton bone name -> index map
+	var target_bone_map: Dictionary = {}
+	for i in target_skeleton.get_bone_count():
+		target_bone_map[target_skeleton.get_bone_name(i).to_lower()] = i
+
+	# Process each bone in the skin data
+	for bone_idx in range(skin_data.bones.size()):
+		var bone_info: Dictionary = skin_data.bones[bone_idx]
+		var bone_transform: Defs.NIFTransform = bone_info["transform"]
+
+		# Get bone name from NiNode reference
+		var bone_node := _reader.call("get_record", skin_instance.bone_indices[bone_idx]) as Defs.NiNode
+		if bone_node == null:
+			continue
+
+		var bone_name := bone_node.name.to_lower() if bone_node.name else ""
+		if bone_name.is_empty():
+			continue
+
+		# Apply mirroring if needed
+		if mirror and bone_name in BONE_MIRROR_MAP:
+			bone_name = BONE_MIRROR_MAP[bone_name]
+
+		# Find in target skeleton
+		if not bone_name in target_bone_map:
+			if debug_mode:
+				push_warning("NIFSkeletonBuilder: Bone '%s' not in target skeleton" % bone_name)
+			continue
+
+		var target_bone_idx: int = target_bone_map[bone_name]
+
+		# Convert inverse bind matrix from NIF to Godot coordinates
+		var inv_bind_nif := bone_transform.to_transform3d()
+		var inv_bind_godot := CS.transform_to_godot(inv_bind_nif)
+
+		# The bind pose is the inverse of the inverse bind matrix
+		var bind_pose := inv_bind_godot.affine_inverse()
+
+		# Add to skin - Godot stores the BIND POSE (not inverse bind)
+		skin.add_bind(target_bone_idx, bind_pose)
+
+	if debug_mode:
+		print("NIFSkeletonBuilder: Built Skin with %d binds" % skin.get_bind_count())
+
+	return skin
+
+
+## Build a full skeleton from the NIF node hierarchy (for character base skeletons)
+## This includes ALL bone nodes, not just those with vertex weights.
+## Use this for base_anim.nif and similar skeleton-only files.
+func build_skeleton_from_hierarchy(root_node: Defs.NiNode) -> Skeleton3D:
+	_validation_errors.clear()
+	_validation_warnings.clear()
+	_bone_name_to_index.clear()
+
+	if root_node == null:
+		_add_error("Null root node provided")
+		return null
+
+	var skeleton := Skeleton3D.new()
+	skeleton.name = "Skeleton3D"
+
+	# Find all bone nodes (nodes with names starting with "Bip01" or "Root Bone")
+	# and build them in parent-child order
+	var bone_nodes: Array[Dictionary] = []  # [{node, parent_idx}]
+	_collect_bone_nodes(root_node, -1, bone_nodes)
+
+	if bone_nodes.is_empty():
+		_add_error("No bone nodes found in hierarchy")
+		return null
+
+	if debug_mode:
+		print("NIFSkeletonBuilder: Building skeleton from hierarchy with %d bones" % bone_nodes.size())
+
+	# Add bones to skeleton in order (parent first, then children)
+	for bone_data: Dictionary in bone_nodes:
+		var node: Defs.NiNode = bone_data["node"]
+		var parent_idx: int = bone_data["parent_idx"]
+
+		var bone_name: String = node.name if node.name else "Bone_%d" % skeleton.get_bone_count()
+
+		# Check for duplicate bone names
+		var lower_name := bone_name.to_lower()
+		if lower_name in _bone_name_to_index:
+			# Skip duplicates
+			continue
+
+		var bone_idx := skeleton.get_bone_count()
+		skeleton.add_bone(bone_name)
+		_bone_name_to_index[lower_name] = bone_idx
+
+		# Set parent relationship
+		if parent_idx >= 0:
+			skeleton.set_bone_parent(bone_idx, parent_idx)
+
+		# Set rest pose from node transform
+		var rest_pose := _convert_nif_transform(node.transform.to_transform3d())
+		skeleton.set_bone_rest(bone_idx, rest_pose)
+
+		if debug_mode:
+			print("  Bone %d: '%s' (parent: %d)" % [bone_idx, bone_name, parent_idx])
+
+	return skeleton
+
+
+## Recursively collect bone nodes from NIF hierarchy
+func _collect_bone_nodes(node: Defs.NiNode, parent_bone_idx: int, out_bones: Array[Dictionary]) -> void:
+	if node == null:
+		return
+
+	# Check if this node is a bone (Bip01 naming convention for Morrowind)
+	var name_lower := node.name.to_lower() if node.name else ""
+	var is_bone := name_lower.begins_with("bip01") or name_lower == "root bone" or name_lower == "bone" or name_lower.begins_with("bone_")
+
+	var this_bone_idx := parent_bone_idx
+
+	if is_bone:
+		this_bone_idx = out_bones.size()
+		out_bones.append({
+			"node": node,
+			"parent_idx": parent_bone_idx
+		})
+
+	# Recurse into children
+	for child_idx in node.children_indices:
+		if child_idx < 0:
+			continue
+		var child: Defs.NIFRecord = _reader.call("get_record", child_idx) as Defs.NIFRecord
+		if child is Defs.NiNode:
+			_collect_bone_nodes(child as Defs.NiNode, this_bone_idx, out_bones)
 
 
 ## Check if NiSkinPartition data should be used instead of NiSkinData weights
