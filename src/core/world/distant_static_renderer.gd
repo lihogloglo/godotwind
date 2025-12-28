@@ -54,6 +54,7 @@ class CellInstance:
 	var instance_rid: RID      ## RenderingServer instance
 	var mesh_rid: RID          ## RenderingServer mesh
 	var material_rid: RID      ## RenderingServer material
+	var mesh_ref: ArrayMesh    ## Keep reference to prevent GC invalidating mesh_rid
 	var aabb: AABB
 	var vertex_count: int
 	var object_count: int
@@ -62,7 +63,11 @@ class CellInstance:
 
 
 func _enter_tree() -> void:
-	_scenario = get_viewport().get_world_3d().scenario
+	var world_3d := get_viewport().get_world_3d()
+	if world_3d:
+		_scenario = world_3d.scenario
+	else:
+		push_error("[DistantStaticRenderer] No World3D available in viewport!")
 	_create_default_material()
 
 
@@ -76,13 +81,16 @@ func _create_default_material() -> void:
 	if _default_material:
 		return
 	_default_material = StandardMaterial3D.new()
-	_default_material.albedo_color = Color(0.6, 0.55, 0.5)  # Neutral gray-brown
+	# Neutral gray base - vertex colors will override if present
+	_default_material.albedo_color = Color(0.6, 0.6, 0.6)
 	_default_material.roughness = 0.9
 	_default_material.metallic = 0.0
-	# Disable features for performance
+	# Per-vertex shading for performance at distance
 	_default_material.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
-	# Enable vertex colors if the mesh has them
+	# Use vertex colors if available (baked from original materials)
 	_default_material.vertex_color_use_as_albedo = true
+	# Normal backface culling
+	_default_material.cull_mode = BaseMaterial3D.CULL_BACK
 
 
 ## Set the mesh merger to use
@@ -101,31 +109,41 @@ func set_cell_manager(manager: CellManager) -> void:
 ## mesh: Pre-baked ArrayMesh from {cache}/merged_cells/
 ## Returns true if cell was successfully added
 func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
-	# One-time diagnostic on first cell
+	# Log first cell for diagnostics - BEFORE any checks
 	if not _first_cell_logged:
 		_first_cell_logged = true
-		print("[DistantStaticRenderer] === FIRST add_cell_prebaked CALL ===")
-		print("[DistantStaticRenderer]   Cell: %s" % cell_grid)
-		print("[DistantStaticRenderer]   Mesh: %s, surfaces: %d" % [
-			"OK" if mesh else "NULL",
-			mesh.get_surface_count() if mesh else 0
-		])
-		print("[DistantStaticRenderer]   Scenario valid: %s" % _scenario.is_valid())
+		print("[DistantStaticRenderer] First cell diagnostic:")
+		print("  cell_grid: %s" % cell_grid)
+		print("  mesh: %s" % mesh)
+		print("  mesh surfaces: %d" % (mesh.get_surface_count() if mesh else -1))
+		print("  mesh AABB: %s" % (mesh.get_aabb() if mesh else "N/A"))
+		print("  scenario valid: %s" % _scenario.is_valid())
+		print("  in scene tree: %s" % is_inside_tree())
+		var viewport_scenario := get_viewport().get_world_3d().scenario if get_viewport() and get_viewport().get_world_3d() else RID()
+		print("  current viewport scenario: %s" % viewport_scenario)
+		print("  scenarios match: %s" % (_scenario == viewport_scenario))
 
 	# Skip if already loaded
 	if cell_grid in _cells:
 		return true
 
+	# Validate scenario - critical for rendering
 	if not _scenario.is_valid():
-		push_warning("DistantStaticRenderer: Not in scene tree, cannot add cells")
+		push_error("DistantStaticRenderer: Invalid scenario RID - mesh won't render! Is node in scene tree?")
 		return false
 
 	if not mesh:
+		push_warning("DistantStaticRenderer: Null mesh for cell %s" % cell_grid)
+		return false
+
+	if mesh.get_surface_count() == 0:
+		push_warning("DistantStaticRenderer: Empty mesh (0 surfaces) for cell %s" % cell_grid)
 		return false
 
 	# Create RenderingServer resources
 	var cell_instance: CellInstance = CellInstance.new()
 	cell_instance.grid = cell_grid
+	cell_instance.mesh_ref = mesh  # CRITICAL: Keep reference to prevent GC
 	cell_instance.mesh_rid = mesh.get_rid()
 	cell_instance.owns_mesh = false  # Mesh is owned by resource
 
@@ -134,18 +152,37 @@ func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 	RenderingServer.instance_set_base(cell_instance.instance_rid, cell_instance.mesh_rid)
 	RenderingServer.instance_set_scenario(cell_instance.instance_rid, _scenario)
 
-	# Apply default material to all surfaces if mesh has no material
-	# This ensures the mesh is visible even if prebaked without materials
-	if _default_material and mesh.get_surface_count() > 0:
-		for surf_idx: int in range(mesh.get_surface_count()):
-			var existing_material: Material = mesh.surface_get_material(surf_idx)
-			if not existing_material:
-				RenderingServer.instance_geometry_set_material_override(
-					cell_instance.instance_rid, _default_material.get_rid())
-				break  # Material override applies to whole instance
+	# CRITICAL: Set identity transform explicitly - RenderingServer requires this!
+	# Without this, the instance won't render (mesh vertices are already in world space)
+	RenderingServer.instance_set_transform(cell_instance.instance_rid, Transform3D.IDENTITY)
+
+	# CRITICAL: Set visibility margin for proper frustum culling at distance
+	# Without this, Godot may cull large distant meshes prematurely
+	RenderingServer.instance_set_extra_visibility_margin(cell_instance.instance_rid, 500.0)
+
+	# Ensure instance is visible (explicit, not relying on default)
+	RenderingServer.instance_set_visible(cell_instance.instance_rid, true)
+
+	# Set layer mask to all layers to ensure visibility with any camera cull mask
+	RenderingServer.instance_set_layer_mask(cell_instance.instance_rid, 0xFFFFFFFF)
+
+	# ALWAYS apply default material for prebaked meshes (they have no materials baked in)
+	# This ensures meshes are visible with a neutral color
+	if _default_material:
+		RenderingServer.instance_geometry_set_material_override(
+			cell_instance.instance_rid, _default_material.get_rid())
+
+	# DEBUG: Print instance creation details
+	if _cells.size() < 3:  # Only for first few cells
+		var center := mesh.get_aabb().get_center()
+		print("DSR CELL %s CENTER=(%.0f,%.0f,%.0f) INST=%s SCEN=%s" % [
+			cell_grid, center.x, center.y, center.z,
+			cell_instance.instance_rid.is_valid(),
+			_scenario.is_valid()
+		])
 
 	# Get mesh info for stats
-	cell_instance.aabb = mesh.get_aabb() if mesh.get_surface_count() > 0 else AABB()
+	cell_instance.aabb = mesh.get_aabb()
 	cell_instance.vertex_count = 0
 	cell_instance.object_count = 1
 	for i: int in range(mesh.get_surface_count()):
@@ -163,23 +200,6 @@ func add_cell_prebaked(cell_grid: Vector2i, mesh: ArrayMesh) -> bool:
 	_stats["total_objects"] += cell_instance.object_count
 	_stats["visible_cells"] += 1
 
-	# Log first successful add
-	if _stats["loaded_cells"] == 1:
-		print("[DistantStaticRenderer] First cell added successfully: %s (%d verts)" % [
-			cell_grid, cell_instance.vertex_count])
-		# Debug: log mesh AABB to verify position
-		print("[DistantStaticRenderer]   AABB: pos=%s, size=%s" % [cell_instance.aabb.position, cell_instance.aabb.size])
-		print("[DistantStaticRenderer]   Instance RID valid: %s, Mesh RID valid: %s" % [
-			cell_instance.instance_rid.is_valid(), cell_instance.mesh_rid.is_valid()])
-		# Check if scenario is in the right world
-		print("[DistantStaticRenderer]   Scenario RID: %s" % _scenario)
-		print("[DistantStaticRenderer]   Self global_position: %s" % global_position)
-
-	# Every 10th cell, log a progress update
-	if _stats["loaded_cells"] % 10 == 0:
-		print("[DistantStaticRenderer] Loaded %d cells total (%d vertices)" % [
-			_stats["loaded_cells"], _stats["total_vertices"]])
-
 	return true
 
 
@@ -193,8 +213,9 @@ func add_cell(cell_grid: Vector2i, references: Array = []) -> bool:
 	if cell_grid in _cells:
 		return true
 
+	# Validate scenario - critical for rendering
 	if not _scenario.is_valid():
-		push_warning("DistantStaticRenderer: Not in scene tree, cannot add cells")
+		push_error("DistantStaticRenderer: Invalid scenario RID - mesh won't render! Is node in scene tree?")
 		return false
 
 	# Get references if not provided
@@ -226,6 +247,7 @@ func add_cell(cell_grid: Vector2i, references: Array = []) -> bool:
 	if not mesh:
 		return false
 
+	cell_instance.mesh_ref = mesh  # CRITICAL: Keep reference to prevent GC
 	cell_instance.mesh_rid = mesh.get_rid()
 	cell_instance.owns_mesh = false  # Mesh is owned by ArrayMesh resource
 
@@ -234,12 +256,26 @@ func add_cell(cell_grid: Vector2i, references: Array = []) -> bool:
 	RenderingServer.instance_set_base(cell_instance.instance_rid, cell_instance.mesh_rid)
 	RenderingServer.instance_set_scenario(cell_instance.instance_rid, _scenario)
 
-	# Apply material if available
+	# CRITICAL: Set identity transform explicitly - RenderingServer requires this!
+	RenderingServer.instance_set_transform(cell_instance.instance_rid, Transform3D.IDENTITY)
+
+	# CRITICAL: Set visibility margin for proper frustum culling at distance
+	RenderingServer.instance_set_extra_visibility_margin(cell_instance.instance_rid, 500.0)
+
+	# Ensure instance is visible (explicit)
+	RenderingServer.instance_set_visible(cell_instance.instance_rid, true)
+
+	# Set layer mask to all layers
+	RenderingServer.instance_set_layer_mask(cell_instance.instance_rid, 0xFFFFFFFF)
+
+	# Apply material if available, otherwise use default
 	if merged_data.material:
 		cell_instance.material_rid = merged_data.material.get_rid()
 		RenderingServer.instance_geometry_set_material_override(
-			cell_instance.instance_rid, cell_instance.material_rid
-		)
+			cell_instance.instance_rid, cell_instance.material_rid)
+	elif _default_material:
+		RenderingServer.instance_geometry_set_material_override(
+			cell_instance.instance_rid, _default_material.get_rid())
 
 	# Store metadata
 	cell_instance.aabb = merged_data.aabb
@@ -380,4 +416,23 @@ func get_cell_info(cell_grid: Vector2i) -> Dictionary:
 		"object_count": cell_instance.object_count,
 		"aabb": cell_instance.aabb,
 		"visible": cell_instance.visible,
+	}
+
+
+## Debug: Print detailed state information
+func debug_print_state() -> void:
+	print("[DistantStaticRenderer] Loaded cells: %d, Total vertices: %d, Visible cells: %d" % [
+		_cells.size(), _stats["total_vertices"], _stats["visible_cells"]])
+
+
+## Debug: Get extended statistics including rendering info
+func get_debug_info() -> Dictionary:
+	return {
+		"scenario_valid": _scenario.is_valid(),
+		"material_valid": _default_material != null,
+		"loaded_cells": _stats["loaded_cells"],
+		"visible_cells": _stats["visible_cells"],
+		"total_vertices": _stats["total_vertices"],
+		"total_objects": _stats["total_objects"],
+		"in_tree": is_inside_tree(),
 	}

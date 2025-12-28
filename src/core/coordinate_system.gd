@@ -47,6 +47,12 @@ const CELL_SIZE_MW: float = 8192.0
 ## Morrowind cell size in Godot meters
 const CELL_SIZE_GODOT: float = CELL_SIZE_MW / UNITS_PER_METER  # ~117.03
 
+## Default terrain height for areas without LAND data (ocean floor)
+## Morrowind ocean floor is typically around -2000 to -4000 MW units below sea level
+## We use -2000 MW units = ~-28.6 meters in Godot, well below sea level (0)
+const OCEAN_FLOOR_MW: float = -2000.0
+const OCEAN_FLOOR_GODOT: float = OCEAN_FLOOR_MW / UNITS_PER_METER  # ~-28.6m
+
 ## Terrain3D configuration constants (for consistent setup across tools)
 ## Morrowind LAND records have 65x65 vertices per cell (we crop to 64 to avoid overlap)
 const TERRAIN_VERTICES_PER_CELL: int = 64
@@ -294,6 +300,13 @@ static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true
 		push_error("CoordinateSystem.configure_terrain3d: terrain is null")
 		return false
 
+	# Terrain3D.data is read-only and created automatically by the addon
+	# when the node enters the scene tree. If data is null here, the caller
+	# should wait for the node to fully initialize (await get_tree().process_frame)
+	if not terrain.data:
+		push_error("CoordinateSystem.configure_terrain3d: terrain.data is null - ensure Terrain3D is in scene tree first")
+		return false
+
 	# Set vertex spacing for Morrowind cells
 	terrain.vertex_spacing = TERRAIN_VERTEX_SPACING
 
@@ -310,6 +323,13 @@ static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true
 	if create_material and not terrain.material:
 		terrain.set_material(Terrain3DMaterial.new())
 		terrain.material.show_checkered = false
+
+	# Configure world background to show flat terrain outside regions
+	# Note: FLAT mode uses height 0 (sea level). For ocean appearance,
+	# rely on the ocean mesh rendering over these areas.
+	if terrain.material:
+		# WorldBackground.FLAT = 1 (renders flat plane at height 0 outside regions)
+		terrain.material.world_background = 1  # FLAT
 
 	# Create assets if needed
 	if create_assets and not terrain.assets:

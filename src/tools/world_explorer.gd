@@ -386,123 +386,6 @@ func _setup_console() -> void:
 		PackedStringArray(["coe -2 -9"])
 	)
 
-	# Register cloud control commands
-	var cloud_scale_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("scale", TYPE_FLOAT, "Cloud scale (0.1-5.0, smaller = larger clouds)")
-	]
-	console.register_command(
-		"cloudscale", _cmd_cloud_scale,
-		"Set volumetric cloud scale (smaller values = larger clouds)",
-		"sky",
-		PackedStringArray(["cs"]),
-		cloud_scale_params,
-		PackedStringArray(["cloudscale 0.3", "cs 1.0"])
-	)
-
-	var cloud_coverage_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("coverage", TYPE_FLOAT, "Cloud coverage (0.0-1.0)")
-	]
-	console.register_command(
-		"cloudcoverage", _cmd_cloud_coverage,
-		"Set cloud coverage (0 = clear, 1 = overcast)",
-		"sky",
-		PackedStringArray(["cc"]),
-		cloud_coverage_params,
-		PackedStringArray(["cloudcoverage 0.5", "cc 0.8"])
-	)
-
-	var cloud_height_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("height", TYPE_FLOAT, "Cloud base height (1.0-20.0)")
-	]
-	console.register_command(
-		"cloudheight", _cmd_cloud_height,
-		"Set cloud base height",
-		"sky",
-		PackedStringArray(["ch"]),
-		cloud_height_params,
-		PackedStringArray(["cloudheight 5.0", "ch 10.0"])
-	)
-
-	var cloud_density_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("density", TYPE_FLOAT, "Cloud density multiplier (0.1-3.0)")
-	]
-	console.register_command(
-		"clouddensity", _cmd_cloud_density,
-		"Set cloud density multiplier",
-		"sky",
-		PackedStringArray(["cd"]),
-		cloud_density_params,
-		PackedStringArray(["clouddensity 1.5", "cd 2.0"])
-	)
-
-	var cloud_thickness_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("thickness", TYPE_FLOAT, "Cloud layer thickness (1.0-20.0)")
-	]
-	console.register_command(
-		"cloudthickness", _cmd_cloud_thickness,
-		"Set cloud layer vertical thickness",
-		"sky",
-		PackedStringArray(["ct"]),
-		cloud_thickness_params,
-		PackedStringArray(["cloudthickness 8.0", "ct 12.0"])
-	)
-
-	var cloud_speed_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("speed", TYPE_FLOAT, "Wind speed in m/s (0-120)")
-	]
-	console.register_command(
-		"cloudspeed", _cmd_cloud_speed,
-		"Set cloud wind speed",
-		"sky",
-		PackedStringArray(["cspd"]),
-		cloud_speed_params,
-		PackedStringArray(["cloudspeed 1.0", "cspd 0.5"])
-	)
-
-	var cloud_detail_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("strength", TYPE_FLOAT, "Detail erosion strength (0.0-1.0)")
-	]
-	console.register_command(
-		"clouddetail", _cmd_cloud_detail,
-		"Set cloud detail erosion strength (makes clouds wispier)",
-		"sky",
-		PackedStringArray(["cdet"]),
-		cloud_detail_params,
-		PackedStringArray(["clouddetail 0.2", "cdet 0.5"])
-	)
-
-	var cloud_info_params: Array[CommandRegistry.ParameterInfo] = []
-	console.register_command(
-		"cloudinfo", _cmd_cloud_info,
-		"Show current cloud parameters",
-		"sky",
-		PackedStringArray(["ci"]),
-		cloud_info_params,
-		PackedStringArray(["cloudinfo"])
-	)
-
-	var cloud_color_params: Array[CommandRegistry.ParameterInfo] = [
-		CommandRegistry.ParameterInfo.new("color", TYPE_STRING, "Color name: red, green, blue, pink, white")
-	]
-	console.register_command(
-		"cloudcolor", _cmd_cloud_color,
-		"Set cloud color for debugging (red, green, blue, pink, white)",
-		"sky",
-		PackedStringArray(["ccol"]),
-		cloud_color_params,
-		PackedStringArray(["cloudcolor red", "ccol pink"])
-	)
-
-	var cloud_procedural_params: Array[CommandRegistry.ParameterInfo] = []
-	console.register_command(
-		"cloudprocedural", _cmd_cloud_procedural,
-		"Toggle procedural noise (bypasses 3D textures for debugging)",
-		"sky",
-		PackedStringArray(["cproc"]),
-		cloud_procedural_params,
-		PackedStringArray(["cloudprocedural", "cproc"])
-	)
-
 	_log("Console initialized (~ to toggle)")
 
 
@@ -549,173 +432,6 @@ func _cmd_center_on_exterior(args: Dictionary) -> CommandRegistry.CommandResult:
 
 	_teleport_to_cell(x, y)
 	return CommandRegistry.CommandResult.ok("Teleported to cell (%d, %d)" % [x, y])
-
-
-## Console command: Set cloud scale
-func _cmd_cloud_scale(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var scale: float = args.get("scale", 1.0)
-	scale = clampf(scale, 0.1, 5.0)
-	dome.vol_cloud_scale = scale
-	return CommandRegistry.CommandResult.ok("Cloud scale set to %.2f" % scale)
-
-
-## Console command: Set cloud coverage
-func _cmd_cloud_coverage(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var coverage: float = args.get("coverage", 0.5)
-	coverage = clampf(coverage, 0.0, 1.0)
-	dome.vol_cloud_coverage = coverage
-	return CommandRegistry.CommandResult.ok("Cloud coverage set to %.2f" % coverage)
-
-
-## Console command: Set cloud height
-func _cmd_cloud_height(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var height: float = args.get("height", 3.0)
-	height = clampf(height, 1.0, 20.0)
-	dome.vol_cloud_base_height = height
-	return CommandRegistry.CommandResult.ok("Cloud base height set to %.2f" % height)
-
-
-## Console command: Set cloud density
-func _cmd_cloud_density(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var density: float = args.get("density", 1.0)
-	density = clampf(density, 0.1, 3.0)
-	dome.vol_cloud_density = density
-	return CommandRegistry.CommandResult.ok("Cloud density set to %.2f" % density)
-
-
-## Console command: Set cloud thickness
-func _cmd_cloud_thickness(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var thickness: float = args.get("thickness", 5.0)
-	thickness = clampf(thickness, 1.0, 20.0)
-	dome.vol_cloud_thickness = thickness
-	return CommandRegistry.CommandResult.ok("Cloud thickness set to %.2f" % thickness)
-
-
-## Console command: Set cloud wind speed
-func _cmd_cloud_speed(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var speed: float = args.get("speed", 1.0)
-	speed = clampf(speed, 0.0, 120.0)
-	dome.wind_speed = speed
-	return CommandRegistry.CommandResult.ok("Cloud wind speed set to %.2f m/s" % speed)
-
-
-## Console command: Set cloud detail erosion
-func _cmd_cloud_detail(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var strength: float = args.get("strength", 0.4)
-	strength = clampf(strength, 0.0, 1.0)
-	dome.vol_cloud_detail_strength = strength
-	return CommandRegistry.CommandResult.ok("Cloud detail strength set to %.2f" % strength)
-
-
-## Console command: Show cloud info
-func _cmd_cloud_info(_args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	if not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("SkyDome not available.")
-
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-	var info := "Volumetric Cloud Parameters:\n"
-	info += "  Enabled: %s\n" % str(dome.volumetric_clouds_enabled)
-	info += "  Scale: %.2f (smaller = larger clouds)\n" % dome.vol_cloud_scale
-	info += "  Coverage: %.2f\n" % dome.vol_cloud_coverage
-	info += "  Density: %.2f\n" % dome.vol_cloud_density
-	info += "  Base Height: %.2f\n" % dome.vol_cloud_base_height
-	info += "  Thickness: %.2f\n" % dome.vol_cloud_thickness
-	info += "  Detail Strength: %.2f\n" % dome.vol_cloud_detail_strength
-	info += "  Wind Speed: %.2f m/s\n" % dome.wind_speed
-	info += "  March Steps: %d\n" % dome.vol_cloud_march_steps
-	info += "  Procedural Noise: %s\n" % str(dome.vol_use_procedural_noise)
-	info += "  Shape Texture: %s\n" % ("loaded" if dome.vol_cloud_shape_texture else "MISSING")
-	info += "  Detail Texture: %s\n" % ("loaded" if dome.vol_cloud_detail_texture else "MISSING")
-	info += "\nCommands: cloudscale (cs), cloudcoverage (cc), cloudheight (ch),"
-	info += "\n          clouddensity (cd), cloudthickness (ct), cloudspeed (cspd),"
-	info += "\n          clouddetail (cdet), cloudcolor (ccol), cloudprocedural (cproc)"
-	return CommandRegistry.CommandResult.ok(info)
-
-
-## Console command: Set cloud debug color (for visibility testing)
-func _cmd_cloud_color(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-
-	var color_name: String = args.get("color", "white")
-	var base_color: Color
-	var shadow_color: Color
-
-	match color_name.to_lower():
-		"red":
-			base_color = Color(1.0, 0.2, 0.2)
-			shadow_color = Color(0.5, 0.1, 0.1)
-		"green":
-			base_color = Color(0.2, 1.0, 0.2)
-			shadow_color = Color(0.1, 0.5, 0.1)
-		"blue":
-			base_color = Color(0.2, 0.2, 1.0)
-			shadow_color = Color(0.1, 0.1, 0.5)
-		"pink":
-			base_color = Color(1.0, 0.4, 0.8)
-			shadow_color = Color(0.5, 0.2, 0.4)
-		"white", _:
-			base_color = Color(0.95, 0.95, 1.0)
-			shadow_color = Color(0.4, 0.45, 0.55)
-
-	dome.vol_cloud_base_color = base_color
-	dome.vol_cloud_shadow_color = shadow_color
-	return CommandRegistry.CommandResult.ok("Cloud color set to: %s" % color_name)
-
-
-## Console command: Toggle procedural noise (for debugging texture issues)
-func _cmd_cloud_procedural(args: Dictionary) -> CommandRegistry.CommandResult:
-	if not sky_3d or not sky_3d.sky:
-		return CommandRegistry.CommandResult.error("Sky3D not initialized. Toggle sky on first.")
-	var dome := sky_3d.sky as SkyDomeVolumetric
-	if not dome:
-		return CommandRegistry.CommandResult.error("SkyDomeVolumetric not available.")
-
-	dome.vol_use_procedural_noise = not dome.vol_use_procedural_noise
-	var status: String = "ON (slow but works without textures)" if dome.vol_use_procedural_noise else "OFF (uses 3D textures)"
-	return CommandRegistry.CommandResult.ok("Procedural noise: %s" % status)
 
 
 ## Toggle between fly camera and player controller
@@ -1394,7 +1110,7 @@ func _create_sky3d() -> void:
 	if _sky3d_initialized:
 		return
 
-	_log("Initializing Sky3D with volumetric clouds...")
+	_log("Initializing Sky3D...")
 
 	# Remove fallback environment BEFORE adding Sky3D (only one WorldEnvironment can be active)
 	if _fallback_world_env and _fallback_world_env.is_inside_tree():
@@ -1402,8 +1118,8 @@ func _create_sky3d() -> void:
 	if _fallback_light:
 		_fallback_light.visible = false
 
-	# Instantiate Sky3DVolumetric for raymarched volumetric clouds
-	sky_3d = Sky3DVolumetric.new()
+	# Instantiate standard Sky3D with 2D texture clouds
+	sky_3d = Sky3D.new()
 	sky_3d.name = "Sky3D"
 
 	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
@@ -1417,7 +1133,7 @@ func _create_sky3d() -> void:
 	sky_3d.sky3d_enabled = true
 
 	_sky3d_initialized = true
-	_log("Sky3D initialized with volumetric clouds")
+	_log("Sky3D initialized")
 
 
 ## Setup fallback environment and light for when Sky3D is disabled
@@ -1509,8 +1225,10 @@ func _on_preprocess_pressed() -> void:
 	# Use COMBINED REGION approach (4x4 cells per region = 256x256 pixels)
 	# This matches the on-the-fly terrain generation and supports larger terrain
 
-	# First, collect all unique regions that have terrain data
+	# First, collect all unique regions that have terrain data and find bounds
 	var regions_with_data: Dictionary = {}  # region_coord -> true
+	var min_region := Vector2i(999, 999)
+	var max_region := Vector2i(-999, -999)
 
 	for key: String in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
@@ -1521,31 +1239,59 @@ func _on_preprocess_pressed() -> void:
 		var region_coord: Vector2i = terrain_manager.cell_to_region(Vector2i(land.cell_x, land.cell_y))
 		regions_with_data[region_coord] = true
 
-	_log("Found %d combined regions to process (from %d cells)" % [regions_with_data.size(), ESMManager.lands.size()])
+		# Track bounds
+		min_region.x = mini(min_region.x, region_coord.x)
+		min_region.y = mini(min_region.y, region_coord.y)
+		max_region.x = maxi(max_region.x, region_coord.x)
+		max_region.y = maxi(max_region.y, region_coord.y)
 
-	# Process each combined region
-	var total_regions := regions_with_data.size()
+	_log("Found %d combined regions with data (from %d cells)" % [regions_with_data.size(), ESMManager.lands.size()])
+	_log("Region bounds: (%d,%d) to (%d,%d)" % [min_region.x, min_region.y, max_region.x, max_region.y])
+
+	# Expand bounds by 2 regions on each side for ocean floor
+	const OCEAN_PADDING := 2
+	min_region.x = maxi(min_region.x - OCEAN_PADDING, -16)
+	min_region.y = maxi(min_region.y - OCEAN_PADDING, -16)
+	max_region.x = mini(max_region.x + OCEAN_PADDING, 15)
+	max_region.y = mini(max_region.y + OCEAN_PADDING, 15)
+
+	# Calculate total regions (including ocean floor)
+	var total_x := max_region.x - min_region.x + 1
+	var total_y := max_region.y - min_region.y + 1
+	var total_regions := total_x * total_y
+
+	_log("Processing %d total regions (including %d ocean floor regions)" % [
+		total_regions, total_regions - regions_with_data.size()])
+
 	var processed := 0
-	var skipped := 0
+	var ocean_floor := 0
 
 	# Create callable for getting LAND records
 	var get_land_func := func(cell_x: int, cell_y: int) -> LandRecord:
 		return ESMManager.get_land(cell_x, cell_y)
 
-	for region_coord: Vector2i in regions_with_data.keys():
-		# Import combined region (4x4 cells at once)
-		if terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func):
-			processed += 1
-		else:
-			skipped += 1
+	# Process ALL regions in the expanded bounds
+	for ry in range(min_region.y, max_region.y + 1):
+		for rx in range(min_region.x, max_region.x + 1):
+			var region_coord := Vector2i(rx, ry)
 
-		# Update progress
-		var percent := float(processed + skipped) / float(total_regions) * 100.0
-		preprocess_status.text = "Processing... %.0f%% (%d/%d regions)" % [percent, processed + skipped, total_regions]
+			if regions_with_data.has(region_coord):
+				# Region has LAND data - import normally
+				if terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func):
+					processed += 1
+			else:
+				# No LAND data - create ocean floor region
+				if terrain_manager.import_ocean_floor_region(terrain_3d, region_coord):
+					ocean_floor += 1
 
-		# Yield periodically to keep UI responsive
-		if (processed + skipped) % 10 == 0:
-			await get_tree().process_frame
+			# Update progress
+			var done := processed + ocean_floor
+			var percent := float(done) / float(total_regions) * 100.0
+			preprocess_status.text = "Processing... %.0f%% (%d/%d regions)" % [percent, done, total_regions]
+
+			# Yield periodically to keep UI responsive
+			if done % 10 == 0:
+				await get_tree().process_frame
 
 	# Save to disk (cache folder)
 	var terrain_data_dir := SettingsManager.get_terrain_path()
@@ -1553,8 +1299,8 @@ func _on_preprocess_pressed() -> void:
 	terrain_3d.data.save_directory(terrain_data_dir)
 
 	_log("[color=green]Terrain preprocessing complete![/color]")
-	_log("  Processed: %d combined regions (4x4 cells each)" % processed)
-	_log("  Skipped: %d regions (no height data)" % skipped)
+	_log("  Terrain regions: %d (4x4 cells each)" % processed)
+	_log("  Ocean floor regions: %d" % ocean_floor)
 	_log("  Saved to: %s" % terrain_data_dir)
 
 	preprocess_btn.disabled = false

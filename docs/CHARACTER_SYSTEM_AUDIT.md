@@ -1,15 +1,39 @@
 # Character System Audit: OpenMW vs Godotwind (Mixamo)
 
+## BUGS FIXED (2024-12-28)
+
+### Fixed: MorrowindNPCAssembler Now Uses SkinRebinder
+
+**File:** `src/core/character/morrowind/morrowind_npc_assembler.gd`
+
+The assembler was computing inverse bind matrices from Mixamo skeleton rest poses instead of using the original Morrowind matrices. This caused body parts to appear at wrong positions.
+
+**Fix applied:** `_attach_skinned_mesh_mixamo()` now calls `SkinRebinder.rebind()` which correctly uses the original Morrowind inverse bind matrices.
+
+### Understanding Morrowind Body Part Meshes
+
+Morrowind body part NIFs (hands, arms, legs) contain geometry for **BOTH** left and right sides in a single mesh. The vertices are skinned to both `Bip01 L Hand` and `Bip01 R Hand` bones simultaneously. This is working as designed.
+
+### Current State
+
+| Issue | Status |
+|-------|--------|
+| Inverse bind matrices | **FIXED** - Uses SkinRebinder |
+| Code duplication | **FIXED** - Single implementation |
+| Both sides in mesh | **BY DESIGN** - MW meshes contain L+R geometry |
+
+---
+
 ## Executive Summary
 
 | Aspect | OpenMW | Godotwind (Mixamo) |
 |--------|--------|-------------------|
 | Skeleton | Uses original Morrowind Bip01 hierarchy | Uses Mixamo skeleton with bone mapping |
-| Mesh Binding | Original NIF inverse bind matrices | Rebinds meshes to Mixamo skeleton |
+| Mesh Binding | Original NIF inverse bind matrices | Uses SkinRebinder with original MW matrices |
 | Animation | NIF keyframe controllers | Mixamo FBX animations |
 | Skinning | RigGeometry with original bone weights | Same weights, remapped bone indices |
 | Body Parts | Fetched from ESM, attached to bones | Same source, different target skeleton |
-| **Symmetrical Limbs** | **Same mesh assigned to L+R slots** | **Single slot only (mesh has both sides)** |
+| **Symmetrical Limbs** | **Mesh skinned to L+R bones** | **Same - mesh has both sides built-in** |
 
 ---
 

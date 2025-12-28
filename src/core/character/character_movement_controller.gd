@@ -29,10 +29,7 @@ extends CharacterBody3D
 @export var navmesh_path_update_interval: float = 0.5
 
 # References
-var animation_controller: CharacterAnimationController
 var character_root: Node3D
-var foot_ik_controller: FootIKController  # Phase 1: IK integration
-var animation_lod_manager: AnimationLODManager  # Phase 1: LOD optimization
 
 # State
 var is_swimming: bool = false
@@ -71,16 +68,12 @@ func _ready() -> void:
 
 
 ## Initialize with character data
-func setup(char_root: Node3D, anim_ctrl: CharacterAnimationController) -> void:
+func setup(char_root: Node3D) -> void:
 	character_root = char_root
-	animation_controller = anim_ctrl
 
 	# Add character root as child
 	if character_root and not character_root.get_parent():
 		add_child(character_root)
-
-	# Setup Phase 1 features
-	_setup_phase1_features()
 
 
 ## Set movement target
@@ -134,11 +127,6 @@ func _physics_process(delta: float) -> void:
 	# Phase 1: Update slope adaptation
 	if enable_slope_adaptation and is_on_floor():
 		_update_slope_adaptation(delta)
-
-	# Update animation
-	if animation_controller:
-		animation_controller.update_animation(delta, velocity, is_on_floor())
-		animation_controller.set_swimming_mode(is_swimming)
 
 
 ## Calculate movement towards target
@@ -239,38 +227,6 @@ func set_collision_shape(radius: float, height: float) -> void:
 # ============================================================================
 # PHASE 1 IMPLEMENTATIONS
 # ============================================================================
-
-## Setup Phase 1 features (IK, LOD, etc.)
-func _setup_phase1_features() -> void:
-	# Setup Foot IK Controller
-	if enable_slope_adaptation and character_root:
-		var skeleton := _find_skeleton(character_root)
-		if skeleton:
-			foot_ik_controller = FootIKController.new()
-			foot_ik_controller.name = "FootIKController"
-			add_child(foot_ik_controller)
-			foot_ik_controller.setup(skeleton, self)
-
-	# Setup Animation LOD Manager
-	if animation_controller:
-		animation_lod_manager = AnimationLODManager.new()
-		animation_lod_manager.name = "AnimationLODManager"
-		add_child(animation_lod_manager)
-		animation_lod_manager.setup(animation_controller, self)
-
-
-## Find skeleton in character hierarchy
-func _find_skeleton(node: Node) -> Skeleton3D:
-	if node is Skeleton3D:
-		return node as Skeleton3D
-
-	for child in node.get_children():
-		var result := _find_skeleton(child)
-		if result:
-			return result
-
-	return null
-
 
 ## Setup navigation agent for NavMesh pathfinding
 func _setup_navigation_agent() -> void:
@@ -400,14 +356,3 @@ func navigate_to(target: Vector3) -> void:
 		navmesh_path_timer = navmesh_path_update_interval  # Force immediate update
 
 
-## Enable or disable IK at runtime
-func set_ik_enabled(enabled: bool) -> void:
-	if foot_ik_controller:
-		foot_ik_controller.set_ik_enabled(enabled)
-
-
-## Get current LOD level (for debugging)
-func get_animation_lod_level() -> String:
-	if animation_lod_manager:
-		return animation_lod_manager.get_lod_level_name()
-	return "NONE"

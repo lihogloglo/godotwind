@@ -97,7 +97,8 @@ func _get_combined_map(region_coord: Vector2i, map_type: MapType) -> Image:
 	match map_type:
 		MapType.HEIGHT:
 			combined = Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
-			combined.fill(Color(0, 0, 0, 1))
+			# Fill with ocean floor depth so areas without data appear as deep ocean
+			combined.fill(Color(CS.OCEAN_FLOOR_GODOT, 0, 0, 1))
 		MapType.CONTROL:
 			combined = Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
 			var default_control := _encode_control_value(0, 0, 0)

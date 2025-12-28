@@ -10,12 +10,10 @@
 class_name NPCProvider
 extends AssetProvider
 
-# Dependencies - now using only Mixamo character factory
-var mixamo_factory: MixamoCharacterFactory = null
+# Dependencies
+const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
+var character_factory: CharacterFactoryV2 = null
 var model_loader: ModelLoader = null
-
-# Always use Mixamo skeleton (legacy mode removed)
-var use_mixamo_skeleton: bool = true
 
 # Data
 var _all_characters: Array[Dictionary] = []  # {id, name, type, record}
@@ -71,10 +69,10 @@ func initialize() -> Error:
 	# Initialize model loader
 	model_loader = ModelLoader.new()
 
-	# Initialize Mixamo character factory
-	mixamo_factory = MixamoCharacterFactory.new()
-	mixamo_factory.debug_mode = true
-	_log("MixamoCharacterFactory initialized")
+	# Initialize character factory (uses Mixamo skeleton internally)
+	character_factory = CharacterFactoryV2.new()
+	character_factory.debug_characters = true
+	_log("CharacterFactoryV2 initialized")
 
 	_progress(85, 100, "Building character list...")
 
@@ -126,7 +124,7 @@ func _build_character_list() -> void:
 
 
 func is_ready() -> bool:
-	return mixamo_factory != null and not _all_characters.is_empty()
+	return character_factory != null and not _all_characters.is_empty()
 
 
 func get_categories() -> Array[String]:
@@ -145,23 +143,23 @@ func load_item(item: Dictionary) -> Node3D:
 		_log("[color=red]Error: No record in item[/color]")
 		return null
 
-	_log("Loading: %s [Mixamo]" % item.get("name", "Unknown"))
+	_log("Loading: %s" % item.get("name", "Unknown"))
 
 	var start_time := Time.get_ticks_msec()
 	var character: CharacterBody3D = null
 
 	if item_type == "npc":
 		var npc_rec := record as NPCRecord
-		var race_rec: RaceRecord = ESMManager.get_race(npc_rec.race_id) if npc_rec else null
-		if race_rec:
-			character = mixamo_factory.create_npc(npc_rec, race_rec)
-		else:
-			_log("[color=red]Error: Race '%s' not found[/color]" % npc_rec.race_id)
+		character = character_factory.create_npc(npc_rec)
+		if character == null:
+			_log("[color=red]Error: Failed to create NPC[/color]")
 			return null
 	elif item_type == "creature":
-		# Creatures not yet supported by MixamoCharacterFactory
-		_log("[color=yellow]Creatures not yet supported - needs implementation[/color]")
-		return null
+		var creature_rec := record as CreatureRecord
+		character = character_factory.create_creature(creature_rec)
+		if character == null:
+			_log("[color=red]Error: Failed to create creature[/color]")
+			return null
 
 	var load_time := Time.get_ticks_msec() - start_time
 	_log("[color=yellow]Character creation took %d ms[/color]" % load_time)
@@ -260,8 +258,8 @@ func _build_settings_tab(container: Control, _item: Dictionary) -> void:
 
 	# Status info
 	var status_label := Label.new()
-	if _last_character and _last_character.has_meta("is_mixamo"):
-		status_label.text = "Current character: Mixamo skeleton"
+	if _last_character and _last_character.has_meta("uses_new_animation_system"):
+		status_label.text = "Current character: Mixamo skeleton + animation system"
 	else:
 		status_label.text = "Current character: None loaded"
 	vbox.add_child(status_label)
@@ -581,12 +579,11 @@ func _get_creature_type_name(creature_type: int) -> String:
 
 
 func cleanup() -> void:
-	if mixamo_factory:
-		_log("MixamoFactory stats: %s" % str(mixamo_factory.get_stats()))
-		mixamo_factory.clear_cache()
+	if character_factory:
+		_log("CharacterFactory stats: %s" % str(CharacterFactoryV2.get_cache_stats()))
 
 	_all_characters.clear()
 	_last_character = null
 	_last_record = null
-	mixamo_factory = null
+	character_factory = null
 	model_loader = null

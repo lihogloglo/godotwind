@@ -53,11 +53,8 @@ static func _load_all_animations() -> void:
 		push_warning("MixamoAnimationLoader: Cannot open animations folder: %s" % MIXAMO_ANIMATIONS_PATH)
 		return
 
-	print("MixamoAnimationLoader: Scanning %s" % MIXAMO_ANIMATIONS_PATH)
-
 	dir.list_dir_begin()
 	var file_name := dir.get_next()
-	var loaded_count := 0
 
 	while file_name != "":
 		if not dir.current_is_dir():
@@ -65,12 +62,10 @@ static func _load_all_animations() -> void:
 			# Handle FBX, GLB, GLTF files (skip .import files)
 			if lower.ends_with(".fbx") or lower.ends_with(".glb") or lower.ends_with(".gltf"):
 				var full_path := MIXAMO_ANIMATIONS_PATH + file_name
-				if _load_animation_file(full_path):
-					loaded_count += 1
+				_load_animation_file(full_path)
 		file_name = dir.get_next()
 
 	dir.list_dir_end()
-	print("MixamoAnimationLoader: Loaded %d animation files" % loaded_count)
 
 
 ## Load animations from a single FBX/GLB/GLTF file
@@ -163,17 +158,11 @@ static func _extract_animations_from_scene(root: Node, path: String) -> bool:
 		# Add to library
 		if _cached_library.has_animation(normalized_name):
 			_cached_library.remove_animation(normalized_name)
-			print("  Replacing: %s" % normalized_name)
 
 		var add_err := _cached_library.add_animation(normalized_name, fixed_anim)
 		if add_err == OK:
 			_cached_animations[normalized_name] = fixed_anim
 			anim_count += 1
-			print("  Added: %s (%.2fs, %d tracks) from %s" % [
-				normalized_name, fixed_anim.length, fixed_anim.get_track_count(), path.get_file()
-			])
-		else:
-			push_warning("  Failed to add animation: %s (error %d)" % [normalized_name, add_err])
 
 	return anim_count > 0
 
@@ -316,7 +305,6 @@ static func print_loaded_animations() -> void:
 	if _cached_library == null:
 		get_animation_library()
 
-	print("=== Loaded Mixamo Animations ===")
 	var names := _cached_library.get_animation_list()
 	for anim_name in names:
 		var anim := _cached_library.get_animation(anim_name)
@@ -331,4 +319,3 @@ static func print_loaded_animations() -> void:
 			anim.get_track_count(),
 			loop_str
 		])
-	print("Total: %d animations" % names.size())

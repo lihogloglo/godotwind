@@ -49,7 +49,7 @@ var camera: Camera3D = null
 var use_frustum_culling: bool = false
 
 ## Enable debug output
-var debug_enabled: bool = false
+var debug_enabled: bool = true  # Temporarily enable for debugging
 
 ## Loaded MID tier chunks: chunk_key (int) -> LoadedChunkData
 var _loaded_mid_chunks: Dictionary = {}
@@ -115,16 +115,6 @@ func update_chunks(camera_cell: Vector2i) -> void:
 		push_warning("ChunkRenderer: No chunk manager configured")
 		return
 
-	# Log first call for diagnostics
-	var is_first_call: bool = _stats["last_update_ms"] == 0.0
-	if is_first_call:
-		print("[ChunkRenderer] First update_chunks call at camera_cell=%s" % camera_cell)
-		print("[ChunkRenderer]   distant_renderer: %s" % ("OK" if distant_renderer else "NULL"))
-		print("[ChunkRenderer]   impostor_manager: %s" % ("OK" if impostor_manager else "NULL"))
-		print("[ChunkRenderer]   tier_manager: %s" % ("OK" if tier_manager else "NULL"))
-		print("[ChunkRenderer]   chunk_manager: %s" % ("OK" if chunk_manager else "NULL"))
-		print("[ChunkRenderer]   use_frustum_culling: %s, camera: %s" % [use_frustum_culling, "OK" if camera else "NULL"])
-
 	var start_time := Time.get_ticks_usec()
 
 	# Clear current frame tracking
@@ -133,15 +123,6 @@ func update_chunks(camera_cell: Vector2i) -> void:
 
 	# Get visible chunks for each tier
 	var visible_by_tier: Dictionary = chunk_manager.call("get_visible_chunks_by_tier", camera_cell)
-
-	if is_first_call:
-		var mid_chunks: Array = visible_by_tier.get(DistanceTierManagerScript.Tier.MID, [])
-		var far_chunks: Array = visible_by_tier.get(DistanceTierManagerScript.Tier.FAR, [])
-		print("[ChunkRenderer]   Visible MID chunks: %d, FAR chunks: %d" % [mid_chunks.size(), far_chunks.size()])
-		if tier_manager:
-			@warning_ignore("unsafe_method_access")
-			var debug_info: Dictionary = tier_manager.get_debug_info()
-			print("[ChunkRenderer]   Tier distances: %s" % debug_info.get("tier_distances", {}))
 
 	# DEBUG: Log chunk manager distances (guarded to avoid string formatting overhead)
 	if debug_enabled:
@@ -179,14 +160,6 @@ func update_chunks(camera_cell: Vector2i) -> void:
 	_stats["last_update_ms"] = (Time.get_ticks_usec() - start_time) / 1000.0
 	_stats["mid_chunks_loaded"] = _loaded_mid_chunks.size()
 	_stats["far_chunks_loaded"] = _loaded_far_chunks.size()
-
-	# Log periodic summary (every 60 frames)
-	var frame := Engine.get_frames_drawn()
-	if frame % 60 == 0 and (_loaded_mid_chunks.size() > 0 or _loaded_far_chunks.size() > 0):
-		print("[ChunkRenderer] MID chunks: %d (%d cells), FAR chunks: %d (%d cells)" % [
-			_loaded_mid_chunks.size(), _stats["mid_cells_loaded"],
-			_loaded_far_chunks.size(), _stats["far_cells_loaded"]
-		])
 
 #endregion
 
@@ -274,7 +247,8 @@ func _remove_stale_chunks() -> void:
 ## Load a MID tier chunk (aggregates per-cell pre-baked meshes)
 func _load_mid_chunk(chunk_grid: Vector2i, chunk_key: int) -> void:
 	if not distant_renderer:
-		print("[ChunkRenderer] ERROR: distant_renderer is null!")
+		if debug_enabled:
+			print("ChunkRenderer: _load_mid_chunk SKIPPED - distant_renderer is null!")
 		return
 
 	var start_time := Time.get_ticks_usec()
@@ -285,41 +259,27 @@ func _load_mid_chunk(chunk_grid: Vector2i, chunk_key: int) -> void:
 	# Get all cells in this chunk
 	var cells: Array[Vector2i] = chunk_manager.call("get_cells_in_chunk", chunk_grid, QuadtreeChunkManagerScript.MID_CHUNK_SIZE)
 
-	# Log first chunk load for diagnostics
-	var is_first_chunk := _loaded_mid_chunks.is_empty()
-	if is_first_chunk:
-		print("[ChunkRenderer] === FIRST MID CHUNK LOAD ===")
-		print("[ChunkRenderer]   Chunk grid: %s, key: %d" % [chunk_grid, chunk_key])
-		print("[ChunkRenderer]   Cells in chunk: %d" % cells.size())
-		print("[ChunkRenderer]   Merged cells path: %s" % _get_merged_cells_path())
-
-	var cells_found := 0
-	var cells_loaded := 0
+	var files_found := 0
+	var meshes_loaded := 0
+	var has_method_check := distant_renderer.has_method("add_cell_prebaked")
 
 	# Load pre-baked mesh for each cell
 	for cell_grid in cells:
 		var prebaked_path := _get_merged_cells_path().path_join("cell_%d_%d.res" % [cell_grid.x, cell_grid.y])
 
 		if ResourceLoader.exists(prebaked_path):
-			cells_found += 1
+			files_found += 1
 			var mesh := load(prebaked_path) as ArrayMesh
 			if mesh:
-				if distant_renderer.has_method("add_cell_prebaked"):
+				meshes_loaded += 1
+				if has_method_check:
 					var success: bool = distant_renderer.call("add_cell_prebaked", cell_grid, mesh)
 					if success:
 						chunk_data.cells_loaded.append(cell_grid)
-						cells_loaded += 1
-					elif is_first_chunk:
-						print("[ChunkRenderer]   Cell %s: add_cell_prebaked returned false" % cell_grid)
-				elif is_first_chunk:
-					print("[ChunkRenderer]   ERROR: distant_renderer missing add_cell_prebaked method!")
-			elif is_first_chunk:
-				print("[ChunkRenderer]   Cell %s: mesh loaded as null" % cell_grid)
-		elif is_first_chunk:
-			print("[ChunkRenderer]   Cell %s: file not found (%s)" % [cell_grid, prebaked_path.get_file()])
 
-	if is_first_chunk:
-		print("[ChunkRenderer]   Result: %d cells found, %d loaded successfully" % [cells_found, cells_loaded])
+	if debug_enabled and chunk_data.cells_loaded.size() != meshes_loaded:
+		print("ChunkRenderer: MID chunk %s - files_found=%d, meshes_loaded=%d, cells_added=%d, has_method=%s" % [
+			chunk_grid, files_found, meshes_loaded, chunk_data.cells_loaded.size(), has_method_check])
 
 	chunk_data.load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
 	_loaded_mid_chunks[chunk_key] = chunk_data

@@ -253,7 +253,6 @@ func get_landmark_models() -> Array[String]:
 				break
 
 	_landmark_cache_built = true
-	print("ImpostorCandidates: Found %d landmark models in BSA" % _cached_landmark_models.size())
 	return _cached_landmark_models.duplicate()
 
 
@@ -354,12 +353,6 @@ func get_all_impostor_models() -> Array[String]:
 			if pattern in lower:
 				tree_count += 1
 				break
-
-	print("ImpostorCandidates: Found %d impostor candidates in BSA:" % _cached_all_models.size())
-	print("  - Landmarks: %d" % landmark_count)
-	print("  - Buildings: %d" % building_count)
-	print("  - Terrain: %d" % terrain_count)
-	print("  - Trees: %d" % tree_count)
 
 	return _cached_all_models.duplicate()
 

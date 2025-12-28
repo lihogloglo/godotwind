@@ -304,14 +304,6 @@ func _process(delta: float) -> void:
 			if cell_manager.has_method("get_async_pending_count"):
 				async_reqs = cell_manager.get_async_pending_count()
 
-		if _load_queue.size() > 0 or inst_queue > 0 or async_reqs > 0:
-			print("[DIAG] WSM: load_queue=%d, inst_queue=%d, async_reqs=%d, loaded_cells=%d, fps=%.1f" % [
-				_load_queue.size(),
-				inst_queue,
-				async_reqs,
-				_loaded_cells.size(),
-				Engine.get_frames_per_second()
-			])
 		_diag_cells_queued_this_second = 0
 		_diag_cells_loaded_this_second = 0
 		_diag_last_log_frame = current_frame
@@ -797,16 +789,16 @@ func _setup_chunk_paging() -> void:
 ## Called when camera moves to a different cell
 var _cell_change_log_count: int = 0
 func _on_camera_cell_changed(new_cell: Vector2i) -> void:
+	_cell_change_log_count += 1
+	if _cell_change_log_count <= 5:
+		print("[WSM] Camera cell changed to: %s (tiered=%s, chunk_paging=%s, chunk_renderer=%s)" % [
+			new_cell, distant_rendering_enabled, use_chunk_paging, chunk_renderer != null])
 	_debug("Camera cell changed to: %s" % new_cell)
 
 	# Reset dropped cell counter for this update cycle
 	_queue_full_message_count = 0
 
 	# Use tiered loading if enabled and tier manager exists
-	_cell_change_log_count += 1
-	if _cell_change_log_count <= 3:
-		print("[WSM] _on_camera_cell_changed: distant_rendering_enabled=%s, tier_manager=%s, chunk_renderer=%s" % [
-			distant_rendering_enabled, "OK" if tier_manager else "NULL", "OK" if chunk_renderer else "NULL"])
 	if distant_rendering_enabled and tier_manager:
 		_on_camera_cell_changed_tiered(new_cell)
 		return
@@ -1644,33 +1636,7 @@ func _debug(msg: String) -> void:
 
 ## Log diagnostic info about distant rendering setup
 func _log_distant_rendering_status() -> void:
-	print("\n[WSM] === DISTANT RENDERING STATUS ===")
-	print("[WSM] distant_rendering_enabled: %s" % distant_rendering_enabled)
-	print("[WSM] use_chunk_paging: %s" % use_chunk_paging)
-	print("[WSM] tier_manager: %s" % ("OK" if tier_manager else "NULL"))
-	print("[WSM] distant_renderer: %s" % ("OK" if distant_renderer else "NULL"))
-	print("[WSM] impostor_manager: %s" % ("OK" if impostor_manager else "NULL"))
-	print("[WSM] chunk_manager: %s" % ("OK" if chunk_manager else "NULL"))
-	print("[WSM] chunk_renderer: %s" % ("OK" if chunk_renderer else "NULL"))
-
-	if tier_manager:
-		print("[WSM] Tier distances:")
-		print("[WSM]   NEAR: 0m - %.0fm" % tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.NEAR, 0))
-		print("[WSM]   MID: %.0fm - %.0fm" % [
-			tier_manager.tier_distances.get(DistanceTierManagerScript.Tier.MID, 0),
-			tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.MID, 0)
-		])
-		print("[WSM]   FAR: %.0fm - %.0fm" % [
-			tier_manager.tier_distances.get(DistanceTierManagerScript.Tier.FAR, 0),
-			tier_manager.tier_end_distances.get(DistanceTierManagerScript.Tier.FAR, 0)
-		])
-
-	# Check cache paths
-	var impostors_path := _get_impostors_path()
-	var merged_cells_path := _get_merged_cells_path()
-	print("[WSM] Impostors path: %s (exists: %s)" % [impostors_path, DirAccess.dir_exists_absolute(impostors_path)])
-	print("[WSM] Merged cells path: %s (exists: %s)" % [merged_cells_path, DirAccess.dir_exists_absolute(merged_cells_path)])
-	print("[WSM] ================================\n")
+	pass  # Debug function - call manually if needed
 
 
 ## Cache tier distances to avoid dictionary lookups every frame

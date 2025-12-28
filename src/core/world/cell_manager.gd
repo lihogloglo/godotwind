@@ -152,15 +152,9 @@ func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
 			if obj:
 				cell_node.add_child(obj)
 				loaded += 1
-			else:
-				print("CellManager: Failed to instantiate %s '%s'" % [type_name, ref.ref_id])
-
 	# Restore original loading settings
 	load_npcs = was_loading_npcs
 	load_creatures = was_loading_creatures
-
-	if npc_refs > 0:
-		print("CellManager: Cell %d,%d has %d NPC/creature refs, loaded %d" % [x, y, npc_refs, loaded])
 
 	return loaded
 
@@ -177,8 +171,6 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 		cell_node.name = cell.name.replace(" ", "_").replace(",", "")
 	else:
 		cell_node.name = "Cell_%d_%d" % [cell.grid_x, cell.grid_y]
-
-	print("CellManager: Loading cell '%s' with %d references..." % [cell.get_description(), cell.references.size()])
 
 	var loaded := 0
 	var failed := 0
@@ -428,8 +420,6 @@ func preload_common_models() -> int:
 	var loaded := 0
 	var pool_instances := 0
 
-	print("CellManager: Preloading %d common models..." % common_models.size())
-
 	for model_path: String in common_models:
 		# Skip if already cached
 		if _model_loader.has_model(model_path):
@@ -454,7 +444,6 @@ func preload_common_models() -> int:
 				_object_pool.call("register_model", model_path, prototype, initial_count, pool_size)
 				pool_instances += initial_count
 
-	print("CellManager: Preloaded %d models, pre-warmed pool with %d instances" % [loaded, pool_instances])
 	return loaded
 
 
@@ -793,12 +782,6 @@ func process_pending_conversions(_budget_ms: float) -> bool:
 				_model_loader.add_to_cache(model_path, prototype, item_id)
 			# NOW queue references for this model
 			_queue_references_for_model(request, model_path)
-
-			if diagnostic_logging:
-				var source := "disk" if was_disk_hit else "NIF"
-				print("[DIAG] Loaded (%s): %s (%.1fms, pending=%d, queue=%d)" % [
-					source, model_path.get_file(), convert_elapsed, _pending_conversions.size(), _instantiation_queue.size()
-				])
 		else:
 			request.failed_models.append(model_path)
 			# Still queue references - they'll get placeholders
@@ -884,25 +867,6 @@ func process_async_instantiation(budget_ms: float) -> int:
 		var child: Node3D = entry.child
 		if is_instance_valid(parent) and is_instance_valid(child):
 			parent.add_child(child)
-	var add_child_elapsed := Time.get_ticks_usec() - add_child_start
-
-	# Diagnostic logging every 60 frames (~1 second at 60 FPS)
-	var current_frame := Engine.get_frames_drawn()
-	if diagnostic_logging and (current_frame - _diag_last_log_frame) >= 60:
-		var avg_inst_us := _diag_duplicate_time_total_us / maxi(_diag_duplicate_count, 1)
-		print("[DIAG] CellManager: queue=%d, instantiated=%d, exit=%s, avg_inst=%.2fms, add_child=%.2fms, async_reqs=%d" % [
-			_instantiation_queue.size(),
-			instantiated,
-			exit_reason if exit_reason else "empty_queue",
-			avg_inst_us / 1000.0,
-			add_child_elapsed / 1000.0,
-			_async_requests.size()
-		])
-		# Reset counters
-		_diag_duplicate_time_total_us = 0
-		_diag_duplicate_count = 0
-		_diag_last_log_frame = current_frame
-
 	return instantiated
 
 
@@ -984,9 +948,6 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 
 		# Queue reference for later (after model is parsed)
 		request.references_to_process.append(ref)
-
-	if disk_cache_hits > 0 and diagnostic_logging:
-		print("[DIAG] Cell %s: %d models loaded from disk cache (instant)" % [request.cell_node.name, disk_cache_hits])
 
 	# Submit parse tasks for models that need loading
 	for model_path: String in models_to_load:

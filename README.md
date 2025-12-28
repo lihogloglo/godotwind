@@ -54,7 +54,7 @@ The long-term goal is to continue where Skelerealms stopped. ( https://github.co
 | **BSA Management** | Archive reading, 256MB LRU cache, thread-safe extraction |
 | **Texture Loading** | DDS/TGA with material library deduplication |
 | **Ocean** | FFT waves from this project : https://github.com/2Retr0/GodotOceanWaves/ , shore dampening, choppiness controls, buoyancy queries |
-| **Sky/Weather** | Volumetric clouds, day/night cycle, sun/moon, ambient lighting |
+| **Sky/Weather** | 2D texture clouds, day/night cycle, sun/moon, ambient lighting |
 | **Character Assembly** | NPC body parts combined from race + head + hair meshes |
 | **Character Animation** | Full state machine (idle, walk, run, jump, swim, combat, death, spell cast) |
 | **Character Movement** | Slope adaptation, foot IK, wander behavior, speed modulation |

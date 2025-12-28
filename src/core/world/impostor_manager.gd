@@ -166,7 +166,6 @@ func _start_texture_load_thread() -> void:
 	_thread_should_exit = false
 	_texture_load_thread = Thread.new()
 	_texture_load_thread.start(_texture_load_worker)
-	print("[ImpostorManager] Background texture loading thread started")
 
 
 ## Stop the background texture loading thread
@@ -177,7 +176,6 @@ func _stop_texture_load_thread() -> void:
 	_texture_load_thread.wait_to_finish()
 	_texture_load_thread = null
 	_texture_load_mutex = null
-	print("[ImpostorManager] Background texture loading thread stopped")
 
 
 ## Background thread worker - loads images from disk without blocking main thread
@@ -201,14 +199,11 @@ func _texture_load_worker() -> void:
 			continue
 
 		_thread_work_count += 1
-		if _thread_work_count <= 3:
-			print("[ImpostorManager] Thread processing item %d: %s" % [_thread_work_count, work_item.path])
 
 		# Load the image (this is the slow I/O operation we're offloading)
 		var image := Image.new()
 		var path_str: String = work_item.path
 		if path_str.is_empty():
-			print("[ImpostorManager] Thread: ERROR - empty path!")
 			continue
 
 		var err := image.load(path_str)
@@ -220,15 +215,7 @@ func _texture_load_worker() -> void:
 				"hash_key": work_item.hash_key,
 				"image": image
 			})
-			var queue_len := _loaded_images_queue.size()
 			_texture_load_mutex.unlock()
-			# Log first few successful loads to verify thread is working
-			if queue_len <= 3:
-				print("[ImpostorManager] Thread: Loaded %s (%dx%d), queue=%d" % [
-					work_item.path.get_file(), image.get_width(), image.get_height(), queue_len])
-		else:
-			# Log error but don't crash
-			print("[ImpostorManager] Thread: Failed to load texture %s (error %d)" % [work_item.path, err])
 
 
 var _process_log_counter: int = 0
@@ -238,39 +225,6 @@ const TEXTURES_PER_FRAME: int = 10  # Process up to 10 loaded textures per frame
 var _first_process_logged: bool = false
 
 func _process(delta: float) -> void:
-	# One-time diagnostic on first _process call
-	if not _first_process_logged:
-		_first_process_logged = true
-		var queue_size := 0
-		var loaded_size := 0
-		if _texture_load_mutex:
-			_texture_load_mutex.lock()
-			queue_size = _texture_load_queue.size()
-			loaded_size = _loaded_images_queue.size()
-			_texture_load_mutex.unlock()
-		print("[ImpostorManager] === FIRST _process CALL ===")
-		print("[ImpostorManager]   Thread queue: %d, loaded queue: %d" % [queue_size, loaded_size])
-		print("[ImpostorManager]   Pending impostors: %d, pending loads: %d" % [_pending_impostors.size(), _pending_texture_loads.size()])
-
-	# Log periodic summary (every 300 frames ~ 5 seconds)
-	_process_log_counter += 1
-	if _process_log_counter >= 300:
-		_process_log_counter = 0
-		# Always log summary if we have impostors or pending loads (helps diagnose issues)
-		var pending_count := _pending_texture_loads.size()
-		var queue_size := 0
-		var loaded_size := 0
-		if _texture_load_mutex:
-			_texture_load_mutex.lock()
-			pending_count += _texture_load_queue.size()
-			queue_size = _texture_load_queue.size()
-			loaded_size = _loaded_images_queue.size()
-			_texture_load_mutex.unlock()
-		if _impostors.size() > 0 or pending_count > 0 or _pending_impostors.size() > 0:
-			print("[ImpostorManager] STATUS: impostors=%d, visible=%d, pending=%d, textures=%d, missing=%d, queue=%d, loaded=%d" % [
-				_impostors.size(), _visible_cells.size(), pending_count,
-				_texture_array_size, _missing_texture_count, queue_size, loaded_size])
-
 	# Poll for textures loaded by background thread (non-blocking)
 	_poll_loaded_images_from_thread()
 
@@ -309,22 +263,9 @@ var _poll_call_count: int = 0
 
 func _poll_loaded_images_from_thread() -> void:
 	if _texture_load_mutex == null:
-		print("[ImpostorManager] _poll: mutex is NULL!")
 		return
 
-	_poll_call_count += 1
-
 	_textures_loaded_this_frame = 0
-
-	# Check queue size before polling
-	_texture_load_mutex.lock()
-	var queue_size := _loaded_images_queue.size()
-	_texture_load_mutex.unlock()
-
-	# Log first few poll calls to verify polling is happening
-	if _poll_call_count <= 5 or (queue_size > 0 and _poll_call_count <= 20):
-		var queue_hash: int = hash(_loaded_images_queue)
-		print("[ImpostorManager] _poll #%d: loaded_queue=%d, self=%s, queue_hash=%d" % [_poll_call_count, queue_size, self, queue_hash])
 
 	while _textures_loaded_this_frame < TEXTURES_PER_FRAME:
 		# Get one loaded image from the thread's result queue
@@ -338,7 +279,6 @@ func _poll_loaded_images_from_thread() -> void:
 		if not has_result:
 			break
 
-		print("[ImpostorManager] _poll: Processing texture %s" % result.hash_key)
 		# Process the loaded image on main thread
 		_on_texture_loaded(result.hash_key, result.image)
 		_textures_loaded_this_frame += 1
@@ -378,7 +318,6 @@ func _setup_billboard_material() -> void:
 	var default_array := Texture2DArray.new()
 	default_array.create_from_images([default_img])
 	_billboard_material.set_shader_parameter("texture_atlas", default_array)
-	print("[ImpostorManager] Billboard material created with default texture array")
 
 	_master_instance.material_override = _billboard_material
 
@@ -506,8 +445,6 @@ func add_impostor(
 	if not FileAccess.file_exists(texture_path):
 		# Track missing textures for summary (don't spam per-model)
 		_missing_texture_count += 1
-		if debug_enabled:
-			print("ImpostorManager: Texture not found for '%s' -> '%s'" % [model_path, texture_path.get_file()])
 		return -1
 
 	# Mark as pending before queueing to avoid duplicate loads
@@ -519,9 +456,6 @@ func add_impostor(
 
 	# Queue texture for background thread loading (non-blocking)
 	_queue_texture_for_background_load(hash_key, texture_path)
-
-	if debug_enabled:
-		print("ImpostorManager: Queued background load for %s" % texture_path.get_file())
 
 	return -1
 
@@ -562,12 +496,7 @@ func _queue_texture_for_background_load(hash_key: String, texture_path: String) 
 		"hash_key": hash_key,
 		"path": texture_path
 	})
-	var queue_len := _texture_load_queue.size()
 	_texture_load_mutex.unlock()
-
-	# Log first few queued textures to verify queueing works
-	if queue_len <= 3:
-		print("[ImpostorManager] Queued for thread: %s (queue=%d)" % [texture_path.get_file(), queue_len])
 
 	# Remove from pending dict since it's now in the thread queue
 	_pending_texture_loads.erase(hash_key)
@@ -575,24 +504,9 @@ func _queue_texture_for_background_load(hash_key: String, texture_path: String) 
 
 ## Called when a texture finishes loading
 func _on_texture_loaded(hash_key: String, image: Image) -> void:
-	# One-time diagnostic on first texture load
-	if not _first_texture_logged:
-		_first_texture_logged = true
-		print("[ImpostorManager] === FIRST TEXTURE LOADED ===")
-		print("[ImpostorManager]   Image size: %dx%d, format: %d (%s)" % [
-			image.get_width(), image.get_height(), image.get_format(),
-			_format_name(image.get_format())])
-		print("[ImpostorManager]   Hash key: %s" % hash_key)
-		print("[ImpostorManager]   Pending textures remaining: %d" % _pending_texture_loads.size())
-		# Check image content
-		var has_alpha := image.detect_alpha() != Image.ALPHA_NONE
-		var sample_color := image.get_pixel(image.get_width() / 2, image.get_height() / 2)
-		print("[ImpostorManager]   Has alpha: %s, center pixel: %s" % [has_alpha, sample_color])
-
 	# Create texture and cache it
 	var texture := ImageTexture.create_from_image(image)
 	if not texture:
-		print("ImpostorManager: Failed to create texture from image for hash %s" % hash_key)
 		return
 
 	_impostor_textures[hash_key] = texture
@@ -618,10 +532,6 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 			)
 		_pending_impostors.erase(hash_key)
 
-	if debug_enabled:
-		print("ImpostorManager: Texture loaded - index=%d, pending_created=%d, total_impostors=%d" % [
-			texture_index, pending_count, _impostors.size()])
-
 
 ## Add texture to the texture array
 func _add_to_texture_array(hash_key: String, image: Image) -> int:
@@ -632,8 +542,6 @@ func _add_to_texture_array(hash_key: String, image: Image) -> int:
 		# Array is full - find an existing texture to reuse (LRU would be better but this is simpler)
 		# For now, just cycle through existing indices
 		var fallback_index := hash_key.hash() % MAX_TEXTURE_ARRAY_LAYERS
-		if debug_enabled:
-			push_warning("ImpostorManager: Texture array full (%d), reusing index %d for %s" % [MAX_TEXTURE_ARRAY_LAYERS, fallback_index, hash_key])
 		_texture_index_map[hash_key] = fallback_index
 		return fallback_index
 
@@ -696,40 +604,11 @@ func _rebuild_texture_array() -> void:
 
 	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
 
-	# Verify the texture was set
-	var verify: Variant = _billboard_material.get_shader_parameter("texture_atlas")
-	print("[ImpostorManager] Texture array set on material. Verify: %s, layers: %d" % [
-		"OK" if verify == _texture_array else "MISMATCH",
-		_texture_array.get_layers()])
-
-	# Also verify material is still on the instance
+	# Verify material is still on the instance
 	if _master_instance and _master_instance.material_override != _billboard_material:
-		print("[ImpostorManager] WARNING: material_override mismatch! Re-assigning...")
 		_master_instance.material_override = _billboard_material
 
-	# One-time diagnostic on first rebuild
-	if not _first_array_rebuild_logged:
-		_first_array_rebuild_logged = true
-		print("[ImpostorManager] === FIRST TEXTURE ARRAY REBUILD ===")
-		print("[ImpostorManager]   Layers: %d" % images.size())
-		if images.size() > 0:
-			var first_img: Image = images[0]
-			print("[ImpostorManager]   First image: %dx%d, format=%d" % [first_img.get_width(), first_img.get_height(), first_img.get_format()])
-			# Check if image has actual content (not all transparent)
-			var non_transparent_pixels := 0
-			for y in range(mini(32, first_img.get_height())):
-				for x in range(mini(32, first_img.get_width())):
-					if first_img.get_pixel(x, y).a > 0.1:
-						non_transparent_pixels += 1
-			print("[ImpostorManager]   Non-transparent pixels in 32x32 sample: %d" % non_transparent_pixels)
-		print("[ImpostorManager]   Material assigned: %s" % ("YES" if _billboard_material else "NO"))
-		print("[ImpostorManager]   Texture array valid: %s, layers: %d" % [
-			_texture_array != null, _texture_array.get_layers() if _texture_array else 0])
-
 	_texture_array_dirty = false
-
-	if debug_enabled:
-		print("ImpostorManager: Rebuilt texture array with %d layers" % images.size())
 
 
 ## Create the actual impostor instance
@@ -786,13 +665,6 @@ func _create_impostor_instance(
 ## Add impostors for all eligible objects in a cell
 ## Returns number of impostors added (may be 0 if textures are loading async)
 func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
-	# One-time diagnostic on first cell
-	if not _first_cell_logged:
-		_first_cell_logged = true
-		print("[ImpostorManager] === FIRST add_cell_impostors CALL ===")
-		print("[ImpostorManager]   Cell: %s, references: %d" % [cell_grid, references.size()])
-		print("[ImpostorManager]   impostor_candidates: %s" % ("OK" if impostor_candidates else "NULL"))
-
 	var count: int = 0
 	var checked_count: int = 0
 	var eligible_count: int = 0
@@ -844,14 +716,6 @@ func add_cell_impostors(cell_grid: Vector2i, references: Array) -> int:
 			var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
 			if hash_key not in _pending_texture_loads and hash_key not in _impostor_textures:
 				missing_texture_count += 1
-
-	# Only log if something interesting happened (reduce spam)
-	if eligible_count > 0:
-		# Log summary every 10 cells or if there are issues
-		var frame := Engine.get_frames_drawn()
-		if missing_texture_count > 0 or (frame % 10 == 0 and debug_enabled):
-			print("[ImpostorManager] Cell %s: %d eligible, %d created, %d missing textures, %d pending" % [
-				cell_grid, eligible_count, count, missing_texture_count, _pending_texture_loads.size()])
 
 	return count
 
@@ -1020,22 +884,8 @@ func _rebuild_multimesh() -> void:
 		# Set custom data (texture layer index)
 		_master_multimesh.set_instance_custom_data(i, Color(float(impostor.texture_index), 0, 0, 1))
 
-	# One-time diagnostic on first rebuild with visible impostors
-	if not _first_multimesh_rebuild_logged and count > 0:
-		_first_multimesh_rebuild_logged = true
-		var first := visible_impostors[0]
-		print("[ImpostorManager] === FIRST MULTIMESH REBUILD ===")
-		print("[ImpostorManager]   Visible impostors: %d" % count)
-		print("[ImpostorManager]   First impostor: pos=%s, size=%s, tex_idx=%d" % [
-			first.position, first.texture_size, first.texture_index])
-		print("[ImpostorManager]   Master instance visible: %s" % _master_instance.visible)
-		print("[ImpostorManager]   Material: %s" % ("OK" if _billboard_material else "NULL"))
-
 	_dirty_cells.clear()
 	_full_rebuild_needed = false
-
-	if debug_enabled:
-		print("ImpostorManager: Rebuilt MultiMesh with %d visible impostors" % count)
 
 
 ## Get or load impostor metadata for a model
@@ -1065,9 +915,6 @@ func _get_or_load_impostor_metadata(model_path: String) -> Dictionary:
 
 ## Set visibility for all impostors at once
 func set_all_visible(is_visible: bool) -> void:
-	print("[ImpostorManager] set_all_visible(%s) - impostors=%d, cells=%d" % [
-		is_visible, _impostors.size(), _impostors_by_cell.size()])
-
 	# Update global visibility flag
 	_globally_visible = is_visible
 

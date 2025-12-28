@@ -303,11 +303,20 @@ func _bake_terrain() -> Dictionary:
 	# Get terrain state
 	var state: PrebakeState.ComponentState = _state_manager.terrain
 
-	# Check if already completed
-	if state.is_complete() and not state.pending.is_empty():
-		print("  Terrain already preprocessed, skipping")
-		component_completed.emit("Terrain", state.completed.size(), 0, 0)
-		return {"success": state.completed.size(), "failed": 0, "skipped": 0}
+	# Check if already completed (skip only if we have completed items and nothing pending)
+	if state.completed.size() > 0 and state.pending.is_empty():
+		# Verify terrain data actually exists on disk
+		var terrain_data_dir := SettingsManager.get_terrain_path()
+		if DirAccess.dir_exists_absolute(terrain_data_dir):
+			var dir := DirAccess.open(terrain_data_dir)
+			if dir and dir.get_files().size() > 0:
+				print("  Terrain already preprocessed (%d regions), skipping" % state.completed.size())
+				component_completed.emit("Terrain", state.completed.size(), 0, 0)
+				return {"success": state.completed.size(), "failed": 0, "skipped": 0}
+		# State says complete but no files - reset and re-bake
+		print("  Terrain state says complete but no files found - resetting")
+		state.completed.clear()
+		state.pending.clear()
 
 	# Create or get Terrain3D
 	if not terrain_3d:
@@ -912,9 +921,11 @@ func _perlin_noise_3d(pos: Vector3) -> float:
 
 
 func _hash_noise(n: float) -> float:
-	var v := sin(n) * 43758.5453123
-	return v - floor(v)
+	var x := sin(n) * 43758.5453
+	return x - floorf(x)
 
 
-func _remap(value: float, old_min: float, old_max: float, new_min: float, new_max: float) -> float:
-	return new_min + (value - old_min) * (new_max - new_min) / (old_max - old_min)
+func _remap(value: float, from_min: float, from_max: float, to_min: float, to_max: float) -> float:
+	if from_max - from_min == 0:
+		return to_min
+	return to_min + (value - from_min) * (to_max - to_min) / (from_max - from_min)
