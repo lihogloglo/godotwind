@@ -17,6 +17,28 @@ const CELL_SIZE_METERS: float = 117.0
 ## Half cell size (used for center calculations)
 const HALF_CELL_SIZE: float = CELL_SIZE_METERS * 0.5
 
+#region Tier Distance Constants (Single Source of Truth)
+
+## NEAR tier: Full 3D meshes with physics/collision (0 to NEAR_END)
+const NEAR_END: float = 150.0
+
+## MID tier: Per-object LOD meshes (NEAR_END to MID_END)
+const MID_END: float = 500.0
+
+## FAR tier: Impostors/billboards (MID_END to FAR_END)
+const FAR_END: float = 5000.0
+
+## Tier start distances (for convenience)
+const NEAR_START: float = 0.0
+const MID_START: float = NEAR_END
+const FAR_START: float = MID_END
+
+## Crossfade zone size (meters) - both tiers visible during transition
+## Increased from 15m to 30m for smoother, more noticeable transitions
+const FADE_MARGIN: float = 30.0
+
+#endregion
+
 
 ## Calculate squared distance between two cells (in meters)
 ## Use this when comparing distances to avoid sqrt overhead

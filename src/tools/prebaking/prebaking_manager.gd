@@ -22,6 +22,7 @@ const ModelPrebaker := preload("res://src/tools/prebaking/model_prebaker.gd")
 const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const ShoreMaskBaker := preload("res://src/tools/shore_mask_baker.gd")
 const ImpostorCandidates := preload("res://src/core/world/impostor_candidates.gd")
+const LODPrebaker := preload("res://src/tools/prebaking/lod_prebaker.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
@@ -30,6 +31,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 enum Component {
 	TERRAIN,       # Preprocessed Terrain3D regions (heightmaps, textures)
 	MODELS,        # Individual NIF->Godot conversions (NEAR tier)
+	LODS,          # Simplified LOD meshes for per-object LOD system
 	IMPOSTORS,     # Octahedral impostor textures (FAR tier)
 	MERGED_MESHES, # Simplified merged cell meshes (MID tier)
 	NAVMESHES,     # Navigation meshes
@@ -55,6 +57,7 @@ var _state_manager: PrebakeState = null
 
 ## Bakers
 var _model_baker: ModelPrebaker = null
+var _lod_baker: LODPrebaker = null
 var _impostor_baker: ImpostorBakerV2 = null
 var _mesh_baker: MeshPrebakerV2 = null
 var _navmesh_baker: NavMeshBaker = null
@@ -63,6 +66,7 @@ var _shore_baker: ShoreMaskBaker = null
 ## Component enable flags
 var enable_terrain: bool = true
 var enable_models: bool = true
+var enable_lods: bool = true
 var enable_impostors: bool = true
 var enable_merged_meshes: bool = true
 var enable_navmeshes: bool = true
@@ -144,6 +148,48 @@ func _exit_tree() -> void:
 		_impostor_baker.queue_free()
 
 
+## Ensure terrain is loaded (creates Terrain3D and loads cached data if available)
+## This is needed for shore mask when terrain baking was skipped or disabled
+func _ensure_terrain_loaded() -> bool:
+	if terrain_3d:
+		return true
+
+	if not ClassDB.class_exists("Terrain3D"):
+		push_error("PrebakingManager: Terrain3D addon not loaded")
+		return false
+
+	# Create Terrain3D node
+	terrain_3d = Terrain3D.new()
+	terrain_3d.name = "PrebakingTerrain3D"
+
+	# Disable physics processing to avoid camera errors during prebaking
+	# Terrain3D tries to find a camera which doesn't exist in tool mode
+	var terrain_node := terrain_3d as Terrain3D
+	terrain_node.set_physics_process(false)
+	terrain_node.set_process(false)
+
+	add_child(terrain_3d)
+
+	# Wait a frame for initialization
+	await get_tree().process_frame
+
+	# Configure with shared settings
+	CS.configure_terrain3d(terrain_node)
+
+	# Try to load cached terrain data
+	var terrain_data_dir := SettingsManager.get_terrain_path()
+	if DirAccess.dir_exists_absolute(terrain_data_dir):
+		var dir := DirAccess.open(terrain_data_dir)
+		if dir and dir.get_files().size() > 0:
+			terrain_node.data.load_directory(terrain_data_dir)
+			print("PrebakingManager: Loaded terrain from cache: %s" % terrain_data_dir)
+			return true
+
+	push_warning("PrebakingManager: No cached terrain data found at %s" % terrain_data_dir)
+	push_warning("PrebakingManager: You need to bake terrain before shore mask")
+	return false
+
+
 ## Start prebaking all enabled components
 func start_prebaking() -> void:
 	if _is_processing:
@@ -181,6 +227,11 @@ func start_prebaking() -> void:
 	if enable_models and not _should_stop:
 		_current_component = Component.MODELS
 		results["models"] = await _bake_models()
+
+	# LODs - simplified meshes for per-object LOD system (uses prebaked models)
+	if enable_lods and not _should_stop:
+		_current_component = Component.LODS
+		results["lods"] = await _bake_lods()
 
 	if enable_impostors and not _should_stop:
 		_current_component = Component.IMPOSTORS
@@ -303,6 +354,29 @@ func _bake_terrain() -> Dictionary:
 	# Get terrain state
 	var state: PrebakeState.ComponentState = _state_manager.terrain
 
+	# Create or get Terrain3D (do this BEFORE checking if we can skip, so shore mask has terrain)
+	if not terrain_3d:
+		if not ClassDB.class_exists("Terrain3D"):
+			error_occurred.emit("Terrain", "Terrain3D addon not loaded")
+			return {"success": 0, "failed": 1, "error": "Terrain3D addon not loaded"}
+
+		terrain_3d = Terrain3D.new()
+		terrain_3d.name = "PrebakingTerrain3D"
+
+		# Disable physics processing to avoid camera errors during prebaking
+		# Terrain3D tries to find a camera which doesn't exist in tool mode
+		var terrain_node := terrain_3d as Terrain3D
+		terrain_node.set_physics_process(false)
+		terrain_node.set_process(false)
+
+		add_child(terrain_3d)
+
+		# Wait a frame for Terrain3D to fully initialize in the scene tree
+		await get_tree().process_frame
+
+		# Use shared configuration from CoordinateSystem (single source of truth)
+		CS.configure_terrain3d(terrain_node)
+
 	# Check if already completed (skip only if we have completed items and nothing pending)
 	if state.completed.size() > 0 and state.pending.is_empty():
 		# Verify terrain data actually exists on disk
@@ -310,31 +384,16 @@ func _bake_terrain() -> Dictionary:
 		if DirAccess.dir_exists_absolute(terrain_data_dir):
 			var dir := DirAccess.open(terrain_data_dir)
 			if dir and dir.get_files().size() > 0:
-				print("  Terrain already preprocessed (%d regions), skipping" % state.completed.size())
+				# Load the existing terrain data so shore mask can use it
+				var terrain_node := terrain_3d as Terrain3D
+				terrain_node.data.load_directory(terrain_data_dir)
+				print("  Terrain already preprocessed (%d regions), loaded from cache" % state.completed.size())
 				component_completed.emit("Terrain", state.completed.size(), 0, 0)
 				return {"success": state.completed.size(), "failed": 0, "skipped": 0}
 		# State says complete but no files - reset and re-bake
 		print("  Terrain state says complete but no files found - resetting")
 		state.completed.clear()
 		state.pending.clear()
-
-	# Create or get Terrain3D
-	if not terrain_3d:
-		# Create a temporary Terrain3D for preprocessing
-		if not ClassDB.class_exists("Terrain3D"):
-			error_occurred.emit("Terrain", "Terrain3D addon not loaded")
-			return {"success": 0, "failed": 1, "error": "Terrain3D addon not loaded"}
-
-		terrain_3d = Terrain3D.new()
-		terrain_3d.name = "PrebakingTerrain3D"
-		add_child(terrain_3d)
-
-		# Wait a frame for Terrain3D to fully initialize in the scene tree
-		# This prevents "data.tree is null" errors from Terrain3D's internal code
-		await get_tree().process_frame
-
-		# Use shared configuration from CoordinateSystem (single source of truth)
-		CS.configure_terrain3d(terrain_3d as Terrain3D)
 
 	# Create terrain manager and texture loader
 	var terrain_manager := TerrainManagerScript.new()
@@ -448,6 +507,60 @@ func _bake_models() -> Dictionary:
 	var result: Dictionary = await _model_baker.bake_all_models()
 
 	component_completed.emit("Models", result.success, result.failed, result.skipped)
+
+	return result
+
+
+## Bake LOD meshes for significant objects
+func _bake_lods() -> Dictionary:
+	print("\n" + "=".repeat(80))
+	print("LODS: Generating simplified LOD meshes for per-object LOD system")
+	print("=".repeat(80))
+
+	component_started.emit("LODs")
+
+	_lod_baker = LODPrebaker.new()
+
+	if _lod_baker.initialize() != OK:
+		error_occurred.emit("LODs", "Failed to initialize LOD baker")
+		return {"success": 0, "failed": 0, "skipped": 0, "error": "Initialization failed"}
+
+	# Get LOD state
+	var lod_state: PrebakeState.ComponentState = _state_manager.lods
+
+	# If pending is empty and no completed, build initial list
+	if lod_state.pending.is_empty() and lod_state.completed.is_empty():
+		var candidates := ImpostorCandidates.new()
+		lod_state.pending = candidates.get_all_impostor_models().duplicate()
+		lod_state.start_time = Time.get_unix_time_from_system()
+		_state_manager.save_state()
+
+	print("  %d pending, %d completed, %d failed" % [
+		lod_state.pending.size(), lod_state.completed.size(), lod_state.failed.size()])
+
+	# Connect progress signals
+	_lod_baker.progress.connect(func(current: int, total: int, name: String) -> void:
+		component_progress.emit("LODs", current, total, name)
+	)
+	_lod_baker.model_baked.connect(func(path: String, success: bool, lod_count: int) -> void:
+		item_baked.emit("LODs", path, success)
+		if success:
+			lod_state.completed.append(path)
+			lod_state.pending.erase(path)
+			lod_state.last_baked = path
+		else:
+			lod_state.failed.append(path)
+			lod_state.pending.erase(path)
+		_state_manager.save_state()
+	)
+
+	# Bake LODs
+	var result: Dictionary = await _lod_baker.bake_all_lods()
+
+	lod_state.end_time = Time.get_unix_time_from_system()
+	_state_manager.save_state()
+
+	component_completed.emit("LODs", result.success, result.failed, result.skipped)
 
 	return result
 
@@ -625,32 +738,48 @@ func _bake_navmeshes() -> Dictionary:
 ## Bake shore mask
 func _bake_shore_mask() -> Dictionary:
 	print("\n" + "=".repeat(80))
-	print("SHORE MASK: Baking ocean visibility mask")
+	print("SHORE MASK: Baking ocean wave dampening mask (JFA algorithm)")
 	print("=".repeat(80))
-	print("PrebakingManager: terrain_3d = %s" % [terrain_3d])
-	if terrain_3d and terrain_3d is Terrain3D:
-		var terrain_node := terrain_3d as Terrain3D
-		print("PrebakingManager: terrain_3d path = %s" % terrain_node.get_path())
-		print("PrebakingManager: terrain_3d.data = %s" % [terrain_node.data])
 
 	component_started.emit("Shore Mask")
 
+	# Ensure terrain is available (even if terrain baking was skipped/disabled)
 	if not terrain_3d:
-		push_warning("PrebakingManager: No Terrain3D set, skipping shore mask")
-		error_occurred.emit("Shore Mask", "No Terrain3D found in scene")
-		component_completed.emit("Shore Mask", 0, 1, 0)
-		return {"success": 0, "failed": 1, "error": "No terrain"}
+		if not await _ensure_terrain_loaded():
+			push_warning("PrebakingManager: Could not load terrain for shore mask")
+			error_occurred.emit("Shore Mask", "Failed to load terrain data")
+			component_completed.emit("Shore Mask", 0, 1, 0)
+			return {"success": 0, "failed": 1, "error": "No terrain"}
+
+	print("PrebakingManager: terrain_3d = %s" % [terrain_3d])
+	if terrain_3d and terrain_3d is Terrain3D:
+		var terrain_node := terrain_3d as Terrain3D
+		print("PrebakingManager: terrain_3d.data = %s, region_count = %d" % [
+			terrain_node.data,
+			terrain_node.data.get_region_count() if terrain_node.data else 0
+		])
 
 	_shore_baker = ShoreMaskBaker.new()
 	_shore_baker.terrain = terrain_3d as Terrain3D
+
+	# Get sea level from project settings (consistent with OceanManager)
+	var sea_level: float = ProjectSettings.get_setting("ocean/sea_level", 0.0)
+	_shore_baker.sea_level = sea_level
+
+	# Get fade distance from OceanManager defaults
+	_shore_baker.fade_distance = 50.0  # Matches OceanManager.shore_fade_distance
+
+	print("PrebakingManager: Shore mask config - sea_level=%.1f, fade_distance=%.1fm" % [
+		_shore_baker.sea_level, _shore_baker.fade_distance
+	])
 
 	# Connect progress
 	_shore_baker.progress.connect(func(percent: float, message: String) -> void:
 		component_progress.emit("Shore Mask", int(percent), 100, message)
 	)
 
-	# Bake
-	var result: Dictionary = _shore_baker.bake_shore_mask()
+	# Bake using JFA algorithm (now async - must await)
+	var result: Dictionary = await _shore_baker.bake_shore_mask()
 
 	var state: PrebakeState.ComponentState = _state_manager.shore_mask
 	if result.success:
@@ -714,6 +843,8 @@ func bake_component(component: Component) -> void:
 			result = await _bake_terrain()
 		Component.MODELS:
 			result = await _bake_models()
+		Component.LODS:
+			result = await _bake_lods()
 		Component.IMPOSTORS:
 			result = await _bake_impostors()
 		Component.MERGED_MESHES:
@@ -735,6 +866,7 @@ func _component_name(component: Component) -> String:
 	match component:
 		Component.TERRAIN: return "terrain"
 		Component.MODELS: return "models"
+		Component.LODS: return "lods"
 		Component.IMPOSTORS: return "impostors"
 		Component.MERGED_MESHES: return "merged_meshes"
 		Component.NAVMESHES: return "navmeshes"

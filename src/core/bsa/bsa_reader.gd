@@ -37,6 +37,11 @@ var _data_offset: int = 0  # Where the actual file data begins
 # and with 100+ objects per cell, this adds up to seconds of I/O overhead
 var _file_handle: FileAccess = null
 
+# Mutex for thread-safe file access
+# Required because worker threads may call extract_file_entry concurrently
+# and the shared _file_handle's seek/read operations are not atomic
+var _file_mutex: Mutex = null
+
 # File entries indexed by normalized path
 var _files_by_path: Dictionary = {}  # String -> FileEntry
 # File entries indexed by hash for fast lookup
@@ -140,6 +145,9 @@ func open(path: String) -> Error:
 	# Keep file handle open for fast extraction (don't close!)
 	# This dramatically improves performance by avoiding file open/close per extraction
 	_file_handle = file
+
+	# Initialize mutex for thread-safe extraction
+	_file_mutex = Mutex.new()
 
 	return result
 
@@ -252,20 +260,26 @@ func extract_file(path: String) -> PackedByteArray:
 
 ## Extract file data using a FileEntry
 ## Uses persistent file handle for performance (avoids open/close per call)
+## Thread-safe: Uses mutex to protect seek/read operations from concurrent access
 func extract_file_entry(entry: FileEntry) -> PackedByteArray:
 	if entry == null:
 		return PackedByteArray()
 
 	# Use persistent file handle if available (fast path)
-	if _file_handle != null:
+	# Mutex protects seek+read as an atomic operation for thread safety
+	if _file_handle != null and _file_mutex != null:
+		_file_mutex.lock()
 		_file_handle.seek(entry.absolute_offset)
 		var data := _file_handle.get_buffer(entry.size)
+		_file_mutex.unlock()
+
 		if data.size() != entry.size:
 			push_error("BSAReader: Failed to read file data for: %s" % entry.name)
 			return PackedByteArray()
 		return data
 
-	# Fallback: reopen file if handle was closed (shouldn't happen in normal use)
+	# Fallback: open a new file handle for this extraction
+	# This is thread-safe since each call gets its own handle, but slower
 	var file := FileAccess.open(_file_path, FileAccess.READ)
 	if file == null:
 		push_error("BSAReader: Failed to reopen archive: %s" % _file_path)

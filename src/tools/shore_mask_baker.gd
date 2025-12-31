@@ -1,6 +1,9 @@
 ## ShoreMaskBaker - Tool for pre-generating shore distance mask from terrain
 ##
-## Generates a shore distance texture where each pixel stores the distance to the nearest shoreline:
+## Generates a shore distance texture using Jump Flooding Algorithm (JFA)
+## for efficient Euclidean distance field computation.
+##
+## Output texture (single channel R8):
 ## - 0.0 = at shore or on land (full wave dampening)
 ## - 1.0 = far from shore (full waves, beyond fade_distance)
 ##
@@ -9,7 +12,7 @@
 ## Usage:
 ##   var baker := ShoreMaskBaker.new()
 ##   baker.terrain = $Terrain3D
-##   baker.bake_shore_mask()  # Saves to cache/ocean/shore_mask.png
+##   await baker.bake_shore_mask()  # Saves to cache/ocean/shore_mask.png
 class_name ShoreMaskBaker
 extends RefCounted
 
@@ -39,6 +42,10 @@ var terrain: Terrain3D = null
 signal progress(percent: float, message: String)
 signal bake_complete(success: bool, output_path: String)
 
+## Internal: seed map for JFA (stores nearest shore pixel coordinates)
+## Packed as y * resolution + x, -1 = no seed yet
+var _seeds: PackedInt32Array
+
 
 ## Initialize the baker and create output directory
 func initialize() -> Error:
@@ -56,7 +63,7 @@ func initialize() -> Error:
 	return OK
 
 
-## Bake shore mask and save to file
+## Bake shore mask and save to file (async version - must be awaited)
 ## Returns: Dictionary with { success: bool, output_path: String, error: String }
 func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	progress.emit(0.0, "Initializing...")
@@ -75,120 +82,154 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	if world_bounds.size == Vector2.ZERO:
 		_calculate_world_bounds()
 
-	progress.emit(5.0, "Creating binary water/land mask...")
+	progress.emit(5.0, "Classifying terrain (water/land)...")
 
-	# Step 1: Create binary mask (1 = water, 0 = land)
-	var binary_mask := Image.create(resolution, resolution, false, Image.FORMAT_R8)
+	# Get scene tree for yielding - CRITICAL for UI responsiveness
+	var tree: SceneTree = terrain.get_tree() if terrain else Engine.get_main_loop() as SceneTree
+	if not tree:
+		push_error("ShoreMaskBaker: No scene tree available for async processing")
+		bake_complete.emit(false, "")
+		return {"success": false, "output_path": "", "error": "No scene tree"}
 
+	# Step 1: Create binary mask and initialize JFA seeds
+	# Shore pixels (water adjacent to land) become seeds with distance 0
+	var binary_mask := PackedByteArray()
+	binary_mask.resize(resolution * resolution)
+
+	_seeds = PackedInt32Array()
+	_seeds.resize(resolution * resolution)
+	_seeds.fill(-1)  # -1 = no seed
+
+	# First pass: classify water vs land
+	print("ShoreMaskBaker: Classifying terrain (%dx%d pixels)..." % [resolution, resolution])
 	for y in range(resolution):
 		for x in range(resolution):
 			var world_pos := _pixel_to_world(x, y)
 			var terrain_height := _get_terrain_height(world_pos)
+			var idx := y * resolution + x
 
-			# Water = below sea level, Land = above sea level
-			var is_water := terrain_height < sea_level
-			binary_mask.set_pixel(x, y, Color(1.0 if is_water else 0.0, 0, 0, 1))
+			# 1 = water, 0 = land
+			binary_mask[idx] = 1 if terrain_height < sea_level else 0
 
-		if y % 100 == 0:
-			progress.emit(5.0 + (float(y) / float(resolution)) * 15.0, "Creating binary mask... %d%%" % int((float(y) / float(resolution)) * 100))
+		# Yield every 64 rows to keep UI responsive
+		if y % 64 == 0:
+			var pct := 5.0 + (float(y) / float(resolution)) * 10.0
+			progress.emit(pct, "Classifying terrain... %d%%" % int((float(y) / float(resolution)) * 100))
+			await tree.process_frame
 
-	progress.emit(20.0, "Finding shore pixels...")
+	progress.emit(15.0, "Finding shore pixels...")
+	await tree.process_frame
 
-	# Step 2: Find shore pixels (water pixels adjacent to land)
-	var shore_pixels: Array[Vector2i] = []
+	# Step 2: Find shore pixels (water pixels adjacent to land using 8-connected)
+	# These become the seeds for JFA
+	var shore_count := 0
 
+	print("ShoreMaskBaker: Finding shore pixels...")
 	for y in range(resolution):
 		for x in range(resolution):
-			var is_water := binary_mask.get_pixel(x, y).r > 0.5
+			var idx := y * resolution + x
+			var is_water := binary_mask[idx] == 1
+
 			if is_water:
-				# Check if adjacent to land (4-connected)
+				# Check 8-connected neighbors for land
 				var adjacent_to_land := false
-				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
-					var nx: int = x + offset.x
-					var ny: int = y + offset.y
-					if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
-						if binary_mask.get_pixel(nx, ny).r < 0.5:
-							adjacent_to_land = true
-							break
+				for dy in range(-1, 2):
+					for dx in range(-1, 2):
+						if dx == 0 and dy == 0:
+							continue
+						var nx := x + dx
+						var ny := y + dy
+						if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
+							var nidx := ny * resolution + nx
+							if binary_mask[nidx] == 0:  # Land
+								adjacent_to_land = true
+								break
+					if adjacent_to_land:
+						break
+
 				if adjacent_to_land:
-					shore_pixels.append(Vector2i(x, y))
+					# This is a shore pixel - seed points to itself (distance 0)
+					_seeds[idx] = idx
+					shore_count += 1
 
-	print("ShoreMaskBaker: Found %d shore pixels" % shore_pixels.size())
-	progress.emit(30.0, "Computing distance field...")
+		# Yield every 128 rows
+		if y % 128 == 0:
+			var pct := 15.0 + (float(y) / float(resolution)) * 10.0
+			progress.emit(pct, "Finding shore pixels... %d%%" % int((float(y) / float(resolution)) * 100))
+			await tree.process_frame
 
-	# Step 3: Compute distance transform using iterative flood fill
-	var meters_per_pixel := world_bounds.size.x / float(resolution)
-	var fade_pixels := fade_distance / meters_per_pixel
+	print("ShoreMaskBaker: Found %d shore pixels" % shore_count)
 
-	# Create distance image (float format for precision)
-	var distance_image := Image.create(resolution, resolution, false, Image.FORMAT_RF)
+	if shore_count == 0:
+		push_warning("ShoreMaskBaker: No shore pixels found - terrain may be entirely above or below sea level")
 
-	# Initialize: water pixels get large distance, land pixels get 0
-	for y in range(resolution):
-		for x in range(resolution):
-			var is_water := binary_mask.get_pixel(x, y).r > 0.5
-			if is_water:
-				distance_image.set_pixel(x, y, Color(999999.0, 0, 0, 1))
-			else:
-				# Land = 0 distance (will be masked out anyway)
-				distance_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
+	progress.emit(25.0, "Running Jump Flooding Algorithm...")
+	await tree.process_frame
 
-	# Set shore pixels to 0 distance
-	for shore_px in shore_pixels:
-		distance_image.set_pixel(shore_px.x, shore_px.y, Color(0.0, 0, 0, 1))
+	# Step 3: Jump Flooding Algorithm
+	# Process in log2(resolution) passes with decreasing step sizes
+	var step := resolution / 2
+	var pass_num := 0
+	var total_passes := int(ceil(log(float(resolution)) / log(2.0)))
 
-	progress.emit(40.0, "Propagating distances...")
+	print("ShoreMaskBaker: Running JFA (%d passes)..." % total_passes)
+	while step >= 1:
+		await _jfa_pass_async(step, binary_mask, tree)
+		pass_num += 1
+		var pct := 25.0 + (float(pass_num) / float(total_passes)) * 50.0
+		progress.emit(pct, "JFA pass %d/%d (step=%d)..." % [pass_num, total_passes, step])
+		print("ShoreMaskBaker: JFA pass %d/%d complete (step=%d)" % [pass_num, total_passes, step])
+		await tree.process_frame
+		step /= 2
 
-	# Propagate distances using iterative approach
-	var max_iterations := int(fade_pixels * 1.5) + 10
-	for iteration in range(max_iterations):
-		var changed := false
-		for y in range(resolution):
-			for x in range(resolution):
-				var current_dist := distance_image.get_pixel(x, y).r
-				if current_dist <= 0.0:
-					continue  # Already at shore or land
+	progress.emit(75.0, "Computing shore factor gradient...")
+	await tree.process_frame
 
-				# Check neighbors
-				var best_dist := current_dist
-				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
-					var nx: int = x + offset.x
-					var ny: int = y + offset.y
-					if nx >= 0 and nx < resolution and ny >= 0 and ny < resolution:
-						var neighbor_dist := distance_image.get_pixel(nx, ny).r + 1.0
-						if neighbor_dist < best_dist:
-							best_dist = neighbor_dist
-							changed = true
-
-				if best_dist < current_dist:
-					distance_image.set_pixel(x, y, Color(best_dist, 0, 0, 1))
-
-		if not changed:
-			print("ShoreMaskBaker: Distance propagation converged at iteration %d" % iteration)
-			break
-
-		if iteration % 10 == 0:
-			progress.emit(40.0 + (float(iteration) / float(max_iterations)) * 40.0, "Propagating distances... iteration %d" % iteration)
-
-	progress.emit(80.0, "Converting to shore factor...")
-
-	# Step 4: Convert to shore factor: 0 = at shore, 1 = far from shore
+	# Step 4: Convert distances to shore factor with smoothstep
 	var result_image := Image.create(resolution, resolution, false, Image.FORMAT_R8)
+	var texel_size := world_bounds.size.x / float(resolution)
 
+	print("ShoreMaskBaker: Computing gradient...")
 	for y in range(resolution):
 		for x in range(resolution):
-			var is_water := binary_mask.get_pixel(x, y).r > 0.5
+			var idx := y * resolution + x
+			var is_water := binary_mask[idx] == 1
+
 			if not is_water:
-				# Land = 0 (no ocean)
+				# Land = 0 (no ocean rendering here)
 				result_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
 			else:
-				var dist_pixels := distance_image.get_pixel(x, y).r
-				var dist_meters := dist_pixels * meters_per_pixel
-				# Smoothstep from 0 (at shore) to 1 (at fade_distance)
-				var shore_factor := _smoothstep(0.0, fade_distance, dist_meters)
+				var seed_idx := _seeds[idx]
+				var shore_factor: float
+
+				if seed_idx < 0:
+					# No shore found - open ocean, full waves
+					shore_factor = 1.0
+				elif seed_idx == idx:
+					# This IS a shore pixel
+					shore_factor = 0.0
+				else:
+					# Calculate Euclidean distance to nearest shore
+					var seed_x := seed_idx % resolution
+					var seed_y := seed_idx / resolution
+					var dx := float(x - seed_x)
+					var dy := float(y - seed_y)
+					var pixel_distance := sqrt(dx * dx + dy * dy)
+					var world_distance := pixel_distance * texel_size
+
+					# Smoothstep from 0 (at shore) to 1 (at fade_distance)
+					shore_factor = _smoothstep(0.0, fade_distance, world_distance)
+
 				result_image.set_pixel(x, y, Color(shore_factor, 0, 0, 1))
 
-	progress.emit(90.0, "Saving shore mask...")
+		# Yield every 64 rows
+		if y % 64 == 0:
+			var pct := 75.0 + (float(y) / float(resolution)) * 20.0
+			progress.emit(pct, "Computing gradient... %d%%" % int((float(y) / float(resolution)) * 100))
+			await tree.process_frame
+
+	progress.emit(95.0, "Saving shore mask...")
+	await tree.process_frame
 
 	# Determine output path
 	var output_path := custom_output_path
@@ -203,21 +244,19 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 		bake_complete.emit(false, "")
 		return {"success": false, "output_path": "", "error": error}
 
-	progress.emit(95.0, "Saving metadata...")
-
 	# Save metadata (bounds info)
 	_save_metadata(output_path)
 
 	progress.emit(100.0, "Complete!")
 
-	print("ShoreMaskBaker: Saved shore distance mask to %s" % output_path)
+	print("ShoreMaskBaker: Saved shore mask to %s" % output_path)
 	print("  Resolution: %dx%d" % [resolution, resolution])
 	print("  World bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
 		world_bounds.position.x, world_bounds.position.y,
 		world_bounds.end.x, world_bounds.end.y
 	])
 	print("  Sea level: %.1f, Fade distance: %.1fm" % [sea_level, fade_distance])
-	print("  Shore pixels found: %d" % shore_pixels.size())
+	print("  Shore pixels found: %d" % shore_count)
 
 	bake_complete.emit(true, output_path)
 	return {
@@ -226,6 +265,119 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 		"error": "",
 		"bounds": world_bounds
 	}
+
+
+## Jump Flooding Algorithm - single pass with given step size (async version)
+## Checks 8 neighbors at distance 'step' and updates seeds
+func _jfa_pass_async(step: int, binary_mask: PackedByteArray, tree: SceneTree) -> void:
+	# Neighbor offsets (8-connected at step distance)
+	var offsets: Array[Vector2i] = [
+		Vector2i(-step, -step), Vector2i(0, -step), Vector2i(step, -step),
+		Vector2i(-step, 0),                          Vector2i(step, 0),
+		Vector2i(-step, step),  Vector2i(0, step),  Vector2i(step, step)
+	]
+
+	# Create copy for reading while writing
+	var new_seeds := _seeds.duplicate()
+
+	for y in range(resolution):
+		for x in range(resolution):
+			var idx := y * resolution + x
+
+			# Only process water pixels
+			if binary_mask[idx] == 0:
+				continue
+
+			var best_seed := _seeds[idx]
+			var best_dist_sq := _distance_squared_to_seed(x, y, best_seed)
+
+			# Check all neighbors at step distance
+			for offset in offsets:
+				var nx := x + offset.x
+				var ny := y + offset.y
+
+				# Bounds check
+				if nx < 0 or nx >= resolution or ny < 0 or ny >= resolution:
+					continue
+
+				var neighbor_idx := ny * resolution + nx
+				var neighbor_seed := _seeds[neighbor_idx]
+
+				if neighbor_seed < 0:
+					continue  # Neighbor has no seed
+
+				var dist_sq := _distance_squared_to_seed(x, y, neighbor_seed)
+				if dist_sq < best_dist_sq:
+					best_dist_sq = dist_sq
+					best_seed = neighbor_seed
+
+			new_seeds[idx] = best_seed
+
+		# Yield every 128 rows to keep UI responsive
+		if y % 128 == 0:
+			await tree.process_frame
+
+	_seeds = new_seeds
+
+
+## Jump Flooding Algorithm - single pass (synchronous, kept for compatibility)
+func _jfa_pass(step: int, binary_mask: PackedByteArray) -> void:
+	# Neighbor offsets (8-connected at step distance)
+	var offsets: Array[Vector2i] = [
+		Vector2i(-step, -step), Vector2i(0, -step), Vector2i(step, -step),
+		Vector2i(-step, 0),                          Vector2i(step, 0),
+		Vector2i(-step, step),  Vector2i(0, step),  Vector2i(step, step)
+	]
+
+	# Create copy for reading while writing
+	var new_seeds := _seeds.duplicate()
+
+	for y in range(resolution):
+		for x in range(resolution):
+			var idx := y * resolution + x
+
+			# Only process water pixels
+			if binary_mask[idx] == 0:
+				continue
+
+			var best_seed := _seeds[idx]
+			var best_dist_sq := _distance_squared_to_seed(x, y, best_seed)
+
+			# Check all neighbors at step distance
+			for offset in offsets:
+				var nx := x + offset.x
+				var ny := y + offset.y
+
+				# Bounds check
+				if nx < 0 or nx >= resolution or ny < 0 or ny >= resolution:
+					continue
+
+				var neighbor_idx := ny * resolution + nx
+				var neighbor_seed := _seeds[neighbor_idx]
+
+				if neighbor_seed < 0:
+					continue  # Neighbor has no seed
+
+				var dist_sq := _distance_squared_to_seed(x, y, neighbor_seed)
+				if dist_sq < best_dist_sq:
+					best_dist_sq = dist_sq
+					best_seed = neighbor_seed
+
+			new_seeds[idx] = best_seed
+
+	_seeds = new_seeds
+
+
+## Calculate squared Euclidean distance from pixel (x, y) to the pixel at seed_idx
+func _distance_squared_to_seed(x: int, y: int, seed_idx: int) -> float:
+	if seed_idx < 0:
+		return INF
+
+	var seed_x := seed_idx % resolution
+	var seed_y := seed_idx / resolution
+	var dx := float(x - seed_x)
+	var dy := float(y - seed_y)
+	return dx * dx + dy * dy
 
 
 ## Calculate world bounds from terrain
@@ -272,8 +424,8 @@ func _calculate_world_bounds() -> void:
 		world_max.y - world_min.y
 	)
 
-	# Add padding
-	var padding := 500.0
+	# Add padding for shore gradient to extend beyond terrain edge
+	var padding := fade_distance + 100.0
 	world_bounds = Rect2(
 		world_bounds.position.x - padding,
 		world_bounds.position.y - padding,
@@ -281,14 +433,15 @@ func _calculate_world_bounds() -> void:
 		world_bounds.size.y + padding * 2
 	)
 
-	print("ShoreMaskBaker: Calculated world bounds: %s" % world_bounds)
+	print("ShoreMaskBaker: Calculated world bounds: %s (with %.0fm padding)" % [world_bounds, padding])
 
 
 ## Get terrain height at world position
 func _get_terrain_height(world_pos: Vector3) -> float:
 	if terrain and terrain.data:
 		return terrain.data.get_height(world_pos)
-	return 0.0
+	# Outside terrain = assume ocean (below sea level)
+	return sea_level - 1.0
 
 
 ## Convert pixel coordinates to world position
@@ -319,7 +472,8 @@ func _save_metadata(image_path: String) -> void:
 	config.set_value("shore_mask", "bounds_y", world_bounds.position.y)
 	config.set_value("shore_mask", "bounds_width", world_bounds.size.x)
 	config.set_value("shore_mask", "bounds_height", world_bounds.size.y)
-	config.set_value("shore_mask", "type", "distance")  # Mark as distance-based
+	config.set_value("shore_mask", "algorithm", "jfa")  # Mark as JFA-based
+	config.set_value("shore_mask", "version", 2)
 
 	var cfg_path := image_path.replace(".png", ".cfg")
 	config.save(cfg_path)
@@ -344,6 +498,7 @@ static func load_prebaked(image_path: String) -> Dictionary:
 	# Load metadata
 	var cfg_path := image_path.replace(".png", ".cfg")
 	var bounds := Rect2(-8000, -8000, 16000, 16000)  # Default
+	var fade_dist := 50.0
 
 	if FileAccess.file_exists(cfg_path):
 		var config := ConfigFile.new()
@@ -353,13 +508,15 @@ static func load_prebaked(image_path: String) -> Dictionary:
 			var bounds_w: float = config.get_value("shore_mask", "bounds_width", 16000.0)
 			var bounds_h: float = config.get_value("shore_mask", "bounds_height", 16000.0)
 			bounds = Rect2(bounds_x, bounds_y, bounds_w, bounds_h)
-			var mask_type: String = config.get_value("shore_mask", "type", "height")
-			print("ShoreMaskBaker: Loaded %s-based shore mask" % mask_type)
+			fade_dist = config.get_value("shore_mask", "fade_distance", 50.0)
+			var algorithm: String = config.get_value("shore_mask", "algorithm", "iterative")
+			print("ShoreMaskBaker: Loaded %s-based shore mask (fade=%.0fm)" % [algorithm, fade_dist])
 
 	print("ShoreMaskBaker: Loaded prebaked shore mask from %s" % image_path)
 	print("  Bounds: %s" % bounds)
 
 	return {
 		"texture": texture,
-		"bounds": bounds
+		"bounds": bounds,
+		"fade_distance": fade_dist
 	}

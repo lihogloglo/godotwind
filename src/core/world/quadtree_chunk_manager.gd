@@ -1,27 +1,19 @@
-## QuadtreeChunkManager - Hierarchical chunk management for distant rendering
+## QuadtreeChunkManager - Chunk management for FAR tier distant rendering
 ##
-## Organizes cells into hierarchical chunks for efficient MID/FAR tier management:
-## - MID tier: 4x4 cell chunks (~468m each)
-## - FAR tier: 8x8 cell chunks (~936m each)
-## - NEAR tier: Uses per-cell (not managed here)
-##
-## This dramatically reduces the number of visibility calculations and dictionary
-## lookups compared to per-cell tracking (~35x improvement).
+## Organizes cells into 8x8 chunks (~936m each) for efficient FAR tier management.
+## Reduces visibility calculations by ~35x compared to per-cell tracking.
 ##
 ## Reference patterns from DigitallyTailored/godot4-quadtree (MIT license).
 ##
 ## Usage:
 ##   var chunk_manager := QuadtreeChunkManager.new()
 ##   chunk_manager.configure(tier_manager)
-##   var visible_chunks := chunk_manager.get_visible_chunks(camera_cell, Tier.MID)
+##   var visible_chunks := chunk_manager.get_visible_chunks(camera_cell, Tier.FAR)
 class_name QuadtreeChunkManager
 extends RefCounted
 
 const DistanceTierManagerScript := preload("res://src/core/world/distance_tier_manager.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
-
-## Chunk size in cells for MID tier (4x4 = 16 cells per chunk)
-const MID_CHUNK_SIZE := 4
 
 ## Chunk size in cells for FAR tier (8x8 = 64 cells per chunk)
 const FAR_CHUNK_SIZE := 8
@@ -29,15 +21,11 @@ const FAR_CHUNK_SIZE := 8
 ## Cell size in meters (from DistanceUtils - single source of truth)
 const CELL_SIZE_METERS := DU.CELL_SIZE_METERS
 
-## MID chunk size in meters (4 * 117 = 468m)
-const MID_CHUNK_SIZE_METERS := MID_CHUNK_SIZE * CELL_SIZE_METERS
-
 ## FAR chunk size in meters (8 * 117 = 936m)
 const FAR_CHUNK_SIZE_METERS := FAR_CHUNK_SIZE * CELL_SIZE_METERS
 
-## Maximum chunks to track per tier (prevents runaway)
-const MAX_MID_CHUNKS := 50
-const MAX_FAR_CHUNKS := 60
+## Maximum chunks to track (prevents runaway)
+const MAX_FAR_CHUNKS := 80
 
 ## Reference to tier manager for distance thresholds
 var tier_manager: RefCounted = null
@@ -58,7 +46,6 @@ func configure(p_tier_manager: RefCounted) -> void:
 		var tier_end_distances_dict: Dictionary = tier_manager.get("tier_end_distances")
 		_tier_distances = tier_distances_dict.duplicate()
 		_tier_end_distances = tier_end_distances_dict.duplicate()
-		print("[QuadtreeChunkManager] Configured with tier_distances: %s, tier_end_distances: %s" % [_tier_distances, _tier_end_distances])
 	else:
 		push_warning("QuadtreeChunkManager: tier_manager is required - using empty distances")
 		_tier_distances = {}
@@ -71,8 +58,8 @@ func configure(p_tier_manager: RefCounted) -> void:
 
 ## Convert a cell grid coordinate to its containing chunk grid coordinate
 ## cell: The cell position (e.g., Vector2i(5, 7))
-## chunk_size: The chunk size in cells (e.g., 4 for MID tier)
-## Returns: The chunk grid coordinate (e.g., Vector2i(1, 1) for 4x4 chunks)
+## chunk_size: The chunk size in cells (e.g., 8 for FAR tier)
+## Returns: The chunk grid coordinate (e.g., Vector2i(0, 0) for 8x8 chunks)
 func cell_to_chunk_grid(cell: Vector2i, chunk_size: int) -> Vector2i:
 	# Use floor division to handle negative coordinates correctly
 	var chunk_x := floori(float(cell.x) / chunk_size)
@@ -82,7 +69,7 @@ func cell_to_chunk_grid(cell: Vector2i, chunk_size: int) -> Vector2i:
 
 ## Get all cell grid coordinates within a chunk
 ## chunk_grid: The chunk position (e.g., Vector2i(1, 1))
-## chunk_size: The chunk size in cells (e.g., 4 for MID tier)
+## chunk_size: The chunk size in cells (e.g., 8 for FAR tier)
 ## Returns: Array of cell positions within the chunk
 func get_cells_in_chunk(chunk_grid: Vector2i, chunk_size: int) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
@@ -106,20 +93,17 @@ func get_chunk_center_cell(chunk_grid: Vector2i, chunk_size: int) -> Vector2i:
 ## Get chunk size for a given tier
 func get_chunk_size_for_tier(tier: int) -> int:
 	match tier:
-		DistanceTierManagerScript.Tier.MID:
-			return MID_CHUNK_SIZE
 		DistanceTierManagerScript.Tier.FAR:
 			return FAR_CHUNK_SIZE
 		_:
-			return 1  # NEAR tier uses per-cell
+			return 1  # NEAR/MID tiers use per-cell (managed by ObjectDistanceManager)
 
 
 ## Generate a unique identifier string for a chunk
 ## Used as dictionary key for tracking loaded chunks
 ## Note: For performance, prefer get_chunk_key() which returns an int
-func get_chunk_identifier(chunk_grid: Vector2i, tier: int) -> String:
-	var tier_prefix := "M" if tier == DistanceTierManagerScript.Tier.MID else "F"
-	return "%s_%d_%d" % [tier_prefix, chunk_grid.x, chunk_grid.y]
+func get_chunk_identifier(chunk_grid: Vector2i, _tier: int) -> String:
+	return "F_%d_%d" % [chunk_grid.x, chunk_grid.y]
 
 
 ## Generate a unique integer key for a chunk (faster than string identifier)
@@ -148,30 +132,20 @@ func decode_chunk_key(key: int) -> Dictionary:
 
 #region Chunk Visibility
 
-## Get all visible chunks for a specific tier
+## Get all visible chunks for FAR tier
 ## camera_cell: The cell the camera is currently in
-## tier: The tier to get chunks for (MID or FAR)
+## tier: The tier to get chunks for (only FAR tier uses chunks)
 ## Returns: Array of chunk grid coordinates that should be loaded
-var _get_visible_call_count: int = 0
 func get_visible_chunks(camera_cell: Vector2i, tier: int) -> Array[Vector2i]:
-	_get_visible_call_count += 1
-	if _get_visible_call_count <= 4:
-		print("[QuadtreeChunkManager] get_visible_chunks CALLED #%d - tier=%d, camera=%s" % [_get_visible_call_count, tier, camera_cell])
-
 	var visible_chunks: Array[Vector2i] = []
 
-	# Only MID and FAR tiers use chunks
-	if tier != DistanceTierManagerScript.Tier.MID and tier != DistanceTierManagerScript.Tier.FAR:
-		if _get_visible_call_count <= 4:
-			print("[QuadtreeChunkManager]   SKIP - tier %d not MID(1) or FAR(2)" % tier)
+	# Only FAR tier uses chunks
+	if tier != DistanceTierManagerScript.Tier.FAR:
 		return visible_chunks
 
-	var chunk_size := get_chunk_size_for_tier(tier)
+	var chunk_size := FAR_CHUNK_SIZE
 	var min_dist: float = _tier_distances.get(tier, 0.0)
 	var max_dist: float = _tier_end_distances.get(tier, 0.0)
-
-	if _get_visible_call_count <= 4:
-		print("[QuadtreeChunkManager]   Processing tier=%d, min_dist=%.1f, max_dist=%.1f, chunk_size=%d" % [tier, min_dist, max_dist, chunk_size])
 
 	# Calculate chunk radius from distance
 	# Add 1 to ensure we cover edge cases
@@ -201,11 +175,9 @@ func get_visible_chunks(camera_cell: Vector2i, tier: int) -> Array[Vector2i]:
 	chunks_with_distance.sort_custom(func(a: Variant, b: Variant) -> bool: return a.distance < b.distance)
 
 	# Apply hard limit
-	var max_chunks := MAX_MID_CHUNKS if tier == DistanceTierManagerScript.Tier.MID else MAX_FAR_CHUNKS
 	var count := 0
-
 	for entry in chunks_with_distance:
-		if count >= max_chunks:
+		if count >= MAX_FAR_CHUNKS:
 			break
 		visible_chunks.append(entry.chunk)
 		count += 1
@@ -237,11 +209,10 @@ func _chunk_distance_to_cell(chunk: Vector2i, cell: Vector2i, chunk_size: int) -
 	return DU.cell_distance(chunk_center, cell)
 
 
-## Get visible chunks for both MID and FAR tiers at once
+## Get visible chunks for FAR tier
 ## Returns: Dictionary mapping tier -> Array[Vector2i] of chunk grids
 func get_visible_chunks_by_tier(camera_cell: Vector2i) -> Dictionary:
 	return {
-		DistanceTierManagerScript.Tier.MID: get_visible_chunks(camera_cell, DistanceTierManagerScript.Tier.MID),
 		DistanceTierManagerScript.Tier.FAR: get_visible_chunks(camera_cell, DistanceTierManagerScript.Tier.FAR),
 	}
 
@@ -298,16 +269,12 @@ func is_chunk_in_frustum(chunk_grid: Vector2i, chunk_size: int, camera: Camera3D
 
 ## Get debug information about chunk calculations
 func get_debug_info(camera_cell: Vector2i) -> Dictionary:
-	var mid_chunks := get_visible_chunks(camera_cell, DistanceTierManagerScript.Tier.MID)
 	var far_chunks := get_visible_chunks(camera_cell, DistanceTierManagerScript.Tier.FAR)
 
 	return {
 		"camera_cell": camera_cell,
-		"mid_chunk_size": MID_CHUNK_SIZE,
 		"far_chunk_size": FAR_CHUNK_SIZE,
-		"visible_mid_chunks": mid_chunks.size(),
 		"visible_far_chunks": far_chunks.size(),
-		"mid_cells_covered": mid_chunks.size() * MID_CHUNK_SIZE * MID_CHUNK_SIZE,
 		"far_cells_covered": far_chunks.size() * FAR_CHUNK_SIZE * FAR_CHUNK_SIZE,
 		"tier_distances": _tier_distances.duplicate(),
 	}

@@ -56,6 +56,7 @@ import/blender/enabled=false
 [rendering]
 
 textures/vram_compression/import_etc2_astc=true
+anti_aliasing/quality/use_taa=true
 occlusion_culling/use_occlusion_culling=true
 
 [shader_globals]

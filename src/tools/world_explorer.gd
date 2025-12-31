@@ -42,6 +42,8 @@ const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 const ConsoleScript := preload("res://src/core/console/console.gd")
 const AutomatedTestRunnerScript := preload("res://src/tools/automated_test_runner.gd")
+const FoldablePanelScript := preload("res://src/tools/ui/foldable_panel.gd")
+const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -95,6 +97,29 @@ var _ocean_initialized: bool = false  # Track if ocean has ever been created
 # Fallback environment for when Sky3D is disabled (Godot default-like sky)
 var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
+
+# Foldable panel references
+var _panel_scroll: ScrollContainer = null
+var _panel_vbox: VBoxContainer = null
+var _performance_panel: FoldablePanel = null
+var _visibility_panel: FoldablePanel = null
+var _ocean_panel: FoldablePanel = null
+var _navigation_panel: FoldablePanel = null
+var _terrain_panel: FoldablePanel = null
+var _debug_panel: FoldablePanel = null
+var _render_tier_panel: FoldablePanel = null
+
+# Render tier toggle references
+var _near_tier_toggle: CheckBox = null
+var _mid_tier_toggle: CheckBox = null
+var _far_tier_toggle: CheckBox = null
+
+# Debug overlay for 3D visualizations
+var _debug_overlay: Node3D = null
+var _show_chunk_debug: bool = false
+var _show_tier_debug: bool = false
+var _show_cell_debug: bool = false
+var _lod_mode_btn: Button = null
 
 # Interior cell browser UI (will be added to scene)
 @onready var interior_panel: Panel = $UI/InteriorPanel if has_node("UI/InteriorPanel") else null
@@ -244,13 +269,8 @@ func _init_async() -> void:
 	await _update_loading(85, "Setting up streaming system...")
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
 
-	# Preload common models in background for faster initial cell loading
-	# This starts async loading of ~100 common models (flora, rocks, containers, etc.)
-	# Models will be ready when user first loads cells, reducing visible pop-in
-	await _update_loading(90, "Preloading common models...")
-	if world_streaming_manager:
-		world_streaming_manager.preload_common_models(false)  # false = async
-		_log("Started async preload of common models")
+	# Models are NOT preloaded at startup - they will only load when the Models button is toggled
+	# This ensures no model loading happens until explicitly requested by the user
 
 	# Done
 	await _update_loading(100, "Ready!")
@@ -271,6 +291,9 @@ func _init_async() -> void:
 
 	# NOW start tracking the camera - cells will generate around Seyda Neen
 	world_streaming_manager.set_tracked_node(camera)
+
+	# Update debug overlay with references to managers
+	_update_debug_overlay_references()
 
 
 func _init_terrain3d() -> void:
@@ -561,54 +584,142 @@ func _update_preprocess_status() -> void:
 		preprocess_btn.text = "Preprocess ALL Terrain"
 
 
-## Setup visibility toggle checkboxes
+## Setup visibility toggle checkboxes (legacy - now uses foldable panels)
 func _setup_visibility_toggles() -> void:
+	# Create fallback environment and light for when Sky3D is disabled
+	_setup_fallback_environment()
+
+	# Setup the new foldable panel system
+	_setup_foldable_panels()
+
+	# Setup debug overlay for 3D visualizations
+	_setup_debug_overlay()
+
+	# Apply initial resolution (1920x1080)
+	_apply_resolution(2)
+
+
+## Setup the new foldable panel UI system
+func _setup_foldable_panels() -> void:
 	# Find the VBox container in stats panel
 	var vbox: VBoxContainer = stats_panel.get_node_or_null("VBox")
 	if not vbox:
 		return
 
-	# Row 1: Basic visibility toggles (Models, NPCs, Ocean, Sky)
-	var toggle_row1 := HBoxContainer.new()
-	toggle_row1.name = "VisibilityToggles"
+	# Hide old static content (we'll rebuild with foldable panels)
+	var stats_text_node: Control = vbox.get_node_or_null("StatsText")
+	if stats_text_node:
+		stats_text_node.visible = false
+
+	# Create scroll container for panels
+	_panel_scroll = ScrollContainer.new()
+	_panel_scroll.name = "PanelScroll"
+	_panel_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_panel_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+
+	_panel_vbox = VBoxContainer.new()
+	_panel_vbox.name = "PanelVBox"
+	_panel_vbox.add_theme_constant_override("separation", 4)
+	_panel_scroll.add_child(_panel_vbox)
+
+	# Create foldable panels
+	_create_performance_panel()
+	_create_visibility_panel()
+	_create_navigation_panel()
+	_create_terrain_panel()
+	_create_ocean_panel()
+	_create_debug_panel()
+	_create_render_tier_panel()
+
+	# Insert scroll container after title
+	var separator_idx := 2  # After title and first separator
+	vbox.add_child(_panel_scroll)
+	vbox.move_child(_panel_scroll, separator_idx)
+
+
+## Create performance stats panel
+func _create_performance_panel() -> void:
+	_performance_panel = FoldablePanelScript.new("Performance", false)
+
+	# FPS and timing (updated dynamically)
+	var fps_label := Label.new()
+	fps_label.name = "FPSLabel"
+	fps_label.add_theme_font_size_override("font_size", 11)
+	fps_label.text = "FPS: --"
+	_performance_panel.add_content(fps_label)
+
+	var timing_label := Label.new()
+	timing_label.name = "TimingLabel"
+	timing_label.add_theme_font_size_override("font_size", 11)
+	timing_label.text = "Frame: -- ms | P95: -- ms"
+	_performance_panel.add_content(timing_label)
+
+	var render_label := Label.new()
+	render_label.name = "RenderLabel"
+	render_label.add_theme_font_size_override("font_size", 11)
+	render_label.text = "Draw calls: -- | Tris: --k"
+	_performance_panel.add_content(render_label)
+
+	var memory_label := Label.new()
+	memory_label.name = "MemoryLabel"
+	memory_label.add_theme_font_size_override("font_size", 11)
+	memory_label.text = "Memory: -- MB"
+	_performance_panel.add_content(memory_label)
+
+	_panel_vbox.add_child(_performance_panel)
+
+
+## Create visibility toggles panel
+func _create_visibility_panel() -> void:
+	_visibility_panel = FoldablePanelScript.new("Rendering", false)
+
+	# Row 1: Models, NPCs
+	var row1 := HBoxContainer.new()
+	row1.add_theme_constant_override("separation", 8)
 
 	_show_models_toggle = CheckBox.new()
-	_show_models_toggle.text = "Models"
+	_show_models_toggle.text = "Models [M]"
 	_show_models_toggle.button_pressed = _show_models
 	_show_models_toggle.toggled.connect(_on_show_models_toggled)
-	_show_models_toggle.tooltip_text = "Toggle static models"
-	toggle_row1.add_child(_show_models_toggle)
+	_show_models_toggle.tooltip_text = "Toggle static models (shortcut: M)"
+	row1.add_child(_show_models_toggle)
 
 	_show_characters_toggle = CheckBox.new()
-	_show_characters_toggle.text = "NPCs"
+	_show_characters_toggle.text = "NPCs [N]"
 	_show_characters_toggle.button_pressed = _show_characters
 	_show_characters_toggle.toggled.connect(_on_show_characters_toggled)
-	_show_characters_toggle.tooltip_text = "Toggle NPCs and creatures"
-	toggle_row1.add_child(_show_characters_toggle)
+	_show_characters_toggle.tooltip_text = "Toggle NPCs and creatures (shortcut: N)"
+	row1.add_child(_show_characters_toggle)
+
+	_visibility_panel.add_content(row1)
+
+	# Row 2: Ocean, Sky
+	var row2 := HBoxContainer.new()
+	row2.add_theme_constant_override("separation", 8)
 
 	_show_ocean_toggle = CheckBox.new()
-	_show_ocean_toggle.text = "Ocean"
+	_show_ocean_toggle.text = "Ocean [O]"
 	_show_ocean_toggle.button_pressed = _show_ocean
 	_show_ocean_toggle.toggled.connect(_on_show_ocean_toggled)
-	toggle_row1.add_child(_show_ocean_toggle)
+	_show_ocean_toggle.tooltip_text = "Toggle ocean (shortcut: O)"
+	row2.add_child(_show_ocean_toggle)
 
 	_show_sky_toggle = CheckBox.new()
-	_show_sky_toggle.text = "Sky"
+	_show_sky_toggle.text = "Sky [K]"
 	_show_sky_toggle.button_pressed = _show_sky
 	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
-	toggle_row1.add_child(_show_sky_toggle)
+	_show_sky_toggle.tooltip_text = "Toggle sky/day-night cycle (shortcut: K)"
+	row2.add_child(_show_sky_toggle)
 
-	# Create fallback environment and light for when Sky3D is disabled
-	_setup_fallback_environment()
+	_visibility_panel.add_content(row2)
 
-	# Row 2: Resolution and Water Quality dropdowns
-	var settings_row := HBoxContainer.new()
-	settings_row.name = "SettingsRow"
-
+	# Row 3: Resolution dropdown
+	var res_row := HBoxContainer.new()
 	var res_label := Label.new()
-	res_label.text = "Res:"
-	res_label.custom_minimum_size.x = 30
-	settings_row.add_child(res_label)
+	res_label.text = "Resolution:"
+	res_label.add_theme_font_size_override("font_size", 11)
+	res_label.custom_minimum_size.x = 70
+	res_row.add_child(res_label)
 
 	_resolution_btn = OptionButton.new()
 	_resolution_btn.add_item("720p", 0)
@@ -619,13 +730,137 @@ func _setup_visibility_toggles() -> void:
 	_resolution_btn.selected = 2
 	_resolution_btn.item_selected.connect(_on_resolution_changed)
 	_resolution_btn.tooltip_text = "Window resolution"
-	_resolution_btn.custom_minimum_size.x = 70
-	settings_row.add_child(_resolution_btn)
+	_resolution_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	res_row.add_child(_resolution_btn)
 
-	var water_label := Label.new()
-	water_label.text = "Water:"
-	water_label.custom_minimum_size.x = 45
-	settings_row.add_child(water_label)
+	_visibility_panel.add_content(res_row)
+
+	_panel_vbox.add_child(_visibility_panel)
+
+
+## Create navigation panel
+func _create_navigation_panel() -> void:
+	_navigation_panel = FoldablePanelScript.new("Navigation", true)  # Start folded
+
+	# Camera info (updated dynamically)
+	var camera_label := Label.new()
+	camera_label.name = "CameraLabel"
+	camera_label.add_theme_font_size_override("font_size", 11)
+	camera_label.text = "Cell: (0, 0) | Mode: Fly"
+	_navigation_panel.add_content(camera_label)
+
+	# View distance control
+	var view_row := HBoxContainer.new()
+	var view_label := Label.new()
+	view_label.text = "View dist:"
+	view_label.add_theme_font_size_override("font_size", 11)
+	view_label.custom_minimum_size.x = 60
+	view_row.add_child(view_label)
+
+	var minus_btn := Button.new()
+	minus_btn.text = "-"
+	minus_btn.custom_minimum_size.x = 30
+	minus_btn.pressed.connect(func() -> void: _adjust_view_distance(-1))
+	view_row.add_child(minus_btn)
+
+	var dist_label := Label.new()
+	dist_label.name = "DistLabel"
+	dist_label.text = "%d cells" % _current_view_distance
+	dist_label.add_theme_font_size_override("font_size", 11)
+	dist_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	dist_label.custom_minimum_size.x = 60
+	view_row.add_child(dist_label)
+
+	var plus_btn := Button.new()
+	plus_btn.text = "+"
+	plus_btn.custom_minimum_size.x = 30
+	plus_btn.pressed.connect(func() -> void: _adjust_view_distance(1))
+	view_row.add_child(plus_btn)
+
+	_navigation_panel.add_content(view_row)
+
+	# Quick teleport buttons
+	var teleport_label := Label.new()
+	teleport_label.text = "Quick Teleport:"
+	teleport_label.add_theme_font_size_override("font_size", 11)
+	_navigation_panel.add_content(teleport_label)
+
+	var btn_row1 := HBoxContainer.new()
+	btn_row1.add_theme_constant_override("separation", 4)
+
+	var seyda_btn := Button.new()
+	seyda_btn.text = "Seyda Neen"
+	seyda_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	seyda_btn.pressed.connect(func() -> void: _teleport_to_cell(-2, -9))
+	btn_row1.add_child(seyda_btn)
+
+	var balmora_btn_new := Button.new()
+	balmora_btn_new.text = "Balmora"
+	balmora_btn_new.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	balmora_btn_new.pressed.connect(func() -> void: _teleport_to_cell(-3, -2))
+	btn_row1.add_child(balmora_btn_new)
+
+	_navigation_panel.add_content(btn_row1)
+
+	var btn_row2 := HBoxContainer.new()
+	btn_row2.add_theme_constant_override("separation", 4)
+
+	var vivec_btn_new := Button.new()
+	vivec_btn_new.text = "Vivec"
+	vivec_btn_new.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vivec_btn_new.pressed.connect(func() -> void: _teleport_to_cell(5, -6))
+	btn_row2.add_child(vivec_btn_new)
+
+	var origin_btn_new := Button.new()
+	origin_btn_new.text = "Origin"
+	origin_btn_new.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	origin_btn_new.pressed.connect(func() -> void: _teleport_to_cell(0, 0))
+	btn_row2.add_child(origin_btn_new)
+
+	_navigation_panel.add_content(btn_row2)
+
+	_panel_vbox.add_child(_navigation_panel)
+
+
+## Create terrain panel
+func _create_terrain_panel() -> void:
+	_terrain_panel = FoldablePanelScript.new("Terrain", true)  # Start folded
+
+	# Terrain stats (updated dynamically)
+	var terrain_label := Label.new()
+	terrain_label.name = "TerrainLabel"
+	terrain_label.add_theme_font_size_override("font_size", 11)
+	terrain_label.text = "Regions: --"
+	_terrain_panel.add_content(terrain_label)
+
+	# Preprocess status
+	var status_label := Label.new()
+	status_label.name = "PreprocessStatusLabel"
+	status_label.add_theme_font_size_override("font_size", 11)
+	status_label.text = "Status: Checking..."
+	_terrain_panel.add_content(status_label)
+
+	# Preprocess button
+	var preprocess_btn_new := Button.new()
+	preprocess_btn_new.name = "PreprocessBtnNew"
+	preprocess_btn_new.text = "Preprocess Terrain"
+	preprocess_btn_new.pressed.connect(_on_preprocess_pressed)
+	_terrain_panel.add_content(preprocess_btn_new)
+
+	_panel_vbox.add_child(_terrain_panel)
+
+
+## Create ocean settings panel
+func _create_ocean_panel() -> void:
+	_ocean_panel = FoldablePanelScript.new("Ocean Settings", true)  # Start folded
+
+	# Water quality dropdown
+	var quality_row := HBoxContainer.new()
+	var quality_label := Label.new()
+	quality_label.text = "Quality:"
+	quality_label.add_theme_font_size_override("font_size", 11)
+	quality_label.custom_minimum_size.x = 55
+	quality_row.add_child(quality_label)
 
 	_water_quality_btn = OptionButton.new()
 	_water_quality_btn.add_item("Auto", -1)
@@ -634,18 +869,15 @@ func _setup_visibility_toggles() -> void:
 	_water_quality_btn.selected = 0
 	_water_quality_btn.item_selected.connect(_on_water_quality_changed)
 	_water_quality_btn.tooltip_text = "Water quality: Flat (simple) or FFT (GPU waves)"
-	_water_quality_btn.custom_minimum_size.x = 65
-	settings_row.add_child(_water_quality_btn)
+	_water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	quality_row.add_child(_water_quality_btn)
 
-	# Ocean controls container (shown/hidden with ocean toggle)
+	_ocean_panel.add_content(quality_row)
+
+	# Ocean controls container (for sliders - populated when ocean is enabled)
 	_ocean_controls_container = VBoxContainer.new()
 	_ocean_controls_container.name = "OceanControls"
 	_ocean_controls_container.visible = false  # Hidden until ocean is enabled
-
-	var ocean_label := Label.new()
-	ocean_label.text = "Ocean Settings:"
-	ocean_label.add_theme_font_size_override("font_size", 12)
-	_ocean_controls_container.add_child(ocean_label)
 
 	# Wind Speed slider
 	_wind_speed_slider = _create_slider_row(_ocean_controls_container, "Wind:", 0.0, 40.0, 10.0, _on_wind_speed_changed)
@@ -670,20 +902,247 @@ func _setup_visibility_toggles() -> void:
 	_debug_shore_toggle.text = "Debug Shore Mask"
 	_debug_shore_toggle.button_pressed = false
 	_debug_shore_toggle.toggled.connect(_on_debug_shore_toggled)
-	_debug_shore_toggle.tooltip_text = "Visualize shore damping: Magenta=shore, Cyan=deep water"
+	_debug_shore_toggle.tooltip_text = "Visualize shore damping"
 	_ocean_controls_container.add_child(_debug_shore_toggle)
 
-	# Insert controls into the panel
-	var preprocess_idx := preprocess_btn.get_index() if preprocess_btn else vbox.get_child_count()
-	vbox.add_child(toggle_row1)
-	vbox.move_child(toggle_row1, preprocess_idx)
-	vbox.add_child(settings_row)
-	vbox.move_child(settings_row, preprocess_idx + 1)
-	vbox.add_child(_ocean_controls_container)
-	vbox.move_child(_ocean_controls_container, preprocess_idx + 2)
+	_ocean_panel.add_content(_ocean_controls_container)
 
-	# Apply initial resolution (1920x1080)
-	_apply_resolution(2)
+	_panel_vbox.add_child(_ocean_panel)
+
+
+## Create debug visualization panel
+func _create_debug_panel() -> void:
+	_debug_panel = FoldablePanelScript.new("Debug Overlays", true)  # Start folded
+
+	# Chunk visualization toggle
+	var chunk_toggle := CheckBox.new()
+	chunk_toggle.text = "Show Chunks (FAR tier)"
+	chunk_toggle.button_pressed = _show_chunk_debug
+	chunk_toggle.toggled.connect(_on_show_chunks_toggled)
+	chunk_toggle.tooltip_text = "Visualize quadtree chunk boundaries (8x8 cells each)"
+	_debug_panel.add_content(chunk_toggle)
+
+	# Tier visualization toggle
+	var tier_toggle := CheckBox.new()
+	tier_toggle.text = "Show Distance Tiers"
+	tier_toggle.button_pressed = _show_tier_debug
+	tier_toggle.toggled.connect(_on_show_tiers_toggled)
+	tier_toggle.tooltip_text = "Visualize NEAR/MID/FAR tier zones with colors"
+	_debug_panel.add_content(tier_toggle)
+
+	# Cell grid visualization toggle
+	var cell_toggle := CheckBox.new()
+	cell_toggle.text = "Show Cell Grid"
+	cell_toggle.button_pressed = _show_cell_debug
+	cell_toggle.toggled.connect(_on_show_cells_toggled)
+	cell_toggle.tooltip_text = "Visualize individual cell boundaries and coordinates"
+	_debug_panel.add_content(cell_toggle)
+
+	# LOD level visualization toggle (colors objects by LOD level)
+	var lod_toggle := CheckBox.new()
+	lod_toggle.text = "Show LOD Levels"
+	lod_toggle.button_pressed = false
+	lod_toggle.toggled.connect(_on_show_lod_levels_toggled)
+	lod_toggle.tooltip_text = "Color objects by render state (Green=Full detail, Gray=Unknown)"
+	_debug_panel.add_content(lod_toggle)
+
+	# LOD mode toggle button (actual vs expected)
+	var lod_mode_btn := Button.new()
+	lod_mode_btn.text = "LOD Mode: Actual"
+	lod_mode_btn.pressed.connect(_on_lod_mode_pressed)
+	lod_mode_btn.tooltip_text = "Toggle between Actual (what IS rendered) and Expected (what SHOULD be by distance)"
+	_debug_panel.add_content(lod_mode_btn)
+	_lod_mode_btn = lod_mode_btn
+
+	# Separator
+	var sep := HSeparator.new()
+	_debug_panel.add_content(sep)
+
+	# Debug info (updated dynamically)
+	var debug_info_label := Label.new()
+	debug_info_label.name = "DebugInfoLabel"
+	debug_info_label.add_theme_font_size_override("font_size", 10)
+	debug_info_label.text = "Loaded cells: -- | Queue: --"
+	_debug_panel.add_content(debug_info_label)
+
+	# Object Distance Manager stats (updated dynamically)
+	var odm_label := Label.new()
+	odm_label.name = "ODMLabel"
+	odm_label.add_theme_font_size_override("font_size", 10)
+	odm_label.text = "ODM: -- tracked | NEAR: -- MID: -- FAR: --"
+	_debug_panel.add_content(odm_label)
+
+	# F4 dump button
+	var dump_btn := Button.new()
+	dump_btn.text = "Dump Profiling Report [F4]"
+	dump_btn.pressed.connect(_dump_profiling_report)
+	_debug_panel.add_content(dump_btn)
+
+	_panel_vbox.add_child(_debug_panel)
+
+
+## Create render tier debug panel for toggling NEAR/MID/FAR visibility
+func _create_render_tier_panel() -> void:
+	_render_tier_panel = FoldablePanelScript.new("Render Tiers", false)  # Start expanded for easy debugging
+
+	# Info label
+	var info_label := Label.new()
+	info_label.add_theme_font_size_override("font_size", 10)
+	info_label.text = "Toggle individual render tiers for debugging:"
+	_render_tier_panel.add_content(info_label)
+
+	# Tier toggles row
+	var tier_row := HBoxContainer.new()
+	tier_row.add_theme_constant_override("separation", 8)
+
+	# NEAR tier toggle (full objects with physics)
+	_near_tier_toggle = CheckBox.new()
+	_near_tier_toggle.text = "NEAR"
+	_near_tier_toggle.button_pressed = true
+	_near_tier_toggle.toggled.connect(_on_near_tier_toggled)
+	_near_tier_toggle.tooltip_text = "NEAR tier (0-150m): Full Node3D objects with physics"
+	tier_row.add_child(_near_tier_toggle)
+
+	# MID tier toggle (LOD meshes)
+	_mid_tier_toggle = CheckBox.new()
+	_mid_tier_toggle.text = "MID"
+	_mid_tier_toggle.button_pressed = true
+	_mid_tier_toggle.toggled.connect(_on_mid_tier_toggled)
+	_mid_tier_toggle.tooltip_text = "MID tier (150-500m): LOD meshes via MultiMesh"
+	tier_row.add_child(_mid_tier_toggle)
+
+	# FAR tier toggle (impostors)
+	_far_tier_toggle = CheckBox.new()
+	_far_tier_toggle.text = "FAR"
+	_far_tier_toggle.button_pressed = true
+	_far_tier_toggle.toggled.connect(_on_far_tier_toggled)
+	_far_tier_toggle.tooltip_text = "FAR tier (500m+): Billboard impostors"
+	tier_row.add_child(_far_tier_toggle)
+
+	_render_tier_panel.add_content(tier_row)
+
+	# Distance legend
+	var legend_label := Label.new()
+	legend_label.add_theme_font_size_override("font_size", 9)
+	legend_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	legend_label.text = "NEAR: 0-150m | MID: 150-500m | FAR: 500m+"
+	_render_tier_panel.add_content(legend_label)
+
+	# Stats label (updated dynamically)
+	var tier_stats_label := Label.new()
+	tier_stats_label.name = "TierStatsLabel"
+	tier_stats_label.add_theme_font_size_override("font_size", 10)
+	tier_stats_label.text = "NEAR: -- | MID: -- | FAR: --"
+	_render_tier_panel.add_content(tier_stats_label)
+
+	_panel_vbox.add_child(_render_tier_panel)
+
+
+## Handle NEAR tier toggle
+func _on_near_tier_toggled(enabled: bool) -> void:
+	if world_streaming_manager and world_streaming_manager.object_distance_manager:
+		var odm: Node3D = world_streaming_manager.object_distance_manager
+		if odm.has_method("set_near_visible"):
+			odm.set_near_visible(enabled)
+	_log("NEAR tier: %s" % ("ON" if enabled else "OFF"))
+
+
+## Handle MID tier toggle
+func _on_mid_tier_toggled(enabled: bool) -> void:
+	if world_streaming_manager and world_streaming_manager.object_distance_manager:
+		var odm: Node3D = world_streaming_manager.object_distance_manager
+		if odm.has_method("set_mid_visible"):
+			odm.set_mid_visible(enabled)
+	_log("MID tier: %s" % ("ON" if enabled else "OFF"))
+
+
+## Handle FAR tier toggle
+func _on_far_tier_toggled(enabled: bool) -> void:
+	if world_streaming_manager and world_streaming_manager.object_distance_manager:
+		var odm: Node3D = world_streaming_manager.object_distance_manager
+		if odm.has_method("set_far_visible"):
+			odm.set_far_visible(enabled)
+	_log("FAR tier: %s" % ("ON" if enabled else "OFF"))
+
+
+## Setup debug overlay for 3D visualizations
+func _setup_debug_overlay() -> void:
+	_debug_overlay = DebugOverlayScript.new()
+	_debug_overlay.name = "DebugOverlay"
+	add_child(_debug_overlay)
+
+
+## Update debug overlay with camera and managers
+func _update_debug_overlay_references() -> void:
+	print("[WorldExplorer] Updating debug overlay references...")
+	if not _debug_overlay:
+		print("[WorldExplorer] No debug overlay!")
+		return
+
+	print("[WorldExplorer] Setting camera: %s" % [camera.name if camera else "null"])
+	_debug_overlay.set_camera(camera)
+
+	if world_streaming_manager:
+		# Set world streaming manager reference for LOD visualization
+		_debug_overlay.set_world_streaming_manager(world_streaming_manager)
+
+		var tier_mgr: RefCounted = world_streaming_manager.tier_manager
+		if tier_mgr:
+			print("[WorldExplorer] Setting tier manager")
+			_debug_overlay.set_tier_manager(tier_mgr)
+		else:
+			print("[WorldExplorer] No tier manager found")
+
+		var chunk_mgr: RefCounted = world_streaming_manager.chunk_manager
+		if chunk_mgr:
+			print("[WorldExplorer] Setting chunk manager")
+			_debug_overlay.set_chunk_manager(chunk_mgr)
+		else:
+			print("[WorldExplorer] No chunk manager found")
+	else:
+		print("[WorldExplorer] No world streaming manager")
+
+
+## Toggle chunk debug visualization
+func _on_show_chunks_toggled(enabled: bool) -> void:
+	_show_chunk_debug = enabled
+	if _debug_overlay:
+		_debug_overlay.show_chunks = enabled
+	_log("Chunk debug: %s" % ("ON" if enabled else "OFF"))
+
+
+## Toggle tier debug visualization
+func _on_show_tiers_toggled(enabled: bool) -> void:
+	_show_tier_debug = enabled
+	if _debug_overlay:
+		_debug_overlay.show_tiers = enabled
+	_log("Tier debug: %s" % ("ON" if enabled else "OFF"))
+
+
+## Toggle cell grid debug visualization
+func _on_show_cells_toggled(enabled: bool) -> void:
+	_show_cell_debug = enabled
+	if _debug_overlay:
+		_debug_overlay.show_cells = enabled
+	_log("Cell debug: %s" % ("ON" if enabled else "OFF"))
+
+
+## Toggle LOD level debug visualization
+func _on_show_lod_levels_toggled(enabled: bool) -> void:
+	if _debug_overlay:
+		_debug_overlay.show_lod_levels = enabled
+	_log("LOD levels debug: %s" % ("ON" if enabled else "OFF"))
+
+
+## Toggle LOD debug mode (actual vs expected)
+func _on_lod_mode_pressed() -> void:
+	if _debug_overlay and _debug_overlay.has_method("toggle_lod_debug_mode"):
+		_debug_overlay.toggle_lod_debug_mode()
+		# Update button text
+		if _lod_mode_btn:
+			var mode: int = _debug_overlay.lod_debug_mode
+			_lod_mode_btn.text = "LOD Mode: " + ("Expected" if mode == 1 else "Actual")
+		_log("LOD debug mode: %s" % ("Expected" if _debug_overlay.lod_debug_mode == 1 else "Actual"))
 
 
 ## Helper to create a labeled slider row
@@ -788,33 +1247,43 @@ func _on_show_models_toggled(enabled: bool) -> void:
 		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		_log("[DIAG] Currently loaded cells in dictionary: %d" % loaded_coords.size())
 
-		# Show/hide existing loaded cell objects from dictionary
-		var visible_count := 0
-		for cell_grid: Vector2i in loaded_coords:
-			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
-			if cell_node:
-				cell_node.visible = enabled
-				visible_count += 1
+		# AAA Streaming: Use ObjectStreamer's tier visibility if available
+		var object_streamer: Node = world_streaming_manager.get_node_or_null("ObjectStreamer")
+		if object_streamer and object_streamer.has_method("set_near_visible"):
+			# Use ObjectStreamer's tier visibility system (cleaner, no cell iteration)
+			object_streamer.set_near_visible(enabled)
+			object_streamer.set_mid_visible(enabled)
+			object_streamer.set_far_visible(enabled)
+			_log("[DIAG] ObjectStreamer tier visibility: %s" % ("ON" if enabled else "OFF"))
+		else:
+			# Legacy path: Show/hide existing loaded cell objects from dictionary
+			var visible_count := 0
+			for cell_grid: Vector2i in loaded_coords:
+				var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
+				if cell_node:
+					cell_node.visible = enabled
+					visible_count += 1
 
-		# Also iterate direct children to catch any cells not in the dictionary
-		# (cells are added as children of WorldStreamingManager)
-		var child_count := 0
-		for child in world_streaming_manager.get_children():
-			if child is Node3D and child.has_meta("cell_grid"):
-				child.visible = enabled
-				child_count += 1
+			# Also iterate direct children to catch any cells not in the dictionary
+			# (cells are added as children of WorldStreamingManager)
+			var child_count := 0
+			for child in world_streaming_manager.get_children():
+				if child is Node3D and child.has_meta("cell_grid"):
+					child.visible = enabled
+					child_count += 1
 
-		_log("[DIAG] Set visibility for %d cell nodes (dict), %d children with cell_grid meta" % [visible_count, child_count])
+			_log("[DIAG] Set visibility for %d cell nodes (dict), %d children with cell_grid meta" % [visible_count, child_count])
 
-		# Toggle impostor visibility
-		var impostor_mgr: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
-		if impostor_mgr and impostor_mgr.has_method("set_all_visible"):
-			impostor_mgr.call("set_all_visible", enabled)
-			_log("[DIAG] Impostors visibility: %s" % ("ON" if enabled else "OFF"))
+			# Toggle impostor visibility
+			var impostor_mgr: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
+			if impostor_mgr and impostor_mgr.has_method("set_all_visible"):
+				impostor_mgr.call("set_all_visible", enabled)
+				_log("[DIAG] Impostors visibility: %s" % ("ON" if enabled else "OFF"))
 
-		# Log impostor manager stats
-		if impostor_mgr and impostor_mgr.has_method("get_stats"):
-			var imp_stats: Dictionary = impostor_mgr.call("get_stats")
+		# Log impostor manager stats (get reference outside if/else block)
+		var impostor_mgr_stats: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
+		if impostor_mgr_stats and impostor_mgr_stats.has_method("get_stats"):
+			var imp_stats: Dictionary = impostor_mgr_stats.call("get_stats")
 			_log("[DIAG] Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
 				imp_stats.get("total_impostors", 0),
 				imp_stats.get("visible_impostors", 0),
@@ -823,12 +1292,24 @@ func _on_show_models_toggled(enabled: bool) -> void:
 				imp_stats.get("texture_array_layers", 0),
 			])
 
-		# When enabling, clear tier state and trigger fresh loading
-		if enabled:
-			# Clear stale tier tracking that may have accumulated
-			if world_streaming_manager.has_method("clear_tier_state"):
-				world_streaming_manager.clear_tier_state()
-			world_streaming_manager.refresh_cells()
+		# AAA Streaming: Use ObjectStreamer's enabled flag instead of reloading cells
+		# This avoids the massive performance spike from reload_all_cells()
+		# Reuse object_streamer variable from above
+		if object_streamer and "enabled" in object_streamer:
+			object_streamer.enabled = enabled
+			_log("[DIAG] ObjectStreamer.enabled = %s" % enabled)
+		else:
+			# Legacy path: Only reload when enabling (still causes stutter but needed for old system)
+			if enabled:
+				# Full reload required because cells loaded without objects have no Node3D children
+				# and the LOD manager needs objects to be registered during instantiation
+				if world_streaming_manager.has_method("reload_all_cells"):
+					world_streaming_manager.reload_all_cells()
+				else:
+					# Fallback for older WSM
+					if world_streaming_manager.has_method("clear_tier_state"):
+						world_streaming_manager.clear_tier_state()
+					world_streaming_manager.refresh_cells()
 
 			# Log chunk renderer stats
 			var chunk_renderer: Node = world_streaming_manager.get_node_or_null("ChunkRenderer")
@@ -1177,10 +1658,10 @@ func _setup_fallback_environment() -> void:
 	env.ssr_fade_out = 2.0
 	env.ssr_depth_tolerance = 0.2
 
-	# Tonemapping (ACES for better contrast)
-	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	# Tonemapping (Filmic for good contrast without crushing blacks)
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure = 1.0
-	env.tonemap_white = 6.0
+	env.tonemap_white = 1.0
 
 	_fallback_world_env.environment = env
 	add_child(_fallback_world_env)
@@ -1319,6 +1800,7 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
 	world_streaming_manager.distant_rendering_enabled = true  # Always enable tiered system
 	world_streaming_manager.debug_enabled = true
+	world_streaming_manager.use_aaa_streaming = true  # Phase 2B: AAA-style object streaming
 
 	# OWDB configuration for Morrowind objects
 	var chunk_sizes: Array[float] = [8.0, 16.0, 64.0]
@@ -1340,8 +1822,8 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Initialize after all configuration is set
 	world_streaming_manager.initialize()
 
-	# Preload common models in background
-	world_streaming_manager.preload_common_models(false)
+	# Models are NOT preloaded - they will only load when Models toggle is enabled
+	# This ensures AAA streaming method is used exclusively
 
 	# Only start tracking if requested (allows teleporting BEFORE streaming starts)
 	if start_tracking:
@@ -1407,10 +1889,9 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 
 
 func _update_stats() -> void:
-	if not world_streaming_manager:
-		return
-
-	var stats: Dictionary = world_streaming_manager.get_stats()
+	var stats: Dictionary = {}
+	if world_streaming_manager:
+		stats = world_streaming_manager.get_stats()
 
 	# Get profiler data
 	var fps := 0.0
@@ -1444,8 +1925,15 @@ func _update_stats() -> void:
 	var inst_queue: int = stats.get("instantiation_queue", 0)
 
 	var camera_mode_str := "Fly" if _camera_mode == CameraMode.FLY_CAMERA else "Player"
+	var camera_cell: Vector2i = stats.get("camera_cell", Vector2i(0, 0))
 
-	stats_text.text = """[b]Performance[/b]
+	# Update foldable panel labels
+	_update_panel_labels(fps, frame_ms, p95_ms, draw_calls, primitives, mem_mb,
+						  stats, total_regions, camera_mode_str, camera_cell)
+
+	# Also update legacy stats_text if visible (backwards compatibility)
+	if stats_text and stats_text.visible:
+		stats_text.text = """[b]Performance[/b]
 FPS: %.1f (%.2f ms)
 P95: %.2f ms
 Draw calls: %d
@@ -1470,27 +1958,108 @@ Mode [P]: %s
 Cell: (%d, %d)
 
 [color=gray]F3: Overlay | F4: Report | P: Toggle Camera[/color]""" % [
-		fps, frame_ms,
-		p95_ms,
-		draw_calls,
-		primitives / 1000.0,
-		mem_mb,
-		stats.get("loaded_cells", 0),
-		stats.get("load_queue_size", 0),
-		stats.get("queue_high_water_mark", 0),
-		async_pending,
-		inst_queue,
-		_current_view_distance,
-		total_regions,
-		"ON" if _show_models else "OFF",
+			fps, frame_ms,
+			p95_ms,
+			draw_calls,
+			primitives / 1000.0,
+			mem_mb,
+			stats.get("loaded_cells", 0),
+			stats.get("load_queue_size", 0),
+			stats.get("queue_high_water_mark", 0),
+			async_pending,
+			inst_queue,
+			_current_view_distance,
+			total_regions,
+			"ON" if _show_models else "OFF",
 		"ON" if _show_characters else "OFF",
 		"ON" if _show_ocean else "OFF",
 		"ON" if _show_sky else "OFF",
 		ocean_manager.get_water_quality_name() if ocean_manager else "N/A",
-		camera_mode_str,
-		stats.get("camera_cell", Vector2i(0, 0)).x,
-		stats.get("camera_cell", Vector2i(0, 0)).y,
-	]
+			camera_mode_str,
+			camera_cell.x,
+			camera_cell.y,
+		]
+
+
+## Update labels in foldable panels
+func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
+						   primitives: int, mem_mb: float, stats: Dictionary,
+						   total_regions: int, camera_mode_str: String, camera_cell: Vector2i) -> void:
+	# Update performance panel
+	if _performance_panel:
+		var content := _performance_panel.get_content_container()
+		var fps_label: Label = content.get_node_or_null("FPSLabel")
+		if fps_label:
+			fps_label.text = "FPS: %.1f (%.2f ms avg)" % [fps, frame_ms]
+		var timing_label: Label = content.get_node_or_null("TimingLabel")
+		if timing_label:
+			timing_label.text = "P95: %.2f ms" % p95_ms
+		var render_label: Label = content.get_node_or_null("RenderLabel")
+		if render_label:
+			render_label.text = "Draw: %d | Tris: %.1fk" % [draw_calls, primitives / 1000.0]
+		var memory_label: Label = content.get_node_or_null("MemoryLabel")
+		if memory_label:
+			memory_label.text = "Memory: %.1f MB" % mem_mb
+
+	# Update navigation panel
+	if _navigation_panel:
+		var content := _navigation_panel.get_content_container()
+		var camera_label: Label = content.get_node_or_null("CameraLabel")
+		if camera_label:
+			camera_label.text = "Cell: (%d, %d) | Mode: %s [P]" % [camera_cell.x, camera_cell.y, camera_mode_str]
+		var dist_label: Label = content.get_node_or_null("DistLabel")
+		if dist_label:
+			dist_label.text = "%d cells" % _current_view_distance
+
+	# Update terrain panel
+	if _terrain_panel:
+		var content := _terrain_panel.get_content_container()
+		var terrain_label: Label = content.get_node_or_null("TerrainLabel")
+		if terrain_label:
+			terrain_label.text = "Regions loaded: %d" % total_regions
+		# Update preprocess status
+		var status_label_panel: Label = content.get_node_or_null("PreprocessStatusLabel")
+		if status_label_panel:
+			var terrain_data_dir := SettingsManager.get_terrain_path()
+			var has_terrain := DirAccess.dir_exists_absolute(terrain_data_dir)
+			if has_terrain:
+				status_label_panel.text = "Status: Preprocessed"
+				status_label_panel.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
+			else:
+				status_label_panel.text = "Status: Not preprocessed"
+				status_label_panel.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
+
+	# Update debug panel
+	if _debug_panel:
+		var content := _debug_panel.get_content_container()
+		var debug_label: Label = content.get_node_or_null("DebugInfoLabel")
+		if debug_label:
+			var loaded_cells: int = stats.get("loaded_cells", 0)
+			var queue_size: int = stats.get("load_queue_size", 0)
+			var async_pending: int = stats.get("async_pending", 0)
+			debug_label.text = "Cells: %d | Queue: %d | Async: %d" % [loaded_cells, queue_size, async_pending]
+
+		# Update ODM stats (key changed from "per_object_lod" to "object_distance_manager")
+		var odm_label: Label = content.get_node_or_null("ODMLabel")
+		if odm_label:
+			var odm_stats: Dictionary = stats.get("object_distance_manager", {})
+			var total_obj: int = odm_stats.get("total_objects", 0)
+			var near_obj: int = odm_stats.get("near_visible", 0)
+			var mid_obj: int = odm_stats.get("mid_visible", 0)
+			var far_obj: int = odm_stats.get("far_visible", 0)
+			odm_label.text = "ODM: %d tracked | NEAR: %d MID: %d FAR: %d" % [total_obj, near_obj, mid_obj, far_obj]
+
+	# Update render tier panel stats
+	if _render_tier_panel:
+		var tier_content := _render_tier_panel.get_content_container()
+		var tier_stats_label: Label = tier_content.get_node_or_null("TierStatsLabel")
+		if tier_stats_label:
+			var odm_stats: Dictionary = stats.get("object_distance_manager", {})
+			var near_obj: int = odm_stats.get("near_visible", 0)
+			var mid_obj: int = odm_stats.get("mid_visible", 0)
+			var far_obj: int = odm_stats.get("far_visible", 0)
+			var hidden_obj: int = odm_stats.get("hidden", 0)
+			tier_stats_label.text = "NEAR: %d | MID: %d | FAR: %d | Hidden: %d" % [near_obj, mid_obj, far_obj, hidden_obj]
 
 
 # ==================== UI Helpers ====================

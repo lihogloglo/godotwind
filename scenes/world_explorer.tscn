@@ -119,8 +119,8 @@ horizontal_alignment = 1
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -300.0
-offset_bottom = 480.0
+offset_left = -280.0
+offset_bottom = 520.0
 grow_horizontal = 0
 
 [node name="VBox" type="VBoxContainer" parent="UI/StatsPanel"]
@@ -134,8 +134,8 @@ offset_bottom = -10.0
 
 [node name="Title" type="Label" parent="UI/StatsPanel/VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 16
-text = "World Streaming Demo"
+theme_override_font_sizes/font_size = 14
+text = "World Explorer [F3]"
 
 [node name="HSeparator" type="HSeparator" parent="UI/StatsPanel/VBox"]
 layout_mode = 2
@@ -147,13 +147,16 @@ bbcode_enabled = true
 text = "Initializing..."
 
 [node name="HSeparator2" type="HSeparator" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 
 [node name="QuickLabel" type="Label" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 text = "Quick Teleport:"
 
 [node name="QuickButtons" type="GridContainer" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 columns = 2
 
@@ -174,22 +177,27 @@ layout_mode = 2
 text = "Origin (0,0)"
 
 [node name="HSeparator3" type="HSeparator" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 
 [node name="TerrainLabel" type="Label" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 text = "Terrain:"
 
 [node name="PreprocessBtn" type="Button" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 text = "Preprocess ALL Terrain"
 
 [node name="PreprocessStatus" type="Label" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
 text = "No pre-processed data"
 
 [node name="HSeparator4" type="HSeparator" parent="UI/StatsPanel/VBox"]
+visible = false
 layout_mode = 2
 
 [node name="LogPanel" type="Panel" parent="UI"]

@@ -19,7 +19,7 @@ func _get_shore_mask_path() -> String:
 @export var ocean_radius: float = 8000.0  # 8km clipmap radius
 @export var wave_update_rate: int = 30    # Wave updates per second
 @export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore (horizontal distance)
-@export var shore_mask_resolution: int = 2048  # Shore mask texture size
+@export var shore_mask_resolution: int = 4096  # Shore mask texture size
 @export var use_prebaked_shore_mask: bool = true  # Try to load prebaked shore mask first
 
 # Sea level - can be configured per world
@@ -36,6 +36,27 @@ func _get_shore_mask_path() -> String:
 @export var wind_direction: float = 0.0  # radians
 @export var wave_scale: float = 1.0
 @export var choppiness: float = 1.0
+
+# Weather/lighting settings for visual effects
+@export_group("Weather Settings")
+## Rain intensity for rain ripples effect (0.0 = no rain, 1.0 = heavy rain)
+@export_range(0.0, 1.0) var rain_intensity: float = 0.0:
+	set(value):
+		rain_intensity = value
+		if _ocean_mesh:
+			_ocean_mesh.set_rain_intensity(value)
+## Enable sunlight scattering through waves (cyan glow effect)
+@export var enable_sunlight_scattering: bool = true:
+	set(value):
+		enable_sunlight_scattering = value
+		if _ocean_mesh:
+			_ocean_mesh.set_sunlight_scattering_enabled(value)
+## Enable wobbly shore effect (waves wobble the shoreline)
+@export var enable_wobbly_shores: bool = true:
+	set(value):
+		enable_wobbly_shores = value
+		if _ocean_mesh:
+			_ocean_mesh.set_wobbly_shores_enabled(value)
 
 # Visual settings - based on OpenMW water shader for realistic Morrowind-style ocean
 # OpenMW uses WATER_COLOR = vec3(0.090195, 0.115685, 0.12745) and VISIBILITY = 2500.0
@@ -58,10 +79,12 @@ var _wave_generator: WaveGenerator = null
 var _shore_mask: ShoreMaskGenerator = null
 var _terrain: Terrain3D = null
 var _camera: Camera3D = null
+var _sun_light: DirectionalLight3D = null
 var _enabled: bool = true  # Runtime enable/disable (for gameplay)
 var _time: float = 0.0
 var _wave_update_timer: float = 0.0
 var _auto_find_camera: bool = true  # Auto-detect camera if not set
+var _auto_find_sun: bool = true  # Auto-detect sun light if not set
 
 # Displacement texture for CPU sampling (for buoyancy)
 var _displacement_image: Image = null
@@ -308,6 +331,27 @@ func _process(delta: float) -> void:
 	# Update shader time (for vertex Gerstner animation)
 	_ocean_mesh.set_shader_time(_time)
 
+	# Update sun direction for scattering effect
+	if _auto_find_sun and not _sun_light:
+		_sun_light = _find_sun_light()
+		if _sun_light:
+			print("[OceanManager] Auto-detected sun light: %s" % _sun_light.name)
+
+	if _sun_light and _ocean_mesh:
+		# DirectionalLight3D's -Z axis points toward the light direction
+		var sun_dir := -_sun_light.global_basis.z
+		_ocean_mesh.set_sun_direction(sun_dir)
+
+
+func _find_sun_light() -> DirectionalLight3D:
+	# Try to find the main directional light (sun) in the scene
+	var lights := get_tree().get_nodes_in_group("sun")
+	if lights.size() > 0 and lights[0] is DirectionalLight3D:
+		return lights[0] as DirectionalLight3D
+
+	# Look for any DirectionalLight3D that might be the sun
+	return _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
+
 
 func _find_active_camera() -> Camera3D:
 	# Try to find the current camera from viewport
@@ -426,6 +470,12 @@ func set_sea_level(level: float) -> void:
 	# Regenerate shore mask with new sea level if terrain available
 	if _terrain and _shore_mask:
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
+		# Update ocean mesh with new shore mask
+		if _ocean_mesh:
+			_ocean_mesh.set_shore_mask(
+				_shore_mask.get_shore_mask_texture(),
+				_shore_mask.get_world_bounds()
+			)
 
 
 ## Get current sea level
@@ -662,3 +712,26 @@ func is_integrated_gpu() -> bool:
 ## Get GPU name
 func get_gpu_name() -> String:
 	return HardwareDetection.get_gpu_name()
+
+
+## Set the sun light for scattering effect (optional - auto-detected if not set)
+func set_sun_light(light: DirectionalLight3D) -> void:
+	_sun_light = light
+	_auto_find_sun = false  # Disable auto-find once manually set
+
+
+## Set rain intensity (0.0 = no rain, 1.0 = heavy rain)
+func set_rain_intensity(intensity: float) -> void:
+	rain_intensity = intensity
+
+
+## Get current rain intensity
+func get_rain_intensity() -> float:
+	return rain_intensity
+
+
+## Set sun direction directly (alternative to setting sun light)
+func set_sun_direction(direction: Vector3) -> void:
+	_auto_find_sun = false  # Disable auto-find
+	if _ocean_mesh:
+		_ocean_mesh.set_sun_direction(direction)

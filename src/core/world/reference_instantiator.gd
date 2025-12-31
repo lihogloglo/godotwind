@@ -15,12 +15,25 @@ extends RefCounted
 const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
+const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+
+# Preload crossfade shader for fade-in effect
+const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
 
 # Injected dependencies (set by CellManager)
 var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
+var object_distance_manager: Node3D = null  # ObjectDistanceManager (optional)
+
+# Legacy alias for compatibility
+var per_object_lod_manager: Node3D:
+	get: return object_distance_manager
+	set(value): object_distance_manager = value
+
+# Impostor candidates for determining significant objects
+var _impostor_candidates: RefCounted = null
 
 # Configuration
 var create_lights: bool = true
@@ -28,6 +41,12 @@ var load_npcs: bool = true
 var load_creatures: bool = true
 var use_object_pool: bool = true
 var use_static_renderer: bool = true
+var debug_lod: bool = false
+var enable_fade_in: bool = true  # Smooth fade-in for newly instantiated objects
+var fade_in_duration: float = 0.4  # Duration of fade-in animation in seconds
+
+# Scene tree reference for tweens (must be set by parent, e.g., CellManager)
+var scene_tree: SceneTree = null
 
 # Statistics
 var stats: Dictionary = {
@@ -38,6 +57,7 @@ var stats: Dictionary = {
 	"npcs_loaded": 0,
 	"creatures_loaded": 0,
 	"static_renderer_instances": 0,
+	"significant_objects_registered": 0,  # Objects registered with per-object LOD
 }
 
 # Morrowind light radius to Godot light range conversion factor
@@ -46,10 +66,19 @@ const MW_LIGHT_SCALE: float = 1.0 / 70.0
 
 ## Instantiate a cell reference into a Node3D
 ## Returns null if the reference cannot be instantiated or uses StaticObjectRenderer
+var _inst_call_count: int = 0
 func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+	_inst_call_count += 1
+
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
 	var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+
+	if debug_lod and _inst_call_count <= 20:
+		print("[LOD-INST] #%d ref=%s, type=%s, found=%s, cell=%s" % [
+			_inst_call_count, ref.ref_id, record_type[0] if record_type.size() > 0 else "?",
+			base_record != null, cell_grid
+		])
 
 	if not base_record:
 		# Not an error - some refs are for types we don't handle yet
@@ -86,9 +115,56 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 			return _instantiate_model_object(ref, base_record, cell_grid)
 
 
+## Check if a model is considered "significant" for per-object LOD
+## Significant objects include buildings, towers, large rocks, landmarks
+## Uses ImpostorCandidates patterns (same ones used for impostor generation)
+func is_significant_object(model_path: String) -> bool:
+	# Lazy initialization of impostor candidates
+	if not _impostor_candidates:
+		_impostor_candidates = ImpostorCandidatesScript.new()
+
+	return _impostor_candidates.should_have_impostor(model_path)
+
+
+## Register an object with the object distance manager
+## This enables distance-based visibility with dither crossfade for smooth transitions
+func _register_with_distance_manager(
+	node: Node3D,
+	ref: CellReference,
+	model_path: String,
+	cell_grid: Vector2i
+) -> void:
+	if not object_distance_manager:
+		if debug_lod:
+			print("[ODM] FAIL: object_distance_manager is null for %s" % model_path.get_file())
+		return
+
+	if not object_distance_manager.has_method("register_object"):
+		if debug_lod:
+			print("[ODM] FAIL: object_distance_manager has no register_object method!")
+		return
+
+	# Register with distance manager
+	# Signature: register_object(node3d, model_path, cell_grid, ref_num)
+	var result: int = object_distance_manager.register_object(
+		node,
+		model_path,
+		cell_grid,
+		ref.ref_num
+	)
+
+	if result >= 0:
+		stats["significant_objects_registered"] += 1
+		if debug_lod:
+			print("[ODM] Registered %s (id=%d)" % [model_path.get_file(), result])
+
+
 ## Instantiate a standard object with a NIF model
 ## For flora/rocks, uses StaticObjectRenderer for ~10x faster instantiation
+var _model_obj_count: int = 0
 func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+	_model_obj_count += 1
+
 	# Get model path and record ID
 	var model_path: String = _get_model_path(base_record)
 	if model_path.is_empty():
@@ -98,6 +174,14 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	var record_id: String = ""
 	if "record_id" in base_record:
 		record_id = base_record.record_id
+
+	# Debug: Log what path each object is taking
+	if debug_lod and _model_obj_count <= 20:
+		var is_static := use_static_renderer and static_renderer and _is_static_render_model(model_path)
+		var is_sig := is_significant_object(model_path)
+		print("[LOD-PATH] #%d %s: static_render=%s, significant=%s" % [
+			_model_obj_count, model_path.get_file(), is_static, is_sig
+		])
 
 	# Check if this model should use static rendering (flora, small rocks)
 	# Static rendering is ~10x faster but has no physics/interaction
@@ -133,6 +217,25 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	_apply_metadata(instance, ref, base_record, model_path)
 
 	stats["objects_instantiated"] += 1
+
+	# Apply fade-in effect for smooth object appearance (prevents visual pop)
+	if enable_fade_in:
+		_apply_fade_in(instance)
+
+	# Register objects with distance manager for distance-based visibility
+	# Significant objects get full LOD chain, others get simple LOD
+	var is_significant := is_significant_object(model_path)
+	if debug_lod:
+		print("[ODM-INST] Object %s: odm=%s, significant=%s" % [
+			model_path.get_file(),
+			object_distance_manager != null,
+			is_significant
+		])
+
+	# Register with object distance manager (handles both significant and non-significant)
+	if object_distance_manager:
+		_register_with_distance_manager(instance, ref, model_path, cell_grid)
+
 	return instance
 
 
@@ -534,9 +637,9 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 	var placeholder := MeshInstance3D.new()
 	placeholder.name = str(ref.ref_id) + "_placeholder"
 
-	# Simple box mesh (in Godot Y-up coordinates)
+	# Simple box mesh (human-sized in Godot meters)
 	var box := BoxMesh.new()
-	box.size = Vector3(50, 50, 50)  # Roughly human-sized in Morrowind units
+	box.size = Vector3(0.5, 1.8, 0.5)  # Roughly human-sized
 	placeholder.mesh = box
 
 	# Magenta material to stand out
@@ -571,6 +674,96 @@ func _is_static_render_model(model_path: String) -> bool:
 	return false
 
 
+## Apply fade-in effect to newly instantiated object
+## Uses dither crossfade shader for smooth appearance (prevents visual pop)
+func _apply_fade_in(instance: Node3D) -> void:
+	if not scene_tree:
+		return  # Need scene tree for tweens
+
+	# Find all MeshInstance3D nodes in the hierarchy
+	var mesh_instances: Array[MeshInstance3D] = []
+	_find_mesh_instances(instance, mesh_instances)
+
+	if mesh_instances.is_empty():
+		return
+
+	# Store original materials and apply fade materials
+	var fade_data: Array[Dictionary] = []
+
+	for mesh_inst: MeshInstance3D in mesh_instances:
+		# Get the original material (from override or mesh surface)
+		var original_mat: Material = mesh_inst.material_override
+		if original_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
+			original_mat = mesh_inst.mesh.surface_get_material(0)
+
+		# Create fade material with crossfade shader
+		var fade_mat := ShaderMaterial.new()
+		fade_mat.shader = LOD_CROSSFADE_SHADER
+
+		# Copy texture from original material if it's a StandardMaterial3D
+		if original_mat is StandardMaterial3D:
+			var std_mat: StandardMaterial3D = original_mat as StandardMaterial3D
+			if std_mat.albedo_texture:
+				fade_mat.set_shader_parameter("albedo_texture", std_mat.albedo_texture)
+			fade_mat.set_shader_parameter("albedo_color", std_mat.albedo_color)
+			fade_mat.set_shader_parameter("roughness", std_mat.roughness)
+			fade_mat.set_shader_parameter("metallic", std_mat.metallic)
+			# Handle alpha cutout for vegetation
+			if std_mat.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+				fade_mat.set_shader_parameter("use_alpha_cutout", true)
+				fade_mat.set_shader_parameter("alpha_cutout", std_mat.alpha_scissor_threshold)
+
+		# Start fully invisible
+		fade_mat.set_shader_parameter("fade_amount", 0.0)
+		mesh_inst.material_override = fade_mat
+
+		fade_data.append({
+			"mesh_instance": mesh_inst,
+			"fade_material": fade_mat,
+			"original_material": original_mat
+		})
+
+	# Create tween to animate fade_amount from 0 to 1
+	# IMPORTANT: Bind to the instance node so tween is killed when node is freed
+	# This prevents "Lambda capture was freed" errors when cells unload during fade
+	var tween: Tween = instance.create_tween()
+	tween.set_parallel(true)  # Animate all meshes simultaneously
+
+	for entry: Dictionary in fade_data:
+		var fade_mat: ShaderMaterial = entry.fade_material
+		var mesh_inst: MeshInstance3D = entry.mesh_instance
+		tween.tween_method(
+			func(value: float) -> void:
+				# Check if mesh still exists before setting shader parameter
+				if is_instance_valid(mesh_inst) and is_instance_valid(fade_mat):
+					fade_mat.set_shader_parameter("fade_amount", value),
+			0.0, 1.0, fade_in_duration
+		)
+
+	# When complete, restore original materials
+	tween.chain()  # Wait for parallel tweens
+	tween.tween_callback(func() -> void:
+		for entry: Dictionary in fade_data:
+			# CRITICAL: Check validity BEFORE accessing dictionary values
+			# The mesh_instance may have been freed if cell was unloaded during fade
+			var mesh_inst_ref: Variant = entry.get("mesh_instance")
+			if not is_instance_valid(mesh_inst_ref):
+				continue
+			var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D
+			var original_mat: Material = entry.original_material
+			mesh_inst.material_override = original_mat
+	)
+
+
+## Find all MeshInstance3D nodes in a hierarchy
+func _find_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
+	if node is MeshInstance3D:
+		result.append(node as MeshInstance3D)
+
+	for child in node.get_children():
+		_find_mesh_instances(child, result)
+
+
 ## Reset statistics
 func reset_stats() -> void:
 	stats = {
@@ -581,6 +774,7 @@ func reset_stats() -> void:
 		"npcs_loaded": 0,
 		"creatures_loaded": 0,
 		"static_renderer_instances": 0,
+		"significant_objects_registered": 0,
 	}
 
 

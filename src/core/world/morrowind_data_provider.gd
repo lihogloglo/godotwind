@@ -10,6 +10,7 @@ extends "res://src/core/world/world_data_provider.gd"
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 ## Internal terrain manager for heightmap generation
 var _terrain_manager: RefCounted = null
@@ -280,7 +281,7 @@ func get_tier_unit_counts() -> Dictionary:
 
 ## Morrowind max view distance (foggy volcanic island aesthetic)
 func get_max_view_distance() -> float:
-	return 5000.0  # 5km max view distance
+	return DU.FAR_END
 
 
 ## Distant rendering support (requires pre-baked assets)

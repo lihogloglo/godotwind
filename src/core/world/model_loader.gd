@@ -20,8 +20,6 @@
 class_name ModelLoader
 extends RefCounted
 
-const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-
 ## Cache for loaded models: model_path (lowercase) -> Node3D prototype
 var _model_cache: Dictionary = {}
 
@@ -29,16 +27,37 @@ var _model_cache: Dictionary = {}
 ## Set to true to persist converted models between game sessions
 var enable_disk_cache: bool = true
 
+## RUNTIME MODE: Only load from disk cache, never convert NIFs
+## When true (default for world explorer), models not in disk cache return null
+## When false (prebaking mode), missing models trigger NIF conversion
+var runtime_mode: bool = true
+
 ## Directory for disk cache (set from SettingsManager on first use)
 ## Defaults to Documents/Godotwind/cache/models/
 var _disk_cache_dir: String = ""
+
+## Cache for file existence checks to avoid repeated disk I/O
+## Maps disk_path -> bool (exists or not)
+## This eliminates repeated FileAccess.file_exists() calls which are slow
+var _file_exists_cache: Dictionary = {}
+
+## Pending async load requests: disk_path -> {cache_key: String, callbacks: Array[Callable]}
+## Multiple requests for the same model share one load operation
+var _pending_async_loads: Dictionary = {}
 
 ## Statistics
 var _stats: Dictionary = {
 	"models_loaded": 0,
 	"models_from_cache": 0,
 	"models_from_disk": 0,
+	"models_from_disk_async": 0,
+	"file_exists_cache_hits": 0,
+	"models_saved": 0,
 }
+
+## Track first saved model for condensed logging
+var _first_saved_model: String = ""
+var _last_save_report_count: int = 0
 
 
 ## Get or load a model prototype
@@ -67,14 +86,22 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 	# 2. Check disk cache if enabled (fast - direct resource load)
 	if enable_disk_cache:
 		var disk_path := _get_disk_cache_path(cache_key)
-		if FileAccess.file_exists(disk_path):
+		if _cached_file_exists(disk_path):
 			var loaded := _load_from_disk_cache(disk_path)
 			if loaded:
 				_model_cache[cache_key] = loaded
 				_stats["models_from_disk"] += 1
 				return loaded
 
-	# 3. Fall back to BSA extraction + NIF conversion (slow)
+	# 3. RUNTIME MODE: Return null for uncached models (no NIF conversion at runtime)
+	# NIF conversion should ONLY happen during prebaking, never during gameplay
+	if runtime_mode:
+		# Cache null to avoid repeated disk checks
+		_model_cache[cache_key] = null
+		return null
+
+	# 4. PREBAKING MODE ONLY: Fall back to BSA extraction + NIF conversion
+	# This path is only used by prebaking tools, never during world exploration
 	var full_path := model_path
 	if not model_path.to_lower().begins_with("meshes"):
 		full_path = "meshes\\" + model_path
@@ -94,6 +121,8 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 		return null
 
 	# Convert NIF to Godot scene with item_id for collision shape lookup
+	# NOTE: This only runs during prebaking, not at runtime
+	const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 	var converter := NIFConverter.new()
 	if not item_id.is_empty():
 		converter.collision_item_id = item_id
@@ -106,7 +135,7 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 		_model_cache[cache_key] = null
 		return null
 
-	# 4. Save to disk cache for next time (async-friendly)
+	# 5. Save to disk cache for next time (async-friendly)
 	if enable_disk_cache:
 		_save_to_disk_cache(node, cache_key)
 
@@ -118,21 +147,55 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 ## Clear the model cache and reset statistics
 func clear_cache() -> void:
 	_model_cache.clear()
+	_file_exists_cache.clear()
 	_stats["models_loaded"] = 0
 	_stats["models_from_cache"] = 0
 	_stats["models_from_disk"] = 0
+	_stats["file_exists_cache_hits"] = 0
+
+
+## Cached file existence check - avoids repeated disk I/O
+## Results are cached for the session lifetime since prebaked files don't change
+func _cached_file_exists(path: String) -> bool:
+	if path in _file_exists_cache:
+		_stats["file_exists_cache_hits"] += 1
+		return _file_exists_cache[path]
+
+	var exists := FileAccess.file_exists(path)
+	_file_exists_cache[path] = exists
+	return exists
 
 
 ## Get statistics about model loading
 ## Returns:
-##   Dictionary with keys: models_loaded, models_from_cache, models_from_disk, cached_models
+##   Dictionary with keys: models_loaded, models_from_cache, models_from_disk, models_from_disk_async, etc.
 func get_stats() -> Dictionary:
 	return {
 		"models_loaded": _stats["models_loaded"],
 		"models_from_cache": _stats["models_from_cache"],
 		"models_from_disk": _stats["models_from_disk"],
+		"models_from_disk_async": _stats["models_from_disk_async"],
+		"models_saved": _stats["models_saved"],
+		"pending_async_loads": _pending_async_loads.size(),
 		"cached_models": _model_cache.size(),
+		"file_exists_cache_hits": _stats["file_exists_cache_hits"],
+		"file_exists_cache_size": _file_exists_cache.size(),
 	}
+
+
+## Print final summary of saved models (call when batch save is complete)
+func print_save_summary() -> void:
+	var saved: int = _stats["models_saved"]
+	if saved == 0:
+		return
+
+	# Only print if there are unreported saves
+	if saved > _last_save_report_count:
+		if saved == 1:
+			print("ModelLoader: Saved %s" % _first_saved_model)
+		else:
+			print("ModelLoader: Saved %d models total (first: %s)" % [saved, _first_saved_model])
+		_last_save_report_count = saved
 
 
 ## Get the number of models currently cached
@@ -152,6 +215,167 @@ func has_model(model_path: String, item_id: String = "") -> bool:
 	if not item_id.is_empty():
 		cache_key = normalized + ":" + item_id.to_lower()
 	return cache_key in _model_cache
+
+
+# =============================================================================
+# ASYNC DISK LOADING API
+# =============================================================================
+# Uses ResourceLoader.load_threaded_request() to load models without blocking
+# the main thread. Call request_model_async() to start loading, then call
+# process_async_loads() each frame to check for completions.
+# =============================================================================
+
+## Request async loading of a model from disk cache
+## Returns immediately. Call process_async_loads() to get results.
+## Parameters:
+##   model_path: Path to NIF model
+##   item_id: Optional item ID for collision variations
+##   callback: Called when load completes with (model_path: String, item_id: String, model: Node3D)
+## Returns:
+##   true if load was started or model already cached, false if not in disk cache
+func request_model_async(model_path: String, item_id: String = "", callback: Callable = Callable()) -> bool:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var cache_key := normalized
+	if not item_id.is_empty():
+		cache_key = normalized + ":" + item_id.to_lower()
+
+	# 1. Check memory cache first
+	if cache_key in _model_cache:
+		_stats["models_from_cache"] += 1
+		var model: Node3D = _model_cache[cache_key]
+		if callback.is_valid():
+			callback.call(model_path, item_id, model)
+		return true
+
+	# 2. Check if already loading this model
+	var disk_path := _get_disk_cache_path(cache_key)
+	if disk_path in _pending_async_loads:
+		# Already loading - add callback to existing request
+		if callback.is_valid():
+			_pending_async_loads[disk_path].callbacks.append({
+				"callback": callback,
+				"model_path": model_path,
+				"item_id": item_id
+			})
+		return true
+
+	# 3. Check disk cache exists
+	if not enable_disk_cache or not _cached_file_exists(disk_path):
+		# Not in disk cache - in runtime mode this means model isn't prebaked
+		if runtime_mode:
+			_model_cache[cache_key] = null  # Cache miss
+			if callback.is_valid():
+				callback.call(model_path, item_id, null)
+		return false
+
+	# 4. Start async load
+	var err := ResourceLoader.load_threaded_request(disk_path, "PackedScene")
+	if err != OK:
+		push_warning("ModelLoader: Failed to start async load for %s: %s" % [disk_path, error_string(err)])
+		if callback.is_valid():
+			callback.call(model_path, item_id, null)
+		return false
+
+	# Track pending load
+	_pending_async_loads[disk_path] = {
+		"cache_key": cache_key,
+		"callbacks": [] as Array[Dictionary]
+	}
+	if callback.is_valid():
+		_pending_async_loads[disk_path].callbacks.append({
+			"callback": callback,
+			"model_path": model_path,
+			"item_id": item_id
+		})
+
+	return true
+
+
+## Check if a model is currently being loaded asynchronously
+func is_loading_async(model_path: String, item_id: String = "") -> bool:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var cache_key := normalized
+	if not item_id.is_empty():
+		cache_key = normalized + ":" + item_id.to_lower()
+	var disk_path := _get_disk_cache_path(cache_key)
+	return disk_path in _pending_async_loads
+
+
+## Process pending async loads - call this every frame
+## Returns number of loads completed this frame
+func process_async_loads() -> int:
+	if _pending_async_loads.is_empty():
+		return 0
+
+	var completed := 0
+	var to_remove: Array[String] = []
+
+	for disk_path: String in _pending_async_loads:
+		var status := ResourceLoader.load_threaded_get_status(disk_path)
+
+		match status:
+			ResourceLoader.THREAD_LOAD_LOADED:
+				# Load completed successfully
+				var packed_scene := ResourceLoader.load_threaded_get(disk_path) as PackedScene
+				var model: Node3D = null
+
+				if packed_scene:
+					var instance := packed_scene.instantiate()
+					if instance is Node3D:
+						model = instance as Node3D
+					else:
+						# Wrong type - corrupted cache
+						if instance:
+							instance.free()
+						DirAccess.remove_absolute(disk_path)
+				else:
+					# Failed to load - corrupted cache
+					DirAccess.remove_absolute(disk_path)
+
+				# Cache the result
+				var cache_key: String = _pending_async_loads[disk_path].cache_key
+				_model_cache[cache_key] = model
+				if model:
+					_stats["models_from_disk_async"] += 1
+
+				# Call all callbacks
+				for cb_info: Dictionary in _pending_async_loads[disk_path].callbacks:
+					var cb: Callable = cb_info.callback
+					if cb.is_valid():
+						cb.call(cb_info.model_path, cb_info.item_id, model)
+
+				to_remove.append(disk_path)
+				completed += 1
+
+			ResourceLoader.THREAD_LOAD_FAILED, ResourceLoader.THREAD_LOAD_INVALID_RESOURCE:
+				# Load failed
+				push_warning("ModelLoader: Async load failed for %s" % disk_path)
+				var cache_key: String = _pending_async_loads[disk_path].cache_key
+				_model_cache[cache_key] = null
+
+				# Call callbacks with null
+				for cb_info: Dictionary in _pending_async_loads[disk_path].callbacks:
+					var cb: Callable = cb_info.callback
+					if cb.is_valid():
+						cb.call(cb_info.model_path, cb_info.item_id, null)
+
+				to_remove.append(disk_path)
+				completed += 1
+
+			ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+				# Still loading - do nothing
+				pass
+
+	# Remove completed loads
+	for disk_path: String in to_remove:
+		_pending_async_loads.erase(disk_path)
+
+	return completed
+
+
+## Get count of pending async loads
+func get_pending_async_count() -> int:
+	return _pending_async_loads.size()
 
 
 ## Directly add a model to the cache (for async loading)
@@ -301,7 +525,22 @@ func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 	if save_result != OK:
 		push_warning("ModelLoader: Failed to save scene: %s (%s)" % [scene_path, error_string(save_result)])
 	else:
-		print("ModelLoader: Saved %s (%d meshes)" % [cache_key.get_file(), mesh_count])
+		# Update file existence cache so subsequent checks don't hit disk
+		_file_exists_cache[scene_path] = true
+		_stats["models_saved"] += 1
+
+		# Track first model for condensed logging
+		if _first_saved_model.is_empty():
+			_first_saved_model = cache_key.get_file()
+
+		# Print condensed progress every 10 models
+		if _stats["models_saved"] % 10 == 0:
+			var count: int = _stats["models_saved"]
+			if count == 10:
+				print("ModelLoader: Saved %s and 9 more models..." % _first_saved_model)
+			else:
+				print("ModelLoader: Saved %d models (last: %s)" % [count, cache_key.get_file()])
+			_last_save_report_count = count
 
 
 ## Save all meshes in a node tree to disk and update their resource paths
@@ -460,4 +699,4 @@ func has_disk_cached(model_path: String, item_id: String = "") -> bool:
 	if not item_id.is_empty():
 		cache_key = normalized + ":" + item_id.to_lower()
 	var disk_path := _get_disk_cache_path(cache_key)
-	return FileAccess.file_exists(disk_path)
+	return _cached_file_exists(disk_path)

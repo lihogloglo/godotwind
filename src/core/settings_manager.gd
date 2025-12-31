@@ -260,17 +260,23 @@ func get_terrain_path() -> String:
 	return get_cache_base_path().path_join("terrain")
 
 
+## Gets the LOD meshes cache path (simplified LOD1/LOD2/LOD3 meshes for per-object LOD)
+func get_lods_path() -> String:
+	return get_cache_base_path().path_join("lods")
+
+
 ## Creates all cache subdirectories if they don't exist
 ## Returns OK on success, or the first error encountered
 func ensure_cache_directories() -> Error:
 	var paths := [
 		get_cache_base_path(),
 		get_impostors_path(),
-		get_merged_cells_path(),
+		get_merged_cells_path(),  # DEPRECATED but kept for compatibility
 		get_navmeshes_path(),
 		get_ocean_path(),
 		get_models_path(),
 		get_terrain_path(),
+		get_lods_path(),
 	]
 
 	for path: String in paths:

@@ -71,6 +71,7 @@ class ComponentState:
 ## Component states
 var terrain := ComponentState.new()
 var models := ComponentState.new()
+var lods := ComponentState.new()
 var impostors := ComponentState.new()
 var merged_meshes := ComponentState.new()
 var navmeshes := ComponentState.new()
@@ -97,6 +98,7 @@ func load_state() -> bool:
 
 	_load_component(config, "terrain", terrain)
 	_load_component(config, "models", models)
+	_load_component(config, "lods", lods)
 	_load_component(config, "impostors", impostors)
 	_load_component(config, "merged_meshes", merged_meshes)
 	_load_component(config, "navmeshes", navmeshes)
@@ -118,6 +120,7 @@ func save_state() -> bool:
 
 	_save_component(config, "terrain", terrain)
 	_save_component(config, "models", models)
+	_save_component(config, "lods", lods)
 	_save_component(config, "impostors", impostors)
 	_save_component(config, "merged_meshes", merged_meshes)
 	_save_component(config, "navmeshes", navmeshes)
@@ -137,6 +140,7 @@ func save_state() -> bool:
 func clear_state() -> void:
 	terrain.reset()
 	models.reset()
+	lods.reset()
 	impostors.reset()
 	merged_meshes.reset()
 	navmeshes.reset()
@@ -156,8 +160,8 @@ func has_pending_work() -> bool:
 	return (
 		not terrain.pending.is_empty() or
 		not models.pending.is_empty() or
+		not lods.pending.is_empty() or
 		not impostors.pending.is_empty() or
-		not merged_meshes.pending.is_empty() or
 		not navmeshes.pending.is_empty() or
 		not shore_mask.pending.is_empty() or
 		not texture_atlases.pending.is_empty()
@@ -166,7 +170,7 @@ func has_pending_work() -> bool:
 
 ## Get overall progress (0.0 - 1.0)
 func get_overall_progress() -> float:
-	var components := [terrain, models, impostors, merged_meshes, navmeshes, shore_mask, texture_atlases]
+	var components := [terrain, models, lods, impostors, navmeshes, shore_mask, texture_atlases]
 	var enabled_components := components.filter(func(c: ComponentState) -> bool: return c.enabled)
 
 	if enabled_components.is_empty():
@@ -184,8 +188,8 @@ func get_summary() -> Dictionary:
 	return {
 		"terrain": terrain.to_dict(),
 		"models": models.to_dict(),
+		"lods": lods.to_dict(),
 		"impostors": impostors.to_dict(),
-		"merged_meshes": merged_meshes.to_dict(),
 		"navmeshes": navmeshes.to_dict(),
 		"shore_mask": shore_mask.to_dict(),
 		"texture_atlases": texture_atlases.to_dict(),
@@ -225,10 +229,10 @@ func _print_summary() -> void:
 		terrain.completed.size(), terrain.pending.size(), terrain.failed.size()])
 	print("  Models: %d completed, %d pending, %d failed" % [
 		models.completed.size(), models.pending.size(), models.failed.size()])
+	print("  LODs: %d completed, %d pending, %d failed" % [
+		lods.completed.size(), lods.pending.size(), lods.failed.size()])
 	print("  Impostors: %d completed, %d pending, %d failed" % [
 		impostors.completed.size(), impostors.pending.size(), impostors.failed.size()])
-	print("  Merged Meshes: %d completed, %d pending, %d failed" % [
-		merged_meshes.completed.size(), merged_meshes.pending.size(), merged_meshes.failed.size()])
 	print("  Navmeshes: %d completed, %d pending, %d failed" % [
 		navmeshes.completed.size(), navmeshes.pending.size(), navmeshes.failed.size()])
 	print("  Shore Mask: %s" % ("complete" if shore_mask.is_complete() else "pending"))

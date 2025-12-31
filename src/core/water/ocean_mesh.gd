@@ -35,6 +35,8 @@ var _cached_water_color: Color = Color(0.1, 0.15, 0.18, 1.0)
 var _cached_foam_color: Color = Color(0.9, 0.9, 0.9, 1.0)
 var _cached_depth_absorption: Vector3 = Vector3(7.5, 22.0, 38.0)
 var _cached_wave_scale: float = 1.0
+var _cached_sun_direction: Vector3 = Vector3(0.5, 0.7, 0.5)
+var _cached_rain_intensity: float = 0.0
 var _debug_shore_mask: bool = false
 
 
@@ -87,13 +89,13 @@ func _create_shader() -> void:
 			print("[OceanMesh] Using GPU FFT compute shader")
 
 		QualityMode.FLAT:
-			shader_path = "res://src/core/water/shaders/ocean_flat.gdshader"
+			shader_path = "res://src/core/water/shaders/flat_water.gdshader"
 			_shader = load(shader_path) as Shader
 			if not _shader:
-				push_warning("[OceanMesh] Flat shader not found, using inline")
+				push_warning("[OceanMesh] Flat water shader not found, using inline")
 				_shader = _create_inline_flat_shader()
 			else:
-				print("[OceanMesh] Using flat plane shader")
+				print("[OceanMesh] Using flat water shader with SSR")
 
 
 func _create_inline_flat_shader() -> Shader:
@@ -138,6 +140,105 @@ void fragment() {
 	return shader
 
 
+func _setup_detail_normal_texture() -> void:
+	## Set up detail normal texture for FFT shader surface detail
+	if not _material:
+		return
+
+	# Try to load OpenMW water normal map first
+	var openmw_normal: Texture2D = load("res://inspos/openmw/files/data/textures/omw/water_nm.png")
+	if openmw_normal:
+		_material.set_shader_parameter("detail_normal_map", openmw_normal)
+		print("[OceanMesh] Using OpenMW water_nm.png for detail normals")
+		return
+
+	# Fallback: generate procedural normal texture
+	var detail_noise := FastNoiseLite.new()
+	detail_noise.noise_type = FastNoiseLite.TYPE_PERLIN
+	detail_noise.frequency = 0.015
+	detail_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	detail_noise.fractal_octaves = 3
+
+	var detail_tex := NoiseTexture2D.new()
+	detail_tex.noise = detail_noise
+	detail_tex.seamless = true
+	detail_tex.seamless_blend_skirt = 0.5
+	detail_tex.as_normal_map = true
+	detail_tex.bump_strength = 8.0
+
+	_material.set_shader_parameter("detail_normal_map", detail_tex)
+	print("[OceanMesh] Using procedural detail normal texture")
+
+
+func _setup_flat_water_textures() -> void:
+	## Set up noise textures for flat water shader (matching GodotSSRWater reference)
+	if not _material:
+		return
+
+	# Wave height textures (for vertex displacement)
+	var wave_noise_a := FastNoiseLite.new()
+	wave_noise_a.noise_type = FastNoiseLite.TYPE_PERLIN
+	wave_noise_a.frequency = 0.0005
+	wave_noise_a.fractal_type = FastNoiseLite.FRACTAL_FBM
+
+	var wave_tex_a := NoiseTexture2D.new()
+	wave_tex_a.noise = wave_noise_a
+	wave_tex_a.seamless = true
+	wave_tex_a.seamless_blend_skirt = 0.5
+
+	var wave_noise_b := FastNoiseLite.new()
+	wave_noise_b.noise_type = FastNoiseLite.TYPE_CELLULAR
+	wave_noise_b.frequency = 0.0225
+	wave_noise_b.fractal_type = FastNoiseLite.FRACTAL_NONE
+
+	var wave_tex_b := NoiseTexture2D.new()
+	wave_tex_b.noise = wave_noise_b
+	wave_tex_b.seamless = true
+	wave_tex_b.seamless_blend_skirt = 0.5
+
+	# Surface normal textures (for detail)
+	var normal_noise_a := FastNoiseLite.new()
+	normal_noise_a.noise_type = FastNoiseLite.TYPE_PERLIN
+	normal_noise_a.frequency = 0.007
+
+	var normal_tex_a := NoiseTexture2D.new()
+	normal_tex_a.noise = normal_noise_a
+	normal_tex_a.seamless = true
+	normal_tex_a.seamless_blend_skirt = 0.5
+	normal_tex_a.as_normal_map = true
+
+	var normal_noise_b := FastNoiseLite.new()
+	normal_noise_b.noise_type = FastNoiseLite.TYPE_PERLIN
+	normal_noise_b.frequency = 0.02
+
+	var normal_tex_b := NoiseTexture2D.new()
+	normal_tex_b.noise = normal_noise_b
+	normal_tex_b.seamless = true
+	normal_tex_b.seamless_blend_skirt = 0.5
+	normal_tex_b.as_normal_map = true
+
+	# Set shader parameters
+	_material.set_shader_parameter("wave_a", wave_tex_a)
+	_material.set_shader_parameter("wave_b", wave_tex_b)
+	_material.set_shader_parameter("surface_normals_a", normal_tex_a)
+	_material.set_shader_parameter("surface_normals_b", normal_tex_b)
+
+	# Water colors (OpenMW style)
+	_material.set_shader_parameter("water_color", Color(0.09, 0.116, 0.127))
+	_material.set_shader_parameter("color_deep", Color(0.02, 0.04, 0.06))
+
+	# OpenMW absorption settings (2500 MW units ≈ 35m in real units)
+	_material.set_shader_parameter("water_visibility", 35.0)
+	_material.set_shader_parameter("depth_fade", 0.15)
+
+	# SSR and visual settings
+	_material.set_shader_parameter("ssr_mix_strength", 0.7)
+	_material.set_shader_parameter("refraction_intensity", 0.4)
+	_material.set_shader_parameter("wave_height_scale", 1.0)
+
+	print("[OceanMesh] Flat water textures initialized")
+
+
 func _create_material() -> void:
 	_material = ShaderMaterial.new()
 
@@ -156,14 +257,21 @@ func _create_material() -> void:
 	_material.shader = _shader
 
 	# Set common uniform values
-	_material.set_shader_parameter("water_color", Color(0.1, 0.15, 0.18, 1.0))
-	_material.set_shader_parameter("roughness", 0.3)
+	_material.set_shader_parameter("roughness", 0.25)
 
-	# FFT-specific uniforms
+	# Mode-specific uniforms
 	if _quality == QualityMode.FFT:
+		_material.set_shader_parameter("water_color", Color(0.1, 0.15, 0.18, 1.0))
 		_material.set_shader_parameter("foam_color", Color(0.9, 0.9, 0.9, 1.0))
 		_material.set_shader_parameter("normal_strength", 1.0)
 		_material.set_shader_parameter("time", 0.0)
+		_material.set_shader_parameter("sun_direction", _cached_sun_direction)
+		_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
+		# Set up detail normal texture for surface detail
+		_setup_detail_normal_texture()
+	else:
+		# FLAT mode - set up noise textures for waves and normals
+		_setup_flat_water_textures()
 
 	material_override = _material
 	print("[OceanMesh] Material created - shader: %s" % [
@@ -454,8 +562,13 @@ func _restore_cached_state() -> void:
 		_material.set_shader_parameter("foam_color", _cached_foam_color)
 		_material.set_shader_parameter("depth_color_consumption", _cached_depth_absorption)
 		_material.set_shader_parameter("wave_scale", _cached_wave_scale)
+		_material.set_shader_parameter("sun_direction", _cached_sun_direction)
+		_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
+		_material.set_shader_parameter("enable_rain_ripples", _cached_rain_intensity > 0.01)
 		RenderingServer.global_shader_parameter_set(&"water_color", _cached_water_color.srgb_to_linear())
 		RenderingServer.global_shader_parameter_set(&"foam_color", _cached_foam_color.srgb_to_linear())
+		# Set up detail normal map
+		_setup_detail_normal_texture()
 
 	_material.set_shader_parameter("debug_shore_mask", _debug_shore_mask)
 
@@ -473,3 +586,30 @@ func set_debug_shore_mask(enabled: bool) -> void:
 ## Get current debug shore mask state
 func is_debug_shore_mask() -> bool:
 	return _debug_shore_mask
+
+
+## Set sun direction for sunlight scattering effect
+func set_sun_direction(direction: Vector3) -> void:
+	_cached_sun_direction = direction.normalized()
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("sun_direction", _cached_sun_direction)
+
+
+## Set rain intensity for rain ripples effect (0.0 - 1.0)
+func set_rain_intensity(intensity: float) -> void:
+	_cached_rain_intensity = clampf(intensity, 0.0, 1.0)
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
+		_material.set_shader_parameter("enable_rain_ripples", intensity > 0.01)
+
+
+## Enable/disable sunlight scattering
+func set_sunlight_scattering_enabled(enabled: bool) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("enable_sunlight_scattering", enabled)
+
+
+## Enable/disable wobbly shores
+func set_wobbly_shores_enabled(enabled: bool) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("enable_wobbly_shores", enabled)

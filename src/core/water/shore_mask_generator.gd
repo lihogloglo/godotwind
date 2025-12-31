@@ -1,35 +1,46 @@
-## ShoreMaskGenerator - Generates shore distance map from terrain
-## Creates a texture where each pixel stores the distance to the nearest shoreline
-## 0 = at shore, 1 = far from shore (beyond fade_distance)
-## This is used for wave dampening near coastlines (OpenMW-style)
+## ShoreMaskGenerator - Runtime shore distance map generation from terrain
+##
+## Creates a texture where each pixel stores the shore factor:
+## - 0.0 = at shore or on land (full wave dampening)
+## - 1.0 = far from shore (full waves, beyond fade_distance)
+##
+## Uses Jump Flooding Algorithm (JFA) for efficient Euclidean distance computation.
+## This is used for wave dampening near coastlines (OpenMW-style).
 class_name ShoreMaskGenerator
 extends Node
 
-# Shore mask texture
+## Shore mask texture
 var _shore_mask: ImageTexture = null
 var _shore_image: Image = null
 var _mask_resolution: int = 2048
 
-# World bounds covered by the mask
-var _world_bounds: Rect2 = Rect2(-8000, -8000, 16000, 16000)
+## World bounds covered by the mask
+var _world_bounds: Rect2 = Rect2()
 
-# User override mask (for manual editing)
+## User override mask (for manual editing)
 var _user_mask: Image = null
 var _user_mask_path: String = ""
 
-# Cached terrain reference
+## Cached terrain reference
 var _terrain: Terrain3D = null
 
-# Cached sea level
+## Cached sea level
 var _sea_level: float = 0.0
 
+## Fade distance for shore gradient
+var _fade_distance: float = 50.0
 
-## Generate shore distance map from terrain
-## fade_distance: horizontal distance in meters over which waves should fade (e.g., 30m)
+## Internal: seed map for JFA
+var _seeds: PackedInt32Array
+
+
+## Generate shore distance map from terrain using JFA
+## fade_distance: horizontal distance in meters over which waves should fade (e.g., 50m)
 func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: float, sea_level: float = 0.0) -> void:
 	_terrain = terrain
 	_mask_resolution = resolution
 	_sea_level = sea_level
+	_fade_distance = fade_distance
 
 	# Determine world bounds from terrain
 	_calculate_world_bounds()
@@ -37,21 +48,84 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 	print("[ShoreMaskGenerator] Generating shore distance map %dx%d, fade=%.0fm, sea_level=%.1f..." % [
 		_mask_resolution, _mask_resolution, fade_distance, _sea_level])
 
-	# Step 1: Create binary shore mask (1 = water, 0 = land)
-	var binary_mask := Image.create(_mask_resolution, _mask_resolution, false, Image.FORMAT_R8)
+	var start_time := Time.get_ticks_msec()
 
+	# Step 1: Create binary mask and find shore pixels
+	var binary_mask := PackedByteArray()
+	binary_mask.resize(_mask_resolution * _mask_resolution)
+
+	_seeds = PackedInt32Array()
+	_seeds.resize(_mask_resolution * _mask_resolution)
+	_seeds.fill(-1)
+
+	# Classify water vs land
 	for y in range(_mask_resolution):
 		for x in range(_mask_resolution):
 			var world_pos := _pixel_to_world(x, y)
 			var terrain_height := _get_terrain_height(world_pos)
+			var idx := y * _mask_resolution + x
+			binary_mask[idx] = 1 if terrain_height < _sea_level else 0
 
-			# Water = below sea level, Land = above sea level
-			var is_water := terrain_height < _sea_level
-			binary_mask.set_pixel(x, y, Color(1.0 if is_water else 0.0, 0, 0, 1))
+	# Find shore pixels (water adjacent to land, 8-connected)
+	var shore_count := 0
+	for y in range(_mask_resolution):
+		for x in range(_mask_resolution):
+			var idx := y * _mask_resolution + x
+			if binary_mask[idx] == 1:  # Water
+				var adjacent_to_land := false
+				for dy in range(-1, 2):
+					for dx in range(-1, 2):
+						if dx == 0 and dy == 0:
+							continue
+						var nx := x + dx
+						var ny := y + dy
+						if nx >= 0 and nx < _mask_resolution and ny >= 0 and ny < _mask_resolution:
+							if binary_mask[ny * _mask_resolution + nx] == 0:
+								adjacent_to_land = true
+								break
+					if adjacent_to_land:
+						break
+				if adjacent_to_land:
+					_seeds[idx] = idx
+					shore_count += 1
 
-	# Step 2: Compute distance transform from shoreline
-	# Using a simple but effective approximation: iterative dilation/erosion
-	_shore_image = _compute_shore_distance(binary_mask, fade_distance)
+	print("[ShoreMaskGenerator] Found %d shore pixels" % shore_count)
+
+	# Step 2: Jump Flooding Algorithm
+	var step := _mask_resolution / 2
+	while step >= 1:
+		_jfa_pass(step, binary_mask)
+		step /= 2
+
+	# Step 3: Compute shore factor with smoothstep
+	_shore_image = Image.create(_mask_resolution, _mask_resolution, false, Image.FORMAT_R8)
+	var texel_size := _world_bounds.size.x / float(_mask_resolution)
+
+	for y in range(_mask_resolution):
+		for x in range(_mask_resolution):
+			var idx := y * _mask_resolution + x
+			var is_water := binary_mask[idx] == 1
+
+			if not is_water:
+				_shore_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
+			else:
+				var seed_idx := _seeds[idx]
+				var shore_factor: float
+
+				if seed_idx < 0:
+					shore_factor = 1.0
+				elif seed_idx == idx:
+					shore_factor = 0.0
+				else:
+					var seed_x := seed_idx % _mask_resolution
+					var seed_y := seed_idx / _mask_resolution
+					var dx := float(x - seed_x)
+					var dy := float(y - seed_y)
+					var pixel_distance := sqrt(dx * dx + dy * dy)
+					var world_distance := pixel_distance * texel_size
+					shore_factor = _smoothstep(0.0, _fade_distance, world_distance)
+
+				_shore_image.set_pixel(x, y, Color(shore_factor, 0, 0, 1))
 
 	# Apply user override if available
 	if _user_mask:
@@ -59,142 +133,124 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 			for x in range(_mask_resolution):
 				var current := _shore_image.get_pixel(x, y).r
 				var user_value := _user_mask.get_pixel(x, y).r
-				# User mask multiplies the shore factor
 				_shore_image.set_pixel(x, y, Color(current * user_value, 0, 0, 1))
 
 	# Create texture from image
 	_shore_mask = ImageTexture.create_from_image(_shore_image)
 
-	print("[ShoreMaskGenerator] Shore distance map generated, bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
+	var elapsed := (Time.get_ticks_msec() - start_time) / 1000.0
+	print("[ShoreMaskGenerator] Shore distance map generated in %.2fs, bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
+		elapsed,
 		_world_bounds.position.x, _world_bounds.position.y,
 		_world_bounds.end.x, _world_bounds.end.y
 	])
 
 
-## Compute shore distance using Jump Flooding Algorithm (JFA)
-## Returns image where 0 = at shore, 1 = far from shore
-func _compute_shore_distance(binary_mask: Image, fade_distance: float) -> Image:
-	var size := _mask_resolution
-	var meters_per_pixel := _world_bounds.size.x / float(size)
-	var fade_pixels := fade_distance / meters_per_pixel
+## JFA pass with given step size (8-connected)
+func _jfa_pass(step: int, binary_mask: PackedByteArray) -> void:
+	var offsets: Array[Vector2i] = [
+		Vector2i(-step, -step), Vector2i(0, -step), Vector2i(step, -step),
+		Vector2i(-step, 0),                          Vector2i(step, 0),
+		Vector2i(-step, step),  Vector2i(0, step),  Vector2i(step, step)
+	]
 
-	# Find shore pixels (water pixels adjacent to land)
-	var shore_pixels: Array[Vector2i] = []
+	var new_seeds := _seeds.duplicate()
 
-	for y in range(size):
-		for x in range(size):
-			var is_water := binary_mask.get_pixel(x, y).r > 0.5
-			if is_water:
-				# Check if adjacent to land (4-connected)
-				var adjacent_to_land := false
-				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
-					var nx: int = x + offset.x
-					var ny: int = y + offset.y
-					if nx >= 0 and nx < size and ny >= 0 and ny < size:
-						if binary_mask.get_pixel(nx, ny).r < 0.5:
-							adjacent_to_land = true
-							break
-				if adjacent_to_land:
-					shore_pixels.append(Vector2i(x, y))
+	for y in range(_mask_resolution):
+		for x in range(_mask_resolution):
+			var idx := y * _mask_resolution + x
+			if binary_mask[idx] == 0:
+				continue
 
-	print("[ShoreMaskGenerator] Found %d shore pixels" % shore_pixels.size())
+			var best_seed := _seeds[idx]
+			var best_dist_sq := _distance_squared_to_seed(x, y, best_seed)
 
-	# Create distance image
-	var distance_image := Image.create(size, size, false, Image.FORMAT_RF)
+			for offset in offsets:
+				var nx := x + offset.x
+				var ny := y + offset.y
+				if nx < 0 or nx >= _mask_resolution or ny < 0 or ny >= _mask_resolution:
+					continue
 
-	# Initialize: water pixels get large distance, land pixels get 0
-	for y in range(size):
-		for x in range(size):
-			var is_water := binary_mask.get_pixel(x, y).r > 0.5
-			if is_water:
-				distance_image.set_pixel(x, y, Color(999999.0, 0, 0, 1))
-			else:
-				# Land = 0 distance (will be masked out anyway)
-				distance_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
+				var neighbor_seed := _seeds[ny * _mask_resolution + nx]
+				if neighbor_seed < 0:
+					continue
 
-	# Set shore pixels to 0 distance
-	for shore_px in shore_pixels:
-		distance_image.set_pixel(shore_px.x, shore_px.y, Color(0.0, 0, 0, 1))
+				var dist_sq := _distance_squared_to_seed(x, y, neighbor_seed)
+				if dist_sq < best_dist_sq:
+					best_dist_sq = dist_sq
+					best_seed = neighbor_seed
 
-	# Propagate distances using simple iterative approach
-	# (Faster than brute force, good enough for our resolution)
-	var max_iterations := int(fade_pixels * 1.5)
-	for iteration in range(max_iterations):
-		var changed := false
-		for y in range(size):
-			for x in range(size):
-				var current_dist := distance_image.get_pixel(x, y).r
-				if current_dist <= 0.0:
-					continue  # Already at shore or land
+			new_seeds[idx] = best_seed
 
-				# Check neighbors
-				var best_dist := current_dist
-				for offset: Vector2i in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
-					var nx: int = x + offset.x
-					var ny: int = y + offset.y
-					if nx >= 0 and nx < size and ny >= 0 and ny < size:
-						var neighbor_dist := distance_image.get_pixel(nx, ny).r + 1.0
-						if neighbor_dist < best_dist:
-							best_dist = neighbor_dist
-							changed = true
+	_seeds = new_seeds
 
-				if best_dist < current_dist:
-					distance_image.set_pixel(x, y, Color(best_dist, 0, 0, 1))
 
-		if not changed:
-			break
-
-	# Convert to shore factor: 0 = at shore (dampen waves), 1 = far from shore (full waves)
-	var result := Image.create(size, size, false, Image.FORMAT_R8)
-
-	for y in range(size):
-		for x in range(size):
-			var is_water := binary_mask.get_pixel(x, y).r > 0.5
-			if not is_water:
-				# Land = 0 (no ocean)
-				result.set_pixel(x, y, Color(0.0, 0, 0, 1))
-			else:
-				var dist_pixels := distance_image.get_pixel(x, y).r
-				var dist_meters := dist_pixels * meters_per_pixel
-				# Smoothstep from 0 (at shore) to 1 (at fade_distance)
-				var shore_factor := smoothstep(0.0, fade_distance, dist_meters)
-				result.set_pixel(x, y, Color(shore_factor, 0, 0, 1))
-
-	return result
+func _distance_squared_to_seed(x: int, y: int, seed_idx: int) -> float:
+	if seed_idx < 0:
+		return INF
+	var seed_x := seed_idx % _mask_resolution
+	var seed_y := seed_idx / _mask_resolution
+	var dx := float(x - seed_x)
+	var dy := float(y - seed_y)
+	return dx * dx + dy * dy
 
 
 func _calculate_world_bounds() -> void:
 	if not _terrain or not _terrain.data:
-		# Default to large bounds
 		_world_bounds = Rect2(-8000, -8000, 16000, 16000)
+		print("[ShoreMaskGenerator] Using default world bounds (no terrain data)")
 		return
 
-	# Get terrain bounds from Terrain3D
 	var region_count := _terrain.data.get_region_count()
 	if region_count == 0:
 		_world_bounds = Rect2(-8000, -8000, 16000, 16000)
+		print("[ShoreMaskGenerator] Using default world bounds (no regions)")
 		return
 
-	# Use reasonable defaults - can be improved with actual terrain bounds query
-	var min_x := -4000.0
-	var min_z := -4000.0
-	var max_x := 4000.0
-	var max_z := 4000.0
+	# Calculate bounds from terrain regions
+	var region_size: float = _terrain.get_region_size() * _terrain.get_vertex_spacing()
+	var region_locations: Array[Vector2i] = _terrain.data.get_region_locations()
 
-	# Add padding
-	var padding := 500.0
+	if region_locations.is_empty():
+		_world_bounds = Rect2(-8000, -8000, 16000, 16000)
+		print("[ShoreMaskGenerator] Using default world bounds (no region locations)")
+		return
+
+	var min_loc := region_locations[0]
+	var max_loc := region_locations[0]
+	for loc in region_locations:
+		min_loc.x = mini(min_loc.x, loc.x)
+		min_loc.y = mini(min_loc.y, loc.y)
+		max_loc.x = maxi(max_loc.x, loc.x)
+		max_loc.y = maxi(max_loc.y, loc.y)
+
+	var world_min := Vector2(min_loc.x, min_loc.y) * region_size
+	var world_max := Vector2(max_loc.x + 1, max_loc.y + 1) * region_size
+
 	_world_bounds = Rect2(
-		min_x - padding,
-		min_z - padding,
-		(max_x - min_x) + padding * 2,
-		(max_z - min_z) + padding * 2
+		world_min.x,
+		world_min.y,
+		world_max.x - world_min.x,
+		world_max.y - world_min.y
 	)
+
+	# Add padding for shore gradient
+	var padding := _fade_distance + 100.0
+	_world_bounds = Rect2(
+		_world_bounds.position.x - padding,
+		_world_bounds.position.y - padding,
+		_world_bounds.size.x + padding * 2,
+		_world_bounds.size.y + padding * 2
+	)
+
+	print("[ShoreMaskGenerator] Calculated world bounds from %d regions: %s" % [region_count, _world_bounds])
 
 
 func _get_terrain_height(world_pos: Vector3) -> float:
 	if _terrain and _terrain.data:
 		return _terrain.data.get_height(world_pos)
-	return 0.0
+	# Outside terrain = assume ocean
+	return _sea_level - 1.0
 
 
 func _pixel_to_world(x: int, y: int) -> Vector3:
@@ -218,7 +274,7 @@ func _world_to_pixel(world_pos: Vector3) -> Vector2i:
 	)
 
 
-func smoothstep(edge0: float, edge1: float, x: float) -> float:
+func _smoothstep(edge0: float, edge1: float, x: float) -> float:
 	var t := clampf((x - edge0) / (edge1 - edge0), 0.0, 1.0)
 	return t * t * (3.0 - 2.0 * t)
 

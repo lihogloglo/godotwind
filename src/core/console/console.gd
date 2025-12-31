@@ -390,6 +390,19 @@ func _register_builtin_commands() -> void:
 	registry.register("distant_stats", _cmd_distant_stats, "Show distant rendering statistics", "debug",
 		PackedStringArray(["far_stats"]))
 
+	# Ocean debug commands
+	registry.register("ocean_debug", _cmd_ocean_debug, "Toggle ocean shore mask debug visualization", "debug",
+		PackedStringArray(["shore_debug", "water_debug"]),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on/off/toggle", false, "toggle")])
+
+	registry.register("ocean_info", _cmd_ocean_info, "Show ocean and shore mask information", "debug",
+		PackedStringArray(["water_info", "shore_info"]))
+
+	registry.register("ocean_fade", _cmd_ocean_fade, "Set/get shore fade distance", "debug",
+		PackedStringArray(["shore_fade"]),
+		[CommandRegistry.ParameterInfo.new("distance", TYPE_STRING, "Fade distance in meters (or empty to show current)", false, "")],
+		PackedStringArray(["ocean_fade", "ocean_fade 200"]))
+
 
 #endregion
 
@@ -737,5 +750,165 @@ func _tier_to_string(tier: int) -> String:
 		3: return "HORIZON"
 		4: return "NONE"
 		_: return "UNKNOWN(%d)" % tier
+
+
+func _cmd_ocean_debug(args: Dictionary) -> CommandRegistry.CommandResult:
+	var state: String = args.get("state", "toggle")
+
+	# Get OceanManager autoload
+	var ocean: Variant = _context.get("ocean")
+	if not ocean:
+		# Try to find it
+		ocean = get_node_or_null("/root/OceanManager")
+		if ocean:
+			_context["ocean"] = ocean
+
+	if not ocean or not ocean is Object:
+		return CommandRegistry.CommandResult.error("OceanManager not found")
+
+	var ocean_obj: Object = ocean as Object
+	if not ocean_obj.has_method("get_ocean_mesh"):
+		return CommandRegistry.CommandResult.error("OceanManager doesn't have get_ocean_mesh method")
+
+	var ocean_mesh: Variant = ocean_obj.call("get_ocean_mesh")
+	if not ocean_mesh or not ocean_mesh is Object:
+		return CommandRegistry.CommandResult.error("Ocean mesh not available")
+
+	var mesh_obj: Object = ocean_mesh as Object
+
+	# Determine new state
+	var new_enabled: bool
+	var current: bool = mesh_obj.call("is_debug_shore_mask") if mesh_obj.has_method("is_debug_shore_mask") else false
+
+	match state.to_lower():
+		"on", "true", "1", "enabled":
+			new_enabled = true
+		"off", "false", "0", "disabled":
+			new_enabled = false
+		_:  # toggle
+			new_enabled = not current
+
+	# Apply state
+	if mesh_obj.has_method("set_debug_shore_mask"):
+		mesh_obj.call("set_debug_shore_mask", new_enabled)
+
+	var help_msg := ""
+	if new_enabled:
+		help_msg = "\n[color=gray]Magenta = shore/land (factor 0), Cyan = ocean (factor 1)[/color]"
+
+	return CommandRegistry.CommandResult.ok("Shore mask debug: %s%s" % [
+		"[color=green]enabled[/color]" if new_enabled else "[color=red]disabled[/color]",
+		help_msg
+	])
+
+
+func _cmd_ocean_info(_args: Dictionary) -> CommandRegistry.CommandResult:
+	# Get OceanManager autoload
+	var ocean: Variant = _context.get("ocean")
+	if not ocean:
+		ocean = get_node_or_null("/root/OceanManager")
+		if ocean:
+			_context["ocean"] = ocean
+
+	if not ocean or not ocean is Object:
+		return CommandRegistry.CommandResult.error("OceanManager not found")
+
+	var ocean_obj: Object = ocean as Object
+	var lines: PackedStringArray = ["[b]Ocean System Info[/b]"]
+
+	# Basic state
+	var is_enabled: bool = ocean_obj.call("is_system_enabled") if ocean_obj.has_method("is_system_enabled") else false
+	var is_init: bool = ocean_obj.call("is_initialized") if ocean_obj.has_method("is_initialized") else false
+	lines.append("System enabled: %s" % ("yes" if is_enabled else "no"))
+	lines.append("Initialized: %s" % ("yes" if is_init else "no"))
+
+	# Sea level and fade distance
+	var sea_level: float = ocean_obj.get("sea_level") if "sea_level" in ocean_obj else 0.0
+	var fade_dist: float = ocean_obj.get("shore_fade_distance") if "shore_fade_distance" in ocean_obj else 50.0
+	var mask_res: int = ocean_obj.get("shore_mask_resolution") if "shore_mask_resolution" in ocean_obj else 2048
+	lines.append("Sea level: %.1fm" % sea_level)
+	lines.append("Shore fade distance: %.1fm" % fade_dist)
+	lines.append("Shore mask resolution: %dx%d" % [mask_res, mask_res])
+
+	# Quality mode
+	if ocean_obj.has_method("get_water_quality_name"):
+		var quality_name: String = ocean_obj.call("get_water_quality_name")
+		lines.append("Quality mode: %s" % quality_name)
+
+	# Shore mask info
+	lines.append("")
+	lines.append("[b]Shore Mask[/b]")
+
+	var shore_gen: Variant = ocean_obj.call("get_shore_mask_generator") if ocean_obj.has_method("get_shore_mask_generator") else null
+	if shore_gen and shore_gen is Object:
+		var shore_obj: Object = shore_gen as Object
+		var bounds: Rect2 = shore_obj.call("get_world_bounds") if shore_obj.has_method("get_world_bounds") else Rect2()
+		lines.append("World bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
+			bounds.position.x, bounds.position.y,
+			bounds.end.x, bounds.end.y
+		])
+		var world_size: float = bounds.size.x
+		var meters_per_pixel: float = world_size / float(mask_res)
+		var fade_pixels: float = fade_dist / meters_per_pixel
+		lines.append("Meters per pixel: %.2f" % meters_per_pixel)
+		lines.append("Fade distance in pixels: %.1f" % fade_pixels)
+
+		if fade_pixels < 10:
+			lines.append("[color=yellow]Warning: Low pixel resolution for fade![/color]")
+			lines.append("[color=gray]Consider increasing fade distance or mask resolution[/color]")
+	else:
+		lines.append("[color=gray]Shore mask generator not available[/color]")
+
+	# Ocean mesh info
+	var ocean_mesh: Variant = ocean_obj.call("get_ocean_mesh") if ocean_obj.has_method("get_ocean_mesh") else null
+	if ocean_mesh and ocean_mesh is Object:
+		var mesh_obj: Object = ocean_mesh as Object
+		var debug_mode: bool = mesh_obj.call("is_debug_shore_mask") if mesh_obj.has_method("is_debug_shore_mask") else false
+		lines.append("")
+		lines.append("Debug shore mask: %s" % ("on" if debug_mode else "off"))
+
+	lines.append("")
+	lines.append("[color=gray]Use 'ocean_debug' to visualize the shore mask gradient[/color]")
+
+	return CommandRegistry.CommandResult.ok("\n".join(lines))
+
+
+func _cmd_ocean_fade(args: Dictionary) -> CommandRegistry.CommandResult:
+	var distance_str: String = args.get("distance", "")
+
+	# Get OceanManager autoload
+	var ocean: Variant = _context.get("ocean")
+	if not ocean:
+		ocean = get_node_or_null("/root/OceanManager")
+		if ocean:
+			_context["ocean"] = ocean
+
+	if not ocean or not ocean is Object:
+		return CommandRegistry.CommandResult.error("OceanManager not found")
+
+	var ocean_obj: Object = ocean as Object
+
+	# If no distance provided, show current value
+	if distance_str.is_empty():
+		var current: float = ocean_obj.get("shore_fade_distance") if "shore_fade_distance" in ocean_obj else 50.0
+		return CommandRegistry.CommandResult.ok("Current shore fade distance: %.1fm" % current)
+
+	# Parse and set new distance
+	if not distance_str.is_valid_float():
+		return CommandRegistry.CommandResult.error("Invalid distance value: %s" % distance_str)
+
+	var new_distance: float = distance_str.to_float()
+	if new_distance <= 0:
+		return CommandRegistry.CommandResult.error("Distance must be positive")
+
+	# Set the new value
+	ocean_obj.set("shore_fade_distance", new_distance)
+
+	# Regenerate shore mask if possible
+	if ocean_obj.has_method("regenerate_shore_mask"):
+		ocean_obj.call("regenerate_shore_mask")
+		return CommandRegistry.CommandResult.ok("Shore fade distance set to %.1fm (mask regenerated)" % new_distance)
+	else:
+		return CommandRegistry.CommandResult.ok("Shore fade distance set to %.1fm\n[color=yellow]Note: Restart or rebake shore mask to see effect[/color]" % new_distance)
 
 #endregion

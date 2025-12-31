@@ -276,7 +276,19 @@ func _populate_simple_records(
 			var native_rec: RefCounted = native_dict[key]
 			var rec: ESMRecord = converter.call(native_rec)
 			target_dict[key] = rec
-			_all_records[key] = {"record": rec, "type": type_name}
+			# Only add to unified lookup if no collision, or if this type has higher priority
+			# Priority: static/activator > container/door > misc/weapon > light
+			# This prevents lights from overwriting statics with the same name (e.g., "bc mushroom 256")
+			var dominated: bool = _all_records.has(key)
+			var dominated_by: String = _all_records[key].get("type", "") if dominated else ""
+			var dominated_priority: int = _get_type_priority(dominated_by) if dominated else -1
+			var new_priority: int = _get_type_priority(type_name)
+			if not dominated or new_priority > dominated_priority:
+				_all_records[key] = {"record": rec, "type": type_name}
+			elif dominated and "mushroom" in str(key):
+				print("[ESM-COLLISION] Key '%s': keeping %s (pri=%d) over %s (pri=%d)" % [
+					key, dominated_by, dominated_priority, type_name, new_priority
+				])
 
 
 ## Helper: Copy common base fields from native record to GDScript record
@@ -1171,6 +1183,24 @@ func get_any_record(id: String, out_type: Array = []) -> ESMRecord:
 		out_type[0] = entry.get("type", "unknown")
 
 	return entry.get("record") as ESMRecord
+
+
+## Get priority for a record type (higher = takes precedence in name collisions)
+## Statics/activators should win over lights with the same name
+static func _get_type_priority(type_name: String) -> int:
+	match type_name:
+		"static", "activator":
+			return 100  # Highest - these are the "real" objects
+		"container", "door":
+			return 90   # Interactive objects
+		"misc", "weapon", "armor", "clothing", "book", "ingredient", "apparatus", "potion":
+			return 80   # Items
+		"npc", "creature":
+			return 70   # Actors
+		"light":
+			return 10   # Lowest - lights often share names with statics (e.g., "bc mushroom 256")
+		_:
+			return 50   # Default
 
 #endregion
 

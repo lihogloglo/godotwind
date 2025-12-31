@@ -36,6 +36,14 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
+# Object distance manager for distance-based visibility
+var _object_distance_manager: Node3D = null  # ObjectDistanceManager
+
+# Legacy alias for compatibility
+var _per_object_lod_manager: Node3D:
+	get: return _object_distance_manager
+	set(value): _object_distance_manager = value
+
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
 	"multimesh_instances": 0,
@@ -81,6 +89,27 @@ func get_object_pool() -> RefCounted:
 	return _object_pool
 
 
+## Set the object distance manager for distance-based visibility
+func set_object_distance_manager(manager: Node3D) -> void:
+	_object_distance_manager = manager
+	_sync_instantiator_config()
+
+
+## Get the object distance manager
+func get_object_distance_manager() -> Node3D:
+	return _object_distance_manager
+
+
+## Legacy alias for compatibility
+func set_per_object_lod_manager(manager: Node3D) -> void:
+	set_object_distance_manager(manager)
+
+
+## Legacy alias for compatibility
+func get_per_object_lod_manager() -> Node3D:
+	return _object_distance_manager
+
+
 ## Sync configuration to instantiator
 func _sync_instantiator_config() -> void:
 	# Set up character factory
@@ -91,11 +120,17 @@ func _sync_instantiator_config() -> void:
 	_instantiator.object_pool = _object_pool
 	_instantiator.static_renderer = _static_renderer
 	_instantiator.character_factory = _character_factory
+	_instantiator.object_distance_manager = _object_distance_manager
 	_instantiator.create_lights = create_lights
 	_instantiator.load_npcs = load_npcs
 	_instantiator.load_creatures = load_creatures
 	_instantiator.use_object_pool = use_object_pool
 	_instantiator.use_static_renderer = use_static_renderer
+
+	# Pass scene tree for fade-in tweens (will be set when first called from a Node)
+	var main_loop: MainLoop = Engine.get_main_loop()
+	if main_loop is SceneTree:
+		_instantiator.scene_tree = main_loop as SceneTree
 
 
 ## Load an interior cell by name and return a Node3D containing all objects
@@ -116,6 +151,28 @@ func load_exterior_cell(x: int, y: int) -> Node3D:
 		return null
 
 	return _instantiate_cell(cell_record)
+
+
+## Load exterior cell metadata only (no objects) for AAA streaming mode
+## Returns an empty Node3D container - terrain is handled separately via Terrain3D
+## Objects are streamed by ObjectStreamer via position index
+func load_exterior_cell_metadata_only(x: int, y: int) -> Node3D:
+	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	if not cell_record:
+		push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
+		return null
+
+	# Create empty container - no objects, terrain is separate
+	var cell_node := Node3D.new()
+	cell_node.name = "Cell_%d_%d" % [x, y]
+
+	# Store cell metadata for potential use (water height, ambient, etc.)
+	cell_node.set_meta("cell_record", cell_record)
+	cell_node.set_meta("grid_x", x)
+	cell_node.set_meta("grid_y", y)
+	cell_node.set_meta("aaa_mode", true)
+
+	return cell_node
 
 
 ## Load only NPCs/creatures into an existing cell node
@@ -222,6 +279,7 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 func _group_references_for_instancing(references: Array, cell_grid: Vector2i) -> Dictionary:
 	var multimesh_candidates: Dictionary = {}  # model_path -> Array of {ref, base_record}
 	var individual_refs: Array = []
+	var _debug_significant_count := 0
 
 	for ref: CellReference in references:
 		# Get base record and type
@@ -246,6 +304,13 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 		# Check if suitable for MultiMesh
 		if not _is_multimesh_candidate(model_path, base_record):
 			individual_refs.append(ref)
+			# Debug: Check if this is a significant object
+			if _instantiator.is_significant_object(model_path):
+				_debug_significant_count += 1
+				if _debug_significant_count <= 5:
+					print("[ODM-GROUP] Significant object for individual: %s in cell %s" % [
+						model_path.get_file(), cell_grid
+					])
 			continue
 
 		# Check if would use static renderer (skip those - already optimized)
@@ -275,6 +340,11 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 			# Too few instances - instantiate individually
 			for candidate: Dictionary in candidates:
 				individual_refs.append(candidate.ref)
+
+	if _debug_significant_count > 0:
+		print("[ODM-GROUP] Cell %s: %d significant objects to instantiate individually" % [
+			cell_grid, _debug_significant_count
+		])
 
 	return {
 		"multimesh_groups": multimesh_groups,
@@ -436,11 +506,12 @@ func preload_common_models() -> int:
 
 			# Register with pool AND pre-warm with initial instances
 			# Pre-warming means acquire() returns instantly without duplicate()
-			# Increased from 33% to 50% for better cache hit rate (targeting 70%+)
+			# Increased from 50% to 80% for higher cache hit rate (targeting 70%+)
 			if _object_pool and not _object_pool.call("has_model", model_path):
 				var pool_size: int = common_models[model_path]
-				# Pre-create 50% of max pool size for higher cache hit rate
-				var initial_count: int = maxi(10, pool_size / 2)
+				# Pre-create 80% of max pool size for maximum cache hit rate
+				# This front-loads the duplicate() cost during preload instead of gameplay
+				var initial_count: int = maxi(10, int(pool_size * 0.8))
 				_object_pool.call("register_model", model_path, prototype, initial_count, pool_size)
 				pool_instances += initial_count
 
@@ -459,6 +530,29 @@ var _preload_failed: int = 0
 var _preload_total: int = 0
 
 func preload_common_models_async() -> void:
+	# In runtime mode, load from disk cache only - no NIF parsing
+	if _model_loader.runtime_mode:
+		var common_models := ObjectPoolScript.identify_common_models(self)
+		var loaded := 0
+		var skipped := 0
+
+		for model_path: String in common_models:
+			# Skip if already in memory cache
+			if _model_loader.has_model(model_path):
+				continue
+
+			# Try to load from disk cache
+			var prototype := _model_loader.get_model(model_path)
+			if prototype:
+				loaded += 1
+			else:
+				skipped += 1  # Not prebaked - that's fine
+
+		print("CellManager: Preloaded %d models from disk cache (%d not prebaked)" % [loaded, skipped])
+		preload_complete.emit(loaded, skipped)
+		return
+
+	# PREBAKING MODE: Do async NIF parsing
 	if not _background_processor:
 		push_warning("CellManager: No background processor, falling back to sync preload")
 		preload_common_models()
@@ -532,6 +626,153 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 
 
 # =============================================================================
+# DEFERRED CELL LOADING (For Per-Object Distance Management)
+# =============================================================================
+# Loads cell reference DATA without instantiating Node3D objects.
+# Objects are registered with ObjectDistanceManager as "deferred" and will
+# be instantiated when they enter NEAR range.
+#
+# This enables radius-based cell loading where:
+# - All cells within FAR range have their data loaded
+# - Only objects in NEAR range get Node3D instantiated
+# - MID/FAR objects show LOD meshes or impostors via ODM
+# =============================================================================
+
+## Load cell reference data and register all objects as deferred with ODM
+## Does NOT instantiate Node3D objects - that happens when objects enter NEAR range
+## Returns number of objects registered, or -1 on failure
+func load_cell_deferred(x: int, y: int) -> int:
+	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	if not cell_record:
+		return -1
+
+	if not _object_distance_manager:
+		push_warning("CellManager: Cannot load deferred - no ObjectDistanceManager set")
+		return -1
+
+	if not _object_distance_manager.has_method("register_deferred_object"):
+		push_warning("CellManager: ObjectDistanceManager does not support deferred registration")
+		return -1
+
+	var cell_grid := Vector2i(x, y)
+	var registered := 0
+
+	for ref: CellReference in cell_record.references:
+		# Get base record and type
+		var record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		if not base_record:
+			continue
+
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+		# Skip types that don't work with deferred loading
+		if type_name == "light":
+			continue  # Lights need special handling
+		if type_name == "leveled_item":
+			continue  # Leveled items need resolution
+		if type_name == "npc" and not load_npcs:
+			continue
+		if type_name == "creature" and not load_creatures:
+			continue
+		if type_name == "leveled_creature" and not load_creatures:
+			continue
+
+		# Get model path
+		var model_path: String = _get_model_path(base_record)
+		if model_path.is_empty():
+			continue
+
+		# Skip models that would use static renderer (already optimized differently)
+		if use_static_renderer and _static_renderer and _instantiator._is_static_render_model(model_path):
+			continue
+
+		# Calculate world position and rotation
+		var world_position: Vector3 = CS.vector_to_godot(ref.position)
+		var rotation: Vector3 = ref.rotation  # Store raw ESM rotation for later conversion
+		var scale_factor: Vector3 = CS.scale_to_godot(ref.scale)
+
+		# Register with ODM as deferred
+		var object_id: int = _object_distance_manager.register_deferred_object(
+			model_path,
+			world_position,
+			rotation,
+			scale_factor,
+			cell_grid,
+			str(ref.ref_id),
+			ref.ref_num
+		)
+
+		if object_id >= 0:
+			registered += 1
+
+	return registered
+
+
+## Get cell references for deferred loading (without instantiation)
+## Used by WorldStreamingManager to get reference data for deferred registration
+func get_cell_references(x: int, y: int) -> Array:
+	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	if not cell_record:
+		return []
+	return cell_record.references
+
+
+## Instantiate a single deferred object by its ODM data
+## Called when ObjectDistanceManager requests instantiation (object entering NEAR)
+## Returns the instantiated Node3D or null on failure
+func instantiate_deferred_object(
+	model_path: String,
+	world_transform: Transform3D,
+	cell_grid: Vector2i,
+	ref_id: String,
+	ref_num: int
+) -> Node3D:
+	# Get record_id for collision shape lookup
+	var record_type: Array = [""]
+	var base_record: Variant = ESMManager.get_any_record(ref_id, record_type)
+
+	var record_id: String = ""
+	if base_record and "record_id" in base_record:
+		record_id = base_record.record_id
+
+	# Try to get from object pool first
+	if use_object_pool and _object_pool:
+		var pooled: Node3D = _object_pool.call("acquire", model_path)
+		if pooled:
+			pooled.name = ref_id + "_" + str(ref_num)
+			pooled.global_transform = world_transform
+			_stats["objects_from_pool"] += 1
+			return pooled
+
+	# Load or get cached model
+	var model_prototype: Node3D = _model_loader.get_model(model_path, record_id)
+	if not model_prototype:
+		return null
+
+	# Create instance
+	var instance: Node3D = model_prototype.duplicate()
+	instance.name = ref_id + "_" + str(ref_num)
+	instance.global_transform = world_transform
+
+	# Add metadata for console object picker
+	if base_record:
+		if "record_id" in base_record:
+			instance.set_meta("form_id", base_record.record_id)
+		instance.set_meta("ref_id", ref_id)
+		instance.set_meta("ref_num", ref_num)
+		instance.set_meta("model_path", model_path)
+
+	_stats["objects_instantiated"] += 1
+
+	# Apply fade-in effect if enabled
+	if _instantiator.enable_fade_in:
+		_instantiator._apply_fade_in(instance)
+
+	return instance
+
+
+# =============================================================================
 # ASYNC CELL LOADING API
 # =============================================================================
 # Uses BackgroundProcessor to parse NIFs on worker threads.
@@ -548,9 +789,9 @@ const MAX_ASYNC_REQUESTS := 6
 const MAX_INSTANTIATION_QUEUE := 8000
 
 ## Maximum objects to instantiate per frame (prevents frame spikes)
-## Diagnostics show avg instantiation is ~0.35ms, so 30 objects = ~10.5ms
-## This leaves headroom within a 16.6ms frame (60 FPS)
-const MAX_INSTANTIATIONS_PER_FRAME := 30
+## With prebaked models (no NIF conversion), instantiation is very fast (~0.35ms per object)
+## Increased from 30 to 50 for faster loading without significant FPS impact
+const MAX_INSTANTIATIONS_PER_FRAME := 50
 
 ## Enable diagnostic logging for performance analysis
 var diagnostic_logging: bool = true
@@ -583,6 +824,7 @@ class AsyncCellRequest:
 	var is_interior: bool
 	var request_id: int
 	var pending_parses: Dictionary = {}  # model_path -> task_id
+	var pending_disk_loads: Dictionary = {}  # model_path -> Array[CellReference] (refs waiting for this model)
 	var parsed_results: Dictionary = {}  # model_path -> NIFParseResult
 	var references_to_process: Array = []  # CellReference objects awaiting instantiation
 	var pending_instantiations: int = 0  # Count of items queued for instantiation
@@ -604,7 +846,15 @@ var _async_requests: Dictionary = {}  # request_id -> AsyncCellRequest
 var _background_processor: Node = null
 
 ## Instantiation queue for time-budgeted processing
-var _instantiation_queue: Array = []  # Array of {request_id, ref, model_path}
+## Entries include position for distance-priority sorting
+var _instantiation_queue: Array = []  # Array of {request_id, ref, model_path, position}
+
+## Camera position for distance-based prioritization
+var _camera_position: Vector3 = Vector3.ZERO
+
+## Frame counter for periodic queue re-sorting
+var _queue_sort_frame: int = 0
+const QUEUE_SORT_INTERVAL: int = 10  # Re-sort every N frames
 
 ## Parsed model prototypes waiting to be cached (from async results)
 var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
@@ -729,6 +979,18 @@ func cancel_async_request(request_id: int) -> void:
 	for task_id: int in request.pending_parses.values():
 		_background_processor.call("cancel_task", task_id)
 
+	# Remove all pending instantiations for this request from the queue
+	# This prevents orphan objects when the cell is unloaded mid-loading
+	var queue_before := _instantiation_queue.size()
+	_instantiation_queue = _instantiation_queue.filter(
+		func(entry: Dictionary) -> bool: return entry.request_id != request_id
+	)
+	var removed := queue_before - _instantiation_queue.size()
+	if removed > 0:
+		# This is expected behavior when cells are unloaded mid-loading
+		# Using print instead of push_warning since it's informational, not a problem
+		print("CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
+
 	# Clean up cell node if started
 	if request.cell_node:
 		request.cell_node.queue_free()
@@ -736,17 +998,37 @@ func cancel_async_request(request_id: int) -> void:
 	_async_requests.erase(request_id)
 
 
-## Process pending NIF conversions - ONE per frame to maintain responsiveness
-## Returns true if any conversions were done
-## Call this BEFORE process_async_instantiation to feed the cache
-## NOTE: Complex models can take 500ms-6s each, so we limit to MAX_CONVERSIONS_PER_FRAME
-## With disk caching, second runs are nearly instant (1-5ms per model)
+## Cancel async request by cell grid (useful when unloading cells)
+func cancel_async_request_for_cell(grid: Vector2i) -> void:
+	# Find and cancel any async request for this cell
+	var request_ids_to_cancel: Array[int] = []
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if not request.is_interior and request.grid == grid:
+			request_ids_to_cancel.append(request_id)
+
+	for request_id in request_ids_to_cancel:
+		cancel_async_request(request_id)
+
+
+## Process pending NIF conversions - DISABLED AT RUNTIME
+## At runtime, all models should already be in disk cache from prebaking.
+## This function is kept for prebaking tools but does nothing in runtime mode.
+## Returns true if any conversions were done (always false in runtime mode)
 func process_pending_conversions(_budget_ms: float) -> bool:
+	# In runtime mode (world explorer), skip all conversion - models must be prebaked
+	if _model_loader.runtime_mode:
+		# Clear any pending conversions - they shouldn't exist in runtime mode
+		if not _pending_conversions.is_empty():
+			push_warning("CellManager: %d models queued for conversion but runtime_mode=true. Run prebaking first!" % _pending_conversions.size())
+			_pending_conversions.clear()
+		return false
+
+	# PREBAKING MODE ONLY: Process conversions for prebaking tools
 	if _pending_conversions.is_empty():
 		return false
 
 	var converted := 0
-	var from_disk := 0
 
 	while not _pending_conversions.is_empty() and converted < MAX_CONVERSIONS_PER_FRAME:
 		var entry: Dictionary = _pending_conversions.pop_front()
@@ -760,26 +1042,15 @@ func process_pending_conversions(_budget_ms: float) -> bool:
 			continue
 
 		var request: AsyncCellRequest = _async_requests[request_id]
-		var convert_start := Time.get_ticks_usec()
 		var prototype: Node3D = null
-		var was_disk_hit := false
 
-		# First check disk cache (fast path - 1-5ms vs 300-6000ms)
-		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, item_id):
-			prototype = _model_loader.get_model(model_path, item_id)
-			was_disk_hit = true
-			from_disk += 1
-		else:
-			# Perform the conversion (this is the slow part - can take 500ms-6s!)
-			var converter := NIFConverter.new()
-			prototype = converter.convert_from_parsed(parse_result)
-
-		var convert_elapsed := (Time.get_ticks_usec() - convert_start) / 1000.0
+		# Perform the conversion (PREBAKING ONLY - can take 500ms-6s!)
+		var converter := NIFConverter.new()
+		prototype = converter.convert_from_parsed(parse_result)
 
 		if prototype:
-			if not was_disk_hit:
-				# Add to memory cache AND disk cache (handled inside add_to_cache)
-				_model_loader.add_to_cache(model_path, prototype, item_id)
+			# Add to memory cache AND disk cache (handled inside add_to_cache)
+			_model_loader.add_to_cache(model_path, prototype, item_id)
 			# NOW queue references for this model
 			_queue_references_for_model(request, model_path)
 		else:
@@ -796,15 +1067,43 @@ func process_pending_conversions(_budget_ms: float) -> bool:
 	return converted > 0
 
 
+## Process async disk loads - call this every frame to complete pending model loads
+## Returns number of models that finished loading this frame
+func process_async_disk_loads() -> int:
+	return _model_loader.process_async_loads()
+
+
+## Get count of pending async disk loads
+func get_pending_disk_load_count() -> int:
+	return _model_loader.get_pending_async_count()
+
+
 ## Process async instantiation within time budget (call from _process)
 ## Returns number of objects instantiated this frame
 ## Uses BOTH time budget AND object count cap for consistent frame times
-func process_async_instantiation(budget_ms: float) -> int:
-	# First process any pending conversions to feed the cache
+## Objects are sorted by distance to camera - nearest objects instantiate first
+## Parameters:
+##   budget_ms: Time budget in milliseconds
+##   camera_pos: Camera position for distance-priority sorting (optional, uses cached if not provided)
+func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3.INF) -> int:
+	# Update camera position if provided
+	if camera_pos != Vector3.INF:
+		_camera_position = camera_pos
+
+	# First process any pending async disk loads (non-blocking check)
+	process_async_disk_loads()
+
+	# Then process any pending conversions to feed the cache
 	process_pending_conversions(MAX_CONVERSION_TIME_MS)
 
 	if _instantiation_queue.is_empty():
 		return 0
+
+	# Sort queue by distance periodically (not every frame - too expensive)
+	var current_frame := Engine.get_frames_drawn()
+	if current_frame - _queue_sort_frame >= QUEUE_SORT_INTERVAL:
+		_queue_sort_frame = current_frame
+		_sort_queue_by_distance()
 
 	var start_time := Time.get_ticks_usec()
 	var budget_usec := budget_ms * 1000.0
@@ -838,6 +1137,17 @@ func process_async_instantiation(budget_ms: float) -> int:
 
 		var request: AsyncCellRequest = _async_requests[request_id]
 
+		# CRITICAL: Check if cell_node is still valid (cell may have been unloaded)
+		# This prevents crash when camera moves and cell is freed mid-instantiation
+		if not is_instance_valid(request.cell_node):
+			# Cell was unloaded, skip remaining items for this request
+			request.pending_instantiations -= 1
+			if _is_request_complete(request):
+				request.completed = true
+				request.failed = true
+				request.error_message = "Cell node freed during instantiation"
+			continue
+
 		# Decrement pending count
 		request.pending_instantiations -= 1
 
@@ -851,9 +1161,13 @@ func process_async_instantiation(budget_ms: float) -> int:
 		_diag_duplicate_count += 1
 
 		if obj:
-			# Queue for batch add_child instead of immediate
-			pending_children.append({"parent": request.cell_node, "child": obj})
-			instantiated += 1
+			# Double-check parent is still valid before queuing (defensive)
+			if is_instance_valid(request.cell_node):
+				pending_children.append({"parent": request.cell_node, "child": obj})
+				instantiated += 1
+			else:
+				# Parent was freed, clean up the orphan object
+				obj.queue_free()
 
 		# Check if this was the last reference
 		if _is_request_complete(request):
@@ -868,6 +1182,22 @@ func process_async_instantiation(budget_ms: float) -> int:
 		if is_instance_valid(parent) and is_instance_valid(child):
 			parent.add_child(child)
 	return instantiated
+
+
+## Sort instantiation queue by distance to camera (nearest first)
+## Uses squared distance for performance (avoids sqrt)
+func _sort_queue_by_distance() -> void:
+	if _instantiation_queue.size() < 2:
+		return
+
+	var cam_pos := _camera_position
+	_instantiation_queue.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var pos_a: Vector3 = a.get("position", Vector3.ZERO)
+		var pos_b: Vector3 = b.get("position", Vector3.ZERO)
+		var dist_sq_a := cam_pos.distance_squared_to(pos_a)
+		var dist_sq_b := cam_pos.distance_squared_to(pos_b)
+		return dist_sq_a < dist_sq_b  # Nearest first
+	)
 
 
 ## Internal: Start an async request
@@ -931,15 +1261,28 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 			_queue_instantiation(request.request_id, ref, model_path, item_id)
 			continue
 
-		# Check disk cache - if available, load synchronously (fast! 1-5ms)
+		# Check disk cache - if available, start ASYNC load (non-blocking!)
 		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, item_id):
-			var prototype := _model_loader.get_model(model_path, item_id)
-			if prototype:
-				disk_cache_hits += 1
-				_queue_instantiation(request.request_id, ref, model_path, item_id)
-				continue
+			# Track this reference as waiting for the model
+			if model_path not in request.pending_disk_loads:
+				request.pending_disk_loads[model_path] = []
+			request.pending_disk_loads[model_path].append({"ref": ref, "item_id": item_id})
 
-		# Need to load this model from BSA + convert NIF
+			# Start async load (or add callback to existing load)
+			# request_model_async handles deduplication internally
+			var callback := _make_disk_load_callback(request.request_id, model_path, item_id)
+			_model_loader.request_model_async(model_path, item_id, callback)
+			disk_cache_hits += 1
+			continue
+
+		# RUNTIME MODE: Skip models not in disk cache - they must be prebaked
+		# No NIF conversion at runtime - only prebaking does conversion
+		if _model_loader.runtime_mode:
+			# Model not prebaked - skip this reference silently
+			# (The prebaking UI will show which models are missing)
+			continue
+
+		# PREBAKING MODE ONLY: Need to load this model from BSA + convert NIF
 		if model_path not in models_to_load:
 			models_to_load[model_path] = {"item_ids": []}
 		var item_ids_array: Array = models_to_load[model_path].item_ids
@@ -969,26 +1312,32 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 
 
 ## Internal: Submit a NIF parse task to background processor
-func _submit_parse_task(model_path: String, item_id: String, request_id: int) -> int:
-	# Build full path
+## BSA extraction now happens ON THE WORKER THREAD to avoid main thread stalls
+func _submit_parse_task(model_path: String, item_id: String, _request_id: int) -> int:
+	# Build full path (this is just string manipulation, fast)
 	var full_path := model_path
 	if not model_path.to_lower().begins_with("meshes"):
 		full_path = "meshes\\" + model_path
 
-	# Extract from BSA (this is I/O but relatively fast)
-	var nif_data := PackedByteArray()
+	# Check if file exists BEFORE submitting task (fast metadata check)
+	# This avoids submitting tasks for non-existent files
+	var actual_path := ""
 	if BSAManager.has_file(full_path):
-		nif_data = BSAManager.extract_file(full_path)
+		actual_path = full_path
 	elif BSAManager.has_file(model_path):
-		nif_data = BSAManager.extract_file(model_path)
-		full_path = model_path
+		actual_path = model_path
 
-	if nif_data.is_empty():
+	if actual_path.is_empty():
 		return -1
 
-	# Submit parse task
+	# Submit task that does BOTH extraction AND parsing on worker thread
+	# This moves the expensive I/O off the main thread entirely
 	var task_id: int = _background_processor.call("submit_task", func() -> Variant:
-		return NIFConverter.parse_buffer_only(nif_data, full_path, item_id)
+		# BSA extraction now happens on worker thread!
+		var nif_data: PackedByteArray = BSAManager.extract_file(actual_path)
+		if nif_data.is_empty():
+			return null
+		return NIFConverter.parse_buffer_only(nif_data, actual_path, item_id)
 	)
 
 	return task_id
@@ -1068,7 +1417,48 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 
 ## Internal: Check if an async request is complete
 func _is_request_complete(request: AsyncCellRequest) -> bool:
-	return request.pending_parses.is_empty() and request.references_to_process.is_empty() and request.pending_instantiations <= 0
+	return request.pending_parses.is_empty() and request.pending_disk_loads.is_empty() and request.references_to_process.is_empty() and request.pending_instantiations <= 0
+
+
+## Internal: Create a callback for async disk load completion
+## This is called when ModelLoader finishes loading a model from disk cache
+func _make_disk_load_callback(request_id: int, model_path: String, _item_id: String) -> Callable:
+	return func(loaded_model_path: String, loaded_item_id: String, model: Node3D) -> void:
+		_on_disk_load_completed(request_id, loaded_model_path, loaded_item_id, model)
+
+
+## Internal: Handle async disk load completion
+func _on_disk_load_completed(request_id: int, model_path: String, item_id: String, _model: Node3D) -> void:
+	if request_id not in _async_requests:
+		return  # Request was cancelled
+
+	var request: AsyncCellRequest = _async_requests[request_id]
+
+	# Check if cell_node is still valid (cell may have been unloaded)
+	if not is_instance_valid(request.cell_node):
+		request.pending_disk_loads.erase(model_path)
+		if _is_request_complete(request):
+			request.completed = true
+			request.failed = true
+			request.error_message = "Cell node freed during disk load"
+		return
+
+	# Get all references waiting for this model
+	if model_path not in request.pending_disk_loads:
+		return
+
+	var waiting_refs: Array = request.pending_disk_loads[model_path]
+	request.pending_disk_loads.erase(model_path)
+
+	# Queue all waiting references for instantiation
+	for ref_info: Dictionary in waiting_refs:
+		var ref: CellReference = ref_info.ref
+		var ref_item_id: String = ref_info.item_id
+		_queue_instantiation(request_id, ref, model_path, ref_item_id)
+
+	# Check if request is now complete
+	if _is_request_complete(request):
+		request.completed = true
 
 
 ## Helper methods delegated to ReferenceInstantiator
@@ -1153,17 +1543,22 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 
 
 ## Internal: Queue an object for instantiation with limit checking
+## Includes object position for distance-priority sorting
 func _queue_instantiation(request_id: int, ref: CellReference, model_path: String, item_id: String) -> bool:
 	# Check queue limit to prevent memory buildup
 	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
 		push_warning("CellManager: Instantiation queue full (%d items), dropping object" % MAX_INSTANTIATION_QUEUE)
 		return false
 
+	# Get object position for distance-priority sorting
+	var position := CS.vector_to_godot(ref.position)
+
 	_instantiation_queue.append({
 		"request_id": request_id,
 		"ref": ref,
 		"model_path": model_path,
-		"item_id": item_id
+		"item_id": item_id,
+		"position": position
 	})
 
 	# Track pending instantiation count for completion checking
@@ -1193,3 +1588,16 @@ func get_async_pending_count() -> int:
 ## Get total objects waiting in instantiation queue
 func get_instantiation_queue_size() -> int:
 	return _instantiation_queue.size()
+
+
+## Clean up significant objects in a cell when it's unloaded
+## Called by WorldStreamingManager when unloading cells
+## Returns number of objects unregistered
+func cleanup_cell_significant_objects(cell_grid: Vector2i) -> int:
+	if not _object_distance_manager:
+		return 0
+
+	if not _object_distance_manager.has_method("unregister_cell"):
+		return 0
+
+	return _object_distance_manager.unregister_cell(cell_grid)

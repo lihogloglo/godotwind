@@ -57,6 +57,7 @@ func load_terrain_textures(terrain_assets: Terrain3DAssets) -> int:
 
 	# Load textures for used indices (limit to 31 since slot 0 is default)
 	var loaded := 0
+	var first_texture_name := ""
 	for mw_index: int in unique_indices:
 		if mw_index == 0:
 			continue  # Skip default texture index
@@ -65,11 +66,26 @@ func load_terrain_textures(terrain_assets: Terrain3DAssets) -> int:
 			push_warning("TerrainTextureLoader: Maximum texture slots reached (32)")
 			break
 
+		var ltex_name := ""
 		if _load_ltex_texture(terrain_assets, mw_index):
+			if loaded == 0:
+				# Get the first texture name for condensed logging
+				var ltex_index := mw_index - 1
+				var ltex: LandTextureRecord = _find_ltex_by_index(ltex_index)
+				if ltex:
+					first_texture_name = ltex.texture_path
 			loaded += 1
 
 	_stats["textures_loaded"] = loaded
-	print("TerrainTextureLoader: Loaded %d textures (%d failed)" % [loaded, _stats["textures_failed"]])
+
+	# Condensed logging
+	if loaded > 0:
+		if loaded == 1:
+			print("TerrainTextureLoader: Loaded '%s' (MW idx -> slot)" % first_texture_name)
+		else:
+			print("TerrainTextureLoader: Loaded '%s' and %d more textures (%d failed)" % [first_texture_name, loaded - 1, _stats["textures_failed"]])
+	else:
+		print("TerrainTextureLoader: No textures loaded (%d failed)" % _stats["textures_failed"])
 
 	return loaded
 
@@ -199,7 +215,7 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 	_texture_assets[mw_index] = asset
 	_next_slot += 1
 
-	print("TerrainTextureLoader: Loaded '%s' (MW idx %d) -> slot %d" % [ltex.texture_path, mw_index, slot])
+	# Verbose logging removed - use print_debug_summary() for details if needed
 	return true
 
 

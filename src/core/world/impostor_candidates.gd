@@ -17,6 +17,7 @@
 class_name ImpostorCandidates
 extends RefCounted
 
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 ## Impostor generation settings
 const DEFAULT_SETTINGS: Dictionary = {
@@ -24,8 +25,8 @@ const DEFAULT_SETTINGS: Dictionary = {
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
 	"optimize_size": true,     # Compress texture
-	"min_distance": 500.0,     # Start showing impostor at 500m (matches FAR tier start)
-	"max_distance": 5000.0,    # Stop showing at 5km
+	"min_distance": DU.FAR_START,  # Start showing at FAR tier (500m)
+	"max_distance": DU.FAR_END,    # Stop showing at FAR end (5km)
 }
 
 ## High-priority landmark patterns (matched against actual BSA files)
@@ -85,6 +86,16 @@ const LARGE_BUILDING_PATTERNS: Array[String] = [
 	"windmill",
 	"watchtower",
 	"ex_ashl_tower",
+	# Common buildings (Seyda Neen, etc.)
+	"ex_common_house",
+	"ex_common_warehouse",
+	"ex_common_tower",
+	"ex_common_",  # Catch-all for common exterior buildings
+	# Nordic buildings
+	"ex_nord_",
+	# Wooden docks and platforms
+	"ex_de_dock",
+	"ex_de_shack",
 ]
 
 ## Large rock formations visible from distance

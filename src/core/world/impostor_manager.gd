@@ -20,9 +20,20 @@ extends Node3D
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+const BackgroundJobSystemScript := preload("res://src/core/threading/background_job_system.gd")
 
 ## Reference to ImpostorCandidates for checking impostor eligibility
 var impostor_candidates: ImpostorCandidates = null
+
+## Reference to ObjectStreamer for LOD-Impostor crossfade coordination
+var object_streamer: RefCounted = null
+
+## **UNIFIED VISIBILITY**: Reference to DistanceTierManager for visibility authority
+var _distance_tier_manager: RefCounted = null
+
+## Track impostors managed by LOD system (currently in LOD3-Impostor transition)
+## object_id -> impostor_id mapping
+var _lod_managed_impostors: Dictionary = {}
 
 ## World scenario RID
 var _scenario: RID = RID()
@@ -51,10 +62,11 @@ var _impostors: Dictionary = {}
 ## Used for O(1) cell-based visibility culling
 var _impostors_by_cell: Dictionary = {}
 
-## Visible cells cache (updated when camera moves significantly)
-var _visible_cells: Dictionary = {}  # Vector2i -> true
-var _last_visibility_check_pos: Vector3 = Vector3.INF  # INF ensures first check always runs
-var _visibility_check_threshold: float = 25.0  # Re-check every 25 meters (more responsive)
+## **UNIFIED VISIBILITY**: Cached visible cells from DistanceTierManager (FAR tier cells)
+## Updated by update_visibility() which queries the authority
+var _cached_visible_cells: Dictionary = {}  # Vector2i -> true
+## REMOVED: _last_visibility_check_pos - no longer needed, tier manager handles updates
+## REMOVED: _visibility_check_threshold - no longer needed, tier manager handles updates
 
 ## Next impostor ID
 var _next_id: int = 0
@@ -70,12 +82,19 @@ var _all_array_images: Array[Image] = []  # Keep all images in memory for rebuil
 var _texture_array_size: int = 0
 const MAX_TEXTURE_ARRAY_LAYERS: int = 512  # Increased from 256 - most GPUs support this
 
-## Background texture loading thread
+## Background job system for texture loading
+var _job_system: RefCounted = null  # BackgroundJobSystem
+var _pending_job_ids: Dictionary = {}  # hash_key -> job_id
+
+## Legacy thread variables (kept for migration, will be removed)
 var _texture_load_thread: Thread = null
 var _texture_load_mutex: Mutex = null
 var _texture_load_queue: Array = []  # Array of {hash_key: String, path: String}
 var _loaded_images_queue: Array = []  # Thread-safe results: {hash_key: String, image: Image}
 var _thread_should_exit: bool = false
+
+## Use new job system instead of legacy thread (set to true after testing)
+var _use_job_system: bool = true
 
 ## Texture array rebuild batching - wait for loading to stabilize before rebuilding
 var _last_texture_add_time: float = 0.0
@@ -112,11 +131,15 @@ var _missing_texture_count: int = 0
 var _dirty_cells: Dictionary = {}  # Vector2i -> true (cells needing rebuild)
 var _full_rebuild_needed: bool = false
 var _rebuild_timer: float = 0.0
-const REBUILD_DELAY: float = 0.05  # Batch rebuilds over 50ms
+const REBUILD_DELAY: float = 0.1  # Batch rebuilds over 100ms (was 50ms)
 
-## Distance thresholds (cached from tier manager)
-var _min_distance_sq: float = 250000.0  # 500m squared
-var _max_distance_sq: float = 25000000.0  # 5000m squared
+## Throttle rebuilds to prevent per-frame stutter
+var _last_rebuild_time: float = 0.0
+const MIN_REBUILD_INTERVAL: float = 0.25  # Max 4 rebuilds per second (was unlimited)
+
+## Distance thresholds from DistanceUtils (single source of truth)
+var _min_distance_sq: float = DU.MID_END * DU.MID_END  # 500m squared
+var _max_distance_sq: float = DU.FAR_END * DU.FAR_END  # 5000m squared
 
 
 ## Pending impostor data (waiting for texture)
@@ -141,22 +164,135 @@ class ImpostorInstance:
 	var cell_grid: Vector2i
 	var visible: bool = true
 	var texture_size: Vector2
+	var fade_amount: float = 1.0  # For LOD crossfade (0.0=invisible, 1.0=fully visible)
+	var lod_object_id: int = -1   # Linked LOD object ID (-1 if not LOD-managed)
 
 
 func _enter_tree() -> void:
 	_scenario = get_viewport().get_world_3d().scenario
 	_setup_master_multimesh()
 	_setup_billboard_material()
-	_start_texture_load_thread()
+	_start_background_loading()
 	# Start hidden - visibility controlled by Models toggle in world_explorer
 	if _master_instance:
 		_master_instance.visible = false
 
 
 func _exit_tree() -> void:
-	_stop_texture_load_thread()
+	_stop_background_loading()
 	clear()
 
+
+## Start background loading system (job system or legacy thread)
+func _start_background_loading() -> void:
+	if _use_job_system:
+		_start_job_system()
+	else:
+		_start_texture_load_thread()
+
+
+## Stop background loading system
+func _stop_background_loading() -> void:
+	if _use_job_system:
+		_stop_job_system()
+	else:
+		_stop_texture_load_thread()
+
+
+#region Job System (New)
+
+## Start the background job system for texture loading
+func _start_job_system() -> void:
+	if _job_system != null:
+		return
+
+	_job_system = BackgroundJobSystemScript.new()
+	# Use 2 worker threads for texture I/O (more than that doesn't help disk-bound work)
+	var err: Error = _job_system.start(2)
+	if err != OK:
+		push_error("ImpostorManager: Failed to start job system")
+		_job_system = null
+		# Fall back to legacy thread
+		_use_job_system = false
+		_start_texture_load_thread()
+		return
+
+	if debug_enabled:
+		print("ImpostorManager: Job system started with 2 workers")
+
+
+## Stop the job system
+func _stop_job_system() -> void:
+	if _job_system == null:
+		return
+
+	_job_system.stop()
+	_job_system = null
+	_pending_job_ids.clear()
+
+
+## Submit a texture load job to the job system
+func _submit_texture_load_job(hash_key: String, texture_path: String) -> void:
+	if _job_system == null:
+		return
+
+	# Create a job that loads the image from disk
+	# IMPORTANT: This callable runs on a worker thread - must be thread-safe!
+	var load_callable := func() -> Dictionary:
+		var image := Image.new()
+		var err := image.load(texture_path)
+		if err == OK:
+			return {"hash_key": hash_key, "image": image, "success": true}
+		else:
+			return {"hash_key": hash_key, "image": null, "success": false, "error": err}
+
+	var job_id: int = _job_system.submit(load_callable, "texture", 0)
+	if job_id >= 0:
+		_pending_job_ids[hash_key] = job_id
+
+
+## Poll job system for completed texture loads
+func _poll_job_system_results() -> void:
+	if _job_system == null:
+		return
+
+	# Process up to 10 results per frame
+	var results: Array = _job_system.poll_results(10)
+
+	for result in results:
+		if result.status != BackgroundJobSystemScript.JobStatus.COMPLETED:
+			# Job failed or was cancelled
+			var hash_key_to_remove := ""
+			for hk: String in _pending_job_ids:
+				if _pending_job_ids[hk] == result.job_id:
+					hash_key_to_remove = hk
+					break
+			if not hash_key_to_remove.is_empty():
+				_pending_job_ids.erase(hash_key_to_remove)
+				_pending_impostors.erase(hash_key_to_remove)
+			continue
+
+		# Extract result data
+		var data: Dictionary = result.result
+		if data == null or not data.get("success", false):
+			continue
+
+		var hash_key: String = data.get("hash_key", "")
+		var image: Image = data.get("image")
+
+		if hash_key.is_empty() or image == null:
+			continue
+
+		# Remove from pending tracking
+		_pending_job_ids.erase(hash_key)
+
+		# Process the loaded texture
+		_on_texture_loaded(hash_key, image)
+
+#endregion
+
+
+#region Legacy Thread System (for fallback)
 
 ## Start the background texture loading thread
 func _start_texture_load_thread() -> void:
@@ -217,6 +353,8 @@ func _texture_load_worker() -> void:
 			})
 			_texture_load_mutex.unlock()
 
+#endregion
+
 
 var _process_log_counter: int = 0
 var _textures_loaded_this_frame: int = 0
@@ -225,19 +363,30 @@ const TEXTURES_PER_FRAME: int = 10  # Process up to 10 loaded textures per frame
 var _first_process_logged: bool = false
 
 func _process(delta: float) -> void:
-	# Poll for textures loaded by background thread (non-blocking)
-	_poll_loaded_images_from_thread()
+	# Poll for textures loaded by background system (non-blocking)
+	if _use_job_system:
+		_poll_job_system_results()
+	else:
+		_poll_loaded_images_from_thread()
 
 	# Rebuild texture array if dirty AND enough time has passed since last texture add
 	# This batches multiple texture additions into a single rebuild
 	if _texture_array_dirty:
 		var time_since_last_add := Time.get_ticks_msec() / 1000.0 - _last_texture_add_time
-		# Check if there are still textures being loaded (in pending dict OR thread queue)
+		# Check if there are still textures being loaded
 		var still_loading := not _pending_texture_loads.is_empty() or not _pending_impostors.is_empty()
-		if _texture_load_mutex:
-			_texture_load_mutex.lock()
-			still_loading = still_loading or not _texture_load_queue.is_empty() or not _loaded_images_queue.is_empty()
-			_texture_load_mutex.unlock()
+
+		if _use_job_system:
+			# Check job system for pending work
+			if _job_system != null:
+				still_loading = still_loading or _job_system.get_queue_size() > 0 or _job_system.get_active_count() > 0 or _job_system.get_pending_result_count() > 0
+		else:
+			# Check legacy thread queue
+			if _texture_load_mutex:
+				_texture_load_mutex.lock()
+				still_loading = still_loading or not _texture_load_queue.is_empty() or not _loaded_images_queue.is_empty()
+				_texture_load_mutex.unlock()
+
 		if time_since_last_add >= TEXTURE_ARRAY_REBUILD_DELAY or not still_loading:
 			_rebuild_texture_array()
 
@@ -253,9 +402,15 @@ func _process(delta: float) -> void:
 			_rebuild_timer += delta
 			# Use shorter delay during active loading for progressive display
 			var rebuild_delay := REBUILD_DELAY if _pending_texture_loads.is_empty() else 0.2
-			if _rebuild_timer >= rebuild_delay:
+
+			# Additional throttle: don't rebuild more than MIN_REBUILD_INTERVAL apart
+			var current_time := Time.get_ticks_msec() / 1000.0
+			var time_since_last_rebuild := current_time - _last_rebuild_time
+
+			if _rebuild_timer >= rebuild_delay and time_since_last_rebuild >= MIN_REBUILD_INTERVAL:
 				_rebuild_multimesh()
 				_rebuild_timer = 0.0
+				_last_rebuild_time = current_time
 
 
 ## Poll for images loaded by the background thread and process them
@@ -323,6 +478,7 @@ func _setup_billboard_material() -> void:
 
 
 ## Simplified working shader - proven to work in test_impostor_minimal.gd
+## Extended with LOD crossfade support using screen-door dithering
 func _get_optimized_shader_code() -> String:
 	return """
 shader_type spatial;
@@ -334,10 +490,27 @@ uniform int atlas_rows = 4;
 
 varying vec3 view_direction;
 varying flat float texture_layer;
+varying flat float fade_amount;
+
+// 4x4 Bayer dither matrix for screen-door fade (matches lod_crossfade.gdshader)
+const float BAYER_MATRIX[16] = float[16](
+	0.0 / 16.0,  8.0 / 16.0,  2.0 / 16.0, 10.0 / 16.0,
+	12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0,  6.0 / 16.0,
+	3.0 / 16.0, 11.0 / 16.0,  1.0 / 16.0,  9.0 / 16.0,
+	15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0,  5.0 / 16.0
+);
+
+float get_bayer_threshold(ivec2 screen_pos) {
+	int x = screen_pos.x % 4;
+	int y = screen_pos.y % 4;
+	return BAYER_MATRIX[y * 4 + x];
+}
 
 void vertex() {
-	// Get texture layer from instance custom data
+	// Get texture layer and fade amount from instance custom data
+	// x = texture layer, y = fade amount (0.0-1.0)
 	texture_layer = INSTANCE_CUSTOM.x;
+	fade_amount = INSTANCE_CUSTOM.y;
 
 	// Calculate view direction
 	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
@@ -387,6 +560,15 @@ void fragment() {
 		discard;
 	}
 
+	// Screen-door dithering for LOD crossfade
+	// When fade_amount = 1.0, all pixels pass (fully visible)
+	// When fade_amount = 0.0, no pixels pass (invisible)
+	ivec2 screen_pos = ivec2(FRAGCOORD.xy);
+	float dither_threshold = get_bayer_threshold(screen_pos);
+	if (dither_threshold >= fade_amount) {
+		discard;
+	}
+
 	ALBEDO = tex.rgb;
 }
 """
@@ -395,6 +577,76 @@ void fragment() {
 ## Set the impostor candidates reference
 func set_impostor_candidates(candidates: ImpostorCandidates) -> void:
 	impostor_candidates = candidates
+
+
+## Set the ObjectStreamer for LOD-Impostor crossfade coordination
+func set_object_streamer(manager: RefCounted) -> void:
+	object_streamer = manager
+
+## Legacy alias for compatibility
+func set_object_distance_manager(manager: RefCounted) -> void:
+	set_object_streamer(manager)
+
+## **UNIFIED VISIBILITY**: Set the DistanceTierManager for visibility authority
+func set_distance_tier_manager(manager: RefCounted) -> void:
+	_distance_tier_manager = manager
+
+
+#region LOD Crossfade Coordination
+
+## Register an impostor as managed by the LOD system
+## Called by ObjectStreamer when starting MID-FAR transition
+func register_lod_managed_impostor(lod_object_id: int, impostor_id: int) -> void:
+	if impostor_id not in _impostors:
+		return
+	_lod_managed_impostors[lod_object_id] = impostor_id
+	var impostor: ImpostorInstance = _impostors[impostor_id]
+	impostor.lod_object_id = lod_object_id
+
+
+## Unregister an impostor from LOD management
+## Called when transition completes or object is unregistered
+func unregister_lod_managed_impostor(lod_object_id: int) -> void:
+	if lod_object_id not in _lod_managed_impostors:
+		return
+	var impostor_id: int = _lod_managed_impostors[lod_object_id]
+	if impostor_id in _impostors:
+		var impostor: ImpostorInstance = _impostors[impostor_id]
+		impostor.lod_object_id = -1
+		impostor.fade_amount = 1.0  # Reset to fully visible
+	_lod_managed_impostors.erase(lod_object_id)
+
+
+## Set the fade amount for a LOD-managed impostor
+## amount: 0.0 = invisible, 1.0 = fully visible
+## Returns true if successfully updated
+func set_lod_impostor_fade(lod_object_id: int, amount: float) -> bool:
+	if lod_object_id not in _lod_managed_impostors:
+		return false
+	var impostor_id: int = _lod_managed_impostors[lod_object_id]
+	if impostor_id not in _impostors:
+		return false
+	var impostor: ImpostorInstance = _impostors[impostor_id]
+	impostor.fade_amount = clampf(amount, 0.0, 1.0)
+	# Mark cell dirty to update multimesh
+	_dirty_cells[impostor.cell_grid] = true
+	return true
+
+
+## Get the impostor ID for a LOD-managed object
+## Returns -1 if not found
+func get_lod_impostor_id(lod_object_id: int) -> int:
+	return _lod_managed_impostors.get(lod_object_id, -1)
+
+
+## Check if an impostor is LOD-managed
+func is_lod_managed(impostor_id: int) -> bool:
+	if impostor_id not in _impostors:
+		return false
+	var impostor: ImpostorInstance = _impostors[impostor_id]
+	return impostor.lod_object_id >= 0
+
+#endregion
 
 
 ## Add an impostor for a model at a specific world position
@@ -476,9 +728,26 @@ func _queue_pending_impostor(hash_key: String, model_path: String, pos: Vector3,
 	(_pending_impostors[hash_key] as Array).append(pending)
 
 
-## Queue pending texture loads to the background thread
+## Queue pending texture loads to the background system
 ## Called when add_impostor discovers a texture needs loading
 func _queue_texture_for_background_load(hash_key: String, texture_path: String) -> void:
+	# Use job system if enabled
+	if _use_job_system:
+		if _job_system != null:
+			_submit_texture_load_job(hash_key, texture_path)
+			_pending_texture_loads.erase(hash_key)
+		else:
+			# Fallback to synchronous load if job system not available
+			var image := Image.new()
+			if image.load(texture_path) == OK:
+				_on_texture_loaded(hash_key, image)
+			else:
+				print("[ImpostorManager] Fallback load failed for %s" % texture_path.get_file())
+				_pending_impostors.erase(hash_key)
+			_pending_texture_loads.erase(hash_key)
+		return
+
+	# Legacy thread system
 	if _texture_load_mutex == null:
 		# Fallback to synchronous load if thread not available
 		var image := Image.new()
@@ -644,8 +913,8 @@ func _create_impostor_instance(
 	if cell_grid not in _impostors_by_cell:
 		_impostors_by_cell[cell_grid] = []
 		_stats["cells_with_impostors"] = _impostors_by_cell.size()
-		# New cells default to visible (will be culled by update_impostor_visibility if out of range)
-		_visible_cells[cell_grid] = true
+		# New cells default to visible (will be culled by update_visibility if out of range)
+		_cached_visible_cells[cell_grid] = true
 	(_impostors_by_cell[cell_grid] as Array).append(impostor.id)
 
 	# Update stats
@@ -655,9 +924,7 @@ func _create_impostor_instance(
 	# Mark cell as dirty for rebuild
 	_dirty_cells[cell_grid] = true
 
-	# Force visibility update on first impostor to ensure proper distance culling
-	if _impostors.size() == 1:
-		_last_visibility_check_pos = Vector3.INF
+	# Note: Visibility will be updated by WorldStreamingManager calling update_visibility()
 
 	return impostor.id
 
@@ -765,70 +1032,71 @@ func remove_impostors_for_cell(cell_grid: Vector2i) -> void:
 	_full_rebuild_needed = true
 
 
-## Update visibility for impostors based on camera distance
-## Uses cell-based spatial culling for O(visible cells) complexity
-func update_impostor_visibility(camera_pos: Vector3, min_distance: float, max_distance: float) -> int:
-	# Cache squared distances
-	_min_distance_sq = min_distance * min_distance
-	_max_distance_sq = max_distance * max_distance
-
-	# Check if we need to recalculate visible cells
-	# Note: _last_visibility_check_pos starts as INF, so first call always passes
-	var dist_moved := camera_pos.distance_squared_to(_last_visibility_check_pos)
-	var threshold_sq := _visibility_check_threshold * _visibility_check_threshold
-
-	# Also force update if we have impostors but no visible cells (initial state)
-	var needs_initial_update := not _impostors_by_cell.is_empty() and _visible_cells.is_empty()
-
-	if dist_moved < threshold_sq and not needs_initial_update:
-		return 0  # Haven't moved enough, skip update
-
-	_last_visibility_check_pos = camera_pos
-
-	# Update visible cells based on distance
+## **UNIFIED VISIBILITY**: Update impostor visibility from DistanceTierManager
+## Replaces manual distance calculations with queries to the visibility authority
+## No parameters needed - queries FAR tier cells from DistanceTierManager
+func update_visibility() -> int:
 	var changes: int = 0
-	var new_visible_cells: Dictionary = {}
 
-	# Only check cells that have impostors
-	for cell_grid: Vector2i in _impostors_by_cell:
-		# Calculate cell center distance using centralized utility
-		var cell_center := DU.cell_to_world_center(cell_grid, camera_pos.y)
-		var dist_sq := camera_pos.distance_squared_to(cell_center)
+	# **UNIFIED VISIBILITY**: Query FAR tier cells from authority
+	if _distance_tier_manager:
+		var far_cells: Array[Vector2i] = _distance_tier_manager.get_cells_for_tier(
+			Vector2i.ZERO,  # camera_cell not needed - tier manager already knows
+			DU.Tier.FAR  # Impostors are in FAR tier
+		)
 
-		var cell_visible := dist_sq >= _min_distance_sq and dist_sq <= _max_distance_sq
-
-		if cell_visible:
+		# Convert to visibility dictionary
+		var new_visible_cells: Dictionary = {}
+		for cell_grid in far_cells:
 			new_visible_cells[cell_grid] = true
 
-		# Check if visibility changed for this cell
-		var was_visible: bool = cell_grid in _visible_cells
-		if cell_visible != was_visible:
-			# Update all impostors in this cell
-			var cell_impostors: Array = _impostors_by_cell[cell_grid]
-			for impostor_id: int in cell_impostors:
-				var impostor: Variant = _impostors.get(impostor_id)
-				if impostor != null:
-					impostor.visible = cell_visible
-					changes += 1
+		# Detect changes and update impostors
+		for cell_grid: Vector2i in _impostors_by_cell:
+			var was_visible: bool = cell_grid in _cached_visible_cells
+			var is_visible: bool = cell_grid in new_visible_cells
 
-			# Mark cell as dirty
-			_dirty_cells[cell_grid] = true
+			if was_visible != is_visible:
+				# Update all impostors in this cell
+				var cell_impostors: Array = _impostors_by_cell[cell_grid]
+				for impostor_id: int in cell_impostors:
+					var impostor: Variant = _impostors.get(impostor_id)
+					if impostor != null:
+						# Skip LOD-managed impostors - ObjectStreamer controls their visibility
+						if impostor.lod_object_id >= 0:
+							continue
 
-	_visible_cells = new_visible_cells
+						impostor.visible = is_visible
+						changes += 1
 
-	# Update stats
-	var visible_count: int = 0
-	for cell_grid: Vector2i in _visible_cells:
-		var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
-		if cell_arr != null:
-			visible_count += (cell_arr as Array).size()
-	_stats["visible_impostors"] = visible_count
+				# Mark cell as dirty
+				_dirty_cells[cell_grid] = true
+
+		_cached_visible_cells = new_visible_cells
+
+		# Update stats
+		var visible_count: int = 0
+		for cell_grid: Vector2i in _cached_visible_cells:
+			var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
+			if cell_arr != null:
+				visible_count += (cell_arr as Array).size()
+		_stats["visible_impostors"] = visible_count
+
+	else:
+		# Fallback: No tier manager available - show all impostors
+		push_warning("[ImpostorManager] No DistanceTierManager - showing all impostors")
+		for cell_grid in _impostors_by_cell:
+			_cached_visible_cells[cell_grid] = true
+		_stats["visible_impostors"] = _impostors.size()
 
 	return changes
 
 
 ## Track first multimesh rebuild for one-time diagnostic
 var _first_multimesh_rebuild_logged: bool = false
+
+## Throttle debug logging to reduce spam
+var _last_debug_log_time: float = 0.0
+const DEBUG_LOG_INTERVAL: float = 2.0  # Only log every 2 seconds
 
 ## Rebuild the master MultiMesh with current impostor data
 func _rebuild_multimesh() -> void:
@@ -843,14 +1111,19 @@ func _rebuild_multimesh() -> void:
 		for impostor_id: int in cell_impostors:
 			var impostor: Variant = _impostors.get(impostor_id)
 			if impostor != null and impostor.visible:
+				# LOD-managed impostors: Include but use their LOD-controlled fade amount
+				# Standalone impostors: Always fully visible (fade_amount = 1.0)
 				visible_impostors.append(impostor)
 
 	# Resize MultiMesh
 	var count := visible_impostors.size()
 
 	if debug_enabled:
-		print("ImpostorManager: _rebuild_multimesh - total=%d, visible_cells=%d, visible_impostors=%d, texture_layers=%d" % [
-			_impostors.size(), _visible_cells.size(), count, _texture_array_size])
+		var current_time := Time.get_ticks_msec() / 1000.0
+		if current_time - _last_debug_log_time >= DEBUG_LOG_INTERVAL:
+			_last_debug_log_time = current_time
+			print("ImpostorManager: _rebuild_multimesh - total=%d, visible_cells=%d, visible_impostors=%d, texture_layers=%d" % [
+				_impostors.size(), _visible_cells.size(), count, _texture_array_size])
 
 	if count == 0:
 		_master_multimesh.instance_count = 0
@@ -881,8 +1154,8 @@ func _rebuild_multimesh() -> void:
 
 		_master_multimesh.set_instance_transform(i, xform)
 
-		# Set custom data (texture layer index)
-		_master_multimesh.set_instance_custom_data(i, Color(float(impostor.texture_index), 0, 0, 1))
+		# Set custom data: x = texture layer index, y = fade amount (for LOD crossfade)
+		_master_multimesh.set_instance_custom_data(i, Color(float(impostor.texture_index), impostor.fade_amount, 0, 1))
 
 	_dirty_cells.clear()
 	_full_rebuild_needed = false
@@ -920,9 +1193,9 @@ func set_all_visible(is_visible: bool) -> void:
 
 	for cell_grid: Vector2i in _impostors_by_cell:
 		if is_visible:
-			_visible_cells[cell_grid] = true
+			_cached_visible_cells[cell_grid] = true
 		else:
-			_visible_cells.erase(cell_grid)
+			_cached_visible_cells.erase(cell_grid)
 
 		var cell_impostors: Array = _impostors_by_cell[cell_grid]
 		for impostor_id: int in cell_impostors:
@@ -936,8 +1209,7 @@ func set_all_visible(is_visible: bool) -> void:
 
 	if is_visible:
 		_stats["visible_impostors"] = _stats["total_impostors"]
-		# Force visibility re-check on next update to apply distance culling
-		_last_visibility_check_pos = Vector3.INF
+		# Visibility will be recalculated on next update_visibility() call
 	else:
 		_stats["visible_impostors"] = 0
 
@@ -948,7 +1220,7 @@ func set_all_visible(is_visible: bool) -> void:
 func clear() -> void:
 	_impostors.clear()
 	_impostors_by_cell.clear()
-	_visible_cells.clear()
+	_cached_visible_cells.clear()
 	_dirty_cells.clear()
 	_pending_impostors.clear()
 	_pending_texture_loads.clear()
@@ -959,7 +1231,12 @@ func clear() -> void:
 	_texture_array_size = 0
 	_texture_array = null
 
-	# Clear thread queues if thread is running
+	# Cancel pending jobs if using job system
+	if _use_job_system and _job_system != null:
+		_job_system.cancel_by_tag("texture")
+		_pending_job_ids.clear()
+
+	# Clear thread queues if thread is running (legacy)
 	if _texture_load_mutex:
 		_texture_load_mutex.lock()
 		_texture_load_queue.clear()
@@ -981,7 +1258,16 @@ func clear() -> void:
 
 ## Get statistics
 func get_stats() -> Dictionary:
-	return _stats.duplicate()
+	var stats := _stats.duplicate()
+
+	# Add job system stats if enabled
+	if _use_job_system and _job_system != null:
+		var job_stats: Dictionary = _job_system.get_stats()
+		stats["job_queue_size"] = job_stats.get("queue_size", 0)
+		stats["job_active_count"] = job_stats.get("active_jobs", 0)
+		stats["job_total_completed"] = job_stats.get("jobs_completed", 0)
+
+	return stats
 
 
 ## Check if a cell has impostors
