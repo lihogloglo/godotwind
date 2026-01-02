@@ -179,7 +179,9 @@ func bake_model_lods(model_path: String) -> Dictionary:
 
 		if lod_mesh:
 			var output_path := output_dir.path_join("%s_lod%d.res" % [model_hash, lod_level])
-			var err := ResourceSaver.save(lod_mesh, output_path)
+			# Use FLAG_BUNDLE_RESOURCES to embed textures directly in the .res file
+			# Without this flag, textures are saved as external references which may not load
+			var err := ResourceSaver.save(lod_mesh, output_path, ResourceSaver.FLAG_BUNDLE_RESOURCES)
 			if err == OK:
 				lods_created += 1
 			else:
@@ -251,10 +253,24 @@ func _create_lod_mesh(mesh_instances: Array[MeshInstance3D], target_ratio: float
 		if not source_mesh:
 			continue
 
+		# Get the material source: material_override takes priority, then surface materials
+		# NIF converter stores materials on material_override, not on mesh surfaces
+		var mesh_inst_material: Material = mesh_inst.material_override
+
 		for surf_idx in range(source_mesh.get_surface_count()):
 			var arrays: Array = source_mesh.surface_get_arrays(surf_idx)
 			if arrays.is_empty() or arrays[Mesh.ARRAY_VERTEX] == null:
 				continue
+
+			# Determine material for this surface:
+			# 1. MeshInstance3D.material_override (applies to all surfaces)
+			# 2. MeshInstance3D.get_surface_override_material(surf_idx)
+			# 3. mesh.surface_get_material(surf_idx)
+			var mat: Material = mesh_inst_material
+			if not mat:
+				mat = mesh_inst.get_surface_override_material(surf_idx)
+			if not mat:
+				mat = source_mesh.surface_get_material(surf_idx)
 
 			# Get original triangle count for comparison
 			var original_indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX] if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] else PackedInt32Array()
@@ -264,9 +280,9 @@ func _create_lod_mesh(mesh_instances: Array[MeshInstance3D], target_ratio: float
 			if original_tris < 4:
 				# Just copy as-is
 				result_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-				var mat: Material = source_mesh.surface_get_material(surf_idx)
 				if mat:
-					result_mesh.surface_set_material(surface_idx, mat.duplicate())
+					var dup_mat := _duplicate_material_with_textures(mat)
+					result_mesh.surface_set_material(surface_idx, dup_mat)
 				surface_idx += 1
 				continue
 
@@ -286,10 +302,10 @@ func _create_lod_mesh(mesh_instances: Array[MeshInstance3D], target_ratio: float
 			result_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, simplified)
 
 			# Copy and duplicate material to ensure it's saved with the resource
-			var mat: Material = source_mesh.surface_get_material(surf_idx)
 			if mat:
-				# Duplicate to make it a standalone resource that saves with the mesh
-				result_mesh.surface_set_material(surface_idx, mat.duplicate())
+				# Deep duplicate material with textures to make it fully standalone
+				var dup_mat := _duplicate_material_with_textures(mat)
+				result_mesh.surface_set_material(surface_idx, dup_mat)
 
 			surface_idx += 1
 
@@ -297,6 +313,36 @@ func _create_lod_mesh(mesh_instances: Array[MeshInstance3D], target_ratio: float
 		return null
 
 	return result_mesh
+
+
+## Duplicate a material and ensure all textures are embedded (not external references)
+## This is critical for LOD resources to be self-contained and loadable without original assets
+func _duplicate_material_with_textures(mat: Material) -> Material:
+	if mat is StandardMaterial3D:
+		var std_mat := mat as StandardMaterial3D
+		var dup := std_mat.duplicate() as StandardMaterial3D
+
+		# Duplicate all texture properties to make them local resources
+		# This ensures they get saved with FLAG_BUNDLE_RESOURCES
+		if std_mat.albedo_texture:
+			dup.albedo_texture = std_mat.albedo_texture.duplicate() if std_mat.albedo_texture else null
+		if std_mat.normal_texture:
+			dup.normal_texture = std_mat.normal_texture.duplicate() if std_mat.normal_texture else null
+		if std_mat.roughness_texture:
+			dup.roughness_texture = std_mat.roughness_texture.duplicate() if std_mat.roughness_texture else null
+		if std_mat.metallic_texture:
+			dup.metallic_texture = std_mat.metallic_texture.duplicate() if std_mat.metallic_texture else null
+		if std_mat.ao_texture:
+			dup.ao_texture = std_mat.ao_texture.duplicate() if std_mat.ao_texture else null
+		if std_mat.emission_texture:
+			dup.emission_texture = std_mat.emission_texture.duplicate() if std_mat.emission_texture else null
+
+		return dup
+	elif mat is ShaderMaterial:
+		# For shader materials, duplicate but we can't easily duplicate shader params
+		return mat.duplicate()
+	else:
+		return mat.duplicate()
 
 
 ## Check if all LODs are already cached for a model

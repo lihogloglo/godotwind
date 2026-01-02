@@ -103,6 +103,41 @@ func preload_model(model_path: String, count: int) -> void:
 	_preload_instances(entry, count)
 
 
+## Pre-warm pool for a model if it's registered
+## Returns number of instances created (0 if model not registered or pool full)
+## Unlike preload_model, this silently does nothing if model isn't registered
+func prewarm(model_path: String, count: int) -> int:
+	var normalized := _normalize_path(model_path)
+
+	if normalized not in _pools:
+		return 0
+
+	var entry: PoolEntry = _pools[normalized]
+	var before := entry.get_available_count()
+	_preload_instances(entry, count)
+	return entry.get_available_count() - before
+
+
+## Pre-warm pools for multiple models in a single call
+## models: Dictionary of model_path -> count
+## Returns total instances created
+func prewarm_batch(models: Dictionary) -> int:
+	var total := 0
+	for model_path: String in models:
+		var count: int = models[model_path]
+		total += prewarm(model_path, count)
+	return total
+
+
+## Get number of available instances for a model (ready for immediate use)
+func get_available_count(model_path: String) -> int:
+	var normalized := _normalize_path(model_path)
+	if normalized not in _pools:
+		return 0
+	var entry: PoolEntry = _pools[normalized]
+	return entry.get_available_count()
+
+
 ## Acquire an instance from the pool
 ## Returns null if model not registered or pool exhausted
 func acquire(model_path: String) -> Node3D:
@@ -119,6 +154,9 @@ func acquire(model_path: String) -> Node3D:
 	if not entry.available.is_empty():
 		var instance: Node3D = entry.available.pop_back()
 		entry.in_use.append(instance)
+		# Remove from pool parent before returning - caller will add to their own parent
+		if instance.get_parent():
+			instance.get_parent().remove_child(instance)
 		instance.visible = true
 		_stats["cache_hits"] += 1
 		return instance

@@ -4,6 +4,17 @@
 ## through the unified WorldDataProvider interface.
 ##
 ## Uses combined regions (4x4 MW cells per Terrain3D region) for large world support.
+##
+## Terrain Texture Blending:
+## --------------------------
+## This provider implements OpenMW-style cross-cell texture blending to eliminate
+## the "chessboard" appearance at cell boundaries. Key features:
+##
+## 1. Region-level control map generation with neighbor sampling
+## 2. Bilinear interpolation of texture indices across cell boundaries
+## 3. Future-proof support for next-gen PBR textures (normal, roughness, AO maps)
+##
+## Reference: OpenMW components/esmterrain/storage.cpp getBlendmaps()
 class_name MorrowindDataProvider
 extends "res://src/core/world/world_data_provider.gd"
 
@@ -23,6 +34,15 @@ var _terrain_assets: Terrain3DAssets = null
 
 ## Cells per Terrain3D region (4x4 = 16 cells per region)
 const CELLS_PER_REGION: int = 4
+
+## Morrowind texture grid size per cell
+const MW_TEXTURE_SIZE: int = 16
+
+## Height vertices per cell (including shared edge)
+const MW_LAND_SIZE: int = 65
+
+## Cropped cell size in pixels (without shared edge)
+const CELL_SIZE_PX: int = 64
 
 
 func _init() -> void:
@@ -77,7 +97,8 @@ func get_heightmap_for_region(region_coord: Vector2i) -> Image:
 
 
 func get_controlmap_for_region(region_coord: Vector2i) -> Image:
-	return _get_combined_map(region_coord, MapType.CONTROL)
+	# Use new cross-cell blending approach for smooth texture transitions
+	return _generate_region_controlmap_with_blending(region_coord)
 
 
 func get_colormap_for_region(region_coord: Vector2i) -> Image:
@@ -151,6 +172,200 @@ func _get_combined_map(region_coord: Vector2i, map_type: MapType) -> Image:
 			combined.blit_rect(cell_map, Rect2i(0, 0, CELL_SIZE_PX, CELL_SIZE_PX), Vector2i(img_x, img_y))
 
 	return combined if any_data else null
+
+
+## Generate region-level control map with cross-cell texture blending
+##
+## This implements OpenMW-style blending where texture samples are taken
+## from neighboring cells at boundaries, eliminating the chessboard effect.
+##
+## The key insight is that MW's texture grid (16x16 per cell) must be sampled
+## continuously across cell boundaries, not per-cell in isolation.
+func _generate_region_controlmap_with_blending(region_coord: Vector2i) -> Image:
+	var region_size_px: int = CELLS_PER_REGION * CELL_SIZE_PX  # 256
+
+	# Create control map image
+	var controlmap := Image.create(region_size_px, region_size_px, false, Image.FORMAT_RF)
+	var default_control := _encode_control_value(0, 0, 0)
+	controlmap.fill(Color(default_control, 0, 0, 1))
+
+	var sw_cell := _region_to_sw_cell(region_coord)
+	var any_data := false
+
+	# Pre-cache LAND records for this region + 1-cell border for neighbor sampling
+	# This matches OpenMW's LandCache approach: startCellX - 1, startCellY - 1, +2 buffer
+	var land_cache: Dictionary = {}  # Vector2i -> LandRecord
+	for cache_y in range(-1, CELLS_PER_REGION + 1):
+		for cache_x in range(-1, CELLS_PER_REGION + 1):
+			var cell_coord := Vector2i(sw_cell.x + cache_x, sw_cell.y + cache_y)
+			var land: LandRecord = ESMManager.get_land(cell_coord.x, cell_coord.y)
+			if land:
+				land_cache[cell_coord] = land
+				if cache_x >= 0 and cache_x < CELLS_PER_REGION and cache_y >= 0 and cache_y < CELLS_PER_REGION:
+					if land.has_textures():
+						any_data = true
+
+	if not any_data:
+		return null
+
+	# Vertices per texture cell (~4.0)
+	var vertices_per_tex := float(MW_LAND_SIZE - 1) / float(MW_TEXTURE_SIZE)
+
+	# Generate control map with cross-cell blending
+	# Iterate through each pixel in the combined region image
+	for local_y in range(CELLS_PER_REGION):
+		for local_x in range(CELLS_PER_REGION):
+			var cell_coord := Vector2i(sw_cell.x + local_x, sw_cell.y + local_y)
+
+			# Calculate image offset for this cell
+			# Y is flipped: local_y=0 (south) goes to bottom of image
+			var img_offset_x := local_x * CELL_SIZE_PX
+			var img_offset_y := (CELLS_PER_REGION - 1 - local_y) * CELL_SIZE_PX
+
+			# Generate control values for each pixel in this cell
+			for py in range(CELL_SIZE_PX):
+				for px in range(CELL_SIZE_PX):
+					# Calculate continuous position in MW texture space
+					# This extends across cell boundaries for proper blending
+					var tex_x_f := (float(px) / vertices_per_tex) - 0.5
+					var tex_y_f := (float(CELL_SIZE_PX - 1 - py) / vertices_per_tex) - 0.5  # Flip Y
+
+					# Sample 4 corners with cross-cell awareness
+					var control := _sample_texture_bilinear(
+						cell_coord, tex_x_f, tex_y_f, land_cache
+					)
+
+					controlmap.set_pixel(
+						img_offset_x + px,
+						img_offset_y + py,
+						Color(control, 0, 0, 1)
+					)
+
+	return controlmap
+
+
+## Sample texture index with bilinear interpolation, crossing cell boundaries
+##
+## tex_x_f, tex_y_f: Continuous position in texture space (0-16 range, can be negative)
+## Returns: Encoded control value with base, overlay, and blend
+func _sample_texture_bilinear(
+	cell_coord: Vector2i,
+	tex_x_f: float,
+	tex_y_f: float,
+	land_cache: Dictionary
+) -> float:
+	# Get the 4 surrounding texture cells for bilinear interpolation
+	var tx0 := int(floorf(tex_x_f))
+	var ty0 := int(floorf(tex_y_f))
+	var tx1 := tx0 + 1
+	var ty1 := ty0 + 1
+
+	# Bilinear weights
+	var fx := tex_x_f - float(tx0)
+	var fy := tex_y_f - float(ty0)
+	fx = clampf(fx, 0.0, 1.0)
+	fy = clampf(fy, 0.0, 1.0)
+
+	# Get texture slots for all 4 corners (with cross-cell sampling)
+	var slot_00 := _get_texture_slot_at(cell_coord, tx0, ty0, land_cache)
+	var slot_10 := _get_texture_slot_at(cell_coord, tx1, ty0, land_cache)
+	var slot_01 := _get_texture_slot_at(cell_coord, tx0, ty1, land_cache)
+	var slot_11 := _get_texture_slot_at(cell_coord, tx1, ty1, land_cache)
+
+	# Calculate bilinear weights for each corner
+	var w00 := (1.0 - fx) * (1.0 - fy)
+	var w10 := fx * (1.0 - fy)
+	var w01 := (1.0 - fx) * fy
+	var w11 := fx * fy
+
+	# Find dominant texture (highest weight) as base
+	var weights := [w00, w10, w01, w11]
+	var slots := [slot_00, slot_10, slot_01, slot_11]
+
+	var max_weight := 0.0
+	var base_slot := slot_00
+	for i in 4:
+		if weights[i] > max_weight:
+			max_weight = weights[i]
+			base_slot = slots[i]
+
+	# Find best overlay texture (highest weight among different textures)
+	var overlay_slot := base_slot
+	var overlay_weight := 0.0
+	for i in 4:
+		if slots[i] != base_slot and weights[i] > overlay_weight:
+			overlay_weight = weights[i]
+			overlay_slot = slots[i]
+
+	# Calculate blend value
+	var blend := 0
+	if overlay_slot != base_slot:
+		# Total weight of non-base textures
+		var total_other_weight := 0.0
+		for i in 4:
+			if slots[i] != base_slot:
+				total_other_weight += weights[i]
+		blend = int(clampf(total_other_weight, 0.0, 1.0) * 255.0)
+
+	return _encode_control_value(base_slot, overlay_slot, blend)
+
+
+## Get texture slot at a position that may cross cell boundaries
+##
+## cell_coord: The base cell we're processing
+## tx, ty: Texture coordinates that may be outside 0-15 range
+## land_cache: Pre-cached LAND records including neighbors
+func _get_texture_slot_at(
+	cell_coord: Vector2i,
+	tx: int,
+	ty: int,
+	land_cache: Dictionary
+) -> int:
+	# Determine which cell this texture coordinate belongs to
+	var actual_cell := cell_coord
+	var actual_tx := tx
+	var actual_ty := ty
+
+	# Handle crossing into neighboring cells
+	if tx < 0:
+		actual_cell.x -= 1
+		actual_tx = MW_TEXTURE_SIZE + tx  # tx is negative, so this wraps correctly
+	elif tx >= MW_TEXTURE_SIZE:
+		actual_cell.x += 1
+		actual_tx = tx - MW_TEXTURE_SIZE
+
+	if ty < 0:
+		actual_cell.y -= 1
+		actual_ty = MW_TEXTURE_SIZE + ty
+	elif ty >= MW_TEXTURE_SIZE:
+		actual_cell.y += 1
+		actual_ty = ty - MW_TEXTURE_SIZE
+
+	# Clamp to valid range after cell adjustment
+	actual_tx = clampi(actual_tx, 0, MW_TEXTURE_SIZE - 1)
+	actual_ty = clampi(actual_ty, 0, MW_TEXTURE_SIZE - 1)
+
+	# Get LAND record from cache
+	if actual_cell not in land_cache:
+		return 0  # Default texture for missing cells
+
+	var land: LandRecord = land_cache[actual_cell]
+	if not land.has_textures():
+		return 0  # Default texture
+
+	# Get MW texture index and convert to Terrain3D slot
+	var mw_tex_idx := land.get_texture_index(actual_tx, actual_ty)
+	return _get_terrain3d_slot(mw_tex_idx)
+
+
+## Get Terrain3D texture slot for MW texture index
+func _get_terrain3d_slot(mw_tex_idx: int) -> int:
+	if mw_tex_idx == 0:
+		return 0
+	if _texture_loader and _texture_loader.has_method("get_slot_for_mw_index"):
+		return _texture_loader.call("get_slot_for_mw_index", mw_tex_idx)
+	# Fallback: modulo mapping
+	return ((mw_tex_idx - 1) % 31) + 1
 
 
 func has_terrain_at_region(region_coord: Vector2i) -> bool:

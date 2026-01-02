@@ -42,6 +42,7 @@ extends RefCounted
 
 ## Use centralized distance utilities
 const DU := preload("res://src/core/world/distance_utils.gd")
+const GPUVisibilityManagerScript := preload("res://src/core/world/gpu_visibility_manager.gd")
 
 ## Distance tiers for rendering detail levels
 enum Tier {
@@ -152,10 +153,24 @@ var _camera_position: Vector3 = Vector3.ZERO
 
 #region UNIFIED VISIBILITY AUTHORITY - Object Tracking
 
-## **NEW**: Registered objects for per-object tier tracking
+## **PERFORMANCE OPTIMIZED**: Registered objects for per-object tier tracking
 ## Maps object_id (int) -> ObjectVisibilityInfo
+##
+## IMPORTANT: Only NEAR and MID tier objects are registered here.
+## FAR tier objects use chunk-based rendering (QuadtreeChunkManager/ImpostorManager)
+## to avoid iterating 10,000+ objects per frame.
+##
+## Typical counts:
+## - NEAR tier (0-150m): ~500 objects
+## - MID tier (150-500m): ~1000-2000 objects
+## - FAR tier (500m-5km): Handled by chunks, NOT individual objects
+##
 ## Objects are registered by ObjectStreamer via register_object()
 var _registered_objects: Dictionary = {}
+
+## **SPATIAL INDEX**: Objects grouped by cell for O(nearby_cells) lookup instead of O(all_objects)
+## Maps Vector2i (cell_grid) -> Array[int] (object_ids in that cell)
+var _objects_by_cell: Dictionary = {}
 
 ## **NEW**: Current tier for each object
 ## Maps object_id (int) -> Tier
@@ -181,6 +196,9 @@ var _tier_changes_this_frame: Array[Dictionary] = []
 ## **NEW**: Cached visible cells from last update (for change detection)
 var _cached_visible_cells_by_tier: Dictionary = {}
 
+## **NEW**: Last camera cell used for cell visibility calculation (for cache invalidation)
+var _last_camera_cell_for_cells: Vector2i = Vector2i(999999, 999999)
+
 ## **NEW**: Frame counter for visibility updates (for debugging/stats)
 var _visibility_update_frame: int = 0
 
@@ -198,7 +216,110 @@ class ObjectVisibilityInfo extends RefCounted:
 
 ## Whether to use view frustum culling for MID/FAR tiers
 ## Significantly reduces cell count by only processing visible cells
-var use_frustum_culling: bool = true
+## TEMPORARILY DISABLED for debugging - frustum culling was filtering ALL cells
+var use_frustum_culling: bool = false
+
+
+#region GPU Compute Acceleration
+
+## GPU visibility manager for accelerated tier calculations
+## Automatically initialized on first use if hardware supports it
+var _gpu_visibility_manager: RefCounted = null
+
+## Whether GPU compute is enabled (can be disabled for debugging)
+var use_gpu_compute: bool = true
+
+## Whether GPU compute was successfully initialized
+var _gpu_compute_available: bool = false
+
+## Threshold for using GPU compute (objects registered)
+## Below this threshold, CPU path may be faster due to dispatch overhead
+const GPU_COMPUTE_THRESHOLD: int = 500
+
+## Phase 2 GPU-driven mode flag
+## When true, this Phase 1 GPU path is disabled in favor of GPUVisibilityRenderer (Phase 2)
+## Set by WorldStreamingManager when Phase 2 is successfully initialized
+var phase2_gpu_driven_enabled: bool = false
+
+## Initialize GPU compute manager (called lazily on first update)
+func _init_gpu_compute() -> void:
+	if _gpu_visibility_manager != null:
+		return  # Already initialized
+
+	_gpu_visibility_manager = GPUVisibilityManagerScript.new()
+	_gpu_compute_available = _gpu_visibility_manager.initialize()
+
+	if _gpu_compute_available:
+		# Configure tier distances to match our settings
+		var near_end: float = tier_end_distances[Tier.NEAR]
+		var mid_end: float = tier_end_distances[Tier.MID]
+		var far_end: float = tier_end_distances[Tier.FAR]
+		_gpu_visibility_manager.set_tier_distances(near_end, mid_end, far_end)
+
+		# Configure hysteresis
+		var near_hyst: float = tier_hysteresis.get(Tier.NEAR, 40.0)
+		var mid_hyst: float = tier_hysteresis.get(Tier.MID, 60.0)
+		var far_hyst: float = tier_hysteresis.get(Tier.FAR, 150.0)
+		_gpu_visibility_manager.set_hysteresis(near_hyst, mid_hyst, far_hyst)
+
+		print("[DistanceTierManager] GPU compute enabled - visibility calculations will be accelerated")
+	else:
+		print("[DistanceTierManager] GPU compute not available - using CPU fallback")
+
+
+## Track if we've synced existing objects to GPU after init
+var _gpu_objects_synced: bool = false
+
+## Check if GPU compute should be used for current update
+func _should_use_gpu_compute() -> bool:
+	# Phase 2 GPU-driven mode supersedes Phase 1 GPU path
+	# When Phase 2 is active, GPUVisibilityRenderer handles MID/FAR visibility
+	if phase2_gpu_driven_enabled:
+		return false
+
+	if not use_gpu_compute:
+		return false
+
+	if _gpu_visibility_manager == null:
+		_init_gpu_compute()
+
+	if not _gpu_compute_available:
+		return false
+
+	# Use GPU compute if we have enough objects to justify dispatch overhead
+	var should_use := _registered_objects.size() >= GPU_COMPUTE_THRESHOLD
+
+	# First time crossing threshold with GPU available - sync all existing objects
+	if should_use and not _gpu_objects_synced:
+		print("[DistanceTierManager] Syncing %d existing objects to GPU..." % _registered_objects.size())
+		_sync_objects_to_gpu()
+		_gpu_objects_synced = true
+		print("[DistanceTierManager] GPU sync complete - switching to GPU path")
+
+	return should_use
+
+
+## Sync all registered objects to GPU visibility manager
+## Called when GPU compute is first enabled or after significant changes
+func _sync_objects_to_gpu() -> void:
+	if not _gpu_visibility_manager:
+		return
+
+	# Clear and re-register all objects
+	_gpu_visibility_manager.clear()
+
+	for obj_id: int in _registered_objects:
+		var obj_info: ObjectVisibilityInfo = _registered_objects[obj_id]
+		_gpu_visibility_manager.register_object(obj_id, obj_info.position)
+
+
+## Get GPU compute statistics
+func get_gpu_stats() -> Dictionary:
+	if _gpu_visibility_manager and _gpu_compute_available:
+		return _gpu_visibility_manager.get_stats()
+	return {"gpu_supported": false, "enabled": use_gpu_compute}
+
+#endregion
 
 
 #region Configuration
@@ -435,7 +556,17 @@ func get_all_cells_in_radius(camera_cell: Vector2i, radius_meters: float = -1.0)
 ## IMPORTANT: Uses actual camera position (_camera_position) for distance calculations
 ## instead of camera cell center. This prevents tier jumping when crossing cell boundaries.
 ## Call set_camera_position() every frame before calling this function.
+##
+## OPTIMIZATION: Results are cached based on camera cell. If camera is in the same cell,
+## returns cached result (cell visibility changes slowly relative to camera position within cell).
 func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
+	# OPTIMIZATION: Return cached result if camera is in the same cell
+	# Cell visibility only needs recalculating when camera crosses cell boundary
+	if camera_cell == _last_camera_cell_for_cells and not _cached_visible_cells_by_tier.is_empty():
+		return _cached_visible_cells_by_tier
+
+	_last_camera_cell_for_cells = camera_cell
+
 	var result := {
 		Tier.NEAR: [] as Array[Vector2i],
 		Tier.MID: [] as Array[Vector2i],
@@ -520,6 +651,8 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 			cells_array.append(entry.cell)
 			tier_counts[tier] += 1
 
+	# Cache the result for future calls with same camera cell
+	_cached_visible_cells_by_tier = result.duplicate(true)
 	return result
 
 
@@ -532,15 +665,17 @@ func _is_cell_in_frustum(cell: Vector2i) -> bool:
 	# Calculate cell center in world coordinates
 	var cell_center := Vector3(
 		cell.x * cell_size_meters + cell_size_meters * 0.5,
-		0.0,  # Y will be terrain height, use 0 for simplicity
+		0.0,
 		-cell.y * cell_size_meters - cell_size_meters * 0.5  # Z is flipped in Godot
 	)
 
-	# Create cell AABB (assuming ~100m height for buildings)
+	# Create cell AABB with generous height range to handle terrain elevation
+	# Use -100 to +500 to cover deep valleys and tall mountains/structures
+	# This ensures cells aren't incorrectly culled due to camera Y position
 	var half_size := cell_size_meters * 0.5
 	var cell_aabb := AABB(
-		cell_center - Vector3(half_size, 0, half_size),
-		Vector3(cell_size_meters, 100.0, cell_size_meters)
+		cell_center - Vector3(half_size, 100.0, half_size),  # Start 100m below ground
+		Vector3(cell_size_meters, 600.0, cell_size_meters)   # Extend 500m above ground
 	)
 
 	# Check against camera frustum
@@ -622,7 +757,7 @@ func get_tier_cell_counts(camera_cell: Vector2i) -> Dictionary:
 ##
 ## Performs:
 ## 1. Cell-level visibility (which cells are in which tier)
-## 2. Object-level visibility (which objects are in which tier)
+## 2. Object-level visibility (which objects are in which tier) - GPU accelerated when available
 ## 3. Tier change detection (objects that changed tiers this frame)
 ##
 ## camera_cell: The cell the camera is currently in
@@ -639,59 +774,364 @@ func update_visibility(camera_cell: Vector2i, delta: float = 0.0) -> Dictionary:
 		"objects_changed_tier": 0,
 		"cells_per_tier": {},
 		"objects_per_tier": {},
+		"gpu_accelerated": false,
 	}
 
+	# OPTIMIZATION: Early exit if no registered objects - saves time when world is empty
+	if _registered_objects.is_empty():
+		return stats
+
 	# 1. Update cell-level visibility (uses existing optimized implementation)
+	# NOTE: get_visible_cells_by_tier already caches the result internally
 	var visible_cells_by_tier := get_visible_cells_by_tier(camera_cell)
-	_cached_visible_cells_by_tier = visible_cells_by_tier.duplicate(true)
 
 	for tier in visible_cells_by_tier:
 		var cells_array: Array = visible_cells_by_tier[tier]
 		stats.cells_per_tier[tier] = cells_array.size()
 
 	# 2. Update object-level visibility
-	# Clear per-tier object lists
-	for tier in _visible_objects_by_tier:
-		(_visible_objects_by_tier[tier] as Array).clear()
+	# Choose update path based on Phase 2 mode and GPU availability
+	if phase2_gpu_driven_enabled:
+		# PHASE 2 MODE: GPUVisibilityRenderer handles MID/FAR tiers
+		# We only need to track NEAR tier for CPU instantiation decisions
+		stats = _update_visibility_near_only(stats, visible_cells_by_tier)
+		stats["phase2_active"] = true
+	elif _should_use_gpu_compute():
+		stats = _update_visibility_gpu(stats, visible_cells_by_tier)
+		stats["gpu_accelerated"] = true
+	else:
+		stats = _update_visibility_cpu(stats, visible_cells_by_tier)
 
-	# Update each registered object's tier
-	for obj_id: int in _registered_objects:
+	return stats
+
+
+## Track frame count for periodic GPU stats logging
+var _gpu_log_frame_count: int = 0
+
+## GPU-accelerated visibility update using compute shader
+## Processes all objects in parallel on GPU, then reads back tier changes
+## Uses SPARSE READBACK: O(changes) instead of O(all_objects) for industry-standard perf
+func _update_visibility_gpu(stats: Dictionary, _visible_cells_by_tier: Dictionary) -> Dictionary:
+	# Dispatch GPU compute shader and get tier changes
+	var gpu_changes: Array[Dictionary] = _gpu_visibility_manager.update_visibility(_camera_position)
+
+	# Log GPU stats periodically (every 300 frames ~5 seconds at 60fps)
+	_gpu_log_frame_count += 1
+	if _gpu_log_frame_count == 1 or _gpu_log_frame_count % 300 == 0:
+		var gpu_stats: Dictionary = _gpu_visibility_manager.get_stats()
+		var sparse_changes: int = gpu_stats.get("sparse_readback_changes", -1)
+		var sparse_saved: int = gpu_stats.get("sparse_readback_saved_bytes", 0)
+
+		# Show sparse readback stats if available
+		if sparse_changes >= 0:
+			print("[DistanceTierManager] GPU SPARSE: %d obj, %d changes, saved %dKB, dispatch: %.2f ms, readback: %.2f ms, total: %.2f ms" % [
+				gpu_stats.get("objects_registered", 0),
+				sparse_changes,
+				sparse_saved / 1024,
+				gpu_stats.get("last_dispatch_time_us", 0) / 1000.0,
+				gpu_stats.get("last_readback_time_us", 0) / 1000.0,
+				gpu_stats.get("last_total_time_us", 0) / 1000.0,
+			])
+		else:
+			print("[DistanceTierManager] GPU: %d obj, upload: %.2f ms, dispatch: %.2f ms, readback: %.2f ms, total: %.2f ms" % [
+				gpu_stats.get("objects_registered", 0),
+				gpu_stats.get("last_upload_time_us", 0) / 1000.0,
+				gpu_stats.get("last_dispatch_time_us", 0) / 1000.0,
+				gpu_stats.get("last_readback_time_us", 0) / 1000.0,
+				gpu_stats.get("last_total_time_us", 0) / 1000.0,
+			])
+
+	# Process tier changes and update local state
+	for change in gpu_changes:
+		var obj_id: int = change["object_id"]
+		var old_tier: int = change["old_tier"]
+		var new_tier: int = change["new_tier"]
+
+		if obj_id not in _registered_objects:
+			continue
+
 		var obj: ObjectVisibilityInfo = _registered_objects[obj_id]
-		stats.objects_checked += 1
 
-		# Calculate distance from camera to object
-		var distance := _camera_position.distance_to(obj.position)
+		# Update local state
+		obj.current_tier = new_tier as Tier
+		_object_tier_map[obj_id] = new_tier as Tier
+
+		# Calculate distance for the change event
+		var dx: float = _camera_position.x - obj.position.x
+		var dy: float = _camera_position.y - obj.position.y
+		var dz: float = _camera_position.z - obj.position.z
+		var distance: float = sqrt(dx * dx + dy * dy + dz * dz)
 		obj.last_distance = distance
-
-		# Determine new tier using centralized tier calculation with hysteresis
-		var old_tier: Tier = obj.current_tier
-		var new_tier: Tier = get_tier_for_distance(distance, obj.cell_grid)
-
-		# Detect tier changes
-		if new_tier != old_tier:
-			obj.current_tier = new_tier
-			_object_tier_map[obj_id] = new_tier
-
-			_tier_changes_this_frame.append({
-				"object_id": obj_id,
-				"old_tier": old_tier,
-				"new_tier": new_tier,
-				"distance": distance,
-			})
-
-			stats.objects_changed_tier += 1
-
-		# Add to appropriate tier list (even if tier didn't change)
-		if new_tier != Tier.NONE:
-			var tier_list: Array = _visible_objects_by_tier[new_tier]
-			tier_list.append(obj_id)
-
 		obj.last_update_frame = _visibility_update_frame
 
+		_tier_changes_this_frame.append({
+			"object_id": obj_id,
+			"old_tier": old_tier,
+			"new_tier": new_tier,
+			"distance": distance,
+		})
+
+		stats.objects_changed_tier += 1
+
+	# Get tier lists in bulk from GPU manager (single loop instead of N lookups)
+	var tier_lists: Dictionary = _gpu_visibility_manager.get_objects_by_tier()
+
+	# Update tier arrays directly
+	_visible_objects_by_tier[Tier.NEAR] = tier_lists.get(Tier.NEAR, [])
+	_visible_objects_by_tier[Tier.MID] = tier_lists.get(Tier.MID, [])
+	_visible_objects_by_tier[Tier.FAR] = tier_lists.get(Tier.FAR, [])
+
 	# Update stats
-	for tier in _visible_objects_by_tier:
-		var objects_array: Array = _visible_objects_by_tier[tier]
-		stats.objects_per_tier[tier] = objects_array.size()
+	stats.objects_checked = _registered_objects.size()
+	stats.objects_per_tier[Tier.NEAR] = (_visible_objects_by_tier[Tier.NEAR] as Array).size()
+	stats.objects_per_tier[Tier.MID] = (_visible_objects_by_tier[Tier.MID] as Array).size()
+	stats.objects_per_tier[Tier.FAR] = (_visible_objects_by_tier[Tier.FAR] as Array).size()
+
+	return stats
+
+
+## CPU-based visibility update (original implementation)
+## Used when GPU compute is not available or object count is below threshold
+func _update_visibility_cpu(stats: Dictionary, visible_cells_by_tier: Dictionary) -> Dictionary:
+	# Pre-compute squared tier thresholds ONCE (avoid dictionary lookups in hot loop)
+	var near_end: float = tier_end_distances[Tier.NEAR]
+	var mid_end: float = tier_end_distances[Tier.MID]
+	var far_end: float = tier_end_distances[Tier.FAR]
+	var near_end_sq: float = near_end * near_end
+	var mid_end_sq: float = mid_end * mid_end
+	var far_end_sq: float = far_end * far_end
+
+	# OPTIMIZATION: Cache camera position locally to avoid property access in loop
+	var cam_x: float = _camera_position.x
+	var cam_y: float = _camera_position.y
+	var cam_z: float = _camera_position.z
+
+	# Collect cells that need checking:
+	# **OPTIMIZATION**: Only check NEAR and MID tier cells for per-object visibility
+	# FAR tier objects use chunk-based rendering (ImpostorManager) - no per-object tracking needed
+	var cells_to_check: Array[Vector2i] = []
+
+	# Only add NEAR and MID tier cells (skip FAR and HORIZON)
+	var near_cells: Array = visible_cells_by_tier.get(Tier.NEAR, [])
+	for cell in near_cells:
+		cells_to_check.append(cell)
+
+	var mid_cells: Array = visible_cells_by_tier.get(Tier.MID, [])
+	for cell in mid_cells:
+		cells_to_check.append(cell)
+
+	# OPTIMIZATION: Pre-allocate result arrays to avoid array growth overhead
+	var near_objects: Array[int] = []
+	var mid_objects: Array[int] = []
+	var far_objects: Array[int] = []
+
+	# Pre-compute squared hysteresis thresholds for per-object hysteresis
+	# Hysteresis prevents tier thrashing by requiring objects to move further before changing tier
+	var near_hyst: float = tier_hysteresis.get(Tier.NEAR, 40.0)
+	var mid_hyst: float = tier_hysteresis.get(Tier.MID, 60.0)
+
+	# Thresholds with hysteresis pre-computed (squared for fast comparison)
+	var near_exit_sq: float = (near_end + near_hyst) * (near_end + near_hyst)  # Leave NEAR
+	var near_enter_sq: float = (near_end - near_hyst) * (near_end - near_hyst)  # Enter NEAR
+	var mid_exit_sq: float = (mid_end + mid_hyst) * (mid_end + mid_hyst)  # Leave MID
+	var mid_enter_sq: float = (mid_end - mid_hyst) * (mid_end - mid_hyst)  # Enter MID
+
+	# Check objects only in relevant cells
+	for cell_grid: Vector2i in cells_to_check:
+		if cell_grid not in _objects_by_cell:
+			continue
+
+		var cell_objects: Array = _objects_by_cell[cell_grid]
+		for obj_id: int in cell_objects:
+			if obj_id not in _registered_objects:
+				continue
+
+			var obj: ObjectVisibilityInfo = _registered_objects[obj_id]
+			stats.objects_checked += 1
+
+			# OPTIMIZATION: Inline distance calculation (avoid function call overhead)
+			var dx: float = cam_x - obj.position.x
+			var dy: float = cam_y - obj.position.y
+			var dz: float = cam_z - obj.position.z
+			var distance_sq: float = dx * dx + dy * dy + dz * dz
+
+			# PER-OBJECT HYSTERESIS: Use object's current tier to determine threshold
+			# This prevents tier thrashing for individual objects
+			var old_tier: Tier = obj.current_tier
+			var new_tier: Tier
+
+			# Apply hysteresis based on current tier
+			match old_tier:
+				Tier.NEAR:
+					# Currently NEAR - need to exceed exit threshold to leave
+					if distance_sq < near_exit_sq:
+						new_tier = Tier.NEAR
+					elif distance_sq < mid_exit_sq:
+						new_tier = Tier.MID
+					elif distance_sq < far_end_sq:
+						new_tier = Tier.FAR
+					else:
+						new_tier = Tier.NONE
+				Tier.MID:
+					# Currently MID - use entry threshold for NEAR, exit for FAR
+					if distance_sq < near_enter_sq:
+						new_tier = Tier.NEAR
+					elif distance_sq < mid_exit_sq:
+						new_tier = Tier.MID
+					elif distance_sq < far_end_sq:
+						new_tier = Tier.FAR
+					else:
+						new_tier = Tier.NONE
+				Tier.FAR:
+					# Currently FAR - use entry thresholds for closer tiers
+					if distance_sq < near_enter_sq:
+						new_tier = Tier.NEAR
+					elif distance_sq < mid_enter_sq:
+						new_tier = Tier.MID
+					elif distance_sq < far_end_sq:
+						new_tier = Tier.FAR
+					else:
+						new_tier = Tier.NONE
+				_:
+					# No previous tier or NONE - use standard thresholds
+					if distance_sq < near_end_sq:
+						new_tier = Tier.NEAR
+					elif distance_sq < mid_end_sq:
+						new_tier = Tier.MID
+					elif distance_sq < far_end_sq:
+						new_tier = Tier.FAR
+					else:
+						new_tier = Tier.NONE
+
+			# Add to correct tier array AFTER hysteresis is applied
+			match new_tier:
+				Tier.NEAR:
+					near_objects.append(obj_id)
+				Tier.MID:
+					mid_objects.append(obj_id)
+				Tier.FAR:
+					far_objects.append(obj_id)
+
+			# Emit tier change event if actually changed
+			if new_tier != old_tier:
+				obj.current_tier = new_tier
+				obj.last_distance = sqrt(distance_sq)
+				_object_tier_map[obj_id] = new_tier
+
+				_tier_changes_this_frame.append({
+					"object_id": obj_id,
+					"old_tier": old_tier,
+					"new_tier": new_tier,
+					"distance": obj.last_distance,
+				})
+
+				stats.objects_changed_tier += 1
+
+			obj.last_update_frame = _visibility_update_frame
+
+	# OPTIMIZATION: Assign arrays directly instead of rebuilding with appends
+	_visible_objects_by_tier[Tier.NEAR] = near_objects
+	_visible_objects_by_tier[Tier.MID] = mid_objects
+	_visible_objects_by_tier[Tier.FAR] = far_objects
+
+	# Update stats
+	stats.objects_per_tier[Tier.NEAR] = near_objects.size()
+	stats.objects_per_tier[Tier.MID] = mid_objects.size()
+	stats.objects_per_tier[Tier.FAR] = far_objects.size()
+
+	return stats
+
+
+## PHASE 2 MODE: Near-only visibility update
+## When GPUVisibilityRenderer handles MID/FAR, we only need to track NEAR tier
+## for CPU Node3D instantiation decisions. This is O(near_cells) instead of O(all_objects).
+##
+## MID/FAR tier visibility is handled entirely by GPUVisibilityRenderer's compute shader.
+func _update_visibility_near_only(stats: Dictionary, visible_cells_by_tier: Dictionary) -> Dictionary:
+	# Pre-compute squared near threshold
+	var near_end: float = tier_end_distances[Tier.NEAR]
+	var near_end_sq: float = near_end * near_end
+
+	# Hysteresis for NEAR tier
+	var near_hyst: float = tier_hysteresis.get(Tier.NEAR, 40.0)
+	var near_exit_sq: float = (near_end + near_hyst) * (near_end + near_hyst)
+	var near_enter_sq: float = (near_end - near_hyst) * (near_end - near_hyst)
+
+	# Cache camera position
+	var cam_x: float = _camera_position.x
+	var cam_y: float = _camera_position.y
+	var cam_z: float = _camera_position.z
+
+	# Only check cells that could contain NEAR objects
+	# Use NEAR + MID cells since objects could transition between them
+	var cells_to_check: Array[Vector2i] = []
+
+	var near_cells: Array = visible_cells_by_tier.get(Tier.NEAR, [])
+	for cell in near_cells:
+		cells_to_check.append(cell)
+
+	# Also check MID cells adjacent to NEAR (objects might transition in)
+	var mid_cells: Array = visible_cells_by_tier.get(Tier.MID, [])
+	for cell in mid_cells:
+		cells_to_check.append(cell)
+
+	var near_objects: Array[int] = []
+
+	# Check objects only for NEAR tier transitions
+	for cell_grid: Vector2i in cells_to_check:
+		if cell_grid not in _objects_by_cell:
+			continue
+
+		var cell_objects: Array = _objects_by_cell[cell_grid]
+		for obj_id: int in cell_objects:
+			if obj_id not in _registered_objects:
+				continue
+
+			var obj: ObjectVisibilityInfo = _registered_objects[obj_id]
+			stats.objects_checked += 1
+
+			# Inline distance calculation
+			var dx: float = cam_x - obj.position.x
+			var dy: float = cam_y - obj.position.y
+			var dz: float = cam_z - obj.position.z
+			var distance_sq: float = dx * dx + dy * dy + dz * dz
+
+			var old_tier: Tier = obj.current_tier
+			var is_near: bool = false
+
+			# Determine if object should be in NEAR tier (with hysteresis)
+			if old_tier == Tier.NEAR:
+				# Currently NEAR - need to exceed exit threshold to leave
+				is_near = distance_sq < near_exit_sq
+			else:
+				# Not NEAR - need to be within entry threshold to enter
+				is_near = distance_sq < near_enter_sq
+
+			# For Phase 2, we only track NEAR vs NOT_NEAR
+			# GPUVisibilityRenderer handles MID/FAR distinction
+			var new_tier: Tier = Tier.NEAR if is_near else Tier.MID  # MID = "not near"
+
+			# Track NEAR tier changes
+			if new_tier != old_tier:
+				obj.current_tier = new_tier
+				obj.last_distance = sqrt(distance_sq)
+				obj.last_update_frame = _visibility_update_frame
+				_object_tier_map[obj_id] = new_tier
+				stats.objects_changed_tier += 1
+
+				_tier_changes_this_frame.append({
+					"object_id": obj_id,
+					"old_tier": old_tier,
+					"new_tier": new_tier,
+					"distance": obj.last_distance,
+				})
+
+			if is_near:
+				near_objects.append(obj_id)
+
+	# Update NEAR tier list (MID/FAR handled by GPUVisibilityRenderer)
+	_visible_objects_by_tier[Tier.NEAR] = near_objects
+	stats.objects_per_tier[Tier.NEAR] = near_objects.size()
 
 	return stats
 
@@ -720,6 +1160,15 @@ func register_object(object_id: int, position: Vector3, cell_grid: Vector2i) -> 
 	_registered_objects[object_id] = obj_info
 	_object_tier_map[object_id] = Tier.NONE
 
+	# Add to spatial index
+	if cell_grid not in _objects_by_cell:
+		_objects_by_cell[cell_grid] = []
+	(_objects_by_cell[cell_grid] as Array).append(object_id)
+
+	# Sync to GPU visibility manager if enabled
+	if _gpu_visibility_manager and _gpu_compute_available:
+		_gpu_visibility_manager.register_object(object_id, position)
+
 	return true
 
 
@@ -735,6 +1184,7 @@ func unregister_object(object_id: int) -> bool:
 
 	var obj_info: ObjectVisibilityInfo = _registered_objects[object_id]
 	var tier: Tier = obj_info.current_tier
+	var cell_grid: Vector2i = obj_info.cell_grid
 
 	# Remove from tier list
 	if tier in _visible_objects_by_tier:
@@ -743,8 +1193,22 @@ func unregister_object(object_id: int) -> bool:
 		if idx >= 0:
 			tier_list.remove_at(idx)
 
+	# Remove from spatial index
+	if cell_grid in _objects_by_cell:
+		var cell_list: Array = _objects_by_cell[cell_grid]
+		var cell_idx := cell_list.find(object_id)
+		if cell_idx >= 0:
+			cell_list.remove_at(cell_idx)
+		# Clean up empty cells
+		if cell_list.is_empty():
+			_objects_by_cell.erase(cell_grid)
+
 	_registered_objects.erase(object_id)
 	_object_tier_map.erase(object_id)
+
+	# Sync to GPU visibility manager if enabled
+	if _gpu_visibility_manager and _gpu_compute_available:
+		_gpu_visibility_manager.unregister_object(object_id)
 
 	return true
 
@@ -762,6 +1226,10 @@ func update_object_position(object_id: int, new_position: Vector3) -> bool:
 
 	var obj_info: ObjectVisibilityInfo = _registered_objects[object_id]
 	obj_info.position = new_position
+
+	# Sync to GPU visibility manager if enabled
+	if _gpu_visibility_manager and _gpu_compute_available:
+		_gpu_visibility_manager.update_object_position(object_id, new_position)
 
 	return true
 
@@ -816,9 +1284,24 @@ func get_registered_object_count() -> int:
 func clear_registered_objects() -> void:
 	_registered_objects.clear()
 	_object_tier_map.clear()
+	_objects_by_cell.clear()  # Clear spatial index
 	for tier in _visible_objects_by_tier:
 		(_visible_objects_by_tier[tier] as Array).clear()
 	_tier_changes_this_frame.clear()
+
+	# Clear GPU visibility manager if enabled
+	if _gpu_visibility_manager and _gpu_compute_available:
+		_gpu_visibility_manager.clear()
+
+	# Reset GPU sync flag so objects get re-synced after next load
+	_gpu_objects_synced = false
+
+
+## **OPTIMIZATION**: Get cached visible cells from last update_visibility() call
+## This avoids expensive recalculation - ImpostorManager and other consumers should use this
+## Returns: Dictionary mapping Tier -> Array[Vector2i] (empty if update_visibility not called yet)
+func get_cached_visible_cells_by_tier() -> Dictionary:
+	return _cached_visible_cells_by_tier
 
 
 #endregion
@@ -940,6 +1423,28 @@ func set_camera_position(pos: Vector3) -> void:
 ## Get camera position
 func get_camera_position() -> Vector3:
 	return _camera_position
+
+
+## Get statistics for debugging
+func get_stats() -> Dictionary:
+	var near_cells := 0
+	var mid_cells := 0
+	var far_cells := 0
+
+	for cell_grid: Vector2i in _cell_tiers:
+		var tier: int = _cell_tiers[cell_grid]
+		match tier:
+			Tier.NEAR: near_cells += 1
+			Tier.MID: mid_cells += 1
+			Tier.FAR: far_cells += 1
+
+	return {
+		"registered_objects": _registered_objects.size(),
+		"near_cells": near_cells,
+		"mid_cells": mid_cells,
+		"far_cells": far_cells,
+		"total_cells": _cell_tiers.size(),
+	}
 
 
 #endregion

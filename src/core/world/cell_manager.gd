@@ -36,13 +36,8 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
-# Object distance manager for distance-based visibility
-var _object_distance_manager: Node3D = null  # ObjectDistanceManager
-
-# Legacy alias for compatibility
-var _per_object_lod_manager: Node3D:
-	get: return _object_distance_manager
-	set(value): _object_distance_manager = value
+# ObjectStreamer for distance-based visibility and LOD management
+var _object_distance_manager: Node3D = null  # ObjectStreamer
 
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
@@ -78,9 +73,14 @@ func _init() -> void:
 
 
 ## Initialize object pool for frequently used models
-func init_object_pool() -> void:
+## parent_node: Node3D to store pooled objects when not in use (required for proper pooling)
+func init_object_pool(parent_node: Node3D = null) -> void:
 	if _object_pool == null:
 		_object_pool = ObjectPoolScript.new()
+		# Initialize pool with parent node for storing inactive instances
+		# Without this, released objects have no parent and may be garbage collected
+		if parent_node:
+			_object_pool.call("init", parent_node)
 		_sync_instantiator_config()
 
 
@@ -89,25 +89,10 @@ func get_object_pool() -> RefCounted:
 	return _object_pool
 
 
-## Set the object distance manager for distance-based visibility
-func set_object_distance_manager(manager: Node3D) -> void:
-	_object_distance_manager = manager
+## Set the ObjectStreamer for distance-based visibility and LOD
+func set_object_streamer(streamer: Node3D) -> void:
+	_object_distance_manager = streamer
 	_sync_instantiator_config()
-
-
-## Get the object distance manager
-func get_object_distance_manager() -> Node3D:
-	return _object_distance_manager
-
-
-## Legacy alias for compatibility
-func set_per_object_lod_manager(manager: Node3D) -> void:
-	set_object_distance_manager(manager)
-
-
-## Legacy alias for compatibility
-func get_per_object_lod_manager() -> Node3D:
-	return _object_distance_manager
 
 
 ## Sync configuration to instantiator
@@ -629,16 +614,16 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 # DEFERRED CELL LOADING (For Per-Object Distance Management)
 # =============================================================================
 # Loads cell reference DATA without instantiating Node3D objects.
-# Objects are registered with ObjectDistanceManager as "deferred" and will
+# Objects are registered with ObjectStreamer as "deferred" and will
 # be instantiated when they enter NEAR range.
 #
 # This enables radius-based cell loading where:
 # - All cells within FAR range have their data loaded
 # - Only objects in NEAR range get Node3D instantiated
-# - MID/FAR objects show LOD meshes or impostors via ODM
+# - MID/FAR objects show LOD meshes or impostors via ObjectStreamer
 # =============================================================================
 
-## Load cell reference data and register all objects as deferred with ODM
+## Load cell reference data and register all objects as deferred with ObjectStreamer
 ## Does NOT instantiate Node3D objects - that happens when objects enter NEAR range
 ## Returns number of objects registered, or -1 on failure
 func load_cell_deferred(x: int, y: int) -> int:
@@ -647,11 +632,11 @@ func load_cell_deferred(x: int, y: int) -> int:
 		return -1
 
 	if not _object_distance_manager:
-		push_warning("CellManager: Cannot load deferred - no ObjectDistanceManager set")
+		push_warning("CellManager: Cannot load deferred - no ObjectStreamer set")
 		return -1
 
 	if not _object_distance_manager.has_method("register_deferred_object"):
-		push_warning("CellManager: ObjectDistanceManager does not support deferred registration")
+		push_warning("CellManager: ObjectStreamer does not support deferred registration")
 		return -1
 
 	var cell_grid := Vector2i(x, y)
@@ -718,8 +703,8 @@ func get_cell_references(x: int, y: int) -> Array:
 	return cell_record.references
 
 
-## Instantiate a single deferred object by its ODM data
-## Called when ObjectDistanceManager requests instantiation (object entering NEAR)
+## Instantiate a single deferred object by its data
+## Called when ObjectStreamer requests instantiation (object entering NEAR)
 ## Returns the instantiated Node3D or null on failure
 func instantiate_deferred_object(
 	model_path: String,
@@ -816,6 +801,69 @@ const MAX_CONVERSIONS_PER_FRAME := 1
 
 ## Maximum retries for failed async requests
 const MAX_ASYNC_RETRIES := 2
+
+# =============================================================================
+# NEAR TIER BURST LOADING (Aggressive instantiation for critical cells)
+# =============================================================================
+
+## Import StreamingConfig for burst loading parameters
+const SC := preload("res://src/core/world/streaming_config.gd")
+
+## Whether burst loading is currently active
+var _burst_loading_active: bool = false
+
+## Burst loading budget (ms) - higher than normal for faster cell population
+var _burst_budget_ms: float = SC.NEAR_BURST_BUDGET_MS
+
+## Burst loading max instantiations per frame
+var _burst_max_instantiations: int = SC.NEAR_BURST_MAX_INSTANTIATIONS
+
+## Distance threshold for burst loading (objects closer than this get burst priority)
+var _burst_distance: float = SC.NEAR_BURST_DISTANCE
+
+# =============================================================================
+# PARALLEL DUPLICATE (WorkerThreadPool)
+# =============================================================================
+
+## Enable parallel duplicate() for faster instantiation
+var parallel_duplicate_enabled: bool = SC.PARALLEL_DUPLICATE_ENABLED
+
+## Results from parallel duplicate tasks (thread-safe queue)
+## Each entry: {instance: Node3D, request_id: int, transform_data: Dictionary, model_path: String, name: String, cell_node: Node3D}
+## Note: We store transform_data instead of ref to avoid RefCounted lifetime issues across threads
+var _parallel_duplicate_results: Array = []
+var _parallel_duplicate_mutex: Mutex = Mutex.new()
+
+## Active parallel duplicate task count
+var _parallel_duplicate_active: int = 0
+
+## Pending parallel duplicate requests (waiting for task slot)
+## Each entry: {prototype: Node3D, request_id: int, ref: CellReference, model_path: String, item_id: String}
+var _parallel_duplicate_pending: Array = []
+
+## Statistics for parallel duplicate diagnostics
+var _parallel_duplicate_stats: Dictionary = {
+	"dispatched": 0,
+	"completed": 0,
+	"failed_cell_freed": 0,
+	"failed_instance_invalid": 0,
+	"failed_duplicate_error": 0,
+	"total_dispatch_time_usec": 0,
+	"total_process_time_usec": 0,
+}
+
+# =============================================================================
+# POOL PRE-WARMING
+# =============================================================================
+
+## Enable pool pre-warming when objects are discovered near player
+var pool_prewarm_enabled: bool = SC.POOL_PREWARM_ENABLED
+
+## Models pending pre-warm: model_path -> count needed
+var _prewarm_pending: Dictionary = {}
+
+## Pre-warm budget per frame
+var _prewarm_per_frame: int = SC.POOL_PREWARM_MAX_PER_FRAME
 
 ## Async cell request tracking
 class AsyncCellRequest:
@@ -1082,8 +1130,15 @@ func get_pending_disk_load_count() -> int:
 ## Returns number of objects instantiated this frame
 ## Uses BOTH time budget AND object count cap for consistent frame times
 ## Objects are sorted by distance to camera - nearest objects instantiate first
+##
+## BURST LOADING: When objects are very close to camera (< NEAR_BURST_DISTANCE),
+## uses higher budget and limits for faster cell population.
+##
+## PARALLEL DUPLICATE: When enabled and queue is large enough, uses WorkerThreadPool
+## to duplicate prototypes on worker threads, reducing main thread stalls.
+##
 ## Parameters:
-##   budget_ms: Time budget in milliseconds
+##   budget_ms: Time budget in milliseconds (may be overridden by burst loading)
 ##   camera_pos: Camera position for distance-priority sorting (optional, uses cached if not provided)
 func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3.INF) -> int:
 	# Update camera position if provided
@@ -1096,8 +1151,15 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# Then process any pending conversions to feed the cache
 	process_pending_conversions(MAX_CONVERSION_TIME_MS)
 
+	# Process completed parallel duplicate results first (these are ready to add)
+	var parallel_added := _process_parallel_duplicate_results()
+
+	# Process pool pre-warming in background
+	if pool_prewarm_enabled:
+		_process_pool_prewarm()
+
 	if _instantiation_queue.is_empty():
-		return 0
+		return parallel_added
 
 	# Sort queue by distance periodically (not every frame - too expensive)
 	var current_frame := Engine.get_frames_drawn()
@@ -1105,10 +1167,35 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_queue_sort_frame = current_frame
 		_sort_queue_by_distance()
 
+	# BURST LOADING: Check if nearest objects are very close (critical loading)
+	# If so, use aggressive budget to populate cells faster
+	var effective_budget_ms := budget_ms
+	var effective_max_instantiations := MAX_INSTANTIATIONS_PER_FRAME
+
+	if not _instantiation_queue.is_empty():
+		var first_entry: Dictionary = _instantiation_queue[0]
+		var first_pos: Vector3 = first_entry.get("position", Vector3.ZERO)
+		var first_distance := _camera_position.distance_to(first_pos)
+
+		if first_distance < _burst_distance:
+			# Activate burst loading for nearby objects
+			_burst_loading_active = true
+			effective_budget_ms = _burst_budget_ms
+			effective_max_instantiations = _burst_max_instantiations
+		else:
+			_burst_loading_active = false
+
 	var start_time := Time.get_ticks_usec()
-	var budget_usec := budget_ms * 1000.0
-	var instantiated := 0
+	var budget_usec := effective_budget_ms * 1000.0
+	var instantiated := parallel_added
 	var exit_reason := ""
+
+	# PARALLEL DUPLICATE: If queue is large and parallel enabled, dispatch to workers
+	if parallel_duplicate_enabled and _instantiation_queue.size() >= SC.PARALLEL_DUPLICATE_MIN_BATCH:
+		var dispatched := _dispatch_parallel_duplicates(effective_max_instantiations - instantiated)
+		if dispatched > 0:
+			# Some work dispatched to workers, continue with remaining budget
+			pass
 
 	# Batch children for deferred add_child (reduces scene tree churn)
 	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
@@ -1121,7 +1208,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			break
 
 		# Check object count cap (critical for consistent frame times)
-		if instantiated >= MAX_INSTANTIATIONS_PER_FRAME:
+		if instantiated >= effective_max_instantiations:
 			exit_reason = "object_cap"
 			break
 
@@ -1198,6 +1285,305 @@ func _sort_queue_by_distance() -> void:
 		var dist_sq_b := cam_pos.distance_squared_to(pos_b)
 		return dist_sq_a < dist_sq_b  # Nearest first
 	)
+
+
+# =============================================================================
+# PARALLEL DUPLICATE IMPLEMENTATION
+# =============================================================================
+
+## Dispatch duplicate tasks to WorkerThreadPool
+## Returns number of tasks dispatched
+func _dispatch_parallel_duplicates(max_count: int) -> int:
+	if _parallel_duplicate_active >= SC.PARALLEL_DUPLICATE_MAX_TASKS:
+		return 0  # Already at capacity
+
+	var dispatched := 0
+	var available_slots := SC.PARALLEL_DUPLICATE_MAX_TASKS - _parallel_duplicate_active
+
+	while dispatched < mini(max_count, available_slots) and not _instantiation_queue.is_empty():
+		var entry: Dictionary = _instantiation_queue.pop_front()
+		var request_id: int = entry.request_id
+		var ref: CellReference = entry.ref
+		var model_path: String = entry.model_path
+		var item_id: String = entry.get("item_id", "")
+
+		# Check if request still exists
+		if request_id not in _async_requests:
+			continue
+
+		var request: AsyncCellRequest = _async_requests[request_id]
+
+		# Check if cell_node is still valid
+		if not is_instance_valid(request.cell_node):
+			request.pending_instantiations -= 1
+			if _is_request_complete(request):
+				request.completed = true
+				request.failed = true
+				request.error_message = "Cell node freed during parallel dispatch"
+			continue
+
+		# Get the model prototype (must be done on main thread)
+		var cache_key := _get_cache_key(model_path, item_id)
+		var model_prototype: Node3D = null
+
+		# Try object pool first
+		if use_object_pool and _object_pool and not model_path.is_empty():
+			var pooled: Node3D = _object_pool.call("acquire", model_path)
+			if pooled:
+				# Got from pool - no need to duplicate, add directly
+				var pool_name := str(ref.ref_id) + "_" + str(ref.ref_num)
+				pooled.name = pool_name
+				_apply_transform(pooled, ref, true)
+				_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
+
+				# Add to results directly (already done on main thread)
+				# Mark as from_pool so we don't increment "completed" counter for worker tasks
+				_parallel_duplicate_mutex.lock()
+				_parallel_duplicate_results.append({
+					"instance": pooled,
+					"request_id": request_id,
+					"transform_data": {},  # Already applied above, empty to skip re-apply
+					"model_path": model_path,
+					"cell_node": request.cell_node,
+					"name": pool_name,
+					"from_pool": true
+				})
+				_parallel_duplicate_mutex.unlock()
+				dispatched += 1
+				continue
+
+		# Get from cache
+		model_prototype = _model_loader.get_cached(model_path, item_id)
+		if not model_prototype:
+			# Model not in cache - fall back to sync path
+			model_prototype = _model_loader.get_model(model_path, item_id)
+			if not model_prototype:
+				request.pending_instantiations -= 1
+				continue
+
+		# Auto-register with object pool if available (on-demand pooling)
+		# This enables pooling even without explicit preload_common_models() call
+		if use_object_pool and _object_pool and not model_path.is_empty():
+			if not _object_pool.call("has_model", model_path):
+				# Register with default pool size - pool will grow as needed
+				_object_pool.call("register_model", model_path, model_prototype, 0, 50)
+
+		# Dispatch duplicate() to worker thread
+		_parallel_duplicate_active += 1
+		var dispatch_start := Time.get_ticks_usec()
+
+		# Capture variables for closure - extract transform data BEFORE dispatching
+		# This avoids RefCounted lifetime issues with CellReference across threads
+		var cell_node: Node3D = request.cell_node
+		var instance_name := str(ref.ref_id) + "_" + str(ref.ref_num)
+		var transform_data := {
+			"position": ref.position,
+			"rotation": ref.rotation,
+			"scale": ref.scale,
+		}
+
+		WorkerThreadPool.add_task(func():
+			# This runs on worker thread - duplicate the prototype
+			# Resource paths are cleared in ModelLoader._load_from_disk_cache() so duplicates
+			# don't conflict on the same paths
+			var task_start := Time.get_ticks_usec()
+			var instance: Node3D = null
+			var success := true
+
+			instance = model_prototype.duplicate()
+			if instance:
+				instance.name = instance_name
+			else:
+				success = false
+
+			# Store result for main thread to process
+			_parallel_duplicate_mutex.lock()
+			if success and instance:
+				_parallel_duplicate_results.append({
+					"instance": instance,
+					"request_id": request_id,
+					"transform_data": transform_data,
+					"model_path": model_path,
+					"cell_node": cell_node,
+					"name": instance_name
+				})
+			else:
+				_parallel_duplicate_stats["failed_duplicate_error"] += 1
+			_parallel_duplicate_active -= 1
+			_parallel_duplicate_stats["total_dispatch_time_usec"] += Time.get_ticks_usec() - task_start
+			_parallel_duplicate_mutex.unlock()
+		)
+
+		_parallel_duplicate_stats["dispatched"] += 1
+
+		dispatched += 1
+
+	return dispatched
+
+
+## Process completed parallel duplicate results
+## Returns number of objects added to scene
+func _process_parallel_duplicate_results() -> int:
+	var process_start := Time.get_ticks_usec()
+
+	_parallel_duplicate_mutex.lock()
+	var results := _parallel_duplicate_results.duplicate()
+	_parallel_duplicate_results.clear()
+	_parallel_duplicate_mutex.unlock()
+
+	if results.is_empty():
+		return 0
+
+	var added := 0
+	for result: Dictionary in results:
+		var instance: Node3D = result.get("instance")
+		var request_id: int = result.get("request_id", -1)
+		var transform_data: Dictionary = result.get("transform_data", {})
+		var cell_node: Node3D = result.get("cell_node")
+
+		# Validate instance is still valid (could have been freed if duplicate failed)
+		if not is_instance_valid(instance):
+			_parallel_duplicate_stats["failed_instance_invalid"] += 1
+			continue
+
+		# Validate cell_node is still valid
+		if not is_instance_valid(cell_node):
+			instance.queue_free()
+			_parallel_duplicate_stats["failed_cell_freed"] += 1
+			continue
+
+		# Validate request still exists
+		if request_id in _async_requests:
+			var request: AsyncCellRequest = _async_requests[request_id]
+			request.pending_instantiations -= 1
+
+			if _is_request_complete(request):
+				request.completed = true
+
+		# Apply transform from stored data (instead of ref)
+		# This matches _apply_transform but uses stored Dictionary instead of CellReference
+		if not transform_data.is_empty():
+			instance.position = CS.vector_to_godot(transform_data.get("position", Vector3.ZERO))
+			instance.scale = CS.scale_to_godot(transform_data.get("scale", 1.0))
+			instance.basis = CS.esm_rotation_to_godot_basis(transform_data.get("rotation", Vector3.ZERO))
+
+		# Set pool metadata so object can be returned to pool when cell is unloaded
+		var model_path: String = result.get("model_path", "")
+		if use_object_pool and _object_pool and not model_path.is_empty():
+			var normalized := model_path.to_lower().replace("/", "\\")
+			instance.set_meta("pool_model_path", normalized)
+
+		# Add to scene
+		cell_node.add_child(instance)
+		added += 1
+
+		_stats["objects_instantiated"] += 1
+		_diag_duplicate_count += 1
+
+		# Only count as "completed" if this was an actual worker thread duplicate, not from pool
+		if not result.get("from_pool", false):
+			_parallel_duplicate_stats["completed"] += 1
+
+	_parallel_duplicate_stats["total_process_time_usec"] += Time.get_ticks_usec() - process_start
+	return added
+
+
+# =============================================================================
+# POOL PRE-WARMING IMPLEMENTATION
+# =============================================================================
+
+## Queue models for pre-warming based on nearby objects
+## Called when objects are registered with ObjectStreamer
+func queue_prewarm(model_path: String, count: int = 1) -> void:
+	if not pool_prewarm_enabled or not _object_pool:
+		return
+
+	var normalized := model_path.to_lower().replace("/", "\\")
+
+	# Check if pool already has enough available
+	if _object_pool.has_method("get_available_count"):
+		var available: int = _object_pool.get_available_count(normalized)
+		if available >= SC.POOL_PREWARM_MAX_PER_MODEL:
+			return
+
+	# Add to pending pre-warm
+	var current: int = _prewarm_pending.get(normalized, 0)
+	_prewarm_pending[normalized] = mini(current + count, SC.POOL_PREWARM_MAX_PER_MODEL)
+
+
+## Process pool pre-warming within budget
+func _process_pool_prewarm() -> void:
+	if _prewarm_pending.is_empty() or not _object_pool:
+		return
+
+	var prewarmed := 0
+	var to_remove: Array[String] = []
+
+	for model_path: String in _prewarm_pending:
+		if prewarmed >= _prewarm_per_frame:
+			break
+
+		var count: int = _prewarm_pending[model_path]
+		var remaining := _prewarm_per_frame - prewarmed
+
+		# Only pre-warm if pool has the model registered
+		if _object_pool.has_method("prewarm"):
+			var created: int = _object_pool.prewarm(model_path, mini(count, remaining))
+			prewarmed += created
+
+			if created >= count:
+				to_remove.append(model_path)
+			else:
+				_prewarm_pending[model_path] = count - created
+
+	# Remove completed entries
+	for path in to_remove:
+		_prewarm_pending.erase(path)
+
+
+## Check if burst loading is currently active
+func is_burst_loading() -> bool:
+	return _burst_loading_active
+
+
+## Get parallel duplicate stats
+func get_parallel_duplicate_stats() -> Dictionary:
+	var stats := {
+		"active_tasks": _parallel_duplicate_active,
+		"pending_results": _parallel_duplicate_results.size(),
+		"enabled": parallel_duplicate_enabled,
+		# Detailed stats
+		"dispatched": _parallel_duplicate_stats.get("dispatched", 0),
+		"completed": _parallel_duplicate_stats.get("completed", 0),
+		"failed_cell_freed": _parallel_duplicate_stats.get("failed_cell_freed", 0),
+		"failed_instance_invalid": _parallel_duplicate_stats.get("failed_instance_invalid", 0),
+		"failed_duplicate_error": _parallel_duplicate_stats.get("failed_duplicate_error", 0),
+	}
+
+	# Calculate averages
+	var dispatched: int = _parallel_duplicate_stats.get("dispatched", 0)
+	if dispatched > 0:
+		stats["avg_dispatch_time_us"] = _parallel_duplicate_stats.get("total_dispatch_time_usec", 0) / dispatched
+	else:
+		stats["avg_dispatch_time_us"] = 0
+
+	var completed: int = _parallel_duplicate_stats.get("completed", 0)
+	if completed > 0:
+		stats["avg_process_time_us"] = _parallel_duplicate_stats.get("total_process_time_usec", 0) / completed
+	else:
+		stats["avg_process_time_us"] = 0
+
+	# Success rate
+	var failed_cell: int = stats["failed_cell_freed"]
+	var failed_instance: int = stats["failed_instance_invalid"]
+	var failed_dup: int = stats["failed_duplicate_error"]
+	var total_finished: int = completed + failed_cell + failed_instance + failed_dup
+	if total_finished > 0:
+		stats["success_rate"] = float(completed) / float(total_finished)
+	else:
+		stats["success_rate"] = 1.0
+
+	return stats
 
 
 ## Internal: Start an async request
@@ -1588,6 +1974,42 @@ func get_async_pending_count() -> int:
 ## Get total objects waiting in instantiation queue
 func get_instantiation_queue_size() -> int:
 	return _instantiation_queue.size()
+
+
+## Get comprehensive loading stats including burst loading and parallel duplicate
+func get_loading_stats() -> Dictionary:
+	var parallel_stats := get_parallel_duplicate_stats()
+	return {
+		"instantiation_queue_size": _instantiation_queue.size(),
+		"burst_loading_active": _burst_loading_active,
+		"burst_budget_ms": _burst_budget_ms,
+		"burst_max_instantiations": _burst_max_instantiations,
+		"parallel_duplicate_enabled": parallel_duplicate_enabled,
+		"parallel_duplicate_active": parallel_stats.active_tasks,
+		"parallel_duplicate_pending": parallel_stats.pending_results,
+		"prewarm_pending_count": _prewarm_pending.size(),
+		"objects_instantiated": _stats.get("objects_instantiated", 0),
+		"objects_from_pool": _stats.get("objects_from_pool", 0),
+		"avg_duplicate_time_us": (_diag_duplicate_time_total_us / _diag_duplicate_count) if _diag_duplicate_count > 0 else 0
+	}
+
+
+## Get overall stats including pool stats
+func get_stats() -> Dictionary:
+	var result := _stats.duplicate()
+
+	# Add pool stats if pool is available
+	if _object_pool and _object_pool.has_method("get_stats"):
+		var pool_stats: Dictionary = _object_pool.call("get_stats")
+		result["pool_available"] = pool_stats.get("total_available", 0)
+		result["pool_in_use"] = pool_stats.get("total_in_use", 0)
+		result["pool_total_pools"] = pool_stats.get("total_pools", 0)
+		result["pool_hit_rate"] = pool_stats.get("hit_rate", 0.0)
+		result["pool_new_instances"] = pool_stats.get("new_instances_created", 0)
+		result["pool_acquires"] = pool_stats.get("acquires", 0)
+		result["pool_releases"] = pool_stats.get("releases", 0)
+
+	return result
 
 
 ## Clean up significant objects in a cell when it's unloaded

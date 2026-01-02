@@ -199,19 +199,17 @@ func get_render_stats() -> Dictionary:
 
 
 ## Get material library stats if available
+## Uses the MaterialLibrary class with static methods
 func get_material_library_stats() -> Dictionary:
-	var MatLib: GDScript = load("res://src/core/texture/material_library.gd")
-	if MatLib:
-		return MatLib.call("get_stats")
-	return {}
+	# MaterialLibrary is a class_name, call static method directly
+	return MaterialLibrary.get_stats()
 
 
 ## Get texture loader stats if available
+## Uses the TextureLoader class with static methods
 func get_texture_stats() -> Dictionary:
-	var TexLoader: GDScript = load("res://src/core/texture/texture_loader.gd")
-	if TexLoader:
-		return TexLoader.call("get_stats")
-	return {}
+	# TextureLoader is a class_name, call static method directly
+	return TextureLoader.get_stats()
 
 
 ## Get complete profiling report

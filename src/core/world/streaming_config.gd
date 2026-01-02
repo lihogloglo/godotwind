@@ -1,0 +1,306 @@
+class_name StreamingConfig
+extends RefCounted
+
+## Centralized configuration for the world streaming system
+##
+## All tunable parameters for LOD, streaming, and performance are defined here.
+## Modify these values to adjust streaming behavior globally.
+##
+## Usage:
+##   var near_distance = StreamingConfig.NEAR_END
+##   var fade_margin = StreamingConfig.FADE_MARGIN_NEAR
+
+# =============================================================================
+# DISTANCE THRESHOLDS
+# =============================================================================
+
+## Distance where NEAR tier ends and MID tier begins (meters)
+## NEAR tier: Full Node3D with physics and collision
+const NEAR_END := 150.0
+
+## Distance where MID tier ends and FAR tier begins (meters)
+## MID tier: MultiMesh LOD instances (3 levels)
+const MID_END := 500.0
+
+## Distance where FAR tier ends and HORIZON begins (meters)
+## FAR tier: Octahedral impostor billboards
+const FAR_END := 5000.0
+
+# =============================================================================
+# LOD LEVELS WITHIN MID TIER
+# =============================================================================
+
+## MID tier is subdivided into 3 LOD levels
+## LOD1: Highest detail in MID tier
+const MID_LOD1_START := NEAR_END
+const MID_LOD1_END := 250.0
+
+## LOD2: Medium detail
+const MID_LOD2_START := 250.0
+const MID_LOD2_END := 375.0
+
+## LOD3: Lowest detail in MID tier (transitions to impostor)
+const MID_LOD3_START := 375.0
+const MID_LOD3_END := MID_END
+
+# =============================================================================
+# CROSSFADE MARGINS
+# =============================================================================
+
+## Overlap distance for NEAR→MID transition (meters)
+## Both tiers visible during crossfade with dithering
+## Increased from 30m to 50m for smoother, more visible transitions
+## At 50m/s camera speed, this gives ~1 second transition time
+const FADE_MARGIN_NEAR := 50.0
+
+## Overlap distance for MID→FAR transition (meters)
+## Increased for smoother impostor pop-in
+const FADE_MARGIN_MID := 50.0
+
+## Overlap distance for FAR→HORIZON transition (meters)
+## Larger margin for distant fading
+const FADE_MARGIN_FAR := 100.0
+
+## Generic fade margin (used by DistanceUtils)
+## This is the default value used when specific margins aren't specified
+const FADE_MARGIN := 50.0
+
+# =============================================================================
+# HYSTERESIS (Anti-Flickering)
+# =============================================================================
+
+## Hysteresis at NEAR boundary prevents rapid tier switching
+## Objects must move NEAR_END + HYSTERESIS_NEAR before switching back
+const HYSTERESIS_NEAR := 40.0
+
+## Hysteresis at MID boundary
+const HYSTERESIS_MID := 60.0
+
+## Hysteresis at FAR boundary
+const HYSTERESIS_FAR := 150.0
+
+# =============================================================================
+# TIME BUDGETS (milliseconds per frame)
+# =============================================================================
+
+## Maximum time per frame for processing cell loading queue
+## Prevents frame drops during heavy streaming
+const CELL_QUEUE_BUDGET_MS := 2.0
+
+## Maximum time per frame for instantiating NEAR tier objects (default mode)
+const INSTANTIATION_BUDGET_MS := 12.0
+
+## NEAR TIER BURST LOADING - Aggressive budget for critical cells
+## When loading the player's current cell or immediately adjacent cells,
+## use these higher limits to populate objects much faster.
+## This trades slightly higher frame times for dramatically faster cell load times.
+const NEAR_BURST_BUDGET_MS := 24.0           ## 2x budget during burst loading
+const NEAR_BURST_MAX_INSTANTIATIONS := 150   ## 3x objects per frame during burst
+const NEAR_BURST_DISTANCE := 200.0           ## Radius for burst loading priority
+
+## Delay before rebuilding impostor texture array (batching)
+## Waits for multiple textures to finish loading before rebuilding
+const TEXTURE_REBUILD_DELAY_MS := 300.0
+
+## Maximum number of MultiMesh rebuilds per second
+## Prevents per-frame rebuilding during heavy loading
+const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
+
+# =============================================================================
+# MEMORY LIMITS
+# =============================================================================
+
+## Maximum number of pooled Node3D objects
+## Prevents unbounded memory growth
+const MAX_POOLED_OBJECTS := 2048
+
+## Maximum number of impostor textures in texture array
+## GPU hardware limit (most GPUs support 512+ layers)
+const MAX_IMPOSTOR_TEXTURES := 512
+
+## Warning threshold (90% of max)
+const IMPOSTOR_TEXTURE_WARNING_THRESHOLD := 450
+
+## Maximum number of NEAR tier cells loaded simultaneously
+## NEAR tier: ~150m radius = ~13 cells (117m cell size)
+const MAX_NEAR_CELLS := 13
+
+## Maximum number of MID tier cells loaded simultaneously
+## MID tier: 150-500m ring
+const MAX_MID_CELLS := 80
+
+## Maximum number of FAR tier cells loaded simultaneously
+## FAR tier: 500-5000m ring
+const MAX_FAR_CELLS := 250
+
+# =============================================================================
+# CELL DIMENSIONS
+# =============================================================================
+
+## Cell size in world units (meters)
+## Morrowind standard: 117.12m (8192 Morrowind units)
+const CELL_SIZE := 117.12
+
+## Spatial hash cell size for ObjectStreamer (meters)
+## Used for fast nearby object queries
+const SPATIAL_HASH_CELL_SIZE := 50.0
+
+# =============================================================================
+# QUALITY PRESETS
+# =============================================================================
+
+enum QualityPreset {
+	LOW,      ## Minimum settings for low-end hardware
+	MEDIUM,   ## Balanced settings (default)
+	HIGH,     ## Higher quality for mid-range hardware
+	ULTRA     ## Maximum quality for high-end hardware
+}
+
+## Quality preset configurations
+## Returns dictionary with distance overrides for the given preset
+static func get_quality_preset_config(preset: QualityPreset) -> Dictionary:
+	match preset:
+		QualityPreset.LOW:
+			return {
+				"near_end": 100.0,
+				"mid_end": 300.0,
+				"far_end": 2000.0,
+				"max_near_cells": 8,
+				"max_mid_cells": 40,
+				"max_far_cells": 100
+			}
+		QualityPreset.MEDIUM:
+			return {
+				"near_end": NEAR_END,
+				"mid_end": MID_END,
+				"far_end": FAR_END,
+				"max_near_cells": MAX_NEAR_CELLS,
+				"max_mid_cells": MAX_MID_CELLS,
+				"max_far_cells": MAX_FAR_CELLS
+			}
+		QualityPreset.HIGH:
+			return {
+				"near_end": 200.0,
+				"mid_end": 750.0,
+				"far_end": 7500.0,
+				"max_near_cells": 20,
+				"max_mid_cells": 120,
+				"max_far_cells": 350
+			}
+		QualityPreset.ULTRA:
+			return {
+				"near_end": 300.0,
+				"mid_end": 1000.0,
+				"far_end": 10000.0,
+				"max_near_cells": 30,
+				"max_mid_cells": 160,
+				"max_far_cells": 500
+			}
+
+	# Fallback to medium
+	return get_quality_preset_config(QualityPreset.MEDIUM)
+
+# =============================================================================
+# EVENT-DRIVEN FADE ANIMATION (Industry-Standard)
+# =============================================================================
+
+## Time-based fade animation duration (seconds)
+## Industry-standard: 0.3-0.5 seconds for smooth transitions
+## This is purely time-based, not distance-based, for consistent visual quality
+const FADE_DURATION := 0.3
+
+## Maximum concurrent fade animations
+## Prevents runaway processing when moving fast through many objects
+## ObjectStreamer._active_fades is capped at this size
+const MAX_CONCURRENT_FADES := 200
+
+## Teleport detection threshold (meters)
+## If camera moves more than this in one frame, skip fades and pop instantly
+## Matches user preference for "instant pop" on fast travel/debug flying
+const TELEPORT_THRESHOLD := 100.0
+const TELEPORT_THRESHOLD_SQ := TELEPORT_THRESHOLD * TELEPORT_THRESHOLD
+
+# =============================================================================
+# MATERIAL POOLING (Zero-Allocation at Runtime)
+# =============================================================================
+
+## Pre-allocated crossfade material pool size
+## Should be >= MAX_CONCURRENT_FADES to avoid runtime allocation
+const MATERIAL_POOL_SIZE := 256
+
+## Initial number of materials to pre-warm at startup
+const MATERIAL_POOL_PREWARM := 64
+
+# =============================================================================
+# PARALLEL DUPLICATE (WorkerThreadPool)
+# =============================================================================
+
+## Enable parallel duplicate() for NEAR tier instantiation
+## Uses WorkerThreadPool to clone prototypes on worker threads
+## Main thread only does add_child() from completed results
+const PARALLEL_DUPLICATE_ENABLED := true
+
+## Maximum concurrent parallel duplicate tasks
+## Should be <= number of CPU cores for best performance
+const PARALLEL_DUPLICATE_MAX_TASKS := 8
+
+## Minimum queue size before triggering parallel duplicate
+## Below this, sequential duplicate is faster due to overhead
+const PARALLEL_DUPLICATE_MIN_BATCH := 4
+
+# =============================================================================
+# OBJECT POOL PRE-WARMING
+# =============================================================================
+
+## Enable automatic pool pre-warming when cells are discovered
+## Pre-creates instances before they're needed for faster instantiation
+const POOL_PREWARM_ENABLED := true
+
+## Maximum instances to pre-warm per model type
+const POOL_PREWARM_MAX_PER_MODEL := 10
+
+## Maximum total instances to pre-warm per frame
+const POOL_PREWARM_MAX_PER_FRAME := 20
+
+## Distance threshold for triggering pre-warm (slightly beyond NEAR_END)
+## Objects within this distance get their pools pre-warmed
+const POOL_PREWARM_DISTANCE := 250.0
+
+# =============================================================================
+# LODMULTIMESHBATCHER OPTIMIZATION
+# =============================================================================
+
+## Initial capacity for each MultiMesh batch
+## Higher = fewer growth operations, more memory
+## 256 is good balance for typical Morrowind object density
+const INITIAL_BATCH_CAPACITY := 256
+
+## Maximum batch capacity before splitting into new batch
+const MAX_BATCH_CAPACITY := 4096
+
+## Pre-warm batch count for common mesh types
+const BATCH_PREWARM_COUNT := 20
+
+# =============================================================================
+# GPU VISIBILITY (Sparse Readback)
+# =============================================================================
+
+## Maximum tier changes per frame for sparse readback
+## If exceeded, falls back to full scan (rare during teleport)
+const MAX_GPU_CHANGES := 4096
+
+## GPU object threshold - use GPU compute above this count
+const GPU_OBJECT_THRESHOLD := 100
+
+# =============================================================================
+# DIAGNOSTIC FLAGS
+# =============================================================================
+
+## Enable debug logging for streaming system
+const DEBUG_LOGGING := false
+
+## Enable debug visualization overlays
+const DEBUG_VISUALIZATION := false
+
+## Enable performance profiling markers
+const ENABLE_PROFILING := true

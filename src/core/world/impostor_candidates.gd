@@ -98,22 +98,135 @@ const LARGE_BUILDING_PATTERNS: Array[String] = [
 	"ex_de_shack",
 ]
 
-## Large rock formations visible from distance
+## Rock formations visible from distance (expanded for dense world)
 const TERRAIN_FEATURE_PATTERNS: Array[String] = [
-	"terrain_rock_rm_",  # Large rocks only
-	"terrain_rock_big_",
+	# Large distinctive rocks
+	"terrain_rock_rm_",   # Red Mountain rocks
+	"terrain_rock_big_",  # Big rocks
+	"terrain_rock_bc_",   # Bitter Coast rocks
+	"terrain_rock_wg_",   # West Gash rocks
+	"terrain_rock_ai_",   # Ascadian Isles rocks
+	"terrain_rock_gl_",   # Grazelands rocks
+	"terrain_rock_ash_",  # Ashlands rocks
+	"terrain_rock_ma_",   # Molag Amur rocks
+	"terrain_rock_sh_",   # Sheogorad rocks
+	# Medium-sized rocks (visible from MID tier)
+	"terrain_rock_sm_",   # Small-medium rocks
+	# Arches and pillars
 	"terrain_arch_",
 	"terrain_pillar_",
+	# Cliffs and ledges
+	"terrain_cliff_",
+	"terrain_ledge_",
 ]
 
-## Large trees that should have impostors
+## Trees that should have LODs/impostors (expanded)
 const TREE_PATTERNS: Array[String] = [
+	# Large trees by region
 	"flora_tree_gl",     # Grazelands trees
 	"flora_tree_ai",     # Ascadian Isles trees
 	"flora_tree_bc",     # Bitter Coast trees
 	"flora_tree_wg",     # West Gash trees
-	"flora_emp_tree",    # Emperor Parasol (large mushroom)
 	"flora_ashtree",     # Ashlands trees
+	# Giant mushrooms (iconic Morrowind flora)
+	"flora_emp_tree",    # Emperor Parasol
+	"flora_bc_empmush",  # Emperor mushrooms
+	# Telvanni mushroom towers (organic buildings)
+	"flora_t_mushroom",
+	# Other significant vegetation
+	"flora_bc_tree",     # Bitter Coast general
+	"flora_bc_fern",     # Large ferns
+]
+
+## Smaller vegetation that adds density (LOD only, no impostor - too small)
+## These are MID tier objects that don't need FAR tier impostors
+const VEGETATION_PATTERNS: Array[String] = [
+	# Mushrooms (distinctive Morrowind flora)
+	"flora_bc_mushroom",   # Bitter Coast mushrooms
+	"flora_ash_grass",     # Ashlands grass clumps
+	"flora_grass_",        # Grass patches
+	"flora_kelp",          # Underwater kelp
+	# Smaller plants with silhouettes
+	"flora_bc_fern",
+	"flora_bc_podplant",
+	"flora_comberry",
+	"flora_marshmerrow",
+	"flora_saltrice",
+	"flora_stoneflower",
+	"flora_wickwheat",
+	"flora_corkbulb",
+	"flora_hackle-lo",
+	# Stumps and logs
+	"flora_bc_log",
+	"flora_bc_stump",
+]
+
+## Props and clutter that add life to the world
+const PROP_PATTERNS: Array[String] = [
+	# Wooden structures
+	"ex_de_ship",         # Ships and boats (important for coastal areas)
+	"furn_de_rope",       # Ropes and rigging
+	# Stone markers and monuments
+	"ex_t_menhir",        # Standing stones (Telvanni)
+	"ex_ashl_marker",     # Ashlander markers
+	"furn_headstone",     # Gravestones
+	# Signs and posts
+	"furn_sign",          # Town signs
+	"ex_de_post",         # Posts
+	# Barrels and crates (common outdoor clutter)
+	"furn_de_barrel",
+	"furn_com_barrel",
+	"furn_de_crate",
+	# Market stalls
+	"furn_de_stall",
+	# Wells and fountains
+	"furn_well",
+	"furn_fountain",
+	# Campfires and outdoor fixtures
+	"furn_campfire",
+	"light_de_lantern_",  # Lanterns on posts
+]
+
+## Dunmer architectural details (walls, fences, stairs)
+const ARCHITECTURE_DETAIL_PATTERNS: Array[String] = [
+	# Walls and fences
+	"ex_hlaalu_fence",
+	"ex_hlaalu_wall",
+	"ex_redoran_fence",
+	"ex_redoran_wall",
+	"ex_common_wall",
+	"ex_common_fence",
+	# Stairs and platforms
+	"ex_common_stair",
+	"ex_hlaalu_stair",
+	"ex_redoran_stair",
+	"ex_de_docks_stair",
+	# Pillars and posts
+	"ex_common_pillar",
+	"ex_hlaalu_pillar",
+	"ex_hlaalu_post",
+	# Bridges
+	"ex_de_bridge",
+	"ex_common_bridge",
+	# Platforms and docks (for coastal/river areas)
+	"ex_common_plat",
+	"ex_de_docks_plat",
+	"ex_de_docks_plank",
+	"ex_de_docks_post",
+	"ex_de_docks_ladder",
+	"ex_de_shack_plat",
+	"ex_de_shack_post",
+]
+
+## Ruined structures (add atmosphere)
+const RUIN_PATTERNS: Array[String] = [
+	"ex_dwe_ruin",        # Dwemer ruins (catch-all for smaller pieces)
+	"ex_dae_ruin",        # Daedric ruins
+	"ex_velothi_ruin",    # Velothi ruins
+	"ex_hlaalu_ruin",     # Ruined Hlaalu buildings
+	"ex_common_ruin",     # Ruined common buildings
+	"ex_6th_ruin",        # Sixth House ruins
+	"ruin_",              # Generic ruins
 ]
 
 ## Minimum size (meters) for an object to be considered for impostors
@@ -145,7 +258,7 @@ func _check_impostor_candidate(lower_path: String) -> bool:
 	if lower_path in _custom_candidates:
 		return true
 
-	# Check landmark patterns
+	# Check landmark patterns (highest priority - large structures)
 	for pattern: String in LANDMARK_PATTERNS:
 		if pattern in lower_path:
 			return true
@@ -155,13 +268,33 @@ func _check_impostor_candidate(lower_path: String) -> bool:
 		if pattern in lower_path:
 			return true
 
-	# Check terrain features
+	# Check terrain features (rocks, arches, etc.)
 	for pattern: String in TERRAIN_FEATURE_PATTERNS:
 		if pattern in lower_path:
 			return true
 
 	# Check large trees
 	for pattern: String in TREE_PATTERNS:
+		if pattern in lower_path:
+			return true
+
+	# Check vegetation (smaller plants that still add density)
+	for pattern: String in VEGETATION_PATTERNS:
+		if pattern in lower_path:
+			return true
+
+	# Check props (barrels, signs, ships, etc.)
+	for pattern: String in PROP_PATTERNS:
+		if pattern in lower_path:
+			return true
+
+	# Check architectural details (walls, fences, stairs)
+	for pattern: String in ARCHITECTURE_DETAIL_PATTERNS:
+		if pattern in lower_path:
+			return true
+
+	# Check ruins
+	for pattern: String in RUIN_PATTERNS:
 		if pattern in lower_path:
 			return true
 
@@ -184,32 +317,67 @@ func get_impostor_settings(model_path: String) -> Dictionary:
 	# Default settings based on model type
 	var settings: Dictionary = DEFAULT_SETTINGS.duplicate()
 
-	# Landmarks get higher resolution
+	# Landmarks get higher resolution (Vivec cantons, strongholds, etc.)
 	for pattern: String in LANDMARK_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 1024
 			settings["frames"] = 24
 			return settings
 
-	# Large buildings
+	# Large buildings get medium-high resolution
 	for pattern: String in LARGE_BUILDING_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 512
 			settings["frames"] = 16
 			return settings
 
-	# Trees get smaller textures (many of them)
+	# Ruins get medium resolution
+	for pattern: String in RUIN_PATTERNS:
+		if pattern in lower:
+			settings["texture_size"] = 512
+			settings["frames"] = 12
+			return settings
+
+	# Terrain features (rocks, arches) - medium resolution
+	for pattern: String in TERRAIN_FEATURE_PATTERNS:
+		if pattern in lower:
+			settings["texture_size"] = 512
+			settings["frames"] = 12
+			return settings
+
+	# Trees get smaller textures (many of them, but iconic)
 	for pattern: String in TREE_PATTERNS:
 		if pattern in lower:
 			settings["texture_size"] = 256
 			settings["frames"] = 8
 			return settings
 
-	# Terrain features
-	for pattern: String in TERRAIN_FEATURE_PATTERNS:
+	# Architectural details (walls, stairs, platforms) - LOD only, small impostor
+	for pattern: String in ARCHITECTURE_DETAIL_PATTERNS:
 		if pattern in lower:
-			settings["texture_size"] = 512
-			settings["frames"] = 12
+			settings["texture_size"] = 256
+			settings["frames"] = 8
+			return settings
+
+	# Props (barrels, signs, ships) - LOD + small impostor for ships
+	for pattern: String in PROP_PATTERNS:
+		if pattern in lower:
+			# Ships get bigger impostors since they're larger
+			if "ship" in lower:
+				settings["texture_size"] = 512
+				settings["frames"] = 12
+			else:
+				settings["texture_size"] = 128
+				settings["frames"] = 6
+			return settings
+
+	# Vegetation - LOD only, very small impostor (or none)
+	for pattern: String in VEGETATION_PATTERNS:
+		if pattern in lower:
+			settings["texture_size"] = 128
+			settings["frames"] = 4
+			# Smaller max distance for small vegetation
+			settings["max_distance"] = 2000.0
 			return settings
 
 	return settings
@@ -268,7 +436,7 @@ func get_landmark_models() -> Array[String]:
 
 
 ## Get all impostor candidate models by scanning BSA for all matching patterns
-## This includes landmarks, buildings, terrain features, and trees
+## This includes landmarks, buildings, terrain, trees, vegetation, props, architecture, ruins
 func get_all_impostor_models() -> Array[String]:
 	# Return cached results if already built
 	if _all_cache_built:
@@ -285,87 +453,98 @@ func get_all_impostor_models() -> Array[String]:
 	var nif_files: Array = BSAManager.get_files_by_extension(".nif")
 	var seen: Dictionary = {}  # Avoid duplicates
 
+	# Helper to check and add model if it matches any pattern in a list
+	var check_patterns := func(file_path: String, original_path: String, patterns: Array[String]) -> bool:
+		for pattern: String in patterns:
+			if pattern in file_path:
+				_cached_all_models.append(original_path)
+				seen[file_path] = true
+				return true
+		return false
+
 	for file_info: Dictionary in nif_files:
 		var file_path: String = str(file_info["path"]).to_lower()
+		var original_path: String = str(file_info["path"])
 
 		# Skip if already added
 		if file_path in seen:
 			continue
 
-		# Check landmarks (in x/ folder - exterior meshes)
-		if "\\x\\" in file_path or "/x/" in file_path:
-			for pattern: String in LANDMARK_PATTERNS:
-				if pattern in file_path:
-					_cached_all_models.append(str(file_info["path"]))
-					seen[file_path] = true
-					break
+		# Check exterior meshes (in x/ folder)
+		var is_exterior: bool = "\\x\\" in file_path or "/x/" in file_path
 
-			# Check buildings (also in x/ folder)
-			if file_path not in seen:
-				for pattern: String in LARGE_BUILDING_PATTERNS:
-					if pattern in file_path:
-						_cached_all_models.append(str(file_info["path"]))
-						seen[file_path] = true
-						break
+		if is_exterior:
+			# Priority order for exterior meshes
+			if check_patterns.call(file_path, original_path, LANDMARK_PATTERNS):
+				continue
+			if check_patterns.call(file_path, original_path, LARGE_BUILDING_PATTERNS):
+				continue
+			if check_patterns.call(file_path, original_path, RUIN_PATTERNS):
+				continue
+			if check_patterns.call(file_path, original_path, TERRAIN_FEATURE_PATTERNS):
+				continue
+			if check_patterns.call(file_path, original_path, ARCHITECTURE_DETAIL_PATTERNS):
+				continue
 
-			# Check terrain features (also in x/ folder)
-			if file_path not in seen:
-				for pattern: String in TERRAIN_FEATURE_PATTERNS:
-					if pattern in file_path:
-						_cached_all_models.append(str(file_info["path"]))
-						seen[file_path] = true
-						break
-
-		# Trees can be in various folders (flora is usually not in x/)
+		# Trees, vegetation, and props can be in various folders
 		if file_path not in seen:
-			for pattern: String in TREE_PATTERNS:
-				if pattern in file_path:
-					_cached_all_models.append(str(file_info["path"]))
-					seen[file_path] = true
-					break
+			if check_patterns.call(file_path, original_path, TREE_PATTERNS):
+				continue
+		if file_path not in seen:
+			if check_patterns.call(file_path, original_path, VEGETATION_PATTERNS):
+				continue
+		if file_path not in seen:
+			if check_patterns.call(file_path, original_path, PROP_PATTERNS):
+				continue
 
 	_all_cache_built = true
 
 	# Count by category for logging
-	var landmark_count := 0
-	var building_count := 0
-	var terrain_count := 0
-	var tree_count := 0
+	var counts: Dictionary = {
+		"landmarks": 0,
+		"buildings": 0,
+		"ruins": 0,
+		"terrain": 0,
+		"trees": 0,
+		"vegetation": 0,
+		"props": 0,
+		"architecture": 0,
+	}
 
 	for model_path: String in _cached_all_models:
 		var lower: String = model_path.to_lower()
-		var categorized := false
 
-		for pattern: String in LANDMARK_PATTERNS:
-			if pattern in lower:
-				landmark_count += 1
-				categorized = true
-				break
-		if categorized:
-			continue
+		if _matches_any(lower, LANDMARK_PATTERNS):
+			counts["landmarks"] += 1
+		elif _matches_any(lower, LARGE_BUILDING_PATTERNS):
+			counts["buildings"] += 1
+		elif _matches_any(lower, RUIN_PATTERNS):
+			counts["ruins"] += 1
+		elif _matches_any(lower, TERRAIN_FEATURE_PATTERNS):
+			counts["terrain"] += 1
+		elif _matches_any(lower, TREE_PATTERNS):
+			counts["trees"] += 1
+		elif _matches_any(lower, VEGETATION_PATTERNS):
+			counts["vegetation"] += 1
+		elif _matches_any(lower, PROP_PATTERNS):
+			counts["props"] += 1
+		elif _matches_any(lower, ARCHITECTURE_DETAIL_PATTERNS):
+			counts["architecture"] += 1
 
-		for pattern: String in LARGE_BUILDING_PATTERNS:
-			if pattern in lower:
-				building_count += 1
-				categorized = true
-				break
-		if categorized:
-			continue
-
-		for pattern: String in TERRAIN_FEATURE_PATTERNS:
-			if pattern in lower:
-				terrain_count += 1
-				categorized = true
-				break
-		if categorized:
-			continue
-
-		for pattern: String in TREE_PATTERNS:
-			if pattern in lower:
-				tree_count += 1
-				break
+	print("ImpostorCandidates: Found %d models total" % _cached_all_models.size())
+	print("  Landmarks: %d, Buildings: %d, Ruins: %d" % [counts["landmarks"], counts["buildings"], counts["ruins"]])
+	print("  Terrain: %d, Trees: %d, Vegetation: %d" % [counts["terrain"], counts["trees"], counts["vegetation"]])
+	print("  Props: %d, Architecture: %d" % [counts["props"], counts["architecture"]])
 
 	return _cached_all_models.duplicate()
+
+
+## Helper to check if a path matches any pattern in a list
+func _matches_any(lower_path: String, patterns: Array[String]) -> bool:
+	for pattern: String in patterns:
+		if pattern in lower_path:
+			return true
+	return false
 
 
 ## Get all impostor candidate patterns
@@ -373,7 +552,11 @@ func get_all_patterns() -> Dictionary:
 	return {
 		"landmarks": LANDMARK_PATTERNS.duplicate(),
 		"buildings": LARGE_BUILDING_PATTERNS.duplicate(),
+		"ruins": RUIN_PATTERNS.duplicate(),
 		"terrain": TERRAIN_FEATURE_PATTERNS.duplicate(),
+		"vegetation": VEGETATION_PATTERNS.duplicate(),
+		"props": PROP_PATTERNS.duplicate(),
+		"architecture": ARCHITECTURE_DETAIL_PATTERNS.duplicate(),
 		"trees": TREE_PATTERNS.duplicate(),
 		"custom": _custom_candidates.keys(),
 	}

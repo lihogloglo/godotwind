@@ -3,7 +3,7 @@
 ## Features:
 ## - WORLD MODE: Infinite terrain streaming with multi-region support
 ##   - Terrain3D for terrain LOD and streaming
-##   - OWDB for object streaming (statics, lights, NPCs, etc.)
+##   - Object streaming (statics, lights, NPCs, etc.)
 ##   - Free-fly camera OR player controller with physics
 ##
 ## - INTERIOR MODE: Browse and explore interior cells
@@ -44,6 +44,7 @@ const ConsoleScript := preload("res://src/core/console/console.gd")
 const AutomatedTestRunnerScript := preload("res://src/tools/automated_test_runner.gd")
 const FoldablePanelScript := preload("res://src/tools/ui/foldable_panel.gd")
 const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
+const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -110,6 +111,7 @@ var _debug_panel: FoldablePanel = null
 var _render_tier_panel: FoldablePanel = null
 
 # Render tier toggle references
+var _distant_rendering_toggle: CheckBox = null
 var _near_tier_toggle: CheckBox = null
 var _mid_tier_toggle: CheckBox = null
 var _far_tier_toggle: CheckBox = null
@@ -175,7 +177,12 @@ func _ready() -> void:
 	cell_manager.load_creatures = _show_characters
 
 	# Initialize object pool for frequently used models
-	cell_manager.init_object_pool()
+	# Create a hidden container for pooled objects when they're not in use
+	var pool_container := Node3D.new()
+	pool_container.name = "ObjectPoolContainer"
+	pool_container.visible = false  # Hidden container for inactive pooled objects
+	add_child(pool_container)
+	cell_manager.init_object_pool(pool_container)
 
 	# Initialize profiler
 	profiler = PerformanceProfilerScript.new()
@@ -943,7 +950,7 @@ func _create_debug_panel() -> void:
 	lod_toggle.text = "Show LOD Levels"
 	lod_toggle.button_pressed = false
 	lod_toggle.toggled.connect(_on_show_lod_levels_toggled)
-	lod_toggle.tooltip_text = "Color objects by render state (Green=Full detail, Gray=Unknown)"
+	lod_toggle.tooltip_text = "Color batched LODs: Green=LOD0/NEAR, Yellow=LOD1, Orange=LOD2, Red=LOD3/FAR"
 	_debug_panel.add_content(lod_toggle)
 
 	# LOD mode toggle button (actual vs expected)
@@ -972,6 +979,13 @@ func _create_debug_panel() -> void:
 	odm_label.text = "ODM: -- tracked | NEAR: -- MID: -- FAR: --"
 	_debug_panel.add_content(odm_label)
 
+	# Streaming profiler summary (updated dynamically)
+	var profiler_label := Label.new()
+	profiler_label.name = "ProfilerLabel"
+	profiler_label.add_theme_font_size_override("font_size", 10)
+	profiler_label.text = "Profiler: --"
+	_debug_panel.add_content(profiler_label)
+
 	# F4 dump button
 	var dump_btn := Button.new()
 	dump_btn.text = "Dump Profiling Report [F4]"
@@ -984,6 +998,18 @@ func _create_debug_panel() -> void:
 ## Create render tier debug panel for toggling NEAR/MID/FAR visibility
 func _create_render_tier_panel() -> void:
 	_render_tier_panel = FoldablePanelScript.new("Render Tiers", false)  # Start expanded for easy debugging
+
+	# Distant rendering master toggle
+	_distant_rendering_toggle = CheckBox.new()
+	_distant_rendering_toggle.text = "Distant Rendering (MID/FAR)"
+	_distant_rendering_toggle.button_pressed = true  # Matches initial state in _setup_world_streaming_manager
+	_distant_rendering_toggle.toggled.connect(_on_distant_rendering_toggled)
+	_distant_rendering_toggle.tooltip_text = "Enable distant land rendering (MID/FAR tiers). When OFF, only NEAR tier objects are loaded."
+	_render_tier_panel.add_content(_distant_rendering_toggle)
+
+	# Separator
+	var sep := HSeparator.new()
+	_render_tier_panel.add_content(sep)
 
 	# Info label
 	var info_label := Label.new()
@@ -1038,10 +1064,25 @@ func _create_render_tier_panel() -> void:
 	_panel_vbox.add_child(_render_tier_panel)
 
 
+## Handle distant rendering toggle - switches between NEAR-only and full AAA streaming
+func _on_distant_rendering_toggled(enabled: bool) -> void:
+	if world_streaming_manager:
+		world_streaming_manager.distant_rendering_enabled = enabled
+		_log("Distant rendering: %s (mode: %s)" % [
+			"ON" if enabled else "OFF",
+			"AAA streaming" if enabled else "NEAR-only legacy"
+		])
+		# Update tier toggle sensitivity - they only matter when distant rendering is on
+		if _mid_tier_toggle:
+			_mid_tier_toggle.disabled = not enabled
+		if _far_tier_toggle:
+			_far_tier_toggle.disabled = not enabled
+
+
 ## Handle NEAR tier toggle
 func _on_near_tier_toggled(enabled: bool) -> void:
-	if world_streaming_manager and world_streaming_manager.object_distance_manager:
-		var odm: Node3D = world_streaming_manager.object_distance_manager
+	if world_streaming_manager and world_streaming_manager.object_streamer:
+		var odm: Node3D = world_streaming_manager.object_streamer
 		if odm.has_method("set_near_visible"):
 			odm.set_near_visible(enabled)
 	_log("NEAR tier: %s" % ("ON" if enabled else "OFF"))
@@ -1049,8 +1090,8 @@ func _on_near_tier_toggled(enabled: bool) -> void:
 
 ## Handle MID tier toggle
 func _on_mid_tier_toggled(enabled: bool) -> void:
-	if world_streaming_manager and world_streaming_manager.object_distance_manager:
-		var odm: Node3D = world_streaming_manager.object_distance_manager
+	if world_streaming_manager and world_streaming_manager.object_streamer:
+		var odm: Node3D = world_streaming_manager.object_streamer
 		if odm.has_method("set_mid_visible"):
 			odm.set_mid_visible(enabled)
 	_log("MID tier: %s" % ("ON" if enabled else "OFF"))
@@ -1058,8 +1099,8 @@ func _on_mid_tier_toggled(enabled: bool) -> void:
 
 ## Handle FAR tier toggle
 func _on_far_tier_toggled(enabled: bool) -> void:
-	if world_streaming_manager and world_streaming_manager.object_distance_manager:
-		var odm: Node3D = world_streaming_manager.object_distance_manager
+	if world_streaming_manager and world_streaming_manager.object_streamer:
+		var odm: Node3D = world_streaming_manager.object_streamer
 		if odm.has_method("set_far_visible"):
 			odm.set_far_visible(enabled)
 	_log("FAR tier: %s" % ("ON" if enabled else "OFF"))
@@ -1131,6 +1172,13 @@ func _on_show_cells_toggled(enabled: bool) -> void:
 func _on_show_lod_levels_toggled(enabled: bool) -> void:
 	if _debug_overlay:
 		_debug_overlay.show_lod_levels = enabled
+
+	# Also enable shader debug coloring on MultiMesh batches
+	if world_streaming_manager and world_streaming_manager.object_streamer:
+		var batcher = world_streaming_manager.object_streamer.get_batcher()
+		if batcher and batcher.has_method("set_debug_lod_colors"):
+			batcher.set_debug_lod_colors(enabled)
+
 	_log("LOD levels debug: %s" % ("ON" if enabled else "OFF"))
 
 
@@ -1610,6 +1658,10 @@ func _create_sky3d() -> void:
 	sky_3d.current_time = 12.0
 	sky_3d.ambient_energy = 0.5
 
+	# Use Filmic tonemapping instead of ACES to avoid crushing blacks
+	if sky_3d.environment:
+		sky_3d.environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+
 	# Start enabled
 	sky_3d.sky3d_enabled = true
 
@@ -1798,15 +1850,8 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
-	world_streaming_manager.distant_rendering_enabled = true  # Always enable tiered system
+	world_streaming_manager.distant_rendering_enabled = true  # Enable full AAA streaming with MID/FAR tiers
 	world_streaming_manager.debug_enabled = true
-	world_streaming_manager.use_aaa_streaming = true  # Phase 2B: AAA-style object streaming
-
-	# OWDB configuration for Morrowind objects
-	var chunk_sizes: Array[float] = [8.0, 16.0, 64.0]
-	world_streaming_manager.owdb_chunk_sizes = chunk_sizes
-	world_streaming_manager.owdb_chunk_load_range = 3
-	world_streaming_manager.owdb_batch_time_limit_ms = 5.0
 
 	add_child(world_streaming_manager)
 
@@ -2048,6 +2093,15 @@ func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls
 			var mid_obj: int = odm_stats.get("mid_visible", 0)
 			var far_obj: int = odm_stats.get("far_visible", 0)
 			odm_label.text = "ODM: %d tracked | NEAR: %d MID: %d FAR: %d" % [total_obj, near_obj, mid_obj, far_obj]
+
+		# Update streaming profiler summary
+		var profiler_label_node: Label = content.get_node_or_null("ProfilerLabel")
+		if profiler_label_node and world_streaming_manager and world_streaming_manager.has_method("get_streaming_profiler"):
+			var sp: StreamingProfiler = world_streaming_manager.get_streaming_profiler()
+			if sp:
+				profiler_label_node.text = sp.get_compact_summary()
+			else:
+				profiler_label_node.text = "Profiler: not initialized"
 
 	# Update render tier panel stats
 	if _render_tier_panel:
@@ -2534,24 +2588,90 @@ func _dump_profiling_report() -> void:
 	if not textures_data.is_empty():
 		_log("")
 		_log("[b]Textures[/b]")
-		_log("  Loaded: %d" % textures_data.get("textures_loaded", 0))
-		_log("  Cache hits: %d" % textures_data.get("cache_hits", 0))
+		# TextureLoader.get_stats() returns "loaded" not "textures_loaded"
+		_log("  Loaded: %d (cached: %d)" % [
+			textures_data.get("loaded", 0),
+			textures_data.get("cached", 0)
+		])
+		_log("  Cache hits: %d | Failures: %d" % [
+			textures_data.get("cache_hits", 0),
+			textures_data.get("failures", 0)
+		])
 
 	# Add object pool stats
 	var cell_stats: Dictionary = {}
 	if cell_manager.has_method("get_stats"):
-		cell_stats = cell_manager.call("get_stats")
+		cell_stats = cell_manager.get_stats()
 	var pool_available: int = cell_stats.get("pool_available", 0)
 	var pool_in_use: int = cell_stats.get("pool_in_use", 0)
-	if pool_available > 0 or pool_in_use > 0:
+	var pool_acquires: int = cell_stats.get("pool_acquires", 0)
+	if pool_available > 0 or pool_in_use > 0 or pool_acquires > 0:
+		_log("")
+		_log("[b]Object Pool[/b]")
+		_log("  Available: %d | In use: %d | Total pools: %d" % [
+			pool_available,
+			pool_in_use,
+			cell_stats.get("pool_total_pools", 0)
+		])
+		_log("  Acquires: %d | Releases: %d | New instances: %d" % [
+			pool_acquires,
+			cell_stats.get("pool_releases", 0),
+			cell_stats.get("pool_new_instances", 0)
+		])
+		_log("  Objects from pool (reused): %d" % cell_stats.get("objects_from_pool", 0))
+		_log("  Hit rate: %.1f%%" % (cell_stats.get("pool_hit_rate", 0.0) * 100.0))
+
+	# Add parallel duplicate (async worker) stats
+	if cell_manager.has_method("get_parallel_duplicate_stats"):
+		var pd_stats: Dictionary = cell_manager.get_parallel_duplicate_stats()
+		var pd_dispatched: int = pd_stats.get("dispatched", 0)
+		if pd_dispatched > 0 or pd_stats.get("enabled", false):
 			_log("")
-			_log("[b]Object Pool[/b]")
-			_log("  Available: %d | In use: %d" % [
-				cell_stats.get("pool_available", 0),
-				cell_stats.get("pool_in_use", 0)
+			_log("[b]Async Worker (Parallel Duplicate)[/b]")
+			_log("  Enabled: %s | Active tasks: %d" % [
+				"Yes" if pd_stats.get("enabled", false) else "No",
+				pd_stats.get("active_tasks", 0)
 			])
-			_log("  From pool: %d" % cell_stats.get("objects_from_pool", 0))
-			_log("  Hit rate: %.1f%%" % (cell_stats.get("pool_hit_rate", 0.0) * 100.0))
+			_log("  Dispatched: %d | Completed: %d" % [
+				pd_dispatched,
+				pd_stats.get("completed", 0)
+			])
+			var failed_cell: int = pd_stats.get("failed_cell_freed", 0)
+			var failed_instance: int = pd_stats.get("failed_instance_invalid", 0)
+			var failed_dup: int = pd_stats.get("failed_duplicate_error", 0)
+			var total_failed := failed_cell + failed_instance + failed_dup
+			if total_failed > 0:
+				_log("  [color=yellow]Failures: %d[/color] (cell freed: %d, instance invalid: %d, dup error: %d)" % [
+					total_failed, failed_cell, failed_instance, failed_dup
+				])
+			else:
+				_log("  Failures: 0")
+			_log("  Success rate: %.1f%%" % (pd_stats.get("success_rate", 1.0) * 100.0))
+			_log("  Avg dispatch time: %d us | Avg process time: %d us" % [
+				pd_stats.get("avg_dispatch_time_us", 0),
+				pd_stats.get("avg_process_time_us", 0)
+			])
+
+	# Add loading stats (instantiation queue, burst loading)
+	if cell_manager.has_method("get_loading_stats"):
+		var loading_stats: Dictionary = cell_manager.get_loading_stats()
+		_log("")
+		_log("[b]Instantiation Pipeline[/b]")
+		_log("  Queue size: %d | Burst active: %s" % [
+			loading_stats.get("instantiation_queue_size", 0),
+			"Yes" if loading_stats.get("burst_loading_active", false) else "No"
+		])
+		_log("  Burst budget: %.1f ms | Max instantiations: %d" % [
+			loading_stats.get("burst_budget_ms", 0.0),
+			loading_stats.get("burst_max_instantiations", 0)
+		])
+		_log("  Objects instantiated: %d | From pool: %d" % [
+			loading_stats.get("objects_instantiated", 0),
+			loading_stats.get("objects_from_pool", 0)
+		])
+		var avg_dup_us: int = loading_stats.get("avg_duplicate_time_us", 0)
+		_log("  Avg duplicate time: %d us (%.2f ms)" % [avg_dup_us, avg_dup_us / 1000.0])
+		_log("  Pre-warm pending: %d models" % loading_stats.get("prewarm_pending_count", 0))
 
 	# Add BSA cache stats
 	var bsa_cache_stats: Dictionary = BSAManager.get_cache_stats()
@@ -2576,6 +2696,39 @@ func _dump_profiling_report() -> void:
 			var model_path: String = model.get("path", "")
 			var model_count: int = model.get("count", 0)
 			_log("  %.2f ms - %s (x%d)" % [avg_ms, model_path.get_file(), model_count])
+
+	# Add streaming profiler data if available
+	if world_streaming_manager and world_streaming_manager.has_method("get_streaming_profiler"):
+		var streaming_profiler: StreamingProfiler = world_streaming_manager.get_streaming_profiler()
+		if streaming_profiler:
+			_log("")
+			_log("[b]Streaming Pipeline Breakdown[/b]")
+			var sections: Dictionary = streaming_profiler.get_all_sections()
+
+			# Sort sections by last time descending
+			var section_list: Array = []
+			for name: String in sections:
+				var data: Dictionary = sections[name]
+				section_list.append({"name": name, "data": data})
+			section_list.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+				return a.data.last_ms > b.data.last_ms
+			)
+
+			for s: Dictionary in section_list:
+				var name: String = s.name
+				var data: Dictionary = s.data
+				var flag := " [color=red]◀ SLOW[/color]" if data.last_ms > 16.0 else ""
+				_log("  %s: %.2f ms (avg %.2f, max %.2f)%s" % [
+					name, data.last_ms, data.avg_ms, data.max_ms, flag
+				])
+
+			# Log streaming frame percentiles
+			var frame_percs: Dictionary = streaming_profiler.get_frame_percentiles()
+			_log("")
+			_log("[b]Streaming Frame Times[/b]")
+			_log("  P50: %.2f ms | P95: %.2f ms | P99: %.2f ms | Max: %.2f ms" % [
+				frame_percs.p50, frame_percs.p95, frame_percs.p99, frame_percs.max
+			])
 
 	_log("[b]==============================[/b]")
 

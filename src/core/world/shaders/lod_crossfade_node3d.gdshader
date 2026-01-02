@@ -29,7 +29,7 @@ uniform bool use_alpha_cutout = false;
 
 group_uniforms Crossfade;
 // Fade amount: 1.0 = fully visible, 0.0 = invisible
-// Updated per-frame by PerObjectLODManager during transitions
+// Updated per-frame by ObjectStreamer during tier transitions
 uniform float fade_amount : hint_range(0.0, 1.0) = 1.0;
 
 // 4x4 Bayer dither matrix - same as MultiMesh shader for consistency

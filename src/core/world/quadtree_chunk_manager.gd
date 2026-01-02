@@ -96,7 +96,7 @@ func get_chunk_size_for_tier(tier: int) -> int:
 		DistanceTierManagerScript.Tier.FAR:
 			return FAR_CHUNK_SIZE
 		_:
-			return 1  # NEAR/MID tiers use per-cell (managed by ObjectDistanceManager)
+			return 1  # NEAR/MID tiers use per-cell (managed by ObjectStreamer)
 
 
 ## Generate a unique identifier string for a chunk

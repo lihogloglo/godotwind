@@ -236,7 +236,25 @@
       "Bash(Sort-Object LastWriteTime -Descending)",
       "Bash(Select-Object -First 1)",
       "Bash(ls \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\src\\\\core\\\\world\"\" | grep -i \"distance \")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(godot --headless --check-only --script:*)",
+      "Bash(dir /s /b *.gdextension)",
+      "Bash(echo:*)",
+      "Bash(ping:*)",
+      "Bash(tasklist /FI \"IMAGENAME eq Godot*\")",
+      "Bash(\"C:\\\\Program Files\\\\Godot\\\\Godot_v4.4-stable_win64.exe\" --path . --headless --quit-after 5)",
+      "Bash(dir \"C:\\\\Program Files\\\\Godot\"\" 2>nul || dir \"C:UsersmetzoAppDataLocalGodot\"\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --headless --quit-after 5)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/streaming_test_scene.tscn\" --headless --quit-after 15)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/streaming_test_scene.tscn\" --headless --quit-after 25)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/streaming_test_scene.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/streaming_test_scene.tscn\" --headless --quit-after 20)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/streaming_test_scene.tscn\" --headless --quit-after 30)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/prebaking/prebaking_ui.tscn\")",
+      "Bash(dir /b \"src\\\\tools\\\\streaming_test_scene.*\")",
+      "Bash(powershell -Command \"Get-Command godot* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "Bash(dir /s /b \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\addons\\\\terrain_3d\\\\*.gdshader\")",
+      "Bash(timeout 5 godot:*)"
     ]
   }
 }

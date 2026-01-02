@@ -34,8 +34,9 @@ const MID_START: float = NEAR_END
 const FAR_START: float = MID_END
 
 ## Crossfade zone size (meters) - both tiers visible during transition
-## Increased from 15m to 30m for smoother, more noticeable transitions
-const FADE_MARGIN: float = 30.0
+## Increased from 30m to 50m for smoother, more visible transitions
+## At 50m/s camera speed, this gives ~1 second transition time
+const FADE_MARGIN: float = 50.0
 
 #endregion
 

@@ -68,12 +68,14 @@ void fragment() {
 	// Standard material output - preserves original appearance
 	ALBEDO = albedo_sample.rgb;
 
-	// Normal mapping
-	vec3 normal_map = texture(normal_texture, UV).rgb;
-	if (length(normal_map) > 0.01) {
-		NORMAL_MAP = normal_map;
-		NORMAL_MAP_DEPTH = normal_scale;
-	}
+	// NOTE: Normal mapping disabled to avoid tangent requirements on LOD meshes.
+	// Many prebaked/simplified meshes don't have tangent data generated.
+	// If your meshes have tangents, uncomment below:
+	// vec3 normal_map = texture(normal_texture, UV).rgb;
+	// if (length(normal_map) > 0.01) {
+	//     NORMAL_MAP = normal_map;
+	//     NORMAL_MAP_DEPTH = normal_scale;
+	// }
 
 	ROUGHNESS = roughness;
 	METALLIC = metallic;

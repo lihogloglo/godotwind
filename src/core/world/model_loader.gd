@@ -484,7 +484,66 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 		DirAccess.remove_absolute(disk_path)
 		return null
 
+	# CRITICAL: Clear resource paths on loaded model to allow safe multi-threaded duplication
+	# Without this, concurrent duplicate() calls conflict on the same resource paths
+	_clear_resource_paths(instance)
+
 	return instance as Node3D
+
+
+## Clear resource paths from a node tree to allow safe duplication
+## This prevents "Another resource is loaded from path" errors when duplicating
+func _clear_resource_paths(node: Node) -> void:
+	if node is MeshInstance3D:
+		var mesh_inst := node as MeshInstance3D
+		if mesh_inst.mesh and not mesh_inst.mesh.resource_path.is_empty():
+			mesh_inst.mesh.resource_path = ""
+			# Also clear material paths
+			for i in range(mesh_inst.mesh.get_surface_count()):
+				var mat := mesh_inst.mesh.surface_get_material(i)
+				if mat:
+					_clear_material_paths(mat)
+		# Clear override materials too
+		for i in range(mesh_inst.get_surface_override_material_count()):
+			var mat := mesh_inst.get_surface_override_material(i)
+			if mat:
+				_clear_material_paths(mat)
+
+	if node is CollisionShape3D:
+		var shape := (node as CollisionShape3D).shape
+		if shape and not shape.resource_path.is_empty():
+			shape.resource_path = ""
+
+	for child in node.get_children():
+		_clear_resource_paths(child)
+
+
+## Clear all resource paths from a material and its textures
+func _clear_material_paths(mat: Material) -> void:
+	if not mat.resource_path.is_empty():
+		mat.resource_path = ""
+
+	if mat is StandardMaterial3D:
+		var std_mat := mat as StandardMaterial3D
+		# Clear all texture slots that could have paths
+		var textures: Array[Texture2D] = [
+			std_mat.albedo_texture,
+			std_mat.normal_texture,
+			std_mat.roughness_texture,
+			std_mat.metallic_texture,
+			std_mat.emission_texture,
+			std_mat.ao_texture,
+			std_mat.heightmap_texture,
+			std_mat.rim_texture,
+			std_mat.clearcoat_texture,
+			std_mat.backlight_texture,
+			std_mat.refraction_texture,
+			std_mat.detail_albedo,
+			std_mat.detail_normal,
+		]
+		for tex in textures:
+			if tex and not tex.resource_path.is_empty():
+				tex.resource_path = ""
 
 
 ## Save a model to disk cache

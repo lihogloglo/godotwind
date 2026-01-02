@@ -25,12 +25,7 @@ var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
-var object_distance_manager: Node3D = null  # ObjectDistanceManager (optional)
-
-# Legacy alias for compatibility
-var per_object_lod_manager: Node3D:
-	get: return object_distance_manager
-	set(value): object_distance_manager = value
+var object_distance_manager: Node3D = null  # ObjectStreamer (optional)
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null

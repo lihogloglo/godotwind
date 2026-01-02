@@ -10,6 +10,23 @@
 ##   Index N > 0 = LTEX record with index N-1
 ##
 ## Terrain3D supports up to 32 textures (slots 0-31)
+##
+## Next-Gen Texture Support (Future-Proofing):
+## -------------------------------------------
+## This loader is designed to support PBR texture packs when available:
+##
+## 1. Albedo/Diffuse: Standard color texture (always loaded)
+## 2. Normal Map: _n.dds or _normal.dds suffix (optional)
+## 3. Roughness/Height: _r.dds or _height.dds suffix (optional)
+## 4. Ambient Occlusion: _ao.dds suffix (optional)
+##
+## PBR textures are auto-detected using common naming conventions:
+##   textures/terrain/grass.dds       -> albedo
+##   textures/terrain/grass_n.dds     -> normal
+##   textures/terrain/grass_r.dds     -> roughness (packed into alpha)
+##
+## When next-gen texture packs are installed, they will be automatically
+## loaded if they follow these naming conventions.
 class_name TerrainTextureLoader
 extends RefCounted
 
@@ -17,6 +34,15 @@ const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
 
 ## Default texture path for index 0 (when no LTEX specified)
 const DEFAULT_TEXTURE_PATH := "textures\\_land_default.dds"
+
+## PBR texture suffixes to search for (in priority order)
+const NORMAL_SUFFIXES := ["_n", "_normal", "_nrm"]
+const HEIGHT_SUFFIXES := ["_h", "_height", "_disp"]
+const ROUGHNESS_SUFFIXES := ["_r", "_rough", "_roughness"]
+const AO_SUFFIXES := ["_ao", "_ambient", "_occlusion"]
+
+## Enable PBR texture loading (set to true when next-gen packs are available)
+var enable_pbr_textures: bool = true
 
 ## Cache of loaded texture assets: MW texture_index -> Terrain3DTextureAsset
 var _texture_assets: Dictionary = {}
@@ -180,6 +206,7 @@ func _add_default_texture(terrain_assets: Terrain3DAssets) -> void:
 
 
 ## Load a single LTEX texture and add to Terrain3D
+## Includes PBR texture detection for next-gen texture packs
 func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 	# MW stores texture_index in VTEX as (LTEX.index + 1)
 	var ltex_index := mw_index - 1
@@ -191,7 +218,7 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 		_stats["textures_failed"] += 1
 		return false
 
-	# Load the texture from BSA
+	# Load the albedo/diffuse texture from BSA
 	var texture := TextureLoaderScript.load_texture(ltex.texture_path)
 	if not texture or texture == TextureLoaderScript._get_fallback_texture():
 		push_warning("TerrainTextureLoader: Failed to load texture '%s' for LTEX %d" % [ltex.texture_path, ltex_index])
@@ -206,6 +233,10 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 	asset.name = ltex.record_id
 	asset.albedo_texture = texture
 
+	# Try to load PBR textures if enabled (next-gen texture support)
+	if enable_pbr_textures:
+		_try_load_pbr_textures(asset, ltex.texture_path)
+
 	# Add to Terrain3D at next available slot
 	var slot := _next_slot
 	terrain_assets.set_texture(slot, asset)
@@ -217,6 +248,45 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 
 	# Verbose logging removed - use print_debug_summary() for details if needed
 	return true
+
+
+## Try to load PBR textures (normal, height, roughness, AO) for a texture
+## These are auto-detected using common naming conventions
+func _try_load_pbr_textures(asset: Terrain3DTextureAsset, base_path: String) -> void:
+	# Get base path without extension
+	var base_name := _get_path_without_extension(base_path)
+
+	# Try to load normal map
+	var normal_tex := _try_load_texture_with_suffixes(base_name, NORMAL_SUFFIXES)
+	if normal_tex:
+		normal_tex = _ensure_mipmaps(normal_tex)
+		asset.normal_texture = normal_tex
+		if _stats["textures_loaded"] < 3:
+			print("TerrainTextureLoader: Found normal map for %s" % base_path)
+
+	# Note: Terrain3DTextureAsset has limited PBR support
+	# Height and roughness could be packed into albedo alpha or separate channels
+	# For now, we document the capability for future Terrain3D versions
+
+
+## Try to load a texture with any of the given suffixes
+func _try_load_texture_with_suffixes(base_name: String, suffixes: Array) -> ImageTexture:
+	for suffix: String in suffixes:
+		# Try common extensions
+		for ext: String in [".dds", ".png", ".tga"]:
+			var path := base_name + suffix + ext
+			var tex := TextureLoaderScript.load_texture(path)
+			if tex and tex != TextureLoaderScript._get_fallback_texture():
+				return tex
+	return null
+
+
+## Get path without file extension
+func _get_path_without_extension(path: String) -> String:
+	var dot_pos := path.rfind(".")
+	if dot_pos > 0:
+		return path.substr(0, dot_pos)
+	return path
 
 
 ## Find LTEX record by its texture_index

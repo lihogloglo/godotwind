@@ -225,9 +225,11 @@ func generate_color_map(land: LandRecord) -> Image:
 ## Debug flag to print control map encoding details (set to true to diagnose)
 var _debug_control_map: bool = false
 
-## Fast mode skips expensive per-pixel blending for better performance
-## Set to false for higher quality texture transitions
-var fast_control_map: bool = true
+## Control map generation mode
+## 0 = FAST: Nearest-neighbor, no blending (chessboard look)
+## 1 = TERRAIN3D_OPTIMIZED: Leverages Terrain3D's bilinear interpolation + height blending
+## 2 = LEGACY: Old per-pixel blending (slow, mediocre results)
+var control_map_mode: int = 1
 
 func generate_control_map(land: LandRecord) -> Image:
 	# Terrain3D expects control map at same resolution as heightmap
@@ -246,23 +248,141 @@ func generate_control_map(land: LandRecord) -> Image:
 	# Each MW texture cell covers ~4 height vertices
 	var vertices_per_tex := float(MW_LAND_SIZE - 1) / float(MW_TEXTURE_SIZE)  # ~4.0
 
-	# FAST MODE: Simple nearest-neighbor texture mapping (no blending)
-	# This is ~10x faster than full blending and looks acceptable
-	if fast_control_map:
-		for y in range(MW_LAND_SIZE):
-			for x in range(MW_LAND_SIZE):
-				var tex_x := mini(int(float(x) / vertices_per_tex), MW_TEXTURE_SIZE - 1)
-				var tex_y := mini(int(float(y) / vertices_per_tex), MW_TEXTURE_SIZE - 1)
-				var mw_tex_idx := land.get_texture_index(tex_x, tex_y)
-				var slot := _get_terrain3d_texture_slot(mw_tex_idx)
-				var img_y := MW_LAND_SIZE - 1 - y
-				var control := _encode_control_value(slot, 0, 0)
-				img.set_pixel(x, img_y, Color(control, 0, 0, 1))
+	# Log which mode is being used (only first time)
+	if _stats["control_maps_generated"] == 0:
+		var mode_names: Array[String] = ["FAST (no blending)", "TERRAIN3D_OPTIMIZED", "LEGACY"]
+		var mode_name: String = mode_names[control_map_mode] if control_map_mode < mode_names.size() else "UNKNOWN"
+		print("TerrainManager: Using control map mode %d (%s)" % [control_map_mode, mode_name])
 
-		_stats["control_maps_generated"] += 1
-		return img
+	match control_map_mode:
+		0:
+			_generate_control_map_fast(img, land, vertices_per_tex)
+		1:
+			_generate_control_map_terrain3d_optimized(img, land, vertices_per_tex)
+		2:
+			_generate_control_map_legacy(img, land, vertices_per_tex)
+		_:
+			_generate_control_map_terrain3d_optimized(img, land, vertices_per_tex)
 
-	# QUALITY MODE: Full per-pixel blending (expensive but prettier)
+	_stats["control_maps_generated"] += 1
+	return img
+
+
+## FAST MODE: Simple nearest-neighbor texture mapping (no blending)
+## Results in chessboard appearance but is very fast
+func _generate_control_map_fast(img: Image, land: LandRecord, vertices_per_tex: float) -> void:
+	for y in range(MW_LAND_SIZE):
+		for x in range(MW_LAND_SIZE):
+			var tex_x := mini(int(float(x) / vertices_per_tex), MW_TEXTURE_SIZE - 1)
+			var tex_y := mini(int(float(y) / vertices_per_tex), MW_TEXTURE_SIZE - 1)
+			var mw_tex_idx := land.get_texture_index(tex_x, tex_y)
+			var slot := _get_terrain3d_texture_slot(mw_tex_idx)
+			var img_y := MW_LAND_SIZE - 1 - y
+			var control := _encode_control_value(slot, 0, 0)
+			img.set_pixel(x, img_y, Color(control, 0, 0, 1))
+
+
+## TERRAIN3D OPTIMIZED MODE: Leverages Terrain3D's bilinear interpolation
+##
+## Key insight: Terrain3D's shader samples 4 adjacent control map pixels and
+## performs bilinear interpolation. For smooth texture transitions:
+## - Adjacent control pixels must have DIFFERENT base textures at boundaries
+## - The shader will then naturally interpolate between them
+##
+## Strategy: Use bilinear sampling of the MW texture grid
+## - Sample the 4 nearest MW texture cells and blend based on position
+## - This ensures control map pixels at boundaries reference both textures
+func _generate_control_map_terrain3d_optimized(img: Image, land: LandRecord, vertices_per_tex: float) -> void:
+	# Debug: track blend statistics
+	var blend_count := 0
+	var max_blend_value := 0
+	var total_blend := 0
+
+	for y in range(MW_LAND_SIZE):
+		for x in range(MW_LAND_SIZE):
+			# Calculate position in MW texture space (0-16 range, continuous)
+			# Offset by 0.5 to sample from texture cell centers
+			var tex_x_f := (float(x) / vertices_per_tex) - 0.5
+			var tex_y_f := (float(y) / vertices_per_tex) - 0.5
+
+			# Get the 4 surrounding texture cells for bilinear interpolation
+			var tx0 := clampi(int(floorf(tex_x_f)), 0, MW_TEXTURE_SIZE - 1)
+			var ty0 := clampi(int(floorf(tex_y_f)), 0, MW_TEXTURE_SIZE - 1)
+			var tx1 := clampi(tx0 + 1, 0, MW_TEXTURE_SIZE - 1)
+			var ty1 := clampi(ty0 + 1, 0, MW_TEXTURE_SIZE - 1)
+
+			# Bilinear weights (how close to each corner)
+			var fx := clampf(tex_x_f - float(tx0), 0.0, 1.0)
+			var fy := clampf(tex_y_f - float(ty0), 0.0, 1.0)
+
+			# Get texture slots for all 4 corners
+			var slot_00 := _get_terrain3d_texture_slot(land.get_texture_index(tx0, ty0))  # bottom-left
+			var slot_10 := _get_terrain3d_texture_slot(land.get_texture_index(tx1, ty0))  # bottom-right
+			var slot_01 := _get_terrain3d_texture_slot(land.get_texture_index(tx0, ty1))  # top-left
+			var slot_11 := _get_terrain3d_texture_slot(land.get_texture_index(tx1, ty1))  # top-right
+
+			# Calculate bilinear weights for each corner
+			var w00 := (1.0 - fx) * (1.0 - fy)  # bottom-left weight
+			var w10 := fx * (1.0 - fy)          # bottom-right weight
+			var w01 := (1.0 - fx) * fy          # top-left weight
+			var w11 := fx * fy                   # top-right weight
+
+			# Find dominant texture (highest weight) as base
+			var weights := [w00, w10, w01, w11]
+			var slots := [slot_00, slot_10, slot_01, slot_11]
+
+			var max_weight := 0.0
+			var base_slot := slot_00
+			for i in 4:
+				if weights[i] > max_weight:
+					max_weight = weights[i]
+					base_slot = slots[i]
+
+			# Find best overlay texture (highest weight among different textures)
+			var overlay_slot := base_slot
+			var overlay_weight := 0.0
+			for i in 4:
+				if slots[i] != base_slot and weights[i] > overlay_weight:
+					overlay_weight = weights[i]
+					overlay_slot = slots[i]
+
+			# Calculate blend value
+			# If all 4 corners are same texture, blend = 0
+			# Otherwise, blend represents how much overlay shows through
+			var blend := 0
+			if overlay_slot != base_slot:
+				# Normalize overlay weight relative to total weight of "other" textures
+				var total_other_weight := 0.0
+				for i in 4:
+					if slots[i] != base_slot:
+						total_other_weight += weights[i]
+				# Blend is the proportion of non-base textures
+				blend = int(clampf(total_other_weight, 0.0, 1.0) * 255.0)
+
+			# Track blend statistics
+			if blend > 0:
+				blend_count += 1
+				total_blend += blend
+				if blend > max_blend_value:
+					max_blend_value = blend
+
+			# FLIP Y axis to match heightmap orientation
+			var img_y := MW_LAND_SIZE - 1 - y
+			var control := _encode_control_value(base_slot, overlay_slot, blend)
+			img.set_pixel(x, img_y, Color(control, 0, 0, 1))
+
+	# Debug output for first few cells
+	if _debug_control_map or _stats["control_maps_generated"] < 3:
+		var total_pixels := MW_LAND_SIZE * MW_LAND_SIZE
+		var avg_blend := float(total_blend) / float(blend_count) if blend_count > 0 else 0.0
+		print("TerrainManager: Cell (%d,%d) blend stats: %d/%d pixels blended (%.1f%%), max=%d, avg=%.1f" % [
+			land.cell_x, land.cell_y, blend_count, total_pixels,
+			100.0 * float(blend_count) / float(total_pixels),
+			max_blend_value, avg_blend])
+
+
+## LEGACY MODE: Old per-pixel blending approach (kept for comparison)
+func _generate_control_map_legacy(img: Image, land: LandRecord, vertices_per_tex: float) -> void:
 	for y in range(MW_LAND_SIZE):
 		for x in range(MW_LAND_SIZE):
 			# Calculate fractional position within texture grid
@@ -344,52 +464,31 @@ func generate_control_map(land: LandRecord) -> Image:
 			var control := _encode_control_value(base_slot, overlay_slot, blend)
 			img.set_pixel(x, img_y, Color(control, 0, 0, 1))
 
-	# Debug: Print texture usage for first few control maps
-	if _debug_control_map and _stats["control_maps_generated"] < 5:
-		var tex_usage: Dictionary = {}
-		var mw_indices: Dictionary = {}
-		for y in range(MW_TEXTURE_SIZE):
-			for x in range(MW_TEXTURE_SIZE):
-				var mw_idx := land.get_texture_index(x, y)
-				var slot := _get_terrain3d_texture_slot(mw_idx)
-				if not tex_usage.has(slot):
-					tex_usage[slot] = 0
-				tex_usage[slot] += 1
-				if not mw_indices.has(mw_idx):
-					mw_indices[mw_idx] = slot
-		print("TerrainManager: Cell (%d,%d) MW->Slot mappings: %s" % [land.cell_x, land.cell_y, mw_indices])
-		print("TerrainManager: Cell (%d,%d) slot usage counts: %s" % [land.cell_x, land.cell_y, tex_usage])
-		# Sample control values from different slots to verify encoding
-		for mw_idx: int in mw_indices.keys():
-			var slot: int = mw_indices[mw_idx]
-			var sample_ctrl := _encode_control_value(slot, 0, 0)
-			var decoded_slot := (_float_to_bits(sample_ctrl) >> 27) & 0x1F
-			print("TerrainManager: Verify encoding - MW idx %d -> slot %d -> bits %d -> decoded %d [%s]" % [
-				mw_idx, slot, _float_to_bits(sample_ctrl), decoded_slot,
-				"OK" if decoded_slot == slot else "MISMATCH!"])
-
-	# Verify the control map image actually stored correct values
-	if _debug_control_map and _stats["control_maps_generated"] < 3:
-		print("TerrainManager: Verifying control map image values for cell (%d,%d):" % [land.cell_x, land.cell_y])
-		# Sample a few pixels and decode them
-		for sample_y: int in [0, 32, 63]:
-			for sample_x: int in [0, 32, 63]:
-				var pixel_color := img.get_pixel(sample_x, sample_y)
-				var stored_float := pixel_color.r
-				var stored_bits := _float_to_bits(stored_float)
-				var decoded_base := (stored_bits >> 27) & 0x1F
-				var decoded_overlay := (stored_bits >> 22) & 0x1F
-				var decoded_blend := (stored_bits >> 14) & 0xFF
-				print("  Pixel (%d,%d): base_slot=%d, overlay=%d, blend=%d (bits=0x%08X)" % [
-					sample_x, sample_y, decoded_base, decoded_overlay, decoded_blend, stored_bits])
-
-	_stats["control_maps_generated"] += 1
-	return img
-
 
 ## Debug: Enable/disable control map debug output
 func set_debug_control_map(enabled: bool) -> void:
 	_debug_control_map = enabled
+
+
+## Debug: Print control map statistics for a land record
+func debug_print_control_map_stats(land: LandRecord) -> void:
+	if not land.has_textures():
+		print("TerrainManager: Cell (%d,%d) has NO texture data" % [land.cell_x, land.cell_y])
+		return
+
+	var tex_usage: Dictionary = {}
+	var mw_indices: Dictionary = {}
+	for y in range(MW_TEXTURE_SIZE):
+		for x in range(MW_TEXTURE_SIZE):
+			var mw_idx := land.get_texture_index(x, y)
+			var slot := _get_terrain3d_texture_slot(mw_idx)
+			if not tex_usage.has(slot):
+				tex_usage[slot] = 0
+			tex_usage[slot] += 1
+			if not mw_indices.has(mw_idx):
+				mw_indices[mw_idx] = slot
+	print("TerrainManager: Cell (%d,%d) MW->Slot mappings: %s" % [land.cell_x, land.cell_y, mw_indices])
+	print("TerrainManager: Cell (%d,%d) slot usage counts: %s" % [land.cell_x, land.cell_y, tex_usage])
 
 
 ## Convert float back to int bits for debugging
