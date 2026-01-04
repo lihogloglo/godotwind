@@ -48,6 +48,7 @@ const LODPrebakerScript := preload("res://src/tools/prebaking/lod_prebaker.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const TU := preload("res://src/core/world/tier_utils.gd")
 
 #region Constants
 
@@ -146,6 +147,105 @@ class StreamedObject extends RefCounted:
 var _object_pool: Array[StreamedObject] = []
 var _pool_available: Array[int] = []  # Indices of available objects in pool
 
+## Max-heap for O(log n) eviction of farthest objects
+## Each entry is [distance_sq, pool_id] - heap ordered by distance_sq (max at root)
+var _eviction_heap: Array = []
+var _heap_object_indices: Dictionary = {}  # pool_id -> heap index for O(1) updates
+
+
+## Heap helper: Swap two elements and update index tracking
+func _heap_swap(i: int, j: int) -> void:
+	var temp: Array = _eviction_heap[i]
+	_eviction_heap[i] = _eviction_heap[j]
+	_eviction_heap[j] = temp
+	_heap_object_indices[_eviction_heap[i][1]] = i
+	_heap_object_indices[_eviction_heap[j][1]] = j
+
+
+## Heap helper: Bubble up element at index to maintain max-heap property
+func _heap_bubble_up(idx: int) -> void:
+	while idx > 0:
+		var parent: int = (idx - 1) / 2
+		if _eviction_heap[idx][0] > _eviction_heap[parent][0]:
+			_heap_swap(idx, parent)
+			idx = parent
+		else:
+			break
+
+
+## Heap helper: Bubble down element at index to maintain max-heap property
+func _heap_bubble_down(idx: int) -> void:
+	var size: int = _eviction_heap.size()
+	while true:
+		var largest: int = idx
+		var left: int = 2 * idx + 1
+		var right: int = 2 * idx + 2
+
+		if left < size and _eviction_heap[left][0] > _eviction_heap[largest][0]:
+			largest = left
+		if right < size and _eviction_heap[right][0] > _eviction_heap[largest][0]:
+			largest = right
+
+		if largest != idx:
+			_heap_swap(idx, largest)
+			idx = largest
+		else:
+			break
+
+
+## Add object to eviction heap
+func _heap_add(pool_id: int, distance_sq: float) -> void:
+	var idx: int = _eviction_heap.size()
+	_eviction_heap.append([distance_sq, pool_id])
+	_heap_object_indices[pool_id] = idx
+	_heap_bubble_up(idx)
+
+
+## Remove object from eviction heap
+func _heap_remove(pool_id: int) -> void:
+	if pool_id not in _heap_object_indices:
+		return
+
+	var idx: int = _heap_object_indices[pool_id]
+	var last_idx: int = _eviction_heap.size() - 1
+
+	if idx != last_idx:
+		_heap_swap(idx, last_idx)
+
+	_eviction_heap.pop_back()
+	_heap_object_indices.erase(pool_id)
+
+	if idx < _eviction_heap.size():
+		_heap_bubble_up(idx)
+		_heap_bubble_down(idx)
+
+
+## Update object distance in heap (call when distance changes)
+func _heap_update_distance(pool_id: int, new_distance_sq: float) -> void:
+	if pool_id not in _heap_object_indices:
+		_heap_add(pool_id, new_distance_sq)
+		return
+
+	var idx: int = _heap_object_indices[pool_id]
+	var old_distance_sq: float = _eviction_heap[idx][0]
+	_eviction_heap[idx][0] = new_distance_sq
+
+	if new_distance_sq > old_distance_sq:
+		_heap_bubble_up(idx)
+	else:
+		_heap_bubble_down(idx)
+
+
+## Pop farthest object from heap (O(log n))
+func _heap_pop_farthest() -> int:
+	if _eviction_heap.is_empty():
+		return -1
+
+	var farthest_pool_id: int = _eviction_heap[0][1]
+	_heap_remove(farthest_pool_id)
+	return farthest_pool_id
+
+
 ## Acquire an object from the pool (or create new if needed)
 func _pool_acquire() -> StreamedObject:
 	if not _pool_available.is_empty():
@@ -171,6 +271,9 @@ func _pool_release(obj: StreamedObject) -> void:
 	if obj.in_pool:
 		return  # Already in pool
 
+	# Remove from eviction heap (no longer eligible for eviction)
+	_heap_remove(obj.id)
+
 	# Cleanup object state
 	_cleanup_object(obj)
 
@@ -179,24 +282,28 @@ func _pool_release(obj: StreamedObject) -> void:
 	_pool_available.append(obj.id)
 
 
-## Evict the farthest object to make room
+## Evict the farthest object to make room - O(log n) using max-heap
 func _pool_evict_farthest() -> StreamedObject:
-	var farthest_obj: StreamedObject = null
-	var farthest_dist_sq: float = -1.0
+	var farthest_pool_id: int = _heap_pop_farthest()
 
+	if farthest_pool_id >= 0 and farthest_pool_id < _object_pool.size():
+		var farthest_obj: StreamedObject = _object_pool[farthest_pool_id]
+		if farthest_obj and not farthest_obj.in_pool:
+			_pool_release(farthest_obj)
+			_objects.erase(farthest_obj.id)
+			_remove_from_spatial_hash(farthest_obj)
+			farthest_obj.in_pool = false
+			return farthest_obj
+
+	# Heap empty or invalid - fallback to linear scan (should be rare)
 	for obj in _object_pool:
 		if obj.in_pool:
 			continue
-		if obj.distance_sq > farthest_dist_sq:
-			farthest_dist_sq = obj.distance_sq
-			farthest_obj = obj
-
-	if farthest_obj:
-		_pool_release(farthest_obj)
-		_objects.erase(farthest_obj.id)
-		_remove_from_spatial_hash(farthest_obj)
-		farthest_obj.in_pool = false
-		return farthest_obj
+		_pool_release(obj)
+		_objects.erase(obj.id)
+		_remove_from_spatial_hash(obj)
+		obj.in_pool = false
+		return obj
 
 	# Shouldn't happen, but create new as fallback
 	push_warning("[ObjectStreamer] Pool eviction failed, creating overflow object")
@@ -318,6 +425,12 @@ var _scenario: RID = RID()
 var _current_update_group: int = 0
 var _frame_count: int = 0
 
+## Burst loading mode - uses higher budgets during initial load
+## Activated automatically for the first few seconds of world population
+var _burst_mode_active: bool = true
+var _burst_mode_start_time: float = 0.0
+const BURST_MODE_DURATION: float = 5.0  # Seconds of burst loading after start
+
 ## Camera tracking
 var _camera_pos: Vector3 = Vector3.ZERO
 var _camera_moved_threshold_sq: float = 1.0
@@ -326,6 +439,12 @@ var _camera_moved_threshold_sq: float = 1.0
 var near_tier_visible: bool = true
 var mid_tier_visible: bool = true
 var far_tier_visible: bool = true
+
+## Tier SYSTEM enable flags (for isolation)
+## When disabled, the tier system is completely bypassed - no processing, no state changes
+## This allows NEAR to operate independently of MID/FAR (distant rendering)
+var near_tier_enabled: bool = true   # Enable NEAR tier (Node3D instantiation)
+var distant_tiers_enabled: bool = false  # Enable MID+FAR tiers (LOD + impostors) - DISABLED by default for stability
 
 ## Enable/disable object streaming (controlled by Models toggle)
 ## Using setter to handle immediate visibility changes
@@ -376,6 +495,14 @@ var _tier_change_counts: Dictionary = {}  # "FROM→TO" -> count
 var _tier_change_log_timer: float = 0.0
 const TIER_CHANGE_LOG_INTERVAL: float = 2.0  # Print summary every 2 seconds
 
+## [LODAUDIT] Diagnostic logging for LOD system debugging
+## Search for "[LODAUDIT]" in logs to find all diagnostic output
+const LOD_AUDIT_MAX_SAMPLES: int = 20  # Limit log spam
+var _lod_audit_sample_count: int = 0
+var _lod_audit_switch_counts: Dictionary = {}  # "LOD0→LOD1" -> count
+var _lod_audit_timer: float = 0.0
+const LOD_AUDIT_INTERVAL: float = 5.0  # Print summary every 5 seconds
+
 #endregion
 
 
@@ -403,6 +530,10 @@ func _enter_tree() -> void:
 	var world_3d := get_viewport().get_world_3d()
 	if world_3d:
 		_scenario = world_3d.scenario
+
+	# Initialize burst mode for fast initial population
+	_burst_mode_active = true
+	_burst_mode_start_time = Time.get_ticks_msec() / 1000.0
 
 	# Load crossfade shaders
 	_multimesh_shader = load("res://src/core/world/shaders/lod_crossfade_multimesh.gdshader")
@@ -435,6 +566,9 @@ func _process(_delta: float) -> void:
 ## Set the ImpostorManager reference
 func set_impostor_manager(manager: Node) -> void:
 	_impostor_manager = manager
+	# TIER ISOLATION: If distant tiers are disabled, hide all impostors immediately
+	if not distant_tiers_enabled and _impostor_manager and _impostor_manager.has_method("set_all_visible"):
+		_impostor_manager.call("set_all_visible", false)
 
 
 ## Set the ImpostorCandidates reference
@@ -656,6 +790,9 @@ func register_deferred_object(
 		var distance := world_position.distance_to(_camera_pos)
 		obj.distance_sq = distance * distance
 
+		# Add to eviction heap for O(log n) eviction when pool is full
+		_heap_add(obj.id, obj.distance_sq)
+
 		# Determine initial tier
 		var initial_tier: int
 		if distance < NEAR_END:
@@ -690,6 +827,9 @@ func register_deferred_object(
 		# Use simple distance-based tier assignment
 		var distance := world_position.distance_to(_camera_pos)
 		obj.distance_sq = distance * distance
+
+		# Add to eviction heap for O(log n) eviction when pool is full
+		_heap_add(obj.id, obj.distance_sq)
 
 		if distance < NEAR_END:
 			obj.current_tier = Tier.NEAR
@@ -782,6 +922,13 @@ func update(camera_pos: Vector3, delta: float) -> void:
 	if not enabled:
 		return
 
+	# NEAR-ONLY MODE: Skip all MID/FAR processing
+	# Only process instantiation queue for NEAR tier objects
+	if not distant_tiers_enabled:
+		_camera_pos = camera_pos
+		process_instantiation_queue(camera_pos)
+		return
+
 	var start_time := Time.get_ticks_usec()
 
 	# Teleport detection - skip fades if camera moved too far in one frame
@@ -844,6 +991,12 @@ func update(camera_pos: Vector3, delta: float) -> void:
 					_stats["lod_pending_loads"]
 				])
 			_tier_change_log_timer = 0.0
+
+	# [LODAUDIT] Periodic LOD switch summary - always runs (not just debug mode)
+	_lod_audit_timer += delta
+	if _lod_audit_timer >= LOD_AUDIT_INTERVAL:
+		_print_lod_audit_summary()
+		_lod_audit_timer = 0.0
 
 
 ## Called when a deferred object has been instantiated
@@ -1118,6 +1271,80 @@ func set_far_visible(visible: bool) -> void:
 	if _impostor_manager and _impostor_manager.has_method("set_all_visible"):
 		_impostor_manager.call("set_all_visible", visible)
 
+
+## Set NEAR tier system enabled (for isolation testing)
+## When disabled, no Node3D instantiation or NEAR tier processing occurs
+func set_near_tier_enabled(enable: bool) -> void:
+	if near_tier_enabled == enable:
+		return
+	near_tier_enabled = enable
+	if debug_enabled:
+		print("[ObjectStreamer] NEAR tier %s" % ("ENABLED" if enable else "DISABLED"))
+	# When disabling, hide all NEAR objects
+	if not enable:
+		for pool_id: int in _objects:
+			var obj: StreamedObject = _objects[pool_id]
+			_hide_near_tier(obj)
+	else:
+		_apply_tier_visibility()
+
+
+## Set distant tiers (MID + FAR) system enabled (for isolation testing)
+## When disabled, no LOD meshes or impostors are shown
+func set_distant_tiers_enabled(enable: bool) -> void:
+	if distant_tiers_enabled == enable:
+		return
+	distant_tiers_enabled = enable
+	print("[ObjectStreamer] Distant tiers (MID+FAR) %s" % ("ENABLED" if enable else "DISABLED"))
+
+	# When disabling, hide all MID and FAR objects
+	if not enable:
+		for pool_id: int in _objects:
+			var obj: StreamedObject = _objects[pool_id]
+			_hide_mid_tier(obj)
+			_hide_far_tier(obj)
+		# Also hide ALL impostors in ImpostorManager (including cell-based ones)
+		if _impostor_manager and _impostor_manager.has_method("set_all_visible"):
+			_impostor_manager.call("set_all_visible", false)
+	else:
+		_apply_tier_visibility()
+		# Re-show impostors when enabling
+		if _impostor_manager and _impostor_manager.has_method("set_all_visible"):
+			_impostor_manager.call("set_all_visible", true)
+
+
+## Check if NEAR tier is enabled
+func is_near_tier_enabled() -> bool:
+	return near_tier_enabled
+
+
+## Check if distant tiers are enabled
+func is_distant_tiers_enabled() -> bool:
+	return distant_tiers_enabled
+
+
+## Enable NEAR-only mode (disable MID + FAR tiers)
+## Use this to isolate NEAR tier for testing/debugging
+func enable_near_only_mode() -> void:
+	set_near_tier_enabled(true)
+	set_distant_tiers_enabled(false)
+	print("[ObjectStreamer] NEAR-ONLY MODE: MID/FAR tiers disabled")
+
+
+## Enable distant-only mode (disable NEAR tier)
+## Use this to isolate MID/FAR tiers for testing/debugging
+func enable_distant_only_mode() -> void:
+	set_near_tier_enabled(false)
+	set_distant_tiers_enabled(true)
+	print("[ObjectStreamer] DISTANT-ONLY MODE: NEAR tier disabled")
+
+
+## Enable all tiers (default mode)
+func enable_all_tiers() -> void:
+	set_near_tier_enabled(true)
+	set_distant_tiers_enabled(true)
+	print("[ObjectStreamer] ALL TIERS ENABLED")
+
 #endregion
 
 
@@ -1152,18 +1379,16 @@ func _update_aaa_streaming(camera_pos: Vector3) -> void:
 			print("[ObjectStreamer] AAA: Position index not built yet!")
 		return
 
-	# SIMPLIFIED STRATEGY: Query MID tier immediately (covers 0-500m = the visible area)
+	# SIMPLIFIED STRATEGY: Query FULL MID tier immediately from the start
+	# This ensures objects at 150-500m are visible right away, not just objects at 0-150m
 	# FAR tier (500m-5km) uses impostors managed by ImpostorManager, not per-object tracking
-	# This drastically reduces complexity and ensures all nearby objects are registered quickly
 	var query_radius: float
 	var total_registered := _aaa_registered_objects.size()
 
-	if total_registered < 100:
-		# Initial load - start with NEAR tier for fastest visible objects
-		query_radius = NEAR_END + FADE_MARGIN  # 180m
-	elif not _aaa_initial_load_complete:
-		# Expand to full MID tier for complete nearby coverage
-		query_radius = MID_END + FADE_MARGIN  # 530m
+	# ALWAYS query full MID tier radius during initial load
+	# This fixes the issue where MID tier (150-500m) was empty at startup
+	if not _aaa_initial_load_complete:
+		query_radius = MID_END + FADE_MARGIN  # 530m from the start
 		# Check if we've populated MID tier well enough
 		if total_registered > 500:
 			_aaa_initial_load_complete = true
@@ -1408,6 +1633,9 @@ func _process_tier_changes_from_authority(delta: float) -> void:
 		obj.current_tier = current_tier
 		obj.distance_sq = distance * distance
 
+		# Update eviction heap with new distance (O(log n))
+		_heap_update_distance(obj.id, obj.distance_sq)
+
 		# Update visibility and transitions based on tier and distance
 		_update_object_state(obj, external_id, current_tier, distance, delta)
 
@@ -1416,7 +1644,7 @@ func _process_tier_changes_from_authority(delta: float) -> void:
 
 		# Batched logging for tier changes (accumulate, print summary periodically)
 		if debug_enabled and old_tier != current_tier:
-			var key := "%s→%s" % [_tier_name(old_tier), _tier_name(current_tier)]
+			var key := "%s→%s" % [TU.get_tier_name(old_tier), TU.get_tier_name(current_tier)]
 			_tier_change_counts[key] = _tier_change_counts.get(key, 0) + 1
 
 		# Update NEAR keepalive timer
@@ -1466,7 +1694,7 @@ func _process_tier_changes_event_driven(delta: float) -> void:
 
 		# Batched logging for tier changes
 		if debug_enabled:
-			var key := "%s→%s" % [_tier_name(old_tier), _tier_name(new_tier)]
+			var key := "%s→%s" % [TU.get_tier_name(old_tier), TU.get_tier_name(new_tier)]
 			_tier_change_counts[key] = _tier_change_counts.get(key, 0) + 1
 
 	# Step 3: Update active fade animations (time-based, not distance-based)
@@ -1480,53 +1708,79 @@ func _process_tier_changes_event_driven(delta: float) -> void:
 
 ## Apply immediate tier state change (show/hide representations)
 ## This is separate from fade animation - it sets up the visual state
+## TIER ISOLATION: NEAR and MID/FAR can be independently enabled/disabled
 func _apply_tier_change_immediate(obj: StreamedObject, external_id: int, old_tier: int, new_tier: int) -> void:
-	# Entering NEAR tier
-	if new_tier == Tier.NEAR and old_tier != Tier.NEAR:
-		# Queue for Node3D instantiation if not already present
-		if obj.node3d == null and external_id not in _instantiation_queue:
-			_instantiation_queue.append(external_id)
+	# Safety check: validate object is still valid
+	if obj == null or obj.in_pool:
+		return
 
-	# Entering MID tier
-	if new_tier == Tier.MID:
-		# Ensure LOD meshes are loaded
-		if not obj.lod_meshes_loaded:
-			_load_lod_meshes(obj)
-		# Show MID representation
-		if obj.lod_meshes_loaded and mid_tier_visible:
-			_show_mid_tier(obj)
+	# === NEAR TIER (isolated from distant rendering) ===
+	if near_tier_enabled:
+		# Entering NEAR tier
+		if new_tier == Tier.NEAR and old_tier != Tier.NEAR:
+			# Queue for Node3D instantiation if not already present
+			if obj.node3d == null and external_id not in _instantiation_queue:
+				_instantiation_queue.append(external_id)
 
-	# Entering FAR tier
-	if new_tier == Tier.FAR:
-		# Show FAR representation
-		if far_tier_visible and obj.impostor_id >= 0 and _impostor_manager:
-			_impostor_manager.set_lod_impostor_visible(obj.impostor_id, true)
+		# Leaving NEAR tier - hide Node3D
+		if old_tier == Tier.NEAR and new_tier != Tier.NEAR:
+			if near_tier_visible:
+				_hide_near_tier(obj)
 
-	# Leaving NEAR tier
-	if old_tier == Tier.NEAR and new_tier != Tier.NEAR:
-		# Start hiding Node3D (will be handled by fade)
-		pass
+	# === DISTANT TIERS (MID + FAR, isolated from NEAR) ===
+	if distant_tiers_enabled:
+		# Entering MID tier
+		if new_tier == Tier.MID:
+			# Ensure LOD meshes are loaded
+			if not obj.lod_meshes_loaded:
+				_load_lod_meshes(obj)
+			# Show MID representation
+			if obj.lod_meshes_loaded and mid_tier_visible:
+				_show_mid_tier(obj)
 
-	# Leaving MID tier
-	if old_tier == Tier.MID and new_tier != Tier.MID:
-		# Hide will be handled by fade completion
-		pass
+		# Entering FAR tier
+		if new_tier == Tier.FAR:
+			# Show FAR representation - with safety guards
+			if far_tier_visible and obj.impostor_id >= 0:
+				if _impostor_manager and is_instance_valid(_impostor_manager):
+					if _impostor_manager.has_method("set_lod_impostor_visible"):
+						_impostor_manager.set_lod_impostor_visible(obj.impostor_id, true)
 
-	# Leaving FAR tier
-	if old_tier == Tier.FAR and new_tier != Tier.FAR:
-		# Hide will be handled by fade completion
-		pass
+		# Leaving MID tier
+		if old_tier == Tier.MID and new_tier != Tier.MID:
+			_hide_mid_tier(obj)
 
-	# Entering HIDDEN tier
+		# Leaving FAR tier
+		if old_tier == Tier.FAR and new_tier != Tier.FAR:
+			_hide_far_tier(obj)
+
+	# === HIDDEN TIER (respects isolation flags) ===
 	if new_tier == Tier.HIDDEN:
-		# Immediately hide everything (no fade for HIDDEN)
-		_hide_all_tiers(obj)
+		# Hide only the tiers that are enabled
+		if near_tier_enabled:
+			_hide_near_tier(obj)
+		if distant_tiers_enabled:
+			_hide_mid_tier(obj)
+			_hide_far_tier(obj)
 
 
 ## Start a fade animation for a tier transition
+## TIER ISOLATION: Only animate tiers that are enabled
 func _start_fade_animation(obj: StreamedObject, external_id: int, old_tier: int, new_tier: int) -> void:
 	# Don't animate HIDDEN transitions
 	if new_tier == Tier.HIDDEN or old_tier == Tier.HIDDEN:
+		return
+
+	# TIER ISOLATION: Skip fade if the relevant tier system is disabled
+	# NEAR transitions require near_tier_enabled
+	var involves_near := (old_tier == Tier.NEAR or new_tier == Tier.NEAR)
+	if involves_near and not near_tier_enabled:
+		return
+
+	# MID/FAR transitions require distant_tiers_enabled
+	var involves_distant := (old_tier == Tier.MID or new_tier == Tier.MID or
+							  old_tier == Tier.FAR or new_tier == Tier.FAR)
+	if involves_distant and not distant_tiers_enabled:
 		return
 
 	# Don't exceed max concurrent fades
@@ -1625,15 +1879,17 @@ func _apply_fade_to_object(obj: StreamedObject, external_id: int, fade: FadeAnim
 			_update_mid_fade(obj, 1.0 - t)
 		# Fade in FAR
 		obj.far_fade = t
-		if far_tier_visible and obj.impostor_id >= 0 and _impostor_manager:
-			_impostor_manager.set_lod_impostor_fade(obj.impostor_id, t)
+		if far_tier_visible and obj.impostor_id >= 0:
+			if _impostor_manager and is_instance_valid(_impostor_manager) and _impostor_manager.has_method("set_lod_impostor_fade"):
+				_impostor_manager.set_lod_impostor_fade(obj.impostor_id, t)
 
 	# FAR→MID transition
 	elif from_tier == Tier.FAR and to_tier == Tier.MID:
 		# Fade out FAR
 		obj.far_fade = 1.0 - t
-		if far_tier_visible and obj.impostor_id >= 0 and _impostor_manager:
-			_impostor_manager.set_lod_impostor_fade(obj.impostor_id, 1.0 - t)
+		if far_tier_visible and obj.impostor_id >= 0:
+			if _impostor_manager and is_instance_valid(_impostor_manager) and _impostor_manager.has_method("set_lod_impostor_fade"):
+				_impostor_manager.set_lod_impostor_fade(obj.impostor_id, 1.0 - t)
 		# Fade in MID
 		obj.mid_fade = t
 		if mid_tier_visible:
@@ -1642,42 +1898,58 @@ func _apply_fade_to_object(obj: StreamedObject, external_id: int, fade: FadeAnim
 
 ## Update MID tier fade value in the batcher
 func _update_mid_fade(obj: StreamedObject, fade: float) -> void:
-	if not obj.multimesh_keys.is_empty() and _batcher:
-		for batch_key in obj.multimesh_keys:
-			_batcher.update_fade(obj.id, batch_key, fade)
+	if not obj.multimesh_keys.is_empty():
+		if _batcher and is_instance_valid(_batcher) and _batcher.has_method("update_fade"):
+			for batch_key in obj.multimesh_keys:
+				_batcher.update_fade(obj.id, batch_key, fade)
 
 
 ## Finalize a tier transition after fade completes
+## TIER ISOLATION: Only affects tiers that are enabled
 func _finalize_tier_transition(obj: StreamedObject, external_id: int, final_tier: int) -> void:
 	match final_tier:
 		Tier.NEAR:
-			# Remove crossfade shader, show NEAR fully
-			_remove_near_crossfade_shader(obj)
-			if obj.node3d and is_instance_valid(obj.node3d):
-				obj.node3d.visible = near_tier_visible
-			# Hide MID and FAR
-			_hide_mid_tier(obj)
-			_hide_far_tier(obj)
+			if near_tier_enabled:
+				# Remove crossfade shader, show NEAR fully
+				_remove_near_crossfade_shader(obj)
+				if obj.node3d and is_instance_valid(obj.node3d):
+					obj.node3d.visible = near_tier_visible
+			if distant_tiers_enabled:
+				# Hide MID and FAR
+				_hide_mid_tier(obj)
+				_hide_far_tier(obj)
 
 		Tier.MID:
-			# Show MID fully, hide NEAR and FAR
-			obj.mid_fade = 1.0
-			_update_mid_fade(obj, 1.0)
-			if obj.node3d and is_instance_valid(obj.node3d):
-				obj.node3d.visible = false
-			_remove_near_crossfade_shader(obj)
-			_hide_far_tier(obj)
+			if distant_tiers_enabled:
+				# Show MID fully, hide FAR
+				obj.mid_fade = 1.0
+				_update_mid_fade(obj, 1.0)
+				_hide_far_tier(obj)
+			if near_tier_enabled:
+				# Hide NEAR
+				if obj.node3d and is_instance_valid(obj.node3d):
+					obj.node3d.visible = false
+				_remove_near_crossfade_shader(obj)
 
 		Tier.FAR:
-			# Show FAR fully, hide NEAR and MID
-			obj.far_fade = 1.0
-			if obj.impostor_id >= 0 and _impostor_manager:
-				_impostor_manager.set_lod_impostor_fade(obj.impostor_id, 1.0)
-			_hide_near_tier(obj)
-			_hide_mid_tier(obj)
+			if distant_tiers_enabled:
+				# Show FAR fully, hide MID
+				obj.far_fade = 1.0
+				if obj.impostor_id >= 0:
+					if _impostor_manager and is_instance_valid(_impostor_manager) and _impostor_manager.has_method("set_lod_impostor_fade"):
+						_impostor_manager.set_lod_impostor_fade(obj.impostor_id, 1.0)
+				_hide_mid_tier(obj)
+			if near_tier_enabled:
+				# Hide NEAR
+				_hide_near_tier(obj)
 
 		Tier.HIDDEN:
-			_hide_all_tiers(obj)
+			# Hide only enabled tiers
+			if near_tier_enabled:
+				_hide_near_tier(obj)
+			if distant_tiers_enabled:
+				_hide_mid_tier(obj)
+				_hide_far_tier(obj)
 
 
 ## Handle teleport - cancel all fades and pop instantly
@@ -1708,17 +1980,6 @@ func _hide_all_tiers(obj: StreamedObject) -> void:
 #endregion
 
 
-## Helper to get tier name for debug logging
-func _tier_name(tier: int) -> String:
-	match tier:
-		Tier.NEAR: return "NEAR"
-		Tier.MID: return "MID"
-		Tier.FAR: return "FAR"
-		Tier.HIDDEN: return "HIDDEN"
-		4: return "NONE"  # DistanceTierManager.Tier.NONE (not registered)
-		_: return "T%d" % tier
-
-
 ## Print batched tier change summary (called periodically instead of per-object logging)
 func _print_tier_change_summary() -> void:
 	if _tier_change_counts.is_empty():
@@ -1730,6 +1991,58 @@ func _print_tier_change_summary() -> void:
 
 	print("[ObjectStreamer] Tier changes: %s" % ", ".join(parts))
 	_tier_change_counts.clear()
+
+
+## [LODAUDIT] Print summary of LOD switches and issues
+func _print_lod_audit_summary() -> void:
+	# Count LOD distribution from batcher
+	var lod_counts := {1: 0, 2: 0, 3: 0}
+	if _batcher:
+		var batches: Dictionary = _batcher.get_all_batches()
+		for batch_key: int in batches:
+			var batch: RefCounted = batches[batch_key]
+			var lod_level: int = batch.lod_level
+			var instance_count: int = batch.instances.size()
+			if lod_level in lod_counts:
+				lod_counts[lod_level] += instance_count
+
+	# Build switch summary
+	var switch_parts: Array[String] = []
+	var clamp_parts: Array[String] = []
+	for key: String in _lod_audit_switch_counts:
+		var count: int = _lod_audit_switch_counts[key]
+		if key.begins_with("CLAMP"):
+			clamp_parts.append("%s: %d" % [key, count])
+		else:
+			switch_parts.append("%s: %d" % [key, count])
+
+	print("[LODAUDIT] === LOD SUMMARY ===")
+	print("[LODAUDIT] Active instances: LOD1=%d, LOD2=%d, LOD3=%d" % [
+		lod_counts[1], lod_counts[2], lod_counts[3]])
+
+	if not switch_parts.is_empty():
+		print("[LODAUDIT] Switches: %s" % ", ".join(switch_parts))
+
+	if not clamp_parts.is_empty():
+		print("[LODAUDIT] CLAMPED (missing LODs!): %s" % ", ".join(clamp_parts))
+
+	# Count objects by lod_meshes.size()
+	var mesh_count_dist := {0: 0, 1: 0, 2: 0, 3: 0}
+	var significant_count := 0
+	for pool_id: int in _objects:
+		var obj: StreamedObject = _objects[pool_id]
+		if obj.is_significant:
+			significant_count += 1
+			var count: int = obj.lod_meshes.size()
+			if count in mesh_count_dist:
+				mesh_count_dist[count] += 1
+			else:
+				mesh_count_dist[0] += 1
+
+	print("[LODAUDIT] Significant objects: %d (0 LODs: %d, 1 LOD: %d, 2 LODs: %d, 3 LODs: %d)" % [
+		significant_count, mesh_count_dist[0], mesh_count_dist[1], mesh_count_dist[2], mesh_count_dist[3]])
+
+	_lod_audit_switch_counts.clear()
 
 
 ## Update object visibility, fade, and LOD state based on current tier and distance
@@ -1759,10 +2072,10 @@ func _update_object_state(obj: StreamedObject, external_id: int, tier: int, dist
 
 ## Update NEAR tier state (full Node3D with crossfade at boundaries)
 func _update_near_state(obj: StreamedObject, external_id: int, distance: float, _delta: float) -> void:
-	# Calculate fade at NEAR/MID boundary
+	# Calculate fade at NEAR/MID boundary (fade out as we exit NEAR)
 	var fade_amount := 1.0
 	if distance > NEAR_END - FADE_MARGIN:
-		fade_amount = clampf((NEAR_END + FADE_MARGIN - distance) / (2.0 * FADE_MARGIN), 0.0, 1.0)
+		fade_amount = TU.calculate_boundary_fade(distance, NEAR_END, FADE_MARGIN, false)
 
 	if near_tier_visible:
 		if obj.node3d and is_instance_valid(obj.node3d):
@@ -1820,13 +2133,13 @@ func _update_mid_state(obj: StreamedObject, distance: float, _delta: float) -> v
 	var fade_near := 0.0
 	var fade_far := 1.0
 
-	# Fade from NEAR
+	# Fade in from NEAR (entering MID tier)
 	if distance < NEAR_END + FADE_MARGIN:
-		fade_near = clampf((distance - (NEAR_END - FADE_MARGIN)) / (2.0 * FADE_MARGIN), 0.0, 1.0)
+		fade_near = TU.calculate_boundary_fade(distance, NEAR_END, FADE_MARGIN, true)
 
-	# Fade to FAR
+	# Fade out to FAR (exiting MID tier)
 	if distance > MID_END - FADE_MARGIN:
-		fade_far = clampf((MID_END + FADE_MARGIN - distance) / (2.0 * FADE_MARGIN), 0.0, 1.0)
+		fade_far = TU.calculate_boundary_fade(distance, MID_END, FADE_MARGIN, false)
 
 	var effective_fade := minf(fade_near, fade_far)
 
@@ -1874,12 +2187,12 @@ func _update_far_state(obj: StreamedObject, external_id: int, distance: float, _
 	# Calculate fade at MID/FAR boundary (fade in from MID)
 	var fade_in := 1.0
 	if distance < MID_END + FADE_MARGIN:
-		fade_in = clampf((distance - (MID_END - FADE_MARGIN)) / (2.0 * FADE_MARGIN), 0.0, 1.0)
+		fade_in = TU.calculate_boundary_fade(distance, MID_END, FADE_MARGIN, true)
 
 	# Calculate fade at FAR/HIDDEN boundary (fade out to HIDDEN)
 	var fade_out := 1.0
 	if distance > FAR_END - FADE_MARGIN:
-		fade_out = clampf((FAR_END + FADE_MARGIN - distance) / (2.0 * FADE_MARGIN), 0.0, 1.0)
+		fade_out = TU.calculate_boundary_fade(distance, FAR_END, FADE_MARGIN, false)
 
 	# Combined fade amount (whichever is limiting)
 	var fade_amount := minf(fade_in, fade_out)
@@ -1946,13 +2259,10 @@ func _update_near_keepalive(obj: StreamedObject, delta: float) -> void:
 			obj.node3d = null
 
 
-## Increment tier stat
+## Increment tier stat (uses TierUtils.TIER_STAT_KEYS for array lookup)
 func _increment_tier_stat(tier: int) -> void:
-	match tier:
-		Tier.NEAR: _stats["near_visible"] += 1
-		Tier.MID: _stats["mid_visible"] += 1
-		Tier.FAR: _stats["far_visible"] += 1
-		Tier.HIDDEN: _stats["hidden"] += 1
+	if tier >= 0 and tier < TU.TIER_STAT_KEYS.size():
+		_stats[TU.TIER_STAT_KEYS[tier]] += 1
 
 #endregion
 
@@ -1999,6 +2309,7 @@ func _start_async_lod_load(obj: StreamedObject) -> void:
 	_stats["lod_pending_loads"] = _pending_lod_loads.size()
 
 	# Submit async load requests for each LOD level
+	var missing_levels: Array[int] = []
 	for lod_level in [1, 2, 3]:
 		var lod_path := LODPrebakerScript.get_lod_path(model_path, lod_level)
 		if ResourceLoader.exists(lod_path):
@@ -2008,7 +2319,14 @@ func _start_async_lod_load(obj: StreamedObject) -> void:
 				_handle_lod_load_error(model_path, lod_level)
 		else:
 			# No LOD file exists - mark as complete with null
+			missing_levels.append(lod_level)
 			_on_lod_level_loaded(model_path, lod_level, null)
+
+	# [LODAUDIT] Log missing LOD files
+	if not missing_levels.is_empty() and _lod_audit_sample_count < LOD_AUDIT_MAX_SAMPLES:
+		print("[LODAUDIT] MISSING_FILES: %s missing LOD levels %s" % [
+			model_path.get_file(), str(missing_levels)])
+		_lod_audit_sample_count += 1
 
 
 ## Poll for completed async LOD loads - called from update()
@@ -2104,15 +2422,21 @@ func _apply_cached_lod_meshes(obj: StreamedObject) -> void:
 	var cache_entry: Variant = _lod_mesh_cache.get(obj.model_path)
 	if cache_entry == null:
 		obj.lod_meshes_loaded = true  # Mark as loaded even if empty
+		# [LODAUDIT] No cache entry for model
+		if _lod_audit_sample_count < LOD_AUDIT_MAX_SAMPLES:
+			print("[LODAUDIT] NO_CACHE: %s" % obj.model_path.get_file())
+			_lod_audit_sample_count += 1
 		return
 
 	obj.lod_meshes_loaded = true
 
 	# Apply in order: LOD1, LOD2, LOD3
+	var loaded_levels: Array[int] = []
 	for lod_level in [1, 2, 3]:
 		var lod_mesh: ArrayMesh = (cache_entry as Dictionary).get(lod_level)
 		if lod_mesh:
 			obj.lod_meshes.append(lod_mesh)
+			loaded_levels.append(lod_level)
 
 			var materials: Array[Material] = []
 			for surf_idx in range(lod_mesh.get_surface_count()):
@@ -2120,6 +2444,12 @@ func _apply_cached_lod_meshes(obj: StreamedObject) -> void:
 				if mat:
 					materials.append(mat)
 			obj.lod_materials.append(materials)
+
+	# [LODAUDIT] Log if not all 3 LOD levels loaded
+	if obj.lod_meshes.size() < 3 and _lod_audit_sample_count < LOD_AUDIT_MAX_SAMPLES:
+		print("[LODAUDIT] PARTIAL_LODS: %s has %d meshes (levels: %s)" % [
+			obj.model_path.get_file(), obj.lod_meshes.size(), str(loaded_levels)])
+		_lod_audit_sample_count += 1
 
 
 func _get_mid_lod_level(distance: float) -> int:
@@ -2137,12 +2467,29 @@ func _update_mid_lod_level(obj: StreamedObject, distance: float) -> void:
 	if not obj.mid_visible or obj.lod_meshes.is_empty():
 		return
 
-	var target_lod_idx := _get_mid_lod_level(distance)
-	target_lod_idx = mini(target_lod_idx, obj.lod_meshes.size() - 1)
+	# DESYNC FIX: Validate current_mid_lod_idx is valid before using it
+	# This prevents crashes when LOD index gets out of sync with actual mesh array
+	if obj.current_mid_lod_idx >= obj.lod_meshes.size():
+		# Index out of bounds - reset tracking to force full re-add
+		obj.current_mid_lod_idx = -1
+		obj.multimesh_keys.clear()
+
+	var raw_target_lod_idx := _get_mid_lod_level(distance)
+	var target_lod_idx := mini(raw_target_lod_idx, obj.lod_meshes.size() - 1)
+
+	# [LODAUDIT] Track when clamping occurs (means missing LOD levels)
+	if raw_target_lod_idx != target_lod_idx:
+		var clamp_key := "CLAMP_%d→%d" % [raw_target_lod_idx, target_lod_idx]
+		_lod_audit_switch_counts[clamp_key] = _lod_audit_switch_counts.get(clamp_key, 0) + 1
 
 	# Only switch if LOD level changed
 	if target_lod_idx == obj.current_mid_lod_idx:
 		return
+
+	# [LODAUDIT] Track LOD switches
+	var old_lod := obj.current_mid_lod_idx if obj.current_mid_lod_idx >= 0 else -1
+	var switch_key := "LOD%d→LOD%d" % [old_lod + 1, target_lod_idx + 1]
+	_lod_audit_switch_counts[switch_key] = _lod_audit_switch_counts.get(switch_key, 0) + 1
 
 	# Remove old LOD instance
 	for batch_key in obj.multimesh_keys:
@@ -2178,6 +2525,10 @@ func _update_mid_lod_level(obj: StreamedObject, distance: float) -> void:
 
 
 func _show_mid_tier(obj: StreamedObject) -> void:
+	# TIER ISOLATION: Skip if distant tiers are disabled
+	if not distant_tiers_enabled:
+		return
+
 	if obj.mid_visible:
 		return
 
@@ -2185,6 +2536,12 @@ func _show_mid_tier(obj: StreamedObject) -> void:
 		_load_lod_meshes(obj)
 
 	if obj.lod_meshes.is_empty():
+		# FALLBACK: Keep NEAR Node3D visible while LOD meshes are loading
+		# This prevents objects from becoming invisible during async LOD load
+		if obj.node3d and is_instance_valid(obj.node3d) and near_tier_visible:
+			obj.node3d.visible = true
+			# Apply semi-transparent crossfade to indicate it's a fallback
+			_apply_near_crossfade_shader(obj, 0.7)
 		return
 
 	var distance := sqrt(obj.distance_sq)
@@ -2233,8 +2590,10 @@ func _hide_mid_tier(obj: StreamedObject) -> void:
 			for batch_key: int in obj.multimesh_keys:
 				_unregister_object_from_gpu_batch(external_id, batch_key)
 
-	for batch_key: int in obj.multimesh_keys:
-		_batcher.remove_instance(obj.id, batch_key)
+	# Safety check: ensure batcher exists before using it
+	if _batcher:
+		for batch_key: int in obj.multimesh_keys:
+			_batcher.remove_instance(obj.id, batch_key)
 	obj.multimesh_keys.clear()
 
 	obj.mid_visible = false
@@ -2253,6 +2612,10 @@ func _set_mid_fade(obj: StreamedObject, fade: float) -> void:
 #region FAR Tier
 
 func _show_far_tier(obj: StreamedObject) -> void:
+	# TIER ISOLATION: Skip if distant tiers are disabled
+	if not distant_tiers_enabled:
+		return
+
 	if obj.far_visible or not _impostor_manager:
 		return
 
@@ -2508,6 +2871,34 @@ func _get_external_id(obj: StreamedObject) -> int:
 	return _pool_to_external.get(obj.id, -1)
 
 
+## Safely retrieve a StreamedObject by external_id with validation
+## Returns null if external_id is invalid or mapping is stale
+## Cleans up stale mappings automatically to prevent crashes
+func _get_object_safe(external_id: int) -> StreamedObject:
+	if external_id not in _external_to_pool:
+		return null
+
+	var pool_id: int = _external_to_pool[external_id]
+
+	if pool_id not in _objects:
+		# Clean up stale mapping
+		_external_to_pool.erase(external_id)
+		_pool_to_external.erase(pool_id)
+		_heap_remove(pool_id)  # Also clean up heap
+		return null
+
+	var obj: StreamedObject = _objects[pool_id]
+
+	# Validate object is not already in pool (reused)
+	if obj.in_pool:
+		# Clean up stale mapping
+		_external_to_pool.erase(external_id)
+		_pool_to_external.erase(pool_id)
+		return null
+
+	return obj
+
+
 ## Queue an object for instantiation
 ## Uses time-budgeted queue instead of immediate emission for smooth frame times
 func _request_instantiation(obj: StreamedObject, external_id: int) -> void:
@@ -2525,14 +2916,40 @@ var _queue_last_sort_frame: int = -100
 const QUEUE_SORT_INTERVAL: int = 30  # Only sort every 30 frames (0.5s at 60fps)
 
 
+## Update burst mode state - deactivate after duration expires
+func _update_burst_mode() -> void:
+	if not _burst_mode_active:
+		return
+
+	var current_time := Time.get_ticks_msec() / 1000.0
+	var elapsed := current_time - _burst_mode_start_time
+
+	if elapsed >= BURST_MODE_DURATION:
+		_burst_mode_active = false
+		if debug_enabled:
+			print("[ObjectStreamer] Burst mode ended after %.1fs - using normal budgets" % elapsed)
+
+
 ## Process instantiation queue with time budget
 ## Call this from update() - returns number of objects instantiated
+## TIER ISOLATION: Only processes when near_tier_enabled is true
 func process_instantiation_queue(camera_pos: Vector3) -> int:
+	# Skip if NEAR tier is disabled (no Node3D instantiation needed)
+	if not near_tier_enabled:
+		return 0
+
 	if _instantiation_queue.is_empty():
 		return 0
 
+	# Update burst mode state
+	_update_burst_mode()
+
 	var start_time := Time.get_ticks_usec()
 	var instantiated := 0
+
+	# BURST MODE: Use higher budgets during initial load for faster world population
+	var budget_ms: float = SC.NEAR_BURST_BUDGET_MS if _burst_mode_active else instantiation_budget_ms
+	var max_per_frame: int = SC.NEAR_BURST_MAX_INSTANTIATIONS if _burst_mode_active else max_instantiations_per_frame
 
 	# OPTIMIZATION: Only sort periodically or when queue changed significantly
 	# Sorting is O(n log n) and was causing major frame spikes with large queues
@@ -2541,10 +2958,10 @@ func process_instantiation_queue(camera_pos: Vector3) -> int:
 		_queue_last_sort_frame = _frame_count
 
 	# Process queue within budget
-	while not _instantiation_queue.is_empty() and instantiated < max_instantiations_per_frame:
+	while not _instantiation_queue.is_empty() and instantiated < max_per_frame:
 		# Check time budget
 		var elapsed_ms := (Time.get_ticks_usec() - start_time) / 1000.0
-		if elapsed_ms >= instantiation_budget_ms:
+		if elapsed_ms >= budget_ms:
 			break
 
 		var external_id: int = _instantiation_queue.pop_front()
@@ -2591,7 +3008,21 @@ func process_instantiation_queue(camera_pos: Vector3) -> int:
 
 
 ## Sort instantiation queue by distance to camera (closest first)
+## OPTIMIZED: Uses partial sort for large queues - only sorts top K elements
 func _sort_instantiation_queue_by_distance(camera_pos: Vector3) -> void:
+	# For small queues, full sort is fine
+	var queue_size := _instantiation_queue.size()
+	if queue_size <= max_instantiations_per_frame * 2:
+		_sort_instantiation_queue_full(camera_pos)
+		return
+
+	# For large queues, use partial sort (find top K closest)
+	# This is O(n) average vs O(n log n) for full sort
+	_sort_instantiation_queue_partial(camera_pos, max_instantiations_per_frame * 2)
+
+
+## Full sort - used for small queues
+func _sort_instantiation_queue_full(camera_pos: Vector3) -> void:
 	# Create array of [distance_sq, external_id] for sorting
 	var sortable: Array = []
 	for external_id: int in _instantiation_queue:
@@ -2613,6 +3044,68 @@ func _sort_instantiation_queue_by_distance(camera_pos: Vector3) -> void:
 	_instantiation_queue.clear()
 	for entry: Array in sortable:
 		_instantiation_queue.append(entry[1] as int)
+
+
+## Partial sort - find top K closest objects, leave rest unsorted
+## Uses selection approach: O(n) to find K smallest, then sort only those K elements
+func _sort_instantiation_queue_partial(camera_pos: Vector3, k: int) -> void:
+	# Build distance array
+	var distances: Array = []  # [distance_sq, external_id, is_valid]
+	for external_id: int in _instantiation_queue:
+		if external_id not in _external_to_pool:
+			continue
+
+		var pool_id: int = _external_to_pool[external_id]
+		if pool_id not in _objects:
+			continue
+
+		var obj: StreamedObject = _objects[pool_id]
+		var dist_sq := camera_pos.distance_squared_to(obj.position)
+		distances.append([dist_sq, external_id])
+
+	if distances.size() <= k:
+		# Not enough elements, just sort all
+		distances.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+		_instantiation_queue.clear()
+		for entry: Array in distances:
+			_instantiation_queue.append(entry[1] as int)
+		return
+
+	# Find the k-th smallest distance using partial sort
+	# We use a simple approach: sort first k elements, then scan rest
+	# Simpler than full quickselect but still faster than full sort for large queues
+
+	# Sort just the first k elements
+	var top_k: Array = distances.slice(0, k)
+	top_k.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+
+	# Track the k-th smallest distance
+	var threshold: float = top_k[k - 1][0]
+
+	# Scan remaining elements - replace if closer
+	for i in range(k, distances.size()):
+		var entry: Array = distances[i]
+		if entry[0] < threshold:
+			# Find position to insert and push out the farthest
+			for j in range(k):
+				if entry[0] < top_k[j][0]:
+					# Insert here, shift rest down, drop last
+					top_k.insert(j, entry)
+					top_k.pop_back()
+					threshold = top_k[k - 1][0]
+					break
+
+	# Rebuild queue: top_k first (sorted), then rest (unsorted)
+	_instantiation_queue.clear()
+	for entry: Array in top_k:
+		_instantiation_queue.append(entry[1] as int)
+
+	# Add remaining unsorted (these won't be processed this frame anyway)
+	for i in range(k, distances.size()):
+		var entry: Array = distances[i]
+		# Skip if already added in top_k replacement
+		if entry[1] not in _instantiation_queue:
+			_instantiation_queue.append(entry[1] as int)
 
 
 ## Get number of objects waiting for instantiation
@@ -2655,38 +3148,43 @@ func _apply_tier_visibility() -> void:
 		_apply_object_visibility(obj)
 
 
+## Apply visibility for a single object
+## TIER ISOLATION: Respects near_tier_enabled and distant_tiers_enabled flags
 func _apply_object_visibility(obj: StreamedObject) -> void:
-	# NEAR
-	if obj.node3d and is_instance_valid(obj.node3d):
-		var should_show := near_tier_visible and obj.current_tier == Tier.NEAR
-		obj.node3d.visible = should_show
-		obj.near_visible = should_show
+	# === NEAR TIER (isolated) ===
+	if near_tier_enabled:
+		if obj.node3d and is_instance_valid(obj.node3d):
+			var should_show := near_tier_visible and obj.current_tier == Tier.NEAR
+			obj.node3d.visible = should_show
+			obj.near_visible = should_show
 
-	# MID
-	if obj.current_tier == Tier.MID and obj.is_significant:
-		if mid_tier_visible:
-			if not obj.mid_visible:
-				_show_mid_tier(obj)
-				obj.mid_fade = 1.0
-				_set_mid_fade(obj, 1.0)
-		else:
-			if obj.mid_visible:
-				_hide_mid_tier(obj)
-	elif obj.mid_visible:
-		_hide_mid_tier(obj)
+	# === DISTANT TIERS (MID + FAR, isolated) ===
+	if distant_tiers_enabled:
+		# MID
+		if obj.current_tier == Tier.MID and obj.is_significant:
+			if mid_tier_visible:
+				if not obj.mid_visible:
+					_show_mid_tier(obj)
+					obj.mid_fade = 1.0
+					_set_mid_fade(obj, 1.0)
+			else:
+				if obj.mid_visible:
+					_hide_mid_tier(obj)
+		elif obj.mid_visible:
+			_hide_mid_tier(obj)
 
-	# FAR
-	if obj.current_tier == Tier.FAR and obj.is_significant:
-		if far_tier_visible:
-			if not obj.far_visible:
-				_show_far_tier(obj)
-				obj.far_fade = 1.0
-				_set_far_fade(obj, 1.0)
-		else:
-			if obj.far_visible:
-				_hide_far_tier(obj)
-	elif obj.far_visible:
-		_hide_far_tier(obj)
+		# FAR
+		if obj.current_tier == Tier.FAR and obj.is_significant:
+			if far_tier_visible:
+				if not obj.far_visible:
+					_show_far_tier(obj)
+					obj.far_fade = 1.0
+					_set_far_fade(obj, 1.0)
+			else:
+				if obj.far_visible:
+					_hide_far_tier(obj)
+		elif obj.far_visible:
+			_hide_far_tier(obj)
 
 
 func _update_stats() -> void:

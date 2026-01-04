@@ -234,7 +234,16 @@ var _gpu_compute_available: bool = false
 
 ## Threshold for using GPU compute (objects registered)
 ## Below this threshold, CPU path may be faster due to dispatch overhead
+## HYSTERESIS: Enable at 600, disable at 400 to prevent flickering at boundary
+const GPU_COMPUTE_ENABLE_THRESHOLD: int = 600
+const GPU_COMPUTE_DISABLE_THRESHOLD: int = 400
+
+## Legacy constant for compatibility
 const GPU_COMPUTE_THRESHOLD: int = 500
+
+## Incremental GPU sync settings
+## Sync this many objects per frame instead of all at once
+const GPU_SYNC_BATCH_SIZE: int = 100
 
 ## Phase 2 GPU-driven mode flag
 ## When true, this Phase 1 GPU path is disabled in favor of GPUVisibilityRenderer (Phase 2)
@@ -270,6 +279,14 @@ func _init_gpu_compute() -> void:
 ## Track if we've synced existing objects to GPU after init
 var _gpu_objects_synced: bool = false
 
+## Incremental sync state
+var _gpu_sync_in_progress: bool = false
+var _gpu_sync_batch_start: int = 0
+var _gpu_sync_object_keys: Array = []  # Cached keys for iteration
+
+## Whether GPU mode is currently active (with hysteresis)
+var _gpu_mode_active: bool = false
+
 ## Check if GPU compute should be used for current update
 func _should_use_gpu_compute() -> bool:
 	# Phase 2 GPU-driven mode supersedes Phase 1 GPU path
@@ -286,17 +303,66 @@ func _should_use_gpu_compute() -> bool:
 	if not _gpu_compute_available:
 		return false
 
-	# Use GPU compute if we have enough objects to justify dispatch overhead
-	var should_use := _registered_objects.size() >= GPU_COMPUTE_THRESHOLD
+	var object_count := _registered_objects.size()
 
-	# First time crossing threshold with GPU available - sync all existing objects
-	if should_use and not _gpu_objects_synced:
-		print("[DistanceTierManager] Syncing %d existing objects to GPU..." % _registered_objects.size())
-		_sync_objects_to_gpu()
+	# HYSTERESIS: Prevent flickering at threshold boundary
+	if _gpu_mode_active:
+		# Currently using GPU - only disable if we drop below lower threshold
+		if object_count < GPU_COMPUTE_DISABLE_THRESHOLD:
+			_gpu_mode_active = false
+			_gpu_objects_synced = false
+			print("[DistanceTierManager] GPU mode disabled (objects: %d < %d)" % [object_count, GPU_COMPUTE_DISABLE_THRESHOLD])
+	else:
+		# Currently using CPU - only enable if we exceed upper threshold
+		if object_count >= GPU_COMPUTE_ENABLE_THRESHOLD:
+			_gpu_mode_active = true
+			print("[DistanceTierManager] GPU mode enabled (objects: %d >= %d)" % [object_count, GPU_COMPUTE_ENABLE_THRESHOLD])
+
+	# If GPU mode is active but not synced, start incremental sync
+	if _gpu_mode_active and not _gpu_objects_synced:
+		if not _gpu_sync_in_progress:
+			# Start incremental sync
+			_start_incremental_gpu_sync()
+		else:
+			# Continue incremental sync
+			_continue_incremental_gpu_sync()
+
+		# Don't use GPU path until sync is complete
+		return false
+
+	return _gpu_mode_active
+
+
+## Start incremental GPU sync
+func _start_incremental_gpu_sync() -> void:
+	print("[DistanceTierManager] Starting incremental GPU sync for %d objects..." % _registered_objects.size())
+	_gpu_visibility_manager.clear()
+	_gpu_sync_object_keys = _registered_objects.keys()
+	_gpu_sync_batch_start = 0
+	_gpu_sync_in_progress = true
+
+
+## Continue incremental GPU sync (call each frame)
+func _continue_incremental_gpu_sync() -> void:
+	if not _gpu_sync_in_progress:
+		return
+
+	var end_idx := mini(_gpu_sync_batch_start + GPU_SYNC_BATCH_SIZE, _gpu_sync_object_keys.size())
+
+	for i in range(_gpu_sync_batch_start, end_idx):
+		var obj_id: int = _gpu_sync_object_keys[i]
+		if obj_id in _registered_objects:
+			var obj_info: ObjectVisibilityInfo = _registered_objects[obj_id]
+			_gpu_visibility_manager.register_object(obj_id, obj_info.position)
+
+	_gpu_sync_batch_start = end_idx
+
+	# Check if sync is complete
+	if _gpu_sync_batch_start >= _gpu_sync_object_keys.size():
+		_gpu_sync_in_progress = false
 		_gpu_objects_synced = true
-		print("[DistanceTierManager] GPU sync complete - switching to GPU path")
-
-	return should_use
+		_gpu_sync_object_keys.clear()
+		print("[DistanceTierManager] Incremental GPU sync complete - switching to GPU path")
 
 
 ## Sync all registered objects to GPU visibility manager
@@ -890,16 +956,38 @@ func _update_visibility_gpu(stats: Dictionary, _visible_cells_by_tier: Dictionar
 	return stats
 
 
+## Pre-compute squared hysteresis thresholds for visibility calculations
+## Called once per frame before the hot loop to avoid repeated dictionary lookups
+## Returns: Dictionary with near_exit_sq, near_enter_sq, mid_exit_sq, mid_enter_sq, far_end_sq
+func _precompute_hysteresis_thresholds() -> Dictionary:
+	var near_end: float = tier_end_distances[Tier.NEAR]
+	var mid_end: float = tier_end_distances[Tier.MID]
+	var far_end: float = tier_end_distances[Tier.FAR]
+	var near_hyst: float = tier_hysteresis.get(Tier.NEAR, 40.0)
+	var mid_hyst: float = tier_hysteresis.get(Tier.MID, 60.0)
+	return {
+		"near_end_sq": near_end * near_end,
+		"mid_end_sq": mid_end * mid_end,
+		"far_end_sq": far_end * far_end,
+		"near_exit_sq": (near_end + near_hyst) * (near_end + near_hyst),
+		"near_enter_sq": (near_end - near_hyst) * (near_end - near_hyst),
+		"mid_exit_sq": (mid_end + mid_hyst) * (mid_end + mid_hyst),
+		"mid_enter_sq": (mid_end - mid_hyst) * (mid_end - mid_hyst),
+	}
+
+
 ## CPU-based visibility update (original implementation)
 ## Used when GPU compute is not available or object count is below threshold
 func _update_visibility_cpu(stats: Dictionary, visible_cells_by_tier: Dictionary) -> Dictionary:
 	# Pre-compute squared tier thresholds ONCE (avoid dictionary lookups in hot loop)
-	var near_end: float = tier_end_distances[Tier.NEAR]
-	var mid_end: float = tier_end_distances[Tier.MID]
-	var far_end: float = tier_end_distances[Tier.FAR]
-	var near_end_sq: float = near_end * near_end
-	var mid_end_sq: float = mid_end * mid_end
-	var far_end_sq: float = far_end * far_end
+	var thresholds := _precompute_hysteresis_thresholds()
+	var near_end_sq: float = thresholds.near_end_sq
+	var mid_end_sq: float = thresholds.mid_end_sq
+	var far_end_sq: float = thresholds.far_end_sq
+	var near_exit_sq: float = thresholds.near_exit_sq
+	var near_enter_sq: float = thresholds.near_enter_sq
+	var mid_exit_sq: float = thresholds.mid_exit_sq
+	var mid_enter_sq: float = thresholds.mid_enter_sq
 
 	# OPTIMIZATION: Cache camera position locally to avoid property access in loop
 	var cam_x: float = _camera_position.x
@@ -924,17 +1012,6 @@ func _update_visibility_cpu(stats: Dictionary, visible_cells_by_tier: Dictionary
 	var near_objects: Array[int] = []
 	var mid_objects: Array[int] = []
 	var far_objects: Array[int] = []
-
-	# Pre-compute squared hysteresis thresholds for per-object hysteresis
-	# Hysteresis prevents tier thrashing by requiring objects to move further before changing tier
-	var near_hyst: float = tier_hysteresis.get(Tier.NEAR, 40.0)
-	var mid_hyst: float = tier_hysteresis.get(Tier.MID, 60.0)
-
-	# Thresholds with hysteresis pre-computed (squared for fast comparison)
-	var near_exit_sq: float = (near_end + near_hyst) * (near_end + near_hyst)  # Leave NEAR
-	var near_enter_sq: float = (near_end - near_hyst) * (near_end - near_hyst)  # Enter NEAR
-	var mid_exit_sq: float = (mid_end + mid_hyst) * (mid_end + mid_hyst)  # Leave MID
-	var mid_enter_sq: float = (mid_end - mid_hyst) * (mid_end - mid_hyst)  # Enter MID
 
 	# Check objects only in relevant cells
 	for cell_grid: Vector2i in cells_to_check:
@@ -1048,14 +1125,10 @@ func _update_visibility_cpu(stats: Dictionary, visible_cells_by_tier: Dictionary
 ##
 ## MID/FAR tier visibility is handled entirely by GPUVisibilityRenderer's compute shader.
 func _update_visibility_near_only(stats: Dictionary, visible_cells_by_tier: Dictionary) -> Dictionary:
-	# Pre-compute squared near threshold
-	var near_end: float = tier_end_distances[Tier.NEAR]
-	var near_end_sq: float = near_end * near_end
-
-	# Hysteresis for NEAR tier
-	var near_hyst: float = tier_hysteresis.get(Tier.NEAR, 40.0)
-	var near_exit_sq: float = (near_end + near_hyst) * (near_end + near_hyst)
-	var near_enter_sq: float = (near_end - near_hyst) * (near_end - near_hyst)
+	# Reuse the shared threshold pre-computation (only uses near_exit_sq and near_enter_sq)
+	var thresholds := _precompute_hysteresis_thresholds()
+	var near_exit_sq: float = thresholds.near_exit_sq
+	var near_enter_sq: float = thresholds.near_enter_sq
 
 	# Cache camera position
 	var cam_x: float = _camera_position.x

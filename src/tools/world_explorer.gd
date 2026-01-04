@@ -30,6 +30,7 @@ extends Node3D
 
 # Preload dependencies
 const WorldStreamingManagerScript := preload("res://src/core/world/world_streaming_manager.gd")
+const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
@@ -45,6 +46,8 @@ const AutomatedTestRunnerScript := preload("res://src/tools/automated_test_runne
 const FoldablePanelScript := preload("res://src/tools/ui/foldable_panel.gd")
 const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
 const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
+const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.gd")
+const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -108,13 +111,6 @@ var _ocean_panel: FoldablePanel = null
 var _navigation_panel: FoldablePanel = null
 var _terrain_panel: FoldablePanel = null
 var _debug_panel: FoldablePanel = null
-var _render_tier_panel: FoldablePanel = null
-
-# Render tier toggle references
-var _distant_rendering_toggle: CheckBox = null
-var _near_tier_toggle: CheckBox = null
-var _mid_tier_toggle: CheckBox = null
-var _far_tier_toggle: CheckBox = null
 
 # Debug overlay for 3D visualizations
 var _debug_overlay: Node3D = null
@@ -143,6 +139,8 @@ var ocean_manager: OceanManagerClass = null  # OceanManager
 var background_processor: BackgroundProcessor = null  # BackgroundProcessor for async loading
 var console: Console = null  # Developer console
 var test_runner: Node = null  # Automated test runner (AutomatedTestRunner)
+var diagnostic_overlay: Node = null  # Real-time streaming diagnostics (DiagnosticOverlay)
+var crash_reporter: Node = null  # State capture for crash analysis (CrashReporter)
 
 # State
 var _data_path: String = ""
@@ -196,6 +194,9 @@ func _ready() -> void:
 
 	# Setup automated test runner
 	_setup_test_runner()
+
+	# Setup diagnostic overlay and crash reporter
+	_setup_diagnostic_systems()
 
 	# Connect quick teleport buttons
 	seyda_neen_btn.pressed.connect(func() -> void: _teleport_to_cell(-2, -9))
@@ -301,6 +302,9 @@ func _init_async() -> void:
 
 	# Update debug overlay with references to managers
 	_update_debug_overlay_references()
+
+	# Connect diagnostic systems now that WSM is ready
+	_connect_diagnostic_systems()
 
 
 func _init_terrain3d() -> void:
@@ -431,6 +435,88 @@ func _setup_test_runner() -> void:
 	runner.connect("error_captured", _on_test_error_captured)
 	
 	_log("Test runner initialized (F6=start, F7=stop, F8=report)")
+
+
+## Setup diagnostic overlay and crash reporter
+func _setup_diagnostic_systems() -> void:
+	# Create diagnostic overlay (hidden by default)
+	diagnostic_overlay = DiagnosticOverlayScript.new()
+	diagnostic_overlay.name = "DiagnosticOverlay"
+	diagnostic_overlay.visible = false  # Start hidden, toggle with F9
+	add_child(diagnostic_overlay)
+
+	# Create crash reporter
+	crash_reporter = CrashReporterScript.new()
+	crash_reporter.name = "CrashReporter"
+	add_child(crash_reporter)
+
+	_log("Diagnostic systems initialized (F9=overlay, F10=crash test, F11=dump)")
+
+
+## Connect diagnostic systems to streaming (called after WSM is ready)
+func _connect_diagnostic_systems() -> void:
+	if not diagnostic_overlay or not crash_reporter:
+		return
+
+	# Connect to streaming systems
+	if world_streaming_manager:
+		var object_streamer: Node = world_streaming_manager.get_node_or_null("ObjectStreamer")
+		diagnostic_overlay.connect_to_streaming(world_streaming_manager, object_streamer)
+		crash_reporter.connect_to_systems(self, world_streaming_manager, object_streamer, diagnostic_overlay)
+
+	_log("Diagnostic systems connected to streaming")
+
+
+## Run the "models toggle with distant land" crash scenario test
+## This helps reproduce crashes by:
+## 1. Teleporting to a high-traffic area (Seyda Neen)
+## 2. Ensuring distant land is enabled
+## 3. Toggling models ON
+## 4. Showing diagnostic overlay to monitor what happens
+func _run_crash_scenario_test() -> void:
+	_log("[color=cyan]========================================[/color]")
+	_log("[color=cyan]CRASH SCENARIO TEST: Models Toggle[/color]")
+	_log("[color=cyan]========================================[/color]")
+
+	# Show diagnostic overlay
+	if diagnostic_overlay:
+		diagnostic_overlay.visible = true
+		diagnostic_overlay.clear()
+
+	# Log to crash reporter
+	if crash_reporter:
+		crash_reporter.log_toggle("CRASH_TEST_START", true)
+
+	# Step 1: Teleport to Seyda Neen
+	_log("Step 1: Teleporting to Seyda Neen...")
+	_teleport_to_cell(-2, -9)
+
+	# Step 2: Ensure models are OFF first
+	if _show_models:
+		_log("Step 2: Disabling models first...")
+		if _show_models_toggle:
+			_show_models_toggle.button_pressed = false
+		await get_tree().create_timer(0.5).timeout
+
+	# Step 3: Wait a moment for position to settle
+	_log("Step 3: Waiting for streaming to settle...")
+	await get_tree().create_timer(1.0).timeout
+
+	# Step 4: Toggle models ON (the crash scenario)
+	_log("Step 4: Enabling models (crash scenario)...")
+	_log("[color=yellow]Watch the diagnostic overlay for issues![/color]")
+	if _show_models_toggle:
+		_show_models_toggle.button_pressed = true
+
+	# Step 5: Monitor for a few seconds
+	_log("Step 5: Monitoring for 5 seconds...")
+	await get_tree().create_timer(5.0).timeout
+
+	_log("[color=green]Crash scenario test completed[/color]")
+	_log("Check diagnostic overlay and crash report for issues")
+
+	if crash_reporter:
+		crash_reporter.dump_state_now()
 
 
 ## Handle test completion
@@ -636,7 +722,6 @@ func _setup_foldable_panels() -> void:
 	_create_terrain_panel()
 	_create_ocean_panel()
 	_create_debug_panel()
-	_create_render_tier_panel()
 
 	# Insert scroll container after title
 	var separator_idx := 2  # After title and first separator
@@ -995,117 +1080,6 @@ func _create_debug_panel() -> void:
 	_panel_vbox.add_child(_debug_panel)
 
 
-## Create render tier debug panel for toggling NEAR/MID/FAR visibility
-func _create_render_tier_panel() -> void:
-	_render_tier_panel = FoldablePanelScript.new("Render Tiers", false)  # Start expanded for easy debugging
-
-	# Distant rendering master toggle
-	_distant_rendering_toggle = CheckBox.new()
-	_distant_rendering_toggle.text = "Distant Rendering (MID/FAR)"
-	_distant_rendering_toggle.button_pressed = true  # Matches initial state in _setup_world_streaming_manager
-	_distant_rendering_toggle.toggled.connect(_on_distant_rendering_toggled)
-	_distant_rendering_toggle.tooltip_text = "Enable distant land rendering (MID/FAR tiers). When OFF, only NEAR tier objects are loaded."
-	_render_tier_panel.add_content(_distant_rendering_toggle)
-
-	# Separator
-	var sep := HSeparator.new()
-	_render_tier_panel.add_content(sep)
-
-	# Info label
-	var info_label := Label.new()
-	info_label.add_theme_font_size_override("font_size", 10)
-	info_label.text = "Toggle individual render tiers for debugging:"
-	_render_tier_panel.add_content(info_label)
-
-	# Tier toggles row
-	var tier_row := HBoxContainer.new()
-	tier_row.add_theme_constant_override("separation", 8)
-
-	# NEAR tier toggle (full objects with physics)
-	_near_tier_toggle = CheckBox.new()
-	_near_tier_toggle.text = "NEAR"
-	_near_tier_toggle.button_pressed = true
-	_near_tier_toggle.toggled.connect(_on_near_tier_toggled)
-	_near_tier_toggle.tooltip_text = "NEAR tier (0-150m): Full Node3D objects with physics"
-	tier_row.add_child(_near_tier_toggle)
-
-	# MID tier toggle (LOD meshes)
-	_mid_tier_toggle = CheckBox.new()
-	_mid_tier_toggle.text = "MID"
-	_mid_tier_toggle.button_pressed = true
-	_mid_tier_toggle.toggled.connect(_on_mid_tier_toggled)
-	_mid_tier_toggle.tooltip_text = "MID tier (150-500m): LOD meshes via MultiMesh"
-	tier_row.add_child(_mid_tier_toggle)
-
-	# FAR tier toggle (impostors)
-	_far_tier_toggle = CheckBox.new()
-	_far_tier_toggle.text = "FAR"
-	_far_tier_toggle.button_pressed = true
-	_far_tier_toggle.toggled.connect(_on_far_tier_toggled)
-	_far_tier_toggle.tooltip_text = "FAR tier (500m+): Billboard impostors"
-	tier_row.add_child(_far_tier_toggle)
-
-	_render_tier_panel.add_content(tier_row)
-
-	# Distance legend
-	var legend_label := Label.new()
-	legend_label.add_theme_font_size_override("font_size", 9)
-	legend_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
-	legend_label.text = "NEAR: 0-150m | MID: 150-500m | FAR: 500m+"
-	_render_tier_panel.add_content(legend_label)
-
-	# Stats label (updated dynamically)
-	var tier_stats_label := Label.new()
-	tier_stats_label.name = "TierStatsLabel"
-	tier_stats_label.add_theme_font_size_override("font_size", 10)
-	tier_stats_label.text = "NEAR: -- | MID: -- | FAR: --"
-	_render_tier_panel.add_content(tier_stats_label)
-
-	_panel_vbox.add_child(_render_tier_panel)
-
-
-## Handle distant rendering toggle - switches between NEAR-only and full AAA streaming
-func _on_distant_rendering_toggled(enabled: bool) -> void:
-	if world_streaming_manager:
-		world_streaming_manager.distant_rendering_enabled = enabled
-		_log("Distant rendering: %s (mode: %s)" % [
-			"ON" if enabled else "OFF",
-			"AAA streaming" if enabled else "NEAR-only legacy"
-		])
-		# Update tier toggle sensitivity - they only matter when distant rendering is on
-		if _mid_tier_toggle:
-			_mid_tier_toggle.disabled = not enabled
-		if _far_tier_toggle:
-			_far_tier_toggle.disabled = not enabled
-
-
-## Handle NEAR tier toggle
-func _on_near_tier_toggled(enabled: bool) -> void:
-	if world_streaming_manager and world_streaming_manager.object_streamer:
-		var odm: Node3D = world_streaming_manager.object_streamer
-		if odm.has_method("set_near_visible"):
-			odm.set_near_visible(enabled)
-	_log("NEAR tier: %s" % ("ON" if enabled else "OFF"))
-
-
-## Handle MID tier toggle
-func _on_mid_tier_toggled(enabled: bool) -> void:
-	if world_streaming_manager and world_streaming_manager.object_streamer:
-		var odm: Node3D = world_streaming_manager.object_streamer
-		if odm.has_method("set_mid_visible"):
-			odm.set_mid_visible(enabled)
-	_log("MID tier: %s" % ("ON" if enabled else "OFF"))
-
-
-## Handle FAR tier toggle
-func _on_far_tier_toggled(enabled: bool) -> void:
-	if world_streaming_manager and world_streaming_manager.object_streamer:
-		var odm: Node3D = world_streaming_manager.object_streamer
-		if odm.has_method("set_far_visible"):
-			odm.set_far_visible(enabled)
-	_log("FAR tier: %s" % ("ON" if enabled else "OFF"))
-
-
 ## Setup debug overlay for 3D visualizations
 func _setup_debug_overlay() -> void:
 	_debug_overlay = DebugOverlayScript.new()
@@ -1286,11 +1260,17 @@ func _on_show_models_toggled(enabled: bool) -> void:
 
 	_log("[DIAG] Models toggle: %s" % ("ON" if enabled else "OFF"))
 
+	# Log to crash reporter for debugging
+	if crash_reporter:
+		crash_reporter.log_toggle("Models", enabled)
+
 	# Toggle object loading in WorldStreamingManager
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
-		# NOTE: Don't change distant_rendering_enabled here - it controls the tier system behavior,
-		# not visibility. The visibility is controlled by set_all_visible on ImpostorManager.
+		# Use streaming_mode as single source of truth for tier activation
+		# This ensures all subsystems (tier_manager, object_streamer, impostor_manager)
+		# are properly synchronized via _apply_streaming_mode()
+		world_streaming_manager.streaming_mode = StreamingConfig.StreamingMode.FULL_AAA if enabled else StreamingConfig.StreamingMode.NEAR_ONLY
 
 		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		_log("[DIAG] Currently loaded cells in dictionary: %d" % loaded_coords.size())
@@ -1850,7 +1830,9 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
-	world_streaming_manager.distant_rendering_enabled = true  # Enable full AAA streaming with MID/FAR tiers
+	# Use streaming_mode as single source of truth:
+	# NEAR_ONLY when models disabled, FULL_AAA when models enabled
+	world_streaming_manager.streaming_mode = StreamingConfig.StreamingMode.FULL_AAA if _show_models else StreamingConfig.StreamingMode.NEAR_ONLY
 	world_streaming_manager.debug_enabled = true
 
 	add_child(world_streaming_manager)
@@ -2103,18 +2085,6 @@ func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls
 			else:
 				profiler_label_node.text = "Profiler: not initialized"
 
-	# Update render tier panel stats
-	if _render_tier_panel:
-		var tier_content := _render_tier_panel.get_content_container()
-		var tier_stats_label: Label = tier_content.get_node_or_null("TierStatsLabel")
-		if tier_stats_label:
-			var odm_stats: Dictionary = stats.get("object_distance_manager", {})
-			var near_obj: int = odm_stats.get("near_visible", 0)
-			var mid_obj: int = odm_stats.get("mid_visible", 0)
-			var far_obj: int = odm_stats.get("far_visible", 0)
-			var hidden_obj: int = odm_stats.get("hidden", 0)
-			tier_stats_label.text = "NEAR: %d | MID: %d | FAR: %d | Hidden: %d" % [near_obj, mid_obj, far_obj, hidden_obj]
-
 
 # ==================== UI Helpers ====================
 
@@ -2184,6 +2154,16 @@ func _input(event: InputEvent) -> void:
 			KEY_K:  # Toggle sky/day-night cycle
 				if _show_sky_toggle:
 					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
+			KEY_F9:  # Toggle diagnostic overlay
+				if diagnostic_overlay:
+					diagnostic_overlay.visible = not diagnostic_overlay.visible
+					_log("Diagnostic overlay: %s" % ("ON" if diagnostic_overlay.visible else "OFF"))
+			KEY_F10:  # Run crash scenario test
+				_run_crash_scenario_test()
+			KEY_F11:  # Dump current state to log
+				if crash_reporter:
+					crash_reporter.dump_state_now()
+					_log("[color=cyan]State dumped to crash report log[/color]")
 
 
 func _process(delta: float) -> void:

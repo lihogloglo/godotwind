@@ -48,6 +48,7 @@ const ObjectStreamerScript := preload("res://src/core/world/object_streamer.gd")
 const ObjectPositionIndexScript := preload("res://src/core/world/object_position_index.gd")
 const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 const GPUVisibilityRendererScript := preload("res://src/core/world/gpu_visibility_renderer.gd")
+const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 
 ## Emitted when a cell starts loading
 signal cell_loading(grid: Vector2i)
@@ -76,26 +77,24 @@ signal cell_unloaded(grid: Vector2i)
 			if not value and object_streamer.has_method("clear"):
 				object_streamer.clear()
 
-## Enable distant rendering with AAA streaming
-## When enabled:
-## - Cells loaded as metadata-only (terrain/water)
-## - Objects discovered by ObjectPositionIndex (distance-based)
-## - ObjectStreamer handles per-object LOD (NEAR/MID/FAR tiers)
-## - Impostors for FAR tier (500m-5km)
+## Streaming mode - single source of truth for tier activation
+## NEAR_ONLY: Legacy mode with ~150m view distance, no LOD or impostors
+## FULL_AAA: All tiers active with LOD meshes and impostors up to 5km
 ##
-## When disabled:
-## - Legacy NEAR-only mode (~150m view distance)
-## - Cells loaded with all objects
-## - No LOD system
-##
-## NOTE: Requires prebaked assets:
+## NOTE: FULL_AAA requires prebaked assets:
 ## - Run lod_prebaker.gd for LOD meshes (MID tier)
 ## - Run impostor baker for impostors (FAR tier)
-@export var distant_rendering_enabled: bool = true:
+@export var streaming_mode: int = StreamingConfig.StreamingMode.FULL_AAA:
 	set(value):
-		distant_rendering_enabled = value
-		if tier_manager:
-			tier_manager.distant_rendering_enabled = value
+		streaming_mode = value
+		_apply_streaming_mode()
+
+## Backward compatibility property - derives from streaming_mode
+var distant_rendering_enabled: bool:
+	get:
+		return streaming_mode == StreamingConfig.StreamingMode.FULL_AAA
+	set(value):
+		streaming_mode = StreamingConfig.StreamingMode.FULL_AAA if value else StreamingConfig.StreamingMode.NEAR_ONLY
 
 ## NOTE: Terrain streaming removed - use GenericTerrainStreamer separately
 ## This manager now focuses ONLY on cell/object streaming
@@ -289,8 +288,48 @@ func initialize() -> void:
 		_verify_taa_enabled()
 	_initialized = true
 
+	# CRITICAL: Apply streaming mode AFTER all subsystems are created
+	# This ensures proper synchronization of visibility flags
+	_apply_streaming_mode()
+
 	# Log diagnostic info
 	_log_distant_rendering_status()
+
+
+## Apply streaming mode to all subsystems - SINGLE SOURCE OF TRUTH
+## This is the ONLY place where mode is propagated to all subsystems
+## Called after initialize() and whenever streaming_mode changes
+func _apply_streaming_mode() -> void:
+	if not _initialized:
+		return  # Will be called after initialize() completes
+
+	var flags := StreamingConfig.get_mode_flags(streaming_mode)
+	var mode_name := "NEAR_ONLY" if streaming_mode == StreamingConfig.StreamingMode.NEAR_ONLY else "FULL_AAA"
+
+	_debug("Applying streaming mode: %s" % mode_name)
+
+	# 1. Update tier_manager
+	if tier_manager:
+		tier_manager.distant_rendering_enabled = flags.distant_rendering_enabled
+
+	# 2. Update ObjectStreamer
+	if object_streamer and object_streamer.has_method("set_distant_tiers_enabled"):
+		object_streamer.set_distant_tiers_enabled(flags.distant_rendering_enabled)
+
+	# 3. CRITICAL FIX: Directly update ImpostorManager visibility
+	# This prevents the race condition where ImpostorManager._globally_visible
+	# was set to true in _enter_tree() before synchronization happened
+	if impostor_manager and impostor_manager.has_method("set_all_visible"):
+		var show_impostors: bool = flags.far_enabled and load_objects
+		impostor_manager.call("set_all_visible", show_impostors)
+		if debug_enabled:
+			_debug("ImpostorManager visibility set to: %s" % show_impostors)
+
+	# 4. Clear FAR chunks when disabling distant rendering
+	if not flags.far_enabled and chunk_renderer and chunk_renderer.has_method("clear"):
+		chunk_renderer.clear()
+		if debug_enabled:
+			_debug("Cleared FAR chunks (distant rendering disabled)")
 
 
 ## Verify TAA (Temporal Anti-Aliasing) is enabled for best dithering quality
@@ -361,6 +400,43 @@ func _process(delta: float) -> void:
 	if current_cell != _last_camera_cell:
 		cell_changed = true
 		_last_camera_cell = current_cell
+
+	# ═══════════════════════════════════════════════════════════════════════
+	# NEAR-ONLY MODE: Skip all distant-tier processing for efficiency
+	# ═══════════════════════════════════════════════════════════════════════
+	if streaming_mode == StreamingConfig.StreamingMode.NEAR_ONLY:
+		# Process ONLY: cell changes, async completions, instantiation, load queue
+		# SKIP: visibility calculations, GPU rendering, impostor updates, object streamer MID/FAR
+		if cell_changed:
+			if streaming_profiler:
+				streaming_profiler.begin_section("CellManager.on_cell_changed")
+			_on_camera_cell_changed(current_cell)
+			if streaming_profiler:
+				streaming_profiler.end_section("CellManager.on_cell_changed")
+
+		if streaming_profiler:
+			streaming_profiler.begin_section("AsyncCompletions.poll")
+		_poll_async_completions()
+		if streaming_profiler:
+			streaming_profiler.end_section("AsyncCompletions.poll")
+
+		if cell_manager and cell_manager.has_method("process_async_instantiation"):
+			if streaming_profiler:
+				streaming_profiler.begin_section("CellManager.instantiation")
+			cell_manager.process_async_instantiation(instantiation_budget_ms, camera_pos)
+			if streaming_profiler:
+				streaming_profiler.end_section("CellManager.instantiation")
+
+		if async_loading_enabled and not _load_queue.is_empty():
+			if streaming_profiler:
+				streaming_profiler.begin_section("LoadQueue.process")
+			_process_load_queue()
+			if streaming_profiler:
+				streaming_profiler.end_section("LoadQueue.process")
+
+		if streaming_profiler:
+			streaming_profiler.end_frame()
+		return  # Early exit - skip all MID/FAR processing
 
 	# ═══════════════════════════════════════════════════════════════════════
 	# **UNIFIED VISIBILITY AUTHORITY** - Single source of truth for all visibility
@@ -457,7 +533,12 @@ func _process(delta: float) -> void:
 	# **UNIFIED VISIBILITY**: Impostor visibility
 	# GPU-driven mode: GPUVisibilityRenderer already applied visibility in its update()
 	# CPU mode: Use cell-based visibility from DistanceTierManager
-	if distant_rendering_enabled and impostor_manager:
+	# TIER ISOLATION: Check if distant tiers are enabled in ObjectStreamer
+	var distant_tiers_active := distant_rendering_enabled
+	if object_streamer and object_streamer.has_method("is_distant_tiers_enabled"):
+		distant_tiers_active = distant_tiers_active and object_streamer.is_distant_tiers_enabled()
+
+	if distant_tiers_active and impostor_manager:
 		if streaming_profiler:
 			streaming_profiler.begin_section("ImpostorManager.update_visibility")
 		# Only call update_visibility if NOT in GPU-driven mode
@@ -1077,6 +1158,10 @@ func _setup_object_streamer() -> void:
 	# Propagate debug setting
 	object_streamer.debug_enabled = debug_enabled
 
+	# TIER ISOLATION: Sync distant_tiers_enabled with distant_rendering_enabled
+	if object_streamer.has_method("set_distant_tiers_enabled"):
+		object_streamer.set_distant_tiers_enabled(distant_rendering_enabled)
+
 	# Connect impostor manager for FAR tier coordination
 	if impostor_manager:
 		object_streamer.set_impostor_manager(impostor_manager)
@@ -1208,9 +1293,9 @@ func _setup_chunk_paging() -> void:
 	chunk_renderer.name = "ChunkRenderer"
 	add_child(chunk_renderer)
 
-	# Configure chunk renderer with dependencies
+	# Configure chunk renderer with dependencies (include ObjectStreamer for tier isolation)
 	if chunk_renderer.has_method("configure"):
-		chunk_renderer.call("configure", chunk_manager, impostor_manager, tier_manager)
+		chunk_renderer.call("configure", chunk_manager, impostor_manager, tier_manager, object_streamer)
 	chunk_renderer.set("debug_enabled", debug_enabled)
 
 	_debug("ChunkRenderer initialized for FAR tier impostors")
@@ -1858,7 +1943,12 @@ func _process_far_tier_cell(grid: Vector2i) -> void:
 	var deferred_count := 0
 
 	# Add impostors for visual representation in FAR tier
-	if impostor_manager and impostor_manager.has_method("add_cell_impostors"):
+	# TIER ISOLATION: Only add impostors if distant tiers are enabled in ObjectStreamer
+	var distant_enabled := true
+	if object_streamer and object_streamer.has_method("is_distant_tiers_enabled"):
+		distant_enabled = object_streamer.is_distant_tiers_enabled()
+
+	if distant_enabled and impostor_manager and impostor_manager.has_method("add_cell_impostors"):
 		impostor_count = impostor_manager.call("add_cell_impostors", grid, cell_record.references)
 
 	# Also register with ODM for tier transitions (FAR→MID→NEAR)

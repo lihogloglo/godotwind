@@ -32,6 +32,9 @@ var impostor_manager: Node = null
 ## Reference to tier manager for distance info
 var tier_manager: RefCounted = null
 
+## Reference to ObjectStreamer for tier isolation checks
+var object_streamer: Node = null
+
 ## Camera reference for frustum culling
 var camera: Camera3D = null
 
@@ -71,11 +74,13 @@ class LoadedChunkData:
 func configure(
 	p_chunk_manager: RefCounted,
 	p_impostor_manager: Node,
-	p_tier_manager: RefCounted = null
+	p_tier_manager: RefCounted = null,
+	p_object_streamer: Node = null
 ) -> void:
 	chunk_manager = p_chunk_manager
 	impostor_manager = p_impostor_manager
 	tier_manager = p_tier_manager
+	object_streamer = p_object_streamer
 
 	if chunk_manager and tier_manager:
 		chunk_manager.call("configure", tier_manager)
@@ -98,6 +103,14 @@ func update_chunks(camera_cell: Vector2i) -> void:
 	if not chunk_manager:
 		push_warning("ChunkRenderer: No chunk manager configured")
 		return
+
+	# TIER ISOLATION: Early exit if distant tiers disabled
+	# Also clear existing FAR chunks when transitioning to NEAR-only mode
+	if object_streamer and object_streamer.has_method("is_distant_tiers_enabled"):
+		if not object_streamer.is_distant_tiers_enabled():
+			if not _loaded_far_chunks.is_empty():
+				clear()  # Clean up existing chunks
+			return
 
 	var start_time := Time.get_ticks_usec()
 
@@ -220,6 +233,17 @@ func _load_far_chunk(chunk_grid: Vector2i, chunk_key: int) -> void:
 	var cells: Array[Vector2i] = chunk_manager.call("get_cells_in_chunk", chunk_grid, QuadtreeChunkManagerScript.FAR_CHUNK_SIZE)
 	if debug_enabled:
 		print("ChunkRenderer: FAR chunk %s contains %d cells" % [chunk_grid, cells.size()])
+
+	# TIER ISOLATION: Check if distant tiers are enabled before loading impostors
+	var distant_enabled := true
+	if object_streamer and object_streamer.has_method("is_distant_tiers_enabled"):
+		distant_enabled = object_streamer.is_distant_tiers_enabled()
+
+	if not distant_enabled:
+		_debug("Skipping FAR chunk %s - distant tiers disabled" % chunk_grid)
+		chunk_data.load_time_ms = (Time.get_ticks_usec() - start_time) / 1000.0
+		_loaded_far_chunks[chunk_key] = chunk_data
+		return
 
 	# Load impostors for each cell
 	for cell_grid in cells:

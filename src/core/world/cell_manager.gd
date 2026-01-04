@@ -1338,13 +1338,15 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 
 				# Add to results directly (already done on main thread)
 				# Mark as from_pool so we don't increment "completed" counter for worker tasks
+				# Use cell_node_id for consistency with worker thread path
+				var pool_cell_id: int = request.cell_node.get_instance_id() if request.cell_node else 0
 				_parallel_duplicate_mutex.lock()
 				_parallel_duplicate_results.append({
 					"instance": pooled,
 					"request_id": request_id,
 					"transform_data": {},  # Already applied above, empty to skip re-apply
 					"model_path": model_path,
-					"cell_node": request.cell_node,
+					"cell_node_id": pool_cell_id,
 					"name": pool_name,
 					"from_pool": true
 				})
@@ -1374,13 +1376,20 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 
 		# Capture variables for closure - extract transform data BEFORE dispatching
 		# This avoids RefCounted lifetime issues with CellReference across threads
+		# IMPORTANT: Capture cell_node_id instead of cell_node to avoid crash if cell is freed
+		# before the worker thread completes. We look up the node by ID on the main thread.
 		var cell_node: Node3D = request.cell_node
+		var cell_node_id: int = cell_node.get_instance_id() if cell_node else 0
 		var instance_name := str(ref.ref_id) + "_" + str(ref.ref_num)
 		var transform_data := {
 			"position": ref.position,
 			"rotation": ref.rotation,
 			"scale": ref.scale,
 		}
+
+		# Capture model_prototype instance ID instead of the node itself
+		# This prevents crashes if the model cache is cleared during the async operation
+		var prototype_id: int = model_prototype.get_instance_id() if model_prototype else 0
 
 		WorkerThreadPool.add_task(func():
 			# This runs on worker thread - duplicate the prototype
@@ -1390,13 +1399,19 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 			var instance: Node3D = null
 			var success := true
 
-			instance = model_prototype.duplicate()
-			if instance:
-				instance.name = instance_name
+			# Look up prototype by ID - safe if node was freed
+			var prototype: Node3D = instance_from_id(prototype_id) as Node3D if prototype_id != 0 else null
+			if prototype:
+				instance = prototype.duplicate()
+				if instance:
+					instance.name = instance_name
+				else:
+					success = false
 			else:
 				success = false
 
 			# Store result for main thread to process
+			# NOTE: We store cell_node_id instead of cell_node to avoid lambda capture crash
 			_parallel_duplicate_mutex.lock()
 			if success and instance:
 				_parallel_duplicate_results.append({
@@ -1404,7 +1419,7 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 					"request_id": request_id,
 					"transform_data": transform_data,
 					"model_path": model_path,
-					"cell_node": cell_node,
+					"cell_node_id": cell_node_id,
 					"name": instance_name
 				})
 			else:
@@ -1439,12 +1454,17 @@ func _process_parallel_duplicate_results() -> int:
 		var instance: Node3D = result.get("instance")
 		var request_id: int = result.get("request_id", -1)
 		var transform_data: Dictionary = result.get("transform_data", {})
-		var cell_node: Node3D = result.get("cell_node")
+		var cell_node_id: int = result.get("cell_node_id", 0)
 
 		# Validate instance is still valid (could have been freed if duplicate failed)
 		if not is_instance_valid(instance):
 			_parallel_duplicate_stats["failed_instance_invalid"] += 1
 			continue
+
+		# Look up cell_node from instance ID (avoids lambda capture crash)
+		var cell_node: Node3D = null
+		if cell_node_id != 0:
+			cell_node = instance_from_id(cell_node_id) as Node3D
 
 		# Validate cell_node is still valid
 		if not is_instance_valid(cell_node):

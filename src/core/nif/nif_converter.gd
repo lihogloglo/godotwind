@@ -149,6 +149,15 @@ var generate_occluders: bool = true
 ## Debug mode for occluder generation
 var debug_occluders: bool = false
 
+## Material Merging Settings
+## When enabled, merges all NiTriShape/NiTriStrips with the same material into one mesh surface.
+## This dramatically reduces draw calls for Morrowind models which have many small submeshes.
+## Example: A building with 20 wall pieces using the same texture becomes 1 draw call instead of 20.
+var merge_by_material: bool = true
+
+## Debug mode for material merging
+var debug_merge: bool = false
+
 # Source path for auto collision mode detection
 var _source_path: String = ""
 
@@ -524,6 +533,11 @@ func _convert() -> Node3D:
 		# Native reader: skeleton/collision not yet supported
 		_skeleton_builder = null
 		_collision_builder = null
+
+	# Use merged conversion path if enabled and no skinning
+	# This dramatically reduces draw calls for static geometry
+	if _should_merge_by_material():
+		return _convert_merged()
 
 	# Check if this NIF has skinning - if so, we need to create skeleton first
 	var has_skinning := _has_skinning_data()
@@ -2433,3 +2447,479 @@ func _convert_ni_switch_node(switch_node: Defs.NiSwitchNode, skeleton: Skeleton3
 		child_index_counter += 1
 
 	return node
+
+
+# =============================================================================
+# MATERIAL MERGING - Reduces draw calls by combining meshes with same material
+# =============================================================================
+
+## Collected geometry data for merging
+## Stores geometry arrays + world transform + material key for later merging
+class CollectedGeometry:
+	var arrays: Array = []  # Mesh arrays (ARRAY_VERTEX, ARRAY_NORMAL, etc.)
+	var world_transform: Transform3D = Transform3D.IDENTITY
+	var material_key: String = ""
+	var material: StandardMaterial3D = null
+	var is_hidden: bool = false
+	var has_skinning: bool = false  # Skip skinned meshes from merging
+
+
+## Check if merging should be used for this conversion
+func _should_merge_by_material() -> bool:
+	if not merge_by_material:
+		return false
+	# Don't merge skinned meshes
+	if _has_skinning_data():
+		return false
+	return true
+
+
+## Get material key for a geometry shape (used for grouping)
+func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
+	var mat_prop: Defs.NiMaterialProperty = null
+	var tex_prop: Defs.NiTexturingProperty = null
+	var alpha_prop: Defs.NiAlphaProperty = null
+	var vc_prop: Defs.NiVertexColorProperty = null
+
+	for prop_idx in geom.property_indices:
+		if prop_idx < 0:
+			continue
+		var prop := _reader.get_record(prop_idx)
+		if prop is Defs.NiMaterialProperty:
+			mat_prop = prop
+		elif prop is Defs.NiTexturingProperty:
+			tex_prop = prop
+		elif prop is Defs.NiAlphaProperty:
+			alpha_prop = prop
+		elif prop is Defs.NiVertexColorProperty:
+			vc_prop = prop
+
+	# Build material key using same logic as MaterialLibrary
+	var props := MatLib.MaterialProperties.new()
+
+	# Get texture path
+	if tex_prop and not tex_prop.textures.is_empty():
+		var base_tex := tex_prop.textures[0] if tex_prop.textures.size() > 0 else null
+		if base_tex and base_tex.has_texture and base_tex.source_index >= 0:
+			var tex_source := _reader.get_record(base_tex.source_index)
+			if tex_source is Defs.NiSourceTexture:
+				props.texture_path = (tex_source as Defs.NiSourceTexture).filename
+
+	if mat_prop:
+		props.albedo_color = mat_prop.diffuse
+		props.specular = mat_prop.glossiness / 128.0
+		props.roughness = 1.0 - props.specular
+		if mat_prop.emissive.r > 0.01 or mat_prop.emissive.g > 0.01 or mat_prop.emissive.b > 0.01:
+			props.has_emission = true
+			props.emission_color = mat_prop.emissive
+
+	if alpha_prop:
+		if alpha_prop.test_enabled():
+			props.transparency_mode = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			props.alpha_scissor_threshold = alpha_prop.threshold / 255.0
+		elif alpha_prop.blend_enabled():
+			props.transparency_mode = BaseMaterial3D.TRANSPARENCY_ALPHA
+
+	if vc_prop:
+		props.use_vertex_colors = true
+
+	return props.get_key()
+
+
+## Collect all geometry from the NIF into groups by material
+## Returns Dictionary[material_key -> Array[CollectedGeometry]]
+func _collect_geometry_by_material() -> Dictionary:
+	var collected: Dictionary = {}  # material_key -> Array[CollectedGeometry]
+
+	for root_idx: int in _reader.roots:
+		var record := _reader.get_record(root_idx)
+		if record:
+			_collect_geometry_recursive(record, Transform3D.IDENTITY, collected)
+
+	return collected
+
+
+## Recursively collect geometry from a record and its children
+func _collect_geometry_recursive(record: Defs.NIFRecord, parent_transform: Transform3D, collected: Dictionary) -> void:
+	if record == null:
+		return
+
+	# Calculate world transform for this node
+	var local_transform := Transform3D.IDENTITY
+	if record is Defs.NiAVObject:
+		local_transform = _convert_nif_transform((record as Defs.NiAVObject).transform.to_transform3d())
+	var world_transform := parent_transform * local_transform
+
+	# Collect geometry
+	if record is Defs.NiTriShape:
+		_collect_tri_shape(record as Defs.NiTriShape, world_transform, collected)
+	elif record is Defs.NiTriStrips:
+		_collect_tri_strips(record as Defs.NiTriStrips, world_transform, collected)
+
+	# Recurse into children
+	if record is Defs.NiNode:
+		var node := record as Defs.NiNode
+		for child_idx in node.children_indices:
+			if child_idx < 0:
+				continue
+			var child_record := _reader.get_record(child_idx)
+			if child_record:
+				_collect_geometry_recursive(child_record, world_transform, collected)
+
+
+## Collect a NiTriShape into the appropriate material group
+func _collect_tri_shape(shape: Defs.NiTriShape, world_transform: Transform3D, collected: Dictionary) -> void:
+	# Skip skinned meshes
+	if shape.skin_index >= 0:
+		return
+
+	if shape.data_index < 0:
+		return
+
+	var data_record := _reader.get_record(shape.data_index)
+	if not (data_record is Defs.NiTriShapeData):
+		return
+
+	var data := data_record as Defs.NiTriShapeData
+	if data.vertices.is_empty() or data.triangles.is_empty():
+		return
+
+	var geom := CollectedGeometry.new()
+	geom.world_transform = world_transform
+	geom.material_key = _get_material_key_for_shape(shape)
+	geom.material = _get_material_for_shape(shape)
+	geom.is_hidden = shape.is_hidden()
+	geom.has_skinning = false
+
+	# Build arrays (without creating mesh yet)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+
+	arrays[Mesh.ARRAY_VERTEX] = _convert_nif_vertices(data.vertices)
+	if not data.normals.is_empty():
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
+		arrays[Mesh.ARRAY_TEX_UV] = data.uv_sets[0]
+	if not data.colors.is_empty():
+		arrays[Mesh.ARRAY_COLOR] = data.colors
+
+	# Flip winding order
+	var flipped := PackedInt32Array()
+	flipped.resize(data.triangles.size())
+	for i in range(0, data.triangles.size(), 3):
+		flipped[i] = data.triangles[i]
+		flipped[i + 1] = data.triangles[i + 2]
+		flipped[i + 2] = data.triangles[i + 1]
+	arrays[Mesh.ARRAY_INDEX] = flipped
+
+	geom.arrays = arrays
+
+	# Add to collection
+	if not collected.has(geom.material_key):
+		collected[geom.material_key] = []
+	collected[geom.material_key].append(geom)
+
+
+## Collect a NiTriStrips into the appropriate material group
+func _collect_tri_strips(strips: Defs.NiTriStrips, world_transform: Transform3D, collected: Dictionary) -> void:
+	# Skip skinned meshes
+	if strips.skin_index >= 0:
+		return
+
+	if strips.data_index < 0:
+		return
+
+	var data_record := _reader.get_record(strips.data_index)
+	if not (data_record is Defs.NiTriStripsData):
+		return
+
+	var data := data_record as Defs.NiTriStripsData
+	if data.vertices.is_empty() or data.strips.is_empty():
+		return
+
+	# Convert strips to triangles
+	var triangles := PackedInt32Array()
+	for strip in data.strips:
+		if strip.size() < 3:
+			continue
+		for i in range(strip.size() - 2):
+			if i % 2 == 0:
+				triangles.append(strip[i])
+				triangles.append(strip[i + 2])
+				triangles.append(strip[i + 1])
+			else:
+				triangles.append(strip[i])
+				triangles.append(strip[i + 1])
+				triangles.append(strip[i + 2])
+
+	if triangles.is_empty():
+		return
+
+	var geom := CollectedGeometry.new()
+	geom.world_transform = world_transform
+	geom.material_key = _get_material_key_for_shape(strips)
+	geom.material = _get_material_for_shape(strips)
+	geom.is_hidden = strips.is_hidden()
+	geom.has_skinning = false
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+
+	arrays[Mesh.ARRAY_VERTEX] = _convert_nif_vertices(data.vertices)
+	if not data.normals.is_empty():
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
+		arrays[Mesh.ARRAY_TEX_UV] = data.uv_sets[0]
+	if not data.colors.is_empty():
+		arrays[Mesh.ARRAY_COLOR] = data.colors
+	arrays[Mesh.ARRAY_INDEX] = triangles
+
+	geom.arrays = arrays
+
+	if not collected.has(geom.material_key):
+		collected[geom.material_key] = []
+	collected[geom.material_key].append(geom)
+
+
+## Merge multiple geometry pieces with the same material into one mesh
+## Returns ArrayMesh with all geometry combined
+func _merge_geometry_arrays(geometries: Array) -> ArrayMesh:
+	if geometries.is_empty():
+		return null
+
+	# Calculate total sizes
+	var total_vertices := 0
+	var total_indices := 0
+	var has_normals := false
+	var has_uvs := false
+	var has_colors := false
+
+	for geom: CollectedGeometry in geometries:
+		var verts: PackedVector3Array = geom.arrays[Mesh.ARRAY_VERTEX]
+		var indices: PackedInt32Array = geom.arrays[Mesh.ARRAY_INDEX]
+		if verts:
+			total_vertices += verts.size()
+		if indices:
+			total_indices += indices.size()
+		if geom.arrays[Mesh.ARRAY_NORMAL] != null:
+			has_normals = true
+		if geom.arrays[Mesh.ARRAY_TEX_UV] != null:
+			has_uvs = true
+		if geom.arrays[Mesh.ARRAY_COLOR] != null:
+			has_colors = true
+
+	if total_vertices == 0 or total_indices == 0:
+		return null
+
+	# Allocate merged arrays
+	var merged_verts := PackedVector3Array()
+	merged_verts.resize(total_vertices)
+	var merged_indices := PackedInt32Array()
+	merged_indices.resize(total_indices)
+
+	var merged_normals: PackedVector3Array = PackedVector3Array() if has_normals else null
+	if has_normals:
+		merged_normals.resize(total_vertices)
+
+	var merged_uvs: PackedVector2Array = PackedVector2Array() if has_uvs else null
+	if has_uvs:
+		merged_uvs.resize(total_vertices)
+
+	var merged_colors: PackedColorArray = PackedColorArray() if has_colors else null
+	if has_colors:
+		merged_colors.resize(total_vertices)
+
+	# Merge all geometry
+	var vert_offset := 0
+	var idx_offset := 0
+
+	for geom: CollectedGeometry in geometries:
+		var verts: PackedVector3Array = geom.arrays[Mesh.ARRAY_VERTEX]
+		var indices: PackedInt32Array = geom.arrays[Mesh.ARRAY_INDEX]
+
+		if verts == null or indices == null:
+			continue
+
+		var num_verts := verts.size()
+		var num_indices := indices.size()
+
+		# Transform vertices to world space and copy
+		var transform := geom.world_transform
+		for i in range(num_verts):
+			merged_verts[vert_offset + i] = transform * verts[i]
+
+		# Transform normals (rotation only, no translation)
+		if has_normals:
+			var normals: PackedVector3Array = geom.arrays[Mesh.ARRAY_NORMAL]
+			if normals != null and normals.size() == num_verts:
+				var basis := transform.basis
+				for i in range(num_verts):
+					merged_normals[vert_offset + i] = (basis * normals[i]).normalized()
+			else:
+				# Fill with default normals
+				for i in range(num_verts):
+					merged_normals[vert_offset + i] = Vector3.UP
+
+		# Copy UVs (no transformation needed)
+		if has_uvs:
+			var uvs: PackedVector2Array = geom.arrays[Mesh.ARRAY_TEX_UV]
+			if uvs != null and uvs.size() == num_verts:
+				for i in range(num_verts):
+					merged_uvs[vert_offset + i] = uvs[i]
+			else:
+				for i in range(num_verts):
+					merged_uvs[vert_offset + i] = Vector2.ZERO
+
+		# Copy colors
+		if has_colors:
+			var colors: PackedColorArray = geom.arrays[Mesh.ARRAY_COLOR]
+			if colors != null and colors.size() == num_verts:
+				for i in range(num_verts):
+					merged_colors[vert_offset + i] = colors[i]
+			else:
+				for i in range(num_verts):
+					merged_colors[vert_offset + i] = Color.WHITE
+
+		# Copy indices (offset by current vertex count)
+		for i in range(num_indices):
+			merged_indices[idx_offset + i] = indices[i] + vert_offset
+
+		vert_offset += num_verts
+		idx_offset += num_indices
+
+	# Build final mesh arrays
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = merged_verts
+	arrays[Mesh.ARRAY_INDEX] = merged_indices
+	if has_normals:
+		arrays[Mesh.ARRAY_NORMAL] = merged_normals
+	if has_uvs:
+		arrays[Mesh.ARRAY_TEX_UV] = merged_uvs
+	if has_colors:
+		arrays[Mesh.ARRAY_COLOR] = merged_colors
+
+	var mesh := ArrayMesh.new()
+	mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	return mesh
+
+
+## Convert NIF using material merging (reduces draw calls)
+## Returns root Node3D with merged meshes
+func _convert_merged() -> Node3D:
+	var root := Node3D.new()
+	root.name = "NIFRoot"
+
+	# Collect all geometry grouped by material
+	var collected := _collect_geometry_by_material()
+
+	if debug_merge:
+		var total_shapes := 0
+		for key: String in collected:
+			total_shapes += collected[key].size()
+		print("NIFConverter: Merging %d shapes into %d material groups for '%s'" % [
+			total_shapes, collected.size(), _source_path.get_file()
+		])
+
+	# Create one MeshInstance3D per material group
+	var mesh_idx := 0
+	for material_key: String in collected:
+		var geometries: Array = collected[material_key]
+		if geometries.is_empty():
+			continue
+
+		# Get material from first geometry (all have same material)
+		var first_geom: CollectedGeometry = geometries[0]
+		var material: StandardMaterial3D = first_geom.material
+
+		# Merge all geometry with this material
+		var merged_mesh := _merge_geometry_arrays(geometries)
+		if merged_mesh == null:
+			continue
+
+		var mesh_instance := MeshInstance3D.new()
+		mesh_instance.name = "MergedMesh_%d" % mesh_idx
+		mesh_instance.mesh = merged_mesh
+		if material:
+			mesh_instance.material_override = material
+
+		# Check if all pieces are hidden
+		var all_hidden := true
+		for geom: CollectedGeometry in geometries:
+			if not geom.is_hidden:
+				all_hidden = false
+				break
+		mesh_instance.visible = not all_hidden
+
+		root.add_child(mesh_instance)
+		mesh_idx += 1
+
+		if debug_merge:
+			var tri_count := merged_mesh.get_faces().size() / 3
+			print("  Material group '%s': %d shapes merged, %d triangles" % [
+				material_key.substr(0, 40), geometries.size(), tri_count
+			])
+
+	# Handle skinned meshes separately (don't merge)
+	if _has_skinning_data():
+		var skeleton := _create_skeleton_for_nif()
+		if skeleton:
+			root.add_child(skeleton)
+			# Convert skinned meshes the old way
+			for root_idx: int in _reader.roots:
+				var record := _reader.get_record(root_idx)
+				if record:
+					_convert_skinned_subtree(record, skeleton, root)
+
+	# Build collision (uses original geometry, not merged)
+	if load_collision and _collision_builder:
+		var collision_result := _collision_builder.build_collision()
+		if collision_result.has_collision:
+			var static_body := _collision_builder.create_static_body(collision_result)
+			if static_body:
+				root.add_child(static_body)
+
+			if collision_result.has_actor_collision_box:
+				root.set_meta("actor_collision_center", collision_result.bounding_box_center)
+				root.set_meta("actor_collision_extents", collision_result.bounding_box_extents)
+
+	# Post-process: Add LODs
+	if generate_lods and _should_generate_lods():
+		_add_lods_to_scene(root)
+
+	# Post-process: Add occluders
+	if generate_occluders and _should_generate_occluders():
+		_add_occluders_to_scene(root)
+
+	return root
+
+
+## Convert only skinned subtrees (for use with merged conversion)
+func _convert_skinned_subtree(record: Defs.NIFRecord, skeleton: Skeleton3D, root: Node3D) -> void:
+	if record == null:
+		return
+
+	if record is Defs.NiTriShape:
+		var shape := record as Defs.NiTriShape
+		if shape.skin_index >= 0:
+			var mesh_instance := _convert_ni_tri_shape(shape, skeleton)
+			if mesh_instance:
+				skeleton.add_child(mesh_instance)
+	elif record is Defs.NiTriStrips:
+		var strips := record as Defs.NiTriStrips
+		if strips.skin_index >= 0:
+			var mesh_instance := _convert_ni_tri_strips(strips, skeleton)
+			if mesh_instance:
+				skeleton.add_child(mesh_instance)
+
+	# Recurse
+	if record is Defs.NiNode:
+		var node := record as Defs.NiNode
+		for child_idx in node.children_indices:
+			if child_idx < 0:
+				continue
+			var child := _reader.get_record(child_idx)
+			if child:
+				_convert_skinned_subtree(child, skeleton, root)

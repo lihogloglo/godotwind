@@ -131,8 +131,9 @@ var debug_enabled: bool = false
 
 ## Global visibility flag - controlled by Models toggle in world_explorer
 ## When false, impostors are hidden regardless of individual visibility
-## Defaults to true so impostors are visible when enabled
-var _globally_visible: bool = true
+## CHANGED: Defaults to FALSE - visibility will be set by WorldStreamingManager._apply_streaming_mode()
+## This prevents impostors from appearing before proper mode synchronization
+var _globally_visible: bool = false
 
 ## Track first texture load for one-time diagnostic
 var _first_texture_logged: bool = false

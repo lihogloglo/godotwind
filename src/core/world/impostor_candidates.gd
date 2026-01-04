@@ -118,6 +118,8 @@ const TERRAIN_FEATURE_PATTERNS: Array[String] = [
 	# Cliffs and ledges
 	"terrain_cliff_",
 	"terrain_ledge_",
+	# Swamp/water surface details
+	"terrain_bc_scum",    # Bitter Coast swamp scum
 ]
 
 ## Trees that should have LODs/impostors (expanded)
@@ -143,12 +145,16 @@ const TREE_PATTERNS: Array[String] = [
 const VEGETATION_PATTERNS: Array[String] = [
 	# Mushrooms (distinctive Morrowind flora)
 	"flora_bc_mushroom",   # Bitter Coast mushrooms
+	"flora_bc_shelffungus", # Bitter Coast shelf fungus
 	"flora_ash_grass",     # Ashlands grass clumps
 	"flora_grass_",        # Grass patches
+	"flora_bc_grass",      # Bitter Coast grass
 	"flora_kelp",          # Underwater kelp
 	# Smaller plants with silhouettes
 	"flora_bc_fern",
 	"flora_bc_podplant",
+	"flora_bc_knee",       # Bitter Coast knee-high plants
+	"flora_bc_lilypad",    # Bitter Coast lilypads
 	"flora_comberry",
 	"flora_marshmerrow",
 	"flora_saltrice",
@@ -229,6 +235,25 @@ const RUIN_PATTERNS: Array[String] = [
 	"ruin_",              # Generic ruins
 ]
 
+## Cave and dungeon entrances (visible from outside)
+const CAVE_PATTERNS: Array[String] = [
+	"ex_cave_door",       # Cave doors
+	"ex_bc_cave",         # Bitter Coast cave entrances
+	"ex_cave_entrance",   # Generic cave entrances
+	"ex_cavern",          # Cavern entrances
+	"ex_mine_entrance",   # Mine entrances
+	"ex_grotto",          # Grotto entrances
+]
+
+## Objects to explicitly skip (never generate LODs)
+const SKIP_PATTERNS: Array[String] = [
+	"editormarker",       # Editor markers (invisible in-game)
+	"xmarker",            # X markers
+	"activator_",         # Activators
+	"collision_",         # Collision meshes
+	"trigger_",           # Trigger volumes
+]
+
 ## Minimum size (meters) for an object to be considered for impostors
 const MIN_SIZE_FOR_IMPOSTOR: float = 5.0
 
@@ -254,6 +279,11 @@ func should_have_impostor(model_path: String) -> bool:
 
 ## Internal check for impostor candidacy
 func _check_impostor_candidate(lower_path: String) -> bool:
+	# Check skip patterns first (editor markers, collision, etc.)
+	for pattern: String in SKIP_PATTERNS:
+		if pattern in lower_path:
+			return false
+
 	# Check custom overrides first
 	if lower_path in _custom_candidates:
 		return true
@@ -295,6 +325,11 @@ func _check_impostor_candidate(lower_path: String) -> bool:
 
 	# Check ruins
 	for pattern: String in RUIN_PATTERNS:
+		if pattern in lower_path:
+			return true
+
+	# Check cave/dungeon entrances
+	for pattern: String in CAVE_PATTERNS:
 		if pattern in lower_path:
 			return true
 
@@ -378,6 +413,13 @@ func get_impostor_settings(model_path: String) -> Dictionary:
 			settings["frames"] = 4
 			# Smaller max distance for small vegetation
 			settings["max_distance"] = 2000.0
+			return settings
+
+	# Cave/dungeon entrances - medium resolution (important landmarks)
+	for pattern: String in CAVE_PATTERNS:
+		if pattern in lower:
+			settings["texture_size"] = 512
+			settings["frames"] = 12
 			return settings
 
 	return settings
@@ -473,6 +515,15 @@ func get_all_impostor_models() -> Array[String]:
 		# Check exterior meshes (in x/ folder)
 		var is_exterior: bool = "\\x\\" in file_path or "/x/" in file_path
 
+		# Skip editor markers and other non-visual objects
+		var should_skip: bool = false
+		for skip_pattern: String in SKIP_PATTERNS:
+			if skip_pattern in file_path:
+				should_skip = true
+				break
+		if should_skip:
+			continue
+
 		if is_exterior:
 			# Priority order for exterior meshes
 			if check_patterns.call(file_path, original_path, LANDMARK_PATTERNS):
@@ -484,6 +535,8 @@ func get_all_impostor_models() -> Array[String]:
 			if check_patterns.call(file_path, original_path, TERRAIN_FEATURE_PATTERNS):
 				continue
 			if check_patterns.call(file_path, original_path, ARCHITECTURE_DETAIL_PATTERNS):
+				continue
+			if check_patterns.call(file_path, original_path, CAVE_PATTERNS):
 				continue
 
 		# Trees, vegetation, and props can be in various folders
@@ -509,6 +562,7 @@ func get_all_impostor_models() -> Array[String]:
 		"vegetation": 0,
 		"props": 0,
 		"architecture": 0,
+		"caves": 0,
 	}
 
 	for model_path: String in _cached_all_models:
@@ -530,11 +584,13 @@ func get_all_impostor_models() -> Array[String]:
 			counts["props"] += 1
 		elif _matches_any(lower, ARCHITECTURE_DETAIL_PATTERNS):
 			counts["architecture"] += 1
+		elif _matches_any(lower, CAVE_PATTERNS):
+			counts["caves"] += 1
 
 	print("ImpostorCandidates: Found %d models total" % _cached_all_models.size())
 	print("  Landmarks: %d, Buildings: %d, Ruins: %d" % [counts["landmarks"], counts["buildings"], counts["ruins"]])
 	print("  Terrain: %d, Trees: %d, Vegetation: %d" % [counts["terrain"], counts["trees"], counts["vegetation"]])
-	print("  Props: %d, Architecture: %d" % [counts["props"], counts["architecture"]])
+	print("  Props: %d, Architecture: %d, Caves: %d" % [counts["props"], counts["architecture"], counts["caves"]])
 
 	return _cached_all_models.duplicate()
 
@@ -558,6 +614,8 @@ func get_all_patterns() -> Dictionary:
 		"props": PROP_PATTERNS.duplicate(),
 		"architecture": ARCHITECTURE_DETAIL_PATTERNS.duplicate(),
 		"trees": TREE_PATTERNS.duplicate(),
+		"caves": CAVE_PATTERNS.duplicate(),
+		"skip": SKIP_PATTERNS.duplicate(),
 		"custom": _custom_candidates.keys(),
 	}
 

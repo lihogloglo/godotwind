@@ -254,7 +254,18 @@
       "Bash(dir /b \"src\\\\tools\\\\streaming_test_scene.*\")",
       "Bash(powershell -Command \"Get-Command godot* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
       "Bash(dir /s /b \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\addons\\\\terrain_3d\\\\*.gdshader\")",
-      "Bash(timeout 5 godot:*)"
+      "Bash(timeout 5 godot:*)",
+      "Bash(dir /s /b \"%APPDATA%\\\\Godot\")",
+      "Bash(cmd /c \"dir /s /b %APPDATA%\\\\Godot\\\\app_userdata 2>nul\")",
+      "Bash(dir /s /b \"%APPDATA%\\\\Godot\\\\app_userdata\\\\*crash_report*\")",
+      "Bash(dir /s /b \"%APPDATA%\\\\Godot\\\\*\")",
+      "Bash(cmd /c \"dir /s /b %APPDATA%\\\\Godot 2>nul | findstr /i log\")",
+      "Bash(cmd /c \"dir /s /b %APPDATA%\\\\Godot\\\\app_userdata\\\\Godotwind\\\\logs 2>nul\")",
+      "Bash(cmd /c \"if exist %APPDATA%\\\\Godot\\\\app_userdata\\\\Godotwind\\\\logs\\\\crash_report.txt \\(type %APPDATA%\\\\Godot\\\\app_userdata\\\\Godotwind\\\\logs\\\\crash_report.txt\\) else \\(echo No crash report found at expected location\\)\")",
+      "Bash(cmd /c \"dir %APPDATA%\\\\Godot\\\\app_userdata\\\\Godotwind /s /b 2>nul || echo Folder not found\")",
+      "Bash(cmd /c \"dir %APPDATA%\\\\Godot /s /b 2>nul\")",
+      "Bash(cmd /c \"dir %APPDATA%\\\\Godot\")",
+      "Bash(dir \"%APPDATA%\\\\Godot\")"
     ]
   }
 }

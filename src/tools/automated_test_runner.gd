@@ -49,6 +49,13 @@ signal waypoint_reached(waypoint_name: String)
 enum TestState { IDLE, INITIALIZING, RUNNING, PAUSED, COMPLETED }
 var _state: TestState = TestState.IDLE
 
+## Test scenario types
+enum TestScenario {
+	FULL_TOUR,        ## Default waypoint tour
+	MODELS_TOGGLE,    ## Toggle models with distant land (crash test)
+	TELEPORT_STRESS,  ## Rapid teleportation between distant points
+}
+
 ## Waypoint definition
 class Waypoint:
 	var name: String
@@ -677,3 +684,162 @@ func _log(message: String) -> void:
 		clean = clean.replace("[color=yellow]", "").replace("[color=red]", "")
 		clean = clean.replace("[/color]", "")
 		print(clean)
+
+
+#region Crash Scenario Tests
+
+## Run a specific test scenario
+func run_scenario(scenario: TestScenario) -> void:
+	match scenario:
+		TestScenario.FULL_TOUR:
+			start_test()
+		TestScenario.MODELS_TOGGLE:
+			_run_models_toggle_scenario()
+		TestScenario.TELEPORT_STRESS:
+			_run_teleport_stress_scenario()
+
+
+## Models toggle crash scenario
+## This tests the specific crash case: toggling models ON with distant land active
+func _run_models_toggle_scenario() -> void:
+	if _state == TestState.RUNNING:
+		_log("[color=yellow]Test already running[/color]")
+		return
+
+	_log("[color=cyan]========================================[/color]")
+	_log("[color=cyan]SCENARIO: Models Toggle (Crash Test)[/color]")
+	_log("[color=cyan]========================================[/color]")
+
+	_state = TestState.RUNNING
+	_test_start_time = Time.get_ticks_msec() / 1000.0
+	_captured_errors.clear()
+	_captured_warnings.clear()
+	_frame_times.clear()
+
+	var cell_size: float = 8192.0
+
+	# Step 1: Ensure models are OFF
+	_log("Step 1: Ensuring models are OFF...")
+	var show_models_toggle: CheckBox = _world_explorer.get("_show_models_toggle") as CheckBox
+	if show_models_toggle and show_models_toggle.button_pressed:
+		show_models_toggle.button_pressed = false
+		await get_tree().create_timer(0.5).timeout
+
+	# Step 2: Teleport to Seyda Neen (high object density)
+	_log("Step 2: Teleporting to Seyda Neen...")
+	var seyda_neen_pos := Vector3(-2 * cell_size, 100, -9 * cell_size)
+	if _fly_camera:
+		_fly_camera.global_position = seyda_neen_pos
+	await get_tree().create_timer(1.0).timeout
+
+	# Step 3: Record pre-toggle state
+	_log("Step 3: Recording pre-toggle state...")
+	var pre_toggle_stats := _get_streaming_stats()
+	_log("  Queue: %d, NEAR: %d, MID: %d, FAR: %d" % [
+		pre_toggle_stats.get("queue", 0),
+		pre_toggle_stats.get("near", 0),
+		pre_toggle_stats.get("mid", 0),
+		pre_toggle_stats.get("far", 0),
+	])
+
+	# Step 4: Toggle models ON (the crash trigger)
+	_log("[color=yellow]Step 4: TOGGLING MODELS ON (potential crash point)[/color]")
+	if show_models_toggle:
+		show_models_toggle.button_pressed = true
+
+	# Step 5: Monitor for 5 seconds
+	_log("Step 5: Monitoring for issues (5 seconds)...")
+	var monitor_start: float = Time.get_ticks_msec() / 1000.0
+	while (Time.get_ticks_msec() / 1000.0) - monitor_start < 5.0:
+		await get_tree().create_timer(0.5).timeout
+		var stats: Dictionary = _get_streaming_stats()
+		var fps: float = 1.0 / get_process_delta_time() if get_process_delta_time() > 0 else 0.0
+		_log("  [%.1fs] FPS: %.1f, Queue: %d, NEAR: %d" % [
+			(Time.get_ticks_msec() / 1000.0) - monitor_start,
+			fps,
+			stats.get("queue", 0),
+			stats.get("near", 0),
+		])
+
+		# Check for issues
+		if fps < 10:
+			capture_error("Critical FPS drop: %.1f" % fps)
+		if stats.get("queue", 0) > 500:
+			capture_warning("High queue: %d" % stats.get("queue", 0))
+
+	# Complete
+	_state = TestState.COMPLETED
+	_log("[color=green]Models toggle scenario completed[/color]")
+	_log("Errors: %d, Warnings: %d" % [_captured_errors.size(), _captured_warnings.size()])
+
+	var report := _generate_report()
+	test_completed.emit(report)
+
+
+## Teleport stress test - rapid movement between distant locations
+func _run_teleport_stress_scenario() -> void:
+	if _state == TestState.RUNNING:
+		_log("[color=yellow]Test already running[/color]")
+		return
+
+	_log("[color=cyan]========================================[/color]")
+	_log("[color=cyan]SCENARIO: Teleport Stress Test[/color]")
+	_log("[color=cyan]========================================[/color]")
+
+	_state = TestState.RUNNING
+	_test_start_time = Time.get_ticks_msec() / 1000.0
+	_captured_errors.clear()
+	_frame_times.clear()
+
+	var cell_size: float = 8192.0
+	var locations: Array[Dictionary] = [
+		{"name": "Seyda Neen", "pos": Vector3(-2 * cell_size, 100, -9 * cell_size)},
+		{"name": "Balmora", "pos": Vector3(-3 * cell_size, 100, -2 * cell_size)},
+		{"name": "Vivec", "pos": Vector3(5 * cell_size, 100, -6 * cell_size)},
+		{"name": "Red Mountain", "pos": Vector3(3 * cell_size, 300, 6 * cell_size)},
+		{"name": "Origin", "pos": Vector3(0, 100, 0)},
+	]
+
+	# Ensure models are ON for this test
+	var show_models_toggle: CheckBox = _world_explorer.get("_show_models_toggle") as CheckBox
+	if show_models_toggle and not show_models_toggle.button_pressed:
+		show_models_toggle.button_pressed = true
+		await get_tree().create_timer(1.0).timeout
+
+	# Rapid teleportation
+	for i in range(3):  # 3 rounds
+		_log("Round %d/3" % (i + 1))
+		for loc in locations:
+			_log("  Teleporting to %s..." % loc["name"])
+			if _fly_camera:
+				_fly_camera.global_position = loc["pos"]
+
+			await get_tree().create_timer(0.5).timeout
+
+			var fps: float = 1.0 / get_process_delta_time() if get_process_delta_time() > 0 else 0.0
+			if fps < 15:
+				capture_error("FPS drop at %s: %.1f" % [loc["name"], fps])
+
+	_state = TestState.COMPLETED
+	_log("[color=green]Teleport stress scenario completed[/color]")
+
+	var report := _generate_report()
+	test_completed.emit(report)
+
+
+## Get current streaming stats from ObjectStreamer
+func _get_streaming_stats() -> Dictionary:
+	var stats := {}
+	if _world_explorer:
+		var wsm: Node = _world_explorer.get("world_streaming_manager")
+		if wsm:
+			var os: Node = wsm.get_node_or_null("ObjectStreamer")
+			if os and os.has_method("get_stats"):
+				var os_stats: Dictionary = os.get_stats()
+				stats["queue"] = os_stats.get("instantiation_queue_size", 0)
+				stats["near"] = os_stats.get("near_visible", 0)
+				stats["mid"] = os_stats.get("mid_visible", 0)
+				stats["far"] = os_stats.get("far_visible", 0)
+	return stats
+
+#endregion

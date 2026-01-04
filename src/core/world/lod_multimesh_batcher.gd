@@ -101,6 +101,11 @@ var _crossfade_shader: Shader = null
 ## Next batch key
 var _next_batch_key: int = 1
 
+## Rate limiting for batch creation - prevents frame spikes during heavy loading
+const MAX_BATCH_CREATES_PER_FRAME: int = 4
+var _batch_creates_this_frame: int = 0
+var _batch_create_frame: int = 0
+
 ## Statistics
 var _stats: Dictionary = {
 	"total_batches": 0,
@@ -374,10 +379,24 @@ func _get_or_create_batch(mesh: ArrayMesh, lod_level: int, materials: Array[Mate
 		if lod_level in lod_map:
 			return _batches[lod_map[lod_level]]
 
+	# RATE LIMITING: Reset counter on new frame
+	var current_frame := Engine.get_process_frames()
+	if current_frame != _batch_create_frame:
+		_batch_create_frame = current_frame
+		_batch_creates_this_frame = 0
+
+	# RATE LIMITING: Check if we've hit the per-frame limit
+	if _batch_creates_this_frame >= MAX_BATCH_CREATES_PER_FRAME:
+		# Return null to defer creation to next frame
+		# Caller will retry on next update
+		return null
+
 	# Create new batch (pass materials for shader creation)
 	var batch := _create_batch(mesh, lod_level, materials)
 	if not batch:
 		return null
+
+	_batch_creates_this_frame += 1
 
 	# Register in lookup tables
 	if mesh_id not in _mesh_to_batch:
