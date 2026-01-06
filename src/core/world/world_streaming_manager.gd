@@ -77,24 +77,17 @@ signal cell_unloaded(grid: Vector2i)
 			if not value and object_streamer.has_method("clear"):
 				object_streamer.clear()
 
-## Streaming mode - single source of truth for tier activation
-## NEAR_ONLY: Legacy mode with ~150m view distance, no LOD or impostors
-## FULL_AAA: All tiers active with LOD meshes and impostors up to 5km
+## Streaming mode - SIMPLIFIED: Always FULL_AAA
+## All tiers active: NEAR + MID + FAR with LOD and impostors up to 5km
+## NEAR_ONLY mode has been removed to simplify the codebase.
 ##
-## NOTE: FULL_AAA requires prebaked assets:
-## - Run lod_prebaker.gd for LOD meshes (MID tier)
+## NOTE: Requires prebaked assets:
+## - Models prebaked with embedded LODs via NIFConverter (MID tier)
 ## - Run impostor baker for impostors (FAR tier)
-@export var streaming_mode: int = StreamingConfig.StreamingMode.FULL_AAA:
-	set(value):
-		streaming_mode = value
-		_apply_streaming_mode()
 
-## Backward compatibility property - derives from streaming_mode
-var distant_rendering_enabled: bool:
-	get:
-		return streaming_mode == StreamingConfig.StreamingMode.FULL_AAA
-	set(value):
-		streaming_mode = StreamingConfig.StreamingMode.FULL_AAA if value else StreamingConfig.StreamingMode.NEAR_ONLY
+## Always enabled - all tiers are active (NEAR/MID/FAR)
+## Kept for backward compatibility with code that checks this flag
+var distant_rendering_enabled: bool = true
 
 ## NOTE: Terrain streaming removed - use GenericTerrainStreamer separately
 ## This manager now focuses ONLY on cell/object streaming
@@ -118,7 +111,6 @@ var _deferred_cells: Dictionary = {}  # grid -> true
 @export var cell_load_budget_ms: float = 2.0
 
 ## Maximum cells to queue for loading (NEAR tier uses queue, other tiers should NOT use queue)
-## If distant_rendering_enabled, this needs to be much larger, but that's experimental
 @export var max_load_queue_size: int = 128
 
 ## Enable async/time-budgeted cell loading
@@ -188,6 +180,11 @@ var object_streamer: Node3D = null  # ObjectStreamer
 ## Enables distance-based object discovery without loading cells first
 var object_position_index: RefCounted = null  # ObjectPositionIndex
 
+## Container for NEAR tier objects in AAA mode (not tied to cell lifecycle)
+## Objects are parented here instead of cell nodes, so they persist based on
+## individual distance rather than cell unload events
+var _near_objects_container: Node3D = null
+
 ## Streaming profiler for per-subsystem timing breakdown
 ## Access via get_streaming_profiler() for external UI display
 var streaming_profiler: StreamingProfiler = null
@@ -197,8 +194,10 @@ var streaming_profiler: StreamingProfiler = null
 var gpu_visibility_renderer: RefCounted = null  # GPUVisibilityRenderer
 
 ## Whether GPU-driven rendering is enabled (Phase 2)
-## When enabled, MID/FAR tiers use GPU compute for visibility
-var _gpu_driven_enabled: bool = false
+## DISABLED: Phase 2 GPU rendering is disabled for simplification
+## The code is kept for future use but never activated
+## When Phase 2 is complete and needed, change this to true and uncomment setup
+var _gpu_driven_enabled: bool = false  # Keep disabled - Phase 2 not complete
 
 #endregion
 
@@ -258,6 +257,10 @@ var _stats_cells_per_tier: Dictionary = {}
 var _queue_full_message_count: int = 0
 var _queue_full_message_throttle: int = 100  # Only print every N dropped cells
 
+## Cells pending unload (waiting for fade-out animations to complete)
+## grid -> { "cell_node": Variant, "timestamp": float }
+var _pending_cell_unloads: Dictionary = {}
+
 #endregion
 
 
@@ -286,61 +289,57 @@ func initialize() -> void:
 	# Only check TAA if distant rendering is enabled (dithering only used with LOD)
 	if distant_rendering_enabled:
 		_verify_taa_enabled()
+
+	# Create persistent container for NEAR tier objects (AAA mode only)
+	# Objects parented here persist based on individual distance, not cell unload
+	if distant_rendering_enabled:
+		_near_objects_container = Node3D.new()
+		_near_objects_container.name = "NearObjects"
+		add_child(_near_objects_container)
+
 	_initialized = true
 
 	# CRITICAL: Apply streaming mode AFTER all subsystems are created
 	# This ensures proper synchronization of visibility flags
+	# (also logs status via _log_distant_rendering_status)
 	_apply_streaming_mode()
 
-	# Log diagnostic info
-	_log_distant_rendering_status()
 
-
-## Apply streaming mode to all subsystems - SINGLE SOURCE OF TRUTH
-## This is the ONLY place where mode is propagated to all subsystems
-## Called after initialize() and whenever streaming_mode changes
+## Apply streaming mode to all subsystems - SIMPLIFIED
+## FULL_AAA mode is always active (NEAR_ONLY removed)
+## Called after initialize()
 func _apply_streaming_mode() -> void:
 	if not _initialized:
 		return  # Will be called after initialize() completes
 
-	var flags := StreamingConfig.get_mode_flags(streaming_mode)
-	var mode_name := "NEAR_ONLY" if streaming_mode == StreamingConfig.StreamingMode.NEAR_ONLY else "FULL_AAA"
+	_debug("Applying streaming mode: FULL_AAA (all tiers enabled)")
 
-	_debug("Applying streaming mode: %s" % mode_name)
-
-	# 1. Update tier_manager
+	# 1. Update tier_manager - always enable distant rendering
 	if tier_manager:
-		tier_manager.distant_rendering_enabled = flags.distant_rendering_enabled
+		tier_manager.distant_rendering_enabled = true
 
-	# 2. Update ObjectStreamer
+	# 2. Update ObjectStreamer - always enable distant tiers
 	if object_streamer and object_streamer.has_method("set_distant_tiers_enabled"):
-		object_streamer.set_distant_tiers_enabled(flags.distant_rendering_enabled)
+		object_streamer.set_distant_tiers_enabled(true)
 
-	# 3. CRITICAL FIX: Directly update ImpostorManager visibility
-	# This prevents the race condition where ImpostorManager._globally_visible
-	# was set to true in _enter_tree() before synchronization happened
+	# 2b. Wire position index to ObjectStreamer
+	if object_position_index and object_streamer:
+		if object_streamer.has_method("set_position_index"):
+			object_streamer.set_position_index(object_position_index)
+
+	# 3. Update ImpostorManager visibility based on load_objects flag
 	if impostor_manager and impostor_manager.has_method("set_all_visible"):
-		var show_impostors: bool = flags.far_enabled and load_objects
-		impostor_manager.call("set_all_visible", show_impostors)
-		if debug_enabled:
-			_debug("ImpostorManager visibility set to: %s" % show_impostors)
+		impostor_manager.call("set_all_visible", load_objects)
 
-	# 4. Clear FAR chunks when disabling distant rendering
-	if not flags.far_enabled and chunk_renderer and chunk_renderer.has_method("clear"):
-		chunk_renderer.clear()
-		if debug_enabled:
-			_debug("Cleared FAR chunks (distant rendering disabled)")
+	# Log status after applying mode
+	_log_distant_rendering_status()
 
 
 ## Verify TAA (Temporal Anti-Aliasing) is enabled for best dithering quality
 ## Dithering crossfade works without TAA but looks noisy/grainy
 ## NOTE: TAA is OPTIONAL - system works fine without it (just less smooth transitions)
 func _verify_taa_enabled() -> void:
-	# Only check if distant rendering is enabled (dithering only used with LOD system)
-	if not distant_rendering_enabled:
-		return
-
-	# Check if TAA is enabled in project settings
+	# Check if TAA is enabled in project settings (dithering used with LOD system)
 	var use_taa: bool = ProjectSettings.get_setting("rendering/anti_aliasing/quality/use_taa", false)
 
 	if not use_taa:
@@ -350,22 +349,14 @@ func _verify_taa_enabled() -> void:
 		_debug("TAA enabled ✓ - Dithering crossfade will look smooth")
 
 
-## Log active streaming mode
+## Log active streaming mode - SIMPLIFIED (always FULL_AAA)
 func _validate_streaming_modes() -> void:
-	var mode_name := "Legacy (NEAR only, ~150m)"
-	if distant_rendering_enabled:
-		mode_name = "AAA Streaming (position index + LOD tiers, 0-5km)"
-
 	print("[WSM] ═══════════════════════════════════════════")
-	print("[WSM] Streaming Mode: %s" % mode_name)
-	if distant_rendering_enabled:
-		print("[WSM]   • Cells: Metadata-only (terrain/water)")
-		print("[WSM]   • Objects: Distance-based via ObjectPositionIndex")
-		print("[WSM]   • Tiers: NEAR (0-150m) / MID (150-500m) / FAR (500m-5km)")
-		print("[WSM]   • Crossfade: Dithering with TAA")
-	else:
-		print("[WSM]   • Simple radius-based cell loading")
-		print("[WSM]   • No LOD system")
+	print("[WSM] Streaming Mode: FULL_AAA (0-5km)")
+	print("[WSM]   • Cells: Metadata-only (terrain/water)")
+	print("[WSM]   • Objects: Distance-based via ObjectPositionIndex")
+	print("[WSM]   • Tiers: NEAR (0-150m) / MID (150-500m) / FAR (500m-5km)")
+	print("[WSM]   • Crossfade: Dithering with TAA")
 	print("[WSM] ═══════════════════════════════════════════")
 
 
@@ -402,42 +393,7 @@ func _process(delta: float) -> void:
 		_last_camera_cell = current_cell
 
 	# ═══════════════════════════════════════════════════════════════════════
-	# NEAR-ONLY MODE: Skip all distant-tier processing for efficiency
-	# ═══════════════════════════════════════════════════════════════════════
-	if streaming_mode == StreamingConfig.StreamingMode.NEAR_ONLY:
-		# Process ONLY: cell changes, async completions, instantiation, load queue
-		# SKIP: visibility calculations, GPU rendering, impostor updates, object streamer MID/FAR
-		if cell_changed:
-			if streaming_profiler:
-				streaming_profiler.begin_section("CellManager.on_cell_changed")
-			_on_camera_cell_changed(current_cell)
-			if streaming_profiler:
-				streaming_profiler.end_section("CellManager.on_cell_changed")
-
-		if streaming_profiler:
-			streaming_profiler.begin_section("AsyncCompletions.poll")
-		_poll_async_completions()
-		if streaming_profiler:
-			streaming_profiler.end_section("AsyncCompletions.poll")
-
-		if cell_manager and cell_manager.has_method("process_async_instantiation"):
-			if streaming_profiler:
-				streaming_profiler.begin_section("CellManager.instantiation")
-			cell_manager.process_async_instantiation(instantiation_budget_ms, camera_pos)
-			if streaming_profiler:
-				streaming_profiler.end_section("CellManager.instantiation")
-
-		if async_loading_enabled and not _load_queue.is_empty():
-			if streaming_profiler:
-				streaming_profiler.begin_section("LoadQueue.process")
-			_process_load_queue()
-			if streaming_profiler:
-				streaming_profiler.end_section("LoadQueue.process")
-
-		if streaming_profiler:
-			streaming_profiler.end_frame()
-		return  # Early exit - skip all MID/FAR processing
-
+	# NOTE: NEAR_ONLY mode block removed - always use FULL_AAA mode
 	# ═══════════════════════════════════════════════════════════════════════
 	# **UNIFIED VISIBILITY AUTHORITY** - Single source of truth for all visibility
 	# ═══════════════════════════════════════════════════════════════════════
@@ -448,7 +404,9 @@ func _process(delta: float) -> void:
 	# 2. **CALCULATE ALL VISIBILITY** - This is the ONLY place visibility is computed
 	# Now uses the UPDATED _last_camera_cell, preventing stale cell tier calculations
 	var vis_stats: Dictionary = {}
-	if tier_manager and distant_rendering_enabled and load_objects:
+
+	# Run full visibility calculation (FULL_AAA mode is always active)
+	if tier_manager and load_objects:
 		if streaming_profiler:
 			streaming_profiler.begin_section("DistanceTierManager.update_visibility")
 		vis_stats = tier_manager.update_visibility(current_cell, delta)
@@ -458,10 +416,9 @@ func _process(delta: float) -> void:
 			streaming_profiler.record_metric("objects_changed_tier", vis_stats.get("objects_changed_tier", 0))
 			streaming_profiler.record_metric("gpu_accelerated", 1 if vis_stats.get("gpu_accelerated", false) else 0)
 
-		# Log visibility changes if diagnostic logging enabled
-		if diagnostic_logging and vis_stats.get("objects_changed_tier", 0) > 0:
-			var gpu_str := " (GPU)" if vis_stats.get("gpu_accelerated", false) else ""
-			print("[WSM] Visibility: %d objects changed tier%s" % [vis_stats.objects_changed_tier, gpu_str])
+		# NOTE: Visibility tier change logging disabled to reduce console spam
+		# The high change count on first frame is expected (all objects transitioning from HIDDEN)
+		pass
 
 	# ═══════════════════════════════════════════════════════════════════════
 	# **CONSUMERS** - Systems react to visibility changes (NO calculations)
@@ -530,15 +487,8 @@ func _process(delta: float) -> void:
 			if not gpu_near_changes.is_empty() and object_streamer:
 				_process_gpu_near_tier_changes(gpu_near_changes)
 
-	# **UNIFIED VISIBILITY**: Impostor visibility
-	# GPU-driven mode: GPUVisibilityRenderer already applied visibility in its update()
-	# CPU mode: Use cell-based visibility from DistanceTierManager
-	# TIER ISOLATION: Check if distant tiers are enabled in ObjectStreamer
-	var distant_tiers_active := distant_rendering_enabled
-	if object_streamer and object_streamer.has_method("is_distant_tiers_enabled"):
-		distant_tiers_active = distant_tiers_active and object_streamer.is_distant_tiers_enabled()
-
-	if distant_tiers_active and impostor_manager:
+	# **UNIFIED VISIBILITY**: Impostor visibility (always active in FULL_AAA mode)
+	if impostor_manager:
 		if streaming_profiler:
 			streaming_profiler.begin_section("ImpostorManager.update_visibility")
 		# Only call update_visibility if NOT in GPU-driven mode
@@ -549,7 +499,7 @@ func _process(delta: float) -> void:
 			streaming_profiler.end_section("ImpostorManager.update_visibility")
 
 	# **UNIFIED VISIBILITY**: Object streamer processes tier changes from authority
-	if distant_rendering_enabled and object_streamer:
+	if object_streamer:
 		if streaming_profiler:
 			streaming_profiler.begin_section("ObjectStreamer.update")
 		object_streamer.update(camera_pos, delta)
@@ -573,13 +523,16 @@ func _process(delta: float) -> void:
 
 	# Periodically clean up ODM tracking for cells that have gone beyond FAR tier
 	# This runs every ~60 frames to avoid per-frame overhead
-	if distant_rendering_enabled and object_streamer and (current_frame % 60) == 0:
+	if object_streamer and (current_frame % 60) == 0:
 		_cleanup_distant_odm_tracking()
 
 	# Periodically clean up stale cell references (nodes freed externally)
 	# This runs every ~120 frames to avoid per-frame overhead
 	if (current_frame % 120) == 0:
 		_cleanup_stale_cell_references()
+
+	# Process pending cell unloads (cells waiting for fade-out animations)
+	_process_pending_unloads()
 
 	if diagnostic_logging and (current_frame - _diag_last_log_frame) >= 60:
 		var inst_queue := 0
@@ -1095,11 +1048,8 @@ func _setup_tier_manager() -> void:
 		_loading_cells_by_tier[tier] = {}
 		_stats_cells_per_tier[tier] = 0
 
-	# Skip tier manager entirely if distant rendering is disabled
-	if not distant_rendering_enabled:
-		_debug("Distant rendering disabled - skipping tier manager setup")
-		return
-
+	# Always create tier manager - enable/disable state is set via _apply_streaming_mode()
+	# This allows toggling distant rendering at runtime without recreating subsystems
 	tier_manager = DistanceTierManagerScript.new()
 	tier_manager.distant_rendering_enabled = distant_rendering_enabled
 
@@ -1111,12 +1061,9 @@ func _setup_tier_manager() -> void:
 
 
 ## Set up distant renderers for FAR tier and per-object LOD
-## Only creates when distant rendering is enabled
+## Always creates subsystems - enable/disable state is controlled via _apply_streaming_mode()
+## This allows toggling distant rendering at runtime without recreating subsystems
 func _setup_distant_renderers() -> void:
-	# Skip entirely if distant rendering is disabled
-	if not distant_rendering_enabled:
-		_debug("Distant rendering disabled - skipping impostor/object streamer setup")
-		return
 	# Create ImpostorManager for FAR tier (impostors from 500m-5km)
 	var impostor_manager_class: Resource = load("res://src/core/world/impostor_manager.gd")
 	if impostor_manager_class:
@@ -1202,22 +1149,23 @@ func _setup_object_streamer() -> void:
 
 	_debug("ObjectStreamer created (unified Phase 1 system)")
 
-	# Set up GPU visibility renderer for Phase 2
-	_setup_gpu_visibility_renderer()
-
-	# Connect ObjectStreamer to GPUVisibilityRenderer for Phase 2 batch registration
-	if gpu_visibility_renderer and object_streamer:
-		object_streamer.set_gpu_visibility_renderer(gpu_visibility_renderer)
-		# Connect batcher to GPU renderer for optimized visibility application
-		if object_streamer.has_method("get_batcher"):
-			var batcher: RefCounted = object_streamer.call("get_batcher")
-			if batcher and gpu_visibility_renderer.has_method("set_batcher"):
-				gpu_visibility_renderer.set_batcher(batcher)
-
-	# Connect ImpostorManager to GPUVisibilityRenderer for FAR tier GPU visibility
-	if gpu_visibility_renderer and impostor_manager:
-		if gpu_visibility_renderer.has_method("set_impostor_manager"):
-			gpu_visibility_renderer.set_impostor_manager(impostor_manager)
+	# PHASE 2 GPU DISABLED: The Phase 2 GPU visibility renderer is disabled for simplification
+	# The code is kept for future use. Uncomment when Phase 2 is complete and needed.
+	# _setup_gpu_visibility_renderer()
+	#
+	# # Connect ObjectStreamer to GPUVisibilityRenderer for Phase 2 batch registration
+	# if gpu_visibility_renderer and object_streamer:
+	# 	object_streamer.set_gpu_visibility_renderer(gpu_visibility_renderer)
+	# 	# Connect batcher to GPU renderer for optimized visibility application
+	# 	if object_streamer.has_method("get_batcher"):
+	# 		var batcher: RefCounted = object_streamer.call("get_batcher")
+	# 		if batcher and gpu_visibility_renderer.has_method("set_batcher"):
+	# 			gpu_visibility_renderer.set_batcher(batcher)
+	#
+	# # Connect ImpostorManager to GPUVisibilityRenderer for FAR tier GPU visibility
+	# if gpu_visibility_renderer and impostor_manager:
+	# 	if gpu_visibility_renderer.has_method("set_impostor_manager"):
+	# 		gpu_visibility_renderer.set_impostor_manager(impostor_manager)
 
 
 ## Set up GPU visibility renderer for Phase 2 GPU-driven MID/FAR rendering
@@ -1276,12 +1224,8 @@ func configure_for_world(world_provider: RefCounted) -> void:
 
 ## Set up chunk-based paging for FAR tier
 ## NOTE: MID tier removed - per-object LOD handles significant objects
-## Always creates chunk infrastructure so it's ready when toggled on
+## Always creates chunk infrastructure (FULL_AAA mode is always active)
 func _setup_chunk_paging() -> void:
-	# ChunkRenderer is used for FAR tier impostor organization in AAA mode
-	if not distant_rendering_enabled:
-		return
-
 	# Create chunk manager
 	chunk_manager = QuadtreeChunkManagerScript.new()
 	if tier_manager:
@@ -1303,12 +1247,14 @@ func _setup_chunk_paging() -> void:
 
 ## Set up object position index for AAA streaming
 ## Builds spatial index of all object positions for distance-based queries
+## NOTE: Always creates the index even if distant_rendering_enabled is initially false,
+## because the user may toggle to FULL_AAA mode later and the index must be ready.
 func _setup_position_index() -> void:
-	if not distant_rendering_enabled:
-		return
+	print("[WSM] _setup_position_index called, distant_rendering_enabled=%s" % distant_rendering_enabled)
 
 	# Create position index
 	object_position_index = ObjectPositionIndexScript.new()
+	print("[WSM] Created ObjectPositionIndex")
 
 	# Try to load from prebaked file first (faster startup)
 	var loaded := false
@@ -1333,11 +1279,18 @@ func _setup_position_index() -> void:
 				_debug("Saved position index to %s" % position_index_path)
 
 	# Wire position index to ObjectStreamer
+	print("[WSM] Wiring position index - object_streamer=%s, has_method=%s" % [
+		object_streamer != null,
+		object_streamer.has_method("set_position_index") if object_streamer else false
+	])
 	if object_streamer and object_streamer.has_method("set_position_index"):
 		object_streamer.set_position_index(object_position_index)
-		_debug("Connected position index to ObjectStreamer")
+		print("[WSM] Connected position index to ObjectStreamer")
+	else:
+		print("[WSM] FAILED to connect position index!")
 
 	var stats: Dictionary = object_position_index.get_stats()
+	print("[WSM] Position index stats: %s" % stats)
 	_debug("AAA streaming ready: %d objects indexed in %d cells" % [
 		stats.get("total_objects", 0),
 		stats.get("cells_indexed", 0)
@@ -1398,6 +1351,7 @@ func _load_cell_internal(grid: Vector2i) -> Node3D:
 
 
 ## Internal cell unloading
+## Now defers actual cell destruction to allow fade-out animations
 func _unload_cell_internal(grid: Vector2i, keep_odm_tracking: bool = false) -> void:
 	if grid not in _loaded_cells:
 		return
@@ -1413,36 +1367,31 @@ func _unload_cell_internal(grid: Vector2i, keep_odm_tracking: bool = false) -> v
 		var near_loading: Dictionary = _loading_cells_by_tier[DistanceTierManagerScript.Tier.NEAR]
 		near_loading.erase(grid)
 
+	# Start fade-out for objects in this cell before unloading
+	if object_streamer and object_streamer.has_method("start_cell_fadeout"):
+		object_streamer.start_cell_fadeout(grid)
+
 	# PRIORITY 1 FIX: Unregister all objects in this cell from ObjectStreamer/DistanceTierManager
 	# This prevents memory leaks and wasted CPU calculating tiers for non-existent objects
 	# Skip cleanup only in special cases (AAA mode unload with keep_odm_tracking=true)
+	# NOTE: Now deferred until fade completes
 	if not keep_odm_tracking and object_streamer:
-		var unregistered_count: int = object_streamer.unregister_cell(grid)
-		if unregistered_count > 0 and debug_enabled:
-			_debug("Unregistered %d objects from ObjectStreamer for cell %s" % [unregistered_count, grid])
+		# Don't unregister immediately - defer until fade completes
+		# The fade system will handle unregistration via _pending_unloads
+		pass
 
 	if is_instance_valid(cell_node_variant):
-		var cell_node: Node3D = cell_node_variant as Node3D
-
-		# Release pooled objects back to the pool before freeing the cell
-		# This dramatically improves performance by reusing Node3D instances
-		if cell_manager:
-			var pool: RefCounted = cell_manager.get_object_pool()
-			if pool and pool.has_method("release_cell_objects"):
-				var released: int = pool.call("release_cell_objects", cell_node)
-				if released > 0:
-					_debug("Released %d objects to pool from cell %s" % [released, grid])
-
-		cell_node.queue_free()
-
-	# Clean up static renderer instances (flora, small rocks rendered via RenderingServer)
-	if cell_manager and cell_manager.has_method("cleanup_cell_static_instances"):
-		var static_removed: int = cell_manager.call("cleanup_cell_static_instances", grid)
-		if static_removed > 0:
-			_debug("Removed %d static instances from cell %s" % [static_removed, grid])
-
-	cell_unloaded.emit(grid)
-	_debug("Cell unloaded: %s" % grid)
+		# Defer cell destruction until fade-out completes
+		_pending_cell_unloads[grid] = {
+			"cell_node": cell_node_variant,
+			"timestamp": Time.get_ticks_msec() / 1000.0,
+			"keep_odm_tracking": keep_odm_tracking
+		}
+		_debug("Cell %s deferred for fade-out" % grid)
+	else:
+		# Cell already freed externally, just emit signal
+		cell_unloaded.emit(grid)
+		_debug("Cell unloaded (already freed): %s" % grid)
 
 
 ## Clean up stale cell references (nodes freed externally)
@@ -1459,6 +1408,64 @@ func _cleanup_stale_cell_references() -> void:
 		_loading_cells.erase(grid)
 		if debug_enabled:
 			_debug("Cleaned up stale cell reference: %s" % grid)
+
+
+## Process pending cell unloads (cells waiting for fade-out to complete)
+func _process_pending_unloads() -> void:
+	if _pending_cell_unloads.is_empty():
+		return
+
+	var completed: Array[Vector2i] = []
+	var current_time := Time.get_ticks_msec() / 1000.0
+	var max_wait_time := 2.0  # Max time to wait for fade (safety timeout)
+
+	for grid: Vector2i in _pending_cell_unloads:
+		var entry: Dictionary = _pending_cell_unloads[grid]
+		var cell_node: Variant = entry.get("cell_node")
+		var timestamp: float = entry.get("timestamp", 0.0)
+		var keep_odm_tracking: bool = entry.get("keep_odm_tracking", false)
+
+		# Check if all objects in this cell have finished fading
+		var fading_complete := true
+		if object_streamer and object_streamer.has_method("has_fading_objects_in_cell"):
+			fading_complete = not object_streamer.has_fading_objects_in_cell(grid)
+
+		# Also complete if we've waited too long (safety timeout)
+		var timed_out := (current_time - timestamp) > max_wait_time
+
+		if fading_complete or timed_out:
+			# Now unregister objects from ObjectStreamer
+			if not keep_odm_tracking and object_streamer:
+				var unregistered_count: int = object_streamer.unregister_cell(grid)
+				if unregistered_count > 0 and debug_enabled:
+					_debug("Unregistered %d objects from ObjectStreamer for cell %s (after fade)" % [unregistered_count, grid])
+
+			# Release pooled objects and free cell node
+			if is_instance_valid(cell_node):
+				var cell_node_3d: Node3D = cell_node as Node3D
+
+				# Release pooled objects back to the pool
+				if cell_manager:
+					var pool: RefCounted = cell_manager.get_object_pool()
+					if pool and pool.has_method("release_cell_objects"):
+						var released: int = pool.call("release_cell_objects", cell_node_3d)
+						if released > 0:
+							_debug("Released %d objects to pool from cell %s" % [released, grid])
+
+				cell_node_3d.queue_free()
+
+			# Clean up static renderer instances
+			if cell_manager and cell_manager.has_method("cleanup_cell_static_instances"):
+				var static_removed: int = cell_manager.call("cleanup_cell_static_instances", grid)
+				if static_removed > 0:
+					_debug("Removed %d static instances from cell %s" % [static_removed, grid])
+
+			completed.append(grid)
+			cell_unloaded.emit(grid)
+			_debug("Cell unloaded (fade complete): %s%s" % [grid, " (timed out)" if timed_out else ""])
+
+	for grid in completed:
+		_pending_cell_unloads.erase(grid)
 
 
 ## Process NEAR tier changes from GPU visibility renderer
@@ -1492,7 +1499,12 @@ func _cleanup_distant_odm_tracking() -> void:
 
 ## Handle instantiation requests from ObjectStreamer
 ## Called when an object needs to be instantiated (entered NEAR tier)
+var _inst_req_count: int = 0
 func _on_odm_instantiation_requested(object_id: int, model_path: String, world_transform: Transform3D, cell_grid: Vector2i, ref_id: String, ref_num: int) -> void:
+	_inst_req_count += 1
+	if _inst_req_count <= 10:
+		print("[WSM] Instantiation request #%d: %s at cell %s" % [_inst_req_count, model_path.get_file(), cell_grid])
+
 	if not cell_manager:
 		push_warning("[WSM] No cell_manager for instantiation request")
 		return
@@ -1507,14 +1519,23 @@ func _on_odm_instantiation_requested(object_id: int, model_path: String, world_t
 	)
 
 	if instance:
-		# Add to scene under appropriate cell node or main world
-		var cell_node: Node3D = _get_or_create_cell_node(cell_grid)
-		if cell_node:
-			cell_node.add_child(instance)
+		# In AAA mode, parent to persistent container (not cell node)
+		# This ensures objects persist based on individual distance, not cell unload
+		if distant_rendering_enabled and _near_objects_container:
+			_near_objects_container.add_child(instance)
+			instance.set_meta("cell_grid", cell_grid)  # Track for potential cleanup
 		else:
-			# Fallback: add to object_streamer if no cell node
-			if object_streamer:
-				object_streamer.add_child(instance)
+			# Legacy mode: parent to cell node
+			var cell_node: Node3D = _get_or_create_cell_node(cell_grid)
+			if cell_node:
+				cell_node.add_child(instance)
+			else:
+				# Fallback: add to object_streamer if no cell node
+				if object_streamer:
+					object_streamer.add_child(instance)
+
+		# Apply fade-in AFTER add_child (node must be in scene tree for tweens)
+		cell_manager.apply_fade_in_to_object(instance)
 
 		# Notify ObjectStreamer that instantiation completed
 		if object_streamer and object_streamer.has_method("on_object_instantiated"):
@@ -1553,25 +1574,24 @@ func _get_or_create_cell_node(cell_grid: Vector2i) -> Node3D:
 
 
 ## Called when camera moves to a different cell
+## SIMPLIFIED: Always uses AAA mode (NEAR_ONLY legacy mode removed)
 var _cell_change_log_count: int = 0
 func _on_camera_cell_changed(new_cell: Vector2i) -> void:
 	_cell_change_log_count += 1
 	if _cell_change_log_count <= 5:
-		print("[WSM] Camera cell changed to: %s (mode: %s)" % [
-			new_cell, "AAA" if distant_rendering_enabled else "Legacy"])
+		print("[WSM] Camera cell changed to: %s (mode: AAA)" % new_cell)
 	_debug("Camera cell changed to: %s" % new_cell)
 
 	# Reset dropped cell counter for this update cycle
 	_queue_full_message_count = 0
 
 	# AAA STREAMING: Objects discovered via ObjectPositionIndex, cells are metadata-only
-	# This is the production mode - always use when distant_rendering_enabled=true
-	if distant_rendering_enabled and object_streamer:
+	if object_streamer:
 		_on_camera_cell_changed_aaa(new_cell)
 		return
 
-	# LEGACY MODE: Simple NEAR-only cell loading (~150m)
-	# Only used when distant_rendering_enabled=false
+	# FALLBACK: Simple cell loading if object_streamer not available
+	# This should rarely happen in production
 	var visible_cells := _get_visible_cells(new_cell)
 
 	# Build visible set for O(1) lookup instead of O(n) array search
@@ -2184,7 +2204,19 @@ func _debug(msg: String) -> void:
 
 ## Log diagnostic info about distant rendering setup
 func _log_distant_rendering_status() -> void:
-	pass  # Debug function - call manually if needed
+	print("[WSM] ═══════════════════════════════════════════")
+	print("[WSM] DISTANT RENDERING STATUS:")
+	print("[WSM]   streaming_mode: FULL_AAA (always)")
+	print("[WSM]   distant_rendering_enabled: %s" % distant_rendering_enabled)
+	print("[WSM]   load_objects: %s" % load_objects)
+	print("[WSM]   tier_manager: %s" % ("EXISTS" if tier_manager else "NULL"))
+	print("[WSM]   object_streamer: %s" % ("EXISTS" if object_streamer else "NULL"))
+	print("[WSM]   impostor_manager: %s" % ("EXISTS" if impostor_manager else "NULL"))
+	if tier_manager:
+		print("[WSM]   tier_manager.distant_rendering_enabled: %s" % tier_manager.distant_rendering_enabled)
+	if object_streamer and object_streamer.has_method("is_distant_tiers_enabled"):
+		print("[WSM]   object_streamer.distant_tiers_enabled: %s" % object_streamer.is_distant_tiers_enabled())
+	print("[WSM] ═══════════════════════════════════════════")
 
 
 ## Cache tier distances to avoid dictionary lookups every frame

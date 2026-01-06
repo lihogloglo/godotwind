@@ -153,10 +153,14 @@ func _read_record(index: int) -> Defs.NIFRecord:
 		# Nodes
 		Defs.RT_NI_NODE, Defs.RT_ROOT_COLLISION_NODE, Defs.RT_NI_BILLBOARD_NODE, \
 		Defs.RT_AVOID_NODE, Defs.RT_NI_BS_ANIMATION_NODE, Defs.RT_NI_BS_PARTICLE_NODE, \
-		Defs.RT_NI_COLLISION_SWITCH, Defs.RT_NI_SORT_ADJUST_NODE:
+		Defs.RT_NI_COLLISION_SWITCH:
 			record = _read_ni_node(record_type)
-		Defs.RT_NI_SWITCH_NODE, Defs.RT_NI_FLT_ANIMATION_NODE:
+		Defs.RT_NI_SORT_ADJUST_NODE:
+			record = _read_ni_sort_adjust_node()
+		Defs.RT_NI_SWITCH_NODE:
 			record = _read_ni_switch_node()
+		Defs.RT_NI_FLT_ANIMATION_NODE:
+			record = _read_ni_flt_animation_node()
 		Defs.RT_NI_LOD_NODE:
 			record = _read_ni_lod_node()
 
@@ -252,6 +256,16 @@ func _read_record(index: int) -> Defs.NIFRecord:
 			record = _read_ni_particle_system_controller()
 		Defs.RT_NI_LIGHT_COLOR_CONTROLLER:
 			record = _read_ni_light_color_controller()
+		# Additional controllers with data index
+		"NiLightDimmerController", "NiLightRadiusController", \
+		"NiTextureTransformController", "NiTransformController":
+			record = _read_ni_controller_with_data()
+		# Controllers without data index (pure NiTimeController)
+		"NiMultiTargetTransformController", "NiFloatExtraDataController", \
+		"NiFloatsExtraDataController", "NiFloatsExtraDataPoint3Controller", \
+		"NiColorExtraDataController", "NiBoolInterpController", \
+		"NiPoint3InterpController", "NiFloatInterpController":
+			record = _read_ni_controller_only()
 
 		# Controller Data
 		Defs.RT_NI_KEYFRAME_DATA:
@@ -383,6 +397,50 @@ func _read_ni_switch_node() -> Defs.NiSwitchNode:
 
 	# Switch specific
 	node.initial_index = _read_u32()
+
+	return node
+
+## Read NiSortAdjustNode
+func _read_ni_sort_adjust_node() -> Defs.NiNode:
+	var node := Defs.NiNode.new()
+	_read_ni_av_object(node)
+
+	# Children
+	var num_children := _read_u32()
+	for i in range(num_children):
+		node.children_indices.append(_read_s32())
+
+	# Effects
+	var num_effects := _read_u32()
+	for i in range(num_effects):
+		node.effects_indices.append(_read_s32())
+
+	# NiSortAdjustNode specific fields
+	var _sort_mode := _read_u32()
+	var _sub_sorter := _read_s32()  # Only for version <= 20.0.0.3, Morrowind qualifies
+
+	return node
+
+## Read NiFltAnimationNode - extends NiSwitchNode with duration
+func _read_ni_flt_animation_node() -> Defs.NiSwitchNode:
+	var node := Defs.NiSwitchNode.new()
+	_read_ni_av_object(node)
+
+	# Children
+	var num_children := _read_u32()
+	for i in range(num_children):
+		node.children_indices.append(_read_s32())
+
+	# Effects
+	var num_effects := _read_u32()
+	for i in range(num_effects):
+		node.effects_indices.append(_read_s32())
+
+	# NiSwitchNode fields
+	node.initial_index = _read_u32()
+
+	# NiFltAnimationNode specific: duration
+	var _duration := _read_float()
 
 	return node
 
@@ -722,13 +780,13 @@ func _read_ni_texturing_property() -> Defs.NiTexturingProperty:
 			# Unknown 2 bytes (Morrowind version <= 4.1.0.12)
 			_skip(2)
 
-			# Special handling for bump texture (index 5)
-			if i == 5:
-				prop.env_map_luma_bias = Vector2(_read_float(), _read_float())
-				prop.bump_map_matrix[0] = _read_float()
-				prop.bump_map_matrix[1] = _read_float()
-				prop.bump_map_matrix[2] = _read_float()
-				prop.bump_map_matrix[3] = _read_float()
+		# Special handling for bump texture (index 5) - ONLY if texture is enabled
+		if i == 5 and tex.has_texture:
+			prop.env_map_luma_bias = Vector2(_read_float(), _read_float())
+			prop.bump_map_matrix[0] = _read_float()
+			prop.bump_map_matrix[1] = _read_float()
+			prop.bump_map_matrix[2] = _read_float()
+			prop.bump_map_matrix[3] = _read_float()
 
 		prop.textures.append(tex)
 
@@ -1119,6 +1177,19 @@ func _read_ni_light_color_controller() -> Defs.NiTimeController:
 	var _data_index := _read_s32()
 	return ctrl
 
+## Read generic controller with data index (NiSingleInterpController pattern)
+func _read_ni_controller_with_data() -> Defs.NiTimeController:
+	var ctrl := Defs.NiTimeController.new()
+	_read_ni_time_controller(ctrl)
+	var _data_index := _read_s32()
+	return ctrl
+
+## Read generic controller without data index
+func _read_ni_controller_only() -> Defs.NiTimeController:
+	var ctrl := Defs.NiTimeController.new()
+	_read_ni_time_controller(ctrl)
+	return ctrl
+
 ## Read NiParticleSystemController
 func _read_ni_particle_system_controller() -> Defs.NiParticleSystemController:
 	var ctrl := Defs.NiParticleSystemController.new()
@@ -1463,8 +1534,9 @@ func _read_ni_camera() -> Defs.NiCamera:
 
 	# Scene pointer (unused)
 	_skip(4)
-	# Unused
-	_skip(4)
+	# Unused (only for version >= 4.2.1.0, Morrowind is 4.0.0.2)
+	if _version >= 0x04020100:
+		_skip(4)
 
 	return camera
 

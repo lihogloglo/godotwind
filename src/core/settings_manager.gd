@@ -265,6 +265,197 @@ func get_lods_path() -> String:
 	return get_cache_base_path().path_join("lods")
 
 
+# =============================================================================
+# External Texture Directory Management (OpenMW-style mod support)
+# =============================================================================
+# External texture directories allow loading textures from mod folders outside BSA.
+# Priority: Later directories override earlier ones (like OpenMW mod order).
+# External textures override BSA textures when found.
+
+## Gets external texture directories (for mod texture packs)
+## Returns array where later entries have higher priority
+func get_external_texture_directories() -> Array[String]:
+	_load_config()
+	var dirs: Array[String] = []
+	if _config.has_section_key("textures", "external_directories"):
+		var config_dirs: Variant = _config.get_value("textures", "external_directories", [])
+		if config_dirs is Array:
+			for dir: Variant in config_dirs:
+				if dir is String:
+					dirs.append(dir)
+	return dirs
+
+
+## Sets external texture directories
+func set_external_texture_directories(dirs: Array[String]) -> void:
+	_load_config()
+	_config.set_value("textures", "external_directories", dirs)
+	_save_config()
+
+
+## Adds an external texture directory (appended = highest priority)
+func add_external_texture_directory(dir: String) -> void:
+	var dirs := get_external_texture_directories()
+	if dir not in dirs:
+		dirs.append(dir)
+		set_external_texture_directories(dirs)
+
+
+## Removes an external texture directory
+func remove_external_texture_directory(dir: String) -> void:
+	var dirs := get_external_texture_directories()
+	var idx := dirs.find(dir)
+	if idx >= 0:
+		dirs.remove_at(idx)
+		set_external_texture_directories(dirs)
+
+
+# =============================================================================
+# Graphics Settings
+# =============================================================================
+# Rendering and visual quality settings that affect performance and visuals.
+
+## Anti-aliasing modes
+enum AntiAliasing {
+	DISABLED,
+	FXAA,
+	TAA,
+	MSAA_2X,
+	MSAA_4X,
+	MSAA_8X
+}
+
+## Quality presets matching StreamingConfig
+enum QualityPreset {
+	LOW,
+	MEDIUM,
+	HIGH,
+	ULTRA,
+	CUSTOM
+}
+
+## Gets the anti-aliasing mode
+func get_anti_aliasing() -> AntiAliasing:
+	_load_config()
+	return _config.get_value("graphics", "anti_aliasing", AntiAliasing.TAA) as AntiAliasing
+
+## Sets the anti-aliasing mode
+func set_anti_aliasing(mode: AntiAliasing) -> void:
+	_load_config()
+	_config.set_value("graphics", "anti_aliasing", mode)
+	_save_config()
+
+## Gets whether distant rendering (LOD + impostors) is enabled
+func get_distant_rendering_enabled() -> bool:
+	_load_config()
+	return _config.get_value("graphics", "distant_rendering", true)
+
+## Sets whether distant rendering is enabled
+func set_distant_rendering_enabled(enabled: bool) -> void:
+	_load_config()
+	_config.set_value("graphics", "distant_rendering", enabled)
+	_save_config()
+
+## Gets the quality preset
+func get_quality_preset() -> QualityPreset:
+	_load_config()
+	return _config.get_value("graphics", "quality_preset", QualityPreset.MEDIUM) as QualityPreset
+
+## Sets the quality preset
+func set_quality_preset(preset: QualityPreset) -> void:
+	_load_config()
+	_config.set_value("graphics", "quality_preset", preset)
+	_save_config()
+
+## Gets the view distance multiplier (0.5 to 2.0)
+func get_view_distance_multiplier() -> float:
+	_load_config()
+	return _config.get_value("graphics", "view_distance_multiplier", 1.0)
+
+## Sets the view distance multiplier
+func set_view_distance_multiplier(multiplier: float) -> void:
+	_load_config()
+	_config.set_value("graphics", "view_distance_multiplier", clampf(multiplier, 0.25, 2.0))
+	_save_config()
+
+## Gets whether VSync is enabled
+func get_vsync_enabled() -> bool:
+	_load_config()
+	return _config.get_value("graphics", "vsync", true)
+
+## Sets VSync
+func set_vsync_enabled(enabled: bool) -> void:
+	_load_config()
+	_config.set_value("graphics", "vsync", enabled)
+	_save_config()
+
+## Gets the shadow quality (0=disabled, 1=low, 2=medium, 3=high, 4=ultra)
+func get_shadow_quality() -> int:
+	_load_config()
+	return _config.get_value("graphics", "shadow_quality", 2)
+
+## Sets shadow quality
+func set_shadow_quality(quality: int) -> void:
+	_load_config()
+	_config.set_value("graphics", "shadow_quality", clampi(quality, 0, 4))
+	_save_config()
+
+## Gets SSAO (Screen Space Ambient Occlusion) enabled state
+func get_ssao_enabled() -> bool:
+	_load_config()
+	return _config.get_value("graphics", "ssao", true)
+
+## Sets SSAO enabled state
+func set_ssao_enabled(enabled: bool) -> void:
+	_load_config()
+	_config.set_value("graphics", "ssao", enabled)
+	_save_config()
+
+## Gets SSR (Screen Space Reflections) enabled state
+func get_ssr_enabled() -> bool:
+	_load_config()
+	return _config.get_value("graphics", "ssr", false)
+
+## Sets SSR enabled state
+func set_ssr_enabled(enabled: bool) -> void:
+	_load_config()
+	_config.set_value("graphics", "ssr", enabled)
+	_save_config()
+
+## Gets Glow/Bloom enabled state
+func get_glow_enabled() -> bool:
+	_load_config()
+	return _config.get_value("graphics", "glow", true)
+
+## Sets Glow enabled state
+func set_glow_enabled(enabled: bool) -> void:
+	_load_config()
+	_config.set_value("graphics", "glow", enabled)
+	_save_config()
+
+## Gets volumetric fog enabled state
+func get_volumetric_fog_enabled() -> bool:
+	_load_config()
+	return _config.get_value("graphics", "volumetric_fog", false)
+
+## Sets volumetric fog enabled state
+func set_volumetric_fog_enabled(enabled: bool) -> void:
+	_load_config()
+	_config.set_value("graphics", "volumetric_fog", enabled)
+	_save_config()
+
+## Gets the max FPS limit (0 = unlimited)
+func get_max_fps() -> int:
+	_load_config()
+	return _config.get_value("graphics", "max_fps", 0)
+
+## Sets max FPS limit
+func set_max_fps(fps: int) -> void:
+	_load_config()
+	_config.set_value("graphics", "max_fps", maxi(fps, 0))
+	_save_config()
+
+
 ## Creates all cache subdirectories if they don't exist
 ## Returns OK on success, or the first error encountered
 func ensure_cache_directories() -> Error:

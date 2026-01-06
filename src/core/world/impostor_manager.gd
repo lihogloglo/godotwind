@@ -87,11 +87,17 @@ var _impostors: Dictionary = {}
 ## Used for O(1) cell-based visibility culling
 var _impostors_by_cell: Dictionary = {}
 
-## **UNIFIED VISIBILITY**: Cached visible cells from DistanceTierManager (FAR tier cells)
-## Updated by update_visibility() which queries the authority
+## **UNIFIED VISIBILITY**: Cached visible cells computed by update_visibility()
+## Only recalculated when camera crosses cell boundary (optimization)
 var _cached_visible_cells: Dictionary = {}  # Vector2i -> true
-## REMOVED: _last_visibility_check_pos - no longer needed, tier manager handles updates
-## REMOVED: _visibility_check_threshold - no longer needed, tier manager handles updates
+
+## **CACHE**: Last camera cell for visibility caching
+## Only recalculate visible cells when camera crosses cell boundary
+var _last_camera_cell: Vector2i = Vector2i(-99999, -99999)
+
+## **CACHE**: Cached impostor cell keys to avoid allocation during iteration
+var _impostors_by_cell_keys_cache: Array = []
+var _impostors_by_cell_keys_dirty: bool = true
 
 ## Next impostor ID
 var _next_id: int = 0
@@ -135,17 +141,8 @@ var debug_enabled: bool = false
 ## This prevents impostors from appearing before proper mode synchronization
 var _globally_visible: bool = false
 
-## Track first texture load for one-time diagnostic
-var _first_texture_logged: bool = false
-
-## Track first add_cell call for one-time diagnostic
-var _first_cell_logged: bool = false
-
 ## Track missing textures count (for summary logging, not spam)
 var _missing_texture_count: int = 0
-
-## Track if we've warned about missing tier manager (to avoid log spam)
-var _warned_no_tier_manager: bool = false
 
 ## Dirty tracking for efficient rebuilds
 var _dirty_cells: Dictionary = {}  # Vector2i -> true (cells needing rebuild)
@@ -785,9 +782,6 @@ func _add_to_texture_array(hash_key: String, image: Image) -> int:
 	return index
 
 
-## Track first texture array rebuild for one-time diagnostic
-var _first_array_rebuild_logged: bool = false
-
 ## Rebuild the texture array from stored images
 func _rebuild_texture_array() -> void:
 	if _all_array_images.is_empty():
@@ -855,9 +849,10 @@ func _create_impostor_instance(
 	impostor.cell_grid = cell_grid
 	impostor.texture_size = impostor_size
 	impostor.aabb_center_y = aabb_center_y
-	# Visibility determined by whether cell is in FAR tier (via _cached_visible_cells)
-	# New impostors start visible only if their cell is already confirmed in FAR tier
-	impostor.visible = cell_grid in _cached_visible_cells
+	# Visibility determined by global visibility state
+	# Using _globally_visible instead of _cached_visible_cells to avoid race condition
+	# where new impostors are created before update_visibility() populates the cache
+	impostor.visible = _globally_visible
 
 	_impostors[_next_id] = impostor
 	_next_id += 1
@@ -865,6 +860,7 @@ func _create_impostor_instance(
 	# Track by cell for spatial culling
 	if cell_grid not in _impostors_by_cell:
 		_impostors_by_cell[cell_grid] = []
+		_impostors_by_cell_keys_dirty = true  # New cell added - refresh cache
 		_stats["cells_with_impostors"] = _impostors_by_cell.size()
 		# NOTE: Do NOT add to _cached_visible_cells here!
 		# Visibility is determined by DistanceTierManager.FAR tier only.
@@ -1008,79 +1004,115 @@ func update_visibility() -> int:
 	if _impostors_by_cell.is_empty():
 		return 0
 
-	# **UNIFIED VISIBILITY**: Query FAR tier cells from authority
+	# **SELF-COMPUTED FAR VISIBILITY**: Compute visible cells directly
+	# Instead of relying on DTM's FAR cell list (which only tracks significant objects),
+	# we iterate our own _impostors_by_cell and check distance.
+	# This is more efficient: O(impostor_cells) instead of O(far_radius²)
+	# and ensures all impostor cells are considered, not just DTM-tracked ones.
+
+	# Get camera position from tier manager
+	var camera_pos := Vector3.ZERO
 	if _distance_tier_manager:
-		# **OPTIMIZATION**: Use cached visible cells from this frame's update_visibility()
-		# This avoids expensive recalculation of get_visible_cells_by_tier()
-		var cells_by_tier: Dictionary = _distance_tier_manager.get_cached_visible_cells_by_tier()
+		camera_pos = _distance_tier_manager._camera_position
+	if camera_pos == Vector3.ZERO:
+		# Fallback: No camera position, keep current visibility
+		return 0
 
-		# **SAFETY CHECK**: If cache is empty, tier manager may not have run yet this frame
-		# In this case, skip updates and wait for next frame to avoid stale data
-		if cells_by_tier.is_empty():
-			# First frame or tier manager not initialized - keep current visibility
-			return 0
+	# **OPTIMIZATION**: Only recalculate visible cells when camera crosses cell boundary
+	# This reduces iteration from O(1023 cells) every frame to only when camera moves 117m+
+	var current_cell := Vector2i(
+		int(floor(camera_pos.x / DU.CELL_SIZE_METERS)),
+		int(floor(-camera_pos.z / DU.CELL_SIZE_METERS))  # Z is flipped
+	)
 
-		var far_cells: Array = cells_by_tier.get(DistanceTierManager.Tier.FAR, [])
+	# If camera is in same cell, skip expensive recalculation
+	if current_cell == _last_camera_cell and not _cached_visible_cells.is_empty():
+		# No changes needed - visibility is cached
+		return 0
 
-		# Convert to visibility dictionary for efficient lookups
-		var new_visible_cells: Dictionary = {}
-		for cell_grid in far_cells:
-			new_visible_cells[cell_grid] = true
+	_last_camera_cell = current_cell
 
-		# Detect changes and update STANDALONE impostors only
-		for cell_grid: Vector2i in _impostors_by_cell:
-			var was_visible: bool = cell_grid in _cached_visible_cells
-			var is_visible: bool = cell_grid in new_visible_cells
+	# Calculate FAR tier distance thresholds (squared for efficiency)
+	var far_start_sq := DU.MID_END * DU.MID_END  # 500m²
+	var far_end_sq := DU.FAR_END * DU.FAR_END    # 5000m²
 
-			if was_visible != is_visible:
-				# Update all STANDALONE impostors in this cell
-				var cell_impostors: Variant = _impostors_by_cell.get(cell_grid)
-				if cell_impostors == null:
+	# Refresh cached keys only when dirty (impostor added/removed)
+	if _impostors_by_cell_keys_dirty:
+		_impostors_by_cell_keys_cache = _impostors_by_cell.keys()
+		_impostors_by_cell_keys_dirty = false
+
+	# Build visible cells by checking each impostor cell's distance
+	var far_cells: Array[Vector2i] = []
+	for cell_grid: Vector2i in _impostors_by_cell_keys_cache:
+		# Calculate cell center position
+		var cell_center := Vector3(
+			cell_grid.x * DU.CELL_SIZE_METERS + DU.HALF_CELL_SIZE,
+			camera_pos.y,  # Use camera Y to avoid height affecting distance
+			-cell_grid.y * DU.CELL_SIZE_METERS - DU.HALF_CELL_SIZE  # Z is flipped
+		)
+		var dist_sq := camera_pos.distance_squared_to(cell_center)
+
+		# Check if in FAR tier range
+		if dist_sq >= far_start_sq and dist_sq < far_end_sq:
+			far_cells.append(cell_grid)
+
+	# Limit FAR cells to prevent overload (optional, matches DTM behavior)
+	const MAX_FAR_CELLS := 250
+	if far_cells.size() > MAX_FAR_CELLS:
+		# Sort by distance and take closest
+		far_cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+			var ca := Vector3(a.x * DU.CELL_SIZE_METERS, 0, -a.y * DU.CELL_SIZE_METERS)
+			var cb := Vector3(b.x * DU.CELL_SIZE_METERS, 0, -b.y * DU.CELL_SIZE_METERS)
+			return camera_pos.distance_squared_to(ca) < camera_pos.distance_squared_to(cb)
+		)
+		far_cells.resize(MAX_FAR_CELLS)
+
+	# Convert to visibility dictionary for efficient lookups
+	var new_visible_cells: Dictionary = {}
+	for cell_grid in far_cells:
+		new_visible_cells[cell_grid] = true
+
+	# Detect changes and update STANDALONE impostors only
+	for cell_grid: Vector2i in _impostors_by_cell:
+		var was_visible: bool = cell_grid in _cached_visible_cells
+		var is_visible: bool = cell_grid in new_visible_cells
+
+		if was_visible != is_visible:
+			# Update all STANDALONE impostors in this cell
+			var cell_impostors: Variant = _impostors_by_cell.get(cell_grid)
+			if cell_impostors == null:
+				continue
+
+			for impostor_id: int in cell_impostors:
+				var impostor: Variant = _impostors.get(impostor_id)
+				if impostor == null:
 					continue
 
-				for impostor_id: int in cell_impostors:
-					var impostor: Variant = _impostors.get(impostor_id)
-					if impostor == null:
-						continue
+				# **DUAL SYSTEM**: Skip LOD-managed impostors
+				# ObjectStreamer controls visibility and crossfade for significant objects
+				# via set_lod_impostor_fade() during MID→FAR tier transitions
+				if impostor.lod_object_id >= 0:
+					continue
 
-					# **DUAL SYSTEM**: Skip LOD-managed impostors
-					# ObjectStreamer controls visibility and crossfade for significant objects
-					# via set_lod_impostor_fade() during MID→FAR tier transitions
-					if impostor.lod_object_id >= 0:
-						continue
+				# STANDALONE impostor: Use cell-level visibility (instant pop-in)
+				impostor.visible = is_visible
+				changes += 1
 
-					# STANDALONE impostor: Use cell-level visibility (instant pop-in)
-					impostor.visible = is_visible
-					changes += 1
+			# Mark cell as dirty
+			_dirty_cells[cell_grid] = true
 
-				# Mark cell as dirty
-				_dirty_cells[cell_grid] = true
+	_cached_visible_cells = new_visible_cells
 
-		_cached_visible_cells = new_visible_cells
-
-		# Update stats
-		var visible_count: int = 0
-		for cell_grid: Vector2i in _cached_visible_cells:
-			var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
-			if cell_arr != null:
-				visible_count += (cell_arr as Array).size()
-		_stats["visible_impostors"] = visible_count
-
-	else:
-		# Fallback: No tier manager available - show all impostors
-		# Only warn once per session to avoid log spam
-		if not _warned_no_tier_manager:
-			push_warning("[ImpostorManager] No DistanceTierManager - showing all impostors")
-			_warned_no_tier_manager = true
-		for cell_grid in _impostors_by_cell:
-			_cached_visible_cells[cell_grid] = true
-		_stats["visible_impostors"] = _impostors.size()
+	# Update stats
+	var visible_count: int = 0
+	for cell_grid: Vector2i in _cached_visible_cells:
+		var cell_arr: Variant = _impostors_by_cell.get(cell_grid)
+		if cell_arr != null:
+			visible_count += (cell_arr as Array).size()
+	_stats["visible_impostors"] = visible_count
 
 	return changes
 
-
-## Track first multimesh rebuild for one-time diagnostic
-var _first_multimesh_rebuild_logged: bool = false
 
 ## Throttle debug logging to reduce spam
 var _last_debug_log_time: float = 0.0
@@ -1206,17 +1238,29 @@ func set_all_visible(is_visible: bool) -> void:
 
 	if is_visible:
 		_stats["visible_impostors"] = _stats["total_impostors"]
-		# Visibility will be recalculated on next update_visibility() call
+		# Mark all cells as dirty and force immediate rebuild
+		for cell_grid: Vector2i in _impostors_by_cell:
+			_dirty_cells[cell_grid] = true
+			_cached_visible_cells[cell_grid] = true
 	else:
 		_stats["visible_impostors"] = 0
+		_cached_visible_cells.clear()
 
 	_full_rebuild_needed = true
+
+	# Force immediate rebuild when visibility is enabled
+	# This ensures impostors appear right away instead of waiting for next frame
+	if is_visible and not _impostors_by_cell.is_empty():
+		_rebuild_multimesh()
 
 
 ## Clear all impostors
 func clear() -> void:
 	_impostors.clear()
 	_impostors_by_cell.clear()
+	_impostors_by_cell_keys_cache.clear()
+	_impostors_by_cell_keys_dirty = true
+	_last_camera_cell = Vector2i(-99999, -99999)
 	_cached_visible_cells.clear()
 	_dirty_cells.clear()
 	_pending_impostors.clear()
@@ -1286,27 +1330,6 @@ func _check_texture_array_limits() -> void:
 			int((_texture_array_size * 100.0) / MAX_TEXTURE_ARRAY_LAYERS)
 		])
 		_texture_limit_warning_shown = true
-
-
-## Helper to get human-readable image format name
-func _format_name(format: int) -> String:
-	match format:
-		Image.FORMAT_L8: return "L8"
-		Image.FORMAT_LA8: return "LA8"
-		Image.FORMAT_R8: return "R8"
-		Image.FORMAT_RG8: return "RG8"
-		Image.FORMAT_RGB8: return "RGB8"
-		Image.FORMAT_RGBA8: return "RGBA8"
-		Image.FORMAT_RGBA4444: return "RGBA4444"
-		Image.FORMAT_RGB565: return "RGB565"
-		Image.FORMAT_RF: return "RF"
-		Image.FORMAT_RGF: return "RGF"
-		Image.FORMAT_RGBF: return "RGBF"
-		Image.FORMAT_RGBAF: return "RGBAF"
-		Image.FORMAT_DXT1: return "DXT1"
-		Image.FORMAT_DXT3: return "DXT3"
-		Image.FORMAT_DXT5: return "DXT5"
-		_: return "FORMAT_%d" % format
 
 
 #region GPU Visibility Support (Phase 2)

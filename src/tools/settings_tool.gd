@@ -1,5 +1,5 @@
 extends Control
-## Settings Tool for configuring Morrowind data path and cache location
+## Settings Tool for configuring Morrowind data path, cache location, and texture packs
 
 @onready var current_path_label: Label = %CurrentPathLabel
 @onready var path_source_label: Label = %PathSourceLabel
@@ -18,6 +18,29 @@ extends Control
 @onready var cache_reset_button: Button = %CacheResetButton
 @onready var current_cache_label: Label = %CurrentCacheLabel
 @onready var cache_file_dialog: FileDialog = %CacheFileDialog
+
+# Texture packs UI elements
+@onready var texture_packs_list: ItemList = %TexturePacksList
+@onready var add_texture_pack_button: Button = %AddTexturePackButton
+@onready var remove_texture_pack_button: Button = %RemoveTexturePackButton
+@onready var move_up_button: Button = %MoveUpButton
+@onready var move_down_button: Button = %MoveDownButton
+@onready var clear_texture_cache_button: Button = %ClearTextureCacheButton
+@onready var texture_pack_file_dialog: FileDialog = %TexturePackFileDialog
+
+# Graphics settings UI elements
+@onready var quality_preset_option: OptionButton = %QualityPresetOption
+@onready var distant_rendering_check: CheckBox = %DistantRenderingCheck
+@onready var anti_aliasing_option: OptionButton = %AntiAliasingOption
+@onready var shadow_quality_option: OptionButton = %ShadowQualityOption
+@onready var view_distance_slider: HSlider = %ViewDistanceSlider
+@onready var view_distance_value: Label = %ViewDistanceValue
+@onready var vsync_check: CheckBox = %VSyncCheck
+@onready var ssao_check: CheckBox = %SSAOCheck
+@onready var ssr_check: CheckBox = %SSRCheck
+@onready var glow_check: CheckBox = %GlowCheck
+@onready var volumetric_fog_check: CheckBox = %VolumetricFogCheck
+@onready var max_fps_option: OptionButton = %MaxFPSOption
 
 func _ready() -> void:
 	# Connect signals
@@ -40,6 +63,32 @@ func _ready() -> void:
 	# Configure cache file dialog
 	cache_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
 	cache_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+
+	# Connect texture pack signals
+	add_texture_pack_button.pressed.connect(_on_add_texture_pack_pressed)
+	remove_texture_pack_button.pressed.connect(_on_remove_texture_pack_pressed)
+	move_up_button.pressed.connect(_on_move_up_pressed)
+	move_down_button.pressed.connect(_on_move_down_pressed)
+	clear_texture_cache_button.pressed.connect(_on_clear_texture_cache_pressed)
+	texture_pack_file_dialog.dir_selected.connect(_on_texture_pack_dir_selected)
+	texture_packs_list.item_selected.connect(_on_texture_pack_selected)
+
+	# Configure texture pack file dialog
+	texture_pack_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	texture_pack_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+
+	# Connect graphics settings signals
+	quality_preset_option.item_selected.connect(_on_quality_preset_changed)
+	distant_rendering_check.toggled.connect(_on_distant_rendering_toggled)
+	anti_aliasing_option.item_selected.connect(_on_anti_aliasing_changed)
+	shadow_quality_option.item_selected.connect(_on_shadow_quality_changed)
+	view_distance_slider.value_changed.connect(_on_view_distance_changed)
+	vsync_check.toggled.connect(_on_vsync_toggled)
+	ssao_check.toggled.connect(_on_ssao_toggled)
+	ssr_check.toggled.connect(_on_ssr_toggled)
+	glow_check.toggled.connect(_on_glow_toggled)
+	volumetric_fog_check.toggled.connect(_on_volumetric_fog_toggled)
+	max_fps_option.item_selected.connect(_on_max_fps_changed)
 
 	# Load current settings
 	_load_current_settings()
@@ -87,6 +136,12 @@ func _load_current_settings() -> void:
 	else:
 		current_cache_label.text = cache_path + " (custom)"
 		current_cache_label.add_theme_color_override("font_color", Color.GREEN)
+
+	# Load texture pack directories
+	_load_texture_packs_list()
+
+	# Load graphics settings
+	_load_graphics_settings()
 
 	# Validate
 	_validate_settings()
@@ -221,3 +276,294 @@ func _on_cache_reset_pressed() -> void:
 	cache_path_edit.text = default_path
 	_log("Cache path reset to default: %s" % default_path)
 	_log("[color=yellow]Click 'Save Settings' to apply changes.[/color]")
+
+
+# =============================================================================
+# External Texture Packs Configuration
+# =============================================================================
+
+func _load_texture_packs_list() -> void:
+	texture_packs_list.clear()
+	var dirs := SettingsManager.get_external_texture_directories()
+	for i in dirs.size():
+		var dir: String = dirs[i]
+		# Show priority number (higher = later = higher priority)
+		var priority := i + 1
+		texture_packs_list.add_item("[%d] %s" % [priority, dir])
+	_update_texture_pack_buttons()
+
+
+func _update_texture_pack_buttons() -> void:
+	var selected := texture_packs_list.get_selected_items()
+	var has_selection := selected.size() > 0
+	var item_count := texture_packs_list.item_count
+
+	remove_texture_pack_button.disabled = not has_selection
+	move_up_button.disabled = not has_selection or (has_selection and selected[0] == 0)
+	move_down_button.disabled = not has_selection or (has_selection and selected[0] == item_count - 1)
+
+
+func _on_texture_pack_selected(_index: int) -> void:
+	_update_texture_pack_buttons()
+
+
+func _on_add_texture_pack_pressed() -> void:
+	# Set initial directory to a reasonable location
+	var last_dir := ""
+	var dirs := SettingsManager.get_external_texture_directories()
+	if dirs.size() > 0:
+		last_dir = dirs[dirs.size() - 1]
+		if DirAccess.dir_exists_absolute(last_dir):
+			# Go to parent directory to make it easier to add sibling folders
+			last_dir = last_dir.get_base_dir()
+
+	if last_dir.is_empty() or not DirAccess.dir_exists_absolute(last_dir):
+		# Default to user's Documents or home directory
+		last_dir = OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+
+	texture_pack_file_dialog.current_dir = last_dir
+	texture_pack_file_dialog.popup_centered_ratio(0.7)
+
+
+func _on_texture_pack_dir_selected(dir: String) -> void:
+	# Check if directory is already in the list
+	var dirs := SettingsManager.get_external_texture_directories()
+	if dir in dirs:
+		_log("[color=yellow]Directory already in list: %s[/color]" % dir)
+		return
+
+	# Add to list and save immediately
+	SettingsManager.add_external_texture_directory(dir)
+	_load_texture_packs_list()
+
+	# Clear texture cache since we have new textures available
+	_clear_texture_cache_internal()
+
+	_log("[color=green]Added texture pack directory:[/color] %s" % dir)
+	_log("Priority: %d (higher = overrides lower)" % SettingsManager.get_external_texture_directories().size())
+
+
+func _on_remove_texture_pack_pressed() -> void:
+	var selected := texture_packs_list.get_selected_items()
+	if selected.size() == 0:
+		return
+
+	var idx: int = selected[0]
+	var dirs := SettingsManager.get_external_texture_directories()
+	if idx < 0 or idx >= dirs.size():
+		return
+
+	var removed_dir: String = dirs[idx]
+	SettingsManager.remove_external_texture_directory(removed_dir)
+	_load_texture_packs_list()
+
+	# Clear texture cache since available textures changed
+	_clear_texture_cache_internal()
+
+	_log("[color=orange]Removed texture pack directory:[/color] %s" % removed_dir)
+
+
+func _on_move_up_pressed() -> void:
+	var selected := texture_packs_list.get_selected_items()
+	if selected.size() == 0:
+		return
+
+	var idx: int = selected[0]
+	if idx <= 0:
+		return
+
+	var dirs := SettingsManager.get_external_texture_directories()
+	if idx >= dirs.size():
+		return
+
+	# Swap with previous item
+	var temp: String = dirs[idx]
+	dirs[idx] = dirs[idx - 1]
+	dirs[idx - 1] = temp
+	SettingsManager.set_external_texture_directories(dirs)
+	_load_texture_packs_list()
+
+	# Re-select the moved item
+	texture_packs_list.select(idx - 1)
+	_update_texture_pack_buttons()
+
+	# Clear texture cache since priority changed
+	_clear_texture_cache_internal()
+
+	_log("Moved texture pack up (lower priority now)")
+
+
+func _on_move_down_pressed() -> void:
+	var selected := texture_packs_list.get_selected_items()
+	if selected.size() == 0:
+		return
+
+	var idx: int = selected[0]
+	var dirs := SettingsManager.get_external_texture_directories()
+	if idx < 0 or idx >= dirs.size() - 1:
+		return
+
+	# Swap with next item
+	var temp: String = dirs[idx]
+	dirs[idx] = dirs[idx + 1]
+	dirs[idx + 1] = temp
+	SettingsManager.set_external_texture_directories(dirs)
+	_load_texture_packs_list()
+
+	# Re-select the moved item
+	texture_packs_list.select(idx + 1)
+	_update_texture_pack_buttons()
+
+	# Clear texture cache since priority changed
+	_clear_texture_cache_internal()
+
+	_log("Moved texture pack down (higher priority now)")
+
+
+func _on_clear_texture_cache_pressed() -> void:
+	_clear_texture_cache_internal()
+	_log("[color=green]Texture cache cleared.[/color]")
+	_log("Textures will be reloaded from external directories on next use.")
+
+
+func _clear_texture_cache_internal() -> void:
+	# Clear the TextureLoader's internal caches
+	var TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
+	TextureLoaderScript.clear_cache()
+
+
+# =============================================================================
+# Graphics Settings Configuration
+# =============================================================================
+
+func _load_graphics_settings() -> void:
+	# Load all graphics settings from SettingsManager
+	quality_preset_option.select(SettingsManager.get_quality_preset())
+	distant_rendering_check.button_pressed = SettingsManager.get_distant_rendering_enabled()
+	anti_aliasing_option.select(SettingsManager.get_anti_aliasing())
+	shadow_quality_option.select(SettingsManager.get_shadow_quality())
+
+	var view_dist := SettingsManager.get_view_distance_multiplier()
+	view_distance_slider.value = view_dist
+	view_distance_value.text = "%d%%" % int(view_dist * 100)
+
+	vsync_check.button_pressed = SettingsManager.get_vsync_enabled()
+	ssao_check.button_pressed = SettingsManager.get_ssao_enabled()
+	ssr_check.button_pressed = SettingsManager.get_ssr_enabled()
+	glow_check.button_pressed = SettingsManager.get_glow_enabled()
+	volumetric_fog_check.button_pressed = SettingsManager.get_volumetric_fog_enabled()
+
+	# Map FPS value to option index
+	var max_fps := SettingsManager.get_max_fps()
+	var fps_index := 0  # Unlimited
+	match max_fps:
+		30: fps_index = 1
+		60: fps_index = 2
+		90: fps_index = 3
+		120: fps_index = 4
+		144: fps_index = 5
+	max_fps_option.select(fps_index)
+
+
+func _on_quality_preset_changed(index: int) -> void:
+	SettingsManager.set_quality_preset(index as SettingsManager.QualityPreset)
+	_log("Quality preset changed to: %s" % quality_preset_option.get_item_text(index))
+	_log("[color=yellow]Restart required for full effect.[/color]")
+
+
+func _on_distant_rendering_toggled(enabled: bool) -> void:
+	SettingsManager.set_distant_rendering_enabled(enabled)
+	if enabled:
+		_log("[color=green]Distant rendering enabled[/color] - LOD + Impostors active")
+	else:
+		_log("[color=orange]Distant rendering disabled[/color] - NEAR tier only (~150m)")
+
+
+func _on_anti_aliasing_changed(index: int) -> void:
+	SettingsManager.set_anti_aliasing(index as SettingsManager.AntiAliasing)
+	var aa_name := anti_aliasing_option.get_item_text(index)
+	_log("Anti-aliasing changed to: %s" % aa_name)
+
+	# Apply immediately if possible
+	_apply_anti_aliasing(index)
+
+
+func _apply_anti_aliasing(mode: int) -> void:
+	var viewport := get_viewport()
+	if not viewport:
+		return
+
+	# Reset both MSAA and screen-space AA
+	viewport.msaa_3d = Viewport.MSAA_DISABLED
+	viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+
+	match mode:
+		0:  # Disabled
+			pass
+		1:  # FXAA
+			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+		2:  # TAA
+			# TAA is set via ProjectSettings, requires restart
+			_log("[color=yellow]TAA requires restart to apply.[/color]")
+		3:  # MSAA 2x
+			viewport.msaa_3d = Viewport.MSAA_2X
+		4:  # MSAA 4x
+			viewport.msaa_3d = Viewport.MSAA_4X
+		5:  # MSAA 8x
+			viewport.msaa_3d = Viewport.MSAA_8X
+
+
+func _on_shadow_quality_changed(index: int) -> void:
+	SettingsManager.set_shadow_quality(index)
+	var quality_name := shadow_quality_option.get_item_text(index)
+	_log("Shadow quality changed to: %s" % quality_name)
+	_log("[color=yellow]May require scene reload to apply.[/color]")
+
+
+func _on_view_distance_changed(value: float) -> void:
+	SettingsManager.set_view_distance_multiplier(value)
+	view_distance_value.text = "%d%%" % int(value * 100)
+
+
+func _on_vsync_toggled(enabled: bool) -> void:
+	SettingsManager.set_vsync_enabled(enabled)
+	# Apply immediately
+	if enabled:
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED)
+		_log("VSync enabled")
+	else:
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		_log("VSync disabled")
+
+
+func _on_ssao_toggled(enabled: bool) -> void:
+	SettingsManager.set_ssao_enabled(enabled)
+	_log("SSAO %s" % ("enabled" if enabled else "disabled"))
+
+
+func _on_ssr_toggled(enabled: bool) -> void:
+	SettingsManager.set_ssr_enabled(enabled)
+	_log("SSR %s" % ("enabled" if enabled else "disabled"))
+
+
+func _on_glow_toggled(enabled: bool) -> void:
+	SettingsManager.set_glow_enabled(enabled)
+	_log("Glow/Bloom %s" % ("enabled" if enabled else "disabled"))
+
+
+func _on_volumetric_fog_toggled(enabled: bool) -> void:
+	SettingsManager.set_volumetric_fog_enabled(enabled)
+	_log("Volumetric fog %s" % ("enabled" if enabled else "disabled"))
+
+
+func _on_max_fps_changed(index: int) -> void:
+	var fps_values := [0, 30, 60, 90, 120, 144]
+	var fps: int = fps_values[index] if index < fps_values.size() else 0
+	SettingsManager.set_max_fps(fps)
+
+	# Apply immediately
+	Engine.max_fps = fps
+	if fps == 0:
+		_log("Max FPS: Unlimited")
+	else:
+		_log("Max FPS: %d" % fps)

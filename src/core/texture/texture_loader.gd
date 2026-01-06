@@ -111,18 +111,26 @@ static func load_texture(texture_path: String) -> ImageTexture:
 ## Uses NifSkope-style path resolution:
 ## 1. If path contains "textures\" or "textures/", strip everything before it
 ## 2. If path doesn't start with "textures\", prepend it
-## 3. Try multiple extensions (.dds, .tga, .bmp)
-## Results are cached to avoid repeated BSA probing
+## 3. Try multiple extensions (.dds, .tga, .bmp, .png)
+##
+## Priority order (OpenMW-style):
+## 1. External texture directories (later dirs override earlier - mod support)
+## 2. BSA archives (vanilla game files)
+##
+## Results are cached to avoid repeated file system/BSA probing
 static func _extract_texture_data(normalized_path: String) -> PackedByteArray:
-	# Check path cache first - avoid re-probing BSA for known paths
+	# Check path cache first - avoid re-probing for known paths
 	if _path_cache.has(normalized_path):
 		var cached_path: String = _path_cache[normalized_path]
 		if cached_path.is_empty():
 			return PackedByteArray()  # Known failure
+		# Check if it's an external file (absolute path) or BSA path
+		if cached_path.is_absolute_path():
+			return FileAccess.get_file_as_bytes(cached_path)
 		return BSAManager.extract_file(cached_path)
 
-	# Extensions to try - DDS is most common in Morrowind BSAs
-	var extensions := [".dds", ".tga", ".bmp"]
+	# Extensions to try - DDS is most common, PNG for modern texture packs
+	var extensions := [".dds", ".png", ".tga", ".bmp"]
 
 	# NifSkope-style path normalization:
 	# Find "textures\" or "textures/" anywhere in the path and strip everything before it
@@ -133,30 +141,44 @@ static func _extract_texture_data(normalized_path: String) -> PackedByteArray:
 	if not ext.is_empty():
 		base_path = base_path.substr(0, base_path.length() - ext.length() - 1)
 
-	# Try with and without textures\ prefix
+	# Build relative path variants to try
 	var path_variants: Array[String] = []
 
-	# Primary: with textures\ prefix (how most BSAs store textures)
-	if not base_path.begins_with("textures\\"):
+	# Primary: with textures\ prefix (how most BSAs/mods store textures)
+	if not base_path.begins_with("textures\\") and not base_path.begins_with("textures/"):
 		path_variants.append("textures\\" + base_path)
 	path_variants.append(base_path)
 
-	# Try each path variant with each extension
+	# PRIORITY 1: Check external texture directories (later dirs have higher priority)
+	var external_dirs := SettingsManager.get_external_texture_directories()
+	# Reverse order so later directories are checked first (higher priority)
+	var reversed_dirs: Array[String] = []
+	for i in range(external_dirs.size() - 1, -1, -1):
+		reversed_dirs.append(external_dirs[i])
+
+	for dir: String in reversed_dirs:
+		for path_base: String in path_variants:
+			for try_ext: String in extensions:
+				# Handle both backslash and forward slash in path_base
+				var rel_path := path_base.replace("\\", "/") + try_ext
+				var full_path := dir.path_join(rel_path)
+				if FileAccess.file_exists(full_path):
+					# Cache the successful external path
+					_path_cache[normalized_path] = full_path
+					return FileAccess.get_file_as_bytes(full_path)
+
+	# PRIORITY 2: Check BSA archives
 	for path_base: String in path_variants:
 		for try_ext: String in extensions:
 			var full_path: String = path_base + try_ext
 			var data: PackedByteArray = BSAManager.extract_file(full_path)
 			if not data.is_empty():
-				# Cache the successful path
+				# Cache the successful BSA path
 				_path_cache[normalized_path] = full_path
 				return data
 
 	# Cache the failure (empty string) to avoid re-probing
 	_path_cache[normalized_path] = ""
-
-	# Debug: Log the failure for troubleshooting
-	if OS.is_debug_build():
-		push_warning("TextureLoader: Failed to find texture, tried paths based on: %s" % normalized_path)
 
 	return PackedByteArray()
 

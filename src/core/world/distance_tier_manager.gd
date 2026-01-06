@@ -172,6 +172,11 @@ var _registered_objects: Dictionary = {}
 ## Maps Vector2i (cell_grid) -> Array[int] (object_ids in that cell)
 var _objects_by_cell: Dictionary = {}
 
+## **CACHE**: Cached keys for _objects_by_cell to avoid allocation on every cell iteration
+## Refreshed only when objects are registered/unregistered (dirty flag)
+var _objects_by_cell_keys_cache: Array = []
+var _objects_by_cell_keys_dirty: bool = true
+
 ## **NEW**: Current tier for each object
 ## Maps object_id (int) -> Tier
 ## Updated every frame by update_visibility()
@@ -216,8 +221,9 @@ class ObjectVisibilityInfo extends RefCounted:
 
 ## Whether to use view frustum culling for MID/FAR tiers
 ## Significantly reduces cell count by only processing visible cells
-## TEMPORARILY DISABLED for debugging - frustum culling was filtering ALL cells
-var use_frustum_culling: bool = false
+## Fixed: Was filtering ALL cells due to insufficient AABB height bounds (-100 to +500)
+## Now uses -500 to +1000 (matching quadtree_chunk_manager.gd) for generous coverage
+var use_frustum_culling: bool = true
 
 
 #region GPU Compute Acceleration
@@ -234,16 +240,19 @@ var _gpu_compute_available: bool = false
 
 ## Threshold for using GPU compute (objects registered)
 ## Below this threshold, CPU path may be faster due to dispatch overhead
-## HYSTERESIS: Enable at 600, disable at 400 to prevent flickering at boundary
-const GPU_COMPUTE_ENABLE_THRESHOLD: int = 600
-const GPU_COMPUTE_DISABLE_THRESHOLD: int = 400
+## HYSTERESIS: Enable at 500, disable at 300 to prevent flickering at boundary
+## Lowered from 600/400 to enable GPU acceleration sooner for better performance
+const GPU_COMPUTE_ENABLE_THRESHOLD: int = 500
+const GPU_COMPUTE_DISABLE_THRESHOLD: int = 300
 
 ## Legacy constant for compatibility
 const GPU_COMPUTE_THRESHOLD: int = 500
 
 ## Incremental GPU sync settings
 ## Sync this many objects per frame instead of all at once
-const GPU_SYNC_BATCH_SIZE: int = 100
+## Increased from 100 to 2000 to complete sync faster (~4 frames for 7500 objects)
+## GPU buffer uploads are fast - the incremental approach was overly conservative
+const GPU_SYNC_BATCH_SIZE: int = 2000
 
 ## Phase 2 GPU-driven mode flag
 ## When true, this Phase 1 GPU path is disabled in favor of GPUVisibilityRenderer (Phase 2)
@@ -289,10 +298,8 @@ var _gpu_mode_active: bool = false
 
 ## Check if GPU compute should be used for current update
 func _should_use_gpu_compute() -> bool:
-	# Phase 2 GPU-driven mode supersedes Phase 1 GPU path
-	# When Phase 2 is active, GPUVisibilityRenderer handles MID/FAR visibility
-	if phase2_gpu_driven_enabled:
-		return false
+	# NOTE: Phase 2 GPU-driven mode check removed - Phase 1 GPU compute is now preferred
+	# Phase 2 code remains for future use but Phase 1 is simpler and works well
 
 	if not use_gpu_compute:
 		return false
@@ -617,7 +624,7 @@ func get_all_cells_in_radius(camera_cell: Vector2i, radius_meters: float = -1.0)
 ##
 ## CRITICAL: This function now enforces hard cell limits per tier to prevent
 ## queue overflow. Cells are sorted by distance so closest are prioritized.
-## View frustum culling is applied to MID and FAR tiers to reduce processing.
+## View frustum culling is applied to MID tier to reduce processing.
 ##
 ## IMPORTANT: Uses actual camera position (_camera_position) for distance calculations
 ## instead of camera cell center. This prevents tier jumping when crossing cell boundaries.
@@ -625,6 +632,10 @@ func get_all_cells_in_radius(camera_cell: Vector2i, radius_meters: float = -1.0)
 ##
 ## OPTIMIZATION: Results are cached based on camera cell. If camera is in the same cell,
 ## returns cached result (cell visibility changes slowly relative to camera position within cell).
+##
+## PERFORMANCE FIX (January 2026): Instead of iterating (2*far_radius+1)² cells (7500+),
+## we now iterate NEAR+MID with small radii, and for FAR tier we only check cells that
+## actually have registered objects. This reduces iteration from ~7500 to ~200 cells.
 func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 	# OPTIMIZATION: Return cached result if camera is in the same cell
 	# Cell visibility only needs recalculating when camera crosses cell boundary
@@ -640,20 +651,12 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 		Tier.HORIZON: [] as Array[Vector2i],
 	}
 
-	# Calculate cell radius for each tier (add buffer for position-based calculation)
-	# We need a slightly larger search radius since camera might be at edge of cell
+	# Calculate cell radius for NEAR and MID only (small radii)
 	var near_end_dist: float = tier_end_distances[Tier.NEAR]
 	var near_radius := ceili((near_end_dist + cell_size_meters) / cell_size_meters)
 	var mid_end_dist: float = tier_end_distances[Tier.MID]
 	var mid_radius := ceili((mid_end_dist + cell_size_meters) / cell_size_meters) if distant_rendering_enabled else 0
 	var far_end_dist: float = tier_end_distances[Tier.FAR]
-	var far_radius := ceili((far_end_dist + cell_size_meters) / cell_size_meters) if distant_rendering_enabled else 0
-	# HORIZON tier doesn't need per-cell processing - skip it entirely
-
-	var max_radius := maxi(near_radius, maxi(mid_radius, far_radius))
-
-	# Collect cells with their squared distances for sorting (avoid sqrt)
-	var cells_with_distance: Array[Dictionary] = []
 
 	# Pre-compute squared tier thresholds for comparison without sqrt
 	var near_end_sq := near_end_dist * near_end_dist
@@ -661,61 +664,100 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 	var far_end_sq := far_end_dist * far_end_dist
 
 	# Use actual camera position for distance calculation (smooth transitions)
-	# Falls back to cell-center if position not set
 	var use_position_distance := _camera_position != Vector3.ZERO
 
-	# Iterate over all cells within max radius
-	for dy in range(-max_radius, max_radius + 1):
-		for dx in range(-max_radius, max_radius + 1):
+	# === PART 1: Iterate NEAR and MID tiers with small radius ===
+	# MID radius is only ~5 cells, so we iterate at most (11)² = 121 cells
+	var near_mid_radius := maxi(near_radius, mid_radius)
+	var near_mid_cells: Array[Dictionary] = []
+
+	for dy in range(-near_mid_radius, near_mid_radius + 1):
+		for dx in range(-near_mid_radius, near_mid_radius + 1):
 			var cell := Vector2i(camera_cell.x + dx, camera_cell.y + dy)
 
-			# Use position-based distance for smooth tier transitions
 			var distance_sq: float
 			if use_position_distance:
 				distance_sq = position_to_cell_distance_squared(cell)
 			else:
 				distance_sq = _cell_distance_squared(camera_cell, cell)
 
-			# Determine tier using squared distance thresholds
+			# Only NEAR and MID in this loop
 			var tier: Tier
 			if distance_sq < near_end_sq:
 				tier = Tier.NEAR
 			elif distance_sq < mid_end_sq:
 				tier = Tier.MID
-			elif distance_sq < far_end_sq:
-				tier = Tier.FAR
 			else:
-				continue  # Skip HORIZON and beyond
+				continue  # Skip - will be handled in FAR loop or is beyond
 
-			# Apply view frustum culling for MID and FAR tiers
-			if use_frustum_culling and camera and (tier == Tier.MID or tier == Tier.FAR):
+			# Apply view frustum culling for MID tier only
+			if use_frustum_culling and camera and tier == Tier.MID:
 				if not _is_cell_in_frustum(cell):
 					continue
 
-			cells_with_distance.append({
+			near_mid_cells.append({
 				"cell": cell,
-				"distance_sq": distance_sq,  # Store squared distance
+				"distance_sq": distance_sq,
 				"tier": tier
 			})
 
-	# Sort by squared distance (closest first) - same ordering, no sqrt needed
-	cells_with_distance.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.distance_sq < b.distance_sq)
+	# === PART 2: FAR tier - only check cells that have registered objects ===
+	# Instead of iterating 7500+ cells, we only check cells in _objects_by_cell
+	var far_cells: Array[Dictionary] = []
 
-	# Distribute to tiers respecting hard limits
-	var tier_counts := {
-		Tier.NEAR: 0,
-		Tier.MID: 0,
-		Tier.FAR: 0,
-	}
+	if distant_rendering_enabled:
+		# Refresh cached keys only when dirty (object registered/unregistered)
+		if _objects_by_cell_keys_dirty:
+			_objects_by_cell_keys_cache = _objects_by_cell.keys()
+			_objects_by_cell_keys_dirty = false
 
-	for entry: Dictionary in cells_with_distance:
+		for cell: Vector2i in _objects_by_cell_keys_cache:
+			var distance_sq: float
+			if use_position_distance:
+				distance_sq = position_to_cell_distance_squared(cell)
+			else:
+				distance_sq = _cell_distance_squared(camera_cell, cell)
+
+			# Only FAR tier (between MID and FAR thresholds)
+			if distance_sq >= mid_end_sq and distance_sq < far_end_sq:
+				far_cells.append({
+					"cell": cell,
+					"distance_sq": distance_sq,
+					"tier": Tier.FAR
+				})
+
+	# === PART 3: Sort and distribute ===
+	# Sort NEAR+MID by distance
+	near_mid_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.distance_sq < b.distance_sq)
+
+	# Sort FAR by distance separately
+	far_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.distance_sq < b.distance_sq)
+
+	# Distribute NEAR and MID
+	var near_count := 0
+	var mid_count := 0
+	var max_near: int = max_cells_per_tier.get(Tier.NEAR, 0)
+	var max_mid: int = max_cells_per_tier.get(Tier.MID, 0)
+
+	for entry: Dictionary in near_mid_cells:
 		var tier: int = entry.tier
-		var max_for_tier: int = max_cells_per_tier.get(tier, 0)
+		if tier == Tier.NEAR and near_count < max_near:
+			(result[Tier.NEAR] as Array).append(entry.cell)
+			near_count += 1
+		elif tier == Tier.MID and mid_count < max_mid:
+			(result[Tier.MID] as Array).append(entry.cell)
+			mid_count += 1
 
-		if tier_counts[tier] < max_for_tier:
-			var cells_array: Array = result[tier]
-			cells_array.append(entry.cell)
-			tier_counts[tier] += 1
+	# Distribute FAR (already sorted by distance)
+	var far_count := 0
+	var max_far: int = max_cells_per_tier.get(Tier.FAR, 0)
+
+	for entry: Dictionary in far_cells:
+		if far_count < max_far:
+			(result[Tier.FAR] as Array).append(entry.cell)
+			far_count += 1
+		else:
+			break  # Already sorted, so rest are farther
 
 	# Cache the result for future calls with same camera cell
 	_cached_visible_cells_by_tier = result.duplicate(true)
@@ -724,30 +766,34 @@ func get_visible_cells_by_tier(camera_cell: Vector2i) -> Dictionary:
 
 ## Check if a cell is within the camera's view frustum
 ## Uses a simple AABB check against the frustum planes
+## Algorithm: For each plane, find the p-vertex (corner most aligned with plane normal).
+## If the p-vertex is behind the plane, the entire AABB is outside the frustum.
 func _is_cell_in_frustum(cell: Vector2i) -> bool:
 	if not camera:
 		return true  # No camera = assume visible
 
-	# Calculate cell center in world coordinates
-	var cell_center := Vector3(
-		cell.x * cell_size_meters + cell_size_meters * 0.5,
-		0.0,
-		-cell.y * cell_size_meters - cell_size_meters * 0.5  # Z is flipped in Godot
-	)
+	# Calculate cell origin in world coordinates (min corner, not center)
+	# This matches quadtree_chunk_manager.gd:get_chunk_aabb() which works correctly
+	var origin_x := cell.x * cell_size_meters
+	var origin_z := -cell.y * cell_size_meters  # Z is flipped in Godot
 
-	# Create cell AABB with generous height range to handle terrain elevation
-	# Use -100 to +500 to cover deep valleys and tall mountains/structures
-	# This ensures cells aren't incorrectly culled due to camera Y position
-	var half_size := cell_size_meters * 0.5
+	# Create cell AABB with very generous height bounds to avoid over-culling
+	# Use -500 to +1000 (1500m total) to cover:
+	# - Deep underwater areas and caves (-500m)
+	# - Terrain at any elevation
+	# - Tall buildings, mountains, and structures (+1000m)
+	# Using generous bounds is better than incorrectly culling visible cells
 	var cell_aabb := AABB(
-		cell_center - Vector3(half_size, 100.0, half_size),  # Start 100m below ground
-		Vector3(cell_size_meters, 600.0, cell_size_meters)   # Extend 500m above ground
+		Vector3(origin_x, -500.0, origin_z - cell_size_meters),  # Min corner
+		Vector3(cell_size_meters, 1500.0, cell_size_meters)       # Size
 	)
 
 	# Check against camera frustum
+	# Godot's frustum planes point inward - positive distance = inside frustum
 	var frustum := camera.get_frustum()
 	for plane in frustum:
-		# Check if AABB is completely behind this plane
+		# Find the p-vertex: the corner most in the direction of the plane normal
+		# If this corner is behind the plane, the entire AABB is outside
 		var corner := cell_aabb.position
 		if plane.normal.x >= 0:
 			corner.x += cell_aabb.size.x
@@ -757,7 +803,7 @@ func _is_cell_in_frustum(cell: Vector2i) -> bool:
 			corner.z += cell_aabb.size.z
 
 		if plane.distance_to(corner) < 0:
-			return false  # Completely outside this plane
+			return false  # AABB is completely outside this plane
 
 	return true
 
@@ -1236,6 +1282,7 @@ func register_object(object_id: int, position: Vector3, cell_grid: Vector2i) -> 
 	# Add to spatial index
 	if cell_grid not in _objects_by_cell:
 		_objects_by_cell[cell_grid] = []
+		_objects_by_cell_keys_dirty = true  # New cell added
 	(_objects_by_cell[cell_grid] as Array).append(object_id)
 
 	# Sync to GPU visibility manager if enabled
@@ -1275,6 +1322,7 @@ func unregister_object(object_id: int) -> bool:
 		# Clean up empty cells
 		if cell_list.is_empty():
 			_objects_by_cell.erase(cell_grid)
+			_objects_by_cell_keys_dirty = true  # Cell removed
 
 	_registered_objects.erase(object_id)
 	_object_tier_map.erase(object_id)
@@ -1358,6 +1406,8 @@ func clear_registered_objects() -> void:
 	_registered_objects.clear()
 	_object_tier_map.clear()
 	_objects_by_cell.clear()  # Clear spatial index
+	_objects_by_cell_keys_cache.clear()
+	_objects_by_cell_keys_dirty = true
 	for tier in _visible_objects_by_tier:
 		(_visible_objects_by_tier[tier] as Array).clear()
 	_tier_changes_this_frame.clear()

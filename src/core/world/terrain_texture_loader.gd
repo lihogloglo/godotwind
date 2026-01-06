@@ -38,10 +38,12 @@ const DEFAULT_TEXTURE_PATH := "textures\\_land_default.dds"
 ## PBR texture suffixes to search for (in priority order)
 const NORMAL_SUFFIXES := ["_n", "_normal", "_nrm"]
 const HEIGHT_SUFFIXES := ["_h", "_height", "_disp"]
-const ROUGHNESS_SUFFIXES := ["_r", "_rough", "_roughness"]
+const ROUGHNESS_SUFFIXES := ["_r", "_rough", "_roughness", "_spec"]  # _spec often used for roughness/specular
 const AO_SUFFIXES := ["_ao", "_ambient", "_occlusion"]
 
-## Enable PBR texture loading (set to true when next-gen packs are available)
+## Enable PBR texture loading
+## When true, auto-detects PBR textures (normal, height, roughness) from texture packs
+## Uses external texture directories configured in SettingsManager
 var enable_pbr_textures: bool = true
 
 ## Cache of loaded texture assets: MW texture_index -> Terrain3DTextureAsset

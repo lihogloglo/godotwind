@@ -146,7 +146,7 @@ func extract_file(path: String) -> PackedByteArray:
 	_cache_mutex.unlock()
 
 	if not _file_cache.has(normalized):
-		push_error("BSAManager: File not found: %s" % path)
+		# Don't log error here - caller may be probing for optional files (e.g., PBR textures)
 		return PackedByteArray()
 
 	var cached: Dictionary = _file_cache[normalized]

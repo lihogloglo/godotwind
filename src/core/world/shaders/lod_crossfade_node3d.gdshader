@@ -12,6 +12,8 @@ render_mode cull_back;
 // Original materials are restored after transition completes.
 // =============================================================================
 
+#include "res://src/core/world/shaders/dither_include.gdshaderinc"
+
 group_uniforms Material;
 // Material properties preserved from source StandardMaterial3D
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
@@ -32,20 +34,6 @@ group_uniforms Crossfade;
 // Updated per-frame by ObjectStreamer during tier transitions
 uniform float fade_amount : hint_range(0.0, 1.0) = 1.0;
 
-// 4x4 Bayer dither matrix - same as MultiMesh shader for consistency
-const float BAYER_MATRIX[16] = float[16](
-	0.0 / 16.0,  8.0 / 16.0,  2.0 / 16.0, 10.0 / 16.0,
-	12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0,  6.0 / 16.0,
-	3.0 / 16.0, 11.0 / 16.0,  1.0 / 16.0,  9.0 / 16.0,
-	15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0,  5.0 / 16.0
-);
-
-float get_bayer_threshold(ivec2 screen_pos) {
-	int x = screen_pos.x % 4;
-	int y = screen_pos.y % 4;
-	return BAYER_MATRIX[y * 4 + x];
-}
-
 void fragment() {
 	// Sample albedo texture
 	vec4 albedo_sample = texture(albedo_texture, UV) * albedo_color;
@@ -55,9 +43,8 @@ void fragment() {
 		discard;
 	}
 
-	// Screen-door dithering for LOD crossfade
-	ivec2 screen_pos = ivec2(FRAGCOORD.xy);
-	float dither_threshold = get_bayer_threshold(screen_pos);
+	// Screen-door dithering for LOD crossfade (uses shared include)
+	float dither_threshold = get_dither_threshold(ivec2(FRAGCOORD.xy));
 
 	if (dither_threshold >= fade_amount) {
 		discard;

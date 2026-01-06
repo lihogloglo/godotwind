@@ -9,6 +9,8 @@ render_mode cull_back;
 // complementary dither patterns that sum to full coverage.
 // =============================================================================
 
+#include "res://src/core/world/shaders/dither_include.gdshaderinc"
+
 group_uniforms Material;
 // Original material properties (preserved from source)
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
@@ -28,22 +30,6 @@ uniform float fade_amount : hint_range(0.0, 1.0) = 1.0;
 uniform float alpha_cutout : hint_range(0.0, 1.0) = 0.5;
 uniform bool use_alpha_cutout = false;
 
-// 4x4 Bayer dither matrix for smooth screen-door effect
-// This creates a visually pleasing pattern that blends well at distance
-// Values are normalized to 0.0-1.0 range
-const float BAYER_MATRIX[16] = {
-	0.0 / 16.0,  8.0 / 16.0,  2.0 / 16.0, 10.0 / 16.0,
-	12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0,  6.0 / 16.0,
-	3.0 / 16.0, 11.0 / 16.0,  1.0 / 16.0,  9.0 / 16.0,
-	15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0,  5.0 / 16.0
-};
-
-float get_bayer_threshold(ivec2 screen_pos) {
-	int x = screen_pos.x % 4;
-	int y = screen_pos.y % 4;
-	return BAYER_MATRIX[y * 4 + x];
-}
-
 void fragment() {
 	// Sample original textures
 	vec4 albedo_sample = texture(albedo_texture, UV) * albedo_color;
@@ -53,9 +39,8 @@ void fragment() {
 		discard;
 	}
 
-	// Calculate dither threshold from screen position
-	ivec2 screen_pos = ivec2(FRAGCOORD.xy);
-	float dither_threshold = get_bayer_threshold(screen_pos);
+	// Calculate dither threshold from screen position (uses shared include)
+	float dither_threshold = get_dither_threshold(ivec2(FRAGCOORD.xy));
 
 	// Screen-door dithering: discard pixel if threshold exceeds visibility
 	// When fade_amount = 1.0, all pixels pass (fully visible)

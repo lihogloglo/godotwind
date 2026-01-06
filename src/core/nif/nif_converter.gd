@@ -120,18 +120,31 @@ var debug_collision: bool = false
 
 ## LOD Generation Settings
 ## When enabled, generates simplified LOD meshes during conversion using VisibilityRange
+##
+## LOD meshes serve TWO purposes:
+## 1. NEAR tier (0-150m): VisibilityRange auto-switches between LOD0/LOD1/LOD2
+## 2. MID tier (150-500m): ObjectStreamer extracts LOD meshes for MultiMesh batching
+##
+## Distance thresholds are aligned with streaming tier boundaries:
+## - LOD0: 0-50m (full detail, 100%)
+## - LOD1: 50-150m (75% triangles) - extracted for MID tier 150-250m
+## - LOD2: 150-250m (50% triangles) - extracted for MID tier 250-375m
+## - LOD3: 250-500m (25% triangles) - extracted for MID tier 375-500m
 var generate_lods: bool = true
 
 ## Number of LOD levels to generate (excluding original LOD0)
 var lod_levels: int = 3
 
 ## Triangle reduction ratios for each LOD level
-var lod_reduction_ratios: Array[float] = [0.75, 0.5, 0.25]
+## LOD1: 50% for MID tier LOD1 (150-250m)
+## LOD2: 25% for MID tier LOD2 (250-375m)
+## LOD3: 10% for MID tier LOD3 (375-500m)
+var lod_reduction_ratios: Array[float] = [0.50, 0.25, 0.10]
 
 ## Distance thresholds for LOD switching (in meters)
-## LOD0 (full detail) visible from 0 to lod_distances[0]
-## LOD1 visible from lod_distances[0] to lod_distances[1], etc.
-var lod_distances: Array[float] = [20.0, 50.0, 150.0, 500.0]
+## These match StreamingConfig MID tier sub-LOD thresholds
+## LOD0: 0-50m, LOD1: 50-150m, LOD2: 150-250m, LOD3: 250-500m
+var lod_distances: Array[float] = [50.0, 150.0, 250.0, 500.0]
 
 ## Fade margin for LOD transitions (prevents popping)
 var lod_fade_margin: float = 5.0
@@ -1195,7 +1208,13 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		])
 
 	# Get material to apply to all LOD levels
-	var material := mesh_instance.material_override
+	# First try material_override, then fall back to surface material
+	var material: Material = mesh_instance.material_override
+	if material == null and mesh_instance.mesh and mesh_instance.mesh.get_surface_count() > 0:
+		material = mesh_instance.mesh.surface_get_material(0)
+
+	if material == null and debug_lod:
+		push_warning("NIFConverter: No material found for LOD generation of '%s'" % _source_path.get_file())
 
 	var simplifier := MeshOptimizer.new()
 	var parent := mesh_instance.get_parent()
@@ -1218,6 +1237,10 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		lod_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
 		lod_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod_arrays)
 
+		# Embed material directly in mesh surface (ensures material travels with mesh)
+		if material:
+			lod_mesh.surface_set_material(0, material)
+
 		# Create LOD mesh instance
 		var lod_instance := MeshInstance3D.new()
 		lod_instance.name = "%s_LOD%d" % [mesh_instance.name, lod_idx + 1]
@@ -1227,18 +1250,17 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		# Copy transform from original
 		lod_instance.transform = mesh_instance.transform
 
-		# Set visibility range
-		lod_instance.visibility_range_begin = lod_distances[lod_idx]
-		lod_instance.visibility_range_begin_margin = lod_fade_margin
+		# IMPORTANT: LOD meshes are hidden by default - they are extracted by ObjectStreamer
+		# for MultiMesh batching in the MID tier, NOT rendered directly in the scene tree.
+		# Setting visible = false prevents overlap with the main mesh and ObjectStreamer's LOD system.
+		# The mesh data and materials are preserved for extraction via _find_lod_meshes_recursive().
+		lod_instance.visible = false
 
-		if lod_idx + 1 < lod_distances.size():
-			lod_instance.visibility_range_end = lod_distances[lod_idx + 1]
-			lod_instance.visibility_range_end_margin = lod_fade_margin
-		else:
-			# Last LOD extends to infinity
-			lod_instance.visibility_range_end = 0.0
-			lod_instance.visibility_range_end_margin = 0.0
-
+		# Disable VisibilityRange - ObjectStreamer handles LOD visibility manually
+		# Leaving these enabled would cause Godot's built-in LOD system to show/hide
+		# these nodes based on camera distance, conflicting with our custom streaming.
+		lod_instance.visibility_range_begin = 0.0
+		lod_instance.visibility_range_end = 0.0
 		lod_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 		# Add as sibling to original mesh
@@ -1248,10 +1270,8 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		if debug_lod:
 			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
 			var lod_tris: int = lod_indices.size() / 3 if lod_indices else 0
-			print("  LOD%d: %d -> %d triangles (%.1f%%), visible %gm-%gm" % [
-				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles,
-				lod_instance.visibility_range_begin,
-				lod_instance.visibility_range_end if lod_instance.visibility_range_end > 0 else INF
+			print("  LOD%d: %d -> %d triangles (%.1f%%), hidden for MultiMesh extraction" % [
+				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles
 			])
 
 
@@ -2717,15 +2737,15 @@ func _merge_geometry_arrays(geometries: Array) -> ArrayMesh:
 	var merged_indices := PackedInt32Array()
 	merged_indices.resize(total_indices)
 
-	var merged_normals: PackedVector3Array = PackedVector3Array() if has_normals else null
+	var merged_normals: PackedVector3Array = PackedVector3Array()
 	if has_normals:
 		merged_normals.resize(total_vertices)
 
-	var merged_uvs: PackedVector2Array = PackedVector2Array() if has_uvs else null
+	var merged_uvs: PackedVector2Array = PackedVector2Array()
 	if has_uvs:
 		merged_uvs.resize(total_vertices)
 
-	var merged_colors: PackedColorArray = PackedColorArray() if has_colors else null
+	var merged_colors: PackedColorArray = PackedColorArray()
 	if has_colors:
 		merged_colors.resize(total_vertices)
 
@@ -2750,7 +2770,7 @@ func _merge_geometry_arrays(geometries: Array) -> ArrayMesh:
 
 		# Transform normals (rotation only, no translation)
 		if has_normals:
-			var normals: PackedVector3Array = geom.arrays[Mesh.ARRAY_NORMAL]
+			var normals = geom.arrays[Mesh.ARRAY_NORMAL]
 			if normals != null and normals.size() == num_verts:
 				var basis := transform.basis
 				for i in range(num_verts):
@@ -2762,7 +2782,7 @@ func _merge_geometry_arrays(geometries: Array) -> ArrayMesh:
 
 		# Copy UVs (no transformation needed)
 		if has_uvs:
-			var uvs: PackedVector2Array = geom.arrays[Mesh.ARRAY_TEX_UV]
+			var uvs = geom.arrays[Mesh.ARRAY_TEX_UV]
 			if uvs != null and uvs.size() == num_verts:
 				for i in range(num_verts):
 					merged_uvs[vert_offset + i] = uvs[i]
@@ -2772,7 +2792,7 @@ func _merge_geometry_arrays(geometries: Array) -> ArrayMesh:
 
 		# Copy colors
 		if has_colors:
-			var colors: PackedColorArray = geom.arrays[Mesh.ARRAY_COLOR]
+			var colors = geom.arrays[Mesh.ARRAY_COLOR]
 			if colors != null and colors.size() == num_verts:
 				for i in range(num_verts):
 					merged_colors[vert_offset + i] = colors[i]
@@ -2851,7 +2871,16 @@ func _convert_merged() -> Node3D:
 			if not geom.is_hidden:
 				all_hidden = false
 				break
-		mesh_instance.visible = not all_hidden
+
+		# IMPORTANT: Also hide meshes with no material - these are typically:
+		# - Collision geometry that shouldn't render
+		# - Placeholder nodes from the NIF
+		# Without this, they render as white untextured meshes
+		var should_hide := all_hidden or (material == null)
+		mesh_instance.visible = not should_hide
+
+		if material == null and not all_hidden:
+			print("[NIFConverter] Hiding materialless mesh in %s (likely collision geometry)" % _source_path.get_file())
 
 		root.add_child(mesh_instance)
 		mesh_idx += 1

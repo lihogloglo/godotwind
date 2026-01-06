@@ -16,6 +16,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 
 # Preload crossfade shader for fade-in effect
 const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
@@ -188,6 +189,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 		var pooled: Node3D = object_pool.call("acquire", model_path)
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+			_hide_lod_nodes(pooled)  # Ensure LOD nodes are hidden (may have been reset in pool)
 			_apply_transform(pooled, ref, true)
 			stats["objects_from_pool"] += 1
 			return pooled
@@ -205,6 +207,11 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
+	# CRITICAL: Hide embedded LOD nodes immediately after duplication
+	# These nodes (named _LOD1, _LOD2, _LOD3) are used for MID tier MultiMesh batching,
+	# not for direct rendering. Without this, LOD meshes overlap with the main mesh.
+	_hide_lod_nodes(instance)
+
 	# Apply transform
 	_apply_transform(instance, ref, true)
 
@@ -213,9 +220,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	stats["objects_instantiated"] += 1
 
-	# Apply fade-in effect for smooth object appearance (prevents visual pop)
-	if enable_fade_in:
-		_apply_fade_in(instance)
+	# NOTE: Fade-in is NOT applied here because the node isn't in the scene tree yet.
+	# Fade-in must be applied AFTER add_child() - see CellManager._instantiate_cell()
 
 	# Register objects with distance manager for distance-based visibility
 	# Significant objects get full LOD chain, others get simple LOD
@@ -278,6 +284,7 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 		if model_prototype:
 			var model_instance: Node3D = model_prototype.duplicate()
 			model_instance.name = "Model"
+			_hide_lod_nodes(model_instance)  # Hide LOD nodes to prevent overlap
 			light_node.add_child(model_instance)
 
 	# Create the actual light source
@@ -379,6 +386,9 @@ func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_
 
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+
+	# Hide LOD nodes to prevent overlap
+	_hide_lod_nodes(instance)
 
 	# Check if model has actor collision metadata (from NIF "Bounding Box" node)
 	# If so, ensure it has a capsule collision shape for proper physics
@@ -673,6 +683,7 @@ func _is_static_render_model(model_path: String) -> bool:
 ## Uses dither crossfade shader for smooth appearance (prevents visual pop)
 func _apply_fade_in(instance: Node3D) -> void:
 	if not scene_tree:
+		print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
 		return  # Need scene tree for tweens
 
 	# Find all MeshInstance3D nodes in the hierarchy
@@ -680,7 +691,10 @@ func _apply_fade_in(instance: Node3D) -> void:
 	_find_mesh_instances(instance, mesh_instances)
 
 	if mesh_instances.is_empty():
+		print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no mesh instances in %s" % instance.name)
 		return
+
+	print("[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
 
 	# Store original materials and apply fade materials
 	var fade_data: Array[Dictionary] = []
@@ -757,6 +771,12 @@ func _find_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
 
 	for child in node.get_children():
 		_find_mesh_instances(child, result)
+
+
+## Hide LOD sibling nodes and materialless meshes in a scene tree
+## Uses centralized MeshVisibilityUtils for consistent behavior across the codebase
+func _hide_lod_nodes(node: Node) -> void:
+	MeshVisibilityUtils.hide_lod_and_materialless(node, debug_lod)
 
 
 ## Reset statistics

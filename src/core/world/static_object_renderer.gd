@@ -130,9 +130,17 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 	register_mesh_type(type_name, mesh_instance.mesh, material)
 
 
+## Find first MeshInstance3D in prototype, skipping LOD nodes
+## LOD nodes (_LOD1, _LOD2, _LOD3) are for MID tier batching, not static rendering
 func _find_mesh_instance(node: Node) -> MeshInstance3D:
 	if node is MeshInstance3D:
-		return node
+		var node_name: String = node.name
+		# Skip LOD nodes - they're for MID tier MultiMesh, not direct rendering
+		var is_lod := node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3")
+		if is_lod:
+			print("[StaticRenderer] Skipping LOD node: %s" % node_name)
+		else:
+			return node
 	for child in node.get_children():
 		var result := _find_mesh_instance(child)
 		if result:
@@ -256,22 +264,13 @@ func get_instance_transform(id: int) -> Transform3D:
 	return _instances[id].transform
 
 
-## Update visibility based on distance from camera
+## DEPRECATED: This function is not called anywhere and bypasses the tier system
+## Visibility should be controlled by DistanceTierManager (the unified visibility authority)
+## Kept for potential future use but not actively used in FULL_AAA mode
 ## Returns number of visibility changes made
-func update_visibility_by_distance(camera_pos: Vector3, max_distance: float) -> int:
-	var changes := 0
-	var max_dist_sq := max_distance * max_distance
-
-	for id: int in _instances:
-		var data: InstanceData = _instances[id]
-		var dist_sq := camera_pos.distance_squared_to(data.transform.origin)
-		var should_be_visible := dist_sq <= max_dist_sq
-
-		if data.visible != should_be_visible:
-			set_instance_visible(data.id, should_be_visible)
-			changes += 1
-
-	return changes
+func update_visibility_by_distance(_camera_pos: Vector3, _max_distance: float) -> int:
+	push_warning("[StaticObjectRenderer] update_visibility_by_distance is deprecated - use DistanceTierManager")
+	return 0  # No-op, visibility controlled by tier manager
 
 
 ## Batch add instances (more efficient than individual adds)

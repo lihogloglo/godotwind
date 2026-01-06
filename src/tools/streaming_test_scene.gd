@@ -28,7 +28,6 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
-const LODPrebakerScript := preload("res://src/tools/prebaking/lod_prebaker.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 
 # Managers
@@ -235,16 +234,8 @@ func _init_async() -> void:
 	# Check cache directories
 	_log("Cache paths:")
 	_log("  Models: %s" % SettingsManager.get_models_path())
-	_log("  LODs: %s" % SettingsManager.get_lods_path())
 	_log("  Impostors: %s" % SettingsManager.get_impostors_path())
-
-	# Check if LODs exist
-	var lod_path := SettingsManager.get_lods_path()
-	if DirAccess.dir_exists_absolute(lod_path):
-		var lod_files := DirAccess.get_files_at(lod_path)
-		_log("  LOD files found: %d" % lod_files.size())
-	else:
-		_log("[color=yellow]  WARNING: LOD directory not found![/color]")
+	_log("  NOTE: LODs are now embedded in prebaked models (no separate LOD files)")
 
 	# Check if impostors exist
 	var impostor_path := SettingsManager.get_impostors_path()
@@ -573,67 +564,27 @@ func _run_diagnostics() -> void:
 		else:
 			_log("  [color=red]ObjectStreamer._position_index: NULL[/color]")
 
-	# Test LOD loading manually
+	# Test LOD extraction from ObjectStreamer cache
+	# LODs are now embedded in models, not in separate files
 	_log("")
-	_log("[LOD Cache Directory]")
-	var lod_path := SettingsManager.get_lods_path()
-	_log("  Path: %s" % lod_path)
-	if DirAccess.dir_exists_absolute(lod_path):
-		var lod_files := DirAccess.get_files_at(lod_path)
-		_log("  Total LOD files: %d" % lod_files.size())
-		# Show first few
-		for i in range(mini(5, lod_files.size())):
-			_log("    %s" % lod_files[i])
-		if lod_files.size() > 5:
-			_log("    ... and %d more" % (lod_files.size() - 5))
-	else:
-		_log("  [color=red]Directory not found![/color]")
+	_log("[Embedded LOD System]")
+	_log("  LODs are now embedded in prebaked models via NIFConverter")
+	_log("  LOD meshes are extracted from scene tree when models enter NEAR tier")
 
-	_log("")
-	_log("[LOD Cache Test]")
-	var test_paths: Array[String] = [
-		"meshes\\x\\ex_common_house_01.nif",
-		"meshes\\x\\ex_hlaalu_b_01.nif",
-		"meshes\\f\\flora_tree_gl_01.nif",
-	]
-
-	for test_path in test_paths:
-		var lod1 = LODPrebakerScript.load_lod_mesh(test_path, 1)
-		var lod2 = LODPrebakerScript.load_lod_mesh(test_path, 2)
-		var lod3 = LODPrebakerScript.load_lod_mesh(test_path, 3)
-		var has_lods := lod1 != null or lod2 != null or lod3 != null
-		if has_lods:
-			_log("  [color=green]%s: LOD1=%s LOD2=%s LOD3=%s[/color]" % [
-				test_path.get_file(),
-				"yes" if lod1 else "no",
-				"yes" if lod2 else "no",
-				"yes" if lod3 else "no"
-			])
-			# Check materials on LOD1
-			if lod1:
-				var surf_count := lod1.get_surface_count()
-				_log("    LOD1 surfaces: %d" % surf_count)
-				for i in range(surf_count):
-					var mat := lod1.surface_get_material(i)
-					if mat:
-						if mat is StandardMaterial3D:
-							var std := mat as StandardMaterial3D
-							var has_tex := std.albedo_texture != null
-							_log("      Surface %d: StandardMaterial3D, albedo_texture=%s" % [i, "yes" if has_tex else "NO"])
-						else:
-							_log("      Surface %d: %s" % [i, mat.get_class()])
-					else:
-						_log("      Surface %d: [color=red]NO MATERIAL[/color]" % i)
-		else:
-			_log("  [color=red]%s: No LODs found[/color]" % test_path.get_file())
-			# Show the expected path
-			var expected_lod_path := LODPrebakerScript.get_lod_path(test_path, 1)
-			_log("    Expected at: %s" % expected_lod_path)
-			_log("    File exists: %s" % FileAccess.file_exists(expected_lod_path))
+	if object_streamer and object_streamer.has_method("get_stats"):
+		var os_stats: Dictionary = object_streamer.get_stats()
+		_log("  ObjectStreamer LOD cache size: %d" % os_stats.get("lod_cache_size", 0))
+		_log("  ObjectStreamer LOD cache hits: %d" % os_stats.get("lod_cache_hits", 0))
 
 	# Test impostor texture loading
 	_log("")
 	_log("[Impostor Texture Test]")
+	var test_paths: Array[String] = [
+		"meshes/x/ex_vivec_palace_01.nif",
+		"meshes/x/ex_hlaalu_b_01.nif",
+		"meshes/x/ex_stronghold_enter00.nif",
+		"meshes/x/ex_dwe_tower00.nif",
+	]
 	for test_path in test_paths:
 		var tex_path := ImpostorCandidatesScript.get_impostor_texture_path(test_path)
 		var exists := FileAccess.file_exists(tex_path)

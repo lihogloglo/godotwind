@@ -20,8 +20,13 @@
 class_name ModelLoader
 extends RefCounted
 
+const LODResource := preload("res://src/core/world/lod_resource.gd")
+
 ## Cache for loaded models: model_path (lowercase) -> Node3D prototype
 var _model_cache: Dictionary = {}
+
+## Cache for loaded LOD resources: model_path (lowercase) -> LODResource
+var _lod_cache: Dictionary = {}
 
 ## Enable disk caching of converted models (saves as .res files)
 ## Set to true to persist converted models between game sessions
@@ -124,6 +129,8 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 	# NOTE: This only runs during prebaking, not at runtime
 	const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 	var converter := NIFConverter.new()
+	converter.generate_lods = true  # LODs embedded in model for MID tier MultiMesh
+	converter.generate_occluders = false  # Occluders handled separately
 	if not item_id.is_empty():
 		converter.collision_item_id = item_id
 	var node := converter.convert_buffer(nif_data, full_path)
@@ -484,11 +491,29 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 		DirAccess.remove_absolute(disk_path)
 		return null
 
+	# DEBUG: Log all MeshInstance3D nodes in the loaded model to audit for LOD nodes
+	if _stats["models_from_disk"] < 5:  # Only log first 5 models to avoid spam
+		print("[ModelLoader] Loaded from disk: %s" % disk_path.get_file())
+		_debug_log_mesh_nodes(instance, 0)
+
 	# CRITICAL: Clear resource paths on loaded model to allow safe multi-threaded duplication
 	# Without this, concurrent duplicate() calls conflict on the same resource paths
 	_clear_resource_paths(instance)
 
 	return instance as Node3D
+
+
+## Debug: Log all mesh nodes in a model hierarchy
+func _debug_log_mesh_nodes(node: Node, depth: int) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		var is_lod := mi.name.ends_with("_LOD1") or mi.name.ends_with("_LOD2") or mi.name.ends_with("_LOD3")
+		var has_mat := mi.material_override != null or (mi.mesh and mi.mesh.get_surface_count() > 0 and mi.mesh.surface_get_material(0) != null)
+		print("[ModelLoader]   %s%s: visible=%s, is_lod=%s, has_material=%s" % [
+			"  ".repeat(depth), mi.name, mi.visible, is_lod, has_mat
+		])
+	for child in node.get_children():
+		_debug_log_mesh_nodes(child, depth + 1)
 
 
 ## Clear resource paths from a node tree to allow safe duplication
@@ -503,7 +528,10 @@ func _clear_resource_paths(node: Node) -> void:
 				var mat := mesh_inst.mesh.surface_get_material(i)
 				if mat:
 					_clear_material_paths(mat)
-		# Clear override materials too
+		# Clear material_override (used by LOD meshes from NIFConverter)
+		if mesh_inst.material_override:
+			_clear_material_paths(mesh_inst.material_override)
+		# Clear surface override materials too
 		for i in range(mesh_inst.get_surface_override_material_count()):
 			var mat := mesh_inst.get_surface_override_material(i)
 			if mat:
@@ -759,3 +787,143 @@ func has_disk_cached(model_path: String, item_id: String = "") -> bool:
 		cache_key = normalized + ":" + item_id.to_lower()
 	var disk_path := _get_disk_cache_path(cache_key)
 	return _cached_file_exists(disk_path)
+
+
+# =============================================================================
+# LOD LOADING API (SEPARATE FILES)
+# =============================================================================
+# LODs are prebaked as separate .lod.res files to enable on-demand loading.
+# This reduces memory usage - NEAR tier objects don't load LOD meshes.
+# LODs are only loaded when objects enter MID tier.
+# =============================================================================
+
+## Get LOD resource for a model (loads from disk if not cached)
+## Returns LODResource or null if no LODs exist for this model
+## Parameters:
+##   model_path: Path to model (e.g., "meshes\\x\\ex_door.nif")
+func get_lod_resource(model_path: String) -> LODResource:
+	var normalized := model_path.to_lower().replace("/", "\\")
+
+	# Check memory cache
+	if normalized in _lod_cache:
+		return _lod_cache[normalized]
+
+	# Try to load from disk
+	var lod_path := _get_lod_disk_path(normalized)
+	if not _cached_file_exists(lod_path):
+		# No LOD file exists - cache null to avoid repeated checks
+		_lod_cache[normalized] = null
+		return null
+
+	var lod_res := ResourceLoader.load(lod_path, "Resource") as LODResource
+	if not lod_res:
+		# Failed to load - cache null
+		_lod_cache[normalized] = null
+		return null
+
+	_lod_cache[normalized] = lod_res
+	return lod_res
+
+
+## Request async loading of LOD resource
+## Returns immediately. Callback is called when load completes.
+## Parameters:
+##   model_path: Path to model
+##   callback: Called with (model_path: String, lod_res: LODResource) - lod_res may be null
+## Returns:
+##   true if load was started or already cached
+func request_lod_async(model_path: String, callback: Callable) -> bool:
+	var normalized := model_path.to_lower().replace("/", "\\")
+
+	# Check memory cache
+	if normalized in _lod_cache:
+		if callback.is_valid():
+			callback.call(model_path, _lod_cache[normalized])
+		return true
+
+	# Check if file exists
+	var lod_path := _get_lod_disk_path(normalized)
+	if not _cached_file_exists(lod_path):
+		_lod_cache[normalized] = null
+		if callback.is_valid():
+			callback.call(model_path, null)
+		return false
+
+	# Start async load
+	var err := ResourceLoader.load_threaded_request(lod_path, "Resource")
+	if err != OK:
+		if callback.is_valid():
+			callback.call(model_path, null)
+		return false
+
+	# Store callback for later (simplified - real impl would track pending)
+	# For now, use sync callback in process_async_loads
+	_pending_lod_loads[lod_path] = {
+		"model_path": model_path,
+		"normalized": normalized,
+		"callback": callback
+	}
+	return true
+
+
+## Pending LOD async loads
+var _pending_lod_loads: Dictionary = {}
+
+
+## Process pending LOD async loads - call every frame alongside process_async_loads()
+## Returns number of loads completed
+func process_lod_async_loads() -> int:
+	if _pending_lod_loads.is_empty():
+		return 0
+
+	var completed := 0
+	var to_remove: Array[String] = []
+
+	for lod_path: String in _pending_lod_loads:
+		var status := ResourceLoader.load_threaded_get_status(lod_path)
+
+		match status:
+			ResourceLoader.THREAD_LOAD_LOADED:
+				var lod_res := ResourceLoader.load_threaded_get(lod_path) as LODResource
+				var info: Dictionary = _pending_lod_loads[lod_path]
+				_lod_cache[info.normalized] = lod_res
+
+				if info.callback.is_valid():
+					info.callback.call(info.model_path, lod_res)
+
+				to_remove.append(lod_path)
+				completed += 1
+
+			ResourceLoader.THREAD_LOAD_FAILED, ResourceLoader.THREAD_LOAD_INVALID_RESOURCE:
+				var info: Dictionary = _pending_lod_loads[lod_path]
+				_lod_cache[info.normalized] = null
+
+				if info.callback.is_valid():
+					info.callback.call(info.model_path, null)
+
+				to_remove.append(lod_path)
+				completed += 1
+
+	for lod_path: String in to_remove:
+		_pending_lod_loads.erase(lod_path)
+
+	return completed
+
+
+## Get disk path for LOD resource
+func _get_lod_disk_path(normalized_path: String) -> String:
+	var safe_name := normalized_path.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
+	return _get_disk_cache_dir().path_join(safe_name + ".lod.res")
+
+
+## Check if LOD resource exists on disk
+func has_lod_cached(model_path: String) -> bool:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var lod_path := _get_lod_disk_path(normalized)
+	return _cached_file_exists(lod_path)
+
+
+## Clear LOD cache
+func clear_lod_cache() -> void:
+	_lod_cache.clear()
+	_pending_lod_loads.clear()

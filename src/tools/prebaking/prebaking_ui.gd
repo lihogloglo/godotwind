@@ -21,7 +21,7 @@ var _status_label: Label
 # Component sections
 var _terrain_section: Dictionary = {}
 var _model_section: Dictionary = {}
-var _lod_section: Dictionary = {}
+# NOTE: LODs are now embedded in models via NIFConverter, no separate LOD prebaking
 var _impostor_section: Dictionary = {}
 var _navmesh_section: Dictionary = {}
 var _shore_section: Dictionary = {}
@@ -108,7 +108,7 @@ func _build_ui() -> void:
 	# Component sections
 	_terrain_section = _create_component_section("Terrain", "Preprocess Morrowind heightmaps to Terrain3D format - Required for world exploration!")
 	_model_section = _create_component_section("Models", "Pre-convert NIF models to Godot resources (NEAR tier) - Most impactful for load times!")
-	_lod_section = _create_component_section("LODs", "Simplified LOD meshes for per-object LOD system - Smooth LOD transitions!")
+	# NOTE: LODs are now embedded in models via NIFConverter during model prebaking
 	_impostor_section = _create_component_section("Impostors", "Octahedral impostor textures for distant landmarks (FAR tier)")
 	_navmesh_section = _create_component_section("Navigation Meshes", "Pathfinding meshes for AI navigation")
 	_shore_section = _create_component_section("Shore Mask", "Ocean visibility mask based on terrain height")
@@ -245,9 +245,6 @@ func _connect_signals() -> void:
 	(_model_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_models = pressed
 	)
-	(_lod_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
-		manager.enable_lods = pressed
-	)
 	(_impostor_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_impostors = pressed
 	)
@@ -264,9 +261,6 @@ func _connect_signals() -> void:
 	)
 	(_model_section.bake_button as Button).pressed.connect(func() -> void:
 		manager.bake_component(PrebakingManagerScript.Component.MODELS)
-	)
-	(_lod_section.bake_button as Button).pressed.connect(func() -> void:
-		manager.bake_component(PrebakingManagerScript.Component.LODS)
 	)
 	(_impostor_section.bake_button as Button).pressed.connect(func() -> void:
 		manager.bake_component(PrebakingManagerScript.Component.IMPOSTORS)
@@ -300,7 +294,6 @@ func _update_ui_state() -> void:
 	# Update component sections
 	_update_component_section(_terrain_section, summary.get("terrain", {}) as Dictionary, is_running)
 	_update_component_section(_model_section, summary.get("models", {}) as Dictionary, is_running)
-	_update_component_section(_lod_section, summary.get("lods", {}) as Dictionary, is_running)
 	_update_component_section(_impostor_section, summary.get("impostors", {}) as Dictionary, is_running)
 	_update_component_section(_navmesh_section, summary.get("navmeshes", {}) as Dictionary, is_running)
 	_update_component_section(_shore_section, summary.get("shore_mask", {}) as Dictionary, is_running)
@@ -396,7 +389,6 @@ func _on_component_progress(component: String, current: int, total: int, item_na
 	match component:
 		"Terrain": section = _terrain_section
 		"Models": section = _model_section
-		"LODs": section = _lod_section
 		"Impostors": section = _impostor_section
 		"Navmeshes": section = _navmesh_section
 		"Shore Mask": section = _shore_section

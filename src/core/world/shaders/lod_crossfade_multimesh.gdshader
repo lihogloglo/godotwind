@@ -9,6 +9,8 @@ render_mode cull_back;
 // Matches ImpostorManager's dithering pattern for visual consistency.
 // =============================================================================
 
+#include "res://src/core/world/shaders/dither_include.gdshaderinc"
+
 group_uniforms Material;
 // Material properties preserved from source StandardMaterial3D
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
@@ -34,21 +36,6 @@ uniform int lod_level : hint_range(0, 3) = 1;
 // Per-instance fade amount passed via varying
 varying flat float v_fade_amount;
 
-// 4x4 Bayer dither matrix - same as ImpostorManager for consistency
-// Creates visually pleasing screen-door pattern
-const float BAYER_MATRIX[16] = float[16](
-	0.0 / 16.0,  8.0 / 16.0,  2.0 / 16.0, 10.0 / 16.0,
-	12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0,  6.0 / 16.0,
-	3.0 / 16.0, 11.0 / 16.0,  1.0 / 16.0,  9.0 / 16.0,
-	15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0,  5.0 / 16.0
-);
-
-float get_bayer_threshold(ivec2 screen_pos) {
-	int x = screen_pos.x % 4;
-	int y = screen_pos.y % 4;
-	return BAYER_MATRIX[y * 4 + x];
-}
-
 void vertex() {
 	// Read per-instance fade amount from custom data
 	// x = fade amount (0.0 = invisible, 1.0 = fully visible)
@@ -64,12 +51,11 @@ void fragment() {
 		discard;
 	}
 
-	// Screen-door dithering for LOD crossfade
+	// Screen-door dithering for LOD crossfade (uses shared include)
 	// When fade_amount = 1.0: all pixels pass (fully visible)
 	// When fade_amount = 0.5: ~50% of pixels pass (half visible)
 	// When fade_amount = 0.0: no pixels pass (invisible)
-	ivec2 screen_pos = ivec2(FRAGCOORD.xy);
-	float dither_threshold = get_bayer_threshold(screen_pos);
+	float dither_threshold = get_dither_threshold(ivec2(FRAGCOORD.xy));
 
 	if (dither_threshold >= v_fade_amount) {
 		discard;

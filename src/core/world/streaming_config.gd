@@ -6,30 +6,31 @@ extends RefCounted
 ## All tunable parameters for LOD, streaming, and performance are defined here.
 ## Modify these values to adjust streaming behavior globally.
 ##
-## NOTE: Core tier distance constants (NEAR_END, MID_END, FAR_END) are also
-## defined in DistanceUtils which is the single source of truth for distance
-## calculations. These constants are duplicated here for convenience when
-## configuring the streaming system. If you change values, update both files.
+## Core tier distance constants are defined in DistanceUtils (single source of truth).
+## This file references them directly to avoid duplication.
 ##
 ## Usage:
 ##   var near_distance = StreamingConfig.NEAR_END
 ##   var fade_margin = StreamingConfig.FADE_MARGIN_NEAR
 
+# Single source of truth for distance constants
+const DU := preload("res://src/core/world/distance_utils.gd")
+
 # =============================================================================
-# DISTANCE THRESHOLDS (see also: DistanceUtils for the canonical definitions)
+# DISTANCE THRESHOLDS (referenced from DistanceUtils - single source of truth)
 # =============================================================================
 
 ## Distance where NEAR tier ends and MID tier begins (meters)
 ## NEAR tier: Full Node3D with physics and collision
-const NEAR_END := 150.0  # Must match DistanceUtils.NEAR_END
+const NEAR_END := DU.NEAR_END  # 150.0
 
 ## Distance where MID tier ends and FAR tier begins (meters)
 ## MID tier: MultiMesh LOD instances (3 levels)
-const MID_END := 500.0  # Must match DistanceUtils.MID_END
+const MID_END := DU.MID_END  # 500.0
 
 ## Distance where FAR tier ends and HORIZON begins (meters)
 ## FAR tier: Octahedral impostor billboards
-const FAR_END := 5000.0  # Must match DistanceUtils.FAR_END
+const FAR_END := DU.FAR_END  # 5000.0
 
 # =============================================================================
 # LOD LEVELS WITHIN MID TIER
@@ -93,15 +94,16 @@ const HYSTERESIS_FAR := 150.0
 const CELL_QUEUE_BUDGET_MS := 2.0
 
 ## Maximum time per frame for instantiating NEAR tier objects (default mode)
-const INSTANTIATION_BUDGET_MS := 12.0
+## Increased from 12ms to 30ms for faster NEAR tier population
+const INSTANTIATION_BUDGET_MS := 30.0
 
 ## NEAR TIER BURST LOADING - Aggressive budget for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
 ## use these higher limits to populate objects much faster.
 ## This trades slightly higher frame times for dramatically faster cell load times.
-const NEAR_BURST_BUDGET_MS := 24.0           ## 2x budget during burst loading
-const NEAR_BURST_MAX_INSTANTIATIONS := 150   ## 3x objects per frame during burst
-const NEAR_BURST_DISTANCE := 200.0           ## Radius for burst loading priority
+const NEAR_BURST_BUDGET_MS := 50.0           ## Aggressive budget during burst loading
+const NEAR_BURST_MAX_INSTANTIATIONS := 300   ## 6x objects per frame during burst
+const NEAR_BURST_DISTANCE := 250.0           ## Radius for burst loading priority
 
 ## Delay before rebuilding impostor texture array (batching)
 ## Waits for multiple textures to finish loading before rebuilding
@@ -311,34 +313,8 @@ const DEBUG_VISUALIZATION := false
 const ENABLE_PROFILING := true
 
 # =============================================================================
-# STREAMING MODE (Single Source of Truth)
+# STREAMING MODE - FULL_AAA ONLY (Simplified)
 # =============================================================================
-
-## Streaming modes - controls what tier systems are active
-## NEAR_ONLY: Legacy mode with ~150m view distance, no LOD or impostors
-## FULL_AAA: All tiers active with LOD meshes and impostors up to 5km
-enum StreamingMode {
-	NEAR_ONLY,    ## NEAR tier only (0-150m), no LOD/impostors
-	FULL_AAA      ## All tiers: NEAR + MID + FAR with LOD and impostors
-}
-
-## Get tier enable flags for a given streaming mode
-## Returns dictionary with boolean flags for each tier and system
-static func get_mode_flags(mode: StreamingMode) -> Dictionary:
-	match mode:
-		StreamingMode.NEAR_ONLY:
-			return {
-				"near_enabled": true,
-				"mid_enabled": false,
-				"far_enabled": false,
-				"distant_rendering_enabled": false
-			}
-		StreamingMode.FULL_AAA:
-			return {
-				"near_enabled": true,
-				"mid_enabled": true,
-				"far_enabled": true,
-				"distant_rendering_enabled": true
-			}
-	# Default to NEAR_ONLY for safety
-	return get_mode_flags(StreamingMode.NEAR_ONLY)
+# NOTE: NEAR_ONLY mode has been removed. All streaming now uses FULL_AAA mode
+# with all tiers active: NEAR + MID + FAR with LOD and impostors up to 5km.
+# This simplifies the codebase by removing conditional tier activation.

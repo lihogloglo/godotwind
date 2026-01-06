@@ -94,6 +94,10 @@ func set_object_streamer(streamer: Node3D) -> void:
 	_object_distance_manager = streamer
 	_sync_instantiator_config()
 
+	# Pass ModelLoader to ObjectStreamer for on-demand LOD loading
+	if streamer and streamer.has_method("set_model_loader"):
+		streamer.set_model_loader(_model_loader)
+
 
 ## Sync configuration to instantiator
 func _sync_instantiator_config() -> void:
@@ -226,27 +230,45 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 		# Phase 2: Create MultiMesh instances for suitable groups
 		multimesh_count = _create_multimesh_instances(instance_groups, cell_node)
 
+		# Collect objects for deferred fade-in (must wait until cell_node is in scene tree)
+		var objects_to_fade: Array[Node3D] = []
+
 		# Phase 3: Instantiate remaining objects normally
 		for ref: CellReference in instance_groups.get("individual_refs", []):
 			var obj := _instantiator.instantiate_reference(ref, cell_grid)
 			if obj:
 				cell_node.add_child(obj)
+				if _instantiator.enable_fade_in:
+					objects_to_fade.append(obj)
 				loaded += 1
 			elif use_static_renderer and _static_renderer:
 				static_count += 1
 			else:
 				failed += 1
+
+		# Defer fade-in until cell_node enters scene tree
+		if not objects_to_fade.is_empty():
+			_defer_fade_in(cell_node, objects_to_fade)
 	else:
+		# Collect objects for deferred fade-in
+		var objects_to_fade: Array[Node3D] = []
+
 		# Original path: no batching
 		for ref: CellReference in cell.references:
 			var obj := _instantiator.instantiate_reference(ref, cell_grid)
 			if obj:
 				cell_node.add_child(obj)
+				if _instantiator.enable_fade_in:
+					objects_to_fade.append(obj)
 				loaded += 1
 			elif use_static_renderer and _static_renderer:
 				static_count += 1
 			else:
 				failed += 1
+
+		# Defer fade-in until cell_node enters scene tree
+		if not objects_to_fade.is_empty():
+			_defer_fade_in(cell_node, objects_to_fade)
 
 	var total_objects := loaded + static_count + multimesh_count
 	print("CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
@@ -255,6 +277,26 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 	_stats["multimesh_instances"] = _stats.get("multimesh_instances", 0) + multimesh_count
 
 	return cell_node
+
+
+## Defer fade-in until cell_node enters the scene tree
+## This is necessary because Node.create_tween() requires the node to be in the scene tree
+func _defer_fade_in(cell_node: Node3D, objects: Array[Node3D]) -> void:
+	print("[CellManager] _defer_fade_in called with %d objects, cell in tree: %s" % [objects.size(), cell_node.is_inside_tree()])
+
+	# Connect to tree_entered signal to apply fade-in once in scene tree
+	var apply_fades := func() -> void:
+		print("[CellManager] apply_fades executing for %d objects" % objects.size())
+		for obj: Node3D in objects:
+			if is_instance_valid(obj):
+				_instantiator._apply_fade_in(obj)
+
+	if cell_node.is_inside_tree():
+		# Already in tree, apply immediately
+		apply_fades.call()
+	else:
+		# Wait for tree entry
+		cell_node.tree_entered.connect(apply_fades, CONNECT_ONE_SHOT)
 
 
 ## Group cell references for MultiMesh instancing
@@ -408,14 +450,19 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 					parent_node.add_child(obj)
 			continue
 
-		# Find first MeshInstance3D in prototype
+		# Find first MeshInstance3D in prototype (skips LOD nodes)
 		var mesh_instance: MeshInstance3D = _find_first_mesh_instance(prototype)
 		if not mesh_instance or not mesh_instance.mesh:
+			print("[DIAG] MultiMesh: No valid mesh found in %s, falling back to individual" % model_path.get_file())
 			for candidate: Dictionary in candidates:
 				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
 				if obj:
 					parent_node.add_child(obj)
 			continue
+
+		# Debug: Log what mesh we're using and what other meshes exist in the prototype
+		print("[DIAG] MultiMesh using mesh '%s' from %s" % [mesh_instance.name, model_path.get_file()])
+		_debug_log_all_meshes(prototype, model_path.get_file())
 
 		# Create MultiMesh
 		var multimesh := MultiMesh.new()
@@ -444,9 +491,13 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 
 
 ## Find first MeshInstance3D in a node hierarchy
+## Skips LOD nodes (_LOD1, _LOD2, _LOD3) which are for MID tier, not direct rendering
 func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
 	if node is MeshInstance3D:
-		return node as MeshInstance3D
+		var node_name: String = node.name
+		# Skip LOD meshes - they are used for MID tier MultiMesh batching, not main rendering
+		if not (node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3")):
+			return node as MeshInstance3D
 
 	for child in node.get_children():
 		var found := _find_first_mesh_instance(child)
@@ -454,6 +505,24 @@ func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
 			return found
 
 	return null
+
+
+## Debug: Log all MeshInstance3D nodes in a prototype (to audit LOD nodes)
+func _debug_log_all_meshes(node: Node, model_name: String, depth: int = 0) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		var is_lod := mi.name.ends_with("_LOD1") or mi.name.ends_with("_LOD2") or mi.name.ends_with("_LOD3")
+		var mat_info := "no_material"
+		if mi.material_override:
+			mat_info = "override"
+		elif mi.mesh and mi.mesh.get_surface_count() > 0:
+			var surf_mat := mi.mesh.surface_get_material(0)
+			mat_info = "surface_mat" if surf_mat else "no_surf_mat"
+		print("[DIAG]   %s%s: visible=%s, is_lod=%s, mat=%s" % [
+			"  ".repeat(depth), mi.name, mi.visible, is_lod, mat_info
+		])
+	for child in node.get_children():
+		_debug_log_all_meshes(child, model_name, depth + 1)
 
 
 ## Calculate transform for a cell reference
@@ -727,6 +796,7 @@ func instantiate_deferred_object(
 		if pooled:
 			pooled.name = ref_id + "_" + str(ref_num)
 			pooled.global_transform = world_transform
+			_hide_lod_nodes(pooled)  # CRITICAL: Hide LODs on pooled objects
 			_stats["objects_from_pool"] += 1
 			return pooled
 
@@ -740,6 +810,9 @@ func instantiate_deferred_object(
 	instance.name = ref_id + "_" + str(ref_num)
 	instance.global_transform = world_transform
 
+	# CRITICAL: Hide LOD nodes to prevent white mesh overlays
+	_hide_lod_nodes(instance)
+
 	# Add metadata for console object picker
 	if base_record:
 		if "record_id" in base_record:
@@ -750,11 +823,17 @@ func instantiate_deferred_object(
 
 	_stats["objects_instantiated"] += 1
 
-	# Apply fade-in effect if enabled
-	if _instantiator.enable_fade_in:
-		_instantiator._apply_fade_in(instance)
+	# NOTE: Fade-in is NOT applied here - caller must apply after add_child()
+	# Use apply_fade_in_to_object() after adding to scene tree
 
 	return instance
+
+
+## Apply fade-in effect to an object (must be called after add_child)
+## This is a public helper for callers who instantiate objects via instantiate_deferred_object()
+func apply_fade_in_to_object(obj: Node3D) -> void:
+	if _instantiator.enable_fade_in and is_instance_valid(obj):
+		_instantiator._apply_fade_in(obj)
 
 
 # =============================================================================
@@ -834,6 +913,13 @@ var parallel_duplicate_enabled: bool = SC.PARALLEL_DUPLICATE_ENABLED
 var _parallel_duplicate_results: Array = []
 var _parallel_duplicate_mutex: Mutex = Mutex.new()
 
+## Per-model mutex to prevent concurrent duplicate() calls on the same prototype
+## Key: model_path, Value: Mutex
+## This prevents "cyclic resource inclusion" errors when multiple threads try to
+## duplicate the same prototype simultaneously
+var _model_mutexes: Dictionary = {}
+var _model_mutexes_lock: Mutex = Mutex.new()
+
 ## Active parallel duplicate task count
 var _parallel_duplicate_active: int = 0
 
@@ -851,6 +937,16 @@ var _parallel_duplicate_stats: Dictionary = {
 	"total_dispatch_time_usec": 0,
 	"total_process_time_usec": 0,
 }
+
+
+## Get or create a mutex for a specific model path
+func _get_model_mutex(model_path: String) -> Mutex:
+	_model_mutexes_lock.lock()
+	if model_path not in _model_mutexes:
+		_model_mutexes[model_path] = Mutex.new()
+	var mtx: Mutex = _model_mutexes[model_path]
+	_model_mutexes_lock.unlock()
+	return mtx
 
 # =============================================================================
 # POOL PRE-WARMING
@@ -1391,10 +1487,13 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 		# This prevents crashes if the model cache is cleared during the async operation
 		var prototype_id: int = model_prototype.get_instance_id() if model_prototype else 0
 
+		# Get per-model mutex to serialize duplicate() calls for the same model
+		# This prevents "cyclic resource inclusion" errors from concurrent access
+		var model_mutex: Mutex = _get_model_mutex(model_path)
+
 		WorkerThreadPool.add_task(func():
 			# This runs on worker thread - duplicate the prototype
-			# Resource paths are cleared in ModelLoader._load_from_disk_cache() so duplicates
-			# don't conflict on the same paths
+			# Use per-model mutex to prevent concurrent duplicate() on same prototype
 			var task_start := Time.get_ticks_usec()
 			var instance: Node3D = null
 			var success := true
@@ -1402,7 +1501,11 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 			# Look up prototype by ID - safe if node was freed
 			var prototype: Node3D = instance_from_id(prototype_id) as Node3D if prototype_id != 0 else null
 			if prototype:
+				# Lock per-model mutex to serialize duplicate() calls for this model
+				model_mutex.lock()
 				instance = prototype.duplicate()
+				model_mutex.unlock()
+
 				if instance:
 					instance.name = instance_name
 				else:
@@ -1492,6 +1595,10 @@ func _process_parallel_duplicate_results() -> int:
 		if use_object_pool and _object_pool and not model_path.is_empty():
 			var normalized := model_path.to_lower().replace("/", "\\")
 			instance.set_meta("pool_model_path", normalized)
+
+		# CRITICAL: Hide LOD nodes to prevent white mesh overlays
+		# Parallel duplicate path bypasses ReferenceInstantiator, so we must hide here
+		_hide_lod_nodes(instance)
 
 		# Add to scene
 		cell_node.add_child(instance)
@@ -1897,6 +2004,7 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 			_apply_transform(pooled, ref, true)
+			_hide_lod_nodes(pooled)  # CRITICAL: Hide LODs on pooled objects
 			_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
 			return pooled
 
@@ -1910,6 +2018,9 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 	# Create instance
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+
+	# CRITICAL: Hide LOD nodes to prevent white mesh overlays
+	_hide_lod_nodes(instance)
 
 	# Check if this is a light record - needs OmniLight3D in addition to model
 	var record_type: Array = [""]
@@ -1980,6 +2091,13 @@ func _get_cache_key(model_path: String, item_id: String) -> String:
 	if not item_id.is_empty():
 		return normalized + ":" + item_id.to_lower()
 	return normalized
+
+
+## Hide LOD sibling nodes and materialless meshes in a scene tree
+## Delegates to ReferenceInstantiator for consistent behavior across all instantiation paths
+## CRITICAL: Must be called after every duplicate() to prevent white mesh overlays
+func _hide_lod_nodes(node: Node) -> void:
+	_instantiator._hide_lod_nodes(node)
 
 
 ## Get count of pending async requests

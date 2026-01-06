@@ -265,7 +265,14 @@
       "Bash(cmd /c \"dir %APPDATA%\\\\Godot\\\\app_userdata\\\\Godotwind /s /b 2>nul || echo Folder not found\")",
       "Bash(cmd /c \"dir %APPDATA%\\\\Godot /s /b 2>nul\")",
       "Bash(cmd /c \"dir %APPDATA%\\\\Godot\")",
-      "Bash(dir \"%APPDATA%\\\\Godot\")"
+      "Bash(dir \"%APPDATA%\\\\Godot\")",
+      "Bash(powershell -Command \"Get-ChildItem ''D:\\\\Gamedev\\\\openmw-mods\\\\LiamMello''''s MVR PBR\\\\00 Base-Parallax-Normal Maps'' | Select-Object -First 20\")",
+      "Bash(powershell -Command \"Get-ChildItem ''D:\\\\Gamedev\\\\openmw-mods\\\\LiamMello''''s MVR PBR\\\\01 PBR Maps'' | Select-Object -First 20\")",
+      "Bash(powershell -Command \"Get-ChildItem ''D:\\\\Gamedev\\\\openmw-mods\\\\LiamMello''''s MVR PBR\\\\00 Base-Parallax-Normal Maps\\\\Textures'' -Recurse | Select-Object -First 30\")",
+      "Bash(powershell -Command \"Get-ChildItem ''D:\\\\Gamedev\\\\openmw-mods\\\\LiamMello''''s MVR PBR\\\\01 PBR Maps\\\\textures'' -Recurse | Select-Object -First 30\")",
+      "Bash(ls -la \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\src\\\\tools\\\\prebaking\"\" 2>/dev/null || dir \"d:GamedevGodotwindgodotwindsrctoolsprebaking\"\")",
+      "Bash(dir /b \"%USERPROFILE%\\\\Documents\\\\Godotwind\\\\cache\\\\models\")",
+      "Bash(godot --headless --script:*)"
     ]
   }
 }

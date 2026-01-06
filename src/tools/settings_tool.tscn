@@ -165,6 +165,256 @@ text = "Subdirectories: impostors/, models/, merged_cells/, navmeshes/, ocean/, 
 [node name="HSeparator4" type="HSeparator" parent="MarginContainer/VBoxContainer"]
 layout_mode = 2
 
+[node name="TexturePacksPanel" type="PanelContainer" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="MarginContainer/VBoxContainer/TexturePacksPanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Label" type="Label" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "External Texture Packs (OpenMW-style)"
+
+[node name="TexturePacksInfoLabel" type="Label" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = "Add directories containing texture mods. Later entries have higher priority (override earlier ones)."
+
+[node name="TexturePacksList" type="ItemList" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 100)
+layout_mode = 2
+size_flags_vertical = 3
+allow_reselect = true
+allow_search = false
+
+[node name="TexturePacksButtonsHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="AddTexturePackButton" type="Button" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer/TexturePacksButtonsHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Add Directory..."
+
+[node name="RemoveTexturePackButton" type="Button" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer/TexturePacksButtonsHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Remove Selected"
+
+[node name="MoveUpButton" type="Button" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer/TexturePacksButtonsHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Move Up"
+
+[node name="MoveDownButton" type="Button" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer/TexturePacksButtonsHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Move Down"
+
+[node name="ClearTextureCacheButton" type="Button" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer/TexturePacksButtonsHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Clear Texture Cache"
+
+[node name="TexturePackFileDialog" type="FileDialog" parent="."]
+unique_name_in_owner = true
+title = "Select Texture Pack Directory"
+size = Vector2i(800, 500)
+ok_button_text = "Select"
+
+[node name="HSeparator6" type="HSeparator" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="GraphicsPanel" type="PanelContainer" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Label" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "Graphics Settings"
+
+[node name="QualityHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="QualityLabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/QualityHBox"]
+layout_mode = 2
+text = "Quality Preset:"
+
+[node name="QualityPresetOption" type="OptionButton" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/QualityHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+selected = 1
+item_count = 4
+popup/item_0/text = "Low"
+popup/item_1/text = "Medium"
+popup/item_1/id = 1
+popup/item_2/text = "High"
+popup/item_2/id = 2
+popup/item_3/text = "Ultra"
+popup/item_3/id = 3
+
+[node name="DistantRenderingCheck" type="CheckBox" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Distant Rendering (LOD + Impostors)"
+
+[node name="DistantRenderingInfo" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 11
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Enables multi-tier LOD system with impostors for distant objects (5km+ view distance)"
+
+[node name="AAHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="AALabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/AAHBox"]
+layout_mode = 2
+text = "Anti-Aliasing:"
+
+[node name="AntiAliasingOption" type="OptionButton" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/AAHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+selected = 2
+item_count = 6
+popup/item_0/text = "Disabled"
+popup/item_1/text = "FXAA"
+popup/item_1/id = 1
+popup/item_2/text = "TAA (Recommended)"
+popup/item_2/id = 2
+popup/item_3/text = "MSAA 2x"
+popup/item_3/id = 3
+popup/item_4/text = "MSAA 4x"
+popup/item_4/id = 4
+popup/item_5/text = "MSAA 8x"
+popup/item_5/id = 5
+
+[node name="ShadowHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="ShadowLabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/ShadowHBox"]
+layout_mode = 2
+text = "Shadow Quality:"
+
+[node name="ShadowQualityOption" type="OptionButton" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/ShadowHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+selected = 2
+item_count = 5
+popup/item_0/text = "Disabled"
+popup/item_1/text = "Low"
+popup/item_1/id = 1
+popup/item_2/text = "Medium"
+popup/item_2/id = 2
+popup/item_3/text = "High"
+popup/item_3/id = 3
+popup/item_4/text = "Ultra"
+popup/item_4/id = 4
+
+[node name="ViewDistanceHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="ViewDistanceLabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/ViewDistanceHBox"]
+layout_mode = 2
+text = "View Distance:"
+
+[node name="ViewDistanceSlider" type="HSlider" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/ViewDistanceHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 0.25
+max_value = 2.0
+step = 0.25
+value = 1.0
+
+[node name="ViewDistanceValue" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/ViewDistanceHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(50, 0)
+text = "100%"
+
+[node name="EffectsLabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+text = "Post-Processing Effects:"
+
+[node name="EffectsGrid" type="GridContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+columns = 3
+
+[node name="VSyncCheck" type="CheckBox" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/EffectsGrid"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "VSync"
+
+[node name="SSAOCheck" type="CheckBox" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/EffectsGrid"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "SSAO"
+
+[node name="SSRCheck" type="CheckBox" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/EffectsGrid"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "SSR"
+
+[node name="GlowCheck" type="CheckBox" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/EffectsGrid"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Glow/Bloom"
+
+[node name="VolumetricFogCheck" type="CheckBox" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/EffectsGrid"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Volumetric Fog"
+
+[node name="FPSHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="FPSLabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/FPSHBox"]
+layout_mode = 2
+text = "Max FPS:"
+
+[node name="MaxFPSOption" type="OptionButton" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer/FPSHBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+selected = 0
+item_count = 6
+popup/item_0/text = "Unlimited"
+popup/item_1/text = "30"
+popup/item_1/id = 1
+popup/item_2/text = "60"
+popup/item_2/id = 2
+popup/item_3/text = "90"
+popup/item_3/id = 3
+popup/item_4/text = "120"
+popup/item_4/id = 4
+popup/item_5/text = "144"
+popup/item_5/id = 5
+
+[node name="GraphicsInfoLabel" type="Label" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 11
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+text = "Note: Some settings require restart to take effect."
+
+[node name="HSeparator7" type="HSeparator" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+
 [node name="SaveButton" type="Button" parent="MarginContainer/VBoxContainer"]
 unique_name_in_owner = true
 layout_mode = 2

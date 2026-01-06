@@ -499,14 +499,11 @@ func get_max_view_distance() -> float:
 	return DU.FAR_END
 
 
-## Distant rendering support (requires pre-baked assets)
+## Distant rendering support
 func supports_distant_rendering() -> bool:
-	# Check if pre-baked assets exist in cache directory
-	var has_impostors := DirAccess.dir_exists_absolute(SettingsManager.get_impostors_path())
-	var has_merged := DirAccess.dir_exists_absolute(SettingsManager.get_merged_cells_path())
-
-	# Enable if either impostors or merged cells exist
-	return has_impostors or has_merged
+	# Always enable distant rendering - LOD system works without pre-baked impostors
+	# MID tier uses embedded LODs from NIFConverter, FAR tier uses impostors if available
+	return true
 
 
 ## Get impostor candidates for Morrowind landmarks

@@ -121,6 +121,9 @@ var _gpu_features_checked: bool = false
 var _has_buffer_rd_rid: bool = false
 var _has_indirect_drawing: bool = false
 
+## Debug warning counter to avoid log spam
+var _debug_material_warnings: int = 0
+
 ## Check for Godot 4.4+ GPU features
 func _check_gpu_features() -> void:
 	if _gpu_features_checked:
@@ -546,6 +549,7 @@ func _grow_batch(batch: MeshBatch) -> void:
 ## lod_level: LOD level for debug coloring (0-3)
 func _create_crossfade_material(mesh: ArrayMesh, materials: Array[Material] = [], lod_level: int = 1) -> ShaderMaterial:
 	if not _crossfade_shader:
+		push_warning("[LODMultiMeshBatcher] No crossfade shader set - LODs will render without materials")
 		return null
 
 	var shader_mat := ShaderMaterial.new()
@@ -555,13 +559,18 @@ func _create_crossfade_material(mesh: ArrayMesh, materials: Array[Material] = []
 	shader_mat.set_shader_parameter("lod_level", lod_level)
 
 	# Try to get source material:
-	# 1. First check mesh's embedded surface material
-	# 2. Fall back to externally provided materials array
+	# 1. First check externally provided materials array (preferred - from object_streamer)
+	# 2. Fall back to mesh's embedded surface material
 	var source_mat: Material = null
-	if mesh.get_surface_count() > 0:
-		source_mat = mesh.surface_get_material(0)
-	if source_mat == null and not materials.is_empty():
+	var material_source := "none"
+
+	if not materials.is_empty() and materials[0] != null:
 		source_mat = materials[0]
+		material_source = "external_array"
+	elif mesh.get_surface_count() > 0:
+		source_mat = mesh.surface_get_material(0)
+		if source_mat:
+			material_source = "mesh_surface"
 
 	# Apply material properties to shader
 	if source_mat is StandardMaterial3D:
@@ -584,6 +593,33 @@ func _create_crossfade_material(mesh: ArrayMesh, materials: Array[Material] = []
 		if std_mat.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
 			shader_mat.set_shader_parameter("use_alpha_cutout", true)
 			shader_mat.set_shader_parameter("alpha_cutout", std_mat.alpha_scissor_threshold)
+	elif source_mat is ShaderMaterial:
+		# ShaderMaterial - try to extract texture from shader parameters
+		var shader_source := source_mat as ShaderMaterial
+		var albedo_tex: Texture2D = shader_source.get_shader_parameter("albedo_texture")
+		if albedo_tex:
+			shader_mat.set_shader_parameter("albedo_texture", albedo_tex)
+		var albedo_col: Variant = shader_source.get_shader_parameter("albedo_color")
+		if albedo_col is Color:
+			shader_mat.set_shader_parameter("albedo_color", albedo_col)
+		# Log that we're using ShaderMaterial fallback
+		if _debug_material_warnings < 10:
+			print("[LODMultiMeshBatcher] Using ShaderMaterial fallback for LOD%d (source: %s)" % [lod_level, material_source])
+			_debug_material_warnings += 1
+	elif source_mat == null:
+		# NO MATERIAL - this causes white LODs!
+		if _debug_material_warnings < 20:
+			push_warning("[LODMultiMeshBatcher] NO MATERIAL for LOD%d batch - will render WHITE! (mesh surfaces: %d, external materials: %d)" % [
+				lod_level, mesh.get_surface_count(), materials.size()])
+			_debug_material_warnings += 1
+		# Set a visible debug color so white LODs are obvious
+		shader_mat.set_shader_parameter("albedo_color", Color(1.0, 0.0, 1.0, 1.0))  # Magenta = missing material
+	else:
+		# Unknown material type
+		if _debug_material_warnings < 10:
+			push_warning("[LODMultiMeshBatcher] Unknown material type '%s' for LOD%d - cannot extract properties" % [
+				source_mat.get_class(), lod_level])
+			_debug_material_warnings += 1
 
 	return shader_mat
 

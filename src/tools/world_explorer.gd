@@ -1267,10 +1267,8 @@ func _on_show_models_toggled(enabled: bool) -> void:
 	# Toggle object loading in WorldStreamingManager
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
-		# Use streaming_mode as single source of truth for tier activation
-		# This ensures all subsystems (tier_manager, object_streamer, impostor_manager)
-		# are properly synchronized via _apply_streaming_mode()
-		world_streaming_manager.streaming_mode = StreamingConfig.StreamingMode.FULL_AAA if enabled else StreamingConfig.StreamingMode.NEAR_ONLY
+		# Note: streaming_mode is always FULL_AAA now (NEAR_ONLY removed)
+		# Visibility is controlled via load_objects flag and tier visibility methods
 
 		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		_log("[DIAG] Currently loaded cells in dictionary: %d" % loaded_coords.size())
@@ -1830,9 +1828,7 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	world_streaming_manager.view_distance_cells = _current_view_distance
 	world_streaming_manager.load_objects = _show_models  # Respect default setting
-	# Use streaming_mode as single source of truth:
-	# NEAR_ONLY when models disabled, FULL_AAA when models enabled
-	world_streaming_manager.streaming_mode = StreamingConfig.StreamingMode.FULL_AAA if _show_models else StreamingConfig.StreamingMode.NEAR_ONLY
+	# Note: streaming_mode is always FULL_AAA now (NEAR_ONLY removed)
 	world_streaming_manager.debug_enabled = true
 
 	add_child(world_streaming_manager)
