@@ -452,12 +452,41 @@ func get_stats() -> Dictionary:
 	# Add load queue stats
 	s["load_queue_size"] = _pending_load_queue.size()
 	s["camera_cell"] = _camera_cell
+	s["camera_position"] = _camera_position
+	s["frame_budget_ms"] = frame_budget_ms
 
 	# Merge impostor stats if available
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
 		s.merge(_impostor_renderer.call("get_stats"))
 
 	return s
+
+
+## Print detailed debug information to console (for troubleshooting)
+func print_debug_info() -> void:
+	print("\n========== NATIVE STREAMING DEBUG INFO ==========")
+	print("Initialized: ", _initialized)
+	print("Camera: ", _camera)
+	print("Camera Cell: ", _camera_cell)
+	print("Camera Position: ", _camera_position)
+	print("\nSettings:")
+	print("  load_radius_cells: ", load_radius_cells)
+	print("  impostor_radius_cells: ", impostor_radius_cells)
+	print("  frame_budget_ms: ", frame_budget_ms)
+	print("  use_native_visibility: ", use_native_visibility)
+	print("  debug_enabled: ", debug_enabled)
+	print("\nStats:")
+	var stats = get_stats()
+	for key in stats:
+		print("  %s: %s" % [key, stats[key]])
+	print("\nImpostor Renderer:")
+	if _impostor_renderer:
+		print("  Exists: true")
+		print("  ImpostorCandidates: ", _impostor_renderer.impostor_candidates != null)
+		print("  Debug enabled: ", _impostor_renderer.debug_enabled)
+	else:
+		print("  Exists: false")
+	print("=================================================\n")
 
 
 ## Force reload all cells (after configuration change)
