@@ -236,6 +236,9 @@ func _update_loaded_cells() -> void:
 		if grid not in cells_to_load:
 			cells_to_unload.append(grid)
 
+	if debug_enabled and not cells_to_unload.is_empty():
+		_debug("Unloading %d cells" % cells_to_unload.size())
+
 	for grid: Vector2i in cells_to_unload:
 		_unload_cell(grid)
 
@@ -244,6 +247,9 @@ func _update_loaded_cells() -> void:
 	for grid: Vector2i in cells_to_load:
 		if grid not in _loaded_cells and grid not in _loading_cells:
 			_pending_load_queue.append(grid)
+
+	if debug_enabled and not _pending_load_queue.is_empty():
+		_debug("Queueing %d cells for loading (camera at cell %s)" % [_pending_load_queue.size(), _camera_cell])
 
 	# Sort by distance (closest first)
 	_pending_load_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
@@ -404,6 +410,7 @@ func _process_pending_loads(_delta: float) -> void:
 		return
 
 	var start_time := Time.get_ticks_msec()
+	var cells_loaded_this_frame := 0
 
 	# Process cells from the queue until we hit the frame budget
 	while not _pending_load_queue.is_empty():
@@ -416,6 +423,7 @@ func _process_pending_loads(_delta: float) -> void:
 
 		# Load the cell
 		_load_cell(grid)
+		cells_loaded_this_frame += 1
 
 		# Check frame budget
 		var elapsed := Time.get_ticks_msec() - start_time
@@ -423,9 +431,14 @@ func _process_pending_loads(_delta: float) -> void:
 
 		if elapsed >= frame_budget_ms:
 			# Budget exceeded - continue next frame
-			if not _pending_load_queue.is_empty():
-				_debug("Frame budget exceeded (%.1fms), %d cells remaining" % [elapsed, _pending_load_queue.size()])
+			if debug_enabled or _pending_load_queue.size() > 5:
+				_debug("Frame budget exceeded (%.1fms), loaded %d cells, %d remaining" % [elapsed, cells_loaded_this_frame, _pending_load_queue.size()])
 			break
+
+	# Log if we loaded cells without hitting budget
+	if debug_enabled and cells_loaded_this_frame > 0 and _pending_load_queue.is_empty():
+		var elapsed := Time.get_ticks_msec() - start_time
+		_debug("Loaded %d cells in %.1fms (under budget)" % [cells_loaded_this_frame, elapsed])
 
 #endregion
 

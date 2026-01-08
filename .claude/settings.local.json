@@ -280,7 +280,9 @@
       "Bash(\"D:/Gamedev/Godotwind/godot.exe\" --headless --quit --path .)",
       "Bash(\"../Godot_v4.5.1-stable_mono_win64_console.exe\" --headless --quit --path .)",
       "Bash(git add:*)",
-      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --headless --path . --quit)"
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --headless --path . --quit)",
+      "Bash(dir \"C:\\\\Users\\\\metzo\\\\Documents\\\\Godotwind\\\\cache\\\\impostors\")",
+      "Bash(git commit:*)"
     ]
   }
 }

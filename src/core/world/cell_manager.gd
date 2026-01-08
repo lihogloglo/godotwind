@@ -989,7 +989,8 @@ func request_cell_async(cell_name: String) -> int:
 func is_async_complete(request_id: int) -> bool:
 	if request_id not in _async_requests:
 		return true  # Not found = already completed or invalid
-	return _async_requests[request_id].completed
+	var request: AsyncCellRequest = _async_requests.get(request_id)
+	return request.completed if request else true
 
 
 ## Check if an async request has failed (some models couldn't be parsed)
@@ -1004,7 +1005,8 @@ func has_async_failed(request_id: int) -> bool:
 func get_async_error(request_id: int) -> String:
 	if request_id not in _async_requests:
 		return ""
-	return _async_requests[request_id].error_message
+	var request: AsyncCellRequest = _async_requests.get(request_id)
+	return request.error_message if request else ""
 
 
 ## Get number of failed models in an async request
@@ -1037,7 +1039,8 @@ func get_async_result(request_id: int) -> Node3D:
 func get_async_cell_node(request_id: int) -> Node3D:
 	if request_id not in _async_requests:
 		return null
-	return _async_requests[request_id].cell_node
+	var request: AsyncCellRequest = _async_requests.get(request_id)
+	return request.cell_node if request else null
 
 
 ## Cancel an async request
@@ -1736,7 +1739,7 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 	# Submit parse tasks for models that need loading
 	for model_path: String in models_to_load:
 		var model_info: Variant = models_to_load[model_path]
-		var item_ids: Array = model_info.item_ids if model_info is Dictionary else []
+		var item_ids: Array = model_info.get("item_ids", []) if model_info is Dictionary else []
 		var item_id: String = item_ids[0] if item_ids.size() > 0 else ""
 
 		var task_id := _submit_parse_task(str(model_path), item_id, request.request_id)
@@ -2008,7 +2011,9 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 
 	# Track pending instantiation count for completion checking
 	if request_id in _async_requests:
-		_async_requests[request_id].pending_instantiations += 1
+		var request: AsyncCellRequest = _async_requests.get(request_id)
+		if request:
+			request.pending_instantiations += 1
 
 	return true
 
@@ -2032,7 +2037,8 @@ func _hide_lod_nodes(node: Node) -> void:
 func get_async_pending_count() -> int:
 	var count := 0
 	for request_id: int in _async_requests:
-		if not _async_requests[request_id].completed:
+		var request: AsyncCellRequest = _async_requests.get(request_id)
+		if request and not request.completed:
 			count += 1
 	return count
 

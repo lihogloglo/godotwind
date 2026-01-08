@@ -643,7 +643,8 @@ func _is_static_render_model(model_path: String) -> bool:
 ## Uses dither crossfade shader for smooth appearance (prevents visual pop)
 func _apply_fade_in(instance: Node3D) -> void:
 	if not scene_tree:
-		print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
+		if debug_lod:
+			print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
 		return  # Need scene tree for tweens
 
 	# Find all MeshInstance3D nodes in the hierarchy
@@ -651,10 +652,12 @@ func _apply_fade_in(instance: Node3D) -> void:
 	_find_mesh_instances(instance, mesh_instances)
 
 	if mesh_instances.is_empty():
-		print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no mesh instances in %s" % instance.name)
+		if debug_lod:
+			print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no mesh instances in %s" % instance.name)
 		return
 
-	print("[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
+	if debug_lod:
+		print("[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
 
 	# Store original materials and apply fade materials
 	var fade_data: Array[Dictionary] = []

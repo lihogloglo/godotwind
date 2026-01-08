@@ -1102,19 +1102,10 @@ func _update_debug_overlay_references() -> void:
 		# Set world streaming manager reference for LOD visualization
 		_debug_overlay.set_world_streaming_manager(world_streaming_manager)
 
-		var tier_mgr: RefCounted = world_streaming_manager.tier_manager
-		if tier_mgr:
-			print("[WorldExplorer] Setting tier manager")
-			_debug_overlay.set_tier_manager(tier_mgr)
-		else:
-			print("[WorldExplorer] No tier manager found")
-
-		var chunk_mgr: RefCounted = world_streaming_manager.chunk_manager
-		if chunk_mgr:
-			print("[WorldExplorer] Setting chunk manager")
-			_debug_overlay.set_chunk_manager(chunk_mgr)
-		else:
-			print("[WorldExplorer] No chunk manager found")
+		# Note: NativeStreamingManager doesn't expose tier_manager/chunk_manager
+		# Those were part of the old architecture and are now internal to NativeStreamingManager
+		# The debug overlay should work with the streaming manager directly
+		print("[WorldExplorer] World streaming manager set (NativeStreamingManager)")
 	else:
 		print("[WorldExplorer] No world streaming manager")
 
@@ -1304,14 +1295,15 @@ func _on_show_models_toggled(enabled: bool) -> void:
 		# Log impostor manager stats (get reference outside if/else block)
 		var impostor_mgr_stats: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
 		if impostor_mgr_stats and impostor_mgr_stats.has_method("get_stats"):
-			var imp_stats: Dictionary = impostor_mgr_stats.call("get_stats")
-			_log("[DIAG] Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
-				imp_stats.get("total_impostors", 0),
-				imp_stats.get("visible_impostors", 0),
-				imp_stats.get("texture_cache_size", 0),
-				imp_stats.get("pending_loads", 0),
-				imp_stats.get("texture_array_layers", 0),
-			])
+			var imp_stats: Variant = impostor_mgr_stats.call("get_stats")
+			if imp_stats and imp_stats is Dictionary:
+				_log("[DIAG] Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
+					imp_stats.get("total_impostors", 0),
+					imp_stats.get("visible_impostors", 0),
+					imp_stats.get("texture_cache_size", 0),
+					imp_stats.get("pending_loads", 0),
+					imp_stats.get("texture_array_layers", 0),
+				])
 
 		# Native streaming system: Objects are always loaded when cells load
 		# Visibility is controlled by native visibility_range properties
@@ -1347,14 +1339,15 @@ func _on_show_models_toggled(enabled: bool) -> void:
 		_log("[DIAG] After 2s delay:")
 		var impostor_mgr_delayed: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
 		if impostor_mgr_delayed and impostor_mgr_delayed.has_method("get_stats"):
-			var imp_stats: Dictionary = impostor_mgr_delayed.call("get_stats")
-			_log("[DIAG]   Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
-				imp_stats.get("total_impostors", 0),
-				imp_stats.get("visible_impostors", 0),
-				imp_stats.get("texture_cache_size", 0),
-				imp_stats.get("pending_loads", 0),
-				imp_stats.get("texture_array_layers", 0),
-			])
+			var imp_stats: Variant = impostor_mgr_delayed.call("get_stats")
+			if imp_stats and imp_stats is Dictionary:
+				_log("[DIAG]   Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
+					imp_stats.get("total_impostors", 0),
+					imp_stats.get("visible_impostors", 0),
+					imp_stats.get("texture_cache_size", 0),
+					imp_stats.get("pending_loads", 0),
+					imp_stats.get("texture_array_layers", 0),
+				])
 		# Native streaming system: No chunk renderer (uses cell-based loading)
 		# ChunkRenderer is deprecated - native system doesn't use chunk-based paging
 
@@ -1813,7 +1806,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	
 	# Configure
 	native_streaming_manager.load_radius_cells = _current_view_distance
-	native_streaming_manager.debug_enabled = true
+	native_streaming_manager.debug_enabled = false
 	
 	add_child(native_streaming_manager)
 	

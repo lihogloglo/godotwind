@@ -396,6 +396,8 @@ func _poll_job_results() -> void:
 ## Set the impostor candidates reference
 func set_impostor_candidates(candidates: ImpostorCandidatesScript) -> void:
 	impostor_candidates = candidates
+	if debug_enabled:
+		_debug("ImpostorCandidates initialized: %s" % (impostor_candidates != null))
 
 
 ## Add an impostor for a model at a specific world position
@@ -463,8 +465,14 @@ func add_impostor(
 	pending.scale = world_scale
 	pending.texture_size = impostor_size
 	pending.aabb_center_y = aabb_center_y
-	(_pending_impostors[hash_key] as Array).append(pending)
-	
+
+	# Check if key still exists (might have been removed by fast texture load)
+	if hash_key in _pending_impostors:
+		(_pending_impostors[hash_key] as Array).append(pending)
+	else:
+		# Texture loaded already, create impostor immediately
+		return _create_impostor(model_path, cell_grid, hash_key, world_position, world_rotation, world_scale, impostor_size, aabb_center_y)
+
 	return -1
 
 
@@ -493,6 +501,8 @@ func get_stats() -> Dictionary:
 ## Called by streaming manager
 func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 	if not impostor_candidates:
+		if debug_enabled:
+			push_warning("[NativeImpostorRenderer] update_impostor_area called but impostor_candidates is null!")
 		return
 		
 	# 1. Calculate cells that SHOULD be loaded
@@ -522,9 +532,10 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 			_loaded_impostor_cells[grid] = true
 			
 	if not cells_to_load.is_empty():
-		_debug("Loading impostors for %d new cells" % cells_to_load.size())
+		_debug("Loading impostors for %d new cells (center: %s, radius: %d)" % [cells_to_load.size(), center_cell, radius])
 		for grid in cells_to_load:
 			_load_impostors_from_cell_record(grid)
+		_debug("After loading: %d active impostors, %d pending" % [_impostors.size(), _pending_impostors.size()])
 
 
 ## Unload impostors belonging to specific cells
