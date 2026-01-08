@@ -26,7 +26,6 @@ var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
-var object_distance_manager: Node3D = null  # ObjectStreamer (DEPRECATED - not used by native streaming)
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null
@@ -122,37 +121,10 @@ func is_significant_object(model_path: String) -> bool:
 	return _impostor_candidates.should_have_impostor(model_path)
 
 
-## Register an object with the object distance manager
-## This enables distance-based visibility with dither crossfade for smooth transitions
-func _register_with_distance_manager(
-	node: Node3D,
-	ref: CellReference,
-	model_path: String,
-	cell_grid: Vector2i
-) -> void:
-	if not object_distance_manager:
-		if debug_lod:
-			print("[ODM] FAIL: object_distance_manager is null for %s" % model_path.get_file())
-		return
-
-	if not object_distance_manager.has_method("register_object"):
-		if debug_lod:
-			print("[ODM] FAIL: object_distance_manager has no register_object method!")
-		return
-
-	# Register with distance manager
-	# Signature: register_object(node3d, model_path, cell_grid, ref_num)
-	var result: int = object_distance_manager.register_object(
-		node,
-		model_path,
-		cell_grid,
-		ref.ref_num
-	)
-
-	if result >= 0:
-		stats["significant_objects_registered"] += 1
-		if debug_lod:
-			print("[ODM] Registered %s (id=%d)" % [model_path.get_file(), result])
+# REMOVED: _register_with_distance_manager()
+# The native streaming system uses visibility_range for distance-based visibility,
+# not a separate ObjectStreamer/DistanceTierManager.
+# LOD configuration is handled by NativeStreamingManager._configure_cell_visibility()
 
 
 ## Instantiate a standard object with a NIF model
@@ -189,7 +161,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 		var pooled: Node3D = object_pool.call("acquire", model_path)
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
-			_hide_lod_nodes(pooled)  # Ensure LOD nodes are hidden (may have been reset in pool)
+			# Note: visibility_range is already configured on pooled objects
 			_apply_transform(pooled, ref, true)
 			stats["objects_from_pool"] += 1
 			return pooled
@@ -207,9 +179,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	# CRITICAL: Hide embedded LOD nodes immediately after duplication
-	# These nodes (named _LOD1, _LOD2, _LOD3) are used for MID tier MultiMesh batching,
-	# not for direct rendering. Without this, LOD meshes overlap with the main mesh.
+	# Hide materialless meshes (collision geometry, placeholders)
+	# LOD nodes (_LOD1, _LOD2, _LOD3) are now kept visible and configured with visibility_range
 	_hide_lod_nodes(instance)
 
 	# Apply transform
@@ -223,19 +194,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# NOTE: Fade-in is NOT applied here because the node isn't in the scene tree yet.
 	# Fade-in must be applied AFTER add_child() - see CellManager._instantiate_cell()
 
-	# Register objects with distance manager for distance-based visibility
-	# Significant objects get full LOD chain, others get simple LOD
-	var is_significant := is_significant_object(model_path)
-	if debug_lod:
-		print("[ODM-INST] Object %s: odm=%s, significant=%s" % [
-			model_path.get_file(),
-			object_distance_manager != null,
-			is_significant
-		])
-
-	# Register with object distance manager (handles both significant and non-significant)
-	if object_distance_manager:
-		_register_with_distance_manager(instance, ref, model_path, cell_grid)
+	# NOTE: visibility_range configuration happens in NativeStreamingManager._configure_cell_visibility()
+	# after the cell is added to the scene tree. No need to register with a separate distance manager.
 
 	return instance
 
@@ -284,7 +244,7 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 		if model_prototype:
 			var model_instance: Node3D = model_prototype.duplicate()
 			model_instance.name = "Model"
-			_hide_lod_nodes(model_instance)  # Hide LOD nodes to prevent overlap
+			_hide_lod_nodes(model_instance)  # Hide materialless meshes only
 			light_node.add_child(model_instance)
 
 	# Create the actual light source
@@ -387,7 +347,7 @@ func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_
 	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
-	# Hide LOD nodes to prevent overlap
+	# Hide materialless meshes only
 	_hide_lod_nodes(instance)
 
 	# Check if model has actor collision metadata (from NIF "Bounding Box" node)
@@ -773,7 +733,7 @@ func _find_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
 		_find_mesh_instances(child, result)
 
 
-## Hide LOD sibling nodes and materialless meshes in a scene tree
+## Hide materialless meshes in a scene tree (LOD nodes are kept visible)
 ## Uses centralized MeshVisibilityUtils for consistent behavior across the codebase
 func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node, debug_lod)

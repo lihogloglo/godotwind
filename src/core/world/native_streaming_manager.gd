@@ -29,6 +29,7 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ModelLoaderScript := preload("res://src/core/world/model_loader.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 #region Signals
@@ -111,6 +112,9 @@ var _loaded_cells: Dictionary = {}
 ## Cells currently being loaded (async)
 var _loading_cells: Dictionary = {}
 
+## Pending cells to load (priority queue, sorted by distance)
+var _pending_load_queue: Array[Vector2i] = []
+
 ## Container node for all cell content
 var _world_container: Node3D = null
 
@@ -136,40 +140,6 @@ var _stats: Dictionary = {
 ## Whether the manager has been initialized
 var _initialized: bool = false
 
-## Background processor (for backwards compatibility, not used in native system)
-var _background_processor: RefCounted = null
-
-## Streaming profiler (stub for backwards compatibility)
-var _streaming_profiler: RefCounted = null
-
-#endregion
-
-
-#region Backwards Compatibility - Stub Properties
-
-## Stub tier_manager property for backwards compatibility
-## Returns null since native system doesn't use DistanceTierManager
-var tier_manager: RefCounted:
-	get:
-		return null
-
-## Stub object_streamer property for backwards compatibility
-## Returns null since native system doesn't use ObjectStreamer
-var object_streamer: Node:
-	get:
-		return null
-
-## Stub chunk_manager property for backwards compatibility
-## Returns null since this was deprecated
-var chunk_manager: RefCounted:
-	get:
-		return null
-
-## Stub object_position_index property for backwards compatibility
-var object_position_index: RefCounted:
-	get:
-		return null
-
 #endregion
 
 
@@ -189,28 +159,6 @@ func _ready() -> void:
 	# Create impostor candidates helper
 	_impostor_candidates = ImpostorCandidatesScript.new()
 	_impostor_renderer.set_impostor_candidates(_impostor_candidates)
-
-	# Create stub nodes for backwards compatibility
-	_create_stub_nodes()
-
-
-## Create stub nodes for backwards compatibility with old API
-func _create_stub_nodes() -> void:
-	# Create ObjectStreamer stub - a simple node that responds to common queries
-	var object_streamer_stub := Node.new()
-	object_streamer_stub.name = "ObjectStreamer"
-	# Add stub properties
-	object_streamer_stub.set_meta("enabled", true)
-	object_streamer_stub.set_meta("near_tier_visible", true)
-	object_streamer_stub.set_meta("mid_tier_visible", true)
-	object_streamer_stub.set_meta("far_tier_visible", true)
-	object_streamer_stub.set_meta("_camera_pos", Vector3.ZERO)
-	add_child(object_streamer_stub)
-
-	# Create DistanceTierManager stub
-	var tier_mgr_stub := Node.new()
-	tier_mgr_stub.name = "DistanceTierManager"
-	add_child(tier_mgr_stub)
 
 
 ## Initialize the streaming manager
@@ -246,15 +194,9 @@ func set_camera(camera: Camera3D) -> void:
 	_camera = camera
 
 
-## Set cell manager (backwards compatibility)
+## Set cell manager
 func set_cell_manager(cell_manager: CellManagerScript) -> void:
 	_cell_manager = cell_manager
-
-
-## Set background processor (backwards compatibility, not used in native system)
-func set_background_processor(processor: RefCounted) -> void:
-	_background_processor = processor
-	_debug("Background processor set (not used in native streaming)")
 
 #endregion
 
@@ -285,26 +227,28 @@ func _process(delta: float) -> void:
 
 ## Update which cells should be loaded based on camera position
 func _update_loaded_cells() -> void:
-	var start_time := Time.get_ticks_msec()
-	
 	# Calculate which cells should be loaded
 	var cells_to_load := _get_cells_in_radius(_camera_cell, load_radius_cells)
-	
+
 	# Unload cells that are too far
 	var cells_to_unload: Array[Vector2i] = []
 	for grid: Vector2i in _loaded_cells:
 		if grid not in cells_to_load:
 			cells_to_unload.append(grid)
-	
+
 	for grid: Vector2i in cells_to_unload:
 		_unload_cell(grid)
-	
-	# Load new cells
+
+	# Queue new cells for loading (sorted by distance)
+	_pending_load_queue.clear()
 	for grid: Vector2i in cells_to_load:
 		if grid not in _loaded_cells and grid not in _loading_cells:
-			_load_cell(grid)
+			_pending_load_queue.append(grid)
 
-	_stats["load_time_ms"] = Time.get_ticks_msec() - start_time
+	# Sort by distance (closest first)
+	_pending_load_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return DU.cell_distance_squared(_camera_cell, a) < DU.cell_distance_squared(_camera_cell, b)
+	)
 
 	# Update impostors
 	if _impostor_renderer:
@@ -402,30 +346,29 @@ func _configure_cell_visibility(cell_node: Node3D) -> void:
 func _configure_node_visibility_recursive(node: Node) -> void:
 	if node is GeometryInstance3D:
 		var geo := node as GeometryInstance3D
-		
+		var node_name := node.name
+
 		# Determine appropriate visibility based on node name/type
-		if _is_lod_node(node):
-			# LOD nodes get their specific range
-			var lod_level := _get_lod_level(node)
+		if MeshVisibilityUtils.is_lod_node_name(node_name):
+			# LOD nodes get their specific range based on their level
+			var lod_level := _get_lod_level(node_name)
 			_lod_configurator.configure_mid_object(geo, lod_level)
+			if debug_enabled:
+				_debug("Configured LOD%d: %s (range: %s)" % [lod_level, node_name, _get_lod_range_str(lod_level)])
 		else:
-			# Default: NEAR tier visibility
+			# Default: NEAR tier visibility (0-150m)
 			_lod_configurator.configure_near_object(geo)
-	
+			if debug_enabled and node is MeshInstance3D:
+				_debug("Configured NEAR: %s (0-150m)" % node_name)
+
 	# Recurse to children
 	for child in node.get_children():
 		_configure_node_visibility_recursive(child)
 
 
-## Check if a node is a LOD mesh
-func _is_lod_node(node: Node) -> bool:
-	var name := node.name.to_lower()
-	return "_lod" in name
-
-
 ## Get LOD level from node name (1, 2, or 3)
-func _get_lod_level(node: Node) -> int:
-	var name := node.name.to_lower()
+func _get_lod_level(node_name: String) -> int:
+	var name := node_name.to_lower()
 	if "_lod1" in name:
 		return 1
 	elif "_lod2" in name:
@@ -433,6 +376,15 @@ func _get_lod_level(node: Node) -> int:
 	elif "_lod3" in name:
 		return 3
 	return 1  # Default to LOD1
+
+
+## Get human-readable distance range string for LOD level (debug helper)
+func _get_lod_range_str(lod_level: int) -> String:
+	match lod_level:
+		1: return "150-250m"
+		2: return "250-375m"
+		3: return "375-500m"
+		_: return "unknown"
 
 
 ## Count MeshInstance3D nodes in a tree
@@ -445,10 +397,35 @@ func _count_mesh_instances(node: Node) -> int:
 	return count
 
 
-## Process pending async loads (placeholder for future async implementation)
+## Process pending cell loads with frame budget limiting
+## Loads cells from the pending queue respecting the frame_budget_ms limit
 func _process_pending_loads(_delta: float) -> void:
-	# Currently synchronous - async loading can be added later
-	pass
+	if _pending_load_queue.is_empty():
+		return
+
+	var start_time := Time.get_ticks_msec()
+
+	# Process cells from the queue until we hit the frame budget
+	while not _pending_load_queue.is_empty():
+		var grid := _pending_load_queue[0]
+		_pending_load_queue.remove_at(0)
+
+		# Skip if already loaded or loading
+		if grid in _loaded_cells or grid in _loading_cells:
+			continue
+
+		# Load the cell
+		_load_cell(grid)
+
+		# Check frame budget
+		var elapsed := Time.get_ticks_msec() - start_time
+		_stats["load_time_ms"] = elapsed
+
+		if elapsed >= frame_budget_ms:
+			# Budget exceeded - continue next frame
+			if not _pending_load_queue.is_empty():
+				_debug("Frame budget exceeded (%.1fms), %d cells remaining" % [elapsed, _pending_load_queue.size()])
+			break
 
 #endregion
 
@@ -459,12 +436,9 @@ func _process_pending_loads(_delta: float) -> void:
 func get_stats() -> Dictionary:
 	var s := _stats.duplicate()
 
-	# Add backwards compatibility keys
-	s["load_queue_size"] = 0  # Native system has no queue
-	s["queue_high_water_mark"] = 0
+	# Add load queue stats
+	s["load_queue_size"] = _pending_load_queue.size()
 	s["camera_cell"] = _camera_cell
-	s["async_pending"] = 0
-	s["instantiation_queue"] = 0
 
 	# Merge impostor stats if available
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
@@ -512,7 +486,7 @@ func teleport_to(position: Vector3) -> void:
 	_update_loaded_cells()
 
 
-## Get all loaded cell coordinates (backwards compatibility)
+## Get all loaded cell coordinates
 func get_loaded_cell_coordinates() -> Array[Vector2i]:
 	var coords: Array[Vector2i] = []
 	for grid: Vector2i in _loaded_cells.keys():
@@ -520,29 +494,11 @@ func get_loaded_cell_coordinates() -> Array[Vector2i]:
 	return coords
 
 
-## Refresh cells around camera (backwards compatibility)
+## Refresh cells around camera
 ## Forces a check of which cells should be loaded
 func refresh_cells() -> void:
 	if _initialized:
 		_update_loaded_cells()
-
-
-## Clear load queue (backwards compatibility stub)
-## Native system loads synchronously, so this is a no-op
-func clear_load_queue() -> void:
-	_debug("clear_load_queue() called (no-op in native streaming)")
-
-
-## Get streaming profiler (backwards compatibility stub)
-## Returns null since native system doesn't use StreamingProfiler
-func get_streaming_profiler() -> RefCounted:
-	return _streaming_profiler
-
-
-## Clear tier state (backwards compatibility stub)
-## No-op since native system doesn't use tiers
-func clear_tier_state() -> void:
-	_debug("clear_tier_state() called (no-op in native streaming)")
 
 
 ## Update objects visibility based on load_objects flag

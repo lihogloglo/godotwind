@@ -75,6 +75,9 @@ var _pending_job_ids: Dictionary = {}
 ## Pending impostors waiting for texture
 var _pending_impostors: Dictionary = {}  # hash_key -> Array[PendingImpostor]
 
+## Default fallback texture for missing impostors (created on demand)
+var _fallback_texture: ImageTexture = null
+
 ## Active impostors: impostor_id -> ImpostorData
 var _impostors: Dictionary = {}
 var _next_id: int = 0
@@ -284,11 +287,12 @@ void fragment() {
 func _start_job_system() -> void:
 	if _job_system != null:
 		return
-	
+
 	_job_system = BackgroundJobSystemScript.new()
 	var err: Error = _job_system.start(2)  # 2 worker threads
 	if err != OK:
-		push_error("[NativeImpostorRenderer] Failed to start job system")
+		push_error("[NativeImpostorRenderer] Failed to start job system: %s" % error_string(err))
+		push_error("[NativeImpostorRenderer] Falling back to synchronous texture loading")
 		_job_system = null
 
 
@@ -304,7 +308,7 @@ func _stop_job_system() -> void:
 func _submit_texture_load_job(hash_key: String, texture_path: String) -> void:
 	if _job_system == null:
 		return
-	
+
 	var load_callable := func() -> Dictionary:
 		var image := Image.new()
 		var err := image.load(texture_path)
@@ -312,10 +316,37 @@ func _submit_texture_load_job(hash_key: String, texture_path: String) -> void:
 			return {"hash_key": hash_key, "image": image, "success": true}
 		else:
 			return {"hash_key": hash_key, "image": null, "success": false}
-	
+
 	var job_id: int = _job_system.submit(load_callable, "texture", 0)
 	if job_id >= 0:
 		_pending_job_ids[hash_key] = job_id
+		if debug_enabled:
+			_debug("Submitted async texture load job %d for hash %s" % [job_id, hash_key])
+
+
+## Synchronous texture loading fallback
+func _load_texture_sync(hash_key: String, texture_path: String) -> void:
+	var image := Image.new()
+	var err := image.load(texture_path)
+	if err == OK:
+		if debug_enabled:
+			_debug("Loaded texture synchronously: %s" % texture_path)
+		_on_texture_loaded(hash_key, image)
+	else:
+		push_warning("[NativeImpostorRenderer] Failed to load texture: %s (%s)" % [texture_path, error_string(err)])
+		# Use fallback
+		_on_texture_loaded(hash_key, _get_fallback_image())
+
+
+## Get or create fallback texture image (magenta/pink for visibility)
+func _get_fallback_image() -> Image:
+	if _fallback_texture == null:
+		var img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
+		img.fill(Color(1.0, 0.0, 1.0, 1.0))  # Magenta
+		_fallback_texture = ImageTexture.create_from_image(img)
+		if debug_enabled:
+			_debug("Created fallback impostor texture (magenta)")
+	return _fallback_texture.get_image()
 
 #endregion
 
@@ -403,11 +434,25 @@ func add_impostor(
 	# Queue for async load
 	if hash_key not in _pending_impostors:
 		_pending_impostors[hash_key] = []
-		
+
 		# Start texture load
 		var texture_path := ImpostorCandidatesScript.get_impostor_texture_path(model_path)
+		if debug_enabled:
+			_debug("Checking impostor texture: %s" % texture_path)
+			_debug("File exists: %s" % FileAccess.file_exists(texture_path))
+
 		if FileAccess.file_exists(texture_path):
-			_submit_texture_load_job(hash_key, texture_path)
+			# Try async loading first
+			if _job_system != null:
+				_submit_texture_load_job(hash_key, texture_path)
+			else:
+				# Fallback to synchronous loading if job system failed
+				_load_texture_sync(hash_key, texture_path)
+		else:
+			if debug_enabled:
+				_debug("Impostor texture not found, using fallback for: %s" % model_path)
+			# Use fallback texture immediately
+			_on_texture_loaded(hash_key, _get_fallback_image())
 	
 	# Queue the impostor
 	var pending := PendingImpostor.new()

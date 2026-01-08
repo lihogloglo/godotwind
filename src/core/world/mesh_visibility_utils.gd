@@ -1,9 +1,11 @@
 ## MeshVisibilityUtils - Centralized mesh visibility management
 ##
 ## Provides utilities for hiding meshes that shouldn't render:
-## - LOD nodes (_LOD1, _LOD2, _LOD3) used for MultiMesh batching
 ## - Materialless meshes (collision geometry, placeholders)
 ## - Meshes with empty/invalid materials (no texture)
+##
+## NOTE: LOD nodes (_LOD1, _LOD2, _LOD3) are NO LONGER hidden.
+## They are configured with visibility_range by NativeStreamingManager for proper LOD transitions.
 ##
 ## This consolidates duplicate code from:
 ## - ReferenceInstantiator._hide_lod_nodes()
@@ -83,7 +85,7 @@ static func _is_material_renderable(mat: Material) -> bool:
 	return true
 
 
-## Hide LOD nodes and materialless meshes in a node tree
+## Hide materialless meshes in a node tree (LOD nodes are NO LONGER hidden)
 ## This is the single source of truth for mesh hiding logic
 ##
 ## Parameters:
@@ -94,18 +96,18 @@ static func hide_lod_and_materialless(node: Node, debug: bool = false) -> void:
 		var mi := node as MeshInstance3D
 		var mesh_name: String = mi.name
 
-		# 1. Hide LOD nodes (used for MID tier MultiMesh batching)
-		if is_lod_node_name(mesh_name):
-			mi.visible = false
-			if debug:
-				print("[MeshVisibility] Hiding LOD node: %s" % mesh_name)
-			# Don't return - still process children
+		# LOD nodes (_LOD1, _LOD2, _LOD3) are NO LONGER hidden
+		# They are configured with visibility_range by NativeStreamingManager
+		# for proper distance-based LOD transitions
 
-		# 2. Hide meshes without valid renderable material
-		elif mi.visible and not has_valid_material(mi):
-			mi.visible = false
-			if debug:
-				print("[MeshVisibility] Hiding materialless/white mesh: %s" % mesh_name)
+		# Hide meshes without valid renderable material
+		if mi.visible and not has_valid_material(mi):
+			# Skip LOD nodes - even if they have no material, they should be visible
+			# (visibility_range will control when they render)
+			if not is_lod_node_name(mesh_name):
+				mi.visible = false
+				if debug:
+					print("[MeshVisibility] Hiding materialless/white mesh: %s" % mesh_name)
 
 	# Recurse into children
 	for child in node.get_children():
