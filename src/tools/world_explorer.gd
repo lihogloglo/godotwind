@@ -1827,34 +1827,53 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		# Add debugging commands
 		console.register_command(
 			"debug_streaming",
-			func(_args: Array) -> String:
-				native_streaming_manager.print_debug_info()
-				return "Debug info printed to console",
-			"Print detailed streaming system debug info"
+			_cmd_debug_streaming,
+			"Print detailed streaming system debug info",
+			"debug"
 		)
 
 		console.register_command(
 			"toggle_debug",
-			func(_args: Array) -> String:
-				native_streaming_manager.debug_enabled = not native_streaming_manager.debug_enabled
-				if native_streaming_manager._impostor_renderer:
-					native_streaming_manager._impostor_renderer.debug_enabled = native_streaming_manager.debug_enabled
-				return "Debug mode: %s" % ("ON" if native_streaming_manager.debug_enabled else "OFF"),
-			"Toggle debug logging for streaming system"
+			_cmd_toggle_debug,
+			"Toggle debug logging for streaming system",
+			"debug"
 		)
 
 		console.register_command(
 			"impostor_stats",
-			func(_args: Array) -> String:
-				if native_streaming_manager._impostor_renderer:
-					var stats = native_streaming_manager._impostor_renderer.get_stats()
-					var result = "Impostor Stats:\n"
-					for key in stats:
-						result += "  %s: %s\n" % [key, stats[key]]
-					return result
-				return "Impostor renderer not available",
-			"Show impostor renderer statistics"
+			_cmd_impostor_stats,
+			"Show impostor renderer statistics",
+			"debug"
 		)
+
+
+## Console command: debug_streaming
+func _cmd_debug_streaming(_args: Dictionary) -> String:
+	if native_streaming_manager:
+		native_streaming_manager.print_debug_info()
+		return "Debug info printed above"
+	return "Native streaming manager not available"
+
+
+## Console command: toggle_debug
+func _cmd_toggle_debug(_args: Dictionary) -> String:
+	if native_streaming_manager:
+		native_streaming_manager.debug_enabled = not native_streaming_manager.debug_enabled
+		if native_streaming_manager._impostor_renderer:
+			native_streaming_manager._impostor_renderer.debug_enabled = native_streaming_manager.debug_enabled
+		return "Debug mode: %s" % ("ON" if native_streaming_manager.debug_enabled else "OFF")
+	return "Native streaming manager not available"
+
+
+## Console command: impostor_stats
+func _cmd_impostor_stats(_args: Dictionary) -> String:
+	if native_streaming_manager and native_streaming_manager._impostor_renderer:
+		var stats = native_streaming_manager._impostor_renderer.get_stats()
+		var result = "Impostor Stats:\n"
+		for key in stats:
+			result += "  %s: %s\n" % [key, stats[key]]
+		return result
+	return "Impostor renderer not available"
 
 
 ## Callback for native streaming manager cell loaded
