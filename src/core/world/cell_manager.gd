@@ -691,63 +691,8 @@ func load_cell_deferred(x: int, y: int) -> int:
 	push_warning("CellManager.load_cell_deferred() is deprecated - use load_exterior_cell() instead")
 	return -1
 
-	var cell_grid := Vector2i(x, y)
-	var registered := 0
 
-	for ref: CellReference in cell_record.references:
-		# Get base record and type
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-		if not base_record:
-			continue
-
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-
-		# Skip types that don't work with deferred loading
-		if type_name == "light":
-			continue  # Lights need special handling
-		if type_name == "leveled_item":
-			continue  # Leveled items need resolution
-		if type_name == "npc" and not load_npcs:
-			continue
-		if type_name == "creature" and not load_creatures:
-			continue
-		if type_name == "leveled_creature" and not load_creatures:
-			continue
-
-		# Get model path
-		var model_path: String = _get_model_path(base_record)
-		if model_path.is_empty():
-			continue
-
-		# Skip models that would use static renderer (already optimized differently)
-		if use_static_renderer and _static_renderer and _instantiator._is_static_render_model(model_path):
-			continue
-
-		# Calculate world position and rotation
-		var world_position: Vector3 = CS.vector_to_godot(ref.position)
-		var rotation: Vector3 = ref.rotation  # Store raw ESM rotation for later conversion
-		var scale_factor: Vector3 = CS.scale_to_godot(ref.scale)
-
-		# Register with ODM as deferred
-		var object_id: int = _object_distance_manager.register_deferred_object(
-			model_path,
-			world_position,
-			rotation,
-			scale_factor,
-			cell_grid,
-			str(ref.ref_id),
-			ref.ref_num
-		)
-
-		if object_id >= 0:
-			registered += 1
-
-	return registered
-
-
-## Get cell references for deferred loading (without instantiation)
-## Used by WorldStreamingManager to get reference data for deferred registration
+## Get cell references (kept for backwards compatibility)
 func get_cell_references(x: int, y: int) -> Array:
 	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
 	if not cell_record:
@@ -2133,14 +2078,8 @@ func get_stats() -> Dictionary:
 	return result
 
 
-## Clean up significant objects in a cell when it's unloaded
-## Called by WorldStreamingManager when unloading cells
-## Returns number of objects unregistered
+## Clean up significant objects in a cell when it's unloaded (DEPRECATED)
+## Native streaming system handles cleanup automatically
 func cleanup_cell_significant_objects(cell_grid: Vector2i) -> int:
-	if not _object_distance_manager:
-		return 0
-
-	if not _object_distance_manager.has_method("unregister_cell"):
-		return 0
-
-	return _object_distance_manager.unregister_cell(cell_grid)
+	# DEPRECATED: No-op, native streaming handles cleanup
+	return 0
