@@ -33,7 +33,6 @@ static func get_tier_name(tier: int) -> String:
 		Tier.MID: return "MID"
 		Tier.FAR: return "FAR"
 		Tier.HIDDEN: return "HIDDEN"
-		4: return "NONE"  # DistanceTierManager.Tier.NONE compatibility
 		_: return "T%d" % tier
 
 

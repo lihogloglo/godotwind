@@ -137,7 +137,6 @@ func get_tier_unit_counts() -> Dictionary:
 
 
 ## Get maximum view distance for this world (in meters)
-## Used to configure DistanceTierManager.max_view_distance
 ## Returns: Distance in meters, or 0.0 to use default (5000m)
 func get_max_view_distance() -> float:
 	return 0.0  # Use default

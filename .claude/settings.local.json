@@ -272,7 +272,15 @@
       "Bash(powershell -Command \"Get-ChildItem ''D:\\\\Gamedev\\\\openmw-mods\\\\LiamMello''''s MVR PBR\\\\01 PBR Maps\\\\textures'' -Recurse | Select-Object -First 30\")",
       "Bash(ls -la \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\src\\\\tools\\\\prebaking\"\" 2>/dev/null || dir \"d:GamedevGodotwindgodotwindsrctoolsprebaking\"\")",
       "Bash(dir /b \"%USERPROFILE%\\\\Documents\\\\Godotwind\\\\cache\\\\models\")",
-      "Bash(godot --headless --script:*)"
+      "Bash(godot --headless --script:*)",
+      "Bash(xargs:*)",
+      "Bash(git mv:*)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\godot.exe\" --headless --quit --path .)",
+      "Bash(\"/d/Gamedev/Godotwind/godot.exe\" --headless --quit --path .)",
+      "Bash(\"D:/Gamedev/Godotwind/godot.exe\" --headless --quit --path .)",
+      "Bash(\"../Godot_v4.5.1-stable_mono_win64_console.exe\" --headless --quit --path .)",
+      "Bash(git add:*)",
+      "Bash(\"D:\\\\Gamedev\\\\Godotwind\\\\Godot_v4.5.1-stable_mono_win64_console.exe\" --headless --path . --quit)"
     ]
   }
 }

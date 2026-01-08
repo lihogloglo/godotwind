@@ -36,8 +36,8 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
-# ObjectStreamer for distance-based visibility and LOD management
-var _object_distance_manager: Node3D = null  # ObjectStreamer
+# ObjectStreamer for distance-based visibility and LOD management (DEPRECATED - not used by native streaming)
+var _object_distance_manager: Node3D = null  # ObjectStreamer (legacy only)
 
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
@@ -89,7 +89,7 @@ func get_object_pool() -> RefCounted:
 	return _object_pool
 
 
-## Set the ObjectStreamer for distance-based visibility and LOD
+## Set the ObjectStreamer for distance-based visibility and LOD (DEPRECATED - not used by native streaming)
 func set_object_streamer(streamer: Node3D) -> void:
 	_object_distance_manager = streamer
 	_sync_instantiator_config()

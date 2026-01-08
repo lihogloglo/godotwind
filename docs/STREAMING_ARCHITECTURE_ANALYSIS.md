@@ -1,8 +1,18 @@
 # Godotwind Streaming & Distant Rendering Architecture Analysis
 
-## Executive Summary
+## Status: REPLACED BY NATIVE SYSTEM (January 2026)
 
-This document provides a comprehensive audit of the Godotwind asset streaming pipeline, analyzing how the system handles rendering from near to far distances. The codebase implements a **sophisticated 4-tier rendering system** with GPU compute acceleration, following industry-standard patterns from games like RDR2 and Horizon Zero Dawn.
+**⚠️ HISTORICAL DOCUMENT**: This architecture has been replaced by a native Godot-based streaming system. See [STREAMING_AUDIT_REPORT.md](STREAMING_AUDIT_REPORT.md) for the current implementation.
+
+The custom 10,000+ line streaming system described in this document has been deprecated and moved to `src/core/world/deprecated/`. The new system uses Godot 4.x native `visibility_range` features and consists of ~1,500 lines of code.
+
+---
+
+## Executive Summary (Historical)
+
+This document provides a comprehensive audit of the **original** Godotwind asset streaming pipeline, analyzing how the system handled rendering from near to far distances. The codebase implemented a **sophisticated 4-tier rendering system** with GPU compute acceleration, following industry-standard patterns from games like RDR2 and Horizon Zero Dawn.
+
+**This system has been replaced** - kept for historical reference only.
 
 ### Recent Simplifications (January 2026)
 

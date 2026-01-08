@@ -218,7 +218,6 @@ const FADE_DURATION := 0.3
 
 ## Maximum concurrent fade animations
 ## Prevents runaway processing when moving fast through many objects
-## ObjectStreamer._active_fades is capped at this size
 const MAX_CONCURRENT_FADES := 200
 
 ## Teleport detection threshold (meters)

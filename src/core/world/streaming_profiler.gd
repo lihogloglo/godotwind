@@ -7,9 +7,9 @@
 ##   var profiler := StreamingProfiler.new()
 ##   profiler.begin_frame()
 ##
-##   profiler.begin_section("ObjectStreamer.update")
-##   object_streamer.update(camera_pos, delta)
-##   profiler.end_section("ObjectStreamer.update")
+##   profiler.begin_section("NativeStreamingManager.update")
+##   native_streaming_manager.update(camera_pos, delta)
+##   profiler.end_section("NativeStreamingManager.update")
 ##
 ##   profiler.end_frame()
 ##   print(profiler.get_formatted_report())

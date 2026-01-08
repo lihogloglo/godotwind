@@ -16,7 +16,7 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
-const BackgroundJobSystemScript := preload("res://src/core/jobs/background_job_system.gd")
+const BackgroundJobSystemScript := preload("res://src/core/threading/background_job_system.gd")
 # We assume global CS class is available or we use duplicated logic?
 # Best to rely on the fact that CellManager usually handles this.
 # Note: Since we are reading raw ESM data here, we might need CoordinateSystem.
@@ -286,7 +286,7 @@ func _start_job_system() -> void:
 		return
 	
 	_job_system = BackgroundJobSystemScript.new()
-	var err := _job_system.start(2)  # 2 worker threads
+	var err: Error = _job_system.start(2)  # 2 worker threads
 	if err != OK:
 		push_error("[NativeImpostorRenderer] Failed to start job system")
 		_job_system = null
@@ -694,13 +694,10 @@ func _rebuild_multimesh() -> void:
 		# Create transform with scale based on texture size
 		var scale_x := impostor.texture_size.x * impostor.scale.x
 		var scale_y := impostor.texture_size.y * impostor.scale.y
-		
-		var transform := Transform3D()
+
 		transform = transform.scaled(Vector3(scale_x, scale_y, 1.0))
 		transform.origin = billboard_pos
-		
-		_master_multimesh.set_instance_transform(idx, transform)
-		
+
 		_master_multimesh.set_instance_transform(idx, transform)
 		
 		# Custom data: x = texture layer, y = rotation.y (radians)

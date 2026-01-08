@@ -26,7 +26,7 @@ var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
-var object_distance_manager: Node3D = null  # ObjectStreamer (optional)
+var object_distance_manager: Node3D = null  # ObjectStreamer (DEPRECATED - not used by native streaming)
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null

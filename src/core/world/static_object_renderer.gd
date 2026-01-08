@@ -264,13 +264,12 @@ func get_instance_transform(id: int) -> Transform3D:
 	return _instances[id].transform
 
 
-## DEPRECATED: This function is not called anywhere and bypasses the tier system
-## Visibility should be controlled by DistanceTierManager (the unified visibility authority)
-## Kept for potential future use but not actively used in FULL_AAA mode
+## DEPRECATED: This function is not called anywhere
+## Native streaming system uses Godot's visibility_range for automatic distance culling
 ## Returns number of visibility changes made
 func update_visibility_by_distance(_camera_pos: Vector3, _max_distance: float) -> int:
-	push_warning("[StaticObjectRenderer] update_visibility_by_distance is deprecated - use DistanceTierManager")
-	return 0  # No-op, visibility controlled by tier manager
+	push_warning("[StaticObjectRenderer] update_visibility_by_distance is deprecated - native streaming uses visibility_range")
+	return 0  # No-op
 
 
 ## Batch add instances (more efficient than individual adds)

@@ -7,7 +7,6 @@
 ##
 ## This consolidates duplicate code from:
 ## - ReferenceInstantiator._hide_lod_nodes()
-## - ObjectStreamer._hide_lod_siblings()
 ## - CellManager._hide_lod_nodes()
 class_name MeshVisibilityUtils
 extends RefCounted

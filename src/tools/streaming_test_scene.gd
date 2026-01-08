@@ -268,7 +268,7 @@ func _init_async() -> void:
 	_teleport_to_cell(-2, -9)
 
 	# Start tracking camera
-	world_streaming_manager.set_tracked_node(camera)
+	world_streaming_manager.set_camera(camera)
 
 	# Enable models (this is what user would do with the toggle)
 	_enable_models()

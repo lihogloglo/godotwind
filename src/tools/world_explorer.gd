@@ -29,7 +29,7 @@
 extends Node3D
 
 # Preload dependencies
-const WorldStreamingManagerScript := preload("res://src/core/world/world_streaming_manager.gd")
+const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
 const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
@@ -130,7 +130,8 @@ var _lod_mode_btn: Button = null
 @onready var interior_container: Node3D = $InteriorContainer if has_node("InteriorContainer") else null
 
 # Managers
-var world_streaming_manager: WorldStreamingManager = null  # WorldStreamingManager (objects only)
+var world_streaming_manager: Node3D = null  # NativeStreamingManager (always native now)
+var native_streaming_manager: Node3D = null  # NativeStreamingManager reference (same as above)
 var terrain_manager: TerrainManager = null  # TerrainManager (for prebaking)
 var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
@@ -273,7 +274,7 @@ func _init_async() -> void:
 
 	# Ocean system is now lazy-loaded - created on first toggle
 
-	# Create and setup WorldStreamingManager (but don't start tracking yet)
+	# Create and setup NativeStreamingManager (but don't start tracking yet)
 	await _update_loading(85, "Setting up streaming system...")
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
 
@@ -298,7 +299,7 @@ func _init_async() -> void:
 	_teleport_to_cell(-2, -9)
 
 	# NOW start tracking the camera - cells will generate around Seyda Neen
-	world_streaming_manager.set_tracked_node(camera)
+	world_streaming_manager.set_camera(camera)
 
 	# Update debug overlay with references to managers
 	_update_debug_overlay_references()
@@ -460,9 +461,9 @@ func _connect_diagnostic_systems() -> void:
 
 	# Connect to streaming systems
 	if world_streaming_manager:
-		var object_streamer: Node = world_streaming_manager.get_node_or_null("ObjectStreamer")
-		diagnostic_overlay.connect_to_streaming(world_streaming_manager, object_streamer)
-		crash_reporter.connect_to_systems(self, world_streaming_manager, object_streamer, diagnostic_overlay)
+		# Native streaming system doesn't have ObjectStreamer - pass null
+		diagnostic_overlay.connect_to_streaming(world_streaming_manager, null)
+		crash_reporter.connect_to_systems(self, world_streaming_manager, null, diagnostic_overlay)
 
 	_log("Diagnostic systems connected to streaming")
 
@@ -585,7 +586,7 @@ func _switch_to_player_controller() -> void:
 
 	# Update tracked node for streaming
 	if world_streaming_manager:
-		world_streaming_manager.set_tracked_node(player_controller)
+		world_streaming_manager.set_camera(camera)
 
 	# Update ocean camera
 	if ocean_manager and ocean_manager.has_method("set_camera"):
@@ -623,7 +624,7 @@ func _switch_to_fly_camera() -> void:
 
 	# Update tracked node for streaming
 	if world_streaming_manager:
-		world_streaming_manager.set_tracked_node(fly_camera)
+		world_streaming_manager.set_camera(camera)
 
 	# Update ocean camera
 	if ocean_manager and ocean_manager.has_method("set_camera"):
@@ -1264,7 +1265,7 @@ func _on_show_models_toggled(enabled: bool) -> void:
 	if crash_reporter:
 		crash_reporter.log_toggle("Models", enabled)
 
-	# Toggle object loading in WorldStreamingManager
+	# Toggle object loading in NativeStreamingManager
 	if world_streaming_manager:
 		world_streaming_manager.load_objects = enabled
 		# Note: streaming_mode is always FULL_AAA now (NEAR_ONLY removed)
@@ -1273,16 +1274,10 @@ func _on_show_models_toggled(enabled: bool) -> void:
 		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		_log("[DIAG] Currently loaded cells in dictionary: %d" % loaded_coords.size())
 
-		# AAA Streaming: Use ObjectStreamer's tier visibility if available
-		var object_streamer: Node = world_streaming_manager.get_node_or_null("ObjectStreamer")
-		if object_streamer and object_streamer.has_method("set_near_visible"):
-			# Use ObjectStreamer's tier visibility system (cleaner, no cell iteration)
-			object_streamer.set_near_visible(enabled)
-			object_streamer.set_mid_visible(enabled)
-			object_streamer.set_far_visible(enabled)
-			_log("[DIAG] ObjectStreamer tier visibility: %s" % ("ON" if enabled else "OFF"))
-		else:
-			# Legacy path: Show/hide existing loaded cell objects from dictionary
+		# Native streaming system: Visibility controlled by Godot's native visibility_range
+		# Objects automatically show/hide based on distance - we just need to show/hide cell containers
+		if true:
+			# Show/hide existing loaded cell objects from dictionary
 			var visible_count := 0
 			for cell_grid: Vector2i in loaded_coords:
 				var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
@@ -1291,7 +1286,7 @@ func _on_show_models_toggled(enabled: bool) -> void:
 					visible_count += 1
 
 			# Also iterate direct children to catch any cells not in the dictionary
-			# (cells are added as children of WorldStreamingManager)
+			# (cells are added as children of NativeStreamingManager)
 			var child_count := 0
 			for child in world_streaming_manager.get_children():
 				if child is Node3D and child.has_meta("cell_grid"):
@@ -1318,14 +1313,11 @@ func _on_show_models_toggled(enabled: bool) -> void:
 				imp_stats.get("texture_array_layers", 0),
 			])
 
-		# AAA Streaming: Use ObjectStreamer's enabled flag instead of reloading cells
-		# This avoids the massive performance spike from reload_all_cells()
-		# Reuse object_streamer variable from above
-		if object_streamer and "enabled" in object_streamer:
-			object_streamer.enabled = enabled
-			_log("[DIAG] ObjectStreamer.enabled = %s" % enabled)
-		else:
-			# Legacy path: Only reload when enabling (still causes stutter but needed for old system)
+		# Native streaming system: Objects are always loaded when cells load
+		# Visibility is controlled by native visibility_range properties
+		# No need for ObjectStreamer.enabled flag
+		if true:
+			# Nothing special needed - visibility is automatic
 			if enabled:
 				# Full reload required because cells loaded without objects have no Node3D children
 				# and the LOD manager needs objects to be registered during instantiation
@@ -1337,16 +1329,8 @@ func _on_show_models_toggled(enabled: bool) -> void:
 						world_streaming_manager.clear_tier_state()
 					world_streaming_manager.refresh_cells()
 
-			# Log chunk renderer stats
-			var chunk_renderer: Node = world_streaming_manager.get_node_or_null("ChunkRenderer")
-			if chunk_renderer and chunk_renderer.has_method("get_stats"):
-				var cr_stats: Dictionary = chunk_renderer.call("get_stats")
-				_log("[DIAG] ChunkRenderer: mid_chunks=%d, far_chunks=%d, mid_cells=%d, far_cells=%d" % [
-					cr_stats.get("mid_chunks_loaded", 0),
-					cr_stats.get("far_chunks_loaded", 0),
-					cr_stats.get("mid_cells_loaded", 0),
-					cr_stats.get("far_cells_loaded", 0),
-				])
+			# Native streaming system: No chunk renderer (uses cell-based loading)
+			# ChunkRenderer is deprecated - native system doesn't use chunk-based paging
 
 		# Log current queue states
 		if cell_manager:
@@ -1371,15 +1355,8 @@ func _on_show_models_toggled(enabled: bool) -> void:
 				imp_stats.get("pending_loads", 0),
 				imp_stats.get("texture_array_layers", 0),
 			])
-		var chunk_renderer: Node = world_streaming_manager.get_node_or_null("ChunkRenderer")
-		if chunk_renderer and chunk_renderer.has_method("get_stats"):
-			var cr_stats: Dictionary = chunk_renderer.call("get_stats")
-			_log("[DIAG]   ChunkRenderer: mid_chunks=%d, far_chunks=%d, mid_cells=%d, far_cells=%d" % [
-				cr_stats.get("mid_chunks_loaded", 0),
-				cr_stats.get("far_chunks_loaded", 0),
-				cr_stats.get("mid_cells_loaded", 0),
-				cr_stats.get("far_cells_loaded", 0),
-			])
+		# Native streaming system: No chunk renderer (uses cell-based loading)
+		# ChunkRenderer is deprecated - native system doesn't use chunk-based paging
 
 
 ## Toggle characters (NPCs/creatures) visibility
@@ -1819,62 +1796,51 @@ func _on_preprocess_pressed() -> void:
 
 
 func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
-	# Create WorldStreamingManager (objects only - terrain is prebaked)
-	var wsm_node := Node3D.new()
-	wsm_node.set_script(WorldStreamingManagerScript)
-	wsm_node.name = "WorldStreamingManager"
-	world_streaming_manager = wsm_node as WorldStreamingManager
+	_setup_native_streaming_manager(start_tracking)
 
+
+## Setup NEW native streaming manager (uses Godot visibility_range)
+## ~1,000 lines of code vs ~10,000 in legacy system
+func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
+	_log("[color=cyan]Using NATIVE streaming system (Godot visibility_range)[/color]")
+	
+	# Create NativeStreamingManager
+	var nsm_node := Node3D.new()
+	nsm_node.set_script(NativeStreamingManagerScript)
+	nsm_node.name = "NativeStreamingManager"
+	native_streaming_manager = nsm_node
+	world_streaming_manager = nsm_node  # Assign to common reference
+	
 	# Configure
-	world_streaming_manager.view_distance_cells = _current_view_distance
-	world_streaming_manager.load_objects = _show_models  # Respect default setting
-	# Note: streaming_mode is always FULL_AAA now (NEAR_ONLY removed)
-	world_streaming_manager.debug_enabled = true
-
-	add_child(world_streaming_manager)
-
+	native_streaming_manager.load_radius_cells = _current_view_distance
+	native_streaming_manager.debug_enabled = true
+	
+	add_child(native_streaming_manager)
+	
 	# Connect signals
-	world_streaming_manager.cell_loaded.connect(_on_cell_loaded)
-	world_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
-
-	# Provide managers
-	world_streaming_manager.set_cell_manager(cell_manager)
-	if background_processor:
-		world_streaming_manager.set_background_processor(background_processor)
-
-	# Initialize after all configuration is set
-	world_streaming_manager.initialize()
-
-	# Models are NOT preloaded - they will only load when Models toggle is enabled
-	# This ensures AAA streaming method is used exclusively
-
-	# Only start tracking if requested (allows teleporting BEFORE streaming starts)
-	if start_tracking:
-		world_streaming_manager.set_tracked_node(camera)
-
-	_log("WorldStreamingManager created and configured (terrain is prebaked)")
-
-	# Register world streaming manager with console
+	native_streaming_manager.cell_loaded.connect(_on_native_cell_loaded)
+	native_streaming_manager.cell_unloaded.connect(_on_native_cell_unloaded)
+	
+	# Initialize with cell manager and camera
+	native_streaming_manager.initialize(cell_manager, camera if start_tracking else null)
+	
+	_log("NativeStreamingManager created - using Godot's native visibility_range")
+	
+	# Register with console
 	if console:
-		console.register_context("world", world_streaming_manager)
+		console.register_context("world", native_streaming_manager)
 		console.register_context("player", player_controller)
 
 
-func _on_cell_loaded(grid: Vector2i, node: Node3D) -> void:
-	var obj_count := node.get_child_count()
-	_log("Cell loaded: (%d, %d) - %d objects" % [grid.x, grid.y, obj_count])
-
-	# Record cell load in profiler
-	if profiler and world_streaming_manager:
-		var stats: Dictionary = world_streaming_manager.get_stats()
-		var load_time: float = stats.get("load_time_ms", 0.0)
-		profiler.record_cell_load(load_time, obj_count)
-
+## Callback for native streaming manager cell loaded
+func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
+	_log("Cell loaded: (%d, %d) - %d objects (native)" % [grid.x, grid.y, object_count])
 	_update_stats()
 
 
-func _on_cell_unloaded(grid: Vector2i) -> void:
-	_log("Cell unloaded: (%d, %d)" % [grid.x, grid.y])
+## Callback for native streaming manager cell unloaded
+func _on_native_cell_unloaded(grid: Vector2i) -> void:
+	_log("Cell unloaded: (%d, %d) (native)" % [grid.x, grid.y])
 	_update_stats()
 
 
