@@ -1824,6 +1824,38 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		console.register_context("world", native_streaming_manager)
 		console.register_context("player", player_controller)
 
+		# Add debugging commands
+		console.register_command(
+			"debug_streaming",
+			func(_args: Array) -> String:
+				native_streaming_manager.print_debug_info()
+				return "Debug info printed to console",
+			"Print detailed streaming system debug info"
+		)
+
+		console.register_command(
+			"toggle_debug",
+			func(_args: Array) -> String:
+				native_streaming_manager.debug_enabled = not native_streaming_manager.debug_enabled
+				if native_streaming_manager._impostor_renderer:
+					native_streaming_manager._impostor_renderer.debug_enabled = native_streaming_manager.debug_enabled
+				return "Debug mode: %s" % ("ON" if native_streaming_manager.debug_enabled else "OFF"),
+			"Toggle debug logging for streaming system"
+		)
+
+		console.register_command(
+			"impostor_stats",
+			func(_args: Array) -> String:
+				if native_streaming_manager._impostor_renderer:
+					var stats = native_streaming_manager._impostor_renderer.get_stats()
+					var result = "Impostor Stats:\n"
+					for key in stats:
+						result += "  %s: %s\n" % [key, stats[key]]
+					return result
+				return "Impostor renderer not available",
+			"Show impostor renderer statistics"
+		)
+
 
 ## Callback for native streaming manager cell loaded
 func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
