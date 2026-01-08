@@ -36,9 +36,6 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
-# ObjectStreamer for distance-based visibility and LOD management (DEPRECATED - not used by native streaming)
-var _object_distance_manager: Node3D = null  # ObjectStreamer (legacy only)
-
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
 	"multimesh_instances": 0,
@@ -89,14 +86,8 @@ func get_object_pool() -> RefCounted:
 	return _object_pool
 
 
-## Set the ObjectStreamer for distance-based visibility and LOD (DEPRECATED - not used by native streaming)
-func set_object_streamer(streamer: Node3D) -> void:
-	_object_distance_manager = streamer
-	_sync_instantiator_config()
-
-	# Pass ModelLoader to ObjectStreamer for on-demand LOD loading
-	if streamer and streamer.has_method("set_model_loader"):
-		streamer.set_model_loader(_model_loader)
+# REMOVED: set_object_streamer()
+# Native streaming system uses visibility_range, not a separate ObjectStreamer
 
 
 ## Sync configuration to instantiator
@@ -109,7 +100,6 @@ func _sync_instantiator_config() -> void:
 	_instantiator.object_pool = _object_pool
 	_instantiator.static_renderer = _static_renderer
 	_instantiator.character_factory = _character_factory
-	_instantiator.object_distance_manager = _object_distance_manager
 	_instantiator.create_lights = create_lights
 	_instantiator.load_npcs = load_npcs
 	_instantiator.load_creatures = load_creatures
@@ -696,17 +686,10 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 ## Does NOT instantiate Node3D objects - that happens when objects enter NEAR range
 ## Returns number of objects registered, or -1 on failure
 func load_cell_deferred(x: int, y: int) -> int:
-	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
-	if not cell_record:
-		return -1
-
-	if not _object_distance_manager:
-		push_warning("CellManager: Cannot load deferred - no ObjectStreamer set")
-		return -1
-
-	if not _object_distance_manager.has_method("register_deferred_object"):
-		push_warning("CellManager: ObjectStreamer does not support deferred registration")
-		return -1
+	# DEPRECATED: This function is no longer used by native streaming system
+	# Kept for backwards compatibility but does nothing
+	push_warning("CellManager.load_cell_deferred() is deprecated - use load_exterior_cell() instead")
+	return -1
 
 	var cell_grid := Vector2i(x, y)
 	var registered := 0
