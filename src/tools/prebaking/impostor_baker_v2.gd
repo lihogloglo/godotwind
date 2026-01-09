@@ -401,6 +401,7 @@ func _find_all_mesh_instances(node: Node) -> Array[MeshInstance3D]:
 
 
 ## Generate output path for impostor files
+## Uses the same hash function as ImpostorCandidates for consistency
 func _get_output_path(model_path: String, extension: String) -> String:
 	var normalized := model_path
 	var lower := normalized.to_lower()
@@ -409,12 +410,14 @@ func _get_output_path(model_path: String, extension: String) -> String:
 
 	# CRITICAL: Normalize slashes BEFORE hashing to match loader
 	# This ensures ESM paths (forward slash) and BSA paths (backslash) produce same hash
-	normalized = normalized.replace("/", "\\")
+	normalized = normalized.replace("/", "\\").to_lower()
 
-	var hash_val := normalized.to_lower().hash()
+	# Use MD5 for deterministic hashing (matches ImpostorCandidates.get_hash_key)
+	# WARNING: Do NOT use String.hash() - it's not deterministic across sessions!
+	var hash_key := normalized.md5_text().substr(0, 8)
 	var base_name := normalized.get_file().get_basename()
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
-	var filename := "%s_%x.%s" % [base_name, hash_val, extension]
+	var filename := "%s_%s.%s" % [base_name, hash_key, extension]
 	return output_dir.path_join(filename)
 
 

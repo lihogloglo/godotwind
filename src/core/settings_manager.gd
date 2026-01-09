@@ -235,11 +235,6 @@ func get_impostors_path() -> String:
 	return get_cache_base_path().path_join("impostors")
 
 
-## Gets the merged cells cache path
-func get_merged_cells_path() -> String:
-	return get_cache_base_path().path_join("merged_cells")
-
-
 ## Gets the navmeshes cache path
 func get_navmeshes_path() -> String:
 	return get_cache_base_path().path_join("navmeshes")
@@ -258,11 +253,6 @@ func get_models_path() -> String:
 ## Gets the preprocessed terrain data cache path (Terrain3D regions)
 func get_terrain_path() -> String:
 	return get_cache_base_path().path_join("terrain")
-
-
-## Gets the LOD meshes cache path (simplified LOD1/LOD2/LOD3 meshes for per-object LOD)
-func get_lods_path() -> String:
-	return get_cache_base_path().path_join("lods")
 
 
 # =============================================================================
@@ -462,12 +452,10 @@ func ensure_cache_directories() -> Error:
 	var paths := [
 		get_cache_base_path(),
 		get_impostors_path(),
-		get_merged_cells_path(),  # DEPRECATED but kept for compatibility
 		get_navmeshes_path(),
 		get_ocean_path(),
 		get_models_path(),
 		get_terrain_path(),
-		get_lods_path(),
 	]
 
 	for path: String in paths:

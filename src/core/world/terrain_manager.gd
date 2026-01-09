@@ -584,10 +584,12 @@ func _get_terrain3d_texture_slot(mw_tex_idx: int) -> int:
 	return slot
 
 
-## Create a flat heightmap (all zeros)
+## Create a flat heightmap at ocean floor depth
+## Used when LAND record has no height data
 func _create_flat_heightmap() -> Image:
 	var img := Image.create(MW_LAND_SIZE, MW_LAND_SIZE, false, Image.FORMAT_RF)
-	img.fill(Color(0, 0, 0, 1))
+	# Use ocean floor depth instead of 0 so missing terrain appears as ocean
+	img.fill(Color(CS.OCEAN_FLOOR_GODOT, 0, 0, 1))
 	return img
 
 
@@ -781,8 +783,8 @@ func import_combined_region(terrain: Terrain3D, region_coord: Vector2i, get_land
 	var combined_colormap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RGB8)
 	var combined_controlmap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RF)
 
-	# Fill with defaults
-	combined_heightmap.fill(Color(0, 0, 0, 1))  # Flat terrain
+	# Fill with ocean floor depth so areas without LAND data appear as deep ocean
+	combined_heightmap.fill(Color(CS.OCEAN_FLOOR_GODOT, 0, 0, 1))
 	combined_colormap.fill(Color.WHITE)          # White vertex color
 	var default_control := _encode_control_value(0, 0, 0)
 	combined_controlmap.fill(Color(default_control, 0, 0, 1))
@@ -822,8 +824,10 @@ func import_combined_region(terrain: Terrain3D, region_coord: Vector2i, get_land
 			combined_colormap.blit_rect(cell_colormap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
 			combined_controlmap.blit_rect(cell_controlmap, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
 
-	if not any_data:
-		return false
+	# Even if no LAND data exists, we still import the region
+	# The heightmap is pre-filled with ocean floor depth, so pure ocean
+	# regions will render correctly below sea level
+	# (Removed: if not any_data: return false)
 
 	# Calculate world position for this region
 	# Each cell is (64 vertices × vertex_spacing) meters wide

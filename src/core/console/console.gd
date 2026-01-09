@@ -276,14 +276,18 @@ func _on_command_submitted(cmd_string: String) -> void:
 		return
 
 	# Execute command
-	var result: CommandRegistry.CommandResult
+	var result: Variant = null
 	if cmd.callback.is_valid():
 		result = cmd.callback.call(parsed.args)
 	else:
 		result = CommandRegistry.CommandResult.error("Command callback is invalid")
 
-	# Display result
-	if result:
+	# Display result - handle both String and CommandResult returns
+	if result is String:
+		# Legacy: commands returning String directly
+		if not result.is_empty():
+			ui.print_line(result)
+	elif result is CommandRegistry.CommandResult:
 		if result.success:
 			if not result.message.is_empty():
 				ui.print_line(result.message)
@@ -389,6 +393,20 @@ func _register_builtin_commands() -> void:
 
 	registry.register("distant_stats", _cmd_distant_stats, "Show distant rendering statistics", "debug",
 		PackedStringArray(["far_stats"]))
+
+	registry.register("impostor_debug", _cmd_impostor_debug, "Show detailed impostor system diagnostics", "debug",
+		PackedStringArray(["imp_debug", "impostor_diag"]))
+
+	registry.register("impostor_verbose", _cmd_impostor_verbose, "Toggle verbose impostor debug logging", "debug",
+		PackedStringArray(["imp_verbose"]),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on/off", false, "on")])
+
+	registry.register("impostor_show", _cmd_impostor_show, "Toggle impostor shader debug (shows magenta at ANY distance)", "debug",
+		PackedStringArray(["imp_show"]),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on/off", false, "on")])
+
+	registry.register("impostor_dump", _cmd_impostor_dump, "Dump detailed impostor renderer state to console", "debug",
+		PackedStringArray(["imp_dump"]))
 
 	# Ocean debug commands
 	registry.register("ocean_debug", _cmd_ocean_debug, "Toggle ocean shore mask debug visualization", "debug",
@@ -731,9 +749,19 @@ func _cmd_distant_stats(_args: Dictionary) -> CommandRegistry.CommandResult:
 			lines.append("")
 			lines.append("[color=yellow]FAR Tier (Impostors):[/color]")
 			lines.append("  Total impostors: %d" % stats.get("total_impostors", 0))
-			lines.append("  Visible impostors: %d" % stats.get("visible_impostors", 0))
+			lines.append("  MultiMesh instances: %d" % stats.get("multimesh_instance_count", 0))
 			lines.append("  Texture cache: %d" % stats.get("texture_cache_size", 0))
-			lines.append("  Cells with impostors: %d" % stats.get("cells_with_impostors", 0))
+			lines.append("  Texture array layers: %d" % stats.get("texture_array_layers", 0))
+			lines.append("  Loaded cells: %d" % stats.get("loaded_impostor_cells", 0))
+			lines.append("  Pending texture loads: %d" % stats.get("pending_texture_loads", 0))
+			lines.append("  Pending impostors: %d" % stats.get("pending_impostors", 0))
+			# Highlight issues
+			var process_enabled: bool = stats.get("process_enabled", true)
+			var has_candidates: bool = stats.get("has_candidates", false)
+			if not process_enabled:
+				lines.append("  [color=red]WARNING: _process() DISABLED - impostors won't update![/color]")
+			if not has_candidates:
+				lines.append("  [color=red]WARNING: ImpostorCandidates not set![/color]")
 
 	if lines.size() == 1:
 		lines.append("No distant rendering components found in world")
@@ -750,6 +778,221 @@ func _tier_to_string(tier: int) -> String:
 		3: return "HORIZON"
 		4: return "NONE"
 		_: return "UNKNOWN(%d)" % tier
+
+
+func _cmd_impostor_debug(_args: Dictionary) -> CommandRegistry.CommandResult:
+	var lines: PackedStringArray = ["[b]Impostor System Diagnostics[/b]"]
+
+	# Get world object
+	var world: Variant = _context.get("world")
+	if not world:
+		return CommandRegistry.CommandResult.error("No world context set. Use 'help context' to set up.")
+
+	var world_obj: Object = world as Object
+
+	# Check distant_rendering_enabled setting
+	var settings_manager: Variant = get_node_or_null("/root/SettingsManager")
+	if settings_manager:
+		var distant_enabled: bool = settings_manager.call("get_distant_rendering_enabled") if settings_manager.has_method("get_distant_rendering_enabled") else true
+		lines.append("")
+		lines.append("[color=cyan]Settings:[/color]")
+		lines.append("  distant_rendering_enabled (saved): %s" % ("ON" if distant_enabled else "[color=red]OFF[/color]"))
+
+	# Check streaming manager setting
+	if "distant_rendering_enabled" in world_obj:
+		var runtime_enabled: bool = world_obj.get("distant_rendering_enabled")
+		lines.append("  distant_rendering_enabled (runtime): %s" % ("ON" if runtime_enabled else "[color=red]OFF[/color]"))
+
+	# Get impostor renderer
+	var impostor_renderer: Variant = null
+	if world_obj.has_method("get_impostor_manager"):
+		impostor_renderer = world_obj.call("get_impostor_manager")
+
+	if not impostor_renderer:
+		lines.append("")
+		lines.append("[color=red]ERROR: No impostor renderer found![/color]")
+		lines.append("Check that NativeStreamingManager is set as world context")
+		return CommandRegistry.CommandResult.ok("\n".join(lines))
+
+	var renderer: Object = impostor_renderer as Object
+
+	# Core state
+	lines.append("")
+	lines.append("[color=cyan]Renderer State:[/color]")
+	lines.append("  _process() enabled: %s" % ("ON" if renderer.is_processing() else "[color=red]OFF - CRITICAL![/color]"))
+	lines.append("  ImpostorCandidates set: %s" % ("YES" if renderer.get("impostor_candidates") != null else "[color=red]NO[/color]"))
+	lines.append("  Debug logging: %s" % ("ON" if renderer.get("debug_enabled") else "OFF"))
+
+	# Stats
+	if renderer.has_method("get_stats"):
+		var stats: Dictionary = renderer.call("get_stats")
+		lines.append("")
+		lines.append("[color=cyan]Impostor Data:[/color]")
+		lines.append("  Total impostors: %d" % stats.get("total_impostors", 0))
+		lines.append("  MultiMesh instances: %d" % stats.get("multimesh_instance_count", 0))
+		lines.append("  Loaded cells: %d" % stats.get("loaded_impostor_cells", 0))
+		lines.append("")
+		lines.append("[color=cyan]Texture System:[/color]")
+		lines.append("  Texture cache size: %d" % stats.get("texture_cache_size", 0))
+		lines.append("  Texture array layers: %d" % stats.get("texture_array_layers", 0))
+		lines.append("  Pending texture loads: %d" % stats.get("pending_texture_loads", 0))
+		lines.append("  Pending impostors: %d" % stats.get("pending_impostors", 0))
+
+	# Check impostor texture directory
+	lines.append("")
+	lines.append("[color=cyan]Impostor Textures:[/color]")
+	if settings_manager and settings_manager.has_method("get_impostors_path"):
+		var imp_path: String = settings_manager.call("get_impostors_path")
+		lines.append("  Directory: %s" % imp_path)
+		if DirAccess.dir_exists_absolute(imp_path):
+			var files := DirAccess.get_files_at(imp_path)
+			var png_count := 0
+			var json_count := 0
+			for f: String in files:
+				if f.ends_with(".png"):
+					png_count += 1
+				elif f.ends_with(".json"):
+					json_count += 1
+			lines.append("  PNG textures: %d" % png_count)
+			lines.append("  JSON metadata: %d" % json_count)
+			if png_count == 0:
+				lines.append("  [color=yellow]WARNING: No impostor textures found! Run prebaking.[/color]")
+		else:
+			lines.append("  [color=red]ERROR: Directory does not exist![/color]")
+	else:
+		lines.append("  [color=red]ERROR: Cannot determine impostor path[/color]")
+
+	# Test texture path lookup with a sample model
+	lines.append("")
+	lines.append("[color=cyan]Texture Path Test:[/color]")
+	var ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+	var test_model := "x\\ex_common_house_01.nif"
+	var test_hash := ImpostorCandidatesScript.get_hash_key(test_model)
+	var test_path := ImpostorCandidatesScript.get_impostor_texture_path(test_model)
+	lines.append("  Test model: %s" % test_model)
+	lines.append("  Hash key: %s" % test_hash)
+	lines.append("  Expected path: %s" % test_path)
+	lines.append("  File exists: %s" % ("YES" if FileAccess.file_exists(test_path) else "[color=red]NO[/color]"))
+
+	# Diagnosis
+	lines.append("")
+	lines.append("[color=cyan]Diagnosis:[/color]")
+	var issues_found := false
+
+	if renderer.is_processing() == false:
+		lines.append("  [color=red]CRITICAL: _process() disabled - set distant_rendering_enabled=true[/color]")
+		issues_found = true
+
+	if renderer.get("impostor_candidates") == null:
+		lines.append("  [color=red]CRITICAL: ImpostorCandidates not initialized[/color]")
+		issues_found = true
+
+	if renderer.has_method("get_stats"):
+		var stats: Dictionary = renderer.call("get_stats")
+		if stats.get("loaded_impostor_cells", 0) == 0:
+			lines.append("  [color=yellow]WARNING: No impostor cells loaded yet[/color]")
+			issues_found = true
+		if stats.get("texture_array_layers", 0) == 0 and stats.get("total_impostors", 0) > 0:
+			lines.append("  [color=yellow]WARNING: Impostors exist but no textures loaded[/color]")
+			issues_found = true
+		if stats.get("multimesh_instance_count", 0) == 0 and stats.get("total_impostors", 0) > 0:
+			lines.append("  [color=yellow]WARNING: Impostors exist but MultiMesh is empty[/color]")
+			issues_found = true
+		if stats.get("total_impostors", 0) == 0 and stats.get("loaded_impostor_cells", 0) > 0:
+			lines.append("  [color=yellow]WARNING: Cells loaded but no impostors created[/color]")
+			lines.append("    - Check if ESMManager has cell data")
+			lines.append("    - Check if ImpostorCandidates patterns match your models")
+			issues_found = true
+
+	if not issues_found:
+		lines.append("  [color=green]No obvious issues detected[/color]")
+		lines.append("  If impostors still don't appear:")
+		lines.append("    1. Move camera >500m from objects")
+		lines.append("    2. Run 'impostor_verbose' to enable debug logging")
+		lines.append("    3. Check that visibility_range_begin=450 on ImpostorMasterBatch")
+
+	return CommandRegistry.CommandResult.ok("\n".join(lines))
+
+
+func _cmd_impostor_dump(_args: Dictionary) -> CommandRegistry.CommandResult:
+	# Get world object
+	var world: Variant = _context.get("world")
+	if not world:
+		return CommandRegistry.CommandResult.error("No world context set")
+
+	var world_obj: Object = world as Object
+	var impostor_renderer: Variant = null
+	if world_obj.has_method("get_impostor_manager"):
+		impostor_renderer = world_obj.call("get_impostor_manager")
+
+	if not impostor_renderer:
+		return CommandRegistry.CommandResult.error("No impostor renderer found")
+
+	var renderer: Object = impostor_renderer as Object
+	if renderer.has_method("dump_diagnostic"):
+		var output: String = renderer.call("dump_diagnostic")
+		return CommandRegistry.CommandResult.ok(output)
+	else:
+		return CommandRegistry.CommandResult.error("Renderer doesn't have dump_diagnostic method")
+
+
+func _cmd_impostor_verbose(args: Dictionary) -> CommandRegistry.CommandResult:
+	var state: String = args.get("state", "on")
+
+	# Get world object
+	var world: Variant = _context.get("world")
+	if not world:
+		return CommandRegistry.CommandResult.error("No world context set")
+
+	var world_obj: Object = world as Object
+	var impostor_renderer: Variant = null
+	if world_obj.has_method("get_impostor_manager"):
+		impostor_renderer = world_obj.call("get_impostor_manager")
+
+	if not impostor_renderer:
+		return CommandRegistry.CommandResult.error("No impostor renderer found")
+
+	var renderer: Object = impostor_renderer as Object
+	var enable := state == "on"
+	renderer.set("debug_enabled", enable)
+
+	if enable:
+		# Force an update to trigger debug output
+		print("[Console] Impostor verbose logging ENABLED - move to new cell to see output")
+	else:
+		print("[Console] Impostor verbose logging DISABLED")
+
+	return CommandRegistry.CommandResult.ok("Impostor verbose logging: %s" % ("ON" if enable else "OFF"))
+
+
+func _cmd_impostor_show(args: Dictionary) -> CommandRegistry.CommandResult:
+	var state: String = args.get("state", "on")
+
+	# Get world object
+	var world: Variant = _context.get("world")
+	if not world:
+		return CommandRegistry.CommandResult.error("No world context set")
+
+	var world_obj: Object = world as Object
+	var impostor_renderer: Variant = null
+	if world_obj.has_method("get_impostor_manager"):
+		impostor_renderer = world_obj.call("get_impostor_manager")
+
+	if not impostor_renderer:
+		return CommandRegistry.CommandResult.error("No impostor renderer found")
+
+	var renderer: Object = impostor_renderer as Object
+	var enable := state == "on"
+
+	# Call set_shader_debug_mode to toggle magenta debug rendering
+	if renderer.has_method("set_shader_debug_mode"):
+		renderer.call("set_shader_debug_mode", enable)
+		if enable:
+			return CommandRegistry.CommandResult.ok("Impostor shader debug: ON\nImpostors now show as MAGENTA at ANY distance.\nIf you don't see magenta squares, the MultiMesh isn't rendering.")
+		else:
+			return CommandRegistry.CommandResult.ok("Impostor shader debug: OFF\nImpostors now render normally (visible only at 500m+)")
+	else:
+		return CommandRegistry.CommandResult.error("Renderer doesn't have set_shader_debug_mode method")
 
 
 func _cmd_ocean_debug(args: Dictionary) -> CommandRegistry.CommandResult:

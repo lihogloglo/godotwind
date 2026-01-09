@@ -404,6 +404,8 @@ func _bake_terrain() -> Dictionary:
 
 	# Collect all unique regions that have terrain data
 	var regions_with_data: Dictionary = {}  # region_coord -> true
+	var min_region := Vector2i(999999, 999999)
+	var max_region := Vector2i(-999999, -999999)
 
 	for key: String in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
@@ -411,6 +413,24 @@ func _bake_terrain() -> Dictionary:
 			continue
 		var region_coord: Vector2i = terrain_manager.cell_to_region(Vector2i(land.cell_x, land.cell_y))
 		regions_with_data[region_coord] = true
+		# Track bounds for ocean buffer
+		min_region.x = mini(min_region.x, region_coord.x)
+		min_region.y = mini(min_region.y, region_coord.y)
+		max_region.x = maxi(max_region.x, region_coord.x)
+		max_region.y = maxi(max_region.y, region_coord.y)
+
+	# Add ocean buffer regions around the terrain (3 regions ≈ 1.4km of ocean)
+	# These regions will be filled with ocean floor depth
+	const OCEAN_BUFFER_REGIONS: int = 3
+	var ocean_regions_added := 0
+	for ry in range(min_region.y - OCEAN_BUFFER_REGIONS, max_region.y + OCEAN_BUFFER_REGIONS + 1):
+		for rx in range(min_region.x - OCEAN_BUFFER_REGIONS, max_region.x + OCEAN_BUFFER_REGIONS + 1):
+			var region_coord := Vector2i(rx, ry)
+			if region_coord not in regions_with_data:
+				regions_with_data[region_coord] = true
+				ocean_regions_added += 1
+
+	print("  Added %d ocean buffer regions around terrain" % ocean_regions_added)
 
 	# Initialize pending list if needed
 	if state.pending.is_empty() and state.completed.is_empty():

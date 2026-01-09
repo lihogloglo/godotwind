@@ -131,8 +131,8 @@ func _on_queue_changed(queue_size: int) -> void:
 		_log_operation("QUEUE_SIZE: %d" % queue_size)
 
 
-func _on_cell_loaded(grid: Vector2i, _node: Node3D) -> void:
-	_log_operation("CELL_LOADED: (%d, %d)" % [grid.x, grid.y])
+func _on_cell_loaded(grid: Vector2i, object_count: int) -> void:
+	_log_operation("CELL_LOADED: (%d, %d) with %d objects" % [grid.x, grid.y, object_count])
 
 
 func _on_cell_unloaded(grid: Vector2i) -> void:
@@ -208,11 +208,10 @@ func _generate_report() -> String:
 			mode = "PLAYER" if _world_explorer.get("_camera_mode") == 1 else "FLY_CAMERA"
 		lines.append("Camera mode: %s" % mode)
 
-		var show_models: bool = _world_explorer.get("_show_models") if _world_explorer.get("_show_models") != null else false
+		# Models are always visible now (no toggle since refactor)
 		var show_ocean: bool = _world_explorer.get("_show_ocean") if _world_explorer.get("_show_ocean") != null else false
 		var show_sky: bool = _world_explorer.get("_show_sky") if _world_explorer.get("_show_sky") != null else false
-		lines.append("Models: %s, Ocean: %s, Sky: %s" % [
-			"ON" if show_models else "OFF",
+		lines.append("Models: ON (always), Ocean: %s, Sky: %s" % [
 			"ON" if show_ocean else "OFF",
 			"ON" if show_sky else "OFF"
 		])

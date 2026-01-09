@@ -40,6 +40,14 @@ var _cached_sun_fade: float = 1.0
 var _cached_rain_intensity: float = 0.0
 var _debug_shore_mask: bool = false
 
+# New visual features
+var _cached_sparkle_intensity: float = 1.5
+var _cached_caustic_intensity: float = 0.7
+var _cached_bubble_intensity: float = 0.5
+var _cached_color_gradient: Texture2D = null
+var _cached_sparkle_map: Texture2D = null
+var _cached_bubble_texture: Texture2D = null
+
 
 func initialize(radius: float, quality_override: int = -1) -> void:
 	_quality_override = quality_override
@@ -173,61 +181,211 @@ func _setup_fft_shader_defaults() -> void:
 	_material.set_shader_parameter("enable_rain_ripples", false)
 	_material.set_shader_parameter("rain_intensity", 0.0)
 
-	print("[OceanMesh] FFT shader defaults configured (units: meters)")
+	# === NEW VISUAL FEATURES ===
+
+	# Color gradient (disabled by default, uses shader's color_shallow/color_deep)
+	_material.set_shader_parameter("use_color_gradient", false)
+	_material.set_shader_parameter("color_gradient_depth", 20.0)
+
+	# Sparkles (sun glints on wave peaks)
+	_material.set_shader_parameter("enable_sparkles", true)
+	_material.set_shader_parameter("sparkle_intensity", _cached_sparkle_intensity)
+	_material.set_shader_parameter("sparkle_speed", 0.05)
+	_material.set_shader_parameter("sparkle_scale", 0.02)
+	_setup_sparkle_texture()
+
+	# Underwater caustics
+	_material.set_shader_parameter("enable_caustics", true)
+	_material.set_shader_parameter("caustic_intensity", _cached_caustic_intensity)
+	_material.set_shader_parameter("caustic_scale", 0.025)
+	_material.set_shader_parameter("caustic_speed", 1.8)
+
+	# Bubble layer foam enhancement
+	_material.set_shader_parameter("enable_bubbles", true)
+	_material.set_shader_parameter("bubble_intensity", _cached_bubble_intensity)
+	_material.set_shader_parameter("bubble_scale", 8.0)
+	_material.set_shader_parameter("flow_speed", 0.5)
+	_setup_bubble_texture()
+
+	print("[OceanMesh] FFT shader defaults configured with enhanced visuals")
+
+
+func _setup_sparkle_texture() -> void:
+	## Create procedural sparkle/highlight noise texture
+	if _cached_sparkle_map:
+		_material.set_shader_parameter("sparkle_map", _cached_sparkle_map)
+		return
+
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_VALUE
+	noise.frequency = 0.1
+	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	noise.fractal_octaves = 3
+	noise.seed = 55555
+
+	var sparkle_tex := NoiseTexture2D.new()
+	sparkle_tex.noise = noise
+	sparkle_tex.seamless = true
+	sparkle_tex.seamless_blend_skirt = 0.3
+	sparkle_tex.width = 256
+	sparkle_tex.height = 256
+
+	_cached_sparkle_map = sparkle_tex
+	_material.set_shader_parameter("sparkle_map", sparkle_tex)
+
+
+func _setup_bubble_texture() -> void:
+	## Create procedural bubble texture (cellular noise for foam look)
+	if _cached_bubble_texture:
+		_material.set_shader_parameter("bubble_texture", _cached_bubble_texture)
+		return
+
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+	noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
+	noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
+	noise.frequency = 0.08
+	noise.seed = 66666
+
+	var bubble_tex := NoiseTexture2D.new()
+	bubble_tex.noise = noise
+	bubble_tex.seamless = true
+	bubble_tex.seamless_blend_skirt = 0.3
+	bubble_tex.width = 256
+	bubble_tex.height = 256
+
+	_cached_bubble_texture = bubble_tex
+	_material.set_shader_parameter("bubble_texture", bubble_tex)
 
 
 func _setup_flat_water_textures() -> void:
 	## Set up noise textures for flat water shader
+	## The shader expects: normal1tex, normal2tex, height1tex, height2tex, edge1tex, edge2tex
 	if not _material:
 		return
 
-	# Try to load OpenMW water normal map first
-	var openmw_normal: Texture2D = load("res://inspos/openmw/files/data/textures/omw/water_nm.png")
-	if openmw_normal:
-		_material.set_shader_parameter("wave_normal", openmw_normal)
-		print("[OceanMesh] Flat water using OpenMW water_nm.png")
-	else:
-		# Fallback: generate procedural normal texture
-		var wave_noise := FastNoiseLite.new()
-		wave_noise.noise_type = FastNoiseLite.TYPE_PERLIN
-		wave_noise.frequency = 0.01
-		wave_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-		wave_noise.fractal_octaves = 3
+	# Generate procedural normal textures (two layers for animation blend)
+	var normal_noise1 := FastNoiseLite.new()
+	normal_noise1.noise_type = FastNoiseLite.TYPE_PERLIN
+	normal_noise1.frequency = 0.02
+	normal_noise1.fractal_type = FastNoiseLite.FRACTAL_FBM
+	normal_noise1.fractal_octaves = 4
+	normal_noise1.seed = 12345
 
-		var wave_tex := NoiseTexture2D.new()
-		wave_tex.noise = wave_noise
-		wave_tex.seamless = true
-		wave_tex.seamless_blend_skirt = 0.5
-		wave_tex.as_normal_map = true
-		wave_tex.bump_strength = 4.0
+	var normal_tex1 := NoiseTexture2D.new()
+	normal_tex1.noise = normal_noise1
+	normal_tex1.seamless = true
+	normal_tex1.seamless_blend_skirt = 0.3
+	normal_tex1.as_normal_map = true
+	normal_tex1.bump_strength = 8.0
+	normal_tex1.width = 512
+	normal_tex1.height = 512
 
-		_material.set_shader_parameter("wave_normal", wave_tex)
-		print("[OceanMesh] Flat water using procedural normal texture")
+	var normal_noise2 := FastNoiseLite.new()
+	normal_noise2.noise_type = FastNoiseLite.TYPE_PERLIN
+	normal_noise2.frequency = 0.03
+	normal_noise2.fractal_type = FastNoiseLite.FRACTAL_FBM
+	normal_noise2.fractal_octaves = 3
+	normal_noise2.seed = 67890
 
-	# Water colors (OpenMW style)
-	_material.set_shader_parameter("water_color", Color(0.09, 0.116, 0.127))
-	_material.set_shader_parameter("color_deep", Color(0.02, 0.04, 0.06))
-	_material.set_shader_parameter("foam_color", Color(0.9, 0.9, 0.9))
+	var normal_tex2 := NoiseTexture2D.new()
+	normal_tex2.noise = normal_noise2
+	normal_tex2.seamless = true
+	normal_tex2.seamless_blend_skirt = 0.3
+	normal_tex2.as_normal_map = true
+	normal_tex2.bump_strength = 6.0
+	normal_tex2.width = 512
+	normal_tex2.height = 512
 
-	# OpenMW absorption settings (converted to meters)
-	_material.set_shader_parameter("water_visibility", 34.5)  # 2500 MW ≈ 34.5m
-	_material.set_shader_parameter("depth_fade", 10.0)  # Tuned for meters
-	_material.set_shader_parameter("shore_depth_scale", 4.0)  # 300 MW ≈ 4m
-	_material.set_shader_parameter("refraction_strength", 0.07)
+	# Generate height textures for vertex displacement
+	var height_noise1 := FastNoiseLite.new()
+	height_noise1.noise_type = FastNoiseLite.TYPE_PERLIN
+	height_noise1.frequency = 0.01
+	height_noise1.fractal_type = FastNoiseLite.FRACTAL_FBM
+	height_noise1.fractal_octaves = 2
+	height_noise1.seed = 11111
 
-	# Wave animation settings
-	_material.set_shader_parameter("wave_scale", 0.05)
-	_material.set_shader_parameter("wave_speed", 0.15)
-	_material.set_shader_parameter("wave_height", 0.3)
-	_material.set_shader_parameter("normal_strength", 1.0)
+	var height_tex1 := NoiseTexture2D.new()
+	height_tex1.noise = height_noise1
+	height_tex1.seamless = true
+	height_tex1.width = 256
+	height_tex1.height = 256
 
-	# Scattering
-	_material.set_shader_parameter("enable_sunlight_scattering", true)
-	_material.set_shader_parameter("scatter_amount", 0.3)
-	_material.set_shader_parameter("scatter_color", Color(0.0, 1.0, 0.95))
-	_material.set_shader_parameter("sun_fade", 1.0)
+	var height_noise2 := FastNoiseLite.new()
+	height_noise2.noise_type = FastNoiseLite.TYPE_PERLIN
+	height_noise2.frequency = 0.015
+	height_noise2.fractal_type = FastNoiseLite.FRACTAL_FBM
+	height_noise2.fractal_octaves = 2
+	height_noise2.seed = 22222
 
-	print("[OceanMesh] Flat water shader configured")
+	var height_tex2 := NoiseTexture2D.new()
+	height_tex2.noise = height_noise2
+	height_tex2.seamless = true
+	height_tex2.width = 256
+	height_tex2.height = 256
+
+	# Generate edge/foam textures
+	var edge_noise1 := FastNoiseLite.new()
+	edge_noise1.noise_type = FastNoiseLite.TYPE_CELLULAR
+	edge_noise1.frequency = 0.05
+	edge_noise1.seed = 33333
+
+	var edge_tex1 := NoiseTexture2D.new()
+	edge_tex1.noise = edge_noise1
+	edge_tex1.seamless = true
+	edge_tex1.width = 256
+	edge_tex1.height = 256
+
+	var edge_noise2 := FastNoiseLite.new()
+	edge_noise2.noise_type = FastNoiseLite.TYPE_CELLULAR
+	edge_noise2.frequency = 0.04
+	edge_noise2.seed = 44444
+
+	var edge_tex2 := NoiseTexture2D.new()
+	edge_tex2.noise = edge_noise2
+	edge_tex2.seamless = true
+	edge_tex2.width = 256
+	edge_tex2.height = 256
+
+	# Set shader uniforms (matching flat_water.gdshader uniform names)
+	_material.set_shader_parameter("normal1tex", normal_tex1)
+	_material.set_shader_parameter("normal2tex", normal_tex2)
+	_material.set_shader_parameter("height1tex", height_tex1)
+	_material.set_shader_parameter("height2tex", height_tex2)
+	_material.set_shader_parameter("edge1tex", edge_tex1)
+	_material.set_shader_parameter("edge2tex", edge_tex2)
+
+	# Water colors (shader uses surfacecolour/volumecolour)
+	_material.set_shader_parameter("surfacecolour", Vector3(0.1, 0.3, 0.4))
+	_material.set_shader_parameter("volumecolour", Vector3(0.0, 0.1, 0.2))
+
+	# UV scaling - CRITICAL for large ocean mesh with world_vertex_coords
+	# With world coords, UV = world_pos * samplerscale
+	# For visible waves at human scale: 0.01 = 1 tile per 100m, 0.1 = 1 tile per 10m
+	# Use 0.02 for nice wave visibility (1 tile per 50m)
+	_material.set_shader_parameter("samplerscale", Vector2(0.02, 0.02))
+
+	# Animation speeds (meters per second in world coords)
+	_material.set_shader_parameter("sampler1speed", Vector2(0.02, 0.0))
+	_material.set_shader_parameter("sampler2speed", Vector2(0.0, 0.02))
+
+	# Normal and height strength
+	_material.set_shader_parameter("normalstrength", 1.5)
+	_material.set_shader_parameter("heightstrength", 0.3)
+
+	# Refraction
+	_material.set_shader_parameter("refrationamount", 0.3)
+
+	# Edge foam
+	_material.set_shader_parameter("edge_size", 0.1)
+	_material.set_shader_parameter("foam_or_fade", false)
+
+	# SSR settings
+	_material.set_shader_parameter("far_clip", 50.0)
+	_material.set_shader_parameter("steps", 256)  # Reduced from 512 for performance
+	_material.set_shader_parameter("ssr_screen_fade", 0.05)
+
+	print("[OceanMesh] Flat water shader configured with proper uniforms")
 
 
 func _create_material() -> void:
@@ -556,6 +714,19 @@ func _restore_cached_state() -> void:
 		_material.set_shader_parameter("enable_rain_ripples", _cached_rain_intensity > 0.01)
 		RenderingServer.global_shader_parameter_set(&"water_color", _cached_water_color.srgb_to_linear())
 		RenderingServer.global_shader_parameter_set(&"foam_color", _cached_foam_color.srgb_to_linear())
+
+		# Restore new visual features
+		_material.set_shader_parameter("sparkle_intensity", _cached_sparkle_intensity)
+		_material.set_shader_parameter("caustic_intensity", _cached_caustic_intensity)
+		_material.set_shader_parameter("bubble_intensity", _cached_bubble_intensity)
+		if _cached_color_gradient:
+			_material.set_shader_parameter("water_color_gradient", _cached_color_gradient)
+			_material.set_shader_parameter("use_color_gradient", true)
+		if _cached_sparkle_map:
+			_material.set_shader_parameter("sparkle_map", _cached_sparkle_map)
+		if _cached_bubble_texture:
+			_material.set_shader_parameter("bubble_texture", _cached_bubble_texture)
+
 		# Apply FFT shader defaults
 		_setup_fft_shader_defaults()
 
@@ -617,3 +788,85 @@ func set_ssr_enabled(enabled: bool) -> void:
 	if _material and _quality == QualityMode.FFT:
 		_material.set_shader_parameter("enable_ssr", enabled)
 		print("[OceanMesh] SSR %s (WARNING: expensive!)" % ("enabled" if enabled else "disabled"))
+
+
+# =============================================================================
+# NEW VISUAL FEATURES API
+# =============================================================================
+
+## Set water color gradient texture (1D gradient, X = depth)
+## Pass null to disable and use color_shallow/color_deep interpolation
+func set_color_gradient(gradient_texture: Texture2D) -> void:
+	_cached_color_gradient = gradient_texture
+	if _material and _quality == QualityMode.FFT:
+		if gradient_texture:
+			_material.set_shader_parameter("water_color_gradient", gradient_texture)
+			_material.set_shader_parameter("use_color_gradient", true)
+		else:
+			_material.set_shader_parameter("use_color_gradient", false)
+
+
+## Set color gradient depth (how deep until full deep color)
+func set_color_gradient_depth(depth: float) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("color_gradient_depth", depth)
+
+
+## Set shallow/deep colors (when not using gradient texture)
+func set_water_colors(shallow: Color, deep: Color) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("color_shallow", Vector3(shallow.r, shallow.g, shallow.b))
+		_material.set_shader_parameter("color_deep", Vector3(deep.r, deep.g, deep.b))
+
+
+## Enable/disable sparkles (sun glints on wave peaks)
+func set_sparkles_enabled(enabled: bool) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("enable_sparkles", enabled)
+
+
+## Set sparkle intensity (0.0 - 5.0)
+func set_sparkle_intensity(intensity: float) -> void:
+	_cached_sparkle_intensity = clampf(intensity, 0.0, 5.0)
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("sparkle_intensity", _cached_sparkle_intensity)
+
+
+## Enable/disable underwater caustics
+func set_caustics_enabled(enabled: bool) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("enable_caustics", enabled)
+
+
+## Set caustic intensity (0.0 - 2.0)
+func set_caustic_intensity(intensity: float) -> void:
+	_cached_caustic_intensity = clampf(intensity, 0.0, 2.0)
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("caustic_intensity", _cached_caustic_intensity)
+
+
+## Enable/disable bubble foam layer
+func set_bubbles_enabled(enabled: bool) -> void:
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("enable_bubbles", enabled)
+
+
+## Set bubble intensity (0.0 - 2.0)
+func set_bubble_intensity(intensity: float) -> void:
+	_cached_bubble_intensity = clampf(intensity, 0.0, 2.0)
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("bubble_intensity", _cached_bubble_intensity)
+
+
+## Set custom sparkle texture (overrides procedural generation)
+func set_sparkle_texture(texture: Texture2D) -> void:
+	_cached_sparkle_map = texture
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("sparkle_map", texture)
+
+
+## Set custom bubble texture (overrides procedural generation)
+func set_bubble_texture(texture: Texture2D) -> void:
+	_cached_bubble_texture = texture
+	if _material and _quality == QualityMode.FFT:
+		_material.set_shader_parameter("bubble_texture", texture)

@@ -324,11 +324,14 @@ static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true
 		terrain.set_material(Terrain3DMaterial.new())
 		terrain.material.show_checkered = false
 
-	# Configure world background to show flat terrain outside regions
-	# Note: FLAT mode uses height 0 (sea level). For ocean appearance,
-	# rely on the ocean mesh rendering over these areas.
+	# Configure world background for areas beyond generated regions
+	# Note: MorrowindDataProvider now generates ocean floor terrain for all regions
+	# within extended world bounds (including 3-region ocean buffer).
+	# FLAT mode (height 0) is used only for areas far beyond the ocean buffer.
+	# The ocean mesh renders over these areas, hiding any height discrepancy.
 	if terrain.material:
 		# WorldBackground.FLAT = 1 (renders flat plane at height 0 outside regions)
+		# WorldBackground.NONE = 0 would hide the terrain entirely
 		terrain.material.world_background = 1  # FLAT
 
 	# Create assets if needed

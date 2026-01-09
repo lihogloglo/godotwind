@@ -1,229 +1,320 @@
 shader_type spatial;
-render_mode blend_mix, depth_draw_opaque, cull_disabled;
+render_mode world_vertex_coords, cull_disabled;
 
 /**
- * Flat water shader - lightweight fallback without FFT
- * Uses scrolling noise textures for wave animation
- * Visual style matches ocean_compute.gdshader (OpenMW-inspired)
+ * Realistic Water with Reflection and Refraction
+ * Based on GodotShaders.com shader by Lohik (CC0 license)
+ * https://godotshaders.com/shader/realistic-water-with-reflection-and-refraction/
+ *
+ * Features:
+ * - Schlick Fresnel for angle-dependent reflectivity
+ * - Screen-space reflections (SSR) with edge fading
+ * - Screen-space refraction with depth-aware distortion
+ * - Snell's window for underwater viewing
+ * - Foam/edge effects at water boundaries
  */
 
-uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
-uniform sampler2D depth_texture : hint_depth_texture, filter_linear_mipmap;
+uniform sampler2D screen : hint_screen_texture, filter_linear_mipmap_anisotropic, repeat_disable;
 
-// ============================================================================
-// WATER COLORS - OpenMW style
-// ============================================================================
-uniform vec3 water_color : source_color = vec3(0.090, 0.116, 0.127);
-uniform vec3 color_deep : source_color = vec3(0.02, 0.04, 0.06);
+group_uniforms colours;
+uniform vec3 surfacecolour : source_color = vec3(0.1, 0.3, 0.4);
+uniform vec3 volumecolour : source_color = vec3(0.0, 0.1, 0.2);
 
-// ============================================================================
-// MATERIAL PROPERTIES
-// ============================================================================
-// Unit conversion: 1 Morrowind unit ≈ 0.0138 meters
-uniform float metallic : hint_range(0.0, 1.0) = 0.0;
-uniform float roughness : hint_range(0.0, 1.0) = 0.05;
-uniform float water_visibility : hint_range(1.0, 100.0) = 34.5;  // 2500 MW ≈ 34.5m
-uniform float depth_fade : hint_range(0.1, 20.0) = 10.0;  // Tuned for meters
+group_uniforms material;
+uniform float AirIOR = 1.0;
+uniform float IOR = 1.33;
 
-// ============================================================================
-// WAVE TEXTURES (noise-based displacement)
-// ============================================================================
-uniform sampler2D wave_normal : repeat_enable, filter_linear_mipmap, hint_normal;
-uniform vec2 wave_direction_a = vec2(-1.0, 0.0);
-uniform vec2 wave_direction_b = vec2(0.0, 1.0);
-uniform float wave_scale : hint_range(0.001, 0.5) = 0.05;
-uniform float wave_speed : hint_range(0.0, 1.0) = 0.15;
-uniform float wave_height : hint_range(0.0, 2.0) = 0.3;
-uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
+group_uniforms textures;
+uniform vec2 sampler1speed = vec2(0.02, 0.0);
+uniform vec2 sampler2speed = vec2(0.0, 0.02);
+uniform float samplermix : hint_range(0.0, 1.0, 0.1) = 0.5;
+uniform vec2 samplerscale = vec2(0.1);
+uniform sampler2D normal1tex : filter_linear_mipmap_anisotropic, hint_normal;
+uniform sampler2D normal2tex : filter_linear_mipmap_anisotropic, hint_normal;
+uniform float normalstrength : hint_range(0.0, 5.0, 0.01) = 1.0;
+uniform sampler2D height1tex : filter_linear_mipmap_anisotropic;
+uniform sampler2D height2tex : filter_linear_mipmap_anisotropic;
+uniform float heightstrength : hint_range(0.0, 5.0, 0.01) = 0.12;
+uniform sampler2D edge1tex : filter_linear_mipmap_anisotropic;
+uniform sampler2D edge2tex : filter_linear_mipmap_anisotropic;
 
-// ============================================================================
-// REFRACTION
-// ============================================================================
-uniform float refraction_strength : hint_range(0.0, 0.2) = 0.07;
-
-// ============================================================================
-// SHORE
-// ============================================================================
+group_uniforms shore;
 uniform sampler2D shore_mask : filter_linear;
 uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
-uniform float shore_depth_scale : hint_range(0.0, 20.0) = 4.0;  // 300 MW ≈ 4m
-uniform vec3 foam_color : source_color = vec3(0.9, 0.9, 0.9);
-uniform float foam_scale : hint_range(0.0, 5.0) = 1.5;
+
+varying vec2 position;
+varying vec3 wposition;
+varying float v_shore_factor;
+
+group_uniforms refraction;
+uniform float refrationamount : hint_range(0.0, 1.0, 0.01) = 0.3;
+uniform bool fog_underwater = true;
+
+group_uniforms edge;
+uniform float edge_size : hint_range(0.01, 0.5, 0.01) = 0.1;
+uniform bool foam_or_fade = false;
+
+uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_linear_mipmap, repeat_disable;
+
+group_uniforms screen_space_reflection;
+uniform float far_clip = 50.0;
+uniform int steps : hint_range(64, 1024, 16) = 512;
+uniform float ssr_screen_fade : hint_range(0.01, 0.5, 0.01) = 0.05;
 
 // ============================================================================
-// SUNLIGHT SCATTERING
+// FRESNEL - Schlick approximation
 // ============================================================================
-uniform bool enable_sunlight_scattering = true;
-uniform float scatter_amount : hint_range(0.0, 1.0) = 0.3;
-uniform vec3 scatter_color : source_color = vec3(0.0, 1.0, 0.95);
-uniform vec3 sun_direction = vec3(0.5, 0.7, 0.5);
-uniform float sun_fade : hint_range(0.0, 1.0) = 1.0;
-
-// Camera
-uniform vec3 camera_position_world;
-
-// ============================================================================
-// VARYINGS
-// ============================================================================
-varying vec3 v_world_pos;
-varying vec3 v_world_normal;
-
-// ============================================================================
-// FRESNEL
-// ============================================================================
-float fresnel_dielectric(vec3 incoming, vec3 normal, float eta) {
-	float c = abs(dot(incoming, normal));
-	float g = eta * eta - 1.0 + c * c;
-	if (g > 0.0) {
-		g = sqrt(g);
-		float A = (g - c) / (g + c);
-		float B = (c * (g + c) - 1.0) / (c * (g - c) + 1.0);
-		return 0.5 * A * A * (1.0 + B * B);
-	}
-	return 1.0;
+float schlickfresnel(float ior1, float ior2, vec3 view, vec3 norm) {
+	float incident = dot(view, norm);
+	float reflectance = pow(((ior2 - ior1)/(ior2 + ior1)), 2.0);
+	float fresnelincident = reflectance + (1.0 - reflectance) * pow(1.0 - cos(incident), 5.0);
+	return(fresnelincident / incident);
 }
 
 // ============================================================================
-// SHORE MASK
+// SNELL'S WINDOW - Underwater viewing physics
+// ============================================================================
+float snells_window(vec3 normal, vec3 view, float ior) {
+	float cos_theta = dot(normal, view);
+	return step(sqrt(1.0 - cos_theta * cos_theta) * ior, 1.0);
+}
+
+// ============================================================================
+// DEPTH CONVERSION
+// ============================================================================
+float linear_depth(float nonlinear_depth, mat4 inv_projection_matrix) {
+	return 1.0 / (nonlinear_depth * inv_projection_matrix[2].w + inv_projection_matrix[3].w);
+}
+
+float nonlinear_depth(float linear_depth, mat4 inv_projection_matrix) {
+	return (1.0 / linear_depth - inv_projection_matrix[3].w) / inv_projection_matrix[2].w;
+}
+
+// ============================================================================
+// UV HELPERS
+// ============================================================================
+vec2 view2uv(vec3 position_view_space, mat4 proj_m) {
+	vec4 position_clip_space = proj_m * vec4(position_view_space.xyz, 1.0);
+	vec2 position_ndc = position_clip_space.xy / position_clip_space.w;
+	return position_ndc.xy * 0.5 + 0.5;
+}
+
+float remap(float x, float min1, float max1, float min2, float max2) {
+	return ((x - min1) / (max1 - min1) + min2) * (max2 - min2);
+}
+
+float remap1(float x, float min1, float max1) {
+	return (x - min1) / (max1 - min1);
+}
+
+float edge_fade(vec2 uv, float size) {
+	float x1 = clamp(remap1(uv.x, 0.0, size), 0.0, 1.0);
+	float x2 = clamp(remap1(uv.x, 1.0, 1.0 - size), 0.0, 1.0);
+	float y1 = clamp(remap1(uv.y, 0.0, size), 0.0, 1.0);
+	float y2 = clamp(remap1(uv.y, 1.0, 1.0 - size), 0.0, 1.0);
+	return x1 * x2 * y1 * y2;
+}
+
+// ============================================================================
+// SHORE MASK - Sample shore distance factor
 // ============================================================================
 float sample_shore_mask(vec2 world_xz) {
 	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
 	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-		return 1.0;
+		return 1.0;  // Outside bounds = open ocean
 	}
 	return texture(shore_mask, uv).r;
 }
 
 // ============================================================================
-// NORMAL BLENDING (UDN method)
-// ============================================================================
-vec3 blend_normals(vec3 n1, vec3 n2) {
-	return normalize(vec3(n1.xy + n2.xy, n1.z * n2.z));
-}
-
-// ============================================================================
-// VERTEX
+// VERTEX SHADER
 // ============================================================================
 void vertex() {
-	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	position = VERTEX.xz;
+	wposition = VERTEX;
 
-	// Animated wave UVs
-	vec2 uv = v_world_pos.xz * wave_scale;
-	vec2 uv_a = uv + wave_direction_a * TIME * wave_speed;
-	vec2 uv_b = uv + wave_direction_b * TIME * wave_speed * 0.8;
+	// Sample shore mask for wave dampening
+	v_shore_factor = sample_shore_mask(VERTEX.xz);
 
-	// Sample height from normal map (use green channel)
-	float h1 = texture(wave_normal, uv_a).g;
-	float h2 = texture(wave_normal, uv_b).g;
-	float height = (h1 + h2) * 0.5 - 0.5;
+	// Calculate UVs with animation
+	UV = VERTEX.xz * samplerscale + (sampler1speed * TIME);
+	UV2 = VERTEX.xz * samplerscale + (sampler2speed * TIME);
 
-	// Shore dampening
-	float shore = sample_shore_mask(v_world_pos.xz);
-	VERTEX.y += height * wave_height * shore;
-
-	// Calculate normal from height gradient
-	vec2 e = vec2(0.01, 0.0);
-	float h_l = texture(wave_normal, uv_a - e).g + texture(wave_normal, uv_b - e).g;
-	float h_r = texture(wave_normal, uv_a + e).g + texture(wave_normal, uv_b + e).g;
-	float h_d = texture(wave_normal, uv_a - e.yx).g + texture(wave_normal, uv_b - e.yx).g;
-	float h_u = texture(wave_normal, uv_a + e.yx).g + texture(wave_normal, uv_b + e.yx).g;
-
-	vec3 calc_normal = normalize(vec3(
-		(h_l - h_r) * wave_height * shore,
-		2.0 * e.x,
-		(h_d - h_u) * wave_height * shore
-	));
-
-	v_world_normal = calc_normal;
-	NORMAL = calc_normal;
+	// Height displacement (dampened near shores)
+	float height = mix(texture(height1tex, UV), texture(height2tex, UV2), samplermix).x;
+	VERTEX.y += (height - 0.5) * heightstrength * v_shore_factor;
 }
 
 // ============================================================================
-// FRAGMENT
+// FRAGMENT SHADER
 // ============================================================================
 void fragment() {
-	float dist_to_cam = length(v_world_pos.xz - camera_position_world.xz);
-
-	// Depth
-	float depth_raw = texture(depth_texture, SCREEN_UV).r;
-	vec4 floor_ndc = vec4(SCREEN_UV * 2.0 - 1.0, depth_raw, 1.0);
-	vec4 floor_view = INV_PROJECTION_MATRIX * floor_ndc;
-	float floor_depth = floor_view.z / floor_view.w;
-	float water_depth = max(VERTEX.z - floor_depth, 0.0);
-
-	// Shore factor
-	float shore_map = sample_shore_mask(v_world_pos.xz);
-	float depth_shore = smoothstep(0.0, shore_depth_scale, water_depth);
-	float shore_factor = min(shore_map, depth_shore);
-
-	if (shore_factor < 0.05) {
+	// Discard fragments on land (shore_factor near 0)
+	if (v_shore_factor < 0.01) {
 		discard;
 	}
 
-	// Detail normals from texture
-	vec2 uv = v_world_pos.xz * wave_scale;
-	vec2 uv_a = uv + wave_direction_a * TIME * wave_speed;
-	vec2 uv_b = uv + wave_direction_b * TIME * wave_speed * 0.8;
+	vec3 onorm = NORMAL;
 
-	vec3 n1 = texture(wave_normal, uv_a).xyz * 2.0 - 1.0;
-	vec3 n2 = texture(wave_normal, uv_b).xyz * 2.0 - 1.0;
-	vec3 detail = blend_normals(n1, n2);
+	// Normal mapping from two scrolling textures (dampened near shores)
+	vec2 normmap = mix(texture(normal1tex, UV), texture(normal2tex, UV2), samplermix).xy;
+	float effective_normal_strength = normalstrength * v_shore_factor;
+	NORMAL += TANGENT * (normmap.x - 0.5) * effective_normal_strength;
+	NORMAL += BINORMAL * (normmap.y - 0.5) * effective_normal_strength;
 
-	// Blend with vertex normal
-	float detail_blend = exp(-dist_to_cam * 0.002) * normal_strength;
-	vec3 world_normal = normalize(mix(v_world_normal, detail, detail_blend * 0.5));
+	vec3 wnorm = (vec4(NORMAL, 0.0) * VIEW_MATRIX).xyz;
+	vec3 wview = (vec4(VIEW, 0.0) * VIEW_MATRIX).xyz;
 
-	// Flip for backface
-	if (!FRONT_FACING) {
-		world_normal = -world_normal;
-	}
+	if (FRONT_FACING) {
+		// ========== ABOVE WATER ==========
 
-	NORMAL = (VIEW_MATRIX * vec4(world_normal, 0.0)).xyz;
+		ROUGHNESS = 0.0;
+		METALLIC = 1.0;
+		SPECULAR = 0.0;
 
-	// Fresnel
-	vec3 view_world = normalize(camera_position_world - v_world_pos);
-	float fresnel = fresnel_dielectric(-view_world, world_normal, 1.333);
-	fresnel = clamp(fresnel, 0.02, 1.0);
+		float fres = schlickfresnel(AirIOR, IOR, VIEW, NORMAL);
+		ALBEDO = surfacecolour * fres;
 
-	// Refraction - suppress at shores to prevent artifacts
-	vec2 refr_offset = world_normal.xz * refraction_strength;
-	refr_offset *= clamp(water_depth / shore_depth_scale, 0.0, 1.0);
-	vec2 refraction_uv = clamp(SCREEN_UV - refr_offset, vec2(0.001), vec2(0.999));
-	vec3 refracted = texture(screen_texture, refraction_uv).rgb;
+		// === REFRACTION ===
+		float lineardepth = linear_depth(texture(DEPTH_TEXTURE, SCREEN_UV).r, INV_PROJECTION_MATRIX);
+		float selfdepth = -VERTEX.z;
+		float depth_diff = lineardepth - selfdepth;
 
-	// Water color absorption (OpenMW formula)
-	vec3 water_col = water_color * sun_fade;
-	float depth_correction = sqrt(1.0 + 4.0 * depth_fade * depth_fade);
-	float absorption = depth_fade * depth_fade /
-		(-0.5 * depth_correction + 0.5 - water_depth / water_visibility)
-		+ 0.5 * depth_correction + 0.5;
-	absorption = clamp(absorption, 0.0, 1.0);
-	vec3 underwater = mix(refracted, water_col, absorption);
+		vec3 tanx = BINORMAL * (normmap.x - 0.5) * normalstrength;
+		vec3 tany = TANGENT * (normmap.y - 0.5) * normalstrength;
+		vec2 refracted_uv = SCREEN_UV + (tanx + tany).xy * refrationamount * depth_diff / lineardepth;
 
-	// Deep water
-	float deep = smoothstep(water_visibility * 0.3, water_visibility, water_depth);
-	underwater = mix(underwater, color_deep, deep * 0.6);
+		float newdepth = linear_depth(texture(DEPTH_TEXTURE, refracted_uv).r, INV_PROJECTION_MATRIX);
+		vec3 newvolcolour = mix(volumecolour, vec3(1.0), clamp(1.0 / (depth_diff * 1.0), 0.0, 1.0));
+		EMISSION = newvolcolour * texture(screen, refracted_uv).rgb;
 
-	// Sunlight scattering
-	if (enable_sunlight_scattering) {
-		vec3 sun_dir = normalize(sun_direction);
-		float sun_height = sun_dir.y;
-		if (sun_height > 0.0) {
-			float scatter_lambert = max(dot(sun_dir, world_normal) * 0.7 + 0.3, 0.0);
-			float scatter_reflect = max(dot(reflect(sun_dir, world_normal), -view_world) * 2.0 - 1.2, 0.0);
-			float light_scatter = scatter_lambert * scatter_reflect * scatter_amount * sun_fade
-								  * max(1.0 - exp(-sun_height), 0.0);
-			underwater = mix(underwater, scatter_color, light_scatter * 0.5);
+		// Prevent refraction from sampling above water surface
+		if (newdepth < selfdepth) {
+			EMISSION = newvolcolour * texture(screen, SCREEN_UV).rgb;
+		}
+
+		// === SCREEN-SPACE REFLECTIONS ===
+		vec3 reflected = -reflect(VIEW, NORMAL);
+		vec3 pos = VERTEX;
+		int curstep = 0;
+		bool finished = false;
+		vec2 uv;
+		float currentdepth;
+
+		while (curstep < steps) {
+			float step_scale = float(curstep + 1) / float(steps);
+			float step_dist = step_scale * step_scale * far_clip;
+			pos += reflected * step_dist;
+			curstep += 1;
+			currentdepth = -pos.z;
+			uv = view2uv(pos, PROJECTION_MATRIX);
+
+			if (!(uv.x < 1.0 && uv.y < 1.0 && uv.x > 0.0 && uv.y > 0.0)) {
+				break;
+			}
+
+			float testdepth = linear_depth(texture(DEPTH_TEXTURE, uv).r, INV_PROJECTION_MATRIX);
+			if (testdepth < currentdepth) {
+				finished = true;
+				break;
+			}
+		}
+
+		if (finished && currentdepth < far_clip * 0.99) {
+			float fade = edge_fade(uv, ssr_screen_fade);
+			ALBEDO *= 1.0 - fade;
+			METALLIC *= 1.0 - fade;
+			EMISSION += texture(screen, uv).xyz * schlickfresnel(1.0, 1.33, VIEW, NORMAL) * fade;
+		}
+
+		// === EDGE EFFECT (Foam or Fade) ===
+		float distfromedge = depth_diff * dot(normalize(NORMAL), normalize(-VERTEX)) / VIEW.z;
+		if (distfromedge < edge_size) {
+			distfromedge /= edge_size;
+			if (foam_or_fade) {
+				// Fade to transparent at edges
+				ALPHA = distfromedge;
+			} else {
+				// Foam effect at edges
+				float edgetex = mix(texture(edge1tex, UV).r, texture(edge2tex, UV2).r, samplermix);
+				if (edgetex > distfromedge) {
+					ALBEDO = vec3(1.0);
+					ROUGHNESS = 1.0;
+					METALLIC = 1.0;
+					EMISSION = vec3(0.0);
+					NORMAL = onorm;
+				}
+			}
+		}
+
+	} else {
+		// ========== UNDERWATER ==========
+
+		// Snell's window - determines if we see through to air or get total internal reflection
+		float window = snells_window(wnorm, wview, IOR);
+
+		if (window > 0.5) {
+			// Inside Snell's window - see through to surface
+			ROUGHNESS = 1.0;
+			METALLIC = 1.0;
+			ALBEDO = vec3(0.0);
+			SPECULAR = 0.0;
+
+			float linear_depth_val = 1.0 / (texture(DEPTH_TEXTURE, SCREEN_UV).r * INV_PROJECTION_MATRIX[2].w + INV_PROJECTION_MATRIX[3].w);
+			float selfdepth = 1.0 / (FRAGCOORD.z * INV_PROJECTION_MATRIX[2].w + INV_PROJECTION_MATRIX[3].w);
+			float depth_diff = linear_depth_val - selfdepth;
+
+			vec3 tanx = BINORMAL * (normmap.x - 0.5) * normalstrength;
+			vec3 tany = TANGENT * (normmap.y - 0.5) * normalstrength;
+
+			float newdepth = 1.0 / (texture(DEPTH_TEXTURE, SCREEN_UV + (tanx + tany).xy * refrationamount).r * INV_PROJECTION_MATRIX[2].w + INV_PROJECTION_MATRIX[3].w);
+			vec3 newvolcolour = mix(volumecolour, vec3(1.0), clamp(1.0 / (selfdepth * 1.0), 0.0, 1.0));
+
+			if (!fog_underwater) {
+				newvolcolour = vec3(1.0);
+			}
+
+			EMISSION = newvolcolour * texture(screen, SCREEN_UV + (tanx + tany).xy * refrationamount).rgb;
+
+		} else {
+			// Outside Snell's window - total internal reflection
+			ALBEDO = surfacecolour;
+			ROUGHNESS = 0.0;
+			METALLIC = 1.0;
+
+			// SSR for underwater reflection
+			vec3 reflected = -reflect(VIEW, NORMAL);
+			vec3 pos = VERTEX;
+			int curstep = 0;
+			bool finished = false;
+			vec2 uv;
+			float currentdepth;
+
+			while (curstep < steps) {
+				float step_scale = float(curstep + 1) / float(steps);
+				float step_dist = step_scale * step_scale * far_clip;
+				pos += reflected * step_dist;
+				curstep += 1;
+				currentdepth = -pos.z;
+				uv = view2uv(pos, PROJECTION_MATRIX);
+
+				if (!(uv.x < 1.0 && uv.y < 1.0 && uv.x > 0.0 && uv.y > 0.0)) {
+					break;
+				}
+
+				float testdepth = linear_depth(texture(DEPTH_TEXTURE, uv).r, INV_PROJECTION_MATRIX);
+				if (testdepth < currentdepth) {
+					finished = true;
+					break;
+				}
+			}
+
+			if (finished && currentdepth < far_clip * 0.99) {
+				float fade = edge_fade(uv, ssr_screen_fade);
+				ALBEDO *= 1.0 - fade;
+				METALLIC *= 1.0 - fade;
+				EMISSION += texture(screen, uv).xyz * schlickfresnel(1.0, 1.33, VIEW, NORMAL) * fade;
+			}
 		}
 	}
-
-	// Shore foam
-	float foam_factor = 1.0 - smoothstep(0.0, foam_scale, water_depth);
-	vec3 final_color = mix(underwater, foam_color, foam_factor * shore_factor);
-
-	// Output
-	ALBEDO = final_color;
-	METALLIC = metallic;
-	ROUGHNESS = mix(roughness, 0.5, foam_factor);
-	ALPHA = 1.0;
 }

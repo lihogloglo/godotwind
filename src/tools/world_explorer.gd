@@ -21,8 +21,16 @@
 ## - Press P to toggle between Fly Camera and Player Controller
 ## - Press F3 to toggle performance overlay
 ## - Press F4 to dump detailed profiling report
+## - Press F9 to toggle debug overlay
+## - Press F11 to dump state to file
+## - Press F12 to toggle auto-test mode (automated camera for streaming tests)
 ## - Press TAB to toggle between World and Interior modes
 ## - Use +/- to adjust view distance
+##
+## Auto-Test Mode (F12):
+## - Automatically moves camera through key locations
+## - Captures performance metrics and errors
+## - Can be triggered programmatically with DEBUG_AUTO_TEST environment variable
 ##
 ## Fly Camera: Hold Right-click to look, WASD to move, Space/Shift for up/down
 ## Player: WASD to move, Space to jump, Shift to run, mouse to look
@@ -48,6 +56,7 @@ const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
 const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.gd")
 const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
+const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -73,7 +82,6 @@ const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 @onready var preprocess_status: Label = $UI/StatsPanel/VBox/PreprocessStatus
 
 # Visibility toggles (will be created dynamically)
-var _show_models_toggle: CheckBox = null
 var _show_characters_toggle: CheckBox = null
 var _show_ocean_toggle: CheckBox = null
 var _show_sky_toggle: CheckBox = null
@@ -86,7 +94,7 @@ var _wave_scale_slider: HSlider = null
 var _choppiness_slider: HSlider = null
 var _debug_shore_toggle: CheckBox = null
 var _ocean_controls_container: VBoxContainer = null
-var _show_models: bool = false  # Default OFF for performance
+# Models are always visible (no toggle needed)
 var _show_characters: bool = false  # Default OFF - separate from static models
 var _show_ocean: bool = false   # Default OFF for performance
 var _show_sky: bool = false     # Default OFF - enable for day/night cycle
@@ -142,6 +150,7 @@ var console: Console = null  # Developer console
 var test_runner: Node = null  # Automated test runner (AutomatedTestRunner)
 var diagnostic_overlay: Node = null  # Real-time streaming diagnostics (DiagnosticOverlay)
 var crash_reporter: Node = null  # State capture for crash analysis (CrashReporter)
+var debug_system: Node = null  # Unified debug system (DebugSystem - F4/F9/F11/F12)
 
 # State
 var _data_path: String = ""
@@ -274,12 +283,17 @@ func _init_async() -> void:
 
 	# Ocean system is now lazy-loaded - created on first toggle
 
+	# Pre-warm model cache with common models (improves first-cell loading)
+	await _update_loading(80, "Pre-loading common models...")
+	var preload_count := cell_manager.preload_common_models()
+	_log("Pre-loaded %d common models into cache" % preload_count)
+
 	# Create and setup NativeStreamingManager (but don't start tracking yet)
-	await _update_loading(85, "Setting up streaming system...")
+	await _update_loading(90, "Setting up streaming system...")
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
 
-	# Models are NOT preloaded at startup - they will only load when the Models button is toggled
-	# This ensures no model loading happens until explicitly requested by the user
+	# Models load automatically when streaming system starts
+	# Visibility is controlled by Godot's native visibility_range system
 
 	# Done
 	await _update_loading(100, "Ready!")
@@ -438,20 +452,27 @@ func _setup_test_runner() -> void:
 	_log("Test runner initialized (F6=start, F7=stop, F8=report)")
 
 
-## Setup diagnostic overlay and crash reporter
+## Setup diagnostic overlay, crash reporter, and unified debug system
 func _setup_diagnostic_systems() -> void:
-	# Create diagnostic overlay (hidden by default)
+	# Create diagnostic overlay (hidden by default) - legacy, kept for compatibility
 	diagnostic_overlay = DiagnosticOverlayScript.new()
 	diagnostic_overlay.name = "DiagnosticOverlay"
 	diagnostic_overlay.visible = false  # Start hidden, toggle with F9
 	add_child(diagnostic_overlay)
 
-	# Create crash reporter
+	# Create crash reporter - legacy, kept for compatibility
 	crash_reporter = CrashReporterScript.new()
 	crash_reporter.name = "CrashReporter"
 	add_child(crash_reporter)
 
-	_log("Diagnostic systems initialized (F9=overlay, F10=crash test, F11=dump)")
+	# Create unified debug system (merges F4/F9/F11/F12 functionality)
+	debug_system = DebugSystemScript.new()
+	debug_system.name = "DebugSystem"
+	# Enable auto-test on startup if DEBUG_AUTO_TEST environment variable is set
+	debug_system.auto_test_on_startup = OS.has_environment("DEBUG_AUTO_TEST")
+	add_child(debug_system)
+
+	_log("Debug systems initialized (F4=profile, F9=overlay, F11=dump, F12=auto-test)")
 
 
 ## Connect diagnostic systems to streaming (called after WSM is ready)
@@ -459,65 +480,25 @@ func _connect_diagnostic_systems() -> void:
 	if not diagnostic_overlay or not crash_reporter:
 		return
 
-	# Connect to streaming systems
+	# Connect legacy diagnostic systems to streaming
 	if world_streaming_manager:
 		# Native streaming system doesn't have ObjectStreamer - pass null
 		diagnostic_overlay.connect_to_streaming(world_streaming_manager, null)
 		crash_reporter.connect_to_systems(self, world_streaming_manager, null, diagnostic_overlay)
 
+	# Initialize unified debug system with all references
+	if debug_system and debug_system.has_method("initialize"):
+		var streaming_profiler: StreamingProfiler = null
+		if world_streaming_manager and world_streaming_manager.has_method("get_streaming_profiler"):
+			streaming_profiler = world_streaming_manager.get_streaming_profiler()
+		debug_system.call("initialize", self, fly_camera, world_streaming_manager, cell_manager, profiler, streaming_profiler)
+		if debug_system.has_signal("auto_test_completed"):
+			debug_system.connect("auto_test_completed", _on_debug_auto_test_completed)
+
 	_log("Diagnostic systems connected to streaming")
 
 
-## Run the "models toggle with distant land" crash scenario test
-## This helps reproduce crashes by:
-## 1. Teleporting to a high-traffic area (Seyda Neen)
-## 2. Ensuring distant land is enabled
-## 3. Toggling models ON
-## 4. Showing diagnostic overlay to monitor what happens
-func _run_crash_scenario_test() -> void:
-	_log("[color=cyan]========================================[/color]")
-	_log("[color=cyan]CRASH SCENARIO TEST: Models Toggle[/color]")
-	_log("[color=cyan]========================================[/color]")
-
-	# Show diagnostic overlay
-	if diagnostic_overlay:
-		diagnostic_overlay.visible = true
-		diagnostic_overlay.clear()
-
-	# Log to crash reporter
-	if crash_reporter:
-		crash_reporter.log_toggle("CRASH_TEST_START", true)
-
-	# Step 1: Teleport to Seyda Neen
-	_log("Step 1: Teleporting to Seyda Neen...")
-	_teleport_to_cell(-2, -9)
-
-	# Step 2: Ensure models are OFF first
-	if _show_models:
-		_log("Step 2: Disabling models first...")
-		if _show_models_toggle:
-			_show_models_toggle.button_pressed = false
-		await get_tree().create_timer(0.5).timeout
-
-	# Step 3: Wait a moment for position to settle
-	_log("Step 3: Waiting for streaming to settle...")
-	await get_tree().create_timer(1.0).timeout
-
-	# Step 4: Toggle models ON (the crash scenario)
-	_log("Step 4: Enabling models (crash scenario)...")
-	_log("[color=yellow]Watch the diagnostic overlay for issues![/color]")
-	if _show_models_toggle:
-		_show_models_toggle.button_pressed = true
-
-	# Step 5: Monitor for a few seconds
-	_log("Step 5: Monitoring for 5 seconds...")
-	await get_tree().create_timer(5.0).timeout
-
-	_log("[color=green]Crash scenario test completed[/color]")
-	_log("Check diagnostic overlay and crash report for issues")
-
-	if crash_reporter:
-		crash_reporter.dump_state_now()
+# Crash scenario test removed - Models toggle no longer exists
 
 
 ## Handle test completion
@@ -530,6 +511,14 @@ func _on_test_completed(report: Dictionary) -> void:
 ## Handle test error capture
 func _on_test_error_captured(error: String) -> void:
 	_log("[color=red]TEST ERROR: %s[/color]" % error.substr(0, 100))
+
+
+## Handle debug system auto-test completion
+func _on_debug_auto_test_completed(report: Dictionary) -> void:
+	var summary: Dictionary = report.get("summary", {})
+	var errors: int = summary.get("errors", 0)
+	var duration: float = summary.get("duration_seconds", 0.0)
+	_log("[color=cyan]Auto-test completed: %.1fs, %d errors[/color]" % [duration, errors])
 
 
 ## Console command: Center on cell (interior)
@@ -766,16 +755,9 @@ func _create_performance_panel() -> void:
 func _create_visibility_panel() -> void:
 	_visibility_panel = FoldablePanelScript.new("Rendering", false)
 
-	# Row 1: Models, NPCs
+	# Row 1: NPCs only (Models always visible now)
 	var row1 := HBoxContainer.new()
 	row1.add_theme_constant_override("separation", 8)
-
-	_show_models_toggle = CheckBox.new()
-	_show_models_toggle.text = "Models [M]"
-	_show_models_toggle.button_pressed = _show_models
-	_show_models_toggle.toggled.connect(_on_show_models_toggled)
-	_show_models_toggle.tooltip_text = "Toggle static models (shortcut: M)"
-	row1.add_child(_show_models_toggle)
 
 	_show_characters_toggle = CheckBox.new()
 	_show_characters_toggle.text = "NPCs [N]"
@@ -1244,114 +1226,6 @@ func _update_ocean_wave_params() -> void:
 			params.wind_direction = ocean_manager.wind_direction
 
 
-## Toggle models visibility
-## Industry standard: Toggle should only change visibility, not trigger mass loading
-## New cells will load naturally via _process() streaming - no need to force refresh
-func _on_show_models_toggled(enabled: bool) -> void:
-	_show_models = enabled
-
-	_log("[DIAG] Models toggle: %s" % ("ON" if enabled else "OFF"))
-
-	# Log to crash reporter for debugging
-	if crash_reporter:
-		crash_reporter.log_toggle("Models", enabled)
-
-	# Toggle object loading in NativeStreamingManager
-	if world_streaming_manager:
-		world_streaming_manager.load_objects = enabled
-		# Note: streaming_mode is always FULL_AAA now (NEAR_ONLY removed)
-		# Visibility is controlled via load_objects flag and tier visibility methods
-
-		var loaded_coords: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
-		_log("[DIAG] Currently loaded cells in dictionary: %d" % loaded_coords.size())
-
-		# Native streaming system: Visibility controlled by Godot's native visibility_range
-		# Objects automatically show/hide based on distance - we just need to show/hide cell containers
-		if true:
-			# Show/hide existing loaded cell objects from dictionary
-			var visible_count := 0
-			for cell_grid: Vector2i in loaded_coords:
-				var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
-				if cell_node:
-					cell_node.visible = enabled
-					visible_count += 1
-
-			# Also iterate direct children to catch any cells not in the dictionary
-			# (cells are added as children of NativeStreamingManager)
-			var child_count := 0
-			for child in world_streaming_manager.get_children():
-				if child is Node3D and child.has_meta("cell_grid"):
-					child.visible = enabled
-					child_count += 1
-
-			_log("[DIAG] Set visibility for %d cell nodes (dict), %d children with cell_grid meta" % [visible_count, child_count])
-
-			# Toggle impostor visibility
-			var impostor_mgr: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
-			if impostor_mgr and impostor_mgr.has_method("set_all_visible"):
-				impostor_mgr.call("set_all_visible", enabled)
-				_log("[DIAG] Impostors visibility: %s" % ("ON" if enabled else "OFF"))
-
-		# Log impostor manager stats (get reference outside if/else block)
-		var impostor_mgr_stats: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
-		if impostor_mgr_stats and impostor_mgr_stats.has_method("get_stats"):
-			var imp_stats: Variant = impostor_mgr_stats.call("get_stats")
-			if imp_stats and imp_stats is Dictionary:
-				_log("[DIAG] Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
-					imp_stats.get("total_impostors", 0),
-					imp_stats.get("visible_impostors", 0),
-					imp_stats.get("texture_cache_size", 0),
-					imp_stats.get("pending_loads", 0),
-					imp_stats.get("texture_array_layers", 0),
-				])
-
-		# Native streaming system: Objects are always loaded when cells load
-		# Visibility is controlled by native visibility_range properties
-		# No need for ObjectStreamer.enabled flag
-		if true:
-			# Nothing special needed - visibility is automatic
-			if enabled:
-				# Full reload required because cells loaded without objects have no Node3D children
-				# and the LOD manager needs objects to be registered during instantiation
-				if world_streaming_manager.has_method("reload_all_cells"):
-					world_streaming_manager.reload_all_cells()
-				else:
-					# Fallback for older WSM
-					if world_streaming_manager.has_method("clear_tier_state"):
-						world_streaming_manager.clear_tier_state()
-					world_streaming_manager.refresh_cells()
-
-			# Native streaming system: No chunk renderer (uses cell-based loading)
-			# ChunkRenderer is deprecated - native system doesn't use chunk-based paging
-
-		# Log current queue states
-		if cell_manager:
-			var inst_queue: int = cell_manager.get_instantiation_queue_size() if cell_manager.has_method("get_instantiation_queue_size") else 0
-			var async_pending: int = cell_manager.get_async_pending_count() if cell_manager.has_method("get_async_pending_count") else 0
-			_log("[DIAG] After toggle: inst_queue=%d, async_pending=%d" % [inst_queue, async_pending])
-
-	_log("Models: %s" % ("ON" if enabled else "OFF"))
-	_update_stats()
-
-	# Log stats again after a delay to see if chunks loaded
-	if enabled and world_streaming_manager:
-		await get_tree().create_timer(2.0).timeout
-		_log("[DIAG] After 2s delay:")
-		var impostor_mgr_delayed: Node = world_streaming_manager.get_node_or_null("ImpostorManager")
-		if impostor_mgr_delayed and impostor_mgr_delayed.has_method("get_stats"):
-			var imp_stats: Variant = impostor_mgr_delayed.call("get_stats")
-			if imp_stats and imp_stats is Dictionary:
-				_log("[DIAG]   Impostor stats: total=%d, visible=%d, textures=%d, pending=%d, layers=%d" % [
-					imp_stats.get("total_impostors", 0),
-					imp_stats.get("visible_impostors", 0),
-					imp_stats.get("texture_cache_size", 0),
-					imp_stats.get("pending_loads", 0),
-					imp_stats.get("texture_array_layers", 0),
-				])
-		# Native streaming system: No chunk renderer (uses cell-based loading)
-		# ChunkRenderer is deprecated - native system doesn't use chunk-based paging
-
-
 ## Toggle characters (NPCs/creatures) visibility
 ## Separate from models for isolated character/animation testing
 func _on_show_characters_toggled(enabled: bool) -> void:
@@ -1806,13 +1680,15 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	
 	# Configure
 	native_streaming_manager.load_radius_cells = _current_view_distance
-	native_streaming_manager.debug_enabled = false
+	native_streaming_manager.debug_enabled = false  # Disabled for performance (enable with toggle_debug command)
 	
 	add_child(native_streaming_manager)
 	
 	# Connect signals
 	native_streaming_manager.cell_loaded.connect(_on_native_cell_loaded)
 	native_streaming_manager.cell_unloaded.connect(_on_native_cell_unloaded)
+	native_streaming_manager.startup_progress.connect(_on_streaming_startup_progress)
+	native_streaming_manager.startup_complete.connect(_on_streaming_startup_complete)
 	
 	# Initialize with cell manager and camera
 	native_streaming_manager.initialize(cell_manager, camera if start_tracking else null)
@@ -1846,6 +1722,41 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"debug"
 		)
 
+		console.register_command(
+			"lod_check",
+			_cmd_lod_check,
+			"Check LOD configuration on loaded meshes (shows first 20 with issues)",
+			"debug"
+		)
+
+		console.register_command(
+			"lod_dump",
+			_cmd_lod_dump,
+			"Dump visibility_range config for a specific node name pattern",
+			"debug"
+		)
+
+		console.register_command(
+			"lod_stats",
+			_cmd_lod_stats,
+			"Show detailed LOD statistics by tier (LOD0/1/2/3) with configuration state",
+			"debug"
+		)
+
+		console.register_command(
+			"lod_fix",
+			_cmd_lod_fix,
+			"Force reconfigure visibility_range on all loaded cells",
+			"debug"
+		)
+
+		console.register_command(
+			"lod_materials",
+			_cmd_lod_materials,
+			"Check materials on LOD nodes (diagnose white LODs)",
+			"debug"
+		)
+
 
 ## Console command: debug_streaming
 func _cmd_debug_streaming(_args: Dictionary) -> String:
@@ -1874,6 +1785,400 @@ func _cmd_impostor_stats(_args: Dictionary) -> String:
 			result += "  %s: %s\n" % [key, stats[key]]
 		return result
 	return "Impostor renderer not available"
+
+
+## Console command: lod_check - verify LOD nodes have correct visibility_range
+func _cmd_lod_check(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not available"
+
+	var results: Array[String] = []
+	var counters := {"total": 0, "bad": 0, "good": 0}
+
+	# Check all loaded cells
+	for grid: Vector2i in native_streaming_manager._loaded_cells:
+		var cell_node: Node3D = native_streaming_manager._loaded_cells[grid]
+		if cell_node:
+			_check_lod_nodes_recursive(cell_node, results, counters)
+
+	# Build result string
+	var output := "LOD Configuration Check:\n"
+	output += "  Total LOD nodes found: %d\n" % counters["total"]
+	output += "  Correctly configured: %d\n" % counters["good"]
+	output += "  Misconfigured (end=0): %d\n" % counters["bad"]
+
+	if not results.is_empty():
+		output += "\nFirst %d issues:\n" % mini(results.size(), 20)
+		for i in mini(results.size(), 20):
+			output += "  %s\n" % results[i]
+
+	if counters["bad"] == 0 and counters["total"] > 0:
+		output += "\n[OK] All LOD nodes properly configured!"
+	elif counters["total"] == 0:
+		output += "\n[WARN] No LOD nodes found in loaded cells. Check prebaking."
+
+	return output
+
+
+## Helper: recursively check LOD node configuration
+func _check_lod_nodes_recursive(node: Node, results: Array[String], counters: Dictionary) -> void:
+	if node is GeometryInstance3D:
+		var geo := node as GeometryInstance3D
+		var node_name: String = node.name
+
+		# Check if this is a LOD node
+		if node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3"):
+			counters["total"] += 1
+
+			# Check if visibility_range_end is 0 (misconfigured - means always visible)
+			if geo.visibility_range_end == 0.0:
+				counters["bad"] += 1
+				results.append("%s: begin=%.0f, end=%.0f [BAD - end=0 means always visible]" % [
+					node_name, geo.visibility_range_begin, geo.visibility_range_end
+				])
+			else:
+				counters["good"] += 1
+
+	for child in node.get_children():
+		_check_lod_nodes_recursive(child, results, counters)
+
+
+## Console command: lod_dump - dump visibility_range for nodes matching pattern
+func _cmd_lod_dump(args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not available"
+
+	var pattern: String = args.get("pattern", "")
+	if pattern.is_empty():
+		return "Usage: lod_dump <pattern>\nExample: lod_dump door"
+
+	var results: Array[String] = []
+
+	for grid: Vector2i in native_streaming_manager._loaded_cells:
+		var cell_node: Node3D = native_streaming_manager._loaded_cells[grid]
+		if cell_node:
+			_dump_matching_nodes_recursive(cell_node, pattern.to_lower(), results)
+
+	if results.is_empty():
+		return "No nodes found matching '%s'" % pattern
+
+	var output := "Nodes matching '%s' (max 30):\n" % pattern
+	for i in mini(results.size(), 30):
+		output += "%s\n" % results[i]
+
+	return output
+
+
+## Helper: dump visibility_range for nodes matching pattern
+func _dump_matching_nodes_recursive(node: Node, pattern: String, results: Array[String]) -> void:
+	if node is GeometryInstance3D:
+		var geo := node as GeometryInstance3D
+		var node_name: String = node.name
+
+		if node_name.to_lower().contains(pattern):
+			var fade_mode := "DISABLED"
+			match geo.visibility_range_fade_mode:
+				GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF:
+					fade_mode = "SELF"
+				GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES:
+					fade_mode = "DEPS"
+
+			results.append("%s: begin=%.0f, end=%.0f, fade=%s, visible=%s" % [
+				node_name,
+				geo.visibility_range_begin,
+				geo.visibility_range_end,
+				fade_mode,
+				geo.visible
+			])
+
+	for child in node.get_children():
+		_dump_matching_nodes_recursive(child, pattern, results)
+
+
+## Console command: lod_stats - detailed LOD statistics by tier
+func _cmd_lod_stats(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not available"
+
+	# Expected visibility_range values for each tier
+	const EXPECTED := {
+		"lod0": {"begin": 0.0, "end": 150.0},      # NEAR tier
+		"lod1": {"begin": 150.0, "end": 250.0},    # MID tier level 1
+		"lod2": {"begin": 250.0, "end": 375.0},    # MID tier level 2
+		"lod3": {"begin": 375.0, "end": 500.0},    # MID tier level 3
+	}
+
+	var stats := {
+		"lod0_correct": 0, "lod0_bad": 0, "lod0_total": 0,
+		"lod1_correct": 0, "lod1_bad": 0, "lod1_total": 0,
+		"lod2_correct": 0, "lod2_bad": 0, "lod2_total": 0,
+		"lod3_correct": 0, "lod3_bad": 0, "lod3_total": 0,
+		"other_meshes": 0,
+	}
+	var examples: Dictionary = {"lod0_bad": [], "lod1_bad": [], "lod2_bad": [], "lod3_bad": []}
+
+	# Walk all loaded cells
+	for grid: Vector2i in native_streaming_manager._loaded_cells:
+		var cell_node: Node3D = native_streaming_manager._loaded_cells[grid]
+		if cell_node:
+			_collect_lod_stats_recursive(cell_node, stats, examples, EXPECTED)
+
+	# Build output
+	var output := "=== LOD Statistics ===\n\n"
+
+	# LOD0 (NEAR tier: 0-150m)
+	output += "LOD0 (NEAR 0-150m):\n"
+	output += "  Total: %d, Correct: %d, Bad: %d\n" % [
+		stats["lod0_total"], stats["lod0_correct"], stats["lod0_bad"]]
+	if not examples["lod0_bad"].is_empty():
+		output += "  Bad examples: %s\n" % ", ".join(examples["lod0_bad"].slice(0, 3))
+
+	# LOD1 (MID tier: 150-250m)
+	output += "\nLOD1 (MID 150-250m):\n"
+	output += "  Total: %d, Correct: %d, Bad: %d\n" % [
+		stats["lod1_total"], stats["lod1_correct"], stats["lod1_bad"]]
+	if not examples["lod1_bad"].is_empty():
+		output += "  Bad examples: %s\n" % ", ".join(examples["lod1_bad"].slice(0, 3))
+
+	# LOD2 (MID tier: 250-375m)
+	output += "\nLOD2 (MID 250-375m):\n"
+	output += "  Total: %d, Correct: %d, Bad: %d\n" % [
+		stats["lod2_total"], stats["lod2_correct"], stats["lod2_bad"]]
+	if not examples["lod2_bad"].is_empty():
+		output += "  Bad examples: %s\n" % ", ".join(examples["lod2_bad"].slice(0, 3))
+
+	# LOD3 (MID tier: 375-500m)
+	output += "\nLOD3 (MID 375-500m):\n"
+	output += "  Total: %d, Correct: %d, Bad: %d\n" % [
+		stats["lod3_total"], stats["lod3_correct"], stats["lod3_bad"]]
+	if not examples["lod3_bad"].is_empty():
+		output += "  Bad examples: %s\n" % ", ".join(examples["lod3_bad"].slice(0, 3))
+
+	output += "\nOther meshes (no LOD suffix): %d\n" % stats["other_meshes"]
+
+	var total_bad: int = int(stats["lod0_bad"]) + int(stats["lod1_bad"]) + int(stats["lod2_bad"]) + int(stats["lod3_bad"])
+	if total_bad == 0:
+		output += "\n[OK] All LOD nodes properly configured!"
+	else:
+		output += "\n[WARN] %d nodes with incorrect visibility_range. Run 'lod_fix' to repair." % total_bad
+
+	return output
+
+
+## Helper: collect LOD statistics recursively
+func _collect_lod_stats_recursive(node: Node, stats: Dictionary, examples: Dictionary, expected: Dictionary) -> void:
+	if node is GeometryInstance3D:
+		var geo := node as GeometryInstance3D
+		var node_name: String = node.name.to_lower()
+
+		var lod_type := ""
+		if node_name.ends_with("_lod1"):
+			lod_type = "lod1"
+		elif node_name.ends_with("_lod2"):
+			lod_type = "lod2"
+		elif node_name.ends_with("_lod3"):
+			lod_type = "lod3"
+		elif node is MeshInstance3D:
+			# Check if this might be LOD0 (has LOD siblings)
+			var has_lod_sibling := false
+			if node.get_parent():
+				for sibling in node.get_parent().get_children():
+					var sname: String = sibling.name.to_lower()
+					if sname.ends_with("_lod1") or sname.ends_with("_lod2") or sname.ends_with("_lod3"):
+						has_lod_sibling = true
+						break
+			if has_lod_sibling:
+				lod_type = "lod0"
+			else:
+				stats["other_meshes"] += 1
+
+		if not lod_type.is_empty():
+			stats[lod_type + "_total"] += 1
+			var exp: Dictionary = expected.get(lod_type, {"begin": 0.0, "end": 0.0})
+
+			# Check if visibility_range matches expected (with tolerance)
+			var begin_ok := absf(geo.visibility_range_begin - exp["begin"]) < 1.0
+			var end_ok := absf(geo.visibility_range_end - exp["end"]) < 1.0
+
+			if begin_ok and end_ok:
+				stats[lod_type + "_correct"] += 1
+			else:
+				stats[lod_type + "_bad"] += 1
+				var bad_list: Array = examples[lod_type + "_bad"]
+				if bad_list.size() < 5:
+					bad_list.append("%s (%.0f-%.0f)" % [node.name, geo.visibility_range_begin, geo.visibility_range_end])
+
+	for child in node.get_children():
+		_collect_lod_stats_recursive(child, stats, examples, expected)
+
+
+## Console command: lod_fix - force reconfigure visibility_range on all loaded cells
+func _cmd_lod_fix(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not available"
+
+	var fixed_count := 0
+	var cell_count := 0
+
+	# Reconfigure all loaded cells
+	for grid: Vector2i in native_streaming_manager._loaded_cells:
+		var cell_node: Node3D = native_streaming_manager._loaded_cells[grid]
+		if cell_node:
+			cell_count += 1
+			fixed_count += _fix_lod_nodes_recursive(cell_node)
+
+	return "Reconfigured %d LOD nodes in %d cells.\nRun 'lod_stats' to verify." % [fixed_count, cell_count]
+
+
+## Helper: fix LOD node visibility_range recursively
+func _fix_lod_nodes_recursive(node: Node) -> int:
+	var fixed := 0
+
+	if node is GeometryInstance3D:
+		var geo := node as GeometryInstance3D
+		var node_name: String = node.name.to_lower()
+
+		# Fix LOD nodes
+		if node_name.ends_with("_lod1"):
+			geo.visibility_range_begin = 150.0
+			geo.visibility_range_end = 250.0
+			geo.visibility_range_begin_margin = 50.0
+			geo.visibility_range_end_margin = 50.0
+			geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+			fixed += 1
+		elif node_name.ends_with("_lod2"):
+			geo.visibility_range_begin = 250.0
+			geo.visibility_range_end = 375.0
+			geo.visibility_range_begin_margin = 50.0
+			geo.visibility_range_end_margin = 50.0
+			geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+			fixed += 1
+		elif node_name.ends_with("_lod3"):
+			geo.visibility_range_begin = 375.0
+			geo.visibility_range_end = 500.0
+			geo.visibility_range_begin_margin = 50.0
+			geo.visibility_range_end_margin = 50.0
+			geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+			fixed += 1
+		elif node is MeshInstance3D:
+			# Check if this is LOD0 (has LOD siblings)
+			var has_lod_sibling := false
+			if node.get_parent():
+				for sibling in node.get_parent().get_children():
+					var sname: String = sibling.name.to_lower()
+					if sname.ends_with("_lod1") or sname.ends_with("_lod2") or sname.ends_with("_lod3"):
+						has_lod_sibling = true
+						break
+			if has_lod_sibling:
+				# Configure as LOD0 (NEAR tier: 0-150m)
+				geo.visibility_range_begin = 0.0
+				geo.visibility_range_end = 150.0
+				geo.visibility_range_begin_margin = 0.0
+				geo.visibility_range_end_margin = 50.0
+				geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+				fixed += 1
+			else:
+				# No LOD siblings - this is a simple object without LOD chain
+				# Configure as NEAR tier only (disappears at 150m)
+				# Only configure if visibility_range is currently unconfigured (both 0)
+				if geo.visibility_range_begin == 0.0 and geo.visibility_range_end == 0.0:
+					geo.visibility_range_begin = 0.0
+					geo.visibility_range_end = 150.0
+					geo.visibility_range_begin_margin = 0.0
+					geo.visibility_range_end_margin = 50.0
+					geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+					fixed += 1
+
+	for child in node.get_children():
+		fixed += _fix_lod_nodes_recursive(child)
+
+	return fixed
+
+
+## Console command: lod_materials - diagnose white LODs
+func _cmd_lod_materials(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not available"
+
+	var stats := {
+		"lod_with_material": 0,
+		"lod_without_material": 0,
+		"lod0_with_material": 0,
+		"lod0_without_material": 0,
+	}
+	var examples_no_mat: Array[String] = []
+	var examples_with_mat: Array[String] = []
+
+	# Walk all loaded cells
+	for grid: Vector2i in native_streaming_manager._loaded_cells:
+		var cell_node: Node3D = native_streaming_manager._loaded_cells[grid]
+		if cell_node:
+			_collect_lod_material_stats(cell_node, stats, examples_no_mat, examples_with_mat)
+
+	var output := "=== LOD Material Statistics ===\n\n"
+	output += "LOD nodes (LOD1/2/3):\n"
+	output += "  With material: %d\n" % stats["lod_with_material"]
+	output += "  Without material (WHITE): %d\n" % stats["lod_without_material"]
+
+	output += "\nLOD0 nodes:\n"
+	output += "  With material: %d\n" % stats["lod0_with_material"]
+	output += "  Without material: %d\n" % stats["lod0_without_material"]
+
+	if not examples_no_mat.is_empty():
+		output += "\nExamples without material:\n"
+		for ex in examples_no_mat.slice(0, 5):
+			output += "  - %s\n" % ex
+
+	if not examples_with_mat.is_empty():
+		output += "\nExamples with material:\n"
+		for ex in examples_with_mat.slice(0, 3):
+			output += "  - %s\n" % ex
+
+	return output
+
+
+## Helper: collect LOD material statistics
+func _collect_lod_material_stats(node: Node, stats: Dictionary, no_mat: Array[String], with_mat: Array[String]) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		var node_name: String = node.name.to_lower()
+		var is_lod := node_name.ends_with("_lod1") or node_name.ends_with("_lod2") or node_name.ends_with("_lod3")
+
+		# Check for material
+		var has_mat := false
+		if mi.material_override:
+			has_mat = true
+		elif mi.mesh and mi.mesh.get_surface_count() > 0:
+			var surf_mat := mi.mesh.surface_get_material(0)
+			if surf_mat:
+				has_mat = true
+
+		if is_lod:
+			if has_mat:
+				stats["lod_with_material"] += 1
+				if with_mat.size() < 5:
+					with_mat.append(node.name)
+			else:
+				stats["lod_without_material"] += 1
+				if no_mat.size() < 10:
+					no_mat.append(node.name)
+		else:
+			# Check if it's LOD0 (has LOD siblings)
+			var has_lod_sibling := false
+			if node.get_parent():
+				for sibling in node.get_parent().get_children():
+					var sname: String = sibling.name.to_lower()
+					if sname.ends_with("_lod1") or sname.ends_with("_lod2") or sname.ends_with("_lod3"):
+						has_lod_sibling = true
+						break
+			if has_lod_sibling:
+				if has_mat:
+					stats["lod0_with_material"] += 1
+				else:
+					stats["lod0_without_material"] += 1
+
+	for child in node.get_children():
+		_collect_lod_material_stats(child, stats, no_mat, with_mat)
 
 
 ## Callback for native streaming manager cell loaded
@@ -2003,7 +2308,7 @@ Cell: (%d, %d)
 			inst_queue,
 			_current_view_distance,
 			total_regions,
-			"ON" if _show_models else "OFF",
+			"ON",  # Models are always visible (no toggle)
 		"ON" if _show_characters else "OFF",
 		"ON" if _show_ocean else "OFF",
 		"ON" if _show_sky else "OFF",
@@ -2105,6 +2410,17 @@ func _hide_loading() -> void:
 	loading_overlay.visible = false
 
 
+func _on_streaming_startup_progress(progress: float, loaded_cells: int, total_cells: int, queued_objects: int) -> void:
+	loading_overlay.visible = true
+	loading_label.text = "Loading World"
+	status_label.text = "Cells: %d/%d | Objects queued: %d" % [loaded_cells, total_cells, queued_objects]
+	progress_bar.value = progress
+
+
+func _on_streaming_startup_complete() -> void:
+	_hide_loading()
+
+
 func _update_loading(progress: float, status: String) -> void:
 	progress_bar.value = progress
 	status_label.text = status
@@ -2142,15 +2458,16 @@ func _input(event: InputEvent) -> void:
 				stats_panel.visible = _perf_overlay_visible
 				_log("Performance overlay: %s" % ("ON" if _perf_overlay_visible else "OFF"))
 			KEY_F4:
-				# Dump detailed profiling report
-				_dump_profiling_report()
+				# Dump detailed profiling report - handled by DebugSystem
+				# Legacy fallback if DebugSystem not available
+				if debug_system:
+					pass  # DebugSystem handles this via its own _input
+				else:
+					_dump_profiling_report()
 			KEY_EQUAL, KEY_KP_ADD:  # + key
 				_adjust_view_distance(1)
 			KEY_MINUS, KEY_KP_SUBTRACT:  # - key
 				_adjust_view_distance(-1)
-			KEY_M:  # Toggle models
-				if _show_models_toggle:
-					_show_models_toggle.button_pressed = not _show_models_toggle.button_pressed
 			KEY_N:  # Toggle NPCs/characters
 				if _show_characters_toggle:
 					_show_characters_toggle.button_pressed = not _show_characters_toggle.button_pressed
@@ -2160,16 +2477,23 @@ func _input(event: InputEvent) -> void:
 			KEY_K:  # Toggle sky/day-night cycle
 				if _show_sky_toggle:
 					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
-			KEY_F9:  # Toggle diagnostic overlay
-				if diagnostic_overlay:
+			KEY_F9:  # Toggle diagnostic overlay - handled by DebugSystem
+				# DebugSystem uses its own overlay; legacy diagnostic_overlay kept for compatibility
+				if debug_system:
+					pass  # DebugSystem handles this via its own _input
+				elif diagnostic_overlay:
 					diagnostic_overlay.visible = not diagnostic_overlay.visible
 					_log("Diagnostic overlay: %s" % ("ON" if diagnostic_overlay.visible else "OFF"))
-			KEY_F10:  # Run crash scenario test
-				_run_crash_scenario_test()
-			KEY_F11:  # Dump current state to log
-				if crash_reporter:
+			KEY_F11:  # Dump current state to log - handled by DebugSystem
+				# DebugSystem handles this; legacy fallback for crash_reporter
+				if debug_system:
+					pass  # DebugSystem handles this via its own _input
+				elif crash_reporter:
 					crash_reporter.dump_state_now()
 					_log("[color=cyan]State dumped to crash report log[/color]")
+			KEY_F12:  # Toggle auto-test - handled by DebugSystem
+				# No legacy fallback - this is new functionality
+				pass  # DebugSystem handles this via its own _input
 
 
 func _process(delta: float) -> void:
@@ -2202,8 +2526,9 @@ func _process(delta: float) -> void:
 
 
 ## Adjust view distance and update streaming manager
+## Max 10 cells (~1.2km) is reasonable for most GPUs; beyond that FPS may drop significantly
 func _adjust_view_distance(delta: int) -> void:
-	_current_view_distance = clampi(_current_view_distance + delta, 1, 8)
+	_current_view_distance = clampi(_current_view_distance + delta, 1, 10)
 	if world_streaming_manager:
 		world_streaming_manager.view_distance_cells = _current_view_distance
 		world_streaming_manager.refresh_cells()

@@ -258,7 +258,7 @@ func _model_cached(model_path: String) -> bool:
 
 
 ## Save model to cache with embedded materials and textures
-## LOD meshes are saved as separate files for on-demand loading
+## LOD meshes are kept in the main scene file for native visibility_range system
 func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
 	var base_path := output_dir.path_join(safe_name)
@@ -266,11 +266,16 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	# Prepare all resources for embedding (makes them local to scene)
 	_prepare_resources_for_embedding(node)
 
-	# Extract and save LOD meshes to separate files before removing from tree
-	_extract_and_save_lods(node, base_path)
-
-	# Remove LOD nodes - they're now in separate .lod.res files
-	_remove_lod_nodes(node)
+	# OPTION A: Keep LOD nodes in main scene for native visibility_range
+	# LOD nodes (named _LOD1, _LOD2, _LOD3) remain as siblings to the main mesh.
+	# NativeStreamingManager will configure visibility_range at runtime.
+	# This enables Godot's native FADE_DEPENDENCIES crossfade between LODs.
+	#
+	# Previously we extracted LODs to separate .lod.res files, but they were
+	# never loaded at runtime, breaking the MID tier (150-500m).
+	var lod_count := _count_lod_nodes(node)
+	if lod_count > 0:
+		print("[ModelPrebaker] Keeping %d LOD nodes in %s for native visibility_range" % [lod_count, cache_key])
 
 	# Count meshes for return value
 	var mesh_count := _count_meshes(node)
@@ -296,15 +301,25 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	return mesh_count
 
 
-## Count meshes in node tree (excludes LOD meshes)
+## Count meshes in node tree (includes LOD meshes now that we keep them)
 func _count_meshes(node: Node) -> int:
 	var count := 0
 	if node is MeshInstance3D:
 		var mesh_inst := node as MeshInstance3D
-		if mesh_inst.mesh and not _is_lod_node(node):
+		if mesh_inst.mesh:
 			count += 1
 	for child in node.get_children():
 		count += _count_meshes(child)
+	return count
+
+
+## Count LOD nodes in tree
+func _count_lod_nodes(node: Node) -> int:
+	var count := 0
+	if _is_lod_node(node):
+		count += 1
+	for child in node.get_children():
+		count += _count_lod_nodes(child)
 	return count
 
 

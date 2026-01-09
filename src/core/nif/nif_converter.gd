@@ -1197,10 +1197,12 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 			])
 		return
 
-	# Set visibility range for LOD0 (original mesh)
-	mesh_instance.visibility_range_end = lod_distances[0]
-	mesh_instance.visibility_range_end_margin = lod_fade_margin
-	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+	# visibility_range IS set here at prebake time (see lines below).
+	# This ensures LOD nodes have correct ranges when loaded from cache.
+	# NativeStreamingManager may also reconfigure at runtime if needed.
+	#
+	# LOD0 (original mesh): NEAR tier (0-150m)
+	# LOD1/2/3: MID tier sub-levels (150-250m, 250-375m, 375-500m)
 
 	if debug_lod:
 		print("NIFConverter: Generating %d LOD levels for '%s' (%d triangles)" % [
@@ -1213,8 +1215,30 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 	if material == null and mesh_instance.mesh and mesh_instance.mesh.get_surface_count() > 0:
 		material = mesh_instance.mesh.surface_get_material(0)
 
-	if material == null and debug_lod:
-		push_warning("NIFConverter: No material found for LOD generation of '%s'" % _source_path.get_file())
+	# If no material found, try to inherit from parent nodes
+	if material == null:
+		var parent_node: Node = mesh_instance.get_parent()
+		while parent_node and material == null:
+			if parent_node is MeshInstance3D:
+				var parent_mi := parent_node as MeshInstance3D
+				material = parent_mi.material_override
+				if material == null and parent_mi.mesh and parent_mi.mesh.get_surface_count() > 0:
+					material = parent_mi.mesh.surface_get_material(0)
+			parent_node = parent_node.get_parent() if parent_node else null
+
+	# Also try sibling MeshInstance3D nodes (common in NIF files where material is on a sibling)
+	if material == null and mesh_instance.get_parent():
+		for sibling in mesh_instance.get_parent().get_children():
+			if sibling is MeshInstance3D and sibling != mesh_instance:
+				var sibling_mi := sibling as MeshInstance3D
+				material = sibling_mi.material_override
+				if material == null and sibling_mi.mesh and sibling_mi.mesh.get_surface_count() > 0:
+					material = sibling_mi.mesh.surface_get_material(0)
+				if material:
+					break
+
+	if material == null:
+		push_warning("NIFConverter: No material found for LOD generation of '%s' - LODs may render white" % _source_path.get_file())
 
 	var simplifier := MeshOptimizer.new()
 	var parent := mesh_instance.get_parent()
@@ -1250,18 +1274,33 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		# Copy transform from original
 		lod_instance.transform = mesh_instance.transform
 
-		# IMPORTANT: LOD meshes are hidden by default - they are extracted by ObjectStreamer
-		# for MultiMesh batching in the MID tier, NOT rendered directly in the scene tree.
-		# Setting visible = false prevents overlap with the main mesh and ObjectStreamer's LOD system.
-		# The mesh data and materials are preserved for extraction via _find_lod_meshes_recursive().
-		lod_instance.visible = false
+		# Configure visibility_range at prebake time to ensure correct LOD behavior
+		# This avoids relying on runtime configuration which may fail during async loading
+		# Distance constants from distance_utils.gd:
+		#   NEAR_END = 150.0, LOD1_END = 250.0, LOD2_END = 375.0, LOD3_END = 500.0
+		#   FADE_MARGIN = 50.0
+		lod_instance.visible = true
 
-		# Disable VisibilityRange - ObjectStreamer handles LOD visibility manually
-		# Leaving these enabled would cause Godot's built-in LOD system to show/hide
-		# these nodes based on camera distance, conflicting with our custom streaming.
-		lod_instance.visibility_range_begin = 0.0
-		lod_instance.visibility_range_end = 0.0
-		lod_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+		# Set visibility_range based on LOD level (lod_idx is 0-based, LOD level is 1-based)
+		match lod_idx + 1:
+			1:  # LOD1: 150-250m (MID tier, first level)
+				lod_instance.visibility_range_begin = 150.0
+				lod_instance.visibility_range_end = 250.0
+			2:  # LOD2: 250-375m (MID tier, second level)
+				lod_instance.visibility_range_begin = 250.0
+				lod_instance.visibility_range_end = 375.0
+			3:  # LOD3: 375-500m (MID tier, third level)
+				lod_instance.visibility_range_begin = 375.0
+				lod_instance.visibility_range_end = 500.0
+			_:  # Fallback for any additional levels
+				lod_instance.visibility_range_begin = 375.0
+				lod_instance.visibility_range_end = 500.0
+
+		# Margins for hysteresis (prevents flickering at boundaries)
+		lod_instance.visibility_range_begin_margin = 50.0
+		lod_instance.visibility_range_end_margin = 50.0
+		# FADE_DEPENDENCIES enables smooth crossfade between sibling LOD nodes
+		lod_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
 
 		# Add as sibling to original mesh
 		if parent:
@@ -1270,9 +1309,21 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		if debug_lod:
 			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
 			var lod_tris: int = lod_indices.size() / 3 if lod_indices else 0
-			print("  LOD%d: %d -> %d triangles (%.1f%%), hidden for MultiMesh extraction" % [
-				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles
+			print("  LOD%d: %d -> %d triangles (%.1f%%), range: %.0f-%.0fm" % [
+				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles,
+				lod_instance.visibility_range_begin, lod_instance.visibility_range_end
 			])
+
+	# Configure the original mesh (LOD0) as NEAR tier (0-150m)
+	# This ensures LOD0 is only visible at close range, transitioning to LOD1 at 150m
+	mesh_instance.visibility_range_begin = 0.0
+	mesh_instance.visibility_range_end = 150.0  # NEAR_END
+	mesh_instance.visibility_range_begin_margin = 0.0
+	mesh_instance.visibility_range_end_margin = 50.0  # FADE_MARGIN
+	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+
+	if debug_lod:
+		print("  LOD0 (original): configured for NEAR tier (0-150m)")
 
 
 ## Create ArrayMesh from NiTriShapeData

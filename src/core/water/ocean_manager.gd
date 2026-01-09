@@ -16,7 +16,7 @@ func _get_shore_mask_path() -> String:
 	return SettingsManager.get_ocean_path().path_join("shore_mask.png")
 
 # Ocean configuration
-@export var ocean_radius: float = 8000.0  # 8km clipmap radius
+@export var ocean_radius: float = 25000.0  # 25km clipmap radius - covers all of Vvardenfell
 @export var wave_update_rate: int = 30    # Wave updates per second
 @export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore (horizontal distance)
 @export var shore_mask_resolution: int = 4096  # Shore mask texture size
@@ -156,8 +156,8 @@ func _register_project_settings() -> void:
 		})
 
 	if not ProjectSettings.has_setting(SETTING_RADIUS):
-		ProjectSettings.set_setting(SETTING_RADIUS, 8000.0)
-		ProjectSettings.set_initial_value(SETTING_RADIUS, 8000.0)
+		ProjectSettings.set_setting(SETTING_RADIUS, 25000.0)
+		ProjectSettings.set_initial_value(SETTING_RADIUS, 25000.0)
 		ProjectSettings.add_property_info({
 			"name": SETTING_RADIUS,
 			"type": TYPE_FLOAT,

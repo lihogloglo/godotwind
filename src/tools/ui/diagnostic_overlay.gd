@@ -293,8 +293,8 @@ func _on_instantiation_requested(object_id: int, model_path: String, _world_tran
 	_add_recent_model(model_path, "REQUESTED")
 
 
-func _on_cell_loaded(grid: Vector2i, _node: Node3D) -> void:
-	_add_recent_model("Cell (%d, %d)" % [grid.x, grid.y], "LOADED")
+func _on_cell_loaded(grid: Vector2i, object_count: int) -> void:
+	_add_recent_model("Cell (%d, %d) [%d objects]" % [grid.x, grid.y, object_count], "LOADED")
 
 #endregion
 

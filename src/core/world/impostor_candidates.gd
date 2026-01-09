@@ -277,60 +277,33 @@ func should_have_impostor(model_path: String) -> bool:
 	return result
 
 
+## All pattern arrays for impostor candidates (order = priority)
+const ALL_CANDIDATE_PATTERNS: Array = [
+	LANDMARK_PATTERNS,
+	LARGE_BUILDING_PATTERNS,
+	TERRAIN_FEATURE_PATTERNS,
+	TREE_PATTERNS,
+	VEGETATION_PATTERNS,
+	PROP_PATTERNS,
+	ARCHITECTURE_DETAIL_PATTERNS,
+	RUIN_PATTERNS,
+	CAVE_PATTERNS,
+]
+
+
 ## Internal check for impostor candidacy
 func _check_impostor_candidate(lower_path: String) -> bool:
 	# Check skip patterns first (editor markers, collision, etc.)
-	for pattern: String in SKIP_PATTERNS:
-		if pattern in lower_path:
-			return false
+	if _matches_any(lower_path, SKIP_PATTERNS):
+		return false
 
-	# Check custom overrides first
+	# Check custom overrides
 	if lower_path in _custom_candidates:
 		return true
 
-	# Check landmark patterns (highest priority - large structures)
-	for pattern: String in LANDMARK_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check building patterns
-	for pattern: String in LARGE_BUILDING_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check terrain features (rocks, arches, etc.)
-	for pattern: String in TERRAIN_FEATURE_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check large trees
-	for pattern: String in TREE_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check vegetation (smaller plants that still add density)
-	for pattern: String in VEGETATION_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check props (barrels, signs, ships, etc.)
-	for pattern: String in PROP_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check architectural details (walls, fences, stairs)
-	for pattern: String in ARCHITECTURE_DETAIL_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check ruins
-	for pattern: String in RUIN_PATTERNS:
-		if pattern in lower_path:
-			return true
-
-	# Check cave/dungeon entrances
-	for pattern: String in CAVE_PATTERNS:
-		if pattern in lower_path:
+	# Check all candidate pattern arrays
+	for pattern_array: Array in ALL_CANDIDATE_PATTERNS:
+		if _matches_any(lower_path, pattern_array):
 			return true
 
 	return false
@@ -675,30 +648,33 @@ static func normalize_model_path(model_path: String) -> String:
 ## Get the hash key for a model path (used for texture lookups)
 ## This is the single source of truth for hash key generation.
 ## MUST be used everywhere that needs to match impostor textures to model paths.
+## Uses MD5 (first 8 chars) for deterministic hashing across sessions and platforms.
+## WARNING: String.hash() is NOT deterministic - do not use it for persistent lookups!
 static func get_hash_key(model_path: String) -> String:
 	var normalized: String = normalize_model_path(model_path)
-	return str(normalized.hash())
+	# Use MD5 for deterministic hashing (first 8 hex chars = 32 bits of entropy)
+	return normalized.md5_text().substr(0, 8)
 
 
 ## Get the impostor texture path for a model
 ## Returns expected path where impostor texture would be stored
-## Format matches impostor_baker_v2: {base_name}_{hash_hex}.png
+## Format: {base_name}_{md5_hash}.png
 ## NOTE: The baker receives paths WITHOUT the "meshes\" prefix (e.g., "x\Ex_T_menhir_L_01.nif")
 ## We must normalize the path the same way for hash consistency
 static func get_impostor_texture_path(model_path: String) -> String:
+	var hash_key: String = get_hash_key(model_path)
 	var normalized: String = normalize_model_path(model_path)
-	var hash_val: int = normalized.hash()
 	var base_name: String = normalized.get_file().get_basename()
 	# Clean filename and lowercase (match baker output format which is lowercase on disk)
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
-	return _get_impostors_dir().path_join("%s_%x.png" % [base_name, hash_val])
+	return _get_impostors_dir().path_join("%s_%s.png" % [base_name, hash_key])
 
 
 ## Get the impostor metadata path for a model
-## Format matches impostor_baker_v2: {base_name}_{hash_hex}.json
+## Format: {base_name}_{md5_hash}.json
 static func get_impostor_metadata_path(model_path: String) -> String:
+	var hash_key: String = get_hash_key(model_path)
 	var normalized: String = normalize_model_path(model_path)
-	var hash_val: int = normalized.hash()
 	var base_name: String = normalized.get_file().get_basename()
 	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
-	return _get_impostors_dir().path_join("%s_%x.json" % [base_name, hash_val])
+	return _get_impostors_dir().path_join("%s_%s.json" % [base_name, hash_key])

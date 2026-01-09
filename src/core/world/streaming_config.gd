@@ -94,16 +94,17 @@ const HYSTERESIS_FAR := 150.0
 const CELL_QUEUE_BUDGET_MS := 2.0
 
 ## Maximum time per frame for instantiating NEAR tier objects (default mode)
-## Increased from 12ms to 30ms for faster NEAR tier population
-const INSTANTIATION_BUDGET_MS := 30.0
+## UNIFIED BUDGET: This is the single source of truth for frame budgets
+## Set to 8ms to leave headroom for rendering (targeting 60 FPS = 16.67ms total)
+const INSTANTIATION_BUDGET_MS := 8.0
 
-## NEAR TIER BURST LOADING - Aggressive budget for critical cells
+## NEAR TIER BURST LOADING - Moderate priority for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
-## use these higher limits to populate objects much faster.
-## This trades slightly higher frame times for dramatically faster cell load times.
-const NEAR_BURST_BUDGET_MS := 50.0           ## Aggressive budget during burst loading
-const NEAR_BURST_MAX_INSTANTIATIONS := 300   ## 6x objects per frame during burst
-const NEAR_BURST_DISTANCE := 250.0           ## Radius for burst loading priority
+## use these limits to populate objects faster without exceeding frame budget.
+## Reduced from 50ms/300 objects to stay within frame budget and prevent stuttering.
+const NEAR_BURST_BUDGET_MS := 12.0            ## Stay within frame budget
+const NEAR_BURST_MAX_INSTANTIATIONS := 100    ## 2x normal, not 6x (was 300)
+const NEAR_BURST_DISTANCE := 100.0            ## Only for very close objects (was 250)
 
 ## Delay before rebuilding impostor texture array (batching)
 ## Waits for multiple textures to finish loading before rebuilding

@@ -35,8 +35,6 @@ signal waypoint_reached(waypoint_name: String)
 @export var test_speed: float = 100.0
 ## Time to wait at each waypoint (seconds)
 @export var waypoint_wait_time: float = 3.0
-## Whether to enable models during test
-@export var test_models: bool = true
 ## Whether to enable sky during test
 @export var test_sky: bool = true
 ## Whether to enable ocean during test
@@ -52,7 +50,6 @@ var _state: TestState = TestState.IDLE
 ## Test scenario types
 enum TestScenario {
 	FULL_TOUR,        ## Default waypoint tour
-	MODELS_TOGGLE,    ## Toggle models with distant land (crash test)
 	TELEPORT_STRESS,  ## Rapid teleportation between distant points
 }
 
@@ -62,17 +59,15 @@ class Waypoint:
 	var position: Vector3
 	var look_target: Vector3
 	var wait_time: float
-	var enable_models: bool
 	var enable_sky: bool
 	var enable_ocean: bool
 
 	func _init(p_name: String, p_pos: Vector3, p_target: Vector3 = Vector3.ZERO,
-			   p_wait: float = 3.0, p_models: bool = false, p_sky: bool = false, p_ocean: bool = false) -> void:
+			   p_wait: float = 3.0, p_sky: bool = false, p_ocean: bool = false) -> void:
 		name = p_name
 		position = p_pos
 		look_target = p_target if p_target != Vector3.ZERO else p_pos + Vector3(0, -10, -50)
 		wait_time = p_wait
-		enable_models = p_models
 		enable_sky = p_sky
 		enable_ocean = p_ocean
 
@@ -164,7 +159,7 @@ func _setup_default_waypoints() -> void:
 		"Overview Start",
 		Vector3(0, 500, 0),
 		Vector3(0, 0, -100),
-		2.0, false, false, false
+		2.0, false, false
 	))
 
 	# Seyda Neen area - enable models first
@@ -172,21 +167,21 @@ func _setup_default_waypoints() -> void:
 		"Seyda Neen Approach",
 		Vector3(-2 * cell_size, 200, -9 * cell_size),
 		Vector3(-2 * cell_size, 0, -9 * cell_size - 200),
-		3.0, true, false, false  # Enable models
+		3.0, false, false  # Models always visible
 	))
 
 	_waypoints.append(Waypoint.new(
 		"Seyda Neen Harbor",
 		Vector3(-2 * cell_size - 1000, 50, -9 * cell_size + 500),
 		Vector3(-2 * cell_size, 0, -9 * cell_size),
-		4.0, true, true, false  # Enable sky
+		4.0, true, false  # Enable sky (models always visible)
 	))
 
 	_waypoints.append(Waypoint.new(
 		"Seyda Neen Coast",
 		Vector3(-2 * cell_size - 2000, 30, -9 * cell_size),
 		Vector3(-2 * cell_size, 0, -9 * cell_size),
-		4.0, true, true, true  # Enable ocean
+		4.0, true, true  # Enable ocean (models always visible)
 	))
 
 	# Move along coast
@@ -194,7 +189,7 @@ func _setup_default_waypoints() -> void:
 		"Western Coast",
 		Vector3(-4 * cell_size, 50, -8 * cell_size),
 		Vector3(-3 * cell_size, 0, -7 * cell_size),
-		3.0, true, true, true
+		3.0, true, true
 	))
 
 	# Balmora area
@@ -202,14 +197,14 @@ func _setup_default_waypoints() -> void:
 		"Balmora Approach",
 		Vector3(-3 * cell_size, 150, -2 * cell_size),
 		Vector3(-3 * cell_size, 0, -2 * cell_size - 200),
-		3.0, true, true, true
+		3.0, true, true
 	))
 
 	_waypoints.append(Waypoint.new(
 		"Balmora City",
 		Vector3(-3 * cell_size + 500, 80, -2 * cell_size + 500),
 		Vector3(-3 * cell_size, 0, -2 * cell_size),
-		4.0, true, true, true
+		4.0, true, true
 	))
 
 	# Vivec approach
@@ -217,14 +212,14 @@ func _setup_default_waypoints() -> void:
 		"Vivec Approach",
 		Vector3(5 * cell_size, 200, -6 * cell_size - 2000),
 		Vector3(5 * cell_size, 0, -6 * cell_size),
-		3.0, true, true, true
+		3.0, true, true
 	))
 
 	_waypoints.append(Waypoint.new(
 		"Vivec Canton",
 		Vector3(5 * cell_size + 1000, 100, -6 * cell_size + 1000),
 		Vector3(5 * cell_size, 50, -6 * cell_size),
-		4.0, true, true, true
+		4.0, true, true
 	))
 
 	# Sadrith Mora / Eastern area
@@ -232,7 +227,7 @@ func _setup_default_waypoints() -> void:
 		"Eastern Islands",
 		Vector3(10 * cell_size, 150, 5 * cell_size),
 		Vector3(10 * cell_size + 500, 0, 5 * cell_size + 500),
-		3.0, true, true, true
+		3.0, true, true
 	))
 
 	# Red Mountain area
@@ -240,7 +235,7 @@ func _setup_default_waypoints() -> void:
 		"Red Mountain Vista",
 		Vector3(3 * cell_size, 500, 6 * cell_size),
 		Vector3(0, 300, 3 * cell_size),
-		4.0, true, true, false
+		4.0, true, false
 	))
 
 	# Final overview
@@ -248,14 +243,14 @@ func _setup_default_waypoints() -> void:
 		"Final Overview",
 		Vector3(0, 800, 0),
 		Vector3(0, 0, -500),
-		3.0, true, true, true
+		3.0, true, true
 	))
 
 
 ## Add a custom waypoint to the test path
 func add_waypoint(wp_name: String, wp_position: Vector3, look_target: Vector3 = Vector3.ZERO,
-				  wait_time: float = 3.0, models: bool = true, sky: bool = true, ocean: bool = true) -> void:
-	_waypoints.append(Waypoint.new(wp_name, wp_position, look_target, wait_time, models, sky, ocean))
+				  wait_time: float = 3.0, sky: bool = true, ocean: bool = true) -> void:
+	_waypoints.append(Waypoint.new(wp_name, wp_position, look_target, wait_time, sky, ocean))
 
 
 ## Clear all waypoints
@@ -358,16 +353,7 @@ func _start_waypoint(idx: int) -> void:
 
 ## Apply system toggles for a waypoint
 func _apply_waypoint_systems(waypoint: Waypoint) -> void:
-	# Models toggle
-	if waypoint.enable_models and test_models:
-		var show_models: bool = _world_explorer.get("_show_models") as bool
-		if not show_models:
-			var toggle: CheckBox = _world_explorer.get("_show_models_toggle") as CheckBox
-			if toggle:
-				toggle.button_pressed = true
-			if _world_explorer.has_method("_on_show_models_toggled"):
-				_world_explorer.call("_on_show_models_toggled", true)
-			_log("  [Models: ON]")
+	# Models are always visible now (no toggle)
 
 	# Sky toggle
 	if waypoint.enable_sky and test_sky:
@@ -693,87 +679,8 @@ func run_scenario(scenario: TestScenario) -> void:
 	match scenario:
 		TestScenario.FULL_TOUR:
 			start_test()
-		TestScenario.MODELS_TOGGLE:
-			_run_models_toggle_scenario()
 		TestScenario.TELEPORT_STRESS:
 			_run_teleport_stress_scenario()
-
-
-## Models toggle crash scenario
-## This tests the specific crash case: toggling models ON with distant land active
-func _run_models_toggle_scenario() -> void:
-	if _state == TestState.RUNNING:
-		_log("[color=yellow]Test already running[/color]")
-		return
-
-	_log("[color=cyan]========================================[/color]")
-	_log("[color=cyan]SCENARIO: Models Toggle (Crash Test)[/color]")
-	_log("[color=cyan]========================================[/color]")
-
-	_state = TestState.RUNNING
-	_test_start_time = Time.get_ticks_msec() / 1000.0
-	_captured_errors.clear()
-	_captured_warnings.clear()
-	_frame_times.clear()
-
-	var cell_size: float = 8192.0
-
-	# Step 1: Ensure models are OFF
-	_log("Step 1: Ensuring models are OFF...")
-	var show_models_toggle: CheckBox = _world_explorer.get("_show_models_toggle") as CheckBox
-	if show_models_toggle and show_models_toggle.button_pressed:
-		show_models_toggle.button_pressed = false
-		await get_tree().create_timer(0.5).timeout
-
-	# Step 2: Teleport to Seyda Neen (high object density)
-	_log("Step 2: Teleporting to Seyda Neen...")
-	var seyda_neen_pos := Vector3(-2 * cell_size, 100, -9 * cell_size)
-	if _fly_camera:
-		_fly_camera.global_position = seyda_neen_pos
-	await get_tree().create_timer(1.0).timeout
-
-	# Step 3: Record pre-toggle state
-	_log("Step 3: Recording pre-toggle state...")
-	var pre_toggle_stats := _get_streaming_stats()
-	_log("  Queue: %d, NEAR: %d, MID: %d, FAR: %d" % [
-		pre_toggle_stats.get("queue", 0),
-		pre_toggle_stats.get("near", 0),
-		pre_toggle_stats.get("mid", 0),
-		pre_toggle_stats.get("far", 0),
-	])
-
-	# Step 4: Toggle models ON (the crash trigger)
-	_log("[color=yellow]Step 4: TOGGLING MODELS ON (potential crash point)[/color]")
-	if show_models_toggle:
-		show_models_toggle.button_pressed = true
-
-	# Step 5: Monitor for 5 seconds
-	_log("Step 5: Monitoring for issues (5 seconds)...")
-	var monitor_start: float = Time.get_ticks_msec() / 1000.0
-	while (Time.get_ticks_msec() / 1000.0) - monitor_start < 5.0:
-		await get_tree().create_timer(0.5).timeout
-		var stats: Dictionary = _get_streaming_stats()
-		var fps: float = 1.0 / get_process_delta_time() if get_process_delta_time() > 0 else 0.0
-		_log("  [%.1fs] FPS: %.1f, Queue: %d, NEAR: %d" % [
-			(Time.get_ticks_msec() / 1000.0) - monitor_start,
-			fps,
-			stats.get("queue", 0),
-			stats.get("near", 0),
-		])
-
-		# Check for issues
-		if fps < 10:
-			capture_error("Critical FPS drop: %.1f" % fps)
-		if stats.get("queue", 0) > 500:
-			capture_warning("High queue: %d" % stats.get("queue", 0))
-
-	# Complete
-	_state = TestState.COMPLETED
-	_log("[color=green]Models toggle scenario completed[/color]")
-	_log("Errors: %d, Warnings: %d" % [_captured_errors.size(), _captured_warnings.size()])
-
-	var report := _generate_report()
-	test_completed.emit(report)
 
 
 ## Teleport stress test - rapid movement between distant locations
@@ -800,11 +707,7 @@ func _run_teleport_stress_scenario() -> void:
 		{"name": "Origin", "pos": Vector3(0, 100, 0)},
 	]
 
-	# Ensure models are ON for this test
-	var show_models_toggle: CheckBox = _world_explorer.get("_show_models_toggle") as CheckBox
-	if show_models_toggle and not show_models_toggle.button_pressed:
-		show_models_toggle.button_pressed = true
-		await get_tree().create_timer(1.0).timeout
+	# Models are always visible now (no toggle needed)
 
 	# Rapid teleportation
 	for i in range(3):  # 3 rounds

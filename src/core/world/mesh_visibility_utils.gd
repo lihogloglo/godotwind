@@ -22,15 +22,18 @@ static func is_lod_node_name(mesh_name: String) -> bool:
 ## Check if a MeshInstance3D has a valid renderable material
 ## Returns false for:
 ## - No material at all (null)
-## - Material with no albedo texture (renders white)
+## - Material with no albedo texture (renders white) - unless it's a LOD node
 ## - Collision geometry meshes
-static func has_valid_material(mi: MeshInstance3D) -> bool:
+## Parameters:
+##   mi: The MeshInstance3D to check
+##   for_lod_node: If true, be more permissive (LOD nodes shouldn't be hidden for white materials)
+static func has_valid_material(mi: MeshInstance3D, for_lod_node: bool = false) -> bool:
 	if not mi.mesh:
 		return false
 
 	# Check material_override first
 	if mi.material_override:
-		return _is_material_renderable(mi.material_override)
+		return _is_material_renderable(mi.material_override, for_lod_node)
 
 	# Check surface materials
 	if mi.mesh.get_surface_count() == 0:
@@ -38,14 +41,15 @@ static func has_valid_material(mi: MeshInstance3D) -> bool:
 
 	var surface_mat := mi.mesh.surface_get_material(0)
 	if surface_mat:
-		return _is_material_renderable(surface_mat)
+		return _is_material_renderable(surface_mat, for_lod_node)
 
 	return false
 
 
 ## Check if a material is actually renderable (has visible content)
 ## Empty StandardMaterial3D without textures renders as white/flat
-static func _is_material_renderable(mat: Material) -> bool:
+## NOTE: for_lod_node parameter allows LOD nodes to be more permissive
+static func _is_material_renderable(mat: Material, for_lod_node: bool = false) -> bool:
 	if mat == null:
 		return false
 
@@ -68,6 +72,11 @@ static func _is_material_renderable(mat: Material) -> bool:
 
 		# Has albedo texture - definitely renderable
 		if std_mat.albedo_texture:
+			return true
+
+		# LOD nodes should always be considered valid if they have a material
+		# The white-color check was incorrectly hiding LOD meshes
+		if for_lod_node:
 			return true
 
 		# No texture - check if it's a near-white color (placeholder)
@@ -95,16 +104,18 @@ static func hide_lod_and_materialless(node: Node, debug: bool = false) -> void:
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
 		var mesh_name: String = mi.name
+		var is_lod := is_lod_node_name(mesh_name)
 
 		# LOD nodes (_LOD1, _LOD2, _LOD3) are NO LONGER hidden
 		# They are configured with visibility_range by NativeStreamingManager
 		# for proper distance-based LOD transitions
 
 		# Hide meshes without valid renderable material
-		if mi.visible and not has_valid_material(mi):
+		# For LOD nodes, use permissive check (don't hide for white materials)
+		if mi.visible and not has_valid_material(mi, is_lod):
 			# Skip LOD nodes - even if they have no material, they should be visible
 			# (visibility_range will control when they render)
-			if not is_lod_node_name(mesh_name):
+			if not is_lod:
 				mi.visible = false
 				if debug:
 					print("[MeshVisibility] Hiding materialless/white mesh: %s" % mesh_name)

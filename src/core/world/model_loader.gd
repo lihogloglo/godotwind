@@ -327,13 +327,23 @@ func process_async_loads() -> int:
 				var model: Node3D = null
 
 				if packed_scene:
-					var instance := packed_scene.instantiate()
-					if instance is Node3D:
-						model = instance as Node3D
+					# Validate PackedScene state before instantiation
+					var state := packed_scene.get_state()
+					if state and state.get_node_count() > 0:
+						var instance := packed_scene.instantiate()
+						if instance == null:
+							# Instantiation failed (corrupted mesh data, invalid RIDs)
+							push_warning("ModelLoader: Async instantiate failed: %s" % disk_path)
+							DirAccess.remove_absolute(disk_path)
+						elif instance is Node3D:
+							model = instance as Node3D
+						else:
+							# Wrong type - corrupted cache
+							instance.queue_free()
+							DirAccess.remove_absolute(disk_path)
 					else:
-						# Wrong type - corrupted cache
-						if instance:
-							instance.free()
+						# Empty or corrupted state
+						push_warning("ModelLoader: Async load - empty state: %s" % disk_path)
 						DirAccess.remove_absolute(disk_path)
 				else:
 					# Failed to load - corrupted cache
@@ -485,9 +495,24 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 		DirAccess.remove_absolute(disk_path)
 		return null
 
+	# Validate PackedScene state before instantiation
+	# This catches some corrupted scenes that load but fail to instantiate
+	var state := packed_scene.get_state()
+	if not state or state.get_node_count() == 0:
+		push_warning("ModelLoader: Corrupted PackedScene (empty state): %s" % disk_path)
+		DirAccess.remove_absolute(disk_path)
+		return null
+
 	var instance := packed_scene.instantiate()
+	if instance == null:
+		# Instantiation failed (corrupted mesh data, invalid RIDs, etc.)
+		push_warning("ModelLoader: Failed to instantiate scene: %s" % disk_path)
+		DirAccess.remove_absolute(disk_path)
+		return null
+
 	if not instance is Node3D:
 		# Wrong type - delete corrupted cache
+		instance.queue_free()
 		DirAccess.remove_absolute(disk_path)
 		return null
 
@@ -518,12 +543,14 @@ func _debug_log_mesh_nodes(node: Node, depth: int) -> void:
 
 ## Clear resource paths from a node tree to allow safe duplication
 ## This prevents "Another resource is loaded from path" errors when duplicating
+## CRITICAL: Must clear ALL paths unconditionally to prevent multi-thread conflicts
 func _clear_resource_paths(node: Node) -> void:
 	if node is MeshInstance3D:
 		var mesh_inst := node as MeshInstance3D
-		if mesh_inst.mesh and not mesh_inst.mesh.resource_path.is_empty():
+		if mesh_inst.mesh:
+			# Always clear mesh path, even if empty (ensures no conflicts)
 			mesh_inst.mesh.resource_path = ""
-			# Also clear material paths
+			# Also clear material paths on all surfaces
 			for i in range(mesh_inst.mesh.get_surface_count()):
 				var mat := mesh_inst.mesh.surface_get_material(i)
 				if mat:
@@ -539,17 +566,26 @@ func _clear_resource_paths(node: Node) -> void:
 
 	if node is CollisionShape3D:
 		var shape := (node as CollisionShape3D).shape
-		if shape and not shape.resource_path.is_empty():
+		if shape:
 			shape.resource_path = ""
+
+	# Also handle MultiMeshInstance3D which can contain resource paths
+	if node is MultiMeshInstance3D:
+		var mmi := node as MultiMeshInstance3D
+		if mmi.multimesh:
+			mmi.multimesh.resource_path = ""
+			if mmi.multimesh.mesh:
+				mmi.multimesh.mesh.resource_path = ""
 
 	for child in node.get_children():
 		_clear_resource_paths(child)
 
 
 ## Clear all resource paths from a material and its textures
+## CRITICAL: Always clear paths unconditionally to prevent multi-thread conflicts
 func _clear_material_paths(mat: Material) -> void:
-	if not mat.resource_path.is_empty():
-		mat.resource_path = ""
+	# Always clear material path
+	mat.resource_path = ""
 
 	if mat is StandardMaterial3D:
 		var std_mat := mat as StandardMaterial3D
@@ -570,8 +606,12 @@ func _clear_material_paths(mat: Material) -> void:
 			std_mat.detail_normal,
 		]
 		for tex in textures:
-			if tex and not tex.resource_path.is_empty():
+			if tex:
 				tex.resource_path = ""
+	elif mat is ShaderMaterial:
+		var shader_mat := mat as ShaderMaterial
+		if shader_mat.shader:
+			shader_mat.shader.resource_path = ""
 
 
 ## Save a model to disk cache

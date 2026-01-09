@@ -171,7 +171,10 @@ func _get_combined_map(region_coord: Vector2i, map_type: MapType) -> Image:
 			# Blit 64x64 (crop the shared edge)
 			combined.blit_rect(cell_map, Rect2i(0, 0, CELL_SIZE_PX, CELL_SIZE_PX), Vector2i(img_x, img_y))
 
-	return combined if any_data else null
+	# Return combined map even if no LAND data exists
+	# The map is pre-filled with ocean floor depth / default values
+	# This ensures ocean areas render at correct depth instead of height 0
+	return combined
 
 
 ## Generate region-level control map with cross-cell texture blending
@@ -205,8 +208,10 @@ func _generate_region_controlmap_with_blending(region_coord: Vector2i) -> Image:
 					if land.has_textures():
 						any_data = true
 
+	# If no texture data exists, return the default-filled control map
+	# This ensures ocean regions still get valid control data
 	if not any_data:
-		return null
+		return controlmap
 
 	# Vertices per texture cell (~4.0)
 	var vertices_per_tex := float(MW_LAND_SIZE - 1) / float(MW_TEXTURE_SIZE)
@@ -369,9 +374,38 @@ func _get_terrain3d_slot(mw_tex_idx: int) -> int:
 
 
 func has_terrain_at_region(region_coord: Vector2i) -> bool:
+	# Check if region is within extended world bounds (includes ocean buffer)
+	# This ensures ocean floor terrain is generated beyond LAND data boundaries
+	if not _is_region_in_extended_bounds(region_coord):
+		return false
+
+	# Always return true for regions within bounds - we'll generate ocean floor
+	# for areas without LAND data
+	return true
+
+
+## Check if region is within extended world bounds
+## Adds an ocean buffer around the actual LAND data for seamless ocean rendering
+func _is_region_in_extended_bounds(region_coord: Vector2i) -> bool:
+	# Ocean buffer in regions (each region = 4 cells × 117m ≈ 468m)
+	# 3 regions = ~1.4km of ocean around the island
+	const OCEAN_BUFFER_REGIONS: int = 3
+
+	# Calculate region bounds from world bounds
+	var region_world_size := float(region_size) * vertex_spacing
+	var min_region_x := floori(world_bounds.position.x / region_world_size) - OCEAN_BUFFER_REGIONS
+	var max_region_x := ceili(world_bounds.end.x / region_world_size) + OCEAN_BUFFER_REGIONS
+	var min_region_y := floori(world_bounds.position.y / region_world_size) - OCEAN_BUFFER_REGIONS
+	var max_region_y := ceili(world_bounds.end.y / region_world_size) + OCEAN_BUFFER_REGIONS
+
+	return (region_coord.x >= min_region_x and region_coord.x <= max_region_x and
+			region_coord.y >= min_region_y and region_coord.y <= max_region_y)
+
+
+## Check if region has actual LAND data (not just ocean)
+func _region_has_land_data(region_coord: Vector2i) -> bool:
 	var sw_cell := _region_to_sw_cell(region_coord)
 
-	# Check if any cell in this region has terrain
 	for local_y in range(CELLS_PER_REGION):
 		for local_x in range(CELLS_PER_REGION):
 			var cell_x := sw_cell.x + local_x

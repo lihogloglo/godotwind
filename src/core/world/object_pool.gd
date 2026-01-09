@@ -321,11 +321,20 @@ func clear() -> void:
 
 
 ## Internal: Create a new instance from prototype
+## Note: Some models may trigger "bs > sbs" AABB warnings in the renderer.
+## This is a mesh data issue from the original NIF files, not a code bug.
+## The warning is harmless and the mesh still renders correctly.
 func _create_instance(entry: PoolEntry) -> Node3D:
 	if not entry.prototype or not is_instance_valid(entry.prototype):
 		return null
 
+	# duplicate() may trigger renderer warnings for meshes with unusual AABB
+	# These are cosmetic warnings from C++ and don't affect functionality
 	var instance: Node3D = entry.prototype.duplicate()
+	if not instance:
+		push_warning("ObjectPool: Failed to duplicate prototype for %s" % entry.model_path)
+		return null
+
 	instance.set_meta("pool_model_path", entry.model_path)
 	entry.total_created += 1
 	_stats["new_instances_created"] += 1

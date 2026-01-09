@@ -24,6 +24,7 @@ class_name NativeStreamingManager
 extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
+const SC := preload("res://src/core/world/streaming_config.gd")
 const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ModelLoaderScript := preload("res://src/core/world/model_loader.gd")
@@ -31,6 +32,7 @@ const NativeImpostorRendererScript := preload("res://src/core/world/native_impos
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 
 #region Signals
 
@@ -46,6 +48,13 @@ signal cell_unloaded(grid: Vector2i)
 ## Emitted when streaming stats are updated
 signal stats_updated(stats: Dictionary)
 
+## Emitted during startup phase with loading progress (0-100)
+## Allows parent (e.g., world_explorer) to show loading UI
+signal startup_progress(progress: float, loaded_cells: int, total_cells: int, queued_objects: int)
+
+## Emitted when startup phase completes
+signal startup_complete()
+
 #endregion
 
 
@@ -56,7 +65,8 @@ signal stats_updated(stats: Dictionary)
 
 ## Maximum distance at which to load cells (in meters)
 ## Cells beyond this are never loaded, even if within radius
-@export var max_load_distance: float = 600.0
+## 800m is reasonable default; increase for powerful GPUs (up to ~2000m)
+@export var max_load_distance: float = 800.0
 
 ## Whether to use native visibility_range (should always be true)
 @export var use_native_visibility: bool = true
@@ -65,18 +75,16 @@ signal stats_updated(stats: Dictionary)
 @export var debug_enabled: bool = false
 
 ## Time budget per frame for loading (ms)
-@export var frame_budget_ms: float = 8.0
+## Uses StreamingConfig.INSTANTIATION_BUDGET_MS as the single source of truth
+@export var frame_budget_ms: float = SC.INSTANTIATION_BUDGET_MS
+
+## Enable async loading (uses CellManager's async API)
+## When disabled, falls back to synchronous loading
+@export var async_loading_enabled: bool = true
 
 ## Radius for impostors (cells) - radius around camera where impostors are generated
-## 40 cells * 117m ~= 4680m (4.6km)
-@export var impostor_radius_cells: int = 40
-
-## Enable/disable object loading (backwards compatibility)
-## Setting this to false will hide all loaded objects
-@export var load_objects: bool = true:
-	set(value):
-		load_objects = value
-		_update_objects_visibility()
+## 60 cells * 117m ~= 7km default; increase to 100 for whole-island (may impact FPS)
+@export var impostor_radius_cells: int = 60
 
 ## View distance in cells (alias for load_radius_cells, backwards compatibility)
 @export var view_distance_cells: int = 3:
@@ -112,8 +120,14 @@ var _loaded_cells: Dictionary = {}
 ## Cells currently being loaded (async)
 var _loading_cells: Dictionary = {}
 
+## Async request tracking: grid -> request_id
+var _async_requests: Dictionary = {}
+
 ## Pending cells to load (priority queue, sorted by distance)
 var _pending_load_queue: Array[Vector2i] = []
+
+## Background processor for async NIF parsing
+var _background_processor: BackgroundProcessorScript = null
 
 ## Container node for all cell content
 var _world_container: Node3D = null
@@ -140,6 +154,11 @@ var _stats: Dictionary = {
 ## Whether the manager has been initialized
 var _initialized: bool = false
 
+## Startup phase state - controls staggered loading during initial population
+var _startup_phase: bool = true
+var _startup_frames: int = 0
+const STARTUP_PHASE_FRAMES: int = 30  # ~0.5 seconds at 60 FPS
+
 #endregion
 
 
@@ -160,6 +179,11 @@ func _ready() -> void:
 	_impostor_candidates = ImpostorCandidatesScript.new()
 	_impostor_renderer.set_impostor_candidates(_impostor_candidates)
 
+	# Create background processor for async loading
+	_background_processor = BackgroundProcessorScript.new()
+	_background_processor.name = "BackgroundProcessor"
+	add_child(_background_processor)
+
 
 ## Initialize the streaming manager
 ## cell_manager: CellManager instance for loading cell data
@@ -167,36 +191,59 @@ func _ready() -> void:
 func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Error:
 	if _initialized:
 		return OK
-	
+
 	if not cell_manager:
 		push_error("[NativeStreamingManager] cell_manager is required")
 		return ERR_INVALID_PARAMETER
-	
+
 	_cell_manager = cell_manager
+	_cell_manager.set_lod_configurator(_lod_configurator)
 	_camera = camera
-	
-	# Find camera if not provided
-	if not _camera:
-		_camera = get_viewport().get_camera_3d()
-	
+
+	# Wire up background processor for async loading
+	if _background_processor and async_loading_enabled:
+		_cell_manager.set_background_processor(_background_processor)
+		_debug("Async loading enabled with BackgroundProcessor")
+	else:
+		_debug("Async loading disabled, using synchronous loading")
+
 	# Sync debug flag
 	if _impostor_renderer:
 		_impostor_renderer.set("debug_enabled", debug_enabled)
 
 	_initialized = true
-	_debug("Initialized with native visibility_range streaming")
-	
+	print("[NativeStreamingManager] Initialized with native visibility_range streaming")
+
+	# Only start tracking if camera was explicitly provided
+	# If camera is null, wait for set_camera() to be called later
+	# This allows caller to control when streaming actually starts
+	if _camera:
+		_camera_position = _camera.global_position
+		_camera_cell = DU.world_to_cell(_camera_position)
+		print("[NativeStreamingManager] Initial camera cell: %s (position: %s)" % [_camera_cell, _camera_position])
+		_update_loaded_cells()
+	else:
+		print("[NativeStreamingManager] No camera provided - streaming will start when set_camera() is called")
+
 	return OK
 
 
 ## Set the camera to track
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
+	# Trigger initial update if system is initialized and camera is set
+	if _initialized and _camera:
+		_camera_position = _camera.global_position
+		_camera_cell = DU.world_to_cell(_camera_position)
+		_debug("Camera set, initial cell: %s" % _camera_cell)
+		_update_loaded_cells()
 
 
 ## Set cell manager
 func set_cell_manager(cell_manager: CellManagerScript) -> void:
 	_cell_manager = cell_manager
+	if _cell_manager and _lod_configurator:
+		_cell_manager.set_lod_configurator(_lod_configurator)
 
 #endregion
 
@@ -205,24 +252,47 @@ func set_cell_manager(cell_manager: CellManagerScript) -> void:
 
 func _process(delta: float) -> void:
 	if not _initialized:
+		if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
+			print("[NativeStreamingManager] _process skipped: not initialized")
 		return
-	
+
 	if not _camera:
 		_camera = get_viewport().get_camera_3d()
 		if not _camera:
+			if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
+				print("[NativeStreamingManager] _process skipped: no camera")
 			return
-	
+
 	# Update camera position
 	_camera_position = _camera.global_position
 	var new_cell := DU.world_to_cell(_camera_position)
-	
+
+	# Track startup frames for staggered loading
+	if _startup_phase:
+		_startup_frames += 1
+		_emit_startup_progress()
+
 	# Check if we moved to a new cell
 	if new_cell != _camera_cell:
+		_debug("Camera moved to new cell: %s (was %s)" % [new_cell, _camera_cell])
 		_camera_cell = new_cell
 		_update_loaded_cells()
-	
-	# Process any pending async loads
-	_process_pending_loads(delta)
+
+	# Process async loading (three-phase approach)
+	if async_loading_enabled:
+		# Phase 1: Check for completed async requests
+		_process_async_completions()
+
+		# Phase 2: Process async instantiation (progressive object creation)
+		var instantiated := _cell_manager.process_async_instantiation(frame_budget_ms, _camera_position)
+		if instantiated > 0 and debug_enabled:
+			_debug("Instantiated %d objects this frame" % instantiated)
+
+		# Phase 3: Queue new cell requests (non-blocking)
+		_process_pending_loads_async()
+	else:
+		# Fallback: synchronous loading (blocks frame)
+		_process_pending_loads_sync(delta)
 
 
 ## Update which cells should be loaded based on camera position
@@ -258,7 +328,11 @@ func _update_loaded_cells() -> void:
 
 	# Update impostors
 	if _impostor_renderer:
+		if debug_enabled:
+			_debug("Updating impostor area: center=%s, radius=%d" % [_camera_cell, impostor_radius_cells])
 		_impostor_renderer.update_impostor_area(_camera_cell, impostor_radius_cells)
+	elif debug_enabled:
+		_debug("WARNING: _impostor_renderer is null!")
 
 
 ## Get all cells within a radius of the center cell
@@ -287,55 +361,90 @@ func _get_cells_in_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 
 #region Cell Loading
 
-## Load a cell at the given grid position
-func _load_cell(grid: Vector2i) -> void:
+## Request async loading of a cell (non-blocking)
+## Returns true if request was submitted, false if already loading or at capacity
+func _request_cell_async(grid: Vector2i) -> bool:
 	if grid in _loaded_cells or grid in _loading_cells:
-		return
-	
-	cell_loading.emit(grid)
-	
-	# Mark as loading
+		return false
+
+	# Submit async request
+	var request_id := _cell_manager.request_exterior_cell_async(grid.x, grid.y)
+
+	if request_id < 0:
+		# Async not available (no background processor) or at capacity
+		# Don't fall back to sync - let the cell stay in queue for next frame
+		# This prevents frame stalls from sync loading when async is just busy
+		if debug_enabled:
+			_debug("Async request rejected for cell %s (will retry)" % grid)
+		return false
+
+	# Track the request
+	_async_requests[grid] = request_id
 	_loading_cells[grid] = true
-	
-	# Load cell synchronously (could be made async later)
-	var cell_node := _cell_manager.load_exterior_cell(grid.x, grid.y)
-	
+
+	# Get the in-progress cell node and add it to scene immediately
+	# Objects will appear progressively as they are instantiated
+	var cell_node := _cell_manager.get_async_cell_node(request_id)
 	if cell_node:
-		# Configure visibility_range on all meshes
-		_configure_cell_visibility(cell_node)
-		
-		# Add to scene
 		_world_container.add_child(cell_node)
 		_loaded_cells[grid] = cell_node
-		
+
+	cell_loading.emit(grid)
+	_debug("Async request %d submitted for cell %s" % [request_id, grid])
+	return true
+
+
+## Load a cell synchronously (blocking - used as fallback)
+func _load_cell_sync(grid: Vector2i) -> void:
+	if grid in _loaded_cells or grid in _loading_cells:
+		return
+
+	cell_loading.emit(grid)
+	_loading_cells[grid] = true
+
+	var cell_node := _cell_manager.load_exterior_cell(grid.x, grid.y)
+
+	if cell_node:
+		_configure_cell_visibility(cell_node)
+		_world_container.add_child(cell_node)
+		_loaded_cells[grid] = cell_node
+
 		var object_count := _count_mesh_instances(cell_node)
 		_stats["loaded_cells"] = _loaded_cells.size()
 		_stats["total_objects"] += object_count
-		
+
 		cell_loaded.emit(grid, object_count)
-		_debug("Loaded cell %s with %d objects" % [grid, object_count])
+		_debug("Sync loaded cell %s with %d objects" % [grid, object_count])
 	else:
 		_debug("Failed to load cell %s" % [grid])
-	
+
 	_loading_cells.erase(grid)
 	stats_updated.emit(_stats)
 
 
 ## Unload a cell at the given grid position
 func _unload_cell(grid: Vector2i) -> void:
+	# Cancel any pending async request for this cell
+	if grid in _async_requests:
+		var request_id: int = _async_requests[grid]
+		_cell_manager.cancel_async_request(request_id)
+		_async_requests.erase(grid)
+		_loading_cells.erase(grid)
+		_debug("Cancelled async request %d for cell %s" % [request_id, grid])
+
 	if grid not in _loaded_cells:
 		return
-	
+
 	var cell_node: Node3D = _loaded_cells[grid]
 	var object_count := _count_mesh_instances(cell_node)
-	
+
 	# Remove from scene
 	cell_node.queue_free()
 	_loaded_cells.erase(grid)
-	
+
 	_stats["loaded_cells"] = _loaded_cells.size()
 	_stats["total_objects"] -= object_count
-	
+
 	cell_unloaded.emit(grid)
 	stats_updated.emit(_stats)
 
@@ -344,12 +453,27 @@ func _unload_cell(grid: Vector2i) -> void:
 func _configure_cell_visibility(cell_node: Node3D) -> void:
 	if not use_native_visibility:
 		return
-	
-	_configure_node_visibility_recursive(cell_node)
+
+	# Collect stats for compact logging
+	var stats := {"near": 0, "lod1": 0, "lod2": 0, "lod3": 0}
+	_configure_node_visibility_recursive(cell_node, stats)
+
+	if debug_enabled:
+		var parts: Array[String] = []
+		if stats["near"] > 0:
+			parts.append("NEAR:%d" % stats["near"])
+		if stats["lod1"] > 0:
+			parts.append("LOD1:%d" % stats["lod1"])
+		if stats["lod2"] > 0:
+			parts.append("LOD2:%d" % stats["lod2"])
+		if stats["lod3"] > 0:
+			parts.append("LOD3:%d" % stats["lod3"])
+		if not parts.is_empty():
+			_debug("Configured visibility: %s (total: %d)" % [", ".join(parts), stats["near"] + stats["lod1"] + stats["lod2"] + stats["lod3"]])
 
 
 ## Recursively configure visibility_range on a node and its children
-func _configure_node_visibility_recursive(node: Node) -> void:
+func _configure_node_visibility_recursive(node: Node, stats: Dictionary) -> void:
 	if node is GeometryInstance3D:
 		var geo := node as GeometryInstance3D
 		var node_name := node.name
@@ -359,17 +483,16 @@ func _configure_node_visibility_recursive(node: Node) -> void:
 			# LOD nodes get their specific range based on their level
 			var lod_level := _get_lod_level(node_name)
 			_lod_configurator.configure_mid_object(geo, lod_level)
-			if debug_enabled:
-				_debug("Configured LOD%d: %s (range: %s)" % [lod_level, node_name, _get_lod_range_str(lod_level)])
+			stats["lod%d" % lod_level] += 1
 		else:
 			# Default: NEAR tier visibility (0-150m)
 			_lod_configurator.configure_near_object(geo)
-			if debug_enabled and node is MeshInstance3D:
-				_debug("Configured NEAR: %s (0-150m)" % node_name)
+			if node is MeshInstance3D:
+				stats["near"] += 1
 
 	# Recurse to children
 	for child in node.get_children():
-		_configure_node_visibility_recursive(child)
+		_configure_node_visibility_recursive(child, stats)
 
 
 ## Get LOD level from node name (1, 2, or 3)
@@ -403,42 +526,153 @@ func _count_mesh_instances(node: Node) -> int:
 	return count
 
 
-## Process pending cell loads with frame budget limiting
-## Loads cells from the pending queue respecting the frame_budget_ms limit
-func _process_pending_loads(_delta: float) -> void:
+## Process pending cell loads asynchronously (non-blocking)
+## Submits async requests for cells in the queue
+## Uses staggered loading during startup to prevent freeze
+func _process_pending_loads_async() -> void:
+	if _pending_load_queue.is_empty():
+		return
+
+	var requests_submitted := 0
+
+	# Staggered loading during startup phase to prevent initial freeze
+	# Frame 0-5: Load 1 cell per frame (camera's cell first)
+	# Frame 6-15: Load 2 cells per frame
+	# Frame 16+: Normal loading (2 cells per frame)
+	var max_requests_per_frame: int
+	if _startup_phase:
+		if _startup_frames < 5:
+			max_requests_per_frame = 1  # Very slow start
+		elif _startup_frames < 15:
+			max_requests_per_frame = 2  # Ramping up
+		else:
+			max_requests_per_frame = 2  # Normal rate
+	else:
+		max_requests_per_frame = 2
+
+	# Check if startup phase should end:
+	# - At least 1 cell fully loaded, AND
+	# - Instantiation queue is empty or nearly empty (objects are placed), AND
+	# - At least 20 frames have passed (give time for objects to instantiate)
+	if _startup_phase and _startup_frames >= 20:
+		var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
+		if _loaded_cells.size() >= 1 and queue_size < 50:
+			_startup_phase = false
+			startup_complete.emit()
+			_debug("Startup phase complete after %d frames, %d cells loaded" % [_startup_frames, _loaded_cells.size()])
+
+	# Check if there's async capacity before trying to submit
+	# This prevents unnecessary fallback to sync loading and reduces warning spam
+	var available_slots := _cell_manager.get_async_slots_available() if _cell_manager else 0
+
+	# Don't try to submit if there's no capacity - cells will stay in queue
+	if available_slots <= 0 and not _pending_load_queue.is_empty():
+		if debug_enabled:
+			_debug("Async capacity exhausted, %d cells waiting in queue" % _pending_load_queue.size())
+	else:
+		while not _pending_load_queue.is_empty() and requests_submitted < max_requests_per_frame and available_slots > 0:
+			var grid := _pending_load_queue[0]
+			_pending_load_queue.remove_at(0)
+
+			# Skip if already loaded or loading
+			if grid in _loaded_cells or grid in _loading_cells:
+				continue
+
+			# Submit async request
+			if _request_cell_async(grid):
+				requests_submitted += 1
+				available_slots -= 1
+
+		if requests_submitted > 0 and debug_enabled:
+			_debug("Submitted %d async cell requests, %d remaining in queue (startup=%s, frame=%d)" % [
+				requests_submitted, _pending_load_queue.size(), _startup_phase, _startup_frames
+			])
+
+
+## Process completed async requests
+## Checks for finished cell loads and finalizes them
+func _process_async_completions() -> void:
+	var completed_grids: Array[Vector2i] = []
+
+	for grid: Vector2i in _async_requests.keys():
+		var request_id: int = _async_requests[grid]
+
+		if _cell_manager.is_async_complete(request_id):
+			# Request is complete - finalize
+			var cell_node := _cell_manager.get_async_result(request_id)
+
+			if cell_node:
+				# Always configure visibility, even if already in scene
+				# This ensures LOD nodes get proper visibility_range when async loading
+				# (prebaked values are now correct, but runtime can override if needed)
+				_configure_cell_visibility(cell_node)
+
+				if cell_node.get_parent() != _world_container:
+					_world_container.add_child(cell_node)
+
+				_loaded_cells[grid] = cell_node
+
+				var object_count := _count_mesh_instances(cell_node)
+				_stats["loaded_cells"] = _loaded_cells.size()
+				_stats["total_objects"] += object_count
+
+				# Check for failed models
+				if _cell_manager.has_async_failed(request_id):
+					var failed_count := _cell_manager.get_async_failed_count(request_id)
+					_debug("Cell %s completed with %d failed models" % [grid, failed_count])
+
+				cell_loaded.emit(grid, object_count)
+				_debug("Async cell %s completed with %d objects" % [grid, object_count])
+			else:
+				_debug("Async cell %s returned null" % grid)
+
+			completed_grids.append(grid)
+
+	# Clean up completed requests
+	for grid in completed_grids:
+		_async_requests.erase(grid)
+		_loading_cells.erase(grid)
+
+	if not completed_grids.is_empty():
+		stats_updated.emit(_stats)
+
+
+## Process pending cell loads synchronously (blocking fallback)
+## DEPRECATED: This sync path can cause significant frame stuttering
+## Use async_loading_enabled = true (the default) instead
+## This fallback exists only for debugging edge cases
+func _process_pending_loads_sync(_delta: float) -> void:
+	# Warn about sync loading usage - it causes stuttering
+	if Engine.get_frames_drawn() == 1:
+		push_warning("[NativeStreamingManager] Using synchronous cell loading - this can cause stuttering. Set async_loading_enabled = true for better performance.")
+
 	if _pending_load_queue.is_empty():
 		return
 
 	var start_time := Time.get_ticks_msec()
 	var cells_loaded_this_frame := 0
 
-	# Process cells from the queue until we hit the frame budget
 	while not _pending_load_queue.is_empty():
+		# FIX: Check budget BEFORE starting a new cell load, not after
+		var elapsed := Time.get_ticks_msec() - start_time
+		if cells_loaded_this_frame > 0 and elapsed >= frame_budget_ms:
+			if debug_enabled or _pending_load_queue.size() > 5:
+				_debug("Frame budget reached (%.1fms), loaded %d cells, %d remaining" % [elapsed, cells_loaded_this_frame, _pending_load_queue.size()])
+			break
+
 		var grid := _pending_load_queue[0]
 		_pending_load_queue.remove_at(0)
 
-		# Skip if already loaded or loading
 		if grid in _loaded_cells or grid in _loading_cells:
 			continue
 
-		# Load the cell
-		_load_cell(grid)
+		_load_cell_sync(grid)
 		cells_loaded_this_frame += 1
+		_stats["load_time_ms"] = Time.get_ticks_msec() - start_time
 
-		# Check frame budget
-		var elapsed := Time.get_ticks_msec() - start_time
-		_stats["load_time_ms"] = elapsed
-
-		if elapsed >= frame_budget_ms:
-			# Budget exceeded - continue next frame
-			if debug_enabled or _pending_load_queue.size() > 5:
-				_debug("Frame budget exceeded (%.1fms), loaded %d cells, %d remaining" % [elapsed, cells_loaded_this_frame, _pending_load_queue.size()])
-			break
-
-	# Log if we loaded cells without hitting budget
 	if debug_enabled and cells_loaded_this_frame > 0 and _pending_load_queue.is_empty():
 		var elapsed := Time.get_ticks_msec() - start_time
-		_debug("Loaded %d cells in %.1fms (under budget)" % [cells_loaded_this_frame, elapsed])
+		_debug("Sync loaded %d cells in %.1fms" % [cells_loaded_this_frame, elapsed])
 
 #endregion
 
@@ -451,9 +685,18 @@ func get_stats() -> Dictionary:
 
 	# Add load queue stats
 	s["load_queue_size"] = _pending_load_queue.size()
+	s["async_requests"] = _async_requests.size()
+	s["async_loading_enabled"] = async_loading_enabled
 	s["camera_cell"] = _camera_cell
 	s["camera_position"] = _camera_position
 	s["frame_budget_ms"] = frame_budget_ms
+
+	# Add CellManager async stats if available
+	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
+		var cm_stats: Dictionary = _cell_manager.get_loading_stats()
+		s["instantiation_queue"] = cm_stats.get("instantiation_queue_size", 0)
+		s["pending_conversions"] = cm_stats.get("pending_conversions", 0)
+		s["pending_disk_loads"] = cm_stats.get("pending_disk_loads", 0)
 
 	# Merge impostor stats if available
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
@@ -474,7 +717,16 @@ func print_debug_info() -> void:
 	print("  impostor_radius_cells: ", impostor_radius_cells)
 	print("  frame_budget_ms: ", frame_budget_ms)
 	print("  use_native_visibility: ", use_native_visibility)
+	print("  async_loading_enabled: ", async_loading_enabled)
 	print("  debug_enabled: ", debug_enabled)
+	print("\nAsync Loading:")
+	print("  BackgroundProcessor: ", _background_processor != null)
+	print("  Pending async requests: ", _async_requests.size())
+	print("  Load queue size: ", _pending_load_queue.size())
+	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
+		var cm_stats: Dictionary = _cell_manager.get_loading_stats()
+		print("  Instantiation queue: ", cm_stats.get("instantiation_queue_size", 0))
+		print("  Pending conversions: ", cm_stats.get("pending_conversions", 0))
 	print("\nStats:")
 	var stats = get_stats()
 	for key in stats:
@@ -515,6 +767,11 @@ func is_cell_loaded(grid: Vector2i) -> bool:
 	return grid in _loaded_cells
 
 
+## Get the impostor renderer (for console commands and diagnostics)
+func get_impostor_manager() -> Node3D:
+	return _impostor_renderer
+
+
 ## Teleport to a new location (forces immediate cell reload)
 func teleport_to(position: Vector3) -> void:
 	_camera_position = position
@@ -542,12 +799,6 @@ func refresh_cells() -> void:
 	if _initialized:
 		_update_loaded_cells()
 
-
-## Update objects visibility based on load_objects flag
-func _update_objects_visibility() -> void:
-	if _world_container:
-		_world_container.visible = load_objects
-
 #endregion
 
 
@@ -556,5 +807,29 @@ func _update_objects_visibility() -> void:
 func _debug(msg: String) -> void:
 	if debug_enabled:
 		print("[NativeStreamingManager] %s" % msg)
+
+#endregion
+
+
+#region Startup Progress
+
+## Emit startup progress signal for parent UI to handle
+func _emit_startup_progress() -> void:
+	var target_cells := load_radius_cells * load_radius_cells  # Approximate
+	var loaded := _loaded_cells.size()
+	var loading := _loading_cells.size()
+	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
+
+	# Calculate progress (0-100)
+	var progress := 0.0
+	if target_cells > 0:
+		progress = float(loaded + loading * 0.5) / float(target_cells) * 100.0
+		progress = clampf(progress, 0.0, 100.0)
+
+	startup_progress.emit(progress, loaded, target_cells, queue_size)
+
+## Check if currently in startup phase
+func is_in_startup_phase() -> bool:
+	return _startup_phase
 
 #endregion

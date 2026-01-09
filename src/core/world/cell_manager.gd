@@ -19,6 +19,8 @@ const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
+const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
+const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
@@ -35,6 +37,9 @@ var _object_pool: RefCounted = null  # ObjectPool
 
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
+
+# LOD configurator for setting visibility ranges
+var _lod_configurator: LODConfigurator = null
 
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
@@ -321,13 +326,8 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 		# Check if suitable for MultiMesh
 		if not _is_multimesh_candidate(model_path, base_record):
 			individual_refs.append(ref)
-			# Debug: Check if this is a significant object
 			if _instantiator.is_significant_object(model_path):
 				_debug_significant_count += 1
-				if _debug_significant_count <= 5:
-					print("[ODM-GROUP] Significant object for individual: %s in cell %s" % [
-						model_path.get_file(), cell_grid
-					])
 			continue
 
 		# Check if would use static renderer (skip those - already optimized)
@@ -471,6 +471,10 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		mmi.multimesh = multimesh
 		mmi.material_override = mesh_instance.material_override
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		# Configure visibility range (NEAR tier: 0-150m)
+		if _lod_configurator:
+			_lod_configurator.configure_near_object(mmi)
 
 		parent_node.add_child(mmi)
 		total_count += count
@@ -682,17 +686,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 # - MID/FAR objects show LOD meshes or impostors via ObjectStreamer
 # =============================================================================
 
-## Load cell reference data and register all objects as deferred with ObjectStreamer
-## Does NOT instantiate Node3D objects - that happens when objects enter NEAR range
-## Returns number of objects registered, or -1 on failure
-func load_cell_deferred(x: int, y: int) -> int:
-	# DEPRECATED: This function is no longer used by native streaming system
-	# Kept for backwards compatibility but does nothing
-	push_warning("CellManager.load_cell_deferred() is deprecated - use load_exterior_cell() instead")
-	return -1
-
-
-## Get cell references (kept for backwards compatibility)
+## Get cell references for a given grid position
 func get_cell_references(x: int, y: int) -> Array:
 	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
 	if not cell_record:
@@ -841,12 +835,12 @@ var parallel_duplicate_enabled: bool = SC.PARALLEL_DUPLICATE_ENABLED
 var _parallel_duplicate_results: Array = []
 var _parallel_duplicate_mutex: Mutex = Mutex.new()
 
-## Per-model mutex to prevent concurrent duplicate() calls on the same prototype
-## Key: model_path, Value: Mutex
-## This prevents "cyclic resource inclusion" errors when multiple threads try to
-## duplicate the same prototype simultaneously
-var _model_mutexes: Dictionary = {}
-var _model_mutexes_lock: Mutex = Mutex.new()
+## Global mutex to prevent concurrent duplicate() calls
+## This prevents "cyclic resource inclusion" errors from Godot's resource system
+## when multiple threads try to duplicate nodes that share sub-resources
+## (e.g., two different models that use the same texture or mesh)
+## NOTE: Per-model mutex was insufficient because sub-resources can be shared
+var _global_duplicate_mutex: Mutex = Mutex.new()
 
 ## Active parallel duplicate task count
 var _parallel_duplicate_active: int = 0
@@ -867,14 +861,6 @@ var _parallel_duplicate_stats: Dictionary = {
 }
 
 
-## Get or create a mutex for a specific model path
-func _get_model_mutex(model_path: String) -> Mutex:
-	_model_mutexes_lock.lock()
-	if model_path not in _model_mutexes:
-		_model_mutexes[model_path] = Mutex.new()
-	var mtx: Mutex = _model_mutexes[model_path]
-	_model_mutexes_lock.unlock()
-	return mtx
 
 # =============================================================================
 # POOL PRE-WARMING
@@ -932,6 +918,11 @@ const QUEUE_SORT_INTERVAL: int = 10  # Re-sort every N frames
 var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
 
 
+## Set the LOD configurator for visibility range configuration
+func set_lod_configurator(configurator: LODConfigurator) -> void:
+	_lod_configurator = configurator
+
+
 ## Set the background processor to use for async loading
 func set_background_processor(processor: Node) -> void:
 	if _background_processor:
@@ -947,16 +938,31 @@ func set_background_processor(processor: Node) -> void:
 			task_completed_signal.connect(_on_parse_completed)
 
 
+## Check if there's capacity for more async requests
+## Use this before calling request_exterior_cell_async to avoid fallback to sync
+func has_async_capacity() -> bool:
+	return _background_processor != null and _async_requests.size() < MAX_ASYNC_REQUESTS
+
+
+## Get the number of available async request slots
+func get_async_slots_available() -> int:
+	if not _background_processor:
+		return 0
+	return maxi(0, MAX_ASYNC_REQUESTS - _async_requests.size())
+
+
 ## Request async loading of an exterior cell
 ## Returns request_id for tracking, or -1 if async not available or at capacity
 func request_exterior_cell_async(x: int, y: int) -> int:
 	if not _background_processor:
-		push_warning("CellManager: No background processor set, falling back to sync load")
+		# Only warn once per session about missing processor
+		if not _stats.get("_warned_no_processor", false):
+			push_warning("CellManager: No background processor set, falling back to sync load")
+			_stats["_warned_no_processor"] = true
 		return -1
 
-	# Check concurrent request limit
+	# Check concurrent request limit - don't warn, caller should check has_async_capacity()
 	if _async_requests.size() >= MAX_ASYNC_REQUESTS:
-		push_warning("CellManager: Async request limit reached (%d), rejecting cell (%d, %d)" % [MAX_ASYNC_REQUESTS, x, y])
 		return -1
 
 	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
@@ -970,12 +976,14 @@ func request_exterior_cell_async(x: int, y: int) -> int:
 ## Returns request_id for tracking, or -1 if async not available or at capacity
 func request_cell_async(cell_name: String) -> int:
 	if not _background_processor:
-		push_warning("CellManager: No background processor set, falling back to sync load")
+		# Only warn once per session about missing processor
+		if not _stats.get("_warned_no_processor", false):
+			push_warning("CellManager: No background processor set, falling back to sync load")
+			_stats["_warned_no_processor"] = true
 		return -1
 
-	# Check concurrent request limit
+	# Check concurrent request limit - don't warn, caller should check has_async_capacity()
 	if _async_requests.size() >= MAX_ASYNC_REQUESTS:
-		push_warning("CellManager: Async request limit reached (%d), rejecting cell '%s'" % [MAX_ASYNC_REQUESTS, cell_name])
 		return -1
 
 	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
@@ -1288,13 +1296,18 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			request.completed = true
 
 	# Batch add all children at once (significantly reduces scene tree overhead)
-	# Using call_deferred spreads the work across frames for very large batches
+	# For large batches (>20), use call_deferred to spread work across frames
+	const DEFERRED_THRESHOLD := 20
 	var add_child_start := Time.get_ticks_usec()
+	var use_deferred := pending_children.size() > DEFERRED_THRESHOLD
 	for entry in pending_children:
 		var parent: Node3D = entry.parent
 		var child: Node3D = entry.child
 		if is_instance_valid(parent) and is_instance_valid(child):
-			parent.add_child(child)
+			if use_deferred:
+				parent.call_deferred("add_child", child)
+			else:
+				parent.add_child(child)
 	return instantiated
 
 
@@ -1418,50 +1431,43 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 		# This prevents crashes if the model cache is cleared during the async operation
 		var prototype_id: int = model_prototype.get_instance_id() if model_prototype else 0
 
-		# Get per-model mutex to serialize duplicate() calls for the same model
-		# This prevents "cyclic resource inclusion" errors from concurrent access
-		var model_mutex: Mutex = _get_model_mutex(model_path)
+		# MAIN THREAD DUPLICATE: duplicate() must run on main thread to avoid
+		# "cyclic resource inclusion" errors caused by Godot's internal resource
+		# path tracking conflicting across threads (even with mutex serialization).
+		# We queue the duplicate work and process it in batches on main thread.
+		var task_start := Time.get_ticks_usec()
+		var instance: Node3D = null
+		var success := true
 
-		WorkerThreadPool.add_task(func():
-			# This runs on worker thread - duplicate the prototype
-			# Use per-model mutex to prevent concurrent duplicate() on same prototype
-			var task_start := Time.get_ticks_usec()
-			var instance: Node3D = null
-			var success := true
+		# Look up prototype by ID - safe if node was freed
+		var prototype: Node3D = instance_from_id(prototype_id) as Node3D if prototype_id != 0 else null
+		if prototype:
+			# Perform duplicate on main thread - safe for shared sub-resources
+			instance = prototype.duplicate()
 
-			# Look up prototype by ID - safe if node was freed
-			var prototype: Node3D = instance_from_id(prototype_id) as Node3D if prototype_id != 0 else null
-			if prototype:
-				# Lock per-model mutex to serialize duplicate() calls for this model
-				model_mutex.lock()
-				instance = prototype.duplicate()
-				model_mutex.unlock()
-
-				if instance:
-					instance.name = instance_name
-				else:
-					success = false
+			if instance:
+				instance.name = instance_name
 			else:
 				success = false
+		else:
+			success = false
 
-			# Store result for main thread to process
-			# NOTE: We store cell_node_id instead of cell_node to avoid lambda capture crash
-			_parallel_duplicate_mutex.lock()
-			if success and instance:
-				_parallel_duplicate_results.append({
-					"instance": instance,
-					"request_id": request_id,
-					"transform_data": transform_data,
-					"model_path": model_path,
-					"cell_node_id": cell_node_id,
-					"name": instance_name
-				})
-			else:
-				_parallel_duplicate_stats["failed_duplicate_error"] += 1
-			_parallel_duplicate_active -= 1
-			_parallel_duplicate_stats["total_dispatch_time_usec"] += Time.get_ticks_usec() - task_start
-			_parallel_duplicate_mutex.unlock()
-		)
+		# Store result for later processing
+		_parallel_duplicate_mutex.lock()
+		if success and instance:
+			_parallel_duplicate_results.append({
+				"instance": instance,
+				"request_id": request_id,
+				"transform_data": transform_data,
+				"model_path": model_path,
+				"cell_node_id": cell_node_id,
+				"name": instance_name
+			})
+		else:
+			_parallel_duplicate_stats["failed_duplicate_error"] += 1
+		_parallel_duplicate_active -= 1
+		_parallel_duplicate_stats["total_dispatch_time_usec"] += Time.get_ticks_usec() - task_start
+		_parallel_duplicate_mutex.unlock()
 
 		_parallel_duplicate_stats["dispatched"] += 1
 
@@ -2027,10 +2033,10 @@ func _get_cache_key(model_path: String, item_id: String) -> String:
 
 
 ## Hide LOD sibling nodes and materialless meshes in a scene tree
-## Delegates to ReferenceInstantiator for consistent behavior across all instantiation paths
+## Calls MeshVisibilityUtils directly for consistent behavior
 ## CRITICAL: Must be called after every duplicate() to prevent white mesh overlays
 func _hide_lod_nodes(node: Node) -> void:
-	_instantiator._hide_lod_nodes(node)
+	MeshVisibilityUtils.hide_lod_and_materialless(node)
 
 
 ## Get count of pending async requests
@@ -2082,10 +2088,3 @@ func get_stats() -> Dictionary:
 		result["pool_releases"] = pool_stats.get("releases", 0)
 
 	return result
-
-
-## Clean up significant objects in a cell when it's unloaded (DEPRECATED)
-## Native streaming system handles cleanup automatically
-func cleanup_cell_significant_objects(cell_grid: Vector2i) -> int:
-	# DEPRECATED: No-op, native streaming handles cleanup
-	return 0

@@ -106,7 +106,7 @@ func configure_far_object(mesh_instance: GeometryInstance3D) -> void:
 ##
 ## lod0: Full detail mesh (NEAR tier, 0-150m)
 ## lod1: First simplification (MID tier, 150-250m) - optional
-## lod2: Second simplification (MID tier, 250-375m) - optional  
+## lod2: Second simplification (MID tier, 250-375m) - optional
 ## lod3: Third simplification (MID tier, 375-500m) - optional
 ## impostor: Billboard/octahedral impostor (FAR tier, 500-5000m) - optional
 ##
