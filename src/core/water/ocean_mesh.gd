@@ -9,20 +9,23 @@ class_name OceanMesh
 extends MeshInstance3D
 
 # Clipmap configuration
-const NUM_LOD_RINGS: int = 6
+# Inner rings (0-5) provide detail for FFT waves up to ~2km
+# Outer rings (6-10) are coarse geometry to fill horizon out to 50km+
+# Ring 10: 2048m quads → 65,536m (~65km)
+const NUM_LOD_RINGS: int = 11
 const BASE_QUAD_SIZE: float = 2.0  # Innermost ring quad size in meters
 const RING_VERTEX_COUNT: int = 64   # Vertices per side for each ring
 
-# Quality modes (simplified from 4 to 2)
-enum QualityMode { FLAT, FFT }
+# Quality modes - GERSTNER is default (good balance of visual quality and performance)
+enum QualityMode { FLAT, GERSTNER, FFT }
 
 # Shader
 var _material: ShaderMaterial = null
 var _shader: Shader = null
 
 # Quality settings
-var _quality: QualityMode = QualityMode.FFT
-var _quality_override: int = -1  # -1 = auto, 0 = flat, 1 = FFT
+var _quality: QualityMode = QualityMode.GERSTNER
+var _quality_override: int = -1  # -1 = auto, 0 = flat, 1 = gerstner, 2 = FFT
 
 # Cascade data for shader
 var _map_scales: Array[Vector4] = []
@@ -48,6 +51,10 @@ var _cached_color_gradient: Texture2D = null
 var _cached_sparkle_map: Texture2D = null
 var _cached_bubble_texture: Texture2D = null
 
+# Vector map generator for Gerstner mode (GPU compute shader)
+var _vector_map_generator: VectorMapGenerator = null
+var _use_compute_vector_map: bool = true  # Set to false to use static texture fallback
+
 
 func initialize(radius: float, quality_override: int = -1) -> void:
 	_quality_override = quality_override
@@ -57,7 +64,14 @@ func initialize(radius: float, quality_override: int = -1) -> void:
 	_create_material()
 	_create_clipmap_mesh(radius)
 
-	var mode_name := "GPU FFT (3 cascades)" if _quality == QualityMode.FFT else "Flat Plane"
+	var mode_name: String
+	match _quality:
+		QualityMode.FFT:
+			mode_name = "GPU FFT (3 cascades)"
+		QualityMode.GERSTNER:
+			mode_name = "Gerstner Waves"
+		_:
+			mode_name = "Flat Plane"
 	print("[OceanMesh] Initialized - radius: %.0fm, mode: %s" % [radius, mode_name])
 
 
@@ -66,21 +80,29 @@ func _select_quality() -> void:
 		_quality = QualityMode.FLAT
 		print("[OceanMesh] Quality override: FLAT")
 	elif _quality_override == 1:
+		_quality = QualityMode.GERSTNER
+		print("[OceanMesh] Quality override: GERSTNER")
+	elif _quality_override == 2:
 		_quality = QualityMode.FFT
 		print("[OceanMesh] Quality override: FFT")
 	else:
 		# Auto-detect based on hardware
+		# Default to GERSTNER (good balance), FFT for high-end GPUs, FLAT for low-end
 		HardwareDetection.detect()
 		var recommended := HardwareDetection.get_recommended_quality()
-		# Map old quality levels to new simplified ones
-		# HIGH -> FFT, everything else -> FLAT
-		if recommended == HardwareDetection.WaterQuality.HIGH:
-			_quality = QualityMode.FFT
-		else:
-			_quality = QualityMode.FLAT
-		print("[OceanMesh] Auto-detected quality: %s (GPU: %s)" % [
-			"FFT" if _quality == QualityMode.FFT else "FLAT",
-			HardwareDetection.get_gpu_name()])
+		match recommended:
+			HardwareDetection.WaterQuality.HIGH:
+				_quality = QualityMode.GERSTNER  # Gerstner is default even for high-end
+			HardwareDetection.WaterQuality.MEDIUM, HardwareDetection.WaterQuality.LOW:
+				_quality = QualityMode.GERSTNER
+			_:
+				_quality = QualityMode.FLAT
+		var quality_name := "FLAT"
+		if _quality == QualityMode.GERSTNER:
+			quality_name = "GERSTNER"
+		elif _quality == QualityMode.FFT:
+			quality_name = "FFT"
+		print("[OceanMesh] Auto-detected quality: %s (GPU: %s)" % [quality_name, HardwareDetection.get_gpu_name()])
 
 
 func _create_shader() -> void:
@@ -91,11 +113,21 @@ func _create_shader() -> void:
 			shader_path = "res://src/core/water/shaders/ocean_compute.gdshader"
 			_shader = load(shader_path) as Shader
 			if not _shader:
-				push_warning("[OceanMesh] FFT shader not found, falling back to flat")
+				push_warning("[OceanMesh] FFT shader not found, falling back to Gerstner")
+				_quality = QualityMode.GERSTNER
+				_create_shader()  # Recurse to load Gerstner
+				return
+			print("[OceanMesh] Using GPU FFT compute shader")
+
+		QualityMode.GERSTNER:
+			shader_path = "res://src/core/water/shaders/gerstner_water.gdshader"
+			_shader = load(shader_path) as Shader
+			if not _shader:
+				push_warning("[OceanMesh] Gerstner shader not found, falling back to flat")
 				_quality = QualityMode.FLAT
 				_create_shader()  # Recurse to load flat
 				return
-			print("[OceanMesh] Using GPU FFT compute shader")
+			print("[OceanMesh] Using Gerstner wave shader")
 
 		QualityMode.FLAT:
 			shader_path = "res://src/core/water/shaders/flat_water.gdshader"
@@ -258,6 +290,278 @@ func _setup_bubble_texture() -> void:
 	_material.set_shader_parameter("bubble_texture", bubble_tex)
 
 
+func _setup_gerstner_shader_defaults() -> void:
+	## Set up textures and parameters for Gerstner water shader
+	## Uses textures from inspos/Godot-Water-Shader-Prototype-4.4 or procedural fallbacks
+	if not _material:
+		return
+
+	# Base path for Gerstner textures (copied from prototype)
+	var tex_base := "res://src/core/water/textures/"
+
+	# Vector map - flow/height texture for base waves (critical for wave appearance)
+	# Try to use GPU compute shader for dynamic vector map
+	if _use_compute_vector_map:
+		_initialize_vector_map_generator(tex_base)
+	else:
+		# Fallback to static procedural texture
+		var vector_map := _load_texture_or_generate(tex_base + "vector_map.png", "vector_map")
+		_material.set_shader_parameter("vector_map", vector_map)
+
+	# Gerstner height and normal maps - these are the key textures for wave displacement
+	var gerstner_height := _load_texture_or_generate(tex_base + "gerstner_height.png", "gerstner_height")
+	var gerstner_normal := _load_texture_or_generate(tex_base + "gerstner_normal.png", "gerstner_normal")
+	var detail_normal := _load_texture_or_generate(tex_base + "detail_normal.png", "detail_normal")
+
+	_material.set_shader_parameter("gerstner_height_map", gerstner_height)
+	_material.set_shader_parameter("gerstner_normal_map", gerstner_normal)
+	_material.set_shader_parameter("detail_normal_map", detail_normal)
+
+	# Foam and bubble textures
+	var foam_albedo := _load_texture_or_generate(tex_base + "foam_albedo.png", "foam_albedo")
+	var foam_normal := _load_texture_or_generate(tex_base + "foam_normal.png", "foam_normal")
+	var bubble_albedo := _load_texture_or_generate(tex_base + "bubbles_albedo.png", "bubble_albedo")
+	var bubble_normal := _load_texture_or_generate(tex_base + "bubbles_normal.png", "bubble_normal")
+
+	_material.set_shader_parameter("foam_albedo_map", foam_albedo)
+	_material.set_shader_parameter("foam_normal_map", foam_normal)
+	_material.set_shader_parameter("bubble_albedo_map", bubble_albedo)
+	_material.set_shader_parameter("bubble_normal_map", bubble_normal)
+
+	# Beach waves mask (horizontal gradient for shore foam)
+	var beach_waves := _load_texture_or_generate(tex_base + "beach_mask.png", "beach_mask")
+	_material.set_shader_parameter("beach_waves_map", beach_waves)
+
+	# Water highlight map for specular variation
+	var water_highlight := _load_texture_or_generate(tex_base + "water_highlight.png", "water_highlight")
+	_material.set_shader_parameter("water_highlight_map", water_highlight)
+
+	# Water color gradient (can also use procedural colors)
+	var water_gradient := _create_water_color_gradient()
+	_material.set_shader_parameter("water_color_gradient", water_gradient)
+
+	# Set water colors (used if gradient not available)
+	_material.set_shader_parameter("water_color_shallow", Vector3(0.1, 0.3, 0.4))
+	_material.set_shader_parameter("water_color_deep", Vector3(0.02, 0.08, 0.12))
+
+	# Gerstner wave parameters - matching original shader defaults
+	_material.set_shader_parameter("gerstner_height", 0.4)
+	_material.set_shader_parameter("gerstner_normal", 0.25)
+	_material.set_shader_parameter("gerstner_stretch", 1.5)
+	_material.set_shader_parameter("gerstner_tiling", 0.1)
+	_material.set_shader_parameter("gerstner_speed", Vector2(0.011, 0.014))
+
+	_material.set_shader_parameter("gerstner_2_height", 1.0)
+	_material.set_shader_parameter("gerstner_2_normal", 0.4)
+	_material.set_shader_parameter("gerstner_2_stretch", 1.0)
+	_material.set_shader_parameter("gerstner_2_tiling", 0.412)
+	_material.set_shader_parameter("gerstner_2_speed", Vector2(0.003, 0.008))
+
+	# Base wave parameters (from original shader)
+	_material.set_shader_parameter("wave_height", 0.3)
+	_material.set_shader_parameter("wave_z_offset", -0.15)
+
+	# Distance fadeout - matching original values
+	_material.set_shader_parameter("gerstner_distance_fadeout", 50.0)
+	_material.set_shader_parameter("normal_dist_fadeout", 10.0)
+
+	# Foam/bubble parameters - matching original
+	_material.set_shader_parameter("foam_amount", 3.0)
+	_material.set_shader_parameter("bubble_amount", 1.0)
+	_material.set_shader_parameter("foam_gerstner", 0.7)
+	_material.set_shader_parameter("bubble_gerstner", 2.0)
+
+	# Beach foam
+	_material.set_shader_parameter("beach_foam_amount", 0.7)
+	_material.set_shader_parameter("beach_foam_depth", 2.0)
+
+	# Subsurface scattering
+	_material.set_shader_parameter("sss_strength", 5.0)
+
+	print("[OceanMesh] Gerstner shader defaults configured")
+
+
+func _initialize_vector_map_generator(tex_base: String) -> void:
+	## Initialize the GPU compute shader for dynamic vector map generation
+	if _vector_map_generator and _vector_map_generator.is_initialized():
+		# Already initialized, just update the shader parameter
+		_material.set_shader_parameter("vector_map", _vector_map_generator.get_texture())
+		return
+
+	# Load the flow source texture
+	var flow_texture: Texture2D = null
+	var flow_path := tex_base + "flowmap_source.png"
+	if ResourceLoader.exists(flow_path):
+		flow_texture = load(flow_path) as Texture2D
+		print("[OceanMesh] Loaded flow source texture: %s" % flow_path)
+
+	# Create and initialize the generator
+	_vector_map_generator = VectorMapGenerator.new()
+	if _vector_map_generator.initialize(flow_texture):
+		_material.set_shader_parameter("vector_map", _vector_map_generator.get_texture())
+		print("[OceanMesh] Vector map generator initialized (GPU compute)")
+	else:
+		push_warning("[OceanMesh] Failed to initialize vector map generator, using static fallback")
+		_use_compute_vector_map = false
+		var vector_map := _load_texture_or_generate(tex_base + "vector_map.png", "vector_map")
+		_material.set_shader_parameter("vector_map", vector_map)
+
+
+## Update the vector map generator (call once per frame for Gerstner mode)
+func update_vector_map(delta: float) -> void:
+	if _quality == QualityMode.GERSTNER and _vector_map_generator and _vector_map_generator.is_initialized():
+		_vector_map_generator.update(delta)
+
+
+## Check if using compute-based vector map
+func is_using_compute_vector_map() -> bool:
+	return _use_compute_vector_map and _vector_map_generator != null and _vector_map_generator.is_initialized()
+
+
+## Enable/disable compute vector map (requires re-initialization)
+func set_use_compute_vector_map(enabled: bool) -> void:
+	if _use_compute_vector_map == enabled:
+		return
+	_use_compute_vector_map = enabled
+	if _quality == QualityMode.GERSTNER:
+		_setup_gerstner_shader_defaults()
+
+
+## Clean up vector map generator resources
+func cleanup_vector_map() -> void:
+	if _vector_map_generator:
+		_vector_map_generator.cleanup()
+		_vector_map_generator = null
+
+
+func _load_texture_or_generate(path: String, fallback_type: String) -> Texture2D:
+	## Try to load texture from disk, or generate a procedural fallback
+	if ResourceLoader.exists(path):
+		var tex := load(path) as Texture2D
+		if tex:
+			return tex
+
+	# Generate procedural fallback based on type
+	return _create_procedural_texture(fallback_type)
+
+
+func _create_procedural_texture(tex_type: String) -> Texture2D:
+	## Create procedural texture as fallback when file not found
+	var noise := FastNoiseLite.new()
+	var tex := NoiseTexture2D.new()
+	tex.seamless = true
+	tex.seamless_blend_skirt = 0.3
+	tex.width = 512
+	tex.height = 512
+
+	match tex_type:
+		"vector_map":
+			# Vector map stores: R=flow_x, G=flow_y, B=height
+			# Create procedural version with perlin noise for height
+			# and neutral flow (0.5, 0.5 = no flow after -0.5 offset)
+			noise.noise_type = FastNoiseLite.TYPE_PERLIN
+			noise.frequency = 0.02
+			noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+			noise.fractal_octaves = 4
+			noise.seed = 44444
+			tex.noise = noise
+			# Note: This creates grayscale; shader expects RGB but we use .z for height
+			# The xy channels will be ~0.5 which gives neutral flow
+			return tex
+
+		"gerstner_height":
+			noise.noise_type = FastNoiseLite.TYPE_PERLIN
+			noise.frequency = 0.015
+			noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+			noise.fractal_octaves = 4
+			noise.seed = 77777
+			tex.noise = noise
+
+		"gerstner_normal":
+			noise.noise_type = FastNoiseLite.TYPE_PERLIN
+			noise.frequency = 0.02
+			noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+			noise.fractal_octaves = 3
+			noise.seed = 88888
+			tex.noise = noise
+			tex.as_normal_map = true
+			tex.bump_strength = 8.0
+
+		"detail_normal":
+			noise.noise_type = FastNoiseLite.TYPE_PERLIN
+			noise.frequency = 0.05
+			noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+			noise.fractal_octaves = 2
+			noise.seed = 99999
+			tex.noise = noise
+			tex.as_normal_map = true
+			tex.bump_strength = 4.0
+
+		"foam_albedo", "bubble_albedo":
+			noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+			noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
+			noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
+			noise.frequency = 0.04
+			noise.seed = 11111 if tex_type == "foam_albedo" else 22222
+			tex.noise = noise
+			tex.width = 256
+			tex.height = 256
+
+		"foam_normal", "bubble_normal":
+			noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+			noise.frequency = 0.04
+			noise.seed = 33333 if tex_type == "foam_normal" else 44444
+			tex.noise = noise
+			tex.as_normal_map = true
+			tex.bump_strength = 4.0
+			tex.width = 256
+			tex.height = 256
+
+		"beach_mask":
+			# Create a horizontal gradient for beach foam
+			var img := Image.create(256, 1, false, Image.FORMAT_L8)
+			for x in range(256):
+				var v := 1.0 - pow(float(x) / 255.0, 2.0)
+				img.set_pixel(x, 0, Color(v, v, v, 1.0))
+			var gradient_tex := ImageTexture.create_from_image(img)
+			return gradient_tex
+
+		"water_highlight":
+			noise.noise_type = FastNoiseLite.TYPE_VALUE
+			noise.frequency = 0.08
+			noise.seed = 55555
+			tex.noise = noise
+			tex.width = 256
+			tex.height = 256
+
+		_:
+			# Default noise
+			noise.noise_type = FastNoiseLite.TYPE_PERLIN
+			noise.frequency = 0.02
+			noise.seed = 12345
+			tex.noise = noise
+
+	return tex
+
+
+func _create_water_color_gradient() -> Texture2D:
+	## Create a water color gradient texture (vertical gradient from shallow to deep)
+	var gradient := Gradient.new()
+	gradient.set_color(0, Color(0.15, 0.35, 0.45, 1.0))  # Shallow - lighter blue-green
+	gradient.add_point(0.3, Color(0.08, 0.2, 0.28, 1.0))  # Mid depth
+	gradient.add_point(0.6, Color(0.04, 0.12, 0.18, 1.0))  # Deeper
+	gradient.set_color(1, Color(0.02, 0.06, 0.1, 1.0))    # Deep - dark blue
+
+	var gradient_tex := GradientTexture2D.new()
+	gradient_tex.gradient = gradient
+	gradient_tex.width = 256
+	gradient_tex.height = 1
+	gradient_tex.fill_from = Vector2(0, 0)
+	gradient_tex.fill_to = Vector2(0, 1)
+
+	return gradient_tex
+
+
 func _setup_flat_water_textures() -> void:
 	## Set up noise textures for flat water shader
 	## The shader expects: normal1tex, normal2tex, height1tex, height2tex, edge1tex, edge2tex
@@ -409,17 +713,23 @@ func _create_material() -> void:
 	_material.set_shader_parameter("roughness", 0.25)
 
 	# Mode-specific uniforms
-	if _quality == QualityMode.FFT:
-		_material.set_shader_parameter("water_color", Color(0.09, 0.116, 0.127, 1.0))  # OpenMW WATER_COLOR
-		_material.set_shader_parameter("foam_color", Color(0.9, 0.9, 0.9, 1.0))
-		_material.set_shader_parameter("sun_direction", _cached_sun_direction)
-		_material.set_shader_parameter("sun_fade", _cached_sun_fade)
-		_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
-		# Set up FFT shader defaults (no detail normals needed)
-		_setup_fft_shader_defaults()
-	else:
-		# FLAT mode - set up noise textures for waves and normals
-		_setup_flat_water_textures()
+	match _quality:
+		QualityMode.FFT:
+			_material.set_shader_parameter("water_color", Color(0.09, 0.116, 0.127, 1.0))  # OpenMW WATER_COLOR
+			_material.set_shader_parameter("foam_color", Color(0.9, 0.9, 0.9, 1.0))
+			_material.set_shader_parameter("sun_direction", _cached_sun_direction)
+			_material.set_shader_parameter("sun_fade", _cached_sun_fade)
+			_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
+			# Set up FFT shader defaults (no detail normals needed)
+			_setup_fft_shader_defaults()
+
+		QualityMode.GERSTNER:
+			# Set up Gerstner shader textures and defaults
+			_setup_gerstner_shader_defaults()
+
+		QualityMode.FLAT:
+			# FLAT mode - set up noise textures for waves and normals
+			_setup_flat_water_textures()
 
 	material_override = _material
 	print("[OceanMesh] Material created - shader: %s" % [
@@ -662,7 +972,13 @@ func get_quality() -> QualityMode:
 
 ## Get quality as HardwareDetection.WaterQuality for compatibility
 func get_quality_compat() -> HardwareDetection.WaterQuality:
-	return HardwareDetection.WaterQuality.HIGH if _quality == QualityMode.FFT else HardwareDetection.WaterQuality.ULTRA_LOW
+	match _quality:
+		QualityMode.FFT:
+			return HardwareDetection.WaterQuality.HIGH
+		QualityMode.GERSTNER:
+			return HardwareDetection.WaterQuality.MEDIUM
+		_:
+			return HardwareDetection.WaterQuality.ULTRA_LOW
 
 
 ## Check if using GPU compute (FFT mode)
@@ -679,15 +995,30 @@ func set_quality(quality: QualityMode, radius: float) -> bool:
 	if _quality == old_quality:
 		return false
 
+	# Clean up previous mode's resources
+	if old_quality == QualityMode.GERSTNER:
+		cleanup_vector_map()
+
 	_create_shader()
 	_create_material()
 	_restore_cached_state()
 
 	print("[OceanMesh] Quality changed: %s -> %s" % [
-		"FFT" if old_quality == QualityMode.FFT else "FLAT",
-		"FFT" if _quality == QualityMode.FFT else "FLAT"])
+		_quality_to_string(old_quality),
+		_quality_to_string(_quality)])
 
 	return _quality == QualityMode.FFT
+
+
+## Convert quality mode to string for logging
+func _quality_to_string(quality: QualityMode) -> String:
+	match quality:
+		QualityMode.FFT:
+			return "FFT"
+		QualityMode.GERSTNER:
+			return "GERSTNER"
+		_:
+			return "FLAT"
 
 
 ## Restore cached shader parameters after quality change
@@ -695,6 +1026,7 @@ func _restore_cached_state() -> void:
 	if not _material:
 		return
 
+	# Shore mask is common to all modes
 	if _cached_shore_mask:
 		_material.set_shader_parameter("shore_mask", _cached_shore_mask)
 		_material.set_shader_parameter("shore_mask_bounds", Vector4(
@@ -704,35 +1036,45 @@ func _restore_cached_state() -> void:
 			_cached_shore_bounds.size.y
 		))
 
-	_material.set_shader_parameter("water_color", _cached_water_color)
+	match _quality:
+		QualityMode.FFT:
+			_material.set_shader_parameter("water_color", _cached_water_color)
+			_material.set_shader_parameter("foam_color", _cached_foam_color)
+			_material.set_shader_parameter("sun_direction", _cached_sun_direction)
+			_material.set_shader_parameter("sun_fade", _cached_sun_fade)
+			_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
+			_material.set_shader_parameter("enable_rain_ripples", _cached_rain_intensity > 0.01)
+			RenderingServer.global_shader_parameter_set(&"water_color", _cached_water_color.srgb_to_linear())
+			RenderingServer.global_shader_parameter_set(&"foam_color", _cached_foam_color.srgb_to_linear())
 
-	if _quality == QualityMode.FFT:
-		_material.set_shader_parameter("foam_color", _cached_foam_color)
-		_material.set_shader_parameter("sun_direction", _cached_sun_direction)
-		_material.set_shader_parameter("sun_fade", _cached_sun_fade)
-		_material.set_shader_parameter("rain_intensity", _cached_rain_intensity)
-		_material.set_shader_parameter("enable_rain_ripples", _cached_rain_intensity > 0.01)
-		RenderingServer.global_shader_parameter_set(&"water_color", _cached_water_color.srgb_to_linear())
-		RenderingServer.global_shader_parameter_set(&"foam_color", _cached_foam_color.srgb_to_linear())
+			# Restore new visual features
+			_material.set_shader_parameter("sparkle_intensity", _cached_sparkle_intensity)
+			_material.set_shader_parameter("caustic_intensity", _cached_caustic_intensity)
+			_material.set_shader_parameter("bubble_intensity", _cached_bubble_intensity)
+			if _cached_color_gradient:
+				_material.set_shader_parameter("water_color_gradient", _cached_color_gradient)
+				_material.set_shader_parameter("use_color_gradient", true)
+			if _cached_sparkle_map:
+				_material.set_shader_parameter("sparkle_map", _cached_sparkle_map)
+			if _cached_bubble_texture:
+				_material.set_shader_parameter("bubble_texture", _cached_bubble_texture)
 
-		# Restore new visual features
-		_material.set_shader_parameter("sparkle_intensity", _cached_sparkle_intensity)
-		_material.set_shader_parameter("caustic_intensity", _cached_caustic_intensity)
-		_material.set_shader_parameter("bubble_intensity", _cached_bubble_intensity)
-		if _cached_color_gradient:
-			_material.set_shader_parameter("water_color_gradient", _cached_color_gradient)
-			_material.set_shader_parameter("use_color_gradient", true)
-		if _cached_sparkle_map:
-			_material.set_shader_parameter("sparkle_map", _cached_sparkle_map)
-		if _cached_bubble_texture:
-			_material.set_shader_parameter("bubble_texture", _cached_bubble_texture)
+			# Apply FFT shader defaults
+			_setup_fft_shader_defaults()
 
-		# Apply FFT shader defaults
-		_setup_fft_shader_defaults()
+		QualityMode.GERSTNER:
+			# Gerstner uses its own color parameters
+			_material.set_shader_parameter("water_color_shallow", Vector3(_cached_water_color.r, _cached_water_color.g, _cached_water_color.b))
+			# Gerstner shader defaults handle texture setup
+			_setup_gerstner_shader_defaults()
+
+		QualityMode.FLAT:
+			_material.set_shader_parameter("water_color", _cached_water_color)
+			_setup_flat_water_textures()
 
 	_material.set_shader_parameter("debug_shore_mask", _debug_shore_mask)
 
-	print("[OceanMesh] Restored cached state")
+	print("[OceanMesh] Restored cached state for %s mode" % _quality_to_string(_quality))
 
 
 ## Toggle debug visualization of shore mask

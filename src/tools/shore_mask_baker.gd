@@ -493,7 +493,14 @@ static func load_prebaked(image_path: String) -> Dictionary:
 		push_error("ShoreMaskBaker: Failed to load shore mask image: %s" % image_path)
 		return {}
 
+	# Clear mipmaps if present - ImageTexture.create_from_image() fails with embedded mipmaps
+	if image.has_mipmaps():
+		image.clear_mipmaps()
+
 	var texture := ImageTexture.create_from_image(image)
+	if not texture:
+		push_error("ShoreMaskBaker: Failed to create texture from image: %s" % image_path)
+		return {}
 
 	# Load metadata
 	var cfg_path := image_path.replace(".png", ".cfg")

@@ -940,10 +940,11 @@ func _create_ocean_panel() -> void:
 	_water_quality_btn = OptionButton.new()
 	_water_quality_btn.add_item("Auto", -1)
 	_water_quality_btn.add_item("Flat", 0)
-	_water_quality_btn.add_item("FFT", 1)
-	_water_quality_btn.selected = 0
+	_water_quality_btn.add_item("Gerstner", 1)
+	_water_quality_btn.add_item("FFT", 2)
+	_water_quality_btn.selected = 0  # Auto by default
 	_water_quality_btn.item_selected.connect(_on_water_quality_changed)
-	_water_quality_btn.tooltip_text = "Water quality: Flat (simple) or FFT (GPU waves)"
+	_water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane\n- Gerstner: GPU vertex waves (recommended)\n- FFT: Full GPU compute waves"
 	_water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	quality_row.add_child(_water_quality_btn)
 
@@ -1369,7 +1370,37 @@ func _create_ocean() -> void:
 	ocean_manager.set_enabled(true)
 
 	_ocean_initialized = true
+
+	# Sync UI dropdown with actual quality
+	_sync_water_quality_dropdown()
+
 	_log("Ocean system initialized (quality: %s)" % ocean_manager.get_water_quality_name())
+
+
+## Sync the water quality dropdown with the current ocean quality
+func _sync_water_quality_dropdown() -> void:
+	if not _water_quality_btn or not ocean_manager:
+		return
+
+	var current_quality := ocean_manager.get_water_quality()
+	# Map QualityMode enum to dropdown item ID
+	# FLAT=0, GERSTNER=1, FFT=2, Auto=-1
+	var target_id: int
+	match current_quality:
+		OceanMesh.QualityMode.FLAT:
+			target_id = 0
+		OceanMesh.QualityMode.GERSTNER:
+			target_id = 1
+		OceanMesh.QualityMode.FFT:
+			target_id = 2
+		_:
+			target_id = -1  # Auto
+
+	# Find and select the item with matching ID
+	for i in _water_quality_btn.get_item_count():
+		if _water_quality_btn.get_item_id(i) == target_id:
+			_water_quality_btn.selected = i
+			break
 
 
 ## Handle water quality change

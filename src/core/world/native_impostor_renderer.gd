@@ -94,6 +94,13 @@ var _loaded_impostor_cells: Dictionary = {} # Vector2i -> true
 ## Track when impostors have been modified (need MultiMesh rebuild)
 var _impostors_dirty: bool = false
 
+## Rate-limiting for MultiMesh rebuilds to prevent frame stalls
+## Rebuilding 70k+ instances every frame is catastrophic for performance
+var _last_multimesh_rebuild_time: float = 0.0
+var _last_impostor_add_time: float = 0.0  # When the last impostor was created (for debounce)
+const MULTIMESH_REBUILD_INTERVAL: float = 0.5  # Minimum seconds between rebuilds
+const MULTIMESH_REBUILD_DEBOUNCE: float = 0.2  # Wait this long after last impostor add before rebuilding
+
 ## Deferred impostor loading - process cells progressively to avoid freezing
 var _pending_impostor_cells: Array[Vector2i] = []  # Cells waiting to be processed
 var _impostor_cells_per_frame: int = 5  # Max cells to process per frame (tunable)
@@ -467,15 +474,31 @@ func _process(_delta: float) -> void:
 
 	# Rebuild texture array if needed (batched to avoid rebuilding every frame)
 	if _texture_array_dirty:
-		var time_since_add := Time.get_ticks_msec() / 1000.0 - _last_texture_add_time
+		var time_since_add := current_time - _last_texture_add_time
 		if time_since_add >= TEXTURE_ARRAY_REBUILD_DELAY:
 			_rebuild_texture_array()
+			# Schedule MultiMesh rebuild (rate-limited below)
+			_impostors_dirty = true
+			_texture_array_dirty = false
+
+	# Rate-limited MultiMesh rebuild to prevent frame stalls
+	# With 70k+ impostors, rebuilding every frame destroys FPS
+	if _impostors_dirty:
+		var time_since_last_rebuild := current_time - _last_multimesh_rebuild_time
+		var time_since_last_add := current_time - _last_impostor_add_time
+
+		# Only rebuild if:
+		# 1. Enough time has passed since last rebuild (rate limit), AND
+		# 2. Either we've waited long enough after last add (debounce), OR no pending cells
+		var should_rebuild := time_since_last_rebuild >= MULTIMESH_REBUILD_INTERVAL
+		var done_adding := time_since_last_add >= MULTIMESH_REBUILD_DEBOUNCE or _pending_impostor_cells.is_empty()
+
+		if should_rebuild and done_adding:
+			# Log at info level since this is now rate-limited (not every frame)
+			print("[NativeImpostorRenderer] Rebuilding MultiMesh with %d impostors" % _impostors.size())
 			_rebuild_multimesh()
+			_last_multimesh_rebuild_time = current_time
 			_impostors_dirty = false
-	elif _impostors_dirty:
-		# Impostors were added but no new textures needed - rebuild MultiMesh only
-		_rebuild_multimesh()
-		_impostors_dirty = false
 
 
 ## Process pending impostor cells progressively (time-budgeted)
@@ -984,7 +1007,8 @@ func _create_impostor(
 	_next_id += 1
 	_impostors[impostor.id] = impostor
 	_stats["total_impostors"] = _impostors.size()
-	_impostors_dirty = true  # Mark for MultiMesh rebuild
+	_impostors_dirty = true  # Mark for MultiMesh rebuild (rate-limited in _process)
+	_last_impostor_add_time = Time.get_ticks_msec() / 1000.0  # For debounce
 
 	# Increment texture reference count
 	_texture_ref_counts[hash_key] = _texture_ref_counts.get(hash_key, 0) + 1
@@ -1108,14 +1132,13 @@ func _rebuild_multimesh() -> void:
 
 	if impostor_count == 0:
 		_master_multimesh.instance_count = 0
-		print("[NativeImpostorRenderer] _rebuild_multimesh: No impostors to render")
+		if debug_enabled:
+			_debug("_rebuild_multimesh: No impostors to render")
 		return
 
 	_master_multimesh.instance_count = impostor_count
-	print("[NativeImpostorRenderer] _rebuild_multimesh: Setting instance_count to %d" % impostor_count)
 
 	var idx := 0
-	var sample_logged := false
 	for impostor_id: int in _impostors:
 		var impostor: ImpostorData = _impostors[impostor_id]
 
@@ -1136,21 +1159,13 @@ func _rebuild_multimesh() -> void:
 		# Custom data: x = texture layer, y = rotation.y (radians)
 		_master_multimesh.set_instance_custom_data(idx, Color(float(impostor.texture_index), impostor.rotation.y, 0.0, 1.0))
 
-		# Log first few instances for debugging
-		if not sample_logged and idx < 3:
-			print("[NativeImpostorRenderer] Instance %d: pos=%s, scale=(%0.1f, %0.1f), tex_size=%s, tex_idx=%d" % [
-				idx, billboard_pos, scale_x, scale_y, impostor.texture_size, impostor.texture_index
-			])
-			if idx == 2:
-				sample_logged = true
-
 		idx += 1
 
-	# Verify the MultiMesh is actually updated
-	print("[NativeImpostorRenderer] MultiMesh rebuilt: visible_instance_count=%d, mesh=%s" % [
-		_master_multimesh.visible_instance_count,
-		_master_multimesh.mesh != null
-	])
+	# Only log rebuild at debug level (was spamming the console)
+	if debug_enabled:
+		_debug("MultiMesh rebuilt: %d instances, visible=%d" % [
+			impostor_count, _master_multimesh.visible_instance_count
+		])
 
 
 func _get_or_load_metadata(model_path: String) -> Dictionary:

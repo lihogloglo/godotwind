@@ -16,7 +16,7 @@ func _get_shore_mask_path() -> String:
 	return SettingsManager.get_ocean_path().path_join("shore_mask.png")
 
 # Ocean configuration
-@export var ocean_radius: float = 25000.0  # 25km clipmap radius - covers all of Vvardenfell
+@export var ocean_radius: float = 50000.0  # 50km clipmap radius - extends to horizon
 @export var wave_update_rate: int = 30    # Wave updates per second
 @export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore (horizontal distance)
 @export var shore_mask_resolution: int = 4096  # Shore mask texture size
@@ -295,7 +295,9 @@ func _process(delta: float) -> void:
 	if not _system_enabled or not _enabled:
 		return
 
-	_time += delta
+	# Use real time instead of accumulated delta to avoid speed-up/slow-down
+	# when framerate fluctuates during asset loading
+	_time = Time.get_ticks_msec() / 1000.0
 
 	# Auto-find camera if not set
 	if not _camera and _auto_find_camera:
@@ -330,6 +332,9 @@ func _process(delta: float) -> void:
 
 	# Update shader time (for vertex Gerstner animation)
 	_ocean_mesh.set_shader_time(_time)
+
+	# Update vector map generator (for Gerstner mode animated flow)
+	_ocean_mesh.update_vector_map(delta)
 
 	# Update sun direction for scattering effect
 	if _auto_find_sun and not _sun_light:
@@ -578,15 +583,7 @@ func toggle_ocean() -> bool:
 			force_initialize()
 		# force_initialize sets _system_enabled = true
 		set_enabled(true)
-		var mode: String
-		match get_water_quality():
-			HardwareDetection.WaterQuality.HIGH:
-				mode = "GPU FFT"
-			HardwareDetection.WaterQuality.MEDIUM, HardwareDetection.WaterQuality.LOW:
-				mode = "Vertex Gerstner"
-			_:
-				mode = "Flat Plane"
-		print("[OceanManager] Ocean enabled (mode: %s, quality: %s)" % [mode, get_water_quality_name()])
+		print("[OceanManager] Ocean enabled (mode: %s)" % get_water_quality_name())
 	return _system_enabled
 
 
@@ -643,10 +640,10 @@ func force_initialize() -> void:
 func get_water_quality() -> OceanMesh.QualityMode:
 	if _ocean_mesh:
 		return _ocean_mesh.get_quality()
-	return OceanMesh.QualityMode.FFT
+	return OceanMesh.QualityMode.GERSTNER
 
 
-## Set water quality mode (0 = flat, 1 = FFT, -1 = auto)
+## Set water quality mode (0 = flat, 1 = gerstner, 2 = FFT, -1 = auto)
 func set_water_quality(quality: int) -> void:
 	water_quality = quality
 	if not _system_enabled:
@@ -656,15 +653,24 @@ func set_water_quality(quality: int) -> void:
 
 	# Map input to QualityMode
 	var target_quality: OceanMesh.QualityMode
-	if quality == 0:
-		target_quality = OceanMesh.QualityMode.FLAT
-	elif quality == 1:
-		target_quality = OceanMesh.QualityMode.FFT
-	else:
-		# Auto-detect
-		HardwareDetection.detect()
-		var recommended := HardwareDetection.get_recommended_quality()
-		target_quality = OceanMesh.QualityMode.FFT if recommended == HardwareDetection.WaterQuality.HIGH else OceanMesh.QualityMode.FLAT
+	match quality:
+		0:
+			target_quality = OceanMesh.QualityMode.FLAT
+		1:
+			target_quality = OceanMesh.QualityMode.GERSTNER
+		2:
+			target_quality = OceanMesh.QualityMode.FFT
+		_:
+			# Auto-detect - default to GERSTNER (best balance)
+			HardwareDetection.detect()
+			var recommended := HardwareDetection.get_recommended_quality()
+			match recommended:
+				HardwareDetection.WaterQuality.HIGH:
+					target_quality = OceanMesh.QualityMode.GERSTNER  # Gerstner is default
+				HardwareDetection.WaterQuality.MEDIUM, HardwareDetection.WaterQuality.LOW:
+					target_quality = OceanMesh.QualityMode.GERSTNER
+				_:
+					target_quality = OceanMesh.QualityMode.FLAT
 
 	var needs_wave_textures := _ocean_mesh.set_quality(target_quality, ocean_radius)
 
@@ -700,7 +706,13 @@ func set_water_quality(quality: int) -> void:
 ## Get water quality name as string
 func get_water_quality_name() -> String:
 	if _ocean_mesh:
-		return "FFT" if _ocean_mesh.get_quality() == OceanMesh.QualityMode.FFT else "Flat"
+		match _ocean_mesh.get_quality():
+			OceanMesh.QualityMode.FFT:
+				return "FFT"
+			OceanMesh.QualityMode.GERSTNER:
+				return "Gerstner"
+			_:
+				return "Flat"
 	return "Unknown"
 
 
