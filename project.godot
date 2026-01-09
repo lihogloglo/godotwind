@@ -21,6 +21,7 @@ SettingsManager="*res://src/core/settings_manager.gd"
 BSAManager="*res://src/core/bsa/bsa_manager.gd"
 ESMManager="*res://src/core/esm/esm_manager.gd"
 OceanManager="*res://src/core/water/ocean_manager.gd"
+ShaderManager="*res://src/core/shaders/shader_manager.gd"
 
 [debug]
 

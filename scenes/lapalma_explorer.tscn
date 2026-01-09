@@ -71,7 +71,7 @@ script = ExtResource("1_lapalma")
 
 [node name="FlyCamera" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 1000, 0)
-far = 50000.0
+far = 150000.0
 
 [node name="Terrain3D" type="Terrain3D" parent="."]
 data_directory = "res://lapalma_terrain"
@@ -190,7 +190,8 @@ text = "Controls:
 Hold Right Click to look
 WASD/ZQSD to move
 Space/Shift for up/down
-Ctrl for speed boost"
+Ctrl for speed boost
+K: Sky | O: Ocean"
 
 [node name="LogPanel" type="Panel" parent="UI"]
 anchors_preset = 2

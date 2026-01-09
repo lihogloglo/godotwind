@@ -116,9 +116,16 @@ var _panel_vbox: VBoxContainer = null
 var _performance_panel: FoldablePanel = null
 var _visibility_panel: FoldablePanel = null
 var _ocean_panel: FoldablePanel = null
+var _shader_panel: FoldablePanel = null
 var _navigation_panel: FoldablePanel = null
 var _terrain_panel: FoldablePanel = null
 var _debug_panel: FoldablePanel = null
+
+# Shader effect toggles
+var _fog_toggle: CheckBox = null
+var _clouds_toggle: CheckBox = null
+var _color_grading_toggle: CheckBox = null
+var _shader_manager_attached: bool = false
 
 # Debug overlay for 3D visualizations
 var _debug_overlay: Node3D = null
@@ -156,7 +163,7 @@ var debug_system: Node = null  # Unified debug system (DebugSystem - F4/F9/F11/F
 var _data_path: String = ""
 var _initialized: bool = false
 var _perf_overlay_visible: bool = true
-var _current_view_distance: int = 2  # Start with smaller view distance for faster initial load
+var _current_view_distance: int = 5  # Must be at least 5 cells (585m) to cover MID tier (500m)
 
 # Interior cell browser state
 enum ExplorerMode { WORLD, INTERIOR }
@@ -711,6 +718,7 @@ func _setup_foldable_panels() -> void:
 	_create_navigation_panel()
 	_create_terrain_panel()
 	_create_ocean_panel()
+	_create_shader_panel()
 	_create_debug_panel()
 
 	# Insert scroll container after title
@@ -984,6 +992,186 @@ func _create_ocean_panel() -> void:
 	_ocean_panel.add_content(_ocean_controls_container)
 
 	_panel_vbox.add_child(_ocean_panel)
+
+
+## Create shader effects panel (hot-swap post-processing)
+func _create_shader_panel() -> void:
+	_shader_panel = FoldablePanelScript.new("Shader Effects", true)  # Start folded
+
+	# Info label
+	var info_label := Label.new()
+	info_label.add_theme_font_size_override("font_size", 10)
+	info_label.text = "Post-processing effects (VAIO-style)"
+	info_label.modulate = Color(0.7, 0.7, 0.7)
+	_shader_panel.add_content(info_label)
+
+	# Volumetric Fog toggle
+	_fog_toggle = CheckBox.new()
+	_fog_toggle.text = "Volumetric Fog"
+	_fog_toggle.button_pressed = false
+	_fog_toggle.toggled.connect(_on_fog_effect_toggled)
+	_fog_toggle.tooltip_text = "Ray-marched volumetric fog with 3D noise"
+	_shader_panel.add_content(_fog_toggle)
+
+	# Fog intensity slider
+	var fog_row := HBoxContainer.new()
+	var fog_label := Label.new()
+	fog_label.text = "  Intensity:"
+	fog_label.add_theme_font_size_override("font_size", 11)
+	fog_label.custom_minimum_size.x = 70
+	fog_row.add_child(fog_label)
+
+	var fog_slider := HSlider.new()
+	fog_slider.name = "FogIntensitySlider"
+	fog_slider.min_value = 0.0
+	fog_slider.max_value = 2.0
+	fog_slider.step = 0.05
+	fog_slider.value = 0.5
+	fog_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fog_slider.value_changed.connect(_on_fog_intensity_changed)
+	fog_row.add_child(fog_slider)
+	_shader_panel.add_content(fog_row)
+
+	# Volumetric Clouds toggle
+	_clouds_toggle = CheckBox.new()
+	_clouds_toggle.text = "Volumetric Clouds"
+	_clouds_toggle.button_pressed = false
+	_clouds_toggle.toggled.connect(_on_clouds_effect_toggled)
+	_clouds_toggle.tooltip_text = "Ray-marched volumetric clouds"
+	_shader_panel.add_content(_clouds_toggle)
+
+	# Cloud coverage slider
+	var cloud_row := HBoxContainer.new()
+	var cloud_label := Label.new()
+	cloud_label.text = "  Coverage:"
+	cloud_label.add_theme_font_size_override("font_size", 11)
+	cloud_label.custom_minimum_size.x = 70
+	cloud_row.add_child(cloud_label)
+
+	var cloud_slider := HSlider.new()
+	cloud_slider.name = "CloudCoverageSlider"
+	cloud_slider.min_value = 0.0
+	cloud_slider.max_value = 1.0
+	cloud_slider.step = 0.05
+	cloud_slider.value = 0.5
+	cloud_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cloud_slider.value_changed.connect(_on_cloud_coverage_changed)
+	cloud_row.add_child(cloud_slider)
+	_shader_panel.add_content(cloud_row)
+
+	# Separator
+	var sep := HSeparator.new()
+	_shader_panel.add_content(sep)
+
+	# Color Grading toggle
+	_color_grading_toggle = CheckBox.new()
+	_color_grading_toggle.text = "Color Grading"
+	_color_grading_toggle.button_pressed = false
+	_color_grading_toggle.toggled.connect(_on_color_grading_toggled)
+	_color_grading_toggle.tooltip_text = "Color correction and grading"
+	_shader_panel.add_content(_color_grading_toggle)
+
+	# Preset buttons
+	var preset_row := HBoxContainer.new()
+	preset_row.add_theme_constant_override("separation", 4)
+
+	var morrowind_btn := Button.new()
+	morrowind_btn.text = "Morrowind"
+	morrowind_btn.pressed.connect(_apply_morrowind_color_preset)
+	morrowind_btn.tooltip_text = "Warm Morrowind-style tones"
+	preset_row.add_child(morrowind_btn)
+
+	var dramatic_btn := Button.new()
+	dramatic_btn.text = "Dramatic"
+	dramatic_btn.pressed.connect(_apply_dramatic_color_preset)
+	dramatic_btn.tooltip_text = "High contrast dramatic look"
+	preset_row.add_child(dramatic_btn)
+
+	var reset_btn := Button.new()
+	reset_btn.text = "Reset"
+	reset_btn.pressed.connect(_reset_color_grading)
+	reset_btn.tooltip_text = "Reset to defaults"
+	preset_row.add_child(reset_btn)
+
+	_shader_panel.add_content(preset_row)
+
+	_panel_vbox.add_child(_shader_panel)
+
+
+## Ensure ShaderManager is attached to the scene
+func _ensure_shader_manager_attached() -> void:
+	if _shader_manager_attached:
+		return
+
+	# Attach ShaderManager to the fallback environment or Sky3D
+	if _fallback_world_env and _fallback_world_env.is_inside_tree():
+		ShaderManager.attach_to(_fallback_world_env)
+		_shader_manager_attached = true
+		_log("ShaderManager attached to fallback environment")
+	elif sky_3d and sky_3d.is_inside_tree():
+		ShaderManager.attach_to(sky_3d)
+		_shader_manager_attached = true
+		_log("ShaderManager attached to Sky3D")
+
+
+func _on_fog_effect_toggled(enabled: bool) -> void:
+	_ensure_shader_manager_attached()
+	if enabled:
+		ShaderManager.enable_effect("volumetric_fog", 0.3)
+	else:
+		ShaderManager.disable_effect("volumetric_fog", 0.3)
+	_log("Volumetric Fog: %s" % ("ON" if enabled else "OFF"))
+
+
+func _on_fog_intensity_changed(value: float) -> void:
+	ShaderManager.set_effect_param("volumetric_fog", "fog_intensity", value)
+
+
+func _on_clouds_effect_toggled(enabled: bool) -> void:
+	_ensure_shader_manager_attached()
+	if enabled:
+		ShaderManager.enable_effect("volumetric_clouds", 0.3)
+	else:
+		ShaderManager.disable_effect("volumetric_clouds", 0.3)
+	_log("Volumetric Clouds: %s" % ("ON" if enabled else "OFF"))
+
+
+func _on_cloud_coverage_changed(value: float) -> void:
+	ShaderManager.set_effect_param("volumetric_clouds", "cloud_coverage", value)
+
+
+func _on_color_grading_toggled(enabled: bool) -> void:
+	_ensure_shader_manager_attached()
+	if enabled:
+		ShaderManager.enable_effect("color_grading", 0.3)
+	else:
+		ShaderManager.disable_effect("color_grading", 0.3)
+	_log("Color Grading: %s" % ("ON" if enabled else "OFF"))
+
+
+func _apply_morrowind_color_preset() -> void:
+	var effect := ShaderManager.get_effect("color_grading")
+	if effect and effect.has_method("apply_morrowind_preset"):
+		effect.apply_morrowind_preset()
+		if not _color_grading_toggle.button_pressed:
+			_color_grading_toggle.button_pressed = true
+		_log("Applied Morrowind color preset")
+
+
+func _apply_dramatic_color_preset() -> void:
+	var effect := ShaderManager.get_effect("color_grading")
+	if effect and effect.has_method("apply_dramatic_preset"):
+		effect.apply_dramatic_preset()
+		if not _color_grading_toggle.button_pressed:
+			_color_grading_toggle.button_pressed = true
+		_log("Applied Dramatic color preset")
+
+
+func _reset_color_grading() -> void:
+	var effect := ShaderManager.get_effect("color_grading")
+	if effect:
+		effect.reset_all_params()
+		_log("Reset color grading to defaults")
 
 
 ## Create debug visualization panel

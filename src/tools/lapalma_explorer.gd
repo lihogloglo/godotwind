@@ -41,6 +41,22 @@ var mouse_captured: bool = false
 var _show_sky_toggle: CheckBox = null
 var _show_sky: bool = false  # Default OFF - enable for day/night cycle
 
+# Ocean toggle
+var _show_ocean_toggle: CheckBox = null
+var _show_ocean: bool = false  # Default OFF - enable for ocean rendering
+var _ocean_initialized: bool = false
+
+# Fog slider (Environment fog)
+var _fog_slider: HSlider = null
+var _fog_label: Label = null
+var _fog_density: float = 0.00001  # Default very low fog for extended view
+
+# ShaderManager post-processing effects
+var _shader_manager_attached: bool = false
+var _volumetric_fog_toggle: CheckBox = null
+var _volumetric_clouds_toggle: CheckBox = null
+var _color_grading_toggle: CheckBox = null
+
 # Sky3D is created lazily - only on first toggle
 var sky_3d: Node = null  # Sky3D node (created on demand)
 var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
@@ -48,6 +64,10 @@ var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
 # Fallback environment for when Sky3D is disabled (Godot default-like sky)
 var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
+
+# Extended view distance for seeing the whole island
+const EXTENDED_FAR_PLANE: float = 150000.0  # 150km - enough to see whole island
+const OCEAN_RADIUS: float = 100000.0  # 100km ocean clipmap radius
 
 # State
 var _initialized: bool = false
@@ -123,9 +143,11 @@ func _init_terrain3d() -> void:
 	# Terrain3D loads configuration from the preprocessed region files
 	# The data_directory is set in the scene to res://lapalma_terrain/
 
-	# Configure LOD for large terrain - optimized settings
-	terrain_3d.mesh_lods = 7  # LOD levels for distant terrain
-	terrain_3d.mesh_size = 32  # Mesh chunk size (must be power of 2)
+	# Configure LOD for large terrain - maximum distance to see entire island
+	# Render distance = mesh_size × vertex_spacing × 2^mesh_lods
+	# With mesh_size=48, vertex_spacing=1.0, mesh_lods=10: 48 × 1 × 1024 = ~49km
+	terrain_3d.mesh_lods = 10  # Maximum LOD levels (10 = max) for full island view
+	terrain_3d.mesh_size = 48  # Mesh chunk size (larger = more detail per LOD)
 
 	# Setup material - use the scene's material if it exists, otherwise create one
 	if not terrain_3d.material:
@@ -140,18 +162,25 @@ func _init_terrain3d() -> void:
 	terrain_3d.material.show_checkered = false  # Material property
 	terrain_3d.material.show_colormap = true  # Use procedural height colors
 
-	_log("Material settings: checkered=false, colormap=true (procedural)")
+	# Disable macro variation (color noise) which can look foggy at distance
+	# Use Terrain3DMaterial's set_shader_param method
+	terrain_3d.material.set_shader_param(&"enable_macro_variation", false)
+	_log("Disabled macro_variation for clearer distance view")
+
+	_log("Material settings: checkered=false, colormap=true")
 
 	# Setup assets
 	if not terrain_3d.assets:
 		terrain_3d.set_assets(Terrain3DAssets.new())
 
-	_log("Terrain3D configured: vertex_spacing=%.1fm, mesh_size=%d, lods=%d" % [
-		terrain_3d.vertex_spacing, terrain_3d.mesh_size, terrain_3d.mesh_lods
+	# Calculate and log render distance
+	var render_distance := terrain_3d.mesh_size * terrain_3d.vertex_spacing * pow(2, terrain_3d.mesh_lods)
+	_log("Terrain3D configured: mesh_size=%d, lods=%d, render_dist=%.0fkm" % [
+		terrain_3d.mesh_size, terrain_3d.mesh_lods, render_distance / 1000.0
 	])
 
 
-## Setup sky toggle checkbox in the UI
+## Setup sky and ocean toggle checkboxes in the UI
 func _setup_sky_toggle() -> void:
 	# Find the VBox container in stats panel
 	var vbox: VBoxContainer = stats_panel.get_node_or_null("VBox")
@@ -162,9 +191,9 @@ func _setup_sky_toggle() -> void:
 	var quick_label: Label = vbox.get_node_or_null("QuickLabel")
 	var insert_idx: int = quick_label.get_index() if quick_label else vbox.get_child_count()
 
-	# Create a container for the toggle
-	var toggle_container := HBoxContainer.new()
-	toggle_container.name = "SkyToggle"
+	# Create a container for toggles
+	var toggle_container := VBoxContainer.new()
+	toggle_container.name = "ToggleContainer"
 
 	# Create "Sky" checkbox
 	_show_sky_toggle = CheckBox.new()
@@ -172,6 +201,65 @@ func _setup_sky_toggle() -> void:
 	_show_sky_toggle.button_pressed = _show_sky
 	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
 	toggle_container.add_child(_show_sky_toggle)
+
+	# Create "Ocean" checkbox
+	_show_ocean_toggle = CheckBox.new()
+	_show_ocean_toggle.text = "Ocean [O]"
+	_show_ocean_toggle.button_pressed = _show_ocean
+	_show_ocean_toggle.toggled.connect(_on_show_ocean_toggled)
+	toggle_container.add_child(_show_ocean_toggle)
+
+	# Create fog density slider
+	var fog_container := HBoxContainer.new()
+	fog_container.name = "FogContainer"
+
+	_fog_label = Label.new()
+	_fog_label.text = "Fog:"
+	_fog_label.custom_minimum_size.x = 30
+	fog_container.add_child(_fog_label)
+
+	_fog_slider = HSlider.new()
+	_fog_slider.min_value = 0.0
+	_fog_slider.max_value = 1.0
+	_fog_slider.step = 0.01
+	_fog_slider.value = 0.0  # Default: no fog (0 maps to very low density)
+	_fog_slider.custom_minimum_size.x = 120
+	_fog_slider.value_changed.connect(_on_fog_changed)
+	fog_container.add_child(_fog_slider)
+
+	toggle_container.add_child(fog_container)
+
+	# Add separator before shader effects
+	var sep := HSeparator.new()
+	sep.name = "ShaderSeparator"
+	toggle_container.add_child(sep)
+
+	# Add shader effects label
+	var shader_label := Label.new()
+	shader_label.text = "Post-Processing:"
+	shader_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	toggle_container.add_child(shader_label)
+
+	# Create volumetric fog toggle
+	_volumetric_fog_toggle = CheckBox.new()
+	_volumetric_fog_toggle.text = "Vol. Fog [F]"
+	_volumetric_fog_toggle.button_pressed = false
+	_volumetric_fog_toggle.toggled.connect(_on_volumetric_fog_toggled)
+	toggle_container.add_child(_volumetric_fog_toggle)
+
+	# Create volumetric clouds toggle
+	_volumetric_clouds_toggle = CheckBox.new()
+	_volumetric_clouds_toggle.text = "Vol. Clouds [C]"
+	_volumetric_clouds_toggle.button_pressed = false
+	_volumetric_clouds_toggle.toggled.connect(_on_volumetric_clouds_toggled)
+	toggle_container.add_child(_volumetric_clouds_toggle)
+
+	# Create color grading toggle
+	_color_grading_toggle = CheckBox.new()
+	_color_grading_toggle.text = "Color Grade [G]"
+	_color_grading_toggle.button_pressed = false
+	_color_grading_toggle.toggled.connect(_on_color_grading_toggled)
+	toggle_container.add_child(_color_grading_toggle)
 
 	vbox.add_child(toggle_container)
 	vbox.move_child(toggle_container, insert_idx)
@@ -229,11 +317,180 @@ func _create_sky3d() -> void:
 	sky_3d.set("current_time", 10.0)
 	sky_3d.set("minutes_per_day", 60.0)
 
+	# Configure fog for extended view distance (150km)
+	# Reduce fog density significantly to see the whole island
+	_configure_sky3d_fog()
+
 	# Start enabled
 	sky_3d.set("sky3d_enabled", true)
 
 	_sky3d_initialized = true
 	_log("Sky3D initialized")
+
+
+## Configure Sky3D fog for extended view distance
+func _configure_sky3d_fog() -> void:
+	if not sky_3d:
+		return
+
+	# Access the environment through Sky3D
+	var env: Environment = sky_3d.get("environment")
+	if env:
+		# Configure fog settings (but keep disabled until slider is moved)
+		env.fog_enabled = _fog_density > 0.0
+		env.fog_light_color = Color(0.8, 0.85, 0.9)  # Slight blue tint for atmosphere
+		env.fog_light_energy = 0.5
+		env.fog_sun_scatter = 0.3
+
+		# Use current fog density from slider
+		env.fog_density = _fog_density
+
+		# Aerial perspective settings
+		env.fog_aerial_perspective = 0.3  # Subtle atmospheric haze
+		env.fog_sky_affect = 0.5
+
+		_log("Sky3D fog configured (density: %.6f)" % _fog_density)
+
+
+## Toggle ocean visibility
+func _on_show_ocean_toggled(enabled: bool) -> void:
+	_show_ocean = enabled
+
+	if enabled:
+		# Initialize ocean lazily on first enable
+		if not _ocean_initialized:
+			_initialize_ocean()
+
+		# Enable ocean rendering
+		if OceanManager.is_system_enabled():
+			OceanManager.set_enabled(true)
+			_log("Ocean: ON (mode: %s)" % OceanManager.get_water_quality_name())
+		else:
+			_log("[color=yellow]Ocean: Failed to enable[/color]")
+	else:
+		# Disable ocean rendering
+		if OceanManager.is_system_enabled():
+			OceanManager.set_enabled(false)
+		_log("Ocean: OFF")
+
+	_update_stats()
+
+
+## Initialize OceanManager for La Palma (sea level at 2m, flat mode)
+func _initialize_ocean() -> void:
+	if _ocean_initialized:
+		return
+
+	_log("Initializing Ocean system (flat mode)...")
+
+	# Configure ocean for La Palma's extended view distance
+	OceanManager.ocean_radius = OCEAN_RADIUS
+	OceanManager.sea_level = 10.0  # Sea level at 10 meters altitude
+
+	# Force FLAT quality mode (0 = flat) before initialization
+	OceanManager.water_quality = 0
+
+	# Force initialize (since ocean is disabled by default in project settings)
+	OceanManager.force_initialize()
+
+	# Ensure FLAT mode is set after initialization
+	OceanManager.set_water_quality(0)  # 0 = FLAT
+
+	# Set the terrain for shore mask generation
+	if terrain_3d:
+		OceanManager.set_terrain(terrain_3d)
+
+	# Set the camera
+	OceanManager.set_camera(camera)
+
+	_ocean_initialized = true
+	_log("Ocean initialized: FLAT mode, sea_level=10m, radius=%.0fkm" % (OCEAN_RADIUS / 1000.0))
+
+
+## Handle fog slider change
+func _on_fog_changed(value: float) -> void:
+	# Map slider 0-1 to fog density
+	# 0 = no fog, 1 = heavy fog
+	# Using exponential scale: 0 to 0.0001 (very light) to 0.01 (heavy)
+	if value <= 0.05:
+		_fog_density = 0.0  # Disable fog completely for first 5% of slider
+	else:
+		# Remap 0.05-1.0 to exponential range
+		var t := (value - 0.05) / 0.95  # Normalize to 0-1
+		_fog_density = 0.0000001 * pow(100000, t)  # Range: 0.0000001 to 0.01
+
+	_apply_fog_density()
+
+
+## Apply fog density to active environment
+func _apply_fog_density() -> void:
+	# Apply to Sky3D environment if active
+	if _show_sky and sky_3d:
+		var env: Environment = sky_3d.get("environment")
+		if env:
+			env.fog_enabled = _fog_density > 0.0
+			env.fog_density = _fog_density
+
+	# Apply to fallback environment if active
+	if not _show_sky and _fallback_world_env and _fallback_world_env.environment:
+		_fallback_world_env.environment.fog_enabled = _fog_density > 0.0
+		_fallback_world_env.environment.fog_density = _fog_density
+
+
+## Ensure ShaderManager is attached to the active WorldEnvironment
+func _ensure_shader_manager_attached() -> void:
+	if _shader_manager_attached:
+		return
+
+	# Attach to whichever WorldEnvironment is currently active
+	if _show_sky and sky_3d:
+		ShaderManager.attach_to(sky_3d)
+		_shader_manager_attached = true
+		_log("ShaderManager attached to Sky3D")
+	elif _fallback_world_env:
+		ShaderManager.attach_to(_fallback_world_env)
+		_shader_manager_attached = true
+		_log("ShaderManager attached to fallback environment")
+
+
+## Toggle volumetric fog effect
+func _on_volumetric_fog_toggled(enabled: bool) -> void:
+	_ensure_shader_manager_attached()
+
+	if enabled:
+		ShaderManager.enable_effect("volumetric_fog", 0.3)
+		_log("Volumetric Fog: ON")
+	else:
+		ShaderManager.disable_effect("volumetric_fog", 0.3)
+		_log("Volumetric Fog: OFF")
+
+
+## Toggle volumetric clouds effect
+func _on_volumetric_clouds_toggled(enabled: bool) -> void:
+	_ensure_shader_manager_attached()
+
+	if enabled:
+		ShaderManager.enable_effect("volumetric_clouds", 0.3)
+		_log("Volumetric Clouds: ON")
+	else:
+		ShaderManager.disable_effect("volumetric_clouds", 0.3)
+		_log("Volumetric Clouds: OFF")
+
+
+## Toggle color grading effect
+func _on_color_grading_toggled(enabled: bool) -> void:
+	_ensure_shader_manager_attached()
+
+	if enabled:
+		ShaderManager.enable_effect("color_grading", 0.3)
+		# Apply Morrowind-style warm tones preset
+		var effect = ShaderManager.get_effect("color_grading")
+		if effect and effect.has_method("apply_morrowind_preset"):
+			effect.apply_morrowind_preset()
+		_log("Color Grading: ON (Morrowind preset)")
+	else:
+		ShaderManager.disable_effect("color_grading", 0.3)
+		_log("Color Grading: OFF")
 
 
 ## Setup fallback environment and light for when Sky3D is disabled
@@ -274,6 +531,19 @@ func _setup_fallback_environment() -> void:
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	env.tonemap_exposure = 1.0
 	env.tonemap_white = 6.0
+
+	# Fog disabled by default (slider at 0 = no fog)
+	env.fog_enabled = false
+
+	# Disable volumetric fog completely
+	env.volumetric_fog_enabled = false
+
+	# Disable glow (can cause haze-like effects)
+	env.glow_enabled = false
+
+	# Disable SSAO/SSIL (can darken distant terrain)
+	env.ssao_enabled = false
+	env.ssil_enabled = false
 
 	_fallback_world_env.environment = env
 	add_child(_fallback_world_env)
@@ -352,6 +622,11 @@ func _update_stats() -> void:
 		var game_time_val: Variant = sky_3d.get("game_time")
 		time_str = str(game_time_val) if game_time_val else "N/A"
 
+	# Get ocean info
+	var ocean_str := "OFF"
+	if _show_ocean and OceanManager.is_system_enabled():
+		ocean_str = "ON (%s)" % OceanManager.get_water_quality_name()
+
 	stats_text.text = """[b]Performance[/b]
 FPS: [color=%s]%.1f[/color] (%.2f ms)
 
@@ -361,17 +636,22 @@ Est. VRAM: %.1f MB
 
 [b]Settings[/b]
 Sky [K]: %s %s
+Ocean [O]: %s
+View: %.0f km
 
 [b]Camera[/b]
 Position: (%.0f, %.0f, %.0f)
 Above terrain: %.0f m
 
-[color=gray]F3: Stats | K: Sky[/color]""" % [
+[color=gray]F3: Stats | K: Sky | O: Ocean
+F: Fog | C: Clouds | G: Color[/color]""" % [
 		fps_color, fps, frame_ms,
 		region_count,
 		estimated_vram_mb,
 		"ON" if _show_sky else "OFF",
 		("(" + time_str + ")") if _show_sky else "",
+		ocean_str,
+		camera.far / 1000.0,
 		camera.position.x, camera.position.y, camera.position.z,
 		height_above_terrain,
 	]
@@ -432,6 +712,18 @@ func _input(event: InputEvent) -> void:
 				KEY_K:  # Toggle sky/day-night cycle
 					if _show_sky_toggle:
 						_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
+				KEY_O:  # Toggle ocean
+					if _show_ocean_toggle:
+						_show_ocean_toggle.button_pressed = not _show_ocean_toggle.button_pressed
+				KEY_F:  # Toggle volumetric fog
+					if _volumetric_fog_toggle:
+						_volumetric_fog_toggle.button_pressed = not _volumetric_fog_toggle.button_pressed
+				KEY_C:  # Toggle volumetric clouds
+					if _volumetric_clouds_toggle:
+						_volumetric_clouds_toggle.button_pressed = not _volumetric_clouds_toggle.button_pressed
+				KEY_G:  # Toggle color grading
+					if _color_grading_toggle:
+						_color_grading_toggle.button_pressed = not _color_grading_toggle.button_pressed
 
 
 func _process(delta: float) -> void:
