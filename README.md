@@ -53,7 +53,7 @@ The long-term goal is to continue where Skelerealms stopped. ( https://github.co
 | **NIF Conversion** | Geometry, materials, skeletons (buggy), animations  (buggy), collision, auto-LOD (3 levels) |
 | **BSA Management** | Archive reading, 256MB LRU cache, thread-safe extraction |
 | **Texture Loading** | DDS/TGA with material library deduplication |
-| **Ocean** | FFT waves from this project : https://github.com/2Retr0/GodotOceanWaves/ , shore dampening, choppiness controls, buoyancy queries |
+| **Ocean** | FFT waves from this project : https://github.com/2Retr0/GodotOceanWaves/ , shore dampening, choppiness controls, buoyancy queries. There's also a Flat version that comes from this project : https://godotshaders.com/shader/realistic-water-with-reflection-and-refraction/ . And a Gerstner wave implem from this too : https://github.com/Flarkk/Godot-Water-Shader-Prototype |
 | **Sky/Weather** | 2D texture clouds, day/night cycle, sun/moon, ambient lighting |
 | **Character Assembly** | NPC body parts combined from race + head + hair meshes |
 | **Character Animation** | Full state machine (idle, walk, run, jump, swim, combat, death, spell cast) |
