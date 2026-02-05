@@ -400,7 +400,7 @@ func _create_animation_tree() -> void:
 	var root := _create_tree_structure()
 	animation_tree.tree_root = root
 
-	# Add to scene tree first (required for get_path_to in Godot 4.5)
+	# Add to scene tree first (required for get_path_to)
 	skeleton.get_parent().add_child(animation_tree)
 
 	# Now set the animation player path

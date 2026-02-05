@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Godotwind"
 run/main_scene="uid://clb74pwrqrgok"
-config/features=PackedStringArray("4.5", "C#")
+config/features=PackedStringArray("4.6", "C#")
 config/icon="res://icon.svg"
 
 [autoload]
@@ -53,6 +53,10 @@ import/blender/enabled=false
 
 3d_physics/layer_1="Environment"
 3d_physics/layer_2="Player"
+
+[physics]
+
+3d/physics_engine="JoltPhysics3D"
 
 [rendering]
 

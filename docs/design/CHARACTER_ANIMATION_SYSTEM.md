@@ -73,11 +73,11 @@ The goal is to achieve AAA-quality character animation while maintaining the fle
 
 | Feature | Issue | Workaround |
 |---------|-------|------------|
-| **SkeletonIK3D** | Deprecated (still works) | Use SkeletonModifier3D or plugins |
+| **SkeletonIK3D** | Superseded in 4.6 | Use TwoBoneIK3D / IKModifier3D (4.6+) |
 | **Animation Layers** | Manual bone filtering | Custom SkeletonMask resource |
 | **Additive Animation** | Blender workflow awkward | Runtime pose subtraction |
 | **Root Motion** | Offset bugs in 4.2-4.3 | Use plugin or disable |
-| **IK Ecosystem** | Immature native support | Third-party plugins |
+| **IK Ecosystem** | Full native support in 4.6 | TwoBoneIK3D, FABRIK3D, CCDIK3D, SplineIK3D |
 
 ### Godot's Animation Architecture
 

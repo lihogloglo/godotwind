@@ -5,7 +5,7 @@
 ## - Look-at IK (head/spine tracking)
 ## - Hand IK (weapon grips, interactions)
 ##
-## Uses SkeletonIK3D internally (compatible with SkeletonModifier3D when available)
+## Uses TwoBoneIK3D (Godot 4.6 IKModifier3D system) for limb IK
 class_name IKController
 extends Node
 
@@ -49,10 +49,10 @@ var character_body: CharacterBody3D = null
 # Bone indices (populated during setup)
 var _bone_indices: Dictionary = {}
 
-# IK nodes
-var _left_foot_ik: SkeletonIK3D = null
-var _right_foot_ik: SkeletonIK3D = null
-var _look_at_modifier: Node = null  # Custom look-at (not SkeletonIK3D)
+# IK nodes (Godot 4.6 TwoBoneIK3D — auto-solves as SkeletonModifier3D)
+var _left_foot_ik: TwoBoneIK3D = null
+var _right_foot_ik: TwoBoneIK3D = null
+var _look_at_modifier: Node = null  # Custom look-at (not TwoBoneIK3D)
 
 # IK targets
 var _left_foot_target: Node3D = null
@@ -121,49 +121,53 @@ func update(delta: float) -> void:
 # FOOT IK
 # =============================================================================
 
-## Setup foot IK chains
+## Setup foot IK chains using TwoBoneIK3D (Godot 4.6)
 func _setup_foot_ik() -> void:
 	var left_foot_idx: int = _bone_indices.get(&"left_foot", -1)
 	var right_foot_idx: int = _bone_indices.get(&"right_foot", -1)
 	var left_upper_leg_idx: int = _bone_indices.get(&"left_upper_leg", -1)
+	var left_lower_leg_idx: int = _bone_indices.get(&"left_lower_leg", -1)
 	var right_upper_leg_idx: int = _bone_indices.get(&"right_upper_leg", -1)
+	var right_lower_leg_idx: int = _bone_indices.get(&"right_lower_leg", -1)
 
 	if left_foot_idx < 0 or right_foot_idx < 0:
 		push_warning("IKController: Foot bones not found, disabling foot IK")
 		enable_foot_ik = false
 		return
 
-	# Create left foot IK
-	_left_foot_ik = SkeletonIK3D.new()
+	# Create left foot IK (TwoBoneIK3D: root=upper_leg, mid=lower_leg, end=foot)
+	_left_foot_ik = TwoBoneIK3D.new()
 	_left_foot_ik.name = "LeftFootIK"
+	_left_foot_ik.set_setting_count(1)
 	if left_upper_leg_idx >= 0:
-		_left_foot_ik.root_bone = skeleton.get_bone_name(left_upper_leg_idx)
-	_left_foot_ik.tip_bone = skeleton.get_bone_name(left_foot_idx)
-	_left_foot_ik.use_magnet = false
-	_left_foot_ik.override_tip_basis = false
+		_left_foot_ik.set_root_bone_name(0, skeleton.get_bone_name(left_upper_leg_idx))
+	if left_lower_leg_idx >= 0:
+		_left_foot_ik.set_middle_bone_name(0, skeleton.get_bone_name(left_lower_leg_idx))
+	_left_foot_ik.set_end_bone_name(0, skeleton.get_bone_name(left_foot_idx))
 	skeleton.add_child(_left_foot_ik)
 
 	# Create left foot target
 	_left_foot_target = Node3D.new()
 	_left_foot_target.name = "LeftFootTarget"
 	skeleton.add_child(_left_foot_target)
-	_left_foot_ik.target_node = _left_foot_ik.get_path_to(_left_foot_target)
+	_left_foot_ik.set_target_node(0, _left_foot_ik.get_path_to(_left_foot_target))
 
 	# Create right foot IK
-	_right_foot_ik = SkeletonIK3D.new()
+	_right_foot_ik = TwoBoneIK3D.new()
 	_right_foot_ik.name = "RightFootIK"
+	_right_foot_ik.set_setting_count(1)
 	if right_upper_leg_idx >= 0:
-		_right_foot_ik.root_bone = skeleton.get_bone_name(right_upper_leg_idx)
-	_right_foot_ik.tip_bone = skeleton.get_bone_name(right_foot_idx)
-	_right_foot_ik.use_magnet = false
-	_right_foot_ik.override_tip_basis = false
+		_right_foot_ik.set_root_bone_name(0, skeleton.get_bone_name(right_upper_leg_idx))
+	if right_lower_leg_idx >= 0:
+		_right_foot_ik.set_middle_bone_name(0, skeleton.get_bone_name(right_lower_leg_idx))
+	_right_foot_ik.set_end_bone_name(0, skeleton.get_bone_name(right_foot_idx))
 	skeleton.add_child(_right_foot_ik)
 
 	# Create right foot target
 	_right_foot_target = Node3D.new()
 	_right_foot_target.name = "RightFootTarget"
 	skeleton.add_child(_right_foot_target)
-	_right_foot_ik.target_node = _right_foot_ik.get_path_to(_right_foot_target)
+	_right_foot_ik.set_target_node(0, _right_foot_ik.get_path_to(_right_foot_target))
 
 
 ## Update foot IK each physics frame
@@ -216,9 +220,7 @@ func _update_foot_ik(delta: float) -> void:
 	_current_pelvis_offset = lerpf(_current_pelvis_offset, target_pelvis_offset, foot_ik_smoothing * delta)
 	_apply_pelvis_offset(_current_pelvis_offset)
 
-	# Start IK solving
-	_left_foot_ik.start()
-	_right_foot_ik.start()
+	# TwoBoneIK3D solves automatically as SkeletonModifier3D — no start() needed
 
 
 ## Raycast to find ground
@@ -353,11 +355,15 @@ func _apply_look_rotation(bone_idx: int, target_dir: Vector3, weight: float, del
 
 	var target_basis := Basis(right, up, -forward)
 
-	# Blend with current rotation
+	# Blend with current rotation in global space
 	var blended := current_pose.basis.slerp(target_basis, weight * look_smoothing * delta)
 
-	# Apply to bone
-	skeleton.set_bone_global_pose_override(bone_idx, Transform3D(blended, current_pose.origin), weight)
+	# Convert blended global rotation to local pose space
+	var parent_idx := skeleton.get_bone_parent(bone_idx)
+	var parent_global_basis := skeleton.get_bone_global_pose(parent_idx).basis if parent_idx >= 0 else Basis.IDENTITY
+	var rest_basis := skeleton.get_bone_rest(bone_idx).basis
+	var local_rotation := (rest_basis.inverse() * parent_global_basis.inverse() * blended).get_rotation_quaternion()
+	skeleton.set_bone_pose_rotation(bone_idx, local_rotation)
 
 
 # =============================================================================
@@ -404,15 +410,9 @@ func clear_hand_target(hand: StringName) -> void:
 func set_foot_ik_enabled(enabled: bool) -> void:
 	enable_foot_ik = enabled
 	if _left_foot_ik:
-		if enabled:
-			_left_foot_ik.start()
-		else:
-			_left_foot_ik.stop()
+		_left_foot_ik.active = enabled
 	if _right_foot_ik:
-		if enabled:
-			_right_foot_ik.start()
-		else:
-			_right_foot_ik.stop()
+		_right_foot_ik.active = enabled
 
 	ik_enabled_changed.emit(&"foot", enabled)
 
@@ -529,10 +529,10 @@ func _is_right_bone(name: String) -> bool:
 
 # Quadruped IK state
 var _is_quadruped: bool = false
-var _front_left_ik: SkeletonIK3D = null
-var _front_right_ik: SkeletonIK3D = null
-var _back_left_ik: SkeletonIK3D = null
-var _back_right_ik: SkeletonIK3D = null
+var _front_left_ik: TwoBoneIK3D = null
+var _front_right_ik: TwoBoneIK3D = null
+var _back_left_ik: TwoBoneIK3D = null
+var _back_right_ik: TwoBoneIK3D = null
 var _front_left_target: Node3D = null
 var _front_right_target: Node3D = null
 var _back_left_target: Node3D = null
@@ -574,34 +574,35 @@ func configure_quadruped_mode(front_left: Dictionary, front_right: Dictionary,
 		_back_right_target = _create_ik_target("BackRightTarget", _back_right_ik)
 
 
-## Create a leg IK chain
-func _create_leg_ik(ik_name: String, leg_bones: Dictionary) -> SkeletonIK3D:
-	var ik := SkeletonIK3D.new()
+## Create a leg IK chain using TwoBoneIK3D (Godot 4.6)
+func _create_leg_ik(ik_name: String, leg_bones: Dictionary) -> TwoBoneIK3D:
+	var ik := TwoBoneIK3D.new()
 	ik.name = ik_name
+	ik.set_setting_count(1)
 
 	var upper_idx: int = leg_bones.get("upper", -1)
+	var lower_idx: int = leg_bones.get("lower", -1)
 	var foot_idx: int = leg_bones.get("foot", -1)
 
 	if upper_idx >= 0:
-		ik.root_bone = skeleton.get_bone_name(upper_idx)
+		ik.set_root_bone_name(0, skeleton.get_bone_name(upper_idx))
+	if lower_idx >= 0:
+		ik.set_middle_bone_name(0, skeleton.get_bone_name(lower_idx))
 	if foot_idx >= 0:
-		ik.tip_bone = skeleton.get_bone_name(foot_idx)
-
-	ik.use_magnet = false
-	ik.override_tip_basis = false
+		ik.set_end_bone_name(0, skeleton.get_bone_name(foot_idx))
 
 	skeleton.add_child(ik)
 	return ik
 
 
 ## Create an IK target for a leg
-func _create_ik_target(target_name: String, ik: SkeletonIK3D) -> Node3D:
+func _create_ik_target(target_name: String, ik: TwoBoneIK3D) -> Node3D:
 	var target := Node3D.new()
 	target.name = target_name
 	skeleton.add_child(target)
 
 	if ik:
-		ik.target_node = ik.get_path_to(target)
+		ik.set_target_node(0, ik.get_path_to(target))
 
 	return target
 
@@ -625,10 +626,10 @@ func _update_quadruped_ik(delta: float) -> void:
 
 
 ## Update a single leg's IK
-func _update_leg_ik(ik: SkeletonIK3D, target: Node3D,
+func _update_leg_ik(ik: TwoBoneIK3D, target: Node3D,
 		space_state: PhysicsDirectSpaceState3D, delta: float) -> void:
-	# Get foot bone index
-	var foot_idx := skeleton.find_bone(ik.tip_bone)
+	# Get foot bone index from TwoBoneIK3D end bone
+	var foot_idx := skeleton.find_bone(ik.get_end_bone_name(0))
 	if foot_idx < 0:
 		return
 
@@ -646,8 +647,7 @@ func _update_leg_ik(ik: SkeletonIK3D, target: Node3D,
 		# Smooth interpolation
 		target.global_position = target.global_position.lerp(target_pos, foot_ik_smoothing * delta)
 
-	# Start IK solving
-	ik.start()
+	# TwoBoneIK3D solves automatically — no start() needed
 
 
 ## Check if configured for quadruped

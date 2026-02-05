@@ -312,7 +312,13 @@
       "Bash(powershell -Command \"Get-Content ''C:\\\\Users\\\\metzo\\\\Documents\\\\Godotwind\\\\cache\\\\impostors\\\\ex_vivec_c_01_9cebc80c.json'' | Select-Object -First 20\")",
       "Bash(powershell -Command \"[BitConverter]::ToString\\([System.Text.Encoding]::UTF8.GetBytes\\(''x\\\\ex_vivec_c_01.nif''.ToLower\\(\\)\\)\\).Replace\\(''-'',''''\\).Substring\\(0,8\\)\")",
       "Bash(cmd.exe /c \"dir /b C:\\\\Users\\\\metzo\\\\Documents\\\\Godotwind\\\\cache\\\\impostors\\\\*.png 2>nul | findstr /n . | findstr /b \"\"[1-5]:\"\"\")",
-      "Bash(dir /s /b \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\inspos\")"
+      "Bash(dir /s /b \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\inspos\")",
+      "Bash(gh pr view:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(git log:*)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:godotengine.org)",
+      "WebFetch(domain:docs.godotengine.org)"
     ]
   }
 }
