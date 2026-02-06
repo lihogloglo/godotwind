@@ -318,7 +318,14 @@
       "Bash(git log:*)",
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:godotengine.org)",
-      "WebFetch(domain:docs.godotengine.org)"
+      "WebFetch(domain:docs.godotengine.org)",
+      "WebFetch(domain:www.builder.io)",
+      "WebFetch(domain:agents.md)",
+      "WebFetch(domain:blog.jetbrains.com)",
+      "WebFetch(domain:blog.sshh.io)",
+      "WebFetch(domain:www.bodenmchale.com)",
+      "Bash(for:*)",
+      "Bash(done)"
     ]
   }
 }
