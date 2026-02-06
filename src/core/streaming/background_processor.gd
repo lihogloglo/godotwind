@@ -51,7 +51,7 @@ func _ready() -> void:
 		_concurrent_limit = max_concurrent_tasks
 
 	_running = true
-	print("BackgroundProcessor: Initialized with %d concurrent task limit" % _concurrent_limit)
+	Logger.info("threading", "BackgroundProcessor initialized with %d concurrent task limit" % _concurrent_limit)
 
 
 func _process(_delta: float) -> void:

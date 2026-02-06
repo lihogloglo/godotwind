@@ -148,7 +148,7 @@ func _ready() -> void:
 
 	# Auto-start test if configured
 	if auto_test_on_startup:
-		print("[DebugSystem] Auto-test scheduled to start in %.1f seconds" % auto_test_startup_delay)
+		Logger.info("debug", "Auto-test scheduled to start in %.1f seconds" % auto_test_startup_delay)
 		get_tree().create_timer(auto_test_startup_delay).timeout.connect(_on_auto_test_startup)
 
 
@@ -244,7 +244,7 @@ func initialize(world_explorer: Node3D, fly_camera: Camera3D = null,
 	_setup_overlay()
 
 	_log_operation("DEBUG_SYSTEM_INITIALIZED")
-	print("[DebugSystem] Initialized - F4: Profile, F9: Overlay, F11: Dump, F12: Auto-test")
+	Logger.info("debug", "Initialized - F4: Profile, F9: Overlay, F11: Dump, F12: Auto-test")
 
 
 func _connect_streaming_signals() -> void:
@@ -497,7 +497,7 @@ func toggle_overlay() -> void:
 	_overlay_visible = not _overlay_visible
 	if _overlay_panel:
 		_overlay_panel.visible = _overlay_visible
-	print("[DebugSystem] Overlay: %s" % ("ON" if _overlay_visible else "OFF"))
+	Logger.info("debug", "Overlay: %s" % ("ON" if _overlay_visible else "OFF"))
 
 #endregion
 
@@ -554,7 +554,7 @@ func _on_auto_test_startup() -> void:
 ## Start the auto-test (can be called programmatically)
 func start_auto_test() -> void:
 	if _test_state == TestState.RUNNING:
-		print("[DebugSystem] Auto-test already running")
+		Logger.warn("debug", "Auto-test already running")
 		return
 
 	if not _fly_camera:
@@ -590,7 +590,7 @@ func start_auto_test() -> void:
 
 	_log_operation("AUTO_TEST_STARTED")
 	_add_log("Auto-test started with %d waypoints" % _waypoints.size(), "success")
-	print("[DebugSystem] Auto-test started - %d waypoints" % _waypoints.size())
+	Logger.info("debug", "Auto-test started - %d waypoints" % _waypoints.size())
 
 	# Show overlay automatically
 	if not _overlay_visible:
@@ -714,7 +714,7 @@ func _complete_auto_test() -> void:
 	])
 
 	_add_log("Test completed in %.1fs" % elapsed, "success")
-	print("[DebugSystem] Auto-test completed - Duration: %.1fs, Errors: %d" % [
+	Logger.info("debug", "Auto-test completed - Duration: %.1fs, Errors: %d" % [
 		elapsed, _test_metrics.errors_captured
 	])
 
@@ -732,147 +732,147 @@ func _complete_auto_test() -> void:
 
 ## Dump comprehensive profiling report (F4 functionality)
 func dump_profiling_report() -> void:
-	print("\n")
-	print("=" .repeat(70))
-	print("                    GODOTWIND DEBUG REPORT")
-	print("=" .repeat(70))
-	print("Generated: %s" % Time.get_datetime_string_from_system())
-	print("")
+	Logger.info("debug", "")
+	Logger.info("debug", "=" .repeat(70))
+	Logger.info("debug", "                    GODOTWIND DEBUG REPORT")
+	Logger.info("debug", "=" .repeat(70))
+	Logger.info("debug", "Generated: %s" % Time.get_datetime_string_from_system())
+	Logger.info("debug", "")
 
 	# Session info
 	var elapsed := (Time.get_ticks_msec() / 1000.0) - _session_start_time
-	print("[SESSION]")
-	print("  Duration: %.1f seconds" % elapsed)
-	print("  Frames: %d" % _frame_count)
-	print("")
+	Logger.info("debug", "[SESSION]")
+	Logger.info("debug", "  Duration: %.1f seconds" % elapsed)
+	Logger.info("debug", "  Frames: %d" % _frame_count)
+	Logger.info("debug", "")
 
 	# Frame timing
-	print("[FRAME TIMING]")
+	Logger.info("debug", "[FRAME TIMING]")
 	var fps := _calculate_fps()
 	var frame_time := _calculate_frame_time()
 	var percs := _get_frame_percentiles()
-	print("  FPS: %.1f (%.2f ms avg)" % [fps, frame_time])
-	print("  P50: %.2f ms | P95: %.2f ms | P99: %.2f ms | Max: %.2f ms" % [
+	Logger.info("debug", "  FPS: %.1f (%.2f ms avg)" % [fps, frame_time])
+	Logger.info("debug", "  P50: %.2f ms | P95: %.2f ms | P99: %.2f ms | Max: %.2f ms" % [
 		percs.p50, percs.p95, percs.p99, percs.max
 	])
-	print("")
+	Logger.info("debug", "")
 
 	# Rendering stats
-	print("[RENDERING]")
-	print("  Draw calls: %d" % Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
-	print("  Primitives: %d" % Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
-	print("  Objects visible: %d" % Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
-	print("")
+	Logger.info("debug", "[RENDERING]")
+	Logger.info("debug", "  Draw calls: %d" % Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	Logger.info("debug", "  Primitives: %d" % Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
+	Logger.info("debug", "  Objects visible: %d" % Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+	Logger.info("debug", "")
 
 	# Memory stats
-	print("[MEMORY]")
-	print("  Static: %.1f MB" % (Performance.get_monitor(Performance.MEMORY_STATIC) / (1024.0 * 1024.0)))
-	print("  Nodes: %d | Resources: %d" % [
+	Logger.info("debug", "[MEMORY]")
+	Logger.info("debug", "  Static: %.1f MB" % (Performance.get_monitor(Performance.MEMORY_STATIC) / (1024.0 * 1024.0)))
+	Logger.info("debug", "  Nodes: %d | Resources: %d" % [
 		Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
 		Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT)
 	])
-	print("")
+	Logger.info("debug", "")
 
 	# Streaming stats
 	if _world_streaming_manager:
-		print("[STREAMING]")
+		Logger.info("debug", "[STREAMING]")
 		if _world_streaming_manager.has_method("get_stats"):
 			var wsm_stats: Dictionary = _world_streaming_manager.get_stats()
-			print("  Loaded cells: %d" % wsm_stats.get("loaded_cells", 0))
+			Logger.info("debug", "  Loaded cells: %d" % wsm_stats.get("loaded_cells", 0))
 
 		var object_streamer := _world_streaming_manager.get_node_or_null("ObjectStreamer")
 		if object_streamer and object_streamer.has_method("get_stats"):
 			var os_stats: Dictionary = object_streamer.get_stats()
-			print("  Queue size: %d" % os_stats.get("instantiation_queue_size", 0))
-			print("  Total objects: %d" % os_stats.get("total_objects", 0))
-			print("  NEAR: %d | MID: %d | FAR: %d" % [
+			Logger.info("debug", "  Queue size: %d" % os_stats.get("instantiation_queue_size", 0))
+			Logger.info("debug", "  Total objects: %d" % os_stats.get("total_objects", 0))
+			Logger.info("debug", "  NEAR: %d | MID: %d | FAR: %d" % [
 				os_stats.get("near_visible", 0),
 				os_stats.get("mid_visible", 0),
 				os_stats.get("far_visible", 0)
 			])
-		print("")
+		Logger.info("debug", "")
 
 	# Cell manager stats
 	if _cell_manager and _cell_manager.has_method("get_stats"):
-		print("[CELL MANAGER]")
+		Logger.info("debug", "[CELL MANAGER]")
 		var cm_stats: Dictionary = _cell_manager.get_stats()
-		print("  Pool available: %d | In use: %d" % [
+		Logger.info("debug", "  Pool available: %d | In use: %d" % [
 			cm_stats.get("pool_available", 0),
 			cm_stats.get("pool_in_use", 0)
 		])
-		print("  Pool hit rate: %.1f%%" % (cm_stats.get("pool_hit_rate", 0.0) * 100.0))
-		print("")
+		Logger.info("debug", "  Pool hit rate: %.1f%%" % (cm_stats.get("pool_hit_rate", 0.0) * 100.0))
+		Logger.info("debug", "")
 
 	# Profiler data
 	if _profiler:
-		print("[PROFILER DATA]")
+		Logger.info("debug", "[PROFILER DATA]")
 		var report: Dictionary = _profiler.get_report()
-		print("  Cells loaded: %d" % report.get("session", {}).get("total_cells_loaded", 0))
-		print("  Objects loaded: %d" % report.get("session", {}).get("total_objects_loaded", 0))
-		print("  Avg cell load time: %.1f ms" % report.get("cell_loading", {}).get("avg_load_time_ms", 0.0))
+		Logger.info("debug", "  Cells loaded: %d" % report.get("session", {}).get("total_cells_loaded", 0))
+		Logger.info("debug", "  Objects loaded: %d" % report.get("session", {}).get("total_objects_loaded", 0))
+		Logger.info("debug", "  Avg cell load time: %.1f ms" % report.get("cell_loading", {}).get("avg_load_time_ms", 0.0))
 
 		var slowest: Array = report.get("slowest_models", [])
 		if not slowest.is_empty():
-			print("  Slowest models:")
+			Logger.info("debug", "  Slowest models:")
 			for model: Dictionary in slowest.slice(0, 5):
-				print("    %.2f ms - %s" % [model.get("avg_ms", 0.0), model.get("path", "?").get_file()])
-		print("")
+				Logger.info("debug", "    %.2f ms - %s" % [model.get("avg_ms", 0.0), model.get("path", "?").get_file()])
+		Logger.info("debug", "")
 
 	# Streaming profiler data
 	if _streaming_profiler:
-		print("[STREAMING PROFILER]")
+		Logger.info("debug", "[STREAMING PROFILER]")
 		var sections: Dictionary = _streaming_profiler.get_all_sections()
 		for name: String in sections:
 			var data: Dictionary = sections[name]
 			var slow_flag := " <-- SLOW" if data.last_ms > 16.0 else ""
-			print("  %s: %.2f ms (avg %.2f, max %.2f)%s" % [
+			Logger.info("debug", "  %s: %.2f ms (avg %.2f, max %.2f)%s" % [
 				name, data.last_ms, data.avg_ms, data.max_ms, slow_flag
 			])
-		print("")
+		Logger.info("debug", "")
 
 	# Material library stats
-	print("[MATERIALS]")
+	Logger.info("debug", "[MATERIALS]")
 	var mat_stats: Dictionary = MaterialLibrary.get_stats()
-	print("  Cached: %d | Hits: %d | Rate: %.1f%%" % [
+	Logger.info("debug", "  Cached: %d | Hits: %d | Rate: %.1f%%" % [
 		mat_stats.get("cached_materials", 0),
 		mat_stats.get("cache_hits", 0),
 		mat_stats.get("hit_rate", 0.0) * 100.0
 	])
-	print("")
+	Logger.info("debug", "")
 
 	# Texture loader stats
-	print("[TEXTURES]")
+	Logger.info("debug", "[TEXTURES]")
 	var tex_stats: Dictionary = TextureLoader.get_stats()
-	print("  Loaded: %d | Cached: %d | Hits: %d" % [
+	Logger.info("debug", "  Loaded: %d | Cached: %d | Hits: %d" % [
 		tex_stats.get("loaded", 0),
 		tex_stats.get("cached", 0),
 		tex_stats.get("cache_hits", 0)
 	])
-	print("")
+	Logger.info("debug", "")
 
 	# BSA cache stats
-	print("[BSA CACHE]")
+	Logger.info("debug", "[BSA CACHE]")
 	var bsa_stats: Dictionary = BSAManager.get_cache_stats()
-	print("  Size: %.1f MB (%d files)" % [
+	Logger.info("debug", "  Size: %.1f MB (%d files)" % [
 		bsa_stats.get("cache_size_mb", 0.0),
 		bsa_stats.get("cached_files", 0)
 	])
-	print("  Hits: %d | Misses: %d | Rate: %.1f%%" % [
+	Logger.info("debug", "  Hits: %d | Misses: %d | Rate: %.1f%%" % [
 		bsa_stats.get("cache_hits", 0),
 		bsa_stats.get("cache_misses", 0),
 		bsa_stats.get("hit_rate", 0.0) * 100.0
 	])
-	print("")
+	Logger.info("debug", "")
 
 	# Recent errors
 	if not _recent_errors.is_empty():
-		print("[RECENT ERRORS]")
+		Logger.info("debug", "[RECENT ERRORS]")
 		for err: Dictionary in _recent_errors.slice(-10):
-			print("  [%.1fs] %s" % [err.get("time", 0.0), err.get("message", "?")])
-		print("")
+			Logger.info("debug", "  [%.1fs] %s" % [err.get("time", 0.0), err.get("message", "?")])
+		Logger.info("debug", "")
 
-	print("=" .repeat(70))
-	print("")
+	Logger.info("debug", "=" .repeat(70))
+	Logger.info("debug", "")
 
 	_add_log("Profiling report dumped to console", "success")
 
@@ -887,7 +887,7 @@ func dump_state_now() -> void:
 	_write_state_to_file()
 
 	var global_path := ProjectSettings.globalize_path(log_path)
-	print("[DebugSystem] State dumped to: %s" % global_path)
+	Logger.info("debug", "State dumped to: %s" % global_path)
 	_add_log("State dumped to log file", "success")
 
 
@@ -1006,32 +1006,32 @@ func _generate_test_report() -> Dictionary:
 
 
 func _print_test_report(report: Dictionary) -> void:
-	print("\n")
-	print("=" .repeat(60))
-	print("              AUTO-TEST REPORT")
-	print("=" .repeat(60))
+	Logger.info("debug", "")
+	Logger.info("debug", "=" .repeat(60))
+	Logger.info("debug", "              AUTO-TEST REPORT")
+	Logger.info("debug", "=" .repeat(60))
 
 	var summary: Dictionary = report.get("summary", {})
-	print("Duration: %.1f seconds" % summary.get("duration_seconds", 0.0))
-	print("Waypoints: %d/%d" % [summary.get("waypoints_visited", 0), summary.get("waypoints_total", 0)])
-	print("Errors: %d | Warnings: %d" % [summary.get("errors", 0), summary.get("warnings", 0)])
-	print("")
+	Logger.info("debug", "Duration: %.1f seconds" % summary.get("duration_seconds", 0.0))
+	Logger.info("debug", "Waypoints: %d/%d" % [summary.get("waypoints_visited", 0), summary.get("waypoints_total", 0)])
+	Logger.info("debug", "Errors: %d | Warnings: %d" % [summary.get("errors", 0), summary.get("warnings", 0)])
+	Logger.info("debug", "")
 
 	var perf: Dictionary = report.get("performance", {})
-	print("Performance:")
-	print("  Avg FPS: %.1f | Min FPS: %.1f" % [perf.get("avg_fps", 0.0), perf.get("min_fps", 0.0)])
-	print("  Frame times: P50=%.1fms P95=%.1fms Max=%.1fms" % [
+	Logger.info("debug", "Performance:")
+	Logger.info("debug", "  Avg FPS: %.1f | Min FPS: %.1f" % [perf.get("avg_fps", 0.0), perf.get("min_fps", 0.0)])
+	Logger.info("debug", "  Frame times: P50=%.1fms P95=%.1fms Max=%.1fms" % [
 		perf.get("p50_ms", 0.0), perf.get("p95_ms", 0.0), perf.get("max_ms", 0.0)
 	])
-	print("")
+	Logger.info("debug", "")
 
 	var streaming: Dictionary = report.get("streaming", {})
-	print("Streaming:")
-	print("  Cells loaded: %d" % streaming.get("cells_loaded", 0))
-	print("  Objects loaded: %d" % streaming.get("objects_loaded", 0))
+	Logger.info("debug", "Streaming:")
+	Logger.info("debug", "  Cells loaded: %d" % streaming.get("cells_loaded", 0))
+	Logger.info("debug", "  Objects loaded: %d" % streaming.get("objects_loaded", 0))
 
-	print("=" .repeat(60))
-	print("")
+	Logger.info("debug", "=" .repeat(60))
+	Logger.info("debug", "")
 
 #endregion
 

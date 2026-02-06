@@ -281,7 +281,7 @@ func _log(text: String) -> void:
 	var plain := text
 	for tag in ["[b]", "[/b]", "[color=red]", "[color=green]", "[color=yellow]", "[/color]"]:
 		plain = plain.replace(tag, "")
-	print("[AssetViewer] %s" % plain)
+	Logger.info("tools", "[AssetViewer] %s" % plain)
 
 
 func _set_status(text: String) -> void:

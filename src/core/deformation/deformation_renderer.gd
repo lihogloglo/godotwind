@@ -31,9 +31,9 @@ func _ready():
 	_setup_stamp_mesh()
 
 	if _follow_player:
-		print("[DeformationRenderer] RTT renderer initialized (PLAYER-FOLLOWING mode, radius: ", _follow_radius, "m)")
+		Logger.info("deformation", "DeformationRenderer: RTT renderer initialized (PLAYER-FOLLOWING mode, radius: %sm)" % _follow_radius)
 	else:
-		print("[DeformationRenderer] RTT renderer initialized (REGION-BASED mode)")
+		Logger.info("deformation", "DeformationRenderer: RTT renderer initialized (REGION-BASED mode)")
 
 # Setup the SubViewport for rendering
 func _setup_viewport():
@@ -109,7 +109,7 @@ func _setup_stamp_mesh():
 func set_player(player: Node3D) -> void:
 	_player_node = player
 	if _follow_player and _player_node:
-		print("[DeformationRenderer] Now following player: ", _player_node.name)
+		Logger.info("deformation", "DeformationRenderer: Now following player: %s" % _player_node.name)
 
 # Process function to update camera position when following player
 func _process(_delta: float):
@@ -201,8 +201,7 @@ func _get_material_type_value(material_type: int) -> float:
 
 # Batch render multiple stamps in one pass (optimization)
 func render_batch(stamps: Array, region_data):
-	# TODO: Implement instanced rendering for multiple stamps
-	# For now, render stamps sequentially
+	# Sequential rendering — instanced batching would help if stamp count becomes a bottleneck
 	for stamp in stamps:
 		var world_pos = stamp.get("world_pos", Vector3.ZERO)
 		render_stamp(

@@ -33,19 +33,19 @@ func initialize(size: int = 256) -> void:
 	# Check if compute shaders are available
 	var rd := RenderingServer.get_rendering_device()
 	if rd == null:
-		print("[WaveGenerator] No RenderingDevice available - using flat plane fallback")
+		Logger.info("water", "WaveGenerator: No RenderingDevice available - using flat plane fallback")
 		_use_compute = false
 		return
 
 	# Check if compute shader files exist
 	var shader_path := "res://src/core/water/shaders/compute/spectrum_compute.glsl"
 	if not FileAccess.file_exists(shader_path):
-		print("[WaveGenerator] Compute shaders not found - using flat plane fallback")
+		Logger.info("water", "WaveGenerator: Compute shaders not found - using flat plane fallback")
 		_use_compute = false
 		return
 
 	_use_compute = true
-	print("[WaveGenerator] GPU compute shaders available, map size: %d" % map_size)
+	Logger.info("water", "WaveGenerator: GPU compute shaders available, map size: %d" % map_size)
 
 
 func init_gpu(num_cascades: int) -> void:
@@ -157,7 +157,7 @@ func init_gpu(num_cascades: int) -> void:
 	normal_maps.texture_rd_rid = descriptors[&"normal_map"].rid
 
 	_initialized = true
-	print("[WaveGenerator] GPU compute initialized with %d cascades" % num_cascades)
+	Logger.info("water", "WaveGenerator: GPU compute initialized with %d cascades" % num_cascades)
 
 
 func _process(_delta: float) -> void:

@@ -763,6 +763,6 @@ func _encode_control_value(base_tex: int, overlay_tex: int, blend: int) -> float
 
 func _debug(msg: String) -> void:
 	if debug_enabled:
-		print("GenericTerrainStreamer: %s" % msg)
+		Logger.debug("streaming", "GenericTerrainStreamer: %s" % msg)
 
 #endregion

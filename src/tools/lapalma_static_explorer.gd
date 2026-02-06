@@ -59,7 +59,7 @@ func _load_terrain() -> void:
 		push_error("Run lapalma_batch_import.gd first to create it!")
 		return
 
-	print("Loading terrain from %s..." % TERRAIN_DIR)
+	Logger.info("tools", "Loading terrain from %s..." % TERRAIN_DIR)
 	var start := Time.get_ticks_msec()
 
 	# Set the data directory - Terrain3D will load all region files from here
@@ -79,7 +79,7 @@ func _load_terrain() -> void:
 	if terrain_3d.data:
 		region_count = terrain_3d.data.get_region_count()
 
-	print("Terrain loaded: %d regions in %.2f seconds" % [region_count, elapsed])
+	Logger.info("tools", "Terrain loaded: %d regions in %.2f seconds" % [region_count, elapsed])
 
 	_initialized = true
 	_teleport_to_position(Vector3(0, 1000, 0))

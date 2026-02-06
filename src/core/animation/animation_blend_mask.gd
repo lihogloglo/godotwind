@@ -61,7 +61,7 @@ func build_masks(skeleton: Skeleton3D) -> void:
 		_mask_bones[mask_type] = _build_mask(mask_type)
 
 		if debug_mode:
-			print("AnimationBlendMask: Built mask %d with %d bones" % [
+			Logger.debug("animation", "AnimationBlendMask: Built mask %d with %d bones" % [
 				mask_type, _mask_bones[mask_type].size()
 			])
 

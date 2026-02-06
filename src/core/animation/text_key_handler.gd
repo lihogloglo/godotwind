@@ -100,7 +100,7 @@ func register_text_keys(animation_name: String, text_keys: Array) -> void:
 		parsed.append(parsed_key)
 
 		if debug_mode:
-			print("TextKeyHandler: Registered key '%s' at %.3fs for '%s'" % [
+			Logger.debug("animation", "TextKeyHandler: Registered key '%s' at %.3fs for '%s'" % [
 				name, time, animation_name
 			])
 
@@ -205,7 +205,7 @@ func _trigger_key(key: Dictionary, position: Vector3) -> void:
 	var time: float = key.get("time", 0.0)
 
 	if debug_mode:
-		print("TextKeyHandler: Triggering '%s' at %.3fs (type=%d)" % [raw, time, key_type])
+		Logger.debug("animation", "TextKeyHandler: Triggering '%s' at %.3fs (type=%d)" % [raw, time, key_type])
 
 	match key_type:
 		KeyType.SOUND:
@@ -248,7 +248,7 @@ func _on_animation_started(anim_name: StringName) -> void:
 	_is_processing = true
 
 	if debug_mode:
-		print("TextKeyHandler: Animation started '%s'" % anim_name)
+		Logger.debug("animation", "TextKeyHandler: Animation started '%s'" % anim_name)
 
 
 ## Animation finished callback
@@ -256,7 +256,7 @@ func _on_animation_finished(anim_name: StringName) -> void:
 	_is_processing = false
 
 	if debug_mode:
-		print("TextKeyHandler: Animation finished '%s'" % anim_name)
+		Logger.debug("animation", "TextKeyHandler: Animation finished '%s'" % anim_name)
 
 
 ## Get loop points for an animation (returns {start: float, end: float} or null)

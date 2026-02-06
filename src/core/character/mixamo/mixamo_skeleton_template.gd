@@ -275,21 +275,23 @@ static func get_bone_count(skeleton_type: SkeletonType) -> int:
 
 ## Print skeleton hierarchy for debugging
 static func print_hierarchy(skeleton: Skeleton3D, indent: int = 0) -> void:
-	var indent_str := "  ".repeat(indent)
+	var lines := PackedStringArray()
 
 	# Find root bones
 	for i in skeleton.get_bone_count():
 		if skeleton.get_bone_parent(i) == -1:
-			_print_bone_recursive(skeleton, i, 0)
+			_collect_bone_recursive(skeleton, i, 0, lines)
+
+	Logger.debug("character", "\n".join(lines))
 
 
-static func _print_bone_recursive(skeleton: Skeleton3D, bone_idx: int, depth: int) -> void:
+static func _collect_bone_recursive(skeleton: Skeleton3D, bone_idx: int, depth: int, lines: PackedStringArray) -> void:
 	var indent := "  ".repeat(depth)
-	var name := skeleton.get_bone_name(bone_idx)
+	var bone_name := skeleton.get_bone_name(bone_idx)
 	var rest := skeleton.get_bone_rest(bone_idx)
-	print("%s%s [pos: %.3f, %.3f, %.3f]" % [indent, name, rest.origin.x, rest.origin.y, rest.origin.z])
+	lines.append("%s%s [pos: %.3f, %.3f, %.3f]" % [indent, bone_name, rest.origin.x, rest.origin.y, rest.origin.z])
 
 	# Find children
 	for i in skeleton.get_bone_count():
 		if skeleton.get_bone_parent(i) == bone_idx:
-			_print_bone_recursive(skeleton, i, depth + 1)
+			_collect_bone_recursive(skeleton, i, depth + 1, lines)

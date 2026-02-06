@@ -342,7 +342,7 @@ func _on_body_entered(body: Node3D) -> void:
 	if body is CharacterBody3D or body is RigidBody3D:
 		_bodies_in_water.append(body)
 		body_entered_water.emit(body)
-		print("[WaterVolume] Body entered water: %s" % body.name)
+		Logger.debug("water", "WaterVolume: Body entered water: %s" % body.name)
 
 
 func _on_body_exited(body: Node3D) -> void:
@@ -350,7 +350,7 @@ func _on_body_exited(body: Node3D) -> void:
 	if idx >= 0:
 		_bodies_in_water.remove_at(idx)
 		body_exited_water.emit(body)
-		print("[WaterVolume] Body exited water: %s" % body.name)
+		Logger.debug("water", "WaterVolume: Body exited water: %s" % body.name)
 
 
 func _process_body_in_water(body: Node3D, delta: float) -> void:

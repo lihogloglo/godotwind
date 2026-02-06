@@ -95,7 +95,7 @@ func _detect_creature_type(p_skeleton: Skeleton3D) -> void:
 		creature_type = CreatureType.UNKNOWN
 
 	if debug_mode:
-		print("CreatureAnimationSystem: Detected type %s (legs: %d, wings: %s, tail: %s)" % [
+		Logger.debug("animation", "CreatureAnimationSystem: Detected type %s (legs: %d, wings: %s, tail: %s)" % [
 			_get_type_name(), _leg_count, _has_wings, _has_tail
 		])
 
@@ -150,11 +150,12 @@ func _setup_quadruped_ik() -> void:
 	var back_right := _find_leg_bones("back", "right")
 
 	if debug_mode:
-		print("CreatureAnimationSystem: Quadruped IK setup:")
-		print("  Front Left: %s" % str(front_left))
-		print("  Front Right: %s" % str(front_right))
-		print("  Back Left: %s" % str(back_left))
-		print("  Back Right: %s" % str(back_right))
+		var ik_info := "CreatureAnimationSystem: Quadruped IK setup:"
+		ik_info += "\n  Front Left: %s" % str(front_left)
+		ik_info += "\n  Front Right: %s" % str(front_right)
+		ik_info += "\n  Back Left: %s" % str(back_left)
+		ik_info += "\n  Back Right: %s" % str(back_right)
+		Logger.debug("animation", ik_info)
 
 	# Configure IK chains for each leg
 	var ik_ctrl: _IKControllerScript = ik_controller as _IKControllerScript

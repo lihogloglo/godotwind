@@ -394,8 +394,9 @@ static func print_bone_mapping(
 	morrowind_bones: PackedStringArray,
 	mixamo_skeleton: Skeleton3D
 ) -> void:
-	print("=== Bone Mapping Debug ===")
-	print("Morrowind bones: %d" % morrowind_bones.size())
+	var lines := PackedStringArray()
+	lines.append("=== Bone Mapping Debug ===")
+	lines.append("Morrowind bones: %d" % morrowind_bones.size())
 
 	var mapped := 0
 	var unmapped := 0
@@ -405,20 +406,21 @@ static func print_bone_mapping(
 		var mixamo_name := BoneMapper.to_mixamo(mw_name)
 
 		if mixamo_name.is_empty():
-			print("  [UNMAPPED] %s -> ?" % mw_name)
+			lines.append("  [UNMAPPED] %s -> ?" % mw_name)
 			unmapped += 1
 			continue
 
 		var mixamo_idx := mixamo_skeleton.find_bone(mixamo_name)
 		if mixamo_idx < 0:
-			print("  [NOT FOUND] %s -> %s (not in skeleton)" % [mw_name, mixamo_name])
+			lines.append("  [NOT FOUND] %s -> %s (not in skeleton)" % [mw_name, mixamo_name])
 			unmapped += 1
 			continue
 
-		print("  [OK] %s -> %s (idx %d)" % [mw_name, mixamo_name, mixamo_idx])
+		lines.append("  [OK] %s -> %s (idx %d)" % [mw_name, mixamo_name, mixamo_idx])
 		mapped += 1
 
-	print("Mapped: %d, Unmapped: %d" % [mapped, unmapped])
+	lines.append("Mapped: %d, Unmapped: %d" % [mapped, unmapped])
+	Logger.debug("character", "\n".join(lines))
 
 
 ## Clear cached Morrowind skeleton data (for memory management)
@@ -430,12 +432,14 @@ static func clear_mw_skeleton_cache() -> void:
 ## Debug: Print Morrowind skeleton bone transforms
 static func print_mw_skeleton_debug() -> void:
 	_ensure_mw_skeleton_loaded()
-	print("=== Morrowind Skeleton Bones ===")
-	print("Total bones: %d" % _mw_bone_transforms.size())
+	var lines := PackedStringArray()
+	lines.append("=== Morrowind Skeleton Bones ===")
+	lines.append("Total bones: %d" % _mw_bone_transforms.size())
 
 	var bones := _mw_bone_transforms.keys()
 	bones.sort()
 
 	for bone_name in bones:
 		var transform: Transform3D = _mw_bone_transforms[bone_name]
-		print("  %s: pos=%s" % [bone_name, transform.origin])
+		lines.append("  %s: pos=%s" % [bone_name, transform.origin])
+	Logger.debug("character", "\n".join(lines))

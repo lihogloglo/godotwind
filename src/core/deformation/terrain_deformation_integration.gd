@@ -25,10 +25,10 @@ var _next_array_index: int = 0
 func _ready():
 	# Check if terrain integration is enabled
 	if not DeformationConfig.enable_terrain_integration:
-		print("[TerrainDeformationIntegration] Terrain integration disabled in config")
+		Logger.info("deformation", "TerrainDeformationIntegration: Terrain integration disabled in config")
 		return
 
-	print("[TerrainDeformationIntegration] Initializing Terrain3D integration...")
+	Logger.info("deformation", "TerrainDeformationIntegration: Initializing Terrain3D integration...")
 
 	# Wait for scene tree to be ready
 	await get_tree().process_frame
@@ -38,7 +38,7 @@ func _ready():
 	if _terrain != null:
 		_setup_terrain_integration()
 	else:
-		print("[TerrainDeformationIntegration] No Terrain3D found - deformations will not be visible on terrain")
+		Logger.warn("deformation", "TerrainDeformationIntegration: No Terrain3D found - deformations will not be visible on terrain")
 
 # Find Terrain3D node in scene
 func _find_terrain():
@@ -52,16 +52,16 @@ func _find_terrain():
 	for path in possible_paths:
 		_terrain = get_node_or_null(path)
 		if _terrain != null:
-			print("[TerrainDeformationIntegration] Found Terrain3D at: ", path)
+			Logger.info("deformation", "TerrainDeformationIntegration: Found Terrain3D at: %s" % path)
 			return
 
 	# Search for any Terrain3D node
 	_terrain = _find_node_by_class(get_tree().root, "Terrain3D")
 
 	if _terrain == null:
-		print("[TerrainDeformationIntegration] Warning: Terrain3D not found, deformation won't be visible")
+		Logger.warn("deformation", "TerrainDeformationIntegration: Terrain3D not found, deformation won't be visible")
 	else:
-		print("[TerrainDeformationIntegration] Found Terrain3D node")
+		Logger.info("deformation", "TerrainDeformationIntegration: Found Terrain3D node")
 
 # Recursive node search by class name
 func _find_node_by_class(node: Node, target_class: String) -> Node:
@@ -86,11 +86,11 @@ func _setup_terrain_integration():
 	elif "material" in _terrain:
 		_terrain_material = _terrain.material
 	else:
-		print("[TerrainDeformationIntegration] Warning: Could not get terrain material")
+		Logger.warn("deformation", "TerrainDeformationIntegration: Could not get terrain material")
 		return
 
 	if _terrain_material == null or not _terrain_material is ShaderMaterial:
-		print("[TerrainDeformationIntegration] Warning: Terrain material is not a ShaderMaterial")
+		Logger.warn("deformation", "TerrainDeformationIntegration: Terrain material is not a ShaderMaterial")
 		return
 
 	# Initialize texture array
@@ -99,7 +99,7 @@ func _setup_terrain_integration():
 	# Set shader parameters
 	_inject_deformation_parameters()
 
-	print("[TerrainDeformationIntegration] Terrain integration setup complete")
+	Logger.info("deformation", "TerrainDeformationIntegration: Terrain integration setup complete")
 
 # Create texture array for deformation regions
 func _create_deformation_texture_array():
@@ -120,7 +120,7 @@ func _create_deformation_texture_array():
 	_deformation_texture_array = Texture2DArray.new()
 	_deformation_texture_array.create_from_images(images)
 
-	print("[TerrainDeformationIntegration] Created deformation texture array")
+	Logger.debug("deformation", "TerrainDeformationIntegration: Created deformation texture array")
 
 # Inject deformation parameters into terrain shader
 func _inject_deformation_parameters():
@@ -132,7 +132,7 @@ func _inject_deformation_parameters():
 	_terrain_material.set_shader_parameter("deformation_enabled", true)
 	_terrain_material.set_shader_parameter("deformation_depth_scale", DeformationManager.deformation_depth_scale)
 
-	print("[TerrainDeformationIntegration] Injected deformation parameters into terrain shader")
+	Logger.debug("deformation", "TerrainDeformationIntegration: Injected deformation parameters into terrain shader")
 
 # Update deformation texture for a specific region
 func update_region_texture(region_coord: Vector2i, texture: ImageTexture):
@@ -163,7 +163,7 @@ func update_region_texture(region_coord: Vector2i, texture: ImageTexture):
 		_deformation_texture_array.update_layer(image, array_index)
 
 		if DeformationConfig.debug_mode:
-			print("[TerrainDeformationIntegration] Updated deformation layer %d for region %s" % [array_index, region_coord])
+			Logger.debug("deformation", "TerrainDeformationIntegration: Updated deformation layer %d for region %s" % [array_index, region_coord])
 
 # Try to get Terrain3D's layer index for a region coordinate
 func _get_terrain_layer_index(region_coord: Vector2i) -> int:
@@ -197,7 +197,7 @@ func _get_or_create_array_index(region_coord: Vector2i) -> int:
 	# Assign new index with LRU eviction if array is full
 	if _next_array_index >= MAX_TEXTURE_ARRAY_SIZE:
 		# Find least recently used region (simple: use first available slot)
-		# TODO: Implement proper LRU eviction
+		# Simple slot recycling — proper LRU not needed unless texture array fills frequently
 		if DeformationConfig.debug_mode:
 			push_warning("[TerrainDeformationIntegration] Texture array full, eviction needed")
 
@@ -243,7 +243,7 @@ func remove_region_texture(region_coord: Vector2i):
 	_array_index_to_region.erase(array_index)
 
 	if DeformationConfig.debug_mode:
-		print("[TerrainDeformationIntegration] Cleared deformation layer %d for region %s" % [array_index, region_coord])
+		Logger.debug("deformation", "TerrainDeformationIntegration: Cleared deformation layer %d for region %s" % [array_index, region_coord])
 
 # Get array index for region (for shader parameter binding)
 func get_region_array_index(region_coord: Vector2i) -> int:

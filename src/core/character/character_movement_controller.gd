@@ -192,8 +192,8 @@ func _update_wander(delta: float) -> void:
 
 ## Update swimming state based on water detection
 func _update_swimming_state() -> void:
-	# TODO: Implement proper water detection using cell water level
-	# For now, swimming is disabled
+	# Water detection requires ocean system integration (not yet wired in)
+	# Swimming disabled until water volumes provide height data
 	is_swimming = false
 
 

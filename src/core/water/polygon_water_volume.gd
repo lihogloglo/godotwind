@@ -161,7 +161,7 @@ func _create_polygon_mesh() -> void:
 	_water_mesh.material_override = _material
 	_water_mesh.position.y = water_surface_height
 
-	print("[PolygonWaterVolume] Created polygon mesh with %d vertices, %d triangles" % [
+	Logger.debug("water", "PolygonWaterVolume: Created polygon mesh with %d vertices, %d triangles" % [
 		vertices.size(), indices.size() / 3])
 
 

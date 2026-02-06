@@ -72,19 +72,19 @@ func initialize(radius: float, quality_override: int = -1) -> void:
 			mode_name = "Gerstner Waves"
 		_:
 			mode_name = "Flat Plane"
-	print("[OceanMesh] Initialized - radius: %.0fm, mode: %s" % [radius, mode_name])
+	Logger.info("water", "OceanMesh: Initialized - radius: %.0fm, mode: %s" % [radius, mode_name])
 
 
 func _select_quality() -> void:
 	if _quality_override == 0:
 		_quality = QualityMode.FLAT
-		print("[OceanMesh] Quality override: FLAT")
+		Logger.info("water", "OceanMesh: Quality override: FLAT")
 	elif _quality_override == 1:
 		_quality = QualityMode.GERSTNER
-		print("[OceanMesh] Quality override: GERSTNER")
+		Logger.info("water", "OceanMesh: Quality override: GERSTNER")
 	elif _quality_override == 2:
 		_quality = QualityMode.FFT
-		print("[OceanMesh] Quality override: FFT")
+		Logger.info("water", "OceanMesh: Quality override: FFT")
 	else:
 		# Auto-detect based on hardware
 		# Default to GERSTNER (good balance), FFT for high-end GPUs, FLAT for low-end
@@ -102,7 +102,7 @@ func _select_quality() -> void:
 			quality_name = "GERSTNER"
 		elif _quality == QualityMode.FFT:
 			quality_name = "FFT"
-		print("[OceanMesh] Auto-detected quality: %s (GPU: %s)" % [quality_name, HardwareDetection.get_gpu_name()])
+		Logger.info("water", "OceanMesh: Auto-detected quality: %s (GPU: %s)" % [quality_name, HardwareDetection.get_gpu_name()])
 
 
 func _create_shader() -> void:
@@ -117,7 +117,7 @@ func _create_shader() -> void:
 				_quality = QualityMode.GERSTNER
 				_create_shader()  # Recurse to load Gerstner
 				return
-			print("[OceanMesh] Using GPU FFT compute shader")
+			Logger.info("water", "OceanMesh: Using GPU FFT compute shader")
 
 		QualityMode.GERSTNER:
 			shader_path = "res://src/core/water/shaders/gerstner_water.gdshader"
@@ -127,7 +127,7 @@ func _create_shader() -> void:
 				_quality = QualityMode.FLAT
 				_create_shader()  # Recurse to load flat
 				return
-			print("[OceanMesh] Using Gerstner wave shader")
+			Logger.info("water", "OceanMesh: Using Gerstner wave shader")
 
 		QualityMode.FLAT:
 			shader_path = "res://src/core/water/shaders/flat_water.gdshader"
@@ -136,7 +136,7 @@ func _create_shader() -> void:
 				push_warning("[OceanMesh] Flat water shader not found, using inline")
 				_shader = _create_inline_flat_shader()
 			else:
-				print("[OceanMesh] Using flat water shader with SSR")
+				Logger.info("water", "OceanMesh: Using flat water shader with SSR")
 
 
 func _create_inline_flat_shader() -> Shader:
@@ -239,7 +239,7 @@ func _setup_fft_shader_defaults() -> void:
 	_material.set_shader_parameter("flow_speed", 0.5)
 	_setup_bubble_texture()
 
-	print("[OceanMesh] FFT shader defaults configured with enhanced visuals")
+	Logger.debug("water", "OceanMesh: FFT shader defaults configured with enhanced visuals")
 
 
 func _setup_sparkle_texture() -> void:
@@ -378,7 +378,7 @@ func _setup_gerstner_shader_defaults() -> void:
 	# Subsurface scattering
 	_material.set_shader_parameter("sss_strength", 5.0)
 
-	print("[OceanMesh] Gerstner shader defaults configured")
+	Logger.debug("water", "OceanMesh: Gerstner shader defaults configured")
 
 
 func _initialize_vector_map_generator(tex_base: String) -> void:
@@ -393,13 +393,13 @@ func _initialize_vector_map_generator(tex_base: String) -> void:
 	var flow_path := tex_base + "flowmap_source.png"
 	if ResourceLoader.exists(flow_path):
 		flow_texture = load(flow_path) as Texture2D
-		print("[OceanMesh] Loaded flow source texture: %s" % flow_path)
+		Logger.debug("water", "OceanMesh: Loaded flow source texture: %s" % flow_path)
 
 	# Create and initialize the generator
 	_vector_map_generator = VectorMapGenerator.new()
 	if _vector_map_generator.initialize(flow_texture):
 		_material.set_shader_parameter("vector_map", _vector_map_generator.get_texture())
-		print("[OceanMesh] Vector map generator initialized (GPU compute)")
+		Logger.info("water", "OceanMesh: Vector map generator initialized (GPU compute)")
 	else:
 		push_warning("[OceanMesh] Failed to initialize vector map generator, using static fallback")
 		_use_compute_vector_map = false
@@ -689,7 +689,7 @@ func _setup_flat_water_textures() -> void:
 	_material.set_shader_parameter("steps", 256)  # Reduced from 512 for performance
 	_material.set_shader_parameter("ssr_screen_fade", 0.05)
 
-	print("[OceanMesh] Flat water shader configured with proper uniforms")
+	Logger.debug("water", "OceanMesh: Flat water shader configured with proper uniforms")
 
 
 func _create_material() -> void:
@@ -705,7 +705,7 @@ func _create_material() -> void:
 		var foam_col := Color(0.9, 0.9, 0.9, 1.0)
 		RenderingServer.global_shader_parameter_set(&"water_color", water_col.srgb_to_linear())
 		RenderingServer.global_shader_parameter_set(&"foam_color", foam_col.srgb_to_linear())
-		print("[OceanMesh] Initialized global shader parameters for FFT shader")
+		Logger.debug("water", "OceanMesh: Initialized global shader parameters for FFT shader")
 
 	_material.shader = _shader
 
@@ -732,7 +732,7 @@ func _create_material() -> void:
 			_setup_flat_water_textures()
 
 	material_override = _material
-	print("[OceanMesh] Material created - shader: %s" % [
+	Logger.debug("water", "OceanMesh: Material created - shader: %s" % [
 		_shader.resource_path if _shader else "INLINE"])
 
 
@@ -768,7 +768,7 @@ func _create_clipmap_mesh(radius: float) -> void:
 		vertex_offset += ring_verts.size()
 		prev_outer_radius = outer_radius
 
-	print("[OceanMesh] Created mesh with %d vertices, %d triangles" % [vertices.size(), indices.size() / 3])
+	Logger.debug("water", "OceanMesh: Created mesh with %d vertices, %d triangles" % [vertices.size(), indices.size() / 3])
 
 	if vertices.size() == 0:
 		push_error("[OceanMesh] ERROR: No vertices created! Radius: %.0f" % radius)
@@ -789,7 +789,7 @@ func _create_clipmap_mesh(radius: float) -> void:
 	mesh = array_mesh
 
 	var aabb := array_mesh.get_aabb()
-	print("[OceanMesh] Mesh AABB: position=%s, size=%s" % [aabb.position, aabb.size])
+	Logger.debug("water", "OceanMesh: Mesh AABB: position=%s, size=%s" % [aabb.position, aabb.size])
 
 
 func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, vertex_offset: int) -> Dictionary:
@@ -918,7 +918,7 @@ func set_wave_textures(displacements: Texture2DArrayRD, normals: Texture2DArrayR
 	RenderingServer.global_shader_parameter_set(&"displacements", displacements)
 	RenderingServer.global_shader_parameter_set(&"normals", normals)
 	RenderingServer.global_shader_parameter_set(&"num_cascades", _num_cascades)
-	print("[OceanMesh] Global shader parameters set - cascades: %d" % _num_cascades)
+	Logger.debug("water", "OceanMesh: Global shader parameters set - cascades: %d" % _num_cascades)
 
 	# Set map scales
 	var scales: PackedVector4Array
@@ -955,7 +955,7 @@ func set_shore_mask(mask: Texture2D, world_bounds: Rect2) -> void:
 			world_bounds.size.y
 		)
 		_material.set_shader_parameter("shore_mask_bounds", bounds_vec)
-		print("[OceanMesh] Shore mask set - texture: %s, bounds: %s" % [
+		Logger.debug("water", "OceanMesh: Shore mask set - texture: %s, bounds: %s" % [
 			mask.get_size() if mask else "null",
 			bounds_vec
 		])
@@ -1003,7 +1003,7 @@ func set_quality(quality: QualityMode, radius: float) -> bool:
 	_create_material()
 	_restore_cached_state()
 
-	print("[OceanMesh] Quality changed: %s -> %s" % [
+	Logger.info("water", "OceanMesh: Quality changed: %s -> %s" % [
 		_quality_to_string(old_quality),
 		_quality_to_string(_quality)])
 
@@ -1074,7 +1074,7 @@ func _restore_cached_state() -> void:
 
 	_material.set_shader_parameter("debug_shore_mask", _debug_shore_mask)
 
-	print("[OceanMesh] Restored cached state for %s mode" % _quality_to_string(_quality))
+	Logger.debug("water", "OceanMesh: Restored cached state for %s mode" % _quality_to_string(_quality))
 
 
 ## Toggle debug visualization of shore mask
@@ -1082,7 +1082,7 @@ func set_debug_shore_mask(enabled: bool) -> void:
 	_debug_shore_mask = enabled
 	if _material:
 		_material.set_shader_parameter("debug_shore_mask", enabled)
-		print("[OceanMesh] Debug shore mask: %s" % enabled)
+		Logger.debug("water", "OceanMesh: Debug shore mask: %s" % enabled)
 
 
 ## Get current debug shore mask state
@@ -1129,7 +1129,7 @@ func set_wobbly_shores_enabled(enabled: bool) -> void:
 func set_ssr_enabled(enabled: bool) -> void:
 	if _material and _quality == QualityMode.FFT:
 		_material.set_shader_parameter("enable_ssr", enabled)
-		print("[OceanMesh] SSR %s (WARNING: expensive!)" % ("enabled" if enabled else "disabled"))
+		Logger.warn("water", "OceanMesh: SSR %s (expensive!)" % ("enabled" if enabled else "disabled"))
 
 
 # =============================================================================

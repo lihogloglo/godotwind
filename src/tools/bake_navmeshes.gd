@@ -34,18 +34,17 @@ var args: Dictionary = {}
 
 
 func _init() -> void:
-	print("=" * 80)
-	print("NavMesh Baking Tool - Headless Mode")
-	print("=" * 80)
-	print()
+	Logger.info("navmesh", "=" .repeat(80))
+	Logger.info("navmesh", "NavMesh Baking Tool - Headless Mode")
+	Logger.info("navmesh", "=" .repeat(80))
 
 	# Parse command line arguments
 	_parse_arguments()
 
 	# Initialize ESM system
-	print("Initializing ESM system...")
+	Logger.info("navmesh", "Initializing ESM system...")
 	if not _initialize_esm():
-		print("ERROR: Failed to initialize ESM system")
+		Logger.error("navmesh", "Failed to initialize ESM system")
 		quit(1)
 		return
 
@@ -116,30 +115,29 @@ func _parse_arguments() -> void:
 	if not args.has("skip_existing"):
 		args["skip_existing"] = true
 
-	# Print configuration
-	print("Configuration:")
-	print("  Exterior cells: %s" % args.get("bake_exterior", false))
-	print("  Interior cells: %s" % args.get("bake_interior", false))
-	print("  Skip existing: %s" % args.get("skip_existing", true))
-	print("  Output: %s" % (args.get("output") if args.has("output") else "(using SettingsManager default)"))
+	# Log configuration
+	Logger.info("navmesh", "Configuration:")
+	Logger.info("navmesh", "  Exterior cells: %s" % args.get("bake_exterior", false))
+	Logger.info("navmesh", "  Interior cells: %s" % args.get("bake_interior", false))
+	Logger.info("navmesh", "  Skip existing: %s" % args.get("skip_existing", true))
+	Logger.info("navmesh", "  Output: %s" % (args.get("output") if args.has("output") else "(using SettingsManager default)"))
 	if args.has("specific_cell"):
-		print("  Specific cell: %s" % args.specific_cell)
-	print()
+		Logger.info("navmesh", "  Specific cell: %s" % args.specific_cell)
 
 
 func _initialize_esm() -> bool:
 	# Check if ESMManager is available
 	if not ESMManager:
-		print("ERROR: ESMManager autoload not found")
+		Logger.error("navmesh", "ESMManager autoload not found")
 		return false
 
 	# Check if data is loaded
 	if ESMManager.cells.is_empty():
-		print("ERROR: ESMManager has no cell data")
-		print("Make sure Morrowind.esm is loaded and configured in settings")
+		Logger.error("navmesh", "ESMManager has no cell data")
+		Logger.error("navmesh", "Make sure Morrowind.esm is loaded and configured in settings")
 		return false
 
-	print("ESM system initialized: %d cells loaded" % ESMManager.cells.size())
+	Logger.info("navmesh", "ESM system initialized: %d cells loaded" % ESMManager.cells.size())
 	return true
 
 
@@ -155,29 +153,26 @@ func _run_baking() -> void:
 
 
 func _bake_all_cells() -> void:
-	print("Starting batch baking...")
-	print()
+	Logger.info("navmesh", "Starting batch baking...")
 
 	var result := baker.bake_all_cells()
 
-	print()
-	print("=" * 80)
-	print("Baking Complete")
-	print("=" * 80)
-	print("Total: %d" % result.total)
-	print("Success: %d" % result.success)
-	print("Skipped: %d" % result.skipped)
-	print("Failed: %d" % result.failed)
+	Logger.info("navmesh", "=" .repeat(80))
+	Logger.info("navmesh", "Baking Complete")
+	Logger.info("navmesh", "=" .repeat(80))
+	Logger.info("navmesh", "Total: %d" % result.total)
+	Logger.info("navmesh", "Success: %d" % result.success)
+	Logger.info("navmesh", "Skipped: %d" % result.skipped)
+	Logger.info("navmesh", "Failed: %d" % result.failed)
 
 	if result.failed > 0:
-		print("\nFailed cells:")
+		Logger.warn("navmesh", "Failed cells:")
 		for cell_id in result.failed_cells:
-			print("  - %s" % cell_id)
+			Logger.warn("navmesh", "  - %s" % cell_id)
 
 
 func _bake_specific_cell(cell_str: String) -> void:
-	print("Baking specific cell: %s" % cell_str)
-	print()
+	Logger.info("navmesh", "Baking specific cell: %s" % cell_str)
 
 	# Parse cell identifier
 	var cell: CellRecord = null
@@ -196,25 +191,24 @@ func _bake_specific_cell(cell_str: String) -> void:
 		cell = ESMManager.get_cell(cell_str)
 
 	if not cell:
-		print("ERROR: Cell not found: %s" % cell_str)
+		Logger.error("navmesh", "Cell not found: %s" % cell_str)
 		quit(1)
 		return
 
 	# Bake the cell
 	if baker.initialize() != OK:
-		print("ERROR: Failed to initialize baker")
+		Logger.error("navmesh", "Failed to initialize baker")
 		quit(1)
 		return
 
 	var result := baker.bake_cell(cell)
 
-	print()
 	if result.success:
-		print("SUCCESS: Baked navmesh with %d polygons" % result.polygon_count)
-		print("  Output: %s" % result.output_path)
-		print("  Time: %.2fs" % result.bake_time)
+		Logger.info("navmesh", "SUCCESS: Baked navmesh with %d polygons" % result.polygon_count)
+		Logger.info("navmesh", "  Output: %s" % result.output_path)
+		Logger.info("navmesh", "  Time: %.2fs" % result.bake_time)
 	else:
-		print("FAILED: %s" % result.get("error", "Unknown error"))
+		Logger.error("navmesh", "FAILED: %s" % result.get("error", "Unknown error"))
 		quit(1)
 
 
@@ -226,7 +220,7 @@ func _on_progress(current: int, total: int, cell_id: String) -> void:
 func _on_cell_baked(cell_id: String, success: bool, output_path: String, polygon_count: int) -> void:
 	# Cell baked callback
 	if not success:
-		print("    FAILED: %s" % cell_id)
+		Logger.warn("navmesh", "FAILED: %s" % cell_id)
 
 
 func _on_batch_complete(total: int, success_count: int, failed_count: int) -> void:

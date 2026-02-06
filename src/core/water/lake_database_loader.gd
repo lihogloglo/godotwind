@@ -48,7 +48,7 @@ static func load_lakes_from_json(json_path: String, parent: Node) -> Array[Polyg
 			lakes.append(lake)
 			total_loaded += 1
 
-	print("[LakeDatabaseLoader] Loaded %d lakes from %s" % [total_loaded, json_path])
+	Logger.info("water", "LakeDatabaseLoader: Loaded %d lakes from %s" % [total_loaded, json_path])
 	return lakes
 
 
@@ -73,7 +73,7 @@ static func save_lakes_to_json(json_path: String, lakes: Array[PolygonWaterVolum
 	file.store_string(json_text)
 	file.close()
 
-	print("[LakeDatabaseLoader] Saved %d lakes to %s" % [lake_data.size(), json_path])
+	Logger.info("water", "LakeDatabaseLoader: Saved %d lakes to %s" % [lake_data.size(), json_path])
 	return true
 
 
@@ -164,7 +164,7 @@ static func create_example_database(json_path: String) -> bool:
 	file.store_string(json_text)
 	file.close()
 
-	print("[LakeDatabaseLoader] Created example database: %s" % json_path)
+	Logger.info("water", "LakeDatabaseLoader: Created example database: %s" % json_path)
 	return true
 
 

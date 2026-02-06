@@ -68,6 +68,13 @@ var min_instances_for_multimesh: int = 10  # Minimum instances to use MultiMesh 
 # MW units are roughly 1/128th of a meter, so radius 256 ~= 2 meters
 const MW_LIGHT_SCALE: float = 1.0 / 70.0  # Tuned for visual appearance
 
+# Pool pre-warming: fraction of max pool size to pre-create during preload
+const POOL_PREWARM_RATIO: float = 0.8
+# Pool pre-warming: minimum instances to pre-create per model
+const POOL_PREWARM_MIN_COUNT: int = 10
+# Default maximum pool size when auto-registering models
+const DEFAULT_POOL_MAX_SIZE: int = 50
+
 
 ## Initialize instantiator with current configuration and dependencies
 func _init() -> void:
@@ -266,7 +273,7 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 			_defer_fade_in(cell_node, objects_to_fade)
 
 	var total_objects := loaded + static_count + multimesh_count
-	print("CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
+	Logger.info("streaming", "CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
 		total_objects, loaded, static_count, multimesh_count, failed
 	])
 	_stats["multimesh_instances"] = _stats.get("multimesh_instances", 0) + multimesh_count
@@ -277,11 +284,11 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 ## Defer fade-in until cell_node enters the scene tree
 ## This is necessary because Node.create_tween() requires the node to be in the scene tree
 func _defer_fade_in(cell_node: Node3D, objects: Array[Node3D]) -> void:
-	print("[CellManager] _defer_fade_in called with %d objects, cell in tree: %s" % [objects.size(), cell_node.is_inside_tree()])
+	Logger.debug("streaming", "[CellManager] _defer_fade_in called with %d objects, cell in tree: %s" % [objects.size(), cell_node.is_inside_tree()])
 
 	# Connect to tree_entered signal to apply fade-in once in scene tree
 	var apply_fades := func() -> void:
-		print("[CellManager] apply_fades executing for %d objects" % objects.size())
+		Logger.debug("streaming", "[CellManager] apply_fades executing for %d objects" % objects.size())
 		for obj: Node3D in objects:
 			if is_instance_valid(obj):
 				_instantiator._apply_fade_in(obj)
@@ -359,7 +366,7 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 				individual_refs.append(candidate.ref)
 
 	if _debug_significant_count > 0:
-		print("[ODM-GROUP] Cell %s: %d significant objects to instantiate individually" % [
+		Logger.debug("streaming", "[ODM-GROUP] Cell %s: %d significant objects to instantiate individually" % [
 			cell_grid, _debug_significant_count
 		])
 
@@ -443,7 +450,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		# Find first MeshInstance3D in prototype (skips LOD nodes)
 		var mesh_instance: MeshInstance3D = _find_first_mesh_instance(prototype)
 		if not mesh_instance or not mesh_instance.mesh:
-			print("[DIAG] MultiMesh: No valid mesh found in %s, falling back to individual" % model_path.get_file())
+			Logger.debug("streaming", "[DIAG] MultiMesh: No valid mesh found in %s, falling back to individual" % model_path.get_file())
 			for candidate: Dictionary in candidates:
 				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
 				if obj:
@@ -451,7 +458,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 			continue
 
 		# Debug: Log what mesh we're using and what other meshes exist in the prototype
-		print("[DIAG] MultiMesh using mesh '%s' from %s" % [mesh_instance.name, model_path.get_file()])
+		Logger.debug("streaming", "[DIAG] MultiMesh using mesh '%s' from %s" % [mesh_instance.name, model_path.get_file()])
 		_debug_log_all_meshes(prototype, model_path.get_file())
 
 		# Create MultiMesh
@@ -479,7 +486,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		parent_node.add_child(mmi)
 		total_count += count
 
-		print("  MultiMesh: %d × %s" % [count, model_path.get_file()])
+		Logger.debug("streaming", "  MultiMesh: %d x %s" % [count, model_path.get_file()])
 
 	return total_count
 
@@ -512,7 +519,7 @@ func _debug_log_all_meshes(node: Node, model_name: String, depth: int = 0) -> vo
 		elif mi.mesh and mi.mesh.get_surface_count() > 0:
 			var surf_mat := mi.mesh.surface_get_material(0)
 			mat_info = "surface_mat" if surf_mat else "no_surf_mat"
-		print("[DIAG]   %s%s: visible=%s, is_lod=%s, mat=%s" % [
+		Logger.debug("streaming", "[DIAG]   %s%s: visible=%s, is_lod=%s, mat=%s" % [
 			"  ".repeat(depth), mi.name, mi.visible, is_lod, mat_info
 		])
 	for child in node.get_children():
@@ -559,7 +566,7 @@ func preload_common_models() -> int:
 				var pool_size: int = common_models[model_path]
 				# Pre-create 80% of max pool size for maximum cache hit rate
 				# This front-loads the duplicate() cost during preload instead of gameplay
-				var initial_count: int = maxi(10, int(pool_size * 0.8))
+				var initial_count: int = maxi(POOL_PREWARM_MIN_COUNT, int(pool_size * POOL_PREWARM_RATIO))
 				_object_pool.call("register_model", model_path, prototype, initial_count, pool_size)
 				pool_instances += initial_count
 
@@ -596,7 +603,7 @@ func preload_common_models_async() -> void:
 			else:
 				skipped += 1  # Not prebaked - that's fine
 
-		print("CellManager: Preloaded %d models from disk cache (%d not prebaked)" % [loaded, skipped])
+		Logger.info("streaming", "CellManager: Preloaded %d models from disk cache (%d not prebaked)" % [loaded, skipped])
 		preload_complete.emit(loaded, skipped)
 		return
 
@@ -628,7 +635,7 @@ func preload_common_models_async() -> void:
 		preload_complete.emit(0, 0)
 		return
 
-	print("CellManager: Preloading %d models asynchronously..." % _preload_pending.size())
+	Logger.info("streaming", "CellManager: Preloading %d models asynchronously..." % _preload_pending.size())
 
 
 func _check_preload_completion(task_id: int, result: Variant) -> bool:
@@ -656,7 +663,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 				# Register with pool
 				if _object_pool and not _object_pool.call("has_model", model_path):
 					var common_models: Dictionary = ObjectPoolScript.identify_common_models(self)
-					_object_pool.call("register_model", model_path, prototype, 0, common_models.get(model_path, 50))
+					_object_pool.call("register_model", model_path, prototype, 0, common_models.get(model_path, DEFAULT_POOL_MAX_SIZE))
 			else:
 				_preload_failed += 1
 		else:
@@ -667,7 +674,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 	preload_progress.emit(_preload_loaded, _preload_total)
 
 	if _preload_pending.is_empty():
-		print("CellManager: Preload complete - %d loaded, %d failed" % [_preload_loaded, _preload_failed])
+		Logger.info("streaming", "CellManager: Preload complete - %d loaded, %d failed" % [_preload_loaded, _preload_failed])
 		preload_complete.emit(_preload_loaded, _preload_failed)
 
 	return true
@@ -1072,7 +1079,7 @@ func cancel_async_request(request_id: int) -> void:
 	if removed > 0:
 		# This is expected behavior when cells are unloaded mid-loading
 		# Using print instead of push_warning since it's informational, not a problem
-		print("CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
+		Logger.info("streaming", "CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
 
 	# Clean up cell node if started
 	if request.cell_node:
@@ -1408,7 +1415,7 @@ func _dispatch_parallel_duplicates(max_count: int) -> int:
 		if use_object_pool and _object_pool and not model_path.is_empty():
 			if not _object_pool.call("has_model", model_path):
 				# Register with default pool size - pool will grow as needed
-				_object_pool.call("register_model", model_path, model_prototype, 0, 50)
+				_object_pool.call("register_model", model_path, model_prototype, 0, DEFAULT_POOL_MAX_SIZE)
 
 		# Dispatch duplicate() to worker thread
 		_parallel_duplicate_active += 1

@@ -59,14 +59,14 @@ static func load_from_project_settings() -> void:
 	show_region_bounds = _get_project_setting("deformation/debug/show_region_bounds", false)
 
 	if debug_mode:
-		print("[DeformationConfig] Configuration loaded:")
-		print("  - Enabled: ", enabled)
-		print("  - Terrain Integration: ", enable_terrain_integration)
-		print("  - Recovery: ", enable_recovery)
-		print("  - Persistence: ", enable_persistence)
-		print("  - Streaming: ", enable_streaming)
-		print("  - Texture Size: ", texture_size)
-		print("  - Max Regions: ", max_active_regions)
+		Logger.debug("deformation", "DeformationConfig: Configuration loaded:")
+		Logger.debug("deformation", "  - Enabled: %s" % enabled)
+		Logger.debug("deformation", "  - Terrain Integration: %s" % enable_terrain_integration)
+		Logger.debug("deformation", "  - Recovery: %s" % enable_recovery)
+		Logger.debug("deformation", "  - Persistence: %s" % enable_persistence)
+		Logger.debug("deformation", "  - Streaming: %s" % enable_streaming)
+		Logger.debug("deformation", "  - Texture Size: %s" % texture_size)
+		Logger.debug("deformation", "  - Max Regions: %s" % max_active_regions)
 
 static func _get_project_setting(setting_name: String, default_value):
 	if ProjectSettings.has_setting(setting_name):

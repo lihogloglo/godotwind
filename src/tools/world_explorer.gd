@@ -1,36 +1,25 @@
-## World Explorer - Complete Morrowind world exploration tool
+## World Explorer - Morrowind world exploration orchestrator
 ##
-## Features:
-## - WORLD MODE: Infinite terrain streaming with multi-region support
-##   - Terrain3D for terrain LOD and streaming
-##   - Object streaming (statics, lights, NPCs, etc.)
-##   - Free-fly camera OR player controller with physics
+## This is the main scene script. It wires together all subsystems and handles
+## initialization, camera switching, input routing, and the frame loop.
+## Heavy logic has been extracted into focused RefCounted classes:
 ##
-## - INTERIOR MODE: Browse and explore interior cells
-##   - Cell browser with search
-##   - Interior/exterior filtering
-##   - Quick load for common locations
-##
-## - DEVELOPER CONSOLE: Click-to-select objects, commands, scripting
-##   - Press ~ (tilde) to toggle console
-##   - Click objects to inspect them
-##   - Type 'help' for available commands
+##   ExplorerPanels      — UI panel construction (src/tools/ui/explorer_panels.gd)
+##   CellBrowser         — Interior/exterior cell browser (src/tools/ui/cell_browser.gd)
+##   OceanControls       — Ocean/water system (src/tools/ui/ocean_controls.gd)
+##   EnvironmentControls — Shader effects + sky (src/tools/ui/environment_controls.gd)
+##   StatsCollector      — Performance stats display (src/tools/ui/stats_collector.gd)
+##   TerrainPreprocessor — Terrain prebaking (src/tools/ui/terrain_preprocessor.gd)
+##   LodDebugCommands    — LOD console commands (src/tools/lod_debug_commands.gd)
+##   ProfilingReport     — UI log profiling (src/tools/profiling_report.gd)
 ##
 ## Controls:
-## - Press ~ (tilde) to toggle developer console
-## - Press P to toggle between Fly Camera and Player Controller
-## - Press F3 to toggle performance overlay
-## - Press F4 to dump detailed profiling report
-## - Press F9 to toggle debug overlay
-## - Press F11 to dump state to file
-## - Press F12 to toggle auto-test mode (automated camera for streaming tests)
-## - Press TAB to toggle between World and Interior modes
-## - Use +/- to adjust view distance
-##
-## Auto-Test Mode (F12):
-## - Automatically moves camera through key locations
-## - Captures performance metrics and errors
-## - Can be triggered programmatically with DEBUG_AUTO_TEST environment variable
+##   ~     Developer console       P     Toggle camera mode
+##   F3    Performance overlay     F4    Profiling report
+##   F9    Debug overlay           F11   State dump
+##   F12   Auto-test mode          TAB   World/Interior toggle
+##   N     NPCs toggle             O     Ocean toggle
+##   K     Sky toggle              +/-   View distance
 ##
 ## Fly Camera: Hold Right-click to look, WASD to move, Space/Shift for up/down
 ## Player: WASD to move, Space to jump, Shift to run, mouse to look
@@ -45,7 +34,10 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
-const OceanManagerScript := preload("res://src/core/water/ocean_manager.gd")
+const OceanControlsScript := preload("res://src/tools/ui/ocean_controls.gd")
+const EnvironmentControlsScript := preload("res://src/tools/ui/environment_controls.gd")
+const StatsCollectorScript := preload("res://src/tools/ui/stats_collector.gd")
+const TerrainPreprocessorScript := preload("res://src/tools/ui/terrain_preprocessor.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
@@ -69,7 +61,6 @@ const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 @onready var progress_bar: ProgressBar = $UI/LoadingOverlay/VBox/ProgressBar
 @onready var status_label: Label = $UI/LoadingOverlay/VBox/StatusLabel
 @onready var stats_panel: Panel = $UI/StatsPanel
-@onready var stats_text: RichTextLabel = $UI/StatsPanel/VBox/StatsText
 @onready var log_text: RichTextLabel = $UI/LogPanel/VBox/LogText
 
 # Quick teleport buttons
@@ -86,22 +77,6 @@ const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 var _panels: ExplorerPanels = null
 # Models are always visible (no toggle needed)
 var _show_characters: bool = false  # Default OFF - separate from static models
-var _show_ocean: bool = false   # Default OFF for performance
-var _show_sky: bool = false     # Default OFF - enable for day/night cycle
-
-# Sky3D is created lazily - only on first toggle
-var sky_3d: Sky3D = null  # Sky3D node (created on demand)
-var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
-
-# Ocean is created lazily - only on first toggle
-var _ocean_initialized: bool = false  # Track if ocean has ever been created
-
-# Fallback environment for when Sky3D is disabled (Godot default-like sky)
-var _fallback_world_env: WorldEnvironment = null
-var _fallback_light: DirectionalLight3D = null
-
-# Shader manager state
-var _shader_manager_attached: bool = false
 
 # Debug overlay for 3D visualizations
 var _debug_overlay: Node3D = null
@@ -126,7 +101,10 @@ var terrain_manager: TerrainManager = null  # TerrainManager (for prebaking)
 var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
 var profiler: PerformanceProfiler = null  # PerformanceProfiler
-var ocean_manager: OceanManagerClass = null  # OceanManager
+var _ocean_controls: OceanControls = null  # OceanControls (ocean/water system)
+var _env_controls: EnvironmentControls = null  # EnvironmentControls (shader effects + sky)
+var _stats_collector: StatsCollector = null  # StatsCollector (panel label updates)
+var _terrain_preprocessor: TerrainPreprocessor = null  # TerrainPreprocessor (terrain baking)
 var background_processor: BackgroundProcessor = null  # BackgroundProcessor for async loading
 var console: Console = null  # Developer console
 var test_runner: Node = null  # Automated test runner (AutomatedTestRunner)
@@ -283,7 +261,7 @@ func _init_async() -> void:
 
 	# Sync sky state with toggle to ensure consistent initial state
 	# This ensures the sky visibility matches what the toggle shows
-	_sync_sky_state()
+	_env_controls.sync_sky_state()
 
 	# First teleport camera to Seyda Neen BEFORE starting to track
 	_teleport_to_cell(-2, -9)
@@ -474,9 +452,6 @@ func _connect_diagnostic_systems() -> void:
 	_log("Diagnostic systems connected to streaming")
 
 
-# Crash scenario test removed - Models toggle no longer exists
-
-
 ## Handle test completion
 func _on_test_completed(report: Dictionary) -> void:
 	var errors: Dictionary = report.get("errors", {})
@@ -503,7 +478,7 @@ func _cmd_center_on_cell(args: Dictionary) -> CommandRegistry.CommandResult:
 	if cell_name.is_empty():
 		return CommandRegistry.CommandResult.error("Cell name required")
 
-	# TODO: Actually teleport to interior cell
+	# Interior cell teleportation requires the interior transition system (not yet implemented)
 	return CommandRegistry.CommandResult.ok("Would teleport to: %s" % cell_name)
 
 
@@ -554,8 +529,8 @@ func _switch_to_player_controller() -> void:
 		world_streaming_manager.set_camera(camera)
 
 	# Update ocean camera
-	if ocean_manager and ocean_manager.has_method("set_camera"):
-		ocean_manager.set_camera(camera)
+	if _ocean_controls:
+		_ocean_controls.set_camera(camera)
 
 	# Update console camera for object picking
 	if console:
@@ -592,8 +567,8 @@ func _switch_to_fly_camera() -> void:
 		world_streaming_manager.set_camera(camera)
 
 	# Update ocean camera
-	if ocean_manager and ocean_manager.has_method("set_camera"):
-		ocean_manager.set_camera(camera)
+	if _ocean_controls:
+		_ocean_controls.set_camera(camera)
 
 	# Update console camera for object picking
 	if console:
@@ -645,29 +620,46 @@ func _update_preprocess_status() -> void:
 
 ## Setup visibility toggle checkboxes and foldable panel system
 func _setup_visibility_toggles() -> void:
-	# Create fallback environment and light for when Sky3D is disabled
-	_setup_fallback_environment()
+	# Create environment controls (extracted in Session 5)
+	var env_callbacks := {
+		"log": _log,
+		"add_child": add_child,
+		"remove_child": remove_child,
+		"update_stats": _update_stats,
+	}
+	_env_controls = EnvironmentControlsScript.new(env_callbacks)
+	_env_controls.setup_fallback_environment()
+
+	# Create ocean controls (extracted in Session 4)
+	var ocean_callbacks := {
+		"log": _log,
+		"add_child": add_child,
+		"get_active_camera": _get_active_camera,
+		"get_terrain": func() -> Terrain3D: return terrain_3d,
+		"update_stats": _update_stats,
+	}
+	_ocean_controls = OceanControlsScript.new(ocean_callbacks)
 
 	# Build foldable panels via ExplorerPanels
 	var callbacks := {
 		"show_characters_toggled": _on_show_characters_toggled,
-		"show_ocean_toggled": _on_show_ocean_toggled,
-		"show_sky_toggled": _on_show_sky_toggled,
+		"show_ocean_toggled": _ocean_controls.on_show_ocean_toggled,
+		"show_sky_toggled": _env_controls.on_show_sky_toggled,
 		"resolution_changed": _on_resolution_changed,
-		"water_quality_changed": _on_water_quality_changed,
-		"wind_speed_changed": _on_wind_speed_changed,
-		"wind_dir_changed": _on_wind_dir_changed,
-		"wave_scale_changed": _on_wave_scale_changed,
-		"choppiness_changed": _on_choppiness_changed,
-		"debug_shore_toggled": _on_debug_shore_toggled,
-		"fog_toggled": _on_fog_effect_toggled,
-		"fog_intensity_changed": _on_fog_intensity_changed,
-		"clouds_toggled": _on_clouds_effect_toggled,
-		"cloud_coverage_changed": _on_cloud_coverage_changed,
-		"color_grading_toggled": _on_color_grading_toggled,
-		"morrowind_preset": _apply_morrowind_color_preset,
-		"dramatic_preset": _apply_dramatic_color_preset,
-		"reset_color_grading": _reset_color_grading,
+		"water_quality_changed": _ocean_controls.on_water_quality_changed,
+		"wind_speed_changed": _ocean_controls.on_wind_speed_changed,
+		"wind_dir_changed": _ocean_controls.on_wind_dir_changed,
+		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
+		"choppiness_changed": _ocean_controls.on_choppiness_changed,
+		"debug_shore_toggled": _ocean_controls.on_debug_shore_toggled,
+		"fog_toggled": _env_controls.on_fog_effect_toggled,
+		"fog_intensity_changed": _env_controls.on_fog_intensity_changed,
+		"clouds_toggled": _env_controls.on_clouds_effect_toggled,
+		"cloud_coverage_changed": _env_controls.on_cloud_coverage_changed,
+		"color_grading_toggled": _env_controls.on_color_grading_toggled,
+		"morrowind_preset": _env_controls.on_morrowind_color_preset,
+		"dramatic_preset": _env_controls.on_dramatic_color_preset,
+		"reset_color_grading": _env_controls.on_reset_color_grading,
 		"show_chunks_toggled": _on_show_chunks_toggled,
 		"show_tiers_toggled": _on_show_tiers_toggled,
 		"show_cells_toggled": _on_show_cells_toggled,
@@ -682,8 +674,8 @@ func _setup_visibility_toggles() -> void:
 	}
 	var initial_state := {
 		"show_characters": _show_characters,
-		"show_ocean": _show_ocean,
-		"show_sky": _show_sky,
+		"show_ocean": _ocean_controls.show_ocean,
+		"show_sky": _env_controls.show_sky,
 		"view_distance": _current_view_distance,
 		"show_chunk_debug": _show_chunk_debug,
 		"show_tier_debug": _show_tier_debug,
@@ -694,87 +686,29 @@ func _setup_visibility_toggles() -> void:
 	if vbox:
 		_panels.build(vbox)
 
+	# Give panels reference to extracted controls
+	_ocean_controls.set_panels(_panels)
+	_env_controls.set_panels(_panels)
+
+	# Create stats collector (extracted in Session 6)
+	_stats_collector = StatsCollectorScript.new(_panels)
+	_stats_collector.set_profiler(profiler)
+	_stats_collector.set_terrain(terrain_3d)
+
+	# Create terrain preprocessor (extracted in Session 7)
+	var preprocess_callbacks := {
+		"log": _log,
+		"get_tree": get_tree,
+		"update_preprocess_status": _update_preprocess_status,
+	}
+	_terrain_preprocessor = TerrainPreprocessorScript.new(preprocess_callbacks)
+
 	# Setup debug overlay for 3D visualizations
 	_setup_debug_overlay()
 
 	# Apply initial resolution (1920x1080)
 	_apply_resolution(2)
 
-
-## Ensure ShaderManager is attached to the scene
-func _ensure_shader_manager_attached() -> void:
-	if _shader_manager_attached:
-		return
-
-	# Attach ShaderManager to the fallback environment or Sky3D
-	if _fallback_world_env and _fallback_world_env.is_inside_tree():
-		ShaderManager.attach_to(_fallback_world_env)
-		_shader_manager_attached = true
-		_log("ShaderManager attached to fallback environment")
-	elif sky_3d and sky_3d.is_inside_tree():
-		ShaderManager.attach_to(sky_3d)
-		_shader_manager_attached = true
-		_log("ShaderManager attached to Sky3D")
-
-
-func _on_fog_effect_toggled(enabled: bool) -> void:
-	_ensure_shader_manager_attached()
-	if enabled:
-		ShaderManager.enable_effect("volumetric_fog", 0.3)
-	else:
-		ShaderManager.disable_effect("volumetric_fog", 0.3)
-	_log("Volumetric Fog: %s" % ("ON" if enabled else "OFF"))
-
-
-func _on_fog_intensity_changed(value: float) -> void:
-	ShaderManager.set_effect_param("volumetric_fog", "fog_intensity", value)
-
-
-func _on_clouds_effect_toggled(enabled: bool) -> void:
-	_ensure_shader_manager_attached()
-	if enabled:
-		ShaderManager.enable_effect("volumetric_clouds", 0.3)
-	else:
-		ShaderManager.disable_effect("volumetric_clouds", 0.3)
-	_log("Volumetric Clouds: %s" % ("ON" if enabled else "OFF"))
-
-
-func _on_cloud_coverage_changed(value: float) -> void:
-	ShaderManager.set_effect_param("volumetric_clouds", "cloud_coverage", value)
-
-
-func _on_color_grading_toggled(enabled: bool) -> void:
-	_ensure_shader_manager_attached()
-	if enabled:
-		ShaderManager.enable_effect("color_grading", 0.3)
-	else:
-		ShaderManager.disable_effect("color_grading", 0.3)
-	_log("Color Grading: %s" % ("ON" if enabled else "OFF"))
-
-
-func _apply_morrowind_color_preset() -> void:
-	var effect := ShaderManager.get_effect("color_grading")
-	if effect and effect.has_method("apply_morrowind_preset"):
-		effect.apply_morrowind_preset()
-		if not _panels.color_grading_toggle.button_pressed:
-			_panels.color_grading_toggle.button_pressed = true
-		_log("Applied Morrowind color preset")
-
-
-func _apply_dramatic_color_preset() -> void:
-	var effect := ShaderManager.get_effect("color_grading")
-	if effect and effect.has_method("apply_dramatic_preset"):
-		effect.apply_dramatic_preset()
-		if not _panels.color_grading_toggle.button_pressed:
-			_panels.color_grading_toggle.button_pressed = true
-		_log("Applied Dramatic color preset")
-
-
-func _reset_color_grading() -> void:
-	var effect := ShaderManager.get_effect("color_grading")
-	if effect:
-		effect.reset_all_params()
-		_log("Reset color grading to defaults")
 
 
 ## Setup debug overlay for 3D visualizations
@@ -786,24 +720,11 @@ func _setup_debug_overlay() -> void:
 
 ## Update debug overlay with camera and managers
 func _update_debug_overlay_references() -> void:
-	print("[WorldExplorer] Updating debug overlay references...")
 	if not _debug_overlay:
-		print("[WorldExplorer] No debug overlay!")
 		return
-
-	print("[WorldExplorer] Setting camera: %s" % [camera.name if camera else "null"])
 	_debug_overlay.set_camera(camera)
-
 	if world_streaming_manager:
-		# Set world streaming manager reference for LOD visualization
 		_debug_overlay.set_world_streaming_manager(world_streaming_manager)
-
-		# Note: NativeStreamingManager doesn't expose tier_manager/chunk_manager
-		# Those were part of the old architecture and are now internal to NativeStreamingManager
-		# The debug overlay should work with the streaming manager directly
-		print("[WorldExplorer] World streaming manager set (NativeStreamingManager)")
-	else:
-		print("[WorldExplorer] No world streaming manager")
 
 
 ## Toggle chunk debug visualization
@@ -853,52 +774,6 @@ func _on_lod_mode_pressed() -> void:
 			var mode: int = _debug_overlay.lod_debug_mode
 			_panels.lod_mode_btn.text = "LOD Mode: " + ("Expected" if mode == 1 else "Actual")
 		_log("LOD debug mode: %s" % ("Expected" if _debug_overlay.lod_debug_mode == 1 else "Actual"))
-
-
-## Ocean parameter callbacks
-func _on_wind_speed_changed(value: float) -> void:
-	_panels.update_slider_label(_panels.wind_speed_slider, value)
-	if ocean_manager:
-		ocean_manager.wind_speed = value
-		_update_ocean_wave_params()
-
-func _on_wind_dir_changed(value: float) -> void:
-	_panels.update_slider_label(_panels.wind_dir_slider, value)
-	if ocean_manager:
-		ocean_manager.wind_direction = deg_to_rad(value)
-		_update_ocean_wave_params()
-
-func _on_wave_scale_changed(value: float) -> void:
-	_panels.update_slider_label(_panels.wave_scale_slider, value)
-	if ocean_manager:
-		ocean_manager.wave_scale = value
-		if ocean_manager.has_method("_update_shader_parameters"):
-			ocean_manager._update_shader_parameters()
-
-func _on_choppiness_changed(value: float) -> void:
-	_panels.update_slider_label(_panels.choppiness_slider, value)
-	if ocean_manager:
-		ocean_manager.choppiness = value
-		_update_ocean_wave_params()
-
-
-## Toggle debug shore mask visualization
-func _on_debug_shore_toggled(enabled: bool) -> void:
-	if ocean_manager and ocean_manager._ocean_mesh:
-		ocean_manager._ocean_mesh.set_debug_shore_mask(enabled)
-		_log("Debug shore mask: %s" % ("ON" if enabled else "OFF"))
-
-
-## Update wave cascade parameters when ocean settings change
-func _update_ocean_wave_params() -> void:
-	if not ocean_manager:
-		return
-	# Update wave parameters in cascades if they exist
-	var wave_params: Array[WaveCascadeParameters] = ocean_manager._wave_parameters
-	if wave_params.size() > 0:
-		for params: WaveCascadeParameters in wave_params:
-			params.wind_speed = ocean_manager.wind_speed
-			params.wind_direction = ocean_manager.wind_direction
 
 
 ## Toggle characters (NPCs/creatures) visibility
@@ -955,142 +830,6 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 	_update_stats()
 
 
-## Toggle ocean visibility
-func _on_show_ocean_toggled(enabled: bool) -> void:
-	_show_ocean = enabled
-
-	# Show/hide ocean controls panel
-	if _panels and _panels.ocean_controls_container:
-		_panels.ocean_controls_container.visible = enabled
-
-	if enabled:
-		# Create ocean lazily on first enable
-		if not _ocean_initialized:
-			_create_ocean()
-
-		# Enable ocean
-		if ocean_manager and ocean_manager.has_method("set_enabled"):
-			ocean_manager.set_enabled(true)
-
-		# Sync sliders with ocean manager values
-		_sync_ocean_sliders()
-	else:
-		# Disable ocean (if it exists)
-		if ocean_manager and ocean_manager.has_method("set_enabled"):
-			ocean_manager.set_enabled(false)
-
-	_log("Ocean: %s" % ("ON" if enabled else "OFF"))
-	_update_stats()
-
-
-## Sync ocean slider values with current ocean manager settings
-func _sync_ocean_sliders() -> void:
-	if not ocean_manager or not _panels:
-		return
-	if _panels.wind_speed_slider:
-		_panels.wind_speed_slider.value = ocean_manager.wind_speed
-		_panels.update_slider_label(_panels.wind_speed_slider, ocean_manager.wind_speed)
-	if _panels.wind_dir_slider:
-		_panels.wind_dir_slider.value = rad_to_deg(ocean_manager.wind_direction)
-		_panels.update_slider_label(_panels.wind_dir_slider, rad_to_deg(ocean_manager.wind_direction))
-	if _panels.wave_scale_slider:
-		_panels.wave_scale_slider.value = ocean_manager.wave_scale
-		_panels.update_slider_label(_panels.wave_scale_slider, ocean_manager.wave_scale)
-	if _panels.choppiness_slider:
-		_panels.choppiness_slider.value = ocean_manager.choppiness
-		_panels.update_slider_label(_panels.choppiness_slider, ocean_manager.choppiness)
-
-
-## Create ocean system lazily (only called on first toggle)
-func _create_ocean() -> void:
-	if _ocean_initialized:
-		return
-
-	_log("Initializing ocean system...")
-
-	if OceanManagerScript == null:
-		_log("[color=yellow]Warning: OceanManager script not found[/color]")
-		return
-
-	# Run hardware detection and log GPU info
-	HardwareDetection.detect()
-	_log("[b]GPU Detection:[/b] %s" % HardwareDetection.get_gpu_name())
-	if HardwareDetection.is_integrated_gpu():
-		_log("[color=yellow]Integrated GPU detected - using optimized water[/color]")
-	_log("Recommended water quality: %s" % HardwareDetection.quality_name(HardwareDetection.get_recommended_quality()))
-
-	# Create ocean manager
-	ocean_manager = OceanManagerScript.new()
-	ocean_manager.name = "OceanManager"
-
-	# Configure for Morrowind
-	ocean_manager.ocean_radius = 8000.0  # 8km radius
-	ocean_manager.sea_level = 0.0  # Sea level at Y=0 in Godot coords
-	ocean_manager.water_quality = -1  # Auto-detect quality based on hardware
-
-	# Add to scene
-	add_child(ocean_manager)
-
-	# Set camera for ocean to follow
-	var active_camera := _get_active_camera()
-	if active_camera:
-		ocean_manager.set_camera(active_camera)
-
-	# Set terrain reference if available (for shore mask)
-	if terrain_3d:
-		ocean_manager.set_terrain(terrain_3d)
-
-	# Start enabled
-	ocean_manager.set_enabled(true)
-
-	_ocean_initialized = true
-
-	# Sync UI dropdown with actual quality
-	_sync_water_quality_dropdown()
-
-	_log("Ocean system initialized (quality: %s)" % ocean_manager.get_water_quality_name())
-
-
-## Sync the water quality dropdown with the current ocean quality
-func _sync_water_quality_dropdown() -> void:
-	if not _panels or not _panels.water_quality_btn or not ocean_manager:
-		return
-
-	var current_quality := ocean_manager.get_water_quality()
-	# Map QualityMode enum to dropdown item ID
-	# FLAT=0, GERSTNER=1, FFT=2, Auto=-1
-	var target_id: int
-	match current_quality:
-		OceanMesh.QualityMode.FLAT:
-			target_id = 0
-		OceanMesh.QualityMode.GERSTNER:
-			target_id = 1
-		OceanMesh.QualityMode.FFT:
-			target_id = 2
-		_:
-			target_id = -1  # Auto
-
-	# Find and select the item with matching ID
-	for i in _panels.water_quality_btn.get_item_count():
-		if _panels.water_quality_btn.get_item_id(i) == target_id:
-			_panels.water_quality_btn.selected = i
-			break
-
-
-## Handle water quality change
-func _on_water_quality_changed(index: int) -> void:
-	if not ocean_manager:
-		return
-
-	# Get the quality value from item ID (-1 = auto, 0-3 = specific quality)
-	var quality: int = _panels.water_quality_btn.get_item_id(index)
-	ocean_manager.set_water_quality(quality)
-
-	var quality_name: String = ocean_manager.get_water_quality_name()
-	_log("Water quality: %s" % quality_name)
-	_update_stats()
-
-
 ## Handle resolution change
 func _on_resolution_changed(index: int) -> void:
 	_apply_resolution(index)
@@ -1121,250 +860,10 @@ func _apply_resolution(index: int) -> void:
 		_log("Resolution: %dx%d" % [res.x, res.y])
 
 
-## Toggle sky/day-night cycle visibility
-func _on_show_sky_toggled(enabled: bool) -> void:
-	_show_sky = enabled
-
-	if enabled:
-		# Create Sky3D lazily on first enable
-		if not _sky3d_initialized:
-			_create_sky3d()
-
-		# Enable Sky3D - add to tree if not already there
-		if sky_3d:
-			if not sky_3d.is_inside_tree():
-				add_child(sky_3d)
-			sky_3d.sky3d_enabled = true
-		# Remove fallback from tree (only one WorldEnvironment can be active)
-		if _fallback_world_env and _fallback_world_env.is_inside_tree():
-			remove_child(_fallback_world_env)
-		if _fallback_light:
-			_fallback_light.visible = false
-	else:
-		# Disable and remove Sky3D from tree so fallback can take over
-		# (WorldEnvironment nodes only work when in tree, and only one is active)
-		if sky_3d:
-			# First remove from tree to stop rendering, then disable
-			if sky_3d.is_inside_tree():
-				remove_child(sky_3d)
-			sky_3d.sky3d_enabled = false
-		# Add fallback back to tree AFTER Sky3D is removed
-		if _fallback_world_env:
-			if not _fallback_world_env.is_inside_tree():
-				add_child(_fallback_world_env)
-			# Force the environment to be current
-			_fallback_world_env.environment = _fallback_world_env.environment
-		if _fallback_light:
-			_fallback_light.visible = true
-
-	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
-	_update_stats()
-
-
-## Create Sky3D node lazily (only called on first toggle)
-func _create_sky3d() -> void:
-	if _sky3d_initialized:
-		return
-
-	_log("Initializing Sky3D...")
-
-	# Remove fallback environment BEFORE adding Sky3D (only one WorldEnvironment can be active)
-	if _fallback_world_env and _fallback_world_env.is_inside_tree():
-		remove_child(_fallback_world_env)
-	if _fallback_light:
-		_fallback_light.visible = false
-
-	# Instantiate standard Sky3D with 2D texture clouds
-	sky_3d = Sky3D.new()
-	sky_3d.name = "Sky3D"
-
-	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
-	add_child(sky_3d)
-
-	# Configure AFTER adding to tree so _initialize() has run and environment exists
-	sky_3d.current_time = 12.0
-	sky_3d.ambient_energy = 0.5
-
-	# Use Filmic tonemapping instead of ACES to avoid crushing blacks
-	if sky_3d.environment:
-		sky_3d.environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-
-	# Start enabled
-	sky_3d.sky3d_enabled = true
-
-	_sky3d_initialized = true
-	_log("Sky3D initialized")
-
-
-## Setup fallback environment and light for when Sky3D is disabled
-## This provides a Godot default-like appearance instead of black sky
-func _setup_fallback_environment() -> void:
-	# Create fallback WorldEnvironment with procedural sky (like Godot's default)
-	_fallback_world_env = WorldEnvironment.new()
-	_fallback_world_env.name = "FallbackEnvironment"
-
-	# Create environment with procedural sky material (Godot's default look)
-	var env := Environment.new()
-	env.background_mode = Environment.BG_SKY
-
-	# Create procedural sky (similar to Godot's default new scene sky)
-	var sky := Sky.new()
-	var sky_material := ProceduralSkyMaterial.new()
-
-	# Configure for a pleasant daytime look (similar to Godot's default)
-	sky_material.sky_top_color = Color(0.385, 0.454, 0.55)  # Godot default blue
-	sky_material.sky_horizon_color = Color(0.646, 0.656, 0.67)
-	sky_material.ground_bottom_color = Color(0.2, 0.169, 0.133)
-	sky_material.ground_horizon_color = Color(0.646, 0.656, 0.67)
-	sky_material.sun_angle_max = 30.0
-	sky_material.sun_curve = 0.15
-
-	sky.sky_material = sky_material
-	env.sky = sky
-
-	# Ambient lighting from sky
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_sky_contribution = 1.0
-	env.ambient_light_energy = 1.0
-
-	# Reflected light from sky
-	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
-
-	# Screen-Space Reflections for water
-	env.ssr_enabled = true
-	env.ssr_max_steps = 64
-	env.ssr_fade_in = 0.15
-	env.ssr_fade_out = 2.0
-	env.ssr_depth_tolerance = 0.2
-
-	# Tonemapping (Filmic for good contrast without crushing blacks)
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure = 1.0
-	env.tonemap_white = 1.0
-
-	_fallback_world_env.environment = env
-	add_child(_fallback_world_env)
-
-	# Create fallback directional light
-	_fallback_light = DirectionalLight3D.new()
-	_fallback_light.name = "FallbackLight"
-
-	# Strong daylight settings (brighter than before)
-	_fallback_light.light_color = Color(1.0, 0.98, 0.95)  # Slightly warm white
-	_fallback_light.light_energy = 1.2  # Stronger light
-	_fallback_light.shadow_enabled = true
-	_fallback_light.shadow_bias = 0.03
-	_fallback_light.directional_shadow_max_distance = 500.0
-
-	# Point downward at an angle (like midday sun)
-	_fallback_light.rotation_degrees = Vector3(-45, -30, 0)
-
-	add_child(_fallback_light)
-
-
-## Sync sky state with toggle on initialization
-## Since Sky3D is lazily created, this just ensures fallback is in tree
-func _sync_sky_state() -> void:
-	# Sky3D is not created yet (lazy init), so fallback should be in tree
-	# WorldEnvironment doesn't have visible property - it's controlled by being in tree
-	if _fallback_light:
-		_fallback_light.visible = not _show_sky
-
-
-## Handle preprocess button press
+## Handle preprocess button press (delegates to TerrainPreprocessor)
 func _on_preprocess_pressed() -> void:
-	_log("[color=cyan]Starting terrain preprocessing...[/color]")
-	preprocess_btn.disabled = true
-	preprocess_status.text = "Preprocessing..."
-
-	if not terrain_3d:
-		_log("[color=red]ERROR: Terrain3D not initialized[/color]")
-		preprocess_btn.disabled = false
-		return
-
-	# Use COMBINED REGION approach (4x4 cells per region = 256x256 pixels)
-	# This matches the on-the-fly terrain generation and supports larger terrain
-
-	# First, collect all unique regions that have terrain data and find bounds
-	var regions_with_data: Dictionary = {}  # region_coord -> true
-	var min_region := Vector2i(999, 999)
-	var max_region := Vector2i(-999, -999)
-
-	for key: String in ESMManager.lands:
-		var land: LandRecord = ESMManager.lands[key]
-		if not land or not land.has_heights():
-			continue
-
-		# Get the region this cell belongs to
-		var region_coord: Vector2i = terrain_manager.cell_to_region(Vector2i(land.cell_x, land.cell_y))
-		regions_with_data[region_coord] = true
-
-		# Track bounds
-		min_region.x = mini(min_region.x, region_coord.x)
-		min_region.y = mini(min_region.y, region_coord.y)
-		max_region.x = maxi(max_region.x, region_coord.x)
-		max_region.y = maxi(max_region.y, region_coord.y)
-
-	_log("Found %d combined regions with data (from %d cells)" % [regions_with_data.size(), ESMManager.lands.size()])
-	_log("Region bounds: (%d,%d) to (%d,%d)" % [min_region.x, min_region.y, max_region.x, max_region.y])
-
-	# Expand bounds by 2 regions on each side for ocean floor
-	const OCEAN_PADDING := 2
-	min_region.x = maxi(min_region.x - OCEAN_PADDING, -16)
-	min_region.y = maxi(min_region.y - OCEAN_PADDING, -16)
-	max_region.x = mini(max_region.x + OCEAN_PADDING, 15)
-	max_region.y = mini(max_region.y + OCEAN_PADDING, 15)
-
-	# Calculate total regions (including ocean floor)
-	var total_x := max_region.x - min_region.x + 1
-	var total_y := max_region.y - min_region.y + 1
-	var total_regions := total_x * total_y
-
-	_log("Processing %d total regions (including %d ocean floor regions)" % [
-		total_regions, total_regions - regions_with_data.size()])
-
-	var processed := 0
-	var ocean_floor := 0
-
-	# Create callable for getting LAND records
-	var get_land_func := func(cell_x: int, cell_y: int) -> LandRecord:
-		return ESMManager.get_land(cell_x, cell_y)
-
-	# Process ALL regions in the expanded bounds
-	for ry in range(min_region.y, max_region.y + 1):
-		for rx in range(min_region.x, max_region.x + 1):
-			var region_coord := Vector2i(rx, ry)
-
-			if regions_with_data.has(region_coord):
-				# Region has LAND data - import normally
-				if terrain_manager.import_combined_region(terrain_3d, region_coord, get_land_func):
-					processed += 1
-			else:
-				# No LAND data - create ocean floor region
-				if terrain_manager.import_ocean_floor_region(terrain_3d, region_coord):
-					ocean_floor += 1
-
-			# Update progress
-			var done := processed + ocean_floor
-			var percent := float(done) / float(total_regions) * 100.0
-			preprocess_status.text = "Processing... %.0f%% (%d/%d regions)" % [percent, done, total_regions]
-
-			# Yield periodically to keep UI responsive
-			if done % 10 == 0:
-				await get_tree().process_frame
-
-	# Save to disk (cache folder)
-	var terrain_data_dir := SettingsManager.get_terrain_path()
-	DirAccess.make_dir_recursive_absolute(terrain_data_dir)
-	terrain_3d.data.save_directory(terrain_data_dir)
-
-	_log("[color=green]Terrain preprocessing complete![/color]")
-	_log("  Terrain regions: %d (4x4 cells each)" % processed)
-	_log("  Ocean floor regions: %d" % ocean_floor)
-	_log("  Saved to: %s" % terrain_data_dir)
-
-	preprocess_btn.disabled = false
-	_update_preprocess_status()
+	var ui_refs := {"preprocess_btn": preprocess_btn, "preprocess_status": preprocess_status}
+	await _terrain_preprocessor.run(terrain_3d, terrain_manager, ui_refs)
 
 
 func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
@@ -1428,6 +927,10 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	_profiling_report = ProfilingReport.new(
 		profiler, cell_manager, world_streaming_manager, _log, self
 	)
+
+	# Set streaming manager ref on stats collector (created during _setup_visibility_toggles)
+	if _stats_collector:
+		_stats_collector.set_world_streaming_manager(world_streaming_manager)
 
 
 ## Console command: debug_streaming
@@ -1494,177 +997,12 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 
 
 func _update_stats() -> void:
-	var stats: Dictionary = {}
-	if world_streaming_manager:
-		stats = world_streaming_manager.get_stats()
-
-	# Get profiler data
-	var fps := 0.0
-	var frame_ms := 0.0
-	var draw_calls := 0
-	var primitives := 0
-	var mem_mb := 0.0
-	var p95_ms := 0.0
-
-	if profiler:
-		fps = profiler.get_fps()
-		frame_ms = profiler.get_avg_frame_time_ms()
-		var render: Dictionary = profiler.get_render_stats()
-		var render_draw_calls: int = render.draw_calls
-		var render_primitives: int = render.primitives
-		draw_calls = render_draw_calls
-		primitives = render_primitives
-		var mem: Dictionary = profiler.get_memory_stats()
-		var static_mem: float = mem.static_memory_mb
-		mem_mb = static_mem
-		var percentiles: Dictionary = profiler.get_frame_time_percentiles()
-		var p95_val: float = percentiles.p95
-		p95_ms = p95_val
-
-	# Get terrain stats
-	var total_regions := 0
-	if terrain_3d and terrain_3d.data:
-		total_regions = terrain_3d.data.get_region_count()
-
-	var async_pending: int = stats.get("async_pending", 0)
-	var inst_queue: int = stats.get("instantiation_queue", 0)
-
-	var camera_mode_str := "Fly" if _camera_mode == CameraMode.FLY_CAMERA else "Player"
-	var camera_cell: Vector2i = stats.get("camera_cell", Vector2i(0, 0))
-
-	# Update foldable panel labels
-	_update_panel_labels(fps, frame_ms, p95_ms, draw_calls, primitives, mem_mb,
-						  stats, total_regions, camera_mode_str, camera_cell)
-
-	# Also update legacy stats_text if visible (backwards compatibility)
-	if stats_text and stats_text.visible:
-		stats_text.text = """[b]Performance[/b]
-FPS: %.1f (%.2f ms)
-P95: %.2f ms
-Draw calls: %d
-Primitives: %dk
-Memory: %.1f MB
-
-[b]Streaming[/b]
-Loaded cells: %d
-Queue: %d (peak: %d)
-Async: %d | Inst: %d
-View dist: %d cells [+/-]
-
-[b]Terrain[/b]
-Regions: %d
-
-[b]Visibility[/b]
-Models [M]: %s | NPCs [N]: %s | Ocean [O]: %s | Sky [K]: %s
-Water quality: %s
-
-[b]Camera[/b]
-Mode [P]: %s
-Cell: (%d, %d)
-
-[color=gray]F3: Overlay | F4: Report | P: Toggle Camera[/color]""" % [
-			fps, frame_ms,
-			p95_ms,
-			draw_calls,
-			primitives / 1000.0,
-			mem_mb,
-			stats.get("loaded_cells", 0),
-			stats.get("load_queue_size", 0),
-			stats.get("queue_high_water_mark", 0),
-			async_pending,
-			inst_queue,
-			_current_view_distance,
-			total_regions,
-			"ON",  # Models are always visible (no toggle)
-		"ON" if _show_characters else "OFF",
-		"ON" if _show_ocean else "OFF",
-		"ON" if _show_sky else "OFF",
-		ocean_manager.get_water_quality_name() if ocean_manager else "N/A",
-			camera_mode_str,
-			camera_cell.x,
-			camera_cell.y,
-		]
-
-
-## Update labels in foldable panels
-func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
-						   primitives: int, mem_mb: float, stats: Dictionary,
-						   total_regions: int, camera_mode_str: String, camera_cell: Vector2i) -> void:
-	if not _panels:
-		return
-
-	# Update performance panel
-	if _panels.performance_panel:
-		var content := _panels.performance_panel.get_content_container()
-		var fps_label: Label = content.get_node_or_null("FPSLabel")
-		if fps_label:
-			fps_label.text = "FPS: %.1f (%.2f ms avg)" % [fps, frame_ms]
-		var timing_label: Label = content.get_node_or_null("TimingLabel")
-		if timing_label:
-			timing_label.text = "P95: %.2f ms" % p95_ms
-		var render_label: Label = content.get_node_or_null("RenderLabel")
-		if render_label:
-			render_label.text = "Draw: %d | Tris: %.1fk" % [draw_calls, primitives / 1000.0]
-		var memory_label: Label = content.get_node_or_null("MemoryLabel")
-		if memory_label:
-			memory_label.text = "Memory: %.1f MB" % mem_mb
-
-	# Update navigation panel
-	if _panels.navigation_panel:
-		var content := _panels.navigation_panel.get_content_container()
-		var camera_label: Label = content.get_node_or_null("CameraLabel")
-		if camera_label:
-			camera_label.text = "Cell: (%d, %d) | Mode: %s [P]" % [camera_cell.x, camera_cell.y, camera_mode_str]
-		var dist_label: Label = content.get_node_or_null("DistLabel")
-		if dist_label:
-			dist_label.text = "%d cells" % _current_view_distance
-
-	# Update terrain panel
-	if _panels.terrain_panel:
-		var content := _panels.terrain_panel.get_content_container()
-		var terrain_label: Label = content.get_node_or_null("TerrainLabel")
-		if terrain_label:
-			terrain_label.text = "Regions loaded: %d" % total_regions
-		# Update preprocess status
-		var status_label_panel: Label = content.get_node_or_null("PreprocessStatusLabel")
-		if status_label_panel:
-			var terrain_data_dir := SettingsManager.get_terrain_path()
-			var has_terrain := DirAccess.dir_exists_absolute(terrain_data_dir)
-			if has_terrain:
-				status_label_panel.text = "Status: Preprocessed"
-				status_label_panel.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
-			else:
-				status_label_panel.text = "Status: Not preprocessed"
-				status_label_panel.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
-
-	# Update debug panel
-	if _panels.debug_panel:
-		var content := _panels.debug_panel.get_content_container()
-		var debug_label: Label = content.get_node_or_null("DebugInfoLabel")
-		if debug_label:
-			var loaded_cells: int = stats.get("loaded_cells", 0)
-			var queue_size: int = stats.get("load_queue_size", 0)
-			var async_pending: int = stats.get("async_pending", 0)
-			debug_label.text = "Cells: %d | Queue: %d | Async: %d" % [loaded_cells, queue_size, async_pending]
-
-		# Update ODM stats (key changed from "per_object_lod" to "object_distance_manager")
-		var odm_label: Label = content.get_node_or_null("ODMLabel")
-		if odm_label:
-			var odm_stats: Dictionary = stats.get("object_distance_manager", {})
-			var total_obj: int = odm_stats.get("total_objects", 0)
-			var near_obj: int = odm_stats.get("near_visible", 0)
-			var mid_obj: int = odm_stats.get("mid_visible", 0)
-			var far_obj: int = odm_stats.get("far_visible", 0)
-			odm_label.text = "ODM: %d tracked | NEAR: %d MID: %d FAR: %d" % [total_obj, near_obj, mid_obj, far_obj]
-
-		# Update streaming profiler summary
-		var profiler_label_node: Label = content.get_node_or_null("ProfilerLabel")
-		if profiler_label_node and world_streaming_manager and world_streaming_manager.has_method("get_streaming_profiler"):
-			var sp: StreamingProfiler = world_streaming_manager.get_streaming_profiler()
-			if sp:
-				profiler_label_node.text = sp.get_compact_summary()
-			else:
-				profiler_label_node.text = "Profiler: not initialized"
+	if _stats_collector:
+		var state := {
+			"camera_mode_str": "Fly" if _camera_mode == CameraMode.FLY_CAMERA else "Player",
+			"view_distance": _current_view_distance,
+		}
+		_stats_collector.update(state)
 
 
 # ==================== UI Helpers ====================
@@ -1700,7 +1038,7 @@ func _update_loading(progress: float, status: String) -> void:
 func _log(message: String) -> void:
 	if log_text:
 		log_text.append_text(message + "\n")
-	print(message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
+	Logger.info("tools", message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
 
 
 # ==================== Input Handling ====================
@@ -1729,11 +1067,8 @@ func _input(event: InputEvent) -> void:
 				stats_panel.visible = _perf_overlay_visible
 				_log("Performance overlay: %s" % ("ON" if _perf_overlay_visible else "OFF"))
 			KEY_F4:
-				# Dump detailed profiling report - handled by DebugSystem
-				# Legacy fallback if DebugSystem not available
-				if debug_system:
-					pass  # DebugSystem handles this via its own _input
-				elif _profiling_report:
+				# Handled by DebugSystem; fallback to profiling report
+				if not debug_system and _profiling_report:
 					_profiling_report.dump_report()
 			KEY_EQUAL, KEY_KP_ADD:  # + key
 				_adjust_view_distance(1)
@@ -1748,23 +1083,14 @@ func _input(event: InputEvent) -> void:
 			KEY_K:  # Toggle sky/day-night cycle
 				if _panels and _panels.show_sky_toggle:
 					_panels.show_sky_toggle.button_pressed = not _panels.show_sky_toggle.button_pressed
-			KEY_F9:  # Toggle diagnostic overlay - handled by DebugSystem
-				# DebugSystem uses its own overlay; legacy diagnostic_overlay kept for compatibility
-				if debug_system:
-					pass  # DebugSystem handles this via its own _input
-				elif diagnostic_overlay:
+			KEY_F9:  # Handled by DebugSystem; fallback to legacy overlay
+				if not debug_system and diagnostic_overlay:
 					diagnostic_overlay.visible = not diagnostic_overlay.visible
 					_log("Diagnostic overlay: %s" % ("ON" if diagnostic_overlay.visible else "OFF"))
-			KEY_F11:  # Dump current state to log - handled by DebugSystem
-				# DebugSystem handles this; legacy fallback for crash_reporter
-				if debug_system:
-					pass  # DebugSystem handles this via its own _input
-				elif crash_reporter:
+			KEY_F11:  # Handled by DebugSystem; fallback to crash reporter
+				if not debug_system and crash_reporter:
 					crash_reporter.dump_state_now()
 					_log("[color=cyan]State dumped to crash report log[/color]")
-			KEY_F12:  # Toggle auto-test - handled by DebugSystem
-				# No legacy fallback - this is new functionality
-				pass  # DebugSystem handles this via its own _input
 
 
 func _process(delta: float) -> void:
@@ -1838,8 +1164,8 @@ func _setup_interior_browser() -> void:
 func _on_browser_switch_to_interior() -> void:
 	if terrain_3d:
 		terrain_3d.visible = false
-	if ocean_manager and ocean_manager.has_method("set_enabled"):
-		ocean_manager.set_enabled(false)
+	if _ocean_controls:
+		_ocean_controls.set_enabled(false)
 	if world_streaming_manager:
 		world_streaming_manager.set_process(false)
 
@@ -1848,8 +1174,8 @@ func _on_browser_switch_to_interior() -> void:
 func _on_browser_switch_to_world() -> void:
 	if terrain_3d:
 		terrain_3d.visible = true
-	if ocean_manager and ocean_manager.has_method("set_enabled") and _show_ocean:
-		ocean_manager.set_enabled(true)
+	if _ocean_controls and _ocean_controls.show_ocean:
+		_ocean_controls.set_enabled(true)
 	if world_streaming_manager:
 		world_streaming_manager.set_process(true)
 

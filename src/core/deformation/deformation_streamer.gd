@@ -19,7 +19,7 @@ var _camera_position: Vector3 = Vector3.ZERO
 var _last_camera_region: Vector2i = Vector2i.ZERO
 
 func _ready():
-	print("[DeformationStreamer] Streamer initialized")
+	Logger.info("deformation", "DeformationStreamer: Streamer initialized")
 
 	# Try to connect to existing terrain streaming system
 	_connect_to_terrain_streamer()
@@ -37,32 +37,32 @@ func _connect_to_terrain_streamer():
 	# Try to find WorldStreamingManager
 	var world_streaming_manager = get_node_or_null("/root/WorldStreamingManager")
 	if world_streaming_manager == null:
-		print("[DeformationStreamer] Warning: WorldStreamingManager not found, manual region management required")
+		Logger.warn("deformation", "DeformationStreamer: WorldStreamingManager not found, manual region management required")
 		return
 
 	# Try to find GenericTerrainStreamer
 	var terrain_streamer = world_streaming_manager.get_node_or_null("GenericTerrainStreamer")
 	if terrain_streamer == null:
-		print("[DeformationStreamer] Warning: GenericTerrainStreamer not found")
+		Logger.warn("deformation", "DeformationStreamer: GenericTerrainStreamer not found")
 		return
 
 	# Connect to terrain streaming signals if they exist
 	if terrain_streamer.has_signal("region_loaded"):
 		terrain_streamer.connect("region_loaded", _on_terrain_region_loaded)
-		print("[DeformationStreamer] Connected to terrain region_loaded signal")
+		Logger.info("deformation", "DeformationStreamer: Connected to terrain region_loaded signal")
 
 	if terrain_streamer.has_signal("region_unloaded"):
 		terrain_streamer.connect("region_unloaded", _on_terrain_region_unloaded)
-		print("[DeformationStreamer] Connected to terrain region_unloaded signal")
+		Logger.info("deformation", "DeformationStreamer: Connected to terrain region_unloaded signal")
 
 # Terrain region loaded callback
 func _on_terrain_region_loaded(region_coord: Vector2i):
-	print("[DeformationStreamer] Terrain region loaded: ", region_coord)
+	Logger.debug("deformation", "DeformationStreamer: Terrain region loaded: %s" % region_coord)
 	request_load_region(region_coord)
 
 # Terrain region unloaded callback
 func _on_terrain_region_unloaded(region_coord: Vector2i):
-	print("[DeformationStreamer] Terrain region unloaded: ", region_coord)
+	Logger.debug("deformation", "DeformationStreamer: Terrain region unloaded: %s" % region_coord)
 	request_unload_region(region_coord)
 
 # Request deformation region load

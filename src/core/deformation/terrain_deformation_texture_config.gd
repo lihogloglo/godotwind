@@ -131,11 +131,11 @@ func _apply_volcanic_preset() -> void:
 
 ## Debug: Print configuration
 func print_config() -> void:
-	print("=== Terrain Deformation Config ===")
-	print("Textures: ", texture_heights.size())
+	Logger.debug("deformation", "=== Terrain Deformation Config ===")
+	Logger.debug("deformation", "Textures: %d" % texture_heights.size())
 	for entry in texture_heights:
-		print("  [%2d] %-25s: %.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
-	print("==================================")
+		Logger.debug("deformation", "  [%2d] %-25s: %.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
+	Logger.debug("deformation", "==================================")
 
 
 # Individual texture entry

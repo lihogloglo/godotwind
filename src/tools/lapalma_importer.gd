@@ -47,9 +47,9 @@ func _run_import() -> void:
 		return
 	_is_importing = true
 
-	print("\n" + "=".repeat(60))
-	print("La Palma Terrain Import (Memory-Optimized)")
-	print("=".repeat(60))
+	Logger.info("tools", "=".repeat(60))
+	Logger.info("tools", "La Palma Terrain Import (Memory-Optimized)")
+	Logger.info("tools", "=".repeat(60))
 
 	# Load metadata
 	var meta_path := DATA_DIR + "/metadata.json"
@@ -71,10 +71,10 @@ func _run_import() -> void:
 	var region_size: int = int(_metadata.region_size)
 	var vs: float = float(_metadata.vertex_spacing)
 
-	print("\nWorld: %s" % _metadata.get("world_name", "Unknown"))
-	print("Region size: %d pixels" % region_size)
-	print("Vertex spacing: %.1fm" % vs)
-	print("Batch size: %d regions" % batch_size)
+	Logger.info("tools", "World: %s" % _metadata.get("world_name", "Unknown"))
+	Logger.info("tools", "Region size: %d pixels" % region_size)
+	Logger.info("tools", "Vertex spacing: %.1fm" % vs)
+	Logger.info("tools", "Batch size: %d regions" % batch_size)
 
 	# Configure terrain
 	vertex_spacing = vs
@@ -98,7 +98,7 @@ func _run_import() -> void:
 			valid_regions.append(reg)
 
 	var total := valid_regions.size()
-	print("\nRegions to import: %d (of %d total)" % [total, regions.size()])
+	Logger.info("tools", "Regions to import: %d (of %d total)" % [total, regions.size()])
 
 	# Import in small batches
 	var start_time := Time.get_ticks_msec()
@@ -122,17 +122,17 @@ func _run_import() -> void:
 			var elapsed := (Time.get_ticks_msec() - start_time) / 1000.0
 			var rate := imported / elapsed if elapsed > 0 else 0.0
 			var remaining := (total - imported) / rate if rate > 0 else 0.0
-			print("  [%d/%d] %.1f/sec, ~%.0fs remaining" % [imported, total, rate, remaining])
+			Logger.info("tools", "  [%d/%d] %.1f/sec, ~%.0fs remaining" % [imported, total, rate, remaining])
 
 	var elapsed := (Time.get_ticks_msec() - start_time) / 1000.0
 
-	print("\n" + "=".repeat(60))
-	print("Import Complete!")
-	print("=".repeat(60))
-	print("  Regions imported: %d" % imported)
-	print("  Time: %.1f seconds" % elapsed)
-	print("\nNow click 'Save Terrain' to save to disk.")
-	print("=".repeat(60) + "\n")
+	Logger.info("tools", "=".repeat(60))
+	Logger.info("tools", "Import Complete!")
+	Logger.info("tools", "=".repeat(60))
+	Logger.info("tools", "  Regions imported: %d" % imported)
+	Logger.info("tools", "  Time: %.1f seconds" % elapsed)
+	Logger.info("tools", "Now click 'Save Terrain' to save to disk.")
+	Logger.info("tools", "=".repeat(60))
 
 	_is_importing = false
 
@@ -186,7 +186,7 @@ func _save_terrain() -> void:
 		dir.make_dir_recursive(OUTPUT_DIR.replace("res://", ""))
 
 	var global_path := ProjectSettings.globalize_path(OUTPUT_DIR)
-	print("\nSaving terrain to: " + global_path)
+	Logger.info("tools", "Saving terrain to: " + global_path)
 
 	data.save_directory(global_path)
 
@@ -203,26 +203,26 @@ func _save_terrain() -> void:
 					total_size += f.get_length()
 			fname = out_dir.get_next()
 
-	print("\n" + "=".repeat(60))
-	print("Terrain Saved!")
-	print("=".repeat(60))
-	print("  Output: %s" % OUTPUT_DIR)
-	print("  Size: %.1f MB" % (total_size / 1024.0 / 1024.0))
-	print("  Regions: %d" % data.get_region_count())
-	print("\nYou can now delete:")
-	print("  - lapalma_processed/  (~900 MB)")
-	print("  - lapalma_map/        (~2.2 GB)")
-	print("=".repeat(60) + "\n")
+	Logger.info("tools", "=".repeat(60))
+	Logger.info("tools", "Terrain Saved!")
+	Logger.info("tools", "=".repeat(60))
+	Logger.info("tools", "  Output: %s" % OUTPUT_DIR)
+	Logger.info("tools", "  Size: %.1f MB" % (total_size / 1024.0 / 1024.0))
+	Logger.info("tools", "  Regions: %d" % data.get_region_count())
+	Logger.info("tools", "You can now delete:")
+	Logger.info("tools", "  - lapalma_processed/  (~900 MB)")
+	Logger.info("tools", "  - lapalma_map/        (~2.2 GB)")
+	Logger.info("tools", "=".repeat(60))
 
 
 func _clear_terrain() -> void:
 	if not data:
 		return
-	print("Clearing terrain...")
+	Logger.info("tools", "Clearing terrain...")
 	for region: Terrain3DRegion in data.get_regions_active():
 		data.remove_region(region, false)
 	data.update_maps(Terrain3DRegion.TYPE_MAX, true, false)
-	print("Terrain cleared.")
+	Logger.info("tools", "Terrain cleared.")
 
 
 func _create_simple_colormap(heightmap: Image, size: int) -> Image:

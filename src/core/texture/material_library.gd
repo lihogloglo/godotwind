@@ -249,8 +249,10 @@ static func get_cache_size() -> int:
 
 ## Debug: Print all cached materials
 static func print_cache_contents() -> void:
-	print("MaterialLibrary Cache (%d materials):" % _cache.size())
+	var lines := PackedStringArray()
+	lines.append("MaterialLibrary Cache (%d materials):" % _cache.size())
 	for key: String in _cache:
 		var mat: StandardMaterial3D = _cache[key]
 		var tex_name := mat.albedo_texture.resource_path.get_file() if mat.albedo_texture else "none"
-		print("  %s -> %s" % [key.substr(0, 50), tex_name])
+		lines.append("  %s -> %s" % [key.substr(0, 50), tex_name])
+	Logger.debug("textures", "\n".join(lines))

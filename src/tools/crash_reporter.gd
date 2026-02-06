@@ -67,7 +67,7 @@ func _ready() -> void:
 		dir.make_dir("logs")
 
 	_log_operation("SESSION_START")
-	print("[CrashReporter] Logging to: %s" % ProjectSettings.globalize_path(log_path))
+	Logger.info("tools", "CrashReporter logging to: %s" % ProjectSettings.globalize_path(log_path))
 
 
 func _process(_delta: float) -> void:
@@ -110,7 +110,7 @@ func connect_to_systems(world_explorer: Node, wsm: Node = null, os: Node = null,
 		_diagnostic_overlay.issue_detected.connect(_on_issue_detected)
 
 	_log_operation("SYSTEMS_CONNECTED")
-	print("[CrashReporter] Connected to systems")
+	Logger.info("tools", "CrashReporter connected to systems")
 
 
 func _on_instantiation_requested(_object_id: int, model_path: String, world_transform: Transform3D, cell_grid: Vector2i, _ref_id: String, _ref_num: int) -> void:
@@ -300,7 +300,7 @@ func _update_camera_info() -> void:
 func dump_state_now() -> void:
 	_log_operation("MANUAL_DUMP_REQUESTED")
 	_write_state()
-	print("[CrashReporter] State dumped to: %s" % ProjectSettings.globalize_path(log_path))
+	Logger.info("tools", "CrashReporter state dumped to: %s" % ProjectSettings.globalize_path(log_path))
 
 
 ## Get the current report as string (for display)

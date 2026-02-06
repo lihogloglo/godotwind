@@ -227,7 +227,7 @@ func _load_file_native_cached(path: String) -> Error:
 	loaded_files.append(path)
 
 	# Detailed timing breakdown for optimization
-	print("ESMManager: Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
+	Logger.info("esm", "Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
 		path.get_file(), total_time, csharp_time, populate_time, supplement_time])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
@@ -253,7 +253,7 @@ func _load_file_native(path: String) -> Error:
 	load_time_ms += stats.get("load_time_ms", 0.0) as float
 	loaded_files.append(path)
 
-	print("ESMManager: Loaded %s via native C# in %.1f ms" % [path, stats.get("load_time_ms", 0.0)])
+	Logger.info("esm", "Loaded %s via native C# in %.1f ms" % [path, stats.get("load_time_ms", 0.0)])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
 	return OK
@@ -286,7 +286,7 @@ func _populate_simple_records(
 			if not dominated or new_priority > dominated_priority:
 				_all_records[key] = {"record": rec, "type": type_name}
 			elif dominated and "mushroom" in str(key):
-				print("[ESM-COLLISION] Key '%s': keeping %s (pri=%d) over %s (pri=%d)" % [
+				Logger.debug("esm", "Key '%s': keeping %s (pri=%d) over %s (pri=%d)" % [
 					key, dominated_by, dominated_priority, type_name, new_priority
 				])
 
@@ -598,7 +598,7 @@ func _populate_from_native(loader: RefCounted) -> void:
 		for cell_key: Variant in cells:
 			var cell_rec: CellRecord = cells[cell_key]
 			ref_count += cell_rec.references.size()
-		print("  Populate timing: statics=%dms, simple=%dms, cells+refs=%dms (%d refs), lands+ltex=%dms, actors+items=%dms" % [
+		Logger.debug("esm", "Populate timing: statics=%dms, simple=%dms, cells+refs=%dms (%d refs), lands+ltex=%dms, actors+items=%dms" % [
 			t1 - t0, t2 - t1, t3 - t2, ref_count, t4 - t3, t5 - t4])
 
 
@@ -641,7 +641,7 @@ func _supplement_actor_data(path: String) -> void:
 	reader.close()
 
 	if records_loaded > 0:
-		print("ESMManager: Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d)" % [
+		Logger.info("esm", "Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d)" % [
 			records_loaded, classes.size(), factions.size(), skills.size(), birthsigns.size()
 		])
 
@@ -656,15 +656,11 @@ func _load_file_gdscript(path: String) -> Error:
 		loading_failed.emit(path, "Failed to open file")
 		return err
 
-	print("Loading: %s" % path)
-	print("  Author: %s" % reader.header.author)
-	print("  Description: %s" % reader.header.description.substr(0, 100))
-	print("  Records: %d" % reader.header.record_count)
-
+	Logger.info("esm", "Loading: %s" % path)
+	Logger.info("esm", "  Author: %s, Records: %d" % [reader.header.author, reader.header.record_count])
 	if reader.header.master_files.size() > 0:
-		print("  Masters:")
 		for master in reader.header.master_files:
-			print("    - %s (%d bytes)" % [master.name, master.size])
+			Logger.info("esm", "  Master: %s (%d bytes)" % [master.name, master.size])
 
 	# Load all records
 	var records_loaded := 0
@@ -707,15 +703,14 @@ func _load_file_gdscript(path: String) -> Error:
 	total_records_loaded += records_parsed
 	loaded_files.append(path)
 
-	print("  Loaded %d records in %d ms" % [records_parsed, elapsed])
-
-	# Debug: Show skipped record types
+	Logger.info("esm", "  Loaded %d records in %d ms" % [records_parsed, elapsed])
 	if skipped_types.size() > 0:
-		print("  Skipped record types:")
+		var skipped_summary := ""
 		var sorted_skipped := skipped_types.keys()
 		sorted_skipped.sort()
 		for type_name: String in sorted_skipped:
-			print("    %s: %d" % [type_name, skipped_types[type_name]])
+			skipped_summary += " %s:%d" % [type_name, skipped_types[type_name]]
+		Logger.debug("esm", "  Skipped types:%s" % skipped_summary)
 	loading_completed.emit(path, records_loaded)
 
 	return OK
@@ -1269,73 +1264,30 @@ func get_stats() -> Dictionary:
 ## Print a summary of loaded data
 func print_stats() -> void:
 	var stats := get_stats()
-	print("=== ESM Manager Stats ===")
-	print("Files loaded: %d" % stats.files)
-	print("Total records: %d" % stats.total_records)
-	print("Load time: %.2f seconds" % (stats.load_time_ms / 1000.0))
-	print("")
-	print("--- World ---")
-	print("  Statics: %d" % stats.statics)
-	print("  Cells: %d (exterior: %d)" % [stats.cells, stats.exterior_cells])
-	print("  Lands: %d" % stats.lands)
-	print("  Land Textures: %d" % stats.land_textures)
-	print("  Regions: %d" % stats.regions)
-	print("  Pathgrids: %d" % stats.pathgrids)
-	print("")
-	print("--- Actors ---")
-	print("  NPCs: %d" % stats.npcs)
-	print("  Creatures: %d" % stats.creatures)
-	print("  Body Parts: %d" % stats.body_parts)
-	print("")
-	print("--- Items ---")
-	print("  Weapons: %d" % stats.weapons)
-	print("  Armors: %d" % stats.armors)
-	print("  Clothing: %d" % stats.clothing)
-	print("  Books: %d" % stats.books)
-	print("  Potions: %d" % stats.potions)
-	print("  Ingredients: %d" % stats.ingredients)
-	print("  Misc Items: %d" % stats.misc_items)
-	print("  Containers: %d" % stats.containers)
-	print("  Lights: %d" % stats.lights)
-	print("  Doors: %d" % stats.doors)
-	print("  Activators: %d" % stats.activators)
-	print("")
-	print("--- Magic ---")
-	print("  Spells: %d" % stats.spells)
-	print("  Enchantments: %d" % stats.enchantments)
-	print("  Magic Effects: %d" % stats.magic_effects)
-	print("")
-	print("--- Character ---")
-	print("  Classes: %d" % stats.classes)
-	print("  Races: %d" % stats.races)
-	print("  Factions: %d" % stats.factions)
-	print("  Skills: %d" % stats.skills)
-	print("  Birthsigns: %d" % stats.birthsigns)
-	print("")
-	print("--- Dialogue ---")
-	print("  Topics: %d" % stats.dialogues)
-	print("  Topics with responses: %d" % stats.dialogue_topics_with_infos)
-	print("")
-	print("--- Audio ---")
-	print("  Sounds: %d" % stats.sounds)
-	print("  Sound Generators: %d" % stats.sound_generators)
-	print("")
-	print("--- Scripts ---")
-	print("  Scripts: %d" % stats.scripts)
-	print("  Game Settings: %d" % stats.game_settings)
-	print("  Globals: %d" % stats.globals)
-	print("  Start Scripts: %d" % stats.start_scripts)
-	print("")
-	print("--- Leveled Lists ---")
-	print("  Leveled Items: %d" % stats.leveled_items)
-	print("  Leveled Creatures: %d" % stats.leveled_creatures)
-
+	var lines: PackedStringArray = [
+		"=== ESM Manager Stats ===",
+		"Files loaded: %d | Total records: %d | Load time: %.2fs" % [stats.files, stats.total_records, stats.load_time_ms / 1000.0],
+		"World: statics=%d cells=%d(%d ext) lands=%d ltex=%d regions=%d pathgrids=%d" % [
+			stats.statics, stats.cells, stats.exterior_cells, stats.lands, stats.land_textures, stats.regions, stats.pathgrids],
+		"Actors: npcs=%d creatures=%d bodyparts=%d" % [stats.npcs, stats.creatures, stats.body_parts],
+		"Items: weapons=%d armors=%d clothing=%d books=%d potions=%d ingredients=%d misc=%d containers=%d lights=%d doors=%d activators=%d" % [
+			stats.weapons, stats.armors, stats.clothing, stats.books, stats.potions, stats.ingredients,
+			stats.misc_items, stats.containers, stats.lights, stats.doors, stats.activators],
+		"Magic: spells=%d enchantments=%d effects=%d" % [stats.spells, stats.enchantments, stats.magic_effects],
+		"Character: classes=%d races=%d factions=%d skills=%d birthsigns=%d" % [
+			stats.classes, stats.races, stats.factions, stats.skills, stats.birthsigns],
+		"Dialogue: topics=%d (with responses=%d)" % [stats.dialogues, stats.dialogue_topics_with_infos],
+		"Audio: sounds=%d generators=%d | Scripts: %d | Settings: %d | Globals: %d" % [
+			stats.sounds, stats.sound_generators, stats.scripts, stats.game_settings, stats.globals],
+		"Leveled: items=%d creatures=%d" % [stats.leveled_items, stats.leveled_creatures],
+	]
 	if records_by_type.size() > 0:
-		print("")
-		print("--- Records by Type ---")
+		var type_parts: PackedStringArray = []
 		var sorted_types := records_by_type.keys()
 		sorted_types.sort()
 		for type_name: String in sorted_types:
-			print("  %s: %d" % [type_name, records_by_type[type_name]])
+			type_parts.append("%s:%d" % [type_name, records_by_type[type_name]])
+		lines.append("By type: %s" % " ".join(type_parts))
+	Logger.info("esm", "\n".join(lines))
 
 #endregion

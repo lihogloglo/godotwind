@@ -31,8 +31,8 @@ func _init() -> void:
 		print("MeshOptimizer: Using native meshoptimizer library")
 	else:
 		print("MeshOptimizer: Native library not available, using GDScript fallback")
-		# Load fallback (the existing MeshSimplifier)
-		var SimplifierClass = load("res://src/core/nif/mesh_simplifier.gd")
+		# Load fallback (QEM mesh decimation in GDScript)
+		var SimplifierClass = load("res://src/tools/prebaking/mesh_simplifier_v2.gd")
 		if SimplifierClass:
 			_fallback = SimplifierClass.new()
 

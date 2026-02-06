@@ -212,7 +212,7 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		_impostor_renderer.set("debug_enabled", debug_enabled)
 
 	_initialized = true
-	print("[NativeStreamingManager] Initialized with native visibility_range streaming")
+	Logger.info("streaming", "Initialized with native visibility_range streaming")
 
 	# Only start tracking if camera was explicitly provided
 	# If camera is null, wait for set_camera() to be called later
@@ -220,10 +220,10 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	if _camera:
 		_camera_position = _camera.global_position
 		_camera_cell = DU.world_to_cell(_camera_position)
-		print("[NativeStreamingManager] Initial camera cell: %s (position: %s)" % [_camera_cell, _camera_position])
+		Logger.info("streaming", "Initial camera cell: %s (position: %s)" % [_camera_cell, _camera_position])
 		_update_loaded_cells()
 	else:
-		print("[NativeStreamingManager] No camera provided - streaming will start when set_camera() is called")
+		Logger.info("streaming", "No camera provided - streaming will start when set_camera() is called")
 
 	return OK
 
@@ -253,14 +253,14 @@ func set_cell_manager(cell_manager: CellManagerScript) -> void:
 func _process(delta: float) -> void:
 	if not _initialized:
 		if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
-			print("[NativeStreamingManager] _process skipped: not initialized")
+			Logger.debug("streaming", "_process skipped: not initialized")
 		return
 
 	if not _camera:
 		_camera = get_viewport().get_camera_3d()
 		if not _camera:
 			if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
-				print("[NativeStreamingManager] _process skipped: no camera")
+				Logger.debug("streaming", "_process skipped: no camera")
 			return
 
 	# Update camera position
@@ -707,38 +707,40 @@ func get_stats() -> Dictionary:
 
 ## Print detailed debug information to console (for troubleshooting)
 func print_debug_info() -> void:
-	print("\n========== NATIVE STREAMING DEBUG INFO ==========")
-	print("Initialized: ", _initialized)
-	print("Camera: ", _camera)
-	print("Camera Cell: ", _camera_cell)
-	print("Camera Position: ", _camera_position)
-	print("\nSettings:")
-	print("  load_radius_cells: ", load_radius_cells)
-	print("  impostor_radius_cells: ", impostor_radius_cells)
-	print("  frame_budget_ms: ", frame_budget_ms)
-	print("  use_native_visibility: ", use_native_visibility)
-	print("  async_loading_enabled: ", async_loading_enabled)
-	print("  debug_enabled: ", debug_enabled)
-	print("\nAsync Loading:")
-	print("  BackgroundProcessor: ", _background_processor != null)
-	print("  Pending async requests: ", _async_requests.size())
-	print("  Load queue size: ", _pending_load_queue.size())
+	var lines: Array[String] = []
+	lines.append("========== NATIVE STREAMING DEBUG INFO ==========")
+	lines.append("Initialized: %s" % _initialized)
+	lines.append("Camera: %s" % _camera)
+	lines.append("Camera Cell: %s" % _camera_cell)
+	lines.append("Camera Position: %s" % _camera_position)
+	lines.append("Settings:")
+	lines.append("  load_radius_cells: %s" % load_radius_cells)
+	lines.append("  impostor_radius_cells: %s" % impostor_radius_cells)
+	lines.append("  frame_budget_ms: %s" % frame_budget_ms)
+	lines.append("  use_native_visibility: %s" % use_native_visibility)
+	lines.append("  async_loading_enabled: %s" % async_loading_enabled)
+	lines.append("  debug_enabled: %s" % debug_enabled)
+	lines.append("Async Loading:")
+	lines.append("  BackgroundProcessor: %s" % (_background_processor != null))
+	lines.append("  Pending async requests: %s" % _async_requests.size())
+	lines.append("  Load queue size: %s" % _pending_load_queue.size())
 	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
 		var cm_stats: Dictionary = _cell_manager.get_loading_stats()
-		print("  Instantiation queue: ", cm_stats.get("instantiation_queue_size", 0))
-		print("  Pending conversions: ", cm_stats.get("pending_conversions", 0))
-	print("\nStats:")
+		lines.append("  Instantiation queue: %s" % cm_stats.get("instantiation_queue_size", 0))
+		lines.append("  Pending conversions: %s" % cm_stats.get("pending_conversions", 0))
+	lines.append("Stats:")
 	var stats = get_stats()
 	for key in stats:
-		print("  %s: %s" % [key, stats[key]])
-	print("\nImpostor Renderer:")
+		lines.append("  %s: %s" % [key, stats[key]])
+	lines.append("Impostor Renderer:")
 	if _impostor_renderer:
-		print("  Exists: true")
-		print("  ImpostorCandidates: ", _impostor_renderer.impostor_candidates != null)
-		print("  Debug enabled: ", _impostor_renderer.debug_enabled)
+		lines.append("  Exists: true")
+		lines.append("  ImpostorCandidates: %s" % (_impostor_renderer.impostor_candidates != null))
+		lines.append("  Debug enabled: %s" % _impostor_renderer.debug_enabled)
 	else:
-		print("  Exists: false")
-	print("=================================================\n")
+		lines.append("  Exists: false")
+	lines.append("=================================================")
+	Logger.info("streaming", "\n".join(lines))
 
 
 ## Force reload all cells (after configuration change)
@@ -806,7 +808,7 @@ func refresh_cells() -> void:
 
 func _debug(msg: String) -> void:
 	if debug_enabled:
-		print("[NativeStreamingManager] %s" % msg)
+		Logger.debug("streaming", msg)
 
 #endregion
 

@@ -282,7 +282,7 @@ func connect_to_streaming(wsm: Node, os: Node = null) -> void:
 		if _world_streaming_manager.has_signal("cell_loaded"):
 			_world_streaming_manager.cell_loaded.connect(_on_cell_loaded)
 
-	print("[DiagnosticOverlay] Connected to streaming systems")
+	Logger.info("debug", "DiagnosticOverlay connected to streaming systems")
 
 
 func _on_queue_changed(queue_size: int) -> void:

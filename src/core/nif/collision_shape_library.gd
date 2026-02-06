@@ -73,7 +73,7 @@ func _try_auto_load() -> void:
 		if FileAccess.file_exists(path):
 			if load_from_file(path):
 				if debug_mode:
-					print("CollisionShapeLibrary: Auto-loaded from %s" % path)
+					Logger.debug("collision", Auto-loaded from %s" % path)
 				return
 	# No file found - that's OK, library will work without explicit mappings
 
@@ -172,7 +172,7 @@ func _parse_yaml(content: String) -> bool:
 	_loaded = true
 
 	if debug_mode:
-		print("CollisionShapeLibrary: Loaded %d items, %d patterns" % [
+		Logger.debug("collision", "Loaded %d items, %d patterns" % [
 			_item_shapes.size(), _patterns.size()
 		])
 
@@ -273,7 +273,7 @@ func get_shape_for_item(item_id: String) -> Variant:  ## Returns ShapeType or nu
 	# Check exact match first
 	if lower_id in _item_shapes:
 		if debug_mode:
-			print("CollisionShapeLibrary: Exact match for '%s' -> %s" % [
+			Logger.debug("collision", "Exact match for '%s' -> %s" % [
 				item_id, ShapeType.keys()[_item_shapes[lower_id]]
 			])
 		return _item_shapes[lower_id]
@@ -282,7 +282,7 @@ func get_shape_for_item(item_id: String) -> Variant:  ## Returns ShapeType or nu
 	for compiled: CompiledPattern in _patterns:
 		if _pattern_matches(compiled, lower_id):
 			if debug_mode:
-				print("CollisionShapeLibrary: Pattern '%s' matched '%s' -> %s" % [
+				Logger.debug("collision", Pattern '%s' matched '%s' -> %s" % [
 					compiled.pattern, item_id, ShapeType.keys()[compiled.shape_type]
 				])
 			return compiled.shape_type

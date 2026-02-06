@@ -306,6 +306,7 @@ static func print_loaded_animations() -> void:
 		get_animation_library()
 
 	var names := _cached_library.get_animation_list()
+	var lines := PackedStringArray()
 	for anim_name in names:
 		var anim := _cached_library.get_animation(anim_name)
 		var loop_str := "none"
@@ -313,9 +314,10 @@ static func print_loaded_animations() -> void:
 			Animation.LOOP_NONE: loop_str = "none"
 			Animation.LOOP_LINEAR: loop_str = "linear"
 			Animation.LOOP_PINGPONG: loop_str = "pingpong"
-		print("  %s: %.2fs, %d tracks, loop=%s" % [
+		lines.append("  %s: %.2fs, %d tracks, loop=%s" % [
 			anim_name,
 			anim.length,
 			anim.get_track_count(),
 			loop_str
 		])
+	Logger.debug("character", "Loaded animations:\n" + "\n".join(lines))

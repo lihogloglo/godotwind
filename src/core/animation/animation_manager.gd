@@ -150,7 +150,7 @@ func _setup_blend_masks() -> void:
 	_upper_body_filter = masks.create_filter_array(_BlendMask.MaskType.TORSO)
 
 	if debug_state_changes:
-		print(masks.get_debug_info())
+		Logger.debug("animation", masks.get_debug_info())
 
 
 ## Setup text key handler for animation events
@@ -265,7 +265,7 @@ func transition_to(state: StringName, force: bool = false) -> void:
 	state_changed.emit(_previous_state, _current_state)
 
 	if debug_state_changes:
-		print("AnimationManager: %s -> %s" % [_previous_state, _current_state])
+		Logger.debug("animation", "AnimationManager: %s -> %s" % [_previous_state, _current_state])
 
 
 ## Get current state name
@@ -278,7 +278,7 @@ func set_blend_parameter(name: StringName, value: Variant) -> void:
 	_blend_parameters[name] = value
 
 	if debug_blend_values:
-		print("AnimationManager: Blend param '%s' = %s" % [name, value])
+		Logger.debug("animation", "AnimationManager: Blend param '%s' = %s" % [name, value])
 
 
 ## Get a blend parameter
@@ -623,7 +623,7 @@ func _apply_blend_mask_filters() -> void:
 		animation_tree.set(filter_path, true)
 
 	if debug_state_changes:
-		print("AnimationManager: Applied upper body filter to %d bones" % upper_bones.size())
+		Logger.debug("animation", "AnimationManager: Applied upper body filter to %d bones" % upper_bones.size())
 
 
 ## Sync blend parameters to AnimationTree

@@ -68,7 +68,7 @@ static func detect() -> void:
 	_gpu_name = info
 	_renderer_name = vendor + " " + info
 
-	print("[HardwareDetection] GPU: %s" % _renderer_name)
+	Logger.info("water", "HardwareDetection: GPU: %s" % _renderer_name)
 
 	# Check for integrated GPU
 	var gpu_lower := _gpu_name.to_lower()
@@ -100,9 +100,9 @@ static func detect() -> void:
 	# Determine recommended quality
 	_recommended_quality = _calculate_recommended_quality()
 
-	print("[HardwareDetection] Integrated GPU: %s" % _is_integrated_gpu)
-	print("[HardwareDetection] Has compute: %s" % _has_compute)
-	print("[HardwareDetection] Recommended water quality: %s" % WaterQuality.keys()[_recommended_quality])
+	Logger.info("water", "HardwareDetection: Integrated GPU: %s" % _is_integrated_gpu)
+	Logger.info("water", "HardwareDetection: Has compute: %s" % _has_compute)
+	Logger.info("water", "HardwareDetection: Recommended water quality: %s" % WaterQuality.keys()[_recommended_quality])
 
 
 static func _calculate_recommended_quality() -> WaterQuality:

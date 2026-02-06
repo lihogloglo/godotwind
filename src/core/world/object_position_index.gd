@@ -106,7 +106,7 @@ func build_from_esm() -> void:
 	_is_built = true
 	_build_time_ms = Time.get_ticks_msec() - start_time
 
-	print("ObjectPositionIndex: Built in %.1fms - %d objects in %d cells" % [
+	Logger.info("streaming", "ObjectPositionIndex: Built in %.1fms - %d objects in %d cells" % [
 		_build_time_ms, _total_objects, _cells_indexed
 	])
 
@@ -413,7 +413,7 @@ func save_to_file(path: String) -> Error:
 	file.store_string(json)
 	file.close()
 
-	print("ObjectPositionIndex: Saved to %s (%.1f KB)" % [path, json.length() / 1024.0])
+	Logger.info("streaming", "ObjectPositionIndex: Saved to %s (%.1f KB)" % [path, json.length() / 1024.0])
 	return OK
 
 
@@ -472,7 +472,7 @@ func load_from_file(path: String) -> Error:
 	_is_built = true
 	_build_time_ms = Time.get_ticks_msec() - start_time
 
-	print("ObjectPositionIndex: Loaded from %s in %.1fms - %d objects" % [
+	Logger.info("streaming", "ObjectPositionIndex: Loaded from %s in %.1fms - %d objects" % [
 		path, _build_time_ms, _total_objects
 	])
 

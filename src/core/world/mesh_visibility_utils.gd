@@ -118,7 +118,7 @@ static func hide_lod_and_materialless(node: Node, debug: bool = false) -> void:
 			if not is_lod:
 				mi.visible = false
 				if debug:
-					print("[MeshVisibility] Hiding materialless/white mesh: %s" % mesh_name)
+					Logger.debug("streaming", "[MeshVisibility] Hiding materialless/white mesh: %s" % mesh_name)
 
 	# Recurse into children
 	for child in node.get_children():

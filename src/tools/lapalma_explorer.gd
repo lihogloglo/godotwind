@@ -679,7 +679,7 @@ func _update_loading(progress: float, status: String) -> void:
 func _log(message: String) -> void:
 	if log_text:
 		log_text.append_text(message + "\n")
-	print(message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
+	Logger.info("tools", message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
 
 
 # ==================== Camera Controls ====================

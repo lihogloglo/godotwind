@@ -199,9 +199,9 @@ func print_save_summary() -> void:
 	# Only print if there are unreported saves
 	if saved > _last_save_report_count:
 		if saved == 1:
-			print("ModelLoader: Saved %s" % _first_saved_model)
+			Logger.info("models", "Saved %s" % _first_saved_model)
 		else:
-			print("ModelLoader: Saved %d models total (first: %s)" % [saved, _first_saved_model])
+			Logger.info("models", "Saved %d models total (first: %s)" % [saved, _first_saved_model])
 		_last_save_report_count = saved
 
 
@@ -518,7 +518,7 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 
 	# DEBUG: Log all MeshInstance3D nodes in the loaded model to audit for LOD nodes
 	if _stats["models_from_disk"] < 5:  # Only log first 5 models to avoid spam
-		print("[ModelLoader] Loaded from disk: %s" % disk_path.get_file())
+		Logger.debug("models", "Loaded from disk: %s" % disk_path.get_file())
 		_debug_log_mesh_nodes(instance, 0)
 
 	# CRITICAL: Clear resource paths on loaded model to allow safe multi-threaded duplication
@@ -534,7 +534,7 @@ func _debug_log_mesh_nodes(node: Node, depth: int) -> void:
 		var mi := node as MeshInstance3D
 		var is_lod := mi.name.ends_with("_LOD1") or mi.name.ends_with("_LOD2") or mi.name.ends_with("_LOD3")
 		var has_mat := mi.material_override != null or (mi.mesh and mi.mesh.get_surface_count() > 0 and mi.mesh.surface_get_material(0) != null)
-		print("[ModelLoader]   %s%s: visible=%s, is_lod=%s, has_material=%s" % [
+		Logger.debug("models", "  %s%s: visible=%s, is_lod=%s, has_material=%s" % [
 			"  ".repeat(depth), mi.name, mi.visible, is_lod, has_mat
 		])
 	for child in node.get_children():
@@ -664,9 +664,9 @@ func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 		if _stats["models_saved"] % 10 == 0:
 			var count: int = _stats["models_saved"]
 			if count == 10:
-				print("ModelLoader: Saved %s and 9 more models..." % _first_saved_model)
+				Logger.info("models", "Saved %s and 9 more models..." % _first_saved_model)
 			else:
-				print("ModelLoader: Saved %d models (last: %s)" % [count, cache_key.get_file()])
+				Logger.info("models", "Saved %d models (last: %s)" % [count, cache_key.get_file()])
 			_last_save_report_count = count
 
 
@@ -774,7 +774,7 @@ func clear_disk_cache() -> void:
 		file_name = dir.get_next()
 	dir.list_dir_end()
 
-	print("ModelLoader: Cleared disk cache (%d files deleted)" % deleted)
+	Logger.info("models", "Cleared disk cache (%d files deleted)" % deleted)
 
 
 ## Get disk cache statistics

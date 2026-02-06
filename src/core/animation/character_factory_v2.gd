@@ -91,7 +91,7 @@ static func clear_all_caches() -> void:
 ## Preload all character assets for fastest NPC creation
 ## Call this once at startup after BSA archives are loaded
 static func preload_character_assets() -> void:
-	print("CharacterFactoryV2: Preloading character assets...")
+	Logger.info("animation", "CharacterFactoryV2: Preloading character assets...")
 	var start := Time.get_ticks_msec()
 
 	# Preload skeleton templates
@@ -104,9 +104,9 @@ static func preload_character_assets() -> void:
 	_preload_animation_library("meshes/xbase_anim_female.kf", "female")
 	_preload_animation_library("meshes/xbase_animkna.kf", "beast")
 
-	print("CharacterFactoryV2: Assets preloaded in %d ms" % (Time.get_ticks_msec() - start))
+	Logger.info("animation", "CharacterFactoryV2: Assets preloaded in %d ms" % (Time.get_ticks_msec() - start))
 	var stats := get_cache_stats()
-	print("  Skeletons: %d, Body parts: %d, Animations: %d" % [
+	Logger.info("animation", "  Skeletons: %d, Body parts: %d, Animations: %d" % [
 		stats["skeleton_templates"],
 		stats["cached_body_parts"],
 		stats["cached_animation_libraries"]
@@ -125,7 +125,7 @@ static func _preload_animation_library(kf_path: String, type_name: String) -> vo
 	var prebaked_lib := ModelPrebaker.load_cached_animations(kf_path)
 	if prebaked_lib:
 		_animation_library_cache[cache_key] = prebaked_lib
-		print("  Loaded prebaked %s animations: %d" % [type_name, prebaked_lib.get_animation_list().size()])
+		Logger.info("animation", "  Loaded prebaked %s animations: %d" % [type_name, prebaked_lib.get_animation_list().size()])
 		return
 
 	# Fall back to parsing from BSA
@@ -146,7 +146,7 @@ static func _preload_animation_library(kf_path: String, type_name: String) -> vo
 		for anim_name: String in animations:
 			lib.add_animation(anim_name, animations[anim_name])
 		_animation_library_cache[cache_key] = lib
-		print("  Parsed %s animations: %d" % [type_name, animations.size()])
+		Logger.info("animation", "  Parsed %s animations: %d" % [type_name, animations.size()])
 
 
 ## Create an NPC character instance
@@ -169,7 +169,7 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 		push_warning("CharacterFactoryV2: Failed to assemble NPC '%s'" % npc_record.record_id)
 		return _create_placeholder_character(npc_record, "npc", ref_num)
 	if debug_characters:
-		print("CharacterFactoryV2: Assemble NPC: %d ms" % (Time.get_ticks_msec() - assemble_start))
+		Logger.info("animation", "CharacterFactoryV2: Assemble NPC: %d ms" % (Time.get_ticks_msec() - assemble_start))
 
 	# Get additional race info for animation
 	var is_female := npc_record.is_female()
@@ -185,7 +185,7 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 	var anim_start := Time.get_ticks_msec()
 	_load_character_animations(character_root, skeleton, is_female, is_beast)
 	if debug_characters:
-		print("CharacterFactoryV2: Load animations: %d ms" % (Time.get_ticks_msec() - anim_start))
+		Logger.info("animation", "CharacterFactoryV2: Load animations: %d ms" % (Time.get_ticks_msec() - anim_start))
 
 	# Create movement controller (CharacterBody3D)
 	var movement_controller := CharacterMovementController.new()
@@ -231,7 +231,7 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 	movement_controller.set_meta("uses_new_animation_system", true)
 
 	if debug_characters:
-		print("CharacterFactoryV2: Created NPC '%s' (%s, %s) - Total: %d ms" % [
+		Logger.info("animation", "CharacterFactoryV2: Created NPC '%s' (%s, %s) - Total: %d ms" % [
 			npc_record.name if not npc_record.name.is_empty() else npc_record.record_id,
 			"female" if is_female else "male",
 			"beast" if is_beast else "humanoid",
@@ -302,7 +302,7 @@ func create_creature(creature_record: CreatureRecord, ref_num: int = 0) -> Chara
 	movement_controller.set_meta("uses_new_animation_system", true)
 
 	if debug_characters:
-		print("CharacterFactoryV2: Created creature '%s'" % creature_record.record_id)
+		Logger.info("animation", "CharacterFactoryV2: Created creature '%s'" % creature_record.record_id)
 
 	return movement_controller
 
@@ -327,7 +327,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 	var anim_player := _find_animation_player(character_root)
 	if not anim_player:
 		if debug_characters:
-			print("CharacterFactoryV2: No AnimationPlayer found in character root")
+			Logger.debug("animation", "CharacterFactoryV2: No AnimationPlayer found in character root")
 		return
 
 	# Normalize path for cache key
@@ -343,7 +343,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", cached_lib)
 		if debug_characters:
-			print("CharacterFactoryV2: Shared cached AnimationLibrary '%s' (%d anims)" % [
+			Logger.debug("animation", "CharacterFactoryV2: Shared cached AnimationLibrary '%s' (%d anims)" % [
 				anim_path, cached_lib.get_animation_list().size()
 			])
 		return
@@ -359,7 +359,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", prebaked_lib)
 		if debug_characters:
-			print("CharacterFactoryV2: Loaded and shared prebaked AnimationLibrary '%s'" % anim_path)
+			Logger.debug("animation", "CharacterFactoryV2: Loaded and shared prebaked AnimationLibrary '%s'" % anim_path)
 		return
 
 	# 3) Check parsed animation cache - convert to library
@@ -374,7 +374,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", new_lib)
 		if debug_characters:
-			print("CharacterFactoryV2: Created shared library from parsed cache '%s'" % anim_path)
+			Logger.debug("animation", "CharacterFactoryV2: Created shared library from parsed cache '%s'" % anim_path)
 		return
 
 	# 4) Load from BSA and parse (slowest - only on first run without prebake)
@@ -384,7 +384,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 
 	if not BSAManager.has_file(full_path):
 		if debug_characters:
-			print("CharacterFactoryV2: Animation file not found in BSA: '%s'" % full_path)
+			Logger.debug("animation", "CharacterFactoryV2: Animation file not found in BSA: '%s'" % full_path)
 		return
 
 	var kf_data := BSAManager.extract_file(full_path)
@@ -396,7 +396,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 	var parse_start := Time.get_ticks_msec()
 	var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
 	if debug_characters:
-		print("CharacterFactoryV2: Parsed KF file '%s' in %d ms (%d anims)" % [
+		Logger.info("animation", "CharacterFactoryV2: Parsed KF file '%s' in %d ms (%d anims)" % [
 			anim_path, Time.get_ticks_msec() - parse_start, animations.size()
 		])
 
@@ -416,7 +416,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 		anim_player.add_animation_library("", new_lib)
 
 	if debug_characters:
-		print("CharacterFactoryV2: Created and shared new AnimationLibrary '%s' (%d anims)" % [
+		Logger.debug("animation", "CharacterFactoryV2: Created and shared new AnimationLibrary '%s' (%d anims)" % [
 			anim_path, animations.size()
 		])
 

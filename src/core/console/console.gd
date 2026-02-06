@@ -476,8 +476,8 @@ func _cmd_inspect(args: Dictionary) -> CommandRegistry.CommandResult:
 
 		return CommandRegistry.CommandResult.ok(picker.get_selection_info())
 
-	# TODO: Look up object by name/ID
-	return CommandRegistry.CommandResult.error("Object lookup not yet implemented")
+	# Object lookup by name/ID not yet implemented — use 'select' to pick visually
+	return CommandRegistry.CommandResult.error("Object lookup not yet implemented. Use 'select' to pick an object.")
 
 
 func _cmd_teleport(args: Dictionary) -> CommandRegistry.CommandResult:
@@ -957,10 +957,9 @@ func _cmd_impostor_verbose(args: Dictionary) -> CommandRegistry.CommandResult:
 	renderer.set("debug_enabled", enable)
 
 	if enable:
-		# Force an update to trigger debug output
-		print("[Console] Impostor verbose logging ENABLED - move to new cell to see output")
+		Logger.debug("console", "Impostor verbose logging ENABLED - move to new cell to see output")
 	else:
-		print("[Console] Impostor verbose logging DISABLED")
+		Logger.debug("console", "Impostor verbose logging DISABLED")
 
 	return CommandRegistry.CommandResult.ok("Impostor verbose logging: %s" % ("ON" if enable else "OFF"))
 

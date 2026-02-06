@@ -72,7 +72,7 @@ The long-term goal is to continue where Skelerealms stopped. ( https://github.co
 | AI Behaviors | beehave | Wander works, behavior trees not integrated |
 | Combat | - | No attack/defense/damage system |
 | Magic/Spells | - | Spell records parsed, no casting |
-| Save/Load | save_system | Addon installed, not wired |
+| Save/Load | - | Use Godot native FileAccess/ResourceSaver |
 | NPC Interaction | - | Can't click NPCs to initiate dialogue |
 
 ## Performance Optimizations

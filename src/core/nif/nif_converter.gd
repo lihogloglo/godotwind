@@ -37,9 +37,9 @@ static func is_native_available() -> bool:
 		_native_bridge = NativeBridgeScript.new()
 		_native_available = _native_bridge.has_native_nif()
 		if _native_available:
-			print("NIFConverter: C# native classes available via NativeBridge")
+			Logger.info("nif", "NIFConverter: C# native classes available via NativeBridge")
 		else:
-			print("NIFConverter: C# native code not available (rebuild C# project to enable)")
+			Logger.info("nif", "NIFConverter: C# native code not available (rebuild C# project to enable)")
 	return _native_available
 
 
@@ -517,9 +517,8 @@ func _convert() -> Node3D:
 		push_error("NIFConverter: No root nodes")
 		return null
 
-	# Note: Skeleton and collision builders currently require GDScript reader.
+	# Skeleton and collision builders currently require GDScript reader.
 	# When using native C# reader, these features are limited.
-	# TODO: Update skeleton/collision builders to support native reader.
 	if not _is_native_reader and _reader != null:
 		# Initialize skeleton builder
 		_skeleton_builder = SkeletonBuilder.new()
@@ -537,7 +536,7 @@ func _convert() -> Node3D:
 		if auto_collision_mode and not _source_path.is_empty():
 			_collision_builder.collision_mode = CollisionBuilder.get_recommended_mode(_source_path)
 			if debug_collision:
-				print("NIFConverter: Auto-selected collision mode %d for %s" % [
+				Logger.debug("nif", "NIFConverter: Auto-selected collision mode %d for %s" % [
 					_collision_builder.collision_mode, _source_path.get_file()
 				])
 		else:
@@ -568,7 +567,7 @@ func _convert() -> Node3D:
 		if skeleton:
 			root.add_child(skeleton)
 			if debug_skinning:
-				print("NIFConverter: Created skeleton with %d bones" % skeleton.get_bone_count())
+				Logger.debug("nif", "NIFConverter: Created skeleton with %d bones" % skeleton.get_bone_count())
 
 	# Convert each root
 	for root_idx: int in roots:
@@ -600,7 +599,7 @@ func _convert() -> Node3D:
 		if anim_player:
 			root.add_child(anim_player)
 			if debug_animations:
-				print("NIFConverter: Created AnimationPlayer with %d animations" % anim_player.get_animation_library("").get_animation_list().size())
+				Logger.debug("nif", "NIFConverter: Created AnimationPlayer with %d animations" % anim_player.get_animation_library("").get_animation_list().size())
 
 	# Build and add collision shapes if enabled
 	if load_collision:
@@ -610,7 +609,7 @@ func _convert() -> Node3D:
 			if static_body:
 				root.add_child(static_body)
 				if debug_collision:
-					print("NIFConverter: Created StaticBody3D with %d collision shapes" % collision_result.collision_shapes.size())
+					Logger.debug("nif", "NIFConverter: Created StaticBody3D with %d collision shapes" % collision_result.collision_shapes.size())
 
 			# Store actor collision info as metadata for later use
 			if collision_result.has_actor_collision_box:
@@ -763,7 +762,7 @@ func _add_occluder_to_mesh(mesh_instance: MeshInstance3D) -> void:
 		parent.add_child(occluder)
 
 		if debug_occluders:
-			print("NIFConverter: Added occluder to '%s' (size: %v)" % [
+			Logger.debug("nif", "NIFConverter: Added occluder to '%s' (size: %v)" % [
 				_source_path.get_file(), size
 			])
 
@@ -778,7 +777,7 @@ func _link_skinned_meshes_to_skeleton(node: Node, skeleton: Skeleton3D) -> void:
 			mesh_instance.remove_meta("_has_skeleton")
 
 			if debug_skinning:
-				print("NIFConverter: Linked '%s' to skeleton (path=%s)" % [
+				Logger.debug("nif", "NIFConverter: Linked '%s' to skeleton (path=%s)" % [
 					mesh_instance.name, mesh_instance.skeleton
 				])
 
@@ -867,7 +866,7 @@ func create_skeleton_from_hierarchy() -> Skeleton3D:
 		return null
 
 	if debug_skinning:
-		print("NIFConverter: Building skeleton from hierarchy, root='%s'" % root_node.name)
+		Logger.debug("nif", "NIFConverter: Building skeleton from hierarchy, root='%s'" % root_node.name)
 
 	return _skeleton_builder.build_skeleton_from_hierarchy(root_node)
 
@@ -971,7 +970,7 @@ func _convert_ni_tri_shape(shape: Defs.NiTriShape, skeleton: Skeleton3D = null) 
 			skin_data = _reader.get_record(skin_instance.data_index) as Defs.NiSkinData
 
 		if debug_skinning:
-			print("NIFConverter: Converting skinned mesh '%s'" % mesh_instance.name)
+			Logger.debug("nif", "NIFConverter: Converting skinned mesh '%s'" % mesh_instance.name)
 
 	# Create mesh (with skinning data if available)
 	var mesh: ArrayMesh
@@ -1065,7 +1064,7 @@ func _convert_ni_tri_strips(strips: Defs.NiTriStrips, skeleton: Skeleton3D = nul
 			skin_data = _reader.get_record(skin_instance.data_index) as Defs.NiSkinData
 
 		if debug_skinning:
-			print("NIFConverter: Converting skinned strip mesh '%s'" % mesh_instance.name)
+			Logger.debug("nif", "NIFConverter: Converting skinned strip mesh '%s'" % mesh_instance.name)
 
 	# Create mesh (with skinning data if available)
 	var mesh: ArrayMesh
@@ -1192,7 +1191,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 	var num_triangles: int = indices.size() / 3
 	if num_triangles < min_triangles_for_lod:
 		if debug_lod:
-			print("NIFConverter: Skipping LOD for '%s' with %d triangles (min: %d)" % [
+			Logger.debug("nif", "NIFConverter: Skipping LOD for '%s' with %d triangles (min: %d)" % [
 				_source_path.get_file(), num_triangles, min_triangles_for_lod
 			])
 		return
@@ -1205,7 +1204,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 	# LOD1/2/3: MID tier sub-levels (150-250m, 250-375m, 375-500m)
 
 	if debug_lod:
-		print("NIFConverter: Generating %d LOD levels for '%s' (%d triangles)" % [
+		Logger.debug("nif", "NIFConverter: Generating %d LOD levels for '%s' (%d triangles)" % [
 			lod_levels, _source_path.get_file(), num_triangles
 		])
 
@@ -1253,7 +1252,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 
 		if lod_arrays.is_empty() or lod_arrays[Mesh.ARRAY_VERTEX] == null:
 			if debug_lod:
-				print("  LOD%d: Failed to generate" % (lod_idx + 1))
+				Logger.debug("nif", "  LOD%d: Failed to generate" % (lod_idx + 1))
 			continue
 
 		# Create LOD mesh
@@ -1309,7 +1308,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 		if debug_lod:
 			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
 			var lod_tris: int = lod_indices.size() / 3 if lod_indices else 0
-			print("  LOD%d: %d -> %d triangles (%.1f%%), range: %.0f-%.0fm" % [
+			Logger.debug("nif", "  LOD%d: %d -> %d triangles (%.1f%%), range: %.0f-%.0fm" % [
 				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles,
 				lod_instance.visibility_range_begin, lod_instance.visibility_range_end
 			])
@@ -1323,7 +1322,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
 
 	if debug_lod:
-		print("  LOD0 (original): configured for NEAR tier (0-150m)")
+		Logger.debug("nif", "  LOD0 (original): configured for NEAR tier (0-150m)")
 
 
 ## Create ArrayMesh from NiTriShapeData
@@ -1460,7 +1459,7 @@ func _create_skinned_tri_shape_mesh(data: Defs.NiTriShapeData, skin_instance: De
 			arrays[Mesh.ARRAY_WEIGHTS] = weights_arr
 
 			if debug_skinning:
-				print("  Added bone weights: %d vertices, %d indices, %d weights" % [
+				Logger.debug("nif", "  Added bone weights: %d vertices, %d indices, %d weights" % [
 					data.num_vertices,
 					indices_arr.size(),
 					weights_arr.size()
@@ -1539,7 +1538,7 @@ func _create_skinned_tri_strips_mesh(data: Defs.NiTriStripsData, skin_instance: 
 			arrays[Mesh.ARRAY_WEIGHTS] = weights_arr
 
 			if debug_skinning:
-				print("  Added bone weights: %d vertices, %d indices, %d weights" % [
+				Logger.debug("nif", "  Added bone weights: %d vertices, %d indices, %d weights" % [
 					data.num_vertices,
 					indices_arr.size(),
 					weights_arr.size()
@@ -1753,7 +1752,7 @@ func _create_animation_player(skeleton: Skeleton3D) -> AnimationPlayer:
 			if err != OK:
 				push_warning("NIFConverter: Failed to add animation '%s': %s" % [anim_name, error_string(err)])
 			elif debug_animations:
-				print("  Added animation '%s' (%.2fs, %d tracks)" % [
+				Logger.debug("nif", "  Added animation '%s' (%.2fs, %d tracks)" % [
 					anim_name, anim.length, anim.get_track_count()
 				])
 
@@ -2890,7 +2889,7 @@ func _convert_merged() -> Node3D:
 		var total_shapes := 0
 		for key: String in collected:
 			total_shapes += collected[key].size()
-		print("NIFConverter: Merging %d shapes into %d material groups for '%s'" % [
+		Logger.debug("nif", "NIFConverter: Merging %d shapes into %d material groups for '%s'" % [
 			total_shapes, collected.size(), _source_path.get_file()
 		])
 
@@ -2931,14 +2930,14 @@ func _convert_merged() -> Node3D:
 		mesh_instance.visible = not should_hide
 
 		if material == null and not all_hidden:
-			print("[NIFConverter] Hiding materialless mesh in %s (likely collision geometry)" % _source_path.get_file())
+			Logger.debug("nif", "NIFConverter: Hiding materialless mesh in %s (likely collision geometry)" % _source_path.get_file())
 
 		root.add_child(mesh_instance)
 		mesh_idx += 1
 
 		if debug_merge:
 			var tri_count := merged_mesh.get_faces().size() / 3
-			print("  Material group '%s': %d shapes merged, %d triangles" % [
+			Logger.debug("nif", "  Material group '%s': %d shapes merged, %d triangles" % [
 				material_key.substr(0, 40), geometries.size(), tri_count
 			])
 

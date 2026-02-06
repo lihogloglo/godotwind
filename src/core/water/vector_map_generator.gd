@@ -142,7 +142,7 @@ func initialize(flow_texture: Texture2D) -> bool:
 	_output_texture.texture_rd_rid = _texture_rds[0]
 
 	_initialized = true
-	print("[VectorMapGenerator] Initialized with %dx%d texture" % [TEXTURE_SIZE, TEXTURE_SIZE])
+	Logger.info("water", "VectorMapGenerator: Initialized with %dx%d texture" % [TEXTURE_SIZE, TEXTURE_SIZE])
 	return true
 
 

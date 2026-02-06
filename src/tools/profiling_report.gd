@@ -232,4 +232,4 @@ func dump_report() -> void:
 	_log("[b]==============================[/b]")
 
 	# Also print full report to console for easy copying
-	print("\n" + JSON.stringify(report, "  "))
+	Logger.debug("debug", JSON.stringify(report, "  "))

@@ -74,7 +74,7 @@ func initialize() -> Error:
 	# Calculate world bounds from LAND records
 	_calculate_world_bounds()
 
-	print("MorrowindDataProvider initialized: %d LAND records" % ESMManager.lands.size())
+	Logger.info("streaming", "MorrowindDataProvider initialized: %d LAND records" % ESMManager.lands.size())
 	return OK
 
 
@@ -83,7 +83,7 @@ func set_terrain_assets(assets: Terrain3DAssets) -> void:
 	_terrain_assets = assets
 	if _texture_loader and assets:
 		var loaded: int = _texture_loader.call("load_terrain_textures", assets)
-		print("MorrowindDataProvider: Loaded %d terrain textures" % loaded)
+		Logger.info("streaming", "MorrowindDataProvider: Loaded %d terrain textures" % loaded)
 		if _terrain_manager:
 			_terrain_manager.call("set_texture_slot_mapper", _texture_loader)
 
@@ -494,7 +494,7 @@ func _calculate_world_bounds() -> void:
 	var north := float(max_y + 1) * cell_size
 
 	world_bounds = Rect2(west, south, east - west, north - south)
-	print("MorrowindDataProvider: World bounds = %.1f x %.1f km" % [
+	Logger.info("streaming", "MorrowindDataProvider: World bounds = %.1f x %.1f km" % [
 		world_bounds.size.x / 1000.0, world_bounds.size.y / 1000.0
 	])
 

@@ -22,7 +22,7 @@ func _check_native_availability() -> void:
 		_native_generator = ClassDB.instantiate("TerrainGenerator")
 		_use_native = _native_generator != null
 		if _use_native:
-			print("TerrainManager: Using native C# terrain generation (50-100x faster)")
+			Logger.info("streaming", "TerrainManager: Using native C# terrain generation (50-100x faster)")
 	else:
 		_use_native = false
 
@@ -242,7 +242,7 @@ func generate_control_map(land: LandRecord) -> Image:
 		img.fill(Color(default_control, 0, 0, 1))
 		_stats["control_maps_generated"] += 1
 		if _debug_control_map:
-			print("TerrainManager: Cell (%d,%d) has NO texture data - using default" % [land.cell_x, land.cell_y])
+			Logger.debug("streaming", "TerrainManager: Cell (%d,%d) has NO texture data - using default" % [land.cell_x, land.cell_y])
 		return img
 
 	# Each MW texture cell covers ~4 height vertices
@@ -252,7 +252,7 @@ func generate_control_map(land: LandRecord) -> Image:
 	if _stats["control_maps_generated"] == 0:
 		var mode_names: Array[String] = ["FAST (no blending)", "TERRAIN3D_OPTIMIZED", "LEGACY"]
 		var mode_name: String = mode_names[control_map_mode] if control_map_mode < mode_names.size() else "UNKNOWN"
-		print("TerrainManager: Using control map mode %d (%s)" % [control_map_mode, mode_name])
+		Logger.info("streaming", "TerrainManager: Using control map mode %d (%s)" % [control_map_mode, mode_name])
 
 	match control_map_mode:
 		0:
@@ -375,7 +375,7 @@ func _generate_control_map_terrain3d_optimized(img: Image, land: LandRecord, ver
 	if _debug_control_map or _stats["control_maps_generated"] < 3:
 		var total_pixels := MW_LAND_SIZE * MW_LAND_SIZE
 		var avg_blend := float(total_blend) / float(blend_count) if blend_count > 0 else 0.0
-		print("TerrainManager: Cell (%d,%d) blend stats: %d/%d pixels blended (%.1f%%), max=%d, avg=%.1f" % [
+		Logger.debug("streaming", "TerrainManager: Cell (%d,%d) blend stats: %d/%d pixels blended (%.1f%%), max=%d, avg=%.1f" % [
 			land.cell_x, land.cell_y, blend_count, total_pixels,
 			100.0 * float(blend_count) / float(total_pixels),
 			max_blend_value, avg_blend])
@@ -473,7 +473,7 @@ func set_debug_control_map(enabled: bool) -> void:
 ## Debug: Print control map statistics for a land record
 func debug_print_control_map_stats(land: LandRecord) -> void:
 	if not land.has_textures():
-		print("TerrainManager: Cell (%d,%d) has NO texture data" % [land.cell_x, land.cell_y])
+		Logger.debug("streaming", "TerrainManager: Cell (%d,%d) has NO texture data" % [land.cell_x, land.cell_y])
 		return
 
 	var tex_usage: Dictionary = {}
@@ -487,8 +487,8 @@ func debug_print_control_map_stats(land: LandRecord) -> void:
 			tex_usage[slot] += 1
 			if not mw_indices.has(mw_idx):
 				mw_indices[mw_idx] = slot
-	print("TerrainManager: Cell (%d,%d) MW->Slot mappings: %s" % [land.cell_x, land.cell_y, mw_indices])
-	print("TerrainManager: Cell (%d,%d) slot usage counts: %s" % [land.cell_x, land.cell_y, tex_usage])
+	Logger.debug("streaming", "TerrainManager: Cell (%d,%d) MW->Slot mappings: %s" % [land.cell_x, land.cell_y, mw_indices])
+	Logger.debug("streaming", "TerrainManager: Cell (%d,%d) slot usage counts: %s" % [land.cell_x, land.cell_y, tex_usage])
 
 
 ## Convert float back to int bits for debugging
@@ -571,7 +571,7 @@ func _get_terrain3d_texture_slot(mw_tex_idx: int) -> int:
 		var slot: int = _texture_slot_mapper.call("get_slot_for_mw_index", mw_tex_idx)
 		_texture_map[mw_tex_idx] = slot  # Cache for next time
 		if _debug_control_map and _stats["control_maps_generated"] < 3:
-			print("TerrainManager: _get_terrain3d_texture_slot(%d) -> slot %d (via mapper)" % [mw_tex_idx, slot])
+			Logger.debug("streaming", "TerrainManager: _get_terrain3d_texture_slot(%d) -> slot %d (via mapper)" % [mw_tex_idx, slot])
 		return slot
 
 	# Fallback: simple modulo mapping (Terrain3D supports 32 textures)
@@ -738,13 +738,13 @@ func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: V
 
 	# DEBUG: Log import position for verification
 	if use_local_coord and (cell_x == 0 and cell_y == 0) or (cell_x == -8 and cell_y == -8):
-		print("[TerrainManager] Importing cell (%d,%d) at world pos: (%.1f, %.1f, %.1f)" % [
+		Logger.debug("streaming", "[TerrainManager] Importing cell (%d,%d) at world pos: (%.1f, %.1f, %.1f)" % [
 			cell_x, cell_y, import_pos.x, import_pos.y, import_pos.z
 		])
-		print("  Terrain global_position: (%.1f, %.1f, %.1f)" % [
+		Logger.debug("streaming", "  Terrain global_position: (%.1f, %.1f, %.1f)" % [
 			terrain.global_position.x, terrain.global_position.y, terrain.global_position.z
 		])
-		print("  use_local_coord: %s, region_world_size: %.2f" % [use_local_coord, region_world_size])
+		Logger.debug("streaming", "  use_local_coord: %s, region_world_size: %.2f" % [use_local_coord, region_world_size])
 
 	terrain.data.import_images(imported_images, import_pos, 0.0, 1.0)
 

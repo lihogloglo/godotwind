@@ -141,7 +141,7 @@ func start(worker_count: int = 0) -> Error:
 		_workers.append(thread)
 
 	_stats["worker_count"] = _workers.size()
-	print("BackgroundJobSystem: Started with %d worker threads" % _workers.size())
+	Logger.info("threading", "BackgroundJobSystem started with %d worker threads" % _workers.size())
 
 	return OK
 
@@ -171,7 +171,7 @@ func stop() -> void:
 	_results_mutex = null
 	_semaphore = null
 
-	print("BackgroundJobSystem: Stopped")
+	Logger.info("threading", "BackgroundJobSystem stopped")
 
 
 ## Check if the system is running

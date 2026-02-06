@@ -109,10 +109,10 @@ func _ensure_data_loaded() -> bool:
 	# Check if already loaded by another system
 	if ESMManager.cells.size() > 0:
 		_esm_loaded = true
-		print("PrebakingManager: ESM already loaded (%d cells)" % ESMManager.cells.size())
+		Logger.info("prebaking", "ESM already loaded (%d cells)" % ESMManager.cells.size())
 		return true
 
-	print("PrebakingManager: Loading ESM data...")
+	Logger.info("prebaking", "Loading ESM data...")
 
 	# Initialize BSA
 	var data_path: String = SettingsManager.get_data_path()
@@ -128,7 +128,7 @@ func _ensure_data_loaded() -> bool:
 			push_error("PrebakingManager: No BSA archives found in: %s" % data_path)
 			error_occurred.emit("Init", "No BSA archives found")
 			return false
-		print("PrebakingManager: Loaded %d BSA archives" % loaded)
+		Logger.info("prebaking", "Loaded %d BSA archives" % loaded)
 
 	# Load ESM file
 	var esm_file: String = SettingsManager.get_esm_file()
@@ -140,7 +140,7 @@ func _ensure_data_loaded() -> bool:
 		error_occurred.emit("Init", "Failed to load ESM file: " + esm_file)
 		return false
 
-	print("PrebakingManager: ESM loaded - %d cells, %d statics" % [ESMManager.cells.size(), ESMManager.statics.size()])
+	Logger.info("prebaking", "ESM loaded - %d cells, %d statics" % [ESMManager.cells.size(), ESMManager.statics.size()])
 	_esm_loaded = true
 	return true
 
@@ -184,7 +184,7 @@ func _ensure_terrain_loaded() -> bool:
 		var dir := DirAccess.open(terrain_data_dir)
 		if dir and dir.get_files().size() > 0:
 			terrain_node.data.load_directory(terrain_data_dir)
-			print("PrebakingManager: Loaded terrain from cache: %s" % terrain_data_dir)
+			Logger.info("prebaking", "Loaded terrain from cache: %s" % terrain_data_dir)
 			return true
 
 	push_warning("PrebakingManager: No cached terrain data found at %s" % terrain_data_dir)
@@ -198,9 +198,9 @@ func start_prebaking() -> void:
 		push_warning("PrebakingManager: Already processing")
 		return
 
-	print("=".repeat(80))
-	print("PrebakingManager: Starting prebaking")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "Starting prebaking")
+	Logger.info("prebaking", "=".repeat(80))
 
 	# Ensure ESM/BSA data is loaded
 	if not _ensure_data_loaded():
@@ -257,10 +257,10 @@ func start_prebaking() -> void:
 
 	if _should_stop:
 		status = Status.PAUSED
-		print("PrebakingManager: Paused by user")
+		Logger.info("prebaking", "Paused by user")
 	else:
 		status = Status.COMPLETED
-		print("PrebakingManager: All components completed")
+		Logger.info("prebaking", "All components completed")
 
 	status_changed.emit(status)
 	all_completed.emit(results)
@@ -268,7 +268,7 @@ func start_prebaking() -> void:
 
 ## Stop prebaking (can be resumed later)
 func stop_prebaking() -> void:
-	print("PrebakingManager: Stop requested")
+	Logger.info("prebaking", "Stop requested")
 	_should_stop = true
 
 
@@ -286,7 +286,7 @@ func reset_all(clear_cache: bool = true) -> void:
 
 	status = Status.IDLE
 	status_changed.emit(status)
-	print("PrebakingManager: Reset all progress%s" % (" and cleared cache" if clear_cache else ""))
+	Logger.info("prebaking", "Reset all progress%s" % (" and cleared cache" if clear_cache else ""))
 
 
 ## Clear all cached files from disk
@@ -303,7 +303,7 @@ func _clear_cache_directories() -> void:
 	for dir_path: String in directories:
 		if DirAccess.dir_exists_absolute(dir_path):
 			var deleted := _delete_directory_contents(dir_path)
-			print("PrebakingManager: Cleared %d files from %s" % [deleted, dir_path])
+			Logger.info("prebaking", "Cleared %d files from %s" % [deleted, dir_path])
 
 
 ## Delete all files in a directory (not subdirectories)
@@ -342,9 +342,9 @@ func has_pending_work() -> bool:
 
 ## Bake terrain (heightmaps, textures -> Terrain3D regions)
 func _bake_terrain() -> Dictionary:
-	print("\n" + "=".repeat(80))
-	print("TERRAIN: Preprocessing Terrain3D regions")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "TERRAIN: Preprocessing Terrain3D regions")
+	Logger.info("prebaking", "=".repeat(80))
 
 	component_started.emit("Terrain")
 
@@ -384,11 +384,11 @@ func _bake_terrain() -> Dictionary:
 				# Load the existing terrain data so shore mask can use it
 				var terrain_node := terrain_3d as Terrain3D
 				terrain_node.data.load_directory(terrain_data_dir)
-				print("  Terrain already preprocessed (%d regions), loaded from cache" % state.completed.size())
+				Logger.info("prebaking", "Terrain already preprocessed (%d regions), loaded from cache" % state.completed.size())
 				component_completed.emit("Terrain", state.completed.size(), 0, 0)
 				return {"success": state.completed.size(), "failed": 0, "skipped": 0}
 		# State says complete but no files - reset and re-bake
-		print("  Terrain state says complete but no files found - resetting")
+		Logger.warn("prebaking", "Terrain state says complete but no files found - resetting")
 		state.completed.clear()
 		state.pending.clear()
 
@@ -399,7 +399,7 @@ func _bake_terrain() -> Dictionary:
 	# Load terrain textures
 	var terrain_assets: Terrain3DAssets = (terrain_3d as Terrain3D).assets
 	var textures_loaded := texture_loader.load_terrain_textures(terrain_assets)
-	print("  Loaded %d terrain textures" % textures_loaded)
+	Logger.info("prebaking", "Loaded %d terrain textures" % textures_loaded)
 	terrain_manager.set_texture_slot_mapper(texture_loader)
 
 	# Collect all unique regions that have terrain data
@@ -430,7 +430,7 @@ func _bake_terrain() -> Dictionary:
 				regions_with_data[region_coord] = true
 				ocean_regions_added += 1
 
-	print("  Added %d ocean buffer regions around terrain" % ocean_regions_added)
+	Logger.info("prebaking", "Added %d ocean buffer regions around terrain" % ocean_regions_added)
 
 	# Initialize pending list if needed
 	if state.pending.is_empty() and state.completed.is_empty():
@@ -439,7 +439,7 @@ func _bake_terrain() -> Dictionary:
 		state.start_time = Time.get_unix_time_from_system()
 		_state_manager.save_state()
 
-	print("  Found %d regions (%d pending, %d completed)" % [
+	Logger.info("prebaking", "Found %d regions (%d pending, %d completed)" % [
 		regions_with_data.size(), state.pending.size(), state.completed.size()])
 
 	# Process each combined region
@@ -488,7 +488,7 @@ func _bake_terrain() -> Dictionary:
 		DirAccess.make_dir_recursive_absolute(terrain_data_dir)
 		var terrain_node := terrain_3d as Terrain3D
 		terrain_node.data.save_directory(terrain_data_dir)
-		print("  Saved terrain to: %s" % terrain_data_dir)
+		Logger.info("prebaking", "Saved terrain to: %s" % terrain_data_dir)
 
 	state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
@@ -500,9 +500,9 @@ func _bake_terrain() -> Dictionary:
 
 ## Bake individual models (NIF -> Godot conversion)
 func _bake_models() -> Dictionary:
-	print("\n" + "=".repeat(80))
-	print("MODELS: Pre-converting NIF models to Godot resources")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "MODELS: Pre-converting NIF models to Godot resources")
+	Logger.info("prebaking", "=".repeat(80))
 
 	component_started.emit("Models")
 
@@ -533,9 +533,9 @@ func _bake_models() -> Dictionary:
 
 ## Bake impostors
 func _bake_impostors() -> Dictionary:
-	print("\n" + "=".repeat(80))
-	print("IMPOSTORS: Baking octahedral impostor textures")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "IMPOSTORS: Baking octahedral impostor textures")
+	Logger.info("prebaking", "=".repeat(80))
 
 	component_started.emit("Impostors")
 
@@ -552,7 +552,7 @@ func _bake_impostors() -> Dictionary:
 		impostor_state.pending = candidates.get_all_impostor_models().duplicate()
 		impostor_state.start_time = Time.get_unix_time_from_system()
 
-	print("  %d pending, %d completed, %d failed" % [
+	Logger.info("prebaking", "%d pending, %d completed, %d failed" % [
 		impostor_state.pending.size(), impostor_state.completed.size(), impostor_state.failed.size()])
 
 	if _impostor_baker.initialize() != OK:
@@ -592,9 +592,9 @@ func _bake_impostors() -> Dictionary:
 
 ## Bake navigation meshes
 func _bake_navmeshes() -> Dictionary:
-	print("\n" + "=".repeat(80))
-	print("NAVMESHES: Baking navigation meshes")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "NAVMESHES: Baking navigation meshes")
+	Logger.info("prebaking", "=".repeat(80))
 
 	component_started.emit("Navmeshes")
 
@@ -616,7 +616,7 @@ func _bake_navmeshes() -> Dictionary:
 			nav_state.pending.append("%d,%d" % [cell.x, cell.y])
 		nav_state.start_time = Time.get_unix_time_from_system()
 
-	print("  %d pending, %d completed, %d failed" % [
+	Logger.info("prebaking", "%d pending, %d completed, %d failed" % [
 		nav_state.pending.size(), nav_state.completed.size(), nav_state.failed.size()])
 
 	if _navmesh_baker.initialize() != OK:
@@ -652,9 +652,9 @@ func _bake_navmeshes() -> Dictionary:
 
 ## Bake shore mask
 func _bake_shore_mask() -> Dictionary:
-	print("\n" + "=".repeat(80))
-	print("SHORE MASK: Baking ocean wave dampening mask (JFA algorithm)")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "SHORE MASK: Baking ocean wave dampening mask (JFA algorithm)")
+	Logger.info("prebaking", "=".repeat(80))
 
 	component_started.emit("Shore Mask")
 
@@ -666,10 +666,10 @@ func _bake_shore_mask() -> Dictionary:
 			component_completed.emit("Shore Mask", 0, 1, 0)
 			return {"success": 0, "failed": 1, "error": "No terrain"}
 
-	print("PrebakingManager: terrain_3d = %s" % [terrain_3d])
+	Logger.debug("prebaking", "terrain_3d = %s" % [terrain_3d])
 	if terrain_3d and terrain_3d is Terrain3D:
 		var terrain_node := terrain_3d as Terrain3D
-		print("PrebakingManager: terrain_3d.data = %s, region_count = %d" % [
+		Logger.debug("prebaking", "terrain_3d.data = %s, region_count = %d" % [
 			terrain_node.data,
 			terrain_node.data.get_region_count() if terrain_node.data else 0
 		])
@@ -684,7 +684,7 @@ func _bake_shore_mask() -> Dictionary:
 	# Get fade distance from OceanManager defaults
 	_shore_baker.fade_distance = 50.0  # Matches OceanManager.shore_fade_distance
 
-	print("PrebakingManager: Shore mask config - sea_level=%.1f, fade_distance=%.1fm" % [
+	Logger.info("prebaking", "Shore mask config - sea_level=%.1f, fade_distance=%.1fm" % [
 		_shore_baker.sea_level, _shore_baker.fade_distance
 	])
 
@@ -788,9 +788,9 @@ func _component_name(component: Component) -> String:
 
 ## Bake cloud noise textures for volumetric clouds
 func _bake_cloud_noise() -> Dictionary:
-	print("\n" + "=".repeat(80))
-	print("CLOUD NOISE: Generating 3D noise textures for volumetric clouds")
-	print("=".repeat(80))
+	Logger.info("prebaking", "=".repeat(80))
+	Logger.info("prebaking", "CLOUD NOISE: Generating 3D noise textures for volumetric clouds")
+	Logger.info("prebaking", "=".repeat(80))
 
 	component_started.emit("Cloud Noise")
 
@@ -799,7 +799,7 @@ func _bake_cloud_noise() -> Dictionary:
 	const SHAPE_RESOLUTION := 64
 	const DETAIL_RESOLUTION := 32
 
-	print("CLOUD NOISE: Output path: %s" % output_path)
+	Logger.info("prebaking", "Cloud noise output path: %s" % output_path)
 
 	# Ensure output directory exists
 	DirAccess.make_dir_recursive_absolute(output_path)
@@ -901,7 +901,7 @@ func _bake_cloud_noise() -> Dictionary:
 	detail_meta_file.close()
 
 	var elapsed := (Time.get_ticks_msec() - start_time) / 1000.0
-	print("Cloud noise generation complete in %.1f seconds" % elapsed)
+	Logger.info("prebaking", "Cloud noise generation complete in %.1f seconds" % elapsed)
 
 	component_completed.emit("Cloud Noise", 2, 0, 0)  # 2 textures: shape and detail
 	return {"success": 2, "failed": 0}

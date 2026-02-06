@@ -286,7 +286,9 @@ static func validate_mixamo_skeleton(skeleton: Skeleton3D, require_fingers: bool
 
 ## Print bone mapping for debugging
 static func print_mapping() -> void:
-	print("=== Morrowind → Mixamo Bone Mapping ===")
+	var lines := PackedStringArray()
+	lines.append("=== Morrowind -> Mixamo Bone Mapping ===")
 	for mw_name: String in MORROWIND_TO_MIXAMO:
-		print("  %s → %s" % [mw_name, MORROWIND_TO_MIXAMO[mw_name]])
-	print("Total: %d mappings" % MORROWIND_TO_MIXAMO.size())
+		lines.append("  %s -> %s" % [mw_name, MORROWIND_TO_MIXAMO[mw_name]])
+	lines.append("Total: %d mappings" % MORROWIND_TO_MIXAMO.size())
+	Logger.debug("character", "\n".join(lines))

@@ -560,10 +560,10 @@ func get_all_impostor_models() -> Array[String]:
 		elif _matches_any(lower, CAVE_PATTERNS):
 			counts["caves"] += 1
 
-	print("ImpostorCandidates: Found %d models total" % _cached_all_models.size())
-	print("  Landmarks: %d, Buildings: %d, Ruins: %d" % [counts["landmarks"], counts["buildings"], counts["ruins"]])
-	print("  Terrain: %d, Trees: %d, Vegetation: %d" % [counts["terrain"], counts["trees"], counts["vegetation"]])
-	print("  Props: %d, Architecture: %d, Caves: %d" % [counts["props"], counts["architecture"], counts["caves"]])
+	Logger.info("streaming", "ImpostorCandidates: Found %d models total" % _cached_all_models.size())
+	Logger.info("streaming", "  Landmarks: %d, Buildings: %d, Ruins: %d" % [counts["landmarks"], counts["buildings"], counts["ruins"]])
+	Logger.info("streaming", "  Terrain: %d, Trees: %d, Vegetation: %d" % [counts["terrain"], counts["trees"], counts["vegetation"]])
+	Logger.info("streaming", "  Props: %d, Architecture: %d, Caves: %d" % [counts["props"], counts["architecture"], counts["caves"]])
 
 	return _cached_all_models.duplicate()
 

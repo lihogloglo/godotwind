@@ -273,15 +273,15 @@ static func is_visible_at_distance(mesh_instance: GeometryInstance3D, distance: 
 ## Print debug info about a mesh's visibility configuration
 static func debug_print_config(mesh_instance: GeometryInstance3D, name: String = "") -> void:
 	if not mesh_instance:
-		print("[LODConfigurator] %s: null" % name)
+		Logger.debug("streaming", "[LODConfigurator] %s: null" % name)
 		return
-	
+
 	var label := name if name else str(mesh_instance.get_instance_id())
-	print("[LODConfigurator] %s:" % label)
-	print("  visibility_range_begin: %.1f" % mesh_instance.visibility_range_begin)
-	print("  visibility_range_end: %.1f" % mesh_instance.visibility_range_end)
-	print("  visibility_range_begin_margin: %.1f" % mesh_instance.visibility_range_begin_margin)
-	print("  visibility_range_end_margin: %.1f" % mesh_instance.visibility_range_end_margin)
-	print("  visibility_range_fade_mode: %d" % mesh_instance.visibility_range_fade_mode)
+	Logger.debug("streaming", "[LODConfigurator] %s:" % label)
+	Logger.debug("streaming", "  visibility_range_begin: %.1f" % mesh_instance.visibility_range_begin)
+	Logger.debug("streaming", "  visibility_range_end: %.1f" % mesh_instance.visibility_range_end)
+	Logger.debug("streaming", "  visibility_range_begin_margin: %.1f" % mesh_instance.visibility_range_begin_margin)
+	Logger.debug("streaming", "  visibility_range_end_margin: %.1f" % mesh_instance.visibility_range_end_margin)
+	Logger.debug("streaming", "  visibility_range_fade_mode: %d" % mesh_instance.visibility_range_fade_mode)
 
 #endregion

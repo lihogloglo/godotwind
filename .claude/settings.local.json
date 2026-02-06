@@ -325,7 +325,9 @@
       "WebFetch(domain:blog.sshh.io)",
       "WebFetch(domain:www.bodenmchale.com)",
       "Bash(for:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Read(//d/Gamedev/Godotwind/godotwind/**)",
+      "Bash(do:*)"
     ]
   }
 }

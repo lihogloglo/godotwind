@@ -32,7 +32,7 @@ func _ready():
 	# Auto-parse texture names if no config provided
 	if texture_config == null and auto_parse_textures:
 		if debug:
-			print("[TerrainDeformationBridge] Auto-parsing texture names...")
+			Logger.debug("deformation", "TerrainDeformationBridge: Auto-parsing texture names...")
 		texture_config = auto_parse_terrain_textures()
 
 	# Apply configuration
@@ -43,7 +43,7 @@ func _ready():
 		terrain_node.material_changed.connect(_on_material_changed)
 
 	if debug:
-		print("[TerrainDeformationBridge] Initialized for: ", terrain_node.name)
+		Logger.info("deformation", "TerrainDeformationBridge: Initialized for: %s" % terrain_node.name)
 
 ## Apply deformation heights to Terrain3D material
 func apply_deformation_heights() -> void:
@@ -74,14 +74,14 @@ func apply_deformation_heights() -> void:
 		if texture_id >= 0 and texture_id < 32:
 			rest_heights[texture_id] = rest_height
 			if debug:
-				print("  Texture %d: %.3fm (%s)" % [texture_id, rest_height, entry.texture_name])
+				Logger.debug("deformation", "  Texture %d: %.3fm (%s)" % [texture_id, rest_height, entry.texture_name])
 
 	# Set the shader parameter
 	# NOTE: Even though this is a "private" uniform (_prefix), GDScript can still set it!
 	material.set_shader_parameter("_texture_deform_rest_array", rest_heights)
 
 	if debug:
-		print("[TerrainDeformationBridge] Applied %d texture heights to Terrain3D" % texture_config.texture_heights.size())
+		Logger.debug("deformation", "TerrainDeformationBridge: Applied %d texture heights to Terrain3D" % texture_config.texture_heights.size())
 
 ## Auto-find Terrain3D node in scene tree
 func _find_terrain3d() -> Terrain3D:
@@ -114,7 +114,7 @@ func _search_for_terrain3d(node: Node) -> Terrain3D:
 ## Called when Terrain3D material changes (reload, shader swap, etc.)
 func _on_material_changed() -> void:
 	if debug:
-		print("[TerrainDeformationBridge] Terrain3D material changed, reapplying heights...")
+		Logger.debug("deformation", "TerrainDeformationBridge: Terrain3D material changed, reapplying heights...")
 
 	# Reapply configuration
 	call_deferred("apply_deformation_heights")
@@ -158,18 +158,17 @@ func set_rest_height(texture_id: int, height: float) -> void:
 ## Debug: Print current configuration
 func print_configuration() -> void:
 	if texture_config == null:
-		print("[TerrainDeformationBridge] No configuration loaded")
+		Logger.debug("deformation", "TerrainDeformationBridge: No configuration loaded")
 		return
 
-	print("=== Terrain Deformation Heights Configuration ===")
-	print("Terrain3D: ", terrain_node.name if terrain_node else "NOT SET")
-	print("Textures configured: ", texture_config.texture_heights.size())
-	print()
+	Logger.debug("deformation", "=== Terrain Deformation Heights Configuration ===")
+	Logger.debug("deformation", "Terrain3D: %s" % (terrain_node.name if terrain_node else "NOT SET"))
+	Logger.debug("deformation", "Textures configured: %d" % texture_config.texture_heights.size())
 
 	for entry in texture_config.texture_heights:
-		print("  [%2d] %-20s: %6.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
+		Logger.debug("deformation", "  [%2d] %-20s: %6.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
 
-	print("=================================================")
+	Logger.debug("deformation", "=================================================")
 
 ## Auto-parse texture names using TerrainTextureNameParser
 func auto_parse_terrain_textures() -> TerrainDeformationTextureConfig:
@@ -186,6 +185,6 @@ func auto_parse_terrain_textures() -> TerrainDeformationTextureConfig:
 	var config = parser.create_config_from_terrain(terrain_node)
 
 	if debug:
-		print("[TerrainDeformationBridge] Auto-parsed %d textures" % config.texture_heights.size())
+		Logger.debug("deformation", "TerrainDeformationBridge: Auto-parsed %d textures" % config.texture_heights.size())
 
 	return config

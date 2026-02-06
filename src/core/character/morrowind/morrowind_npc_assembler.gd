@@ -72,7 +72,7 @@ static func assemble(npc_record, race_record) -> Node3D:
 	var body_parts := _collect_body_parts(npc_record, race_record, is_female)
 
 	if debug_mode:
-		print("MorrowindNPCAssembler: Collected %d body parts for %s" % [body_parts.size(), root.name])
+		Logger.info("character", "Collected %d body parts for %s" % [body_parts.size(), root.name])
 
 	# Attach each body part with rebinding to Mixamo skeleton
 	for slot in body_parts:
@@ -80,7 +80,7 @@ static func assemble(npc_record, race_record) -> Node3D:
 		_attach_body_part_mixamo(skeleton, slot, part_data)
 
 	if debug_mode:
-		print("MorrowindNPCAssembler: Assembled NPC with %d meshes" % _count_mesh_instances(skeleton))
+		Logger.info("character", "Assembled NPC with %d meshes" % _count_mesh_instances(skeleton))
 
 	return root
 
@@ -233,7 +233,7 @@ static func _attach_skinned_mesh_mixamo(skeleton: Skeleton3D, mesh_data: MeshExt
 		return
 
 	if debug_mode and not result.unmapped_bones.is_empty():
-		print("MorrowindNPCAssembler: Unmapped bones for %s: %s" % [
+		Logger.debug("character", "Unmapped bones for %s: %s" % [
 			BodyPartSlots.slot_name(slot), str(result.unmapped_bones)])
 
 	# Create MeshInstance3D

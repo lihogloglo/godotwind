@@ -81,12 +81,12 @@ func initialize() -> Error:
 		var coord := Vector2i(int(region_data["x"]), int(region_data["y"]))
 		_region_info[coord] = region_data
 
-	print("LaPalmaDataProvider initialized:")
-	print("  World: %s" % world_name)
-	print("  Size: %.1f x %.1f km" % [width_m / 1000.0, height_m / 1000.0])
-	print("  Vertex spacing: %.1fm" % vertex_spacing)
-	print("  Regions: %d (of %d x %d grid)" % [_region_info.size(), num_x, num_y])
-	print("  Height range: %.1f to %.1f m" % [
+	Logger.info("streaming", "LaPalmaDataProvider initialized:")
+	Logger.info("streaming", "  World: %s" % world_name)
+	Logger.info("streaming", "  Size: %.1f x %.1f km" % [width_m / 1000.0, height_m / 1000.0])
+	Logger.info("streaming", "  Vertex spacing: %.1fm" % vertex_spacing)
+	Logger.info("streaming", "  Regions: %d (of %d x %d grid)" % [_region_info.size(), num_x, num_y])
+	Logger.info("streaming", "  Height range: %.1f to %.1f m" % [
 		_metadata.get("min_height", 0.0),
 		_metadata.get("max_height", 0.0)
 	])

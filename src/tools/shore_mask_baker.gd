@@ -59,7 +59,7 @@ func initialize() -> Error:
 		push_error("ShoreMaskBaker: Failed to create cache directories")
 		return err
 
-	print("ShoreMaskBaker: Initialized - output dir: %s" % output_dir)
+	Logger.info("tools", "ShoreMaskBaker: Initialized - output dir: %s" % output_dir)
 	return OK
 
 
@@ -101,7 +101,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	_seeds.fill(-1)  # -1 = no seed
 
 	# First pass: classify water vs land
-	print("ShoreMaskBaker: Classifying terrain (%dx%d pixels)..." % [resolution, resolution])
+	Logger.info("tools", "ShoreMaskBaker: Classifying terrain (%dx%d pixels)..." % [resolution, resolution])
 	for y in range(resolution):
 		for x in range(resolution):
 			var world_pos := _pixel_to_world(x, y)
@@ -124,7 +124,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	# These become the seeds for JFA
 	var shore_count := 0
 
-	print("ShoreMaskBaker: Finding shore pixels...")
+	Logger.info("tools", "ShoreMaskBaker: Finding shore pixels...")
 	for y in range(resolution):
 		for x in range(resolution):
 			var idx := y * resolution + x
@@ -158,7 +158,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 			progress.emit(pct, "Finding shore pixels... %d%%" % int((float(y) / float(resolution)) * 100))
 			await tree.process_frame
 
-	print("ShoreMaskBaker: Found %d shore pixels" % shore_count)
+	Logger.info("tools", "ShoreMaskBaker: Found %d shore pixels" % shore_count)
 
 	if shore_count == 0:
 		push_warning("ShoreMaskBaker: No shore pixels found - terrain may be entirely above or below sea level")
@@ -172,13 +172,13 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	var pass_num := 0
 	var total_passes := int(ceil(log(float(resolution)) / log(2.0)))
 
-	print("ShoreMaskBaker: Running JFA (%d passes)..." % total_passes)
+	Logger.info("tools", "ShoreMaskBaker: Running JFA (%d passes)..." % total_passes)
 	while step >= 1:
 		await _jfa_pass_async(step, binary_mask, tree)
 		pass_num += 1
 		var pct := 25.0 + (float(pass_num) / float(total_passes)) * 50.0
 		progress.emit(pct, "JFA pass %d/%d (step=%d)..." % [pass_num, total_passes, step])
-		print("ShoreMaskBaker: JFA pass %d/%d complete (step=%d)" % [pass_num, total_passes, step])
+		Logger.debug("tools", "ShoreMaskBaker: JFA pass %d/%d complete (step=%d)" % [pass_num, total_passes, step])
 		await tree.process_frame
 		step /= 2
 
@@ -189,7 +189,7 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 	var result_image := Image.create(resolution, resolution, false, Image.FORMAT_R8)
 	var texel_size := world_bounds.size.x / float(resolution)
 
-	print("ShoreMaskBaker: Computing gradient...")
+	Logger.info("tools", "ShoreMaskBaker: Computing gradient...")
 	for y in range(resolution):
 		for x in range(resolution):
 			var idx := y * resolution + x
@@ -249,14 +249,14 @@ func bake_shore_mask(custom_output_path: String = "") -> Dictionary:
 
 	progress.emit(100.0, "Complete!")
 
-	print("ShoreMaskBaker: Saved shore mask to %s" % output_path)
-	print("  Resolution: %dx%d" % [resolution, resolution])
-	print("  World bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
+	Logger.info("tools", "ShoreMaskBaker: Saved shore mask to %s" % output_path)
+	Logger.info("tools", "  Resolution: %dx%d" % [resolution, resolution])
+	Logger.info("tools", "  World bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
 		world_bounds.position.x, world_bounds.position.y,
 		world_bounds.end.x, world_bounds.end.y
 	])
-	print("  Sea level: %.1f, Fade distance: %.1fm" % [sea_level, fade_distance])
-	print("  Shore pixels found: %d" % shore_count)
+	Logger.info("tools", "  Sea level: %.1f, Fade distance: %.1fm" % [sea_level, fade_distance])
+	Logger.info("tools", "  Shore pixels found: %d" % shore_count)
 
 	bake_complete.emit(true, output_path)
 	return {
@@ -385,14 +385,14 @@ func _calculate_world_bounds() -> void:
 	if not terrain or not terrain.data:
 		# Default to large bounds
 		world_bounds = Rect2(-8000, -8000, 16000, 16000)
-		print("ShoreMaskBaker: Using default world bounds (no terrain data)")
+		Logger.warn("tools", "ShoreMaskBaker: Using default world bounds (no terrain data)")
 		return
 
 	# Try to get bounds from terrain data
 	var region_count := terrain.data.get_region_count()
 	if region_count == 0:
 		world_bounds = Rect2(-8000, -8000, 16000, 16000)
-		print("ShoreMaskBaker: Using default world bounds (no regions)")
+		Logger.warn("tools", "ShoreMaskBaker: Using default world bounds (no regions)")
 		return
 
 	# Calculate bounds from region locations
@@ -401,7 +401,7 @@ func _calculate_world_bounds() -> void:
 
 	if region_locations.is_empty():
 		world_bounds = Rect2(-8000, -8000, 16000, 16000)
-		print("ShoreMaskBaker: Using default world bounds (no region locations)")
+		Logger.warn("tools", "ShoreMaskBaker: Using default world bounds (no region locations)")
 		return
 
 	# Find min/max region coordinates
@@ -433,7 +433,7 @@ func _calculate_world_bounds() -> void:
 		world_bounds.size.y + padding * 2
 	)
 
-	print("ShoreMaskBaker: Calculated world bounds: %s (with %.0fm padding)" % [world_bounds, padding])
+	Logger.info("tools", "ShoreMaskBaker: Calculated world bounds: %s (with %.0fm padding)" % [world_bounds, padding])
 
 
 ## Get terrain height at world position
@@ -477,7 +477,7 @@ func _save_metadata(image_path: String) -> void:
 
 	var cfg_path := image_path.replace(".png", ".cfg")
 	config.save(cfg_path)
-	print("ShoreMaskBaker: Saved metadata to %s" % cfg_path)
+	Logger.debug("tools", "ShoreMaskBaker: Saved metadata to %s" % cfg_path)
 
 
 ## Load prebaked shore mask from file
@@ -517,10 +517,10 @@ static func load_prebaked(image_path: String) -> Dictionary:
 			bounds = Rect2(bounds_x, bounds_y, bounds_w, bounds_h)
 			fade_dist = config.get_value("shore_mask", "fade_distance", 50.0)
 			var algorithm: String = config.get_value("shore_mask", "algorithm", "iterative")
-			print("ShoreMaskBaker: Loaded %s-based shore mask (fade=%.0fm)" % [algorithm, fade_dist])
+			Logger.debug("tools", "ShoreMaskBaker: Loaded %s-based shore mask (fade=%.0fm)" % [algorithm, fade_dist])
 
-	print("ShoreMaskBaker: Loaded prebaked shore mask from %s" % image_path)
-	print("  Bounds: %s" % bounds)
+	Logger.info("tools", "ShoreMaskBaker: Loaded prebaked shore mask from %s" % image_path)
+	Logger.debug("tools", "  Bounds: %s" % bounds)
 
 	return {
 		"texture": texture,

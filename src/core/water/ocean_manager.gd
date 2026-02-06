@@ -113,7 +113,7 @@ func _ready() -> void:
 		_system_enabled = ProjectSettings.get_setting(SETTING_ENABLED, false)
 
 		if not _system_enabled:
-			print("[OceanManager] System disabled via project settings - skipping initialization")
+			Logger.info("water", "OceanManager: System disabled via project settings - skipping initialization")
 			return
 	else:
 		# Manual instance - always enable
@@ -232,11 +232,11 @@ func _deferred_init() -> void:
 			var bounds: Rect2 = prebaked.bounds
 			_ocean_mesh.set_shore_mask(tex, bounds)
 			shore_mask_loaded = true
-			print("[OceanManager] Using prebaked shore mask from %s" % shore_mask_path)
+			Logger.info("water", "OceanManager: Using prebaked shore mask from %s" % shore_mask_path)
 
 	# Fall back to runtime generation if terrain available
 	if not shore_mask_loaded and _terrain:
-		print("[OceanManager] Generating shore mask at runtime...")
+		Logger.info("water", "OceanManager: Generating shore mask at runtime...")
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
 		# Pass shore mask to ocean mesh shader
 		_ocean_mesh.set_shore_mask(
@@ -246,15 +246,15 @@ func _deferred_init() -> void:
 		shore_mask_loaded = true
 
 	if not shore_mask_loaded:
-		print("[OceanManager] Warning: No shore mask available - ocean will appear everywhere")
+		Logger.warn("water", "OceanManager: No shore mask available - ocean will appear everywhere")
 
 	_system_initialized = true
 	ocean_initialized.emit()
 
 	var mode := "GPU FFT (3 cascades)" if _use_compute else "Flat Plane"
-	print("[OceanManager] Initialized - sea level: %.1f, radius: %.0fm, mode: %s" % [
+	Logger.info("water", "OceanManager: Initialized - sea level: %.1f, radius: %.0fm, mode: %s" % [
 		sea_level, ocean_radius, mode])
-	print("[OceanManager] Ocean mesh visible: %s, vertices: %d" % [
+	Logger.debug("water", "OceanManager: Ocean mesh visible: %s, vertices: %d" % [
 		_ocean_mesh.visible,
 		_ocean_mesh.mesh.get_faces().size() / 3 if _ocean_mesh.mesh else 0])
 
@@ -288,7 +288,7 @@ func _setup_wave_cascades() -> void:
 		params.time = 120.0 + PI * i  # Offset to prevent interference
 		_wave_parameters.append(params)
 
-	print("[OceanManager] Configured %d wave cascade(s)" % cascade_configs.size())
+	Logger.info("water", "OceanManager: Configured %d wave cascade(s)" % cascade_configs.size())
 
 
 func _process(delta: float) -> void:
@@ -303,7 +303,7 @@ func _process(delta: float) -> void:
 	if not _camera and _auto_find_camera:
 		_camera = _find_active_camera()
 		if _camera:
-			print("[OceanManager] Auto-detected camera: %s at %s" % [_camera.name, _camera.global_position])
+			Logger.debug("water", "OceanManager: Auto-detected camera: %s at %s" % [_camera.name, _camera.global_position])
 
 	# Update wave generator
 	if _use_compute and _wave_parameters.size() > 0:
@@ -328,7 +328,7 @@ func _process(delta: float) -> void:
 		_ocean_mesh.update_position(new_pos)
 		# Debug: print position once
 		if _time < 0.1:
-			print("[OceanManager] Ocean mesh positioned at: %s (camera: %s)" % [new_pos, cam_pos])
+			Logger.debug("water", "OceanManager: Ocean mesh positioned at: %s (camera: %s)" % [new_pos, cam_pos])
 
 	# Update shader time (for vertex Gerstner animation)
 	_ocean_mesh.set_shader_time(_time)
@@ -340,7 +340,7 @@ func _process(delta: float) -> void:
 	if _auto_find_sun and not _sun_light:
 		_sun_light = _find_sun_light()
 		if _sun_light:
-			print("[OceanManager] Auto-detected sun light: %s" % _sun_light.name)
+			Logger.debug("water", "OceanManager: Auto-detected sun light: %s" % _sun_light.name)
 
 	if _sun_light and _ocean_mesh:
 		# DirectionalLight3D's -Z axis points toward the light direction
@@ -506,11 +506,11 @@ func set_terrain(terrain: Terrain3D) -> void:
 				var bounds: Rect2 = prebaked.bounds
 				_ocean_mesh.set_shore_mask(tex, bounds)
 			shore_mask_loaded = true
-			print("[OceanManager] Using prebaked shore mask from %s" % shore_mask_path)
+			Logger.info("water", "OceanManager: Using prebaked shore mask from %s" % shore_mask_path)
 
 	# Fall back to runtime generation if no prebaked mask
 	if not shore_mask_loaded and _shore_mask and _terrain:
-		print("[OceanManager] No prebaked shore mask, generating at runtime...")
+		Logger.info("water", "OceanManager: No prebaked shore mask, generating at runtime...")
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
 		if _ocean_mesh:
 			_ocean_mesh.set_shore_mask(
@@ -576,14 +576,14 @@ func toggle_ocean() -> bool:
 		# Disable
 		set_enabled(false)
 		_system_enabled = false
-		print("[OceanManager] Ocean disabled")
+		Logger.info("water", "OceanManager: Ocean disabled")
 	else:
 		# Enable - may need to initialize first
 		if not _system_initialized:
 			force_initialize()
 		# force_initialize sets _system_enabled = true
 		set_enabled(true)
-		print("[OceanManager] Ocean enabled (mode: %s)" % get_water_quality_name())
+		Logger.info("water", "OceanManager: Ocean enabled (mode: %s)" % get_water_quality_name())
 	return _system_enabled
 
 
@@ -602,10 +602,10 @@ static func is_hardware_suitable() -> bool:
 ## This allows the autoload to stay disabled by default while scenes can opt-in
 func force_initialize() -> void:
 	if _system_initialized:
-		print("[OceanManager] Already initialized, skipping force_initialize")
+		Logger.debug("water", "OceanManager: Already initialized, skipping force_initialize")
 		return
 
-	print("[OceanManager] Force initializing ocean system...")
+	Logger.info("water", "OceanManager: Force initializing ocean system...")
 	_system_enabled = true
 
 	# Create child systems if not already created
@@ -613,19 +613,19 @@ func force_initialize() -> void:
 		_ocean_mesh = OceanMesh.new()
 		_ocean_mesh.name = "OceanMesh"
 		add_child(_ocean_mesh)
-		print("[OceanManager] Created OceanMesh")
+		Logger.debug("water", "OceanManager: Created OceanMesh")
 
 	if not _wave_generator:
 		_wave_generator = WaveGenerator.new()
 		_wave_generator.name = "WaveGenerator"
 		add_child(_wave_generator)
-		print("[OceanManager] Created WaveGenerator")
+		Logger.debug("water", "OceanManager: Created WaveGenerator")
 
 	if not _shore_mask:
 		_shore_mask = ShoreMaskGenerator.new()
 		_shore_mask.name = "ShoreMaskGenerator"
 		add_child(_shore_mask)
-		print("[OceanManager] Created ShoreMaskGenerator")
+		Logger.debug("water", "OceanManager: Created ShoreMaskGenerator")
 
 	# Run deferred init
 	_deferred_init()
@@ -633,7 +633,7 @@ func force_initialize() -> void:
 	# Ensure mesh is visible and positioned
 	if _ocean_mesh:
 		_ocean_mesh.visible = true
-		print("[OceanManager] Ocean mesh visible: %s, position: %s" % [_ocean_mesh.visible, _ocean_mesh.global_position])
+		Logger.debug("water", "OceanManager: Ocean mesh visible: %s, position: %s" % [_ocean_mesh.visible, _ocean_mesh.global_position])
 
 
 ## Get current water quality mode
@@ -684,7 +684,7 @@ func set_water_quality(quality: int) -> void:
 			_wave_generator.get_normal_texture(),
 			_wave_parameters.size()
 		)
-		print("[OceanManager] Reconnected wave textures for FFT mode")
+		Logger.debug("water", "OceanManager: Reconnected wave textures for FFT mode")
 	elif needs_wave_textures:
 		# Need to initialize wave generator for FFT mode
 		if not _wave_generator.is_initialized():
@@ -698,9 +698,9 @@ func set_water_quality(quality: int) -> void:
 						_wave_generator.get_normal_texture(),
 						_wave_parameters.size()
 					)
-					print("[OceanManager] Initialized wave generator for FFT mode switch")
+					Logger.debug("water", "OceanManager: Initialized wave generator for FFT mode switch")
 
-	print("[OceanManager] Quality changed to: %s" % get_water_quality_name())
+	Logger.info("water", "OceanManager: Quality changed to: %s" % get_water_quality_name())
 
 
 ## Get water quality name as string

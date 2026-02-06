@@ -550,71 +550,71 @@ func _generate_report() -> Dictionary:
 func print_report() -> void:
 	var report: Dictionary = _generate_report()
 
-	print("\n")
-	print("╔════════════════════════════════════════════════════════════════╗")
-	print("║               AUTOMATED TEST REPORT                            ║")
-	print("╠════════════════════════════════════════════════════════════════╣")
+	Logger.info("testing", "")
+	Logger.info("testing", "╔════════════════════════════════════════════════════════════════╗")
+	Logger.info("testing", "║               AUTOMATED TEST REPORT                            ║")
+	Logger.info("testing", "╠════════════════════════════════════════════════════════════════╣")
 
 	# Test info
 	var info: Dictionary = report.get("test_info", {})
 	var duration_val: float = info.get("duration_seconds", 0.0) as float
 	var wp_completed: int = info.get("waypoints_completed", 0) as int
 	var wp_total: int = info.get("waypoints_total", 0) as int
-	print("║ Duration: %.1f seconds" % duration_val)
-	print("║ Waypoints: %d/%d completed" % [wp_completed, wp_total])
+	Logger.info("testing", "║ Duration: %.1f seconds" % duration_val)
+	Logger.info("testing", "║ Waypoints: %d/%d completed" % [wp_completed, wp_total])
 
 	# Performance
 	var perf: Dictionary = report.get("performance", {})
-	print("╠════════════════════════════════════════════════════════════════╣")
-	print("║ PERFORMANCE")
+	Logger.info("testing", "╠════════════════════════════════════════════════════════════════╣")
+	Logger.info("testing", "║ PERFORMANCE")
 	var avg_fps: float = perf.get("avg_fps", 0.0) as float
 	var avg_ft: float = perf.get("avg_frame_time_ms", 0.0) as float
 	var p95_ft: float = perf.get("p95_frame_time_ms", 0.0) as float
 	var max_ft: float = perf.get("max_frame_time_ms", 0.0) as float
-	print("║   Avg FPS: %.1f" % avg_fps)
-	print("║   Frame time: %.2fms avg, %.2fms P95, %.2fms max" % [avg_ft, p95_ft, max_ft])
+	Logger.info("testing", "║   Avg FPS: %.1f" % avg_fps)
+	Logger.info("testing", "║   Frame time: %.2fms avg, %.2fms P95, %.2fms max" % [avg_ft, p95_ft, max_ft])
 
 	# Loading times
 	var loading: Dictionary = report.get("loading", {})
 	var times: Dictionary = loading.get("waypoint_times", {})
 	if not times.is_empty():
-		print("╠════════════════════════════════════════════════════════════════╣")
-		print("║ LOADING TIMES (by waypoint)")
+		Logger.info("testing", "╠════════════════════════════════════════════════════════════════╣")
+		Logger.info("testing", "║ LOADING TIMES (by waypoint)")
 		for wp_name: String in times.keys():
 			var time_val: float = times[wp_name] as float
-			print("║   %s: %.2fs" % [wp_name, time_val])
+			Logger.info("testing", "║   %s: %.2fs" % [wp_name, time_val])
 
 	# Errors
 	var errors: Dictionary = report.get("errors", {})
-	print("╠════════════════════════════════════════════════════════════════╣")
+	Logger.info("testing", "╠════════════════════════════════════════════════════════════════╣")
 	var err_total: int = errors.get("total_count", 0) as int
 	var err_unique: int = errors.get("unique_count", 0) as int
-	print("║ ERRORS: %d total (%d unique)" % [err_total, err_unique])
+	Logger.info("testing", "║ ERRORS: %d total (%d unique)" % [err_total, err_unique])
 	var error_groups_dict: Dictionary = errors.get("groups", {})
 	for key: String in error_groups_dict.keys():
 		var group: Dictionary = error_groups_dict[key]
 		var cnt: int = group.get("count", 0) as int
-		print("║   [x%d] %s" % [cnt, key.substr(0, 60)])
+		Logger.info("testing", "║   [x%d] %s" % [cnt, key.substr(0, 60)])
 
 	# Warnings
 	var warnings: Dictionary = report.get("warnings", {})
-	print("╠════════════════════════════════════════════════════════════════╣")
+	Logger.info("testing", "╠════════════════════════════════════════════════════════════════╣")
 	var warn_total: int = warnings.get("total_count", 0) as int
 	var warn_unique: int = warnings.get("unique_count", 0) as int
-	print("║ WARNINGS: %d total (%d unique)" % [warn_total, warn_unique])
+	Logger.info("testing", "║ WARNINGS: %d total (%d unique)" % [warn_total, warn_unique])
 	var warning_groups_dict: Dictionary = warnings.get("groups", {})
 	var shown: int = 0
 	for key: String in warning_groups_dict.keys():
 		if shown >= 10:
-			print("║   ... and %d more warning types" % (warning_groups_dict.size() - shown))
+			Logger.info("testing", "║   ... and %d more warning types" % (warning_groups_dict.size() - shown))
 			break
 		var group: Dictionary = warning_groups_dict[key]
 		var cnt: int = group.get("count", 0) as int
-		print("║   [x%d] %s" % [cnt, key.substr(0, 60)])
+		Logger.info("testing", "║   [x%d] %s" % [cnt, key.substr(0, 60)])
 		shown += 1
 
-	print("╚════════════════════════════════════════════════════════════════╝")
-	print("\n")
+	Logger.info("testing", "╚════════════════════════════════════════════════════════════════╝")
+	Logger.info("testing", "")
 
 
 ## Capture an error during the test
@@ -669,7 +669,7 @@ func _log(message: String) -> void:
 		clean = clean.replace("[color=green]", "").replace("[color=cyan]", "")
 		clean = clean.replace("[color=yellow]", "").replace("[color=red]", "")
 		clean = clean.replace("[/color]", "")
-		print(clean)
+		Logger.info("testing", clean)
 
 
 #region Crash Scenario Tests

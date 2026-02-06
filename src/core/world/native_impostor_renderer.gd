@@ -152,11 +152,11 @@ class ImpostorData:
 #region Initialization
 
 func _ready() -> void:
-	print("[NativeImpostorRenderer] Initializing impostor renderer...")
+	Logger.info("impostors", "Initializing impostor renderer...")
 	_setup_master_multimesh()
 	_setup_billboard_material()
 	_start_job_system()
-	print("[NativeImpostorRenderer] Initialization complete. Debug enabled: %s" % debug_enabled)
+	Logger.info("impostors", "Initialization complete. Debug enabled: %s" % debug_enabled)
 
 
 func _exit_tree() -> void:
@@ -200,7 +200,7 @@ func _setup_billboard_material() -> void:
 
 	# Check if shader compiled successfully
 	# Note: Godot doesn't expose direct "is_valid" for shaders, but errors print to console
-	print("[NativeImpostorRenderer] Shader code length: %d chars" % shader.code.length())
+	Logger.debug("impostors", "Shader code length: %d chars" % shader.code.length())
 
 	_billboard_material = ShaderMaterial.new()
 	_billboard_material.shader = shader
@@ -222,18 +222,18 @@ func _setup_billboard_material() -> void:
 	var quad_mesh: QuadMesh = _master_multimesh.mesh as QuadMesh
 	if quad_mesh:
 		quad_mesh.surface_set_material(0, _billboard_material)
-		print("[NativeImpostorRenderer] Set material on QuadMesh surface 0")
+		Logger.debug("impostors", "Set material on QuadMesh surface 0")
 
 	_master_instance.material_override = _billboard_material
-	print("[NativeImpostorRenderer] Set material_override on MultiMeshInstance3D")
+	Logger.debug("impostors", "Set material_override on MultiMeshInstance3D")
 
 
 ## Toggle debug mode for impostor shader (shows bright magenta at any distance)
 ## CRITICAL: Also disables visibility_range_begin so impostors render at close range
 func set_shader_debug_mode(enabled: bool) -> void:
-	print("[NativeImpostorRenderer] set_shader_debug_mode called with: %s" % enabled)
-	print("[NativeImpostorRenderer] _billboard_material is: %s" % (_billboard_material != null))
-	print("[NativeImpostorRenderer] _master_instance is: %s" % (_master_instance != null))
+	Logger.debug("impostors", "set_shader_debug_mode called with: %s" % enabled)
+	Logger.debug("impostors", "_billboard_material is: %s" % (_billboard_material != null))
+	Logger.debug("impostors", "_master_instance is: %s" % (_master_instance != null))
 
 	# Note: Currently using simplified debug shader that always shows magenta
 	# The debug_mode uniform only exists in the full shader (commented out)
@@ -243,11 +243,11 @@ func set_shader_debug_mode(enabled: bool) -> void:
 		if "debug_mode" in shader_code:
 			_billboard_material.set_shader_parameter("debug_mode", enabled)
 			var actual_value = _billboard_material.get_shader_parameter("debug_mode")
-			print("[NativeImpostorRenderer] debug_mode uniform set to: %s (verified: %s)" % [enabled, actual_value])
+			Logger.debug("impostors", "debug_mode uniform set to: %s (verified: %s)" % [enabled, actual_value])
 		else:
-			print("[NativeImpostorRenderer] Using simplified shader (no debug_mode uniform) - always magenta")
+			Logger.debug("impostors", "Using simplified shader (no debug_mode uniform) - always magenta")
 	else:
-		print("[NativeImpostorRenderer] ERROR: _billboard_material or shader is null!")
+		Logger.error("impostors", "_billboard_material or shader is null!")
 
 	# CRITICAL FIX: visibility_range culls the MultiMesh BEFORE shader runs
 	# So we must also disable visibility_range_begin for debug mode to work at close range
@@ -256,14 +256,14 @@ func set_shader_debug_mode(enabled: bool) -> void:
 			# Debug mode: show at any distance
 			_master_instance.visibility_range_begin = 0.0
 			_master_instance.visibility_range_begin_margin = 0.0
-			print("[NativeImpostorRenderer] visibility_range_begin set to 0 (debug mode)")
+			Logger.debug("impostors", "visibility_range_begin set to 0 (debug mode)")
 		else:
 			# Normal mode: restore FAR tier visibility (450m+)
 			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN  # 450m
 			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN  # 50m hysteresis
-			print("[NativeImpostorRenderer] visibility_range_begin restored to 450m")
+			Logger.debug("impostors", "visibility_range_begin restored to 450m")
 
-	print("[NativeImpostorRenderer] Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (500m+)"))
+	Logger.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (500m+)"))
 
 #endregion
 
@@ -494,8 +494,7 @@ func _process(_delta: float) -> void:
 		var done_adding := time_since_last_add >= MULTIMESH_REBUILD_DEBOUNCE or _pending_impostor_cells.is_empty()
 
 		if should_rebuild and done_adding:
-			# Log at info level since this is now rate-limited (not every frame)
-			print("[NativeImpostorRenderer] Rebuilding MultiMesh with %d impostors" % _impostors.size())
+			Logger.info("impostors", "Rebuilding MultiMesh with %d impostors" % _impostors.size())
 			_rebuild_multimesh()
 			_last_multimesh_rebuild_time = current_time
 			_impostors_dirty = false
@@ -773,7 +772,7 @@ func dump_diagnostic() -> String:
 			count += 1
 
 	var output := "\n".join(lines)
-	print(output)
+	Logger.info("impostors", output)
 	return output
 
 
@@ -826,7 +825,7 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 
 		# Queue for progressive loading instead of loading synchronously
 		_pending_impostor_cells.append_array(cells_to_load)
-		print("[NativeImpostorRenderer] Queued %d impostor cells for deferred loading (total pending: %d)" % [
+		Logger.info("impostors", "Queued %d impostor cells for deferred loading (total pending: %d)" % [
 			cells_to_load.size(), _pending_impostor_cells.size()])
 
 
@@ -874,7 +873,7 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 ## Internal helper to load impostors from ESM record
 func _load_impostors_from_cell_record(grid: Vector2i) -> void:
 	if not ESMManager:
-		print("[NativeImpostorRenderer] ERROR: ESMManager not available!")
+		Logger.error("impostors", "ESMManager not available!")
 		return
 
 	var cell_record = ESMManager.get_exterior_cell(grid.x, grid.y)
@@ -922,7 +921,7 @@ func _load_impostors_from_cell_record(grid: Vector2i) -> void:
 
 func _debug(msg: String) -> void:
 	if debug_enabled:
-		print("[NativeImpostorRenderer] %s" % msg)
+		Logger.debug("impostors", msg)
 
 #endregion
 
@@ -1121,9 +1120,9 @@ func _rebuild_texture_array() -> void:
 		_texture_array_dirty = false
 		return
 
-	print("[NativeImpostorRenderer] _rebuild_texture_array: Created texture array with %d layers" % images.size())
+	Logger.debug("impostors", "Rebuilt texture array with %d layers" % images.size())
 	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
-	print("[NativeImpostorRenderer] _rebuild_texture_array: Set texture_atlas on material")
+	Logger.debug("impostors", "Set texture_atlas on material")
 	_texture_array_dirty = false
 
 

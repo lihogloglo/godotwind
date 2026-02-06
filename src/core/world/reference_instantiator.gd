@@ -70,7 +70,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 	var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 
 	if debug_lod and _inst_call_count <= 20:
-		print("[LOD-INST] #%d ref=%s, type=%s, found=%s, cell=%s" % [
+		Logger.debug("streaming", "[LOD-INST] #%d ref=%s, type=%s, found=%s, cell=%s" % [
 			_inst_call_count, ref.ref_id, record_type[0] if record_type.size() > 0 else "?",
 			base_record != null, cell_grid
 		])
@@ -147,7 +147,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	if debug_lod and _model_obj_count <= 20:
 		var is_static := use_static_renderer and static_renderer and _is_static_render_model(model_path)
 		var is_sig := is_significant_object(model_path)
-		print("[LOD-PATH] #%d %s: static_render=%s, significant=%s" % [
+		Logger.debug("streaming", "[LOD-PATH] #%d %s: static_render=%s, significant=%s" % [
 			_model_obj_count, model_path.get_file(), is_static, is_sig
 		])
 
@@ -644,7 +644,7 @@ func _is_static_render_model(model_path: String) -> bool:
 func _apply_fade_in(instance: Node3D) -> void:
 	if not scene_tree:
 		if debug_lod:
-			print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
+			Logger.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
 		return  # Need scene tree for tweens
 
 	# Find all MeshInstance3D nodes in the hierarchy
@@ -653,11 +653,11 @@ func _apply_fade_in(instance: Node3D) -> void:
 
 	if mesh_instances.is_empty():
 		if debug_lod:
-			print("[ReferenceInstantiator] _apply_fade_in SKIPPED - no mesh instances in %s" % instance.name)
+			Logger.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - no mesh instances in %s" % instance.name)
 		return
 
 	if debug_lod:
-		print("[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
+		Logger.debug("streaming", "[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
 
 	# Store original materials and apply fade materials
 	var fade_data: Array[Dictionary] = []
