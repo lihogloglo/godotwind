@@ -204,6 +204,114 @@ If you don't see these → Models don't have LOD nodes.
 
 ---
 
+## Streaming Benchmark
+
+Automated performance measurement for the streaming pipeline. Runs a scripted camera path through the world, logs per-frame metrics, and outputs results as CSV + summary.
+
+### `benchmark_streaming` (alias: `bench_stream`)
+
+Full benchmark run (~30 seconds). Moves the camera through 6 phases designed to stress-test every aspect of the streaming system:
+
+| Phase | Duration | What It Tests |
+|-------|----------|---------------|
+| **idle** | 3s | Time-to-stable after initial spawn |
+| **approach** | 5s | Impostor→MID→NEAR transitions (800m → center at 160m/s) |
+| **orbit** | 10s | Steady-state streaming, cell boundary crossings (200m radius circle) |
+| **sprint** | 5s | High-speed loading pressure (600m north at 120m/s) |
+| **teleport** | 3s | Worst-case teardown + rebuild (3 jumps, 500m apart) |
+| **return** | 4s | Re-loading previously cached area |
+
+**Starting location:** Seyda Neen (cell -2, -9)
+
+### `benchmark_streaming_quick` (alias: `bench_quick`)
+
+Quick benchmark (~18 seconds). Only runs idle + approach + orbit phases. Useful for fast iteration.
+
+### Output
+
+**Real-time overlay:** FPS, frame time, node count, draw calls, queue size, current phase, progress bar.
+
+**CSV file:** Saved to `user://benchmark_results/benchmark_YYYY-MM-DD_HH-MM-SS.csv` with 15 columns per frame:
+
+```
+frame, time_ms, fps, node_count, draw_calls, rendered_objects, primitives,
+queue_size, loaded_cells, async_requests, cam_x, cam_y, cam_z, memory_static, segment
+```
+
+**Console summary** (printed on completion):
+
+```
+========== STREAMING BENCHMARK RESULTS ==========
+Duration: 30.2s (1812 frames)
+
+Frame Time:
+  Average: 11.2ms (89 FPS)
+  P50: 9.8ms
+  P95: 18.4ms
+  P99: 34.2ms
+  Max: 52.1ms (frame 847, segment: teleport)
+
+Time to Stable 60 FPS: 198 frames (3.3s)
+
+Loading:
+  Peak instantiation queue: 8432
+  Peak loaded cells: 49
+  Peak node count: 14203
+
+Rendering:
+  Average draw calls: 1247
+  Peak draw calls: 2103
+
+Per-Segment Breakdown:
+  idle:      avg  14.2ms  p99  22.1ms  (180 frames)
+  approach:  avg  12.1ms  p99  28.3ms  (300 frames)
+  orbit:     avg   9.8ms  p99  15.2ms  (600 frames)
+  sprint:    avg  13.4ms  p99  38.7ms  (300 frames)
+  teleport:  avg  18.9ms  p99  52.1ms  (180 frames)
+  return:    avg   8.2ms  p99  11.4ms  (240 frames)
+
+CSV saved to: user://benchmark_results/benchmark_2026-02-06_14-30-22.csv
+==================================================
+```
+
+### Standalone Mode
+
+The benchmark can also run as a standalone scene without the world explorer:
+
+1. Open `src/tools/streaming_benchmark.tscn` in Godot
+2. Run it directly (F5 or Ctrl+F5)
+3. It will auto-initialize BSA/ESM data, create its own streaming manager, and run the benchmark
+
+This is useful for isolated testing without the overhead of the full world explorer scene.
+
+### Key Metrics to Watch
+
+| Metric | What It Means | Healthy Value |
+|--------|---------------|---------------|
+| Time to 60 FPS | How long initial loading takes | < 1.0s (target) |
+| P99 frame time | Worst 1% of frames | < 16.7ms (60 FPS) |
+| Max frame time | Single worst frame | < 33ms (30 FPS floor) |
+| Peak queue | Max objects waiting to instantiate | Lower = faster loading |
+| Peak nodes | Scene tree size | Lower = less overhead |
+
+### Before/After Comparison
+
+Run the benchmark before and after making streaming changes. Compare CSV files to verify improvements:
+
+```
+# Run benchmark, note the CSV path
+benchmark_streaming
+
+# Make streaming changes...
+
+# Run again
+benchmark_streaming
+
+# Compare the two CSV files (frame time columns, queue size, etc.)
+```
+
+---
+
 ## Still Having Issues?
 
 Run `debug_streaming` and `impostor_stats`, then provide:
@@ -218,5 +326,5 @@ This will help identify the exact issue!
 
 ---
 
-*Last updated: 2026-01-08*
+*Last updated: 2026-02-06*
 *See also: [DEBUGGING_DISTANCE_RENDERING.md](./DEBUGGING_DISTANCE_RENDERING.md) for detailed troubleshooting*

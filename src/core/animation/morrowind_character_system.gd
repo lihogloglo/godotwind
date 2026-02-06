@@ -138,7 +138,7 @@ func _build_bone_map() -> void:
 		for standard_name: StringName in _bone_map:
 			var idx: int = _bone_map[standard_name]
 			map_info += "\n  %s -> %s (idx %d)" % [standard_name, skeleton.get_bone_name(idx), idx]
-		Logger.debug("animation", map_info)
+		Log.debug("animation", map_info)
 
 
 ## Find animation by Morrowind name

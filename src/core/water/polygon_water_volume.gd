@@ -161,7 +161,7 @@ func _create_polygon_mesh() -> void:
 	_water_mesh.material_override = _material
 	_water_mesh.position.y = water_surface_height
 
-	Logger.debug("water", "PolygonWaterVolume: Created polygon mesh with %d vertices, %d triangles" % [
+	Log.debug("water", "PolygonWaterVolume: Created polygon mesh with %d vertices, %d triangles" % [
 		vertices.size(), indices.size() / 3])
 
 
@@ -181,9 +181,9 @@ func _triangulate_polygon(points: PackedVector2Array) -> Array:
 		var ear_found := false
 
 		for i in range(remaining_indices.size()):
-			var prev_idx := remaining_indices[(i - 1 + remaining_indices.size()) % remaining_indices.size()]
-			var curr_idx := remaining_indices[i]
-			var next_idx := remaining_indices[(i + 1) % remaining_indices.size()]
+			var prev_idx: int = remaining_indices[(i - 1 + remaining_indices.size()) % remaining_indices.size()]
+			var curr_idx: int = remaining_indices[i]
+			var next_idx: int = remaining_indices[(i + 1) % remaining_indices.size()]
 
 			var p1 := points[prev_idx]
 			var p2 := points[curr_idx]

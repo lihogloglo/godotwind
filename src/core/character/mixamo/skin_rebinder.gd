@@ -420,7 +420,7 @@ static func print_bone_mapping(
 		mapped += 1
 
 	lines.append("Mapped: %d, Unmapped: %d" % [mapped, unmapped])
-	Logger.debug("character", "\n".join(lines))
+	Log.debug("character", "\n".join(lines))
 
 
 ## Clear cached Morrowind skeleton data (for memory management)
@@ -442,4 +442,4 @@ static func print_mw_skeleton_debug() -> void:
 	for bone_name in bones:
 		var transform: Transform3D = _mw_bone_transforms[bone_name]
 		lines.append("  %s: pos=%s" % [bone_name, transform.origin])
-	Logger.debug("character", "\n".join(lines))
+	Log.debug("character", "\n".join(lines))

@@ -227,7 +227,7 @@ func _load_file_native_cached(path: String) -> Error:
 	loaded_files.append(path)
 
 	# Detailed timing breakdown for optimization
-	Logger.info("esm", "Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
+	Log.info("esm", "Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
 		path.get_file(), total_time, csharp_time, populate_time, supplement_time])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
@@ -253,7 +253,7 @@ func _load_file_native(path: String) -> Error:
 	load_time_ms += stats.get("load_time_ms", 0.0) as float
 	loaded_files.append(path)
 
-	Logger.info("esm", "Loaded %s via native C# in %.1f ms" % [path, stats.get("load_time_ms", 0.0)])
+	Log.info("esm", "Loaded %s via native C# in %.1f ms" % [path, stats.get("load_time_ms", 0.0)])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
 	return OK
@@ -286,7 +286,7 @@ func _populate_simple_records(
 			if not dominated or new_priority > dominated_priority:
 				_all_records[key] = {"record": rec, "type": type_name}
 			elif dominated and "mushroom" in str(key):
-				Logger.debug("esm", "Key '%s': keeping %s (pri=%d) over %s (pri=%d)" % [
+				Log.debug("esm", "Key '%s': keeping %s (pri=%d) over %s (pri=%d)" % [
 					key, dominated_by, dominated_priority, type_name, new_priority
 				])
 
@@ -598,7 +598,7 @@ func _populate_from_native(loader: RefCounted) -> void:
 		for cell_key: Variant in cells:
 			var cell_rec: CellRecord = cells[cell_key]
 			ref_count += cell_rec.references.size()
-		Logger.debug("esm", "Populate timing: statics=%dms, simple=%dms, cells+refs=%dms (%d refs), lands+ltex=%dms, actors+items=%dms" % [
+		Log.debug("esm", "Populate timing: statics=%dms, simple=%dms, cells+refs=%dms (%d refs), lands+ltex=%dms, actors+items=%dms" % [
 			t1 - t0, t2 - t1, t3 - t2, ref_count, t4 - t3, t5 - t4])
 
 
@@ -641,7 +641,7 @@ func _supplement_actor_data(path: String) -> void:
 	reader.close()
 
 	if records_loaded > 0:
-		Logger.info("esm", "Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d)" % [
+		Log.info("esm", "Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d)" % [
 			records_loaded, classes.size(), factions.size(), skills.size(), birthsigns.size()
 		])
 
@@ -656,11 +656,11 @@ func _load_file_gdscript(path: String) -> Error:
 		loading_failed.emit(path, "Failed to open file")
 		return err
 
-	Logger.info("esm", "Loading: %s" % path)
-	Logger.info("esm", "  Author: %s, Records: %d" % [reader.header.author, reader.header.record_count])
+	Log.info("esm", "Loading: %s" % path)
+	Log.info("esm", "  Author: %s, Records: %d" % [reader.header.author, reader.header.record_count])
 	if reader.header.master_files.size() > 0:
 		for master in reader.header.master_files:
-			Logger.info("esm", "  Master: %s (%d bytes)" % [master.name, master.size])
+			Log.info("esm", "  Master: %s (%d bytes)" % [master.name, master.size])
 
 	# Load all records
 	var records_loaded := 0
@@ -703,14 +703,14 @@ func _load_file_gdscript(path: String) -> Error:
 	total_records_loaded += records_parsed
 	loaded_files.append(path)
 
-	Logger.info("esm", "  Loaded %d records in %d ms" % [records_parsed, elapsed])
+	Log.info("esm", "  Loaded %d records in %d ms" % [records_parsed, elapsed])
 	if skipped_types.size() > 0:
 		var skipped_summary := ""
 		var sorted_skipped := skipped_types.keys()
 		sorted_skipped.sort()
 		for type_name: String in sorted_skipped:
 			skipped_summary += " %s:%d" % [type_name, skipped_types[type_name]]
-		Logger.debug("esm", "  Skipped types:%s" % skipped_summary)
+		Log.debug("esm", "  Skipped types:%s" % skipped_summary)
 	loading_completed.emit(path, records_loaded)
 
 	return OK
@@ -1288,6 +1288,6 @@ func print_stats() -> void:
 		for type_name: String in sorted_types:
 			type_parts.append("%s:%d" % [type_name, records_by_type[type_name]])
 		lines.append("By type: %s" % " ".join(type_parts))
-	Logger.info("esm", "\n".join(lines))
+	Log.info("esm", "\n".join(lines))
 
 #endregion

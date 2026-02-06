@@ -48,7 +48,7 @@ static func load_lakes_from_json(json_path: String, parent: Node) -> Array[Polyg
 			lakes.append(lake)
 			total_loaded += 1
 
-	Logger.info("water", "LakeDatabaseLoader: Loaded %d lakes from %s" % [total_loaded, json_path])
+	Log.info("water", "LakeDatabaseLoader: Loaded %d lakes from %s" % [total_loaded, json_path])
 	return lakes
 
 
@@ -73,7 +73,7 @@ static func save_lakes_to_json(json_path: String, lakes: Array[PolygonWaterVolum
 	file.store_string(json_text)
 	file.close()
 
-	Logger.info("water", "LakeDatabaseLoader: Saved %d lakes to %s" % [lake_data.size(), json_path])
+	Log.info("water", "LakeDatabaseLoader: Saved %d lakes to %s" % [lake_data.size(), json_path])
 	return true
 
 
@@ -164,7 +164,7 @@ static func create_example_database(json_path: String) -> bool:
 	file.store_string(json_text)
 	file.close()
 
-	Logger.info("water", "LakeDatabaseLoader: Created example database: %s" % json_path)
+	Log.info("water", "LakeDatabaseLoader: Created example database: %s" % json_path)
 	return true
 
 
@@ -209,7 +209,7 @@ static func get_database_stats(lakes: Array[PolygonWaterVolume]) -> Dictionary:
 		stats["total_area"] += lake.get_polygon_area()
 		stats["total_depth"] += lake.size.y
 
-		var type_name := WaterVolume.WaterType.keys()[lake.water_type]
+		var type_name: String = WaterVolume.WaterType.keys()[lake.water_type]
 		if not type_name in stats["by_type"]:
 			stats["by_type"][type_name] = 0
 		stats["by_type"][type_name] += 1

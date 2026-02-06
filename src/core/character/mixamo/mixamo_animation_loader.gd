@@ -320,4 +320,4 @@ static func print_loaded_animations() -> void:
 			anim.get_track_count(),
 			loop_str
 		])
-	Logger.debug("character", "Loaded animations:\n" + "\n".join(lines))
+	Log.debug("character", "Loaded animations:\n" + "\n".join(lines))

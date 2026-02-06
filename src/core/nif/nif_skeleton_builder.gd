@@ -65,9 +65,9 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 		_add_warning("No root node found for skeleton, hierarchy may be incorrect")
 
 	if debug_mode:
-		Logger.debug("nif", "NIFSkeletonBuilder: Building skeleton with %d bones" % skin_instance.bone_indices.size())
+		Log.debug("nif", "NIFSkeletonBuilder: Building skeleton with %d bones" % skin_instance.bone_indices.size())
 		if root_node:
-			Logger.debug("nif", "  Root node: '%s'" % root_node.name)
+			Log.debug("nif", "  Root node: '%s'" % root_node.name)
 
 	# Track missing bones for error reporting
 	var missing_bones: Array[int] = []
@@ -106,7 +106,7 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 		_bone_name_to_index[bone_name.to_lower()] = bone_idx
 
 		if debug_mode:
-			Logger.debug("nif", "  Bone %d: '%s' (node %d)" % [bone_idx, bone_name, bone_node_idx])
+			Log.debug("nif", "  Bone %d: '%s' (node %d)" % [bone_idx, bone_name, bone_node_idx])
 
 	# Report missing bones
 	if not missing_bones.is_empty():
@@ -178,14 +178,14 @@ func _add_warning(message: String) -> void:
 ## Print validation results
 func _print_validation_results() -> void:
 	if not _validation_errors.is_empty():
-		Logger.error("nif", "NIFSkeletonBuilder: %d errors:" % _validation_errors.size())
+		Log.error("nif", "NIFSkeletonBuilder: %d errors:" % _validation_errors.size())
 		for error: String in _validation_errors:
-			Logger.error("nif", "  %s" % error)
+			Log.error("nif", "  %s" % error)
 
 	if not _validation_warnings.is_empty():
-		Logger.warn("nif", "NIFSkeletonBuilder: %d warnings:" % _validation_warnings.size())
+		Log.warn("nif", "NIFSkeletonBuilder: %d warnings:" % _validation_warnings.size())
 		for warning: String in _validation_warnings:
-			Logger.warn("nif", "  %s" % warning)
+			Log.warn("nif", "  %s" % warning)
 
 
 ## Get validation errors
@@ -218,7 +218,7 @@ func _setup_bone_hierarchy(skeleton: Skeleton3D, skin_instance: Defs.NiSkinInsta
 		if parent_bone_idx >= 0:
 			skeleton.set_bone_parent(i, parent_bone_idx)
 			if debug_mode:
-				Logger.debug("nif", "  Bone %d parent -> %d" % [i, parent_bone_idx])
+				Log.debug("nif", "  Bone %d parent -> %d" % [i, parent_bone_idx])
 
 
 ## Find the parent bone index for a given node by traversing up the tree
@@ -292,7 +292,7 @@ func _setup_bone_rest_poses(skeleton: Skeleton3D, skin_instance: Defs.NiSkinInst
 		skeleton.set_bone_rest(i, rest_pose)
 
 		if debug_mode:
-			Logger.debug("nif", "  Bone %d '%s' rest: pos=%s rot=%s" % [
+			Log.debug("nif", "  Bone %d '%s' rest: pos=%s rot=%s" % [
 				i, bone_node.name, rest_pose.origin, rest_pose.basis.get_euler()
 			])
 
@@ -378,7 +378,7 @@ func build_skin_arrays(geom_data: Defs.NiGeometryData, skin_instance: Defs.NiSki
 		# Debug: print first few vertices
 		for i in range(mini(5, num_vertices)):
 			var idx := i * BONES_PER_VERTEX
-			Logger.debug("nif", "  Vertex %d: bones=[%d,%d,%d,%d] weights=[%.3f,%.3f,%.3f,%.3f]" % [
+			Log.debug("nif", "  Vertex %d: bones=[%d,%d,%d,%d] weights=[%.3f,%.3f,%.3f,%.3f]" % [
 				i,
 				bone_indices[idx], bone_indices[idx+1], bone_indices[idx+2], bone_indices[idx+3],
 				bone_weights[idx], bone_weights[idx+1], bone_weights[idx+2], bone_weights[idx+3]
@@ -480,7 +480,7 @@ func build_skin_resource(skin_instance: Defs.NiSkinInstance, skin_data: Defs.NiS
 		skin.add_bind(target_bone_idx, bind_pose)
 
 	if debug_mode:
-		Logger.debug("nif", "NIFSkeletonBuilder: Built Skin with %d binds" % skin.get_bind_count())
+		Log.debug("nif", "NIFSkeletonBuilder: Built Skin with %d binds" % skin.get_bind_count())
 
 	return skin
 
@@ -510,7 +510,7 @@ func build_skeleton_from_hierarchy(root_node: Defs.NiNode) -> Skeleton3D:
 		return null
 
 	if debug_mode:
-		Logger.debug("nif", "NIFSkeletonBuilder: Building skeleton from hierarchy with %d bones" % bone_nodes.size())
+		Log.debug("nif", "NIFSkeletonBuilder: Building skeleton from hierarchy with %d bones" % bone_nodes.size())
 
 	# Add bones to skeleton in order (parent first, then children)
 	for bone_data: Dictionary in bone_nodes:
@@ -538,7 +538,7 @@ func build_skeleton_from_hierarchy(root_node: Defs.NiNode) -> Skeleton3D:
 		skeleton.set_bone_rest(bone_idx, rest_pose)
 
 		if debug_mode:
-			Logger.debug("nif", "  Bone %d: '%s' (parent: %d)" % [bone_idx, bone_name, parent_idx])
+			Log.debug("nif", "  Bone %d: '%s' (parent: %d)" % [bone_idx, bone_name, parent_idx])
 
 	return skeleton
 

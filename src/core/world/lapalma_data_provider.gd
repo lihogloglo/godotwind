@@ -81,12 +81,12 @@ func initialize() -> Error:
 		var coord := Vector2i(int(region_data["x"]), int(region_data["y"]))
 		_region_info[coord] = region_data
 
-	Logger.info("streaming", "LaPalmaDataProvider initialized:")
-	Logger.info("streaming", "  World: %s" % world_name)
-	Logger.info("streaming", "  Size: %.1f x %.1f km" % [width_m / 1000.0, height_m / 1000.0])
-	Logger.info("streaming", "  Vertex spacing: %.1fm" % vertex_spacing)
-	Logger.info("streaming", "  Regions: %d (of %d x %d grid)" % [_region_info.size(), num_x, num_y])
-	Logger.info("streaming", "  Height range: %.1f to %.1f m" % [
+	Log.info("streaming", "LaPalmaDataProvider initialized:")
+	Log.info("streaming", "  World: %s" % world_name)
+	Log.info("streaming", "  Size: %.1f x %.1f km" % [width_m / 1000.0, height_m / 1000.0])
+	Log.info("streaming", "  Vertex spacing: %.1fm" % vertex_spacing)
+	Log.info("streaming", "  Regions: %d (of %d x %d grid)" % [_region_info.size(), num_x, num_y])
+	Log.info("streaming", "  Height range: %.1f to %.1f m" % [
 		_metadata.get("min_height", 0.0),
 		_metadata.get("max_height", 0.0)
 	])
@@ -271,12 +271,11 @@ func get_cache_stats() -> Dictionary:
 func get_tier_unit_counts() -> Dictionary:
 	# La Palma regions are HUGE (1536m), so we need far fewer per tier
 	# These prevent loading too much data while still providing good coverage
-	const DistanceTier := preload("res://src/core/world/distance_tier_manager.gd")
 	return {
-		DistanceTier.Tier.NEAR: 5,       # ~7.7km radius (5 large regions)
-		DistanceTier.Tier.MID: 10,       # ~15.4km radius (simplified)
-		DistanceTier.Tier.FAR: 20,       # ~30.8km radius (impostors)
-		DistanceTier.Tier.HORIZON: 0,    # Ocean skybox (no per-region processing)
+		TierUtils.Tier.NEAR: 5,       # ~7.7km radius (5 large regions)
+		TierUtils.Tier.MID: 10,       # ~15.4km radius (simplified)
+		TierUtils.Tier.FAR: 20,       # ~30.8km radius (impostors)
+		TierUtils.Tier.HIDDEN: 0,     # Ocean skybox (no per-region processing)
 	}
 
 

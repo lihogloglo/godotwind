@@ -327,7 +327,9 @@
       "Bash(for:*)",
       "Bash(done)",
       "Read(//d/Gamedev/Godotwind/godotwind/**)",
-      "Bash(do:*)"
+      "Bash(do:*)",
+      "Bash(cmd //c:*)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --headless --quit)"
     ]
   }
 }

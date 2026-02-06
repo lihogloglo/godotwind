@@ -74,7 +74,7 @@ func initialize() -> Error:
 	# Calculate world bounds from LAND records
 	_calculate_world_bounds()
 
-	Logger.info("streaming", "MorrowindDataProvider initialized: %d LAND records" % ESMManager.lands.size())
+	Log.info("streaming", "MorrowindDataProvider initialized: %d LAND records" % ESMManager.lands.size())
 	return OK
 
 
@@ -83,7 +83,7 @@ func set_terrain_assets(assets: Terrain3DAssets) -> void:
 	_terrain_assets = assets
 	if _texture_loader and assets:
 		var loaded: int = _texture_loader.call("load_terrain_textures", assets)
-		Logger.info("streaming", "MorrowindDataProvider: Loaded %d terrain textures" % loaded)
+		Log.info("streaming", "MorrowindDataProvider: Loaded %d terrain textures" % loaded)
 		if _terrain_manager:
 			_terrain_manager.call("set_texture_slot_mapper", _texture_loader)
 
@@ -494,7 +494,7 @@ func _calculate_world_bounds() -> void:
 	var north := float(max_y + 1) * cell_size
 
 	world_bounds = Rect2(west, south, east - west, north - south)
-	Logger.info("streaming", "MorrowindDataProvider: World bounds = %.1f x %.1f km" % [
+	Log.info("streaming", "MorrowindDataProvider: World bounds = %.1f x %.1f km" % [
 		world_bounds.size.x / 1000.0, world_bounds.size.y / 1000.0
 	])
 
@@ -519,12 +519,11 @@ func _encode_control_value(base_tex: int, overlay_tex: int, blend: int) -> float
 func get_tier_unit_counts() -> Dictionary:
 	# Morrowind cells are small (117m), so we can have more per tier
 	# These limits prevent queue overflow while providing good view distance
-	const DistanceTier := preload("res://src/core/world/distance_tier_manager.gd")
 	return {
-		DistanceTier.Tier.NEAR: 50,      # ~585m radius (full 3D geometry)
-		DistanceTier.Tier.MID: 100,      # ~1170m radius (pre-merged meshes)
-		DistanceTier.Tier.FAR: 200,      # ~2340m radius (impostors)
-		DistanceTier.Tier.HORIZON: 0,    # Skybox only (no per-cell processing)
+		TierUtils.Tier.NEAR: 50,      # ~585m radius (full 3D geometry)
+		TierUtils.Tier.MID: 100,      # ~1170m radius (pre-merged meshes)
+		TierUtils.Tier.FAR: 200,      # ~2340m radius (impostors)
+		TierUtils.Tier.HIDDEN: 0,     # Skybox only (no per-cell processing)
 	}
 
 
@@ -599,9 +598,8 @@ func get_cell_size_meters() -> float:
 ## Override tier distances for foggy Morrowind atmosphere
 func get_tier_distances() -> Dictionary:
 	# Reduce FAR tier slightly due to volcanic fog
-	const DistanceTier := preload("res://src/core/world/distance_tier_manager.gd")
 	return {
-		DistanceTier.Tier.FAR: 4000.0,  # 4km instead of default 5km
+		TierUtils.Tier.FAR: 4000.0,  # 4km instead of default 5km
 	}
 
 

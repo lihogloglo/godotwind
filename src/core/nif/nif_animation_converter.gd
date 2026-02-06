@@ -61,7 +61,7 @@ func convert_to_animation(animation_name: String = "default") -> Animation:
 	animation.length = max_time if max_time > 0.0 else 1.0
 
 	if debug_mode:
-		Logger.debug("nif", "NIFAnimationConverter: Created animation '%s' with %d tracks, length=%.2fs" % [
+		Log.debug("nif", "NIFAnimationConverter: Created animation '%s' with %d tracks, length=%.2fs" % [
 			animation_name, animation.get_track_count(), animation.length
 		])
 
@@ -92,7 +92,7 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 		return false
 
 	if debug_mode:
-		Logger.debug("nif", "  Processing keyframes for '%s': rot=%d, trans=%d, scale=%d" % [
+		Log.debug("nif", "  Processing keyframes for '%s': rot=%d, trans=%d, scale=%d" % [
 			target_name,
 			data.rotation_keys.size(),
 			data.translation_keys.size(),
@@ -132,7 +132,7 @@ func _add_controller_tracks(animation: Animation, controller: Defs.NiKeyframeCon
 			added_any = true
 
 			if debug_mode:
-				Logger.debug("nif", "    XYZ rotation: %d x-keys, %d y-keys, %d z-keys -> %d samples" % [
+				Log.debug("nif", "    XYZ rotation: %d x-keys, %d y-keys, %d z-keys -> %d samples" % [
 					data.x_rotation_keys.size(),
 					data.y_rotation_keys.size(),
 					data.z_rotation_keys.size(),
@@ -402,7 +402,7 @@ func _create_animation_for_range(name: String, start_time: float, end_time: floa
 		return null
 
 	if debug_mode:
-		Logger.debug("nif", "NIFAnimationConverter: Created range animation '%s' [%.2f-%.2f] with %d tracks" % [
+		Log.debug("nif", "NIFAnimationConverter: Created range animation '%s' [%.2f-%.2f] with %d tracks" % [
 			name, start_time, end_time, animation.get_track_count()
 		])
 

@@ -103,7 +103,7 @@ func on_effect_added() -> void:
 	# Create samplers
 	_create_samplers()
 
-	Logger.info("shaders", "VolumetricFogEffect initialized")
+	Log.info("shaders", "VolumetricFogEffect initialized")
 
 
 func _load_noise_textures() -> void:

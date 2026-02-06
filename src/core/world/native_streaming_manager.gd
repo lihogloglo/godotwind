@@ -123,8 +123,14 @@ var _loading_cells: Dictionary = {}
 ## Async request tracking: grid -> request_id
 var _async_requests: Dictionary = {}
 
-## Pending cells to load (priority queue, sorted by distance)
+## Pending cells to load (priority queue, sorted farthest-first so pop_back gets nearest)
 var _pending_load_queue: Array[Vector2i] = []
+
+## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
+var _unloading_cells: Dictionary = {}
+
+## Hidden container for cells being unloaded (keeps them out of rendering)
+var _unload_container: Node3D = null
 
 ## Background processor for async NIF parsing
 var _background_processor: BackgroundProcessorScript = null
@@ -170,6 +176,12 @@ func _ready() -> void:
 	_world_container.name = "WorldContainer"
 	add_child(_world_container)
 
+	# Create hidden container for cells being gradually unloaded
+	_unload_container = Node3D.new()
+	_unload_container.name = "UnloadContainer"
+	_unload_container.visible = false
+	add_child(_unload_container)
+
 	# Create impostor renderer (renamed to match old API)
 	_impostor_renderer = NativeImpostorRendererScript.new()
 	_impostor_renderer.name = "ImpostorManager"  # Use old name for backwards compatibility
@@ -212,7 +224,7 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		_impostor_renderer.set("debug_enabled", debug_enabled)
 
 	_initialized = true
-	Logger.info("streaming", "Initialized with native visibility_range streaming")
+	Log.info("streaming", "Initialized with native visibility_range streaming")
 
 	# Only start tracking if camera was explicitly provided
 	# If camera is null, wait for set_camera() to be called later
@@ -220,10 +232,10 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	if _camera:
 		_camera_position = _camera.global_position
 		_camera_cell = DU.world_to_cell(_camera_position)
-		Logger.info("streaming", "Initial camera cell: %s (position: %s)" % [_camera_cell, _camera_position])
+		Log.info("streaming", "Initial camera cell: %s (position: %s)" % [_camera_cell, _camera_position])
 		_update_loaded_cells()
 	else:
-		Logger.info("streaming", "No camera provided - streaming will start when set_camera() is called")
+		Log.info("streaming", "No camera provided - streaming will start when set_camera() is called")
 
 	return OK
 
@@ -253,14 +265,14 @@ func set_cell_manager(cell_manager: CellManagerScript) -> void:
 func _process(delta: float) -> void:
 	if not _initialized:
 		if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
-			Logger.debug("streaming", "_process skipped: not initialized")
+			Log.debug("streaming", "_process skipped: not initialized")
 		return
 
 	if not _camera:
 		_camera = get_viewport().get_camera_3d()
 		if not _camera:
 			if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
-				Logger.debug("streaming", "_process skipped: no camera")
+				Log.debug("streaming", "_process skipped: no camera")
 			return
 
 	# Update camera position
@@ -278,13 +290,19 @@ func _process(delta: float) -> void:
 		_camera_cell = new_cell
 		_update_loaded_cells()
 
+	# Phase 0: Budgeted unloading — free children of departing cells gradually
+	# Runs BEFORE loading so freed memory is available for new cells
+	if not _unloading_cells.is_empty():
+		_process_budgeted_unloading()
+
 	# Process async loading (three-phase approach)
 	if async_loading_enabled:
 		# Phase 1: Check for completed async requests
 		_process_async_completions()
 
 		# Phase 2: Process async instantiation (progressive object creation)
-		var instantiated := _cell_manager.process_async_instantiation(frame_budget_ms, _camera_position)
+		var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
+		var instantiated := _cell_manager.process_async_instantiation(frame_budget_ms, _camera_position, camera_fwd)
 		if instantiated > 0 and debug_enabled:
 			_debug("Instantiated %d objects this frame" % instantiated)
 
@@ -300,6 +318,26 @@ func _update_loaded_cells() -> void:
 	# Calculate which cells should be loaded
 	var cells_to_load := _get_cells_in_radius(_camera_cell, load_radius_cells)
 
+	# Reclaim cells that re-entered radius while still being unloaded
+	var reclaimed: Array[Vector2i] = []
+	for grid: Vector2i in _unloading_cells:
+		if grid in cells_to_load:
+			var cell_ref: Variant = _unloading_cells[grid]
+			if not is_instance_valid(cell_ref):
+				continue
+			var cell_node: Node3D = cell_ref as Node3D
+			if cell_node.get_child_count() > 0:
+				# Move back to world container
+				if cell_node.get_parent():
+					cell_node.get_parent().remove_child(cell_node)
+				cell_node.visible = true
+				_world_container.add_child(cell_node)
+				_loaded_cells[grid] = cell_node
+				reclaimed.append(grid)
+				_debug("Reclaimed unloading cell %s (%d children remaining)" % [grid, cell_node.get_child_count()])
+	for grid in reclaimed:
+		_unloading_cells.erase(grid)
+
 	# Unload cells that are too far
 	var cells_to_unload: Array[Vector2i] = []
 	for grid: Vector2i in _loaded_cells:
@@ -312,7 +350,7 @@ func _update_loaded_cells() -> void:
 	for grid: Vector2i in cells_to_unload:
 		_unload_cell(grid)
 
-	# Queue new cells for loading (sorted by distance)
+	# Queue new cells for loading (sorted farthest-first so pop_back gets nearest)
 	_pending_load_queue.clear()
 	for grid: Vector2i in cells_to_load:
 		if grid not in _loaded_cells and grid not in _loading_cells:
@@ -321,9 +359,9 @@ func _update_loaded_cells() -> void:
 	if debug_enabled and not _pending_load_queue.is_empty():
 		_debug("Queueing %d cells for loading (camera at cell %s)" % [_pending_load_queue.size(), _camera_cell])
 
-	# Sort by distance (closest first)
+	# Sort farthest first — pop_back() returns nearest cell (O(1) instead of O(n))
 	_pending_load_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return DU.cell_distance_squared(_camera_cell, a) < DU.cell_distance_squared(_camera_cell, b)
+		return DU.cell_distance_squared(_camera_cell, a) > DU.cell_distance_squared(_camera_cell, b)
 	)
 
 	# Update impostors
@@ -422,7 +460,7 @@ func _load_cell_sync(grid: Vector2i) -> void:
 	stats_updated.emit(_stats)
 
 
-## Unload a cell at the given grid position
+## Unload a cell at the given grid position (budgeted — gradual over multiple frames)
 func _unload_cell(grid: Vector2i) -> void:
 	# Cancel any pending async request for this cell
 	if grid in _async_requests:
@@ -436,17 +474,91 @@ func _unload_cell(grid: Vector2i) -> void:
 		return
 
 	var cell_node: Node3D = _loaded_cells[grid]
-	var object_count := _count_mesh_instances(cell_node)
-
-	# Remove from scene
-	cell_node.queue_free()
 	_loaded_cells.erase(grid)
-
 	_stats["loaded_cells"] = _loaded_cells.size()
-	_stats["total_objects"] -= object_count
 
+	# Move cell to hidden unload container for gradual teardown
+	# Reparenting is cheaper than queue_free() on entire subtree
+	if cell_node.get_parent():
+		cell_node.get_parent().remove_child(cell_node)
+	cell_node.visible = false
+	_unload_container.add_child(cell_node)
+	_unloading_cells[grid] = cell_node
+
+	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
 	cell_unloaded.emit(grid)
 	stats_updated.emit(_stats)
+
+
+## Process gradual unloading of departing cells within time budget
+## Removes children in batches to avoid frame spikes from mass queue_free()
+func _process_budgeted_unloading() -> void:
+	var start_time := Time.get_ticks_usec()
+	var budget_usec := SC.UNLOAD_BUDGET_MS * 1000.0
+	var total_freed := 0
+
+	# Get object pool for returning pooled instances
+	var object_pool: RefCounted = _cell_manager.get_object_pool() if _cell_manager else null
+
+	# Process each unloading cell
+	var completed_grids: Array[Vector2i] = []
+
+	for grid: Vector2i in _unloading_cells:
+		var cell_ref: Variant = _unloading_cells[grid]
+		if not is_instance_valid(cell_ref):
+			completed_grids.append(grid)
+			continue
+		var cell_node: Node3D = cell_ref as Node3D
+
+		var children_count := cell_node.get_child_count()
+		if children_count == 0:
+			# Cell is empty, free the container
+			cell_node.queue_free()
+			completed_grids.append(grid)
+			continue
+
+		# Remove up to UNLOAD_BATCH_SIZE children from this cell
+		var batch := 0
+		while batch < SC.UNLOAD_BATCH_SIZE and cell_node.get_child_count() > 0:
+			# Check time budget
+			if Time.get_ticks_usec() - start_time >= budget_usec:
+				# Out of time — stop and continue next frame
+				if debug_enabled and total_freed > 0:
+					_debug("Unload budget hit: freed %d objects, %d cells still unloading" % [total_freed, _unloading_cells.size() - completed_grids.size()])
+				# Clean up completed cells before returning
+				for g in completed_grids:
+					_unloading_cells.erase(g)
+				return
+
+			# Remove last child (pop from end = O(1))
+			var child := cell_node.get_child(cell_node.get_child_count() - 1)
+			cell_node.remove_child(child)
+
+			# Try to return to object pool instead of destroying
+			var returned_to_pool := false
+			if object_pool and child is Node3D and child.has_meta("pool_model_path"):
+				var pool_path: String = child.get_meta("pool_model_path")
+				if not pool_path.is_empty() and object_pool.has_method("release"):
+					object_pool.call("release", child)
+					returned_to_pool = true
+
+			if not returned_to_pool:
+				child.queue_free()
+
+			batch += 1
+			total_freed += 1
+
+		# Check if cell is now empty
+		if cell_node.get_child_count() == 0:
+			cell_node.queue_free()
+			completed_grids.append(grid)
+
+	# Remove completed cells from tracking
+	for g in completed_grids:
+		_unloading_cells.erase(g)
+
+	if debug_enabled and total_freed > 0:
+		_debug("Budgeted unload: freed %d objects, %d cells remaining" % [total_freed, _unloading_cells.size()])
 
 
 ## Configure visibility_range on all MeshInstance3D nodes in a cell
@@ -571,8 +683,8 @@ func _process_pending_loads_async() -> void:
 			_debug("Async capacity exhausted, %d cells waiting in queue" % _pending_load_queue.size())
 	else:
 		while not _pending_load_queue.is_empty() and requests_submitted < max_requests_per_frame and available_slots > 0:
-			var grid := _pending_load_queue[0]
-			_pending_load_queue.remove_at(0)
+			var grid: Vector2i = _pending_load_queue[-1]
+			_pending_load_queue.resize(_pending_load_queue.size() - 1)
 
 			# Skip if already loaded or loading
 			if grid in _loaded_cells or grid in _loading_cells:
@@ -660,8 +772,8 @@ func _process_pending_loads_sync(_delta: float) -> void:
 				_debug("Frame budget reached (%.1fms), loaded %d cells, %d remaining" % [elapsed, cells_loaded_this_frame, _pending_load_queue.size()])
 			break
 
-		var grid := _pending_load_queue[0]
-		_pending_load_queue.remove_at(0)
+		var grid: Vector2i = _pending_load_queue[-1]
+		_pending_load_queue.resize(_pending_load_queue.size() - 1)
 
 		if grid in _loaded_cells or grid in _loading_cells:
 			continue
@@ -740,7 +852,7 @@ func print_debug_info() -> void:
 	else:
 		lines.append("  Exists: false")
 	lines.append("=================================================")
-	Logger.info("streaming", "\n".join(lines))
+	Log.info("streaming", "\n".join(lines))
 
 
 ## Force reload all cells (after configuration change)
@@ -808,7 +920,7 @@ func refresh_cells() -> void:
 
 func _debug(msg: String) -> void:
 	if debug_enabled:
-		Logger.debug("streaming", msg)
+		Log.debug("streaming", msg)
 
 #endregion
 

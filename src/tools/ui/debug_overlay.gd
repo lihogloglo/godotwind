@@ -122,7 +122,7 @@ var _last_camera_cell := Vector2i(99999, 99999)
 
 
 func _ready() -> void:
-	Logger.info("debug", "Initializing debug overlay...")
+	Log.info("debug", "Initializing debug overlay...")
 
 	# Create container nodes
 	_chunk_container = Node3D.new()
@@ -159,7 +159,7 @@ func _process(delta: float) -> void:
 		if vp:
 			_camera = vp.get_camera_3d()
 			if _camera:
-				Logger.debug("debug", "Auto-found camera: %s" % _camera.name)
+				Log.debug("debug", "Auto-found camera: %s" % _camera.name)
 
 	if not _camera:
 		return
@@ -197,7 +197,7 @@ func _process(delta: float) -> void:
 ## Set the camera reference
 func set_camera(cam: Camera3D) -> void:
 	_camera = cam
-	Logger.info("debug", "Camera set: %s" % [cam.name if cam else "null"])
+	Log.info("debug", "Camera set: %s" % [cam.name if cam else "null"])
 	# Force rebuild if any overlays are enabled
 	if _camera:
 		_rebuild_overlays()
@@ -277,7 +277,7 @@ func _rebuild_chunk_overlay() -> void:
 		return
 
 	if not _camera:
-		Logger.warn("debug", "Chunks: No camera set")
+		Log.warn("debug", "Chunks: No camera set")
 		return
 
 	var camera_cell := _get_camera_cell()
@@ -293,7 +293,7 @@ func _rebuild_chunk_overlay() -> void:
 			for dx in range(-2, 3):
 				far_chunks.append(Vector2i(camera_chunk.x + dx, camera_chunk.y + dy))
 
-	Logger.debug("debug", "Showing %d chunks around cell %s" % [far_chunks.size(), camera_cell])
+	Log.debug("debug", "Showing %d chunks around cell %s" % [far_chunks.size(), camera_cell])
 
 	# Create visual for each chunk
 	for chunk: Vector2i in far_chunks:
@@ -379,7 +379,7 @@ func _rebuild_tier_overlay() -> void:
 	_tier_rings_built = false
 
 	if not _camera:
-		Logger.warn("debug", "Tiers: No camera set")
+		Log.warn("debug", "Tiers: No camera set")
 		return
 
 	# Rings are centered at origin (0, 0, 0) - container will be moved to camera position
@@ -402,7 +402,7 @@ func _rebuild_tier_overlay() -> void:
 		tier_distances = {0: 0.0, 2: 150.0, 3: 5000.0}
 		tier_end_distances = {0: 150.0, 2: 5000.0, 3: 10000.0}
 
-	Logger.debug("debug", "Tier distances: %s (rings centered at origin, container follows camera)" % [tier_end_distances])
+	Log.debug("debug", "Tier distances: %s (rings centered at origin, container follows camera)" % [tier_end_distances])
 
 	# Create rings for each tier (centered at origin)
 	# NEAR tier: 0 to 150m (green)
@@ -507,10 +507,10 @@ func _rebuild_cell_overlay() -> void:
 		return
 
 	if not _camera:
-		Logger.warn("debug", "Cells: No camera set")
+		Log.warn("debug", "Cells: No camera set")
 		return
 
-	Logger.debug("debug", "Rebuilding cell grid at camera position %s" % [_camera.global_position])
+	Log.debug("debug", "Rebuilding cell grid at camera position %s" % [_camera.global_position])
 
 	var camera_cell := _get_camera_cell()
 	var view_radius := 5  # Show cells within 5 cell radius
@@ -600,16 +600,16 @@ func _rebuild_lod_overlay() -> void:
 			child.queue_free()
 
 	if not _camera:
-		Logger.warn("debug", "LOD: No camera set")
+		Log.warn("debug", "LOD: No camera set")
 		return
 
 	if not _world_streaming_manager:
-		Logger.warn("debug", "LOD: No world streaming manager set")
+		Log.warn("debug", "LOD: No world streaming manager set")
 		_create_lod_legend()
 		return
 
 	var camera_pos := _camera.global_position
-	Logger.debug("debug", "Rebuilding LOD visualization at %s" % [camera_pos])
+	Log.debug("debug", "Rebuilding LOD visualization at %s" % [camera_pos])
 
 	# Get loaded cells and color their objects
 	var colored_count := 0
@@ -623,7 +623,7 @@ func _rebuild_lod_overlay() -> void:
 				cells_processed += 1
 				colored_count += _color_cell_objects(cell_node, camera_pos)
 
-	Logger.debug("debug", "LOD: Colored %d objects in %d cells" % [colored_count, cells_processed])
+	Log.debug("debug", "LOD: Colored %d objects in %d cells" % [colored_count, cells_processed])
 
 	# Create legend
 	_create_lod_legend()
@@ -764,7 +764,7 @@ func _clear_lod_overlay() -> void:
 				(mesh_inst as MeshInstance3D).material_override = mats[0]
 
 	_original_materials.clear()
-	Logger.debug("debug", "LOD: Cleared overlay and restored materials")
+	Log.debug("debug", "LOD: Cleared overlay and restored materials")
 
 
 ## Create a legend showing what each color means

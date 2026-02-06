@@ -29,25 +29,25 @@ func parse_texture_name(filename: String) -> float:
 	var clean_name = _clean_filename(filename)
 
 	if debug:
-		Logger.debug("deformation", "[Parser] Analyzing: %s → %s" % [filename, clean_name])
+		Log.debug("deformation", "[Parser] Analyzing: %s → %s" % [filename, clean_name])
 
 	# Check special cases first (exact matches)
 	if special_cases.has(clean_name):
 		var height = special_cases[clean_name]
 		if debug:
-			Logger.debug("deformation", "  → Special case match: %.3fm" % height)
+			Log.debug("deformation", "  → Special case match: %.3fm" % height)
 		return height
 
 	# Try pattern matching rules (in priority order)
 	for rule in rules:
 		if _matches_rule(clean_name, rule):
 			if debug:
-				Logger.debug("deformation", "  → Rule match '%s': %.3fm" % [rule.name, rule.height])
+				Log.debug("deformation", "  → Rule match '%s': %.3fm" % [rule.name, rule.height])
 			return rule.height
 
 	# Fallback
 	if debug:
-		Logger.debug("deformation", "  → No match, using default: %.3fm" % default_height)
+		Log.debug("deformation", "  → No match, using default: %.3fm" % default_height)
 	return default_height
 
 ## Batch parse texture list
@@ -191,19 +191,19 @@ func clear_rules() -> void:
 
 ## Print all rules (debug)
 func print_rules() -> void:
-	Logger.debug("deformation", "=== Texture Name Parser Rules ===")
-	Logger.debug("deformation", "Special Cases: %d" % special_cases.size())
+	Log.debug("deformation", "=== Texture Name Parser Rules ===")
+	Log.debug("deformation", "Special Cases: %d" % special_cases.size())
 	for filename in special_cases:
-		Logger.debug("deformation", "  '%s' → %.3fm" % [filename, special_cases[filename]])
+		Log.debug("deformation", "  '%s' → %.3fm" % [filename, special_cases[filename]])
 
-	Logger.debug("deformation", "Pattern Rules: %d" % rules.size())
+	Log.debug("deformation", "Pattern Rules: %d" % rules.size())
 	for i in range(rules.size()):
 		var rule = rules[i]
-		Logger.debug("deformation", "  [%d] %s → %.3fm" % [i, rule.name, rule.height])
-		Logger.debug("deformation", "      Contains: %s" % str(rule.contains))
+		Log.debug("deformation", "  [%d] %s → %.3fm" % [i, rule.name, rule.height])
+		Log.debug("deformation", "      Contains: %s" % str(rule.contains))
 		if rule.excludes.size() > 0:
-			Logger.debug("deformation", "      Excludes: %s" % str(rule.excludes))
-	Logger.debug("deformation", "==================================")
+			Log.debug("deformation", "      Excludes: %s" % str(rule.excludes))
+	Log.debug("deformation", "==================================")
 
 ## Export configuration as TerrainDeformationTextureConfig
 func create_config_from_terrain(terrain: Terrain3D) -> TerrainDeformationTextureConfig:
@@ -220,7 +220,7 @@ func create_config_from_terrain(terrain: Terrain3D) -> TerrainDeformationTexture
 		return config
 
 	if debug:
-		Logger.debug("deformation", "[Parser] Processing %d textures..." % texture_list.size())
+		Log.debug("deformation", "[Parser] Processing %d textures..." % texture_list.size())
 
 	for i in range(texture_list.size()):
 		var texture_asset = texture_list[i]
@@ -231,7 +231,7 @@ func create_config_from_terrain(terrain: Terrain3D) -> TerrainDeformationTexture
 		var texture_name = _get_texture_name(texture_asset)
 		if texture_name == "":
 			if debug:
-				Logger.debug("deformation", "  [%d] Skipped (no name)" % i)
+				Log.debug("deformation", "  [%d] Skipped (no name)" % i)
 			continue
 
 		# Parse and assign height
@@ -239,7 +239,7 @@ func create_config_from_terrain(terrain: Terrain3D) -> TerrainDeformationTexture
 		config.set_height(i, height, texture_name)
 
 		if debug:
-			Logger.debug("deformation", "  [%d] %s → %.3fm" % [i, texture_name, height])
+			Log.debug("deformation", "  [%d] %s → %.3fm" % [i, texture_name, height])
 
 	return config
 

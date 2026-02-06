@@ -51,7 +51,7 @@ func initialize() -> Error:
 		push_error("ModelPrebaker: Failed to create cache directories")
 		return err
 
-	Logger.info("prebaking", "ModelPrebaker initialized - output dir: %s" % output_dir)
+	Log.info("prebaking", "ModelPrebaker initialized - output dir: %s" % output_dir)
 	return OK
 
 
@@ -67,7 +67,7 @@ func bake_all_models() -> Dictionary:
 
 	# Collect all unique model paths from ESM
 	var model_paths := _collect_unique_models()
-	Logger.info("prebaking", "Found %d unique models to bake" % model_paths.size())
+	Log.info("prebaking", "Found %d unique models to bake" % model_paths.size())
 
 	# Bake each model
 	for i in range(model_paths.size()):
@@ -94,7 +94,7 @@ func bake_all_models() -> Dictionary:
 
 	batch_complete.emit(model_paths.size(), _total_baked, _total_failed, _total_skipped)
 
-	Logger.info("prebaking", "Models complete - %d baked, %d skipped, %d failed" % [
+	Log.info("prebaking", "Models complete - %d baked, %d skipped, %d failed" % [
 		_total_baked, _total_skipped, _total_failed])
 
 	return {
@@ -275,7 +275,7 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	# never loaded at runtime, breaking the MID tier (150-500m).
 	var lod_count := _count_lod_nodes(node)
 	if lod_count > 0:
-		Logger.debug("prebaking", "Keeping %d LOD nodes in %s for native visibility_range" % [lod_count, cache_key])
+		Log.debug("prebaking", "Keeping %d LOD nodes in %s for native visibility_range" % [lod_count, cache_key])
 
 	# Count meshes for return value
 	var mesh_count := _count_meshes(node)
@@ -497,7 +497,7 @@ func _remove_lod_nodes(node: Node) -> void:
 	_collect_lod_nodes_for_removal(node, all_lod_nodes)
 
 	if all_lod_nodes.size() > 0:
-		Logger.debug("prebaking", "Removing %d LOD nodes from %s" % [all_lod_nodes.size(), node.name])
+		Log.debug("prebaking", "Removing %d LOD nodes from %s" % [all_lod_nodes.size(), node.name])
 
 	# Pass 2: Remove all collected nodes
 	for lod_node in all_lod_nodes:
@@ -555,7 +555,7 @@ func bake_all_animations() -> Dictionary:
 		return {"success": 0, "failed": 0, "skipped": 0}
 
 	var anim_paths := _collect_animation_files()
-	Logger.info("prebaking", "Found %d animation files to bake" % anim_paths.size())
+	Log.info("prebaking", "Found %d animation files to bake" % anim_paths.size())
 
 	var success := 0
 	var failed := 0
@@ -576,7 +576,7 @@ func bake_all_animations() -> Dictionary:
 		else:
 			failed += 1
 
-	Logger.info("prebaking", "Animations complete - %d baked, %d skipped, %d failed" % [
+	Log.info("prebaking", "Animations complete - %d baked, %d skipped, %d failed" % [
 		success, skipped, failed])
 
 	return {

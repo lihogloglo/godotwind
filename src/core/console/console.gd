@@ -957,9 +957,9 @@ func _cmd_impostor_verbose(args: Dictionary) -> CommandRegistry.CommandResult:
 	renderer.set("debug_enabled", enable)
 
 	if enable:
-		Logger.debug("console", "Impostor verbose logging ENABLED - move to new cell to see output")
+		Log.debug("console", "Impostor verbose logging ENABLED - move to new cell to see output")
 	else:
-		Logger.debug("console", "Impostor verbose logging DISABLED")
+		Log.debug("console", "Impostor verbose logging DISABLED")
 
 	return CommandRegistry.CommandResult.ok("Impostor verbose logging: %s" % ("ON" if enable else "OFF"))
 

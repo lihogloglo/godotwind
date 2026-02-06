@@ -86,7 +86,7 @@ func on_effect_added() -> void:
 	_load_noise_texture()
 	_create_samplers()
 
-	Logger.info("shaders", "VolumetricCloudsEffect initialized")
+	Log.info("shaders", "VolumetricCloudsEffect initialized")
 
 
 func _load_noise_texture() -> void:

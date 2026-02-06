@@ -74,11 +74,11 @@ func _ready():
 
 	# Check if system is enabled
 	if not DeformationConfig.enabled:
-		Logger.info("deformation", "DeformationManager: System disabled via project settings - skipping initialization")
+		Log.info("deformation", "DeformationManager: System disabled via project settings - skipping initialization")
 		_system_enabled = false
 		return
 
-	Logger.info("deformation", "DeformationManager: Initializing RTT deformation system...")
+	Log.info("deformation", "DeformationManager: Initializing RTT deformation system...")
 
 	# Load configuration values
 	_load_configuration()
@@ -91,7 +91,7 @@ func _ready():
 
 	_system_enabled = true
 	_system_initialized = true
-	Logger.info("deformation", "DeformationManager: System initialized successfully")
+	Log.info("deformation", "DeformationManager: System initialized successfully")
 
 # Load configuration from DeformationConfig
 func _load_configuration():
@@ -322,7 +322,7 @@ func load_deformation_region(region_coord: Vector2i):
 		_terrain_integration.update_region_texture(region_coord, region_data.texture)
 
 	if DeformationConfig.debug_mode:
-		Logger.debug("deformation", "DeformationManager: Loaded deformation region: %s" % region_coord)
+		Log.debug("deformation", "DeformationManager: Loaded deformation region: %s" % region_coord)
 
 func unload_deformation_region(region_coord: Vector2i):
 	# Safety checks
@@ -345,7 +345,7 @@ func unload_deformation_region(region_coord: Vector2i):
 	_active_regions.erase(region_coord)
 
 	if DeformationConfig.debug_mode:
-		Logger.debug("deformation", "DeformationManager: Unloaded deformation region: %s" % region_coord)
+		Log.debug("deformation", "DeformationManager: Unloaded deformation region: %s" % region_coord)
 
 # Get deformation texture for a region (for shader binding)
 func get_region_texture(region_coord: Vector2i) -> ImageTexture:
@@ -380,7 +380,7 @@ func _save_region_to_disk(region_data: RegionData, path: String):
 	if err != OK:
 		push_error("[DeformationManager] Failed to save region to: " + path)
 	else:
-		Logger.info("deformation", "DeformationManager: Saved deformation region to: %s" % path)
+		Log.info("deformation", "DeformationManager: Saved deformation region to: %s" % path)
 
 func _load_region_from_disk(region_data: RegionData, path: String):
 	var loaded_image = Image.load_from_file(path)
@@ -390,7 +390,7 @@ func _load_region_from_disk(region_data: RegionData, path: String):
 
 	region_data.image = loaded_image
 	region_data.texture = ImageTexture.create_from_image(loaded_image)
-	Logger.info("deformation", "DeformationManager: Loaded deformation region from: %s" % path)
+	Log.info("deformation", "DeformationManager: Loaded deformation region from: %s" % path)
 
 # Signal handlers
 func _on_region_load_requested(region_coord: Vector2i):
@@ -449,7 +449,7 @@ func shutdown():
 	if not _system_enabled:
 		return
 
-	Logger.info("deformation", "DeformationManager: Shutting down deformation system...")
+	Log.info("deformation", "DeformationManager: Shutting down deformation system...")
 
 	# Save all dirty regions if persistence enabled
 	if DeformationConfig.enable_persistence and DeformationConfig.auto_save_on_unload:
@@ -464,7 +464,7 @@ func shutdown():
 	_pending_deformations.clear()
 
 	_system_enabled = false
-	Logger.info("deformation", "DeformationManager: System shutdown complete")
+	Log.info("deformation", "DeformationManager: System shutdown complete")
 
 func _exit_tree():
 	shutdown()

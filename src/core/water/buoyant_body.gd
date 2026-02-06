@@ -52,7 +52,7 @@ func _ready() -> void:
 	# Calculate total mass from cells
 	_calculate_mass()
 
-	Logger.info("water", "BuoyantBody: Initialized with %d cells, total mass: %.1f kg" % [buoyancy_cells.size(), _total_mass])
+	Log.info("water", "BuoyantBody: Initialized with %d cells, total mass: %.1f kg" % [buoyancy_cells.size(), _total_mass])
 
 
 func _physics_process(delta: float) -> void:
@@ -203,7 +203,7 @@ func _auto_generate_buoyancy_cells() -> void:
 				cell.density = 500.0  # Default wood density
 				buoyancy_cells.append(cell)
 
-	Logger.debug("water", "BuoyantBody: Auto-generated %d buoyancy cells" % buoyancy_cells.size())
+	Log.debug("water", "BuoyantBody: Auto-generated %d buoyancy cells" % buoyancy_cells.size())
 
 
 func _get_shape_aabb(shape: Shape3D) -> AABB:

@@ -122,11 +122,11 @@ func build_collision() -> CollisionResult:
 	result.has_collision = result.collision_shapes.size() > 0 or result.has_actor_collision_box
 
 	if debug_mode:
-		Logger.debug("nif", "NIFCollisionBuilder: Built %d collision shapes" % result.collision_shapes.size())
+		Log.debug("nif", "NIFCollisionBuilder: Built %d collision shapes" % result.collision_shapes.size())
 		if result.detected_shapes.size() > 0:
-			Logger.debug("nif", "  Detected shapes: %s" % ", ".join(result.detected_shapes))
+			Log.debug("nif", "  Detected shapes: %s" % ", ".join(result.detected_shapes))
 		if result.has_actor_collision_box:
-			Logger.debug("nif", "  Actor collision box: center=%s, extents=%s" % [
+			Log.debug("nif", "  Actor collision box: center=%s, extents=%s" % [
 				result.bounding_box_center, result.bounding_box_extents
 			])
 
@@ -145,14 +145,14 @@ func _find_special_nodes(node: Defs.NiAVObject, result: CollisionResult) -> void
 				result.bounding_box_center = bv.box.center
 				result.bounding_box_extents = bv.box.extents
 				if debug_mode:
-					Logger.debug("nif", "NIFCollisionBuilder: Found actor bounding box at node '%s'" % node.name)
+					Log.debug("nif", "NIFCollisionBuilder: Found actor bounding box at node '%s'" % node.name)
 		return  # Don't recurse into Bounding Box node
 
 	# Check for RootCollisionNode
 	if node.record_type == Defs.RT_ROOT_COLLISION_NODE:
 		result.root_collision_node_index = node.record_index
 		if debug_mode:
-			Logger.debug("nif", "NIFCollisionBuilder: Found RootCollisionNode at index %d" % node.record_index)
+			Log.debug("nif", "NIFCollisionBuilder: Found RootCollisionNode at index %d" % node.record_index)
 
 	# Check for string extra data markers
 	if node.extra_data_index >= 0:
@@ -252,7 +252,7 @@ func _process_collision_geometry(node: Defs.NiAVObject, parent_transform: Transf
 		if not shape_data.is_empty():
 			result.collision_shapes.append(shape_data)
 			if debug_mode:
-				Logger.debug("nif", "NIFCollisionBuilder: Created collision from '%s' (type: %s)" % [node.name, shape_data.get("type", "unknown")])
+				Log.debug("nif", "NIFCollisionBuilder: Created collision from '%s' (type: %s)" % [node.name, shape_data.get("type", "unknown")])
 
 	# Recurse into children
 	if node is Defs.NiNode:
@@ -368,7 +368,7 @@ func _create_shape_from_geometry(geom: Defs.NiGeometry, transform: Transform3D, 
 					var shape_transform := Transform3D.IDENTITY
 					shape_transform.origin = bounds.get_center()
 					if debug_mode:
-						Logger.debug("nif", "NIFCollisionBuilder: Using library shape '%s' for '%s'" % [
+						Log.debug("nif", "NIFCollisionBuilder: Using library shape '%s' for '%s'" % [
 							ShapeLib.shape_type_name(shape_type), item_id
 						])
 					return {
@@ -457,7 +457,7 @@ func _detect_best_shape(vertices: PackedVector3Array) -> DetectedShape:
 	# Check for sphere (all points roughly equidistant from center)
 	if dist_uniformity > (1.0 - detection_tolerance):
 		if debug_mode:
-			Logger.debug("nif", "NIFCollisionBuilder: Detected SPHERE (uniformity=%.2f)" % dist_uniformity)
+			Log.debug("nif", "NIFCollisionBuilder: Detected SPHERE (uniformity=%.2f)" % dist_uniformity)
 		return DetectedShape.SPHERE
 
 	# Check aspect ratios for cylinder/capsule vs box
@@ -470,21 +470,21 @@ func _detect_best_shape(vertices: PackedVector3Array) -> DetectedShape:
 		var xz_uniformity := _check_circular_cross_section(vertices, center)
 		if xz_uniformity > (1.0 - detection_tolerance):
 			if debug_mode:
-				Logger.debug("nif", "NIFCollisionBuilder: Detected CYLINDER (aspect_xy=%.2f, height_ratio=%.2f, xz_uniform=%.2f)" % [aspect_xy, height_ratio, xz_uniformity])
+				Log.debug("nif", "NIFCollisionBuilder: Detected CYLINDER (aspect_xy=%.2f, height_ratio=%.2f, xz_uniform=%.2f)" % [aspect_xy, height_ratio, xz_uniformity])
 			return DetectedShape.CYLINDER
 
 	# Check for capsule (cylinder with rounded ends)
 	if aspect_xy > (1.0 - detection_tolerance) and height_ratio > 1.5:
 		# Could be capsule - similar to cylinder but check for rounded ends
 		if debug_mode:
-			Logger.debug("nif", "NIFCollisionBuilder: Detected CAPSULE (aspect_xy=%.2f, height_ratio=%.2f)" % [aspect_xy, height_ratio])
+			Log.debug("nif", "NIFCollisionBuilder: Detected CAPSULE (aspect_xy=%.2f, height_ratio=%.2f)" % [aspect_xy, height_ratio])
 		return DetectedShape.CAPSULE
 
 	# Check for box (roughly equal extents or rectangular)
 	var box_score := _calculate_box_score(vertices, bounds)
 	if box_score > (1.0 - detection_tolerance):
 		if debug_mode:
-			Logger.debug("nif", "NIFCollisionBuilder: Detected BOX (score=%.2f)" % box_score)
+			Log.debug("nif", "NIFCollisionBuilder: Detected BOX (score=%.2f)" % box_score)
 		return DetectedShape.BOX
 
 	# Default to convex hull

@@ -138,7 +138,7 @@ func _find_mesh_instance(node: Node) -> MeshInstance3D:
 		# Skip LOD nodes - they're for MID tier MultiMesh, not direct rendering
 		var is_lod := node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3")
 		if is_lod:
-			Logger.debug("streaming", "[StaticRenderer] Skipping LOD node: %s" % node_name)
+			Log.debug("streaming", "[StaticRenderer] Skipping LOD node: %s" % node_name)
 		else:
 			return node
 	for child in node.get_children():

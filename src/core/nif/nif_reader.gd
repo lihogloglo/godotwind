@@ -124,14 +124,14 @@ func _parse() -> Error:
 	if _version == Defs.VER_MW:
 		# Morrowind: roots come after all records
 		if debug_mode:
-			Logger.debug("nif", "  Reading roots at pos=%d, buffer_size=%d" % [_pos, _buffer.size()])
+			Log.debug("nif", "  Reading roots at pos=%d, buffer_size=%d" % [_pos, _buffer.size()])
 		var num_roots := _read_u32()
 		if debug_mode:
-			Logger.debug("nif", "  num_roots=%d" % num_roots)
+			Log.debug("nif", "  num_roots=%d" % num_roots)
 		for i in range(num_roots):
 			var root_idx := _read_s32()
 			if debug_mode:
-				Logger.debug("nif", "  root[%d]=%d" % [i, root_idx])
+				Log.debug("nif", "  root[%d]=%d" % [i, root_idx])
 			roots.append(root_idx)
 
 	return OK
@@ -144,7 +144,7 @@ func _read_record(index: int) -> Defs.NIFRecord:
 	var record_type := _read_string()
 
 	if debug_mode:
-		Logger.debug("nif", "  [%d] pos=%d type='%s'" % [index, start_pos, record_type])
+		Log.debug("nif", "  [%d] pos=%d type='%s'" % [index, start_pos, record_type])
 
 	var record: Defs.NIFRecord = null
 
@@ -544,19 +544,19 @@ func _read_ni_tri_shape_data() -> Defs.NiTriShapeData:
 	var start_pos := _pos
 	_read_ni_geometry_data(data)
 	if debug_mode:
-		Logger.debug("nif", "    After geometry_data: pos=%d (read %d bytes), verts=%d, normals=%d, colors=%d, uvs=%d" % [
+		Log.debug("nif", "    After geometry_data: pos=%d (read %d bytes), verts=%d, normals=%d, colors=%d, uvs=%d" % [
 			_pos, _pos - start_pos, data.vertices.size(), data.normals.size(),
 			data.colors.size(), data.uv_sets.size()])
 
 	# Triangle count
 	data.num_triangles = _read_u16()
 	if debug_mode:
-		Logger.debug("nif", "    pos before num_indices=%d, next 8 bytes: %s" % [_pos, _buffer.slice(_pos, mini(_pos + 8, _buffer.size())).hex_encode()])
+		Log.debug("nif", "    pos before num_indices=%d, next 8 bytes: %s" % [_pos, _buffer.slice(_pos, mini(_pos + 8, _buffer.size())).hex_encode()])
 
 	# Triangle indices - this is the TRIANGLE POINT COUNT (num_triangles * 3)
 	var num_indices := _read_u32()
 	if debug_mode:
-		Logger.debug("nif", "    num_triangles=%d, num_indices=%d (expected ~%d)" % [data.num_triangles, num_indices, data.num_triangles * 3])
+		Log.debug("nif", "    num_triangles=%d, num_indices=%d (expected ~%d)" % [data.num_triangles, num_indices, data.num_triangles * 3])
 	data.triangles.resize(num_indices)
 	for i in range(num_indices):
 		data.triangles[i] = _read_u16()
@@ -564,7 +564,7 @@ func _read_ni_tri_shape_data() -> Defs.NiTriShapeData:
 	# Match groups (skip for now)
 	var num_match_groups := _read_u16()
 	if debug_mode:
-		Logger.debug("nif", "    num_match_groups=%d, final pos=%d" % [num_match_groups, _pos])
+		Log.debug("nif", "    num_match_groups=%d, final pos=%d" % [num_match_groups, _pos])
 	for i in range(num_match_groups):
 		var group_size := _read_u16()
 		_skip(group_size * 2)  # Skip indices
@@ -678,7 +678,7 @@ func _read_ni_geometry_data(data: Defs.NiGeometryData) -> void:
 	# Vertex count
 	data.num_vertices = _read_u16()
 	if debug_mode:
-		Logger.debug("nif", "      num_vertices=%d" % data.num_vertices)
+		Log.debug("nif", "      num_vertices=%d" % data.num_vertices)
 
 	# Has vertices flag (bool - 4 bytes in Morrowind!)
 	var has_vertices := _read_bool()
@@ -687,7 +687,7 @@ func _read_ni_geometry_data(data: Defs.NiGeometryData) -> void:
 		for i in range(data.num_vertices):
 			data.vertices[i] = _read_vector3()
 	if debug_mode:
-		Logger.debug("nif", "      after vertices (has=%s): pos=%d" % [has_vertices, _pos])
+		Log.debug("nif", "      after vertices (has=%s): pos=%d" % [has_vertices, _pos])
 
 	# Has normals flag (bool - 4 bytes in Morrowind!)
 	var has_normals := _read_bool()
@@ -695,19 +695,19 @@ func _read_ni_geometry_data(data: Defs.NiGeometryData) -> void:
 		# Show first normal to verify it looks valid
 		var peek_pos := _pos
 		var n0 := Vector3(_buffer.decode_float(peek_pos), _buffer.decode_float(peek_pos+4), _buffer.decode_float(peek_pos+8))
-		Logger.debug("nif", "      first normal preview: %s" % n0)
+		Log.debug("nif", "      first normal preview: %s" % n0)
 	if has_normals:
 		data.normals.resize(data.num_vertices)
 		for i in range(data.num_vertices):
 			data.normals[i] = _read_vector3()
 	if debug_mode:
-		Logger.debug("nif", "      after normals (has=%s): pos=%d" % [has_normals, _pos])
+		Log.debug("nif", "      after normals (has=%s): pos=%d" % [has_normals, _pos])
 
 	# Bounding sphere
 	data.center = _read_vector3()
 	data.radius = _read_float()
 	if debug_mode:
-		Logger.debug("nif", "      after bsphere: pos=%d (center=%s, radius=%s)" % [_pos, data.center, data.radius])
+		Log.debug("nif", "      after bsphere: pos=%d (center=%s, radius=%s)" % [_pos, data.center, data.radius])
 
 	# Has vertex colors flag (bool - 4 bytes in Morrowind!)
 	var has_colors := _read_bool()
@@ -716,19 +716,19 @@ func _read_ni_geometry_data(data: Defs.NiGeometryData) -> void:
 		for i in range(data.num_vertices):
 			data.colors[i] = _read_color4()
 	if debug_mode:
-		Logger.debug("nif", "      after colors (has=%s): pos=%d" % [has_colors, _pos])
+		Log.debug("nif", "      after colors (has=%s): pos=%d" % [has_colors, _pos])
 
 	# UV sets - in Morrowind (4.0.0.2), data_flags IS the number of UV sets
 	# The format is: data_flags (u16), then has_uv (bool), then UV data
 	data.data_flags = _read_u16()
 	var num_uv_sets := data.data_flags  # For Morrowind, the whole value is numUVs
 	if debug_mode:
-		Logger.debug("nif", "      data_flags/num_uv_sets=%d" % num_uv_sets)
+		Log.debug("nif", "      data_flags/num_uv_sets=%d" % num_uv_sets)
 
 	# Has UV flag (bool - 4 bytes in Morrowind!) - if false, no UVs regardless of num_uv_sets
 	var has_uv := _read_bool()
 	if debug_mode:
-		Logger.debug("nif", "      has_uv=%s, pos before UV read=%d" % [has_uv, _pos])
+		Log.debug("nif", "      has_uv=%s, pos before UV read=%d" % [has_uv, _pos])
 	if not has_uv:
 		num_uv_sets = 0
 
@@ -744,7 +744,7 @@ func _read_ni_geometry_data(data: Defs.NiGeometryData) -> void:
 				uvs[i] = Vector2(u, 1.0 - v)
 			data.uv_sets[uv_idx] = uvs
 	if debug_mode:
-		Logger.debug("nif", "      after UVs: pos=%d, total geom bytes=%d" % [_pos, _pos - geom_start])
+		Log.debug("nif", "      after UVs: pos=%d, total geom bytes=%d" % [_pos, _pos - geom_start])
 
 # =============================================================================
 # PROPERTY READERS

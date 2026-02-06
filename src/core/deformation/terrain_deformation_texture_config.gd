@@ -131,28 +131,8 @@ func _apply_volcanic_preset() -> void:
 
 ## Debug: Print configuration
 func print_config() -> void:
-	Logger.debug("deformation", "=== Terrain Deformation Config ===")
-	Logger.debug("deformation", "Textures: %d" % texture_heights.size())
+	Log.debug("deformation", "=== Terrain Deformation Config ===")
+	Log.debug("deformation", "Textures: %d" % texture_heights.size())
 	for entry in texture_heights:
-		Logger.debug("deformation", "  [%2d] %-25s: %.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
-	Logger.debug("deformation", "==================================")
-
-
-# Individual texture entry
-class_name TerrainDeformationTextureEntry
-extends Resource
-
-## Terrain3D texture slot ID (0-31)
-@export_range(0, 31, 1) var texture_id: int = 0
-
-## Deformation rest height in meters (0.0 = no deformation)
-@export_range(0.0, 1.0, 0.01, "or_greater") var rest_height: float = 0.0
-
-## Human-readable name for this texture (optional, for editor clarity)
-@export var texture_name: String = ""
-
-## Category/type hint (optional)
-@export_enum("Soft", "Medium", "Hard") var category: String = "Medium"
-
-## Notes (optional)
-@export_multiline var notes: String = ""
+		Log.debug("deformation", "  [%2d] %-25s: %.3fm" % [entry.texture_id, entry.texture_name, entry.rest_height])
+	Log.debug("deformation", "==================================")

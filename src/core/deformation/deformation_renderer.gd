@@ -31,9 +31,9 @@ func _ready():
 	_setup_stamp_mesh()
 
 	if _follow_player:
-		Logger.info("deformation", "DeformationRenderer: RTT renderer initialized (PLAYER-FOLLOWING mode, radius: %sm)" % _follow_radius)
+		Log.info("deformation", "DeformationRenderer: RTT renderer initialized (PLAYER-FOLLOWING mode, radius: %sm)" % _follow_radius)
 	else:
-		Logger.info("deformation", "DeformationRenderer: RTT renderer initialized (REGION-BASED mode)")
+		Log.info("deformation", "DeformationRenderer: RTT renderer initialized (REGION-BASED mode)")
 
 # Setup the SubViewport for rendering
 func _setup_viewport():
@@ -109,7 +109,7 @@ func _setup_stamp_mesh():
 func set_player(player: Node3D) -> void:
 	_player_node = player
 	if _follow_player and _player_node:
-		Logger.info("deformation", "DeformationRenderer: Now following player: %s" % _player_node.name)
+		Log.info("deformation", "DeformationRenderer: Now following player: %s" % _player_node.name)
 
 # Process function to update camera position when following player
 func _process(_delta: float):

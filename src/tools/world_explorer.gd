@@ -50,6 +50,7 @@ const StreamingProfilerScript := preload("res://src/core/world/streaming_profile
 const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.gd")
 const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 const DebugSystemScript := preload("res://src/tools/debug_system.gd")
+const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -923,6 +924,11 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		var lod_cmds := LodDebugCommands.new(native_streaming_manager)
 		lod_cmds.register_commands(console)
 
+		# Register streaming benchmark commands
+		StreamingBenchmarkScript.register_console_commands(
+			console, native_streaming_manager, cell_manager, camera
+		)
+
 	# Initialize profiling report (extracted to ProfilingReport)
 	_profiling_report = ProfilingReport.new(
 		profiler, cell_manager, world_streaming_manager, _log, self
@@ -1038,7 +1044,7 @@ func _update_loading(progress: float, status: String) -> void:
 func _log(message: String) -> void:
 	if log_text:
 		log_text.append_text(message + "\n")
-	Logger.info("tools", message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
+	Log.info("tools", message.replace("[color=green]", "").replace("[color=red]", "").replace("[color=yellow]", "").replace("[/color]", "").replace("[b]", "").replace("[/b]", ""))
 
 
 # ==================== Input Handling ====================

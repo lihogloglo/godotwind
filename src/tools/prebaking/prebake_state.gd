@@ -86,7 +86,7 @@ func load_state() -> bool:
 	var config := ConfigFile.new()
 	var err := config.load(STATE_FILE)
 	if err != OK:
-		Logger.info("prebaking", "No saved state found (this is normal for first run)")
+		Log.info("prebaking", "No saved state found (this is normal for first run)")
 		return false
 
 	version = config.get_value("global", "version", 1)
@@ -99,7 +99,7 @@ func load_state() -> bool:
 	_load_component(config, "navmeshes", navmeshes)
 	_load_component(config, "shore_mask", shore_mask)
 
-	Logger.info("prebaking", "Loaded state from %s" % STATE_FILE)
+	Log.info("prebaking", "Loaded state from %s" % STATE_FILE)
 	_print_summary()
 	return true
 
@@ -140,7 +140,7 @@ func clear_state() -> void:
 	if FileAccess.file_exists(STATE_FILE):
 		DirAccess.remove_absolute(STATE_FILE)
 
-	Logger.info("prebaking", "Cleared all state")
+	Log.info("prebaking", "Cleared all state")
 
 
 ## Check if any component has pending work
@@ -209,12 +209,12 @@ func _save_component(config: ConfigFile, section: String, state: ComponentState)
 
 
 func _print_summary() -> void:
-	Logger.info("prebaking", "Terrain: %d completed, %d pending, %d failed" % [
+	Log.info("prebaking", "Terrain: %d completed, %d pending, %d failed" % [
 		terrain.completed.size(), terrain.pending.size(), terrain.failed.size()])
-	Logger.info("prebaking", "Models: %d completed, %d pending, %d failed" % [
+	Log.info("prebaking", "Models: %d completed, %d pending, %d failed" % [
 		models.completed.size(), models.pending.size(), models.failed.size()])
-	Logger.info("prebaking", "Impostors: %d completed, %d pending, %d failed" % [
+	Log.info("prebaking", "Impostors: %d completed, %d pending, %d failed" % [
 		impostors.completed.size(), impostors.pending.size(), impostors.failed.size()])
-	Logger.info("prebaking", "Navmeshes: %d completed, %d pending, %d failed" % [
+	Log.info("prebaking", "Navmeshes: %d completed, %d pending, %d failed" % [
 		navmeshes.completed.size(), navmeshes.pending.size(), navmeshes.failed.size()])
-	Logger.info("prebaking", "Shore Mask: %s" % ("complete" if shore_mask.is_complete() else "pending"))
+	Log.info("prebaking", "Shore Mask: %s" % ("complete" if shore_mask.is_complete() else "pending"))

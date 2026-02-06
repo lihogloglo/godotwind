@@ -282,7 +282,7 @@ static func print_hierarchy(skeleton: Skeleton3D, indent: int = 0) -> void:
 		if skeleton.get_bone_parent(i) == -1:
 			_collect_bone_recursive(skeleton, i, 0, lines)
 
-	Logger.debug("character", "\n".join(lines))
+	Log.debug("character", "\n".join(lines))
 
 
 static func _collect_bone_recursive(skeleton: Skeleton3D, bone_idx: int, depth: int, lines: PackedStringArray) -> void:

@@ -66,7 +66,7 @@ func _ready() -> void:
 	_compositor = Compositor.new()
 	_load_built_in_effects()
 	_load_config()
-	Logger.info("shaders", "ShaderManager initialized with %d effects" % _effects.size())
+	Log.info("shaders", "ShaderManager initialized with %d effects" % _effects.size())
 
 
 ## Attach the shader manager to a WorldEnvironment or Camera3D
@@ -76,10 +76,10 @@ func attach_to(node: Node) -> void:
 	if node is WorldEnvironment:
 		# WorldEnvironment has compositor as a direct property, NOT on Environment
 		node.compositor = _compositor
-		Logger.info("shaders", "ShaderManager attached to WorldEnvironment")
+		Log.info("shaders", "ShaderManager attached to WorldEnvironment")
 	elif node is Camera3D:
 		node.compositor = _compositor
-		Logger.info("shaders", "ShaderManager attached to Camera3D")
+		Log.info("shaders", "ShaderManager attached to Camera3D")
 	else:
 		push_warning("[ShaderManager] Can only attach to WorldEnvironment or Camera3D")
 
@@ -114,7 +114,7 @@ func load_effect(path: String) -> bool:
 	effect.parameter_changed.connect(_on_effect_param_changed.bind(effect.effect_name))
 
 	effect_loaded.emit(effect.effect_name)
-	Logger.info("shaders", "Loaded effect: %s" % effect.effect_name)
+	Log.info("shaders", "Loaded effect: %s" % effect.effect_name)
 	return true
 
 
@@ -128,7 +128,7 @@ func unload_effect(effect_name: String) -> void:
 	effect.on_effect_removed()
 
 	_effects.erase(effect_name)
-	Logger.info("shaders", "Unloaded effect: %s" % effect_name)
+	Log.info("shaders", "Unloaded effect: %s" % effect_name)
 
 
 ## Enable an effect (add to compositor)
@@ -167,7 +167,7 @@ func enable_effect(effect_name: String, transition_time: float = 0.0) -> bool:
 
 	effect_enabled.emit(effect_name)
 	stack_changed.emit(_effect_stack.duplicate())
-	Logger.info("shaders", "Enabled effect: %s" % effect_name)
+	Log.info("shaders", "Enabled effect: %s" % effect_name)
 	return true
 
 
@@ -200,7 +200,7 @@ func _remove_effect_from_compositor(effect_name: String) -> void:
 
 	effect_disabled.emit(effect_name)
 	stack_changed.emit(_effect_stack.duplicate())
-	Logger.info("shaders", "Disabled effect: %s" % effect_name)
+	Log.info("shaders", "Disabled effect: %s" % effect_name)
 
 
 ## Toggle an effect on/off
@@ -320,7 +320,7 @@ func save_preset(preset_name: String) -> void:
 
 	_presets[preset_name] = preset
 	_current_preset = preset_name
-	Logger.info("shaders", "Saved preset: %s" % preset_name)
+	Log.info("shaders", "Saved preset: %s" % preset_name)
 
 
 ## Load a preset
@@ -346,7 +346,7 @@ func load_preset(preset_name: String) -> bool:
 		enable_effect(effect_name)
 
 	_current_preset = preset_name
-	Logger.info("shaders", "Loaded preset: %s" % preset_name)
+	Log.info("shaders", "Loaded preset: %s" % preset_name)
 	return true
 
 
@@ -387,7 +387,7 @@ func save_config() -> void:
 	if err != OK:
 		push_error("[ShaderManager] Failed to save config: %d" % err)
 	else:
-		Logger.info("shaders", "Config saved to %s" % CONFIG_PATH)
+		Log.info("shaders", "Config saved to %s" % CONFIG_PATH)
 
 
 ## Load configuration from file
@@ -418,7 +418,7 @@ func _load_config() -> void:
 			if effect_name in _effects:
 				enable_effect(effect_name)
 
-	Logger.info("shaders", "Config loaded from %s" % CONFIG_PATH)
+	Log.info("shaders", "Config loaded from %s" % CONFIG_PATH)
 
 
 ## Load built-in effects from the effects directory

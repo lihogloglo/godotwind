@@ -74,14 +74,14 @@ func load_terrain_textures(terrain_assets: Terrain3DAssets) -> int:
 		return 0
 
 	_stats["ltex_records"] = ESMManager.land_textures.size()
-	Logger.info("textures", "Loading %d LTEX textures..." % _stats["ltex_records"])
+	Log.info("textures", "Loading %d LTEX textures..." % _stats["ltex_records"])
 
 	# First, add a default texture at slot 0
 	_add_default_texture(terrain_assets)
 
 	# Collect unique textures from all LAND records
 	var unique_indices := _collect_used_texture_indices()
-	Logger.info("textures", "Found %d unique texture indices in use" % unique_indices.size())
+	Log.info("textures", "Found %d unique texture indices in use" % unique_indices.size())
 
 	# Load textures for used indices (limit to 31 since slot 0 is default)
 	var loaded := 0
@@ -109,11 +109,11 @@ func load_terrain_textures(terrain_assets: Terrain3DAssets) -> int:
 	# Condensed logging
 	if loaded > 0:
 		if loaded == 1:
-			Logger.info("textures", "Loaded '%s' (MW idx -> slot)" % first_texture_name)
+			Log.info("textures", "Loaded '%s' (MW idx -> slot)" % first_texture_name)
 		else:
-			Logger.info("textures", "Loaded '%s' and %d more textures (%d failed)" % [first_texture_name, loaded - 1, _stats["textures_failed"]])
+			Log.info("textures", "Loaded '%s' and %d more textures (%d failed)" % [first_texture_name, loaded - 1, _stats["textures_failed"]])
 	else:
-		Logger.info("textures", "No textures loaded (%d failed)" % _stats["textures_failed"])
+		Log.info("textures", "No textures loaded (%d failed)" % _stats["textures_failed"])
 
 	return loaded
 
@@ -145,8 +145,8 @@ func _collect_used_texture_indices() -> Array[int]:
 					usage_counts[idx] = 0
 				usage_counts[idx] += 1
 
-	Logger.info("textures", "Cells with VTEX data: %d, without: %d" % [cells_with_textures, cells_without_textures])
-	Logger.info("textures", "Total unique texture indices: %d" % usage_counts.size())
+	Log.info("textures", "Cells with VTEX data: %d, without: %d" % [cells_with_textures, cells_without_textures])
+	Log.info("textures", "Total unique texture indices: %d" % usage_counts.size())
 
 	# Sort by usage frequency (most used first) to prioritize popular textures
 	var indices_by_usage: Array = []
@@ -165,19 +165,19 @@ func _collect_used_texture_indices() -> Array[int]:
 		var details := []
 		for entry: Variant in indices_by_usage:
 			details.append("idx%d:%d" % [entry["idx"], entry["count"]])
-		Logger.debug("textures", "Texture usage (idx:count): %s" % ", ".join(details))
+		Log.debug("textures", "Texture usage (idx:count): %s" % ", ".join(details))
 	else:
 		# Show top 32 (what will fit in slots) plus any that won't fit
 		var top_details := []
 		for i in mini(32, indices_by_usage.size()):
 			top_details.append("idx%d:%d" % [indices_by_usage[i]["idx"], indices_by_usage[i]["count"]])
-		Logger.debug("textures", "Top 32 textures by usage: %s" % ", ".join(top_details))
+		Log.debug("textures", "Top 32 textures by usage: %s" % ", ".join(top_details))
 
 		if result.size() > 32:
 			var overflow_details := []
 			for i in range(32, mini(40, indices_by_usage.size())):
 				overflow_details.append("idx%d:%d" % [indices_by_usage[i]["idx"], indices_by_usage[i]["count"]])
-			Logger.warn("textures", "%d textures won't get slots. First overflow: %s" % [
+			Log.warn("textures", "%d textures won't get slots. First overflow: %s" % [
 				result.size() - 32, ", ".join(overflow_details)])
 
 	return result
@@ -204,7 +204,7 @@ func _add_default_texture(terrain_assets: Terrain3DAssets) -> void:
 	terrain_assets.set_texture(0, asset)
 	_slot_mapping[0] = 0
 	_next_slot = 1
-	Logger.info("textures", "Default texture added to slot 0")
+	Log.info("textures", "Default texture added to slot 0")
 
 
 ## Load a single LTEX texture and add to Terrain3D
@@ -264,7 +264,7 @@ func _try_load_pbr_textures(asset: Terrain3DTextureAsset, base_path: String) -> 
 		normal_tex = _ensure_mipmaps(normal_tex)
 		asset.normal_texture = normal_tex
 		if _stats["textures_loaded"] < 3:
-			Logger.debug("textures", "Found normal map for %s" % base_path)
+			Log.debug("textures", "Found normal map for %s" % base_path)
 
 	# Note: Terrain3DTextureAsset has limited PBR support
 	# Height and roughness could be packed into albedo alpha or separate channels
@@ -339,11 +339,11 @@ func clear() -> void:
 ## Print summary of unmapped texture indices (those that fell back to default)
 func print_unmapped_summary() -> void:
 	if _unmapped_indices.is_empty():
-		Logger.info("textures", "No unmapped texture indices (all textures have slots)")
+		Log.info("textures", "No unmapped texture indices (all textures have slots)")
 		return
 	var indices: Array = _unmapped_indices.keys()
 	indices.sort()
-	Logger.info("textures", "%d unmapped MW indices (using default texture): %s" % [
+	Log.info("textures", "%d unmapped MW indices (using default texture): %s" % [
 		indices.size(), str(indices)])
 
 
@@ -411,7 +411,7 @@ func print_debug_summary() -> void:
 			asset_name = asset.name if asset else "null"
 		lines.append("    MW %d -> slot %d (%s)" % [mw_idx, slot, asset_name])
 	lines.append("===========================================")
-	Logger.info("textures", "\n".join(lines))
+	Log.info("textures", "\n".join(lines))
 
 
 ## Verify textures are properly set in Terrain3DAssets
@@ -434,4 +434,4 @@ func verify_terrain_assets(terrain_assets: Terrain3DAssets) -> void:
 		else:
 			lines.append("    Slot %d: <empty>" % i)
 	lines.append("=====================================")
-	Logger.info("textures", "\n".join(lines))
+	Log.info("textures", "\n".join(lines))

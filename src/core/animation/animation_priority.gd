@@ -108,7 +108,7 @@ func request_animation_with_priority(state: StringName, priority: int,
 	# Check if current animation has higher priority
 	if not force and current["priority"] > priority:
 		if debug_mode:
-			Logger.debug("animation", "AnimationPriority: Blocked '%s' (prio %d) by '%s' (prio %d)" % [
+			Log.debug("animation", "AnimationPriority: Blocked '%s' (prio %d) by '%s' (prio %d)" % [
 				state, priority, current["name"], current["priority"]
 			])
 		return false
@@ -125,7 +125,7 @@ func request_animation_with_priority(state: StringName, priority: int,
 	}
 
 	if debug_mode:
-		Logger.debug("animation", "AnimationPriority: Accepted '%s' (prio %d, group %d)" % [
+		Log.debug("animation", "AnimationPriority: Accepted '%s' (prio %d, group %d)" % [
 			state, priority, group
 		])
 
@@ -141,7 +141,7 @@ func clear_animation(state: StringName) -> void:
 		_group_animations[group] = {"name": &"", "priority": -1, "time": 0.0}
 
 		if debug_mode:
-			Logger.debug("animation", "AnimationPriority: Cleared '%s' from group %d" % [state, group])
+			Log.debug("animation", "AnimationPriority: Cleared '%s' from group %d" % [state, group])
 
 
 ## Clear all groups
@@ -195,7 +195,7 @@ func queue_animation(state: StringName) -> void:
 	})
 
 	if debug_mode:
-		Logger.debug("animation", "AnimationPriority: Queued '%s'" % state)
+		Log.debug("animation", "AnimationPriority: Queued '%s'" % state)
 
 
 ## Get and remove next queued animation for a group

@@ -291,4 +291,4 @@ static func print_mapping() -> void:
 	for mw_name: String in MORROWIND_TO_MIXAMO:
 		lines.append("  %s -> %s" % [mw_name, MORROWIND_TO_MIXAMO[mw_name]])
 	lines.append("Total: %d mappings" % MORROWIND_TO_MIXAMO.size())
-	Logger.debug("character", "\n".join(lines))
+	Log.debug("character", "\n".join(lines))

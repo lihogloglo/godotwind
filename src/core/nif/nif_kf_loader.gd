@@ -66,7 +66,7 @@ func _extract_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dictionary:
 		return _extract_regular_animations(reader, skeleton)
 
 	if debug_mode:
-		Logger.debug("nif", Found NiSequenceStreamHelper")
+		Log.debug("nif", "Found NiSequenceStreamHelper")
 
 	# Get text keys (animation markers)
 	var text_keys: Array[Dictionary] = []
@@ -78,9 +78,9 @@ func _extract_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dictionary:
 			var text_key_data := first_extra as Defs.NiTextKeyExtraData
 			text_keys = text_key_data.keys
 			if debug_mode:
-				Logger.debug("nif", "Text keys: %d" % text_keys.size())
+				Log.debug("nif", "Text keys: %d" % text_keys.size())
 				for tk in text_keys:
-					Logger.debug("nif", "  %.3fs: %s" % [tk["time"], tk["value"]])
+					Log.debug("nif", "  %.3fs: %s" % [tk["time"], tk["value"]])
 
 	# Collect bone name -> controller pairs
 	var bone_controllers: Dictionary = {}  # bone_name -> NiKeyframeController
@@ -119,8 +119,8 @@ func _extract_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dictionary:
 			break
 
 	if debug_mode:
-		Logger.debug("nif", "Extra data chain: %d items" % extra_indices.size())
-		Logger.debug("nif", "Controller chain: %d items" % controller_indices.size())
+		Log.debug("nif", "Extra data chain: %d items" % extra_indices.size())
+		Log.debug("nif", "Controller chain: %d items" % controller_indices.size())
 
 	# Match string extra data (bone names) with controllers
 	# First extra is text keys, so start from index 1
@@ -137,8 +137,8 @@ func _extract_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dictionary:
 			keyframe_controllers.append(ctrl as Defs.NiKeyframeController)
 
 	if debug_mode:
-		Logger.debug("nif", "String extras (bone names): %d" % string_extras.size())
-		Logger.debug("nif", "Keyframe controllers: %d" % keyframe_controllers.size())
+		Log.debug("nif", "String extras (bone names): %d" % string_extras.size())
+		Log.debug("nif", "Keyframe controllers: %d" % keyframe_controllers.size())
 
 	# Pair them up
 	var pair_count := mini(string_extras.size(), keyframe_controllers.size())
@@ -148,7 +148,7 @@ func _extract_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dictionary:
 		bone_controllers[bone_name] = controller
 
 		if debug_mode:
-			Logger.debug("nif", "  Bone '%s' -> controller with data_index=%d" % [bone_name, controller.data_index])
+			Log.debug("nif", "  Bone '%s' -> controller with data_index=%d" % [bone_name, controller.data_index])
 
 	# Now create animations from text key ranges
 	return _create_animations_from_kf(reader, text_keys, bone_controllers, skeleton)
@@ -198,9 +198,9 @@ func _create_animations_from_kf(
 				current_anim = ""
 
 	if debug_mode:
-		Logger.debug("nif", "Animation ranges found: %d" % anim_ranges.size())
+		Log.debug("nif", "Animation ranges found: %d" % anim_ranges.size())
 		for r in anim_ranges:
-			Logger.debug("nif", "  '%s': %.3f - %.3f" % [r["name"], r["start_time"], r["end_time"]])
+			Log.debug("nif", "  '%s': %.3f - %.3f" % [r["name"], r["start_time"], r["end_time"]])
 
 	# Create an animation for each range
 	for anim_range in anim_ranges:
@@ -315,7 +315,7 @@ func _create_single_animation(
 					animation.scale_track_insert_key(track_idx, time, Vector3(scale_val, scale_val, scale_val))
 
 	if debug_mode:
-		Logger.debug("nif", "  Created animation '%s': %.2fs, %d tracks" % [
+		Log.debug("nif", "  Created animation '%s': %.2fs, %d tracks" % [
 			anim_name, animation.length, animation.get_track_count()
 		])
 

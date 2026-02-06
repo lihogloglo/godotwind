@@ -42,6 +42,7 @@
 | **La Palma Explorer** | ⚠️ WIP | Terrain-only, minimal features |
 | **Settings Tool** | ✅ Production | Morrowind path config |
 | **Developer Console** | ✅ New | Object picking, commands, scripting foundation |
+| **Streaming Benchmark** | ✅ New | 6-phase automated benchmark, CSV output, console commands |
 
 ## Gameplay Systems (Not Implemented)
 

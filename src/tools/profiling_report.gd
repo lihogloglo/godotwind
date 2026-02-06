@@ -122,37 +122,6 @@ func dump_report() -> void:
 		_log("  Objects from pool (reused): %d" % cell_stats.get("objects_from_pool", 0))
 		_log("  Hit rate: %.1f%%" % (cell_stats.get("pool_hit_rate", 0.0) * 100.0))
 
-	# Parallel duplicate (async worker) stats
-	if _cell_manager.has_method("get_parallel_duplicate_stats"):
-		var pd_stats: Dictionary = _cell_manager.get_parallel_duplicate_stats()
-		var pd_dispatched: int = pd_stats.get("dispatched", 0)
-		if pd_dispatched > 0 or pd_stats.get("enabled", false):
-			_log("")
-			_log("[b]Async Worker (Parallel Duplicate)[/b]")
-			_log("  Enabled: %s | Active tasks: %d" % [
-				"Yes" if pd_stats.get("enabled", false) else "No",
-				pd_stats.get("active_tasks", 0)
-			])
-			_log("  Dispatched: %d | Completed: %d" % [
-				pd_dispatched,
-				pd_stats.get("completed", 0)
-			])
-			var failed_cell: int = pd_stats.get("failed_cell_freed", 0)
-			var failed_instance: int = pd_stats.get("failed_instance_invalid", 0)
-			var failed_dup: int = pd_stats.get("failed_duplicate_error", 0)
-			var total_failed := failed_cell + failed_instance + failed_dup
-			if total_failed > 0:
-				_log("  [color=yellow]Failures: %d[/color] (cell freed: %d, instance invalid: %d, dup error: %d)" % [
-					total_failed, failed_cell, failed_instance, failed_dup
-				])
-			else:
-				_log("  Failures: 0")
-			_log("  Success rate: %.1f%%" % (pd_stats.get("success_rate", 1.0) * 100.0))
-			_log("  Avg dispatch time: %d us | Avg process time: %d us" % [
-				pd_stats.get("avg_dispatch_time_us", 0),
-				pd_stats.get("avg_process_time_us", 0)
-			])
-
 	# Instantiation pipeline stats
 	if _cell_manager.has_method("get_loading_stats"):
 		var loading_stats: Dictionary = _cell_manager.get_loading_stats()
@@ -232,4 +201,4 @@ func dump_report() -> void:
 	_log("[b]==============================[/b]")
 
 	# Also print full report to console for easy copying
-	Logger.debug("debug", JSON.stringify(report, "  "))
+	Log.debug("debug", JSON.stringify(report, "  "))

@@ -1,7 +1,8 @@
+@tool
 ## Logger — Structured logging with levels and categories
 ##
 ## Replaces raw print() calls with categorized, level-gated output.
-## Registered as autoload — use directly: Logger.info("esm", "Loaded 500 cells")
+## Registered as autoload — use directly: Log.info("esm", "Loaded 500 cells")
 ##
 ## Levels: DEBUG < INFO < WARN < ERROR
 ## Categories match subsystem directories (streaming, esm, nif, etc.)

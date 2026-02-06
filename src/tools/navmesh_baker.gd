@@ -67,10 +67,10 @@ func set_terrain3d_from_scene(root: Node) -> bool:
 	var terrain := _find_terrain3d_recursive(root)
 	if terrain:
 		terrain_3d = terrain
-		Logger.info("navmesh", "Found Terrain3D instance, will use optimized navmesh generation")
+		Log.info("navmesh", "Found Terrain3D instance, will use optimized navmesh generation")
 		return true
 	else:
-		Logger.info("navmesh", "No Terrain3D found, will use LAND heightmap fallback")
+		Log.info("navmesh", "No Terrain3D found, will use LAND heightmap fallback")
 		return false
 
 
@@ -114,9 +114,9 @@ func initialize() -> Error:
 		push_error("NavMeshBaker: Failed to create cache directories")
 		return err
 
-	Logger.info("navmesh", "NavMeshBaker: Initialized")
-	Logger.info("navmesh", NavMeshConfig.get_config_summary())
-	Logger.info("navmesh", "  Output: %s" % output_dir)
+	Log.info("navmesh", "NavMeshBaker: Initialized")
+	Log.info("navmesh", NavMeshConfig.get_config_summary())
+	Log.info("navmesh", "  Output: %s" % output_dir)
 	return OK
 
 
@@ -146,7 +146,7 @@ func bake_all_cells() -> Dictionary:
 
 		cells_to_bake.append(cell)
 
-	Logger.info("navmesh", "Found %d cells to bake" % cells_to_bake.size())
+	Log.info("navmesh", "Found %d cells to bake" % cells_to_bake.size())
 
 	# Bake each cell
 	for i in range(cells_to_bake.size()):
@@ -157,7 +157,7 @@ func bake_all_cells() -> Dictionary:
 
 		# Check if already exists
 		if skip_existing and _navmesh_exists(cell_id):
-			Logger.debug("navmesh", "[%d/%d] %s - SKIPPED (already exists)" % [i + 1, cells_to_bake.size(), cell_id])
+			Log.debug("navmesh", "[%d/%d] %s - SKIPPED (already exists)" % [i + 1, cells_to_bake.size(), cell_id])
 			_total_skipped += 1
 			continue
 
@@ -183,16 +183,16 @@ func bake_all_cells() -> Dictionary:
 	if not _bake_times.is_empty():
 		avg_time = _bake_times.reduce(func(sum: float, t: float) -> float: return sum + t, 0.0) / _bake_times.size()
 
-	Logger.info("navmesh", "Batch complete")
-	Logger.info("navmesh", "  Total: %d" % total)
-	Logger.info("navmesh", "  Baked: %d" % _total_baked)
-	Logger.info("navmesh", "  Skipped: %d" % _total_skipped)
-	Logger.info("navmesh", "  Failed: %d" % _total_failed)
+	Log.info("navmesh", "Batch complete")
+	Log.info("navmesh", "  Total: %d" % total)
+	Log.info("navmesh", "  Baked: %d" % _total_baked)
+	Log.info("navmesh", "  Skipped: %d" % _total_skipped)
+	Log.info("navmesh", "  Failed: %d" % _total_failed)
 	if _total_baked > 0:
-		Logger.info("navmesh", "  Avg bake time: %.2fs" % avg_time)
+		Log.info("navmesh", "  Avg bake time: %.2fs" % avg_time)
 
 	if not _failed_cells.is_empty():
-		Logger.warn("navmesh", "  Failed cells: %s" % ", ".join(_failed_cells))
+		Log.warn("navmesh", "  Failed cells: %s" % ", ".join(_failed_cells))
 
 	return {
 		"total": total,
@@ -210,7 +210,7 @@ func bake_cell(cell: CellRecord) -> Dictionary:
 	var cell_id := _get_cell_id(cell)
 	var start_time := Time.get_ticks_msec()
 
-	Logger.info("navmesh", "Baking %s..." % cell_id)
+	Log.info("navmesh", "Baking %s..." % cell_id)
 
 	# Create NavigationMesh
 	var nav_mesh := NavMeshConfig.create_navmesh()
@@ -254,7 +254,7 @@ func bake_cell(cell: CellRecord) -> Dictionary:
 		return {"success": false, "output_path": "", "polygon_count": polygon_count, "error": error, "bake_time": 0.0}
 
 	var bake_time := (Time.get_ticks_msec() - start_time) / 1000.0
-	Logger.info("navmesh", "  Success: %d polygons, %.2fs" % [polygon_count, bake_time])
+	Log.info("navmesh", "  Success: %d polygons, %.2fs" % [polygon_count, bake_time])
 
 	cell_baked.emit(cell_id, true, output_path, polygon_count)
 	return {
@@ -282,7 +282,7 @@ func _parse_cell_geometry(cell: CellRecord, source_geometry: NavigationMeshSourc
 	var objects_result := _add_object_geometry(cell, cell_origin, source_geometry)
 	mesh_count += objects_result.mesh_count
 
-	Logger.debug("navmesh", "Parsed %d meshes for cell" % mesh_count)
+	Log.debug("navmesh", "Parsed %d meshes for cell" % mesh_count)
 
 	return {
 		"success": true,
@@ -323,7 +323,7 @@ func _add_terrain3d_geometry(cell: CellRecord, cell_origin: Vector3, source_geom
 	# Add faces to source geometry
 	source_geometry.add_faces(faces, Transform3D.IDENTITY)
 
-	Logger.debug("navmesh", "Using Terrain3D optimized geometry: %d triangles" % (faces.size() / 9))
+	Log.debug("navmesh", "Using Terrain3D optimized geometry: %d triangles" % (faces.size() / 9))
 	return {"success": true}
 
 

@@ -52,24 +52,24 @@ static func _check_native_availability() -> void:
 
 	# Try to load the NativeFactory C# script
 	if not ResourceLoader.exists(NATIVE_FACTORY_PATH):
-		Logger.info("bridge", "Native factory not found at %s" % NATIVE_FACTORY_PATH)
+		Log.info("bridge", "Native factory not found at %s" % NATIVE_FACTORY_PATH)
 		return
 
 	var factory_script: Resource = load(NATIVE_FACTORY_PATH)
 	if factory_script == null:
-		Logger.info("bridge", "Failed to load native factory script")
+		Log.info("bridge", "Failed to load native factory script")
 		return
 
 	# Try to instantiate the factory (CSharpScript.new() returns RefCounted)
 	# Must use call() since Script.new() isn't statically typed
 	_factory = factory_script.call("new") as RefCounted
 	if _factory == null:
-		Logger.info("bridge", "Failed to instantiate native factory")
+		Log.info("bridge", "Failed to instantiate native factory")
 		return
 
 	# Check if factory is working
 	if not _factory.call("IsAvailable"):
-		Logger.info("bridge", "Native factory reported not available")
+		Log.info("bridge", "Native factory reported not available")
 		_factory = null
 		return
 
@@ -78,7 +78,7 @@ static func _check_native_availability() -> void:
 	_nif_native_available = true
 
 	var version: String = _factory.call("GetVersion")
-	Logger.info("bridge", "Native C# code available (version %s)" % version)
+	Log.info("bridge", "Native C# code available (version %s)" % version)
 
 ## Returns true if native C# terrain generation is available
 func has_native_terrain() -> bool:

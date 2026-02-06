@@ -76,7 +76,7 @@ func load_archive(path: String) -> Error:
 
 	total_files_indexed = _file_cache.size()
 
-	Logger.info("bsa", "Loaded %s (%d files)" % [path.get_file(), file_count])
+	Log.info("bsa", "Loaded %s (%d files)" % [path.get_file(), file_count])
 	archive_loaded.emit(path, file_count)
 	return OK
 

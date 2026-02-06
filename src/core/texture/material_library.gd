@@ -255,4 +255,4 @@ static func print_cache_contents() -> void:
 		var mat: StandardMaterial3D = _cache[key]
 		var tex_name := mat.albedo_texture.resource_path.get_file() if mat.albedo_texture else "none"
 		lines.append("  %s -> %s" % [key.substr(0, 50), tex_name])
-	Logger.debug("textures", "\n".join(lines))
+	Log.debug("textures", "\n".join(lines))

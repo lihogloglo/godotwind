@@ -64,7 +64,7 @@ func on_effect_added() -> void:
 		push_error("[ColorGradingEffect] Failed to load shader")
 		return
 
-	Logger.info("shaders", "ColorGradingEffect initialized")
+	Log.info("shaders", "ColorGradingEffect initialized")
 
 
 func _render_callback(effect_callback_type: int, render_data: RenderData) -> void:

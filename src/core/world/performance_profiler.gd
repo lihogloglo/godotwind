@@ -42,7 +42,7 @@ func start_session() -> void:
 	_peak_vertices = 0
 	_frame_times.clear()
 	_cell_load_times.clear()
-	Logger.info("streaming", "PerformanceProfiler: Session started")
+	Log.info("streaming", "PerformanceProfiler: Session started")
 
 
 ## Record frame timing

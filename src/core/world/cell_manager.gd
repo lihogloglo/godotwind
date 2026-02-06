@@ -273,7 +273,7 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 			_defer_fade_in(cell_node, objects_to_fade)
 
 	var total_objects := loaded + static_count + multimesh_count
-	Logger.info("streaming", "CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
+	Log.info("streaming", "CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
 		total_objects, loaded, static_count, multimesh_count, failed
 	])
 	_stats["multimesh_instances"] = _stats.get("multimesh_instances", 0) + multimesh_count
@@ -284,11 +284,11 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 ## Defer fade-in until cell_node enters the scene tree
 ## This is necessary because Node.create_tween() requires the node to be in the scene tree
 func _defer_fade_in(cell_node: Node3D, objects: Array[Node3D]) -> void:
-	Logger.debug("streaming", "[CellManager] _defer_fade_in called with %d objects, cell in tree: %s" % [objects.size(), cell_node.is_inside_tree()])
+	Log.debug("streaming", "[CellManager] _defer_fade_in called with %d objects, cell in tree: %s" % [objects.size(), cell_node.is_inside_tree()])
 
 	# Connect to tree_entered signal to apply fade-in once in scene tree
 	var apply_fades := func() -> void:
-		Logger.debug("streaming", "[CellManager] apply_fades executing for %d objects" % objects.size())
+		Log.debug("streaming", "[CellManager] apply_fades executing for %d objects" % objects.size())
 		for obj: Node3D in objects:
 			if is_instance_valid(obj):
 				_instantiator._apply_fade_in(obj)
@@ -366,7 +366,7 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 				individual_refs.append(candidate.ref)
 
 	if _debug_significant_count > 0:
-		Logger.debug("streaming", "[ODM-GROUP] Cell %s: %d significant objects to instantiate individually" % [
+		Log.debug("streaming", "[ODM-GROUP] Cell %s: %d significant objects to instantiate individually" % [
 			cell_grid, _debug_significant_count
 		])
 
@@ -450,7 +450,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		# Find first MeshInstance3D in prototype (skips LOD nodes)
 		var mesh_instance: MeshInstance3D = _find_first_mesh_instance(prototype)
 		if not mesh_instance or not mesh_instance.mesh:
-			Logger.debug("streaming", "[DIAG] MultiMesh: No valid mesh found in %s, falling back to individual" % model_path.get_file())
+			Log.debug("streaming", "[DIAG] MultiMesh: No valid mesh found in %s, falling back to individual" % model_path.get_file())
 			for candidate: Dictionary in candidates:
 				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
 				if obj:
@@ -458,7 +458,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 			continue
 
 		# Debug: Log what mesh we're using and what other meshes exist in the prototype
-		Logger.debug("streaming", "[DIAG] MultiMesh using mesh '%s' from %s" % [mesh_instance.name, model_path.get_file()])
+		Log.debug("streaming", "[DIAG] MultiMesh using mesh '%s' from %s" % [mesh_instance.name, model_path.get_file()])
 		_debug_log_all_meshes(prototype, model_path.get_file())
 
 		# Create MultiMesh
@@ -486,7 +486,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		parent_node.add_child(mmi)
 		total_count += count
 
-		Logger.debug("streaming", "  MultiMesh: %d x %s" % [count, model_path.get_file()])
+		Log.debug("streaming", "  MultiMesh: %d x %s" % [count, model_path.get_file()])
 
 	return total_count
 
@@ -519,7 +519,7 @@ func _debug_log_all_meshes(node: Node, model_name: String, depth: int = 0) -> vo
 		elif mi.mesh and mi.mesh.get_surface_count() > 0:
 			var surf_mat := mi.mesh.surface_get_material(0)
 			mat_info = "surface_mat" if surf_mat else "no_surf_mat"
-		Logger.debug("streaming", "[DIAG]   %s%s: visible=%s, is_lod=%s, mat=%s" % [
+		Log.debug("streaming", "[DIAG]   %s%s: visible=%s, is_lod=%s, mat=%s" % [
 			"  ".repeat(depth), mi.name, mi.visible, is_lod, mat_info
 		])
 	for child in node.get_children():
@@ -603,7 +603,7 @@ func preload_common_models_async() -> void:
 			else:
 				skipped += 1  # Not prebaked - that's fine
 
-		Logger.info("streaming", "CellManager: Preloaded %d models from disk cache (%d not prebaked)" % [loaded, skipped])
+		Log.info("streaming", "CellManager: Preloaded %d models from disk cache (%d not prebaked)" % [loaded, skipped])
 		preload_complete.emit(loaded, skipped)
 		return
 
@@ -635,7 +635,7 @@ func preload_common_models_async() -> void:
 		preload_complete.emit(0, 0)
 		return
 
-	Logger.info("streaming", "CellManager: Preloading %d models asynchronously..." % _preload_pending.size())
+	Log.info("streaming", "CellManager: Preloading %d models asynchronously..." % _preload_pending.size())
 
 
 func _check_preload_completion(task_id: int, result: Variant) -> bool:
@@ -674,7 +674,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 	preload_progress.emit(_preload_loaded, _preload_total)
 
 	if _preload_pending.is_empty():
-		Logger.info("streaming", "CellManager: Preload complete - %d loaded, %d failed" % [_preload_loaded, _preload_failed])
+		Log.info("streaming", "CellManager: Preload complete - %d loaded, %d failed" % [_preload_loaded, _preload_failed])
 		preload_complete.emit(_preload_loaded, _preload_failed)
 
 	return true
@@ -829,44 +829,6 @@ var _burst_max_instantiations: int = SC.NEAR_BURST_MAX_INSTANTIATIONS
 ## Distance threshold for burst loading (objects closer than this get burst priority)
 var _burst_distance: float = SC.NEAR_BURST_DISTANCE
 
-# =============================================================================
-# PARALLEL DUPLICATE (WorkerThreadPool)
-# =============================================================================
-
-## Enable parallel duplicate() for faster instantiation
-var parallel_duplicate_enabled: bool = SC.PARALLEL_DUPLICATE_ENABLED
-
-## Results from parallel duplicate tasks (thread-safe queue)
-## Each entry: {instance: Node3D, request_id: int, transform_data: Dictionary, model_path: String, name: String, cell_node: Node3D}
-## Note: We store transform_data instead of ref to avoid RefCounted lifetime issues across threads
-var _parallel_duplicate_results: Array = []
-var _parallel_duplicate_mutex: Mutex = Mutex.new()
-
-## Global mutex to prevent concurrent duplicate() calls
-## This prevents "cyclic resource inclusion" errors from Godot's resource system
-## when multiple threads try to duplicate nodes that share sub-resources
-## (e.g., two different models that use the same texture or mesh)
-## NOTE: Per-model mutex was insufficient because sub-resources can be shared
-var _global_duplicate_mutex: Mutex = Mutex.new()
-
-## Active parallel duplicate task count
-var _parallel_duplicate_active: int = 0
-
-## Pending parallel duplicate requests (waiting for task slot)
-## Each entry: {prototype: Node3D, request_id: int, ref: CellReference, model_path: String, item_id: String}
-var _parallel_duplicate_pending: Array = []
-
-## Statistics for parallel duplicate diagnostics
-var _parallel_duplicate_stats: Dictionary = {
-	"dispatched": 0,
-	"completed": 0,
-	"failed_cell_freed": 0,
-	"failed_instance_invalid": 0,
-	"failed_duplicate_error": 0,
-	"total_dispatch_time_usec": 0,
-	"total_process_time_usec": 0,
-}
-
 
 
 # =============================================================================
@@ -916,6 +878,9 @@ var _instantiation_queue: Array = []  # Array of {request_id, ref, model_path, p
 
 ## Camera position for distance-based prioritization
 var _camera_position: Vector3 = Vector3.ZERO
+
+## Camera forward direction for frustum-aware priority sorting
+var _camera_forward: Vector3 = Vector3.FORWARD
 
 ## Frame counter for periodic queue re-sorting
 var _queue_sort_frame: int = 0
@@ -1079,7 +1044,7 @@ func cancel_async_request(request_id: int) -> void:
 	if removed > 0:
 		# This is expected behavior when cells are unloaded mid-loading
 		# Using print instead of push_warning since it's informational, not a problem
-		Logger.info("streaming", "CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
+		Log.info("streaming", "CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
 
 	# Clean up cell node if started
 	if request.cell_node:
@@ -1171,21 +1136,21 @@ func get_pending_disk_load_count() -> int:
 ## Process async instantiation within time budget (call from _process)
 ## Returns number of objects instantiated this frame
 ## Uses BOTH time budget AND object count cap for consistent frame times
-## Objects are sorted by distance to camera - nearest objects instantiate first
+## Objects sorted by frustum-aware priority - visible nearest objects first
 ##
 ## BURST LOADING: When objects are very close to camera (< NEAR_BURST_DISTANCE),
 ## uses higher budget and limits for faster cell population.
 ##
-## PARALLEL DUPLICATE: When enabled and queue is large enough, uses WorkerThreadPool
-## to duplicate prototypes on worker threads, reducing main thread stalls.
-##
 ## Parameters:
 ##   budget_ms: Time budget in milliseconds (may be overridden by burst loading)
-##   camera_pos: Camera position for distance-priority sorting (optional, uses cached if not provided)
-func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3.INF) -> int:
-	# Update camera position if provided
+##   camera_pos: Camera position for priority sorting (optional, uses cached if not provided)
+##   camera_fwd: Camera forward direction for frustum priority (optional)
+func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3.INF, camera_fwd: Vector3 = Vector3.INF) -> int:
+	# Update camera position/forward if provided
 	if camera_pos != Vector3.INF:
 		_camera_position = camera_pos
+	if camera_fwd != Vector3.INF:
+		_camera_forward = camera_fwd
 
 	# First process any pending async disk loads (non-blocking check)
 	process_async_disk_loads()
@@ -1193,21 +1158,18 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# Then process any pending conversions to feed the cache
 	process_pending_conversions(MAX_CONVERSION_TIME_MS)
 
-	# Process completed parallel duplicate results first (these are ready to add)
-	var parallel_added := _process_parallel_duplicate_results()
-
 	# Process pool pre-warming in background
 	if pool_prewarm_enabled:
 		_process_pool_prewarm()
 
 	if _instantiation_queue.is_empty():
-		return parallel_added
+		return 0
 
-	# Sort queue by distance periodically (not every frame - too expensive)
+	# Sort queue by priority periodically (not every frame - too expensive)
 	var current_frame := Engine.get_frames_drawn()
 	if current_frame - _queue_sort_frame >= QUEUE_SORT_INTERVAL:
 		_queue_sort_frame = current_frame
-		_sort_queue_by_distance()
+		_sort_queue_by_priority()
 
 	# BURST LOADING: Check if nearest objects are very close (critical loading)
 	# If so, use aggressive budget to populate cells faster
@@ -1215,11 +1177,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var effective_max_instantiations := MAX_INSTANTIATIONS_PER_FRAME
 
 	if not _instantiation_queue.is_empty():
-		var first_entry: Dictionary = _instantiation_queue[0]
-		var first_pos: Vector3 = first_entry.get("position", Vector3.ZERO)
-		var first_distance := _camera_position.distance_to(first_pos)
+		var last_entry: Dictionary = _instantiation_queue[-1]
+		var last_pos: Vector3 = last_entry.get("position", Vector3.ZERO)
+		var last_distance := _camera_position.distance_to(last_pos)
 
-		if first_distance < _burst_distance:
+		if last_distance < _burst_distance:
 			# Activate burst loading for nearby objects
 			_burst_loading_active = true
 			effective_budget_ms = _burst_budget_ms
@@ -1229,15 +1191,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 	var start_time := Time.get_ticks_usec()
 	var budget_usec := effective_budget_ms * 1000.0
-	var instantiated := parallel_added
+	var instantiated := 0
 	var exit_reason := ""
-
-	# PARALLEL DUPLICATE: If queue is large and parallel enabled, dispatch to workers
-	if parallel_duplicate_enabled and _instantiation_queue.size() >= SC.PARALLEL_DUPLICATE_MIN_BATCH:
-		var dispatched := _dispatch_parallel_duplicates(effective_max_instantiations - instantiated)
-		if dispatched > 0:
-			# Some work dispatched to workers, continue with remaining budget
-			pass
 
 	# Batch children for deferred add_child (reduces scene tree churn)
 	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
@@ -1254,7 +1209,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			exit_reason = "object_cap"
 			break
 
-		var entry: Dictionary = _instantiation_queue.pop_front()
+		var entry: Dictionary = _instantiation_queue.pop_back()
 		var request_id: int = entry.request_id
 		var ref: CellReference = entry.ref
 		var model_path: String = entry.model_path
@@ -1318,245 +1273,34 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	return instantiated
 
 
-## Sort instantiation queue by distance to camera (nearest first)
-## Uses squared distance for performance (avoids sqrt)
-func _sort_queue_by_distance() -> void:
+## Sort instantiation queue by frustum-aware priority
+## Objects in front of camera get priority; objects behind are deprioritized 4x
+## Queue is sorted FARTHEST-first so pop_back() returns highest priority (nearest/in-frustum)
+func _sort_queue_by_priority() -> void:
 	if _instantiation_queue.size() < 2:
 		return
 
 	var cam_pos := _camera_position
+	var cam_fwd := _camera_forward
 	_instantiation_queue.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		var pos_a: Vector3 = a.get("position", Vector3.ZERO)
 		var pos_b: Vector3 = b.get("position", Vector3.ZERO)
 		var dist_sq_a := cam_pos.distance_squared_to(pos_a)
 		var dist_sq_b := cam_pos.distance_squared_to(pos_b)
-		return dist_sq_a < dist_sq_b  # Nearest first
+
+		# Frustum penalty: objects behind camera (dot < 0.3) get 4x distance penalty
+		if cam_fwd != Vector3.ZERO:
+			var dir_a := (pos_a - cam_pos)
+			var dir_b := (pos_b - cam_pos)
+			# Only normalize if far enough to avoid division by near-zero
+			if dist_sq_a > 1.0 and cam_fwd.dot(dir_a) < 0.3 * dir_a.length():
+				dist_sq_a *= 4.0
+			if dist_sq_b > 1.0 and cam_fwd.dot(dir_b) < 0.3 * dir_b.length():
+				dist_sq_b *= 4.0
+
+		# Reverse order: farthest first, so pop_back() returns nearest/highest-priority
+		return dist_sq_a > dist_sq_b
 	)
-
-
-# =============================================================================
-# PARALLEL DUPLICATE IMPLEMENTATION
-# =============================================================================
-
-## Dispatch duplicate tasks to WorkerThreadPool
-## Returns number of tasks dispatched
-func _dispatch_parallel_duplicates(max_count: int) -> int:
-	if _parallel_duplicate_active >= SC.PARALLEL_DUPLICATE_MAX_TASKS:
-		return 0  # Already at capacity
-
-	var dispatched := 0
-	var available_slots := SC.PARALLEL_DUPLICATE_MAX_TASKS - _parallel_duplicate_active
-
-	while dispatched < mini(max_count, available_slots) and not _instantiation_queue.is_empty():
-		var entry: Dictionary = _instantiation_queue.pop_front()
-		var request_id: int = entry.request_id
-		var ref: CellReference = entry.ref
-		var model_path: String = entry.model_path
-		var item_id: String = entry.get("item_id", "")
-
-		# Check if request still exists
-		if request_id not in _async_requests:
-			continue
-
-		var request: AsyncCellRequest = _async_requests[request_id]
-
-		# Check if cell_node is still valid
-		if not is_instance_valid(request.cell_node):
-			request.pending_instantiations -= 1
-			if _is_request_complete(request):
-				request.completed = true
-				request.failed = true
-				request.error_message = "Cell node freed during parallel dispatch"
-			continue
-
-		# Get the model prototype (must be done on main thread)
-		var cache_key := _get_cache_key(model_path, item_id)
-		var model_prototype: Node3D = null
-
-		# Try object pool first
-		if use_object_pool and _object_pool and not model_path.is_empty():
-			var pooled: Node3D = _object_pool.call("acquire", model_path)
-			if pooled:
-				# Got from pool - no need to duplicate, add directly
-				var pool_name := str(ref.ref_id) + "_" + str(ref.ref_num)
-				pooled.name = pool_name
-				_apply_transform(pooled, ref, true)
-				_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
-
-				# Add to results directly (already done on main thread)
-				# Mark as from_pool so we don't increment "completed" counter for worker tasks
-				# Use cell_node_id for consistency with worker thread path
-				var pool_cell_id: int = request.cell_node.get_instance_id() if request.cell_node else 0
-				_parallel_duplicate_mutex.lock()
-				_parallel_duplicate_results.append({
-					"instance": pooled,
-					"request_id": request_id,
-					"transform_data": {},  # Already applied above, empty to skip re-apply
-					"model_path": model_path,
-					"cell_node_id": pool_cell_id,
-					"name": pool_name,
-					"from_pool": true
-				})
-				_parallel_duplicate_mutex.unlock()
-				dispatched += 1
-				continue
-
-		# Get from cache
-		model_prototype = _model_loader.get_cached(model_path, item_id)
-		if not model_prototype:
-			# Model not in cache - fall back to sync path
-			model_prototype = _model_loader.get_model(model_path, item_id)
-			if not model_prototype:
-				request.pending_instantiations -= 1
-				continue
-
-		# Auto-register with object pool if available (on-demand pooling)
-		# This enables pooling even without explicit preload_common_models() call
-		if use_object_pool and _object_pool and not model_path.is_empty():
-			if not _object_pool.call("has_model", model_path):
-				# Register with default pool size - pool will grow as needed
-				_object_pool.call("register_model", model_path, model_prototype, 0, DEFAULT_POOL_MAX_SIZE)
-
-		# Dispatch duplicate() to worker thread
-		_parallel_duplicate_active += 1
-		var dispatch_start := Time.get_ticks_usec()
-
-		# Capture variables for closure - extract transform data BEFORE dispatching
-		# This avoids RefCounted lifetime issues with CellReference across threads
-		# IMPORTANT: Capture cell_node_id instead of cell_node to avoid crash if cell is freed
-		# before the worker thread completes. We look up the node by ID on the main thread.
-		var cell_node: Node3D = request.cell_node
-		var cell_node_id: int = cell_node.get_instance_id() if cell_node else 0
-		var instance_name := str(ref.ref_id) + "_" + str(ref.ref_num)
-		var transform_data := {
-			"position": ref.position,
-			"rotation": ref.rotation,
-			"scale": ref.scale,
-		}
-
-		# Capture model_prototype instance ID instead of the node itself
-		# This prevents crashes if the model cache is cleared during the async operation
-		var prototype_id: int = model_prototype.get_instance_id() if model_prototype else 0
-
-		# MAIN THREAD DUPLICATE: duplicate() must run on main thread to avoid
-		# "cyclic resource inclusion" errors caused by Godot's internal resource
-		# path tracking conflicting across threads (even with mutex serialization).
-		# We queue the duplicate work and process it in batches on main thread.
-		var task_start := Time.get_ticks_usec()
-		var instance: Node3D = null
-		var success := true
-
-		# Look up prototype by ID - safe if node was freed
-		var prototype: Node3D = instance_from_id(prototype_id) as Node3D if prototype_id != 0 else null
-		if prototype:
-			# Perform duplicate on main thread - safe for shared sub-resources
-			instance = prototype.duplicate()
-
-			if instance:
-				instance.name = instance_name
-			else:
-				success = false
-		else:
-			success = false
-
-		# Store result for later processing
-		_parallel_duplicate_mutex.lock()
-		if success and instance:
-			_parallel_duplicate_results.append({
-				"instance": instance,
-				"request_id": request_id,
-				"transform_data": transform_data,
-				"model_path": model_path,
-				"cell_node_id": cell_node_id,
-				"name": instance_name
-			})
-		else:
-			_parallel_duplicate_stats["failed_duplicate_error"] += 1
-		_parallel_duplicate_active -= 1
-		_parallel_duplicate_stats["total_dispatch_time_usec"] += Time.get_ticks_usec() - task_start
-		_parallel_duplicate_mutex.unlock()
-
-		_parallel_duplicate_stats["dispatched"] += 1
-
-		dispatched += 1
-
-	return dispatched
-
-
-## Process completed parallel duplicate results
-## Returns number of objects added to scene
-func _process_parallel_duplicate_results() -> int:
-	var process_start := Time.get_ticks_usec()
-
-	_parallel_duplicate_mutex.lock()
-	var results := _parallel_duplicate_results.duplicate()
-	_parallel_duplicate_results.clear()
-	_parallel_duplicate_mutex.unlock()
-
-	if results.is_empty():
-		return 0
-
-	var added := 0
-	for result: Dictionary in results:
-		var instance: Node3D = result.get("instance")
-		var request_id: int = result.get("request_id", -1)
-		var transform_data: Dictionary = result.get("transform_data", {})
-		var cell_node_id: int = result.get("cell_node_id", 0)
-
-		# Validate instance is still valid (could have been freed if duplicate failed)
-		if not is_instance_valid(instance):
-			_parallel_duplicate_stats["failed_instance_invalid"] += 1
-			continue
-
-		# Look up cell_node from instance ID (avoids lambda capture crash)
-		var cell_node: Node3D = null
-		if cell_node_id != 0:
-			cell_node = instance_from_id(cell_node_id) as Node3D
-
-		# Validate cell_node is still valid
-		if not is_instance_valid(cell_node):
-			instance.queue_free()
-			_parallel_duplicate_stats["failed_cell_freed"] += 1
-			continue
-
-		# Validate request still exists
-		if request_id in _async_requests:
-			var request: AsyncCellRequest = _async_requests[request_id]
-			request.pending_instantiations -= 1
-
-			if _is_request_complete(request):
-				request.completed = true
-
-		# Apply transform from stored data (instead of ref)
-		# This matches _apply_transform but uses stored Dictionary instead of CellReference
-		if not transform_data.is_empty():
-			instance.position = CS.vector_to_godot(transform_data.get("position", Vector3.ZERO))
-			instance.scale = CS.scale_to_godot(transform_data.get("scale", 1.0))
-			instance.basis = CS.esm_rotation_to_godot_basis(transform_data.get("rotation", Vector3.ZERO))
-
-		# Set pool metadata so object can be returned to pool when cell is unloaded
-		var model_path: String = result.get("model_path", "")
-		if use_object_pool and _object_pool and not model_path.is_empty():
-			var normalized := model_path.to_lower().replace("/", "\\")
-			instance.set_meta("pool_model_path", normalized)
-
-		# CRITICAL: Hide LOD nodes to prevent white mesh overlays
-		# Parallel duplicate path bypasses ReferenceInstantiator, so we must hide here
-		_hide_lod_nodes(instance)
-
-		# Add to scene
-		cell_node.add_child(instance)
-		added += 1
-
-		_stats["objects_instantiated"] += 1
-		_diag_duplicate_count += 1
-
-		# Only count as "completed" if this was an actual worker thread duplicate, not from pool
-		if not result.get("from_pool", false):
-			_parallel_duplicate_stats["completed"] += 1
-
-	_parallel_duplicate_stats["total_process_time_usec"] += Time.get_ticks_usec() - process_start
-	return added
 
 
 # =============================================================================
@@ -1617,44 +1361,6 @@ func is_burst_loading() -> bool:
 	return _burst_loading_active
 
 
-## Get parallel duplicate stats
-func get_parallel_duplicate_stats() -> Dictionary:
-	var stats := {
-		"active_tasks": _parallel_duplicate_active,
-		"pending_results": _parallel_duplicate_results.size(),
-		"enabled": parallel_duplicate_enabled,
-		# Detailed stats
-		"dispatched": _parallel_duplicate_stats.get("dispatched", 0),
-		"completed": _parallel_duplicate_stats.get("completed", 0),
-		"failed_cell_freed": _parallel_duplicate_stats.get("failed_cell_freed", 0),
-		"failed_instance_invalid": _parallel_duplicate_stats.get("failed_instance_invalid", 0),
-		"failed_duplicate_error": _parallel_duplicate_stats.get("failed_duplicate_error", 0),
-	}
-
-	# Calculate averages
-	var dispatched: int = _parallel_duplicate_stats.get("dispatched", 0)
-	if dispatched > 0:
-		stats["avg_dispatch_time_us"] = _parallel_duplicate_stats.get("total_dispatch_time_usec", 0) / dispatched
-	else:
-		stats["avg_dispatch_time_us"] = 0
-
-	var completed: int = _parallel_duplicate_stats.get("completed", 0)
-	if completed > 0:
-		stats["avg_process_time_us"] = _parallel_duplicate_stats.get("total_process_time_usec", 0) / completed
-	else:
-		stats["avg_process_time_us"] = 0
-
-	# Success rate
-	var failed_cell: int = stats["failed_cell_freed"]
-	var failed_instance: int = stats["failed_instance_invalid"]
-	var failed_dup: int = stats["failed_duplicate_error"]
-	var total_finished: int = completed + failed_cell + failed_instance + failed_dup
-	if total_finished > 0:
-		stats["success_rate"] = float(completed) / float(total_finished)
-	else:
-		stats["success_rate"] = 1.0
-
-	return stats
 
 
 ## Internal: Start an async request
@@ -2061,17 +1767,13 @@ func get_instantiation_queue_size() -> int:
 	return _instantiation_queue.size()
 
 
-## Get comprehensive loading stats including burst loading and parallel duplicate
+## Get comprehensive loading stats
 func get_loading_stats() -> Dictionary:
-	var parallel_stats := get_parallel_duplicate_stats()
 	return {
 		"instantiation_queue_size": _instantiation_queue.size(),
 		"burst_loading_active": _burst_loading_active,
 		"burst_budget_ms": _burst_budget_ms,
 		"burst_max_instantiations": _burst_max_instantiations,
-		"parallel_duplicate_enabled": parallel_duplicate_enabled,
-		"parallel_duplicate_active": parallel_stats.active_tasks,
-		"parallel_duplicate_pending": parallel_stats.pending_results,
 		"prewarm_pending_count": _prewarm_pending.size(),
 		"objects_instantiated": _stats.get("objects_instantiated", 0),
 		"objects_from_pool": _stats.get("objects_from_pool", 0),

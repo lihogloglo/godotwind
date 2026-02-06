@@ -228,32 +228,16 @@ const TELEPORT_THRESHOLD := 100.0
 const TELEPORT_THRESHOLD_SQ := TELEPORT_THRESHOLD * TELEPORT_THRESHOLD
 
 # =============================================================================
-# MATERIAL POOLING (Zero-Allocation at Runtime)
+# BUDGETED UNLOADING
 # =============================================================================
 
-## Pre-allocated crossfade material pool size
-## Should be >= MAX_CONCURRENT_FADES to avoid runtime allocation
-const MATERIAL_POOL_SIZE := 256
+## Maximum time per frame for unloading cell children (milliseconds)
+## Prevents frame spikes when multiple cells exit the load radius at once
+const UNLOAD_BUDGET_MS := 4.0
 
-## Initial number of materials to pre-warm at startup
-const MATERIAL_POOL_PREWARM := 64
-
-# =============================================================================
-# PARALLEL DUPLICATE (WorkerThreadPool)
-# =============================================================================
-
-## Enable parallel duplicate() for NEAR tier instantiation
-## Uses WorkerThreadPool to clone prototypes on worker threads
-## Main thread only does add_child() from completed results
-const PARALLEL_DUPLICATE_ENABLED := true
-
-## Maximum concurrent parallel duplicate tasks
-## Should be <= number of CPU cores for best performance
-const PARALLEL_DUPLICATE_MAX_TASKS := 8
-
-## Minimum queue size before triggering parallel duplicate
-## Below this, sequential duplicate is faster due to overhead
-const PARALLEL_DUPLICATE_MIN_BATCH := 4
+## Maximum children to remove per unloading cell per frame
+## Caps work even if individual queue_free() calls are fast
+const UNLOAD_BATCH_SIZE := 30
 
 # =============================================================================
 # OBJECT POOL PRE-WARMING
@@ -287,17 +271,6 @@ const MAX_BATCH_CAPACITY := 4096
 
 ## Pre-warm batch count for common mesh types
 const BATCH_PREWARM_COUNT := 20
-
-# =============================================================================
-# GPU VISIBILITY (Sparse Readback)
-# =============================================================================
-
-## Maximum tier changes per frame for sparse readback
-## If exceeded, falls back to full scan (rare during teleport)
-const MAX_GPU_CHANGES := 4096
-
-## GPU object threshold - use GPU compute above this count
-const GPU_OBJECT_THRESHOLD := 100
 
 # =============================================================================
 # DIAGNOSTIC FLAGS

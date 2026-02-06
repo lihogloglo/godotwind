@@ -45,7 +45,7 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 	# Determine world bounds from terrain
 	_calculate_world_bounds()
 
-	Logger.info("water", "ShoreMaskGenerator: Generating shore distance map %dx%d, fade=%.0fm, sea_level=%.1f..." % [
+	Log.info("water", "ShoreMaskGenerator: Generating shore distance map %dx%d, fade=%.0fm, sea_level=%.1f..." % [
 		_mask_resolution, _mask_resolution, fade_distance, _sea_level])
 
 	var start_time := Time.get_ticks_msec()
@@ -89,7 +89,7 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 					_seeds[idx] = idx
 					shore_count += 1
 
-	Logger.debug("water", "ShoreMaskGenerator: Found %d shore pixels" % shore_count)
+	Log.debug("water", "ShoreMaskGenerator: Found %d shore pixels" % shore_count)
 
 	# Step 2: Jump Flooding Algorithm
 	var step := _mask_resolution / 2
@@ -139,7 +139,7 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 	_shore_mask = ImageTexture.create_from_image(_shore_image)
 
 	var elapsed := (Time.get_ticks_msec() - start_time) / 1000.0
-	Logger.info("water", "ShoreMaskGenerator: Shore distance map generated in %.2fs, bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
+	Log.info("water", "ShoreMaskGenerator: Shore distance map generated in %.2fs, bounds: (%.0f, %.0f) to (%.0f, %.0f)" % [
 		elapsed,
 		_world_bounds.position.x, _world_bounds.position.y,
 		_world_bounds.end.x, _world_bounds.end.y
@@ -198,13 +198,13 @@ func _distance_squared_to_seed(x: int, y: int, seed_idx: int) -> float:
 func _calculate_world_bounds() -> void:
 	if not _terrain or not _terrain.data:
 		_world_bounds = Rect2(-8000, -8000, 16000, 16000)
-		Logger.debug("water", "ShoreMaskGenerator: Using default world bounds (no terrain data)")
+		Log.debug("water", "ShoreMaskGenerator: Using default world bounds (no terrain data)")
 		return
 
 	var region_count := _terrain.data.get_region_count()
 	if region_count == 0:
 		_world_bounds = Rect2(-8000, -8000, 16000, 16000)
-		Logger.debug("water", "ShoreMaskGenerator: Using default world bounds (no regions)")
+		Log.debug("water", "ShoreMaskGenerator: Using default world bounds (no regions)")
 		return
 
 	# Calculate bounds from terrain regions
@@ -213,7 +213,7 @@ func _calculate_world_bounds() -> void:
 
 	if region_locations.is_empty():
 		_world_bounds = Rect2(-8000, -8000, 16000, 16000)
-		Logger.debug("water", "ShoreMaskGenerator: Using default world bounds (no region locations)")
+		Log.debug("water", "ShoreMaskGenerator: Using default world bounds (no region locations)")
 		return
 
 	var min_loc := region_locations[0]
@@ -243,7 +243,7 @@ func _calculate_world_bounds() -> void:
 		_world_bounds.size.y + padding * 2
 	)
 
-	Logger.debug("water", "ShoreMaskGenerator: Calculated world bounds from %d regions: %s" % [region_count, _world_bounds])
+	Log.debug("water", "ShoreMaskGenerator: Calculated world bounds from %d regions: %s" % [region_count, _world_bounds])
 
 
 func _get_terrain_height(world_pos: Vector3) -> float:
@@ -314,7 +314,7 @@ func load_user_mask(path: String) -> bool:
 		# Resize to match our resolution
 		if _user_mask.get_size() != Vector2i(_mask_resolution, _mask_resolution):
 			_user_mask.resize(_mask_resolution, _mask_resolution)
-		Logger.info("water", "ShoreMaskGenerator: Loaded user mask: %s" % path)
+		Log.info("water", "ShoreMaskGenerator: Loaded user mask: %s" % path)
 		return true
 
 	return false
@@ -328,7 +328,7 @@ func export_mask(path: String) -> bool:
 
 	var error := _shore_image.save_png(path)
 	if error == OK:
-		Logger.info("water", "ShoreMaskGenerator: Exported shore mask to: %s" % path)
+		Log.info("water", "ShoreMaskGenerator: Exported shore mask to: %s" % path)
 		return true
 	else:
 		push_error("[ShoreMaskGenerator] Failed to export shore mask: %d" % error)

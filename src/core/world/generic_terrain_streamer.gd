@@ -376,14 +376,15 @@ func _on_region_changed(new_region: Vector2i) -> void:
 			_queue_region(region, priority)
 
 
-## Add region to priority queue
+## Add region to priority queue (sorted lowest-priority-last so pop_back gets highest priority)
 func _queue_region(region: Vector2i, priority: float) -> void:
 	var entry := { "region": region, "priority": priority }
 
-	# Insert in sorted order
+	# Insert in sorted order: highest priority value first, lowest last
+	# pop_back() returns the lowest priority value = highest importance
 	var inserted := false
 	for i in range(_generation_queue.size()):
-		if priority < _generation_queue[i].priority:
+		if priority > _generation_queue[i].priority:
 			_generation_queue.insert(i, entry)
 			inserted = true
 			break
@@ -408,7 +409,7 @@ func _process_queue() -> void:
 		if loads_this_frame >= max_loads_per_frame:
 			break
 
-		var entry: Dictionary = _generation_queue.pop_front()
+		var entry: Dictionary = _generation_queue.pop_back()  # O(1) — lowest priority value = highest importance
 		var region: Vector2i = entry.region
 
 		# Skip if already loaded (race condition)
@@ -581,7 +582,7 @@ func _process_pending_imports() -> void:
 		if imports_this_frame >= max_loads_per_frame:
 			break
 
-		var data: Dictionary = _pending_import.pop_front()
+		var data: Dictionary = _pending_import.pop_back()  # LIFO OK — newest region is closest to camera
 		_import_generated_data(data)
 		imports_this_frame += 1
 
@@ -763,6 +764,6 @@ func _encode_control_value(base_tex: int, overlay_tex: int, blend: int) -> float
 
 func _debug(msg: String) -> void:
 	if debug_enabled:
-		Logger.debug("streaming", "GenericTerrainStreamer: %s" % msg)
+		Log.debug("streaming", "GenericTerrainStreamer: %s" % msg)
 
 #endregion

@@ -15,7 +15,7 @@ var _time_since_last_recovery: float = 0.0
 
 func _ready():
 	_setup_recovery_viewport()
-	Logger.info("deformation", "DeformationCompositor: Compositor initialized")
+	Log.info("deformation", "DeformationCompositor: Compositor initialized")
 
 # Setup recovery viewport for processing recovery shader
 func _setup_recovery_viewport():

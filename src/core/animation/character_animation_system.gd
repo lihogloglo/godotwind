@@ -89,7 +89,7 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null,
 	_is_setup = true
 
 	if debug_mode:
-		Logger.debug("animation", "CharacterAnimationSystem: Setup complete")
+		Log.debug("animation", "CharacterAnimationSystem: Setup complete")
 		_print_debug_info()
 
 
@@ -389,7 +389,7 @@ func _on_animation_state_changed(old_state: StringName, new_state: StringName) -
 	animation_state_changed.emit(old_state, new_state)
 
 	if debug_mode:
-		Logger.debug("animation", "CharacterAnimationSystem: State %s -> %s" % [old_state, new_state])
+		Log.debug("animation", "CharacterAnimationSystem: State %s -> %s" % [old_state, new_state])
 
 
 func _on_animation_finished(animation_name: StringName) -> void:
@@ -410,4 +410,4 @@ func _print_debug_info() -> void:
 	info += "\n  IK: %s" % ("Enabled" if enable_ik and ik_controller else "Disabled")
 	info += "\n  Procedural: %s" % ("Enabled" if enable_procedural and procedural_modifiers else "Disabled")
 	info += "\n  LOD: %s" % ("Enabled" if enable_lod and lod_controller else "Disabled")
-	Logger.debug("animation", info)
+	Log.debug("animation", info)

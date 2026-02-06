@@ -126,7 +126,7 @@ func _setup_rendering_viewport() -> void:
 	_viewport.add_child(_model_container)
 
 	_is_initialized = true
-	Logger.info("prebaking", "ImpostorBakerV2 initialized (16-frame, %dx%d atlas)" % [texture_size, texture_size])
+	Log.info("prebaking", "ImpostorBakerV2 initialized (16-frame, %dx%d atlas)" % [texture_size, texture_size])
 
 
 ## Initialize output directory
@@ -146,7 +146,7 @@ func initialize() -> Error:
 
 ## Bake impostor for a single model
 func bake_model(model_path: String) -> Dictionary:
-	Logger.info("prebaking", "Baking impostor: %s" % model_path)
+	Log.info("prebaking", "Baking impostor: %s" % model_path)
 
 	if not is_inside_tree():
 		var error := "ImpostorBaker not in scene tree"
@@ -232,7 +232,7 @@ func bake_model(model_path: String) -> Dictionary:
 	var metadata := _generate_metadata(model_path, aabb, texture_path)
 	_save_metadata(metadata_path, metadata)
 
-	Logger.info("prebaking", "Saved impostor: %s" % texture_path)
+	Log.info("prebaking", "Saved impostor: %s" % texture_path)
 	model_baked.emit(model_path, true, texture_path)
 
 	return {

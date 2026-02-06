@@ -246,7 +246,7 @@ func _on_save_pressed() -> void:
 
 func _log(text: String) -> void:
 	output_text.append_text(text + "\n")
-	Logger.info("tools", text.replace("[b]", "").replace("[/b]", "").replace("[color=red]", "").replace("[color=green]", "").replace("[color=yellow]", "").replace("[color=orange]", "").replace("[/color]", ""))
+	Log.info("tools", text.replace("[b]", "").replace("[/b]", "").replace("[color=red]", "").replace("[color=green]", "").replace("[color=yellow]", "").replace("[color=orange]", "").replace("[/color]", ""))
 
 
 # =============================================================================
