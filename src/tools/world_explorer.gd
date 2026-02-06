@@ -51,7 +51,8 @@ const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 const ConsoleScript := preload("res://src/core/console/console.gd")
 const AutomatedTestRunnerScript := preload("res://src/tools/automated_test_runner.gd")
-const FoldablePanelScript := preload("res://src/tools/ui/foldable_panel.gd")
+const ExplorerPanelsScript := preload("res://src/tools/ui/explorer_panels.gd")
+const CellBrowserScript := preload("res://src/tools/ui/cell_browser.gd")
 const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
 const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.gd")
@@ -81,19 +82,8 @@ const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 @onready var preprocess_btn: Button = $UI/StatsPanel/VBox/PreprocessBtn
 @onready var preprocess_status: Label = $UI/StatsPanel/VBox/PreprocessStatus
 
-# Visibility toggles (will be created dynamically)
-var _show_characters_toggle: CheckBox = null
-var _show_ocean_toggle: CheckBox = null
-var _show_sky_toggle: CheckBox = null
-var _water_quality_btn: OptionButton = null
-var _resolution_btn: OptionButton = null
-# Ocean parameter sliders
-var _wind_speed_slider: HSlider = null
-var _wind_dir_slider: HSlider = null
-var _wave_scale_slider: HSlider = null
-var _choppiness_slider: HSlider = null
-var _debug_shore_toggle: CheckBox = null
-var _ocean_controls_container: VBoxContainer = null
+# UI panels (constructed by ExplorerPanels)
+var _panels: ExplorerPanels = null
 # Models are always visible (no toggle needed)
 var _show_characters: bool = false  # Default OFF - separate from static models
 var _show_ocean: bool = false   # Default OFF for performance
@@ -110,21 +100,7 @@ var _ocean_initialized: bool = false  # Track if ocean has ever been created
 var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
 
-# Foldable panel references
-var _panel_scroll: ScrollContainer = null
-var _panel_vbox: VBoxContainer = null
-var _performance_panel: FoldablePanel = null
-var _visibility_panel: FoldablePanel = null
-var _ocean_panel: FoldablePanel = null
-var _shader_panel: FoldablePanel = null
-var _navigation_panel: FoldablePanel = null
-var _terrain_panel: FoldablePanel = null
-var _debug_panel: FoldablePanel = null
-
-# Shader effect toggles
-var _fog_toggle: CheckBox = null
-var _clouds_toggle: CheckBox = null
-var _color_grading_toggle: CheckBox = null
+# Shader manager state
 var _shader_manager_attached: bool = false
 
 # Debug overlay for 3D visualizations
@@ -132,7 +108,6 @@ var _debug_overlay: Node3D = null
 var _show_chunk_debug: bool = false
 var _show_tier_debug: bool = false
 var _show_cell_debug: bool = false
-var _lod_mode_btn: Button = null
 
 # Interior cell browser UI (will be added to scene)
 @onready var interior_panel: Panel = $UI/InteriorPanel if has_node("UI/InteriorPanel") else null
@@ -166,15 +141,8 @@ var _initialized: bool = false
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = 5  # Must be at least 5 cells (585m) to cover MID tier (500m)
 
-# Interior cell browser state
-enum ExplorerMode { WORLD, INTERIOR }
-var _current_mode: ExplorerMode = ExplorerMode.WORLD
-var _all_cells: Array[Dictionary] = []  # {name, is_interior, record, ref_count, grid_x, grid_y}
-var _filtered_cells: Array[Dictionary] = []
-var _current_filter: String = "interior"  # "interior", "exterior", "all"
-var _search_timer: Timer = null
-var _max_display_items: int = 500
-var _loaded_interior_cell: Node3D = null
+# Interior cell browser (constructed by CellBrowser)
+var _cell_browser: CellBrowser = null
 
 # Camera mode state
 enum CameraMode { FLY_CAMERA, PLAYER_CONTROLLER }
@@ -675,428 +643,62 @@ func _update_preprocess_status() -> void:
 		preprocess_btn.text = "Preprocess ALL Terrain"
 
 
-## Setup visibility toggle checkboxes (legacy - now uses foldable panels)
+## Setup visibility toggle checkboxes and foldable panel system
 func _setup_visibility_toggles() -> void:
 	# Create fallback environment and light for when Sky3D is disabled
 	_setup_fallback_environment()
 
-	# Setup the new foldable panel system
-	_setup_foldable_panels()
+	# Build foldable panels via ExplorerPanels
+	var callbacks := {
+		"show_characters_toggled": _on_show_characters_toggled,
+		"show_ocean_toggled": _on_show_ocean_toggled,
+		"show_sky_toggled": _on_show_sky_toggled,
+		"resolution_changed": _on_resolution_changed,
+		"water_quality_changed": _on_water_quality_changed,
+		"wind_speed_changed": _on_wind_speed_changed,
+		"wind_dir_changed": _on_wind_dir_changed,
+		"wave_scale_changed": _on_wave_scale_changed,
+		"choppiness_changed": _on_choppiness_changed,
+		"debug_shore_toggled": _on_debug_shore_toggled,
+		"fog_toggled": _on_fog_effect_toggled,
+		"fog_intensity_changed": _on_fog_intensity_changed,
+		"clouds_toggled": _on_clouds_effect_toggled,
+		"cloud_coverage_changed": _on_cloud_coverage_changed,
+		"color_grading_toggled": _on_color_grading_toggled,
+		"morrowind_preset": _apply_morrowind_color_preset,
+		"dramatic_preset": _apply_dramatic_color_preset,
+		"reset_color_grading": _reset_color_grading,
+		"show_chunks_toggled": _on_show_chunks_toggled,
+		"show_tiers_toggled": _on_show_tiers_toggled,
+		"show_cells_toggled": _on_show_cells_toggled,
+		"show_lod_levels_toggled": _on_show_lod_levels_toggled,
+		"lod_mode_pressed": _on_lod_mode_pressed,
+		"dump_profiling": func() -> void:
+			if _profiling_report:
+				_profiling_report.dump_report(),
+		"teleport_to_cell": _teleport_to_cell,
+		"adjust_view_distance": _adjust_view_distance,
+		"preprocess_pressed": _on_preprocess_pressed,
+	}
+	var initial_state := {
+		"show_characters": _show_characters,
+		"show_ocean": _show_ocean,
+		"show_sky": _show_sky,
+		"view_distance": _current_view_distance,
+		"show_chunk_debug": _show_chunk_debug,
+		"show_tier_debug": _show_tier_debug,
+		"show_cell_debug": _show_cell_debug,
+	}
+	_panels = ExplorerPanelsScript.new(callbacks, initial_state)
+	var vbox: VBoxContainer = stats_panel.get_node_or_null("VBox")
+	if vbox:
+		_panels.build(vbox)
 
 	# Setup debug overlay for 3D visualizations
 	_setup_debug_overlay()
 
 	# Apply initial resolution (1920x1080)
 	_apply_resolution(2)
-
-
-## Setup the new foldable panel UI system
-func _setup_foldable_panels() -> void:
-	# Find the VBox container in stats panel
-	var vbox: VBoxContainer = stats_panel.get_node_or_null("VBox")
-	if not vbox:
-		return
-
-	# Hide old static content (we'll rebuild with foldable panels)
-	var stats_text_node: Control = vbox.get_node_or_null("StatsText")
-	if stats_text_node:
-		stats_text_node.visible = false
-
-	# Create scroll container for panels
-	_panel_scroll = ScrollContainer.new()
-	_panel_scroll.name = "PanelScroll"
-	_panel_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_panel_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-
-	_panel_vbox = VBoxContainer.new()
-	_panel_vbox.name = "PanelVBox"
-	_panel_vbox.add_theme_constant_override("separation", 4)
-	_panel_scroll.add_child(_panel_vbox)
-
-	# Create foldable panels
-	_create_performance_panel()
-	_create_visibility_panel()
-	_create_navigation_panel()
-	_create_terrain_panel()
-	_create_ocean_panel()
-	_create_shader_panel()
-	_create_debug_panel()
-
-	# Insert scroll container after title
-	var separator_idx := 2  # After title and first separator
-	vbox.add_child(_panel_scroll)
-	vbox.move_child(_panel_scroll, separator_idx)
-
-
-## Create performance stats panel
-func _create_performance_panel() -> void:
-	_performance_panel = FoldablePanelScript.new("Performance", false)
-
-	# FPS and timing (updated dynamically)
-	var fps_label := Label.new()
-	fps_label.name = "FPSLabel"
-	fps_label.add_theme_font_size_override("font_size", 11)
-	fps_label.text = "FPS: --"
-	_performance_panel.add_content(fps_label)
-
-	var timing_label := Label.new()
-	timing_label.name = "TimingLabel"
-	timing_label.add_theme_font_size_override("font_size", 11)
-	timing_label.text = "Frame: -- ms | P95: -- ms"
-	_performance_panel.add_content(timing_label)
-
-	var render_label := Label.new()
-	render_label.name = "RenderLabel"
-	render_label.add_theme_font_size_override("font_size", 11)
-	render_label.text = "Draw calls: -- | Tris: --k"
-	_performance_panel.add_content(render_label)
-
-	var memory_label := Label.new()
-	memory_label.name = "MemoryLabel"
-	memory_label.add_theme_font_size_override("font_size", 11)
-	memory_label.text = "Memory: -- MB"
-	_performance_panel.add_content(memory_label)
-
-	_panel_vbox.add_child(_performance_panel)
-
-
-## Create visibility toggles panel
-func _create_visibility_panel() -> void:
-	_visibility_panel = FoldablePanelScript.new("Rendering", false)
-
-	# Row 1: NPCs only (Models always visible now)
-	var row1 := HBoxContainer.new()
-	row1.add_theme_constant_override("separation", 8)
-
-	_show_characters_toggle = CheckBox.new()
-	_show_characters_toggle.text = "NPCs [N]"
-	_show_characters_toggle.button_pressed = _show_characters
-	_show_characters_toggle.toggled.connect(_on_show_characters_toggled)
-	_show_characters_toggle.tooltip_text = "Toggle NPCs and creatures (shortcut: N)"
-	row1.add_child(_show_characters_toggle)
-
-	_visibility_panel.add_content(row1)
-
-	# Row 2: Ocean, Sky
-	var row2 := HBoxContainer.new()
-	row2.add_theme_constant_override("separation", 8)
-
-	_show_ocean_toggle = CheckBox.new()
-	_show_ocean_toggle.text = "Ocean [O]"
-	_show_ocean_toggle.button_pressed = _show_ocean
-	_show_ocean_toggle.toggled.connect(_on_show_ocean_toggled)
-	_show_ocean_toggle.tooltip_text = "Toggle ocean (shortcut: O)"
-	row2.add_child(_show_ocean_toggle)
-
-	_show_sky_toggle = CheckBox.new()
-	_show_sky_toggle.text = "Sky [K]"
-	_show_sky_toggle.button_pressed = _show_sky
-	_show_sky_toggle.toggled.connect(_on_show_sky_toggled)
-	_show_sky_toggle.tooltip_text = "Toggle sky/day-night cycle (shortcut: K)"
-	row2.add_child(_show_sky_toggle)
-
-	_visibility_panel.add_content(row2)
-
-	# Row 3: Resolution dropdown
-	var res_row := HBoxContainer.new()
-	var res_label := Label.new()
-	res_label.text = "Resolution:"
-	res_label.add_theme_font_size_override("font_size", 11)
-	res_label.custom_minimum_size.x = 70
-	res_row.add_child(res_label)
-
-	_resolution_btn = OptionButton.new()
-	_resolution_btn.add_item("720p", 0)
-	_resolution_btn.add_item("900p", 1)
-	_resolution_btn.add_item("1080p", 2)
-	_resolution_btn.add_item("1440p", 3)
-	_resolution_btn.add_item("Full", 4)
-	_resolution_btn.selected = 2
-	_resolution_btn.item_selected.connect(_on_resolution_changed)
-	_resolution_btn.tooltip_text = "Window resolution"
-	_resolution_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	res_row.add_child(_resolution_btn)
-
-	_visibility_panel.add_content(res_row)
-
-	_panel_vbox.add_child(_visibility_panel)
-
-
-## Create navigation panel
-func _create_navigation_panel() -> void:
-	_navigation_panel = FoldablePanelScript.new("Navigation", true)  # Start folded
-
-	# Camera info (updated dynamically)
-	var camera_label := Label.new()
-	camera_label.name = "CameraLabel"
-	camera_label.add_theme_font_size_override("font_size", 11)
-	camera_label.text = "Cell: (0, 0) | Mode: Fly"
-	_navigation_panel.add_content(camera_label)
-
-	# View distance control
-	var view_row := HBoxContainer.new()
-	var view_label := Label.new()
-	view_label.text = "View dist:"
-	view_label.add_theme_font_size_override("font_size", 11)
-	view_label.custom_minimum_size.x = 60
-	view_row.add_child(view_label)
-
-	var minus_btn := Button.new()
-	minus_btn.text = "-"
-	minus_btn.custom_minimum_size.x = 30
-	minus_btn.pressed.connect(func() -> void: _adjust_view_distance(-1))
-	view_row.add_child(minus_btn)
-
-	var dist_label := Label.new()
-	dist_label.name = "DistLabel"
-	dist_label.text = "%d cells" % _current_view_distance
-	dist_label.add_theme_font_size_override("font_size", 11)
-	dist_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	dist_label.custom_minimum_size.x = 60
-	view_row.add_child(dist_label)
-
-	var plus_btn := Button.new()
-	plus_btn.text = "+"
-	plus_btn.custom_minimum_size.x = 30
-	plus_btn.pressed.connect(func() -> void: _adjust_view_distance(1))
-	view_row.add_child(plus_btn)
-
-	_navigation_panel.add_content(view_row)
-
-	# Quick teleport buttons
-	var teleport_label := Label.new()
-	teleport_label.text = "Quick Teleport:"
-	teleport_label.add_theme_font_size_override("font_size", 11)
-	_navigation_panel.add_content(teleport_label)
-
-	var btn_row1 := HBoxContainer.new()
-	btn_row1.add_theme_constant_override("separation", 4)
-
-	var seyda_btn := Button.new()
-	seyda_btn.text = "Seyda Neen"
-	seyda_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	seyda_btn.pressed.connect(func() -> void: _teleport_to_cell(-2, -9))
-	btn_row1.add_child(seyda_btn)
-
-	var balmora_btn_new := Button.new()
-	balmora_btn_new.text = "Balmora"
-	balmora_btn_new.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	balmora_btn_new.pressed.connect(func() -> void: _teleport_to_cell(-3, -2))
-	btn_row1.add_child(balmora_btn_new)
-
-	_navigation_panel.add_content(btn_row1)
-
-	var btn_row2 := HBoxContainer.new()
-	btn_row2.add_theme_constant_override("separation", 4)
-
-	var vivec_btn_new := Button.new()
-	vivec_btn_new.text = "Vivec"
-	vivec_btn_new.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vivec_btn_new.pressed.connect(func() -> void: _teleport_to_cell(5, -6))
-	btn_row2.add_child(vivec_btn_new)
-
-	var origin_btn_new := Button.new()
-	origin_btn_new.text = "Origin"
-	origin_btn_new.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	origin_btn_new.pressed.connect(func() -> void: _teleport_to_cell(0, 0))
-	btn_row2.add_child(origin_btn_new)
-
-	_navigation_panel.add_content(btn_row2)
-
-	_panel_vbox.add_child(_navigation_panel)
-
-
-## Create terrain panel
-func _create_terrain_panel() -> void:
-	_terrain_panel = FoldablePanelScript.new("Terrain", true)  # Start folded
-
-	# Terrain stats (updated dynamically)
-	var terrain_label := Label.new()
-	terrain_label.name = "TerrainLabel"
-	terrain_label.add_theme_font_size_override("font_size", 11)
-	terrain_label.text = "Regions: --"
-	_terrain_panel.add_content(terrain_label)
-
-	# Preprocess status
-	var status_label := Label.new()
-	status_label.name = "PreprocessStatusLabel"
-	status_label.add_theme_font_size_override("font_size", 11)
-	status_label.text = "Status: Checking..."
-	_terrain_panel.add_content(status_label)
-
-	# Preprocess button
-	var preprocess_btn_new := Button.new()
-	preprocess_btn_new.name = "PreprocessBtnNew"
-	preprocess_btn_new.text = "Preprocess Terrain"
-	preprocess_btn_new.pressed.connect(_on_preprocess_pressed)
-	_terrain_panel.add_content(preprocess_btn_new)
-
-	_panel_vbox.add_child(_terrain_panel)
-
-
-## Create ocean settings panel
-func _create_ocean_panel() -> void:
-	_ocean_panel = FoldablePanelScript.new("Ocean Settings", true)  # Start folded
-
-	# Water quality dropdown
-	var quality_row := HBoxContainer.new()
-	var quality_label := Label.new()
-	quality_label.text = "Quality:"
-	quality_label.add_theme_font_size_override("font_size", 11)
-	quality_label.custom_minimum_size.x = 55
-	quality_row.add_child(quality_label)
-
-	_water_quality_btn = OptionButton.new()
-	_water_quality_btn.add_item("Auto", -1)
-	_water_quality_btn.add_item("Flat", 0)
-	_water_quality_btn.add_item("Gerstner", 1)
-	_water_quality_btn.add_item("FFT", 2)
-	_water_quality_btn.selected = 0  # Auto by default
-	_water_quality_btn.item_selected.connect(_on_water_quality_changed)
-	_water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane\n- Gerstner: GPU vertex waves (recommended)\n- FFT: Full GPU compute waves"
-	_water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	quality_row.add_child(_water_quality_btn)
-
-	_ocean_panel.add_content(quality_row)
-
-	# Ocean controls container (for sliders - populated when ocean is enabled)
-	_ocean_controls_container = VBoxContainer.new()
-	_ocean_controls_container.name = "OceanControls"
-	_ocean_controls_container.visible = false  # Hidden until ocean is enabled
-
-	# Wind Speed slider
-	_wind_speed_slider = _create_slider_row(_ocean_controls_container, "Wind:", 0.0, 40.0, 10.0, _on_wind_speed_changed)
-	_wind_speed_slider.tooltip_text = "Wind speed (m/s) - affects wave steepness"
-
-	# Wind Direction slider
-	_wind_dir_slider = _create_slider_row(_ocean_controls_container, "Dir:", -180.0, 180.0, 0.0, _on_wind_dir_changed)
-	_wind_dir_slider.tooltip_text = "Wind direction (degrees)"
-
-	# Wave Scale slider
-	_wave_scale_slider = _create_slider_row(_ocean_controls_container, "Scale:", 0.0, 3.0, 1.0, _on_wave_scale_changed)
-	_wave_scale_slider.step = 0.1
-	_wave_scale_slider.tooltip_text = "Wave height multiplier"
-
-	# Choppiness slider
-	_choppiness_slider = _create_slider_row(_ocean_controls_container, "Chop:", 0.0, 2.0, 1.0, _on_choppiness_changed)
-	_choppiness_slider.step = 0.1
-	_choppiness_slider.tooltip_text = "Wave choppiness/sharpness"
-
-	# Debug shore mask toggle
-	_debug_shore_toggle = CheckBox.new()
-	_debug_shore_toggle.text = "Debug Shore Mask"
-	_debug_shore_toggle.button_pressed = false
-	_debug_shore_toggle.toggled.connect(_on_debug_shore_toggled)
-	_debug_shore_toggle.tooltip_text = "Visualize shore damping"
-	_ocean_controls_container.add_child(_debug_shore_toggle)
-
-	_ocean_panel.add_content(_ocean_controls_container)
-
-	_panel_vbox.add_child(_ocean_panel)
-
-
-## Create shader effects panel (hot-swap post-processing)
-func _create_shader_panel() -> void:
-	_shader_panel = FoldablePanelScript.new("Shader Effects", true)  # Start folded
-
-	# Info label
-	var info_label := Label.new()
-	info_label.add_theme_font_size_override("font_size", 10)
-	info_label.text = "Post-processing effects (VAIO-style)"
-	info_label.modulate = Color(0.7, 0.7, 0.7)
-	_shader_panel.add_content(info_label)
-
-	# Volumetric Fog toggle
-	_fog_toggle = CheckBox.new()
-	_fog_toggle.text = "Volumetric Fog"
-	_fog_toggle.button_pressed = false
-	_fog_toggle.toggled.connect(_on_fog_effect_toggled)
-	_fog_toggle.tooltip_text = "Ray-marched volumetric fog with 3D noise"
-	_shader_panel.add_content(_fog_toggle)
-
-	# Fog intensity slider
-	var fog_row := HBoxContainer.new()
-	var fog_label := Label.new()
-	fog_label.text = "  Intensity:"
-	fog_label.add_theme_font_size_override("font_size", 11)
-	fog_label.custom_minimum_size.x = 70
-	fog_row.add_child(fog_label)
-
-	var fog_slider := HSlider.new()
-	fog_slider.name = "FogIntensitySlider"
-	fog_slider.min_value = 0.0
-	fog_slider.max_value = 2.0
-	fog_slider.step = 0.05
-	fog_slider.value = 0.5
-	fog_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	fog_slider.value_changed.connect(_on_fog_intensity_changed)
-	fog_row.add_child(fog_slider)
-	_shader_panel.add_content(fog_row)
-
-	# Volumetric Clouds toggle
-	_clouds_toggle = CheckBox.new()
-	_clouds_toggle.text = "Volumetric Clouds"
-	_clouds_toggle.button_pressed = false
-	_clouds_toggle.toggled.connect(_on_clouds_effect_toggled)
-	_clouds_toggle.tooltip_text = "Ray-marched volumetric clouds"
-	_shader_panel.add_content(_clouds_toggle)
-
-	# Cloud coverage slider
-	var cloud_row := HBoxContainer.new()
-	var cloud_label := Label.new()
-	cloud_label.text = "  Coverage:"
-	cloud_label.add_theme_font_size_override("font_size", 11)
-	cloud_label.custom_minimum_size.x = 70
-	cloud_row.add_child(cloud_label)
-
-	var cloud_slider := HSlider.new()
-	cloud_slider.name = "CloudCoverageSlider"
-	cloud_slider.min_value = 0.0
-	cloud_slider.max_value = 1.0
-	cloud_slider.step = 0.05
-	cloud_slider.value = 0.5
-	cloud_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cloud_slider.value_changed.connect(_on_cloud_coverage_changed)
-	cloud_row.add_child(cloud_slider)
-	_shader_panel.add_content(cloud_row)
-
-	# Separator
-	var sep := HSeparator.new()
-	_shader_panel.add_content(sep)
-
-	# Color Grading toggle
-	_color_grading_toggle = CheckBox.new()
-	_color_grading_toggle.text = "Color Grading"
-	_color_grading_toggle.button_pressed = false
-	_color_grading_toggle.toggled.connect(_on_color_grading_toggled)
-	_color_grading_toggle.tooltip_text = "Color correction and grading"
-	_shader_panel.add_content(_color_grading_toggle)
-
-	# Preset buttons
-	var preset_row := HBoxContainer.new()
-	preset_row.add_theme_constant_override("separation", 4)
-
-	var morrowind_btn := Button.new()
-	morrowind_btn.text = "Morrowind"
-	morrowind_btn.pressed.connect(_apply_morrowind_color_preset)
-	morrowind_btn.tooltip_text = "Warm Morrowind-style tones"
-	preset_row.add_child(morrowind_btn)
-
-	var dramatic_btn := Button.new()
-	dramatic_btn.text = "Dramatic"
-	dramatic_btn.pressed.connect(_apply_dramatic_color_preset)
-	dramatic_btn.tooltip_text = "High contrast dramatic look"
-	preset_row.add_child(dramatic_btn)
-
-	var reset_btn := Button.new()
-	reset_btn.text = "Reset"
-	reset_btn.pressed.connect(_reset_color_grading)
-	reset_btn.tooltip_text = "Reset to defaults"
-	preset_row.add_child(reset_btn)
-
-	_shader_panel.add_content(preset_row)
-
-	_panel_vbox.add_child(_shader_panel)
 
 
 ## Ensure ShaderManager is attached to the scene
@@ -1154,8 +756,8 @@ func _apply_morrowind_color_preset() -> void:
 	var effect := ShaderManager.get_effect("color_grading")
 	if effect and effect.has_method("apply_morrowind_preset"):
 		effect.apply_morrowind_preset()
-		if not _color_grading_toggle.button_pressed:
-			_color_grading_toggle.button_pressed = true
+		if not _panels.color_grading_toggle.button_pressed:
+			_panels.color_grading_toggle.button_pressed = true
 		_log("Applied Morrowind color preset")
 
 
@@ -1163,8 +765,8 @@ func _apply_dramatic_color_preset() -> void:
 	var effect := ShaderManager.get_effect("color_grading")
 	if effect and effect.has_method("apply_dramatic_preset"):
 		effect.apply_dramatic_preset()
-		if not _color_grading_toggle.button_pressed:
-			_color_grading_toggle.button_pressed = true
+		if not _panels.color_grading_toggle.button_pressed:
+			_panels.color_grading_toggle.button_pressed = true
 		_log("Applied Dramatic color preset")
 
 
@@ -1173,87 +775,6 @@ func _reset_color_grading() -> void:
 	if effect:
 		effect.reset_all_params()
 		_log("Reset color grading to defaults")
-
-
-## Create debug visualization panel
-func _create_debug_panel() -> void:
-	_debug_panel = FoldablePanelScript.new("Debug Overlays", true)  # Start folded
-
-	# Chunk visualization toggle
-	var chunk_toggle := CheckBox.new()
-	chunk_toggle.text = "Show Chunks (FAR tier)"
-	chunk_toggle.button_pressed = _show_chunk_debug
-	chunk_toggle.toggled.connect(_on_show_chunks_toggled)
-	chunk_toggle.tooltip_text = "Visualize quadtree chunk boundaries (8x8 cells each)"
-	_debug_panel.add_content(chunk_toggle)
-
-	# Tier visualization toggle
-	var tier_toggle := CheckBox.new()
-	tier_toggle.text = "Show Distance Tiers"
-	tier_toggle.button_pressed = _show_tier_debug
-	tier_toggle.toggled.connect(_on_show_tiers_toggled)
-	tier_toggle.tooltip_text = "Visualize NEAR/MID/FAR tier zones with colors"
-	_debug_panel.add_content(tier_toggle)
-
-	# Cell grid visualization toggle
-	var cell_toggle := CheckBox.new()
-	cell_toggle.text = "Show Cell Grid"
-	cell_toggle.button_pressed = _show_cell_debug
-	cell_toggle.toggled.connect(_on_show_cells_toggled)
-	cell_toggle.tooltip_text = "Visualize individual cell boundaries and coordinates"
-	_debug_panel.add_content(cell_toggle)
-
-	# LOD level visualization toggle (colors objects by LOD level)
-	var lod_toggle := CheckBox.new()
-	lod_toggle.text = "Show LOD Levels"
-	lod_toggle.button_pressed = false
-	lod_toggle.toggled.connect(_on_show_lod_levels_toggled)
-	lod_toggle.tooltip_text = "Color batched LODs: Green=LOD0/NEAR, Yellow=LOD1, Orange=LOD2, Red=LOD3/FAR"
-	_debug_panel.add_content(lod_toggle)
-
-	# LOD mode toggle button (actual vs expected)
-	var lod_mode_btn := Button.new()
-	lod_mode_btn.text = "LOD Mode: Actual"
-	lod_mode_btn.pressed.connect(_on_lod_mode_pressed)
-	lod_mode_btn.tooltip_text = "Toggle between Actual (what IS rendered) and Expected (what SHOULD be by distance)"
-	_debug_panel.add_content(lod_mode_btn)
-	_lod_mode_btn = lod_mode_btn
-
-	# Separator
-	var sep := HSeparator.new()
-	_debug_panel.add_content(sep)
-
-	# Debug info (updated dynamically)
-	var debug_info_label := Label.new()
-	debug_info_label.name = "DebugInfoLabel"
-	debug_info_label.add_theme_font_size_override("font_size", 10)
-	debug_info_label.text = "Loaded cells: -- | Queue: --"
-	_debug_panel.add_content(debug_info_label)
-
-	# Object Distance Manager stats (updated dynamically)
-	var odm_label := Label.new()
-	odm_label.name = "ODMLabel"
-	odm_label.add_theme_font_size_override("font_size", 10)
-	odm_label.text = "ODM: -- tracked | NEAR: -- MID: -- FAR: --"
-	_debug_panel.add_content(odm_label)
-
-	# Streaming profiler summary (updated dynamically)
-	var profiler_label := Label.new()
-	profiler_label.name = "ProfilerLabel"
-	profiler_label.add_theme_font_size_override("font_size", 10)
-	profiler_label.text = "Profiler: --"
-	_debug_panel.add_content(profiler_label)
-
-	# F4 dump button
-	var dump_btn := Button.new()
-	dump_btn.text = "Dump Profiling Report [F4]"
-	dump_btn.pressed.connect(func() -> void:
-		if _profiling_report:
-			_profiling_report.dump_report()
-	)
-	_debug_panel.add_content(dump_btn)
-
-	_panel_vbox.add_child(_debug_panel)
 
 
 ## Setup debug overlay for 3D visualizations
@@ -1328,73 +849,34 @@ func _on_lod_mode_pressed() -> void:
 	if _debug_overlay and _debug_overlay.has_method("toggle_lod_debug_mode"):
 		_debug_overlay.toggle_lod_debug_mode()
 		# Update button text
-		if _lod_mode_btn:
+		if _panels and _panels.lod_mode_btn:
 			var mode: int = _debug_overlay.lod_debug_mode
-			_lod_mode_btn.text = "LOD Mode: " + ("Expected" if mode == 1 else "Actual")
+			_panels.lod_mode_btn.text = "LOD Mode: " + ("Expected" if mode == 1 else "Actual")
 		_log("LOD debug mode: %s" % ("Expected" if _debug_overlay.lod_debug_mode == 1 else "Actual"))
-
-
-## Helper to create a labeled slider row
-func _create_slider_row(parent: Control, label_text: String, min_val: float, max_val: float, default_val: float, callback: Callable) -> HSlider:
-	var row := HBoxContainer.new()
-
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size.x = 40
-	label.add_theme_font_size_override("font_size", 11)
-	row.add_child(label)
-
-	var slider := HSlider.new()
-	slider.min_value = min_val
-	slider.max_value = max_val
-	slider.value = default_val
-	slider.step = 1.0
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	slider.custom_minimum_size.x = 120
-	slider.value_changed.connect(callback)
-	row.add_child(slider)
-
-	var value_label := Label.new()
-	value_label.name = "Value"
-	value_label.text = "%.1f" % default_val
-	value_label.custom_minimum_size.x = 35
-	value_label.add_theme_font_size_override("font_size", 11)
-	row.add_child(value_label)
-
-	parent.add_child(row)
-	return slider
-
-
-## Update value label next to slider
-func _update_slider_label(slider: HSlider, value: float) -> void:
-	var row: HBoxContainer = slider.get_parent()
-	var value_label: Label = row.get_node_or_null("Value")
-	if value_label:
-		value_label.text = "%.1f" % value
 
 
 ## Ocean parameter callbacks
 func _on_wind_speed_changed(value: float) -> void:
-	_update_slider_label(_wind_speed_slider, value)
+	_panels.update_slider_label(_panels.wind_speed_slider, value)
 	if ocean_manager:
 		ocean_manager.wind_speed = value
 		_update_ocean_wave_params()
 
 func _on_wind_dir_changed(value: float) -> void:
-	_update_slider_label(_wind_dir_slider, value)
+	_panels.update_slider_label(_panels.wind_dir_slider, value)
 	if ocean_manager:
 		ocean_manager.wind_direction = deg_to_rad(value)
 		_update_ocean_wave_params()
 
 func _on_wave_scale_changed(value: float) -> void:
-	_update_slider_label(_wave_scale_slider, value)
+	_panels.update_slider_label(_panels.wave_scale_slider, value)
 	if ocean_manager:
 		ocean_manager.wave_scale = value
 		if ocean_manager.has_method("_update_shader_parameters"):
 			ocean_manager._update_shader_parameters()
 
 func _on_choppiness_changed(value: float) -> void:
-	_update_slider_label(_choppiness_slider, value)
+	_panels.update_slider_label(_panels.choppiness_slider, value)
 	if ocean_manager:
 		ocean_manager.choppiness = value
 		_update_ocean_wave_params()
@@ -1478,8 +960,8 @@ func _on_show_ocean_toggled(enabled: bool) -> void:
 	_show_ocean = enabled
 
 	# Show/hide ocean controls panel
-	if _ocean_controls_container:
-		_ocean_controls_container.visible = enabled
+	if _panels and _panels.ocean_controls_container:
+		_panels.ocean_controls_container.visible = enabled
 
 	if enabled:
 		# Create ocean lazily on first enable
@@ -1503,20 +985,20 @@ func _on_show_ocean_toggled(enabled: bool) -> void:
 
 ## Sync ocean slider values with current ocean manager settings
 func _sync_ocean_sliders() -> void:
-	if not ocean_manager:
+	if not ocean_manager or not _panels:
 		return
-	if _wind_speed_slider:
-		_wind_speed_slider.value = ocean_manager.wind_speed
-		_update_slider_label(_wind_speed_slider, ocean_manager.wind_speed)
-	if _wind_dir_slider:
-		_wind_dir_slider.value = rad_to_deg(ocean_manager.wind_direction)
-		_update_slider_label(_wind_dir_slider, rad_to_deg(ocean_manager.wind_direction))
-	if _wave_scale_slider:
-		_wave_scale_slider.value = ocean_manager.wave_scale
-		_update_slider_label(_wave_scale_slider, ocean_manager.wave_scale)
-	if _choppiness_slider:
-		_choppiness_slider.value = ocean_manager.choppiness
-		_update_slider_label(_choppiness_slider, ocean_manager.choppiness)
+	if _panels.wind_speed_slider:
+		_panels.wind_speed_slider.value = ocean_manager.wind_speed
+		_panels.update_slider_label(_panels.wind_speed_slider, ocean_manager.wind_speed)
+	if _panels.wind_dir_slider:
+		_panels.wind_dir_slider.value = rad_to_deg(ocean_manager.wind_direction)
+		_panels.update_slider_label(_panels.wind_dir_slider, rad_to_deg(ocean_manager.wind_direction))
+	if _panels.wave_scale_slider:
+		_panels.wave_scale_slider.value = ocean_manager.wave_scale
+		_panels.update_slider_label(_panels.wave_scale_slider, ocean_manager.wave_scale)
+	if _panels.choppiness_slider:
+		_panels.choppiness_slider.value = ocean_manager.choppiness
+		_panels.update_slider_label(_panels.choppiness_slider, ocean_manager.choppiness)
 
 
 ## Create ocean system lazily (only called on first toggle)
@@ -1571,7 +1053,7 @@ func _create_ocean() -> void:
 
 ## Sync the water quality dropdown with the current ocean quality
 func _sync_water_quality_dropdown() -> void:
-	if not _water_quality_btn or not ocean_manager:
+	if not _panels or not _panels.water_quality_btn or not ocean_manager:
 		return
 
 	var current_quality := ocean_manager.get_water_quality()
@@ -1589,9 +1071,9 @@ func _sync_water_quality_dropdown() -> void:
 			target_id = -1  # Auto
 
 	# Find and select the item with matching ID
-	for i in _water_quality_btn.get_item_count():
-		if _water_quality_btn.get_item_id(i) == target_id:
-			_water_quality_btn.selected = i
+	for i in _panels.water_quality_btn.get_item_count():
+		if _panels.water_quality_btn.get_item_id(i) == target_id:
+			_panels.water_quality_btn.selected = i
 			break
 
 
@@ -1601,7 +1083,7 @@ func _on_water_quality_changed(index: int) -> void:
 		return
 
 	# Get the quality value from item ID (-1 = auto, 0-3 = specific quality)
-	var quality: int = _water_quality_btn.get_item_id(index)
+	var quality: int = _panels.water_quality_btn.get_item_id(index)
 	ocean_manager.set_water_quality(quality)
 
 	var quality_name: String = ocean_manager.get_water_quality_name()
@@ -2108,9 +1590,12 @@ Cell: (%d, %d)
 func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
 						   primitives: int, mem_mb: float, stats: Dictionary,
 						   total_regions: int, camera_mode_str: String, camera_cell: Vector2i) -> void:
+	if not _panels:
+		return
+
 	# Update performance panel
-	if _performance_panel:
-		var content := _performance_panel.get_content_container()
+	if _panels.performance_panel:
+		var content := _panels.performance_panel.get_content_container()
 		var fps_label: Label = content.get_node_or_null("FPSLabel")
 		if fps_label:
 			fps_label.text = "FPS: %.1f (%.2f ms avg)" % [fps, frame_ms]
@@ -2125,8 +1610,8 @@ func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls
 			memory_label.text = "Memory: %.1f MB" % mem_mb
 
 	# Update navigation panel
-	if _navigation_panel:
-		var content := _navigation_panel.get_content_container()
+	if _panels.navigation_panel:
+		var content := _panels.navigation_panel.get_content_container()
 		var camera_label: Label = content.get_node_or_null("CameraLabel")
 		if camera_label:
 			camera_label.text = "Cell: (%d, %d) | Mode: %s [P]" % [camera_cell.x, camera_cell.y, camera_mode_str]
@@ -2135,8 +1620,8 @@ func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls
 			dist_label.text = "%d cells" % _current_view_distance
 
 	# Update terrain panel
-	if _terrain_panel:
-		var content := _terrain_panel.get_content_container()
+	if _panels.terrain_panel:
+		var content := _panels.terrain_panel.get_content_container()
 		var terrain_label: Label = content.get_node_or_null("TerrainLabel")
 		if terrain_label:
 			terrain_label.text = "Regions loaded: %d" % total_regions
@@ -2153,8 +1638,8 @@ func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls
 				status_label_panel.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
 
 	# Update debug panel
-	if _debug_panel:
-		var content := _debug_panel.get_content_container()
+	if _panels.debug_panel:
+		var content := _panels.debug_panel.get_content_container()
 		var debug_label: Label = content.get_node_or_null("DebugInfoLabel")
 		if debug_label:
 			var loaded_cells: int = stats.get("loaded_cells", 0)
@@ -2236,7 +1721,8 @@ func _input(event: InputEvent) -> void:
 				_toggle_camera_mode()
 			KEY_TAB:
 				# Toggle between World and Interior modes
-				_toggle_explorer_mode()
+				if _cell_browser:
+					_cell_browser.toggle_explorer_mode()
 			KEY_F3:
 				# Toggle performance overlay
 				_perf_overlay_visible = not _perf_overlay_visible
@@ -2254,14 +1740,14 @@ func _input(event: InputEvent) -> void:
 			KEY_MINUS, KEY_KP_SUBTRACT:  # - key
 				_adjust_view_distance(-1)
 			KEY_N:  # Toggle NPCs/characters
-				if _show_characters_toggle:
-					_show_characters_toggle.button_pressed = not _show_characters_toggle.button_pressed
+				if _panels and _panels.show_characters_toggle:
+					_panels.show_characters_toggle.button_pressed = not _panels.show_characters_toggle.button_pressed
 			KEY_O:  # Toggle ocean
-				if _show_ocean_toggle:
-					_show_ocean_toggle.button_pressed = not _show_ocean_toggle.button_pressed
+				if _panels and _panels.show_ocean_toggle:
+					_panels.show_ocean_toggle.button_pressed = not _panels.show_ocean_toggle.button_pressed
 			KEY_K:  # Toggle sky/day-night cycle
-				if _show_sky_toggle:
-					_show_sky_toggle.button_pressed = not _show_sky_toggle.button_pressed
+				if _panels and _panels.show_sky_toggle:
+					_panels.show_sky_toggle.button_pressed = not _panels.show_sky_toggle.button_pressed
 			KEY_F9:  # Toggle diagnostic overlay - handled by DebugSystem
 				# DebugSystem uses its own overlay; legacy diagnostic_overlay kept for compatibility
 				if debug_system:
@@ -2323,289 +1809,52 @@ func _adjust_view_distance(delta: int) -> void:
 
 # ==================== Interior Cell Browser ====================
 
-## Setup interior cell browser UI and signals
+## Setup interior cell browser via CellBrowser (extracted in Session 3)
 func _setup_interior_browser() -> void:
-	# Create search debounce timer
-	_search_timer = Timer.new()
-	_search_timer.one_shot = true
-	_search_timer.wait_time = 0.2
-	_search_timer.timeout.connect(_apply_cell_filter)
-	add_child(_search_timer)
-
-	# Create interior container if it doesn't exist
-	if not interior_container:
-		interior_container = Node3D.new()
-		interior_container.name = "InteriorContainer"
-		add_child(interior_container)
-
-	# Connect UI signals if elements exist
-	if mode_toggle_btn:
-		mode_toggle_btn.pressed.connect(_toggle_explorer_mode)
-
-	if cell_search_edit:
-		cell_search_edit.text_changed.connect(_on_cell_search_changed)
-
-	if cell_list:
-		cell_list.item_selected.connect(_on_cell_list_selected)
-		cell_list.item_activated.connect(_on_cell_list_activated)
-
-	if interior_filter_btn:
-		interior_filter_btn.pressed.connect(func() -> void: _set_cell_filter("interior"))
-
-	if exterior_filter_btn:
-		exterior_filter_btn.pressed.connect(func() -> void: _set_cell_filter("exterior"))
-
-	if all_filter_btn:
-		all_filter_btn.pressed.connect(func() -> void: _set_cell_filter("all"))
-
-	# Hide interior panel by default
-	if interior_panel:
-		interior_panel.visible = false
+	var callbacks := {
+		"log": _log,
+		"switch_to_interior": _on_browser_switch_to_interior,
+		"switch_to_world": _on_browser_switch_to_world,
+		"load_cell": func(cell_name: String) -> Node3D: return cell_manager.load_cell(cell_name),
+		"load_exterior_cell": func(gx: int, gy: int) -> Node3D: return cell_manager.load_exterior_cell(gx, gy),
+		"position_camera": _position_camera_for_interior_cell,
+		"get_cell_count": func() -> int: return ESMManager.cells.size(),
+	}
+	var ui_nodes := {
+		"interior_panel": interior_panel,
+		"cell_search_edit": cell_search_edit,
+		"cell_list": cell_list,
+		"interior_filter_btn": interior_filter_btn,
+		"exterior_filter_btn": exterior_filter_btn,
+		"all_filter_btn": all_filter_btn,
+		"mode_toggle_btn": mode_toggle_btn,
+		"interior_container": interior_container,
+	}
+	_cell_browser = CellBrowserScript.new(callbacks, ui_nodes)
+	_cell_browser.setup(self)
 
 
-## Toggle between World and Interior modes
-func _toggle_explorer_mode() -> void:
-	if _current_mode == ExplorerMode.WORLD:
-		_switch_to_interior_mode()
-	else:
-		_switch_to_world_mode()
-
-
-## Switch to interior cell browsing mode
-func _switch_to_interior_mode() -> void:
-	_current_mode = ExplorerMode.INTERIOR
-	_log("[color=cyan]Switched to INTERIOR mode[/color]")
-
-	# Hide world streaming elements
+## Delegate: hide world elements when switching to interior mode
+func _on_browser_switch_to_interior() -> void:
 	if terrain_3d:
 		terrain_3d.visible = false
-
-	# Hide ocean
 	if ocean_manager and ocean_manager.has_method("set_enabled"):
 		ocean_manager.set_enabled(false)
-
-	# Pause world streaming
 	if world_streaming_manager:
 		world_streaming_manager.set_process(false)
 
-	# Show interior panel
-	if interior_panel:
-		interior_panel.visible = true
 
-	# Update mode button text
-	if mode_toggle_btn:
-		mode_toggle_btn.text = "Switch to World Mode"
-
-	# Build cell list if not already built
-	if _all_cells.is_empty() and ESMManager.cells.size() > 0:
-		_build_cell_list()
-		_apply_cell_filter()
-
-
-## Switch back to world streaming mode
-func _switch_to_world_mode() -> void:
-	_current_mode = ExplorerMode.WORLD
-	_log("[color=cyan]Switched to WORLD mode[/color]")
-
-	# Clear loaded interior cell
-	if _loaded_interior_cell:
-		_loaded_interior_cell.queue_free()
-		_loaded_interior_cell = null
-
-	# Show world streaming elements
+## Delegate: restore world elements when switching to world mode
+func _on_browser_switch_to_world() -> void:
 	if terrain_3d:
 		terrain_3d.visible = true
-
-	# Show ocean (if toggle is enabled)
 	if ocean_manager and ocean_manager.has_method("set_enabled") and _show_ocean:
 		ocean_manager.set_enabled(true)
-
-	# Resume world streaming
 	if world_streaming_manager:
 		world_streaming_manager.set_process(true)
 
-	# Hide interior panel
-	if interior_panel:
-		interior_panel.visible = false
 
-	# Update mode button text
-	if mode_toggle_btn:
-		mode_toggle_btn.text = "Switch to Interior Mode"
-
-
-## Build list of all cells for browser
-func _build_cell_list() -> void:
-	_all_cells.clear()
-
-	for cell_id: String in ESMManager.cells:
-		var cell: CellRecord = ESMManager.cells[cell_id]
-		var cell_info := {
-			"name": cell.name if cell.is_interior() else "Exterior (%d, %d)" % [cell.grid_x, cell.grid_y],
-			"is_interior": cell.is_interior(),
-			"record": cell,
-			"ref_count": cell.references.size(),
-			"grid_x": cell.grid_x,
-			"grid_y": cell.grid_y,
-		}
-		_all_cells.append(cell_info)
-
-	# Sort: interiors by name, exteriors by grid
-	_all_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> int:
-		if a["is_interior"] != b["is_interior"]:
-			return -1 if a["is_interior"] else 1  # Interiors first
-		if a["is_interior"]:
-			var name_a: String = a["name"]
-			var name_b: String = b["name"]
-			return name_a.naturalnocasecmp_to(name_b)
-		else:
-			var grid_x_a: int = a["grid_x"]
-			var grid_x_b: int = b["grid_x"]
-			if grid_x_a != grid_x_b:
-				return grid_x_a - grid_x_b
-			var grid_y_a: int = a["grid_y"]
-			var grid_y_b: int = b["grid_y"]
-			return grid_y_a - grid_y_b
-	)
-
-	_log("Built cell list: %d cells (%d interior, %d exterior)" % [
-		_all_cells.size(),
-		_all_cells.filter(func(c: Dictionary) -> bool: return c["is_interior"]).size(),
-		_all_cells.filter(func(c: Dictionary) -> bool: return not c["is_interior"]).size()
-	])
-
-
-## Handle cell search text changed
-func _on_cell_search_changed(_new_text: String) -> void:
-	if _search_timer:
-		_search_timer.start()
-
-
-## Set cell filter type (interior/exterior/all)
-func _set_cell_filter(filter: String) -> void:
-	_current_filter = filter
-
-	# Update button states
-	if interior_filter_btn:
-		interior_filter_btn.button_pressed = filter == "interior"
-	if exterior_filter_btn:
-		exterior_filter_btn.button_pressed = filter == "exterior"
-	if all_filter_btn:
-		all_filter_btn.button_pressed = filter == "all"
-
-	_apply_cell_filter()
-
-
-## Apply search and filter to cell list
-func _apply_cell_filter() -> void:
-	if not cell_list or _all_cells.is_empty():
-		return
-
-	_filtered_cells.clear()
-
-	var search_text := ""
-	if cell_search_edit:
-		search_text = cell_search_edit.text.strip_edges().to_lower()
-
-	for cell_info: Dictionary in _all_cells:
-		# Apply type filter
-		if _current_filter == "interior" and not cell_info["is_interior"]:
-			continue
-		if _current_filter == "exterior" and cell_info["is_interior"]:
-			continue
-
-		# Apply search filter
-		if not search_text.is_empty():
-			var cell_name: String = cell_info["name"]
-			var name_lower: String = cell_name.to_lower()
-			if name_lower.find(search_text) < 0:
-				continue
-
-		_filtered_cells.append(cell_info)
-
-	_populate_cell_list()
-
-
-## Populate the cell list UI with filtered cells
-func _populate_cell_list() -> void:
-	if not cell_list:
-		return
-
-	cell_list.clear()
-
-	var display_count := mini(_filtered_cells.size(), _max_display_items)
-	for i in display_count:
-		var cell_info: Dictionary = _filtered_cells[i]
-		var display_name: String = cell_info["name"]
-		if cell_info["ref_count"] > 0:
-			display_name += " (%d objects)" % cell_info["ref_count"]
-
-		cell_list.add_item(display_name)
-		cell_list.set_item_metadata(i, cell_info)
-
-		# Color code: interiors white, exteriors light blue
-		if not cell_info["is_interior"]:
-			cell_list.set_item_custom_fg_color(i, Color(0.7, 0.85, 1.0))
-
-
-## Handle cell list item selected
-func _on_cell_list_selected(_index: int) -> void:
-	pass  # Could show preview or details
-
-
-## Handle cell list item activated (double-clicked)
-func _on_cell_list_activated(index: int) -> void:
-	if not cell_list:
-		return
-
-	var cell_info: Dictionary = cell_list.get_item_metadata(index)
-	_load_interior_cell(cell_info)
-
-
-## Load an interior cell for viewing
-func _load_interior_cell(cell_info: Dictionary) -> void:
-	var cell_record: CellRecord = cell_info["record"]
-
-	_log("\n[b]Loading cell: '%s'[/b]" % cell_info["name"])
-
-	# Clear existing interior cell
-	if _loaded_interior_cell:
-		_loaded_interior_cell.queue_free()
-		_loaded_interior_cell = null
-
-	if not interior_container:
-		return
-
-	# Clear interior container
-	for child in interior_container.get_children():
-		child.queue_free()
-
-	var start_time := Time.get_ticks_msec()
-	var cell_node: Node3D = null
-
-	# Load the cell
-	if cell_info["is_interior"]:
-		cell_node = cell_manager.load_cell(cell_record.name)
-	else:
-		var grid_x: int = cell_info["grid_x"]
-		var grid_y: int = cell_info["grid_y"]
-		cell_node = cell_manager.load_exterior_cell(grid_x, grid_y)
-
-	if not cell_node:
-		_log("[color=red]Failed to load cell[/color]")
-		return
-
-	var elapsed := Time.get_ticks_msec() - start_time
-	interior_container.add_child(cell_node)
-	_loaded_interior_cell = cell_node
-
-	_log("[color=green]Cell loaded in %d ms[/color]" % elapsed)
-	_log("Objects: %d" % cell_node.get_child_count())
-
-	# Position camera for cell
-	_position_camera_for_interior_cell(cell_record)
-
-
-## Position camera to view an interior cell
+## Position camera to view an interior cell (stays here — accesses camera state)
 func _position_camera_for_interior_cell(cell: CellRecord) -> void:
 	if not cell:
 		return
