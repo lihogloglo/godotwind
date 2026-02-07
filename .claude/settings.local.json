@@ -329,7 +329,13 @@
       "Read(//d/Gamedev/Godotwind/godotwind/**)",
       "Bash(do:*)",
       "Bash(cmd //c:*)",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --headless --quit)"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"D:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --headless --quit)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --check-only --headless)",
+      "Read(//c/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/**)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --scene \"res://src/tools/streaming_benchmark.tscn\" --quit-after 5)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --headless --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --quit-after 3)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path . src/tools/streaming_benchmark.tscn --headless)",
+      "Read(//c/Users/metzo/AppData/Roaming/Godot/**)"
     ]
   }
 }

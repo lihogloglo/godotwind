@@ -32,7 +32,7 @@ const SEGMENT_NAMES: Array[String] = [
 ]
 
 ## CSV column headers
-const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment"
+const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types"
 
 #endregion
 
@@ -94,6 +94,14 @@ var _console: Node = null
 
 ## Segment boundaries: waypoint index where each segment starts
 var _segment_starts: PackedInt32Array = PackedInt32Array()
+
+## Streaming event log for per-model diagnostics
+## Each entry: {frame: int, event: String, detail: String}
+var _event_log: Array[Dictionary] = []
+
+## Track visible objects per frame to detect appear/disappear patterns
+var _prev_visible_count: int = -1
+var _visibility_change_count: int = 0
 
 #endregion
 
@@ -374,6 +382,15 @@ func _start_benchmark() -> void:
 	if _owns_streaming and _streaming_manager:
 		_streaming_manager.set_camera(_camera)
 
+	# Connect to streaming manager signals for lifecycle event tracking
+	if _streaming_manager:
+		if _streaming_manager.has_signal("cell_loading"):
+			_streaming_manager.cell_loading.connect(_on_cell_loading)
+		if _streaming_manager.has_signal("cell_loaded"):
+			_streaming_manager.cell_loaded.connect(_on_cell_loaded)
+		if _streaming_manager.has_signal("cell_unloaded"):
+			_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
+
 	Log.info("tools", "StreamingBenchmark: Started (%d waypoints, %s mode)" % [
 		_waypoints.size(), "quick" if _quick_mode else "full"
 	])
@@ -458,7 +475,7 @@ func _update_segment_index() -> void:
 
 func _log_frame() -> void:
 	var entry := PackedFloat64Array()
-	entry.resize(15)
+	entry.resize(17)
 	entry[0] = float(Engine.get_frames_drawn())
 	entry[1] = _last_frame_time_ms
 	entry[2] = Engine.get_frames_per_second()
@@ -474,7 +491,14 @@ func _log_frame() -> void:
 	entry[12] = _camera.global_position.z
 	entry[13] = Performance.get_monitor(Performance.MEMORY_STATIC)
 	entry[14] = float(_current_segment_index)
+	# MID-tier StaticObjectRenderer stats
+	var mid_stats := _get_mid_tier_stats()
+	entry[15] = float(mid_stats.get("total_instances", 0))
+	entry[16] = float(mid_stats.get("mesh_types", 0))
 	_frame_log.append(entry)
+
+	# Sample visibility for appear/disappear detection
+	_sample_visibility()
 
 
 func _get_node_count() -> int:
@@ -502,6 +526,50 @@ func _get_async_requests() -> int:
 		var stats: Dictionary = _streaming_manager.get_stats()
 		return stats.get("async_requests", 0) as int
 	return 0
+
+
+func _get_mid_tier_stats() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_static_renderer_stats"):
+		return _streaming_manager.get_static_renderer_stats()
+	# Fallback: try to find StaticObjectRenderer in streaming manager children
+	if _streaming_manager:
+		for child in _streaming_manager.get_children():
+			if child.has_method("get_stats"):
+				return child.get_stats()
+	return {}
+
+
+## Count visible MeshInstance3D nodes and rendered objects to detect appear/disappear
+func _sample_visibility() -> void:
+	var rendered := int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+	if _prev_visible_count >= 0:
+		var delta_objects := rendered - _prev_visible_count
+		# Log drops >5 objects in one frame (lowered from 20 to catch subtle issues)
+		if delta_objects < -5:
+			var mid_stats := _get_mid_tier_stats()
+			var mid_count: int = mid_stats.get("total_instances", 0)
+			_log_event("visibility_drop", "rendered %d -> %d (delta %d, mid_instances=%d)" % [_prev_visible_count, rendered, delta_objects, mid_count])
+			_visibility_change_count += 1
+	_prev_visible_count = rendered
+
+
+func _on_cell_loading(grid: Vector2i) -> void:
+	_log_event("cell_loading", "%s" % grid)
+
+func _on_cell_loaded(grid: Vector2i, object_count: int) -> void:
+	_log_event("cell_loaded", "%s (%d objects)" % [grid, object_count])
+
+func _on_cell_unloaded(grid: Vector2i) -> void:
+	_log_event("cell_unloaded", "%s" % grid)
+
+func _log_event(event: String, detail: String) -> void:
+	_event_log.append({
+		"frame": Engine.get_frames_drawn(),
+		"time_ms": Time.get_ticks_msec(),
+		"event": event,
+		"detail": detail,
+		"segment": _current_segment_index,
+	})
 
 #endregion
 
@@ -538,6 +606,7 @@ func _finish_benchmark() -> void:
 
 	var results := _calculate_results()
 	_save_csv()
+	_save_events_csv()
 	_print_summary(results)
 
 	benchmark_complete.emit(results)
@@ -675,16 +744,42 @@ func _save_csv() -> void:
 
 	file.store_line(CSV_HEADERS)
 	for entry in _frame_log:
-		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d" % [
+		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d" % [
 			int(entry[0]), entry[1], entry[2], int(entry[3]), int(entry[4]),
 			int(entry[5]), int(entry[6]), int(entry[7]), int(entry[8]),
 			int(entry[9]), entry[10], entry[11], entry[12], entry[13],
-			int(entry[14])
+			int(entry[14]), int(entry[15]), int(entry[16])
 		]
 		file.store_line(line)
 
 	file.close()
 	Log.info("tools", "StreamingBenchmark: CSV saved to %s" % file_path)
+
+
+func _save_events_csv() -> void:
+	if _event_log.is_empty():
+		return
+
+	var dir_path := "user://benchmark_results"
+	if not DirAccess.dir_exists_absolute(dir_path):
+		DirAccess.make_dir_recursive_absolute(dir_path)
+
+	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	var file_path := "%s/events_%s.csv" % [dir_path, timestamp]
+
+	var file := FileAccess.open(file_path, FileAccess.WRITE)
+	if not file:
+		return
+
+	file.store_line("frame,time_ms,segment,event,detail")
+	for entry: Dictionary in _event_log:
+		file.store_line("%d,%d,%d,%s,%s" % [
+			entry.frame, entry.time_ms, entry.segment,
+			entry.event, entry.detail.replace(",", ";")
+		])
+
+	file.close()
+	Log.info("tools", "StreamingBenchmark: Events CSV saved to %s (%d events)" % [file_path, _event_log.size()])
 
 #endregion
 
@@ -722,6 +817,26 @@ func _print_summary(results: Dictionary) -> void:
 	lines.append("  Average draw calls: %d" % results.avg_draw_calls)
 	lines.append("  Peak draw calls: %d" % results.peak_draw_calls)
 
+	# MID-tier stats from last frame
+	var final_mid_stats := _get_mid_tier_stats()
+	if not final_mid_stats.is_empty():
+		lines.append("")
+		lines.append("MID-Tier (StaticObjectRenderer):")
+		lines.append("  Total RS instances: %d" % final_mid_stats.get("total_instances", 0))
+		lines.append("  Visible RS instances: %d" % final_mid_stats.get("visible_instances", 0))
+		lines.append("  Registered mesh types: %d" % final_mid_stats.get("mesh_types", 0))
+
+	# Tier transition stats
+	if _streaming_manager:
+		var sm_stats: Dictionary = _streaming_manager.get_stats()
+		var promotions: int = sm_stats.get("mid_to_near_promotions", 0)
+		var demotions: int = sm_stats.get("near_to_mid_demotions", 0)
+		if promotions > 0 or demotions > 0:
+			lines.append("")
+			lines.append("Tier Transitions (Phase 5b):")
+			lines.append("  MID→NEAR promotions: %d" % promotions)
+			lines.append("  NEAR→MID demotions: %d" % demotions)
+
 	# Per-segment breakdown
 	var segments: Dictionary = results.get("segments", {})
 	if not segments.is_empty():
@@ -733,6 +848,19 @@ func _print_summary(results: Dictionary) -> void:
 				lines.append("  %-10s avg %5.1fms  p99 %5.1fms  (%d frames)" % [
 					seg_name + ":", seg.avg, seg.p99, seg.frames
 				])
+
+	# Streaming events summary
+	if not _event_log.is_empty():
+		lines.append("")
+		lines.append("Streaming Events:")
+		var event_counts: Dictionary = {}
+		for entry: Dictionary in _event_log:
+			var ev: String = entry.event
+			event_counts[ev] = event_counts.get(ev, 0) + 1
+		for ev: String in event_counts:
+			lines.append("  %s: %d" % [ev, event_counts[ev]])
+		if _visibility_change_count > 0:
+			lines.append("  Visibility drops (>5 objects): %d" % _visibility_change_count)
 
 	lines.append("")
 

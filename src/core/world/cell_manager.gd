@@ -1235,23 +1235,58 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		# Decrement pending count
 		request.pending_instantiations -= 1
 
-		# Instantiate this reference (this contains the expensive duplicate() call)
-		var inst_start := Time.get_ticks_usec()
-		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
-		var inst_elapsed := Time.get_ticks_usec() - inst_start
+		# MID-TIER FAST PATH: Objects beyond NEAR_END (150m) use RenderingServer
+		# directly via StaticObjectRenderer — skips duplicate(), add_child(), and
+		# all scene tree overhead. ~10-40x cheaper per object.
+		# Exceptions: lights (need OmniLight3D), animated objects (NPC/creature),
+		# and model-less references always use the full NEAR path.
+		var obj_position: Vector3 = entry.get("position", Vector3.ZERO)
+		var distance_sq := _camera_position.distance_squared_to(obj_position)
+		var use_mid_path := false
+		var always_near: bool = entry.get("always_near", false)  # Pre-classified at queue time (Phase 5c)
 
-		# Track duplicate time for diagnostics
-		_diag_duplicate_time_total_us += inst_elapsed
-		_diag_duplicate_count += 1
+		if _static_renderer and distance_sq > SC.NEAR_END * SC.NEAR_END and not model_path.is_empty():
+			if not always_near:
+				use_mid_path = true
 
-		if obj:
-			# Double-check parent is still valid before queuing (defensive)
-			if is_instance_valid(request.cell_node):
-				pending_children.append({"parent": request.cell_node, "child": obj})
+		if use_mid_path:
+			# MID-TIER: Create lightweight RenderingServer instance
+			var mid_start := Time.get_ticks_usec()
+			var success := _instantiate_mid_tier(ref, model_path, item_id, request)
+			var mid_elapsed := Time.get_ticks_usec() - mid_start
+
+			_diag_duplicate_time_total_us += mid_elapsed
+			_diag_duplicate_count += 1
+
+			if success:
 				instantiated += 1
 			else:
-				# Parent was freed, clean up the orphan object
-				obj.queue_free()
+				# MID failed (no mesh in prototype, etc.) — fall back to NEAR path
+				Log.debug("streaming", "MID-tier failed for %s, falling back to NEAR" % model_path)
+				use_mid_path = false
+
+		if not use_mid_path:
+			# NEAR-TIER: Full Node3D pipeline (duplicate + scene tree)
+			var inst_start := Time.get_ticks_usec()
+			var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
+			var inst_elapsed := Time.get_ticks_usec() - inst_start
+
+			# Track duplicate time for diagnostics
+			_diag_duplicate_time_total_us += inst_elapsed
+			_diag_duplicate_count += 1
+
+			if obj:
+				# Ensure visibility_range is configured BEFORE the object enters the scene tree.
+				if not obj.has_meta("visibility_prebaked"):
+					LODConfigurator.configure_for_prebake(obj)
+					obj.set_meta("visibility_prebaked", true)
+
+				# Double-check parent is still valid before queuing (defensive)
+				if is_instance_valid(request.cell_node):
+					pending_children.append({"parent": request.cell_node, "child": obj})
+					instantiated += 1
+				else:
+					obj.queue_free()
 
 		# Check if this was the last reference
 		if _is_request_complete(request):
@@ -1709,8 +1744,65 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 	return instance
 
 
+## Check if a cell reference must always use the NEAR (full Node3D) path
+## Returns true for lights, NPCs, creatures — these need physics, interaction, or animation
+func _is_always_near_ref(ref: CellReference) -> bool:
+	var record_type: Array = [""]
+	ESMManager.get_any_record(str(ref.ref_id), record_type)
+	var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+	# Lights need OmniLight3D, actors need animation/collision
+	return type_name in ["light", "npc", "creature", "leveled_creature"]
+
+
+## MID-TIER: Create a lightweight RenderingServer instance instead of full Node3D
+## Uses StaticObjectRenderer — no duplicate(), no scene tree, no add_child()
+## Returns true if the instance was successfully created
+func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> bool:
+	# Get the prototype from cache (need it for mesh data)
+	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
+	if not model_prototype:
+		# Prototype not cached yet — try loading it
+		model_prototype = _model_loader.get_model(model_path, item_id)
+		if not model_prototype:
+			return false
+
+	# Normalize model path as the type name for StaticObjectRenderer
+	var type_name := model_path.to_lower().replace("/", "\\")
+
+	# Register mesh type if not already registered
+	if not _static_renderer.has_type(type_name):
+		_static_renderer.register_from_prototype(type_name, model_prototype)
+		# Verify registration succeeded (prototype might not have a mesh)
+		if not _static_renderer.has_type(type_name):
+			return false
+
+	# Calculate transform from ESM reference
+	var pos := CS.vector_to_godot(ref.position)
+	var scale := CS.scale_to_godot(ref.scale)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scale)
+	var xform := Transform3D(basis, pos)
+
+	# Get cell grid for cleanup tracking
+	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
+
+	# Create RenderingServer instance (with metadata for MID→NEAR promotion)
+	var instance_id: int = _static_renderer.add_instance(
+		type_name, xform, cell_grid,
+		model_path, item_id, ref.ref_id, ref.ref_num
+	)
+	if instance_id < 0:
+		return false
+
+	_stats["objects_instantiated"] += 1
+	_stats["mid_tier_instances"] = _stats.get("mid_tier_instances", 0) + 1
+	return true
+
+
 ## Internal: Queue an object for instantiation with limit checking
 ## Includes object position for distance-priority sorting
+## Pre-classifies ref type at queue time to avoid ESM lookup during instantiation (Phase 5c)
 func _queue_instantiation(request_id: int, ref: CellReference, model_path: String, item_id: String) -> bool:
 	# Check queue limit to prevent memory buildup
 	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
@@ -1720,12 +1812,17 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	# Get object position for distance-priority sorting
 	var position := CS.vector_to_godot(ref.position)
 
+	# Pre-classify: is this ref type always-NEAR? (Phase 5c optimization)
+	# This avoids an ESM lookup per object during process_async_instantiation()
+	var always_near := _is_always_near_ref(ref)
+
 	_instantiation_queue.append({
 		"request_id": request_id,
 		"ref": ref,
 		"model_path": model_path,
 		"item_id": item_id,
-		"position": position
+		"position": position,
+		"always_near": always_near,
 	})
 
 	# Track pending instantiation count for completion checking
@@ -1779,6 +1876,38 @@ func get_loading_stats() -> Dictionary:
 		"objects_from_pool": _stats.get("objects_from_pool", 0),
 		"avg_duplicate_time_us": (_diag_duplicate_time_total_us / _diag_duplicate_count) if _diag_duplicate_count > 0 else 0
 	}
+
+
+## Promote a MID-tier RS instance to a full NEAR-tier Node3D
+## Returns the Node3D, or null on failure. Caller must add_child() to cell_node.
+func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D,
+		ref_id: StringName, ref_num: int) -> Node3D:
+	if model_path.is_empty():
+		return null
+
+	# Get prototype from cache
+	var prototype: Node3D = _model_loader.get_cached(model_path, item_id)
+	if not prototype:
+		prototype = _model_loader.get_model(model_path, item_id)
+		if not prototype:
+			return null
+
+	# Duplicate and configure
+	var instance: Node3D = prototype.duplicate()
+	instance.name = str(ref_id) + "_" + str(ref_num)
+	_hide_lod_nodes(instance)
+
+	# Set transform directly (already in Godot coords from when MID instance was created)
+	instance.transform = xform
+
+	# Bake visibility_range BEFORE tree entry
+	LODConfigurator.configure_for_prebake(instance)
+	instance.set_meta("visibility_prebaked", true)
+	instance.set_meta("promoted_from_mid", true)
+
+	_stats["objects_instantiated"] += 1
+	_stats["mid_promotions"] = _stats.get("mid_promotions", 0) + 1
+	return instance
 
 
 ## Get overall stats including pool stats

@@ -33,6 +33,7 @@ const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candida
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
+const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 
 #region Signals
 
@@ -108,6 +109,9 @@ signal startup_complete()
 ## LOD configurator helper
 var _lod_configurator: LODConfigurator = LODConfigurator.new()
 
+## Static object renderer for MID-tier + flora (RenderingServer direct, no Node3D)
+var _static_renderer: StaticObjectRendererScript = null
+
 ## Native Impostor Renderer
 var _impostor_renderer: Node3D = null
 
@@ -155,6 +159,8 @@ var _stats: Dictionary = {
 	"loaded_cells": 0,
 	"total_objects": 0,
 	"load_time_ms": 0.0,
+	"mid_to_near_promotions": 0,
+	"near_to_mid_demotions": 0,
 }
 
 ## Whether the manager has been initialized
@@ -170,6 +176,28 @@ const STARTUP_PHASE_FRAMES: int = 30  # ~0.5 seconds at 60 FPS
 
 #region Initialization
 
+func _exit_tree() -> void:
+	# Force-clear all remaining RenderingServer instances and pending unloads
+	# to prevent RID leaks at exit (budgeted unloading may still be in progress)
+	if _static_renderer:
+		_static_renderer.clear()
+	_promoted_objects.clear()
+
+	# Force-free all cells still in gradual unload container
+	for grid: Vector2i in _unloading_cells:
+		var cell_ref: Variant = _unloading_cells[grid]
+		if is_instance_valid(cell_ref):
+			(cell_ref as Node3D).queue_free()
+	_unloading_cells.clear()
+
+	# Force-free all loaded cells
+	for grid: Vector2i in _loaded_cells:
+		var cell_ref: Variant = _loaded_cells[grid]
+		if is_instance_valid(cell_ref):
+			(cell_ref as Node3D).queue_free()
+	_loaded_cells.clear()
+
+
 func _ready() -> void:
 	# Create world container
 	_world_container = Node3D.new()
@@ -181,6 +209,12 @@ func _ready() -> void:
 	_unload_container.name = "UnloadContainer"
 	_unload_container.visible = false
 	add_child(_unload_container)
+
+	# Create static object renderer for MID-tier objects and flora
+	# Uses RenderingServer directly — no Node3D overhead for distant objects
+	_static_renderer = StaticObjectRendererScript.new()
+	_static_renderer.name = "StaticRenderer"
+	add_child(_static_renderer)
 
 	# Create impostor renderer (renamed to match old API)
 	_impostor_renderer = NativeImpostorRendererScript.new()
@@ -210,6 +244,8 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 
 	_cell_manager = cell_manager
 	_cell_manager.set_lod_configurator(_lod_configurator)
+	_cell_manager._static_renderer = _static_renderer
+	_cell_manager._sync_instantiator_config()
 	_camera = camera
 
 	# Wire up background processor for async loading
@@ -306,7 +342,10 @@ func _process(delta: float) -> void:
 		if instantiated > 0 and debug_enabled:
 			_debug("Instantiated %d objects this frame" % instantiated)
 
-		# Phase 3: Queue new cell requests (non-blocking)
+		# Phase 3: MID→NEAR promotion for nearby objects (Phase 5b)
+		_process_mid_to_near_promotions()
+
+		# Phase 4: Queue new cell requests (non-blocking)
 		_process_pending_loads_async()
 	else:
 		# Fallback: synchronous loading (blocks frame)
@@ -477,6 +516,24 @@ func _unload_cell(grid: Vector2i) -> void:
 	_loaded_cells.erase(grid)
 	_stats["loaded_cells"] = _loaded_cells.size()
 
+	# Clean up promoted object tracking for this cell
+	# Must happen BEFORE remove_cell_instances so we can match RS IDs
+	var promoted_cleanup := 0
+	var promoted_remove: Array[int] = []
+	for rs_id: int in _promoted_objects:
+		var data: Variant = _static_renderer.get_instance_data(rs_id)
+		if data and data.cell_grid == grid:
+			promoted_remove.append(rs_id)
+	for rs_id: int in promoted_remove:
+		_promoted_objects.erase(rs_id)
+		promoted_cleanup += 1
+
+	# Clean up MID-tier RenderingServer instances for this cell
+	if _static_renderer:
+		var mid_removed := _static_renderer.remove_cell_instances(grid)
+		if mid_removed > 0:
+			_debug("Removed %d MID-tier RS instances for cell %s (+ %d promoted)" % [mid_removed, grid, promoted_cleanup])
+
 	# Move cell to hidden unload container for gradual teardown
 	# Reparenting is cheaper than queue_free() on entire subtree
 	if cell_node.get_parent():
@@ -561,9 +618,129 @@ func _process_budgeted_unloading() -> void:
 		_debug("Budgeted unload: freed %d objects, %d cells remaining" % [total_freed, _unloading_cells.size()])
 
 
+## Track promoted objects: RS instance_id -> NEAR Node3D
+## Used for demotion when camera moves away
+var _promoted_objects: Dictionary = {}  # {rs_id: int -> near_node: Node3D}
+
+
+## Promote MID-tier RS instances to full NEAR-tier Node3D when camera is close.
+## Also demotes NEAR→MID when camera moves away (hysteresis prevents oscillation).
+## Budget-controlled: max 2ms per frame total.
+## Only checks cells adjacent to the camera cell (at most ~9 cells).
+func _process_mid_to_near_promotions() -> void:
+	if not _static_renderer or not _cell_manager:
+		return
+
+	# Only run every 4 frames (promotion/demotion is not time-critical)
+	if Engine.get_frames_drawn() % 4 != 0:
+		return
+
+	var start_time := Time.get_ticks_usec()
+	var budget_usec := 2000.0  # 2ms total budget for promotion + demotion
+
+	# --- DEMOTION: NEAR objects that are now far enough to go back to MID ---
+	# Threshold: NEAR_END + HYSTERESIS_NEAR = 150 + 40 = 190m
+	var demote_distance_sq: float = (SC.NEAR_END + SC.HYSTERESIS_NEAR) * (SC.NEAR_END + SC.HYSTERESIS_NEAR)
+	var demoted := 0
+	var demote_remove: Array[int] = []
+
+	for rs_id: int in _promoted_objects:
+		if Time.get_ticks_usec() - start_time >= budget_usec:
+			break
+
+		var near_node: Node3D = _promoted_objects[rs_id]
+		if not is_instance_valid(near_node):
+			# Node was freed (cell unloaded) — clean up tracking
+			demote_remove.append(rs_id)
+			# Also remove the hidden RS instance since the cell is gone
+			_static_renderer.remove_instance(rs_id)
+			continue
+
+		var dist_sq := _camera_position.distance_squared_to(near_node.global_position)
+		if dist_sq > demote_distance_sq:
+			# Demote: unhide RS instance, remove NEAR Node3D
+			_static_renderer.set_instance_visible(rs_id, true)
+			near_node.queue_free()
+			demote_remove.append(rs_id)
+			demoted += 1
+
+	for rs_id: int in demote_remove:
+		_promoted_objects.erase(rs_id)
+
+	# --- PROMOTION: MID objects that are now close enough to become NEAR ---
+	# Promotion distance: 130m (NEAR_END - 20m margin)
+	var promote_distance_sq: float = (SC.NEAR_END - 20.0) * (SC.NEAR_END - 20.0)
+
+	# Get cells adjacent to camera (only these can have objects within NEAR range)
+	var nearby_cells: Array[Vector2i] = []
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var g := _camera_cell + Vector2i(dx, dy)
+			if g in _loaded_cells:
+				nearby_cells.append(g)
+
+	var promoted := 0
+	if not nearby_cells.is_empty():
+		var promotable := _static_renderer.get_promotable_instances(
+			_camera_position, promote_distance_sq, nearby_cells
+		)
+
+		for id: int in promotable:
+			if Time.get_ticks_usec() - start_time >= budget_usec:
+				break
+
+			# Skip if already promoted (RS instance is hidden, NEAR Node3D exists)
+			if id in _promoted_objects:
+				continue
+
+			var data: Variant = _static_renderer.get_instance_data(id)
+			if not data:
+				continue
+
+			# Find the cell_node for this instance's grid
+			var cell_node: Node3D = _loaded_cells.get(data.cell_grid) as Node3D
+			if not cell_node or not is_instance_valid(cell_node):
+				continue
+
+			# Create NEAR-tier Node3D
+			var near_obj: Node3D = _cell_manager.promote_mid_to_near(
+				data.model_path, data.item_id, data.transform,
+				data.ref_id, data.ref_num
+			)
+			if not near_obj:
+				continue
+
+			# Add Node3D to cell, hide RS instance (don't remove — needed for demotion)
+			cell_node.add_child(near_obj)
+			_static_renderer.set_instance_visible(id, false)
+			_promoted_objects[id] = near_obj
+			promoted += 1
+
+	if promoted > 0 or demoted > 0:
+		_stats["mid_to_near_promotions"] += promoted
+		_stats["near_to_mid_demotions"] += demoted
+		_debug("Tier transitions: promoted %d MID→NEAR, demoted %d NEAR→MID (%.1fms, tracking %d)" % [
+			promoted, demoted, (Time.get_ticks_usec() - start_time) / 1000.0,
+			_promoted_objects.size()
+		])
+
+
 ## Configure visibility_range on all MeshInstance3D nodes in a cell
+## Skips if models were prebaked with visibility_range already set
 func _configure_cell_visibility(cell_node: Node3D) -> void:
 	if not use_native_visibility:
+		return
+
+	# Skip if visibility_range was already baked into the prebaked models
+	# Check each child (each child is an instantiated model from prebaked cache)
+	var all_prebaked := true
+	for child in cell_node.get_children():
+		if not child.has_meta("visibility_prebaked"):
+			all_prebaked = false
+			break
+
+	if all_prebaked and cell_node.get_child_count() > 0:
+		_debug("Skipping visibility config for cell %s — all %d children prebaked" % [cell_node.name, cell_node.get_child_count()])
 		return
 
 	# Collect stats for compact logging
@@ -714,9 +891,9 @@ func _process_async_completions() -> void:
 			var cell_node := _cell_manager.get_async_result(request_id)
 
 			if cell_node:
-				# Always configure visibility, even if already in scene
-				# This ensures LOD nodes get proper visibility_range when async loading
-				# (prebaked values are now correct, but runtime can override if needed)
+				# Per-object visibility_range is now applied during instantiation
+				# (cell_manager.process_async_instantiation sets visibility_prebaked meta)
+				# Only run the cell-level pass as a safety net for edge cases
 				_configure_cell_visibility(cell_node)
 
 				if cell_node.get_parent() != _world_container:
@@ -814,7 +991,21 @@ func get_stats() -> Dictionary:
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
 		s.merge(_impostor_renderer.call("get_stats"))
 
+	# Merge MID-tier static renderer stats
+	if _static_renderer:
+		var sr_stats: Dictionary = _static_renderer.get_stats()
+		s["mid_instances"] = sr_stats.get("total_instances", 0)
+		s["mid_visible"] = sr_stats.get("visible_instances", 0)
+		s["mid_mesh_types"] = sr_stats.get("mesh_types", 0)
+
 	return s
+
+
+## Get StaticObjectRenderer stats (for benchmark diagnostics)
+func get_static_renderer_stats() -> Dictionary:
+	if _static_renderer:
+		return _static_renderer.get_stats()
+	return {}
 
 
 ## Print detailed debug information to console (for troubleshooting)

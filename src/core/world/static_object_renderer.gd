@@ -53,6 +53,8 @@ class MeshType:
 	var name: String
 	var mesh_rid: RID          ## RenderingServer mesh
 	var material_rid: RID      ## RenderingServer material (optional)
+	var mesh_resource: Mesh    ## Strong reference — prevents GC when prototype is LRU-evicted
+	var material_resource: Material  ## Strong reference — same reason
 	var owns_mesh: bool        ## Whether we created the mesh RID
 	var owns_material: bool    ## Whether we created the material RID
 	var aabb: AABB             ## Bounding box for culling
@@ -67,6 +69,11 @@ class InstanceData:
 	var transform: Transform3D
 	var visible: bool = true
 	var cell_grid: Vector2i    ## Which cell this belongs to
+	## Metadata for MID→NEAR promotion (Phase 5b)
+	var model_path: String     ## Original model path for prototype lookup
+	var item_id: String        ## Item variant ID
+	var ref_id: StringName     ## ESM reference ID (e.g., "barrel_01")
+	var ref_num: int           ## ESM unique reference number
 
 
 func _enter_tree() -> void:
@@ -89,8 +96,12 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 	mesh_type.name = type_name
 
 	# Get or create mesh RID
+	# CRITICAL: Store strong references to Mesh/Material resources to keep them alive.
+	# Without these, LRU cache eviction of prototypes can free the underlying resources,
+	# invalidating the RIDs and causing RS instances to disappear.
 	if mesh:
 		mesh_type.mesh_rid = mesh.get_rid()
+		mesh_type.mesh_resource = mesh
 		mesh_type.owns_mesh = false
 		mesh_type.aabb = mesh.get_aabb()
 	else:
@@ -101,6 +112,7 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 	# Get or create material RID
 	if material:
 		mesh_type.material_rid = material.get_rid()
+		mesh_type.material_resource = material
 		mesh_type.owns_material = false
 	else:
 		mesh_type.material_rid = RID()
@@ -150,7 +162,9 @@ func _find_mesh_instance(node: Node) -> MeshInstance3D:
 
 ## Add an instance of a registered mesh type
 ## Returns instance ID for later manipulation, or -1 on failure
-func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO) -> int:
+## model_path/item_id/ref_id/ref_num: metadata for MID→NEAR promotion (Phase 5b)
+func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
+		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
 	if type_name not in _mesh_types:
 		return -1
 
@@ -182,6 +196,10 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	data.transform = transform
 	data.visible = true
 	data.cell_grid = cell_grid
+	data.model_path = model_path
+	data.item_id = item_id
+	data.ref_id = ref_id
+	data.ref_num = ref_num
 
 	_instances[id] = data
 	mesh_type.instance_count += 1
@@ -371,6 +389,30 @@ func get_registered_types() -> Array[String]:
 	for type_name: String in _mesh_types:
 		types.append(type_name)
 	return types
+
+
+## Get instances in cells near the camera that are within promotion distance
+## Returns array of instance IDs whose origin is within max_distance of camera_pos
+## Only checks VISIBLE instances in the specified cell grids (skips already-promoted)
+func get_promotable_instances(camera_pos: Vector3, max_distance_sq: float, cell_grids: Array[Vector2i]) -> Array[int]:
+	var result: Array[int] = []
+	for id: int in _instances:
+		var data: InstanceData = _instances[id]
+		if not data.visible:
+			continue  # Already promoted (hidden)
+		if data.cell_grid not in cell_grids:
+			continue
+		if data.model_path.is_empty():
+			continue
+		var dist_sq := camera_pos.distance_squared_to(data.transform.origin)
+		if dist_sq < max_distance_sq:
+			result.append(id)
+	return result
+
+
+## Get instance data for promotion (returns null if not found)
+func get_instance_data(id: int) -> InstanceData:
+	return _instances.get(id) as InstanceData
 
 
 ## Check if a type is registered

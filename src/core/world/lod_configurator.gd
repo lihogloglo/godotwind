@@ -240,6 +240,87 @@ func configure_auto_lod_mesh(mesh_instance: MeshInstance3D, max_distance: float 
 #endregion
 
 
+#region Prebake Configuration
+
+const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
+
+## Configure visibility_range on all GeometryInstance3D nodes in a tree for prebaking.
+## This bakes the values into the PackedScene so they don't need to be set at runtime.
+## Call this BEFORE PackedScene.pack() during the prebaking step.
+static func configure_for_prebake(root: Node) -> int:
+	var configured := 0
+	_configure_for_prebake_recursive(root, configured)
+	return configured
+
+
+## Recursively configure visibility_range on all geometry nodes
+static func _configure_for_prebake_recursive(node: Node, count: int) -> int:
+	if node is GeometryInstance3D:
+		var geo := node as GeometryInstance3D
+		var node_name := node.name
+
+		if MeshVisibilityUtils.is_lod_node_name(node_name):
+			var lod_level := _get_lod_level_static(node_name)
+			_configure_mid_static(geo, lod_level)
+			count += 1
+		else:
+			_configure_near_static(geo)
+			count += 1
+
+	for child in node.get_children():
+		count = _configure_for_prebake_recursive(child, count)
+
+	return count
+
+
+## Static version of configure_near_object (no instance needed)
+static func _configure_near_static(mesh_instance: GeometryInstance3D) -> void:
+	mesh_instance.visibility_range_begin = 0.0
+	mesh_instance.visibility_range_end = DU.NEAR_END
+	mesh_instance.visibility_range_begin_margin = 0.0
+	mesh_instance.visibility_range_end_margin = DU.FADE_MARGIN
+	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+
+
+## Static version of configure_mid_object (no instance needed)
+static func _configure_mid_static(mesh_instance: GeometryInstance3D, lod_level: int) -> void:
+	var begin_dist: float
+	var end_dist: float
+
+	match lod_level:
+		1:
+			begin_dist = DU.NEAR_END
+			end_dist = 250.0
+		2:
+			begin_dist = 250.0
+			end_dist = 375.0
+		3:
+			begin_dist = 375.0
+			end_dist = DU.MID_END
+		_:
+			return
+
+	mesh_instance.visibility_range_begin = begin_dist
+	mesh_instance.visibility_range_end = end_dist
+	mesh_instance.visibility_range_begin_margin = DU.FADE_MARGIN
+	mesh_instance.visibility_range_end_margin = DU.FADE_MARGIN
+	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+
+
+## Get LOD level from node name (static version)
+static func _get_lod_level_static(node_name: String) -> int:
+	var name_lower := node_name.to_lower()
+	if "_lod1" in name_lower:
+		return 1
+	elif "_lod2" in name_lower:
+		return 2
+	elif "_lod3" in name_lower:
+		return 3
+	return 1
+
+#endregion
+
+
 #region Utility Methods
 
 ## Get the tier name for a given distance

@@ -43,6 +43,11 @@ var fade_in_duration: float = 0.4  # Duration of fade-in animation in seconds
 # Scene tree reference for tweens (must be set by parent, e.g., CellManager)
 var scene_tree: SceneTree = null
 
+# Fade material pool - pre-allocated ShaderMaterials to avoid per-object allocation
+const FADE_POOL_SIZE := 200  # Matches StreamingConfig.MAX_CONCURRENT_FADES
+var _fade_pool: Array[ShaderMaterial] = []  # Available materials
+var _fade_pool_initialized: bool = false
+
 # Statistics
 var stats: Dictionary = {
 	"objects_instantiated": 0,
@@ -639,13 +644,47 @@ func _is_static_render_model(model_path: String) -> bool:
 	return false
 
 
+## Initialize the fade material pool (call once after scene_tree is set)
+func _ensure_fade_pool() -> void:
+	if _fade_pool_initialized:
+		return
+	_fade_pool_initialized = true
+	_fade_pool.resize(FADE_POOL_SIZE)
+	for i in FADE_POOL_SIZE:
+		var mat := ShaderMaterial.new()
+		mat.shader = LOD_CROSSFADE_SHADER
+		_fade_pool[i] = mat
+
+
+## Acquire a fade material from the pool, or null if exhausted
+func _acquire_fade_material() -> ShaderMaterial:
+	if _fade_pool.is_empty():
+		return null
+	return _fade_pool.pop_back()
+
+
+## Return a fade material to the pool after use
+func _release_fade_material(mat: ShaderMaterial) -> void:
+	# Reset params to avoid holding references to textures
+	mat.set_shader_parameter("albedo_texture", null)
+	mat.set_shader_parameter("albedo_color", Color.WHITE)
+	mat.set_shader_parameter("roughness", 1.0)
+	mat.set_shader_parameter("metallic", 0.0)
+	mat.set_shader_parameter("fade_amount", 0.0)
+	mat.set_shader_parameter("use_alpha_cutout", false)
+	mat.set_shader_parameter("alpha_cutout", 0.5)
+	_fade_pool.append(mat)
+
+
 ## Apply fade-in effect to newly instantiated object
-## Uses dither crossfade shader for smooth appearance (prevents visual pop)
+## Uses pooled dither crossfade shader for smooth appearance (prevents visual pop)
 func _apply_fade_in(instance: Node3D) -> void:
 	if not scene_tree:
 		if debug_lod:
 			Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
 		return  # Need scene tree for tweens
+
+	_ensure_fade_pool()
 
 	# Find all MeshInstance3D nodes in the hierarchy
 	var mesh_instances: Array[MeshInstance3D] = []
@@ -659,18 +698,19 @@ func _apply_fade_in(instance: Node3D) -> void:
 	if debug_lod:
 		Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
 
-	# Store original materials and apply fade materials
+	# Store original materials and apply pooled fade materials
 	var fade_data: Array[Dictionary] = []
 
 	for mesh_inst: MeshInstance3D in mesh_instances:
+		# Acquire from pool — if exhausted, skip fade (object pops in instantly)
+		var fade_mat := _acquire_fade_material()
+		if not fade_mat:
+			break
+
 		# Get the original material (from override or mesh surface)
 		var original_mat: Material = mesh_inst.material_override
 		if original_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
 			original_mat = mesh_inst.mesh.surface_get_material(0)
-
-		# Create fade material with crossfade shader
-		var fade_mat := ShaderMaterial.new()
-		fade_mat.shader = LOD_CROSSFADE_SHADER
 
 		# Copy texture from original material if it's a StandardMaterial3D
 		if original_mat is StandardMaterial3D:
@@ -695,6 +735,9 @@ func _apply_fade_in(instance: Node3D) -> void:
 			"original_material": original_mat
 		})
 
+	if fade_data.is_empty():
+		return
+
 	# Create tween to animate fade_amount from 0 to 1
 	# IMPORTANT: Bind to the instance node so tween is killed when node is freed
 	# This prevents "Lambda capture was freed" errors when cells unload during fade
@@ -712,13 +755,18 @@ func _apply_fade_in(instance: Node3D) -> void:
 			0.0, 1.0, fade_in_duration
 		)
 
-	# When complete, restore original materials
+	# When complete, restore original materials and return fade mats to pool
 	tween.chain()  # Wait for parallel tweens
 	tween.tween_callback(func() -> void:
 		for entry: Dictionary in fade_data:
-			# CRITICAL: Check validity BEFORE accessing dictionary values
-			# The mesh_instance may have been freed if cell was unloaded during fade
+			var fade_mat_ref: Variant = entry.get("fade_material")
 			var mesh_inst_ref: Variant = entry.get("mesh_instance")
+
+			# Return the fade material to the pool regardless of mesh validity
+			if is_instance_valid(fade_mat_ref):
+				_release_fade_material(fade_mat_ref as ShaderMaterial)
+
+			# Restore original material if mesh still exists
 			if not is_instance_valid(mesh_inst_ref):
 				continue
 			var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D

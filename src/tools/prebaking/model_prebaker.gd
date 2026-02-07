@@ -18,6 +18,7 @@ extends RefCounted
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
 const LODResource := preload("res://src/core/world/lod_resource.gd")
+const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
 
 ## Output directory (set from SettingsManager)
 var output_dir: String = ""
@@ -284,6 +285,12 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 
 	# Set owner on all children so PackedScene.pack() includes them
 	_set_owner_recursive(node, node)
+
+	# Prebake visibility_range on all GeometryInstance3D nodes
+	# This eliminates the runtime _configure_cell_visibility() recursive walk
+	var vis_configured := LODConfigurator.configure_for_prebake(node)
+	if vis_configured > 0:
+		node.set_meta("visibility_prebaked", true)
 
 	# Save scene (meshes, materials, textures all embedded)
 	var scene_path := base_path + ".res"

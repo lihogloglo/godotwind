@@ -22,8 +22,15 @@ extends RefCounted
 
 const LODResource := preload("res://src/core/world/lod_resource.gd")
 
+## Maximum number of prototypes kept in memory cache
+## When exceeded, least-recently-accessed entries are evicted to 80% capacity
+const MAX_CACHE_SIZE := 500
+
 ## Cache for loaded models: model_path (lowercase) -> Node3D prototype
 var _model_cache: Dictionary = {}
+
+## LRU tracking: cache_key -> last access frame number
+var _last_access: Dictionary = {}
 
 ## Cache for loaded LOD resources: model_path (lowercase) -> LODResource
 var _lod_cache: Dictionary = {}
@@ -86,6 +93,7 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 	# 1. Check memory cache first (fastest)
 	if cache_key in _model_cache:
 		_stats["models_from_cache"] += 1
+		_last_access[cache_key] = Engine.get_frames_drawn()
 		return _model_cache[cache_key]
 
 	# 2. Check disk cache if enabled (fast - direct resource load)
@@ -95,7 +103,9 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 			var loaded := _load_from_disk_cache(disk_path)
 			if loaded:
 				_model_cache[cache_key] = loaded
+				_last_access[cache_key] = Engine.get_frames_drawn()
 				_stats["models_from_disk"] += 1
+				_evict_if_over_budget()
 				return loaded
 
 	# 3. RUNTIME MODE: Return null for uncached models (no NIF conversion at runtime)
@@ -147,18 +157,56 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 		_save_to_disk_cache(node, cache_key)
 
 	_model_cache[cache_key] = node
+	_last_access[cache_key] = Engine.get_frames_drawn()
 	_stats["models_loaded"] += 1
+	_evict_if_over_budget()
 	return node
 
 
 ## Clear the model cache and reset statistics
 func clear_cache() -> void:
 	_model_cache.clear()
+	_last_access.clear()
 	_file_exists_cache.clear()
 	_stats["models_loaded"] = 0
 	_stats["models_from_cache"] = 0
 	_stats["models_from_disk"] = 0
 	_stats["file_exists_cache_hits"] = 0
+
+
+## Evict least-recently-accessed cache entries if over budget
+## Evicts down to 80% of MAX_CACHE_SIZE to avoid evicting every frame
+func _evict_if_over_budget() -> void:
+	if _model_cache.size() <= MAX_CACHE_SIZE:
+		return
+
+	var target_size := int(MAX_CACHE_SIZE * 0.8)
+
+	# Build sortable array of (frame, key) pairs
+	# Only evict non-null entries (null entries are cheap "miss" markers)
+	var entries: Array[Array] = []
+	for key: String in _last_access:
+		if key in _model_cache and _model_cache[key] != null:
+			entries.append([_last_access[key], key])
+
+	# Sort by frame ascending (oldest first)
+	entries.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+
+	# Evict oldest until under target
+	var evicted := 0
+	for entry: Array in entries:
+		if _model_cache.size() <= target_size:
+			break
+		var key: String = entry[1]
+		_model_cache.erase(key)
+		_last_access.erase(key)
+		evicted += 1
+
+	if evicted > 0:
+		if not _stats.has("lru_evictions"):
+			_stats["lru_evictions"] = 0
+		_stats["lru_evictions"] += evicted
+		Log.debug("streaming", "LRU evicted %d prototypes (cache: %d/%d)" % [evicted, _model_cache.size(), MAX_CACHE_SIZE])
 
 
 ## Cached file existence check - avoids repeated disk I/O
@@ -185,6 +233,8 @@ func get_stats() -> Dictionary:
 		"models_saved": _stats["models_saved"],
 		"pending_async_loads": _pending_async_loads.size(),
 		"cached_models": _model_cache.size(),
+		"max_cache_size": MAX_CACHE_SIZE,
+		"lru_evictions": _stats.get("lru_evictions", 0),
 		"file_exists_cache_hits": _stats["file_exists_cache_hits"],
 		"file_exists_cache_size": _file_exists_cache.size(),
 	}
@@ -249,6 +299,7 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 	# 1. Check memory cache first
 	if cache_key in _model_cache:
 		_stats["models_from_cache"] += 1
+		_last_access[cache_key] = Engine.get_frames_drawn()
 		var model: Node3D = _model_cache[cache_key]
 		if callback.is_valid():
 			callback.call(model_path, item_id, model)
@@ -352,8 +403,10 @@ func process_async_loads() -> int:
 				# Cache the result
 				var cache_key: String = _pending_async_loads[disk_path].cache_key
 				_model_cache[cache_key] = model
+				_last_access[cache_key] = Engine.get_frames_drawn()
 				if model:
 					_stats["models_from_disk_async"] += 1
+					_evict_if_over_budget()
 
 				# Call all callbacks
 				for cb_info: Dictionary in _pending_async_loads[disk_path].callbacks:
@@ -408,8 +461,10 @@ func add_to_cache(model_path: String, model: Node3D, item_id: String = "") -> vo
 	if not item_id.is_empty():
 		cache_key = normalized + ":" + item_id.to_lower()
 	_model_cache[cache_key] = model
+	_last_access[cache_key] = Engine.get_frames_drawn()
 	if model:
 		_stats["models_loaded"] += 1
+		_evict_if_over_budget()
 		# Count meshes for debugging
 		var mesh_count := _count_meshes(model)
 		# Also save to disk cache for next session
@@ -448,6 +503,7 @@ func get_cached(model_path: String, item_id: String = "") -> Node3D:
 
 	if cache_key in _model_cache:
 		_stats["models_from_cache"] += 1
+		_last_access[cache_key] = Engine.get_frames_drawn()
 		return _model_cache[cache_key]
 	return null
 
