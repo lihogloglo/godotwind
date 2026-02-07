@@ -221,6 +221,16 @@ func _cached_file_exists(path: String) -> bool:
 	return exists
 
 
+## Invalidate file existence cache for a specific path or all paths
+## Call after rebaking assets or when disk cache changes
+func invalidate_file_cache(path: String = "") -> void:
+	if path.is_empty():
+		_file_exists_cache.clear()
+		Log.info("models", "File existence cache cleared")
+	else:
+		_file_exists_cache.erase(path)
+
+
 ## Get statistics about model loading
 ## Returns:
 ##   Dictionary with keys: models_loaded, models_from_cache, models_from_disk, models_from_disk_async, etc.
@@ -386,19 +396,23 @@ func process_async_loads() -> int:
 							# Instantiation failed (corrupted mesh data, invalid RIDs)
 							push_warning("ModelLoader: Async instantiate failed: %s" % disk_path)
 							DirAccess.remove_absolute(disk_path)
+							_file_exists_cache.erase(disk_path)
 						elif instance is Node3D:
 							model = instance as Node3D
 						else:
 							# Wrong type - corrupted cache
 							instance.queue_free()
 							DirAccess.remove_absolute(disk_path)
+							_file_exists_cache.erase(disk_path)
 					else:
 						# Empty or corrupted state
 						push_warning("ModelLoader: Async load - empty state: %s" % disk_path)
 						DirAccess.remove_absolute(disk_path)
+						_file_exists_cache.erase(disk_path)
 				else:
 					# Failed to load - corrupted cache
 					DirAccess.remove_absolute(disk_path)
+					_file_exists_cache.erase(disk_path)
 
 				# Cache the result
 				var cache_key: String = _pending_async_loads[disk_path].cache_key
@@ -549,6 +563,7 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 	if not packed_scene:
 		# Cache file is corrupted or incompatible - delete it
 		DirAccess.remove_absolute(disk_path)
+		_file_exists_cache.erase(disk_path)
 		return null
 
 	# Validate PackedScene state before instantiation
@@ -557,6 +572,7 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 	if not state or state.get_node_count() == 0:
 		push_warning("ModelLoader: Corrupted PackedScene (empty state): %s" % disk_path)
 		DirAccess.remove_absolute(disk_path)
+		_file_exists_cache.erase(disk_path)
 		return null
 
 	var instance := packed_scene.instantiate()
@@ -564,12 +580,14 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 		# Instantiation failed (corrupted mesh data, invalid RIDs, etc.)
 		push_warning("ModelLoader: Failed to instantiate scene: %s" % disk_path)
 		DirAccess.remove_absolute(disk_path)
+		_file_exists_cache.erase(disk_path)
 		return null
 
 	if not instance is Node3D:
 		# Wrong type - delete corrupted cache
 		instance.queue_free()
 		DirAccess.remove_absolute(disk_path)
+		_file_exists_cache.erase(disk_path)
 		return null
 
 	# DEBUG: Log all MeshInstance3D nodes in the loaded model to audit for LOD nodes
@@ -829,6 +847,9 @@ func clear_disk_cache() -> void:
 			deleted += 1
 		file_name = dir.get_next()
 	dir.list_dir_end()
+
+	# Invalidate all cached file existence checks
+	_file_exists_cache.clear()
 
 	Log.info("models", "Cleared disk cache (%d files deleted)" % deleted)
 

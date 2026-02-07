@@ -7,6 +7,10 @@ extends Node
 signal task_completed(task_id: int, result: Variant)
 signal task_failed(task_id: int, error: String)
 
+## Maximum time (ms) before a running task is considered hung
+## Can't actually kill the worker thread, but frees the slot for new tasks
+const TASK_TIMEOUT_MS := 30000  # 30 seconds
+
 ## Task entry for tracking
 class TaskEntry:
 	var id: int
@@ -15,6 +19,7 @@ class TaskEntry:
 	var group_task_id: int = -1  # WorkerThreadPool task ID
 	var cancelled: bool = false
 	var started: bool = false
+	var start_time_msec: int = 0  # When task started executing
 
 ## Next task ID
 var _next_task_id: int = 1
@@ -55,6 +60,9 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
+	# Check for timed-out tasks before dispatching results
+	_check_task_timeouts()
+
 	# Dispatch completed results on main thread
 	_dispatch_completed_results()
 
@@ -143,6 +151,7 @@ func _start_pending_tasks() -> void:
 			continue
 
 		task.started = true
+		task.start_time_msec = Time.get_ticks_msec()
 		_active_tasks[task.id] = task
 
 		# Submit to WorkerThreadPool
@@ -192,8 +201,8 @@ func _dispatch_completed_results() -> void:
 		var task: TaskEntry = _active_tasks.get(task_id)
 		_active_tasks.erase(task_id)
 
-		# Skip if cancelled
-		if task and task.cancelled:
+		# Skip if cancelled or already removed (e.g. timed out)
+		if not task or task.cancelled:
 			continue
 
 		# Emit appropriate signal
@@ -201,6 +210,30 @@ func _dispatch_completed_results() -> void:
 			task_completed.emit(task_id, result)
 		else:
 			task_failed.emit(task_id, error)
+
+
+## Check for tasks that have been running longer than TASK_TIMEOUT_MS
+## Can't actually kill the worker thread, but marks the slot as free
+## so new tasks can start. The hung task will eventually complete and
+## its result will be silently discarded (cancelled flag).
+func _check_task_timeouts() -> void:
+	if _active_tasks.is_empty():
+		return
+
+	var now := Time.get_ticks_msec()
+	var timed_out: Array[int] = []
+
+	for task_id: int in _active_tasks:
+		var task: TaskEntry = _active_tasks[task_id]
+		if task.start_time_msec > 0 and now - task.start_time_msec > TASK_TIMEOUT_MS:
+			timed_out.append(task_id)
+
+	for task_id: int in timed_out:
+		var task: TaskEntry = _active_tasks[task_id]
+		task.cancelled = true
+		_active_tasks.erase(task_id)
+		Log.warn("threading", "BackgroundProcessor: Task %d timed out after %ds" % [task_id, TASK_TIMEOUT_MS / 1000])
+		task_failed.emit(task_id, "Task timed out after %d seconds" % [TASK_TIMEOUT_MS / 1000])
 
 
 #region Binary Heap Operations

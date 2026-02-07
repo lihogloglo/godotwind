@@ -98,6 +98,12 @@ const CELL_QUEUE_BUDGET_MS := 2.0
 ## Set to 8ms to leave headroom for rendering (targeting 60 FPS = 16.67ms total)
 const INSTANTIATION_BUDGET_MS := 8.0
 
+## Dynamic budget: fraction of frame time to allocate to instantiation
+## Scales with actual FPS — more budget at low FPS, less at high FPS
+const INSTANTIATION_BUDGET_FRACTION := 0.48  ## 48% of frame time
+const INSTANTIATION_BUDGET_MIN_MS := 2.0     ## Floor: never go below 2ms (even at 240 FPS)
+const INSTANTIATION_BUDGET_MAX_MS := 16.0    ## Cap: never exceed 16ms (even at 15 FPS)
+
 ## NEAR TIER BURST LOADING - Moderate priority for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
 ## use these limits to populate objects faster without exceeding frame budget.

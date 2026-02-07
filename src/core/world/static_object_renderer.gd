@@ -34,6 +34,10 @@ var _mesh_types: Dictionary = {}
 ## All instances: instance_id -> InstanceData
 var _instances: Dictionary = {}
 
+## Spatial index: cell_grid Vector2i -> Array[int] of instance IDs
+## Enables O(cell_count) lookups instead of O(total_instances) for promotion/removal
+var _cell_index: Dictionary = {}
+
 ## Next instance ID
 var _next_id: int = 0
 
@@ -206,6 +210,11 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	_stats["total_instances"] += 1
 	_stats["visible_instances"] += 1
 
+	# Maintain spatial index
+	if cell_grid not in _cell_index:
+		_cell_index[cell_grid] = [] as Array[int]
+	_cell_index[cell_grid].append(id)
+
 	return id
 
 
@@ -229,17 +238,26 @@ func remove_instance(id: int) -> void:
 		_stats["visible_instances"] -= 1
 	_stats["total_instances"] -= 1
 
+	# Maintain spatial index
+	if data.cell_grid in _cell_index:
+		var cell_ids: Array[int] = _cell_index[data.cell_grid]
+		var idx := cell_ids.find(id)
+		if idx >= 0:
+			cell_ids.remove_at(idx)
+		if cell_ids.is_empty():
+			_cell_index.erase(data.cell_grid)
+
 	_instances.erase(id)
 
 
 ## Remove all instances belonging to a cell
+## Uses spatial index for O(cell_size) instead of O(total_instances)
 func remove_cell_instances(cell_grid: Vector2i) -> int:
-	var to_remove: Array[int] = []
+	if cell_grid not in _cell_index:
+		return 0
 
-	for id: int in _instances:
-		var data: InstanceData = _instances[id]
-		if data.cell_grid == cell_grid:
-			to_remove.append(id)
+	# Copy the IDs since remove_instance modifies _cell_index
+	var to_remove: Array[int] = _cell_index[cell_grid].duplicate()
 
 	for id: int in to_remove:
 		remove_instance(id)
@@ -336,6 +354,12 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 	_stats["total_instances"] += ids.size()
 	_stats["visible_instances"] += ids.size()
 
+	# Maintain spatial index for batch
+	if not ids.is_empty():
+		if cell_grid not in _cell_index:
+			_cell_index[cell_grid] = [] as Array[int]
+		_cell_index[cell_grid].append_array(ids)
+
 	return ids
 
 
@@ -349,6 +373,7 @@ func clear(clear_mesh_types: bool = true) -> void:
 		if data.instance_rid.is_valid():
 			rs.free_rid(data.instance_rid)
 	_instances.clear()
+	_cell_index.clear()
 
 	# Free mesh types if requested
 	if clear_mesh_types:
@@ -394,19 +419,23 @@ func get_registered_types() -> Array[String]:
 ## Get instances in cells near the camera that are within promotion distance
 ## Returns array of instance IDs whose origin is within max_distance of camera_pos
 ## Only checks VISIBLE instances in the specified cell grids (skips already-promoted)
+## Uses spatial index for O(nearby_instances) instead of O(total_instances)
 func get_promotable_instances(camera_pos: Vector3, max_distance_sq: float, cell_grids: Array[Vector2i]) -> Array[int]:
 	var result: Array[int] = []
-	for id: int in _instances:
-		var data: InstanceData = _instances[id]
-		if not data.visible:
-			continue  # Already promoted (hidden)
-		if data.cell_grid not in cell_grids:
+	for grid: Vector2i in cell_grids:
+		if grid not in _cell_index:
 			continue
-		if data.model_path.is_empty():
-			continue
-		var dist_sq := camera_pos.distance_squared_to(data.transform.origin)
-		if dist_sq < max_distance_sq:
-			result.append(id)
+		for id: int in _cell_index[grid]:
+			var data: InstanceData = _instances.get(id)
+			if not data:
+				continue
+			if not data.visible:
+				continue  # Already promoted (hidden)
+			if data.model_path.is_empty():
+				continue
+			var dist_sq := camera_pos.distance_squared_to(data.transform.origin)
+			if dist_sq < max_distance_sq:
+				result.append(id)
 	return result
 
 

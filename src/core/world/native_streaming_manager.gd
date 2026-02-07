@@ -166,10 +166,14 @@ var _stats: Dictionary = {
 ## Whether the manager has been initialized
 var _initialized: bool = false
 
+## Frame budget overrun tracking
+var _frame_overrun_count: int = 0
+var _last_overrun_log_frame: int = 0
+
 ## Startup phase state - controls staggered loading during initial population
 var _startup_phase: bool = true
 var _startup_frames: int = 0
-const STARTUP_PHASE_FRAMES: int = 30  # ~0.5 seconds at 60 FPS
+const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit condition
 
 #endregion
 
@@ -311,6 +315,9 @@ func _process(delta: float) -> void:
 				Log.debug("streaming", "_process skipped: no camera")
 			return
 
+	# Start timing for frame budget telemetry
+	var _frame_start_usec := Time.get_ticks_usec()
+
 	# Update camera position
 	_camera_position = _camera.global_position
 	var new_cell := DU.world_to_cell(_camera_position)
@@ -338,7 +345,8 @@ func _process(delta: float) -> void:
 
 		# Phase 2: Process async instantiation (progressive object creation)
 		var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
-		var instantiated := _cell_manager.process_async_instantiation(frame_budget_ms, _camera_position, camera_fwd)
+		var dynamic_budget := _get_dynamic_budget(delta)
+		var instantiated := _cell_manager.process_async_instantiation(dynamic_budget, _camera_position, camera_fwd)
 		if instantiated > 0 and debug_enabled:
 			_debug("Instantiated %d objects this frame" % instantiated)
 
@@ -350,6 +358,15 @@ func _process(delta: float) -> void:
 	else:
 		# Fallback: synchronous loading (blocks frame)
 		_process_pending_loads_sync(delta)
+
+	# Frame budget telemetry — detect when combined streaming work exceeds budget
+	var total_ms := (Time.get_ticks_usec() - _frame_start_usec) / 1000.0
+	if total_ms > frame_budget_ms * 1.5:
+		_frame_overrun_count += 1
+		# Log at most once per 60 frames to avoid spam
+		if Engine.get_frames_drawn() - _last_overrun_log_frame > 60:
+			Log.warn("streaming", "Frame budget overrun: %.1fms (budget: %.1fms, overruns: %d)" % [total_ms, frame_budget_ms, _frame_overrun_count])
+			_last_overrun_log_frame = Engine.get_frames_drawn()
 
 
 ## Update which cells should be loaded based on camera position
@@ -972,7 +989,8 @@ func _process_pending_loads_sync(_delta: float) -> void:
 func get_stats() -> Dictionary:
 	var s := _stats.duplicate()
 
-	# Add load queue stats
+	# Add load queue stats and telemetry
+	s["frame_overrun_count"] = _frame_overrun_count
 	s["load_queue_size"] = _pending_load_queue.size()
 	s["async_requests"] = _async_requests.size()
 	s["async_loading_enabled"] = async_loading_enabled
@@ -1103,6 +1121,20 @@ func get_loaded_cell_coordinates() -> Array[Vector2i]:
 func refresh_cells() -> void:
 	if _initialized:
 		_update_loaded_cells()
+
+#endregion
+
+
+#region Utilities
+
+## Calculate dynamic frame budget based on actual FPS
+## At 60 FPS: ~8ms (same as static INSTANTIATION_BUDGET_MS)
+## At 30 FPS: ~16ms (more time per frame available)
+## At 120 FPS: ~4ms (less time to stay within frame budget)
+func _get_dynamic_budget(delta: float) -> float:
+	var frame_time_ms := delta * 1000.0
+	var budget := frame_time_ms * SC.INSTANTIATION_BUDGET_FRACTION
+	return clampf(budget, SC.INSTANTIATION_BUDGET_MIN_MS, SC.INSTANTIATION_BUDGET_MAX_MS)
 
 #endregion
 
