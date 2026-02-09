@@ -19,11 +19,17 @@ extends Node3D
 
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const MeshExtractor := preload("res://src/core/character/mixamo/mesh_extractor.gd")
+const NIFReader := preload("res://src/core/nif/nif_reader.gd")
+const NIFDefs := preload("res://src/core/nif/nif_defs.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
-# Inv bind modes
+# Inv bind modes (for skinned parts)
 enum BindMode { COMPOSED, OPENMW, SKELETON_REST }
 var _current_mode: BindMode = BindMode.COMPOSED
+
+# Static attachment modes (for non-skinned parts)
+enum StaticMode { BONE_REST_INV, DIRECT, IDENTITY, ATTACHMENT }
+var _static_mode: StaticMode = StaticMode.ATTACHMENT
 
 # Scene containers
 var _skel_container: Node3D = null     # Left: skeleton only
@@ -34,24 +40,59 @@ var _info_label: RichTextLabel = null
 # Cached data
 var _skeleton_template: Skeleton3D = null
 var _body_part_data: Dictionary = {}   # slot_name -> MeshExtractor.MeshData array
+var _attachment_transforms: Dictionary = {}  # attachment_name_lower -> Transform3D (local, relative to parent Bip01 bone)
 
-# Slot coloring for visual identification
-# Slot-to-bone mapping for the test (string slot names -> Bip01 bone names)
+# Slot-to-bone mapping: which Bip01 bone is the PARENT of the named attachment node
+# Must match the actual NIF hierarchy (verified from xbase_anim.nif dump)
 const TEST_SLOT_TO_BONE := {
 	"HEAD": "bip01 head",
 	"HAIR": "bip01 head",
 	"NECK": "bip01 neck",
 	"SKINS": "bip01 spine1",
-	"CHEST": "bip01 spine1",
+	"CHEST": "bip01 spine2",        # Chest attachment is child of Bip01 Spine2 (not Spine1)
 	"GROIN": "bip01 pelvis",
 	"UPPER_ARM_R": "bip01 r upperarm",
+	"UPPER_ARM_L": "bip01 l upperarm",
 	"FOREARM_R": "bip01 r forearm",
+	"FOREARM_L": "bip01 l forearm",
 	"HAND_R": "bip01 r hand",
+	"HAND_L": "bip01 l hand",
 	"WRIST_R": "bip01 r forearm",
+	"WRIST_L": "bip01 l forearm",
 	"UPPER_LEG_R": "bip01 r thigh",
+	"UPPER_LEG_L": "bip01 l thigh",
 	"KNEE_R": "bip01 r calf",
-	"ANKLE_R": "bip01 r foot",
+	"KNEE_L": "bip01 l calf",
+	"ANKLE_R": "bip01 r calf",      # Ankle attachment is child of Bip01 R Calf (not Foot)
+	"ANKLE_L": "bip01 l calf",
 	"FOOT_R": "bip01 r foot",
+	"FOOT_L": "bip01 l foot",
+}
+
+# Maps slot name -> OpenMW-style attachment node name in xbase_anim.nif
+# Body part vertices are authored in the attachment node's local frame
+const SLOT_TO_ATTACHMENT := {
+	"HEAD": "head",
+	"HAIR": "head",
+	"NECK": "neck",
+	"CHEST": "chest",
+	"GROIN": "groin",
+	"UPPER_ARM_R": "right upper arm",
+	"UPPER_ARM_L": "left upper arm",
+	"FOREARM_R": "right forearm",
+	"FOREARM_L": "left forearm",
+	"HAND_R": "right hand",
+	"HAND_L": "left hand",
+	"WRIST_R": "right wrist",
+	"WRIST_L": "left wrist",
+	"UPPER_LEG_R": "right upper leg",
+	"UPPER_LEG_L": "left upper leg",
+	"KNEE_R": "right knee",
+	"KNEE_L": "left knee",
+	"ANKLE_R": "right ankle",
+	"ANKLE_L": "left ankle",
+	"FOOT_R": "right foot",
+	"FOOT_L": "left foot",
 }
 
 const SLOT_COLORS := {
@@ -62,14 +103,37 @@ const SLOT_COLORS := {
 	"CHEST": Color(0.3, 0.5, 1.0),      # Blue
 	"GROIN": Color(0.3, 0.3, 0.8),      # Dark blue
 	"UPPER_ARM_R": Color(0.3, 0.8, 0.3),# Green
+	"UPPER_ARM_L": Color(0.3, 0.8, 0.3),
 	"FOREARM_R": Color(0.4, 0.9, 0.4),  # Light green
+	"FOREARM_L": Color(0.4, 0.9, 0.4),
 	"HAND_R": Color(0.5, 1.0, 0.5),     # Pale green
+	"HAND_L": Color(0.5, 1.0, 0.5),
 	"WRIST_R": Color(0.6, 1.0, 0.6),    # Lighter green
+	"WRIST_L": Color(0.6, 1.0, 0.6),
 	"UPPER_LEG_R": Color(0.9, 0.9, 0.2),# Yellow
+	"UPPER_LEG_L": Color(0.9, 0.9, 0.2),
 	"KNEE_R": Color(0.8, 0.8, 0.3),     # Dark yellow
+	"KNEE_L": Color(0.8, 0.8, 0.3),
 	"ANKLE_R": Color(0.7, 0.7, 0.4),    # Olive
+	"ANKLE_L": Color(0.7, 0.7, 0.4),
 	"FOOT_R": Color(0.6, 0.6, 0.5),     # Tan
+	"FOOT_L": Color(0.6, 0.6, 0.5),
 }
+
+# Right-to-left slot mapping for auto-mirroring
+const RIGHT_TO_LEFT := {
+	"UPPER_ARM_R": "UPPER_ARM_L",
+	"FOREARM_R": "FOREARM_L",
+	"WRIST_R": "WRIST_L",
+	"UPPER_LEG_R": "UPPER_LEG_L",
+	"KNEE_R": "KNEE_L",
+	"ANKLE_R": "ANKLE_L",
+	"FOOT_R": "FOOT_L",
+}
+
+# Left-side slots (need X-axis mirroring)
+const LEFT_SLOTS := ["UPPER_ARM_L", "FOREARM_L", "HAND_L", "WRIST_L",
+	"UPPER_LEG_L", "KNEE_L", "ANKLE_L", "FOOT_L"]
 
 # Known body part paths for Dark Elf male (common test race)
 # "skins" file contains chest+hands+wrists as sub-meshes
@@ -101,6 +165,7 @@ func _ready() -> void:
 
 	_load_all_data()
 	_rebuild_all()
+	_dump_debug_info()
 
 
 func _ensure_data_loaded() -> void:
@@ -146,11 +211,25 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_3:
 				_current_mode = BindMode.SKELETON_REST
 				_rebuild_characters()
+			KEY_4:
+				_static_mode = StaticMode.BONE_REST_INV
+				_rebuild_characters()
+			KEY_5:
+				_static_mode = StaticMode.DIRECT
+				_rebuild_characters()
+			KEY_6:
+				_static_mode = StaticMode.IDENTITY
+				_rebuild_characters()
+			KEY_7:
+				_static_mode = StaticMode.ATTACHMENT
+				_rebuild_characters()
 			KEY_R:
 				_load_all_data()
 				_rebuild_all()
 			KEY_D:
 				_dump_debug_info()
+			KEY_H:
+				_dump_nif_hierarchy()
 
 
 # =============================================================================
@@ -160,10 +239,14 @@ func _unhandled_input(event: InputEvent) -> void:
 func _load_all_data() -> void:
 	_skeleton_template = _load_skeleton()
 	_body_part_data.clear()
+	_attachment_transforms.clear()
 
 	if not _skeleton_template:
 		push_error("CharacterAssemblyTest: Failed to load skeleton")
 		return
+
+	# Extract attachment node transforms from xbase_anim.nif
+	_extract_attachment_transforms()
 
 	var bsa_mgr = get_node_or_null("/root/BSAManager")
 	if not bsa_mgr:
@@ -181,6 +264,12 @@ func _load_all_data() -> void:
 				Log.warn("character", "No meshes from: %s" % path)
 		else:
 			Log.warn("character", "BSA missing: %s" % path)
+
+	# Auto-generate left-side from right-side (Morrowind ships right-side only)
+	for right_slot in RIGHT_TO_LEFT:
+		var left_slot: String = RIGHT_TO_LEFT[right_slot]
+		if right_slot in _body_part_data and left_slot not in _body_part_data:
+			_body_part_data[left_slot] = _body_part_data[right_slot]
 
 	Log.info("character", "Loaded skeleton (%d bones) + %d body parts" % [
 		_skeleton_template.get_bone_count(), _body_part_data.size()])
@@ -207,6 +296,62 @@ func _load_skeleton() -> Skeleton3D:
 		scene.queue_free()
 
 	return skeleton
+
+
+## Extract attachment node transforms from xbase_anim.nif
+## These named nodes ("Head", "Right Upper Arm", etc.) define the local frame
+## that body part mesh vertices are authored in.
+func _extract_attachment_transforms() -> void:
+	var bsa_mgr = get_node_or_null("/root/BSAManager")
+	if not bsa_mgr:
+		return
+
+	var data: PackedByteArray = bsa_mgr.extract_file("meshes\\xbase_anim.nif")
+	if data.is_empty():
+		return
+
+	var reader := NIFReader.new()
+	var err := reader.load_buffer(data, "meshes\\xbase_anim.nif")
+	if err != OK:
+		return
+
+	# Walk the NIF hierarchy and collect attachment node transforms
+	for root_idx in reader.roots:
+		var root := reader.get_record(root_idx)
+		if root is NIFDefs.NiNode:
+			_collect_attachment_transforms(reader, root as NIFDefs.NiNode)
+
+	Log.info("character", "Extracted %d attachment node transforms" % _attachment_transforms.size())
+
+
+## Known attachment node names (OpenMW convention)
+const ATTACHMENT_NAMES := [
+	"head", "neck", "chest", "groin",
+	"right hand", "left hand", "right wrist", "left wrist",
+	"right forearm", "left forearm", "right upper arm", "left upper arm",
+	"right foot", "left foot", "right ankle", "left ankle",
+	"right knee", "left knee", "right upper leg", "left upper leg",
+	"right clavicle", "left clavicle", "weapon bone", "shield bone", "tail",
+]
+
+func _collect_attachment_transforms(reader: NIFReader, node: NIFDefs.NiNode) -> void:
+	var node_name: String = node.name if node.name else ""
+	var name_lower := node_name.to_lower()
+
+	# If this is a known attachment node, store its local transform
+	if name_lower in ATTACHMENT_NAMES:
+		var local_nif := Transform3D.IDENTITY
+		if node.transform:
+			local_nif = node.transform.to_transform3d()
+		_attachment_transforms[name_lower] = CS.transform_to_godot(local_nif)
+
+	# Recurse children
+	for child_idx in node.children_indices:
+		if child_idx < 0:
+			continue
+		var child := reader.get_record(child_idx)
+		if child is NIFDefs.NiNode:
+			_collect_attachment_transforms(reader, child as NIFDefs.NiNode)
 
 
 # =============================================================================
@@ -327,10 +472,10 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 	skeleton.name = "Skeleton3D"
 	container.add_child(skeleton)
 
-	# Add mode label above character
+	# Add mode labels above character
 	var mode_label := Label3D.new()
-	mode_label.text = _mode_name(mode)
-	mode_label.font_size = 48
+	mode_label.text = _mode_name(mode) + "\n" + _static_mode_name(_static_mode)
+	mode_label.font_size = 36
 	mode_label.pixel_size = 0.001
 	mode_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	mode_label.no_depth_test = true
@@ -347,9 +492,11 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 			var extracted: MeshExtractor.MeshData = mesh_data
 			var array_mesh := MeshExtractor.create_array_mesh(extracted)
 
+			var is_left: bool = slot_name in LEFT_SLOTS
+
 			var mat := StandardMaterial3D.new()
 			mat.albedo_color = color
-			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mat.cull_mode = BaseMaterial3D.CULL_FRONT if is_left else BaseMaterial3D.CULL_DISABLED
 			array_mesh.surface_set_material(0, mat)
 
 			if extracted.is_skinned:
@@ -374,9 +521,31 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 				var bone_idx := _find_bone_ci(skeleton, bone_name) if not bone_name.is_empty() else -1
 
 				if bone_idx >= 0:
-					# Vertices are in NIF geometry-local space, not bone-local.
-					# Compensate the bone's rest rotation so mesh appears correct.
-					instance.transform = skeleton.get_bone_global_rest(bone_idx).affine_inverse() * extracted.node_transform
+					# Apply transform based on selected static mode
+					match _static_mode:
+						StaticMode.BONE_REST_INV:
+							# Original (broken): undoes bone positioning
+							instance.transform = skeleton.get_bone_global_rest(bone_idx).affine_inverse() * extracted.node_transform
+						StaticMode.DIRECT:
+							# NIF transforms only (usually identity)
+							instance.transform = extracted.node_transform
+						StaticMode.IDENTITY:
+							# Pure bone-local: no additional transform
+							instance.transform = Transform3D.IDENTITY
+						StaticMode.ATTACHMENT:
+							# Compose attachment node transform with NIF scene root transform.
+							# OpenMW: v_world = bone * attachment_local * nif_root * v_mesh
+							# The NIF root rotation is ~inverse of attachment rotation,
+							# so the composition yields ~identity rotation + combined translation.
+							var attach_name: String = SLOT_TO_ATTACHMENT.get(slot_name, "")
+							if not attach_name.is_empty() and attach_name in _attachment_transforms:
+								instance.transform = _attachment_transforms[attach_name] * extracted.node_transform
+							else:
+								instance.transform = extracted.node_transform
+
+					# Left-side mirroring: scale X by -1
+					if is_left:
+						instance.scale.x *= -1.0
 
 					var attachment := BoneAttachment3D.new()
 					attachment.name = "Attach_%s" % slot_name
@@ -455,7 +624,9 @@ func _update_info() -> void:
 
 	var lines := PackedStringArray()
 	lines.append("[b]Character Assembly Diagnostic[/b]")
-	lines.append("Keys: [1] Composed  [2] OpenMW  [3] Skeleton Rest  [R] Reload  [D] Dump")
+	lines.append("Skinned: [1] Composed  [2] OpenMW  [3] Skeleton Rest")
+	lines.append("Static:  [4] BoneRestInv  [5] Direct  [6] Identity  [7] Attachment")
+	lines.append("[R] Reload  [D] Dump debug info")
 	lines.append("")
 
 	# Skeleton info
@@ -503,13 +674,14 @@ func _update_info() -> void:
 	lines.append("")
 
 	# Mode info
-	lines.append("[color=white]Center: [b]%s[/b][/color]" % _mode_name(_current_mode))
+	lines.append("[color=white]Skinned: [b]%s[/b][/color]" % _mode_name(_current_mode))
+	lines.append("[color=white]Static: [b]%s[/b][/color]" % _static_mode_name(_static_mode))
 	var alt_mode: BindMode
 	match _current_mode:
 		BindMode.COMPOSED: alt_mode = BindMode.OPENMW
 		BindMode.OPENMW: alt_mode = BindMode.SKELETON_REST
 		BindMode.SKELETON_REST: alt_mode = BindMode.COMPOSED
-	lines.append("[color=gray]Right: %s[/color]" % _mode_name(alt_mode))
+	lines.append("[color=gray]Right panel: %s[/color]" % _mode_name(alt_mode))
 
 	_info_label.text = "\n".join(lines)
 
@@ -522,12 +694,23 @@ func _mode_name(mode: BindMode) -> String:
 		_: return "UNKNOWN"
 
 
+func _static_mode_name(mode: StaticMode) -> String:
+	match mode:
+		StaticMode.BONE_REST_INV: return "Static: BONE_REST_INV (broken)"
+		StaticMode.DIRECT: return "Static: DIRECT (node_transform)"
+		StaticMode.IDENTITY: return "Static: IDENTITY (no transform)"
+		StaticMode.ATTACHMENT: return "Static: ATTACHMENT (named node xform)"
+		_: return "Static: UNKNOWN"
+
+
 # =============================================================================
 # DEBUG DUMP
 # =============================================================================
 
 func _dump_debug_info() -> void:
 	Log.info("character", "=== CHARACTER ASSEMBLY DEBUG DUMP ===")
+	Log.info("character", "Skinned mode: %s" % _mode_name(_current_mode))
+	Log.info("character", "Static mode: %s" % _static_mode_name(_static_mode))
 
 	if _skeleton_template:
 		Log.info("character", "Skeleton: %d bones" % _skeleton_template.get_bone_count())
@@ -549,14 +732,24 @@ func _dump_debug_info() -> void:
 			var extracted: MeshExtractor.MeshData = mesh_data
 			var attach_type := "SKINNED" if extracted.is_skinned else "STATIC"
 
+			# Compute vertex AABB
+			var aabb := _compute_vertex_aabb(extracted.vertices)
+
 			Log.info("character", "Body Part: %s [%s] (%d verts, %d bones)" % [
 				slot_name, attach_type, extracted.vertices.size(), extracted.bone_names.size()])
+			Log.info("character", "  vertex_aabb: min=(%.4f,%.4f,%.4f) max=(%.4f,%.4f,%.4f)" % [
+				aabb[0].x, aabb[0].y, aabb[0].z, aabb[1].x, aabb[1].y, aabb[1].z])
+			Log.info("character", "  vertex_center: (%.4f,%.4f,%.4f) size=(%.4f,%.4f,%.4f)" % [
+				aabb[2].x, aabb[2].y, aabb[2].z, aabb[3].x, aabb[3].y, aabb[3].z])
 
 			if extracted.is_skinned:
+				var st := extracted.skin_transform
 				Log.info("character", "  skin_transform: origin=(%.4f,%.4f,%.4f)" % [
-					extracted.skin_transform.origin.x,
-					extracted.skin_transform.origin.y,
-					extracted.skin_transform.origin.z])
+					st.origin.x, st.origin.y, st.origin.z])
+				Log.info("character", "    basis_x=(%.3f,%.3f,%.3f) basis_y=(%.3f,%.3f,%.3f) basis_z=(%.3f,%.3f,%.3f)" % [
+					st.basis.x.x, st.basis.x.y, st.basis.x.z,
+					st.basis.y.x, st.basis.y.y, st.basis.y.z,
+					st.basis.z.x, st.basis.z.y, st.basis.z.z])
 
 				for j in extracted.bone_names.size():
 					var bone_name: String = extracted.bone_names[j]
@@ -575,13 +768,148 @@ func _dump_debug_info() -> void:
 			else:
 				var target_bone: String = TEST_SLOT_TO_BONE.get(slot_name, "")
 				var bone_idx := _find_bone_ci(_skeleton_template, target_bone) if _skeleton_template and not target_bone.is_empty() else -1
-				Log.info("character", "  target_bone: %s (idx=%d), node_transform origin=(%.4f,%.4f,%.4f)" % [
-					target_bone if not target_bone.is_empty() else "NONE", bone_idx,
-					extracted.node_transform.origin.x,
-					extracted.node_transform.origin.y,
-					extracted.node_transform.origin.z])
+
+				# Full node_transform
+				var nt := extracted.node_transform
+				Log.info("character", "  node_transform: origin=(%.4f,%.4f,%.4f)" % [
+					nt.origin.x, nt.origin.y, nt.origin.z])
+				Log.info("character", "    basis_x=(%.3f,%.3f,%.3f) basis_y=(%.3f,%.3f,%.3f) basis_z=(%.3f,%.3f,%.3f)" % [
+					nt.basis.x.x, nt.basis.x.y, nt.basis.x.z,
+					nt.basis.y.x, nt.basis.y.y, nt.basis.y.z,
+					nt.basis.z.x, nt.basis.z.y, nt.basis.z.z])
+
+				# Bone info
+				if bone_idx >= 0 and _skeleton_template:
+					var bone_rest := _skeleton_template.get_bone_global_rest(bone_idx)
+					Log.info("character", "  target_bone: %s (idx=%d)" % [target_bone, bone_idx])
+					Log.info("character", "    bone_global_rest: origin=(%.4f,%.4f,%.4f)" % [
+						bone_rest.origin.x, bone_rest.origin.y, bone_rest.origin.z])
+					Log.info("character", "    basis_x=(%.3f,%.3f,%.3f) basis_y=(%.3f,%.3f,%.3f) basis_z=(%.3f,%.3f,%.3f)" % [
+						bone_rest.basis.x.x, bone_rest.basis.x.y, bone_rest.basis.x.z,
+						bone_rest.basis.y.x, bone_rest.basis.y.y, bone_rest.basis.y.z,
+						bone_rest.basis.z.x, bone_rest.basis.z.y, bone_rest.basis.z.z])
+
+					# Distance from vertex center to bone position
+					var center_vec: Vector3 = aabb[2]
+					var dist: float = center_vec.distance_to(bone_rest.origin)
+					Log.info("character", "    distance vertex_center→bone: %.4f m" % dist)
+
+					# Computed instance transforms for each mode
+					var t_rest_inv := bone_rest.affine_inverse() * nt
+					Log.info("character", "    [BONE_REST_INV] result origin=(%.4f,%.4f,%.4f)" % [
+						t_rest_inv.origin.x, t_rest_inv.origin.y, t_rest_inv.origin.z])
+					Log.info("character", "    [DIRECT]        result origin=(%.4f,%.4f,%.4f)" % [
+						nt.origin.x, nt.origin.y, nt.origin.z])
+					Log.info("character", "    [IDENTITY]      result origin=(0,0,0)")
+
+					# ATTACHMENT result
+					var attach_name: String = SLOT_TO_ATTACHMENT.get(slot_name, "")
+					if not attach_name.is_empty() and attach_name in _attachment_transforms:
+						var t_attach: Transform3D = _attachment_transforms[attach_name] * nt
+						Log.info("character", "    [ATTACHMENT]    result origin=(%.4f,%.4f,%.4f)" % [
+							t_attach.origin.x, t_attach.origin.y, t_attach.origin.z])
+						Log.info("character", "      basis_x=(%.3f,%.3f,%.3f) basis_y=(%.3f,%.3f,%.3f) basis_z=(%.3f,%.3f,%.3f)" % [
+							t_attach.basis.x.x, t_attach.basis.x.y, t_attach.basis.x.z,
+							t_attach.basis.y.x, t_attach.basis.y.y, t_attach.basis.y.z,
+							t_attach.basis.z.x, t_attach.basis.z.y, t_attach.basis.z.z])
+				else:
+					Log.info("character", "  target_bone: %s — NOT FOUND" % (target_bone if not target_bone.is_empty() else "NONE"))
+
+				# BoneOffset info
+				if "has_bone_offset" in extracted and extracted.has_bone_offset:
+					Log.info("character", "  bone_offset: (%.4f,%.4f,%.4f)" % [
+						extracted.bone_offset_position.x,
+						extracted.bone_offset_position.y,
+						extracted.bone_offset_position.z])
 
 	Log.info("character", "=== END DEBUG DUMP ===")
+
+
+# =============================================================================
+# NIF HIERARCHY DUMP — find named attachment nodes
+# =============================================================================
+
+func _dump_nif_hierarchy() -> void:
+	Log.info("character", "=== NIF HIERARCHY DUMP (xbase_anim.nif) ===")
+
+	var bsa_mgr = get_node_or_null("/root/BSAManager")
+	if not bsa_mgr:
+		Log.error("character", "BSAManager not available")
+		return
+
+	var data: PackedByteArray = bsa_mgr.extract_file("meshes\\xbase_anim.nif")
+	if data.is_empty():
+		Log.error("character", "Cannot load xbase_anim.nif")
+		return
+
+	var reader := NIFReader.new()
+	var err := reader.load_buffer(data, "meshes\\xbase_anim.nif")
+	if err != OK:
+		Log.error("character", "Failed to parse xbase_anim.nif")
+		return
+
+	# Walk full hierarchy from roots
+	for root_idx in reader.roots:
+		var root := reader.get_record(root_idx)
+		if root is NIFDefs.NiNode:
+			_dump_nif_node(reader, root as NIFDefs.NiNode, 0, Transform3D.IDENTITY)
+
+	Log.info("character", "=== END NIF HIERARCHY ===")
+
+
+func _dump_nif_node(reader: NIFReader, node: NIFDefs.NiNode, depth: int, parent_accumulated: Transform3D) -> void:
+	var indent := "  ".repeat(depth)
+	var node_name: String = node.name if node.name else "(unnamed)"
+	var name_lower := node_name.to_lower()
+
+	# Get local transform from NIF (in NIF space, before coordinate conversion)
+	var local_nif := Transform3D.IDENTITY
+	if node.transform:
+		local_nif = node.transform.to_transform3d()
+
+	# Accumulated transform in NIF space
+	var accumulated_nif := parent_accumulated * local_nif
+
+	# Convert to Godot space for display
+	var local_godot := CS.transform_to_godot(local_nif)
+	var accumulated_godot := CS.transform_to_godot(accumulated_nif)
+
+	# Mark special nodes
+	var marker := ""
+	if name_lower.begins_with("bip01"):
+		marker = " [BONE]"
+	elif name_lower in ["head", "neck", "chest", "groin", "right hand", "left hand",
+			"right wrist", "left wrist", "right forearm", "left forearm",
+			"right upper arm", "left upper arm", "right foot", "left foot",
+			"right ankle", "left ankle", "right knee", "left knee",
+			"right upper leg", "left upper leg", "right clavicle", "left clavicle",
+			"weapon bone", "shield bone", "tail"]:
+		marker = " [ATTACHMENT]"
+
+	# Print node info
+	var local_pos := local_godot.origin
+	var accum_pos := accumulated_godot.origin
+	Log.info("character", "%s%s%s  local=(%.4f,%.4f,%.4f)  global=(%.4f,%.4f,%.4f)" % [
+		indent, node_name, marker,
+		local_pos.x, local_pos.y, local_pos.z,
+		accum_pos.x, accum_pos.y, accum_pos.z])
+
+	# For attachment nodes, also print basis to compare with parent Bip01 bone
+	if marker == " [ATTACHMENT]":
+		var lb := local_godot.basis
+		Log.info("character", "%s  local_basis: x=(%.3f,%.3f,%.3f) y=(%.3f,%.3f,%.3f) z=(%.3f,%.3f,%.3f)" % [
+			indent,
+			lb.x.x, lb.x.y, lb.x.z,
+			lb.y.x, lb.y.y, lb.y.z,
+			lb.z.x, lb.z.y, lb.z.z])
+
+	# Recurse children
+	for child_idx in node.children_indices:
+		if child_idx < 0:
+			continue
+		var child := reader.get_record(child_idx)
+		if child is NIFDefs.NiNode:
+			_dump_nif_node(reader, child as NIFDefs.NiNode, depth + 1, accumulated_nif)
 
 
 # =============================================================================
@@ -688,6 +1016,24 @@ func _setup_ui() -> void:
 # =============================================================================
 # UTILITY
 # =============================================================================
+
+## Compute vertex AABB → [min, max, center, size]
+func _compute_vertex_aabb(vertices: PackedVector3Array) -> Array:
+	if vertices.is_empty():
+		return [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
+	var aabb_min := Vector3(INF, INF, INF)
+	var aabb_max := Vector3(-INF, -INF, -INF)
+	for v in vertices:
+		aabb_min.x = minf(aabb_min.x, v.x)
+		aabb_min.y = minf(aabb_min.y, v.y)
+		aabb_min.z = minf(aabb_min.z, v.z)
+		aabb_max.x = maxf(aabb_max.x, v.x)
+		aabb_max.y = maxf(aabb_max.y, v.y)
+		aabb_max.z = maxf(aabb_max.z, v.z)
+	var center := (aabb_min + aabb_max) * 0.5
+	var size := aabb_max - aabb_min
+	return [aabb_min, aabb_max, center, size]
+
 
 func _duplicate_skeleton(source: Skeleton3D) -> Skeleton3D:
 	var skeleton := Skeleton3D.new()

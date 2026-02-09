@@ -41,7 +41,7 @@ const SLOT_TO_BONE := {
 	Slot.HEAD: "bip01 head",
 	Slot.HAIR: "bip01 head",
 	Slot.NECK: "bip01 neck",
-	Slot.CHEST: "bip01 spine1",
+	Slot.CHEST: "bip01 spine2",  # Chest attachment is child of Bip01 Spine2 in xbase_anim.nif
 	Slot.GROIN: "bip01 pelvis",
 	Slot.SKIRT: "bip01 pelvis",
 	Slot.HAND_R: "bip01 r hand",
@@ -54,8 +54,8 @@ const SLOT_TO_BONE := {
 	Slot.UPPER_ARM_L: "bip01 l upperarm",
 	Slot.FOOT_R: "bip01 r foot",
 	Slot.FOOT_L: "bip01 l foot",
-	Slot.ANKLE_R: "bip01 r foot",
-	Slot.ANKLE_L: "bip01 l foot",
+	Slot.ANKLE_R: "bip01 r calf",  # Ankle attachment is child of Bip01 R Calf in xbase_anim.nif
+	Slot.ANKLE_L: "bip01 l calf",
 	Slot.KNEE_R: "bip01 r calf",
 	Slot.KNEE_L: "bip01 l calf",
 	Slot.UPPER_LEG_R: "bip01 r thigh",

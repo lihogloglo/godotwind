@@ -34,6 +34,10 @@ class MeshData:
 	var node_transform: Transform3D = Transform3D.IDENTITY  # Accumulated NIF hierarchy transform (in Godot space)
 	var parent_bone_name: String = ""  # Parent NiNode name (bone to attach static meshes to)
 
+	## BoneOffset (from NIF "BoneOffset" NiNode, per OpenMW convention)
+	var bone_offset_position: Vector3 = Vector3.ZERO  # Translation from BoneOffset node
+	var has_bone_offset: bool = false
+
 	## Material info
 	var texture_path: String = ""
 	var material_properties: Dictionary = {}
@@ -85,13 +89,54 @@ static func extract_from_buffer(buffer: PackedByteArray, path_hint: String = "")
 static func _extract_from_reader(reader: NIFReader, source_path: String) -> Array[MeshData]:
 	var meshes: Array[MeshData] = []
 
+	# Search for BoneOffset node in the NIF (per OpenMW convention)
+	# BoneOffset provides a translation offset for non-skinned body parts
+	var bone_offset := Vector3.ZERO
+	var found_bone_offset := false
+	for root_idx in reader.roots:
+		var root := reader.get_record(root_idx)
+		if root:
+			var offset: Variant = _find_bone_offset(reader, root)
+			if offset != null:
+				bone_offset = offset
+				found_bone_offset = true
+				break
+
 	# Process all root nodes
 	for root_idx in reader.roots:
 		var root := reader.get_record(root_idx)
 		if root:
 			_extract_recursive(reader, root, Transform3D.IDENTITY, "", meshes, source_path)
 
+	# Apply BoneOffset to all extracted meshes
+	if found_bone_offset:
+		for mesh in meshes:
+			mesh.bone_offset_position = bone_offset
+			mesh.has_bone_offset = true
+
 	return meshes
+
+
+## Search for a "BoneOffset" NiNode in the NIF hierarchy (per OpenMW convention)
+## Returns the converted translation vector, or null if not found
+static func _find_bone_offset(reader: NIFReader, record: NIFDefs.NIFRecord) -> Variant:
+	if record is NIFDefs.NiNode:
+		var node := record as NIFDefs.NiNode
+		if node.name and node.name.to_lower() == "boneoffset":
+			# Extract translation only (OpenMW ignores rotation/scale on BoneOffset)
+			var transform := _get_node_transform(node)
+			return CS.vector_to_godot(transform.origin)
+
+		# Recurse into children
+		for child_idx in node.children_indices:
+			if child_idx >= 0:
+				var child := reader.get_record(child_idx)
+				if child:
+					var result: Variant = _find_bone_offset(reader, child)
+					if result != null:
+						return result
+
+	return null
 
 
 ## Recursively extract meshes from NIF node tree
@@ -414,17 +459,9 @@ static func _extract_material_info(reader: NIFReader, geom: NIFDefs.NiGeometry, 
 
 ## Get transform from a NIF node
 static func _get_node_transform(record: NIFDefs.NIFRecord) -> Transform3D:
-	if "translation" in record and "rotation" in record:
-		var translation: Vector3 = record.translation
-		var rotation: Basis = record.rotation
-		var scale_val: float = record.scale if "scale" in record else 1.0
-
-		var basis := rotation
-		if scale_val != 1.0:
-			basis = basis.scaled(Vector3(scale_val, scale_val, scale_val))
-
-		return Transform3D(basis, translation)
-
+	# NiAVObject stores transform as a NIFTransform sub-object, not direct properties
+	if record is NIFDefs.NiAVObject:
+		return record.transform.to_transform3d()
 	return Transform3D.IDENTITY
 
 

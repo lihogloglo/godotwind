@@ -572,16 +572,79 @@ The generic `BodyPartAssembler` would have a simpler path for modern characters 
 
 ---
 
-## Summary of Changes Needed
+## Root Cause Analysis — Static Part Transform (2026-02-09)
 
-| Priority | Change | File(s) | Complexity |
-|----------|--------|---------|------------|
-| **P0** | Use `SLOT_TO_BONE` for non-skinned attachment | `morrowind_npc_assembler.gd` | Low |
-| **P0** | Pass slot through to `_attach_static_mesh()` | `morrowind_npc_assembler.gd` | Low |
-| **P1** | Add left-side mirroring (X=-1 scale) | `morrowind_npc_assembler.gd` | Medium |
-| **P1** | Populate left-side slots from right-side data | `morrowind_npc_assembler.gd`, `morrowind_body_part_slots.gd` | Medium |
-| **P2** | Fix test to show non-skinned parts | `character_assembly_test.gd` | Low |
-| **P2** | Add `SKELETON_REST` fallback for unreliable inv_bind | `morrowind_npc_assembler.gd` | Low |
-| **P3** | Debug visualization (color by attachment method) | `character_assembly_test.gd` | Low |
+### Confirmed Symptom
 
-The P0 changes alone should make all body parts visible. P1 adds the missing left side. P2 improves diagnostics.
+All non-skinned body parts **cluster at the skeleton root** (origin). They are visible but positioned at (0,0,0) instead of at their corresponding bones.
+
+### Root Cause
+
+The transform formula in `_attach_static_mesh()` is **wrong**:
+
+```gdscript
+# BROKEN — undoes the BoneAttachment3D positioning:
+instance.transform = skeleton.get_bone_global_rest(bone_idx).affine_inverse() * mesh_data.node_transform
+```
+
+**Why it fails:** Body part NIF vertices are in **bone-local space** (near origin, authored relative to the attachment bone). The NIF hierarchy transforms (`node_transform`) are approximately identity. When we apply `bone_global_rest_inv`, we cancel out the BoneAttachment3D's bone positioning:
+
+1. BoneAttachment3D applies `bone_global_rest` → positions mesh at bone
+2. `bone_global_rest_inv` undoes that → moves mesh back to origin
+3. `node_transform ≈ IDENTITY` → no additional positioning
+4. Result: all parts appear at skeleton root
+
+### OpenMW Reference — How It Actually Works
+
+From `inspos/openmw/components/sceneutil/attach.cpp:144-198` (PATH B, non-skinned):
+
+```
+1. Clone the body part NIF (preserving internal scene graph transforms)
+2. Search for "BoneOffset" NiNode → extract TRANSLATION ONLY, remove node
+3. If left-side → apply scale(-1, 1, 1) + invert face culling
+4. Attach cloned NIF as child of the bone node
+```
+
+**No inverse-rest compensation.** The NIF scene graph is attached directly under the bone. The NIF's internal transforms (Scene Root → geometry) provide bone-relative positioning.
+
+Full transform chain in OpenMW:
+```
+v_world = skeleton * bone_pose * [BoneOffset_translation] * NIF_scene_root * geometry_local * v
+```
+
+### The Fix
+
+```gdscript
+# CORRECT — bone-relative, matching OpenMW:
+instance.transform = mesh_data.node_transform
+
+# Apply BoneOffset if present (translation only, per OpenMW)
+if mesh_data.has_bone_offset:
+    instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
+```
+
+### BoneOffset Node
+
+Some body part NIFs contain a `NiNode` named "BoneOffset" that provides a **translation offset** relative to the bone attachment point. OpenMW extracts only the translation (not rotation/scale) and removes the node from the scene graph. Our `MeshExtractor` needs to detect this node and pass the offset separately.
+
+If BoneOffset is a **sibling** of the geometry in the NIF (not an ancestor), its transform is NOT included in `node_transform` and would be lost. If it's an **ancestor**, it IS included but OpenMW removes it — the net effect is the same since only translation is extracted.
+
+---
+
+## Progress Tracker
+
+| Step | Status | Description |
+|------|--------|-------------|
+| **P0 DONE** | ✅ | `SLOT_TO_BONE` lookup for non-skinned parts |
+| **P0 DONE** | ✅ | Slot passed through to `_attach_static_mesh()` |
+| **P1 DONE** | ✅ | Left-side mirroring (X=-1 scale + cull flip) |
+| **P1 DONE** | ✅ | Left-side slot population from right-side data |
+| **P2 DONE** | ✅ | Non-skinned parts shown in test scene |
+| **Diagnostics** | ✅ | Static attachment mode toggle (BONE_REST_INV/DIRECT/IDENTITY) — keys 4/5/6 |
+| **Diagnostics** | ✅ | Vertex AABB + full transform logging in debug dump (D key) |
+| **Diagnostics** | ✅ | BoneOffset detection in MeshExtractor (`_find_bone_offset()`) |
+| **Fix** | ✅ | Remove `bone_global_rest_inv` from transform formula — use `node_transform` directly |
+| **Fix** | ✅ | Add BoneOffset support (translation only, per OpenMW) |
+| **Fix** | ✅ | Apply fix to production `morrowind_npc_assembler.gd` |
+| **Verify** | ⬜ | Run `character_assembly_test.tscn` — all parts at correct bones |
+| **Verify** | ⬜ | Run `world_explorer.tscn` — NPCs look correct in-world |

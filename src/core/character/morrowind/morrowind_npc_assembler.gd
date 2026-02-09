@@ -12,6 +12,9 @@ extends RefCounted
 # NIF conversion for loading skeleton from xbase_anim.nif
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const MeshExtractor := preload("res://src/core/character/mixamo/mesh_extractor.gd")
+const NIFReader := preload("res://src/core/nif/nif_reader.gd")
+const NIFDefs := preload("res://src/core/nif/nif_defs.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 # Game layer components
 const BodyPartSlots := preload("res://src/core/character/morrowind/morrowind_body_part_slots.gd")
@@ -23,8 +26,52 @@ static var _skeleton_cache: Dictionary = {}
 ## Cached body part mesh data: { "model_path" -> Array[MeshExtractor.MeshData] }
 static var _body_part_cache: Dictionary = {}
 
+## Cached attachment node transforms: { "type" -> { "name_lower" -> Transform3D } }
+static var _attachment_cache: Dictionary = {}
+
 ## Debug mode
 static var debug_mode: bool = false
+
+## Slot -> OpenMW attachment node name (lowercase) in xbase_anim.nif
+const SLOT_TO_ATTACHMENT_NAME := {
+	BodyPartSlots.Slot.HEAD: "head",
+	BodyPartSlots.Slot.HAIR: "head",
+	BodyPartSlots.Slot.NECK: "neck",
+	BodyPartSlots.Slot.CHEST: "chest",
+	BodyPartSlots.Slot.GROIN: "groin",
+	BodyPartSlots.Slot.SKIRT: "groin",
+	BodyPartSlots.Slot.HAND_R: "right hand",
+	BodyPartSlots.Slot.HAND_L: "left hand",
+	BodyPartSlots.Slot.WRIST_R: "right wrist",
+	BodyPartSlots.Slot.WRIST_L: "left wrist",
+	BodyPartSlots.Slot.FOREARM_R: "right forearm",
+	BodyPartSlots.Slot.FOREARM_L: "left forearm",
+	BodyPartSlots.Slot.UPPER_ARM_R: "right upper arm",
+	BodyPartSlots.Slot.UPPER_ARM_L: "left upper arm",
+	BodyPartSlots.Slot.FOOT_R: "right foot",
+	BodyPartSlots.Slot.FOOT_L: "left foot",
+	BodyPartSlots.Slot.ANKLE_R: "right ankle",
+	BodyPartSlots.Slot.ANKLE_L: "left ankle",
+	BodyPartSlots.Slot.KNEE_R: "right knee",
+	BodyPartSlots.Slot.KNEE_L: "left knee",
+	BodyPartSlots.Slot.UPPER_LEG_R: "right upper leg",
+	BodyPartSlots.Slot.UPPER_LEG_L: "left upper leg",
+	BodyPartSlots.Slot.CLAVICLE_R: "right clavicle",
+	BodyPartSlots.Slot.CLAVICLE_L: "left clavicle",
+	BodyPartSlots.Slot.WEAPON: "weapon bone",
+	BodyPartSlots.Slot.SHIELD: "shield bone",
+	BodyPartSlots.Slot.TAIL: "tail",
+}
+
+## Known attachment node names from xbase_anim.nif
+const ATTACHMENT_NODE_NAMES := [
+	"head", "neck", "chest", "groin",
+	"right hand", "left hand", "right wrist", "left wrist",
+	"right forearm", "left forearm", "right upper arm", "left upper arm",
+	"right foot", "left foot", "right ankle", "left ankle",
+	"right knee", "left knee", "right upper leg", "left upper leg",
+	"right clavicle", "left clavicle", "weapon bone", "shield bone", "tail",
+]
 
 
 ## Body part data container (simplified, holds extracted mesh data)
@@ -72,7 +119,7 @@ static func assemble(npc_record, race_record) -> Node3D:
 	# Attach each body part directly (no rebinding — bones match)
 	for slot in body_parts:
 		var part_data: BodyPartData = body_parts[slot]
-		_attach_body_part_native(skeleton, slot, part_data)
+		_attach_body_part_native(skeleton, slot, part_data, is_beast)
 
 	if debug_mode:
 		Log.info("character", "Assembled NPC with %d meshes on native skeleton (%d bones)" % [
@@ -164,14 +211,14 @@ static func _duplicate_skeleton(source: Skeleton3D) -> Skeleton3D:
 # =============================================================================
 
 ## Attach a body part directly to the native skeleton
-static func _attach_body_part_native(skeleton: Skeleton3D, slot: int, part_data: BodyPartData) -> void:
+static func _attach_body_part_native(skeleton: Skeleton3D, slot: int, part_data: BodyPartData, is_beast: bool) -> void:
 	for mesh_data in part_data.meshes:
 		var extracted: MeshExtractor.MeshData = mesh_data
 
 		if extracted.is_skinned:
 			_attach_skinned_mesh_native(skeleton, extracted, slot)
 		else:
-			_attach_static_mesh(skeleton, extracted, slot)
+			_attach_static_mesh(skeleton, extracted, slot, is_beast)
 
 
 ## Attach a skinned mesh directly to the native Morrowind skeleton
@@ -247,10 +294,11 @@ static func _create_native_skin(mesh_data: MeshExtractor.MeshData, skeleton: Ske
 
 ## Attach a static (non-skinned) mesh
 ##
-## Static body parts are rigid meshes in bone-local space. We attach via
-## BoneAttachment3D using the slot-to-bone mapping (authoritative), with
-## NIF parent bone name as fallback. Left-side slots are mirrored on X axis.
-static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.MeshData, slot: int) -> void:
+## Static body parts are positioned using OpenMW's attach PATH B:
+##   v_world = bone * attachment_local * nif_root * v_mesh
+## BoneAttachment3D provides "bone", instance.transform = attachment_local * nif_root.
+## Left-side slots are mirrored on X axis with inverted face culling.
+static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.MeshData, slot: int, is_beast: bool = false) -> void:
 	var array_mesh := MeshExtractor.create_array_mesh(mesh_data)
 
 	var instance := MeshInstance3D.new()
@@ -282,12 +330,18 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 		bone_idx = _find_bone_ci(skeleton, mesh_data.parent_bone_name)
 
 	if bone_idx >= 0:
-		# Mesh vertices are in NIF geometry-local space (not bone-local).
-		# BoneAttachment3D applies the bone's global pose, so we must undo
-		# the bone's rest transform and apply node_transform to bring vertices
-		# from geometry space → model space → bone-local space.
-		# At rest: bone_global_rest * inv(bone_global_rest) * node_transform * v = node_transform * v
-		instance.transform = skeleton.get_bone_global_rest(bone_idx).affine_inverse() * mesh_data.node_transform
+		# OpenMW PATH B: v_world = bone * attachment_local * nif_root * v_mesh
+		# Compose attachment node transform with NIF scene root transform.
+		var attach_name: String = SLOT_TO_ATTACHMENT_NAME.get(slot, "")
+		var attachment_transforms := _get_attachment_transforms(is_beast)
+		if not attach_name.is_empty() and attach_name in attachment_transforms:
+			instance.transform = attachment_transforms[attach_name] * mesh_data.node_transform
+		else:
+			instance.transform = mesh_data.node_transform
+
+		# Apply BoneOffset if the NIF had one (translation only, per OpenMW)
+		if mesh_data.has_bone_offset:
+			instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
 
 		# Left-side mirroring: scale X by -1 (right-side mesh mirrored to left bone)
 		if is_mirrored:
@@ -303,6 +357,73 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 			Log.warn("character", "Static mesh slot %s: no bone found, using node_transform fallback" % BodyPartSlots.slot_name(slot))
 		instance.transform = mesh_data.node_transform
 		skeleton.add_child(instance)
+
+
+# =============================================================================
+# ATTACHMENT NODE TRANSFORMS
+# =============================================================================
+
+## Get attachment transforms for a skeleton type, loading from NIF if needed.
+## Returns { "name_lower" -> Transform3D } mapping attachment node names to
+## their local transforms (in Godot space) relative to parent bone.
+static func _get_attachment_transforms(is_beast: bool) -> Dictionary:
+	var key := "beast" if is_beast else "humanoid"
+
+	if key in _attachment_cache:
+		return _attachment_cache[key]
+
+	var nif_path := "meshes\\xbase_animkna.nif" if is_beast else "meshes\\xbase_anim.nif"
+	var transforms := _extract_attachment_transforms(nif_path)
+	_attachment_cache[key] = transforms
+
+	if debug_mode:
+		Log.info("character", "Cached %d attachment transforms for %s skeleton" % [transforms.size(), key])
+
+	return transforms
+
+
+## Extract attachment node transforms from a skeleton NIF file.
+static func _extract_attachment_transforms(nif_path: String) -> Dictionary:
+	var result: Dictionary = {}
+
+	var bsa_mgr := _get_bsa_manager()
+	if not bsa_mgr:
+		return result
+
+	var data: PackedByteArray = bsa_mgr.extract_file(nif_path)
+	if data.is_empty():
+		return result
+
+	var reader := NIFReader.new()
+	var err := reader.load_buffer(data, nif_path)
+	if err != OK:
+		return result
+
+	for root_idx in reader.roots:
+		var root := reader.get_record(root_idx)
+		if root is NIFDefs.NiNode:
+			_collect_attachment_nodes(reader, root as NIFDefs.NiNode, result)
+
+	return result
+
+
+## Recursively collect named attachment nodes from NIF hierarchy.
+static func _collect_attachment_nodes(reader: NIFReader, node: NIFDefs.NiNode, out: Dictionary) -> void:
+	var node_name: String = node.name if node.name else ""
+	var name_lower := node_name.to_lower()
+
+	if name_lower in ATTACHMENT_NODE_NAMES:
+		var local_nif := Transform3D.IDENTITY
+		if node.transform:
+			local_nif = node.transform.to_transform3d()
+		out[name_lower] = CS.transform_to_godot(local_nif)
+
+	for child_idx in node.children_indices:
+		if child_idx < 0:
+			continue
+		var child := reader.get_record(child_idx)
+		if child is NIFDefs.NiNode:
+			_collect_attachment_nodes(reader, child as NIFDefs.NiNode, out)
 
 
 # =============================================================================
@@ -475,6 +596,7 @@ static func _count_mesh_instances(node: Node) -> int:
 static func clear_caches() -> void:
 	_skeleton_cache.clear()
 	_body_part_cache.clear()
+	_attachment_cache.clear()
 
 
 ## Preload skeleton for a race/gender (call during loading screen)

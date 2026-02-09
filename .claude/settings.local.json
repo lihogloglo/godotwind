@@ -363,7 +363,14 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --headless --path . --script res://src/tools/character_assembly_test.gd)",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --headless --path . -e 'var bsa = Engine.get_main_loop\\(\\).root.get_node\\(\"\"/root/BSAManager\"\"\\); print\\(bsa.list_files\\(\"\"meshes/b/b_n_dark*\"\"\\)\\)')",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --headless --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" --script res://src/tools/bsa_path_finder.gd)",
-      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" res://src/tools/character_assembly_test.tscn)"
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" res://src/tools/character_assembly_test.tscn)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path . res://src/tools/character_assembly_test.tscn)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/character_assembly_test.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/character_assembly_test.tscn\" --quit)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-dev6_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/character_assembly_test.tscn\")",
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\")",
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\" --quit-after 5000)",
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\" --quit-after 8000)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",
