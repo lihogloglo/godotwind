@@ -70,6 +70,11 @@ var animation_player: AnimationPlayer = null
 var animation_tree: AnimationTree = null
 var character_node: Node3D = null  # For position in sound emission
 
+# Retargeting: when set, AnimationPlayer/AnimationTree target this skeleton
+# instead of the main skeleton. Used with RetargetModifier3D hierarchy where
+# animations play on a source skeleton and get retargeted to the target.
+var retarget_source: Skeleton3D = null
+
 # Text key handler
 var _text_key_handler: RefCounted = null  # TextKeyHandler
 
@@ -224,16 +229,18 @@ func _process(_delta: float) -> void:
 
 ## Process text keys for current animation frame
 func _process_text_keys() -> void:
-	if not _text_key_handler or not animation_player:
+	if not _text_key_handler or not _state_machine:
 		return
 
-	var current_anim := animation_player.current_animation
-	if current_anim.is_empty():
+	var current_node := _state_machine.get_current_node()
+	if current_node.is_empty():
 		return
 
-	var current_time := animation_player.current_animation_position
+	# Map state machine node name to actual animation name
+	var anim_name: StringName = _state_animation_map.get(current_node, current_node)
+	var current_time := _state_machine.get_current_play_position()
 	var handler: _TextKeyHandler = _text_key_handler as _TextKeyHandler
-	handler.process_animation_time(current_anim, current_time)
+	handler.process_animation_time(anim_name, current_time)
 
 
 ## Transition to a new state
@@ -367,27 +374,30 @@ func is_ready() -> bool:
 # INTERNAL METHODS
 # =============================================================================
 
-## Find AnimationPlayer in skeleton hierarchy
+## Find AnimationPlayer in skeleton hierarchy.
+## When retarget_source is set, searches there instead (animations play on source skeleton).
 func _find_animation_player() -> AnimationPlayer:
-	if not skeleton:
+	var search_skel: Skeleton3D = retarget_source if retarget_source else skeleton
+	if not search_skel:
 		return null
 
 	# Check parent's children (siblings)
-	var parent := skeleton.get_parent()
+	var parent := search_skel.get_parent()
 	if parent:
 		for child in parent.get_children():
 			if child is AnimationPlayer:
 				return child as AnimationPlayer
 
 	# Check skeleton's children
-	for child in skeleton.get_children():
+	for child in search_skel.get_children():
 		if child is AnimationPlayer:
 			return child as AnimationPlayer
 
 	return null
 
 
-## Create AnimationTree with state machine
+## Create AnimationTree with state machine.
+## When retarget_source is set, AnimationTree is added near the source skeleton.
 func _create_animation_tree() -> void:
 	if not animation_player:
 		return
@@ -401,7 +411,8 @@ func _create_animation_tree() -> void:
 	animation_tree.tree_root = root
 
 	# Add to scene tree first (required for get_path_to)
-	skeleton.get_parent().add_child(animation_tree)
+	var anim_skel: Skeleton3D = retarget_source if retarget_source else skeleton
+	anim_skel.get_parent().add_child(animation_tree)
 
 	# Now set the animation player path
 	animation_tree.anim_player = animation_tree.get_path_to(animation_player)

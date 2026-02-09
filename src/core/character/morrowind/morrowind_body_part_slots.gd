@@ -107,6 +107,21 @@ static func get_right_equivalent(slot: int) -> int:
 		_: return slot
 
 
+## Get the left-side equivalent of a right-side slot
+static func get_left_equivalent(slot: int) -> int:
+	match slot:
+		Slot.HAND_R: return Slot.HAND_L
+		Slot.WRIST_R: return Slot.WRIST_L
+		Slot.FOREARM_R: return Slot.FOREARM_L
+		Slot.UPPER_ARM_R: return Slot.UPPER_ARM_L
+		Slot.FOOT_R: return Slot.FOOT_L
+		Slot.ANKLE_R: return Slot.ANKLE_L
+		Slot.KNEE_R: return Slot.KNEE_L
+		Slot.UPPER_LEG_R: return Slot.UPPER_LEG_L
+		Slot.CLAVICLE_R: return Slot.CLAVICLE_L
+		_: return slot
+
+
 ## Map ESM BodyPart.PartType to slot(s)
 ## PartType is what's stored in the ESM body part record
 ## Note: In Morrowind, each naked body part mesh contains geometry for BOTH sides

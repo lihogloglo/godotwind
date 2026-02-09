@@ -34,9 +34,14 @@ const MID_START: float = NEAR_END
 const FAR_START: float = MID_END
 
 ## Crossfade zone size (meters) - both tiers visible during transition
-## Increased from 30m to 50m for smoother, more visible transitions
-## At 50m/s camera speed, this gives ~1 second transition time
-const FADE_MARGIN: float = 50.0
+## Tiered: smaller at close range (geometry mismatch visible), larger at distance
+const FADE_MARGIN: float = 10.0  ## Default / legacy (used by FAR tier impostor renderer)
+
+## Per-boundary fade margins (total crossfade zone = 2x margin)
+const FADE_MARGIN_NEAR_LOD1: float = 5.0   ## NEAR/LOD1 at 150m — near-hard-cut, mismatch very visible
+const FADE_MARGIN_LOD1_LOD2: float = 10.0  ## LOD1/LOD2 at 250m — small crossfade
+const FADE_MARGIN_LOD2_LOD3: float = 15.0  ## LOD2/LOD3 at 375m — moderate crossfade
+const FADE_MARGIN_LOD3_FAR: float = 20.0   ## LOD3/FAR  at 500m — comfortable crossfade
 
 #endregion
 

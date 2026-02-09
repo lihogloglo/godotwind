@@ -1275,9 +1275,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 
 		# Configure visibility_range at prebake time to ensure correct LOD behavior
 		# This avoids relying on runtime configuration which may fail during async loading
-		# Distance constants from distance_utils.gd:
-		#   NEAR_END = 150.0, LOD1_END = 250.0, LOD2_END = 375.0, LOD3_END = 500.0
-		#   FADE_MARGIN = 50.0
+		# Distance constants from distance_utils.gd (tiered margins)
 		lod_instance.visible = true
 
 		# Set visibility_range based on LOD level (lod_idx is 0-based, LOD level is 1-based)
@@ -1285,19 +1283,24 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 			1:  # LOD1: 150-250m (MID tier, first level)
 				lod_instance.visibility_range_begin = 150.0
 				lod_instance.visibility_range_end = 250.0
+				lod_instance.visibility_range_begin_margin = 5.0   # FADE_MARGIN_NEAR_LOD1
+				lod_instance.visibility_range_end_margin = 10.0    # FADE_MARGIN_LOD1_LOD2
 			2:  # LOD2: 250-375m (MID tier, second level)
 				lod_instance.visibility_range_begin = 250.0
 				lod_instance.visibility_range_end = 375.0
+				lod_instance.visibility_range_begin_margin = 10.0  # FADE_MARGIN_LOD1_LOD2
+				lod_instance.visibility_range_end_margin = 15.0    # FADE_MARGIN_LOD2_LOD3
 			3:  # LOD3: 375-500m (MID tier, third level)
 				lod_instance.visibility_range_begin = 375.0
 				lod_instance.visibility_range_end = 500.0
+				lod_instance.visibility_range_begin_margin = 15.0  # FADE_MARGIN_LOD2_LOD3
+				lod_instance.visibility_range_end_margin = 20.0    # FADE_MARGIN_LOD3_FAR
 			_:  # Fallback for any additional levels
 				lod_instance.visibility_range_begin = 375.0
 				lod_instance.visibility_range_end = 500.0
+				lod_instance.visibility_range_begin_margin = 15.0
+				lod_instance.visibility_range_end_margin = 20.0
 
-		# Margins for hysteresis (prevents flickering at boundaries)
-		lod_instance.visibility_range_begin_margin = 50.0
-		lod_instance.visibility_range_end_margin = 50.0
 		# FADE_DEPENDENCIES enables smooth crossfade between sibling LOD nodes
 		lod_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
 
@@ -1318,7 +1321,7 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 	mesh_instance.visibility_range_begin = 0.0
 	mesh_instance.visibility_range_end = 150.0  # NEAR_END
 	mesh_instance.visibility_range_begin_margin = 0.0
-	mesh_instance.visibility_range_end_margin = 50.0  # FADE_MARGIN
+	mesh_instance.visibility_range_end_margin = 5.0  # FADE_MARGIN_NEAR_LOD1
 	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
 
 	if debug_lod:

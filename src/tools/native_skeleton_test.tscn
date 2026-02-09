@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bkxn3bskeletontest"]
+
+[ext_resource type="Script" path="res://src/tools/native_skeleton_test.gd" id="1_test"]
+
+[node name="NativeSkeletonTest" type="Node3D"]
+script = ExtResource("1_test")

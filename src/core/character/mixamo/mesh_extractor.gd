@@ -28,6 +28,11 @@ class MeshData:
 	var bone_weights: Array  # Array[PackedFloat32Array] per vertex
 	var bone_indices: Array  # Array[PackedInt32Array] per vertex
 	var inv_bind_poses: Array  # Array[Transform3D] per bone
+	var skin_transform: Transform3D = Transform3D.IDENTITY  # NiSkinData overall transform (mesh → skeleton space)
+
+	## Transform data
+	var node_transform: Transform3D = Transform3D.IDENTITY  # Accumulated NIF hierarchy transform (in Godot space)
+	var parent_bone_name: String = ""  # Parent NiNode name (bone to attach static meshes to)
 
 	## Material info
 	var texture_path: String = ""
@@ -84,7 +89,7 @@ static func _extract_from_reader(reader: NIFReader, source_path: String) -> Arra
 	for root_idx in reader.roots:
 		var root := reader.get_record(root_idx)
 		if root:
-			_extract_recursive(reader, root, Transform3D.IDENTITY, meshes, source_path)
+			_extract_recursive(reader, root, Transform3D.IDENTITY, "", meshes, source_path)
 
 	return meshes
 
@@ -94,34 +99,41 @@ static func _extract_recursive(
 	reader: NIFReader,
 	record: NIFDefs.NIFRecord,
 	parent_transform: Transform3D,
+	parent_node_name: String,
 	meshes: Array[MeshData],
 	source_path: String
 ) -> void:
-	# Get this node's transform
+	# Get this node's transform and name
 	var local_transform := Transform3D.IDENTITY
+	var node_name := ""
 	if record is NIFDefs.NiNode or record is NIFDefs.NiGeometry:
 		local_transform = _get_node_transform(record)
+		if "name" in record and record.name:
+			node_name = record.name
 
 	var world_transform := parent_transform * local_transform
 
-	# Check if this is geometry
+	# Check if this is geometry — pass parent_node_name as the bone to attach to
 	if record is NIFDefs.NiTriShape:
 		var mesh := _extract_tri_shape(reader, record as NIFDefs.NiTriShape, world_transform, source_path)
 		if mesh:
+			mesh.parent_bone_name = parent_node_name
 			meshes.append(mesh)
 	elif record is NIFDefs.NiTriStrips:
 		var mesh := _extract_tri_strips(reader, record as NIFDefs.NiTriStrips, world_transform, source_path)
 		if mesh:
+			mesh.parent_bone_name = parent_node_name
 			meshes.append(mesh)
 
-	# Process children
+	# Process children — pass this node's name as parent_node_name for bone tracking
 	if record is NIFDefs.NiNode:
 		var node := record as NIFDefs.NiNode
+		var current_name := node_name if not node_name.is_empty() else parent_node_name
 		for child_idx in node.children_indices:
 			if child_idx >= 0:
 				var child := reader.get_record(child_idx)
 				if child:
-					_extract_recursive(reader, child, world_transform, meshes, source_path)
+					_extract_recursive(reader, child, world_transform, current_name, meshes, source_path)
 
 
 ## Extract from NiTriShape
@@ -140,6 +152,10 @@ static func _extract_tri_shape(
 
 	var mesh := MeshData.new()
 	mesh.source_path = source_path
+
+	# Store accumulated NIF hierarchy transform (converted to Godot space)
+	# Used for static (non-skinned) meshes; skinned meshes use skin_transform instead
+	mesh.node_transform = CS.transform_to_godot(world_transform)
 
 	# Convert vertices to Godot space
 	mesh.vertices = _convert_vertices(data.vertices)
@@ -178,6 +194,9 @@ static func _extract_tri_strips(
 
 	var mesh := MeshData.new()
 	mesh.source_path = source_path
+
+	# Store accumulated NIF hierarchy transform (converted to Godot space)
+	mesh.node_transform = CS.transform_to_godot(world_transform)
 
 	# Convert vertices to Godot space
 	mesh.vertices = _convert_vertices(data.vertices)
@@ -289,6 +308,10 @@ static func _extract_skin_data(reader: NIFReader, skin_index: int, mesh: MeshDat
 
 	mesh.is_skinned = true
 
+	# Extract overall skin transform (mesh space → skeleton root space)
+	# This is critical for correct skinning when body parts have non-identity offsets
+	mesh.skin_transform = CS.transform_to_godot(skin_data.skin_transform.to_transform3d())
+
 	# Extract bone names
 	mesh.bone_names = PackedStringArray()
 	for bone_idx in skin_inst.bone_indices:
@@ -299,6 +322,8 @@ static func _extract_skin_data(reader: NIFReader, skin_index: int, mesh: MeshDat
 			mesh.bone_names.append("Bone_%d" % bone_idx)
 
 	# Extract inverse bind poses (convert to Godot space)
+	# These are the per-bone offsets from NiSkinData, stored for reference.
+	# The native skeleton pipeline uses skeleton rest poses instead (more robust).
 	mesh.inv_bind_poses = []
 	for bone_info in skin_data.bones:
 		var transform: NIFDefs.NIFTransform = bone_info["transform"]

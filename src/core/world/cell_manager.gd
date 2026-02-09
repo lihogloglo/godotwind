@@ -889,6 +889,10 @@ const QUEUE_SORT_INTERVAL: int = 10  # Re-sort every N frames
 ## Parsed model prototypes waiting to be cached (from async results)
 var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
 
+## Deferred NEAR refs — objects that skipped MID tier, waiting for player to approach
+## Keyed by Vector2i (cell_grid) -> Array of pre-computed instantiation data
+var _deferred_near_refs: Dictionary = {}  # Vector2i -> Array[Dictionary]
+
 
 ## Set the LOD configurator for visibility range configuration
 func set_lod_configurator(configurator: LODConfigurator) -> void:
@@ -1244,10 +1248,18 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		var distance_sq := _camera_position.distance_squared_to(obj_position)
 		var use_mid_path := false
 		var always_near: bool = entry.get("always_near", false)  # Pre-classified at queue time (Phase 5c)
+		var mid_worthy: bool = entry.get("mid_worthy", true)  # Pre-classified at queue time
 
 		if _static_renderer and distance_sq > SC.NEAR_END * SC.NEAR_END and not model_path.is_empty():
 			if not always_near:
-				use_mid_path = true
+				if mid_worthy:
+					use_mid_path = true
+				else:
+					# Object is at MID distance but not visually significant — defer for NEAR
+					_defer_for_near(ref, model_path, item_id, request, obj_position)
+					_stats["mid_filtered"] = _stats.get("mid_filtered", 0) + 1
+					instantiated += 1  # Count as handled for completion tracking
+					continue
 
 		if use_mid_path:
 			# MID-TIER: Create lightweight RenderingServer instance
@@ -1755,6 +1767,75 @@ func _is_always_near_ref(ref: CellReference) -> bool:
 	return type_name in ["light", "npc", "creature", "leveled_creature"]
 
 
+## MID-tier significance filter — only visually significant objects get RS instances.
+## Small items (potions, forks, books, etc.) are invisible at 150m+ and waste resources.
+## Filtered objects are deferred and instantiated at NEAR range when the player approaches.
+func _is_mid_worthy(type_name: String, model_path: String) -> bool:
+	# Level 1: Record type fast-reject — small items never visible at 150m+
+	if type_name in ["weapon", "armor", "clothing", "book", "potion",
+			"ingredient", "misc", "apparatus", "lockpick", "probe",
+			"repair", "leveled_item", "body_part"]:
+		return false
+
+	# Level 2: Doors are always MID-worthy (entrance markers)
+	if type_name == "door":
+		return true
+
+	# Level 3: Model path check for static, container, activator
+	var lower := model_path.to_lower()
+
+	# Architecture (exterior and interior pieces)
+	if "ex_" in lower or "in_" in lower:
+		return true
+
+	# Trees and large flora
+	if "flora_tree" in lower or "flora_ashtree" in lower or \
+			"flora_emp_tree" in lower or "flora_bc_" in lower or \
+			"flora_t_mushroom" in lower:
+		return true
+
+	# Terrain features (rocks, cliffs, arches — skip small rocks)
+	if "terrain_" in lower:
+		return "_small" not in lower
+
+	# Large structural objects
+	if "bridge" in lower or "ship" in lower or "boat" in lower or \
+			"platform" in lower or "dock_" in lower:
+		return true
+
+	# Container-specific: only large containers visible at distance
+	if type_name == "container":
+		return "barrel" in lower or "crate" in lower
+
+	# Default: not MID-worthy (small clutter, misc placed as static, etc.)
+	return false
+
+
+## Store a non-mid-worthy object for deferred NEAR instantiation.
+## Pre-computes the transform so it's ready when the player approaches.
+func _defer_for_near(ref: CellReference, model_path: String, item_id: String,
+		request: AsyncCellRequest, position: Vector3) -> void:
+	var cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
+	var pos := CS.vector_to_godot(ref.position)
+	var scl := CS.scale_to_godot(ref.scale)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scl)
+	var xform := Transform3D(basis, pos)
+
+	if cell_grid not in _deferred_near_refs:
+		_deferred_near_refs[cell_grid] = []
+
+	_deferred_near_refs[cell_grid].append({
+		"model_path": model_path,
+		"item_id": item_id,
+		"transform": xform,
+		"ref_id": ref.ref_id,
+		"ref_num": ref.ref_num,
+		"position": position,
+		"cell_grid": cell_grid,
+	})
+
+
 ## MID-TIER: Create a lightweight RenderingServer instance instead of full Node3D
 ## Uses StaticObjectRenderer — no duplicate(), no scene tree, no add_child()
 ## Returns true if the instance was successfully created
@@ -1812,9 +1893,15 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	# Get object position for distance-priority sorting
 	var position := CS.vector_to_godot(ref.position)
 
-	# Pre-classify: is this ref type always-NEAR? (Phase 5c optimization)
-	# This avoids an ESM lookup per object during process_async_instantiation()
-	var always_near := _is_always_near_ref(ref)
+	# Pre-classify ref type at queue time (Phase 5c optimization)
+	# Single ESM lookup reused for both always_near and mid_worthy flags
+	var record_type: Array = [""]
+	ESMManager.get_any_record(str(ref.ref_id), record_type)
+	var type_name: String = record_type[0] if record_type.size() > 0 else ""
+	var always_near := type_name in ["light", "npc", "creature", "leveled_creature"]
+	var mid_worthy := true
+	if not always_near:
+		mid_worthy = _is_mid_worthy(type_name, model_path)
 
 	_instantiation_queue.append({
 		"request_id": request_id,
@@ -1823,6 +1910,7 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 		"item_id": item_id,
 		"position": position,
 		"always_near": always_near,
+		"mid_worthy": mid_worthy,
 	})
 
 	# Track pending instantiation count for completion checking
@@ -1910,6 +1998,67 @@ func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D
 	return instance
 
 
+## Check deferred NEAR refs and instantiate objects that are now within NEAR range.
+## Called periodically from NativeStreamingManager alongside MID→NEAR promotions.
+## Returns array of {parent: Node3D, child: Node3D} for the caller to add_child().
+func process_deferred_near(camera_pos: Vector3, nearby_cells: Array[Vector2i],
+		loaded_cells: Dictionary) -> Array[Dictionary]:
+	var results: Array[Dictionary] = []
+	var near_dist_sq: float = SC.NEAR_END * SC.NEAR_END
+	var budget_start := Time.get_ticks_usec()
+	var budget_us := 1000  # 1ms budget
+
+	for cell_grid in nearby_cells:
+		if cell_grid not in _deferred_near_refs:
+			continue
+
+		var cell_node: Node3D = loaded_cells.get(cell_grid) as Node3D
+		if not cell_node or not is_instance_valid(cell_node):
+			continue
+
+		var refs: Array = _deferred_near_refs[cell_grid]
+		var i := refs.size() - 1
+		while i >= 0:
+			if Time.get_ticks_usec() - budget_start > budget_us:
+				return results
+
+			var entry: Dictionary = refs[i]
+			var dist_sq := camera_pos.distance_squared_to(entry.position)
+			if dist_sq <= near_dist_sq:
+				var obj: Node3D = promote_mid_to_near(
+					entry.model_path, entry.item_id, entry.transform,
+					entry.ref_id, entry.ref_num
+				)
+				if obj:
+					results.append({"parent": cell_node, "child": obj})
+					_stats["deferred_near_instantiated"] = _stats.get("deferred_near_instantiated", 0) + 1
+				refs.remove_at(i)
+			i -= 1
+
+		if refs.is_empty():
+			_deferred_near_refs.erase(cell_grid)
+
+	return results
+
+
+## Clean up deferred NEAR refs for a cell that is being unloaded
+func clear_deferred_for_cell(grid: Vector2i) -> void:
+	var count := 0
+	if grid in _deferred_near_refs:
+		count = _deferred_near_refs[grid].size()
+		_deferred_near_refs.erase(grid)
+	if count > 0:
+		Log.debug("streaming", "Cleared %d deferred NEAR refs for cell %s" % [count, grid])
+
+
+## Get current count of deferred NEAR refs waiting across all cells
+func get_deferred_near_count() -> int:
+	var count := 0
+	for grid in _deferred_near_refs:
+		count += _deferred_near_refs[grid].size()
+	return count
+
+
 ## Get overall stats including pool stats
 func get_stats() -> Dictionary:
 	var result := _stats.duplicate()
@@ -1924,5 +2073,8 @@ func get_stats() -> Dictionary:
 		result["pool_new_instances"] = pool_stats.get("new_instances_created", 0)
 		result["pool_acquires"] = pool_stats.get("acquires", 0)
 		result["pool_releases"] = pool_stats.get("releases", 0)
+
+	# Add deferred NEAR stats
+	result["deferred_near_count"] = get_deferred_near_count()
 
 	return result

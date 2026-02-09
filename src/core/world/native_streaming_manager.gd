@@ -194,6 +194,11 @@ func _exit_tree() -> void:
 			(cell_ref as Node3D).queue_free()
 	_unloading_cells.clear()
 
+	# Clear deferred NEAR refs (data only, no RIDs)
+	if _cell_manager:
+		for grid: Vector2i in _loaded_cells:
+			_cell_manager.clear_deferred_for_cell(grid)
+
 	# Force-free all loaded cells
 	for grid: Vector2i in _loaded_cells:
 		var cell_ref: Variant = _loaded_cells[grid]
@@ -352,6 +357,9 @@ func _process(delta: float) -> void:
 
 		# Phase 3: MID→NEAR promotion for nearby objects (Phase 5b)
 		_process_mid_to_near_promotions()
+
+		# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
+		_process_deferred_near_instantiation()
 
 		# Phase 4: Queue new cell requests (non-blocking)
 		_process_pending_loads_async()
@@ -551,6 +559,9 @@ func _unload_cell(grid: Vector2i) -> void:
 		if mid_removed > 0:
 			_debug("Removed %d MID-tier RS instances for cell %s (+ %d promoted)" % [mid_removed, grid, promoted_cleanup])
 
+	# Clean up deferred NEAR refs for this cell
+	_cell_manager.clear_deferred_for_cell(grid)
+
 	# Move cell to hidden unload container for gradual teardown
 	# Reparenting is cheaper than queue_free() on entire subtree
 	if cell_node.get_parent():
@@ -740,6 +751,41 @@ func _process_mid_to_near_promotions() -> void:
 			promoted, demoted, (Time.get_ticks_usec() - start_time) / 1000.0,
 			_promoted_objects.size()
 		])
+
+
+## Instantiate deferred NEAR objects that skipped MID tier and are now close enough.
+## Runs every 4 frames (offset from promotion tick) with a 1ms budget.
+func _process_deferred_near_instantiation() -> void:
+	if not _cell_manager:
+		return
+
+	# Run every 4 frames, offset from promotion tick (which uses % 4 == 0)
+	if Engine.get_frames_drawn() % 4 != 2:
+		return
+
+	# Get nearby cells (same 3x3 grid as promotion system)
+	var nearby_cells: Array[Vector2i] = []
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var g := _camera_cell + Vector2i(dx, dy)
+			if g in _loaded_cells:
+				nearby_cells.append(g)
+
+	if nearby_cells.is_empty():
+		return
+
+	var results := _cell_manager.process_deferred_near(
+		_camera_position, nearby_cells, _loaded_cells
+	)
+
+	for entry in results:
+		var parent: Node3D = entry.parent
+		var child: Node3D = entry.child
+		if is_instance_valid(parent) and is_instance_valid(child):
+			parent.add_child(child)
+
+	if not results.is_empty() and debug_enabled:
+		_debug("Deferred NEAR: instantiated %d objects" % results.size())
 
 
 ## Configure visibility_range on all MeshInstance3D nodes in a cell

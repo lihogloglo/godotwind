@@ -5,11 +5,11 @@
 ## - CreatureAnimationSystem for creatures
 ## - Full IK, procedural animation, and LOD support
 ##
-## PERFORMANCE OPTIMIZATIONS:
-## - Static skeleton template caching (via MorrowindNPCAssembler)
-## - Static animation library caching (shared across all NPCs of same type)
-## - Static body part mesh caching (via MorrowindNPCAssembler)
-## - Prebaked animation support for fastest loading
+## PIPELINE (Phase 3B):
+## 1. MorrowindNPCAssembler creates native Morrowind skeleton (Bip01 bones)
+## 2. Factory renames bones to SkeletonProfileHumanoid names (for IK, blend masks)
+## 3. Animation tracks remapped from Bip01 → profile names
+## 4. Remapped libraries cached for sharing across all NPCs of same type
 class_name CharacterFactoryV2
 extends RefCounted
 
@@ -21,6 +21,7 @@ const CreatureAnimationSystemScript := preload("res://src/core/animation/creatur
 const CharacterAnimationSystemScript := preload("res://src/core/animation/character_animation_system.gd")
 const MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
+const RetargetSetupScript := preload("res://src/core/animation/retarget_setup.gd")
 
 # Dependencies
 var model_loader: RefCounted = null  # ModelLoader
@@ -31,11 +32,20 @@ var kf_loader: NIFKFLoader = null
 # =============================================================================
 
 ## Animation library cache: cache_key -> AnimationLibrary
+## Libraries are stored with profile bone names (remapped from Bip01)
 ## Key format: "meshes\xbase_anim.kf" (normalized, lowercase)
 static var _animation_library_cache: Dictionary = {}
 
 ## Parsed animation cache (fallback when no prebaked): cache_key -> Dictionary of anim_name -> Animation
 static var _parsed_animation_cache: Dictionary = {}
+
+## Bone name remap caches: { original_Bip01_name -> profile_name }
+## Built lazily from skeleton, same for all Morrowind NPCs of same type
+static var _humanoid_bone_remap: Dictionary = {}
+static var _beast_bone_remap: Dictionary = {}
+
+## Track which animation cache entries have been remapped to profile names
+static var _remapped_cache_keys: Dictionary = {}
 
 ## Cache statistics
 static var _anim_cache_hits: int = 0
@@ -84,6 +94,9 @@ static func clear_all_caches() -> void:
 	MorrowindNPCAssembler.clear_caches()
 	_animation_library_cache.clear()
 	_parsed_animation_cache.clear()
+	_humanoid_bone_remap.clear()
+	_beast_bone_remap.clear()
+	_remapped_cache_keys.clear()
 	_anim_cache_hits = 0
 	_anim_cache_misses = 0
 
@@ -99,10 +112,13 @@ static func preload_character_assets() -> void:
 	MorrowindNPCAssembler.preload_skeleton(true, false)   # female humanoid
 	MorrowindNPCAssembler.preload_skeleton(false, true)   # beast
 
-	# Preload animation libraries for all character types
-	_preload_animation_library("meshes/xbase_anim.kf", "male")
-	_preload_animation_library("meshes/xbase_anim_female.kf", "female")
-	_preload_animation_library("meshes/xbase_animkna.kf", "beast")
+	# Build bone remaps from cached skeletons (must happen before animation preload)
+	_preload_bone_remaps()
+
+	# Preload animation libraries for all character types (remapped to profile names)
+	_preload_animation_library("meshes/xbase_anim.kf", "male", false)
+	_preload_animation_library("meshes/xbase_anim_female.kf", "female", false)
+	_preload_animation_library("meshes/xbase_animkna.kf", "beast", true)
 
 	Log.info("animation", "CharacterFactoryV2: Assets preloaded in %d ms" % (Time.get_ticks_msec() - start))
 	var stats := get_cache_stats()
@@ -113,8 +129,31 @@ static func preload_character_assets() -> void:
 	])
 
 
-## Preload a specific animation library
-static func _preload_animation_library(kf_path: String, type_name: String) -> void:
+## Build bone remaps from preloaded skeleton cache
+static func _preload_bone_remaps() -> void:
+	# Build remaps by creating temporary skeletons from the assembler cache
+	for is_beast in [false, true]:
+		var key := "beast" if is_beast else "humanoid"
+		if key not in MorrowindNPCAssembler._skeleton_cache:
+			continue
+		var skel: Skeleton3D = MorrowindNPCAssembler._skeleton_cache[key]
+		# build_remap needs a BoneMap, which gets stored as metadata
+		# Use duplicate to avoid polluting the cached skeleton with metadata
+		var tmp := MorrowindNPCAssembler._duplicate_skeleton(skel)
+		var remap := RetargetSetupScript.build_remap(tmp)
+		tmp.free()
+
+		if is_beast:
+			_beast_bone_remap = remap
+		else:
+			_humanoid_bone_remap = remap
+
+	Log.info("animation", "  Bone remaps built: humanoid=%d, beast=%d entries" % [
+		_humanoid_bone_remap.size(), _beast_bone_remap.size()])
+
+
+## Preload a specific animation library (remapped to profile bone names)
+static func _preload_animation_library(kf_path: String, type_name: String, is_beast: bool) -> void:
 	var cache_key := kf_path.to_lower().replace("/", "\\")
 
 	# Check if already cached
@@ -124,7 +163,7 @@ static func _preload_animation_library(kf_path: String, type_name: String) -> vo
 	# Try prebaked first
 	var prebaked_lib := ModelPrebaker.load_cached_animations(kf_path)
 	if prebaked_lib:
-		_animation_library_cache[cache_key] = prebaked_lib
+		prebaked_lib = _remap_and_cache_library(prebaked_lib, cache_key, is_beast)
 		Log.info("animation", "  Loaded prebaked %s animations: %d" % [type_name, prebaked_lib.get_animation_list().size()])
 		return
 
@@ -141,11 +180,10 @@ static func _preload_animation_library(kf_path: String, type_name: String) -> vo
 	var animations := loader.load_kf_buffer(kf_data, null)
 
 	if not animations.is_empty():
-		# Create an AnimationLibrary from the parsed animations
 		var lib := AnimationLibrary.new()
 		for anim_name: String in animations:
 			lib.add_animation(anim_name, animations[anim_name])
-		_animation_library_cache[cache_key] = lib
+		lib = _remap_and_cache_library(lib, cache_key, is_beast)
 		Log.info("animation", "  Parsed %s animations: %d" % [type_name, animations.size()])
 
 
@@ -181,7 +219,14 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 		push_warning("CharacterFactoryV2: No skeleton found for NPC '%s'" % npc_record.record_id)
 		return _create_placeholder_character(npc_record, "npc", ref_num)
 
-	# Load animations (uses cached animation library)
+	# Build bone remap BEFORE renaming (Bip01 → profile names)
+	# This is cached per skeleton type (humanoid/beast)
+	_ensure_bone_remap(skeleton, is_beast)
+
+	# Rename skeleton bones to profile names (required for IK, blend masks, etc.)
+	RetargetSetupScript.rename_bones_to_profile(skeleton)
+
+	# Load animations (remapped to profile bone names)
 	var anim_start := Time.get_ticks_msec()
 	_load_character_animations(character_root, skeleton, is_female, is_beast)
 	if debug_characters:
@@ -221,6 +266,7 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 
 	# Store references for movement controller
 	movement_controller.character_root = character_root
+	movement_controller.animation_system = anim_system
 	movement_controller.set_meta("animation_system", anim_system)
 
 	# Add metadata
@@ -286,6 +332,7 @@ func create_creature(creature_record: CreatureRecord, ref_num: int = 0) -> Chara
 			creature_record.record_id
 		)
 
+		movement_controller.animation_system = anim_system
 		movement_controller.set_meta("animation_system", anim_system)
 
 	# Set collision based on creature type
@@ -319,7 +366,8 @@ static func _get_animation_path(is_female: bool, is_beast: bool) -> String:
 
 ## Load character animations from .kf file
 ## Uses static cache for maximum performance - shares AnimationLibrary across all NPCs
-## of the same type (male/female/beast) to minimize memory usage
+## of the same type (male/female/beast) to minimize memory usage.
+## Libraries are remapped from Bip01 bone names to profile names on first load.
 func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is_female: bool, is_beast: bool) -> void:
 	var anim_path := _get_animation_path(is_female, is_beast)
 
@@ -337,8 +385,8 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 	if cache_key in _animation_library_cache:
 		_anim_cache_hits += 1
 		var cached_lib: AnimationLibrary = _animation_library_cache[cache_key]
-		# Share the same AnimationLibrary - Godot 4 allows this!
-		# Multiple AnimationPlayers can reference the same library
+		# Ensure tracks are remapped to profile names
+		cached_lib = _ensure_library_remapped(cached_lib, cache_key, is_beast)
 		if anim_player.has_animation_library(""):
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", cached_lib)
@@ -353,8 +401,7 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 	# 2) Try prebaked AnimationLibrary
 	var prebaked_lib := ModelPrebaker.load_cached_animations(anim_path)
 	if prebaked_lib:
-		# Cache for future use and share directly
-		_animation_library_cache[cache_key] = prebaked_lib
+		prebaked_lib = _remap_and_cache_library(prebaked_lib, cache_key, is_beast)
 		if anim_player.has_animation_library(""):
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", prebaked_lib)
@@ -365,11 +412,10 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 	# 3) Check parsed animation cache - convert to library
 	if cache_key in _parsed_animation_cache:
 		var animations: Dictionary = _parsed_animation_cache[cache_key]
-		# Create a shared library from parsed cache
 		var new_lib := AnimationLibrary.new()
 		for anim_name: String in animations:
 			new_lib.add_animation(anim_name, animations[anim_name])
-		_animation_library_cache[cache_key] = new_lib
+		new_lib = _remap_and_cache_library(new_lib, cache_key, is_beast)
 		if anim_player.has_animation_library(""):
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", new_lib)
@@ -403,14 +449,13 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 	# Cache parsed animations
 	_parsed_animation_cache[cache_key] = animations
 
-	# Create a shared AnimationLibrary and cache it
+	# Create a shared AnimationLibrary, remap, and cache it
 	if not animations.is_empty():
 		var new_lib := AnimationLibrary.new()
 		for anim_name: String in animations:
 			new_lib.add_animation(anim_name, animations[anim_name])
-		_animation_library_cache[cache_key] = new_lib
+		new_lib = _remap_and_cache_library(new_lib, cache_key, is_beast)
 
-		# Share the library
 		if anim_player.has_animation_library(""):
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", new_lib)
@@ -638,6 +683,46 @@ func _create_placeholder_character(record: ESMRecord, type: String, ref_num: int
 	movement_controller.set_meta("ref_num", ref_num)
 
 	return movement_controller
+
+
+# =============================================================================
+# BONE REMAP & ANIMATION REMAPPING
+# =============================================================================
+
+## Build and cache bone remap for a skeleton type (must call BEFORE renaming)
+## The skeleton should still have native Bip01 bone names at this point.
+static func _ensure_bone_remap(skeleton: Skeleton3D, is_beast: bool) -> Dictionary:
+	var cached := _beast_bone_remap if is_beast else _humanoid_bone_remap
+	if not cached.is_empty():
+		return cached
+
+	var remap := RetargetSetupScript.build_remap(skeleton)
+
+	if is_beast:
+		_beast_bone_remap = remap
+	else:
+		_humanoid_bone_remap = remap
+
+	return remap
+
+
+## Ensure a cached library has profile-named tracks (lazy remap on first access)
+static func _ensure_library_remapped(lib: AnimationLibrary, cache_key: String, is_beast: bool) -> AnimationLibrary:
+	if cache_key in _remapped_cache_keys:
+		return lib
+
+	return _remap_and_cache_library(lib, cache_key, is_beast)
+
+
+## Remap a library's bone tracks from Bip01 → profile names, cache result
+static func _remap_and_cache_library(lib: AnimationLibrary, cache_key: String, is_beast: bool) -> AnimationLibrary:
+	var remap := _beast_bone_remap if is_beast else _humanoid_bone_remap
+	if not remap.is_empty():
+		lib = RetargetSetupScript.remap_library(lib, remap)
+
+	_animation_library_cache[cache_key] = lib
+	_remapped_cache_keys[cache_key] = true
+	return lib
 
 
 # =============================================================================

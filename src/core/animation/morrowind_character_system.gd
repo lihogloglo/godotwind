@@ -11,8 +11,9 @@ extends "res://src/core/animation/humanoid_animation_system.gd"
 
 # _AnimationManagerScript is inherited from parent class
 
-# Morrowind bone name mapping
-# Maps Morrowind Bip01 names to standard humanoid names
+# Morrowind bone name mapping — REFERENCE ONLY
+# Runtime bone mapping uses SkeletonProfileAdapter (auto-detects Morrowind Bip01).
+# Kept here for documentation of the Morrowind → humanoid bone correspondence.
 const MORROWIND_BONE_MAP: Dictionary = {
 	# Root/Hips
 	"Bip01": &"Hips",
@@ -110,35 +111,6 @@ func setup_morrowind(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D,
 
 	# Call parent setup
 	setup(p_skeleton, p_character_body)
-
-
-## Override bone mapping for Morrowind skeletons
-func _build_bone_map() -> void:
-	if not skeleton:
-		return
-
-	# Use Morrowind bone mapping
-	for i in skeleton.get_bone_count():
-		var bone_name := skeleton.get_bone_name(i)
-
-		# Check direct match in Morrowind map
-		if bone_name in MORROWIND_BONE_MAP:
-			_bone_map[MORROWIND_BONE_MAP[bone_name]] = i
-		# Check lowercase match
-		elif bone_name.to_lower() in MORROWIND_BONE_MAP:
-			_bone_map[MORROWIND_BONE_MAP[bone_name.to_lower()]] = i
-		else:
-			# Fall back to parent mapping logic
-			var mapped := _map_bone_name(bone_name)
-			if not mapped.is_empty():
-				_bone_map[mapped] = i
-
-	if debug_mode:
-		var map_info := "MorrowindCharacterSystem: Mapped %d bones" % _bone_map.size()
-		for standard_name: StringName in _bone_map:
-			var idx: int = _bone_map[standard_name]
-			map_info += "\n  %s -> %s (idx %d)" % [standard_name, skeleton.get_bone_name(idx), idx]
-		Log.debug("animation", map_info)
 
 
 ## Find animation by Morrowind name

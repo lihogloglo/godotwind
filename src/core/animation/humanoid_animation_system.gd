@@ -13,6 +13,7 @@ extends "res://src/core/animation/character_animation_system.gd"
 # Preload for constants access
 const _AnimationManagerScript := preload("res://src/core/animation/animation_manager.gd")
 const _ProceduralModifierScript := preload("res://src/core/animation/procedural_modifier_controller.gd")
+const _SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
 
 # Humanoid-specific signals
 signal combat_mode_changed(enabled: bool)
@@ -63,112 +64,24 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null,
 	_configure_humanoid_ik()
 
 
-## Build bone name mapping
+## Build bone name mapping using _SPA
 func _build_bone_map() -> void:
 	if not skeleton:
 		return
 
-	# Standard humanoid bone names we expect
-	var expected_bones := [
-		&"Hips", &"Spine", &"Spine1", &"Spine2", &"Chest",
-		&"Neck", &"Head",
-		&"LeftShoulder", &"LeftUpperArm", &"LeftLowerArm", &"LeftHand",
-		&"RightShoulder", &"RightUpperArm", &"RightLowerArm", &"RightHand",
-		&"LeftUpperLeg", &"LeftLowerLeg", &"LeftFoot", &"LeftToes",
-		&"RightUpperLeg", &"RightLowerLeg", &"RightFoot", &"RightToes",
-	]
+	var bone_map := _SPA.create_bone_map(skeleton)
+	if not bone_map:
+		return
 
-	# Map actual skeleton bones to standard names
-	for i in skeleton.get_bone_count():
-		var bone_name := skeleton.get_bone_name(i)
-		var mapped := _map_bone_name(bone_name)
-		if not mapped.is_empty():
-			_bone_map[mapped] = i
-
-
-## Map a bone name to standard humanoid name
-func _map_bone_name(bone_name: String) -> StringName:
-	var lower := bone_name.to_lower()
-
-	# Hips/Pelvis
-	if "hip" in lower or "pelvis" in lower:
-		return &"Hips"
-
-	# Spine chain
-	if "spine" in lower:
-		if "2" in lower or "upper" in lower:
-			return &"Spine2"
-		elif "1" in lower:
-			return &"Spine1"
-		else:
-			return &"Spine"
-
-	if "chest" in lower:
-		return &"Chest"
-
-	# Head/Neck
-	if "neck" in lower:
-		return &"Neck"
-	if "head" in lower:
-		return &"Head"
-
-	# Left arm
-	if _is_left(lower):
-		if "shoulder" in lower or "clavicle" in lower:
-			return &"LeftShoulder"
-		if "upperarm" in lower or ("upper" in lower and "arm" in lower):
-			return &"LeftUpperArm"
-		if "forearm" in lower or "lowerarm" in lower or ("lower" in lower and "arm" in lower):
-			return &"LeftLowerArm"
-		if "hand" in lower and "finger" not in lower:
-			return &"LeftHand"
-
-	# Right arm
-	if _is_right(lower):
-		if "shoulder" in lower or "clavicle" in lower:
-			return &"RightShoulder"
-		if "upperarm" in lower or ("upper" in lower and "arm" in lower):
-			return &"RightUpperArm"
-		if "forearm" in lower or "lowerarm" in lower or ("lower" in lower and "arm" in lower):
-			return &"RightLowerArm"
-		if "hand" in lower and "finger" not in lower:
-			return &"RightHand"
-
-	# Left leg
-	if _is_left(lower):
-		if "thigh" in lower or "upperleg" in lower or ("upper" in lower and "leg" in lower):
-			return &"LeftUpperLeg"
-		if "calf" in lower or "shin" in lower or "lowerleg" in lower or ("lower" in lower and "leg" in lower):
-			return &"LeftLowerLeg"
-		if "foot" in lower and "toe" not in lower:
-			return &"LeftFoot"
-		if "toe" in lower:
-			return &"LeftToes"
-
-	# Right leg
-	if _is_right(lower):
-		if "thigh" in lower or "upperleg" in lower or ("upper" in lower and "leg" in lower):
-			return &"RightUpperLeg"
-		if "calf" in lower or "shin" in lower or "lowerleg" in lower or ("lower" in lower and "leg" in lower):
-			return &"RightLowerLeg"
-		if "foot" in lower and "toe" not in lower:
-			return &"RightFoot"
-		if "toe" in lower:
-			return &"RightToes"
-
-	return &""
-
-
-func _is_left(name: String) -> bool:
-	return "left" in name or " l " in name or name.begins_with("l ") or \
-		   name.ends_with(" l") or ".l" in name or "_l" in name or \
-		   " l_" in name or name.begins_with("l_")
-
-
-func _is_right(name: String) -> bool:
-	return "right" in name or " r " in name or name.begins_with("r ") or \
-		   name.ends_with(" r") or ".r" in name or "_r" in name or \
-		   " r_" in name or name.begins_with("r_")
+	# Populate _bone_map: profile_name -> bone_index
+	var profile := bone_map.profile
+	for i in profile.bone_size:
+		var profile_name := profile.get_bone_name(i)
+		var skel_name := bone_map.get_skeleton_bone_name(profile_name)
+		if not skel_name.is_empty():
+			var idx := skeleton.find_bone(skel_name)
+			if idx >= 0:
+				_bone_map[profile_name] = idx
 
 
 ## Configure IK for humanoid skeleton

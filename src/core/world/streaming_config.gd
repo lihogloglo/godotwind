@@ -53,23 +53,14 @@ const MID_LOD3_END := MID_END
 # CROSSFADE MARGINS
 # =============================================================================
 
-## Overlap distance for NEAR→MID transition (meters)
-## Both tiers visible during crossfade with dithering
-## Increased from 30m to 50m for smoother, more visible transitions
-## At 50m/s camera speed, this gives ~1 second transition time
-const FADE_MARGIN_NEAR := 50.0
+## Per-boundary crossfade margins (tiered: smaller at close range where mismatch is visible)
+## Total crossfade zone = 2x margin value
+const FADE_MARGIN_NEAR := DU.FADE_MARGIN_NEAR_LOD1  # 5.0 — NEAR/LOD1 at 150m
+const FADE_MARGIN_MID := DU.FADE_MARGIN_LOD1_LOD2   # 10.0 — LOD1/LOD2 at 250m
+const FADE_MARGIN_FAR := DU.FADE_MARGIN_LOD3_FAR    # 20.0 — LOD3/FAR at 500m
 
-## Overlap distance for MID→FAR transition (meters)
-## Increased for smoother impostor pop-in
-const FADE_MARGIN_MID := 50.0
-
-## Overlap distance for FAR→HORIZON transition (meters)
-## Larger margin for distant fading
-const FADE_MARGIN_FAR := 100.0
-
-## Generic fade margin (used by DistanceUtils)
-## This is the default value used when specific margins aren't specified
-const FADE_MARGIN := 50.0
+## Generic fade margin (legacy default)
+const FADE_MARGIN := DU.FADE_MARGIN  # 10.0
 
 # =============================================================================
 # HYSTERESIS (Anti-Flickering)

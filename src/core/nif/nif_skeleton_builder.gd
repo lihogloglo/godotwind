@@ -461,23 +461,21 @@ func build_skin_resource(skin_instance: Defs.NiSkinInstance, skin_data: Defs.NiS
 		if mirror and bone_name in BONE_MIRROR_MAP:
 			bone_name = BONE_MIRROR_MAP[bone_name]
 
-		# Find in target skeleton
-		if not bone_name in target_bone_map:
+		# Find in target skeleton (fallback to root if not found)
+		var target_bone_idx: int
+		if bone_name in target_bone_map:
+			target_bone_idx = target_bone_map[bone_name]
+		else:
 			if debug_mode:
-				push_warning("NIFSkeletonBuilder: Bone '%s' not in target skeleton" % bone_name)
-			continue
-
-		var target_bone_idx: int = target_bone_map[bone_name]
+				push_warning("NIFSkeletonBuilder: Bone '%s' not in target skeleton, mapping to root" % bone_name)
+			target_bone_idx = 0
 
 		# Convert inverse bind matrix from NIF to Godot coordinates
 		var inv_bind_nif := bone_transform.to_transform3d()
 		var inv_bind_godot := CS.transform_to_godot(inv_bind_nif)
 
-		# The bind pose is the inverse of the inverse bind matrix
-		var bind_pose := inv_bind_godot.affine_inverse()
-
-		# Add to skin - Godot stores the BIND POSE (not inverse bind)
-		skin.add_bind(target_bone_idx, bind_pose)
+		# Add to skin - Godot Skin.add_bind() expects the INVERSE BIND MATRIX
+		skin.add_bind(target_bone_idx, inv_bind_godot)
 
 	if debug_mode:
 		Log.debug("nif", "NIFSkeletonBuilder: Built Skin with %d binds" % skin.get_bind_count())

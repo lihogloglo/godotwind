@@ -11,6 +11,8 @@
 class_name AnimationBlendMask
 extends RefCounted
 
+const _SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
+
 # Predefined mask types matching OpenMW
 enum MaskType {
 	LOWER_BODY = 0,    # Legs and pelvis
@@ -20,21 +22,14 @@ enum MaskType {
 	FULL_BODY = 4,     # All bones
 }
 
-# Mask root bones (OpenMW's sBlendMaskRoots)
-# Everything at and below these bones is included in the mask
+# Mask root bones defined as SkeletonProfileHumanoid names
+# Resolved to actual skeleton bone names via _SPA
 const BLEND_MASK_ROOTS := {
-	MaskType.LOWER_BODY: "",  # Empty = all bones from root
-	MaskType.TORSO: "Bip01 Spine1",
-	MaskType.LEFT_ARM: "Bip01 L Clavicle",
-	MaskType.RIGHT_ARM: "Bip01 R Clavicle",
-	MaskType.FULL_BODY: "",  # Empty = all bones
-}
-
-# Alternative bone names for different skeleton conventions
-const BONE_ALIASES := {
-	"Bip01 Spine1": ["Bip01 Spine1", "bip01 spine1", "Spine1", "spine1"],
-	"Bip01 L Clavicle": ["Bip01 L Clavicle", "bip01 l clavicle", "LeftShoulder", "Left Clavicle"],
-	"Bip01 R Clavicle": ["Bip01 R Clavicle", "bip01 r clavicle", "RightShoulder", "Right Clavicle"],
+	MaskType.LOWER_BODY: &"",             # Empty = all bones from root
+	MaskType.TORSO: &"Chest",             # Profile: Chest (Morrowind: "Bip01 Spine1")
+	MaskType.LEFT_ARM: &"LeftShoulder",   # Profile: LeftShoulder (Morrowind: "Bip01 L Clavicle")
+	MaskType.RIGHT_ARM: &"RightShoulder", # Profile: RightShoulder (Morrowind: "Bip01 R Clavicle")
+	MaskType.FULL_BODY: &"",              # Empty = all bones
 }
 
 # Cached bone indices for each mask type
@@ -71,57 +66,31 @@ func _build_mask(mask_type: int) -> Array[int]:
 	var bones: Array[int] = []
 
 	if mask_type == MaskType.FULL_BODY:
-		# Full body includes all bones
 		for i in _skeleton.get_bone_count():
 			bones.append(i)
 		return bones
 
-	# Get root bone for this mask
-	var root_name: String = BLEND_MASK_ROOTS.get(mask_type, "")
+	# Get profile bone name for this mask root
+	var profile_bone: StringName = BLEND_MASK_ROOTS.get(mask_type, &"")
 
-	if root_name.is_empty():
-		# Empty root = all bones from skeleton root
+	if profile_bone.is_empty():
 		for i in _skeleton.get_bone_count():
 			bones.append(i)
 		return bones
 
-	# Find the root bone index
-	var root_idx := _find_bone(root_name)
+	# Resolve profile name to actual skeleton bone via BoneMap
+	var root_idx := _SPA.get_bone_index(_skeleton, profile_bone)
 	if root_idx < 0:
 		if debug_mode:
-			push_warning("AnimationBlendMask: Could not find root bone '%s' for mask %d" % [
-				root_name, mask_type
+			push_warning("AnimationBlendMask: Could not find bone for profile '%s' (mask %d)" % [
+				profile_bone, mask_type
 			])
 		return bones
 
-	# Add root bone and all descendants
 	bones.append(root_idx)
 	_add_descendants(root_idx, bones)
 
 	return bones
-
-
-## Find a bone by name, checking aliases
-func _find_bone(bone_name: String) -> int:
-	# Try direct lookup first
-	var idx := _skeleton.find_bone(bone_name)
-	if idx >= 0:
-		return idx
-
-	# Try aliases
-	var aliases: Array = BONE_ALIASES.get(bone_name, [])
-	for alias: String in aliases:
-		idx = _skeleton.find_bone(alias)
-		if idx >= 0:
-			return idx
-
-	# Try case-insensitive search
-	var lower := bone_name.to_lower()
-	for i in _skeleton.get_bone_count():
-		if _skeleton.get_bone_name(i).to_lower() == lower:
-			return i
-
-	return -1
 
 
 ## Add all descendants of a bone to the mask

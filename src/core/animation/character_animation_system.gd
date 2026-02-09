@@ -21,6 +21,9 @@ const _AnimationLODController := preload("res://src/core/animation/animation_lod
 signal animation_state_changed(old_state: StringName, new_state: StringName)
 signal animation_finished(animation_name: StringName)
 signal ik_target_reached(ik_type: StringName)
+signal sound_triggered(sound_id: String, position: Vector3)
+signal hit_triggered(position: Vector3)
+signal footstep_triggered(foot: String, position: Vector3)
 
 # Child controllers (created in setup)
 # Note: Using Node type to avoid cyclic dependency issues with preloaded scripts
@@ -331,6 +334,9 @@ func _setup_controllers() -> void:
 		anim.setup(skeleton, character_body)
 		anim.state_changed.connect(_on_animation_state_changed)
 		anim.animation_finished.connect(_on_animation_finished)
+		anim.sound_triggered.connect(_on_sound_triggered)
+		anim.hit_triggered.connect(_on_hit_triggered)
+		anim.footstep_triggered.connect(_on_footstep_triggered)
 
 	# Setup IK Controller
 	var ik: _IKController = ik_controller as _IKController
@@ -398,6 +404,29 @@ func _on_animation_finished(animation_name: StringName) -> void:
 
 func _on_ik_target_reached(ik_type: StringName) -> void:
 	ik_target_reached.emit(ik_type)
+
+
+func _on_sound_triggered(sound_id: String, position: Vector3) -> void:
+	sound_triggered.emit(sound_id, position)
+
+
+func _on_hit_triggered(position: Vector3) -> void:
+	hit_triggered.emit(position)
+
+
+func _on_footstep_triggered(foot: String, position: Vector3) -> void:
+	footstep_triggered.emit(foot, position)
+
+
+# =============================================================================
+# TEXT KEY API
+# =============================================================================
+
+## Register text keys for an animation (from NIF/KF loading)
+func register_text_keys(animation_name: String, text_keys: Array) -> void:
+	var anim: _AnimationManager = animation_manager as _AnimationManager
+	if anim:
+		anim.register_animation_text_keys(animation_name, text_keys)
 
 
 # =============================================================================

@@ -51,6 +51,7 @@ const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.
 const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
+const LodTransitionTestScript := preload("res://src/tools/lod_transition_test.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -926,6 +927,11 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 
 		# Register streaming benchmark commands
 		StreamingBenchmarkScript.register_console_commands(
+			console, native_streaming_manager, cell_manager, camera
+		)
+
+		# Register LOD transition test commands
+		LodTransitionTestScript.register_console_commands(
 			console, native_streaming_manager, cell_manager, camera
 		)
 

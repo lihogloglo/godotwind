@@ -30,6 +30,7 @@ extends CharacterBody3D
 
 # References
 var character_root: Node3D
+var animation_system: Node = null
 
 # State
 var is_swimming: bool = false
@@ -123,6 +124,10 @@ func _physics_process(delta: float) -> void:
 
 	# Move character
 	move_and_slide()
+
+	# Update animation system with current movement state
+	if animation_system:
+		animation_system.update_from_movement(velocity, is_on_floor())
 
 	# Phase 1: Update slope adaptation
 	if enable_slope_adaptation and is_on_floor():

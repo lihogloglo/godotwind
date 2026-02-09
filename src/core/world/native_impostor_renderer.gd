@@ -185,10 +185,10 @@ func _setup_master_multimesh() -> void:
 	# CRITICAL FIX: Use Godot's native visibility_range to hide impostors at close range
 	# This is more reliable than shader-only discard because Godot culls BEFORE rendering
 	# Begin at FAR_START (500m) minus margin for smooth transition
-	_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN  # 450m
+	_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR  # 480m
 	_master_instance.visibility_range_end = DU.FAR_END  # 5000m
-	_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN  # 50m hysteresis
-	_master_instance.visibility_range_end_margin = DU.FADE_MARGIN
+	_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
+	_master_instance.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
 	_master_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
 	add_child(_master_instance)
@@ -214,7 +214,7 @@ func _setup_billboard_material() -> void:
 	default_array.create_from_images([default_img])
 	_billboard_material.set_shader_parameter("texture_atlas", default_array)
 	_billboard_material.set_shader_parameter("fade_distance", DU.MID_END) # 500m
-	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN) # 50m
+	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN_LOD3_FAR) # 20m
 	_billboard_material.set_shader_parameter("debug_mode", false)  # Normal mode: impostors only visible 500m+
 
 	# Set material on both the mesh surface AND as override (belt and suspenders)
@@ -259,8 +259,8 @@ func set_shader_debug_mode(enabled: bool) -> void:
 			Log.debug("impostors", "visibility_range_begin set to 0 (debug mode)")
 		else:
 			# Normal mode: restore FAR tier visibility (450m+)
-			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN  # 450m
-			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN  # 50m hysteresis
+			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR  # 480m
+			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
 			Log.debug("impostors", "visibility_range_begin restored to 450m")
 
 	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (500m+)"))
