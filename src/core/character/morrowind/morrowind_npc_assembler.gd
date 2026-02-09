@@ -307,19 +307,15 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 
 	var is_mirrored: bool = BodyPartSlots.is_left_side(slot)
 
-	# Apply material
+	# Apply material — use CULL_DISABLED because attachment node transforms from
+	# xbase_anim.nif have mixed-sign determinants (some negative, some positive),
+	# making per-part cull mode unreliable. Double-sided rendering is safe for
+	# low-poly Morrowind body parts.
 	if not mesh_data.texture_path.is_empty():
 		var material := _create_material(mesh_data.texture_path, mesh_data.material_properties)
 		if material:
-			if is_mirrored:
-				material.cull_mode = BaseMaterial3D.CULL_FRONT
+			material.cull_mode = BaseMaterial3D.CULL_DISABLED
 			array_mesh.surface_set_material(0, material)
-
-	# Left-side: create fallback material for cull flip if none was set
-	if is_mirrored and array_mesh.surface_get_material(0) == null:
-		var fallback_mat := StandardMaterial3D.new()
-		fallback_mat.cull_mode = BaseMaterial3D.CULL_FRONT
-		array_mesh.surface_set_material(0, fallback_mat)
 
 	# PRIMARY: Use slot-to-bone mapping (authoritative for body parts)
 	var bone_name := BodyPartSlots.get_bone(slot)
@@ -330,22 +326,28 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 		bone_idx = _find_bone_ci(skeleton, mesh_data.parent_bone_name)
 
 	if bone_idx >= 0:
-		# OpenMW PATH B: v_world = bone * attachment_local * nif_root * v_mesh
-		# Compose attachment node transform with NIF scene root transform.
+		# OpenMW PATH B: v_world = bone * attachment * [bone_offset * mirror] * nif_root * v
+		# Mirror goes BETWEEN attachment and nif_root so nif_root's translation
+		# is correctly mirrored for left-side parts (matches OpenMW attach.cpp).
 		var attach_name: String = SLOT_TO_ATTACHMENT_NAME.get(slot, "")
 		var attachment_transforms := _get_attachment_transforms(is_beast)
 		if not attach_name.is_empty() and attach_name in attachment_transforms:
-			instance.transform = attachment_transforms[attach_name] * mesh_data.node_transform
+			if is_mirrored:
+				# OpenMW: PositionAttitudeTransform(pos=bone_offset, scale=mirror)
+				# This applies as: translate(bone_offset) * scale(mirror) — scale first, then translate
+				var bone_offset_pos := mesh_data.bone_offset_position if mesh_data.has_bone_offset else Vector3.ZERO
+				var mirror_xf := Transform3D(Basis.from_scale(Vector3(-1, 1, 1)), bone_offset_pos)
+				instance.transform = attachment_transforms[attach_name] * mirror_xf * mesh_data.node_transform
+			else:
+				instance.transform = attachment_transforms[attach_name] * mesh_data.node_transform
+				if mesh_data.has_bone_offset:
+					instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
 		else:
 			instance.transform = mesh_data.node_transform
-
-		# Apply BoneOffset if the NIF had one (translation only, per OpenMW)
-		if mesh_data.has_bone_offset:
-			instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
-
-		# Left-side mirroring: scale X by -1 (right-side mesh mirrored to left bone)
-		if is_mirrored:
-			instance.scale.x *= -1.0
+			if mesh_data.has_bone_offset:
+				instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
+			if is_mirrored:
+				instance.scale.x *= -1.0
 
 		var attachment := BoneAttachment3D.new()
 		attachment.name = "Attach_%s" % BodyPartSlots.slot_name(slot)

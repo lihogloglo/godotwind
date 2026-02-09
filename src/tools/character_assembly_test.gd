@@ -496,7 +496,7 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 
 			var mat := StandardMaterial3D.new()
 			mat.albedo_color = color
-			mat.cull_mode = BaseMaterial3D.CULL_FRONT if is_left else BaseMaterial3D.CULL_DISABLED
+			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 			array_mesh.surface_set_material(0, mat)
 
 			if extracted.is_skinned:
@@ -533,18 +533,23 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 							# Pure bone-local: no additional transform
 							instance.transform = Transform3D.IDENTITY
 						StaticMode.ATTACHMENT:
-							# Compose attachment node transform with NIF scene root transform.
-							# OpenMW: v_world = bone * attachment_local * nif_root * v_mesh
-							# The NIF root rotation is ~inverse of attachment rotation,
-							# so the composition yields ~identity rotation + combined translation.
+							# OpenMW order: bone * attachment * mirror_if_left * nif_root * v
+							# Mirror goes BETWEEN attachment and nif_root so nif_root's
+							# translation is correctly mirrored for left-side parts.
 							var attach_name: String = SLOT_TO_ATTACHMENT.get(slot_name, "")
 							if not attach_name.is_empty() and attach_name in _attachment_transforms:
-								instance.transform = _attachment_transforms[attach_name] * extracted.node_transform
+								if is_left:
+									var mirror_xf := Transform3D(Basis.from_scale(Vector3(-1, 1, 1)), Vector3.ZERO)
+									instance.transform = _attachment_transforms[attach_name] * mirror_xf * extracted.node_transform
+								else:
+									instance.transform = _attachment_transforms[attach_name] * extracted.node_transform
 							else:
 								instance.transform = extracted.node_transform
+								if is_left:
+									instance.scale.x *= -1.0
 
-					# Left-side mirroring: scale X by -1
-					if is_left:
+					# Left-side mirroring for non-ATTACHMENT modes
+					if is_left and _static_mode != StaticMode.ATTACHMENT:
 						instance.scale.x *= -1.0
 
 					var attachment := BoneAttachment3D.new()
@@ -920,7 +925,7 @@ func _setup_scene() -> void:
 	# Camera
 	var camera := Camera3D.new()
 	camera.name = "Camera3D"
-	camera.position = Vector3(0, 1.0, 3.5)
+	camera.position = Vector3(0, 1.0, -3.5)
 	add_child(camera)
 	camera.look_at(Vector3(0, 0.8, 0))
 

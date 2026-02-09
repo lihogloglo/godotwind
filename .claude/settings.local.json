@@ -370,7 +370,8 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-dev6_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/character_assembly_test.tscn\")",
       "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\")",
       "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\" --quit-after 5000)",
-      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\" --quit-after 8000)"
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:/Gamedev/Godotwind/godotwind\" \"res://src/tools/character_assembly_test.tscn\" --quit-after 8000)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64_console.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/character_assembly_test.tscn\" --windowed)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

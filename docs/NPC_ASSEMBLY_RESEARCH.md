@@ -646,5 +646,8 @@ If BoneOffset is a **sibling** of the geometry in the NIF (not an ancestor), its
 | **Fix** | ✅ | Remove `bone_global_rest_inv` from transform formula — use `node_transform` directly |
 | **Fix** | ✅ | Add BoneOffset support (translation only, per OpenMW) |
 | **Fix** | ✅ | Apply fix to production `morrowind_npc_assembler.gd` |
+| **Fix** | ✅ | Camera: Z=3.5 → Z=-3.5 (was looking at back of characters) |
+| **Fix** | ✅ | Face culling: CULL_DISABLED for all static parts (attachment transforms have mixed-sign determinants) |
+| **Fix** | ✅ | Mirror order: `attachment * mirror * nif_root` (was `attachment * nif_root * mirror`) — matches OpenMW |
 | **Verify** | ⬜ | Run `character_assembly_test.tscn` — all parts at correct bones |
 | **Verify** | ⬜ | Run `world_explorer.tscn` — NPCs look correct in-world |
