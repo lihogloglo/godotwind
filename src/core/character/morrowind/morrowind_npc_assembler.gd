@@ -485,15 +485,13 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 		var attachment_transforms := _get_attachment_transforms(is_beast)
 
 		if is_mirrored:
-			# Mesh vertices/normals are already X-flipped. We need the transform to
-			# position the mirrored mesh correctly WITHOUT negative scale.
-			# Derivation: right_att * mirror * node_xf * vertex
-			#           = right_att * (mirror * node_xf * mirror) * mirrored_vertex
-			# So T = right_att * bone_offset * conjugate(node_xf, mirror)
-			# where conjugate flips the origin X and mirrors the basis.
-			var right_slot: int = BodyPartSlots.get_right_equivalent(slot)
-			var right_name: String = SLOT_TO_ATTACHMENT_NAME.get(right_slot, attach_name)
-			var att: Transform3D = attachment_transforms.get(right_name, Transform3D.IDENTITY)
+			# Match OpenMW's static path for left-side limbs:
+			# OpenMW attaches to the LEFT bone node, inserts a PAT with
+			# position=BoneOffset and scale=(-1,1,1), then the unmodified NIF.
+			# Since our mesh vertices are already X-flipped, the scale(-1,1,1)
+			# becomes a conjugation of node_xf: M * node_xf * M.
+			# We use the LEFT attachment transform directly (not the right one).
+			var att: Transform3D = attachment_transforms.get(attach_name, Transform3D.IDENTITY)
 
 			var M := Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1))
 			var mirrored_node := Transform3D(
@@ -505,6 +503,23 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 				instance.transform = att * Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * mirrored_node
 			else:
 				instance.transform = att * mirrored_node
+
+			if debug_mode:
+				var right_slot: int = BodyPartSlots.get_right_equivalent(slot)
+				var right_name: String = SLOT_TO_ATTACHMENT_NAME.get(right_slot, attach_name)
+				var att_R: Transform3D = attachment_transforms.get(right_name, Transform3D.IDENTITY)
+				var bone_global_L := skeleton.get_bone_global_rest(bone_idx)
+				var right_bone_name := BodyPartSlots.get_bone(right_slot)
+				var right_bone_idx := _find_bone_ci(skeleton, right_bone_name)
+				var bone_global_R := skeleton.get_bone_global_rest(right_bone_idx) if right_bone_idx >= 0 else Transform3D.IDENTITY
+				var M_check := Transform3D(M, Vector3.ZERO)
+				var expected_L := M_check * bone_global_R * M_check
+				Log.info("character", "  [MIRROR %s] bone_L=%s" % [BodyPartSlots.slot_name(slot), bone_global_L.origin])
+				Log.info("character", "    bone_R=%s, M*R*M=%s" % [bone_global_R.origin, expected_L.origin])
+				Log.info("character", "    att_L=%s, att_R=%s" % [att.origin, att_R.origin])
+				Log.info("character", "    node_xf=%s, mirrored=%s" % [mesh_data.node_transform.origin, mirrored_node.origin])
+				Log.info("character", "    bone_offset=%s (has=%s)" % [mesh_data.bone_offset_position, mesh_data.has_bone_offset])
+				Log.info("character", "    final_xf=%s" % instance.transform.origin)
 		else:
 			# Right side: attachment * [bone_offset] * node_transform
 			var att: Transform3D = attachment_transforms.get(attach_name, Transform3D.IDENTITY)
