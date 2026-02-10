@@ -213,14 +213,43 @@ static func _duplicate_skeleton(source: Skeleton3D) -> Skeleton3D:
 ## Attach a body part directly to the native skeleton
 static func _attach_body_part_native(skeleton: Skeleton3D, slot: int, part_data: BodyPartData, is_beast: bool) -> void:
 	var is_mirrored: bool = BodyPartSlots.is_left_side(slot)
+	var is_limb_slot: bool = BodyPartSlots.is_limb_slot(slot)
+
+	# For non-limb slots (CHEST, GROIN, etc.), check if ANY sub-mesh from this NIF
+	# qualifies as full-body skin (many bones). If so, ALL skinned sub-meshes should
+	# use the skinned path — their node_transform is in skeleton-root space and would
+	# produce incorrect positioning via the static path.
+	var has_full_body_mesh: bool = false
+	if not is_limb_slot:
+		for md in part_data.meshes:
+			if md.is_skinned and md.bone_names.size() > 4:
+				has_full_body_mesh = true
+				break
 
 	for mesh_data in part_data.meshes:
 		var extracted: MeshExtractor.MeshData = mesh_data
 
-		# OpenMW treats individual limb parts as STATIC even if they have NiSkinData
-		# (their NIF root is not a Skeleton type). Only full-body "skin" meshes
-		# (many bones, Skeleton root) use GPU skinning. Heuristic: >4 bones = full body.
-		var is_full_body_skin: bool = extracted.is_skinned and extracted.bone_names.size() > 4
+		# Route decision (matching OpenMW's two-path system):
+		# 1. Limb slots → ALWAYS static (per OpenMW: individual limb NIFs have
+		#    non-Skeleton root, so they go through Path B regardless of skin data)
+		# 2. Non-limb slots with full-body NIF → ALL skinned sub-meshes go through
+		#    the skinned path (even those with <=4 bones). Their transforms are in
+		#    skeleton-root space and must be resolved by the skinning pipeline.
+		# 3. Non-limb slots without full-body NIF → standard bone count heuristic
+		var is_full_body_skin: bool = false
+		if not is_limb_slot:
+			if has_full_body_mesh and extracted.is_skinned:
+				is_full_body_skin = true
+			elif extracted.is_skinned and extracted.bone_names.size() > 4:
+				is_full_body_skin = true
+
+		if debug_mode:
+			Log.info("character", "  [%s] mesh: %d verts, %d bones, skinned=%s, route=%s" % [
+				BodyPartSlots.slot_name(slot),
+				extracted.vertices.size(),
+				extracted.bone_names.size(),
+				str(extracted.is_skinned),
+				"SKINNED" if is_full_body_skin else "STATIC"])
 
 		if is_full_body_skin:
 			if is_mirrored:
@@ -331,11 +360,19 @@ static func _attach_skinned_mesh_mirrored(skeleton: Skeleton3D, mesh_data: MeshE
 	var mirror_basis := Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1))
 	var mirror_xf := Transform3D(mirror_basis, Vector3.ZERO)
 
+	# Find a valid fallback bone (first bone that exists in skeleton)
+	var mirrored_fallback := 0
+	for i in remapped_bone_names.size():
+		var idx := _find_bone_ci(skeleton, remapped_bone_names[i])
+		if idx >= 0:
+			mirrored_fallback = idx
+			break
+
 	for i in remapped_bone_names.size():
 		var bone_name: String = remapped_bone_names[i]
 		var bone_idx := _find_bone_ci(skeleton, bone_name)
 		if bone_idx < 0:
-			bone_idx = 0  # fallback to root
+			bone_idx = mirrored_fallback  # use first valid bone, not root
 
 		var inv_bind: Transform3D
 		if has_nif_binds:
@@ -376,6 +413,14 @@ static func _create_native_skin(mesh_data: MeshExtractor.MeshData, skeleton: Ske
 	var unmapped := PackedStringArray()
 	var has_nif_binds: bool = mesh_data.inv_bind_poses.size() == mesh_data.bone_names.size()
 
+	# First pass: find a valid fallback bone (first bone that exists in skeleton)
+	var fallback_bone_idx := 0
+	for i in mesh_data.bone_names.size():
+		var idx := _find_bone_ci(skeleton, mesh_data.bone_names[i])
+		if idx >= 0:
+			fallback_bone_idx = idx
+			break
+
 	for i in mesh_data.bone_names.size():
 		var bone_name: String = mesh_data.bone_names[i]
 
@@ -383,7 +428,7 @@ static func _create_native_skin(mesh_data: MeshExtractor.MeshData, skeleton: Ske
 
 		if bone_idx < 0:
 			unmapped.append(bone_name)
-			bone_idx = 0  # fallback to root bone
+			bone_idx = fallback_bone_idx  # use first valid bone, not root
 
 		var inv_bind: Transform3D
 		if has_nif_binds:
@@ -397,8 +442,9 @@ static func _create_native_skin(mesh_data: MeshExtractor.MeshData, skeleton: Ske
 
 		skin.add_bind(bone_idx, inv_bind)
 
-	if debug_mode and not unmapped.is_empty():
-		Log.debug("character", "Native skin unmapped bones: %s" % str(unmapped))
+	if not unmapped.is_empty():
+		Log.warn("character", "Native skin unmapped bones (fell back to '%s'): %s" % [
+			skeleton.get_bone_name(fallback_bone_idx), str(unmapped)])
 
 	return skin
 
@@ -561,11 +607,33 @@ static func _collect_body_parts(npc_record, race_record, is_female: bool) -> Dic
 	# Get race body parts from ESM
 	if esm_mgr.has_method("get_body_parts_for_race"):
 		var race_parts: Array = esm_mgr.get_body_parts_for_race(race_record.record_id, is_female)
+		if debug_mode:
+			Log.info("character", "ESM returned %d body parts for race '%s' (%s):" % [
+				race_parts.size(), race_record.record_id, "female" if is_female else "male"])
 		for part in race_parts:
+			# Skip first-person body parts (*.1st) — they are close-up meshes
+			# for the player's first-person view, NOT for third-person NPCs.
+			# In Morrowind ESM, these have record IDs ending in ".1st".
+			if part.record_id.to_lower().ends_with(".1st"):
+				if debug_mode:
+					Log.info("character", "  [SKIP] ESM part '%s' — first-person only" % part.record_id)
+				continue
+
 			var slots := BodyPartSlots.part_type_to_slots(part.part_type)
+			if debug_mode:
+				Log.info("character", "  ESM part '%s' type=%d model='%s' -> slots=%s" % [
+					part.record_id, part.part_type, part.model, str(slots)])
 			for slot in slots:
 				var part_data := _load_body_part(part.model)
 				if part_data:
+					if debug_mode:
+						var max_bones := 0
+						for md in part_data.meshes:
+							if md.is_skinned and md.bone_names.size() > max_bones:
+								max_bones = md.bone_names.size()
+						if max_bones > 0:
+							Log.info("character", "    -> %d sub-meshes, max %d bones, skinned" % [
+								part_data.meshes.size(), max_bones])
 					parts[slot] = part_data
 
 	# Override with NPC-specific head/hair if set
@@ -583,6 +651,31 @@ static func _collect_body_parts(npc_record, race_record, is_female: bool) -> Dic
 			if hair_data:
 				parts[BodyPartSlots.Slot.HAIR] = hair_data
 
+	# If a limb slot references the SAME NIF as a non-limb slot (e.g., HAND_R references
+	# Skins.nif which is already loaded for CHEST), skip it. The non-limb slot renders
+	# that NIF via the skinned path; having the limb slot re-render the same 7 sub-meshes
+	# as static attachments on a single bone produces floating geometry.
+	# We do NOT remove limb slots that reference their own dedicated NIF files.
+	var non_limb_models: Dictionary = {}  # model_path -> slot
+	for slot: int in parts:
+		if not BodyPartSlots.is_limb_slot(slot):
+			var pd: BodyPartData = parts[slot]
+			non_limb_models[pd.model_path] = slot
+
+	var duplicate_limb_slots := PackedInt32Array()
+	for slot: int in parts:
+		if BodyPartSlots.is_limb_slot(slot):
+			var pd: BodyPartData = parts[slot]
+			if pd.model_path in non_limb_models:
+				duplicate_limb_slots.append(slot)
+				if debug_mode:
+					Log.info("character", "  Skipping limb slot %s — same NIF as %s ('%s')" % [
+						BodyPartSlots.slot_name(slot),
+						BodyPartSlots.slot_name(non_limb_models[pd.model_path]),
+						pd.model_path])
+	for slot in duplicate_limb_slots:
+		parts.erase(slot)
+
 	# Populate left-side slots from right-side parts.
 	# Morrowind body parts are modeled for the RIGHT side only.
 	# Left-side geometry is created by full mesh-space mirror:
@@ -593,6 +686,13 @@ static func _collect_body_parts(npc_record, race_record, is_female: bool) -> Dic
 		var left_slot: int = BodyPartSlots.get_left_equivalent(right_slot)
 		if left_slot != right_slot and left_slot not in parts:
 			parts[left_slot] = parts[right_slot]
+
+	if debug_mode:
+		Log.info("character", "Final slot assignment (%d slots):" % parts.size())
+		for slot: int in parts:
+			var pd: BodyPartData = parts[slot]
+			Log.info("character", "  %s: %d meshes from '%s'" % [
+				BodyPartSlots.slot_name(slot), pd.meshes.size(), pd.model_path])
 
 	return parts
 

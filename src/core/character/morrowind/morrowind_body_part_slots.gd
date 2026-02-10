@@ -92,6 +92,18 @@ static func is_left_side(slot: int) -> bool:
 	return slot in LEFT_SIDE_SLOTS
 
 
+## Check if slot is an individual limb part (always uses static attachment).
+## Limb parts are modeled for one side and attached rigidly to their bone.
+## Only central body parts (HEAD, HAIR, NECK, CHEST, GROIN, SKIRT, TAIL)
+## can use GPU skinning when their NIF has full-body skin data.
+static func is_limb_slot(slot: int) -> bool:
+	return slot in LEFT_SIDE_SLOTS or slot in [
+		Slot.HAND_R, Slot.WRIST_R, Slot.FOREARM_R, Slot.UPPER_ARM_R,
+		Slot.FOOT_R, Slot.ANKLE_R, Slot.KNEE_R, Slot.UPPER_LEG_R,
+		Slot.CLAVICLE_R,
+	]
+
+
 ## Get the right-side equivalent of a left-side slot
 static func get_right_equivalent(slot: int) -> int:
 	match slot:

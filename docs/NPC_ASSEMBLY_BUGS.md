@@ -7,48 +7,75 @@ Test scene: `src/tools/body_part_diagnostic.tscn`
 
 ## Active Bugs
 
-### Bug 1: Left-side limbs have wrong normals (dark/inverted lighting) — FIXED
+### Bug 1: Left-side limbs have wrong normals (dark/inverted lighting) — FIXED (2026-02-10)
 
-**Root cause:** Double normal flip. The code pre-flipped normal.x in mesh data AND Godot's
-`MODEL_NORMAL_MATRIX` (`basis.inverse().transposed()`) also flips normal.x for `scale(-1,1,1)`.
-The two flips cancel out, leaving normals pointing the same direction as the right side.
+**Root cause:** The old code used a hybrid approach — mesh-level winding reversal + transform-level
+`scale(-1,1,1)`. This depended on Godot's `MODEL_NORMAL_MATRIX` behavior for negative-determinant
+transforms, which proved unreliable across multiple attempts (double-flip, hollow, dark).
 
-**Fix:** Removed the normal pre-flip from `_create_mirrored_static_mesh()`. Now only
-Godot's MODEL_NORMAL_MATRIX handles the normal flip (single flip = correct).
-Winding reversal is kept (cancels GPU winding flip from negative scale → CULL_BACK works).
+**Fix:** Replaced with **full mesh-space mirror** — flip vertex X, normal X, and reverse winding
+all in mesh data. Transform uses NO negative scale (conjugated node_transform instead).
+This is the same strategy already working for skinned parts (`_attach_skinned_mesh_mirrored()`).
+`_create_mirrored_mesh()` replaces the old `_create_mirrored_static_mesh()`.
 
-**Key insight:** The MEMORY.md entry claiming "Godot's MODEL_NORMAL_MATRIX does NOT correctly
-flip normals" was WRONG. `basis.inverse().transposed()` of `diag(-1,1,1)` = `diag(-1,1,1)`,
-which correctly flips normal X. This matches what OpenMW's OSG does (inverse-transpose).
+**Transform derivation:**
+```
+right_att * mirror * node_xf * vertex = right_att * (M * node_xf * M) * mirrored_vertex
+T = att * bone_offset * Transform3D(M * basis * M, M * origin)  # NO negative scale
+```
 
----
-
-### Bug 2: Hand meshes floating above the character
-
-**Symptom:** Two hand meshes appear high above the character's head, completely detached from the body. Small hand-shaped geometry visible floating in the air.
-
-**Where it happens:** The hand meshes from the "skins" NIF file (e.g. `b_n_wood elf_m_skins.nif`) are full-body skinned meshes (many bones). The assembler's `_collect_body_parts()` assigns them to HAND_R, then creates HAND_L by copying the same data.
-
-**Suspected cause:** The skins file contains a full-body mesh with geometry for BOTH hands already via bone weights. The assembler:
-1. Assigns skins mesh data to HAND_R slot
-2. Copies HAND_R data to HAND_L slot
-3. For HAND_R: `is_full_body_skin = true` (many bones) → calls `_attach_skinned_mesh_native()` — renders the FULL body mesh as a "hand" part, but the inv_bind matrices position it incorrectly because the skin_transform composition is wrong for a part that was already correctly positioned
-4. For HAND_L: `is_mirrored + is_full_body_skin` → calls `_attach_skinned_mesh_mirrored()` — X-flips vertices of a mesh that already has both-side geometry, producing garbage
-
-**Root issue:** The `is_full_body_skin` heuristic (`bone_names.size() > 4`) routes hand meshes through the GPU skinning path when they should go through the static attachment path. OpenMW determines this by checking if the NIF root node is a Skeleton type — not by counting bones.
-
-**Relevant code:**
-- `morrowind_npc_assembler.gd:223` — `is_full_body_skin` heuristic
-- `morrowind_npc_assembler.gd:597-601` — left-side slot creation from right-side data
-- `morrowind_npc_assembler.gd:225-231` — routing based on `is_full_body_skin`
+**Visually confirmed** with `body_part_diagnostic.tscn` — press N for normal vis, left side
+now shows correct mirrored normals (cyan where right shows red).
 
 ---
 
-### Bug 3: Vertex stretching at hand/wrist area
+### Bug 2: 6+ floating hand meshes around the character — FIXED (2026-02-10)
+
+**Symptom:** 6+ hand-shaped meshes floating at various positions around the character (above head,
+at waist level to left/right), completely detached from the body.
+
+**Root cause (two problems):**
+
+1. **Full-body NIF sub-meshes with <=4 bones routed to static path:** When a race has a full-body
+   "body.nif" or "skins.nif" that enters the CHEST slot (part_type=3), its sub-meshes are each
+   evaluated independently. Sub-meshes with <=4 bones bypassed `is_full_body_skin` and went
+   through `_attach_static_mesh()` — but their `node_transform` is in skeleton-root space (e.g.,
+   hand geometry positioned at the hand's skeleton-root location). Attaching these to the CHEST
+   bone with that large offset produces floating meshes.
+
+2. **Individual limb parts stacking on top of full-body skin:** The CHEST NIF's skinned sub-meshes
+   already render the full body (including hands, feet, arms). Individual limb parts (HAND_R/L,
+   WRIST_R/L, FOREARM_R/L, etc.) are ALSO loaded and rendered as static attachments. Each pair
+   (right + mirrored left) produces 2 more meshes. With 3+ limb types that have hand-like
+   geometry (hand, wrist, forearm), this easily reaches 6+ extra meshes.
+
+**Fix (two-part):**
+
+1. **Force skinned path for ALL sub-meshes from full-body NIFs:** In `_attach_body_part_native()`,
+   when processing a non-limb slot (CHEST, GROIN), if ANY sub-mesh has >4 bones, ALL skinned
+   sub-meshes from that NIF go through the skinned path. Their `inv_bind_poses` and
+   `skin_transform` correctly position the geometry via the skinning pipeline.
+
+2. **Skip individual limb parts when full-body skin covers them:** In `_collect_body_parts()`,
+   after loading all ESM parts, detect if any non-limb slot contains a full-body skin. If so,
+   remove individual limb slots (HAND_R, WRIST_R, FOREARM_R, etc.) since the full-body skin
+   already provides that geometry via bone weights.
+
+**Debug logging:** Enable `MorrowindNPCAssembler.debug_mode = true` (diagnostic scene does this
+automatically) to see: ESM parts found, slot assignments, full-body skin detection, limb part
+skipping, and per-mesh routing decisions (SKINNED vs STATIC).
+
+---
+
+### Bug 3: Vertex stretching at hand/wrist area — likely fixed by Bug 2 fix
 
 **Symptom:** In the textured view, vertices near the hands/wrists are stretched or distorted, creating spiky geometry artifacts around the wrist joints.
 
-**Suspected cause:** Related to Bug 2. The skinning composition `inv_bind_poses[i] * skin_transform` may be incorrect for meshes that are being attached as individual parts but treated as full-body skins. The inv_bind matrices from the NIF assume the mesh is rendered as a complete body — using them for a subset of the geometry (just hands) produces wrong vertex positions.
+**Suspected cause:** Was related to Bug 2. Individual limb NIFs with skin data were being routed
+through the GPU skinned path when the CHEST slot contained a full-body NIF. The inv_bind matrices
+assumed the mesh would be rendered as a complete body, producing wrong vertex positions for
+individual parts. With Bug 2's fix (individual limb parts are now skipped when a full-body skin is
+present), this should no longer occur.
 
 ---
 

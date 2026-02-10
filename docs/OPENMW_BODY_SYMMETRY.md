@@ -394,24 +394,27 @@ Female NPCs prefer `mFemale`, falling back to `mMale`. Male NPCs use `mMale` dir
 
 ## Godotwind's Approach (Differs from OpenMW)
 
-Because Godot's normal matrix doesn't handle negative-determinant transforms, Godotwind cannot use OpenMW's `scale(-1,1,1)` + `FrontFace::CLOCKWISE` approach directly. Instead:
+Godotwind uses **full mesh-space mirroring** for both static and skinned parts. Unlike OpenMW's
+transform-level `scale(-1,1,1)`, everything is done in mesh data. This avoids depending on
+Godot's `MODEL_NORMAL_MATRIX` behavior for negative-determinant transforms (which proved
+unreliable in practice — multiple hybrid approaches failed before settling on this).
 
-### Static Parts (Non-Skinned)
-1. Create a **mirrored copy** of the mesh data:
-   - Flip normal X components: `normal.x = -normal.x`
-   - Reverse triangle winding: swap `indices[i+1]` and `indices[i+2]` for each triangle
-2. Apply the standard X-axis mirror transform for positioning (`scale(-1,1,1)`)
-3. Use default `CULL_BACK` — the pre-flipped normals and reversed winding make it work correctly
+### Static Parts AND Skinned Parts (Single-Sided Limbs) — Same Strategy
 
-### Skinned Parts (Single-Sided Limbs)
+Both use `_create_mirrored_mesh()` / `_attach_skinned_mesh_mirrored()`:
+
 1. Create a **mirrored copy** of the mesh data:
    - Flip vertex X positions: `vertex.x = -vertex.x`
    - Flip normal X components: `normal.x = -normal.x`
-   - Reverse triangle winding
+   - Reverse triangle winding: swap `indices[i+1]` and `indices[i+2]`
+2. For skinned parts only:
    - Remap bone names: `" R "` ↔ `" L "` (e.g., `"bip01 r forearm"` → `"bip01 l forearm"`)
-   - Use the skeleton's rest poses for the left-side bones as inverse bind matrices
-2. Create a new `Skin` resource with the remapped bone names and new inverse binds
-3. Attach as a `MeshInstance3D` with the mirrored skin — no transform mirror needed since the vertices are already flipped
+   - Mirror inverse bind matrices: `bind_L = mirror * nif_inv_bind * skin_transform * mirror`
+3. Compute transform WITHOUT negative scale:
+   - `T = right_att * bone_offset * conjugated_node_xf`
+   - Where `conjugated_node_xf = Transform3D(M * basis * M, M * origin)` and `M = diag(-1,1,1)`
+   - This conjugation absorbs the mirror into the transform while keeping a positive determinant
+4. Default `CULL_BACK` works — mesh winding is self-consistent
 
 ### Full-Body Skins (Both Sides Already Present)
 - Attached directly with their original skin data, no mirroring — same as OpenMW's Path A

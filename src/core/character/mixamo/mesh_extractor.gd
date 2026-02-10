@@ -413,7 +413,9 @@ static func _extract_skin_data(reader: NIFReader, skin_index: int, mesh: MeshDat
 			mesh.bone_weights[vertex_idx] = vert_weights
 			mesh.bone_indices[vertex_idx] = vert_indices
 
-	# Normalize weights
+	# Normalize weights and fix unused bone index slots.
+	# Unused slots have weight 0 but bone_index defaults to 0 (root bone).
+	# Set them to the first actually-used bone to prevent any edge-case influence.
 	for i in vertex_count:
 		var weights: PackedFloat32Array = mesh.bone_weights[i]
 		var total: float = weights[0] + weights[1] + weights[2] + weights[3]
@@ -424,6 +426,18 @@ static func _extract_skin_data(reader: NIFReader, skin_index: int, mesh: MeshDat
 				weights[2] / total,
 				weights[3] / total
 			])
+
+			# Find first used bone and fill unused slots with it
+			var vert_indices: PackedInt32Array = mesh.bone_indices[i]
+			var first_bone: int = vert_indices[0]
+			for slot in 4:
+				if weights[slot] > 0.0:
+					first_bone = vert_indices[slot]
+					break
+			for slot in 4:
+				if weights[slot] == 0.0:
+					vert_indices[slot] = first_bone
+			mesh.bone_indices[i] = vert_indices
 
 
 ## Extract material and texture info
