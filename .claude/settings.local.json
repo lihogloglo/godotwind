@@ -379,7 +379,9 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/animation_integration_test.tscn\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --headless --quit-after 5 \"res://src/tools/body_part_diagnostic.tscn\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/body_part_diagnostic.tscn\")",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/ik_animation_showcase.tscn\")"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/ik_animation_showcase.tscn\")",
+      "Bash([ -d \"d:/Gamedev/Godotwind/godotwind/docs/archive\" ])",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --script res://tests/test_animation_poses.gd --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\")"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

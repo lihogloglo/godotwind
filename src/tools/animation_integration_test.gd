@@ -63,16 +63,8 @@ func _ready() -> void:
 	var stats := CharacterFactoryV2Script.get_cache_stats()
 	_log("  Skeletons: %d, Animations: %d" % [stats["skeleton_templates"], stats["cached_animation_libraries"]])
 
-	# Load Mixamo animations (from assets/animations/mixamo/)
-	_log("Loading Mixamo animations...")
-	_mixamo_library = AnimationLoaderScript.load_from_directory("res://assets/animations/mixamo/")
-	if _mixamo_library:
-		_log("[color=green]Mixamo loaded: %d animations[/color]" % _mixamo_library.get_animation_list().size())
-		for anim_name in _mixamo_library.get_animation_list():
-			var anim: Animation = _mixamo_library.get_animation(anim_name)
-			_log("  %s: %.2fs, %d tracks, loop=%d" % [anim_name, anim.length, anim.get_track_count(), anim.loop_mode])
-	else:
-		_log("[color=yellow]No Mixamo animations found[/color]")
+	# Mixamo animations loaded on demand when [M] is pressed
+	_log("[color=gray]Mixamo: deferred (press [M] to load)[/color]")
 
 	# Create factory
 	_factory = CharacterFactoryV2Script.new()
@@ -371,10 +363,16 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _toggle_mixamo() -> void:
+	# Lazy-load Mixamo on first toggle
 	if not _mixamo_library:
-		_log("[color=yellow]No Mixamo animations loaded[/color]")
-		_update_info()
-		return
+		_log("Loading Mixamo animations...")
+		_mixamo_library = AnimationLoaderScript.load_from_directory("res://assets/animations/mixamo/")
+		if _mixamo_library:
+			_log("[color=green]Mixamo loaded: %d animations[/color]" % _mixamo_library.get_animation_list().size())
+		else:
+			_log("[color=yellow]No Mixamo animations found[/color]")
+			_update_info()
+			return
 
 	if not _npc_node:
 		_log("[color=yellow]No NPC loaded[/color]")
