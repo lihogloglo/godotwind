@@ -262,17 +262,11 @@ func _create_single_animation(
 			continue
 
 		# Determine track path
-		# Animation tracks for skeleton bones use the format "path/to/Skeleton3D:BoneName"
-		# When AnimationPlayer is a child of Skeleton3D with default root_node (".."),
-		# the skeleton is "." and bone tracks are ".:BoneName"
-		var track_path: String
-		var bone_idx: int = bone_name_to_idx.get(bone_name.to_lower(), -1)
-
-		if bone_idx >= 0 and skeleton:
-			# Skeleton3D bone tracks use "." (skeleton itself) + ":" + bone_name
-			track_path = ".:%s" % bone_name
-		else:
-			track_path = bone_name
+		# KF bone tracks always target a Skeleton3D. AnimationPlayer is a child of
+		# Skeleton3D with root_node "..", so bone tracks use ".:BoneName" format.
+		# This must be consistent regardless of whether a skeleton reference is
+		# available at parse time (preloading passes null).
+		var track_path := ".:%s" % bone_name
 
 		# Add rotation track
 		if not data.rotation_keys.is_empty():

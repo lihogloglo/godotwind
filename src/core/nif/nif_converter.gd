@@ -1133,6 +1133,11 @@ static func _convert_nif_vertices(vertices: PackedVector3Array) -> PackedVector3
 	return CS.vectors_to_godot(vertices)  # Converts to meters
 
 
+## Convert NIF normals to Godot coordinate system (axis swap only, no scaling)
+static func _convert_nif_normals(normals: PackedVector3Array) -> PackedVector3Array:
+	return CS.vectors_to_godot(normals, false)  # false = no unit scaling
+
+
 ## Check if this NIF should generate LODs based on model path
 ## Generates LODs for: buildings, trees, large rocks, and other complex static objects
 func _should_generate_lods() -> bool:
@@ -1341,7 +1346,7 @@ func _create_tri_shape_mesh(data: Defs.NiTriShapeData) -> ArrayMesh:
 
 	# Normals - convert from NIF to Godot coordinates
 	if not data.normals.is_empty():
-		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_normals(data.normals)
 
 	# UVs (use first UV set)
 	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
@@ -1400,7 +1405,7 @@ func _create_tri_strips_mesh(data: Defs.NiTriStripsData) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = _convert_nif_vertices(data.vertices)
 
 	if not data.normals.is_empty():
-		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_normals(data.normals)
 
 	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
 		arrays[Mesh.ARRAY_TEX_UV] = data.uv_sets[0]
@@ -1431,7 +1436,7 @@ func _create_skinned_tri_shape_mesh(data: Defs.NiTriShapeData, skin_instance: De
 
 	# Normals - convert from NIF to Godot coordinates
 	if not data.normals.is_empty():
-		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_normals(data.normals)
 
 	# UVs (use first UV set)
 	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
@@ -1519,7 +1524,7 @@ func _create_skinned_tri_strips_mesh(data: Defs.NiTriStripsData, skin_instance: 
 	arrays[Mesh.ARRAY_VERTEX] = _convert_nif_vertices(data.vertices)
 
 	if not data.normals.is_empty():
-		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_normals(data.normals)
 
 	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
 		arrays[Mesh.ARRAY_TEX_UV] = data.uv_sets[0]
@@ -2670,7 +2675,7 @@ func _collect_tri_shape(shape: Defs.NiTriShape, world_transform: Transform3D, co
 
 	arrays[Mesh.ARRAY_VERTEX] = _convert_nif_vertices(data.vertices)
 	if not data.normals.is_empty():
-		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_normals(data.normals)
 	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
 		arrays[Mesh.ARRAY_TEX_UV] = data.uv_sets[0]
 	if not data.colors.is_empty():
@@ -2740,7 +2745,7 @@ func _collect_tri_strips(strips: Defs.NiTriStrips, world_transform: Transform3D,
 
 	arrays[Mesh.ARRAY_VERTEX] = _convert_nif_vertices(data.vertices)
 	if not data.normals.is_empty():
-		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_vertices(data.normals)
+		arrays[Mesh.ARRAY_NORMAL] = _convert_nif_normals(data.normals)
 	if not data.uv_sets.is_empty() and not data.uv_sets[0].is_empty():
 		arrays[Mesh.ARRAY_TEX_UV] = data.uv_sets[0]
 	if not data.colors.is_empty():

@@ -258,9 +258,13 @@ func transition_to(state: StringName, force: bool = false) -> void:
 			# Blocked by higher priority animation
 			return
 
-	# Check if state exists
+	# Check if state exists in the state machine
 	if not _state_machine.get_current_node():
 		# State machine not ready yet
+		return
+
+	# Skip if the target state has no animation (wasn't added to the state machine)
+	if state not in _state_animation_map:
 		return
 
 	_previous_state = _current_state
@@ -410,9 +414,10 @@ func _create_animation_tree() -> void:
 	var root := _create_tree_structure()
 	animation_tree.tree_root = root
 
-	# Add to scene tree first (required for get_path_to)
+	# Add to skeleton so default root_node ("..") resolves to Skeleton3D.
+	# This is required for bone track paths (".:BoneName") to find the skeleton.
 	var anim_skel: Skeleton3D = retarget_source if retarget_source else skeleton
-	anim_skel.get_parent().add_child(animation_tree)
+	anim_skel.add_child(animation_tree)
 
 	# Now set the animation player path
 	animation_tree.anim_player = animation_tree.get_path_to(animation_player)
@@ -427,59 +432,18 @@ func _create_animation_tree() -> void:
 	_apply_blend_mask_filters()
 
 
-## Create the animation tree structure
-## Uses a layered approach:
-## - Locomotion layer (state machine for idle/walk/run/jump)
-## - Upper body action layer (attacks, spellcasting - blended on upper body only)
-## - Additive layer (breathing, hit reactions)
+## Create the animation tree structure.
+## Currently: locomotion state machine only (full body).
+## Upper body blend + additive layers deferred until combat/spellcasting.
 func _create_tree_structure() -> AnimationNodeBlendTree:
 	var root := AnimationNodeBlendTree.new()
 
-	# Create locomotion state machine (base layer - full body)
+	# Locomotion state machine (base layer - full body)
 	var locomotion_sm := _create_locomotion_state_machine()
 	root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
 
-	# Create upper body action layer using Blend2 with filter
-	# This allows actions to only affect upper body while legs continue locomotion
-	var upper_body_blend := AnimationNodeBlend2.new()
-	upper_body_blend.filter_enabled = true  # Enable bone filtering
-	root.add_node(&"upper_body_blend", upper_body_blend, Vector2(300, 0))
-
-	# Create action animation node for upper body
-	var action_anim := AnimationNodeAnimation.new()
-	root.add_node(&"action_animation", action_anim, Vector2(300, 100))
-
-	# Create action oneshot (wraps upper body blend for on-demand playback)
-	var action_oneshot := AnimationNodeOneShot.new()
-	action_oneshot.mix_mode = AnimationNodeOneShot.MIX_MODE_BLEND
-	root.add_node(&"action_oneshot", action_oneshot, Vector2(450, 0))
-
-	# Create additive layer for procedural animations (breathing, hit reactions)
-	var additive := AnimationNodeAdd2.new()
-	root.add_node(&"additive", additive, Vector2(600, 0))
-
-	# Create additive animation node
-	var additive_anim := AnimationNodeAnimation.new()
-	root.add_node(&"additive_animation", additive_anim, Vector2(600, 100))
-
-	# Connect nodes:
-	# locomotion -> upper_body_blend (input 0 = base)
-	# action_animation -> upper_body_blend (input 1 = action, filtered to upper body)
-	root.connect_node(&"upper_body_blend", 0, &"locomotion")
-	root.connect_node(&"upper_body_blend", 1, &"action_animation")
-
-	# upper_body_blend -> action_oneshot (input 0 = main)
-	# action_animation -> action_oneshot (input 1 = oneshot, for non-filtered actions)
-	root.connect_node(&"action_oneshot", 0, &"upper_body_blend")
-	root.connect_node(&"action_oneshot", 1, &"action_animation")
-
-	# action_oneshot -> additive (input 0 = main)
-	# additive_anim -> additive (input 1 = add)
-	root.connect_node(&"additive", 0, &"action_oneshot")
-	root.connect_node(&"additive", 1, &"additive_animation")
-
-	# Set output
-	root.connect_node(&"output", 0, &"additive")
+	# Connect locomotion directly to output
+	root.connect_node(&"output", 0, &"locomotion")
 
 	return root
 
@@ -565,11 +529,21 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 		_:
 			search_terms = [state_name.to_lower(), state_name]
 
-	# Search animations
+	# Search animations: exact match first, then substring fallback
 	var animations := animation_player.get_animation_list()
+
+	# Pass 1: exact match (case-insensitive)
 	for term in search_terms:
+		var term_lower := term.to_lower()
 		for anim in animations:
-			if term in anim or anim.to_lower().contains(term.to_lower()):
+			if anim.to_lower() == term_lower:
+				return StringName(anim)
+
+	# Pass 2: substring match (case-insensitive)
+	for term in search_terms:
+		var term_lower := term.to_lower()
+		for anim in animations:
+			if term_lower in anim.to_lower():
 				return StringName(anim)
 
 	return &""

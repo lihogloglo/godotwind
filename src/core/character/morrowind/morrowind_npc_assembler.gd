@@ -212,11 +212,21 @@ static func _duplicate_skeleton(source: Skeleton3D) -> Skeleton3D:
 
 ## Attach a body part directly to the native skeleton
 static func _attach_body_part_native(skeleton: Skeleton3D, slot: int, part_data: BodyPartData, is_beast: bool) -> void:
+	var is_mirrored: bool = BodyPartSlots.is_left_side(slot)
+
 	for mesh_data in part_data.meshes:
 		var extracted: MeshExtractor.MeshData = mesh_data
 
-		if extracted.is_skinned:
-			_attach_skinned_mesh_native(skeleton, extracted, slot)
+		# OpenMW treats individual limb parts as STATIC even if they have NiSkinData
+		# (their NIF root is not a Skeleton type). Only full-body "skin" meshes
+		# (many bones, Skeleton root) use GPU skinning. Heuristic: >4 bones = full body.
+		var is_full_body_skin: bool = extracted.is_skinned and extracted.bone_names.size() > 4
+
+		if is_full_body_skin:
+			if is_mirrored:
+				_attach_skinned_mesh_mirrored(skeleton, extracted, slot)
+			else:
+				_attach_skinned_mesh_native(skeleton, extracted, slot)
 		else:
 			_attach_static_mesh(skeleton, extracted, slot, is_beast)
 
@@ -244,6 +254,107 @@ static func _attach_skinned_mesh_native(skeleton: Skeleton3D, mesh_data: MeshExt
 	instance.skeleton = NodePath("..")  # Parent is skeleton
 
 	# Apply material if texture available
+	if not mesh_data.texture_path.is_empty():
+		var material := _create_material(mesh_data.texture_path, mesh_data.material_properties)
+		if material:
+			array_mesh.surface_set_material(0, material)
+
+	skeleton.add_child(instance)
+
+
+## Attach a MIRRORED skinned mesh for left-side body parts.
+##
+## Morrowind individual limb parts (hand, foot, etc.) only have right-side
+## geometry. For left-side slots we mirror the mesh data:
+##   - Vertex X positions negated
+##   - Normal X components negated
+##   - Triangle winding reversed
+##   - Bone names remapped from right → left equivalents
+##   - Inverse bind matrices computed from skeleton rest poses (for left bones)
+static func _attach_skinned_mesh_mirrored(skeleton: Skeleton3D, mesh_data: MeshExtractor.MeshData, slot: int) -> void:
+	# Build mirrored arrays
+	var mirrored_verts := PackedVector3Array()
+	mirrored_verts.resize(mesh_data.vertices.size())
+	for i in mesh_data.vertices.size():
+		var v := mesh_data.vertices[i]
+		mirrored_verts[i] = Vector3(-v.x, v.y, v.z)
+
+	var mirrored_normals := PackedVector3Array()
+	if not mesh_data.normals.is_empty():
+		mirrored_normals.resize(mesh_data.normals.size())
+		for i in mesh_data.normals.size():
+			var n := mesh_data.normals[i]
+			mirrored_normals[i] = Vector3(-n.x, n.y, n.z)
+
+	var mirrored_indices := PackedInt32Array()
+	mirrored_indices.resize(mesh_data.indices.size())
+	for i in range(0, mesh_data.indices.size(), 3):
+		mirrored_indices[i] = mesh_data.indices[i]
+		mirrored_indices[i + 1] = mesh_data.indices[i + 2]
+		mirrored_indices[i + 2] = mesh_data.indices[i + 1]
+
+	# Build mesh arrays
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = mirrored_verts
+	if not mirrored_normals.is_empty():
+		arrays[Mesh.ARRAY_NORMAL] = mirrored_normals
+	if not mesh_data.uvs.is_empty():
+		arrays[Mesh.ARRAY_TEX_UV] = mesh_data.uvs
+	arrays[Mesh.ARRAY_INDEX] = mirrored_indices
+
+	# Remap bone names (right → left) and build skinning data
+	var remapped_bone_names := PackedStringArray()
+	for bone_name in mesh_data.bone_names:
+		remapped_bone_names.append(_mirror_bone_name(bone_name))
+
+	# Build bone indices/weights for the mesh
+	if mesh_data.is_skinned:
+		var bones := PackedInt32Array()
+		var weights := PackedFloat32Array()
+		for i in mesh_data.vertices.size():
+			var bi: PackedInt32Array = mesh_data.bone_indices[i]
+			var bw: PackedFloat32Array = mesh_data.bone_weights[i]
+			bones.append_array(bi)
+			weights.append_array(bw)
+		arrays[Mesh.ARRAY_BONES] = bones
+		arrays[Mesh.ARRAY_WEIGHTS] = weights
+
+	var array_mesh := ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	# Create Skin with left-side bone indices using mirrored NIF bind data.
+	# Right side uses: bind = nif_inv_bind * skin_transform
+	# Left side (vertices X-flipped): bind = mirror * nif_inv_bind * skin_transform * mirror
+	var skin := Skin.new()
+	var has_nif_binds: bool = mesh_data.inv_bind_poses.size() == mesh_data.bone_names.size()
+	var mirror_basis := Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1))
+	var mirror_xf := Transform3D(mirror_basis, Vector3.ZERO)
+
+	for i in remapped_bone_names.size():
+		var bone_name: String = remapped_bone_names[i]
+		var bone_idx := _find_bone_ci(skeleton, bone_name)
+		if bone_idx < 0:
+			bone_idx = 0  # fallback to root
+
+		var inv_bind: Transform3D
+		if has_nif_binds:
+			# Mirror the right-side NIF inverse bind and compose with skin_transform
+			inv_bind = mirror_xf * mesh_data.inv_bind_poses[i] * mesh_data.skin_transform * mirror_xf
+		else:
+			# Fallback: compute from skeleton rest poses (no skin_transform available)
+			inv_bind = skeleton.get_bone_global_rest(bone_idx).affine_inverse()
+
+		skin.add_bind(bone_idx, inv_bind)
+
+	# Create MeshInstance3D
+	var instance := MeshInstance3D.new()
+	instance.name = "BodyPart_%s" % BodyPartSlots.slot_name(slot)
+	instance.mesh = array_mesh
+	instance.skin = skin
+	instance.skeleton = NodePath("..")
+
+	# Apply material
 	if not mesh_data.texture_path.is_empty():
 		var material := _create_material(mesh_data.texture_path, mesh_data.material_properties)
 		if material:
@@ -292,62 +403,70 @@ static func _create_native_skin(mesh_data: MeshExtractor.MeshData, skeleton: Ske
 	return skin
 
 
-## Attach a static (non-skinned) mesh
+## Attach a static (non-skinned) mesh to a bone via BoneAttachment3D.
 ##
-## Static body parts are positioned using OpenMW's attach PATH B:
-##   v_world = bone * attachment_local * nif_root * v_mesh
-## BoneAttachment3D provides "bone", instance.transform = attachment_local * nif_root.
-## Left-side slots are mirrored on X axis with inverted face culling.
+## Right side: mesh as-is, positioned by attachment_transform * node_transform.
+## Left side: FULL MESH-SPACE MIRROR — vertex X, normal X, winding all flipped
+## in mesh data. Transform has NO negative scale (avoids MODEL_NORMAL_MATRIX ambiguity).
+## This is the same strategy as _attach_skinned_mesh_mirrored().
 static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.MeshData, slot: int, is_beast: bool = false) -> void:
-	var array_mesh := MeshExtractor.create_array_mesh(mesh_data)
+	var is_mirrored: bool = BodyPartSlots.is_left_side(slot)
+
+	var array_mesh: ArrayMesh
+	if is_mirrored:
+		array_mesh = _create_mirrored_mesh(mesh_data)
+	else:
+		array_mesh = MeshExtractor.create_array_mesh(mesh_data)
 
 	var instance := MeshInstance3D.new()
 	instance.name = "Static_%s" % BodyPartSlots.slot_name(slot)
 	instance.mesh = array_mesh
 
-	var is_mirrored: bool = BodyPartSlots.is_left_side(slot)
-
-	# Apply material — use CULL_DISABLED because attachment node transforms from
-	# xbase_anim.nif have mixed-sign determinants (some negative, some positive),
-	# making per-part cull mode unreliable. Double-sided rendering is safe for
-	# low-poly Morrowind body parts.
 	if not mesh_data.texture_path.is_empty():
 		var material := _create_material(mesh_data.texture_path, mesh_data.material_properties)
 		if material:
-			material.cull_mode = BaseMaterial3D.CULL_DISABLED
 			array_mesh.surface_set_material(0, material)
 
-	# PRIMARY: Use slot-to-bone mapping (authoritative for body parts)
+	# Find bone
 	var bone_name := BodyPartSlots.get_bone(slot)
 	var bone_idx := _find_bone_ci(skeleton, bone_name) if not bone_name.is_empty() else -1
-
-	# FALLBACK: Try NIF parent bone name if slot lookup failed
 	if bone_idx < 0 and not mesh_data.parent_bone_name.is_empty():
 		bone_idx = _find_bone_ci(skeleton, mesh_data.parent_bone_name)
 
 	if bone_idx >= 0:
-		# OpenMW PATH B: v_world = bone * attachment * [bone_offset * mirror] * nif_root * v
-		# Mirror goes BETWEEN attachment and nif_root so nif_root's translation
-		# is correctly mirrored for left-side parts (matches OpenMW attach.cpp).
+		# Compute instance transform
 		var attach_name: String = SLOT_TO_ATTACHMENT_NAME.get(slot, "")
 		var attachment_transforms := _get_attachment_transforms(is_beast)
-		if not attach_name.is_empty() and attach_name in attachment_transforms:
-			if is_mirrored:
-				# OpenMW: PositionAttitudeTransform(pos=bone_offset, scale=mirror)
-				# This applies as: translate(bone_offset) * scale(mirror) — scale first, then translate
-				var bone_offset_pos := mesh_data.bone_offset_position if mesh_data.has_bone_offset else Vector3.ZERO
-				var mirror_xf := Transform3D(Basis.from_scale(Vector3(-1, 1, 1)), bone_offset_pos)
-				instance.transform = attachment_transforms[attach_name] * mirror_xf * mesh_data.node_transform
-			else:
-				instance.transform = attachment_transforms[attach_name] * mesh_data.node_transform
-				if mesh_data.has_bone_offset:
-					instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
-		else:
-			instance.transform = mesh_data.node_transform
+
+		if is_mirrored:
+			# Mesh vertices/normals are already X-flipped. We need the transform to
+			# position the mirrored mesh correctly WITHOUT negative scale.
+			# Derivation: right_att * mirror * node_xf * vertex
+			#           = right_att * (mirror * node_xf * mirror) * mirrored_vertex
+			# So T = right_att * bone_offset * conjugate(node_xf, mirror)
+			# where conjugate flips the origin X and mirrors the basis.
+			var right_slot: int = BodyPartSlots.get_right_equivalent(slot)
+			var right_name: String = SLOT_TO_ATTACHMENT_NAME.get(right_slot, attach_name)
+			var att: Transform3D = attachment_transforms.get(right_name, Transform3D.IDENTITY)
+
+			var M := Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1))
+			var mirrored_node := Transform3D(
+				M * mesh_data.node_transform.basis * M,
+				M * mesh_data.node_transform.origin
+			)
+
 			if mesh_data.has_bone_offset:
-				instance.transform = Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * instance.transform
-			if is_mirrored:
-				instance.scale.x *= -1.0
+				instance.transform = att * Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position) * mirrored_node
+			else:
+				instance.transform = att * mirrored_node
+		else:
+			# Right side: attachment * [bone_offset] * node_transform
+			var att: Transform3D = attachment_transforms.get(attach_name, Transform3D.IDENTITY)
+			if mesh_data.has_bone_offset:
+				var bone_offset_xf := Transform3D(Basis.IDENTITY, mesh_data.bone_offset_position)
+				instance.transform = att * bone_offset_xf * mesh_data.node_transform
+			else:
+				instance.transform = att * mesh_data.node_transform
 
 		var attachment := BoneAttachment3D.new()
 		attachment.name = "Attach_%s" % BodyPartSlots.slot_name(slot)
@@ -355,8 +474,6 @@ static func _attach_static_mesh(skeleton: Skeleton3D, mesh_data: MeshExtractor.M
 		skeleton.add_child(attachment)
 		attachment.add_child(instance)
 	else:
-		if debug_mode:
-			Log.warn("character", "Static mesh slot %s: no bone found, using node_transform fallback" % BodyPartSlots.slot_name(slot))
 		instance.transform = mesh_data.node_transform
 		skeleton.add_child(instance)
 
@@ -466,23 +583,16 @@ static func _collect_body_parts(npc_record, race_record, is_female: bool) -> Dic
 			if hair_data:
 				parts[BodyPartSlots.Slot.HAIR] = hair_data
 
-	# Populate left-side slots by duplicating right-side non-skinned parts.
-	# Non-skinned body parts only have right-side geometry in the NIF;
-	# left-side is created by X-axis mirroring (handled in _attach_static_mesh).
-	# Skinned parts (e.g. "skins" file) already contain both sides via bone weights.
+	# Populate left-side slots from right-side parts.
+	# Morrowind body parts are modeled for the RIGHT side only.
+	# Left-side geometry is created by full mesh-space mirror:
+	# vertex X flip + normal X flip + winding reverse (+ bone remap for skinned).
+	# No transform-level scale(-1,1,1) — avoids MODEL_NORMAL_MATRIX ambiguity.
 	var right_slots: Array = parts.keys().duplicate()
 	for right_slot: int in right_slots:
 		var left_slot: int = BodyPartSlots.get_left_equivalent(right_slot)
 		if left_slot != right_slot and left_slot not in parts:
-			var part_data: BodyPartData = parts[right_slot]
-			var has_skinned := false
-			for mesh_data in part_data.meshes:
-				var extracted: MeshExtractor.MeshData = mesh_data
-				if extracted.is_skinned:
-					has_skinned = true
-					break
-			if not has_skinned:
-				parts[left_slot] = part_data
+			parts[left_slot] = parts[right_slot]
 
 	return parts
 
@@ -567,6 +677,64 @@ static func _create_material(texture_path: String, properties: Dictionary) -> St
 			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 
 	return mat
+
+
+# =============================================================================
+# MESH MIRRORING
+# =============================================================================
+
+## Full mesh-space mirror: flip vertex X, normal X, reverse winding.
+## Produces a self-consistent left-side mesh. No transform-level scale(-1,1,1) needed.
+## This avoids all MODEL_NORMAL_MATRIX ambiguity — default CULL_BACK just works.
+## Same strategy as _attach_skinned_mesh_mirrored() uses for skinned parts.
+static func _create_mirrored_mesh(mesh_data: MeshExtractor.MeshData) -> ArrayMesh:
+	var mirrored_verts := PackedVector3Array()
+	mirrored_verts.resize(mesh_data.vertices.size())
+	for i in mesh_data.vertices.size():
+		mirrored_verts[i] = Vector3(-mesh_data.vertices[i].x, mesh_data.vertices[i].y, mesh_data.vertices[i].z)
+
+	var mirrored_normals := PackedVector3Array()
+	if not mesh_data.normals.is_empty():
+		mirrored_normals.resize(mesh_data.normals.size())
+		for i in mesh_data.normals.size():
+			mirrored_normals[i] = Vector3(-mesh_data.normals[i].x, mesh_data.normals[i].y, mesh_data.normals[i].z)
+
+	var mirrored_indices := PackedInt32Array()
+	mirrored_indices.resize(mesh_data.indices.size())
+	for i in range(0, mesh_data.indices.size(), 3):
+		mirrored_indices[i] = mesh_data.indices[i]
+		mirrored_indices[i + 1] = mesh_data.indices[i + 2]
+		mirrored_indices[i + 2] = mesh_data.indices[i + 1]
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = mirrored_verts
+	if not mirrored_normals.is_empty():
+		arrays[Mesh.ARRAY_NORMAL] = mirrored_normals
+	if not mesh_data.uvs.is_empty():
+		arrays[Mesh.ARRAY_TEX_UV] = mesh_data.uvs
+	arrays[Mesh.ARRAY_INDEX] = mirrored_indices
+
+	var array_mesh := ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return array_mesh
+
+
+## Mirror a Morrowind bone name from right to left (or vice versa).
+## Handles "Bip01 R " ↔ "Bip01 L " pattern (case-insensitive).
+static func _mirror_bone_name(bone_name: String) -> String:
+	var lower := bone_name.to_lower()
+	# "bip01 r " → "bip01 l " and vice versa
+	if lower.contains(" r "):
+		return bone_name.replace(" R ", " L ").replace(" r ", " l ")
+	elif lower.contains(" l "):
+		return bone_name.replace(" L ", " R ").replace(" l ", " r ")
+	# Handle end-of-string: "Bip01 R" (no trailing space)
+	if lower.ends_with(" r"):
+		return bone_name.substr(0, bone_name.length() - 1) + ("L" if bone_name[-1] == "R" else "l")
+	elif lower.ends_with(" l"):
+		return bone_name.substr(0, bone_name.length() - 1) + ("R" if bone_name[-1] == "L" else "r")
+	return bone_name
 
 
 # =============================================================================

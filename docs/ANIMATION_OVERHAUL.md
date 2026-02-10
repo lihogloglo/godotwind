@@ -304,6 +304,52 @@ Characters keep native skeletons; animations retarget at runtime.
 
 **Phase 3 Test:** 94/94 skeleton profile, 16/16 animation wiring, 87/87 retargeting — all passing.
 
+### Session 3C: Animation Integration Test & Bug Fixes — COMPLETE
+
+- [x] **Created:** `src/tools/animation_integration_test.gd` + `.tscn` (end-to-end NPC animation test)
+  - Spawns NPC via CharacterFactoryV2, runs full diagnostic pipeline
+  - Verifies: skeleton bones renamed, animations loaded & remapped, AnimationTree active, state machine working
+  - Controls: W=wander, I=IK, D=debug, R=reload, 1/2/3=switch NPC
+  - Ground plane with StaticBody3D collision for CharacterBody3D physics
+
+- [x] **Fixed:** `nif_kf_loader.gd` — Track path format always `".:BoneName"`
+  - Root cause: preloading with `skeleton=null` produced bare `"BoneName"` tracks; `remap_animation()` skipped them
+  - Fix: Always use `".:bone_name"` — these are always bone tracks targeting a Skeleton3D
+
+- [x] **Fixed:** `character_factory_v2.gd` — BoneAttachment3D name update after bone renaming
+
+- [x] **Fixed:** `animation_manager.gd` — Exact-first animation name matching (prevents "idlecombat" matching before "idle")
+
+- [x] **Fixed:** `animation_manager.gd` — Guard against missing state machine states in `transition_to()`
+
+- [x] **Simplified:** `animation_manager.gd` — Blend tree now locomotion-only (upper body + additive layers deferred to Phase 6)
+
+**Result:** 132 MW animations loaded, 67/69 tracks remapped to profile names (2 unmapped aux bones expected). Zero errors.
+
+### Session 3D: Visual Fix & Mixamo Loading — COMPLETE
+
+- [x] **Fixed:** `animation_manager.gd` — AnimationTree added to Skeleton3D (was added to parent Node3D)
+  - Root cause: AnimationTree's default `root_node` is `".."` (parent). When AnimationTree was a child of Character (Node3D), `".."` resolved to Character. Track paths `".:BoneName"` then tried to find bones on Character (not Skeleton3D), silently failing → mesh stayed in rest pose.
+  - Fix: `anim_skel.add_child(animation_tree)` instead of `anim_skel.get_parent().add_child(animation_tree)`. Now `".."` resolves to Skeleton3D, and `".:Hips"` correctly finds bones.
+
+- [x] **Created:** `src/core/animation/animation_loader.gd` (~230 lines) — Phase 7 unified animation loader
+  - Loads FBX, GLB, GLTF files via Godot's importer
+  - Normalizes track paths to `".:ProfileBoneName"` format
+  - Auto-detects skeleton type (Mixamo, Morrowind, Generic) and remaps bone names
+  - Standard name normalization: file name → canonical names (idle, walk, run, jump, etc.)
+  - Sets loop mode for locomotion animations
+  - API: `load_from_fbx()`, `load_from_glb()`, `load_from_directory()`
+
+- [x] **Enhanced:** `animation_integration_test.gd` — Mixamo toggle and diagnostics
+  - [M] key toggles between Morrowind and Mixamo animations on current NPC
+  - Loads Mixamo FBX files via AnimationLoader, remaps to profile names
+  - Diagnostics now verify AnimationTree `root_node` resolves to Skeleton3D
+  - Diagnostics now verify AnimationPlayer `root_node` resolves to Skeleton3D
+
+- [x] **Wired:** `world_explorer.gd` — `CharacterFactoryV2.preload_character_assets()` called at startup
+  - After BSA + ESM loaded, before streaming starts (~85% loading progress)
+  - Preloads skeletons, bone remaps, animation libraries for all character types
+
 ---
 
 ## Phase 4: Head Animation & Equipment Attachment
@@ -368,14 +414,15 @@ Characters keep native skeletons; animations retarget at runtime.
 
 ---
 
-## Phase 7: Unified Animation Loader
+## Phase 7: Unified Animation Loader — PARTIAL (FBX/GLB done, KF separate)
 
-- [ ] **New:** `src/core/animation/animation_loader.gd` (~200 lines)
-  - `load_from_kf(path) -> AnimationLibrary`
+- [x] **Created:** `src/core/animation/animation_loader.gd` (~230 lines) — Session 3D
   - `load_from_fbx(path) -> AnimationLibrary`
   - `load_from_glb(path) -> AnimationLibrary`
   - `load_from_directory(path) -> AnimationLibrary`
-  - Normalizes track paths via BoneMap
+  - Auto-detects skeleton type, remaps bone names to profile, normalizes track paths to `".:ProfileBone"`
+  - Standard name normalization (idle, walk, run, jump, etc.)
+- [ ] `load_from_kf(path)` — KF loading still handled by NIFKFLoader + CharacterFactoryV2 pipeline
 - [ ] **New test:** `tests/test_animation_loader.gd`
 
 ---
@@ -426,7 +473,7 @@ Phase 1 (Foundation) --> Phase 2 (Wiring) --> Phase 6 (Multi-layer)
 | `attachment_point_manager.gd` | ~180 | Equipment slots via BoneAttachment3D | 4B |
 | `spline_ik_controller.gd` | ~150 | SplineIK3D for tails/chains | 5A |
 | `reach_ik_controller.gd` | ~120 | FABRIK3D reaching | 5B |
-| `animation_loader.gd` | ~200 | Unified animation loading | 7 |
+| `animation_loader.gd` | 230 | Unified animation loading (FBX/GLB) | 7 DONE |
 | `animation_modifier_interface.gd` | ~50 | Base class for animation modifiers | 8A |
 | `ragdoll_controller.gd` | ~80 | Ragdoll stub | 8B |
 | `procedural_locomotion_controller.gd` | ~80 | Procedural locomotion stub | 8B |
@@ -442,6 +489,7 @@ Phase 1 (Foundation) --> Phase 2 (Wiring) --> Phase 6 (Multi-layer)
 | `tests/test_animation_wiring.gd` | 2 | State transitions (Idle↔Walk↔Run, Jump, Fall), signal forwarding, text key registration — 16/16 PASS |
 | `tests/test_retargeting.gd` | 3A | Bone renaming, animation remapping, source skeleton, modifier config, hierarchy — 87/87 PASS |
 | `src/tools/native_skeleton_test.tscn` | 3B | Visual: native skeleton load, bone rename, animation remap, bone visualization |
+| `src/tools/animation_integration_test.tscn` | 3C | End-to-end: spawn NPC, verify remapped tracks, AnimationTree, state machine, ground physics |
 | `tests/test_head_and_attachments.gd` | 4 | Blinks happen, attached item follows hand bone |
 | `tests/test_advanced_ik.gd` | 5 | SplineIK tails, knee pole targets, FABRIK reach |
 | `tests/test_multilayer_blend.gd` | 6 | Walk+attack+block on different body parts |

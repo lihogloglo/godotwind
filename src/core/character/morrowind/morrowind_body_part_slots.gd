@@ -123,11 +123,11 @@ static func get_left_equivalent(slot: int) -> int:
 
 
 ## Map ESM BodyPart.PartType to slot(s)
-## PartType is what's stored in the ESM body part record
-## Note: In Morrowind, each naked body part mesh contains geometry for BOTH sides
-## (e.g., a hand mesh has both left and right hands). So we return only the
-## RIGHT slot here - the mesh itself contains all needed geometry.
-## Mirroring/duplicating is only used for CLOTHING/ARMOR overlays.
+## PartType is what's stored in the ESM body part record.
+## Morrowind stores one mesh per body region (e.g., one "Hand" mesh for both sides).
+## We return only the RIGHT slot; the assembler creates left-side copies by mirroring:
+##   - Static parts: transform-based X mirror + pre-flipped normals/winding
+##   - Skinned parts: vertex/normal X flip + winding reverse + bone name remap
 static func part_type_to_slots(part_type: int) -> Array[int]:
 	match part_type:
 		0:  # HEAD

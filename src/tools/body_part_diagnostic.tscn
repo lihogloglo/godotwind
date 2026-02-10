@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://cbodypartdiag001"]
+
+[ext_resource type="Script" path="res://src/tools/body_part_diagnostic.gd" id="1_diag"]
+
+[node name="BodyPartDiagnostic" type="Node3D"]
+script = ExtResource("1_diag")

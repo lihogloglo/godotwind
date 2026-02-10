@@ -52,6 +52,7 @@ const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 const LodTransitionTestScript := preload("res://src/tools/lod_transition_test.gd")
+const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -243,6 +244,10 @@ func _init_async() -> void:
 	await _update_loading(80, "Pre-loading common models...")
 	var preload_count := cell_manager.preload_common_models()
 	_log("Pre-loaded %d common models into cache" % preload_count)
+
+	# Pre-load character assets (skeletons, bone remaps, animation libraries)
+	await _update_loading(85, "Pre-loading character animations...")
+	CharacterFactoryV2Script.preload_character_assets()
 
 	# Create and setup NativeStreamingManager (but don't start tracking yet)
 	await _update_loading(90, "Setting up streaming system...")

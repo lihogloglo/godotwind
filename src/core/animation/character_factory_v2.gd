@@ -224,7 +224,13 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 	_ensure_bone_remap(skeleton, is_beast)
 
 	# Rename skeleton bones to profile names (required for IK, blend masks, etc.)
-	RetargetSetupScript.rename_bones_to_profile(skeleton)
+	var rename_map := RetargetSetupScript.rename_bones_to_profile(skeleton)
+
+	# Update BoneAttachment3D bone_name properties to match renamed skeleton.
+	# Attachments were created with Bip01 names during assembly; skeleton now has
+	# profile names. Without this, attachments may fail to resolve their bone.
+	if not rename_map.is_empty():
+		_update_bone_attachment_names(skeleton, rename_map)
 
 	# Load animations (remapped to profile bone names)
 	var anim_start := Time.get_ticks_msec()
@@ -723,6 +729,17 @@ static func _remap_and_cache_library(lib: AnimationLibrary, cache_key: String, i
 	_animation_library_cache[cache_key] = lib
 	_remapped_cache_keys[cache_key] = true
 	return lib
+
+
+## Update BoneAttachment3D bone names after skeleton bones are renamed.
+## rename_map: { old_Bip01_name -> new_profile_name }
+static func _update_bone_attachment_names(node: Node, rename_map: Dictionary) -> void:
+	if node is BoneAttachment3D:
+		var attach := node as BoneAttachment3D
+		if attach.bone_name in rename_map:
+			attach.bone_name = rename_map[attach.bone_name]
+	for child in node.get_children():
+		_update_bone_attachment_names(child, rename_map)
 
 
 # =============================================================================

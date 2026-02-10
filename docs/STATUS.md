@@ -53,6 +53,7 @@
 | Stats/Skills | ❌ |
 | Combat | ❌ |
 | Magic | ❌ |
+| NPC Animation | ⚠️ Pipeline complete, needs visual verification |
 | AI/NPCs | ❌ Plugins installed (Beehave), not wired |
 | Dialogue | ❌ Records parsed, no UI |
 | Quests | ❌ Plugin installed (Questify), not wired |

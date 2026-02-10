@@ -22,6 +22,7 @@ const MeshExtractor := preload("res://src/core/character/mixamo/mesh_extractor.g
 const NIFReader := preload("res://src/core/nif/nif_reader.gd")
 const NIFDefs := preload("res://src/core/nif/nif_defs.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
 
 # Inv bind modes (for skinned parts)
 enum BindMode { COMPOSED, OPENMW, SKELETON_REST }
@@ -135,20 +136,21 @@ const RIGHT_TO_LEFT := {
 const LEFT_SLOTS := ["UPPER_ARM_L", "FOREARM_L", "HAND_L", "WRIST_L",
 	"UPPER_LEG_L", "KNEE_L", "ANKLE_L", "FOOT_L"]
 
-# Known body part paths for Dark Elf male (common test race)
+# Known body part paths for Wood Elf male (Fargoth's race)
 # "skins" file contains chest+hands+wrists as sub-meshes
 const TEST_BODY_PARTS := {
-	"SKINS": "meshes/b/b_n_dark elf_m_skins.nif",
-	"UPPER_ARM_R": "meshes/b/b_n_dark elf_m_upper arm.nif",
-	"FOREARM_R": "meshes/b/b_n_dark elf_m_forearm.nif",
-	"GROIN": "meshes/b/b_n_dark elf_m_groin.nif",
-	"UPPER_LEG_R": "meshes/b/b_n_dark elf_m_upper leg.nif",
-	"KNEE_R": "meshes/b/b_n_dark elf_m_knee.nif",
-	"ANKLE_R": "meshes/b/b_n_dark elf_m_ankle.nif",
-	"FOOT_R": "meshes/b/b_n_dark elf_m_foot.nif",
-	"NECK": "meshes/b/b_n_dark elf_m_neck.nif",
-	"WRIST_R": "meshes/b/b_n_dark elf_m_wrist.nif",
-	"HEAD": "meshes/b/b_n_dark elf_m_head_01.nif",
+	"SKINS": "meshes/b/b_n_wood elf_m_skins.nif",
+	"UPPER_ARM_R": "meshes/b/b_n_wood elf_m_upper arm.nif",
+	"FOREARM_R": "meshes/b/b_n_wood elf_m_forearm.nif",
+	"GROIN": "meshes/b/b_n_wood elf_m_groin.nif",
+	"UPPER_LEG_R": "meshes/b/b_n_wood elf_m_upper leg.nif",
+	"KNEE_R": "meshes/b/b_n_wood elf_m_knee.nif",
+	"ANKLE_R": "meshes/b/b_n_wood elf_m_ankle.nif",
+	"FOOT_R": "meshes/b/b_n_wood elf_m_foot.nif",
+	"NECK": "meshes/b/b_n_wood elf_m_neck.nif",
+	"WRIST_R": "meshes/b/b_n_wood elf_m_wrist.nif",
+	"HEAD": "meshes/b/b_n_wood elf_m_head_01.nif",
+	"HAIR": "meshes/b/b_n_wood elf_m_hair_01.nif",
 }
 
 
@@ -494,28 +496,58 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 
 			var is_left: bool = slot_name in LEFT_SLOTS
 
-			var mat := StandardMaterial3D.new()
-			mat.albedo_color = color
-			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			# Try textured material first, fall back to flat color
+			var mat := _create_textured_material(extracted.texture_path, extracted.material_properties)
+			if not mat:
+				mat = StandardMaterial3D.new()
+				mat.albedo_color = color
 			array_mesh.surface_set_material(0, mat)
 
-			if extracted.is_skinned:
-				# PATH A: Skinned mesh — create Skin resource
-				var skin := _create_skin(extracted, skeleton, mode)
-				if not skin:
-					continue
+			# Match OpenMW: only full-body skins (many bones) use GPU skinning
+			var is_actually_skinned: bool = extracted.is_skinned and extracted.bone_names.size() > 4
 
-				var instance := MeshInstance3D.new()
-				instance.name = "Part_%s" % slot_name
-				instance.mesh = array_mesh
-				instance.skin = skin
-				instance.skeleton = NodePath("..")
-				skeleton.add_child(instance)
+			if is_actually_skinned:
+				if is_left:
+					# PATH A2: Mirrored skinned mesh for left side
+					var mirrored_mesh := _create_mirrored_skinned_mesh(extracted)
+					var skin := _create_mirrored_skin(extracted, skeleton)
+					if not skin:
+						continue
+
+					mat.cull_mode = BaseMaterial3D.CULL_BACK
+					mirrored_mesh.surface_set_material(0, mat)
+
+					var instance := MeshInstance3D.new()
+					instance.name = "Part_%s" % slot_name
+					instance.mesh = mirrored_mesh
+					instance.skin = skin
+					instance.skeleton = NodePath("..")
+					skeleton.add_child(instance)
+				else:
+					# PATH A1: Skinned mesh — create Skin resource
+					var skin := _create_skin(extracted, skeleton, mode)
+					if not skin:
+						continue
+
+					var instance := MeshInstance3D.new()
+					instance.name = "Part_%s" % slot_name
+					instance.mesh = array_mesh
+					instance.skin = skin
+					instance.skeleton = NodePath("..")
+					skeleton.add_child(instance)
 			else:
 				# PATH B: Non-skinned mesh — BoneAttachment3D
+				# For left-side: use mirrored mesh (pre-flipped normals + reversed winding)
+				var final_mesh: ArrayMesh
+				if is_left:
+					final_mesh = _create_mirrored_static_mesh(extracted)
+					final_mesh.surface_set_material(0, mat)
+				else:
+					final_mesh = array_mesh
+
 				var instance := MeshInstance3D.new()
 				instance.name = "Static_%s" % slot_name
-				instance.mesh = array_mesh
+				instance.mesh = final_mesh
 
 				var bone_name: String = TEST_SLOT_TO_BONE.get(slot_name, "")
 				var bone_idx := _find_bone_ci(skeleton, bone_name) if not bone_name.is_empty() else -1
@@ -524,25 +556,25 @@ func _build_character(container: Node3D, mode: BindMode) -> void:
 					# Apply transform based on selected static mode
 					match _static_mode:
 						StaticMode.BONE_REST_INV:
-							# Original (broken): undoes bone positioning
 							instance.transform = skeleton.get_bone_global_rest(bone_idx).affine_inverse() * extracted.node_transform
 						StaticMode.DIRECT:
-							# NIF transforms only (usually identity)
 							instance.transform = extracted.node_transform
 						StaticMode.IDENTITY:
-							# Pure bone-local: no additional transform
 							instance.transform = Transform3D.IDENTITY
 						StaticMode.ATTACHMENT:
-							# OpenMW order: bone * attachment * mirror_if_left * nif_root * v
-							# Mirror goes BETWEEN attachment and nif_root so nif_root's
-							# translation is correctly mirrored for left-side parts.
 							var attach_name: String = SLOT_TO_ATTACHMENT.get(slot_name, "")
 							if not attach_name.is_empty() and attach_name in _attachment_transforms:
 								if is_left:
-									var mirror_xf := Transform3D(Basis.from_scale(Vector3(-1, 1, 1)), Vector3.ZERO)
+									var bone_offset_pos: Vector3 = extracted.bone_offset_position if extracted.has_bone_offset else Vector3.ZERO
+									var mirror_xf := Transform3D(Basis.from_scale(Vector3(-1, 1, 1)), bone_offset_pos)
 									instance.transform = _attachment_transforms[attach_name] * mirror_xf * extracted.node_transform
 								else:
-									instance.transform = _attachment_transforms[attach_name] * extracted.node_transform
+									# bone_offset sits BETWEEN attachment and nif_root (matches OpenMW PAT hierarchy)
+									if extracted.has_bone_offset:
+										var bone_offset_xf := Transform3D(Basis.IDENTITY, extracted.bone_offset_position)
+										instance.transform = _attachment_transforms[attach_name] * bone_offset_xf * extracted.node_transform
+									else:
+										instance.transform = _attachment_transforms[attach_name] * extracted.node_transform
 							else:
 								instance.transform = extracted.node_transform
 								if is_left:
@@ -929,19 +961,30 @@ func _setup_scene() -> void:
 	add_child(camera)
 	camera.look_at(Vector3(0, 0.8, 0))
 
-	# Light
+	# Key light
 	var light := DirectionalLight3D.new()
-	light.name = "Light"
+	light.name = "KeyLight"
 	light.rotation_degrees = Vector3(-45, 30, 0)
+	light.light_energy = 1.2
+	light.shadow_enabled = true
 	add_child(light)
 
-	# Ambient light so we can see colors
+	# Fill light (softer, from opposite side)
+	var fill := DirectionalLight3D.new()
+	fill.name = "FillLight"
+	fill.rotation_degrees = Vector3(-30, -120, 0)
+	fill.light_energy = 0.4
+	fill.light_color = Color(0.8, 0.85, 1.0)
+	add_child(fill)
+
+	# Environment with ambient + tonemap for texture readability
 	var env := WorldEnvironment.new()
 	var environment := Environment.new()
-	environment.ambient_light_color = Color(0.4, 0.4, 0.4)
-	environment.ambient_light_energy = 0.5
+	environment.ambient_light_color = Color(0.5, 0.5, 0.55)
+	environment.ambient_light_energy = 0.6
 	environment.background_mode = Environment.BG_COLOR
 	environment.background_color = Color(0.15, 0.15, 0.2)
+	environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.environment = environment
 	add_child(env)
 
@@ -1019,8 +1062,156 @@ func _setup_ui() -> void:
 
 
 # =============================================================================
+# MESH MIRRORING (matches MorrowindNPCAssembler)
+# =============================================================================
+
+## Create mirrored static mesh: pre-flipped normals + reversed winding
+func _create_mirrored_static_mesh(mesh_data: MeshExtractor.MeshData) -> ArrayMesh:
+	var mirrored_normals := PackedVector3Array()
+	if not mesh_data.normals.is_empty():
+		mirrored_normals.resize(mesh_data.normals.size())
+		for i in mesh_data.normals.size():
+			var n := mesh_data.normals[i]
+			mirrored_normals[i] = Vector3(-n.x, n.y, n.z)
+
+	var mirrored_indices := PackedInt32Array()
+	mirrored_indices.resize(mesh_data.indices.size())
+	for i in range(0, mesh_data.indices.size(), 3):
+		mirrored_indices[i] = mesh_data.indices[i]
+		mirrored_indices[i + 1] = mesh_data.indices[i + 2]
+		mirrored_indices[i + 2] = mesh_data.indices[i + 1]
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = mesh_data.vertices
+	if not mirrored_normals.is_empty():
+		arrays[Mesh.ARRAY_NORMAL] = mirrored_normals
+	if not mesh_data.uvs.is_empty():
+		arrays[Mesh.ARRAY_TEX_UV] = mesh_data.uvs
+	arrays[Mesh.ARRAY_INDEX] = mirrored_indices
+
+	var array_mesh := ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return array_mesh
+
+
+## Create mirrored skinned mesh: flipped vertices/normals + reversed winding
+func _create_mirrored_skinned_mesh(mesh_data: MeshExtractor.MeshData) -> ArrayMesh:
+	var mirrored_verts := PackedVector3Array()
+	mirrored_verts.resize(mesh_data.vertices.size())
+	for i in mesh_data.vertices.size():
+		var v := mesh_data.vertices[i]
+		mirrored_verts[i] = Vector3(-v.x, v.y, v.z)
+
+	var mirrored_normals := PackedVector3Array()
+	if not mesh_data.normals.is_empty():
+		mirrored_normals.resize(mesh_data.normals.size())
+		for i in mesh_data.normals.size():
+			var n := mesh_data.normals[i]
+			mirrored_normals[i] = Vector3(-n.x, n.y, n.z)
+
+	var mirrored_indices := PackedInt32Array()
+	mirrored_indices.resize(mesh_data.indices.size())
+	for i in range(0, mesh_data.indices.size(), 3):
+		mirrored_indices[i] = mesh_data.indices[i]
+		mirrored_indices[i + 1] = mesh_data.indices[i + 2]
+		mirrored_indices[i + 2] = mesh_data.indices[i + 1]
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = mirrored_verts
+	if not mirrored_normals.is_empty():
+		arrays[Mesh.ARRAY_NORMAL] = mirrored_normals
+	if not mesh_data.uvs.is_empty():
+		arrays[Mesh.ARRAY_TEX_UV] = mesh_data.uvs
+	arrays[Mesh.ARRAY_INDEX] = mirrored_indices
+
+	if mesh_data.is_skinned:
+		var bones := PackedInt32Array()
+		var weights := PackedFloat32Array()
+		for i in mesh_data.vertices.size():
+			var bi: PackedInt32Array = mesh_data.bone_indices[i]
+			var bw: PackedFloat32Array = mesh_data.bone_weights[i]
+			bones.append_array(bi)
+			weights.append_array(bw)
+		arrays[Mesh.ARRAY_BONES] = bones
+		arrays[Mesh.ARRAY_WEIGHTS] = weights
+
+	var array_mesh := ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return array_mesh
+
+
+## Create Skin for mirrored (left-side) skinned mesh using remapped bone names.
+## Uses mirrored NIF bind data: mirror * nif_inv_bind * skin_transform * mirror
+func _create_mirrored_skin(mesh_data: MeshExtractor.MeshData, skeleton: Skeleton3D) -> Skin:
+	if mesh_data.bone_names.is_empty():
+		return null
+
+	var skin := Skin.new()
+	var has_nif_binds: bool = mesh_data.inv_bind_poses.size() == mesh_data.bone_names.size()
+	var mirror_basis := Basis(Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1))
+	var mirror_xf := Transform3D(mirror_basis, Vector3.ZERO)
+
+	for i in mesh_data.bone_names.size():
+		var bone_name: String = mesh_data.bone_names[i]
+		var mirrored_name := _mirror_bone_name(bone_name)
+		var bone_idx := _find_bone_ci(skeleton, mirrored_name)
+		if bone_idx < 0:
+			bone_idx = 0
+
+		var inv_bind: Transform3D
+		if has_nif_binds:
+			inv_bind = mirror_xf * mesh_data.inv_bind_poses[i] * mesh_data.skin_transform * mirror_xf
+		else:
+			inv_bind = skeleton.get_bone_global_rest(bone_idx).affine_inverse()
+
+		skin.add_bind(bone_idx, inv_bind)
+	return skin
+
+
+## Mirror bone name: "Bip01 R " ↔ "Bip01 L "
+func _mirror_bone_name(bone_name: String) -> String:
+	var lower := bone_name.to_lower()
+	if lower.contains(" r "):
+		return bone_name.replace(" R ", " L ").replace(" r ", " l ")
+	elif lower.contains(" l "):
+		return bone_name.replace(" L ", " R ").replace(" l ", " r ")
+	if lower.ends_with(" r"):
+		return bone_name.substr(0, bone_name.length() - 1) + ("L" if bone_name[-1] == "R" else "l")
+	elif lower.ends_with(" l"):
+		return bone_name.substr(0, bone_name.length() - 1) + ("R" if bone_name[-1] == "L" else "r")
+	return bone_name
+
+
+# =============================================================================
 # UTILITY
 # =============================================================================
+
+func _create_textured_material(texture_path: String, properties: Dictionary) -> StandardMaterial3D:
+	if texture_path.is_empty():
+		return null
+
+	var path := texture_path.to_lower().replace("\\", "/")
+	if not path.begins_with("textures/"):
+		path = "textures/" + path
+	if path.ends_with(".tga"):
+		path = path.replace(".tga", ".dds")
+
+	var texture: Texture2D = TextureLoaderScript.load_texture(path)
+	if not texture:
+		return null
+
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = texture
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+
+	if not properties.is_empty():
+		if "alpha" in properties and properties["alpha"] < 1.0:
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+
+	return mat
+
 
 ## Compute vertex AABB → [min, max, center, size]
 func _compute_vertex_aabb(vertices: PackedVector3Array) -> Array:
