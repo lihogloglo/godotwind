@@ -6,6 +6,9 @@
 ## on an infinite straight walkway with procedurally generated obstacles.
 ##
 ## Controls:
+##   Z / W        — Walk forward (overrides auto-walk)
+##   S            — Walk backward (overrides auto-walk)
+##   (no input)   — Auto-walk forward infinitely
 ##   RMB drag     — Orbit camera
 ##   Scroll       — Zoom in/out
 ##   L-click drag — Move look orb or hand cube
@@ -78,6 +81,10 @@ var _pitch: float = -20.0
 var _distance: float = 6.0
 var _orbiting: bool = false
 
+# Direct look-at (applied in _process AFTER AnimationTree to avoid overwrite)
+var _look_smooth_quat: Quaternion = Quaternion.IDENTITY
+var _look_initialized: bool = false
+
 # Log lines for info panel
 var _log_lines: PackedStringArray = PackedStringArray()
 
@@ -89,6 +96,9 @@ var _rock_mat: StandardMaterial3D
 
 
 func _ready() -> void:
+	# Run _process AFTER AnimationTree so look-at bone writes aren't overwritten
+	process_priority = 100
+
 	_create_environment()
 	_create_ground_strip()
 	_create_look_target()
@@ -186,6 +196,7 @@ func _spawn_npc() -> void:
 		await get_tree().process_frame
 
 	_log_lines.clear()
+	_look_initialized = false
 	var npc_id: String = TEST_NPCS[_current_npc_index]
 	_log("[b]Spawning: %s[/b]" % npc_id)
 
@@ -544,22 +555,88 @@ func _is_dragging(target: MeshInstance3D) -> bool:
 	return _dragging and _dragged_target == target
 
 
+## Apply head look-at directly in _process (after AnimationTree has run).
+## The IK controller's look-at runs in _physics_process which gets overwritten
+## by AnimationTree in _process. This bypasses that by running late in _process.
+func _apply_direct_look_at(delta: float) -> void:
+	if not _look_orb:
+		return
+	var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D")
+	if not skeleton:
+		return
+	var head_idx := skeleton.find_bone("Head")
+	if head_idx < 0:
+		return
+
+	# Head position in world space
+	var head_global_xf := skeleton.global_transform * skeleton.get_bone_global_pose(head_idx)
+	var head_pos := head_global_xf.origin
+
+	# Direction to look target
+	var to_target := _look_orb.global_position - head_pos
+	if to_target.length_squared() < 0.001:
+		return
+	to_target = to_target.normalized()
+
+	# Angle check vs character forward
+	var char_forward := -skeleton.global_transform.basis.z.normalized()
+	var angle := rad_to_deg(char_forward.angle_to(to_target))
+	if angle > 90.0:
+		# Outside cone — smoothly return to rest
+		_look_initialized = false
+		return
+
+	# Desired global rotation (look at target)
+	var target_q := Transform3D.IDENTITY.looking_at(to_target, Vector3.UP).basis.get_rotation_quaternion()
+
+	# Track smoothed rotation ourselves (NOT reading bone pose which returns rest)
+	if not _look_initialized:
+		_look_smooth_quat = target_q
+		_look_initialized = true
+	_look_smooth_quat = _look_smooth_quat.slerp(target_q, clampf(5.0 * delta, 0.0, 1.0))
+
+	# Parent global rotation for local conversion
+	var parent_idx := skeleton.get_bone_parent(head_idx)
+	var parent_global_q := Quaternion.IDENTITY
+	if parent_idx >= 0:
+		parent_global_q = (skeleton.global_transform * skeleton.get_bone_global_pose(parent_idx)).basis.orthonormalized().get_rotation_quaternion()
+	var rest_q := skeleton.get_bone_rest(head_idx).basis.get_rotation_quaternion()
+	var rest_global_q := parent_global_q * rest_q
+
+	# Blend rest → look direction with angle-based weight
+	var weight := smoothstep(0.0, 1.0, 1.0 - angle / 90.0) * 0.7
+	var final_global_q := rest_global_q.slerp(_look_smooth_quat, weight)
+
+	# Convert to local bone space: pose = rest^-1 * parent_global^-1 * final_global
+	var local_q := rest_q.inverse() * parent_global_q.inverse() * final_global_q
+	skeleton.set_bone_pose_rotation(head_idx, local_q)
+
+
 # =============================================================================
 # STRAIGHT-LINE WALKING
 # =============================================================================
 
 func _update_walking() -> void:
-	if not _npc_node or not _walk_enabled:
+	if not _npc_node:
 		return
 
-	var npc_z: float = _npc_node.global_position.z
+	var npc_pos: Vector3 = _npc_node.global_position
 
-	# Extend the walk target before the NPC reaches it (avoids pausing)
-	if npc_z > _walk_target_z - 10.0:
-		_walk_target_z = npc_z + WALK_TARGET_AHEAD
+	# Z/W = forward, S = backward (overrides auto-walk)
+	var user_forward := Input.is_key_pressed(KEY_Z) or Input.is_key_pressed(KEY_W)
+	var user_backward := Input.is_key_pressed(KEY_S)
+
+	if user_forward or user_backward:
+		var dir := 1.0 if user_forward else -1.0
+		_walk_target_z = npc_pos.z + dir * WALK_TARGET_AHEAD
 		_npc_node.move_to(Vector3(0, 0, _walk_target_z))
-	elif not _npc_node.has_movement_target:
-		_npc_node.move_to(Vector3(0, 0, _walk_target_z))
+	elif _walk_enabled:
+		# Auto-walk: always keep target far ahead so NPC never stops
+		if npc_pos.z > _walk_target_z - 10.0 or not _npc_node.has_movement_target:
+			_walk_target_z = npc_pos.z + WALK_TARGET_AHEAD
+			_npc_node.move_to(Vector3(0, 0, _walk_target_z))
+	elif not _walk_enabled and _npc_node.has_movement_target:
+		_npc_node.stop_movement()
 
 
 # =============================================================================
@@ -576,9 +653,12 @@ func _physics_process(delta: float) -> void:
 		_update_drag()
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_update_camera()
 	_update_live_info()
+	# Apply look-at AFTER AnimationTree (process_priority=100 ensures this)
+	if _look_ik_enabled and _npc_node:
+		_apply_direct_look_at(delta)
 
 
 # =============================================================================
@@ -664,6 +744,7 @@ func _input(event: InputEvent) -> void:
 				_log("Foot IK: %s" % ("ON" if _foot_ik_enabled else "OFF"))
 			KEY_2:
 				_look_ik_enabled = not _look_ik_enabled
+				_look_initialized = false
 				_apply_ik_state()
 				_log("Look-at IK: %s" % ("ON" if _look_ik_enabled else "OFF"))
 			KEY_3:
@@ -675,8 +756,9 @@ func _input(event: InputEvent) -> void:
 				if not _walk_enabled and _npc_node:
 					_npc_node.stop_movement()
 				elif _walk_enabled and _npc_node:
+					_walk_target_z = _npc_node.global_position.z + WALK_TARGET_AHEAD
 					_npc_node.move_to(Vector3(0, 0, _walk_target_z))
-				_log("Walking: %s" % ("ON" if _walk_enabled else "OFF"))
+				_log("Auto-walk: %s (Z/S still works)" % ("ON" if _walk_enabled else "OFF"))
 			KEY_M:
 				if _using_mixamo:
 					_switch_to_morrowind()
@@ -796,7 +878,18 @@ func _update_live_info() -> void:
 	lines.append("")
 	lines.append("Active bumps: %d" % _bumps.size())
 
+	# User input state
+	var user_fwd := Input.is_key_pressed(KEY_Z) or Input.is_key_pressed(KEY_W)
+	var user_bwd := Input.is_key_pressed(KEY_S)
+	if user_fwd:
+		lines.append("Input: [color=green]FORWARD (Z/W)[/color]")
+	elif user_bwd:
+		lines.append("Input: [color=green]BACKWARD (S)[/color]")
+	else:
+		lines.append("Input: [color=gray]auto-walk[/color]")
+
 	lines.append("")
+	lines.append("[color=gray][Z/W] Forward  [S] Backward  (auto if none)[/color]")
 	lines.append("[color=gray][M] Anims  [N] NPC  [D] Debug  [Space] Auto[/color]")
 	lines.append("[color=gray][RMB] Orbit  [Scroll] Zoom  [LMB] Drag[/color]")
 
