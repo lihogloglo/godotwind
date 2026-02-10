@@ -124,6 +124,9 @@ func update(delta: float) -> void:
 	if enable_look_at and _has_look_target:
 		_update_look_at(delta)
 
+	if enable_hand_ik:
+		_update_hand_ik(delta)
+
 
 # =============================================================================
 # FOOT IK
@@ -476,6 +479,29 @@ func set_hand_target(hand: StringName, target: Node3D, weight: float = 1.0) -> v
 		_right_hand_weight = weight
 		if _right_hand_ik:
 			_right_hand_ik.active = true
+
+
+## Update hand IK targets from tracked nodes each frame
+func _update_hand_ik(_delta: float) -> void:
+	_update_single_hand_ik(_left_hand_target, _left_hand_pole, _left_hand_weight, -1.0)
+	_update_single_hand_ik(_right_hand_target, _right_hand_pole, _right_hand_weight, 1.0)
+
+
+func _update_single_hand_ik(target: Node3D, pole: Node3D, weight: float, side_sign: float) -> void:
+	if not target or weight <= 0.0:
+		return
+
+	# Copy tracked node position to IK target
+	if target.has_meta("tracked_node"):
+		var tracked: Node3D = target.get_meta("tracked_node")
+		if tracked and is_instance_valid(tracked):
+			target.global_position = tracked.global_position
+
+	# Update pole position (elbows bend backward/down relative to character)
+	if pole and character_body:
+		var char_back := character_body.global_transform.basis.z
+		var elbow_pos := character_body.global_position + Vector3(side_sign * 0.3, 1.2, 0)
+		pole.global_position = elbow_pos + char_back * 0.5 + Vector3.DOWN * 0.3
 
 
 ## Clear hand IK target
