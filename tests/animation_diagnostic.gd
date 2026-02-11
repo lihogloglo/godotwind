@@ -1159,16 +1159,23 @@ func _setup_scene() -> void:
 	light.rotation_degrees = Vector3(-45, -30, 0)
 	add_child(light)
 
-	# Ground
-	var ground := MeshInstance3D.new()
-	ground.name = "Ground"
+	# Ground (visual + collision)
+	var ground_body := StaticBody3D.new()
+	ground_body.name = "Ground"
+	add_child(ground_body)
+
+	var ground_mesh := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(10, 10)
-	ground.mesh = plane
+	ground_mesh.mesh = plane
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.3, 0.3, 0.3)
-	ground.material_override = mat
-	add_child(ground)
+	ground_mesh.material_override = mat
+	ground_body.add_child(ground_mesh)
+
+	var ground_col := CollisionShape3D.new()
+	ground_col.shape = WorldBoundaryShape3D.new()
+	ground_body.add_child(ground_col)
 
 
 func _setup_ui() -> void:

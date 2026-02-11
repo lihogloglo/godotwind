@@ -48,6 +48,13 @@ var _wander_enabled: bool = false
 var _ik_enabled: bool = true
 var _diagnostic_lines: PackedStringArray = PackedStringArray()
 
+# Animation browser
+var _browse_mode: bool = false
+var _browse_index: int = 0
+var _browse_list: PackedStringArray = PackedStringArray()
+var _browse_paused: bool = false
+var _browse_time: float = 0.0
+
 
 func _ready() -> void:
 	_setup_scene()
@@ -365,6 +372,20 @@ func _check_bone_attachments(node: Node, skeleton: Skeleton3D, broken_count: int
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
+		if _browse_mode:
+			match event.keycode:
+				KEY_RIGHT:
+					_browse_next()
+				KEY_LEFT:
+					_browse_prev()
+				KEY_SPACE:
+					_browse_toggle_pause()
+				KEY_TAB:
+					_exit_browse_mode()
+				KEY_ESCAPE:
+					_exit_browse_mode()
+			return
+
 		match event.keycode:
 			KEY_W:
 				_wander_enabled = not _wander_enabled
@@ -375,11 +396,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_I:
 				_ik_enabled = not _ik_enabled
 				_log("IK: %s" % ("ON" if _ik_enabled else "OFF"))
-				# Rebuild to apply
 				_spawn_npc()
 			KEY_D:
 				_dump_detailed_debug()
 			KEY_R:
+				_browse_mode = false
 				_spawn_npc()
 			KEY_1:
 				_current_npc_index = 0
@@ -392,6 +413,118 @@ func _unhandled_input(event: InputEvent) -> void:
 				_spawn_npc()
 			KEY_M:
 				_toggle_mixamo()
+			KEY_TAB:
+				_enter_browse_mode()
+
+
+# =============================================================================
+# ANIMATION BROWSER
+# =============================================================================
+
+func _enter_browse_mode() -> void:
+	if not _npc_node:
+		_log("[color=yellow]No NPC loaded[/color]")
+		return
+
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+	if not anim_player:
+		_log("[color=red]No AnimationPlayer[/color]")
+		return
+
+	# Disable AnimationTree so we control playback directly
+	var anim_tree: AnimationTree = _find_node_of_type(_npc_node, "AnimationTree")
+	if anim_tree:
+		anim_tree.active = false
+
+	# Disable wander so CharacterBody3D doesn't move
+	if "wander_enabled" in _npc_node:
+		_npc_node.wander_enabled = false
+
+	# Build sorted animation list
+	_browse_list.clear()
+	for anim_name in anim_player.get_animation_list():
+		_browse_list.append(anim_name)
+	_browse_list.sort()
+
+	if _browse_list.is_empty():
+		_log("[color=yellow]No animations available[/color]")
+		return
+
+	_browse_mode = true
+	_browse_index = 0
+	_browse_paused = false
+	_browse_play_current()
+	_log("[color=cyan]BROWSE MODE — Left/Right to switch, Space to pause, Tab to exit[/color]")
+
+
+func _exit_browse_mode() -> void:
+	_browse_mode = false
+	_log("[color=gray]Exited browse mode[/color]")
+
+	# Re-enable AnimationTree
+	if _npc_node:
+		var anim_tree: AnimationTree = _find_node_of_type(_npc_node, "AnimationTree")
+		if anim_tree:
+			anim_tree.active = true
+		var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+		if anim_player:
+			anim_player.stop()
+	_update_info()
+
+
+func _browse_next() -> void:
+	if _browse_list.is_empty():
+		return
+	_browse_index = (_browse_index + 1) % _browse_list.size()
+	_browse_play_current()
+
+
+func _browse_prev() -> void:
+	if _browse_list.is_empty():
+		return
+	_browse_index = (_browse_index - 1 + _browse_list.size()) % _browse_list.size()
+	_browse_play_current()
+
+
+func _browse_toggle_pause() -> void:
+	if not _npc_node:
+		return
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+	if not anim_player:
+		return
+	_browse_paused = not _browse_paused
+	anim_player.speed_scale = 0.0 if _browse_paused else 1.0
+
+
+func _browse_play_current() -> void:
+	if not _npc_node or _browse_list.is_empty():
+		return
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+	if not anim_player:
+		return
+
+	var anim_name: String = _browse_list[_browse_index]
+	anim_player.speed_scale = 0.0 if _browse_paused else 1.0
+
+	# Get animation info
+	var anim: Animation = anim_player.get_animation(anim_name)
+
+	# Force loop for locomotion animations (MW KF files don't set loop_mode)
+	if anim and anim.loop_mode == Animation.LOOP_NONE:
+		var lower := anim_name.to_lower()
+		if "idle" in lower or "walk" in lower or "run" in lower or "swim" in lower:
+			anim.loop_mode = Animation.LOOP_LINEAR
+
+	anim_player.play(anim_name)
+
+	var loop_str := "NONE"
+	if anim:
+		match anim.loop_mode:
+			Animation.LOOP_LINEAR: loop_str = "LOOP"
+			Animation.LOOP_PINGPONG: loop_str = "PINGPONG"
+	_log("[color=cyan][%d/%d] %s[/color]  (%.1fs, %s)" % [
+		_browse_index + 1, _browse_list.size(), anim_name,
+		anim.length if anim else 0.0, loop_str])
 
 
 func _toggle_mixamo() -> void:
@@ -513,8 +646,31 @@ func _update_live_info() -> void:
 	# Animation source
 	live_lines.append("Animations: [color=cyan]%s[/color]" % ("Mixamo" if _using_mixamo else "Morrowind"))
 
-	live_lines.append("")
-	live_lines.append("[color=gray][W] Wander  [I] IK  [M] Mixamo  [D] Debug  [R] Reload  [1/2/3] NPC[/color]")
+	# Browse mode info
+	if _browse_mode and not _browse_list.is_empty():
+		var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+		var current_name: String = _browse_list[_browse_index]
+		var anim: Animation = anim_player.get_animation(current_name) if anim_player else null
+		var loop_str := "NONE"
+		if anim:
+			match anim.loop_mode:
+				Animation.LOOP_LINEAR: loop_str = "LOOP"
+				Animation.LOOP_PINGPONG: loop_str = "PINGPONG"
+		var pos_str := ""
+		if anim_player and anim_player.is_playing():
+			pos_str = "  %.1f/%.1fs" % [anim_player.current_animation_position, anim.length if anim else 0.0]
+		live_lines.append("")
+		live_lines.append("[b]--- BROWSE MODE ---[/b]")
+		live_lines.append("[color=cyan][%d/%d] %s[/color]" % [_browse_index + 1, _browse_list.size(), current_name])
+		live_lines.append("Duration: %.1fs  Loop: %s  %s%s" % [
+			anim.length if anim else 0.0, loop_str,
+			"[color=yellow]PAUSED[/color]" if _browse_paused else "[color=green]PLAYING[/color]",
+			pos_str])
+		live_lines.append("")
+		live_lines.append("[color=gray][Left/Right] Switch  [Space] Pause  [Tab/Esc] Exit browse[/color]")
+	else:
+		live_lines.append("")
+		live_lines.append("[color=gray][W] Wander  [I] IK  [M] Mixamo  [D] Debug  [R] Reload  [Tab] Browse  [1/2/3] NPC[/color]")
 
 	# Combine diagnostic + live
 	var full_text := "\n".join(_diagnostic_lines) + "\n" + "\n".join(live_lines)
