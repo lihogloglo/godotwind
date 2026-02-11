@@ -388,7 +388,11 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . tests/animation_diagnostic.tscn --quit-after 90)",
       "Bash(if not exist \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\tests\\\\data\" mkdir \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\tests\\\\data\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://tests/data/prebake_test_npc.tscn\")",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://tests/animation_diagnostic.tscn\" -- --auto-quit)"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://tests/animation_diagnostic.tscn\" -- --auto-quit)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/animation_integration_test.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/animation_integration_test.tscn\" -- --autotest)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . res://src/tools/animation_integration_test.tscn -- --autotest)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/animation_integration_test.tscn\" -- --autotest)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

@@ -357,7 +357,18 @@ func _setup_controllers() -> void:
 
 ## Cleanup controllers on reset
 func _cleanup_controllers() -> void:
+	# Clean up AnimationTree FIRST — it lives on the Skeleton3D, not the
+	# AnimationManager, so queue_free() on the manager won't remove it.
+	# Leaving it causes two AnimationTrees fighting for bone control.
 	if animation_manager:
+		var anim: _AnimationManager = animation_manager as _AnimationManager
+		if anim and anim.animation_tree and is_instance_valid(anim.animation_tree):
+			anim.animation_tree.active = false
+			var parent := anim.animation_tree.get_parent()
+			if parent:
+				parent.remove_child(anim.animation_tree)
+			anim.animation_tree.queue_free()
+			anim.animation_tree = null
 		animation_manager.queue_free()
 		animation_manager = null
 

@@ -41,11 +41,13 @@ var _factory_ready: bool = false
 
 # Mixamo animations
 var _mixamo_library: AnimationLibrary = null
+var _mixamo_source_rest: Dictionary = {}
 var _using_mixamo: bool = false
 
 # State
 var _wander_enabled: bool = false
 var _ik_enabled: bool = true
+var _force_full_pipeline: bool = false
 var _diagnostic_lines: PackedStringArray = PackedStringArray()
 
 # Animation browser
@@ -64,15 +66,126 @@ func _ready() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
+	# Check for --autotest flag (forces full pipeline + Mixamo test)
+	var autotest := "--autotest" in OS.get_cmdline_user_args()
+	if autotest:
+		_force_full_pipeline = true
+
 	# Try prebaked NPC first (fast path — skips BSA/ESM loading)
 	var npc_id: String = TEST_NPCS[_current_npc_index]
-	if TestNPCLoaderScript.has_prebaked(npc_id):
+	if not _force_full_pipeline and TestNPCLoaderScript.has_prebaked(npc_id):
 		_log("[color=green]FAST PATH: Loading prebaked NPC[/color]")
 		_spawn_npc()
 	else:
 		# Full pipeline — load BSA/ESM and create factory
 		await _ensure_full_pipeline()
 		_spawn_npc()
+
+	if autotest:
+		_run_auto_test()
+
+
+## Auto-test sequence: verifies MW animations, toggles Mixamo, verifies again
+func _run_auto_test() -> void:
+	_log("")
+	_log("[b]=== AUTO-TEST SEQUENCE ===[/b]")
+
+	# Wait for animations to settle
+	await get_tree().create_timer(1.0).timeout
+
+	# Verify MW animations are playing
+	var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D") if _npc_node else null
+	if skeleton:
+		var hips_idx := skeleton.find_bone("Hips")
+		if hips_idx >= 0:
+			var hips_pos := skeleton.get_bone_global_pose(hips_idx).origin
+			_log("[color=cyan]S1 MW idle — Hips global: (%.3f, %.3f, %.3f)[/color]" % [
+				hips_pos.x, hips_pos.y, hips_pos.z])
+			if hips_pos.y > 0.3 and hips_pos.y < 2.0:
+				_log("[color=green]S1 PASS — MW Hips height: %.2fm[/color]" % hips_pos.y)
+			else:
+				_log("[color=red]S1 FAIL — MW Hips height: %.2fm[/color]" % hips_pos.y)
+
+	# Count AnimationTrees before toggle (should be exactly 1)
+	var at_count_before := _count_nodes_of_type(_npc_node, "AnimationTree")
+	_log("S2 AnimationTrees before toggle: %d" % at_count_before)
+
+	# Toggle to Mixamo
+	_log("[b]S3 Switching to Mixamo...[/b]")
+	_toggle_mixamo()
+	await get_tree().create_timer(1.5).timeout
+
+	# Count AnimationTrees after toggle (should still be exactly 1)
+	var at_count_after := _count_nodes_of_type(_npc_node, "AnimationTree")
+	if at_count_after == 1:
+		_log("[color=green]S4 PASS — AnimationTree count: %d (no leak)[/color]" % at_count_after)
+	else:
+		_log("[color=red]S4 FAIL — AnimationTree count: %d (expected 1, leak detected!)[/color]" % at_count_after)
+
+	# Verify Mixamo animations are playing
+	if skeleton:
+		var hips_idx := skeleton.find_bone("Hips")
+		if hips_idx >= 0:
+			var hips_pos := skeleton.get_bone_global_pose(hips_idx).origin
+			_log("[color=cyan]S5 Mixamo idle — Hips global: (%.3f, %.3f, %.3f)[/color]" % [
+				hips_pos.x, hips_pos.y, hips_pos.z])
+			if hips_pos.y > 0.3 and hips_pos.y < 2.0:
+				_log("[color=green]S5 PASS — Mixamo Hips height plausible (%.2fm)[/color]" % hips_pos.y)
+			else:
+				_log("[color=red]S5 FAIL — Mixamo Hips height suspicious (%.2fm)[/color]" % hips_pos.y)
+
+		# Check if bones are actually moving (not stuck in rest)
+		var spine_idx := skeleton.find_bone("Spine")
+		var head_idx := skeleton.find_bone("Head")
+		if spine_idx >= 0 and head_idx >= 0:
+			var spine_pos := skeleton.get_bone_global_pose(spine_idx).origin
+			var head_pos := skeleton.get_bone_global_pose(head_idx).origin
+			var spine_head_dist := (head_pos - spine_pos).length()
+			if spine_head_dist > 0.1:
+				_log("[color=green]S5b PASS — Spine-Head distance: %.3fm (skeleton not collapsed)[/color]" % spine_head_dist)
+			else:
+				_log("[color=red]S5b FAIL — Spine-Head distance: %.3fm (skeleton collapsed!)[/color]" % spine_head_dist)
+
+	# Browse Mixamo animations
+	_log("[b]S6 Browsing Mixamo animations...[/b]")
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer") if _npc_node else null
+	if anim_player:
+		for anim_name in anim_player.get_animation_list():
+			var anim: Animation = anim_player.get_animation(anim_name)
+			_log("  %s — %d tracks, %.1fs" % [anim_name, anim.get_track_count(), anim.length])
+	else:
+		_log("[color=red]S6 FAIL — No AnimationPlayer found![/color]")
+
+	# Verify AnimationTree state
+	var anim_tree: AnimationTree = _find_node_of_type(_npc_node, "AnimationTree") if _npc_node else null
+	if anim_tree:
+		_log("S7 AnimationTree: active=%s root=%s" % [str(anim_tree.active), str(anim_tree.root_node)])
+		var sm = anim_tree.get("parameters/locomotion/playback")
+		if sm:
+			_log("S7 State machine current: %s" % str(sm.get_current_node()))
+		else:
+			_log("[color=red]S7 FAIL — No state machine playback![/color]")
+	else:
+		_log("[color=red]S7 FAIL — No AnimationTree![/color]")
+
+	# Toggle back to MW
+	_log("[b]S8 Switching back to MW...[/b]")
+	_toggle_mixamo()
+	await get_tree().create_timer(1.0).timeout
+
+	if skeleton:
+		var hips_idx := skeleton.find_bone("Hips")
+		if hips_idx >= 0:
+			var hips_pos := skeleton.get_bone_global_pose(hips_idx).origin
+			_log("[color=cyan]S8 MW idle restored — Hips global: (%.3f, %.3f, %.3f)[/color]" % [
+				hips_pos.x, hips_pos.y, hips_pos.z])
+			if hips_pos.y > 0.3 and hips_pos.y < 2.0:
+				_log("[color=green]S8 PASS — MW restored, height: %.2fm[/color]" % hips_pos.y)
+			else:
+				_log("[color=red]S8 FAIL — MW restored height: %.2fm[/color]" % hips_pos.y)
+
+	_log("[b]=== AUTO-TEST COMPLETE ===[/b]")
+	_update_info()
 
 
 ## Load BSA/ESM and create factory (lazy — only when needed)
@@ -142,13 +255,16 @@ func _spawn_npc() -> void:
 		await get_tree().process_frame
 
 	_diagnostic_lines.clear()
+	# Reset Mixamo state when switching NPCs (skeleton rest poses may differ)
+	_using_mixamo = false
+	_mixamo_library = null
 	var npc_id: String = TEST_NPCS[_current_npc_index]
 	_log("[b]Spawning NPC: %s[/b]" % npc_id)
 
 	var start := Time.get_ticks_msec()
 
-	# Try prebaked NPC first
-	if TestNPCLoaderScript.has_prebaked(npc_id):
+	# Try prebaked NPC first (skipped when full pipeline is forced)
+	if not _force_full_pipeline and TestNPCLoaderScript.has_prebaked(npc_id):
 		var character = TestNPCLoaderScript.load_test_npc(npc_id)
 		if character:
 			var elapsed := Time.get_ticks_msec() - start
@@ -330,7 +446,7 @@ func _run_diagnostics(character: Node) -> void:
 		_log("[color=yellow]WARN[/color] AnimationManager not found")
 
 	# 5. Find AnimationSystem
-	var anim_system = character.get_meta("animation_system", null)
+	var anim_system = character.get_meta("animation_system") if character.has_meta("animation_system") else null
 	if anim_system:
 		_log("[color=green]PASS[/color] AnimationSystem wired to character")
 	else:
@@ -528,21 +644,56 @@ func _browse_play_current() -> void:
 
 
 func _toggle_mixamo() -> void:
-	# Lazy-load Mixamo on first toggle
-	if not _mixamo_library:
-		_log("Loading Mixamo animations...")
-		_mixamo_library = AnimationLoaderScript.load_from_directory("res://assets/animations/mixamo/")
-		if _mixamo_library:
-			_log("[color=green]Mixamo loaded: %d animations[/color]" % _mixamo_library.get_animation_list().size())
-		else:
-			_log("[color=yellow]No Mixamo animations found[/color]")
-			_update_info()
-			return
-
 	if not _npc_node:
 		_log("[color=yellow]No NPC loaded[/color]")
 		_update_info()
 		return
+
+	# Lazy-load Mixamo on first toggle — load with rest poses for retargeting
+	if not _mixamo_library:
+		_log("Loading Mixamo animations with rest poses...")
+		var result := AnimationLoaderScript.load_from_directory_with_rest("res://assets/animations/mixamo/")
+		if result.has("library") and result["library"]:
+			_mixamo_source_rest = result.get("source_rest", {})
+			_log("  Source rest poses: %d bones" % _mixamo_source_rest.size())
+			if not _mixamo_source_rest.is_empty():
+				for bone_name: String in ["Hips", "Spine", "LeftUpperArm"]:
+					if bone_name in _mixamo_source_rest:
+						var t: Transform3D = _mixamo_source_rest[bone_name]
+						var q := t.basis.get_rotation_quaternion()
+						_log("  Mixamo %s: rot=(%.3f,%.3f,%.3f,%.3f) pos=(%.3f,%.3f,%.3f)" % [
+							bone_name, q.x, q.y, q.z, q.w, t.origin.x, t.origin.y, t.origin.z])
+
+			# Get MW skeleton rest poses for retargeting
+			var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D")
+			if skeleton and not _mixamo_source_rest.is_empty():
+				var target_rest := AnimationLoaderScript.get_skeleton_rest_poses(skeleton)
+				_log("  Target (MW) rest poses: %d bones" % target_rest.size())
+				for bone_name: String in ["Hips", "Spine", "LeftUpperArm"]:
+					if bone_name in target_rest:
+						var t: Transform3D = target_rest[bone_name]
+						var q := t.basis.get_rotation_quaternion()
+						_log("  MW %s: rot=(%.3f,%.3f,%.3f,%.3f) pos=(%.3f,%.3f,%.3f)" % [
+							bone_name, q.x, q.y, q.z, q.w, t.origin.x, t.origin.y, t.origin.z])
+
+				_log("  Retargeting Mixamo → MW skeleton (absolute target)...")
+				# MW skeleton uses absolute KF values as poses — use absolute retargeting
+				_mixamo_library = AnimationLoaderScript.retarget_library(
+					result["library"], _mixamo_source_rest, target_rest, true)
+				_log("[color=green]Mixamo loaded + retargeted: %d animations[/color]" % _mixamo_library.get_animation_list().size())
+
+				# Log retargeted sample values for debugging
+				for anim_name: String in _mixamo_library.get_animation_list():
+					var anim: Animation = _mixamo_library.get_animation(anim_name)
+					_log("  '%s': %d tracks, %.1fs" % [anim_name, anim.get_track_count(), anim.length])
+			else:
+				# No skeleton or no rest poses — use raw (will look wrong but won't crash)
+				_mixamo_library = result["library"]
+				_log("[color=yellow]Mixamo loaded WITHOUT retargeting: %d animations[/color]" % _mixamo_library.get_animation_list().size())
+		else:
+			_log("[color=yellow]No Mixamo animations found in res://assets/animations/mixamo/[/color]")
+			_update_info()
+			return
 
 	_using_mixamo = not _using_mixamo
 
@@ -554,14 +705,7 @@ func _toggle_mixamo() -> void:
 		return
 
 	if _using_mixamo:
-		# Add Mixamo library alongside MW library
-		if not anim_player.has_animation_library("mixamo"):
-			anim_player.add_animation_library("mixamo", _mixamo_library)
-		_log("[color=cyan]Mixamo animations ADDED[/color] (library 'mixamo')")
-		_log("  Available: %s" % str(_mixamo_library.get_animation_list()))
-
-		# Try to play a Mixamo animation via the AnimationTree state machine
-		# The state machine uses the default library, so we need to swap it
+		# Store MW library, swap in retargeted Mixamo library as default
 		var old_lib: AnimationLibrary = null
 		if anim_player.has_animation_library(""):
 			old_lib = anim_player.get_animation_library("")
@@ -570,9 +714,9 @@ func _toggle_mixamo() -> void:
 		if old_lib:
 			anim_player.add_animation_library("morrowind", old_lib)
 
-		# Rebuild AnimationTree to pick up new animations
 		_rebuild_animation_tree()
-		_log("[color=green]Switched to Mixamo animations[/color]")
+		_log("[color=green]Switched to Mixamo animations (retargeted)[/color]")
+		_log("  Available: %s" % str(_mixamo_library.get_animation_list()))
 	else:
 		# Restore MW library
 		if anim_player.has_animation_library("morrowind"):
@@ -592,15 +736,145 @@ func _toggle_mixamo() -> void:
 
 func _rebuild_animation_tree() -> void:
 	if not _npc_node:
+		_log("[color=red]_rebuild_animation_tree: no NPC node[/color]")
 		return
 
-	# Find and reset the animation system to rebuild the AnimationTree
-	var anim_system = _npc_node.get_meta("animation_system", null)
+	var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D")
+	if not skeleton:
+		_log("[color=red]_rebuild_animation_tree: no skeleton[/color]")
+		return
+
+	var anim_system = _npc_node.get_meta("animation_system") if _npc_node.has_meta("animation_system") else null
 	if anim_system and anim_system.has_method("reset"):
-		var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D")
+		# Full pipeline NPC — reset + re-setup through animation system
 		anim_system.reset()
-		if skeleton:
-			anim_system.setup(skeleton, _npc_node as CharacterBody3D)
+		anim_system.setup(skeleton, _npc_node as CharacterBody3D)
+		_log("  AnimationTree rebuilt via animation system")
+	else:
+		# Prebaked NPC or missing animation system — direct AnimationTree rebuild
+		_log("  No animation system — rebuilding AnimationTree directly")
+		_rebuild_animation_tree_direct(skeleton)
+
+	# Verify the rebuild worked
+	var anim_tree: AnimationTree = _find_node_of_type(_npc_node, "AnimationTree")
+	if anim_tree:
+		_log("  AnimationTree: active=%s" % str(anim_tree.active))
+		var sm = anim_tree.get("parameters/locomotion/playback")
+		if sm:
+			_log("  State machine: %s" % str(sm.get_current_node()))
+		else:
+			_log("[color=red]  No state machine playback![/color]")
+	else:
+		_log("[color=red]  AnimationTree NOT found after rebuild![/color]")
+
+	# Verify AnimationPlayer still has the expected library
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+	if anim_player:
+		var lib_name := "Mixamo" if _using_mixamo else "Morrowind"
+		var lib := anim_player.get_animation_library("") if anim_player.has_animation_library("") else null
+		if lib:
+			_log("  %s library: %d animations" % [lib_name, lib.get_animation_list().size()])
+		else:
+			_log("[color=red]  No default animation library![/color]")
+
+
+## Direct AnimationTree rebuild without animation system (for prebaked NPCs)
+## Removes the old AnimationTree, builds a new state machine from the current
+## AnimationPlayer library, and creates a fresh AnimationTree on the skeleton.
+func _rebuild_animation_tree_direct(skeleton: Skeleton3D) -> void:
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+	if not anim_player:
+		_log("[color=red]  Direct rebuild: no AnimationPlayer[/color]")
+		return
+
+	# Remove existing AnimationTree(s) — prevent duplication
+	for child in skeleton.get_children():
+		if child is AnimationTree:
+			child.active = false
+			skeleton.remove_child(child)
+			child.queue_free()
+
+	# Build state machine from current animations
+	var animations := anim_player.get_animation_list()
+	_log("  Direct rebuild: %d animations available" % animations.size())
+
+	var sm := AnimationNodeStateMachine.new()
+	var state_names := [&"Idle", &"Walk", &"Run", &"Sprint", &"Jump", &"Fall", &"Land"]
+	var added_states: Array[StringName] = []
+
+	for state_name: StringName in state_names:
+		var anim_name := _find_anim_for_state(animations, state_name)
+		if not anim_name.is_empty():
+			var anim_node := AnimationNodeAnimation.new()
+			anim_node.animation = anim_name
+			sm.add_node(state_name, anim_node)
+			added_states.append(state_name)
+			_log("  State '%s' → anim '%s'" % [state_name, anim_name])
+
+	# Add transitions between states
+	var transitions := [
+		[&"Idle", &"Walk"], [&"Walk", &"Idle"],
+		[&"Walk", &"Run"], [&"Run", &"Walk"],
+		[&"Run", &"Sprint"], [&"Sprint", &"Run"],
+		[&"Idle", &"Jump"], [&"Walk", &"Jump"], [&"Run", &"Jump"],
+		[&"Jump", &"Fall"], [&"Fall", &"Land"], [&"Land", &"Idle"],
+	]
+	for trans: Array in transitions:
+		var from: StringName = trans[0]
+		var to: StringName = trans[1]
+		if sm.has_node(from) and sm.has_node(to):
+			var t := AnimationNodeStateMachineTransition.new()
+			t.xfade_time = 0.2
+			sm.add_transition(from, to, t)
+
+	# Start → Idle auto-transition
+	if sm.has_node(&"Idle"):
+		var start_trans := AnimationNodeStateMachineTransition.new()
+		start_trans.advance_mode = AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO
+		sm.add_transition(&"Start", &"Idle", start_trans)
+
+	# Create blend tree root with state machine
+	var root := AnimationNodeBlendTree.new()
+	root.add_node(&"locomotion", sm, Vector2(0, 0))
+	root.connect_node(&"output", 0, &"locomotion")
+
+	# Create new AnimationTree as child of skeleton
+	var new_tree := AnimationTree.new()
+	new_tree.name = "AnimationTree"
+	new_tree.tree_root = root
+	skeleton.add_child(new_tree)
+	new_tree.anim_player = new_tree.get_path_to(anim_player)
+	new_tree.active = true
+
+	_log("  Direct rebuild: %d states added" % added_states.size())
+
+
+## Find the best animation name for a state from available animations
+func _find_anim_for_state(animations: PackedStringArray, state_name: StringName) -> StringName:
+	var search_terms: Array[String] = []
+	match state_name:
+		&"Idle": search_terms = ["idle"]
+		&"Walk": search_terms = ["walk", "walking"]
+		&"Run": search_terms = ["run", "running"]
+		&"Sprint": search_terms = ["sprint", "run", "running"]
+		&"Jump": search_terms = ["jump", "jump_up", "jumping"]
+		&"Fall": search_terms = ["fall", "falling", "jump_down"]
+		&"Land": search_terms = ["land", "landing"]
+		_: search_terms = [state_name.to_lower()]
+
+	# Exact match first (case-insensitive)
+	for term in search_terms:
+		for anim in animations:
+			if anim.to_lower() == term:
+				return StringName(anim)
+
+	# Substring match
+	for term in search_terms:
+		for anim in animations:
+			if term in anim.to_lower():
+				return StringName(anim)
+
+	return &""
 
 
 func _process(_delta: float) -> void:
@@ -629,7 +903,7 @@ func _update_live_info() -> void:
 	])
 
 	# Animation state
-	var anim_system = _npc_node.get_meta("animation_system", null)
+	var anim_system = _npc_node.get_meta("animation_system") if _npc_node.has_meta("animation_system") else null
 	if anim_system and anim_system.has_method("get_state"):
 		live_lines.append("State: [color=cyan]%s[/color]" % anim_system.get_state())
 
