@@ -44,3 +44,7 @@ desktop.ini
 *.x86_64
 *.pck
 addons/terrain_3d.backup-*/
+
+# Prebaked test data (binary, generated)
+tests/data/*.scn
+tests/data/*.res

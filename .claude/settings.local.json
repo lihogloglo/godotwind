@@ -381,7 +381,14 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/body_part_diagnostic.tscn\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/ik_animation_showcase.tscn\")",
       "Bash([ -d \"d:/Gamedev/Godotwind/godotwind/docs/archive\" ])",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --script res://tests/test_animation_poses.gd --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\")"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --script res://tests/test_animation_poses.gd --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . res://src/tools/animation_integration_test.tscn)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://tests/animation_diagnostic.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . tests/animation_diagnostic.tscn --quit-after 30)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . tests/animation_diagnostic.tscn --quit-after 90)",
+      "Bash(if not exist \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\tests\\\\data\" mkdir \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\tests\\\\data\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://tests/data/prebake_test_npc.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://tests/animation_diagnostic.tscn\" -- --auto-quit)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

@@ -262,13 +262,91 @@ func _run_test() -> void:
 	print("")
 
 	# =========================================================================
-	# 6. Also load RAW (pre-conversion) data for comparison
+	# 6. REST-RELATIVE CONVERSION VALIDATION
+	# After converting: pose = rest^-1 * kf_absolute
+	# Idle frame 0 should become ≈ identity for all bones (since kf === rest)
+	# =========================================================================
+	_header("REST-RELATIVE CONVERSION TEST (pose = rest^-1 * kf)")
+
+	var conversion_pass := 0
+	var conversion_fail := 0
+	var conversion_skip := 0
+
+	print("%-28s | %-44s | %-44s | %s" % [
+		"Bone Name", "Converted Rotation (should ≈ identity)", "Converted Position (should ≈ zero)", "Status"
+	])
+	print("-".repeat(170))
+
+	for i in skeleton.get_bone_count():
+		var bone_name := skeleton.get_bone_name(i)
+		var rest := skeleton.get_bone_rest(i)
+		var rest_rot := rest.basis.get_rotation_quaternion()
+		var rest_pos := rest.origin
+		var rest_rot_inv := rest_rot.inverse()
+
+		var track_key := bone_name.to_lower()
+		if track_key not in bone_tracks:
+			conversion_skip += 1
+			continue
+
+		var track_info: Dictionary = bone_tracks[track_key]
+
+		# Convert rotation: pose_rot = rest_rot^-1 * kf_rot
+		var conv_rot := Quaternion.IDENTITY
+		var has_rot := false
+		if track_info.has("rot_idx"):
+			var rot_idx: int = track_info["rot_idx"]
+			if idle_anim.track_get_key_count(rot_idx) > 0:
+				var abs_rot: Quaternion = idle_anim.track_get_key_value(rot_idx, 0)
+				conv_rot = rest_rot_inv * abs_rot
+				has_rot = true
+
+		# Convert position: pose_pos = rest_rot^-1 * (kf_pos - rest_pos)
+		var conv_pos := Vector3.ZERO
+		var has_pos := false
+		if track_info.has("pos_idx"):
+			var pos_idx: int = track_info["pos_idx"]
+			if idle_anim.track_get_key_count(pos_idx) > 0:
+				var abs_pos: Vector3 = idle_anim.track_get_key_value(pos_idx, 0)
+				conv_pos = rest_rot_inv * (abs_pos - rest_pos)
+				has_pos = true
+
+		# Check if rotation is near identity and position is near zero
+		var rot_angle := _quat_angle_deg(Quaternion.IDENTITY, conv_rot) if has_rot else 0.0
+		var pos_delta := conv_pos.length() if has_pos else 0.0
+		var status := ""
+
+		if rot_angle < 1.0 and pos_delta < 0.001:
+			status = "PASS"
+			conversion_pass += 1
+		else:
+			status = "FAIL (rot=%.2f° pos=%.4fm)" % [rot_angle, pos_delta]
+			conversion_fail += 1
+
+		print("%-28s | (%8.4f, %8.4f, %8.4f, %8.4f)         | (%8.5f, %8.5f, %8.5f)         | %s" % [
+			bone_name,
+			conv_rot.x, conv_rot.y, conv_rot.z, conv_rot.w,
+			conv_pos.x, conv_pos.y, conv_pos.z,
+			status
+		])
+
+	print("")
+	print("CONVERSION TEST: %d PASS, %d FAIL, %d skipped" % [conversion_pass, conversion_fail, conversion_skip])
+	if conversion_fail == 0:
+		print(">>> ALL BONES PASS: rest^-1 * kf produces identity for idle frame 0")
+		print(">>> This confirms the conversion formula is correct")
+	else:
+		print(">>> %d BONES FAILED — conversion formula needs investigation" % conversion_fail)
+	print("")
+
+	# =========================================================================
+	# 7. Also load RAW (pre-conversion) data for comparison
 	# =========================================================================
 	_header("RAW NIF DATA (pre-coordinate-conversion)")
 	_dump_raw_nif_data("meshes\\xbase_anim.nif", "meshes\\xbase_anim.kf")
 
 	# =========================================================================
-	# 7. Bone hierarchy integrity check
+	# 8. Bone hierarchy integrity check
 	# =========================================================================
 	_header("BONE HIERARCHY INTEGRITY")
 	_check_hierarchy(skeleton)

@@ -23,6 +23,7 @@ extends Node3D
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
 const AnimationLoaderScript := preload("res://src/core/animation/animation_loader.gd")
+const TestNPCLoaderScript := preload("res://tests/test_npc_loader.gd")
 
 # Test NPC record IDs (well-known Morrowind NPCs in Seyda Neen)
 const TEST_NPCS := ["fargoth", "arrille", "sellus gravius"]
@@ -33,6 +34,10 @@ var _npc_node: Node = null
 var _info_label: RichTextLabel = null
 var _camera: Camera3D = null
 var _factory: CharacterFactoryV2Script = null
+
+# Data loading state
+var _data_loaded: bool = false
+var _factory_ready: bool = false
 
 # Mixamo animations
 var _mixamo_library: AnimationLibrary = null
@@ -52,10 +57,26 @@ func _ready() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	# Ensure data is loaded
-	await _ensure_data_loaded()
+	# Try prebaked NPC first (fast path — skips BSA/ESM loading)
+	var npc_id: String = TEST_NPCS[_current_npc_index]
+	if TestNPCLoaderScript.has_prebaked(npc_id):
+		_log("[color=green]FAST PATH: Loading prebaked NPC[/color]")
+		_spawn_npc()
+	else:
+		# Full pipeline — load BSA/ESM and create factory
+		await _ensure_full_pipeline()
+		_spawn_npc()
 
-	# Preload character assets (skeletons, bone remaps, animation libraries)
+
+## Load BSA/ESM and create factory (lazy — only when needed)
+func _ensure_full_pipeline() -> void:
+	if _factory_ready:
+		return
+
+	if not _data_loaded:
+		await _ensure_data_loaded()
+		_data_loaded = true
+
 	_log("Preloading character assets...")
 	var preload_start := Time.get_ticks_msec()
 	CharacterFactoryV2Script.preload_character_assets()
@@ -63,18 +84,15 @@ func _ready() -> void:
 	var stats := CharacterFactoryV2Script.get_cache_stats()
 	_log("  Skeletons: %d, Animations: %d" % [stats["skeleton_templates"], stats["cached_animation_libraries"]])
 
-	# Mixamo animations loaded on demand when [M] is pressed
 	_log("[color=gray]Mixamo: deferred (press [M] to load)[/color]")
 
-	# Create factory
 	_factory = CharacterFactoryV2Script.new()
 	_factory.debug_characters = true
 	_factory.debug_animations = true
 	_factory.enable_ik = _ik_enabled
 	_factory.enable_wander = _wander_enabled
 
-	# Spawn first NPC
-	_spawn_npc()
+	_factory_ready = true
 
 
 func _ensure_data_loaded() -> void:
@@ -120,7 +138,25 @@ func _spawn_npc() -> void:
 	var npc_id: String = TEST_NPCS[_current_npc_index]
 	_log("[b]Spawning NPC: %s[/b]" % npc_id)
 
-	# Look up NPC record
+	var start := Time.get_ticks_msec()
+
+	# Try prebaked NPC first
+	if TestNPCLoaderScript.has_prebaked(npc_id):
+		var character = TestNPCLoaderScript.load_test_npc(npc_id)
+		if character:
+			var elapsed := Time.get_ticks_msec() - start
+			_log("[color=green]Loaded PREBAKED in %d ms[/color]" % elapsed)
+			_log("[color=gray](IK/Wander/Mixamo unavailable — press R for full pipeline)[/color]")
+			_npc_node = character
+			add_child(character)
+			character.global_position = Vector3(0, 0.05, 0)
+			_run_diagnostics(character)
+			_update_info()
+			return
+
+	# Full pipeline fallback
+	await _ensure_full_pipeline()
+
 	var esm_mgr = get_node_or_null("/root/ESMManager")
 	if not esm_mgr:
 		_log("[color=red]ESMManager not available![/color]")
@@ -141,10 +177,8 @@ func _spawn_npc() -> void:
 		str(npc_record.is_female()) if npc_record.has_method("is_female") else "?"
 	])
 
-	# Create NPC via CharacterFactoryV2
 	_factory.enable_ik = _ik_enabled
 	_factory.enable_wander = _wander_enabled
-	var start := Time.get_ticks_msec()
 	var character = _factory.create_npc(npc_record, 0)
 	var elapsed := Time.get_ticks_msec() - start
 
@@ -153,14 +187,12 @@ func _spawn_npc() -> void:
 		_update_info()
 		return
 
-	_log("[color=green]NPC created in %d ms[/color]" % elapsed)
+	_log("[color=green]NPC created in %d ms (full pipeline)[/color]" % elapsed)
 	_npc_node = character
 
-	# Add to scene first (must be in tree for global_position), then position
 	add_child(character)
 	character.global_position = Vector3(0, 0.05, 0)
 
-	# Run diagnostics
 	_run_diagnostics(character)
 	_update_info()
 

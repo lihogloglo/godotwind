@@ -695,6 +695,109 @@ func _create_placeholder_character(record: ESMRecord, type: String, ref_num: int
 # BONE REMAP & ANIMATION REMAPPING
 # =============================================================================
 
+## UNUSED — kept for reference. Diagnostic A/B test (2026-02-11) showed raw KF values
+## produce correct anatomy while converted values collapse the skeleton. The NPC skeleton's
+## rest-pose chain appears to be ineffective (identity or near-zero), so the raw absolute
+## KF values are the correct bone poses. See docs/ANIMATION_DIAGNOSTIC_HANDOFF.md.
+static func _convert_library_to_rest_relative(lib: AnimationLibrary, skeleton: Skeleton3D) -> AnimationLibrary:
+	if not lib or not skeleton:
+		return lib
+
+	# Build bone name → rest pose map (case-insensitive)
+	var rest_map: Dictionary = {}
+	for i in skeleton.get_bone_count():
+		var bone_name := skeleton.get_bone_name(i).to_lower()
+		var rest := skeleton.get_bone_rest(i)
+		rest_map[bone_name] = rest
+
+	Log.info("animation", "Converting %d animations to rest-relative (skeleton: %d bones)" % [
+		lib.get_animation_list().size(), skeleton.get_bone_count()])
+
+	var result := AnimationLibrary.new()
+	var total_rot_keys := 0
+	var total_pos_keys := 0
+
+	for anim_name: String in lib.get_animation_list():
+		var source_anim: Animation = lib.get_animation(anim_name)
+		var anim := Animation.new()
+		anim.resource_name = source_anim.resource_name
+		anim.length = source_anim.length
+		anim.loop_mode = source_anim.loop_mode
+
+		for t in source_anim.get_track_count():
+			var path := source_anim.track_get_path(t)
+			var track_type := source_anim.track_get_type(t)
+			var interp := source_anim.track_get_interpolation_type(t)
+
+			# Add track to new animation
+			var new_t := anim.add_track(track_type)
+			anim.track_set_path(new_t, path)
+			anim.track_set_interpolation_type(new_t, interp)
+
+			# Get bone name for conversion lookup
+			var bone_name := ""
+			if path.get_subname_count() > 0:
+				bone_name = String(path.get_subname(0)).to_lower()
+
+			var has_rest := bone_name in rest_map
+			var rest_rot := Quaternion.IDENTITY
+			var rest_pos := Vector3.ZERO
+			var rest_rot_inv := Quaternion.IDENTITY
+			if has_rest:
+				var rest: Transform3D = rest_map[bone_name]
+				rest_rot = rest.basis.get_rotation_quaternion()
+				rest_pos = rest.origin
+				rest_rot_inv = rest_rot.inverse()
+
+			# Copy and convert keys
+			for k in source_anim.track_get_key_count(t):
+				var time := source_anim.track_get_key_time(t, k)
+
+				if has_rest and track_type == Animation.TYPE_ROTATION_3D:
+					var abs_rot: Quaternion = source_anim.track_get_key_value(t, k)
+					var rel_rot := rest_rot_inv * abs_rot
+					anim.rotation_track_insert_key(new_t, time, rel_rot)
+					total_rot_keys += 1
+
+				elif has_rest and track_type == Animation.TYPE_POSITION_3D:
+					var abs_pos: Vector3 = source_anim.track_get_key_value(t, k)
+					var rel_pos := rest_rot_inv * (abs_pos - rest_pos)
+					anim.position_track_insert_key(new_t, time, rel_pos)
+					total_pos_keys += 1
+
+				elif track_type == Animation.TYPE_SCALE_3D:
+					var scale_val: Vector3 = source_anim.track_get_key_value(t, k)
+					anim.scale_track_insert_key(new_t, time, scale_val)
+
+				else:
+					# Copy key as-is for unmatched bones or other track types
+					var val = source_anim.track_get_key_value(t, k)
+					var transition := source_anim.track_get_key_transition(t, k)
+					anim.track_insert_key(new_t, time, val, transition)
+
+		result.add_animation(anim_name, anim)
+
+	Log.info("animation", "  Converted %d rotation keys, %d position keys" % [total_rot_keys, total_pos_keys])
+
+	# Debug: print first bone's idle conversion for verification
+	if result.has_animation("Idle") and skeleton.get_bone_count() > 0:
+		var idle: Animation = result.get_animation("Idle")
+		var bone0_name := skeleton.get_bone_name(0)
+		for t in idle.get_track_count():
+			var path := idle.track_get_path(t)
+			if path.get_subname_count() > 0 and String(path.get_subname(0)) == bone0_name:
+				if idle.track_get_type(t) == Animation.TYPE_ROTATION_3D and idle.track_get_key_count(t) > 0:
+					var val: Quaternion = idle.track_get_key_value(t, 0)
+					Log.info("animation", "  Idle bone0 '%s' converted rot: (%s) (should ≈ identity)" % [
+						bone0_name, str(val)])
+				elif idle.track_get_type(t) == Animation.TYPE_POSITION_3D and idle.track_get_key_count(t) > 0:
+					var val: Vector3 = idle.track_get_key_value(t, 0)
+					Log.info("animation", "  Idle bone0 '%s' converted pos: (%s) (should ≈ zero)" % [
+						bone0_name, str(val)])
+
+	return result
+
+
 ## Build and cache bone remap for a skeleton type (must call BEFORE renaming)
 ## The skeleton should still have native Bip01 bone names at this point.
 static func _ensure_bone_remap(skeleton: Skeleton3D, is_beast: bool) -> Dictionary:
@@ -720,7 +823,9 @@ static func _ensure_library_remapped(lib: AnimationLibrary, cache_key: String, i
 	return _remap_and_cache_library(lib, cache_key, is_beast)
 
 
-## Remap a library's bone tracks from Bip01 → profile names, cache result
+## Remap a library's bone tracks from Bip01 → profile names, cache result.
+## MW KF keyframes are absolute parent-local transforms — used directly as Godot bone poses.
+## See docs/ANIMATION_DIAGNOSTIC_HANDOFF.md for why rest-relative conversion was removed.
 static func _remap_and_cache_library(lib: AnimationLibrary, cache_key: String, is_beast: bool) -> AnimationLibrary:
 	var remap := _beast_bone_remap if is_beast else _humanoid_bone_remap
 	if not remap.is_empty():
