@@ -129,7 +129,7 @@ Output format: Print a table of bone names, rest rotations, keyframe rotations, 
 
 ### Session 2: Fix MW Animation Playback + Mixamo Retargeting
 
-**Status:** NOT STARTED — **UNBLOCKED** (Session 1B data confirms approach)
+**Status:** DONE (2026-02-13) — All bugs fixed, autotest S1-S8 PASS
 **Goal:** Fix native MW animations on MW skeleton, then wire Mixamo retargeting.
 
 **IMPORTANT — Session 1 showed MW animations are ALSO broken (not just Mixamo). The original plan assumed MW animations would work and only Mixamo needed retargeting. This is wrong. Fix MW animations FIRST, then Mixamo.**
@@ -167,10 +167,10 @@ Output format: Print a table of bone names, rest rotations, keyframe rotations, 
 
 ---
 
-### Session 3: Delete Dead Mixamo Code
+### Session 3: Delete Dead Mixamo Code + Improve Mixamo Retarget
 
-**Status:** NOT STARTED
-**Goal:** Remove 4 superseded files (~1,360 lines), relocate misplaced `mesh_extractor.gd`.
+**Status:** DONE (2026-02-13)
+**Goal:** Remove 4 superseded files (~1,360 lines), relocate misplaced `mesh_extractor.gd`, fix Mixamo retarget quality.
 
 **Files to delete:**
 - `src/core/character/mixamo/bone_mapper.gd` (294L) — replaced by `skeleton_profile_adapter.gd`
@@ -264,13 +264,13 @@ Output format: Print a table of bone names, rest rotations, keyframe rotations, 
 |---------|------|--------------|------|--------|
 | 1 | Diagnose animation quality | 0 | — | DONE (partial) |
 | **1B** | **Fast loading + headless tests** | **~0 (net +200)** | **None** | **DONE** |
-| 2 | Fix MW anims + Mixamo retargeting | ~0 (net +300) | pose=rest^-1*kf | UNBLOCKED |
-| 3 | Delete dead Mixamo code | ~1,360 | Hidden reference | NOT STARTED |
+| 2 | Fix MW anims + Mixamo retargeting | ~0 (net +300) | pose=rest^-1*kf | **DONE** |
+| 3 | Delete dead Mixamo + retarget fix | ~1,460 | Hidden reference | **DONE** |
 | 4 | Consolidate test files | ~2,440 | Losing useful diagnostic | NOT STARTED |
 | 5 | Code cleanup pass | ~80 | None | NOT STARTED |
 | 6 | Doc consolidation | ~90K archived | None | NOT STARTED |
 
-**Total: ~3,880 lines of dead code removed, ~90K docs archived, animation quality fixed.**
+**Total: ~3,980 lines of dead code removed, ~90K docs archived, animation quality fixed.**
 
 **Session dependency chain:** 1B → 2 → 3 → 4 → 5 → 6. Sessions 3-6 (cleanup) are independent of 1B/2 (animation fix) and can proceed in parallel if desired.
 

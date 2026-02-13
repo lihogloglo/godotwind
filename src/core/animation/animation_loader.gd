@@ -142,8 +142,8 @@ static func load_from_directory_with_rest(dir_path: String, bone_remap: Dictiona
 ## target_rest: { profile_bone_name -> Transform3D } from the skeleton that will play the animations
 ## target_uses_absolute: if true, the target skeleton uses absolute KF values as poses
 ##   (MW skeleton quirk — Godot computes local = rest * pose where pose = absolute value).
-##   Formula: corrected = src_rest * original * src_rest⁻¹ * tgt_rest
-##   This preserves MW idle shape and transfers motion deltas between reference frames.
+##   Formula: corrected = tgt_rest⁻¹ * src_rest * original * src_rest⁻¹ * tgt_rest²
+##   This preserves MW idle shape and properly conjugates motion deltas between rest frames.
 ## Returns a new AnimationLibrary (originals not modified).
 static func retarget_library(
 		lib: AnimationLibrary,
@@ -166,12 +166,17 @@ static func retarget_library(
 		result.add_animation(anim_name, retargeted)
 
 	# Count converted bones for logging
+	var unmatched_bones := PackedStringArray()
 	for bone_name: String in source_rest:
 		if bone_name in target_rest:
 			converted_bones += 1
+		else:
+			unmatched_bones.append(bone_name)
 
-	Log.info("animation", "AnimationLoader: Retargeted %d animations (%d bones compensated, absolute=%s)" % [
-		lib.get_animation_list().size(), converted_bones, str(target_uses_absolute)])
+	Log.info("animation", "AnimationLoader: Retargeted %d animations (%d bones compensated, %d unmatched, absolute=%s)" % [
+		lib.get_animation_list().size(), converted_bones, unmatched_bones.size(), str(target_uses_absolute)])
+	if not unmatched_bones.is_empty():
+		Log.info("animation", "  Unmatched source bones: %s" % ", ".join(unmatched_bones))
 	return result
 
 
@@ -182,6 +187,54 @@ static func get_skeleton_rest_poses(skeleton: Skeleton3D) -> Dictionary:
 	for i in skeleton.get_bone_count():
 		rest[skeleton.get_bone_name(i)] = skeleton.get_bone_rest(i)
 	return rest
+
+
+## Extract "effective rest poses" from the first frame of the idle animation.
+##
+## Godot's FBX importer may apply pre-rotations to the skeleton's bind pose
+## that don't match the animation data. This causes a small per-bone error in
+## retargeting that compounds down the chain. By using the idle animation's
+## frame 0 as the source rest (instead of skeleton.get_bone_rest()), the
+## retarget formula produces exact results at idle and better results during motion.
+##
+## skeleton_rest: the geometric rest poses from the FBX skeleton (for position + fallback)
+## Returns: a copy of skeleton_rest with rotation components replaced by idle frame 0 values
+static func extract_anim_rest_poses(lib: AnimationLibrary, skeleton_rest: Dictionary) -> Dictionary:
+	# Find idle animation
+	var idle_anim: Animation = null
+	for anim_name: String in lib.get_animation_list():
+		if "idle" in anim_name.to_lower():
+			idle_anim = lib.get_animation(anim_name)
+			break
+
+	if not idle_anim:
+		Log.info("animation", "AnimationLoader: No idle animation found — using skeleton rest poses")
+		return skeleton_rest
+
+	# Start with skeleton rest poses (for position + any bones without tracks)
+	var result := skeleton_rest.duplicate()
+	var overridden := 0
+
+	# Override rotations with frame 0 values from idle animation
+	for track_idx in idle_anim.get_track_count():
+		var path := idle_anim.track_get_path(track_idx)
+		if path.get_subname_count() == 0:
+			continue
+		var bone_name := String(path.get_subname(0))
+		if bone_name not in result:
+			continue
+
+		var track_type := idle_anim.track_get_type(track_idx)
+		if track_type == Animation.TYPE_ROTATION_3D and idle_anim.track_get_key_count(track_idx) > 0:
+			var frame0_rot: Quaternion = idle_anim.track_get_key_value(track_idx, 0)
+			var rest_xf: Transform3D = result[bone_name]
+			# Replace rotation with animation frame 0 value, keep position from skeleton
+			result[bone_name] = Transform3D(Basis(frame0_rot), rest_xf.origin)
+			overridden += 1
+
+	Log.info("animation", "AnimationLoader: Extracted anim rest for %d/%d bones from idle frame 0" % [
+		overridden, skeleton_rest.size()])
+	return result
 
 
 ## Build a Mixamo bone remap dictionary (mixamo_bone_name -> profile_name).
@@ -229,6 +282,8 @@ static func _extract_and_remap(root: Node, source_path: String, bone_remap: Dict
 
 	var lib := AnimationLibrary.new()
 	var anim_list := anim_player.get_animation_list()
+	Log.info("animation", "AnimationLoader: Extracting %d animations from '%s' (remap: %d entries)" % [
+		anim_list.size(), source_path.get_file(), bone_remap.size()])
 
 	for anim_name: String in anim_list:
 		if anim_name == "RESET":
@@ -249,6 +304,8 @@ static func _extract_and_remap(root: Node, source_path: String, bone_remap: Dict
 
 		if not lib.has_animation(normalized):
 			lib.add_animation(normalized, fixed)
+			Log.debug("animation", "  '%s' → '%s': %d tracks, %.1fs" % [
+				anim_name, normalized, fixed.get_track_count(), fixed.length])
 
 	return lib
 
@@ -410,23 +467,30 @@ static func _find_skeleton(node: Node) -> Skeleton3D:
 static func _load_fbx_with_rest(path: String, bone_remap: Dictionary = {}) -> Dictionary:
 	var scene: PackedScene = load(path) as PackedScene
 	if not scene:
+		Log.info("animation", "AnimationLoader: Cannot load FBX scene: %s" % path)
 		return {}
 
 	var root := scene.instantiate()
 	if not root:
+		Log.info("animation", "AnimationLoader: Cannot instantiate FBX: %s" % path)
 		return {}
 
 	# Extract rest poses from the source skeleton
 	var source_rest := {}
 	var skeleton := _find_skeleton(root)
 	if skeleton:
+		Log.info("animation", "AnimationLoader: FBX '%s' has skeleton with %d bones" % [
+			path.get_file(), skeleton.get_bone_count()])
 		if bone_remap.is_empty():
 			bone_remap = _build_remap_from_skeleton(skeleton)
+		Log.info("animation", "  Bone remap: %d entries" % bone_remap.size())
 		# Map rest poses to profile bone names
 		for i in skeleton.get_bone_count():
 			var bone_name := skeleton.get_bone_name(i)
 			var profile_name: String = bone_remap.get(bone_name, bone_name)
 			source_rest[profile_name] = skeleton.get_bone_rest(i)
+	else:
+		Log.info("animation", "AnimationLoader: FBX '%s' has NO skeleton (animation-only export?)" % path.get_file())
 
 	var lib := _extract_and_remap(root, path, bone_remap)
 	root.queue_free()
@@ -500,14 +564,29 @@ static func _retarget_animation(
 
 
 ## Retarget a single animation for a target skeleton that uses absolute values as poses.
-## The MW skeleton uses raw KF absolute values directly as Godot bone poses.
-## Godot computes local = rest * pose, and MW idle works because pose = rest → local = rest².
 ##
-## Formula: corrected_rot = src_rest * original * src_rest⁻¹ * tgt_rest
-## - For idle (original = identity): corrected = tgt_rest → same as MW idle
-## - For motion: delta is properly transferred between source and target reference frames
+## Both Godot FBX imports and MW KF files store ABSOLUTE bone local rotations:
+##   - Mixamo idle: animation value ≈ Mixamo rest rotation (NOT identity)
+##   - MW idle: animation value ≈ MW rest rotation
+##   - Godot computes: local = rest * pose, so idle local = rest² for both
 ##
-## For positions: use tgt_rest_pos (preserve MW bone positions, scale root translation)
+## Since both are absolute, conversion is a simple rest-frame conjugation:
+##   corrected = tgt_rot * src_rot⁻¹ * original
+##   - At idle (original ≈ src_rot): corrected = tgt_rot ✓
+##   - At motion: delta from src rest is preserved in tgt rest frame
+##
+## IMPORTANT: For best results, source_rest should come from extract_anim_rest_poses()
+## rather than skeleton.get_bone_rest(). FBX importers may apply pre-rotations to the
+## skeleton that don't match the animation data, causing a ~2-5° per-bone error that
+## compounds down the chain. Using idle frame 0 values eliminates this mismatch.
+##
+## Hemisphere normalization: FBX may store -q (same rotation, opposite hemisphere).
+## We normalize the first keyframe to src_rot's hemisphere, then each subsequent
+## keyframe to the previous one's hemisphere (ensures smooth interpolation).
+##
+## Positions: root/hips translation delta is scaled by height ratio. Non-root bones
+## use target rest position + scaled delta to preserve MW skeleton shape while
+## keeping subtle animation motion (breathing, sway).
 static func _retarget_animation_absolute(
 		source: Animation,
 		source_rest: Dictionary,
@@ -538,32 +617,49 @@ static func _retarget_animation_absolute(
 			var src_rot_inv := src_rot.inverse()
 			var tgt_rot := tgt_rest.basis.get_rotation_quaternion()
 
-			# Pre-compute the constant change-of-basis: src_rest⁻¹ * tgt_rest
-			var basis_change := src_rot_inv * tgt_rot
+			# Pre-compute: tgt * src⁻¹ (applied as left-multiply to each keyframe)
+			var left := tgt_rot * src_rot_inv
 
-			for key_idx in source.track_get_key_count(track_idx):
+			var prev_rot := src_rot  # For consecutive-keyframe hemisphere tracking
+			var key_count := source.track_get_key_count(track_idx)
+			for key_idx in key_count:
 				var time := source.track_get_key_time(track_idx, key_idx)
 				var original_rot: Quaternion = source.track_get_key_value(track_idx, key_idx)
-				# corrected = src_rest * original * src_rest⁻¹ * tgt_rest
-				var corrected := src_rot * original_rot * basis_change
+
+				# Hemisphere normalization:
+				# First keyframe: normalize to source rest hemisphere
+				# Subsequent keyframes: normalize to previous keyframe hemisphere
+				# This ensures smooth interpolation while being correctly oriented
+				if prev_rot.dot(original_rot) < 0.0:
+					original_rot = -original_rot
+				prev_rot = original_rot
+
+				var corrected := left * original_rot
 				result.rotation_track_insert_key(new_idx, time, corrected)
 
 		elif has_source and has_target and track_type == Animation.TYPE_POSITION_3D:
 			var tgt_rest: Transform3D = target_rest[bone_name]
-			# Use MW rest position for all keyframes — preserves MW skeleton shape.
-			# Root/hips translation from Mixamo is preserved (scaled by height ratio).
-			var is_root := bone_name == "Hips" or bone_name == "Root"
 			var src_rest: Transform3D = source_rest[bone_name]
+			var is_root := bone_name == "Hips" or bone_name == "Root"
+
+			# Compute bone length ratio for scaling position deltas
+			var src_len := maxf(0.001, src_rest.origin.length())
+			var tgt_len := maxf(0.001, tgt_rest.origin.length())
+			var length_ratio := tgt_len / src_len
 
 			for key_idx in source.track_get_key_count(track_idx):
 				var time := source.track_get_key_time(track_idx, key_idx)
 				var original_pos: Vector3 = source.track_get_key_value(track_idx, key_idx)
-				if is_root and original_pos.length() > 0.001:
-					# Scale root translation by height ratio
-					var height_ratio := tgt_rest.origin.length() / maxf(0.001, src_rest.origin.length())
-					result.position_track_insert_key(new_idx, time, tgt_rest.origin + original_pos * height_ratio)
+				var delta := original_pos - src_rest.origin
+
+				if is_root:
+					# Root: scale translation delta by height ratio
+					result.position_track_insert_key(new_idx, time, tgt_rest.origin + delta * length_ratio)
+				elif delta.length_squared() > 0.0001:
+					# Non-root with meaningful position animation: scale by bone length
+					result.position_track_insert_key(new_idx, time, tgt_rest.origin + delta * length_ratio)
 				else:
-					# Non-root bones: keep MW rest position
+					# Non-root, no meaningful delta: use target rest position
 					result.position_track_insert_key(new_idx, time, tgt_rest.origin)
 
 		else:

@@ -406,6 +406,15 @@ func _create_animation_tree() -> void:
 	if not animation_player:
 		return
 
+	# Remove any pre-existing AnimationTree (e.g., leftover from prebaked scene)
+	var anim_skel: Skeleton3D = retarget_source if retarget_source else skeleton
+	if anim_skel:
+		for child in anim_skel.get_children():
+			if child is AnimationTree:
+				child.active = false
+				anim_skel.remove_child(child)
+				child.queue_free()
+
 	# Create AnimationTree
 	animation_tree = AnimationTree.new()
 	animation_tree.name = "AnimationTree"
@@ -416,7 +425,7 @@ func _create_animation_tree() -> void:
 
 	# Add to skeleton so default root_node ("..") resolves to Skeleton3D.
 	# This is required for bone track paths (".:BoneName") to find the skeleton.
-	var anim_skel: Skeleton3D = retarget_source if retarget_source else skeleton
+	anim_skel = retarget_source if retarget_source else skeleton
 	anim_skel.add_child(animation_tree)
 
 	# Now set the animation player path

@@ -202,76 +202,8 @@ func _section_1_raw_data() -> void:
 # =============================================================================
 
 func _section_2_conversion() -> void:
-	_print_header("SECTION 2: CONVERSION CORRECTNESS (informational — conversion removed from pipeline)")
-
-	var cached_skel: Skeleton3D = MorrowindNPCAssembler._skeleton_cache.get("humanoid")
-	if not cached_skel:
-		_result("S2", "skeleton", "MISSING", "FAIL")
-		return
-
-	# Load raw KF
-	var kf_data := BSAManager.extract_file("meshes\\xbase_anim.kf")
-	if kf_data.is_empty():
-		_result("S2", "kf_data", "MISSING", "FAIL")
-		return
-
-	var loader := NIFKFLoaderScript.new()
-	var animations: Dictionary = loader.load_kf_buffer(kf_data, null)
-
-	# Build raw library
-	var raw_lib := AnimationLibrary.new()
-	for anim_name: String in animations:
-		raw_lib.add_animation(anim_name, animations[anim_name])
-
-	# Run conversion
-	var converted_lib: AnimationLibrary = CharacterFactoryV2Script._convert_library_to_rest_relative(raw_lib, cached_skel)
-	if not converted_lib:
-		_result("S2", "conversion", "RETURNED NULL", "FAIL")
-		return
-
-	# Check idle frame 0 — should be identity rotation, zero position
-	var idle_anim: Animation = _find_idle_in_lib(converted_lib)
-	if not idle_anim:
-		_result("S2", "idle_converted", "NOT FOUND", "FAIL")
-		return
-
-	var bone_tracks := _map_bone_tracks(idle_anim)
-	var rot_pass := 0
-	var rot_fail := 0
-	var pos_pass := 0
-	var pos_fail := 0
-
-	for i in cached_skel.get_bone_count():
-		var bone_name := cached_skel.get_bone_name(i)
-		var track_key := bone_name.to_lower()
-		if track_key not in bone_tracks:
-			continue
-
-		var info: Dictionary = bone_tracks[track_key]
-
-		if info.has("rot_idx"):
-			var rot_idx: int = info["rot_idx"]
-			if idle_anim.track_get_key_count(rot_idx) > 0:
-				var conv_rot: Quaternion = idle_anim.track_get_key_value(rot_idx, 0)
-				var angle := _quat_angle_deg(Quaternion.IDENTITY, conv_rot)
-				if angle < 1.0:
-					rot_pass += 1
-				else:
-					rot_fail += 1
-					_result("S2", "rot_fail_%s" % bone_name, "angle=%.2f deg" % angle, "FAIL")
-
-		if info.has("pos_idx"):
-			var pos_idx: int = info["pos_idx"]
-			if idle_anim.track_get_key_count(pos_idx) > 0:
-				var conv_pos: Vector3 = idle_anim.track_get_key_value(pos_idx, 0)
-				if conv_pos.length() < 0.01:
-					pos_pass += 1
-				else:
-					pos_fail += 1
-					_result("S2", "pos_fail_%s" % bone_name, "delta=%.4fm (%s)" % [conv_pos.length(), str(conv_pos)], "FAIL")
-
-	_result("S2", "rotation_identity", "%d pass, %d fail" % [rot_pass, rot_fail], "PASS" if rot_fail == 0 else "FAIL")
-	_result("S2", "position_zero", "%d pass, %d fail" % [pos_pass, pos_fail], "PASS" if pos_fail == 0 else "FAIL")
+	_print_header("SECTION 2: CONVERSION CORRECTNESS (SKIPPED — rest-relative conversion removed from pipeline)")
+	_result("S2", "status", "rest-relative conversion removed — raw KF absolute values used directly", "INFO")
 	_log("")
 
 
@@ -912,12 +844,11 @@ func _get_converted_idle(skeleton: Skeleton3D) -> Animation:
 	for anim_name: String in animations:
 		raw_lib.add_animation(anim_name, animations[anim_name])
 
-	# Convert to rest-relative, then remap bone names to profile (matching skeleton)
-	var converted_lib := CharacterFactoryV2Script._convert_library_to_rest_relative(raw_lib, cached_skel)
+	# Remap bone names to profile (matching skeleton) — no rest-relative conversion
 	var remap := CharacterFactoryV2Script._humanoid_bone_remap
 	if not remap.is_empty():
-		converted_lib = RetargetSetupScript.remap_library(converted_lib, remap)
-	return _find_idle_in_lib(converted_lib)
+		raw_lib = RetargetSetupScript.remap_library(raw_lib, remap)
+	return _find_idle_in_lib(raw_lib)
 
 
 func _get_raw_idle(skeleton: Skeleton3D) -> Animation:

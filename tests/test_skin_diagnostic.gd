@@ -35,7 +35,7 @@ func _run_all() -> void:
 	# Late-load scripts that depend on Log autoload (bypass compilation cache)
 	NIFReader = ResourceLoader.load("res://src/core/nif/nif_reader.gd", "", ResourceLoader.CACHE_MODE_IGNORE) as GDScript
 	NIFSkeletonBuilder = ResourceLoader.load("res://src/core/nif/nif_skeleton_builder.gd", "", ResourceLoader.CACHE_MODE_IGNORE) as GDScript
-	MeshExtractor = ResourceLoader.load("res://src/core/character/mixamo/mesh_extractor.gd", "", ResourceLoader.CACHE_MODE_IGNORE) as GDScript
+	MeshExtractor = ResourceLoader.load("res://src/core/character/mesh_extractor.gd", "", ResourceLoader.CACHE_MODE_IGNORE) as GDScript
 
 	# Find BSA
 	var bsa_path := _find_morrowind_bsa()

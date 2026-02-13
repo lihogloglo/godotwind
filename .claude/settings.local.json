@@ -392,7 +392,15 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/animation_integration_test.tscn\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/animation_integration_test.tscn\" -- --autotest)",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . res://src/tools/animation_integration_test.tscn -- --autotest)",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/animation_integration_test.tscn\" -- --autotest)"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/animation_integration_test.tscn\" -- --autotest)",
+      "Bash(Select-String -Path \"C:\\\\Users\\\\metzo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Gamedev-Godotwind-godotwind\\\\tasks\\\\b272d4d.output\" -Pattern \"S[1-8]|AUTO-TEST|PASS|FAIL\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --quit-after 1)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://tests/data/prebake_test_npc.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\":*)",
+      "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" status --short)",
+      "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/tools/animation_integration_test.gd)",
+      "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/character_factory_v2.gd)",
+      "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/animation_loader.gd)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

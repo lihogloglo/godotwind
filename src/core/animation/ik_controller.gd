@@ -260,7 +260,7 @@ func _update_foot_ik(delta: float) -> void:
 ## Raycast to find ground
 func _raycast_ground(space_state: PhysicsDirectSpaceState3D, foot_pos: Vector3) -> Dictionary:
 	var ray_start := foot_pos + Vector3.UP * 0.5  # Start slightly above foot
-	var ray_end := foot_pos - Vector3.DOWN * foot_raycast_length
+	var ray_end := foot_pos + Vector3.DOWN * foot_raycast_length
 
 	var query := PhysicsRayQueryParameters3D.create(ray_start, ray_end)
 	query.collision_mask = 1  # World layer

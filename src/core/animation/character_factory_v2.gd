@@ -22,6 +22,7 @@ const CharacterAnimationSystemScript := preload("res://src/core/animation/charac
 const MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const RetargetSetupScript := preload("res://src/core/animation/retarget_setup.gd")
+const AnimationLoaderScript := preload("res://src/core/animation/animation_loader.gd")
 
 # Dependencies
 var model_loader: RefCounted = null  # ModelLoader
@@ -47,6 +48,9 @@ static var _beast_bone_remap: Dictionary = {}
 ## Track which animation cache entries have been remapped to profile names
 static var _remapped_cache_keys: Dictionary = {}
 
+## Mixamo retargeted animation library (shared across all NPCs)
+static var _mixamo_library: AnimationLibrary = null
+
 ## Cache statistics
 static var _anim_cache_hits: int = 0
 static var _anim_cache_misses: int = 0
@@ -58,6 +62,7 @@ var enable_procedural: bool = true
 var enable_lod: bool = true
 var enable_movement: bool = true
 var enable_wander: bool = false
+var enable_mixamo: bool = false  ## Load retargeted Mixamo animations as supplement
 
 @export_group("Debug")
 var debug_characters: bool = false
@@ -97,6 +102,7 @@ static func clear_all_caches() -> void:
 	_humanoid_bone_remap.clear()
 	_beast_bone_remap.clear()
 	_remapped_cache_keys.clear()
+	_mixamo_library = null
 	_anim_cache_hits = 0
 	_anim_cache_misses = 0
 
@@ -187,7 +193,68 @@ static func _preload_animation_library(kf_path: String, type_name: String, is_be
 		Log.info("animation", "  Parsed %s animations: %d" % [type_name, animations.size()])
 
 
-## Create an NPC character instance
+## Preload and retarget Mixamo animations for use on MW skeletons.
+## Must be called after preload_character_assets() (needs skeleton rest poses).
+## dir_path: path to directory containing FBX files (default: res://assets/animations/mixamo/)
+static func preload_mixamo_animations(skeleton: Skeleton3D, dir_path: String = "res://assets/animations/mixamo/") -> void:
+	if _mixamo_library:
+		return  # Already loaded
+
+	var dir := DirAccess.open(dir_path)
+	if not dir:
+		Log.info("animation", "CharacterFactoryV2: No Mixamo directory at %s — skipping" % dir_path)
+		return
+
+	var start := Time.get_ticks_msec()
+	var result := AnimationLoaderScript.load_from_directory_with_rest(dir_path)
+	if not result.has("library") or not result["library"]:
+		Log.info("animation", "CharacterFactoryV2: No Mixamo animations found in %s" % dir_path)
+		return
+
+	var raw_lib: AnimationLibrary = result["library"]
+	var source_rest: Dictionary = result.get("source_rest", {})
+	if source_rest.is_empty():
+		Log.warn("animation", "CharacterFactoryV2: Mixamo FBX has no skeleton rest — can't retarget")
+		return
+
+	# Use animation-derived rest (idle frame 0) instead of skeleton geometric rest.
+	# FBX importers may apply pre-rotations that don't match animation data.
+	var anim_rest := AnimationLoaderScript.extract_anim_rest_poses(raw_lib, source_rest)
+	var target_rest := AnimationLoaderScript.get_skeleton_rest_poses(skeleton)
+	_mixamo_library = AnimationLoaderScript.retarget_library(raw_lib, anim_rest, target_rest, true)
+	Log.info("animation", "CharacterFactoryV2: Mixamo preloaded in %d ms (%d animations, retargeted)" % [
+		Time.get_ticks_msec() - start, _mixamo_library.get_animation_list().size()])
+
+
+## Set up animation system on an already-assembled character.
+## Use this for prebaked NPCs that already have skeleton + meshes + animations
+## but need the runtime animation system (IK, state machine, procedural, LOD).
+## character must be a CharacterMovementController with:
+##   - A child Node3D (character_root) containing a Skeleton3D with profile-named bones
+##   - An AnimationPlayer with remapped animation library already loaded
+func setup_character(character: CharacterBody3D,
+		is_female: bool = false, is_beast: bool = false,
+		race_id: String = "", record_id: String = "") -> void:
+
+	# Find character_root (first Node3D child that contains the skeleton)
+	var character_root: Node3D = null
+	var skeleton: Skeleton3D = null
+	for child in character.get_children():
+		if child is Node3D:
+			skeleton = _find_skeleton(child)
+			if skeleton:
+				character_root = child as Node3D
+				break
+
+	if not skeleton:
+		push_warning("CharacterFactoryV2.setup_character: No skeleton found")
+		return
+
+	# Wire up animation system (shared code with create_npc)
+	_setup_animation_system(character, character_root, skeleton, is_female, is_beast, race_id, record_id)
+
+
+## Create an NPC character instance from ESM/BSA data (full pipeline)
 func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 	if not npc_record:
 		return null
@@ -246,6 +313,34 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 	# Add character root to movement controller
 	movement_controller.add_child(character_root)
 
+	# Set collision shape based on race/size
+	_setup_collision_for_npc(movement_controller, npc_record)
+
+	# Wire up animation system (shared with setup_character)
+	_setup_animation_system(movement_controller, character_root, skeleton,
+		is_female, is_beast, npc_record.race_id, npc_record.record_id)
+	movement_controller.set_meta("ref_num", ref_num)
+
+	if debug_characters:
+		Log.info("animation", "CharacterFactoryV2: Created NPC '%s' (%s, %s) - Total: %d ms" % [
+			npc_record.name if not npc_record.name.is_empty() else npc_record.record_id,
+			"female" if is_female else "male",
+			"beast" if is_beast else "humanoid",
+			Time.get_ticks_msec() - total_start
+		])
+
+	return movement_controller
+
+
+## Internal: Wire up MorrowindCharacterSystem on a character node.
+## Used by both create_npc() (full pipeline) and setup_character() (prebaked).
+func _setup_animation_system(movement_controller: CharacterBody3D,
+		character_root: Node3D, skeleton: Skeleton3D,
+		is_female: bool, is_beast: bool,
+		race_id: String, record_id: String) -> void:
+
+	movement_controller.wander_enabled = enable_wander
+
 	# Create new animation system
 	var anim_system: MorrowindCharacterSystemScript = MorrowindCharacterSystemScript.new()
 	anim_system.name = "AnimationSystem"
@@ -263,12 +358,9 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 		movement_controller,
 		is_female,
 		is_beast,
-		npc_record.race_id,
-		npc_record.record_id
+		race_id,
+		record_id
 	)
-
-	# Set collision shape based on race/size
-	_setup_collision_for_npc(movement_controller, npc_record)
 
 	# Store references for movement controller
 	movement_controller.character_root = character_root
@@ -277,20 +369,12 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 
 	# Add metadata
 	movement_controller.set_meta("record_type", "NPC_")
-	movement_controller.set_meta("record_id", npc_record.record_id)
-	movement_controller.set_meta("ref_num", ref_num)
+	movement_controller.set_meta("record_id", record_id)
 	movement_controller.set_meta("is_character", true)
+	movement_controller.set_meta("is_female", is_female)
+	movement_controller.set_meta("is_beast", is_beast)
+	movement_controller.set_meta("race_id", race_id)
 	movement_controller.set_meta("uses_new_animation_system", true)
-
-	if debug_characters:
-		Log.info("animation", "CharacterFactoryV2: Created NPC '%s' (%s, %s) - Total: %d ms" % [
-			npc_record.name if not npc_record.name.is_empty() else npc_record.record_id,
-			"female" if is_female else "male",
-			"beast" if is_beast else "humanoid",
-			Time.get_ticks_msec() - total_start
-		])
-
-	return movement_controller
 
 
 ## Create a creature instance
@@ -386,90 +470,81 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 
 	# Normalize path for cache key
 	var cache_key := anim_path.to_lower().replace("/", "\\")
+	var loaded := false
 
 	# 1) Check static animation library cache (fastest - SHARE the library directly)
 	if cache_key in _animation_library_cache:
 		_anim_cache_hits += 1
 		var cached_lib: AnimationLibrary = _animation_library_cache[cache_key]
-		# Ensure tracks are remapped to profile names
 		cached_lib = _ensure_library_remapped(cached_lib, cache_key, is_beast)
 		if anim_player.has_animation_library(""):
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", cached_lib)
+		loaded = true
 		if debug_characters:
 			Log.debug("animation", "CharacterFactoryV2: Shared cached AnimationLibrary '%s' (%d anims)" % [
-				anim_path, cached_lib.get_animation_list().size()
-			])
-		return
+				anim_path, cached_lib.get_animation_list().size()])
 
-	_anim_cache_misses += 1
+	if not loaded:
+		_anim_cache_misses += 1
 
-	# 2) Try prebaked AnimationLibrary
-	var prebaked_lib := ModelPrebaker.load_cached_animations(anim_path)
-	if prebaked_lib:
-		prebaked_lib = _remap_and_cache_library(prebaked_lib, cache_key, is_beast)
-		if anim_player.has_animation_library(""):
-			anim_player.remove_animation_library("")
-		anim_player.add_animation_library("", prebaked_lib)
-		if debug_characters:
-			Log.debug("animation", "CharacterFactoryV2: Loaded and shared prebaked AnimationLibrary '%s'" % anim_path)
-		return
+		# 2) Try prebaked AnimationLibrary
+		var prebaked_lib := ModelPrebaker.load_cached_animations(anim_path)
+		if prebaked_lib:
+			prebaked_lib = _remap_and_cache_library(prebaked_lib, cache_key, is_beast)
+			if anim_player.has_animation_library(""):
+				anim_player.remove_animation_library("")
+			anim_player.add_animation_library("", prebaked_lib)
+			loaded = true
+			if debug_characters:
+				Log.debug("animation", "CharacterFactoryV2: Loaded and shared prebaked AnimationLibrary '%s'" % anim_path)
 
-	# 3) Check parsed animation cache - convert to library
-	if cache_key in _parsed_animation_cache:
-		var animations: Dictionary = _parsed_animation_cache[cache_key]
-		var new_lib := AnimationLibrary.new()
-		for anim_name: String in animations:
-			new_lib.add_animation(anim_name, animations[anim_name])
-		new_lib = _remap_and_cache_library(new_lib, cache_key, is_beast)
-		if anim_player.has_animation_library(""):
-			anim_player.remove_animation_library("")
-		anim_player.add_animation_library("", new_lib)
-		if debug_characters:
-			Log.debug("animation", "CharacterFactoryV2: Created shared library from parsed cache '%s'" % anim_path)
-		return
+	if not loaded:
+		# 3) Check parsed animation cache - convert to library
+		if cache_key in _parsed_animation_cache:
+			var animations: Dictionary = _parsed_animation_cache[cache_key]
+			var new_lib := AnimationLibrary.new()
+			for anim_name: String in animations:
+				new_lib.add_animation(anim_name, animations[anim_name])
+			new_lib = _remap_and_cache_library(new_lib, cache_key, is_beast)
+			if anim_player.has_animation_library(""):
+				anim_player.remove_animation_library("")
+			anim_player.add_animation_library("", new_lib)
+			loaded = true
+			if debug_characters:
+				Log.debug("animation", "CharacterFactoryV2: Created shared library from parsed cache '%s'" % anim_path)
 
-	# 4) Load from BSA and parse (slowest - only on first run without prebake)
-	var full_path := anim_path
-	if not anim_path.to_lower().begins_with("meshes"):
-		full_path = "meshes\\" + anim_path
+	if not loaded:
+		# 4) Load from BSA and parse (slowest - only on first run without prebake)
+		var full_path := anim_path
+		if not anim_path.to_lower().begins_with("meshes"):
+			full_path = "meshes\\" + anim_path
 
-	if not BSAManager.has_file(full_path):
-		if debug_characters:
-			Log.debug("animation", "CharacterFactoryV2: Animation file not found in BSA: '%s'" % full_path)
-		return
+		if BSAManager.has_file(full_path):
+			var kf_data := BSAManager.extract_file(full_path)
+			if not kf_data.is_empty():
+				var parse_start := Time.get_ticks_msec()
+				var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
+				if debug_characters:
+					Log.info("animation", "CharacterFactoryV2: Parsed KF file '%s' in %d ms (%d anims)" % [
+						anim_path, Time.get_ticks_msec() - parse_start, animations.size()])
 
-	var kf_data := BSAManager.extract_file(full_path)
-	if kf_data.is_empty():
-		push_warning("CharacterFactoryV2: Failed to extract animation file: '%s'" % full_path)
-		return
+				_parsed_animation_cache[cache_key] = animations
 
-	# Load animations using NIFKFLoader
-	var parse_start := Time.get_ticks_msec()
-	var animations := kf_loader.load_kf_buffer(kf_data, skeleton)
-	if debug_characters:
-		Log.info("animation", "CharacterFactoryV2: Parsed KF file '%s' in %d ms (%d anims)" % [
-			anim_path, Time.get_ticks_msec() - parse_start, animations.size()
-		])
+				if not animations.is_empty():
+					var new_lib := AnimationLibrary.new()
+					for anim_name: String in animations:
+						new_lib.add_animation(anim_name, animations[anim_name])
+					new_lib = _remap_and_cache_library(new_lib, cache_key, is_beast)
+					if anim_player.has_animation_library(""):
+						anim_player.remove_animation_library("")
+					anim_player.add_animation_library("", new_lib)
+					loaded = true
 
-	# Cache parsed animations
-	_parsed_animation_cache[cache_key] = animations
-
-	# Create a shared AnimationLibrary, remap, and cache it
-	if not animations.is_empty():
-		var new_lib := AnimationLibrary.new()
-		for anim_name: String in animations:
-			new_lib.add_animation(anim_name, animations[anim_name])
-		new_lib = _remap_and_cache_library(new_lib, cache_key, is_beast)
-
-		if anim_player.has_animation_library(""):
-			anim_player.remove_animation_library("")
-		anim_player.add_animation_library("", new_lib)
-
-	if debug_characters:
-		Log.debug("animation", "CharacterFactoryV2: Created and shared new AnimationLibrary '%s' (%d anims)" % [
-			anim_path, animations.size()
-		])
+	# Add Mixamo animations as secondary library (if enabled and preloaded)
+	if loaded and enable_mixamo and _mixamo_library and not is_beast:
+		if not anim_player.has_animation_library("mixamo"):
+			anim_player.add_animation_library("mixamo", _mixamo_library)
 
 
 ## Load creature-specific animations
@@ -694,109 +769,6 @@ func _create_placeholder_character(record: ESMRecord, type: String, ref_num: int
 # =============================================================================
 # BONE REMAP & ANIMATION REMAPPING
 # =============================================================================
-
-## UNUSED — kept for reference. Diagnostic A/B test (2026-02-11) showed raw KF values
-## produce correct anatomy while converted values collapse the skeleton. The NPC skeleton's
-## rest-pose chain appears to be ineffective (identity or near-zero), so the raw absolute
-## KF values are the correct bone poses. See docs/ANIMATION_DIAGNOSTIC_HANDOFF.md.
-static func _convert_library_to_rest_relative(lib: AnimationLibrary, skeleton: Skeleton3D) -> AnimationLibrary:
-	if not lib or not skeleton:
-		return lib
-
-	# Build bone name → rest pose map (case-insensitive)
-	var rest_map: Dictionary = {}
-	for i in skeleton.get_bone_count():
-		var bone_name := skeleton.get_bone_name(i).to_lower()
-		var rest := skeleton.get_bone_rest(i)
-		rest_map[bone_name] = rest
-
-	Log.info("animation", "Converting %d animations to rest-relative (skeleton: %d bones)" % [
-		lib.get_animation_list().size(), skeleton.get_bone_count()])
-
-	var result := AnimationLibrary.new()
-	var total_rot_keys := 0
-	var total_pos_keys := 0
-
-	for anim_name: String in lib.get_animation_list():
-		var source_anim: Animation = lib.get_animation(anim_name)
-		var anim := Animation.new()
-		anim.resource_name = source_anim.resource_name
-		anim.length = source_anim.length
-		anim.loop_mode = source_anim.loop_mode
-
-		for t in source_anim.get_track_count():
-			var path := source_anim.track_get_path(t)
-			var track_type := source_anim.track_get_type(t)
-			var interp := source_anim.track_get_interpolation_type(t)
-
-			# Add track to new animation
-			var new_t := anim.add_track(track_type)
-			anim.track_set_path(new_t, path)
-			anim.track_set_interpolation_type(new_t, interp)
-
-			# Get bone name for conversion lookup
-			var bone_name := ""
-			if path.get_subname_count() > 0:
-				bone_name = String(path.get_subname(0)).to_lower()
-
-			var has_rest := bone_name in rest_map
-			var rest_rot := Quaternion.IDENTITY
-			var rest_pos := Vector3.ZERO
-			var rest_rot_inv := Quaternion.IDENTITY
-			if has_rest:
-				var rest: Transform3D = rest_map[bone_name]
-				rest_rot = rest.basis.get_rotation_quaternion()
-				rest_pos = rest.origin
-				rest_rot_inv = rest_rot.inverse()
-
-			# Copy and convert keys
-			for k in source_anim.track_get_key_count(t):
-				var time := source_anim.track_get_key_time(t, k)
-
-				if has_rest and track_type == Animation.TYPE_ROTATION_3D:
-					var abs_rot: Quaternion = source_anim.track_get_key_value(t, k)
-					var rel_rot := rest_rot_inv * abs_rot
-					anim.rotation_track_insert_key(new_t, time, rel_rot)
-					total_rot_keys += 1
-
-				elif has_rest and track_type == Animation.TYPE_POSITION_3D:
-					var abs_pos: Vector3 = source_anim.track_get_key_value(t, k)
-					var rel_pos := rest_rot_inv * (abs_pos - rest_pos)
-					anim.position_track_insert_key(new_t, time, rel_pos)
-					total_pos_keys += 1
-
-				elif track_type == Animation.TYPE_SCALE_3D:
-					var scale_val: Vector3 = source_anim.track_get_key_value(t, k)
-					anim.scale_track_insert_key(new_t, time, scale_val)
-
-				else:
-					# Copy key as-is for unmatched bones or other track types
-					var val = source_anim.track_get_key_value(t, k)
-					var transition := source_anim.track_get_key_transition(t, k)
-					anim.track_insert_key(new_t, time, val, transition)
-
-		result.add_animation(anim_name, anim)
-
-	Log.info("animation", "  Converted %d rotation keys, %d position keys" % [total_rot_keys, total_pos_keys])
-
-	# Debug: print first bone's idle conversion for verification
-	if result.has_animation("Idle") and skeleton.get_bone_count() > 0:
-		var idle: Animation = result.get_animation("Idle")
-		var bone0_name := skeleton.get_bone_name(0)
-		for t in idle.get_track_count():
-			var path := idle.track_get_path(t)
-			if path.get_subname_count() > 0 and String(path.get_subname(0)) == bone0_name:
-				if idle.track_get_type(t) == Animation.TYPE_ROTATION_3D and idle.track_get_key_count(t) > 0:
-					var val: Quaternion = idle.track_get_key_value(t, 0)
-					Log.info("animation", "  Idle bone0 '%s' converted rot: (%s) (should ≈ identity)" % [
-						bone0_name, str(val)])
-				elif idle.track_get_type(t) == Animation.TYPE_POSITION_3D and idle.track_get_key_count(t) > 0:
-					var val: Vector3 = idle.track_get_key_value(t, 0)
-					Log.info("animation", "  Idle bone0 '%s' converted pos: (%s) (should ≈ zero)" % [
-						bone0_name, str(val)])
-
-	return result
-
 
 ## Build and cache bone remap for a skeleton type (must call BEFORE renaming)
 ## The skeleton should still have native Bip01 bone names at this point.

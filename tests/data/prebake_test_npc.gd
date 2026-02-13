@@ -63,11 +63,20 @@ func _run_prebake() -> void:
 
 	print("  NPC created: %d ms" % (Time.get_ticks_msec() - total_start))
 
+	# Store character info metadata (read by setup_character() at load time)
+	var race = ESMManager.get_race(npc_record.race_id)
+	character.set_meta("is_female", npc_record.is_female())
+	character.set_meta("is_beast", race.is_beast() if race else false)
+	character.set_meta("race_id", npc_record.race_id)
+	print("  Metadata: female=%s beast=%s race=%s" % [
+		npc_record.is_female(), race.is_beast() if race else false, npc_record.race_id])
+
 	# Must add to tree briefly for node path resolution
 	add_child(character)
 	await get_tree().process_frame
 
 	# 4. Strip runtime-only nodes (AnimationSystem and sub-controllers)
+	#    These are recreated at load time by CharacterFactoryV2.setup_character()
 	var stripped := _strip_runtime_nodes(character)
 	print("  Stripped %d runtime nodes" % stripped)
 
@@ -123,6 +132,13 @@ func _strip_runtime_nodes(root: Node) -> int:
 	if anim_sys:
 		anim_sys.get_parent().remove_child(anim_sys)
 		anim_sys.queue_free()
+		count += 1
+
+	# Also remove AnimationTree from skeleton (it lives on Skeleton3D, not AnimationSystem)
+	var anim_tree := root.find_child("AnimationTree", true, false)
+	if anim_tree:
+		anim_tree.get_parent().remove_child(anim_tree)
+		anim_tree.queue_free()
 		count += 1
 	return count
 

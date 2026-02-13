@@ -11,7 +11,7 @@ extends RefCounted
 
 # NIF conversion for loading skeleton from xbase_anim.nif
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-const MeshExtractor := preload("res://src/core/character/mixamo/mesh_extractor.gd")
+const MeshExtractor := preload("res://src/core/character/mesh_extractor.gd")
 const NIFReader := preload("res://src/core/nif/nif_reader.gd")
 const NIFDefs := preload("res://src/core/nif/nif_defs.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
