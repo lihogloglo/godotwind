@@ -76,8 +76,16 @@ var _has_look_target: bool = false
 var _left_hand_weight: float = 0.0
 var _right_hand_weight: float = 0.0
 
+# Target parent — MUST be outside skeleton to avoid transform feedback loop.
+# When targets are children of Skeleton3D, bone modifications change their global
+# position, causing the IK solver to chase a moving target.
+var _target_parent: Node3D = null
+
 # Smoothed values
 var _current_pelvis_offset: float = 0.0
+
+# Diagnostics
+var _foot_ik_first_update: bool = true
 
 
 func _ready() -> void:
@@ -93,6 +101,12 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null) -> 
 		push_error("IKController: Skeleton is required")
 		return
 
+	# Target parent must be OUTSIDE skeleton to avoid transform feedback.
+	# Prefer character_body (CharacterBody3D), fall back to skeleton's parent.
+	_target_parent = character_body if character_body else (skeleton.get_parent() as Node3D)
+	if not _target_parent:
+		_target_parent = skeleton  # last resort
+
 	# Find bone indices
 	_find_bone_indices()
 
@@ -107,7 +121,12 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null) -> 
 		_setup_hand_ik()
 
 	_is_setup = true
+	_foot_ik_first_update = true
 	set_physics_process(true)
+
+	Log.info("animation", "IKController.setup: skeleton=%s, char_body=%s, target_parent=%s, bones=%d" % [
+		skeleton.name, character_body.name if character_body else "null",
+		_target_parent.name if _target_parent else "null", _bone_indices.size()])
 
 
 ## Update IK (called from CharacterAnimationSystem)
@@ -160,16 +179,19 @@ func _setup_foot_ik() -> void:
 	_left_foot_ik.set_pole_direction(0, SkeletonModifier3D.SECONDARY_DIRECTION_MINUS_Z)
 	skeleton.add_child(_left_foot_ik)
 
-	# Create left foot target
+	# Create left foot target — OUTSIDE skeleton to avoid transform feedback
 	_left_foot_target = Node3D.new()
 	_left_foot_target.name = "LeftFootTarget"
-	skeleton.add_child(_left_foot_target)
+	_target_parent.add_child(_left_foot_target)
+	var left_foot_pos := skeleton.global_transform * skeleton.get_bone_global_pose(left_foot_idx).origin
+	_left_foot_target.global_position = left_foot_pos
 	_left_foot_ik.set_target_node(0, _left_foot_ik.get_path_to(_left_foot_target))
 
-	# Create left foot pole (knees bend forward)
+	# Create left foot pole (knees bend forward) — also outside skeleton
 	_left_foot_pole = Node3D.new()
 	_left_foot_pole.name = "LeftFootPole"
-	skeleton.add_child(_left_foot_pole)
+	_target_parent.add_child(_left_foot_pole)
+	_left_foot_pole.global_position = left_foot_pos + Vector3(0, 0.4, -0.5)
 	_left_foot_ik.set_pole_node(0, _left_foot_ik.get_path_to(_left_foot_pole))
 
 	# Create right foot IK
@@ -185,16 +207,19 @@ func _setup_foot_ik() -> void:
 	_right_foot_ik.set_pole_direction(0, SkeletonModifier3D.SECONDARY_DIRECTION_MINUS_Z)
 	skeleton.add_child(_right_foot_ik)
 
-	# Create right foot target
+	# Create right foot target — OUTSIDE skeleton to avoid transform feedback
 	_right_foot_target = Node3D.new()
 	_right_foot_target.name = "RightFootTarget"
-	skeleton.add_child(_right_foot_target)
+	_target_parent.add_child(_right_foot_target)
+	var right_foot_pos := skeleton.global_transform * skeleton.get_bone_global_pose(right_foot_idx).origin
+	_right_foot_target.global_position = right_foot_pos
 	_right_foot_ik.set_target_node(0, _right_foot_ik.get_path_to(_right_foot_target))
 
-	# Create right foot pole (knees bend forward)
+	# Create right foot pole (knees bend forward) — also outside skeleton
 	_right_foot_pole = Node3D.new()
 	_right_foot_pole.name = "RightFootPole"
-	skeleton.add_child(_right_foot_pole)
+	_target_parent.add_child(_right_foot_pole)
+	_right_foot_pole.global_position = right_foot_pos + Vector3(0, 0.4, -0.5)
 	_right_foot_ik.set_pole_node(0, _right_foot_ik.get_path_to(_right_foot_pole))
 
 
@@ -212,6 +237,22 @@ func _update_foot_ik(delta: float) -> void:
 	# Get current foot positions
 	var left_foot_global := skeleton.global_transform * skeleton.get_bone_global_pose(left_foot_idx).origin
 	var right_foot_global := skeleton.global_transform * skeleton.get_bone_global_pose(right_foot_idx).origin
+
+	# One-shot diagnostic on first frame
+	if _foot_ik_first_update:
+		_foot_ik_first_update = false
+		var space := character_body.get_world_3d().direct_space_state
+		var l_hit := _raycast_ground(space, left_foot_global)
+		var r_hit := _raycast_ground(space, right_foot_global)
+		Log.info("animation", "IK foot first update: L_foot=%.2f,%.2f,%.2f  R_foot=%.2f,%.2f,%.2f" % [
+			left_foot_global.x, left_foot_global.y, left_foot_global.z,
+			right_foot_global.x, right_foot_global.y, right_foot_global.z])
+		Log.info("animation", "  L_target=%.2f,%.2f,%.2f  R_target=%.2f,%.2f,%.2f" % [
+			_left_foot_target.global_position.x, _left_foot_target.global_position.y, _left_foot_target.global_position.z,
+			_right_foot_target.global_position.x, _right_foot_target.global_position.y, _right_foot_target.global_position.z])
+		Log.info("animation", "  L_raycast=%s  R_raycast=%s  target_parent=%s" % [
+			not l_hit.is_empty(), not r_hit.is_empty(),
+			_target_parent.name if _target_parent else "null"])
 
 	# Raycast for ground detection
 	var space_state := character_body.get_world_3d().direct_space_state
@@ -434,12 +475,12 @@ func _setup_hand_ik() -> void:
 
 	_left_hand_target = Node3D.new()
 	_left_hand_target.name = "LeftHandTarget"
-	skeleton.add_child(_left_hand_target)
+	_target_parent.add_child(_left_hand_target)
 	_left_hand_ik.set_target_node(0, _left_hand_ik.get_path_to(_left_hand_target))
 
 	_left_hand_pole = Node3D.new()
 	_left_hand_pole.name = "LeftHandPole"
-	skeleton.add_child(_left_hand_pole)
+	_target_parent.add_child(_left_hand_pole)
 	_left_hand_ik.set_pole_node(0, _left_hand_ik.get_path_to(_left_hand_pole))
 
 	# Create right hand IK
@@ -458,12 +499,12 @@ func _setup_hand_ik() -> void:
 
 	_right_hand_target = Node3D.new()
 	_right_hand_target.name = "RightHandTarget"
-	skeleton.add_child(_right_hand_target)
+	_target_parent.add_child(_right_hand_target)
 	_right_hand_ik.set_target_node(0, _right_hand_ik.get_path_to(_right_hand_target))
 
 	_right_hand_pole = Node3D.new()
 	_right_hand_pole.name = "RightHandPole"
-	skeleton.add_child(_right_hand_pole)
+	_target_parent.add_child(_right_hand_pole)
 	_right_hand_ik.set_pole_node(0, _right_hand_ik.get_path_to(_right_hand_pole))
 
 
@@ -679,15 +720,15 @@ func _create_leg_ik(ik_name: String, leg_bones: Dictionary) -> TwoBoneIK3D:
 	return ik
 
 
-## Create an IK target and pole for a leg
+## Create an IK target and pole for a leg — outside skeleton to avoid feedback
 func _create_ik_target(target_name: String, ik: TwoBoneIK3D) -> Node3D:
 	var target := Node3D.new()
 	target.name = target_name
-	skeleton.add_child(target)
+	_target_parent.add_child(target)
 
 	var pole := Node3D.new()
 	pole.name = target_name.replace("Target", "Pole")
-	skeleton.add_child(pole)
+	_target_parent.add_child(pole)
 
 	if ik:
 		ik.set_target_node(0, ik.get_path_to(target))

@@ -41,8 +41,23 @@ var _mixamo_list: ItemList = null
 var _mw_header: Label = null
 var _mixamo_header: Label = null
 var _status_label: Label = null
-var _ik_toggle: CheckButton = null
-var _ik_enabled: bool = true
+
+# IK toggles (separate for each feature)
+var _foot_ik_toggle: CheckButton = null
+var _look_ik_toggle: CheckButton = null
+var _hand_ik_toggle: CheckButton = null
+var _foot_ik_enabled: bool = true
+var _look_ik_enabled: bool = false
+var _hand_ik_enabled: bool = false
+
+# IK target visuals
+var _look_orb: MeshInstance3D = null
+var _left_hand_sphere: MeshInstance3D = null
+var _right_hand_sphere: MeshInstance3D = null
+var _ik_time: float = 0.0
+
+# Animation system reference (cached after NPC spawn)
+var _anim_system: Node = null
 
 # IK test cubes — scroll past the character to create uneven ground
 var _cube_container: Node3D = null
@@ -114,13 +129,35 @@ func _setup_ui() -> void:
 	_npc_selector.item_selected.connect(_on_npc_selected)
 	top_bar.add_child(_npc_selector)
 
-	_ik_toggle = CheckButton.new()
-	_ik_toggle.text = "IK"
-	_ik_toggle.button_pressed = _ik_enabled
-	_ik_toggle.toggled.connect(_on_ik_toggled)
-	top_bar.add_child(_ik_toggle)
-
 	vbox.add_child(top_bar)
+
+	# --- IK toggle row ---
+	var ik_row := HBoxContainer.new()
+	ik_row.add_theme_constant_override("separation", 6)
+
+	var ik_label := Label.new()
+	ik_label.text = "IK:"
+	ik_row.add_child(ik_label)
+
+	_foot_ik_toggle = CheckButton.new()
+	_foot_ik_toggle.text = "Foot"
+	_foot_ik_toggle.button_pressed = _foot_ik_enabled
+	_foot_ik_toggle.toggled.connect(_on_foot_ik_toggled)
+	ik_row.add_child(_foot_ik_toggle)
+
+	_look_ik_toggle = CheckButton.new()
+	_look_ik_toggle.text = "Look"
+	_look_ik_toggle.button_pressed = _look_ik_enabled
+	_look_ik_toggle.toggled.connect(_on_look_ik_toggled)
+	ik_row.add_child(_look_ik_toggle)
+
+	_hand_ik_toggle = CheckButton.new()
+	_hand_ik_toggle.text = "Hands"
+	_hand_ik_toggle.button_pressed = _hand_ik_enabled
+	_hand_ik_toggle.toggled.connect(_on_hand_ik_toggled)
+	ik_row.add_child(_hand_ik_toggle)
+
+	vbox.add_child(ik_row)
 
 	# --- Separator ---
 	vbox.add_child(HSeparator.new())
@@ -202,16 +239,41 @@ func _on_npc_selected(index: int) -> void:
 	_spawn_npc()
 
 
-func _on_ik_toggled(enabled: bool) -> void:
-	_ik_enabled = enabled
-	if not _npc_node:
+func _on_foot_ik_toggled(enabled: bool) -> void:
+	_foot_ik_enabled = enabled
+	if _anim_system and _anim_system.has_method("set_foot_ik_enabled"):
+		_anim_system.set_foot_ik_enabled(enabled)
+	_status_label.text = "Foot IK %s" % ("ON" if enabled else "OFF")
+
+
+func _on_look_ik_toggled(enabled: bool) -> void:
+	_look_ik_enabled = enabled
+	if not _npc_node or not _anim_system:
 		return
-	# Find IK controller and toggle it
-	var ik_nodes := []
-	_collect_nodes_of_class(_npc_node, "SkeletonModifier3D", ik_nodes)
-	for ik_node: Node in ik_nodes:
-		ik_node.active = enabled
-	_status_label.text = "IK %s" % ("ON" if enabled else "OFF")
+	if enabled:
+		_create_look_orb_if_needed()
+		if _anim_system.has_method("set_look_target"):
+			_anim_system.set_look_target(_look_orb)
+	else:
+		if _anim_system.has_method("clear_look_target"):
+			_anim_system.clear_look_target()
+	_status_label.text = "Look-at IK %s" % ("ON" if enabled else "OFF")
+
+
+func _on_hand_ik_toggled(enabled: bool) -> void:
+	_hand_ik_enabled = enabled
+	if not _npc_node or not _anim_system:
+		return
+	if enabled:
+		_create_hand_spheres_if_needed()
+		if _anim_system.has_method("set_hand_target"):
+			_anim_system.set_hand_target(&"left", _left_hand_sphere, 1.0)
+			_anim_system.set_hand_target(&"right", _right_hand_sphere, 1.0)
+	else:
+		if _anim_system.has_method("clear_hand_target"):
+			_anim_system.clear_hand_target(&"left")
+			_anim_system.clear_hand_target(&"right")
+	_status_label.text = "Hand IK %s" % ("ON" if enabled else "OFF")
 
 
 func _collect_nodes_of_class(node: Node, class_name_str: String, results: Array) -> void:
@@ -421,6 +483,8 @@ func _spawn_npc() -> void:
 	if _npc_node:
 		_npc_node.queue_free()
 		_npc_node = null
+		_anim_system = null
+		_cleanup_ik_visuals()
 		await get_tree().process_frame
 
 	var npc_id: String = TEST_NPCS[_current_npc_index]
@@ -449,6 +513,7 @@ func _spawn_npc() -> void:
 
 			_force_loop_locomotion(character)
 			_populate_mw_list()
+			_cache_anim_system()
 			_status_label.text = "%s loaded (prebaked, %d ms)" % [npc_id, Time.get_ticks_msec() - start]
 			return
 
@@ -482,6 +547,7 @@ func _spawn_npc() -> void:
 
 	_force_loop_locomotion(character)
 	_populate_mw_list()
+	_cache_anim_system()
 	_status_label.text = "%s loaded (full pipeline, %d ms)" % [npc_id, Time.get_ticks_msec() - start]
 
 
@@ -586,22 +652,178 @@ func _run_auto_test() -> void:
 
 
 # =============================================================================
+# IK HELPERS
+# =============================================================================
+
+func _cache_anim_system() -> void:
+	if not _npc_node:
+		return
+	_anim_system = _npc_node.get_meta("animation_system", null)
+	if not _anim_system:
+		_anim_system = _find_node_of_type(_npc_node, "MorrowindCharacterSystem")
+	if not _anim_system:
+		_anim_system = _find_node_of_type(_npc_node, "CharacterAnimationSystem")
+
+	# Apply current foot IK state
+	if _anim_system and _anim_system.has_method("set_foot_ik_enabled"):
+		_anim_system.set_foot_ik_enabled(_foot_ik_enabled)
+
+	_print_ik_diagnostics()
+
+
+func _cleanup_ik_visuals() -> void:
+	if _look_orb and is_instance_valid(_look_orb):
+		_look_orb.queue_free()
+		_look_orb = null
+	if _left_hand_sphere and is_instance_valid(_left_hand_sphere):
+		_left_hand_sphere.queue_free()
+		_left_hand_sphere = null
+	if _right_hand_sphere and is_instance_valid(_right_hand_sphere):
+		_right_hand_sphere.queue_free()
+		_right_hand_sphere = null
+
+
+func _create_look_orb_if_needed() -> void:
+	if _look_orb and is_instance_valid(_look_orb):
+		return
+
+	_look_orb = MeshInstance3D.new()
+	_look_orb.name = "LookAtOrb"
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.08
+	sphere.height = 0.16
+	_look_orb.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.85, 0.2)
+	mat.emission_enabled = true
+	mat.emission = Color(0.8, 0.6, 0.1)
+	mat.emission_energy_multiplier = 2.0
+	_look_orb.material_override = mat
+	add_child(_look_orb)
+	# Initialize position at head height
+	var npc_pos: Vector3 = _npc_node.global_position if _npc_node else Vector3.ZERO
+	_look_orb.global_position = npc_pos + Vector3(1.5, 1.6, 0)
+
+
+func _create_hand_spheres_if_needed() -> void:
+	if _left_hand_sphere and is_instance_valid(_left_hand_sphere):
+		return
+
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.2, 0.9, 0.5)
+	mat.emission_enabled = true
+	mat.emission = Color(0.1, 0.4, 0.2)
+	mat.emission_energy_multiplier = 1.5
+
+	_left_hand_sphere = MeshInstance3D.new()
+	_left_hand_sphere.name = "LeftHandAttractor"
+	var sphere_l := SphereMesh.new()
+	sphere_l.radius = 0.06
+	sphere_l.height = 0.12
+	_left_hand_sphere.mesh = sphere_l
+	_left_hand_sphere.material_override = mat
+	add_child(_left_hand_sphere)
+
+	_right_hand_sphere = MeshInstance3D.new()
+	_right_hand_sphere.name = "RightHandAttractor"
+	var sphere_r := SphereMesh.new()
+	sphere_r.radius = 0.06
+	sphere_r.height = 0.12
+	_right_hand_sphere.mesh = sphere_r
+	_right_hand_sphere.material_override = mat
+	add_child(_right_hand_sphere)
+
+	var npc_pos: Vector3 = _npc_node.global_position if _npc_node else Vector3.ZERO
+	_left_hand_sphere.global_position = npc_pos + Vector3(-0.6, 1.3, -0.3)
+	_right_hand_sphere.global_position = npc_pos + Vector3(0.6, 1.3, -0.3)
+
+
+func _print_ik_diagnostics() -> void:
+	if not _npc_node:
+		print("[IK Diag] No NPC loaded")
+		return
+
+	print("[IK Diag] === IK DIAGNOSTICS ===")
+	var char_body: CharacterBody3D = _npc_node as CharacterBody3D
+	print("[IK Diag] CharacterBody3D: %s (type: %s)" % [char_body != null, _npc_node.get_class()])
+	print("[IK Diag] AnimationSystem: %s" % (_anim_system != null))
+
+	if _anim_system:
+		print("[IK Diag]   enable_ik: %s" % _anim_system.get("enable_ik"))
+		var ik_ctrl = _anim_system.get("ik_controller")
+		print("[IK Diag]   ik_controller: %s" % (ik_ctrl != null))
+		if ik_ctrl:
+			print("[IK Diag]   IK _is_setup: %s" % ik_ctrl.get("_is_setup"))
+			print("[IK Diag]   IK character_body: %s" % (ik_ctrl.get("character_body") != null))
+			print("[IK Diag]   IK foot/look/hand: %s/%s/%s" % [
+				ik_ctrl.get("enable_foot_ik"), ik_ctrl.get("enable_look_at"),
+				ik_ctrl.get("enable_hand_ik")])
+			print("[IK Diag]   _left_foot_ik: %s  _right_foot_ik: %s" % [
+				ik_ctrl.get("_left_foot_ik") != null, ik_ctrl.get("_right_foot_ik") != null])
+
+	# Check skeleton for TwoBoneIK3D children
+	var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D")
+	if skeleton:
+		print("[IK Diag] Skeleton: %s (%d bones)" % [skeleton.name, skeleton.get_bone_count()])
+		for child in skeleton.get_children():
+			if child is TwoBoneIK3D:
+				var ik: TwoBoneIK3D = child
+				print("[IK Diag]   %s: active=%s" % [ik.name, ik.active])
+
+	# Check ground collision layer
+	var ground := get_node_or_null("Ground")
+	if ground is StaticBody3D:
+		print("[IK Diag] Ground collision_layer: %d" % (ground as StaticBody3D).collision_layer)
+
+	print("[IK Diag] === END ===")
+
+
+# =============================================================================
 # IK TEST CUBES
 # =============================================================================
 
 func _process(delta: float) -> void:
-	if not _cube_container:
-		return
 	# Scroll cubes toward the camera (negative Z), wrap around
-	for cube: Node3D in _cube_container.get_children():
-		cube.position.z -= CUBE_SCROLL_SPEED * delta
-		if cube.position.z < -CUBE_WRAP_Z:
-			cube.position.z += CUBE_SPREAD_Z + CUBE_WRAP_Z
-			# Randomize X and height on wrap
-			cube.position.x = randf_range(-CUBE_SPREAD_X * 0.5, CUBE_SPREAD_X * 0.5)
-			var h := randf_range(0.02, 0.12)
-			cube.position.y = h * 0.5
-			cube.scale.y = h / 0.1  # base box is 0.1 tall
+	if _cube_container:
+		for cube: Node3D in _cube_container.get_children():
+			cube.position.z -= CUBE_SCROLL_SPEED * delta
+			if cube.position.z < -CUBE_WRAP_Z:
+				cube.position.z += CUBE_SPREAD_Z + CUBE_WRAP_Z
+				cube.position.x = randf_range(-CUBE_SPREAD_X * 0.5, CUBE_SPREAD_X * 0.5)
+				var h := randf_range(0.02, 0.12)
+				cube.position.y = h * 0.5
+				cube.scale.y = h / 0.1
+
+	# Update IK targets
+	if not _npc_node:
+		return
+	_ik_time += delta
+	var npc_pos: Vector3 = _npc_node.global_position
+
+	# Look orb: orbit around head
+	if _look_ik_enabled and _look_orb and is_instance_valid(_look_orb):
+		var radius := 1.5
+		var y: float = npc_pos.y + 1.6 + sin(_ik_time * 0.7) * 0.3
+		_look_orb.global_position = Vector3(
+			npc_pos.x + sin(_ik_time * 0.5) * radius,
+			y,
+			npc_pos.z + cos(_ik_time * 0.5) * radius
+		)
+
+	# Hand spheres: hover near the character's hands with gentle motion
+	if _hand_ik_enabled:
+		if _left_hand_sphere and is_instance_valid(_left_hand_sphere):
+			_left_hand_sphere.global_position = Vector3(
+				npc_pos.x - 0.6 + sin(_ik_time * 0.8) * 0.15,
+				npc_pos.y + 1.3 + sin(_ik_time * 1.2) * 0.15,
+				npc_pos.z - 0.3 + cos(_ik_time * 0.6) * 0.2
+			)
+		if _right_hand_sphere and is_instance_valid(_right_hand_sphere):
+			_right_hand_sphere.global_position = Vector3(
+				npc_pos.x + 0.6 + sin(_ik_time * 0.8 + PI) * 0.15,
+				npc_pos.y + 1.3 + sin(_ik_time * 1.2 + PI) * 0.15,
+				npc_pos.z - 0.3 + cos(_ik_time * 0.6 + PI) * 0.2
+			)
 
 
 func _create_ik_cubes() -> void:
@@ -618,6 +840,7 @@ func _create_ik_cubes() -> void:
 	for i in CUBE_COUNT:
 		var body := StaticBody3D.new()
 		body.name = "Cube%d" % i
+		body.collision_layer = 1  # Must match IK raycast collision_mask
 
 		# Spread cubes in a field around origin
 		var x := randf_range(-CUBE_SPREAD_X * 0.5, CUBE_SPREAD_X * 0.5)
@@ -677,6 +900,7 @@ func _setup_scene() -> void:
 
 	var ground_body := StaticBody3D.new()
 	ground_body.name = "Ground"
+	ground_body.collision_layer = 1  # Must match IK raycast collision_mask
 	add_child(ground_body)
 
 	var ground := MeshInstance3D.new()
