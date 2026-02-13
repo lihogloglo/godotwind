@@ -10,6 +10,7 @@ class_name IKController
 extends Node
 
 const _SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
+const _LookAtIKModifierScript := preload("res://src/core/animation/look_at_modifier.gd")
 
 # Signals
 signal target_reached(ik_type: StringName)
@@ -56,7 +57,7 @@ var _left_foot_ik: TwoBoneIK3D = null
 var _right_foot_ik: TwoBoneIK3D = null
 var _left_hand_ik: TwoBoneIK3D = null
 var _right_hand_ik: TwoBoneIK3D = null
-var _look_at_modifier: Node = null  # Custom look-at (not TwoBoneIK3D)
+var _look_modifier: SkeletonModifier3D = null  # LookAtIKModifier for look-at
 
 # IK targets and poles (TwoBoneIK3D requires BOTH target + pole Node3D to solve)
 var _left_foot_target: Node3D = null
@@ -140,7 +141,7 @@ func update(delta: float) -> void:
 		else:
 			_update_foot_ik(delta)
 
-	if enable_look_at and _has_look_target:
+	if enable_look_at and (_has_look_target or (_look_modifier and _look_modifier.blend_weight > 0.001)):
 		_update_look_at(delta)
 
 	if enable_hand_ik:
@@ -335,19 +336,39 @@ func _apply_pelvis_offset(offset: float) -> void:
 # LOOK-AT IK
 # =============================================================================
 
-## Setup look-at system
+## Setup look-at system using LookAtIKModifier (SkeletonModifier3D).
+## Runs in the modifier pipeline AFTER AnimationTree, so it modifies
+## animated poses instead of being overwritten.
 func _setup_look_at() -> void:
-	# Create a target node for look-at
+	# Create target node OUTSIDE skeleton to avoid transform feedback
 	_look_target = Node3D.new()
 	_look_target.name = "LookAtTarget"
-	add_child(_look_target)
+	_target_parent.add_child(_look_target)
+
+	# Create the modifier and add bones in parent→child order
+	_look_modifier = _LookAtIKModifierScript.new()
+	_look_modifier.name = "LookAtIK"
+	_look_modifier.target = _look_target
+	_look_modifier.max_look_angle = max_look_angle
+
+	var spine_idx: int = _bone_indices.get(&"spine2", -1)
+	var neck_idx: int = _bone_indices.get(&"neck", -1)
+	var head_idx: int = _bone_indices.get(&"head", -1)
+
+	if spine_idx >= 0:
+		_look_modifier.add_bone(spine_idx, spine_weight)
+	if neck_idx >= 0:
+		_look_modifier.add_bone(neck_idx, neck_weight)
+	if head_idx >= 0:
+		_look_modifier.add_bone(head_idx, head_weight)
+
+	skeleton.add_child(_look_modifier)
 
 
 ## Set look-at target node
 func set_look_target(target: Node3D) -> void:
 	if target:
 		_has_look_target = true
-		# We'll track the node's position each frame
 		_look_target.set_meta("tracked_node", target)
 	else:
 		clear_look_target()
@@ -360,84 +381,34 @@ func set_look_position(position: Vector3) -> void:
 	_look_target.set_meta("tracked_node", null)
 
 
-## Clear look-at target
+## Clear look-at target (smooth blend-out)
 func clear_look_target() -> void:
+	# Don't set _has_look_target = false immediately — _update_look_at
+	# keeps running during blend-out and clears it when weight reaches 0.
 	_has_look_target = false
 	if _look_target and _look_target.has_meta("tracked_node"):
 		_look_target.remove_meta("tracked_node")
 
 
-## Update look-at each frame
+## Update look-at each frame — moves target and blends weight.
+## The actual bone rotation happens in LookAtIKModifier._process_modification().
 func _update_look_at(delta: float) -> void:
-	var head_idx: int = _bone_indices.get(&"head", -1)
-	if head_idx < 0:
+	if not _look_modifier:
 		return
 
-	# Get target position
-	var target_pos: Vector3
-	if _look_target.has_meta("tracked_node"):
-		var tracked_node: Node3D = _look_target.get_meta("tracked_node")
-		if tracked_node:
-			target_pos = tracked_node.global_position
-		else:
-			target_pos = _look_target_position
-	else:
-		target_pos = _look_target_position
+	# Update target position from tracked node or explicit position
+	if _has_look_target:
+		var target_pos: Vector3 = _look_target_position
+		if _look_target.has_meta("tracked_node"):
+			var tracked: Node3D = _look_target.get_meta("tracked_node")
+			if tracked and is_instance_valid(tracked):
+				target_pos = tracked.global_position
+		_look_target.global_position = target_pos
 
-	# Get head position
-	var head_global := skeleton.global_transform * skeleton.get_bone_global_pose(head_idx).origin
-
-	# Calculate direction to target
-	var to_target := (target_pos - head_global).normalized()
-
-	# Get character forward direction
-	var forward := -skeleton.global_transform.basis.z
-
-	# Check if target is within look cone
-	var angle := rad_to_deg(forward.angle_to(to_target))
-	if angle > max_look_angle:
-		return  # Target outside look range
-
-	# Calculate weight based on angle (smooth falloff)
-	var angle_weight := 1.0 - (angle / max_look_angle)
-	angle_weight = smoothstep(0.0, 1.0, angle_weight)
-
-	# Apply rotation to head
-	_apply_look_rotation(head_idx, to_target, head_weight * angle_weight, delta)
-
-	# Apply to neck if available
-	var neck_idx: int = _bone_indices.get(&"neck", -1)
-	if neck_idx >= 0:
-		_apply_look_rotation(neck_idx, to_target, neck_weight * angle_weight, delta)
-
-	# Apply to upper spine if available
-	var spine_idx: int = _bone_indices.get(&"spine2", -1)
-	if spine_idx >= 0:
-		_apply_look_rotation(spine_idx, to_target, spine_weight * angle_weight, delta)
-
-
-## Apply look rotation to a bone
-func _apply_look_rotation(bone_idx: int, target_dir: Vector3, weight: float, delta: float) -> void:
-	if bone_idx < 0 or weight <= 0:
-		return
-
-	# Calculate target rotation (look at direction) using Transform3D.looking_at
-	var look_xform := Transform3D.IDENTITY.looking_at(target_dir, Vector3.UP)
-	var target_quat := look_xform.basis.get_rotation_quaternion()
-
-	# Get current bone rotation as quaternion (via orthonormalized basis to avoid errors)
-	var current_quat := skeleton.get_bone_global_pose(bone_idx).basis.orthonormalized().get_rotation_quaternion()
-
-	# Blend in global space using quaternion slerp
-	var blend_factor := clampf(weight * look_smoothing * delta, 0.0, 1.0)
-	var blended_quat := current_quat.slerp(target_quat, blend_factor)
-
-	# Convert blended global rotation to local pose space
-	var parent_idx := skeleton.get_bone_parent(bone_idx)
-	var parent_quat := skeleton.get_bone_global_pose(parent_idx).basis.orthonormalized().get_rotation_quaternion() if parent_idx >= 0 else Quaternion.IDENTITY
-	var rest_quat := skeleton.get_bone_rest(bone_idx).basis.get_rotation_quaternion()
-	var local_rotation := rest_quat.inverse() * parent_quat.inverse() * blended_quat
-	skeleton.set_bone_pose_rotation(bone_idx, local_rotation)
+	# Smoothly blend weight toward target (1.0 when active, 0.0 when cleared)
+	var target_weight := 1.0 if _has_look_target else 0.0
+	_look_modifier.blend_weight = move_toward(
+		_look_modifier.blend_weight, target_weight, look_smoothing * delta)
 
 
 # =============================================================================
@@ -581,6 +552,8 @@ func set_look_at_enabled(enabled: bool) -> void:
 	enable_look_at = enabled
 	if not enabled:
 		clear_look_target()
+		if _look_modifier:
+			_look_modifier.blend_weight = 0.0
 	ik_enabled_changed.emit(&"look_at", enabled)
 
 

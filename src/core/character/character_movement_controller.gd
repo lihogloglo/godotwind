@@ -20,7 +20,7 @@ extends CharacterBody3D
 @export var wander_interval: float = 3.0
 
 # Slope adaptation parameters (Phase 1)
-@export var enable_slope_adaptation: bool = true
+@export var enable_slope_adaptation: bool = false
 @export var slope_tilt_strength: float = 0.5  # How much to tilt character on slopes (0-1)
 @export var slope_speed_modifier: bool = true  # Adjust speed on slopes
 
@@ -252,6 +252,10 @@ func _update_slope_adaptation(delta: float) -> void:
 	# Get floor normal
 	current_floor_normal = get_floor_normal()
 	current_slope_angle = current_floor_normal.angle_to(Vector3.UP)
+
+	# Clamp: don't tilt on steep surfaces (object edges, walls, etc.)
+	if current_slope_angle > deg_to_rad(15.0):
+		return
 
 	# Apply body tilt to match slope
 	if current_slope_angle > 0.01:  # Small threshold to avoid jitter on flat ground

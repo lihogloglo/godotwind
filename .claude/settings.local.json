@@ -400,7 +400,8 @@
       "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" status --short)",
       "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/tools/animation_integration_test.gd)",
       "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/character_factory_v2.gd)",
-      "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/animation_loader.gd)"
+      "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/animation_loader.gd)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --windowed --resolution 1280x720 src/tools/animation_integration_test.tscn)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",
