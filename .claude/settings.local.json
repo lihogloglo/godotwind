@@ -401,7 +401,10 @@
       "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/tools/animation_integration_test.gd)",
       "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/character_factory_v2.gd)",
       "Bash(git -C \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" diff src/core/animation/animation_loader.gd)",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --windowed --resolution 1280x720 src/tools/animation_integration_test.tscn)"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --windowed --resolution 1280x720 src/tools/animation_integration_test.tscn)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --windowed --resolution 800x600 src/tools/animation_integration_test.tscn -- --autotest)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --windowed --resolution 1200x800 src/tools/animation_integration_test.tscn)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . src/tools/animation_integration_test.tscn)"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

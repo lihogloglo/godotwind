@@ -139,17 +139,29 @@ static func load_from_directory_with_rest(dir_path: String, bone_remap: Dictiona
 ## Retarget an animation library from one skeleton's rest space to another.
 ## Converts rotation tracks so animations authored for source_rest play correctly on target_rest.
 ## source_rest: { profile_bone_name -> Transform3D } from the animation source skeleton
+##   When target_uses_absolute=true, this should be the animation-derived rest (idle frame 0)
+##   from extract_anim_rest_poses(), NOT the skeleton geometric rest.
 ## target_rest: { profile_bone_name -> Transform3D } from the skeleton that will play the animations
 ## target_uses_absolute: if true, the target skeleton uses absolute KF values as poses
 ##   (MW skeleton quirk — Godot computes local = rest * pose where pose = absolute value).
-##   Formula: corrected = tgt_rest⁻¹ * src_rest * original * src_rest⁻¹ * tgt_rest²
-##   This preserves MW idle shape and properly conjugates motion deltas between rest frames.
+## source_geometric_rest: { profile_bone_name -> Transform3D } the FBX skeleton's geometric rest.
+##   When provided with target_uses_absolute=true, enables axis-corrected conjugation that
+##   accounts for different bone-local axis orientations between source and target skeletons.
+##   Without this, motion deltas get applied around wrong axes when skeletons have different
+##   rest orientations (e.g. Mixamo T-pose vs MW's Bip01 convention with 90° Y offset on Hips).
+## target_global_idles: { bone_name -> Quaternion } pre-computed global idle orientations from
+##   the actual target skeleton hierarchy (from compute_skeleton_global_idles()). When provided,
+##   the CoB computation uses the actual skeleton hierarchy (including intermediate non-profile
+##   bones like Bip01 Pelvis) instead of the profile hierarchy. This is critical for MW
+##   skeletons where the profile hierarchy doesn't match the actual bone parent chain.
 ## Returns a new AnimationLibrary (originals not modified).
 static func retarget_library(
 		lib: AnimationLibrary,
 		source_rest: Dictionary,
 		target_rest: Dictionary,
-		target_uses_absolute: bool = false) -> AnimationLibrary:
+		target_uses_absolute: bool = false,
+		source_geometric_rest: Dictionary = {},
+		target_global_idles: Dictionary = {}) -> AnimationLibrary:
 	if not lib or source_rest.is_empty() or target_rest.is_empty():
 		return lib
 
@@ -160,7 +172,7 @@ static func retarget_library(
 		var source_anim: Animation = lib.get_animation(anim_name)
 		var retargeted: Animation
 		if target_uses_absolute:
-			retargeted = _retarget_animation_absolute(source_anim, source_rest, target_rest)
+			retargeted = _retarget_animation_absolute(source_anim, source_rest, target_rest, source_geometric_rest, target_global_idles)
 		else:
 			retargeted = _retarget_animation(source_anim, source_rest, target_rest)
 		result.add_animation(anim_name, retargeted)
@@ -261,6 +273,43 @@ static func build_mixamo_remap() -> Dictionary:
 
 	skel.free()
 	return remap
+
+
+## Compute global idle-chain orientation for each bone using the ACTUAL skeleton hierarchy.
+##
+## The SkeletonProfileHumanoid hierarchy doesn't include intermediate bones like
+## "Bip01 Pelvis" that exist in the actual MW skeleton between "Hips" (Bip01) and
+## "LeftUpperLeg" (Bip01 L Thigh). Using the profile hierarchy for the CoB parent
+## chain misses these bones' rest rotation contribution, causing wrong axis mapping
+## for all descendant bones (legs go sideways instead of forward/back).
+##
+## This function walks the actual skeleton (including ALL bones, profile or not)
+## to compute the true global idle orientation at each bone.
+##
+## skeleton: the Skeleton3D (should already have profile-renamed bones for MW)
+## idle_overrides: { bone_name -> Quaternion } idle rotation per bone.
+##   For bones not in idle_overrides, rest rotation is used as idle.
+##   For MW: pass each bone's rest rotation (idle ≈ rest for MW KF).
+## Returns: { bone_name -> Quaternion } global idle orientation for every bone.
+static func compute_skeleton_global_idles(skeleton: Skeleton3D, idle_overrides: Dictionary = {}) -> Dictionary:
+	var result := {}
+	for i in skeleton.get_bone_count():
+		var bone_name := skeleton.get_bone_name(i)
+		var rest_rot := skeleton.get_bone_rest(i).basis.get_rotation_quaternion()
+
+		# Idle value: override if provided, otherwise use rest (MW idle ≈ rest)
+		var idle_rot: Quaternion = idle_overrides.get(bone_name, rest_rot)
+
+		var parent_idx := skeleton.get_bone_parent(i)
+		var parent_global := Quaternion.IDENTITY
+		if parent_idx >= 0:
+			var parent_name := skeleton.get_bone_name(parent_idx)
+			parent_global = result.get(parent_name, Quaternion.IDENTITY)
+
+		# global_idle = parent_global * rest * idle
+		# This is the Godot model: local = rest * pose, and idle pose ≈ idle_rot
+		result[bone_name] = parent_global * rest_rot * idle_rot
+	return result
 
 
 # =============================================================================
@@ -462,6 +511,103 @@ static func _find_skeleton(node: Node) -> Skeleton3D:
 	return null
 
 
+## Format quaternion for diagnostic logging (compact)
+static func _qstr(q: Quaternion) -> String:
+	return "(%.3f,%.3f,%.3f,%.3f)" % [q.x, q.y, q.z, q.w]
+
+
+## Compute per-bone pose-space change-of-basis for retargeting.
+##
+## For the SOURCE skeleton (Mixamo), uses the SkeletonProfileHumanoid hierarchy
+## which is correct (Mixamo has no intermediate non-profile bones).
+##
+## For the TARGET skeleton (MW), when target_global_idles is provided, uses
+## pre-computed global idle orientations from the ACTUAL skeleton hierarchy.
+## This is critical because the MW skeleton has intermediate bones like
+## "Bip01 Pelvis" between profile bones (e.g. between Hips and LeftUpperLeg)
+## that the profile hierarchy doesn't know about. Without this, the CoB
+## computation produces wrong axis mappings for all descendant bones.
+##
+## The pose-space frame F is where Godot applies the bone's pose value:
+##   F(bone) = global_idle(bone) * idle(bone)⁻¹
+## The change-of-basis C = F_t⁻¹ * F_s maps from source to target pose-space.
+## The retarget formula per keyframe:
+##   corrected = C * anim * idle_src⁻¹ * C⁻¹ * R_t
+##
+## Returns: { "left": { bone -> Quaternion }, "right": { bone -> Quaternion } }
+## where corrected = left[bone] * anim * right[bone]
+static func _compute_global_change_of_basis(
+		source_rest: Dictionary,
+		target_rest: Dictionary,
+		source_geometric_rest: Dictionary,
+		target_global_idles: Dictionary = {}) -> Dictionary:
+	var profile := SkeletonProfileHumanoid.new()
+
+	# Build parent map from profile hierarchy
+	var bone_parent: Dictionary = {}  # bone_name -> parent_bone_name
+	var bone_order: Array[String] = []  # profile ordering (parent-first)
+	for i in profile.bone_size:
+		var bone_name := String(profile.get_bone_name(i))
+		bone_order.append(bone_name)
+		var parent_name_sn: StringName = profile.get_bone_parent(i)
+		if not parent_name_sn.is_empty():
+			bone_parent[bone_name] = String(parent_name_sn)
+
+	# Walk hierarchy root-to-leaf computing:
+	# 1. Idle-chain globals (for children to use as parent global)
+	# 2. Pose-space frames (parent idle-chain * bone_rest)
+	# 3. Per-bone change-of-basis from source to target pose-space
+	var src_global: Dictionary = {}  # bone_name -> Quaternion (idle-chain orientation)
+	var tgt_global: Dictionary = {}
+	var bone_left: Dictionary = {}
+	var bone_right: Dictionary = {}
+
+	for bone_name in bone_order:
+		if bone_name not in source_rest or bone_name not in target_rest:
+			continue
+		if bone_name not in source_geometric_rest:
+			continue
+
+		var R_s_geom: Quaternion = source_geometric_rest[bone_name].basis.get_rotation_quaternion()
+		var idle_s: Quaternion = source_rest[bone_name].basis.get_rotation_quaternion()
+		var R_t: Quaternion = target_rest[bone_name].basis.get_rotation_quaternion()
+
+		# Get parent globals (identity for root bones)
+		var parent_name: String = bone_parent.get(bone_name, "")
+		var G_s_parent: Quaternion = src_global.get(parent_name, Quaternion.IDENTITY)
+		var G_t_parent: Quaternion = tgt_global.get(parent_name, Quaternion.IDENTITY)
+
+		# Source pose-space frame (profile hierarchy is correct for Mixamo)
+		var F_s: Quaternion = G_s_parent * R_s_geom
+
+		# Target pose-space frame
+		# When target_global_idles is available, use the actual skeleton hierarchy
+		# (includes intermediate non-profile bones like Bip01 Pelvis).
+		# F_t = global_idle(bone) * idle(bone)⁻¹ = global_idle(bone) * R_t⁻¹
+		var F_t: Quaternion
+		if not target_global_idles.is_empty() and bone_name in target_global_idles:
+			F_t = target_global_idles[bone_name] * R_t.inverse()
+		else:
+			F_t = G_t_parent * R_t
+
+		# Change of basis: source pose-space → target pose-space
+		var C: Quaternion = F_t.inverse() * F_s
+
+		# corrected = C * anim * idle_s⁻¹ * C⁻¹ * R_t
+		bone_left[bone_name] = C
+		bone_right[bone_name] = idle_s.inverse() * C.inverse() * R_t
+
+		# Idle-chain globals (children use this as parent global)
+		src_global[bone_name] = F_s * idle_s
+		if not target_global_idles.is_empty() and bone_name in target_global_idles:
+			tgt_global[bone_name] = target_global_idles[bone_name]
+		else:
+			tgt_global[bone_name] = F_t * R_t
+
+	Log.info("animation", "AnimationLoader: Pose-space CoB computed for %d bones" % bone_left.size())
+	return { "left": bone_left, "right": bone_right }
+
+
 ## Load a single FBX file and also extract skeleton rest poses.
 ## Returns: { "library": AnimationLibrary, "source_rest": Dictionary }
 static func _load_fbx_with_rest(path: String, bone_remap: Dictionary = {}) -> Dictionary:
@@ -570,15 +716,15 @@ static func _retarget_animation(
 ##   - MW idle: animation value ≈ MW rest rotation
 ##   - Godot computes: local = rest * pose, so idle local = rest² for both
 ##
-## Since both are absolute, conversion is a simple rest-frame conjugation:
-##   corrected = tgt_rot * src_rot⁻¹ * original
-##   - At idle (original ≈ src_rot): corrected = tgt_rot ✓
-##   - At motion: delta from src rest is preserved in tgt rest frame
+## Pose-space change-of-basis retargeting (when source_geometric_rest is provided):
+##   Computes per-bone CoB from the REST-CHAIN (not model-chain) of both skeletons
+##   via _compute_global_change_of_basis(). The CoB conjugation correctly maps
+##   bone-local animation deltas between skeletons with different rest orientations.
+##   Formula: corrected = left[bone] * anim * right[bone]
+##   where left = tgt_idle * C * src_idle⁻¹, right = C⁻¹
+##   At idle: corrected = tgt_idle ✓
 ##
-## IMPORTANT: For best results, source_rest should come from extract_anim_rest_poses()
-## rather than skeleton.get_bone_rest(). FBX importers may apply pre-rotations to the
-## skeleton that don't match the animation data, causing a ~2-5° per-bone error that
-## compounds down the chain. Using idle frame 0 values eliminates this mismatch.
+## Fallback (no source_geometric_rest): uses simple formula tgt * src⁻¹ * anim.
 ##
 ## Hemisphere normalization: FBX may store -q (same rotation, opposite hemisphere).
 ## We normalize the first keyframe to src_rot's hemisphere, then each subsequent
@@ -590,10 +736,24 @@ static func _retarget_animation(
 static func _retarget_animation_absolute(
 		source: Animation,
 		source_rest: Dictionary,
-		target_rest: Dictionary) -> Animation:
+		target_rest: Dictionary,
+		source_geometric_rest: Dictionary = {},
+		target_global_idles: Dictionary = {}) -> Animation:
 	var result := Animation.new()
 	result.length = source.length
 	result.loop_mode = source.loop_mode
+
+	# When source_geometric_rest is available, use pose-space change-of-basis (CoB)
+	# to correctly handle different bone-local axis orientations between skeletons.
+	# Formula: corrected = left[bone] * anim * right[bone]
+	# where left/right are precomputed from the rest-chain CoB.
+	# Without geometric rest, falls back to simple baseline swap.
+	var cob_left: Dictionary = {}
+	var cob_right: Dictionary = {}
+	if not source_geometric_rest.is_empty():
+		var cob := _compute_global_change_of_basis(source_rest, target_rest, source_geometric_rest, target_global_idles)
+		cob_left = cob["left"]
+		cob_right = cob["right"]
 
 	for track_idx in source.get_track_count():
 		var path := source.track_get_path(track_idx)
@@ -611,30 +771,33 @@ static func _retarget_animation_absolute(
 		result.track_set_interpolation_type(new_idx, source.track_get_interpolation_type(track_idx))
 
 		if has_source and has_target and track_type == Animation.TYPE_ROTATION_3D:
-			var src_rest: Transform3D = source_rest[bone_name]
-			var tgt_rest: Transform3D = target_rest[bone_name]
-			var src_rot := src_rest.basis.get_rotation_quaternion()
-			var src_rot_inv := src_rot.inverse()
-			var tgt_rot := tgt_rest.basis.get_rotation_quaternion()
+			var idle_src: Quaternion = source_rest[bone_name].basis.get_rotation_quaternion()
 
-			# Pre-compute: tgt * src⁻¹ (applied as left-multiply to each keyframe)
-			var left := tgt_rot * src_rot_inv
+			# Use CoB left/right when available, otherwise simple baseline swap
+			var left: Quaternion
+			var right: Quaternion
+			if bone_name in cob_left:
+				left = cob_left[bone_name]
+				right = cob_right[bone_name]
+			else:
+				var tgt_rot: Quaternion = target_rest[bone_name].basis.get_rotation_quaternion()
+				left = tgt_rot * idle_src.inverse()
+				right = Quaternion.IDENTITY
 
-			var prev_rot := src_rot  # For consecutive-keyframe hemisphere tracking
+			var prev_rot := idle_src  # For consecutive-keyframe hemisphere tracking
 			var key_count := source.track_get_key_count(track_idx)
 			for key_idx in key_count:
 				var time := source.track_get_key_time(track_idx, key_idx)
 				var original_rot: Quaternion = source.track_get_key_value(track_idx, key_idx)
 
 				# Hemisphere normalization:
-				# First keyframe: normalize to source rest hemisphere
+				# First keyframe: normalize to source idle hemisphere
 				# Subsequent keyframes: normalize to previous keyframe hemisphere
-				# This ensures smooth interpolation while being correctly oriented
 				if prev_rot.dot(original_rot) < 0.0:
 					original_rot = -original_rot
 				prev_rot = original_rot
 
-				var corrected := left * original_rot
+				var corrected := left * original_rot * right
 				result.rotation_track_insert_key(new_idx, time, corrected)
 
 		elif has_source and has_target and track_type == Animation.TYPE_POSITION_3D:

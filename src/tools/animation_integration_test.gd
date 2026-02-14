@@ -28,11 +28,21 @@ var _factory_ready: bool = false
 
 # Mixamo
 var _mixamo_library: AnimationLibrary = null
+var _mixamo_raw_library: AnimationLibrary = null  # Un-retargeted, for diagnostics
 var _mixamo_source_rest: Dictionary = {}
+var _mixamo_anim_rest: Dictionary = {}  # Idle frame 0 rest poses
+var _mixamo_target_rest: Dictionary = {}  # MW skeleton rest
 var _mixamo_loaded: bool = false
 
 # Cached MW library (so we can swap back after playing Mixamo)
 var _mw_library: AnimationLibrary = null
+
+# Mixamo reference character (side-by-side comparison)
+var _mixamo_ref_node: Node = null
+var _mixamo_ref_anim_player: AnimationPlayer = null
+var _mixamo_ref_library: AnimationLibrary = null  # Original un-retargeted, for reference
+var _mixamo_ref_skeleton: Skeleton3D = null
+var _mixamo_ref_debug_mesh: MeshInstance3D = null  # ImmediateMesh skeleton wireframe
 
 # UI elements
 var _npc_selector: OptionButton = null
@@ -41,6 +51,16 @@ var _mixamo_list: ItemList = null
 var _mw_header: Label = null
 var _mixamo_header: Label = null
 var _status_label: Label = null
+var _anim_panel: PanelContainer = null
+var _panel_toggle: Button = null
+
+# Retarget CoB toggle
+var _cob_toggle: CheckButton = null
+var _use_cob: bool = true
+
+# MW skeleton wireframe (for bone-by-bone comparison)
+var _mw_debug_mesh: MeshInstance3D = null
+var _mw_skeleton: Skeleton3D = null
 
 # IK toggles (separate for each feature)
 var _foot_ik_toggle: CheckButton = null
@@ -91,16 +111,17 @@ func _setup_ui() -> void:
 	add_child(canvas)
 
 	# Main container anchored to right side of screen
-	var panel := PanelContainer.new()
-	panel.name = "AnimPanel"
-	panel.anchor_left = 0.55
-	panel.anchor_top = 0.0
-	panel.anchor_right = 1.0
-	panel.anchor_bottom = 1.0
-	panel.offset_left = 0
-	panel.offset_top = 0
-	panel.offset_right = 0
-	panel.offset_bottom = 0
+	_anim_panel = PanelContainer.new()
+	_anim_panel.name = "AnimPanel"
+	_anim_panel.anchor_left = 0.55
+	_anim_panel.anchor_top = 0.0
+	_anim_panel.anchor_right = 1.0
+	_anim_panel.anchor_bottom = 1.0
+	_anim_panel.offset_left = 0
+	_anim_panel.offset_top = 0
+	_anim_panel.offset_right = 0
+	_anim_panel.offset_bottom = 0
+	var panel := _anim_panel
 
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.08, 0.08, 0.1, 0.9)
@@ -158,6 +179,18 @@ func _setup_ui() -> void:
 	ik_row.add_child(_hand_ik_toggle)
 
 	vbox.add_child(ik_row)
+
+	# --- Retarget toggle row ---
+	var retarget_row := HBoxContainer.new()
+	retarget_row.add_theme_constant_override("separation", 6)
+
+	_cob_toggle = CheckButton.new()
+	_cob_toggle.text = "CoB retarget"
+	_cob_toggle.button_pressed = _use_cob
+	_cob_toggle.toggled.connect(_on_cob_toggled)
+	retarget_row.add_child(_cob_toggle)
+
+	vbox.add_child(retarget_row)
 
 	# --- Separator ---
 	vbox.add_child(HSeparator.new())
@@ -220,10 +253,47 @@ func _setup_ui() -> void:
 	panel.add_child(vbox)
 	canvas.add_child(panel)
 
+	# Toggle button anchored to the left edge of the panel
+	_panel_toggle = Button.new()
+	_panel_toggle.name = "PanelToggle"
+	_panel_toggle.text = "<"
+	_panel_toggle.anchor_left = 0.55
+	_panel_toggle.anchor_top = 0.0
+	_panel_toggle.anchor_right = 0.55
+	_panel_toggle.anchor_bottom = 0.0
+	_panel_toggle.offset_left = -28
+	_panel_toggle.offset_top = 4
+	_panel_toggle.offset_right = -4
+	_panel_toggle.offset_bottom = 28
+	_panel_toggle.pressed.connect(_on_panel_toggle)
+	var btn_style := StyleBoxFlat.new()
+	btn_style.bg_color = Color(0.15, 0.15, 0.2, 0.9)
+	btn_style.set_corner_radius_all(4)
+	_panel_toggle.add_theme_stylebox_override("normal", btn_style)
+	_panel_toggle.add_theme_stylebox_override("hover", btn_style)
+	_panel_toggle.add_theme_stylebox_override("pressed", btn_style)
+	canvas.add_child(_panel_toggle)
+
 
 # =============================================================================
 # LIST CLICK HANDLERS
 # =============================================================================
+
+func _on_panel_toggle() -> void:
+	_anim_panel.visible = not _anim_panel.visible
+	if _anim_panel.visible:
+		_panel_toggle.text = "<"
+		_panel_toggle.anchor_left = 0.55
+		_panel_toggle.anchor_right = 0.55
+		_panel_toggle.offset_left = -28
+		_panel_toggle.offset_right = -4
+	else:
+		_panel_toggle.text = ">"
+		_panel_toggle.anchor_left = 1.0
+		_panel_toggle.anchor_right = 1.0
+		_panel_toggle.offset_left = -28
+		_panel_toggle.offset_right = -4
+
 
 func _on_npc_selected(index: int) -> void:
 	if index == _current_npc_index:
@@ -233,10 +303,28 @@ func _on_npc_selected(index: int) -> void:
 	_mixamo_library = null
 	_mixamo_loaded = false
 	_mw_library = null
+	if _mixamo_ref_node and is_instance_valid(_mixamo_ref_node):
+		_mixamo_ref_node.queue_free()
+		_mixamo_ref_node = null
+		_mixamo_ref_anim_player = null
+		_mixamo_ref_library = null
+		_mixamo_ref_skeleton = null
+		_mixamo_ref_debug_mesh = null
 	_mixamo_list.clear()
 	_mixamo_list.add_item("[ Click to load Mixamo ]")
 	_mixamo_header.text = "Mixamo (click to load)"
 	_spawn_npc()
+
+
+func _on_cob_toggled(enabled: bool) -> void:
+	_use_cob = enabled
+	# Force Mixamo reload with new setting
+	_mixamo_library = null
+	_mixamo_loaded = false
+	_mixamo_list.clear()
+	_mixamo_list.add_item("[ Click to load Mixamo ]")
+	_mixamo_header.text = "Mixamo (click to reload)"
+	_status_label.text = "CoB %s — click Mixamo list to reload" % ("ON" if enabled else "OFF (simple swap)")
 
 
 func _on_foot_ik_toggled(enabled: bool) -> void:
@@ -289,6 +377,9 @@ func _on_mw_anim_selected(index: int) -> void:
 	var anim_name: String = _mw_list.get_item_metadata(index)
 	_ensure_mw_active()
 	_play_animation(anim_name)
+	# Stop reference character when playing MW anims
+	if _mixamo_ref_anim_player:
+		_mixamo_ref_anim_player.stop()
 	# Deselect the other list
 	_mixamo_list.deselect_all()
 	_status_label.text = "Playing: %s (MW)" % anim_name
@@ -313,9 +404,11 @@ func _on_mixamo_anim_selected(index: int) -> void:
 	var anim_name: String = _mixamo_list.get_item_metadata(index)
 	_ensure_mixamo_active()
 	_play_animation(anim_name)
+	_play_mixamo_reference(anim_name)
+	_dump_retarget_diagnostic(anim_name)
 	# Deselect the other list
 	_mw_list.deselect_all()
-	_status_label.text = "Playing: %s (Mixamo)" % anim_name
+	_status_label.text = "Playing: %s (Mixamo) — reference on left" % anim_name
 
 
 # =============================================================================
@@ -357,6 +450,25 @@ func _play_animation(anim_name: String) -> void:
 	anim_player.play(anim_name)
 	print("[AnimTest] Playing '%s' (tracks: %d, length: %.1fs)" % [
 		anim_name, anim.get_track_count() if anim else 0, anim.length if anim else 0.0])
+
+
+func _play_mixamo_reference(anim_name: String) -> void:
+	if not _mixamo_ref_anim_player or not _mixamo_ref_library:
+		return
+	if not _mixamo_ref_library.has_animation(anim_name):
+		print("[AnimTest] Reference doesn't have animation '%s'" % anim_name)
+		return
+
+	var anim: Animation = _mixamo_ref_library.get_animation(anim_name)
+	# Force loop on locomotion anims
+	if anim and anim.loop_mode == Animation.LOOP_NONE:
+		var lower := anim_name.to_lower()
+		if "idle" in lower or "walk" in lower or "run" in lower:
+			anim.loop_mode = Animation.LOOP_LINEAR
+
+	_mixamo_ref_anim_player.speed_scale = 1.0
+	_mixamo_ref_anim_player.play(anim_name)
+	print("[AnimTest] Reference playing '%s'" % anim_name)
 
 
 func _ensure_mw_active() -> void:
@@ -403,23 +515,187 @@ func _load_mixamo() -> void:
 
 	var raw_library: AnimationLibrary = result["library"]
 	_mixamo_source_rest = result.get("source_rest", {})
+	_mixamo_raw_library = raw_library  # Keep for diagnostics
 
 	if _mixamo_source_rest.is_empty():
-		# No skeleton data — use raw animations without retargeting
 		_mixamo_library = raw_library
 	else:
-		# Retarget to MW skeleton
 		var skeleton: Skeleton3D = _find_node_of_type(_npc_node, "Skeleton3D") if _npc_node else null
 		if not skeleton:
 			_mixamo_library = raw_library
 		else:
-			var target_rest := AnimationLoaderScript.get_skeleton_rest_poses(skeleton)
-			var anim_rest := AnimationLoaderScript.extract_anim_rest_poses(raw_library, _mixamo_source_rest)
-			_mixamo_library = AnimationLoaderScript.retarget_library(
-				raw_library, anim_rest, target_rest, true)
+			_mixamo_target_rest = AnimationLoaderScript.get_skeleton_rest_poses(skeleton)
+			_mixamo_anim_rest = AnimationLoaderScript.extract_anim_rest_poses(raw_library, _mixamo_source_rest)
+
+			# Compute global idle orientations using ACTUAL MW skeleton hierarchy.
+			# Critical: the MW skeleton has intermediate bones (e.g. Bip01 Pelvis)
+			# between profile bones that the profile hierarchy doesn't know about.
+			var mw_idle_quats := {}
+			for bone_name in _mixamo_target_rest:
+				mw_idle_quats[bone_name] = _mixamo_target_rest[bone_name].basis.get_rotation_quaternion()
+			var target_global_idles := AnimationLoaderScript.compute_skeleton_global_idles(skeleton, mw_idle_quats)
+			_dump_hierarchy_diagnostic(skeleton, target_global_idles)
+
+			if _use_cob:
+				_mixamo_library = AnimationLoaderScript.retarget_library(
+					raw_library, _mixamo_anim_rest, _mixamo_target_rest, true, _mixamo_source_rest, target_global_idles)
+				print("[AnimTest] Retarget mode: CoB (pose-space change of basis)")
+			else:
+				_mixamo_library = AnimationLoaderScript.retarget_library(
+					raw_library, _mixamo_anim_rest, _mixamo_target_rest, true, {}, {})
+				print("[AnimTest] Retarget mode: Simple swap (R_t * idle_s⁻¹ * anim)")
 
 	_mixamo_loaded = true
 	_populate_mixamo_list()
+	_spawn_mixamo_reference()
+
+
+func _spawn_mixamo_reference() -> void:
+	# Clean up previous reference
+	if _mixamo_ref_node and is_instance_valid(_mixamo_ref_node):
+		_mixamo_ref_node.queue_free()
+		_mixamo_ref_node = null
+		_mixamo_ref_anim_player = null
+
+	# Load Idle.fbx as the reference character (has skeleton + mesh)
+	var scene: PackedScene = load("res://assets/animations/mixamo/Idle.fbx") as PackedScene
+	if not scene:
+		print("[AnimTest] Cannot load Mixamo reference FBX")
+		return
+
+	_mixamo_ref_node = scene.instantiate()
+	if not _mixamo_ref_node:
+		return
+
+	# Position to the left of MW character, rotated 180° Y to face same direction
+	add_child(_mixamo_ref_node)
+	_mixamo_ref_node.global_position = Vector3(-1.5, 0.05, 0)
+	if _mixamo_ref_node is Node3D:
+		(_mixamo_ref_node as Node3D).rotation.y = PI  # 180° Y — face same direction as MW
+
+	# Dump the transform chain to understand facing direction
+	_dump_transform_chain("Mixamo Ref", _mixamo_ref_node)
+
+	# Find its AnimationPlayer
+	_mixamo_ref_anim_player = _find_node_of_type(_mixamo_ref_node, "AnimationPlayer")
+	if not _mixamo_ref_anim_player:
+		print("[AnimTest] Mixamo reference has no AnimationPlayer")
+		return
+
+	# Build merged library with all Mixamo FBX animations (un-retargeted, original bone names)
+	_mixamo_ref_library = AnimationLibrary.new()
+
+	var dir := DirAccess.open("res://assets/animations/mixamo/")
+	if not dir:
+		return
+	dir.list_dir_begin()
+	var file_name := dir.get_next()
+	while not file_name.is_empty():
+		if not dir.current_is_dir():
+			var lower := file_name.to_lower()
+			if lower.ends_with(".fbx") or lower.ends_with(".glb"):
+				var full_path := "res://assets/animations/mixamo/".path_join(file_name)
+				var fbx_scene: PackedScene = load(full_path) as PackedScene
+				if fbx_scene:
+					var fbx_root := fbx_scene.instantiate()
+					var fbx_ap: AnimationPlayer = _find_node_of_type(fbx_root, "AnimationPlayer")
+					if fbx_ap:
+						for anim_name in fbx_ap.get_animation_list():
+							if anim_name == "RESET":
+								continue
+							# Normalize name same way as AnimationLoader
+							var normalized := AnimationLoaderScript._normalize_name(anim_name, full_path)
+							if not _mixamo_ref_library.has_animation(normalized):
+								_mixamo_ref_library.add_animation(normalized, fbx_ap.get_animation(anim_name))
+					fbx_root.queue_free()
+		file_name = dir.get_next()
+	dir.list_dir_end()
+
+	# Replace the default library
+	if _mixamo_ref_anim_player.has_animation_library(""):
+		_mixamo_ref_anim_player.remove_animation_library("")
+	_mixamo_ref_anim_player.add_animation_library("", _mixamo_ref_library)
+
+	# Disable any AnimationTree on the reference
+	var trees := []
+	_collect_nodes_of_class(_mixamo_ref_node, "AnimationTree", trees)
+	for t: Node in trees:
+		t.set("active", false)
+
+	# Create skeleton wireframe visualization (FBX has no mesh — "Without Skin" export)
+	_mixamo_ref_skeleton = _find_node_of_type(_mixamo_ref_node, "Skeleton3D") as Skeleton3D
+	if _mixamo_ref_skeleton:
+		_mixamo_ref_debug_mesh = MeshInstance3D.new()
+		_mixamo_ref_debug_mesh.name = "SkeletonWireframe"
+		var im := ImmediateMesh.new()
+		_mixamo_ref_debug_mesh.mesh = im
+		var wire_mat := StandardMaterial3D.new()
+		wire_mat.albedo_color = Color(0.2, 0.85, 1.0)
+		wire_mat.emission_enabled = true
+		wire_mat.emission = Color(0.1, 0.4, 0.6)
+		wire_mat.emission_energy_multiplier = 2.0
+		wire_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_mixamo_ref_debug_mesh.material_override = wire_mat
+		_mixamo_ref_skeleton.add_child(_mixamo_ref_debug_mesh)
+		print("[AnimTest] Skeleton wireframe created (%d bones)" % _mixamo_ref_skeleton.get_bone_count())
+
+	print("[AnimTest] Mixamo reference spawned with %d animations" % _mixamo_ref_library.get_animation_list().size())
+
+
+func _setup_mw_wireframe() -> void:
+	if _mw_debug_mesh and is_instance_valid(_mw_debug_mesh):
+		_mw_debug_mesh.queue_free()
+	_mw_skeleton = _find_node_of_type(_npc_node, "Skeleton3D") as Skeleton3D if _npc_node else null
+	if not _mw_skeleton:
+		return
+	_mw_debug_mesh = MeshInstance3D.new()
+	_mw_debug_mesh.name = "MWSkeletonWireframe"
+	var im := ImmediateMesh.new()
+	_mw_debug_mesh.mesh = im
+	var wire_mat := StandardMaterial3D.new()
+	wire_mat.albedo_color = Color(1.0, 0.6, 0.2)  # Orange for MW
+	wire_mat.emission_enabled = true
+	wire_mat.emission = Color(0.5, 0.3, 0.1)
+	wire_mat.emission_energy_multiplier = 2.0
+	wire_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_mw_debug_mesh.material_override = wire_mat
+	_mw_skeleton.add_child(_mw_debug_mesh)
+	print("[AnimTest] MW skeleton wireframe created (%d bones)" % _mw_skeleton.get_bone_count())
+
+
+func _draw_skeleton_wireframe(skeleton: Skeleton3D, debug_mesh: MeshInstance3D) -> void:
+	if not skeleton or not debug_mesh:
+		return
+	if not is_instance_valid(skeleton) or not is_instance_valid(debug_mesh):
+		return
+
+	var im: ImmediateMesh = debug_mesh.mesh
+	im.clear_surfaces()
+
+	# Draw bone lines (parent → child)
+	im.surface_begin(Mesh.PRIMITIVE_LINES)
+	for i in skeleton.get_bone_count():
+		var parent_idx := skeleton.get_bone_parent(i)
+		if parent_idx < 0:
+			continue
+		var bone_pos: Vector3 = skeleton.get_bone_global_pose(i).origin
+		var parent_pos: Vector3 = skeleton.get_bone_global_pose(parent_idx).origin
+		im.surface_add_vertex(parent_pos)
+		im.surface_add_vertex(bone_pos)
+	im.surface_end()
+
+	# Draw small crosses at each joint for visibility
+	im.surface_begin(Mesh.PRIMITIVE_LINES)
+	var cross_size := 0.015
+	for i in skeleton.get_bone_count():
+		var pos: Vector3 = skeleton.get_bone_global_pose(i).origin
+		im.surface_add_vertex(pos + Vector3(-cross_size, 0, 0))
+		im.surface_add_vertex(pos + Vector3(cross_size, 0, 0))
+		im.surface_add_vertex(pos + Vector3(0, -cross_size, 0))
+		im.surface_add_vertex(pos + Vector3(0, cross_size, 0))
+		im.surface_add_vertex(pos + Vector3(0, 0, -cross_size))
+		im.surface_add_vertex(pos + Vector3(0, 0, cross_size))
+	im.surface_end()
 
 
 # =============================================================================
@@ -484,6 +760,8 @@ func _spawn_npc() -> void:
 		_npc_node.queue_free()
 		_npc_node = null
 		_anim_system = null
+		_mw_skeleton = null
+		_mw_debug_mesh = null
 		_cleanup_ik_visuals()
 		await get_tree().process_frame
 
@@ -514,6 +792,8 @@ func _spawn_npc() -> void:
 			_force_loop_locomotion(character)
 			_populate_mw_list()
 			_cache_anim_system()
+			_dump_transform_chain("MW NPC", character)
+			_setup_mw_wireframe()
 			_status_label.text = "%s loaded (prebaked, %d ms)" % [npc_id, Time.get_ticks_msec() - start]
 			return
 
@@ -548,6 +828,7 @@ func _spawn_npc() -> void:
 	_force_loop_locomotion(character)
 	_populate_mw_list()
 	_cache_anim_system()
+	_setup_mw_wireframe()
 	_status_label.text = "%s loaded (full pipeline, %d ms)" % [npc_id, Time.get_ticks_msec() - start]
 
 
@@ -589,6 +870,265 @@ func _ensure_data_loaded() -> void:
 			_status_label.text = "Failed to load ESM"
 			return
 		await get_tree().process_frame
+
+
+# =============================================================================
+# RETARGET DIAGNOSTICS
+# =============================================================================
+
+## Key bones to diagnose (skip fingers for readability)
+const _DIAG_BONES := [
+	"Hips", "Spine", "Chest", "UpperChest", "Neck", "Head",
+	"LeftShoulder", "LeftUpperArm", "LeftLowerArm", "LeftHand",
+	"RightShoulder", "RightUpperArm", "RightLowerArm", "RightHand",
+	"LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+	"RightUpperLeg", "RightLowerLeg", "RightFoot",
+]
+
+
+func _dump_retarget_diagnostic(anim_name: String) -> void:
+	if not _mixamo_raw_library or not _mixamo_library:
+		return
+
+	var raw_anim: Animation = _mixamo_raw_library.get_animation(anim_name) if _mixamo_raw_library.has_animation(anim_name) else null
+	var ret_anim: Animation = _mixamo_library.get_animation(anim_name) if _mixamo_library.has_animation(anim_name) else null
+	if not raw_anim or not ret_anim:
+		print("[Diag] Animation '%s' not found in raw or retargeted library" % anim_name)
+		return
+
+	print("")
+	print("[Diag] ========== RETARGET DIAGNOSTIC: %s ==========" % anim_name)
+	print("[Diag] Format: euler angles in degrees (pitch, yaw, roll)")
+	print("[Diag]")
+
+	# Build track index lookup for raw and retargeted animations
+	var raw_tracks := {}  # bone_name -> track_idx
+	for i in raw_anim.get_track_count():
+		var path := raw_anim.track_get_path(i)
+		if path.get_subname_count() > 0:
+			raw_tracks[String(path.get_subname(0))] = i
+
+	var ret_tracks := {}
+	for i in ret_anim.get_track_count():
+		var path := ret_anim.track_get_path(i)
+		if path.get_subname_count() > 0:
+			ret_tracks[String(path.get_subname(0))] = i
+
+	# Print rest pose comparison header
+	print("[Diag] %-18s | %-28s | %-28s | %-28s | %-28s" % [
+		"Bone", "Mixamo GeomRest", "Mixamo AnimRest(idle f0)", "MW Rest", "Raw Frame0 → Retarg Frame0"])
+
+	for bone_name in _DIAG_BONES:
+		var geom_rest_str := "---"
+		var anim_rest_str := "---"
+		var mw_rest_str := "---"
+		var frame0_str := "---"
+
+		if bone_name in _mixamo_source_rest:
+			var q: Quaternion = _mixamo_source_rest[bone_name].basis.get_rotation_quaternion()
+			geom_rest_str = _euler_str(q)
+
+		if bone_name in _mixamo_anim_rest:
+			var q: Quaternion = _mixamo_anim_rest[bone_name].basis.get_rotation_quaternion()
+			anim_rest_str = _euler_str(q)
+
+		if bone_name in _mixamo_target_rest:
+			var q: Quaternion = _mixamo_target_rest[bone_name].basis.get_rotation_quaternion()
+			mw_rest_str = _euler_str(q)
+
+		# Frame 0 comparison: raw vs retargeted
+		var raw_f0_str := "---"
+		var ret_f0_str := "---"
+		if bone_name in raw_tracks:
+			var tidx: int = raw_tracks[bone_name]
+			if raw_anim.track_get_type(tidx) == Animation.TYPE_ROTATION_3D and raw_anim.track_get_key_count(tidx) > 0:
+				var q: Quaternion = raw_anim.track_get_key_value(tidx, 0)
+				raw_f0_str = _euler_str(q)
+		if bone_name in ret_tracks:
+			var tidx: int = ret_tracks[bone_name]
+			if ret_anim.track_get_type(tidx) == Animation.TYPE_ROTATION_3D and ret_anim.track_get_key_count(tidx) > 0:
+				var q: Quaternion = ret_anim.track_get_key_value(tidx, 0)
+				ret_f0_str = _euler_str(q)
+
+		frame0_str = "%s → %s" % [raw_f0_str, ret_f0_str]
+		print("[Diag] %-18s | %-28s | %-28s | %-28s | %s" % [
+			bone_name, geom_rest_str, anim_rest_str, mw_rest_str, frame0_str])
+
+	# Also dump a few mid-animation frames for walk to see motion deltas
+	if anim_name == "walk" and raw_anim.length > 0.3:
+		print("[Diag]")
+		print("[Diag] --- Walk frame samples (raw delta from idle → retargeted delta from MW rest) ---")
+		var sample_time := raw_anim.length * 0.25  # 25% through walk cycle
+		for bone_name in ["Hips", "LeftUpperLeg", "LeftLowerLeg", "LeftUpperArm", "Spine"]:
+			if bone_name in raw_tracks and bone_name in ret_tracks:
+				var raw_tidx: int = raw_tracks[bone_name]
+				var ret_tidx: int = ret_tracks[bone_name]
+				if raw_anim.track_get_type(raw_tidx) != Animation.TYPE_ROTATION_3D:
+					continue
+
+				# Sample at 25% of animation
+				var raw_val: Quaternion = raw_anim.track_get_key_value(raw_tidx, mini(raw_anim.track_get_key_count(raw_tidx) / 4, raw_anim.track_get_key_count(raw_tidx) - 1))
+				var ret_val: Quaternion = ret_anim.track_get_key_value(ret_tidx, mini(ret_anim.track_get_key_count(ret_tidx) / 4, ret_anim.track_get_key_count(ret_tidx) - 1))
+
+				# Compute deltas from idle
+				var raw_idle: Quaternion = Quaternion.IDENTITY
+				if bone_name in _mixamo_anim_rest:
+					raw_idle = _mixamo_anim_rest[bone_name].basis.get_rotation_quaternion()
+				var raw_delta: Quaternion = raw_idle.inverse() * raw_val
+
+				var mw_idle: Quaternion = Quaternion.IDENTITY
+				if bone_name in _mixamo_target_rest:
+					mw_idle = _mixamo_target_rest[bone_name].basis.get_rotation_quaternion()
+				var ret_delta: Quaternion = mw_idle.inverse() * ret_val
+
+				print("[Diag]   %-16s t=%.2fs: raw_delta=%s  ret_delta=%s  angle_diff=%.1f°" % [
+					bone_name, sample_time,
+					_euler_str(raw_delta), _euler_str(ret_delta),
+					rad_to_deg(raw_delta.angle_to(ret_delta))])
+
+	print("[Diag] ========== END DIAGNOSTIC ==========")
+	print("")
+
+
+func _dump_hierarchy_diagnostic(skeleton: Skeleton3D, global_idles: Dictionary) -> void:
+	print("")
+	print("[Hierarchy] ========== MW SKELETON HIERARCHY ==========")
+	print("[Hierarchy] Bones: %d" % skeleton.get_bone_count())
+
+	# Print actual parent chain for key bones
+	var key_bones := ["Hips", "LeftUpperLeg", "RightUpperLeg", "Spine", "LeftUpperArm"]
+	for target_bone in key_bones:
+		var idx := skeleton.find_bone(target_bone)
+		if idx < 0:
+			continue
+		var chain: String = target_bone
+		var walk_idx := skeleton.get_bone_parent(idx)
+		while walk_idx >= 0:
+			var parent_name := skeleton.get_bone_name(walk_idx)
+			var rest_euler := _euler_str(skeleton.get_bone_rest(walk_idx).basis.get_rotation_quaternion())
+			chain = "%s(%s) → " % [parent_name, rest_euler] + chain
+			walk_idx = skeleton.get_bone_parent(walk_idx)
+		print("[Hierarchy]   %s" % chain)
+
+	# Show intermediate (non-profile) bones between Hips and LeftUpperLeg
+	var profile := SkeletonProfileHumanoid.new()
+	var profile_names := {}
+	for i in profile.bone_size:
+		profile_names[String(profile.get_bone_name(i))] = true
+
+	var non_profile := []
+	for i in skeleton.get_bone_count():
+		var name := skeleton.get_bone_name(i)
+		if name not in profile_names:
+			var parent_idx := skeleton.get_bone_parent(i)
+			var parent_name := skeleton.get_bone_name(parent_idx) if parent_idx >= 0 else "(root)"
+			var rest_euler := _euler_str(skeleton.get_bone_rest(i).basis.get_rotation_quaternion())
+			non_profile.append("  %s (parent=%s, rest=%s)" % [name, parent_name, rest_euler])
+
+	if non_profile.size() > 0:
+		print("[Hierarchy] Non-profile bones in MW skeleton:")
+		for line in non_profile:
+			print("[Hierarchy] %s" % line)
+
+	# Compare profile-based F_t vs actual-hierarchy F_t for LeftUpperLeg
+	var lul_idx := skeleton.find_bone("LeftUpperLeg")
+	var hips_idx := skeleton.find_bone("Hips")
+	if lul_idx >= 0 and hips_idx >= 0:
+		var R_t_lul := skeleton.get_bone_rest(lul_idx).basis.get_rotation_quaternion()
+		var R_t_hips := skeleton.get_bone_rest(hips_idx).basis.get_rotation_quaternion()
+
+		# Profile-based: F_t = G_t(Hips) * R_t(LUL) where G_t(Hips) = R_t(Hips) * R_t(Hips) = R_t²
+		var profile_G_hips := R_t_hips * R_t_hips  # rest * idle = rest²
+		var profile_F_lul := profile_G_hips * R_t_lul
+
+		# Actual-hierarchy: F_t = global_idle(LUL) * R_t(LUL)⁻¹
+		var actual_F_lul := Quaternion.IDENTITY
+		if "LeftUpperLeg" in global_idles:
+			actual_F_lul = global_idles["LeftUpperLeg"] * R_t_lul.inverse()
+
+		var angle_diff := rad_to_deg(profile_F_lul.angle_to(actual_F_lul))
+		print("[Hierarchy] LeftUpperLeg F_t comparison:")
+		print("[Hierarchy]   Profile-based:  %s" % _euler_str(profile_F_lul))
+		print("[Hierarchy]   Actual-hierarch: %s" % _euler_str(actual_F_lul))
+		print("[Hierarchy]   Angle diff: %.1f°" % angle_diff)
+
+	print("[Hierarchy] ========== END ==========")
+	print("")
+
+
+func _euler_str(q: Quaternion) -> String:
+	var e := q.get_euler() * (180.0 / PI)
+	return "(%6.1f,%6.1f,%6.1f)" % [e.x, e.y, e.z]
+
+
+@warning_ignore("untyped_declaration")
+func _dump_transform_chain(label: String, root_node: Node) -> void:
+	print("")
+	print("[Orient] ========== %s TRANSFORM CHAIN ==========" % label)
+
+	# Walk the node tree from root to skeleton, printing transforms
+	var node: Node = root_node
+	var depth := 0
+	while node:
+		if node is Node3D:
+			var n3d: Node3D = node as Node3D
+			var rot_e: Vector3 = n3d.transform.basis.get_rotation_quaternion().get_euler() * (180.0 / PI)
+			var sc: Vector3 = n3d.transform.basis.get_scale()
+			print("[Orient]   %s%s (%s): pos=%s rot=(%6.1f,%6.1f,%6.1f) scale=(%.2f,%.2f,%.2f)" % [
+				"  ".repeat(depth), node.name, node.get_class(),
+				str(n3d.transform.origin).substr(0, 30),
+				rot_e.x, rot_e.y, rot_e.z, sc.x, sc.y, sc.z])
+		else:
+			print("[Orient]   %s%s (%s)" % ["  ".repeat(depth), node.name, node.get_class()])
+		# Look for Skeleton3D child
+		var skel_child: Node = null
+		for child in node.get_children():
+			if child is Skeleton3D:
+				skel_child = child
+				break
+			for grandchild in child.get_children():
+				if grandchild is Skeleton3D:
+					if child is Node3D:
+						var ch3d: Node3D = child as Node3D
+						var ch_r: Vector3 = ch3d.transform.basis.get_rotation_quaternion().get_euler() * (180.0 / PI)
+						print("[Orient]   %s%s (%s): rot=(%6.1f,%6.1f,%6.1f)" % [
+							"  ".repeat(depth + 1), child.name, child.get_class(),
+							ch_r.x, ch_r.y, ch_r.z])
+					skel_child = grandchild
+					depth += 1
+					break
+			if skel_child:
+				break
+		if skel_child:
+			node = skel_child
+			depth += 1
+		else:
+			break
+
+	# Find Skeleton3D and print key bone rest poses
+	var skeleton: Skeleton3D = _find_node_of_type(root_node, "Skeleton3D") as Skeleton3D
+	if skeleton:
+		print("[Orient]   Skeleton3D global_transform rotation: %s" % _euler_str(
+			skeleton.global_transform.basis.get_rotation_quaternion()))
+		print("[Orient]   Key bone REST poses (in parent-local space):")
+		for bone_name in ["Hips", "Spine", "LeftUpperLeg", "RightUpperLeg"]:
+			var idx := skeleton.find_bone(bone_name)
+			if idx >= 0:
+				var rest_q := skeleton.get_bone_rest(idx).basis.get_rotation_quaternion()
+				var parent_idx := skeleton.get_bone_parent(idx)
+				var parent_name := skeleton.get_bone_name(parent_idx) if parent_idx >= 0 else "(root)"
+				print("[Orient]     %s (parent=%s): rest=%s" % [bone_name, parent_name, _euler_str(rest_q)])
+		# Also print Hips GLOBAL pose at current animation state
+		var hips_idx := skeleton.find_bone("Hips")
+		if hips_idx >= 0:
+			var hips_global := skeleton.get_bone_global_pose(hips_idx)
+			print("[Orient]   Hips GLOBAL pose: %s" % _euler_str(hips_global.basis.get_rotation_quaternion()))
+			# Forward vector: what direction does the skeleton face?
+			var forward := (skeleton.global_transform * hips_global).basis * Vector3.FORWARD
+			print("[Orient]   Hips WORLD forward: (%.2f, %.2f, %.2f)" % [forward.x, forward.y, forward.z])
+
+	print("[Orient] ========== END %s ==========" % label)
+	print("")
 
 
 # =============================================================================
@@ -783,6 +1323,10 @@ func _print_ik_diagnostics() -> void:
 # =============================================================================
 
 func _process(delta: float) -> void:
+	# Update skeleton wireframes
+	_draw_skeleton_wireframe(_mixamo_ref_skeleton, _mixamo_ref_debug_mesh)
+	_draw_skeleton_wireframe(_mw_skeleton, _mw_debug_mesh)
+
 	# Scroll cubes toward the camera (negative Z), wrap around
 	if _cube_container:
 		for cube: Node3D in _cube_container.get_children():
@@ -870,9 +1414,9 @@ func _create_ik_cubes() -> void:
 func _setup_scene() -> void:
 	_camera = Camera3D.new()
 	_camera.name = "Camera3D"
-	_camera.position = Vector3(0, 1.0, -3.0)
+	_camera.position = Vector3(-0.75, 1.0, -3.5)
 	add_child(_camera)
-	_camera.look_at(Vector3(0, 0.8, 0))
+	_camera.look_at(Vector3(-0.75, 0.8, 0))
 
 	var light := DirectionalLight3D.new()
 	light.name = "KeyLight"

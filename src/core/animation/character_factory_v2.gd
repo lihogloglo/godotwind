@@ -219,9 +219,19 @@ static func preload_mixamo_animations(skeleton: Skeleton3D, dir_path: String = "
 
 	# Use animation-derived rest (idle frame 0) instead of skeleton geometric rest.
 	# FBX importers may apply pre-rotations that don't match animation data.
+	# Pass source_rest as geometric rest for axis-corrected conjugation.
 	var anim_rest := AnimationLoaderScript.extract_anim_rest_poses(raw_lib, source_rest)
 	var target_rest := AnimationLoaderScript.get_skeleton_rest_poses(skeleton)
-	_mixamo_library = AnimationLoaderScript.retarget_library(raw_lib, anim_rest, target_rest, true)
+
+	# Compute global idle orientations using actual MW skeleton hierarchy.
+	# The MW skeleton has intermediate bones (Bip01 Pelvis) between profile bones
+	# that the profile hierarchy doesn't know about.
+	var idle_quats := {}
+	for bone_name: String in target_rest:
+		idle_quats[bone_name] = target_rest[bone_name].basis.get_rotation_quaternion()
+	var target_global_idles := AnimationLoaderScript.compute_skeleton_global_idles(skeleton, idle_quats)
+
+	_mixamo_library = AnimationLoaderScript.retarget_library(raw_lib, anim_rest, target_rest, true, source_rest, target_global_idles)
 	Log.info("animation", "CharacterFactoryV2: Mixamo preloaded in %d ms (%d animations, retargeted)" % [
 		Time.get_ticks_msec() - start, _mixamo_library.get_animation_list().size()])
 
