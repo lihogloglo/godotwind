@@ -62,6 +62,9 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null,
 	# Configure IK for humanoid
 	_configure_humanoid_ik()
 
+	# Auto-detect and set root motion track (Hips bone)
+	_setup_root_motion_track()
+
 
 ## Build bone name mapping (skeleton should have profile-named bones after renaming)
 func _build_bone_map() -> void:
@@ -83,6 +86,40 @@ func _configure_humanoid_ik() -> void:
 	# IK controller should already be set up by parent
 	# We can adjust settings here if needed
 	pass
+
+
+## Auto-detect root motion bone and set it on AnimationTree.
+## Humanoid: Hips bone. MW: Bip01 NonAccum (if available).
+func _setup_root_motion_track() -> void:
+	if not skeleton:
+		return
+
+	# Try profile name first
+	var hips_idx := skeleton.find_bone("Hips")
+	if hips_idx < 0:
+		# Try BoneMap reverse lookup
+		if skeleton.has_meta("bone_map"):
+			var bone_map: BoneMap = skeleton.get_meta("bone_map") as BoneMap
+			if bone_map:
+				var actual_name: StringName = bone_map.get_skeleton_bone_name(&"Hips")
+				if not actual_name.is_empty():
+					hips_idx = skeleton.find_bone(actual_name)
+	if hips_idx < 0:
+		# Last resort: search for any bone with "hips" in the name
+		for i in skeleton.get_bone_count():
+			if "hips" in skeleton.get_bone_name(i).to_lower():
+				hips_idx = i
+				break
+
+	# MW fallback: Bip01 NonAccum
+	if hips_idx < 0:
+		hips_idx = skeleton.find_bone("Bip01 NonAccum")
+
+	if hips_idx >= 0:
+		var bone_name := skeleton.get_bone_name(hips_idx)
+		set_root_motion_track(NodePath(".:" + bone_name))
+		if debug_mode:
+			Log.debug("animation", "HumanoidAnimationSystem: Root motion track = .:%s" % bone_name)
 
 
 # =============================================================================
@@ -241,7 +278,9 @@ func clear_weapon_grip() -> void:
 # =============================================================================
 
 ## Update animation from movement (override for combat awareness)
-func update_from_movement(velocity: Vector3, is_grounded: bool = true) -> void:
+func update_from_movement(velocity: Vector3, is_grounded: bool = true,
+		input_direction: Vector2 = Vector2.ZERO,
+		p_is_sprinting: bool = false, p_is_walking: bool = false) -> void:
 	if _is_in_combat and velocity.length() < 0.1:
 		# Stay in combat idle when stationary in combat
 		var anim: _AnimationManagerScript = animation_manager as _AnimationManagerScript
@@ -250,7 +289,8 @@ func update_from_movement(velocity: Vector3, is_grounded: bool = true) -> void:
 		return
 
 	# Otherwise use parent implementation
-	super.update_from_movement(velocity, is_grounded)
+	super.update_from_movement(velocity, is_grounded, input_direction,
+		p_is_sprinting, p_is_walking)
 
 
 # =============================================================================

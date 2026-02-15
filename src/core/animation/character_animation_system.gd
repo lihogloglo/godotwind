@@ -176,11 +176,42 @@ func get_blend_parameter(param_name: StringName) -> Variant:
 	return null
 
 
-## Update animation based on movement (convenience method)
-func update_from_movement(velocity: Vector3, is_grounded: bool = true) -> void:
+## Update animation based on movement (convenience method).
+## input_direction, is_sprinting, is_walking forwarded for BlendSpace2D.
+func update_from_movement(velocity: Vector3, is_grounded: bool = true,
+		input_direction: Vector2 = Vector2.ZERO,
+		p_is_sprinting: bool = false, p_is_walking: bool = false) -> void:
 	var anim: _AnimationManager = animation_manager as _AnimationManager
 	if anim:
-		anim.update_from_velocity(velocity, is_grounded)
+		anim.update_from_velocity(velocity, is_grounded, input_direction,
+			p_is_sprinting, p_is_walking)
+
+
+# =============================================================================
+# WIRING API
+# =============================================================================
+
+## Late-bind the CharacterBody3D (e.g. from PlayerController.attach_character)
+func set_character_body(body: CharacterBody3D) -> void:
+	character_body = body
+	var ik: _IKController = ik_controller as _IKController
+	if ik:
+		ik.character_body = body
+
+
+## Set root motion track on the AnimationTree
+func set_root_motion_track(bone_path: NodePath) -> void:
+	var anim: _AnimationManager = animation_manager as _AnimationManager
+	if anim:
+		anim.set_root_motion_track(bone_path)
+
+
+## Get the AnimationTree (for root motion queries from PlayerController)
+func get_animation_tree() -> AnimationTree:
+	var anim: _AnimationManager = animation_manager as _AnimationManager
+	if anim:
+		return anim.get_animation_tree()
+	return null
 
 
 # =============================================================================

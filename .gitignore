@@ -7,6 +7,9 @@ lapalma_map/
 lapalma_processed/
 godotoceanbuoyancy/
 GodotOceanWaves/
+assets/animations/
+assets/characters/
+*.fbx
 # Godot-specific ignores
 *.translation
 

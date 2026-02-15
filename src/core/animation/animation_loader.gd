@@ -5,15 +5,15 @@
 ##
 ## NO RETARGETING - animations are loaded as-is for their native skeleton type.
 ## MW characters use KF animations with MW skeleton.
-## Mixamo characters use FBX animations with Mixamo skeleton.
+## Humanoid characters use GLB/FBX animations with their native skeleton.
 ##
 ## Track path convention:
 ##   ".:BoneName" — bone tracks target the Skeleton3D at root_node
 ##   This is consistent with KF loader and AnimationTree root_node setup.
 ##
 ## Usage:
-##   var lib := AnimationLoader.load_from_fbx("res://assets/animations/mixamo/idle.fbx")
-##   anim_player.add_animation_library("mixamo", lib)
+##   var lib := AnimationLoader.load_from_glb("res://assets/characters/quaternius/UAL2_Standard.glb")
+##   anim_player.add_animation_library("", lib)
 class_name AnimationLoader
 extends RefCounted
 
@@ -36,60 +36,6 @@ const _CHECK_ORDER: Array[String] = [
 	"idle", "walk", "run", "jump", "fall", "land",
 ]
 
-## Hardcoded Mixamo bone name map (mixamo_bone -> profile_name)
-## Used when loading Mixamo FBX files to normalize bone names
-const _MIXAMO_BONE_MAP := {
-	# Spine
-	"mixamorig1_Hips": "Hips",
-	"mixamorig_Hips": "Hips",
-	"mixamorig1_Spine": "Spine",
-	"mixamorig_Spine": "Spine",
-	"mixamorig1_Spine1": "UpperChest",
-	"mixamorig_Spine1": "UpperChest",
-	"mixamorig1_Spine2": "Chest",
-	"mixamorig_Spine2": "Chest",
-	"mixamorig1_Neck": "Neck",
-	"mixamorig_Neck": "Neck",
-	"mixamorig1_Head": "Head",
-	"mixamorig_Head": "Head",
-	# Left arm
-	"mixamorig1_LeftShoulder": "LeftShoulder",
-	"mixamorig_LeftShoulder": "LeftShoulder",
-	"mixamorig1_LeftArm": "LeftUpperArm",
-	"mixamorig_LeftArm": "LeftUpperArm",
-	"mixamorig1_LeftForeArm": "LeftLowerArm",
-	"mixamorig_LeftForeArm": "LeftLowerArm",
-	"mixamorig1_LeftHand": "LeftHand",
-	"mixamorig_LeftHand": "LeftHand",
-	# Right arm
-	"mixamorig1_RightShoulder": "RightShoulder",
-	"mixamorig_RightShoulder": "RightShoulder",
-	"mixamorig1_RightArm": "RightUpperArm",
-	"mixamorig_RightArm": "RightUpperArm",
-	"mixamorig1_RightForeArm": "RightLowerArm",
-	"mixamorig_RightForeArm": "RightLowerArm",
-	"mixamorig1_RightHand": "RightHand",
-	"mixamorig_RightHand": "RightHand",
-	# Left leg
-	"mixamorig1_LeftUpLeg": "LeftUpperLeg",
-	"mixamorig_LeftUpLeg": "LeftUpperLeg",
-	"mixamorig1_LeftLeg": "LeftLowerLeg",
-	"mixamorig_LeftLeg": "LeftLowerLeg",
-	"mixamorig1_LeftFoot": "LeftFoot",
-	"mixamorig_LeftFoot": "LeftFoot",
-	"mixamorig1_LeftToeBase": "LeftToes",
-	"mixamorig_LeftToeBase": "LeftToes",
-	# Right leg
-	"mixamorig1_RightUpLeg": "RightUpperLeg",
-	"mixamorig_RightUpLeg": "RightUpperLeg",
-	"mixamorig1_RightLeg": "RightLowerLeg",
-	"mixamorig_RightLeg": "RightLowerLeg",
-	"mixamorig1_RightFoot": "RightFoot",
-	"mixamorig_RightFoot": "RightFoot",
-	"mixamorig1_RightToeBase": "RightToes",
-	"mixamorig_RightToeBase": "RightToes",
-}
-
 
 # =============================================================================
 # PUBLIC API
@@ -98,9 +44,8 @@ const _MIXAMO_BONE_MAP := {
 ## Load animations from a single FBX file.
 ## Returns an AnimationLibrary with normalized bone track names.
 ## bone_remap: optional { native_name -> target_name } dictionary.
-##   If empty, auto-detects Mixamo format and applies _MIXAMO_BONE_MAP.
+##   If empty, uses identity remap (bone names stay as-is).
 ## preserve_bone_names: if true, skips bone name remapping (identity remap).
-##   Use for native Mixamo characters where skeleton keeps original bone names.
 static func load_from_fbx(path: String, bone_remap: Dictionary = {}, preserve_bone_names: bool = false) -> AnimationLibrary:
 	var scene: PackedScene = load(path) as PackedScene
 	if not scene:
@@ -173,11 +118,11 @@ static func _extract_and_remap(root: Node, source_path: String, bone_remap: Dict
 		push_warning("AnimationLoader: No AnimationPlayer in: %s" % source_path)
 		return null
 
-	# Auto-detect Mixamo format and apply bone remap
+	# Build identity remap if no explicit remap provided
 	if bone_remap.is_empty():
 		var skeleton := _find_skeleton(root)
 		if skeleton:
-			bone_remap = _build_remap_from_skeleton(skeleton, preserve_names)
+			bone_remap = _build_identity_remap(skeleton)
 
 	var lib := AnimationLibrary.new()
 	var anim_list := anim_player.get_animation_list()
@@ -188,7 +133,7 @@ static func _extract_and_remap(root: Node, source_path: String, bone_remap: Dict
 		# Skip special animations
 		if anim_name == "RESET":
 			continue
-		# Skip Mixamo T-pose exports (static single-keyframe animations)
+		# Skip T-pose exports (static single-keyframe animations)
 		if anim_name.begins_with("Take ") or anim_name.begins_with("T-Pose"):
 			Log.debug("animation", "  Skipping T-pose animation: %s" % anim_name)
 			continue
@@ -226,10 +171,10 @@ static func _fix_and_remap_tracks(source: Animation, bone_remap: Dictionary) -> 
 		var track_type := source.track_get_type(track_idx)
 
 		# Extract bone name from track path
-		# FBX imports produce various formats:
-		#   "Armature/Skeleton3D:mixamorig1_Hips" (FBX)
-		#   "Skeleton3D:mixamorig1_Hips"
-		#   ".:mixamorig1_Hips"
+		# Imports produce various formats:
+		#   "Armature/Skeleton3D:Hips" (GLB/FBX)
+		#   "Skeleton3D:Hips"
+		#   ".:Hips"
 		var bone_name := ""
 		if path.get_subname_count() > 0:
 			bone_name = String(path.get_subname(0))
@@ -262,42 +207,13 @@ static func _fix_and_remap_tracks(source: Animation, bone_remap: Dictionary) -> 
 	return result
 
 
-## Build bone remap from an actual skeleton in the imported scene.
-## Auto-detects Mixamo format by checking for "mixamorig" prefix.
-## preserve_names: if true, always uses identity remap (no bone name changes).
-static func _build_remap_from_skeleton(skeleton: Skeleton3D, preserve_names: bool = false) -> Dictionary:
+## Build identity bone remap from skeleton (all bone names map to themselves)
+static func _build_identity_remap(skeleton: Skeleton3D) -> Dictionary:
 	var remap := {}
-
-	if preserve_names:
-		# Identity remap - keep all bone names as-is
-		for i in skeleton.get_bone_count():
-			var bone_name := skeleton.get_bone_name(i)
-			remap[bone_name] = bone_name
-		Log.info("animation", "AnimationLoader: Preserving original bone names (identity remap)")
-		return remap
-
-	# Check for Mixamo format (bones start with "mixamorig")
-	var is_mixamo := false
 	for i in skeleton.get_bone_count():
 		var bone_name := skeleton.get_bone_name(i)
-		if bone_name.begins_with("mixamorig"):
-			is_mixamo = true
-			break
-
-	if is_mixamo:
-		# Apply Mixamo bone map
-		for i in skeleton.get_bone_count():
-			var bone_name := skeleton.get_bone_name(i)
-			if bone_name in _MIXAMO_BONE_MAP:
-				remap[bone_name] = _MIXAMO_BONE_MAP[bone_name]
-		Log.info("animation", "AnimationLoader: Detected Mixamo skeleton, mapped %d bones" % remap.size())
-	else:
-		# Unknown format - identity remap (bone names stay as-is)
-		for i in skeleton.get_bone_count():
-			var bone_name := skeleton.get_bone_name(i)
-			remap[bone_name] = bone_name
-		Log.info("animation", "AnimationLoader: Unknown skeleton format, using identity remap")
-
+		remap[bone_name] = bone_name
+	Log.info("animation", "AnimationLoader: Using identity bone remap (%d bones)" % remap.size())
 	return remap
 
 

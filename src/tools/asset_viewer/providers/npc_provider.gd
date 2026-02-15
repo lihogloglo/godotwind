@@ -5,7 +5,7 @@
 ## - Character assembly from body parts
 ## - Animation playback
 ## - Skeleton/bone inspection
-## - Mixamo skeleton for modern animation features
+## - Humanoid profile skeleton for modern animation features
 @warning_ignore("untyped_declaration", "unsafe_method_access", "unsafe_cast", "unsafe_call_argument")
 class_name NPCProvider
 extends AssetProvider
@@ -69,7 +69,7 @@ func initialize() -> Error:
 	# Initialize model loader
 	model_loader = ModelLoader.new()
 
-	# Initialize character factory (uses Mixamo skeleton internally)
+	# Initialize character factory (uses humanoid profile skeleton)
 	character_factory = CharacterFactoryV2.new()
 	character_factory.debug_characters = true
 	_log("CharacterFactoryV2 initialized")
@@ -250,7 +250,7 @@ func _build_settings_tab(container: Control, _item: Dictionary) -> void:
 	vbox.add_child(HSeparator.new())
 
 	var desc := Label.new()
-	desc.text = "Using Mixamo-compatible skeleton for:\n• AnimationTree support\n• Inverse Kinematics (IK)\n• Motion matching\n• Thousands of free Mixamo animations"
+	desc.text = "Using humanoid profile skeleton for:\n• AnimationTree support\n• Inverse Kinematics (IK)\n• Motion matching\n• GLB/FBX animation libraries (e.g. Quaternius)"
 	desc.add_theme_font_size_override("font_size", 12)
 	vbox.add_child(desc)
 
@@ -259,7 +259,7 @@ func _build_settings_tab(container: Control, _item: Dictionary) -> void:
 	# Status info
 	var status_label := Label.new()
 	if _last_character and _last_character.has_meta("uses_new_animation_system"):
-		status_label.text = "Current character: Mixamo skeleton + animation system"
+		status_label.text = "Current character: humanoid skeleton + animation system"
 	else:
 		status_label.text = "Current character: None loaded"
 	vbox.add_child(status_label)
@@ -333,7 +333,7 @@ func _build_animations_tab(container: Control, _item: Dictionary) -> void:
 
 	if anim_list.item_count == 0:
 		anim_list.add_item("(No animations loaded)")
-		info_label.text = "No animations - add GLB files to assets/animations/mixamo/"
+		info_label.text = "No animations - add GLB files to assets/characters/quaternius/"
 		play_btn.disabled = true
 		stop_btn.disabled = true
 

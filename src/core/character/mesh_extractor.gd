@@ -2,7 +2,7 @@
 ##
 ## This class extracts ONLY the mesh geometry from NIF files, without any
 ## skeleton or animation data. The geometry is converted to Godot's coordinate
-## system and prepared for rebinding to a Mixamo skeleton.
+## system and prepared for rebinding to a humanoid skeleton.
 ##
 ## Key difference from NIFConverter: We extract geometry in MESH-LOCAL space,
 ## not skeleton space. This allows clean rebinding to any skeleton.

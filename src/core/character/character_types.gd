@@ -1,6 +1,6 @@
 # Character Type System
 # Defines character types and spawn data structures for dual character pipeline
-# Routes character creation to appropriate factory (MW vs Mixamo)
+# Routes character creation to appropriate factory (MW vs Humanoid)
 
 class_name CharacterTypes
 extends RefCounted
@@ -8,7 +8,7 @@ extends RefCounted
 ## Character type enum - determines which factory to use
 enum Type {
 	MORROWIND,  ## MW skeleton + KF animations (xbase_anim.nif based)
-	MIXAMO,     ## Mixamo skeleton + FBX animations (native format)
+	HUMANOID,   ## Humanoid skeleton + GLB/FBX animations (e.g. Quaternius)
 }
 
 ## Spawn data for character creation - type-specific data routing
@@ -33,11 +33,11 @@ static func create_morrowind_spawn(pos: Vector3, rot: float, race: String, parts
 	}
 	return SpawnData.new(Type.MORROWIND, pos, rot, data)
 
-## Mixamo-specific spawn data helper
-static func create_mixamo_spawn(pos: Vector3, rot: float, fbx_path: String, equipment: Dictionary = {}) -> SpawnData:
+## Humanoid-specific spawn data helper
+static func create_humanoid_spawn(pos: Vector3, rot: float, model_path: String, equipment: Dictionary = {}) -> SpawnData:
 	var data := {
-		"fbx_path": fbx_path,      # Path to character FBX
+		"model_path": model_path,   # Path to character GLB/FBX
 		"equipment": equipment,     # Equipment attachment data
 		"customization": {},        # Color/material overrides (optional)
 	}
-	return SpawnData.new(Type.MIXAMO, pos, rot, data)
+	return SpawnData.new(Type.HUMANOID, pos, rot, data)

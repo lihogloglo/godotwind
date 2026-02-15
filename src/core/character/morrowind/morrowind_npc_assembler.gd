@@ -2,7 +2,7 @@
 ## Assembles Morrowind body parts onto the native Morrowind skeleton.
 ##
 ## KEY DESIGN:
-## - Uses native Morrowind skeleton (from xbase_anim.nif), NOT Mixamo
+## - Uses native Morrowind skeleton (from xbase_anim.nif)
 ## - Body parts attach directly — bone names and skinning data match
 ## - No skin rebinding needed (bones are native Bip01)
 ## - Bone renaming to profile names happens later in CharacterFactoryV2

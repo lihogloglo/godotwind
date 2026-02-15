@@ -1,6 +1,6 @@
-## IK + Animation Showcase — Demonstrates all IK features with Mixamo walk on a real NPC
+## IK + Animation Showcase — Demonstrates all IK features with walk animation on a real NPC
 ##
-## Spawns a Morrowind NPC via CharacterFactoryV2, loads Mixamo Walking animation,
+## Spawns a Morrowind NPC via CharacterFactoryV2, loads Quaternius Walking animation,
 ## and showcases foot IK (bumpy terrain), look-at IK (orbiting orb around head),
 ## and hand IK (floating cube that follows the character) all working together
 ## on an infinite straight walkway with procedurally generated obstacles.
@@ -17,7 +17,7 @@
 ##   2            — Toggle look-at IK
 ##   3            — Toggle hand IK
 ##   4            — Toggle walk (pause/resume NPC movement)
-##   M            — Switch Mixamo/Morrowind animations
+##   M            — Switch Quaternius/Morrowind animations
 ##   N            — Switch NPC (cycle presets)
 ##   D            — Dump debug info
 @tool
@@ -51,9 +51,9 @@ var _info_label: RichTextLabel
 var _look_orb: MeshInstance3D
 var _hand_cube: MeshInstance3D
 
-# Mixamo
-var _mixamo_library: AnimationLibrary = null
-var _using_mixamo: bool = false
+# External animation library (Quaternius)
+var _external_library: AnimationLibrary = null
+var _using_external: bool = false
 
 # NPC state
 var _current_npc_index: int = 0
@@ -121,21 +121,21 @@ func _ready() -> void:
 	CharacterFactoryV2Script.preload_character_assets()
 	_log("Preloaded in %d ms" % (Time.get_ticks_msec() - t))
 
-	# Load Mixamo Walking animation only
-	_log("Loading Mixamo Walking animation...")
-	_mixamo_library = AnimationLoaderScript.load_from_fbx("res://assets/animations/mixamo/Walking.fbx")
-	if _mixamo_library:
+	# Load Quaternius animations
+	_log("Loading Quaternius animation library...")
+	_external_library = AnimationLoaderScript.load_from_glb("res://assets/characters/quaternius/UAL2_Standard.glb")
+	if _external_library:
 		# Ensure loop + strip head/neck tracks so look-at IK can override them
 		# (AnimationTree processes in _process AFTER IK runs in _physics_process,
 		#  so walk's head track would overwrite look-at every frame)
-		for anim_name in _mixamo_library.get_animation_list():
-			var anim: Animation = _mixamo_library.get_animation(anim_name)
+		for anim_name in _external_library.get_animation_list():
+			var anim: Animation = _external_library.get_animation(anim_name)
 			anim.loop_mode = Animation.LOOP_LINEAR
 			_strip_bone_tracks(anim, ["Head", "Neck"])
 			_log("  %s: %.2fs, %d tracks (looped, head/neck stripped)" % [anim_name, anim.length, anim.get_track_count()])
-		_log("[color=green]Mixamo: %d animations[/color]" % _mixamo_library.get_animation_list().size())
+		_log("[color=green]Quaternius: %d animations[/color]" % _external_library.get_animation_list().size())
 	else:
-		_log("[color=yellow]No Walking animation found[/color]")
+		_log("[color=yellow]No Quaternius animations found — import GLB first[/color]")
 
 	# Create factory
 	_factory = CharacterFactoryV2Script.new()
@@ -144,9 +144,9 @@ func _ready() -> void:
 	_factory.enable_ik = true
 	_factory.enable_wander = false
 
-	# Spawn first NPC with Mixamo animations
+	# Spawn first NPC with Quaternius animations
 	_spawn_npc()
-	_switch_to_mixamo()
+	_switch_to_external()
 
 	_update_camera()
 
@@ -240,26 +240,26 @@ func _spawn_npc() -> void:
 	_update_live_info()
 
 
-func _switch_to_mixamo() -> void:
-	if not _mixamo_library or not _npc_node:
+func _switch_to_external() -> void:
+	if not _external_library or not _npc_node:
 		return
 
 	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
 	if not anim_player:
 		return
 
-	# Swap: current default -> "morrowind", mixamo -> default ""
+	# Swap: current default -> "morrowind", external -> default ""
 	var old_lib: AnimationLibrary = null
 	if anim_player.has_animation_library(""):
 		old_lib = anim_player.get_animation_library("")
 		anim_player.remove_animation_library("")
-	anim_player.add_animation_library("", _mixamo_library)
+	anim_player.add_animation_library("", _external_library)
 	if old_lib:
 		anim_player.add_animation_library("morrowind", old_lib)
 
-	_using_mixamo = true
+	_using_external = true
 	_rebuild_animation_tree()
-	_log("[color=green]Switched to Mixamo[/color]")
+	_log("[color=green]Switched to Quaternius[/color]")
 
 
 func _switch_to_morrowind() -> void:
@@ -276,10 +276,8 @@ func _switch_to_morrowind() -> void:
 		if anim_player.has_animation_library(""):
 			anim_player.remove_animation_library("")
 		anim_player.add_animation_library("", mw_lib)
-	if anim_player.has_animation_library("mixamo"):
-		anim_player.remove_animation_library("mixamo")
 
-	_using_mixamo = false
+	_using_external = false
 	_rebuild_animation_tree()
 	_log("[color=green]Switched to Morrowind[/color]")
 
@@ -760,15 +758,15 @@ func _input(event: InputEvent) -> void:
 					_npc_node.move_to(Vector3(0, 0, _walk_target_z))
 				_log("Auto-walk: %s (Z/S still works)" % ("ON" if _walk_enabled else "OFF"))
 			KEY_M:
-				if _using_mixamo:
+				if _using_external:
 					_switch_to_morrowind()
 				else:
-					_switch_to_mixamo()
+					_switch_to_external()
 			KEY_N:
 				_current_npc_index = (_current_npc_index + 1) % TEST_NPCS.size()
 				_spawn_npc()
-				if _using_mixamo:
-					_switch_to_mixamo()
+				if _using_external:
+					_switch_to_external()
 			KEY_D:
 				_dump_debug()
 			KEY_SPACE:
@@ -837,7 +835,7 @@ func _update_live_info() -> void:
 
 	# NPC info
 	lines.append("NPC: [color=cyan]%s[/color]" % TEST_NPCS[_current_npc_index])
-	lines.append("Animations: [color=cyan]%s[/color]" % ("Mixamo" if _using_mixamo else "Morrowind"))
+	lines.append("Animations: [color=cyan]%s[/color]" % ("Quaternius" if _using_external else "Morrowind"))
 
 	# IK toggles
 	lines.append("")

@@ -228,6 +228,10 @@ func _update_foot_ik(delta: float) -> void:
 	if not _left_foot_ik or not _right_foot_ik or not character_body:
 		return
 
+	# Disable foot IK during jump/fall
+	if not character_body.is_on_floor():
+		return
+
 	var left_foot_idx: int = _bone_indices.get(&"left_foot", -1)
 	var right_foot_idx: int = _bone_indices.get(&"right_foot", -1)
 
@@ -285,7 +289,9 @@ func _update_foot_ik(delta: float) -> void:
 	)
 
 	# Update pole positions (knees bend forward — place poles ahead of character)
-	var char_forward := -character_body.global_transform.basis.z
+	# Use skeleton's forward, NOT character_body's — the CharacterBody3D doesn't
+	# rotate in 3rd-person setups, only the visual mesh/skeleton does.
+	var char_forward := -skeleton.global_transform.basis.z
 	var knee_height_offset := Vector3.UP * 0.5
 	_left_foot_pole.global_position = left_foot_global + char_forward * 0.5 + knee_height_offset
 	_right_foot_pole.global_position = right_foot_global + char_forward * 0.5 + knee_height_offset
@@ -608,9 +614,19 @@ func _find_bone_indices() -> void:
 	if not skeleton:
 		return
 
+	# Try BoneMap metadata for reverse lookup (non-profile skeletons keep original names)
+	var bone_map: BoneMap = null
+	if skeleton.has_meta("bone_map"):
+		bone_map = skeleton.get_meta("bone_map") as BoneMap
+
 	for ik_key: StringName in _IK_TO_PROFILE:
 		var profile_bone: StringName = _IK_TO_PROFILE[ik_key]
 		var idx: int = skeleton.find_bone(profile_bone)
+		# Fallback: use BoneMap to find original bone name
+		if idx < 0 and bone_map:
+			var actual_name: StringName = bone_map.get_skeleton_bone_name(profile_bone)
+			if not actual_name.is_empty():
+				idx = skeleton.find_bone(actual_name)
 		if idx >= 0:
 			_bone_indices[ik_key] = idx
 

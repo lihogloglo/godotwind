@@ -95,6 +95,8 @@ var _blend_parameters: Dictionary = {
 	&"movement_direction": Vector2.ZERO,  # X = strafe, Y = forward/back
 	&"movement_speed": 0.0,               # 0 = idle, 1 = walk, 2 = run
 	&"is_grounded": true,
+	&"is_sprinting": false,
+	&"is_walking": false,
 }
 
 # Animation name mappings (state -> animation name)
@@ -103,6 +105,9 @@ var _state_animation_map: Dictionary = {}
 # One-shot state
 var _oneshot_active: bool = false
 var _oneshot_layer: StringName = &""
+
+# Whether the tree uses BlendSpace2D locomotion (vs simple state machine)
+var _has_blendspace: bool = false
 
 # Setup state
 var _is_setup: bool = false
@@ -321,8 +326,11 @@ func play_oneshot(animation: StringName, layer: StringName = LAYER_ACTION) -> vo
 	_oneshot_layer = layer
 
 
-## Update animation state based on velocity
-func update_from_velocity(velocity: Vector3, is_grounded: bool = true) -> void:
+## Update animation state based on velocity and input state.
+## input_direction, is_sprinting, is_walking are optional and used for BlendSpace2D.
+func update_from_velocity(velocity: Vector3, is_grounded: bool = true,
+		input_direction: Vector2 = Vector2.ZERO,
+		p_is_sprinting: bool = false, p_is_walking: bool = false) -> void:
 	# Calculate horizontal speed
 	var horizontal_velocity := Vector3(velocity.x, 0, velocity.z)
 	var speed := horizontal_velocity.length()
@@ -330,8 +338,11 @@ func update_from_velocity(velocity: Vector3, is_grounded: bool = true) -> void:
 	# Update blend parameters
 	set_blend_parameter(&"movement_speed", speed)
 	set_blend_parameter(&"is_grounded", is_grounded)
+	set_blend_parameter(&"movement_direction", input_direction)
+	set_blend_parameter(&"is_sprinting", p_is_sprinting)
+	set_blend_parameter(&"is_walking", p_is_walking)
 
-	# Determine target state based on speed and grounded state
+	# Determine target state
 	var target_state: StringName
 
 	if not is_grounded:
@@ -339,6 +350,9 @@ func update_from_velocity(velocity: Vector3, is_grounded: bool = true) -> void:
 			target_state = &"Jump"
 		else:
 			target_state = &"Fall"
+	elif _has_blendspace:
+		# BlendSpace2D mode: use Locomotion for all ground movement
+		target_state = &"Locomotion"
 	elif speed < idle_threshold:
 		target_state = &"Idle"
 	elif speed < walk_threshold:
@@ -349,8 +363,7 @@ func update_from_velocity(velocity: Vector3, is_grounded: bool = true) -> void:
 		target_state = &"Sprint"
 
 	# Fall back if target state has no animation mapped
-	if target_state not in _state_animation_map:
-		# Try nearby states: Idle→Walk, Walk→Idle, Run→Walk, Sprint→Run
+	if target_state not in _state_animation_map and target_state != &"Locomotion":
 		var fallbacks: Dictionary = {
 			&"Idle": [&"Walk"],
 			&"Walk": [&"Idle"],
@@ -462,18 +475,21 @@ func _create_animation_tree() -> void:
 
 
 ## Create the animation tree structure.
-## Currently: locomotion state machine only (full body).
-## Upper body blend + additive layers deferred until combat/spellcasting.
+## Detects directional animations and uses BlendSpace2D if available,
+## otherwise falls back to simple state machine.
 func _create_tree_structure() -> AnimationNodeBlendTree:
 	var root := AnimationNodeBlendTree.new()
 
-	# Locomotion state machine (base layer - full body)
-	var locomotion_sm := _create_locomotion_state_machine()
-	root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
+	if _has_directional_animations():
+		_has_blendspace = true
+		var locomotion_sm := _create_blendspace_state_machine()
+		root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
+	else:
+		_has_blendspace = false
+		var locomotion_sm := _create_locomotion_state_machine()
+		root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
 
-	# Connect locomotion directly to output
 	root.connect_node(&"output", 0, &"locomotion")
-
 	return root
 
 
@@ -545,6 +561,176 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 			sm.add_transition(from, to, transition)
 
 
+## Check if enough directional animations exist for BlendSpace2D
+func _has_directional_animations() -> bool:
+	if not animation_player:
+		return false
+	var required := ["walk_forward", "walk_left", "walk_right", "walk_backward"]
+	var found := 0
+	for req: String in required:
+		if not _find_animation_containing(req).is_empty():
+			found += 1
+	return found >= 4
+
+
+## Create a state machine that wraps a BlendSpace2D locomotion tree + jump/fall/land
+func _create_blendspace_state_machine() -> AnimationNodeStateMachine:
+	var sm := AnimationNodeStateMachine.new()
+
+	# Locomotion node: blend tree with walk/run/sprint BlendSpace2Ds
+	var loco_blend := _create_blendspace_blend_tree()
+	sm.add_node(&"Locomotion", loco_blend, Vector2(0, 0))
+
+	# Add Locomotion to state animation map so transition_to works
+	_state_animation_map[&"Locomotion"] = &"Locomotion"
+
+	# Jump/Fall/Land states
+	var jump_states := [&"Jump", &"Fall", &"Land"]
+	for state_name: StringName in jump_states:
+		var anim_name := _find_animation_for_state_name(state_name)
+		if not anim_name.is_empty():
+			var anim_node := AnimationNodeAnimation.new()
+			anim_node.animation = anim_name
+			sm.add_node(state_name, anim_node)
+
+	# Transitions
+	var transitions: Array[Array] = [
+		[&"Locomotion", &"Jump"],
+		[&"Jump", &"Fall"],
+		[&"Fall", &"Land"],
+		[&"Land", &"Locomotion"],
+		[&"Jump", &"Locomotion"],  # Land directly from jump
+		[&"Fall", &"Locomotion"],  # Land from fall
+	]
+	for trans: Array in transitions:
+		var from: StringName = trans[0]
+		var to: StringName = trans[1]
+		if sm.has_node(from) and sm.has_node(to):
+			var transition := AnimationNodeStateMachineTransition.new()
+			transition.xfade_time = default_blend_time
+			sm.add_transition(from, to, transition)
+
+	# Start -> Locomotion
+	var start_trans := AnimationNodeStateMachineTransition.new()
+	start_trans.advance_mode = AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO
+	sm.add_transition(&"Start", &"Locomotion", start_trans)
+
+	return sm
+
+
+## Create the BlendSpace2D blend tree for locomotion (walk/run/sprint blending)
+func _create_blendspace_blend_tree() -> AnimationNodeBlendTree:
+	var tree := AnimationNodeBlendTree.new()
+
+	# Walk BlendSpace2D (8 directions + idle center)
+	var walk_blend := _create_directional_blend_space("walk", true)
+	tree.add_node(&"WalkBlend", walk_blend, Vector2(-280, 100))
+
+	# Run BlendSpace2D
+	var run_blend := _create_directional_blend_space("run", false)
+	tree.add_node(&"RunBlend", run_blend, Vector2(-280, 360))
+
+	# WalkRunBlend: Blend2 between walk and run
+	var walk_run := AnimationNodeBlend2.new()
+	tree.add_node(&"WalkRunBlend", walk_run, Vector2(120, 240))
+	tree.connect_node(&"WalkRunBlend", 0, &"WalkBlend")
+	tree.connect_node(&"WalkRunBlend", 1, &"RunBlend")
+
+	# Sprint BlendSpace2D
+	var sprint_blend := _create_directional_blend_space("sprint", false)
+	tree.add_node(&"SprintBlend", sprint_blend, Vector2(-280, 620))
+
+	# SpeedBlend: Blend2 between WalkRun and Sprint
+	var speed_blend := AnimationNodeBlend2.new()
+	tree.add_node(&"SpeedBlend", speed_blend, Vector2(440, 380))
+	tree.connect_node(&"SpeedBlend", 0, &"WalkRunBlend")
+	tree.connect_node(&"SpeedBlend", 1, &"SprintBlend")
+
+	tree.connect_node(&"output", 0, &"SpeedBlend")
+	return tree
+
+
+## Create a BlendSpace2D with directional animation points
+func _create_directional_blend_space(tier: String, include_idle: bool) -> AnimationNodeBlendSpace2D:
+	var bs := AnimationNodeBlendSpace2D.new()
+	bs.auto_triangles = true
+	bs.set_blend_mode(AnimationNodeBlendSpace2D.BLEND_MODE_INTERPOLATED)
+
+	# Direction mappings: suffix -> Vector2 position in blend space
+	var directions: Dictionary = {
+		"_forward": Vector2(0, -1),
+		"_backward": Vector2(0, 1),
+		"_left": Vector2(-1, 0),
+		"_right": Vector2(1, 0),
+		"_forward_left": Vector2(-0.7, -0.7),
+		"_forward_right": Vector2(0.7, -0.7),
+		"_backward_left": Vector2(-0.7, 0.7),
+		"_backward_right": Vector2(0.7, 0.7),
+	}
+
+	# Add idle at center for walk tier
+	if include_idle:
+		var idle_anim := _find_animation_for_state_name(&"Idle")
+		if not idle_anim.is_empty():
+			var node := AnimationNodeAnimation.new()
+			node.animation = idle_anim
+			bs.add_blend_point(node, Vector2.ZERO)
+
+	for suffix: String in directions:
+		var anim_name := _find_animation_containing(tier + suffix)
+		if not anim_name.is_empty():
+			var node := AnimationNodeAnimation.new()
+			node.animation = anim_name
+			bs.add_blend_point(node, directions[suffix])
+
+	# If only forward exists, ensure at least that works
+	if bs.get_blend_point_count() < 2:
+		var forward_anim := _find_animation_for_state_name(
+			&"Walk" if tier == "walk" else (&"Run" if tier == "run" else &"Sprint"))
+		if not forward_anim.is_empty():
+			var node := AnimationNodeAnimation.new()
+			node.animation = forward_anim
+			bs.add_blend_point(node, Vector2(0, -1))
+
+	return bs
+
+
+## Find animation by substring match (case-insensitive)
+func _find_animation_containing(substring: String) -> StringName:
+	if not animation_player:
+		return &""
+	var sub_lower := substring.to_lower()
+	var animations := animation_player.get_animation_list()
+	# Exact match first
+	for anim: String in animations:
+		if sub_lower == anim.to_lower():
+			return StringName(anim)
+	# Word-boundary match (delimited by _ or start/end)
+	for anim: String in animations:
+		var anim_lower := anim.to_lower()
+		var pos := anim_lower.find(sub_lower)
+		if pos >= 0:
+			var before_ok := (pos == 0 or anim_lower[pos - 1] == "_")
+			var after_pos := pos + sub_lower.length()
+			var after_ok := (after_pos >= anim_lower.length() or anim_lower[after_pos] == "_")
+			if before_ok and after_ok:
+				return StringName(anim)
+	return &""
+
+
+## Set root motion track on AnimationTree
+func set_root_motion_track(bone_path: NodePath) -> void:
+	if animation_tree:
+		animation_tree.root_motion_track = bone_path
+		if debug_state_changes:
+			Log.debug("animation", "AnimationManager: Root motion track = %s" % bone_path)
+
+
+## Get the AnimationTree (for root motion queries)
+func get_animation_tree() -> AnimationTree:
+	return animation_tree
+
+
 ## Find animation name for a state (searches animation library)
 func _find_animation_for_state_name(state_name: StringName) -> StringName:
 	if not animation_player:
@@ -556,17 +742,17 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 		&"Idle":
 			search_terms = ["idle", "Idle"]
 		&"Walk":
-			search_terms = ["walk", "Walk"]
+			search_terms = ["walk", "Walk", "walking", "Walking"]
 		&"Run":
-			search_terms = ["run", "Run"]
+			search_terms = ["run", "Run", "running", "Running"]
 		&"Sprint":
-			search_terms = ["run", "Run", "sprint", "Sprint"]  # Fall back to run
+			search_terms = ["sprint", "Sprint", "sprinting", "Sprinting", "run", "Run", "running", "Running"]
 		&"Jump":
-			search_terms = ["jump", "Jump"]
+			search_terms = ["jump", "Jump", "jumping", "Jumping"]
 		&"Fall":
-			search_terms = ["fall", "Fall", "jumploop", "JumpLoop"]
+			search_terms = ["fall", "Fall", "falling", "Falling", "jumploop", "JumpLoop"]
 		&"Land":
-			search_terms = ["land", "Land", "jumpland", "JumpLand"]
+			search_terms = ["land", "Land", "landing", "Landing", "jumpland", "JumpLand"]
 		_:
 			search_terms = [state_name.to_lower(), state_name]
 
@@ -580,12 +766,19 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 			if anim.to_lower() == term_lower:
 				return StringName(anim)
 
-	# Pass 2: substring match (case-insensitive)
+	# Pass 2: word-boundary match (term must be delimited by _ or start/end)
+	# Prevents "run" from matching "sprinting_forward_roll"
 	for term in search_terms:
 		var term_lower := term.to_lower()
 		for anim in animations:
-			if term_lower in anim.to_lower():
-				return StringName(anim)
+			var anim_lower := anim.to_lower()
+			var pos := anim_lower.find(term_lower)
+			if pos >= 0:
+				var before_ok := (pos == 0 or anim_lower[pos - 1] == "_")
+				var after_pos := pos + term_lower.length()
+				var after_ok := (after_pos >= anim_lower.length() or anim_lower[after_pos] == "_")
+				if before_ok and after_ok:
+					return StringName(anim)
 
 	return &""
 
@@ -657,16 +850,15 @@ func _sync_blend_parameters() -> void:
 	if not animation_tree:
 		return
 
-	# Sync movement speed to blend space (if using BlendSpace)
-	var speed: float = _blend_parameters.get(&"movement_speed", 0.0)
-	var direction: Vector2 = _blend_parameters.get(&"movement_direction", Vector2.ZERO)
-
 	# Sync upper body blend weight for action animations
-	# When action is active, blend to 1.0; when not, blend to 0.0
 	var upper_blend_weight: float = 0.0
 	if _oneshot_active and _oneshot_layer == LAYER_ACTION:
 		upper_blend_weight = 1.0
 	animation_tree.set("parameters/upper_body_blend/blend_amount", upper_blend_weight)
+
+	# Sync BlendSpace2D parameters when using directional locomotion
+	if _has_blendspace:
+		_sync_blendspace_parameters()
 
 
 ## Check if one-shot animation is complete
@@ -684,3 +876,37 @@ func _check_oneshot_completion() -> void:
 		var anim_path := "parameters/%s_animation/animation" % _oneshot_layer
 		var anim_name: StringName = animation_tree.get(anim_path)
 		animation_finished.emit(anim_name)
+
+
+## Sync BlendSpace2D parameters for directional locomotion
+func _sync_blendspace_parameters() -> void:
+	var input_dir: Vector2 = _blend_parameters.get(&"movement_direction", Vector2.ZERO)
+	var p_is_walking: bool = _blend_parameters.get(&"is_walking", false)
+	var p_is_sprinting: bool = _blend_parameters.get(&"is_sprinting", false)
+
+	# Target blend position: input direction (Y negated for BlendSpace2D convention)
+	var target_blend := Vector2(input_dir.x, -input_dir.y)
+
+	# Smoothly update all BlendSpace2D positions
+	var blend_names := [&"WalkBlend", &"RunBlend", &"SprintBlend"]
+	for bs_name: StringName in blend_names:
+		var param_path := "parameters/locomotion/Locomotion/%s/blend_position" % bs_name
+		var current: Variant = animation_tree.get(param_path)
+		if current != null:
+			var smooth: Vector2 = (current as Vector2).lerp(target_blend, 0.16)
+			animation_tree.set(param_path, smooth)
+
+	# Walk/Run blend amount (0.0 = walk, 1.0 = run)
+	var walk_run_target := 0.0 if p_is_walking else 1.0
+	var walk_run_path := "parameters/locomotion/Locomotion/WalkRunBlend/blend_amount"
+	var current_wr: Variant = animation_tree.get(walk_run_path)
+	if current_wr != null:
+		animation_tree.set(walk_run_path, lerpf(current_wr as float, walk_run_target, 0.13))
+
+	# Speed blend (0.0 = walk/run, 1.0 = sprint)
+	var moving_backward := input_dir.y > 0
+	var speed_target := 1.0 if (p_is_sprinting and not moving_backward) else 0.0
+	var speed_path := "parameters/locomotion/Locomotion/SpeedBlend/blend_amount"
+	var current_sp: Variant = animation_tree.get(speed_path)
+	if current_sp != null:
+		animation_tree.set(speed_path, lerpf(current_sp as float, speed_target, 0.13))

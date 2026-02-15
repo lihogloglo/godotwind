@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://c4out2jbk3nhb"]
 
-[ext_resource type="Script" path="res://src/tools/ik_animation_showcase.gd" id="1_script"]
+[ext_resource type="Script" uid="uid://bvwb1n6pad3vr" path="res://src/tools/ik_animation_showcase.gd" id="1_script"]
 
-[node name="IKAnimationShowcase" type="Node3D"]
+[node name="IKAnimationShowcase" type="Node3D" unique_id=1057168645]
+process_priority = 100
 script = ExtResource("1_script")
