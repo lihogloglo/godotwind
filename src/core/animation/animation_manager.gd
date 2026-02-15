@@ -348,6 +348,26 @@ func update_from_velocity(velocity: Vector3, is_grounded: bool = true) -> void:
 	else:
 		target_state = &"Sprint"
 
+	# Fall back if target state has no animation mapped
+	if target_state not in _state_animation_map:
+		# Try nearby states: Idle→Walk, Walk→Idle, Run→Walk, Sprint→Run
+		var fallbacks: Dictionary = {
+			&"Idle": [&"Walk"],
+			&"Walk": [&"Idle"],
+			&"Run": [&"Walk", &"Sprint"],
+			&"Sprint": [&"Run", &"Walk"],
+			&"Jump": [&"Fall"],
+			&"Fall": [&"Jump"],
+		}
+		var found := false
+		for fb: StringName in fallbacks.get(target_state, []):
+			if fb in _state_animation_map:
+				target_state = fb
+				found = true
+				break
+		if not found:
+			return
+
 	# Transition if needed
 	transition_to(target_state)
 
@@ -474,11 +494,23 @@ func _create_locomotion_state_machine() -> AnimationNodeStateMachine:
 	# Add transitions
 	_add_locomotion_transitions(sm)
 
-	# Set start state
+	# Set start state: prefer Idle, fall back to Walk, then first available
+	var start_state: StringName = &""
 	if sm.has_node(&"Idle"):
+		start_state = &"Idle"
+	elif sm.has_node(&"Walk"):
+		start_state = &"Walk"
+	else:
+		# Use first available state
+		for state_name: StringName in states:
+			if sm.has_node(state_name):
+				start_state = state_name
+				break
+
+	if not start_state.is_empty():
 		var start_trans := AnimationNodeStateMachineTransition.new()
 		start_trans.advance_mode = AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO
-		sm.add_transition(&"Start", &"Idle", start_trans)
+		sm.add_transition(&"Start", start_state, start_trans)
 
 	return sm
 

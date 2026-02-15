@@ -404,7 +404,19 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --windowed --resolution 1280x720 src/tools/animation_integration_test.tscn)",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --windowed --resolution 800x600 src/tools/animation_integration_test.tscn -- --autotest)",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --windowed --resolution 1200x800 src/tools/animation_integration_test.tscn)",
-      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . src/tools/animation_integration_test.tscn)"
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . src/tools/animation_integration_test.tscn)",
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/animation_integration_test.tscn\")",
+      "Bash(\"/d/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" \"res://src/tools/animation_integration_test.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --headless src/tools/animation_integration_test.tscn -- --autotest)",
+      "Bash(\"/d/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --headless --quit)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --headless --script \"src/tools/mixamo_character_test.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --headless --check-only)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path . --verbose res://src/tools/mixamo_character_test.tscn)",
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path . --headless --script test_bone_names.gd)",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --quit --script \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\tests\\\\check_mixamo_bones.gd\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" \"src/tools/mixamo_character_test.tscn\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --script \"tests/inspect_fbx_keyframes.gd\")",
+      "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/mixamo_character_test.tscn\")"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",

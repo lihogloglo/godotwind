@@ -21,8 +21,7 @@ const CreatureAnimationSystemScript := preload("res://src/core/animation/creatur
 const CharacterAnimationSystemScript := preload("res://src/core/animation/character_animation_system.gd")
 const MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-const RetargetSetupScript := preload("res://src/core/animation/retarget_setup.gd")
-const AnimationLoaderScript := preload("res://src/core/animation/animation_loader.gd")
+const SkeletonUtils := preload("res://src/core/animation/skeleton_utils.gd")
 
 # Dependencies
 var model_loader: RefCounted = null  # ModelLoader
@@ -48,9 +47,6 @@ static var _beast_bone_remap: Dictionary = {}
 ## Track which animation cache entries have been remapped to profile names
 static var _remapped_cache_keys: Dictionary = {}
 
-## Mixamo retargeted animation library (shared across all NPCs)
-static var _mixamo_library: AnimationLibrary = null
-
 ## Cache statistics
 static var _anim_cache_hits: int = 0
 static var _anim_cache_misses: int = 0
@@ -62,7 +58,6 @@ var enable_procedural: bool = true
 var enable_lod: bool = true
 var enable_movement: bool = true
 var enable_wander: bool = false
-var enable_mixamo: bool = false  ## Load retargeted Mixamo animations as supplement
 
 @export_group("Debug")
 var debug_characters: bool = false
@@ -102,7 +97,6 @@ static func clear_all_caches() -> void:
 	_humanoid_bone_remap.clear()
 	_beast_bone_remap.clear()
 	_remapped_cache_keys.clear()
-	_mixamo_library = null
 	_anim_cache_hits = 0
 	_anim_cache_misses = 0
 
@@ -137,17 +131,13 @@ static func preload_character_assets() -> void:
 
 ## Build bone remaps from preloaded skeleton cache
 static func _preload_bone_remaps() -> void:
-	# Build remaps by creating temporary skeletons from the assembler cache
+	# Build remaps from cached skeletons (Bip01 → profile names)
 	for is_beast in [false, true]:
 		var key := "beast" if is_beast else "humanoid"
 		if key not in MorrowindNPCAssembler._skeleton_cache:
 			continue
 		var skel: Skeleton3D = MorrowindNPCAssembler._skeleton_cache[key]
-		# build_remap needs a BoneMap, which gets stored as metadata
-		# Use duplicate to avoid polluting the cached skeleton with metadata
-		var tmp := MorrowindNPCAssembler._duplicate_skeleton(skel)
-		var remap := RetargetSetupScript.build_remap(tmp)
-		tmp.free()
+		var remap := SkeletonUtils.build_remap(skel)
 
 		if is_beast:
 			_beast_bone_remap = remap
@@ -191,49 +181,6 @@ static func _preload_animation_library(kf_path: String, type_name: String, is_be
 			lib.add_animation(anim_name, animations[anim_name])
 		lib = _remap_and_cache_library(lib, cache_key, is_beast)
 		Log.info("animation", "  Parsed %s animations: %d" % [type_name, animations.size()])
-
-
-## Preload and retarget Mixamo animations for use on MW skeletons.
-## Must be called after preload_character_assets() (needs skeleton rest poses).
-## dir_path: path to directory containing FBX files (default: res://assets/animations/mixamo/)
-static func preload_mixamo_animations(skeleton: Skeleton3D, dir_path: String = "res://assets/animations/mixamo/") -> void:
-	if _mixamo_library:
-		return  # Already loaded
-
-	var dir := DirAccess.open(dir_path)
-	if not dir:
-		Log.info("animation", "CharacterFactoryV2: No Mixamo directory at %s — skipping" % dir_path)
-		return
-
-	var start := Time.get_ticks_msec()
-	var result := AnimationLoaderScript.load_from_directory_with_rest(dir_path)
-	if not result.has("library") or not result["library"]:
-		Log.info("animation", "CharacterFactoryV2: No Mixamo animations found in %s" % dir_path)
-		return
-
-	var raw_lib: AnimationLibrary = result["library"]
-	var source_rest: Dictionary = result.get("source_rest", {})
-	if source_rest.is_empty():
-		Log.warn("animation", "CharacterFactoryV2: Mixamo FBX has no skeleton rest — can't retarget")
-		return
-
-	# Use animation-derived rest (idle frame 0) instead of skeleton geometric rest.
-	# FBX importers may apply pre-rotations that don't match animation data.
-	# Pass source_rest as geometric rest for axis-corrected conjugation.
-	var anim_rest := AnimationLoaderScript.extract_anim_rest_poses(raw_lib, source_rest)
-	var target_rest := AnimationLoaderScript.get_skeleton_rest_poses(skeleton)
-
-	# Compute global idle orientations using actual MW skeleton hierarchy.
-	# The MW skeleton has intermediate bones (Bip01 Pelvis) between profile bones
-	# that the profile hierarchy doesn't know about.
-	var idle_quats := {}
-	for bone_name: String in target_rest:
-		idle_quats[bone_name] = target_rest[bone_name].basis.get_rotation_quaternion()
-	var target_global_idles := AnimationLoaderScript.compute_skeleton_global_idles(skeleton, idle_quats)
-
-	_mixamo_library = AnimationLoaderScript.retarget_library(raw_lib, anim_rest, target_rest, true, source_rest, target_global_idles)
-	Log.info("animation", "CharacterFactoryV2: Mixamo preloaded in %d ms (%d animations, retargeted)" % [
-		Time.get_ticks_msec() - start, _mixamo_library.get_animation_list().size()])
 
 
 ## Set up animation system on an already-assembled character.
@@ -301,7 +248,7 @@ func create_npc(npc_record: NPCRecord, ref_num: int = 0) -> CharacterBody3D:
 	_ensure_bone_remap(skeleton, is_beast)
 
 	# Rename skeleton bones to profile names (required for IK, blend masks, etc.)
-	var rename_map := RetargetSetupScript.rename_bones_to_profile(skeleton)
+	var rename_map := SkeletonUtils.rename_bones_to_profile(skeleton)
 
 	# Update BoneAttachment3D bone_name properties to match renamed skeleton.
 	# Attachments were created with Bip01 names during assembly; skeleton now has
@@ -551,11 +498,6 @@ func _load_character_animations(character_root: Node3D, skeleton: Skeleton3D, is
 					anim_player.add_animation_library("", new_lib)
 					loaded = true
 
-	# Add Mixamo animations as secondary library (if enabled and preloaded)
-	if loaded and enable_mixamo and _mixamo_library and not is_beast:
-		if not anim_player.has_animation_library("mixamo"):
-			anim_player.add_animation_library("mixamo", _mixamo_library)
-
 
 ## Load creature-specific animations
 func _load_creature_animations(character_root: Node3D, skeleton: Skeleton3D, creature_record: CreatureRecord) -> void:
@@ -787,7 +729,7 @@ static func _ensure_bone_remap(skeleton: Skeleton3D, is_beast: bool) -> Dictiona
 	if not cached.is_empty():
 		return cached
 
-	var remap := RetargetSetupScript.build_remap(skeleton)
+	var remap := SkeletonUtils.build_remap(skeleton)
 
 	if is_beast:
 		_beast_bone_remap = remap
@@ -807,11 +749,10 @@ static func _ensure_library_remapped(lib: AnimationLibrary, cache_key: String, i
 
 ## Remap a library's bone tracks from Bip01 → profile names, cache result.
 ## MW KF keyframes are absolute parent-local transforms — used directly as Godot bone poses.
-## See docs/ANIMATION_DIAGNOSTIC_HANDOFF.md for why rest-relative conversion was removed.
 static func _remap_and_cache_library(lib: AnimationLibrary, cache_key: String, is_beast: bool) -> AnimationLibrary:
 	var remap := _beast_bone_remap if is_beast else _humanoid_bone_remap
 	if not remap.is_empty():
-		lib = RetargetSetupScript.remap_library(lib, remap)
+		lib = SkeletonUtils.remap_library(lib, remap)
 
 	_animation_library_cache[cache_key] = lib
 	_remapped_cache_keys[cache_key] = true

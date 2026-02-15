@@ -11,8 +11,6 @@
 class_name AnimationBlendMask
 extends RefCounted
 
-const _SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
-
 # Predefined mask types matching OpenMW
 enum MaskType {
 	LOWER_BODY = 0,    # Legs and pelvis
@@ -78,8 +76,8 @@ func _build_mask(mask_type: int) -> Array[int]:
 			bones.append(i)
 		return bones
 
-	# Resolve profile name to actual skeleton bone via BoneMap
-	var root_idx := _SPA.get_bone_index(_skeleton, profile_bone)
+	# Find bone by profile name (skeleton should have profile-named bones after renaming)
+	var root_idx: int = _skeleton.find_bone(profile_bone)
 	if root_idx < 0:
 		if debug_mode:
 			push_warning("AnimationBlendMask: Could not find bone for profile '%s' (mask %d)" % [

@@ -13,7 +13,6 @@ extends "res://src/core/animation/character_animation_system.gd"
 # Preload for constants access
 const _AnimationManagerScript := preload("res://src/core/animation/animation_manager.gd")
 const _ProceduralModifierScript := preload("res://src/core/animation/procedural_modifier_controller.gd")
-const _SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
 
 # Humanoid-specific signals
 signal combat_mode_changed(enabled: bool)
@@ -64,24 +63,19 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null,
 	_configure_humanoid_ik()
 
 
-## Build bone name mapping using _SPA
+## Build bone name mapping (skeleton should have profile-named bones after renaming)
 func _build_bone_map() -> void:
 	if not skeleton:
 		return
 
-	var bone_map := _SPA.create_bone_map(skeleton)
-	if not bone_map:
-		return
-
 	# Populate _bone_map: profile_name -> bone_index
-	var profile := bone_map.profile
+	# Skeleton bones have already been renamed to profile names by CharacterFactory
+	var profile := SkeletonProfileHumanoid.new()
 	for i in profile.bone_size:
 		var profile_name := profile.get_bone_name(i)
-		var skel_name := bone_map.get_skeleton_bone_name(profile_name)
-		if not skel_name.is_empty():
-			var idx := skeleton.find_bone(skel_name)
-			if idx >= 0:
-				_bone_map[profile_name] = idx
+		var idx: int = skeleton.find_bone(profile_name)
+		if idx >= 0:
+			_bone_map[profile_name] = idx
 
 
 ## Configure IK for humanoid skeleton

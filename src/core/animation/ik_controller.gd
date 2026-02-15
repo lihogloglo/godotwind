@@ -9,7 +9,6 @@
 class_name IKController
 extends Node
 
-const _SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
 const _LookAtIKModifierScript := preload("res://src/core/animation/look_at_modifier.gd")
 
 # Signals
@@ -604,16 +603,14 @@ const _IK_TO_PROFILE := {
 }
 
 
-## Find all relevant bone indices via _SPA
+## Find all relevant bone indices (skeleton should have profile-named bones)
 func _find_bone_indices() -> void:
 	if not skeleton:
 		return
 
-	_SPA.create_bone_map(skeleton)
-
 	for ik_key: StringName in _IK_TO_PROFILE:
 		var profile_bone: StringName = _IK_TO_PROFILE[ik_key]
-		var idx := _SPA.get_bone_index(skeleton, profile_bone)
+		var idx: int = skeleton.find_bone(profile_bone)
 		if idx >= 0:
 			_bone_indices[ik_key] = idx
 
