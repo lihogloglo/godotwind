@@ -32,7 +32,7 @@ class CompiledPattern:
 static var _instance: CollisionShapeLibrary = null
 
 ## Exact item ID -> ShapeType mappings (case-insensitive keys)
-var _item_shapes: Dictionary = {}
+var _item_shapes: Dictionary[String, ShapeType] = {}
 
 ## Compiled patterns for pattern matching (ordered, first match wins)
 var _patterns: Array[CompiledPattern] = []

@@ -49,7 +49,7 @@ var skeleton: Skeleton3D = null
 var character_body: CharacterBody3D = null
 
 # Bone indices (populated during setup)
-var _bone_indices: Dictionary = {}
+var _bone_indices: Dictionary[StringName, int] = {}
 
 # IK nodes (Godot 4.6 TwoBoneIK3D — auto-solves as SkeletonModifier3D)
 var _left_foot_ik: TwoBoneIK3D = null

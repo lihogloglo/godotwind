@@ -36,9 +36,9 @@ const FADE_LOD2_LOD3: float = DU.FADE_MARGIN_LOD2_LOD3  # 15.0
 const FADE_LOD3_FAR: float = DU.FADE_MARGIN_LOD3_FAR    # 20.0
 
 ## Sub-LOD boundaries within MID tier
-const LOD1_END: float = 250.0   # LOD0 -> LOD1 at 150-250m
-const LOD2_END: float = 375.0   # LOD1 -> LOD2 at 250-375m
-const LOD3_END: float = 500.0   # LOD2 -> LOD3 at 375-500m (then -> impostor)
+const LOD1_END: float = DU.LOD1_END
+const LOD2_END: float = DU.LOD2_END
+const LOD3_END: float = DU.LOD3_END
 
 #endregion
 
@@ -308,17 +308,17 @@ static func _configure_mid_static(mesh_instance: GeometryInstance3D, lod_level: 
 	match lod_level:
 		1:
 			begin_dist = DU.NEAR_END
-			end_dist = 250.0
+			end_dist = DU.LOD1_END
 			begin_margin = DU.FADE_MARGIN_NEAR_LOD1
 			end_margin = DU.FADE_MARGIN_LOD1_LOD2
 		2:
-			begin_dist = 250.0
-			end_dist = 375.0
+			begin_dist = DU.LOD1_END
+			end_dist = DU.LOD2_END
 			begin_margin = DU.FADE_MARGIN_LOD1_LOD2
 			end_margin = DU.FADE_MARGIN_LOD2_LOD3
 		3:
-			begin_dist = 375.0
-			end_dist = DU.MID_END
+			begin_dist = DU.LOD2_END
+			end_dist = DU.LOD3_END
 			begin_margin = DU.FADE_MARGIN_LOD2_LOD3
 			end_margin = DU.FADE_MARGIN_LOD3_FAR
 		_:

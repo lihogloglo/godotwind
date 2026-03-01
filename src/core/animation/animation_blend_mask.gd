@@ -31,7 +31,7 @@ const BLEND_MASK_ROOTS := {
 }
 
 # Cached bone indices for each mask type
-var _mask_bones: Dictionary = {}  # MaskType -> Array[int]
+var _mask_bones: Dictionary[int, Array] = {}  # MaskType -> Array[int]
 
 # Reference skeleton
 var _skeleton: Skeleton3D = null
@@ -128,24 +128,6 @@ func create_filter_array(mask_type: int) -> PackedInt32Array:
 	return filter
 
 
-## Get bone weights for smooth blending between masks
-## Returns weight 0.0-1.0 for each bone based on mask
-func get_bone_weights(mask_type: int) -> PackedFloat32Array:
-	if not _skeleton:
-		return PackedFloat32Array()
-
-	var weights := PackedFloat32Array()
-	weights.resize(_skeleton.get_bone_count())
-	weights.fill(0.0)
-
-	var mask_bones: Array[int] = get_mask_bones(mask_type)
-	for bone_idx: int in mask_bones:
-		if bone_idx >= 0 and bone_idx < weights.size():
-			weights[bone_idx] = 1.0
-
-	return weights
-
-
 ## Blend two masks together
 ## Returns combined bone indices
 func blend_masks(mask_a: int, mask_b: int) -> Array[int]:
@@ -191,7 +173,18 @@ func get_lower_body_only() -> Array[int]:
 
 ## Get upper body bones (torso + both arms)
 func get_upper_body() -> Array[int]:
-	return blend_masks(MaskType.TORSO, blend_masks(MaskType.LEFT_ARM, MaskType.RIGHT_ARM)[0])
+	var torso: Array[int] = get_mask_bones(MaskType.TORSO)
+	var left_arm: Array[int] = get_mask_bones(MaskType.LEFT_ARM)
+	var right_arm: Array[int] = get_mask_bones(MaskType.RIGHT_ARM)
+
+	var combined: Array[int] = torso.duplicate()
+	for bone: int in left_arm:
+		if bone not in combined:
+			combined.append(bone)
+	for bone: int in right_arm:
+		if bone not in combined:
+			combined.append(bone)
+	return combined
 
 
 ## Check if skeleton is valid for blend masks

@@ -2,9 +2,8 @@
 ##
 ## CharacterBody3D-based player controller with:
 ## - SpringArm3D orbit camera with collision avoidance
-## - Walk/Run/Sprint speed tiers with analog stick support
 ## - First/third-person camera toggle with smooth transition
-## - Root motion or velocity-driven movement
+## - Move-as-Node state machine for movement + combat (via MoveContainer)
 ## - Character model + animation system integration
 ## - Freeze/unfreeze for dialogue, cutscenes
 ## - IK wiring (foot, look-at, hand) via CharacterAnimationSystem
@@ -112,6 +111,9 @@ var character_root: Node3D
 ## Animation system (set via attach_character)
 var animation_system: Node
 
+## Input gatherer (creates InputPackage each frame for MoveContainer)
+var _input_gatherer: Node = null  # PlayerInputGatherer
+
 #endregion
 
 
@@ -185,7 +187,7 @@ func _physics_process(delta: float) -> void:
 	if not enabled:
 		return
 
-	_handle_gravity_and_jump(delta)
+	# Camera (always updated regardless of movement mode)
 	_handle_camera_transition(delta)
 	_handle_controller_camera(delta)
 
@@ -194,27 +196,16 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		return
 
-	_handle_movement_input()
-
-	if camera_mode == CameraMode.THIRD_PERSON:
-		_handle_character_rotation(delta)
-
-	if use_root_motion:
-		_apply_root_motion(delta)
-	else:
-		_apply_velocity_movement()
-
-	move_and_slide()
+	# Gather input and let MoveContainer handle movement + animation
+	if _input_gatherer and animation_system:
+		var input: Resource = _input_gatherer.gather_input()
+		if animation_system.has_method("process_moves"):
+			animation_system.process_moves(input, delta)
 
 	# Landing detection
 	if is_on_floor() and not _was_on_floor:
 		landed.emit()
 	_was_on_floor = is_on_floor()
-
-	# Update animation system
-	if animation_system and animation_system.has_method("update_from_movement"):
-		animation_system.update_from_movement(
-			velocity, is_on_floor(), input_direction, is_sprinting, is_walking)
 
 	# Update look-at IK target
 	if camera_mode == CameraMode.THIRD_PERSON:
@@ -292,6 +283,17 @@ func _setup_camera() -> void:
 	spring_arm.add_child(camera)
 
 
+## Create and wire up the PlayerInputGatherer
+func _setup_input_gatherer() -> void:
+	if _input_gatherer:
+		_input_gatherer.queue_free()
+	var GathererClass := preload("res://src/core/character/controller/player_input_gatherer.gd")
+	_input_gatherer = GathererClass.new()
+	_input_gatherer.name = "InputGatherer"
+	_input_gatherer.camera_pivot = camera_pivot
+	add_child(_input_gatherer)
+
+
 ## Register required input actions if they don't exist
 func _ensure_input_actions() -> void:
 	var actions: Dictionary = {
@@ -333,6 +335,9 @@ func attach_character(character: Node3D, anim_sys: Node = null) -> void:
 	# Wire IK controller to use this CharacterBody3D for raycasts
 	if anim_sys and anim_sys.has_method("set_character_body"):
 		anim_sys.set_character_body(self)
+
+	# Create input gatherer (reads hardware input into InputPackage)
+	_setup_input_gatherer()
 
 	# Default to third person when character is attached
 	set_camera_mode(CameraMode.THIRD_PERSON)
@@ -408,76 +413,11 @@ func set_root_motion(p_enabled: bool) -> void:
 
 
 # =============================================================================
-# MOVEMENT
+# MOVEMENT (legacy — kept for fallback when MoveContainer is not active)
 # =============================================================================
-
-func _handle_gravity_and_jump(delta: float) -> void:
-	if not is_on_floor():
-		velocity += get_gravity() * delta
-		is_jumping = velocity.y > 0
-	else:
-		is_jumping = false
-
-	if not frozen and Input.is_action_just_pressed("jump") and is_on_floor():
-		velocity.y = jump_velocity
-		is_jumping = true
-
-
-func _handle_movement_input() -> void:
-	input_direction = Input.get_vector("move_left", "move_right", "move_forward", "move_backward")
-	input_strength = minf(input_direction.length(), 1.0)
-
-	var cam_basis := Basis(Vector3.UP, camera_pivot.rotation.y)
-	direction = (cam_basis * Vector3(input_direction.x, 0, input_direction.y)).normalized()
-
-
-func _handle_character_rotation(delta: float) -> void:
-	if not character_root or direction == Vector3.ZERO:
-		return
-	var target_angle := atan2(direction.x, direction.z) + character_facing_offset
-	character_root.rotation.y = lerp_angle(
-		character_root.rotation.y, target_angle, rotation_speed * delta)
-
-
-func _apply_velocity_movement() -> void:
-	var is_moving := input_direction != Vector2.ZERO and is_on_floor()
-	is_sprinting = Input.is_action_pressed("sprint") and is_moving and not Input.is_action_pressed("walk")
-	is_walking = Input.is_action_pressed("walk") and is_moving and not Input.is_action_pressed("sprint") and can_walk
-
-	var current_speed: float
-	if is_sprinting:
-		current_speed = sprint_speed
-	elif is_walking:
-		current_speed = walk_speed
-	else:
-		current_speed = run_speed
-
-	if direction != Vector3.ZERO:
-		velocity.x = direction.x * current_speed * input_strength
-		velocity.z = direction.z * current_speed * input_strength
-	else:
-		velocity.x = move_toward(velocity.x, 0, current_speed)
-		velocity.z = move_toward(velocity.z, 0, current_speed)
-
-
-func _apply_root_motion(_delta: float) -> void:
-	# Set sprint/walk flags even in root motion mode
-	var is_moving := input_direction != Vector2.ZERO and is_on_floor()
-	is_sprinting = Input.is_action_pressed("sprint") and is_moving
-	is_walking = Input.is_action_pressed("walk") and is_moving and can_walk
-
-	# Get root motion from AnimationTree
-	var anim_tree: AnimationTree = _get_animation_tree()
-	if anim_tree and is_on_floor() and input_direction != Vector2.ZERO:
-		var root_motion_pos := anim_tree.get_root_motion_position()
-		# Transform root motion from skeleton space to world space
-		if character_root:
-			root_motion_pos = character_root.global_transform.basis * root_motion_pos
-		velocity.x = root_motion_pos.x / _delta if _delta > 0 else 0.0
-		velocity.z = root_motion_pos.z / _delta if _delta > 0 else 0.0
-	elif is_on_floor():
-		velocity.x = move_toward(velocity.x, 0, run_speed)
-		velocity.z = move_toward(velocity.z, 0, run_speed)
+# Movement is now handled by individual Move nodes (IdleMove, RunMove, etc.)
+# via the MoveContainer in CharacterAnimationSystem. These methods are kept
+# for backwards compatibility when enable_moves=false.
 
 
 func _handle_frozen_movement() -> void:

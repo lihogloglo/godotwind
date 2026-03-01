@@ -197,7 +197,7 @@ func _generate_region_controlmap_with_blending(region_coord: Vector2i) -> Image:
 
 	# Pre-cache LAND records for this region + 1-cell border for neighbor sampling
 	# This matches OpenMW's LandCache approach: startCellX - 1, startCellY - 1, +2 buffer
-	var land_cache: Dictionary = {}  # Vector2i -> LandRecord
+	var land_cache: Dictionary[Vector2i, LandRecord] = {}
 	for cache_y in range(-1, CELLS_PER_REGION + 1):
 		for cache_x in range(-1, CELLS_PER_REGION + 1):
 			var cell_coord := Vector2i(sw_cell.x + cache_x, sw_cell.y + cache_y)
@@ -257,7 +257,7 @@ func _sample_texture_bilinear(
 	cell_coord: Vector2i,
 	tex_x_f: float,
 	tex_y_f: float,
-	land_cache: Dictionary
+	land_cache: Dictionary[Vector2i, LandRecord]
 ) -> float:
 	# Get the 4 surrounding texture cells for bilinear interpolation
 	var tx0 := int(floorf(tex_x_f))
@@ -324,7 +324,7 @@ func _get_texture_slot_at(
 	cell_coord: Vector2i,
 	tx: int,
 	ty: int,
-	land_cache: Dictionary
+	land_cache: Dictionary[Vector2i, LandRecord]
 ) -> int:
 	# Determine which cell this texture coordinate belongs to
 	var actual_cell := cell_coord
@@ -447,9 +447,9 @@ func get_height_at_position(world_pos: Vector3) -> float:
 
 func get_all_terrain_regions() -> Array[Vector2i]:
 	var regions: Array[Vector2i] = []
-	var seen: Dictionary = {}
+	var seen: Dictionary[Vector2i, bool] = {}
 
-	for key: Variant in ESMManager.lands:
+	for key: String in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
 		if land and land.has_heights():
 			var region := _cell_to_region(Vector2i(land.cell_x, land.cell_y))
@@ -479,7 +479,7 @@ func _calculate_world_bounds() -> void:
 	var min_y := 999999
 	var max_y := -999999
 
-	for key: Variant in ESMManager.lands:
+	for key: String in ESMManager.lands:
 		var land: LandRecord = ESMManager.lands[key]
 		if land:
 			min_x = mini(min_x, land.cell_x)

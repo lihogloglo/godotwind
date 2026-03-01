@@ -9,72 +9,12 @@
 class_name MorrowindCharacterSystem
 extends "res://src/core/animation/humanoid_animation_system.gd"
 
+# Preload dependencies
+const SkeletonUtilsScript := preload("res://src/core/animation/skeleton_utils.gd")
+
 # _AnimationManagerScript is inherited from parent class
 
-# Morrowind bone name mapping — REFERENCE ONLY
-# Runtime bone mapping uses SkeletonProfileAdapter (auto-detects Morrowind Bip01).
-# Kept here for documentation of the Morrowind → humanoid bone correspondence.
-const MORROWIND_BONE_MAP: Dictionary = {
-	# Root/Hips
-	"Bip01": &"Hips",
-	"bip01": &"Hips",
-
-	# Spine chain
-	"Bip01 Spine": &"Spine",
-	"bip01 spine": &"Spine",
-	"Bip01 Spine1": &"Spine1",
-	"bip01 spine1": &"Spine1",
-	"Bip01 Spine2": &"Spine2",
-	"bip01 spine2": &"Spine2",
-
-	# Head/Neck
-	"Bip01 Neck": &"Neck",
-	"bip01 neck": &"Neck",
-	"Bip01 Head": &"Head",
-	"bip01 head": &"Head",
-
-	# Left Arm
-	"Bip01 L Clavicle": &"LeftShoulder",
-	"bip01 l clavicle": &"LeftShoulder",
-	"Bip01 L UpperArm": &"LeftUpperArm",
-	"bip01 l upperarm": &"LeftUpperArm",
-	"Bip01 L Forearm": &"LeftLowerArm",
-	"bip01 l forearm": &"LeftLowerArm",
-	"Bip01 L Hand": &"LeftHand",
-	"bip01 l hand": &"LeftHand",
-
-	# Right Arm
-	"Bip01 R Clavicle": &"RightShoulder",
-	"bip01 r clavicle": &"RightShoulder",
-	"Bip01 R UpperArm": &"RightUpperArm",
-	"bip01 r upperarm": &"RightUpperArm",
-	"Bip01 R Forearm": &"RightLowerArm",
-	"bip01 r forearm": &"RightLowerArm",
-	"Bip01 R Hand": &"RightHand",
-	"bip01 r hand": &"RightHand",
-
-	# Left Leg
-	"Bip01 L Thigh": &"LeftUpperLeg",
-	"bip01 l thigh": &"LeftUpperLeg",
-	"Bip01 L Calf": &"LeftLowerLeg",
-	"bip01 l calf": &"LeftLowerLeg",
-	"Bip01 L Foot": &"LeftFoot",
-	"bip01 l foot": &"LeftFoot",
-	"Bip01 L Toe0": &"LeftToes",
-	"bip01 l toe0": &"LeftToes",
-
-	# Right Leg
-	"Bip01 R Thigh": &"RightUpperLeg",
-	"bip01 r thigh": &"RightUpperLeg",
-	"Bip01 R Calf": &"RightLowerLeg",
-	"bip01 r calf": &"RightLowerLeg",
-	"Bip01 R Foot": &"RightFoot",
-	"bip01 r foot": &"RightFoot",
-	"Bip01 R Toe0": &"RightToes",
-	"bip01 r toe0": &"RightToes",
-}
-
-# Morrowind animation name mapping
+# Character info
 # Maps animation states to Morrowind animation names
 const MORROWIND_ANIM_MAP: Dictionary = {
 	&"Idle": ["idle", "Idle"],
@@ -126,13 +66,26 @@ func find_morrowind_animation(state: StringName) -> StringName:
 	var search_terms: Array = MORROWIND_ANIM_MAP.get(state, [state])
 
 	for term: String in search_terms:
-		for anim: String in animations:
-			if anim.to_lower() == term.to_lower():
-				return StringName(anim)
-			if term.to_lower() in anim.to_lower():
+		var term_lower := term.to_lower()
+
+		# Pass 1: exact match (case-insensitive)
+		for anim in animations:
+			if anim.to_lower() == term_lower:
 				return StringName(anim)
 
+		# Pass 2: word-boundary match (term must be delimited by _ or start/end)
+		for anim in animations:
+			var anim_lower := anim.to_lower()
+			var pos := anim_lower.find(term_lower)
+			if pos >= 0:
+				var before_ok := (pos == 0 or anim_lower[pos - 1] == "_")
+				var after_pos := pos + term_lower.length()
+				var after_ok := (after_pos >= anim_lower.length() or anim_lower[after_pos] == "_")
+				if before_ok and after_ok:
+					return StringName(anim)
+
 	return &""
+
 
 
 ## Check if character is female
@@ -198,7 +151,7 @@ func play_magic_effect(effect_type: StringName) -> void:
 		anim_mgr.play_oneshot(anim_name, _AnimationManagerScript.LAYER_ACTION)
 
 
-## Find animation containing a substring
+## Find animation containing a substring (word-boundary aware)
 func _find_animation_containing(substring: String) -> StringName:
 	var anim_mgr: _AnimationManagerScript = animation_manager as _AnimationManagerScript
 	if not anim_mgr or not anim_mgr.animation_player:
@@ -207,9 +160,21 @@ func _find_animation_containing(substring: String) -> StringName:
 	var animations: PackedStringArray = anim_mgr.animation_player.get_animation_list()
 	var substring_lower := substring.to_lower()
 
+	# Pass 1: Exact match
 	for anim: String in animations:
-		if substring_lower in anim.to_lower():
+		if anim.to_lower() == substring_lower:
 			return StringName(anim)
+
+	# Pass 2: Word-boundary match
+	for anim: String in animations:
+		var anim_lower := anim.to_lower()
+		var pos := anim_lower.find(substring_lower)
+		if pos >= 0:
+			var before_ok := (pos == 0 or anim_lower[pos - 1] == "_")
+			var after_pos := pos + substring_lower.length()
+			var after_ok := (after_pos >= anim_lower.length() or anim_lower[after_pos] == "_")
+			if before_ok and after_ok:
+				return StringName(anim)
 
 	return &""
 

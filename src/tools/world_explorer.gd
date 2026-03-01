@@ -53,6 +53,7 @@ const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 const LodTransitionTestScript := preload("res://src/tools/lod_transition_test.gd")
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
+const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -109,6 +110,7 @@ var _env_controls: EnvironmentControls = null  # EnvironmentControls (shader eff
 var _stats_collector: StatsCollector = null  # StatsCollector (panel label updates)
 var _terrain_preprocessor: TerrainPreprocessor = null  # TerrainPreprocessor (terrain baking)
 var background_processor: BackgroundProcessor = null  # BackgroundProcessor for async loading
+var mod_registry: ModRegistry = null  # ModRegistry for mod loading
 var console: Console = null  # Developer console
 var test_runner: Node = null  # Automated test runner (AutomatedTestRunner)
 var diagnostic_overlay: Node = null  # Real-time streaming diagnostics (DiagnosticOverlay)
@@ -200,24 +202,48 @@ func _ready() -> void:
 
 
 func _init_async() -> void:
+	# Initialize ModRegistry
+	await _update_loading(2, "Initializing mod registry...")
+	mod_registry = ModRegistryScript.new()
+	var mod_err := mod_registry.load_manifest()
+	if mod_err == OK:
+		_log("Mod registry initialized (%d mods)" % mod_registry.total_mods_loaded)
+	else:
+		_log("[color=yellow]Warning: Mod registry failed to load manifest (error %d)[/color]" % mod_err)
+
 	# Load BSA archives
 	await _update_loading(5, "Loading BSA archives...")
+	# 1. Load vanilla BSAs
 	var bsa_count := BSAManager.load_archives_from_directory(_data_path)
-	_log("Loaded %d BSA archives" % bsa_count)
+	
+	# 2. Load mod BSAs
+	var mod_bsas := mod_registry.get_bsa_load_order()
+	for bsa_path in mod_bsas:
+		if BSAManager.load_archive(bsa_path) == OK:
+			bsa_count += 1
+			
+	_log("Loaded %d BSA archives (vanilla + mods)" % bsa_count)
 
 	# Initialize background processor for async loading
 	background_processor = BackgroundProcessorScript.new()
 	background_processor.name = "BackgroundProcessor"
 	add_child(background_processor)
 	cell_manager.set_background_processor(background_processor)
+	
+	# Register mod registry with loaders that need asset resolution
+	if cell_manager.has_method("set_mod_registry"):
+		cell_manager.call("set_mod_registry", mod_registry)
+		
 	_log("Background processor initialized for async cell loading")
 
 	# Pre-warm BSA cache with common files (improves cell loading performance)
 	await _update_loading(10, "Pre-warming file cache...")
 	_prewarm_bsa_cache()
 
-	# Load ESM file
-	await _update_loading(30, "Loading ESM file...")
+	# Load ESM/ESP files
+	await _update_loading(30, "Loading game data (ESM/ESPs)...")
+	
+	# 1. Load primary ESM
 	var esm_file: String = SettingsManager.get_esm_file()
 	var esm_path := _data_path.path_join(esm_file)
 	var error := ESMManager.load_file(esm_path)
@@ -226,8 +252,15 @@ func _init_async() -> void:
 		_log("[color=red]ERROR: Failed to load ESM: %s[/color]" % error_string(error))
 		_hide_loading()
 		return
+		
+	# 2. Load mod ESPs
+	var mod_esps := mod_registry.get_esp_load_order()
+	for esp_path in mod_esps:
+		var esp_err := ESMManager.load_file(esp_path)
+		if esp_err != OK:
+			_log("[color=yellow]Warning: Failed to load mod ESP: %s[/color]" % esp_path.get_file())
 
-	_log("[color=green]ESM loaded successfully[/color]")
+	_log("[color=green]Game data loaded successfully[/color]")
 	_log("LAND records: %d, CELL records: %d" % [ESMManager.lands.size(), ESMManager.cells.size()])
 
 	# Initialize Terrain3D
@@ -654,10 +687,7 @@ func _setup_visibility_toggles() -> void:
 		"show_sky_toggled": _env_controls.on_show_sky_toggled,
 		"resolution_changed": _on_resolution_changed,
 		"water_quality_changed": _ocean_controls.on_water_quality_changed,
-		"wind_speed_changed": _ocean_controls.on_wind_speed_changed,
-		"wind_dir_changed": _ocean_controls.on_wind_dir_changed,
 		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
-		"choppiness_changed": _ocean_controls.on_choppiness_changed,
 		"debug_shore_toggled": _ocean_controls.on_debug_shore_toggled,
 		"fog_toggled": _env_controls.on_fog_effect_toggled,
 		"fog_intensity_changed": _env_controls.on_fog_intensity_changed,

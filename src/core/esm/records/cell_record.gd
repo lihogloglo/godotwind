@@ -42,7 +42,7 @@ var map_color: int
 var ref_num_counter: int
 
 # Cell references - objects placed in this cell
-var references: Array = []  # Array of CellReference objects
+var references: Array[CellReference] = []  # Array of CellReference objects
 
 # File context for lazy loading of cell contents
 var context_positions: Array[int]  # File positions for each content file

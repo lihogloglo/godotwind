@@ -47,7 +47,7 @@ func set_world_streaming_manager(wsm: Node3D) -> void:
 ## Collect stats from all sources and update panel labels.
 ## [param state] Dictionary with world_explorer state:
 ##   camera_mode_str: String, view_distance: int
-func update(state: Dictionary) -> void:
+func update(state: Dictionary[String, Variant]) -> void:
 	var stats: Dictionary = {}
 	if _world_streaming_manager:
 		stats = _world_streaming_manager.get_stats()

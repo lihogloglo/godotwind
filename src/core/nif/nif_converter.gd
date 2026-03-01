@@ -179,11 +179,11 @@ var _source_path: String = ""
 var collision_item_id: String = ""
 
 # Cache for converted resources
-var _mesh_cache: Dictionary = {}  # record_index -> ArrayMesh
-var _material_cache: Dictionary = {}  # hash -> StandardMaterial3D
+var _mesh_cache: Dictionary[int, ArrayMesh] = {}
+var _material_cache: Dictionary[int, Material] = {}
 
 # Skeleton cache for this conversion (skin_instance_index -> Skeleton3D)
-var _skeleton_cache: Dictionary = {}
+var _skeleton_cache: Dictionary[int, Skeleton3D] = {}
 
 
 # =============================================================================

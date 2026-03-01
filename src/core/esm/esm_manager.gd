@@ -24,64 +24,64 @@ signal loading_failed(file_path: String, error: String)
 var _all_records: Dictionary = {}
 
 # World/Environment
-var statics: Dictionary = {}           # String -> StaticRecord
-var cells: Dictionary = {}             # String -> CellRecord
-var lands: Dictionary = {}             # String -> LandRecord
-var land_textures: Dictionary = {}     # String -> LandTextureRecord
-var regions: Dictionary = {}           # String -> RegionRecord
-var pathgrids: Dictionary = {}         # String -> PathgridRecord
+var statics: Dictionary[String, StaticRecord] = {}
+var cells: Dictionary[String, CellRecord] = {}
+var lands: Dictionary[String, LandRecord] = {}
+var land_textures: Dictionary[String, LandTextureRecord] = {}
+var regions: Dictionary[String, RegionRecord] = {}
+var pathgrids: Dictionary[String, PathgridRecord] = {}
 
 # Actors
-var npcs: Dictionary = {}              # String -> NPCRecord
-var creatures: Dictionary = {}         # String -> CreatureRecord
-var body_parts: Dictionary = {}        # String -> BodyPartRecord
+var npcs: Dictionary[String, NPCRecord] = {}
+var creatures: Dictionary[String, CreatureRecord] = {}
+var body_parts: Dictionary[String, BodyPartRecord] = {}
 
 # Items
-var weapons: Dictionary = {}           # String -> WeaponRecord
-var armors: Dictionary = {}            # String -> ArmorRecord
-var clothing: Dictionary = {}          # String -> ClothingRecord
-var books: Dictionary = {}             # String -> BookRecord
-var potions: Dictionary = {}           # String -> PotionRecord
-var ingredients: Dictionary = {}       # String -> IngredientRecord
-var misc_items: Dictionary = {}        # String -> MiscRecord
-var containers: Dictionary = {}        # String -> ContainerRecord
-var lights: Dictionary = {}            # String -> LightRecord
-var doors: Dictionary = {}             # String -> DoorRecord
-var activators: Dictionary = {}        # String -> ActivatorRecord
-var apparatus: Dictionary = {}         # String -> ApparatusRecord
-var lockpicks: Dictionary = {}         # String -> LockpickRecord
-var probes: Dictionary = {}            # String -> ProbeRecord
-var repair_items: Dictionary = {}      # String -> RepairRecord
+var weapons: Dictionary[String, WeaponRecord] = {}
+var armors: Dictionary[String, ArmorRecord] = {}
+var clothing: Dictionary[String, ClothingRecord] = {}
+var books: Dictionary[String, BookRecord] = {}
+var potions: Dictionary[String, PotionRecord] = {}
+var ingredients: Dictionary[String, IngredientRecord] = {}
+var misc_items: Dictionary[String, MiscRecord] = {}
+var containers: Dictionary[String, ContainerRecord] = {}
+var lights: Dictionary[String, LightRecord] = {}
+var doors: Dictionary[String, DoorRecord] = {}
+var activators: Dictionary[String, ActivatorRecord] = {}
+var apparatus: Dictionary[String, ApparatusRecord] = {}
+var lockpicks: Dictionary[String, LockpickRecord] = {}
+var probes: Dictionary[String, ProbeRecord] = {}
+var repair_items: Dictionary[String, RepairRecord] = {}
 
 # Magic
-var spells: Dictionary = {}            # String -> SpellRecord
-var enchantments: Dictionary = {}      # String -> EnchantmentRecord
-var magic_effects: Dictionary = {}     # String -> MagicEffectRecord
+var spells: Dictionary[String, SpellRecord] = {}
+var enchantments: Dictionary[String, EnchantmentRecord] = {}
+var magic_effects: Dictionary[String, MagicEffectRecord] = {}
 
 # Character Definition
-var classes: Dictionary = {}           # String -> ClassRecord
-var races: Dictionary = {}             # String -> RaceRecord
-var factions: Dictionary = {}          # String -> FactionRecord
-var skills: Dictionary = {}            # String -> SkillRecord
-var birthsigns: Dictionary = {}        # String -> BirthsignRecord
+var classes: Dictionary[String, ClassRecord] = {}
+var races: Dictionary[String, RaceRecord] = {}
+var factions: Dictionary[String, FactionRecord] = {}
+var skills: Dictionary[String, SkillRecord] = {}
+var birthsigns: Dictionary[String, BirthsignRecord] = {}
 
 # Dialogue
-var dialogues: Dictionary = {}         # String -> DialogueRecord
-var dialogue_infos: Dictionary = {}    # String -> Array[DialogueInfoRecord]
+var dialogues: Dictionary[String, DialogueRecord] = {}
+var dialogue_infos: Dictionary[String, Array] = {}    # String -> Array[DialogueInfoRecord]
 
 # Audio
-var sounds: Dictionary = {}            # String -> SoundRecord
-var sound_generators: Dictionary = {}  # String -> SoundGenRecord
+var sounds: Dictionary[String, SoundRecord] = {}
+var sound_generators: Dictionary[String, SoundGenRecord] = {}
 
 # Scripts & Settings
-var scripts: Dictionary = {}           # String -> ScriptRecord
-var game_settings: Dictionary = {}     # String -> GameSettingRecord
-var globals: Dictionary = {}           # String -> GlobalRecord
+var scripts: Dictionary[String, ScriptRecord] = {}
+var game_settings: Dictionary[String, GameSettingRecord] = {}
+var globals: Dictionary[String, GlobalRecord] = {}
 var start_scripts: Array[String] = []  # StartScriptRecord IDs
 
 # Leveled Lists
-var leveled_items: Dictionary = {}     # String -> LeveledItemRecord
-var leveled_creatures: Dictionary = {} # String -> LeveledCreatureRecord
+var leveled_items: Dictionary[String, LeveledItemRecord] = {}
+var leveled_creatures: Dictionary[String, LeveledCreatureRecord] = {}
 
 #endregion
 

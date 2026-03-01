@@ -76,7 +76,7 @@ var _tier_rings_built: bool = false
 
 ## LOD level colors for debug visualization
 ## LOD0 = Full detail (NEAR tier), LOD1-3 = MID tier, Impostor = FAR tier
-const LOD_COLORS := {
+const LOD_COLORS: Dictionary[int, Color] = {
 	0: Color(0.2, 1.0, 0.2, 0.8),    # LOD0 (NEAR) - Bright green
 	1: Color(1.0, 1.0, 0.2, 0.8),    # LOD1 (MID close) - Yellow
 	2: Color(1.0, 0.6, 0.2, 0.8),    # LOD2 (MID mid) - Orange
@@ -86,13 +86,13 @@ const LOD_COLORS := {
 }
 
 ## Cache of original materials for restoration
-var _original_materials: Dictionary = {}  # object_id -> Array[Material]
+var _original_materials: Dictionary[int, Array] = {}  # object_id -> Array[Material]
 
 ## Cached materials for each tier
-var _tier_materials: Dictionary = {}
+var _tier_materials: Dictionary[int, StandardMaterial3D] = {}
 
 ## Tier colors (semi-transparent)
-const TIER_COLORS := {
+const TIER_COLORS: Dictionary[int, Color] = {
 	0: Color(0.2, 1.0, 0.2, 0.15),   # NEAR - green (0-150m)
 	1: Color(1.0, 1.0, 0.2, 0.15),   # MID - yellow (150-500m)
 	2: Color(1.0, 0.5, 0.2, 0.15),   # FAR - orange (500-5000m)

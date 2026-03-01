@@ -33,6 +33,9 @@ var _active_tasks: Dictionary = {}  # task_id -> TaskEntry
 ## Completed results waiting for main thread dispatch
 var _completed_results: Array = []  # Array of {task_id, result, error}
 
+## Timed-out WTP handles that still need cleanup when the worker eventually finishes
+var _orphaned_wtp_handles: Array[int] = []
+
 ## Mutex for thread-safe access to completed results
 var _results_mutex: Mutex
 
@@ -65,6 +68,9 @@ func _process(_delta: float) -> void:
 
 	# Dispatch completed results on main thread
 	_dispatch_completed_results()
+
+	# Clean up orphaned WTP handles from timed-out tasks that eventually finished
+	_cleanup_orphaned_handles()
 
 	# Start pending tasks if we have capacity
 	_start_pending_tasks()
@@ -201,6 +207,10 @@ func _dispatch_completed_results() -> void:
 		var task: TaskEntry = _active_tasks.get(task_id)
 		_active_tasks.erase(task_id)
 
+		# Clean up WTP handle — task already finished so this returns immediately
+		if task and task.group_task_id >= 0:
+			WorkerThreadPool.wait_for_task_completion(task.group_task_id)
+
 		# Skip if cancelled or already removed (e.g. timed out)
 		if not task or task.cancelled:
 			continue
@@ -231,9 +241,25 @@ func _check_task_timeouts() -> void:
 	for task_id: int in timed_out:
 		var task: TaskEntry = _active_tasks[task_id]
 		task.cancelled = true
+		# Track orphaned WTP handle for deferred cleanup
+		if task.group_task_id >= 0:
+			_orphaned_wtp_handles.append(task.group_task_id)
 		_active_tasks.erase(task_id)
 		Log.warn("threading", "BackgroundProcessor: Task %d timed out after %ds" % [task_id, TASK_TIMEOUT_MS / 1000])
 		task_failed.emit(task_id, "Task timed out after %d seconds" % [TASK_TIMEOUT_MS / 1000])
+
+
+## Clean up WTP handles from timed-out tasks that have since completed
+## Uses wait_for_task_completion() which returns immediately if the task finished
+func _cleanup_orphaned_handles() -> void:
+	if _orphaned_wtp_handles.is_empty():
+		return
+
+	# Try to clean up one handle per frame to avoid blocking
+	var handle: int = _orphaned_wtp_handles[-1]
+	if WorkerThreadPool.is_task_completed(handle):
+		WorkerThreadPool.wait_for_task_completion(handle)
+		_orphaned_wtp_handles.pop_back()
 
 
 #region Binary Heap Operations

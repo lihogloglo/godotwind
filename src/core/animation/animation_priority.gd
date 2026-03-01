@@ -76,9 +76,6 @@ const STATE_GROUPS := {
 # Current animation state per group
 var _group_animations: Array[Dictionary] = []  # [{name: StringName, priority: int, time: float}]
 
-# Queued animations (for combos, sequences)
-var _animation_queue: Array[Dictionary] = []
-
 # Debug mode
 var debug_mode: bool = false
 
@@ -183,36 +180,6 @@ func get_group_for_state(state: StringName) -> int:
 	return STATE_GROUPS.get(state, AnimGroup.FULL_BODY)
 
 
-## Queue an animation to play after current
-func queue_animation(state: StringName) -> void:
-	var priority := get_priority_for_state(state)
-	var group := get_group_for_state(state)
-
-	_animation_queue.append({
-		"name": state,
-		"priority": priority,
-		"group": group,
-	})
-
-	if debug_mode:
-		Log.debug("animation", "AnimationPriority: Queued '%s'" % state)
-
-
-## Get and remove next queued animation for a group
-func pop_queued_animation(group: int) -> StringName:
-	for i in range(_animation_queue.size()):
-		if _animation_queue[i]["group"] == group:
-			var anim: Dictionary = _animation_queue[i]
-			_animation_queue.remove_at(i)
-			return anim["name"]
-	return &""
-
-
-## Clear animation queue
-func clear_queue() -> void:
-	_animation_queue.clear()
-
-
 ## Update animation times (call each frame)
 func update(delta: float) -> void:
 	for i in AnimGroup.size():
@@ -257,11 +224,6 @@ func get_debug_info() -> String:
 			]
 		else:
 			info += "  %s: (empty)\n" % group_name
-
-	if not _animation_queue.is_empty():
-		info += "Queue:\n"
-		for queued: Dictionary in _animation_queue:
-			info += "  - %s (prio %d)\n" % [queued["name"], queued["priority"]]
 
 	return info
 

@@ -1,26 +1,22 @@
 # Godotwind
 
-An open-world framework for Godot 4.5+. Uses Morrowind assets as its reference implementation to demonstrate seamless world streaming, terrain rendering, and game data integration at scale.
+An open-world RPG framework for Godot 4.6. Not a faithful port — a framework that uses Morrowind as its reference implementation.
 
-So far, 100% vibe coded with Claude Opus 4.5.
+The long-term goal is to continue where [Skelerealms](https://github.com/SlashScreen/skelerealms) stopped: a general-purpose open-world RPG framework for Godot, with abstract interfaces for inventory, dialogue, AI, and save/load — where addons are optional backends and Morrowind is just one "mod" that implements them.
 
-The long-term goal is to continue where Skelerealms stopped. ( https://github.com/SlashScreen/skelerealms )
-
-**A world streaming and rendering showcase** - all visual/technical systems are okay-ish. Player interaction systems (combat, dialogue, quests) are not yet implemented.
-
+**Current state:** World streaming and rendering are production-quality. Gameplay systems (combat, dialogue, quests) are not yet implemented. See [MASTERPLAN](docs/audit/MASTERPLAN.md) for the roadmap.
 
 ## Quick Start
 
 1. **Configure Morrowind Path**
-   - Run `scenes/settings_tool.tscn` - Auto-Detect or Browse
+   - Run `src/tools/settings_tool.tscn` — Auto-Detect or Browse
    - Or set env: `export MORROWIND_DATA_PATH="/path/to/Data Files"`
 
-2. **Prebake the assets**
-   - Run `prebaking_ui.tscn` and generate the Terrain (fast), the impostors (kinda fast), the shore mask (kinda fast) and the merged meshes (a bit slow, but it's better thanks to our custom wrapper for meshoptimizer https://github.com/zeux/meshoptimizer )
+2. **Prebake Assets**
+   - Run `src/tools/prebaking_ui.tscn` — generate terrain, impostors, shore mask, merged meshes
 
 3. **Run World Explorer**
-   - Main scene for Morrowind : `scenes/world_explorer.tscn`
-   - La Palma island in 1:1 resolution. Heightmap generated thanks to the data of Centro de descargas https://centrodedescargas.cnig.es/CentroDescargas/ 
+   - Main scene: `src/tools/world_explorer.tscn`
 
 ## Controls
 
@@ -31,66 +27,62 @@ The long-term goal is to continue where Skelerealms stopped. ( https://github.co
 | Space/Shift | Up/Down |
 | Ctrl | Speed boost |
 | Scroll | Adjust speed |
-| M | Toggle models |
-| N | Toggle NPCs |
-| O | Toggle ocean |
-| K | Toggle sky/day-night |
 | P | Toggle player/fly camera |
 | TAB | Interior browser |
 | F3 | Performance overlay |
-| \` (Backtick) | Developer console |
+| `` ` `` | Developer console |
 
 ## Implementation Status
 
-### Complete Systems
+### Core Systems (Complete)
 
-| System | Description |
-|--------|-------------|
-| **World Streaming** | Infinite terrain, time-budgeted async loading, no loading screens |
-| **Terrain** | Morrowind LAND to Terrain3D, heightmaps, texture splatting, multi-region |
-| **Object Streaming** | Cell references, async NIF parsing, object pooling, MultiMesh batching |
-| **ESM/ESP Parsing** | 44 record types with thread-safe global access and grid indexing |
-| **NIF Conversion** | Geometry, materials, skeletons (buggy), animations  (buggy), collision, auto-LOD (3 levels) |
-| **BSA Management** | Archive reading, 256MB LRU cache, thread-safe extraction |
-| **Texture Loading** | DDS/TGA with material library deduplication |
-| **Ocean** | FFT waves from this project : https://github.com/2Retr0/GodotOceanWaves/ , shore dampening, choppiness controls, buoyancy queries. There's also a Flat version that comes from this project : https://godotshaders.com/shader/realistic-water-with-reflection-and-refraction/ . And a Gerstner wave implem from this too : https://github.com/Flarkk/Godot-Water-Shader-Prototype |
-| **Sky/Weather** | 2D texture clouds, day/night cycle, sun/moon, ambient lighting |
-| **Character Assembly** | NPC body parts combined from race + head + hair meshes |
-| **Character Animation** | Full state machine (idle, walk, run, jump, swim, combat, death, spell cast) |
-| **Character Movement** | Slope adaptation, foot IK, wander behavior, speed modulation |
-| **Deformation** | RTT-based ground deformation with recovery (snow, mud, ash) |
+| System | Notes |
+|--------|-------|
+| **World Streaming** | Time-budgeted async, priority queues, no hitches |
+| **Terrain** | Terrain3D integration, multi-region, edge stitching |
+| **Object Streaming** | Cell refs, async NIF parsing, object pooling, MultiMesh batching |
+| **ESM/ESP Parsing** | 47 record types, thread-safe global access, grid indexing |
+| **NIF Conversion** | Geometry, materials, skeletons, animations, collision |
+| **BSA Archives** | 256MB LRU cache, thread-safe extraction |
+| **Texture Loading** | DDS/TGA, material deduplication |
+| **Deformation** | RTT-based ground deformation (snow, mud, ash) |
 | **Console** | Command registry, object picking, selection outline |
-| **Distant Rendering** | MID tier merged meshes (500m-2km), FAR tier impostors (2km-5km) |
+| **3-Tier LOD** | NEAR (0-150m full 3D), MID (150-500m merged), FAR (500-5km impostors) |
 
-### Not Implemented (Addons Installed But Not Wired)
+### Framework Ready (Not Integrated)
 
-| System | Addon | Status |
-|--------|-------|--------|
-| Dialogue UI | dialogue_manager | Data parses, no UI to display conversations |
-| Player Inventory | gloot | NPC inventories load, player has no inventory |
-| Quest System | questify | No quest tracking or journal |
-| AI Behaviors | beehave | Wander works, behavior trees not integrated |
-| Combat | - | No attack/defense/damage system |
-| Magic/Spells | - | Spell records parsed, no casting |
-| Save/Load | - | Use Godot native FileAccess/ResourceSaver |
-| NPC Interaction | - | Can't click NPCs to initiate dialogue |
+| System | Status |
+|--------|--------|
+| **Ocean/Water** | FFT waves, shore dampening, buoyancy — OceanManager exists, not wired into main scene |
+| **Sky/Weather** | Sky3D installed, day/night prepared — not integrated |
+| **Character Assembly** | NPC body parts from race + head + hair — pipeline complete |
+| **Character Animation** | State machine (idle/walk/run/jump) — locomotion working, action layers stubbed |
 
-## Performance Optimizations
+### Not Started (Addons Installed, Not Wired)
 
-All verified in source code:
+| System | Addon | Notes |
+|--------|-------|-------|
+| Dialogue | dialogue_manager | Records parsed, no UI |
+| Inventory | GLoot | NPC inventories load, player has none |
+| Quests | Questify | No tracking or journal |
+| AI | Beehave | Behavior trees not integrated |
+| Combat | — | No attack/defense/damage |
+| Save/Load | — | No persistence layer designed |
 
-| Optimization | Location | Effect |
-|--------------|----------|--------|
-| MultiMesh Batching | cell_manager.gd | 10+ identical objects → single draw call |
-| Object Pooling | object_pool.gd | Reuses nodes, reduces allocations |
-| Auto-LOD Generation | nif_converter.gd | 3 levels (75%, 50%, 25% reduction) |
-| Material Deduplication | material_library.gd | Shared materials reduce VRAM |
-| Async NIF Parsing | background_processor.gd | Worker threads prevent frame spikes |
-| Time Budgeting | world_streaming_manager.gd | 2ms/frame cell load, 8ms terrain gen |
-| Frustum Culling | Native Godot + occlusion | Skips off-screen objects |
-| Adaptive Submit Rate | world_streaming_manager.gd | Throttles under queue pressure |
+## Documentation
 
+| Doc | Content |
+|-----|---------|
+| [STATUS.md](docs/STATUS.md) | Per-system implementation status (ground truth) |
+| [MASTERPLAN.md](docs/audit/MASTERPLAN.md) | Roadmap, architecture decisions, framework-first identity |
+| [FINDINGS.md](docs/audit/FINDINGS.md) | Audit issue tracker |
+| [DESIGN_PATTERNS.md](docs/DESIGN_PATTERNS.md) | Code patterns: NativeBridge, pooling, batching |
+| [DATA_PIPELINE.md](docs/DATA_PIPELINE.md) | ESM/NIF/BSA formats, coordinate conversion |
+| [PERFORMANCE_GUIDE.md](docs/PERFORMANCE_GUIDE.md) | Frame budgeting, async loading, profiling |
 
-## License
+## Tech Stack
 
-I don't know, I'm just vibing here.
+- **Engine:** Godot 4.6, Forward+, Jolt Physics, D3D12
+- **Languages:** GDScript 95% / C# 5% / GLSL shaders
+- **Terrain:** Terrain3D addon
+- **Asset formats:** ESM/ESP, NIF, BSA (Morrowind)

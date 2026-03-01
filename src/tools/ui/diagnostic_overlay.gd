@@ -14,7 +14,6 @@
 ##
 ## Controls:
 ##   F9: Toggle overlay visibility
-@warning_ignore("untyped_declaration")
 class_name DiagnosticOverlay
 extends CanvasLayer
 
@@ -49,13 +48,13 @@ const MAX_RECENT_ERRORS: int = 10
 #region State
 
 ## Ring buffer for recent model loads
-var _recent_models: Array[Dictionary] = []  # {path, time, tier}
+var _recent_models: Array[Dictionary] = []  # Array[{path: String, time: float, tier: String}]
 
 ## Ring buffer for recent errors
-var _recent_errors: Array[Dictionary] = []  # {message, time, type}
+var _recent_errors: Array[Dictionary] = []  # Array[{message: String, time: float, type: String}]
 
 ## Current streaming stats
-var _current_stats: Dictionary = {}
+var _current_stats: Dictionary[String, Variant] = {}
 
 ## Stall detection
 var _last_queue_size: int = 0
@@ -261,36 +260,24 @@ func _create_spacer() -> Control:
 #region Streaming Connection
 
 ## Connect to streaming systems to receive events
-func connect_to_streaming(wsm: Node, os: Node = null) -> void:
+func connect_to_streaming(wsm: Node, _os: Node = null) -> void:
 	_world_streaming_manager = wsm
+	# NativeStreamingManager doesn't use ObjectStreamer - it handles tiers internally
 
-	# Get ObjectStreamer from WSM if not provided
-	if os == null and wsm:
-		os = wsm.get_node_or_null("ObjectStreamer")
-	_object_streamer = os
-
-	# Connect to ObjectStreamer signals
-	if _object_streamer:
-		if _object_streamer.has_signal("instantiation_queue_changed"):
-			_object_streamer.instantiation_queue_changed.connect(_on_queue_changed)
-
-		if _object_streamer.has_signal("instantiation_requested"):
-			_object_streamer.instantiation_requested.connect(_on_instantiation_requested)
-
-	# Connect to WorldStreamingManager signals
+	# Connect to NativeStreamingManager signals
 	if _world_streaming_manager:
 		if _world_streaming_manager.has_signal("cell_loaded"):
 			_world_streaming_manager.cell_loaded.connect(_on_cell_loaded)
+		
+		# Watch for startup progress
+		if _world_streaming_manager.has_signal("startup_progress"):
+			_world_streaming_manager.startup_progress.connect(_on_startup_progress)
 
-	Log.info("debug", "DiagnosticOverlay connected to streaming systems")
+	Log.info("debug", "DiagnosticOverlay connected to NativeStreamingManager")
 
 
-func _on_queue_changed(queue_size: int) -> void:
-	_current_stats["queue_size"] = queue_size
-
-
-func _on_instantiation_requested(object_id: int, model_path: String, _world_transform: Transform3D, _cell_grid: Vector2i, _ref_id: String, _ref_num: int) -> void:
-	_add_recent_model(model_path, "REQUESTED")
+func _on_startup_progress(progress: float, loaded: int, total: int, _queued: int) -> void:
+	_add_recent_model("Startup: %.1f%% (%d/%d cells)" % [progress, loaded, total], "PROGRESS")
 
 
 func _on_cell_loaded(grid: Vector2i, object_count: int) -> void:
@@ -302,20 +289,23 @@ func _on_cell_loaded(grid: Vector2i, object_count: int) -> void:
 #region Stats Update
 
 func _update_stats() -> void:
-	# Get stats from ObjectStreamer
-	if _object_streamer and _object_streamer.has_method("get_stats"):
-		var os_stats: Dictionary = _object_streamer.get_stats()
-		_current_stats["near_visible"] = os_stats.get("near_visible", 0)
-		_current_stats["mid_visible"] = os_stats.get("mid_visible", 0)
-		_current_stats["far_visible"] = os_stats.get("far_visible", 0)
-		_current_stats["queue_size"] = os_stats.get("instantiation_queue_size", 0)
-		_current_stats["instantiations_this_frame"] = os_stats.get("instantiations_this_frame", 0)
-		_current_stats["total_objects"] = os_stats.get("total_objects", 0)
+	if not _world_streaming_manager:
+		return
 
-	# Get stats from WorldStreamingManager
-	if _world_streaming_manager and _world_streaming_manager.has_method("get_stats"):
-		var wsm_stats: Dictionary = _world_streaming_manager.get_stats()
-		_current_stats["loaded_cells"] = wsm_stats.get("loaded_cells", 0)
+	# Get stats from NativeStreamingManager (unified API)
+	if _world_streaming_manager.has_method("get_stats"):
+		var stats: Dictionary = _world_streaming_manager.get_stats()
+		_current_stats["loaded_cells"] = stats.get("loaded_cells", 0)
+		_current_stats["queue_size"] = stats.get("instantiation_queue", 0)
+		_current_stats["total_objects"] = stats.get("total_objects", 0)
+		
+		# Tier stats
+		_current_stats["near_visible"] = stats.get("loaded_cells", 0) # proxy
+		_current_stats["mid_visible"] = stats.get("mid_instances", 0)
+		_current_stats["far_visible"] = stats.get("total_impostors", 0)
+		
+		# Performance stats
+		_current_stats["instantiations_this_frame"] = stats.get("instantiations_this_frame", 0) # Note: verify if this exists in NativeStreamingManager
 
 
 func _check_for_issues(delta: float) -> void:

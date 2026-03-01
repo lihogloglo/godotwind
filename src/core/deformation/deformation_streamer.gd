@@ -33,27 +33,38 @@ func _process(_delta: float):
 func _connect_to_terrain_streamer():
 	# Wait for tree to be ready
 	await get_tree().process_frame
-
-	# Try to find WorldStreamingManager
-	var world_streaming_manager = get_node_or_null("/root/WorldStreamingManager")
+	
+	# Try to find NativeStreamingManager
+	var world_streaming_manager = NativeStreamingManager.instance
 	if world_streaming_manager == null:
-		Log.warn("deformation", "DeformationStreamer: WorldStreamingManager not found, manual region management required")
+		# Fallback to searching the tree if static instance is not set (e.g. during init)
+		world_streaming_manager = _find_node_by_class(get_tree().root, "NativeStreamingManager")
+
+	if world_streaming_manager == null:
+		Log.warn("deformation", "DeformationStreamer: NativeStreamingManager not found, manual region management required")
 		return
 
-	# Try to find GenericTerrainStreamer
+	# Found NativeStreamingManager - it replaces WorldStreamingManager
+	Log.info("deformation", "DeformationStreamer: Connected to NativeStreamingManager")
+
+	# Try to find GenericTerrainStreamer (might be a child of NativeStreamingManager or elsewhere)
 	var terrain_streamer = world_streaming_manager.get_node_or_null("GenericTerrainStreamer")
+	if terrain_streamer == null:
+		# Search the tree for ANY GenericTerrainStreamer as fallback
+		terrain_streamer = _find_node_by_class(get_tree().root, "GenericTerrainStreamer")
+		
 	if terrain_streamer == null:
 		Log.warn("deformation", "DeformationStreamer: GenericTerrainStreamer not found")
 		return
 
 	# Connect to terrain streaming signals if they exist
-	if terrain_streamer.has_signal("region_loaded"):
-		terrain_streamer.connect("region_loaded", _on_terrain_region_loaded)
-		Log.info("deformation", "DeformationStreamer: Connected to terrain region_loaded signal")
+	if terrain_streamer.has_signal("terrain_region_loaded"):
+		terrain_streamer.terrain_region_loaded.connect(_on_terrain_region_loaded)
+		Log.info("deformation", "DeformationStreamer: Connected to terrain terrain_region_loaded signal")
 
-	if terrain_streamer.has_signal("region_unloaded"):
-		terrain_streamer.connect("region_unloaded", _on_terrain_region_unloaded)
-		Log.info("deformation", "DeformationStreamer: Connected to terrain region_unloaded signal")
+	if terrain_streamer.has_signal("terrain_region_unloaded"):
+		terrain_streamer.terrain_region_unloaded.connect(_on_terrain_region_unloaded)
+		Log.info("deformation", "DeformationStreamer: Connected to terrain terrain_region_unloaded signal")
 
 # Terrain region loaded callback
 func _on_terrain_region_loaded(region_coord: Vector2i):
@@ -149,3 +160,15 @@ func load_regions_around_position(world_pos: Vector3, radius: int = 1):
 func unload_all_regions():
 	for region_coord in _tracked_regions.keys():
 		request_unload_region(region_coord)
+
+# Recursive node search by class name
+func _find_node_by_class(node: Node, target_class: String) -> Node:
+	if node.get_class() == target_class:
+		return node
+
+	for child in node.get_children():
+		var result = _find_node_by_class(child, target_class)
+		if result != null:
+			return result
+
+	return null

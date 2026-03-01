@@ -116,6 +116,13 @@ func _create_player() -> void:
 		var parent_name := skeleton.get_bone_name(parent_idx) if parent_idx >= 0 else "ROOT"
 		print("  [%d] %s ← %s" % [i, skeleton.get_bone_name(i), parent_name])
 
+	# Print move container state
+	if anim_system.move_container:
+		var mc = anim_system.move_container
+		if mc.has_method("get_current_move_name"):
+			print("=== MoveContainer: %d moves, current='%s' ===" % [
+				mc.moves.size(), mc.get_current_move_name()])
+
 	print("ControllerTest: Ready — root_motion=%s" % player_controller.use_root_motion)
 
 

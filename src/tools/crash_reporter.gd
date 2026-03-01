@@ -38,7 +38,6 @@ var _operation_log: Array[String] = []
 ## Reference to systems
 var _world_explorer: Node = null
 var _world_streaming_manager: Node = null
-var _object_streamer: Node = null
 var _diagnostic_overlay: Node = null
 
 ## Frame counter
@@ -81,24 +80,12 @@ func _process(_delta: float) -> void:
 #region System Connection
 
 ## Connect to all relevant systems for monitoring
-func connect_to_systems(world_explorer: Node, wsm: Node = null, os: Node = null, diag: Node = null) -> void:
+func connect_to_systems(world_explorer: Node, wsm: Node = null, _os: Node = null, diag: Node = null) -> void:
 	_world_explorer = world_explorer
 	_world_streaming_manager = wsm
-	_object_streamer = os
 	_diagnostic_overlay = diag
 
-	# Get ObjectStreamer from WSM if not provided
-	if _object_streamer == null and _world_streaming_manager:
-		_object_streamer = _world_streaming_manager.get_node_or_null("ObjectStreamer")
-
-	# Connect to ObjectStreamer signals
-	if _object_streamer:
-		if _object_streamer.has_signal("instantiation_requested"):
-			_object_streamer.instantiation_requested.connect(_on_instantiation_requested)
-		if _object_streamer.has_signal("instantiation_queue_changed"):
-			_object_streamer.instantiation_queue_changed.connect(_on_queue_changed)
-
-	# Connect to WorldStreamingManager signals
+	# Connect to WorldStreamingManager (NativeStreamingManager) signals
 	if _world_streaming_manager:
 		if _world_streaming_manager.has_signal("cell_loaded"):
 			_world_streaming_manager.cell_loaded.connect(_on_cell_loaded)
@@ -219,20 +206,15 @@ func _generate_report() -> String:
 
 	# Streaming state
 	lines.append("=== STREAMING STATE ===")
-	if _object_streamer and _object_streamer.has_method("get_stats"):
-		var stats: Dictionary = _object_streamer.get_stats()
-		lines.append("Queue: %d pending" % stats.get("instantiation_queue_size", 0))
-		lines.append("NEAR: %d | MID: %d | FAR: %d" % [
-			stats.get("near_visible", 0),
-			stats.get("mid_visible", 0),
-			stats.get("far_visible", 0)
+	if _world_streaming_manager and _world_streaming_manager.has_method("get_stats"):
+		var stats: Dictionary = _world_streaming_manager.get_stats()
+		lines.append("Queue: %d pending" % stats.get("instantiation_queue", 0))
+		lines.append("NEAR (cells): %d | MID: %d | FAR: %d" % [
+			stats.get("loaded_cells", 0),
+			stats.get("mid_instances", 0),
+			stats.get("total_impostors", 0)
 		])
 		lines.append("Total objects: %d" % stats.get("total_objects", 0))
-		lines.append("Instantiations this frame: %d" % stats.get("instantiations_this_frame", 0))
-
-	if _world_streaming_manager and _world_streaming_manager.has_method("get_stats"):
-		var wsm_stats: Dictionary = _world_streaming_manager.get_stats()
-		lines.append("Loaded cells: %d" % wsm_stats.get("loaded_cells", 0))
 	lines.append("")
 
 	# Toggle history

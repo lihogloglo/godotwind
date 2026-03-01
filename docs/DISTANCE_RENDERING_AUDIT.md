@@ -1,7 +1,7 @@
 # Distance Rendering Pipeline Audit
 
 **Date:** 2026-01-09 (Updated: 2026-01-09)
-**Godot Version:** 4.5
+**Godot Version:** 4.6
 **Status:** 🔧 Fixes Applied - Rebaking Required
 
 ---

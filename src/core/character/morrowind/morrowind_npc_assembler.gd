@@ -21,13 +21,13 @@ const BodyPartSlots := preload("res://src/core/character/morrowind/morrowind_bod
 
 
 ## Cached skeleton templates: { "type" -> Skeleton3D }
-static var _skeleton_cache: Dictionary = {}
+static var _skeleton_cache: Dictionary[String, Skeleton3D] = {}
 
 ## Cached body part mesh data: { "model_path" -> Array[MeshExtractor.MeshData] }
-static var _body_part_cache: Dictionary = {}
+static var _body_part_cache: Dictionary[String, BodyPartData] = {}
 
 ## Cached attachment node transforms: { "type" -> { "name_lower" -> Transform3D } }
-static var _attachment_cache: Dictionary = {}
+static var _attachment_cache: Dictionary[String, Dictionary] = {}
 
 ## Debug mode
 static var debug_mode: bool = false
@@ -76,10 +76,10 @@ const ATTACHMENT_NODE_NAMES := [
 
 ## Body part data container (simplified, holds extracted mesh data)
 class BodyPartData:
-	var meshes: Array  # Array of MeshExtractor.MeshData
+	var meshes: Array[MeshExtractor.MeshData]  # Array of MeshExtractor.MeshData
 	var model_path: String
 
-	static func from_meshes(p_meshes: Array, path: String) -> BodyPartData:
+	static func from_meshes(p_meshes: Array[MeshExtractor.MeshData], path: String) -> BodyPartData:
 		var data := BodyPartData.new()
 		data.meshes = p_meshes
 		data.model_path = path

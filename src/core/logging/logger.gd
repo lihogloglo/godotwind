@@ -17,7 +17,7 @@ var min_level: Level = Level.INFO
 
 ## Per-category overrides: { "category": Level }
 ## Example: category_levels["streaming"] = Level.DEBUG
-var category_levels: Dictionary = {}
+var category_levels: Dictionary[String, Level] = {}
 
 ## Whether to include timestamps in output
 var show_timestamps: bool = false

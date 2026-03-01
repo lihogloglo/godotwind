@@ -29,14 +29,14 @@ class_name StaticObjectRenderer
 extends Node3D
 
 ## Registered mesh types: type_name -> MeshType
-var _mesh_types: Dictionary = {}
+var _mesh_types: Dictionary[String, MeshType] = {}
 
 ## All instances: instance_id -> InstanceData
-var _instances: Dictionary = {}
+var _instances: Dictionary[int, InstanceData] = {}
 
 ## Spatial index: cell_grid Vector2i -> Array[int] of instance IDs
 ## Enables O(cell_count) lookups instead of O(total_instances) for promotion/removal
-var _cell_index: Dictionary = {}
+var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
 
 ## Next instance ID
 var _next_id: int = 0
@@ -73,6 +73,7 @@ class InstanceData:
 	var transform: Transform3D
 	var visible: bool = true
 	var cell_grid: Vector2i    ## Which cell this belongs to
+	var gpu_slot: int = -1     ## Slot index in GPUSceneDatabase (-1 if not tracked)
 	## Metadata for MID→NEAR promotion (Phase 5b)
 	var model_path: String     ## Original model path for prototype lookup
 	var item_id: String        ## Item variant ID
@@ -298,14 +299,6 @@ func get_instance_transform(id: int) -> Transform3D:
 	if id not in _instances:
 		return Transform3D.IDENTITY
 	return _instances[id].transform
-
-
-## DEPRECATED: This function is not called anywhere
-## Native streaming system uses Godot's visibility_range for automatic distance culling
-## Returns number of visibility changes made
-func update_visibility_by_distance(_camera_pos: Vector3, _max_distance: float) -> int:
-	push_warning("[StaticObjectRenderer] update_visibility_by_distance is deprecated - native streaming uses visibility_range")
-	return 0  # No-op
 
 
 ## Batch add instances (more efficient than individual adds)

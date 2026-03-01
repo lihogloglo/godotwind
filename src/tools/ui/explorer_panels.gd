@@ -39,10 +39,7 @@ var resolution_btn: OptionButton = null
 
 ## Ocean panel widgets
 var water_quality_btn: OptionButton = null
-var wind_speed_slider: HSlider = null
-var wind_dir_slider: HSlider = null
 var wave_scale_slider: HSlider = null
-var choppiness_slider: HSlider = null
 var debug_shore_toggle: CheckBox = null
 var ocean_controls_container: VBoxContainer = null
 
@@ -378,11 +375,10 @@ func _create_ocean_panel() -> void:
 	water_quality_btn = OptionButton.new()
 	water_quality_btn.add_item("Auto", -1)
 	water_quality_btn.add_item("Flat", 0)
-	water_quality_btn.add_item("Gerstner", 1)
-	water_quality_btn.add_item("FFT", 2)
+	water_quality_btn.add_item("Standard", 1)
 	water_quality_btn.selected = 0  # Auto by default
 	water_quality_btn.item_selected.connect(_cb.get("water_quality_changed", Callable()))
-	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane\n- Gerstner: GPU vertex waves (recommended)\n- FFT: Full GPU compute waves"
+	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane (fallback)\n- Standard: Analytical Gerstner waves + native SSR"
 	water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	quality_row.add_child(water_quality_btn)
 
@@ -393,23 +389,10 @@ func _create_ocean_panel() -> void:
 	ocean_controls_container.name = "OceanControls"
 	ocean_controls_container.visible = false  # Hidden until ocean is enabled
 
-	# Wind Speed slider
-	wind_speed_slider = create_slider_row(ocean_controls_container, "Wind:", 0.0, 40.0, 10.0, _cb.get("wind_speed_changed", Callable()))
-	wind_speed_slider.tooltip_text = "Wind speed (m/s) - affects wave steepness"
-
-	# Wind Direction slider
-	wind_dir_slider = create_slider_row(ocean_controls_container, "Dir:", -180.0, 180.0, 0.0, _cb.get("wind_dir_changed", Callable()))
-	wind_dir_slider.tooltip_text = "Wind direction (degrees)"
-
 	# Wave Scale slider
 	wave_scale_slider = create_slider_row(ocean_controls_container, "Scale:", 0.0, 3.0, 1.0, _cb.get("wave_scale_changed", Callable()))
 	wave_scale_slider.step = 0.1
 	wave_scale_slider.tooltip_text = "Wave height multiplier"
-
-	# Choppiness slider
-	choppiness_slider = create_slider_row(ocean_controls_container, "Chop:", 0.0, 2.0, 1.0, _cb.get("choppiness_changed", Callable()))
-	choppiness_slider.step = 0.1
-	choppiness_slider.tooltip_text = "Wave choppiness/sharpness"
 
 	# Debug shore mask toggle
 	debug_shore_toggle = CheckBox.new()

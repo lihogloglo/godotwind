@@ -43,7 +43,8 @@ var _is_in_combat: bool = false
 var _combat_state: CombatState = CombatState.NONE
 var _current_weapon_type: StringName = &""
 
-# Bone mapping (standard humanoid names)
+# Bone mapping cache (profile_name -> bone_index)
+static var _bone_map_cache: Dictionary[String, Dictionary] = {} # skeleton_name -> map
 var _bone_map: Dictionary = {}
 
 
@@ -71,14 +72,24 @@ func _build_bone_map() -> void:
 	if not skeleton:
 		return
 
+	# Use cache if available for this skeleton type
+	var cache_key := "%s_%d" % [skeleton.name, skeleton.get_bone_count()]
+	if cache_key in _bone_map_cache:
+		_bone_map = _bone_map_cache[cache_key]
+		return
+
 	# Populate _bone_map: profile_name -> bone_index
 	# Skeleton bones have already been renamed to profile names by CharacterFactory
+	_bone_map = {}
 	var profile := SkeletonProfileHumanoid.new()
 	for i in profile.bone_size:
 		var profile_name := profile.get_bone_name(i)
 		var idx: int = skeleton.find_bone(profile_name)
 		if idx >= 0:
 			_bone_map[profile_name] = idx
+			
+	# Cache it
+	_bone_map_cache[cache_key] = _bone_map
 
 
 ## Configure IK for humanoid skeleton

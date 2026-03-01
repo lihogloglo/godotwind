@@ -83,7 +83,7 @@ func _extract_animations(reader: NIFReader, skeleton: Skeleton3D) -> Dictionary:
 					Log.debug("nif", "  %.3fs: %s" % [tk["time"], tk["value"]])
 
 	# Collect bone name -> controller pairs
-	var bone_controllers: Dictionary = {}  # bone_name -> NiKeyframeController
+	var bone_controllers: Dictionary[String, Defs.NiKeyframeController] = {}  # bone_name -> NiKeyframeController
 
 	# Walk through extra data chain (skipping first which is text keys)
 	var extra_indices: Array[int] = []

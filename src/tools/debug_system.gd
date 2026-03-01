@@ -100,8 +100,8 @@ var _frame_times: Array[float] = []
 const FRAME_SAMPLES: int = 120
 
 ## Error/warning capture
-var _recent_errors: Array[Dictionary] = []
-var _recent_logs: Array[Dictionary] = []
+var _recent_errors: Array[Dictionary] = [] # Array[{message: String, time: float, type: String}]
+var _recent_logs: Array[Dictionary] = []   # Array[{message: String, time: float}]
 const MAX_ERRORS: int = 50
 const MAX_LOGS: int = 30
 
@@ -118,7 +118,7 @@ var _target_position: Vector3 = Vector3.ZERO
 var _wait_timer: float = 0.0
 
 ## Test metrics
-var _test_metrics: Dictionary = {
+var _test_metrics: Dictionary[String, Variant] = {
 	"waypoints_visited": 0,
 	"errors_captured": 0,
 	"warnings_captured": 0,
@@ -777,18 +777,14 @@ func dump_profiling_report() -> void:
 	if _world_streaming_manager:
 		Log.info("debug", "[STREAMING]")
 		if _world_streaming_manager.has_method("get_stats"):
-			var wsm_stats: Dictionary = _world_streaming_manager.get_stats()
-			Log.info("debug", "  Loaded cells: %d" % wsm_stats.get("loaded_cells", 0))
-
-		var object_streamer := _world_streaming_manager.get_node_or_null("ObjectStreamer")
-		if object_streamer and object_streamer.has_method("get_stats"):
-			var os_stats: Dictionary = object_streamer.get_stats()
-			Log.info("debug", "  Queue size: %d" % os_stats.get("instantiation_queue_size", 0))
-			Log.info("debug", "  Total objects: %d" % os_stats.get("total_objects", 0))
-			Log.info("debug", "  NEAR: %d | MID: %d | FAR: %d" % [
-				os_stats.get("near_visible", 0),
-				os_stats.get("mid_visible", 0),
-				os_stats.get("far_visible", 0)
+			var stats: Dictionary = _world_streaming_manager.get_stats()
+			Log.info("debug", "  Loaded cells: %d" % stats.get("loaded_cells", 0))
+			Log.info("debug", "  Queue size: %d" % stats.get("instantiation_queue", 0))
+			Log.info("debug", "  Total objects: %d" % stats.get("total_objects", 0))
+			Log.info("debug", "  NEAR: %d (cells) | MID: %d | FAR: %d" % [
+				stats.get("loaded_cells", 0),
+				stats.get("mid_instances", 0),
+				stats.get("total_impostors", 0)
 			])
 		Log.info("debug", "")
 
@@ -936,12 +932,14 @@ func _write_state_to_file() -> void:
 	# Streaming state
 	lines.append("=== STREAMING STATE ===")
 	if _world_streaming_manager and _world_streaming_manager.has_method("get_stats"):
-		var wsm_stats: Dictionary = _world_streaming_manager.get_stats()
-		lines.append("Loaded cells: %d" % wsm_stats.get("loaded_cells", 0))
-
-	var tiers := _get_tier_counts()
-	lines.append("NEAR: %d | MID: %d | FAR: %d" % [tiers.near, tiers.mid, tiers.far])
-	lines.append("Queue: %d" % _get_queue_size())
+		var stats: Dictionary = _world_streaming_manager.get_stats()
+		lines.append("Loaded cells: %d" % stats.get("loaded_cells", 0))
+		lines.append("NEAR (cells): %d | MID: %d | FAR: %d" % [
+			stats.get("loaded_cells", 0),
+			stats.get("mid_instances", 0),
+			stats.get("total_impostors", 0)
+		])
+		lines.append("Queue: %d" % stats.get("instantiation_queue", 0))
 	lines.append("")
 
 	# Recent operations
@@ -1079,10 +1077,9 @@ func _get_frame_percentiles() -> Dictionary:
 func _get_queue_size() -> int:
 	if not _world_streaming_manager:
 		return 0
-	var object_streamer := _world_streaming_manager.get_node_or_null("ObjectStreamer")
-	if object_streamer and object_streamer.has_method("get_stats"):
-		var stats: Dictionary = object_streamer.get_stats()
-		return stats.get("instantiation_queue_size", 0)
+	if _world_streaming_manager.has_method("get_stats"):
+		var stats: Dictionary = _world_streaming_manager.get_stats()
+		return stats.get("instantiation_queue", 0)
 	return 0
 
 
@@ -1090,12 +1087,11 @@ func _get_tier_counts() -> Dictionary:
 	var result := {"near": 0, "mid": 0, "far": 0}
 	if not _world_streaming_manager:
 		return result
-	var object_streamer := _world_streaming_manager.get_node_or_null("ObjectStreamer")
-	if object_streamer and object_streamer.has_method("get_stats"):
-		var stats: Dictionary = object_streamer.get_stats()
-		result.near = stats.get("near_visible", 0)
-		result.mid = stats.get("mid_visible", 0)
-		result.far = stats.get("far_visible", 0)
+	if _world_streaming_manager.has_method("get_stats"):
+		var stats: Dictionary = _world_streaming_manager.get_stats()
+		result.near = stats.get("loaded_cells", 0) # Approximation
+		result.mid = stats.get("mid_instances", 0)
+		result.far = stats.get("total_impostors", 0)
 	return result
 
 

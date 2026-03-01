@@ -13,7 +13,7 @@ var _reader: RefCounted = null
 var _skeleton: Skeleton3D = null
 
 # Bone name to skeleton bone index mapping
-var _bone_name_to_idx: Dictionary = {}
+var _bone_name_to_idx: Dictionary[String, int] = {}
 
 # Debug output
 var debug_mode: bool = false

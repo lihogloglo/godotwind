@@ -59,7 +59,7 @@ var _animation_player: AnimationPlayer = null
 var _character_node: Node3D = null
 
 # Parsed text keys: animation_name -> Array[{time: float, key: String, type: KeyType}]
-var _text_keys: Dictionary = {}
+var _text_keys: Dictionary[String, Array] = {} # Array[Dictionary]
 
 # Active markers for tracking
 var _last_processed_time: float = 0.0

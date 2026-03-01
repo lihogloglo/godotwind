@@ -90,15 +90,16 @@ var _target_look: Vector3 = Vector3.ZERO
 var _wait_timer: float = 0.0
 
 ## Error/warning capture
-var _captured_errors: Array[Dictionary] = []
-var _captured_warnings: Array[Dictionary] = []
+var _captured_errors: Array[Dictionary] = []   # Array[{message: String, time: float, type: String}]
+var _captured_warnings: Array[Dictionary] = [] # Array[{message: String, time: float}]
 var _test_start_time: float = 0.0
 var _waypoint_start_time: float = 0.0
 
 ## Performance tracking
 var _frame_times: Array[float] = []
-var _loading_times: Dictionary = {}  # waypoint_name -> loading_time
-var _cell_load_counts: Dictionary = {}  # waypoint_name -> cells_loaded
+var _loading_times: Dictionary[String, float] = {}  # waypoint_name -> loading_time
+var _cell_load_counts: Dictionary[String, int] = {} # waypoint_name -> cell_count
+
 
 
 func _ready() -> void:
@@ -337,9 +338,8 @@ func _start_waypoint(idx: int) -> void:
 	_log("[color=green]>> Waypoint %d/%d: %s[/color]" % [idx + 1, _waypoints.size(), waypoint.name])
 
 	# Record cell count before moving
-	var wsm: Node = _world_explorer.get_node_or_null("WorldStreamingManager")
-	if wsm and wsm.has_method("get_stats"):
-		var stats: Dictionary = wsm.call("get_stats")
+	if _world_explorer and _world_explorer.get("world_streaming_manager"):
+		var stats: Dictionary = _world_explorer.get("world_streaming_manager").get_stats()
 		_cell_load_counts[waypoint.name + "_start"] = stats.get("loaded_cells", 0)
 
 	# Enable systems based on waypoint config
@@ -399,9 +399,8 @@ func _update_camera_movement(delta: float) -> void:
 		_loading_times[_waypoints[_current_waypoint_idx].name] = load_time
 
 		# Record cell count after arriving
-		var wsm: Node = _world_explorer.get_node_or_null("WorldStreamingManager")
-		if wsm and wsm.has_method("get_stats"):
-			var stats: Dictionary = wsm.call("get_stats")
+		if _world_explorer and _world_explorer.get("world_streaming_manager"):
+			var stats: Dictionary = _world_explorer.get("world_streaming_manager").get_stats()
 			_cell_load_counts[_waypoints[_current_waypoint_idx].name + "_end"] = stats.get("loaded_cells", 0)
 
 		_log("  Arrived (%.1fs)" % load_time)
@@ -730,19 +729,15 @@ func _run_teleport_stress_scenario() -> void:
 	test_completed.emit(report)
 
 
-## Get current streaming stats from ObjectStreamer
+## Get current streaming stats from NativeStreamingManager
 func _get_streaming_stats() -> Dictionary:
 	var stats := {}
-	if _world_explorer:
-		var wsm: Node = _world_explorer.get("world_streaming_manager")
-		if wsm:
-			var os: Node = wsm.get_node_or_null("ObjectStreamer")
-			if os and os.has_method("get_stats"):
-				var os_stats: Dictionary = os.get_stats()
-				stats["queue"] = os_stats.get("instantiation_queue_size", 0)
-				stats["near"] = os_stats.get("near_visible", 0)
-				stats["mid"] = os_stats.get("mid_visible", 0)
-				stats["far"] = os_stats.get("far_visible", 0)
+	if _world_explorer and _world_explorer.get("world_streaming_manager"):
+		var nsm_stats: Dictionary = _world_explorer.get("world_streaming_manager").get_stats()
+		stats["queue"] = nsm_stats.get("instantiation_queue", 0)
+		stats["near"] = nsm_stats.get("loaded_cells", 0)
+		stats["mid"] = nsm_stats.get("mid_instances", 0)
+		stats["far"] = nsm_stats.get("total_impostors", 0)
 	return stats
 
 #endregion

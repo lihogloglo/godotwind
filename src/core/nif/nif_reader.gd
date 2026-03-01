@@ -15,7 +15,7 @@ var _parse_failed: bool = false  # Set when unrecoverable error encountered
 var _source_path: String = ""  # Source file path (for error messages)
 
 # Parsed data
-var records: Array = []  # Array of NIFRecord objects
+var records: Array[Defs.NIFRecord] = []  # Array of NIFRecord objects
 var roots: Array[int] = []  # Root record indices
 
 # Debug mode - set to true to print parsing info

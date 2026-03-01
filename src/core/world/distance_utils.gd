@@ -10,9 +10,10 @@
 class_name DistanceUtils
 extends RefCounted
 
+const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Morrowind cell size in meters (standard across all ESM data)
-const CELL_SIZE_METERS: float = 117.0
+const CELL_SIZE_METERS: float = CS.CELL_SIZE_GODOT
 
 ## Half cell size (used for center calculations)
 const HALF_CELL_SIZE: float = CELL_SIZE_METERS * 0.5
@@ -27,6 +28,11 @@ const MID_END: float = 500.0
 
 ## FAR tier: Impostors/billboards (MID_END to FAR_END)
 const FAR_END: float = 5000.0
+
+## Sub-LOD boundaries within MID tier
+const LOD1_END: float = 250.0   # LOD0 -> LOD1 at 150-250m
+const LOD2_END: float = 375.0   # LOD1 -> LOD2 at 250-375m
+const LOD3_END: float = 500.0   # LOD2 -> LOD3 at 375-500m (then -> impostor)
 
 ## Tier start distances (for convenience)
 const NEAR_START: float = 0.0

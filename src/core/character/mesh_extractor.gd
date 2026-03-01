@@ -25,9 +25,9 @@ class MeshData:
 
 	## Skinning data (if present)
 	var bone_names: PackedStringArray  # Original Morrowind bone names
-	var bone_weights: Array  # Array[PackedFloat32Array] per vertex
-	var bone_indices: Array  # Array[PackedInt32Array] per vertex
-	var inv_bind_poses: Array  # Array[Transform3D] per bone
+	var bone_weights: Array[PackedFloat32Array] = []  # Array[PackedFloat32Array] per vertex
+	var bone_indices: Array[PackedInt32Array] = []  # Array[PackedInt32Array] per vertex
+	var inv_bind_poses: Array[Transform3D] = []  # Array[Transform3D] per bone
 	var skin_transform: Transform3D = Transform3D.IDENTITY  # NiSkinData overall transform (mesh → skeleton space)
 
 	## Transform data

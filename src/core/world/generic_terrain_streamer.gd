@@ -382,15 +382,11 @@ func _queue_region(region: Vector2i, priority: float) -> void:
 
 	# Insert in sorted order: highest priority value first, lowest last
 	# pop_back() returns the lowest priority value = highest importance
-	var inserted := false
-	for i in range(_generation_queue.size()):
-		if priority > _generation_queue[i].priority:
-			_generation_queue.insert(i, entry)
-			inserted = true
-			break
-
-	if not inserted:
-		_generation_queue.append(entry)
+	var index := _generation_queue.bsearch_custom(entry, 
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return a.priority > b.priority
+	)
+	_generation_queue.insert(index, entry)
 
 
 ## Process the generation queue with time budgeting

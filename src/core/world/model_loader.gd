@@ -35,6 +35,9 @@ var _last_access: Dictionary = {}
 ## Cache for loaded LOD resources: model_path (lowercase) -> LODResource
 var _lod_cache: Dictionary = {}
 
+## The mod registry for asset resolution
+var _mod_registry: ModRegistry = null
+
 ## Enable disk caching of converted models (saves as .res files)
 ## Set to true to persist converted models between game sessions
 var enable_disk_cache: bool = true
@@ -541,16 +544,24 @@ func _get_disk_cache_dir() -> String:
 ## NOTE: Strips item_id suffix since prebaked models don't include it
 func _get_disk_cache_path(cache_key: String) -> String:
 	# Strip item_id suffix if present (e.g., "meshes\x\ex_door.nif:door_01" -> "meshes\x\ex_door.nif")
-	# Prebaked models are saved without item_id since collision is already baked in
 	var base_key := cache_key
 	var colon_pos := cache_key.rfind(":")
 	if colon_pos > 0:
 		base_key = cache_key.substr(0, colon_pos)
 
-	# Convert to safe filename
-	# Example: "meshes\x\ex_door.nif" -> "meshes_x_ex_door_nif.res"
 	var safe_name := base_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
-	return _get_disk_cache_dir().path_join(safe_name + ".res")
+	var file_name := safe_name + ".res"
+
+	# Priority 1: Check ModRegistry for mod-specific prebaked
+	if _mod_registry:
+		var mod := _mod_registry.resolve_mod_for_path(base_key)
+		if mod and mod.has_prebaked:
+			var mod_prebaked_path := mod.path.path_join("prebaked").path_join(file_name)
+			if _cached_file_exists(mod_prebaked_path):
+				return mod_prebaked_path
+
+	# Priority 2: Standard vanilla prebaked cache
+	return _get_disk_cache_dir().path_join(file_name)
 
 
 ## Load a model from disk cache
@@ -772,61 +783,6 @@ func _set_owner_recursive(node: Node, owner_node: Node) -> void:
 		_set_owner_recursive(child, owner_node)
 
 
-## Prepare resources for saving by giving them unique paths within the scene file
-## This allows PackedScene to properly embed all mesh and material data
-## Returns count of resources prepared
-func _prepare_resources_for_saving(node: Node, scene_path: String, depth: int = 0) -> int:
-	var count := 0
-	var base_name := scene_path.get_file().get_basename()
-
-	if node is MeshInstance3D:
-		var mesh_inst := node as MeshInstance3D
-		if mesh_inst.mesh:
-			# Give the mesh a unique internal path
-			mesh_inst.mesh.resource_local_to_scene = true
-			mesh_inst.mesh.take_over_path("local://mesh_%s_%d" % [base_name, count])
-			count += 1
-			# Also handle materials
-			for i in range(mesh_inst.mesh.get_surface_count()):
-				var mat := mesh_inst.mesh.surface_get_material(i)
-				if mat:
-					mat.resource_local_to_scene = true
-					mat.take_over_path("local://mat_%s_%d" % [base_name, count])
-					count += 1
-					# Handle textures within material
-					if mat is StandardMaterial3D:
-						var std_mat := mat as StandardMaterial3D
-						_prepare_texture(std_mat.albedo_texture, base_name, count)
-						_prepare_texture(std_mat.normal_texture, base_name, count + 1)
-						count += 2
-		# Mark override materials too
-		for i in range(mesh_inst.get_surface_override_material_count()):
-			var mat := mesh_inst.get_surface_override_material(i)
-			if mat:
-				mat.resource_local_to_scene = true
-				mat.take_over_path("local://override_mat_%s_%d" % [base_name, count])
-				count += 1
-
-	if node is CollisionShape3D:
-		var shape := (node as CollisionShape3D).shape
-		if shape:
-			shape.resource_local_to_scene = true
-			shape.take_over_path("local://shape_%s_%d" % [base_name, count])
-			count += 1
-
-	for child in node.get_children():
-		count += _prepare_resources_for_saving(child, scene_path, count)
-
-	return count
-
-
-## Helper to prepare a texture for saving
-func _prepare_texture(tex: Texture2D, base_name: String, idx: int) -> void:
-	if tex and tex.resource_path.is_empty():
-		tex.resource_local_to_scene = true
-		tex.take_over_path("local://tex_%s_%d" % [base_name, idx])
-
-
 ## Clear the disk cache (deletes all cached .res files)
 ## Use this when game assets have been updated
 func clear_disk_cache() -> void:
@@ -1044,3 +1000,8 @@ func has_lod_cached(model_path: String) -> bool:
 func clear_lod_cache() -> void:
 	_lod_cache.clear()
 	_pending_lod_loads.clear()
+
+
+## Set the mod registry for asset resolution
+func set_mod_registry(registry: ModRegistry) -> void:
+	_mod_registry = registry

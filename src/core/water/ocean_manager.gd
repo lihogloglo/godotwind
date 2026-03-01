@@ -1,5 +1,5 @@
 ## OceanManager - Main coordinator for the ocean water system
-## Manages ocean mesh, wave generation, shore dampening, and buoyancy queries
+## Manages ocean mesh, shore dampening, and buoyancy queries via GerstnerMath
 ## Autoload singleton: accessible via OceanManager global
 ## OPTIONAL SYSTEM - Can be completely disabled via project settings
 class_name OceanManagerClass
@@ -16,123 +16,60 @@ func _get_shore_mask_path() -> String:
 	return SettingsManager.get_ocean_path().path_join("shore_mask.png")
 
 # Ocean configuration
-@export var ocean_radius: float = 50000.0  # 50km clipmap radius - extends to horizon
-@export var wave_update_rate: int = 30    # Wave updates per second
-@export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore (horizontal distance)
-@export var shore_mask_resolution: int = 4096  # Shore mask texture size
-@export var use_prebaked_shore_mask: bool = true  # Try to load prebaked shore mask first
+@export var ocean_radius: float = 50000.0  # 50km clipmap radius
+@export var shore_fade_distance: float = 50.0  # Meters to fade waves near shore
+@export var shore_mask_resolution: int = 4096
+@export var use_prebaked_shore_mask: bool = true
 
-# Sea level - can be configured per world
+# Sea level
 @export var sea_level: float = 0.0
 
 # Quality settings
 @export_group("Quality Settings")
-## Water quality level: -1 = auto-detect, 0 = ultra low, 1 = low, 2 = medium, 3 = high
-@export_range(-1, 3) var water_quality: int = -1
+## Water quality: -1 = auto, 0 = flat, 1 = standard
+@export_range(-1, 1) var water_quality: int = -1
 
-# Wave parameters
+# Wave parameters (exposed for UI control)
 @export_group("Wave Settings")
-@export var wind_speed: float = 10.0  # m/s
-@export var wind_direction: float = 0.0  # radians
 @export var wave_scale: float = 1.0
-@export var choppiness: float = 1.0
-
-# Weather/lighting settings for visual effects
-@export_group("Weather Settings")
-## Rain intensity for rain ripples effect (0.0 = no rain, 1.0 = heavy rain)
-@export_range(0.0, 1.0) var rain_intensity: float = 0.0:
-	set(value):
-		rain_intensity = value
-		if _ocean_mesh:
-			_ocean_mesh.set_rain_intensity(value)
-## Enable sunlight scattering through waves (cyan glow effect)
-@export var enable_sunlight_scattering: bool = true:
-	set(value):
-		enable_sunlight_scattering = value
-		if _ocean_mesh:
-			_ocean_mesh.set_sunlight_scattering_enabled(value)
-## Enable wobbly shore effect (waves wobble the shoreline)
-@export var enable_wobbly_shores: bool = true:
-	set(value):
-		enable_wobbly_shores = value
-		if _ocean_mesh:
-			_ocean_mesh.set_wobbly_shores_enabled(value)
-
-# Visual settings - based on OpenMW water shader for realistic Morrowind-style ocean
-# OpenMW uses WATER_COLOR = vec3(0.090195, 0.115685, 0.12745) and VISIBILITY = 2500.0
-@export_group("Visual Settings")
-@export var water_color: Color = Color(0.090, 0.116, 0.127, 1.0)  # OpenMW blue-green
-@export var foam_color: Color = Color(0.9, 0.9, 0.9, 1.0)
-# Depth absorption distances in meters for each RGB channel
-# Higher values = clearer water (light travels further before being absorbed)
-# OpenMW VISIBILITY = 2500m, but we scale it per-channel for realistic color shift
-# Red absorbs first (shortest distance), blue absorbs last (longest distance)
-@export var depth_color_absorption: Vector3 = Vector3(15.0, 40.0, 80.0)
 
 # System state
 var _system_initialized: bool = false
-var _system_enabled: bool = false  # Whether ocean system is enabled via project settings
+var _system_enabled: bool = false
 
 # Internal state
 var _ocean_mesh: OceanMesh = null
-var _wave_generator: WaveGenerator = null
 var _shore_mask: ShoreMaskGenerator = null
 var _terrain: Terrain3D = null
 var _camera: Camera3D = null
-var _sun_light: DirectionalLight3D = null
-var _enabled: bool = true  # Runtime enable/disable (for gameplay)
+var _enabled: bool = true
 var _time: float = 0.0
-var _wave_update_timer: float = 0.0
-var _auto_find_camera: bool = true  # Auto-detect camera if not set
-var _auto_find_sun: bool = true  # Auto-detect sun light if not set
-
-# Displacement texture for CPU sampling (for buoyancy)
-var _displacement_image: Image = null
-var _displacement_map_size: int = 256
-
-# Wave cascade parameters (for GPU compute mode)
-var _wave_parameters: Array[WaveCascadeParameters] = []
-var _use_compute: bool = false
-var _rng := RandomNumberGenerator.new()
+var _auto_find_camera: bool = true
 
 # Signals
 signal ocean_initialized()
-signal wave_updated()
 
 
 func _ready() -> void:
-	# Register project settings if they don't exist
 	_register_project_settings()
 
-	# Only check project settings if we're the autoload singleton
-	# Manual instances (created by scenes) should always initialize
 	var is_autoload := get_parent() == get_tree().root and name == "OceanManager"
-
 	if is_autoload:
-		# Check if system is enabled via project settings
 		_system_enabled = ProjectSettings.get_setting(SETTING_ENABLED, false)
-
 		if not _system_enabled:
-			Log.info("water", "OceanManager: System disabled via project settings - skipping initialization")
+			Log.info("water", "OceanManager: System disabled via project settings")
 			return
 	else:
-		# Manual instance - always enable
 		_system_enabled = true
 
-	# Create child systems
 	_ocean_mesh = OceanMesh.new()
 	_ocean_mesh.name = "OceanMesh"
 	add_child(_ocean_mesh)
-
-	_wave_generator = WaveGenerator.new()
-	_wave_generator.name = "WaveGenerator"
-	add_child(_wave_generator)
 
 	_shore_mask = ShoreMaskGenerator.new()
 	_shore_mask.name = "ShoreMaskGenerator"
 	add_child(_shore_mask)
 
-	# Defer initialization until terrain is available
 	call_deferred("_deferred_init")
 
 
@@ -171,56 +108,31 @@ func _register_project_settings() -> void:
 			"name": SETTING_QUALITY,
 			"type": TYPE_INT,
 			"hint": PROPERTY_HINT_RANGE,
-			"hint_string": "-1,3,1"  # -1 = auto, 0-3 = quality levels
+			"hint_string": "-1,1,1"
 		})
 
 
 func _deferred_init() -> void:
-	# Load configuration from project settings
 	sea_level = ProjectSettings.get_setting(SETTING_SEA_LEVEL, 0.0)
 	ocean_radius = ProjectSettings.get_setting(SETTING_RADIUS, 8000.0)
 	water_quality = ProjectSettings.get_setting(SETTING_QUALITY, -1)
 
-	# Run hardware detection first
 	HardwareDetection.detect()
-
-	# Try to find terrain in scene
 	_find_terrain()
 
-	# Initialize ocean mesh first - it determines quality and mode
 	_ocean_mesh.initialize(ocean_radius, water_quality)
-
-	# Check if using FFT mode (compute shaders)
-	_use_compute = _ocean_mesh.is_using_compute()
-
-	if _use_compute:
-		# Initialize wave generator for FFT mode
-		var map_size := 256
-		_wave_generator.initialize(map_size)
-
-		if _wave_generator.is_using_compute():
-			_setup_wave_cascades()
-			# Initialize GPU resources BEFORE trying to get textures
-			_wave_generator.init_gpu(maxi(2, _wave_parameters.size()))
-
-			if _wave_generator.is_initialized():
-				_ocean_mesh.set_wave_textures(
-					_wave_generator.get_displacement_texture(),
-					_wave_generator.get_normal_texture(),
-					_wave_parameters.size()
-				)
-			else:
-				# GPU init failed - fall back to flat
-				_use_compute = false
-				push_warning("[OceanManager] GPU compute init failed, falling back to flat plane")
-		else:
-			# Compute failed to init - fall back to flat
-			_use_compute = false
-			push_warning("[OceanManager] GPU compute failed, falling back to flat plane")
-
 	_update_shader_parameters()
+	_load_shore_mask()
 
-	# Load or generate shore mask
+	_system_initialized = true
+	ocean_initialized.emit()
+
+	var mode := "Standard" if _ocean_mesh.get_quality() == OceanMesh.QualityMode.STANDARD else "Flat"
+	Log.info("water", "OceanManager: Initialized - sea level: %.1f, radius: %.0fm, mode: %s" % [
+		sea_level, ocean_radius, mode])
+
+
+func _load_shore_mask() -> void:
 	var shore_mask_loaded := false
 
 	# Try prebaked shore mask first
@@ -238,7 +150,6 @@ func _deferred_init() -> void:
 	if not shore_mask_loaded and _terrain:
 		Log.info("water", "OceanManager: Generating shore mask at runtime...")
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
-		# Pass shore mask to ocean mesh shader
 		_ocean_mesh.set_shore_mask(
 			_shore_mask.get_shore_mask_texture(),
 			_shore_mask.get_world_bounds()
@@ -248,141 +159,43 @@ func _deferred_init() -> void:
 	if not shore_mask_loaded:
 		Log.warn("water", "OceanManager: No shore mask available - ocean will appear everywhere")
 
-	_system_initialized = true
-	ocean_initialized.emit()
-
-	var mode := "GPU FFT (3 cascades)" if _use_compute else "Flat Plane"
-	Log.info("water", "OceanManager: Initialized - sea level: %.1f, radius: %.0fm, mode: %s" % [
-		sea_level, ocean_radius, mode])
-	Log.debug("water", "OceanManager: Ocean mesh visible: %s, vertices: %d" % [
-		_ocean_mesh.visible,
-		_ocean_mesh.mesh.get_faces().size() / 3 if _ocean_mesh.mesh else 0])
-
-
-func _setup_wave_cascades() -> void:
-	_wave_parameters.clear()
-	_rng.seed = 1234  # Consistent seed for reproducible waves
-
-	# FFT mode always uses 3 cascades for full detail
-	var cascade_configs: Array = [
-		{ "tile_length": Vector2(250, 250), "displacement_scale": 1.0, "normal_scale": 1.0 },
-		{ "tile_length": Vector2(67, 67), "displacement_scale": 0.5, "normal_scale": 0.5 },
-		{ "tile_length": Vector2(17, 17), "displacement_scale": 0.25, "normal_scale": 0.25 }
-	]
-
-	for i in range(cascade_configs.size()):
-		var config: Dictionary = cascade_configs[i]
-		var params := WaveCascadeParameters.new()
-		params.tile_length = config["tile_length"]
-		params.displacement_scale = config["displacement_scale"]
-		params.normal_scale = config["normal_scale"]
-		params.wind_speed = wind_speed
-		params.wind_direction = wind_direction
-		params.fetch_length = 550.0
-		params.swell = 0.8
-		params.spread = 0.2
-		params.detail = 1.0
-		params.whitecap = 0.5
-		params.foam_amount = 5.0
-		params.spectrum_seed = Vector2i(_rng.randi_range(-10000, 10000), _rng.randi_range(-10000, 10000))
-		params.time = 120.0 + PI * i  # Offset to prevent interference
-		_wave_parameters.append(params)
-
-	Log.info("water", "OceanManager: Configured %d wave cascade(s)" % cascade_configs.size())
-
 
 func _process(delta: float) -> void:
 	if not _system_enabled or not _enabled:
 		return
 
-	# Use real time instead of accumulated delta to avoid speed-up/slow-down
-	# when framerate fluctuates during asset loading
 	_time = Time.get_ticks_msec() / 1000.0
 
-	# Auto-find camera if not set
+	# Auto-find camera
 	if not _camera and _auto_find_camera:
 		_camera = _find_active_camera()
-		if _camera:
-			Log.debug("water", "OceanManager: Auto-detected camera: %s at %s" % [_camera.name, _camera.global_position])
-
-	# Update wave generator
-	if _use_compute and _wave_parameters.size() > 0:
-		# GPU compute mode - use cascade-based update
-		_wave_update_timer += delta
-		var update_interval := 1.0 / float(wave_update_rate)
-		if _wave_update_timer >= update_interval:
-			_wave_update_timer -= update_interval
-			_wave_generator.update(update_interval, _wave_parameters)
-			wave_updated.emit()
-	# For flat plane mode, nothing to update
 
 	# Update ocean mesh position to follow camera
 	if _camera:
 		var cam_pos := _camera.global_position
 		var new_pos := Vector3(cam_pos.x, sea_level, cam_pos.z)
-		
-		# Pass smooth camera position for distance-based fades/LODs
-		_ocean_mesh.set_camera_position(new_pos)
-		
-		# Move mesh smoothly with camera (local-space shaders will handle precision)
 		_ocean_mesh.update_position(new_pos)
-		# Debug: print position once
-		if _time < 0.1:
-			Log.debug("water", "OceanManager: Ocean mesh positioned at: %s (camera: %s)" % [new_pos, cam_pos])
-
-	# Update shader time (for vertex Gerstner animation)
-	_ocean_mesh.set_shader_time(_time)
-
-	# Update vector map generator (for Gerstner mode animated flow)
-	_ocean_mesh.update_vector_map(delta)
-
-	# Update sun direction for scattering effect
-	if _auto_find_sun and not _sun_light:
-		_sun_light = _find_sun_light()
-		if _sun_light:
-			Log.debug("water", "OceanManager: Auto-detected sun light: %s" % _sun_light.name)
-
-	if _sun_light and _ocean_mesh:
-		# DirectionalLight3D's -Z axis points toward the light direction
-		var sun_dir := -_sun_light.global_basis.z
-		_ocean_mesh.set_sun_direction(sun_dir)
-
-
-func _find_sun_light() -> DirectionalLight3D:
-	# Try to find the main directional light (sun) in the scene
-	var lights := get_tree().get_nodes_in_group("sun")
-	if lights.size() > 0 and lights[0] is DirectionalLight3D:
-		return lights[0] as DirectionalLight3D
-
-	# Look for any DirectionalLight3D that might be the sun
-	return _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
 
 
 func _find_active_camera() -> Camera3D:
-	# Try to find the current camera from viewport
 	var viewport := get_viewport()
 	if viewport:
 		var cam := viewport.get_camera_3d()
 		if cam:
 			return cam
 
-	# Fallback: search scene tree for any Camera3D
 	var cameras := get_tree().get_nodes_in_group("camera")
 	if cameras.size() > 0 and cameras[0] is Camera3D:
 		return cameras[0] as Camera3D
 
-	# Last resort: find by class
 	return _find_node_by_class(get_tree().root, "Camera3D") as Camera3D
 
 
 func _find_terrain() -> void:
-	# Look for Terrain3D in the scene tree
 	var terrains := get_tree().get_nodes_in_group("terrain")
 	if terrains.size() > 0 and terrains[0] is Terrain3D:
 		_terrain = terrains[0] as Terrain3D
 		return
-
-	# Fallback: search by class
 	_terrain = _find_node_by_class(get_tree().root, "Terrain3D") as Terrain3D
 
 
@@ -399,83 +212,83 @@ func _find_node_by_class(node: Node, class_name_str: String) -> Node:
 func _update_shader_parameters() -> void:
 	if not _ocean_mesh:
 		return
-
-	_ocean_mesh.set_water_color(water_color)
-	_ocean_mesh.set_foam_color(foam_color)
-	_ocean_mesh.set_depth_absorption(depth_color_absorption)
 	_ocean_mesh.set_wave_scale(wave_scale)
 
 
+# ============================================================================
+# WAVE QUERIES — Uses GerstnerMath for CPU-side wave evaluation
+# ============================================================================
+
 ## Get the wave height at a world position (for buoyancy)
-## Returns height in world Y coordinate
 func get_wave_height(world_pos: Vector3) -> float:
-	if not _system_enabled or not _enabled or not _wave_generator:
+	if not _system_enabled or not _enabled:
 		return sea_level
 
-	# Check shore mask - if we're on land, return terrain height
+	# Check shore mask — if on land, no water
 	if _shore_mask and _terrain:
 		var shore_factor := _shore_mask.get_shore_factor(world_pos)
 		if shore_factor <= 0.01:
-			# We're on land, no ocean here
-			return sea_level - 1000.0  # Return very low value to indicate no water
+			return sea_level - 1000.0
 
-	# Sample wave displacement
-	var displacement := _wave_generator.sample_displacement(world_pos)
-	return sea_level + displacement.y * wave_scale
+	var shore_factor := _get_shore_factor(world_pos)
+	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
+	var disp := GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
+	return sea_level + disp.y
 
 
-## Get wave displacement vector at world position (includes XZ horizontal displacement)
+## Get wave displacement vector at world position
 func get_wave_displacement(world_pos: Vector3) -> Vector3:
-	if not _system_enabled or not _enabled or not _wave_generator:
+	if not _system_enabled or not _enabled:
 		return Vector3.ZERO
-
-	return _wave_generator.sample_displacement(world_pos) * wave_scale
+	var shore_factor := _get_shore_factor(world_pos)
+	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
+	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
 
 
 ## Get wave normal at world position
 func get_wave_normal(world_pos: Vector3) -> Vector3:
-	if not _system_enabled or not _enabled or not _wave_generator:
+	if not _system_enabled or not _enabled:
 		return Vector3.UP
+	var shore_factor := _get_shore_factor(world_pos)
+	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
+	return GerstnerMath.get_normal(world_pos, _time, shore_factor * wave_scale, cam_pos)
 
-	return _wave_generator.sample_normal(world_pos)
+
+func _get_shore_factor(world_pos: Vector3) -> float:
+	if _shore_mask:
+		return _shore_mask.get_shore_factor(world_pos)
+	return 1.0
 
 
 ## Check if a position is in ocean water
 func is_in_ocean(world_pos: Vector3) -> bool:
 	if not _system_enabled or not _enabled:
 		return false
-
-	# Check if below sea level
-	if world_pos.y > sea_level + 10.0:  # 10m buffer
+	if world_pos.y > sea_level + 10.0:
 		return false
-
-	# Check shore mask
 	if _shore_mask:
 		return _shore_mask.get_shore_factor(world_pos) > 0.01
-
-	# Fallback: check terrain height
 	if _terrain and _terrain.data:
 		var terrain_height: float = _terrain.data.get_height(world_pos)
 		return terrain_height < sea_level
-
 	return true
 
 
-## Set the camera to follow (ocean mesh centers on camera)
+# ============================================================================
+# PUBLIC API
+# ============================================================================
+
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
-	_auto_find_camera = false  # Disable auto-find once manually set
+	_auto_find_camera = false
 
 
-## Set the sea level (call before initialization or regenerate shore mask after)
 func set_sea_level(level: float) -> void:
 	sea_level = level
 	if not _system_enabled:
 		return
-	# Regenerate shore mask with new sea level if terrain available
 	if _terrain and _shore_mask:
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
-		# Update ocean mesh with new shore mask
 		if _ocean_mesh:
 			_ocean_mesh.set_shore_mask(
 				_shore_mask.get_shore_mask_texture(),
@@ -483,43 +296,17 @@ func set_sea_level(level: float) -> void:
 			)
 
 
-## Get current sea level
 func get_sea_level() -> float:
 	return sea_level
 
 
-## Set the terrain for shore mask generation
-## Prefers prebaked shore mask if available, falls back to runtime generation
 func set_terrain(terrain: Terrain3D) -> void:
 	_terrain = terrain
 	if not _system_enabled:
 		return
-
-	# Try to use prebaked shore mask first (same logic as _deferred_init)
-	var shore_mask_loaded := false
-	var shore_mask_path := _get_shore_mask_path()
-	if use_prebaked_shore_mask and FileAccess.file_exists(shore_mask_path):
-		var prebaked := ShoreMaskBaker.load_prebaked(shore_mask_path)
-		if not prebaked.is_empty():
-			if _ocean_mesh:
-				var tex: Texture2D = prebaked.texture
-				var bounds: Rect2 = prebaked.bounds
-				_ocean_mesh.set_shore_mask(tex, bounds)
-			shore_mask_loaded = true
-			Log.info("water", "OceanManager: Using prebaked shore mask from %s" % shore_mask_path)
-
-	# Fall back to runtime generation if no prebaked mask
-	if not shore_mask_loaded and _shore_mask and _terrain:
-		Log.info("water", "OceanManager: No prebaked shore mask, generating at runtime...")
-		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
-		if _ocean_mesh:
-			_ocean_mesh.set_shore_mask(
-				_shore_mask.get_shore_mask_texture(),
-				_shore_mask.get_world_bounds()
-			)
+	_load_shore_mask()
 
 
-## Regenerate shore mask (call after terrain changes)
 func regenerate_shore_mask() -> void:
 	if not _system_enabled:
 		return
@@ -532,218 +319,107 @@ func regenerate_shore_mask() -> void:
 			)
 
 
-## Enable/disable ocean rendering
 func set_enabled(enabled: bool) -> void:
 	_enabled = enabled
 	if _ocean_mesh:
 		_ocean_mesh.visible = enabled
 
 
-## Get current time (for debugging)
 func get_time() -> float:
 	return _time
 
 
-## Get wave generator (for advanced configuration)
-func get_wave_generator() -> WaveGenerator:
-	return _wave_generator
-
-
-## Get ocean mesh node
 func get_ocean_mesh() -> OceanMesh:
 	return _ocean_mesh
 
 
-## Get shore mask generator
 func get_shore_mask_generator() -> ShoreMaskGenerator:
 	return _shore_mask
 
 
-## Check if system is enabled via project settings
 func is_system_enabled() -> bool:
 	return _system_enabled
 
 
-## Check if system is fully initialized
 func is_initialized() -> bool:
 	return _system_initialized
 
 
-## Toggle ocean on/off at runtime (for settings menus)
-## Returns the new enabled state
 func toggle_ocean() -> bool:
 	if _system_enabled and _system_initialized:
-		# Disable
 		set_enabled(false)
 		_system_enabled = false
 		Log.info("water", "OceanManager: Ocean disabled")
 	else:
-		# Enable - may need to initialize first
 		if not _system_initialized:
 			force_initialize()
-		# force_initialize sets _system_enabled = true
 		set_enabled(true)
 		Log.info("water", "OceanManager: Ocean enabled (mode: %s)" % get_water_quality_name())
 	return _system_enabled
 
 
-## Static helper to check if ocean should be enabled for current hardware
-## Call this before enabling ocean on low-end systems
 static func is_hardware_suitable() -> bool:
 	HardwareDetection.detect()
 	var quality := HardwareDetection.get_recommended_quality()
-	# Only suitable if hardware can handle at least LOW quality without severe impact
-	# ULTRA_LOW means software renderer - definitely not suitable
 	return quality != HardwareDetection.WaterQuality.ULTRA_LOW
 
 
-## Force-enable and initialize the ocean system
-## Call this from scenes that need ocean but have ocean/enabled = false in project settings
-## This allows the autoload to stay disabled by default while scenes can opt-in
 func force_initialize() -> void:
 	if _system_initialized:
-		Log.debug("water", "OceanManager: Already initialized, skipping force_initialize")
 		return
-
 	Log.info("water", "OceanManager: Force initializing ocean system...")
 	_system_enabled = true
 
-	# Create child systems if not already created
 	if not _ocean_mesh:
 		_ocean_mesh = OceanMesh.new()
 		_ocean_mesh.name = "OceanMesh"
 		add_child(_ocean_mesh)
-		Log.debug("water", "OceanManager: Created OceanMesh")
-
-	if not _wave_generator:
-		_wave_generator = WaveGenerator.new()
-		_wave_generator.name = "WaveGenerator"
-		add_child(_wave_generator)
-		Log.debug("water", "OceanManager: Created WaveGenerator")
 
 	if not _shore_mask:
 		_shore_mask = ShoreMaskGenerator.new()
 		_shore_mask.name = "ShoreMaskGenerator"
 		add_child(_shore_mask)
-		Log.debug("water", "OceanManager: Created ShoreMaskGenerator")
 
-	# Run deferred init
 	_deferred_init()
 
-	# Ensure mesh is visible and positioned
 	if _ocean_mesh:
 		_ocean_mesh.visible = true
-		Log.debug("water", "OceanManager: Ocean mesh visible: %s, position: %s" % [_ocean_mesh.visible, _ocean_mesh.global_position])
 
 
-## Get current water quality mode
 func get_water_quality() -> OceanMesh.QualityMode:
 	if _ocean_mesh:
 		return _ocean_mesh.get_quality()
-	return OceanMesh.QualityMode.GERSTNER
+	return OceanMesh.QualityMode.STANDARD
 
 
-## Set water quality mode (0 = flat, 1 = gerstner, 2 = FFT, -1 = auto)
 func set_water_quality(quality: int) -> void:
 	water_quality = quality
-	if not _system_enabled:
-		return
-	if not _ocean_mesh:
+	if not _system_enabled or not _ocean_mesh:
 		return
 
-	# Map input to QualityMode
 	var target_quality: OceanMesh.QualityMode
-	match quality:
-		0:
-			target_quality = OceanMesh.QualityMode.FLAT
-		1:
-			target_quality = OceanMesh.QualityMode.GERSTNER
-		2:
-			target_quality = OceanMesh.QualityMode.FFT
-		_:
-			# Auto-detect - default to GERSTNER (best balance)
-			HardwareDetection.detect()
-			var recommended := HardwareDetection.get_recommended_quality()
-			match recommended:
-				HardwareDetection.WaterQuality.HIGH:
-					target_quality = OceanMesh.QualityMode.GERSTNER  # Gerstner is default
-				HardwareDetection.WaterQuality.MEDIUM, HardwareDetection.WaterQuality.LOW:
-					target_quality = OceanMesh.QualityMode.GERSTNER
-				_:
-					target_quality = OceanMesh.QualityMode.FLAT
+	if quality == 0:
+		target_quality = OceanMesh.QualityMode.FLAT
+	else:
+		target_quality = OceanMesh.QualityMode.STANDARD
 
-	var needs_wave_textures := _ocean_mesh.set_quality(target_quality, ocean_radius)
-
-	# Update compute mode flag
-	_use_compute = _ocean_mesh.is_using_compute()
-
-	# If switching to FFT, need to reconnect wave textures
-	if needs_wave_textures and _wave_generator and _wave_generator.is_initialized():
-		_ocean_mesh.set_wave_textures(
-			_wave_generator.get_displacement_texture(),
-			_wave_generator.get_normal_texture(),
-			_wave_parameters.size()
-		)
-		Log.debug("water", "OceanManager: Reconnected wave textures for FFT mode")
-	elif needs_wave_textures:
-		# Need to initialize wave generator for FFT mode
-		if not _wave_generator.is_initialized():
-			_setup_wave_cascades()
-			_wave_generator.initialize(256)
-			if _wave_generator.is_using_compute():
-				_wave_generator.init_gpu(maxi(2, _wave_parameters.size()))
-				if _wave_generator.is_initialized():
-					_ocean_mesh.set_wave_textures(
-						_wave_generator.get_displacement_texture(),
-						_wave_generator.get_normal_texture(),
-						_wave_parameters.size()
-					)
-					Log.debug("water", "OceanManager: Initialized wave generator for FFT mode switch")
-
+	_ocean_mesh.set_quality(target_quality, ocean_radius)
 	Log.info("water", "OceanManager: Quality changed to: %s" % get_water_quality_name())
 
 
-## Get water quality name as string
 func get_water_quality_name() -> String:
 	if _ocean_mesh:
 		match _ocean_mesh.get_quality():
-			OceanMesh.QualityMode.FFT:
-				return "FFT"
-			OceanMesh.QualityMode.GERSTNER:
-				return "Gerstner"
+			OceanMesh.QualityMode.STANDARD:
+				return "Standard"
 			_:
 				return "Flat"
 	return "Unknown"
 
 
-## Check if running on integrated GPU
 func is_integrated_gpu() -> bool:
 	return HardwareDetection.is_integrated_gpu()
 
 
-## Get GPU name
 func get_gpu_name() -> String:
 	return HardwareDetection.get_gpu_name()
-
-
-## Set the sun light for scattering effect (optional - auto-detected if not set)
-func set_sun_light(light: DirectionalLight3D) -> void:
-	_sun_light = light
-	_auto_find_sun = false  # Disable auto-find once manually set
-
-
-## Set rain intensity (0.0 = no rain, 1.0 = heavy rain)
-func set_rain_intensity(intensity: float) -> void:
-	rain_intensity = intensity
-
-
-## Get current rain intensity
-func get_rain_intensity() -> float:
-	return rain_intensity
-
-
-## Set sun direction directly (alternative to setting sun light)
-func set_sun_direction(direction: Vector3) -> void:
-	_auto_find_sun = false  # Disable auto-find
-	if _ocean_mesh:
-		_ocean_mesh.set_sun_direction(direction)

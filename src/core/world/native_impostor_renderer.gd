@@ -10,7 +10,7 @@
 ## The impostor shader is valuable custom code. The visibility logic is not.
 ## Let Godot handle visibility via visibility_range, we just render the impostors.
 ##
-## Lines of code: ~400 (vs ~1,529 in old ImpostorManager)
+## Lines of code: ~1,200 (vs ~1,529 in old ImpostorManager)
 class_name NativeImpostorRenderer
 extends Node3D
 
@@ -59,37 +59,44 @@ var _billboard_material: ShaderMaterial = null
 
 ## Texture array for batched rendering
 var _texture_array: Texture2DArray = null
-var _texture_index_map: Dictionary = {}  # texture_hash -> array_index
+var _texture_index_map: Dictionary[String, int] = {}  # texture_hash -> array_index
 var _texture_array_dirty: bool = false
 var _all_array_images: Array[Image] = []
 var _texture_array_size: int = 0
 var _last_texture_add_time: float = 0.0
 
 ## Reference count for textures: hash_key -> count of impostors using it
-var _texture_ref_counts: Dictionary = {}
+var _texture_ref_counts: Dictionary[String, int] = {}
 
 ## Loaded impostor textures: hash_key -> Texture2D
-var _impostor_textures: Dictionary = {}
+var _impostor_textures: Dictionary[String, Texture2D] = {}
 
 ## Background job system for async texture loading
 var _job_system: RefCounted = null
-var _pending_job_ids: Dictionary = {}
+var _pending_job_ids: Dictionary[String, int] = {} # hash_key -> job_id
 
 ## Pending impostors waiting for texture
-var _pending_impostors: Dictionary = {}  # hash_key -> Array[PendingImpostor]
+var _pending_impostors: Dictionary[String, Array] = {}  # hash_key -> Array[PendingImpostor]
 
 ## Default fallback texture for missing impostors (created on demand)
 var _fallback_texture: ImageTexture = null
 
 ## Active impostors: impostor_id -> ImpostorData
-var _impostors: Dictionary = {}
+var _impostors: Dictionary[int, ImpostorData] = {}
 var _next_id: int = 0
 
+## Spatial index: cell_grid -> Array[int] of impostor IDs
+## Enables O(cell_count) lookups instead of O(total_impostors) for unloading
+var _cell_index: Dictionary[Vector2i, Array] = {}  # Array[int]
+
 ## Cached impostor metadata
-var _impostor_metadata: Dictionary = {}
+var _impostor_metadata: Dictionary[String, Dictionary] = {}
+
+## Cached file existence checks to avoid repeated disk I/O
+var _file_exists_cache: Dictionary[String, bool] = {}
 
 ## Track loaded impostor cells to avoid duplicates
-var _loaded_impostor_cells: Dictionary = {} # Vector2i -> true
+var _loaded_impostor_cells: Dictionary[Vector2i, bool] = {} # Vector2i -> true
 
 ## Track when impostors have been modified (need MultiMesh rebuild)
 var _impostors_dirty: bool = false
@@ -103,6 +110,7 @@ const MULTIMESH_REBUILD_DEBOUNCE: float = 0.2  # Wait this long after last impos
 
 ## Deferred impostor loading - process cells progressively to avoid freezing
 var _pending_impostor_cells: Array[Vector2i] = []  # Cells waiting to be processed
+var _pending_cell_index: int = 0  # Current front of the queue
 var _impostor_cells_per_frame: int = 5  # Max cells to process per frame (tunable)
 var _impostor_load_budget_ms: float = 4.0  # Time budget for impostor loading per frame
 
@@ -491,7 +499,7 @@ func _process(_delta: float) -> void:
 		# 1. Enough time has passed since last rebuild (rate limit), AND
 		# 2. Either we've waited long enough after last add (debounce), OR no pending cells
 		var should_rebuild := time_since_last_rebuild >= MULTIMESH_REBUILD_INTERVAL
-		var done_adding := time_since_last_add >= MULTIMESH_REBUILD_DEBOUNCE or _pending_impostor_cells.is_empty()
+		var done_adding := time_since_last_add >= MULTIMESH_REBUILD_DEBOUNCE or _pending_cell_index >= _pending_impostor_cells.size()
 
 		if should_rebuild and done_adding:
 			Log.info("impostors", "Rebuilding MultiMesh with %d impostors" % _impostors.size())
@@ -502,13 +510,13 @@ func _process(_delta: float) -> void:
 
 ## Process pending impostor cells progressively (time-budgeted)
 func _process_pending_impostor_cells() -> void:
-	if _pending_impostor_cells.is_empty():
+	if _pending_cell_index >= _pending_impostor_cells.size():
 		return
 
 	var start_time := Time.get_ticks_msec()
 	var cells_processed := 0
 
-	while not _pending_impostor_cells.is_empty():
+	while _pending_cell_index < _pending_impostor_cells.size():
 		# Check time budget
 		var elapsed := Time.get_ticks_msec() - start_time
 		if elapsed >= _impostor_load_budget_ms:
@@ -518,14 +526,23 @@ func _process_pending_impostor_cells() -> void:
 		if cells_processed >= _impostor_cells_per_frame:
 			break
 
-		var grid: Vector2i = _pending_impostor_cells.pop_front()
+		var grid: Vector2i = _pending_impostor_cells[_pending_cell_index]
+		_pending_cell_index += 1
 		_load_impostors_from_cell_record(grid)
 		cells_processed += 1
+
+	# Periodic cleanup of the queue
+	if _pending_cell_index >= _pending_impostor_cells.size():
+		_pending_impostor_cells.clear()
+		_pending_cell_index = 0
+	elif _pending_cell_index > 100:
+		_pending_impostor_cells = _pending_impostor_cells.slice(_pending_cell_index)
+		_pending_cell_index = 0
 
 	if cells_processed > 0 and debug_enabled:
 		var elapsed := Time.get_ticks_msec() - start_time
 		_debug("Processed %d impostor cells in %.1fms, %d remaining" % [
-			cells_processed, elapsed, _pending_impostor_cells.size()])
+			cells_processed, elapsed, _pending_impostor_cells.size() - _pending_cell_index])
 
 
 func _poll_job_results() -> void:
@@ -577,13 +594,9 @@ func add_impostor(
 		_stats["skipped_not_candidate"] += 1
 		return -1
 
-	# CRITICAL FIX: Check if prebaked texture actually exists on disk
-	# Many models match the impostor candidate patterns but don't have prebaked textures
-	# Without this check, they would render as magenta fallback textures
+	# Check if prebaked texture actually exists on disk (cached to avoid repeated I/O)
 	var texture_path := ImpostorCandidatesScript.get_impostor_texture_path(model_path)
-	if not FileAccess.file_exists(texture_path):
-		# No prebaked texture - skip this impostor silently
-		# This is expected for many models that match patterns but weren't baked
+	if not _cached_file_exists(texture_path):
 		_stats["skipped_no_texture"] += 1
 		return -1
 
@@ -665,7 +678,9 @@ func remove_impostor(impostor_id: int) -> void:
 ## Clear all impostors
 func clear() -> void:
 	_impostors.clear()
+	_cell_index.clear()
 	_texture_ref_counts.clear()
+	_file_exists_cache.clear()
 	_stats["total_impostors"] = 0
 	_impostors_dirty = true  # Mark for MultiMesh rebuild
 
@@ -831,25 +846,27 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 
 ## Unload impostors belonging to specific cells
 func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
-	var grid_set: Dictionary = {}
-	for g in grids:
-		grid_set[g] = true
+	for g: Vector2i in grids:
 		_loaded_impostor_cells.erase(g)
 
-	# Remove active impostors and decrement texture reference counts
+	# Use spatial index for O(cell_count) lookup instead of O(total_impostors)
 	var ids_to_remove: Array[int] = []
-	for id: int in _impostors:
-		var imp: ImpostorData = _impostors[id]
-		if imp.cell_grid in grid_set:
-			ids_to_remove.append(id)
-			# Decrement texture reference count
-			var hash_key: String = imp.texture_hash
-			if hash_key in _texture_ref_counts:
-				_texture_ref_counts[hash_key] -= 1
-				if _texture_ref_counts[hash_key] <= 0:
-					_texture_ref_counts.erase(hash_key)
+	for grid: Vector2i in grids:
+		if grid not in _cell_index:
+			continue
+		for id: int in _cell_index[grid]:
+			var imp: ImpostorData = _impostors.get(id)
+			if imp:
+				ids_to_remove.append(id)
+				# Decrement texture reference count
+				var hash_key: String = imp.texture_hash
+				if hash_key in _texture_ref_counts:
+					_texture_ref_counts[hash_key] -= 1
+					if _texture_ref_counts[hash_key] <= 0:
+						_texture_ref_counts.erase(hash_key)
+		_cell_index.erase(grid)
 
-	for id in ids_to_remove:
+	for id: int in ids_to_remove:
 		_impostors.erase(id)
 
 	if not ids_to_remove.is_empty():
@@ -858,6 +875,9 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 	_stats["total_impostors"] = _impostors.size()
 	
 	# Remove pending impostors
+	var grid_set: Dictionary = {}
+	for g2: Vector2i in grids:
+		grid_set[g2] = true
 	for hash_key: String in _pending_impostors:
 		var list: Array = _pending_impostors[hash_key]
 		var i := list.size() - 1
@@ -922,6 +942,15 @@ func _load_impostors_from_cell_record(grid: Vector2i) -> void:
 func _debug(msg: String) -> void:
 	if debug_enabled:
 		Log.debug("impostors", msg)
+
+
+## Cached file existence check — avoids repeated disk I/O for the same paths
+func _cached_file_exists(path: String) -> bool:
+	if path in _file_exists_cache:
+		return _file_exists_cache[path]
+	var exists := FileAccess.file_exists(path)
+	_file_exists_cache[path] = exists
+	return exists
 
 #endregion
 
@@ -1008,6 +1037,11 @@ func _create_impostor(
 	_stats["total_impostors"] = _impostors.size()
 	_impostors_dirty = true  # Mark for MultiMesh rebuild (rate-limited in _process)
 	_last_impostor_add_time = Time.get_ticks_msec() / 1000.0  # For debounce
+
+	# Maintain spatial index for O(cell_size) unloading
+	if cell_grid not in _cell_index:
+		_cell_index[cell_grid] = [] as Array[int]
+	_cell_index[cell_grid].append(impostor.id)
 
 	# Increment texture reference count
 	_texture_ref_counts[hash_key] = _texture_ref_counts.get(hash_key, 0) + 1

@@ -38,6 +38,9 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
+# GPU scene database for SSBO-backed world state (Phase 2)
+var _gpu_scene_db: RefCounted = null  # GPUSceneDatabase
+
 # LOD configurator for setting visibility ranges
 var _lod_configurator: LODConfigurator = null
 
@@ -96,6 +99,12 @@ func init_object_pool(parent_node: Node3D = null) -> void:
 ## Get the object pool (for releasing objects back when unloading cells)
 func get_object_pool() -> RefCounted:
 	return _object_pool
+
+
+## Set the mod registry for asset resolution
+func set_mod_registry(registry: ModRegistry) -> void:
+	if _model_loader:
+		_model_loader.set_mod_registry(registry)
 
 
 # REMOVED: set_object_streamer()
@@ -797,6 +806,7 @@ var _diag_last_log_frame: int = 0
 ## Queue for pending NIF conversions (deferred to avoid main thread stall)
 ## Each entry: {parse_result: NIFParseResult, model_path: String, request_id: int, item_id: String}
 var _pending_conversions: Array[Dictionary] = []
+var _pending_conversion_index: int = 0
 
 ## Maximum conversion time per frame in milliseconds
 ## NOTE: A single complex model can take 500ms-6s to convert
@@ -850,10 +860,10 @@ class AsyncCellRequest:
 	var grid: Vector2i  # For exterior cells
 	var is_interior: bool
 	var request_id: int
-	var pending_parses: Dictionary = {}  # model_path -> task_id
-	var pending_disk_loads: Dictionary = {}  # model_path -> Array[CellReference] (refs waiting for this model)
-	var parsed_results: Dictionary = {}  # model_path -> NIFParseResult
-	var references_to_process: Array = []  # CellReference objects awaiting instantiation
+	var pending_parses: Dictionary[String, int] = {}  # model_path -> task_id
+	var pending_disk_loads: Dictionary[String, Array] = {}  # model_path -> Array[CellReference] (refs waiting for this model)
+	var parsed_results: Dictionary[String, NIFParseResult] = {}  # model_path -> NIFParseResult
+	var references_to_process: Array[CellReference] = []  # CellReference objects awaiting instantiation
 	var pending_instantiations: int = 0  # Count of items queued for instantiation
 	var cell_node: Node3D = null  # The cell node being built
 	var started: bool = false
@@ -862,19 +872,33 @@ class AsyncCellRequest:
 	var error_message: String = ""  # Error description if failed
 	var retry_count: int = 0  # Number of retries attempted
 	var failed_models: Array[String] = []  # Models that failed to parse
+	var gpu_objects: Array[Dictionary] = [] # Buffer for GPU Scene Database objects (Phase 2)
+
 
 ## Next async request ID
 var _next_async_id: int = 1
 
 ## Active async requests
-var _async_requests: Dictionary = {}  # request_id -> AsyncCellRequest
+var _async_requests: Dictionary[int, AsyncCellRequest] = {}
+
+
+## Entry in the instantiation queue
+class InstantiationEntry:
+	var request_id: int
+	var ref: CellReference
+	var model_path: String
+	var item_id: String
+	var position: Vector3
+	var always_near: bool
+	var mid_worthy: bool
+
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
 var _background_processor: Node = null
 
 ## Instantiation queue for time-budgeted processing
 ## Entries include position for distance-priority sorting
-var _instantiation_queue: Array = []  # Array of {request_id, ref, model_path, position}
+var _instantiation_queue: Array[InstantiationEntry] = []
 
 ## Camera position for distance-based prioritization
 var _camera_position: Vector3 = Vector3.ZERO
@@ -897,6 +921,12 @@ var _deferred_near_refs: Dictionary = {}  # Vector2i -> Array[Dictionary]
 ## Set the LOD configurator for visibility range configuration
 func set_lod_configurator(configurator: LODConfigurator) -> void:
 	_lod_configurator = configurator
+
+
+## Set the GPU scene database for SSBO-backed world state
+func set_gpu_scene_db(db: RefCounted) -> void:
+	_gpu_scene_db = db
+	_sync_instantiator_config()
 
 
 ## Set the background processor to use for async loading
@@ -1042,7 +1072,7 @@ func cancel_async_request(request_id: int) -> void:
 	# This prevents orphan objects when the cell is unloaded mid-loading
 	var queue_before := _instantiation_queue.size()
 	_instantiation_queue = _instantiation_queue.filter(
-		func(entry: Dictionary) -> bool: return entry.request_id != request_id
+		func(entry: InstantiationEntry) -> bool: return entry.request_id != request_id
 	)
 	var removed := queue_before - _instantiation_queue.size()
 	if removed > 0:
@@ -1078,19 +1108,21 @@ func process_pending_conversions(_budget_ms: float) -> bool:
 	# In runtime mode (world explorer), skip all conversion - models must be prebaked
 	if _model_loader.runtime_mode:
 		# Clear any pending conversions - they shouldn't exist in runtime mode
-		if not _pending_conversions.is_empty():
-			push_warning("CellManager: %d models queued for conversion but runtime_mode=true. Run prebaking first!" % _pending_conversions.size())
+		if _pending_conversion_index < _pending_conversions.size():
+			push_warning("CellManager: %d models queued for conversion but runtime_mode=true. Run prebaking first!" % (_pending_conversions.size() - _pending_conversion_index))
 			_pending_conversions.clear()
+			_pending_conversion_index = 0
 		return false
 
 	# PREBAKING MODE ONLY: Process conversions for prebaking tools
-	if _pending_conversions.is_empty():
+	if _pending_conversion_index >= _pending_conversions.size():
 		return false
 
 	var converted := 0
 
-	while not _pending_conversions.is_empty() and converted < MAX_CONVERSIONS_PER_FRAME:
-		var entry: Dictionary = _pending_conversions.pop_front()
+	while _pending_conversion_index < _pending_conversions.size() and converted < MAX_CONVERSIONS_PER_FRAME:
+		var entry: Dictionary = _pending_conversions[_pending_conversion_index]
+		_pending_conversion_index += 1
 		var parse_result: NIFParseResult = entry.parse_result
 		var model_path: String = entry.model_path
 		var request_id: int = entry.request_id
@@ -1121,7 +1153,15 @@ func process_pending_conversions(_budget_ms: float) -> bool:
 
 		# Check if request is now complete
 		if _is_request_complete(request):
-			request.completed = true
+			_finalize_request(request)
+
+	# Periodic cleanup of the queue
+	if _pending_conversion_index >= _pending_conversions.size():
+		_pending_conversions.clear()
+		_pending_conversion_index = 0
+	elif _pending_conversion_index > 50:
+		_pending_conversions = _pending_conversions.slice(_pending_conversion_index)
+		_pending_conversion_index = 0
 
 	return converted > 0
 
@@ -1181,8 +1221,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var effective_max_instantiations := MAX_INSTANTIATIONS_PER_FRAME
 
 	if not _instantiation_queue.is_empty():
-		var last_entry: Dictionary = _instantiation_queue[-1]
-		var last_pos: Vector3 = last_entry.get("position", Vector3.ZERO)
+		var last_entry: InstantiationEntry = _instantiation_queue[-1]
+		var last_pos: Vector3 = last_entry.position
 		var last_distance := _camera_position.distance_to(last_pos)
 
 		if last_distance < _burst_distance:
@@ -1213,11 +1253,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			exit_reason = "object_cap"
 			break
 
-		var entry: Dictionary = _instantiation_queue.pop_back()
+		var entry: InstantiationEntry = _instantiation_queue.pop_back()
 		var request_id: int = entry.request_id
 		var ref: CellReference = entry.ref
 		var model_path: String = entry.model_path
-		var item_id: String = entry.get("item_id", "")
+		var item_id: String = entry.item_id
 
 		# Check if request still exists
 		if request_id not in _async_requests:
@@ -1244,11 +1284,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		# all scene tree overhead. ~10-40x cheaper per object.
 		# Exceptions: lights (need OmniLight3D), animated objects (NPC/creature),
 		# and model-less references always use the full NEAR path.
-		var obj_position: Vector3 = entry.get("position", Vector3.ZERO)
+		var obj_position: Vector3 = entry.position
 		var distance_sq := _camera_position.distance_squared_to(obj_position)
 		var use_mid_path := false
-		var always_near: bool = entry.get("always_near", false)  # Pre-classified at queue time (Phase 5c)
-		var mid_worthy: bool = entry.get("mid_worthy", true)  # Pre-classified at queue time
+		var always_near: bool = entry.always_near  # Pre-classified at queue time (Phase 5c)
+		var mid_worthy: bool = entry.mid_worthy  # Pre-classified at queue time
 
 		if _static_renderer and distance_sq > SC.NEAR_END * SC.NEAR_END and not model_path.is_empty():
 			if not always_near:
@@ -1329,24 +1369,25 @@ func _sort_queue_by_priority() -> void:
 
 	var cam_pos := _camera_position
 	var cam_fwd := _camera_forward
-	_instantiation_queue.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		var pos_a: Vector3 = a.get("position", Vector3.ZERO)
-		var pos_b: Vector3 = b.get("position", Vector3.ZERO)
-		var dist_sq_a := cam_pos.distance_squared_to(pos_a)
-		var dist_sq_b := cam_pos.distance_squared_to(pos_b)
-
-		# Frustum penalty: objects behind camera (dot < 0.3) get 4x distance penalty
+	
+	# Pre-calculate priorities to avoid expensive lambda logic during sort
+	# GDScript sort_custom is much faster with simple float comparisons
+	var priorities := {} # entry -> float
+	for entry in _instantiation_queue:
+		var pos: Vector3 = entry.position
+		var dist_sq := cam_pos.distance_squared_to(pos)
+		
 		if cam_fwd != Vector3.ZERO:
-			var dir_a := (pos_a - cam_pos)
-			var dir_b := (pos_b - cam_pos)
-			# Only normalize if far enough to avoid division by near-zero
-			if dist_sq_a > 1.0 and cam_fwd.dot(dir_a) < 0.3 * dir_a.length():
-				dist_sq_a *= 4.0
-			if dist_sq_b > 1.0 and cam_fwd.dot(dir_b) < 0.3 * dir_b.length():
-				dist_sq_b *= 4.0
+			var dir := (pos - cam_pos)
+			# Frustum penalty: objects behind camera (dot < 0.3) get 4x distance penalty
+			if dist_sq > 1.0 and cam_fwd.dot(dir) < 0.3 * dir.length():
+				dist_sq *= 4.0
+		
+		priorities[entry] = dist_sq
 
+	_instantiation_queue.sort_custom(func(a: InstantiationEntry, b: InstantiationEntry) -> bool:
 		# Reverse order: farthest first, so pop_back() returns nearest/highest-priority
-		return dist_sq_a > dist_sq_b
+		return priorities[a] > priorities[b]
 	)
 
 
@@ -1516,7 +1557,7 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -
 
 	# Mark as complete if nothing to do (all models cached and instantiated)
 	if _is_request_complete(request):
-		request.completed = true
+		_finalize_request(request)
 
 	return request.request_id
 
@@ -1668,7 +1709,7 @@ func _on_disk_load_completed(request_id: int, model_path: String, item_id: Strin
 
 	# Check if request is now complete
 	if _is_request_complete(request):
-		request.completed = true
+		_finalize_request(request)
 
 
 ## Helper methods delegated to ReferenceInstantiator
@@ -1875,10 +1916,37 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	)
 	if instance_id < 0:
 		return false
+	
+	# If GPU Scene Database is active, collect data for batch upload
+	if _gpu_scene_db:
+		# Retrieve AABB from static renderer's type registry
+		var mesh_stats: Dictionary = _static_renderer.call("get_mesh_type_stats", type_name)
+		var aabb: AABB = mesh_stats.get("aabb", AABB())
+		
+		request.gpu_objects.append({
+			"transform": xform,
+			"aabb": aabb,
+			"mesh_id": float(type_name.hash()),
+			"lod_mask": 0 # Default
+		})
 
 	_stats["objects_instantiated"] += 1
 	_stats["mid_tier_instances"] = _stats.get("mid_tier_instances", 0) + 1
 	return true
+
+
+## Internal: Finalize a request (upload GPU objects, mark completed)
+func _finalize_request(request: AsyncCellRequest) -> void:
+	if request.completed:
+		return
+
+	# Upload buffered GPU objects to scene database
+	if _gpu_scene_db and not request.gpu_objects.is_empty():
+		_gpu_scene_db.call("add_cell_objects", request.grid, request.gpu_objects)
+		# Clear buffer to free memory
+		request.gpu_objects.clear()
+
+	request.completed = true
 
 
 ## Internal: Queue an object for instantiation with limit checking
@@ -1903,15 +1971,16 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	if not always_near:
 		mid_worthy = _is_mid_worthy(type_name, model_path)
 
-	_instantiation_queue.append({
-		"request_id": request_id,
-		"ref": ref,
-		"model_path": model_path,
-		"item_id": item_id,
-		"position": position,
-		"always_near": always_near,
-		"mid_worthy": mid_worthy,
-	})
+	var entry := InstantiationEntry.new()
+	entry.request_id = request_id
+	entry.ref = ref
+	entry.model_path = model_path
+	entry.item_id = item_id
+	entry.position = position
+	entry.always_near = always_near
+	entry.mid_worthy = mid_worthy
+
+	_instantiation_queue.append(entry)
 
 	# Track pending instantiation count for completion checking
 	if request_id in _async_requests:

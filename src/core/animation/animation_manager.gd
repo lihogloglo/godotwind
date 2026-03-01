@@ -91,7 +91,7 @@ var _current_state: StringName = &"Idle"
 var _previous_state: StringName = &""
 
 # Blend parameters
-var _blend_parameters: Dictionary = {
+var _blend_parameters: Dictionary[StringName, Variant] = {
 	&"movement_direction": Vector2.ZERO,  # X = strafe, Y = forward/back
 	&"movement_speed": 0.0,               # 0 = idle, 1 = walk, 2 = run
 	&"is_grounded": true,
@@ -100,7 +100,7 @@ var _blend_parameters: Dictionary = {
 }
 
 # Animation name mappings (state -> animation name)
-var _state_animation_map: Dictionary = {}
+var _state_animation_map: Dictionary[StringName, StringName] = {}
 
 # One-shot state
 var _oneshot_active: bool = false
@@ -248,6 +248,25 @@ func _process_text_keys() -> void:
 	handler.process_animation_time(anim_name, current_time)
 
 
+## Resolve fallback state if target has no mapped animation.
+## Returns empty StringName if no fallback found.
+func _resolve_fallback_state(state: StringName) -> StringName:
+	if state in _state_animation_map:
+		return state
+	const FALLBACKS: Dictionary = {
+		&"Idle": [&"Walk"],
+		&"Walk": [&"Idle"],
+		&"Run": [&"Walk", &"Sprint"],
+		&"Sprint": [&"Run", &"Walk"],
+		&"Jump": [&"Fall"],
+		&"Fall": [&"Jump"],
+	}
+	for fb: StringName in FALLBACKS.get(state, []):
+		if fb in _state_animation_map:
+			return fb
+	return &""
+
+
 ## Transition to a new state
 func transition_to(state: StringName, force: bool = false) -> void:
 	if not _is_setup or not _state_machine:
@@ -268,8 +287,9 @@ func transition_to(state: StringName, force: bool = false) -> void:
 		# State machine not ready yet
 		return
 
-	# Skip if the target state has no animation (wasn't added to the state machine)
-	if state not in _state_animation_map:
+	# Fallback if the target state has no animation
+	state = _resolve_fallback_state(state)
+	if state == &"":
 		return
 
 	_previous_state = _current_state
@@ -363,22 +383,9 @@ func update_from_velocity(velocity: Vector3, is_grounded: bool = true,
 		target_state = &"Sprint"
 
 	# Fall back if target state has no animation mapped
-	if target_state not in _state_animation_map and target_state != &"Locomotion":
-		var fallbacks: Dictionary = {
-			&"Idle": [&"Walk"],
-			&"Walk": [&"Idle"],
-			&"Run": [&"Walk", &"Sprint"],
-			&"Sprint": [&"Run", &"Walk"],
-			&"Jump": [&"Fall"],
-			&"Fall": [&"Jump"],
-		}
-		var found := false
-		for fb: StringName in fallbacks.get(target_state, []):
-			if fb in _state_animation_map:
-				target_state = fb
-				found = true
-				break
-		if not found:
+	if target_state != &"Locomotion":
+		target_state = _resolve_fallback_state(target_state)
+		if target_state == &"":
 			return
 
 	# Transition if needed
@@ -477,19 +484,62 @@ func _create_animation_tree() -> void:
 ## Create the animation tree structure.
 ## Detects directional animations and uses BlendSpace2D if available,
 ## otherwise falls back to simple state machine.
+## Builds a multi-layer tree: Locomotion -> Action Layer (masked) -> Output
 func _create_tree_structure() -> AnimationNodeBlendTree:
 	var root := AnimationNodeBlendTree.new()
 
+	# 1. Base Locomotion Layer
+	var locomotion: AnimationNodeStateMachine
 	if _has_directional_animations():
 		_has_blendspace = true
-		var locomotion_sm := _create_blendspace_state_machine()
-		root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
+		locomotion = _create_blendspace_state_machine()
 	else:
 		_has_blendspace = false
-		var locomotion_sm := _create_locomotion_state_machine()
-		root.add_node(&"locomotion", locomotion_sm, Vector2(0, 0))
+		locomotion = _create_locomotion_state_machine()
+	
+	root.add_node(&"locomotion", locomotion, Vector2(-400, 0))
 
-	root.connect_node(&"output", 0, &"locomotion")
+	# 2. Action Layer (OneShot)
+	var action_anim := AnimationNodeAnimation.new()
+	action_anim.animation = _find_animation_for_state_name(&"Attack") # placeholder
+	root.add_node(&"action_animation", action_anim, Vector2(-400, 200))
+
+	var action_oneshot := AnimationNodeOneShot.new()
+	action_oneshot.fadein_time = 0.1
+	action_oneshot.fadeout_time = 0.2
+	root.add_node(&"action_oneshot", action_oneshot, Vector2(-100, 100))
+
+	# 3. Upper Body Blend (Layered animation)
+	var upper_blend := AnimationNodeBlend2.new()
+	upper_blend.filter_enabled = true
+	root.add_node(&"upper_body_blend", upper_blend, Vector2(200, 0))
+
+	# 4. Additive Layer (Hit reactions, etc.)
+	var additive_anim := AnimationNodeAnimation.new()
+	root.add_node(&"additive_animation", additive_anim, Vector2(200, 200))
+	
+	var additive_oneshot := AnimationNodeOneShot.new()
+	additive_oneshot.mix_mode = AnimationNodeOneShot.MIX_MODE_ADD
+	root.add_node(&"additive_oneshot", additive_oneshot, Vector2(500, 100))
+
+	# Connections:
+	# [locomotion] ----------------------------> [upper_body_blend.in0]
+	# [locomotion] -> [action_oneshot.in0]
+	# [action_anim] -> [action_oneshot.in1] ----> [upper_body_blend.in1]
+	# [upper_body_blend] -> [additive_oneshot.in0]
+	# [additive_anim] -> [additive_oneshot.in1] -> [output]
+	
+	root.connect_node(&"action_oneshot", 0, &"locomotion")
+	root.connect_node(&"action_oneshot", 1, &"action_animation")
+	
+	root.connect_node(&"upper_body_blend", 0, &"locomotion")
+	root.connect_node(&"upper_body_blend", 1, &"action_oneshot")
+	
+	root.connect_node(&"additive_oneshot", 0, &"upper_body_blend")
+	root.connect_node(&"additive_oneshot", 1, &"additive_animation")
+	
+	root.connect_node(&"output", 0, &"additive_oneshot")
+	
 	return root
 
 
@@ -836,9 +886,7 @@ func _apply_blend_mask_filters() -> void:
 	# In AnimationTree, we need to enable filters per-bone using the skeleton path
 	for bone_idx: int in upper_bones:
 		var bone_name := skeleton.get_bone_name(bone_idx)
-		var filter_path := "parameters/upper_body_blend/filters/%s:%s" % [
-			skeleton.get_path(), bone_name
-		]
+		var filter_path := "parameters/upper_body_blend/filters/%s" % bone_name
 		animation_tree.set(filter_path, true)
 
 	if debug_state_changes:

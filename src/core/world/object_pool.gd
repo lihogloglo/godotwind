@@ -29,7 +29,7 @@ class PoolEntry:
 	var model_path: String
 	var prototype: Node3D                ## Original model to duplicate
 	var available: Array[Node3D] = []    ## Instances ready for reuse
-	var in_use: Array[Node3D] = []       ## Instances currently in use
+	var in_use: Dictionary[int, Node3D] = {} ## Instances currently in use (mapped by object ID for O(1) removal)
 	var max_pool_size: int = 100         ## Cap per model type
 	var total_created: int = 0           ## Total instances ever created
 
@@ -153,7 +153,7 @@ func acquire(model_path: String) -> Node3D:
 	# Try to get from available pool
 	if not entry.available.is_empty():
 		var instance: Node3D = entry.available.pop_back()
-		entry.in_use.append(instance)
+		entry.in_use[instance.get_instance_id()] = instance
 		# Remove from pool parent before returning - caller will add to their own parent
 		if instance.get_parent():
 			instance.get_parent().remove_child(instance)
@@ -165,7 +165,7 @@ func acquire(model_path: String) -> Node3D:
 	if entry.total_created < entry.max_pool_size and _stats["total_instances"] < max_total_instances:
 		var instance := _create_instance(entry)
 		if instance:
-			entry.in_use.append(instance)
+			entry.in_use[instance.get_instance_id()] = instance
 			_stats["cache_misses"] += 1
 			return instance
 
@@ -195,10 +195,8 @@ func release(instance: Node3D) -> void:
 
 	var entry: PoolEntry = _pools[model_path]
 
-	# Remove from in_use list
-	var idx := entry.in_use.find(instance)
-	if idx >= 0:
-		entry.in_use.remove_at(idx)
+	# Remove from in_use dictionary (O(1))
+	entry.in_use.erase(instance.get_instance_id())
 
 	# Reset and return to available pool
 	_reset_instance(instance)
@@ -301,7 +299,7 @@ func clear() -> void:
 		entry.available.clear()
 
 		# Free all in-use instances
-		for instance: Node3D in entry.in_use:
+		for instance: Node3D in entry.in_use.values():
 			if is_instance_valid(instance):
 				instance.queue_free()
 		entry.in_use.clear()

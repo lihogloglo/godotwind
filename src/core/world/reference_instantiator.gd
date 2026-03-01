@@ -25,10 +25,14 @@ const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfad
 var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
+var gpu_scene_db: RefCounted = null  # GPUSceneDatabase (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null
+
+# Output data for non-Node3D instances (Phase 2)
+var last_static_data: Dictionary = {}
 
 # Configuration
 var create_lights: bool = true
@@ -227,10 +231,22 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 	basis = basis.scaled(scale)
 	var transform := Transform3D(basis, pos)
 
+	# Get mesh AABB for GPU Scene Database
+	var mesh_type_stats: Dictionary = static_renderer.call("get_mesh_type_stats", normalized)
+	var aabb: AABB = mesh_type_stats.get("aabb", AABB())
+
 	# Add instance to static renderer
 	var instance_id: int = static_renderer.call("add_instance", normalized, transform, cell_grid)
 	if instance_id >= 0:
 		stats["static_renderer_instances"] += 1
+
+		# Store data for GPU Scene Database collection by CellManager
+		last_static_data = {
+			"transform": transform,
+			"aabb": aabb,
+			"mesh_id": float(normalized.hash()), # Float-compatible float for SSBO
+			"lod_mask": 0 # Default for now
+		}
 
 	# Return null - no Node3D created, exists only in RenderingServer
 	# The cell_grid parameter lets us clean up when the cell unloads

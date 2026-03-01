@@ -39,15 +39,15 @@ const FAR_END := DU.FAR_END  # 5000.0
 ## MID tier is subdivided into 3 LOD levels
 ## LOD1: Highest detail in MID tier
 const MID_LOD1_START := NEAR_END
-const MID_LOD1_END := 250.0
+const MID_LOD1_END := DU.LOD1_END
 
 ## LOD2: Medium detail
-const MID_LOD2_START := 250.0
-const MID_LOD2_END := 375.0
+const MID_LOD2_START := DU.LOD1_END
+const MID_LOD2_END := DU.LOD2_END
 
 ## LOD3: Lowest detail in MID tier (transitions to impostor)
-const MID_LOD3_START := 375.0
-const MID_LOD3_END := MID_END
+const MID_LOD3_START := DU.LOD2_END
+const MID_LOD3_END := DU.LOD3_END
 
 # =============================================================================
 # CROSSFADE MARGINS
@@ -143,12 +143,8 @@ const MAX_FAR_CELLS := 250
 # =============================================================================
 
 ## Cell size in world units (meters)
-## Morrowind standard: 117.12m (8192 Morrowind units)
-const CELL_SIZE := 117.12
-
-## Spatial hash cell size for ObjectStreamer (meters)
-## Used for fast nearby object queries
-const SPATIAL_HASH_CELL_SIZE := 50.0
+## Morrowind standard: ~117.03m (8192 Morrowind units / 70 units per meter)
+const CELL_SIZE := DU.CELL_SIZE_METERS
 
 # =============================================================================
 # QUALITY PRESETS

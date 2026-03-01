@@ -18,6 +18,9 @@ const MAX_CACHE_SIZE: int = 2000
 # Resolved path cache: input_path -> resolved_full_path (avoids re-probing BSA)
 static var _path_cache: Dictionary = {}
 
+# The mod registry for asset resolution
+static var _mod_registry: ModRegistry = null
+
 # Fallback texture for missing textures
 static var _fallback_texture: ImageTexture = null
 
@@ -149,7 +152,20 @@ static func _extract_texture_data(normalized_path: String) -> PackedByteArray:
 		path_variants.append("textures\\" + base_path)
 	path_variants.append(base_path)
 
-	# PRIORITY 1: Check external texture directories (later dirs have higher priority)
+	# PRIORITY 1: Check ModRegistry for mod-specific loose files
+	if _mod_registry:
+		for path_base: String in path_variants:
+			for try_ext: String in extensions:
+				var full_rel_path := path_base + try_ext
+				var mod := _mod_registry.resolve_mod_for_path(full_rel_path)
+				if mod and mod.has_loose:
+					var mod_file_path := mod.path.path_join(full_rel_path)
+					if FileAccess.file_exists(mod_file_path):
+						# Cache the successful external path
+						_path_cache[normalized_path] = mod_file_path
+						return FileAccess.get_file_as_bytes(mod_file_path)
+
+	# PRIORITY 2: Check external texture directories (Legacy/Legacy Mod Support)
 	var external_dirs := SettingsManager.get_external_texture_directories()
 	# Reverse order so later directories are checked first (higher priority)
 	var reversed_dirs: Array[String] = []
@@ -366,3 +382,8 @@ static func preload_textures(paths: Array[String]) -> int:
 		if texture != _fallback_texture:
 			loaded += 1
 	return loaded
+
+
+## Set the mod registry for asset resolution
+static func set_mod_registry(registry: ModRegistry) -> void:
+	_mod_registry = registry

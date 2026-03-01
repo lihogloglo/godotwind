@@ -418,11 +418,26 @@
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --headless --script \"tests/inspect_fbx_keyframes.gd\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/mixamo_character_test.tscn\")",
       "Bash(\"D:\\\\Gamedev\\\\Godot\\\\Godot_v4.6-stable_mono_win64.exe\" --path \"d:\\\\Gamedev\\\\Godotwind\\\\godotwind\" \"res://src/tools/controller_test.tscn\")",
-      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/controller_test.tscn\")"
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path . \"res://src/tools/controller_test.tscn\")",
+      "Bash(gh repo view:*)",
+      "Bash(\"/d/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path . res://src/tools/controller_test.tscn)",
+      "Bash(\"/d/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path . --import --headless --quit)",
+      "Bash(\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --headless --script -:*)",
+      "WebFetch(domain:quaternius.com)",
+      "Bash(.venv/Scripts/pip install -r requirements.txt)",
+      "Bash(cmd.exe /c \"cd /d D:\\\\Gamedev\\\\Godotwind\\\\godotwind\\\\agentchattr && .venv\\\\Scripts\\\\pip.exe install -r requirements.txt\")",
+      "Bash(\"d:/Gamedev/Godotwind/godotwind/agentchattr/.venv/Scripts/pip.exe\" install -r \"d:/Gamedev/Godotwind/godotwind/agentchattr/requirements.txt\")",
+      "mcp__agentchattr__chat_channels",
+      "mcp__agentchattr__chat_resync",
+      "mcp__agentchattr__chat_decision"
     ],
     "additionalDirectories": [
       "d:\\Gamedev\\Godotwind\\godotwind",
       "C:\\Users\\metzo\\Documents\\Godotwind\\cache\\models"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "agentchattr"
+  ]
 }

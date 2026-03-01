@@ -71,13 +71,13 @@ var _workers: Array[Thread] = []
 var _job_queue: Array[Job] = []
 
 ## Jobs currently being processed: job_id -> Job
-var _active_jobs: Dictionary = {}
+var _active_jobs: Dictionary[int, Job] = {}
 
 ## Completed jobs waiting for poll: Array[JobResult]
 var _completed_results: Array[JobResult] = []
 
 ## Cancelled job IDs (checked by workers before processing)
-var _cancelled_ids: Dictionary = {}
+var _cancelled_ids: Dictionary[int, bool] = {}
 
 ## Thread synchronization
 var _queue_mutex: Mutex = null
@@ -392,6 +392,7 @@ func get_stats() -> Dictionary:
 #region Internal
 
 ## Insert job into queue maintaining priority order (lower = higher priority)
+## Higher priority items are placed at the END of the array for O(1) pop_back()
 func _insert_by_priority(job: Job) -> void:
 	# Binary search for insertion point
 	var low := 0
@@ -399,7 +400,9 @@ func _insert_by_priority(job: Job) -> void:
 
 	while low < high:
 		var mid := (low + high) / 2
-		if _job_queue[mid].priority <= job.priority:
+		# Sort descending by priority value (ascending by priority importance)
+		# so highest priority (lowest value) is at the back
+		if _job_queue[mid].priority >= job.priority:
 			low = mid + 1
 		else:
 			high = mid
@@ -416,13 +419,13 @@ func _worker_function(worker_id: int) -> void:
 		if _should_stop:
 			break
 
-		# Get next job from queue
+		# Get next job from queue (highest priority is at the back)
 		_queue_mutex.lock()
 		if _job_queue.is_empty():
 			_queue_mutex.unlock()
 			continue
 
-		var job: Job = _job_queue.pop_front()
+		var job: Job = _job_queue.pop_back()
 
 		# Check if cancelled
 		if job.id in _cancelled_ids:

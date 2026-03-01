@@ -10,7 +10,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 var _reader: RefCounted = null
 
 # Bone name to index mapping (case-insensitive)
-var _bone_name_to_index: Dictionary = {}
+var _bone_name_to_index: Dictionary[String, int] = {}
 
 # Validation results
 var _validation_errors: Array[String] = []
@@ -71,7 +71,7 @@ func build_skeleton(skin_instance: Defs.NiSkinInstance) -> Skeleton3D:
 
 	# Track missing bones for error reporting
 	var missing_bones: Array[int] = []
-	var duplicate_names: Dictionary = {}
+	var duplicate_names: Dictionary[String, int] = {}
 
 	# Build bones from the bone list in NiSkinInstance
 	# Each bone index points to an NiNode in the scene graph

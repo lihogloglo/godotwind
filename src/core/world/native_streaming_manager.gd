@@ -19,9 +19,12 @@
 ## - Frustum culling (automatic)
 ## - Hysteresis via visibility_range_*_margin
 ##
-## Lines of code: ~300 (vs ~2,235 in old WorldStreamingManager)
+## Lines of code: ~1,200 (vs ~2,235 in old WorldStreamingManager)
 class_name NativeStreamingManager
 extends Node3D
+
+## Static singleton instance for easy access without Autoload
+static var instance: NativeStreamingManager = null
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const SC := preload("res://src/core/world/streaming_config.gd")
@@ -34,6 +37,7 @@ const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils
 const CS := preload("res://src/core/coordinate_system.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
+const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
 
 #region Signals
 
@@ -125,13 +129,13 @@ var _loaded_cells: Dictionary = {}
 var _loading_cells: Dictionary = {}
 
 ## Async request tracking: grid -> request_id
-var _async_requests: Dictionary = {}
+var _async_requests: Dictionary[Vector2i, int] = {}
 
 ## Pending cells to load (priority queue, sorted farthest-first so pop_back gets nearest)
 var _pending_load_queue: Array[Vector2i] = []
 
 ## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
-var _unloading_cells: Dictionary = {}
+var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
 
 ## Hidden container for cells being unloaded (keeps them out of rendering)
 var _unload_container: Node3D = null
@@ -144,6 +148,9 @@ var _world_container: Node3D = null
 
 ## Cell manager for loading cells
 var _cell_manager: CellManagerScript = null
+
+## GPU scene database for SSBO-backed world state (Phase 2)
+var _gpu_scene_db: GPUSceneDatabaseScript = null
 
 ## Current camera position
 var _camera_position: Vector3 = Vector3.ZERO
@@ -181,6 +188,14 @@ const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit
 #region Initialization
 
 func _exit_tree() -> void:
+	if instance == self:
+		instance = null
+	
+	# Clean up GPU Scene Database
+	if _gpu_scene_db:
+		_gpu_scene_db.cleanup()
+		_gpu_scene_db = null
+
 	# Force-clear all remaining RenderingServer instances and pending unloads
 	# to prevent RID leaks at exit (budgeted unloading may still be in progress)
 	if _static_renderer:
@@ -208,6 +223,8 @@ func _exit_tree() -> void:
 
 
 func _ready() -> void:
+	instance = self
+	
 	# Create world container
 	_world_container = Node3D.new()
 	_world_container.name = "WorldContainer"
@@ -239,6 +256,9 @@ func _ready() -> void:
 	_background_processor.name = "BackgroundProcessor"
 	add_child(_background_processor)
 
+	# Create GPU scene database for SSBO-backed world state (Phase 2)
+	_gpu_scene_db = GPUSceneDatabaseScript.new()
+
 
 ## Initialize the streaming manager
 ## cell_manager: CellManager instance for loading cell data
@@ -254,6 +274,7 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	_cell_manager = cell_manager
 	_cell_manager.set_lod_configurator(_lod_configurator)
 	_cell_manager._static_renderer = _static_renderer
+	_cell_manager.set_gpu_scene_db(_gpu_scene_db)
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
 
@@ -1121,13 +1142,14 @@ func reload_all_cells() -> void:
 
 
 ## Get loaded cell at grid position (overload for backwards compatibility)
-func get_loaded_cell(x, y = null) -> Node3D:
+func get_loaded_cell(x: Variant, y: Variant = null) -> Node3D:
 	if y == null:
 		# Called with Vector2i
-		return _loaded_cells.get(x, null)
+		var grid: Vector2i = x
+		return _loaded_cells.get(grid, null)
 	else:
 		# Called with x, y integers
-		var grid := Vector2i(x, y)
+		var grid := Vector2i(int(x), int(y))
 		return _loaded_cells.get(grid, null)
 
 

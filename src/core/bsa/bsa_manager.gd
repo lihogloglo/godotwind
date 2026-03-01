@@ -11,15 +11,15 @@ signal archive_load_failed(path: String, error: String)
 signal file_extracted(archive_path: String, file_path: String, size: int)
 
 # Loaded archives (path -> BSAReader)
-var _archives: Dictionary = {}
+var _archives: Dictionary[String, BSAReader] = {}
 # File lookup cache (normalized path -> {archive: BSAReader, entry: FileEntry})
-var _file_cache: Dictionary = {}
+var _file_cache: Dictionary[String, Dictionary] = {}
 # Load order (later archives override earlier ones)
 var _load_order: Array[String] = []
 
 # Extracted data cache - stores frequently accessed file data in memory
 # This avoids repeated disk reads for common models/textures
-var _extracted_cache: Dictionary = {}  # normalized_path -> PackedByteArray
+var _extracted_cache: Dictionary[String, PackedByteArray] = {}  # normalized_path -> PackedByteArray
 var _extracted_cache_size: int = 0     # Current cache size in bytes
 const MAX_EXTRACTED_CACHE_SIZE := 256 * 1024 * 1024  # 256MB max cache
 const MAX_CACHEABLE_FILE_SIZE := 2 * 1024 * 1024      # Only cache files < 2MB

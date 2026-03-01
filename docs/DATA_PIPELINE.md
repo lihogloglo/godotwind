@@ -43,7 +43,7 @@ class ESMLoader {
 }
 ```
 
-See also: `docs/05_ESM_SYSTEM.md` for full ESM record documentation.
+See also: `docs/ESM_SYSTEM.md` for full ESM record documentation.
 
 ---
 
@@ -94,7 +94,7 @@ func create_collision_shape(nif_node: NIFNode) -> CollisionShape3D:
     return _create_trimesh_shape(nif_node)
 ```
 
-See also: `docs/06_NIF_SYSTEM.md` for full NIF node documentation.
+See also: `docs/NIF_SYSTEM.md` for full NIF node documentation.
 
 ---
 
@@ -109,7 +109,7 @@ var texture_data: PackedByteArray = BSAManager.extract_file("Textures\\tx_door_w
 var cached := BSAManager.extract_file("Meshes\\x\\door_wood.nif")  # Fast - from cache
 ```
 
-See also: `docs/07_ASSET_MANAGEMENT.md` for BSA details.
+See also: `docs/ASSET_MANAGEMENT.md` for BSA details.
 
 ---
 
