@@ -42,7 +42,7 @@ var use_object_pool: bool = true
 var use_static_renderer: bool = true
 var debug_lod: bool = false
 var enable_fade_in: bool = true  # Smooth fade-in for newly instantiated objects
-var fade_in_duration: float = 0.4  # Duration of fade-in animation in seconds
+var fade_in_duration: float = 0.3  # Duration of fade-in animation in seconds (matches StreamingConfig.FADE_DURATION)
 
 # Scene tree reference for tweens (must be set by parent, e.g., CellManager)
 var scene_tree: SceneTree = null

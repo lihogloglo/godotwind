@@ -38,7 +38,8 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
-const MidTierBatchPoolScript := preload("res://src/core/world/mid_tier_batch_pool.gd")
+# MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
+# replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
 #region Signals
 
@@ -115,10 +116,8 @@ signal startup_complete()
 var _lod_configurator: LODConfigurator = LODConfigurator.new()
 
 ## Static object renderer for MID-tier + flora (RenderingServer direct, no Node3D)
+## Now with per-instance LOD visibility_range (replaces broken MultiMesh batch pool)
 var _static_renderer: StaticObjectRendererScript = null
-
-## MID-tier MultiMesh batch pool (replaces individual RS instances with batched draws)
-var _batch_pool: MidTierBatchPoolScript = null
 
 ## Native Impostor Renderer
 var _impostor_renderer: Node3D = null
@@ -200,10 +199,8 @@ func _exit_tree() -> void:
 		_gpu_scene_db.cleanup()
 		_gpu_scene_db = null
 
-	# Force-clear all remaining instances and pending unloads
+	# Force-clear all remaining RS instances and pending unloads
 	# to prevent RID leaks at exit (budgeted unloading may still be in progress)
-	if _batch_pool:
-		_batch_pool.clear()
 	if _static_renderer:
 		_static_renderer.clear()
 	_promoted_objects.clear()
@@ -248,10 +245,8 @@ func _ready() -> void:
 	_static_renderer.name = "StaticRenderer"
 	add_child(_static_renderer)
 
-	# Create MID-tier batch pool (MultiMesh per mesh_type × lod_level)
-	_batch_pool = MidTierBatchPoolScript.new()
-	_batch_pool.name = "MidTierBatchPool"
-	add_child(_batch_pool)
+	# NOTE: MidTierBatchPool removed — StaticObjectRenderer now handles MID-tier
+	# with per-instance RS visibility_range (see STREAMING_FIX_PLAN.md)
 
 	# Create impostor renderer (renamed to match old API)
 	_impostor_renderer = NativeImpostorRendererScript.new()
@@ -285,7 +280,6 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	_cell_manager = cell_manager
 	_cell_manager.set_lod_configurator(_lod_configurator)
 	_cell_manager._static_renderer = _static_renderer
-	_cell_manager._batch_pool = _batch_pool
 	_cell_manager.set_gpu_scene_db(_gpu_scene_db)
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
@@ -397,9 +391,6 @@ func _process(delta: float) -> void:
 		# Phase 4: Queue new cell requests (non-blocking)
 		_process_pending_loads_async()
 
-		# Phase 5: Rebuild dirty MultiMesh batches (MID-tier batch pool)
-		if _batch_pool:
-			_batch_pool.rebuild_dirty_batches(2.0)
 	else:
 		# Fallback: synchronous loading (blocks frame)
 		_process_pending_loads_sync(delta)
@@ -590,34 +581,20 @@ func _unload_cell(grid: Vector2i) -> void:
 	var promoted_cleanup := 0
 	var promoted_remove: Array[int] = []
 
-	if _batch_pool:
-		# Batch pool path: object IDs tracked in _promoted_objects
-		for obj_id: int in _promoted_objects:
-			var entry: Variant = _batch_pool.get_object_entry(obj_id)
-			if entry and entry.cell_grid == grid:
-				promoted_remove.append(obj_id)
-	else:
-		# Legacy static renderer path
-		for rs_id: int in _promoted_objects:
-			var data: Variant = _static_renderer.get_instance_data(rs_id)
-			if data and data.cell_grid == grid:
-				promoted_remove.append(rs_id)
+	for rs_id: int in _promoted_objects:
+		var data: Variant = _static_renderer.get_instance_data(rs_id)
+		if data and data.cell_grid == grid:
+			promoted_remove.append(rs_id)
 
 	for obj_id: int in promoted_remove:
 		_promoted_objects.erase(obj_id)
 		promoted_cleanup += 1
 
-	# Clean up MID-tier batched objects for this cell
-	if _batch_pool:
-		var batch_removed := _batch_pool.remove_cell(grid)
-		if batch_removed > 0 or promoted_cleanup > 0:
-			_debug("Removed %d MID-tier batch objects for cell %s (+ %d promoted)" % [batch_removed, grid, promoted_cleanup])
-
-	# Clean up legacy MID-tier RenderingServer instances (if any remain)
+	# Clean up MID-tier RS instances for this cell
 	if _static_renderer:
 		var mid_removed := _static_renderer.remove_cell_instances(grid)
-		if mid_removed > 0:
-			_debug("Removed %d legacy MID-tier RS instances for cell %s" % [mid_removed, grid])
+		if mid_removed > 0 or promoted_cleanup > 0:
+			_debug("Removed %d MID-tier RS instances for cell %s (+ %d promoted)" % [mid_removed, grid, promoted_cleanup])
 
 	# Clean up deferred NEAR refs for this cell
 	_cell_manager.clear_deferred_for_cell(grid)
@@ -718,7 +695,7 @@ var _promoted_objects: Dictionary = {}  # {id: int -> near_node: Node3D}
 func _process_mid_to_near_promotions() -> void:
 	if not _cell_manager:
 		return
-	if not _batch_pool and not _static_renderer:
+	if not _static_renderer:
 		return
 
 	# Only run every 4 frames (promotion/demotion is not time-critical)
@@ -745,11 +722,8 @@ func _process_mid_to_near_promotions() -> void:
 
 		var dist_sq := _camera_position.distance_squared_to(near_node.global_position)
 		if dist_sq > demote_distance_sq:
-			# Demote: unhide batch pool object, remove NEAR Node3D
-			if _batch_pool:
-				_batch_pool.set_object_visible(obj_id, true)
-			elif _static_renderer:
-				_static_renderer.set_instance_visible(obj_id, true)
+			# Demote: unhide MID RS instances, remove NEAR Node3D
+			_static_renderer.set_instance_visible(obj_id, true)
 			near_node.queue_free()
 			demote_remove.append(obj_id)
 			demoted += 1
@@ -771,64 +745,34 @@ func _process_mid_to_near_promotions() -> void:
 
 	var promoted := 0
 	if not nearby_cells.is_empty():
-		if _batch_pool:
-			var promotable := _batch_pool.get_promotable_objects(
-				_camera_position, promote_distance_sq, nearby_cells
+		var promotable := _static_renderer.get_promotable_instances(
+			_camera_position, promote_distance_sq, nearby_cells
+		)
+		for id: int in promotable:
+			if Time.get_ticks_usec() - start_time >= budget_usec:
+				break
+			if id in _promoted_objects:
+				continue
+
+			var data: Variant = _static_renderer.get_instance_data(id)
+			if not data:
+				continue
+
+			var cell_node: Node3D = _loaded_cells.get(data.cell_grid) as Node3D
+			if not cell_node or not is_instance_valid(cell_node):
+				continue
+
+			var near_obj: Node3D = _cell_manager.promote_mid_to_near(
+				data.model_path, data.item_id, data.transform,
+				data.ref_id, data.ref_num
 			)
-			for id: int in promotable:
-				if Time.get_ticks_usec() - start_time >= budget_usec:
-					break
-				if id in _promoted_objects:
-					continue
+			if not near_obj:
+				continue
 
-				var entry: Variant = _batch_pool.get_object_entry(id)
-				if not entry:
-					continue
-
-				var cell_node: Node3D = _loaded_cells.get(entry.cell_grid) as Node3D
-				if not cell_node or not is_instance_valid(cell_node):
-					continue
-
-				var near_obj: Node3D = _cell_manager.promote_mid_to_near(
-					entry.model_path, entry.item_id, entry.transform,
-					entry.ref_id, entry.ref_num
-				)
-				if not near_obj:
-					continue
-
-				cell_node.add_child(near_obj)
-				_batch_pool.set_object_visible(id, false)
-				_promoted_objects[id] = near_obj
-				promoted += 1
-		elif _static_renderer:
-			var promotable := _static_renderer.get_promotable_instances(
-				_camera_position, promote_distance_sq, nearby_cells
-			)
-			for id: int in promotable:
-				if Time.get_ticks_usec() - start_time >= budget_usec:
-					break
-				if id in _promoted_objects:
-					continue
-
-				var data: Variant = _static_renderer.get_instance_data(id)
-				if not data:
-					continue
-
-				var cell_node: Node3D = _loaded_cells.get(data.cell_grid) as Node3D
-				if not cell_node or not is_instance_valid(cell_node):
-					continue
-
-				var near_obj: Node3D = _cell_manager.promote_mid_to_near(
-					data.model_path, data.item_id, data.transform,
-					data.ref_id, data.ref_num
-				)
-				if not near_obj:
-					continue
-
-				cell_node.add_child(near_obj)
-				_static_renderer.set_instance_visible(id, false)
-				_promoted_objects[id] = near_obj
-				promoted += 1
+			cell_node.add_child(near_obj)
+			_static_renderer.set_instance_visible(id, false)
+			_promoted_objects[id] = near_obj
+			promoted += 1
 
 	if promoted > 0 or demoted > 0:
 		_stats["mid_to_near_promotions"] += promoted

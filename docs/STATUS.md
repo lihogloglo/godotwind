@@ -22,7 +22,7 @@ For the roadmap, see [MASTERPLAN.md](audit/MASTERPLAN.md).
 
 | System | Status | Notes |
 |--------|--------|-------|
-| **3-Tier LOD** | Complete | NEAR (0-150m), MID (150-500m merged), FAR (500-5km impostors) |
+| **3-Tier LOD** | Complete | NEAR (0-150m Node3D), MID (150-500m per-instance RS visibility_range, 3 LOD levels), FAR (500-5km impostors) |
 | **Terrain LOD** | Complete | Handled by Terrain3D clipmap |
 | **Object LOD** | Complete | Native Godot VisibilityRange |
 | **Object Pooling** | Complete | Hit rate tracking, O(1) release |

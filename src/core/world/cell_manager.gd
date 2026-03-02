@@ -39,8 +39,7 @@ var _object_pool: RefCounted = null  # ObjectPool
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
 
-# MID-tier batch pool for MultiMesh batching (replaces individual RS instances)
-var _batch_pool: Node = null  # MidTierBatchPool
+# MID-tier batch pool removed — StaticObjectRenderer now handles MID with per-instance LOD
 
 # GPU scene database for SSBO-backed world state (Phase 2)
 var _gpu_scene_db: RefCounted = null  # GPUSceneDatabase
@@ -1361,6 +1360,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				parent.call_deferred("add_child", child)
 			else:
 				parent.add_child(child)
+			# Apply fade-in after add_child (tween runs on scene_tree, works for deferred too)
+			apply_fade_in_to_object(child)
 	return instantiated
 
 
@@ -1845,7 +1846,10 @@ func _defer_for_near(ref: CellReference, model_path: String, item_id: String,
 
 
 ## MID-TIER: Create a lightweight RenderingServer instance instead of full Node3D
-## Uses StaticObjectRenderer — no duplicate(), no scene tree, no add_child()
+## Uses StaticObjectRenderer with per-instance RS visibility_range — no Node3D overhead.
+## Creates up to 3 RS instances per object (LOD1/LOD2/LOD3), each with per-instance
+## visibility_range via RenderingServer.instance_geometry_set_visibility_range().
+## Godot handles distance-based LOD switching entirely in C++.
 ## Returns true if the instance was successfully created
 func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> bool:
 	# Get the prototype from cache (need it for mesh data)
@@ -1869,42 +1873,24 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	# Get cell grid for cleanup tracking
 	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
 
-	# Route to batch pool (MultiMesh batching) if available
-	if _batch_pool:
-		if not _batch_pool.has_type(type_name):
-			_batch_pool.register_from_prototype(type_name, model_prototype)
-			if not _batch_pool.has_type(type_name):
-				return false
-
-		var object_id: int = _batch_pool.add_object(
-			type_name, xform, cell_grid,
-			model_path, item_id, ref.ref_id, ref.ref_num
-		)
-		if object_id < 0:
-			return false
-	else:
-		# Fallback: individual RS instances via StaticObjectRenderer
+	# Register with LOD support (extracts LOD1/LOD2/LOD3 meshes from prototype)
+	# Falls back to single-mesh if no LOD nodes found in prototype
+	if not _static_renderer.has_type(type_name):
+		_static_renderer.register_lod_from_prototype(type_name, model_prototype)
 		if not _static_renderer.has_type(type_name):
-			_static_renderer.register_from_prototype(type_name, model_prototype)
-			if not _static_renderer.has_type(type_name):
-				return false
-
-		var instance_id: int = _static_renderer.add_instance(
-			type_name, xform, cell_grid,
-			model_path, item_id, ref.ref_id, ref.ref_num
-		)
-		if instance_id < 0:
 			return false
+
+	var instance_id: int = _static_renderer.add_instance(
+		type_name, xform, cell_grid,
+		model_path, item_id, ref.ref_id, ref.ref_num
+	)
+	if instance_id < 0:
+		return false
 
 	# If GPU Scene Database is active, collect data for batch upload
 	if _gpu_scene_db:
-		var aabb := AABB()
-		if _batch_pool and _batch_pool.has_type(type_name):
-			# Batch pool tracks AABB internally via mesh data
-			pass  # AABB retrieved from mesh type at upload time
-		elif _static_renderer:
-			var mesh_stats: Dictionary = _static_renderer.call("get_mesh_type_stats", type_name)
-			aabb = mesh_stats.get("aabb", AABB())
+		var mesh_stats: Dictionary = _static_renderer.get_mesh_type_stats(type_name)
+		var aabb: AABB = mesh_stats.get("aabb", AABB())
 
 		request.gpu_objects.append({
 			"transform": xform,
@@ -1989,6 +1975,18 @@ func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node)
 
 
+## Extend visibility_range_end on NEAR geometry in promoted objects.
+## Prevents the dead zone between NEAR fade-out (150m) and demotion threshold (190m).
+func _extend_promoted_visibility(node: Node, end_dist: float) -> void:
+	if node is GeometryInstance3D:
+		var geo := node as GeometryInstance3D
+		# Only extend geometry configured as NEAR tier (end <= NEAR_END)
+		if geo.visibility_range_end > 0.0 and geo.visibility_range_end <= SC.NEAR_END:
+			geo.visibility_range_end = end_dist
+	for child in node.get_children():
+		_extend_promoted_visibility(child, end_dist)
+
+
 ## Get count of pending async requests
 func get_async_pending_count() -> int:
 	var count := 0
@@ -2044,6 +2042,12 @@ func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D
 	LODConfigurator.configure_for_prebake(instance)
 	instance.set_meta("visibility_prebaked", true)
 	instance.set_meta("promoted_from_mid", true)
+
+	# Extend NEAR visibility to demotion distance to prevent dead zone.
+	# Default prebake sets NEAR end=150m, but demotion happens at 190m.
+	# Without this, the object is invisible from ~155m to 190m.
+	var demotion_dist: float = SC.NEAR_END + SC.HYSTERESIS_NEAR
+	_extend_promoted_visibility(instance, demotion_dist)
 
 	_stats["objects_instantiated"] += 1
 	_stats["mid_promotions"] = _stats.get("mid_promotions", 0) + 1

@@ -53,6 +53,7 @@ const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 const LodTransitionTestScript := preload("res://src/tools/lod_transition_test.gd")
+const MidTierDebuggerScript := preload("res://src/tools/mid_tier_debugger.gd")
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
@@ -975,12 +976,17 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		var lod_cmds := LodDebugCommands.new(native_streaming_manager)
 		lod_cmds.register_commands(console)
 
-		# Register batch pool debug commands
+		# Register batch pool debug commands (legacy HUD)
 		console.register_command(
-			"mid_debug",
+			"mid_hud",
 			_cmd_toggle_batch_debug,
 			"Toggle MID-tier batch pool debug HUD + LOD band rings",
 			"debug"
+		)
+
+		# Register MID-tier debugger commands (autopilot + census + markers)
+		MidTierDebuggerScript.register_console_commands(
+			console, native_streaming_manager, cell_manager, camera
 		)
 
 		# Register streaming benchmark commands
@@ -1075,7 +1081,7 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 
 func _update_stats() -> void:
 	if _stats_collector:
-		var state := {
+		var state: Dictionary[String, Variant] = {
 			"camera_mode_str": "Fly" if _camera_mode == CameraMode.FLY_CAMERA else "Player",
 			"view_distance": _current_view_distance,
 		}

@@ -441,32 +441,13 @@ func _collect_lod_material_stats(node: Node, stats: Dictionary, no_mat: Array[St
 
 
 func _cmd_mid_batch_stats(_args: Dictionary) -> String:
-	if not _streaming_manager or not _streaming_manager._batch_pool:
-		return "MID-tier batch pool not available"
+	if not _streaming_manager or not _streaming_manager._static_renderer:
+		return "MID-tier static renderer not available"
 
-	var stats: Dictionary = _streaming_manager._batch_pool.get_stats()
-	var output := "MID-Tier Batch Pool Stats:\n"
+	var stats: Dictionary = _streaming_manager._static_renderer.get_stats()
+	var output := "MID-Tier Static Renderer Stats (per-instance RS visibility_range):\n"
 	output += "  Mesh types: %d\n" % stats.get("mesh_types", 0)
-	output += "  Batches: %d\n" % stats.get("batches", 0)
-	output += "  Total objects: %d\n" % stats.get("total_objects", 0)
-	output += "  Visible objects: %d\n" % stats.get("visible_objects", 0)
-	output += "  Rebuilds: %d\n" % stats.get("rebuilds", 0)
-	output += "  Draw calls (current): %d\n" % stats.get("batches", 0)
-
-	var details: Dictionary = stats.get("batch_details", {})
-	if not details.is_empty():
-		output += "\nTop batches (by object count):\n"
-		var sorted_keys: Array = details.keys()
-		sorted_keys.sort_custom(func(a: String, b: String) -> bool:
-			return details[a].get("objects", 0) > details[b].get("objects", 0)
-		)
-		for i in mini(sorted_keys.size(), 15):
-			var key: String = sorted_keys[i]
-			var d: Dictionary = details[key]
-			output += "  %s: %d obj, cap=%d, free=%d, vis=%d/%d\n" % [
-				key, d.get("objects", 0), d.get("capacity", 0),
-				d.get("free_slots", 0), d.get("visible_count", 0),
-				d.get("instance_count", 0)
-			]
-
+	output += "  Total instances: %d\n" % stats.get("total_instances", 0)
+	output += "  Visible instances: %d\n" % stats.get("visible_instances", 0)
+	output += "  LOD RS instances: %d\n" % stats.get("lod_instances", 0)
 	return output

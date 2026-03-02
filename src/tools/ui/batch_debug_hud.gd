@@ -1,6 +1,6 @@
-## BatchDebugHUD - Debug visualization for MidTierBatchPool
+## BatchDebugHUD - Debug visualization for MID-tier static renderer
 ##
-## Shows real-time batch pool statistics and LOD band boundary rings.
+## Shows real-time RS instance statistics and LOD band boundary rings.
 ## Toggle with console command `mid_debug` or programmatically.
 ##
 ## Visualization:
@@ -211,82 +211,59 @@ func _update_stats() -> void:
 		_stats_label.text = "[color=gray]No streaming manager connected[/color]"
 		return
 
-	var batch_pool: Node = _streaming_manager.get("_batch_pool")
-	if not batch_pool:
-		_stats_label.text = "[color=gray]Batch pool not initialized[/color]"
+	var static_renderer = _streaming_manager.get("_static_renderer")
+	if not static_renderer:
+		_stats_label.text = "[color=gray]Static renderer not initialized[/color]"
 		return
 
-	var stats: Dictionary = batch_pool.get_stats()
+	var stats: Dictionary = static_renderer.get_stats()
 	var promoted: Dictionary = _streaming_manager.get("_promoted_objects")
 	var promoted_count: int = promoted.size() if promoted else 0
 
 	# Build BBCode text
-	var text := "[b][color=#7799ff]MID-Tier Batch Pool[/color][/b]\n"
+	var text := "[b][color=#7799ff]MID-Tier Static Renderer[/color][/b]\n"
 	text += "[color=#888]━━━━━━━━━━━━━━━━━━━━[/color]\n"
 
 	# Summary
 	var mesh_types: int = stats.get("mesh_types", 0)
-	var batches: int = stats.get("batches", 0)
-	var total_objects: int = stats.get("total_objects", 0)
-	var visible_objects: int = stats.get("visible_objects", 0)
-	var rebuilds: int = stats.get("rebuilds", 0)
+	var total_instances: int = stats.get("total_instances", 0)
+	var visible_instances: int = stats.get("visible_instances", 0)
+	var lod_instances: int = stats.get("lod_instances", 0)
 
 	text += "[b]Mesh types:[/b] %d\n" % mesh_types
-	text += "[b]Batches:[/b] %d (= draw calls)\n" % batches
-	text += "[b]Objects:[/b] %d total, %d visible\n" % [total_objects, visible_objects]
+	text += "[b]Instances:[/b] %d total, %d visible\n" % [total_instances, visible_instances]
+	text += "[b]LOD RIDs:[/b] %d (RS auto-batched)\n" % lod_instances
 	text += "[b]Promoted:[/b] %d (MID→NEAR)\n" % promoted_count
-	text += "[b]Rebuilds:[/b] %d\n" % rebuilds
 
 	# GPU draw call estimate
 	var engine_draws := Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
 	text += "[b]Engine draws:[/b] %d\n" % engine_draws
 
-	# Per-band breakdown
-	var details: Dictionary = stats.get("batch_details", {})
-	if not details.is_empty():
-		text += "\n[b][color=#aabbdd]Per-LOD Band:[/color][/b]\n"
+	# Per mesh type breakdown (top 5 by instance count)
+	var type_names: Array[String] = static_renderer.get_registered_types()
+	if not type_names.is_empty():
+		text += "\n[b][color=#aabbdd]Top Mesh Types:[/color][/b]\n"
 
-		for lod: int in [1, 2, 3]:
-			var band_label: String = BAND_LABELS.get(lod, "LOD%d" % lod)
-			var band_objects := 0
-			var band_batches := 0
-			var band_capacity := 0
-
-			for key: String in details:
-				if key.ends_with("_lod%d" % lod):
-					var d: Dictionary = details[key]
-					band_objects += d.get("objects", 0)
-					band_batches += 1
-					band_capacity += d.get("capacity", 0)
-
-			var color := "white"
-			match lod:
-				1: color = "#44ff44"  # Green
-				2: color = "#ffcc44"  # Yellow
-				3: color = "#ff6644"  # Orange
-
-			text += "[color=%s]%s[/color]: %d obj in %d batches (cap: %d)\n" % [
-				color, band_label, band_objects, band_batches, band_capacity
-			]
-
-	# Top batches by size
-	if not details.is_empty():
-		text += "\n[b][color=#aabbdd]Top Batches:[/color][/b]\n"
-		var sorted_keys: Array = details.keys()
-		sorted_keys.sort_custom(func(a: String, b: String) -> bool:
-			return details[a].get("objects", 0) > details[b].get("objects", 0)
+		var type_counts: Array[Dictionary] = []
+		for tn: String in type_names:
+			var type_stats: Dictionary = static_renderer.get_mesh_type_stats(tn)
+			type_counts.append(type_stats)
+		type_counts.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return a.get("instance_count", 0) > b.get("instance_count", 0)
 		)
-		for i in mini(sorted_keys.size(), 5):
-			var key: String = sorted_keys[i]
-			var d: Dictionary = details[key]
-			var obj_count: int = d.get("objects", 0)
-			if obj_count == 0:
+
+		for i in mini(type_counts.size(), 5):
+			var ts: Dictionary = type_counts[i]
+			var count: int = ts.get("instance_count", 0)
+			if count == 0:
 				break
-			# Shorten the key for display
-			var short_key := key.get_file() if "/" in key or "\\" in key else key
-			if short_key.length() > 30:
-				short_key = "..." + short_key.right(27)
-			text += "[color=#888]%s[/color]: %d\n" % [short_key, obj_count]
+			var name: String = ts.get("name", "?")
+			var has_lod: bool = ts.get("has_lod", false)
+			var short_name := name.get_file() if "/" in name or "\\" in name else name
+			if short_name.length() > 30:
+				short_name = "..." + short_name.right(27)
+			var lod_tag := "[color=#44ff44]LOD[/color]" if has_lod else "[color=#888]no LOD[/color]"
+			text += "[color=#ccc]%s[/color]: %d %s\n" % [short_name, count, lod_tag]
 
 	_stats_label.text = text
 
