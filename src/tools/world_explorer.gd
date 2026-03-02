@@ -48,6 +48,7 @@ const CellBrowserScript := preload("res://src/tools/ui/cell_browser.gd")
 const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
 const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.gd")
+const BatchDebugHUDScript := preload("res://src/tools/ui/batch_debug_hud.gd")
 const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
 const DebugSystemScript := preload("res://src/tools/debug_system.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
@@ -117,6 +118,7 @@ var diagnostic_overlay: Node = null  # Real-time streaming diagnostics (Diagnost
 var crash_reporter: Node = null  # State capture for crash analysis (CrashReporter)
 var debug_system: Node = null  # Unified debug system (DebugSystem - F4/F9/F11/F12)
 var _profiling_report: ProfilingReport = null  # UI log panel profiling report
+var _batch_debug_hud: Node = null  # Batch pool debug visualization (BatchDebugHUD)
 
 # State
 var _data_path: String = ""
@@ -466,6 +468,11 @@ func _setup_diagnostic_systems() -> void:
 	debug_system.auto_test_on_startup = OS.has_environment("DEBUG_AUTO_TEST")
 	add_child(debug_system)
 
+	# Create batch debug HUD (hidden by default, toggle with `mid_debug` command)
+	_batch_debug_hud = BatchDebugHUDScript.new()
+	_batch_debug_hud.name = "BatchDebugHUD"
+	add_child(_batch_debug_hud)
+
 	_log("Debug systems initialized (F4=profile, F9=overlay, F11=dump, F12=auto-test)")
 
 
@@ -488,6 +495,12 @@ func _connect_diagnostic_systems() -> void:
 		debug_system.call("initialize", self, fly_camera, world_streaming_manager, cell_manager, profiler, streaming_profiler)
 		if debug_system.has_signal("auto_test_completed"):
 			debug_system.connect("auto_test_completed", _on_debug_auto_test_completed)
+
+	# Connect batch debug HUD
+	if _batch_debug_hud:
+		_batch_debug_hud.set_streaming_manager(native_streaming_manager)
+		if camera:
+			_batch_debug_hud.set_camera(camera)
 
 	_log("Diagnostic systems connected to streaming")
 
@@ -762,6 +775,8 @@ func _update_debug_overlay_references() -> void:
 	_debug_overlay.set_camera(camera)
 	if world_streaming_manager:
 		_debug_overlay.set_world_streaming_manager(world_streaming_manager)
+	if _batch_debug_hud and camera:
+		_batch_debug_hud.set_camera(camera)
 
 
 ## Toggle chunk debug visualization
@@ -960,6 +975,14 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		var lod_cmds := LodDebugCommands.new(native_streaming_manager)
 		lod_cmds.register_commands(console)
 
+		# Register batch pool debug commands
+		console.register_command(
+			"mid_debug",
+			_cmd_toggle_batch_debug,
+			"Toggle MID-tier batch pool debug HUD + LOD band rings",
+			"debug"
+		)
+
 		# Register streaming benchmark commands
 		StreamingBenchmarkScript.register_console_commands(
 			console, native_streaming_manager, cell_manager, camera
@@ -996,6 +1019,13 @@ func _cmd_toggle_debug(_args: Dictionary) -> String:
 			native_streaming_manager._impostor_renderer.debug_enabled = native_streaming_manager.debug_enabled
 		return "Debug mode: %s" % ("ON" if native_streaming_manager.debug_enabled else "OFF")
 	return "Native streaming manager not available"
+
+
+func _cmd_toggle_batch_debug(_args: Dictionary) -> String:
+	if _batch_debug_hud:
+		_batch_debug_hud.toggle()
+		return "Batch debug HUD: %s" % ("ON" if _batch_debug_hud.is_active() else "OFF")
+	return "Batch debug HUD not initialized"
 
 
 ## Callback for native streaming manager cell loaded

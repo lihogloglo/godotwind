@@ -1,12 +1,36 @@
 # Distance Rendering Pipeline Audit
 
-**Date:** 2026-01-09 (Updated: 2026-01-09)
+**Date:** 2026-03-02 (Updated: 2026-03-02)
 **Godot Version:** 4.6
-**Status:** 🔧 Fixes Applied - Rebaking Required
+**Status:** 🛠️ Analysis Complete - Implementation Pending
 
 ---
 
-## Executive Summary
+## 2026-03-02 Audit (Current Session)
+
+This session focused on auditing the efficiency of the "Native" streaming pipeline (NEAR/MID/FAR).
+
+### Key Findings
+
+| Finding | Severity | Description |
+|---------|----------|-------------|
+| **MID Tier Vertex Leak** | 🔴 Critical | `StaticObjectRenderer` (150-500m) currently skips `_LOD1/2/3` nodes and renders the high-poly **LOD0** meshes. |
+| **MID Tier Draw Calls** | 🔴 Critical | MID tier uses 200-500 individual `RenderingServer` instances (1 draw call each). Needs MultiMesh batching. |
+| **Missing Hysteresis** | 🟡 Major | The 500m (MID/FAR) boundary oscillates/flickers because `HYSTERESIS_MID` (60m) is defined but unused. |
+| **Broken Crossfade** | 🟡 Major | Sibling LODs use `FADE_DEPENDENCIES` without a parent/parent-child link. Should use `FADE_SELF`. |
+| **Outdated Docs** | 🟢 Minor | `PERFORMANCE_GUIDE.md` still recommends `pop_front()` in examples despite being O(n). |
+
+### Proposed Consensus Plan
+
+1. **[Quick Win]** Fix `PERFORMANCE_GUIDE.md` examples and audit any remaining `pop_front()` in hot paths (Deformation system).
+2. **[Quick Win]** Implement `HYSTERESIS_MID` (60m) at the 500m boundary in `NativeStreamingManager` to stop oscillation.
+3. **[Phase 1]** Update `StaticObjectRenderer` to correctly extract and use LOD meshes from `LODResource` or sibling nodes.
+4. **[Phase 2]** Implement MID-tier MultiMesh batching as per `MID_TIER_BATCHING.md` to reduce draw calls from 500 to ~50.
+5. **[Polish]** Switch sibling LODs to `FADE_SELF` with overlapping 10-15m margins for smoother crossfading.
+
+---
+
+## Historical Audit Data (2026-01-09)
 
 This audit examines the three-tier distance rendering system (NEAR/MID/FAR) and streaming architecture. The system uses Godot 4.5's native `visibility_range` for LOD transitions.
 
@@ -933,6 +957,76 @@ The prebaking system was designed to store LODs separately for on-demand loading
 
 ---
 
+## 2026-03-02 Joint Audit: Claude + Gemini
+
+### Audit Scope
+Full review of object streaming (load/unload logic), rendering efficiency, and distance rendering. Joint analysis by Claude and Gemini with consensus-based findings.
+
+### New Findings
+
+| ID | Severity | Finding | Status |
+|----|----------|---------|--------|
+| **DR-01** | 🟡 Major | MID tier renders LOD0 meshes at 500m (StaticObjectRenderer skips _LOD nodes) | Known — see `MID_TIER_BATCHING.md` |
+| **DR-02** | 🟡 Major | Cell unload threshold (411m) < grid diagonal load distance (496m) — corner cells oscillate. Root cause: Chebyshev load vs Euclidean unload mismatch | ✅ **FIXED** (2026-03-02) |
+| **DR-03** | 🟢 Minor | NEAR/MID fade margin at 5m may be too aggressive for complex architecture (Vivec) — consider 8m | Open |
+| **DR-04** | 🟢 Info | GPU Scene Database (`gpu_scene_database.gd`) has SSBO storage but no compute cull shader consumer | Deferred |
+| **DR-05** | 🟢 Info | `pop_front()` in doc examples (`PERFORMANCE_GUIDE.md`, `DESIGN_PATTERNS.md`) — hot path code already fixed | Fixed |
+| **DR-06** | ✅ Verified | FADE_DEPENDENCIES mode is correct for sibling LODs — margins are symmetric at every boundary | N/A |
+| **DR-07** | 🟢 Info | MID tier draw calls: 200-500 individual RS instances — MultiMesh batching would reduce to ~30-80 | See `MID_TIER_BATCHING.md` |
+
+### Detail: DR-01 — MID Tier LOD0 Leakage
+
+`StaticObjectRenderer._find_mesh_instance()` (line 152) explicitly skips `_LOD1/_LOD2/_LOD3` nodes and returns the first non-LOD MeshInstance3D (LOD0). This means all MID-tier objects rendered via StaticObjectRenderer use full-detail geometry at distances up to 500m.
+
+**Impact:** Significant vertex waste. A building mesh with 5,000 triangles (LOD0) vs 500 triangles (LOD3) at 400m — the camera can't see the detail difference but pays the GPU cost.
+
+**Fix:** Implement LOD support in StaticObjectRenderer or replace with MultiMesh batching per (mesh_type, lod_level). Full design in `docs/MID_TIER_BATCHING.md`.
+
+### Detail: DR-02 — Cell Load/Unload Distance Mismatch (FIXED)
+
+**Root cause:** Cell loading uses Chebyshev grid distance (`load_radius_cells=3`, 7x7 grid). The max Euclidean distance for corner cells is `sqrt(3²+3²) * 117m ≈ 496m`. But cell unloading used a threshold of `3 * 117 + 60 = 411m` (linear radius + hysteresis). Since 496 > 411, corner cells were immediately flagged for unload after loading, causing oscillation on each camera cell change during orbit tests.
+
+**Fix (2026-03-02):** Changed unload threshold to use diagonal-aware max load distance:
+```gdscript
+var max_load_euclidean := float(load_radius_cells) * DU.CELL_SIZE_METERS * sqrt(2.0)  # ~496m
+var unload_threshold_sq := (max_load_euclidean + SC.HYSTERESIS_MID) * (...)  # ~556m
+```
+Corner cells at 496m are now within the 556m unload threshold. `HYSTERESIS_MID` (60m) is properly applied on top of the actual max load distance.
+
+### Detail: DR-03 — NEAR/MID Fade Margin
+
+`FADE_MARGIN_NEAR_LOD1 = 5.0m` creates a very tight crossfade zone (145m-155m). The design rationale is that LOD0→LOD1 geometry mismatch is visible at 150m, so a long crossfade showing both meshes looks worse than a fast transition. However, for complex architecture like Vivec cantons, 5m may cause perceptible popping. Consensus: test at 8m as compromise.
+
+### Detail: DR-06 — FADE_DEPENDENCIES Verification
+
+FADE_DEPENDENCIES is confirmed correct for sibling LODs. Margins are symmetric at every boundary:
+- NEAR end_margin = LOD1 begin_margin = 5.0m
+- LOD1 end_margin = LOD2 begin_margin = 10.0m
+- LOD2 end_margin = LOD3 begin_margin = 15.0m
+- LOD3 end_margin = FAR begin_margin = 20.0m
+
+Ghosting only occurs with asymmetric margins or when single-mesh objects use FADE_DEPENDENCIES without a sibling (should use FADE_SELF instead).
+
+### What's Working Well
+
+1. **Native visibility_range** — Godot handles LOD transitions in C++ with zero GDScript cost
+2. **Async pipeline** — truly non-blocking (8ms cell load, progressive instantiation)
+3. **Spatial indexing** — O(cells) operations for impostor and static renderer unloads
+4. **Frame budgeting** — 2ms load + 8ms instantiate + 4ms unload, consistent 60 FPS
+5. **Material deduplication** — 90% VRAM savings (10K→1K unique materials)
+6. **FAR tier batching** — 70K+ impostors in 1 draw call via MultiMesh
+7. **Object pooling** — 70% hit rate, avoids allocation churn
+8. **MID-tier StaticRenderer** — RenderingServer direct path skips Node3D overhead (~50% FPS improvement)
+
+### Recommended Priority
+
+1. Fix 500m hysteresis (DR-02) — quick win, prevents frame spikes
+2. MID tier MultiMesh batching (DR-01/DR-07) — biggest remaining FPS gain (15-30%)
+3. Fade margin tuning (DR-03) — visual quality, needs visual testing
+4. GPU cull shader (DR-04) — future optimization, deferred
+
+---
+
 ## Appendix: Code Locations
 
 | Component | File | Key Function | Line |
@@ -945,3 +1039,6 @@ The prebaking system was designed to store LODs separately for on-demand loading
 | MultiMesh rebuild | native_impostor_renderer.gd | _rebuild_multimesh() | 739-776 |
 | Cell loading | native_streaming_manager.gd | _load_cell() | 292-323 |
 | Async cell API | cell_manager.gd | request_exterior_cell_async() | varies |
+| Static object renderer | static_object_renderer.gd | _find_mesh_instance() | 152-165 |
+| GPU scene database | gpu_scene_database.gd | add_cell_objects() | 61-90 |
+| Streaming config | streaming_config.gd | HYSTERESIS_MID | 83 |

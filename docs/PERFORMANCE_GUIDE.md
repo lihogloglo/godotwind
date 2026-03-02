@@ -36,7 +36,7 @@ Total frame: 16.67ms (60 FPS)
 func _process(delta: float) -> void:
     var start_time := Time.get_ticks_msec()
     while not _load_queue.is_empty():
-        var obj = _load_queue.pop_front()
+        var obj = _load_queue.pop_back() # Use pop_back() for O(1) performance
         _instantiate_object(obj)
         var elapsed := Time.get_ticks_msec() - start_time
         if elapsed >= frame_budget_ms:

@@ -27,6 +27,10 @@ This document tracks all issues identified during the 2026 Audit & Future-Proofi
 - [x] **S-14** TYPE: `NativeImpostorRenderer` internal dictionaries untyped — owner:gemini
 - [x] **S-15** TYPE: `CellManager` instantiation queue untyped — owner:gemini
 - [x] **S-16** TYPE: `get_loaded_cell(x, y)` completely untyped params — owner:gemini
+- [ ] **S-17** PERF: `StaticObjectRenderer` (MID tier) renders LOD0 meshes instead of LOD1/2/3 — owner:gemini
+- [ ] **S-18** PERF: MID tier individual RS instances (200-500) causing draw call bottleneck — owner:gemini
+- [ ] **S-19** BUG: 500m (MID/FAR) boundary missing `HYSTERESIS_MID` oscillation fix — owner:gemini
+- [ ] **S-20** TECH: Sibling LODs use `FADE_DEPENDENCIES` incorrectly (should use `FADE_SELF`) — owner:gemini
 
 ## General Architecture & Quality
 - [x] **G-01** DEAD: `mesh_simplifier_v2.gd` (broken fallback) — owner:gemini
@@ -77,3 +81,14 @@ This document tracks all issues identified during the 2026 Audit & Future-Proofi
 
 ## Code Dedup & Refactoring (C4)
 - [ ] **G-10** TECH: Queue anti-pattern (manual index + lazy slice) in `native_impostor_renderer.gd` and `cell_manager.gd`. Should use a proper `Deque` or reverse+`pop_back()`. — owner:gemini
+
+## Distance Rendering & Streaming Audit (2026-03-02, Claude + Gemini)
+- [x] **DR-01** MAJOR: MID tier renders LOD0 at 500m — Fixed: `MidTierBatchPool` extracts LOD1/2/3 from prototypes, falls back LOD0→all bands. — owner:claude
+- [x] **DR-02** MAJOR: Cell unload threshold (411m) < grid diagonal load distance (496m) — Chebyshev load vs Euclidean unload mismatch caused corner cell oscillation. Fixed: use `sqrt(2) * radius * cell_size` for unload base distance. — owner:claude
+- [ ] **DR-03** MINOR: NEAR/MID fade margin (5m) may pop on complex architecture — consider 8m, needs visual testing. — owner:claude
+- [x] **DR-04** INFO: GPU Scene Database SSBO storage has no compute cull shader consumer — deferred to future GPU-driven work.
+- [x] **DR-05** INFO: `pop_front()` in doc examples (PERFORMANCE_GUIDE.md, DESIGN_PATTERNS.md) — hot path code already fixed. Doc examples corrected.
+- [x] **DR-06** VERIFIED: FADE_DEPENDENCIES correct for sibling LODs — margins symmetric at all boundaries.
+- [x] **DR-07** MAJOR: MID tier 200-500 individual RS draw calls — Fixed: `MidTierBatchPool` MultiMesh batching reduces to ~30-80. Gemini-roasted: fixed Transform3D() glitch pile, GPU buffer thrashing, O(n²) bulk unload, O(n) rebuild scan. — owner:claude
+- [x] **DR-08** MAJOR: `_is_mid_worthy()` and `_should_generate_lods()` filter mismatch — 393 models (40,012 instances) MID-worthy but lacked LODs; 52 models had LODs but were rejected. Fixed: consolidated into `StreamingPolicy` class (`streaming_policy.gd`). Both `cell_manager.gd` and `nif_converter.gd` now reference single source of truth. Diagnostic: `test_mid_tier_diagnostic.tscn`. — owner:claude
+- [x] **DR-09** REBAKE: Targeted rebake completed — `targeted_rebake.gd` deleted 961 stale cache files and re-baked with LODs. Result: MID+LODs went from 585→678, wasted LODs from 52→1. 437 models still without LODs are all <300 verts (too simple to simplify). Tool: `src/tools/prebaking/targeted_rebake.tscn`. — owner:claude

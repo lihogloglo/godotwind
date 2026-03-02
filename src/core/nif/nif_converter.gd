@@ -18,6 +18,7 @@ const CollisionBuilder := preload("res://src/core/nif/nif_collision_builder.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const MeshOptimizer := preload("res://addons/meshoptimizer/mesh_optimizer.gd")
 const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
+const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 
 ## Static flag to track if native C# is available (checked once at startup)
 static var _native_available: bool = false
@@ -1138,45 +1139,12 @@ static func _convert_nif_normals(normals: PackedVector3Array) -> PackedVector3Ar
 	return CS.vectors_to_godot(normals, false)  # false = no unit scaling
 
 
-## Check if this NIF should generate LODs based on model path
-## Generates LODs for: buildings, trees, large rocks, and other complex static objects
+## Check if this NIF should generate LODs based on model path.
+## Delegates to StreamingPolicy (single source of truth shared with cell_manager).
 func _should_generate_lods() -> bool:
 	if _source_path.is_empty():
 		return false
-
-	var lower := _source_path.to_lower()
-
-	# Architecture (buildings, structures)
-	if "ex_" in lower or "in_" in lower:
-		return true
-
-	# Trees and large flora
-	if "flora_tree" in lower or "flora_plant" in lower:
-		return true
-
-	# Large rocks and terrain features
-	if "terrain_rock" in lower:
-		# Skip small rocks
-		if "small" in lower or "_rm_" in lower:
-			return false
-		return true
-
-	# Furniture and clutter (larger pieces)
-	if "furn_" in lower:
-		# Skip small items like plates, cups
-		if "de_p" in lower or "misc_" in lower:
-			return false
-		return true
-
-	# Containers (chests, crates, urns)
-	if "contain_" in lower:
-		return true
-
-	# Dwemer ruins and Daedric architecture
-	if "dwrv_" in lower or "dae_" in lower:
-		return true
-
-	return false
+	return StreamingPolicyScript.should_generate_lods(_source_path)
 
 
 ## Add VisibilityRange-based LOD system to a MeshInstance3D

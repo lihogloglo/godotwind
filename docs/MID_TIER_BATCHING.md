@@ -1,9 +1,24 @@
 # MID-Tier MultiMesh Batching
 
-**Last Updated:** 2026-02-07
-**Status:** Design — Alternative to full GPU-Driven Renderer
+**Last Updated:** 2026-03-02
+**Status:** Design — Implementation in Progress (2026-03-02 Audit Consensus)
 **Effort:** ~1-2 weeks (vs 8-12 weeks for full GPU-driven)
 **Expected FPS Gain:** 15-30% typical, ~40% in dense areas
+
+---
+
+## 2026-03-02 Audit Consensus
+
+During the 2026-03-02 audit, the following critical issues were identified and prioritized:
+
+1. **LOD0 Vertex Leak:** The current `StaticObjectRenderer` (Phase 0) correctly skips `_LOD1/2/3` nodes but incorrectly renders the high-poly **LOD0** mesh at all MID-tier distances (150-500m). This causes a massive unnecessary vertex load.
+2. **Missing 500m Hysteresis:** The boundary between MID (StaticRenderer) and FAR (Impostors) at 500m lacks hysteresis, causing rapid oscillation/flicker during the `ORBIT_FAR` test phase.
+3. **Crossfade Technicality:** Sibling LODs are using `FADE_DEPENDENCIES` which is technically incorrect for siblings in Godot 4.6 (modeled for parent-child). Consensus is to switch to `FADE_SELF` with symmetric 10-15m margins.
+
+### Agreed Implementation Order:
+- **Quick Win 1:** Implement `HYSTERESIS_MID` (60m) at the 500m boundary in `NativeStreamingManager`.
+- **Quick Win 2:** Update `StaticObjectRenderer` to extract the correct LOD mesh (LOD1/2/3) based on distance bands.
+- **Main Project:** Implement the MultiMesh Batch Pool (Phase 2) to reduce draw calls.
 
 ---
 
@@ -43,10 +58,9 @@ This captures ~60-70% of the performance benefit of the full GPU-Driven Renderer
 
 ### Other issues found during the LOD transition test
 
-1. **MID↔FAR boundary has no hysteresis:** `HYSTERESIS_MID` (60m) is defined in
-   `streaming_config.gd:83` but never used. The 500m boundary oscillated 18 times
-   during the orbit test, causing 70 frame spikes. Needs implementation in the
-   cell loading radius logic.
+1. ~~**MID↔FAR boundary has no hysteresis**~~ **FIXED (2026-03-02):** Root cause was
+   Chebyshev grid load (corner cells at ~496m) vs Euclidean unload threshold (411m).
+   Fix: `unload_threshold = sqrt(2) * radius * cell_size + HYSTERESIS_MID` (~556m).
 
 2. **Test hysteresis check is wrong:** `_check_pass_fail()` at
    `lod_transition_test.gd:1081` measures camera-to-center distance at the 150m tier
@@ -253,3 +267,32 @@ What requires future Godot versions:
 4. Fly close (<130m) and back out (>190m) — promotion/demotion should be seamless
 5. Check LOD transitions at 250m and 375m — no pops or flicker
 6. 10-minute flight through Balmora — no leaks, no pops, stable FPS
+
+---
+
+## 2026-03-02 Joint Audit Notes (Claude + Gemini Consensus)
+
+### Agreed Findings
+
+1. **LOD0 leakage confirmed.** `StaticObjectRenderer._find_mesh_instance()` skips `_LOD1/2/3` nodes — renders full-detail LOD0 at 500m. This is the single largest vertex waste in the MID tier.
+
+2. **MultiMesh batching is the right fix.** Individual RS instances for MID = 200-500 draw calls. Grouping by (mesh_type, lod_level) → ~30-80 draw calls. FAR tier already proves this works (70K impostors, 1 draw call).
+
+3. **500m hysteresis must be fixed first** (prerequisite). `HYSTERESIS_MID=60m` is defined but never used. The orbit test showed 18 oscillations and 70 frame spikes at the 500m boundary. Quick fix: apply hysteresis in cell loading radius logic before starting batching work.
+
+4. **GPU Scene Database is ready but deferred.** The SSBO infrastructure exists (`gpu_scene_database.gd`) but no compute cull shader. The real GPU-driven win is for MID tier culling, not FAR (FAR is already 1 draw call). Deferred until after MultiMesh batching proves out.
+
+### Debated & Resolved
+
+- **FADE_DEPENDENCIES vs FADE_SELF:** Gemini proposed FADE_SELF for sibling LODs. Claude verified margins are symmetric at every boundary, confirming FADE_DEPENDENCIES is correct (crossfades both siblings with complementary alpha). **Consensus: keep FADE_DEPENDENCIES.**
+
+- **NEAR/MID fade margin (5m):** Gemini proposed 10-15m. Claude proposed 8m. **Consensus: test 8m visually** — too long creates ghosting, too short creates popping.
+
+- **`pop_front()` in hot paths:** Gemini verified streaming hot paths already use `pop_back()`. Only doc examples had incorrect patterns. **Consensus: fixed in docs, no runtime changes needed.**
+
+### Implementation Priority
+
+1. Fix 500m hysteresis (DR-02) — prerequisite, quick win
+2. MID tier MultiMesh batching (Phases 1-5 above) — biggest FPS gain
+3. Fade margin tuning (DR-03) — visual quality, visual test
+4. GPU cull shader (DR-04) — future work

@@ -989,6 +989,11 @@ func _finish_test() -> void:
 	# Reset debug logging
 	Log.set_category_level("streaming", Log.Level.INFO)
 
+	# CRITICAL: Disable streaming manager process to prevent exit crash
+	# during prototype duplication in _calculate_results phase
+	if _streaming_manager:
+		_streaming_manager.set_process(false)
+
 	if not _owns_streaming:
 		get_tree().create_timer(2.0).timeout.connect(queue_free)
 

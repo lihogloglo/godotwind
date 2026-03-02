@@ -98,7 +98,7 @@ func _process_load_queue():
 		return
 
 	# Load one region per frame
-	var region_coord = _load_queue.pop_front()
+	var region_coord = _load_queue.pop_back()
 
 	# Emit load request signal
 	region_load_requested.emit(region_coord)
@@ -112,7 +112,7 @@ func _process_unload_queue():
 		return
 
 	# Unload one region per frame
-	var region_coord = _unload_queue.pop_front()
+	var region_coord = _unload_queue.pop_back()
 
 	# Emit unload request signal
 	region_unload_requested.emit(region_coord)

@@ -69,7 +69,7 @@ func _process(delta: float) -> void:
     var start_time := Time.get_ticks_msec()
 
     while not _load_queue.is_empty():
-        var item = _load_queue.pop_front()
+        var item = _load_queue.pop_back()  # O(1) — never use pop_front() in hot paths
         _instantiate_object(item)
 
         var elapsed := Time.get_ticks_msec() - start_time

@@ -21,6 +21,7 @@ const StaticObjectRendererScript := preload("res://src/core/world/static_object_
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
+const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
@@ -37,6 +38,9 @@ var _object_pool: RefCounted = null  # ObjectPool
 
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
+
+# MID-tier batch pool for MultiMesh batching (replaces individual RS instances)
+var _batch_pool: Node = null  # MidTierBatchPool
 
 # GPU scene database for SSBO-backed world state (Phase 2)
 var _gpu_scene_db: RefCounted = null  # GPUSceneDatabase
@@ -1808,48 +1812,11 @@ func _is_always_near_ref(ref: CellReference) -> bool:
 	return type_name in ["light", "npc", "creature", "leveled_creature"]
 
 
-## MID-tier significance filter — only visually significant objects get RS instances.
+## MID-tier significance filter — delegates to StreamingPolicy (single source of truth).
 ## Small items (potions, forks, books, etc.) are invisible at 150m+ and waste resources.
 ## Filtered objects are deferred and instantiated at NEAR range when the player approaches.
 func _is_mid_worthy(type_name: String, model_path: String) -> bool:
-	# Level 1: Record type fast-reject — small items never visible at 150m+
-	if type_name in ["weapon", "armor", "clothing", "book", "potion",
-			"ingredient", "misc", "apparatus", "lockpick", "probe",
-			"repair", "leveled_item", "body_part"]:
-		return false
-
-	# Level 2: Doors are always MID-worthy (entrance markers)
-	if type_name == "door":
-		return true
-
-	# Level 3: Model path check for static, container, activator
-	var lower := model_path.to_lower()
-
-	# Architecture (exterior and interior pieces)
-	if "ex_" in lower or "in_" in lower:
-		return true
-
-	# Trees and large flora
-	if "flora_tree" in lower or "flora_ashtree" in lower or \
-			"flora_emp_tree" in lower or "flora_bc_" in lower or \
-			"flora_t_mushroom" in lower:
-		return true
-
-	# Terrain features (rocks, cliffs, arches — skip small rocks)
-	if "terrain_" in lower:
-		return "_small" not in lower
-
-	# Large structural objects
-	if "bridge" in lower or "ship" in lower or "boat" in lower or \
-			"platform" in lower or "dock_" in lower:
-		return true
-
-	# Container-specific: only large containers visible at distance
-	if type_name == "container":
-		return "barrel" in lower or "crate" in lower
-
-	# Default: not MID-worthy (small clutter, misc placed as static, etc.)
-	return false
+	return StreamingPolicyScript.is_mid_worthy(type_name, model_path)
 
 
 ## Store a non-mid-worthy object for deferred NEAR instantiation.
@@ -1889,15 +1856,8 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 		if not model_prototype:
 			return false
 
-	# Normalize model path as the type name for StaticObjectRenderer
+	# Normalize model path as the type name
 	var type_name := model_path.to_lower().replace("/", "\\")
-
-	# Register mesh type if not already registered
-	if not _static_renderer.has_type(type_name):
-		_static_renderer.register_from_prototype(type_name, model_prototype)
-		# Verify registration succeeded (prototype might not have a mesh)
-		if not _static_renderer.has_type(type_name):
-			return false
 
 	# Calculate transform from ESM reference
 	var pos := CS.vector_to_godot(ref.position)
@@ -1909,25 +1869,48 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	# Get cell grid for cleanup tracking
 	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
 
-	# Create RenderingServer instance (with metadata for MID→NEAR promotion)
-	var instance_id: int = _static_renderer.add_instance(
-		type_name, xform, cell_grid,
-		model_path, item_id, ref.ref_id, ref.ref_num
-	)
-	if instance_id < 0:
-		return false
-	
+	# Route to batch pool (MultiMesh batching) if available
+	if _batch_pool:
+		if not _batch_pool.has_type(type_name):
+			_batch_pool.register_from_prototype(type_name, model_prototype)
+			if not _batch_pool.has_type(type_name):
+				return false
+
+		var object_id: int = _batch_pool.add_object(
+			type_name, xform, cell_grid,
+			model_path, item_id, ref.ref_id, ref.ref_num
+		)
+		if object_id < 0:
+			return false
+	else:
+		# Fallback: individual RS instances via StaticObjectRenderer
+		if not _static_renderer.has_type(type_name):
+			_static_renderer.register_from_prototype(type_name, model_prototype)
+			if not _static_renderer.has_type(type_name):
+				return false
+
+		var instance_id: int = _static_renderer.add_instance(
+			type_name, xform, cell_grid,
+			model_path, item_id, ref.ref_id, ref.ref_num
+		)
+		if instance_id < 0:
+			return false
+
 	# If GPU Scene Database is active, collect data for batch upload
 	if _gpu_scene_db:
-		# Retrieve AABB from static renderer's type registry
-		var mesh_stats: Dictionary = _static_renderer.call("get_mesh_type_stats", type_name)
-		var aabb: AABB = mesh_stats.get("aabb", AABB())
-		
+		var aabb := AABB()
+		if _batch_pool and _batch_pool.has_type(type_name):
+			# Batch pool tracks AABB internally via mesh data
+			pass  # AABB retrieved from mesh type at upload time
+		elif _static_renderer:
+			var mesh_stats: Dictionary = _static_renderer.call("get_mesh_type_stats", type_name)
+			aabb = mesh_stats.get("aabb", AABB())
+
 		request.gpu_objects.append({
 			"transform": xform,
 			"aabb": aabb,
 			"mesh_id": float(type_name.hash()),
-			"lod_mask": 0 # Default
+			"lod_mask": 0
 		})
 
 	_stats["objects_instantiated"] += 1
