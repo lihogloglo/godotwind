@@ -126,45 +126,53 @@ func _index_cell(cell: CellRecord) -> void:
 
 
 ## Create ObjectPosition from CellReference
+## Uses type string from get_any_record() instead of `is` type checks (Phase 4)
 func _create_object_position(ref: CellReference, cell_grid: Vector2i) -> ObjectPosition:
-	# Get the base record to find model path
-	var base_record = ESMManager.get_any_record(String(ref.ref_id))
+	# Get the base record and its type string
+	var record_type: Array = [""]
+	var base_record: Variant = ESMManager.get_any_record(String(ref.ref_id), record_type)
 	if base_record == null:
 		return null
 
-	# Determine object type and model path
+	var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+	# Determine object type, model path, and significance from type string
 	var obj_type := ObjectType.OTHER
 	var model_path := ""
 	var is_significant := false
 
-	if base_record is StaticRecord:
-		obj_type = ObjectType.STATIC
-		model_path = base_record.model
-		# Significant if not tiny flora/clutter
-		is_significant = _is_significant_static(base_record)
-	elif base_record.has_method("get") and base_record.get("model") != null:
-		# Generic handler for records with model property
-		model_path = base_record.model
-		if base_record is DoorRecord:
+	match type_name:
+		"static":
+			obj_type = ObjectType.STATIC
+			model_path = base_record.model
+			is_significant = _is_significant_static(base_record as StaticRecord)
+		"door":
 			obj_type = ObjectType.DOOR
+			model_path = base_record.model
 			is_significant = true
-		elif base_record is ContainerRecord:
+		"container":
 			obj_type = ObjectType.CONTAINER
+			model_path = base_record.model
 			is_significant = true
-		elif base_record is ActivatorRecord:
+		"activator":
 			obj_type = ObjectType.ACTIVATOR
+			model_path = base_record.model
 			is_significant = true
-		elif base_record is LightRecord:
+		"light":
 			obj_type = ObjectType.LIGHT
-			is_significant = false  # Lights usually small
-	elif base_record is NPCRecord:
-		obj_type = ObjectType.NPC
-		is_significant = true
-		# NPCs don't have single model - handled by CharacterFactory
-	elif base_record is CreatureRecord:
-		obj_type = ObjectType.CREATURE
-		model_path = base_record.model
-		is_significant = true
+			model_path = base_record.model
+			is_significant = false
+		"npc":
+			obj_type = ObjectType.NPC
+			is_significant = true
+		"creature":
+			obj_type = ObjectType.CREATURE
+			model_path = base_record.model
+			is_significant = true
+		_:
+			# Generic fallback for records with model property
+			if "model" in base_record and base_record.model:
+				model_path = base_record.model
 
 	# Skip if no model (except NPCs which are assembled)
 	if model_path.is_empty() and obj_type != ObjectType.NPC:

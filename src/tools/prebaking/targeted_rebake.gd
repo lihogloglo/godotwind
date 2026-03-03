@@ -186,7 +186,7 @@ func _ensure_data() -> bool:
 			return false
 		Log.info("prebaking", "Loaded %d BSA archives" % loaded)
 
-	if ESMManager.statics.is_empty():
+	if ESMManager.cells.is_empty():
 		var data_path: String = SettingsManager.get_data_path()
 		var esm_file: String = SettingsManager.get_esm_file()
 		var esm_path := data_path.path_join(esm_file)
@@ -194,7 +194,9 @@ func _ensure_data() -> bool:
 		if err != OK:
 			Log.error("prebaking", "Failed to load ESM: %s" % error_string(err))
 			return false
-		Log.info("prebaking", "ESM loaded — %d statics, %d cells" % [
-			ESMManager.statics.size(), ESMManager.cells.size()])
+	# Ensure typed dicts are populated for prebaking iteration
+	ESMManager.ensure_typed_dicts_populated()
+	Log.info("prebaking", "ESM loaded — %d statics, %d cells" % [
+		ESMManager.statics.size(), ESMManager.cells.size()])
 
 	return true

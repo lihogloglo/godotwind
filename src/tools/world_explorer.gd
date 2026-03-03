@@ -42,18 +42,18 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 const ConsoleScript := preload("res://src/core/console/console.gd")
-const AutomatedTestRunnerScript := preload("res://src/tools/automated_test_runner.gd")
 const ExplorerPanelsScript := preload("res://src/tools/ui/explorer_panels.gd")
 const CellBrowserScript := preload("res://src/tools/ui/cell_browser.gd")
-const DebugOverlayScript := preload("res://src/tools/ui/debug_overlay.gd")
-const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
-const DiagnosticOverlayScript := preload("res://src/tools/ui/diagnostic_overlay.gd")
-const BatchDebugHUDScript := preload("res://src/tools/ui/batch_debug_hud.gd")
-const CrashReporterScript := preload("res://src/tools/crash_reporter.gd")
-const DebugSystemScript := preload("res://src/tools/debug_system.gd")
-const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
-const LodTransitionTestScript := preload("res://src/tools/lod_transition_test.gd")
-const MidTierDebuggerScript := preload("res://src/tools/mid_tier_debugger.gd")
+# Debug/diagnostic scripts — lazy-loaded on first use to speed up startup
+var _AutomatedTestRunnerScript: GDScript
+var _DebugOverlayScript: GDScript
+var _DiagnosticOverlayScript: GDScript
+var _BatchDebugHUDScript: GDScript
+var _CrashReporterScript: GDScript
+var _DebugSystemScript: GDScript
+var _StreamingBenchmarkScript: GDScript
+var _LodTransitionTestScript: GDScript
+var _MidTierDebuggerScript: GDScript
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
@@ -126,6 +126,7 @@ var _data_path: String = ""
 var _initialized: bool = false
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = 5  # Must be at least 5 cells (585m) to cover MID tier (500m)
+var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
 
 # Interior cell browser (constructed by CellBrowser)
 var _cell_browser: CellBrowser = null
@@ -138,6 +139,9 @@ var player_controller: PlayerController = null  # PlayerController instance
 
 
 func _ready() -> void:
+	var _t0 := Time.get_ticks_msec()
+	var _t_step := _t0
+
 	# Initialize managers
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
@@ -154,21 +158,27 @@ func _ready() -> void:
 	add_child(pool_container)
 	cell_manager.init_object_pool(pool_container)
 
+	_t_step = _log_timing(_t_step, "managers + object pool")
+
 	# Initialize profiler
 	profiler = PerformanceProfilerScript.new()
 	profiler.start_session()
 
 	# Setup camera systems
 	_setup_cameras()
+	_t_step = _log_timing(_t_step, "cameras")
 
 	# Setup developer console
 	_setup_console()
+	_t_step = _log_timing(_t_step, "console")
 
 	# Setup automated test runner
 	_setup_test_runner()
+	_t_step = _log_timing(_t_step, "test runner")
 
 	# Setup diagnostic overlay and crash reporter
 	_setup_diagnostic_systems()
+	_t_step = _log_timing(_t_step, "diagnostic systems")
 
 	# Connect quick teleport buttons
 	seyda_neen_btn.pressed.connect(func() -> void: _teleport_to_cell(-2, -9))
@@ -181,9 +191,13 @@ func _ready() -> void:
 
 	# Setup interior cell browser
 	_setup_interior_browser()
+	_t_step = _log_timing(_t_step, "interior browser")
 
 	# Setup visibility toggles
 	_setup_visibility_toggles()
+	_t_step = _log_timing(_t_step, "visibility toggles + panels")
+
+	print("[TIMING] _ready() total: %d ms" % (Time.get_ticks_msec() - _t0))
 
 	# Get Morrowind data path (try auto-detection if not configured)
 	_data_path = SettingsManager.get_data_path()
@@ -205,6 +219,9 @@ func _ready() -> void:
 
 
 func _init_async() -> void:
+	var _ta0 := Time.get_ticks_msec()
+	var _ta := _ta0
+
 	# Initialize ModRegistry
 	await _update_loading(2, "Initializing mod registry...")
 	mod_registry = ModRegistryScript.new()
@@ -213,39 +230,43 @@ func _init_async() -> void:
 		_log("Mod registry initialized (%d mods)" % mod_registry.total_mods_loaded)
 	else:
 		_log("[color=yellow]Warning: Mod registry failed to load manifest (error %d)[/color]" % mod_err)
+	_ta = _log_timing(_ta, "mod registry")
 
 	# Load BSA archives
 	await _update_loading(5, "Loading BSA archives...")
 	# 1. Load vanilla BSAs
 	var bsa_count := BSAManager.load_archives_from_directory(_data_path)
-	
+
 	# 2. Load mod BSAs
 	var mod_bsas := mod_registry.get_bsa_load_order()
 	for bsa_path in mod_bsas:
 		if BSAManager.load_archive(bsa_path) == OK:
 			bsa_count += 1
-			
+
 	_log("Loaded %d BSA archives (vanilla + mods)" % bsa_count)
+	_ta = _log_timing(_ta, "BSA archives")
 
 	# Initialize background processor for async loading
 	background_processor = BackgroundProcessorScript.new()
 	background_processor.name = "BackgroundProcessor"
 	add_child(background_processor)
 	cell_manager.set_background_processor(background_processor)
-	
+
 	# Register mod registry with loaders that need asset resolution
 	if cell_manager.has_method("set_mod_registry"):
 		cell_manager.call("set_mod_registry", mod_registry)
-		
+
 	_log("Background processor initialized for async cell loading")
 
-	# Pre-warm BSA cache with common files (improves cell loading performance)
-	await _update_loading(10, "Pre-warming file cache...")
-	_prewarm_bsa_cache()
+	# Pre-warm BSA cache only when NOT in runtime mode (prebaking needs it, runtime loads from .res)
+	if not cell_manager._model_loader.runtime_mode:
+		await _update_loading(10, "Pre-warming file cache...")
+		_prewarm_bsa_cache()
+		_ta = _log_timing(_ta, "BSA prewarm")
 
 	# Load ESM/ESP files
 	await _update_loading(30, "Loading game data (ESM/ESPs)...")
-	
+
 	# 1. Load primary ESM
 	var esm_file: String = SettingsManager.get_esm_file()
 	var esm_path := _data_path.path_join(esm_file)
@@ -255,13 +276,15 @@ func _init_async() -> void:
 		_log("[color=red]ERROR: Failed to load ESM: %s[/color]" % error_string(error))
 		_hide_loading()
 		return
-		
+	_ta = _log_timing(_ta, "ESM load (primary)")
+
 	# 2. Load mod ESPs
 	var mod_esps := mod_registry.get_esp_load_order()
 	for esp_path in mod_esps:
 		var esp_err := ESMManager.load_file(esp_path)
 		if esp_err != OK:
 			_log("[color=yellow]Warning: Failed to load mod ESP: %s[/color]" % esp_path.get_file())
+	_ta = _log_timing(_ta, "ESP mods")
 
 	_log("[color=green]Game data loaded successfully[/color]")
 	_log("LAND records: %d, CELL records: %d" % [ESMManager.lands.size(), ESMManager.cells.size()])
@@ -269,10 +292,12 @@ func _init_async() -> void:
 	# Initialize Terrain3D
 	await _update_loading(50, "Initializing Terrain3D...")
 	_init_terrain3d()
+	_ta = _log_timing(_ta, "Terrain3D init")
 
 	# Load pre-processed terrain (terrain is always prebaked)
 	await _update_loading(70, "Loading terrain data...")
 	_load_preprocessed_terrain()
+	_ta = _log_timing(_ta, "terrain data load")
 
 	# Ocean system is now lazy-loaded - created on first toggle
 
@@ -280,24 +305,25 @@ func _init_async() -> void:
 	await _update_loading(80, "Pre-loading common models...")
 	var preload_count := cell_manager.preload_common_models()
 	_log("Pre-loaded %d common models into cache" % preload_count)
+	_ta = _log_timing(_ta, "preload common models")
 
-	# Pre-load character assets (skeletons, bone remaps, animation libraries)
-	await _update_loading(85, "Pre-loading character animations...")
-	CharacterFactoryV2Script.preload_character_assets()
+	# Character asset preloading deferred until characters are first enabled (saves ~23s)
+	# CharacterFactoryV2Script.preload_character_assets() called in _on_show_characters_toggled()
 
 	# Create and setup NativeStreamingManager (but don't start tracking yet)
 	await _update_loading(90, "Setting up streaming system...")
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
+	_ta = _log_timing(_ta, "streaming manager setup")
 
 	# Models load automatically when streaming system starts
 	# Visibility is controlled by Godot's native visibility_range system
 
 	# Done
 	await _update_loading(100, "Ready!")
-	await get_tree().create_timer(0.3).timeout
 	_hide_loading()
 
 	_initialized = true
+	print("[TIMING] _init_async() total: %d ms" % (Time.get_ticks_msec() - _ta0))
 	_log("[color=green]World streaming initialized![/color]")
 	_log("Use ZQSD to move, Right-click to look")
 	_log("Cells stream automatically based on camera position")
@@ -437,7 +463,9 @@ func _setup_console() -> void:
 
 ## Setup automated test runner
 func _setup_test_runner() -> void:
-	var runner: Node = AutomatedTestRunnerScript.new()
+	if not _AutomatedTestRunnerScript:
+		_AutomatedTestRunnerScript = load("res://src/tools/automated_test_runner.gd")
+	var runner: Node = _AutomatedTestRunnerScript.new()
 	runner.name = "AutomatedTestRunner"
 	add_child(runner)
 	test_runner = runner
@@ -451,26 +479,35 @@ func _setup_test_runner() -> void:
 
 ## Setup diagnostic overlay, crash reporter, and unified debug system
 func _setup_diagnostic_systems() -> void:
+	if not _DiagnosticOverlayScript:
+		_DiagnosticOverlayScript = load("res://src/tools/ui/diagnostic_overlay.gd")
+	if not _CrashReporterScript:
+		_CrashReporterScript = load("res://src/tools/crash_reporter.gd")
+	if not _DebugSystemScript:
+		_DebugSystemScript = load("res://src/tools/debug_system.gd")
+	if not _BatchDebugHUDScript:
+		_BatchDebugHUDScript = load("res://src/tools/ui/batch_debug_hud.gd")
+
 	# Create diagnostic overlay (hidden by default) - legacy, kept for compatibility
-	diagnostic_overlay = DiagnosticOverlayScript.new()
+	diagnostic_overlay = _DiagnosticOverlayScript.new()
 	diagnostic_overlay.name = "DiagnosticOverlay"
 	diagnostic_overlay.visible = false  # Start hidden, toggle with F9
 	add_child(diagnostic_overlay)
 
 	# Create crash reporter - legacy, kept for compatibility
-	crash_reporter = CrashReporterScript.new()
+	crash_reporter = _CrashReporterScript.new()
 	crash_reporter.name = "CrashReporter"
 	add_child(crash_reporter)
 
 	# Create unified debug system (merges F4/F9/F11/F12 functionality)
-	debug_system = DebugSystemScript.new()
+	debug_system = _DebugSystemScript.new()
 	debug_system.name = "DebugSystem"
 	# Enable auto-test on startup if DEBUG_AUTO_TEST environment variable is set
 	debug_system.auto_test_on_startup = OS.has_environment("DEBUG_AUTO_TEST")
 	add_child(debug_system)
 
 	# Create batch debug HUD (hidden by default, toggle with `mid_debug` command)
-	_batch_debug_hud = BatchDebugHUDScript.new()
+	_batch_debug_hud = _BatchDebugHUDScript.new()
 	_batch_debug_hud.name = "BatchDebugHUD"
 	add_child(_batch_debug_hud)
 
@@ -764,7 +801,9 @@ func _setup_visibility_toggles() -> void:
 
 ## Setup debug overlay for 3D visualizations
 func _setup_debug_overlay() -> void:
-	_debug_overlay = DebugOverlayScript.new()
+	if not _DebugOverlayScript:
+		_DebugOverlayScript = load("res://src/tools/ui/debug_overlay.gd")
+	_debug_overlay = _DebugOverlayScript.new()
 	_debug_overlay.name = "DebugOverlay"
 	add_child(_debug_overlay)
 
@@ -835,6 +874,13 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 	_show_characters = enabled
 
 	_log("[DIAG] Characters toggle: %s" % ("ON" if enabled else "OFF"))
+
+	# Lazy-load character assets on first enable (deferred from startup to save ~23s)
+	if enabled and not _character_assets_preloaded:
+		_character_assets_preloaded = true
+		_log("Pre-loading character assets (first enable)...")
+		CharacterFactoryV2Script.preload_character_assets()
+		_log("Character assets pre-loaded")
 
 	# Update cell_manager loading flags
 	if cell_manager:
@@ -985,19 +1031,34 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		)
 
 		# Register MID-tier debugger commands (autopilot + census + markers)
-		MidTierDebuggerScript.register_console_commands(
-			console, native_streaming_manager, cell_manager, camera
-		)
+		if not _MidTierDebuggerScript:
+			_MidTierDebuggerScript = load("res://src/tools/mid_tier_debugger.gd")
+		if _MidTierDebuggerScript:
+			_MidTierDebuggerScript.register_console_commands(
+				console, native_streaming_manager, cell_manager, camera
+			)
+		else:
+			push_warning("WorldExplorer: Failed to load mid_tier_debugger.gd")
 
 		# Register streaming benchmark commands
-		StreamingBenchmarkScript.register_console_commands(
-			console, native_streaming_manager, cell_manager, camera
-		)
+		if not _StreamingBenchmarkScript:
+			_StreamingBenchmarkScript = load("res://src/tools/streaming_benchmark.gd")
+		if _StreamingBenchmarkScript:
+			_StreamingBenchmarkScript.register_console_commands(
+				console, native_streaming_manager, cell_manager, camera
+			)
+		else:
+			push_warning("WorldExplorer: Failed to load streaming_benchmark.gd")
 
 		# Register LOD transition test commands
-		LodTransitionTestScript.register_console_commands(
-			console, native_streaming_manager, cell_manager, camera
-		)
+		if not _LodTransitionTestScript:
+			_LodTransitionTestScript = load("res://src/tools/lod_transition_test.gd")
+		if _LodTransitionTestScript:
+			_LodTransitionTestScript.register_console_commands(
+				console, native_streaming_manager, cell_manager, camera
+			)
+		else:
+			push_warning("WorldExplorer: Failed to load lod_transition_test.gd")
 
 	# Initialize profiling report (extracted to ProfilingReport)
 	_profiling_report = ProfilingReport.new(
@@ -1116,6 +1177,14 @@ func _update_loading(progress: float, status: String) -> void:
 	progress_bar.value = progress
 	status_label.text = status
 	await get_tree().process_frame
+
+
+## Timing helper: prints elapsed ms since last checkpoint, returns new checkpoint
+func _log_timing(prev_ticks: int, label: String) -> int:
+	var now := Time.get_ticks_msec()
+	var elapsed := now - prev_ticks
+	print("[TIMING] %s: %d ms" % [label, elapsed])
+	return now
 
 
 func _log(message: String) -> void:

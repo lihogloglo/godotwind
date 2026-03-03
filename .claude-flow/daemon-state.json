@@ -1,0 +1,135 @@
+{
+  "running": true,
+  "startedAt": "2026-03-03T04:44:33.329Z",
+  "workers": {
+    "map": {
+      "runCount": 30,
+      "successCount": 30,
+      "failureCount": 0,
+      "averageDurationMs": 0.9666666666666669,
+      "isRunning": false,
+      "nextRun": "2026-03-03T11:59:32.291Z",
+      "lastRun": "2026-03-03T11:59:32.298Z"
+    },
+    "audit": {
+      "runCount": 44,
+      "successCount": 44,
+      "failureCount": 0,
+      "averageDurationMs": 1509.6136363636363,
+      "isRunning": false,
+      "nextRun": "2026-03-03T12:07:38.777Z",
+      "lastRun": "2026-03-03T11:57:38.777Z"
+    },
+    "optimize": {
+      "runCount": 29,
+      "successCount": 29,
+      "failureCount": 0,
+      "averageDurationMs": 179.03448275862064,
+      "isRunning": false,
+      "nextRun": "2026-03-03T12:03:37.501Z",
+      "lastRun": "2026-03-03T11:48:37.500Z"
+    },
+    "consolidate": {
+      "runCount": 15,
+      "successCount": 15,
+      "failureCount": 0,
+      "averageDurationMs": 0.9333333333333333,
+      "isRunning": false,
+      "nextRun": "2026-03-03T12:20:32.148Z",
+      "lastRun": "2026-03-03T11:50:32.148Z"
+    },
+    "testgaps": {
+      "runCount": 22,
+      "successCount": 22,
+      "failureCount": 0,
+      "averageDurationMs": 176.86363636363635,
+      "isRunning": false,
+      "nextRun": "2026-03-03T12:12:35.946Z",
+      "lastRun": "2026-03-03T11:52:35.946Z"
+    },
+    "predict": {
+      "runCount": 0,
+      "successCount": 0,
+      "failureCount": 0,
+      "averageDurationMs": 0,
+      "isRunning": false
+    },
+    "document": {
+      "runCount": 0,
+      "successCount": 0,
+      "failureCount": 0,
+      "averageDurationMs": 0,
+      "isRunning": false
+    }
+  },
+  "config": {
+    "autoStart": false,
+    "logDir": "D:\\Gamedev\\Godotwind\\godotwind\\.claude-flow\\logs",
+    "stateFile": "D:\\Gamedev\\Godotwind\\godotwind\\.claude-flow\\daemon-state.json",
+    "maxConcurrent": 2,
+    "workerTimeoutMs": 300000,
+    "resourceThresholds": {
+      "maxCpuLoad": 2,
+      "minFreeMemoryPercent": 20
+    },
+    "workers": [
+      {
+        "type": "map",
+        "intervalMs": 900000,
+        "offsetMs": 0,
+        "priority": "normal",
+        "description": "Codebase mapping",
+        "enabled": true
+      },
+      {
+        "type": "audit",
+        "intervalMs": 600000,
+        "offsetMs": 120000,
+        "priority": "critical",
+        "description": "Security analysis",
+        "enabled": true
+      },
+      {
+        "type": "optimize",
+        "intervalMs": 900000,
+        "offsetMs": 240000,
+        "priority": "high",
+        "description": "Performance optimization",
+        "enabled": true
+      },
+      {
+        "type": "consolidate",
+        "intervalMs": 1800000,
+        "offsetMs": 360000,
+        "priority": "low",
+        "description": "Memory consolidation",
+        "enabled": true
+      },
+      {
+        "type": "testgaps",
+        "intervalMs": 1200000,
+        "offsetMs": 480000,
+        "priority": "normal",
+        "description": "Test coverage analysis",
+        "enabled": true
+      },
+      {
+        "type": "predict",
+        "intervalMs": 600000,
+        "offsetMs": 0,
+        "priority": "low",
+        "description": "Predictive preloading",
+        "enabled": false
+      },
+      {
+        "type": "document",
+        "intervalMs": 3600000,
+        "offsetMs": 0,
+        "priority": "low",
+        "description": "Auto-documentation",
+        "enabled": false
+      }
+    ]
+  },
+  "savedAt": "2026-03-03T11:59:32.298Z"
+}

@@ -66,7 +66,7 @@ static func _is_material_renderable(mat: Material, for_lod_node: bool = false) -
 		# ShaderMaterial with no texture - still allow (might be intentional)
 		return true
 
-	# StandardMaterial3D - check for albedo texture or non-white color
+	# StandardMaterial3D - check for albedo texture or non-default color
 	if mat is StandardMaterial3D:
 		var std_mat := mat as StandardMaterial3D
 
@@ -75,19 +75,17 @@ static func _is_material_renderable(mat: Material, for_lod_node: bool = false) -
 			return true
 
 		# LOD nodes should always be considered valid if they have a material
-		# The white-color check was incorrectly hiding LOD meshes
 		if for_lod_node:
 			return true
 
-		# No texture - check if it's a near-white color (placeholder)
-		# Using a threshold to catch slightly off-white materials too
+		# Only hide meshes with exactly default white color AND no texture.
+		# The previous 0.95 threshold was too aggressive — Morrowind has many
+		# legitimate near-white surfaces (white stone, plaster, bone, snow).
 		var color := std_mat.albedo_color
-		var is_near_white := color.r > 0.95 and color.g > 0.95 and color.b > 0.95
-		if is_near_white:
-			# Near-white material with no texture - likely collision geometry or placeholder
+		if color == Color.WHITE:
 			return false
 
-		# Non-white color without texture - might be intentional solid color
+		# Any non-default color is considered intentional
 		return true
 
 	# Other material types - assume valid

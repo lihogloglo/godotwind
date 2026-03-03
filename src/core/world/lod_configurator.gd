@@ -55,7 +55,12 @@ func configure_near_object(mesh_instance: GeometryInstance3D) -> void:
 	mesh_instance.visibility_range_end = NEAR_END
 	mesh_instance.visibility_range_begin_margin = 0.0
 	mesh_instance.visibility_range_end_margin = FADE_NEAR_LOD1
-	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+	# FADE_DEPENDENCIES requires sibling LOD nodes for crossfade.
+	# Standalone objects (no _LOD1/_LOD2/_LOD3 siblings) use FADE_SELF (dither).
+	mesh_instance.visibility_range_fade_mode = (
+		GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES if _has_lod_siblings(mesh_instance)
+		else GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	)
 
 
 ## Configure a MID-tier LOD mesh with specific LOD level
@@ -106,6 +111,21 @@ func configure_far_object(mesh_instance: GeometryInstance3D) -> void:
 	mesh_instance.visibility_range_begin_margin = FADE_LOD3_FAR
 	mesh_instance.visibility_range_end_margin = FADE_LOD3_FAR
 	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+
+## Check if a geometry node has LOD siblings (_LOD1, _LOD2, _LOD3) in its parent.
+## Used to decide FADE_DEPENDENCIES (has siblings) vs FADE_SELF (standalone).
+static func _has_lod_siblings(geo: GeometryInstance3D) -> bool:
+	var parent := geo.get_parent()
+	if not parent:
+		return false
+	for sibling in parent.get_children():
+		if sibling == geo:
+			continue
+		if sibling is GeometryInstance3D:
+			var sname: String = sibling.name
+			if sname.ends_with("_LOD1") or sname.ends_with("_LOD2") or sname.ends_with("_LOD3"):
+				return true
+	return false
 
 #endregion
 
@@ -295,7 +315,12 @@ static func _configure_near_static(mesh_instance: GeometryInstance3D) -> void:
 	mesh_instance.visibility_range_end = DU.NEAR_END
 	mesh_instance.visibility_range_begin_margin = 0.0
 	mesh_instance.visibility_range_end_margin = DU.FADE_MARGIN_NEAR_LOD1
-	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+	# FADE_DEPENDENCIES requires sibling LOD nodes for crossfade.
+	# Standalone objects (no _LOD1/_LOD2/_LOD3 siblings) use FADE_SELF (dither).
+	mesh_instance.visibility_range_fade_mode = (
+		GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES if _has_lod_siblings(mesh_instance)
+		else GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	)
 
 
 ## Static version of configure_mid_object (no instance needed)

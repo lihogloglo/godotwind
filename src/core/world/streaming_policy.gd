@@ -63,10 +63,11 @@ static func _is_significant_model(model_path: String) -> bool:
 	if "ex_" in lower or "in_" in lower:
 		return true
 
-	# Trees and large flora — ALL tree/mushroom variants
+	# Trees, large flora, and mushrooms — ALL tree/mushroom variants
 	if "flora_tree" in lower or "flora_ashtree" in lower or \
 			"flora_emp_tree" in lower or "flora_bc_" in lower or \
-			"flora_t_mushroom" in lower or "flora_plant" in lower:
+			"flora_t_mushroom" in lower or "flora_mushroom" in lower or \
+			"flora_plant" in lower:
 		return true
 
 	# Terrain features (rocks, cliffs, boulders, arches — skip small rocks)

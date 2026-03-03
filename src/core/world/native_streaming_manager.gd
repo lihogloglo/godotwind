@@ -385,6 +385,9 @@ func _process(delta: float) -> void:
 		# Phase 3: MID→NEAR promotion for nearby objects (Phase 5b)
 		_process_mid_to_near_promotions()
 
+		# Phase 3a: Re-enable collision on promoted NEAR objects entering visibility
+		_process_promoted_collision_enable()
+
 		# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
 		_process_deferred_near_instantiation()
 
@@ -578,12 +581,14 @@ func _unload_cell(grid: Vector2i) -> void:
 	_stats["loaded_cells"] = _loaded_cells.size()
 
 	# Clean up promoted object tracking for this cell
+	# Reset promoted flags BEFORE removing RS instances (so the flag reset isn't a no-op)
 	var promoted_cleanup := 0
 	var promoted_remove: Array[int] = []
 
 	for rs_id: int in _promoted_objects:
 		var data: Variant = _static_renderer.get_instance_data(rs_id)
 		if data and data.cell_grid == grid:
+			_static_renderer.set_instance_promoted(rs_id, false)
 			promoted_remove.append(rs_id)
 
 	for obj_id: int in promoted_remove:
@@ -688,26 +693,38 @@ func _process_budgeted_unloading() -> void:
 var _promoted_objects: Dictionary = {}  # {id: int -> near_node: Node3D}
 
 
-## Promote MID-tier objects to full NEAR-tier Node3D when camera is close.
-## Also demotes NEAR→MID when camera moves away (hysteresis prevents oscillation).
-## Budget-controlled: max 2ms per frame total.
-## Only checks cells adjacent to the camera cell (at most ~9 cells).
+## Promote MID-tier objects to full NEAR-tier Node3D when camera approaches.
+## On promotion, MID RS instances are HIDDEN (the NEAR Node3D covers 0-500m via
+## its own LOD children from configure_for_prebake). This prevents double-rendering.
+## On demotion, RS instances are shown again.
+## Budget-controlled: max 3ms every 2 frames.
+## Scans a 7×7 cell grid around camera (covers 351m > 250m promotion distance).
 func _process_mid_to_near_promotions() -> void:
 	if not _cell_manager:
 		return
 	if not _static_renderer:
 		return
 
-	# Only run every 4 frames (promotion/demotion is not time-critical)
-	if Engine.get_frames_drawn() % 4 != 0:
+	# Absorb immediate promotions from cell_manager (created in same frame as RS instances).
+	# These are mid-worthy objects that got BOTH RS + Node3D because camera was within NEAR range.
+	# Must run every frame to avoid stale entries.
+	var imm_promos := _cell_manager.get_and_clear_immediate_promotions()
+	for entry: Dictionary in imm_promos:
+		var rs_id: int = entry["id"]
+		var near_node: Node3D = entry["node"]
+		if is_instance_valid(near_node) and rs_id not in _promoted_objects:
+			_promoted_objects[rs_id] = near_node
+			_stats["mid_to_near_promotions"] += 1
+
+	# Run every N frames (configurable)
+	if Engine.get_frames_drawn() % SC.PROMOTION_FRAME_INTERVAL != 0:
 		return
 
 	var start_time := Time.get_ticks_usec()
-	var budget_usec := 2000.0  # 2ms total budget for promotion + demotion
+	var budget_usec := SC.PROMOTION_BUDGET_USEC
 
-	# --- DEMOTION: NEAR objects that are now far enough to go back to MID ---
-	# Threshold: NEAR_END + HYSTERESIS_NEAR = 150 + 40 = 190m
-	var demote_distance_sq: float = (SC.NEAR_END + SC.HYSTERESIS_NEAR) * (SC.NEAR_END + SC.HYSTERESIS_NEAR)
+	# --- DEMOTION: NEAR objects that are now far enough to free ---
+	var demote_distance_sq: float = SC.DEMOTION_DISTANCE * SC.DEMOTION_DISTANCE
 	var demoted := 0
 	var demote_remove: Array[int] = []
 
@@ -720,10 +737,15 @@ func _process_mid_to_near_promotions() -> void:
 			demote_remove.append(obj_id)
 			continue
 
+		# Guard: deferred add_child may not have parented the node yet.
+		# global_position is unreliable until the node is inside the tree.
+		if not near_node.is_inside_tree():
+			continue
+
 		var dist_sq := _camera_position.distance_squared_to(near_node.global_position)
 		if dist_sq > demote_distance_sq:
-			# Demote: unhide MID RS instances, remove NEAR Node3D
-			_static_renderer.set_instance_visible(obj_id, true)
+			# Demote: clear promoted flag (shows LOD0 RS instance), free NEAR Node3D
+			_static_renderer.set_instance_promoted(obj_id, false)
 			near_node.queue_free()
 			demote_remove.append(obj_id)
 			demoted += 1
@@ -731,14 +753,16 @@ func _process_mid_to_near_promotions() -> void:
 	for obj_id: int in demote_remove:
 		_promoted_objects.erase(obj_id)
 
-	# --- PROMOTION: MID objects that are now close enough to become NEAR ---
-	# Promotion distance: 130m (NEAR_END - 20m margin)
-	var promote_distance_sq: float = (SC.NEAR_END - 20.0) * (SC.NEAR_END - 20.0)
+	# --- PROMOTION: MID objects within promotion distance get a NEAR Node3D ---
+	# The NEAR Node3D is invisible at 250m (its visibility_range is 0-155m)
+	# but will be ready when the camera reaches the 145-155m crossfade zone.
+	var promote_distance_sq: float = SC.PROMOTION_DISTANCE * SC.PROMOTION_DISTANCE
 
-	# Get cells adjacent to camera (only these can have objects within NEAR range)
+	# Scan cells in radius around camera
+	var r: int = SC.PROMOTION_CELL_RADIUS
 	var nearby_cells: Array[Vector2i] = []
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
+	for dx in range(-r, r + 1):
+		for dy in range(-r, r + 1):
 			var g := _camera_cell + Vector2i(dx, dy)
 			if g in _loaded_cells:
 				nearby_cells.append(g)
@@ -769,8 +793,13 @@ func _process_mid_to_near_promotions() -> void:
 			if not near_obj:
 				continue
 
+			# Disable collision shapes on the pre-created NEAR Node3D.
+			# The object is invisible beyond 155m — active physics on invisible
+			# objects wastes broadphase budget and causes raycast hits on nothing.
+			_disable_collision_shapes(near_obj)
+
 			cell_node.add_child(near_obj)
-			_static_renderer.set_instance_visible(id, false)
+			_static_renderer.set_instance_promoted(id, true)
 			_promoted_objects[id] = near_obj
 			promoted += 1
 
@@ -781,6 +810,60 @@ func _process_mid_to_near_promotions() -> void:
 			promoted, demoted, (Time.get_ticks_usec() - start_time) / 1000.0,
 			_promoted_objects.size()
 		])
+
+
+## Re-enable collision shapes on promoted NEAR Node3Ds that have entered visibility range.
+## Collision shapes are disabled at promotion time (object is at 150-250m, invisible).
+## We re-enable once within NEAR_END + margin so physics are active when visible.
+func _process_promoted_collision_enable() -> void:
+	if _promoted_objects.is_empty():
+		return
+	# Run on odd frames, offset from promotion tick
+	if Engine.get_frames_drawn() % SC.PROMOTION_FRAME_INTERVAL != 1:
+		return
+	var enable_dist_sq: float = (DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1) * (DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1)
+	for obj_id: int in _promoted_objects:
+		var near_node: Node3D = _promoted_objects[obj_id]
+		if not is_instance_valid(near_node):
+			continue
+		if near_node.has_meta("collision_disabled"):
+			var dist_sq := _camera_position.distance_squared_to(near_node.global_position)
+			if dist_sq < enable_dist_sq:
+				_enable_collision_shapes(near_node)
+
+
+## Disable all CollisionShape3D nodes in a tree (for pre-created invisible NEAR objects)
+static func _disable_collision_shapes(node: Node) -> void:
+	if node is CollisionShape3D:
+		(node as CollisionShape3D).disabled = true
+	for child in node.get_children():
+		_disable_collision_shapes(child)
+	if node is Node3D:
+		node.set_meta("collision_disabled", true)
+
+
+## Re-enable all CollisionShape3D nodes in a tree
+static func _enable_collision_shapes(node: Node) -> void:
+	if node is CollisionShape3D:
+		(node as CollisionShape3D).disabled = false
+	for child in node.get_children():
+		_enable_collision_shapes(child)
+	if node is Node3D:
+		node.remove_meta("collision_disabled")
+
+
+## Batch-free all promoted objects (used after teleport to avoid stale physics bodies)
+func _demote_all_promoted() -> void:
+	var count := _promoted_objects.size()
+	for obj_id: int in _promoted_objects:
+		_static_renderer.set_instance_promoted(obj_id, false)
+		var near_node: Node3D = _promoted_objects[obj_id]
+		if is_instance_valid(near_node):
+			near_node.queue_free()
+	_promoted_objects.clear()
+	if count > 0:
+		_stats["near_to_mid_demotions"] += count
+		_debug("Teleport: batch-demoted %d promoted objects" % count)
 
 
 ## Instantiate deferred NEAR objects that skipped MID tier and are now close enough.
@@ -1176,6 +1259,9 @@ func get_impostor_manager() -> Node3D:
 func teleport_to(position: Vector3) -> void:
 	_camera_position = position
 	_camera_cell = DU.world_to_cell(position)
+
+	# Batch-free all promoted NEAR objects — MID RS instances handle visibility
+	_demote_all_promoted()
 
 	# Unload all cells
 	for grid: Vector2i in _loaded_cells.keys():

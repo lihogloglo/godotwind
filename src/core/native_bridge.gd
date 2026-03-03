@@ -523,6 +523,48 @@ func get_cell_references(cell: RefCounted) -> Array:
 	return refs if refs is Array else []
 
 
+## Export all cells and references as flat packed arrays (Phase 1 batch export)
+## loader: NativeESMLoader C# object
+## Returns: Dictionary with parallel PackedArrays for cells + flat arrays for refs
+## This eliminates ~1.2M individual C#↔GDScript boundary crossings
+@warning_ignore("unsafe_method_access")
+func export_all_cells_packed(loader: RefCounted) -> Dictionary:
+	if loader == null:
+		return {}
+	var result: Variant = loader.call("ExportAllCellsPacked")
+	return result if result is Dictionary else {}
+
+
+## On-demand record lookup — searches C# dicts in priority order
+## Returns: Array [type_string, model_path, record_id] or null
+@warning_ignore("unsafe_method_access")
+func get_record_info(loader: RefCounted, record_id: String) -> Variant:
+	if loader == null:
+		return null
+	return loader.call("GetRecordInfo", record_id)
+
+
+## Get type-specific data for on-demand record creation
+@warning_ignore("unsafe_method_access")
+func get_typed_record_data(loader: RefCounted, type_name: String, record_id: String) -> Dictionary:
+	if loader == null:
+		return {}
+	var method_name: String = ""
+	match type_name:
+		"activator": method_name = "GetActivatorData"
+		"light": method_name = "GetLightData"
+		"npc": method_name = "GetNPCData"
+		"creature": method_name = "GetCreatureData"
+		"door": method_name = "GetDoorData"
+		"container": method_name = "GetContainerData"
+		"weapon": method_name = "GetWeaponData"
+		"armor": method_name = "GetArmorData"
+		"clothing": method_name = "GetClothingData"
+		_: return {}
+	var result: Variant = loader.call(method_name, record_id)
+	return result if result is Dictionary else {}
+
+
 ## Get ESM loader statistics
 ## loader: NativeESMLoader C# object
 ## Returns: Dictionary with load statistics

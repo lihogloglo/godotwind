@@ -140,6 +140,8 @@ func _ensure_data_loaded() -> bool:
 		error_occurred.emit("Init", "Failed to load ESM file: " + esm_file)
 		return false
 
+	# Ensure typed dicts are populated for prebaking iteration
+	ESMManager.ensure_typed_dicts_populated()
 	Log.info("prebaking", "ESM loaded - %d cells, %d statics" % [ESMManager.cells.size(), ESMManager.statics.size()])
 	_esm_loaded = true
 	return true

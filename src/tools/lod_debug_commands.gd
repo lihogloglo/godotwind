@@ -62,6 +62,24 @@ func register_commands(console: Console) -> void:
 		"Show MID-tier MultiMesh batch pool statistics",
 		"debug"
 	)
+	console.register_command(
+		"visibility_gaps",
+		_cmd_visibility_gaps,
+		"Diagnose objects that may be invisible at the camera's current distance",
+		"debug"
+	)
+	console.register_command(
+		"streaming_diag",
+		_cmd_streaming_diag,
+		"Show detailed streaming pipeline status (queues, promotions, deferred)",
+		"debug"
+	)
+	console.register_command(
+		"tex_audit",
+		_cmd_tex_audit,
+		"Audit textures on loaded objects: find materials with color but no texture",
+		"debug"
+	)
 
 
 func _cmd_impostor_stats(_args: Dictionary) -> String:
@@ -451,3 +469,195 @@ func _cmd_mid_batch_stats(_args: Dictionary) -> String:
 	output += "  Visible instances: %d\n" % stats.get("visible_instances", 0)
 	output += "  LOD RS instances: %d\n" % stats.get("lod_instances", 0)
 	return output
+
+
+## Diagnose visibility gaps: find objects that should be visible but aren't
+func _cmd_visibility_gaps(_args: Dictionary) -> String:
+	if not _streaming_manager:
+		return "Streaming manager not available"
+
+	var camera := _streaming_manager.get_viewport().get_camera_3d()
+	if not camera:
+		return "No active camera"
+
+	var cam_pos := camera.global_position
+	var output := "=== VISIBILITY GAP DIAGNOSTIC ===\n"
+	output += "Camera: %.0f, %.0f, %.0f\n" % [cam_pos.x, cam_pos.y, cam_pos.z]
+
+	# Check NEAR Node3Ds in loaded cells
+	var near_count := 0
+	var near_invisible := 0
+	var near_no_vis_range := 0
+	var mid_rs_count := 0
+	var promoted_count: int = _streaming_manager._promoted_objects.size()
+
+	for grid: Vector2i in _streaming_manager._loaded_cells:
+		var cell: Node3D = _streaming_manager._loaded_cells[grid]
+		if not is_instance_valid(cell):
+			continue
+		for child in cell.get_children():
+			if child is Node3D:
+				var dist := cam_pos.distance_to(child.global_position)
+				_check_node_visibility(child, dist, near_count, near_invisible, near_no_vis_range)
+
+	# Check MID-tier RS instances
+	var sr: Node3D = _streaming_manager._static_renderer
+	if sr:
+		var sr_stats: Dictionary = sr.get_stats()
+		mid_rs_count = sr_stats.get("total_instances", 0)
+		var lod_rs: int = sr_stats.get("lod_instances", 0)
+		var vis_rs: int = sr_stats.get("visible_instances", 0)
+		output += "\nMID RS Instances: %d total, %d LOD RIDs, %d visible\n" % [mid_rs_count, lod_rs, vis_rs]
+
+	# Check deferred NEAR
+	var deferred := 0
+	if _streaming_manager._cell_manager:
+		deferred = _streaming_manager._cell_manager.get_deferred_near_count()
+
+	output += "NEAR Node3Ds: %d total, %d invisible, %d missing vis_range\n" % [near_count, near_invisible, near_no_vis_range]
+	output += "Promoted (MID->NEAR): %d\n" % promoted_count
+	output += "Deferred NEAR (waiting): %d\n" % deferred
+
+	# Queue status
+	output += "\nQueues:\n"
+	output += "  Pending load: %d cells\n" % _streaming_manager._pending_load_queue.size()
+	output += "  Async requests: %d\n" % _streaming_manager._async_requests.size()
+	output += "  Unloading: %d cells\n" % _streaming_manager._unloading_cells.size()
+	if _streaming_manager._cell_manager:
+		output += "  Instantiation queue: %d\n" % _streaming_manager._cell_manager.get_instantiation_queue_size()
+
+	return output
+
+
+## Helper: check a node tree for visibility issues
+func _check_node_visibility(node: Node, dist: float, near_count: int, near_invisible: int, near_no_vis_range: int) -> void:
+	if node is GeometryInstance3D:
+		near_count += 1
+		var geo := node as GeometryInstance3D
+		if not geo.visible:
+			near_invisible += 1
+		if geo.visibility_range_end == 0.0 and geo.visibility_range_begin == 0.0:
+			near_no_vis_range += 1
+	for child in node.get_children():
+		_check_node_visibility(child, dist, near_count, near_invisible, near_no_vis_range)
+
+
+## Detailed streaming pipeline diagnostic
+func _cmd_streaming_diag(_args: Dictionary) -> String:
+	if not _streaming_manager:
+		return "Streaming manager not available"
+
+	var s: Dictionary = _streaming_manager.get_stats()
+	var output := "=== STREAMING PIPELINE DIAGNOSTIC ===\n"
+	output += "Camera cell: %s\n" % str(s.get("camera_cell", "?"))
+	output += "Loaded cells: %d\n" % s.get("loaded_cells", 0)
+	output += "Total objects: %d\n" % s.get("total_objects", 0)
+	output += "Frame budget: %.1fms\n" % s.get("frame_budget_ms", 0)
+	output += "Frame overruns: %d\n" % s.get("frame_overrun_count", 0)
+	output += "\nAsync Loading:\n"
+	output += "  Queue: %d\n" % s.get("instantiation_queue", 0)
+	output += "  Pending conversions: %d\n" % s.get("pending_conversions", 0)
+	output += "  Pending disk loads: %d\n" % s.get("pending_disk_loads", 0)
+	output += "  Load queue: %d cells\n" % s.get("load_queue_size", 0)
+	output += "  Async requests: %d\n" % s.get("async_requests", 0)
+	output += "\nTier Transitions:\n"
+	output += "  MID->NEAR promotions: %d\n" % s.get("mid_to_near_promotions", 0)
+	output += "  NEAR->MID demotions: %d\n" % s.get("near_to_mid_demotions", 0)
+	output += "\nMID Tier:\n"
+	output += "  RS instances: %d\n" % s.get("mid_instances", 0)
+	output += "  Visible: %d\n" % s.get("mid_visible", 0)
+	output += "  Mesh types: %d\n" % s.get("mid_mesh_types", 0)
+
+	# Add deferred NEAR info
+	if _streaming_manager._cell_manager:
+		var cm_stats: Dictionary = _streaming_manager._cell_manager.get_stats()
+		output += "\nDeferred NEAR:\n"
+		output += "  Waiting: %d\n" % cm_stats.get("deferred_near_count", 0)
+		output += "  Instantiated: %d\n" % cm_stats.get("deferred_near_instantiated", 0)
+		output += "  MID filtered: %d\n" % cm_stats.get("mid_filtered", 0)
+		output += "  MID tier RS: %d\n" % cm_stats.get("mid_tier_instances", 0)
+		output += "  MID promotions: %d\n" % cm_stats.get("mid_promotions", 0)
+
+	return output
+
+
+## Console command: tex_audit — find materials with color but no texture in loaded cells
+func _cmd_tex_audit(_args: Dictionary) -> String:
+	if not _streaming_manager:
+		return "Streaming manager not available"
+
+	var stats := {
+		"total_meshes": 0,
+		"with_texture": 0,
+		"color_only": 0,
+		"no_material": 0,
+		"magenta_fallback": 0,
+	}
+	var color_only_examples: Array[String] = []
+	var no_mat_examples: Array[String] = []
+
+	for grid: Vector2i in _streaming_manager._loaded_cells:
+		var cell_node: Node3D = _streaming_manager._loaded_cells[grid]
+		if cell_node:
+			_audit_textures_recursive(cell_node, stats, color_only_examples, no_mat_examples)
+
+	var output := "=== TEXTURE AUDIT ===\n\n"
+	output += "Total MeshInstance3D: %d\n" % stats["total_meshes"]
+	output += "  With texture:      %d\n" % stats["with_texture"]
+	output += "  Color only (no tex): %d  <-- white/brownish objects\n" % stats["color_only"]
+	output += "  No material at all:  %d\n" % stats["no_material"]
+	output += "  Magenta fallback:    %d\n" % stats["magenta_fallback"]
+
+	if not color_only_examples.is_empty():
+		output += "\nColor-only examples (first 10):\n"
+		for ex in color_only_examples.slice(0, 10):
+			output += "  %s\n" % ex
+
+	if not no_mat_examples.is_empty():
+		output += "\nNo-material examples (first 5):\n"
+		for ex in no_mat_examples.slice(0, 5):
+			output += "  %s\n" % ex
+
+	return output
+
+
+func _audit_textures_recursive(node: Node, stats: Dictionary, color_only: Array[String], no_mat: Array[String]) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		stats["total_meshes"] += 1
+
+		# Get the effective material using 3-source fallback
+		var mat: Material = mi.material_override
+		if mat == null and mi.get_surface_override_material_count() > 0:
+			mat = mi.get_surface_override_material(0)
+		if mat == null and mi.mesh and mi.mesh.get_surface_count() > 0:
+			mat = mi.mesh.surface_get_material(0)
+
+		if mat == null:
+			stats["no_material"] += 1
+			if no_mat.size() < 10:
+				no_mat.append("%s (parent: %s)" % [mi.name, mi.get_parent().name if mi.get_parent() else "?"])
+		elif mat is StandardMaterial3D:
+			var std := mat as StandardMaterial3D
+			if std.albedo_texture != null:
+				# Check for magenta fallback (8x8 checkerboard)
+				if std.albedo_texture is ImageTexture:
+					var img := (std.albedo_texture as ImageTexture).get_image()
+					if img and img.get_width() == 8 and img.get_height() == 8:
+						stats["magenta_fallback"] += 1
+					else:
+						stats["with_texture"] += 1
+				else:
+					stats["with_texture"] += 1
+			else:
+				# Has material but no texture — this is the white/brownish issue
+				stats["color_only"] += 1
+				if color_only.size() < 20:
+					color_only.append("%s  color=%s (parent: %s)" % [
+						mi.name,
+						std.albedo_color.to_html(),
+						mi.get_parent().name if mi.get_parent() else "?"
+					])
+
+	for child in node.get_children():
+		_audit_textures_recursive(child, stats, color_only, no_mat)

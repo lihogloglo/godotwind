@@ -1,6 +1,7 @@
 # Godot 4+ specific ignores
 .godot/
 agentchattr/
+agentchattr-main/
 inspos/
 .claude/
 openmw-master/

@@ -15,7 +15,7 @@ extends Node3D
 ##   Orange: Has LODs but rejected by MID filter (wasted prebake work)
 ##   Gray:   Correctly rejected (small items, type-locked objects)
 
-const MidTierBatchPoolScript := preload("res://src/core/world/mid_tier_batch_pool.gd")
+const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const SP := preload("res://src/core/world/streaming_policy.gd")
 
 ## Test model definitions: [model_path, type_name, category_label]
@@ -74,7 +74,7 @@ class DiagResult:
 	var vertex_count: int = 0
 
 var _model_loader: ModelLoader
-var _batch_pool: Node3D  ## MidTierBatchPool
+var _static_renderer: Node3D  ## StaticObjectRenderer
 var _results: Array[DiagResult] = []
 var _hud_label: RichTextLabel
 var _camera: Camera3D
@@ -83,16 +83,16 @@ var _audit_running: bool = false
 func _ready() -> void:
 	_setup_environment()
 	_setup_model_loader()
-	_setup_batch_pool()
+	_setup_static_renderer()
 	_run_visual_diagnosis()
 	_build_hud()
 	Log.info("diagnostic", "MID-Tier Diagnostic ready. Press F5 for full ESM audit.")
 
 
 func _exit_tree() -> void:
-	# Clean up batch pool to avoid RID leaks
-	if _batch_pool:
-		_batch_pool.clear()
+	# Clean up static renderer to avoid RID leaks
+	if _static_renderer:
+		_static_renderer.clear()
 
 
 func _input(event: InputEvent) -> void:
@@ -142,10 +142,10 @@ func _setup_model_loader() -> void:
 	_model_loader.enable_disk_cache = true
 	_model_loader.runtime_mode = true  # Only load from prebaked cache
 
-func _setup_batch_pool() -> void:
-	_batch_pool = MidTierBatchPoolScript.new()
-	_batch_pool.name = "MidTierBatchPool"
-	add_child(_batch_pool)
+func _setup_static_renderer() -> void:
+	_static_renderer = StaticObjectRendererScript.new()
+	_static_renderer.name = "StaticObjectRenderer"
+	add_child(_static_renderer)
 
 #endregion
 
@@ -183,17 +183,17 @@ func _run_visual_diagnosis() -> void:
 		# Stage 4: Mid-worthy check (replicate cell_manager logic)
 		result.is_mid_worthy = _is_mid_worthy(type_name, model_path)
 
-		# Stage 5: Batch pool registration
+		# Stage 5: StaticObjectRenderer registration
 		if prototype:
 			var norm_type := model_path.to_lower().replace("/", "\\")
-			if not _batch_pool.has_type(norm_type):
-				_batch_pool.register_from_prototype(norm_type, prototype)
-			result.batch_registered = _batch_pool.has_type(norm_type)
+			if not _static_renderer.has_type(norm_type):
+				_static_renderer.register_lod_from_prototype(norm_type, prototype)
+			result.batch_registered = _static_renderer.has_type(norm_type)
 
-			# Stage 6: Batch pool add
+			# Stage 6: Add instance
 			if result.batch_registered:
 				var cell_grid := Vector2i(0, next_object_id)  # Fake cell grid
-				var obj_id: int = _batch_pool.add_object(
+				var obj_id: int = _static_renderer.add_instance(
 					norm_type, Transform3D.IDENTITY, cell_grid,
 					model_path, "", &"diag", next_object_id
 				)

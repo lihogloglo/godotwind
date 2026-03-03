@@ -77,6 +77,31 @@ const HYSTERESIS_MID := 60.0
 const HYSTERESIS_FAR := 150.0
 
 # =============================================================================
+# MID→NEAR PROMOTION
+# =============================================================================
+
+## Distance at which NEAR Node3Ds are pre-created (invisible until within 155m)
+## 100m before the 150m crossfade zone — gives plenty of time to instantiate
+const PROMOTION_DISTANCE := 250.0
+
+## Distance at which NEAR Node3Ds are freed (hysteresis prevents oscillation)
+const DEMOTION_DISTANCE := 280.0
+
+## Time budget per promotion tick (microseconds)
+const PROMOTION_BUDGET_USEC := 3000.0  # 3ms
+
+## Run promotion every N frames (lower = smoother, higher = cheaper)
+const PROMOTION_FRAME_INTERVAL := 2
+
+## Cell radius for promotion scan. 3 = 7×7 grid = 351m coverage (>250m diagonal)
+const PROMOTION_CELL_RADIUS := 3
+
+## AABB max dimension threshold for runtime MID-worthy upgrade (meters).
+## Objects larger than this in any axis get RS instances even if the prefix filter missed them.
+## 2.0m catches mushroom trees, shacks, walls — skips small clutter.
+const AABB_MID_WORTHY_THRESHOLD := 2.0
+
+# =============================================================================
 # TIME BUDGETS (milliseconds per frame)
 # =============================================================================
 

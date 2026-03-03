@@ -116,7 +116,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 			return null
 		_:
 			# Standard model-based object
-			return _instantiate_model_object(ref, base_record, cell_grid)
+			return _instantiate_model_object(ref, base_record, cell_grid, type_name)
 
 
 ## Check if a model is considered "significant" for per-object LOD
@@ -139,7 +139,7 @@ func is_significant_object(model_path: String) -> bool:
 ## Instantiate a standard object with a NIF model
 ## For flora/rocks, uses StaticObjectRenderer for ~10x faster instantiation
 var _model_obj_count: int = 0
-func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO, type_name: String = "") -> Node3D:
 	_model_obj_count += 1
 
 	# Get model path and record ID
@@ -196,7 +196,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	_apply_transform(instance, ref, true)
 
 	# Add metadata for console object picker
-	_apply_metadata(instance, ref, base_record, model_path)
+	_apply_metadata(instance, ref, base_record, model_path, type_name)
 
 	stats["objects_instantiated"] += 1
 
@@ -557,7 +557,7 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 
 
 ## Apply metadata to an object for console object picker identification
-func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, model_path: String) -> void:
+func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, model_path: String, type_name: String = "") -> void:
 	# Form ID / record ID
 	if "record_id" in base_record:
 		node.set_meta("form_id", base_record.record_id)
@@ -570,45 +570,33 @@ func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, mod
 	node.set_meta("ref_id", str(ref.ref_id))
 	node.set_meta("ref_num", ref.ref_num)
 
-	# Record type - determine from base_record class
-	var record_type := "UNKNOWN"
-
-	# Use class type checks to determine type
-	if base_record is StaticRecord:
-		record_type = "STAT"
-	elif base_record is ActivatorRecord:
-		record_type = "ACTI"
-	elif base_record is ContainerRecord:
-		record_type = "CONT"
-	elif base_record is DoorRecord:
-		record_type = "DOOR"
-	elif base_record is LightRecord:
-		record_type = "LIGH"
-	elif base_record is NPCRecord:
-		record_type = "NPC_"
-	elif base_record is CreatureRecord:
-		record_type = "CREA"
-	elif base_record is MiscRecord:
-		record_type = "MISC"
-	elif base_record is WeaponRecord:
-		record_type = "WEAP"
-	elif base_record is ArmorRecord:
-		record_type = "ARMO"
-	elif base_record is ClothingRecord:
-		record_type = "CLOT"
-	elif base_record is BookRecord:
-		record_type = "BOOK"
-	elif base_record is IngredientRecord:
-		record_type = "INGR"
-	elif base_record is ApparatusRecord:
-		record_type = "APPA"
-	elif base_record is PotionRecord:
-		record_type = "ALCH"
-
+	# Record type - use type_name string from get_any_record() (Phase 4)
+	var record_type := _type_name_to_meta(type_name)
 	node.set_meta("record_type", record_type)
 
 	# Instance ID (unique per cell)
 	node.set_meta("instance_id", ref.ref_num)
+
+
+## Convert internal type_name string to ESM record type code for metadata (Phase 4)
+static func _type_name_to_meta(type_name: String) -> String:
+	match type_name:
+		"static": return "STAT"
+		"activator": return "ACTI"
+		"container": return "CONT"
+		"door": return "DOOR"
+		"light": return "LIGH"
+		"npc": return "NPC_"
+		"creature": return "CREA"
+		"misc": return "MISC"
+		"weapon": return "WEAP"
+		"armor": return "ARMO"
+		"clothing": return "CLOT"
+		"book": return "BOOK"
+		"ingredient": return "INGR"
+		"apparatus": return "APPA"
+		"potion": return "ALCH"
+		_: return "UNKNOWN"
 
 
 ## Get the model path from a base record
@@ -723,10 +711,13 @@ func _apply_fade_in(instance: Node3D) -> void:
 		if not fade_mat:
 			break
 
-		# Get the original material (from override or mesh surface)
+		# Get the original material using the 3-source fallback chain
+		# (matches StaticObjectRenderer's material extraction order)
 		var original_mat: Material = mesh_inst.material_override
 		if original_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
-			original_mat = mesh_inst.mesh.surface_get_material(0)
+			original_mat = mesh_inst.get_surface_override_material(0)
+			if original_mat == null:
+				original_mat = mesh_inst.mesh.surface_get_material(0)
 
 		# Copy texture from original material if it's a StandardMaterial3D
 		if original_mat is StandardMaterial3D:

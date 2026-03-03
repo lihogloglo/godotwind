@@ -52,7 +52,7 @@ func initialize() -> Error:
 		_log("BSA archives already loaded (%d)" % BSAManager.get_archive_count())
 
 	# Check if ESM is already loaded
-	if ESMManager.npcs.is_empty():
+	if ESMManager.cells.is_empty():
 		_progress(30, 100, "Loading ESM...")
 		var esm_file := SettingsManager.get_esm_file()
 		var esm_path := _data_path.path_join(esm_file)
@@ -61,8 +61,10 @@ func initialize() -> Error:
 		if error != OK:
 			loading_failed.emit("Failed to load ESM: %s" % error_string(error))
 			return error
-	else:
-		_log("ESM already loaded (%d NPCs)" % ESMManager.npcs.size())
+
+	# Ensure typed dicts are populated (on-demand records need eager load for iteration)
+	ESMManager.ensure_typed_dicts_populated()
+	_log("ESM loaded (%d NPCs)" % ESMManager.npcs.size())
 
 	_progress(70, 100, "Initializing character factory...")
 

@@ -214,6 +214,406 @@ public partial class NativeESMLoader : RefCounted
         return Error.Ok;
     }
 
+    // =========================================================================
+    // BATCH EXPORT (Phase 1: near-zero populate time)
+    // =========================================================================
+
+    /// <summary>
+    /// Export all cells and their references as flat packed arrays.
+    /// This eliminates ~1.2M individual C#↔GDScript boundary crossings
+    /// by marshalling all data in ~30 bulk array transfers instead.
+    /// </summary>
+    /// <returns>Dictionary with parallel packed arrays for cells and flat arrays for refs</returns>
+    public Godot.Collections.Dictionary ExportAllCellsPacked()
+    {
+        var sw = Stopwatch.StartNew();
+
+        int cellCount = Cells.Count;
+
+        // Cell parallel arrays
+        var cellKeys = new string[cellCount];       // GetKey(): lowercase for interiors, "x,y" for exteriors
+        var cellRecordIds = new string[cellCount];  // RecordId: original case ESM record ID
+        var cellNames = new string[cellCount];
+        var cellFlags = new int[cellCount];
+        var cellGridX = new int[cellCount];
+        var cellGridY = new int[cellCount];
+        var cellRegionIds = new string[cellCount];
+        var cellHasAmbient = new byte[cellCount];
+        var cellAmbientColors = new Color[cellCount];
+        var cellSunlightColors = new Color[cellCount];
+        var cellFogColors = new Color[cellCount];
+        var cellFogDensities = new float[cellCount];
+        var cellWaterHeights = new float[cellCount];
+        var cellHasWaterHeights = new byte[cellCount];
+        var cellMapColors = new int[cellCount];
+
+        // Count total refs first for pre-allocation
+        int totalRefs = 0;
+        foreach (var cell in Cells.Values)
+            totalRefs += cell.References.Count;
+
+        // Per-cell ref counts (for slicing the flat ref arrays)
+        var refCounts = new int[cellCount];
+
+        // Flat reference arrays
+        var refIds = new string[totalRefs];
+        var refNums = new int[totalRefs];
+        var refPositions = new Vector3[totalRefs];
+        var refRotations = new Vector3[totalRefs];
+        var refScales = new float[totalRefs];
+        var refIsDeleted = new byte[totalRefs];
+        var refIsTeleport = new byte[totalRefs];
+        var refTeleportPos = new Vector3[totalRefs];
+        var refTeleportRot = new Vector3[totalRefs];
+        var refTeleportCells = new string[totalRefs];
+
+        // Fill arrays
+        int cellIdx = 0;
+        int refOffset = 0;
+        foreach (var kvp in Cells)
+        {
+            var cell = kvp.Value;
+            cellKeys[cellIdx] = kvp.Key;
+            cellRecordIds[cellIdx] = cell.RecordId ?? "";
+            cellNames[cellIdx] = cell.Name ?? "";
+            cellFlags[cellIdx] = cell.Flags;
+            cellGridX[cellIdx] = cell.GridX;
+            cellGridY[cellIdx] = cell.GridY;
+            cellRegionIds[cellIdx] = cell.RegionId ?? "";
+            cellHasAmbient[cellIdx] = cell.HasAmbient ? (byte)1 : (byte)0;
+            cellAmbientColors[cellIdx] = cell.AmbientColor;
+            cellSunlightColors[cellIdx] = cell.SunlightColor;
+            cellFogColors[cellIdx] = cell.FogColor;
+            cellFogDensities[cellIdx] = cell.FogDensity;
+            cellWaterHeights[cellIdx] = cell.WaterHeight;
+            cellHasWaterHeights[cellIdx] = cell.HasWaterHeight ? (byte)1 : (byte)0;
+            cellMapColors[cellIdx] = cell.MapColor;
+
+            int count = cell.References.Count;
+            refCounts[cellIdx] = count;
+
+            for (int r = 0; r < count; r++)
+            {
+                var cref = cell.References[r];
+                int idx = refOffset + r;
+                refIds[idx] = cref.RefId ?? "";
+                refNums[idx] = cref.RefNum;
+                refPositions[idx] = cref.Position;
+                refRotations[idx] = cref.Rotation;
+                refScales[idx] = cref.Scale;
+                refIsDeleted[idx] = cref.IsDeleted ? (byte)1 : (byte)0;
+                refIsTeleport[idx] = cref.IsTeleport ? (byte)1 : (byte)0;
+                refTeleportPos[idx] = cref.TeleportPos;
+                refTeleportRot[idx] = cref.TeleportRot;
+                refTeleportCells[idx] = cref.TeleportCell ?? "";
+            }
+
+            refOffset += count;
+            cellIdx++;
+        }
+
+        sw.Stop();
+        GD.Print($"NativeESMLoader: ExportAllCellsPacked built {cellCount} cells, {totalRefs} refs in {sw.Elapsed.TotalMilliseconds:F1}ms");
+
+        // Build result dictionary — Godot auto-marshals C# arrays to PackedArrays:
+        //   string[] → PackedStringArray, int[] → PackedInt32Array,
+        //   float[] → PackedFloat32Array, byte[] → PackedByteArray,
+        //   Vector3[] → PackedVector3Array, Color[] → PackedColorArray
+        var result = new Godot.Collections.Dictionary();
+
+        // Cell parallel arrays
+        result["cell_keys"] = cellKeys;
+        result["cell_record_ids"] = cellRecordIds;
+        result["cell_names"] = cellNames;
+        result["cell_flags"] = cellFlags;
+        result["cell_grid_x"] = cellGridX;
+        result["cell_grid_y"] = cellGridY;
+        result["cell_region_ids"] = cellRegionIds;
+        result["cell_has_ambient"] = cellHasAmbient;
+        result["cell_ambient_colors"] = cellAmbientColors;
+        result["cell_sunlight_colors"] = cellSunlightColors;
+        result["cell_fog_colors"] = cellFogColors;
+        result["cell_fog_densities"] = cellFogDensities;
+        result["cell_water_heights"] = cellWaterHeights;
+        result["cell_has_water_heights"] = cellHasWaterHeights;
+        result["cell_map_colors"] = cellMapColors;
+
+        // Per-cell ref count for slicing the flat ref arrays
+        result["ref_counts"] = refCounts;
+
+        // Flat reference arrays (all refs across all cells)
+        result["ref_ids"] = refIds;
+        result["ref_nums"] = refNums;
+        result["ref_positions"] = refPositions;
+        result["ref_rotations"] = refRotations;
+        result["ref_scales"] = refScales;
+        result["ref_is_deleted"] = refIsDeleted;
+        result["ref_is_teleport"] = refIsTeleport;
+        result["ref_teleport_pos"] = refTeleportPos;
+        result["ref_teleport_rot"] = refTeleportRot;
+        result["ref_teleport_cells"] = refTeleportCells;
+
+        return result;
+    }
+
+    // =========================================================================
+    // ON-DEMAND RECORD QUERIES (Phase 2: zero upfront cost for non-cell records)
+    // =========================================================================
+
+    /// <summary>
+    /// Priority-aware record lookup. Searches all record dictionaries in priority order
+    /// matching _get_type_priority() in GDScript (statics > containers > lights).
+    /// Returns [type_string, model_path, record_id_original] or null if not found.
+    /// </summary>
+    public Godot.Collections.Array GetRecordInfo(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+
+        // Search in priority order (highest first)
+        // Priority 100: statics, activators
+        if (Statics.TryGetValue(key, out var stat))
+            return new Godot.Collections.Array { "static", stat.Model ?? "", stat.RecordId ?? "" };
+        if (Activators.TryGetValue(key, out var acti))
+            return new Godot.Collections.Array { "activator", acti.Model ?? "", acti.RecordId ?? "" };
+
+        // Priority 90: containers, doors
+        if (Containers.TryGetValue(key, out var cont))
+            return new Godot.Collections.Array { "container", cont.Model ?? "", cont.RecordId ?? "" };
+        if (Doors.TryGetValue(key, out var door))
+            return new Godot.Collections.Array { "door", door.Model ?? "", door.RecordId ?? "" };
+
+        // Priority 80: weapons, armors, clothing
+        if (Weapons.TryGetValue(key, out var weap))
+            return new Godot.Collections.Array { "weapon", weap.Model ?? "", weap.RecordId ?? "" };
+        if (Armors.TryGetValue(key, out var armo))
+            return new Godot.Collections.Array { "armor", armo.Model ?? "", armo.RecordId ?? "" };
+        if (Clothing.TryGetValue(key, out var clot))
+            return new Godot.Collections.Array { "clothing", clot.Model ?? "", clot.RecordId ?? "" };
+
+        // Priority 70: NPCs, creatures
+        if (NPCs.TryGetValue(key, out var npc))
+            return new Godot.Collections.Array { "npc", npc.Model ?? "", npc.RecordId ?? "" };
+        if (Creatures.TryGetValue(key, out var crea))
+            return new Godot.Collections.Array { "creature", crea.Model ?? "", crea.RecordId ?? "" };
+
+        // Priority 10: lights (lowest — lights often share names with statics)
+        if (Lights.TryGetValue(key, out var ligh))
+            return new Godot.Collections.Array { "light", ligh.Model ?? "", ligh.RecordId ?? "" };
+
+        return null;
+    }
+
+    /// <summary>
+    /// Get light-specific data for on-demand LightRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetLightData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Lights.TryGetValue(key, out var light))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = light.Name ?? "",
+            ["script_id"] = light.ScriptId ?? "",
+            ["weight"] = light.Weight,
+            ["value"] = light.Value,
+            ["time"] = light.Time,
+            ["radius"] = light.Radius,
+            ["color"] = light.LightColor,
+            ["flags"] = light.Flags,
+        };
+    }
+
+    /// <summary>
+    /// Get NPC-specific data for on-demand NPCRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetNPCData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!NPCs.TryGetValue(key, out var npc))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = npc.Name ?? "",
+            ["script_id"] = npc.ScriptId ?? "",
+            ["race_id"] = npc.RaceId ?? "",
+            ["class_id"] = npc.ClassId ?? "",
+            ["faction_id"] = npc.FactionId ?? "",
+            ["head_id"] = npc.HeadId ?? "",
+            ["hair_id"] = npc.HairId ?? "",
+            ["npc_flags"] = npc.NpcFlags,
+            ["level"] = npc.Level,
+            ["health"] = npc.Health,
+            ["mana"] = npc.Mana,
+            ["fatigue"] = npc.Fatigue,
+            ["disposition"] = npc.Disposition,
+            ["reputation"] = npc.Reputation,
+            ["rank"] = npc.Rank,
+            ["gold"] = npc.Gold,
+        };
+    }
+
+    /// <summary>
+    /// Get creature-specific data for on-demand CreatureRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetCreatureData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Creatures.TryGetValue(key, out var crea))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = crea.Name ?? "",
+            ["script_id"] = crea.ScriptId ?? "",
+            ["original_id"] = crea.OriginalId ?? "",
+            ["creature_flags"] = crea.CreatureFlags,
+            ["scale"] = crea.Scale,
+            ["creature_type"] = crea.CreatureType,
+            ["level"] = crea.Level,
+            ["health"] = crea.Health,
+            ["mana"] = crea.Mana,
+            ["fatigue"] = crea.Fatigue,
+            ["soul"] = crea.Soul,
+            ["combat"] = crea.Combat,
+            ["magic"] = crea.Magic,
+            ["stealth"] = crea.Stealth,
+            ["gold"] = crea.Gold,
+        };
+    }
+
+    /// <summary>
+    /// Get activator-specific data for on-demand ActivatorRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetActivatorData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Activators.TryGetValue(key, out var acti))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = acti.Name ?? "",
+            ["script_id"] = acti.ScriptId ?? "",
+        };
+    }
+
+    /// <summary>
+    /// Get door-specific data for on-demand DoorRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetDoorData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Doors.TryGetValue(key, out var door))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = door.Name ?? "",
+            ["script_id"] = door.ScriptId ?? "",
+            ["open_sound"] = door.OpenSound ?? "",
+            ["close_sound"] = door.CloseSound ?? "",
+        };
+    }
+
+    /// <summary>
+    /// Get container-specific data for on-demand ContainerRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetContainerData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Containers.TryGetValue(key, out var cont))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = cont.Name ?? "",
+            ["script_id"] = cont.ScriptId ?? "",
+            ["weight"] = cont.Weight,
+            ["flags"] = cont.Flags,
+        };
+    }
+
+    /// <summary>
+    /// Get weapon-specific data for on-demand WeaponRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetWeaponData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Weapons.TryGetValue(key, out var weap))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = weap.Name ?? "",
+            ["script_id"] = weap.ScriptId ?? "",
+            ["icon"] = weap.Icon ?? "",
+            ["enchant_id"] = weap.EnchantId ?? "",
+            ["weight"] = weap.Weight,
+            ["value"] = weap.Value,
+            ["weapon_type"] = weap.WeaponType,
+            ["health"] = weap.Health,
+            ["speed"] = weap.Speed,
+            ["reach"] = weap.Reach,
+            ["enchant_points"] = weap.EnchantPoints,
+            ["chop_min"] = weap.ChopMin,
+            ["chop_max"] = weap.ChopMax,
+            ["slash_min"] = weap.SlashMin,
+            ["slash_max"] = weap.SlashMax,
+            ["thrust_min"] = weap.ThrustMin,
+            ["thrust_max"] = weap.ThrustMax,
+            ["flags"] = weap.Flags,
+        };
+    }
+
+    /// <summary>
+    /// Get armor-specific data for on-demand ArmorRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetArmorData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Armors.TryGetValue(key, out var armo))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = armo.Name ?? "",
+            ["script_id"] = armo.ScriptId ?? "",
+            ["icon"] = armo.Icon ?? "",
+            ["enchant_id"] = armo.EnchantId ?? "",
+            ["armor_type"] = armo.ArmorType,
+            ["weight"] = armo.Weight,
+            ["value"] = armo.Value,
+            ["health"] = armo.Health,
+            ["enchant_points"] = armo.EnchantPoints,
+            ["armor_rating"] = armo.ArmorRating,
+        };
+    }
+
+    /// <summary>
+    /// Get clothing-specific data for on-demand ClothingRecord creation.
+    /// </summary>
+    public Godot.Collections.Dictionary GetClothingData(string recordId)
+    {
+        var key = recordId.ToLowerInvariant();
+        if (!Clothing.TryGetValue(key, out var clot))
+            return null;
+
+        return new Godot.Collections.Dictionary
+        {
+            ["name"] = clot.Name ?? "",
+            ["script_id"] = clot.ScriptId ?? "",
+            ["icon"] = clot.Icon ?? "",
+            ["enchant_id"] = clot.EnchantId ?? "",
+            ["clothing_type"] = clot.ClothingType,
+            ["weight"] = clot.Weight,
+            ["value"] = clot.Value,
+            ["enchant_points"] = clot.EnchantPoints,
+        };
+    }
+
     /// <summary>
     /// Load cell references for a specific cell (for lazy loading).
     /// </summary>

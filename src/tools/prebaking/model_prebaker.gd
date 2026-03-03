@@ -156,6 +156,9 @@ func _collect_unique_models() -> Array[String]:
 	var models: Array[String] = []
 	var seen: Dictionary = {}
 
+	# Ensure all typed dicts are populated (on-demand records need eager load for prebaking)
+	ESMManager.ensure_typed_dicts_populated()
+
 	# Scan all record types that have models
 	var record_sources := [
 		ESMManager.statics,

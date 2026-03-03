@@ -75,7 +75,7 @@ var min_instances_for_multimesh: int = 10  # Minimum instances to use MultiMesh 
 const MW_LIGHT_SCALE: float = 1.0 / 70.0  # Tuned for visual appearance
 
 # Pool pre-warming: fraction of max pool size to pre-create during preload
-const POOL_PREWARM_RATIO: float = 0.8
+const POOL_PREWARM_RATIO: float = 0.2
 # Pool pre-warming: minimum instances to pre-create per model
 const POOL_PREWARM_MIN_COUNT: int = 10
 # Default maximum pool size when auto-registering models
@@ -920,6 +920,15 @@ var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
 ## Keyed by Vector2i (cell_grid) -> Array of pre-computed instantiation data
 var _deferred_near_refs: Dictionary = {}  # Vector2i -> Array[Dictionary]
 
+## Immediate promotions — mid-worthy objects that got BOTH RS instances AND Node3D
+## in the same frame. The streaming manager picks these up and tracks them for demotion.
+## Each entry: { "id": int (RS instance ID), "node": Node3D (NEAR object) }
+var _immediate_promotions: Array[Dictionary] = []
+
+## AABB max dimension cache — avoids recomputing for same model path.
+## Maps model_path -> float (max dimension in meters). 0.0 = unknown/no mesh.
+var _aabb_cache: Dictionary = {}  # String -> float
+
 
 ## Set the LOD configurator for visibility range configuration
 func set_lod_configurator(configurator: LODConfigurator) -> void:
@@ -1282,66 +1291,87 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		# Decrement pending count
 		request.pending_instantiations -= 1
 
-		# MID-TIER FAST PATH: Objects beyond NEAR_END (150m) use RenderingServer
-		# directly via StaticObjectRenderer — skips duplicate(), add_child(), and
-		# all scene tree overhead. ~10-40x cheaper per object.
-		# Exceptions: lights (need OmniLight3D), animated objects (NPC/creature),
-		# and model-less references always use the full NEAR path.
+		# ALWAYS-RS ARCHITECTURE: Mid-worthy objects ALWAYS get RS instances (0-500m)
+		# as the permanent rendering backbone. Node3D is an upgrade overlay for
+		# physics/interaction when the camera is within NEAR range (0-150m).
+		# Non-mid-worthy objects beyond NEAR get deferred + "near:" RS instance.
+		# Lights, NPCs, creatures (always_near) always use the full Node3D path.
 		var obj_position: Vector3 = entry.position
 		var distance_sq := _camera_position.distance_squared_to(obj_position)
-		var use_mid_path := false
 		var always_near: bool = entry.always_near  # Pre-classified at queue time (Phase 5c)
 		var mid_worthy: bool = entry.mid_worthy  # Pre-classified at queue time
+		var beyond_near := distance_sq > SC.NEAR_END * SC.NEAR_END
+		var mid_instance_id := -1
 
-		if _static_renderer and distance_sq > SC.NEAR_END * SC.NEAR_END and not model_path.is_empty():
-			if not always_near:
-				if mid_worthy:
-					use_mid_path = true
-				else:
-					# Object is at MID distance but not visually significant — defer for NEAR
-					_defer_for_near(ref, model_path, item_id, request, obj_position)
-					_stats["mid_filtered"] = _stats.get("mid_filtered", 0) + 1
-					instantiated += 1  # Count as handled for completion tracking
-					continue
+		# Step 0: AABB-based upgrade — non-mid-worthy objects that are actually large.
+		# Pre-classification only has the model path (no mesh data). Now at instantiation
+		# time the prototype is available, so check its AABB max dimension.
+		# Objects > 2m in any axis get upgraded to mid-worthy for RS coverage.
+		if _static_renderer and not mid_worthy and not always_near and not model_path.is_empty():
+			var max_dim := _get_aabb_max_dim(model_path, item_id)
+			if max_dim > SC.AABB_MID_WORTHY_THRESHOLD:
+				mid_worthy = true
+				_stats["aabb_upgrades"] = _stats.get("aabb_upgrades", 0) + 1
 
-		if use_mid_path:
-			# MID-TIER: Create lightweight RenderingServer instance
+		# Step 1: Mid-worthy objects ALWAYS get RS instances regardless of distance
+		if _static_renderer and not model_path.is_empty() and not always_near and mid_worthy:
 			var mid_start := Time.get_ticks_usec()
-			var success := _instantiate_mid_tier(ref, model_path, item_id, request)
+			mid_instance_id = _instantiate_mid_tier(ref, model_path, item_id, request)
 			var mid_elapsed := Time.get_ticks_usec() - mid_start
-
 			_diag_duplicate_time_total_us += mid_elapsed
 			_diag_duplicate_count += 1
 
-			if success:
-				instantiated += 1
-			else:
-				# MID failed (no mesh in prototype, etc.) — fall back to NEAR path
-				Log.debug("streaming", "MID-tier failed for %s, falling back to NEAR" % model_path)
-				use_mid_path = false
-
-		if not use_mid_path:
-			# NEAR-TIER: Full Node3D pipeline (duplicate + scene tree)
-			var inst_start := Time.get_ticks_usec()
-			var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
-			var inst_elapsed := Time.get_ticks_usec() - inst_start
-
-			# Track duplicate time for diagnostics
-			_diag_duplicate_time_total_us += inst_elapsed
-			_diag_duplicate_count += 1
-
-			if obj:
-				# Ensure visibility_range is configured BEFORE the object enters the scene tree.
-				if not obj.has_meta("visibility_prebaked"):
-					LODConfigurator.configure_for_prebake(obj)
-					obj.set_meta("visibility_prebaked", true)
-
-				# Double-check parent is still valid before queuing (defensive)
-				if is_instance_valid(request.cell_node):
-					pending_children.append({"parent": request.cell_node, "child": obj})
+			if beyond_near:
+				if mid_instance_id >= 0:
+					# Beyond NEAR range: RS-only. Promotion system creates Node3D later.
 					instantiated += 1
+					if _is_request_complete(request):
+						request.completed = true
+					continue
 				else:
-					obj.queue_free()
+					# MID failed AND too far for NEAR — skip entirely (Node3D at >150m is invisible)
+					instantiated += 1
+					if _is_request_complete(request):
+						request.completed = true
+					continue
+			# Within NEAR range (or MID failed at close range): fall through to create Node3D
+
+		# Step 2: Non-mid-worthy objects beyond NEAR: defer + "near:" RS instance
+		if _static_renderer and beyond_near and not model_path.is_empty() and not always_near and not mid_worthy:
+			_defer_for_near(ref, model_path, item_id, request, obj_position)
+			_create_near_only_rs_instance(ref, model_path, item_id, request)
+			_stats["mid_filtered"] = _stats.get("mid_filtered", 0) + 1
+			instantiated += 1
+			continue
+
+		# Step 3: NEAR-TIER — Full Node3D pipeline (duplicate + scene tree)
+		var inst_start := Time.get_ticks_usec()
+		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
+		var inst_elapsed := Time.get_ticks_usec() - inst_start
+		_diag_duplicate_time_total_us += inst_elapsed
+		_diag_duplicate_count += 1
+
+		if obj:
+			# Always reconfigure visibility_range BEFORE the object enters the scene tree.
+			# Even prebaked .res files are reconfigured to pick up runtime fixes
+			# (e.g., FADE_SELF for standalone objects instead of baked FADE_DEPENDENCIES).
+			LODConfigurator.configure_for_prebake(obj)
+			obj.set_meta("visibility_prebaked", true)
+
+			# Double-check parent is still valid before queuing (defensive)
+			if is_instance_valid(request.cell_node):
+				pending_children.append({"parent": request.cell_node, "child": obj})
+				instantiated += 1
+
+				# Immediate promotion: hide RS LOD0 since Node3D covers 0-150m
+				if mid_instance_id >= 0:
+					_static_renderer.set_instance_promoted(mid_instance_id, true)
+					_immediate_promotions.append({
+						"id": mid_instance_id,
+						"node": obj,
+					})
+			else:
+				obj.queue_free()
 
 		# Check if this was the last reference
 		if _is_request_complete(request):
@@ -1845,20 +1875,68 @@ func _defer_for_near(ref: CellReference, model_path: String, item_id: String,
 	})
 
 
+## Create a NEAR-only RS instance (0-150m) for a deferred object.
+## These objects are too small for MID-tier but should still be visible up close.
+## The StaticObjectRenderer handles the RS instance with LOD0 visibility_range.
+## The instance ID is stored in the last deferred entry for cleanup when the full
+## Node3D is created (prevents double-rendering).
+## NOTE: Uses "near:" prefix on type_name to avoid collision with MID-tier LOD
+## registration. Without this, deferred (single-mesh) registration could preempt
+## the LOD registration for the same model path, causing MID-tier instances to
+## only get 0-150m visibility instead of 0-500m with LODs.
+func _create_near_only_rs_instance(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> void:
+	if not _static_renderer:
+		return
+
+	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
+	if not model_prototype:
+		model_prototype = _model_loader.get_model(model_path, item_id)
+		if not model_prototype:
+			return
+
+	# Prefix with "near:" to avoid colliding with MID-tier LOD registration
+	var type_name := "near:" + model_path.to_lower().replace("/", "\\")
+	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
+
+	# Register as single-mesh (no LOD levels) — uses fallback LOD0 range (0-150m)
+	if not _static_renderer.has_type(type_name):
+		_static_renderer.register_from_prototype(type_name, model_prototype)
+		if not _static_renderer.has_type(type_name):
+			return
+
+	var pos := CS.vector_to_godot(ref.position)
+	var scl := CS.scale_to_godot(ref.scale)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scl)
+	var xform := Transform3D(basis, pos)
+
+	var instance_id: int = _static_renderer.add_instance(
+		type_name, xform, cell_grid,
+		model_path, item_id, ref.ref_id, ref.ref_num
+	)
+
+	# Store the RS instance ID in the corresponding deferred entry for later cleanup
+	if instance_id >= 0 and cell_grid in _deferred_near_refs:
+		var refs: Array = _deferred_near_refs[cell_grid]
+		if not refs.is_empty():
+			refs[-1]["rs_instance_id"] = instance_id
+
+
 ## MID-TIER: Create a lightweight RenderingServer instance instead of full Node3D
 ## Uses StaticObjectRenderer with per-instance RS visibility_range — no Node3D overhead.
-## Creates up to 3 RS instances per object (LOD1/LOD2/LOD3), each with per-instance
+## Creates up to 4 RS instances per object (LOD0/LOD1/LOD2/LOD3), each with per-instance
 ## visibility_range via RenderingServer.instance_geometry_set_visibility_range().
+## LOD0 covers 0-150m, ensuring objects are always visible at all distances.
 ## Godot handles distance-based LOD switching entirely in C++.
 ## Returns true if the instance was successfully created
-func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> bool:
+func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> int:
 	# Get the prototype from cache (need it for mesh data)
 	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
 	if not model_prototype:
 		# Prototype not cached yet — try loading it
 		model_prototype = _model_loader.get_model(model_path, item_id)
 		if not model_prototype:
-			return false
+			return -1
 
 	# Normalize model path as the type name
 	var type_name := model_path.to_lower().replace("/", "\\")
@@ -1878,14 +1956,14 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	if not _static_renderer.has_type(type_name):
 		_static_renderer.register_lod_from_prototype(type_name, model_prototype)
 		if not _static_renderer.has_type(type_name):
-			return false
+			return -1
 
 	var instance_id: int = _static_renderer.add_instance(
 		type_name, xform, cell_grid,
 		model_path, item_id, ref.ref_id, ref.ref_num
 	)
 	if instance_id < 0:
-		return false
+		return -1
 
 	# If GPU Scene Database is active, collect data for batch upload
 	if _gpu_scene_db:
@@ -1899,9 +1977,11 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 			"lod_mask": 0
 		})
 
-	_stats["objects_instantiated"] += 1
+	# Only track as mid_tier_instances — objects_instantiated is counted by the
+	# Node3D path (_instantiate_reference_from_parsed). Avoids double-counting
+	# when both RS and Node3D are created for the same object.
 	_stats["mid_tier_instances"] = _stats.get("mid_tier_instances", 0) + 1
-	return true
+	return instance_id
 
 
 ## Internal: Finalize a request (upload GPU objects, mark completed)
@@ -1975,16 +2055,31 @@ func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node)
 
 
-## Extend visibility_range_end on NEAR geometry in promoted objects.
-## Prevents the dead zone between NEAR fade-out (150m) and demotion threshold (190m).
-func _extend_promoted_visibility(node: Node, end_dist: float) -> void:
-	if node is GeometryInstance3D:
-		var geo := node as GeometryInstance3D
-		# Only extend geometry configured as NEAR tier (end <= NEAR_END)
-		if geo.visibility_range_end > 0.0 and geo.visibility_range_end <= SC.NEAR_END:
-			geo.visibility_range_end = end_dist
-	for child in node.get_children():
-		_extend_promoted_visibility(child, end_dist)
+## Get the maximum AABB dimension for a model, with caching.
+## First call loads/caches the prototype. Subsequent calls are O(1) dict lookup.
+## Used for runtime MID-worthy upgrade — objects > threshold get RS instances.
+func _get_aabb_max_dim(model_path: String, item_id: String) -> float:
+	if model_path in _aabb_cache:
+		return _aabb_cache[model_path]
+
+	var prototype: Node3D = _model_loader.get_cached(model_path, item_id)
+	if not prototype:
+		prototype = _model_loader.get_model(model_path, item_id)
+	if not prototype:
+		_aabb_cache[model_path] = 0.0
+		return 0.0
+
+	# Recursively find ALL MeshInstance3D descendants (handles nested NIF structures)
+	var max_dim := 0.0
+	var meshes := prototype.find_children("*", "MeshInstance3D", true, false)
+	for child in meshes:
+		var mi := child as MeshInstance3D
+		if mi and mi.mesh:
+			var s: Vector3 = mi.mesh.get_aabb().size
+			max_dim = maxf(max_dim, maxf(s.x, maxf(s.y, s.z)))
+
+	_aabb_cache[model_path] = max_dim
+	return max_dim
 
 
 ## Get count of pending async requests
@@ -2043,11 +2138,8 @@ func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D
 	instance.set_meta("visibility_prebaked", true)
 	instance.set_meta("promoted_from_mid", true)
 
-	# Extend NEAR visibility to demotion distance to prevent dead zone.
-	# Default prebake sets NEAR end=150m, but demotion happens at 190m.
-	# Without this, the object is invisible from ~155m to 190m.
-	var demotion_dist: float = SC.NEAR_END + SC.HYSTERESIS_NEAR
-	_extend_promoted_visibility(instance, demotion_dist)
+	# MID RS instances are hidden on promotion by set_instance_promoted().
+	# The NEAR Node3D covers 0-500m via configure_for_prebake() LOD children.
 
 	_stats["objects_instantiated"] += 1
 	_stats["mid_promotions"] = _stats.get("mid_promotions", 0) + 1
@@ -2081,6 +2173,11 @@ func process_deferred_near(camera_pos: Vector3, nearby_cells: Array[Vector2i],
 			var entry: Dictionary = refs[i]
 			var dist_sq := camera_pos.distance_squared_to(entry.position)
 			if dist_sq <= near_dist_sq:
+				# Remove the placeholder RS instance before creating the full Node3D
+				var rs_id: int = entry.get("rs_instance_id", -1)
+				if rs_id >= 0 and _static_renderer:
+					_static_renderer.remove_instance(rs_id)
+
 				var obj: Node3D = promote_mid_to_near(
 					entry.model_path, entry.item_id, entry.transform,
 					entry.ref_id, entry.ref_num
@@ -2113,6 +2210,16 @@ func get_deferred_near_count() -> int:
 	for grid in _deferred_near_refs:
 		count += _deferred_near_refs[grid].size()
 	return count
+
+
+## Get and clear immediate promotions (mid-worthy objects that got both RS + Node3D).
+## Called by NativeStreamingManager to absorb into its _promoted_objects tracking.
+func get_and_clear_immediate_promotions() -> Array[Dictionary]:
+	if _immediate_promotions.is_empty():
+		return []
+	var result := _immediate_promotions.duplicate()
+	_immediate_promotions.clear()
+	return result
 
 
 ## Get overall stats including pool stats
