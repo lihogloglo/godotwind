@@ -161,8 +161,16 @@ public partial class NativeNIFConverter : RefCounted
             result.Colors = data.Colors;
         }
 
-        // Convert indices
-        result.Indices = data.Triangles;
+        // Flip winding order: NIF uses CW front faces, Godot uses CCW.
+        // Must swap indices 1 and 2 of each triangle (matches GDScript _create_tri_shape_mesh).
+        var flipped = new int[data.Triangles.Length];
+        for (int i = 0; i < data.Triangles.Length; i += 3)
+        {
+            flipped[i] = data.Triangles[i];
+            flipped[i + 1] = data.Triangles[i + 2];
+            flipped[i + 2] = data.Triangles[i + 1];
+        }
+        result.Indices = flipped;
 
         // Copy bounding info (convert to Godot coords)
         result.Center = ConvertVertex(data.Center);
@@ -357,18 +365,21 @@ public partial class NativeNIFConverter : RefCounted
 
             for (int i = 0; i < strip.Length - 2; i++)
             {
-                // Alternate winding for each triangle in strip
+                // Alternate winding + flip for Godot CCW convention
+                // Matches GDScript _create_tri_strips_mesh winding
                 if (i % 2 == 0)
                 {
+                    // Even: flipped winding (swap 1 and 2)
                     indices[outIdx++] = strip[i];
-                    indices[outIdx++] = strip[i + 1];
                     indices[outIdx++] = strip[i + 2];
+                    indices[outIdx++] = strip[i + 1];
                 }
                 else
                 {
+                    // Odd: strip alternation + flip = normal order
                     indices[outIdx++] = strip[i];
-                    indices[outIdx++] = strip[i + 2];
                     indices[outIdx++] = strip[i + 1];
+                    indices[outIdx++] = strip[i + 2];
                 }
             }
         }
@@ -965,6 +976,10 @@ public partial class NativeNIFConverter : RefCounted
                 info["use_vertex_colors"] = true;
                 info["vertex_mode"] = vcProp.VertexMode;
                 info["lighting_mode"] = vcProp.LightingMode;
+            }
+            else if (prop is NiStencilProperty stencilProp)
+            {
+                info["draw_mode"] = (int)stencilProp.DrawMode;
             }
         }
 

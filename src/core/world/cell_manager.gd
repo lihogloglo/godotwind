@@ -1388,10 +1388,19 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		if is_instance_valid(parent) and is_instance_valid(child):
 			if use_deferred:
 				parent.call_deferred("add_child", child)
+				# Defer fade-in until child enters scene tree — create_tween() requires it.
+				# Without this, material_override gets set to fade ShaderMaterial but the
+				# tween never runs, leaving objects invisible (fade_amount stuck at 0.0).
+				if _instantiator.enable_fade_in:
+					child.tree_entered.connect(
+						func() -> void:
+							if is_instance_valid(child):
+								apply_fade_in_to_object(child),
+						CONNECT_ONE_SHOT
+					)
 			else:
 				parent.add_child(child)
-			# Apply fade-in after add_child (tween runs on scene_tree, works for deferred too)
-			apply_fade_in_to_object(child)
+				apply_fade_in_to_object(child)
 	return instantiated
 
 

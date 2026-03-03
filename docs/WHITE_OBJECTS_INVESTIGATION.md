@@ -103,21 +103,52 @@ Runtime load:
   → static_object_renderer creates RS instances for MID tier
 ```
 
-## Files to Investigate Next
+## Multi-Agent Investigation Results (2026-03-03)
 
-| File | What to check |
-|------|--------------|
-| `model_loader.gd` | `duplicate()` flags, `_clear_resource_paths()` side effects |
-| `cell_manager.gd` | Fade-in material cleanup, object instantiation path |
-| `static_object_renderer.gd` | RS instance material extraction, null material fallback |
-| `nif_converter.gd` | LOD material copy for multi-surface meshes |
-| `lod_configurator.gd` | Interaction between prebaked and runtime visibility_range |
-| `mesh_visibility_utils.gd` | Utility functions for visibility configuration |
+### Auto-Diagnostic Data (@arbiter)
 
-## Recommended Next Steps
+Comprehensive auto-diagnostic ran in-game at Seyda Neen (15s after scene load):
 
-1. **Run `tex_audit` in-game** — press `` ` ``, type `tex_audit`, get hard numbers on textured vs untextured objects
-2. **Add logging at `duplicate()` call** — check if materials survive duplication
-3. **Add logging at RS instance creation** — check if `static_object_renderer` receives null materials
-4. **Check fade-in cleanup** — verify ShaderMaterial overrides are removed after fade animation
-5. **Inspect a specific white object** — use console to identify one white mesh, trace its full material chain from .res to rendered instance
+| Tier | Total | Textured | Color-Only | No-Material | Notes |
+|------|-------|----------|------------|-------------|-------|
+| NEAR (Node3D) | 3701 | 3137 (84.7%) | 37 | 0 | All 37 color-only are markers/effects |
+| MID (RS instances) | 525 types | 518 | 7 | 0 | 7 color-only are markers/mist/smoke |
+| LOD nodes (LOD1/2/3) | 1020 | 1020 | 0 | 0 | All have textures |
+| Disk cache sample | 10 | 10 | 0 | 0 | All .res files have embedded textures |
+
+**Zero unexplained white/textureless objects found.** Rebake may have resolved the original complaint.
+
+38 ShaderMaterial objects found with `lod_crossfade.gdshader` — active fade-in tweens, not stuck (verified shader: `fade_amount=0.0` = invisible via dither discard, NOT white).
+
+### Fade-In Bug Discovery (@coder + @roaster)
+
+Three interacting bugs found in the fade-in system that cause **invisible** (not white) objects:
+
+**Bug A: Deferred add_child + immediate fade** (`cell_manager.gd:~1380-1394`)
+- When `pending_children.size() > DEFERRED_THRESHOLD`, `call_deferred("add_child")` is used
+- But `apply_fade_in_to_object()` runs immediately before deferred add executes
+- `instance.create_tween()` fails (node not in scene tree) → tween never animates
+- `material_override = fade_shader` already set → object stuck invisible (`fade_amount=0.0`)
+
+**Bug B: Cell unload during fade**
+- Cell unloads while fade tween in progress → tween killed → `material_override` stays as fade shader with partial `fade_amount`
+
+**Bug C: Pool doesn't reset material_override** (`object_pool.gd:~360`)
+- `_reset_instance()` resets `visible` and `transform` but NOT `material_override`
+- Stuck fade shader persists through pool recycling → compounds over time
+
+### Consensus Fixing Plan (all 3 agents agree)
+
+| Priority | Fix | File | Description |
+|----------|-----|------|-------------|
+| CRITICAL | 1 | `cell_manager.gd` | Defer fade-in until `tree_entered` when using deferred add_child |
+| CRITICAL | 2 | `reference_instantiator.gd` | Guard `_apply_fade_in` with `is_inside_tree()` check |
+| HIGH | 3 | `object_pool.gd` | Reset `material_override` in `_reset_instance()` for MeshInstance3D children |
+| HIGH | 4 | `reference_instantiator.gd` | Store original material as node metadata for recovery on tween failure |
+| MEDIUM | 5 | `static_object_renderer.gd` | Skip hidden meshes in `_extract_lod_meshes()` (defensive) |
+| LOW | 6 | `lod_debug_commands.gd` | Enhance `tex_audit` to also audit RS instances |
+| REJECT | 7 | — | DO NOT widen white threshold — known regression (was tried and reverted) |
+
+### User Action Required
+
+Visually confirm whether white objects still appear after the rebake. If yes, screenshot + `obj_inspect` in console. If no, proceed with fixes 1-6 above (invisible object bugs).

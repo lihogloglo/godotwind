@@ -1,0 +1,1029 @@
+{
+  "version": 1,
+  "updatedAt": 1772555467688,
+  "nodeCount": 74,
+  "nodes": {
+    "mem-MEMORY-architecture": {
+      "id": "mem-MEMORY-architecture",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823190
+    },
+    "mem-MEMORY-tech-stack": {
+      "id": "mem-MEMORY-tech-stack",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823198
+    },
+    "mem-MEMORY-key-gotchas": {
+      "id": "mem-MEMORY-key-gotchas",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823190
+    },
+    "mem-MEMORY-data": {
+      "id": "mem-MEMORY-data",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823190
+    },
+    "mem-MEMORY-project-overview": {
+      "id": "mem-MEMORY-project-overview",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-documentation-structure--clean": {
+      "id": "mem-MEMORY-documentation-structure--clean",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-key-architecture": {
+      "id": "mem-MEMORY-key-architecture",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-": {
+      "id": "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-body-part-mirroring-fix--2026-": {
+      "id": "mem-MEMORY-body-part-mirroring-fix--2026-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-animation-overhaul---phase-3d-": {
+      "id": "mem-MEMORY-animation-overhaul---phase-3d-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-animation-playback-bug---fixed": {
+      "id": "mem-MEMORY-animation-playback-bug---fixed",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-npc-assembly---floating-hands-": {
+      "id": "mem-MEMORY-npc-assembly---floating-hands-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-npc-assembly-code-quality-issu": {
+      "id": "mem-MEMORY-npc-assembly-code-quality-issu",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-animation-cleanup---session-3-": {
+      "id": "mem-MEMORY-animation-cleanup---session-3-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-mixamo---quaternius-migration-": {
+      "id": "mem-MEMORY-mixamo---quaternius-migration-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-important-files": {
+      "id": "mem-MEMORY-important-files",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-code-audit-progress--8-session": {
+      "id": "mem-MEMORY-code-audit-progress--8-session",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-codebase-cleanup---complete": {
+      "id": "mem-MEMORY-codebase-cleanup---complete",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-ocean-shader-overhaul--2026-03": {
+      "id": "mem-MEMORY-ocean-shader-overhaul--2026-03",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-streaming-pipeline---all-phase": {
+      "id": "mem-MEMORY-streaming-pipeline---all-phase",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-log-system--added-session-2--r": {
+      "id": "mem-MEMORY-log-system--added-session-2--r",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-visual-testing-methodology": {
+      "id": "mem-MEMORY-visual-testing-methodology",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-MEMORY-gotchas": {
+      "id": "mem-MEMORY-gotchas",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823191
+    },
+    "mem-BATCH_PIPELINE_CHAINING-overview": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-overview",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-architecture": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-architecture",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-ui-flow": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-ui-flow",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-cost-model": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-cost-model",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-BATCH_PIPELINE_CHAINING-sync-vs-async": {
+      "id": "mem-BATCH_PIPELINE_CHAINING-sync-vs-async",
+      "category": "BATCH_PIPELINE_CHAINING",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-purpose": {
+      "id": "mem-camera-debug-system-purpose",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-files": {
+      "id": "mem-camera-debug-system-files",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-categories": {
+      "id": "mem-camera-debug-system-categories",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-instrumented-files--30--log-po": {
+      "id": "mem-camera-debug-system-instrumented-files--30--log-po",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-how-to-use": {
+      "id": "mem-camera-debug-system-how-to-use",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-expected-event-chains": {
+      "id": "mem-camera-debug-system-expected-event-chains",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-camera-debug-system-removal": {
+      "id": "mem-camera-debug-system-removal",
+      "category": "camera-debug-system",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823193
+    },
+    "mem-client-loading-optimization-problem": {
+      "id": "mem-client-loading-optimization-problem",
+      "category": "client-loading-optimization",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823194
+    },
+    "mem-client-loading-optimization-changes-made": {
+      "id": "mem-client-loading-optimization-changes-made",
+      "category": "client-loading-optimization",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823194
+    },
+    "mem-client-loading-optimization-impact": {
+      "id": "mem-client-loading-optimization-impact",
+      "category": "client-loading-optimization",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823194
+    },
+    "mem-map-camera-fix-session-problem": {
+      "id": "mem-map-camera-fix-session-problem",
+      "category": "map-camera-fix-session",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-map-camera-fix-session-root-cause--confirmed-via-cons": {
+      "id": "mem-map-camera-fix-session-root-cause--confirmed-via-cons",
+      "category": "map-camera-fix-session",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-map-camera-fix-session-changes-made-to--apps-client-a": {
+      "id": "mem-map-camera-fix-session-changes-made-to--apps-client-a",
+      "category": "map-camera-fix-session",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-map-camera-fix-session-react-map-gl-v8-internals--key": {
+      "id": "mem-map-camera-fix-session-react-map-gl-v8-internals--key",
+      "category": "map-camera-fix-session",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-map-camera-fix-session-status": {
+      "id": "mem-map-camera-fix-session-status",
+      "category": "map-camera-fix-session",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-map-camera-fix-session-files-modified": {
+      "id": "mem-map-camera-fix-session-files-modified",
+      "category": "map-camera-fix-session",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-testing": {
+      "id": "mem-MEMORY-testing",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-ai-pipeline-architecture": {
+      "id": "mem-MEMORY-ai-pipeline-architecture",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-pipeline-features--2026-02-ses": {
+      "id": "mem-MEMORY-pipeline-features--2026-02-ses",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-bugs-fixed--2025-02-session-": {
+      "id": "mem-MEMORY-bugs-fixed--2025-02-session-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-bugs-fixed--2026-02-pipeline-t": {
+      "id": "mem-MEMORY-bugs-fixed--2026-02-pipeline-t",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-batch-pipeline---auto-chaining": {
+      "id": "mem-MEMORY-batch-pipeline---auto-chaining",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-full-pipeline-test--2026-02-05": {
+      "id": "mem-MEMORY-full-pipeline-test--2026-02-05",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-resolved-issues": {
+      "id": "mem-MEMORY-resolved-issues",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-bugs-fixed--2026-02-06-pipelin": {
+      "id": "mem-MEMORY-bugs-fixed--2026-02-06-pipelin",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823195
+    },
+    "mem-MEMORY-bugs-fixed--2026-02-07-batch-p": {
+      "id": "mem-MEMORY-bugs-fixed--2026-02-07-batch-p",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-pre-existing-issues--minor-": {
+      "id": "mem-MEMORY-pre-existing-issues--minor-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-important--admin-app-is-local-": {
+      "id": "mem-MEMORY-important--admin-app-is-local-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-bugs-fixed--2026-02-06-image-b": {
+      "id": "mem-MEMORY-bugs-fixed--2026-02-06-image-b",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-gemini-3-1-pro-svg-generation-": {
+      "id": "mem-MEMORY-gemini-3-1-pro-svg-generation-",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-map-camera-fix---leaflet-mapli": {
+      "id": "mem-MEMORY-map-camera-fix---leaflet-mapli",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-client-loading-optimization--2": {
+      "id": "mem-MEMORY-client-loading-optimization--2",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-camera-debug-system--2026-02-2": {
+      "id": "mem-MEMORY-camera-debug-system--2026-02-2",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-environment": {
+      "id": "mem-MEMORY-environment",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823196
+    },
+    "mem-MEMORY-coordinate-system--updated-202": {
+      "id": "mem-MEMORY-coordinate-system--updated-202",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823197
+    },
+    "mem-MEMORY-shore-distance-bake-pipeline": {
+      "id": "mem-MEMORY-shore-distance-bake-pipeline",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823197
+    },
+    "mem-MEMORY-fog-of-war": {
+      "id": "mem-MEMORY-fog-of-war",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823197
+    },
+    "mem-MEMORY-project-location": {
+      "id": "mem-MEMORY-project-location",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823198
+    },
+    "mem-MEMORY-critical--ai-sdk-6-api-changes": {
+      "id": "mem-MEMORY-critical--ai-sdk-6-api-changes",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823198
+    },
+    "mem-MEMORY-next-js-16-changes": {
+      "id": "mem-MEMORY-next-js-16-changes",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823198
+    },
+    "mem-MEMORY-supabase-types": {
+      "id": "mem-MEMORY-supabase-types",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823198
+    },
+    "mem-MEMORY-implementation-status": {
+      "id": "mem-MEMORY-implementation-status",
+      "category": "core",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772549823198
+    },
+    "insight-1772552613533-97t0": {
+      "id": "insight-1772552613533-97t0",
+      "category": "insights",
+      "confidence": 0.5,
+      "accessCount": 0,
+      "createdAt": 1772552613533
+    }
+  },
+  "edges": [
+    {
+      "sourceId": "mem-MEMORY-architecture",
+      "targetId": "mem-MEMORY-tech-stack",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-tech-stack",
+      "targetId": "mem-MEMORY-key-gotchas",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-key-gotchas",
+      "targetId": "mem-MEMORY-data",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-project-overview",
+      "targetId": "mem-MEMORY-documentation-structure--clean",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-documentation-structure--clean",
+      "targetId": "mem-MEMORY-key-architecture",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-key-architecture",
+      "targetId": "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-",
+      "targetId": "mem-MEMORY-body-part-mirroring-fix--2026-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-body-part-mirroring-fix--2026-",
+      "targetId": "mem-MEMORY-animation-overhaul---phase-3d-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-animation-overhaul---phase-3d-",
+      "targetId": "mem-MEMORY-animation-playback-bug---fixed",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-animation-playback-bug---fixed",
+      "targetId": "mem-MEMORY-npc-assembly---floating-hands-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-npc-assembly---floating-hands-",
+      "targetId": "mem-MEMORY-npc-assembly-code-quality-issu",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-npc-assembly-code-quality-issu",
+      "targetId": "mem-MEMORY-animation-cleanup---session-3-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-animation-cleanup---session-3-",
+      "targetId": "mem-MEMORY-mixamo---quaternius-migration-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-mixamo---quaternius-migration-",
+      "targetId": "mem-MEMORY-important-files",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-important-files",
+      "targetId": "mem-MEMORY-code-audit-progress--8-session",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-code-audit-progress--8-session",
+      "targetId": "mem-MEMORY-codebase-cleanup---complete",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-codebase-cleanup---complete",
+      "targetId": "mem-MEMORY-ocean-shader-overhaul--2026-03",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-ocean-shader-overhaul--2026-03",
+      "targetId": "mem-MEMORY-streaming-pipeline---all-phase",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-streaming-pipeline---all-phase",
+      "targetId": "mem-MEMORY-log-system--added-session-2--r",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-log-system--added-session-2--r",
+      "targetId": "mem-MEMORY-visual-testing-methodology",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-visual-testing-methodology",
+      "targetId": "mem-MEMORY-gotchas",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-overview",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-architecture",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-architecture",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-ui-flow",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-ui-flow",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-cost-model",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-cost-model",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-sync-vs-async",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-camera-debug-system-purpose",
+      "targetId": "mem-camera-debug-system-files",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-camera-debug-system-files",
+      "targetId": "mem-camera-debug-system-categories",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-camera-debug-system-categories",
+      "targetId": "mem-camera-debug-system-instrumented-files--30--log-po",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-camera-debug-system-instrumented-files--30--log-po",
+      "targetId": "mem-camera-debug-system-how-to-use",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-camera-debug-system-how-to-use",
+      "targetId": "mem-camera-debug-system-expected-event-chains",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-camera-debug-system-expected-event-chains",
+      "targetId": "mem-camera-debug-system-removal",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-client-loading-optimization-problem",
+      "targetId": "mem-client-loading-optimization-changes-made",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-client-loading-optimization-changes-made",
+      "targetId": "mem-client-loading-optimization-impact",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-map-camera-fix-session-problem",
+      "targetId": "mem-map-camera-fix-session-root-cause--confirmed-via-cons",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-map-camera-fix-session-root-cause--confirmed-via-cons",
+      "targetId": "mem-map-camera-fix-session-changes-made-to--apps-client-a",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-map-camera-fix-session-changes-made-to--apps-client-a",
+      "targetId": "mem-map-camera-fix-session-react-map-gl-v8-internals--key",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-map-camera-fix-session-react-map-gl-v8-internals--key",
+      "targetId": "mem-map-camera-fix-session-status",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-map-camera-fix-session-status",
+      "targetId": "mem-map-camera-fix-session-files-modified",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-testing",
+      "targetId": "mem-MEMORY-ai-pipeline-architecture",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-ai-pipeline-architecture",
+      "targetId": "mem-MEMORY-pipeline-features--2026-02-ses",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-pipeline-features--2026-02-ses",
+      "targetId": "mem-MEMORY-bugs-fixed--2025-02-session-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-bugs-fixed--2025-02-session-",
+      "targetId": "mem-MEMORY-bugs-fixed--2026-02-pipeline-t",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-bugs-fixed--2026-02-pipeline-t",
+      "targetId": "mem-MEMORY-batch-pipeline---auto-chaining",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-batch-pipeline---auto-chaining",
+      "targetId": "mem-MEMORY-full-pipeline-test--2026-02-05",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-full-pipeline-test--2026-02-05",
+      "targetId": "mem-MEMORY-resolved-issues",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-resolved-issues",
+      "targetId": "mem-MEMORY-bugs-fixed--2026-02-06-pipelin",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-bugs-fixed--2026-02-06-pipelin",
+      "targetId": "mem-MEMORY-bugs-fixed--2026-02-07-batch-p",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-bugs-fixed--2026-02-07-batch-p",
+      "targetId": "mem-MEMORY-pre-existing-issues--minor-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-pre-existing-issues--minor-",
+      "targetId": "mem-MEMORY-important--admin-app-is-local-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-important--admin-app-is-local-",
+      "targetId": "mem-MEMORY-bugs-fixed--2026-02-06-image-b",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-bugs-fixed--2026-02-06-image-b",
+      "targetId": "mem-MEMORY-gemini-3-1-pro-svg-generation-",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-gemini-3-1-pro-svg-generation-",
+      "targetId": "mem-MEMORY-map-camera-fix---leaflet-mapli",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-map-camera-fix---leaflet-mapli",
+      "targetId": "mem-MEMORY-client-loading-optimization--2",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-client-loading-optimization--2",
+      "targetId": "mem-MEMORY-camera-debug-system--2026-02-2",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-camera-debug-system--2026-02-2",
+      "targetId": "mem-MEMORY-environment",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-coordinate-system--updated-202",
+      "targetId": "mem-MEMORY-shore-distance-bake-pipeline",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-shore-distance-bake-pipeline",
+      "targetId": "mem-MEMORY-fog-of-war",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-project-location",
+      "targetId": "mem-MEMORY-tech-stack",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-tech-stack",
+      "targetId": "mem-MEMORY-critical--ai-sdk-6-api-changes",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-critical--ai-sdk-6-api-changes",
+      "targetId": "mem-MEMORY-next-js-16-changes",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-next-js-16-changes",
+      "targetId": "mem-MEMORY-supabase-types",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-supabase-types",
+      "targetId": "mem-MEMORY-implementation-status",
+      "type": "temporal",
+      "weight": 0.5
+    },
+    {
+      "sourceId": "mem-MEMORY-important-files",
+      "targetId": "mem-MEMORY-code-audit-progress--8-session",
+      "type": "similar",
+      "weight": 0.3352272727272727
+    },
+    {
+      "sourceId": "mem-MEMORY-ai-pipeline-architecture",
+      "targetId": "mem-MEMORY-pipeline-features--2026-02-ses",
+      "type": "similar",
+      "weight": 0.3187250996015936
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-overview",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works",
+      "type": "similar",
+      "weight": 0.3416149068322981
+    },
+    {
+      "sourceId": "mem-BATCH_PIPELINE_CHAINING-overview",
+      "targetId": "mem-BATCH_PIPELINE_CHAINING-sync-vs-async",
+      "type": "similar",
+      "weight": 0.3028571428571429
+    },
+    {
+      "sourceId": "mem-camera-debug-system-categories",
+      "targetId": "mem-camera-debug-system-instrumented-files--30--log-po",
+      "type": "similar",
+      "weight": 0.3273381294964029
+    },
+    {
+      "sourceId": "mem-camera-debug-system-instrumented-files--30--log-po",
+      "targetId": "mem-camera-debug-system-expected-event-chains",
+      "type": "similar",
+      "weight": 0.4411764705882353
+    }
+  ],
+  "pageRanks": {
+    "mem-MEMORY-architecture": 0.0037052882431187423,
+    "mem-MEMORY-tech-stack": 0.010004211057304976,
+    "mem-MEMORY-key-gotchas": 0.00795703182769492,
+    "mem-MEMORY-data": 0.010468695992872859,
+    "mem-MEMORY-project-overview": 0.0037052882431187423,
+    "mem-MEMORY-documentation-structure--clean": 0.006854749650211859,
+    "mem-MEMORY-key-architecture": 0.009531762531241479,
+    "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-": 0.011807202433387667,
+    "mem-MEMORY-body-part-mirroring-fix--2026-": 0.013741340581184026,
+    "mem-MEMORY-animation-overhaul---phase-3d-": 0.01538543120458702,
+    "mem-MEMORY-animation-playback-bug---fixed": 0.01678296741261035,
+    "mem-MEMORY-npc-assembly---floating-hands-": 0.01797089711543996,
+    "mem-MEMORY-npc-assembly-code-quality-issu": 0.01898068098856554,
+    "mem-MEMORY-animation-cleanup---session-3-": 0.019839016756682915,
+    "mem-MEMORY-mixamo---quaternius-migration-": 0.020568565579417542,
+    "mem-MEMORY-important-files": 0.021189510809006582,
+    "mem-MEMORY-code-audit-progress--8-session": 0.021717866421971987,
+    "mem-MEMORY-codebase-cleanup---complete": 0.02216638098713114,
+    "mem-MEMORY-ocean-shader-overhaul--2026-03": 0.022547077491937267,
+    "mem-MEMORY-streaming-pipeline---all-phase": 0.022870180427343036,
+    "mem-MEMORY-log-system--added-session-2--r": 0.023144403133221653,
+    "mem-MEMORY-visual-testing-methodology": 0.023377163763566508,
+    "mem-MEMORY-gotchas": 0.02357471952585935,
+    "mem-BATCH_PIPELINE_CHAINING-overview": 0.0037052882431187423,
+    "mem-BATCH_PIPELINE_CHAINING-architecture": 0.004755108712149781,
+    "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works": 0.008796907746252771,
+    "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior": 0.011182580125633413,
+    "mem-BATCH_PIPELINE_CHAINING-ui-flow": 0.01321039511670185,
+    "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes": 0.014934083504917142,
+    "mem-BATCH_PIPELINE_CHAINING-cost-model": 0.016399306815062464,
+    "mem-BATCH_PIPELINE_CHAINING-sync-vs-async": 0.018694609851925698,
+    "mem-camera-debug-system-purpose": 0.0037052882431187423,
+    "mem-camera-debug-system-files": 0.006854749650211859,
+    "mem-camera-debug-system-categories": 0.009531762531241479,
+    "mem-camera-debug-system-instrumented-files--30--log-po": 0.011807202433387667,
+    "mem-camera-debug-system-how-to-use": 0.008723314412151385,
+    "mem-camera-debug-system-expected-event-chains": 0.016138116596432085,
+    "mem-camera-debug-system-removal": 0.017422705749113497,
+    "mem-client-loading-optimization-problem": 0.0037052882431187423,
+    "mem-client-loading-optimization-changes-made": 0.006854749650211859,
+    "mem-client-loading-optimization-impact": 0.009531762531241479,
+    "mem-map-camera-fix-session-problem": 0.0037052882431187423,
+    "mem-map-camera-fix-session-root-cause--confirmed-via-cons": 0.006854749650211859,
+    "mem-map-camera-fix-session-changes-made-to--apps-client-a": 0.009531762531241479,
+    "mem-map-camera-fix-session-react-map-gl-v8-internals--key": 0.011807202433387667,
+    "mem-map-camera-fix-session-status": 0.013741340581184026,
+    "mem-map-camera-fix-session-files-modified": 0.01538543120458702,
+    "mem-MEMORY-testing": 0.0037052882431187423,
+    "mem-MEMORY-ai-pipeline-architecture": 0.006854749650211859,
+    "mem-MEMORY-pipeline-features--2026-02-ses": 0.009531762531241479,
+    "mem-MEMORY-bugs-fixed--2025-02-session-": 0.011807202433387667,
+    "mem-MEMORY-bugs-fixed--2026-02-pipeline-t": 0.013741340581184026,
+    "mem-MEMORY-batch-pipeline---auto-chaining": 0.01538543120458702,
+    "mem-MEMORY-full-pipeline-test--2026-02-05": 0.01678296741261035,
+    "mem-MEMORY-resolved-issues": 0.01797089711543996,
+    "mem-MEMORY-bugs-fixed--2026-02-06-pipelin": 0.01898068098856554,
+    "mem-MEMORY-bugs-fixed--2026-02-07-batch-p": 0.019839016756682915,
+    "mem-MEMORY-pre-existing-issues--minor-": 0.020568565579417542,
+    "mem-MEMORY-important--admin-app-is-local-": 0.021189510809006582,
+    "mem-MEMORY-bugs-fixed--2026-02-06-image-b": 0.021717866421971987,
+    "mem-MEMORY-gemini-3-1-pro-svg-generation-": 0.02216638098713114,
+    "mem-MEMORY-map-camera-fix---leaflet-mapli": 0.022547077491937267,
+    "mem-MEMORY-client-loading-optimization--2": 0.022870180427343036,
+    "mem-MEMORY-camera-debug-system--2026-02-2": 0.023144403133221653,
+    "mem-MEMORY-environment": 0.023377163763566508,
+    "mem-MEMORY-coordinate-system--updated-202": 0.0037052882431187423,
+    "mem-MEMORY-shore-distance-bake-pipeline": 0.006854749650211859,
+    "mem-MEMORY-fog-of-war": 0.009531762531241479,
+    "mem-MEMORY-project-location": 0.0037052882431187423,
+    "mem-MEMORY-critical--ai-sdk-6-api-changes": 0.00795703182769492,
+    "mem-MEMORY-next-js-16-changes": 0.010468695992872859,
+    "mem-MEMORY-supabase-types": 0.01260362063011093,
+    "mem-MEMORY-implementation-status": 0.014418362130688842,
+    "insight-1772552613533-97t0": 0.0037052882431187423
+  }
+}

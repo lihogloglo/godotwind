@@ -120,6 +120,7 @@ var crash_reporter: Node = null  # State capture for crash analysis (CrashReport
 var debug_system: Node = null  # Unified debug system (DebugSystem - F4/F9/F11/F12)
 var _profiling_report: ProfilingReport = null  # UI log panel profiling report
 var _batch_debug_hud: Node = null  # Batch pool debug visualization (BatchDebugHUD)
+var _lod_debug_commands: LodDebugCommands = null  # LOD console commands (prevent GC)
 
 # State
 var _data_path: String = ""
@@ -1019,8 +1020,9 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		)
 
 		# Register LOD/impostor debug commands (extracted to LodDebugCommands)
-		var lod_cmds := LodDebugCommands.new(native_streaming_manager)
-		lod_cmds.register_commands(console)
+		# Store as member var to prevent GC — RefCounted bound methods become invalid otherwise
+		_lod_debug_commands = LodDebugCommands.new(native_streaming_manager)
+		_lod_debug_commands.register_commands(console)
 
 		# Register batch pool debug commands (legacy HUD)
 		console.register_command(

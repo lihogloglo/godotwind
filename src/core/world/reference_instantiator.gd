@@ -688,6 +688,14 @@ func _apply_fade_in(instance: Node3D) -> void:
 			Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
 		return  # Need scene tree for tweens
 
+	# Guard: create_tween() requires the node to be in the scene tree.
+	# Calling it on a detached node returns null or creates an immediately-killed tween,
+	# leaving material_override stuck as the fade ShaderMaterial (invisible object).
+	if not instance.is_inside_tree():
+		if debug_lod:
+			Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - node not in tree: %s" % instance.name)
+		return
+
 	_ensure_fade_pool()
 
 	# Find all MeshInstance3D nodes in the hierarchy
@@ -714,10 +722,23 @@ func _apply_fade_in(instance: Node3D) -> void:
 		# Get the original material using the 3-source fallback chain
 		# (matches StaticObjectRenderer's material extraction order)
 		var original_mat: Material = mesh_inst.material_override
+
+		# Detect stuck fade ShaderMaterial from interrupted tween or pool recycling:
+		# If current override has "fade_amount" parameter, it's a leftover fade material.
+		# Discard it and fall through to the surface material chain.
+		if original_mat is ShaderMaterial:
+			var sm := original_mat as ShaderMaterial
+			if sm.get_shader_parameter("fade_amount") != null:
+				mesh_inst.material_override = null
+				original_mat = null
+
 		if original_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
 			original_mat = mesh_inst.get_surface_override_material(0)
 			if original_mat == null:
 				original_mat = mesh_inst.mesh.surface_get_material(0)
+
+		# Store true original as metadata for robust recovery
+		mesh_inst.set_meta("_pre_fade_material", original_mat)
 
 		# Copy texture from original material if it's a StandardMaterial3D
 		if original_mat is StandardMaterial3D:
@@ -777,8 +798,10 @@ func _apply_fade_in(instance: Node3D) -> void:
 			if not is_instance_valid(mesh_inst_ref):
 				continue
 			var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D
-			var original_mat: Material = entry.original_material
+			# Prefer metadata (survives edge cases better than closure capture)
+			var original_mat: Material = mesh_inst.get_meta("_pre_fade_material", entry.original_material)
 			mesh_inst.material_override = original_mat
+			mesh_inst.remove_meta("_pre_fade_material")
 	)
 
 

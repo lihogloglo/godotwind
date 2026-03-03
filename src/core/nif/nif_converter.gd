@@ -466,6 +466,11 @@ func _create_material_from_native_info(info: Dictionary) -> StandardMaterial3D:
 		if info.get("use_vertex_colors", false):
 			props.use_vertex_colors = true
 
+		# Double-sided geometry (draw_mode 2 = BOTH, 3 = NONE/no cull)
+		var draw_mode: int = info.get("draw_mode", -1)
+		if draw_mode == 2 or draw_mode == 3:
+			props.cull_mode = BaseMaterial3D.CULL_DISABLED
+
 		return MatLib.get_or_create_material(props)
 
 	# Fallback: Create new material directly
@@ -496,6 +501,11 @@ func _create_material_from_native_info(info: Dictionary) -> StandardMaterial3D:
 	# Vertex colors
 	if info.get("use_vertex_colors", false):
 		material.vertex_color_use_as_albedo = true
+
+	# Double-sided geometry
+	var fallback_draw_mode: int = info.get("draw_mode", -1)
+	if fallback_draw_mode == 2 or fallback_draw_mode == 3:
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	# Texture
 	if not texture_path.is_empty() and load_textures:
@@ -1150,18 +1160,20 @@ func _should_generate_lods() -> bool:
 ## Add VisibilityRange-based LOD system to a MeshInstance3D
 ## Creates LOD hierarchy by generating simplified meshes and wrapping them in visibility range nodes
 func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh) -> void:
-	if original_mesh.get_surface_count() == 0:
+	var surface_count := original_mesh.get_surface_count()
+	if surface_count == 0:
 		return
 
-	var arrays := original_mesh.surface_get_arrays(0)
-	if arrays.is_empty():
-		return
+	# Count total triangles across ALL surfaces (not just surface 0)
+	var num_triangles: int = 0
+	for si in range(surface_count):
+		var surf_arrays := original_mesh.surface_get_arrays(si)
+		if surf_arrays.is_empty():
+			continue
+		var surf_indices: PackedInt32Array = surf_arrays[Mesh.ARRAY_INDEX]
+		if surf_indices != null and not surf_indices.is_empty():
+			num_triangles += surf_indices.size() / 3
 
-	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
-	if indices == null or indices.is_empty():
-		return
-
-	var num_triangles: int = indices.size() / 3
 	if num_triangles < min_triangles_for_lod:
 		if debug_lod:
 			Log.debug("nif", "NIFConverter: Skipping LOD for '%s' with %d triangles (min: %d)" % [
@@ -1177,40 +1189,48 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 	# LOD1/2/3: MID tier sub-levels (150-250m, 250-375m, 375-500m)
 
 	if debug_lod:
-		Log.debug("nif", "NIFConverter: Generating %d LOD levels for '%s' (%d triangles)" % [
-			lod_levels, _source_path.get_file(), num_triangles
+		Log.debug("nif", "NIFConverter: Generating %d LOD levels for '%s' (%d triangles, %d surfaces)" % [
+			lod_levels, _source_path.get_file(), num_triangles, surface_count
 		])
 
-	# Get material to apply to all LOD levels
-	# First try material_override, then fall back to surface material
-	var material: Material = mesh_instance.material_override
-	if material == null and mesh_instance.mesh and mesh_instance.mesh.get_surface_count() > 0:
-		material = mesh_instance.mesh.surface_get_material(0)
+	# Collect per-surface materials for multi-surface LODs.
+	# material_override applies to ALL surfaces — if set, LOD gets it too.
+	# Otherwise, each surface keeps its own material from the mesh.
+	var override_material: Material = mesh_instance.material_override
 
-	# If no material found, try to inherit from parent nodes
-	if material == null:
-		var parent_node: Node = mesh_instance.get_parent()
-		while parent_node and material == null:
-			if parent_node is MeshInstance3D:
-				var parent_mi := parent_node as MeshInstance3D
-				material = parent_mi.material_override
-				if material == null and parent_mi.mesh and parent_mi.mesh.get_surface_count() > 0:
-					material = parent_mi.mesh.surface_get_material(0)
-			parent_node = parent_node.get_parent() if parent_node else null
+	# Fallback material search (parent/sibling) — only used if no override AND no surface materials
+	var fallback_material: Material = null
+	if override_material == null:
+		# Check if the mesh itself has any surface materials
+		var has_any_surface_mat := false
+		for si in range(surface_count):
+			var smat: Material = mesh_instance.get_surface_override_material(si)
+			if smat == null:
+				smat = original_mesh.surface_get_material(si)
+			if smat:
+				has_any_surface_mat = true
+				break
 
-	# Also try sibling MeshInstance3D nodes (common in NIF files where material is on a sibling)
-	if material == null and mesh_instance.get_parent():
-		for sibling in mesh_instance.get_parent().get_children():
-			if sibling is MeshInstance3D and sibling != mesh_instance:
-				var sibling_mi := sibling as MeshInstance3D
-				material = sibling_mi.material_override
-				if material == null and sibling_mi.mesh and sibling_mi.mesh.get_surface_count() > 0:
-					material = sibling_mi.mesh.surface_get_material(0)
-				if material:
-					break
+		# Only search parent/sibling if mesh has NO materials at all
+		if not has_any_surface_mat:
+			var parent_node: Node = mesh_instance.get_parent()
+			while parent_node and fallback_material == null:
+				if parent_node is MeshInstance3D:
+					var parent_mi := parent_node as MeshInstance3D
+					fallback_material = parent_mi.material_override
+					if fallback_material == null and parent_mi.mesh and parent_mi.mesh.get_surface_count() > 0:
+						fallback_material = parent_mi.mesh.surface_get_material(0)
+				parent_node = parent_node.get_parent() if parent_node else null
 
-	if material == null:
-		push_warning("NIFConverter: No material found for LOD generation of '%s' - LODs may render white" % _source_path.get_file())
+			if fallback_material == null and mesh_instance.get_parent():
+				for sibling in mesh_instance.get_parent().get_children():
+					if sibling is MeshInstance3D and sibling != mesh_instance:
+						var sibling_mi := sibling as MeshInstance3D
+						fallback_material = sibling_mi.material_override
+						if fallback_material == null and sibling_mi.mesh and sibling_mi.mesh.get_surface_count() > 0:
+							fallback_material = sibling_mi.mesh.surface_get_material(0)
+						if fallback_material:
+							break
 
 	var simplifier := MeshOptimizer.new()
 	var parent := mesh_instance.get_parent()
@@ -1221,27 +1241,56 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 			break
 
 		var reduction := lod_reduction_ratios[lod_idx]
-		var lod_arrays := simplifier.simplify_arrays(arrays, reduction)
 
-		if lod_arrays.is_empty() or lod_arrays[Mesh.ARRAY_VERTEX] == null:
-			if debug_lod:
-				Log.debug("nif", "  LOD%d: Failed to generate" % (lod_idx + 1))
-			continue
-
-		# Create LOD mesh
+		# Create LOD mesh with ALL surfaces simplified independently
 		var lod_mesh := ArrayMesh.new()
 		lod_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
-		lod_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod_arrays)
+		var lod_total_tris: int = 0
+		var surfaces_added: int = 0
 
-		# Embed material directly in mesh surface (ensures material travels with mesh)
-		if material:
-			lod_mesh.surface_set_material(0, material)
+		for si in range(surface_count):
+			var surf_arrays := original_mesh.surface_get_arrays(si)
+			if surf_arrays.is_empty():
+				continue
+			var surf_indices: PackedInt32Array = surf_arrays[Mesh.ARRAY_INDEX]
+			if surf_indices == null or surf_indices.is_empty():
+				continue
+
+			var lod_arrays := simplifier.simplify_arrays(surf_arrays, reduction)
+			if lod_arrays.is_empty() or lod_arrays[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
+			if lod_indices == null or lod_indices.is_empty():
+				continue
+
+			lod_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod_arrays)
+
+			# Set per-surface material (override_material covers all via material_override below)
+			var surf_mat: Material = null
+			if override_material == null:
+				surf_mat = mesh_instance.get_surface_override_material(si)
+				if surf_mat == null:
+					surf_mat = original_mesh.surface_get_material(si)
+				if surf_mat == null:
+					surf_mat = fallback_material
+			if surf_mat:
+				lod_mesh.surface_set_material(surfaces_added, surf_mat)
+
+			lod_total_tris += lod_indices.size() / 3
+			surfaces_added += 1
+
+		if surfaces_added == 0:
+			if debug_lod:
+				Log.debug("nif", "  LOD%d: Failed to generate (all surfaces empty)" % (lod_idx + 1))
+			continue
 
 		# Create LOD mesh instance
 		var lod_instance := MeshInstance3D.new()
 		lod_instance.name = "%s_LOD%d" % [mesh_instance.name, lod_idx + 1]
 		lod_instance.mesh = lod_mesh
-		lod_instance.material_override = material
+		# Apply material_override only if the original has one (covers all surfaces)
+		if override_material:
+			lod_instance.material_override = override_material
 
 		# Copy transform from original
 		lod_instance.transform = mesh_instance.transform
@@ -1282,10 +1331,10 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 			parent.add_child(lod_instance)
 
 		if debug_lod:
-			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
-			var lod_tris: int = lod_indices.size() / 3 if lod_indices else 0
-			Log.debug("nif", "  LOD%d: %d -> %d triangles (%.1f%%), range: %.0f-%.0fm" % [
-				lod_idx + 1, num_triangles, lod_tris, 100.0 * lod_tris / num_triangles,
+			Log.debug("nif", "  LOD%d: %d -> %d triangles (%.1f%%), %d surfaces, range: %.0f-%.0fm" % [
+				lod_idx + 1, num_triangles, lod_total_tris,
+				100.0 * lod_total_tris / num_triangles if num_triangles > 0 else 0.0,
+				surfaces_added,
 				lod_instance.visibility_range_begin, lod_instance.visibility_range_end
 			])
 
@@ -1544,6 +1593,7 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 	var tex_prop: Defs.NiTexturingProperty = null
 	var alpha_prop: Defs.NiAlphaProperty = null
 	var vc_prop: Defs.NiVertexColorProperty = null
+	var stencil_prop: Defs.NiStencilProperty = null
 
 	# Collect properties
 	for prop_idx in geom.property_indices:
@@ -1558,6 +1608,8 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 			alpha_prop = prop
 		elif prop is Defs.NiVertexColorProperty:
 			vc_prop = prop
+		elif prop is Defs.NiStencilProperty:
+			stencil_prop = prop
 
 	# Check if we have any properties
 	if mat_prop == null and tex_prop == null:
@@ -1602,6 +1654,10 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 		if vc_prop:
 			props.use_vertex_colors = true
 
+		# Double-sided geometry (draw_mode 2 = BOTH sides, 3 = NONE/no cull)
+		if stencil_prop and (stencil_prop.draw_mode == 2 or stencil_prop.draw_mode == 3):
+			props.cull_mode = BaseMaterial3D.CULL_DISABLED
+
 		return MatLib.get_or_create_material(props)
 
 	# Fallback: Create new material (legacy behavior)
@@ -1628,6 +1684,10 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 	# Apply vertex colors
 	if vc_prop:
 		material.vertex_color_use_as_albedo = true
+
+	# Double-sided geometry
+	if stencil_prop and (stencil_prop.draw_mode == 2 or stencil_prop.draw_mode == 3):
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	# Texture loading
 	if not texture_path.is_empty():
@@ -2526,6 +2586,7 @@ func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
 	var tex_prop: Defs.NiTexturingProperty = null
 	var alpha_prop: Defs.NiAlphaProperty = null
 	var vc_prop: Defs.NiVertexColorProperty = null
+	var stencil_prop: Defs.NiStencilProperty = null
 
 	for prop_idx in geom.property_indices:
 		if prop_idx < 0:
@@ -2539,6 +2600,8 @@ func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
 			alpha_prop = prop
 		elif prop is Defs.NiVertexColorProperty:
 			vc_prop = prop
+		elif prop is Defs.NiStencilProperty:
+			stencil_prop = prop
 
 	# Build material key using same logic as MaterialLibrary
 	var props := MatLib.MaterialProperties.new()
@@ -2568,6 +2631,12 @@ func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
 
 	if vc_prop:
 		props.use_vertex_colors = true
+
+	# Double-sided geometry (draw_mode 2 = BOTH sides, 3 = NONE/no cull)
+	# Without this, shapes with different draw_modes but same texture get the same
+	# material key and are merged into one mesh with only the first shape's cull_mode.
+	if stencil_prop and (stencil_prop.draw_mode == 2 or stencil_prop.draw_mode == 3):
+		props.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	return props.get_key()
 

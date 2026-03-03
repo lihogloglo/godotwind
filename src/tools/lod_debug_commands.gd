@@ -80,6 +80,12 @@ func register_commands(console: Console) -> void:
 		"Audit textures on loaded objects: find materials with color but no texture",
 		"debug"
 	)
+	console.register_command(
+		"look",
+		_cmd_look,
+		"Inspect mesh under crosshair: LOD level, material, visibility_range (no collision needed)",
+		"debug"
+	)
 
 
 func _cmd_impostor_stats(_args: Dictionary) -> String:
@@ -618,6 +624,23 @@ func _cmd_tex_audit(_args: Dictionary) -> String:
 		for ex in no_mat_examples.slice(0, 5):
 			output += "  %s\n" % ex
 
+	# Audit RS instances (MID tier) if static renderer is available
+	if _streaming_manager.get("_static_renderer"):
+		var rs_stats := _audit_rs_materials(_streaming_manager._static_renderer)
+		output += "\n=== RS INSTANCE MATERIAL AUDIT (MID tier) ===\n"
+		output += "Mesh types registered: %d\n" % rs_stats.total_types
+		output += "  With texture:        %d\n" % rs_stats.textured
+		output += "  Color only (no tex): %d\n" % rs_stats.color_only
+		output += "  No material:         %d  <-- uses mesh default (may be white)\n" % rs_stats.no_material
+		if not rs_stats.no_mat_types.is_empty():
+			output += "\nNo-material RS types (first 10):\n"
+			for t in rs_stats.no_mat_types.slice(0, 10):
+				output += "  %s\n" % t
+		if not rs_stats.color_only_types.is_empty():
+			output += "\nColor-only RS types (first 10):\n"
+			for t in rs_stats.color_only_types.slice(0, 10):
+				output += "  %s\n" % t
+
 	return output
 
 
@@ -661,3 +684,255 @@ func _audit_textures_recursive(node: Node, stats: Dictionary, color_only: Array[
 
 	for child in node.get_children():
 		_audit_textures_recursive(child, stats, color_only, no_mat)
+
+
+## Audit RS instance materials in the static renderer (MID tier)
+## Returns dict with texture/material stats for registered mesh types
+func _audit_rs_materials(renderer: Node3D) -> Dictionary:
+	var result := {
+		"total_types": 0,
+		"textured": 0,
+		"color_only": 0,
+		"no_material": 0,
+		"no_mat_types": [] as Array[String],
+		"color_only_types": [] as Array[String],
+	}
+	if not renderer or not ("_mesh_types" in renderer):
+		return result
+
+	for type_name: String in renderer._mesh_types:
+		var mt: Variant = renderer._mesh_types[type_name]
+		result.total_types += 1
+
+		var has_mat := false
+		var has_tex := false
+
+		# Check primary material (whole-mesh override)
+		if mt.material_resource:
+			has_mat = true
+			if mt.material_resource is StandardMaterial3D:
+				has_tex = (mt.material_resource as StandardMaterial3D).albedo_texture != null
+
+		# Check per-surface materials
+		if not has_mat and not mt.surface_materials.is_empty():
+			for sm: Material in mt.surface_materials:
+				if sm:
+					has_mat = true
+					if sm is StandardMaterial3D and (sm as StandardMaterial3D).albedo_texture:
+						has_tex = true
+
+		# Check LOD mesh entries
+		if not has_mat and not mt.lod_meshes.is_empty():
+			for lod_level: int in mt.lod_meshes:
+				var lod_entry: Variant = mt.lod_meshes[lod_level]
+				if lod_entry.material:
+					has_mat = true
+					if lod_entry.material is StandardMaterial3D:
+						has_tex = (lod_entry.material as StandardMaterial3D).albedo_texture != null
+					break
+
+		if has_tex:
+			result.textured += 1
+		elif has_mat:
+			result.color_only += 1
+			if result.color_only_types.size() < 20:
+				result.color_only_types.append(type_name)
+		else:
+			result.no_material += 1
+			if result.no_mat_types.size() < 20:
+				result.no_mat_types.append(type_name)
+
+	return result
+
+
+## Console command: look — inspect mesh under camera crosshair (no collision needed)
+## Uses ray-to-center distance with angular weighting to pick the best match
+func _cmd_look(_args: Dictionary) -> String:
+	if not _streaming_manager:
+		return "Streaming manager not available"
+
+	var viewport: Viewport = _streaming_manager.get_viewport()
+	if not viewport:
+		return "No viewport"
+	var camera: Camera3D = viewport.get_camera_3d()
+	if not camera:
+		return "No camera available"
+
+	var ray_origin := camera.global_position
+	var ray_dir := -camera.global_basis.z  # Camera forward
+
+	# Search all loaded cell objects
+	var best: Dictionary = {"node": null, "score": INF}
+	for grid: Vector2i in _streaming_manager._loaded_cells:
+		var cell_node: Node3D = _streaming_manager._loaded_cells[grid]
+		if cell_node:
+			_find_mesh_on_ray(cell_node, ray_origin, ray_dir, 300.0, best)
+
+	if not best.node:
+		return "No mesh found in crosshair direction (within 300m)"
+
+	return _format_mesh_info(best.node as MeshInstance3D, ray_origin)
+
+
+## Recursively find the MeshInstance3D closest to the camera ray
+func _find_mesh_on_ray(node: Node, origin: Vector3, dir: Vector3, max_dist: float, best: Dictionary) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		if mi.visible and mi.mesh:
+			var center := mi.global_transform.origin
+			# Get mesh center offset (approximate — use AABB center)
+			var local_center := mi.get_aabb().get_center()
+			if local_center != Vector3.ZERO:
+				center = mi.global_transform * local_center
+
+			var to_mesh := center - origin
+			var along := to_mesh.dot(dir)
+			if along > 0.5 and along < max_dist:
+				# Perpendicular distance from mesh center to ray
+				var closest_on_ray := origin + dir * along
+				var perp_dist := center.distance_to(closest_on_ray)
+				# Score: angular offset (radians) — smaller is better
+				var angular := perp_dist / along if along > 0.0 else INF
+				# Only consider meshes within ~5 degree cone (0.087 rad)
+				if angular < 0.087 and angular < best.score:
+					best.node = mi
+					best.score = angular
+
+	for child in node.get_children():
+		_find_mesh_on_ray(child, origin, dir, max_dist, best)
+
+
+## Format detailed info about a picked MeshInstance3D
+func _format_mesh_info(mi: MeshInstance3D, cam_pos: Vector3) -> String:
+	var lines: PackedStringArray = []
+	lines.append("=== MESH INSPECT (look) ===")
+	lines.append("")
+
+	# Node identity
+	lines.append("Node: %s" % mi.name)
+	var parent := mi.get_parent()
+	if parent:
+		lines.append("Parent: %s" % parent.name)
+		# Walk up for cell/model info
+		var current: Node = parent
+		while current:
+			if current.has_meta("model_path"):
+				lines.append("Model: %s" % str(current.get_meta("model_path")))
+				break
+			if current.has_meta("cell_ref_id"):
+				lines.append("Ref ID: %s" % str(current.get_meta("cell_ref_id")))
+			current = current.get_parent()
+
+	# Distance
+	var dist := cam_pos.distance_to(mi.global_position)
+	lines.append("Distance: %.1fm" % dist)
+
+	# LOD level detection
+	var lod_level := _detect_lod_level(mi)
+	lines.append("LOD level: %s" % lod_level)
+
+	# Visibility range
+	var vr_begin := mi.visibility_range_begin
+	var vr_end := mi.visibility_range_end
+	var vr_margin := mi.visibility_range_end_margin
+	var fade_mode := mi.visibility_range_fade_mode
+	var fade_str := "DISABLED"
+	if fade_mode == GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF:
+		fade_str = "FADE_SELF"
+	elif fade_mode == GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES:
+		fade_str = "FADE_DEPENDENCIES"
+	lines.append("Visibility: begin=%.0f end=%.0f margin=%.0f fade=%s" % [vr_begin, vr_end, vr_margin, fade_str])
+
+	# Material info
+	var mat: Material = mi.material_override
+	var mat_source := "material_override"
+	if mat == null and mi.mesh and mi.mesh.get_surface_count() > 0:
+		mat = mi.get_surface_override_material(0)
+		mat_source = "surface_override(0)"
+	if mat == null and mi.mesh and mi.mesh.get_surface_count() > 0:
+		mat = mi.mesh.surface_get_material(0)
+		mat_source = "mesh_surface(0)"
+	if mat == null:
+		mat_source = "NONE"
+
+	lines.append("")
+	lines.append("Material source: %s" % mat_source)
+	if mat is StandardMaterial3D:
+		var std := mat as StandardMaterial3D
+		var tex_name := "NONE"
+		if std.albedo_texture:
+			tex_name = std.albedo_texture.resource_path
+			if tex_name.is_empty():
+				tex_name = "embedded (%dx%d)" % [
+					std.albedo_texture.get_width() if std.albedo_texture.get_width() > 0 else 0,
+					std.albedo_texture.get_height() if std.albedo_texture.get_height() > 0 else 0
+				]
+		lines.append("Type: StandardMaterial3D")
+		lines.append("Albedo color: %s" % std.albedo_color.to_html())
+		lines.append("Albedo texture: %s" % tex_name)
+		lines.append("Transparency: %s" % _transparency_name(std.transparency))
+	elif mat is ShaderMaterial:
+		var sm := mat as ShaderMaterial
+		var fade_val: Variant = sm.get_shader_parameter("fade_amount")
+		if fade_val != null:
+			lines.append("Type: FADE ShaderMaterial (fade_amount=%.3f)" % [fade_val])
+		else:
+			lines.append("Type: ShaderMaterial (custom)")
+	elif mat:
+		lines.append("Type: %s" % mat.get_class())
+	else:
+		lines.append("Type: NO MATERIAL — will render white/default")
+
+	# Mesh info
+	if mi.mesh:
+		lines.append("")
+		lines.append("Mesh surfaces: %d" % mi.mesh.get_surface_count())
+		lines.append("Mesh AABB: %s" % str(mi.get_aabb()))
+
+	return "\n".join(lines)
+
+
+## Detect LOD level from node name and parent context
+func _detect_lod_level(mi: MeshInstance3D) -> String:
+	var name_lower: String = mi.name.to_lower()
+
+	# Check for LOD suffix in node name
+	if name_lower.ends_with("_lod4") or name_lower.ends_with("_lod3"):
+		return "LOD3/4 (very low detail)"
+	if name_lower.ends_with("_lod2"):
+		return "LOD2 (low detail)"
+	if name_lower.ends_with("_lod1"):
+		return "LOD1 (medium detail)"
+	if "_lod" in name_lower:
+		var lod_idx := name_lower.find("_lod")
+		var suffix := name_lower.substr(lod_idx)
+		return "LOD (%s)" % suffix
+
+	# Check parent name for LOD indicators
+	var mi_parent := mi.get_parent()
+	if mi_parent:
+		var parent_lower: String = mi_parent.name.to_lower()
+		if "_lod" in parent_lower:
+			return "LOD (parent: %s)" % mi_parent.name
+
+	# Check visibility_range to infer tier
+	if mi.visibility_range_begin > 0 and mi.visibility_range_end > 0:
+		if mi.visibility_range_begin >= 100:
+			return "LOD0 (main mesh, visibility suggests MID-range display)"
+		return "LOD0 (main mesh, NEAR tier)"
+
+	if mi.visibility_range_end > 0:
+		return "LOD0 (main mesh, visibility_range_end=%.0f)" % mi.visibility_range_end
+
+	return "LOD0 (main mesh, no visibility_range)"
+
+
+## Helper: transparency mode name
+func _transparency_name(mode: int) -> String:
+	match mode:
+		BaseMaterial3D.TRANSPARENCY_DISABLED: return "DISABLED"
+		BaseMaterial3D.TRANSPARENCY_ALPHA: return "ALPHA"
+		BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR: return "ALPHA_SCISSOR"
+		BaseMaterial3D.TRANSPARENCY_ALPHA_HASH: return "ALPHA_HASH"
+		BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS: return "DEPTH_PRE_PASS"
+		_: return "UNKNOWN(%d)" % mode

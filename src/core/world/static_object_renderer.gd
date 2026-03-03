@@ -266,6 +266,11 @@ func _extract_lod_meshes(node: Node, mesh_type: MeshType) -> void:
 		var mi := node as MeshInstance3D
 		if not mi.mesh:
 			return
+		# Skip hidden meshes — these were filtered by MeshVisibilityUtils
+		# (materialless/white-only nodes). Processing them can overwrite
+		# a valid textured LOD0 entry with an untextured one.
+		if not mi.visible:
+			return
 
 		var node_name: String = node.name
 		var lod_level := _get_lod_level_from_name(node_name)

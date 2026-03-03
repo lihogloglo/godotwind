@@ -24,6 +24,7 @@ ESMManager="*res://src/core/esm/esm_manager.gd"
 OceanManager="*res://src/core/water/ocean_manager.gd"
 ShaderManager="*res://src/core/shaders/shader_manager.gd"
 DeformationManager="*res://src/core/deformation/deformation_manager.gd"
+PerfSnapshot="*res://tests/perf_snapshot.gd"
 
 [debug]
 

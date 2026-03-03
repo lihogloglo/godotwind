@@ -360,6 +360,27 @@ func _preload_instances(entry: PoolEntry, count: int) -> void:
 func _reset_instance(instance: Node3D) -> void:
 	instance.visible = false
 	instance.transform = Transform3D.IDENTITY
+	# Clear stuck material_overrides from interrupted fade-in tweens.
+	# When a cell unloads during fade animation, the tween is killed but
+	# material_override stays as the fade ShaderMaterial. Without this reset,
+	# the next pool acquire inherits the stuck fade material.
+	_reset_materials(instance)
+
+
+## Internal: Clear fade ShaderMaterial overrides from interrupted fade-in animations
+## Only clears materials with "fade_amount" parameter — leaves legitimate ShaderMaterials intact
+func _reset_materials(node: Node) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		if mi.material_override is ShaderMaterial:
+			var sm := mi.material_override as ShaderMaterial
+			if sm.get_shader_parameter("fade_amount") != null:
+				mi.material_override = null
+		# Clean up fade metadata if present
+		if mi.has_meta("_pre_fade_material"):
+			mi.remove_meta("_pre_fade_material")
+	for child in node.get_children():
+		_reset_materials(child)
 
 
 ## Internal: Normalize model path for consistent lookups

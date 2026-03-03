@@ -711,11 +711,19 @@ public partial class NativeNIFReader : RefCounted
 		return prop;
 	}
 
-	private NiObjectNET ReadNiStencilProperty()
+	private NiStencilProperty ReadNiStencilProperty()
 	{
-		var prop = new NiObjectNET();
+		var prop = new NiStencilProperty();
 		ReadNiObjectNET(prop);
-		Skip(2 + 1 + 4 * 6); // flags + enabled + 6 uint32s
+		prop.Flags = ReadUInt16();
+		prop.Enabled = ReadByte() != 0;
+		prop.TestFunction = ReadUInt32();
+		prop.StencilRef = ReadUInt32();
+		prop.StencilMask = ReadUInt32();
+		prop.FailAction = ReadUInt32();
+		prop.ZFailAction = ReadUInt32();
+		prop.PassAction = ReadUInt32();
+		prop.DrawMode = ReadUInt32();
 		return prop;
 	}
 
@@ -1758,6 +1766,20 @@ public partial class NiAlphaProperty : NiObjectNET
 {
 	public ushort AlphaFlags { get; set; }
 	public byte Threshold { get; set; }
+}
+
+public partial class NiStencilProperty : NiObjectNET
+{
+	public ushort Flags { get; set; }
+	public bool Enabled { get; set; }
+	public uint TestFunction { get; set; }
+	public uint StencilRef { get; set; }
+	public uint StencilMask { get; set; }
+	public uint FailAction { get; set; }
+	public uint ZFailAction { get; set; }
+	public uint PassAction { get; set; }
+	/// <summary>Draw mode: 0=CCW_OR_CW (cull back), 1=CW (cull front), 2=BOTH (double-sided), 3=NONE</summary>
+	public uint DrawMode { get; set; }
 }
 
 public partial class NiVertexColorProperty : NiObjectNET
