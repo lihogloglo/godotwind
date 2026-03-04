@@ -91,6 +91,10 @@ class MeshType:
 	## Multi-material buildings have multiple meshes per LOD level.
 	## If populated, add_instance() creates per-LOD RS instances with visibility_range.
 	var lod_meshes: Dictionary = {}  ## {int -> Array[LodMeshEntry]}
+	## When duplicate LOD bands are collapsed (e.g., LOD1==LOD2==LOD3), this stores
+	## the highest collapsed level. LOD1's visibility_range extends to this level's end.
+	## -1 means no collapsing (all LOD levels are unique).
+	var lod_collapsed_to: int = -1
 
 
 ## Instance data
@@ -241,6 +245,23 @@ func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
 						mesh_type.lod_meshes[level] = (mesh_type.lod_meshes[fallback] as Array).duplicate()
 						break
 
+		# Collapse duplicate MID LOD bands (Issue #9).
+		# When LOD2/LOD3 are fallback copies of LOD1 (identical mesh RIDs), rendering
+		# them as separate bands wastes RS instances. Detect and collapse:
+		# - If LOD1 == LOD2 == LOD3: keep LOD1 covering 150-500m, erase LOD2/LOD3
+		# - If LOD1 == LOD2 but LOD3 differs: keep LOD1 covering 150-375m, erase LOD2
+		if 1 in mesh_type.lod_meshes:
+			var collapsed_to := 1
+			for level: int in [2, 3]:
+				if level in mesh_type.lod_meshes and _lod_entries_same_meshes(
+						mesh_type.lod_meshes[1] as Array, mesh_type.lod_meshes[level] as Array):
+					mesh_type.lod_meshes.erase(level)
+					collapsed_to = level
+				else:
+					break  # Stop collapsing at first different LOD
+			if collapsed_to > 1:
+				mesh_type.lod_collapsed_to = collapsed_to
+
 	if mesh_type.lod_meshes.is_empty():
 		# No LOD meshes found — fall back to single-mesh registration
 		register_from_prototype(type_name, prototype)
@@ -280,13 +301,33 @@ func _extract_lod_meshes(node: Node, mesh_type: MeshType) -> void:
 		if not mi.mesh:
 			return
 		# Skip hidden meshes — these were filtered by MeshVisibilityUtils
-		# (materialless/white-only nodes). Processing them can overwrite
-		# a valid textured LOD0 entry with an untextured one.
+		# (materialless/white-only nodes).
 		if not mi.visible:
 			return
 
 		var node_name: String = node.name
 		var lod_level := _get_lod_level_from_name(node_name)
+
+		# Skip LOD nodes whose base mesh is hidden (collision geometry that
+		# got LODs generated before the prebake fix). Base mesh name = strip _LODn.
+		if lod_level > 0:
+			var lower_name: String = node_name.to_lower()
+			var lod_pos: int = lower_name.rfind("_lod")
+			if lod_pos > 0:
+				var base_name: String = node_name.substr(0, lod_pos)
+				var parent_node: Node = mi.get_parent()
+				if parent_node:
+					var base_mesh: Node = parent_node.find_child(base_name, false, false)
+					if base_mesh is MeshInstance3D and not base_mesh.visible:
+						return
+
+		# Skip meshes that would be hidden by _hide_lod_nodes() in the NEAR path.
+		# The prototype passed to register_lod_from_prototype() is the RAW prototype
+		# (not processed by _hide_lod_nodes), so materialless/white meshes are still
+		# visible. Without this check, they'd create plain-colored RS instances that
+		# overlap with textured ones.
+		if not MeshVisibilityUtils.has_valid_material(mi, false):
+			return
 
 		var entry := LodMeshEntry.new()
 		entry.mesh = mi.mesh
@@ -341,6 +382,17 @@ func _get_lod_level_from_name(node_name: String) -> int:
 	elif lower.ends_with("_lod1"):
 		return 1
 	return 0  # Base mesh (LOD0)
+
+
+## Check if two LOD entry arrays reference the same meshes (by RID).
+## Used to detect fallback-filled bands that duplicate an existing LOD level.
+static func _lod_entries_same_meshes(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in range(a.size()):
+		if (a[i] as LodMeshEntry).mesh_rid != (b[i] as LodMeshEntry).mesh_rid:
+			return false
+	return true
 
 
 ## Find first MeshInstance3D in prototype, skipping LOD nodes
@@ -425,8 +477,15 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 						lod_rid, RenderingServer.SHADOW_CASTING_SETTING_OFF
 					)
 
-				# Set per-instance visibility_range for this LOD band
+				# Set per-instance visibility_range for this LOD band.
+				# If duplicate LOD bands were collapsed (Issue #9), extend LOD1's
+				# end distance to cover the full MID range (e.g., 150-500m instead
+				# of 150-250m). This eliminates redundant RS instances.
 				var vis := _get_lod_visibility_range(lod_level)
+				if lod_level == 1 and mesh_type.lod_collapsed_to > 1:
+					var collapsed_vis := _get_lod_visibility_range(mesh_type.lod_collapsed_to)
+					vis.end = collapsed_vis.end
+					vis.end_margin = collapsed_vis.end_margin
 				rs.instance_geometry_set_visibility_range(
 					lod_rid,
 					vis.begin, vis.end,
@@ -605,12 +664,13 @@ func set_instance_visible(id: int, visible: bool) -> void:
 
 
 ## Mark an instance as promoted (NEAR Node3D exists) and hide overlapping RS LODs.
-## On promotion: hides LOD0 RS instance (0-150m, duplicated by NEAR Node3D).
-## LOD1-3 RS instances stay visible as a safety net for 150-500m coverage.
-## If the NEAR Node3D has its own LOD children, the visual overlap is harmless
-## (same mesh, same transform, just slight overdraw). If not, LOD1-3 prevent gaps.
-## On demotion (is_promoted=false), LOD0 RS instance is shown again.
-func set_instance_promoted(id: int, is_promoted: bool) -> void:
+## On promotion (is_promoted=true):
+##   - Always hides LOD0 (0-150m, duplicated by NEAR Node3D)
+##   - If near_has_lods=true, also hides LOD1-3 (150-500m) to prevent double-rendering
+##     (Issue #2: NEAR Node3D's LOD children already cover this range)
+##   - If near_has_lods=false, keeps LOD1-3 visible as a safety net for 150-500m
+## On demotion (is_promoted=false): shows ALL LOD RIDs.
+func set_instance_promoted(id: int, is_promoted: bool, near_has_lods: bool = true) -> void:
 	if id not in _instances:
 		return
 	var data: InstanceData = _instances[id]
@@ -619,11 +679,19 @@ func set_instance_promoted(id: int, is_promoted: bool) -> void:
 	data.promoted = is_promoted
 
 	if not data.lod_rids.is_empty():
-		# Hide ALL LOD0 RIDs — multi-material buildings have multiple meshes at LOD0.
-		# NEAR Node3D covers 0-150m. Keep LOD1-3 visible for 150-500m coverage.
-		var count: int = data.lod0_count if data.lod0_count > 0 else 1
-		for i in range(mini(count, data.lod_rids.size())):
-			RenderingServer.instance_set_visible(data.lod_rids[i], not is_promoted)
+		if is_promoted:
+			# Hide LOD0 RIDs — NEAR Node3D covers 0-150m
+			var lod0_end: int = data.lod0_count if data.lod0_count > 0 else 1
+			for i in range(mini(lod0_end, data.lod_rids.size())):
+				RenderingServer.instance_set_visible(data.lod_rids[i], false)
+			# Hide LOD1-3 too if NEAR has its own LOD children (prevents double-rendering)
+			if near_has_lods:
+				for i in range(lod0_end, data.lod_rids.size()):
+					RenderingServer.instance_set_visible(data.lod_rids[i], false)
+		else:
+			# Demotion: show ALL LOD RIDs (LOD0 + LOD1-3)
+			for lod_rid: RID in data.lod_rids:
+				RenderingServer.instance_set_visible(lod_rid, true)
 	elif data.instance_rid.is_valid():
 		# Single-mesh path: hide the whole instance (NEAR Node3D replaces it)
 		RenderingServer.instance_set_visible(data.instance_rid, not is_promoted)

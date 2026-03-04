@@ -643,8 +643,10 @@ func _add_lods_to_scene(node: Node) -> void:
 	# Process MeshInstance3D nodes
 	if node is MeshInstance3D:
 		var mesh_instance := node as MeshInstance3D
-		# Skip if already has LOD metadata (from old system) or is a skeleton
-		if not mesh_instance.has_meta("_has_skeleton") and mesh_instance.mesh != null:
+		# Skip hidden meshes (collision geometry), skeleton meshes, or meshes without data
+		if not mesh_instance.visible:
+			pass  # Don't generate LODs for hidden meshes (e.g. RootCollisionNode geometry)
+		elif not mesh_instance.has_meta("_has_skeleton") and mesh_instance.mesh != null:
 			var mesh := mesh_instance.mesh as ArrayMesh
 			if mesh:
 				_add_visibility_range_lods(mesh_instance, mesh)
@@ -934,6 +936,12 @@ func _convert_ni_node(ni_node: Defs.NiNode, skeleton: Skeleton3D = null) -> Node
 	if ni_node.record_type == Defs.RT_NI_BILLBOARD_NODE:
 		node.set_meta("nif_billboard", true)
 		node.set_meta("nif_record_type", ni_node.record_type)
+
+	# Skip RootCollisionNode — its geometry is collision-only, not renderable.
+	# Morrowind identifies these by parent node name, not per-shape flags.
+	if ni_node.record_type == Defs.RT_ROOT_COLLISION_NODE:
+		node.visible = false
+		return node
 
 	# Convert children
 	for child_idx in ni_node.children_indices:
@@ -2671,9 +2679,15 @@ func _collect_geometry_recursive(record: Defs.NIFRecord, parent_transform: Trans
 	elif record is Defs.NiTriStrips:
 		_collect_tri_strips(record as Defs.NiTriStrips, world_transform, collected)
 
-	# Recurse into children
+	# Recurse into children (skip RootCollisionNode — its geometry is collision-only)
 	if record is Defs.NiNode:
 		var node := record as Defs.NiNode
+		# RootCollisionNode contains collision geometry that duplicates visual meshes.
+		# Morrowind identifies these by parent node name, not per-shape flags.
+		# Without this skip, collision shapes get collected as renderable geometry,
+		# creating plain-colored overlapping RS instances that z-fight with textured ones.
+		if node.record_type == Defs.RT_ROOT_COLLISION_NODE:
+			return
 		for child_idx in node.children_indices:
 			if child_idx < 0:
 				continue

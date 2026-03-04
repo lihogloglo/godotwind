@@ -1363,9 +1363,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				pending_children.append({"parent": request.cell_node, "child": obj})
 				instantiated += 1
 
-				# Immediate promotion: hide RS LOD0 since Node3D covers 0-150m
+				# Immediate promotion: hide RS LOD instances overlapping with Node3D.
+				# If the Node3D has visible LOD children (150-500m), also hide LOD1-3
+				# RS instances to prevent double-rendering (Issue #2).
 				if mid_instance_id >= 0:
-					_static_renderer.set_instance_promoted(mid_instance_id, true)
+					var has_lods := _has_visible_lod_children(obj)
+					_static_renderer.set_instance_promoted(mid_instance_id, true, has_lods)
 					_immediate_promotions.append({
 						"id": mid_instance_id,
 						"node": obj,
@@ -2062,6 +2065,17 @@ func _get_cache_key(model_path: String, item_id: String) -> String:
 ## CRITICAL: Must be called after every duplicate() to prevent white mesh overlays
 func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node)
+
+
+## Check if a node tree has visible LOD children (used for double-rendering prevention)
+static func _has_visible_lod_children(node: Node) -> bool:
+	for child in node.get_children():
+		if child is MeshInstance3D and child.visible:
+			if MeshVisibilityUtils.is_lod_node_name(child.name):
+				return true
+		if _has_visible_lod_children(child):
+			return true
+	return false
 
 
 ## Get the maximum AABB dimension for a model, with caching.

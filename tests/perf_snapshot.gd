@@ -74,7 +74,50 @@ func _take_sample(t: float) -> Dictionary:
 		"resources": Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT),
 		"orphan_nodes": Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT),
 		"physics_objects": Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS),
+		"mid_rs_instances": _get_mid_tier_instances(),
+		"mid_mesh_types": _get_mid_tier_mesh_types(),
+		"promoted_objects": _get_promoted_count(),
 	}
+
+
+func _get_mid_tier_instances() -> float:
+	var nsm := _get_streaming_manager()
+	if nsm and nsm.has_method("get_static_renderer_stats"):
+		var stats: Dictionary = nsm.get_static_renderer_stats()
+		return float(stats.get("total_instances", 0))
+	return 0.0
+
+
+func _get_mid_tier_mesh_types() -> float:
+	var nsm := _get_streaming_manager()
+	if nsm and nsm.has_method("get_static_renderer_stats"):
+		var stats: Dictionary = nsm.get_static_renderer_stats()
+		return float(stats.get("mesh_types", 0))
+	return 0.0
+
+
+func _get_promoted_count() -> float:
+	var nsm := _get_streaming_manager()
+	if nsm and nsm.has_method("get_stats"):
+		var stats: Dictionary = nsm.get_stats()
+		return float(stats.get("mid_to_near_promotions", 0))
+	return 0.0
+
+
+func _get_streaming_manager() -> Node:
+	# Find NativeStreamingManager in scene tree
+	var root := get_tree().root
+	return _find_node_by_class(root, "NativeStreamingManager")
+
+
+func _find_node_by_class(node: Node, class_str: String) -> Node:
+	if node.get_class() == class_str or (node is Node3D and node.has_method("get_static_renderer_stats")):
+		return node
+	for child in node.get_children():
+		var found := _find_node_by_class(child, class_str)
+		if found:
+			return found
+	return null
 
 func _write_report() -> void:
 	var path := "user://perf_snapshot.txt"
@@ -152,14 +195,18 @@ func _write_report() -> void:
 	f.store_line("Resources (last): %.0f" % _samples[-1]["resources"])
 	f.store_line("Orphan nodes (last): %.0f" % _samples[-1]["orphan_nodes"])
 	f.store_line("Physics objects (last): %.0f" % _samples[-1]["physics_objects"])
+	f.store_line("MID RS instances (last): %.0f" % _samples[-1]["mid_rs_instances"])
+	f.store_line("MID mesh types (last): %.0f" % _samples[-1]["mid_mesh_types"])
+	f.store_line("Promoted objects (total): %.0f" % _samples[-1]["promoted_objects"])
 	f.store_line("")
 
 	f.store_line("--- PER-SECOND SAMPLES ---")
-	f.store_line("t(s) | FPS | FrameMS | DrawCalls | Primitives | ObjRendered | VRAM_MB | Nodes")
+	f.store_line("t(s) | FPS | FrameMS | DrawCalls | Primitives | ObjRendered | VRAM_MB | Nodes | MID_RS | MID_Types | Promoted")
 	for s: Dictionary in _samples:
-		f.store_line("%.1f | %.0f | %.1f | %.0f | %.0f | %.0f | %.1f | %.0f" % [
+		f.store_line("%.1f | %.0f | %.1f | %.0f | %.0f | %.0f | %.1f | %.0f | %.0f | %.0f | %.0f" % [
 			s["t"], s["fps"], s["frame_time_ms"], s["draw_calls"], s["primitives"],
-			s["objects_rendered"], s["video_mem_mb"], s["nodes"]
+			s["objects_rendered"], s["video_mem_mb"], s["nodes"],
+			s["mid_rs_instances"], s["mid_mesh_types"], s["promoted_objects"]
 		])
 
 	f.close()
@@ -171,4 +218,8 @@ func _write_report() -> void:
 	print("[PERF] Primitives (avg): %.0f" % avg_prim)
 	print("[PERF] Nodes (avg): %.0f" % avg_nodes)
 	print("[PERF] VRAM: %.1f MB | Textures: %.1f MB" % [vmem_arr[-1], _samples[-1]["texture_mem_mb"]])
+	print("[PERF] MID RS instances: %.0f | Types: %.0f | Promoted: %.0f" % [
+		_samples[-1]["mid_rs_instances"], _samples[-1]["mid_mesh_types"], _samples[-1]["promoted_objects"]
+	])
+	print("[PERF] Orphan nodes: %.0f" % _samples[-1]["orphan_nodes"])
 	print("[PERF] ============================")

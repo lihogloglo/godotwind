@@ -1028,7 +1028,8 @@ func _cmd_mid_lod_textures(_args: Dictionary) -> String:
 		lines.append("")
 		lines.append("All LOD materials have textures. Issue may be in RS instance material application.")
 
-	return "\n".join(lines)
+	var result := "\n".join(lines)
+	return result
 
 
 ## Check if a LodMeshEntry has a material with an albedo texture
@@ -1127,7 +1128,7 @@ func _cmd_reload_compare(_args: Dictionary) -> String:
 	lines.insert(2, "LOD0 fade modes: FADE_SELF=%d, FADE_DEPS=%d" % [counts["fade_self"], counts["fade_deps"]])
 	lines.insert(3, "LOD0 hidden: %d, Cull: disabled=%d, back=%d" % [counts["hidden_lod0"], counts["cull_disabled"], counts["cull_back"]])
 
-	if buildings_checked == 0:
+	if counts["buildings"] == 0:
 		lines.append("No buildings found in loaded NEAR-tier cells.")
 
 	return "\n".join(lines)

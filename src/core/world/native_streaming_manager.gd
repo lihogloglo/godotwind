@@ -799,7 +799,10 @@ func _process_mid_to_near_promotions() -> void:
 			_disable_collision_shapes(near_obj)
 
 			cell_node.add_child(near_obj)
-			_static_renderer.set_instance_promoted(id, true)
+			# Check if NEAR Node3D has visible LOD children covering 150-500m.
+			# If yes, hide LOD1-3 RS instances to prevent double-rendering (Issue #2).
+			var near_has_lods := _near_has_visible_lod_children(near_obj)
+			_static_renderer.set_instance_promoted(id, true, near_has_lods)
 			_promoted_objects[id] = near_obj
 			promoted += 1
 
@@ -850,6 +853,20 @@ static func _enable_collision_shapes(node: Node) -> void:
 		_enable_collision_shapes(child)
 	if node is Node3D:
 		node.remove_meta("collision_disabled")
+
+
+## Check if a NEAR Node3D has visible LOD children (e.g., _LOD1, _LOD2, _LOD3 meshes)
+## that cover the 150-500m range. Used to decide whether to hide LOD1-3 RS instances
+## on promotion (Issue #2: avoid double-rendering).
+static func _near_has_visible_lod_children(node: Node) -> bool:
+	for child in node.get_children():
+		if child is MeshInstance3D and child.visible:
+			if MeshVisibilityUtils.is_lod_node_name(child.name):
+				return true
+		# Check one level deeper (some NIFs nest meshes under transform nodes)
+		if _near_has_visible_lod_children(child):
+			return true
+	return false
 
 
 ## Batch-free all promoted objects (used after teleport to avoid stale physics bodies)
@@ -1277,6 +1294,16 @@ func get_loaded_cell_coordinates() -> Array[Vector2i]:
 	for grid: Vector2i in _loaded_cells.keys():
 		coords.append(grid)
 	return coords
+
+
+## Get all loaded cell Node3D containers (for object picking)
+func get_loaded_cell_nodes() -> Array:
+	var nodes: Array = []
+	for grid: Vector2i in _loaded_cells:
+		var cell: Variant = _loaded_cells[grid]
+		if is_instance_valid(cell):
+			nodes.append(cell)
+	return nodes
 
 
 ## Refresh cells around camera

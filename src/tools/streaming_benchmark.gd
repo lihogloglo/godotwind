@@ -32,7 +32,7 @@ const SEGMENT_NAMES: Array[String] = [
 ]
 
 ## CSV column headers
-const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types"
+const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects"
 
 #endregion
 
@@ -475,7 +475,7 @@ func _update_segment_index() -> void:
 
 func _log_frame() -> void:
 	var entry := PackedFloat64Array()
-	entry.resize(17)
+	entry.resize(20)
 	entry[0] = float(Engine.get_frames_drawn())
 	entry[1] = _last_frame_time_ms
 	entry[2] = Engine.get_frames_per_second()
@@ -495,6 +495,11 @@ func _log_frame() -> void:
 	var mid_stats := _get_mid_tier_stats()
 	entry[15] = float(mid_stats.get("total_instances", 0))
 	entry[16] = float(mid_stats.get("mesh_types", 0))
+	# VRAM and texture memory (MB)
+	entry[17] = Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
+	entry[18] = Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED) / 1048576.0
+	# Promoted objects count
+	entry[19] = float(_get_promoted_count())
 	_frame_log.append(entry)
 
 	# Sample visibility for appear/disappear detection
@@ -537,6 +542,13 @@ func _get_mid_tier_stats() -> Dictionary:
 			if child.has_method("get_stats"):
 				return child.get_stats()
 	return {}
+
+
+func _get_promoted_count() -> int:
+	if _streaming_manager:
+		var stats: Dictionary = _streaming_manager.get_stats()
+		return stats.get("mid_to_near_promotions", 0) as int
+	return 0
 
 
 ## Count visible MeshInstance3D nodes and rendered objects to detect appear/disappear
@@ -668,12 +680,22 @@ func _calculate_results() -> Dictionary:
 	var peak_nodes := 0.0
 	var peak_draw_calls := 0.0
 	var total_draw_calls := 0.0
+	var min_mid_instances := 999999.0
+	var max_mid_instances := 0.0
+	var peak_vram_mb := 0.0
+	var peak_texture_mb := 0.0
 	for entry in _frame_log:
 		peak_queue = maxf(peak_queue, entry[7])
 		peak_cells = maxf(peak_cells, entry[8])
 		peak_nodes = maxf(peak_nodes, entry[3])
 		peak_draw_calls = maxf(peak_draw_calls, entry[4])
 		total_draw_calls += entry[4]
+		# RS instance range (skip frames before any instances exist)
+		if entry[15] > 0:
+			min_mid_instances = minf(min_mid_instances, entry[15])
+		max_mid_instances = maxf(max_mid_instances, entry[15])
+		peak_vram_mb = maxf(peak_vram_mb, entry[17])
+		peak_texture_mb = maxf(peak_texture_mb, entry[18])
 
 	# Per-segment breakdown
 	var segment_data: Dictionary = {}
@@ -710,6 +732,10 @@ func _calculate_results() -> Dictionary:
 		"peak_nodes": int(peak_nodes),
 		"peak_draw_calls": int(peak_draw_calls),
 		"avg_draw_calls": int(total_draw_calls / float(total_frames)),
+		"min_mid_instances": int(min_mid_instances) if min_mid_instances < 999999.0 else 0,
+		"max_mid_instances": int(max_mid_instances),
+		"peak_vram_mb": peak_vram_mb,
+		"peak_texture_mb": peak_texture_mb,
 		"segments": segment_data,
 	}
 
@@ -744,11 +770,12 @@ func _save_csv() -> void:
 
 	file.store_line(CSV_HEADERS)
 	for entry in _frame_log:
-		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d" % [
+		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d" % [
 			int(entry[0]), entry[1], entry[2], int(entry[3]), int(entry[4]),
 			int(entry[5]), int(entry[6]), int(entry[7]), int(entry[8]),
 			int(entry[9]), entry[10], entry[11], entry[12], entry[13],
-			int(entry[14]), int(entry[15]), int(entry[16])
+			int(entry[14]), int(entry[15]), int(entry[16]),
+			entry[17], entry[18], int(entry[19])
 		]
 		file.store_line(line)
 
@@ -816,13 +843,21 @@ func _print_summary(results: Dictionary) -> void:
 	lines.append("Rendering:")
 	lines.append("  Average draw calls: %d" % results.avg_draw_calls)
 	lines.append("  Peak draw calls: %d" % results.peak_draw_calls)
+	lines.append("")
+	lines.append("VRAM:")
+	lines.append("  Peak VRAM: %.0f MB" % results.peak_vram_mb)
+	lines.append("  Peak texture memory: %.0f MB" % results.peak_texture_mb)
 
-	# MID-tier stats from last frame
+	# MID-tier stats — show range over entire run to detect cleanup issues
 	var final_mid_stats := _get_mid_tier_stats()
 	if not final_mid_stats.is_empty():
 		lines.append("")
 		lines.append("MID-Tier (StaticObjectRenderer):")
-		lines.append("  Total RS instances: %d" % final_mid_stats.get("total_instances", 0))
+		lines.append("  RS instances (final): %d" % final_mid_stats.get("total_instances", 0))
+		lines.append("  RS instances (min/max over run): %d / %d" % [results.min_mid_instances, results.max_mid_instances])
+		var delta: int = results.max_mid_instances - int(final_mid_stats.get("total_instances", 0))
+		if delta > 0:
+			lines.append("  RS instances freed during run: %d (cleanup working)" % delta)
 		lines.append("  Visible RS instances: %d" % final_mid_stats.get("visible_instances", 0))
 		lines.append("  Registered mesh types: %d" % final_mid_stats.get("mesh_types", 0))
 

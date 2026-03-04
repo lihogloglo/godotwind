@@ -88,6 +88,9 @@ func _ready() -> void:
 	picker.picker_mode_entered.connect(func() -> void: ui.print_line("[color=yellow]Click on an object to select it...[/color]"))
 	picker.picker_mode_exited.connect(func() -> void: pass)
 
+	# Enable hover + tooltip when console is visible, disable when hidden
+	ui.console_visibility_changed.connect(_on_console_visibility_for_picker)
+
 	# Register built-in commands
 	_register_builtin_commands()
 
@@ -136,8 +139,14 @@ func set_camera(cam: Camera3D) -> void:
 
 
 ## Register a context object that commands can access
-func register_context(name: String, obj: Variant) -> void:
-	_context[name] = obj
+func register_context(context_name: String, obj: Variant) -> void:
+	_context[context_name] = obj
+
+	# When the streaming manager is registered, wire up the cell provider for picking
+	if context_name == "world" and obj is Object:
+		var world_obj: Object = obj
+		if world_obj.has_method("get_loaded_cell_nodes"):
+			picker.set_cell_provider(Callable(world_obj, "get_loaded_cell_nodes"))
 
 
 ## Get a context object
@@ -323,6 +332,14 @@ func _on_selection_cleared() -> void:
 	ui.hide_selection()
 	_context.erase("selected")
 	selection_cleared.emit()
+
+
+## Enable/disable hover picking when console opens/closes
+func _on_console_visibility_for_picker(visible: bool) -> void:
+	picker.set_hover_enabled(visible)
+	# Pass the console panel reference so picker can dynamically check its rect
+	if not picker._console_panel:
+		picker.set_console_panel(ui.panel)
 
 
 ## Register all built-in commands

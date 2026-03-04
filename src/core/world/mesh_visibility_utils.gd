@@ -35,11 +35,13 @@ static func has_valid_material(mi: MeshInstance3D, for_lod_node: bool = false) -
 	if mi.material_override:
 		return _is_material_renderable(mi.material_override, for_lod_node)
 
-	# Check surface materials
+	# Check surface materials (MeshInstance3D override first, then mesh resource)
 	if mi.mesh.get_surface_count() == 0:
 		return false
 
-	var surface_mat := mi.mesh.surface_get_material(0)
+	var surface_mat: Material = mi.get_surface_override_material(0)
+	if not surface_mat:
+		surface_mat = mi.mesh.surface_get_material(0)
 	if surface_mat:
 		return _is_material_renderable(surface_mat, for_lod_node)
 
@@ -78,14 +80,24 @@ static func _is_material_renderable(mat: Material, for_lod_node: bool = false) -
 		if for_lod_node:
 			return true
 
-		# Only hide meshes with exactly default white color AND no texture.
-		# The previous 0.95 threshold was too aggressive — Morrowind has many
-		# legitimate near-white surfaces (white stone, plaster, bone, snow).
+		# Has vertex colors — renderable even without texture.
+		# Must check BEFORE luminance filter: Morrowind glow meshes have
+		# white albedo + vertex colors for lighting, and would be incorrectly hidden.
+		if std_mat.vertex_color_use_as_albedo:
+			return true
+
+		# Hide textureless meshes with high-luminance colors (near-white/light gray).
+		# These are typically collision geometry or placeholders that leaked through
+		# the RootCollisionNode filter. Legitimate near-white textured surfaces
+		# (stone, plaster, bone, snow) are caught above by the albedo_texture check.
+		# Threshold 0.85 avoids hiding intentionally colored geometry (brown wood,
+		# gray stone trim) while catching collision mesh diffuse values (~0.9-1.0).
 		var color := std_mat.albedo_color
-		if color == Color.WHITE:
+		var luminance := color.r * 0.299 + color.g * 0.587 + color.b * 0.114
+		if luminance > 0.85:
 			return false
 
-		# Any non-default color is considered intentional
+		# Any lower-luminance color without texture is considered intentional
 		return true
 
 	# Other material types - assume valid
