@@ -13,8 +13,10 @@ var _stable_start: float = 0.0
 var _sample_start: float = 0.0
 var _stabilize_time: float = 3.0  # wait 3s after FPS > 5 before sampling
 var _consecutive_good: int = 0
+var _quit_after: bool = false  # Only quit app after report if --perf-quit CLI flag is set
 
 func _ready() -> void:
+	_quit_after = OS.get_cmdline_args().has("--perf-quit") or OS.get_cmdline_user_args().has("--perf-quit")
 	print("[PERF] Auto-profiler waiting for scene to finish loading (FPS > 5)...")
 
 func _process(_delta: float) -> void:
@@ -45,8 +47,9 @@ func _process(_delta: float) -> void:
 			if elapsed >= _duration:
 				_write_report()
 				_state = State.DONE
-				# Auto-quit so the CLI caller gets control back
-				get_tree().quit()
+				# Only quit if launched with --perf-quit (CLI benchmarking mode)
+				if _quit_after:
+					get_tree().quit()
 				return
 
 			if now - _last_sample >= _sample_interval:

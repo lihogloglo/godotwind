@@ -86,6 +86,18 @@ func register_commands(console: Console) -> void:
 		"Inspect mesh under crosshair: LOD level, material, visibility_range (no collision needed)",
 		"debug"
 	)
+	console.register_command(
+		"mid_lod_textures",
+		_cmd_mid_lod_textures,
+		"Audit MID-tier RS LOD materials: find models with textureless LODs (plain colored buildings)",
+		"debug"
+	)
+	console.register_command(
+		"reload_compare",
+		_cmd_reload_compare,
+		"Compare NEAR-tier object state: shows LOD0 visibility, cull_mode, material for loaded buildings",
+		"debug"
+	)
 
 
 func _cmd_impostor_stats(_args: Dictionary) -> String:
@@ -724,11 +736,14 @@ func _audit_rs_materials(renderer: Node3D) -> Dictionary:
 		# Check LOD mesh entries
 		if not has_mat and not mt.lod_meshes.is_empty():
 			for lod_level: int in mt.lod_meshes:
-				var lod_entry: Variant = mt.lod_meshes[lod_level]
-				if lod_entry.material:
-					has_mat = true
-					if lod_entry.material is StandardMaterial3D:
-						has_tex = (lod_entry.material as StandardMaterial3D).albedo_texture != null
+				var entries: Array = mt.lod_meshes[lod_level]
+				for lod_entry: StaticObjectRenderer.LodMeshEntry in entries:
+					if lod_entry.material:
+						has_mat = true
+						if lod_entry.material is StandardMaterial3D:
+							has_tex = (lod_entry.material as StandardMaterial3D).albedo_texture != null
+						break
+				if has_mat:
 					break
 
 		if has_tex:
@@ -936,3 +951,225 @@ func _transparency_name(mode: int) -> String:
 		BaseMaterial3D.TRANSPARENCY_ALPHA_HASH: return "ALPHA_HASH"
 		BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS: return "DEPTH_PRE_PASS"
 		_: return "UNKNOWN(%d)" % mode
+
+
+#region MID LOD Texture Audit
+
+## Audit MID-tier RS LOD materials for missing textures.
+## Checks StaticObjectRenderer._mesh_types to find models where LOD meshes
+## have materials without albedo_texture (renders as plain color at 150-500m).
+@warning_ignore("untyped_declaration")
+func _cmd_mid_lod_textures(_args: Dictionary) -> String:
+	if not _streaming_manager or not _streaming_manager._static_renderer:
+		return "MID-tier static renderer not available"
+
+	var renderer: StaticObjectRenderer = _streaming_manager._static_renderer
+	var mesh_types: Dictionary = renderer._mesh_types
+
+	var total_types := 0
+	var textured_lods := 0
+	var textureless_lods := 0
+	var building_textureless: Array[String] = []
+	var other_textureless: Array[String] = []
+
+	for type_name: String in mesh_types:
+		var mt: StaticObjectRenderer.MeshType = mesh_types[type_name]
+		if mt.lod_meshes.is_empty():
+			continue
+
+		total_types += 1
+		var is_building := type_name.begins_with("ex_") or type_name.begins_with("in_")
+
+		for lod_level: int in mt.lod_meshes:
+			if lod_level == 0:
+				continue  # Skip LOD0, we care about LOD1-3
+			var entries: Array = mt.lod_meshes[lod_level]
+			for entry: StaticObjectRenderer.LodMeshEntry in entries:
+				var has_texture := _lod_entry_has_texture(entry)
+				if has_texture:
+					textured_lods += 1
+				else:
+					textureless_lods += 1
+					var info := "%s LOD%d" % [type_name, lod_level]
+					if entry.material:
+						info += " (mat: %s)" % _mat_summary(entry.material)
+					elif not entry.surface_materials.is_empty():
+						info += " (surf[0]: %s)" % _mat_summary(entry.surface_materials[0])
+					else:
+						info += " (NO MATERIAL)"
+					if is_building:
+						building_textureless.append(info)
+					else:
+						other_textureless.append(info)
+
+	var lines: PackedStringArray = []
+	lines.append("=== MID-TIER LOD TEXTURE AUDIT ===")
+	lines.append("Registered mesh types with LODs: %d" % total_types)
+	lines.append("LOD1-3 entries with texture: %d" % textured_lods)
+	lines.append("LOD1-3 entries WITHOUT texture: %d" % textureless_lods)
+
+	if not building_textureless.is_empty():
+		lines.append("")
+		lines.append("BUILDINGS without LOD texture (%d):" % building_textureless.size())
+		for info in building_textureless.slice(0, 15):
+			lines.append("  %s" % info)
+		if building_textureless.size() > 15:
+			lines.append("  ... and %d more" % (building_textureless.size() - 15))
+
+	if not other_textureless.is_empty():
+		lines.append("")
+		lines.append("Other models without LOD texture (%d):" % other_textureless.size())
+		for info in other_textureless.slice(0, 10):
+			lines.append("  %s" % info)
+		if other_textureless.size() > 10:
+			lines.append("  ... and %d more" % (other_textureless.size() - 10))
+
+	if textureless_lods == 0 and textured_lods > 0:
+		lines.append("")
+		lines.append("All LOD materials have textures. Issue may be in RS instance material application.")
+
+	return "\n".join(lines)
+
+
+## Check if a LodMeshEntry has a material with an albedo texture
+func _lod_entry_has_texture(entry: StaticObjectRenderer.LodMeshEntry) -> bool:
+	# Check primary material
+	if entry.material:
+		if _material_has_texture(entry.material):
+			return true
+	# Check per-surface materials
+	for mat: Material in entry.surface_materials:
+		if mat and _material_has_texture(mat):
+			return true
+	# Check mesh resource surface materials (auto-inherited by RS)
+	if entry.mesh:
+		for si in range(entry.mesh.get_surface_count()):
+			var mat: Material = entry.mesh.surface_get_material(si)
+			if mat and _material_has_texture(mat):
+				return true
+	return false
+
+
+func _material_has_texture(mat: Material) -> bool:
+	if mat is StandardMaterial3D:
+		return (mat as StandardMaterial3D).albedo_texture != null
+	if mat is ShaderMaterial:
+		var sm := mat as ShaderMaterial
+		var tex: Variant = sm.get_shader_parameter("albedo_texture")
+		if tex is Texture2D:
+			return true
+		tex = sm.get_shader_parameter("texture_albedo")
+		if tex is Texture2D:
+			return true
+	return false
+
+
+func _mat_summary(mat: Material) -> String:
+	if mat == null:
+		return "null"
+	if mat is StandardMaterial3D:
+		var std := mat as StandardMaterial3D
+		var tex_str := "tex=YES" if std.albedo_texture else "tex=NO"
+		return "Std3D(%s, color=%s, cull=%d)" % [tex_str, std.albedo_color, std.cull_mode]
+	if mat is ShaderMaterial:
+		return "Shader(%s)" % (mat as ShaderMaterial).shader.resource_path.get_file() if (mat as ShaderMaterial).shader else "Shader(null)"
+	return mat.get_class()
+
+#endregion
+
+
+#region Reload Compare (Bug 1 diagnostic)
+
+## Compare NEAR-tier buildings: check LOD0 mesh state, visibility, cull mode, materials.
+## Helps diagnose "missing faces on reload" by showing the actual state of loaded objects.
+@warning_ignore("untyped_declaration")
+func _cmd_reload_compare(_args: Dictionary) -> String:
+	if not _streaming_manager:
+		return "Streaming manager not available"
+
+	var lines: PackedStringArray = []
+	lines.append("=== NEAR-TIER BUILDING STATE ===")
+
+	var counts := {
+		"buildings": 0, "promoted": 0, "initial": 0,
+		"fade_self": 0, "fade_deps": 0, "hidden_lod0": 0,
+		"cull_disabled": 0, "cull_back": 0,
+	}
+
+	for grid: Vector2i in _streaming_manager._loaded_cells:
+		var cell_node: Node3D = _streaming_manager._loaded_cells[grid]
+		if not cell_node:
+			continue
+		for child_idx in range(cell_node.get_child_count()):
+			var obj: Node = cell_node.get_child(child_idx)
+			if not obj is Node3D:
+				continue
+			var model_path: String = obj.get_meta("model_path", "")
+			if model_path.is_empty():
+				continue
+			# Only check building-type models
+			var fname := model_path.get_file().to_lower()
+			if not (fname.begins_with("ex_") or fname.begins_with("in_")):
+				continue
+
+			counts["buildings"] += 1
+			var is_promoted_obj := obj.has_meta("promoted_from_mid")
+			if is_promoted_obj:
+				counts["promoted"] += 1
+			else:
+				counts["initial"] += 1
+
+			# Check all MeshInstance3D children for LOD state
+			_audit_building_meshes(obj, lines, counts["buildings"] <= 5,
+				counts, is_promoted_obj)
+
+	lines.insert(1, "Buildings checked: %d (initial: %d, promoted: %d)" % [counts["buildings"], counts["initial"], counts["promoted"]])
+	lines.insert(2, "LOD0 fade modes: FADE_SELF=%d, FADE_DEPS=%d" % [counts["fade_self"], counts["fade_deps"]])
+	lines.insert(3, "LOD0 hidden: %d, Cull: disabled=%d, back=%d" % [counts["hidden_lod0"], counts["cull_disabled"], counts["cull_back"]])
+
+	if buildings_checked == 0:
+		lines.append("No buildings found in loaded NEAR-tier cells.")
+
+	return "\n".join(lines)
+
+
+## Audit meshes within a building object
+func _audit_building_meshes(node: Node, lines: PackedStringArray, verbose: bool,
+		counts: Dictionary, is_promoted: bool) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		var mesh_name: String = mi.name
+		var is_lod := MeshVisibilityUtils.is_lod_node_name(mesh_name)
+
+		if not is_lod:
+			# LOD0 mesh
+			if not mi.visible:
+				counts["hidden_lod0"] += 1
+			var fade_mode := mi.visibility_range_fade_mode
+			if fade_mode == GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF:
+				counts["fade_self"] += 1
+			elif fade_mode == GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES:
+				counts["fade_deps"] += 1
+
+			# Check cull mode
+			var mat: Material = mi.material_override
+			if mat == null and mi.mesh and mi.mesh.get_surface_count() > 0:
+				mat = mi.mesh.surface_get_material(0)
+			if mat is StandardMaterial3D:
+				if (mat as StandardMaterial3D).cull_mode == BaseMaterial3D.CULL_DISABLED:
+					counts["cull_disabled"] += 1
+				else:
+					counts["cull_back"] += 1
+
+			if verbose:
+				var promo_tag := " [PROMOTED]" if is_promoted else " [INITIAL]"
+				var vis_tag := " HIDDEN" if not mi.visible else ""
+				var fade_str := "DEPS" if fade_mode == GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES else "SELF"
+				lines.append("  %s%s%s: vis=%.0f-%.0f fade=%s" % [
+					mesh_name, promo_tag, vis_tag,
+					mi.visibility_range_begin, mi.visibility_range_end, fade_str])
+
+	for child in node.get_children():
+		_audit_building_meshes(child, lines, verbose, counts, is_promoted)
+
+#endregion

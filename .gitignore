@@ -4,6 +4,7 @@ agentchattr/
 agentchattr-main/
 inspos/
 .claude/
+.claude-flow/
 openmw-master/
 lapalma_map/
 lapalma_processed/
