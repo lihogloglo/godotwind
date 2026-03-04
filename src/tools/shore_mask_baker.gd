@@ -424,8 +424,10 @@ func _calculate_world_bounds() -> void:
 		world_max.y - world_min.y
 	)
 
-	# Add padding for shore gradient to extend beyond terrain edge
-	var padding := fade_distance + 100.0
+	# No padding — terrain data outside loaded regions returns 0.0 (sea level)
+	# which gets classified as land, creating a false gap. The shader returns
+	# shore_factor=1.0 for positions outside mask bounds, so the ocean is seamless.
+	var padding := 0.0
 	world_bounds = Rect2(
 		world_bounds.position.x - padding,
 		world_bounds.position.y - padding,

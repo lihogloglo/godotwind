@@ -376,9 +376,10 @@ func _create_ocean_panel() -> void:
 	water_quality_btn.add_item("Auto", -1)
 	water_quality_btn.add_item("Flat", 0)
 	water_quality_btn.add_item("Standard", 1)
+	water_quality_btn.add_item("High (FFT)", 2)
 	water_quality_btn.selected = 0  # Auto by default
 	water_quality_btn.item_selected.connect(_cb.get("water_quality_changed", Callable()))
-	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane (fallback)\n- Standard: Analytical Gerstner waves + native SSR"
+	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane (fallback)\n- Standard: Analytical Gerstner waves\n- High: FFT compute ocean (JONSWAP spectrum)"
 	water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	quality_row.add_child(water_quality_btn)
 

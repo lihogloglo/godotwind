@@ -57,6 +57,11 @@ import/blender/enabled=false
 3d_physics/layer_1="Environment"
 3d_physics/layer_2="Player"
 
+[ocean]
+
+enabled=false
+quality=2
+
 [physics]
 
 3d/physics_engine="JoltPhysics3D"

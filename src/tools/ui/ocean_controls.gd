@@ -147,8 +147,10 @@ func _sync_water_quality_dropdown() -> void:
 	var current_quality := OceanManager.get_water_quality()
 	var target_id: int
 	match current_quality:
-		0: # FLAT
+		OceanMesh.QualityMode.FLAT:
 			target_id = 0
+		OceanMesh.QualityMode.HIGH:
+			target_id = 2
 		_: # STANDARD
 			target_id = 1
 

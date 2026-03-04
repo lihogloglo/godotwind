@@ -2,9 +2,10 @@
 ## Creates a multi-LOD mesh that follows the camera
 ## Inner rings are high detail, outer rings are lower detail
 ##
-## Two quality modes:
-## - STANDARD: Analytical multi-octave Gerstner waves via ocean_standard.gdshader
+## Three quality modes:
 ## - FLAT: Simple flat plane with basic lighting (software renderer fallback)
+## - STANDARD: Analytical multi-octave Gerstner waves via ocean_standard.gdshader
+## - HIGH: FFT compute ocean via ocean_fft.gdshader (JONSWAP spectrum, multi-cascade)
 class_name OceanMesh
 extends MeshInstance3D
 
@@ -13,7 +14,7 @@ const NUM_LOD_RINGS: int = 11
 const BASE_QUAD_SIZE: float = 2.0  # Innermost ring quad size in meters
 const RING_VERTEX_COUNT: int = 64   # Vertices per side for each ring
 
-enum QualityMode { FLAT, STANDARD }
+enum QualityMode { FLAT, STANDARD, HIGH }
 
 # Shader state
 var _material: ShaderMaterial = null
@@ -34,32 +35,45 @@ func initialize(radius: float, quality_override: int = -1) -> void:
 	_create_material()
 	_create_clipmap_mesh(radius)
 
-	var mode_name := "Standard (Gerstner)" if _quality == QualityMode.STANDARD else "Flat"
-	Log.info("water", "OceanMesh: Initialized - radius: %.0fm, mode: %s" % [radius, mode_name])
+	Log.info("water", "OceanMesh: Initialized - radius: %.0fm, mode: %s" % [radius, _quality_name()])
 
 
 func _select_quality(quality_override: int) -> void:
 	if quality_override == 0:
 		_quality = QualityMode.FLAT
 		Log.info("water", "OceanMesh: Quality override: FLAT")
-	elif quality_override >= 1:
+	elif quality_override == 1:
 		_quality = QualityMode.STANDARD
-		Log.info("water", "OceanMesh: Quality override: STANDARD")
+		Log.info("water", "OceanMesh: Quality override: STANDARD (Gerstner)")
+	elif quality_override >= 2:
+		_quality = QualityMode.HIGH
+		Log.info("water", "OceanMesh: Quality override: HIGH (FFT)")
 	else:
 		# Auto-detect based on hardware
 		HardwareDetection.detect()
 		var recommended := HardwareDetection.get_recommended_quality()
 		if recommended == HardwareDetection.WaterQuality.ULTRA_LOW:
 			_quality = QualityMode.FLAT
-		else:
+		elif HardwareDetection.is_integrated_gpu():
 			_quality = QualityMode.STANDARD
+		else:
+			_quality = QualityMode.HIGH
 		Log.info("water", "OceanMesh: Auto-detected quality: %s (GPU: %s)" % [
-			"STANDARD" if _quality == QualityMode.STANDARD else "FLAT",
-			HardwareDetection.get_gpu_name()])
+			_quality_name(), HardwareDetection.get_gpu_name()])
 
 
 func _create_shader() -> void:
 	match _quality:
+		QualityMode.HIGH:
+			var shader_path := "res://src/core/water/shaders/ocean_fft.gdshader"
+			_shader = load(shader_path) as Shader
+			if not _shader:
+				Log.warn("water", "OceanMesh: FFT shader not found, falling back to Gerstner")
+				_quality = QualityMode.STANDARD
+				_create_shader()
+				return
+			Log.info("water", "OceanMesh: Using ocean_fft.gdshader (FFT)")
+
 		QualityMode.STANDARD:
 			var shader_path := "res://src/core/water/shaders/ocean_standard.gdshader"
 			_shader = load(shader_path) as Shader
@@ -68,7 +82,7 @@ func _create_shader() -> void:
 				_quality = QualityMode.FLAT
 				_create_shader()
 				return
-			Log.info("water", "OceanMesh: Using ocean_standard.gdshader")
+			Log.info("water", "OceanMesh: Using ocean_standard.gdshader (Gerstner)")
 
 		QualityMode.FLAT:
 			_shader = _create_inline_flat_shader()
@@ -109,7 +123,7 @@ void fragment() {
 	ALBEDO = water_color.rgb;
 	ROUGHNESS = roughness;
 	METALLIC = 0.0;
-	ALPHA = shore_factor;
+	ALPHA = 1.0;
 }
 """
 	return shader
@@ -123,13 +137,32 @@ func _create_material() -> void:
 
 	_material.shader = _shader
 
-	if _quality == QualityMode.STANDARD:
+	if _quality == QualityMode.HIGH:
+		_setup_fft_defaults()
+	elif _quality == QualityMode.STANDARD:
 		_setup_standard_defaults()
 	# FLAT shader has sensible defaults in its code
 
 	material_override = _material
-	Log.debug("water", "OceanMesh: Material created - mode: %s" % (
-		"STANDARD" if _quality == QualityMode.STANDARD else "FLAT"))
+	Log.debug("water", "OceanMesh: Material created - mode: %s" % _quality_name())
+
+
+func _setup_fft_defaults() -> void:
+	if not _material:
+		return
+
+	# Foam texture (same as standard)
+	var foam_tex := _load_foam_texture()
+	_material.set_shader_parameter("foam_texture", foam_tex)
+	_cached_foam_texture = foam_tex
+
+	# Default white shore mask
+	var white_img := Image.create(1, 1, false, Image.FORMAT_L8)
+	white_img.set_pixel(0, 0, Color.WHITE)
+	var white_tex := ImageTexture.create_from_image(white_img)
+	_material.set_shader_parameter("shore_mask", white_tex)
+
+	Log.debug("water", "OceanMesh: FFT shader defaults configured")
 
 
 func _setup_standard_defaults() -> void:
@@ -224,10 +257,15 @@ func _create_clipmap_mesh(radius: float) -> void:
 
 	var array_mesh := ArrayMesh.new()
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	# Custom AABB with Y extent for FFT wave displacement (flat mesh has zero Y extent)
+	array_mesh.custom_aabb = AABB(Vector3(-radius, -50.0, -radius), Vector3(radius * 2.0, 100.0, radius * 2.0))
 	mesh = array_mesh
 
-	Log.debug("water", "OceanMesh: Created mesh with %d vertices, %d triangles" % [
-		vertices.size(), indices.size() / 3])
+	# Prevent false frustum/occlusion culling at distance and altitude
+	extra_cull_margin = radius
+
+	Log.info("water", "OceanMesh: Created mesh with %d vertices, %d triangles, %d rings" % [
+		vertices.size(), indices.size() / 3, NUM_LOD_RINGS])
 
 
 func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, vertex_offset: int) -> Dictionary:
@@ -260,31 +298,43 @@ func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, ve
 				indices.append(i + num_quads + 1)
 				indices.append(i + num_quads + 2)
 	else:
-		# Outer ring - donut shape
-		var num_segments := int(outer_radius * 2.0 * PI / quad_size / 4.0) * 4
-		num_segments = maxi(num_segments, 16)
+		# Outer ring - square annulus (4 rectangular strips forming a square donut)
+		# Matches the square inner ring geometry — no gaps at diagonal angles
+		var strip_width := outer_radius - inner_radius
+		var strip_quads := maxi(int(strip_width / quad_size), 1)
+		var inner_quads := maxi(int(inner_radius * 2.0 / quad_size), 1)
+		var outer_quads := maxi(int(outer_radius * 2.0 / quad_size), 1)
 
-		for i in range(num_segments):
-			var angle := float(i) / float(num_segments) * TAU
-			var cos_a := cos(angle)
-			var sin_a := sin(angle)
-			vertices.append(Vector3(cos_a * inner_radius, 0.0, sin_a * inner_radius))
-			uvs.append(Vector2(cos_a * inner_radius, sin_a * inner_radius))
-			vertices.append(Vector3(cos_a * outer_radius, 0.0, sin_a * outer_radius))
-			uvs.append(Vector2(cos_a * outer_radius, sin_a * outer_radius))
+		# 4 strips: top, bottom (full width), left, right (inner height only)
+		var strips: Array[Dictionary] = [
+			{"x0": -outer_radius, "z0": inner_radius, "nx": outer_quads, "nz": strip_quads},
+			{"x0": -outer_radius, "z0": -outer_radius, "nx": outer_quads, "nz": strip_quads},
+			{"x0": -outer_radius, "z0": -inner_radius, "nx": strip_quads, "nz": inner_quads},
+			{"x0": inner_radius, "z0": -inner_radius, "nx": strip_quads, "nz": inner_quads},
+		]
 
-		for i in range(num_segments):
-			var next := (i + 1) % num_segments
-			var i0 := i * 2 + vertex_offset
-			var i1 := i * 2 + 1 + vertex_offset
-			var i2 := next * 2 + vertex_offset
-			var i3 := next * 2 + 1 + vertex_offset
-			indices.append(i0)
-			indices.append(i2)
-			indices.append(i1)
-			indices.append(i1)
-			indices.append(i2)
-			indices.append(i3)
+		for strip in strips:
+			var x0: float = strip["x0"]
+			var z0: float = strip["z0"]
+			var nx: int = strip["nx"]
+			var nz: int = strip["nz"]
+
+			var strip_offset := vertices.size() + vertex_offset
+			for z in range(nz + 1):
+				for x in range(nx + 1):
+					var pos := Vector3(x0 + x * quad_size, 0.0, z0 + z * quad_size)
+					vertices.append(pos)
+					uvs.append(Vector2(pos.x, pos.z))
+
+			for z in range(nz):
+				for x in range(nx):
+					var i := z * (nx + 1) + x + strip_offset
+					indices.append(i)
+					indices.append(i + nx + 1)
+					indices.append(i + 1)
+					indices.append(i + 1)
+					indices.append(i + nx + 1)
+					indices.append(i + nx + 2)
 
 	return {
 		"vertices": vertices,
@@ -298,7 +348,15 @@ func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, ve
 # ============================================================================
 
 func update_position(center: Vector3) -> void:
-	global_position = center
+	# Snap mesh position to large grid to prevent vertex swimming
+	# 64m snap = inner ring half-size. Vertices stable between rare jumps.
+	# Must move mesh (not shader offset) so Godot's AABB frustum culling stays correct.
+	const SNAP_SIZE: float = 64.0
+	global_position = Vector3(
+		snappedf(center.x, SNAP_SIZE),
+		center.y,
+		snappedf(center.z, SNAP_SIZE)
+	)
 
 
 func set_wave_scale(scale: float) -> void:
@@ -337,7 +395,7 @@ func get_quality() -> QualityMode:
 	return _quality
 
 
-## Set quality mode. Returns false (no wave texture reconnection needed).
+## Set quality mode. Returns true if FFT pipeline needs (re)connection.
 func set_quality(quality: QualityMode, radius: float) -> bool:
 	var old_quality := _quality
 	_quality = quality
@@ -348,10 +406,10 @@ func set_quality(quality: QualityMode, radius: float) -> bool:
 	_create_material()
 	_restore_cached_state()
 
+	var needs_fft := (_quality == QualityMode.HIGH)
 	Log.info("water", "OceanMesh: Quality changed: %s -> %s" % [
-		"STANDARD" if old_quality == QualityMode.STANDARD else "FLAT",
-		"STANDARD" if _quality == QualityMode.STANDARD else "FLAT"])
-	return false
+		_quality_name_for(old_quality), _quality_name()])
+	return needs_fft
 
 
 func _restore_cached_state() -> void:
@@ -365,5 +423,19 @@ func _restore_cached_state() -> void:
 	if _cached_wave_scale != 1.0:
 		set_wave_scale(_cached_wave_scale)
 
-	if _quality == QualityMode.STANDARD and _cached_foam_texture:
+	if _quality in [QualityMode.STANDARD, QualityMode.HIGH] and _cached_foam_texture:
 		_material.set_shader_parameter("foam_texture", _cached_foam_texture)
+
+
+func _quality_name() -> String:
+	return _quality_name_for(_quality)
+
+
+static func _quality_name_for(q: QualityMode) -> String:
+	match q:
+		QualityMode.HIGH:
+			return "High (FFT)"
+		QualityMode.STANDARD:
+			return "Standard (Gerstner)"
+		_:
+			return "Flat"
