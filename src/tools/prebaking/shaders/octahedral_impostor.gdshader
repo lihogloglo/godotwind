@@ -1,29 +1,32 @@
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_opaque, shadows_disabled;
+render_mode blend_mix, depth_prepass_alpha, cull_disabled, shadows_disabled;
 
-// Octahedral impostor shader with 16-frame support and parallax
-// Optimized for distant rendering with smooth rotation transitions
-// Supports both 4x4 (16 frames) and 4x2 (8 frames) atlas layouts
+// Lit octahedral impostor shader with normal map support
+// Used for prebaked impostor rendering in the FAR tier (500m-5km)
+// Supports both v3 (albedo-only, unlit) and v4 (albedo + normals, lit) bakes
 
 uniform sampler2D albedo_atlas : source_color, filter_linear_mipmap;
+uniform sampler2D normal_atlas : filter_linear_mipmap;
 uniform float alpha_cutoff : hint_range(0.0, 1.0) = 0.5;
 
 // Atlas configuration (4x4 = 16 frames for smooth rotation)
 uniform int atlas_columns = 4;
 uniform int atlas_rows = 4;
 
-// Impostor settings
-uniform vec2 impostor_size = vec2(10.0, 10.0);
+// Whether normal atlas is available (false = legacy v3 unlit bake)
+uniform bool has_normal_atlas = false;
 
-// Parallax settings (uses depth baked in alpha channel)
-uniform bool use_parallax = true;
-uniform float parallax_depth : hint_range(0.0, 0.5) = 0.15;
+// PBR settings (Morrowind: rough, non-metallic materials)
+uniform float impostor_roughness : hint_range(0.0, 1.0) = 0.85;
+uniform float impostor_specular : hint_range(0.0, 1.0) = 0.3;
+
+// Parallax settings (uses depth baked in normal atlas alpha channel)
+uniform float parallax_depth : hint_range(0.0, 0.2) = 0.1;
 
 // Frame interpolation for smoother transitions
 uniform bool interpolate_frames = true;
 uniform float interpolation_sharpness = 4.0;
 
-// Billboard mode
 varying vec3 view_direction;
 
 void vertex() {
@@ -57,86 +60,63 @@ void vertex() {
 	MODELVIEW_MATRIX = VIEW_MATRIX * billboard;
 }
 
-// Convert view direction to frame index
-int get_frame_index(vec3 view_dir) {
-	// Project to XZ plane and get angle
-	float angle = atan(view_dir.x, view_dir.z);  // -PI to PI
-
-	// Convert to 0-N range (N = total frames)
-	float normalized = (angle + PI) / (2.0 * PI);  // 0-1
-	int total_frames = atlas_columns * atlas_rows;
-	int frame = int(normalized * float(total_frames)) % total_frames;
-
-	return frame;
-}
-
 // Get UV offset for a frame index
 vec2 get_frame_uv(int frame_index, vec2 uv) {
 	float col = float(frame_index % atlas_columns);
 	float row = float(frame_index / atlas_columns);
-
 	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-	vec2 frame_offset = vec2(col, row) * frame_size;
-
-	return frame_offset + uv * frame_size;
-}
-
-// Sample with parallax offset using depth from alpha
-vec4 sample_with_parallax(vec3 view_dir, vec2 uv, int frame) {
-	vec2 atlas_uv = get_frame_uv(frame, uv);
-
-	if (!use_parallax) {
-		return texture(albedo_atlas, atlas_uv);
-	}
-
-	// Simple parallax offset based on view angle
-	// Depth is encoded in alpha: 1 = close, 0 = far
-	vec2 parallax_offset = vec2(view_dir.x, -view_dir.y) * parallax_depth * (1.0 - uv.y);
-	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-
-	// Clamp offset to stay within frame bounds
-	vec2 offset_uv = atlas_uv + parallax_offset * frame_size;
-	vec2 frame_min = get_frame_uv(frame, vec2(0.0, 0.0));
-	vec2 frame_max = get_frame_uv(frame, vec2(1.0, 1.0));
-	offset_uv = clamp(offset_uv, frame_min, frame_max);
-
-	return texture(albedo_atlas, offset_uv);
-}
-
-// Smoothly blend between two frames based on angle
-vec4 sample_interpolated(vec3 view_dir, vec2 uv) {
-	float angle = atan(view_dir.x, view_dir.z) + PI;  // 0 to 2*PI
-	int total_frames = atlas_columns * atlas_rows;
-	float frame_angle = angle / (2.0 * PI) * float(total_frames);  // 0 to N
-
-	int frame_a = int(floor(frame_angle)) % total_frames;
-	int frame_b = (frame_a + 1) % total_frames;
-	float blend = fract(frame_angle);
-
-	// Sharpen the blend for less ghosting
-	blend = smoothstep(0.5 - 0.5/interpolation_sharpness, 0.5 + 0.5/interpolation_sharpness, blend);
-
-	vec4 color_a = sample_with_parallax(view_dir, uv, frame_a);
-	vec4 color_b = sample_with_parallax(view_dir, uv, frame_b);
-
-	return mix(color_a, color_b, blend);
+	return vec2(col, row) * frame_size + uv * frame_size;
 }
 
 void fragment() {
+	// Calculate view angle for frame selection
+	float angle = atan(view_direction.x, view_direction.z);
+	float normalized = (angle + PI) / (2.0 * PI);
+	int total_frames = atlas_columns * atlas_rows;
+
 	vec4 tex;
+	vec4 normal_data;
+	vec2 base_uv = UV;
 
 	if (interpolate_frames) {
-		tex = sample_interpolated(view_direction, UV);
+		// 2-frame angular blend
+		float frame_angle = normalized * float(total_frames);
+		int frame_a = int(floor(frame_angle)) % total_frames;
+		int frame_b = (frame_a + 1) % total_frames;
+		float blend = fract(frame_angle);
+		blend = smoothstep(0.5 - 0.5/interpolation_sharpness, 0.5 + 0.5/interpolation_sharpness, blend);
+
+		vec2 uv_a = get_frame_uv(frame_a, base_uv);
+		vec2 uv_b = get_frame_uv(frame_b, base_uv);
+
+		tex = mix(texture(albedo_atlas, uv_a), texture(albedo_atlas, uv_b), blend);
+		if (has_normal_atlas) {
+			normal_data = mix(texture(normal_atlas, uv_a), texture(normal_atlas, uv_b), blend);
+		}
 	} else {
-		int frame = get_frame_index(view_direction);
-		tex = sample_with_parallax(view_direction, UV, frame);
+		int frame = int(normalized * float(total_frames)) % total_frames;
+		vec2 atlas_uv = get_frame_uv(frame, base_uv);
+		tex = texture(albedo_atlas, atlas_uv);
+		if (has_normal_atlas) {
+			normal_data = texture(normal_atlas, atlas_uv);
+		}
 	}
 
-	// Alpha test - discard transparent pixels
+	// Alpha test
 	if (tex.a < alpha_cutoff) {
 		discard;
 	}
 
 	ALBEDO = tex.rgb;
-	// No ALPHA assignment - treated as fully opaque after discard test
+
+	if (has_normal_atlas) {
+		// Decode world-space normal from atlas
+		vec3 world_normal = normalize(normal_data.rgb * 2.0 - 1.0);
+
+		// Convert world-space normal to view-space (Godot's NORMAL is view-space)
+		NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
+
+		ROUGHNESS = impostor_roughness;
+		SPECULAR = impostor_specular;
+	}
 }

@@ -57,7 +57,7 @@ var _master_instance: MultiMeshInstance3D = null
 ## Billboard shader material with texture array
 var _billboard_material: ShaderMaterial = null
 
-## Texture array for batched rendering
+## Texture array for batched rendering (albedo)
 var _texture_array: Texture2DArray = null
 var _texture_index_map: Dictionary[String, int] = {}  # texture_hash -> array_index
 var _texture_array_dirty: bool = false
@@ -65,11 +65,21 @@ var _all_array_images: Array[Image] = []
 var _texture_array_size: int = 0
 var _last_texture_add_time: float = 0.0
 
+## Normal texture array (parallel to albedo array, same layer indices)
+var _normal_texture_array: Texture2DArray = null
+var _normal_index_map: Dictionary[String, int] = {}  # texture_hash -> normal array_index
+var _all_normal_images: Array[Image] = []
+var _normal_array_size: int = 0
+var _normal_array_dirty: bool = false
+
 ## Reference count for textures: hash_key -> count of impostors using it
 var _texture_ref_counts: Dictionary[String, int] = {}
 
 ## Loaded impostor textures: hash_key -> Texture2D
 var _impostor_textures: Dictionary[String, Texture2D] = {}
+
+## Loaded normal textures: hash_key -> Image (stored as Image, added to array)
+var _impostor_normal_images: Dictionary[String, Image] = {}
 
 ## Background job system for async texture loading
 var _job_system: RefCounted = null
@@ -148,6 +158,7 @@ class ImpostorData:
 	var model_path: String
 	var texture_hash: String
 	var texture_index: int
+	var normal_texture_index: int = -1  # -1 = no normals (legacy v3 bake)
 	var position: Vector3
 	var rotation: Vector3
 	var scale: Vector3
@@ -215,15 +226,23 @@ func _setup_billboard_material() -> void:
 	_billboard_material.set_shader_parameter("atlas_columns", 4)
 	_billboard_material.set_shader_parameter("atlas_rows", 4)
 
-	# Create initial empty texture array
+	# Create initial empty texture arrays (albedo + normal)
 	var default_img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
 	default_img.fill(Color(0, 0, 0, 0))
 	var default_array := Texture2DArray.new()
 	default_array.create_from_images([default_img])
 	_billboard_material.set_shader_parameter("texture_atlas", default_array)
+
+	# Normal atlas: default to up-facing normal (0.5, 1.0, 0.5), zero depth
+	var default_normal_img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
+	default_normal_img.fill(Color(0.5, 1.0, 0.5, 0.0))
+	var default_normal_array := Texture2DArray.new()
+	default_normal_array.create_from_images([default_normal_img])
+	_billboard_material.set_shader_parameter("normal_atlas", default_normal_array)
+
 	_billboard_material.set_shader_parameter("fade_distance", DU.MID_END) # 500m
 	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN_LOD3_FAR) # 20m
-	_billboard_material.set_shader_parameter("debug_mode", false)  # Normal mode: impostors only visible 500m+
+	_billboard_material.set_shader_parameter("debug_mode", false)
 
 	# Set material on both the mesh surface AND as override (belt and suspenders)
 	# This ensures the shader is applied even if material_override has issues
@@ -276,35 +295,42 @@ func set_shader_debug_mode(enabled: bool) -> void:
 #endregion
 
 
-#region Octahedral Billboard Shader (Valuable Custom Code)
+#region Octahedral Billboard Shader (Lit with Normal Maps)
 
 func _get_octahedral_shader_code() -> String:
-	# Full octahedral impostor shader with texture sampling and debug mode
-	# NOTE: Godot shaders do NOT support 'return' in fragment() - use if/else instead
+	# Lit octahedral impostor shader with normal map support and backward compatibility.
+	# Per-impostor distance culling is done in shader because MultiMesh visibility_range
+	# checks distance from the MultiMeshInstance3D node position, not per-instance.
 	#
-	# IMPORTANT: Per-impostor distance culling is done in the shader because:
-	# - MultiMesh visibility_range is calculated from the MultiMeshInstance3D position (origin)
-	# - NOT from each individual instance's position
-	# - So we must discard fragments for impostors that are too close to the camera
+	# INSTANCE_CUSTOM layout:
+	#   .x = texture array layer index (albedo)
+	#   .y = rotation offset (radians)
+	#   .z = normal texture array layer index (-1.0 = no normals, use legacy unlit path)
 	return """
 shader_type spatial;
-render_mode blend_mix, depth_prepass_alpha, cull_disabled, unshaded;
+render_mode blend_mix, depth_prepass_alpha, cull_disabled, shadows_disabled;
 
 uniform sampler2DArray texture_atlas : source_color, filter_linear_mipmap;
+uniform sampler2DArray normal_atlas : filter_linear_mipmap;
 uniform int atlas_columns = 4;
 uniform int atlas_rows = 4;
 uniform float fade_distance = 500.0;
 uniform float fade_margin = 50.0;
 uniform bool debug_mode = false;
+uniform float parallax_depth : hint_range(0.0, 0.2) = 0.1;
+uniform float impostor_roughness : hint_range(0.0, 1.0) = 0.85;
+uniform float impostor_specular : hint_range(0.0, 1.0) = 0.3;
 
 varying flat float texture_layer;
+varying flat float normal_layer;
 varying flat float rotation_offset;
 varying float dist_to_camera;
 
 void vertex() {
-	// Get texture layer and rotation from instance custom data
+	// Get texture layer, rotation, and normal layer from instance custom data
 	texture_layer = INSTANCE_CUSTOM.x;
 	rotation_offset = INSTANCE_CUSTOM.y;
+	normal_layer = INSTANCE_CUSTOM.z;
 
 	// Calculate distance to camera for fading
 	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
@@ -338,10 +364,7 @@ void vertex() {
 }
 
 void fragment() {
-	// CRITICAL: Per-impostor distance culling
-	// Discard impostors that are closer than FAR tier start (fade_distance)
-	// This is necessary because MultiMesh visibility_range only checks distance
-	// from the MultiMeshInstance3D node position (origin), not each instance
+	// Per-impostor distance culling
 	if (!debug_mode && dist_to_camera < fade_distance - fade_margin) {
 		discard;
 	}
@@ -359,24 +382,54 @@ void fragment() {
 	// Calculate UV within the atlas
 	int col = frame % atlas_columns;
 	int row = frame / atlas_columns;
-	vec2 frame_size = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-	vec2 atlas_uv = vec2(float(col), float(row)) * frame_size + UV * frame_size;
+	vec2 frame_size_uv = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
+	vec2 base_uv = UV;
 
-	// Sample texture from array using the layer index
+	// Parallax offset from depth (only if we have normal atlas)
+	bool has_normals = normal_layer >= 0.0;
+	if (has_normals && parallax_depth > 0.0) {
+		vec2 pre_parallax_uv = vec2(float(col), float(row)) * frame_size_uv + base_uv * frame_size_uv;
+		vec4 normal_sample = texture(normal_atlas, vec3(pre_parallax_uv, normal_layer));
+		float depth = normal_sample.a;  // 1=near, 0=far
+		// Distance-based parallax falloff: full strength at fade_distance, zero at 5x fade_distance
+		float parallax_fade = clamp(1.0 - (dist_to_camera - fade_distance) / (fade_distance * 4.0), 0.0, 1.0);
+		vec2 parallax_offset = vec2(view_dir.x, -view_dir.y) * parallax_depth * (1.0 - depth) * parallax_fade;
+		base_uv = clamp(base_uv + parallax_offset, vec2(0.001), vec2(0.999));
+	}
+
+	vec2 atlas_uv = vec2(float(col), float(row)) * frame_size_uv + base_uv * frame_size_uv;
+
+	// Sample albedo from texture array
 	vec4 tex = texture(texture_atlas, vec3(atlas_uv, texture_layer));
 
-	// DEBUG MODE: Show bright magenta at any distance (for testing)
-	// Normal mode: show actual texture
+	// DEBUG MODE
 	if (debug_mode) {
 		ALBEDO = vec3(1.0, 0.0, 1.0);
 		ALPHA = 1.0;
 	} else {
-		// Alpha test - discard fully transparent pixels
+		// Alpha test
 		if (tex.a < 0.1) {
 			discard;
 		}
+
 		ALBEDO = tex.rgb;
 		ALPHA = tex.a;
+
+		if (has_normals) {
+			// Sample normal atlas (RGB = world-space normal encoded as [0,1])
+			vec4 normal_data = texture(normal_atlas, vec3(atlas_uv, normal_layer));
+			vec3 world_normal = normalize(normal_data.rgb * 2.0 - 1.0);
+
+			// Convert world-space normal to view-space (Godot's NORMAL is view-space)
+			// The normals are baked in world space by the capture shader, so we just
+			// need VIEW_MATRIX to bring them into the current camera's view space.
+			NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
+
+			ROUGHNESS = impostor_roughness;
+			SPECULAR = impostor_specular;
+		}
+		// else: no normals = legacy v3 bake, stays unlit (NORMAL not set = flat plane lit)
+		// For legacy bakes, the albedo already has lighting baked in, so flat lighting is acceptable
 	}
 }
 """
@@ -440,6 +493,76 @@ func _load_texture_sync(hash_key: String, texture_path: String) -> void:
 		_on_texture_loaded(hash_key, _get_fallback_image())
 
 
+## Submit async job to load a normal texture
+func _submit_normal_load_job(hash_key: String, normal_path: String) -> void:
+	if _job_system == null:
+		return
+
+	var normal_job_key := hash_key + "_normal"
+	if normal_job_key in _pending_job_ids:
+		return  # Already loading
+
+	var load_callable := func() -> Dictionary:
+		var image := Image.new()
+		var err := image.load(normal_path)
+		if err == OK:
+			return {"hash_key": hash_key, "image": image, "success": true, "is_normal": true}
+		else:
+			return {"hash_key": hash_key, "image": null, "success": false, "is_normal": true}
+
+	var job_id: int = _job_system.submit(load_callable, "texture", 0)
+	if job_id >= 0:
+		_pending_job_ids[normal_job_key] = job_id
+
+
+## Synchronous normal texture loading fallback
+func _load_normal_sync(hash_key: String, normal_path: String) -> void:
+	var image := Image.new()
+	var err := image.load(normal_path)
+	if err == OK:
+		_on_normal_loaded(hash_key, image)
+	else:
+		if debug_enabled:
+			_debug("Failed to load normal texture: %s" % normal_path)
+
+
+## Called when a normal texture finishes loading
+func _on_normal_loaded(hash_key: String, image: Image) -> void:
+	# Resize to standard size
+	var img_copy := image.duplicate() as Image
+	if img_copy.get_size() != Vector2i(512, 512):
+		img_copy.resize(512, 512, Image.INTERPOLATE_LANCZOS)
+
+	_impostor_normal_images[hash_key] = img_copy
+
+	# Add to normal texture array
+	var normal_index := _add_to_normal_array(hash_key, img_copy)
+
+	# Update any existing impostors that have this hash to use normals
+	for id: int in _impostors:
+		var imp: ImpostorData = _impostors[id]
+		if imp.texture_hash == hash_key:
+			imp.normal_texture_index = normal_index
+			_impostors_dirty = true
+
+	if debug_enabled:
+		_debug("Normal texture loaded for hash %s, index %d" % [hash_key, normal_index])
+
+
+## Add image to normal texture array
+func _add_to_normal_array(hash_key: String, image: Image) -> int:
+	if hash_key in _normal_index_map:
+		return _normal_index_map[hash_key]
+
+	var index := _normal_array_size
+	_normal_index_map[hash_key] = index
+	_normal_array_size += 1
+	_all_normal_images.append(image)
+	_normal_array_dirty = true
+	_last_texture_add_time = Time.get_ticks_msec() / 1000.0
+	return index
+
+
 ## Get or create fallback texture image (magenta/pink for visibility)
 func _get_fallback_image() -> Image:
 	if _fallback_texture == null:
@@ -480,14 +603,13 @@ func _process(_delta: float) -> void:
 					_debug("Periodic compaction freed %d texture slots (%d -> %d)" % [
 						before - _texture_array_size, before, _texture_array_size])
 
-	# Rebuild texture array if needed (batched to avoid rebuilding every frame)
-	if _texture_array_dirty:
+	# Rebuild texture arrays if needed (batched to avoid rebuilding every frame)
+	if _texture_array_dirty or _normal_array_dirty:
 		var time_since_add := current_time - _last_texture_add_time
 		if time_since_add >= TEXTURE_ARRAY_REBUILD_DELAY:
 			_rebuild_texture_array()
 			# Schedule MultiMesh rebuild (rate-limited below)
 			_impostors_dirty = true
-			_texture_array_dirty = false
 
 	# Rate-limited MultiMesh rebuild to prevent frame stalls
 	# With 70k+ impostors, rebuilding every frame destroys FPS
@@ -554,19 +676,24 @@ func _poll_job_results() -> void:
 	for result in results:
 		if result.status != BackgroundJobSystemScript.JobStatus.COMPLETED:
 			continue
-		
+
 		var data: Dictionary = result.result
 		if data == null or not data.get("success", false):
 			continue
-		
+
 		var hash_key: String = data.get("hash_key", "")
 		var image: Image = data.get("image")
-		
+
 		if hash_key.is_empty() or image == null:
 			continue
-		
-		_pending_job_ids.erase(hash_key)
-		_on_texture_loaded(hash_key, image)
+
+		# Route to correct handler based on whether this is a normal texture
+		if data.get("is_normal", false):
+			_pending_job_ids.erase(hash_key + "_normal")
+			_on_normal_loaded(hash_key, image)
+		else:
+			_pending_job_ids.erase(hash_key)
+			_on_texture_loaded(hash_key, image)
 
 #endregion
 
@@ -600,8 +727,12 @@ func add_impostor(
 		_stats["skipped_no_texture"] += 1
 		return -1
 
+	# Also check for normal texture (v4 bakes)
+	var normal_path := ImpostorCandidatesScript.get_impostor_normal_path(model_path)
+	var has_normal_texture := _cached_file_exists(normal_path)
+
 	var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
-	
+
 	# Get impostor metadata for size
 	var metadata := _get_or_load_metadata(model_path)
 	var impostor_size := Vector2(10.0, 10.0)
@@ -649,13 +780,19 @@ func add_impostor(
 			_debug("  Normalized path: %s" % normalized)
 			_debug("  Hash key: %s" % hash_key)
 			_debug("  Texture path: %s" % texture_path)
+			_debug("  Normal path: %s (exists: %s)" % [normal_path, has_normal_texture])
 
 		# Try async loading first
 		if _job_system != null:
 			_submit_texture_load_job(hash_key, texture_path)
+			# Also load normal texture if it exists (v4 bakes)
+			if has_normal_texture:
+				_submit_normal_load_job(hash_key, normal_path)
 		else:
 			# Fallback to synchronous loading if job system failed
 			_load_texture_sync(hash_key, texture_path)
+			if has_normal_texture:
+				_load_normal_sync(hash_key, normal_path)
 
 	return -1
 
@@ -681,6 +818,7 @@ func clear() -> void:
 	_cell_index.clear()
 	_texture_ref_counts.clear()
 	_file_exists_cache.clear()
+	_impostor_normal_images.clear()
 	_stats["total_impostors"] = 0
 	_impostors_dirty = true  # Mark for MultiMesh rebuild
 
@@ -990,10 +1128,13 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 		return
 
 	# Create all pending impostors waiting for this texture
+	# Check if normal texture was already loaded for this hash
+	var normal_idx: int = _normal_index_map.get(hash_key, -1)
+
 	var pending_list: Array = _pending_impostors[hash_key]
 	var created_count := pending_list.size()
 	for pending: PendingImpostor in pending_list:
-		_create_impostor(
+		var imp_id := _create_impostor(
 			pending.model_path,
 			pending.cell_grid,
 			hash_key,
@@ -1003,6 +1144,9 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 			pending.texture_size,
 			pending.aabb_center_y
 		)
+		# Set normal index if available
+		if imp_id >= 0 and normal_idx >= 0 and imp_id in _impostors:
+			_impostors[imp_id].normal_texture_index = normal_idx
 	_pending_impostors.erase(hash_key)
 	if debug_enabled:
 		_debug("Texture loaded, created %d impostors for hash %s" % [created_count, hash_key])
@@ -1110,22 +1254,39 @@ func _compact_texture_array() -> void:
 		new_images.append(_all_array_images[old_index])
 		new_index_map[hash_key] = i
 
+	# Also compact normal arrays in parallel
+	var new_normal_images: Array[Image] = []
+	var new_normal_index_map: Dictionary = {}
+
+	for i in used_hashes.size():
+		var hash_key: String = used_hashes[i]
+		if hash_key in _normal_index_map:
+			var old_normal_idx: int = _normal_index_map[hash_key]
+			new_normal_images.append(_all_normal_images[old_normal_idx])
+			new_normal_index_map[hash_key] = new_normal_images.size() - 1
+
 	# Update impostor texture indices to match new array positions
 	for id: int in _impostors:
 		var imp: ImpostorData = _impostors[id]
 		if imp.texture_hash in new_index_map:
 			imp.texture_index = new_index_map[imp.texture_hash]
+			imp.normal_texture_index = new_normal_index_map.get(imp.texture_hash, -1)
 
 	# Clear old cached textures that are no longer in the array
 	for hash_key: String in _impostor_textures.keys():
 		if hash_key not in new_index_map:
 			_impostor_textures.erase(hash_key)
+			_impostor_normal_images.erase(hash_key)
 
 	# Replace arrays
 	_all_array_images = new_images
 	_texture_index_map = new_index_map
 	_texture_array_size = new_images.size()
+	_all_normal_images = new_normal_images
+	_normal_index_map = new_normal_index_map
+	_normal_array_size = new_normal_images.size()
 	_texture_array_dirty = true
+	_normal_array_dirty = true
 	_impostors_dirty = true  # Need to rebuild MultiMesh with new indices
 
 	_stats["texture_array_layers"] = _texture_array_size
@@ -1139,14 +1300,16 @@ func _compact_texture_array() -> void:
 func _rebuild_texture_array() -> void:
 	if _all_array_images.is_empty():
 		_texture_array_dirty = false
+		_normal_array_dirty = false
 		return
-	
+
+	# Rebuild albedo texture array
 	var images: Array[Image] = []
 	for img: Image in _all_array_images:
 		if img.get_format() != Image.FORMAT_RGBA8:
 			img.convert(Image.FORMAT_RGBA8)
 		images.append(img)
-	
+
 	_texture_array = Texture2DArray.new()
 	var err := _texture_array.create_from_images(images)
 	if err != OK:
@@ -1156,8 +1319,24 @@ func _rebuild_texture_array() -> void:
 
 	Log.debug("impostors", "Rebuilt texture array with %d layers" % images.size())
 	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
-	Log.debug("impostors", "Set texture_atlas on material")
 	_texture_array_dirty = false
+
+	# Rebuild normal texture array (if any normals loaded)
+	if not _all_normal_images.is_empty():
+		var normal_images: Array[Image] = []
+		for img: Image in _all_normal_images:
+			if img.get_format() != Image.FORMAT_RGBA8:
+				img.convert(Image.FORMAT_RGBA8)
+			normal_images.append(img)
+
+		_normal_texture_array = Texture2DArray.new()
+		err = _normal_texture_array.create_from_images(normal_images)
+		if err != OK:
+			push_error("[NativeImpostorRenderer] Failed to create normal texture array: %s" % error_string(err))
+		else:
+			Log.debug("impostors", "Rebuilt normal texture array with %d layers" % normal_images.size())
+			_billboard_material.set_shader_parameter("normal_atlas", _normal_texture_array)
+	_normal_array_dirty = false
 
 
 func _rebuild_multimesh() -> void:
@@ -1189,8 +1368,13 @@ func _rebuild_multimesh() -> void:
 
 		_master_multimesh.set_instance_transform(idx, transform)
 
-		# Custom data: x = texture layer, y = rotation.y (radians)
-		_master_multimesh.set_instance_custom_data(idx, Color(float(impostor.texture_index), impostor.rotation.y, 0.0, 1.0))
+		# Custom data: x = texture layer, y = rotation.y (radians), z = normal layer (-1 = no normals)
+		_master_multimesh.set_instance_custom_data(idx, Color(
+			float(impostor.texture_index),
+			impostor.rotation.y,
+			float(impostor.normal_texture_index),
+			1.0
+		))
 
 		idx += 1
 

@@ -670,6 +670,16 @@ static func get_impostor_texture_path(model_path: String) -> String:
 	return _get_impostors_dir().path_join("%s_%s.png" % [base_name, hash_key])
 
 
+## Get the impostor normal texture path for a model
+## Format: {base_name}_{md5_hash}_normal.png
+static func get_impostor_normal_path(model_path: String) -> String:
+	var hash_key: String = get_hash_key(model_path)
+	var normalized: String = normalize_model_path(model_path)
+	var base_name: String = normalized.get_file().get_basename()
+	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
+	return _get_impostors_dir().path_join("%s_%s_normal.png" % [base_name, hash_key])
+
+
 ## Get the impostor metadata path for a model
 ## Format: {base_name}_{md5_hash}.json
 static func get_impostor_metadata_path(model_path: String) -> String:

@@ -1,523 +1,523 @@
 {
   "version": 1,
-  "updatedAt": 1772636402714,
+  "updatedAt": 1772802431882,
   "nodeCount": 74,
   "nodes": {
     "mem-MEMORY-architecture": {
       "id": "mem-MEMORY-architecture",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823190
     },
     "mem-MEMORY-tech-stack": {
       "id": "mem-MEMORY-tech-stack",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823198
     },
     "mem-MEMORY-key-gotchas": {
       "id": "mem-MEMORY-key-gotchas",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823190
     },
     "mem-MEMORY-data": {
       "id": "mem-MEMORY-data",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823190
     },
     "mem-MEMORY-project-overview": {
       "id": "mem-MEMORY-project-overview",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-documentation-structure--clean": {
       "id": "mem-MEMORY-documentation-structure--clean",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-key-architecture": {
       "id": "mem-MEMORY-key-architecture",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-": {
       "id": "mem-MEMORY-godot-4-6-ik-api--twoboneik3d-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-body-part-mirroring-fix--2026-": {
       "id": "mem-MEMORY-body-part-mirroring-fix--2026-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-animation-overhaul---phase-3d-": {
       "id": "mem-MEMORY-animation-overhaul---phase-3d-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-animation-playback-bug---fixed": {
       "id": "mem-MEMORY-animation-playback-bug---fixed",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-npc-assembly---floating-hands-": {
       "id": "mem-MEMORY-npc-assembly---floating-hands-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-npc-assembly-code-quality-issu": {
       "id": "mem-MEMORY-npc-assembly-code-quality-issu",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-animation-cleanup---session-3-": {
       "id": "mem-MEMORY-animation-cleanup---session-3-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-mixamo---quaternius-migration-": {
       "id": "mem-MEMORY-mixamo---quaternius-migration-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-important-files": {
       "id": "mem-MEMORY-important-files",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-code-audit-progress--8-session": {
       "id": "mem-MEMORY-code-audit-progress--8-session",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-codebase-cleanup---complete": {
       "id": "mem-MEMORY-codebase-cleanup---complete",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-ocean-shader-overhaul--2026-03": {
       "id": "mem-MEMORY-ocean-shader-overhaul--2026-03",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-streaming-pipeline---all-phase": {
       "id": "mem-MEMORY-streaming-pipeline---all-phase",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-log-system--added-session-2--r": {
       "id": "mem-MEMORY-log-system--added-session-2--r",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-visual-testing-methodology": {
       "id": "mem-MEMORY-visual-testing-methodology",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-MEMORY-gotchas": {
       "id": "mem-MEMORY-gotchas",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823191
     },
     "mem-BATCH_PIPELINE_CHAINING-overview": {
       "id": "mem-BATCH_PIPELINE_CHAINING-overview",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-architecture": {
       "id": "mem-BATCH_PIPELINE_CHAINING-architecture",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works": {
       "id": "mem-BATCH_PIPELINE_CHAINING-how-auto-chaining-works",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior": {
       "id": "mem-BATCH_PIPELINE_CHAINING-auto-save-behavior",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-ui-flow": {
       "id": "mem-BATCH_PIPELINE_CHAINING-ui-flow",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes": {
       "id": "mem-BATCH_PIPELINE_CHAINING-known-issues---fixes",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-cost-model": {
       "id": "mem-BATCH_PIPELINE_CHAINING-cost-model",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-BATCH_PIPELINE_CHAINING-sync-vs-async": {
       "id": "mem-BATCH_PIPELINE_CHAINING-sync-vs-async",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-purpose": {
       "id": "mem-camera-debug-system-purpose",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-files": {
       "id": "mem-camera-debug-system-files",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-categories": {
       "id": "mem-camera-debug-system-categories",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-instrumented-files--30--log-po": {
       "id": "mem-camera-debug-system-instrumented-files--30--log-po",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-how-to-use": {
       "id": "mem-camera-debug-system-how-to-use",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-expected-event-chains": {
       "id": "mem-camera-debug-system-expected-event-chains",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-camera-debug-system-removal": {
       "id": "mem-camera-debug-system-removal",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823193
     },
     "mem-client-loading-optimization-problem": {
       "id": "mem-client-loading-optimization-problem",
       "category": "client-loading-optimization",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823194
     },
     "mem-client-loading-optimization-changes-made": {
       "id": "mem-client-loading-optimization-changes-made",
       "category": "client-loading-optimization",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823194
     },
     "mem-client-loading-optimization-impact": {
       "id": "mem-client-loading-optimization-impact",
       "category": "client-loading-optimization",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823194
     },
     "mem-map-camera-fix-session-problem": {
       "id": "mem-map-camera-fix-session-problem",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-map-camera-fix-session-root-cause--confirmed-via-cons": {
       "id": "mem-map-camera-fix-session-root-cause--confirmed-via-cons",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-map-camera-fix-session-changes-made-to--apps-client-a": {
       "id": "mem-map-camera-fix-session-changes-made-to--apps-client-a",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-map-camera-fix-session-react-map-gl-v8-internals--key": {
       "id": "mem-map-camera-fix-session-react-map-gl-v8-internals--key",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-map-camera-fix-session-status": {
       "id": "mem-map-camera-fix-session-status",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-map-camera-fix-session-files-modified": {
       "id": "mem-map-camera-fix-session-files-modified",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-testing": {
       "id": "mem-MEMORY-testing",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-ai-pipeline-architecture": {
       "id": "mem-MEMORY-ai-pipeline-architecture",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-pipeline-features--2026-02-ses": {
       "id": "mem-MEMORY-pipeline-features--2026-02-ses",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-bugs-fixed--2025-02-session-": {
       "id": "mem-MEMORY-bugs-fixed--2025-02-session-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-bugs-fixed--2026-02-pipeline-t": {
       "id": "mem-MEMORY-bugs-fixed--2026-02-pipeline-t",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-batch-pipeline---auto-chaining": {
       "id": "mem-MEMORY-batch-pipeline---auto-chaining",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-full-pipeline-test--2026-02-05": {
       "id": "mem-MEMORY-full-pipeline-test--2026-02-05",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-resolved-issues": {
       "id": "mem-MEMORY-resolved-issues",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-bugs-fixed--2026-02-06-pipelin": {
       "id": "mem-MEMORY-bugs-fixed--2026-02-06-pipelin",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823195
     },
     "mem-MEMORY-bugs-fixed--2026-02-07-batch-p": {
       "id": "mem-MEMORY-bugs-fixed--2026-02-07-batch-p",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-pre-existing-issues--minor-": {
       "id": "mem-MEMORY-pre-existing-issues--minor-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-important--admin-app-is-local-": {
       "id": "mem-MEMORY-important--admin-app-is-local-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-bugs-fixed--2026-02-06-image-b": {
       "id": "mem-MEMORY-bugs-fixed--2026-02-06-image-b",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-gemini-3-1-pro-svg-generation-": {
       "id": "mem-MEMORY-gemini-3-1-pro-svg-generation-",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-map-camera-fix---leaflet-mapli": {
       "id": "mem-MEMORY-map-camera-fix---leaflet-mapli",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-client-loading-optimization--2": {
       "id": "mem-MEMORY-client-loading-optimization--2",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-camera-debug-system--2026-02-2": {
       "id": "mem-MEMORY-camera-debug-system--2026-02-2",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-environment": {
       "id": "mem-MEMORY-environment",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823196
     },
     "mem-MEMORY-coordinate-system--updated-202": {
       "id": "mem-MEMORY-coordinate-system--updated-202",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823197
     },
     "mem-MEMORY-shore-distance-bake-pipeline": {
       "id": "mem-MEMORY-shore-distance-bake-pipeline",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823197
     },
     "mem-MEMORY-fog-of-war": {
       "id": "mem-MEMORY-fog-of-war",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823197
     },
     "mem-MEMORY-project-location": {
       "id": "mem-MEMORY-project-location",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823198
     },
     "mem-MEMORY-critical--ai-sdk-6-api-changes": {
       "id": "mem-MEMORY-critical--ai-sdk-6-api-changes",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823198
     },
     "mem-MEMORY-next-js-16-changes": {
       "id": "mem-MEMORY-next-js-16-changes",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823198
     },
     "mem-MEMORY-supabase-types": {
       "id": "mem-MEMORY-supabase-types",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823198
     },
     "mem-MEMORY-implementation-status": {
       "id": "mem-MEMORY-implementation-status",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772549823198
     },
     "insight-1772552613533-97t0": {
       "id": "insight-1772552613533-97t0",
       "category": "insights",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "accessCount": 0,
       "createdAt": 1772552613533
     }

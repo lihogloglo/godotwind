@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "computedAt": 1772636402716,
+  "computedAt": 1772802431885,
   "entries": [
     {
       "id": "mem-MEMORY-gotchas",
       "content": "- **Log autoload is `Log`, not `Logger`** — Godot 4.6 native `Logger` class conflict\r\n- **RenderingServer RID + GC:** When using RS RIDs from Mesh/Material resources, MUST hold strong refs to the resources. Otherwise LRU cache eviction frees resources → RIDs become invalid → RS instances disappear silently\r\n- **CellReference.ref_id is StringName, not int** — ESM reference ID (e.g., \"barrel_01\"). ref_num is the int field\r\n- **Godot exit-time RID leaks:** If Node3D instances are still in gradual u",
       "summary": "Gotchas",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.02357471952585935,
       "accessCount": 0,
       "words": [
@@ -71,7 +71,7 @@
       "content": "- **Always visually verify** game dev changes by launching Godot — don't just trust code review\r\n- **Godot path:** `D:\\Gamedev\\Godot\\Godot_v4.6-stable_mono_win64.exe`\r\n- **Visual test scenes** in `tests/visual/` — standalone scenes that exercise one system\r\n- **Launch command:** `\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path \"D:/Gamedev/Godotwind/godotwind\" res://tests/visual/test_ocean_setup.tscn`\r\n- **Main scene test:** `\"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe\" --path \"",
       "summary": "Visual Testing Methodology",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.023377163763566508,
       "accessCount": 0,
       "words": [
@@ -147,7 +147,7 @@
       "content": "- Gemini API: `v1beta` endpoint, `google_search` tool (not `google_search_retrieval`)\r\n- Gemini JSON mode: `responseMimeType` + `responseJsonSchema` go inside `generationConfig`\r\n- Gemini tools: go at top level of request body (NOT inside `generationConfig`)\r\n- **`gemini-3-flash-preview` maxOutputTokens**: Must be >= 16384; model uses internal reasoning tokens that consume output budget, causing MAX_TOKENS at ~500-700 chars with 4096 limit",
       "summary": "Environment",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.023377163763566508,
       "accessCount": 0,
       "words": [
@@ -203,7 +203,7 @@
       "content": "- Autoload: `src/core/logging/logger.gd` (named `Log` in project) — loads before all other autoloads\r\n- Renamed from `Logger` to `Log` because Godot 4.6 introduced a built-in native `Logger` class that caused a naming conflict\r\n- Levels: DEBUG < INFO < WARN < ERROR\r\n- Categories: streaming, esm, nif, water, animation, deformation, textures, collision, models, impostors, shaders, threading, bridge, character, bsa, console, prebaking, navmesh, testing, debug, tools\r\n- Usage: `Log.info(\"esm\", \"mess",
       "summary": "Log System (Added Session 2, renamed from Logger in Session 5)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.023144403133221653,
       "accessCount": 0,
       "words": [
@@ -275,7 +275,7 @@
       "content": "- **Full doc**: `camera-debug-system.md` in memory\r\n- **Files**: `cameraDebugLog.ts` (logger), `CameraDebugOverlay.tsx` (on-screen overlay)\r\n- **Instrumented**: Map.tsx, page.tsx, MapBottomCard.tsx — 30+ log points covering pin taps, swipes, camera commands, and guard blocks\r\n- **Usage**: Blue \"D\" button in dev mode → on-screen log. \"Copy\" button exports text for pasting into chat.\r\n- **Purpose**: Diagnosing map camera issues (pin tap not centering, swipe not following camera)",
       "summary": "Camera Debug System (2026-02-24)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.023144403133221653,
       "accessCount": 0,
       "words": [
@@ -342,7 +342,7 @@
       "content": "- **Phase 0:** Benchmark scene\r\n- **Phase 1:** Removed fake-parallel duplicate (~220 lines)\r\n- **Phase 2:** Budgeted cell unloading (4ms budget, 30 children/frame)\r\n- **Phase 3:** Frustum-priority loading (4x behind-camera penalty)\r\n- **Phase 4:** Prebake visibility_range into PackedScene\r\n- **Phase 4b:** Per-object visibility fix (before add_child)\r\n- **Phase 5a:** MID-tier fast path (~97% objects skip Node3D, ~50% FPS improvement)\r\n- **Phase 5b:** MID↔NEAR tier transitions (promotion at 130m, ",
       "summary": "Streaming Pipeline — ALL PHASES COMPLETE (Sessions 6-10)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.022870180427343036,
       "accessCount": 0,
       "words": [
@@ -408,7 +408,7 @@
       "content": "- **Full doc**: `client-loading-optimization.md` in memory\r\n- **Problem**: PlacesProvider blocked UI on every app restart (2-5s Supabase fetch)\r\n- **Fix**: IndexedDB persistence (`placesCache.ts`), non-blocking background revalidation in PlacesContext, Map chunk preload at module level, deferred AdMob init via `requestIdleCallback`\r\n- **Result**: Repeat visits render in ~100ms from IDB; spinner only on first-ever visit",
       "summary": "Client Loading Optimization (2026-02-26)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.022870180427343036,
       "accessCount": 0,
       "words": [
@@ -462,7 +462,7 @@
       "content": "- **Deleted:** 3 competing shaders (flat_water, gerstner_water, ocean_compute), compute pipeline (wave_generator, rendering_context, wave_cascade_parameters, vector_map_generator), 6 GLSL compute shaders, 22 textures. ~3,800 lines removed.\r\n- **Created:** `ocean_standard.gdshader` (260L, analytical 3-octave Gerstner, 12 waves), `gerstner_math.gd` (144L, CPU-side static class for buoyancy sync)\r\n- **Rewritten:** ocean_mesh.gd (1215→370L), ocean_manager.gd (750→426L), ocean_controls.gd (243→172L)\r",
       "summary": "Ocean Shader Overhaul (2026-03-01)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.022547077491937267,
       "accessCount": 0,
       "words": [
@@ -535,7 +535,7 @@
       "content": "- **Full doc**: `map-camera-fix-session.md` in memory\r\n- **Problem**: After migrating from Leaflet to react-map-gl v8 + MapLibre GL JS, camera commands (flyTo, panTo, setView) were blocked because `rawMapRef` was only set in `handleLoad`, which depends on the `load` event. If the map style fails to load (e.g., MapTiler 403), `handleLoad` never fires.\r\n- **Fix**: Added `getRawMap()` lazy initializer that falls back to `maplibreRef.current?.getMap()` — works even without `load` event\r\n- **Key insi",
       "summary": "Map Camera Fix — Leaflet→MapLibre Migration (2026-02-25)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.022547077491937267,
       "accessCount": 0,
       "words": [
@@ -600,7 +600,7 @@
       "content": "- **Sessions 1-4:** Deleted orphans, created Log autoload, converted all print() → Log, housekeeping\r\n- **Session 5:** Built streaming benchmark (786 lines, 6-segment camera path, CSV output)\r\n- **Sessions 6-10:** Streaming pipeline overhaul (Phases 0-7, see below)",
       "summary": "Codebase Cleanup — COMPLETE",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.02216638098713114,
       "accessCount": 0,
       "words": [
@@ -645,7 +645,7 @@
       "content": "- **Model**: `gemini-3.1-pro-preview` — now default for SVG generation\r\n- **Token budget**: Must use `maxOutputTokens: 65536` — thinking tokens consume output budget even more aggressively than Flash\r\n- **Thinking config**: `thinkingConfig: { thinkingLevel: 'LOW' }` reduces thinking overhead, cuts generation time from ~180s to ~40s\r\n- **SVG extraction**: Must search `rawText` (pre-code-fence-stripping) for `<svg>...</svg>` — model wraps output in markdown fences\r\n- **Config location**: `apps/adm",
       "summary": "Gemini 3.1 Pro SVG Generation (2026-02-23)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.02216638098713114,
       "accessCount": 0,
       "words": [
@@ -712,7 +712,7 @@
       "content": "- **Session 1:** DONE — Extracted LOD commands + profiling report from world_explorer.gd\r\n- **Session 2:** DONE — Extracted UI panel construction into `explorer_panels.gd`\r\n- **Session 3:** DONE — Extracted interior cell browser into `cell_browser.gd`\r\n- **Session 4:** DONE — Extracted ocean/water controls into `ocean_controls.gd`\r\n- **Session 5:** DONE — Extracted shader effects + sky into `environment_controls.gd` (~228 lines moved)\r\n- **Session 6:** DONE — Extracted stats collection into `sta",
       "summary": "Code Audit Progress (8-session plan) — COMPLETE",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.021717866421971987,
       "accessCount": 0,
       "words": [
@@ -778,7 +778,7 @@
       "content": "13. **Image batch jobs stuck in 'processing'** -> Root cause: poll endpoint checked `batch_api_name` (always NULL for image jobs) and returned \"not submitted\". Fix: poll endpoint now detects `job_type === 'image_fetch'` and returns current DB state. poll-all endpoint also now includes image jobs in results.\r\n14. **Image process/cron had Vercel chunking** -> Designed for 60s serverless timeout (10-15 items/chunk). Since admin is local-only, removed chunking — processes all items in one call.\r\n15.",
       "summary": "Bugs Fixed (2026-02-06 image batch)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.021717866421971987,
       "accessCount": 0,
       "words": [
@@ -854,7 +854,7 @@
       "content": "- `src/core/animation/ik_controller.gd` — IK system (TwoBoneIK3D)\r\n- `src/tools/world_explorer.gd` — Main scene orchestrator (~1,249 lines after 8-session audit)\r\n- **Main scene:** `scenes/Godotwind.tscn` (renamed from `src/tools/world_explorer.tscn`)\r\n- `src/tools/ui/explorer_panels.gd` — UI panel construction (ExplorerPanels, RefCounted)\r\n- `src/tools/ui/ocean_controls.gd` — Ocean/water controls (OceanControls, RefCounted, 171 lines)\r\n- `src/tools/ui/cell_browser.gd` — Interior/exterior cell b",
       "summary": "Important Files",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.021189510809006582,
       "accessCount": 0,
       "words": [
@@ -921,7 +921,7 @@
       "content": "- Admin app (`apps/admin`) **always runs locally** (localhost:3001)\r\n- Never design for Vercel/serverless constraints (timeouts, cold starts, cron limits)\r\n- Long-running requests are fine; process all items in one call",
       "summary": "Important: Admin App is Local-Only",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.021189510809006582,
       "accessCount": 0,
       "words": [
@@ -962,7 +962,7 @@
       "content": "- **Removed all Mixamo FBX assets** (license restriction) from `assets/characters/mixamo/` and `assets/animations/mixamo/`\r\n- **Quaternius animations** (CC0): `assets/characters/quaternius/UAL2_Standard.glb` — single GLB with all animations\r\n- **Renamed `src/core/character/mixamo/` → `src/core/character/humanoid/`**\r\n- `MixamoCharacterFactory` → `HumanoidCharacterFactory`, `MixamoEquipment` → `HumanoidEquipment`\r\n- Factory now loads animations from model GLB itself (single file) instead of mergi",
       "summary": "Mixamo → Quaternius Migration (2026-02-15)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.020568565579417542,
       "accessCount": 0,
       "words": [
@@ -1025,7 +1025,7 @@
       "content": "- `BatchImageModal.tsx:352` has a type error (ExistingImage vs SelectedImageWithType) - unrelated to AI pipeline\r\n- **Deterministic style corrections are crude**: regex replacements just remove forbidden words/phrases, leaving grammatical artifacts (\"a evidence\", double spaces). LLM corrections from the style-check are better but sometimes lost if JSON parsing fails.",
       "summary": "Pre-existing Issues (Minor)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.020568565579417542,
       "accessCount": 0,
       "words": [
@@ -1073,7 +1073,7 @@
       "content": "- **Deleted dead Mixamo-specific files** — superseded by `animation_loader.gd` and native assembler\r\n- **Moved `mesh_extractor.gd`** to `src/core/character/mesh_extractor.gd` (updated 3 references)\r\n- **Deleted dead `_convert_library_to_rest_relative()`** from `character_factory_v2.gd` (~97 lines)",
       "summary": "Animation Cleanup — Session 3 (2026-02-13)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.019839016756682915,
       "accessCount": 0,
       "words": [
@@ -1116,7 +1116,7 @@
       "content": "17. **Missing `style_check` in `batch_jobs_job_type_check` constraint** -> Migration 012 only added `image_fetch` to job_type constraint but never `style_check`. When chaining fact_check→style_check, INSERT fails silently (caught in try/catch). Fix: migration 029 adds `style_check` to constraint.\r\n18. **Batch upsert fails atomically on PostGIS trigger** -> `autoSaveResultsAsDrafts` uses batch upsert of 100 rows. One bad row (PostGIS trigger error) fails entire batch. Fix: added individual-update",
       "summary": "Bugs Fixed (2026-02-07 batch pipeline at scale)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.019839016756682915,
       "accessCount": 0,
       "words": [
@@ -1195,7 +1195,7 @@
       "content": "- **~600 lines duplicated** between `character_assembly_test.gd` (1249L) and `morrowind_npc_assembler.gd` (788L)\r\n- **3 sources of truth** for slot→bone mappings: `body_part_slots.gd`, `npc_assembler.gd`, `character_assembly_test.gd`\r\n- **4 overlapping test files**: character_assembly_test, npc_assembly_test, native_skeleton_test, animation_integration_test\r\n- mesh_extractor.gd at `src/core/character/mesh_extractor.gd` (moved 2026-02-13)\r\n- **`is_full_body_skin` heuristic still uses bone count**",
       "summary": "NPC Assembly Code Quality Issues (2026-02-09, partially cleaned 2026-02-13)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01898068098856554,
       "accessCount": 0,
       "words": [
@@ -1272,7 +1272,7 @@
       "content": "10. **UI: \"All Pending\" count inflated** -> Summed overlapping stage counts. Fix: added `needsAnyProcessing` server-side count (unique drafts needing any stage via OR query). `classifyTopics.ts` extracted as testable pure function.\r\n11. **UI: PipelineView button ignored style-check** -> Button only checked factCheck/SVG pending. Fix: added `styleCheckPending/Verified/Flagged` to `ProcessingStats`, added style-check badge, updated button condition.\r\n12. **poll-all `createChainedJob` not paginated",
       "summary": "Bugs Fixed (2026-02-06 pipeline review)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01898068098856554,
       "accessCount": 0,
       "words": [
@@ -1335,7 +1335,7 @@
       "content": "| Aspect | Sync (Instant) | Async (Batch) |\r\n|--------|---------------|---------------|\r\n| Endpoints | `/topics/generate-now`, `/fact-check`, `/style-check`, `/generate-media/svg` | `/batch/pipeline` |\r\n| Max items | 1-10 | Unlimited (batched at 100) |\r\n| Cost | Full price | 50% discount |\r\n| Timing | 15-85s per request | 5-30 min total |\r\n| Chaining | Manual | Automatic |\r\n| Use case | Quick testing, single items | Bulk production |",
       "summary": "Sync vs Async",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.018694609851925698,
       "accessCount": 0,
       "words": [
@@ -1393,7 +1393,7 @@
       "content": "- **Root cause 1:** Full-body NIF (body.nif/skins.nif) in CHEST slot has sub-meshes with <=4 bones → bypassed `is_full_body_skin` → went through static path → `node_transform` is skeleton-root space → floated at wrong positions\r\n- **Root cause 2:** Individual limb parts (hand, wrist, forearm) loaded ON TOP of full-body skin → 2 extra meshes per pair (R + mirrored L) → 6+ floating hands\r\n- **Fix 1:** In `_attach_body_part_native()`, if ANY sub-mesh from non-limb slot has >4 bones, ALL skinned sub",
       "summary": "NPC Assembly — Floating Hands Fix (2026-02-10)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01797089711543996,
       "accessCount": 0,
       "words": [
@@ -1466,7 +1466,7 @@
       "content": "- **PostGIS trigger** -> Fixed via migration 026 (EXECUTE dynamic SQL). Applied to DB.",
       "summary": "Resolved Issues",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01797089711543996,
       "accessCount": 0,
       "words": [
@@ -1489,7 +1489,7 @@
       "content": "This is a debugging tool. To remove:\r\n1. Delete `cameraDebugLog.ts` and `CameraDebugOverlay.tsx`\r\n2. Remove `<CameraDebugOverlay />` from `page.tsx`\r\n3. Replace all `cameraLog(...)` calls with `console.debug(...)` or remove them\r\n4. Remove `import { cameraLog }` from Map.tsx, page.tsx, MapBottomCard.tsx",
       "summary": "Removal",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.017422705749113497,
       "accessCount": 0,
       "words": [
@@ -1528,7 +1528,7 @@
       "content": "- **Symptom:** MW animations on MW skeleton were broken — character floats, arms forward, legs bent\r\n- **Root cause:** `_convert_library_to_rest_relative()` converted KF absolute values to rest-relative, but this collapsed the skeleton. Despite rest poses being correct NIF transforms and the conversion formula being mathematically valid (idle converts to identity), the rest-pose chain collapses when pose=identity.\r\n- **Fix:** Removed `_convert_library_to_rest_relative()` call from `_remap_and_ca",
       "summary": "Animation Playback Bug — FIXED (2026-02-11)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01678296741261035,
       "accessCount": 0,
       "words": [
@@ -1592,7 +1592,7 @@
       "content": "- Sync article gen: 2/2 OK (39s, Gemini 2.5 Pro)\r\n- Sync fact-check: 4/4 OK (~83s each, all flagged real issues)\r\n- Sync style-check: 4/4 OK (~80s each, caught forbidden AI words)\r\n- Sync SVG gen: 2/2 OK (~14s each, 2.5-2.8KB)\r\n- Sync image search: 2/2 OK (Wikimedia + Smithsonian)\r\n- Async batch: articles generated + auto-saved, chaining failed pre-fix (migration 027)",
       "summary": "Full Pipeline Test (2026-02-05) - 15/15 PASSED",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01678296741261035,
       "accessCount": 0,
       "words": [
@@ -1647,7 +1647,7 @@
       "content": "| Model | Standard (per 1M tokens) | Batch (50% off) |\r\n|-------|-------------------------|------------------|\r\n| gemini-2.5-pro | $1.25 in / $10.00 out | $0.625 in / $5.00 out |\r\n| gemini-3-flash-preview | $0.10 in / $0.40 out | $0.05 in / $0.20 out |\r\n\r\nArticle generation uses 2.5-pro; fact-check, style-check, and SVG use flash.",
       "summary": "Cost Model",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.016399306815062464,
       "accessCount": 0,
       "words": [
@@ -1686,7 +1686,7 @@
       "content": "### Pin tap → camera pan\r\n```\r\n[INP] pin clicked: \"PlaceName\"\r\n[INP] handleMapPlaceClick: \"PlaceName\"\r\n[STA] selectPoiOnMap: \"PlaceName\" {camera:\"panTo\", hasMapRef:true}\r\n[CAM] panTo (lat, lng) {offset, containerH}\r\n[CAM] panTo moveend: transition complete\r\n```\r\n\r\n### MapBottomCard swipe → camera follow\r\n```\r\n[INP] touchEnd {diffY, velocity, isFlick, threshold}\r\n[INP] swipe UP detected → next\r\n[INP] swipe navigate next: \"PlaceName\" {fromIndex, toIndex}\r\n[STA] onPlaceChange → \"PlaceName\"\r\n[INP] h",
       "summary": "Expected Event Chains",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.016138116596432085,
       "accessCount": 0,
       "words": [
@@ -1754,7 +1754,7 @@
       "content": "- **Phase 3B:** NPC assembly uses native Morrowind skeleton, bones renamed to profile, tracks remapped\r\n- **Phase 3C:** End-to-end integration test, bug fixes (track format, BoneAttachment names, state guards)\r\n- **Phase 3D:** AnimationTree root_node fix, GLB/FBX loader, streaming world wiring\r\n- KF loader ALWAYS uses `\".:BoneName\"` track format (even with null skeleton during preloading)\r\n- BoneAttachment3D names updated after bone renaming via `_update_bone_attachment_names()`\r\n- AnimationMana",
       "summary": "Animation Overhaul — Phase 3D (2026-02-09)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01538543120458702,
       "accessCount": 0,
       "words": [
@@ -1825,7 +1825,7 @@
       "content": "| File | Changes |\r\n|------|---------|\r\n| `apps/client/app/components/Map.tsx` | `rawMapRef` + `getRawMap()`, rewrite `mapHandle`, fix `handleLoad`, mobile click, deselection guard, debug logs |\r\n| `apps/client/app/page.tsx` | Debug log in `selectPoiOnMap` |",
       "summary": "Files Modified",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01538543120458702,
       "accessCount": 0,
       "words": [
@@ -1868,7 +1868,7 @@
       "content": "- **Full doc**: `docs/batch-pipeline-chaining.md` (canonical) + `BATCH_PIPELINE_CHAINING.md` in memory\r\n- **Chain flow**: article_generation → fact_check → style_check → svg_generation\r\n- **Start modes**: `auto` (smart grouping), `article_generation`, `fact_check`, `style_check`, `svg_generation`\r\n- **Auto mode**: Groups drafts by earliest missing stage (A: fact_check, B: style_check, C: SVG), creates parallel chains\r\n- **Chaining triggers**: on poll (3 endpoints: single poll, poll-all, cron)\r\n-",
       "summary": "Batch Pipeline & Auto-Chaining",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01538543120458702,
       "accessCount": 0,
       "words": [
@@ -1937,7 +1937,7 @@
       "content": "### Fixed: `auto_chain_to` constraint (Migration 027)\r\nThe original CHECK constraint on `batch_jobs.auto_chain_to` (migration 011) only allowed `article_generation`, `svg_generation`, `fact_check`. The value `style_check` was missing, causing chaining from fact_check → style_check to fail with:\r\n```\r\n\"new row for relation batch_jobs violates check constraint batch_jobs_auto_chain_to_check\"\r\n```\r\n**Fix**: Migration 027 drops and recreates the constraint with all 4 values.\r\n\r\n### Batch API Timing\r",
       "summary": "Known Issues & Fixes",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.014934083504917142,
       "accessCount": 0,
       "words": [
@@ -2007,7 +2007,7 @@
       "content": "- Phase 1 (MVP): COMPLETE - chat UI, API route, auth, migrations, layout\n- Phase 2 (Knowledge Management): NOT STARTED\n- Phase 3 (Smart Context/RAG): NOT STARTED\n- Phase 4 (Auto-Extraction): NOT STARTED\n- Phase 5 (Export/Drive): NOT STARTED\n- Phase 6 (PWA Polish): NOT STARTED",
       "summary": "Implementation Status",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.014418362130688842,
       "accessCount": 0,
       "words": [
@@ -2049,7 +2049,7 @@
       "content": "- **Strategy: FULL MESH-SPACE MIRROR** — flip vertex X, normal X, reverse winding in mesh data. NO transform-level `scale(-1,1,1)`. Avoids all MODEL_NORMAL_MATRIX ambiguity.\r\n- **Both static and skinned** paths now use the same approach: `_create_mirrored_mesh()` + conjugated node_transform\r\n- **Transform for mirrored parts:** `T = att_L * bone_offset * conj(node_xf)` where conj(X)=M*X*M, M=diag(-1,1,1). Use LEFT attachment from xbase_anim.nif (NOT right), bone_offset un-mirrored, only node_xf c",
       "summary": "Body Part Mirroring Fix (2026-02-10, rewritten)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.013741340581184026,
       "accessCount": 0,
       "words": [
@@ -2118,7 +2118,7 @@
       "content": "- **Code changes**: Complete, compiles successfully\r\n- **Testing**: BLOCKED — MapTiler API key returns 403 (out of credits). Map tiles don't render.\r\n- **Next step**: User needs to restore MapTiler API credits, then test the camera system\r\n- **Debug logs**: Still in place (`console.warn('[MAP DEBUG]...')`) — remove after confirming fix works",
       "summary": "Status",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.013741340581184026,
       "accessCount": 0,
       "words": [
@@ -2172,7 +2172,7 @@
       "content": "7. **maxOutputTokens too low (4096)** -> `gemini-3-flash-preview` uses internal reasoning tokens counting against output budget; increased to 16384 for both fact-check and style-check\r\n8. **DB update trigger fails** -> Root cause: migration 025 set `SET search_path = ''` + `::public.geography`, but on Supabase PostGIS types live in `extensions` schema not `public`. Fix: use EXECUTE dynamic SQL. Full audit: `apps/admin/migrations/POSTGIS_TRIGGER_AUDIT.md`\r\n9. **Batch auto_chain_to constraint miss",
       "summary": "Bugs Fixed (2026-02 pipeline testing)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.013741340581184026,
       "accessCount": 0,
       "words": [
@@ -2242,7 +2242,7 @@
       "content": "### Starting a Pipeline\r\n1. User clicks \"Auto-Generate (N)\" button on PipelineView\r\n2. AutoPipelineModal opens showing pending counts, cost estimate\r\n3. User can toggle auto-chaining, select model, name campaign\r\n4. \"Start Pipeline\" → POST `/api/admin/batch/pipeline`\r\n\r\n### Monitoring Progress\r\n1. Sidebar → \"Campaigns\" → CampaignDashboard\r\n2. Shows active campaigns with progress bars (Articles %, Fact-Check %, SVG %)\r\n3. \"Poll All\" button manually checks Google API for updates\r\n4. \"Apply All\" ap",
       "summary": "UI Flow",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01321039511670185,
       "accessCount": 0,
       "words": [
@@ -2303,7 +2303,7 @@
       "content": "- Using simple interfaces in `src/types/database.ts` (not the full Database generic)\n- The supabase-js generic type system is strict and needs auto-generated types from real project\n- Will generate proper types with `npx supabase gen types` once project is set up",
       "summary": "Supabase Types",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.01260362063011093,
       "accessCount": 0,
       "words": [
@@ -2345,7 +2345,7 @@
       "content": "- Settings-indexed: `ik.set_setting_count(1)`, then `set_root_bone_name(0, ...)`, `set_middle_bone_name(0, ...)`, `set_end_bone_name(0, ...)`\r\n- Target: `ik.set_target_node(0, path)` — REQUIRED\r\n- **Pole: `ik.set_pole_node(0, path)` — REQUIRED (solver silently skips without it!)**\r\n- Pole direction: `ik.set_pole_direction(0, SkeletonModifier3D.SECONDARY_DIRECTION_MINUS_Z)`\r\n- End bone direction: `ik.set_end_bone_direction(0, SkeletonModifier3D.BONE_DIRECTION_FROM_PARENT)`\r\n- No `start()`/`stop()",
       "summary": "Godot 4.6 IK API (TwoBoneIK3D) — FIXED 2026-02-08",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.011807202433387667,
       "accessCount": 0,
       "words": [
@@ -2416,7 +2416,7 @@
       "content": "- **Map.tsx**: flyTo/panTo/setView (with offset+containerH), reactive camera effect (with threshold deltas), pin click, map background click, map load\r\n- **page.tsx**: selectPoiOnMap (with mapRef status), handleMapPlaceClick, handleSwipeNavigation, handleRandomPlace, handleSwitchToMap (pre+post delayed flyTo), mode-switch effect, header select, geolocation, centerOnLocation\r\n- **MapBottomCard.tsx**: touchEnd (diffY, velocity, isFlick, threshold), swipe UP/DOWN detection, navigateWithAnimation (d",
       "summary": "Instrumented Files (30+ log points)",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.011807202433387667,
       "accessCount": 0,
       "words": [
@@ -2480,7 +2480,7 @@
       "content": "### Map initialization flow\r\n1. `useEffect([], [])` → `Promise.resolve(mapLib)` → `new Maplibre(MapClass, props, container)`\r\n2. `contextValue.map = createRef(maplibre)` — creates MapRef proxy\r\n3. `setMapInstance(maplibre)` → triggers re-render\r\n4. `useImperativeHandle(ref, () => contextValue.map, [mapInstance])` → sets `maplibreRef.current`\r\n5. MapLibre fires `load` event → `onLoad` prop called via `_onEvent`\r\n\r\n**Key**: Steps 1-4 happen before step 5. `maplibreRef.current` is available before ",
       "summary": "react-map-gl v8 Internals (key findings)",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.011807202433387667,
       "accessCount": 0,
       "words": [
@@ -2543,7 +2543,7 @@
       "content": "1. **Destructive normalization** in apply-correction -> Fixed with position-mapped targeted replacement\r\n2. **Style-check had NO normalization** for corrections -> Now uses shared `applySingleCorrection()`\r\n3. **apply-all routes had NO normalization** -> Now uses shared `applySingleCorrection()`\r\n4. **JSON repair corrupted valid JSON** with embedded single quotes -> Fixed: try `JSON.parse` first\r\n5. **Brace extraction skipped when JSON at position 0** -> Fixed in both parsers\r\n6. **`throw` for n",
       "summary": "Bugs Fixed (2025-02 session)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.011807202433387667,
       "accessCount": 0,
       "words": [
@@ -2600,7 +2600,7 @@
       "content": "When a batch job completes, results are automatically parsed and saved:\r\n\r\n| Job Type | Auto-Save Action |\r\n|----------|-----------------|\r\n| `article_generation` | Parse JSON → update topic to `status='draft'` with title, content, hook, fun_facts, sources |\r\n| `fact_check` | Parse JSON → update `fact_check_status` + `fact_check_issues` on topic |\r\n| `style_check` | Parse JSON → update `style_check_status` + `style_check_issues` on topic |\r\n| `svg_generation` | Parse SVG → save `animated_svg_dat",
       "summary": "Auto-Save Behavior",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.011182580125633413,
       "accessCount": 0,
       "words": [
@@ -2672,7 +2672,7 @@
       "content": "- Calendar: CSV files in `packages/calendar/public/data/`",
       "summary": "Data",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.010468695992872859,
       "accessCount": 0,
       "words": [
@@ -2691,7 +2691,7 @@
       "content": "- `middleware.ts` is deprecated → should migrate to `proxy` convention\n- `params` in page components is now `Promise<{ id: string }>` (must await)",
       "summary": "Next.js 16 Changes",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.010468695992872859,
       "accessCount": 0,
       "words": [
@@ -2717,7 +2717,7 @@
       "content": "- Svelte 5 (v5.43.8), Vite 7 (v7.2.4)\n- Calendar app uses legacy Svelte patterns (`export let`, `$:`, `on:click`)\n- Shared package: Leaflet 1.9.4 for maps, CSV utils, geo utils",
       "summary": "Tech Stack",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.010004211057304976,
       "accessCount": 0,
       "words": [
@@ -2749,7 +2749,7 @@
       "content": "- Next.js 16.1.6 + TypeScript + Tailwind CSS 4.1\n- shadcn/ui (unified radix-ui, Feb 2026)\n- Supabase (PostgreSQL + pgvector) - untyped client for now\n- Vercel AI SDK 6 (`ai` v6, `@ai-sdk/react` v3)\n- Gemini 3 Flash (`gemini-3-flash-preview`)\n- Serwist for PWA (not yet configured)",
       "summary": "Tech Stack",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.010004211057304976,
       "accessCount": 0,
       "words": [
@@ -2787,7 +2787,7 @@
       "content": "- 3-tier distance rendering: NEAR (0-150m), MID (150-500m), FAR (500-5km impostors)\r\n- IK system uses **TwoBoneIK3D** (Godot 4.6) — settings-indexed API, NOT property-based\r\n- Ocean uses **Godot 4.6 native SSR** + ReflectionProbe (no custom raymarching)\r\n- Prebaking pipeline converts NIF/ESM/BSA -> Godot .res files",
       "summary": "Key Architecture",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.009531762531241479,
       "accessCount": 0,
       "words": [
@@ -2834,7 +2834,7 @@
       "content": "| Category | Color | What it tracks |\r\n|---|---|---|\r\n| INPUT | green | Pin taps, swipes, button presses, touch events |\r\n| STATE | blue | selectPoiOnMap, mode switches, currentPoi changes, MapBottomCard sync |\r\n| CAMERA | amber | flyTo, panTo, setView, reactive camera effect, moveend |\r\n| GUARD | red | Blocked actions: null mapRef, animation locks, thresholds not met, cooldowns |\r\n| LIFECYCLE | violet | Map loaded, onMapReady, initialization |",
       "summary": "Categories",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.009531762531241479,
       "accessCount": 0,
       "words": [
@@ -2897,7 +2897,7 @@
       "content": "| Scenario | Before | After |\r\n|----------|--------|-------|\r\n| App restart (IDB fresh) | 2-5s spinner | ~100ms (IDB read) |\r\n| App restart (IDB stale) | 2-5s spinner | ~100ms (stale render, bg update) |\r\n| First-ever visit | 2-5s spinner | 2-5s (unchanged, but Map preloads in parallel) |",
       "summary": "Impact",
       "category": "client-loading-optimization",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.009531762531241479,
       "accessCount": 0,
       "words": [
@@ -2941,7 +2941,7 @@
       "content": "### 1. Added `rawMapRef` + `getRawMap()` lazy initializer\r\n- `rawMapRef = useRef<any>(null)` — stores raw MapLibre GL JS map instance\r\n- `getRawMap()` — lazy-init helper: if `rawMapRef.current` is null, tries `maplibreRef.current?.getMap()` to populate it. This handles cases where `handleLoad` hasn't fired (style 403, slow load, etc.)\r\n\r\n### 2. Rewrote `mapHandle` methods to use `getRawMap()`\r\nAll four methods (`flyTo`, `setView`, `panTo`, `getZoom`) now call `getRawMap()` instead of directly re",
       "summary": "Changes Made to `apps/client/app/components/Map.tsx`",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.009531762531241479,
       "accessCount": 0,
       "words": [
@@ -3011,7 +3011,7 @@
       "content": "1. **Gemini JSON mode**: `responseMimeType: \"application/json\"` + `responseJsonSchema` forces valid JSON output\r\n2. **Google Search grounding**: `tools: [{google_search: {}}]` on fact-check calls; grounding metadata parsed into `FactCheckIssue.sources`\r\n3. **Deterministic style pre-pass**: Regex checks forbidden words/phrases before LLM; results merged via `deduplicateIssues()`\r\n4. **JSON repair removed**: Brace-counting + repair logic replaced with simple `JSON.parse` + fallback extraction",
       "summary": "Pipeline Features (2026-02 session)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.009531762531241479,
       "accessCount": 0,
       "words": [
@@ -3075,7 +3075,7 @@
       "content": "- Enabled in ThreeMap.jsx\n- FOG_PLANE_SIZE = 300 (3 ocean tiles)\n- Trail texture UV mapping accounts for MAP_BOUNDS.minX/minZ offset",
       "summary": "Fog of War",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.009531762531241479,
       "accessCount": 0,
       "words": [
@@ -3106,7 +3106,7 @@
       "content": "### Creation\r\n\r\nWhen a pipeline is created with `enableChaining: true`:\r\n\r\n1. `article_generation` job is created with `auto_chain_to: 'fact_check'`\r\n2. The pipeline stages array is: `[article_generation, fact_check, style_check, svg_generation]`\r\n\r\n### Trigger Flow\r\n\r\nWhen any polling endpoint detects a job has reached `completed` or `partial` status AND `auto_chain_to` is set:\r\n\r\n1. **Filter topics**: Query `topics` table for `resource_ids` WHERE `status = 'draft'` (only successfully processed",
       "summary": "How Auto-Chaining Works",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.008796907746252771,
       "accessCount": 0,
       "words": [
@@ -3169,7 +3169,7 @@
       "content": "1. Run `pnpm dev` in client\r\n2. Open mobile viewport in browser\r\n3. Click blue **D** button (bottom-left, above nav bar) to open overlay\r\n4. Reproduce the issue (tap pin, swipe card, etc.)\r\n5. Read the event trace — look for GUARD (red) entries showing where the chain breaks\r\n6. Click **Copy** to copy the full log as text, then paste into Claude chat for analysis",
       "summary": "How to Use",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.008723314412151385,
       "accessCount": 0,
       "words": [
@@ -3228,7 +3228,7 @@
       "content": "- npm workspaces use `\"*\"` for local deps, NOT `\"workspace:*\"` (that's pnpm only)\n- Svelte 5 doesn't support `onclick|stopPropagation` syntax — use `onclick={(e) => { e.stopPropagation(); handler() }}`\n- `<label>` without `for` attribute triggers a11y warnings; use `<span>` for visual-only labels\n- Leaflet dynamically imported inside `onMount` for SSR safety\n- Shared package exports source `.svelte` files, not compiled — each app's Svelte compiler processes them",
       "summary": "Key Gotchas",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.00795703182769492,
       "accessCount": 0,
       "words": [
@@ -3287,7 +3287,7 @@
       "content": "- `useChat` no longer manages input state - use `useState` yourself\n- `useChat` options: `transport` replaces `api` + `body` → `new DefaultChatTransport({ api, body })`\n- `initialMessages` is now `messages` (prop name change)\n- Messages use `parts` array instead of `content` string: `m.parts.filter(p => p.type === \"text\").map(p => p.text)`\n- `sendMessage({ text })` replaces `handleSubmit(e)`\n- `status` (\"submitted\" | \"streaming\" | \"ready\" | \"error\") replaces `isLoading`\n- `toTextStreamResponse()",
       "summary": "Critical: AI SDK 6 API Changes",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.00795703182769492,
       "accessCount": 0,
       "words": [
@@ -3351,7 +3351,7 @@
       "content": "- **`.claude/CLAUDE.md`** — Concise hub. Typing policy, project structure, autoloads, distance tiers, anti-patterns, gotchas, code style\r\n- **`docs/STATUS.md`** — Ground truth for implementation status\r\n- **`docs/audit/MASTERPLAN.md`** — Roadmap, architecture decisions, framework-first identity\r\n- **`docs/audit/FINDINGS.md`** — Audit issue tracker (streaming, animation, quality)\r\n- **`docs/audit/STREAMING.md`** — Streaming pipeline deep audit\r\n- **`docs/specs/record_cache.md`** — ESM query layer",
       "summary": "Documentation Structure (Cleaned up 2026-03-01)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.006854749650211859,
       "accessCount": 0,
       "words": [
@@ -3418,7 +3418,7 @@
       "content": "- `apps/client/app/lib/cameraDebugLog.ts` — Core logger: circular buffer (80 entries), `cameraLog(category, message, data)`, `exportCameraLog()` for clipboard, `subscribeCameraLog()` for reactive UI\r\n- `apps/client/app/components/CameraDebugOverlay.tsx` — On-screen overlay (dev only): blue \"D\" toggle button bottom-left, color-coded log entries, Copy/Clear buttons",
       "summary": "Files",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.006854749650211859,
       "accessCount": 0,
       "words": [
@@ -3467,7 +3467,7 @@
       "content": "### 1. IndexedDB places cache — `apps/client/app/lib/placesCache.ts` (NEW)\r\n- Persists PlaceWithArticle[] to IndexedDB (`nerdy-planet` DB, `cache` store)\r\n- Three functions: `savePlacesToIDB()`, `loadPlacesFromIDB()`, `clearPlacesIDB()`\r\n- All ops wrapped in try/catch (IDB unavailable in some private browsing modes)\r\n- ~20ms read latency vs 2-5s network\r\n\r\n### 2. Non-blocking PlacesProvider — `apps/client/app/contexts/PlacesContext.tsx`\r\n- New load order: module cache → IndexedDB → Supabase (net",
       "summary": "Changes Made",
       "category": "client-loading-optimization",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.006854749650211859,
       "accessCount": 0,
       "words": [
@@ -3530,7 +3530,7 @@
       "content": "**`handleLoad` never fires** because react-map-gl's `onLoad` depends on MapLibre's `load` event, which only fires after the map style successfully loads. Two issues compound:\r\n\r\n1. **MapTiler API key out of credits (403)** → style never loads → `load` event never fires → `handleLoad` never runs → `rawMapRef.current` stays null → all camera commands blocked\r\n2. **Even with valid API key**, the original code used `maplibreRef.current` (the react-map-gl MapRef proxy) which IS set before `load` fire",
       "summary": "Root Cause (confirmed via console debugging)",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.006854749650211859,
       "accessCount": 0,
       "words": [
@@ -3602,7 +3602,7 @@
       "content": "- **Fact check**: `fact-checker.ts` -> Gemini Flash 3, temp 0.1, JSON mode + Google Search grounding\r\n- **Style check**: `style-checker.ts` -> Gemini Flash 3, temp 0.3, JSON mode + deterministic pre-pass\r\n- **Deterministic style checker**: `deterministic-style-checker.ts` (regex pre-pass, runs before LLM)\r\n- **Style constants**: `style-constants.ts` (single source of truth for forbidden words/patterns)\r\n- **Shared correction logic**: `apply-corrections.ts` (non-destructive Unicode normalization)",
       "summary": "AI Pipeline Architecture",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.006854749650211859,
       "accessCount": 0,
       "words": [
@@ -3660,7 +3660,7 @@
       "content": "- `bake-shore-distance.html` renders islands as silhouettes, runs JFA for distance field\n- `generate-shore-distance.mjs` injects config via regex into bake HTML, runs Puppeteer\n- Bake camera: symmetric frustum (±halfWidth, ±halfHeight), camera.position handles centering\n  - OrthoCamera left/right/top/bottom are in camera-local space, NOT world space!\n  - camera.up=(0,0,1) looking down → camera-right = (-1,0,0), so X is flipped on screen\n- UV flip chain: bake Y-flip + Three.js flipY = V axis corr",
       "summary": "Shore Distance Bake Pipeline",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.006854749650211859,
       "accessCount": 0,
       "words": [
@@ -3727,7 +3727,7 @@
       "content": "### API Endpoints\r\n\r\n| Method | Endpoint | Purpose |\r\n|--------|----------|---------|\r\n| POST | `/api/admin/batch/pipeline` | Create a new batch pipeline campaign |\r\n| GET | `/api/admin/batch/pipeline` | Get pending resource counts + active campaigns |\r\n| GET | `/api/admin/batch/[id]/poll` | Poll single batch job + auto-save results |\r\n| POST | `/api/admin/batch/poll-all` | Poll all jobs in a campaign (requires `{campaignId}` or `{jobIds}`) |\r\n| GET | `/api/cron/poll-batches` | Cron endpoint tha",
       "summary": "Architecture",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.004755108712149781,
       "accessCount": 0,
       "words": [
@@ -3797,7 +3797,7 @@
       "content": "- **Monorepo** with npm workspaces at `packages/` (calendar, shared)\n- Root `package.json` has workspace scripts: `dev:calendar`, `build:calendar`\n- Calendar runs on port 5173\n- **burning-season was extracted** to standalone project at `d:\\Gamedev\\burning-season\\` (separate git repo)",
       "summary": "Architecture",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -3837,7 +3837,7 @@
       "content": "- Godot 4.6 (upgraded from 4.5 on 2026-02-05)\r\n- Morrowind data viewer/explorer with sophisticated rendering pipeline\r\n- Uses GDScript (95%) + C# (5%) + GLSL shaders\r\n- Jolt Physics is the configured 3D physics engine",
       "summary": "Project Overview",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -3869,7 +3869,7 @@
       "content": "The batch pipeline processes topics through 4 stages using Google's Gemini Batch API (50% cost discount). Each stage can auto-chain to the next when it completes.\r\n\r\n```\r\narticle_generation → fact_check → style_check → svg_generation\r\n```",
       "summary": "Overview",
       "category": "BATCH_PIPELINE_CHAINING",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -3905,7 +3905,7 @@
       "content": "Diagnose map/feed/camera issues (pin tap not centering, swipe not following, etc.) by tracking every input, state change, camera command, and guard condition through the system.",
       "summary": "Purpose",
       "category": "camera-debug-system",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -3937,7 +3937,7 @@
       "content": "PlacesProvider blocked the entire UI behind a loading spinner on every app restart. The module-level places cache only lived in RAM — killed on tab close, navigation refresh, or APK restart. Every cold start paid a 2-5s Supabase penalty. MapLibre chunk download also started late (after the loading gate), and AdMob init competed with the critical path.",
       "summary": "Problem",
       "category": "client-loading-optimization",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -3988,7 +3988,7 @@
       "content": "After migrating from Leaflet to MapLibre GL JS + react-map-gl v8, the map camera system broke:\r\n- Tapping a pin doesn't center the camera on it\r\n- Swiping MapBottomCard doesn't move the camera to the new pin\r\n- Feed scroll doesn't move the background map\r\n\r\nLast working commit (Leaflet era): `9211f4f1b21898bddf3ccb6af62289a9d00092a3`",
       "summary": "Problem",
       "category": "map-camera-fix-session",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -4032,7 +4032,7 @@
       "content": "- **Test framework**: vitest, configured in `apps/admin/vitest.config.ts`\r\n- **Test location**: `apps/admin/app/lib/ai/__tests__/`\r\n- **Run tests**: `pnpm --filter @nerdy-planet/admin test`\r\n- **148 tests** across 9 test files (added `batch/__tests__/classifyTopics.test.ts`)",
       "summary": "Testing",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -4076,7 +4076,7 @@
       "content": "Two fundamental values define the coordinate system (in `archipelagoConfig.js`):\n- `sceneSize = 20` — Blender scene size, defines island area\n- `meshScale = 5` — visual multiplier shared by ocean + islands\n\nDerived values:\n- MAP_BOUNDS: 100×100 visual space (-40 to 60) — defined in `constants.js`\n- MAP_BOUNDS.centerX/Z = 10 — world center (= sceneSize/2)\n- Ocean tile size: sceneSize × meshScale = 100 visual units\n- Position formula: `worldPos = blenderPos × meshScale + (10, 0, 10)`\n- Shore mask:",
       "summary": "Coordinate System (updated 2026-02-05)",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -4143,7 +4143,7 @@
       "content": "- Working directory: `d:\\Gamedev\\world-builder` (NOT the original \"World building by talking\" - spaces in paths cause npm issues)",
       "summary": "Project Location",
       "category": "core",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [
@@ -4169,7 +4169,7 @@
       "content": "File unknown was edited 36 times this session — likely a hot path worth monitoring.",
       "summary": "Frequently edited: unknown (36x)",
       "category": "insights",
-      "confidence": 0.5,
+      "confidence": 0.45999999999999996,
       "pageRank": 0.0037052882431187423,
       "accessCount": 0,
       "words": [

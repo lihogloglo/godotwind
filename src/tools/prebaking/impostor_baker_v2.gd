@@ -1,19 +1,19 @@
-## ImpostorBakerV2 - High-quality octahedral impostor texture generator
+## ImpostorBakerV2 - Multi-channel octahedral impostor texture generator
 ##
 ## Creates pre-baked impostor textures for distant rendering (FAR tier, 500m-5km).
 ## Uses SubViewport to render models from 16 octahedral viewing angles.
 ##
 ## Key features:
 ## - 16-frame octahedral atlas (4x4 layout) for smooth rotation
-## - Depth baking in alpha channel for parallax correction
+## - 2-pass baking: unlit albedo + world-space normals with depth
 ## - Hemisphere coverage optimized for ground-based objects
 ## - Async baking support with progress signals
 ## - Resume capability via prebake state
 ##
-## Output format:
-## - PNG atlas: 512x512 (4x4 of 128x128 frames)
-## - RGBA: RGB = albedo, A = normalized depth (for parallax)
-## - JSON metadata with bounds, directions, UVs
+## Output format (v4):
+## - Albedo atlas PNG: 512x512 (4x4 of 128x128 frames), RGB=unlit color, A=cutout
+## - Normal atlas PNG: 512x512 (4x4 of 128x128 frames), RGB=world-space normals, A=depth
+## - JSON metadata with bounds, directions, UVs, bake_version=4
 class_name ImpostorBakerV2
 extends Node
 
@@ -56,8 +56,10 @@ var output_dir: String = ""        ## Set in initialize from SettingsManager
 ## Rendering setup
 var _viewport: SubViewport = null
 var _camera: Camera3D = null
-var _light: DirectionalLight3D = null
 var _model_container: Node3D = null
+
+## Normal capture shader (overrides materials for normal pass)
+var _normal_capture_material: ShaderMaterial = null
 
 ## Progress tracking
 signal progress(current: int, total: int, model_name: String)
@@ -80,7 +82,7 @@ func _setup_rendering_viewport() -> void:
 	if _is_initialized:
 		return
 
-	# Create color SubViewport for rendering
+	# Create SubViewport for rendering
 	_viewport = SubViewport.new()
 	_viewport.size = Vector2i(frame_size, frame_size)
 	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -102,21 +104,14 @@ func _setup_rendering_viewport() -> void:
 	_camera.far = 1000.0
 	_viewport.add_child(_camera)
 
-	# Create directional light
-	_light = DirectionalLight3D.new()
-	_light.rotation_degrees = Vector3(-45, 45, 0)
-	_light.light_energy = 1.0
-	_light.shadow_enabled = false
-	_viewport.add_child(_light)
-
-	# Add ambient light
+	# NO DirectionalLight — flat ambient-only lighting for true material colors
 	var world_env := WorldEnvironment.new()
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = background_color
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color.WHITE
-	env.ambient_light_energy = 0.5
+	env.ambient_light_energy = 1.0  # Full ambient, no directional
 	world_env.environment = env
 	_viewport.add_child(world_env)
 
@@ -125,8 +120,39 @@ func _setup_rendering_viewport() -> void:
 	_model_container.name = "ModelContainer"
 	_viewport.add_child(_model_container)
 
+	# Create the normal capture shader material
+	_normal_capture_material = _create_normal_capture_material()
+
 	_is_initialized = true
-	Log.info("prebaking", "ImpostorBakerV2 initialized (16-frame, %dx%d atlas)" % [texture_size, texture_size])
+	Log.info("prebaking", "ImpostorBakerV2 initialized (16-frame, 2-pass, %dx%d atlas)" % [texture_size, texture_size])
+
+
+## Create a ShaderMaterial that outputs world-space normals as RGB color
+func _create_normal_capture_material() -> ShaderMaterial:
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode unshaded, cull_disabled;
+
+uniform float near_plane = 0.1;
+uniform float far_plane = 100.0;
+
+void vertex() {
+	// Pass world-space normal to fragment via varying
+}
+
+void fragment() {
+	// Encode world-space normal to RGB: [-1,1] -> [0,1]
+	vec3 world_normal = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
+	ALBEDO = world_normal * 0.5 + 0.5;
+	// Encode linear depth in alpha: near=1, far=0
+	float linear_depth = -VERTEX.z;  // View-space depth (positive = further)
+	ALPHA = 1.0 - clamp((linear_depth - near_plane) / (far_plane - near_plane), 0.0, 1.0);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	return mat
 
 
 ## Initialize output directory
@@ -144,7 +170,7 @@ func initialize() -> Error:
 	return OK
 
 
-## Bake impostor for a single model
+## Bake impostor for a single model (2-pass: albedo + normal/depth)
 func bake_model(model_path: String) -> Dictionary:
 	Log.info("prebaking", "Baking impostor: %s" % model_path)
 
@@ -191,53 +217,101 @@ func bake_model(model_path: String) -> Dictionary:
 
 	var camera_distance := max_extent * 2.0
 
-	# Render from all 16 directions
-	var color_frames: Array[Image] = []
+	# Configure normal capture depth range
+	_normal_capture_material.set_shader_parameter("near_plane", _camera.near)
+	_normal_capture_material.set_shader_parameter("far_plane", camera_distance * 2.0)
 
+	# === PASS 1: Albedo (unlit, true material colors) ===
+	var albedo_frames: Array[Image] = []
 	for i in range(OCTAHEDRAL_DIRECTIONS.size()):
 		var direction: Vector3 = OCTAHEDRAL_DIRECTIONS[i].normalized()
-
-		# Render color frame
-		var color_frame := await _render_from_direction_async(_camera, _viewport, direction, camera_distance)
-		if color_frame:
-			color_frames.append(color_frame)
+		var frame := await _render_from_direction_async(_camera, _viewport, direction, camera_distance)
+		if frame:
+			albedo_frames.append(frame)
 		else:
 			var blank := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
 			blank.fill(background_color)
-			color_frames.append(blank)
+			albedo_frames.append(blank)
 
-	# Clean up model
+	# Clean up albedo model
 	model.queue_free()
+	await get_tree().process_frame
 
-	# Pack frames into final atlas
-	var atlas := _pack_atlas(color_frames)
-	if not atlas:
-		var error := "Failed to pack atlas"
+	# === PASS 2: Normal + Depth (reload model with normal capture material) ===
+	# We reload the model fresh and force ALL materials to the normal capture shader.
+	# This is more robust than material_override which can be tricky with NIF meshes.
+	var normal_frames: Array[Image] = []
+	var normal_model := _load_model(model_path)
+	if normal_model:
+		_model_container.add_child(normal_model)
+		normal_model.position = -center
+
+		# Force normal capture material on every mesh instance
+		var normal_mesh_instances := _find_all_mesh_instances(normal_model)
+		Log.info("prebaking", "Normal pass: overriding %d mesh instances" % normal_mesh_instances.size())
+		for mesh_inst in normal_mesh_instances:
+			mesh_inst.material_override = _normal_capture_material
+
+		await get_tree().process_frame
+		await get_tree().process_frame  # Extra frame to ensure material propagates
+
+		for i in range(OCTAHEDRAL_DIRECTIONS.size()):
+			var direction: Vector3 = OCTAHEDRAL_DIRECTIONS[i].normalized()
+			var frame := await _render_from_direction_async(_camera, _viewport, direction, camera_distance)
+			if frame:
+				normal_frames.append(frame)
+			else:
+				var blank := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
+				blank.fill(Color(0.5, 1.0, 0.5, 0.0))
+				normal_frames.append(blank)
+
+		normal_model.queue_free()
+	else:
+		# Fallback: create blank normal frames if model reload fails
+		for i in range(OCTAHEDRAL_DIRECTIONS.size()):
+			var blank := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
+			blank.fill(Color(0.5, 1.0, 0.5, 0.0))
+			normal_frames.append(blank)
+
+	# Pack frames into atlases
+	var albedo_atlas := _pack_atlas(albedo_frames)
+	var normal_atlas := _pack_atlas_normal(normal_frames, albedo_frames)
+	if not albedo_atlas:
+		var error := "Failed to pack albedo atlas"
 		push_warning("ImpostorBakerV2: %s - %s" % [error, model_path])
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "output_path": "", "error": error}
 
-	# Save
+	# Save albedo atlas
 	var texture_path := _get_output_path(model_path, "png")
 	var metadata_path := _get_output_path(model_path, "json")
 
-	var save_err := atlas.save_png(texture_path)
+	var save_err := albedo_atlas.save_png(texture_path)
 	if save_err != OK:
-		var error := "Failed to save atlas: error %d" % save_err
+		var error := "Failed to save albedo atlas: error %d" % save_err
 		push_warning("ImpostorBakerV2: %s - %s" % [error, texture_path])
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "output_path": "", "error": error}
 
+	# Save normal atlas (same name with _normal suffix)
+	var normal_texture_path := _get_output_path_with_suffix(model_path, "normal", "png")
+	if normal_atlas:
+		save_err = normal_atlas.save_png(normal_texture_path)
+		if save_err != OK:
+			push_warning("ImpostorBakerV2: Failed to save normal atlas: %s" % normal_texture_path)
+			normal_texture_path = ""
+
 	# Save metadata
-	var metadata := _generate_metadata(model_path, aabb, texture_path)
+	var metadata := _generate_metadata(model_path, aabb, texture_path, normal_texture_path)
 	_save_metadata(metadata_path, metadata)
 
-	Log.info("prebaking", "Saved impostor: %s" % texture_path)
+	Log.info("prebaking", "Saved impostor: %s (+ normals)" % texture_path)
 	model_baked.emit(model_path, true, texture_path)
 
 	return {
 		"success": true,
 		"output_path": texture_path,
+		"normal_path": normal_texture_path,
 		"metadata_path": metadata_path,
 		"bounds": aabb,
 		"error": ""
@@ -297,13 +371,12 @@ func _render_from_direction_async(cam: Camera3D, vp: SubViewport, direction: Vec
 	return image.duplicate()
 
 
-## Pack color frames into atlas
+## Pack albedo frames into atlas (RGB=unlit color, A=binary cutout)
 func _pack_atlas(color_frames: Array[Image]) -> Image:
 	var expected_frames := atlas_columns * atlas_rows
 	if color_frames.size() < expected_frames:
 		push_warning("ImpostorBakerV2: Expected %d frames, got %d" % [expected_frames, color_frames.size()])
 
-	# Create atlas
 	var atlas := Image.create(texture_size, texture_size, false, Image.FORMAT_RGBA8)
 	atlas.fill(background_color)
 
@@ -316,16 +389,59 @@ func _pack_atlas(color_frames: Array[Image]) -> Image:
 			var x := col * frame_size
 			var y := row * frame_size
 
-			# Get color frame and binarize alpha for clean cutout
 			var color_frame: Image = color_frames[frame_idx]
 			var processed := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
 
 			for py in range(frame_size):
 				for px in range(frame_size):
 					var color := color_frame.get_pixel(px, py)
-					# Binary alpha: solid or transparent (prevents half-transparent artifacts)
 					color.a = 1.0 if color.a > 0.5 else 0.0
 					processed.set_pixel(px, py, color)
+
+			atlas.blit_rect(processed, Rect2i(0, 0, frame_size, frame_size), Vector2i(x, y))
+			frame_idx += 1
+
+	return atlas
+
+
+## Pack normal+depth frames into atlas (RGB=world-space normals, A=linear depth)
+## Uses the albedo frames' alpha as the cutout mask (transparent pixels get zero normal)
+func _pack_atlas_normal(normal_frames: Array[Image], albedo_frames: Array[Image]) -> Image:
+	var expected_frames := atlas_columns * atlas_rows
+	if normal_frames.size() < expected_frames:
+		push_warning("ImpostorBakerV2: Expected %d normal frames, got %d" % [expected_frames, normal_frames.size()])
+
+	var atlas := Image.create(texture_size, texture_size, false, Image.FORMAT_RGBA8)
+	atlas.fill(Color(0.5, 0.5, 1.0, 0.0))  # Default: up-facing normal, zero depth
+
+	var frame_idx := 0
+	for row in range(atlas_rows):
+		for col in range(atlas_columns):
+			if frame_idx >= normal_frames.size():
+				break
+
+			var x := col * frame_size
+			var y := row * frame_size
+
+			var normal_frame: Image = normal_frames[frame_idx]
+			var albedo_frame: Image = albedo_frames[frame_idx] if frame_idx < albedo_frames.size() else null
+			var processed := Image.create(frame_size, frame_size, false, Image.FORMAT_RGBA8)
+
+			for py in range(frame_size):
+				for px in range(frame_size):
+					# Use albedo alpha as the cutout mask
+					var albedo_alpha := 0.0
+					if albedo_frame:
+						albedo_alpha = albedo_frame.get_pixel(px, py).a
+					var is_solid := albedo_alpha > 0.5
+
+					if is_solid:
+						var normal_color := normal_frame.get_pixel(px, py)
+						# RGB = encoded normals from capture shader, A = depth
+						processed.set_pixel(px, py, normal_color)
+					else:
+						# Transparent pixel: default normal, zero depth
+						processed.set_pixel(px, py, Color(0.5, 0.5, 1.0, 0.0))
 
 			atlas.blit_rect(processed, Rect2i(0, 0, frame_size, frame_size), Vector2i(x, y))
 			frame_idx += 1
@@ -421,14 +537,32 @@ func _get_output_path(model_path: String, extension: String) -> String:
 	return output_dir.path_join(filename)
 
 
+## Generate output path with a suffix (e.g., "normal" -> "{name}_{hash}_normal.png")
+func _get_output_path_with_suffix(model_path: String, suffix: String, extension: String) -> String:
+	var normalized := model_path
+	var lower := normalized.to_lower()
+	if lower.begins_with("meshes\\") or lower.begins_with("meshes/"):
+		normalized = normalized.substr(7)
+
+	normalized = normalized.replace("/", "\\").to_lower()
+	var hash_key := normalized.md5_text().substr(0, 8)
+	var base_name := normalized.get_file().get_basename()
+	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
+	var filename := "%s_%s_%s.%s" % [base_name, hash_key, suffix, extension]
+	return output_dir.path_join(filename)
+
+
 ## Generate metadata JSON
-func _generate_metadata(model_path: String, aabb: AABB, texture_path: String) -> Dictionary:
+func _generate_metadata(model_path: String, aabb: AABB, texture_path: String, normal_texture_path: String = "") -> Dictionary:
 	var size := aabb.size
+	var has_normals := not normal_texture_path.is_empty()
 
 	return {
-		"version": 3,
+		"version": 4,
 		"model_path": model_path,
 		"texture_path": texture_path,
+		"normal_texture_path": normal_texture_path if has_normals else "",
+		"has_normal_map": has_normals,
 		"settings": {
 			"texture_size": texture_size,
 			"frame_size": frame_size,
