@@ -1,6 +1,6 @@
 # Godotwind
 
-An open-world RPG framework for Godot 4.6. Not a faithful port — a framework that uses Morrowind as its reference implementation.
+An open-world RPG framework for Godot 4.6. Not a faithful port and more like a framework that uses Morrowind as its reference implementation. At the moment, fully vibe-engineered with Claude Opus 4.5 / 4.6. I'm also trying to figure out how far you can go with LLMs to do an ambitious project such as this one.
 
 The long-term goal is to continue where [Skelerealms](https://github.com/SlashScreen/skelerealms) stopped: a general-purpose open-world RPG framework for Godot, with abstract interfaces for inventory, dialogue, AI, and save/load — where addons are optional backends and Morrowind is just one "mod" that implements them.
 
