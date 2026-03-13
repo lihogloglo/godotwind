@@ -716,6 +716,7 @@ func _attach_player_character() -> void:
 
 	var factory := CharacterFactoryV2Script.new()
 	factory.enable_ik = true
+	factory.enable_lod = false  # Player is always at camera — LOD is pointless overhead
 	factory.debug_characters = true
 	factory.debug_animations = true
 

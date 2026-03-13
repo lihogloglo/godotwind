@@ -147,11 +147,10 @@ func _update_lod_level() -> void:
 	if _forced_level >= 0:
 		return  # Level is forced
 
-	# Ensure we have a camera
+	# Always refresh camera — the active camera can change (fly ↔ player switch)
+	_find_camera()
 	if not camera:
-		_find_camera()
-		if not camera:
-			return
+		return
 
 	# Calculate distance to camera
 	var char_pos := Vector3.ZERO
@@ -167,9 +166,9 @@ func _update_lod_level() -> void:
 	# Apply importance boost (makes character seem closer)
 	var effective_distance := _distance_to_camera - importance_boost
 
-	# Check frustum visibility
+	# Check frustum visibility (use chest height, not feet — avoids cull when looking up)
 	if use_frustum_culling:
-		_is_visible = _check_frustum_visibility(char_pos)
+		_is_visible = _check_frustum_visibility(char_pos + Vector3.UP * 1.0)
 		if not _is_visible:
 			_set_lod_level(LODLevel.CULLED)
 			return
