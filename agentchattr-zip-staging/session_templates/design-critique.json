@@ -1,0 +1,28 @@
+{
+  "id": "design-critique",
+  "name": "Design Critique",
+  "description": "One agent presents work, one critiques it, one synthesises the outcome.",
+  "roles": ["presenter", "critic", "synthesiser"],
+  "user_required": false,
+  "phases": [
+    {
+      "name": "Present",
+      "participants": ["presenter"],
+      "prompt": "Explain the work, goals, constraints, and what feedback you need.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Critique",
+      "participants": ["critic"],
+      "prompt": "Identify strengths, weaknesses, risks, and concrete improvements. Provide your own independent analysis.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Synthesis",
+      "participants": ["synthesiser"],
+      "prompt": "Turn the discussion into prioritised recommendations: what to keep, what to change, what to investigate.",
+      "turn_order": "sequential",
+      "is_output": true
+    }
+  ]
+}

@@ -21,7 +21,7 @@ extends Node3D
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
 const NIFKFLoaderScript := preload("res://src/core/nif/nif_kf_loader.gd")
-const RetargetSetupScript := preload("res://src/core/animation/retarget_setup.gd")
+const RetargetSetupScript := preload("res://src/core/animation/skeleton_utils.gd")
 const TestNPCLoaderScript := preload("res://tests/test_npc_loader.gd")
 
 # Results tracking
@@ -293,6 +293,9 @@ func _section_4_pipeline() -> void:
 	factory.enable_wander = false
 	factory.debug_characters = true
 
+	# Trigger on-demand record creation from C# cache
+	var _out_type: Array = [""]
+	ESMManager.get_any_record("fargoth", _out_type)
 	var npc_record = ESMManager.get_npc("fargoth")
 	if not npc_record:
 		_result("S4", "npc_record", "fargoth NOT FOUND in ESM", "FAIL")

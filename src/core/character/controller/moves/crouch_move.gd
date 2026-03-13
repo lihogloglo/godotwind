@@ -1,0 +1,98 @@
+## CrouchMove — Crouched locomotion with reduced speed and shorter collision
+class_name CrouchMove
+extends Move
+
+@export var crouch_speed: float = 2.0
+@export var crouch_height: float = 1.0
+## Normal player height (restored on exit)
+@export var standing_height: float = 1.8
+
+var _original_height: float = 1.8
+
+
+func _init() -> void:
+	move_name = &"crouch"
+	animation_state = &"Crouch"
+	priority = 1  # Same as walk — crouch replaces walk when crouching
+
+
+func default_lifecycle(input: InputPackage) -> StringName:
+	if input.is_in_water and container and container.has_move(&"swim_idle"):
+		return &"swim_idle"
+	if not player.is_on_floor() and container and container.has_move(&"midair"):
+		return &"midair"
+	# Stay crouching while crouch is held, otherwise uncrouch
+	if not input.actions.has(&"crouch"):
+		# Check if we can stand up (ceiling check)
+		if _can_stand_up():
+			return best_input_that_can_be_paid(input)
+	return &"okay"
+
+
+func update(input: InputPackage, delta: float) -> void:
+	# Gravity
+	if not player.is_on_floor():
+		player.velocity.y -= gravity * delta
+
+	# Movement while crouched
+	if input.input_direction != Vector2.ZERO:
+		_apply_crouch_movement(input, delta)
+	else:
+		player.velocity.x = 0.0
+		player.velocity.z = 0.0
+
+
+func on_enter_state() -> void:
+	# Shrink collision shape
+	_set_collision_height(crouch_height)
+
+
+func on_exit_state() -> void:
+	# Restore collision shape
+	_set_collision_height(_original_height)
+
+
+func _apply_crouch_movement(input: InputPackage, delta: float) -> void:
+	var input_dir_3d := (input.camera_basis * Vector3(
+		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
+	var facing: Node3D = character_root if character_root else player
+	var face_direction := -facing.basis.z
+	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
+
+	var move_dir: Vector3
+	if absf(angle) >= tracking_angular_speed * delta:
+		move_dir = face_direction.rotated(
+			Vector3.UP, signf(angle) * tracking_angular_speed * delta) * crouch_speed
+		facing.rotate_y(signf(angle) * tracking_angular_speed * delta)
+	else:
+		move_dir = face_direction.rotated(Vector3.UP, angle) * crouch_speed
+		facing.rotate_y(angle)
+
+	player.velocity.x = move_dir.x
+	player.velocity.z = move_dir.z
+
+
+func _set_collision_height(height: float) -> void:
+	# Find the CollisionShape3D on the player
+	for child in player.get_children():
+		if child is CollisionShape3D and child.shape is CapsuleShape3D:
+			var capsule: CapsuleShape3D = child.shape as CapsuleShape3D
+			if height == crouch_height:
+				_original_height = capsule.height
+			capsule.height = height
+			child.position.y = height / 2.0
+			break
+
+
+func _can_stand_up() -> bool:
+	# Raycast upward from player to check if there's room to stand
+	var space_state := player.get_world_3d().direct_space_state
+	if not space_state:
+		return true
+	var query := PhysicsRayQueryParameters3D.create(
+		player.global_position + Vector3(0, crouch_height, 0),
+		player.global_position + Vector3(0, standing_height + 0.1, 0),
+		player.collision_mask,
+		[player.get_rid()])
+	var result := space_state.intersect_ray(query)
+	return result.is_empty()

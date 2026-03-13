@@ -113,14 +113,14 @@ static func remap_library(lib: AnimationLibrary, bone_remap: Dictionary) -> Anim
 
 	for anim_name: String in lib.get_animation_list():
 		var source := lib.get_animation(anim_name)
-		var remapped := _remap_animation(source, bone_remap)
+		var remapped := remap_animation(source, bone_remap)
 		result.add_animation(anim_name, remapped)
 
 	return result
 
 
 ## Remap a single animation's track paths
-static func _remap_animation(source: Animation, bone_remap: Dictionary) -> Animation:
+static func remap_animation(source: Animation, bone_remap: Dictionary) -> Animation:
 	var result := Animation.new()
 	result.length = source.length
 	result.loop_mode = source.loop_mode

@@ -146,6 +146,9 @@ var frozen: bool = false
 ## Whether player is in water (future)
 var in_water: bool = false
 
+## Compatibility with CharacterMovementController (factory sets this)
+var wander_enabled: bool = false
+
 ## Current camera mode
 ## (use set_camera_mode() or camera_mode export setter)
 
@@ -162,6 +165,15 @@ var _was_on_floor: bool = false
 
 ## Tilt limit in radians (computed from degrees)
 var _tilt_limit_rad: float = deg_to_rad(75.0)
+
+## Water surface height at player position
+var _water_surface_y: float = -INF
+
+## Whether player is inside a static water volume (Area3D)
+var _in_water_volume: bool = false
+
+## Surface Y of the current static water volume
+var _water_volume_surface_y: float = -INF
 
 #endregion
 
@@ -196,9 +208,16 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		return
 
+	# Water detection (ocean height check each frame)
+	_update_water_state()
+
 	# Gather input and let MoveContainer handle movement + animation
 	if _input_gatherer and animation_system:
 		var input: Resource = _input_gatherer.gather_input()
+		# Inject water state into input package
+		if input is InputPackage:
+			input.is_in_water = in_water
+			input.water_surface_y = _water_surface_y
 		if animation_system.has_method("process_moves"):
 			animation_system.process_moves(input, delta)
 
@@ -261,12 +280,14 @@ func _setup_collision() -> void:
 	collision_shape.shape = capsule
 	collision_shape.position.y = player_height / 2.0
 	add_child(collision_shape)
+	# Morrowind terrain can be steep — allow ~50° slopes before sliding
+	floor_max_angle = deg_to_rad(50.0)
 
 
 func _setup_camera() -> void:
 	camera_pivot = Node3D.new()
 	camera_pivot.name = "CameraPivot"
-	camera_pivot.position.y = 1.5  # Eye height
+	camera_pivot.position.y = 1.7  # Eye/head height
 	add_child(camera_pivot)
 
 	spring_arm = SpringArm3D.new()
@@ -304,7 +325,8 @@ func _ensure_input_actions() -> void:
 		"sprint": KEY_SHIFT,
 		"walk": KEY_CTRL,
 		"jump": KEY_SPACE,
-		"toggle_camera": KEY_V,
+		"crouch": KEY_C,
+		"toggle_camera": KEY_TAB,
 	}
 	for action_name: String in actions:
 		if not InputMap.has_action(action_name):
@@ -486,10 +508,88 @@ func _set_character_visible(p_visible: bool) -> void:
 func _update_look_target() -> void:
 	if not animation_system or not camera:
 		return
-	# Project 20m forward from camera
-	var look_pos := camera.global_position + (-camera.global_transform.basis.z * 20.0)
+
+	# Check for nearby points of interest first
+	var poi_pos := _find_nearest_poi()
+	if poi_pos != Vector3.INF:
+		if animation_system.has_method("set_look_position"):
+			animation_system.set_look_position(poi_pos)
+		return
+
+	# Default: look forward from character (not camera — camera looks down in 3rd person)
+	var char_forward := -global_transform.basis.z.normalized()
+	var head_height := global_position + Vector3.UP * 1.6
+	var look_pos := head_height + char_forward * 10.0
 	if animation_system.has_method("set_look_position"):
 		animation_system.set_look_position(look_pos)
+
+
+## Find the nearest POI within a forward cone. Returns Vector3.INF if none found.
+func _find_nearest_poi() -> Vector3:
+	var pois := get_tree().get_nodes_in_group("poi")
+	if pois.is_empty():
+		return Vector3.INF
+
+	var head_pos := global_position + Vector3.UP * 1.6
+	var char_forward := -global_transform.basis.z.normalized()
+	var best_dist := 15.0  # Max look distance
+	var best_pos := Vector3.INF
+
+	for poi: Node in pois:
+		if not poi is Node3D:
+			continue
+		var poi_node: Node3D = poi as Node3D
+		var to_poi := poi_node.global_position - head_pos
+		var dist := to_poi.length()
+		if dist > best_dist or dist < 0.5:
+			continue
+		# Check if POI is within a 120-degree forward cone
+		var angle := char_forward.angle_to(to_poi.normalized())
+		if angle > deg_to_rad(60.0):
+			continue
+		if dist < best_dist:
+			best_dist = dist
+			best_pos = poi_node.global_position
+
+	return best_pos
+
+
+# =============================================================================
+# WATER DETECTION
+# =============================================================================
+
+## Check ocean/water height at player position each frame.
+## Uses GerstnerMath for ocean surface, or static water volumes (Area3D).
+func _update_water_state() -> void:
+	var pos := global_position
+
+	# Static water volumes take priority (set by Area3D body_entered/exited)
+	if _in_water_volume:
+		_water_surface_y = _water_volume_surface_y
+	else:
+		# Ocean wave height via GerstnerMath (static class)
+		var time: float = float(Time.get_ticks_msec()) / 1000.0
+		_water_surface_y = GerstnerMath.get_height(pos, time)
+
+	var was_in_water := in_water
+	# Player is "in water" when their feet are below the surface
+	in_water = pos.y < _water_surface_y
+	if in_water and not was_in_water:
+		entered_water.emit()
+	elif not in_water and was_in_water:
+		exited_water.emit()
+
+
+## Called by water volume Area3D when player enters
+func enter_water_volume(surface_y: float) -> void:
+	_in_water_volume = true
+	_water_volume_surface_y = surface_y
+
+
+## Called by water volume Area3D when player exits
+func exit_water_volume() -> void:
+	_in_water_volume = false
+	_water_volume_surface_y = -INF
 
 
 # =============================================================================

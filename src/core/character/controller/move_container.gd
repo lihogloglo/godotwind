@@ -70,6 +70,7 @@ func accept_moves() -> void:
 # =============================================================================
 
 ## Process one physics frame: check relevance, maybe switch, then update.
+## move_and_slide() is called HERE, once, after the move sets velocity.
 func process(input: InputPackage, delta: float) -> void:
 	if not _is_setup or current_move == null:
 		return
@@ -79,8 +80,12 @@ func process(input: InputPackage, delta: float) -> void:
 	if relevance != &"okay":
 		switch_to(relevance)
 
-	# Update the (possibly new) current move
+	# Update the (possibly new) current move — sets velocity only
 	current_move._update(input, delta)
+
+	# Single move_and_slide() call per frame
+	if player:
+		player.move_and_slide()
 
 
 # =============================================================================

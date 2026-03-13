@@ -25,6 +25,7 @@ extends Node3D
 
 @warning_ignore("untyped_declaration", "unsafe_method_access")
 
+const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const AnimationLoaderScript := preload("res://src/core/animation/animation_loader.gd")
 
@@ -60,6 +61,11 @@ var _current_npc_index: int = 0
 var _walk_enabled: bool = true
 var _walk_target_z: float = WALK_TARGET_AHEAD
 
+# Animation browser mode (Left/Right arrows cycle through individual animations)
+var _browse_mode: bool = false
+var _browse_anim_index: int = 0
+var _browse_anim_list: PackedStringArray = PackedStringArray()
+
 # IK state
 var _foot_ik_enabled: bool = true
 var _look_ik_enabled: bool = true
@@ -77,7 +83,7 @@ var _dragging: bool = false
 
 # Camera orbit
 var _yaw: float = 30.0
-var _pitch: float = -20.0
+var _pitch: float = 20.0
 var _distance: float = 6.0
 var _orbiting: bool = false
 
@@ -112,8 +118,14 @@ func _ready() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	# Load data
-	await _ensure_data_loaded()
+	# Load game data with loading screen
+	var loading := LoadingScreenScript.new()
+	add_child(loading)
+	var data_ok := await loading.load_game_data()
+	loading.queue_free()
+	if not data_ok:
+		_log("[color=red]Failed to load game data![/color]")
+		return
 
 	# Preload character assets
 	_log("Preloading character assets...")
@@ -144,45 +156,11 @@ func _ready() -> void:
 	_factory.enable_ik = true
 	_factory.enable_wander = false
 
-	# Spawn first NPC with Quaternius animations
+	# Spawn first NPC — default to Morrowind animations for visual verification
 	_spawn_npc()
-	_switch_to_external()
+	# Stay in MW mode by default (press M to switch to Quaternius)
 
 	_update_camera()
-
-
-# =============================================================================
-# DATA LOADING
-# =============================================================================
-
-func _ensure_data_loaded() -> void:
-	var data_path: String = SettingsManager.get_data_path()
-	if data_path.is_empty():
-		data_path = SettingsManager.auto_detect_installation()
-	if data_path.is_empty():
-		_log("[color=red]No Morrowind data path![/color]")
-		return
-
-	if not BSAManager.has_file("meshes\\xbase_anim.nif"):
-		_log("Loading BSA archives...")
-		var count := BSAManager.load_archives_from_directory(data_path)
-		_log("Loaded %d BSA archives" % count)
-		await get_tree().process_frame
-	else:
-		_log("BSA already loaded")
-
-	if ESMManager.cells.is_empty():
-		var esm_file: String = SettingsManager.get_esm_file()
-		var esm_path := data_path.path_join(esm_file)
-		_log("Loading ESM: %s" % esm_file)
-		var error := ESMManager.load_file(esm_path)
-		if error != OK:
-			_log("[color=red]Failed to load ESM![/color]")
-			return
-		_log("ESM loaded: %d cells" % ESMManager.cells.size())
-		await get_tree().process_frame
-	else:
-		_log("ESM already loaded")
 
 
 # =============================================================================
@@ -205,9 +183,21 @@ func _spawn_npc() -> void:
 		_log("[color=red]ESMManager not available![/color]")
 		return
 
-	var npc_record = esm_mgr.get_npc(npc_id) if esm_mgr.has_method("get_npc") else null
+	# Try on-demand C# path first, then direct lookup
+	var npc_record = null
+	var out_type: Array = [""]
+	var any_record = ESMManager.get_any_record(npc_id, out_type)
+	if any_record and out_type[0] == "npc":
+		npc_record = esm_mgr.get_npc(npc_id)
+	if not npc_record:
+		# Direct lookup fallback (works if NPCs were batch-loaded via GDScript path)
+		npc_record = esm_mgr.get_npc(npc_id)
 	if not npc_record:
 		_log("[color=red]NPC '%s' not found![/color]" % npc_id)
+		_log("[color=gray]get_any_record returned: %s (type: %s)[/color]" % [
+			str(any_record != null), out_type[0] if out_type.size() > 0 else "?"])
+		_log("[color=gray]npcs dict size: %d[/color]" % esm_mgr.npcs.size())
+		_log("[color=gray]_all_records size: %d[/color]" % esm_mgr._all_records.size())
 		return
 
 	_log("Race: %s, Female: %s" % [
@@ -227,7 +217,7 @@ func _spawn_npc() -> void:
 
 	_npc_node = character
 	add_child(character)
-	character.global_position = Vector3(0, 0.1, 0)
+	character.global_position = Vector3(0, 1.0, 0)  # Spawn above ground, let physics settle
 
 	# Reset walk target and start walking straight ahead
 	_walk_target_z = WALK_TARGET_AHEAD
@@ -769,6 +759,14 @@ func _input(event: InputEvent) -> void:
 					_switch_to_external()
 			KEY_D:
 				_dump_debug()
+			KEY_B:
+				_toggle_browse_mode()
+			KEY_LEFT:
+				if _browse_mode:
+					_browse_prev_animation()
+			KEY_RIGHT:
+				if _browse_mode:
+					_browse_next_animation()
 			KEY_SPACE:
 				_look_auto = true
 				_hand_auto = true
@@ -788,6 +786,76 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventMouseMotion and _orbiting:
 		_yaw -= event.relative.x * 0.3
 		_pitch = clampf(_pitch - event.relative.y * 0.3, -80.0, 80.0)
+
+
+# =============================================================================
+# ANIMATION BROWSER — cycle through individual MW animations for verification
+# =============================================================================
+
+func _toggle_browse_mode() -> void:
+	_browse_mode = not _browse_mode
+	if _browse_mode:
+		# Stop walking so the NPC stands still
+		if _npc_node and _npc_node.has_method("stop_movement"):
+			_npc_node.stop_movement()
+		# Disable AnimationTree so AnimationPlayer has direct control
+		var anim_tree: AnimationTree = _find_node_of_type(_npc_node, "AnimationTree")
+		if anim_tree:
+			anim_tree.active = false
+		# Build animation list
+		var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+		if anim_player:
+			_browse_anim_list = anim_player.get_animation_list()
+			_browse_anim_list.sort()
+			_browse_anim_index = 0
+			if _browse_anim_list.size() > 0:
+				anim_player.play(_browse_anim_list[0])
+				_log("[color=green]BROWSE MODE ON[/color] — %d animations" % _browse_anim_list.size())
+				_log("Playing: [color=cyan]%s[/color]" % _browse_anim_list[0])
+			else:
+				_log("[color=red]No animations found![/color]")
+				_browse_mode = false
+		else:
+			_log("[color=red]No AnimationPlayer found![/color]")
+			_browse_mode = false
+	else:
+		# Re-enable AnimationTree
+		var anim_tree: AnimationTree = _find_node_of_type(_npc_node, "AnimationTree")
+		if anim_tree:
+			anim_tree.active = true
+		# Resume walking
+		if _walk_enabled and _npc_node:
+			_walk_target_z = _npc_node.global_position.z + WALK_TARGET_AHEAD
+			if _npc_node.has_method("move_to"):
+				_npc_node.move_to(Vector3(0, 0, _walk_target_z))
+		_log("[color=yellow]BROWSE MODE OFF[/color] — AnimationTree restored")
+
+
+func _browse_next_animation() -> void:
+	if _browse_anim_list.is_empty():
+		return
+	_browse_anim_index = (_browse_anim_index + 1) % _browse_anim_list.size()
+	_play_browse_animation()
+
+
+func _browse_prev_animation() -> void:
+	if _browse_anim_list.is_empty():
+		return
+	_browse_anim_index = (_browse_anim_index - 1 + _browse_anim_list.size()) % _browse_anim_list.size()
+	_play_browse_animation()
+
+
+func _play_browse_animation() -> void:
+	var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+	if not anim_player:
+		return
+	var anim_name: String = _browse_anim_list[_browse_anim_index]
+	anim_player.play(anim_name)
+	var anim: Animation = anim_player.get_animation(anim_name)
+	var track_count := anim.get_track_count() if anim else 0
+	var length := anim.length if anim else 0.0
+	_log("[%d/%d] [color=cyan]%s[/color] (%.2fs, %d tracks)" % [
+		_browse_anim_index + 1, _browse_anim_list.size(), anim_name, length, track_count])
 
 
 # =============================================================================
@@ -836,6 +904,23 @@ func _update_live_info() -> void:
 	# NPC info
 	lines.append("NPC: [color=cyan]%s[/color]" % TEST_NPCS[_current_npc_index])
 	lines.append("Animations: [color=cyan]%s[/color]" % ("Quaternius" if _using_external else "Morrowind"))
+
+	# Browse mode info (prominent when active)
+	if _browse_mode:
+		lines.append("")
+		lines.append("[color=green][b]== ANIMATION BROWSER ==[/b][/color]")
+		if _browse_anim_list.size() > 0:
+			lines.append("[color=cyan][b]%s[/b][/color]  (%d/%d)" % [
+				_browse_anim_list[_browse_anim_index],
+				_browse_anim_index + 1, _browse_anim_list.size()])
+			var anim_player: AnimationPlayer = _find_node_of_type(_npc_node, "AnimationPlayer")
+			if anim_player:
+				var anim: Animation = anim_player.get_animation(_browse_anim_list[_browse_anim_index])
+				if anim:
+					lines.append("Length: %.2fs | Tracks: %d | Loop: %s" % [
+						anim.length, anim.get_track_count(),
+						"yes" if anim.loop_mode != Animation.LOOP_NONE else "no"])
+		lines.append("[color=gray]Left/Right = prev/next | B = exit browse[/color]")
 
 	# IK toggles
 	lines.append("")
@@ -889,7 +974,7 @@ func _update_live_info() -> void:
 	lines.append("")
 	lines.append("[color=gray][Z/W] Forward  [S] Backward  (auto if none)[/color]")
 	lines.append("[color=gray][M] Anims  [N] NPC  [D] Debug  [Space] Auto[/color]")
-	lines.append("[color=gray][RMB] Orbit  [Scroll] Zoom  [LMB] Drag[/color]")
+	lines.append("[color=gray][B] Browse anims  [Left/Right] Cycle  [RMB] Orbit[/color]")
 
 	# Append log lines at bottom
 	if _log_lines.size() > 0:

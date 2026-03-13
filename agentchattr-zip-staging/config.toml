@@ -1,0 +1,103 @@
+[server]
+port = 8300
+host = "127.0.0.1"
+data_dir = "./data"
+
+# Add agents here. Each gets a status pill, @mention routing, and color.
+# "cwd" is the working directory for the agent's terminal session.
+# "command" is the CLI command (must be on PATH).
+
+[agents.claude]
+command = "claude"
+cwd = ".."
+color = "#da7756"
+label = "Claude"
+
+[agents.codex]
+command = "codex"
+cwd = ".."
+color = "#10a37f"
+label = "Codex"
+
+[agents.gemini]
+command = "gemini"
+cwd = ".."
+color = "#4285f4"
+label = "Gemini"
+
+[agents.kimi]
+command = "kimi"
+cwd = ".."
+color = "#1783ff"
+label = "Kimi"
+
+[agents.qwen]
+command = "qwen"
+cwd = ".."
+color = "#8b5cf6"
+label = "Qwen"
+mcp_inject = "settings_file"
+mcp_settings_path = ".qwen/settings.json"
+mcp_transport = "http"
+inject_delay = 1.0
+
+[agents.kilo]
+command = "kilo"
+cwd = ".."
+color = "#f7f677"
+label = "Kilo"
+
+[routing]
+# "none" = only route on explicit @mention. "all" = route to all agents by default.
+default = "none"
+max_agent_hops = 4
+
+[mcp]
+http_port = 8200
+sse_port = 8201
+
+[images]
+upload_dir = "./uploads"
+max_size_mb = 10
+
+# --- MCP injection modes ---
+# By default, claude/codex/gemini/kimi use built-in MCP config injection.
+# For other CLI agents, set mcp_inject to tell the wrapper how to inject auth:
+#
+# mcp_inject modes:
+#   "settings_file" — write a JSON settings file at mcp_settings_path (merges, not overwrites)
+#   "env"           — write a settings file, expose path via mcp_env_var
+#   "flag"          — write a config file, pass via CLI flag (mcp_flag, default: --mcp-config)
+#   "proxy_flag"    — start a local proxy, pass URL via CLI flag template
+#
+# Example: Qwen Code CLI
+#   [agents.qwen]
+#   command = "qwen"
+#   cwd = ".."
+#   color = "#8b5cf6"
+#   label = "Qwen"
+#   mcp_inject = "settings_file"
+#   mcp_settings_path = ".qwen/settings.json"
+#   mcp_transport = "http"
+#
+# Example: CLI with env var for settings
+#   [agents.mycli]
+#   command = "mycli"
+#   mcp_inject = "env"
+#   mcp_env_var = "MYCLI_MCP_SETTINGS"
+#   mcp_transport = "http"
+
+# --- API agents (local models) ---
+# Add local model agents in config.local.toml (gitignored).
+# Example config.local.toml:
+#
+#   [agents.qwen]
+#   type = "api"
+#   base_url = "http://localhost:8189/v1"
+#   model = "qwen3-4b"
+#   color = "#8b5cf6"
+#   label = "Qwen"
+#   # api_key_env = "MY_API_KEY"     # optional: env var name for API key
+#   # system_prompt = "You are ..."   # optional: custom system prompt
+#
+# Then run: python wrapper_api.py qwen

@@ -1,0 +1,39 @@
+# config.local.toml — local API agents (gitignored)
+#
+# Copy this file to config.local.toml and uncomment/edit the sections below.
+# These agents connect to OpenAI-compatible endpoints (Ollama, llama-server,
+# LM Studio, vLLM, etc.) and participate in the chat room via @mentions.
+#
+# Usage:
+#   1. cp config.local.toml.example config.local.toml
+#   2. Edit the [agents.NAME] section below
+#   3. Start the server: python run.py
+#   4. Start the wrapper: python wrapper_api.py NAME
+#      (or use: windows/start_api_agent.bat NAME)
+
+# --- Example: Qwen via llama-server ---
+# [agents.qwen]
+# type = "api"                              # required — marks this as an API agent
+# base_url = "http://localhost:8189/v1"     # OpenAI-compatible base URL
+# model = "qwen3-4b"                        # model name (sent in API request)
+# color = "#8b5cf6"                          # status pill color in chat UI
+# label = "Qwen"                             # display name
+# # api_key_env = "OPENAI_API_KEY"          # optional: env var containing API key
+# # system_prompt = "You are a helpful AI."  # optional: custom system prompt
+# # context_messages = 20                    # optional: how many recent messages to send as context
+
+# --- Example: Ollama ---
+# [agents.llama]
+# type = "api"
+# base_url = "http://localhost:11434/v1"
+# model = "llama3.2"
+# color = "#f97316"
+# label = "Llama"
+
+# --- Example: LM Studio ---
+# [agents.lmstudio]
+# type = "api"
+# base_url = "http://localhost:1234/v1"
+# model = "local-model"
+# color = "#06b6d4"
+# label = "LM Studio"

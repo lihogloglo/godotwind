@@ -83,7 +83,7 @@ func update(_input: InputPackage, _delta: float) -> void:
 
 ## Called when entering this move state
 func _on_enter_state() -> void:
-	initial_position = player.global_position
+	initial_position = player.global_position if player.is_inside_tree() else player.position
 	mark_enter_state()
 	on_enter_state()
 	# Tell AnimationManager to transition to our animation state
@@ -160,7 +160,7 @@ func process_input_vector(input: InputPackage, delta: float) -> void:
 	var input_dir_3d := (input.camera_basis * Vector3(
 		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 	var facing: Node3D = character_root if character_root else player
-	var face_direction := facing.basis.z
+	var face_direction := -facing.basis.z
 	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
 	facing.rotate_y(clampf(angle,
 		-tracking_angular_speed * delta, tracking_angular_speed * delta))

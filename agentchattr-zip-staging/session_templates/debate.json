@@ -1,0 +1,34 @@
+{
+  "id": "debate",
+  "name": "Debate",
+  "description": "Two agents argue opposing positions. A third moderates and delivers a verdict.",
+  "roles": ["proposer", "for", "against", "moderator"],
+  "user_required": false,
+  "phases": [
+    {
+      "name": "Frame",
+      "participants": ["proposer"],
+      "prompt": "State the question or decision to debate. Provide context.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Opening Arguments",
+      "participants": ["for", "against"],
+      "prompt": "Make your opening case. Be specific and evidence-based.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Rebuttals",
+      "participants": ["against", "for"],
+      "prompt": "Respond directly to the opposing argument. Where are they wrong? Provide your own independent analysis.",
+      "turn_order": "sequential"
+    },
+    {
+      "name": "Verdict",
+      "participants": ["moderator"],
+      "prompt": "Weigh both sides. Who made the stronger case? What is the recommended decision and why?",
+      "turn_order": "sequential",
+      "is_output": true
+    }
+  ]
+}

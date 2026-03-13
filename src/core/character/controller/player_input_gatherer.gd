@@ -21,6 +21,16 @@ func gather_input() -> InputPackage:
 	if camera_pivot:
 		pkg.camera_basis = Basis(Vector3.UP, camera_pivot.rotation.y)
 
+	# Vertical intent for swimming/flying
+	if Input.is_action_pressed(&"jump"):
+		pkg.vertical_input += 1.0
+	if Input.is_action_pressed(&"crouch"):
+		pkg.vertical_input -= 1.0
+	# Camera pitch contributes to vertical when swimming/flying
+	if camera_pivot and pkg.is_in_water:
+		pkg.vertical_input += clampf(-camera_pivot.rotation.x * pkg.input_direction.length(), -1.0, 1.0)
+	pkg.vertical_input = clampf(pkg.vertical_input, -1.0, 1.0)
+
 	# --- Actions ---
 	pkg.actions.append(&"idle")  # Always available as fallback
 
@@ -34,20 +44,18 @@ func gather_input() -> InputPackage:
 		if Input.is_action_pressed(&"sprint"):
 			pkg.actions.append(&"sprint")
 
+	# Jump (only on ground — midair/swim jumps handled by their respective moves)
 	if Input.is_action_just_pressed(&"jump"):
-		if pkg.actions.has(&"sprint"):
-			pkg.actions.append(&"jump_sprint")
-		else:
-			pkg.actions.append(&"jump_run")
+		pkg.actions.append(&"jump")
+
+	# Crouch
+	if Input.is_action_pressed(&"crouch"):
+		pkg.actions.append(&"crouch")
 
 	# Future combat actions
 	#if Input.is_action_pressed(&"block"):
 	#	pkg.actions.append(&"block")
 	#if Input.is_action_pressed(&"roll"):
 	#	pkg.actions.append(&"roll")
-
-	# --- Combat actions ---
-	#if Input.is_action_just_pressed(&"light_attack"):
-	#	pkg.combat_actions.append(&"light_attack_pressed")
 
 	return pkg

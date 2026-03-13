@@ -87,7 +87,7 @@ var _priority_system: RefCounted = null  # AnimationPriority
 
 # State machine
 var _state_machine: AnimationNodeStateMachinePlayback = null
-var _current_state: StringName = &"Idle"
+var _current_state: StringName = &""
 var _previous_state: StringName = &""
 
 # Blend parameters
@@ -227,9 +227,7 @@ func _process(_delta: float) -> void:
 	# Process text key events based on current animation time
 	_process_text_keys()
 
-	# Check for one-shot completion
-	if _oneshot_active:
-		_check_oneshot_completion()
+	# One-shot completion check (stub — action/additive layers not yet wired)
 
 
 ## Process text keys for current animation frame
@@ -260,6 +258,8 @@ func _resolve_fallback_state(state: StringName) -> StringName:
 		&"Sprint": [&"Run", &"Walk"],
 		&"Jump": [&"Fall"],
 		&"Fall": [&"Jump"],
+		&"Crouch": [&"Idle"],
+		&"CrouchWalk": [&"Walk", &"Idle"],
 	}
 	for fb: StringName in FALLBACKS.get(state, []):
 		if fb in _state_animation_map:
@@ -282,11 +282,6 @@ func transition_to(state: StringName, force: bool = false) -> void:
 			# Blocked by higher priority animation
 			return
 
-	# Check if state exists in the state machine
-	if not _state_machine.get_current_node():
-		# State machine not ready yet
-		return
-
 	# Fallback if the target state has no animation
 	state = _resolve_fallback_state(state)
 	if state == &"":
@@ -295,8 +290,12 @@ func transition_to(state: StringName, force: bool = false) -> void:
 	_previous_state = _current_state
 	_current_state = state
 
-	# Travel to the new state
-	_state_machine.travel(state)
+	# Start or travel depending on whether the state machine has begun
+	if _state_machine.get_current_node().is_empty():
+		# State machine hasn't auto-advanced yet — use start() to begin directly
+		_state_machine.start(state)
+	else:
+		_state_machine.travel(state)
 
 	state_changed.emit(_previous_state, _current_state)
 
@@ -322,28 +321,9 @@ func get_blend_parameter(name: StringName) -> Variant:
 	return _blend_parameters.get(name)
 
 
-## Play a one-shot animation
-func play_oneshot(animation: StringName, layer: StringName = LAYER_ACTION) -> void:
-	if not _is_setup or not animation_tree:
-		return
-
-	# Find the oneshot node path for this layer
-	var oneshot_path := "parameters/%s_oneshot/request" % layer
-
-	# Check if we have an animation with this name
-	if not animation_player.has_animation(animation):
-		push_warning("AnimationManager: Animation '%s' not found" % animation)
-		return
-
-	# Set the animation
-	var anim_path := "parameters/%s_animation/animation" % layer
-	animation_tree.set(anim_path, animation)
-
-	# Fire the oneshot
-	animation_tree.set(oneshot_path, AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE)
-
-	_oneshot_active = true
-	_oneshot_layer = layer
+## Play a one-shot animation (stub — action/additive layers not yet wired)
+func play_oneshot(_animation: StringName, _layer: StringName = LAYER_ACTION) -> void:
+	pass
 
 
 ## Update animation state based on velocity and input state.
@@ -484,11 +464,11 @@ func _create_animation_tree() -> void:
 ## Create the animation tree structure.
 ## Detects directional animations and uses BlendSpace2D if available,
 ## otherwise falls back to simple state machine.
-## Builds a multi-layer tree: Locomotion -> Action Layer (masked) -> Output
+## Locomotion-only for now — action/additive layers added when combat ships.
 func _create_tree_structure() -> AnimationNodeBlendTree:
 	var root := AnimationNodeBlendTree.new()
 
-	# 1. Base Locomotion Layer
+	# Locomotion Layer (state machine or blendspace)
 	var locomotion: AnimationNodeStateMachine
 	if _has_directional_animations():
 		_has_blendspace = true
@@ -496,50 +476,10 @@ func _create_tree_structure() -> AnimationNodeBlendTree:
 	else:
 		_has_blendspace = false
 		locomotion = _create_locomotion_state_machine()
-	
-	root.add_node(&"locomotion", locomotion, Vector2(-400, 0))
 
-	# 2. Action Layer (OneShot)
-	var action_anim := AnimationNodeAnimation.new()
-	action_anim.animation = _find_animation_for_state_name(&"Attack") # placeholder
-	root.add_node(&"action_animation", action_anim, Vector2(-400, 200))
+	root.add_node(&"locomotion", locomotion, Vector2(-200, 0))
+	root.connect_node(&"output", 0, &"locomotion")
 
-	var action_oneshot := AnimationNodeOneShot.new()
-	action_oneshot.fadein_time = 0.1
-	action_oneshot.fadeout_time = 0.2
-	root.add_node(&"action_oneshot", action_oneshot, Vector2(-100, 100))
-
-	# 3. Upper Body Blend (Layered animation)
-	var upper_blend := AnimationNodeBlend2.new()
-	upper_blend.filter_enabled = true
-	root.add_node(&"upper_body_blend", upper_blend, Vector2(200, 0))
-
-	# 4. Additive Layer (Hit reactions, etc.)
-	var additive_anim := AnimationNodeAnimation.new()
-	root.add_node(&"additive_animation", additive_anim, Vector2(200, 200))
-	
-	var additive_oneshot := AnimationNodeOneShot.new()
-	additive_oneshot.mix_mode = AnimationNodeOneShot.MIX_MODE_ADD
-	root.add_node(&"additive_oneshot", additive_oneshot, Vector2(500, 100))
-
-	# Connections:
-	# [locomotion] ----------------------------> [upper_body_blend.in0]
-	# [locomotion] -> [action_oneshot.in0]
-	# [action_anim] -> [action_oneshot.in1] ----> [upper_body_blend.in1]
-	# [upper_body_blend] -> [additive_oneshot.in0]
-	# [additive_anim] -> [additive_oneshot.in1] -> [output]
-	
-	root.connect_node(&"action_oneshot", 0, &"locomotion")
-	root.connect_node(&"action_oneshot", 1, &"action_animation")
-	
-	root.connect_node(&"upper_body_blend", 0, &"locomotion")
-	root.connect_node(&"upper_body_blend", 1, &"action_oneshot")
-	
-	root.connect_node(&"additive_oneshot", 0, &"upper_body_blend")
-	root.connect_node(&"additive_oneshot", 1, &"additive_animation")
-	
-	root.connect_node(&"output", 0, &"additive_oneshot")
-	
 	return root
 
 
@@ -547,8 +487,9 @@ func _create_tree_structure() -> AnimationNodeBlendTree:
 func _create_locomotion_state_machine() -> AnimationNodeStateMachine:
 	var sm := AnimationNodeStateMachine.new()
 
-	# Add states
-	var states := [&"Idle", &"Walk", &"Run", &"Sprint", &"Jump", &"Fall", &"Land"]
+	# Add states (includes swimming/crouch for MW compatibility)
+	var states := [&"Idle", &"Walk", &"Run", &"Sprint", &"Jump", &"Fall", &"Land",
+		&"SwimIdle", &"SwimForward", &"Crouch", &"CrouchWalk"]
 
 	for state_name: StringName in states:
 		var anim_name := _find_animation_for_state_name(state_name)
@@ -598,7 +539,22 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 		[&"Run", &"Jump"],
 		[&"Jump", &"Fall"],
 		[&"Fall", &"Land"],
+		[&"Fall", &"Idle"],
 		[&"Land", &"Idle"],
+
+		# Swimming (any ground state can enter swim, swim returns to idle)
+		[&"Idle", &"SwimIdle"],
+		[&"SwimIdle", &"Idle"],
+		[&"SwimIdle", &"SwimForward"],
+		[&"SwimForward", &"SwimIdle"],
+		[&"Fall", &"SwimIdle"],
+
+		# Crouching
+		[&"Idle", &"Crouch"],
+		[&"Crouch", &"Idle"],
+		[&"Crouch", &"CrouchWalk"],
+		[&"CrouchWalk", &"Crouch"],
+		[&"CrouchWalk", &"Idle"],
 	]
 
 	for trans: Array in transitions:
@@ -765,6 +721,10 @@ func _find_animation_containing(substring: String) -> StringName:
 			var after_ok := (after_pos >= anim_lower.length() or anim_lower[after_pos] == "_")
 			if before_ok and after_ok:
 				return StringName(anim)
+	# Prefix match for CamelCase (MW animations: WalkForward, RunForward, etc.)
+	for anim: String in animations:
+		if anim.to_lower().begins_with(sub_lower):
+			return StringName(anim)
 	return &""
 
 
@@ -792,17 +752,29 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 		&"Idle":
 			search_terms = ["idle", "Idle"]
 		&"Walk":
-			search_terms = ["walk", "Walk", "walking", "Walking"]
+			search_terms = ["walkforward", "walk_forward", "walk", "Walk", "walking", "Walking"]
 		&"Run":
-			search_terms = ["run", "Run", "running", "Running"]
+			search_terms = ["runforward", "run_forward", "run", "Run", "running", "Running"]
 		&"Sprint":
-			search_terms = ["sprint", "Sprint", "sprinting", "Sprinting", "run", "Run", "running", "Running"]
+			search_terms = ["sprint", "Sprint", "sprinting", "Sprinting",
+				"runforward", "run_forward", "run", "Run", "running", "Running"]
 		&"Jump":
 			search_terms = ["jump", "Jump", "jumping", "Jumping"]
 		&"Fall":
-			search_terms = ["fall", "Fall", "falling", "Falling", "jumploop", "JumpLoop"]
+			search_terms = ["jumploop", "JumpLoop", "fall", "Fall", "falling", "Falling", "jump", "Jump"]
 		&"Land":
-			search_terms = ["land", "Land", "landing", "Landing", "jumpland", "JumpLand"]
+			search_terms = ["jumpland", "JumpLand", "land", "Land", "landing", "Landing"]
+		&"SwimIdle":
+			search_terms = ["idleswim", "IdleSwim", "swimidle", "swim_idle", "SwimIdle"]
+		&"SwimForward":
+			search_terms = ["swimwalkforward", "SwimWalkForward", "swimrunforward", "SwimRunForward",
+				"swimforward", "swim_forward", "SwimForward"]
+		&"Crouch":
+			search_terms = ["idlesneak", "IdleSneak", "sneakidle", "sneak_idle", "crouch", "Crouch"]
+		&"CrouchWalk":
+			search_terms = ["sneakforward", "SneakForward", "sneak_forward", "crouchwalk", "CrouchWalk"]
+		&"CombatIdle":
+			search_terms = ["idlecombat", "IdleCombat", "combat_idle", "combatidle", "CombatIdle"]
 		_:
 			search_terms = [state_name.to_lower(), state_name]
 
@@ -830,6 +802,15 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 				if before_ok and after_ok:
 					return StringName(anim)
 
+	# Pass 3: prefix match (handles CamelCase like "WalkForward" matching "walk")
+	# MW animations use CamelCase without underscores, so word-boundary fails.
+	for term in search_terms:
+		var term_lower := term.to_lower()
+		for anim in animations:
+			var anim_lower := anim.to_lower()
+			if anim_lower.begins_with(term_lower):
+				return StringName(anim)
+
 	return &""
 
 
@@ -842,6 +823,7 @@ func _build_animation_map() -> void:
 		&"Idle", &"Walk", &"Run", &"Sprint",
 		&"Jump", &"Fall", &"Land",
 		&"SwimIdle", &"SwimForward",
+		&"Crouch", &"CrouchWalk",
 		&"CombatIdle", &"Attack", &"Block", &"Hit", &"Death", &"SpellCast"
 	]
 
@@ -850,47 +832,17 @@ func _build_animation_map() -> void:
 		if not anim.is_empty():
 			_state_animation_map[state] = anim
 
-
-## Apply blend mask filters to AnimationTree nodes
-func _apply_blend_mask_filters() -> void:
-	if not animation_tree or not _blend_masks or not skeleton:
-		return
-
-	var masks: _BlendMask = _blend_masks as _BlendMask
-	if not masks.is_valid():
-		return
-
-	# Get the tree root
-	var root: AnimationNodeBlendTree = animation_tree.tree_root as AnimationNodeBlendTree
-	if not root:
-		return
-
-	# Apply upper body filter to the blend node
-	# In Godot 4.x, we need to set filters via the tree parameters
-	# The filter path is: parameters/<node_name>/filters/<bone_path>
-
-	# Get upper body bones (torso + arms)
-	var upper_bones: Array[int] = masks.get_mask_bones(_BlendMask.MaskType.TORSO)
-	var left_arm: Array[int] = masks.get_mask_bones(_BlendMask.MaskType.LEFT_ARM)
-	var right_arm: Array[int] = masks.get_mask_bones(_BlendMask.MaskType.RIGHT_ARM)
-
-	# Combine for upper body
-	for bone_idx: int in left_arm:
-		if bone_idx not in upper_bones:
-			upper_bones.append(bone_idx)
-	for bone_idx: int in right_arm:
-		if bone_idx not in upper_bones:
-			upper_bones.append(bone_idx)
-
-	# Set filter for upper_body_blend node
-	# In AnimationTree, we need to enable filters per-bone using the skeleton path
-	for bone_idx: int in upper_bones:
-		var bone_name := skeleton.get_bone_name(bone_idx)
-		var filter_path := "parameters/upper_body_blend/filters/%s" % bone_name
-		animation_tree.set(filter_path, true)
-
 	if debug_state_changes:
-		Log.debug("animation", "AnimationManager: Applied upper body filter to %d bones" % upper_bones.size())
+		var mapped_states := PackedStringArray()
+		for key: StringName in _state_animation_map:
+			mapped_states.append("%s→%s" % [key, _state_animation_map[key]])
+		Log.info("animation", "AnimationManager: State map (%d): %s" % [
+			_state_animation_map.size(), ", ".join(mapped_states)])
+
+
+## Apply blend mask filters (stub — upper_body_blend not yet in tree)
+func _apply_blend_mask_filters() -> void:
+	pass
 
 
 ## Sync blend parameters to AnimationTree
@@ -898,32 +850,14 @@ func _sync_blend_parameters() -> void:
 	if not animation_tree:
 		return
 
-	# Sync upper body blend weight for action animations
-	var upper_blend_weight: float = 0.0
-	if _oneshot_active and _oneshot_layer == LAYER_ACTION:
-		upper_blend_weight = 1.0
-	animation_tree.set("parameters/upper_body_blend/blend_amount", upper_blend_weight)
-
 	# Sync BlendSpace2D parameters when using directional locomotion
 	if _has_blendspace:
 		_sync_blendspace_parameters()
 
 
-## Check if one-shot animation is complete
+## Check if one-shot animation is complete (stub — layers not yet wired)
 func _check_oneshot_completion() -> void:
-	if not animation_tree or not _oneshot_active:
-		return
-
-	var oneshot_path := "parameters/%s_oneshot/active" % _oneshot_layer
-	var is_active: bool = animation_tree.get(oneshot_path)
-
-	if not is_active:
-		_oneshot_active = false
-
-		# Get animation name that finished
-		var anim_path := "parameters/%s_animation/animation" % _oneshot_layer
-		var anim_name: StringName = animation_tree.get(anim_path)
-		animation_finished.emit(anim_name)
+	pass
 
 
 ## Sync BlendSpace2D parameters for directional locomotion

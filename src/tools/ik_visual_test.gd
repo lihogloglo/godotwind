@@ -21,7 +21,6 @@ extends Node3D
 ##   Space = resume auto-motion for all targets
 ##   R = reset character position
 
-const SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
 
 # Scene objects
 var _camera: Camera3D
@@ -275,16 +274,13 @@ func _create_skeleton_character() -> void:
 	# Reset all bones to rest pose
 	_skeleton.reset_bone_poses()
 
-	# Create BoneMap via SPA
-	SPA.create_bone_map(_skeleton)
-
-	# Cache bone indices
+	# Cache bone indices (direct skeleton lookup)
 	for key in ["Hips", "Head", "Neck", "UpperChest",
 				"LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
 				"RightUpperLeg", "RightLowerLeg", "RightFoot",
 				"LeftUpperArm", "LeftLowerArm", "LeftHand",
 				"RightUpperArm", "RightLowerArm", "RightHand"]:
-		_bone_indices[key] = SPA.get_bone_index(_skeleton, key)
+		_bone_indices[key] = _skeleton.find_bone(key)
 
 	# Visualize bones with capsule meshes (limb segments)
 	_visualize_skeleton()
@@ -1049,9 +1045,7 @@ func _update_info() -> void:
 	text += "Look pos: %.1f, %.1f, %.1f\n" % [
 		_look_orb.global_position.x, _look_orb.global_position.y, _look_orb.global_position.z]
 
-	var bmap := SPA.get_bone_map(_skeleton)
-	if bmap:
-		text += "Mapped bones: %d" % SPA.count_mapped_bones(bmap)
+	text += "Bones: %d" % _skeleton.get_bone_count()
 
 	_info_label.text = text
 

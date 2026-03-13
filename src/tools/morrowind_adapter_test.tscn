@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3]
-
-[ext_resource type="Script" path="res://src/tools/morrowind_adapter_test.gd" id="1"]
-
-[node name="MorrowindAdapterTest" type="Node3D"]
-script = ExtResource("1")

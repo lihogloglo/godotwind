@@ -183,15 +183,16 @@ func _setup_foot_ik() -> void:
 	_left_foot_target = Node3D.new()
 	_left_foot_target.name = "LeftFootTarget"
 	_target_parent.add_child(_left_foot_target)
-	var left_foot_pos := skeleton.global_transform * skeleton.get_bone_global_pose(left_foot_idx).origin
-	_left_foot_target.global_position = left_foot_pos
+	# Use local bone pose — global_transform unavailable before add_child to tree
+	var left_foot_local := skeleton.get_bone_global_pose(left_foot_idx).origin
+	_left_foot_target.position = left_foot_local
 	_left_foot_ik.set_target_node(0, _left_foot_ik.get_path_to(_left_foot_target))
 
 	# Create left foot pole (knees bend forward) — also outside skeleton
 	_left_foot_pole = Node3D.new()
 	_left_foot_pole.name = "LeftFootPole"
 	_target_parent.add_child(_left_foot_pole)
-	_left_foot_pole.global_position = left_foot_pos + Vector3(0, 0.4, -0.5)
+	_left_foot_pole.position = left_foot_local + Vector3(0, 0.4, -0.5)
 	_left_foot_ik.set_pole_node(0, _left_foot_ik.get_path_to(_left_foot_pole))
 
 	# Create right foot IK
@@ -211,15 +212,16 @@ func _setup_foot_ik() -> void:
 	_right_foot_target = Node3D.new()
 	_right_foot_target.name = "RightFootTarget"
 	_target_parent.add_child(_right_foot_target)
-	var right_foot_pos := skeleton.global_transform * skeleton.get_bone_global_pose(right_foot_idx).origin
-	_right_foot_target.global_position = right_foot_pos
+	# Use local bone pose — global_transform unavailable before add_child to tree
+	var right_foot_local := skeleton.get_bone_global_pose(right_foot_idx).origin
+	_right_foot_target.position = right_foot_local
 	_right_foot_ik.set_target_node(0, _right_foot_ik.get_path_to(_right_foot_target))
 
 	# Create right foot pole (knees bend forward) — also outside skeleton
 	_right_foot_pole = Node3D.new()
 	_right_foot_pole.name = "RightFootPole"
 	_target_parent.add_child(_right_foot_pole)
-	_right_foot_pole.global_position = right_foot_pos + Vector3(0, 0.4, -0.5)
+	_right_foot_pole.position = right_foot_local + Vector3(0, 0.4, -0.5)
 	_right_foot_ik.set_pole_node(0, _right_foot_ik.get_path_to(_right_foot_pole))
 
 
@@ -228,9 +230,18 @@ func _update_foot_ik(delta: float) -> void:
 	if not _left_foot_ik or not _right_foot_ik or not character_body:
 		return
 
-	# Disable foot IK during jump/fall
+	# Disable foot IK solvers during jump/fall/swim — stale targets fight animations
 	if not character_body.is_on_floor():
+		if _left_foot_ik.active:
+			_left_foot_ik.active = false
+			_right_foot_ik.active = false
 		return
+
+	# Re-enable foot IK when back on ground
+	if not _left_foot_ik.active:
+		_left_foot_ik.active = true
+		_right_foot_ik.active = true
+		_foot_ik_first_update = true  # Re-run diagnostics on landing
 
 	var left_foot_idx: int = _bone_indices.get(&"left_foot", -1)
 	var right_foot_idx: int = _bone_indices.get(&"right_foot", -1)

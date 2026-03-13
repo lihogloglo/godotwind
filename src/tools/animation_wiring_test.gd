@@ -24,7 +24,6 @@ extends Node3D
 ##   Jump  = arms raised, compact body
 ##   Fall  = arms spread, extended body
 
-const SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
 
 # Scene objects
 var _camera: Camera3D
@@ -215,16 +214,13 @@ func _create_skeleton_character() -> void:
 
 	_skeleton.reset_bone_poses()
 
-	# Create BoneMap via SPA
-	SPA.create_bone_map(_skeleton)
-
-	# Cache bone indices
+	# Cache bone indices (direct skeleton lookup)
 	for key in ["Hips", "Head", "Neck", "UpperChest", "Spine", "Chest",
 				"LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
 				"RightUpperLeg", "RightLowerLeg", "RightFoot",
 				"LeftUpperArm", "LeftLowerArm", "LeftHand",
 				"RightUpperArm", "RightLowerArm", "RightHand"]:
-		_bone_indices[key] = SPA.get_bone_index(_skeleton, key)
+		_bone_indices[key] = _skeleton.find_bone(key)
 
 	_visualize_skeleton()
 	_create_direction_arrow()

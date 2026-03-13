@@ -49,6 +49,9 @@ func _run_prebake() -> void:
 	factory.enable_wander = false
 	factory.debug_characters = true
 
+	# Trigger on-demand record creation from C# cache
+	var _out_type: Array = [""]
+	ESMManager.get_any_record("fargoth", _out_type)
 	var npc_record = ESMManager.get_npc("fargoth")
 	if not npc_record:
 		push_error("PrebakeTestNPC: fargoth not found in ESM")

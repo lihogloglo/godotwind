@@ -133,6 +133,9 @@ func _load_npc(npc_id: String) -> void:
 		_update_info()
 		return
 
+	# Trigger on-demand record creation from C# cache
+	var _out_type: Array = [""]
+	ESMManager.get_any_record(npc_id, _out_type)
 	var npc = esm.get_npc(npc_id)
 	if not npc:
 		_diag_lines.append("[color=red]NPC '%s' not found[/color]" % npc_id)

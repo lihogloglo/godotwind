@@ -740,8 +740,9 @@ func _read_ni_geometry_data(data: Defs.NiGeometryData) -> void:
 			for i in range(data.num_vertices):
 				var u := _read_float()
 				var v := _read_float()
-				# Flip V coordinate (DirectX to OpenGL convention)
-				uvs[i] = Vector2(u, 1.0 - v)
+				# V-flip disabled: Godot 4.6 Vulkan/D3D12 matches NIF/DirectX convention
+				# Was: uvs[i] = Vector2(u, 1.0 - v) — caused upside-down face textures
+				uvs[i] = Vector2(u, v)
 			data.uv_sets[uv_idx] = uvs
 	if debug_mode:
 		Log.debug("nif", "      after UVs: pos=%d, total geom bytes=%d" % [_pos, _pos - geom_start])

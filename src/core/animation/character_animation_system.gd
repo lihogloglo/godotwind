@@ -449,6 +449,11 @@ func _add_default_moves() -> void:
 	var WalkMoveClass := preload("res://src/core/character/controller/moves/walk_move.gd")
 	var RunMoveClass := preload("res://src/core/character/controller/moves/run_move.gd")
 	var SprintMoveClass := preload("res://src/core/character/controller/moves/sprint_move.gd")
+	var JumpMoveClass := preload("res://src/core/character/controller/moves/jump_move.gd")
+	var MidairMoveClass := preload("res://src/core/character/controller/moves/midair_move.gd")
+	var CrouchMoveClass := preload("res://src/core/character/controller/moves/crouch_move.gd")
+	var SwimIdleMoveClass := preload("res://src/core/character/controller/moves/swim_idle_move.gd")
+	var SwimMoveClass := preload("res://src/core/character/controller/moves/swim_move.gd")
 
 	var idle := IdleMoveClass.new()
 	idle.name = "IdleMove"
@@ -465,6 +470,26 @@ func _add_default_moves() -> void:
 	var sprint := SprintMoveClass.new()
 	sprint.name = "SprintMove"
 	move_container.add_child(sprint)
+
+	var jump := JumpMoveClass.new()
+	jump.name = "JumpMove"
+	move_container.add_child(jump)
+
+	var midair := MidairMoveClass.new()
+	midair.name = "MidairMove"
+	move_container.add_child(midair)
+
+	var crouch := CrouchMoveClass.new()
+	crouch.name = "CrouchMove"
+	move_container.add_child(crouch)
+
+	var swim_idle := SwimIdleMoveClass.new()
+	swim_idle.name = "SwimIdleMove"
+	move_container.add_child(swim_idle)
+
+	var swim := SwimMoveClass.new()
+	swim.name = "SwimMove"
+	move_container.add_child(swim)
 
 
 ## Find skeleton in node hierarchy

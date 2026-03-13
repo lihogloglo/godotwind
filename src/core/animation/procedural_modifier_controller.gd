@@ -79,6 +79,15 @@ func update(delta: float) -> void:
 	if not _is_setup:
 		return
 
+	# Don't apply modifiers until the animation system is actively driving bones.
+	# Without this guard, additive rotations accumulate on rest-pose bones,
+	# causing rapid spine twisting when no animation is playing.
+	if animation_manager:
+		var am: AnimationManager = animation_manager as AnimationManager
+		if am and am._state_machine:
+			if am._state_machine.get_current_node().is_empty():
+				return
+
 	if enable_lean and character_body:
 		_update_lean(delta)
 

@@ -10,13 +10,17 @@
 ##   B = toggle bone visualization
 ##   W = toggle wireframe
 ##   Enter = focus NPC ID input
+##   Left/Right = cycle animations
+##   Space = play/pause animation
+##   P = print KF-vs-actual bone pose comparison
+##   T = toggle bone pose comparison panel
 @tool
 @warning_ignore("untyped_declaration", "unsafe_method_access")
 extends Node3D
 
+const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 const MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
-const RetargetSetup := preload("res://src/core/animation/retarget_setup.gd")
-const SPA := preload("res://src/core/animation/skeleton_profile_adapter.gd")
+const RetargetSetup := preload("res://src/core/animation/skeleton_utils.gd")
 const BodyPartSlots := preload("res://src/core/character/morrowind/morrowind_body_part_slots.gd")
 const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
 
@@ -48,6 +52,15 @@ var _orbiting := false
 var _bones_visible := false
 var _wireframe := false
 
+# Animation playback
+var _anim_player: AnimationPlayer = null
+var _anim_list: PackedStringArray = PackedStringArray()
+var _anim_index: int = 0
+var _anim_playing: bool = false
+var _anim_label: RichTextLabel = null
+var _pose_label: RichTextLabel = null
+var _pose_visible: bool = false
+
 # Display
 var _stage_lines := PackedStringArray()
 
@@ -70,44 +83,17 @@ func _ready() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	# Ensure game data is loaded (BSA + ESM)
-	await _ensure_data_loaded()
+	# Load game data with loading screen
+	var loading := LoadingScreenScript.new()
+	add_child(loading)
+	var success := await loading.load_game_data()
+	loading.queue_free()
+	if not success:
+		return
 
 	_load_npc(PRESET_NPCS[0])
 
 
-func _ensure_data_loaded() -> void:
-	# Check if ESM is already loaded
-	var esm = get_node_or_null("/root/ESMManager")
-	if esm and not esm.npcs.is_empty():
-		return
-
-	_update_info_text("[b]Loading game data...[/b]")
-
-	# Load BSA archives
-	var data_path: String = SettingsManager.get_data_path()
-	if data_path.is_empty():
-		data_path = SettingsManager.auto_detect_installation()
-		if data_path.is_empty():
-			_update_info_text("[color=red]ERROR: No Morrowind data path configured[/color]\nSet it in SettingsManager")
-			return
-
-	var bsa = get_node_or_null("/root/BSAManager")
-	if bsa:
-		bsa.load_archives_from_directory(data_path)
-
-	# Load ESM file
-	if esm:
-		var esm_file: String = SettingsManager.get_esm_file()
-		var esm_path := data_path.path_join(esm_file)
-		_update_info_text("[b]Loading ESM file...[/b]\n%s" % esm_path)
-		var error: int = esm.load_file(esm_path)
-		if error != OK:
-			_update_info_text("[color=red]ERROR: Failed to load ESM: %s[/color]" % error_string(error))
-			return
-
-		_update_info_text("[b]ESM loaded.[/b] NPCs: %d" % esm.npcs.size())
-		await get_tree().process_frame
 
 
 func _update_info_text(text: String) -> void:
@@ -131,6 +117,9 @@ func _load_npc(npc_id: String) -> void:
 		_update_info()
 		return
 
+	# Trigger on-demand record creation from C# cache before lookup
+	var _out_type: Array = [""]
+	ESMManager.get_any_record(npc_id, _out_type)
 	var npc = esm.get_npc(npc_id)
 	if not npc:
 		_stage_lines.append("[color=red]NPC '%s' not found in ESM data[/color]" % npc_id)
@@ -227,12 +216,11 @@ func _load_npc(npc_id: String) -> void:
 	if rename_result.size() > 4:
 		_stage_lines.append("    ... and %d more" % (rename_result.size() - 4))
 
-	# --- STAGE 4: BoneMap verification ---
-	var bone_map = SPA.create_bone_map(_skeleton)
-	var mapped: int = SPA.count_mapped_bones(bone_map) if bone_map else 0
+	# --- STAGE 4: BoneMap verification (SPA removed — skeleton_profile_adapter deleted) ---
+	var mapped: int = _skeleton.get_bone_count() if _skeleton else 0
 
-	_stage_lines.append("\n[color=yellow]Stage 4: BoneMap Verification[/color]")
-	_stage_lines.append("  Profile bones mapped: %d  %s" % [mapped,
+	_stage_lines.append("\n[color=yellow]Stage 4: Skeleton Bones[/color]")
+	_stage_lines.append("  Bone count: %d  %s" % [mapped,
 		"[color=green]OK[/color]" if mapped > 0 else "[color=red]FAIL[/color]"])
 
 	# --- STAGE 5: Animation loading ---
@@ -251,6 +239,23 @@ func _load_npc(npc_id: String) -> void:
 			_stage_lines.append("    - %s" % anim_names[i])
 		if anim_names.size() > 8:
 			_stage_lines.append("    ... and %d more" % (anim_names.size() - 8))
+
+	# --- STAGE 6: Animation playback setup ---
+	_anim_player = _find_animation_player(_skeleton)
+	if _anim_player:
+		_anim_list = _anim_player.get_animation_list()
+		_anim_index = 0
+		_anim_playing = false
+		# Find and auto-play Idle if available
+		for i in _anim_list.size():
+			if _anim_list[i].to_lower() == "idle":
+				_anim_index = i
+				_play_current_animation()
+				break
+		_stage_lines.append("\n[color=yellow]Stage 6: Animation Playback[/color]")
+		_stage_lines.append("  %d animations available" % _anim_list.size())
+		_stage_lines.append("  [color=cyan]Left/Right[/color] = cycle, [color=cyan]Space[/color] = play/pause")
+		_stage_lines.append("  [color=cyan]P[/color] = bone pose comparison, [color=cyan]T[/color] = toggle panel")
 
 	# Summary
 	_stage_lines.append("\n[color=green]Assembly complete[/color] — Total: %d ms" % (t5 - t0))
@@ -320,21 +325,12 @@ func _build_bone_visualization() -> void:
 	if not _skeleton:
 		return
 
-	# Must create fresh — rename_bones_to_profile clears cached metadata
-	var bone_map = SPA.create_bone_map(_skeleton)
-
 	for i in _skeleton.get_bone_count():
 		var bone_name := _skeleton.get_bone_name(i)
 		var global_pose := _skeleton.get_bone_global_rest(i)
 
-		var is_mapped := false
-		if bone_map and bone_map.profile:
-			for j in bone_map.profile.bone_size:
-				var profile_name: String = bone_map.profile.get_bone_name(j)
-				var skel_name: String = bone_map.get_skeleton_bone_name(profile_name)
-				if skel_name == bone_name:
-					is_mapped = true
-					break
+		# All bones shown as mapped (SPA removed — skeleton_profile_adapter deleted)
+		var is_mapped := true
 
 		var sphere := SphereMesh.new()
 		sphere.radius = 0.015 if is_mapped else 0.01
@@ -395,6 +391,18 @@ func _input(event: InputEvent) -> void:
 			KEY_ENTER:
 				if _npc_id_input:
 					_npc_id_input.grab_focus()
+			KEY_LEFT:
+				_cycle_animation(-1)
+			KEY_RIGHT:
+				_cycle_animation(1)
+			KEY_SPACE:
+				_toggle_animation_playback()
+			KEY_P:
+				_print_bone_pose_comparison()
+			KEY_T:
+				_pose_visible = not _pose_visible
+				if _pose_label and _pose_label.get_parent():
+					_pose_label.get_parent().visible = _pose_visible
 
 
 func _toggle_wireframe() -> void:
@@ -417,6 +425,173 @@ func _set_wireframe_recursive(node: Node, enabled: bool) -> void:
 
 
 # =============================================================================
+# ANIMATION PLAYBACK
+# =============================================================================
+
+func _cycle_animation(direction: int) -> void:
+	if _anim_list.is_empty():
+		return
+	_anim_index = wrapi(_anim_index + direction, 0, _anim_list.size())
+	_play_current_animation()
+
+
+func _play_current_animation() -> void:
+	if not _anim_player or _anim_list.is_empty():
+		return
+	var anim_name: String = _anim_list[_anim_index]
+	_anim_player.play(anim_name)
+	_anim_playing = true
+	_update_animation_label()
+
+
+func _toggle_animation_playback() -> void:
+	if not _anim_player:
+		return
+	if _anim_playing:
+		_anim_player.pause()
+		_anim_playing = false
+	else:
+		if _anim_player.current_animation.is_empty() and not _anim_list.is_empty():
+			_play_current_animation()
+		else:
+			_anim_player.play()
+			_anim_playing = true
+	_update_animation_label()
+
+
+func _update_animation_label() -> void:
+	if not _anim_label:
+		return
+	if _anim_list.is_empty():
+		_anim_label.text = "[color=gray]No animations[/color]"
+		return
+	var anim_name: String = _anim_list[_anim_index]
+	var status := "[color=green]PLAYING[/color]" if _anim_playing else "[color=yellow]PAUSED[/color]"
+	var anim: Animation = _anim_player.get_animation(anim_name) if _anim_player.has_animation(anim_name) else null
+	var length_str := "%.2fs" % anim.length if anim else "?"
+	var track_count := anim.get_track_count() if anim else 0
+	_anim_label.text = "[b]Animation:[/b] [color=cyan]%s[/color] (%d/%d)  %s\n" % [
+		anim_name, _anim_index + 1, _anim_list.size(), status]
+	_anim_label.text += "Length: %s  |  Tracks: %d  |  Loop: %s" % [
+		length_str, track_count,
+		"Yes" if anim and anim.loop_mode != Animation.LOOP_NONE else "No"]
+
+
+## Print KF-vs-actual bone pose comparison to console and update panel
+func _print_bone_pose_comparison() -> void:
+	if not _skeleton or not _anim_player or _anim_list.is_empty():
+		print("[NPC Test] No skeleton or animations to compare")
+		return
+
+	var anim_name: String = _anim_list[_anim_index]
+	var anim: Animation = _anim_player.get_animation(anim_name)
+	if not anim:
+		print("[NPC Test] Animation '%s' not found" % anim_name)
+		return
+
+	var lines := PackedStringArray()
+	lines.append("[b]KF vs Actual — '%s' at t=%.3f[/b]\n" % [
+		anim_name, _anim_player.current_animation_position])
+
+	var current_time: float = _anim_player.current_animation_position
+
+	for track_idx in anim.get_track_count():
+		var path := anim.track_get_path(track_idx)
+		if path.get_subname_count() == 0:
+			continue
+		var bone_name := String(path.get_subname(0))
+		var bone_idx := _skeleton.find_bone(bone_name)
+		if bone_idx < 0:
+			lines.append("[color=red]%s: NOT IN SKELETON[/color]" % bone_name)
+			continue
+
+		var track_type := anim.track_get_type(track_idx)
+
+		# Get KF value at current time
+		if track_type == Animation.TYPE_ROTATION_3D:
+			var kf_rot: Quaternion = anim.rotation_track_interpolate(track_idx, current_time)
+			var actual_rot: Quaternion = _skeleton.get_bone_pose_rotation(bone_idx)
+			var angle_diff := rad_to_deg(kf_rot.angle_to(actual_rot))
+			var color := "green" if angle_diff < 1.0 else ("yellow" if angle_diff < 5.0 else "red")
+			lines.append("[color=%s]%s ROT: diff=%.1f°[/color]  kf=%s  actual=%s" % [
+				color, bone_name, angle_diff,
+				_fmt_quat(kf_rot), _fmt_quat(actual_rot)])
+		elif track_type == Animation.TYPE_POSITION_3D:
+			var kf_pos: Vector3 = anim.position_track_interpolate(track_idx, current_time)
+			var actual_pos: Vector3 = _skeleton.get_bone_pose_position(bone_idx)
+			var dist := kf_pos.distance_to(actual_pos)
+			var color := "green" if dist < 0.01 else ("yellow" if dist < 0.05 else "red")
+			lines.append("[color=%s]%s POS: diff=%.4f[/color]  kf=%s  actual=%s" % [
+				color, bone_name, dist,
+				_fmt_vec3(kf_pos), _fmt_vec3(actual_pos)])
+
+	var text := "\n".join(lines)
+
+	# Print to console
+	for line in lines:
+		var stripped := line
+		for tag in ["[color=green]", "[color=red]", "[color=yellow]", "[color=cyan]", "[color=gray]", "[/color]", "[b]", "[/b]"]:
+			stripped = stripped.replace(tag, "")
+		print("[Pose] %s" % stripped)
+
+	# Update panel
+	if _pose_label:
+		_pose_label.text = text
+		if _pose_label.get_parent():
+			_pose_label.get_parent().visible = true
+		_pose_visible = true
+
+
+## Update the pose panel live while animation is playing
+func _update_live_pose_panel() -> void:
+	if not _pose_label or not _skeleton or not _anim_player:
+		return
+	if _anim_list.is_empty():
+		return
+
+	var anim_name: String = _anim_list[_anim_index]
+	var anim: Animation = _anim_player.get_animation(anim_name) if _anim_player.has_animation(anim_name) else null
+	if not anim:
+		return
+
+	var current_time: float = _anim_player.current_animation_position
+	var lines := PackedStringArray()
+	lines.append("[b]LIVE — '%s' t=%.3f[/b]\n" % [anim_name, current_time])
+
+	# Show first 12 bone tracks for readability
+	var shown := 0
+	for track_idx in anim.get_track_count():
+		if shown >= 12:
+			lines.append("... (%d more tracks)" % (anim.get_track_count() - shown))
+			break
+		var path := anim.track_get_path(track_idx)
+		if path.get_subname_count() == 0:
+			continue
+		var bone_name := String(path.get_subname(0))
+		var bone_idx := _skeleton.find_bone(bone_name)
+		if bone_idx < 0:
+			continue
+		var track_type := anim.track_get_type(track_idx)
+		if track_type == Animation.TYPE_ROTATION_3D:
+			var kf_rot: Quaternion = anim.rotation_track_interpolate(track_idx, current_time)
+			var actual_rot: Quaternion = _skeleton.get_bone_pose_rotation(bone_idx)
+			var angle_diff := rad_to_deg(kf_rot.angle_to(actual_rot))
+			var color := "green" if angle_diff < 1.0 else ("yellow" if angle_diff < 5.0 else "red")
+			lines.append("[color=%s]%s: %.1f°[/color]" % [color, bone_name, angle_diff])
+			shown += 1
+
+	_pose_label.text = "\n".join(lines)
+
+
+func _fmt_quat(q: Quaternion) -> String:
+	return "(%.3f, %.3f, %.3f, %.3f)" % [q.x, q.y, q.z, q.w]
+
+
+func _fmt_vec3(v: Vector3) -> String:
+	return "(%.3f, %.3f, %.3f)" % [v.x, v.y, v.z]
+
+
+# =============================================================================
 # CAMERA
 # =============================================================================
 
@@ -424,6 +599,9 @@ func _process(delta: float) -> void:
 	if not _orbiting:
 		_yaw += delta * 8.0
 	_update_camera()
+	_update_animation_label()
+	if _pose_visible and _anim_playing:
+		_update_live_pose_panel()
 
 
 func _update_camera() -> void:
@@ -533,9 +711,46 @@ func _create_ui() -> void:
 	input_panel.add_child(hbox)
 	canvas.add_child(input_panel)
 
+	# Animation label (bottom-left, above legend)
+	_anim_label = RichTextLabel.new()
+	_anim_label.bbcode_enabled = true
+	_anim_label.fit_content = true
+	_anim_label.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_anim_label.offset_left = 10
+	_anim_label.offset_top = -80
+	_anim_label.offset_right = 600
+	_anim_label.offset_bottom = -35
+	_anim_label.add_theme_font_size_override("normal_font_size", 14)
+	_anim_label.text = "[color=gray]No animation loaded[/color]"
+	canvas.add_child(_anim_label)
+
+	# Bone pose comparison panel (right side)
+	var pose_panel := PanelContainer.new()
+	pose_panel.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	pose_panel.offset_left = -480
+	var pose_style := StyleBoxFlat.new()
+	pose_style.bg_color = Color(0, 0, 0, 0.7)
+	pose_style.set_corner_radius_all(4)
+	pose_style.set_content_margin_all(8)
+	pose_panel.add_theme_stylebox_override("panel", pose_style)
+	pose_panel.visible = false
+
+	_pose_label = RichTextLabel.new()
+	_pose_label.bbcode_enabled = true
+	_pose_label.fit_content = false
+	_pose_label.scroll_active = true
+	_pose_label.custom_minimum_size = Vector2(460, 0)
+	_pose_label.add_theme_font_size_override("normal_font_size", 12)
+	_pose_label.text = "[color=gray]Press P to compare bone poses[/color]"
+	pose_panel.add_child(_pose_label)
+	canvas.add_child(pose_panel)
+	# Store reference to parent panel for visibility toggle
+	_pose_label = _pose_label
+	_pose_label.get_parent().visible = false
+
 	# Controls legend (bottom)
 	var legend := Label.new()
-	legend.text = "1-5: Presets  |  B: Bones  |  W: Wireframe  |  Enter: NPC ID  |  RMB: Orbit  |  Scroll: Zoom"
+	legend.text = "1-5: Presets  |  B: Bones  |  W: Wireframe  |  Left/Right: Anim  |  Space: Play  |  P: Pose  |  T: Panel"
 	legend.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	legend.offset_top = -30
 	legend.add_theme_font_size_override("font_size", 13)
