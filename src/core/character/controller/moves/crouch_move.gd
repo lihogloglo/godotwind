@@ -8,6 +8,7 @@ extends Move
 @export var standing_height: float = 1.8
 
 var _original_height: float = 1.8
+var _current_crouch_anim: StringName = &""
 
 
 func _init() -> void:
@@ -19,7 +20,8 @@ func _init() -> void:
 func default_lifecycle(input: InputPackage) -> StringName:
 	if input.is_in_water and container and container.has_move(&"swim_idle"):
 		return &"swim_idle"
-	if not player.is_on_floor() and container and container.has_move(&"midair"):
+	# Landing lockout: don't transition to midair for 0.1s after entering (prevents Jolt bounce)
+	if works_longer_than(0.1) and not player.is_on_floor() and container and container.has_move(&"midair"):
 		return &"midair"
 	# Stay crouching while crouch is held, otherwise uncrouch
 	if not input.actions.has(&"crouch"):
@@ -34,15 +36,32 @@ func update(input: InputPackage, delta: float) -> void:
 	if not player.is_on_floor():
 		player.velocity.y -= gravity * delta
 
-	# Movement while crouched
+	# Movement while crouched — switch animation based on input direction
 	if input.input_direction != Vector2.ZERO:
+		# Check if moving backward relative to facing
+		var input_dir_3d := (input.camera_basis * Vector3(
+			input.input_direction.x, 0.0, input.input_direction.y)).normalized()
+		var facing: Node3D = character_root if character_root else player
+		var face_direction := -facing.basis.z
+		var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
+
+		var target_anim: StringName = &"CrouchBack" if absf(angle) > 2.1 else &"CrouchWalk"
+		if _current_crouch_anim != target_anim:
+			_current_crouch_anim = target_anim
+			if animator:
+				animator.transition_to(target_anim, true)
 		_apply_crouch_movement(input, delta)
 	else:
+		if _current_crouch_anim != &"Crouch":
+			_current_crouch_anim = &"Crouch"
+			if animator:
+				animator.transition_to(&"Crouch", true)
 		player.velocity.x = 0.0
 		player.velocity.z = 0.0
 
 
 func on_enter_state() -> void:
+	_current_crouch_anim = &"Crouch"
 	# Shrink collision shape
 	_set_collision_height(crouch_height)
 
@@ -60,7 +79,9 @@ func _apply_crouch_movement(input: InputPackage, delta: float) -> void:
 	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
 
 	var move_dir: Vector3
-	if absf(angle) >= tracking_angular_speed * delta:
+	if absf(angle) > 2.1:  # Backward — don't rotate
+		move_dir = -face_direction * crouch_speed * 0.7
+	elif absf(angle) >= tracking_angular_speed * delta:
 		move_dir = face_direction.rotated(
 			Vector3.UP, signf(angle) * tracking_angular_speed * delta) * crouch_speed
 		facing.rotate_y(signf(angle) * tracking_angular_speed * delta)

@@ -282,6 +282,9 @@ func _setup_collision() -> void:
 	add_child(collision_shape)
 	# Morrowind terrain can be steep — allow ~50° slopes before sliding
 	floor_max_angle = deg_to_rad(50.0)
+	# Snap to ground — handles stair steps naturally via Godot's built-in floor snap.
+	# Custom step-up in MoveContainer handles larger obstacles (0.3-0.5m).
+	floor_snap_length = 0.3
 
 
 func _setup_camera() -> void:
@@ -566,10 +569,12 @@ func _update_water_state() -> void:
 	# Static water volumes take priority (set by Area3D body_entered/exited)
 	if _in_water_volume:
 		_water_surface_y = _water_volume_surface_y
-	else:
-		# Ocean wave height via GerstnerMath (static class)
+	elif OceanManager.is_system_enabled():
+		# Ocean wave height via GerstnerMath (only when ocean is active)
 		var time: float = float(Time.get_ticks_msec()) / 1000.0
 		_water_surface_y = GerstnerMath.get_height(pos, time)
+	else:
+		_water_surface_y = -INF
 
 	var was_in_water := in_water
 	# Player is "in water" when their feet are below the surface

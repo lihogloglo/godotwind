@@ -128,6 +128,7 @@ var _initialized: bool = false
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = 5  # Must be at least 5 cells (585m) to cover MID tier (500m)
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
+var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 
 # Interior cell browser (constructed by CellBrowser)
 var _cell_browser: CellBrowser = null
@@ -609,6 +610,10 @@ func _switch_to_player_controller() -> void:
 	fly_camera.disable()
 	fly_camera.current = false
 
+	# Attach player character body if not already attached
+	if not player_controller.character_root:
+		_attach_player_character()
+
 	# Enable and position player controller
 	player_controller.teleport_to(player_pos)
 	player_controller.enable()
@@ -669,6 +674,84 @@ func _switch_to_fly_camera() -> void:
 
 	_log("[color=cyan]Switched to FLY CAMERA mode[/color]")
 	_log("Hold Right-click to look, WASD to move")
+
+
+## Attach a Morrowind NPC body to the player controller
+func _attach_player_character() -> void:
+	# Ensure character assets are preloaded (KF animations, skeletons, body parts)
+	if not _character_assets_preloaded:
+		_character_assets_preloaded = true
+		_log("Pre-loading character assets...")
+		CharacterFactoryV2Script.preload_character_assets()
+		_log("Character assets pre-loaded")
+
+	# Look up NPC record
+	var npc_record: NPCRecord = ESMManager.get_npc(_player_npc_id)
+	if not npc_record:
+		_log("Player NPC not found: %s" % _player_npc_id)
+		return
+
+	var race: RaceRecord = ESMManager.get_race(npc_record.race_id)
+	if not race:
+		_log("Race not found: %s" % npc_record.race_id)
+		return
+
+	var is_female: bool = npc_record.is_female()
+	var is_beast: bool = race.is_beast() if race else false
+
+	# Assemble body parts (skeleton + meshes)
+	var MorrowindNPCAssembler := preload("res://src/core/character/morrowind/morrowind_npc_assembler.gd")
+	var character_root: Node3D = MorrowindNPCAssembler.assemble(npc_record, race)
+	if not character_root:
+		_log("Failed to assemble player NPC: %s" % _player_npc_id)
+		return
+
+	# Find skeleton and rename bones (Bip01 -> profile names)
+	var SkeletonUtils := preload("res://src/core/animation/skeleton_utils.gd")
+	var skeleton: Skeleton3D = _find_skeleton(character_root)
+	if not skeleton:
+		_log("No skeleton found for player NPC: %s" % _player_npc_id)
+		character_root.queue_free()
+		return
+
+	var factory := CharacterFactoryV2Script.new()
+	factory.enable_ik = true
+	factory.debug_characters = true
+	factory.debug_animations = true
+
+	# Build bone remap BEFORE renaming (Bip01 → profile names)
+	factory._ensure_bone_remap(skeleton, is_beast)
+
+	# Rename skeleton bones to profile names (for IK, blend masks)
+	var rename_map := SkeletonUtils.rename_bones_to_profile(skeleton)
+	if not rename_map.is_empty():
+		factory._update_bone_attachment_names(skeleton, rename_map)
+
+	# Add character root to player controller BEFORE loading animations
+	player_controller.add_child(character_root)
+
+	# Load KF animations (uses cached remap to convert Bip01 → profile names)
+	factory._load_character_animations(character_root, skeleton, is_female, is_beast)
+
+	# Wire animation system (MoveContainer, AnimationManager, IK)
+	factory.setup_character(player_controller, is_female, is_beast,
+		npc_record.race_id, npc_record.record_id)
+
+	# Create input gatherer (reads hardware input into InputPackage for moves)
+	player_controller._setup_input_gatherer()
+
+	_log("Player character attached: %s" % _player_npc_id)
+
+
+## Recursively find a Skeleton3D in a node hierarchy
+func _find_skeleton(node: Node) -> Skeleton3D:
+	if node is Skeleton3D:
+		return node as Skeleton3D
+	for child in node.get_children():
+		var result := _find_skeleton(child)
+		if result:
+			return result
+	return null
 
 
 ## Get ground height at a position using terrain data

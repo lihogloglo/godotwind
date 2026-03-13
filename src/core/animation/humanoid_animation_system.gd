@@ -63,8 +63,11 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null,
 	# Configure IK for humanoid
 	_configure_humanoid_ik()
 
-	# Auto-detect and set root motion track (Hips bone)
-	_setup_root_motion_track()
+	# Only set root motion track when the character body is configured for it.
+	# Setting root_motion_track without consuming get_root_motion_position()
+	# silently eats the bone's position animation with no benefit.
+	if character_body and character_body.get("use_root_motion"):
+		_setup_root_motion_track()
 
 
 ## Build bone name mapping (skeleton should have profile-named bones after renaming)

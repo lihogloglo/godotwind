@@ -352,6 +352,8 @@ func _process(delta: float) -> void:
 
 	# Update camera position
 	_camera_position = _camera.global_position
+	if _cell_manager:
+		_cell_manager.set_camera_position(_camera_position)
 	var new_cell := DU.world_to_cell(_camera_position)
 
 	# Track startup frames for staggered loading

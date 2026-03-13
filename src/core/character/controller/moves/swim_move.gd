@@ -6,6 +6,8 @@ extends Move
 @export var swim_acceleration: float = 5.0
 @export var buoyancy_strength: float = 4.0
 @export var water_drag: float = 2.0
+## How far below the surface the character's feet sit at equilibrium.
+@export var submersion_depth: float = 1.2
 
 
 func _init() -> void:
@@ -44,8 +46,8 @@ func update(input: InputPackage, delta: float) -> void:
 	# Lerp to target for smooth acceleration
 	player.velocity = player.velocity.lerp(target_velocity, swim_acceleration * delta)
 
-	# Buoyancy: nudge toward surface
-	var depth := input.water_surface_y - player.global_position.y
+	# Buoyancy: nudge toward equilibrium depth (chest at surface, feet submerged)
+	var depth := input.water_surface_y - player.global_position.y - submersion_depth
 	player.velocity.y += clampf(depth * buoyancy_strength, -2.0, 2.0) * delta
 
 	# Rotate character to face movement direction (horizontal only)

@@ -22,6 +22,10 @@ var resources: Node = null  # HumanoidResources (Phase 4)
 var combat: Node = null  # HumanoidCombat (Phase 5)
 var legs: Node = null  # Legs (Phase 4)
 
+# --- Step-up ---
+## Maximum obstacle height the character can step over without jumping
+var max_step_height: float = 0.45
+
 # --- State ---
 var _is_setup: bool = false
 
@@ -83,9 +87,9 @@ func process(input: InputPackage, delta: float) -> void:
 	# Update the (possibly new) current move — sets velocity only
 	current_move._update(input, delta)
 
-	# Single move_and_slide() call per frame
+	# Single move_and_slide() call per frame — with step-up for small obstacles
 	if player:
-		player.move_and_slide()
+		_move_with_step_up()
 
 
 # =============================================================================
@@ -129,3 +133,112 @@ func has_move(move_name: StringName) -> bool:
 ## Check if setup is complete
 func is_ready() -> bool:
 	return _is_setup
+
+
+# =============================================================================
+# STEP-UP — Separate body for step detection + smooth Y interpolation
+# =============================================================================
+
+## Smoothed Y position for visual step climbing (avoids jerky teleports)
+var _step_target_y: float = 0.0
+var _step_initialized: bool = false
+## Speed at which the body interpolates to step height
+var step_smooth_speed: float = 12.0
+
+## Move with automatic step-up over small obstacles (stairs, curbs, bumps).
+## Uses a two-phase approach:
+## 1. test_move() probes ahead at raised height to detect climbable steps
+## 2. If step found, smoothly interpolate Y up instead of teleporting
+func _move_with_step_up() -> void:
+	if not _step_initialized:
+		_step_target_y = player.global_position.y
+		_step_initialized = true
+
+	var has_horizontal := absf(player.velocity.x) > 0.01 or absf(player.velocity.z) > 0.01
+	if not player.is_on_floor() or not has_horizontal or player.velocity.y > 0.1:
+		# Not grounded, not moving, or jumping — normal move
+		player.move_and_slide()
+		_step_target_y = player.global_position.y
+		return
+
+	# Save pre-move state
+	var original_pos := player.global_position
+	var original_vel := player.velocity
+
+	# Normal move first
+	player.move_and_slide()
+
+	# Check if we hit an obstacle (wall-like normal)
+	var hit_wall := false
+	for i in player.get_slide_collision_count():
+		var col := player.get_slide_collision(i)
+		if col.get_normal().y < 0.5:  # Not a floor — obstacle or step
+			hit_wall = true
+			break
+
+	if not hit_wall:
+		_step_target_y = player.global_position.y
+		return  # Normal move succeeded
+
+	# Step detection: try moving from a raised position
+	var post_normal_pos := player.global_position
+	var post_normal_vel := player.velocity
+
+	# Reset to original position for the raised test
+	player.global_position = original_pos
+	player.velocity = original_vel
+
+	# Check ceiling clearance
+	var raise_height := max_step_height + 0.05
+	if player.test_move(player.global_transform, Vector3.UP * raise_height):
+		# No room above — stick with normal result
+		player.global_position = post_normal_pos
+		player.velocity = post_normal_vel
+		_step_target_y = player.global_position.y
+		return
+
+	# Raise, move forward, snap down — all via test_move (no move_and_slide)
+	player.global_position.y += raise_height
+
+	# Test horizontal movement at raised height.
+	# Use enough forward distance to clear the step's depth — per-frame velocity
+	# (0.08m at 5m/s) is often too short to reach past a step edge.
+	var h_vel := Vector3(original_vel.x, 0.0, original_vel.z)
+	var h_speed := h_vel.length()
+	var h_dir := h_vel / h_speed if h_speed > 0.01 else Vector3.ZERO
+	var h_motion := h_dir * maxf(h_speed * get_physics_process_delta_time(), 0.4)
+	var h_collision := KinematicCollision3D.new()
+	var h_blocked := player.test_move(player.global_transform, h_motion, h_collision)
+
+	# Apply horizontal travel (full or partial)
+	if h_blocked:
+		player.global_position += h_collision.get_travel()
+	else:
+		player.global_position += h_motion
+
+	# Snap down to find the step surface
+	var down_motion := Vector3.DOWN * (raise_height + max_step_height)
+	var down_collision := KinematicCollision3D.new()
+	if player.test_move(player.global_transform, down_motion, down_collision):
+		var landed_y := player.global_position.y + down_collision.get_travel().y
+		var horizontal_gain := Vector2(
+			player.global_position.x - original_pos.x,
+			player.global_position.z - original_pos.z).length()
+		var normal_gain := Vector2(
+			post_normal_pos.x - original_pos.x,
+			post_normal_pos.z - original_pos.z).length()
+
+		if horizontal_gain > normal_gain * 1.1 and landed_y >= original_pos.y - 0.1:
+			# Step-up succeeded — use the new position
+			player.global_position.y = landed_y
+			player.velocity = original_vel
+			player.velocity.y = 0.0
+			# Force floor detection with a tiny move_and_slide
+			player.move_and_slide()
+			_step_target_y = player.global_position.y
+			return
+
+	# Step-up didn't improve — revert to normal move result
+	player.global_position = post_normal_pos
+	player.velocity = post_normal_vel
+	_step_target_y = player.global_position.y

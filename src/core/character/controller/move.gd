@@ -87,7 +87,13 @@ func _on_enter_state() -> void:
 	mark_enter_state()
 	on_enter_state()
 	# Tell AnimationManager to transition to our animation state
+	# Skip if already playing the same state — prevents crossfade rebound
+	# (e.g. JumpMove and MidairMove both use "Fall")
 	if animator and not animation_state.is_empty():
+		if animator.has_method("get_current_state"):
+			var current: StringName = animator.get_current_state()
+			if current == animation_state:
+				return
 		if animator.has_method("transition_to"):
 			animator.transition_to(animation_state, true)
 

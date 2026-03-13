@@ -32,6 +32,7 @@ var _instantiator: ReferenceInstantiator = ReferenceInstantiator.new()
 # Character factory for creating animated NPCs and creatures
 # Use V2 factory for new animation system with IK, procedural animation, and LOD
 var _character_factory: CharacterFactoryV2 = CharacterFactoryV2.new()
+var enable_npc_wander: bool = true  # NPCs wander near spawn points
 
 # Object pool for frequently used models
 var _object_pool: RefCounted = null  # ObjectPool
@@ -118,6 +119,7 @@ func set_mod_registry(registry: ModRegistry) -> void:
 func _sync_instantiator_config() -> void:
 	# Set up character factory
 	_character_factory.set_model_loader(_model_loader)
+	_character_factory.enable_wander = enable_npc_wander
 
 	# Configure instantiator
 	_instantiator.model_loader = _model_loader
@@ -931,6 +933,11 @@ var _aabb_cache: Dictionary = {}  # String -> float
 
 
 ## Set the LOD configurator for visibility range configuration
+## Update camera position for NEAR-tier actor filtering
+func set_camera_position(pos: Vector3) -> void:
+	_instantiator.camera_position = pos
+
+
 func set_lod_configurator(configurator: LODConfigurator) -> void:
 	_lod_configurator = configurator
 

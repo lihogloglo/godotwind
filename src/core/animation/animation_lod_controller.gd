@@ -230,7 +230,7 @@ func _apply_lod_settings(level: int) -> void:
 			_set_animation_active(true)
 
 		LODLevel.CULLED:
-			_update_interval = 999  # Rarely update
+			_update_interval = 30  # Re-check every 0.5s so recovery isn't glacially slow
 			anim_sys.enable_ik = false
 			anim_sys.enable_procedural = false
 			_set_animation_active(false)

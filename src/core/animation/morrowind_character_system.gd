@@ -42,12 +42,6 @@ var _is_beast: bool = false
 var _race_id: String = ""
 var _npc_record_id: String = ""
 
-# Root bone indices to pin (prevents animation root motion from drifting the mesh)
-var _root_bone_indices: PackedInt32Array = []
-# Rest positions for pinned bones (preserves pelvis height etc.)
-var _root_bone_rest_positions: Array[Vector3] = []
-
-
 ## Setup for Morrowind character
 func setup_morrowind(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D,
 		is_female: bool, is_beast: bool, race_id: String = "",
@@ -59,36 +53,6 @@ func setup_morrowind(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D,
 
 	# Call parent setup
 	setup(p_skeleton, p_character_body)
-
-	# Cache root bone indices for position pinning (prevents animation drift)
-	_cache_root_bone_indices()
-
-
-## Pin root bone positions each frame to prevent animation drift.
-## MW animations have absolute position tracks on root bones (Bip01/NonAccum)
-## that move the mesh away from CharacterBody3D. We pin to rest positions
-## (not zero) to preserve pelvis height. Real root motion extraction is Phase 4.
-func _physics_process(delta: float) -> void:
-	super._physics_process(delta)
-	if skeleton and not _root_bone_indices.is_empty():
-		for i: int in _root_bone_indices.size():
-			skeleton.set_bone_pose_position(_root_bone_indices[i], _root_bone_rest_positions[i])
-
-
-## Cache bone indices + rest positions for root bones that need position pinning
-func _cache_root_bone_indices() -> void:
-	_root_bone_indices.clear()
-	_root_bone_rest_positions.clear()
-	if not skeleton:
-		return
-	# Pin any root/locomotion bones that MW animations translate
-	for bone_name: String in ["Root", "Hips", "Bip01", "Bip01 NonAccum"]:
-		var idx := skeleton.find_bone(bone_name)
-		if idx >= 0:
-			_root_bone_indices.append(idx)
-			_root_bone_rest_positions.append(skeleton.get_bone_rest(idx).origin)
-	if not _root_bone_indices.is_empty():
-		Log.debug("animation", "MorrowindCharacterSystem: Pinning %d root bones to rest positions" % _root_bone_indices.size())
 
 
 ## Find animation by Morrowind name

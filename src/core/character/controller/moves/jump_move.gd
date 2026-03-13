@@ -9,7 +9,7 @@ extends Move
 
 func _init() -> void:
 	move_name = &"jump"
-	animation_state = &"Jump"
+	animation_state = &"Jump"  # Direct Idle→Jump path in state machine (avoids intermediate hops)
 	priority = 5  # Higher than locomotion, lower than combat
 
 

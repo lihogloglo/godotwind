@@ -6,6 +6,9 @@ extends Move
 @export var buoyancy_strength: float = 4.0
 ## Damping applied to velocity while treading water
 @export var water_drag: float = 3.0
+## How far below the surface the character's feet sit at equilibrium.
+## For a 1.8m biped floating at chest height, feet are ~1.2m below surface.
+@export var submersion_depth: float = 1.2
 
 
 func _init() -> void:
@@ -30,8 +33,8 @@ func default_lifecycle(input: InputPackage) -> StringName:
 
 
 func update(input: InputPackage, delta: float) -> void:
-	# Buoyancy: nudge toward water surface
-	var depth := input.water_surface_y - player.global_position.y
+	# Buoyancy: nudge toward equilibrium depth (chest at surface, feet submerged)
+	var depth := input.water_surface_y - player.global_position.y - submersion_depth
 	player.velocity.y += clampf(depth * buoyancy_strength, -2.0, 2.0) * delta * 10.0
 
 	# Water drag — slow horizontal movement

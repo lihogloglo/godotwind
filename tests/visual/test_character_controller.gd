@@ -36,6 +36,9 @@ func _ready() -> void:
 	_create_points_of_interest()
 	_create_debug_hud()
 
+	# Ocean disabled — buggy in test scene, to be fixed separately
+	#_setup_ocean()
+
 	# Factory for creating MW NPCs
 	_factory = CharacterFactoryV2Script.new()
 	_factory.enable_ik = true
@@ -248,6 +251,15 @@ func _create_environment() -> void:
 	add_child(world_env)
 
 
+func _setup_ocean() -> void:
+	# Initialize ocean — sea level well below platform so FFT waves don't reach ground
+	# Platform ground is at Y=0. FFT waves have ~1-2m amplitude around sea_level.
+	# Setting sea_level=-3 gives 1-2m clearance even at wave peaks.
+	OceanManager.force_initialize()
+	OceanManager.set_sea_level(-3.0)
+	OceanManager.set_enabled(true)
+
+
 func _create_terrain() -> void:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.3, 0.5, 0.2)
@@ -329,6 +341,41 @@ func _create_terrain() -> void:
 	wall_body.add_child(wall_col)
 	wall_body.position = Vector3(-10, 4, 0)
 	add_child(wall_body)
+
+	# IK test obstacles — small boxes at varying heights for foot IK adaptation
+	var ik_mat := StandardMaterial3D.new()
+	ik_mat.albedo_color = Color(0.55, 0.45, 0.35)
+	var ik_boxes := [
+		# [name, position, size] — scattered near spawn area
+		["IKBox_Low1", Vector3(-3, 0.05, 3), Vector3(1.0, 0.1, 1.0)],     # 10cm step
+		["IKBox_Low2", Vector3(-1, 0.08, 4), Vector3(0.8, 0.16, 0.8)],    # 16cm step
+		["IKBox_Med1", Vector3(1, 0.12, 2), Vector3(0.7, 0.24, 0.7)],     # 24cm step
+		["IKBox_Med2", Vector3(2, 0.1, 5), Vector3(1.2, 0.2, 0.6)],       # 20cm plank
+		["IKBox_High", Vector3(0, 0.15, 6), Vector3(0.6, 0.3, 0.6)],      # 30cm block
+		["IKBox_Flat", Vector3(-2, 0.025, 6), Vector3(2.0, 0.05, 1.5)],   # 5cm slab
+		["IKBox_Step1", Vector3(4, 0.1, 3), Vector3(1.5, 0.2, 0.5)],      # stair step 1
+		["IKBox_Step2", Vector3(4, 0.2, 2.5), Vector3(1.5, 0.4, 0.5)],    # stair step 2
+		["IKBox_Step3", Vector3(4, 0.3, 2.0), Vector3(1.5, 0.6, 0.5)],    # stair step 3
+	]
+	for b in ik_boxes:
+		var bx_mesh := MeshInstance3D.new()
+		bx_mesh.name = b[0]
+		var bx := BoxMesh.new()
+		bx.size = b[2]
+		bx_mesh.mesh = bx
+		bx_mesh.position = b[1]
+		bx_mesh.material_override = ik_mat
+		add_child(bx_mesh)
+
+		var bx_body := StaticBody3D.new()
+		bx_body.name = b[0] + "Body"
+		var bx_col := CollisionShape3D.new()
+		var bx_shape := BoxShape3D.new()
+		bx_shape.size = b[2]
+		bx_col.shape = bx_shape
+		bx_body.add_child(bx_col)
+		bx_body.position = b[1]
+		add_child(bx_body)
 
 
 func _create_water_pool() -> void:

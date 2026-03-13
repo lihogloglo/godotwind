@@ -10,6 +10,7 @@ class_name IKController
 extends Node
 
 const _LookAtIKModifierScript := preload("res://src/core/animation/look_at_modifier.gd")
+const _PelvisOffsetModifier := preload("res://src/core/animation/pelvis_offset_modifier.gd")
 
 # Signals
 signal target_reached(ik_type: StringName)
@@ -24,6 +25,35 @@ enum IKType {
 	HAND_RIGHT,
 }
 
+# IK weight by animation state — controls how much foot IK adapts to terrain.
+# 0.0 = pure animation (no IK), 1.0 = full terrain adaptation.
+const IK_WEIGHT_BY_STATE: Dictionary = {
+	&"Idle": 1.0,
+	&"Walk": 0.7,
+	&"Run": 0.5,
+	&"Sprint": 0.0,
+	&"Crouch": 0.8,
+	&"CrouchWalk": 0.7,
+	&"CrouchBack": 0.6,
+	&"WalkBack": 0.6,
+	&"RunBack": 0.2,
+	&"Jump": 0.0,
+	&"Fall": 0.0,
+	&"Land": 0.5,
+	&"SwimIdle": 0.0,
+	&"SwimForward": 0.0,
+	&"CombatIdle": 0.9,
+	&"Attack": 0.0,
+	&"Block": 0.5,
+	&"Hit": 0.0,
+	&"Death": 0.0,
+}
+
+# Velocity threshold for foot plant detection (skeleton-local units/sec)
+const PLANT_VELOCITY_THRESHOLD: float = 0.8
+# Maximum foot normal tilt in radians (~30 degrees)
+const MAX_FOOT_TILT: float = 0.52
+
 # Configuration
 @export_group("Foot IK")
 @export var enable_foot_ik: bool = true
@@ -31,6 +61,7 @@ enum IKType {
 @export var foot_offset: float = 0.05
 @export var max_foot_adjustment: float = 0.4
 @export var foot_ik_smoothing: float = 10.0
+@export var influence_blend_speed: float = 8.0
 
 @export_group("Look-At IK")
 @export var enable_look_at: bool = true
@@ -81,8 +112,22 @@ var _right_hand_weight: float = 0.0
 # position, causing the IK solver to chase a moving target.
 var _target_parent: Node3D = null
 
+# Pelvis offset modifier (SkeletonModifier3D, runs AFTER AnimationTree)
+var _pelvis_modifier: SkeletonModifier3D = null
+
 # Smoothed values
 var _current_pelvis_offset: float = 0.0
+var _current_left_influence: float = 0.0
+var _current_right_influence: float = 0.0
+
+# Foot contact detection — skeleton-local positions from previous frame
+var _prev_left_foot_local: Vector3 = Vector3.ZERO
+var _prev_right_foot_local: Vector3 = Vector3.ZERO
+var _left_foot_planted: bool = true
+var _right_foot_planted: bool = true
+
+# Animation manager reference for state-based IK weight lookup
+var _animation_manager: Node = null  # AnimationManager
 
 # Diagnostics
 var _foot_ik_first_update: bool = true
@@ -93,9 +138,11 @@ func _ready() -> void:
 
 
 ## Setup the IK system
-func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null) -> void:
+func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null,
+		p_animation_manager: Node = null) -> void:
 	skeleton = p_skeleton
 	character_body = p_character_body
+	_animation_manager = p_animation_manager
 
 	if not skeleton:
 		push_error("IKController: Skeleton is required")
@@ -110,8 +157,12 @@ func setup(p_skeleton: Skeleton3D, p_character_body: CharacterBody3D = null) -> 
 	# Find bone indices
 	_find_bone_indices()
 
-	# Setup IK chains
+	# Setup IK chains — order matters for SkeletonModifier3D pipeline:
+	# 1. PelvisOffsetModifier (drops pelvis for slopes)
+	# 2. Foot IK (TwoBoneIK3D x2, solves with adjusted pelvis)
+	# 3. Look-at / Hand IK
 	if enable_foot_ik:
+		_setup_pelvis_modifier()
 		_setup_foot_ik()
 
 	if enable_look_at:
@@ -225,79 +276,157 @@ func _setup_foot_ik() -> void:
 	_right_foot_ik.set_pole_node(0, _right_foot_ik.get_path_to(_right_foot_pole))
 
 
-## Update foot IK each physics frame
+## Setup PelvisOffsetModifier3D — runs in SkeletonModifier3D pipeline
+## AFTER AnimationTree, BEFORE foot IK. Adjusts pelvis Y for slope adaptation.
+func _setup_pelvis_modifier() -> void:
+	_pelvis_modifier = _PelvisOffsetModifier.new()
+	_pelvis_modifier.name = "PelvisOffset"
+	skeleton.add_child(_pelvis_modifier)
+	var modifier: _PelvisOffsetModifier = _pelvis_modifier as _PelvisOffsetModifier
+	modifier.setup_bone(_IK_TO_PROFILE.get(&"hips", &"Hips"))
+
+
+## Get IK weight for the current animation state
+func _get_state_ik_weight() -> float:
+	if not _animation_manager:
+		# Fallback: velocity-based weight when no AnimationManager
+		if character_body:
+			var h_vel := Vector2(character_body.velocity.x, character_body.velocity.z).length()
+			return clampf(1.0 - h_vel / 8.0, 0.0, 1.0)
+		return 1.0
+
+	var current_state: StringName = &""
+	if _animation_manager.has_method("get_current_state"):
+		current_state = _animation_manager.get_current_state()
+	return IK_WEIGHT_BY_STATE.get(current_state, 0.5)
+
+
+## Detect foot plant state using skeleton-local bone velocity.
+## Skeleton-local velocity isolates foot movement from character locomotion:
+## a planted foot has ~0 velocity relative to the skeleton even during walking.
+func _update_foot_contact(left_foot_idx: int, right_foot_idx: int, delta: float) -> void:
+	if delta <= 0.0:
+		return
+
+	var skel_inv := skeleton.global_transform.affine_inverse()
+
+	# Left foot
+	var left_foot_world := skeleton.global_transform * skeleton.get_bone_global_pose(left_foot_idx).origin
+	var left_foot_local: Vector3 = skel_inv * left_foot_world
+	if _prev_left_foot_local != Vector3.ZERO:
+		var left_vel := (left_foot_local - _prev_left_foot_local).length() / delta
+		_left_foot_planted = left_vel < PLANT_VELOCITY_THRESHOLD
+	_prev_left_foot_local = left_foot_local
+
+	# Right foot
+	var right_foot_world := skeleton.global_transform * skeleton.get_bone_global_pose(right_foot_idx).origin
+	var right_foot_local: Vector3 = skel_inv * right_foot_world
+	if _prev_right_foot_local != Vector3.ZERO:
+		var right_vel := (right_foot_local - _prev_right_foot_local).length() / delta
+		_right_foot_planted = right_vel < PLANT_VELOCITY_THRESHOLD
+	_prev_right_foot_local = right_foot_local
+
+
+## Update foot IK each physics frame — per-foot influence blending
 func _update_foot_ik(delta: float) -> void:
 	if not _left_foot_ik or not _right_foot_ik or not character_body:
 		return
 
-	# Disable foot IK solvers during jump/fall/swim — stale targets fight animations
-	if not character_body.is_on_floor():
-		if _left_foot_ik.active:
-			_left_foot_ik.active = false
-			_right_foot_ik.active = false
-		return
-
-	# Re-enable foot IK when back on ground
-	if not _left_foot_ik.active:
-		_left_foot_ik.active = true
-		_right_foot_ik.active = true
-		_foot_ik_first_update = true  # Re-run diagnostics on landing
-
 	var left_foot_idx: int = _bone_indices.get(&"left_foot", -1)
 	var right_foot_idx: int = _bone_indices.get(&"right_foot", -1)
-
 	if left_foot_idx < 0 or right_foot_idx < 0:
 		return
 
-	# Get current foot positions
+	# Ensure IK modifiers are active (influence controls blend, not active flag)
+	if not _left_foot_ik.active:
+		_left_foot_ik.active = true
+		_right_foot_ik.active = true
+
+	var grounded := character_body.is_on_floor()
+
+	# Instant IK kill when airborne — lerping causes visible leg rebound on jump
+	# because foot IK pulls legs toward ground while animation lifts them
+	if not grounded:
+		_current_left_influence = 0.0
+		_current_right_influence = 0.0
+		_left_foot_ik.influence = 0.0
+		_right_foot_ik.influence = 0.0
+		_current_pelvis_offset = 0.0
+		if _pelvis_modifier:
+			(_pelvis_modifier as _PelvisOffsetModifier).pelvis_offset = 0.0
+		return
+
+	# Phase 1: Detect which foot is planted via skeleton-local bone velocity
+	_update_foot_contact(left_foot_idx, right_foot_idx, delta)
+
+	# Phase 2: Calculate per-foot influence = contact_weight * state_weight
+	var state_weight := _get_state_ik_weight()
+
+	var left_contact := 1.0 if _left_foot_planted else 0.0
+	var right_contact := 1.0 if _right_foot_planted else 0.0
+
+	var left_target_influence := left_contact * state_weight
+	var right_target_influence := right_contact * state_weight
+
+	# Smooth influence transitions to prevent popping
+	_current_left_influence = lerpf(_current_left_influence, left_target_influence,
+		influence_blend_speed * delta)
+	_current_right_influence = lerpf(_current_right_influence, right_target_influence,
+		influence_blend_speed * delta)
+
+	_left_foot_ik.influence = _current_left_influence
+	_right_foot_ik.influence = _current_right_influence
+
+	# Skip raycasts when influence is negligible
+	if _current_left_influence < 0.01 and _current_right_influence < 0.01:
+		# Fade out pelvis offset too
+		_current_pelvis_offset = lerpf(_current_pelvis_offset, 0.0, foot_ik_smoothing * delta)
+		if _pelvis_modifier:
+			(_pelvis_modifier as _PelvisOffsetModifier).pelvis_offset = _current_pelvis_offset
+		return
+
+	# Get current foot positions (one frame stale — acceptable for Morrowind terrain)
 	var left_foot_global := skeleton.global_transform * skeleton.get_bone_global_pose(left_foot_idx).origin
 	var right_foot_global := skeleton.global_transform * skeleton.get_bone_global_pose(right_foot_idx).origin
 
 	# One-shot diagnostic on first frame
 	if _foot_ik_first_update:
 		_foot_ik_first_update = false
-		var space := character_body.get_world_3d().direct_space_state
-		var l_hit := _raycast_ground(space, left_foot_global)
-		var r_hit := _raycast_ground(space, right_foot_global)
-		Log.info("animation", "IK foot first update: L_foot=%.2f,%.2f,%.2f  R_foot=%.2f,%.2f,%.2f" % [
-			left_foot_global.x, left_foot_global.y, left_foot_global.z,
-			right_foot_global.x, right_foot_global.y, right_foot_global.z])
-		Log.info("animation", "  L_target=%.2f,%.2f,%.2f  R_target=%.2f,%.2f,%.2f" % [
-			_left_foot_target.global_position.x, _left_foot_target.global_position.y, _left_foot_target.global_position.z,
-			_right_foot_target.global_position.x, _right_foot_target.global_position.y, _right_foot_target.global_position.z])
-		Log.info("animation", "  L_raycast=%s  R_raycast=%s  target_parent=%s" % [
-			not l_hit.is_empty(), not r_hit.is_empty(),
-			_target_parent.name if _target_parent else "null"])
+		Log.info("animation", "IK foot setup: state_weight=%.2f, L_planted=%s, R_planted=%s" % [
+			state_weight, _left_foot_planted, _right_foot_planted])
 
 	# Raycast for ground detection
 	var space_state := character_body.get_world_3d().direct_space_state
-
 	var left_hit := _raycast_ground(space_state, left_foot_global)
 	var right_hit := _raycast_ground(space_state, right_foot_global)
 
-	# Calculate target positions
+	# Calculate target positions — only adjust Y, preserve animation X/Z
 	var left_target := left_foot_global
 	var right_target := right_foot_global
 	var left_offset: float = 0.0
 	var right_offset: float = 0.0
 
-	if left_hit:
-		left_target = left_hit.position + Vector3.UP * foot_offset
+	if left_hit and _current_left_influence > 0.01:
+		var ground_pos: Vector3 = left_hit.position + Vector3.UP * foot_offset
+		left_target = Vector3(left_foot_global.x, ground_pos.y, left_foot_global.z)
 		left_target = _clamp_ik_position(left_foot_global, left_target, max_foot_adjustment)
 		left_offset = left_target.y - left_foot_global.y
+		# Phase 3: Align foot to ground normal
+		_align_foot_to_normal(_left_foot_target, left_hit.normal)
 
-	if right_hit:
-		right_target = right_hit.position + Vector3.UP * foot_offset
+	if right_hit and _current_right_influence > 0.01:
+		var ground_pos: Vector3 = right_hit.position + Vector3.UP * foot_offset
+		right_target = Vector3(right_foot_global.x, ground_pos.y, right_foot_global.z)
 		right_target = _clamp_ik_position(right_foot_global, right_target, max_foot_adjustment)
 		right_offset = right_target.y - right_foot_global.y
+		# Phase 3: Align foot to ground normal
+		_align_foot_to_normal(_right_foot_target, right_hit.normal)
 
-	# Smooth interpolation
+	# Smooth target position interpolation
 	_left_foot_target.global_position = _left_foot_target.global_position.lerp(
-		left_target, foot_ik_smoothing * delta
-	)
+		left_target, foot_ik_smoothing * delta)
 	_right_foot_target.global_position = _right_foot_target.global_position.lerp(
-		right_target, foot_ik_smoothing * delta
-	)
+		right_target, foot_ik_smoothing * delta)
 
 	# Update pole positions (knees bend forward — place poles ahead of character)
 	# Use skeleton's forward, NOT character_body's — the CharacterBody3D doesn't
@@ -307,12 +436,35 @@ func _update_foot_ik(delta: float) -> void:
 	_left_foot_pole.global_position = left_foot_global + char_forward * 0.5 + knee_height_offset
 	_right_foot_pole.global_position = right_foot_global + char_forward * 0.5 + knee_height_offset
 
-	# Adjust pelvis height
-	var target_pelvis_offset: float = minf(left_offset, right_offset)
-	_current_pelvis_offset = lerpf(_current_pelvis_offset, target_pelvis_offset, foot_ik_smoothing * delta)
-	_apply_pelvis_offset(_current_pelvis_offset)
+	# Pelvis compensation — drop pelvis on slopes via PelvisOffsetModifier3D
+	# (runs in SkeletonModifier3D pipeline AFTER AnimationTree, BEFORE foot IK)
+	var target_pelvis := minf(left_offset, right_offset) * maxf(
+		_current_left_influence, _current_right_influence)
+	_current_pelvis_offset = lerpf(_current_pelvis_offset, target_pelvis,
+		foot_ik_smoothing * delta)
+	if _pelvis_modifier:
+		(_pelvis_modifier as _PelvisOffsetModifier).pelvis_offset = _current_pelvis_offset
 
-	# TwoBoneIK3D solves automatically as SkeletonModifier3D — no start() needed
+
+## Align foot target rotation to ground surface normal.
+## Rotates the foot so its sole (Y-up) aligns with the ground plane.
+func _align_foot_to_normal(foot_target: Node3D, ground_normal: Vector3) -> void:
+	# Skip alignment on near-flat surfaces
+	var tilt_angle := ground_normal.angle_to(Vector3.UP)
+	if tilt_angle < 0.05:  # ~3 degrees — flat enough, skip
+		return
+	# Clamp maximum tilt to prevent unnatural foot angles
+	if tilt_angle > MAX_FOOT_TILT:
+		ground_normal = Vector3.UP.slerp(ground_normal.normalized(), MAX_FOOT_TILT / tilt_angle)
+
+	# Project foot's current forward onto the ground plane
+	var foot_forward := (-skeleton.global_transform.basis.z).slide(ground_normal)
+	if foot_forward.length_squared() < 0.001:
+		return
+	foot_forward = foot_forward.normalized()
+	var foot_right := ground_normal.cross(foot_forward).normalized()
+
+	foot_target.global_transform.basis = Basis(foot_right, ground_normal, foot_forward)
 
 
 ## Raycast to find ground
@@ -334,18 +486,6 @@ func _clamp_ik_position(original: Vector3, target: Vector3, max_dist: float) -> 
 	if offset.length() > max_dist:
 		offset = offset.normalized() * max_dist
 	return original + offset
-
-
-## Apply pelvis height offset
-func _apply_pelvis_offset(offset: float) -> void:
-	var hips_idx: int = _bone_indices.get(&"hips", -1)
-	if hips_idx < 0:
-		return
-
-	# Adjust hips bone position
-	var pose := skeleton.get_bone_pose(hips_idx)
-	pose.origin.y += offset
-	skeleton.set_bone_pose_position(hips_idx, pose.origin)
 
 
 # =============================================================================
@@ -555,10 +695,16 @@ func clear_hand_target(hand: StringName) -> void:
 ## Enable/disable foot IK
 func set_foot_ik_enabled(enabled: bool) -> void:
 	enable_foot_ik = enabled
-	if _left_foot_ik:
-		_left_foot_ik.active = enabled
-	if _right_foot_ik:
-		_right_foot_ik.active = enabled
+	if not enabled:
+		if _left_foot_ik:
+			_left_foot_ik.influence = 0.0
+		if _right_foot_ik:
+			_right_foot_ik.influence = 0.0
+		_current_left_influence = 0.0
+		_current_right_influence = 0.0
+		_current_pelvis_offset = 0.0
+		if _pelvis_modifier:
+			(_pelvis_modifier as _PelvisOffsetModifier).pelvis_offset = 0.0
 
 	ik_enabled_changed.emit(&"foot", enabled)
 

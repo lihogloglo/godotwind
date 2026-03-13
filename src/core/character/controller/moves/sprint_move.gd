@@ -17,7 +17,8 @@ func _init() -> void:
 func default_lifecycle(input: InputPackage) -> StringName:
 	if input.is_in_water and container and container.has_move(&"swim_idle"):
 		return &"swim_idle"
-	if not player.is_on_floor() and container and container.has_move(&"midair"):
+	# Landing lockout: don't transition to midair for 0.1s after entering (prevents Jolt bounce)
+	if works_longer_than(0.1) and not player.is_on_floor() and container and container.has_move(&"midair"):
 		return &"midair"
 	return best_input_that_can_be_paid(input)
 

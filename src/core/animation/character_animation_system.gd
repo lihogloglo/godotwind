@@ -379,10 +379,10 @@ func _setup_controllers() -> void:
 		anim.hit_triggered.connect(_on_hit_triggered)
 		anim.footstep_triggered.connect(_on_footstep_triggered)
 
-	# Setup IK Controller
+	# Setup IK Controller (pass animation_manager for state-based IK weight)
 	var ik: _IKController = ik_controller as _IKController
 	if ik:
-		ik.setup(skeleton, character_body)
+		ik.setup(skeleton, character_body, animation_manager)
 		ik.target_reached.connect(_on_ik_target_reached)
 
 	# Setup Procedural Modifiers

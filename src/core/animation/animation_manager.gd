@@ -256,10 +256,13 @@ func _resolve_fallback_state(state: StringName) -> StringName:
 		&"Walk": [&"Idle"],
 		&"Run": [&"Walk", &"Sprint"],
 		&"Sprint": [&"Run", &"Walk"],
+		&"WalkBack": [&"Walk", &"Idle"],
+		&"RunBack": [&"Run", &"WalkBack", &"Walk"],
 		&"Jump": [&"Fall"],
 		&"Fall": [&"Jump"],
 		&"Crouch": [&"Idle"],
 		&"CrouchWalk": [&"Walk", &"Idle"],
+		&"CrouchBack": [&"CrouchWalk", &"Crouch", &"Idle"],
 	}
 	for fb: StringName in FALLBACKS.get(state, []):
 		if fb in _state_animation_map:
@@ -487,9 +490,12 @@ func _create_tree_structure() -> AnimationNodeBlendTree:
 func _create_locomotion_state_machine() -> AnimationNodeStateMachine:
 	var sm := AnimationNodeStateMachine.new()
 
-	# Add states (includes swimming/crouch for MW compatibility)
-	var states := [&"Idle", &"Walk", &"Run", &"Sprint", &"Jump", &"Fall", &"Land",
-		&"SwimIdle", &"SwimForward", &"Crouch", &"CrouchWalk"]
+	# Add states (includes swimming/crouch/backward for MW compatibility)
+	var states := [&"Idle", &"Walk", &"Run", &"Sprint",
+		&"WalkBack", &"RunBack",
+		&"Jump", &"Fall", &"Land",
+		&"SwimIdle", &"SwimForward",
+		&"Crouch", &"CrouchWalk", &"CrouchBack"]
 
 	for state_name: StringName in states:
 		var anim_name := _find_animation_for_state_name(state_name)
@@ -533,10 +539,11 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 		[&"Run", &"Sprint"],
 		[&"Sprint", &"Run"],
 
-		# Jumping
+		# Jumping — direct paths only. Fall shortcuts are in airborne_shortcuts below.
 		[&"Idle", &"Jump"],
 		[&"Walk", &"Jump"],
 		[&"Run", &"Jump"],
+		[&"Sprint", &"Jump"],
 		[&"Jump", &"Fall"],
 		[&"Fall", &"Land"],
 		[&"Fall", &"Idle"],
@@ -555,6 +562,18 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 		[&"Crouch", &"CrouchWalk"],
 		[&"CrouchWalk", &"Crouch"],
 		[&"CrouchWalk", &"Idle"],
+		[&"Crouch", &"CrouchBack"],
+		[&"CrouchBack", &"Crouch"],
+
+		# Backward movement
+		[&"Idle", &"WalkBack"],
+		[&"WalkBack", &"Idle"],
+		[&"WalkBack", &"RunBack"],
+		[&"RunBack", &"WalkBack"],
+		[&"WalkBack", &"Walk"],
+		[&"Walk", &"WalkBack"],
+		[&"RunBack", &"Run"],
+		[&"Run", &"RunBack"],
 	]
 
 	for trans: Array in transitions:
@@ -566,11 +585,43 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 			transition.xfade_time = default_blend_time
 			sm.add_transition(from, to, transition)
 
+	# Direct ground→Fall and Fall→ground transitions with fast crossfade.
+	# Without these, travel("Fall") from Run routes through Walk→Idle→Jump→Fall
+	# (4 cascading crossfades!), causing visible leg "rebound" as poses flash by.
+	var airborne_shortcuts: Array[Array] = [
+		# Ground → Fall (going airborne from any state)
+		[&"Idle", &"Fall"],
+		[&"Walk", &"Fall"],
+		[&"Run", &"Fall"],
+		[&"Sprint", &"Fall"],
+		[&"WalkBack", &"Fall"],
+		[&"RunBack", &"Fall"],
+		[&"Crouch", &"Fall"],
+		[&"CrouchWalk", &"Fall"],
+		[&"CrouchBack", &"Fall"],
+		# Fall → Ground (landing into movement)
+		[&"Fall", &"Walk"],
+		[&"Fall", &"Run"],
+		[&"Fall", &"Sprint"],
+		[&"Fall", &"Crouch"],
+	]
+	for trans: Array in airborne_shortcuts:
+		var from: StringName = trans[0]
+		var to: StringName = trans[1]
+		if sm.has_node(from) and sm.has_node(to):
+			var transition := AnimationNodeStateMachineTransition.new()
+			transition.xfade_time = fast_blend_time  # 0.1s — fast cut, no cascading
+			sm.add_transition(from, to, transition)
+
 
 ## Check if enough directional animations exist for BlendSpace2D
 func _has_directional_animations() -> bool:
 	if not animation_player:
 		return false
+	# BlendSpace2D locomotion requires the state machine to map Walk/Run/Sprint → Locomotion,
+	# plus swim/crouch/combat states inside the blendspace SM. This isn't wired yet for MW
+	# (Phase 5+). For now, only enable blendspace when underscore-separated names are present
+	# (generic humanoid anims like "walk_forward", NOT MW CamelCase like "WalkForward").
 	var required := ["walk_forward", "walk_left", "walk_right", "walk_backward"]
 	var found := 0
 	for req: String in required:
@@ -773,6 +824,12 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 			search_terms = ["idlesneak", "IdleSneak", "sneakidle", "sneak_idle", "crouch", "Crouch"]
 		&"CrouchWalk":
 			search_terms = ["sneakforward", "SneakForward", "sneak_forward", "crouchwalk", "CrouchWalk"]
+		&"CrouchBack":
+			search_terms = ["sneakback", "SneakBack", "sneak_back", "crouchback", "CrouchBack"]
+		&"WalkBack":
+			search_terms = ["walkback", "WalkBack", "walk_back", "walkbackward"]
+		&"RunBack":
+			search_terms = ["runback", "RunBack", "run_back", "runbackward"]
 		&"CombatIdle":
 			search_terms = ["idlecombat", "IdleCombat", "combat_idle", "combatidle", "CombatIdle"]
 		_:
@@ -821,9 +878,10 @@ func _build_animation_map() -> void:
 
 	var states := [
 		&"Idle", &"Walk", &"Run", &"Sprint",
+		&"WalkBack", &"RunBack",
 		&"Jump", &"Fall", &"Land",
 		&"SwimIdle", &"SwimForward",
-		&"Crouch", &"CrouchWalk",
+		&"Crouch", &"CrouchWalk", &"CrouchBack",
 		&"CombatIdle", &"Attack", &"Block", &"Hit", &"Death", &"SpellCast"
 	]
 

@@ -172,9 +172,10 @@ func _create_animations_from_kf(
 
 	# Parse text keys to find animation boundaries
 	# Format: "AnimName: Start", "AnimName: Loop Start", "AnimName: Stop", etc.
-	var anim_ranges: Array[Dictionary] = []  # [{name, start_time, end_time}]
+	var anim_ranges: Array[Dictionary] = []  # [{name, start_time, end_time, looping}]
 	var current_anim := ""
 	var current_start := 0.0
+	var current_is_loop := false
 
 	for i in range(text_keys.size()):
 		var key: Dictionary = text_keys[i]
@@ -186,27 +187,35 @@ func _create_animations_from_kf(
 			var anim_name := parts[0].strip_edges()
 			var action := parts[1].strip_edges().to_lower()
 
-			if action.contains("start"):
+			if action == "loop start":
 				current_anim = anim_name
 				current_start = key_time
+				current_is_loop = true
+			elif action.contains("start"):
+				current_anim = anim_name
+				current_start = key_time
+				current_is_loop = false
 			elif action.contains("stop") and current_anim == anim_name:
 				anim_ranges.append({
 					"name": anim_name,
 					"start_time": current_start,
-					"end_time": key_time
+					"end_time": key_time,
+					"looping": current_is_loop,
 				})
 				current_anim = ""
+				current_is_loop = false
 
 	if debug_mode:
 		Log.debug("nif", "Animation ranges found: %d" % anim_ranges.size())
 		for r in anim_ranges:
-			Log.debug("nif", "  '%s': %.3f - %.3f" % [r["name"], r["start_time"], r["end_time"]])
+			Log.debug("nif", "  '%s': %.3f - %.3f%s" % [r["name"], r["start_time"], r["end_time"], " (loop)" if r["looping"] else ""])
 
 	# Create an animation for each range
 	for anim_range in anim_ranges:
 		var name: String = anim_range["name"]
 		var start: float = anim_range["start_time"]
 		var end: float = anim_range["end_time"]
+		var looping: bool = anim_range["looping"]
 		var anim := _create_single_animation(
 			reader,
 			name,
@@ -217,6 +226,8 @@ func _create_animations_from_kf(
 			skeleton
 		)
 		if anim and anim.get_track_count() > 0:
+			if looping:
+				anim.loop_mode = Animation.LOOP_LINEAR
 			animations[name] = anim
 
 	# If no animations were created from ranges, create one "default" animation
@@ -281,8 +292,11 @@ func _create_single_animation(
 					var quat := _convert_rotation(key)
 					animation.rotation_track_insert_key(track_idx, time, quat)
 
-		# Add position track
-		if not data.translation_keys.is_empty():
+		# Add position track — skip root/locomotion bones whose position tracks
+		# cause mesh drift (they translate the skeleton away from CharacterBody3D).
+		# Real root motion extraction is a future feature (Phase 4).
+		var _is_root_bone := bone_name in ["Bip01", "Bip01 NonAccum"]
+		if not _is_root_bone and not data.translation_keys.is_empty():
 			var trimmed := _trim_keys(data.translation_keys, start_time, end_time)
 			if not trimmed.is_empty():
 				var track_idx := animation.add_track(Animation.TYPE_POSITION_3D)

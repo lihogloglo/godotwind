@@ -44,6 +44,11 @@ var debug_lod: bool = false
 var enable_fade_in: bool = true  # Smooth fade-in for newly instantiated objects
 var fade_in_duration: float = 0.3  # Duration of fade-in animation in seconds (matches StreamingConfig.FADE_DURATION)
 
+# NEAR-tier actor filtering — skip NPC/creature creation beyond this distance from camera
+# 150m matches the NEAR tier boundary in distance_utils.gd
+var max_actor_distance: float = 150.0
+var camera_position: Vector3 = Vector3.ZERO  # Updated by streaming manager each frame
+
 # Scene tree reference for tweens (must be set by parent, e.g., CellManager)
 var scene_tree: SceneTree = null
 
@@ -314,6 +319,12 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 ## Instantiate an NPC or Creature
 ## Uses CharacterFactory to create fully animated and functional characters
 func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
+	# Skip actors beyond NEAR tier — full CharacterBody3D is too expensive at distance
+	if max_actor_distance > 0.0:
+		var ref_pos := CS.vector_to_godot(ref.position)
+		if ref_pos.distance_squared_to(camera_position) > max_actor_distance * max_actor_distance:
+			return null
+
 	# Use CharacterFactory if available (new system)
 	if character_factory:
 		var character: CharacterBody3D = null
