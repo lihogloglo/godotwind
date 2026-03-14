@@ -1,5 +1,0 @@
-# Force LF line endings for shell scripts (they break with CRLF on Mac/Linux)
-*.sh text eol=lf
-
-# Force LF for Unix-specific Python wrapper
-wrapper_unix.py text eol=lf

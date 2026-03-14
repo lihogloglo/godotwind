@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3]
-
-[ext_resource type="Script" path="res://tests/data/prebake_test_npc.gd" id="1"]
-
-[node name="PrebakeTestNPC" type="Node3D"]
-script = ExtResource("1")
