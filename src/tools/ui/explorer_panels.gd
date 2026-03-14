@@ -43,6 +43,17 @@ var wave_scale_slider: HSlider = null
 var debug_shore_toggle: CheckBox = null
 var ocean_controls_container: VBoxContainer = null
 
+## Rendering Quality panel
+var quality_panel: FoldablePanel = null
+var taa_toggle: CheckBox = null
+var ssao_toggle: CheckBox = null
+var ssil_toggle: CheckBox = null
+var glow_toggle: CheckBox = null
+var native_vfog_toggle: CheckBox = null
+var depth_fog_toggle: CheckBox = null
+var shadow_cascade_toggle: CheckBox = null
+var tonemapper_btn: OptionButton = null
+
 ## Shader panel widgets
 var fog_toggle: CheckBox = null
 var clouds_toggle: CheckBox = null
@@ -108,13 +119,27 @@ func build(vbox: VBoxContainer) -> void:
 	_create_navigation_panel()
 	_create_terrain_panel()
 	_create_ocean_panel()
+	_create_quality_panel()
 	_create_shader_panel()
 	_create_debug_panel()
+
+	# Disable keyboard focus on all controls — prevents spacebar/keys from
+	# toggling checkboxes and buttons while playing the game
+	_strip_focus(panel_scroll)
 
 	# Insert scroll container after title
 	var separator_idx := 2  # After title and first separator
 	vbox.add_child(panel_scroll)
 	vbox.move_child(panel_scroll, separator_idx)
+
+
+## Recursively disable keyboard focus on all child controls.
+## Prevents spacebar/enter from toggling UI while playing.
+func _strip_focus(node: Node) -> void:
+	if node is Control:
+		(node as Control).focus_mode = Control.FOCUS_NONE
+	for child in node.get_children():
+		_strip_focus(child)
 
 
 ## Helper to create a labeled slider row
@@ -408,6 +433,131 @@ func _create_ocean_panel() -> void:
 	panel_vbox.add_child(ocean_panel)
 
 
+func _create_quality_panel() -> void:
+	quality_panel = FoldablePanelScript.new("Rendering Quality", true)  # Start folded
+
+	# Info label
+	var info_label := Label.new()
+	info_label.add_theme_font_size_override("font_size", 10)
+	info_label.text = "Native Godot rendering features"
+	info_label.modulate = Color(0.7, 0.7, 0.7)
+	quality_panel.add_content(info_label)
+
+	# TAA toggle
+	taa_toggle = CheckBox.new()
+	taa_toggle.text = "TAA (Anti-Aliasing)"
+	taa_toggle.button_pressed = false
+	taa_toggle.toggled.connect(_cb.get("taa_toggled", Callable()))
+	taa_toggle.tooltip_text = "Temporal Anti-Aliasing — eliminates edge shimmer. May ghost on ocean surface."
+	quality_panel.add_content(taa_toggle)
+
+	# SSAO toggle
+	ssao_toggle = CheckBox.new()
+	ssao_toggle.text = "SSAO"
+	ssao_toggle.button_pressed = false
+	ssao_toggle.toggled.connect(_cb.get("ssao_toggled", Callable()))
+	ssao_toggle.tooltip_text = "Screen-Space Ambient Occlusion — contact shadows in crevices and corners"
+	quality_panel.add_content(ssao_toggle)
+
+	# SSIL toggle
+	ssil_toggle = CheckBox.new()
+	ssil_toggle.text = "SSIL"
+	ssil_toggle.button_pressed = false
+	ssil_toggle.toggled.connect(_cb.get("ssil_toggled", Callable()))
+	ssil_toggle.tooltip_text = "Screen-Space Indirect Lighting — color bleeding between nearby surfaces"
+	quality_panel.add_content(ssil_toggle)
+
+	# Glow toggle
+	glow_toggle = CheckBox.new()
+	glow_toggle.text = "Glow / Bloom"
+	glow_toggle.button_pressed = false
+	glow_toggle.toggled.connect(_cb.get("glow_toggled", Callable()))
+	glow_toggle.tooltip_text = "HDR bloom on bright surfaces (sun, torches, lava)"
+	quality_panel.add_content(glow_toggle)
+
+	# Separator
+	var sep1 := HSeparator.new()
+	quality_panel.add_content(sep1)
+
+	# Volumetric Fog (native, god rays)
+	native_vfog_toggle = CheckBox.new()
+	native_vfog_toggle.text = "Volumetric Fog (god rays)"
+	native_vfog_toggle.button_pressed = false
+	native_vfog_toggle.toggled.connect(_cb.get("native_vfog_toggled", Callable()))
+	native_vfog_toggle.tooltip_text = "Godot native volumetric fog — produces god rays via forward scattering"
+	quality_panel.add_content(native_vfog_toggle)
+
+	# Depth Fog (aerial perspective)
+	depth_fog_toggle = CheckBox.new()
+	depth_fog_toggle.text = "Depth Fog (aerial perspective)"
+	depth_fog_toggle.button_pressed = false
+	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
+	depth_fog_toggle.tooltip_text = "Distance haze — makes far objects fade to sky color for depth"
+	quality_panel.add_content(depth_fog_toggle)
+
+	# Separator
+	var sep2 := HSeparator.new()
+	quality_panel.add_content(sep2)
+
+	# Shadow cascades
+	shadow_cascade_toggle = CheckBox.new()
+	shadow_cascade_toggle.text = "Shadow 4-Split Cascades"
+	shadow_cascade_toggle.button_pressed = false
+	shadow_cascade_toggle.toggled.connect(_cb.get("shadow_cascades_toggled", Callable()))
+	shadow_cascade_toggle.tooltip_text = "4 shadow cascades with blending — sharper nearby, softer distant shadows"
+	quality_panel.add_content(shadow_cascade_toggle)
+
+	# Tonemapper dropdown
+	var tone_row := HBoxContainer.new()
+	var tone_label := Label.new()
+	tone_label.text = "Tonemapper:"
+	tone_label.add_theme_font_size_override("font_size", 11)
+	tone_label.custom_minimum_size.x = 75
+	tone_row.add_child(tone_label)
+
+	tonemapper_btn = OptionButton.new()
+	tonemapper_btn.add_item("Filmic", 0)
+	tonemapper_btn.add_item("ACES", 1)
+	tonemapper_btn.add_item("AgX", 2)
+	tonemapper_btn.add_item("Linear", 3)
+	tonemapper_btn.selected = 0
+	tonemapper_btn.item_selected.connect(_cb.get("tonemapper_changed", Callable()))
+	tonemapper_btn.tooltip_text = "Tonemapping algorithm:\n- Filmic: balanced (current)\n- ACES: cinematic\n- AgX: best hue preservation (Godot 4.6)\n- Linear: no tonemapping"
+	tonemapper_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tone_row.add_child(tonemapper_btn)
+	quality_panel.add_content(tone_row)
+
+	# Separator
+	var sep3 := HSeparator.new()
+	quality_panel.add_content(sep3)
+
+	# Preset buttons
+	var preset_row := HBoxContainer.new()
+	preset_row.add_theme_constant_override("separation", 4)
+
+	var pretty_btn := Button.new()
+	pretty_btn.text = "Pretty"
+	pretty_btn.pressed.connect(_cb.get("quality_pretty_preset", Callable()))
+	pretty_btn.tooltip_text = "Enable TAA + SSAO + Glow + Depth Fog + AgX + 4-split shadows"
+	preset_row.add_child(pretty_btn)
+
+	var balanced_btn := Button.new()
+	balanced_btn.text = "Balanced"
+	balanced_btn.pressed.connect(_cb.get("quality_balanced_preset", Callable()))
+	balanced_btn.tooltip_text = "Enable TAA + SSAO + Glow only"
+	preset_row.add_child(balanced_btn)
+
+	var fast_btn := Button.new()
+	fast_btn.text = "Fast"
+	fast_btn.pressed.connect(_cb.get("quality_fast_preset", Callable()))
+	fast_btn.tooltip_text = "Disable all rendering quality features"
+	preset_row.add_child(fast_btn)
+
+	quality_panel.add_content(preset_row)
+
+	panel_vbox.add_child(quality_panel)
+
+
 func _create_shader_panel() -> void:
 	shader_panel = FoldablePanelScript.new("Shader Effects", true)  # Start folded
 
@@ -420,10 +570,10 @@ func _create_shader_panel() -> void:
 
 	# Volumetric Fog toggle
 	fog_toggle = CheckBox.new()
-	fog_toggle.text = "Volumetric Fog"
+	fog_toggle.text = "VAIO Fog (shader)"
 	fog_toggle.button_pressed = false
 	fog_toggle.toggled.connect(_cb.get("fog_toggled", Callable()))
-	fog_toggle.tooltip_text = "Ray-marched volumetric fog with 3D noise"
+	fog_toggle.tooltip_text = "Ray-marched VAIO-style volumetric fog (compositor shader)"
 	shader_panel.add_content(fog_toggle)
 
 	# Fog intensity slider

@@ -14,7 +14,7 @@ extends Camera3D
 
 
 ## Movement speed in meters per second
-@export var move_speed: float = 200.0
+@export var move_speed: float = 20.0
 
 ## Mouse sensitivity
 @export var mouse_sensitivity: float = 0.003
@@ -26,7 +26,7 @@ extends Camera3D
 @export var speed_scale: float = 1.17
 
 ## Minimum speed
-@export var min_speed: float = 10.0
+@export var min_speed: float = 1.0
 
 ## Maximum speed
 @export var max_speed: float = 1000.0
@@ -65,9 +65,10 @@ func _input(event: InputEvent) -> void:
 
 		# Scroll wheel speed adjustment
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_UP:
-			move_speed = clampf(move_speed * speed_scale, min_speed, max_speed)
+			_adjust_speed(true)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			move_speed = clampf(move_speed / speed_scale, min_speed, max_speed)
+			_adjust_speed(false)
+
 
 	# Mouse look
 	if event is InputEventMouseMotion and _mouse_captured:
@@ -135,3 +136,11 @@ func disable() -> void:
 ## Enable the camera
 func enable() -> void:
 	enabled = true
+
+
+## Adjust speed up or down by the speed_scale factor
+func _adjust_speed(faster: bool) -> void:
+	if faster:
+		move_speed = clampf(move_speed * speed_scale, min_speed, max_speed)
+	else:
+		move_speed = clampf(move_speed / speed_scale, min_speed, max_speed)

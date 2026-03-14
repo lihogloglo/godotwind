@@ -29,17 +29,17 @@ enum IKType {
 # 0.0 = pure animation (no IK), 1.0 = full terrain adaptation.
 const IK_WEIGHT_BY_STATE: Dictionary = {
 	&"Idle": 1.0,
-	&"Walk": 0.7,
-	&"Run": 0.5,
+	&"Walk": 0.5,
+	&"Run": 0.15,
 	&"Sprint": 0.0,
 	&"Crouch": 0.8,
-	&"CrouchWalk": 0.7,
-	&"CrouchBack": 0.6,
-	&"WalkBack": 0.6,
-	&"RunBack": 0.2,
+	&"CrouchWalk": 0.5,
+	&"CrouchBack": 0.4,
+	&"WalkBack": 0.4,
+	&"RunBack": 0.0,
 	&"Jump": 0.0,
 	&"Fall": 0.0,
-	&"Land": 0.5,
+	&"Land": 0.3,
 	&"SwimIdle": 0.0,
 	&"SwimForward": 0.0,
 	&"CombatIdle": 0.9,
@@ -282,8 +282,10 @@ func _setup_pelvis_modifier() -> void:
 	_pelvis_modifier = _PelvisOffsetModifier.new()
 	_pelvis_modifier.name = "PelvisOffset"
 	skeleton.add_child(_pelvis_modifier)
+	# Defer setup_bone — SkeletonModifier3D.get_skeleton() requires ENTER_TREE
 	var modifier: _PelvisOffsetModifier = _pelvis_modifier as _PelvisOffsetModifier
-	modifier.setup_bone(_IK_TO_PROFILE.get(&"hips", &"Hips"))
+	var bone_name: StringName = _IK_TO_PROFILE.get(&"hips", &"Hips")
+	modifier.call_deferred("setup_bone", bone_name)
 
 
 ## Get IK weight for the current animation state

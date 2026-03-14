@@ -84,6 +84,9 @@ var _panels: ExplorerPanels = null
 # Models are always visible (no toggle needed)
 var _show_characters: bool = false  # Default OFF - separate from static models
 
+# Escape menu
+var _escape_menu: ColorRect = null
+
 # Debug overlay for 3D visualizations
 var _debug_overlay: Node3D = null
 var _show_chunk_debug: bool = false
@@ -199,6 +202,9 @@ func _ready() -> void:
 	_setup_visibility_toggles()
 	_t_step = _log_timing(_t_step, "visibility toggles + panels")
 
+	# Create escape menu (Esc to toggle)
+	_create_escape_menu()
+
 	print("[TIMING] _ready() total: %d ms" % (Time.get_ticks_msec() - _t0))
 
 	# Get Morrowind data path (try auto-detection if not configured)
@@ -309,7 +315,12 @@ func _init_async() -> void:
 	_log("Pre-loaded %d common models into cache" % preload_count)
 	_ta = _log_timing(_ta, "preload common models")
 
-	# Character asset preloading deferred until characters are first enabled (saves ~23s)
+	# Auto-prebake character animations if not cached (one-time ~28s, then <1s on future launches)
+	await _update_loading(85, "Checking character animations...")
+	_auto_prebake_animations()
+	_ta = _log_timing(_ta, "animation prebake check")
+
+	# Character asset preloading deferred until characters are first enabled
 	# CharacterFactoryV2Script.preload_character_assets() called in _on_show_characters_toggled()
 
 	# Create and setup NativeStreamingManager (but don't start tracking yet)
@@ -802,6 +813,7 @@ func _setup_visibility_toggles() -> void:
 		"add_child": add_child,
 		"remove_child": remove_child,
 		"update_stats": _update_stats,
+		"get_viewport": get_viewport,
 	}
 	_env_controls = EnvironmentControlsScript.new(env_callbacks)
 	_env_controls.setup_fallback_environment()
@@ -825,6 +837,17 @@ func _setup_visibility_toggles() -> void:
 		"water_quality_changed": _ocean_controls.on_water_quality_changed,
 		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
 		"debug_shore_toggled": _ocean_controls.on_debug_shore_toggled,
+		"taa_toggled": _env_controls.on_taa_toggled,
+		"ssao_toggled": _env_controls.on_ssao_toggled,
+		"ssil_toggled": _env_controls.on_ssil_toggled,
+		"glow_toggled": _env_controls.on_glow_toggled,
+		"native_vfog_toggled": _env_controls.on_native_volumetric_fog_toggled,
+		"depth_fog_toggled": _env_controls.on_depth_fog_toggled,
+		"tonemapper_changed": _env_controls.on_tonemapper_changed,
+		"shadow_cascades_toggled": _env_controls.on_shadow_cascades_toggled,
+		"quality_pretty_preset": _on_quality_pretty_preset,
+		"quality_balanced_preset": _on_quality_balanced_preset,
+		"quality_fast_preset": _on_quality_fast_preset,
 		"fog_toggled": _env_controls.on_fog_effect_toggled,
 		"fog_intensity_changed": _env_controls.on_fog_intensity_changed,
 		"clouds_toggled": _env_controls.on_clouds_effect_toggled,
@@ -963,8 +986,10 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 	# Lazy-load character assets on first enable (deferred from startup to save ~23s)
 	if enabled and not _character_assets_preloaded:
 		_character_assets_preloaded = true
+		var _tc0 := Time.get_ticks_msec()
 		_log("Pre-loading character assets (first enable)...")
 		CharacterFactoryV2Script.preload_character_assets()
+		print("[TIMING] character asset preload: %d ms" % (Time.get_ticks_msec() - _tc0))
 		_log("Character assets pre-loaded")
 
 	# Update cell_manager loading flags
@@ -980,6 +1005,7 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 
 		_log("[DIAG] Found %d loaded cells to process for NPC toggle" % loaded_coords.size())
 
+		var _tc_cells := Time.get_ticks_msec()
 		for cell_grid: Vector2i in loaded_coords:
 			var cell_node: Node3D = world_streaming_manager.get_loaded_cell(cell_grid.x, cell_grid.y)
 			if cell_node:
@@ -994,11 +1020,12 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 
 					# If no characters exist, load them now
 					if not has_chars and cell_manager:
+						var _tc_cell := Time.get_ticks_msec()
 						_log("[DIAG] Loading characters into cell %s (no existing chars)" % str(cell_grid))
 						var new_chars: int = cell_manager.load_characters_into_cell(cell_grid.x, cell_grid.y, cell_node)
 						loaded_count += new_chars
 						if new_chars > 0:
-							_log("[DIAG] Loaded %d characters into cell %s" % [new_chars, str(cell_grid)])
+							print("[TIMING] cell %s characters: %d ms (%d chars)" % [str(cell_grid), Time.get_ticks_msec() - _tc_cell, new_chars])
 				else:
 					# Hide existing characters
 					for child: Node in cell_node.get_children():
@@ -1007,6 +1034,7 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 							char_count += 1
 
 		if enabled and loaded_count > 0:
+			print("[TIMING] total cell character loading: %d ms (%d chars across %d cells)" % [Time.get_ticks_msec() - _tc_cells, loaded_count, loaded_coords.size()])
 			_log("[DIAG] Total loaded %d new characters into cells" % loaded_count)
 		_log("[DIAG] Toggled visibility for %d characters" % char_count)
 
@@ -1048,6 +1076,54 @@ func _apply_resolution(index: int) -> void:
 func _on_preprocess_pressed() -> void:
 	var ui_refs := {"preprocess_btn": preprocess_btn, "preprocess_status": preprocess_status}
 	await _terrain_preprocessor.run(terrain_3d, terrain_manager, ui_refs)
+
+
+## Quality preset: Pretty — enables most visual features
+func _on_quality_pretty_preset() -> void:
+	if not _panels:
+		return
+	_panels.taa_toggle.button_pressed = true
+	_panels.ssao_toggle.button_pressed = true
+	_panels.ssil_toggle.button_pressed = false
+	_panels.glow_toggle.button_pressed = true
+	_panels.depth_fog_toggle.button_pressed = true
+	_panels.native_vfog_toggle.button_pressed = true
+	_panels.shadow_cascade_toggle.button_pressed = true
+	_panels.tonemapper_btn.selected = 2  # AgX
+	_env_controls.on_tonemapper_changed(2)
+	_log("Quality preset: Pretty")
+
+
+## Quality preset: Balanced — TAA + SSAO + Glow only
+func _on_quality_balanced_preset() -> void:
+	if not _panels:
+		return
+	_panels.taa_toggle.button_pressed = true
+	_panels.ssao_toggle.button_pressed = true
+	_panels.ssil_toggle.button_pressed = false
+	_panels.glow_toggle.button_pressed = true
+	_panels.depth_fog_toggle.button_pressed = false
+	_panels.native_vfog_toggle.button_pressed = false
+	_panels.shadow_cascade_toggle.button_pressed = false
+	_panels.tonemapper_btn.selected = 0  # Filmic
+	_env_controls.on_tonemapper_changed(0)
+	_log("Quality preset: Balanced")
+
+
+## Quality preset: Fast — disable all quality features
+func _on_quality_fast_preset() -> void:
+	if not _panels:
+		return
+	_panels.taa_toggle.button_pressed = false
+	_panels.ssao_toggle.button_pressed = false
+	_panels.ssil_toggle.button_pressed = false
+	_panels.glow_toggle.button_pressed = false
+	_panels.depth_fog_toggle.button_pressed = false
+	_panels.native_vfog_toggle.button_pressed = false
+	_panels.shadow_cascade_toggle.button_pressed = false
+	_panels.tonemapper_btn.selected = 0  # Filmic
+	_env_controls.on_tonemapper_changed(0)
+	_log("Quality preset: Fast")
 
 
 func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
@@ -1126,6 +1202,14 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		else:
 			push_warning("WorldExplorer: Failed to load mid_tier_debugger.gd")
 
+		# Register animation prebake command
+		console.register_command(
+			"prebake_anims",
+			_cmd_prebake_animations,
+			"Prebake character animations (.kf → .animlib) for faster loading",
+			"tools"
+		)
+
 		# Register streaming benchmark commands
 		if not _StreamingBenchmarkScript:
 			_StreamingBenchmarkScript = load("res://src/tools/streaming_benchmark.gd")
@@ -1179,6 +1263,17 @@ func _cmd_toggle_batch_debug(_args: Dictionary) -> String:
 		_batch_debug_hud.toggle()
 		return "Batch debug HUD: %s" % ("ON" if _batch_debug_hud.is_active() else "OFF")
 	return "Batch debug HUD not initialized"
+
+
+func _cmd_prebake_animations(_args: Dictionary) -> String:
+	var prebaker := ModelPrebaker.new()
+	prebaker.animation_output_dir = SettingsManager.get_models_path()
+	prebaker.skip_existing = false  # Force re-prebake
+	var t0 := Time.get_ticks_msec()
+	var result := prebaker.bake_all_animations()
+	var elapsed := Time.get_ticks_msec() - t0
+	return "Prebaked %d animations in %d ms (%d failed)" % [
+		result.get("success", 0), elapsed, result.get("failed", 0)]
 
 
 ## Callback for native streaming manager cell loaded
@@ -1237,6 +1332,107 @@ func _update_stats() -> void:
 
 # ==================== UI Helpers ====================
 
+## Create the escape menu (hidden by default)
+func _create_escape_menu() -> void:
+	# Dimmed background overlay
+	_escape_menu = ColorRect.new()
+	_escape_menu.name = "EscapeMenu"
+	_escape_menu.color = Color(0, 0, 0, 0.6)
+	_escape_menu.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_escape_menu.visible = false
+	_escape_menu.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	# Centered container
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_escape_menu.add_child(center)
+
+	# Panel
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(300, 200)
+	center.add_child(panel)
+
+	# VBox with buttons
+	var vbox := VBoxContainer.new()
+	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_theme_constant_override("separation", 16)
+	panel.add_child(vbox)
+
+	# Title
+	var title := Label.new()
+	title.text = "GODOTWIND"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 24)
+	vbox.add_child(title)
+
+	# Spacer
+	var spacer := Control.new()
+	spacer.custom_minimum_size.y = 8
+	vbox.add_child(spacer)
+
+	# Resume button
+	var resume_btn := Button.new()
+	resume_btn.text = "Resume"
+	resume_btn.custom_minimum_size.y = 40
+	resume_btn.pressed.connect(_toggle_escape_menu)
+	vbox.add_child(resume_btn)
+
+	# Quit button
+	var quit_btn := Button.new()
+	quit_btn.text = "Quit"
+	quit_btn.custom_minimum_size.y = 40
+	quit_btn.pressed.connect(func() -> void: get_tree().quit())
+	vbox.add_child(quit_btn)
+
+	$UI.add_child(_escape_menu)
+
+
+## Toggle the escape menu
+func _toggle_escape_menu() -> void:
+	if not _escape_menu:
+		return
+	_escape_menu.visible = not _escape_menu.visible
+	# Pause mouse capture so cursor is free in menu
+	if _escape_menu.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		# Restore mouse capture based on camera mode
+		if _camera_mode == CameraMode.FLY_CAMERA:
+			# Fly camera captures on right-click, so leave visible
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		else:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## Auto-prebake character animation libraries if not cached
+## First run takes ~28s (KF parsing), subsequent runs skip instantly
+func _auto_prebake_animations() -> void:
+	var prebaker := ModelPrebaker.new()
+	prebaker.animation_output_dir = SettingsManager.get_models_path()
+
+	# Check if the 3 core animation files are already cached
+	var cache_dir: String = SettingsManager.get_models_path()
+	var kf_files := ["meshes/xbase_anim.kf", "meshes/xbase_anim_female.kf", "meshes/xbase_animkna.kf"]
+	var all_cached := true
+	for kf: String in kf_files:
+		var safe := kf.to_lower().replace("/", "\\").replace("\\", "_").replace(":", "_").replace(".", "_")
+		if not FileAccess.file_exists(cache_dir.path_join(safe + ".tres")):
+			all_cached = false
+			break
+
+	if all_cached:
+		_log("Character animations already prebaked — skipping")
+		return
+
+	_log("[color=yellow]Prebaking character animations (one-time, ~30s)...[/color]")
+	var t0 := Time.get_ticks_msec()
+	var result := prebaker.bake_all_animations()
+	var elapsed := Time.get_ticks_msec() - t0
+	_log("[color=green]Animation prebake complete in %d ms — %d baked, %d skipped, %d failed[/color]" % [
+		elapsed, result.get("success", 0), result.get("skipped", 0), result.get("failed", 0)])
+	print("[TIMING] animation prebake: %d ms" % elapsed)
+
+
 func _show_loading(title: String, status: String) -> void:
 	loading_overlay.visible = true
 	loading_label.text = title
@@ -1282,7 +1478,17 @@ func _log(message: String) -> void:
 # ==================== Input Handling ====================
 
 func _input(event: InputEvent) -> void:
-	# Don't process shortcuts when console is open (let user type in the console)
+	# Escape menu takes priority
+	if event is InputEventKey:
+		var key_event := event as InputEventKey
+		if key_event.pressed and key_event.keycode == KEY_ESCAPE:
+			_toggle_escape_menu()
+			get_viewport().set_input_as_handled()
+			return
+
+	# Don't process shortcuts when escape menu or console is open
+	if _escape_menu and _escape_menu.visible:
+		return
 	if console and console.is_visible():
 		return
 

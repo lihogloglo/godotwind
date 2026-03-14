@@ -34,6 +34,7 @@ func _ready() -> void:
 	_create_terrain()
 	_create_water_pool()
 	_create_points_of_interest()
+	_create_pushable_objects()
 	_create_debug_hud()
 
 	# Ocean disabled — buggy in test scene, to be fixed separately
@@ -457,7 +458,7 @@ func _create_water_pool() -> void:
 	var water_area := Area3D.new()
 	water_area.name = "WaterVolume"
 	water_area.collision_layer = 0
-	water_area.collision_mask = 1  # Detect player on layer 1
+	water_area.collision_mask = 2  # Detect player on layer 2
 	var area_col := CollisionShape3D.new()
 	var area_shape := BoxShape3D.new()
 	var vol_height: float = surface_y - floor_y  # from floor to surface
@@ -613,6 +614,46 @@ func _add_poi(pos: Vector3, poi_name: String, color: Color, shape_type: String) 
 	poi.add_child(body)
 
 	add_child(poi)
+
+
+# =============================================================================
+# PUSHABLE PHYSICS OBJECTS — RigidBody3D objects the player can push around
+# =============================================================================
+
+func _create_pushable_objects() -> void:
+	# Sphere — rolls when player walks into it (on Ground_Left, X < -2)
+	_add_pushable_sphere(Vector3(-5, 0.6, 3), 0.5, 1.0, Color(0.8, 0.2, 0.2))
+	# Smaller sphere
+	_add_pushable_sphere(Vector3(-3, 0.45, 5), 0.35, 0.5, Color(0.2, 0.6, 0.8))
+	# Heavy sphere near ramp
+	_add_pushable_sphere(Vector3(-7, 0.5, 1), 0.4, 5.0, Color(0.5, 0.5, 0.5))
+
+
+func _add_pushable_sphere(pos: Vector3, radius: float, mass_kg: float, color: Color) -> void:
+	var body := RigidBody3D.new()
+	body.name = "PushableSphere"
+	body.mass = mass_kg
+	body.position = pos
+	body.collision_layer = 2  # Dynamic object layer
+	body.collision_mask = 1 | 2  # Collide with environment + player
+
+	var col := CollisionShape3D.new()
+	var shape := SphereShape3D.new()
+	shape.radius = radius
+	col.shape = shape
+	body.add_child(col)
+
+	var mesh := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = radius
+	sphere.height = radius * 2.0
+	mesh.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mesh.material_override = mat
+	body.add_child(mesh)
+
+	add_child(body)
 
 
 # =============================================================================

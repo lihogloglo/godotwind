@@ -622,7 +622,7 @@ func bake_animation(anim_path: String) -> Dictionary:
 	# Save to cache
 	var cache_key := anim_path.to_lower().replace("/", "\\")
 	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
-	var lib_path := animation_output_dir.path_join(safe_name + ".animlib")
+	var lib_path := animation_output_dir.path_join(safe_name + ".tres")
 
 	var save_result := ResourceSaver.save(lib, lib_path)
 	if save_result != OK:
@@ -664,7 +664,7 @@ func _collect_animation_files() -> Array[String]:
 func _animation_cached(anim_path: String) -> bool:
 	var cache_key := anim_path.to_lower().replace("/", "\\")
 	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
-	var lib_path := animation_output_dir.path_join(safe_name + ".animlib")
+	var lib_path := animation_output_dir.path_join(safe_name + ".tres")
 	return FileAccess.file_exists(lib_path)
 
 
@@ -673,7 +673,7 @@ static func load_cached_animations(anim_path: String) -> AnimationLibrary:
 	var cache_dir: String = SettingsManager.get_models_path()
 	var cache_key := anim_path.to_lower().replace("/", "\\")
 	var safe_name := cache_key.replace("\\", "_").replace("/", "_").replace(":", "_").replace(".", "_")
-	var lib_path := cache_dir.path_join(safe_name + ".animlib")
+	var lib_path := cache_dir.path_join(safe_name + ".tres")
 
 	if not FileAccess.file_exists(lib_path):
 		return null

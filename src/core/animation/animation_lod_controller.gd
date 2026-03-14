@@ -19,19 +19,19 @@ const _CharacterAnimationSystemScript := preload("res://src/core/animation/chara
 
 # LOD levels
 enum LODLevel {
-	FULL,    # < 15m - everything enabled
-	HIGH,    # 15-30m - IK on, reduced procedural
-	MEDIUM,  # 30-60m - No IK, simple blend
-	LOW,     # 60-100m - Single anim, slow updates
-	CULLED   # > 100m or off-screen - frozen
+	FULL,    # < 5m - IK + procedural (reserved for player companion etc.)
+	HIGH,    # 5-15m - IK on, reduced procedural
+	MEDIUM,  # 15-60m - No IK, animated
+	LOW,     # 60-150m - Slow animation updates
+	CULLED   # > 150m or off-screen - frozen
 }
 
 # Configuration
 @export_group("Distance Thresholds")
-@export var full_distance: float = 15.0
-@export var high_distance: float = 30.0
+@export var full_distance: float = 0.0  # Disabled — FULL never triggers for NPCs
+@export var high_distance: float = 5.0  # IK only within 5m
 @export var medium_distance: float = 60.0
-@export var low_distance: float = 100.0
+@export var low_distance: float = 150.0
 
 @export_group("Update Rates")
 @export var full_fps: int = 60

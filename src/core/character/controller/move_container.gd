@@ -25,6 +25,8 @@ var legs: Node = null  # Legs (Phase 4)
 # --- Step-up ---
 ## Maximum obstacle height the character can step over without jumping
 var max_step_height: float = 0.45
+## Force applied to RigidBody3D objects the player walks into
+var rigid_body_push_force: float = 8.0
 
 # --- State ---
 var _is_setup: bool = false
@@ -90,6 +92,7 @@ func process(input: InputPackage, delta: float) -> void:
 	# Single move_and_slide() call per frame — with step-up for small obstacles
 	if player:
 		_move_with_step_up()
+		_push_rigid_bodies()
 
 
 # =============================================================================
@@ -168,11 +171,11 @@ func _move_with_step_up() -> void:
 	# Normal move first
 	player.move_and_slide()
 
-	# Check if we hit an obstacle (wall-like normal)
+	# Check if we hit a static obstacle (wall-like normal) — skip RigidBody3D (pushable)
 	var hit_wall := false
 	for i in player.get_slide_collision_count():
 		var col := player.get_slide_collision(i)
-		if col.get_normal().y < 0.5:  # Not a floor — obstacle or step
+		if col.get_normal().y < 0.5 and not (col.get_collider() is RigidBody3D):
 			hit_wall = true
 			break
 
@@ -242,3 +245,23 @@ func _move_with_step_up() -> void:
 	player.global_position = post_normal_pos
 	player.velocity = post_normal_vel
 	_step_target_y = player.global_position.y
+
+
+## Push any RigidBody3D objects the player collided with during move_and_slide().
+func _push_rigid_bodies() -> void:
+	if rigid_body_push_force <= 0.0:
+		return
+	for i: int in player.get_slide_collision_count():
+		var col: KinematicCollision3D = player.get_slide_collision(i)
+		if col == null:
+			continue
+		var collider: Object = col.get_collider()
+		if collider is RigidBody3D:
+			var rb: RigidBody3D = collider as RigidBody3D
+			var push_dir: Vector3 = -col.get_normal()
+			push_dir.y = 0.0
+			if push_dir.length_squared() > 0.001:
+				push_dir = push_dir.normalized()
+				var contact: Vector3 = col.get_position()
+				var offset: Vector3 = contact - rb.global_position
+				rb.apply_impulse(push_dir * rigid_body_push_force * get_physics_process_delta_time(), offset)

@@ -1,7 +1,9 @@
 ## Environment control logic for WorldExplorer.
 ##
 ## Extracted from world_explorer.gd (Session 5). Manages shader effects
-## (fog, clouds, color grading), sky/day-night cycle, and fallback environment.
+## (fog, clouds, color grading), sky/day-night cycle, native rendering quality
+## toggles (SSAO, SSIL, glow, volumetric fog, depth fog, TAA, tonemapping),
+## and fallback environment.
 ## World-affecting side effects (scene tree) are delegated back via callbacks.
 ##
 ## Usage:
@@ -29,6 +31,19 @@ var _panels: ExplorerPanels = null
 
 ## Callback dictionary — keys are action names, values are Callables on world_explorer
 var _cb: Dictionary = {}
+
+## Tracks native environment toggles so they survive Sky3D <-> fallback swaps.
+## Keys match Environment property groups; values are Dictionaries of property->value.
+var _visual_state: Dictionary = {
+	"taa": false,
+	"ssao": false,
+	"ssil": false,
+	"glow": false,
+	"volumetric_fog": false,
+	"depth_fog": false,
+	"tonemap_mode": Environment.TONE_MAPPER_FILMIC,
+	"shadow_cascades": false,
+}
 
 
 ## Create the environment controls.
@@ -194,6 +209,270 @@ func on_reset_color_grading() -> void:
 		_log("Reset color grading to defaults")
 
 
+# ── Native Rendering Quality Toggles ──
+# These set properties directly on the active Environment resource.
+# State is tracked in _visual_state so it survives Sky3D <-> fallback swaps.
+
+## Get whichever Environment is currently active.
+func _get_active_environment() -> Environment:
+	if show_sky and sky_3d and sky_3d.environment:
+		return sky_3d.environment
+	if _fallback_world_env and _fallback_world_env.environment:
+		return _fallback_world_env.environment
+	return null
+
+
+## Re-apply all tracked visual state to an Environment resource.
+func _apply_visual_state(env: Environment) -> void:
+	if not env:
+		return
+
+	# SSAO
+	env.ssao_enabled = _visual_state["ssao"]
+	if _visual_state["ssao"]:
+		env.ssao_radius = 1.5
+		env.ssao_intensity = 3.0
+		env.ssao_power = 1.5
+		env.ssao_detail = 0.7
+		env.ssao_sharpness = 0.98
+		env.ssao_light_affect = 0.0
+
+	# SSIL
+	env.ssil_enabled = _visual_state["ssil"]
+	if _visual_state["ssil"]:
+		env.ssil_radius = 5.0
+		env.ssil_intensity = 1.0
+		env.ssil_sharpness = 0.98
+		env.ssil_normal_rejection = 1.0
+
+	# Glow
+	env.glow_enabled = _visual_state["glow"]
+	if _visual_state["glow"]:
+		env.glow_intensity = 0.4
+		env.glow_bloom = 0.15
+		env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
+		env.glow_hdr_threshold = 0.8
+		env.glow_hdr_scale = 2.0
+		env.glow_hdr_luminance_cap = 12.0
+		env.glow_mix = 0.05
+		env.glow_strength = 1.15
+		env.set("glow_levels/1", 0.2)
+		env.set("glow_levels/2", 0.8)
+		env.set("glow_levels/3", 0.5)
+		env.set("glow_levels/4", 0.15)
+
+	# Godot native volumetric fog (god rays via anisotropy)
+	env.volumetric_fog_enabled = _visual_state["volumetric_fog"]
+	if _visual_state["volumetric_fog"]:
+		env.volumetric_fog_density = 0.015
+		env.volumetric_fog_albedo = Color(0.9, 0.9, 0.95)
+		env.volumetric_fog_emission = Color.BLACK
+		env.volumetric_fog_anisotropy = 0.7
+		env.volumetric_fog_length = 300.0
+		env.volumetric_fog_detail_spread = 2.0
+		env.volumetric_fog_gi_inject = 1.0
+		env.volumetric_fog_sky_affect = 0.5
+		env.volumetric_fog_temporal_reprojection_enabled = true
+		env.volumetric_fog_temporal_reprojection_amount = 0.9
+
+	# Depth fog (aerial perspective)
+	env.fog_enabled = _visual_state["depth_fog"]
+	if _visual_state["depth_fog"]:
+		env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+		env.fog_density = 0.001
+		env.fog_light_color = Color(0.6, 0.65, 0.75)
+		env.fog_light_energy = 1.0
+		env.fog_sun_scatter = 0.3
+		env.fog_aerial_perspective = 0.5
+		env.fog_sky_affect = 0.5
+		env.fog_height = -10.0
+		env.fog_height_density = 0.01
+
+	# Tonemapping
+	env.tonemap_mode = _visual_state["tonemap_mode"]
+
+
+## Apply shadow cascade settings to a DirectionalLight3D.
+func _apply_shadow_cascades(light: DirectionalLight3D) -> void:
+	if not light:
+		return
+	if _visual_state["shadow_cascades"]:
+		light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+		light.directional_shadow_blend_splits = true
+		light.directional_shadow_fade_start = 0.8
+		light.directional_shadow_split_1 = 0.05
+		light.directional_shadow_split_2 = 0.15
+		light.directional_shadow_split_3 = 0.4
+	else:
+		light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+		light.directional_shadow_blend_splits = false
+
+
+func on_taa_toggled(enabled: bool) -> void:
+	_visual_state["taa"] = enabled
+	var viewport := _get_viewport()
+	if viewport:
+		viewport.use_taa = enabled
+	_log("TAA: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_ssao_toggled(enabled: bool) -> void:
+	_visual_state["ssao"] = enabled
+	var env := _get_active_environment()
+	if env:
+		env.ssao_enabled = enabled
+		if enabled:
+			env.ssao_radius = 1.0
+			env.ssao_intensity = 2.0
+			env.ssao_power = 1.5
+			env.ssao_detail = 0.5
+			env.ssao_sharpness = 0.98
+			env.ssao_light_affect = 0.0
+	_log("SSAO: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_ssil_toggled(enabled: bool) -> void:
+	_visual_state["ssil"] = enabled
+	var env := _get_active_environment()
+	if env:
+		env.ssil_enabled = enabled
+		if enabled:
+			env.ssil_radius = 5.0
+			env.ssil_intensity = 1.0
+			env.ssil_sharpness = 0.98
+			env.ssil_normal_rejection = 1.0
+	_log("SSIL: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_glow_toggled(enabled: bool) -> void:
+	_visual_state["glow"] = enabled
+	var env := _get_active_environment()
+	if env:
+		env.glow_enabled = enabled
+		if enabled:
+			env.glow_intensity = 0.3
+			env.glow_bloom = 0.0
+			env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
+			env.glow_hdr_threshold = 1.0
+			env.glow_hdr_scale = 2.0
+			env.glow_hdr_luminance_cap = 12.0
+			env.glow_mix = 0.05
+			env.glow_strength = 1.0
+			env.set("glow_levels/2", 0.8)
+			env.set("glow_levels/3", 0.4)
+			env.set("glow_levels/4", 0.1)
+	_log("Glow: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_native_volumetric_fog_toggled(enabled: bool) -> void:
+	_visual_state["volumetric_fog"] = enabled
+	var env := _get_active_environment()
+	if env:
+		env.volumetric_fog_enabled = enabled
+		if enabled:
+			env.volumetric_fog_density = 0.015
+			env.volumetric_fog_albedo = Color(0.9, 0.9, 0.95)
+			env.volumetric_fog_emission = Color.BLACK
+			env.volumetric_fog_anisotropy = 0.7
+			env.volumetric_fog_length = 300.0
+			env.volumetric_fog_detail_spread = 2.0
+			env.volumetric_fog_gi_inject = 1.0
+			env.volumetric_fog_sky_affect = 0.5
+			env.volumetric_fog_temporal_reprojection_enabled = true
+			env.volumetric_fog_temporal_reprojection_amount = 0.9
+	# Boost sun's volumetric fog energy for stronger god rays
+	_set_sun_volumetric_energy(3.0 if enabled else 1.0)
+	# Complementary mode: reduce Sky3D fog when native fog is on
+	_sync_sky3d_fog()
+	_log("Volumetric Fog (god rays): %s" % ("ON" if enabled else "OFF"))
+
+
+func on_depth_fog_toggled(enabled: bool) -> void:
+	_visual_state["depth_fog"] = enabled
+	var env := _get_active_environment()
+	if env:
+		env.fog_enabled = enabled
+		if enabled:
+			env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+			env.fog_density = 0.002
+			env.fog_light_color = Color(0.65, 0.7, 0.78)
+			env.fog_light_energy = 1.0
+			env.fog_sun_scatter = 0.4
+			env.fog_aerial_perspective = 0.6
+			env.fog_sky_affect = 0.6
+			env.fog_height = -10.0
+			env.fog_height_density = 0.01
+	# Mutual exclusion: disable Sky3D's AtmFog when native fog is on (prevents double-fogging)
+	_sync_sky3d_fog()
+	_log("Depth Fog: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_tonemapper_changed(index: int) -> void:
+	var modes := [
+		Environment.TONE_MAPPER_FILMIC,
+		Environment.TONE_MAPPER_ACES,
+		Environment.TONE_MAPPER_AGX,
+		Environment.TONE_MAPPER_LINEAR,
+	]
+	var names := ["Filmic", "ACES", "AgX", "Linear"]
+	if index < 0 or index >= modes.size():
+		return
+	_visual_state["tonemap_mode"] = modes[index]
+	var env := _get_active_environment()
+	if env:
+		env.tonemap_mode = modes[index]
+	_log("Tonemapper: %s" % names[index])
+
+
+func on_shadow_cascades_toggled(enabled: bool) -> void:
+	_visual_state["shadow_cascades"] = enabled
+	# Apply to fallback light
+	_apply_shadow_cascades(_fallback_light)
+	# Apply to Sky3D sun if available
+	if sky_3d:
+		var sun: DirectionalLight3D = sky_3d.get_node_or_null("SunLight")
+		if sun:
+			_apply_shadow_cascades(sun)
+	_log("Shadow 4-split cascades: %s" % ("ON" if enabled else "OFF"))
+
+
+## Sync Sky3D's AtmFog with native fog state.
+## Sky3D's AtmFog is a full-screen quad (blend_mix) — any density reduction still double-fogs.
+## Solution: hide the quad entirely when native fog is on, restore when off.
+func _sync_sky3d_fog() -> void:
+	if not sky_3d or not show_sky:
+		return
+	var any_native_fog: bool = _visual_state["volumetric_fog"] or _visual_state["depth_fog"]
+	# fog_enabled controls the AtmFog screen quad visibility
+	sky_3d.fog_enabled = not any_native_fog
+	if any_native_fog:
+		_log("Sky3D AtmFog hidden (native fog active)")
+	else:
+		_log("Sky3D AtmFog restored")
+
+
+## Set the volumetric fog energy on the active sun DirectionalLight3D.
+## Higher values = brighter god rays without increasing overall fog density.
+func _set_sun_volumetric_energy(energy: float) -> void:
+	# Try Sky3D's sun first
+	if sky_3d and show_sky:
+		var sun: DirectionalLight3D = sky_3d.get_node_or_null("SunLight")
+		if sun:
+			sun.light_volumetric_fog_energy = energy
+			return
+	# Fallback light
+	if _fallback_light:
+		_fallback_light.light_volumetric_fog_energy = energy
+
+
+## Get the root viewport (via callback or fallback).
+func _get_viewport() -> Viewport:
+	var cb: Callable = _cb.get("get_viewport", Callable())
+	if cb.is_valid():
+		return cb.call()
+	return null
+
+
 # ── Sky/Day-Night Cycle ──
 
 ## Toggle sky/day-night cycle visibility.
@@ -229,6 +508,26 @@ func on_show_sky_toggled(enabled: bool) -> void:
 		if _fallback_light:
 			_fallback_light.visible = true
 
+	# Re-apply visual state to the newly active environment
+	_apply_visual_state(_get_active_environment())
+
+	# Sync Sky3D fog with native fog state (disable AtmFog if native fog is on)
+	if enabled:
+		_sync_sky3d_fog()
+
+	# Re-apply TAA to viewport (not env-dependent but needs to persist across toggles)
+	if _visual_state["taa"]:
+		var viewport := _get_viewport()
+		if viewport:
+			viewport.use_taa = true
+
+	# Re-apply shadow cascades to the active light
+	if enabled and sky_3d:
+		var sun: DirectionalLight3D = sky_3d.get_node_or_null("SunLight")
+		_apply_shadow_cascades(sun)
+	else:
+		_apply_shadow_cascades(_fallback_light)
+
 	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
 
@@ -259,12 +558,31 @@ func _create_sky3d() -> void:
 	sky_3d.current_time = 12.0
 	sky_3d.ambient_energy = 0.5
 
-	# Use Filmic tonemapping instead of ACES to avoid crushing blacks
+	# Configure Sky3D's environment to match our quality state
 	if sky_3d.environment:
-		sky_3d.environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+		# Override Sky3D's default ACES tonemapping
+		sky_3d.environment.tonemap_mode = _visual_state["tonemap_mode"]
+		# Enable SSR on Sky3D's environment (matches fallback)
+		sky_3d.environment.ssr_enabled = true
+		sky_3d.environment.ssr_max_steps = 64
+		sky_3d.environment.ssr_fade_in = 0.15
+		sky_3d.environment.ssr_fade_out = 2.0
+		sky_3d.environment.ssr_depth_tolerance = 0.2
+		# Apply all tracked visual state (SSAO, glow, fog, etc.)
+		_apply_visual_state(sky_3d.environment)
+
+	# Set dense Morrowind-style fog defaults on SkyDome
+	if sky_3d.sky:
+		sky_3d.sky.fog_density = 0.0015
+		sky_3d.sky.fog_start = 0.0
+		sky_3d.sky.fog_end = 1000.0
+		sky_3d.sky.fog_falloff = 3.0
 
 	# Start enabled
 	sky_3d.sky3d_enabled = true
+
+	# Sync fog state in case native fogs are already enabled
+	_sync_sky3d_fog()
 
 	_sky3d_initialized = true
 	_log("Sky3D initialized")

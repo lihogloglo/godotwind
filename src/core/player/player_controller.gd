@@ -285,6 +285,9 @@ func _setup_collision() -> void:
 	# Snap to ground — handles stair steps naturally via Godot's built-in floor snap.
 	# Custom step-up in MoveContainer handles larger obstacles (0.3-0.5m).
 	floor_snap_length = 0.3
+	# Allow pushing RigidBody3D objects (barrels, crates, etc.)
+	collision_layer = 2  # Player layer
+	collision_mask = 1 | 2  # Detect Environment + dynamic objects
 
 
 func _setup_camera() -> void:
