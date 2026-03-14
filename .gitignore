@@ -1,13 +1,13 @@
 # Godot 4+ specific ignores
 .godot/
-agentchattr/
-agentchattr-main/
+agentchattr*/
 inspos/
 .claude/
 .claude-flow/
 openmw-master/
 lapalma_map/
 lapalma_processed/
+lapalma_terrain/
 godotoceanbuoyancy/
 GodotOceanWaves/
 assets/animations/

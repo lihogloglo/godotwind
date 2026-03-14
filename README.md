@@ -1,22 +1,19 @@
 # Godotwind
 
-An open-world RPG framework for Godot 4.6. Not a faithful port and more like a framework that uses Morrowind as its reference implementation. At the moment, fully vibe-engineered with Claude Opus 4.5 / 4.6. I'm also trying to figure out how far you can go with LLMs to do an ambitious project such as this one.
+An open-world RPG framework for Godot 4.6, using Morrowind as its data source.
+Not a faithful port — "Morrowind if it was made in 2025."
 
-The long-term goal is to continue where [Skelerealms](https://github.com/SlashScreen/skelerealms) stopped: a general-purpose open-world RPG framework for Godot, with abstract interfaces for inventory, dialogue, AI, and save/load — where addons are optional backends and Morrowind is just one "mod" that implements them.
+The long-term goal: a general-purpose open-world RPG framework for Godot, where Morrowind is just one "mod" that implements abstract interfaces for terrain, NPCs, dialogue, inventory, and quests.
 
-**Current state:** World streaming and rendering are production-quality. Gameplay systems (combat, dialogue, quests) are not yet implemented. See [MASTERPLAN](docs/audit/MASTERPLAN.md) for the roadmap.
+**Current state:** World streaming and rendering are production-quality. Gameplay systems (combat, dialogue, quests) are not started. See [STATUS.md](docs/STATUS.md).
 
 ## Quick Start
 
-1. **Configure Morrowind Path**
-   - Run `src/tools/settings_tool.tscn` — Auto-Detect or Browse
-   - Or set env: `export MORROWIND_DATA_PATH="/path/to/Data Files"`
-
-2. **Prebake Assets**
-   - Run `src/tools/prebaking_ui.tscn` — generate terrain, impostors, shore mask, merged meshes
-
-3. **Run World Explorer**
-   - Main scene: `src/tools/world_explorer.tscn`
+1. **Install Godot 4.6 Mono** (C# support required)
+2. **Install Terrain3D addon v1.0.1** — Download from [Terrain3D releases](https://github.com/TokisanGames/Terrain3D/releases/tag/v1.0.1), extract and copy the `addons/terrain_3d/` folder into your project's `addons/` directory. Enable via Project > Project Settings > Plugins.
+3. **Configure Morrowind path** — Run `src/tools/settings_tool.tscn`, click Auto-Detect or Browse
+4. **Prebake assets** — Run `src/tools/prebaking/prebaking_ui.tscn` to generate terrain, impostors, shore mask
+5. **Run** — Open `scenes/Godotwind.tscn`
 
 ## Controls
 
@@ -32,57 +29,44 @@ The long-term goal is to continue where [Skelerealms](https://github.com/SlashSc
 | F3 | Performance overlay |
 | `` ` `` | Developer console |
 
-## Implementation Status
+## What Works
 
-### Core Systems (Complete)
+- **World streaming** — async cell loading, 2ms/frame budget, priority queues
+- **3-tier LOD** — NEAR (0-150m full 3D), MID (150-500m instanced), FAR (500-5km impostors)
+- **Terrain** — Terrain3D with multi-region support
+- **ESM/NIF/BSA parsing** — 47 record types, thread-safe, C# for performance
+- **NPC assembly** — body parts from race data, body part mirroring, animations
+- **Developer console** — object picking, selection outline, commands
+- **Deformation** — RTT-based ground deformation (snow, mud, ash)
 
-| System | Notes |
-|--------|-------|
-| **World Streaming** | Time-budgeted async, priority queues, no hitches |
-| **Terrain** | Terrain3D integration, multi-region, edge stitching |
-| **Object Streaming** | Cell refs, async NIF parsing, object pooling, MultiMesh batching |
-| **ESM/ESP Parsing** | 47 record types, thread-safe global access, grid indexing |
-| **NIF Conversion** | Geometry, materials, skeletons, animations, collision |
-| **BSA Archives** | 256MB LRU cache, thread-safe extraction |
-| **Texture Loading** | DDS/TGA, material deduplication |
-| **Deformation** | RTT-based ground deformation (snow, mud, ash) |
-| **Console** | Command registry, object picking, selection outline |
-| **3-Tier LOD** | NEAR (0-150m full 3D), MID (150-500m merged), FAR (500-5km impostors) |
+## What Doesn't Work Yet
 
-### Framework Ready (Not Integrated)
-
-| System | Status |
-|--------|--------|
-| **Ocean/Water** | FFT waves, shore dampening, buoyancy — OceanManager exists, not wired into main scene |
-| **Sky/Weather** | Sky3D installed, day/night prepared — not integrated |
-| **Character Assembly** | NPC body parts from race + head + hair — pipeline complete |
-| **Character Animation** | State machine (idle/walk/run/jump) — locomotion working, action layers stubbed |
-
-### Not Started (Addons Installed, Not Wired)
-
-| System | Addon | Notes |
-|--------|-------|-------|
-| Dialogue | dialogue_manager | Records parsed, no UI |
-| Inventory | GLoot | NPC inventories load, player has none |
-| Quests | Questify | No tracking or journal |
-| AI | Beehave | Behavior trees not integrated |
-| Combat | — | No attack/defense/damage |
-| Save/Load | — | No persistence layer designed |
-
-## Documentation
-
-| Doc | Content |
-|-----|---------|
-| [STATUS.md](docs/STATUS.md) | Per-system implementation status (ground truth) |
-| [MASTERPLAN.md](docs/audit/MASTERPLAN.md) | Roadmap, architecture decisions, framework-first identity |
-| [FINDINGS.md](docs/audit/FINDINGS.md) | Audit issue tracker |
-| [DESIGN_PATTERNS.md](docs/DESIGN_PATTERNS.md) | Code patterns: NativeBridge, pooling, batching |
-| [DATA_PIPELINE.md](docs/DATA_PIPELINE.md) | ESM/NIF/BSA formats, coordinate conversion |
-| [PERFORMANCE_GUIDE.md](docs/PERFORMANCE_GUIDE.md) | Frame budgeting, async loading, profiling |
+- Combat, magic, AI, dialogue, quests, inventory, save/load
+- Ocean/water (framework exists, not wired into main scene)
+- Weather/sky (not started)
+- Interior transitions (door detection exists, no seamless loading)
 
 ## Tech Stack
 
 - **Engine:** Godot 4.6, Forward+, Jolt Physics, D3D12
-- **Languages:** GDScript 95% / C# 5% / GLSL shaders
+- **Languages:** GDScript 95% / C# 5% (binary parsing) / GLSL shaders
 - **Terrain:** Terrain3D addon
 - **Asset formats:** ESM/ESP, NIF, BSA (Morrowind)
+
+## Documentation
+
+| Doc | Contents |
+|-----|---------|
+| [STATUS.md](docs/STATUS.md) | What works, what doesn't (ground truth) |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Systems overview, code map, key patterns |
+| [MASTERPLAN.md](docs/audit/MASTERPLAN.md) | Roadmap and architecture decisions |
+| [FUTURE_STEPS.md](docs/FUTURE_STEPS.md) | What's next, Godot features we're waiting for |
+
+## Contributing
+
+- Read [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the code layout
+- GDScript for everything except binary parsing (C#)
+- Strict typing in `src/core/`, relaxed in `src/tools/`
+- Use `Log.info("category", "message")` instead of `print()`
+- Don't create new autoloads — use existing singletons
+- Test visually: run `scenes/Godotwind.tscn`, press `` ` `` for console
