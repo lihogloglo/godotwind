@@ -57,6 +57,14 @@ Gameplay systems (combat, dialogue, quests) are not started. See [STATUS.md](doc
 | [MASTERPLAN.md](docs/audit/MASTERPLAN.md) | Roadmap and architecture decisions |
 | [FUTURE_STEPS.md](docs/FUTURE_STEPS.md) | What's next, Godot features we're waiting for |
 
+## Inspirations and references
+
+https://github.com/SlashScreen/skelerealms/
+https://github.com/expressobits/character-controller
+https://github.com/zeux/meshoptimizer
+https://github.com/2Retr0/GodotOceanWaves
+OpenMW, of course
+
 ## Contributing
 
 - Read [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the code layout
