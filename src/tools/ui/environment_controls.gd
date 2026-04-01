@@ -20,6 +20,9 @@ extends RefCounted
 var show_sky: bool = false
 var sky_3d: Sky3D = null
 
+## When true, weather system owns fog/ambient base values
+var weather_active: bool = false
+
 
 # ── Private state ──
 
@@ -79,8 +82,8 @@ func setup_fallback_environment() -> void:
 	sky_material.sky_horizon_color = Color(0.646, 0.656, 0.67)
 	sky_material.ground_bottom_color = Color(0.2, 0.169, 0.133)
 	sky_material.ground_horizon_color = Color(0.646, 0.656, 0.67)
-	sky_material.sun_angle_max = 30.0
-	sky_material.sun_curve = 0.15
+	# Use Godot defaults for sun disc (sun_angle_max=1.0, sun_curve=0.15)
+	# Don't override — any mismatch can cause visible artifacts
 
 	sky.sky_material = sky_material
 	env.sky = sky
@@ -220,6 +223,16 @@ func _get_active_environment() -> Environment:
 	if _fallback_world_env and _fallback_world_env.environment:
 		return _fallback_world_env.environment
 	return null
+
+
+## Public getter for active environment (used by WeatherRenderer)
+func get_active_environment() -> Environment:
+	return _get_active_environment()
+
+
+## Public getter for fallback directional light
+func get_fallback_light() -> DirectionalLight3D:
+	return _fallback_light
 
 
 ## Re-apply all tracked visual state to an Environment resource.
@@ -382,8 +395,7 @@ func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 			env.volumetric_fog_temporal_reprojection_amount = 0.9
 	# Boost sun's volumetric fog energy for stronger god rays
 	_set_sun_volumetric_energy(3.0 if enabled else 1.0)
-	# Complementary mode: reduce Sky3D fog when native fog is on
-	_sync_sky3d_fog()
+	_disable_sky3d_fog()
 	_log("Volumetric Fog (god rays): %s" % ("ON" if enabled else "OFF"))
 
 
@@ -402,9 +414,10 @@ func on_depth_fog_toggled(enabled: bool) -> void:
 			env.fog_sky_affect = 0.6
 			env.fog_height = -10.0
 			env.fog_height_density = 0.01
-	# Mutual exclusion: disable Sky3D's AtmFog when native fog is on (prevents double-fogging)
-	_sync_sky3d_fog()
+	_disable_sky3d_fog()
 	_log("Depth Fog: %s" % ("ON" if enabled else "OFF"))
+	if weather_active and not enabled:
+		_log("Note: weather fog also disabled (weather drives depth fog density)")
 
 
 func on_tonemapper_changed(index: int) -> void:
@@ -436,19 +449,13 @@ func on_shadow_cascades_toggled(enabled: bool) -> void:
 	_log("Shadow 4-split cascades: %s" % ("ON" if enabled else "OFF"))
 
 
-## Sync Sky3D's AtmFog with native fog state.
-## Sky3D's AtmFog is a full-screen quad (blend_mix) — any density reduction still double-fogs.
-## Solution: hide the quad entirely when native fog is on, restore when off.
-func _sync_sky3d_fog() -> void:
+## Disable Sky3D's AtmFog permanently.
+## Sky3D's AtmFog is a full-screen quad (blend_mix) that fights with Godot's depth fog.
+## We use Godot depth fog as the single fog source — Sky3D handles sky/sun only.
+func _disable_sky3d_fog() -> void:
 	if not sky_3d or not show_sky:
 		return
-	var any_native_fog: bool = _visual_state["volumetric_fog"] or _visual_state["depth_fog"]
-	# fog_enabled controls the AtmFog screen quad visibility
-	sky_3d.fog_enabled = not any_native_fog
-	if any_native_fog:
-		_log("Sky3D AtmFog hidden (native fog active)")
-	else:
-		_log("Sky3D AtmFog restored")
+	sky_3d.fog_enabled = false
 
 
 ## Set the volumetric fog energy on the active sun DirectionalLight3D.
@@ -511,9 +518,9 @@ func on_show_sky_toggled(enabled: bool) -> void:
 	# Re-apply visual state to the newly active environment
 	_apply_visual_state(_get_active_environment())
 
-	# Sync Sky3D fog with native fog state (disable AtmFog if native fog is on)
+	# Sky3D AtmFog is always off — Godot depth fog is the single fog source
 	if enabled:
-		_sync_sky3d_fog()
+		_disable_sky3d_fog()
 
 	# Re-apply TAA to viewport (not env-dependent but needs to persist across toggles)
 	if _visual_state["taa"]:
@@ -581,8 +588,8 @@ func _create_sky3d() -> void:
 	# Start enabled
 	sky_3d.sky3d_enabled = true
 
-	# Sync fog state in case native fogs are already enabled
-	_sync_sky3d_fog()
+	# Sky3D AtmFog always off — Godot depth fog is the single fog source
+	_disable_sky3d_fog()
 
 	_sky3d_initialized = true
 	_log("Sky3D initialized")

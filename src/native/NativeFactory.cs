@@ -267,6 +267,19 @@ public partial class NativeFactory : RefCounted
     }
 
     // =========================================================================
+    // Horizon Map Baking
+    // =========================================================================
+
+    /// <summary>
+    /// Create a new horizon map baker instance.
+    /// ~40-100x faster than GDScript implementation (unsafe math, Parallel.For).
+    /// </summary>
+    public NativeHorizonMapBaker CreateHorizonMapBaker()
+    {
+        return new NativeHorizonMapBaker();
+    }
+
+    // =========================================================================
     // Utility
     // =========================================================================
 

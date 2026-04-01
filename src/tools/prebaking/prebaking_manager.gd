@@ -172,12 +172,14 @@ func _ensure_terrain_loaded() -> bool:
 	terrain_node.set_physics_process(false)
 	terrain_node.set_process(false)
 
+	# Set vertex_spacing BEFORE entering tree (crashes in Terrain3D v1.1.0-dev otherwise)
+	CS.configure_terrain3d_pre_tree(terrain_node)
 	add_child(terrain_3d)
 
 	# Wait a frame for initialization
 	await get_tree().process_frame
 
-	# Configure with shared settings
+	# Configure with shared settings (material, assets, region_size)
 	CS.configure_terrain3d(terrain_node)
 
 	# Try to load cached terrain data
@@ -368,12 +370,14 @@ func _bake_terrain() -> Dictionary:
 		terrain_node.set_physics_process(false)
 		terrain_node.set_process(false)
 
+		# Set vertex_spacing BEFORE entering tree (crashes in Terrain3D v1.1.0-dev otherwise)
+		CS.configure_terrain3d_pre_tree(terrain_node)
 		add_child(terrain_3d)
 
 		# Wait a frame for Terrain3D to fully initialize in the scene tree
 		await get_tree().process_frame
 
-		# Use shared configuration from CoordinateSystem (single source of truth)
+		# Configure remaining settings (material, assets, region_size)
 		CS.configure_terrain3d(terrain_node)
 
 	# Check if already completed (skip only if we have completed items and nothing pending)
@@ -492,12 +496,136 @@ func _bake_terrain() -> Dictionary:
 		terrain_node.data.save_directory(terrain_data_dir)
 		Log.info("prebaking", "Saved terrain to: %s" % terrain_data_dir)
 
+	# === Pass 2: Bake horizon maps for terrain self-shadowing ===
+	if processed > 0 and not _should_stop:
+		Log.info("prebaking", "Baking horizon maps for terrain self-shadowing...")
+		component_progress.emit("Terrain", state.completed.size(), state.completed.size() + state.failed.size(), "horizon maps")
+		await _bake_horizon_maps(terrain_manager, get_land_func, regions_with_data, min_region, max_region)
+
 	state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
 
 	component_completed.emit("Terrain", processed, failed, 0)
 
 	return {"success": processed, "failed": failed, "skipped": 0}
+
+
+## Bake horizon maps for all terrain regions (self-shadowing).
+## Runs as a second pass after terrain heightmaps are imported.
+func _bake_horizon_maps(
+	terrain_manager: TerrainManagerScript,
+	get_land_func: Callable,
+	regions_with_data: Dictionary,
+	min_region: Vector2i,
+	max_region: Vector2i,
+) -> void:
+	var vertex_spacing: float = (terrain_3d as Terrain3D).get_vertex_spacing()
+
+	# Try C# baker first (40-100x faster), fall back to GDScript
+	var native_baker: RefCounted = null
+	var use_native := false
+	var factory_script = load("res://src/native/NativeFactory.cs")
+	if factory_script:
+		var factory: RefCounted = factory_script.new()
+		if factory.call("IsAvailable"):
+			native_baker = factory.call("CreateHorizonMapBaker")
+			if native_baker:
+				native_baker.set("MaxMarchDistance", 64)
+				native_baker.set("TexelSpacing", vertex_spacing)
+				use_native = true
+				Log.info("prebaking", "Using native C# horizon map baker (Parallel.For)")
+
+	var baker: HorizonMapBaker = null
+	if not use_native:
+		baker = HorizonMapBaker.new()
+		baker.texel_spacing = vertex_spacing
+		Log.info("prebaking", "Using GDScript horizon map baker (slow fallback)")
+
+	const CELL_SIZE := 64
+	var region_size_pixels: int = TerrainManagerScript.CELLS_PER_REGION * CELL_SIZE
+
+	# Step 1: Collect region heightmaps, tracking which have complete cell coverage
+	var heightmaps: Dictionary = {}  # Vector2i -> Image
+	var complete_regions: Dictionary = {}  # Vector2i -> bool (all 16 cells have data)
+	var cells_per_region: int = TerrainManagerScript.CELLS_PER_REGION
+	var expected_cells: int = cells_per_region * cells_per_region
+
+	for ry in range(min_region.y, max_region.y + 1):
+		for rx in range(min_region.x, max_region.x + 1):
+			var region_coord := Vector2i(rx, ry)
+			var heightmap := Image.create(region_size_pixels, region_size_pixels, false, Image.FORMAT_RF)
+			heightmap.fill(Color(CS.OCEAN_FLOOR_GODOT, 0, 0, 1))
+
+			var cells_found: int = 0
+			if regions_with_data.has(region_coord):
+				var sw_cell: Vector2i = TerrainManagerScript.region_to_sw_cell(region_coord)
+				for local_y in range(cells_per_region):
+					for local_x in range(cells_per_region):
+						var cell_x: int = sw_cell.x + local_x
+						var cell_y: int = sw_cell.y + local_y
+						var land: LandRecord = get_land_func.call(cell_x, cell_y)
+						if land and land.has_heights():
+							cells_found += 1
+							var cell_hm: Image = terrain_manager.generate_heightmap(land)
+							var img_offset_x: int = local_x * CELL_SIZE
+							var img_offset_y: int = (cells_per_region - 1 - local_y) * CELL_SIZE
+							heightmap.blit_rect(cell_hm, Rect2i(0, 0, CELL_SIZE, CELL_SIZE), Vector2i(img_offset_x, img_offset_y))
+
+			heightmaps[region_coord] = heightmap
+			complete_regions[region_coord] = (cells_found == expected_cells)
+
+	var complete_count: int = complete_regions.values().count(true)
+	Log.info("prebaking", "Collected %d region heightmaps (%d complete, %d incomplete — incomplete will be skipped)" % [
+		heightmaps.size(), complete_count, heightmaps.size() - complete_count])
+
+	# Step 2: Bake only complete regions (all 16 cells have height data).
+	# Incomplete regions would produce streak artifacts at internal cell boundaries
+	# where missing cells default to ocean floor.
+	var baked := 0
+	var skipped := 0
+	var total: int = complete_count
+
+	for ry in range(min_region.y, max_region.y + 1):
+		for rx in range(min_region.x, max_region.x + 1):
+			if _should_stop:
+				break
+
+			var region_coord := Vector2i(rx, ry)
+			if not complete_regions.get(region_coord, false):
+				skipped += 1
+				continue
+
+			var heightmap: Image = heightmaps[region_coord]
+
+			var neighbors: Dictionary = {}
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					if dx == 0 and dy == 0:
+						continue
+					var neighbor_coord := Vector2i(rx + dx, ry + dy)
+					if heightmaps.has(neighbor_coord):
+						neighbors[Vector2i(dx, dy)] = heightmaps[neighbor_coord]
+
+			var tex1: Image
+			var tex2: Image
+			if use_native:
+				var native_result = native_baker.call("BakeWithNeighbors", heightmap, neighbors)
+				tex1 = native_result[0]
+				tex2 = native_result[1]
+			else:
+				var result: Array[Image] = baker.bake_with_neighbors(heightmap, neighbors)
+				tex1 = result[0]
+				tex2 = result[1]
+			HorizonMapManager.save_region(region_coord, tex1, tex2)
+
+			baked += 1
+			component_progress.emit("Terrain", baked, total, "horizon %d,%d" % [rx, ry])
+
+			# Yield every 5 regions
+			if baked % 5 == 0:
+				await get_tree().process_frame
+
+	Log.info("prebaking", "Horizon maps baked: %d regions, skipped %d incomplete" % [baked, skipped])
 
 
 ## Bake individual models (NIF -> Godot conversion)

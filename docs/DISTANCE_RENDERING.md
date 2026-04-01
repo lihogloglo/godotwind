@@ -45,13 +45,19 @@ Custom octahedral impostor system (Godot has no built-in equivalent).
 - Per-impostor transforms stored in MultiMesh custom data
 - Visibility range: begin=480m, end=5km (set on the MultiMeshInstance3D)
 - Texture array rebuild debounced (0.2s after last add, 0.5s min between rebuilds)
+- **MultiMesh rebuild uses `set_buffer(PackedFloat32Array)`** — single bulk upload instead of N×2 RS calls
+- **Differential impostor area update** — on cell crossing, only scans border strip (~242 cells) instead of full 14K grid. Cost: ~1ms per crossing (was 14-158ms)
+- ~63K impostors across ~497 texture layers at full load. ~40% are ≤2px on screen (filtering candidate)
 
 ## Streaming Orchestration
 
 `native_streaming_manager.gd` coordinates all tiers:
 - Camera cell tracked, 3-cell radius loaded async
-- **2ms/frame load budget** — cells queued by frustum priority (4x penalty for behind-camera)
-- **4ms/frame unload budget** — max 30 children removed per frame
+- **Shared 8ms/frame budget** across all streaming phases (was independent budgets per phase)
+- Cells queued by frustum priority (4x penalty for behind-camera)
+- Budgeted unloading: RS instances immediately hidden (`instance_set_visible(false)`), then `free_rid()` deferred across frames
+- Promoted object cleanup uses spatial index (`_promoted_by_cell` dict, O(1) per cell)
+- Per-phase timing instrumentation with overrun logging: `[unload:X async:X inst:X promo:X coll:X defer:X queue:X]`
 - 20-frame startup stagger prevents initial spike
 
 ## Tier Transitions

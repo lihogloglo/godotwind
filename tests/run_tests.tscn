@@ -1,0 +1,23 @@
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="GDScript" id="GDScript_runner"]
+script/source = "## Test runner scene — launch this to run all gdUnit4 tests.
+## Usage: godot --path . res://tests/run_tests.tscn
+extends Node
+
+func _ready() -> void:
+	var args := OS.get_cmdline_args()
+	# Default: run all tests in tests/ directory
+	var test_path := \"res://tests/unit/\"
+	for i in range(args.size()):
+		if args[i] == \"--test\" and i + 1 < args.size():
+			test_path = args[i + 1]
+
+	print(\"[TEST RUNNER] Starting tests: %s\" % test_path)
+	var runner := GdUnitTestCIRunner.new()
+	runner._debug_cmd_args = [\"GdUnitCmdTool.gd\", \"--add\", test_path, \"--continue\"]
+	add_child(runner)
+"
+
+[node name="TestRunner" type="Node"]
+script = SubResource("GDScript_runner")

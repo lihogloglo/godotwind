@@ -9,6 +9,8 @@
 class_name ShoreMaskGenerator
 extends Node
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 ## Shore mask texture
 var _shore_mask: ImageTexture = null
 var _shore_image: Image = null
@@ -250,7 +252,7 @@ func _calculate_world_bounds() -> void:
 
 func _get_terrain_height(world_pos: Vector3) -> float:
 	if _terrain and _terrain.data:
-		return _terrain.data.get_height(world_pos)
+		return CS.get_terrain_height(world_pos, _terrain)
 	# Outside terrain = assume ocean
 	return _sea_level - 1.0
 
@@ -286,7 +288,7 @@ func get_shore_factor(world_pos: Vector3) -> float:
 	if not _shore_image:
 		# Fallback: check terrain height directly
 		if _terrain and _terrain.data:
-			var height := _terrain.data.get_height(world_pos)
+			var height := CS.get_terrain_height(world_pos, _terrain)
 			return 1.0 if height < _sea_level else 0.0
 		return 1.0  # Assume ocean everywhere
 

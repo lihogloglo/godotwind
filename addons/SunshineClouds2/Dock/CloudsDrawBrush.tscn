@@ -1,0 +1,14 @@
+[gd_scene load_steps=3 format=3 uid="uid://bqphpk7wftndj"]
+
+[ext_resource type="Material" uid="uid://b3fgicfsq7yvh" path="res://addons/SunshineClouds2/Dock/Materials/DrawBrushToolsMaterial.tres" id="1_t2125"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_gqrd6"]
+
+[node name="DrawBrush" type="MeshInstance3D"]
+mesh = SubResource("PlaneMesh_gqrd6")
+surface_material_override/0 = ExtResource("1_t2125")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+material_override = ExtResource("1_t2125")
+mesh = SubResource("PlaneMesh_gqrd6")

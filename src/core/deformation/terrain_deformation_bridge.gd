@@ -76,9 +76,10 @@ func apply_deformation_heights() -> void:
 			if debug:
 				Log.debug("deformation", "  Texture %d: %.3fm (%s)" % [texture_id, rest_height, entry.texture_name])
 
-	# Set the shader parameter
-	# NOTE: Even though this is a "private" uniform (_prefix), GDScript can still set it!
-	material.set_shader_parameter("_texture_deform_rest_array", rest_heights)
+	# Set the shader parameter via RenderingServer (Terrain3D v1.1 API)
+	if material.has_method("get_material_rid"):
+		var mat_rid: RID = material.get_material_rid()
+		RenderingServer.material_set_param(mat_rid, "_texture_deform_rest_array", rest_heights)
 
 	if debug:
 		Log.debug("deformation", "TerrainDeformationBridge: Applied %d texture heights to Terrain3D" % texture_config.texture_heights.size())

@@ -467,4 +467,7 @@ func shutdown():
 	Log.info("deformation", "DeformationManager: System shutdown complete")
 
 func _exit_tree():
+	# If quitting, skip shutdown entirely — no need to save or clean up
+	if Engine.has_meta("_quitting"):
+		return
 	shutdown()

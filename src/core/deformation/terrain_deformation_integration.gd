@@ -5,7 +5,8 @@ extends Node
 
 # Reference to Terrain3D node
 var _terrain: Node = null
-var _terrain_material: ShaderMaterial = null
+var _terrain_material = null  # Terrain3DMaterial (not ShaderMaterial in v1.1)
+var _terrain_material_rid: RID = RID()
 
 # Deformation texture array for shader
 var _deformation_texture_array: Texture2DArray = null
@@ -89,9 +90,11 @@ func _setup_terrain_integration():
 		Log.warn("deformation", "TerrainDeformationIntegration: Could not get terrain material")
 		return
 
-	if _terrain_material == null or not _terrain_material is ShaderMaterial:
-		Log.warn("deformation", "TerrainDeformationIntegration: Terrain material is not a ShaderMaterial")
+	if _terrain_material == null:
+		Log.warn("deformation", "TerrainDeformationIntegration: Terrain material is null")
 		return
+	if _terrain_material.has_method("get_material_rid"):
+		_terrain_material_rid = _terrain_material.get_material_rid()
 
 	# Initialize texture array
 	_create_deformation_texture_array()
@@ -128,9 +131,9 @@ func _inject_deformation_parameters():
 		return
 
 	# Set shader parameters
-	_terrain_material.set_shader_parameter("deformation_texture_array", _deformation_texture_array)
-	_terrain_material.set_shader_parameter("deformation_enabled", true)
-	_terrain_material.set_shader_parameter("deformation_depth_scale", DeformationManager.deformation_depth_scale)
+	RenderingServer.material_set_param(_terrain_material_rid,"deformation_texture_array", _deformation_texture_array)
+	RenderingServer.material_set_param(_terrain_material_rid,"deformation_enabled", true)
+	RenderingServer.material_set_param(_terrain_material_rid,"deformation_depth_scale", DeformationManager.deformation_depth_scale)
 
 	Log.debug("deformation", "TerrainDeformationIntegration: Injected deformation parameters into terrain shader")
 
@@ -252,4 +255,4 @@ func get_region_array_index(region_coord: Vector2i) -> int:
 # Enable/disable deformation rendering
 func set_deformation_enabled(enabled: bool):
 	if _terrain_material != null:
-		_terrain_material.set_shader_parameter("deformation_enabled", enabled)
+		RenderingServer.material_set_param(_terrain_material_rid,"deformation_enabled", enabled)

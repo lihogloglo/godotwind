@@ -5,6 +5,8 @@
 class_name OceanManagerClass
 extends Node
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 # Project settings paths
 const SETTING_ENABLED := "ocean/enabled"
 const SETTING_SEA_LEVEL := "ocean/sea_level"
@@ -383,7 +385,7 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 	if _shore_mask:
 		return _shore_mask.get_shore_factor(world_pos) > 0.01
 	if _terrain and _terrain.data:
-		var terrain_height: float = _terrain.data.get_height(world_pos)
+		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
 		return terrain_height < sea_level
 	return true
 
@@ -544,6 +546,8 @@ func get_water_quality_name() -> String:
 
 
 func _exit_tree() -> void:
+	if Engine.has_meta("_quitting"):
+		return
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()
 

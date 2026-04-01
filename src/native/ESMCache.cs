@@ -29,7 +29,7 @@ namespace Godotwind.Native;
 public partial class ESMCache : RefCounted
 {
     private const string CACHE_MAGIC = "ESMCACHE";
-    private const int CACHE_VERSION = 2;  // Bumped for actor/item record support
+    private const int CACHE_VERSION = 3;  // Bumped for light LHDT data (radius, color, flags)
 
     // Statistics
     public float LoadTimeMs { get; private set; } = 0f;
@@ -339,6 +339,17 @@ public partial class ESMCache : RefCounted
             WriteString(writer, kvp.Value.RecordId);
             WriteString(writer, kvp.Value.Model);
             writer.Write(kvp.Value.IsDeleted);
+            // LHDT data
+            WriteString(writer, kvp.Value.Name);
+            WriteString(writer, kvp.Value.ScriptId);
+            WriteString(writer, kvp.Value.Icon);
+            WriteString(writer, kvp.Value.Sound);
+            writer.Write(kvp.Value.Weight);
+            writer.Write(kvp.Value.Value);
+            writer.Write(kvp.Value.Time);
+            writer.Write(kvp.Value.Radius);
+            WriteColor(writer, kvp.Value.LightColor);
+            writer.Write(kvp.Value.Flags);
         }
     }
 
@@ -705,7 +716,18 @@ public partial class ESMCache : RefCounted
             {
                 RecordId = ReadString(reader),
                 Model = ReadString(reader),
-                IsDeleted = reader.ReadBoolean()
+                IsDeleted = reader.ReadBoolean(),
+                // LHDT data
+                Name = ReadString(reader),
+                ScriptId = ReadString(reader),
+                Icon = ReadString(reader),
+                Sound = ReadString(reader),
+                Weight = reader.ReadSingle(),
+                Value = reader.ReadInt32(),
+                Time = reader.ReadInt32(),
+                Radius = reader.ReadInt32(),
+                LightColor = ReadColor(reader),
+                Flags = reader.ReadInt32()
             };
             dict[key] = rec;
         }

@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Godotwind"
 run/main_scene="uid://clb74pwrqrgok"
-config/features=PackedStringArray("4.6", "C#")
+config/features=PackedStringArray("4.6")
 config/icon="res://icon.svg"
 
 [autoload]
@@ -24,7 +24,7 @@ ESMManager="*res://src/core/esm/esm_manager.gd"
 OceanManager="*res://src/core/water/ocean_manager.gd"
 ShaderManager="*res://src/core/shaders/shader_manager.gd"
 DeformationManager="*res://src/core/deformation/deformation_manager.gd"
-PerfSnapshot="*res://tests/perf_snapshot.gd"
+WeatherManager="*res://src/core/weather/weather_manager.gd"
 
 [debug]
 
@@ -46,7 +46,7 @@ project/assembly_name="Godotwind"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/terrain_3d/plugin.cfg")
+enabled=PackedStringArray("res://addons/SunshineClouds2/plugin.cfg", "res://addons/gdUnit4/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
 
 [filesystem]
 
@@ -69,7 +69,6 @@ quality=2
 [rendering]
 
 textures/vram_compression/import_etc2_astc=true
-occlusion_culling/use_occlusion_culling=false
 
 [shader_globals]
 

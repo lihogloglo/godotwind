@@ -17,9 +17,10 @@
 ##   ~     Developer console       P     Toggle camera mode
 ##   F3    Performance overlay     F4    Profiling report
 ##   F9    Debug overlay           F11   State dump
-##   F12   Auto-test mode          TAB   World/Interior toggle
+##   F12   Auto-test mode
 ##   N     NPCs toggle             O     Ocean toggle
 ##   K     Sky toggle              +/-   View distance
+##   ENTER Enter/exit doors (interior transitions)
 ##
 ## Fly Camera: Hold Right-click to look, WASD to move, Space/Shift for up/down
 ## Player: WASD to move, Space to jump, Shift to run, mouse to look
@@ -36,6 +37,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
 const OceanControlsScript := preload("res://src/tools/ui/ocean_controls.gd")
 const EnvironmentControlsScript := preload("res://src/tools/ui/environment_controls.gd")
+const WeatherControlsScript := preload("res://src/tools/ui/weather_controls.gd")
 const StatsCollectorScript := preload("res://src/tools/ui/stats_collector.gd")
 const TerrainPreprocessorScript := preload("res://src/tools/ui/terrain_preprocessor.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
@@ -44,6 +46,7 @@ const PlayerControllerScript := preload("res://src/core/player/player_controller
 const ConsoleScript := preload("res://src/core/console/console.gd")
 const ExplorerPanelsScript := preload("res://src/tools/ui/explorer_panels.gd")
 const CellBrowserScript := preload("res://src/tools/ui/cell_browser.gd")
+const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
 # Debug/diagnostic scripts — lazy-loaded on first use to speed up startup
 var _AutomatedTestRunnerScript: GDScript
 var _DebugOverlayScript: GDScript
@@ -112,6 +115,7 @@ var cell_manager: CellManager = null  # CellManager
 var profiler: PerformanceProfiler = null  # PerformanceProfiler
 var _ocean_controls: OceanControls = null  # OceanControls (ocean/water system)
 var _env_controls: EnvironmentControls = null  # EnvironmentControls (shader effects + sky)
+var _weather_controls: WeatherControls = null  # WeatherControls (weather + time-of-day)
 var _stats_collector: StatsCollector = null  # StatsCollector (panel label updates)
 var _terrain_preprocessor: TerrainPreprocessor = null  # TerrainPreprocessor (terrain baking)
 var background_processor: BackgroundProcessor = null  # BackgroundProcessor for async loading
@@ -124,10 +128,14 @@ var debug_system: Node = null  # Unified debug system (DebugSystem - F4/F9/F11/F
 var _profiling_report: ProfilingReport = null  # UI log panel profiling report
 var _batch_debug_hud: Node = null  # Batch pool debug visualization (BatchDebugHUD)
 var _lod_debug_commands: LodDebugCommands = null  # LOD console commands (prevent GC)
+var _pocket_manager: Node = null  # InteriorPocketManager
+var _door_prompt_label: Label = null  # "Press E to enter" prompt
+var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
 
 # State
 var _data_path: String = ""
 var _initialized: bool = false
+var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = 5  # Must be at least 5 cells (585m) to cover MID tier (500m)
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
@@ -143,7 +151,31 @@ var fly_camera: FlyCamera = null  # FlyCamera instance (with script)
 var player_controller: PlayerController = null  # PlayerController instance
 
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_do_fast_quit()
+
+
+## Immediate shutdown: free GPU resources, set quitting flag, skip slow tree teardown.
+## Called from both Alt+F4 (NOTIFICATION_WM_CLOSE_REQUEST) and the escape menu Quit button.
+func _do_fast_quit() -> void:
+	# Global quitting flag — checked by _exit_tree handlers to bail immediately
+	Engine.set_meta("_quitting", true)
+
+	# Stop background worker threads from blocking on WTP handles
+	if native_streaming_manager:
+		native_streaming_manager.fast_cleanup()
+
+	# Disable deformation persistence so shutdown() skips disk I/O
+	DeformationConfig.enable_persistence = false
+
+	get_tree().quit()
+
+
 func _ready() -> void:
+	# Intercept window close to do fast cleanup instead of slow tree teardown
+	get_tree().set_auto_accept_quit(false)
+
 	var _t0 := Time.get_ticks_msec()
 	var _t_step := _t0
 
@@ -307,6 +339,13 @@ func _init_async() -> void:
 	_load_preprocessed_terrain()
 	_ta = _log_timing(_ta, "terrain data load")
 
+	# Load horizon maps for terrain self-shadowing (if prebaked)
+	_horizon_map_manager = HorizonMapManager.new()
+	var sun: DirectionalLight3D = _find_sun_light()
+	if terrain_3d and sun:
+		_horizon_map_manager.initialize(terrain_3d, sun)
+	_ta = _log_timing(_ta, "horizon maps")
+
 	# Ocean system is now lazy-loaded - created on first toggle
 
 	# Pre-warm model cache with common models (improves first-cell loading)
@@ -330,6 +369,10 @@ func _init_async() -> void:
 
 	# Models load automatically when streaming system starts
 	# Visibility is controlled by Godot's native visibility_range system
+
+	# Initialize interior pocket manager
+	_setup_pocket_manager()
+	_ta = _log_timing(_ta, "pocket manager")
 
 	# Done
 	await _update_loading(100, "Ready!")
@@ -371,6 +414,14 @@ func _init_terrain3d() -> void:
 	if not CS.configure_terrain3d(terrain_3d):
 		_log("[color=red]ERROR: Failed to configure Terrain3D[/color]")
 		return
+
+	# TEMPORARY: Terrain3D v1.1.0-dev crashes on set_vertex_spacing().
+	# Apply vertex_spacing as transform scale to validate terrain alignment.
+	# TODO: Remove when DLL is fixed with null-camera guard.
+	var vs: float = CS.TERRAIN_VERTEX_SPACING
+	if not is_equal_approx(terrain_3d.get_vertex_spacing(), vs):
+		terrain_3d.scale = Vector3(vs, 1.0, vs)
+		_log("Applied terrain scale workaround: %.4f (vertex_spacing DLL bug)" % vs)
 
 	# Load terrain textures
 	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
@@ -470,6 +521,10 @@ func _setup_console() -> void:
 		coe_params,
 		PackedStringArray(["coe -2 -9"])
 	)
+
+	# Register weather console commands
+	if _weather_controls:
+		_weather_controls.register_console_commands(console)
 
 	_log("Console initialized (~ to toggle)")
 
@@ -582,8 +637,32 @@ func _cmd_center_on_cell(args: Dictionary) -> CommandRegistry.CommandResult:
 	if cell_name.is_empty():
 		return CommandRegistry.CommandResult.error("Cell name required")
 
-	# Interior cell teleportation requires the interior transition system (not yet implemented)
-	return CommandRegistry.CommandResult.ok("Would teleport to: %s" % cell_name)
+	# Verify cell exists and is interior
+	var cell: CellRecord = ESMManager.get_cell(cell_name)
+	if not cell:
+		return CommandRegistry.CommandResult.error("Cell not found: %s" % cell_name)
+	if not cell.is_interior():
+		return CommandRegistry.CommandResult.error("Not an interior cell: %s" % cell_name)
+
+	# Use pocket manager to load and enter
+	if _pocket_manager:
+		# Pause streaming while inside (camera at Y=-500 would unload all cells)
+		_set_streaming_paused(true)
+		# Create a synthetic door info for direct teleport
+		var door := InteriorPocketManagerScript.DoorInfo.new()
+		door.ref_id = &"console_coc"
+		door.world_position = camera.global_position
+		door.target_cell_name = cell_name
+		# Default spawn at cell origin
+		door.teleport_pos_mw = Vector3.ZERO
+		door.teleport_rot_mw = Vector3.ZERO
+		var success: bool = await _pocket_manager.enter_interior(door)
+		if not success:
+			_set_streaming_paused(false)
+			return CommandRegistry.CommandResult.error("Failed to enter: %s" % cell_name)
+		return CommandRegistry.CommandResult.ok("Teleporting to: %s" % cell_name)
+
+	return CommandRegistry.CommandResult.error("Pocket manager not initialized")
 
 
 ## Console command: Center on exterior cell
@@ -640,10 +719,19 @@ func _switch_to_player_controller() -> void:
 	if _ocean_controls:
 		_ocean_controls.set_camera(camera)
 
+	# Update weather particles camera
+	if _weather_controls:
+		_weather_controls.set_camera(camera)
+
 	# Update console camera for object picking
 	if console:
 		console.set_camera(camera)
 		console.register_context("camera", camera)
+
+	# Update pocket manager with player body and camera for transitions
+	if _pocket_manager:
+		_pocket_manager.set_player_body(player_controller)
+		_pocket_manager.set_camera(camera)
 
 	_log("[color=cyan]Switched to PLAYER mode[/color]")
 	_log("WASD to move, Space to jump, Shift to run")
@@ -678,10 +766,18 @@ func _switch_to_fly_camera() -> void:
 	if _ocean_controls:
 		_ocean_controls.set_camera(camera)
 
+	# Update weather particles camera
+	if _weather_controls:
+		_weather_controls.set_camera(camera)
+
 	# Update console camera for object picking
 	if console:
 		console.set_camera(camera)
 		console.register_context("camera", camera)
+
+	# Update pocket manager camera for transitions
+	if _pocket_manager:
+		_pocket_manager.set_camera(camera)
 
 	_log("[color=cyan]Switched to FLY CAMERA mode[/color]")
 	_log("Hold Right-click to look, WASD to move")
@@ -772,7 +868,7 @@ func _get_ground_height(pos: Vector3) -> float:
 
 	# Try to get height from Terrain3D
 	if terrain_3d and terrain_3d.data:
-		height = terrain_3d.data.get_height(pos)
+		height = CS.get_terrain_height(pos, terrain_3d)
 		if is_nan(height) or height > 10000 or height < -1000:
 			height = 0.0
 
@@ -828,11 +924,28 @@ func _setup_visibility_toggles() -> void:
 	}
 	_ocean_controls = OceanControlsScript.new(ocean_callbacks)
 
+	# Create weather controls
+	var weather_callbacks := {
+		"log": _log,
+		"add_child": add_child,
+		"get_active_camera": _get_active_camera,
+	}
+	_weather_controls = WeatherControlsScript.new(weather_callbacks)
+	_weather_controls.setup_renderer(_env_controls)
+
 	# Build foldable panels via ExplorerPanels
 	var callbacks := {
 		"show_characters_toggled": _on_show_characters_toggled,
 		"show_ocean_toggled": _ocean_controls.on_show_ocean_toggled,
-		"show_sky_toggled": _env_controls.on_show_sky_toggled,
+		"show_sky_toggled": _on_show_sky_toggled,
+		"weather_toggled": _weather_controls.on_weather_toggled,
+		"weather_preset_changed": _weather_controls.on_weather_preset_changed,
+		"weather_type_changed": _weather_controls.on_weather_type_changed,
+		"time_of_day_changed": _weather_controls.on_time_of_day_changed,
+		"time_scale_changed": _weather_controls.on_time_scale_changed,
+		"time_pause_toggled": _weather_controls.on_time_pause_toggled,
+		"fog_density_changed": _weather_controls.on_fog_density_changed,
+		"cloud_coverage_changed": _weather_controls.on_cloud_coverage_changed,
 		"resolution_changed": _on_resolution_changed,
 		"water_quality_changed": _ocean_controls.on_water_quality_changed,
 		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
@@ -848,10 +961,7 @@ func _setup_visibility_toggles() -> void:
 		"quality_pretty_preset": _on_quality_pretty_preset,
 		"quality_balanced_preset": _on_quality_balanced_preset,
 		"quality_fast_preset": _on_quality_fast_preset,
-		"fog_toggled": _env_controls.on_fog_effect_toggled,
-		"fog_intensity_changed": _env_controls.on_fog_intensity_changed,
-		"clouds_toggled": _env_controls.on_clouds_effect_toggled,
-		"cloud_coverage_changed": _env_controls.on_cloud_coverage_changed,
+		# VAIO fog/clouds removed from UI — redundant with depth/volumetric fog + SunshineClouds2
 		"color_grading_toggled": _env_controls.on_color_grading_toggled,
 		"morrowind_preset": _env_controls.on_morrowind_color_preset,
 		"dramatic_preset": _env_controls.on_dramatic_color_preset,
@@ -885,6 +995,9 @@ func _setup_visibility_toggles() -> void:
 	# Give panels reference to extracted controls
 	_ocean_controls.set_panels(_panels)
 	_env_controls.set_panels(_panels)
+	_weather_controls.set_panels(_panels)
+	_weather_controls.setup_sunshine_clouds(self, _env_controls.get_fallback_light())
+	_weather_controls.setup_particles(self, _get_active_camera())
 
 	# Create stats collector (extracted in Session 6)
 	_stats_collector = StatsCollectorScript.new(_panels)
@@ -978,6 +1091,13 @@ func _on_lod_mode_pressed() -> void:
 
 ## Toggle characters (NPCs/creatures) visibility
 ## Separate from models for isolated character/animation testing
+func _on_show_sky_toggled(enabled: bool) -> void:
+	_env_controls.on_show_sky_toggled(enabled)
+	# Sync Sky3D reference to weather system so it can drive Sky3D params
+	if _weather_controls:
+		_weather_controls.sync_sky3d()
+
+
 func _on_show_characters_toggled(enabled: bool) -> void:
 	_show_characters = enabled
 
@@ -1202,6 +1322,14 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		else:
 			push_warning("WorldExplorer: Failed to load mid_tier_debugger.gd")
 
+		# Register door/portal debug command
+		console.register_command(
+			"dump_doors",
+			_cmd_dump_doors,
+			"Dump all door pairs with positions and wall normals (portal alignment debug)",
+			"debug"
+		)
+
 		# Register animation prebake command
 		console.register_command(
 			"prebake_anims",
@@ -1265,6 +1393,13 @@ func _cmd_toggle_batch_debug(_args: Dictionary) -> String:
 	return "Batch debug HUD not initialized"
 
 
+func _cmd_dump_doors(_args: Dictionary) -> String:
+	if _pocket_manager:
+		_pocket_manager.debug_dump_doors()
+		return "Door dump printed to log (check streaming category)"
+	return "Interior pocket manager not available"
+
+
 func _cmd_prebake_animations(_args: Dictionary) -> String:
 	var prebaker := ModelPrebaker.new()
 	prebaker.animation_output_dir = SettingsManager.get_models_path()
@@ -1281,11 +1416,21 @@ func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 	_log("Cell loaded: (%d, %d) - %d objects (native)" % [grid.x, grid.y, object_count])
 	_update_stats()
 
+	# Register doors from newly loaded cell with pocket manager
+	if _pocket_manager:
+		var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
+		if cell:
+			_pocket_manager.register_exterior_cell_doors(cell, grid)
+
 
 ## Callback for native streaming manager cell unloaded
 func _on_native_cell_unloaded(grid: Vector2i) -> void:
 	_log("Cell unloaded: (%d, %d) (native)" % [grid.x, grid.y])
 	_update_stats()
+
+	# Unregister doors from unloaded cell
+	if _pocket_manager:
+		_pocket_manager.unregister_exterior_cell_doors(grid)
 
 
 func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
@@ -1305,7 +1450,7 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 
 	# Get terrain height from single Terrain3D
 	if terrain_3d and terrain_3d.data:
-		height = terrain_3d.data.get_height(Vector3(world_x, 0, world_z))
+		height = CS.get_terrain_height(Vector3(world_x, 0, world_z), terrain_3d)
 		if is_nan(height) or height > 10000:
 			height = 50.0
 
@@ -1370,6 +1515,17 @@ func _create_escape_menu() -> void:
 	spacer.custom_minimum_size.y = 8
 	vbox.add_child(spacer)
 
+	# Seamless transitions toggle
+	var seamless_check := CheckBox.new()
+	seamless_check.text = "Seamless interior transitions"
+	seamless_check.button_pressed = false
+	seamless_check.toggled.connect(func(enabled: bool) -> void:
+		if _pocket_manager:
+			_pocket_manager.seamless_enabled = enabled
+			Log.info("streaming", "Interior mode: %s" % ("seamless" if enabled else "classic"))
+	)
+	vbox.add_child(seamless_check)
+
 	# Resume button
 	var resume_btn := Button.new()
 	resume_btn.text = "Resume"
@@ -1381,7 +1537,7 @@ func _create_escape_menu() -> void:
 	var quit_btn := Button.new()
 	quit_btn.text = "Quit"
 	quit_btn.custom_minimum_size.y = 40
-	quit_btn.pressed.connect(func() -> void: get_tree().quit())
+	quit_btn.pressed.connect(_do_fast_quit)
 	vbox.add_child(quit_btn)
 
 	$UI.add_child(_escape_menu)
@@ -1446,12 +1602,18 @@ func _hide_loading() -> void:
 
 func _on_streaming_startup_progress(progress: float, loaded_cells: int, total_cells: int, queued_objects: int) -> void:
 	loading_overlay.visible = true
-	loading_label.text = "Loading World"
-	status_label.text = "Cells: %d/%d | Objects queued: %d" % [loaded_cells, total_cells, queued_objects]
+	if progress < 40.0:
+		loading_label.text = "Loading World"
+		status_label.text = "Cells: %d/%d | Objects queued: %d" % [loaded_cells, total_cells, queued_objects]
+	else:
+		loading_label.text = "Building Horizon"
+		var impostor_pct := int((progress - 40.0) / 60.0 * 100.0)
+		status_label.text = "Impostors: %d%% | Cells: %d" % [impostor_pct, loaded_cells]
 	progress_bar.value = progress
 
 
 func _on_streaming_startup_complete() -> void:
+	_is_loading = false
 	_hide_loading()
 
 
@@ -1478,6 +1640,11 @@ func _log(message: String) -> void:
 # ==================== Input Handling ====================
 
 func _input(event: InputEvent) -> void:
+	# Block all input during loading — player shouldn't move/look until ready
+	if _is_loading:
+		get_viewport().set_input_as_handled()
+		return
+
 	# Escape menu takes priority
 	if event is InputEventKey:
 		var key_event := event as InputEventKey
@@ -1501,10 +1668,10 @@ func _input(event: InputEvent) -> void:
 			KEY_P:
 				# Toggle between fly camera and player controller
 				_toggle_camera_mode()
-			KEY_TAB:
-				# Toggle between World and Interior modes
-				if _cell_browser:
-					_cell_browser.toggle_explorer_mode()
+			KEY_E:
+				# Enter/exit interior doors
+				_activate_nearest_door()
+			# KEY_TAB removed — interior browser mode is accessible via UI button only
 			KEY_F3:
 				# Toggle performance overlay
 				_perf_overlay_visible = not _perf_overlay_visible
@@ -1561,6 +1728,19 @@ func _process(delta: float) -> void:
 
 		cell_manager.process_async_instantiation(budget_ms)
 
+	# Update interior pocket manager (door detection, eviction)
+	if _pocket_manager:
+		_pocket_manager.update(camera.global_position, delta)
+		_update_door_prompt()
+
+	# Update weather rendering
+	if _weather_controls:
+		_weather_controls.process(delta)
+
+	# Update horizon map sun direction
+	if _horizon_map_manager:
+		_horizon_map_manager.update_sun_direction()
+
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:
 		_update_stats()
@@ -1575,6 +1755,174 @@ func _adjust_view_distance(delta: int) -> void:
 		world_streaming_manager.refresh_cells()
 	_log("View distance: %d cells (~%dm)" % [_current_view_distance, _current_view_distance * 117])
 	_update_stats()
+
+
+# ==================== Interior Transitions ====================
+
+## Setup interior pocket manager for seamless transitions
+func _setup_pocket_manager() -> void:
+	_pocket_manager = InteriorPocketManagerScript.new()
+	_pocket_manager.name = "InteriorPocketManager"
+	add_child(_pocket_manager)
+
+	# Find the WorldEnvironment node in scene tree
+	var world_env: WorldEnvironment = null
+	for child in get_children():
+		if child is WorldEnvironment:
+			world_env = child
+			break
+
+	# Find the sun (DirectionalLight3D) for interior cull mask management
+	var sun: DirectionalLight3D = _find_sun_light()
+
+	_pocket_manager.initialize(cell_manager, world_env, camera, sun)
+
+	# Hide Terrain3D during interior transitions — camera at Y=-500 causes
+	# Terrain3D GDExtension to crash (clipmap generation at underground position)
+	_pocket_manager.transition_started.connect(_on_interior_transition_started)
+	_pocket_manager.transition_completed.connect(_on_interior_transition_completed)
+
+	# Set player body for physics layer swapping during transitions
+	if player_controller:
+		_pocket_manager.set_player_body(player_controller)
+
+	# Create door prompt label
+	_create_door_prompt()
+
+	# Register doors from already-loaded cells
+	if world_streaming_manager:
+		var loaded: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
+		for grid: Vector2i in loaded:
+			var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
+			if cell:
+				_pocket_manager.register_exterior_cell_doors(cell, grid)
+
+	Log.info("streaming", "Interior pocket manager initialized")
+
+
+## Find the first DirectionalLight3D in the scene tree (sun/moon light)
+func _find_sun_light() -> DirectionalLight3D:
+	return _find_directional_light_recursive(get_tree().root)
+
+
+func _find_directional_light_recursive(node: Node) -> DirectionalLight3D:
+	if node is DirectionalLight3D:
+		return node as DirectionalLight3D
+	for child in node.get_children():
+		var result: DirectionalLight3D = _find_directional_light_recursive(child)
+		if result:
+			return result
+	return null
+
+
+## Create the "Press E to enter" prompt overlay
+func _create_door_prompt() -> void:
+	_door_prompt_label = Label.new()
+	_door_prompt_label.name = "DoorPrompt"
+	_door_prompt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_door_prompt_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_door_prompt_label.add_theme_font_size_override("font_size", 20)
+	_door_prompt_label.add_theme_color_override("font_color", Color.WHITE)
+	_door_prompt_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	_door_prompt_label.add_theme_constant_override("shadow_offset_x", 2)
+	_door_prompt_label.add_theme_constant_override("shadow_offset_y", 2)
+	# Position at bottom-center of screen
+	_door_prompt_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_door_prompt_label.offset_top = -80
+	_door_prompt_label.offset_bottom = -40
+	_door_prompt_label.offset_left = -200
+	_door_prompt_label.offset_right = 200
+	_door_prompt_label.visible = false
+	$UI.add_child(_door_prompt_label)
+
+
+## Update door prompt visibility based on proximity
+func _update_door_prompt() -> void:
+	if not _pocket_manager or not _door_prompt_label:
+		return
+
+	var door: Variant = _pocket_manager.get_closest_door()
+	if door:
+		if _pocket_manager.is_inside():
+			# Check if door leads out or to another interior
+			if not door.target_cell_name.is_empty():
+				var dest: CellRecord = ESMManager.get_cell(door.target_cell_name)
+				if dest and dest.is_interior():
+					_door_prompt_label.text = "Press E to enter %s" % door.target_cell_name
+				else:
+					_door_prompt_label.text = "Press E to exit"
+			else:
+				_door_prompt_label.text = "Press E to exit"
+		else:
+			_door_prompt_label.text = "Press E to enter %s" % door.target_cell_name
+		_door_prompt_label.visible = true
+	else:
+		_door_prompt_label.visible = false
+
+
+## Activate the nearest door (enter/exit interior)
+func _activate_nearest_door() -> void:
+	if not _pocket_manager:
+		return
+
+	var door: Variant = _pocket_manager.get_closest_door()
+	if not door:
+		return
+
+	Log.info("streaming", "[DOOR_ACTIVATE] Door: '%s' -> '%s', inside=%s" % [
+		door.ref_id, door.target_cell_name, _pocket_manager.is_inside()])
+
+	if _pocket_manager.is_inside():
+		var dest: CellRecord = ESMManager.get_cell(door.target_cell_name)
+		if dest and dest.is_interior():
+			await _pocket_manager.transition_interior_to_interior(door)
+		else:
+			# Exit: teleport back to surface, THEN resume streaming.
+			# Streaming was paused since enter — cells are still loaded (frozen).
+			await _pocket_manager.exit_to_exterior(door)
+			_set_streaming_paused(false)
+			_log("[color=cyan]Exited to exterior[/color]")
+	else:
+		# Pause streaming BEFORE enter so cells don't unload when camera goes to Y=-500.
+		# Cells stay frozen in place. Fade-to-black covers the visual transition.
+		_set_streaming_paused(true)
+		var success: bool = await _pocket_manager.enter_interior(door)
+		if success:
+			_log("[color=cyan]Entered interior: %s[/color]" % door.target_cell_name)
+		else:
+			# Failed — resume streaming
+			_set_streaming_paused(false)
+			Log.error("streaming", "[DOOR_ACTIVATE] enter_interior FAILED for '%s'" % door.target_cell_name)
+
+
+## Pause/resume the streaming manager and its children (BackgroundProcessor).
+## CRITICAL: Must be called before interior transitions. Without this, the streaming
+## manager detects the camera at Y=-500 (pocket position), computes a wrong grid cell,
+## and unloads ALL exterior cells mid-transition → use-after-free → segfault.
+func _set_streaming_paused(paused: bool) -> void:
+	if world_streaming_manager:
+		world_streaming_manager.set_process(not paused)
+		# Also pause children (BackgroundProcessor) to prevent async completions
+		# from touching cell data during the transition
+		for child in world_streaming_manager.get_children():
+			child.set_process(not paused)
+	Log.info("streaming", "[STREAMING] Paused=%s" % paused)
+
+
+## Hide Terrain3D when entering interior — camera at Y=-500 causes
+## Terrain3D GDExtension to crash (clipmap generation at underground position).
+func _on_interior_transition_started(_cell_name: String) -> void:
+	if terrain_3d:
+		terrain_3d.visible = false
+		Log.info("streaming", "[TRANSITION] Terrain3D hidden (entering interior)")
+
+
+## Restore Terrain3D when exiting to exterior.
+func _on_interior_transition_completed(cell_name: String) -> void:
+	if not _pocket_manager or not _pocket_manager.is_inside():
+		if terrain_3d:
+			terrain_3d.visible = true
+			Log.info("streaming", "[TRANSITION] Terrain3D restored (exited to exterior)")
 
 
 # ==================== Interior Cell Browser ====================

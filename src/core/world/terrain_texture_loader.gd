@@ -199,9 +199,10 @@ func _add_default_texture(terrain_assets: Terrain3DAssets) -> void:
 		var img := Image.create(64, 64, false, Image.FORMAT_RGB8)
 		img.fill(Color(0.4, 0.35, 0.3))  # Brownish-gray default
 		img.generate_mipmaps()
+		img.compress(Image.COMPRESS_BPTC)
 		asset.albedo_texture = ImageTexture.create_from_image(img)
 
-	terrain_assets.set_texture(0, asset)
+	terrain_assets.set_texture_asset(0, asset)
 	_slot_mapping[0] = 0
 	_next_slot = 1
 	Log.info("textures", "Default texture added to slot 0")
@@ -241,7 +242,7 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 
 	# Add to Terrain3D at next available slot
 	var slot := _next_slot
-	terrain_assets.set_texture(slot, asset)
+	terrain_assets.set_texture_asset(slot, asset)
 
 	# Store mapping: MW index -> Terrain3D slot
 	_slot_mapping[mw_index] = slot
@@ -384,7 +385,12 @@ func _ensure_mipmaps(texture: ImageTexture) -> ImageTexture:
 		push_warning("TerrainTextureLoader: generate_mipmaps() succeeded but image still has no mipmaps")
 		return texture
 
-	# Create new texture from the mipmapped image
+	# Recompress to BC7 (BPTC) for ~75% VRAM savings with near-lossless quality
+	var compress_err := img.compress(Image.COMPRESS_BPTC)
+	if compress_err != OK:
+		Log.warn("textures", "BC7 compression failed (format=%d), using uncompressed" % original_format)
+
+	# Create new texture from the mipmapped (and possibly compressed) image
 	var new_texture := ImageTexture.create_from_image(img)
 
 	# Double-check the new texture
@@ -421,12 +427,14 @@ func verify_terrain_assets(terrain_assets: Terrain3DAssets) -> void:
 	var tex_count := terrain_assets.get_texture_count()
 	lines.append("  Terrain3DAssets texture count: %d" % tex_count)
 	for i in range(mini(tex_count, 10)):  # Check first 10 slots
-		var asset := terrain_assets.get_texture(i)
+		@warning_ignore("untyped_declaration")
+		var asset = terrain_assets.get_texture_asset(i)
 		if asset:
 			var has_albedo := asset.albedo_texture != null
 			var tex_size := ""
 			if asset.albedo_texture:
-				var img := asset.albedo_texture.get_image()
+				@warning_ignore("untyped_declaration")
+				var img = asset.albedo_texture.get_image()
 				if img:
 					tex_size = "%dx%d" % [img.get_width(), img.get_height()]
 					tex_size += " mipmaps=%s" % str(img.has_mipmaps())

@@ -2210,11 +2210,11 @@ func _apply_planar_collider(collider: Defs.NiPlanarCollider, node: GPUParticles3
 	# Negative strength pushes particles away (bounce effect)
 	attractor.strength = -collider.bounce * 10.0
 
-	# Orient the box to align with the plane normal
+	node.add_child(attractor)
+
+	# Orient the box to align with the plane normal (must be in tree for look_at)
 	if plane_normal != Vector3.UP and plane_normal != Vector3.DOWN:
 		attractor.look_at(attractor.position + plane_normal)
-
-	node.add_child(attractor)
 
 
 ## Apply NiSphericalCollider to particle system
@@ -2275,9 +2275,10 @@ func _apply_particle_bomb(bomb: Defs.NiParticleBomb, material: ParticleProcessMa
 			attractor.position = position
 			attractor.size = Vector3(10.0, 10.0, 10.0)  # Large area
 			attractor.strength = bomb.delta_v * CS.SCALE_FACTOR
+			node.add_child(attractor)
+			# Must be in tree for look_at
 			if direction != Vector3.ZERO:
 				attractor.look_at(attractor.position + direction)
-			node.add_child(attractor)
 
 
 ## Get texture material for particles from NiTexturingProperty

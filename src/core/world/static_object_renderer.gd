@@ -128,7 +128,9 @@ func _enter_tree() -> void:
 
 
 func _exit_tree() -> void:
-	# Clean up all RenderingServer resources
+	# If quitting, fast_cleanup already freed RS RIDs — skip redundant work
+	if Engine.has_meta("_quitting"):
+		return
 	clear()
 
 
@@ -608,12 +610,13 @@ func remove_instance(id: int) -> void:
 		_stats["visible_instances"] -= 1
 	_stats["total_instances"] -= 1
 
-	# Maintain spatial index
+	# Maintain spatial index (swap-and-pop for O(1) removal)
 	if data.cell_grid in _cell_index:
 		var cell_ids: Array = _cell_index[data.cell_grid]
 		var idx := cell_ids.find(id)
 		if idx >= 0:
-			cell_ids.remove_at(idx)
+			cell_ids[idx] = cell_ids.back()
+			cell_ids.pop_back()
 		if cell_ids.is_empty():
 			_cell_index.erase(data.cell_grid)
 
@@ -633,6 +636,68 @@ func remove_cell_instances(cell_grid: Vector2i) -> int:
 		remove_instance(id)
 
 	return to_remove.size()
+
+
+## Hide all instances belonging to a cell (fast — no GPU resource cleanup)
+## Used for immediate visual removal before deferred free_rid() cleanup
+func hide_cell_instances(cell_grid: Vector2i) -> int:
+	if cell_grid not in _cell_index:
+		return 0
+
+	var count := 0
+	for id: int in _cell_index[cell_grid]:
+		if id not in _instances:
+			continue
+		var data: InstanceData = _instances[id]
+		if not data.lod_rids.is_empty():
+			for lod_rid: RID in data.lod_rids:
+				if lod_rid.is_valid():
+					RenderingServer.instance_set_visible(lod_rid, false)
+		elif data.instance_rid.is_valid():
+			RenderingServer.instance_set_visible(data.instance_rid, false)
+		data.visible = false
+		count += 1
+
+	return count
+
+
+## Budgeted hide: hides up to `max_count` RS instances for a cell.
+## Returns: [hidden_count, is_complete] — hidden_count is how many were hidden this call,
+## is_complete is true when all instances in the cell have been hidden.
+## Call repeatedly across frames until is_complete is true.
+var _cell_hide_progress: Dictionary[Vector2i, int] = {}  # cell_grid -> index into _cell_index[grid]
+
+func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
+	if cell_grid not in _cell_index:
+		_cell_hide_progress.erase(cell_grid)
+		return [0, true]
+
+	var cell_ids: Array = _cell_index[cell_grid]
+	var start_idx: int = _cell_hide_progress.get(cell_grid, 0)
+	var hidden := 0
+
+	var i := start_idx
+	while i < cell_ids.size() and hidden < max_count:
+		var id: int = cell_ids[i]
+		if id in _instances:
+			var data: InstanceData = _instances[id]
+			if data.visible:
+				if not data.lod_rids.is_empty():
+					for lod_rid: RID in data.lod_rids:
+						if lod_rid.is_valid():
+							RenderingServer.instance_set_visible(lod_rid, false)
+				elif data.instance_rid.is_valid():
+					RenderingServer.instance_set_visible(data.instance_rid, false)
+				data.visible = false
+				hidden += 1
+		i += 1
+
+	var is_complete: bool = i >= cell_ids.size()
+	if is_complete:
+		_cell_hide_progress.erase(cell_grid)
+	else:
+		_cell_hide_progress[cell_grid] = i
+	return [hidden, is_complete]
 
 #endregion
 

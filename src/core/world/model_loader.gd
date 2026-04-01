@@ -144,6 +144,7 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 	var converter := NIFConverter.new()
 	converter.generate_lods = true  # LODs embedded in model for MID tier MultiMesh
 	converter.generate_occluders = false  # Occluders handled separately
+	converter.load_animations = true  # Include NIF keyframe animations in prebaked .res
 	if not item_id.is_empty():
 		converter.collision_item_id = item_id
 	var node := converter.convert_buffer(nif_data, full_path)

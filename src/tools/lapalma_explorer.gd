@@ -163,8 +163,9 @@ func _init_terrain3d() -> void:
 	terrain_3d.material.show_colormap = true  # Use procedural height colors
 
 	# Disable macro variation (color noise) which can look foggy at distance
-	# Use Terrain3DMaterial's set_shader_param method
-	terrain_3d.material.set_shader_param(&"enable_macro_variation", false)
+	if terrain_3d.material:
+		var mat_rid: RID = terrain_3d.material.get_material_rid()
+		RenderingServer.material_set_param(mat_rid, &"macro_variation_enabled", false)
 	_log("Disabled macro_variation for clearer distance view")
 
 	_log("Material settings: checkered=false, colormap=true")

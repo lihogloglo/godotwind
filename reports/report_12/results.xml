@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-03-30" name="report_12" tests="13" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_coordinate_system" package="tests/unit" timestamp="2026-03-30T13:48:44" hostname="localhost" tests="4" failures="0" errors="0" skipped="0" flaky="0" time="0.912">
+		<testcase name="test_vector_to_godot_zero" classname="test_coordinate_system" time="0.092">
+		</testcase>
+		<testcase name="test_vector_to_godot_axes" classname="test_coordinate_system" time="0.095">
+		</testcase>
+		<testcase name="test_vector_roundtrip" classname="test_coordinate_system" time="0.094">
+		</testcase>
+		<testcase name="test_cell_size_is_positive" classname="test_coordinate_system" time="0.095">
+		</testcase>
+	</testsuite>
+	<testsuite id="1" name="test_distance_utils" package="tests/unit" timestamp="2026-03-30T13:48:45" hostname="localhost" tests="9" failures="0" errors="0" skipped="0" flaky="0" time="2.009">
+		<testcase name="test_cell_distance_squared_same_cell" classname="test_distance_utils" time="0.096">
+		</testcase>
+		<testcase name="test_cell_distance_squared_adjacent" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_cell_distance_squared_diagonal" classname="test_distance_utils" time="0.094">
+		</testcase>
+		<testcase name="test_cell_distance_is_sqrt_of_squared" classname="test_distance_utils" time="0.093">
+		</testcase>
+		<testcase name="test_cell_to_world_center_origin" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_world_to_cell_roundtrip" classname="test_distance_utils" time="0.094">
+		</testcase>
+		<testcase name="test_tier_constants_are_ordered" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_distance_to_cell_radius" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_is_cell_in_range" classname="test_distance_utils" time="0.095">
+		</testcase>
+	</testsuite>
+</testsuites>

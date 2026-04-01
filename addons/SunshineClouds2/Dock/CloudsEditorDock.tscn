@@ -1,0 +1,349 @@
+[gd_scene load_steps=18 format=3 uid="uid://bsmrb5nocmcin"]
+
+[ext_resource type="Script" uid="uid://dnan3ytl8evv1" path="res://addons/SunshineClouds2/Dock/CloudsEditorController.gd" id="1_c42ej"]
+[ext_resource type="Texture2D" uid="uid://l06i8g7p2msv" path="res://addons/SunshineClouds2/Dock/Icons/caret-down-solid.svg" id="2_8dri0"]
+[ext_resource type="Texture2D" uid="uid://b404vxesyde33" path="res://addons/SunshineClouds2/CloudsDriverIcon.svg" id="2_tc6ic"]
+[ext_resource type="Script" uid="uid://cb3ho8b5lgx55" path="res://addons/SunshineClouds2/Dock/AccordionButton.gd" id="2_wp1ai"]
+[ext_resource type="StyleBox" uid="uid://dl1aqqpt5iprl" path="res://addons/SunshineClouds2/Dock/DockPanelStyle.tres" id="2_x2oe8"]
+[ext_resource type="RDShaderFile" uid="uid://ck1yv82gbxncv" path="res://addons/SunshineClouds2/Dock/MaskDrawingCompute.glsl" id="2_yqrwx"]
+[ext_resource type="Texture2D" uid="uid://dwbw6ov5xxrkq" path="res://addons/SunshineClouds2/Dock/Icons/cloud-solid.svg" id="7_8l8c2"]
+[ext_resource type="Texture2D" uid="uid://s862ukpen76d" path="res://addons/SunshineClouds2/Dock/Icons/cloud-solid-toggled.svg" id="8_w3q10"]
+[ext_resource type="Texture2D" uid="uid://lr3flf2kgx3g" path="res://addons/SunshineClouds2/Dock/Icons/cloud-solid-hovered.svg" id="9_kg56n"]
+[ext_resource type="Texture2D" uid="uid://dpwhekui78xl1" path="res://addons/SunshineClouds2/Dock/Icons/paintbrush-solid.svg" id="10_6j812"]
+[ext_resource type="Texture2D" uid="uid://ctwabn07mc0k7" path="res://addons/SunshineClouds2/Dock/Icons/paintbrush-solid-toggled.svg" id="11_20jq1"]
+[ext_resource type="Texture2D" uid="uid://d0orkqlt3nybm" path="res://addons/SunshineClouds2/Dock/Icons/paintbrush-solid-hovered.svg" id="12_lwakg"]
+[ext_resource type="Script" uid="uid://cb12y8ylifwet" path="res://addons/SunshineClouds2/Dock/AdaptingGridContainer.gd" id="13_w3q10"]
+
+[sub_resource type="LabelSettings" id="LabelSettings_yqrwx"]
+font_size = 24
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_tc6ic"]
+bg_color = Color(0.257374, 0.311252, 0.386689, 0.564706)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_yqrwx"]
+bg_color = Color(0.0680232, 0.0903094, 0.121509, 0.564706)
+
+[sub_resource type="StyleBoxEmpty" id="StyleBoxEmpty_ml10g"]
+
+[node name="CloudsEditor" type="Control" node_paths=PackedStringArray("CloudsStatusLabel", "CloudsActiveToggle", "CloudsDriverRefresh", "CloudsDriverAccordianButton", "UseMaskToggle", "MaskStatusLabel", "MaskFilePath", "MaskResolution", "MaskWidth", "DrawWeightEnable", "DrawColorEnable", "DrawColorPicker", "DrawTools", "DrawSharpness", "DrawStrength")]
+clip_contents = true
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_bottom = 278.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_c42ej")
+CloudsStatusLabel = NodePath("ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer/Label")
+CloudsActiveToggle = NodePath("ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer/CheckButton")
+CloudsDriverRefresh = NodePath("ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer/DriverQueryButton")
+CloudsDriverAccordianButton = NodePath("ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/AccordionButton")
+UseMaskToggle = NodePath("ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MaskUsageCheckButton")
+MaskStatusLabel = NodePath("ScrollContainer/VBoxContainer/MaskStatusOutput")
+MaskFilePath = NodePath("ScrollContainer/VBoxContainer/HBoxContainer/LineEdit")
+MaskResolution = NodePath("ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Resolution/SpinBox")
+MaskWidth = NodePath("ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Width/SpinBox")
+DrawWeightEnable = NodePath("ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer/CloudsWeight")
+DrawColorEnable = NodePath("ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer/CloudsColor")
+DrawColorPicker = NodePath("ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/ColorPicker")
+DrawTools = NodePath("ScrollContainer/VBoxContainer/DrawTools")
+DrawSharpness = NodePath("ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/VBoxContainer/Sharpness")
+DrawStrength = NodePath("ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/VBoxContainer/Strength")
+compute_shader = ExtResource("2_yqrwx")
+DrawingColor = Color(0.769578, 0.731927, 0.149317, 1)
+InvertedDrawingColor = Color(0.765928, 0.254294, 0.0203708, 1)
+
+[node name="ScrollContainer" type="ScrollContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+horizontal_scroll_mode = 0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="HBoxContainer2" type="HBoxContainer" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+alignment = 1
+
+[node name="Label" type="Label" parent="ScrollContainer/VBoxContainer/HBoxContainer2"]
+layout_mode = 2
+text = "Sunshine Clouds Editor"
+label_settings = SubResource("LabelSettings_yqrwx")
+
+[node name="TextureRect" type="TextureRect" parent="ScrollContainer/VBoxContainer/HBoxContainer2"]
+layout_mode = 2
+texture = ExtResource("2_tc6ic")
+expand_mode = 3
+
+[node name="HSeparator2" type="HSeparator" parent="ScrollContainer/VBoxContainer"]
+custom_minimum_size = Vector2(0, 18.49)
+layout_mode = 2
+
+[node name="MaskStatusOutput" type="Label" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+text = "Mask Detected: res://CloudsMask.png"
+
+[node name="HBoxContainer" type="HBoxContainer" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="ScrollContainer/VBoxContainer/HBoxContainer"]
+layout_mode = 2
+text = "Mask Path:"
+
+[node name="LineEdit" type="LineEdit" parent="ScrollContainer/VBoxContainer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "res://CloudsMask.exr"
+
+[node name="MaskBuildButton" type="Button" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 0
+text = "Refresh Mask Reference"
+
+[node name="MaskSettings" type="PanelContainer" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_styles/panel = ExtResource("2_x2oe8")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/MaskSettings"]
+layout_mode = 2
+
+[node name="AccordionButton" type="Button" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer"]
+layout_mode = 2
+theme_override_styles/hover = SubResource("StyleBoxFlat_tc6ic")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_yqrwx")
+theme_override_styles/normal = SubResource("StyleBoxEmpty_ml10g")
+text = "Mask Settings"
+icon = ExtResource("2_8dri0")
+alignment = 0
+icon_alignment = 2
+expand_icon = true
+script = ExtResource("2_wp1ai")
+metadata/_custom_type_script = "uid://cb3ho8b5lgx55"
+
+[node name="Resolution" type="HBoxContainer" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer"]
+visible = false
+layout_mode = 2
+
+[node name="Label" type="Label" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Resolution"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Mask Resolution"
+
+[node name="SpinBox" type="SpinBox" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Resolution"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 32.0
+max_value = 1024.0
+value = 128.0
+
+[node name="Width" type="HBoxContainer" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer"]
+visible = false
+layout_mode = 2
+
+[node name="Label" type="Label" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Width"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Mask Width"
+
+[node name="SpinBox" type="SpinBox" parent="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Width"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 12.0
+max_value = 1024.0
+value = 32.0
+suffix = "km"
+
+[node name="PanelContainer" type="PanelContainer" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_styles/panel = ExtResource("2_x2oe8")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/PanelContainer"]
+layout_mode = 2
+
+[node name="AccordionButton" type="Button" parent="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_styles/hover = SubResource("StyleBoxFlat_tc6ic")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_yqrwx")
+theme_override_styles/normal = SubResource("StyleBoxEmpty_ml10g")
+text = "Driver Controls
+"
+icon = ExtResource("2_8dri0")
+alignment = 0
+icon_alignment = 2
+expand_icon = true
+script = ExtResource("2_wp1ai")
+metadata/_custom_type_script = "uid://cb3ho8b5lgx55"
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer"]
+layout_mode = 2
+text = "Clouds not present"
+
+[node name="CheckButton" type="CheckButton" parent="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer"]
+layout_mode = 2
+text = "Clouds Updating"
+
+[node name="DriverQueryButton" type="Button" parent="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer"]
+visible = false
+layout_mode = 2
+size_flags_horizontal = 0
+text = "Search for Driver"
+
+[node name="DrawTools" type="PanelContainer" parent="ScrollContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_styles/panel = ExtResource("2_x2oe8")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/DrawTools"]
+layout_mode = 2
+
+[node name="MaskUsageCheckButton" type="CheckButton" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer"]
+layout_mode = 2
+text = "Clouds Mask Enabled"
+
+[node name="MarginContainer2" type="MarginContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 10
+
+[node name="Label" type="Label" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer2"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+text = "Draw mode allows for creation of clouds directly using a mask texture.
+
+When mask mode is disabled, the extra large noise pattern is used to add large scale structures to the world, when mask usage is enabled it is treated as a stationary mask in the world, with rgb being used to tint the clouds, and the alpha used to draw clouds.
+
+Drawing Controls (When drawing either weight, or color):
+Scroll Wheel: Scale up and down brush size
+Left Mouse Button: Paint Clouds
+Ctrl+Left Mouse Button: Erase Clouds
+Escape: Disable draw mode"
+autowrap_mode = 3
+
+[node name="HSeparator" type="HSeparator" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer"]
+custom_minimum_size = Vector2(0, 17.4)
+layout_mode = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 10
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer"]
+layout_mode = 2
+
+[node name="HBoxContainer" type="HBoxContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="CloudsWeight" type="TextureButton" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer"]
+custom_minimum_size = Vector2(50, 50)
+layout_mode = 2
+tooltip_text = "Draw Cloud Weight"
+focus_mode = 0
+toggle_mode = true
+texture_normal = ExtResource("7_8l8c2")
+texture_pressed = ExtResource("8_w3q10")
+texture_hover = ExtResource("9_kg56n")
+ignore_texture_size = true
+stretch_mode = 4
+
+[node name="CloudsColor" type="TextureButton" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer"]
+custom_minimum_size = Vector2(50, 50)
+layout_mode = 2
+tooltip_text = "Draw Cloud Color"
+focus_mode = 0
+toggle_mode = true
+texture_normal = ExtResource("10_6j812")
+texture_pressed = ExtResource("11_20jq1")
+texture_hover = ExtResource("12_lwakg")
+ignore_texture_size = true
+stretch_mode = 4
+
+[node name="HBoxContainer" type="HBoxContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 25
+alignment = 2
+
+[node name="Button" type="Button" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer/HBoxContainer"]
+layout_mode = 2
+tooltip_text = "Will fill the mask with the selected color and draw strength (This cannot be undone, make backups of your mask texture)."
+focus_mode = 0
+theme_override_colors/font_hover_color = Color(1, 0.1, 0, 0.968627)
+theme_override_colors/font_color = Color(0.94, 0.313333, 0, 0.682353)
+text = "Flood Fill mask"
+
+[node name="HSeparator" type="HSeparator" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer"]
+custom_minimum_size = Vector2(0, 17.4)
+layout_mode = 2
+
+[node name="GridContainer" type="GridContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/h_separation = 20
+columns = 2
+script = ExtResource("13_w3q10")
+TargetColumnCount = 2
+MinimumColumnSize = 250.0
+
+[node name="ColorPicker" type="ColorPicker" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer"]
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 0
+theme_override_constants/sv_width = 240
+theme_override_constants/sv_height = 155
+edit_alpha = false
+color_mode = 3
+sampler_visible = false
+presets_visible = false
+
+[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Label2" type="Label" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/VBoxContainer"]
+layout_mode = 2
+text = "Draw Strength:"
+
+[node name="Strength" type="HSlider" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/VBoxContainer"]
+layout_mode = 2
+max_value = 5.0
+step = 0.0
+value = 0.5
+
+[node name="Label3" type="Label" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/VBoxContainer"]
+layout_mode = 2
+text = "Draw Sharpness:"
+
+[node name="Sharpness" type="HSlider" parent="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/GridContainer/VBoxContainer"]
+layout_mode = 2
+min_value = 0.05
+max_value = 0.95
+step = 0.0
+value = 0.2
+
+[node name="HSeparator" type="HSeparator" parent="ScrollContainer/VBoxContainer"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+
+[connection signal="text_submitted" from="ScrollContainer/VBoxContainer/HBoxContainer/LineEdit" to="." method="UpdateMaskSettings" unbinds=1]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/MaskBuildButton" to="." method="UpdateMaskSettings"]
+[connection signal="value_changed" from="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Resolution/SpinBox" to="." method="UpdateMaskSettings" unbinds=1]
+[connection signal="value_changed" from="ScrollContainer/VBoxContainer/MaskSettings/VBoxContainer/Width/SpinBox" to="." method="UpdateMaskSettings" unbinds=1]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer/CheckButton" to="." method="SetCloudsUpdating"]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/PanelContainer/VBoxContainer/VBoxContainer/DriverQueryButton" to="." method="RefreshSceneNode"]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MaskUsageCheckButton" to="." method="UpdateMaskSettings"]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer/CloudsWeight" to="." method="DrawWeightToggled"]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer/CloudsColor" to="." method="DrawColorToggled"]
+[connection signal="pressed" from="ScrollContainer/VBoxContainer/DrawTools/VBoxContainer/MarginContainer/VBoxContainer/HBoxContainer/HBoxContainer/Button" to="." method="FloodFill"]

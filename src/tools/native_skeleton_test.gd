@@ -22,6 +22,8 @@ var _bone_remap: Dictionary = {}
 
 
 func _ready() -> void:
+	if Engine.is_editor_hint():
+		return
 	_setup_camera()
 	_setup_ui()
 

@@ -354,9 +354,12 @@ vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, fl
 	vec3 sun_disk = calc_disk_mask(world_pos, sun_pos, sun_disk_size) * sun_disk_color.rgb * scatter.rgb;
 	sun_disk *= sun_disk_intensity;
 
-	// Moon
+	// Moon — fade out during day to prevent black disk artifact.
+	// Without day_fade, the unlit moon face (ndotl=0) renders as black while
+	// moonMask occludes stars behind it, creating a visible black sphere.
 	float moon_intersect = simple_sphere_intersect(world_pos, moon_pos, moon_size);
-	float moon_mask = moon_intersect > (-1. + sqrt(moon_size)) ? 1.0 : 0.0;
+	float day_fade = clamp_to_unit(angle_mult.z * 2.0);
+	float moon_mask = moon_intersect > (-1. + sqrt(moon_size)) ? day_fade : 0.0;
 	vec3 moon_normal = normalize(world_pos * moon_intersect - moon_pos);
 
 	float moon_ndotl = clamp(dot(moon_normal, sun_pos), 0.0, 1.0);

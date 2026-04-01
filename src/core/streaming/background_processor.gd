@@ -62,6 +62,27 @@ func _ready() -> void:
 	Log.info("threading", "BackgroundProcessor initialized with %d concurrent task limit" % _concurrent_limit)
 
 
+func _exit_tree() -> void:
+	_running = false
+	# If quitting, fast_cleanup already cleared everything — bail immediately
+	# WTP handles are abandoned; the OS reclaims them when the process exits
+	if Engine.has_meta("_quitting"):
+		return
+	# Only wait for COMPLETED tasks (instant) — don't block on in-progress ones
+	# Blocking on disk I/O tasks causes the freeze on Alt+F4
+	for task_id: int in _active_tasks:
+		var task: TaskEntry = _active_tasks[task_id]
+		if task.group_task_id >= 0 and WorkerThreadPool.is_task_completed(task.group_task_id):
+			WorkerThreadPool.wait_for_task_completion(task.group_task_id)
+	_active_tasks.clear()
+	_pending_tasks.clear()
+	# Clean up completed orphaned handles only
+	for handle: int in _orphaned_wtp_handles:
+		if WorkerThreadPool.is_task_completed(handle):
+			WorkerThreadPool.wait_for_task_completion(handle)
+	_orphaned_wtp_handles.clear()
+
+
 func _process(_delta: float) -> void:
 	# Check for timed-out tasks before dispatching results
 	_check_task_timeouts()

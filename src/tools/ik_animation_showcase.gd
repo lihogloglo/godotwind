@@ -102,6 +102,8 @@ var _rock_mat: StandardMaterial3D
 
 
 func _ready() -> void:
+	if Engine.is_editor_hint():
+		return
 	# Run _process AFTER AnimationTree so look-at bone writes aren't overwritten
 	process_priority = 100
 
@@ -632,6 +634,8 @@ func _update_walking() -> void:
 # =============================================================================
 
 func _physics_process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
 	_update_walking()
 	_update_ik_targets(delta)
 	_update_obstacles()
@@ -642,6 +646,8 @@ func _physics_process(delta: float) -> void:
 
 
 func _process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
 	_update_camera()
 	_update_live_info()
 	# Apply look-at AFTER AnimationTree (process_priority=100 ensures this)
@@ -724,6 +730,8 @@ func _stop_drag() -> void:
 # =============================================================================
 
 func _input(event: InputEvent) -> void:
+	if Engine.is_editor_hint():
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_1:

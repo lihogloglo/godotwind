@@ -283,16 +283,48 @@ static func terrain_y_to_image_y(mw_y: int, size: int = 65) -> int:
 #endregion
 
 
+#region Terrain3D Coordinate Helpers
+
+## Convert world position to Terrain3D internal position.
+## Required because set_vertex_spacing() crashes in v1.1.0-dev, so we use
+## node scale as workaround. Terrain3D internally uses vertex_spacing=1.0
+## but the node is scaled by TERRAIN_VERTEX_SPACING on XZ.
+## All terrain.data queries (get_height, get_region_location, etc.) need
+## internal coordinates, not world coordinates.
+static func world_to_terrain_internal(world_pos: Vector3, terrain: Terrain3D) -> Vector3:
+	return terrain.global_transform.affine_inverse() * world_pos
+
+
+## Query terrain height at a world position, accounting for the scale workaround.
+static func get_terrain_height(world_pos: Vector3, terrain: Terrain3D) -> float:
+	if not terrain or not terrain.data:
+		return 0.0
+	var internal_pos := world_to_terrain_internal(world_pos, terrain)
+	return terrain.data.get_height(internal_pos)
+
+
+#endregion
+
+
 #region Terrain3D Configuration
 
 ## Configure a Terrain3D node with Morrowind-appropriate settings
 ## This is the single source of truth for terrain configuration.
-## Use this instead of repeating configuration in multiple files.
-##
-## Parameters:
-##   terrain: The Terrain3D node to configure
-##   create_material: Whether to create a new Terrain3DMaterial if missing (default: true)
-##   create_assets: Whether to create new Terrain3DAssets if missing (default: true)
+## Call BEFORE add_child() to set properties that crash during clipmap rebuild.
+## Terrain3D v1.1.0-dev: set_vertex_spacing() segfaults both in-tree AND causes
+## _enter_tree to crash if spacing was set pre-tree. DISABLED until DLL is fixed.
+## TODO: Re-enable when Terrain3D v1.1 fixes the clipmap null-deref bug.
+static func configure_terrain3d_pre_tree(terrain: Terrain3D) -> void:
+	# DISABLED: vertex_spacing=1.8286 causes _enter_tree segfault in v1.1.0-dev.
+	# Terrain will use default spacing (1.0) until the DLL is fixed.
+	# if terrain.has_method("set_vertex_spacing"):
+	#     terrain.set_vertex_spacing(TERRAIN_VERTEX_SPACING)
+	pass
+
+
+## Configure a Terrain3D node with Morrowind world settings.
+## Call AFTER add_child() + await process_frame (needs terrain.data).
+## IMPORTANT: Call configure_terrain3d_pre_tree() BEFORE add_child() first.
 ##
 ## Returns: true if configuration succeeded, false otherwise
 static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true, create_assets: bool = true) -> bool:
@@ -307,22 +339,31 @@ static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true
 		push_error("CoordinateSystem.configure_terrain3d: terrain.data is null - ensure Terrain3D is in scene tree first")
 		return false
 
-	# Set vertex spacing for Morrowind cells
-	terrain.vertex_spacing = TERRAIN_VERTEX_SPACING
+	# DISABLED: Terrain3D v1.1.0-dev segfaults on set_vertex_spacing() in ALL contexts.
+	# Using default vertex_spacing=1.0 until the DLL clipmap bug is fixed.
+	# TODO: Re-enable when Terrain3D v1.1 fixes the clipmap null-deref bug.
 
 	# Set region size (256 = 4x4 MW cells per region)
-	# Suppressing warnings because Godot's enum handling is strict
+	# v1.1: change_region_size() removed — use set_region_size() or property
 	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
-	terrain.change_region_size(TERRAIN_REGION_SIZE)
+	if terrain.has_method("change_region_size"):
+		terrain.change_region_size(TERRAIN_REGION_SIZE)
+	elif terrain.has_method("set_region_size"):
+		terrain.set_region_size(TERRAIN_REGION_SIZE)
+	else:
+		terrain.region_size = TERRAIN_REGION_SIZE
 
-	# Configure mesh LOD settings for performance
-	terrain.mesh_lods = 7
-	terrain.mesh_size = 48
+	# Configure mesh LOD settings for performance (properties may not exist in v1.1+)
+	if "mesh_lods" in terrain:
+		terrain.mesh_lods = 7
+	if "mesh_size" in terrain:
+		terrain.mesh_size = 48
 
 	# Create material if needed
 	if create_material and not terrain.material:
 		terrain.set_material(Terrain3DMaterial.new())
-		terrain.material.show_checkered = false
+		if "show_checkered" in terrain.material:
+			terrain.material.show_checkered = false
 
 	# Configure world background for areas beyond generated regions
 	# Note: MorrowindDataProvider now generates ocean floor terrain for all regions

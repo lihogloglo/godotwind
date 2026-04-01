@@ -66,6 +66,8 @@ var _stage_lines := PackedStringArray()
 
 
 func _ready() -> void:
+	if Engine.is_editor_hint():
+		return
 	_create_environment()
 	_create_camera()
 	_create_ui()
@@ -363,6 +365,8 @@ func _build_bone_visualization() -> void:
 # =============================================================================
 
 func _input(event: InputEvent) -> void:
+	if Engine.is_editor_hint():
+		return
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			_orbiting = event.pressed
@@ -596,6 +600,8 @@ func _fmt_vec3(v: Vector3) -> String:
 # =============================================================================
 
 func _process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
 	if not _orbiting:
 		_yaw += delta * 8.0
 	_update_camera()

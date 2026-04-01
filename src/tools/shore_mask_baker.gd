@@ -16,6 +16,8 @@
 class_name ShoreMaskBaker
 extends RefCounted
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 ## Output directory for shore mask (set in initialize from SettingsManager)
 var output_dir: String = ""
 
@@ -441,7 +443,7 @@ func _calculate_world_bounds() -> void:
 ## Get terrain height at world position
 func _get_terrain_height(world_pos: Vector3) -> float:
 	if terrain and terrain.data:
-		return terrain.data.get_height(world_pos)
+		return CS.get_terrain_height(world_pos, terrain)
 	# Outside terrain = assume ocean (below sea level)
 	return sea_level - 1.0
 

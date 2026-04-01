@@ -136,6 +136,8 @@ var _async_requests: Dictionary[Vector2i, int] = {}
 
 ## Pending cells to load (priority queue, sorted farthest-first so pop_back gets nearest)
 var _pending_load_queue: Array[Vector2i] = []
+## O(1) membership check for pending queue (mirrors _pending_load_queue contents)
+var _pending_load_set: Dictionary[Vector2i, bool] = {}
 
 ## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
 var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
@@ -185,43 +187,70 @@ var _startup_phase: bool = true
 var _startup_frames: int = 0
 const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit condition
 
+## Deferred impostor update — set when camera cell changes, processed next frame
+## Prevents impostor scan (170ms+ on first call) from stacking with cell load/unload
+var _impostor_update_pending: bool = false
+
+## Predictive loading — pre-queue cells in the camera's movement direction
+var _prev_camera_position: Vector3 = Vector3.ZERO
+var _camera_velocity_xz: Vector2 = Vector2.ZERO  # EMA-smoothed, XZ plane only
+
 #endregion
 
 
 #region Initialization
 
+## Fast cleanup for quit — frees only RS resources, skips slow node tree ops
+## Called from world_explorer's _do_fast_quit() before get_tree().quit()
+func fast_cleanup() -> void:
+	# Stop background processor immediately — prevents WTP handle blocking in _exit_tree
+	if _background_processor:
+		_background_processor._running = false
+		_background_processor._active_tasks.clear()
+		_background_processor._pending_tasks.clear()
+		_background_processor._orphaned_wtp_handles.clear()
+
+	# Free GPU resources (RS RIDs)
+	if _static_renderer:
+		_static_renderer.clear()
+	if _impostor_renderer and _impostor_renderer.has_method("clear"):
+		_impostor_renderer.clear()
+	if _gpu_scene_db:
+		_gpu_scene_db.cleanup()
+		_gpu_scene_db = null
+	_promoted_objects.clear()
+	_promoted_by_cell.clear()
+
+
 func _exit_tree() -> void:
 	if instance == self:
 		instance = null
-	
+
+	# If quitting, fast_cleanup() already freed everything — bail immediately
+	if Engine.has_meta("_quitting"):
+		return
+
 	# Clean up GPU Scene Database
 	if _gpu_scene_db:
 		_gpu_scene_db.cleanup()
 		_gpu_scene_db = null
 
-	# Force-clear all remaining RS instances and pending unloads
-	# to prevent RID leaks at exit (budgeted unloading may still be in progress)
+	# Force-clear RS instances first (before cell tree cleanup)
+	# StaticObjectRenderer holds thousands of RenderingServer RIDs that must be freed
 	if _static_renderer:
 		_static_renderer.clear()
 	_promoted_objects.clear()
-
-	# Force-free all cells still in gradual unload container
-	for grid: Vector2i in _unloading_cells:
-		var cell_ref: Variant = _unloading_cells[grid]
-		if is_instance_valid(cell_ref):
-			(cell_ref as Node3D).queue_free()
-	_unloading_cells.clear()
+	_promoted_by_cell.clear()
 
 	# Clear deferred NEAR refs (data only, no RIDs)
 	if _cell_manager:
 		for grid: Vector2i in _loaded_cells:
 			_cell_manager.clear_deferred_for_cell(grid)
 
-	# Force-free all loaded cells
-	for grid: Vector2i in _loaded_cells:
-		var cell_ref: Variant = _loaded_cells[grid]
-		if is_instance_valid(cell_ref):
-			(cell_ref as Node3D).queue_free()
+	# Clear tracking dictionaries — let Godot's tree cleanup handle the Node3D children
+	# Manually freeing thousands of nodes in _exit_tree causes a long freeze
+	# and Godot produces misleading "leaked dependency" warnings from ordering issues
+	_unloading_cells.clear()
 	_loaded_cells.clear()
 
 
@@ -294,6 +323,9 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	# Sync debug flag
 	if _impostor_renderer:
 		_impostor_renderer.set("debug_enabled", debug_enabled)
+		# Startup burst: 15ms impostor budget while loading screen is visible
+		# Normal budget (4ms) is restored when startup phase completes
+		_impostor_renderer.set_load_budget_usec(15000.0)
 
 	_initialized = true
 	Log.info("streaming", "Initialized with native visibility_range streaming")
@@ -348,72 +380,136 @@ func _process(delta: float) -> void:
 			return
 
 	# Start timing for frame budget telemetry
-	var _frame_start_usec := Time.get_ticks_usec()
+	var frame_start_usec := Time.get_ticks_usec()
+	var phase_times: PackedFloat64Array = PackedFloat64Array()  # usec per phase
+	phase_times.resize(7)  # 0:unload, 1:async_complete, 2:instantiate, 3:promote, 4:collision, 5:deferred, 6:queue
+	var budget_usec := frame_budget_ms * 1000.0
 
-	# Update camera position
+	# Update camera position and velocity
 	_camera_position = _camera.global_position
 	if _cell_manager:
 		_cell_manager.set_camera_position(_camera_position)
 	var new_cell := DU.world_to_cell(_camera_position)
 
+	# EMA-smoothed velocity on XZ plane (for predictive cell loading)
+	if delta > 0.0 and _prev_camera_position != Vector3.ZERO:
+		var raw_vel := Vector2(
+			(_camera_position.x - _prev_camera_position.x) / delta,
+			(_camera_position.z - _prev_camera_position.z) / delta
+		)
+		_camera_velocity_xz = _camera_velocity_xz.lerp(raw_vel, 0.3)
+	_prev_camera_position = _camera_position
+
 	# Track startup frames for staggered loading
 	if _startup_phase:
 		_startup_frames += 1
 		_emit_startup_progress()
+		_check_startup_complete()
 
 	# Check if we moved to a new cell
+	var cell_update_usec: float = 0.0
 	if new_cell != _camera_cell:
 		_debug("Camera moved to new cell: %s (was %s)" % [new_cell, _camera_cell])
 		_camera_cell = new_cell
+		var cu_start := Time.get_ticks_usec()
 		_update_loaded_cells()
+		cell_update_usec = float(Time.get_ticks_usec() - cu_start)
+	elif _impostor_update_pending:
+		# Deferred impostor update — runs on the frame AFTER cell change
+		# Prevents impostor scan (170ms+ initial) from stacking with cell load/unload
+		_impostor_update_pending = false
+		var imp_start := Time.get_ticks_usec()
+		if _impostor_renderer:
+			_impostor_renderer.update_impostor_area(_camera_cell, impostor_radius_cells)
+		var imp_ms := float(Time.get_ticks_usec() - imp_start) / 1000.0
+		if imp_ms > 2.0:
+			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
+
+	# Predictive loading — pre-queue cells in movement direction
+	if not _startup_phase:
+		_predict_and_prequeue_cells()
 
 	# Phase 0: Budgeted unloading — free children of departing cells gradually
 	# Runs BEFORE loading so freed memory is available for new cells
-	if not _unloading_cells.is_empty():
+	var phase_start := Time.get_ticks_usec()
+	if not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty():
 		_process_budgeted_unloading()
+	phase_times[0] = float(Time.get_ticks_usec() - phase_start)
 
 	# Process async loading (three-phase approach)
 	if async_loading_enabled:
 		# Phase 1: Check for completed async requests
+		phase_start = Time.get_ticks_usec()
 		_process_async_completions()
+		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
 		# Phase 2: Process async instantiation (progressive object creation)
+		# During startup: aggressive 15ms budget (player can't see anything behind loading screen)
+		# During gameplay: conservative dynamic budget (48% of delta, clamped 2-16ms)
+		phase_start = Time.get_ticks_usec()
+		var instantiation_budget_ms := 15.0 if _startup_phase else _get_dynamic_budget(delta)
 		var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
-		var dynamic_budget := _get_dynamic_budget(delta)
-		var instantiated := _cell_manager.process_async_instantiation(dynamic_budget, _camera_position, camera_fwd)
+		var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
+		phase_times[2] = float(Time.get_ticks_usec() - phase_start)
 		if instantiated > 0 and debug_enabled:
 			_debug("Instantiated %d objects this frame" % instantiated)
 
-		# Phase 3: MID→NEAR promotion for nearby objects (Phase 5b)
-		_process_mid_to_near_promotions()
+		# Skip remaining phases if budget already exceeded
+		var total_elapsed_usec := Time.get_ticks_usec() - frame_start_usec
+		if total_elapsed_usec < budget_usec:
+			# Phase 3: MID→NEAR promotion for nearby objects (Phase 5b)
+			phase_start = Time.get_ticks_usec()
+			_process_mid_to_near_promotions()
+			phase_times[3] = float(Time.get_ticks_usec() - phase_start)
 
-		# Phase 3a: Re-enable collision on promoted NEAR objects entering visibility
-		_process_promoted_collision_enable()
+		total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
+		if total_elapsed_usec < budget_usec:
+			# Phase 3a: Re-enable collision on promoted NEAR objects entering visibility
+			phase_start = Time.get_ticks_usec()
+			_process_promoted_collision_enable()
+			phase_times[4] = float(Time.get_ticks_usec() - phase_start)
 
-		# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
-		_process_deferred_near_instantiation()
+		total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
+		if total_elapsed_usec < budget_usec:
+			# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
+			phase_start = Time.get_ticks_usec()
+			_process_deferred_near_instantiation()
+			phase_times[5] = float(Time.get_ticks_usec() - phase_start)
 
-		# Phase 4: Queue new cell requests (non-blocking)
-		_process_pending_loads_async()
+		total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
+		if total_elapsed_usec < budget_usec:
+			# Phase 4: Queue new cell requests (non-blocking)
+			phase_start = Time.get_ticks_usec()
+			_process_pending_loads_async()
+			phase_times[6] = float(Time.get_ticks_usec() - phase_start)
 
 	else:
 		# Fallback: synchronous loading (blocks frame)
 		_process_pending_loads_sync(delta)
 
 	# Frame budget telemetry — detect when combined streaming work exceeds budget
-	var total_ms := (Time.get_ticks_usec() - _frame_start_usec) / 1000.0
+	var total_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
 	if total_ms > frame_budget_ms * 1.5:
 		_frame_overrun_count += 1
-		# Log at most once per 60 frames to avoid spam
+		# Log with per-phase breakdown (at most once per 60 frames)
 		if Engine.get_frames_drawn() - _last_overrun_log_frame > 60:
-			Log.warn("streaming", "Frame budget overrun: %.1fms (budget: %.1fms, overruns: %d)" % [total_ms, frame_budget_ms, _frame_overrun_count])
+			Log.warn("streaming", "Frame overrun: %.1fms [cellupd:%.1f unload:%.1f async:%.1f inst:%.1f promo:%.1f coll:%.1f defer:%.1f queue:%.1f] (budget:%.1fms, overruns:%d)" % [
+				total_ms,
+				cell_update_usec / 1000.0,
+				phase_times[0] / 1000.0, phase_times[1] / 1000.0, phase_times[2] / 1000.0,
+				phase_times[3] / 1000.0, phase_times[4] / 1000.0, phase_times[5] / 1000.0,
+				phase_times[6] / 1000.0,
+				frame_budget_ms, _frame_overrun_count])
 			_last_overrun_log_frame = Engine.get_frames_drawn()
 
 
 ## Update which cells should be loaded based on camera position
 func _update_loaded_cells() -> void:
+	var ulc_start := Time.get_ticks_usec()
+
 	# Calculate which cells should be loaded
 	var cells_to_load := _get_cells_in_radius(_camera_cell, load_radius_cells)
+	var t_grid := Time.get_ticks_usec()
 
 	# Reclaim cells that re-entered radius while still being unloaded
 	var reclaimed: Array[Vector2i] = []
@@ -434,6 +530,7 @@ func _update_loaded_cells() -> void:
 				_debug("Reclaimed unloading cell %s (%d children remaining)" % [grid, cell_node.get_child_count()])
 	for grid in reclaimed:
 		_unloading_cells.erase(grid)
+	var t_reclaim := Time.get_ticks_usec()
 
 	# Unload cells that are too far (with hysteresis)
 	# Load uses Chebyshev grid (square), so max Euclidean distance is the diagonal:
@@ -454,12 +551,15 @@ func _update_loaded_cells() -> void:
 
 	for grid: Vector2i in cells_to_unload:
 		_unload_cell(grid)
+	var t_unload := Time.get_ticks_usec()
 
 	# Queue new cells for loading (sorted farthest-first so pop_back gets nearest)
 	_pending_load_queue.clear()
+	_pending_load_set.clear()
 	for grid: Vector2i in cells_to_load:
 		if grid not in _loaded_cells and grid not in _loading_cells:
 			_pending_load_queue.append(grid)
+			_pending_load_set[grid] = true
 
 	if debug_enabled and not _pending_load_queue.is_empty():
 		_debug("Queueing %d cells for loading (camera at cell %s)" % [_pending_load_queue.size(), _camera_cell])
@@ -468,14 +568,71 @@ func _update_loaded_cells() -> void:
 	_pending_load_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return DU.cell_distance_squared(_camera_cell, a) > DU.cell_distance_squared(_camera_cell, b)
 	)
+	var t_queue := Time.get_ticks_usec()
 
-	# Update impostors
-	if _impostor_renderer:
-		if debug_enabled:
-			_debug("Updating impostor area: center=%s, radius=%d" % [_camera_cell, impostor_radius_cells])
-		_impostor_renderer.update_impostor_area(_camera_cell, impostor_radius_cells)
-	elif debug_enabled:
-		_debug("WARNING: _impostor_renderer is null!")
+	# Defer impostor update to next frame to avoid stacking with cell load/unload
+	# The impostor scan (especially first call with 11K+ cells) is expensive
+	_impostor_update_pending = true
+
+	# Log breakdown if total exceeds 2ms
+	var total_ulc_ms := float(Time.get_ticks_usec() - ulc_start) / 1000.0
+	if total_ulc_ms > 2.0:
+		Log.info("streaming", "_update_loaded_cells: %.1fms [grid:%.1f reclaim:%.1f unload:%.1f queue:%.1f]" % [
+			total_ulc_ms,
+			float(t_grid - ulc_start) / 1000.0,
+			float(t_reclaim - t_grid) / 1000.0,
+			float(t_unload - t_reclaim) / 1000.0,
+			float(t_queue - t_unload) / 1000.0])
+
+
+## Pre-queue cells in the camera's movement direction for smoother transitions
+## Uses EMA-smoothed XZ velocity to predict which cells will be needed next
+func _predict_and_prequeue_cells() -> void:
+	# Need meaningful velocity (>2 m/s on XZ plane) to predict
+	var speed_sq := _camera_velocity_xz.length_squared()
+	if speed_sq < 4.0:
+		return
+
+	# Compute which cell offset the camera is heading toward
+	var vel_dir := _camera_velocity_xz.normalized()
+	# Map velocity direction to cell grid offset: +X = +grid.x, +Z = -grid.y (Godot Z is flipped)
+	var predict_x: int = 0
+	var predict_y: int = 0
+	if absf(vel_dir.x) > 0.3:
+		predict_x = 1 if vel_dir.x > 0 else -1
+	if absf(vel_dir.y) > 0.3:
+		predict_y = -1 if vel_dir.y > 0 else 1  # Godot +Z = grid -Y
+
+	if predict_x == 0 and predict_y == 0:
+		return
+
+	# Check how far across the current cell we are in the movement direction
+	var cell_center := DU.cell_to_world_center(_camera_cell)
+	var offset_in_cell := Vector2(_camera_position.x - cell_center.x, _camera_position.z - cell_center.z)
+	var progress := offset_in_cell.dot(vel_dir) / (DU.CELL_SIZE_METERS * 0.5)  # -1 to +1
+	if progress < 0.2:
+		return  # Not far enough across the cell to predict
+
+	# Build list of predicted cells (diagonal + axis-aligned neighbors)
+	var predicted: Array[Vector2i] = []
+	var main_cell := Vector2i(_camera_cell.x + predict_x, _camera_cell.y + predict_y)
+	predicted.append(main_cell)
+	# Axis-aligned neighbors for diagonal movement
+	if predict_x != 0 and predict_y != 0:
+		predicted.append(Vector2i(_camera_cell.x + predict_x, _camera_cell.y))
+		predicted.append(Vector2i(_camera_cell.x, _camera_cell.y + predict_y))
+
+	# Pre-queue cells that aren't already loaded, loading, or pending
+	var queued := 0
+	for grid in predicted:
+		if grid not in _loaded_cells and grid not in _loading_cells and grid not in _pending_load_set:
+			_pending_load_queue.append(grid)
+			_pending_load_set[grid] = true
+			queued += 1
+
+	if queued > 0 and debug_enabled:
+		_debug("Predictive: pre-queued %d cells (vel=%.1f,%.1f dir=%d,%d progress=%.1f)" % [
+			queued, _camera_velocity_xz.x, _camera_velocity_xz.y, predict_x, predict_y, progress])
 
 
 ## Get all cells within a radius of the center cell
@@ -582,26 +739,25 @@ func _unload_cell(grid: Vector2i) -> void:
 	_loaded_cells.erase(grid)
 	_stats["loaded_cells"] = _loaded_cells.size()
 
-	# Clean up promoted object tracking for this cell
-	# Reset promoted flags BEFORE removing RS instances (so the flag reset isn't a no-op)
+	# Clean up promoted object tracking for this cell using spatial index (O(1) lookup)
 	var promoted_cleanup := 0
-	var promoted_remove: Array[int] = []
-
-	for rs_id: int in _promoted_objects:
-		var data: Variant = _static_renderer.get_instance_data(rs_id)
-		if data and data.cell_grid == grid:
+	if grid in _promoted_by_cell:
+		var cell_promoted: Array = _promoted_by_cell[grid]
+		for rs_id: int in cell_promoted:
 			_static_renderer.set_instance_promoted(rs_id, false)
-			promoted_remove.append(rs_id)
+			_promoted_objects.erase(rs_id)
+			promoted_cleanup += 1
+		_promoted_by_cell.erase(grid)
 
-	for obj_id: int in promoted_remove:
-		_promoted_objects.erase(obj_id)
-		promoted_cleanup += 1
-
-	# Clean up MID-tier RS instances for this cell
+	# Queue MID-tier RS instances for BUDGETED hiding across frames.
+	# Previously this called hide_cell_instances() synchronously (1000+ RS calls, 10-32ms).
+	# Now we hide progressively via hide_cell_instances_budgeted() in _process_budgeted_unloading().
 	if _static_renderer:
-		var mid_removed := _static_renderer.remove_cell_instances(grid)
-		if mid_removed > 0 or promoted_cleanup > 0:
-			_debug("Removed %d MID-tier RS instances for cell %s (+ %d promoted)" % [mid_removed, grid, promoted_cleanup])
+		_pending_rs_hide_cells.append(grid)
+		_pending_rs_hide_set[grid] = true
+		_pending_rs_cleanup_cells.append(grid)
+		if promoted_cleanup > 0:
+			_debug("Queued cell %s for budgeted RS hide (+ %d promoted cleanup)" % [grid, promoted_cleanup])
 
 	# Clean up deferred NEAR refs for this cell
 	_cell_manager.clear_deferred_for_cell(grid)
@@ -689,10 +845,62 @@ func _process_budgeted_unloading() -> void:
 	if debug_enabled and total_freed > 0:
 		_debug("Budgeted unload: freed %d objects, %d cells remaining" % [total_freed, _unloading_cells.size()])
 
+	# Phase A: Budgeted RS instance HIDING — hide ~200 instances per frame
+	# Replaces the old synchronous hide_cell_instances() that caused 10-32ms spikes
+	if _static_renderer and not _pending_rs_hide_cells.is_empty():
+		var hide_budget := 200  # Max RS calls per frame for hiding
+		var total_hidden := 0
+		var completed_hide: Array[int] = []  # indices to remove (collected, then batch-removed)
+		for hi in _pending_rs_hide_cells.size():
+			if total_hidden >= hide_budget or Time.get_ticks_usec() - start_time >= budget_usec:
+				break
+			var hide_grid: Vector2i = _pending_rs_hide_cells[hi]
+			var result: Array = _static_renderer.hide_cell_instances_budgeted(hide_grid, hide_budget - total_hidden)
+			total_hidden += result[0] as int
+			if result[1] as bool:  # is_complete
+				completed_hide.append(hi)
+				_pending_rs_hide_set.erase(hide_grid)
+		# Remove completed cells back-to-front to preserve indices
+		for ri in range(completed_hide.size() - 1, -1, -1):
+			var idx: int = completed_hide[ri]
+			_pending_rs_hide_cells[idx] = _pending_rs_hide_cells.back()
+			_pending_rs_hide_cells.pop_back()
+		if total_hidden > 0 and debug_enabled:
+			_debug("Budgeted RS hide: %d instances, %d cells remaining" % [total_hidden, _pending_rs_hide_cells.size()])
+
+	# Phase B: Deferred RS instance cleanup (free_rid) within remaining budget
+	# Only process cells that have been fully hidden
+	if _static_renderer and not _pending_rs_cleanup_cells.is_empty():
+		var rs_freed := 0
+		while not _pending_rs_cleanup_cells.is_empty():
+			if Time.get_ticks_usec() - start_time >= budget_usec:
+				break
+			var cleanup_grid: Vector2i = _pending_rs_cleanup_cells[-1]
+			# Don't free RIDs for cells still being hidden — O(1) set check
+			if cleanup_grid in _pending_rs_hide_set:
+				break
+			_pending_rs_cleanup_cells.resize(_pending_rs_cleanup_cells.size() - 1)
+			rs_freed += _static_renderer.remove_cell_instances(cleanup_grid)
+		if rs_freed > 0 and debug_enabled:
+			_debug("Budgeted RS cleanup: freed %d instances, %d cells remaining" % [rs_freed, _pending_rs_cleanup_cells.size()])
+
 
 ## Track promoted objects: object_id (batch pool) or rs_id (legacy) -> NEAR Node3D
 ## Used for demotion when camera moves away
 var _promoted_objects: Dictionary = {}  # {id: int -> near_node: Node3D}
+
+## Spatial index for promoted objects: cell_grid -> Array[int] of promoted rs_ids
+## Enables O(1) per-cell lookup instead of scanning all promoted objects
+var _promoted_by_cell: Dictionary = {}  # {Vector2i -> Array[int]}
+
+## Cells with RS instances that need budgeted visibility hiding
+## Hides ~200 RS instances per frame to avoid 10-32ms synchronous spikes
+var _pending_rs_hide_cells: Array[Vector2i] = []
+## O(1) lookup for cells still being hidden (mirrors _pending_rs_hide_cells)
+var _pending_rs_hide_set: Dictionary[Vector2i, bool] = {}
+
+## Cells with RS instances that need deferred free_rid() cleanup (after hiding)
+var _pending_rs_cleanup_cells: Array[Vector2i] = []
 
 
 ## Promote MID-tier objects to full NEAR-tier Node3D when camera approaches.
@@ -716,6 +924,13 @@ func _process_mid_to_near_promotions() -> void:
 		var near_node: Node3D = entry["node"]
 		if is_instance_valid(near_node) and rs_id not in _promoted_objects:
 			_promoted_objects[rs_id] = near_node
+			# Maintain spatial index
+			var _promo_data: Variant = _static_renderer.get_instance_data(rs_id)
+			if _promo_data:
+				var _promo_cell: Vector2i = _promo_data.cell_grid
+				if _promo_cell not in _promoted_by_cell:
+					_promoted_by_cell[_promo_cell] = []
+				(_promoted_by_cell[_promo_cell] as Array).append(rs_id)
 			_stats["mid_to_near_promotions"] += 1
 
 	# Run every N frames (configurable)
@@ -753,6 +968,16 @@ func _process_mid_to_near_promotions() -> void:
 			demoted += 1
 
 	for obj_id: int in demote_remove:
+		# Remove from spatial index
+		var _dem_data: Variant = _static_renderer.get_instance_data(obj_id)
+		if _dem_data and _dem_data.cell_grid in _promoted_by_cell:
+			var _dem_arr: Array = _promoted_by_cell[_dem_data.cell_grid]
+			var _dem_idx := _dem_arr.find(obj_id)
+			if _dem_idx >= 0:
+				_dem_arr[_dem_idx] = _dem_arr.back()
+				_dem_arr.pop_back()
+			if _dem_arr.is_empty():
+				_promoted_by_cell.erase(_dem_data.cell_grid)
 		_promoted_objects.erase(obj_id)
 
 	# --- PROMOTION: MID objects within promotion distance get a NEAR Node3D ---
@@ -806,6 +1031,10 @@ func _process_mid_to_near_promotions() -> void:
 			var near_has_lods := _near_has_visible_lod_children(near_obj)
 			_static_renderer.set_instance_promoted(id, true, near_has_lods)
 			_promoted_objects[id] = near_obj
+			# Maintain spatial index
+			if data.cell_grid not in _promoted_by_cell:
+				_promoted_by_cell[data.cell_grid] = []
+			(_promoted_by_cell[data.cell_grid] as Array).append(id)
 			promoted += 1
 
 	if promoted > 0 or demoted > 0:
@@ -880,6 +1109,7 @@ func _demote_all_promoted() -> void:
 		if is_instance_valid(near_node):
 			near_node.queue_free()
 	_promoted_objects.clear()
+	_promoted_by_cell.clear()
 	if count > 0:
 		_stats["near_to_mid_demotions"] += count
 		_debug("Teleport: batch-demoted %d promoted objects" % count)
@@ -1019,31 +1249,7 @@ func _process_pending_loads_async() -> void:
 
 	var requests_submitted := 0
 
-	# Staggered loading during startup phase to prevent initial freeze
-	# Frame 0-5: Load 1 cell per frame (camera's cell first)
-	# Frame 6-15: Load 2 cells per frame
-	# Frame 16+: Normal loading (2 cells per frame)
-	var max_requests_per_frame: int
-	if _startup_phase:
-		if _startup_frames < 5:
-			max_requests_per_frame = 1  # Very slow start
-		elif _startup_frames < 15:
-			max_requests_per_frame = 2  # Ramping up
-		else:
-			max_requests_per_frame = 2  # Normal rate
-	else:
-		max_requests_per_frame = 2
-
-	# Check if startup phase should end:
-	# - At least 1 cell fully loaded, AND
-	# - Instantiation queue is empty or nearly empty (objects are placed), AND
-	# - At least 20 frames have passed (give time for objects to instantiate)
-	if _startup_phase and _startup_frames >= 20:
-		var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
-		if _loaded_cells.size() >= 1 and queue_size < 50:
-			_startup_phase = false
-			startup_complete.emit()
-			_debug("Startup phase complete after %d frames, %d cells loaded" % [_startup_frames, _loaded_cells.size()])
+	var max_requests_per_frame: int = 2
 
 	# Check if there's async capacity before trying to submit
 	# This prevents unnecessary fallback to sync loading and reduces warning spam
@@ -1057,6 +1263,7 @@ func _process_pending_loads_async() -> void:
 		while not _pending_load_queue.is_empty() and requests_submitted < max_requests_per_frame and available_slots > 0:
 			var grid: Vector2i = _pending_load_queue[-1]
 			_pending_load_queue.resize(_pending_load_queue.size() - 1)
+			_pending_load_set.erase(grid)
 
 			# Skip if already loaded or loading
 			if grid in _loaded_cells or grid in _loading_cells:
@@ -1075,10 +1282,14 @@ func _process_pending_loads_async() -> void:
 
 ## Process completed async requests
 ## Checks for finished cell loads and finalizes them
+## Budget-capped: processes at most 2 completions per frame to prevent spikes
 func _process_async_completions() -> void:
 	var completed_grids: Array[Vector2i] = []
+	var max_completions_per_frame := 2
 
-	for grid: Vector2i in _async_requests.keys():
+	for grid: Vector2i in _async_requests:
+		if completed_grids.size() >= max_completions_per_frame:
+			break
 		var request_id: int = _async_requests[grid]
 
 		if _cell_manager.is_async_complete(request_id):
@@ -1146,6 +1357,7 @@ func _process_pending_loads_sync(_delta: float) -> void:
 
 		var grid: Vector2i = _pending_load_queue[-1]
 		_pending_load_queue.resize(_pending_load_queue.size() - 1)
+		_pending_load_set.erase(grid)
 
 		if grid in _loaded_cells or grid in _loading_cells:
 			continue
@@ -1290,10 +1502,15 @@ func teleport_to(position: Vector3) -> void:
 	_update_loaded_cells()
 
 
+## Get the camera's current cell grid coordinate
+func get_camera_cell() -> Vector2i:
+	return _camera_cell
+
+
 ## Get all loaded cell coordinates
 func get_loaded_cell_coordinates() -> Array[Vector2i]:
 	var coords: Array[Vector2i] = []
-	for grid: Vector2i in _loaded_cells.keys():
+	for grid: Vector2i in _loaded_cells:
 		coords.append(grid)
 	return coords
 
@@ -1349,13 +1566,67 @@ func _emit_startup_progress() -> void:
 	var loading := _loading_cells.size()
 	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
 
-	# Calculate progress (0-100)
-	var progress := 0.0
+	# Combined progress: cells (0-40%) + impostors (40-100%)
+	var cell_progress := 0.0
 	if target_cells > 0:
-		progress = float(loaded + loading * 0.5) / float(target_cells) * 100.0
-		progress = clampf(progress, 0.0, 100.0)
+		cell_progress = float(loaded + loading * 0.5) / float(target_cells)
+		cell_progress = clampf(cell_progress, 0.0, 1.0)
+
+	var impostor_progress := 0.0
+	if _impostor_renderer:
+		var initial: int = _impostor_renderer.get_initial_pending_count()
+		var pending: int = _impostor_renderer.get_pending_cell_count()
+		var processed: int = initial - pending
+		# Progress is based on inner ring completion, not the full 11K+ cell ring
+		var inner_ring_radius: int = load_radius_cells + 2
+		var inner_ring_count: int = int(PI * inner_ring_radius * inner_ring_radius)
+		if inner_ring_count > 0:
+			impostor_progress = float(processed) / float(inner_ring_count)
+			impostor_progress = clampf(impostor_progress, 0.0, 1.0)
+
+	var progress := (cell_progress * 40.0) + (impostor_progress * 60.0)
+	progress = clampf(progress, 0.0, 100.0)
 
 	startup_progress.emit(progress, loaded, target_cells, queue_size)
+
+## Check if startup phase should end
+func _check_startup_complete() -> void:
+	if not _startup_phase or _startup_frames < 20:
+		return
+	# Safety timeout: don't block loading screen longer than 10 seconds (~600 frames)
+	if _startup_frames > 600:
+		Log.warn("streaming", "Startup timeout after %d frames — forcing completion" % _startup_frames)
+		_startup_phase = false
+		if _impostor_renderer:
+			_impostor_renderer.set_load_budget_usec(4000.0)
+		startup_complete.emit()
+		return
+	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
+	var impostor_pending: int = _impostor_renderer.get_pending_cell_count() if _impostor_renderer else 0
+	var impostor_initial: int = _impostor_renderer.get_initial_pending_count() if _impostor_renderer else 1
+	# Inner ring = just beyond the load radius — enough for visual horizon
+	var inner_ring_radius: int = load_radius_cells + 2
+	var inner_ring_count: int = int(PI * inner_ring_radius * inner_ring_radius)
+	var impostor_processed: int = impostor_initial - impostor_pending
+	var impostor_inner_ring_done: bool = impostor_processed >= inner_ring_count or impostor_pending == 0
+	# Wait for nearby cells loaded + instantiation queue manageable + inner ring impostors
+	# Don't be too strict — player shouldn't wait 30s for every impostor
+	var nearby_cells_loaded := _loaded_cells.size() >= mini(load_radius_cells * 2 + 1, 7)
+	# Diagnostic: log startup progress every 60 frames
+	if _startup_frames % 60 == 0:
+		Log.info("streaming", "Startup check: cells=%d/%d queue=%d imp_processed=%d/%d imp_pending=%d" % [
+			_loaded_cells.size(), mini(load_radius_cells * 2 + 1, 7),
+			queue_size, impostor_processed, inner_ring_count,
+			impostor_pending])
+	if nearby_cells_loaded and queue_size < 50 and impostor_inner_ring_done:
+		_startup_phase = false
+		# Restore normal impostor budget
+		if _impostor_renderer:
+			_impostor_renderer.set_load_budget_usec(4000.0)
+		startup_complete.emit()
+		Log.info("streaming", "Startup phase complete after %d frames, %d cells loaded, %d impostor cells remaining (inner ring: %d/%d processed)" % [
+			_startup_frames, _loaded_cells.size(), impostor_pending, impostor_processed, inner_ring_count])
+
 
 ## Check if currently in startup phase
 func is_in_startup_phase() -> bool:

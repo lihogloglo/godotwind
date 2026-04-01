@@ -306,6 +306,14 @@ func _defer_fade_in(cell_node: Node3D, objects: Array[Node3D]) -> void:
 		for obj: Node3D in objects:
 			if is_instance_valid(obj):
 				_instantiator._apply_fade_in(obj)
+				# Randomize animation start to desync identical objects (flags, banners)
+				if obj.has_meta("_anim_randomize"):
+					obj.remove_meta("_anim_randomize")
+					for child in obj.get_children():
+						if child is AnimationPlayer:
+							var ap := child as AnimationPlayer
+							if ap.is_playing():
+								ap.seek(randf() * ap.current_animation_length)
 
 	if cell_node.is_inside_tree():
 		# Already in tree, apply immediately
@@ -1826,17 +1834,23 @@ func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, 
 			instance.name = "Model"
 			container.add_child(instance)
 
-			# Create the actual light source (same logic as _instantiate_light)
+			# Create the actual light source (same logic as ReferenceInstantiator._instantiate_light)
 			if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
 				var omni := OmniLight3D.new()
 				omni.name = "Light"
-				omni.omni_range = light_record.radius * MW_LIGHT_SCALE
+				omni.omni_range = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
 				omni.light_color = light_record.color
 				if light_record.is_negative():
 					omni.light_negative = true
-				omni.light_energy = 1.0 if light_record.is_fire() else 0.8
-				omni.shadow_enabled = light_record.is_dynamic()
+				omni.light_energy = 1.2 if light_record.is_fire() else 0.8
+				omni.shadow_enabled = false  # Managed by LightShadowBudget
 				omni.omni_attenuation = 1.0
+				omni.distance_fade_enabled = true
+				omni.distance_fade_begin = 120.0
+				omni.distance_fade_length = 30.0
+				omni.set_meta("mw_flags", light_record.flags)
+				omni.set_meta("mw_radius", light_record.radius)
+				omni.set_meta("base_energy", omni.light_energy)
 				container.add_child(omni)
 				_stats["lights_created"] += 1
 

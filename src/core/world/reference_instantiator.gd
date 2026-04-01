@@ -205,6 +205,9 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	stats["objects_instantiated"] += 1
 
+	# Auto-play NIF keyframe animations (flags, banners, rotating objects) in NEAR tier only
+	_auto_play_nif_animation(instance, ref)
+
 	# NOTE: Fade-in is NOT applied here because the node isn't in the scene tree yet.
 	# Fade-in must be applied AFTER add_child() - see CellManager._instantiate_cell()
 
@@ -271,6 +274,8 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 			var model_instance: Node3D = model_prototype.duplicate()
 			model_instance.name = "Model"
 			_hide_lod_nodes(model_instance)  # Hide materialless meshes only
+			# Auto-play NIF animations on light models (rotating lights, animated lanterns)
+			_auto_play_nif_animation(model_instance, ref)
 			light_node.add_child(model_instance)
 
 	# Create the actual light source
@@ -280,7 +285,9 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 
 		# Convert MW radius to Godot range
 		# MW radius is in game units, Godot uses meters
-		omni.omni_range = light_record.radius * MW_LIGHT_SCALE
+		# Enforce minimum 0.125m (16 game units) per OpenMW convention
+		var godot_range: float = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
+		omni.omni_range = godot_range
 
 		# Set light color
 		omni.light_color = light_record.color
@@ -290,14 +297,24 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 			omni.light_negative = true
 
 		# Set energy based on whether it's a fire/torch light
-		# Fire lights tend to be brighter
-		omni.light_energy = 1.0 if light_record.is_fire() else 0.8
+		omni.light_energy = 1.2 if light_record.is_fire() else 0.8
 
-		# Enable shadows for dynamic lights only (performance)
-		omni.shadow_enabled = light_record.is_dynamic()
+		# Shadows disabled by default — managed by LightShadowBudget if present
+		omni.shadow_enabled = false
 
-		# Set attenuation for softer falloff
+		# Attenuation: softer falloff for enclosed spaces
 		omni.omni_attenuation = 1.0
+
+		# Distance fade: remove lights from cluster budget beyond visibility
+		# Begin fading at 120m, fully gone by 150m (matches NEAR tier boundary)
+		omni.distance_fade_enabled = true
+		omni.distance_fade_begin = 120.0
+		omni.distance_fade_length = 30.0
+
+		# Store light flags for animator and shadow budget manager
+		omni.set_meta("mw_flags", light_record.flags)
+		omni.set_meta("mw_radius", light_record.radius)
+		omni.set_meta("base_energy", omni.light_energy)
 
 		light_node.add_child(omni)
 		stats["lights_created"] += 1
@@ -553,6 +570,49 @@ func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int
 		creature_id, leveled.record_id
 	])
 	return null
+
+
+## Auto-play NIF keyframe animations on objects within NEAR tier (0-150m)
+## Handles animated world objects like flags, banners, rotating lights, etc.
+## Only plays if the object has a prebaked AnimationPlayer from NIF conversion.
+func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
+	# Skip if beyond NEAR tier — animations are only visible up close
+	if max_actor_distance > 0.0:
+		var ref_pos := CS.vector_to_godot(ref.position)
+		if ref_pos.distance_squared_to(camera_position) > max_actor_distance * max_actor_distance:
+			return
+
+	# Find AnimationPlayer in the duplicated instance
+	var anim_player: AnimationPlayer = null
+	for child in instance.get_children():
+		if child is AnimationPlayer:
+			anim_player = child as AnimationPlayer
+			break
+
+	if not anim_player:
+		return
+
+	# Get the animation list from the default library
+	var library := anim_player.get_animation_library("")
+	if not library:
+		return
+
+	var anim_list := library.get_animation_list()
+	if anim_list.is_empty():
+		return
+
+	# Play the first animation (most NIF objects have a single looping animation)
+	# Set looping on the animation resource
+	var first_anim_name: StringName = anim_list[0]
+	var anim: Animation = library.get_animation(first_anim_name)
+	if anim:
+		anim.loop_mode = Animation.LOOP_LINEAR
+
+	# Autoplay — AnimationPlayer needs to be in the tree to play, so defer
+	anim_player.autoplay = first_anim_name
+
+	# Randomize playback position to avoid synchronized animations across instances
+	instance.set_meta("_anim_randomize", true)
 
 
 ## Apply position, rotation, and scale to a node

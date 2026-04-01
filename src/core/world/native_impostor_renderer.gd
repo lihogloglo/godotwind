@@ -75,6 +75,10 @@ var _normal_array_dirty: bool = false
 ## Reference count for textures: hash_key -> count of impostors using it
 var _texture_ref_counts: Dictionary[String, int] = {}
 
+## Reverse index: texture_hash -> Array[int] of impostor IDs using that hash
+## Enables O(k) lookup instead of O(total_impostors) when a normal texture loads
+var _hash_to_impostor_ids: Dictionary[String, Array] = {}  # Array[int]
+
 ## Loaded impostor textures: hash_key -> Texture2D
 var _impostor_textures: Dictionary[String, Texture2D] = {}
 
@@ -105,6 +109,11 @@ var _impostor_metadata: Dictionary[String, Dictionary] = {}
 ## Cached file existence checks to avoid repeated disk I/O
 var _file_exists_cache: Dictionary[String, bool] = {}
 
+## Cached ref_id -> model_path mapping to avoid repeated ESMManager.get_any_record() calls
+## Same ref_ids appear across thousands of cells — cache eliminates redundant C# bridge calls
+var _ref_id_to_model: Dictionary[String, String] = {}  # ref_id -> model_path ("" = no model)
+
+
 ## Track loaded impostor cells to avoid duplicates
 var _loaded_impostor_cells: Dictionary[Vector2i, bool] = {} # Vector2i -> true
 
@@ -121,8 +130,13 @@ const MULTIMESH_REBUILD_DEBOUNCE: float = 0.2  # Wait this long after last impos
 ## Deferred impostor loading - process cells progressively to avoid freezing
 var _pending_impostor_cells: Array[Vector2i] = []  # Cells waiting to be processed
 var _pending_cell_index: int = 0  # Current front of the queue
-var _impostor_cells_per_frame: int = 5  # Max cells to process per frame (tunable)
-var _impostor_load_budget_ms: float = 4.0  # Time budget for impostor loading per frame
+var _impostor_load_budget_usec: float = 4000.0  # Time budget in microseconds (4ms)
+
+## Intra-cell resume state — when a dense cell exceeds the budget mid-reference,
+## we save progress and resume next frame instead of blowing through the budget
+var _has_resume: bool = false
+var _resume_cell_grid: Vector2i = Vector2i.ZERO
+var _resume_ref_index: int = 0
 
 ## Statistics
 var _stats: Dictionary = {
@@ -136,6 +150,17 @@ var _stats: Dictionary = {
 
 ## Debug logging
 var debug_enabled: bool = false
+
+## Benchmark timer for periodic stats logging
+var _benchmark_timer: float = 0.0
+const BENCHMARK_LOG_INTERVAL: float = 5.0
+
+## Last known camera center cell (for screen-size estimation)
+var _last_center_cell: Vector2i = Vector2i.ZERO
+var _screen_size_histogram_logged: bool = false
+
+## Previous center for differential impostor updates
+var _prev_impostor_center: Vector2i = Vector2i(999999, 999999)
 
 #endregion
 
@@ -179,6 +204,8 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if Engine.has_meta("_quitting"):
+		return
 	_stop_job_system()
 	clear()
 
@@ -538,12 +565,13 @@ func _on_normal_loaded(hash_key: String, image: Image) -> void:
 	# Add to normal texture array
 	var normal_index := _add_to_normal_array(hash_key, img_copy)
 
-	# Update any existing impostors that have this hash to use normals
-	for id: int in _impostors:
-		var imp: ImpostorData = _impostors[id]
-		if imp.texture_hash == hash_key:
-			imp.normal_texture_index = normal_index
-			_impostors_dirty = true
+	# Update existing impostors that use this hash — O(k) via reverse index
+	if hash_key in _hash_to_impostor_ids:
+		for id: int in _hash_to_impostor_ids[hash_key]:
+			var imp: ImpostorData = _impostors.get(id)
+			if imp:
+				imp.normal_texture_index = normal_index
+		_impostors_dirty = true
 
 	if debug_enabled:
 		_debug("Normal texture loaded for hash %s, index %d" % [hash_key, normal_index])
@@ -583,7 +611,7 @@ var _last_compaction_time: float = 0.0
 const COMPACTION_INTERVAL: float = 5.0  # Run compaction check every 5 seconds
 const COMPACTION_THRESHOLD: float = 0.75  # Compact when 75% full
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	# Poll for completed texture loads
 	_poll_job_results()
 
@@ -619,52 +647,87 @@ func _process(_delta: float) -> void:
 
 		# Only rebuild if:
 		# 1. Enough time has passed since last rebuild (rate limit), AND
-		# 2. Either we've waited long enough after last add (debounce), OR no pending cells
+		# 2. Either we've waited long enough after last add (debounce), OR no pending cells, AND
+		# 3. We have a meaningful number of impostors (skip tiny rebuilds during initial load)
 		var should_rebuild := time_since_last_rebuild >= MULTIMESH_REBUILD_INTERVAL
 		var done_adding := time_since_last_add >= MULTIMESH_REBUILD_DEBOUNCE or _pending_cell_index >= _pending_impostor_cells.size()
+		var has_enough := _impostors.size() >= 500 or _pending_cell_index >= _pending_impostor_cells.size()
 
-		if should_rebuild and done_adding:
-			Log.info("impostors", "Rebuilding MultiMesh with %d impostors" % _impostors.size())
+		if should_rebuild and done_adding and has_enough:
 			_rebuild_multimesh()
 			_last_multimesh_rebuild_time = current_time
 			_impostors_dirty = false
 
+	# Periodic benchmark stats
+	_benchmark_timer += delta
+	if _benchmark_timer >= BENCHMARK_LOG_INTERVAL:
+		_benchmark_timer = 0.0
+		var pending_count: int = maxi(0, _pending_impostor_cells.size() - _pending_cell_index)
+		Log.info("impostors", "Benchmark: %d impostors, %d tex layers, %d pending cells, mm_instances=%d" % [
+			_impostors.size(), _texture_array_size, pending_count,
+			_master_multimesh.instance_count if _master_multimesh else 0])
 
-## Process pending impostor cells progressively (time-budgeted)
+
+## Process pending impostor cells progressively (time-budgeted with intra-cell resume)
 func _process_pending_impostor_cells() -> void:
-	if _pending_cell_index >= _pending_impostor_cells.size():
+	if _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume:
 		return
 
-	var start_time := Time.get_ticks_msec()
+	var start_usec := Time.get_ticks_usec()
+	var deadline_usec := start_usec + int(_impostor_load_budget_usec)
 	var cells_processed := 0
 
-	while _pending_cell_index < _pending_impostor_cells.size():
-		# Check time budget
-		var elapsed := Time.get_ticks_msec() - start_time
-		if elapsed >= _impostor_load_budget_ms:
-			break
+	# Resume a partially-processed cell from last frame
+	if _has_resume:
+		var resume_idx := _load_impostors_from_cell_record_budgeted(_resume_cell_grid, _resume_ref_index, deadline_usec)
+		if resume_idx < 0:
+			# Cell complete
+			_has_resume = false
+			_resume_ref_index = 0
+			cells_processed += 1
+		else:
+			# Still not done — save resume state and bail
+			_resume_ref_index = resume_idx
+			var elapsed_usec := Time.get_ticks_usec() - start_usec
+			Log.debug("impostors", "Resumed cell %s (ref %d), %.2f ms, %d remaining" % [
+				_resume_cell_grid, resume_idx, elapsed_usec / 1000.0,
+				_pending_impostor_cells.size() - _pending_cell_index])
+			return
 
-		# Check per-frame cell limit
-		if cells_processed >= _impostor_cells_per_frame:
+	while _pending_cell_index < _pending_impostor_cells.size():
+		# Check time budget between cells
+		if Time.get_ticks_usec() >= deadline_usec:
 			break
 
 		var grid: Vector2i = _pending_impostor_cells[_pending_cell_index]
 		_pending_cell_index += 1
-		_load_impostors_from_cell_record(grid)
-		cells_processed += 1
+
+		var resume_idx := _load_impostors_from_cell_record_budgeted(grid, 0, deadline_usec)
+		if resume_idx < 0:
+			# Cell complete
+			cells_processed += 1
+		else:
+			# Cell exceeded budget mid-reference — save resume state
+			_has_resume = true
+			_resume_cell_grid = grid
+			_resume_ref_index = resume_idx
+			break
 
 	# Periodic cleanup of the queue
-	if _pending_cell_index >= _pending_impostor_cells.size():
+	if _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume:
 		_pending_impostor_cells.clear()
 		_pending_cell_index = 0
-	elif _pending_cell_index > 100:
+		# Queue finished — log screen-size histogram once
+		_log_screen_size_histogram()
+	elif _pending_cell_index > 100 and not _has_resume:
 		_pending_impostor_cells = _pending_impostor_cells.slice(_pending_cell_index)
 		_pending_cell_index = 0
 
-	if cells_processed > 0 and debug_enabled:
-		var elapsed := Time.get_ticks_msec() - start_time
-		_debug("Processed %d impostor cells in %.1fms, %d remaining" % [
-			cells_processed, elapsed, _pending_impostor_cells.size() - _pending_cell_index])
+	if cells_processed > 0:
+		var elapsed_usec := Time.get_ticks_usec() - start_usec
+		Log.debug("impostors", "Processed %d cells in %.2f ms, %d remaining" % [
+			cells_processed, elapsed_usec / 1000.0,
+			_pending_impostor_cells.size() - _pending_cell_index])
 
 
 func _poll_job_results() -> void:
@@ -705,6 +768,28 @@ func set_impostor_candidates(candidates: ImpostorCandidatesScript) -> void:
 	impostor_candidates = candidates
 	if debug_enabled:
 		_debug("ImpostorCandidates initialized: %s" % (impostor_candidates != null))
+
+
+## Set the impostor loading budget (microseconds per frame)
+## During startup, use a higher budget (e.g., 15000) since the player isn't playing yet
+func set_load_budget_usec(budget: float) -> void:
+	_impostor_load_budget_usec = budget
+
+
+## Get the number of pending impostor cells (not yet processed)
+func get_pending_cell_count() -> int:
+	var remaining := _pending_impostor_cells.size() - _pending_cell_index
+	if _has_resume:
+		remaining += 1  # Count the partially-processed cell
+	return maxi(0, remaining)
+
+
+## Get the initial total of impostor cells queued (set once at first full recalc)
+## Used for progress calculation
+var _initial_pending_count: int = 0
+
+func get_initial_pending_count() -> int:
+	return _initial_pending_count
 
 
 ## Add an impostor for a model at a specific world position
@@ -807,6 +892,15 @@ func remove_impostor(impostor_id: int) -> void:
 			_texture_ref_counts[hash_key] -= 1
 			if _texture_ref_counts[hash_key] <= 0:
 				_texture_ref_counts.erase(hash_key)
+		# Maintain reverse index
+		if hash_key in _hash_to_impostor_ids:
+			var hash_ids: Array = _hash_to_impostor_ids[hash_key]
+			var hidx := hash_ids.find(impostor_id)
+			if hidx >= 0:
+				hash_ids[hidx] = hash_ids.back()
+				hash_ids.pop_back()
+			if hash_ids.is_empty():
+				_hash_to_impostor_ids.erase(hash_key)
 		_impostors.erase(impostor_id)
 		_stats["total_impostors"] = _impostors.size()
 		_impostors_dirty = true  # Mark for MultiMesh rebuild
@@ -817,8 +911,14 @@ func clear() -> void:
 	_impostors.clear()
 	_cell_index.clear()
 	_texture_ref_counts.clear()
+	_hash_to_impostor_ids.clear()
 	_file_exists_cache.clear()
 	_impostor_normal_images.clear()
+	_ref_id_to_model.clear()
+	_has_resume = false
+	_resume_cell_grid = Vector2i.ZERO
+	_resume_ref_index = 0
+	_initial_pending_count = 0
 	_stats["total_impostors"] = 0
 	_impostors_dirty = true  # Mark for MultiMesh rebuild
 
@@ -930,56 +1030,117 @@ func dump_diagnostic() -> String:
 
 
 ## Update impostor area: load new cells, unload old ones
+## Uses differential update when moving 1-2 cells (only processes the ring delta),
+## falls back to full recalc on teleport or first call.
 ## Called by streaming manager
 func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
+	_last_center_cell = center_cell
 	if not impostor_candidates:
 		push_warning("[NativeImpostorRenderer] update_impostor_area called but impostor_candidates is null!")
 		return
 
-	# 1. Calculate cells that SHOULD be loaded
-	var desired_cells: Dictionary = {}
-	# FIX: Convert cell radius to meters for comparison with cell_distance_squared
-	# cell_distance_squared returns distance in METERS squared, so we need meters squared here
 	var radius_meters := float(radius) * DU.CELL_SIZE_METERS
 	var radius_sq := radius_meters * radius_meters
 
-	for dy in range(-radius, radius + 1):
-		for dx in range(-radius, radius + 1):
-			var grid := Vector2i(center_cell.x + dx, center_cell.y + dy)
-			if DU.cell_distance_squared(center_cell, grid) <= radius_sq:
-				desired_cells[grid] = true
+	# Differential update: if we moved only 1-2 cells, compute only the delta ring
+	var delta := Vector2i(absi(center_cell.x - _prev_impostor_center.x), absi(center_cell.y - _prev_impostor_center.y))
+	var use_differential := _prev_impostor_center != Vector2i(999999, 999999) and delta.x <= 2 and delta.y <= 2
 
-	# Debug: Show how many cells are in range
-	if debug_enabled:
-		_debug("Impostor area: center=%s, radius=%d cells (%.0fm), desired_cells=%d" % [
-			center_cell, radius, radius_meters, desired_cells.size()])
+	if use_differential and center_cell != _prev_impostor_center:
+		# Border-strip approach: only scan strips on the leading/trailing edges
+		# For a move of (dx, dy), new cells appear on the leading edge and old cells
+		# disappear from the trailing edge. Each strip is at most 2R+1 cells long.
+		var cells_to_unload: Array[Vector2i] = []
+		var cells_to_load: Array[Vector2i] = []
+		var move := center_cell - _prev_impostor_center  # (dx, dy) signed
 
-	# 2. Unload cells that are no longer in range
-	var cells_to_unload: Array[Vector2i] = []
-	for grid: Vector2i in _loaded_impostor_cells:
-		if grid not in desired_cells:
-			cells_to_unload.append(grid)
-			
-	if not cells_to_unload.is_empty():
-		_unload_impostors_in_cells(cells_to_unload)
-	
-	# 3. Queue new cells for DEFERRED loading (prevents freezing)
-	var cells_to_load: Array[Vector2i] = []
-	for grid: Vector2i in desired_cells:
-		if grid not in _loaded_impostor_cells and grid not in _pending_impostor_cells:
-			cells_to_load.append(grid)
-			_loaded_impostor_cells[grid] = true
+		# Scan border strips where cells may have entered or exited
+		# For X movement: scan columns at the leading and trailing X edges
+		if move.x != 0:
+			for step in range(1, absi(move.x) + 1):
+				# Leading edge (new cells): column at center + R in direction of motion
+				var lead_x: int = center_cell.x + radius * signi(move.x) - (step - 1) * signi(move.x)
+				# Trailing edge (removed cells): column at prev - R opposite to motion
+				var trail_x: int = _prev_impostor_center.x - radius * signi(move.x) + (step - 1) * signi(move.x)
+				for cy in range(-radius, radius + 1):
+					var lead_grid := Vector2i(lead_x, center_cell.y + cy)
+					if DU.cell_distance_squared(center_cell, lead_grid) <= radius_sq:
+						if lead_grid not in _loaded_impostor_cells and lead_grid not in _pending_impostor_cells:
+							cells_to_load.append(lead_grid)
+							_loaded_impostor_cells[lead_grid] = true
+					var trail_grid := Vector2i(trail_x, _prev_impostor_center.y + cy)
+					if DU.cell_distance_squared(_prev_impostor_center, trail_grid) <= radius_sq:
+						if trail_grid in _loaded_impostor_cells:
+							cells_to_unload.append(trail_grid)
 
-	if not cells_to_load.is_empty():
-		# Sort by distance from center (closest first)
-		cells_to_load.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-			return DU.cell_distance_squared(center_cell, a) < DU.cell_distance_squared(center_cell, b)
-		)
+		# For Y movement: scan rows at the leading and trailing Y edges
+		if move.y != 0:
+			for step in range(1, absi(move.y) + 1):
+				var lead_y: int = center_cell.y + radius * signi(move.y) - (step - 1) * signi(move.y)
+				var trail_y: int = _prev_impostor_center.y - radius * signi(move.y) + (step - 1) * signi(move.y)
+				for cx in range(-radius, radius + 1):
+					var lead_grid := Vector2i(center_cell.x + cx, lead_y)
+					if DU.cell_distance_squared(center_cell, lead_grid) <= radius_sq:
+						if lead_grid not in _loaded_impostor_cells and lead_grid not in _pending_impostor_cells:
+							cells_to_load.append(lead_grid)
+							_loaded_impostor_cells[lead_grid] = true
+					var trail_grid := Vector2i(_prev_impostor_center.x + cx, trail_y)
+					if DU.cell_distance_squared(_prev_impostor_center, trail_grid) <= radius_sq:
+						if trail_grid in _loaded_impostor_cells:
+							cells_to_unload.append(trail_grid)
 
-		# Queue for progressive loading instead of loading synchronously
-		_pending_impostor_cells.append_array(cells_to_load)
-		Log.info("impostors", "Queued %d impostor cells for deferred loading (total pending: %d)" % [
-			cells_to_load.size(), _pending_impostor_cells.size()])
+		if not cells_to_unload.is_empty():
+			_unload_impostors_in_cells(cells_to_unload)
+
+		if not cells_to_load.is_empty():
+			cells_to_load.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+				return DU.cell_distance_squared(center_cell, a) < DU.cell_distance_squared(center_cell, b)
+			)
+			_pending_impostor_cells.append_array(cells_to_load)
+
+		Log.debug("impostors", "Differential: +%d -%d impostor cells (move:%s, scanned:%d)" % [
+			cells_to_load.size(), cells_to_unload.size(), move,
+			(absi(move.x) + absi(move.y)) * (2 * radius + 1) * 2])
+
+	else:
+		# Full recalculation (first call, teleport, or large move)
+		var desired_cells: Dictionary = {}
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				var grid := Vector2i(center_cell.x + dx, center_cell.y + dy)
+				if DU.cell_distance_squared(center_cell, grid) <= radius_sq:
+					desired_cells[grid] = true
+
+		if debug_enabled:
+			_debug("Full impostor recalc: center=%s, radius=%d, desired=%d" % [
+				center_cell, radius, desired_cells.size()])
+
+		var cells_to_unload: Array[Vector2i] = []
+		for grid: Vector2i in _loaded_impostor_cells:
+			if grid not in desired_cells:
+				cells_to_unload.append(grid)
+
+		if not cells_to_unload.is_empty():
+			_unload_impostors_in_cells(cells_to_unload)
+
+		var cells_to_load: Array[Vector2i] = []
+		for grid: Vector2i in desired_cells:
+			if grid not in _loaded_impostor_cells and grid not in _pending_impostor_cells:
+				cells_to_load.append(grid)
+				_loaded_impostor_cells[grid] = true
+
+		if not cells_to_load.is_empty():
+			cells_to_load.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+				return DU.cell_distance_squared(center_cell, a) < DU.cell_distance_squared(center_cell, b)
+			)
+			_pending_impostor_cells.append_array(cells_to_load)
+			# Track initial count for progress reporting (only on first full recalc)
+			if _initial_pending_count == 0:
+				_initial_pending_count = _pending_impostor_cells.size()
+			Log.info("impostors", "Queued %d impostor cells for deferred loading (total pending: %d)" % [
+				cells_to_load.size(), _pending_impostor_cells.size()])
+
+	_prev_impostor_center = center_cell
 
 
 ## Unload impostors belonging to specific cells
@@ -1002,6 +1163,15 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 					_texture_ref_counts[hash_key] -= 1
 					if _texture_ref_counts[hash_key] <= 0:
 						_texture_ref_counts.erase(hash_key)
+				# Maintain reverse index
+				if hash_key in _hash_to_impostor_ids:
+					var hash_ids: Array = _hash_to_impostor_ids[hash_key]
+					var hidx := hash_ids.find(id)
+					if hidx >= 0:
+						hash_ids[hidx] = hash_ids.back()
+						hash_ids.pop_back()
+					if hash_ids.is_empty():
+						_hash_to_impostor_ids.erase(hash_key)
 		_cell_index.erase(grid)
 
 	for id: int in ids_to_remove:
@@ -1029,52 +1199,110 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 
 
 ## Internal helper to load impostors from ESM record
-func _load_impostors_from_cell_record(grid: Vector2i) -> void:
+## Load impostors from a cell record with intra-cell budget checking.
+## Returns -1 if the cell was fully processed, or the reference index to resume from
+## if the budget was exceeded mid-cell.
+func _load_impostors_from_cell_record_budgeted(grid: Vector2i, start_ref: int, deadline_usec: int) -> int:
 	if not ESMManager:
 		Log.error("impostors", "ESMManager not available!")
-		return
+		return -1
 
 	var cell_record = ESMManager.get_exterior_cell(grid.x, grid.y)
 	if not cell_record:
-		# Only log failures for cells within a reasonable range (not ocean/edge cells)
 		if abs(grid.x) < 30 and abs(grid.y) < 30:
 			_debug("No cell record for grid %s" % grid)
-		return
+		return -1
 
-	var ref_count := 0
+	var refs: Array = cell_record.references
+	var ref_count := refs.size()
 	var impostor_count := 0
 	var model_count := 0
 
-	# Iterate over all references in the cell
-	for ref in cell_record.references:
-		ref_count += 1
-		# Lookup the record to get the model path (CellReference doesn't have it directly)
-		var record = ESMManager.get_any_record(str(ref.ref_id))
-		if not record or not ("model" in record) or not record.model:
-			continue
+	# Process references starting from start_ref (supports resume)
+	var i := start_ref
+	while i < ref_count:
+		# Budget check every 16 refs to avoid Time.get_ticks_usec() overhead per-ref
+		if (i - start_ref) & 15 == 15 and Time.get_ticks_usec() >= deadline_usec:
+			return i  # Budget exceeded — return resume index
 
-		var model_path: String = record.model
-		if model_path.is_empty():
-			continue
+		var ref = refs[i]
+		i += 1
+
+		# Fast path: use cached ref_id -> model_path mapping
+		var ref_id_str: String = str(ref.ref_id)
+		var model_path: String
+		if ref_id_str in _ref_id_to_model:
+			model_path = _ref_id_to_model[ref_id_str]
+			if model_path.is_empty():
+				continue  # Cached as "no model"
+		else:
+			# Cache miss — do the expensive ESM lookup once
+			var record = ESMManager.get_any_record(ref_id_str)
+			if not record or not ("model" in record) or not record.model:
+				_ref_id_to_model[ref_id_str] = ""  # Cache negative result
+				continue
+			model_path = record.model
+			if model_path.is_empty():
+				_ref_id_to_model[ref_id_str] = ""
+				continue
+			_ref_id_to_model[ref_id_str] = model_path
 
 		model_count += 1
 
 		# Check if it needs an impostor
 		if impostor_candidates.should_have_impostor(model_path):
 			impostor_count += 1
-			# Convert coordinates using CS (CoordinateSystem)
-			# CS assumes "ref" has position/rotation/scale.
-			# Or we can use the raw values if we know them.
-			# To be safe and consistent with ReferenceInstantiator:
 			var pos := CS.vector_to_godot(ref.position)
 			var scale_vec := CS.scale_to_godot(ref.scale)
 			var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-			var rot_euler := basis.get_euler() # We store Euler for simplicity
+			var rot_euler := basis.get_euler()
 
 			add_impostor(model_path, grid, pos, rot_euler, scale_vec)
 
 	if debug_enabled and (impostor_count > 0 or ref_count > 0):
-		_debug("Cell %s: %d refs, %d models, %d impostor candidates" % [grid, ref_count, model_count, impostor_count])
+		_debug("Cell %s: %d refs (from %d), %d models, %d impostor candidates" % [grid, ref_count, start_ref, model_count, impostor_count])
+
+	return -1  # Cell fully processed
+
+
+## Log screen-size histogram of all loaded impostors (one-time diagnostic)
+func _log_screen_size_histogram() -> void:
+	if _screen_size_histogram_logged:
+		return
+	_screen_size_histogram_logged = true
+
+	var camera_pos := DU.cell_to_world_center(_last_center_cell)
+	# Assume 1080p, 75° vertical FOV
+	var screen_height := 1080.0
+	var fov_rad := deg_to_rad(75.0)
+	var half_screen_factor := screen_height / (2.0 * tan(fov_rad / 2.0))
+
+	var buckets: Array[int] = [0, 0, 0, 0, 0]  # <1px, 1-2px, 2-5px, 5-10px, 10+px
+	var bucket_names: Array[String] = ["<1px", "1-2px", "2-5px", "5-10px", "10+px"]
+
+	for impostor_id: int in _impostors:
+		var imp: ImpostorData = _impostors[impostor_id]
+		var dist := camera_pos.distance_to(imp.position)
+		if dist < 1.0:
+			dist = 1.0
+		var obj_size := maxf(imp.texture_size.x * imp.scale.x, imp.texture_size.y * imp.scale.y)
+		var screen_px := obj_size / dist * half_screen_factor
+
+		if screen_px < 1.0:
+			buckets[0] += 1
+		elif screen_px < 2.0:
+			buckets[1] += 1
+		elif screen_px < 5.0:
+			buckets[2] += 1
+		elif screen_px < 10.0:
+			buckets[3] += 1
+		else:
+			buckets[4] += 1
+
+	Log.info("impostors", "Screen-size histogram (%d total impostors):" % _impostors.size())
+	for i in range(buckets.size()):
+		var pct: float = 100.0 * buckets[i] / maxf(1.0, float(_impostors.size()))
+		Log.info("impostors", "  %s: %d (%.1f%%)" % [bucket_names[i], buckets[i], pct])
 
 
 func _debug(msg: String) -> void:
@@ -1189,6 +1417,11 @@ func _create_impostor(
 
 	# Increment texture reference count
 	_texture_ref_counts[hash_key] = _texture_ref_counts.get(hash_key, 0) + 1
+
+	# Maintain reverse index: hash_key -> impostor IDs
+	if hash_key not in _hash_to_impostor_ids:
+		_hash_to_impostor_ids[hash_key] = [] as Array[int]
+	_hash_to_impostor_ids[hash_key].append(impostor.id)
 
 	impostor_created.emit(impostor.id, model_path)
 
@@ -1340,6 +1573,7 @@ func _rebuild_texture_array() -> void:
 
 
 func _rebuild_multimesh() -> void:
+	var start_usec := Time.get_ticks_usec()
 	var impostor_count := _impostors.size()
 
 	if impostor_count == 0:
@@ -1348,9 +1582,21 @@ func _rebuild_multimesh() -> void:
 			_debug("_rebuild_multimesh: No impostors to render")
 		return
 
-	_master_multimesh.instance_count = impostor_count
+	# Build a PackedFloat32Array and use set_buffer() for a single bulk upload
+	# instead of N * 2 individual set_instance_transform/set_instance_custom_data calls.
+	#
+	# Buffer layout per instance (TRANSFORM_3D + custom_data, no colors):
+	#   12 floats: Transform3D as 3 rows of [basis_col.x, basis_col.y, basis_col.z, origin_component]
+	#     Row 0: [basis.x.x, basis.x.y, basis.x.z, origin.x]  (column 0 + origin.x)
+	#     Row 1: [basis.y.x, basis.y.y, basis.y.z, origin.y]  (column 1 + origin.y)
+	#     Row 2: [basis.z.x, basis.z.y, basis.z.z, origin.z]  (column 2 + origin.z)
+	#   4 floats: custom_data [r, g, b, a]
+	# Total: 16 floats per instance
+	var stride := 16
+	var buffer := PackedFloat32Array()
+	buffer.resize(impostor_count * stride)
 
-	var idx := 0
+	var offset := 0
 	for impostor_id: int in _impostors:
 		var impostor: ImpostorData = _impostors[impostor_id]
 
@@ -1358,31 +1604,40 @@ func _rebuild_multimesh() -> void:
 		var billboard_pos := impostor.position
 		billboard_pos.y += impostor.aabb_center_y * impostor.scale.y
 
-		# Create transform with scale based on texture size
-		var scale_x := impostor.texture_size.x * impostor.scale.x
-		var scale_y := impostor.texture_size.y * impostor.scale.y
+		# Scale based on texture size
+		var sx := impostor.texture_size.x * impostor.scale.x
+		var sy := impostor.texture_size.y * impostor.scale.y
 
-		var transform := Transform3D()
-		transform = transform.scaled(Vector3(scale_x, scale_y, 1.0))
-		transform.origin = billboard_pos
+		# Transform: scaled identity basis (diagonal: sx, sy, 1.0) + origin
+		# Column 0 + origin.x
+		buffer[offset +  0] = sx
+		buffer[offset +  1] = 0.0
+		buffer[offset +  2] = 0.0
+		buffer[offset +  3] = billboard_pos.x
+		# Column 1 + origin.y
+		buffer[offset +  4] = 0.0
+		buffer[offset +  5] = sy
+		buffer[offset +  6] = 0.0
+		buffer[offset +  7] = billboard_pos.y
+		# Column 2 + origin.z
+		buffer[offset +  8] = 0.0
+		buffer[offset +  9] = 0.0
+		buffer[offset + 10] = 1.0
+		buffer[offset + 11] = billboard_pos.z
+		# Custom data: texture_index, rotation_y, normal_index, 1.0
+		buffer[offset + 12] = float(impostor.texture_index)
+		buffer[offset + 13] = impostor.rotation.y
+		buffer[offset + 14] = float(impostor.normal_texture_index)
+		buffer[offset + 15] = 1.0
 
-		_master_multimesh.set_instance_transform(idx, transform)
+		offset += stride
 
-		# Custom data: x = texture layer, y = rotation.y (radians), z = normal layer (-1 = no normals)
-		_master_multimesh.set_instance_custom_data(idx, Color(
-			float(impostor.texture_index),
-			impostor.rotation.y,
-			float(impostor.normal_texture_index),
-			1.0
-		))
+	_master_multimesh.instance_count = impostor_count
+	_master_multimesh.set_buffer(buffer)
 
-		idx += 1
-
-	# Only log rebuild at debug level (was spamming the console)
-	if debug_enabled:
-		_debug("MultiMesh rebuilt: %d instances, visible=%d" % [
-			impostor_count, _master_multimesh.visible_instance_count
-		])
+	var elapsed_usec := Time.get_ticks_usec() - start_usec
+	Log.debug("impostors", "MultiMesh rebuild: %d instances, %.2f ms (set_buffer)" % [
+		impostor_count, elapsed_usec / 1000.0])
 
 
 func _get_or_load_metadata(model_path: String) -> Dictionary:

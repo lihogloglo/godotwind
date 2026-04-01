@@ -59,6 +59,18 @@ var fog_toggle: CheckBox = null
 var clouds_toggle: CheckBox = null
 var color_grading_toggle: CheckBox = null
 
+## Weather panel widgets
+var weather_panel: FoldablePanel = null
+var weather_enabled_toggle: CheckBox = null
+var weather_preset_btn: OptionButton = null
+var weather_type_btn: OptionButton = null
+var fog_density_slider: HSlider = null
+var cloud_coverage_slider: HSlider = null
+var time_of_day_slider: HSlider = null
+var time_scale_slider: HSlider = null
+var time_pause_toggle: CheckBox = null
+var weather_status_label: Label = null
+
 ## Debug panel widgets
 var lod_mode_btn: Button = null
 
@@ -119,6 +131,7 @@ func build(vbox: VBoxContainer) -> void:
 	_create_navigation_panel()
 	_create_terrain_panel()
 	_create_ocean_panel()
+	_create_weather_panel()
 	_create_quality_panel()
 	_create_shader_panel()
 	_create_debug_panel()
@@ -433,6 +446,98 @@ func _create_ocean_panel() -> void:
 	panel_vbox.add_child(ocean_panel)
 
 
+func _create_weather_panel() -> void:
+	weather_panel = FoldablePanelScript.new("Weather", true)  # Start folded
+
+	# Enable toggle
+	weather_enabled_toggle = CheckBox.new()
+	weather_enabled_toggle.text = "Enable Weather"
+	weather_enabled_toggle.button_pressed = false
+	weather_enabled_toggle.toggled.connect(_cb.get("weather_toggled", Callable()))
+	weather_enabled_toggle.tooltip_text = "Enable dynamic weather system"
+	weather_panel.add_content(weather_enabled_toggle)
+
+	# Weather presets dropdown (above individual controls)
+	var preset_row := HBoxContainer.new()
+	var preset_label := Label.new()
+	preset_label.text = "Preset:"
+	preset_label.add_theme_font_size_override("font_size", 11)
+	preset_label.custom_minimum_size.x = 55
+	preset_row.add_child(preset_label)
+
+	weather_preset_btn = OptionButton.new()
+	weather_preset_btn.add_item("Custom")
+	weather_preset_btn.add_item("Morrowind Default")
+	weather_preset_btn.add_item("Clear Day")
+	weather_preset_btn.add_item("Foggy Morning")
+	weather_preset_btn.add_item("Stormy Night")
+	weather_preset_btn.add_item("Ashstorm")
+	weather_preset_btn.add_item("Blizzard")
+	weather_preset_btn.add_item("Golden Hour")
+	weather_preset_btn.selected = 0
+	weather_preset_btn.item_selected.connect(_cb.get("weather_preset_changed", Callable()))
+	weather_preset_btn.tooltip_text = "Quick presets that set weather type + time + speed"
+	weather_preset_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	preset_row.add_child(weather_preset_btn)
+	weather_panel.add_content(preset_row)
+
+	# Weather type dropdown
+	var type_row := HBoxContainer.new()
+	var type_label := Label.new()
+	type_label.text = "Type:"
+	type_label.add_theme_font_size_override("font_size", 11)
+	type_label.custom_minimum_size.x = 55
+	type_row.add_child(type_label)
+
+	weather_type_btn = OptionButton.new()
+	weather_type_btn.add_item("Auto", -1)
+	for i: int in WeatherTypes.TYPE_NAMES.size():
+		weather_type_btn.add_item(WeatherTypes.TYPE_NAMES[i], i)
+	weather_type_btn.selected = 0
+	weather_type_btn.item_selected.connect(_cb.get("weather_type_changed", Callable()))
+	weather_type_btn.tooltip_text = "Weather type override (Auto = region-based)"
+	weather_type_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	type_row.add_child(weather_type_btn)
+	weather_panel.add_content(type_row)
+
+	# Time of day slider (0-24)
+	time_of_day_slider = create_slider_row(weather_panel.get_content_container(), "Time:", 0.0, 24.0, 8.0, _cb.get("time_of_day_changed", Callable()))
+	time_of_day_slider.step = 0.1
+	time_of_day_slider.tooltip_text = "Game hour (0 = midnight, 12 = noon)"
+
+	# Time scale slider
+	time_scale_slider = create_slider_row(weather_panel.get_content_container(), "Speed:", 0.0, 300.0, 30.0, _cb.get("time_scale_changed", Callable()))
+	time_scale_slider.step = 5.0
+	time_scale_slider.tooltip_text = "Time scale: game-seconds per real-second"
+
+	# Pause toggle
+	time_pause_toggle = CheckBox.new()
+	time_pause_toggle.text = "Pause Time"
+	time_pause_toggle.button_pressed = false
+	time_pause_toggle.toggled.connect(_cb.get("time_pause_toggled", Callable()))
+	weather_panel.add_content(time_pause_toggle)
+
+	# Fog density multiplier slider
+	fog_density_slider = create_slider_row(weather_panel.get_content_container(), "Fog:", 0.1, 3.0, 1.0, _cb.get("fog_density_changed", Callable()))
+	fog_density_slider.step = 0.1
+	fog_density_slider.tooltip_text = "Fog density multiplier (1.0 = default, higher = thicker)"
+
+	# Cloud coverage slider
+	cloud_coverage_slider = create_slider_row(weather_panel.get_content_container(), "Clouds:", 0.0, 1.0, 0.4, _cb.get("cloud_coverage_changed", Callable()))
+	cloud_coverage_slider.step = 0.05
+	cloud_coverage_slider.tooltip_text = "Cloud coverage (overridden by weather system when active)"
+
+	# Status label
+	weather_status_label = Label.new()
+	weather_status_label.name = "WeatherStatus"
+	weather_status_label.text = "Weather: Clear | Hour: 8.0"
+	weather_status_label.add_theme_font_size_override("font_size", 10)
+	weather_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	weather_panel.add_content(weather_status_label)
+
+	panel_vbox.add_child(weather_panel)
+
+
 func _create_quality_panel() -> void:
 	quality_panel = FoldablePanelScript.new("Rendering Quality", true)  # Start folded
 
@@ -564,67 +669,12 @@ func _create_shader_panel() -> void:
 	# Info label
 	var info_label := Label.new()
 	info_label.add_theme_font_size_override("font_size", 10)
-	info_label.text = "Post-processing effects (VAIO-style)"
+	info_label.text = "Post-processing effects"
 	info_label.modulate = Color(0.7, 0.7, 0.7)
 	shader_panel.add_content(info_label)
 
-	# Volumetric Fog toggle
-	fog_toggle = CheckBox.new()
-	fog_toggle.text = "VAIO Fog (shader)"
-	fog_toggle.button_pressed = false
-	fog_toggle.toggled.connect(_cb.get("fog_toggled", Callable()))
-	fog_toggle.tooltip_text = "Ray-marched VAIO-style volumetric fog (compositor shader)"
-	shader_panel.add_content(fog_toggle)
-
-	# Fog intensity slider
-	var fog_row := HBoxContainer.new()
-	var fog_label := Label.new()
-	fog_label.text = "  Intensity:"
-	fog_label.add_theme_font_size_override("font_size", 11)
-	fog_label.custom_minimum_size.x = 70
-	fog_row.add_child(fog_label)
-
-	var fog_slider := HSlider.new()
-	fog_slider.name = "FogIntensitySlider"
-	fog_slider.min_value = 0.0
-	fog_slider.max_value = 2.0
-	fog_slider.step = 0.05
-	fog_slider.value = 0.5
-	fog_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	fog_slider.value_changed.connect(_cb.get("fog_intensity_changed", Callable()))
-	fog_row.add_child(fog_slider)
-	shader_panel.add_content(fog_row)
-
-	# Volumetric Clouds toggle
-	clouds_toggle = CheckBox.new()
-	clouds_toggle.text = "Volumetric Clouds"
-	clouds_toggle.button_pressed = false
-	clouds_toggle.toggled.connect(_cb.get("clouds_toggled", Callable()))
-	clouds_toggle.tooltip_text = "Ray-marched volumetric clouds"
-	shader_panel.add_content(clouds_toggle)
-
-	# Cloud coverage slider
-	var cloud_row := HBoxContainer.new()
-	var cloud_label := Label.new()
-	cloud_label.text = "  Coverage:"
-	cloud_label.add_theme_font_size_override("font_size", 11)
-	cloud_label.custom_minimum_size.x = 70
-	cloud_row.add_child(cloud_label)
-
-	var cloud_slider := HSlider.new()
-	cloud_slider.name = "CloudCoverageSlider"
-	cloud_slider.min_value = 0.0
-	cloud_slider.max_value = 1.0
-	cloud_slider.step = 0.05
-	cloud_slider.value = 0.5
-	cloud_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cloud_slider.value_changed.connect(_cb.get("cloud_coverage_changed", Callable()))
-	cloud_row.add_child(cloud_slider)
-	shader_panel.add_content(cloud_row)
-
-	# Separator
-	var sep := HSeparator.new()
-	shader_panel.add_content(sep)
+	# VAIO fog and clouds removed — redundant with native depth/volumetric fog
+	# and SunshineClouds2. Fog is now in Weather panel, clouds driven by weather.
 
 	# Color Grading toggle
 	color_grading_toggle = CheckBox.new()
