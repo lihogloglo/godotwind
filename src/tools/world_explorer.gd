@@ -9,7 +9,6 @@
 ##   OceanControls       — Ocean/water system (src/tools/ui/ocean_controls.gd)
 ##   EnvironmentControls — Shader effects + sky (src/tools/ui/environment_controls.gd)
 ##   StatsCollector      — Performance stats display (src/tools/ui/stats_collector.gd)
-##   TerrainPreprocessor — Terrain prebaking (src/tools/ui/terrain_preprocessor.gd)
 ##   LodDebugCommands    — LOD console commands (src/tools/lod_debug_commands.gd)
 ##   ProfilingReport     — UI log profiling (src/tools/profiling_report.gd)
 ##
@@ -39,7 +38,6 @@ const OceanControlsScript := preload("res://src/tools/ui/ocean_controls.gd")
 const EnvironmentControlsScript := preload("res://src/tools/ui/environment_controls.gd")
 const WeatherControlsScript := preload("res://src/tools/ui/weather_controls.gd")
 const StatsCollectorScript := preload("res://src/tools/ui/stats_collector.gd")
-const TerrainPreprocessorScript := preload("res://src/tools/ui/terrain_preprocessor.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
@@ -78,9 +76,6 @@ const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
 @onready var vivec_btn: Button = $UI/StatsPanel/VBox/QuickButtons/VivecBtn
 @onready var origin_btn: Button = $UI/StatsPanel/VBox/QuickButtons/OriginBtn
 
-# Terrain preprocessing UI
-@onready var preprocess_btn: Button = $UI/StatsPanel/VBox/PreprocessBtn
-@onready var preprocess_status: Label = $UI/StatsPanel/VBox/PreprocessStatus
 
 # UI panels (constructed by ExplorerPanels)
 var _panels: ExplorerPanels = null
@@ -117,7 +112,6 @@ var _ocean_controls: OceanControls = null  # OceanControls (ocean/water system)
 var _env_controls: EnvironmentControls = null  # EnvironmentControls (shader effects + sky)
 var _weather_controls: WeatherControls = null  # WeatherControls (weather + time-of-day)
 var _stats_collector: StatsCollector = null  # StatsCollector (panel label updates)
-var _terrain_preprocessor: TerrainPreprocessor = null  # TerrainPreprocessor (terrain baking)
 var background_processor: BackgroundProcessor = null  # BackgroundProcessor for async loading
 var mod_registry: ModRegistry = null  # ModRegistry for mod loading
 var console: Console = null  # Developer console
@@ -223,8 +217,6 @@ func _ready() -> void:
 	vivec_btn.pressed.connect(func() -> void: _teleport_to_cell(5, -6))
 	origin_btn.pressed.connect(func() -> void: _teleport_to_cell(0, 0))
 
-	# Connect preprocess button
-	preprocess_btn.pressed.connect(_on_preprocess_pressed)
 
 	# Setup interior cell browser
 	_setup_interior_browser()
@@ -411,17 +403,10 @@ func _init_terrain3d() -> void:
 		return
 
 	# Use shared configuration from CoordinateSystem (single source of truth)
+	# This sets vertex_spacing, region_size, material, and assets
 	if not CS.configure_terrain3d(terrain_3d):
 		_log("[color=red]ERROR: Failed to configure Terrain3D[/color]")
 		return
-
-	# TEMPORARY: Terrain3D v1.1.0-dev crashes on set_vertex_spacing().
-	# Apply vertex_spacing as transform scale to validate terrain alignment.
-	# TODO: Remove when DLL is fixed with null-camera guard.
-	var vs: float = CS.TERRAIN_VERTEX_SPACING
-	if not is_equal_approx(terrain_3d.get_vertex_spacing(), vs):
-		terrain_3d.scale = Vector3(vs, 1.0, vs)
-		_log("Applied terrain scale workaround: %.4f (vertex_spacing DLL bug)" % vs)
 
 	# Load terrain textures
 	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
@@ -430,7 +415,7 @@ func _init_terrain3d() -> void:
 	# Configure terrain manager to use proper texture slot mapping
 	terrain_manager.set_texture_slot_mapper(texture_loader)
 
-	_log("Terrain3D configured: region_size=%d, vertex_spacing=%.3f" % [CS.TERRAIN_REGION_SIZE, CS.TERRAIN_VERTEX_SPACING])
+	_log("Terrain3D configured: region_size=%d, vertex_spacing=%.3f" % [CS.TERRAIN_REGION_SIZE, terrain_3d.get_vertex_spacing()])
 
 
 func _load_preprocessed_terrain() -> void:
@@ -442,9 +427,11 @@ func _load_preprocessed_terrain() -> void:
 	var terrain_data_dir := SettingsManager.get_terrain_path()
 	if DirAccess.dir_exists_absolute(terrain_data_dir):
 		terrain_3d.data.load_directory(terrain_data_dir)
-		_log("Loaded preprocessed terrain from %s" % terrain_data_dir)
+		_log("Loaded preprocessed terrain: %d regions from %s" % [
+			terrain_3d.data.get_region_count(), terrain_data_dir])
 	else:
 		_log("[color=yellow]Preprocessed terrain directory not found[/color]")
+
 
 
 # ==================== Camera System ====================
@@ -882,25 +869,6 @@ func _get_active_camera() -> Camera3D:
 	return fly_camera
 
 
-## Update the preprocess status label
-func _update_preprocess_status() -> void:
-	if not preprocess_status:
-		return
-
-	# Check if terrain data exists
-	var terrain_data_dir := SettingsManager.get_terrain_path()
-	var has_terrain := DirAccess.dir_exists_absolute(terrain_data_dir)
-
-	if has_terrain:
-		preprocess_status.text = "Using pre-processed terrain"
-		preprocess_status.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
-		preprocess_btn.text = "Re-preprocess Terrain"
-	else:
-		preprocess_status.text = "No terrain data - click to generate"
-		preprocess_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
-		preprocess_btn.text = "Preprocess ALL Terrain"
-
-
 ## Setup visibility toggle checkboxes and foldable panel system
 func _setup_visibility_toggles() -> void:
 	# Create environment controls (extracted in Session 5)
@@ -976,7 +944,6 @@ func _setup_visibility_toggles() -> void:
 				_profiling_report.dump_report(),
 		"teleport_to_cell": _teleport_to_cell,
 		"adjust_view_distance": _adjust_view_distance,
-		"preprocess_pressed": _on_preprocess_pressed,
 	}
 	var initial_state := {
 		"show_characters": _show_characters,
@@ -1003,14 +970,6 @@ func _setup_visibility_toggles() -> void:
 	_stats_collector = StatsCollectorScript.new(_panels)
 	_stats_collector.set_profiler(profiler)
 	_stats_collector.set_terrain(terrain_3d)
-
-	# Create terrain preprocessor (extracted in Session 7)
-	var preprocess_callbacks := {
-		"log": _log,
-		"get_tree": get_tree,
-		"update_preprocess_status": _update_preprocess_status,
-	}
-	_terrain_preprocessor = TerrainPreprocessorScript.new(preprocess_callbacks)
 
 	# Setup debug overlay for 3D visualizations
 	_setup_debug_overlay()
@@ -1192,10 +1151,6 @@ func _apply_resolution(index: int) -> void:
 		_log("Resolution: %dx%d" % [res.x, res.y])
 
 
-## Handle preprocess button press (delegates to TerrainPreprocessor)
-func _on_preprocess_pressed() -> void:
-	var ui_refs := {"preprocess_btn": preprocess_btn, "preprocess_status": preprocess_status}
-	await _terrain_preprocessor.run(terrain_3d, terrain_manager, ui_refs)
 
 
 ## Quality preset: Pretty — enables most visual features

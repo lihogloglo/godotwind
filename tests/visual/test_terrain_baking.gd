@@ -47,15 +47,15 @@ func _run_test() -> void:
 
 	var terrain := Terrain3D.new()
 	terrain.name = "TestTerrain3D"
+
+	# Set scale BEFORE add_child — DLL clipmap uses it during _initialize()
+	CS.configure_terrain3d_pre_tree(terrain)
+	add_child(terrain)
+
+	# Re-disable physics AFTER add_child — C++ ENTER_TREE re-enables it
 	terrain.set_physics_process(false)
 	terrain.set_process(false)
 
-	# MUST set vertex_spacing BEFORE add_child — crashes in Terrain3D v1.1.0-dev otherwise
-	Log.info("testing", "About to set vertex_spacing pre-tree...")
-	CS.configure_terrain3d_pre_tree(terrain)
-	Log.info("testing", "vertex_spacing set to %.4f, now adding to tree..." % terrain.get_vertex_spacing())
-
-	add_child(terrain)
 	await get_tree().process_frame
 
 	# Set camera explicitly for Terrain3D
@@ -63,6 +63,7 @@ func _run_test() -> void:
 		terrain.set_camera(cam)
 		Log.info("testing", "Camera set on Terrain3D")
 
+	# Configure post-tree: sets vertex_spacing, region_size, material, assets, tessellation
 	if not CS.configure_terrain3d(terrain):
 		_fail("configure_terrain3d failed — terrain.data is null?")
 		return
@@ -108,17 +109,21 @@ func _run_test() -> void:
 			import_failed += 1
 			Log.warn("testing", "  FAILED region %s" % _last_region)
 
-		# Progress every batch_size regions
+		# Save incrementally and yield (Terrain3D can crash after ~50 imports)
 		if i % batch_size == 0:
 			var elapsed := (Time.get_ticks_msec() - _start_time) / 1000.0
 			Log.info("testing", "  Imported %d/%d regions (%.1fs elapsed, last: %s)" % [
 				i, regions_with_data.size(), elapsed, _last_region])
+			# Save terrain data incrementally so progress survives crashes
+			var save_dir := SettingsManager.get_terrain_path()
+			DirAccess.make_dir_recursive_absolute(save_dir)
+			terrain.data.save_directory(save_dir)
 			await get_tree().process_frame
 
 	Log.info("testing", "Phase 1 COMPLETE: %d success, %d failed out of %d" % [
 		import_success, import_failed, regions_with_data.size()])
 
-	# Save terrain data
+	# Final save
 	var terrain_data_dir := SettingsManager.get_terrain_path()
 	DirAccess.make_dir_recursive_absolute(terrain_data_dir)
 	terrain.data.save_directory(terrain_data_dir)

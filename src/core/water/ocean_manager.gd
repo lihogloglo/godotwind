@@ -1,5 +1,6 @@
 ## OceanManager - Main coordinator for the ocean water system
-## Manages ocean mesh, shore dampening, and buoyancy queries via GerstnerMath
+## Manages ocean mesh, shore dampening, FFT compute pipeline, and buoyancy queries.
+## Buoyancy uses OceanPhysicsEvaluator (FFT-synced) in HIGH mode, GerstnerMath fallback in STANDARD.
 ## Autoload singleton: accessible via OceanManager global
 ## OPTIONAL SYSTEM - Can be completely disabled via project settings
 class_name OceanManagerClass
@@ -63,6 +64,15 @@ var _normal_maps := Texture2DArrayRD.new()
 var _fft_time: float = 0.0
 var _fft_next_update: float = 0.0
 var _rng := RandomNumberGenerator.new()
+
+# CPU-side wave evaluation (synced with FFT spectrum)
+var _physics_evaluator: OceanPhysicsEvaluator = null
+
+# GPU readback for buoyancy (exact match with visual waves)
+var _displacement_cpu: PackedByteArray  # Raw RGBA16F data from GPU
+var _displacement_size: int = 0  # Map dimension (e.g., 256)
+var _displacement_tile: Vector2 = Vector2.ZERO  # Tile length from cascade 0
+var _readback_frame: int = 0  # Last frame we did a readback
 
 # Signals
 signal ocean_initialized()
@@ -206,6 +216,13 @@ func _process(delta: float) -> void:
 			_fft_next_update = _fft_time + target_dt
 			_wave_generator.update(update_dt, _cascade_parameters)
 
+	# GPU readback for buoyancy — read displacement map once per frame
+	if _wave_generator and _displacement_size > 0:
+		var frame := Engine.get_process_frames()
+		if frame != _readback_frame:
+			_readback_frame = frame
+			_displacement_cpu = _wave_generator.read_displacement(0)  # Cascade 0 = swell
+
 
 func _find_active_camera() -> Camera3D:
 	var viewport := get_viewport()
@@ -307,6 +324,15 @@ func _init_fft_pipeline() -> void:
 	# Set per-cascade scale uniforms on the material
 	_update_cascade_scales()
 
+	# GPU readback setup — store tile size for UV mapping
+	_displacement_size = fft_map_size
+	_displacement_tile = _cascade_parameters[0].tile_length
+
+	# Initialize CPU-side wave evaluator as fallback (hash mismatch means
+	# waves won't match GPU exactly — GPU readback is preferred when available)
+	_physics_evaluator = OceanPhysicsEvaluator.new()
+	_physics_evaluator.init_from_cascades(_cascade_parameters, fft_map_size)
+
 	Log.info("water", "OceanManager: FFT pipeline initialized - %d cascades, %dx%d maps" % [
 		_cascade_parameters.size(), fft_map_size, fft_map_size])
 
@@ -330,15 +356,17 @@ func _shutdown_fft_pipeline() -> void:
 		_wave_generator.queue_free()
 		_wave_generator = null
 		_cascade_parameters.clear()
+		_physics_evaluator = null
+		_displacement_cpu = PackedByteArray()
+		_displacement_size = 0
 		Log.info("water", "OceanManager: FFT pipeline shut down")
 
 
 # ============================================================================
-# WAVE QUERIES — Uses GerstnerMath for CPU-side wave evaluation
+# WAVE QUERIES — GPU readback (exact match) > OceanPhysicsEvaluator > GerstnerMath
 # ============================================================================
 
 ## Get the wave height at a world position (for buoyancy)
-## TODO Phase 4: Feed GerstnerMath from cascade parameters instead of hardcoded constants
 func get_wave_height(world_pos: Vector3) -> float:
 	if not _system_enabled or not _enabled:
 		return sea_level
@@ -347,6 +375,16 @@ func get_wave_height(world_pos: Vector3) -> float:
 	if shore_factor <= 0.01:
 		return sea_level - 1000.0
 
+	# GPU readback — exact match with visual waves
+	if _displacement_cpu.size() > 0:
+		var disp := _sample_displacement_readback(world_pos)
+		return sea_level + disp.y * shore_factor * wave_scale
+
+	# Fallback: CPU spectrum evaluator (approximate)
+	if _physics_evaluator and _physics_evaluator._component_count > 0:
+		return sea_level + _physics_evaluator.get_height(world_pos, _time, shore_factor * wave_scale)
+
+	# Fallback: Gerstner for STANDARD mode
 	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
 	var disp := GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
 	return sea_level + disp.y
@@ -357,6 +395,14 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.ZERO
 	var shore_factor := _get_shore_factor(world_pos)
+
+	if _displacement_cpu.size() > 0:
+		var disp := _sample_displacement_readback(world_pos)
+		return disp * shore_factor * wave_scale
+
+	if _physics_evaluator and _physics_evaluator._component_count > 0:
+		return _physics_evaluator.get_displacement(world_pos, _time, shore_factor * wave_scale)
+
 	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
 	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
 
@@ -366,8 +412,68 @@ func get_wave_normal(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.UP
 	var shore_factor := _get_shore_factor(world_pos)
+
+	# GPU readback normal via finite differences
+	if _displacement_cpu.size() > 0:
+		var eps := 1.0
+		var h0 := _sample_displacement_readback(world_pos).y
+		var hx := _sample_displacement_readback(world_pos + Vector3(eps, 0, 0)).y
+		var hz := _sample_displacement_readback(world_pos + Vector3(0, 0, eps)).y
+		var nx := (h0 - hx) * shore_factor * wave_scale
+		var nz := (h0 - hz) * shore_factor * wave_scale
+		return Vector3(nx, 1.0, nz).normalized()
+
+	if _physics_evaluator and _physics_evaluator._component_count > 0:
+		return _physics_evaluator.get_normal(world_pos, _time, shore_factor * wave_scale)
+
 	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
 	return GerstnerMath.get_normal(world_pos, _time, shore_factor * wave_scale, cam_pos)
+
+
+## Sample the GPU displacement readback data at a world position.
+## Bilinear interpolation from the RGBA16F displacement map (cascade 0).
+func _sample_displacement_readback(world_pos: Vector3) -> Vector3:
+	if _displacement_cpu.size() == 0 or _displacement_size == 0:
+		return Vector3.ZERO
+
+	# World pos → UV in displacement map (tiling)
+	var u: float = fmod(world_pos.x / _displacement_tile.x, 1.0)
+	var v: float = fmod(world_pos.z / _displacement_tile.y, 1.0)
+	if u < 0.0:
+		u += 1.0
+	if v < 0.0:
+		v += 1.0
+
+	# UV → pixel coordinates
+	var px: float = u * _displacement_size
+	var pz: float = v * _displacement_size
+	var ix: int = int(px) % _displacement_size
+	var iz: int = int(pz) % _displacement_size
+	var fx: float = px - floorf(px)
+	var fz: float = pz - floorf(pz)
+
+	# Bilinear sample (4 texels)
+	var ix1: int = (ix + 1) % _displacement_size
+	var iz1: int = (iz + 1) % _displacement_size
+
+	var d00 := _read_displacement_texel(ix, iz)
+	var d10 := _read_displacement_texel(ix1, iz)
+	var d01 := _read_displacement_texel(ix, iz1)
+	var d11 := _read_displacement_texel(ix1, iz1)
+
+	return d00 * (1.0 - fx) * (1.0 - fz) + d10 * fx * (1.0 - fz) + d01 * (1.0 - fx) * fz + d11 * fx * fz
+
+
+## Read a single texel from the displacement CPU buffer (RGBA16F = 8 bytes/texel).
+func _read_displacement_texel(x: int, z: int) -> Vector3:
+	# RGBA16F: 4 half-floats × 2 bytes = 8 bytes per texel
+	var offset: int = (z * _displacement_size + x) * 8
+	if offset + 7 >= _displacement_cpu.size():
+		return Vector3.ZERO
+	var dx: float = _displacement_cpu.decode_half(offset)
+	var dy: float = _displacement_cpu.decode_half(offset + 2)
+	var dz: float = _displacement_cpu.decode_half(offset + 4)
+	return Vector3(dx, dy, dz)
 
 
 func _get_shore_factor(world_pos: Vector3) -> float:

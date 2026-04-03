@@ -93,11 +93,13 @@ func run(terrain: Terrain3D, terrain_mgr: TerrainManager, ui_refs: Dictionary) -
 		for rx in range(min_region.x, max_region.x + 1):
 			var region_coord := Vector2i(rx, ry)
 
-			if regions_with_data.has(region_coord):
-				if terrain_mgr.import_combined_region(terrain, region_coord, get_land_func):
+			# import_combined_region handles both terrain AND ocean floor regions:
+			# regions with LAND data get real heightmaps, regions without get
+			# pre-filled ocean floor depth (CS.OCEAN_FLOOR_GODOT).
+			if terrain_mgr.import_combined_region(terrain, region_coord, get_land_func):
+				if regions_with_data.has(region_coord):
 					processed += 1
-			else:
-				if terrain_mgr.import_ocean_floor_region(terrain, region_coord):
+				else:
 					ocean_floor += 1
 
 			# Update progress

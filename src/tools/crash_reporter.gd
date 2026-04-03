@@ -15,6 +15,8 @@
 class_name CrashReporter
 extends Node
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 
 #region Configuration
 
@@ -269,9 +271,10 @@ func _update_camera_info() -> void:
 	if camera:
 		_last_camera_pos = camera.global_position
 
-		# Calculate cell from position (8192 units per cell)
-		_last_camera_cell.x = int(floor(_last_camera_pos.x / 8192.0))
-		_last_camera_cell.y = int(floor(_last_camera_pos.z / 8192.0))  # Z is the "Y" in cell grid
+		# Calculate cell from Godot world position
+		var cell_grid := CS.godot_pos_to_cell_grid(_last_camera_pos)
+		_last_camera_cell.x = cell_grid.x
+		_last_camera_cell.y = cell_grid.y
 
 #endregion
 

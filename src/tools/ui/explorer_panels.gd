@@ -384,18 +384,6 @@ func _create_terrain_panel() -> void:
 	terrain_label.text = "Regions: --"
 	terrain_panel.add_content(terrain_label)
 
-	var status_lbl := Label.new()
-	status_lbl.name = "PreprocessStatusLabel"
-	status_lbl.add_theme_font_size_override("font_size", 11)
-	status_lbl.text = "Status: Checking..."
-	terrain_panel.add_content(status_lbl)
-
-	var preprocess_btn_new := Button.new()
-	preprocess_btn_new.name = "PreprocessBtnNew"
-	preprocess_btn_new.text = "Preprocess Terrain"
-	preprocess_btn_new.pressed.connect(_cb.get("preprocess_pressed", Callable()))
-	terrain_panel.add_content(preprocess_btn_new)
-
 	panel_vbox.add_child(terrain_panel)
 
 

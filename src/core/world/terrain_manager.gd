@@ -702,21 +702,14 @@ func import_cell_to_terrain(terrain: Terrain3D, land: LandRecord, local_coord: V
 	# Calculate the import position
 	# CRITICAL: Terrain3D's import_images() uses ABSOLUTE world coordinates,
 	# NOT coordinates relative to the terrain node's position!
-	# When terrain.position = (1000, 0, 0) and we import at (100, 0, 0),
-	# Terrain3D creates the region at WORLD position (100, 0, 0), not (1100, 0, 0).
-	# Therefore, we must ALWAYS add the terrain node's position to get absolute coords.
 	var world_x: float
 	var world_z: float
 
 	if use_local_coord:
 		# In local coord mode, cell_x/cell_y are in range [-16, +15]
-		# We need to:
-		# 1. Convert local coords [-16, +15] to chunk offset [0, 31] by adding 16
-		# 2. Calculate position relative to chunk's origin (southwest corner)
-		# 3. Add the terrain node's world position to get absolute world coords
+		# Convert to absolute by adding terrain node position
 		var offset_x := float(cell_x + 16) * region_world_size + region_world_size * 0.5
 		var offset_z := float(-(cell_y + 16)) * region_world_size - region_world_size * 0.5
-		# Add terrain node's position to get absolute world coordinates
 		world_x = terrain.global_position.x + offset_x
 		world_z = terrain.global_position.z + offset_z
 	else:
@@ -836,9 +829,8 @@ func import_combined_region(terrain: Terrain3D, region_coord: Vector2i, get_land
 	var region_world_size := float(region_size_pixels) * vertex_spacing
 
 	# Region coordinate to world position:
-	# - region_coord (0,0) should be at world origin (0, 0)
-	# - region_coord (1,0) should be at (region_world_size, 0)
-	# - MW Y = north = Godot -Z
+	# CENTER position for proper v1.0.1 region snapping
+	# MW Y = north = Godot -Z
 	var world_x := float(region_coord.x) * region_world_size + region_world_size * 0.5
 	var world_z := float(-region_coord.y) * region_world_size - region_world_size * 0.5
 

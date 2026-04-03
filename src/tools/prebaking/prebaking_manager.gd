@@ -166,20 +166,28 @@ func _ensure_terrain_loaded() -> bool:
 	terrain_3d = Terrain3D.new()
 	terrain_3d.name = "PrebakingTerrain3D"
 
-	# Disable physics processing to avoid camera errors during prebaking
-	# Terrain3D tries to find a camera which doesn't exist in tool mode
 	var terrain_node := terrain_3d as Terrain3D
+
+	# Set scale BEFORE add_child — DLL clipmap builder uses it during _initialize()
+	CS.configure_terrain3d_pre_tree(terrain_node)
+
+	# Add a dummy camera — Terrain3D v1.1+ crashes in _grab_camera() without one
+	if not get_viewport().get_camera_3d():
+		var dummy_cam := Camera3D.new()
+		dummy_cam.name = "PrebakingCamera"
+		add_child(dummy_cam)
+
+	add_child(terrain_3d)
+
+	# Re-disable physics/process AFTER add_child — Terrain3D's C++ ENTER_TREE
+	# handler calls set_physics_process(true), overriding any prior disable
 	terrain_node.set_physics_process(false)
 	terrain_node.set_process(false)
-
-	# Set vertex_spacing BEFORE entering tree (crashes in Terrain3D v1.1.0-dev otherwise)
-	CS.configure_terrain3d_pre_tree(terrain_node)
-	add_child(terrain_3d)
 
 	# Wait a frame for initialization
 	await get_tree().process_frame
 
-	# Configure with shared settings (material, assets, region_size)
+	# Configure post-tree: scale workaround, region_size, material, assets
 	CS.configure_terrain3d(terrain_node)
 
 	# Try to load cached terrain data
@@ -364,20 +372,28 @@ func _bake_terrain() -> Dictionary:
 		terrain_3d = Terrain3D.new()
 		terrain_3d.name = "PrebakingTerrain3D"
 
-		# Disable physics processing to avoid camera errors during prebaking
-		# Terrain3D tries to find a camera which doesn't exist in tool mode
 		var terrain_node := terrain_3d as Terrain3D
+
+		# Pre-tree setup (no-op for v1.0.1 stable — scale set post-tree)
+		CS.configure_terrain3d_pre_tree(terrain_node)
+
+		# Add a dummy camera — Terrain3D v1.1+ crashes in _grab_camera() without one
+		if not get_viewport().get_camera_3d():
+			var dummy_cam := Camera3D.new()
+			dummy_cam.name = "PrebakingCamera"
+			add_child(dummy_cam)
+
+		add_child(terrain_3d)
+
+		# Re-disable physics/process AFTER add_child — Terrain3D's C++ ENTER_TREE
+		# handler calls set_physics_process(true), overriding any prior disable
 		terrain_node.set_physics_process(false)
 		terrain_node.set_process(false)
-
-		# Set vertex_spacing BEFORE entering tree (crashes in Terrain3D v1.1.0-dev otherwise)
-		CS.configure_terrain3d_pre_tree(terrain_node)
-		add_child(terrain_3d)
 
 		# Wait a frame for Terrain3D to fully initialize in the scene tree
 		await get_tree().process_frame
 
-		# Configure remaining settings (material, assets, region_size)
+		# Configure post-tree: scale workaround, region_size, material, assets
 		CS.configure_terrain3d(terrain_node)
 
 	# Check if already completed (skip only if we have completed items and nothing pending)
@@ -483,12 +499,18 @@ func _bake_terrain() -> Dictionary:
 		var current := state.completed.size() + state.failed.size()
 		component_progress.emit("Terrain", current, total, region_key)
 
-		# Yield periodically to keep UI responsive
+		# Yield periodically and save terrain data incrementally
+		# (Terrain3D can crash after ~50 sequential imports — save progress early)
 		if current % 10 == 0:
 			_state_manager.save_state()
+			if processed > 0:
+				var save_dir := SettingsManager.get_terrain_path()
+				DirAccess.make_dir_recursive_absolute(save_dir)
+				(terrain_3d as Terrain3D).data.save_directory(save_dir)
+				Log.info("prebaking", "Incremental save at %d/%d regions" % [current, total])
 			await get_tree().process_frame
 
-	# Save terrain data to disk
+	# Final save of terrain data to disk
 	if processed > 0:
 		var terrain_data_dir := SettingsManager.get_terrain_path()
 		DirAccess.make_dir_recursive_absolute(terrain_data_dir)
@@ -499,7 +521,7 @@ func _bake_terrain() -> Dictionary:
 	# === Pass 2: Bake horizon maps for terrain self-shadowing ===
 	if processed > 0 and not _should_stop:
 		Log.info("prebaking", "Baking horizon maps for terrain self-shadowing...")
-		component_progress.emit("Terrain", state.completed.size(), state.completed.size() + state.failed.size(), "horizon maps")
+		component_progress.emit("Terrain", 0, 1, "Starting horizon map baking...")
 		await _bake_horizon_maps(terrain_manager, get_land_func, regions_with_data, min_region, max_region)
 
 	state.end_time = Time.get_unix_time_from_system()

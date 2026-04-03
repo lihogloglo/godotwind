@@ -272,13 +272,8 @@ static func _convert_vertices(nif_verts: PackedVector3Array) -> PackedVector3Arr
 
 	for i in nif_verts.size():
 		var v := nif_verts[i]
-		# NIF: X-right, Y-forward, Z-up, 70 units/meter
-		# Godot: X-right, Y-up, Z-back, 1 unit/meter
-		result[i] = Vector3(
-			v.x / 70.0,
-			v.z / 70.0,
-			-v.y / 70.0
-		)
+		# NIF→Godot: axis swap (x,y,z) → (x,z,-y) + scale to meters
+		result[i] = CS.vector_to_godot(v)
 
 	return result
 

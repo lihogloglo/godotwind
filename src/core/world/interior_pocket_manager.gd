@@ -465,7 +465,7 @@ func _identify_building_for_door(door: DoorInfo, cell_record: CellRecord) -> voi
 
 		# Check distance (in MW coords to avoid conversion overhead for every ref)
 		var dist_sq: float = ref.position.distance_squared_to(door_pos_mw)
-		if dist_sq > BUILDING_SEARCH_RADIUS_SQ * 70.0 * 70.0:  # MW units = Godot * 70 (UNITS_PER_METER)
+		if dist_sq > BUILDING_SEARCH_RADIUS_SQ * CS.UNITS_PER_METER * CS.UNITS_PER_METER:  # MW units²
 			continue
 
 		# Check for non-seamless entrance patterns (caves, tombs)
@@ -502,8 +502,9 @@ func _identify_building_for_door(door: DoorInfo, cell_record: CellRecord) -> voi
 			if model_path.is_empty():
 				continue
 			var dist_sq: float = ref.position.distance_squared_to(door_pos_mw)
-			# Tighter radius for fallback (3m Godot = ~210 MW units)
-			if dist_sq > 210.0 * 210.0:
+			# Tighter radius for fallback (3m Godot in MW units)
+			var fallback_radius_mw: float = 3.0 * CS.UNITS_PER_METER
+			if dist_sq > fallback_radius_mw * fallback_radius_mw:
 				continue
 			if dist_sq < best_dist_sq:
 				best_dist_sq = dist_sq
@@ -517,7 +518,7 @@ func _identify_building_for_door(door: DoorInfo, cell_record: CellRecord) -> voi
 
 	# Diagnostic logging
 	if best_ref_id != &"":
-		var dist_godot: float = sqrt(best_dist_sq) / 70.0  # Convert MW to Godot approx
+		var dist_godot: float = sqrt(best_dist_sq) * CS.SCALE_FACTOR  # Convert MW to meters
 		Log.info("streaming", "Door '%s' -> building '%s' (%s, dist=%.1fm, seamless=%s)" % [
 			door.ref_id, best_ref_id, best_model_path.get_file(),
 			dist_godot, door.supports_seamless])

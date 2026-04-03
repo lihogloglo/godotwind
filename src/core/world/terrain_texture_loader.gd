@@ -202,7 +202,7 @@ func _add_default_texture(terrain_assets: Terrain3DAssets) -> void:
 		img.compress(Image.COMPRESS_BPTC)
 		asset.albedo_texture = ImageTexture.create_from_image(img)
 
-	terrain_assets.set_texture_asset(0, asset)
+	terrain_assets.set_texture(0, asset)
 	_slot_mapping[0] = 0
 	_next_slot = 1
 	Log.info("textures", "Default texture added to slot 0")
@@ -242,7 +242,7 @@ func _load_ltex_texture(terrain_assets: Terrain3DAssets, mw_index: int) -> bool:
 
 	# Add to Terrain3D at next available slot
 	var slot := _next_slot
-	terrain_assets.set_texture_asset(slot, asset)
+	terrain_assets.set_texture(slot, asset)
 
 	# Store mapping: MW index -> Terrain3D slot
 	_slot_mapping[mw_index] = slot
@@ -428,7 +428,7 @@ func verify_terrain_assets(terrain_assets: Terrain3DAssets) -> void:
 	lines.append("  Terrain3DAssets texture count: %d" % tex_count)
 	for i in range(mini(tex_count, 10)):  # Check first 10 slots
 		@warning_ignore("untyped_declaration")
-		var asset = terrain_assets.get_texture_asset(i)
+		var asset = terrain_assets.get_texture(i)
 		if asset:
 			var has_albedo := asset.albedo_texture != null
 			var tex_size := ""

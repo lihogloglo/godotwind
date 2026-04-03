@@ -51,7 +51,7 @@ func init_gpu(num_cascades: int) -> void:
 	)
 	descriptors[&"displacement_map"] = context.create_texture(
 		dims, RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
-		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT,
+		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT,
 		num_cascades
 	)
 	descriptors[&"normal_map"] = context.create_texture(
@@ -159,6 +159,16 @@ func update(delta: float, parameters: Array[WaveCascadeParameters]) -> void:
 
 	pass_parameters = parameters
 	pass_num_cascades_remaining = len(parameters)
+
+
+## Read back displacement map data from GPU for CPU-side wave queries.
+## Returns raw PackedByteArray of RGBA16F texels for the given cascade layer.
+## This syncs the GPU pipeline — call sparingly (once per frame max).
+func read_displacement(cascade_index: int = 0) -> PackedByteArray:
+	if not context or not descriptors.has(&"displacement_map"):
+		return PackedByteArray()
+	var rd: RenderingDevice = context.device
+	return rd.texture_get_data(descriptors[&"displacement_map"].rid, cascade_index)
 
 
 func _notification(what: int) -> void:

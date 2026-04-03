@@ -111,16 +111,15 @@ func _setup_terrain() -> void:
 	_terrain.name = "Terrain3D"
 	add_child(_terrain)
 
+	# Re-disable physics — Terrain3D C++ ENTER_TREE re-enables it
+	_terrain.set_physics_process(false)
+	_terrain.set_process(false)
+
 	# Wait for Terrain3D to initialize (needs to be in tree for .data)
 	await get_tree().process_frame
 
 	if not CS.configure_terrain3d(_terrain):
 		_log_result("WARN: configure_terrain3d failed — terrain may not have data")
-
-	# Apply vertex spacing workaround (same as main scene)
-	var vs: float = CS.TERRAIN_VERTEX_SPACING
-	if not is_equal_approx(_terrain.get_vertex_spacing(), vs):
-		_terrain.scale = Vector3(vs, 1.0, vs)
 
 	# Load preprocessed terrain data
 	var terrain_data_dir := SettingsManager.get_terrain_path()

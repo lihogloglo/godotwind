@@ -46,7 +46,7 @@ project/assembly_name="Godotwind"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/SunshineClouds2/plugin.cfg", "res://addons/gdUnit4/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
+enabled=PackedStringArray("res://addons/SunshineClouds2/plugin.cfg", "res://addons/gdUnit4/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain3d_release/addons/terrain_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
 
 [filesystem]
 

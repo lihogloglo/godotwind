@@ -25,6 +25,8 @@
 class_name DebugSystem
 extends Node
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 
 ## Emitted when auto-test completes
 signal auto_test_completed(report: Dictionary)
@@ -507,8 +509,8 @@ func toggle_overlay() -> void:
 func _setup_default_waypoints() -> void:
 	_waypoints.clear()
 
-	# Cell size in Godot units
-	var cell_size: float = 8192.0
+	# Cell size in Godot meters
+	var cell_size: float = CS.CELL_SIZE_GODOT
 
 	# Key locations for comprehensive streaming test
 	_waypoints = [
@@ -634,8 +636,8 @@ func _set_waypoint_target(idx: int) -> void:
 	var cell: Vector2i = wp.get("cell", Vector2i.ZERO)
 	var height: float = wp.get("height", 100.0)
 
-	# Convert cell to world position
-	var cell_size: float = 8192.0
+	# Convert cell to world position (Godot meters)
+	var cell_size: float = CS.CELL_SIZE_GODOT
 	_target_position = Vector3(
 		float(cell.x) * cell_size + cell_size * 0.5,
 		height,
@@ -902,8 +904,9 @@ func _write_state_to_file() -> void:
 	if _fly_camera:
 		var pos := _fly_camera.global_position
 		lines.append("Position: (%.1f, %.1f, %.1f)" % [pos.x, pos.y, pos.z])
-		var cell_x := int(floor(pos.x / 8192.0))
-		var cell_y := int(floor(-pos.z / 8192.0))
+		var cell_grid := CS.godot_pos_to_cell_grid(pos)
+		var cell_x := cell_grid.x
+		var cell_y := cell_grid.y
 		lines.append("Cell: (%d, %d)" % [cell_x, cell_y])
 	else:
 		lines.append("Camera: Not available")

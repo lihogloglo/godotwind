@@ -589,6 +589,9 @@ func _supplement_actor_data(path: String) -> void:
 		ESMDefs.RecordType.REC_SKIL,
 		ESMDefs.RecordType.REC_BSGN,
 		ESMDefs.RecordType.REC_LEVC,  # Leveled creatures
+		ESMDefs.RecordType.REC_BOOK,  # Books, scrolls, notes
+		ESMDefs.RecordType.REC_DIAL,  # Dialogue topics
+		ESMDefs.RecordType.REC_INFO,  # Dialogue info entries
 	]
 
 	while reader.has_more_recs():
@@ -609,8 +612,8 @@ func _supplement_actor_data(path: String) -> void:
 	reader.close()
 
 	if records_loaded > 0:
-		Log.info("esm", "Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d)" % [
-			records_loaded, classes.size(), factions.size(), skills.size(), birthsigns.size()
+		Log.info("esm", "Supplemented %d records (Classes: %d, Factions: %d, Skills: %d, Birthsigns: %d, Books: %d, Dialogues: %d)" % [
+			records_loaded, classes.size(), factions.size(), skills.size(), birthsigns.size(), books.size(), dialogues.size()
 		])
 
 

@@ -283,19 +283,15 @@ func force_cleanup() -> void:
 
 #region Internal
 
-## Configure Terrain3D based on provider settings
+## Configure Terrain3D based on provider settings.
+## Uses scale workaround (vertex_spacing=1.0, node scale = TERRAIN_VERTEX_SPACING).
 func _configure_terrain3d() -> void:
 	if not _terrain_3d or not _provider:
 		return
 
-	# Set vertex spacing from provider.
-	# NOTE: Terrain3D v1.1.0-dev crashes in set_vertex_spacing() when the node
-	# is in the scene tree. Only set if not already at the correct value and not in tree.
-	if not _terrain_3d.is_inside_tree():
-		_terrain_3d.vertex_spacing = _provider.vertex_spacing
-	elif not is_equal_approx(_terrain_3d.get_vertex_spacing(), _provider.vertex_spacing):
-		push_warning("GenericTerrainStreamer: vertex_spacing mismatch (have %.4f, want %.4f). Set before add_child()." % [
-			_terrain_3d.get_vertex_spacing(), _provider.vertex_spacing])
+	# Use CoordinateSystem's full setup (vertex_spacing, region_size, material, assets)
+	if _terrain_3d.is_inside_tree() and _terrain_3d.data:
+		CS.configure_terrain3d(_terrain_3d)
 
 	# Set region size (256 is standard) - MUST be done before creating data
 	@warning_ignore("int_as_enum_without_cast", "int_as_enum_without_match")
@@ -317,8 +313,8 @@ func _configure_terrain3d() -> void:
 
 	var actual_region_size := _terrain_3d.get_region_size()
 	var actual_vertex_spacing := _terrain_3d.get_vertex_spacing()
-	_debug("Terrain3D configured: vertex_spacing=%.2f (actual=%.2f), region_size=%d (actual=%d)" % [
-		_provider.vertex_spacing, actual_vertex_spacing,
+	_debug("Terrain3D configured: vertex_spacing=%.2f (actual=%.2f, scale=%.2f), region_size=%d (actual=%d)" % [
+		_provider.vertex_spacing, actual_vertex_spacing, _terrain_3d.scale.x,
 		_provider.region_size, actual_region_size
 	])
 
@@ -460,7 +456,7 @@ func _load_region_sync(region_coord: Vector2i) -> void:
 	if not colormap:
 		colormap = _create_default_colormap()
 
-	# Calculate world position for this region
+	# Calculate world position (CENTER of region for v1.0.1 import snapping)
 	var world_pos := _provider.region_to_world_pos(region_coord)
 
 	# Create import array
@@ -479,23 +475,20 @@ func _load_region_sync(region_coord: Vector2i) -> void:
 		region_world_size
 	])
 
-	# Convert world position to Terrain3D internal coordinates (accounts for
-	# vertex_spacing scale workaround — see CoordinateSystem.world_to_terrain_internal)
-	var internal_pos := CS.world_to_terrain_internal(world_pos, _terrain_3d)
-	_terrain_3d.data.import_images(images, internal_pos, 0.0, 1.0)
+	_terrain_3d.data.import_images(images, world_pos, 0.0, 1.0)
 
 	# Verify region was added and check its location
 	var t3d_count := _terrain_3d.data.get_region_count()
-	var t3d_loc := _terrain_3d.data.get_region_location(internal_pos)
+	var t3d_loc := _terrain_3d.data.get_region_location(world_pos)
 	_debug("Terrain3D: %d regions, this one at T3D loc %s" % [t3d_count, t3d_loc])
 
-	# Track this region (store internal pos for consistent unloading)
+	# Track this region
 	_loaded_regions[region_coord] = true
-	_region_world_positions[region_coord] = internal_pos
+	_region_world_positions[region_coord] = world_pos
 	_stats_regions_loaded += 1
 
 	terrain_region_loaded.emit(region_coord)
-	_debug("Loaded region: %s at internal pos (%.0f, %.0f)" % [region_coord, internal_pos.x, internal_pos.z])
+	_debug("Loaded region: %s at world pos (%.0f, %.0f)" % [region_coord, world_pos.x, world_pos.z])
 
 
 ## Load region asynchronously using BackgroundProcessor
@@ -535,7 +528,7 @@ func _generate_region_on_worker(region_coord: Vector2i, vertex_spacing: float, r
 	if not colormap:
 		colormap = _create_default_colormap_static(region_size)
 
-	# Calculate world position (pure math, thread-safe)
+	# Calculate world position (CENTER of region for v1.0.1 import snapping)
 	var region_world_size := float(region_size) * vertex_spacing
 	var world_x := float(region_coord.x) * region_world_size + region_world_size * 0.5
 	var world_z := float(-region_coord.y) * region_world_size - region_world_size * 0.5
@@ -625,13 +618,11 @@ func _import_generated_data(data: Dictionary) -> void:
 		region_coord, world_pos.x, world_pos.z
 	])
 
-	# Convert to internal coords (vertex_spacing scale workaround)
-	var internal_pos := CS.world_to_terrain_internal(world_pos, _terrain_3d)
-	_terrain_3d.data.import_images(images, internal_pos, 0.0, 1.0)
+	_terrain_3d.data.import_images(images, world_pos, 0.0, 1.0)
 
-	# Track this region (store internal pos for unloading)
+	# Track this region
 	_loaded_regions[region_coord] = true
-	_region_world_positions[region_coord] = internal_pos
+	_region_world_positions[region_coord] = world_pos
 	_stats_regions_loaded += 1
 
 	terrain_region_loaded.emit(region_coord)

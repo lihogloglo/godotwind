@@ -15,6 +15,8 @@
 class_name DebugOverlay
 extends Node3D
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 ## Visibility flags
 var show_chunks: bool = false:
 	set(v):
@@ -108,7 +110,7 @@ const CELL_COLOR := Color(0.5, 0.5, 0.5, 0.1)
 const CELL_BORDER_COLOR := Color(0.8, 0.8, 0.8, 0.4)
 
 ## Cell size in meters (from coordinate system)
-const CELL_SIZE_METERS := 117.0
+const CELL_SIZE_METERS: float = CS.CELL_SIZE_GODOT  # ~117.03m
 
 ## FAR chunk size in cells
 const FAR_CHUNK_SIZE := 8

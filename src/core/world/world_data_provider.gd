@@ -68,14 +68,12 @@ func world_pos_to_region(world_pos: Vector3) -> Vector2i:
 	return Vector2i(rx, ry)
 
 
-## Convert region coordinate to world position (CENTER of region for Terrain3D import)
-## Terrain3D import_images expects center position for proper region snapping
-## Based on terrain_manager.gd which uses: x * size + size * 0.5
+## Convert region coordinate to world position (CENTER of region for Terrain3D import).
+## Terrain3D v1.0.1 import_images() expects center position for proper region snapping.
 func region_to_world_pos(region_coord: Vector2i) -> Vector3:
 	var region_world_size := float(region_size) * vertex_spacing
-	# CENTER position for proper snapping (matches terrain_manager.gd)
 	var x := float(region_coord.x) * region_world_size + region_world_size * 0.5
-	var z := -float(region_coord.y) * region_world_size - region_world_size * 0.5  # Negate Y, offset for center
+	var z := -float(region_coord.y) * region_world_size - region_world_size * 0.5
 	return Vector3(x, 0, z)
 
 

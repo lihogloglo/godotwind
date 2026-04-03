@@ -44,6 +44,11 @@ var response: String
 # Result script (BNAM subrecord)
 var result_script: String
 
+# Quest flags
+var quest_name: bool = false   # QSTN — this INFO adds a quest journal entry
+var quest_finish: bool = false # QSTF — this INFO finishes a quest
+var quest_restart: bool = false # QSTR — this INFO restarts a quest
+
 # Conditions (SCVR/INTV/FLTV subrecords)
 var conditions: Array[Dictionary] = []
 
@@ -71,6 +76,9 @@ func load(esm: ESMReader) -> void:
 	sound_file = ""
 	response = ""
 	result_script = ""
+	quest_name = false
+	quest_finish = false
+	quest_restart = false
 	conditions.clear()
 
 	var INAM := ESMDefs.four_cc("INAM")
@@ -124,8 +132,15 @@ func load(esm: ESMReader) -> void:
 			_load_condition_int(esm)
 		elif sub_name == FLTV:
 			_load_condition_float(esm)
-		elif sub_name in [QSTN, QSTF, QSTR]:
-			esm.skip_h_sub()  # Quest flags
+		elif sub_name == QSTN:
+			esm.skip_h_sub()
+			quest_name = true
+		elif sub_name == QSTF:
+			esm.skip_h_sub()
+			quest_finish = true
+		elif sub_name == QSTR:
+			esm.skip_h_sub()
+			quest_restart = true
 		elif sub_name == ESMDefs.SubRecordType.SREC_DELE:
 			esm.skip_h_sub()
 			is_deleted = true
@@ -138,9 +153,10 @@ func _load_data(esm: ESMReader) -> void:
 	if size >= 12:
 		esm.get_s32()  # Unknown
 		disposition = esm.get_s32()
-		speaker_rank = esm.get_byte()
-		speaker_sex = esm.get_byte()
-		player_rank = esm.get_byte()
+		# These bytes use 0xFF (-1 unsigned) to mean "any"
+		speaker_rank = _byte_to_signed(esm.get_byte())
+		speaker_sex = _byte_to_signed(esm.get_byte())
+		player_rank = _byte_to_signed(esm.get_byte())
 		esm.get_byte()  # Padding
 
 func _load_condition(esm: ESMReader) -> void:
@@ -159,6 +175,12 @@ func _load_condition_float(esm: ESMReader) -> void:
 	var value := esm.get_float()
 	if conditions.size() > 0:
 		conditions[-1]["float_value"] = value
+
+## Convert unsigned byte (0-255) to signed (-128 to 127)
+## MW uses 0xFF (-1) to mean "any" for rank/sex fields
+static func _byte_to_signed(b: int) -> int:
+	return b - 256 if b > 127 else b
+
 
 func _to_string() -> String:
 	return "DialogueInfo('%s')" % record_id

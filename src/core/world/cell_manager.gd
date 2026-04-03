@@ -72,8 +72,7 @@ var use_multimesh_instancing: bool = true  # Use MultiMesh for batching identica
 var min_instances_for_multimesh: int = 10  # Minimum instances to use MultiMesh instead of individual nodes
 
 # Morrowind light radius to Godot light range conversion factor
-# MW units are roughly 1/128th of a meter, so radius 256 ~= 2 meters
-const MW_LIGHT_SCALE: float = 1.0 / 70.0  # Tuned for visual appearance
+const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to meters
 
 # Pool pre-warming: fraction of max pool size to pre-create during preload
 const POOL_PREWARM_RATIO: float = 0.2

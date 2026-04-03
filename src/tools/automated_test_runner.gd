@@ -18,6 +18,8 @@
 class_name AutomatedTestRunner
 extends Node
 
+const CS := preload("res://src/core/coordinate_system.gd")
+
 
 ## Emitted when test run starts
 signal test_started
@@ -151,9 +153,8 @@ func _input(event: InputEvent) -> void:
 func _setup_default_waypoints() -> void:
 	_waypoints.clear()
 
-	# Helper to convert cell coordinates to world position
-	# Cell size is 8192 units, center at (0,0)
-	var cell_size: float = 8192.0
+	# Cell size in Godot meters (from CoordinateSystem)
+	var cell_size: float = CS.CELL_SIZE_GODOT
 
 	# Starting point - high altitude overview
 	_waypoints.append(Waypoint.new(
@@ -697,12 +698,12 @@ func _run_teleport_stress_scenario() -> void:
 	_captured_errors.clear()
 	_frame_times.clear()
 
-	var cell_size: float = 8192.0
+	var cell_size: float = CS.CELL_SIZE_GODOT
 	var locations: Array[Dictionary] = [
-		{"name": "Seyda Neen", "pos": Vector3(-2 * cell_size, 100, -9 * cell_size)},
-		{"name": "Balmora", "pos": Vector3(-3 * cell_size, 100, -2 * cell_size)},
-		{"name": "Vivec", "pos": Vector3(5 * cell_size, 100, -6 * cell_size)},
-		{"name": "Red Mountain", "pos": Vector3(3 * cell_size, 300, 6 * cell_size)},
+		{"name": "Seyda Neen", "pos": Vector3(-2 * cell_size, 100, 9 * cell_size)},
+		{"name": "Balmora", "pos": Vector3(-3 * cell_size, 100, 2 * cell_size)},
+		{"name": "Vivec", "pos": Vector3(5 * cell_size, 100, 6 * cell_size)},
+		{"name": "Red Mountain", "pos": Vector3(3 * cell_size, 300, -6 * cell_size)},
 		{"name": "Origin", "pos": Vector3(0, 100, 0)},
 	]
 

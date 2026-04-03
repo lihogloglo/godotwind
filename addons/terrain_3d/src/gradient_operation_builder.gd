@@ -1,4 +1,4 @@
-# Copyright © 2023-2026 Cory Petkovsek, Roope Palmroos, and Contributors.
+# Copyright © 2025 Cory Petkovsek, Roope Palmroos, and Contributors.
 # Gradient Operation Builder for Terrain3D
 extends "res://addons/terrain_3d/src/operation_builder.gd"
 
@@ -31,7 +31,6 @@ func is_ready() -> bool:
 	return _get_point_picker().all_points_selected() and not _is_drawable()
 
 
-# This function runs a "brush" operation from point1 to point2, when drawable is not checked
 func apply_operation(p_editor: Terrain3DEditor, p_global_position: Vector3, p_camera_direction: float) -> void:
 	var points: PackedVector3Array = _get_point_picker().get_points()
 	assert(points.size() == 2)

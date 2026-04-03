@@ -220,8 +220,9 @@ func get_height_at_position(world_pos: Vector3) -> float:
 	var region_origin := region_to_world_pos(region)
 
 	# Local position within region (0 to region_world_size)
-	var local_x := world_pos.x - (region_origin.x - region_world_size * 0.5)
-	var local_z := -(world_pos.z - (region_origin.z + region_world_size * 0.5))
+	# region_origin is the image corner (not center), so subtract directly
+	var local_x := world_pos.x - region_origin.x
+	var local_z := world_pos.z - region_origin.z
 
 	# Convert to pixel coordinates
 	var px := clampi(int(local_x / vertex_spacing), 0, region_size - 1)

@@ -70,7 +70,7 @@ var stats: Dictionary = {
 }
 
 # Morrowind light radius to Godot light range conversion factor
-const MW_LIGHT_SCALE: float = 1.0 / 70.0
+const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to meters
 
 
 ## Instantiate a cell reference into a Node3D

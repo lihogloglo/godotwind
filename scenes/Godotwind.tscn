@@ -185,17 +185,6 @@ visible = false
 layout_mode = 2
 text = "Terrain:"
 
-[node name="PreprocessBtn" type="Button" parent="UI/StatsPanel/VBox"]
-visible = false
-layout_mode = 2
-text = "Preprocess ALL Terrain"
-
-[node name="PreprocessStatus" type="Label" parent="UI/StatsPanel/VBox"]
-visible = false
-layout_mode = 2
-theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
-text = "No pre-processed data"
-
 [node name="HSeparator4" type="HSeparator" parent="UI/StatsPanel/VBox"]
 visible = false
 layout_mode = 2
