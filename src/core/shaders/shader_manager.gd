@@ -53,6 +53,11 @@ var _presets: Dictionary = {}
 ## Current preset name (empty if custom)
 var _current_preset: String = ""
 
+## Shared textures for inter-effect data passing (Phase 3: texture registry)
+## Effects write intermediate results here; subsequent effects read them.
+## Example: sky transmittance LUT written by SkyTransmittanceEffect, read by FogEffect.
+var _shared_textures: Dictionary = {}  # name: String → RID
+
 ## Config file path for saving/loading settings
 const CONFIG_PATH := "user://shader_settings.cfg"
 
@@ -82,6 +87,14 @@ func attach_to(node: Node) -> void:
 		Log.info("shaders", "ShaderManager attached to Camera3D")
 	else:
 		push_warning("[ShaderManager] Can only attach to WorldEnvironment or Camera3D")
+
+
+## Set the active sun on all effects that support it (fog, godrays, etc.)
+func set_sun(sun: DirectionalLight3D) -> void:
+	for effect_name in _effects:
+		var effect: PostProcessEffect = _effects[effect_name]
+		if effect.has_method("set_sun"):
+			effect.set_sun(sun)
 
 
 ## Detach from current target
@@ -153,10 +166,12 @@ func enable_effect(effect_name: String, transition_time: float = 0.0) -> bool:
 
 	_effect_stack.insert(insert_idx, effect_name)
 
-	# Add to compositor
+	# Add to compositor — must get/modify/set because GDScript Array properties return copies
 	effect.effect_enabled = true
 	effect.on_effect_added()
-	_compositor.compositor_effects.append(effect)
+	var effects := _compositor.compositor_effects
+	effects.append(effect)
+	_compositor.compositor_effects = effects
 
 	# Handle transition
 	if transition_time > 0.0:
@@ -196,7 +211,9 @@ func _remove_effect_from_compositor(effect_name: String) -> void:
 
 	_effect_stack.erase(effect_name)
 	effect.effect_enabled = false
-	_compositor.compositor_effects.erase(effect)
+	var effects := _compositor.compositor_effects
+	effects.erase(effect)
+	_compositor.compositor_effects = effects
 
 	effect_disabled.emit(effect_name)
 	stack_changed.emit(_effect_stack.duplicate())
@@ -450,11 +467,32 @@ func _start_transition(effect_name: String, target_blend: float, duration: float
 	}
 
 
+## Store a shared texture RID for inter-effect data passing
+func set_shared_texture(texture_name: String, rid: RID) -> void:
+	_shared_textures[texture_name] = rid
+
+
+## Retrieve a shared texture RID (returns invalid RID if not found)
+func get_shared_texture(texture_name: String) -> RID:
+	return _shared_textures.get(texture_name, RID())
+
+
+## Remove a shared texture entry
+func clear_shared_texture(texture_name: String) -> void:
+	_shared_textures.erase(texture_name)
+
+
+## Remove all shared texture entries
+func clear_all_shared_textures() -> void:
+	_shared_textures.clear()
+
+
 func _process(delta: float) -> void:
-	# Update weather cache on main thread for render-thread-safe access
-	var fog_effect: PostProcessEffect = _effects.get("volumetric_fog")
-	if fog_effect and fog_effect.has_method("update_weather_cache"):
-		fog_effect.update_weather_cache()
+	# Update weather caches on main thread for render-thread-safe access
+	for effect_name in ["volumetric_fog", "godrays"]:
+		var effect: PostProcessEffect = _effects.get(effect_name)
+		if effect and effect.has_method("update_weather_cache"):
+			effect.update_weather_cache()
 
 	# Process transitions
 	var completed: Array[String] = []

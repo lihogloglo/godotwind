@@ -9,6 +9,7 @@
 ##   T/Y     = Time backward/forward (+/- 1 hour)
 ##   F       = Toggle depth fog
 ##   V       = Toggle volumetric fog
+##   R       = Toggle god rays (compute shader)
 ##   G       = Toggle weather system
 ##   K       = Toggle Sky3D
 ##   ZQSD    = Fly camera (AZERTY), right-click to look
@@ -30,6 +31,8 @@ var _particles: WeatherParticles = null
 # Fog state
 var _depth_fog_enabled: bool = true
 var _volumetric_fog_enabled: bool = true
+var _godrays_enabled: bool = false
+var _shader_manager_attached: bool = false
 var _weather_enabled: bool = false
 var _mouse_captured: bool = false
 var _fly_speed: float = 80.0
@@ -49,7 +52,10 @@ func _ready() -> void:
 	_setup_weather()
 	_setup_ui()
 
-	Log.info("testing", "Fog test ready. Press G=weather, F=depth fog, V=volumetric, 1-0=weather types")
+	# Wire ShaderManager for compute shader effects (godrays, fog)
+	_ensure_shader_manager()
+
+	Log.info("testing", "Fog test ready. Press G=weather, F=depth fog, V=volumetric, R=godrays, 1-0=weather types")
 
 
 func _setup_environment() -> void:
@@ -223,6 +229,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_G: _toggle_weather()
 			KEY_F: _toggle_depth_fog()
 			KEY_V: _toggle_volumetric_fog()
+			KEY_R: _toggle_godrays()
 			KEY_K: _toggle_sky3d()
 
 	if event is InputEventMouseButton:
@@ -334,7 +341,34 @@ func _toggle_sky3d() -> void:
 			add_child(_world_env)
 		WeatherManager.set_sky3d(null)
 		_sun.visible = true
+	# Re-attach ShaderManager to whichever WorldEnvironment is active
+	_shader_manager_attached = false
+	_ensure_shader_manager()
 	Log.info("testing", "Sky3D: %s" % ("ON" if _sky3d_enabled else "OFF"))
+
+
+func _ensure_shader_manager() -> void:
+	if _shader_manager_attached:
+		return
+	if _world_env and _world_env.is_inside_tree():
+		ShaderManager.attach_to(_world_env)
+	elif _sky3d and _sky3d.is_inside_tree():
+		ShaderManager.attach_to(_sky3d)
+	else:
+		return
+	ShaderManager.set_sun(_sun)
+	_shader_manager_attached = true
+	Log.info("testing", "ShaderManager attached for compute effects")
+
+
+func _toggle_godrays() -> void:
+	_ensure_shader_manager()
+	_godrays_enabled = not _godrays_enabled
+	if _godrays_enabled:
+		ShaderManager.enable_effect("godrays", 0.3)
+	else:
+		ShaderManager.disable_effect("godrays", 0.3)
+	Log.info("testing", "God Rays (compute): %s" % ("ON" if _godrays_enabled else "OFF"))
 
 
 ## Apply current fog settings to any Environment (used when swapping Sky3D <-> fallback)

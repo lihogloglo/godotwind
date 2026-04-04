@@ -5,12 +5,14 @@
 ##   - Volumetric fog (density, albedo, anisotropy, length — god rays)
 ##   - Height fog (pools at sea level / valleys)
 ##   - Sun volumetric energy (god ray brightness)
-##   - Sky3D SkyDome (fog density, rayleigh, clouds, wind)
+##   - SkyManager atmosphere (turbidity, Mie, cloud coverage)
+##   - Sky3D SkyDome (legacy — fog density, rayleigh, clouds, wind)
 ##   - SunshineClouds2 (wind speed/direction at 4 detail scales)
 ##   - Fallback Environment + DirectionalLight when Sky3D is off
 ##
 ## Callbacks:
-##   get_sky3d: -> Node (Sky3D instance or null)
+##   get_sky_manager: -> SkyManager (custom sky system, preferred)
+##   get_sky3d: -> Node (Sky3D instance or null, legacy)
 ##   get_environment: -> Environment
 ##   get_light: -> DirectionalLight3D (fallback only)
 ##   get_sunshine_driver: -> Node (SunshineCloudsDriverGD or null)
@@ -35,11 +37,15 @@ func apply(result: WeatherTypes.WeatherResult) -> void:
 	if not _active:
 		return
 
+	var sky_mgr: Node = _get_sky_manager()
 	var sky3d: Node = _get_sky3d()
 	var env: Environment = _get_environment()
 
-	# Sky3D path — drives SkyDome parameters (fog haze, clouds, wind)
-	if sky3d and sky3d.get("sky3d_enabled"):
+	# SkyManager path (preferred) — drives atmosphere params directly
+	if sky_mgr:
+		_apply_sky(sky_mgr, result)
+	elif sky3d and sky3d.get("sky3d_enabled"):
+		# Legacy Sky3D path
 		_apply_sky3d(sky3d, result)
 	else:
 		# Fallback path — drive DirectionalLight for sun position/color
@@ -133,7 +139,15 @@ func _apply_sun_volumetric_energy(result: WeatherTypes.WeatherResult) -> void:
 	if result.thunder_flash > 0.0:
 		energy += result.thunder_flash * 8.0
 
-	# Try Sky3D's sun first
+	# Try SkyManager's sun first
+	var sky_mgr: Node = _get_sky_manager()
+	if sky_mgr and sky_mgr.has_method("get_sun_light"):
+		var sun: DirectionalLight3D = sky_mgr.get_sun_light()
+		if sun:
+			sun.light_volumetric_fog_energy = energy
+			return
+
+	# Legacy: try Sky3D's sun
 	var sky3d: Node = _get_sky3d()
 	if sky3d and sky3d.get("sky3d_enabled"):
 		var sun: DirectionalLight3D = sky3d.get_node_or_null("SunLight")
@@ -149,7 +163,34 @@ func _apply_sun_volumetric_energy(result: WeatherTypes.WeatherResult) -> void:
 #endregion
 
 
-#region Sky3D Path — SkyDome atmospheric parameters
+#region SkyManager Path — Typed atmosphere parameters
+
+func _apply_sky(sky_mgr: Node, result: WeatherTypes.WeatherResult) -> void:
+	# Turbidity: clear=2, hazy=5, storm=8-10
+	var storm_t: float = clampf(result.storm_fog_multiplier - 1.0, 0.0, 1.0)
+	sky_mgr.atmosphere.turbidity = lerpf(2.0, 10.0, storm_t)
+
+	# Mie coefficient: higher in storms (more aerosols)
+	sky_mgr.atmosphere.mie_coefficient = lerpf(21e-6, 50e-6, storm_t)
+
+	# Cloud coverage for sky darkening
+	sky_mgr.cloud_coverage = result.cloud_coverage
+
+	# Wind
+	sky_mgr.wind_speed = result.wind_speed
+
+	# Thunder flash — spike ambient energy, smooth decay back to 1.0
+	var env: Environment = sky_mgr.get_environment()
+	if env:
+		if result.thunder_flash > 0.0:
+			env.ambient_light_energy = 1.0 + result.thunder_flash * 3.0
+		elif env.ambient_light_energy > 1.01:
+			env.ambient_light_energy = lerpf(env.ambient_light_energy, 1.0, 0.15)
+
+#endregion
+
+
+#region Sky3D Path — SkyDome atmospheric parameters (legacy)
 
 func _apply_sky3d(sky3d: Node, result: WeatherTypes.WeatherResult) -> void:
 	var sky_dome: Node = sky3d.get("sky")
@@ -256,6 +297,12 @@ func _apply_sunshine_clouds(driver: Node, result: WeatherTypes.WeatherResult) ->
 
 #region Callbacks
 
+func _get_sky_manager() -> Node:
+	if _cb.has("get_sky_manager"):
+		return _cb["get_sky_manager"].call()
+	return null
+
+
 func _get_sky3d() -> Node:
 	if _cb.has("get_sky3d"):
 		return _cb["get_sky3d"].call()
@@ -263,6 +310,12 @@ func _get_sky3d() -> Node:
 
 
 func _get_environment() -> Environment:
+	# Prefer SkyManager's environment if available
+	var sky_mgr: Node = _get_sky_manager()
+	if sky_mgr and sky_mgr.has_method("get_environment"):
+		var env: Environment = sky_mgr.get_environment()
+		if env:
+			return env
 	if _cb.has("get_environment"):
 		return _cb["get_environment"].call()
 	return null

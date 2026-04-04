@@ -196,54 +196,48 @@ VolumetricFogEffect._render_callback()  [render thread]
 | Per-weather fog parameters (10 types) | Done | `weather_data.gd` + `weather_types.gd` |
 | Fog interpolation (weather-to-weather + time-of-day) | Done | `weather_interpolator.gd` |
 | Fog test scene with terrain | Done | `tests/visual/test_fog.tscn` |
+| **Godrays compute shader (4-pass)** | **Done** | `src/core/shaders/compute/godrays.glsl` |
+| **GodraysEffect CompositorEffect** | **Done** | `src/core/shaders/effects/godrays_effect.gd` |
+| **Shared texture registry** | **Done** | `shader_manager.gd` — `set/get_shared_texture()` |
+| **Shader porting guide** | **Done** | `docs/SHADER_PORTING.md` |
 
 ---
 
 ## What's Next — Implementation Roadmap
 
-### Phase 1: Documentation & Reference (1-2 hours)
+### Phase 1: Documentation & Reference — DONE
 
-Create `src/core/shaders/omw_reference.glsl` — a non-compiled reference file documenting:
-- Every OpenMW builtin and its Godot equivalent
-- Code snippets for common operations (depth reconstruction, world position, phase functions)
-- How to convert .omwfx passes to CompositorEffects
-- Coordinate system notes (OpenMW Z-up → Godot Y-up)
-
-Create `docs/SHADER_PORTING.md` — community-facing guide:
+Created `docs/SHADER_PORTING.md` — community-facing guide:
 - Step-by-step: how to take a .omwfx file and port it to Godotwind
 - Which parts of .omwfx are DSL (not portable) vs GLSL (portable)
 - Push constant struct layout
 - How to register a new effect in ShaderManager
 
-### Phase 2: Godrays CompositorEffect (2-4 hours)
+### Phase 2: Godrays CompositorEffect — DONE
 
-Port Rafael's `godrays.omwfx` as the second CompositorEffect, proving the multi-effect pattern.
+Ported Rafael's `godrays.omwfx` as the second CompositorEffect.
 
-**From godrays.omwfx:**
-- Pass 1 (RT_Stretch): Depth-based sun occlusion detection at reduced resolution
-- Pass 2 (RT_Blur): Radial blur from sun screen position
-- Pass 3 (RT_Rays): Half-resolution ray computation with Gaussian weighting
-- Pass 4 (Combine): Additive blend with sun disc and horizon clipping
+**Implementation:**
+- Single compute shader (`godrays.glsl`) with 4 kernels selected by `pass_id` push constant
+- Pass 0 (Sky Mask): 2x2 supersampled depth → binary sky mask (half res)
+- Pass 1 (Radial Blur): 5-tap Gaussian along radial from sun (half res)
+- Pass 2 (Rays): N-iteration sampling toward sun with blue noise dithering (half res)
+- Pass 3 (Combine): Tangent blur upscaling + sun disc + horizon clipping (full res)
+- 4 dispatches with implicit barriers (compute_list_begin/end pairs)
+- CPU-side sun screen position projection from DirectionalLight3D
+- Per-pixel horizon clipping via `to_world()` reconstruction
+- Weather-aware sun occlusion (10 weather types)
+- 15 configurable parameters (ray strength, disc brightness, etc.)
+- Push constants: 192 bytes (under 256 limit)
 
-**Godot implementation:**
-- Single compute shader with 4 dispatches (different kernels selected by push constant `pass_id`)
-- OR 4 separate dispatches sharing texture RIDs via ShaderManager
-- Blue noise dithering texture for temporal stability
-- Sun screen position computed from DirectionalLight3D direction + projection matrix
+**Files:** `src/core/shaders/compute/godrays.glsl`, `src/core/shaders/effects/godrays_effect.gd`
 
-**Key parameters from godrays.omwfx:**
-- Ray iterations: 16 (configurable 1-50)
-- Ray radius, strength, falloff
-- Sun disc brightness with horizon multiplier
-- Cloud occlusion from VAIO (optional integration)
-- Offscreen range for smooth cutoff when sun exits viewport
+### Phase 3: Shared Texture Registry — DONE
 
-### Phase 3: Shared Texture Registry (1-2 hours)
-
-Extend `ShaderManager` with `_shared_textures` dictionary for inter-effect data passing:
+Added `_shared_textures` dictionary to `ShaderManager`:
 - `set_shared_texture(name, rid)` / `get_shared_texture(name) -> RID`
-- Lifecycle management (free textures when effects are removed)
-- Size tracking (recreate on viewport resize)
+- `clear_shared_texture(name)` / `clear_all_shared_textures()`
+- Weather cache loop now covers both fog and godrays effects
 
 This enables VAIO's multi-pass pattern where RT_Fog reads RT_Sky output.
 

@@ -20,6 +20,9 @@ extends RefCounted
 var show_sky: bool = false
 var sky_3d: Sky3D = null
 
+## Custom sky system (replaces Sky3D)
+var sky_manager: SkyManager = null
+
 ## When true, weather system owns fog/ambient base values
 var weather_active: bool = false
 
@@ -218,6 +221,8 @@ func on_reset_color_grading() -> void:
 
 ## Get whichever Environment is currently active.
 func _get_active_environment() -> Environment:
+	if show_sky and sky_manager:
+		return sky_manager.get_environment()
 	if show_sky and sky_3d and sky_3d.environment:
 		return sky_3d.environment
 	if _fallback_world_env and _fallback_world_env.environment:
@@ -489,27 +494,27 @@ func on_show_sky_toggled(enabled: bool) -> void:
 	show_sky = enabled
 
 	if enabled:
-		# Create Sky3D lazily on first enable
-		if not _sky3d_initialized:
-			_create_sky3d()
+		# Create SkyManager lazily on first enable
+		if not sky_manager:
+			_create_sky_manager()
 
-		# Enable Sky3D - add to tree if not already there
-		if sky_3d:
-			if not sky_3d.is_inside_tree():
-				_add_child(sky_3d)
-			sky_3d.sky3d_enabled = true
+		# Enable SkyManager — add to tree if not already there
+		if sky_manager:
+			if not sky_manager.is_inside_tree():
+				_add_child(sky_manager)
+			sky_manager.enabled = true
 		# Remove fallback from tree (only one WorldEnvironment can be active)
 		if _fallback_world_env and _fallback_world_env.is_inside_tree():
 			_remove_child(_fallback_world_env)
 		if _fallback_light:
 			_fallback_light.visible = false
 	else:
-		# Disable and remove Sky3D from tree so fallback can take over
-		if sky_3d:
-			if sky_3d.is_inside_tree():
-				_remove_child(sky_3d)
-			sky_3d.sky3d_enabled = false
-		# Add fallback back to tree AFTER Sky3D is removed
+		# Disable and remove SkyManager from tree so fallback can take over
+		if sky_manager:
+			if sky_manager.is_inside_tree():
+				_remove_child(sky_manager)
+			sky_manager.enabled = false
+		# Add fallback back to tree AFTER SkyManager is removed
 		if _fallback_world_env:
 			if not _fallback_world_env.is_inside_tree():
 				_add_child(_fallback_world_env)
@@ -520,10 +525,6 @@ func on_show_sky_toggled(enabled: bool) -> void:
 	# Re-apply visual state to the newly active environment
 	_apply_visual_state(_get_active_environment())
 
-	# Sky3D AtmFog is always off — Godot depth fog is the single fog source
-	if enabled:
-		_disable_sky3d_fog()
-
 	# Re-apply TAA to viewport (not env-dependent but needs to persist across toggles)
 	if _visual_state["taa"]:
 		var viewport := _get_viewport()
@@ -531,9 +532,8 @@ func on_show_sky_toggled(enabled: bool) -> void:
 			viewport.use_taa = true
 
 	# Re-apply shadow cascades to the active light
-	if enabled and sky_3d:
-		var sun: DirectionalLight3D = sky_3d.get_node_or_null("SunLight")
-		_apply_shadow_cascades(sun)
+	if enabled and sky_manager:
+		_apply_shadow_cascades(sky_manager.get_sun_light())
 	else:
 		_apply_shadow_cascades(_fallback_light)
 
@@ -543,7 +543,38 @@ func on_show_sky_toggled(enabled: bool) -> void:
 
 # ── Private methods ──
 
-## Create Sky3D node lazily (only called on first toggle).
+## Create SkyManager lazily (only called on first sky toggle).
+func _create_sky_manager() -> void:
+	if sky_manager:
+		return
+
+	_log("Initializing SkyManager...")
+
+	# Remove fallback environment BEFORE adding SkyManager (only one WorldEnvironment can be active)
+	if _fallback_world_env and _fallback_world_env.is_inside_tree():
+		_remove_child(_fallback_world_env)
+	if _fallback_light:
+		_fallback_light.visible = false
+
+	sky_manager = SkyManager.new()
+	sky_manager.name = "SkyManager"
+
+	# Add to scene tree — triggers _ready() → _initialize()
+	_add_child(sky_manager)
+
+	# Apply tracked visual state to SkyManager's environment
+	var env: Environment = sky_manager.get_environment()
+	if env:
+		env.tonemap_mode = _visual_state["tonemap_mode"]
+		_apply_visual_state(env)
+
+	# Initial update at noon
+	sky_manager.update(12.0)
+
+	_log("SkyManager initialized")
+
+
+## Create Sky3D node lazily (legacy — only called on first toggle).
 func _create_sky3d() -> void:
 	if _sky3d_initialized:
 		return

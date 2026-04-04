@@ -40,6 +40,7 @@ func set_panels(panels: ExplorerPanels) -> void:
 func setup_renderer(env_controls: EnvironmentControls) -> void:
 	_env_controls = env_controls
 	var renderer_callbacks := {
+		"get_sky_manager": func() -> Node: return env_controls.sky_manager if env_controls.show_sky else null,
 		"get_sky3d": func() -> Node: return env_controls.sky_3d if env_controls.show_sky else null,
 		"get_environment": env_controls.get_active_environment,
 		"get_light": env_controls.get_fallback_light,
@@ -140,15 +141,27 @@ func set_camera(camera: Camera3D) -> void:
 		_particles.set_camera(camera)
 
 
-## Sync Sky3D reference to WeatherManager and SunshineClouds2 (call when Sky3D is toggled)
+## Sync sky reference to WeatherManager and SunshineClouds2 (call when sky is toggled)
 func sync_sky3d() -> void:
-	if _env_controls and _env_controls.show_sky and _env_controls.sky_3d:
-		var sky3d: Node = _env_controls.sky_3d
-		WeatherManager.set_sky3d(sky3d)
-		# Point SunshineClouds2 at Sky3D's sun instead of fallback light
-		if _sunshine_driver and sky3d.get("sun"):
-			var lights: Array[DirectionalLight3D] = [sky3d.sun]
-			_sunshine_driver.tracked_directional_lights = lights
+	if _env_controls and _env_controls.show_sky:
+		# Prefer SkyManager over Sky3D
+		if _env_controls.sky_manager:
+			var sky_mgr: SkyManager = _env_controls.sky_manager
+			# SkyManager owns the clock — no need to set_sky3d on WeatherManager
+			WeatherManager.set_sky3d(null)
+			# Point SunshineClouds2 at SkyManager's sun
+			if _sunshine_driver:
+				var sun: DirectionalLight3D = sky_mgr.get_sun_light()
+				if sun:
+					var lights: Array[DirectionalLight3D] = [sun]
+					_sunshine_driver.tracked_directional_lights = lights
+		elif _env_controls.sky_3d:
+			# Legacy Sky3D path
+			var sky3d: Node = _env_controls.sky_3d
+			WeatherManager.set_sky3d(sky3d)
+			if _sunshine_driver and sky3d.get("sun"):
+				var lights: Array[DirectionalLight3D] = [sky3d.sun]
+				_sunshine_driver.tracked_directional_lights = lights
 	else:
 		WeatherManager.set_sky3d(null)
 		# Revert SunshineClouds2 to fallback light
@@ -159,7 +172,7 @@ func sync_sky3d() -> void:
 				_sunshine_driver.tracked_directional_lights = lights
 
 	# Re-register CompositorEffect on the active WorldEnvironment.
-	# Sky3D and fallback are different WorldEnvironment nodes — only one is in-tree
+	# SkyManager and fallback are different WorldEnvironment nodes — only one is in-tree
 	# at a time. The CompositorEffect stays on the old one's compositor after a swap,
 	# making the clouds invisible. Re-registering moves it to the active one.
 	_reregister_sunshine_compositor()
@@ -362,6 +375,10 @@ const BASE_CLOUD_COVERAGE: float = 0.4
 
 ## Called each frame by world_explorer to drive rendering
 func process(delta: float) -> void:
+	# Always update SkyManager with current game hour (even when weather is off)
+	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:
+		_env_controls.sky_manager.update(WeatherManager.game_hour)
+
 	# Always drive cloud coverage — clouds should be visible regardless of weather toggle
 	_update_cloud_coverage()
 

@@ -1,0 +1,10 @@
+Sky Textures — Attribution
+
+The following textures are from the Sky3D addon by TokisanGames (Cory Petkovsek).
+Licensed under MIT License.
+Source: https://github.com/TokisanGames/Sky3D
+
+Files:
+  Milkyway.jpg  — Star panorama (equirectangular Milky Way)
+  StarField.jpg — Star field overlay
+  MoonMap.png   — Lunar surface texture
