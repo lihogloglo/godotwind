@@ -85,6 +85,24 @@ static func _clear() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 0.69
 	p.fog_depth_night = 0.69
+	# Height fog — subtle mist at sea level
+	p.fog_height = 0.0
+	p.fog_height_density_day = 0.0012
+	p.fog_height_density_night = 0.003
+	# Depth fog — light haze, good sun scatter for warm feel
+	p.depth_fog_density_day = 0.00006
+	p.depth_fog_density_night = 0.00012
+	p.fog_sun_scatter = 0.4
+	p.fog_aerial_perspective = 0.7
+	p.fog_sky_affect = 0.15
+	# Volumetric — light, visible god rays
+	p.volumetric_density_day = 0.0012
+	p.volumetric_density_night = 0.002
+	p.volumetric_albedo = Color(0.92, 0.92, 0.97)
+	p.volumetric_anisotropy = 0.75
+	p.volumetric_length = 700.0
+	p.volumetric_sky_affect = 0.15
+	p.sun_volumetric_energy = 6.0
 	p.wind_speed = 0.1
 	p.cloud_speed = 1.25
 	p.cloud_coverage = 0.2  # Some clouds even on clear days
@@ -103,6 +121,24 @@ static func _cloudy() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 0.72
 	p.fog_depth_night = 0.72
+	# Height fog — slightly more than clear
+	p.fog_height = 0.0
+	p.fog_height_density_day = 0.0015
+	p.fog_height_density_night = 0.0036
+	# Depth fog — mild haze, reduced sun scatter (clouds diffuse it)
+	p.depth_fog_density_day = 0.00009
+	p.depth_fog_density_night = 0.00015
+	p.fog_sun_scatter = 0.3
+	p.fog_aerial_perspective = 0.65
+	p.fog_sky_affect = 0.18
+	# Volumetric — slightly denser, still god rays through cloud breaks
+	p.volumetric_density_day = 0.0015
+	p.volumetric_density_night = 0.0024
+	p.volumetric_albedo = Color(0.88, 0.88, 0.93)
+	p.volumetric_anisotropy = 0.7
+	p.volumetric_length = 650.0
+	p.volumetric_sky_affect = 0.18
+	p.sun_volumetric_energy = 5.0
 	p.wind_speed = 0.2
 	p.cloud_speed = 2.0
 	p.cloud_coverage = 0.3
@@ -121,6 +157,24 @@ static func _foggy() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 1.0
 	p.fog_depth_night = 1.1
+	# Height fog — HEAVY valley fog, pools strongly at sea level
+	p.fog_height = 5.0
+	p.fog_height_density_day = 0.009
+	p.fog_height_density_night = 0.015
+	# Depth fog — dense, reduced visibility
+	p.depth_fog_density_day = 0.00036
+	p.depth_fog_density_night = 0.0006
+	p.fog_sun_scatter = 0.15
+	p.fog_aerial_perspective = 0.4
+	p.fog_sky_affect = 0.25
+	# Volumetric — dense but diffuse, NO distinct god rays
+	p.volumetric_density_day = 0.0036
+	p.volumetric_density_night = 0.0054
+	p.volumetric_albedo = Color(0.85, 0.87, 0.9)
+	p.volumetric_anisotropy = 0.3
+	p.volumetric_length = 400.0
+	p.volumetric_sky_affect = 0.25
+	p.sun_volumetric_energy = 2.0
 	p.wind_speed = 0.0
 	p.cloud_speed = 1.25
 	p.cloud_coverage = 0.7
@@ -139,6 +193,24 @@ static func _overcast() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 0.7
 	p.fog_depth_night = 0.7
+	# Height fog — moderate
+	p.fog_height = 0.0
+	p.fog_height_density_day = 0.0024
+	p.fog_height_density_night = 0.0045
+	# Depth fog — flat grey haze
+	p.depth_fog_density_day = 0.00015
+	p.depth_fog_density_night = 0.00021
+	p.fog_sun_scatter = 0.1
+	p.fog_aerial_perspective = 0.55
+	p.fog_sky_affect = 0.2
+	# Volumetric — moderate, flat lighting means no god rays
+	p.volumetric_density_day = 0.0021
+	p.volumetric_density_night = 0.003
+	p.volumetric_albedo = Color(0.82, 0.83, 0.87)
+	p.volumetric_anisotropy = 0.4
+	p.volumetric_length = 500.0
+	p.volumetric_sky_affect = 0.2
+	p.sun_volumetric_energy = 2.0
 	p.wind_speed = 0.2
 	p.cloud_speed = 1.5
 	p.cloud_coverage = 0.9
@@ -157,6 +229,24 @@ static func _rain() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 0.72
 	p.fog_depth_night = 0.72
+	# Height fog — rain makes valleys misty
+	p.fog_height = 2.0
+	p.fog_height_density_day = 0.0036
+	p.fog_height_density_night = 0.006
+	# Depth fog — grey curtain of rain
+	p.depth_fog_density_day = 0.00018
+	p.depth_fog_density_night = 0.0003
+	p.fog_sun_scatter = 0.1
+	p.fog_aerial_perspective = 0.5
+	p.fog_sky_affect = 0.2
+	# Volumetric — moderate, grey-blue tint
+	p.volumetric_density_day = 0.0024
+	p.volumetric_density_night = 0.0036
+	p.volumetric_albedo = Color(0.75, 0.78, 0.83)
+	p.volumetric_anisotropy = 0.5
+	p.volumetric_length = 500.0
+	p.volumetric_sky_affect = 0.2
+	p.sun_volumetric_energy = 3.0
 	p.wind_speed = 0.3
 	p.cloud_speed = 2.0
 	p.cloud_coverage = 1.0
@@ -181,6 +271,24 @@ static func _thunderstorm() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 0.72
 	p.fog_depth_night = 0.72
+	# Height fog — thick in valleys
+	p.fog_height = 3.0
+	p.fog_height_density_day = 0.0045
+	p.fog_height_density_night = 0.0075
+	# Depth fog — dark, oppressive atmosphere
+	p.depth_fog_density_day = 0.0003
+	p.depth_fog_density_night = 0.00045
+	p.fog_sun_scatter = 0.05
+	p.fog_aerial_perspective = 0.4
+	p.fog_sky_affect = 0.22
+	# Volumetric — dark, thunder flash illuminates the volume
+	p.volumetric_density_day = 0.003
+	p.volumetric_density_night = 0.0045
+	p.volumetric_albedo = Color(0.6, 0.62, 0.68)
+	p.volumetric_anisotropy = 0.5
+	p.volumetric_length = 450.0
+	p.volumetric_sky_affect = 0.22
+	p.sun_volumetric_energy = 2.0
 	p.wind_speed = 0.5
 	p.cloud_speed = 3.0
 	p.cloud_coverage = 1.0
@@ -208,6 +316,24 @@ static func _ashstorm() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 1.1
 	p.fog_depth_night = 1.2
+	# Height fog — ash settles in low areas
+	p.fog_height = 10.0
+	p.fog_height_density_day = 0.006
+	p.fog_height_density_night = 0.009
+	# Depth fog — thick orange-brown curtain
+	p.depth_fog_density_day = 0.0006
+	p.depth_fog_density_night = 0.0009
+	p.fog_sun_scatter = 0.05
+	p.fog_aerial_perspective = 0.25
+	p.fog_sky_affect = 0.3
+	# Volumetric — warm ash, no god rays
+	p.volumetric_density_day = 0.0054
+	p.volumetric_density_night = 0.0075
+	p.volumetric_albedo = Color(0.55, 0.38, 0.25)
+	p.volumetric_anisotropy = 0.2
+	p.volumetric_length = 300.0
+	p.volumetric_sky_affect = 0.3
+	p.sun_volumetric_energy = 1.0
 	p.wind_speed = 0.8
 	p.cloud_speed = 5.0
 	p.cloud_coverage = 1.0
@@ -230,6 +356,24 @@ static func _blight() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 1.3
 	p.fog_depth_night = 1.4
+	# Height fog — diseased red mist fills everything
+	p.fog_height = 15.0
+	p.fog_height_density_day = 0.0075
+	p.fog_height_density_night = 0.012
+	# Depth fog — sickly red
+	p.depth_fog_density_day = 0.00075
+	p.depth_fog_density_night = 0.00105
+	p.fog_sun_scatter = 0.03
+	p.fog_aerial_perspective = 0.2
+	p.fog_sky_affect = 0.32
+	# Volumetric — bloody red atmosphere
+	p.volumetric_density_day = 0.006
+	p.volumetric_density_night = 0.009
+	p.volumetric_albedo = Color(0.5, 0.22, 0.22)
+	p.volumetric_anisotropy = 0.15
+	p.volumetric_length = 250.0
+	p.volumetric_sky_affect = 0.32
+	p.sun_volumetric_energy = 0.5
 	p.wind_speed = 0.9
 	p.cloud_speed = 6.0
 	p.cloud_coverage = 1.0
@@ -252,6 +396,24 @@ static func _snow() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 1.5
 	p.fog_depth_night = 1.8
+	# Height fog — gentle snow-mist
+	p.fog_height = 0.0
+	p.fog_height_density_day = 0.003
+	p.fog_height_density_night = 0.0054
+	# Depth fog — bright white haze
+	p.depth_fog_density_day = 0.00024
+	p.depth_fog_density_night = 0.00036
+	p.fog_sun_scatter = 0.15
+	p.fog_aerial_perspective = 0.5
+	p.fog_sky_affect = 0.2
+	# Volumetric — cool white, gentle
+	p.volumetric_density_day = 0.0024
+	p.volumetric_density_night = 0.0036
+	p.volumetric_albedo = Color(0.9, 0.91, 0.95)
+	p.volumetric_anisotropy = 0.4
+	p.volumetric_length = 450.0
+	p.volumetric_sky_affect = 0.2
+	p.sun_volumetric_energy = 2.5
 	p.wind_speed = 0.3
 	p.cloud_speed = 1.5
 	p.cloud_coverage = 1.0
@@ -276,6 +438,24 @@ static func _blizzard() -> WeatherTypes.WeatherParams:
 	p.sun_disc_sunset_color = Color(1.0, 0.74, 0.62)
 	p.fog_depth_day = 3.0
 	p.fog_depth_night = 3.5
+	# Height fog — whiteout, snow fills all low terrain
+	p.fog_height = 20.0
+	p.fog_height_density_day = 0.012
+	p.fog_height_density_night = 0.018
+	# Depth fog — near-total whiteout
+	p.depth_fog_density_day = 0.0012
+	p.depth_fog_density_night = 0.0015
+	p.fog_sun_scatter = 0.02
+	p.fog_aerial_perspective = 0.15
+	p.fog_sky_affect = 0.32
+	# Volumetric — bright white wall of snow
+	p.volumetric_density_day = 0.0075
+	p.volumetric_density_night = 0.0105
+	p.volumetric_albedo = Color(0.88, 0.9, 0.95)
+	p.volumetric_anisotropy = 0.15
+	p.volumetric_length = 200.0
+	p.volumetric_sky_affect = 0.32
+	p.sun_volumetric_energy = 0.5
 	p.wind_speed = 0.9
 	p.cloud_speed = 7.5
 	p.cloud_coverage = 1.0

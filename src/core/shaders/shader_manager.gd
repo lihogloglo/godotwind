@@ -451,6 +451,11 @@ func _start_transition(effect_name: String, target_blend: float, duration: float
 
 
 func _process(delta: float) -> void:
+	# Update weather cache on main thread for render-thread-safe access
+	var fog_effect: PostProcessEffect = _effects.get("volumetric_fog")
+	if fog_effect and fog_effect.has_method("update_weather_cache"):
+		fog_effect.update_weather_cache()
+
 	# Process transitions
 	var completed: Array[String] = []
 

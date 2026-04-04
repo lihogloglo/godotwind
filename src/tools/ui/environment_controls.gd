@@ -277,29 +277,30 @@ func _apply_visual_state(env: Environment) -> void:
 	# Godot native volumetric fog (god rays via anisotropy)
 	env.volumetric_fog_enabled = _visual_state["volumetric_fog"]
 	if _visual_state["volumetric_fog"]:
-		env.volumetric_fog_density = 0.015
-		env.volumetric_fog_albedo = Color(0.9, 0.9, 0.95)
+		env.volumetric_fog_density = 0.0015
+		env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
 		env.volumetric_fog_emission = Color.BLACK
-		env.volumetric_fog_anisotropy = 0.7
-		env.volumetric_fog_length = 300.0
+		env.volumetric_fog_anisotropy = 0.55
+		env.volumetric_fog_length = 800.0
 		env.volumetric_fog_detail_spread = 2.0
-		env.volumetric_fog_gi_inject = 1.0
-		env.volumetric_fog_sky_affect = 0.5
+		env.volumetric_fog_gi_inject = 0.5
+		env.volumetric_fog_sky_affect = 0.15
 		env.volumetric_fog_temporal_reprojection_enabled = true
-		env.volumetric_fog_temporal_reprojection_amount = 0.9
+		env.volumetric_fog_temporal_reprojection_amount = 0.7
 
-	# Depth fog (aerial perspective)
+	# Depth fog (aerial perspective + height fog)
 	env.fog_enabled = _visual_state["depth_fog"]
 	if _visual_state["depth_fog"]:
 		env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-		env.fog_density = 0.001
-		env.fog_light_color = Color(0.6, 0.65, 0.75)
+		env.fog_density = 0.00008
+		env.fog_light_color = Color(0.7, 0.75, 0.82)
 		env.fog_light_energy = 1.0
-		env.fog_sun_scatter = 0.3
-		env.fog_aerial_perspective = 0.5
-		env.fog_sky_affect = 0.5
-		env.fog_height = -10.0
-		env.fog_height_density = 0.01
+		env.fog_sun_scatter = 0.5
+		env.fog_aerial_perspective = 0.8
+		env.fog_sky_affect = 0.15
+		# Height fog at sea level — pools in valleys and coastal areas
+		env.fog_height = 0.0
+		env.fog_height_density = 0.003
 
 	# Tonemapping
 	env.tonemap_mode = _visual_state["tonemap_mode"]
@@ -383,18 +384,18 @@ func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 	if env:
 		env.volumetric_fog_enabled = enabled
 		if enabled:
-			env.volumetric_fog_density = 0.015
-			env.volumetric_fog_albedo = Color(0.9, 0.9, 0.95)
+			env.volumetric_fog_density = 0.0015
+			env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
 			env.volumetric_fog_emission = Color.BLACK
-			env.volumetric_fog_anisotropy = 0.7
-			env.volumetric_fog_length = 300.0
+			env.volumetric_fog_anisotropy = 0.55
+			env.volumetric_fog_length = 800.0
 			env.volumetric_fog_detail_spread = 2.0
-			env.volumetric_fog_gi_inject = 1.0
-			env.volumetric_fog_sky_affect = 0.5
+			env.volumetric_fog_gi_inject = 0.5
+			env.volumetric_fog_sky_affect = 0.15
 			env.volumetric_fog_temporal_reprojection_enabled = true
-			env.volumetric_fog_temporal_reprojection_amount = 0.9
+			env.volumetric_fog_temporal_reprojection_amount = 0.7
 	# Boost sun's volumetric fog energy for stronger god rays
-	_set_sun_volumetric_energy(3.0 if enabled else 1.0)
+	_set_sun_volumetric_energy(6.0 if enabled else 1.0)
 	_disable_sky3d_fog()
 	_log("Volumetric Fog (god rays): %s" % ("ON" if enabled else "OFF"))
 
@@ -406,14 +407,15 @@ func on_depth_fog_toggled(enabled: bool) -> void:
 		env.fog_enabled = enabled
 		if enabled:
 			env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-			env.fog_density = 0.002
-			env.fog_light_color = Color(0.65, 0.7, 0.78)
+			env.fog_density = 0.00008
+			env.fog_light_color = Color(0.7, 0.75, 0.82)
 			env.fog_light_energy = 1.0
-			env.fog_sun_scatter = 0.4
-			env.fog_aerial_perspective = 0.6
-			env.fog_sky_affect = 0.6
-			env.fog_height = -10.0
-			env.fog_height_density = 0.01
+			env.fog_sun_scatter = 0.5
+			env.fog_aerial_perspective = 0.8
+			env.fog_sky_affect = 0.15
+			# Height fog at sea level — pools in valleys and coastal areas
+			env.fog_height = 0.0
+			env.fog_height_density = 0.003
 	_disable_sky3d_fog()
 	_log("Depth Fog: %s" % ("ON" if enabled else "OFF"))
 	if weather_active and not enabled:

@@ -56,6 +56,32 @@ static func interpolate_weather(params_a: WeatherTypes.WeatherParams, params_b: 
 	var fog_b: float = lerpf(params_b.fog_depth_day, params_b.fog_depth_night, is_night_factor)
 	result.fog_depth = lerpf(fog_a, fog_b, factor)
 
+	# Height fog: blend day/night then between weathers
+	result.fog_height = lerpf(params_a.fog_height, params_b.fog_height, factor)
+	var hd_a: float = lerpf(params_a.fog_height_density_day, params_a.fog_height_density_night, is_night_factor)
+	var hd_b: float = lerpf(params_b.fog_height_density_day, params_b.fog_height_density_night, is_night_factor)
+	result.fog_height_density = lerpf(hd_a, hd_b, factor)
+
+	# Depth fog parameters
+	var dd_a: float = lerpf(params_a.depth_fog_density_day, params_a.depth_fog_density_night, is_night_factor)
+	var dd_b: float = lerpf(params_b.depth_fog_density_day, params_b.depth_fog_density_night, is_night_factor)
+	result.depth_fog_density = lerpf(dd_a, dd_b, factor)
+	result.fog_sun_scatter = lerpf(params_a.fog_sun_scatter, params_b.fog_sun_scatter, factor)
+	result.fog_aerial_perspective = lerpf(params_a.fog_aerial_perspective, params_b.fog_aerial_perspective, factor)
+	result.fog_sky_affect = lerpf(params_a.fog_sky_affect, params_b.fog_sky_affect, factor)
+
+	# Volumetric fog
+	var vd_a: float = lerpf(params_a.volumetric_density_day, params_a.volumetric_density_night, is_night_factor)
+	var vd_b: float = lerpf(params_b.volumetric_density_day, params_b.volumetric_density_night, is_night_factor)
+	result.volumetric_density = lerpf(vd_a, vd_b, factor)
+	result.volumetric_albedo = params_a.volumetric_albedo.lerp(params_b.volumetric_albedo, factor)
+	result.volumetric_anisotropy = lerpf(params_a.volumetric_anisotropy, params_b.volumetric_anisotropy, factor)
+	result.volumetric_length = lerpf(params_a.volumetric_length, params_b.volumetric_length, factor)
+	result.volumetric_sky_affect = lerpf(params_a.volumetric_sky_affect, params_b.volumetric_sky_affect, factor)
+
+	# Sun volumetric energy (god ray brightness)
+	result.sun_volumetric_energy = lerpf(params_a.sun_volumetric_energy, params_b.sun_volumetric_energy, factor)
+
 	# Scalar blends
 	result.wind_speed = lerpf(params_a.wind_speed, params_b.wind_speed, factor)
 	result.cloud_speed = lerpf(params_a.cloud_speed, params_b.cloud_speed, factor)

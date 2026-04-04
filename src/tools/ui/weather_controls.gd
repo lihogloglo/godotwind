@@ -23,6 +23,9 @@ var _env_controls: EnvironmentControls = null
 ## Whether the weather system is wired and active
 var weather_enabled: bool = false
 
+## Whether weather drives ocean parameters (wind, foam, color)
+var ocean_link_enabled: bool = true
+
 
 func _init(callbacks: Dictionary) -> void:
 	_cb = callbacks
@@ -96,6 +99,13 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# Lower cloud altitude for Morrowind scale (default 1500m is too high)
 		clouds_res.set("cloud_floor", 800.0)
 		clouds_res.set("cloud_ceiling", 12000.0)
+		# Reduce accumulation decay to mitigate 1-frame camera lag.
+		# Default 0.7 causes heavy temporal blending. The SunshineClouds2 shader has
+		# reprojection code for Godot 4.6's mat3x4 view matrices (#else branch in
+		# SunshineCloudsCompute.glsl:900-914) but the mat3x4→mat4 reconstruction
+		# via transpose may be subtly wrong, causing reprojected UVs to drift.
+		# Lower decay = less old-frame bleeding = less perceived camera lag.
+		clouds_res.set("accumulation_decay", 0.4)
 		# Add driver to tree FIRST — clouds_res_added() needs is_inside_tree()=true
 		# to register the CompositorEffect on the WorldEnvironment's Compositor
 		parent.add_child(_sunshine_driver)
@@ -148,6 +158,54 @@ func sync_sky3d() -> void:
 				var lights: Array[DirectionalLight3D] = [fallback]
 				_sunshine_driver.tracked_directional_lights = lights
 
+	# Re-register CompositorEffect on the active WorldEnvironment.
+	# Sky3D and fallback are different WorldEnvironment nodes — only one is in-tree
+	# at a time. The CompositorEffect stays on the old one's compositor after a swap,
+	# making the clouds invisible. Re-registering moves it to the active one.
+	_reregister_sunshine_compositor()
+
+
+## Move SunshineClouds2 CompositorEffect to the currently active WorldEnvironment.
+func _reregister_sunshine_compositor() -> void:
+	if not _sunshine_driver or not is_instance_valid(_sunshine_driver):
+		return
+	var clouds_res: Resource = _sunshine_driver.get("clouds_resource")
+	if not clouds_res:
+		return
+
+	# Remove from whichever WorldEnvironment the driver finds in-tree (may be no-op
+	# if the effect was on the OLD env that's no longer in-tree)
+	_sunshine_driver.clouds_res_removed()
+
+	# Also clean up the out-of-tree WorldEnvironment's compositor to prevent
+	# duplicate entries from accumulating over multiple toggles
+	if _env_controls:
+		_remove_effect_from_compositor(clouds_res, _env_controls.sky_3d)
+		_remove_effect_from_compositor(clouds_res, _env_controls._fallback_world_env)
+
+	# Add to the currently active (in-tree) WorldEnvironment
+	_sunshine_driver.clouds_res_added()
+
+	# Sync environment fog color sampling to the active environment
+	var active_env: Environment = _env_controls.get_active_environment() if _env_controls else null
+	if active_env:
+		_sunshine_driver.ambience_sample_environment = active_env
+
+	Log.info("weather", "SunshineClouds2 compositor re-registered on active WorldEnvironment")
+
+
+## Remove a CompositorEffect from a WorldEnvironment's compositor (safe if not present).
+static func _remove_effect_from_compositor(effect: Resource, world_env: Node) -> void:
+	if not world_env or not is_instance_valid(world_env):
+		return
+	var compositor: Compositor = world_env.get("compositor") as Compositor
+	if not compositor:
+		return
+	var effects: Array[CompositorEffect] = compositor.compositor_effects
+	if effects.has(effect):
+		effects.erase(effect)
+		compositor.compositor_effects = effects
+
 
 ## Fog density multiplier (user-adjustable, default 1.0)
 var fog_density_multiplier: float = 1.0
@@ -174,6 +232,10 @@ func on_weather_toggled(enabled: bool) -> void:
 
 	if _particles:
 		_particles.visible = enabled
+
+	# Reset ocean to calm defaults when weather is disabled
+	if not enabled and OceanManager.is_system_enabled():
+		OceanManager.reset_weather()
 
 	Log.info("weather", "Weather system %s" % ("enabled" if enabled else "disabled"))
 
@@ -313,6 +375,10 @@ func process(delta: float) -> void:
 
 	if _particles:
 		_particles.update(result)
+
+	# Drive ocean parameters from weather (wind → waves, color, foam)
+	if ocean_link_enabled and OceanManager.is_system_enabled():
+		OceanManager.apply_weather(result)
 
 	_update_status_label()
 

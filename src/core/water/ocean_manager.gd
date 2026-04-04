@@ -47,6 +47,10 @@ func _get_shore_mask_path() -> String:
 var _system_initialized: bool = false
 var _system_enabled: bool = false
 
+# Weather integration — last applied values (avoid redundant FFT spectrum regen)
+var _weather_last_wind: float = -1.0
+var _weather_last_storm_dir: Vector3 = Vector3.ZERO
+
 # Internal state
 var _ocean_mesh: OceanMesh = null
 var _shore_mask: ShoreMaskGenerator = null
@@ -649,6 +653,148 @@ func get_water_quality_name() -> String:
 			_:
 				return "Flat"
 	return "Unknown"
+
+
+# ============================================================================
+# WEATHER INTEGRATION
+# ============================================================================
+
+## Apply weather state to ocean parameters.
+## Called each frame when both weather and ocean are active.
+## Guards against redundant FFT spectrum regeneration via epsilon checks.
+func apply_weather(result: WeatherTypes.WeatherResult) -> void:
+	if not _system_enabled or not _enabled:
+		return
+
+	# Normalize MW wind range (0.0-0.9) to 0-1
+	var wind_t: float = clampf(result.wind_speed / 0.9, 0.0, 1.0)
+
+	# FFT mode — update cascade parameters (only when wind actually changes)
+	if _cascade_parameters.size() > 0:
+		var wind_changed: bool = absf(result.wind_speed - _weather_last_wind) > 0.01
+		var dir_changed: bool = result.storm_direction.distance_squared_to(_weather_last_storm_dir) > 0.01
+		if wind_changed or dir_changed:
+			_apply_weather_fft(result, wind_t)
+			_weather_last_wind = result.wind_speed
+			_weather_last_storm_dir = result.storm_direction
+
+	# All modes — update shader material uniforms (cheap, safe every frame)
+	_apply_weather_shader(result, wind_t)
+
+
+func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
+	# Map MW wind (0.0-0.9) to ocean wind speed (3-30 m/s)
+	# Clear (0.1) → ~6 m/s gentle swell, Storm (0.5) → ~20 m/s, Blizzard (0.9) → 30 m/s
+	var ocean_wind: float = lerpf(3.0, 30.0, wind_t)
+
+	# Wind direction from storm direction or default NE wind
+	var wind_dir_deg: float = 45.0
+	if result.storm_direction.length_squared() > 0.01:
+		wind_dir_deg = rad_to_deg(atan2(result.storm_direction.x, result.storm_direction.z))
+
+	# Displacement scale — calm water has gentler waves
+	var disp_scale: float = lerpf(0.3, 1.0, wind_t)
+	# Less foam in calm weather, more in storms
+	var foam_base: float = lerpf(0.5, 8.0, wind_t)
+	# Higher whitecap threshold in calm = almost no foam
+	var whitecap_val: float = lerpf(0.8, 0.2, wind_t)
+	# More directional spreading in storms (choppier, less aligned)
+	var spread_val: float = lerpf(0.15, 0.5, wind_t)
+	# Calm swell is elongated and gentle
+	var swell_val: float = lerpf(0.9, 0.5, wind_t)
+
+	for cascade: WaveCascadeParameters in _cascade_parameters:
+		cascade.wind_speed = ocean_wind
+		cascade.wind_direction = wind_dir_deg
+		cascade.displacement_scale = disp_scale
+		cascade.foam_amount = foam_base
+		cascade.whitecap = whitecap_val
+		cascade.spread = spread_val
+		cascade.swell = swell_val
+
+	# Also update CPU-side physics evaluator to match
+	if _physics_evaluator:
+		_physics_evaluator.init_from_cascades(_cascade_parameters, fft_map_size)
+
+	Log.debug("water", "Weather→Ocean: wind=%.1f m/s dir=%.0f° foam=%.1f whitecap=%.2f" % [
+		ocean_wind, wind_dir_deg, foam_base, whitecap_val])
+
+
+## Calm water defaults — colors and parameters for no weather
+const _SHALLOW_CALM := Color(0.1, 0.3, 0.4)
+const _SHALLOW_STORM := Color(0.08, 0.18, 0.2)
+const _DEEP_CALM := Color(0.02, 0.08, 0.12)
+const _DEEP_STORM := Color(0.015, 0.04, 0.06)
+
+func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
+	if not _ocean_mesh:
+		return
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if not mat:
+		return
+
+	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
+
+	# Water color darkens and desaturates in storms (driven by cloud coverage)
+	var storm_t: float = clampf(result.cloud_coverage, 0.0, 1.0)
+	var shallow_col: Color = _SHALLOW_CALM.lerp(_SHALLOW_STORM, storm_t)
+	var deep_col: Color = _DEEP_CALM.lerp(_DEEP_STORM, storm_t)
+	mat.set_shader_parameter("color_shallow", Vector3(shallow_col.r, shallow_col.g, shallow_col.b))
+	mat.set_shader_parameter("color_deep", Vector3(deep_col.r, deep_col.g, deep_col.b))
+
+	# Shore foam — minimal in calm, wide in storms
+	mat.set_shader_parameter("foam_edge_width", lerpf(0.1, 1.5, wind_t))
+
+	# Normal strength — gentle in calm, choppy in storms
+	mat.set_shader_parameter("normal_strength", lerpf(0.6, 1.6, wind_t))
+
+	# Wave scale for STANDARD mode (Gerstner has no runtime wind — we scale amplitude)
+	if quality == OceanMesh.QualityMode.STANDARD:
+		mat.set_shader_parameter("wave_scale", lerpf(0.4, 2.2, wind_t) * wave_scale)
+
+	# FFT-specific uniforms
+	if quality == OceanMesh.QualityMode.HIGH:
+		# Calm water is glassy smooth, storms are rough
+		mat.set_shader_parameter("roughness", lerpf(0.01, 0.15, wind_t))
+		mat.set_shader_parameter("sss_strength", lerpf(0.9, 0.3, wind_t))
+
+
+## Reset ocean to calm defaults (call when weather system is disabled)
+func reset_weather() -> void:
+	_weather_last_wind = -1.0
+	_weather_last_storm_dir = Vector3.ZERO
+
+	if not _ocean_mesh:
+		return
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if not mat:
+		return
+
+	mat.set_shader_parameter("color_shallow", Vector3(_SHALLOW_CALM.r, _SHALLOW_CALM.g, _SHALLOW_CALM.b))
+	mat.set_shader_parameter("color_deep", Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b))
+	mat.set_shader_parameter("foam_edge_width", 0.1)
+	mat.set_shader_parameter("normal_strength", 0.6)
+	mat.set_shader_parameter("wave_scale", wave_scale)
+
+	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
+	if quality == OceanMesh.QualityMode.HIGH:
+		mat.set_shader_parameter("roughness", 0.01)
+		mat.set_shader_parameter("sss_strength", 0.9)
+
+	# Reset FFT cascades to calm defaults
+	for cascade: WaveCascadeParameters in _cascade_parameters:
+		cascade.wind_speed = 5.0
+		cascade.wind_direction = 45.0
+		cascade.displacement_scale = 0.3
+		cascade.foam_amount = 0.5
+		cascade.whitecap = 0.8
+		cascade.spread = 0.15
+		cascade.swell = 0.9
+
+	if _physics_evaluator and _cascade_parameters.size() > 0:
+		_physics_evaluator.init_from_cascades(_cascade_parameters, fft_map_size)
+
+	Log.info("water", "Ocean weather reset to calm defaults")
 
 
 func _exit_tree() -> void:

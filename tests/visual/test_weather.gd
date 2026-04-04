@@ -14,7 +14,8 @@
 ##   K       = Toggle Sky3D
 ##   C       = Toggle SunshineClouds2 (isolate compositor artifact)
 ##   P       = Toggle ProceduralSkyMaterial sun (set sun_angle_max to 0)
-##   Mouse   = Hold right-click to look, WASD to move, Space/Shift up/down
+##   Mouse   = Hold right-click to look, ZQSD to move, Space/Shift up/down
+##   O       = Toggle ocean
 extends Node3D
 
 # --- Nodes ---
@@ -27,6 +28,7 @@ var _sunshine_driver: Node = null
 var _clouds_resource: Resource = null
 var _particles: WeatherParticles = null
 var _renderer: WeatherRenderer = null
+var _ocean_enabled: bool = false
 
 # --- State ---
 var _depth_fog_enabled: bool = true
@@ -46,12 +48,13 @@ func _ready() -> void:
 	_setup_sky3d()
 	_setup_sunshine_clouds()
 	_setup_weather()
+	_setup_ocean()
 	_setup_ui()
 
 	_camera.position = Vector3(-200, 60, 400)
 	_camera.rotation_degrees = Vector3(-10, -30, 0)
 
-	Log.info("weather", "Weather test scene ready. Keys: 1-0=weather, T/Y=time, W=toggle, K=Sky3D, F=fog, V=vol.fog")
+	Log.info("weather", "Weather test scene ready. Keys: 1-0=weather, T/Y=time, W=toggle, K=Sky3D, O=ocean, F=fog, V=vol.fog")
 
 
 func _setup_environment() -> void:
@@ -97,11 +100,12 @@ func _setup_environment() -> void:
 	_light.directional_shadow_max_distance = 500.0
 	add_child(_light)
 
-	# Ground plane
+	# Ground plane (below sea level so ocean is visible above it)
 	var ground := MeshInstance3D.new()
 	var plane_mesh := PlaneMesh.new()
 	plane_mesh.size = Vector2(2000, 2000)
 	ground.mesh = plane_mesh
+	ground.position.y = -5.0
 	var ground_mat := StandardMaterial3D.new()
 	ground_mat.albedo_color = Color(0.35, 0.3, 0.25)
 	ground.material_override = ground_mat
@@ -205,6 +209,35 @@ func _setup_weather() -> void:
 	add_child(_particles)
 
 
+func _setup_ocean() -> void:
+	# Initialize the ocean via autoload (force-init since it defaults to disabled)
+	if not OceanManager.is_system_enabled():
+		OceanManager.force_initialize()
+
+	OceanManager.set_camera(_camera)
+
+	# Override shore mask with all-water (white) — the prebaked mask from
+	# Morrowind data dampens waves over "land" areas, but this test scene
+	# has no terrain, just a flat ground plane at Y=0.
+	var white_img := Image.create(1, 1, false, Image.FORMAT_L8)
+	white_img.set_pixel(0, 0, Color.WHITE)
+	var white_tex := ImageTexture.create_from_image(white_img)
+	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
+	if ocean_mesh:
+		ocean_mesh.set_shore_mask(white_tex, Rect2(-50000, -50000, 100000, 100000))
+
+	_ocean_enabled = true
+	Log.info("weather", "Ocean initialized for weather test (shore mask overridden to all-water)")
+
+
+func _toggle_ocean() -> void:
+	_ocean_enabled = not _ocean_enabled
+	OceanManager.set_enabled(_ocean_enabled)
+	if not _ocean_enabled and _weather_enabled:
+		OceanManager.reset_weather()
+	Log.info("weather", "Ocean: %s" % ("ON" if _ocean_enabled else "OFF"))
+
+
 func _setup_ui() -> void:
 	var canvas := CanvasLayer.new()
 	canvas.name = "UI"
@@ -225,7 +258,7 @@ func _setup_ui() -> void:
 	canvas.add_child(_debug_label)
 
 	var help := Label.new()
-	help.text = "1-0: Weather | T/Y: Time | +/-: Speed | W: Weather | K: Sky3D | C: Clouds | P: Sun | F: Fog | V: Vol.Fog"
+	help.text = "1-0: Weather | T/Y: Time | +/-: Speed | W: Weather | K: Sky3D | O: Ocean | C: Clouds | P: Sun | F: Fog | V: Vol.Fog"
 	help.add_theme_font_size_override("font_size", 12)
 	help.anchors_preset = Control.PRESET_BOTTOM_WIDE
 	help.position.y = -30
@@ -242,6 +275,9 @@ func _process(delta: float) -> void:
 			_renderer.apply(result)
 		if _particles:
 			_particles.update(result)
+		# Drive ocean from weather
+		if _ocean_enabled and OceanManager.is_system_enabled():
+			OceanManager.apply_weather(result)
 
 	_update_debug_overlay()
 
@@ -266,6 +302,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_MINUS: WeatherManager.set_time_scale(maxf(0.0, WeatherManager.time_scale * 0.5))
 			KEY_W: _toggle_weather()
 			KEY_K: _toggle_sky3d()
+			KEY_O: _toggle_ocean()
 			KEY_C: _toggle_sunshine_clouds()
 			KEY_P: _toggle_procedural_sun()
 			KEY_F: _toggle_depth_fog()
@@ -293,9 +330,10 @@ func _handle_fly_camera(delta: float) -> void:
 	if Input.is_key_pressed(KEY_SHIFT):
 		speed *= 3.0
 	var direction := Vector3.ZERO
-	if Input.is_key_pressed(KEY_A): direction -= _camera.global_basis.x
+	if Input.is_key_pressed(KEY_Q): direction -= _camera.global_basis.x
 	if Input.is_key_pressed(KEY_D): direction += _camera.global_basis.x
 	if Input.is_key_pressed(KEY_S): direction += _camera.global_basis.z
+	if Input.is_key_pressed(KEY_Z): direction -= _camera.global_basis.z
 	direction -= _camera.global_basis.z * (1.0 if Input.is_key_pressed(KEY_UP) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) else 0.0)
 	if Input.is_key_pressed(KEY_SPACE): direction.y += 1.0
 	if Input.is_key_pressed(KEY_CTRL): direction.y -= 1.0
@@ -366,6 +404,16 @@ func _sync_sky3d() -> void:
 			var lights: Array[DirectionalLight3D] = [_light]
 			_sunshine_driver.tracked_directional_lights = lights
 
+		# Re-register CompositorEffect on the active WorldEnvironment
+		# (Sky3D and fallback are different WorldEnvironment nodes)
+		var clouds_res: Resource = _sunshine_driver.get("clouds_resource")
+		if clouds_res:
+			_sunshine_driver.clouds_res_removed()
+			WeatherControls._remove_effect_from_compositor(clouds_res, _sky3d)
+			WeatherControls._remove_effect_from_compositor(clouds_res, _world_env)
+			_sunshine_driver.clouds_res_added()
+			Log.info("weather", "SunshineClouds2 compositor re-registered after Sky3D toggle")
+
 
 func _toggle_sunshine_clouds() -> void:
 	if _sunshine_driver == null:
@@ -406,10 +454,12 @@ func _toggle_volumetric_fog() -> void:
 	if env:
 		env.volumetric_fog_enabled = _volumetric_fog_enabled
 		if _volumetric_fog_enabled:
-			env.volumetric_fog_density = 0.015
-			env.volumetric_fog_albedo = Color(0.9, 0.9, 0.95)
-			env.volumetric_fog_length = 300.0
-			env.volumetric_fog_anisotropy = 0.7
+			env.volumetric_fog_density = 0.0015
+			env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
+			env.volumetric_fog_length = 800.0
+			env.volumetric_fog_anisotropy = 0.55
+			env.volumetric_fog_sky_affect = 0.15
+			env.volumetric_fog_temporal_reprojection_amount = 0.7
 	Log.info("weather", "Volumetric fog: %s" % ("ON" if _volumetric_fog_enabled else "OFF"))
 
 #endregion
@@ -487,6 +537,19 @@ func _update_debug_overlay() -> void:
 		if _sky3d_enabled and _sky3d:
 			var atm_on: bool = _sky3d.get("fog_enabled") if _sky3d.get("fog_enabled") != null else false
 			lines.append("[color=green]Sky3D AtmFog:[/color] %s" % ("ON" if atm_on else "OFF"))
+	lines.append("")
+
+	# Ocean
+	lines.append("[b]Ocean:[/b] %s" % ("ON" if _ocean_enabled else "OFF"))
+	if _ocean_enabled and OceanManager.is_system_enabled():
+		lines.append("  Mode: %s" % OceanManager.get_water_quality_name())
+		if _weather_enabled:
+			var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
+			var wind_t: float = clampf(result.wind_speed / 0.9, 0.0, 1.0)
+			lines.append("  Weather wind → ocean: %.1f m/s" % lerpf(8.0, 30.0, wind_t))
+			lines.append("  Foam edge: %.2f" % lerpf(0.3, 1.5, wind_t))
+		else:
+			lines.append("  [color=yellow]No weather link (press W)[/color]")
 	lines.append("")
 
 	# Clouds

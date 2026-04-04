@@ -29,6 +29,37 @@ var _noise_2d_sampler: RID
 ## Cached uniform set (invalidate on parameter change)
 var _uniform_set_dirty: bool = true
 
+## Active sun for dynamic direction — set by world_explorer or test scenes
+var _active_sun: DirectionalLight3D = null
+
+## Cached weather data — written on main thread, read on render thread.
+## Avoids data race from accessing WeatherManager autoload in _render_callback.
+var _cached_weather_id: float = 0.0
+var _cached_next_weather_id: float = 0.0
+var _cached_weather_transition: float = 0.0
+var _cached_game_hour: float = 12.0
+var _cached_fog_color: Color = Color(0.7, 0.75, 0.8)
+var _cached_weather_active: bool = false
+
+## Set the active sun for dynamic fog scattering direction
+func set_sun(sun: DirectionalLight3D) -> void:
+	_active_sun = sun
+
+
+## Call from main thread (_process or before rendering) to cache weather state.
+## This avoids accessing the WeatherManager autoload from the render thread.
+func update_weather_cache() -> void:
+	if WeatherManager and WeatherManager.enabled:
+		var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
+		_cached_weather_id = float(result.current_type)
+		_cached_next_weather_id = float(result.next_type)
+		_cached_weather_transition = result.transition_factor
+		_cached_game_hour = result.game_hour
+		_cached_fog_color = result.fog_color
+		_cached_weather_active = true
+	else:
+		_cached_weather_active = false
+
 
 func _init() -> void:
 	super._init()
@@ -237,9 +268,11 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	push_constants.append(cam_position.z)
 	push_constants.append(Time.get_ticks_msec() / 1000.0)  # time
 
-	# fog_color (vec4)
+	# fog_color (vec4) — use cached weather fog color when weather is active
 	var fog_color: Color = get_param("fog_color")
 	var intensity: float = get_param("fog_intensity")
+	if _cached_weather_active:
+		fog_color = _cached_fog_color
 	push_constants.append(fog_color.r)
 	push_constants.append(fog_color.g)
 	push_constants.append(fog_color.b)
@@ -257,12 +290,21 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	push_constants.append(get_param("stamp_intensity"))
 	push_constants.append(get_param("stamp_contrast"))
 
-	# sun_direction (vec4)
+	# sun_direction (vec4) — try to find active sun, fall back to parameter
 	var sun_dir: Vector3 = get_param("sun_direction")
+	if _active_sun and is_instance_valid(_active_sun):
+		sun_dir = -_active_sun.global_basis.z
 	push_constants.append(sun_dir.x)
 	push_constants.append(sun_dir.y)
 	push_constants.append(sun_dir.z)
 	push_constants.append(get_param("sun_intensity"))
+
+	# weather_params (vec4) — OpenMW compat: weather_id, next_weather_id, transition, game_hour
+	# Uses cached values written on main thread (see update_weather_cache)
+	push_constants.append(_cached_weather_id)
+	push_constants.append(_cached_next_weather_id)
+	push_constants.append(_cached_weather_transition)
+	push_constants.append(_cached_game_hour)
 
 	# resolution (vec2)
 	push_constants.append(float(size.x))

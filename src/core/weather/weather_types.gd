@@ -77,6 +77,29 @@ class WeatherParams:
 	var fog_depth_day: float = 0.69
 	var fog_depth_night: float = 0.69
 
+	## Height fog — pools at low altitudes (sea level, valleys)
+	var fog_height: float = 0.0  # Y level where fog pools (0 = sea level)
+	var fog_height_density_day: float = 0.02
+	var fog_height_density_night: float = 0.04
+
+	## Depth fog tuning
+	var depth_fog_density_day: float = 0.001
+	var depth_fog_density_night: float = 0.0015
+	var fog_sun_scatter: float = 0.3  # Sun inscattering (warm glow looking toward sun)
+	var fog_aerial_perspective: float = 0.6  # Sky blending at distance boundary
+	var fog_sky_affect: float = 0.5  # How much fog tints the distant sky
+
+	## Volumetric fog (froxel-based — god rays, local scattering)
+	var volumetric_density_day: float = 0.02
+	var volumetric_density_night: float = 0.03
+	var volumetric_albedo: Color = Color(0.9, 0.9, 0.95)
+	var volumetric_anisotropy: float = 0.7  # Forward scattering (higher = sharper god rays)
+	var volumetric_length: float = 600.0  # Ray march distance
+	var volumetric_sky_affect: float = 0.5
+
+	## Sun volumetric energy (god ray brightness independent of fog density)
+	var sun_volumetric_energy: float = 5.0
+
 	## Wind and cloud movement
 	var wind_speed: float = 0.1
 	var cloud_speed: float = 1.25
@@ -134,8 +157,28 @@ class WeatherResult:
 	var sun_color: Color = Color(1.0, 0.99, 0.93)
 	var sun_disc_sunset_color: Color = Color(1.0, 0.74, 0.62)
 
-	## Fog
+	## Fog — depth (legacy MW-style, drives base density)
 	var fog_depth: float = 0.69
+
+	## Height fog
+	var fog_height: float = 0.0
+	var fog_height_density: float = 0.02
+
+	## Depth fog
+	var depth_fog_density: float = 0.001
+	var fog_sun_scatter: float = 0.3
+	var fog_aerial_perspective: float = 0.6
+	var fog_sky_affect: float = 0.5
+
+	## Volumetric fog
+	var volumetric_density: float = 0.02
+	var volumetric_albedo: Color = Color(0.9, 0.9, 0.95)
+	var volumetric_anisotropy: float = 0.7
+	var volumetric_length: float = 600.0
+	var volumetric_sky_affect: float = 0.5
+
+	## Sun volumetric energy (god ray brightness)
+	var sun_volumetric_energy: float = 5.0
 
 	## Wind and clouds
 	var wind_speed: float = 0.1
