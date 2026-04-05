@@ -471,6 +471,20 @@ func _create_material_from_native_info(info: Dictionary) -> StandardMaterial3D:
 		if draw_mode == 2 or draw_mode == 3:
 			props.cull_mode = BaseMaterial3D.CULL_DISABLED
 
+		# Glow texture (NIF slot 4 → emission_texture)
+		props.glow_texture_path = info.get("glow_texture_path", "")
+
+		# Apply mode (HILIGHT = self-illumination)
+		props.apply_mode = info.get("apply_mode", 2)
+
+		# Specular color
+		if info.has("specular"):
+			props.specular_color = info["specular"] as Color
+
+		# Z-buffer property
+		props.depth_test = info.get("depth_test", true)
+		props.depth_write = info.get("depth_write", true)
+
 		return MatLib.get_or_create_material(props)
 
 	# Fallback: Create new material directly
@@ -1602,6 +1616,8 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 	var alpha_prop: Defs.NiAlphaProperty = null
 	var vc_prop: Defs.NiVertexColorProperty = null
 	var stencil_prop: Defs.NiStencilProperty = null
+	var zbuf_prop: Defs.NiZBufferProperty = null
+	var spec_prop: Defs.NiSpecularProperty = null
 
 	# Collect properties
 	for prop_idx in geom.property_indices:
@@ -1618,20 +1634,35 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 			vc_prop = prop
 		elif prop is Defs.NiStencilProperty:
 			stencil_prop = prop
+		elif prop is Defs.NiZBufferProperty:
+			zbuf_prop = prop
+		elif prop is Defs.NiSpecularProperty:
+			spec_prop = prop
 
 	# Check if we have any properties
 	if mat_prop == null and tex_prop == null:
 		return null
 
-	# Get texture path if available
+	# Get texture paths from NiTexturingProperty
 	var texture_path := ""
+	var glow_texture_path := ""
+	var apply_mode: int = 2  # MODULATE default
 	if tex_prop and not tex_prop.textures.is_empty():
-		var base_tex := tex_prop.textures[0] if tex_prop.textures.size() > 0 else null
-		if base_tex and base_tex.has_texture and base_tex.source_index >= 0:
-			var tex_source := _reader.get_record(base_tex.source_index)
-			if tex_source is Defs.NiSourceTexture:
-				var source := tex_source as Defs.NiSourceTexture
-				texture_path = source.filename
+		apply_mode = tex_prop.apply_mode
+		# Base texture (slot 0)
+		if tex_prop.textures.size() > 0:
+			var base_tex := tex_prop.textures[0]
+			if base_tex and base_tex.has_texture and base_tex.source_index >= 0:
+				var tex_source := _reader.get_record(base_tex.source_index)
+				if tex_source is Defs.NiSourceTexture:
+					texture_path = (tex_source as Defs.NiSourceTexture).filename
+		# Glow texture (slot 4)
+		if tex_prop.textures.size() > 4:
+			var glow_tex := tex_prop.textures[4]
+			if glow_tex and glow_tex.has_texture and glow_tex.source_index >= 0:
+				var tex_source := _reader.get_record(glow_tex.source_index)
+				if tex_source is Defs.NiSourceTexture:
+					glow_texture_path = (tex_source as Defs.NiSourceTexture).filename
 
 	# Use MaterialLibrary for deduplication if enabled
 	if use_material_library and load_textures:
@@ -1649,6 +1680,14 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 				props.has_emission = true
 				props.emission_color = mat_prop.emissive
 				props.emission_energy = 1.0
+			# Specular color
+			props.specular_color = mat_prop.specular
+
+		# Glow texture (NIF slot 4 → emission_texture)
+		props.glow_texture_path = glow_texture_path
+
+		# Apply mode (HILIGHT = self-illumination)
+		props.apply_mode = apply_mode
 
 		# Alpha properties
 		if alpha_prop:
@@ -1665,6 +1704,11 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 		# Double-sided geometry (draw_mode 2 = BOTH sides, 3 = NONE/no cull)
 		if stencil_prop and (stencil_prop.draw_mode == 2 or stencil_prop.draw_mode == 3):
 			props.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+		# Z-buffer property (depth test/write)
+		if zbuf_prop:
+			props.depth_test = zbuf_prop.test_enabled()
+			props.depth_write = zbuf_prop.write_enabled()
 
 		return MatLib.get_or_create_material(props)
 

@@ -26,6 +26,9 @@ var cloud_coverage: float = 0.0
 ## Wind speed (m/s). Available for star twinkle modulation, etc.
 var wind_speed: float = 0.0
 
+## Wind direction in degrees (0=north, 90=east, 180=south, 270=west).
+var wind_direction: float = 0.0
+
 ## Current game hour (read-only — set via update()).
 var game_hour: float = 12.0
 
@@ -58,12 +61,108 @@ var night_intensity: float = 0.005
 ## Ground color below horizon.
 var ground_color: Color = Color(0.15, 0.12, 0.1)
 
+# ---- Mie Halos ----
+
+## Sun halo intensity (corona around sun disc). 0=disabled.
+var sun_halo_intensity: float = 0.4
+## Sun halo Henyey-Greenstein g parameter (higher = tighter halo).
+var sun_halo_g: float = 0.96
+## Moon halo intensity. 0=disabled.
+var moon_halo_intensity: float = 0.05
+## Moon halo g parameter.
+var moon_halo_g: float = 0.95
+
+# ---- Star Scintillation ----
+
+## Amount of star twinkling (0=static, 1=max flicker).
+var scintillation_amount: float = 0.15
+## Speed of star twinkling.
+var scintillation_speed: float = 1.5
+
+# ---- Color Tinting ----
+
+## Artist tint for daytime sky (multiplicative). White=no tint.
+var day_tint: Color = Color(1.0, 1.0, 1.0)
+## Artist tint for nighttime sky.
+var night_tint: Color = Color(0.6, 0.7, 1.0)
+## Artist tint for horizon (strongest at sunrise/sunset).
+var horizon_tint: Color = Color(1.0, 0.85, 0.7)
+## How strongly tints affect the sky (0=pure physics, 1=full tint).
+var tint_strength: float = 0.3
+
+# ---- Light Curves ----
+
+## Sun light energy vs altitude curve. X=altitude (0=horizon, 1=zenith), Y=energy.
+## If null, uses the default hardcoded curve.
+var sun_light_curve: Curve = null
+## Moon light energy vs altitude curve. If null, uses default.
+var moon_light_curve: Curve = null
+
+# ---- Ambient Transitions ----
+
+## Sky contribution during day (1.0 = sky fully drives ambient).
+var day_sky_contribution: float = 1.0
+## Sky contribution at night (lower allows ambient_energy to fill in).
+var night_sky_contribution: float = 0.4
+## Ambient light energy at night (boost to prevent pitch black).
+var night_ambient_energy: float = 0.15
+## Transition speed for ambient changes (per second).
+var ambient_transition_speed: float = 0.5
+
+var _current_sky_contribution: float = 1.0
+var _current_ambient_energy: float = 1.0
+
+# ---- Cirrus Clouds ----
+
+const CIRRUS_TEXTURE_PATH: String = "res://assets/sky/cirrus_noise.png"
+
+## Whether cirrus clouds are visible.
+var cirrus_visible: bool = true
+## Cirrus coverage (0=clear, 1=full coverage).
+var cirrus_coverage: float = 0.4
+## Cirrus absorption (Beer's law extinction strength).
+var cirrus_absorption: float = 2.0
+## Cirrus brightness.
+var cirrus_intensity: float = 8.0
+## Cirrus alpha thickness.
+var cirrus_thickness: float = 0.4
+## Cirrus noise scale (higher = smaller wisps).
+var cirrus_size: float = 1.0
+## Cirrus wind scroll speed (UV units per second). Two layers at different speeds.
+var cirrus_wind_speed1: Vector2 = Vector2(0.02, 0.007)
+var cirrus_wind_speed2: Vector2 = Vector2(-0.015, 0.01)
+## Cirrus day color (warm white).
+var cirrus_day_color: Color = Color(1.0, 0.98, 0.95)
+## Cirrus night color (dark blue-grey).
+var cirrus_night_color: Color = Color(0.15, 0.18, 0.25)
+
+var _cirrus_scroll1: Vector2 = Vector2.ZERO
+var _cirrus_scroll2: Vector2 = Vector2.ZERO
+var _cirrus_texture: Texture2D = null
+
 # ---- Textures (Phase 2) ----
 
 ## Star panorama texture (equirectangular). Set to null for procedural stars.
-var star_panorama: Texture2D = null
+var star_panorama: Texture2D = null:
+	set(value):
+		star_panorama = value
+		if _sky_material:
+			if value:
+				_sky_material.set_shader_parameter("star_panorama", value)
+				_sky_material.set_shader_parameter("star_panorama_enabled", true)
+			else:
+				_sky_material.set_shader_parameter("star_panorama_enabled", false)
+
 ## Moon texture. Set to null for simple white disc.
-var moon_texture: Texture2D = null
+var moon_texture: Texture2D = null:
+	set(value):
+		moon_texture = value
+		if _sky_material:
+			if value:
+				_sky_material.set_shader_parameter("moon_texture", value)
+				_sky_material.set_shader_parameter("moon_texture_enabled", true)
+			else:
+				_sky_material.set_shader_parameter("moon_texture_enabled", false)
 
 # ---- Celestial ----
 
@@ -106,6 +205,9 @@ class SkyState:
 	var ambient_color: Color
 	var game_hour: float
 	var atmosphere_transmittance_at_zenith: Color
+	var wind_speed: float
+	var wind_direction: float
+	var date_string: String
 
 
 func _ready() -> void:
@@ -185,8 +287,21 @@ func update(hour: float) -> void:
 
 	game_hour = hour
 
-	# Update celestial positions
+	# Update celestial positions (calendar auto-advances on day boundary)
 	celestial.update(hour)
+
+	# Animate cirrus wind scroll — driven by weather wind
+	var delta: float = get_process_delta_time() if is_inside_tree() else 0.016
+	# Wind multiplier: base speed even in calm, scales up with weather wind
+	var wind_mult: float = maxf(0.5, wind_speed * 2.0)
+	# Rotate scroll direction by wind_direction (degrees → radians)
+	var wind_rad: float = deg_to_rad(wind_direction)
+	var wind_cos: float = cos(wind_rad)
+	var wind_sin: float = sin(wind_rad)
+	var base1: Vector2 = cirrus_wind_speed1 * wind_mult
+	var base2: Vector2 = cirrus_wind_speed2 * wind_mult
+	_cirrus_scroll1 += Vector2(base1.x * wind_cos - base1.y * wind_sin, base1.x * wind_sin + base1.y * wind_cos) * delta
+	_cirrus_scroll2 += Vector2(base2.x * wind_cos - base2.y * wind_sin, base2.x * wind_sin + base2.y * wind_cos) * delta
 
 	# Update shader uniforms
 	_update_shader_uniforms()
@@ -215,6 +330,9 @@ func get_sky_state() -> SkyState:
 	state.ambient_color = _environment.ambient_light_color if _environment else Color.WHITE
 	state.game_hour = game_hour
 	state.atmosphere_transmittance_at_zenith = _zenith_transmittance
+	state.wind_speed = wind_speed
+	state.wind_direction = wind_direction
+	state.date_string = celestial.get_date_string()
 	return state
 
 
@@ -266,6 +384,20 @@ func _update_shader_uniforms() -> void:
 	# Stars
 	_sky_material.set_shader_parameter("star_rotation", celestial.star_rotation)
 	_sky_material.set_shader_parameter("star_energy", star_energy)
+	_sky_material.set_shader_parameter("scintillation_amount", scintillation_amount)
+	_sky_material.set_shader_parameter("scintillation_speed", scintillation_speed)
+
+	# Mie halos
+	_sky_material.set_shader_parameter("sun_halo_intensity", sun_halo_intensity)
+	_sky_material.set_shader_parameter("sun_halo_g", sun_halo_g)
+	_sky_material.set_shader_parameter("moon_halo_intensity", moon_halo_intensity)
+	_sky_material.set_shader_parameter("moon_halo_g", moon_halo_g)
+
+	# Color tinting
+	_sky_material.set_shader_parameter("day_tint", Vector3(day_tint.r, day_tint.g, day_tint.b))
+	_sky_material.set_shader_parameter("night_tint", Vector3(night_tint.r, night_tint.g, night_tint.b))
+	_sky_material.set_shader_parameter("horizon_tint", Vector3(horizon_tint.r, horizon_tint.g, horizon_tint.b))
+	_sky_material.set_shader_parameter("tint_strength", tint_strength)
 
 	# Night
 	_sky_material.set_shader_parameter("night_intensity", night_intensity)
@@ -276,6 +408,18 @@ func _update_shader_uniforms() -> void:
 	# Cloud darkening
 	_sky_material.set_shader_parameter("cloud_coverage", cloud_coverage)
 
+	# Cirrus clouds
+	_sky_material.set_shader_parameter("cirrus_visible", cirrus_visible)
+	_sky_material.set_shader_parameter("cirrus_coverage", cirrus_coverage)
+	_sky_material.set_shader_parameter("cirrus_absorption", cirrus_absorption)
+	_sky_material.set_shader_parameter("cirrus_intensity", cirrus_intensity)
+	_sky_material.set_shader_parameter("cirrus_thickness", cirrus_thickness)
+	_sky_material.set_shader_parameter("cirrus_size", cirrus_size)
+	_sky_material.set_shader_parameter("cirrus_scroll1", _cirrus_scroll1)
+	_sky_material.set_shader_parameter("cirrus_scroll2", _cirrus_scroll2)
+	_sky_material.set_shader_parameter("cirrus_day_color", Vector3(cirrus_day_color.r, cirrus_day_color.g, cirrus_day_color.b))
+	_sky_material.set_shader_parameter("cirrus_night_color", Vector3(cirrus_night_color.r, cirrus_night_color.g, cirrus_night_color.b))
+
 #endregion
 
 
@@ -285,16 +429,20 @@ func _update_lights() -> void:
 	var sun_dir: Vector3 = celestial.sun_direction
 	var moon_dir: Vector3 = celestial.moon_direction
 	var alt: float = celestial.sun_altitude
+	var delta: float = get_process_delta_time() if is_inside_tree() else 0.016
 
 	# --- Sun light ---
 	if _sun_light:
-		# Build basis: light shines along -Z, so we need -Z = -sun_dir (toward ground).
-		# That means +Z = sun_dir (toward sun).
 		_sun_light.basis = _direction_to_light_basis(sun_dir)
 
-		# Energy: peaks at zenith, fades at horizon, zero below
-		var sun_factor: float = clampf((sin(alt) + sun_disk_size) / (2.0 * sun_disk_size + 0.5), 0.0, 1.0)
-		_sun_light.light_energy = lerpf(0.0, 1.2, sun_factor)
+		# Energy: from curve if available, otherwise hardcoded
+		if sun_light_curve:
+			# Curve X: 0=horizon, 1=zenith. Map altitude to 0-1 range.
+			var curve_t: float = clampf(alt / (PI * 0.5), 0.0, 1.0)
+			_sun_light.light_energy = sun_light_curve.sample(curve_t)
+		else:
+			var sun_factor: float = clampf((sin(alt) + sun_disk_size) / (2.0 * sun_disk_size + 0.5), 0.0, 1.0)
+			_sun_light.light_energy = lerpf(0.0, 1.2, sun_factor)
 
 		# Color: warm at horizon, white at zenith
 		var t: float = clampf(alt / (PI * 0.5), 0.0, 1.0)
@@ -307,14 +455,32 @@ func _update_lights() -> void:
 	if _moon_light:
 		_moon_light.basis = _direction_to_light_basis(moon_dir)
 
-		# Energy: much dimmer, phase-dependent, off when below horizon
 		var moon_alt: float = asin(clampf(moon_dir.y, -1.0, 1.0))
 		var phase_factor: float = maxf(0.0, cos(celestial.moon_phase * TAU))
-		var moon_factor: float = clampf(sin(moon_alt), 0.0, 1.0) * phase_factor
-		_moon_light.light_energy = clampf(moon_factor * 0.15, 0.0, 0.15)
 
-		# Only enable shadow when moon is bright enough
+		if moon_light_curve:
+			var curve_t: float = clampf(moon_alt / (PI * 0.5), 0.0, 1.0)
+			_moon_light.light_energy = moon_light_curve.sample(curve_t) * phase_factor
+		else:
+			var moon_factor: float = clampf(sin(moon_alt), 0.0, 1.0) * phase_factor
+			_moon_light.light_energy = clampf(moon_factor * 0.15, 0.0, 0.15)
+
 		_moon_light.shadow_enabled = _moon_light.light_energy > 0.05
+
+	# --- Smooth Ambient Transitions ---
+	if _environment:
+		# Target values based on sun altitude
+		var is_night: float = clampf(-sin(alt) * 2.0, 0.0, 1.0)  # 0=day, 1=night
+		var target_contribution: float = lerpf(day_sky_contribution, night_sky_contribution, is_night)
+		var target_ambient: float = lerpf(1.0, night_ambient_energy, is_night)
+
+		# Smooth transition
+		var lerp_speed: float = 1.0 - exp(-ambient_transition_speed * delta)
+		_current_sky_contribution = lerpf(_current_sky_contribution, target_contribution, lerp_speed)
+		_current_ambient_energy = lerpf(_current_ambient_energy, target_ambient, lerp_speed)
+
+		_environment.ambient_light_sky_contribution = _current_sky_contribution
+		_environment.ambient_light_energy = _current_ambient_energy
 
 
 ## Build a Basis where -Z points in the light direction (away from the celestial body).
@@ -357,8 +523,10 @@ func _update_zenith_transmittance() -> void:
 #region Visibility
 
 func _update_visibility() -> void:
+	# WorldEnvironment extends Node (not Node3D) — no .visible property.
+	# Toggle by nulling/restoring the environment resource instead.
 	if _world_env:
-		_world_env.visible = enabled
+		_world_env.environment = _environment if enabled else null
 	if _sun_light:
 		_sun_light.visible = enabled
 	if _moon_light:
@@ -389,5 +557,15 @@ func _load_default_textures() -> void:
 			Log.info("sky", "Loaded moon texture: %s" % MOON_TEXTURE_PATH)
 	else:
 		Log.info("sky", "No moon texture found — using simple disc")
+
+	# Cirrus noise texture
+	if ResourceLoader.exists(CIRRUS_TEXTURE_PATH):
+		_cirrus_texture = load(CIRRUS_TEXTURE_PATH) as Texture2D
+		if _cirrus_texture and _sky_material:
+			_sky_material.set_shader_parameter("cirrus_texture", _cirrus_texture)
+			Log.info("sky", "Loaded cirrus noise texture: %s" % CIRRUS_TEXTURE_PATH)
+	else:
+		Log.info("sky", "No cirrus texture found — cirrus clouds disabled")
+		cirrus_visible = false
 
 #endregion

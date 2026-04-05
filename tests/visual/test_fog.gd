@@ -11,7 +11,7 @@
 ##   V       = Toggle volumetric fog
 ##   R       = Toggle god rays (compute shader)
 ##   G       = Toggle weather system
-##   K       = Toggle Sky3D
+##   K       = Toggle SkyManager
 ##   ZQSD    = Fly camera (AZERTY), right-click to look
 ##   Space/Ctrl = Up/Down
 ##   Shift   = Fast
@@ -23,8 +23,8 @@ var _terrain: Terrain3D = null
 var _sun: DirectionalLight3D = null
 var _camera: Camera3D = null
 var _world_env: WorldEnvironment = null
-var _sky3d: Node = null
-var _sky3d_enabled: bool = false
+var _sky_manager: SkyManager = null
+var _sky_enabled: bool = false
 var _renderer: WeatherRenderer = null
 var _particles: WeatherParticles = null
 
@@ -48,7 +48,6 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_sun()
 	_setup_terrain()
-	_setup_sky3d()
 	_setup_weather()
 	_setup_ui()
 
@@ -174,15 +173,9 @@ func _setup_terrain() -> void:
 		RenderingServer.material_set_param(mat_rid, "enable_texturing", false)
 
 
-func _setup_sky3d() -> void:
-	# Sky3D created but not enabled by default — press K to toggle
-	pass
-
-
 func _setup_weather() -> void:
-	# Create renderer with callbacks into our scene
 	var callbacks := {
-		"get_sky3d": func() -> Node: return _sky3d if _sky3d_enabled else null,
+		"get_sky_manager": func() -> Node: return _sky_manager if _sky_enabled else null,
 		"get_environment": func() -> Environment: return _get_active_environment(),
 		"get_light": func() -> DirectionalLight3D: return _sun,
 		"get_sunshine_driver": func() -> Node: return null,
@@ -199,6 +192,9 @@ func _setup_weather() -> void:
 
 func _process(delta: float) -> void:
 	_handle_fly_camera(delta)
+
+	if _sky_enabled and _sky_manager:
+		_sky_manager.update(WeatherManager.game_hour)
 
 	if _weather_enabled:
 		var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
@@ -230,7 +226,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F: _toggle_depth_fog()
 			KEY_V: _toggle_volumetric_fog()
 			KEY_R: _toggle_godrays()
-			KEY_K: _toggle_sky3d()
+			KEY_K: _toggle_sky()
 
 	if event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event as InputEventMouseButton
@@ -276,10 +272,10 @@ func _set_weather(type: int) -> void:
 	Log.info("testing", "Weather: %s" % WeatherTypes.type_name(type))
 
 
-## Get the currently active Environment (Sky3D or fallback)
+## Get the currently active Environment (SkyManager or fallback)
 func _get_active_environment() -> Environment:
-	if _sky3d_enabled and _sky3d and _sky3d.environment:
-		return _sky3d.environment
+	if _sky_enabled and _sky_manager:
+		return _sky_manager.get_environment()
 	if _world_env and _world_env.environment:
 		return _world_env.environment
 	return null
@@ -309,42 +305,30 @@ func _toggle_volumetric_fog() -> void:
 	Log.info("testing", "Volumetric fog: %s" % ("ON" if _volumetric_fog_enabled else "OFF"))
 
 
-func _toggle_sky3d() -> void:
-	_sky3d_enabled = not _sky3d_enabled
-	if _sky3d_enabled and _sky3d == null:
-		_sky3d = Sky3D.new()
-		_sky3d.name = "FogTestSky3D"
+func _toggle_sky() -> void:
+	_sky_enabled = not _sky_enabled
+	if _sky_enabled and _sky_manager == null:
+		_sky_manager = SkyManager.new()
+		_sky_manager.name = "FogTestSky"
+	if _sky_enabled:
 		if _world_env.is_inside_tree():
 			remove_child(_world_env)
-		add_child(_sky3d)
-		_sky3d.sky3d_enabled = true
-		_sky3d.current_time = WeatherManager.game_hour
-		# CRITICAL: disable Sky3D's AtmFog — it's a full-screen blend_mix quad
-		# that fights with Godot native depth fog
-		_sky3d.fog_enabled = false
-		_apply_fog_to_environment(_sky3d.environment)
-		WeatherManager.set_sky3d(_sky3d)
-		_sun.visible = false
-	elif _sky3d_enabled:
-		if not _sky3d.is_inside_tree():
-			if _world_env.is_inside_tree():
-				remove_child(_world_env)
-			add_child(_sky3d)
-		_sky3d.sky3d_enabled = true
-		_sky3d.fog_enabled = false
-		_apply_fog_to_environment(_sky3d.environment)
+		if not _sky_manager.is_inside_tree():
+			add_child(_sky_manager)
+		_sky_manager.enabled = true
+		_sky_manager.update(WeatherManager.game_hour)
+		_apply_fog_to_environment(_sky_manager.get_environment())
 		_sun.visible = false
 	else:
-		if _sky3d and _sky3d.is_inside_tree():
-			remove_child(_sky3d)
+		if _sky_manager and _sky_manager.is_inside_tree():
+			remove_child(_sky_manager)
 		if not _world_env.is_inside_tree():
 			add_child(_world_env)
-		WeatherManager.set_sky3d(null)
 		_sun.visible = true
 	# Re-attach ShaderManager to whichever WorldEnvironment is active
 	_shader_manager_attached = false
 	_ensure_shader_manager()
-	Log.info("testing", "Sky3D: %s" % ("ON" if _sky3d_enabled else "OFF"))
+	Log.info("testing", "Sky: %s" % ("ON" if _sky_enabled else "OFF"))
 
 
 func _ensure_shader_manager() -> void:
@@ -352,8 +336,6 @@ func _ensure_shader_manager() -> void:
 		return
 	if _world_env and _world_env.is_inside_tree():
 		ShaderManager.attach_to(_world_env)
-	elif _sky3d and _sky3d.is_inside_tree():
-		ShaderManager.attach_to(_sky3d)
 	else:
 		return
 	ShaderManager.set_sun(_sun)
@@ -371,7 +353,7 @@ func _toggle_godrays() -> void:
 	Log.info("testing", "God Rays (compute): %s" % ("ON" if _godrays_enabled else "OFF"))
 
 
-## Apply current fog settings to any Environment (used when swapping Sky3D <-> fallback)
+## Apply current fog settings to any Environment (used when swapping sky <-> fallback)
 func _apply_fog_to_environment(env: Environment) -> void:
 	if not env:
 		return
@@ -430,7 +412,7 @@ func _update_debug_overlay() -> void:
 
 	var lines: PackedStringArray = PackedStringArray()
 	lines.append("[b]FOG TEST ON TERRAIN[/b]")
-	lines.append("G=weather  F=depth  V=volumetric  K=sky3d")
+	lines.append("G=weather  F=depth  V=volumetric  K=sky")
 	lines.append("1-0=weather types  T/Y=time  ZQSD+mouse=fly")
 	lines.append("")
 
@@ -463,8 +445,8 @@ func _update_debug_overlay() -> void:
 
 		# Sun energy
 		var sun_energy: float = _sun.light_volumetric_fog_energy if _sun.visible else 0.0
-		if _sky3d_enabled and _sky3d:
-			var sky_sun: DirectionalLight3D = _sky3d.get_node_or_null("SunLight")
+		if _sky_enabled and _sky_manager:
+			var sky_sun: DirectionalLight3D = _sky_manager.get_sun_light()
 			if sky_sun:
 				sun_energy = sky_sun.light_volumetric_fog_energy
 		lines.append("Sun volumetric energy: %.1f" % sun_energy)

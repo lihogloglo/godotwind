@@ -906,6 +906,7 @@ func _setup_visibility_toggles() -> void:
 		"show_characters_toggled": _on_show_characters_toggled,
 		"show_ocean_toggled": _ocean_controls.on_show_ocean_toggled,
 		"show_sky_toggled": _on_show_sky_toggled,
+		"cirrus_changed": _env_controls.on_cirrus_changed,
 		"weather_toggled": _weather_controls.on_weather_toggled,
 		"weather_preset_changed": _weather_controls.on_weather_preset_changed,
 		"weather_type_changed": _weather_controls.on_weather_type_changed,
@@ -914,6 +915,7 @@ func _setup_visibility_toggles() -> void:
 		"time_pause_toggled": _weather_controls.on_time_pause_toggled,
 		"fog_density_changed": _weather_controls.on_fog_density_changed,
 		"cloud_coverage_changed": _weather_controls.on_cloud_coverage_changed,
+		"manual_override_toggled": _weather_controls.on_manual_override_toggled,
 		"resolution_changed": _on_resolution_changed,
 		"water_quality_changed": _ocean_controls.on_water_quality_changed,
 		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
@@ -922,6 +924,7 @@ func _setup_visibility_toggles() -> void:
 		"ssao_toggled": _env_controls.on_ssao_toggled,
 		"ssil_toggled": _env_controls.on_ssil_toggled,
 		"glow_toggled": _env_controls.on_glow_toggled,
+		"godrays_toggled": _env_controls.on_godrays_toggled,
 		"native_vfog_toggled": _env_controls.on_native_volumetric_fog_toggled,
 		"depth_fog_toggled": _env_controls.on_depth_fog_toggled,
 		"tonemapper_changed": _env_controls.on_tonemapper_changed,
@@ -1052,9 +1055,9 @@ func _on_lod_mode_pressed() -> void:
 ## Separate from models for isolated character/animation testing
 func _on_show_sky_toggled(enabled: bool) -> void:
 	_env_controls.on_show_sky_toggled(enabled)
-	# Sync Sky3D reference to weather system so it can drive Sky3D params
+	# Sync sky reference to weather system (SunshineClouds2 sun tracking, compositor)
 	if _weather_controls:
-		_weather_controls.sync_sky3d()
+		_weather_controls.sync_sky()
 
 
 func _on_show_characters_toggled(enabled: bool) -> void:
@@ -1153,51 +1156,46 @@ func _apply_resolution(index: int) -> void:
 
 
 
-## Quality preset: Pretty — enables most visual features
-func _on_quality_pretty_preset() -> void:
+## Apply a quality preset by setting UI state without re-triggering signals,
+## then calling each handler once. Prevents cascading signal re-entry.
+func _apply_quality_preset(settings: Dictionary) -> void:
 	if not _panels:
 		return
-	_panels.taa_toggle.button_pressed = true
-	_panels.ssao_toggle.button_pressed = true
-	_panels.ssil_toggle.button_pressed = false
-	_panels.glow_toggle.button_pressed = true
-	_panels.depth_fog_toggle.button_pressed = true
-	_panels.native_vfog_toggle.button_pressed = true
-	_panels.shadow_cascade_toggle.button_pressed = true
-	_panels.tonemapper_btn.selected = 2  # AgX
-	_env_controls.on_tonemapper_changed(2)
+	# Update UI without signals
+	_panels.taa_toggle.set_pressed_no_signal(settings.taa)
+	_panels.ssao_toggle.set_pressed_no_signal(settings.ssao)
+	_panels.ssil_toggle.set_pressed_no_signal(settings.ssil)
+	_panels.glow_toggle.set_pressed_no_signal(settings.glow)
+	_panels.depth_fog_toggle.set_pressed_no_signal(settings.depth_fog)
+	_panels.native_vfog_toggle.set_pressed_no_signal(settings.vfog)
+	_panels.shadow_cascade_toggle.set_pressed_no_signal(settings.shadows)
+	_panels.tonemapper_btn.selected = settings.tonemap
+	# Apply each setting
+	_env_controls.on_taa_toggled(settings.taa)
+	_env_controls.on_ssao_toggled(settings.ssao)
+	_env_controls.on_ssil_toggled(settings.ssil)
+	_env_controls.on_glow_toggled(settings.glow)
+	_env_controls.on_depth_fog_toggled(settings.depth_fog)
+	_env_controls.on_native_volumetric_fog_toggled(settings.vfog)
+	_env_controls.on_shadow_cascades_toggled(settings.shadows)
+	_env_controls.on_tonemapper_changed(settings.tonemap)
+
+
+## Quality preset: Pretty — enables most visual features
+func _on_quality_pretty_preset() -> void:
+	_apply_quality_preset({taa=true, ssao=true, ssil=false, glow=true, depth_fog=true, vfog=true, shadows=true, tonemap=2})
 	_log("Quality preset: Pretty")
 
 
 ## Quality preset: Balanced — TAA + SSAO + Glow only
 func _on_quality_balanced_preset() -> void:
-	if not _panels:
-		return
-	_panels.taa_toggle.button_pressed = true
-	_panels.ssao_toggle.button_pressed = true
-	_panels.ssil_toggle.button_pressed = false
-	_panels.glow_toggle.button_pressed = true
-	_panels.depth_fog_toggle.button_pressed = false
-	_panels.native_vfog_toggle.button_pressed = false
-	_panels.shadow_cascade_toggle.button_pressed = false
-	_panels.tonemapper_btn.selected = 0  # Filmic
-	_env_controls.on_tonemapper_changed(0)
+	_apply_quality_preset({taa=true, ssao=true, ssil=false, glow=true, depth_fog=false, vfog=false, shadows=false, tonemap=0})
 	_log("Quality preset: Balanced")
 
 
 ## Quality preset: Fast — disable all quality features
 func _on_quality_fast_preset() -> void:
-	if not _panels:
-		return
-	_panels.taa_toggle.button_pressed = false
-	_panels.ssao_toggle.button_pressed = false
-	_panels.ssil_toggle.button_pressed = false
-	_panels.glow_toggle.button_pressed = false
-	_panels.depth_fog_toggle.button_pressed = false
-	_panels.native_vfog_toggle.button_pressed = false
-	_panels.shadow_cascade_toggle.button_pressed = false
-	_panels.tonemapper_btn.selected = 0  # Filmic
-	_env_controls.on_tonemapper_changed(0)
+	_apply_quality_preset({taa=false, ssao=false, ssil=false, glow=false, depth_fog=false, vfog=false, shadows=false, tonemap=0})
 	_log("Quality preset: Fast")
 
 
@@ -1695,6 +1693,10 @@ func _process(delta: float) -> void:
 	# Update horizon map sun direction
 	if _horizon_map_manager:
 		_horizon_map_manager.update_sun_direction()
+
+	# Feed sun elevation to distant light manager for time-of-day visibility
+	if native_streaming_manager and _env_controls and _env_controls.sky_manager:
+		native_streaming_manager.set_sun_elevation(_env_controls.sky_manager.celestial.sun_altitude)
 
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:

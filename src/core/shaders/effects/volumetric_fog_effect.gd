@@ -29,6 +29,9 @@ var _noise_2d_sampler: RID
 ## Cached uniform set (invalidate on parameter change)
 var _uniform_set_dirty: bool = true
 
+## Dummy 1x1 texture for when transmittance LUT is not available
+var _dummy_transmittance: RID
+
 ## Active sun for dynamic direction — set by world_explorer or test scenes
 var _active_sun: DirectionalLight3D = null
 
@@ -134,6 +137,9 @@ func on_effect_added() -> void:
 	# Create samplers
 	_create_samplers()
 
+	# Create dummy transmittance texture (1x1 white = full transmittance)
+	_create_dummy_transmittance()
+
 	Log.info("shaders", "VolumetricFogEffect initialized")
 
 
@@ -205,6 +211,18 @@ func _create_samplers() -> void:
 	_depth_sampler = rd.sampler_create(sampler_state)
 	_noise_3d_sampler = rd.sampler_create(sampler_state)
 	_noise_2d_sampler = rd.sampler_create(sampler_state)
+
+
+func _create_dummy_transmittance() -> void:
+	if rd == null:
+		return
+	var fmt := RDTextureFormat.new()
+	fmt.width = 1
+	fmt.height = 1
+	fmt.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	_dummy_transmittance = rd.texture_create(fmt, RDTextureView.new())
 
 
 func _render_callback(effect_callback_type: int, render_data: RenderData) -> void:
@@ -310,9 +328,11 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	push_constants.append(float(size.x))
 	push_constants.append(float(size.y))
 
-	# blend_factor + padding
+	# blend_factor + has_transmittance flag
 	push_constants.append(blend_factor)
-	push_constants.append(0.0)  # padding
+	var transmittance_rid: RID = ShaderManager.get_shared_texture("sky_transmittance")
+	var has_transmittance: float = 1.0 if transmittance_rid.is_valid() else 0.0
+	push_constants.append(has_transmittance)
 
 	# Create uniforms
 	var uniforms: Array[RDUniform] = []
@@ -350,6 +370,15 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 		u_noise2d.add_id(RenderingServer.texture_get_rd_texture(_noise_2d_texture.get_rid()))
 		uniforms.append(u_noise2d)
 
+	# Transmittance LUT (binding 4) — from SkyTransmittanceEffect shared texture
+	var lut_rid: RID = transmittance_rid if transmittance_rid.is_valid() else _dummy_transmittance
+	var u_transmittance := RDUniform.new()
+	u_transmittance.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_transmittance.binding = 4
+	u_transmittance.add_id(_depth_sampler)  # reuse linear/clamp sampler
+	u_transmittance.add_id(lut_rid)
+	uniforms.append(u_transmittance)
+
 	# Create uniform set
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
@@ -380,3 +409,5 @@ func on_effect_removed() -> void:
 			rd.free_rid(_noise_3d_sampler)
 		if _noise_2d_sampler.is_valid():
 			rd.free_rid(_noise_2d_sampler)
+		if _dummy_transmittance.is_valid():
+			rd.free_rid(_dummy_transmittance)

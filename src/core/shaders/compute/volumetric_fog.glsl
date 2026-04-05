@@ -24,6 +24,10 @@ layout(rgba16f, set = 0, binding = 0) uniform image2D color_image;
 layout(set = 0, binding = 1) uniform sampler2D depth_texture;
 layout(set = 0, binding = 2) uniform sampler3D noise_texture;
 layout(set = 0, binding = 3) uniform sampler2D noise_2d_texture;
+// Sky transmittance LUT (from SkyTransmittanceEffect, Phase 4).
+// U = cos(zenith) * 0.5 + 0.5, V = normalized altitude (0=surface, 1=top).
+// When available, tints fog scattering with physically-correct atmospheric extinction.
+layout(set = 0, binding = 4) uniform sampler2D transmittance_lut;
 
 // Push constants for parameters
 layout(push_constant, std430) uniform Params {
@@ -37,7 +41,7 @@ layout(push_constant, std430) uniform Params {
     vec4 weather_params;    // x = weather_id (0-9), y = next_weather_id, z = transition (0-1), w = game_hour (0-24)
     vec2 resolution;
     float blend_factor;
-    float _pad;
+    float has_transmittance;  // 1.0 = transmittance LUT available, 0.0 = use flat fog color
 } params;
 
 // ─── OpenMW Compatibility: Weather Modifier Tables (from VAIO) ───
@@ -97,6 +101,19 @@ const float TIME_FOG_MODIFIERS[4] = float[4](
 
 const int RAY_STEPS = 24;
 const float PI = 3.14159265359;
+
+// ─── Sky Transmittance LUT Lookup ───
+// Reads atmospheric extinction from the precomputed Bruneton LUT.
+// cos_theta: cosine of zenith angle (1.0 = up, -1.0 = down)
+// altitude_km: height above sea level in kilometers
+// Returns RGB transmittance (0-1, fraction of light surviving the path).
+const float ATMOSPHERE_THICKNESS_KM = 100.0;
+
+vec3 lookup_transmittance(float cos_theta, float altitude_km) {
+    float u = cos_theta * 0.5 + 0.5;
+    float v = clamp(altitude_km / ATMOSPHERE_THICKNESS_KM, 0.0, 1.0);
+    return texture(transmittance_lut, vec2(u, v)).rgb;
+}
 
 // ─── OpenMW Compat Helpers ───
 
@@ -289,7 +306,20 @@ void main() {
         float scatter_mod = get_weather_modifier(SCATTER_MODIFIERS);
         float cos_theta = dot(ray_dir, params.sun_direction.xyz);
         float mie = mie_phase(cos_theta, 0.76);
-        fog_col += params.sun_direction.w * mie * vec3(1.0, 0.9, 0.7) * 0.3 * scatter_mod;
+
+        // When transmittance LUT is available, tint the sun scattering
+        // with physically-correct atmospheric extinction along the sun path.
+        // This gives proper red sunsets, blue-shifted zenith fog, and
+        // weather-dependent haze color (ashstorm = brown, blight = red).
+        vec3 sun_transmittance = vec3(1.0, 0.9, 0.7); // default warm tint
+        if (params.has_transmittance > 0.5) {
+            // Sun direction cosine with zenith (Y-up)
+            float sun_cos_zenith = params.sun_direction.y;
+            // Camera altitude in km (approximate — world units are meters)
+            float cam_alt_km = max(params.camera_position.y * 0.001, 0.0);
+            sun_transmittance = lookup_transmittance(sun_cos_zenith, cam_alt_km);
+        }
+        fog_col += params.sun_direction.w * mie * sun_transmittance * 0.3 * scatter_mod;
 
         vec3 final_color = mix(original_color.rgb, fog_col, fog_amount);
         imageStore(color_image, pixel_coords, vec4(final_color, original_color.a));

@@ -6,13 +6,11 @@
 ##   - Height fog (pools at sea level / valleys)
 ##   - Sun volumetric energy (god ray brightness)
 ##   - SkyManager atmosphere (turbidity, Mie, cloud coverage)
-##   - Sky3D SkyDome (legacy — fog density, rayleigh, clouds, wind)
 ##   - SunshineClouds2 (wind speed/direction at 4 detail scales)
-##   - Fallback Environment + DirectionalLight when Sky3D is off
+##   - Fallback Environment + DirectionalLight when sky is off
 ##
 ## Callbacks:
-##   get_sky_manager: -> SkyManager (custom sky system, preferred)
-##   get_sky3d: -> Node (Sky3D instance or null, legacy)
+##   get_sky_manager: -> SkyManager (custom sky system)
 ##   get_environment: -> Environment
 ##   get_light: -> DirectionalLight3D (fallback only)
 ##   get_sunshine_driver: -> Node (SunshineCloudsDriverGD or null)
@@ -38,20 +36,16 @@ func apply(result: WeatherTypes.WeatherResult) -> void:
 		return
 
 	var sky_mgr: Node = _get_sky_manager()
-	var sky3d: Node = _get_sky3d()
 	var env: Environment = _get_environment()
 
-	# SkyManager path (preferred) — drives atmosphere params directly
+	# SkyManager path — drives atmosphere params directly
 	if sky_mgr:
 		_apply_sky(sky_mgr, result)
-	elif sky3d and sky3d.get("sky3d_enabled"):
-		# Legacy Sky3D path
-		_apply_sky3d(sky3d, result)
 	else:
 		# Fallback path — drive DirectionalLight for sun position/color
 		_apply_fallback_light(result)
 
-	# Fog systems — always drive via Environment regardless of Sky3D state
+	# Fog systems — always drive via Environment regardless of sky state
 	if env:
 		_apply_depth_fog(env, result)
 		_apply_volumetric_fog(env, result)
@@ -147,14 +141,6 @@ func _apply_sun_volumetric_energy(result: WeatherTypes.WeatherResult) -> void:
 			sun.light_volumetric_fog_energy = energy
 			return
 
-	# Legacy: try Sky3D's sun
-	var sky3d: Node = _get_sky3d()
-	if sky3d and sky3d.get("sky3d_enabled"):
-		var sun: DirectionalLight3D = sky3d.get_node_or_null("SunLight")
-		if sun:
-			sun.light_volumetric_fog_energy = energy
-			return
-
 	# Fallback light
 	var light: DirectionalLight3D = _get_light()
 	if light:
@@ -178,6 +164,9 @@ func _apply_sky(sky_mgr: Node, result: WeatherTypes.WeatherResult) -> void:
 
 	# Wind
 	sky_mgr.wind_speed = result.wind_speed
+	if result.storm_direction.length_squared() > 0.01:
+		sky_mgr.wind_direction = rad_to_deg(atan2(result.storm_direction.x, result.storm_direction.z))
+
 
 	# Thunder flash — spike ambient energy, smooth decay back to 1.0
 	var env: Environment = sky_mgr.get_environment()
@@ -190,49 +179,7 @@ func _apply_sky(sky_mgr: Node, result: WeatherTypes.WeatherResult) -> void:
 #endregion
 
 
-#region Sky3D Path — SkyDome atmospheric parameters (legacy)
-
-func _apply_sky3d(sky3d: Node, result: WeatherTypes.WeatherResult) -> void:
-	var sky_dome: Node = sky3d.get("sky")
-	if sky_dome == null:
-		return
-
-	# SkyDome fog — atmospheric haze on the sky dome itself (separate from Godot fog)
-	var base_fog: float = result.fog_depth * 0.0004 * result.storm_fog_multiplier
-	sky_dome.set("fog_density", clampf(base_fog, 0.0001, 0.01))
-	sky_dome.set("fog_rayleigh_depth", lerpf(0.05, 0.5, clampf(result.fog_depth / 3.5, 0.0, 1.0)))
-
-	# Cloud handling depends on whether SunshineClouds2 is active.
-	# Sky3D has its own cumulus/cirrus clouds that render in the sky background.
-	# SunshineClouds2 renders volumetric clouds as a CompositorEffect (PRE_TRANSPARENT).
-	# When both are active, Sky3D's bright white cumulus bleeds through SunshineClouds2's
-	# dark overcast, visually hiding storm clouds. Fix: let SunshineClouds2 be sole
-	# cloud renderer when active, and darken Sky3D's atmosphere to match weather.
-	var sunshine_active: bool = _get_sunshine_driver() != null
-	if sunshine_active:
-		# Disable Sky3D's own clouds — SunshineClouds2 handles all cloud rendering
-		sky_dome.set("cumulus_visible", false)
-		sky_dome.set("cirrus_visible", false)
-		# Darken atmosphere based on cloud coverage (overcast/storm → darker sky behind clouds)
-		sky_dome.set("atm_darkness", clampf(result.cloud_coverage * 0.5, 0.0, 0.5))
-	else:
-		# No SunshineClouds2 — use Sky3D's own cumulus clouds
-		sky_dome.set("cumulus_visible", true)
-		sky_dome.set("cirrus_visible", true)
-		sky_dome.set("cumulus_coverage", clampf(result.cloud_coverage * 0.7 + 0.1, 0.0, 1.0))
-		sky_dome.set("atm_darkness", 0.0)
-
-	# Wind — drive Sky3D's wind system
-	sky3d.set("wind_speed", result.wind_speed * 20.0)
-
-	# Thunder flash — briefly spike ambient energy
-	if result.thunder_flash > 0.0:
-		sky3d.set("ambient_energy", 1.0 + result.thunder_flash * 3.0)
-
-#endregion
-
-
-#region Fallback Path — DirectionalLight when Sky3D is off
+#region Fallback Path — DirectionalLight when sky is off
 
 func _apply_fallback_light(result: WeatherTypes.WeatherResult) -> void:
 	var env: Environment = _get_environment()
@@ -254,7 +201,7 @@ func _apply_fallback_light(result: WeatherTypes.WeatherResult) -> void:
 	if result.thunder_flash > 0.0:
 		light.light_energy += result.thunder_flash * 3.0
 
-	# Simple sun arc (east to west) — only for fallback, Sky3D does this properly
+	# Simple sun arc (east to west) — only for fallback, SkyManager does this properly
 	var hour: float = result.game_hour
 	var sun_progress: float = (hour - WeatherData.SUNRISE_TIME) / (WeatherData.SUNSET_TIME - WeatherData.SUNRISE_TIME)
 	var elevation: float = sin(sun_progress * PI) * 60.0
@@ -300,12 +247,6 @@ func _apply_sunshine_clouds(driver: Node, result: WeatherTypes.WeatherResult) ->
 func _get_sky_manager() -> Node:
 	if _cb.has("get_sky_manager"):
 		return _cb["get_sky_manager"].call()
-	return null
-
-
-func _get_sky3d() -> Node:
-	if _cb.has("get_sky3d"):
-		return _cb["get_sky3d"].call()
 	return null
 
 

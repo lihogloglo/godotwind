@@ -3,11 +3,15 @@ extends RefCounted
 ## Computes sun, moon, and star positions from game time.
 ## Adapted from Sky3D's TimeOfDay.gd (MIT, TokisanGames).
 ## Stateless calculator — receives game_hour, outputs directions.
+## Calendar system for date tracking, day-of-year, and save/load.
 
 enum Mode { SIMPLE, REALISTIC }
 
 const RADIANS_PER_HOUR: float = PI / 12.0
 const EARTH_TILT: float = 23.44  # degrees
+## Days per month — Gregorian default. Override for game-specific calendars
+## (e.g., TES: all months 30 days, no leap years).
+var days_per_month: Array[int] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
 var mode: Mode = Mode.SIMPLE
 
@@ -17,6 +21,17 @@ var latitude: float = 45.0
 var longitude: float = 0.0
 ## Moon offset from anti-sun position (degrees). Allows artistic control.
 var moon_offset: Vector2 = Vector2.ZERO
+
+# ---- Calendar ----
+
+## Current game year.
+var year: int = 1
+## Current game month (1-12).
+var month: int = 1
+## Current game day (1-31).
+var day: int = 1
+## Whether to auto-advance the calendar when days_elapsed is provided.
+var calendar_enabled: bool = true
 
 # --- Outputs (computed by update()) ---
 
@@ -33,17 +48,104 @@ var star_rotation: Basis = Basis.IDENTITY
 
 
 ## Compute all celestial positions for the given game hour.
-## day_of_year: 1-365, used for seasonal sun angle in REALISTIC mode.
-func update(game_hour: float, day_of_year: int = 172) -> void:
+## days_elapsed: number of new days since last update (0=same day, 1=next day, etc.).
+##   The clock owner (WeatherManager) is responsible for tracking day boundaries.
+##   Pass -1 to skip calendar updates.
+func update(game_hour: float, days_elapsed: int = 0, day_of_year_override: int = -1) -> void:
+	# Advance calendar by elapsed days
+	if calendar_enabled and days_elapsed > 0:
+		for i: int in days_elapsed:
+			advance_day()
+
+	var doy: int = day_of_year_override if day_of_year_override > 0 else get_day_of_year()
+
 	if mode == Mode.SIMPLE:
 		_compute_simple(game_hour)
 	else:
-		_compute_realistic(game_hour, day_of_year)
+		_compute_realistic(game_hour, doy)
 
 	# Moon phase from dot product with sun (independent of mode)
 	# 0 when moon faces sun (new), 1 when opposite (full)
 	var phase_dot: float = -sun_direction.dot(moon_direction)
 	moon_phase = (phase_dot + 1.0) * 0.5
+
+
+#region Calendar
+
+## Whether the given year is a leap year (Gregorian rules).
+## Override for game-specific calendars that don't use leap years.
+var use_leap_years: bool = true
+
+static func _is_leap_year(y: int) -> bool:
+	return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
+
+
+## Days in the given month (1-12) of the given year.
+func get_days_in_month(m: int, y: int = -1) -> int:
+	if y < 0:
+		y = year
+	if m < 1 or m > days_per_month.size():
+		return 30
+	var d: int = days_per_month[m - 1]
+	if m == 2 and use_leap_years and _is_leap_year(y):
+		d = 29
+	return d
+
+
+## Day of year (1-366) from current date.
+func get_day_of_year() -> int:
+	var doy: int = 0
+	for m: int in range(1, month):
+		doy += get_days_in_month(m, year)
+	doy += day
+	return doy
+
+
+## Advance one day, rolling over month/year as needed.
+func advance_day() -> void:
+	day += 1
+	if day > get_days_in_month(month, year):
+		day = 1
+		month += 1
+		if month > days_per_month.size():
+			month = 1
+			year += 1
+
+
+## Get a readable date string (YYYY-MM-DD).
+func get_date_string() -> String:
+	return "%04d-%02d-%02d" % [year, month, day]
+
+
+## Set date from a dictionary: { "year": int, "month": int, "day": int }.
+## Useful for save/load and Morrowind calendar integration.
+func set_from_date_dict(dict: Dictionary) -> void:
+	year = dict.get("year", year) as int
+	month = clampi(dict.get("month", month) as int, 1, days_per_month.size())
+	day = clampi(dict.get("day", day) as int, 1, get_days_in_month(month, year))
+
+
+## Get date as dictionary for save/load.
+func get_date_dict() -> Dictionary:
+	return { "year": year, "month": month, "day": day }
+
+
+## Set date from day-of-year (1-366) and year.
+func set_from_day_of_year(doy: int, y: int = -1) -> void:
+	if y > 0:
+		year = y
+	doy = clampi(doy, 1, 366)
+	month = 1
+	var remaining: int = doy
+	while remaining > get_days_in_month(month, year):
+		remaining -= get_days_in_month(month, year)
+		month += 1
+		if month > days_per_month.size():
+			month = 12
+			break
+	day = remaining
+
+#endregion
 
 
 #region SIMPLE Mode

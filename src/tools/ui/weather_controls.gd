@@ -26,6 +26,9 @@ var weather_enabled: bool = false
 ## Whether weather drives ocean parameters (wind, foam, color)
 var ocean_link_enabled: bool = true
 
+## When true, weather system stops overwriting fog/cloud slider values
+var manual_override: bool = false
+
 
 func _init(callbacks: Dictionary) -> void:
 	_cb = callbacks
@@ -41,7 +44,6 @@ func setup_renderer(env_controls: EnvironmentControls) -> void:
 	_env_controls = env_controls
 	var renderer_callbacks := {
 		"get_sky_manager": func() -> Node: return env_controls.sky_manager if env_controls.show_sky else null,
-		"get_sky3d": func() -> Node: return env_controls.sky_3d if env_controls.show_sky else null,
 		"get_environment": env_controls.get_active_environment,
 		"get_light": env_controls.get_fallback_light,
 		"get_sunshine_driver": func() -> Node: return _sunshine_driver,
@@ -107,6 +109,11 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# via transpose may be subtly wrong, causing reprojected UVs to drift.
 		# Lower decay = less old-frame bleeding = less perceived camera lag.
 		clouds_res.set("accumulation_decay", 0.4)
+		# Enable environment fog color sampling so clouds match the atmosphere
+		clouds_res.set("use_environment_fog", 0.5)
+		# Set ambient tint to neutral — we drive cloud_ambient_color directly from sky state
+		# Default tint (0.133, 0.2, 0.243) is too dark and multiplies with our computed ambient
+		clouds_res.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
 		# Add driver to tree FIRST — clouds_res_added() needs is_inside_tree()=true
 		# to register the CompositorEffect on the WorldEnvironment's Compositor
 		parent.add_child(_sunshine_driver)
@@ -141,29 +148,16 @@ func set_camera(camera: Camera3D) -> void:
 		_particles.set_camera(camera)
 
 
-## Sync sky reference to WeatherManager and SunshineClouds2 (call when sky is toggled)
-func sync_sky3d() -> void:
-	if _env_controls and _env_controls.show_sky:
-		# Prefer SkyManager over Sky3D
-		if _env_controls.sky_manager:
-			var sky_mgr: SkyManager = _env_controls.sky_manager
-			# SkyManager owns the clock — no need to set_sky3d on WeatherManager
-			WeatherManager.set_sky3d(null)
-			# Point SunshineClouds2 at SkyManager's sun
-			if _sunshine_driver:
-				var sun: DirectionalLight3D = sky_mgr.get_sun_light()
-				if sun:
-					var lights: Array[DirectionalLight3D] = [sun]
-					_sunshine_driver.tracked_directional_lights = lights
-		elif _env_controls.sky_3d:
-			# Legacy Sky3D path
-			var sky3d: Node = _env_controls.sky_3d
-			WeatherManager.set_sky3d(sky3d)
-			if _sunshine_driver and sky3d.get("sun"):
-				var lights: Array[DirectionalLight3D] = [sky3d.sun]
+## Sync sky reference to SunshineClouds2 (call when sky is toggled)
+func sync_sky() -> void:
+	if _env_controls and _env_controls.show_sky and _env_controls.sky_manager:
+		# Point SunshineClouds2 at SkyManager's sun
+		if _sunshine_driver:
+			var sun: DirectionalLight3D = _env_controls.sky_manager.get_sun_light()
+			if sun:
+				var lights: Array[DirectionalLight3D] = [sun]
 				_sunshine_driver.tracked_directional_lights = lights
 	else:
-		WeatherManager.set_sky3d(null)
 		# Revert SunshineClouds2 to fallback light
 		if _sunshine_driver and _env_controls:
 			var fallback: DirectionalLight3D = _env_controls.get_fallback_light()
@@ -193,7 +187,6 @@ func _reregister_sunshine_compositor() -> void:
 	# Also clean up the out-of-tree WorldEnvironment's compositor to prevent
 	# duplicate entries from accumulating over multiple toggles
 	if _env_controls:
-		_remove_effect_from_compositor(clouds_res, _env_controls.sky_3d)
 		_remove_effect_from_compositor(clouds_res, _env_controls._fallback_world_env)
 
 	# Add to the currently active (in-tree) WorldEnvironment
@@ -251,6 +244,12 @@ func on_weather_toggled(enabled: bool) -> void:
 		OceanManager.reset_weather()
 
 	Log.info("weather", "Weather system %s" % ("enabled" if enabled else "disabled"))
+
+
+## Handle manual override toggle — when ON, weather stops pushing fog/cloud values
+func on_manual_override_toggled(enabled: bool) -> void:
+	manual_override = enabled
+	Log.info("weather", "Manual overrides: %s" % ("ON" if enabled else "OFF"))
 
 
 ## Handle fog density slider change
@@ -382,6 +381,9 @@ func process(delta: float) -> void:
 	# Always drive cloud coverage — clouds should be visible regardless of weather toggle
 	_update_cloud_coverage()
 
+	# Sync cloud ambient color from SkyManager's sky state
+	_sync_cloud_ambient()
+
 	if not weather_enabled:
 		return
 
@@ -400,8 +402,10 @@ func process(delta: float) -> void:
 	_update_status_label()
 
 
-## Drive SunshineClouds2 cloud coverage — always runs, weather or not
+## Drive SunshineClouds2 cloud coverage — skipped when manual_override is ON
 func _update_cloud_coverage() -> void:
+	if manual_override:
+		return
 	if _sunshine_driver == null or not is_instance_valid(_sunshine_driver):
 		return
 	var res: Resource = _sunshine_driver.get("clouds_resource")
@@ -416,6 +420,50 @@ func _update_cloud_coverage() -> void:
 		coverage = BASE_CLOUD_COVERAGE
 
 	res.set("clouds_coverage", coverage)
+
+
+## Sync SunshineClouds2 ambient color from SkyManager's sky state.
+## Computes cloud tint from sun altitude + sun color so clouds darken at night
+## and pick up sunset/sunrise color.
+func _sync_cloud_ambient() -> void:
+	if _sunshine_driver == null or not is_instance_valid(_sunshine_driver):
+		return
+	var res: Resource = _sunshine_driver.get("clouds_resource")
+	if res == null:
+		return
+
+	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:
+		var sky_mgr: SkyManager = _env_controls.sky_manager
+		if sky_mgr.has_method("get_sky_state"):
+			var state: SkyManager.SkyState = sky_mgr.get_sky_state()
+			if state:
+				# Sun altitude: positive = above horizon, negative = below
+				var sun_alt: float = state.sun_direction.y
+				# Day factor: 1.0 at noon, 0.0 at night, smooth transition at twilight
+				var day_factor: float = clampf(sun_alt * 5.0 + 0.5, 0.0, 1.0)
+				# Day ambient: warm white tinted by sun color
+				var day_color: Color = state.sun_color.lerp(Color(0.8, 0.85, 0.9), 0.5)
+				# Night ambient: dark blue-gray
+				var night_color := Color(0.08, 0.1, 0.15)
+				# Sunset/sunrise boost: warm orange when sun is near horizon
+				var sunset_factor: float = clampf(1.0 - absf(sun_alt) * 8.0, 0.0, 1.0) * 0.6
+				var sunset_tint := Color(1.0, 0.6, 0.3)
+				# Blend
+				var ambient: Color = night_color.lerp(day_color, day_factor)
+				ambient = ambient.lerp(sunset_tint, sunset_factor)
+				res.set("cloud_ambient_color", ambient)
+
+				# Atmosphere color: controls distant cloud fog tint
+				var atmo_day := Color(0.9, 0.92, 1.0)
+				var atmo_night := Color(0.1, 0.12, 0.2)
+				var atmo_sunset := Color(1.0, 0.55, 0.25)
+				var atmo: Color = atmo_night.lerp(atmo_day, day_factor)
+				atmo = atmo.lerp(atmo_sunset, sunset_factor)
+				res.set("atmosphere_color", atmo)
+				return
+
+	# Fallback: neutral sky ambient when sky is off
+	res.set("cloud_ambient_color", Color(0.761, 0.784, 0.824))
 
 
 ## Update the weather status info label in the panel

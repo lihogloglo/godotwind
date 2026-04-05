@@ -1,8 +1,8 @@
 ## Weather Manager — Weather state machine and region tracking
 ##
 ## Autoload singleton. Owns the weather state machine, per-frame interpolated
-## WeatherResult, and region tracking. Time is owned by Sky3D when available;
-## falls back to internal clock when Sky3D is off.
+## WeatherResult, and region tracking. Owns the single game clock — SkyManager
+## reads time via update(game_hour), it does not advance time itself.
 ##
 ## Weather transitions follow Morrowind's model:
 ##   - Each region has probability weights for 10 weather types
@@ -40,56 +40,28 @@ var auto_weather: bool = true
 #endregion
 
 
-#region Sky3D Integration
+#region Clock
 
-## Sky3D node reference — when set, Sky3D owns the clock
-var _sky3d: Node = null
+## Game clock hour (0.0 - 24.0)
+var _hour: float = 8.0
+var _day: int = 1
+var _time_scale: float = 30.0
+var _paused: bool = false
 
-## Internal fallback clock (used when Sky3D is off)
-var _fallback_hour: float = 8.0
-var _fallback_day: int = 1
-var _fallback_time_scale: float = 30.0
-var _fallback_paused: bool = false
-
-#endregion
-
-
-#region Public Clock API — delegates to Sky3D or fallback
-
-## Current game hour (0.0 - 24.0) — reads from Sky3D when available
+## Current game hour (0.0 - 24.0)
 var game_hour: float:
-	get:
-		if _sky3d and _sky3d.get("sky3d_enabled"):
-			return _sky3d.get("current_time")
-		return _fallback_hour
-	set(value):
-		# Redirect to set_game_hour for consistent behavior
-		set_game_hour(value)
+	get: return _hour
+	set(value): set_game_hour(value)
 
-## Current time scale
+## Current time scale (game-seconds per real-second)
 var time_scale: float:
-	get:
-		if _sky3d and _sky3d.get("sky3d_enabled"):
-			# Convert Sky3D minutes_per_day to our game-seconds-per-real-second
-			var mpd: float = _sky3d.get("minutes_per_day")
-			if mpd > 0.0:
-				return (24.0 * 3600.0) / (mpd * 60.0)
-			return 0.0
-		return _fallback_time_scale
-	set(value):
-		set_time_scale(value)
+	get: return _time_scale
+	set(value): set_time_scale(value)
 
 ## Whether time is paused
 var time_paused: bool:
-	get:
-		return _fallback_paused
-	set(value):
-		_fallback_paused = value
-		if _sky3d and _sky3d.get("sky3d_enabled"):
-			if value:
-				_sky3d.pause()
-			else:
-				_sky3d.resume()
+	get: return _paused
+	set(value): _paused = value
 
 #endregion
 
@@ -123,7 +95,7 @@ var _thunder_flash: float = 0.0
 ## RNG for weather rolls and thunder
 var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
-## Previous frame's game hour (for detecting hour changes in Sky3D mode)
+## Previous frame's game hour (for detecting hour changes)
 var _prev_hour: float = 8.0
 
 #endregion
@@ -167,24 +139,15 @@ func _process(delta: float) -> void:
 #region Clock
 
 func _advance_clock(delta: float) -> void:
-	if _sky3d and _sky3d.get("sky3d_enabled"):
-		# Sky3D owns the clock — just read it and emit signal
-		var current: float = _sky3d.get("current_time")
-		if absf(current - _prev_hour) > 0.001:
-			game_hour_changed.emit(current)
-			_prev_hour = current
+	if _paused:
 		return
 
-	# Fallback internal clock
-	if _fallback_paused:
-		return
+	_hour += delta * _time_scale / 3600.0
+	if _hour >= 24.0:
+		_hour -= 24.0
+		_day += 1
 
-	_fallback_hour += delta * _fallback_time_scale / 3600.0
-	if _fallback_hour >= 24.0:
-		_fallback_hour -= 24.0
-		_fallback_day += 1
-
-	game_hour_changed.emit(_fallback_hour)
+	game_hour_changed.emit(_hour)
 
 #endregion
 
@@ -335,15 +298,6 @@ func _compute_result() -> void:
 
 #region Public API
 
-## Set Sky3D reference — when set, Sky3D owns the clock
-func set_sky3d(sky3d_node: Node) -> void:
-	_sky3d = sky3d_node
-	if _sky3d:
-		Log.info("weather", "Weather clock synced to Sky3D")
-	else:
-		Log.info("weather", "Weather clock using internal fallback")
-
-
 ## Get the current interpolated weather result
 func get_weather_result() -> WeatherTypes.WeatherResult:
 	return _weather_result
@@ -388,26 +342,14 @@ func transition_to(type: int) -> void:
 
 ## Set game hour directly (0-24)
 func set_game_hour(hour: float) -> void:
-	var h: float = fmod(absf(hour), 24.0)
-	if _sky3d and _sky3d.get("sky3d_enabled"):
-		_sky3d.set("current_time", h)
-	else:
-		_fallback_hour = h
-	Log.info("weather", "Game hour set to: %.1f" % h)
+	_hour = fmod(absf(hour), 24.0)
+	Log.info("weather", "Game hour set to: %.1f" % _hour)
 
 
 ## Set time scale (game-seconds per real-second)
 func set_time_scale(scale: float) -> void:
-	var s: float = maxf(0.0, scale)
-	if _sky3d and _sky3d.get("sky3d_enabled"):
-		# Convert game-seconds-per-real-second to minutes_per_day
-		# minutes_per_day = (24 * 3600) / (scale * 60)
-		if s > 0.0:
-			_sky3d.set("minutes_per_day", (24.0 * 3600.0) / (s * 60.0))
-		else:
-			_sky3d.pause()
-	_fallback_time_scale = s
-	Log.info("weather", "Time scale set to: %.1f" % s)
+	_time_scale = maxf(0.0, scale)
+	Log.info("weather", "Time scale set to: %.1f" % _time_scale)
 
 
 ## Get a summary string for debug/console display
@@ -415,9 +357,7 @@ func get_status_string() -> String:
 	var status: String = "Weather: %s" % WeatherTypes.type_name(_current_weather)
 	if _transitioning:
 		status += " -> %s (%.0f%%)" % [WeatherTypes.type_name(_next_weather), (1.0 - _transition_factor) * 100.0]
-	var sky3d_active: bool = _sky3d != null and _sky3d.get("sky3d_enabled")
 	status += " | Hour: %.1f | Region: %s" % [game_hour, _current_region_id if _current_region_id != "" else "none"]
-	status += " | Clock: %s" % ("Sky3D" if sky3d_active else "internal")
 	status += " | Next change in: %.1f hrs" % _hours_until_change
 	return status
 

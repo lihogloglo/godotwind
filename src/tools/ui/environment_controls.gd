@@ -18,9 +18,8 @@ extends RefCounted
 # ── Public state (readable by world_explorer) ──
 
 var show_sky: bool = false
-var sky_3d: Sky3D = null
 
-## Custom sky system (replaces Sky3D)
+## Custom sky system
 var sky_manager: SkyManager = null
 
 ## When true, weather system owns fog/ambient base values
@@ -29,7 +28,6 @@ var weather_active: bool = false
 
 # ── Private state ──
 
-var _sky3d_initialized: bool = false
 var _shader_manager_attached: bool = false
 var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
@@ -38,7 +36,7 @@ var _panels: ExplorerPanels = null
 ## Callback dictionary — keys are action names, values are Callables on world_explorer
 var _cb: Dictionary = {}
 
-## Tracks native environment toggles so they survive Sky3D <-> fallback swaps.
+## Tracks native environment toggles so they survive sky <-> fallback swaps.
 ## Keys match Environment property groups; values are Dictionaries of property->value.
 var _visual_state: Dictionary = {
 	"taa": false,
@@ -64,7 +62,7 @@ func set_panels(panels: ExplorerPanels) -> void:
 	_panels = panels
 
 
-## Setup fallback environment and light for when Sky3D is disabled.
+## Setup fallback environment and light for when sky is disabled.
 ## This provides a Godot default-like appearance instead of black sky.
 ## Must be called before panels are built (needs to be in scene tree first).
 func setup_fallback_environment() -> void:
@@ -132,10 +130,18 @@ func setup_fallback_environment() -> void:
 
 
 ## Sync sky state with toggle on initialization.
-## Since Sky3D is lazily created, this just ensures fallback is in tree.
+## Since SkyManager is lazily created, this just ensures fallback is in tree.
 func sync_sky_state() -> void:
 	if _fallback_light:
 		_fallback_light.visible = not show_sky
+
+
+# ── Cirrus ──
+
+func on_cirrus_changed(value: float) -> void:
+	if sky_manager:
+		sky_manager.cirrus_coverage = value
+	_log("Cirrus coverage: %.2f" % value)
 
 
 # ── Shader Effect Callbacks ──
@@ -149,36 +155,15 @@ func ensure_shader_manager_attached() -> void:
 		ShaderManager.attach_to(_fallback_world_env)
 		_shader_manager_attached = true
 		_log("ShaderManager attached to fallback environment")
-	elif sky_3d and sky_3d.is_inside_tree():
-		ShaderManager.attach_to(sky_3d)
-		_shader_manager_attached = true
-		_log("ShaderManager attached to Sky3D")
 
 
-func on_fog_effect_toggled(enabled: bool) -> void:
+func on_godrays_toggled(enabled: bool) -> void:
 	ensure_shader_manager_attached()
 	if enabled:
-		ShaderManager.enable_effect("volumetric_fog", 0.3)
+		ShaderManager.enable_effect("godrays", 0.3)
 	else:
-		ShaderManager.disable_effect("volumetric_fog", 0.3)
-	_log("Volumetric Fog: %s" % ("ON" if enabled else "OFF"))
-
-
-func on_fog_intensity_changed(value: float) -> void:
-	ShaderManager.set_effect_param("volumetric_fog", "fog_intensity", value)
-
-
-func on_clouds_effect_toggled(enabled: bool) -> void:
-	ensure_shader_manager_attached()
-	if enabled:
-		ShaderManager.enable_effect("volumetric_clouds", 0.3)
-	else:
-		ShaderManager.disable_effect("volumetric_clouds", 0.3)
-	_log("Volumetric Clouds: %s" % ("ON" if enabled else "OFF"))
-
-
-func on_cloud_coverage_changed(value: float) -> void:
-	ShaderManager.set_effect_param("volumetric_clouds", "cloud_coverage", value)
+		ShaderManager.disable_effect("godrays", 0.3)
+	_log("God Rays: %s" % ("ON" if enabled else "OFF"))
 
 
 func on_color_grading_toggled(enabled: bool) -> void:
@@ -217,14 +202,12 @@ func on_reset_color_grading() -> void:
 
 # ── Native Rendering Quality Toggles ──
 # These set properties directly on the active Environment resource.
-# State is tracked in _visual_state so it survives Sky3D <-> fallback swaps.
+# State is tracked in _visual_state so it survives sky <-> fallback swaps.
 
 ## Get whichever Environment is currently active.
 func _get_active_environment() -> Environment:
 	if show_sky and sky_manager:
 		return sky_manager.get_environment()
-	if show_sky and sky_3d and sky_3d.environment:
-		return sky_3d.environment
 	if _fallback_world_env and _fallback_world_env.environment:
 		return _fallback_world_env.environment
 	return null
@@ -401,7 +384,6 @@ func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 			env.volumetric_fog_temporal_reprojection_amount = 0.7
 	# Boost sun's volumetric fog energy for stronger god rays
 	_set_sun_volumetric_energy(6.0 if enabled else 1.0)
-	_disable_sky3d_fog()
 	_log("Volumetric Fog (god rays): %s" % ("ON" if enabled else "OFF"))
 
 
@@ -421,7 +403,6 @@ func on_depth_fog_toggled(enabled: bool) -> void:
 			# Height fog at sea level — pools in valleys and coastal areas
 			env.fog_height = 0.0
 			env.fog_height_density = 0.003
-	_disable_sky3d_fog()
 	_log("Depth Fog: %s" % ("ON" if enabled else "OFF"))
 	if weather_active and not enabled:
 		_log("Note: weather fog also disabled (weather drives depth fog density)")
@@ -448,29 +429,18 @@ func on_shadow_cascades_toggled(enabled: bool) -> void:
 	_visual_state["shadow_cascades"] = enabled
 	# Apply to fallback light
 	_apply_shadow_cascades(_fallback_light)
-	# Apply to Sky3D sun if available
-	if sky_3d:
-		var sun: DirectionalLight3D = sky_3d.get_node_or_null("SunLight")
-		if sun:
-			_apply_shadow_cascades(sun)
+	# Apply to SkyManager sun if available
+	if sky_manager:
+		_apply_shadow_cascades(sky_manager.get_sun_light())
 	_log("Shadow 4-split cascades: %s" % ("ON" if enabled else "OFF"))
-
-
-## Disable Sky3D's AtmFog permanently.
-## Sky3D's AtmFog is a full-screen quad (blend_mix) that fights with Godot's depth fog.
-## We use Godot depth fog as the single fog source — Sky3D handles sky/sun only.
-func _disable_sky3d_fog() -> void:
-	if not sky_3d or not show_sky:
-		return
-	sky_3d.fog_enabled = false
 
 
 ## Set the volumetric fog energy on the active sun DirectionalLight3D.
 ## Higher values = brighter god rays without increasing overall fog density.
 func _set_sun_volumetric_energy(energy: float) -> void:
-	# Try Sky3D's sun first
-	if sky_3d and show_sky:
-		var sun: DirectionalLight3D = sky_3d.get_node_or_null("SunLight")
+	# Try SkyManager's sun first
+	if sky_manager and show_sky:
+		var sun: DirectionalLight3D = sky_manager.get_sun_light()
 		if sun:
 			sun.light_volumetric_fog_energy = energy
 			return
@@ -534,8 +504,23 @@ func on_show_sky_toggled(enabled: bool) -> void:
 	# Re-apply shadow cascades to the active light
 	if enabled and sky_manager:
 		_apply_shadow_cascades(sky_manager.get_sun_light())
+		# Wire sun into ShaderManager so godrays/fog get the sun reference
+		ShaderManager.set_sun(sky_manager.get_sun_light())
+		# Enable sun-dependent effects
+		ensure_shader_manager_attached()
+		ShaderManager.enable_effect("sky_transmittance", 0.0)
+		ShaderManager.enable_effect("godrays", 0.3)
 	else:
 		_apply_shadow_cascades(_fallback_light)
+		# Disable sun-dependent effects when sky is off
+		ShaderManager.disable_effect("godrays", 0.3)
+		ShaderManager.disable_effect("sky_transmittance", 0.0)
+
+	# Enable/disable godrays checkbox based on sky state (godrays need sun)
+	if _panels and _panels.godrays_toggle:
+		_panels.godrays_toggle.disabled = not enabled
+		if not enabled and _panels.godrays_toggle.button_pressed:
+			_panels.godrays_toggle.set_pressed_no_signal(false)
 
 	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
@@ -572,60 +557,6 @@ func _create_sky_manager() -> void:
 	sky_manager.update(12.0)
 
 	_log("SkyManager initialized")
-
-
-## Create Sky3D node lazily (legacy — only called on first toggle).
-func _create_sky3d() -> void:
-	if _sky3d_initialized:
-		return
-
-	_log("Initializing Sky3D...")
-
-	# Remove fallback environment BEFORE adding Sky3D (only one WorldEnvironment can be active)
-	if _fallback_world_env and _fallback_world_env.is_inside_tree():
-		_remove_child(_fallback_world_env)
-	if _fallback_light:
-		_fallback_light.visible = false
-
-	# Instantiate standard Sky3D with 2D texture clouds
-	sky_3d = Sky3D.new()
-	sky_3d.name = "Sky3D"
-
-	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
-	_add_child(sky_3d)
-
-	# Configure AFTER adding to tree so _initialize() has run and environment exists
-	sky_3d.current_time = 12.0
-	sky_3d.ambient_energy = 0.5
-
-	# Configure Sky3D's environment to match our quality state
-	if sky_3d.environment:
-		# Override Sky3D's default ACES tonemapping
-		sky_3d.environment.tonemap_mode = _visual_state["tonemap_mode"]
-		# Enable SSR on Sky3D's environment (matches fallback)
-		sky_3d.environment.ssr_enabled = true
-		sky_3d.environment.ssr_max_steps = 64
-		sky_3d.environment.ssr_fade_in = 0.15
-		sky_3d.environment.ssr_fade_out = 2.0
-		sky_3d.environment.ssr_depth_tolerance = 0.2
-		# Apply all tracked visual state (SSAO, glow, fog, etc.)
-		_apply_visual_state(sky_3d.environment)
-
-	# Set dense Morrowind-style fog defaults on SkyDome
-	if sky_3d.sky:
-		sky_3d.sky.fog_density = 0.0015
-		sky_3d.sky.fog_start = 0.0
-		sky_3d.sky.fog_end = 1000.0
-		sky_3d.sky.fog_falloff = 3.0
-
-	# Start enabled
-	sky_3d.sky3d_enabled = true
-
-	# Sky3D AtmFog always off — Godot depth fog is the single fog source
-	_disable_sky3d_fog()
-
-	_sky3d_initialized = true
-	_log("Sky3D initialized")
 
 
 ## Log a message via callback.

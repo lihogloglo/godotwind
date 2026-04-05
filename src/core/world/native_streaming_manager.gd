@@ -38,6 +38,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
+const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
 # replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
@@ -191,6 +192,12 @@ const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit
 ## Prevents impostor scan (170ms+ on first call) from stacking with cell load/unload
 var _impostor_update_pending: bool = false
 
+## Distant light manager — billboard sprites for lights beyond NEAR tier (150m–5km)
+var _distant_light_manager: DistantLightManager = null
+
+## Sun elevation in radians (set externally by world_explorer via set_sun_elevation)
+var _sun_elevation_rad: float = 0.5  # Default: daytime
+
 ## Predictive loading — pre-queue cells in the camera's movement direction
 var _prev_camera_position: Vector3 = Vector3.ZERO
 var _camera_velocity_xz: Vector2 = Vector2.ZERO  # EMA-smoothed, XZ plane only
@@ -218,6 +225,9 @@ func fast_cleanup() -> void:
 	if _gpu_scene_db:
 		_gpu_scene_db.cleanup()
 		_gpu_scene_db = null
+	if _distant_light_manager:
+		_distant_light_manager.cleanup()
+		_distant_light_manager = null
 	_promoted_objects.clear()
 	_promoted_by_cell.clear()
 
@@ -291,6 +301,10 @@ func _ready() -> void:
 	_background_processor.name = "BackgroundProcessor"
 	add_child(_background_processor)
 
+	# Create distant light manager for billboard lights beyond NEAR tier
+	_distant_light_manager = DistantLightManagerScript.new()
+	_distant_light_manager.setup(_world_container)
+
 	# Create GPU scene database for SSBO-backed world state (Phase 2)
 	_gpu_scene_db = GPUSceneDatabaseScript.new()
 
@@ -353,6 +367,12 @@ func set_camera(camera: Camera3D) -> void:
 		_camera_cell = DU.world_to_cell(_camera_position)
 		_debug("Camera set, initial cell: %s" % _camera_cell)
 		_update_loaded_cells()
+
+
+## Set sun elevation for distant light time-of-day visibility.
+## Called by world_explorer from sky_manager.celestial.sun_altitude.
+func set_sun_elevation(elevation_rad: float) -> void:
+	_sun_elevation_rad = elevation_rad
 
 
 ## Set cell manager
@@ -424,6 +444,10 @@ func _process(delta: float) -> void:
 		var imp_ms := float(Time.get_ticks_usec() - imp_start) / 1000.0
 		if imp_ms > 2.0:
 			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
+
+	# Update distant light manager (camera pos + time-of-day)
+	if _distant_light_manager:
+		_distant_light_manager.update(_camera_position, _sun_elevation_rad)
 
 	# Predictive loading — pre-queue cells in movement direction
 	if not _startup_phase:
@@ -573,6 +597,11 @@ func _update_loaded_cells() -> void:
 	# Defer impostor update to next frame to avoid stacking with cell load/unload
 	# The impostor scan (especially first call with 11K+ cells) is expensive
 	_impostor_update_pending = true
+
+	# Scan for distant lights in a wider radius than loaded cells
+	# Uses impostor_radius since distant lights should be visible as far as impostors
+	if _distant_light_manager:
+		_distant_light_manager.scan_cells_around(_camera_cell, impostor_radius_cells)
 
 	# Log breakdown if total exceeds 2ms
 	var total_ulc_ms := float(Time.get_ticks_usec() - ulc_start) / 1000.0

@@ -209,7 +209,7 @@ Both OpenMW and Godotwind use the same weather type indices:
 
 ## Push Constant Budget
 
-Vulkan guarantees 128 bytes of push constants. Most desktop GPUs support 256 bytes. Godotwind targets D3D12 (Windows) where root constants are flexible, but keep under 256 bytes for portability.
+Vulkan guarantees 128 bytes of push constants. Most desktop GPUs support 256 bytes. Godotwind targets D3D12 (Windows) where root constants are flexible, but keep under 256 bytes for portability. **Note:** The godrays effect hit a 128-byte limit in practice (possibly driver/platform-specific) and was restructured from 192→128 bytes by precomputing weather data on CPU. The volumetric fog effect uses 240 bytes without issues on the same hardware.
 
 If you need more data, move lookup tables to a Uniform Buffer Object (UBO) bound as a separate descriptor set.
 
@@ -237,7 +237,7 @@ If textures are missing, effects generate procedural fallbacks via `FastNoiseLit
 |---|---|---|
 | VAIO fog pass | `volumetric_fog_effect.gd` | Working — weather-aware, 24-step ray march |
 | godrays.omwfx | `godrays_effect.gd` | Working — 4-pass sky mask + radial blur + rays + combine |
-| VAIO sky transmittance | Not ported | Phase 4 — atmospheric scattering LUT |
+| VAIO sky transmittance | `sky_transmittance_effect.gd` | Working — 256x64 Bruneton LUT, weather-aware, feeds fog |
 | VAIO lights pass | Not ported | Phase 5 — point light glow |
 | DIVE.omwfx | Not ported | Phase 6 — underwater effects |
 

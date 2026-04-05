@@ -57,11 +57,11 @@ var _volumetric_fog_toggle: CheckBox = null
 var _volumetric_clouds_toggle: CheckBox = null
 var _color_grading_toggle: CheckBox = null
 
-# Sky3D is created lazily - only on first toggle
-var sky_3d: Node = null  # Sky3D node (created on demand)
-var _sky3d_initialized: bool = false  # Track if Sky3D has ever been created
+# SkyManager is created lazily - only on first toggle
+var _sky_manager: SkyManager = null
+var _sky_initialized: bool = false
 
-# Fallback environment for when Sky3D is disabled (Godot default-like sky)
+# Fallback environment for when sky is disabled (Godot default-like sky)
 var _fallback_world_env: WorldEnvironment = null
 var _fallback_light: DirectionalLight3D = null
 
@@ -265,7 +265,7 @@ func _setup_sky_toggle() -> void:
 	vbox.add_child(toggle_container)
 	vbox.move_child(toggle_container, insert_idx)
 
-	# Create fallback environment and light for when Sky3D is disabled
+	# Create fallback environment and light for when sky is disabled
 	_setup_fallback_environment()
 
 
@@ -274,21 +274,26 @@ func _on_show_sky_toggled(enabled: bool) -> void:
 	_show_sky = enabled
 
 	if enabled:
-		# Create Sky3D lazily on first enable
-		if not _sky3d_initialized:
-			_create_sky3d()
+		# Create SkyManager lazily on first enable
+		if not _sky_initialized:
+			_create_sky_manager()
 
-		# Enable Sky3D, remove fallback from tree (WorldEnvironment has no visible property)
-		if sky_3d:
-			sky_3d.set("sky3d_enabled", true)
+		# Enable SkyManager, remove fallback from tree (only one WorldEnvironment can be active)
+		if _sky_manager:
+			if not _sky_manager.is_inside_tree():
+				add_child(_sky_manager)
+			_sky_manager.enabled = true
+			_sky_manager.update(10.0)
 		if _fallback_world_env and _fallback_world_env.is_inside_tree():
 			remove_child(_fallback_world_env)
 		if _fallback_light:
 			_fallback_light.visible = false
 	else:
-		# Disable Sky3D (if it exists), add fallback back to tree
-		if sky_3d:
-			sky_3d.set("sky3d_enabled", false)
+		# Disable SkyManager, add fallback back to tree
+		if _sky_manager:
+			if _sky_manager.is_inside_tree():
+				remove_child(_sky_manager)
+			_sky_manager.enabled = false
 		if _fallback_world_env and not _fallback_world_env.is_inside_tree():
 			add_child(_fallback_world_env)
 		if _fallback_light:
@@ -298,59 +303,45 @@ func _on_show_sky_toggled(enabled: bool) -> void:
 	_update_stats()
 
 
-## Create Sky3D node lazily (only called on first toggle)
-func _create_sky3d() -> void:
-	if _sky3d_initialized:
+## Create SkyManager lazily (only called on first toggle)
+func _create_sky_manager() -> void:
+	if _sky_initialized:
 		return
 
-	_log("Initializing Sky3D...")
+	_log("Initializing SkyManager...")
 
-	# Load and instantiate Sky3D
-	var Sky3DScript: GDScript = load("res://addons/sky_3d/src/Sky3D.gd") as GDScript
-	sky_3d = WorldEnvironment.new()
-	sky_3d.set_script(Sky3DScript)
-	sky_3d.name = "Sky3D"
+	# Remove fallback before adding SkyManager (only one WorldEnvironment can be active)
+	if _fallback_world_env and _fallback_world_env.is_inside_tree():
+		remove_child(_fallback_world_env)
+	if _fallback_light:
+		_fallback_light.visible = false
 
-	# Add to scene tree FIRST - this triggers Sky3D's _initialize() which creates the environment
-	add_child(sky_3d)
+	_sky_manager = SkyManager.new()
+	_sky_manager.name = "SkyManager"
+	add_child(_sky_manager)
 
-	# Configure AFTER adding to tree so _initialize() has run and environment exists
-	sky_3d.set("current_time", 10.0)
-	sky_3d.set("minutes_per_day", 60.0)
+	# Configure fog for extended view distance
+	_configure_sky_fog()
 
-	# Configure fog for extended view distance (150km)
-	# Reduce fog density significantly to see the whole island
-	_configure_sky3d_fog()
-
-	# Start enabled
-	sky_3d.set("sky3d_enabled", true)
-
-	_sky3d_initialized = true
-	_log("Sky3D initialized")
+	_sky_initialized = true
+	_log("SkyManager initialized")
 
 
-## Configure Sky3D fog for extended view distance
-func _configure_sky3d_fog() -> void:
-	if not sky_3d:
+## Configure SkyManager fog for extended view distance
+func _configure_sky_fog() -> void:
+	if not _sky_manager:
 		return
 
-	# Access the environment through Sky3D
-	var env: Environment = sky_3d.get("environment")
+	var env: Environment = _sky_manager.get_environment()
 	if env:
-		# Configure fog settings (but keep disabled until slider is moved)
 		env.fog_enabled = _fog_density > 0.0
-		env.fog_light_color = Color(0.8, 0.85, 0.9)  # Slight blue tint for atmosphere
+		env.fog_light_color = Color(0.8, 0.85, 0.9)
 		env.fog_light_energy = 0.5
 		env.fog_sun_scatter = 0.3
-
-		# Use current fog density from slider
 		env.fog_density = _fog_density
-
-		# Aerial perspective settings
-		env.fog_aerial_perspective = 0.3  # Subtle atmospheric haze
+		env.fog_aerial_perspective = 0.3
 		env.fog_sky_affect = 0.5
-
-		_log("Sky3D fog configured (density: %.6f)" % _fog_density)
+		_log("Sky fog configured (density: %.6f)" % _fog_density)
 
 
 ## Toggle ocean visibility
@@ -425,9 +416,9 @@ func _on_fog_changed(value: float) -> void:
 
 ## Apply fog density to active environment
 func _apply_fog_density() -> void:
-	# Apply to Sky3D environment if active
-	if _show_sky and sky_3d:
-		var env: Environment = sky_3d.get("environment")
+	# Apply to SkyManager environment if active
+	if _show_sky and _sky_manager:
+		var env: Environment = _sky_manager.get_environment()
 		if env:
 			env.fog_enabled = _fog_density > 0.0
 			env.fog_density = _fog_density
@@ -444,11 +435,7 @@ func _ensure_shader_manager_attached() -> void:
 		return
 
 	# Attach to whichever WorldEnvironment is currently active
-	if _show_sky and sky_3d:
-		ShaderManager.attach_to(sky_3d)
-		_shader_manager_attached = true
-		_log("ShaderManager attached to Sky3D")
-	elif _fallback_world_env:
+	if _fallback_world_env:
 		ShaderManager.attach_to(_fallback_world_env)
 		_shader_manager_attached = true
 		_log("ShaderManager attached to fallback environment")
@@ -494,7 +481,7 @@ func _on_color_grading_toggled(enabled: bool) -> void:
 		_log("Color Grading: OFF")
 
 
-## Setup fallback environment and light for when Sky3D is disabled
+## Setup fallback environment and light for when sky is disabled
 ## This provides a Godot default-like appearance instead of black sky
 func _setup_fallback_environment() -> void:
 	# Create fallback WorldEnvironment with procedural sky (like Godot's default)
@@ -567,10 +554,8 @@ func _setup_fallback_environment() -> void:
 
 
 ## Sync sky state with toggle on initialization
-## Since Sky3D is lazily created, this just ensures fallback is in tree
+## Since SkyManager is lazily created, this just ensures fallback is in tree
 func _sync_sky_state() -> void:
-	# Sky3D is not created yet (lazy init), so fallback should be in tree
-	# WorldEnvironment doesn't have visible property - it's controlled by being in tree
 	if _fallback_light:
 		_fallback_light.visible = not _show_sky
 
@@ -617,11 +602,10 @@ func _update_stats() -> void:
 	# Color code FPS
 	var fps_color := "green" if fps >= 50 else ("yellow" if fps >= 30 else "red")
 
-	# Get time info from Sky3D
+	# Get time info from SkyManager
 	var time_str := "N/A"
-	if sky_3d and _show_sky:
-		var game_time_val: Variant = sky_3d.get("game_time")
-		time_str = str(game_time_val) if game_time_val else "N/A"
+	if _sky_manager and _show_sky:
+		time_str = "%.1f" % _sky_manager.game_hour
 
 	# Get ocean info
 	var ocean_str := "OFF"

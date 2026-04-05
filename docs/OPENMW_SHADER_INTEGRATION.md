@@ -200,6 +200,8 @@ VolumetricFogEffect._render_callback()  [render thread]
 | **GodraysEffect CompositorEffect** | **Done** | `src/core/shaders/effects/godrays_effect.gd` |
 | **Shared texture registry** | **Done** | `shader_manager.gd` — `set/get_shared_texture()` |
 | **Shader porting guide** | **Done** | `docs/SHADER_PORTING.md` |
+| **Sky transmittance LUT** | **Done** | `src/core/shaders/compute/sky_transmittance.glsl`, `src/core/shaders/effects/sky_transmittance_effect.gd` |
+| **Fog transmittance integration** | **Done** | `volumetric_fog.glsl` binding 4, `volumetric_fog_effect.gd` shared texture lookup |
 
 ---
 
@@ -241,15 +243,23 @@ Added `_shared_textures` dictionary to `ShaderManager`:
 
 This enables VAIO's multi-pass pattern where RT_Fog reads RT_Sky output.
 
-### Phase 4: Sky Transmittance Effect (4-6 hours)
+### Phase 4: Sky Transmittance Effect — DONE
 
-Port VAIO's atmospheric scattering:
-- Precomputed Bruneton/Neyret transmittance LUT
-- Per-weather aerosol density tables (128 parameters)
-- Rayleigh + Mie scattering coefficients
-- Multi-step transmittance integration (32 steps)
+Ported VAIO's Bruneton/Neyret transmittance LUT as a compute shader.
 
-This is the most complex VAIO component. It replaces Sky3D's atmospheric rendering with physically-based scattering that responds to weather.
+**Implementation:**
+- Compute shader (`sky_transmittance.glsl`) generates 256x64 LUT
+- U = cos(zenith) * 0.5 + 0.5, V = normalized altitude (0=surface, 1=atmosphere top)
+- 32-step integration through atmosphere with Rayleigh + Mie + ozone extinction
+- Per-weather aerosol density tables (10 weather types with base density + height scale)
+- Per-weather sun tint (ashstorm = brown, blight = red, snow = cool blue)
+- LUT regenerated only when weather changes (dirty flag detection)
+- Registered as shared texture "sky_transmittance" via ShaderManager
+- render_priority = 5 (runs before fog=10 and godrays=11)
+- Volumetric fog reads the LUT at binding 4 for physically-correct sun scattering tint
+- Graceful fallback: fog uses default warm tint when LUT not available
+
+**Files:** `src/core/shaders/compute/sky_transmittance.glsl`, `src/core/shaders/effects/sky_transmittance_effect.gd`
 
 ### Phase 5: Point Light Glow (2-3 hours)
 

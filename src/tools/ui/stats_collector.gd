@@ -1,8 +1,8 @@
 ## Stats collection and panel label updates for WorldExplorer.
 ##
-## Extracted from world_explorer.gd (Session 6). Gathers performance metrics
-## from profiler, streaming manager, and terrain, then pushes values to the
-## foldable panel labels. All data is read-only — no world state is modified.
+## Gathers performance metrics from profiler, streaming manager, and terrain,
+## then pushes values to UI labels across the tabbed panel layout.
+## All data is read-only — no world state is modified.
 ##
 ## Usage:
 ## [codeblock]
@@ -84,74 +84,81 @@ func update(state: Dictionary[String, Variant]) -> void:
 	var camera_cell: Vector2i = stats.get("camera_cell", Vector2i(0, 0))
 	var view_distance: int = state.get("view_distance", 5)
 
-	_update_panel_labels(fps, frame_ms, p95_ms, draw_calls, primitives, mem_mb,
-						  stats, total_regions, camera_mode_str, camera_cell, view_distance)
+	_update_labels(fps, frame_ms, p95_ms, draw_calls, primitives, mem_mb,
+				   stats, total_regions, camera_mode_str, camera_cell, view_distance)
 
 
-## Update labels in foldable panels.
-func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
-						   primitives: int, mem_mb: float, stats: Dictionary,
-						   total_regions: int, camera_mode_str: String, camera_cell: Vector2i,
-						   view_distance: int) -> void:
+## Find a label by name in a container (searches direct children and FoldablePanel content).
+func _find_label(container: Control, label_name: String) -> Label:
+	if container == null:
+		return null
+	# Direct child lookup
+	var label: Label = container.get_node_or_null(label_name) as Label
+	if label:
+		return label
+	# Search inside FoldablePanel content containers
+	for child in container.get_children():
+		if child is FoldablePanel:
+			var fp: FoldablePanel = child as FoldablePanel
+			label = fp.get_content_container().get_node_or_null(label_name) as Label
+			if label:
+				return label
+	return null
+
+
+## Update labels across the tabbed panel layout.
+func _update_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
+					 primitives: int, mem_mb: float, stats: Dictionary,
+					 total_regions: int, camera_mode_str: String, camera_cell: Vector2i,
+					 view_distance: int) -> void:
 	if not _panels:
 		return
 
-	# Update performance panel
-	if _panels.performance_panel:
-		var content := _panels.performance_panel.get_content_container()
-		var fps_label: Label = content.get_node_or_null("FPSLabel")
-		if fps_label:
-			fps_label.text = "FPS: %.1f (%.2f ms avg)" % [fps, frame_ms]
-		var timing_label: Label = content.get_node_or_null("TimingLabel")
-		if timing_label:
-			timing_label.text = "P95: %.2f ms" % p95_ms
-		var render_label: Label = content.get_node_or_null("RenderLabel")
-		if render_label:
-			render_label.text = "Draw: %d | Tris: %.1fk" % [draw_calls, primitives / 1000.0]
-		var memory_label: Label = content.get_node_or_null("MemoryLabel")
-		if memory_label:
-			memory_label.text = "Memory: %.1f MB" % mem_mb
+	# ── Pinned FPS overlay ──
+	if _panels.tab_container:
+		var parent: Node = _panels.tab_container.get_parent()
+		if parent:
+			var pinned: Control = parent.get_node_or_null("PinnedStats")
+			if pinned:
+				var fps_label: Label = pinned.get_node_or_null("FPSLabel")
+				if fps_label:
+					fps_label.text = "FPS: %.1f (%.2f ms)" % [fps, frame_ms]
+				var timing_label: Label = pinned.get_node_or_null("TimingLabel")
+				if timing_label:
+					timing_label.text = "P95: %.2f ms | Draw: %d | Tris: %.1fk" % [p95_ms, draw_calls, primitives / 1000.0]
 
-	# Update navigation panel
-	if _panels.navigation_panel:
-		var content := _panels.navigation_panel.get_content_container()
-		var camera_label: Label = content.get_node_or_null("CameraLabel")
+	# ── Environment tab labels ──
+	if _panels._env_vbox:
+		var terrain_label: Label = _find_label(_panels._env_vbox, "TerrainLabel")
+		if terrain_label:
+			terrain_label.text = "Regions loaded: %d" % total_regions
+
+	# ── Navigation tab labels ──
+	if _panels._nav_vbox:
+		var camera_label: Label = _find_label(_panels._nav_vbox, "CameraLabel")
 		if camera_label:
 			camera_label.text = "Cell: (%d, %d) | Mode: %s [P]" % [camera_cell.x, camera_cell.y, camera_mode_str]
-		var dist_label: Label = content.get_node_or_null("DistLabel")
+		var dist_label: Label = _find_label(_panels._nav_vbox, "DistLabel")
 		if dist_label:
 			dist_label.text = "%d cells" % view_distance
 
-	# Update terrain panel
-	if _panels.terrain_panel:
-		var content := _panels.terrain_panel.get_content_container()
-		var terrain_label: Label = content.get_node_or_null("TerrainLabel")
-		if terrain_label:
-			terrain_label.text = "Regions loaded: %d" % total_regions
-		# Update preprocess status
-		var status_label_panel: Label = content.get_node_or_null("PreprocessStatusLabel")
-		if status_label_panel:
-			var terrain_data_dir := SettingsManager.get_terrain_path()
-			var has_terrain := DirAccess.dir_exists_absolute(terrain_data_dir)
-			if has_terrain:
-				status_label_panel.text = "Status: Preprocessed"
-				status_label_panel.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5))
-			else:
-				status_label_panel.text = "Status: Not preprocessed"
-				status_label_panel.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
+	# ── Debug tab labels ──
+	if _panels._debug_vbox:
+		var render_label: Label = _find_label(_panels._debug_vbox, "RenderLabel")
+		if render_label:
+			render_label.text = "Draw: %d | Tris: %.1fk" % [draw_calls, primitives / 1000.0]
+		var memory_label: Label = _find_label(_panels._debug_vbox, "MemoryLabel")
+		if memory_label:
+			memory_label.text = "Memory: %.1f MB" % mem_mb
 
-	# Update debug panel
-	if _panels.debug_panel:
-		var content := _panels.debug_panel.get_content_container()
-		var debug_label: Label = content.get_node_or_null("DebugInfoLabel")
+		var debug_label: Label = _find_label(_panels._debug_vbox, "DebugInfoLabel")
 		if debug_label:
 			var loaded_cells: int = stats.get("loaded_cells", 0)
 			var queue_size: int = stats.get("load_queue_size", 0)
 			var async_pending: int = stats.get("async_pending", 0)
 			debug_label.text = "Cells: %d | Queue: %d | Async: %d" % [loaded_cells, queue_size, async_pending]
 
-		# Update ODM stats
-		var odm_label: Label = content.get_node_or_null("ODMLabel")
+		var odm_label: Label = _find_label(_panels._debug_vbox, "ODMLabel")
 		if odm_label:
 			var odm_stats: Dictionary = stats.get("object_distance_manager", {})
 			var total_obj: int = odm_stats.get("total_objects", 0)
@@ -160,8 +167,7 @@ func _update_panel_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls
 			var far_obj: int = odm_stats.get("far_visible", 0)
 			odm_label.text = "ODM: %d tracked | NEAR: %d MID: %d FAR: %d" % [total_obj, near_obj, mid_obj, far_obj]
 
-		# Update streaming profiler summary
-		var profiler_label_node: Label = content.get_node_or_null("ProfilerLabel")
+		var profiler_label_node: Label = _find_label(_panels._debug_vbox, "ProfilerLabel")
 		if profiler_label_node and _world_streaming_manager and _world_streaming_manager.has_method("get_streaming_profiler"):
 			var sp: StreamingProfiler = _world_streaming_manager.get_streaming_profiler()
 			if sp:

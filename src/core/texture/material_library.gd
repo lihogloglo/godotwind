@@ -51,6 +51,15 @@ class MaterialProperties:
 	var metallic: float = 0.0
 	var albedo_color: Color = Color.WHITE
 
+	## Extended NIF material properties (Phase 0 — NIF pipeline overhaul)
+	var glow_texture_path: String = ""    ## NIF texture slot 4 (emission map)
+	var bump_texture_path: String = ""    ## NIF texture slot 5 (normal map)
+	var dark_texture_path: String = ""    ## NIF texture slot 1 (shadow overlay)
+	var specular_color: Color = Color.BLACK  ## NiMaterialProperty.specular
+	var apply_mode: int = 2              ## NIFDefs.ApplyMode (0=REPLACE,1=DECAL,2=MODULATE,3=HILIGHT)
+	var depth_test: bool = true           ## NiZBufferProperty
+	var depth_write: bool = true          ## NiZBufferProperty
+
 	## Cached key - generated once, reused on subsequent calls
 	var _cached_key: String = ""
 	var _key_valid: bool = false
@@ -72,6 +81,19 @@ class MaterialProperties:
 			parts.append("as%.2f" % alpha_scissor_threshold)
 		if albedo_color != Color.WHITE:
 			parts.append("c_%s" % albedo_color.to_html())
+		# Extended NIF properties
+		if not glow_texture_path.is_empty():
+			parts.append("glow:%s" % glow_texture_path.to_lower())
+		if not bump_texture_path.is_empty():
+			parts.append("bump:%s" % bump_texture_path.to_lower())
+		if not dark_texture_path.is_empty():
+			parts.append("dark:%s" % dark_texture_path.to_lower())
+		if specular_color != Color.BLACK:
+			parts.append("sc:%s" % specular_color.to_html())
+		if apply_mode != 2:
+			parts.append("am:%d" % apply_mode)
+		if not depth_test or not depth_write:
+			parts.append("z:%d%d" % [int(depth_test), int(depth_write)])
 
 		_cached_key = "|".join(parts)
 		_key_valid = true
@@ -137,6 +159,47 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 		else:
 			# Use fallback color for missing textures
 			mat.albedo_color = Color(1.0, 0.0, 1.0)  # Magenta
+
+	# Glow/emission texture (NIF texture slot 4)
+	if not props.glow_texture_path.is_empty():
+		var glow_tex := TextureLoader.load_texture(props.glow_texture_path)
+		if glow_tex:
+			mat.emission_enabled = true
+			mat.emission_texture = glow_tex
+			if not props.has_emission:
+				mat.emission = Color.WHITE
+				mat.emission_energy_multiplier = 1.0
+
+	# Bump/normal map (NIF texture slot 5)
+	if not props.bump_texture_path.is_empty():
+		var bump_tex := TextureLoader.load_texture(props.bump_texture_path)
+		if bump_tex:
+			mat.normal_enabled = true
+			mat.normal_texture = bump_tex
+
+	# Specular color (NiMaterialProperty.specular)
+	if props.specular_color != Color.BLACK:
+		# StandardMaterial3D doesn't have direct specular color —
+		# approximate by modulating metallic_specular with luminance
+		var lum: float = props.specular_color.r * 0.299 + props.specular_color.g * 0.587 + props.specular_color.b * 0.114
+		mat.metallic_specular = maxf(mat.metallic_specular, lum)
+
+	# HILIGHT apply mode — approximate as additive self-illumination
+	# MW HILIGHT = diffuse * base_tex + base_tex (texture adds to lit result)
+	# SM3D approximation: emission_texture = base_texture with moderate energy
+	if props.apply_mode == 3:  # HILIGHT
+		mat.emission_enabled = true
+		mat.emission = Color.WHITE
+		mat.emission_energy_multiplier = 0.4
+		# Reuse albedo texture as emission texture for self-illumination
+		if mat.albedo_texture:
+			mat.emission_texture = mat.albedo_texture
+
+	# Z-buffer property (NiZBufferProperty)
+	if not props.depth_test:
+		mat.no_depth_test = true
+	if not props.depth_write:
+		mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
 
 	# LRU eviction if cache is full
 	while _cache.size() >= MAX_CACHE_SIZE and not _lru_order.is_empty():

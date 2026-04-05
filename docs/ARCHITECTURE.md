@@ -25,14 +25,14 @@ Systems overview derived from the actual codebase.
 |-----------|-------------|
 | `world/` | Cell streaming, terrain, LOD, object pooling, impostors |
 | `esm/` | ESM/ESP record parsing (47 types), caching |
-| `nif/` | NIF model → Godot mesh/skeleton/animation conversion |
+| `nif/` | NIF model → Godot conversion (mesh, materials, skeleton, 5 animation controller types, collision, particles, lights). NIFMaterialInfo unified struct for GDScript/C# sync |
 | `bsa/` | BSA archive extraction |
 | `character/` | NPC assembly (Morrowind body parts, humanoid GLB), controller |
 | `animation/` | Animation loading, state machine, IK (TwoBoneIK3D), retargeting |
 | `water/` | Ocean mesh, Gerstner waves, buoyancy, shore mask |
 | `console/` | Developer console, command registry, object picking |
 | `deformation/` | RTT-based terrain deformation |
-| `texture/` | DDS/TGA loading, material dedup |
+| `texture/` | DDS/TGA loading, material dedup (hash includes 7 texture slots, apply mode, ZBuffer, specular color) |
 | `streaming/` | BackgroundProcessor (async task queue) |
 | `threading/` | WorkerThreadPool job system |
 | `player/` | Fly camera, FPS controller |

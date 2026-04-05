@@ -10,9 +10,9 @@ What works, what doesn't.
 | 3-Tier LOD | NEAR 0-150m (Node3D), MID 150-500m (RS instances), FAR 500-5km (impostors). Differential impostor updates on cell crossing (~1ms vs 14-158ms before) |
 | Terrain | Terrain3D, multi-region, edge stitching |
 | ESM Parsing | 47 record types, grid-indexed cells, thread-safe |
-| NIF Conversion | Geometry, materials, skeletons, animations, collision |
+| NIF Conversion | Geometry, materials (glow maps, HILIGHT, ZBuffer, specular color), skeletons, animations (keyframe + vis/UV/alpha/path controllers), collision, particles, lights |
 | BSA Archives | Thread-safe, 256MB LRU cache |
-| Textures | DDS/TGA loading, material deduplication (90% reduction) |
+| Textures | DDS/TGA loading, material deduplication (90% reduction), 7 NIF texture slots parsed |
 | NPC Assembly | Race + head + hair, body part mirroring, full-body skin detection |
 | Animations | 132 MW animations, state machine (idle/walk/run/jump) |
 | Deformation | RTT-based (snow, mud, ash) |
@@ -39,10 +39,11 @@ Combat, magic, AI, dialogue UI, quests, inventory, save/load, character creation
 
 ## Known Issues
 
-1. NiParticleSystem not converted
-2. Interior lighting exists but not tuned
-3. Animation action layers stubbed (upper body blend not wired)
-4. Automated tests: gdUnit4 13 unit tests + visual test scenes in tests/visual/
+1. NiGeomMorpherController (blend shapes/face morphs) parsed but not applied — dialogue blocker
+2. Dark texture (36 objs), detail/decal/env map textures not applied (0.2% of vanilla, deferred to mod support)
+3. Interior lighting exists but not tuned
+4. Animation action layers stubbed (upper body blend not wired)
+5. Automated tests: gdUnit4 13 unit tests + visual test scenes in tests/visual/
 
 ## Performance
 

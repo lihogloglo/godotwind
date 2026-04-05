@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Godotwind"
 run/main_scene="uid://clb74pwrqrgok"
-config/features=PackedStringArray("4.6", "C#")
+config/features=PackedStringArray("4.6")
 config/icon="res://icon.svg"
 
 [autoload]
@@ -46,7 +46,7 @@ project/assembly_name="Godotwind"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/SunshineClouds2/plugin.cfg", "res://addons/gdUnit4/plugin.cfg", "res://addons/sky_3d/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
+enabled=PackedStringArray("res://addons/SunshineClouds2/plugin.cfg", "res://addons/gdUnit4/plugin.cfg", "res://addons/terrain_3d/plugin.cfg")
 
 [filesystem]
 

@@ -192,3 +192,34 @@ vec2 equirect_uv(vec3 dir) {
 		asin(clamp(dir.y, -1.0, 1.0)) * INV_PI + 0.5
 	);
 }
+
+// ---- Mie Halos ----
+
+// Dedicated Mie halo around a celestial body (sun or moon).
+// Separate from atmospheric Mie — this renders the visible halo/corona.
+// Uses Henyey-Greenstein phase with wider angular spread than the disc itself.
+vec3 render_mie_halo(vec3 view_dir, vec3 body_dir, float halo_g, float intensity, vec3 halo_color) {
+	float cos_angle = dot(view_dir, body_dir);
+	// Henyey-Greenstein for the halo — strong forward scatter around the body
+	float g2 = halo_g * halo_g;
+	float denom = 1.0 + g2 - 2.0 * halo_g * cos_angle;
+	float phase = (1.0 - g2) / (denom * sqrt(denom));
+	// Normalize: subtract the minimum phase value (at cos_angle=-1) so halo fades to zero
+	float phase_min = (1.0 - g2) / pow(1.0 + g2 + 2.0 * halo_g, 1.5);
+	phase = max(phase - phase_min, 0.0);
+	return halo_color * phase * intensity * ONE_OVER_4PI;
+}
+
+// ---- Star Scintillation ----
+
+// Hash-based twinkling for procedural and panorama stars.
+// Returns a brightness multiplier (0.3 to 1.0) that varies with time.
+float star_scintillation(vec3 star_dir, float time, float speed, float amount) {
+	// 3D hash for unique per-star phase
+	float phase = fract(sin(dot(floor(star_dir * 200.0), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+	// Multi-frequency flicker for natural look
+	float flicker = sin(time * speed * (2.0 + phase * 3.0) + phase * TAU)
+	              * sin(time * speed * (5.0 + phase * 2.0) + phase * 4.0);
+	// Map from [-1,1] to [1-amount, 1]
+	return 1.0 - amount * 0.5 * (1.0 - flicker);
+}

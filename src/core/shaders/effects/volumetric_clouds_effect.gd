@@ -70,7 +70,7 @@ func _define_parameters() -> void:
 	register_parameter("cloud_color_sunset", Color(1.0, 0.6, 0.3, 1.0), null, null, 0.01,
 		"Sunset Color", "Cloud tint color during sunset/sunrise")
 
-	# Sun (can be linked to Sky3D)
+	# Sun direction and intensity
 	register_parameter("sun_direction", Vector3(-0.5, -0.5, 0.707).normalized(), null, null, 0.01,
 		"Sun Direction", "Direction of the sun for lighting")
 
@@ -291,16 +291,9 @@ func on_effect_removed() -> void:
 			rd.free_rid(_depth_sampler)
 
 
-## Update sun direction from Sky3D (call this from world_explorer)
-func sync_with_sky3d(sky3d: Node) -> void:
-	if sky3d == null:
+## Update sun direction from a DirectionalLight3D
+func sync_with_sun(sun_light: DirectionalLight3D) -> void:
+	if sun_light == null:
 		return
-
-	# Get sun direction from Sky3D's sun light
-	var sun_light := sky3d.get_node_or_null("SkyDome/SunLight") as DirectionalLight3D
-	if sun_light:
-		set_param("sun_direction", -sun_light.global_transform.basis.z)
-
-	# Get sun intensity from Sky3D
-	if sky3d.has_method("get") and sky3d.get("sun_energy"):
-		set_param("sun_intensity", sky3d.sun_energy)
+	set_param("sun_direction", -sun_light.global_transform.basis.z)
+	set_param("sun_intensity", sun_light.light_energy)

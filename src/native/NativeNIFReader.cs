@@ -687,19 +687,19 @@ public partial class NativeNIFReader : RefCounted
 		return prop;
 	}
 
-	private NiObjectNET ReadNiZBufferProperty()
+	private NiZBufferProperty ReadNiZBufferProperty()
 	{
-		var prop = new NiObjectNET();
+		var prop = new NiZBufferProperty();
 		ReadNiObjectNET(prop);
-		Skip(2); // flags
+		prop.ZBufFlags = ReadUInt16();
 		return prop;
 	}
 
-	private NiObjectNET ReadNiSpecularProperty()
+	private NiSpecularProperty ReadNiSpecularProperty()
 	{
-		var prop = new NiObjectNET();
+		var prop = new NiSpecularProperty();
 		ReadNiObjectNET(prop);
-		Skip(2); // flags
+		prop.SpecFlags = ReadUInt16();
 		return prop;
 	}
 
@@ -1787,6 +1787,19 @@ public partial class NiVertexColorProperty : NiObjectNET
 	public ushort Flags { get; set; }
 	public uint VertexMode { get; set; }
 	public uint LightingMode { get; set; }
+}
+
+public partial class NiZBufferProperty : NiObjectNET
+{
+	public ushort ZBufFlags { get; set; }
+	public bool TestEnabled => (ZBufFlags & 0x0001) != 0;
+	public bool WriteEnabled => (ZBufFlags & 0x0002) != 0;
+}
+
+public partial class NiSpecularProperty : NiObjectNET
+{
+	public ushort SpecFlags { get; set; }
+	public bool Enabled => SpecFlags != 0;
 }
 
 public partial class NiSourceTexture : NiObjectNET

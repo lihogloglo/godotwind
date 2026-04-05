@@ -943,6 +943,9 @@ public partial class NativeNIFConverter : RefCounted
             }
             else if (prop is NiTexturingProperty texProp)
             {
+                // Apply mode
+                info["apply_mode"] = (int)texProp.ApplyMode;
+
                 // Get base texture path
                 if (texProp.Textures.Count > 0 && texProp.Textures[0].HasTexture)
                 {
@@ -957,7 +960,7 @@ public partial class NativeNIFConverter : RefCounted
                     }
                 }
 
-                // Check for glow/detail textures
+                // Glow texture (slot 4)
                 if (texProp.Textures.Count > 4 && texProp.Textures[4].HasTexture)
                 {
                     var glowTex = texProp.Textures[4];
@@ -980,6 +983,15 @@ public partial class NativeNIFConverter : RefCounted
             else if (prop is NiStencilProperty stencilProp)
             {
                 info["draw_mode"] = (int)stencilProp.DrawMode;
+            }
+            else if (prop is NiZBufferProperty zbufProp)
+            {
+                info["depth_test"] = zbufProp.TestEnabled;
+                info["depth_write"] = zbufProp.WriteEnabled;
+            }
+            else if (prop is NiSpecularProperty specProp)
+            {
+                info["specular_enabled"] = specProp.Enabled;
             }
         }
 

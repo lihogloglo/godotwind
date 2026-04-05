@@ -489,7 +489,7 @@ func clear_all_shared_textures() -> void:
 
 func _process(delta: float) -> void:
 	# Update weather caches on main thread for render-thread-safe access
-	for effect_name in ["volumetric_fog", "godrays"]:
+	for effect_name in ["sky_transmittance", "volumetric_fog", "godrays", "light_glow"]:
 		var effect: PostProcessEffect = _effects.get(effect_name)
 		if effect and effect.has_method("update_weather_cache"):
 			effect.update_weather_cache()

@@ -21,7 +21,7 @@ const PASS_RADIAL_BLUR := 1
 const PASS_RAYS        := 2
 const PASS_COMBINE     := 3
 
-## Internal half-res render targets
+## Internal render targets (mask/blur at full res, rays at half res)
 var _rt_mask: RID
 var _rt_blur: RID
 var _rt_rays: RID
@@ -34,7 +34,8 @@ var _depth_sampler: RID    # linear + clamp (scene depth)
 ## Blue noise texture for temporal dithering
 var _blue_noise_texture: Texture2D
 
-## Current half-resolution (recreate textures on resize)
+## Current resolution tracking (recreate textures on resize)
+var _current_full_size: Vector2i
 var _current_half_size: Vector2i
 
 ## Active sun for ray direction — set by world_explorer or test scenes
@@ -224,19 +225,30 @@ func _create_dummy_textures() -> void:
 	_dummy_rgba16f = rd.texture_create(fmt_rgba, RDTextureView.new())
 
 
-func _create_internal_textures(half_size: Vector2i) -> void:
+func _create_internal_textures(full_size: Vector2i, half_size: Vector2i) -> void:
 	_free_internal_textures()
 
-	var fmt := RDTextureFormat.new()
-	fmt.width = half_size.x
-	fmt.height = half_size.y
-	fmt.format = RenderingDevice.DATA_FORMAT_R16_SFLOAT
-	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
-	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	# Mask and blur at FULL resolution for sharp silhouette edges
+	# (matches Rafael's RT_Stretch/RT_Blur at width_ratio=1.0)
+	var fmt_full := RDTextureFormat.new()
+	fmt_full.width = full_size.x
+	fmt_full.height = full_size.y
+	fmt_full.format = RenderingDevice.DATA_FORMAT_R16_SFLOAT
+	fmt_full.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	fmt_full.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	_rt_mask = rd.texture_create(fmt_full, RDTextureView.new())
+	_rt_blur = rd.texture_create(fmt_full, RDTextureView.new())
 
-	_rt_mask = rd.texture_create(fmt, RDTextureView.new())
-	_rt_blur = rd.texture_create(fmt, RDTextureView.new())
-	_rt_rays = rd.texture_create(fmt, RDTextureView.new())
+	# Ray sampling at half resolution (the expensive iterative part)
+	var fmt_half := RDTextureFormat.new()
+	fmt_half.width = half_size.x
+	fmt_half.height = half_size.y
+	fmt_half.format = RenderingDevice.DATA_FORMAT_R16_SFLOAT
+	fmt_half.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	fmt_half.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	_rt_rays = rd.texture_create(fmt_half, RDTextureView.new())
+
+	_current_full_size = full_size
 	_current_half_size = half_size
 
 
@@ -278,10 +290,10 @@ func _render_callback(effect_callback_type: int, render_data: RenderData) -> voi
 	if size.x == 0 or size.y == 0:
 		return
 
-	# Ensure half-res textures exist and match viewport
+	# Ensure textures exist and match viewport
 	var half_size := Vector2i(size.x / 2, size.y / 2)
-	if half_size != _current_half_size or not _rt_mask.is_valid():
-		_create_internal_textures(half_size)
+	if size != _current_full_size or not _rt_mask.is_valid():
+		_create_internal_textures(size, half_size)
 
 	var view_count: int = render_scene_buffers.get_view_count()
 	for view in view_count:
@@ -417,7 +429,7 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 	var full_groups_x := (size.x + 7) / 8
 	var full_groups_y := (size.y + 7) / 8
 
-	# ═══ Pass 0: Sky Mask ═══
+	# ═══ Pass 0: Sky Mask (full resolution) ═══
 	# tex_a=depth, tex_b=dummy, img_out=rt_mask, color_image=dummy
 	pc_bytes.encode_float(pass_id_byte_offset, float(PASS_SKY_MASK))
 	var us0 := _create_uniform_set(depth_texture, _depth_sampler,
@@ -430,11 +442,11 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 	rd.compute_list_bind_compute_pipeline(cl, pipeline_rid)
 	rd.compute_list_bind_uniform_set(cl, us0, 0)
 	rd.compute_list_set_push_constant(cl, pc_bytes, pc_size)
-	rd.compute_list_dispatch(cl, half_groups_x, half_groups_y, 1)
+	rd.compute_list_dispatch(cl, full_groups_x, full_groups_y, 1)
 	rd.compute_list_end()
 	rd.free_rid(us0)
 
-	# ═══ Pass 1: Radial Blur ═══
+	# ═══ Pass 1: Radial Blur (full resolution) ═══
 	# tex_a=rt_mask(sampler), tex_b=dummy, img_out=rt_blur, color_image=dummy
 	pc_bytes.encode_float(pass_id_byte_offset, float(PASS_RADIAL_BLUR))
 	var us1 := _create_uniform_set(_rt_mask, _linear_sampler,
@@ -447,7 +459,7 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 	rd.compute_list_bind_compute_pipeline(cl, pipeline_rid)
 	rd.compute_list_bind_uniform_set(cl, us1, 0)
 	rd.compute_list_set_push_constant(cl, pc_bytes, pc_size)
-	rd.compute_list_dispatch(cl, half_groups_x, half_groups_y, 1)
+	rd.compute_list_dispatch(cl, full_groups_x, full_groups_y, 1)
 	rd.compute_list_end()
 	rd.free_rid(us1)
 

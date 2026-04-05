@@ -5,8 +5,8 @@
 // Based on Rafael's godrays.omwfx for OpenMW, adapted for Godot 4.6 CompositorEffect.
 //
 // 4-pass architecture (selected by pass_id push constant):
-//   Pass 0 (Sky Mask):     Depth-based sun occlusion detection (half res)
-//   Pass 1 (Radial Blur):  Gaussian blur along radial from sun (half res)
+//   Pass 0 (Sky Mask):     Depth-based sun occlusion detection (full res)
+//   Pass 1 (Radial Blur):  Gaussian blur along radial from sun (full res)
 //   Pass 2 (Rays):         Iterative sampling toward sun with blue noise (half res)
 //   Pass 3 (Combine):      Composite rays + sun disc onto scene color (full res)
 //
@@ -43,9 +43,10 @@ const int PASS_COMBINE     = 3;
 // ═══════════════════════════════════════════════════════════════════
 
 void sky_mask() {
-	vec2 half_res = params.extra_params.xy * 0.5;
+	// Full resolution for sharp silhouette edges (matches Rafael's RT_Stretch)
+	vec2 full_res = params.extra_params.xy;
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-	if (pixel.x >= int(half_res.x) || pixel.y >= int(half_res.y))
+	if (pixel.x >= int(full_res.x) || pixel.y >= int(full_res.y))
 		return;
 
 	if (params.sun_screen_pos.z >= 0.0) {
@@ -53,17 +54,11 @@ void sky_mask() {
 		return;
 	}
 
-	vec2 full_res = params.extra_params.xy;
-	vec2 rcp_res = 1.0 / full_res;
-	vec2 uv = (vec2(pixel) * 2.0 + 1.0) * rcp_res;
+	vec2 uv = (vec2(pixel) + 0.5) / full_res;
 
+	// Single depth sample at full-res (no supersampling needed at native resolution)
 	const float SKY_THRESHOLD = 0.001;
-	float mask = 0.0;
-	mask += step(texture(tex_a, uv).r, SKY_THRESHOLD);
-	mask += step(texture(tex_a, uv + vec2(rcp_res.x, 0.0)).r, SKY_THRESHOLD);
-	mask += step(texture(tex_a, uv + vec2(0.0, rcp_res.y)).r, SKY_THRESHOLD);
-	mask += step(texture(tex_a, uv + rcp_res).r, SKY_THRESHOLD);
-	mask *= 0.25;
+	float mask = step(texture(tex_a, uv).r, SKY_THRESHOLD);
 
 	imageStore(img_out, pixel, vec4(mask));
 }
@@ -74,9 +69,10 @@ void sky_mask() {
 // ═══════════════════════════════════════════════════════════════════
 
 void radial_blur() {
-	vec2 half_res = params.extra_params.xy * 0.5;
+	// Full resolution for edge-precise blur (matches Rafael's RT_Blur)
+	vec2 full_res = params.extra_params.xy;
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-	if (pixel.x >= int(half_res.x) || pixel.y >= int(half_res.y))
+	if (pixel.x >= int(full_res.x) || pixel.y >= int(full_res.y))
 		return;
 
 	if (params.sun_screen_pos.z >= 0.0) {
@@ -84,11 +80,11 @@ void radial_blur() {
 		return;
 	}
 
-	vec2 uv = (vec2(pixel) + 0.5) / half_res;
+	vec2 uv = (vec2(pixel) + 0.5) / full_res;
 	vec2 sun_uv = params.sun_screen_pos.xy;
 	vec2 dir = normalize(uv - sun_uv);
-	vec2 rcp_half = 1.0 / half_res;
-	vec2 radial = dir * rcp_half.yx;
+	vec2 rcp_full = 1.0 / full_res;
+	vec2 radial = dir * rcp_full.yx;
 
 	float alpha = 0.0;
 	alpha += 0.3333 * texture(tex_a, uv).r;
@@ -171,6 +167,7 @@ void combine() {
 		return;
 
 	vec2 uv = (vec2(pixel) + 0.5) / full_res;
+
 	vec4 ray = vec4(0.0);
 
 	float forward = params.sun_screen_pos.z;

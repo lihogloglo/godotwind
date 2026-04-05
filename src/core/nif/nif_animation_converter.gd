@@ -1,5 +1,5 @@
-## NIF Animation Converter - Converts NIF keyframe data to Godot Animation resources
-## Handles NiKeyframeController/NiKeyframeData conversion
+## NIF Animation Converter - Converts NIF keyframe/property data to Godot Animation resources
+## Handles NiKeyframeController, NiVisController, NiUVController, NiAlphaController, NiPathController
 class_name NIFAnimationConverter
 extends RefCounted
 
@@ -45,11 +45,35 @@ func convert_to_animation(animation_name: String = "default") -> Animation:
 	var found_any := false
 	var max_time := 0.0
 
-	# Find all keyframe controllers
+	# Find all controllers
 	for record: Defs.NIFRecord in _reader.get("records"):
 		if record is Defs.NiKeyframeController:
 			var controller := record as Defs.NiKeyframeController
 			var added := _add_controller_tracks(animation, controller)
+			if added:
+				found_any = true
+				max_time = maxf(max_time, controller.stop_time)
+		elif record is Defs.NiVisController:
+			var controller := record as Defs.NiVisController
+			var added := _add_vis_controller_tracks(animation, controller)
+			if added:
+				found_any = true
+				max_time = maxf(max_time, controller.stop_time)
+		elif record is Defs.NiUVController:
+			var controller := record as Defs.NiUVController
+			var added := _add_uv_controller_tracks(animation, controller)
+			if added:
+				found_any = true
+				max_time = maxf(max_time, controller.stop_time)
+		elif record is Defs.NiAlphaController:
+			var controller := record as Defs.NiAlphaController
+			var added := _add_alpha_controller_tracks(animation, controller)
+			if added:
+				found_any = true
+				max_time = maxf(max_time, controller.stop_time)
+		elif record is Defs.NiPathController:
+			var controller := record as Defs.NiPathController
+			var added := _add_path_controller_tracks(animation, controller)
 			if added:
 				found_any = true
 				max_time = maxf(max_time, controller.stop_time)
@@ -268,6 +292,18 @@ func _sample_float_key_at_time(keys: Array, time: float) -> float:
 	return lerpf(prev_value, next_value, t)
 
 
+## Collect all unique sorted times from two float key arrays
+func _collect_float_key_times_2(keys_a: Array, keys_b: Array) -> Array:
+	var times_set := {}
+	for key: Dictionary in keys_a:
+		times_set[key["time"]] = true
+	for key: Dictionary in keys_b:
+		times_set[key["time"]] = true
+	var times: Array = times_set.keys()
+	times.sort()
+	return times
+
+
 ## Collect all unique time values from XYZ rotation keys
 func _collect_xyz_key_times(data: Defs.NiKeyframeData) -> Array:
 	var times_set := {}
@@ -390,13 +426,37 @@ func _create_animation_for_range(name: String, start_time: float, end_time: floa
 
 	var found_any := false
 
-	# Find all keyframe controllers and extract keys within range
+	# Find all controllers and extract keys within range
 	for record: Defs.NIFRecord in _reader.get("records"):
 		if record is Defs.NiKeyframeController:
 			var controller := record as Defs.NiKeyframeController
 			var added := _add_controller_tracks_for_range(animation, controller, start_time, end_time)
 			if added:
 				found_any = true
+		elif record is Defs.NiVisController:
+			var controller := record as Defs.NiVisController
+			if controller.stop_time >= start_time and controller.start_time <= end_time:
+				var added := _add_vis_controller_tracks(animation, controller, start_time, end_time)
+				if added:
+					found_any = true
+		elif record is Defs.NiUVController:
+			var controller := record as Defs.NiUVController
+			if controller.stop_time >= start_time and controller.start_time <= end_time:
+				var added := _add_uv_controller_tracks(animation, controller, start_time, end_time)
+				if added:
+					found_any = true
+		elif record is Defs.NiAlphaController:
+			var controller := record as Defs.NiAlphaController
+			if controller.stop_time >= start_time and controller.start_time <= end_time:
+				var added := _add_alpha_controller_tracks(animation, controller, start_time, end_time)
+				if added:
+					found_any = true
+		elif record is Defs.NiPathController:
+			var controller := record as Defs.NiPathController
+			if controller.stop_time >= start_time and controller.start_time <= end_time:
+				var added := _add_path_controller_tracks(animation, controller, start_time, end_time)
+				if added:
+					found_any = true
 
 	if not found_any:
 		return null
@@ -527,3 +587,289 @@ func _trim_keys_to_range(keys: Array, start_time: float, end_time: float) -> Arr
 			result.append(first_after_end)
 
 	return result
+
+
+# =============================================================================
+# PROPERTY ANIMATION CONTROLLERS
+# =============================================================================
+
+## Get the target node path for a controller
+## Returns empty string if target can't be resolved
+func _get_controller_target_path(controller: Defs.NiTimeController) -> String:
+	var target_idx := controller.target_index
+	if target_idx < 0:
+		return ""
+
+	var target: Defs.NIFRecord = _reader.call("get_record", target_idx)
+	if target == null or not (target is Defs.NiObjectNET):
+		return ""
+
+	var target_name := (target as Defs.NiObjectNET).name
+	if target_name.is_empty():
+		target_name = "Node_%d" % target_idx
+
+	# Check if this is a bone
+	var bone_idx: int = _bone_name_to_idx.get(target_name.to_lower(), -1)
+	if bone_idx >= 0 and _skeleton:
+		return "%s:%s" % [_skeleton.name, target_name]
+
+	return target_name
+
+
+## NiVisController — toggle node visibility on/off
+## Creates a VALUE track on the "visible" property
+## Optional range_start/range_end for text-key-split animations (-1 = no range)
+func _add_vis_controller_tracks(animation: Animation, controller: Defs.NiVisController, range_start: float = -1.0, range_end: float = -1.0) -> bool:
+	var target_path := _get_controller_target_path(controller)
+	if target_path.is_empty():
+		return false
+
+	if controller.data_index < 0:
+		return false
+
+	var data := _reader.call("get_record", controller.data_index) as Defs.NiVisData
+	if data == null or data.keys.is_empty():
+		return false
+
+	var use_range := range_start >= 0.0
+
+	# Create a value track for the "visible" property
+	var track_idx := animation.add_track(Animation.TYPE_VALUE)
+	animation.track_set_path(track_idx, "%s:visible" % target_path)
+	animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_NEAREST)
+	animation.value_track_set_update_mode(track_idx, Animation.UPDATE_DISCRETE)
+
+	var key_count: int = 0
+	for key: Dictionary in data.keys:
+		var time_val: float = key["time"]
+		if use_range:
+			if time_val < range_start or time_val > range_end:
+				continue
+			time_val -= range_start
+		var visible: bool = key["visible"]
+		animation.track_insert_key(track_idx, time_val, visible)
+		key_count += 1
+
+	# If no keys in range, remove the empty track
+	if key_count == 0:
+		animation.remove_track(track_idx)
+		return false
+
+	if debug_mode:
+		Log.debug("nif", "  NiVisController: '%s' with %d keys" % [target_path, key_count])
+
+	return true
+
+
+## NiUVController — animate UV offset/scale for scrolling textures
+## Creates VALUE tracks on shader material UV parameters
+## In SM3D: animates uv1_offset and uv1_scale
+func _add_uv_controller_tracks(animation: Animation, controller: Defs.NiUVController, range_start: float = -1.0, range_end: float = -1.0) -> bool:
+	var target_path := _get_controller_target_path(controller)
+	if target_path.is_empty():
+		return false
+
+	if controller.data_index < 0:
+		return false
+
+	var data := _reader.call("get_record", controller.data_index) as Defs.NiUVData
+	if data == null:
+		return false
+
+	var use_range := range_start >= 0.0
+	var added_any := false
+
+	# UV translation → material uv1_offset (Vector3: x=U, y=V, z=0)
+	# NIF stores U and V translation separately, we need to combine them
+	if not data.u_translation_keys.is_empty() or not data.v_translation_keys.is_empty():
+		var track_idx := animation.add_track(Animation.TYPE_VALUE)
+		animation.track_set_path(track_idx, "%s:material_override:uv1_offset" % target_path)
+		animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
+		animation.value_track_set_update_mode(track_idx, Animation.UPDATE_CONTINUOUS)
+
+		# Collect all unique times from both U and V keys
+		var times := _collect_float_key_times_2(data.u_translation_keys, data.v_translation_keys)
+		var key_count: int = 0
+
+		for time: float in times:
+			if use_range and (time < range_start or time > range_end):
+				continue
+			var u_offset := _sample_float_key_at_time(data.u_translation_keys, time)
+			var v_offset := _sample_float_key_at_time(data.v_translation_keys, time)
+			var insert_time: float = time - range_start if use_range else time
+			animation.track_insert_key(track_idx, insert_time, Vector3(u_offset, v_offset, 0.0))
+			key_count += 1
+
+		if key_count == 0:
+			animation.remove_track(track_idx)
+		else:
+			added_any = true
+
+	# UV scale → material uv1_scale (Vector3: x=U_scale, y=V_scale, z=1)
+	if not data.u_scale_keys.is_empty() or not data.v_scale_keys.is_empty():
+		var track_idx := animation.add_track(Animation.TYPE_VALUE)
+		animation.track_set_path(track_idx, "%s:material_override:uv1_scale" % target_path)
+		animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
+		animation.value_track_set_update_mode(track_idx, Animation.UPDATE_CONTINUOUS)
+
+		var times := _collect_float_key_times_2(data.u_scale_keys, data.v_scale_keys)
+		var key_count: int = 0
+
+		for time: float in times:
+			if use_range and (time < range_start or time > range_end):
+				continue
+			var u_scale := _sample_float_key_at_time(data.u_scale_keys, time)
+			var v_scale := _sample_float_key_at_time(data.v_scale_keys, time)
+			if data.u_scale_keys.is_empty():
+				u_scale = 1.0
+			if data.v_scale_keys.is_empty():
+				v_scale = 1.0
+			var insert_time: float = time - range_start if use_range else time
+			animation.track_insert_key(track_idx, insert_time, Vector3(u_scale, v_scale, 1.0))
+			key_count += 1
+
+		if key_count == 0:
+			animation.remove_track(track_idx)
+		else:
+			added_any = true
+
+	if debug_mode and added_any:
+		Log.debug("nif", "  NiUVController: '%s' u_trans=%d, v_trans=%d, u_scale=%d, v_scale=%d" % [
+			target_path,
+			data.u_translation_keys.size(),
+			data.v_translation_keys.size(),
+			data.u_scale_keys.size(),
+			data.v_scale_keys.size()
+		])
+
+	return added_any
+
+
+## NiAlphaController — animate material transparency
+## Creates a VALUE track on the material's albedo_color alpha channel
+## OpenMW modifies the material alpha via osg::Material setDiffuse alpha
+func _add_alpha_controller_tracks(animation: Animation, controller: Defs.NiAlphaController, range_start: float = -1.0, range_end: float = -1.0) -> bool:
+	var target_path := _get_controller_target_path(controller)
+	if target_path.is_empty():
+		return false
+
+	if controller.data_index < 0:
+		return false
+
+	var data := _reader.call("get_record", controller.data_index) as Defs.NiFloatData
+	if data == null or data.keys.is_empty():
+		return false
+
+	# Get the original albedo color from the target node's NiMaterialProperty
+	# so we preserve RGB tint during alpha animation
+	var base_color := Color.WHITE
+	var target_idx := controller.target_index
+	if target_idx >= 0:
+		var target: Variant = _reader.call("get_record", target_idx)
+		if target is Defs.NiGeometry:
+			var geom := target as Defs.NiGeometry
+			for prop_idx: int in geom.property_indices:
+				if prop_idx >= 0:
+					var prop: Variant = _reader.call("get_record", prop_idx)
+					if prop is Defs.NiMaterialProperty:
+						base_color = (prop as Defs.NiMaterialProperty).diffuse
+						break
+
+	# Animate the material's albedo_color (alpha channel varies, RGB preserved)
+	# This requires the material to have transparency enabled
+	var use_range := range_start >= 0.0
+	var track_idx := animation.add_track(Animation.TYPE_VALUE)
+	animation.track_set_path(track_idx, "%s:material_override:albedo_color" % target_path)
+	animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
+	animation.value_track_set_update_mode(track_idx, Animation.UPDATE_CONTINUOUS)
+
+	var key_count: int = 0
+	for key: Dictionary in data.keys:
+		var time_val: float = key["time"]
+		if use_range:
+			if time_val < range_start or time_val > range_end:
+				continue
+			time_val -= range_start
+		var alpha_val: float = key["value"]
+		animation.track_insert_key(track_idx, time_val, Color(base_color.r, base_color.g, base_color.b, clampf(alpha_val, 0.0, 1.0)))
+		key_count += 1
+
+	if key_count == 0:
+		animation.remove_track(track_idx)
+		return false
+
+	if debug_mode:
+		Log.debug("nif", "  NiAlphaController: '%s' with %d keys, base_color=%s" % [target_path, key_count, base_color])
+
+	return true
+
+
+## NiPathController — animate position along a path curve
+## Creates POSITION_3D tracks from NiPosData path points sampled via NiFloatData percent
+func _add_path_controller_tracks(animation: Animation, controller: Defs.NiPathController, range_start: float = -1.0, range_end: float = -1.0) -> bool:
+	var target_path := _get_controller_target_path(controller)
+	if target_path.is_empty():
+		return false
+
+	if controller.path_data_index < 0 or controller.percent_data_index < 0:
+		return false
+
+	var path_data := _reader.call("get_record", controller.path_data_index) as Defs.NiPosData
+	var percent_data := _reader.call("get_record", controller.percent_data_index) as Defs.NiFloatData
+	if path_data == null or percent_data == null:
+		return false
+
+	if path_data.keys.is_empty() or percent_data.keys.is_empty():
+		return false
+
+	# The path is defined by NiPosData (3D control points)
+	# The percent is defined by NiFloatData (0.0 to 1.0 over time)
+	# We sample the path at each percent keyframe time
+	var use_range := range_start >= 0.0
+	var track_idx := animation.add_track(Animation.TYPE_POSITION_3D)
+	animation.track_set_path(track_idx, target_path)
+	animation.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
+
+	var key_count: int = 0
+	for pct_key: Dictionary in percent_data.keys:
+		var time_val: float = pct_key["time"]
+		if use_range:
+			if time_val < range_start or time_val > range_end:
+				continue
+			time_val -= range_start
+		var percent: float = clampf(pct_key["value"], 0.0, 1.0)
+
+		var pos := _sample_path_at_percent(path_data.keys, percent)
+		var godot_pos := _convert_position(pos)
+		animation.position_track_insert_key(track_idx, time_val, godot_pos)
+		key_count += 1
+
+	if key_count == 0:
+		animation.remove_track(track_idx)
+		return false
+
+	if debug_mode:
+		Log.debug("nif", "  NiPathController: '%s' path_points=%d, percent_keys=%d" % [
+			target_path, path_data.keys.size(), key_count
+		])
+
+	return true
+
+
+## Sample a position along a path defined by position keys at a given percent (0.0-1.0)
+func _sample_path_at_percent(path_keys: Array, percent: float) -> Vector3:
+	if path_keys.is_empty():
+		return Vector3.ZERO
+	if path_keys.size() == 1:
+		return path_keys[0]["value"]
+
+	# Map percent to path segment
+	var total_segments: int = path_keys.size() - 1
+	var float_idx: float = percent * float(total_segments)
+	var seg_idx: int = clampi(int(float_idx), 0, total_segments - 1)
+	var seg_t: float = float_idx - float(seg_idx)
+
+	var p0: Vector3 = path_keys[seg_idx]["value"]
+	var p1: Vector3 = path_keys[mini(seg_idx + 1, total_segments)]["value"]
+
+	return p0.lerp(p1, seg_t)
