@@ -422,9 +422,9 @@ func _update_cloud_coverage() -> void:
 	res.set("clouds_coverage", coverage)
 
 
-## Sync SunshineClouds2 ambient color from SkyManager's sky state.
-## Computes cloud tint from sun altitude + sun color so clouds darken at night
-## and pick up sunset/sunrise color.
+## Sync SunshineClouds2 ambient color from time of day.
+## Computes cloud tint from sun altitude so clouds darken at night
+## and pick up sunset/sunrise color. Works regardless of show_sky toggle.
 func _sync_cloud_ambient() -> void:
 	if _sunshine_driver == null or not is_instance_valid(_sunshine_driver):
 		return
@@ -432,38 +432,88 @@ func _sync_cloud_ambient() -> void:
 	if res == null:
 		return
 
+	# Prefer SkyManager state if available, otherwise compute from game hour
+	var sun_alt: float
+	var sun_color: Color
 	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:
 		var sky_mgr: SkyManager = _env_controls.sky_manager
 		if sky_mgr.has_method("get_sky_state"):
 			var state: SkyManager.SkyState = sky_mgr.get_sky_state()
 			if state:
-				# Sun altitude: positive = above horizon, negative = below
-				var sun_alt: float = state.sun_direction.y
-				# Day factor: 1.0 at noon, 0.0 at night, smooth transition at twilight
-				var day_factor: float = clampf(sun_alt * 5.0 + 0.5, 0.0, 1.0)
-				# Day ambient: warm white tinted by sun color
-				var day_color: Color = state.sun_color.lerp(Color(0.8, 0.85, 0.9), 0.5)
-				# Night ambient: dark blue-gray
-				var night_color := Color(0.08, 0.1, 0.15)
-				# Sunset/sunrise boost: warm orange when sun is near horizon
-				var sunset_factor: float = clampf(1.0 - absf(sun_alt) * 8.0, 0.0, 1.0) * 0.6
-				var sunset_tint := Color(1.0, 0.6, 0.3)
-				# Blend
-				var ambient: Color = night_color.lerp(day_color, day_factor)
-				ambient = ambient.lerp(sunset_tint, sunset_factor)
-				res.set("cloud_ambient_color", ambient)
+				sun_alt = state.sun_direction.y
+				sun_color = state.sun_color
+			else:
+				sun_alt = _sun_alt_from_hour(WeatherManager.game_hour)
+				sun_color = _sun_color_from_alt(sun_alt)
+		else:
+			sun_alt = _sun_alt_from_hour(WeatherManager.game_hour)
+			sun_color = _sun_color_from_alt(sun_alt)
+	else:
+		# Sky is off — derive sun position from game hour directly
+		sun_alt = _sun_alt_from_hour(WeatherManager.game_hour)
+		sun_color = _sun_color_from_alt(sun_alt)
 
-				# Atmosphere color: controls distant cloud fog tint
-				var atmo_day := Color(0.9, 0.92, 1.0)
-				var atmo_night := Color(0.1, 0.12, 0.2)
-				var atmo_sunset := Color(1.0, 0.55, 0.25)
-				var atmo: Color = atmo_night.lerp(atmo_day, day_factor)
-				atmo = atmo.lerp(atmo_sunset, sunset_factor)
-				res.set("atmosphere_color", atmo)
-				return
+	# Day factor: 1.0 at noon, 0.0 at night, smooth transition at twilight
+	var day_factor: float = clampf(sun_alt * 5.0 + 0.5, 0.0, 1.0)
+	# Day ambient: warm white tinted by sun color
+	var day_color: Color = sun_color.lerp(Color(0.8, 0.85, 0.9), 0.5)
+	# Night ambient: dark blue (shader uses this directly, no power scaling)
+	var night_color := Color(0.04, 0.05, 0.1)
+	# Sunset/sunrise boost: warm orange when sun is near horizon
+	var sunset_factor: float = clampf(1.0 - absf(sun_alt) * 8.0, 0.0, 1.0) * 0.6
+	var sunset_tint := Color(1.0, 0.6, 0.3)
+	# Blend
+	var ambient: Color = night_color.lerp(day_color, day_factor)
+	ambient = ambient.lerp(sunset_tint, sunset_factor)
+	res.set("cloud_ambient_color", ambient)
+	# Tint stays neutral — color info goes through cloud_ambient_color only
+	res.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
 
-	# Fallback: neutral sky ambient when sky is off
-	res.set("cloud_ambient_color", Color(0.761, 0.784, 0.824))
+	# Atmosphere color: controls distant cloud fog tint
+	var atmo_day := Color(0.9, 0.92, 1.0)
+	var atmo_night := Color(0.1, 0.12, 0.2)
+	var atmo_sunset := Color(1.0, 0.55, 0.25)
+	var atmo: Color = atmo_night.lerp(atmo_day, day_factor)
+	atmo = atmo.lerp(atmo_sunset, sunset_factor)
+	res.set("atmosphere_color", atmo)
+
+	# Sync fog light color with time of day — SunshineClouds2 samples this via
+	# sampled_environment_fog_color. If left at the bright default, clouds stay white at night.
+	if _env_controls:
+		var active_env: Environment = _env_controls.get_active_environment()
+		if active_env:
+			var fog_day := Color(0.8, 0.85, 0.9)
+			var fog_night := Color(0.08, 0.1, 0.18)
+			var fog_sunset := Color(0.9, 0.6, 0.35)
+			active_env.fog_light_color = fog_night.lerp(fog_day, day_factor).lerp(fog_sunset, sunset_factor)
+
+	# Sync fallback directional light when sky is off — otherwise it stays constant
+	# white and the compute shader's direct lighting term drowns out the ambient color
+	if _env_controls and not _env_controls.show_sky:
+		var fallback: DirectionalLight3D = _env_controls.get_fallback_light()
+		if fallback:
+			fallback.light_color = sun_color
+			# Energy: bright at noon, zero below horizon
+			fallback.light_energy = clampf(sun_alt * 1.2, 0.05, 1.2)
+
+
+## Compute sun altitude (Y component of direction) from game hour.
+## Approximation: sun rises at 6, peaks at 12, sets at 18. Negative at night.
+static func _sun_alt_from_hour(hour: float) -> float:
+	# Normalize hour to 0-24 range, then compute altitude as sinusoid:
+	# Peak at 12h (noon), trough at 0h (midnight)
+	var normalized: float = fmod(hour, 24.0)
+	if normalized < 0.0:
+		normalized += 24.0
+	# Map 0-24h to angle: noon=PI/2, midnight=-PI/2
+	var angle: float = (normalized - 6.0) / 12.0 * PI
+	return sin(angle)
+
+
+## Compute approximate sun color from altitude (warm at horizon, white at zenith).
+static func _sun_color_from_alt(alt: float) -> Color:
+	var t: float = clampf(alt, 0.0, 1.0)
+	return Color(1.0, lerpf(0.7, 0.98, t), lerpf(0.4, 0.95, t))
 
 
 ## Update the weather status info label in the panel

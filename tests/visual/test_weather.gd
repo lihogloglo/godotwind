@@ -40,6 +40,8 @@ var _fly_speed: float = 20.0
 
 # --- UI ---
 var _debug_label: RichTextLabel
+var _time_slider: HSlider
+var _preset_btn: OptionButton
 
 
 func _ready() -> void:
@@ -178,6 +180,9 @@ func _setup_sunshine_clouds() -> void:
 		_clouds_resource.set("cloud_floor", 800.0)
 		_clouds_resource.set("cloud_ceiling", 12000.0)
 		_clouds_resource.set("clouds_coverage", 0.4)
+		_clouds_resource.set("accumulation_decay", 0.4)
+		_clouds_resource.set("use_environment_fog", 0.5)
+		_clouds_resource.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
 		_sunshine_driver.clouds_resource = _clouds_resource
 		Log.info("weather", "SunshineClouds2 clouds initialized (compositor registered)")
 
@@ -246,12 +251,76 @@ func _setup_ui() -> void:
 	_debug_label.add_theme_stylebox_override("normal", style)
 	canvas.add_child(_debug_label)
 
+	# --- Controls panel (right side) ---
+	var panel := PanelContainer.new()
+	panel.anchor_left = 1.0
+	panel.anchor_right = 1.0
+	panel.offset_left = -260
+	panel.offset_right = -10
+	panel.offset_top = 10
+	var panel_style := StyleBoxFlat.new()
+	panel_style.bg_color = Color(0, 0, 0, 0.7)
+	panel_style.set_content_margin_all(10)
+	panel.add_theme_stylebox_override("panel", panel_style)
+	canvas.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	panel.add_child(vbox)
+
+	# Preset dropdown
+	var preset_label := Label.new()
+	preset_label.text = "Preset"
+	preset_label.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(preset_label)
+
+	var preset_btn := OptionButton.new()
+	preset_btn.add_item("Custom")
+	preset_btn.add_item("Clear Day (12h)")
+	preset_btn.add_item("Foggy Morning (7h)")
+	preset_btn.add_item("Foggy Night (22h)")
+	preset_btn.add_item("Stormy Night (22h)")
+	preset_btn.add_item("Golden Hour (18.5h)")
+	preset_btn.add_item("Midnight (0h)")
+	preset_btn.selected = 0
+	preset_btn.item_selected.connect(_on_preset_selected)
+	vbox.add_child(preset_btn)
+	_preset_btn = preset_btn
+
+	# Time slider
+	var time_label := Label.new()
+	time_label.text = "Time of Day"
+	time_label.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(time_label)
+
+	var time_slider := HSlider.new()
+	time_slider.min_value = 0.0
+	time_slider.max_value = 24.0
+	time_slider.step = 0.25
+	time_slider.value = WeatherManager.game_hour
+	time_slider.custom_minimum_size.x = 220
+	time_slider.value_changed.connect(_on_time_slider_changed)
+	vbox.add_child(time_slider)
+	_time_slider = time_slider
+
+	# Sky toggle
+	var sky_toggle := CheckBox.new()
+	sky_toggle.text = "Sky (K)"
+	sky_toggle.button_pressed = _sky_enabled
+	sky_toggle.toggled.connect(func(on: bool) -> void: if on != _sky_enabled: _toggle_sky(); sky_toggle.set_pressed_no_signal(_sky_enabled))
+	vbox.add_child(sky_toggle)
+
+	# Weather toggle
+	var weather_toggle := CheckBox.new()
+	weather_toggle.text = "Weather (W)"
+	weather_toggle.button_pressed = _weather_enabled
+	weather_toggle.toggled.connect(func(on: bool) -> void: if on != _weather_enabled: _toggle_weather(); weather_toggle.set_pressed_no_signal(_weather_enabled))
+	vbox.add_child(weather_toggle)
+
 	var help := Label.new()
-	help.text = "1-0: Weather | T/Y: Time | +/-: Speed | W: Weather | K: Sky | O: Ocean | C: Clouds | P: Sun | F: Fog | V: Vol.Fog"
-	help.add_theme_font_size_override("font_size", 12)
-	help.anchors_preset = Control.PRESET_BOTTOM_WIDE
-	help.position.y = -30
-	canvas.add_child(help)
+	help.text = "RMB: Look | ZQSD: Move | Space/Ctrl: Up/Down"
+	help.add_theme_font_size_override("font_size", 11)
+	vbox.add_child(help)
 
 
 func _process(delta: float) -> void:
@@ -272,7 +341,70 @@ func _process(delta: float) -> void:
 		if _ocean_enabled and OceanManager.is_system_enabled():
 			OceanManager.apply_weather(result)
 
+	_sync_cloud_ambient()
+	if _time_slider:
+		_time_slider.set_value_no_signal(WeatherManager.game_hour)
 	_update_debug_overlay()
+
+
+func _sync_cloud_ambient() -> void:
+	if _clouds_resource == null:
+		return
+	var sun_alt: float
+	var sun_color: Color
+	if _sky_enabled and _sky_manager and _sky_manager.has_method("get_sky_state"):
+		var state: SkyManager.SkyState = _sky_manager.get_sky_state()
+		if state:
+			sun_alt = state.sun_direction.y
+			sun_color = state.sun_color
+		else:
+			sun_alt = WeatherControls._sun_alt_from_hour(WeatherManager.game_hour)
+			sun_color = WeatherControls._sun_color_from_alt(sun_alt)
+	else:
+		sun_alt = WeatherControls._sun_alt_from_hour(WeatherManager.game_hour)
+		sun_color = WeatherControls._sun_color_from_alt(sun_alt)
+
+	var day_factor: float = clampf(sun_alt * 5.0 + 0.5, 0.0, 1.0)
+	var day_color: Color = sun_color.lerp(Color(0.8, 0.85, 0.9), 0.5)
+	var night_color := Color(0.04, 0.05, 0.1)
+	var sunset_factor: float = clampf(1.0 - absf(sun_alt) * 8.0, 0.0, 1.0) * 0.6
+	var sunset_tint := Color(1.0, 0.6, 0.3)
+	var ambient: Color = night_color.lerp(day_color, day_factor)
+	ambient = ambient.lerp(sunset_tint, sunset_factor)
+	_clouds_resource.set("cloud_ambient_color", ambient)
+	_clouds_resource.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
+
+	var atmo_day := Color(0.9, 0.92, 1.0)
+	var atmo_night := Color(0.1, 0.12, 0.2)
+	var atmo_sunset := Color(1.0, 0.55, 0.25)
+	var atmo: Color = atmo_night.lerp(atmo_day, day_factor)
+	atmo = atmo.lerp(atmo_sunset, sunset_factor)
+	_clouds_resource.set("atmosphere_color", atmo)
+
+	# Sync fallback light when sky is off
+	if not _sky_enabled and _light:
+		_light.light_color = sun_color
+		_light.light_energy = clampf(sun_alt * 1.2, 0.05, 1.2)
+		# Rotate light below horizon at night (positive X = below horizon)
+		_light.rotation_degrees.x = lerpf(10.0, -45.0, day_factor)
+
+	# Sync fog light color with time of day — SunshineClouds2 samples this via
+	# sampled_environment_fog_color. If left at the bright default, clouds stay white at night.
+	var active_env: Environment = _get_active_env()
+	if active_env:
+		var fog_day := Color(0.8, 0.85, 0.9)
+		var fog_night := Color(0.08, 0.1, 0.18)
+		var fog_sunset := Color(0.9, 0.6, 0.35)
+		active_env.fog_light_color = fog_night.lerp(fog_day, day_factor).lerp(fog_sunset, sunset_factor)
+
+	# Darken ProceduralSkyMaterial at night when sky is off
+	if not _sky_enabled and _world_env and _world_env.environment and _world_env.environment.sky:
+		var mat: ProceduralSkyMaterial = _world_env.environment.sky.sky_material as ProceduralSkyMaterial
+		if mat:
+			mat.sky_top_color = Color(0.05, 0.05, 0.15).lerp(Color(0.35, 0.55, 0.82), day_factor)
+			mat.sky_horizon_color = Color(0.08, 0.08, 0.12).lerp(Color(0.55, 0.65, 0.75), day_factor)
+			mat.ground_bottom_color = Color(0.02, 0.02, 0.04).lerp(Color(0.15, 0.15, 0.15), day_factor)
+			mat.ground_horizon_color = Color(0.05, 0.05, 0.08).lerp(Color(0.4, 0.4, 0.4), day_factor)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -332,6 +464,38 @@ func _handle_fly_camera(delta: float) -> void:
 	if Input.is_key_pressed(KEY_CTRL): direction.y -= 1.0
 	if direction.length_squared() > 0.001:
 		_camera.position += direction.normalized() * speed * delta
+
+#endregion
+
+
+#region UI Callbacks
+
+func _on_time_slider_changed(value: float) -> void:
+	WeatherManager.set_game_hour(value)
+	if _preset_btn:
+		_preset_btn.select(0)  # Reset to "Custom"
+
+
+const _PRESETS := [
+	{},  # 0 = Custom (no-op)
+	{"type": WeatherTypes.Type.CLEAR, "time": 12.0},
+	{"type": WeatherTypes.Type.FOGGY, "time": 7.0},
+	{"type": WeatherTypes.Type.FOGGY, "time": 22.0},
+	{"type": WeatherTypes.Type.THUNDERSTORM, "time": 22.0},
+	{"type": WeatherTypes.Type.CLEAR, "time": 18.5},
+	{"type": WeatherTypes.Type.CLEAR, "time": 0.0},
+]
+
+func _on_preset_selected(index: int) -> void:
+	if index == 0 or index >= _PRESETS.size():
+		return
+	var preset: Dictionary = _PRESETS[index]
+	_set_weather(preset.type)
+	WeatherManager.set_game_hour(preset.time)
+	WeatherManager.time_paused = true
+	WeatherManager.set_time_scale(0.0)
+	if _time_slider:
+		_time_slider.set_value_no_signal(preset.time)
 
 #endregion
 

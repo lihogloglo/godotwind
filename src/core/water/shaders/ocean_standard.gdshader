@@ -17,12 +17,12 @@ render_mode world_vertex_coords, cull_disabled, diffuse_lambert, specular_schlic
  * - Shore mask dampening
  * - Depth-edge foam
  * - Schlick Fresnel
- * - Refraction via SCREEN_TEXTURE
- * - Relies on Godot 4.6 native SSR + ReflectionProbe for reflections
+ * - Fake refraction via distorted depth UV + Beer-Lambert absorption (no SCREEN_TEXTURE)
+ * - Schlick Fresnel blends refraction (steep) vs reflection (grazing)
+ * - Relies on Godot 4.6 native SSR + ReflectionProbe for reflections (requires opaque pass)
  */
 
-// Screen + depth textures
-uniform sampler2D SCREEN_TEX : hint_screen_texture, filter_linear_mipmap, repeat_disable;
+// Depth texture (no SCREEN_TEXTURE — it forces transparent pass, breaking SSR)
 uniform sampler2D DEPTH_TEX : hint_depth_texture, filter_linear_mipmap, repeat_disable;
 
 // Water colors
@@ -43,9 +43,15 @@ uniform float foam_edge_width : hint_range(0.01, 2.0) = 0.3;
 uniform float foam_scroll_speed : hint_range(0.0, 0.1) = 0.02;
 uniform vec3 foam_color : source_color = vec3(0.9, 0.92, 0.95);
 
-// Refraction
+// Shore color (visible through shallow water where depth → 0)
+group_uniforms shore_color;
+uniform vec3 color_shore : source_color = vec3(0.25, 0.22, 0.18);
+
+// Refraction (fake — distorted depth UV, no SCREEN_TEXTURE)
 group_uniforms refraction;
-uniform float refraction_strength : hint_range(0.0, 0.2) = 0.05;
+uniform float refraction_strength : hint_range(0.0, 0.1) = 0.03;
+uniform vec3 absorption_rate = vec3(0.4, 0.1, 0.06); // R absorbed fast, G/B slower (Beer-Lambert)
+uniform float absorption_density : hint_range(0.01, 2.0) = 0.3;
 
 // Visual tuning
 group_uniforms visual;
@@ -204,34 +210,44 @@ void fragment() {
 	vec3 world_normal = normalize(vec3(n.x, 1.0, n.y));
 	NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
 
+	// Fresnel — Schlick approximation (F0 = 0.02 for water)
+	float cos_theta = max(dot(normalize(-VERTEX), NORMAL), 0.0);
+	float fresnel = 0.02 + 0.98 * pow(1.0 - cos_theta, 5.0);
+
 	// Depth — robust linearization for Godot 4 reversed-Z projection
-	float depth_raw = texture(DEPTH_TEX, SCREEN_UV).r;
-	float floor_dist = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
 	float surface_dist = -(VIEW_MATRIX * vec4(v_world_pos, 1.0)).z;
+
+	// Fake refraction: distort depth UV by wave normal, scaled by distance
+	// Waves shift the apparent position of submerged objects
+	vec2 refract_offset = world_normal.xz * refraction_strength / max(surface_dist, 1.0);
+	vec2 refract_uv = SCREEN_UV + refract_offset;
+	// Clamp to screen to prevent sampling outside viewport
+	refract_uv = clamp(refract_uv, vec2(0.001), vec2(0.999));
+
+	// Sample depth at distorted UV — shows submerged geometry shifting with waves
+	float depth_raw = texture(DEPTH_TEX, refract_uv).r;
+	float floor_dist = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
 	float water_depth = max(floor_dist - surface_dist, 0.0);
 
-	// Fresnel (Schlick) — VIEW is already normalized view direction in Godot
-	float cos_theta = max(dot(VIEW, NORMAL), 0.0);
-	float f0 = 0.02;
-	float fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
-
-	// Refraction
-	vec2 refr_uv = SCREEN_UV + world_normal.xz * refraction_strength * clamp(water_depth * 0.2, 0.0, 1.0);
-	refr_uv = clamp(refr_uv, vec2(0.001), vec2(0.999));
-
-	// Prevent refraction from sampling above water
-	float refr_depth_raw = texture(DEPTH_TEX, refr_uv).r;
-	float refr_floor_dist = PROJECTION_MATRIX[3][2] / (refr_depth_raw + PROJECTION_MATRIX[2][2]);
-	if (refr_floor_dist < surface_dist) {
-		refr_uv = SCREEN_UV;
+	// Sanity check: if distorted UV gives nonsensical depth, fall back to undistorted
+	if (water_depth > 500.0 || water_depth < 0.0) {
+		depth_raw = texture(DEPTH_TEX, SCREEN_UV).r;
+		floor_dist = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
+		water_depth = max(floor_dist - surface_dist, 0.0);
 	}
 
-	vec3 refracted = texture(SCREEN_TEX, refr_uv).rgb;
+	// Beer-Lambert absorption — exponential color shift by water thickness
+	// R absorbed fastest (warm colors vanish first), G/B persist (underwater looks blue-green)
+	vec3 absorption = exp(-water_depth * absorption_rate * absorption_density);
+	// Seabed color tinted by absorption (what you'd see looking down through water)
+	vec3 refracted_col = color_shore * absorption;
+	// Deep water: absorption bottoms out to deep ocean color
+	refracted_col = mix(color_deep, refracted_col, exp(-water_depth * absorption_density * 0.5));
 
-	// Water color by depth
-	float depth_factor = clamp(water_depth / color_depth_range, 0.0, 1.0);
-	vec3 water_col = mix(color_shallow, color_deep, depth_factor);
-	vec3 underwater = mix(refracted, water_col, depth_factor);
+	// Blend refraction (steep viewing angle) vs water surface color (grazing angle)
+	// At steep angles (low fresnel): see through to seabed with absorption tint
+	// At grazing angles (high fresnel): SSR/sky reflections dominate via SPECULAR
+	vec3 underwater = mix(refracted_col, color_shallow, fresnel);
 
 	// Foam at edges
 	float foam_mask = 0.0;
@@ -242,14 +258,14 @@ void fragment() {
 		foam_mask = step(edge_t, foam_tex) * edge_t * v_shore_factor;
 	}
 
-	// Compose
-	vec3 final_col = mix(underwater, foam_color, foam_mask);
+	// Compose — shore edges blend toward shore color (no alpha, stays opaque for SSR)
+	float shore_blend = smoothstep(0.01, 0.15, v_shore_factor) * clamp(water_depth * 4.0, 0.0, 1.0);
+	vec3 final_col = mix(color_shore, mix(underwater, foam_color, foam_mask), shore_blend);
 
-	// Output — let Godot's SSR and ReflectionProbe handle reflections via PBR
+	// Output — fully opaque PBR surface. Godot's SSR + sky reflections work via specular path.
+	// Low roughness + specular 0.5 gives realistic Fresnel reflection blending.
 	ALBEDO = final_col;
-	ROUGHNESS = mix(0.02, 0.6, foam_mask);
+	ROUGHNESS = mix(mix(0.02, 0.15, 1.0 - fresnel), 0.6, foam_mask);
 	METALLIC = 0.0;
 	SPECULAR = 0.5;
-	// Fresnel-based alpha for shore blending
-	ALPHA = clamp(water_depth * 4.0, 0.0, 1.0) * v_shore_factor;
 }

@@ -60,6 +60,9 @@ var _enabled: bool = true
 var _time: float = 0.0
 var _auto_find_camera: bool = true
 
+# Underwater effect (untyped to avoid circular load-order with class_name)
+var _underwater_effect: Node = null
+
 # FFT pipeline
 var _wave_generator: WaveGenerator = null
 var _cascade_parameters: Array[WaveCascadeParameters] = []
@@ -160,6 +163,12 @@ func _deferred_init() -> void:
 	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
 		_init_fft_pipeline()
 
+	# Apply calm defaults to shader uniforms (weather system will override when active)
+	reset_weather()
+
+	# Initialize underwater post-process effect
+	_init_underwater_effect()
+
 	_system_initialized = true
 	ocean_initialized.emit()
 
@@ -220,6 +229,10 @@ func _process(delta: float) -> void:
 			_fft_next_update = _fft_time + target_dt
 			_wave_generator.update(update_dt, _cascade_parameters)
 
+	# Update underwater effect sun tracking (cheap — only a direction vector)
+	if _underwater_effect and _underwater_effect.is_submerged():
+		_update_underwater_sun()
+
 	# GPU readback for buoyancy — read displacement map once per frame
 	if _wave_generator and _displacement_size > 0:
 		var frame := Engine.get_process_frames()
@@ -279,9 +292,9 @@ func _init_fft_pipeline() -> void:
 	# Cascade 0 — Large swell (covers 250m tiles)
 	var cascade_0 := WaveCascadeParameters.new()
 	cascade_0.tile_length = Vector2(250, 250)
-	cascade_0.displacement_scale = 0.8
+	cascade_0.displacement_scale = 0.15
 	cascade_0.normal_scale = 0.8
-	cascade_0.wind_speed = 12.0  # Calm Morrowind Inner Sea
+	cascade_0.wind_speed = 3.0  # Calm lake default — weather system scales up
 	cascade_0.wind_direction = 45.0
 	cascade_0.fetch_length = 300.0
 	cascade_0.swell = 0.8
@@ -296,9 +309,9 @@ func _init_fft_pipeline() -> void:
 	# Cascade 1 — Medium chop (covers 50m tiles)
 	var cascade_1 := WaveCascadeParameters.new()
 	cascade_1.tile_length = Vector2(50, 50)
-	cascade_1.displacement_scale = 0.6
+	cascade_1.displacement_scale = 0.1
 	cascade_1.normal_scale = 1.0
-	cascade_1.wind_speed = 12.0
+	cascade_1.wind_speed = 3.0
 	cascade_1.wind_direction = 45.0
 	cascade_1.fetch_length = 300.0
 	cascade_1.swell = 0.5
@@ -501,16 +514,68 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 
 
 # ============================================================================
+# UNDERWATER EFFECT
+# ============================================================================
+
+func _init_underwater_effect() -> void:
+	if _underwater_effect:
+		return
+	var UnderwaterEffectClass: GDScript = load("res://src/core/water/underwater_effect.gd") as GDScript
+	if UnderwaterEffectClass == null:
+		Log.error("water", "OceanManager: Failed to load UnderwaterEffect script")
+		return
+	_underwater_effect = UnderwaterEffectClass.new()
+	_underwater_effect.name = "UnderwaterEffect"
+	add_child(_underwater_effect)
+	if _camera:
+		_underwater_effect.initialize(_camera, sea_level)
+		Log.info("water", "OceanManager: Underwater effect initialized")
+	else:
+		# Will be initialized when camera is set
+		Log.info("water", "OceanManager: Underwater effect created (awaiting camera)")
+
+
+func _update_underwater_sun() -> void:
+	if not _underwater_effect:
+		return
+	# Find the directional light for sun direction
+	var light: DirectionalLight3D = _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
+	if light:
+		_underwater_effect.set_sun(
+			-light.global_basis.z,
+			1.0,
+			light.light_color
+		)
+
+
+## Get the underwater effect controller
+func get_underwater_effect() -> Node:
+	return _underwater_effect
+
+
+## Check if the camera is currently submerged
+func is_camera_submerged() -> bool:
+	if _underwater_effect:
+		return _underwater_effect.is_submerged()
+	return false
+
+
+# ============================================================================
 # PUBLIC API
 # ============================================================================
 
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
 	_auto_find_camera = false
+	# Re-initialize underwater effect with new camera
+	if _underwater_effect and camera:
+		_underwater_effect.initialize(camera, sea_level)
 
 
 func set_sea_level(level: float) -> void:
 	sea_level = level
+	if _underwater_effect:
+		_underwater_effect.set_sea_level(level)
 	if not _system_enabled:
 		return
 	if _terrain and _shore_mask:
@@ -683,17 +748,17 @@ func apply_weather(result: WeatherTypes.WeatherResult) -> void:
 
 
 func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
-	# Map MW wind (0.0-0.9) to ocean wind speed (3-30 m/s)
-	# Clear (0.1) → ~6 m/s gentle swell, Storm (0.5) → ~20 m/s, Blizzard (0.9) → 30 m/s
-	var ocean_wind: float = lerpf(3.0, 30.0, wind_t)
+	# Map MW wind (0.0-0.9) to ocean wind speed (2-30 m/s)
+	# Clear (0.1) → ~3 m/s lake-calm, Storm (0.5) → ~20 m/s, Blizzard (0.9) → 30 m/s
+	var ocean_wind: float = lerpf(2.0, 30.0, wind_t)
 
 	# Wind direction from storm direction or default NE wind
 	var wind_dir_deg: float = 45.0
 	if result.storm_direction.length_squared() > 0.01:
 		wind_dir_deg = rad_to_deg(atan2(result.storm_direction.x, result.storm_direction.z))
 
-	# Displacement scale — calm water has gentler waves
-	var disp_scale: float = lerpf(0.3, 1.0, wind_t)
+	# Displacement scale — calm water has very gentle waves (lake-like)
+	var disp_scale: float = lerpf(0.1, 1.0, wind_t)
 	# Less foam in calm weather, more in storms
 	var foam_base: float = lerpf(0.5, 8.0, wind_t)
 	# Higher whitecap threshold in calm = almost no foam
@@ -720,11 +785,12 @@ func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> vo
 		ocean_wind, wind_dir_deg, foam_base, whitecap_val])
 
 
-## Calm water defaults — colors and parameters for no weather
-const _SHALLOW_CALM := Color(0.1, 0.3, 0.4)
-const _SHALLOW_STORM := Color(0.08, 0.18, 0.2)
-const _DEEP_CALM := Color(0.02, 0.08, 0.12)
-const _DEEP_STORM := Color(0.015, 0.04, 0.06)
+## Water colors — dark and desaturated like OpenMW. Visual character comes from
+## reflections (SSR/sky), not albedo. Bright/turquoise water = wrong.
+const _SHALLOW_CALM := Color(0.09, 0.12, 0.13)
+const _SHALLOW_STORM := Color(0.06, 0.08, 0.09)
+const _DEEP_CALM := Color(0.02, 0.04, 0.06)
+const _DEEP_STORM := Color(0.01, 0.02, 0.03)
 
 func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
 	if not _ocean_mesh:
@@ -752,6 +818,12 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	if quality == OceanMesh.QualityMode.STANDARD:
 		mat.set_shader_parameter("wave_scale", lerpf(0.4, 2.2, wind_t) * wave_scale)
 
+	# Calm water reflects more sky, storms reflect less (sky obscured by clouds)
+	mat.set_shader_parameter("sky_tint_strength", lerpf(0.8, 0.3, wind_t))
+
+	# Foam suppression: near-zero in calm weather, full in storms
+	mat.set_shader_parameter("foam_intensity", lerpf(0.05, 1.0, wind_t))
+
 	# FFT-specific uniforms
 	if quality == OceanMesh.QualityMode.HIGH:
 		# Calm water is glassy smooth, storms are rough
@@ -773,6 +845,8 @@ func reset_weather() -> void:
 	mat.set_shader_parameter("color_shallow", Vector3(_SHALLOW_CALM.r, _SHALLOW_CALM.g, _SHALLOW_CALM.b))
 	mat.set_shader_parameter("color_deep", Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b))
 	mat.set_shader_parameter("foam_edge_width", 0.1)
+	mat.set_shader_parameter("foam_intensity", 0.05)
+	mat.set_shader_parameter("sky_tint_strength", 0.8)
 	mat.set_shader_parameter("normal_strength", 0.6)
 	mat.set_shader_parameter("wave_scale", wave_scale)
 
@@ -781,11 +855,11 @@ func reset_weather() -> void:
 		mat.set_shader_parameter("roughness", 0.01)
 		mat.set_shader_parameter("sss_strength", 0.9)
 
-	# Reset FFT cascades to calm defaults
+	# Reset FFT cascades to calm/lake defaults
 	for cascade: WaveCascadeParameters in _cascade_parameters:
-		cascade.wind_speed = 5.0
+		cascade.wind_speed = 2.0
 		cascade.wind_direction = 45.0
-		cascade.displacement_scale = 0.3
+		cascade.displacement_scale = 0.1
 		cascade.foam_amount = 0.5
 		cascade.whitecap = 0.8
 		cascade.spread = 0.15
@@ -800,6 +874,9 @@ func reset_weather() -> void:
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
+	if _underwater_effect:
+		_underwater_effect.cleanup()
+		_underwater_effect = null
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()
 

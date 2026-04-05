@@ -42,6 +42,7 @@ var _visual_state: Dictionary = {
 	"taa": false,
 	"ssao": false,
 	"ssil": false,
+	"ssr": true,
 	"glow": false,
 	"volumetric_fog": false,
 	"depth_fog": false,
@@ -97,13 +98,6 @@ func setup_fallback_environment() -> void:
 	# Reflected light from sky
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
 
-	# Screen-Space Reflections for water
-	env.ssr_enabled = true
-	env.ssr_max_steps = 64
-	env.ssr_fade_in = 0.15
-	env.ssr_fade_out = 2.0
-	env.ssr_depth_tolerance = 0.2
-
 	# Tonemapping (Filmic for good contrast without crushing blacks)
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure = 1.0
@@ -111,6 +105,9 @@ func setup_fallback_environment() -> void:
 
 	_fallback_world_env.environment = env
 	_add_child(_fallback_world_env)
+
+	# Apply all tracked visual state (SSR, SSAO, etc.) to the fallback env
+	_apply_visual_state(env)
 
 	# Create fallback directional light
 	_fallback_light = DirectionalLight3D.new()
@@ -245,6 +242,14 @@ func _apply_visual_state(env: Environment) -> void:
 		env.ssil_intensity = 1.0
 		env.ssil_sharpness = 0.98
 		env.ssil_normal_rejection = 1.0
+
+	# SSR (Screen-Space Reflections) — critical for water reflections
+	env.ssr_enabled = _visual_state["ssr"]
+	if _visual_state["ssr"]:
+		env.ssr_max_steps = 64
+		env.ssr_fade_in = 0.15
+		env.ssr_fade_out = 2.0
+		env.ssr_depth_tolerance = 0.2
 
 	# Glow
 	env.glow_enabled = _visual_state["glow"]
@@ -384,7 +389,13 @@ func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 			env.volumetric_fog_temporal_reprojection_amount = 0.7
 	# Boost sun's volumetric fog energy for stronger god rays
 	_set_sun_volumetric_energy(6.0 if enabled else 1.0)
-	_log("Volumetric Fog (god rays): %s" % ("ON" if enabled else "OFF"))
+	# Enable custom VAIO fog (animated, swirling, weather-aware) on top of native fog
+	ensure_shader_manager_attached()
+	if enabled:
+		ShaderManager.enable_effect("volumetric_fog", 0.3)
+	else:
+		ShaderManager.disable_effect("volumetric_fog", 0.3)
+	_log("Volumetric Fog: %s" % ("ON" if enabled else "OFF"))
 
 
 func on_depth_fog_toggled(enabled: bool) -> void:

@@ -114,8 +114,6 @@ var _current_ambient_energy: float = 1.0
 
 # ---- Cirrus Clouds ----
 
-const CIRRUS_TEXTURE_PATH: String = "res://assets/sky/cirrus_noise.png"
-
 ## Whether cirrus clouds are visible.
 var cirrus_visible: bool = true
 ## Cirrus coverage (0=clear, 1=full coverage).
@@ -129,8 +127,8 @@ var cirrus_thickness: float = 0.4
 ## Cirrus noise scale (higher = smaller wisps).
 var cirrus_size: float = 1.0
 ## Cirrus wind scroll speed (UV units per second). Two layers at different speeds.
-var cirrus_wind_speed1: Vector2 = Vector2(0.02, 0.007)
-var cirrus_wind_speed2: Vector2 = Vector2(-0.015, 0.01)
+var cirrus_wind_speed1: Vector2 = Vector2(0.06, 0.02)
+var cirrus_wind_speed2: Vector2 = Vector2(-0.04, 0.03)
 ## Cirrus day color (warm white).
 var cirrus_day_color: Color = Color(1.0, 0.98, 0.95)
 ## Cirrus night color (dark blue-grey).
@@ -138,7 +136,6 @@ var cirrus_night_color: Color = Color(0.15, 0.18, 0.25)
 
 var _cirrus_scroll1: Vector2 = Vector2.ZERO
 var _cirrus_scroll2: Vector2 = Vector2.ZERO
-var _cirrus_texture: Texture2D = null
 
 # ---- Textures (Phase 2) ----
 
@@ -302,6 +299,9 @@ func update(hour: float) -> void:
 	var base2: Vector2 = cirrus_wind_speed2 * wind_mult
 	_cirrus_scroll1 += Vector2(base1.x * wind_cos - base1.y * wind_sin, base1.x * wind_sin + base1.y * wind_cos) * delta
 	_cirrus_scroll2 += Vector2(base2.x * wind_cos - base2.y * wind_sin, base2.x * wind_sin + base2.y * wind_cos) * delta
+	# Wrap to avoid float32 precision loss after long sessions (noise tiles, period arbitrary)
+	_cirrus_scroll1 = Vector2(fmod(_cirrus_scroll1.x, 1000.0), fmod(_cirrus_scroll1.y, 1000.0))
+	_cirrus_scroll2 = Vector2(fmod(_cirrus_scroll2.x, 1000.0), fmod(_cirrus_scroll2.y, 1000.0))
 
 	# Update shader uniforms
 	_update_shader_uniforms()
@@ -558,14 +558,7 @@ func _load_default_textures() -> void:
 	else:
 		Log.info("sky", "No moon texture found — using simple disc")
 
-	# Cirrus noise texture
-	if ResourceLoader.exists(CIRRUS_TEXTURE_PATH):
-		_cirrus_texture = load(CIRRUS_TEXTURE_PATH) as Texture2D
-		if _cirrus_texture and _sky_material:
-			_sky_material.set_shader_parameter("cirrus_texture", _cirrus_texture)
-			Log.info("sky", "Loaded cirrus noise texture: %s" % CIRRUS_TEXTURE_PATH)
-	else:
-		Log.info("sky", "No cirrus texture found — cirrus clouds disabled")
-		cirrus_visible = false
+	# Cirrus clouds use procedural noise (no texture needed)
+	Log.info("sky", "Cirrus clouds: procedural FBM noise (no texture)")
 
 #endregion

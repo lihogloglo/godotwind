@@ -839,7 +839,10 @@ void main() {
 		paintedColor = clamp(paintedColor / lightingSamples, 0.0, 1.0);
 	}
 
-	vec3 ambientLight = genericData.data.ambientLightColor.rgb * totalLightPower;
+	// GODOTWIND FIX: Use ambientLightColor directly — GDScript _sync_cloud_ambient()
+	// already computes time-of-day brightness (dark at night, bright at day).
+	// The original code scaled by totalLightPower which zeroed ambient at night.
+	vec3 ambientLight = genericData.data.ambientLightColor.rgb;
 	ambientLight = mix(ambientLight, ambientLight * aobase.rgb, ambient * aobase.a) * paintedColor;
 	lightColor.rgb += ambientLight;
 	// lightColor.rgb = ambientLight + clamp(lightColor.rgb / lightingSamples, vec3(0.0), vec3(1.0));

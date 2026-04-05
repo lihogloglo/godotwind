@@ -404,7 +404,7 @@ func set_ssao_enabled(enabled: bool) -> void:
 ## Gets SSR (Screen Space Reflections) enabled state
 func get_ssr_enabled() -> bool:
 	_load_config()
-	return _config.get_value("graphics", "ssr", false)
+	return _config.get_value("graphics", "ssr", true)
 
 ## Sets SSR enabled state
 func set_ssr_enabled(enabled: bool) -> void:

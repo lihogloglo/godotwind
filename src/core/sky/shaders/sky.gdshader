@@ -52,7 +52,6 @@ uniform float tint_strength : hint_range(0.0, 1.0) = 0.3;
 
 // ---- Cirrus Clouds ----
 uniform bool cirrus_visible = true;
-uniform sampler2D cirrus_texture : filter_linear, repeat_enable;
 uniform float cirrus_coverage : hint_range(0.0, 1.0) = 0.4;
 uniform float cirrus_absorption : hint_range(0.0, 10.0) = 2.0;
 uniform float cirrus_intensity : hint_range(0.0, 20.0) = 8.0;
@@ -65,6 +64,42 @@ uniform vec3 cirrus_night_color = vec3(0.15, 0.18, 0.25);
 
 // ---- Ground ----
 uniform vec3 ground_color = vec3(0.15, 0.12, 0.1);
+
+// --- Procedural Cirrus Noise ---
+// Gradient noise (Perlin-style) + FBM for wispy cloud patterns. No texture needed.
+// Quintic interpolation (C2 continuous) eliminates visible cell boundaries.
+vec2 _cirrus_hash2(vec2 p) {
+	// 2D gradient hash — returns pseudo-random unit-ish gradient per cell
+	p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+	return -1.0 + 2.0 * fract(sin(p) * 43758.5453);
+}
+
+float _cirrus_gnoise(vec2 p) {
+	// Perlin-style gradient noise with quintic interpolation
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	// Quintic interpolation: C2 continuous, no visible cell edges
+	vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+	// Gradient dot products at four corners
+	float a = dot(_cirrus_hash2(i), f);
+	float b = dot(_cirrus_hash2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0));
+	float c = dot(_cirrus_hash2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0));
+	float d = dot(_cirrus_hash2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0));
+	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 0.5 + 0.5; // Remap to 0..1
+}
+
+float _cirrus_fbm(vec2 p) {
+	// 5 octaves, stretched for elongated wispy shapes
+	float val = 0.0;
+	float amp = 0.5;
+	vec2 q = p * vec2(8.0, 16.0); // High base freq + stretch = wispy ribbons
+	for (int i = 0; i < 5; i++) {
+		val += amp * _cirrus_gnoise(q);
+		q = mat2(vec2(2.2, 0.8), vec2(-0.8, 2.2)) * q; // Rotate + scale to break axis alignment
+		amp *= 0.5;
+	}
+	return val;
+}
 
 // ---- Cloud Darkening ----
 uniform float cloud_coverage : hint_range(0.0, 1.0) = 0.0;
@@ -222,15 +257,25 @@ void sky() {
 	}
 
 	// --- Cirrus Clouds ---
-	// Thin high-altitude wisps rendered as a 2D noise layer on a flat ceiling projection.
-	// Technique: Sky3D (MIT) / industry standard — 2 texture fetches, Beer's law extinction.
+	// Procedural wispy cirrus using FBM noise with domain warping.
+	// No texture needed — generates cloud-like patterns analytically.
 	if (cirrus_visible && view_dir.y > 0.01) {
 		// Project view ray onto flat ceiling plane
 		vec2 cirrus_uv = view_dir.xz / view_dir.y * cirrus_size;
-		// Sample noise twice at different scroll offsets for evolving wispy shapes
-		float n1 = textureLod(cirrus_texture, cirrus_uv + cirrus_scroll1, 0.0).r;
-		float n2 = textureLod(cirrus_texture, cirrus_uv + cirrus_scroll2, 0.0).r;
+
+		// Two FBM layers at different scroll offsets for evolving shapes
+		vec2 uv1 = cirrus_uv + cirrus_scroll1;
+		vec2 uv2 = cirrus_uv + cirrus_scroll2;
+
+		// Domain warp: use FBM of one layer to distort the other (organic shapes)
+		float warp = _cirrus_fbm(uv2 * 0.5);
+		uv1 += vec2(warp * 0.25, warp * 0.15);
+
+		float n1 = _cirrus_fbm(uv1);
+		float n2 = _cirrus_fbm(uv2);
 		float density = clamp((n1 + n2) * 0.5 - (1.0 - cirrus_coverage), 0.0, 1.0);
+		// Soften edges for wispy look
+		density = smoothstep(0.0, 0.3, density) * density;
 
 		if (density > 0.0) {
 			// Beer's law self-shadowing
@@ -245,7 +290,7 @@ void sky() {
 			float horizon_fade = smoothstep(0.01, 0.15, view_dir.y);
 			alpha *= horizon_fade;
 
-			// Composite over sky: cloud_color * density * transmittance * intensity
+			// Composite over sky
 			vec3 cirrus_contrib = cloud_color * density * transmittance_cloud * cirrus_intensity;
 			inscatter = mix(inscatter, cirrus_contrib + inscatter * (1.0 - alpha * 0.5), alpha);
 		}
