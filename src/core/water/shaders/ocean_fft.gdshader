@@ -78,18 +78,39 @@ uniform float absorption_density : hint_range(0.01, 2.0) = 0.3;
 // Clamp water thickness to this many meters when background is far-plane/sky.
 // Prevents division by zero and caps extreme absorption for looking-at-horizon cases.
 uniform float max_visible_depth : hint_range(1.0, 50.0) = 20.0;
-// Strength of the refraction UV offset. Lower values = subtler distortion,
-// 0 to disable. Deliberately under 1.0 to avoid silhouette crossing artifacts
-// (refracted sample landing on the wrong side of an opaque object's edge).
-uniform float refraction_strength : hint_range(0.0, 1.0) = 0.25;
+// Strength of the refraction UV offset. 0.6 is the shader-specialist-tuned
+// default — visibly refractive without crossing silhouettes. 0 to disable.
+uniform float refraction_strength : hint_range(0.0, 1.0) = 0.6;
 // Clamp refraction ray travel distance (meters along the refracted ray direction).
-// Smaller = less shimmer but fewer silhouette artifacts. 0.8m is conservative.
-uniform float max_refr_thickness : hint_range(0.1, 5.0) = 0.8;
+// Combined with refraction_strength, this caps the view-space step length. At
+// 1.5 and 0.6 the max projected ray is ~0.9m → clearly visible pixel offsets.
+uniform float max_refr_thickness : hint_range(0.1, 5.0) = 1.5;
 // Depth-contrast rejection: if the refracted sample's view-space depth differs
 // from the unrefracted sample's depth by more than this many meters, the
 // refracted ray has crossed a silhouette edge (e.g. the edge of a submerged
 // rock or the monolith). Fall back to unrefracted to kill ghost/halo artifacts.
 uniform float refraction_silhouette_threshold : hint_range(0.1, 10.0) = 1.5;
+// World-space Y of the undisplaced water surface. Used by Guard (3b) to reject
+// refracted samples that are view-space-behind the water surface but
+// world-space-ABOVE the waterline (tall objects poking out of the water). Set
+// by OceanManager when the material is initialized; default 0 works for any
+// scene whose sea_level is the world origin.
+uniform float sea_level = 0.0;
+
+// ============================================================================
+// Custom in-shader SSR (Phase 6 / Step 3)
+// Ported faithfully from inspos/GodotSSRWater-main/shaders/water.gdshader.
+// Replaces Godot 4.6 native SSR which is disabled on this material by
+// Phase 0 verdict — declaring hint_depth_texture + hint_screen_texture
+// disables the native SSR pass in Forward+ regardless of whether we sample.
+// ============================================================================
+group_uniforms ssr;
+uniform int ssr_max_steps : hint_range(4, 64) = 24;
+uniform float ssr_resolution : hint_range(0.1, 5.0) = 1.5;   // view-space meters per step
+uniform float ssr_max_travel : hint_range(1.0, 100.0) = 30.0; // view-space meters, total
+uniform float ssr_max_diff : hint_range(0.1, 10.0) = 4.0;    // depth tolerance per step
+uniform float ssr_mix_strength : hint_range(0.0, 1.0) = 0.7; // master reflection knob
+uniform float ssr_screen_border_fadeout : hint_range(0.0, 1.0) = 0.3;
 
 // Visual tuning
 group_uniforms visual;
@@ -149,6 +170,85 @@ vec4 texture_bicubic(in sampler2DArray sampler_tex, in vec3 uvw) {
 	return mix(
 		mix(texture(sampler_tex, vec3(h.yw, uvw.z)), texture(sampler_tex, vec3(h.xw, uvw.z)), w.x),
 		mix(texture(sampler_tex, vec3(h.yz, uvw.z)), texture(sampler_tex, vec3(h.xz, uvw.z)), w.x), w.y);
+}
+
+// ============================================================================
+// CUSTOM SSR RAYMARCH
+// Port of get_ssr_color() from inspos/GodotSSRWater-main/shaders/water.gdshader.
+// Naming is Godotwind-style (ssr_* prefix) but the algorithm is unchanged.
+// View-space raymarch along the reflected view ray, sampling DEPTH_TEXTURE
+// and SCREEN_TEXTURE at each step, accepting the first hit where the ray
+// position is behind the scene depth by less than ssr_max_diff.
+// ============================================================================
+bool ssr_in_screen(vec2 pos) {
+	return pos.x > 0.0 && pos.x < 1.0 && pos.y > 0.0 && pos.y < 1.0;
+}
+
+vec2 ssr_view_to_uv(vec3 view_pos, mat4 proj) {
+	vec4 clip = proj * vec4(view_pos, 1.0);
+	vec2 ndc = clip.xy / clip.w;
+	return ndc * 0.5 + 0.5;
+}
+
+vec3 ssr_uv_to_view(vec2 uv, float depth, mat4 inv_proj) {
+	vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+	vec4 view = inv_proj * ndc;
+	return view.xyz / view.w;
+}
+
+float ssr_edge_alpha(vec2 pos) {
+	// Ported verbatim from GodotSSRWater get_screen_border_alpha(). At the
+	// screen center `mask` approaches 1.0; at the edges it approaches 0.
+	// The smoothstep width + offset trick lets a single uniform
+	// (ssr_screen_border_fadeout) control both the softness of the fade and
+	// how far from the edge it reaches. Disable entirely when ~0.
+	vec2 shifted = 4.0 * pos * (1.0 - pos);
+	float mask = shifted.x * shifted.y;
+	float offset = mix(0.0, 0.5, (clamp(ssr_screen_border_fadeout, 0.75, 1.0) - 0.75) / 0.25);
+	float alpha = clamp(smoothstep(0.0, 2.0 * ssr_screen_border_fadeout, mask) - offset, 0.0, 1.0);
+	return ssr_screen_border_fadeout < 1e-5 ? 1.0 : alpha;
+}
+
+vec4 ssr_trace(
+	vec3 surf_view_pos,
+	vec3 view_normal,
+	vec3 view_vec,
+	mat4 proj,
+	mat4 inv_proj,
+	int steps
+) {
+	if (ssr_max_travel < 1e-5 || steps <= 0) {
+		return vec4(0.0);
+	}
+	// VIEW in Godot fragment is surface→camera; negate to get the incident
+	// direction (camera→surface) for reflect().
+	vec3 incident = -view_vec;
+	vec3 reflect_dir = normalize(reflect(incident, view_normal));
+
+	vec3 current = surf_view_pos;
+	vec2 screen_pos = vec2(0.5);
+	vec3 result = vec3(-1.0);
+	float travel = 0.0;
+	for (int i = 0; i < steps; i++) {
+		if (result.x >= 0.0) { break; }
+		if (travel >= ssr_max_travel) { break; }
+		current += reflect_dir * ssr_resolution;
+		travel += ssr_resolution;
+		screen_pos = ssr_view_to_uv(current, proj);
+		float probe_depth = texture(DEPTH_TEXTURE, screen_pos).r;
+		vec3 probe_view = ssr_uv_to_view(screen_pos, probe_depth, inv_proj);
+		// depth_diff > 0 → scene surface at this UV is behind our probe point
+		// (i.e. ray hasn't reached it yet). depth_diff < max → accept the hit.
+		float depth_diff = probe_view.z - current.z;
+		vec3 sample_color = texture(SCREEN_TEXTURE, screen_pos).rgb;
+		if (ssr_in_screen(screen_pos) && depth_diff >= 0.0 && depth_diff < ssr_max_diff) {
+			result = sample_color;
+		}
+	}
+	if (result.x < 0.0) {
+		return vec4(0.0);
+	}
+	return vec4(result, ssr_edge_alpha(screen_pos));
 }
 
 // ============================================================================
@@ -263,12 +363,17 @@ void fragment() {
 	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
 	vec3 surf_view = surf_view4.xyz / surf_view4.w;
 
+	// Canonical Godot 4.6 reversed-Z depth→view-space-Z reconstruction.
+	// Forward+ / D3D12 / Vulkan use infinite reversed-Z where the depth buffer
+	// stores 1.0 at near plane, 0.0 at far plane, and PROJECTION_MATRIX[3][2]
+	// encodes the negated near distance. Avoids the numerical blowup near the
+	// near plane that a full INV_PROJECTION_MATRIX * clip pipeline produces
+	// when bg_view4.w approaches zero (which was producing the "seafloor
+	// clipping close to camera" artifact in Step 2 rev 1 + rev 2).
 	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
-	vec4 bg_clip = vec4(SCREEN_UV * 2.0 - 1.0, bg_ndc_z, 1.0);
-	vec4 bg_view4 = INV_PROJECTION_MATRIX * bg_clip;
-	vec3 bg_view = bg_view4.xyz / max(abs(bg_view4.w), 1e-6) * sign(bg_view4.w);
+	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
 
-	float raw_thickness = max(0.0, surf_view.z - bg_view.z);
+	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
 	bool is_sky_or_far = raw_thickness >= max_visible_depth;
 	float water_thickness = min(raw_thickness, max_visible_depth);
 
@@ -285,15 +390,23 @@ void fragment() {
 	// Guards (in order):
 	//   (1) Total internal reflection — refract() returns zero; fall back.
 	//   (2) Refracted UV is off-screen [0,1] — fall back.
-	//   (3) Refracted sample is ABOVE water (view-space z less negative than
-	//       surf_view.z). Refracted ray exited back through the surface or into
-	//       above-water geometry; sampling there would bleed that color through.
-	//   (4) SILHOUETTE CROSSING — refracted sample's depth differs from the
+	//   (3) SKY REJECT — refracted UV samples the sky/far plane (NDC depth near
+	//       zero in reversed-Z). Belt-and-suspenders early-out before doing
+	//       reconstruction on garbage depth.
+	//   (4) Refracted sample is BEHIND the water surface in view space
+	//       (cand_view_z less than surf_view.z).
+	//   (5) SILHOUETTE CROSSING — refracted sample's depth differs from the
 	//       unrefracted sample's depth by more than refraction_silhouette_threshold.
 	//       This catches the "monolith ghost" / "seafloor-colored outline around
 	//       submerged rock" artifact where the refracted ray lands on the far
-	//       side of an opaque object's edge and drags its color into the wrong
-	//       pixel. Fall back to unrefracted SCREEN_UV in that case.
+	//       side of an opaque object's edge.
+	//   (6) WORLD-Y REJECT — refracted sample must be BELOW sea_level in WORLD
+	//       space. "Behind the surface in view-Z" is not enough: tall objects
+	//       poking above the waterline are view-space-behind the water plane
+	//       but world-space-above sea_level. Without this guard, refraction
+	//       drags above-water pixels into underwater regions, producing the
+	//       "wobble overlaid on straight mesh" double-vision artifact.
+	//       (Per shader-specialist diagnosis, 2026-04-06.)
 	//
 	// Screen-center-distance deglitch: fade refraction strength toward 0 near the
 	// screen edges so off-screen sampling artifacts don't jitter along the borders.
@@ -314,18 +427,27 @@ void fragment() {
 				if (all(greaterThan(candidate_uv, vec2(0.0)))
 					&& all(lessThan(candidate_uv, vec2(1.0)))) {
 					float cand_ndc_z = texture(DEPTH_TEXTURE, candidate_uv).r;
-					vec4 cand_clip = vec4(candidate_uv * 2.0 - 1.0, cand_ndc_z, 1.0);
-					vec4 cand_view4 = INV_PROJECTION_MATRIX * cand_clip;
-					vec3 cand_view = cand_view4.xyz / max(abs(cand_view4.w), 1e-6) * sign(cand_view4.w);
-					// Guard (3): refracted sample must be BEHIND the surface.
-					bool passes_above = cand_view.z < surf_view.z - 0.01;
-					// Guard (4): refracted sample's depth must be reasonably
-					// close to the unrefracted sample's depth. If the refracted
-					// ray crossed a silhouette edge (e.g. off the side of a
-					// submerged rock), the depth difference will be large.
-					bool passes_silhouette = abs(cand_view.z - bg_view.z) < refraction_silhouette_threshold;
-					if (passes_above && passes_silhouette) {
-						refr_uv = candidate_uv;
+					// Guard (3): sky reject (reversed-Z → far plane near zero).
+					if (cand_ndc_z > 1e-4) {
+						// Canonical reversed-Z view-space Z.
+						float cand_view_z = -PROJECTION_MATRIX[3][2] / max(cand_ndc_z, 1e-5);
+						// Guard (4): refracted sample must be behind the surface.
+						bool passes_above = cand_view_z < surf_view.z - 0.01;
+						// Guard (5): depth-contrast silhouette rejection.
+						bool passes_silhouette = abs(cand_view_z - bg_view_z) < refraction_silhouette_threshold;
+						// Guard (6): refracted sample's WORLD Y must be below
+						// sea_level. Full INV_PROJECTION + INV_VIEW path for
+						// the candidate (more expensive but only runs when all
+						// earlier guards pass — typically a minority of frags).
+						vec4 cand_clip = vec4(candidate_uv * 2.0 - 1.0, cand_ndc_z, 1.0);
+						vec4 cand_view4 = INV_PROJECTION_MATRIX * cand_clip;
+						vec3 cand_view_xyz = cand_view4.xyz / max(abs(cand_view4.w), 1e-4);
+						vec4 cand_world4 = INV_VIEW_MATRIX * vec4(cand_view_xyz, 1.0);
+						float cand_world_y = cand_world4.y / cand_world4.w;
+						bool passes_underwater = cand_world_y < sea_level;
+						if (passes_above && passes_silhouette && passes_underwater) {
+							refr_uv = candidate_uv;
+						}
 					}
 				}
 			}
@@ -346,6 +468,28 @@ void fragment() {
 	// grazing angles reflect sky (fresnel→1 drives sky tint).
 	vec3 water_col = mix(refracted_col, base_water, fresnel);
 	water_col = mix(water_col, color_sky_tint, fresnel * sky_tint_strength);
+
+	// ========================================================================
+	// STEP 3 — Custom in-shader SSR raymarch
+	// Restores object reflections (pillars, submerged rocks, metallic sphere)
+	// that were lost when Phase 0 disabled native SSR on this material.
+	// Distance LOD: full step count near, quartered past 500m to protect the
+	// frame budget. ReflectionProbe + sky cube contributions still come via
+	// SPECULAR below — this is additive on top of those, not a replacement.
+	// ========================================================================
+	int ssr_steps = int(mix(
+		float(ssr_max_steps),
+		float(max(ssr_max_steps / 4, 4)),
+		smoothstep(50.0, 500.0, v_vertex_dist)
+	));
+	vec4 ssr_result = ssr_trace(
+		surf_view, NORMAL, VIEW,
+		PROJECTION_MATRIX, INV_PROJECTION_MATRIX,
+		ssr_steps
+	);
+	// Fresnel-weighted: grazing angles show more reflection; steep angles
+	// dominated by refraction term. ssr_mix_strength as master knob.
+	water_col = mix(water_col, ssr_result.rgb, ssr_result.a * ssr_mix_strength * fresnel);
 
 	// ========================================================================
 	// COMPOSE — fully opaque

@@ -29,7 +29,7 @@ What works, what doesn't.
 
 | System | Notes |
 |--------|-------|
-| Ocean/Water | OceanManager, Gerstner waves, buoyancy — not wired into main scene |
+| Ocean/Water | OceanManager, FFT waves, GPU-readback buoyancy, real depth-driven Beer-Lambert absorption + refraction UV offset + custom in-shader SSR raymarch for object reflections (2026-04-06, Phases 5-6 in `docs/OCEAN_IMPROVEMENTS.md`). Native Godot 4.6 SSR is disabled on this material (declaring hint_depth_texture/hint_screen_texture kills the native SSR pass in Forward+); custom SSR trace ported from GodotSSRWater replaces it. Known residuals: waterline discontinuity on half-submerged objects, underwater POV renders as flat dark. Not wired into main scene. |
 | Weather/Sky | Sky3D addon installed, not integrated |
 | Character Controller | Basic FPS controller, no physics-based movement yet |
 

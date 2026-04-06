@@ -277,6 +277,12 @@ func _update_shader_parameters() -> void:
 	if not _ocean_mesh:
 		return
 	_ocean_mesh.set_wave_scale(wave_scale)
+	# Push sea_level to the ocean surface shader. Used by Guard (6) in
+	# ocean_fft.gdshader's refraction path to reject refracted samples whose
+	# world Y is above the waterline (tall rocks / pillar tops poking out).
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if mat:
+		mat.set_shader_parameter(&"sea_level", sea_level)
 
 
 # ============================================================================
