@@ -12,6 +12,7 @@ class_name BookViewer
 extends CanvasLayer
 
 const TextFormatterScript := preload("res://src/core/ui/text_formatter.gd")
+const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
 
 signal closed
 
@@ -128,21 +129,13 @@ func _build_ui() -> void:
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(overlay)
 
-	# Center panel — parchment-style book
+	# Center panel — parchment book (theme provides bg/border/padding/font)
 	_panel = PanelContainer.new()
+	_panel.theme = DEFAULT_THEME
 	_panel.set_anchors_preset(Control.PRESET_CENTER)
 	_panel.custom_minimum_size = Vector2(700, 500)
 	_panel.size = Vector2(700, 500)
 	_panel.position = Vector2(-350, -250)  # Center it
-
-	# Style the panel
-	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.91, 0.87, 0.78)  # Parchment
-	panel_style.border_color = Color(0.45, 0.35, 0.25)
-	panel_style.set_border_width_all(3)
-	panel_style.set_corner_radius_all(4)
-	panel_style.set_content_margin_all(20)
-	_panel.add_theme_stylebox_override("panel", panel_style)
 	add_child(_panel)
 
 	# VBox layout
@@ -156,41 +149,28 @@ func _build_ui() -> void:
 
 	_title_label = Label.new()
 	_title_label.text = "Book Title"
-	_title_label.add_theme_font_size_override("font_size", 22)
-	_title_label.add_theme_color_override("font_color", Color(0.25, 0.15, 0.1))
+	_title_label.theme_type_variation = "TitleLabel"
 	_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_bar.add_child(_title_label)
 
 	_close_button = Button.new()
 	_close_button.text = "✕"
 	_close_button.flat = true
-	_close_button.add_theme_font_size_override("font_size", 18)
+	_close_button.theme_type_variation = "CloseButton"
 	_close_button.pressed.connect(hide_book)
 	title_bar.add_child(_close_button)
 
 	# Separator line
 	var separator := HSeparator.new()
+	separator.theme_type_variation = "ParchmentSeparator"
 	separator.add_theme_constant_override("separation", 2)
-	var sep_style := StyleBoxFlat.new()
-	sep_style.bg_color = Color(0.45, 0.35, 0.25, 0.5)
-	sep_style.set_content_margin_all(0)
-	sep_style.content_margin_top = 1
-	sep_style.content_margin_bottom = 1
-	separator.add_theme_stylebox_override("separator", sep_style)
 	vbox.add_child(separator)
 
-	# Scrollable text area
+	# Scrollable text area (theme provides font_size, default color, empty background)
 	_text_display = RichTextLabel.new()
 	_text_display.bbcode_enabled = true
 	_text_display.fit_content = false
 	_text_display.scroll_active = true
 	_text_display.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_text_display.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_text_display.add_theme_font_size_override("normal_font_size", 16)
-	_text_display.add_theme_font_size_override("bold_font_size", 16)
-	_text_display.add_theme_font_size_override("italics_font_size", 16)
-	_text_display.add_theme_color_override("default_color", Color(0.15, 0.1, 0.05))
-	# Transparent background (panel provides the parchment color)
-	var empty_style := StyleBoxEmpty.new()
-	_text_display.add_theme_stylebox_override("normal", empty_style)
 	vbox.add_child(_text_display)

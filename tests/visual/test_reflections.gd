@@ -157,15 +157,72 @@ func _setup_ocean() -> void:
 
 
 func _setup_test_geometry() -> void:
-	# Seabed
-	var floor_mesh := MeshInstance3D.new()
-	floor_mesh.mesh = PlaneMesh.new()
-	floor_mesh.mesh.size = Vector2(500, 500)
-	floor_mesh.position = Vector3(0, -15, 0)
-	var floor_mat := StandardMaterial3D.new()
-	floor_mat.albedo_color = Color(0.35, 0.3, 0.25)
-	floor_mesh.material_override = floor_mat
-	add_child(floor_mesh)
+	# Bathymetry test bed — varied seafloor depths for validating depth-driven
+	# Beer-Lambert absorption and refraction UV offset in upcoming shader phases.
+	# Checker-textured so refraction distortion is visible to the eye.
+	var checker_tex: ImageTexture = _make_checker_texture(64, 8,
+		Color(0.55, 0.50, 0.40), Color(0.30, 0.28, 0.22))
+
+	var seabed_mat := StandardMaterial3D.new()
+	seabed_mat.albedo_texture = checker_tex
+	seabed_mat.uv1_scale = Vector3(10.0, 10.0, 1.0)
+	seabed_mat.roughness = 0.85
+
+	# Deep base floor — ambient seabed under everything, y = -25m (25m water column)
+	var base_floor := MeshInstance3D.new()
+	var base_plane := PlaneMesh.new()
+	base_plane.size = Vector2(500, 500)
+	base_floor.mesh = base_plane
+	base_floor.position = Vector3(0, -25, 0)
+	base_floor.material_override = seabed_mat
+	add_child(base_floor)
+
+	# Medium-depth mesa (central) — box with top at y=-8, bottom at y=-25
+	# 8m water column above the mesa top. Pillars will sit on this.
+	var mesa := MeshInstance3D.new()
+	var mesa_box := BoxMesh.new()
+	mesa_box.size = Vector3(80, 17, 80)
+	mesa.mesh = mesa_box
+	mesa.position = Vector3(0, -16.5, -10)  # center y so top at -8, bottom at -25
+	mesa.material_override = seabed_mat
+	add_child(mesa)
+
+	# Shallow shelf — box with top at y=-3 (3m water column), bottom at y=-25
+	var shelf := MeshInstance3D.new()
+	var shelf_box := BoxMesh.new()
+	shelf_box.size = Vector3(30, 22, 30)
+	shelf.mesh = shelf_box
+	shelf.position = Vector3(35, -14, 20)  # center y so top at -3
+	shelf.material_override = seabed_mat
+	add_child(shelf)
+
+	# Fully submerged rock near camera — top at y=-1 (1m underwater), bottom at y=-5
+	# This is the "invisible without refraction" canary. After Phase 1 it should
+	# become visible as a dim absorbed shape.
+	var rock := MeshInstance3D.new()
+	var rock_box := BoxMesh.new()
+	rock_box.size = Vector3(4, 4, 4)
+	rock.mesh = rock_box
+	rock.position = Vector3(-7, -3, 6)  # center y so top at -1, bottom at -5
+	var rock_mat := StandardMaterial3D.new()
+	rock_mat.albedo_color = Color(0.5, 0.45, 0.35)
+	rock_mat.roughness = 0.6
+	rock.material_override = rock_mat
+	add_child(rock)
+
+	# Half-submerged monolith — spans y=-5 to y=+5, crosses the waterline cleanly.
+	# After Phase 1 you should see its above-water and below-water parts with
+	# distinct appearance (absorbed tint below, fresnel reflection where visible).
+	var monolith := MeshInstance3D.new()
+	var mono_box := BoxMesh.new()
+	mono_box.size = Vector3(3, 10, 3)
+	monolith.mesh = mono_box
+	monolith.position = Vector3(7, 0, 6)  # center y=0, half above / half below
+	var mono_mat := StandardMaterial3D.new()
+	mono_mat.albedo_color = Color(0.85, 0.85, 0.90)  # bright so waterline cut is obvious
+	mono_mat.roughness = 0.7
+	monolith.material_override = mono_mat
+	add_child(monolith)
 
 	# DIAGNOSTIC: Glossy mirror plane next to ocean (StandardMaterial3D)
 	# If this reflects but ocean doesn't → shader issue. If neither reflects → env issue.
@@ -181,12 +238,14 @@ func _setup_test_geometry() -> void:
 	mirror.material_override = mirror_mat
 	add_child(mirror)
 
-	# Tall colorful pillars standing in water — should reflect via SSR
-	_add_pillar(Vector3(-10, 0, -15), Color(0.8, 0.2, 0.1), 2.0, 12.0)  # Red
-	_add_pillar(Vector3(10, 0, -15), Color(0.1, 0.6, 0.2), 2.0, 12.0)   # Green
-	_add_pillar(Vector3(0, 0, -25), Color(0.1, 0.2, 0.8), 2.0, 12.0)    # Blue
-	_add_pillar(Vector3(-20, 0, -5), Color(0.9, 0.8, 0.1), 2.0, 8.0)    # Yellow
-	_add_pillar(Vector3(20, 0, -5), Color(0.8, 0.1, 0.8), 2.0, 8.0)     # Purple
+	# Tall colorful pillars standing on the mesa (mesa top at y=-8).
+	# _add_pillar's position formula puts the pillar base at pos.y - 3, so to
+	# sit pillar bases on the mesa top (y=-8) we use pos.y = -5.
+	_add_pillar(Vector3(-12, -5, -15), Color(0.8, 0.2, 0.1), 2.0, 12.0)  # Red
+	_add_pillar(Vector3(12, -5, -15), Color(0.1, 0.6, 0.2), 2.0, 12.0)   # Green
+	_add_pillar(Vector3(0, -5, -25), Color(0.1, 0.2, 0.8), 2.0, 12.0)    # Blue
+	_add_pillar(Vector3(-20, -5, -5), Color(0.9, 0.8, 0.1), 2.0, 8.0)    # Yellow
+	_add_pillar(Vector3(20, -5, -5), Color(0.8, 0.1, 0.8), 2.0, 8.0)     # Purple
 
 	# Metallic sphere (should show sky/environment reflections)
 	var sphere := MeshInstance3D.new()
@@ -200,6 +259,17 @@ func _setup_test_geometry() -> void:
 	metal_mat.albedo_color = Color(0.9, 0.9, 0.9)
 	sphere.material_override = metal_mat
 	add_child(sphere)
+
+
+func _make_checker_texture(size_px: int, cell_px: int, a: Color, b: Color) -> ImageTexture:
+	# Procedural checkerboard used to make seafloor refraction distortion visually
+	# obvious when Phase 2 lands. Two-tone to keep grid axis alignment readable.
+	var img := Image.create(size_px, size_px, false, Image.FORMAT_RGBA8)
+	for y in size_px:
+		for x in size_px:
+			var cell: int = (x / cell_px + y / cell_px) & 1
+			img.set_pixel(x, y, a if cell == 0 else b)
+	return ImageTexture.create_from_image(img)
 
 
 func _add_pillar(pos: Vector3, color: Color, radius: float, height: float) -> void:

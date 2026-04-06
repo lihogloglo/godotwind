@@ -1,8 +1,8 @@
-## Visual test for underwater effects.
+## Visual test for underwater compositor effect.
 ##
 ## Standalone scene — no ESM loading, no asset streaming.
-## Tests: UnderwaterEffect caustics, absorption, light rays, boundary, wobble.
-## Ocean is initialized via OceanManager autoload.
+## Tests: UnderwaterCompositorEffect caustics, absorption, light rays, boundary, wobble.
+## Ocean is initialized via OceanManager autoload. Effect managed via ShaderManager.
 ##
 ## Controls:
 ##   RMB      = Hold to look, ZQSD to move, Space/Ctrl up/down
@@ -13,9 +13,9 @@
 ##   3        = Toggle wobble
 ##   4        = Toggle backscatter
 ##   5        = Toggle boundary effect
+##   6        = Cycle debug modes (depth, normals, caustic raw, etc.)
 ##   R        = Reset camera to underwater
 ##   G        = Reset camera to surface (boundary view)
-##   T/Y      = Time backward/forward (+1 hour)
 ##   +/-      = Adjust absorption rate
 ##   O        = Toggle ocean visibility
 extends Node3D
@@ -24,11 +24,17 @@ var _camera: Camera3D
 var _light: DirectionalLight3D
 var _world_env: WorldEnvironment
 var _debug_label: RichTextLabel
-@warning_ignore("untyped_declaration")
-var _underwater_effect = null
 var _ocean_enabled: bool = true
 var _mouse_captured: bool = false
 var _fly_speed: float = 15.0
+
+# Effect toggle states (independent of compositor — we set params to 0)
+var _caustics_on: bool = true
+var _rays_on: bool = true
+var _wobble_on: bool = true
+var _scatter_on: bool = true
+var _boundary_on: bool = true
+var _debug_mode: int = 0
 
 
 func _ready() -> void:
@@ -36,13 +42,14 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_underwater_geometry()
 	_setup_ocean()
+	_setup_underwater_volume()
 	_setup_ui()
 
 	# Start camera underwater
 	_camera.position = Vector3(0, -8, 20)
 	_camera.rotation_degrees = Vector3(-5, 0, 0)
 
-	Log.info("water", "Underwater test ready. RMB=fly, U=toggle effect, 1-5=toggle features, R=dive, G=surface")
+	Log.info("water", "Underwater test ready. RMB=fly, U=toggle effect, 1-5=toggle features, 6=debug, R=dive, G=surface")
 
 
 func _setup_environment() -> void:
@@ -78,6 +85,10 @@ func _setup_environment() -> void:
 	_world_env.environment = env
 	add_child(_world_env)
 
+	# Attach ShaderManager's compositor to our WorldEnvironment
+	# Without this, CompositorEffects (underwater, godrays, etc.) won't render
+	ShaderManager.attach_to(_world_env)
+
 	_light = DirectionalLight3D.new()
 	_light.name = "SunLight"
 	_light.rotation_degrees = Vector3(-45, -30, 0)
@@ -98,7 +109,7 @@ func _setup_camera() -> void:
 
 
 func _setup_underwater_geometry() -> void:
-	# Sea floor — large ground plane below water
+	# Sea floor
 	var floor_mesh := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(500, 500)
@@ -110,7 +121,7 @@ func _setup_underwater_geometry() -> void:
 	floor_mesh.material_override = floor_mat
 	add_child(floor_mesh)
 
-	# Underwater rocks — various shapes to see caustics on
+	# Rocks
 	var rock_mat := StandardMaterial3D.new()
 	rock_mat.albedo_color = Color(0.35, 0.3, 0.25)
 	rock_mat.roughness = 0.85
@@ -121,18 +132,15 @@ func _setup_underwater_geometry() -> void:
 	_add_rock(Vector3(5, -14, 10), Vector3(2.5, 1, 2.5), rock_mat)
 	_add_rock(Vector3(-6, -11, -8), Vector3(1.5, 3, 1.5), rock_mat)
 
-	# Coral-like colored objects
 	var coral_mat := StandardMaterial3D.new()
 	coral_mat.albedo_color = Color(0.6, 0.3, 0.25)
-	coral_mat.roughness = 0.7
 	_add_rock(Vector3(3, -14.5, -3), Vector3(0.8, 1.5, 0.8), coral_mat)
 
 	var coral_mat2 := StandardMaterial3D.new()
 	coral_mat2.albedo_color = Color(0.3, 0.5, 0.25)
-	coral_mat2.roughness = 0.7
 	_add_rock(Vector3(-4, -14.5, 6), Vector3(1.0, 2.0, 1.0), coral_mat2)
 
-	# Tall pillar extending above and below water (for boundary testing)
+	# Pillar crossing water surface (boundary testing)
 	var pillar := MeshInstance3D.new()
 	var box := BoxMesh.new()
 	box.size = Vector3(2, 25, 2)
@@ -140,29 +148,22 @@ func _setup_underwater_geometry() -> void:
 	pillar.position = Vector3(15, -5, 0)
 	var pillar_mat := StandardMaterial3D.new()
 	pillar_mat.albedo_color = Color(0.4, 0.38, 0.35)
-	pillar_mat.roughness = 0.8
 	pillar.material_override = pillar_mat
 	add_child(pillar)
 
-	# Arch structure
-	var arch_left := MeshInstance3D.new()
+	# Arch
 	var arch_box := BoxMesh.new()
 	arch_box.size = Vector3(1.5, 12, 1.5)
-	arch_left.mesh = arch_box
-	arch_left.position = Vector3(-15, -9, -10)
-	arch_left.material_override = rock_mat
-	add_child(arch_left)
-
-	var arch_right := MeshInstance3D.new()
-	arch_right.mesh = arch_box
-	arch_right.position = Vector3(-15, -9, -5)
-	arch_right.material_override = rock_mat
-	add_child(arch_right)
-
+	for pos in [Vector3(-15, -9, -10), Vector3(-15, -9, -5)]:
+		var arch := MeshInstance3D.new()
+		arch.mesh = arch_box
+		arch.position = pos
+		arch.material_override = rock_mat
+		add_child(arch)
 	var arch_top := MeshInstance3D.new()
-	var arch_top_box := BoxMesh.new()
-	arch_top_box.size = Vector3(1.5, 1.5, 7)
-	arch_top.mesh = arch_top_box
+	var atb := BoxMesh.new()
+	atb.size = Vector3(1.5, 1.5, 7)
+	arch_top.mesh = atb
 	arch_top.position = Vector3(-15, -4, -7.5)
 	arch_top.material_override = rock_mat
 	add_child(arch_top)
@@ -184,7 +185,7 @@ func _setup_ocean() -> void:
 		OceanManager.force_initialize()
 	OceanManager.set_camera(_camera)
 
-	# Override shore mask with all-water (white) for this test scene
+	# Override shore mask with all-water for test scene
 	var white_img := Image.create(1, 1, false, Image.FORMAT_L8)
 	white_img.set_pixel(0, 0, Color.WHITE)
 	var white_tex := ImageTexture.create_from_image(white_img)
@@ -192,23 +193,39 @@ func _setup_ocean() -> void:
 	if ocean_mesh:
 		ocean_mesh.set_shore_mask(white_tex, Rect2(-50000, -50000, 100000, 100000))
 
-	# Get the underwater effect from OceanManager (auto-created)
-	_underwater_effect = OceanManager.get_underwater_effect()
-	if _underwater_effect == null:
-		Log.warn("water", "UnderwaterEffect not available from OceanManager — creating standalone")
-		@warning_ignore("unsafe_method_access")
-		var UnderwaterEffectClass: GDScript = load("res://src/core/water/underwater_effect.gd") as GDScript
-		_underwater_effect = UnderwaterEffectClass.new()
-		_underwater_effect.name = "UnderwaterEffect"
-		add_child(_underwater_effect)
-		_underwater_effect.initialize(_camera, OceanManager.get_sea_level())
+	Log.info("water", "Ocean ready for underwater test")
 
-	Log.info("water", "Ocean + underwater effect ready for test")
+
+var _volume: UnderwaterVolume = null
+
+
+func _setup_underwater_volume() -> void:
+	# Step 0: volume-based caustics shader replacing the old compute effect.
+	_volume = UnderwaterVolume.new()
+	_volume.name = "UnderwaterVolume"
+	_volume.set_camera(_camera)
+	_volume.set_sun(_light)
+	_volume.set_sea_level(OceanManager.get_sea_level())
+	add_child(_volume)
+	Log.info("water", "UnderwaterVolume added (Step 0: caustics only)")
 
 
 func _process(delta: float) -> void:
 	_handle_fly_camera(delta)
+	_update_effect_params()
 	_update_debug_overlay()
+	if _volume != null:
+		_volume.set_sea_level(OceanManager.get_sea_level())
+
+
+func _update_effect_params() -> void:
+	# Step 0: old CompositorEffect underwater path is disabled in favor of the
+	# volume-based spatial shader (see _setup_underwater_volume). Force-disable
+	# it so the old broken effect doesn't overlap the new one. Full deletion of
+	# underwater_compositor_effect.gd + underwater.glsl is Step 5.
+	var effect: PostProcessEffect = OceanManager.get_underwater_effect()
+	if effect != null and effect.effect_enabled:
+		effect.effect_enabled = false
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -216,37 +233,30 @@ func _unhandled_input(event: InputEvent) -> void:
 		var key: InputEventKey = event as InputEventKey
 		match key.keycode:
 			KEY_U:
-				if _underwater_effect:
-					var enabled: bool = _underwater_effect.is_processing()
-					_underwater_effect.set_enabled(not enabled)
-					Log.info("water", "Underwater effect: %s" % ("ON" if not enabled else "OFF"))
+				if _volume != null:
+					_volume.enabled = not _volume.enabled
+					Log.info("water", "Underwater volume: %s" % ("ON" if _volume.enabled else "OFF"))
 			KEY_1:
-				if _underwater_effect:
-					_underwater_effect.caustics_enabled = not _underwater_effect.caustics_enabled
-					Log.info("water", "Caustics: %s" % ("ON" if _underwater_effect.caustics_enabled else "OFF"))
+				_caustics_on = not _caustics_on
+				Log.info("water", "Caustics: %s" % ("ON" if _caustics_on else "OFF"))
 			KEY_2:
-				if _underwater_effect:
-					_underwater_effect.rays_enabled = not _underwater_effect.rays_enabled
-					Log.info("water", "Light rays: %s" % ("ON" if _underwater_effect.rays_enabled else "OFF"))
+				_rays_on = not _rays_on
+				Log.info("water", "Light rays: %s" % ("ON" if _rays_on else "OFF"))
 			KEY_3:
-				if _underwater_effect:
-					_underwater_effect.wobble_enabled = not _underwater_effect.wobble_enabled
-					Log.info("water", "Wobble: %s" % ("ON" if _underwater_effect.wobble_enabled else "OFF"))
+				_wobble_on = not _wobble_on
+				Log.info("water", "Wobble: %s" % ("ON" if _wobble_on else "OFF"))
 			KEY_4:
-				if _underwater_effect:
-					_underwater_effect.backscatter_enabled = not _underwater_effect.backscatter_enabled
-					Log.info("water", "Backscatter: %s" % ("ON" if _underwater_effect.backscatter_enabled else "OFF"))
+				_scatter_on = not _scatter_on
+				Log.info("water", "Backscatter: %s" % ("ON" if _scatter_on else "OFF"))
 			KEY_5:
-				if _underwater_effect:
-					_underwater_effect.boundary_enabled = not _underwater_effect.boundary_enabled
-					Log.info("water", "Boundary: %s" % ("ON" if _underwater_effect.boundary_enabled else "OFF"))
+				_boundary_on = not _boundary_on
+				Log.info("water", "Boundary: %s" % ("ON" if _boundary_on else "OFF"))
 			KEY_6:
-				if _underwater_effect:
-					@warning_ignore("unsafe_method_access")
-					_underwater_effect.debug_mode = (_underwater_effect.debug_mode + 1) % 7
-					var mode_names := ["OFF", "water_depth", "world_pos.y", "underwater_mask", "caustic_raw", "world_normal", "linear_depth"]
-					@warning_ignore("unsafe_method_access")
-					Log.info("water", "Debug mode: %s" % mode_names[_underwater_effect.debug_mode])
+				_debug_mode = (_debug_mode + 1) % 11
+				var names := ["OFF", "water_depth", "world_pos.y", "underwater_mask",
+					"caustic_raw", "world_normal", "linear_depth",
+					"cam_pos_sentinel", "worldpos_bands_10m", "raw_depth", "inv_proj_diag"]
+				Log.info("water", "Debug mode: %s" % names[_debug_mode])
 			KEY_R:
 				_camera.position = Vector3(0, -8, 20)
 				_camera.rotation_degrees = Vector3(-5, 0, 0)
@@ -277,17 +287,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		_camera.rotation_degrees.x = clampf(_camera.rotation_degrees.x, -89, 89)
 
 
-@warning_ignore("unsafe_method_access")
 func _adjust_absorption(delta_val: float) -> void:
-	if _underwater_effect == null:
-		return
-	var mat = _underwater_effect.get_material()
-	if mat == null:
-		return
-	var rate = mat.get_shader_parameter("absorption_rate")
+	var rate = ShaderManager.get_effect_param("underwater", "absorption_rate")
 	if rate == null:
 		rate = 0.0015
-	_underwater_effect.set_absorption_rate(clampf(float(rate) + delta_val, 0.0005, 0.01))
+	ShaderManager.set_effect_param("underwater", "absorption_rate", clampf(float(rate) + delta_val, 0.0005, 0.01))
 
 
 func _handle_fly_camera(delta: float) -> void:
@@ -331,7 +335,7 @@ func _update_debug_overlay() -> void:
 		return
 
 	var lines: PackedStringArray = PackedStringArray()
-	lines.append("[b]UNDERWATER TEST[/b]")
+	lines.append("[b]UNDERWATER TEST (CompositorEffect)[/b]")
 	lines.append("")
 
 	var sea: float = OceanManager.get_sea_level()
@@ -347,28 +351,27 @@ func _update_debug_overlay() -> void:
 		lines.append("[color=green]ABOVE WATER[/color]")
 	lines.append("")
 
-	if _underwater_effect:
-		lines.append("[b]Effects:[/b]")
-		lines.append("  [1] Caustics: %s" % ("[color=cyan]ON[/color]" if _underwater_effect.caustics_enabled else "[color=red]OFF[/color]"))
-		lines.append("  [2] Rays:     %s" % ("[color=cyan]ON[/color]" if _underwater_effect.rays_enabled else "[color=red]OFF[/color]"))
-		lines.append("  [3] Wobble:   %s" % ("[color=cyan]ON[/color]" if _underwater_effect.wobble_enabled else "[color=red]OFF[/color]"))
-		lines.append("  [4] Scatter:  %s" % ("[color=cyan]ON[/color]" if _underwater_effect.backscatter_enabled else "[color=red]OFF[/color]"))
-		lines.append("  [5] Boundary: %s" % ("[color=cyan]ON[/color]" if _underwater_effect.boundary_enabled else "[color=red]OFF[/color]"))
-		@warning_ignore("unsafe_method_access")
-		var mat = _underwater_effect.get_material()
-		if mat:
-			var rate = mat.get_shader_parameter("absorption_rate")
-			if rate != null:
-				lines.append("  Absorption: %.4f [+/-]" % float(rate))
+	var effect: PostProcessEffect = OceanManager.get_underwater_effect()
+	if effect:
+		var active: bool = ShaderManager.is_effect_enabled("underwater")
+		lines.append("[b]Effect:[/b] %s" % ("[color=cyan]ACTIVE[/color]" if active else "[color=red]INACTIVE[/color]"))
+		lines.append("  [1] Caustics: %s" % _on_off(_caustics_on))
+		lines.append("  [2] Rays:     %s" % _on_off(_rays_on))
+		lines.append("  [3] Wobble:   %s" % _on_off(_wobble_on))
+		lines.append("  [4] Scatter:  %s" % _on_off(_scatter_on))
+		lines.append("  [5] Boundary: %s" % _on_off(_boundary_on))
+		var rate = ShaderManager.get_effect_param("underwater", "absorption_rate")
+		if rate != null:
+			lines.append("  Absorption: %.4f [+/-]" % float(rate))
 	else:
-		lines.append("[color=red]No underwater effect[/color]")
+		lines.append("[color=red]No underwater effect loaded[/color]")
 	lines.append("")
 
-	@warning_ignore("unsafe_method_access")
-	var dbg: int = _underwater_effect.debug_mode if _underwater_effect else 0
-	if dbg > 0:
-		var mode_names := ["", "water_depth", "world_pos.y", "underwater_mask", "caustic_raw", "world_normal", "linear_depth"]
-		lines.append("[color=orange][b]DEBUG: %s[/b][/color]" % mode_names[dbg])
+	if _debug_mode > 0:
+		var names := ["", "water_depth", "world_pos.y", "underwater_mask", "caustic_raw",
+			"world_normal", "linear_depth", "cam_pos_sentinel", "worldpos_bands_10m",
+			"raw_depth", "inv_proj_diag"]
+		lines.append("[color=orange][b]DEBUG: %s[/b][/color]" % names[_debug_mode])
 	lines.append("")
 
 	lines.append("[b]Controls:[/b]")
@@ -378,3 +381,7 @@ func _update_debug_overlay() -> void:
 	lines.append("  R = Dive | G = Surface | 6 = Debug mode")
 
 	_debug_label.text = "\n".join(lines)
+
+
+func _on_off(val: bool) -> String:
+	return "[color=cyan]ON[/color]" if val else "[color=red]OFF[/color]"

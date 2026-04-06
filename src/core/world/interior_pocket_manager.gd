@@ -55,6 +55,17 @@ const EVICT_RADIUS_SQ: float = EVICT_RADIUS * EVICT_RADIUS
 ## Grace period before evicting a pocket after leaving (seconds)
 const EVICT_GRACE_PERIOD: float = 10.0
 
+## Hard cap on how long the fade-to-black fallback waits for an in-flight
+## pocket load before giving up, logging an error, and bailing back to the
+## exterior. Should never trigger on a healthy prebake — presence of this
+## timeout only matters for catastrophic failures.
+const INTERIOR_LOAD_TIMEOUT: float = 2.0
+
+## Fast-path radius — if the player is within INTERACT_RADIUS * this when
+## the async load completes, skip the 2-frame finish-up spread and run it
+## all in one frame. Single-pass walk (P1.0) makes the spike acceptable.
+const FAST_PATH_RADIUS_MULT: float = 2.0
+
 ## Render layer masks
 const EXTERIOR_RENDER_LAYERS: int = 0x3      # Layers 1-2 (bits 0-1)
 const INTERIOR_RENDER_LAYERS: int = 0xC      # Layers 3-4 (bits 2-3)
@@ -155,6 +166,20 @@ class PocketSlot:
 	var physics_layer_mask: int = 0
 	var doors_inside: Array[DoorInfo] = []  ## Doors within this interior
 
+	## Async load tracking — non-negative when an async request is in flight.
+	## Set by _load_pocket() after CellManager.request_cell_async(); cleared
+	## when the result is consumed or the request is cancelled/times out.
+	var async_request_id: int = -1
+	## Finish-up phase counter. -1 = not in finish-up (either idle or async
+	## still loading), 0 = placement + single-pass walk pending, 1 = lightbox
+	## and light setup pending. Finish-up runs one phase per frame to spread
+	## work, or collapses to a single frame when the player is already at
+	## the door (fast path).
+	var finish_up_phase: int = -1
+	## AABB computed during the single-pass walk in phase 0. Reused by phase
+	## 1 when building the lightbox mesh, so the walk only happens once.
+	var finish_up_aabb: AABB = AABB()
+
 	func get_offset() -> Vector3:
 		return Vector3(slot_index * POCKET_SPACING_X, POCKET_BASE_Y, 0.0)
 
@@ -168,6 +193,9 @@ class PocketSlot:
 		is_occupied = false
 		is_loading = false
 		evict_timer = -1.0
+		async_request_id = -1
+		finish_up_phase = -1
+		finish_up_aabb = AABB()
 		doors_inside.clear()
 
 #endregion
@@ -269,6 +297,10 @@ signal transition_started(target_cell: String)
 signal transition_completed(cell_name: String)
 signal pocket_loaded(cell_name: String, slot_index: int)
 signal pocket_evicted(cell_name: String)
+## Emitted when a pocket load exceeds INTERIOR_LOAD_TIMEOUT while the player
+## is waiting at the door (fade-to-black bridge path). The transition is
+## aborted and the pocket is cleared.
+signal interior_load_timeout(cell_name: String, request_id: int)
 
 #endregion
 
@@ -532,6 +564,13 @@ func _identify_building_for_door(door: DoorInfo, cell_record: CellRecord) -> voi
 
 ## Call each frame with the player's world position
 func update(player_pos: Vector3, delta: float) -> void:
+	# Drive async pocket loads and their finish-up phases even while a
+	# transition is in progress — the fade-to-black bridge depends on this
+	# pump to drain the load. The transition guard below only affects
+	# door-detection and proximity triggering.
+	_update_async_loads()
+	_update_pocket_finish_up()
+
 	if _is_transitioning:
 		return
 
@@ -711,14 +750,50 @@ func _evict_oldest_pocket() -> PocketSlot:
 			oldest_time = slot.last_access_time
 			oldest = slot
 
+	# If no fully-occupied slot is available, try to cancel the oldest
+	# in-flight async load. Without this, both slots stuck in is_loading
+	# (e.g. if the user rushes past multiple doors faster than they can
+	# finish loading) would permanently wedge the pocket pool. We prefer
+	# killing a stale in-flight load over dropping the new request.
+	if not oldest:
+		var loading_oldest: PocketSlot = null
+		var loading_oldest_time: float = INF
+		for slot: PocketSlot in _slots:
+			if slot == _active_pocket:
+				continue
+			if slot.is_loading and slot.last_access_time < loading_oldest_time:
+				loading_oldest_time = slot.last_access_time
+				loading_oldest = slot
+		if loading_oldest:
+			Log.info("streaming", "[POCKET] Evicting in-flight load for '%s' to free slot %d" % [
+				loading_oldest.cell_name, loading_oldest.slot_index])
+			if loading_oldest.async_request_id >= 0 and _cell_manager:
+				_cell_manager.cancel_async_request(loading_oldest.async_request_id)
+			loading_oldest.clear()
+			return loading_oldest
+
 	if oldest:
 		_evict_pocket(oldest)
 	return oldest
 
 
+## Start loading a pocket ASYNC. Returns immediately — the load completes
+## over multiple frames via _update_async_loads() and _update_pocket_finish_up().
+##
+## Pre-P0 this was a synchronous blocking call to CellManager.load_cell()
+## that stalled the main thread for 35-250ms on approach. The async path
+## uses CellManager.request_cell_async() with a LoadProfile.interior_pocket()
+## that disables the static-renderer batching path (which would otherwise
+## render interior objects at ESM world position, not the pocket offset).
+##
+## Fallback: if async is unavailable (no background processor or capacity
+## full) this falls back to the old sync path so the load still happens,
+## just with the historical hiccup.
 func _load_pocket(slot: PocketSlot, cell_name: String) -> void:
 	slot.is_loading = true
 	slot.cell_name = cell_name
+	slot.async_request_id = -1
+	slot.finish_up_phase = -1
 
 	Log.info("streaming", "[POCKET] Loading '%s' into slot %d" % [cell_name, slot.slot_index])
 
@@ -742,90 +817,139 @@ func _load_pocket(slot: PocketSlot, cell_name: String) -> void:
 		slot.cell_record = null
 		return
 
-	# Disable exterior streaming optimizations for pocket loads:
-	# - fade-in: pockets at Y=-500 are invisible, fade causes stencil-read race condition
-	# - static renderer: RS instances render at ESM world position, not pocket offset,
-	#   and don't get INTERIOR_RENDER_LAYERS applied (they're not Node3D children)
-	# - multimesh instancing: same issue — batched instances bypass pocket positioning
-	# - max_actor_distance: camera is at exterior position during pocket load, but
-	#   interior NPCs use small cell-local coords — distance check would skip all NPCs
-	# Interior cells are small rooms — these exterior optimizations aren't needed.
-	var prev_fade_in: bool = _cell_manager._instantiator.enable_fade_in
-	var prev_static_cm: bool = _cell_manager.use_static_renderer
-	var prev_static_inst: bool = _cell_manager._instantiator.use_static_renderer
-	var prev_multimesh: bool = _cell_manager.use_multimesh_instancing
-	var prev_actor_dist: float = _cell_manager._instantiator.max_actor_distance
-	_cell_manager._instantiator.enable_fade_in = false
-	_cell_manager.use_static_renderer = false
-	_cell_manager._instantiator.use_static_renderer = false  # Must sync — instantiator has its own copy
-	_cell_manager.use_multimesh_instancing = false
-	_cell_manager._instantiator.max_actor_distance = 0.0  # Disable distance check for interior NPCs
-	Log.info("streaming", "[POCKET] CellManager options saved, loading cell geometry...")
+	# Build the per-request LoadProfile for interior pockets. This replaces
+	# the save/restore dance that used to mutate shared instantiator flags.
+	# See CellManager.LoadProfile.interior_pocket() for the settings.
+	var profile: Variant = null
+	var LoadProfileScript: Variant = CellManagerScript.LoadProfile
+	if LoadProfileScript:
+		profile = LoadProfileScript.interior_pocket()
 
-	# Load cell geometry
+	# Try async first
+	if _cell_manager.has_async_capacity():
+		var request_id: int = _cell_manager.request_cell_async(cell_name, profile)
+		if request_id >= 0:
+			slot.async_request_id = request_id
+			Log.info("streaming", "[POCKET] async load started (req=%d) for '%s'" % [request_id, cell_name])
+			return
+
+	# Fallback: sync load (BG processor unavailable or at capacity). This
+	# path still has the historical hiccup but at least the load completes.
+	Log.warn("streaming", "[POCKET] async unavailable, falling back to sync load for '%s'" % cell_name)
 	var cell_node: Node3D = _cell_manager.load_cell(cell_name)
-
-	# Restore settings regardless of load result
-	_cell_manager._instantiator.enable_fade_in = prev_fade_in
-	_cell_manager.use_static_renderer = prev_static_cm
-	_cell_manager._instantiator.use_static_renderer = prev_static_inst
-	_cell_manager.use_multimesh_instancing = prev_multimesh
-	_cell_manager._instantiator.max_actor_distance = prev_actor_dist
-	Log.info("streaming", "[POCKET] CellManager options restored")
-
 	if not cell_node:
-		Log.error("streaming", "[POCKET] load_cell() returned null for '%s'" % cell_name)
+		Log.error("streaming", "[POCKET] sync load_cell() returned null for '%s'" % cell_name)
 		slot.is_loading = false
 		slot.cell_name = ""
 		slot.cell_record = null
 		return
-
-	Log.info("streaming", "[POCKET] Cell loaded: %d children" % cell_node.get_child_count())
-
-	# Position at slot offset
-	cell_node.position = slot.get_offset()
-
-	# Diagnostic: log loaded references for stray model investigation
-	var child_count: int = cell_node.get_child_count()
-	Log.info("streaming", "Pocket '%s': %d objects loaded" % [cell_name, child_count])
-	if child_count < 200:  # Only log details for small-ish cells
-		for child in cell_node.get_children():
-			var model_path: String = str(child.get_meta("model_path", ""))
-			if not model_path.is_empty():
-				Log.debug("streaming", "  Pocket obj: '%s' model=%s pos=%s" % [
-					child.name, model_path.get_file(), child.position])
-
-	# Apply render layer isolation
-	_set_layers_recursive(cell_node, INTERIOR_RENDER_LAYERS)
-
-	# Apply physics layer isolation
-	_set_physics_layers_recursive(cell_node, slot.physics_layer_mask)
-
-	# Add to pocket container
-	_pocket_container.add_child(cell_node)
 	slot.cell_node = cell_node
+	_begin_pocket_finish_up(slot, true)  # collapse all phases (sync load = hiccup already happened)
 
-	# Build interior environment from AMBI data
-	slot.interior_environment = _build_interior_environment(cell_record)
 
-	# Register doors inside this interior
+## Poll in-flight async pocket loads and move them into finish-up when done.
+## Called from update() every frame.
+func _update_async_loads() -> void:
+	if not _cell_manager:
+		return
+	for slot: PocketSlot in _slots:
+		if slot.async_request_id < 0:
+			continue
+		var complete: bool = _cell_manager.is_async_complete(slot.async_request_id)
+		# Periodic diagnostic so a wedged async pipeline is visible in logs.
+		# Cheap — runs only for slots with an in-flight request (usually 0-2).
+		if Engine.get_frames_drawn() % 60 == 0:
+			Log.debug("streaming", "[POCKET] _update_async_loads: slot %d '%s' req=%d complete=%s queue=%d" % [
+				slot.slot_index, slot.cell_name, slot.async_request_id, complete,
+				_cell_manager.get_instantiation_queue_size()])
+		if not complete:
+			continue
+
+		var cell_node: Node3D = _cell_manager.get_async_result(slot.async_request_id)
+		var request_id: int = slot.async_request_id
+		slot.async_request_id = -1
+
+		if not cell_node:
+			Log.error("streaming", "[POCKET] async result null for req=%d, cell='%s'" % [
+				request_id, slot.cell_name])
+			slot.is_loading = false
+			slot.cell_name = ""
+			slot.cell_record = null
+			continue
+
+		Log.info("streaming", "[POCKET] async complete: req=%d '%s' (%d children) → finish-up" % [
+			request_id, slot.cell_name, cell_node.get_child_count()])
+		slot.cell_node = cell_node
+
+		# Fast path: if the player is already right at the door, collapse
+		# the finish-up spread into a single frame. Single-pass walk (P1.0)
+		# keeps the spike bounded and it's strictly better than showing
+		# unlit empty geometry while the phases spread.
+		var collapse := false
+		var closest_door: DoorInfo = _find_closest_door_for_cell(slot.cell_name)
+		if closest_door and _camera:
+			var fast_r: float = INTERACT_RADIUS * FAST_PATH_RADIUS_MULT
+			if _camera.global_position.distance_squared_to(closest_door.world_position) < fast_r * fast_r:
+				collapse = true
+
+		_begin_pocket_finish_up(slot, collapse)
+
+
+## Start the finish-up pipeline for a slot whose cell_node is now populated.
+## collapse = true runs all phases synchronously on the current frame;
+## collapse = false spreads them across 2 frames via _update_pocket_finish_up().
+func _begin_pocket_finish_up(slot: PocketSlot, collapse: bool) -> void:
+	if not slot.cell_node or not is_instance_valid(slot.cell_node):
+		Log.error("streaming", "[POCKET] finish-up called with invalid cell_node for '%s'" % slot.cell_name)
+		slot.is_loading = false
+		slot.cell_name = ""
+		return
+
+	# F0 — Placement. Position the cell_node at the pocket offset, make it
+	# invisible (layers haven't been applied yet), add to pocket container.
+	slot.cell_node.position = slot.get_offset()
+	slot.cell_node.visible = false
+	_pocket_container.add_child(slot.cell_node)
+
+	# F0 — Single-pass walk: apply render layers, physics layers, collect AABB.
+	# Replaces 3 separate O(n) walks. Also registers doors found during the walk.
+	slot.finish_up_aabb = _finalize_cell_node(
+		slot.cell_node, INTERIOR_RENDER_LAYERS, slot.physics_layer_mask
+	)
+
+	# F0 — Build interior environment from AMBI data
+	slot.interior_environment = _build_interior_environment(slot.cell_record)
+
+	# F0 — Register doors inside this interior
 	_register_interior_doors(slot)
 
-	# Add light-blocking box around interior geometry.
-	# MW interior meshes have gaps that let exterior sun leak through.
-	# A black box on interior layers blocks stray light and provides a
-	# dark void background visible through any holes.
-	_add_lightbox(cell_node)
+	if collapse:
+		_pocket_finish_up_phase_1(slot)
+	else:
+		slot.finish_up_phase = 1  # Phase 1 runs next frame via _update_pocket_finish_up
+
+
+## Phase 1: lightbox, light animator, shadow budget, visibility flip.
+## Runs either on the frame after finish-up started (spread path) or
+## immediately after phase 0 in the collapse path.
+func _pocket_finish_up_phase_1(slot: PocketSlot) -> void:
+	if not slot.cell_node or not is_instance_valid(slot.cell_node):
+		slot.finish_up_phase = -1
+		return
+
+	# Add light-blocking box using the AABB captured in phase 0. MW interior
+	# meshes have gaps that let exterior sun leak through — the box provides
+	# a dark void background on interior layers.
+	if slot.finish_up_aabb.size.length_squared() >= 0.01:
+		_add_lightbox_from_aabb(slot.cell_node, slot.finish_up_aabb)
 
 	# Add light animator for flicker/pulse effects
-	var light_count := _count_lights(cell_node)
+	var light_count := _count_lights(slot.cell_node)
 	if light_count > 0:
 		var animator: Node = LightAnimatorScript.new()
 		animator.name = "LightAnimator"
-		cell_node.add_child(animator)
+		slot.cell_node.add_child(animator)
 
-		# Add shadow budget manager with interior-appropriate thresholds.
-		# Morrowind interiors have 5-15 lights — generous budget is fine.
 		var shadow_budget: Node = LightShadowBudgetScript.new()
 		shadow_budget.name = "LightShadowBudget"
 		shadow_budget.camera = _camera
@@ -834,31 +958,103 @@ func _load_pocket(slot: PocketSlot, cell_name: String) -> void:
 		shadow_budget.shadow_cube_disable = 20.0
 		shadow_budget.shadow_dual_enable = 48.0
 		shadow_budget.shadow_dual_disable = 50.0
-		cell_node.add_child(shadow_budget)
+		slot.cell_node.add_child(shadow_budget)
+
+	# Finally make the pocket visible now that layers, physics, and lightbox
+	# are all in place. Visible BEFORE marking occupied so the first frame
+	# of rendering sees the correct state.
+	slot.cell_node.visible = true
 
 	# Mark as loaded
 	slot.is_occupied = true
 	slot.is_loading = false
+	slot.finish_up_phase = -1
 	slot.last_access_time = Time.get_ticks_msec() / 1000.0
 	slot.evict_timer = -1.0
 
 	Log.info("streaming", "Interior pocket loaded: '%s' (slot %d, %d objects, %d doors, %d lights)" % [
-		cell_name, slot.slot_index, cell_node.get_child_count(), slot.doors_inside.size(), light_count
+		slot.cell_name, slot.slot_index, slot.cell_node.get_child_count(),
+		slot.doors_inside.size(), light_count
 	])
-	pocket_loaded.emit(cell_name, slot.slot_index)
+	pocket_loaded.emit(slot.cell_name, slot.slot_index)
+
+
+## Per-frame driver for the phase-1 finish-up step. Called from update().
+func _update_pocket_finish_up() -> void:
+	for slot: PocketSlot in _slots:
+		if slot.finish_up_phase == 1:
+			_pocket_finish_up_phase_1(slot)
+
+
+## Single-pass recursive tree walk over a pocket cell subtree:
+##  - every VisualInstance3D gets its render layers set
+##  - every Light3D gets its light_cull_mask set (must match render layers
+##    or the light won't illuminate interior geometry)
+##  - every CollisionObject3D gets its collision layers/mask set
+##  - every MeshInstance3D's AABB is accumulated into a root-local combined
+##    AABB, which is returned for the lightbox step
+##
+## Replaces three separate O(n) walks (render layers / physics / AABB) with
+## one iterative pass. The old ipm._set_layers_recursive /
+## _set_physics_layers_recursive / _collect_lightbox_aabb_inner have been
+## deleted — this is the single source of truth for pocket finalization.
+func _finalize_cell_node(root: Node3D, layer_mask: int, physics_mask: int) -> AABB:
+	var combined := AABB()
+	var has_any := false
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is VisualInstance3D:
+			(node as VisualInstance3D).layers = layer_mask
+		if node is Light3D:
+			(node as Light3D).light_cull_mask = layer_mask
+		if node is CollisionObject3D:
+			var co: CollisionObject3D = node
+			co.collision_layer = physics_mask
+			co.collision_mask = physics_mask
+		if node is MeshInstance3D:
+			var mi: MeshInstance3D = node
+			if mi.mesh:
+				# Transform local AABB into root-local space
+				var local_aabb: AABB = mi.mesh.get_aabb()
+				var xf: Transform3D = root.global_transform.affine_inverse() * mi.global_transform
+				var world_aabb: AABB = xf * local_aabb
+				if has_any:
+					combined = combined.merge(world_aabb)
+				else:
+					combined = world_aabb
+					has_any = true
+		for child in node.get_children():
+			stack.push_back(child)
+	return combined
+
+
+## Find the closest registered door (exterior or interior) whose target
+## cell matches `cell_name`. Used by the async completion fast-path check.
+func _find_closest_door_for_cell(cell_name: String) -> DoorInfo:
+	if not _camera:
+		return null
+	var closest: DoorInfo = null
+	var closest_dist_sq := INF
+	var player_pos := _camera.global_position
+	for door: DoorInfo in _exterior_doors:
+		if door.target_cell_name != cell_name:
+			continue
+		var d := player_pos.distance_squared_to(door.world_position)
+		if d < closest_dist_sq:
+			closest_dist_sq = d
+			closest = door
+	return closest
 
 
 ## Add a black box around interior geometry to block exterior sun leaking through gaps.
-## Sized from the cell_node descendants' combined AABB + margin. Interior layers only.
-func _add_lightbox(cell_node: Node3D) -> void:
-	# Compute combined AABB of all MeshInstance3D descendants in local space
-	var combined_aabb: AABB = _collect_lightbox_aabb_inner(cell_node, cell_node, AABB(), false)
-	if combined_aabb.size.length_squared() < 0.01:
-		Log.debug("streaming", "Lightbox: no mesh descendants found, skipping")
-		return
-
-	# Expand by margin to avoid clipping through interior walls
-	combined_aabb = combined_aabb.grow(2.0)
+## Uses a pre-computed AABB (typically captured by _finalize_cell_node during
+## the single-pass walk) to avoid re-traversing the subtree.
+func _add_lightbox_from_aabb(cell_node: Node3D, aabb: AABB) -> void:
+	# Expand by margin to avoid clipping through interior walls.
+	# 2m safety margin is fine even for tiny closet interiors — closet is
+	# typically ~5m so 9m total, comfortably below POCKET_SPACING_X (1km).
+	var combined_aabb: AABB = aabb.grow(2.0)
 
 	var box_mesh := BoxMesh.new()
 	box_mesh.size = combined_aabb.size
@@ -885,27 +1081,6 @@ func _add_lightbox(cell_node: Node3D) -> void:
 
 	cell_node.add_child(box_instance)
 	Log.info("streaming", "Added lightbox: size=%s center=%s" % [combined_aabb.size, combined_aabb.get_center()])
-
-
-## Recursively collect AABB from all MeshInstance3D descendants in cell_root local space.
-func _collect_lightbox_aabb_inner(node: Node, cell_root: Node3D, aabb: AABB, found: bool) -> AABB:
-	if node is MeshInstance3D:
-		var mi := node as MeshInstance3D
-		if mi.mesh:
-			var mesh_aabb: AABB = mi.mesh.get_aabb()
-			# Transform to cell_root local space: get relative transform from mi to cell_root
-			var rel_xf: Transform3D = cell_root.global_transform.affine_inverse() * mi.global_transform
-			var local_aabb: AABB = rel_xf * mesh_aabb
-			if not found:
-				aabb = local_aabb
-				found = true
-			else:
-				aabb = aabb.merge(local_aabb)
-	for child in node.get_children():
-		aabb = _collect_lightbox_aabb_inner(child, cell_root, aabb, found)
-		if aabb.size.length_squared() > 0.01:
-			found = true
-	return aabb
 
 
 func _evict_pocket(slot: PocketSlot) -> void:
@@ -955,18 +1130,79 @@ func enter_interior(door: DoorInfo) -> bool:
 		Log.warn("streaming", "[ENTER] Blocked — already transitioning")
 		return false
 
-	# Ensure pocket is loaded
+	# Trigger the load if it hasn't started yet
 	Log.info("streaming", "[ENTER] Step 1: _ensure_pocket_loaded('%s')" % door.target_cell_name)
 	_ensure_pocket_loaded(door.target_cell_name)
-	Log.info("streaming", "[ENTER] Step 1 done: pocket loaded")
 
-	# Find the slot
-	var slot: PocketSlot = _get_slot_for_cell(door.target_cell_name)
-	if not slot or not slot.is_occupied:
-		Log.error("streaming", "[ENTER] FAILED — pocket not loaded: '%s' (slot=%s, occupied=%s)" % [
-			door.target_cell_name,
-			"found" if slot else "null",
-			str(slot.is_occupied) if slot else "n/a"])
+	# Find the slot — use relaxed lookup so the fade-to-black bridge can
+	# find a slot that's still loading (is_loading=true, is_occupied=false).
+	# Strict _get_slot_for_cell would return null here and drop us into the
+	# error path, defeating the whole point of the bridge.
+	var slot: PocketSlot = _get_slot_for_cell_any(door.target_cell_name)
+	if not slot:
+		Log.error("streaming", "[ENTER] FAILED — no slot for '%s'" % door.target_cell_name)
+		return false
+
+	# FADE-TO-BLACK BRIDGE: If the pocket is still loading (async in-flight
+	# or finish-up phases pending), fade to black first, boost the interior
+	# load to the priority lane, wait for completion with a hard timeout,
+	# then continue with the transition. This trades a brief black screen
+	# (max ~INTERIOR_LOAD_TIMEOUT) for a guaranteed non-hiccup transition.
+	if slot.is_loading or slot.finish_up_phase >= 0:
+		_is_transitioning = true
+		transition_started.emit(door.target_cell_name)
+
+		# Boost the in-flight interior load ahead of exterior streaming work
+		if slot.async_request_id >= 0 and _cell_manager:
+			_cell_manager.set_request_priority(slot.async_request_id, true)
+			_cell_manager.force_queue_resort()
+
+		# Fade out first so the player doesn't see half-lit geometry pop in
+		await _fade(0.0, 1.0, FADE_DURATION)
+
+		# Wait for load to complete, with hard timeout
+		var wait_start_ms: int = Time.get_ticks_msec()
+		var timeout_ms: int = int(INTERIOR_LOAD_TIMEOUT * 1000.0)
+		while slot.is_loading or slot.finish_up_phase >= 0:
+			if Time.get_ticks_msec() - wait_start_ms > timeout_ms:
+				var rid: int = slot.async_request_id
+				Log.error("streaming", "[ENTER] Load timeout (%.1fs) for '%s' (req=%d)" % [
+					INTERIOR_LOAD_TIMEOUT, door.target_cell_name, rid])
+				interior_load_timeout.emit(door.target_cell_name, rid)
+				if rid >= 0:
+					_cell_manager.cancel_async_request(rid)
+				slot.clear()
+				# Fade back in to exterior
+				await _fade(1.0, 0.0, FADE_DURATION)
+				_is_transitioning = false
+				return false
+			await get_tree().process_frame
+
+		# Load done — the slot is now occupied. Continue with the teleport
+		# and fade-in. We skip the usual _do_transition() fade-out because
+		# we've already done it during the bridge.
+		if not slot.is_occupied or not slot.cell_node or not is_instance_valid(slot.cell_node):
+			Log.error("streaming", "[ENTER] Load completed but slot invalid for '%s'" % door.target_cell_name)
+			await _fade(1.0, 0.0, FADE_DURATION)
+			_is_transitioning = false
+			return false
+
+		var dest_pos_br: Vector3 = door.get_teleport_pos_godot() + slot.get_offset()
+		var dest_basis_br: Basis = door.get_teleport_yaw_basis_godot()
+		# _do_transition starts with _fade(0.0, 1.0) which is a no-op when
+		# alpha is already 1.0 (tween from current value) — safe to call.
+		await _do_transition(slot, dest_pos_br, dest_basis_br, true)
+
+		_active_pocket = slot
+		_is_inside = true
+		_is_transitioning = false
+		Log.info("streaming", "[ENTER] SUCCESS (bridge) — entered '%s'" % door.target_cell_name)
+		transition_completed.emit(door.target_cell_name)
+		return true
+
+	# NORMAL PATH: pocket was already loaded before the player hit the door
+	if not slot.is_occupied:
+		Log.error("streaming", "[ENTER] FAILED — pocket not occupied: '%s'" % door.target_cell_name)
 		return false
 
 	if not slot.cell_node or not is_instance_valid(slot.cell_node):
@@ -1401,24 +1637,6 @@ func _restore_lights_to_interior(node: Node) -> void:
 		_restore_lights_to_interior(child)
 
 
-func _set_layers_recursive(node: Node, layer_mask: int) -> void:
-	if node is VisualInstance3D:
-		node.layers = layer_mask
-	# Light3D.light_cull_mask controls which geometry layers the light illuminates.
-	# Must match the render layers of interior geometry or lights won't affect it.
-	if node is Light3D:
-		node.light_cull_mask = layer_mask
-	for child in node.get_children():
-		_set_layers_recursive(child, layer_mask)
-
-
-func _set_physics_layers_recursive(node: Node, layer_mask: int) -> void:
-	if node is CollisionObject3D:
-		node.collision_layer = layer_mask
-		node.collision_mask = layer_mask
-	for child in node.get_children():
-		_set_physics_layers_recursive(child, layer_mask)
-
 #endregion
 
 #region Fade Overlay
@@ -1485,10 +1703,24 @@ func get_active_interior_name() -> String:
 	return ""
 
 
-## Get slot for a given cell name
+## Get slot for a given cell name (strict — only returns fully-occupied slots).
+## Use this for portal rendering and any code that needs the slot's cell_node
+## to be final.
 func _get_slot_for_cell(cell_name: String) -> PocketSlot:
 	for slot: PocketSlot in _slots:
 		if slot.is_occupied and slot.cell_name == cell_name:
+			return slot
+	return null
+
+
+## Get slot for a given cell name (relaxed — matches loading OR occupied).
+## Use this for transition code that needs to find a slot whose async load
+## is still in flight (so the fade-to-black bridge can wait for it to
+## finish). A loading slot has is_loading=true, is_occupied=false and its
+## async_request_id is non-negative until the finish-up completes.
+func _get_slot_for_cell_any(cell_name: String) -> PocketSlot:
+	for slot: PocketSlot in _slots:
+		if slot.cell_name == cell_name and (slot.is_occupied or slot.is_loading or slot.finish_up_phase >= 0):
 			return slot
 	return null
 

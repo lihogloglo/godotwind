@@ -52,6 +52,49 @@ func process_dialogue_result(info: DialogueInfoRecord, parent_topic_id: String) 
 	return true
 
 
+## Signal handler for DialogueUI.response_selected.
+## Reads the MW-specific metadata populated by MWDialogueProvider.get_response()
+## and advances the journal without having to re-run the filter.
+## Returns true if the journal was actually updated.
+##
+## Connect via:
+##   dialogue_ui.response_selected.connect(quest_adapter.on_response_selected)
+func on_response_selected(_topic_id: String, response: DialogueProvider.Response) -> bool:
+	if not response.ok() or response.line == null:
+		return false
+	if not response.quest_updated:
+		return false
+
+	var meta := response.metadata
+	if meta.is_empty():
+		Log.warn("dialogue", "on_response_selected: response has quest_updated=true but empty metadata")
+		return false
+
+	var quest_id: String = meta.get("parent_topic", "")
+	if quest_id.is_empty():
+		Log.warn("dialogue", "on_response_selected: metadata missing parent_topic")
+		return false
+
+	var line: RefCounted = response.line
+	var clean_text := TextFormatterScript.to_bbcode(line.text)
+
+	_quest_manager.update_journal(
+		quest_id,
+		meta.get("journal_index", 0),
+		clean_text,
+		meta.get("quest_finish", false),
+		meta.get("quest_restart", false)
+	)
+
+	Log.info("dialogue", "Journal updated via signal: quest='%s' index=%d finish=%s restart=%s" % [
+		quest_id,
+		meta.get("journal_index", 0),
+		meta.get("quest_finish", false),
+		meta.get("quest_restart", false),
+	])
+	return true
+
+
 ## Pre-load all journal entries from ESM into a lookup table
 ## Returns a dictionary: quest_id -> Array[{index, text, finishes, restarts}]
 ## Useful for building a complete journal view without running the dialogue filter

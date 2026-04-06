@@ -8,6 +8,8 @@
 class_name Toast
 extends CanvasLayer
 
+const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
+
 var _label: Label
 var _panel: PanelContainer
 var _tween: Tween
@@ -40,24 +42,17 @@ func show_message(text: String, duration: float = DEFAULT_DURATION) -> void:
 
 
 func _build_ui() -> void:
-	# Panel at top-center of screen
+	# Panel at top-center of screen (Toast variation = dark bg, gold border)
 	_panel = PanelContainer.new()
+	_panel.theme = DEFAULT_THEME
+	_panel.theme_type_variation = "Toast"
 	_panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	_panel.offset_top = 20
 	_panel.offset_left = -200
 	_panel.offset_right = 200
-
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.12, 0.10, 0.08, 0.9)
-	style.border_color = Color(0.6, 0.5, 0.35)
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(6)
-	style.set_content_margin_all(12)
-	_panel.add_theme_stylebox_override("panel", style)
 	add_child(_panel)
 
 	_label = Label.new()
 	_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_label.add_theme_font_size_override("font_size", 16)
-	_label.add_theme_color_override("font_color", Color(0.9, 0.85, 0.7))
+	_label.theme_type_variation = "ToastLabel"
 	_panel.add_child(_label)

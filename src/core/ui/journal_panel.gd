@@ -12,6 +12,7 @@ class_name JournalPanel
 extends CanvasLayer
 
 const QuestManagerScript := preload("res://src/core/dialogue/quest_manager.gd")
+const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
 
 signal closed
 
@@ -146,20 +147,13 @@ func _build_ui() -> void:
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(overlay)
 
-	# Center panel — parchment style
+	# Center panel — parchment (theme provides bg/border/padding/font)
 	_panel = PanelContainer.new()
+	_panel.theme = DEFAULT_THEME
 	_panel.set_anchors_preset(Control.PRESET_CENTER)
 	_panel.custom_minimum_size = Vector2(800, 550)
 	_panel.size = Vector2(800, 550)
 	_panel.position = Vector2(-400, -275)
-
-	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.91, 0.87, 0.78)
-	panel_style.border_color = Color(0.45, 0.35, 0.25)
-	panel_style.set_border_width_all(3)
-	panel_style.set_corner_radius_all(4)
-	panel_style.set_content_margin_all(20)
-	_panel.add_theme_stylebox_override("panel", panel_style)
 	add_child(_panel)
 
 	# Main layout
@@ -173,15 +167,14 @@ func _build_ui() -> void:
 
 	_title_label = Label.new()
 	_title_label.text = "Journal"
-	_title_label.add_theme_font_size_override("font_size", 22)
-	_title_label.add_theme_color_override("font_color", Color(0.25, 0.15, 0.1))
+	_title_label.theme_type_variation = "TitleLabel"
 	_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(_title_label)
 
 	_close_button = Button.new()
 	_close_button.text = "X"
 	_close_button.flat = true
-	_close_button.add_theme_font_size_override("font_size", 18)
+	_close_button.theme_type_variation = "CloseButton"
 	_close_button.pressed.connect(hide_journal)
 	header.add_child(_close_button)
 
@@ -193,14 +186,12 @@ func _build_ui() -> void:
 	_tab_active = Button.new()
 	_tab_active.text = "Active Quests"
 	_tab_active.flat = true
-	_tab_active.add_theme_font_size_override("font_size", 16)
 	_tab_active.pressed.connect(_on_tab_active)
 	tab_row.add_child(_tab_active)
 
 	_tab_completed = Button.new()
 	_tab_completed.text = "Completed"
 	_tab_completed.flat = true
-	_tab_completed.add_theme_font_size_override("font_size", 16)
 	_tab_completed.pressed.connect(_on_tab_completed)
 	tab_row.add_child(_tab_completed)
 
@@ -225,7 +216,7 @@ func _build_ui() -> void:
 	_quest_list.add_theme_constant_override("separation", 4)
 	list_scroll.add_child(_quest_list)
 
-	# Entry display (right)
+	# Entry display (right) — theme provides font_size, default color, empty background
 	_entry_display = RichTextLabel.new()
 	_entry_display.bbcode_enabled = true
 	_entry_display.fit_content = false
@@ -233,8 +224,4 @@ func _build_ui() -> void:
 	_entry_display.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_entry_display.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_entry_display.size_flags_stretch_ratio = 0.6
-	_entry_display.add_theme_font_size_override("normal_font_size", 15)
-	_entry_display.add_theme_color_override("default_color", Color(0.15, 0.1, 0.05))
-	var empty_style := StyleBoxEmpty.new()
-	_entry_display.add_theme_stylebox_override("normal", empty_style)
 	content.add_child(_entry_display)

@@ -49,6 +49,57 @@ var fade_in_duration: float = 0.3  # Duration of fade-in animation in seconds (m
 var max_actor_distance: float = 150.0
 var camera_position: Vector3 = Vector3.ZERO  # Updated by streaming manager each frame
 
+# Transient per-call override: read by the static-renderer gate and
+# actor-distance gate when set. CellManager._process_instantiation_queue sets
+# this from entry.load_profile before dispatching an instantiator call, and
+# clears it immediately after. Because the queue processor is main-thread and
+# fully synchronous, there is no race — but this must NEVER be left set
+# across function boundaries. Always save/clear symmetrically via the
+# helpers below; do not assign _current_load_profile directly from outside.
+# See CellManager.LoadProfile for the struct shape.
+var _current_load_profile: Variant = null  # LoadProfile or null
+
+# Debug counter for leaked-transient detection. _effective_* helpers track
+# that we saw a non-null profile during a processing window; if the window
+# closes with a residual that wasn't cleared, we assert. Only active in
+# debug builds so production has zero overhead.
+var _transient_set_depth: int = 0
+
+
+## Set the transient profile — USE THIS instead of direct assignment so the
+## debug book-keeping stays consistent. Call _clear_transient_profile() in a
+## matched pair (structured as if wrapping a try/finally).
+func _set_transient_profile(profile: Variant) -> void:
+	# Detect a leaked transient from the previous call. If _current_load_profile
+	# is non-null here it means the previous set didn't have a matching clear.
+	assert(_current_load_profile == null,
+		"LoadProfile transient leaked from previous call (depth=%d)" % _transient_set_depth)
+	_current_load_profile = profile
+	_transient_set_depth += 1
+
+
+## Clear the transient profile. Must be called after every _set_transient_profile.
+## Unconditional — call this even on error paths or early returns from the
+## instantiator call it wraps.
+func _clear_transient_profile() -> void:
+	_current_load_profile = null
+	_transient_set_depth -= 1
+
+
+## Get the effective max_actor_distance for the current call, honoring any
+## per-call override set via _current_load_profile.
+func _effective_max_actor_distance() -> float:
+	if _current_load_profile != null:
+		return _current_load_profile.max_actor_distance
+	return max_actor_distance
+
+
+## Get the effective use_static_renderer for the current call.
+func _effective_use_static_renderer() -> bool:
+	if _current_load_profile != null:
+		return _current_load_profile.use_static_renderer
+	return use_static_renderer
+
 # Scene tree reference for tweens (must be set by parent, e.g., CellManager)
 var scene_tree: SceneTree = null
 
@@ -157,9 +208,12 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	if "record_id" in base_record:
 		record_id = base_record.record_id
 
+	# Per-call override: interior pockets must bypass the static renderer.
+	var effective_use_static: bool = _effective_use_static_renderer()
+
 	# Debug: Log what path each object is taking
 	if debug_lod and _model_obj_count <= 20:
-		var is_static := use_static_renderer and static_renderer and _is_static_render_model(model_path)
+		var is_static := effective_use_static and static_renderer and _is_static_render_model(model_path)
 		var is_sig := is_significant_object(model_path)
 		Log.debug("streaming", "[LOD-PATH] #%d %s: static_render=%s, significant=%s" % [
 			_model_obj_count, model_path.get_file(), is_static, is_sig
@@ -167,7 +221,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	# Check if this model should use static rendering (flora, small rocks)
 	# Static rendering is ~10x faster but has no physics/interaction
-	if use_static_renderer and static_renderer and _is_static_render_model(model_path):
+	if effective_use_static and static_renderer and _is_static_render_model(model_path):
 		return _instantiate_static_object(ref, model_path, cell_grid)
 
 	# Try to get from object pool first (if enabled)
@@ -336,10 +390,13 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 ## Instantiate an NPC or Creature
 ## Uses CharacterFactory to create fully animated and functional characters
 func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
-	# Skip actors beyond NEAR tier — full CharacterBody3D is too expensive at distance
-	if max_actor_distance > 0.0:
+	# Skip actors beyond NEAR tier — full CharacterBody3D is too expensive at distance.
+	# Per-request override via LoadProfile: interior pockets set this to 0.0
+	# because the camera is still at exterior position during pocket load.
+	var effective_actor_dist: float = _effective_max_actor_distance()
+	if effective_actor_dist > 0.0:
 		var ref_pos := CS.vector_to_godot(ref.position)
-		if ref_pos.distance_squared_to(camera_position) > max_actor_distance * max_actor_distance:
+		if ref_pos.distance_squared_to(camera_position) > effective_actor_dist * effective_actor_dist:
 			return null
 
 	# Use CharacterFactory if available (new system)
@@ -577,9 +634,10 @@ func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int
 ## Only plays if the object has a prebaked AnimationPlayer from NIF conversion.
 func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
 	# Skip if beyond NEAR tier — animations are only visible up close
-	if max_actor_distance > 0.0:
+	var effective_actor_dist: float = _effective_max_actor_distance()
+	if effective_actor_dist > 0.0:
 		var ref_pos := CS.vector_to_godot(ref.position)
-		if ref_pos.distance_squared_to(camera_position) > max_actor_distance * max_actor_distance:
+		if ref_pos.distance_squared_to(camera_position) > effective_actor_dist * effective_actor_dist:
 			return
 
 	# Find AnimationPlayer in the duplicated instance

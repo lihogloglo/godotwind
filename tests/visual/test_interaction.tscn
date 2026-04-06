@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://btestinteraction"]
+
+[ext_resource type="Script" path="res://tests/visual/test_interaction.gd" id="1"]
+
+[node name="TestInteraction" type="Node"]
+script = ExtResource("1")

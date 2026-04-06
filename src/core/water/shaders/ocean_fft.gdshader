@@ -4,28 +4,34 @@ render_mode world_vertex_coords, cull_disabled, shadows_disabled, depth_draw_opa
 /**
  * Ocean FFT Shader — Godotwind
  *
- * Fully opaque ocean surface (no ALPHA, no transparent pipeline).
- * Water appearance comes from ALBEDO color + SSS lighting — NOT from
- * sampling SCREEN_TEXTURE or refraction tricks.
- *
- * Design follows GodotOceanWaves (2Retr0): opaque render, SSS scattering,
- * Jacobian foam, Fresnel-driven roughness. No refraction = no hollow crests.
+ * Fully opaque ocean surface. Real depth-driven Beer-Lambert absorption via
+ * SCREEN_TEXTURE + DEPTH_TEXTURE sampling and view-space thickness.
+ * ReflectionProbe + sky-cube contributions reach the surface via SPECULAR;
+ * screen-space reflection of objects is (will be in Step 3) a custom in-shader
+ * raymarch ported from GodotSSRWater.
  *
  * Features:
  * - FFT displacement from JONSWAP spectrum (multi-cascade)
  * - Bicubic normal map filtering (reduces aliasing at distance)
  * - Jacobian-based whitecap foam from FFT + distance fade
- * - Prebaked shore mask for wave dampening + shore discard (no DEPTH_TEXTURE)
+ * - Prebaked shore mask for wave dampening, discard, and shore-edge foam ONLY
+ *   (NOT used as depth proxy — real depth now comes from DEPTH_TEXTURE)
+ * - View-space depth reconstruction via INV_PROJECTION_MATRIX
+ * - Per-channel Beer-Lambert absorption from real water thickness
+ * - Screen-space sampling of seafloor behind the water surface
  * - Schlick Fresnel with roughness-dependent power
  * - Distance-based normal flattening (reduces shimmer at far LODs)
  * - SSS (subsurface scattering) on wave crests via custom light()
- * - Relies on Godot 4.6 native SSR + ReflectionProbe for reflections
  *
- * NOTE: No DEPTH_TEXTURE or SCREEN_TEXTURE — both force a late render pass
- * that runs AFTER SSR, making the ocean invisible to screen-space reflections.
+ * Phase 0 verdict (2026-04-06, verified in test_reflections.tscn):
+ * declaring hint_depth_texture + hint_screen_texture disables Godot 4.6
+ * native SSR on this material (even without sampling). ReflectionProbe +
+ * sky-cube contributions via SPECULAR still reach the surface — confirmed by
+ * toggling the probe and observing ocean color change. We accept losing
+ * native SSR in exchange for refraction; a custom SSR trace will be added
+ * in Step 3 (port from inspos/GodotSSRWater-main).
  *
  * Lighting: custom light() for SSS + lambertian diffuse + Smith-GGX specular.
- * Environment reflections (SSR, probes, sky) via SPECULAR in fragment().
  */
 
 #define MAX_CASCADES 8
@@ -45,8 +51,6 @@ uniform vec3 color_shallow : source_color = vec3(0.09, 0.12, 0.13);  // OpenMW-m
 uniform vec3 color_deep : source_color = vec3(0.02, 0.04, 0.06);
 uniform vec3 color_sky_tint : source_color = vec3(0.3, 0.38, 0.45);
 uniform float sky_tint_strength : hint_range(0.0, 1.0) = 0.5;  // Weather-driven: calm=0.8, storm=0.3
-uniform float absorption_coeff : hint_range(0.01, 1.0) = 0.2;
-uniform float min_absorption : hint_range(0.0, 0.3) = 0.1;
 
 // Foam
 group_uniforms foam;
@@ -60,6 +64,32 @@ uniform float foam_intensity : hint_range(0.0, 1.0) = 1.0;  // Weather-driven: 0
 group_uniforms shore;
 uniform sampler2D shore_mask : hint_default_white, filter_linear;
 uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+
+// Refraction — real depth-driven Beer-Lambert from DEPTH_TEXTURE + SCREEN_TEXTURE.
+// Declaring these samplers disables Godot 4.6 native SSR on this material
+// (Phase 0 verdict, 2026-04-06). ReflectionProbe + sky-cube via SPECULAR still work.
+group_uniforms refraction;
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D DEPTH_TEXTURE  : hint_depth_texture, filter_nearest;
+// Beer-Lambert extinction coefficients per channel (m^-1, applied after density scale).
+// R absorbed fastest, G/B slower — matches real ocean spectrum.
+uniform vec3 absorption_rate = vec3(0.4, 0.1, 0.06);
+uniform float absorption_density : hint_range(0.01, 2.0) = 0.3;
+// Clamp water thickness to this many meters when background is far-plane/sky.
+// Prevents division by zero and caps extreme absorption for looking-at-horizon cases.
+uniform float max_visible_depth : hint_range(1.0, 50.0) = 20.0;
+// Strength of the refraction UV offset. Lower values = subtler distortion,
+// 0 to disable. Deliberately under 1.0 to avoid silhouette crossing artifacts
+// (refracted sample landing on the wrong side of an opaque object's edge).
+uniform float refraction_strength : hint_range(0.0, 1.0) = 0.25;
+// Clamp refraction ray travel distance (meters along the refracted ray direction).
+// Smaller = less shimmer but fewer silhouette artifacts. 0.8m is conservative.
+uniform float max_refr_thickness : hint_range(0.1, 5.0) = 0.8;
+// Depth-contrast rejection: if the refracted sample's view-space depth differs
+// from the unrefracted sample's depth by more than this many meters, the
+// refracted ray has crossed a silhouette edge (e.g. the edge of a submerged
+// rock or the monolith). Fall back to unrefracted to kill ghost/halo artifacts.
+uniform float refraction_silhouette_threshold : hint_range(0.1, 10.0) = 1.5;
 
 // Visual tuning
 group_uniforms visual;
@@ -150,7 +180,7 @@ void vertex() {
 }
 
 // ============================================================================
-// FRAGMENT — Opaque ocean: ALBEDO + Fresnel + foam. No refraction.
+// FRAGMENT — Opaque ocean: ALBEDO + Fresnel + foam + shore-mask refraction.
 // ============================================================================
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
@@ -167,8 +197,7 @@ void fragment() {
 	gradient *= v_shore_factor;
 
 	// ========================================================================
-	// SHORE — prebaked mask is the single authority (no DEPTH_TEXTURE).
-	// DEPTH_TEXTURE forces a late render pass that runs AFTER SSR.
+	// SHORE — prebaked mask is the single authority for land/water boundary.
 	// ========================================================================
 	if (v_shore_factor < 0.01) {
 		discard;
@@ -217,22 +246,113 @@ void fragment() {
 	fresnel = mix(pow(1.0 - cos_theta, fresnel_power) / (1.0 + 22.7 * pow(roughness, 1.5)), 1.0, REFLECTANCE);
 
 	// ========================================================================
-	// WATER COLOR — shore-mask absorption + Fresnel sky tint
+	// WATER COLOR — real view-space depth + per-channel Beer-Lambert absorption
 	// ========================================================================
-	// Use shore_factor as proxy for depth: near shore (low) = shallow, open ocean (1.0) = deep
-	float absorption = max(v_shore_factor * absorption_coeff * 10.0, min_absorption);
-	absorption = min(absorption, 1.0);
-	vec3 water_col = mix(color_shallow, color_deep, absorption);
-	// Fresnel-weighted sky tint: at grazing angles, water reflects sky color.
-	// This prevents calm water from looking like flat dark paint.
+	// Reconstruct view-space positions for the water surface AND the scene
+	// fragment directly behind it. View-space -Z is forward, so deeper points
+	// are MORE NEGATIVE; thickness = (surf.z - bg.z) is positive when bg is
+	// further from the camera than the water surface.
+	//
+	// Sky-depth handling: when DEPTH_TEXTURE at SCREEN_UV reads the far plane
+	// (sky, no opaque behind water), the reconstructed bg_view goes to the far
+	// clip distance and thickness blows up. We clamp thickness to max_visible_depth
+	// and skip the SCREEN_TEXTURE sample — the sky is not "behind" the water at
+	// any meaningful depth; sampling it and tinting it through absorption would
+	// bleed sky color into the water color, which is wrong. Do NOT "optimize"
+	// this branch away.
+	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
+	vec3 surf_view = surf_view4.xyz / surf_view4.w;
+
+	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	vec4 bg_clip = vec4(SCREEN_UV * 2.0 - 1.0, bg_ndc_z, 1.0);
+	vec4 bg_view4 = INV_PROJECTION_MATRIX * bg_clip;
+	vec3 bg_view = bg_view4.xyz / max(abs(bg_view4.w), 1e-6) * sign(bg_view4.w);
+
+	float raw_thickness = max(0.0, surf_view.z - bg_view.z);
+	bool is_sky_or_far = raw_thickness >= max_visible_depth;
+	float water_thickness = min(raw_thickness, max_visible_depth);
+
+	// Beer-Lambert transmittance per channel (exponential falloff with thickness).
+	vec3 transmittance = exp(-water_thickness * absorption_rate * absorption_density);
+
+	// ========================================================================
+	// STEP 2 — Refraction UV offset
+	// Refract the view direction through the surface normal using air→water IOR
+	// (1/1.333 = 0.7509). Step along the refracted ray by a distance proportional
+	// to water thickness, project that point back to screen UV, and sample there.
+	// This bends submerged geometry at the waterline.
+	//
+	// Guards (in order):
+	//   (1) Total internal reflection — refract() returns zero; fall back.
+	//   (2) Refracted UV is off-screen [0,1] — fall back.
+	//   (3) Refracted sample is ABOVE water (view-space z less negative than
+	//       surf_view.z). Refracted ray exited back through the surface or into
+	//       above-water geometry; sampling there would bleed that color through.
+	//   (4) SILHOUETTE CROSSING — refracted sample's depth differs from the
+	//       unrefracted sample's depth by more than refraction_silhouette_threshold.
+	//       This catches the "monolith ghost" / "seafloor-colored outline around
+	//       submerged rock" artifact where the refracted ray lands on the far
+	//       side of an opaque object's edge and drags its color into the wrong
+	//       pixel. Fall back to unrefracted SCREEN_UV in that case.
+	//
+	// Screen-center-distance deglitch: fade refraction strength toward 0 near the
+	// screen edges so off-screen sampling artifacts don't jitter along the borders.
+	// ========================================================================
+	vec2 refr_uv = SCREEN_UV;
+	if (!is_sky_or_far && refraction_strength > 0.0) {
+		vec3 refr_dir = refract(-VIEW, NORMAL, 0.7509); // air→water, IOR 1.333
+		if (dot(refr_dir, refr_dir) > 1e-6) {
+			float edge_t = clamp(length((SCREEN_UV - 0.5) * 2.0), 0.0, 1.0);
+			float edge_fade = 1.0 - smoothstep(0.7, 1.0, edge_t);
+			float travel = min(water_thickness, max_refr_thickness)
+				* refraction_strength * edge_fade;
+			vec3 refr_target_view = surf_view + refr_dir * travel;
+			vec4 refr_clip = PROJECTION_MATRIX * vec4(refr_target_view, 1.0);
+			if (refr_clip.w > 1e-4) {
+				vec2 candidate_uv = (refr_clip.xy / refr_clip.w) * 0.5 + 0.5;
+				// Guard (2): on-screen?
+				if (all(greaterThan(candidate_uv, vec2(0.0)))
+					&& all(lessThan(candidate_uv, vec2(1.0)))) {
+					float cand_ndc_z = texture(DEPTH_TEXTURE, candidate_uv).r;
+					vec4 cand_clip = vec4(candidate_uv * 2.0 - 1.0, cand_ndc_z, 1.0);
+					vec4 cand_view4 = INV_PROJECTION_MATRIX * cand_clip;
+					vec3 cand_view = cand_view4.xyz / max(abs(cand_view4.w), 1e-6) * sign(cand_view4.w);
+					// Guard (3): refracted sample must be BEHIND the surface.
+					bool passes_above = cand_view.z < surf_view.z - 0.01;
+					// Guard (4): refracted sample's depth must be reasonably
+					// close to the unrefracted sample's depth. If the refracted
+					// ray crossed a silhouette edge (e.g. off the side of a
+					// submerged rock), the depth difference will be large.
+					bool passes_silhouette = abs(cand_view.z - bg_view.z) < refraction_silhouette_threshold;
+					if (passes_above && passes_silhouette) {
+						refr_uv = candidate_uv;
+					}
+				}
+			}
+		}
+	}
+
+	// Sample the scene behind the water at the refracted UV (or raw UV if any
+	// guard fell through). At sky-depth, skip the sample entirely and use deep
+	// water color — sampling and tinting sky would bleed sky through refraction.
+	vec3 screen_behind = is_sky_or_far
+		? color_deep
+		: texture(SCREEN_TEXTURE, refr_uv).rgb;
+	vec3 refracted_col = screen_behind * transmittance + color_deep * (1.0 - transmittance);
+
+	// Base water color for the "no refraction contribution" term (grazing angles).
+	vec3 base_water = mix(color_shallow, color_deep, clamp(water_thickness * 0.1, 0.0, 1.0));
+	// Fresnel blend: steep angles see through water (refraction dominates),
+	// grazing angles reflect sky (fresnel→1 drives sky tint).
+	vec3 water_col = mix(refracted_col, base_water, fresnel);
 	water_col = mix(water_col, color_sky_tint, fresnel * sky_tint_strength);
 
 	// ========================================================================
-	// COMPOSE — fully opaque, no refraction
+	// COMPOSE — fully opaque
 	// ========================================================================
 	// Shore transition: near shore, lighten the water color toward shallow
 	vec3 final_col = mix(color_shallow * 1.5, water_col, shore_blend);
-	// Foam overlay — foam also perturbs normal slightly for rough micro-detail
+	// Foam overlay
 	final_col = mix(final_col, foam_color, foam_factor);
 
 	ALBEDO = final_col;

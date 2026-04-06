@@ -15,6 +15,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
+const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 
 # Scene nodes
 var _camera: Camera3D
@@ -47,6 +48,31 @@ var _loading: bool = true
 var _stencil_debug: bool = false
 var _depth_test_mode: bool = false
 
+# Frame-time tracking for hiccup verification (P0 fix test harness).
+#
+# `_peak_window_ms` is the max over a rolling 60-frame window, always on.
+# `_transition_peak_ms` is latched when a transition starts and cleared
+# when it completes — this is the number that matters for the P0 fix.
+# `_hiccup_ms_threshold` = 8.0 per roaster's pass criterion.
+# `_transition_recording` flips via transition_started / transition_completed
+# signals on the pocket manager.
+var _peak_window_ms: float = 0.0
+var _peak_window_samples: Array[float] = []
+const _PEAK_WINDOW: int = 60
+var _transition_peak_ms: float = 0.0
+var _transition_recording: bool = false
+# Tracks whether the LAST completed transition engaged the fade-to-black
+# bridge path (slot was still loading when E was pressed) or took the
+# normal path (slot already occupied). Flipped at transition_started time
+# based on the current slot state for the target cell. Shown in the debug
+# panel so we can tell at a glance which code path a reported peak came
+# from — bridge path has a fade-out spike, normal path doesn't.
+var _last_transition_bridge: bool = false
+const _HICCUP_MS_THRESHOLD: float = 8.0
+# Running mode doubles camera speed so we can stress the 10m preload window
+# at the faster "run" speed roaster flagged (8 m/s vs 5 m/s walk).
+var _run_mode: bool = false
+
 
 func _ready() -> void:
 	_setup_environment()
@@ -69,12 +95,25 @@ func _ready() -> void:
 	_cell_manager.use_static_renderer = false
 	_cell_manager.use_multimesh_instancing = false
 
+	# Background processor so the P0 async pocket load path actually runs.
+	# Without this, _cell_manager.has_async_capacity() returns false and
+	# _load_pocket() falls back to the legacy sync path.
+	var bg_processor := BackgroundProcessorScript.new()
+	bg_processor.name = "BackgroundProcessor"
+	add_child(bg_processor)
+	_cell_manager.set_background_processor(bg_processor)
+
 	# Pocket manager
 	_pocket_manager = InteriorPocketManagerScript.new()
 	_pocket_manager.name = "PocketManager"
 	add_child(_pocket_manager)
 	_pocket_manager.initialize(_cell_manager, _environment, _camera, _sun)
 	_pocket_manager.seamless_enabled = false  # Classic teleport mode — seamless is experimental
+
+	# Hook transition signals so the frame-time tracker knows when to record
+	_pocket_manager.transition_started.connect(_on_transition_started)
+	_pocket_manager.transition_completed.connect(_on_transition_completed)
+	_pocket_manager.interior_load_timeout.connect(_on_interior_load_timeout)
 
 	# Load exterior cells and register doors
 	await get_tree().process_frame
@@ -85,6 +124,81 @@ func _ready() -> void:
 	# Position camera near first door
 	if not _door_pairs.is_empty():
 		_teleport_to_door(0)
+
+	# Auto-drive: if launched with `-- --auto-test` (user args after `--`),
+	# programmatically walk through a transition so headless runs can
+	# verify the async pipeline. Without this the scene just sits idle
+	# with no input and the async pipeline is never exercised.
+	var user_args: PackedStringArray = OS.get_cmdline_user_args()
+	var engine_args: PackedStringArray = OS.get_cmdline_args()
+	var has_auto_test: bool = ("--auto-test" in user_args) or ("--auto-test" in engine_args)
+	Log.info("testing", "[AUTO-TEST] user_args=%s engine_args_has=%s" % [str(user_args), "--auto-test" in engine_args])
+	if has_auto_test:
+		_auto_test_run.call_deferred()
+
+
+func _auto_test_run() -> void:
+	Log.info("testing", "[AUTO-TEST] Starting auto-drive verification")
+	# Give a frame for everything to settle
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# Teleport camera to within 2m of the first door (already tab-selected=0)
+	if _door_pairs.is_empty():
+		Log.error("testing", "[AUTO-TEST] No doors — abort")
+		return
+	var dp: Dictionary = _door_pairs[0]
+	var door_pos: Vector3 = CS.vector_to_godot(dp.door_pos_mw)
+	_camera.global_position = door_pos + Vector3(0, 1.5, 2.0)
+	_camera.look_at(door_pos)
+	_yaw = _camera.rotation.y
+	_pitch = _camera.rotation.x
+	Log.info("testing", "[AUTO-TEST] Camera at 2m from door '%s' → '%s' (%d refs)" % [
+		dp.ref_id, dp.interior_name, dp.interior_ref_count])
+
+	# Poll pocket manager until the slot becomes occupied (success) or
+	# times out at 10 seconds (failure).
+	var start_ms: int = Time.get_ticks_msec()
+	var timeout_ms: int = 10000
+	var occupied_frame: int = -1
+	while Time.get_ticks_msec() - start_ms < timeout_ms:
+		await get_tree().process_frame
+		# Force pocket manager update so async polling fires
+		_pocket_manager.update(_camera.global_position, get_process_delta_time())
+		var slot_any = _pocket_manager._get_slot_for_cell_any(dp.interior_name)
+		if slot_any and slot_any.is_occupied:
+			occupied_frame = Engine.get_frames_drawn()
+			break
+
+	if occupied_frame < 0:
+		Log.error("testing", "[AUTO-TEST] TIMEOUT waiting for pocket load of '%s' (10s)" % dp.interior_name)
+		get_tree().quit(1)
+		return
+
+	Log.info("testing", "[AUTO-TEST] Pocket '%s' LOADED in %d ms" % [
+		dp.interior_name, Time.get_ticks_msec() - start_ms])
+
+	# Now activate the door to run a real transition
+	var door = _pocket_manager.get_closest_door()
+	if not door:
+		Log.error("testing", "[AUTO-TEST] No closest door within INTERACT_RADIUS after teleport — abort")
+		get_tree().quit(1)
+		return
+
+	Log.info("testing", "[AUTO-TEST] Calling enter_interior for '%s'" % door.target_cell_name)
+	var ok: bool = await _pocket_manager.enter_interior(door)
+	if not ok:
+		Log.error("testing", "[AUTO-TEST] enter_interior() returned false")
+		get_tree().quit(1)
+		return
+
+	# Wait 2 frames for _on_transition_completed to fire
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	var verdict: String = "PASS" if _transition_peak_ms <= _HICCUP_MS_THRESHOLD else "FAIL"
+	Log.info("testing", "[AUTO-TEST] RESULT: transition peak=%.2f ms [%s]" % [_transition_peak_ms, verdict])
+	get_tree().quit(0 if verdict == "PASS" else 2)
 
 
 func _setup_environment() -> void:
@@ -209,16 +323,86 @@ func _input(event: InputEvent) -> void:
 				_toggle_depth_test()
 			KEY_F5:
 				_toggle_seamless_mode()
+			KEY_R:
+				_toggle_run_mode()
 			KEY_ESCAPE:
 				_mouse_captured = false
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _process(delta: float) -> void:
+	_track_frame_time(delta)
 	_update_camera(delta)
+
+	# CRITICAL PUMP: In the main scene, NativeStreamingManager calls
+	# CellManager.process_async_instantiation() every frame. This test
+	# scene doesn't run NativeStreamingManager, so we call it here.
+	# Without this, async cell loads kick off, background parsing
+	# completes, entries get queued for main-thread instantiation, and
+	# they sit in the queue forever because nothing drains it. The
+	# pocket manager's async poll would then see is_async_complete() ==
+	# false indefinitely and the slot stays stuck in is_loading=true.
+	if _cell_manager:
+		_cell_manager.process_async_instantiation(
+			4.0,
+			_camera.global_position,
+			-_camera.global_basis.z
+		)
+
 	if _pocket_manager:
 		_pocket_manager.update(_camera.global_position, delta)
 	_update_ui()
+
+
+## Sliding-window frame time max. Also latches the per-transition peak
+## while _transition_recording is true (set by transition_started signal).
+func _track_frame_time(delta: float) -> void:
+	var frame_ms: float = delta * 1000.0
+	_peak_window_samples.append(frame_ms)
+	if _peak_window_samples.size() > _PEAK_WINDOW:
+		_peak_window_samples.pop_front()
+	var max_ms: float = 0.0
+	for s: float in _peak_window_samples:
+		if s > max_ms:
+			max_ms = s
+	_peak_window_ms = max_ms
+	if _transition_recording and frame_ms > _transition_peak_ms:
+		_transition_peak_ms = frame_ms
+
+
+func _on_transition_started(target_cell: String) -> void:
+	_transition_recording = true
+	_transition_peak_ms = 0.0
+	# Determine whether the bridge path is about to engage. If the target
+	# cell's slot is still loading / finishing up at this moment, enter_interior
+	# will take the fade-to-black bridge branch; otherwise the normal path.
+	_last_transition_bridge = false
+	if _pocket_manager:
+		@warning_ignore("untyped_declaration")
+		var slot = _pocket_manager._get_slot_for_cell_any(target_cell)
+		if slot and (slot.is_loading or slot.finish_up_phase >= 0):
+			_last_transition_bridge = true
+	Log.info("testing", "[FRAMETIME] transition_started → '%s', bridge=%s tracking begin" % [
+		target_cell, _last_transition_bridge])
+
+
+func _on_transition_completed(cell_name: String) -> void:
+	_transition_recording = false
+	var verdict: String = "PASS" if _transition_peak_ms <= _HICCUP_MS_THRESHOLD else "FAIL"
+	var bridge_str: String = "BRIDGE" if _last_transition_bridge else "NORMAL"
+	Log.info("testing", "[FRAMETIME] transition_completed → '%s' path=%s peak=%.2f ms [%s]" % [
+		cell_name, bridge_str, _transition_peak_ms, verdict])
+
+
+func _on_interior_load_timeout(cell_name: String, request_id: int) -> void:
+	Log.error("testing", "[FRAMETIME] interior_load_timeout for '%s' (req=%d) — fallback triggered" % [
+		cell_name, request_id])
+
+
+func _toggle_run_mode() -> void:
+	_run_mode = not _run_mode
+	_camera_speed = 40.0 if _run_mode else 20.0
+	Log.info("testing", "Run mode: %s (camera speed %.0f)" % ["ON" if _run_mode else "OFF", _camera_speed])
 
 
 var _camera_frozen: bool = false  ## True during transitions to prevent yaw/pitch overwrite
@@ -263,6 +447,19 @@ func _update_ui() -> void:
 		dp.ref_id, dp.interior_name, dp.interior_ref_count
 	]
 
+	# Proximity readout — distance to CURRENT tab-selected door, plus a
+	# prominent "PRESS E" prompt when within INTERACT_RADIUS (3m).
+	if _camera:
+		var target_pos: Vector3 = CS.vector_to_godot(dp.door_pos_mw)
+		var dist: float = _camera.global_position.distance_to(target_pos)
+		var in_range: bool = dist <= 3.0
+		if in_range:
+			text += ">>> [ E ] PRESS E TO ENTER  (%.1fm) <<<\n" % dist
+		elif dist <= 10.0:
+			text += "distance to target door: %.1fm (walk to <3m, then E)\n" % dist
+		else:
+			text += "distance to target door: %.1fm (walk closer — target is %s)\n" % [dist, dp.interior_name]
+
 	if _pocket_manager:
 		text += _pocket_manager.get_debug_info() + "\n"
 		# Show pocket slot positions for debugging
@@ -271,13 +468,29 @@ func _update_ui() -> void:
 			if slot.is_occupied and slot.cell_node:
 				text += "  POCKET '%s': pos=%s children=%d\n" % [
 					slot.cell_name, slot.cell_node.position, slot.cell_node.get_child_count()]
+			elif slot.is_loading:
+				text += "  POCKET '%s': LOADING (req=%d, phase=%d)\n" % [
+					slot.cell_name, slot.async_request_id, slot.finish_up_phase]
+
+	# Frame-time readout — this is what roaster will judge the P0 fix on.
+	text += "\n[FRAMETIME] window peak(1s)=%.2f ms  threshold=%.1f ms  run=%s\n" % [
+		_peak_window_ms, _HICCUP_MS_THRESHOLD, "ON" if _run_mode else "OFF"]
+	if _transition_recording:
+		var live_path: String = "BRIDGE" if _last_transition_bridge else "NORMAL"
+		text += "[FRAMETIME] TRANSITION RECORDING (%s) — peak so far=%.2f ms\n" % [live_path, _transition_peak_ms]
+	elif _transition_peak_ms > 0.0:
+		var verdict: String = "PASS" if _transition_peak_ms <= _HICCUP_MS_THRESHOLD else "FAIL"
+		var path: String = "BRIDGE" if _last_transition_bridge else "NORMAL"
+		text += "[FRAMETIME] last transition peak=%.2f ms  path=%s  [%s]\n" % [
+			_transition_peak_ms, path, verdict]
 
 	@warning_ignore("unsafe_property_access")
 	var mode_str: String = "SEAMLESS (walk-through)" if _pocket_manager.seamless_enabled else "CLASSIC (E to teleport)"
 	text += "\nMode: %s | E — activate door | TAB — Next door\n" % mode_str
-	text += "F1 — Stencil debug (%s) | F2 — Cycle layers | F3 — Wireframe | F4 — Depth test (%s) | F5 — Toggle mode\n" % [
+	text += "F1 — Stencil debug (%s) | F2 — Cycle layers | F3 — Wireframe | F4 — Depth test (%s) | F5 — Toggle mode | R — Run mode (%s)\n" % [
 		"ON" if _stencil_debug else "OFF",
-		"ON" if _depth_test_mode else "OFF"]
+		"ON" if _depth_test_mode else "OFF",
+		"ON" if _run_mode else "OFF"]
 	text += "WASD+mouse — Move | Shift — Fast | Cam layers: 0x%X" % (_camera.cull_mask if _camera else 0)
 	_info_label.text = text
 

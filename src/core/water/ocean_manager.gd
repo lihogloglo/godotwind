@@ -60,8 +60,8 @@ var _enabled: bool = true
 var _time: float = 0.0
 var _auto_find_camera: bool = true
 
-# Underwater effect (untyped to avoid circular load-order with class_name)
-var _underwater_effect: Node = null
+# Underwater compositor effect (managed via ShaderManager)
+var _underwater_effect_loaded: bool = false
 
 # FFT pipeline
 var _wave_generator: WaveGenerator = null
@@ -229,9 +229,9 @@ func _process(delta: float) -> void:
 			_fft_next_update = _fft_time + target_dt
 			_wave_generator.update(update_dt, _cascade_parameters)
 
-	# Update underwater effect sun tracking (cheap — only a direction vector)
-	if _underwater_effect and _underwater_effect.is_submerged():
-		_update_underwater_sun()
+	# Update underwater compositor effect state (submersion, sun, camera)
+	if _underwater_effect_loaded:
+		_update_underwater_state()
 
 	# GPU readback for buoyancy — read displacement map once per frame
 	if _wave_generator and _displacement_size > 0:
@@ -518,45 +518,57 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 # ============================================================================
 
 func _init_underwater_effect() -> void:
-	if _underwater_effect:
+	if _underwater_effect_loaded:
 		return
-	var UnderwaterEffectClass: GDScript = load("res://src/core/water/underwater_effect.gd") as GDScript
-	if UnderwaterEffectClass == null:
-		Log.error("water", "OceanManager: Failed to load UnderwaterEffect script")
-		return
-	_underwater_effect = UnderwaterEffectClass.new()
-	_underwater_effect.name = "UnderwaterEffect"
-	add_child(_underwater_effect)
-	if _camera:
-		_underwater_effect.initialize(_camera, sea_level)
-		Log.info("water", "OceanManager: Underwater effect initialized")
+	var effect_path := "res://src/core/shaders/effects/underwater_compositor_effect.gd"
+	if ShaderManager.load_effect(effect_path):
+		_underwater_effect_loaded = true
+		Log.info("water", "OceanManager: Underwater compositor effect loaded")
 	else:
-		# Will be initialized when camera is set
-		Log.info("water", "OceanManager: Underwater effect created (awaiting camera)")
+		Log.error("water", "OceanManager: Failed to load underwater compositor effect")
 
 
-func _update_underwater_sun() -> void:
-	if not _underwater_effect:
+func _update_underwater_state() -> void:
+	if not _underwater_effect_loaded or not _camera:
 		return
-	# Find the directional light for sun direction
-	var light: DirectionalLight3D = _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
-	if light:
-		_underwater_effect.set_sun(
-			-light.global_basis.z,
-			1.0,
-			light.light_color
-		)
+
+	var cam_y: float = _camera.global_position.y
+	var submerged: bool = cam_y < sea_level + 2.0  # Include boundary zone
+
+	# Enable/disable the effect based on submersion
+	var effect: PostProcessEffect = ShaderManager.get_effect("underwater")
+	if effect == null:
+		return
+
+	var is_active: bool = ShaderManager.is_effect_enabled("underwater")
+	if submerged and not is_active:
+		ShaderManager.enable_effect("underwater")
+		Log.info("water", "Underwater effect: ON")
+	elif not submerged and is_active:
+		ShaderManager.disable_effect("underwater")
+		Log.info("water", "Underwater effect: OFF")
+
+	# Update camera and sun state on the effect
+	if submerged and effect.has_method("set_sea_level"):
+		effect.set_sea_level(sea_level)
+		effect.set_camera_state(_camera.global_position, _camera.global_basis)
+		# Find sun for light direction
+		var light: DirectionalLight3D = _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
+		if light:
+			effect.set_sun(-light.global_basis.z, 1.0)
 
 
-## Get the underwater effect controller
-func get_underwater_effect() -> Node:
-	return _underwater_effect
+## Get the underwater compositor effect
+func get_underwater_effect() -> PostProcessEffect:
+	if _underwater_effect_loaded:
+		return ShaderManager.get_effect("underwater")
+	return null
 
 
 ## Check if the camera is currently submerged
 func is_camera_submerged() -> bool:
-	if _underwater_effect:
-		return _underwater_effect.is_submerged()
+	if _camera:
+		return _camera.global_position.y < sea_level + 2.0
 	return false
 
 
@@ -567,15 +579,10 @@ func is_camera_submerged() -> bool:
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
 	_auto_find_camera = false
-	# Re-initialize underwater effect with new camera
-	if _underwater_effect and camera:
-		_underwater_effect.initialize(camera, sea_level)
 
 
 func set_sea_level(level: float) -> void:
 	sea_level = level
-	if _underwater_effect:
-		_underwater_effect.set_sea_level(level)
 	if not _system_enabled:
 		return
 	if _terrain and _shore_mask:
@@ -874,9 +881,10 @@ func reset_weather() -> void:
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
-	if _underwater_effect:
-		_underwater_effect.cleanup()
-		_underwater_effect = null
+	if _underwater_effect_loaded:
+		ShaderManager.disable_effect("underwater")
+		ShaderManager.unload_effect("underwater")
+		_underwater_effect_loaded = false
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()
 

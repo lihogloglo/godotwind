@@ -1,6 +1,28 @@
 # Godotwind — Future Steps & Godot Wishlist
 
-Last updated: 2026-03-14
+Last updated: 2026-04-06
+
+## Tracked Follow-ups
+
+### Interior transition — explicit `NativeStreamingManager.pause()/resume()` during fade
+
+**Context:** The P0 interior-load hiccup fix (2026-04-06) replaced the sync `CellManager.load_cell()` call in `InteriorPocketManager._load_pocket()` with `request_cell_async()` + a priority lane that boosts in-flight interior entries during a transition. The priority lane is the *effective* pause for the test scene (`tests/visual/test_interior_transition.tscn`) because it doesn't run the full streaming pipeline.
+
+**What's missing:** `world_explorer.gd` DOES run `NativeStreamingManager` alongside the pocket manager. When a transition begins (`InteriorPocketManager.transition_started`), the streaming manager should:
+1. Stop accepting new exterior cell requests (`request_exterior_cell_async` returns -1 until resumed)
+2. Keep draining the existing `_instantiation_queue` (the priority lane already routes interior entries first)
+3. Resume on `transition_completed` OR `interior_load_timeout`
+
+**Where to wire it:**
+- `NativeStreamingManager` already has a pause API at `world_explorer.gd:1855` (grep for `## Pause/resume the streaming manager`). Verify it matches the semantics above.
+- Connect `_pocket_manager.transition_started` → `_streaming_manager.pause()` and `transition_completed` → `_streaming_manager.resume()` in `world_explorer._setup_pocket_manager()`.
+- Same wiring for the new `interior_load_timeout` signal (resume on timeout too).
+
+**Why not this session:** The test scene doesn't use `NativeStreamingManager` so the fix can't be validated there. Deferring keeps the P0 change surgical. The test scene's pass criteria (frame-time peak ≤ 8 ms) are met by the priority-lane boost alone; adding the explicit pause is a belt-and-suspenders hardening for the main scene.
+
+**Verification after wiring:** Main scene (`scenes/Godotwind.tscn`), walk to a Seyda Neen door while looking 90° sideways (so exterior cell loading is still active in your peripheral view). Press E. Frame time peak during the transition window should stay ≤ 8 ms. Confirm `_cell_manager._async_requests` shows no new exterior entries created during the fade window.
+
+
 
 This document covers where the project is heading, what we're building next, and which Godot engine features we're waiting for (or working around).
 

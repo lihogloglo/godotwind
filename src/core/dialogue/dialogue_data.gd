@@ -17,11 +17,3 @@ class DialogueLine extends RefCounted:
 class TopicEntry extends RefCounted:
 	var topic_id: String = ""       # Unique identifier (lowercase)
 	var display_name: String = ""   # How to show it in the UI
-
-
-## Result of a dialogue interaction (may trigger game state changes)
-class DialogueResult extends RefCounted:
-	var line: DialogueLine = null
-	var topics_discovered: Array[String] = []  # New topics found in response text
-	var quest_updated: bool = false
-	var disposition_change: int = 0

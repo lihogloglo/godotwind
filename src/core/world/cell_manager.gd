@@ -866,12 +866,53 @@ var _prewarm_pending: Dictionary = {}
 ## Pre-warm budget per frame
 var _prewarm_per_frame: int = SC.POOL_PREWARM_MAX_PER_FRAME
 
+## Per-request load configuration that overrides shared instantiator defaults.
+##
+## Carried on AsyncCellRequest and copied onto each spawned InstantiationEntry
+## so that concurrent exterior + interior loads can use different settings
+## without stomping on each other's shared state.
+##
+## Prior to this class, InteriorPocketManager had to mutate _instantiator's
+## shared flags during a sync load (ipm.gd:753-774). With async loads the
+## same mutation would be read across frames by concurrent exterior
+## instantiations — LoadProfile eliminates that race by making the settings
+## per-request.
+class LoadProfile:
+	## Apply deferred fade-in after add_child. Off for invisible pocket loads.
+	var fade_in: bool = true
+	## Route mid-worthy objects through the RS / static-renderer batching path.
+	## Must be OFF for interior pockets — RS instances render at ESM world
+	## position and ignore the pocket Y=-500 offset + INTERIOR_RENDER_LAYERS.
+	var use_static_renderer: bool = true
+	## NPC/creature distance cull from camera. 0.0 disables the check — needed
+	## for interior pockets because the camera is at the exterior position
+	## during pocket load but interior actors use small cell-local coordinates.
+	var max_actor_distance: float = 150.0
+	## Priority-lane flag — entries with this set jump to the tail of the
+	## instantiation queue (pop_back() = next out) regardless of distance
+	## priority. Only set to true during an active interior transition to
+	## drain the interior ahead of exterior work.
+	var interior_priority: bool = false
+
+	static func exterior_default() -> LoadProfile:
+		return LoadProfile.new()
+
+	static func interior_pocket() -> LoadProfile:
+		var p := LoadProfile.new()
+		p.fade_in = false
+		p.use_static_renderer = false
+		p.max_actor_distance = 0.0
+		p.interior_priority = false  # Flipped to true by IPM during transition
+		return p
+
+
 ## Async cell request tracking
 class AsyncCellRequest:
 	var cell_record: CellRecord
 	var grid: Vector2i  # For exterior cells
 	var is_interior: bool
 	var request_id: int
+	var load_profile: LoadProfile = null  # Per-request settings (null -> use exterior defaults)
 	var pending_parses: Dictionary[String, int] = {}  # model_path -> task_id
 	var pending_disk_loads: Dictionary[String, Array] = {}  # model_path -> Array[CellReference] (refs waiting for this model)
 	var parsed_results: Dictionary[String, NIFParseResult] = {}  # model_path -> NIFParseResult
@@ -903,6 +944,15 @@ class InstantiationEntry:
 	var position: Vector3
 	var always_near: bool
 	var mid_worthy: bool
+	## Per-entry load profile copied from the owning AsyncCellRequest at queue
+	## time. Read during _process_instantiation_queue so that concurrent loads
+	## with different profiles don't stomp on each other.
+	## Null means "use instantiator defaults" (sync path compatibility).
+	var load_profile: LoadProfile = null
+	## Mirrored from load_profile.interior_priority for cheap sort access.
+	## Flipped to true by InteriorPocketManager when a transition begins so
+	## that in-flight interior entries drain ahead of exterior work.
+	var interior_priority: bool = false
 
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
@@ -976,6 +1026,29 @@ func has_async_capacity() -> bool:
 	return _background_processor != null and _async_requests.size() < MAX_ASYNC_REQUESTS
 
 
+## Set the interior_priority flag on all in-flight instantiation entries for
+## the given async request. Called by InteriorPocketManager at the start of
+## a transition so that the interior drains ahead of exterior streaming. A
+## subsequent force_queue_resort() push the flagged entries to the tail.
+func set_request_priority(request_id: int, priority: bool) -> void:
+	if request_id in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request and request.load_profile:
+			request.load_profile.interior_priority = priority
+	for entry: InstantiationEntry in _instantiation_queue:
+		if entry.request_id == request_id:
+			entry.interior_priority = priority
+			if entry.load_profile:
+				entry.load_profile.interior_priority = priority
+
+
+## Force an immediate queue re-sort. Use after mutating priority flags so
+## the new order takes effect on the next _process_instantiation_queue pass.
+func force_queue_resort() -> void:
+	_sort_queue_by_priority()
+	_queue_sort_frame = Engine.get_frames_drawn()
+
+
 ## Get the number of available async request slots
 func get_async_slots_available() -> int:
 	if not _background_processor:
@@ -985,7 +1058,9 @@ func get_async_slots_available() -> int:
 
 ## Request async loading of an exterior cell
 ## Returns request_id for tracking, or -1 if async not available or at capacity
-func request_exterior_cell_async(x: int, y: int) -> int:
+## `profile` — optional per-request override of instantiator defaults. Pass
+## null (default) to use the shared instantiator flags (current behavior).
+func request_exterior_cell_async(x: int, y: int, profile: LoadProfile = null) -> int:
 	if not _background_processor:
 		# Only warn once per session about missing processor
 		if not _stats.get("_warned_no_processor", false):
@@ -1001,12 +1076,15 @@ func request_exterior_cell_async(x: int, y: int) -> int:
 	if not cell_record:
 		return -1
 
-	return _start_async_request(cell_record, Vector2i(x, y), false)
+	return _start_async_request(cell_record, Vector2i(x, y), false, profile)
 
 
 ## Request async loading of an interior cell
 ## Returns request_id for tracking, or -1 if async not available or at capacity
-func request_cell_async(cell_name: String) -> int:
+## `profile` — per-request override. Interior pockets should pass
+## `LoadProfile.interior_pocket()` so RS/static-renderer batching is disabled
+## (RS instances render at ESM world position, not pocket offset).
+func request_cell_async(cell_name: String, profile: LoadProfile = null) -> int:
 	if not _background_processor:
 		# Only warn once per session about missing processor
 		if not _stats.get("_warned_no_processor", false):
@@ -1022,7 +1100,7 @@ func request_cell_async(cell_name: String) -> int:
 	if not cell_record:
 		return -1
 
-	return _start_async_request(cell_record, Vector2i.ZERO, true)
+	return _start_async_request(cell_record, Vector2i.ZERO, true, profile)
 
 
 ## Check if an async request is complete
@@ -1317,18 +1395,27 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		var beyond_near := distance_sq > SC.NEAR_END * SC.NEAR_END
 		var mid_instance_id := -1
 
+		# Per-entry static-renderer gate. Interior pockets set this false so
+		# RS instances don't render at ESM world position while the pocket
+		# node lives at Y=-500. Null profile = use legacy behavior (always use
+		# _static_renderer if present).
+		var entry_use_static: bool = true
+		if entry.load_profile:
+			entry_use_static = entry.load_profile.use_static_renderer
+		var effective_static_renderer: Node = _static_renderer if entry_use_static else null
+
 		# Step 0: AABB-based upgrade — non-mid-worthy objects that are actually large.
 		# Pre-classification only has the model path (no mesh data). Now at instantiation
 		# time the prototype is available, so check its AABB max dimension.
 		# Objects > 2m in any axis get upgraded to mid-worthy for RS coverage.
-		if _static_renderer and not mid_worthy and not always_near and not model_path.is_empty():
+		if effective_static_renderer and not mid_worthy and not always_near and not model_path.is_empty():
 			var max_dim := _get_aabb_max_dim(model_path, item_id)
 			if max_dim > SC.AABB_MID_WORTHY_THRESHOLD:
 				mid_worthy = true
 				_stats["aabb_upgrades"] = _stats.get("aabb_upgrades", 0) + 1
 
 		# Step 1: Mid-worthy objects ALWAYS get RS instances regardless of distance
-		if _static_renderer and not model_path.is_empty() and not always_near and mid_worthy:
+		if effective_static_renderer and not model_path.is_empty() and not always_near and mid_worthy:
 			var mid_start := Time.get_ticks_usec()
 			mid_instance_id = _instantiate_mid_tier(ref, model_path, item_id, request)
 			var mid_elapsed := Time.get_ticks_usec() - mid_start
@@ -1351,7 +1438,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			# Within NEAR range (or MID failed at close range): fall through to create Node3D
 
 		# Step 2: Non-mid-worthy objects beyond NEAR: defer + "near:" RS instance
-		if _static_renderer and beyond_near and not model_path.is_empty() and not always_near and not mid_worthy:
+		if effective_static_renderer and beyond_near and not model_path.is_empty() and not always_near and not mid_worthy:
 			_defer_for_near(ref, model_path, item_id, request, obj_position)
 			_create_near_only_rs_instance(ref, model_path, item_id, request)
 			_stats["mid_filtered"] = _stats.get("mid_filtered", 0) + 1
@@ -1359,9 +1446,18 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			continue
 
 		# Step 3: NEAR-TIER — Full Node3D pipeline (duplicate + scene tree)
+		# Set the instantiator transient profile BEFORE the call. The
+		# instantiator reads it via _effective_* helpers for actor distance
+		# and static-renderer gating. The set/clear pair is intentionally
+		# kept tight (no awaits, no exceptions can escape an intermediate
+		# GDScript error — push_error/push_warning return normally — so the
+		# clear is guaranteed to run). The _set/_clear helpers carry an
+		# assert that catches leaked transients in debug builds.
+		_instantiator._set_transient_profile(entry.load_profile)
 		var inst_start := Time.get_ticks_usec()
 		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
+		_instantiator._clear_transient_profile()
 		_diag_duplicate_time_total_us += inst_elapsed
 		_diag_duplicate_count += 1
 
@@ -1374,7 +1470,16 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 			# Double-check parent is still valid before queuing (defensive)
 			if is_instance_valid(request.cell_node):
-				pending_children.append({"parent": request.cell_node, "child": obj})
+				# Capture per-entry fade-in decision now so the pending_children
+				# batch loop doesn't have to look up LoadProfile later.
+				var entry_fade_in_decision: bool = _instantiator.enable_fade_in
+				if entry.load_profile:
+					entry_fade_in_decision = entry.load_profile.fade_in
+				pending_children.append({
+					"parent": request.cell_node,
+					"child": obj,
+					"fade_in": entry_fade_in_decision,
+				})
 				instantiated += 1
 
 				# Immediate promotion: hide RS LOD instances overlapping with Node3D.
@@ -1402,13 +1507,17 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	for entry in pending_children:
 		var parent: Node3D = entry.parent
 		var child: Node3D = entry.child
+		# Per-entry fade-in decision captured earlier (pre-batching loop).
+		# Interior pockets flip this off because pocket geometry lives at
+		# Y=-500 while loading and fading is invisible.
+		var entry_fade_in: bool = entry.get("fade_in", _instantiator.enable_fade_in)
 		if is_instance_valid(parent) and is_instance_valid(child):
 			if use_deferred:
 				parent.call_deferred("add_child", child)
 				# Defer fade-in until child enters scene tree — create_tween() requires it.
 				# Without this, material_override gets set to fade ShaderMaterial but the
 				# tween never runs, leaving objects invisible (fade_amount stuck at 0.0).
-				if _instantiator.enable_fade_in:
+				if entry_fade_in:
 					child.tree_entered.connect(
 						func() -> void:
 							if is_instance_valid(child):
@@ -1417,37 +1526,53 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 					)
 			else:
 				parent.add_child(child)
-				apply_fade_in_to_object(child)
+				if entry_fade_in:
+					apply_fade_in_to_object(child)
 	return instantiated
 
 
 ## Sort instantiation queue by frustum-aware priority
 ## Objects in front of camera get priority; objects behind are deprioritized 4x
 ## Queue is sorted FARTHEST-first so pop_back() returns highest priority (nearest/in-frustum)
+##
+## PRIORITY LANE: Entries with `interior_priority == true` ALWAYS sort to the
+## tail of the queue, ahead of every non-priority entry regardless of distance.
+## Within the priority lane, existing distance/frustum ordering still applies.
+## InteriorPocketManager flips this flag on all in-flight interior entries at
+## the start of a transition so that the interior drains ahead of exterior
+## streaming during the critical fade window.
 func _sort_queue_by_priority() -> void:
 	if _instantiation_queue.size() < 2:
 		return
 
 	var cam_pos := _camera_position
 	var cam_fwd := _camera_forward
-	
+
 	# Pre-calculate priorities to avoid expensive lambda logic during sort
 	# GDScript sort_custom is much faster with simple float comparisons
 	var priorities := {} # entry -> float
 	for entry in _instantiation_queue:
 		var pos: Vector3 = entry.position
 		var dist_sq := cam_pos.distance_squared_to(pos)
-		
+
 		if cam_fwd != Vector3.ZERO:
 			var dir := (pos - cam_pos)
 			# Frustum penalty: objects behind camera (dot < 0.3) get 4x distance penalty
 			if dist_sq > 1.0 and cam_fwd.dot(dir) < 0.3 * dir.length():
 				dist_sq *= 4.0
-		
+
 		priorities[entry] = dist_sq
 
 	_instantiation_queue.sort_custom(func(a: InstantiationEntry, b: InstantiationEntry) -> bool:
-		# Reverse order: farthest first, so pop_back() returns nearest/highest-priority
+		# PRIMARY KEY: priority lane. Non-priority entries come first (head
+		# of the array); priority entries go to the tail so pop_back() takes
+		# them first. Returning `false` when a is priority and b is not puts
+		# a AFTER b; returning `true` when a is non-priority and b is priority
+		# puts a BEFORE b.
+		if a.interior_priority != b.interior_priority:
+			return not a.interior_priority  # non-priority before priority
+		# SECONDARY KEY: existing distance/frustum priority. Farthest first,
+		# so pop_back() returns nearest/highest-priority within the lane.
 		return priorities[a] > priorities[b]
 	)
 
@@ -1513,11 +1638,15 @@ func is_burst_loading() -> bool:
 
 
 ## Internal: Start an async request
-func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool) -> int:
+func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, profile: LoadProfile = null) -> int:
 	var request := AsyncCellRequest.new()
 	request.cell_record = cell
 	request.grid = grid
 	request.is_interior = is_interior
+	# Default to exterior profile if caller didn't provide one. Having a
+	# non-null profile on every request simplifies _queue_instantiation and
+	# _process_instantiation_queue (no null checks on the hot path).
+	request.load_profile = profile if profile else LoadProfile.exterior_default()
 	request.request_id = _next_async_id
 	_next_async_id += 1
 
@@ -2061,13 +2190,19 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	entry.always_near = always_near
 	entry.mid_worthy = mid_worthy
 
+	# Copy the per-request LoadProfile onto the entry so the instantiation
+	# queue processor can read it without a dictionary lookup, and so that
+	# concurrent loads with different profiles don't collide on shared state.
+	var owning_request: AsyncCellRequest = _async_requests.get(request_id) if request_id in _async_requests else null
+	if owning_request and owning_request.load_profile:
+		entry.load_profile = owning_request.load_profile
+		entry.interior_priority = owning_request.load_profile.interior_priority
+
 	_instantiation_queue.append(entry)
 
 	# Track pending instantiation count for completion checking
-	if request_id in _async_requests:
-		var request: AsyncCellRequest = _async_requests.get(request_id)
-		if request:
-			request.pending_instantiations += 1
+	if owning_request:
+		owning_request.pending_instantiations += 1
 
 	return true
 

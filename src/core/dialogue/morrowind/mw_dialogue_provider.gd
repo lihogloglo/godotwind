@@ -41,13 +41,15 @@ func _resolve_npc(speaker_id: String) -> NPCRecord:
 	return null
 
 
-## Get an NPC's greeting
-## Searches Greeting 0 through Greeting 9 (MW-specific ordering)
-## Returns DialogueData.DialogueLine or null
-func get_greeting(speaker_id: String, context: DialogueContext) -> RefCounted:
+## Get an NPC's greeting.
+## Searches Greeting 0 through Greeting 9 (MW-specific ordering).
+## Returns DialogueProvider.Response.
+func get_greeting(speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
+	var r := DialogueProvider.Response.new()
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
-		return null
+		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
+		return r
 
 	for i in range(10):
 		var topic_id := "greeting %d" % i
@@ -57,22 +59,26 @@ func get_greeting(speaker_id: String, context: DialogueContext) -> RefCounted:
 			line.text = info.response
 			line.speaker_name = npc.name
 			line.source_id = info.record_id
-			return line
+			r.line = line
+			r.error = DialogueProvider.Error.OK
+			return r
 
-	return null
+	r.error = DialogueProvider.Error.NO_INFO_MATCH
+	return r
 
 
-## Get topics available for this NPC that the player knows
-## Pre-filters by actor fields for performance (avoids 118k+ filter evals)
-## Returns Array of DialogueData.TopicEntry
-func get_available_topics(speaker_id: String, context: DialogueContext) -> Array:
+## Get topics available for this NPC that the player knows.
+## Pre-filters by actor fields for performance (avoids 118k+ filter evals).
+## On success, Response.topics is Array[DialogueData.TopicEntry].
+## An empty topic list is NOT an error — Response.error == OK, Response.topics.is_empty().
+func get_available_topics(speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
+	var r := DialogueProvider.Response.new()
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
-		return []
+		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
+		return r
 
 	_ensure_topic_cache()
-
-	var results: Array = []
 
 	for topic_id in _topic_ids:
 		# Skip topics the player doesn't know
@@ -91,45 +97,53 @@ func get_available_topics(speaker_id: String, context: DialogueContext) -> Array
 			# Display name = original DIAL record_id (preserves case)
 			var dial: DialogueRecord = ESMManager.get_dialogue(topic_id)
 			entry.display_name = dial.record_id if dial != null else topic_id
-			results.append(entry)
+			r.topics.append(entry)
 
-	return results
+	return r
 
 
-## Get response for a specific topic from this NPC
-## Returns DialogueData.DialogueResult
-func get_response(topic_id: String, speaker_id: String, context: DialogueContext) -> RefCounted:
+## Get response for a specific topic from this NPC.
+## Returns DialogueProvider.Response with line, topics_discovered, quest_updated populated on success.
+func get_response(topic_id: String, speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
+	var r := DialogueProvider.Response.new()
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
-		return DialogueDataScript.DialogueResult.new()
-
-	var result: RefCounted = DialogueDataScript.DialogueResult.new()
+		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
+		return r
 
 	var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, context)
 	if info == null:
-		return result
+		r.error = DialogueProvider.Error.NO_INFO_MATCH
+		return r
 
 	var line: RefCounted = DialogueDataScript.DialogueLine.new()
 	line.text = info.response
 	line.speaker_name = npc.name
 	line.source_id = info.record_id
-	result.line = line
+	r.line = line
+	r.topics_discovered = discover_topics_in_text(info.response)
+	r.quest_updated = info.quest_name or info.quest_finish or info.quest_restart
+	# MW-specific metadata so MWQuestAdapter can advance the journal without
+	# re-running the dialogue filter. See DialogueProvider.Response docstring.
+	r.metadata = {
+		"info_id": info.record_id,
+		"parent_topic": topic_id,
+		"journal_index": info.disposition,
+		"quest_name_flag": info.quest_name,
+		"quest_finish": info.quest_finish,
+		"quest_restart": info.quest_restart,
+	}
+	return r
 
-	# Discover topics mentioned in the response text
-	result.topics_discovered = discover_topics_in_text(info.response)
 
-	# Quest flags
-	result.quest_updated = info.quest_name or info.quest_finish or info.quest_restart
-
-	return result
-
-
-## Get the goodbye line for this speaker
-## Searches the "Goodbye" topic for a matching INFO
-func get_goodbye(speaker_id: String, context: DialogueContext) -> RefCounted:
+## Get the goodbye line for this speaker.
+## Searches the "Goodbye" topic for a matching INFO.
+func get_goodbye(speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
+	var r := DialogueProvider.Response.new()
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
-		return null
+		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
+		return r
 
 	var info: DialogueInfoRecord = MWDialogueFilterScript.search("goodbye", npc, context)
 	if info != null and not info.response.is_empty():
@@ -137,9 +151,11 @@ func get_goodbye(speaker_id: String, context: DialogueContext) -> RefCounted:
 		line.text = info.response
 		line.speaker_name = npc.name
 		line.source_id = info.record_id
-		return line
+		r.line = line
+		return r
 
-	return null
+	r.error = DialogueProvider.Error.NO_INFO_MATCH
+	return r
 
 
 ## Get the display name for a speaker

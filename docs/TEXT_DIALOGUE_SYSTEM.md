@@ -1,6 +1,8 @@
 # Text & Dialogue System
 
-Built 2026-04-02. Framework-first architecture — Morrowind is one data source, not the architecture.
+Built 2026-04-02. Phase A (theme + typed Response contract) + Phase B (interaction framework + in-world integration) landed 2026-04-06.
+
+Framework-first architecture — Morrowind is one data source, not the architecture.
 
 ---
 
@@ -9,7 +11,8 @@ Built 2026-04-02. Framework-first architecture — Morrowind is one data source,
 ```
 src/core/dialogue/                    Generic framework (no MW references)
     dialogue_context.gd               Player/world state for dialogue evaluation
-    dialogue_data.gd                  Data types: DialogueLine, TopicEntry, DialogueResult
+    dialogue_data.gd                  Value types: DialogueLine, TopicEntry
+    dialogue_provider.gd              Abstract provider base + Response envelope + Error enum
     quest_manager.gd                  Quest state tracking, journal entries, signals
 
 src/core/dialogue/morrowind/          MW translation layer (all MW-specific logic)
@@ -18,20 +21,41 @@ src/core/dialogue/morrowind/          MW translation layer (all MW-specific logi
     mw_dialogue_filter.gd             4-step INFO matching (OpenMW filter.cpp port)
     mw_dialogue_provider.gd           Greeting/topic/response lookup + topic highlighting
     mw_quest_adapter.gd               Journal DIAL/INFO → QuestManager mapping
+    mw_text_formatter.gd              MW-specific HTML → BBCode converter
+    npc_interactable.gd               NPC interaction adapter (Phase B) — opens DialogueUI
+    book_interactable.gd              Book interaction adapter (Phase B) — opens BookViewer
+
+src/core/interaction/                 Generic interaction framework (Phase B, no MW references)
+    interactable.gd                   Base class: get_prompt_text / can_interact / interact
+    interaction_raycaster.gd          Camera-mounted raycaster, collision layer 3
 
 src/core/ui/                          Generic UI components
-    text_formatter.gd                 MW HTML markup → BBCode converter
-    book_viewer.gd                    Book/scroll display panel
-    journal_panel.gd                  Quest journal with active/completed tabs
-    toast.gd                          Transient notification popup
+    text_formatter.gd                 Generic HTML markup → BBCode converter with callable hooks
+    book_viewer.gd                    Book/scroll display panel (uses default_theme)
+    journal_panel.gd                  Quest journal with active/completed tabs (uses default_theme)
+    dialogue_panel.gd                 DialogueUI singleton (Phase B) — full conversation flow
+    toast.gd                          Transient notification popup (uses default_theme)
+
+assets/ui/
+    fonts/pelagiad/Pelagiad.ttf       Pelagiad font (OFL, MW-themed serif)
+    fonts/pelagiad/LICENSE.txt        OFL 1.1 license
+    themes/default_theme.tres         Shared theme: Pelagiad + 5 StyleBox variations + label/button variations
+    themes/BEFORE_STYLE_CATALOG.md    Source StyleBox values captured before Phase A extraction
 
 tests/visual/
     test_book_viewer.tscn             Browse 30 MW books with formatted text + images
-    test_dialogue.tscn                NPC dialogue with greeting, topics, clickable links
+    test_dialogue.tscn                Thin harness — NPC selector + DialogueUI singleton
     test_journal.tscn                 Quest progression simulation with journal UI
+    test_interaction.tscn             End-to-end Phase B vertical slice: fake NPC + book in a 3D world,
+                                      InteractionRaycaster on camera, E to open dialogue/book
+
+tests/tools/
+    capture_screenshot.tscn           Utility: launch scene, wait, save PNG, quit.
+                                      Sets WINDOW_FLAG_NO_FOCUS + MOUSE_PASSTHROUGH to isolate
+                                      scene from desktop input for deterministic captures.
 ```
 
-**Litmus test:** Someone could write an `OblivionDialogueProvider` without touching any framework file.
+**Litmus test:** Someone could write an `OblivionDialogueProvider` without touching any framework file. Add `OblivionInteractable` subclasses under a new `src/core/dialogue/oblivion/` adapter directory; the generic `Interactable` base + `InteractionRaycaster` + `DialogueUI` stay untouched.
 
 ---
 
@@ -96,36 +120,56 @@ The GDScript supplement pass adds ~1.9s to ESM load time (total ~7s with C# cach
 
 ---
 
-## What's Next
+## Phase A — Shared theme + typed contract (2026-04-06)
 
-### Phase 5: In-World Integration
-- Click/interact with NPC in streaming world → open dialogue panel
-- NPC interaction range check using `hello_distance` from AI data
-- Camera focus on NPC during dialogue
-- Click book object in world → open book viewer
-- Wire quest updates into dialogue response flow (auto-update journal when NPC response has QSTN flag)
+**Shipped:**
+- `assets/ui/themes/default_theme.tres` — single source of truth for all dialogue/book/journal/toast styling. Pelagiad font (OFL) as `default_font`, single `default_font_size = 18` controls all body text. Five StyleBoxFlat variations: Parchment (main panels) / ParchmentTight (dialogue response) / Toast (transient messages) / TopicsList (dark dialogue topic list) / ParchmentSeparator (decorative horizontal rule). Label/button variations: TitleLabel (26pt), DispositionLabel, ToastLabel, CloseButton (22pt).
+- All 4 UI files (`book_viewer.gd`, `journal_panel.gd`, `toast.gd`, `test_dialogue.gd`) refactored to apply the theme via `theme = DEFAULT_THEME` + `theme_type_variation = "..."`. Inline `StyleBoxFlat.new()`, `add_theme_font_size_override`, `add_theme_color_override` calls **deleted** — no commented-out branches left.
+- **`DialogueProvider.Response` envelope.** Replaced silent bare-null returns from provider methods with a typed `Response` class carrying `{error: Error, line, topics, topics_discovered, quest_updated, disposition_change, metadata}`. The `Error` enum distinguishes `OK`, `SPEAKER_NOT_FOUND` (bug), and `NO_INFO_MATCH` (valid state, show fallback UI). See `src/core/dialogue/dialogue_provider.gd` for the field matrix per-method.
+- `MWDialogueProvider` all 4 query methods (`get_greeting`, `get_available_topics`, `get_response`, `get_goodbye`) return `Response`. `_resolve_npc == null` → `SPEAKER_NOT_FOUND`. `filter.search == null` → `NO_INFO_MATCH`.
+- **Deleted:** `DialogueData.DialogueResult` (dead code after the Response envelope subsumed it).
+- `tests/tools/capture_screenshot.gd` — reusable PNG capture tool for visual verification. Sets `WINDOW_FLAG_MOUSE_PASSTHROUGH + WINDOW_FLAG_NO_FOCUS` to isolate the scene from OS input during capture (critical — without this, a random user mouse click over a RichTextLabel url link mid-capture would fire `meta_clicked` and perturb scene state, as we experienced during development).
 
-### Phase 6: UI Polish
-- **Pelagiad font** ([github.com/Isaskar/Pelagiad](https://github.com/Isaskar/Pelagiad)) — MW-themed font for all UI
-- Proper `default_theme.tres` with font slots and parchment styling
-- Book viewer: two-page spread for books, single column for scrolls
-- Book viewer: pagination with page turn
-- Journal: quest display names extracted from first journal entry (not raw IDs)
-- Journal: search/filter
+## Phase B — Interaction framework + in-world integration (2026-04-06)
 
-### Phase 7: Advanced Dialogue
-- **Persuasion mechanics**: admire/intimidate/taunt/bribe wheel with disposition delta formula
-- **Choice branching**: result scripts set `Choice` variable, filter matches against it
-- **INFO chaining**: verify prev_id/next_id semantics (may be mod load-order, not conversation flow)
-- **Result script execution**: basic MW script interpreter for BNAM scripts (give item, set journal, set global)
-- **Service UIs**: merchant, trainer, spellmaker, enchanter (accessed via dialogue)
+**Shipped:**
+- **`src/core/interaction/` directory** — new top-level subsystem. `Interactable` base class (generic, zero game-specific imports) with `get_prompt_text() / can_interact(player, distance) / interact(player)` virtuals, `enabled` + `max_interaction_distance` exports, `interacted(player)` signal. `InteractionRaycaster` Node3D that sits on the player camera, casts against collision layer 3 each physics frame, walks up from collider to find the first `Interactable` ancestor, and calls `interact()` on the configured InputMap action.
+- **Collision layer 3 = "Interactable"** in `project.godot`. Layers 1-3: Environment / Player / Interactable.
+- **`interact` InputMap action** in `project.godot`, bound to physical E key.
+- `src/core/dialogue/morrowind/npc_interactable.gd` — MW adapter. Holds `speaker_id`, caches the `NPCRecord`, reads `ai_data.hello` → meters via `MW_UNITS_PER_METER = 70`, overrides `can_interact()` to enforce hello_distance on top of the generic range cap, `get_prompt_text()` returns `"Talk to <npc_name>"`, `interact()` opens a shared `DialogueUI` with the speaker_id.
+- `src/core/dialogue/morrowind/book_interactable.gd` — MW adapter. Holds `book_id`, caches the `BookRecord`, `get_prompt_text()` returns `"Read <title>"` (or `"Unroll <title>"` for scrolls), `interact()` calls `BookViewer.show_book()`.
+- **`DialogueUI` singleton** at `src/core/ui/dialogue_panel.gd`. Extracted from `test_dialogue.gd` (which is now a thin ~150-line harness). Persistent CanvasLayer at layer 90. `open(provider, speaker_id, context)` / `close()` / `is_open()`. Signals: `opened(speaker_id)`, `closed(speaker_id)`, `response_selected(topic_id, response)`. Handles the full conversation flow: greeting, topic discovery + highlighting, topic click, cross-referenced link click, goodbye (with 1.5s farewell display before auto-close). 85% alpha background so the 3D world dims through during conversation.
+- **Quest signal wiring.** `MWDialogueProvider.get_response()` now populates `Response.metadata` with MW-specific extras: `{info_id, parent_topic, journal_index, quest_name_flag, quest_finish, quest_restart}`. The generic framework ignores the dict; `MWQuestAdapter.on_response_selected(topic_id, response)` is a signal handler that reads the metadata and calls `update_journal()` without re-running the filter. Wire via `dialogue_ui.response_selected.connect(quest_adapter.on_response_selected)`.
+- **`tests/visual/test_interaction.tscn`** — end-to-end vertical slice. Minimal 3D world (floor, sun, WorldEnvironment) + fly camera + `InteractionRaycaster` + a fake NPC cylinder (with `NPCInteractable` as the root + child StaticBody3D on layer 3 + capsule collision) + a fake book cube. Press E to open. Exercises the complete Phase A + B pipeline: generic Interactable → MW adapter → DialogueUI → MWDialogueProvider → quest signal → MWQuestAdapter. Verified visually: walking up to the cylinder shows `[E] Talk to Fargoth (1.7m)` prompt, and E opens the dialogue with Fargoth's greeting + "ring" topic highlighted.
 
-### Phase 8: Advanced Features
-- MW script VM (interpret compiled SCPT bytecode)
+**Gotchas learned:**
+- **Interactable must be an ancestor of the collider**, not a sibling. The raycaster walks UP from the hit collider to find the first Interactable. Prefab pattern: `NPCInteractable` (root, Node3D) → child `MeshInstance3D` + child `StaticBody3D` → child `CollisionShape3D`. Sibling layouts don't work because there's no walk-across-siblings step.
+- **Input.parse_input_event synthetic keys must set BOTH `keycode` and `physical_keycode`.** InputMap bindings from `project.godot` use `physical_keycode` by default, so setting only `keycode` won't match the action. Fixed in `capture_screenshot.gd`.
+
+## What's Next (carry-forwards)
+
+### Phase C — Main scene integration + polish
+- **Wire DialogueUI / BookViewer / InteractionRaycaster into `scenes/Godotwind.tscn`.** Currently only the standalone `test_interaction.tscn` demonstrates the flow. This means: spawn DialogueUI + BookViewer as persistent singletons in `scenes/Godotwind.tscn`, attach InteractionRaycaster to the player camera, add `NPCInteractable` components to spawned NPCs at streaming time (likely in `src/core/world/reference_instantiator.gd` or wherever NPC prefabs are constructed), and add `BookInteractable` to spawned book objects the same way. Cell streaming needs to ensure each NPC has a StaticBody3D on collision layer 3 for the raycaster to hit — NPCs already have physics bodies, just need to verify the layer bits.
+- Quest display names from first QSTN entry text (currently raw IDs)
+- Two-page book spread (use `BookRecord.is_scroll` for layout switching — flag is already wired through `BookInteractable.get_prompt_text()`)
+- Book pagination with page turn animations
+- Journal search/filter
+
+### Phase D — Advanced dialogue (real gameplay content)
+- **Result script (BNAM) interpreter.** Currently parsed but not executed. Handlers for `Journal`, `AddItem`, `SetDisposition`, `SetGlobal`, `Choice`. Biggest gameplay-unblocking feature left — without this dialogue can't actually modify game state.
+- **Choice branching:** result scripts set `Choice` variable, filter matches against it
+- **Persuasion mechanics:** admire/intimidate/taunt/bribe wheel with disposition delta formula
+- **Derived disposition formula.** `NPCInteractable.interact()` currently copies raw `NPCRecord.disposition` into context. Port OpenMW's `getDerivedDisposition()` (base + faction reaction + race reaction + personality attribute + reputation + per-NPC persuasion modifiers) into `mw_dialogue_provider.gd` or `npc_interactable.gd`. Affects filter accuracy.
+- **INFO chaining:** verify `prev_id/next_id` semantics (may be mod load-order, not conversation flow)
+- **Service UIs:** merchant, trainer, spellmaker, enchanter (all accessed via dialogue)
+
+### Phase E — Deep
+- MW SCPT bytecode VM
 - Voice line playback (SNAM references in INFO records)
 - NPC lip sync / animation during dialogue
 - Save/load quest state and dialogue history
 - Tooltip system for items, spells, ingredients
+- **`DialogueProvider.get_speaker_name()` silent fallback cleanup** (returns `speaker_id` on failure instead of typed error — flagged in review)
 
 ---
 
