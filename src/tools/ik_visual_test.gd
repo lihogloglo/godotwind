@@ -677,16 +677,12 @@ func _create_ui() -> void:
 # =========================================================================
 
 func _physics_process(delta: float) -> void:
-	# --- WASD movement ---
+	# --- WASD movement (K.0 actions, AZERTY-correct via physical_keycode) ---
 	var move_dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_W):
-		move_dir.z -= 1.0
-	if Input.is_key_pressed(KEY_S):
-		move_dir.z += 1.0
-	if Input.is_key_pressed(KEY_A):
-		move_dir.x -= 1.0
-	if Input.is_key_pressed(KEY_D):
-		move_dir.x += 1.0
+	var move_xz := Input.get_vector(
+		&"move_left", &"move_right", &"move_forward", &"move_backward")
+	move_dir.x = move_xz.x
+	move_dir.z = move_xz.y
 
 	if move_dir.length() > 0.01:
 		# Move relative to camera yaw
@@ -832,8 +828,8 @@ func _update_drag() -> void:
 	var hit := ray_origin + ray_dir * t
 	_dragged_target.global_position = hit
 
-	# Allow vertical adjustment with Shift held
-	if Input.is_key_pressed(KEY_SHIFT):
+	# Allow vertical adjustment with sprint (SHIFT) held — K.0 action read
+	if Input.is_action_pressed(&"sprint"):
 		# Vertical drag mode: mouse Y controls height
 		var mouse_delta := get_viewport().get_mouse_position()
 		# Use the drag plane Y and adjust based on camera-relative up
@@ -1055,8 +1051,10 @@ func _update_info() -> void:
 # =========================================================================
 
 func _input(event: InputEvent) -> void:
+	# Debug hotkeys outside K.0 namespace — physical_keycode for AZERTY safety,
+	# K.1 GUIDE-managed rebind candidates. See docs/INPUT_SYSTEM.md §8.
 	if event is InputEventKey and event.pressed and not event.echo:
-		match event.keycode:
+		match event.physical_keycode:
 			KEY_1:
 				_foot_ik_enabled = not _foot_ik_enabled
 			KEY_2:

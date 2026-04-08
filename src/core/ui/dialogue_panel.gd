@@ -39,7 +39,7 @@
 ## var dialogue_ui := DialogueUI.new()
 ## add_child(dialogue_ui)
 ## var provider := MWDialogueProvider.new()
-## var context := DialogueContext.new()
+## var context := MWDialogueContext.new()  # adapter-specific subclass
 ## # ... populate context with player state ...
 ## dialogue_ui.open(provider, "fargoth", context)
 ## ```
@@ -47,7 +47,6 @@ class_name DialogueUI
 extends CanvasLayer
 
 const TextFormatterScript := preload("res://src/core/ui/text_formatter.gd")
-const DialogueContextScript := preload("res://src/core/dialogue/dialogue_context.gd")
 const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
 
 
@@ -79,9 +78,27 @@ func _ready() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not _root_control.visible:
 		return
-	if event.is_action_pressed("ui_cancel"):
+	# Escape OR the interact action (E) close the panel — toggling with the
+	# same key the player used to open it.
+	if event.is_action_pressed("ui_cancel") or event.is_action_pressed("interact"):
 		close()
 		get_viewport().set_input_as_handled()
+
+
+func _input(event: InputEvent) -> void:
+	# Node-level mouse tracer — fires for ALL input regardless of GUI hit test.
+	# If this fires but _on_root_gui_input does NOT, the event reached the
+	# Node tree but was eaten before GUI picking.
+	# If this does NOT fire, the event never reached the Node at all —
+	# upstream _input handler consumed it via set_input_as_handled().
+	if not _root_control.visible:
+		return
+	if event is InputEventMouseButton:
+		var mb: InputEventMouseButton = event as InputEventMouseButton
+		if mb.pressed:
+			Log.info("dialogue", "DialogueUI._input caught mouse button=%d pressed pos=(%.0f,%.0f) mouse_mode=%d" % [
+				mb.button_index, mb.position.x, mb.position.y, Input.get_mouse_mode()
+			])
 
 
 ## Open a conversation with the given speaker.
@@ -99,8 +116,29 @@ func open(provider: DialogueProvider, speaker_id: String, context: DialogueConte
 	_context = context
 	_speaker_id = speaker_id
 	_root_control.visible = true
+	# Ensure the cursor is free for button clicks. If the caller had the
+	# mouse captured for fly-camera look, dialogue would be uninteractable
+	# without this.
+	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+	Log.info("dialogue", "DialogueUI.open('%s'): root_control.visible=%s mouse_mode=%d (0=visible 2=captured)" % [
+		speaker_id, _root_control.visible, Input.get_mouse_mode()
+	])
 	opened.emit(speaker_id)
 	_show_greeting()
+	# Start polling mouse mode + visibility for diagnosis; stop on close.
+	set_process(true)
+
+
+func _process(_delta: float) -> void:
+	# Only log if state is unexpected while dialogue is open.
+	if not _root_control.visible:
+		set_process(false)
+		return
+	var mm := Input.get_mouse_mode()
+	if mm != Input.MOUSE_MODE_VISIBLE:
+		Log.warn("dialogue", "DialogueUI: mouse_mode is %d (expected 0=VISIBLE) while dialogue open — input will be eaten by captured cursor" % mm)
+		# Force it back — something upstream is re-capturing
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
 
 
 ## Close the current conversation. Fires `closed` signal.
@@ -121,7 +159,14 @@ func is_open() -> bool:
 
 
 func _show_greeting() -> void:
-	_npc_name_label.text = _provider.get_speaker_name(_speaker_id)
+	# Fall back to the raw speaker_id if the provider reports the speaker as
+	# unknown. Previously the provider silently returned the ID itself, which
+	# masked "NPC not in database" bugs as "NPC named <ID>".
+	var display_name := _provider.get_speaker_name(_speaker_id)
+	if display_name.is_empty():
+		display_name = "<%s>" % _speaker_id
+		Log.warn("dialogue", "DialogueUI: no display name for speaker_id='%s' — showing raw ID" % _speaker_id)
+	_npc_name_label.text = display_name
 	_disposition_label.text = "Disposition: %d" % _context.disposition
 
 	var greeting: DialogueProvider.Response = _provider.get_greeting(_speaker_id, _context)
@@ -185,6 +230,7 @@ func _rebuild_topic_list(topics: Array) -> void:
 
 
 func _on_topic_clicked(topic_id: String) -> void:
+	Log.info("dialogue", "DialogueUI: topic button clicked → '%s'" % topic_id)
 	if _speaker_id.is_empty():
 		return
 
@@ -220,6 +266,7 @@ func _on_topic_clicked(topic_id: String) -> void:
 
 
 func _on_goodbye_clicked() -> void:
+	Log.info("dialogue", "DialogueUI: goodbye button clicked")
 	if _speaker_id.is_empty():
 		return
 	var farewell: DialogueProvider.Response = _provider.get_response("goodbye", _speaker_id, _context)
@@ -237,23 +284,76 @@ func _on_goodbye_clicked() -> void:
 ## Handle clickable topic links in response text
 func _on_topic_link_clicked(meta: Variant) -> void:
 	var topic_id: String = str(meta)
+	Log.info("dialogue", "DialogueUI: topic link clicked → '%s'" % topic_id)
 	_on_topic_clicked(topic_id)
 
 
-func _build_ui() -> void:
-	# Root container — full-screen, visibility toggles the whole panel
-	_root_control = Control.new()
-	_root_control.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_root_control.mouse_filter = Control.MOUSE_FILTER_STOP
-	add_child(_root_control)
+## Debug: log any mouse click that hits the root Control's empty space.
+## If topic buttons or the RichTextLabel consumed the click first, this
+## won't fire. If this DOES fire, the click reached the GUI layer but no
+## child control claimed it — pointing at a layout/sizing bug.
+func _on_root_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		var mb: InputEventMouseButton = event as InputEventMouseButton
+		if mb.pressed:
+			Log.info("dialogue", "DialogueUI: root gui_input caught click button=%d pos=(%.0f,%.0f) — click did NOT hit any topic button or response text" % [
+				mb.button_index, mb.position.x, mb.position.y
+			])
 
-	# Dimming background
+
+## Hover handlers — swap cursor shape so [url] keywords look clickable.
+func _on_meta_hover_started(_meta: Variant) -> void:
+	Input.set_default_cursor_shape(Input.CURSOR_POINTING_HAND)
+	Log.info("dialogue", "DialogueUI: topic link hovered → '%s'" % str(_meta))
+
+
+func _on_meta_hover_ended(_meta: Variant) -> void:
+	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+
+
+func _build_ui() -> void:
+	# Root container — full-screen, visibility toggles the whole panel.
+	# IMPORTANT: a Control as a direct child of a CanvasLayer does NOT
+	# automatically get sized to the viewport by `set_anchors_preset` —
+	# CanvasLayer is not a Control and provides no parent rect. With
+	# parent rect = 0×0, FULL_RECT anchors compute size = 0×0 too, and
+	# the Control's hit-rect stays empty even though it visually renders
+	# (because its CHILDREN have their own offset-based layout).
+	#
+	# Fix: zero the anchors entirely and set size + position manually.
+	# Without anchors fighting it back, set_size sticks across layout
+	# passes. Re-fire on viewport size_changed.
+	_root_control = Control.new()
+	_root_control.anchor_left = 0
+	_root_control.anchor_top = 0
+	_root_control.anchor_right = 0
+	_root_control.anchor_bottom = 0
+	_root_control.offset_left = 0
+	_root_control.offset_top = 0
+	_root_control.offset_right = 0
+	_root_control.offset_bottom = 0
+	_root_control.mouse_filter = Control.MOUSE_FILTER_STOP
+	_root_control.gui_input.connect(_on_root_gui_input)
+	add_child(_root_control)
+	# Force initial size + keep it in sync with viewport size changes.
+	_resize_root_to_viewport()
+	get_viewport().size_changed.connect(_resize_root_to_viewport)
+
+	# Dimming background. MOUSE_FILTER_IGNORE so clicks that miss the topic
+	# buttons / response text and land on the dim background aren't swallowed.
+	# (Godot picks deepest child first regardless of parent filter, so this
+	# isn't about "passing through" — it's about the parent catching whiffs.)
 	_bg = ColorRect.new()
 	_bg.color = Color(0.08, 0.08, 0.1, 0.85)
 	_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root_control.add_child(_bg)
 
-	# Main VBox
+	# Main VBox. MOUSE_FILTER_PASS on all intermediate containers so clicks
+	# that miss a button bubble up to _root_control.gui_input for diagnosis
+	# (and more importantly: so the dim background logic at the root can
+	# see unclaimed clicks instead of having them die silently inside a
+	# container's default MOUSE_FILTER_STOP sink).
 	var root_vbox := VBoxContainer.new()
 	root_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root_vbox.set_anchor_and_offset(SIDE_LEFT, 0, 20)
@@ -261,6 +361,7 @@ func _build_ui() -> void:
 	root_vbox.set_anchor_and_offset(SIDE_TOP, 0, 20)
 	root_vbox.set_anchor_and_offset(SIDE_BOTTOM, 1, -20)
 	root_vbox.add_theme_constant_override("separation", 10)
+	root_vbox.mouse_filter = Control.MOUSE_FILTER_PASS
 	_root_control.add_child(root_vbox)
 
 	# NPC name + disposition row
@@ -284,6 +385,7 @@ func _build_ui() -> void:
 	var content_hbox := HBoxContainer.new()
 	content_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content_hbox.add_theme_constant_override("separation", 15)
+	content_hbox.mouse_filter = Control.MOUSE_FILTER_PASS
 	root_vbox.add_child(content_hbox)
 
 	# Response panel (left, larger)
@@ -292,13 +394,21 @@ func _build_ui() -> void:
 	response_panel.theme_type_variation = "ParchmentTight"
 	response_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	response_panel.size_flags_stretch_ratio = 2.0
+	response_panel.mouse_filter = Control.MOUSE_FILTER_PASS
 	content_hbox.add_child(response_panel)
 
 	_response_text = RichTextLabel.new()
 	_response_text.bbcode_enabled = true
 	_response_text.fit_content = false
 	_response_text.scroll_active = true
+	_response_text.selection_enabled = true  # Lets the cursor hover detection work for [url] tags
+	_response_text.mouse_filter = Control.MOUSE_FILTER_STOP
 	_response_text.meta_clicked.connect(_on_topic_link_clicked)
+	# meta_hover_started/ended swap cursor to pointing_hand so the player
+	# knows topic keywords are clickable. Without this the text looks
+	# "decorative" and players don't realize they can click.
+	_response_text.meta_hover_started.connect(_on_meta_hover_started)
+	_response_text.meta_hover_ended.connect(_on_meta_hover_ended)
 	response_panel.add_child(_response_text)
 
 	# Topics panel (right, narrower)
@@ -307,6 +417,7 @@ func _build_ui() -> void:
 	topics_panel.theme_type_variation = "TopicsList"
 	topics_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	topics_panel.size_flags_stretch_ratio = 1.0
+	topics_panel.mouse_filter = Control.MOUSE_FILTER_PASS
 	content_hbox.add_child(topics_panel)
 
 	var topics_scroll := ScrollContainer.new()
@@ -316,6 +427,7 @@ func _build_ui() -> void:
 	_topics_container = VBoxContainer.new()
 	_topics_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_topics_container.add_theme_constant_override("separation", 4)
+	_topics_container.mouse_filter = Control.MOUSE_FILTER_PASS
 	topics_scroll.add_child(_topics_container)
 
 	# Info bar at bottom
@@ -324,3 +436,12 @@ func _build_ui() -> void:
 	_info_label.add_theme_font_size_override("font_size", 12)
 	_info_label.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
 	root_vbox.add_child(_info_label)
+
+
+func _resize_root_to_viewport() -> void:
+	if _root_control == null:
+		return
+	var vp_size := get_viewport().get_visible_rect().size
+	_root_control.position = Vector2.ZERO
+	_root_control.size = vp_size
+	Log.info("dialogue", "DialogueUI: _root_control sized to %s (rect=%s)" % [vp_size, _root_control.get_rect()])

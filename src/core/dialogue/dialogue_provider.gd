@@ -121,6 +121,10 @@ func discover_topics_in_text(text: String) -> Array[String]:
 
 
 ## Get the display name for a speaker (for the UI header).
-## Returns speaker_id as-is if no override — not an error condition.
-func get_speaker_name(speaker_id: String) -> String:
-	return speaker_id
+## Returns the empty string if the speaker is unknown to the provider.
+## Callers MUST check for empty and decide how to render missing speakers
+## (typically fall back to `speaker_id` with a visible marker so broken
+## lookups don't silently masquerade as valid names).
+func get_speaker_name(_speaker_id: String) -> String:
+	# Base implementation has no speaker database — always unknown.
+	return ""

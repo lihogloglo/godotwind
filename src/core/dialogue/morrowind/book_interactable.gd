@@ -11,13 +11,17 @@
 ## and knows about BookRecord. The Interactable base class it extends is
 ## fully generic.
 ##
+## ## Shared references
+##
+## BookViewer is NOT stored per-instance — it lives in `DialogueSession.current()`,
+## set once at boot by the main scene. `interact()` pulls it at the moment of use.
+##
 ## ## Usage
 ##
 ## ```gdscript
 ## var book_node := <spawned book Node3D>
 ## var interactable := BookInteractable.new()
 ## interactable.book_id = "book_text_clsg"
-## interactable.book_viewer = book_viewer_singleton
 ## book_node.add_child(interactable)
 ## ```
 class_name BookInteractable
@@ -25,9 +29,6 @@ extends Interactable
 
 ## ESM book identifier (record_id, lowercase).
 @export var book_id: String = ""
-
-## Shared BookViewer instance — typically a persistent singleton in the main scene.
-@export var book_viewer: BookViewer
 
 
 var _cached_book: BookRecord = null
@@ -52,14 +53,18 @@ func get_prompt_text() -> String:
 
 ## Override: open the BookViewer with this book.
 func interact(player: Node3D) -> void:
-	if book_viewer == null:
-		Log.warn("dialogue", "BookInteractable has no book_viewer reference")
+	var session := DialogueSession.current()
+	if session == null:
+		Log.warn("dialogue", "BookInteractable.interact(): DialogueSession.current() is null — main scene must call DialogueSession.set_current() at boot")
+		return
+	if session.book_viewer == null:
+		Log.warn("dialogue", "BookInteractable.interact(): session.book_viewer is null")
 		return
 	var book := _get_book_record()
 	if book == null:
 		Log.warn("dialogue", "BookInteractable: book '%s' not found in ESM" % book_id)
 		return
-	book_viewer.show_book(book)
+	session.book_viewer.show_book(book)
 	# Fire the base class signal so any raycaster listeners can react
 	super.interact(player)
 

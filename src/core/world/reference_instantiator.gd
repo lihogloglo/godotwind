@@ -18,6 +18,15 @@ const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 
+# Interaction framework (I.1) — generic carryable spawn path. The MW
+# adapter (mw_carryable_registry.gd) registers MW record types into
+# CarryableRegistry at boot. Reference instantiator stays adapter-agnostic
+# by routing through the registry + body factory and only loading the
+# adapter's PickupInteractable script as a Resource.
+const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
+const CarryableBodyFactoryScript := preload("res://src/core/interaction/carryable_body_factory.gd")
+const PickupInteractableScript := preload("res://src/core/interaction/morrowind/pickup_interactable.gd")
+
 # Preload crossfade shader for fade-in effect
 const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
 
@@ -211,21 +220,31 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# Per-call override: interior pockets must bypass the static renderer.
 	var effective_use_static: bool = _effective_use_static_renderer()
 
+	# I.1 — Carryable check. Generic via CarryableRegistry; the type list
+	# lives in the MW adapter (mw_carryable_registry.gd). Carryables MUST
+	# bypass the static-renderer fast path (no Node3D = no physics) and
+	# the object pool (per-instance RigidBody3D state can't be pooled
+	# safely without `(model_path, body_type)` keying — deferred).
+	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+
 	# Debug: Log what path each object is taking
 	if debug_lod and _model_obj_count <= 20:
-		var is_static := effective_use_static and static_renderer and _is_static_render_model(model_path)
+		var is_static := effective_use_static and static_renderer and _is_static_render_model(model_path) and not is_carryable
 		var is_sig := is_significant_object(model_path)
-		Log.debug("streaming", "[LOD-PATH] #%d %s: static_render=%s, significant=%s" % [
-			_model_obj_count, model_path.get_file(), is_static, is_sig
+		Log.debug("streaming", "[LOD-PATH] #%d %s: static_render=%s, significant=%s, carryable=%s" % [
+			_model_obj_count, model_path.get_file(), is_static, is_sig, is_carryable
 		])
 
 	# Check if this model should use static rendering (flora, small rocks)
-	# Static rendering is ~10x faster but has no physics/interaction
-	if effective_use_static and static_renderer and _is_static_render_model(model_path):
+	# Static rendering is ~10x faster but has no physics/interaction.
+	# Carryables are always Node3D-bound — never the static-renderer path.
+	if not is_carryable and effective_use_static and static_renderer and _is_static_render_model(model_path):
 		return _instantiate_static_object(ref, model_path, cell_grid)
 
-	# Try to get from object pool first (if enabled)
-	if use_object_pool and object_pool:
+	# Try to get from object pool first (if enabled). Skip for carryables —
+	# the pool isn't keyed by body_type so a previously-converted RigidBody3D
+	# could be returned for a non-carryable acquire (or vice versa).
+	if not is_carryable and use_object_pool and object_pool:
 		var pooled: Node3D = object_pool.call("acquire", model_path)
 		if pooled:
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
@@ -256,6 +275,29 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	# Add metadata for console object picker
 	_apply_metadata(instance, ref, base_record, model_path, type_name)
+
+	# I.1 — Carryable conversion. Swap the baked StaticBody3D for a
+	# RigidBody3D (frozen KINEMATIC, layers Environment+Interactable) and
+	# attach a PickupInteractable child. Mass comes from the registered
+	# extractor (MW: ESM `weight` field, treated as kg). If the prototype
+	# has no baked collision, conversion returns null and the instance
+	# stays static — log once and move on.
+	if is_carryable:
+		var mass_kg: float = CarryableRegistryScript.get_mass(type_name, base_record)
+		var display_name: String = ""
+		if "name" in base_record and not String(base_record.name).is_empty():
+			display_name = base_record.name
+		else:
+			display_name = record_id
+		var rb := CarryableBodyFactoryScript.convert_static_to_rigid(
+			instance,
+			mass_kg,
+			StringName(record_id),
+			display_name,
+			PickupInteractableScript,
+		)
+		if rb == null and debug_lod:
+			Log.debug("interaction", "Carryable %s (%s) has no baked collision — staying static" % [record_id, type_name])
 
 	stats["objects_instantiated"] += 1
 

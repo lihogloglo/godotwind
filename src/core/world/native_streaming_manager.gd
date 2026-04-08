@@ -146,6 +146,20 @@ var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
 ## Hidden container for cells being unloaded (keeps them out of rendering)
 var _unload_container: Node3D = null
 
+## I.6 — orphan registry for nodes that must survive cell unload
+## (held / carried items, future: dropped items, NPC corpses, etc.).
+## Persistent across cell unloads. Keyed by registered node → original
+## grid coordinates so we can re-home items when their cell reloads.
+## Per `docs/INTERACTION_SYSTEM.md` §9 ownership note: this is a child
+## of NativeStreamingManager, NOT a fourth singleton. Registration API
+## is `register_persistent_node()` / `unregister_persistent_node()`.
+var _orphan_container: Node3D = null
+# Untyped Dictionary intentional — typed `Dictionary[Node3D, Vector2i]`
+# crashes the iterator if a key has been freed (Godot 4.6 strict typed
+# dict validation). Lazy pruning via `is_instance_valid` requires us to
+# iterate past possibly-freed keys, which only the untyped dict allows.
+var _persistent_nodes: Dictionary = {}
+
 ## Background processor for async NIF parsing
 var _background_processor: BackgroundProcessorScript = null
 
@@ -277,6 +291,14 @@ func _ready() -> void:
 	_unload_container.name = "UnloadContainer"
 	_unload_container.visible = false
 	add_child(_unload_container)
+
+	# I.6 — orphan registry container. Persistent across cell unloads.
+	# Visible (held items rendered through this parent when cell unloads
+	# mid-hold). Per `docs/INTERACTION_SYSTEM.md` §9 — owned by streaming
+	# manager, NOT a separate autoload.
+	_orphan_container = Node3D.new()
+	_orphan_container.name = "OrphanedCarriedItems"
+	add_child(_orphan_container)
 
 	# Create static object renderer for MID-tier objects and flora
 	# Uses RenderingServer directly — no Node3D overhead for distant objects
@@ -790,6 +812,12 @@ func _unload_cell(grid: Vector2i) -> void:
 
 	# Clean up deferred NEAR refs for this cell
 	_cell_manager.clear_deferred_for_cell(grid)
+
+	# I.6 — evacuate any persistent nodes (held items, etc.) from this
+	# cell BEFORE moving it to the unload container. Otherwise the
+	# budgeted unload pass would free the held body along with the
+	# rest of the cell. Per `docs/INTERACTION_SYSTEM.md` §10.
+	_evacuate_persistent_nodes_from_cell(cell_node, grid)
 
 	# Move cell to hidden unload container for gradual teardown
 	# Reparenting is cheaper than queue_free() on entire subtree
@@ -1508,6 +1536,112 @@ func get_loaded_cell(x: Variant, y: Variant = null) -> Node3D:
 ## Check if a cell is loaded
 func is_cell_loaded(grid: Vector2i) -> bool:
 	return grid in _loaded_cells
+
+
+# ----------------------------------------------------------------------------
+# I.6 — Persistent node registry (held / carried items)
+# ----------------------------------------------------------------------------
+#
+# Public API for systems that need to keep a node alive across cell
+# unloads (currently `CarryController` for held bodies; future
+# consumers: dropped items, NPC corpses, save-system anchors).
+#
+# Per `docs/INTERACTION_SYSTEM.md` §10:
+# - On grab: caller invokes `register_persistent_node(body, grid)`
+# - On cell unload: streaming manager reparents matching nodes to
+#   `_orphan_container` so they survive the cell teardown
+# - On cell reload: streaming manager re-homes orphans keyed to that
+#   grid back into the loaded cell node (Phase 2 — not implemented yet)
+# - On release: caller invokes `unregister_persistent_node(body)`
+#
+# Per spec §9: orphan registry is a child of `NativeStreamingManager`,
+# NOT an autoload. Hard rule.
+
+## Register a node as persistent. The node will be reparented to the
+## orphan registry when its origin cell unloads instead of being freed
+## with the cell. Caller MUST call `unregister_persistent_node` when
+## the node no longer needs the protection (e.g. on release for a held
+## item) — the registry does not auto-clean on free, because Godot's
+## `tree_exiting` signal also fires on `reparent()` which is exactly
+## what the evacuation path does. Stale entries are pruned lazily via
+## `is_instance_valid` checks in the evacuation walk.
+##
+## The `original_grid` is the grid coordinate of the cell that contains
+## the node at registration time. Used as the re-home key when the cell
+## reloads. Pass `find_grid_for_node(node)` if you don't track it
+## yourself.
+func register_persistent_node(node: Node3D, original_grid: Vector2i) -> void:
+	if node == null:
+		return
+	_persistent_nodes[node] = original_grid
+
+
+## Unregister a previously-registered persistent node. Idempotent.
+## Does NOT reparent the node — caller decides where it goes after
+## release (back into a loaded cell, into the orphan registry, etc.).
+func unregister_persistent_node(node: Node3D) -> void:
+	if node == null:
+		return
+	_persistent_nodes.erase(node)
+
+
+## Walk the node's ancestor chain looking for a loaded cell. Returns
+## the cell's grid coordinate if found, or `Vector2i(INT_MIN, INT_MIN)`
+## as a sentinel if no ancestor is in the loaded set. Used by callers
+## who need to capture the origin grid at registration time.
+func find_grid_for_node(node: Node3D) -> Vector2i:
+	if node == null:
+		return Vector2i(-2147483648, -2147483648)
+	var current: Node = node.get_parent()
+	while current != null:
+		# Build a reverse lookup once per call — fine for low-frequency
+		# grab events, not on hot path.
+		for grid: Vector2i in _loaded_cells:
+			if _loaded_cells[grid] == current:
+				return grid
+		current = current.get_parent()
+	return Vector2i(-2147483648, -2147483648)
+
+
+## Internal — called from `_unload_cell` BEFORE the cell goes into the
+## unload container. Walks `_persistent_nodes`, finds any whose ancestor
+## chain leads to `cell_node`, reparents them to `_orphan_container`
+## with global transform preserved.
+func _evacuate_persistent_nodes_from_cell(cell_node: Node3D, grid: Vector2i) -> void:
+	if _persistent_nodes.is_empty() or _orphan_container == null:
+		return
+	# Snapshot keys to a plain Array — `_persistent_nodes` is untyped
+	# but iterating it directly while pruning dead entries can still
+	# trip the engine's safety checks. Snapshot, walk, prune at the end.
+	var keys: Array = _persistent_nodes.keys()
+	var to_evacuate: Array[Node3D] = []
+	var dead_keys: Array = []
+	for key in keys:
+		if not is_instance_valid(key):
+			dead_keys.append(key)
+			continue
+		var node: Node3D = key as Node3D
+		if node == null:
+			dead_keys.append(key)
+			continue
+		# Walk ancestors — is `cell_node` in the chain?
+		var ancestor: Node = node.get_parent()
+		while ancestor != null:
+			if ancestor == cell_node:
+				to_evacuate.append(node)
+				# Re-key to the actual current grid (which is the same
+				# as the unload grid; explicit re-record for clarity).
+				_persistent_nodes[node] = grid
+				break
+			ancestor = ancestor.get_parent()
+	# Lazy prune dead entries discovered during the walk.
+	for k in dead_keys:
+		_persistent_nodes.erase(k)
+	for node in to_evacuate:
+		# `reparent` preserves global transform — held bodies' world
+		# pos shouldn't jump on unload.
+		node.reparent(_orphan_container, true)
+		_debug("Evacuated persistent node '%s' from cell %s to orphan registry" % [node.name, grid])
 
 
 ## Get the impostor renderer (for console commands and diagnostics)

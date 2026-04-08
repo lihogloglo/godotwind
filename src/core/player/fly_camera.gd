@@ -47,9 +47,27 @@ func _ready() -> void:
 	set_process(true)
 	set_process_input(true)
 
+	# §17.2.1 / R.1 — physics_interpolation is on project-wide. FlyCamera
+	# owns mouse-look in `_input` (event-driven, render-rate fresh), so
+	# the Camera3D node itself must be carved out of physics interpolation.
+	# Otherwise the engine would interpolate the camera transform between
+	# physics ticks, dropping the in-tick mouse rotation samples.
+	# Per Godot 4.4+ advanced physics interpolation docs.
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+
 
 func _input(event: InputEvent) -> void:
 	if not enabled or not current:
+		return
+
+	# C.2 stopgap: if any dialogue/book/journal panel is holding player input,
+	# don't let right-click re-capture the mouse. Without this, accidentally
+	# right-clicking while reading a book or picking a dialogue topic would
+	# hide the cursor and make the panel uninteractable. Cross-system gate
+	# consumes DialogueSession as a temporary arrangement — C.2.5 replaces
+	# this with PlayerController owning mouse mode per input owner.
+	var _session := DialogueSession.current()
+	if _session != null and _session.is_any_panel_open():
 		return
 
 	# Mouse capture for looking
@@ -83,35 +101,39 @@ func _process(delta: float) -> void:
 	if not enabled or not current:
 		return
 
+	# C.2 stopgap: freeze movement while any dialogue/book/journal panel is open.
+	# Same gate as _input — cross-system, temporary, C.2.5 replaces with
+	# PlayerController input-owner dispatch.
+	var _session := DialogueSession.current()
+	if _session != null and _session.is_any_panel_open():
+		return
+
 	# Movement only when mouse is captured (right-click held)
 	if not _mouse_captured:
 		return
 
-	# Get input direction (supports QWERTY, AZERTY, and arrow keys)
+	# Read movement via InputMap actions (physical_keycode, layout-independent).
+	# AZERTY/QWERTY/Dvorak users press the same physical key positions.
+	# See src/core/input/input_actions.gd and docs/INPUT_SYSTEM.md.
 	var input_dir := Vector3.ZERO
 
-	# Forward/back (W/S or Z/S or arrows)
-	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_Z) or Input.is_key_pressed(KEY_UP):
-		input_dir.z -= 1
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
-		input_dir.z += 1
+	# Horizontal plane — get_vector returns (x: left/right, y: forward/back)
+	var move_xz := Input.get_vector(
+		&"move_left", &"move_right", &"move_forward", &"move_backward")
+	input_dir.x = move_xz.x
+	input_dir.z = move_xz.y
 
-	# Left/right (A/D or Q/D or arrows)
-	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_Q) or Input.is_key_pressed(KEY_LEFT):
-		input_dir.x -= 1
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-		input_dir.x += 1
-
-	# Up/down
-	if Input.is_key_pressed(KEY_SPACE):
-		input_dir.y += 1
-	if Input.is_key_pressed(KEY_SHIFT):
-		input_dir.y -= 1
+	# Vertical (jump = up, crouch = down — crouch is bound to both C and CTRL)
+	if Input.is_action_pressed(&"jump"):
+		input_dir.y += 1.0
+	if Input.is_action_pressed(&"crouch"):
+		input_dir.y -= 1.0
 
 	# Apply movement
 	if input_dir != Vector3.ZERO:
 		var speed := move_speed
-		if Input.is_key_pressed(KEY_CTRL):
+		# Sprint (SHIFT) acts as the fly-camera boost modifier
+		if Input.is_action_pressed(&"sprint"):
 			speed *= boost_multiplier
 
 		var move_dir := global_transform.basis * input_dir.normalized()

@@ -280,7 +280,8 @@ void vertex() {
 }
 
 // ============================================================================
-// FRAGMENT — Opaque ocean: ALBEDO + Fresnel + foam + shore-mask refraction.
+// FRAGMENT — Opaque ocean: depth-buffer refraction + Beer-Lambert absorption +
+// depth-driven shore foam + Fresnel + custom in-shader SSR raymarch.
 // ============================================================================
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
@@ -321,12 +322,46 @@ void fragment() {
 	// Jacobian drives where foam appears, texture gives it detail
 	jacobian_foam *= mix(0.6, 1.0, foam_detail);
 
-	// Shore edge foam — driven by shore mask instead of depth buffer
-	float shore_foam = 0.0;
-	if (v_shore_factor < foam_edge_width) {
-		float edge_t = 1.0 - v_shore_factor / foam_edge_width;
-		shore_foam = step(edge_t, foam_detail) * edge_t;
-	}
+	// Shore edge foam — depth-buffer driven. Reconstruct view-space thickness
+	// here (before NORMAL/fresnel) so foam can use real water depth instead of
+	// the prebaked shore mask. This also rings foam around submerged rocks for
+	// free, since DEPTH_TEXTURE sees any opaque geometry below the surface.
+	// Unit semantics: foam_edge_width is meters of water depth (matches
+	// ocean_standard.gdshader). OceanManager wind animation (0.1→1.5m) still
+	// reads sensibly: calm = thin shoreline, storm = wider band.
+	//
+	// Reconstruct view-space positions for the water surface AND the scene
+	// fragment directly behind it. View-space -Z is forward, so deeper points
+	// are MORE NEGATIVE; thickness = (surf.z - bg.z) is positive when bg is
+	// further from the camera than the water surface.
+	//
+	// Sky-depth handling: when DEPTH_TEXTURE at SCREEN_UV reads the far plane
+	// (sky, no opaque behind water), the reconstructed bg_view goes to the far
+	// clip distance and thickness blows up. We clamp thickness to max_visible_depth
+	// and (downstream in the WATER COLOR section) skip the SCREEN_TEXTURE sample
+	// — the sky is not "behind" the water at any meaningful depth; sampling it
+	// and tinting it through absorption would bleed sky color into the water
+	// color, which is wrong. Do NOT "optimize" this branch away.
+	//
+	// Canonical Godot 4.6 reversed-Z depth→view-space-Z reconstruction. Forward+
+	// / D3D12 / Vulkan use infinite reversed-Z where the depth buffer stores
+	// 1.0 at near plane, 0.0 at far plane, and PROJECTION_MATRIX[3][2] encodes
+	// the negated near distance. Avoids the numerical blowup near the near
+	// plane that a full INV_PROJECTION_MATRIX * clip pipeline produces when
+	// bg_view4.w approaches zero (which was producing the "seafloor clipping
+	// close to camera" artifact in Step 2 rev 1 + rev 2).
+	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
+	vec3 surf_view = surf_view4.xyz / surf_view4.w;
+	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
+	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
+	bool is_sky_or_far = raw_thickness >= max_visible_depth;
+	float water_thickness = min(raw_thickness, max_visible_depth);
+
+	// Smoothstep on depth: 1.0 at zero depth → 0.0 past foam_edge_width meters.
+	// Multiply by foam_detail so the foam gets the same animated texture detail
+	// the shore-mask path used to give it.
+	float shore_foam = (1.0 - smoothstep(0.0, foam_edge_width, water_thickness)) * foam_detail;
 	foam_factor = max(jacobian_foam, shore_foam);
 
 	// ========================================================================
@@ -348,34 +383,9 @@ void fragment() {
 	// ========================================================================
 	// WATER COLOR — real view-space depth + per-channel Beer-Lambert absorption
 	// ========================================================================
-	// Reconstruct view-space positions for the water surface AND the scene
-	// fragment directly behind it. View-space -Z is forward, so deeper points
-	// are MORE NEGATIVE; thickness = (surf.z - bg.z) is positive when bg is
-	// further from the camera than the water surface.
-	//
-	// Sky-depth handling: when DEPTH_TEXTURE at SCREEN_UV reads the far plane
-	// (sky, no opaque behind water), the reconstructed bg_view goes to the far
-	// clip distance and thickness blows up. We clamp thickness to max_visible_depth
-	// and skip the SCREEN_TEXTURE sample — the sky is not "behind" the water at
-	// any meaningful depth; sampling it and tinting it through absorption would
-	// bleed sky color into the water color, which is wrong. Do NOT "optimize"
-	// this branch away.
-	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
-	vec3 surf_view = surf_view4.xyz / surf_view4.w;
-
-	// Canonical Godot 4.6 reversed-Z depth→view-space-Z reconstruction.
-	// Forward+ / D3D12 / Vulkan use infinite reversed-Z where the depth buffer
-	// stores 1.0 at near plane, 0.0 at far plane, and PROJECTION_MATRIX[3][2]
-	// encodes the negated near distance. Avoids the numerical blowup near the
-	// near plane that a full INV_PROJECTION_MATRIX * clip pipeline produces
-	// when bg_view4.w approaches zero (which was producing the "seafloor
-	// clipping close to camera" artifact in Step 2 rev 1 + rev 2).
-	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
-	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
-
-	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
-	bool is_sky_or_far = raw_thickness >= max_visible_depth;
-	float water_thickness = min(raw_thickness, max_visible_depth);
+	// See foam block above for depth reconstruction rationale + sky-depth
+	// handling. surf_view / bg_view_z / water_thickness / is_sky_or_far are
+	// reused here for absorption + refraction.
 
 	// Beer-Lambert transmittance per channel (exponential falloff with thickness).
 	vec3 transmittance = exp(-water_thickness * absorption_rate * absorption_density);

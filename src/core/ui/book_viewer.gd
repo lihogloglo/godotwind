@@ -17,6 +17,7 @@ const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
 signal closed
 
 var _panel: PanelContainer
+var _overlay: ColorRect
 var _title_label: Label
 var _text_display: RichTextLabel
 var _close_button: Button
@@ -33,7 +34,9 @@ func _ready() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not _panel.visible:
 		return
-	if event.is_action_pressed("ui_cancel"):
+	# Escape OR the interact action (E) close the book — toggling with the
+	# same key the player used to open it.
+	if event.is_action_pressed("ui_cancel") or event.is_action_pressed("interact"):
 		hide_book()
 		get_viewport().set_input_as_handled()
 
@@ -61,6 +64,7 @@ func show_book(book: BookRecord) -> void:
 		_render_with_images(formatted)
 
 	_panel.visible = true
+	_overlay.visible = true
 	_text_display.scroll_to_line(0)
 
 
@@ -76,8 +80,15 @@ func show_book_by_id(book_id: String) -> void:
 ## Hide the book viewer
 func hide_book() -> void:
 	_panel.visible = false
+	if _overlay != null:
+		_overlay.visible = false
 	_current_book = null
 	closed.emit()
+
+
+## Is a book currently being displayed?
+func is_open() -> bool:
+	return _panel != null and _panel.visible
 
 
 ## Render formatted text with inline images
@@ -122,12 +133,14 @@ func _render_with_images(formatted: TextFormatterScript.FormattedText) -> void:
 
 
 func _build_ui() -> void:
-	# Full-screen dimming overlay
-	var overlay := ColorRect.new()
-	overlay.color = Color(0, 0, 0, 0.6)
-	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	add_child(overlay)
+	# Full-screen dimming overlay. Stored as a member so hide_book() can
+	# toggle its visibility — without this, the overlay's MOUSE_FILTER_STOP
+	# eats player mouse-look input even while the panel is hidden.
+	_overlay = ColorRect.new()
+	_overlay.color = Color(0, 0, 0, 0.6)
+	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_overlay)
 
 	# Center panel — parchment book (theme provides bg/border/padding/font)
 	_panel = PanelContainer.new()

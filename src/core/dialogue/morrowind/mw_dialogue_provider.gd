@@ -11,7 +11,6 @@ extends DialogueProvider
 
 const MWDialogueFilterScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_filter.gd")
 const DialogueDataScript := preload("res://src/core/dialogue/dialogue_data.gd")
-const DialogueContextScript := preload("res://src/core/dialogue/dialogue_context.gd")
 const TextFormatterScript := preload("res://src/core/ui/text_formatter.gd")
 
 ## Regex for stripping HTML tags from response text
@@ -26,6 +25,18 @@ static func _compile_tag_regex() -> RegEx:
 	var r := RegEx.new()
 	r.compile("<[^>]*>")
 	return r
+
+
+## Downcast the framework-typed context to MWDialogueContext.
+## Returns null and logs an error if the caller passed a plain DialogueContext.
+## All four query methods call this at their entry point — a single cast per
+## call keeps the type flow typed from here all the way down into the filter
+## and the 74 built-in functions.
+func _require_mw_context(context: DialogueContext) -> MWDialogueContext:
+	var mw := context as MWDialogueContext
+	if mw == null:
+		push_error("MWDialogueProvider requires an MWDialogueContext instance (got plain DialogueContext). MW-specific fields — attributes, skills, disease/vampire/werewolf flags, clothing value — are only defined on the subclass.")
+	return mw
 
 
 ## Resolve a speaker_id to an NPCRecord
@@ -46,6 +57,10 @@ func _resolve_npc(speaker_id: String) -> NPCRecord:
 ## Returns DialogueProvider.Response.
 func get_greeting(speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
 	var r := DialogueProvider.Response.new()
+	var mw_ctx := _require_mw_context(context)
+	if mw_ctx == null:
+		r.error = DialogueProvider.Error.NO_INFO_MATCH
+		return r
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
 		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
@@ -53,7 +68,7 @@ func get_greeting(speaker_id: String, context: DialogueContext) -> DialogueProvi
 
 	for i in range(10):
 		var topic_id := "greeting %d" % i
-		var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, context)
+		var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, mw_ctx)
 		if info != null and not info.response.is_empty():
 			var line: RefCounted = DialogueDataScript.DialogueLine.new()
 			line.text = info.response
@@ -73,6 +88,10 @@ func get_greeting(speaker_id: String, context: DialogueContext) -> DialogueProvi
 ## An empty topic list is NOT an error — Response.error == OK, Response.topics.is_empty().
 func get_available_topics(speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
 	var r := DialogueProvider.Response.new()
+	var mw_ctx := _require_mw_context(context)
+	if mw_ctx == null:
+		r.error = DialogueProvider.Error.NO_INFO_MATCH
+		return r
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
 		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
@@ -82,7 +101,7 @@ func get_available_topics(speaker_id: String, context: DialogueContext) -> Dialo
 
 	for topic_id in _topic_ids:
 		# Skip topics the player doesn't know
-		if not context.knows_topic(topic_id):
+		if not mw_ctx.knows_topic(topic_id):
 			continue
 
 		# Quick pre-filter: could any INFO match this NPC?
@@ -90,7 +109,7 @@ func get_available_topics(speaker_id: String, context: DialogueContext) -> Dialo
 			continue
 
 		# Full filter: find the matching INFO
-		var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, context)
+		var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, mw_ctx)
 		if info != null and not info.response.is_empty():
 			var entry: RefCounted = DialogueDataScript.TopicEntry.new()
 			entry.topic_id = topic_id
@@ -106,12 +125,16 @@ func get_available_topics(speaker_id: String, context: DialogueContext) -> Dialo
 ## Returns DialogueProvider.Response with line, topics_discovered, quest_updated populated on success.
 func get_response(topic_id: String, speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
 	var r := DialogueProvider.Response.new()
+	var mw_ctx := _require_mw_context(context)
+	if mw_ctx == null:
+		r.error = DialogueProvider.Error.NO_INFO_MATCH
+		return r
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
 		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
 		return r
 
-	var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, context)
+	var info: DialogueInfoRecord = MWDialogueFilterScript.search(topic_id, npc, mw_ctx)
 	if info == null:
 		r.error = DialogueProvider.Error.NO_INFO_MATCH
 		return r
@@ -140,12 +163,16 @@ func get_response(topic_id: String, speaker_id: String, context: DialogueContext
 ## Searches the "Goodbye" topic for a matching INFO.
 func get_goodbye(speaker_id: String, context: DialogueContext) -> DialogueProvider.Response:
 	var r := DialogueProvider.Response.new()
+	var mw_ctx := _require_mw_context(context)
+	if mw_ctx == null:
+		r.error = DialogueProvider.Error.NO_INFO_MATCH
+		return r
 	var npc := _resolve_npc(speaker_id)
 	if npc == null:
 		r.error = DialogueProvider.Error.SPEAKER_NOT_FOUND
 		return r
 
-	var info: DialogueInfoRecord = MWDialogueFilterScript.search("goodbye", npc, context)
+	var info: DialogueInfoRecord = MWDialogueFilterScript.search("goodbye", npc, mw_ctx)
 	if info != null and not info.response.is_empty():
 		var line: RefCounted = DialogueDataScript.DialogueLine.new()
 		line.text = info.response
@@ -158,12 +185,15 @@ func get_goodbye(speaker_id: String, context: DialogueContext) -> DialogueProvid
 	return r
 
 
-## Get the display name for a speaker
+## Get the display name for a speaker.
+## Returns empty string if the speaker_id has no matching NPCRecord — the
+## UI caller is responsible for falling back to the raw ID (with a visible
+## marker) so broken lookups are visible rather than silent.
 func get_speaker_name(speaker_id: String) -> String:
 	var npc := _resolve_npc(speaker_id)
 	if npc != null:
 		return npc.name
-	return speaker_id
+	return ""
 
 
 ## Highlight topic keywords in text as clickable [url] BBCode links

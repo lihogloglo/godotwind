@@ -612,9 +612,9 @@ func _update_walking() -> void:
 
 	var npc_pos: Vector3 = _npc_node.global_position
 
-	# Z/W = forward, S = backward (overrides auto-walk)
-	var user_forward := Input.is_key_pressed(KEY_Z) or Input.is_key_pressed(KEY_W)
-	var user_backward := Input.is_key_pressed(KEY_S)
+	# K.0 actions, AZERTY-correct via physical_keycode binding (overrides auto-walk)
+	var user_forward := Input.is_action_pressed(&"move_forward")
+	var user_backward := Input.is_action_pressed(&"move_backward")
 
 	if user_forward or user_backward:
 		var dir := 1.0 if user_forward else -1.0
@@ -732,8 +732,10 @@ func _stop_drag() -> void:
 func _input(event: InputEvent) -> void:
 	if Engine.is_editor_hint():
 		return
+	# Debug hotkeys outside K.0 namespace — physical_keycode for AZERTY safety,
+	# K.1 GUIDE-managed rebind candidates. See docs/INPUT_SYSTEM.md §8.
 	if event is InputEventKey and event.pressed and not event.echo:
-		match event.keycode:
+		match event.physical_keycode:
 			KEY_1:
 				_foot_ik_enabled = not _foot_ik_enabled
 				_apply_ik_state()
@@ -969,13 +971,13 @@ func _update_live_info() -> void:
 	lines.append("")
 	lines.append("Active bumps: %d" % _bumps.size())
 
-	# User input state
-	var user_fwd := Input.is_key_pressed(KEY_Z) or Input.is_key_pressed(KEY_W)
-	var user_bwd := Input.is_key_pressed(KEY_S)
+	# User input state (K.0 actions, AZERTY-correct)
+	var user_fwd := Input.is_action_pressed(&"move_forward")
+	var user_bwd := Input.is_action_pressed(&"move_backward")
 	if user_fwd:
-		lines.append("Input: [color=green]FORWARD (Z/W)[/color]")
+		lines.append("Input: [color=green]FORWARD[/color]")
 	elif user_bwd:
-		lines.append("Input: [color=green]BACKWARD (S)[/color]")
+		lines.append("Input: [color=green]BACKWARD[/color]")
 	else:
 		lines.append("Input: [color=gray]auto-walk[/color]")
 

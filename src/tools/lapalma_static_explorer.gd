@@ -153,8 +153,10 @@ func _input(event: InputEvent) -> void:
 		camera.rotate_y(-event.relative.x * mouse_sensitivity)
 		camera.rotate_object_local(Vector3.RIGHT, -event.relative.y * mouse_sensitivity)
 
+	# physical_keycode = layout-independent. Debug toggle outside K.0 namespace,
+	# K.1 GUIDE-managed rebind candidate. See docs/INPUT_SYSTEM.md §8.
 	if event is InputEventKey and event.pressed:
-		match event.keycode:
+		match event.physical_keycode:
 			KEY_F3:
 				_stats_visible = not _stats_visible
 				stats_panel.visible = _stats_visible
@@ -171,23 +173,20 @@ func _process(delta: float) -> void:
 	if not mouse_captured:
 		return
 
-	# ZQSD/WASD movement
+	# Movement via K.0 InputMap actions (physical_keycode, layout-independent).
+	# CTRL=down (crouch), SHIFT=boost (sprint) per fly_camera/K.0 convention.
 	var input_dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_Z) or Input.is_key_pressed(KEY_W):
-		input_dir.z -= 1
-	if Input.is_key_pressed(KEY_S):
-		input_dir.z += 1
-	if Input.is_key_pressed(KEY_Q) or Input.is_key_pressed(KEY_A):
-		input_dir.x -= 1
-	if Input.is_key_pressed(KEY_D):
-		input_dir.x += 1
-	if Input.is_key_pressed(KEY_SPACE):
-		input_dir.y += 1
-	if Input.is_key_pressed(KEY_SHIFT):
-		input_dir.y -= 1
+	var move_xz := Input.get_vector(
+		&"move_left", &"move_right", &"move_forward", &"move_backward")
+	input_dir.x = move_xz.x
+	input_dir.z = move_xz.y
+	if Input.is_action_pressed(&"jump"):
+		input_dir.y += 1.0
+	if Input.is_action_pressed(&"crouch"):
+		input_dir.y -= 1.0
 
 	var speed := camera_speed
-	if Input.is_key_pressed(KEY_CTRL):
+	if Input.is_action_pressed(&"sprint"):
 		speed *= 3.0
 
 	if input_dir != Vector3.ZERO:

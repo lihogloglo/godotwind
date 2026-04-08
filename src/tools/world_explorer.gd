@@ -57,6 +57,9 @@ var _LodTransitionTestScript: GDScript
 var _MidTierDebuggerScript: GDScript
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
+const MWCarryableRegistryScript := preload("res://src/core/interaction/morrowind/mw_carryable_registry.gd")
+const InventoryServiceScript := preload("res://src/core/interaction/inventory_service.gd")
+const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/mw_inventory_service.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -172,6 +175,16 @@ func _ready() -> void:
 
 	var _t0 := Time.get_ticks_msec()
 	var _t_step := _t0
+
+	# I.1 — Register MW carryable record types with the framework registry.
+	# Must run before cell streaming begins so the reference instantiator
+	# sees a populated registry on its first carryable encounter. Idempotent.
+	MWCarryableRegistryScript.register_all()
+
+	# I.2 — Register the MW inventory service. PickupInteractable.interact()
+	# routes through InventoryService.current() — without this the tap path
+	# falls back to a "no service registered" warn and stays in world.
+	InventoryServiceScript.set_current(MWInventoryServiceScript.new())
 
 	# Initialize managers
 	terrain_manager = TerrainManagerScript.new()

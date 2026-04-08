@@ -21,37 +21,6 @@ func _init(quest_manager: RefCounted) -> void:
 	_quest_manager = quest_manager
 
 
-## Process a dialogue result for quest updates
-## Called after get_response() returns — checks if the INFO has quest flags
-## and updates the quest manager accordingly
-func process_dialogue_result(info: DialogueInfoRecord, parent_topic_id: String) -> bool:
-	if not info.quest_name and not info.quest_finish and not info.quest_restart:
-		return false
-
-	# For journal-type dialogue, the parent topic IS the quest ID
-	# The journal index is stored in the INFO's disposition field
-	var quest_id := parent_topic_id
-	var journal_index := info.disposition
-	var entry_text := info.response
-
-	# Convert MW markup to plain-ish text for the journal
-	var clean_text := TextFormatterScript.to_bbcode(entry_text)
-
-	_quest_manager.update_journal(
-		quest_id,
-		journal_index,
-		clean_text,
-		info.quest_finish,
-		info.quest_restart
-	)
-
-	Log.info("dialogue", "Journal updated: quest='%s' index=%d finish=%s restart=%s" % [
-		quest_id, journal_index, info.quest_finish, info.quest_restart
-	])
-
-	return true
-
-
 ## Signal handler for DialogueUI.response_selected.
 ## Reads the MW-specific metadata populated by MWDialogueProvider.get_response()
 ## and advances the journal without having to re-run the filter.

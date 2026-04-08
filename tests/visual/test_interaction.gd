@@ -18,24 +18,26 @@
 extends Node
 
 const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
+const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_interactable.gd")
 const BookInteractableScript := preload("res://src/core/dialogue/morrowind/book_interactable.gd")
 const DialogueUIScript := preload("res://src/core/ui/dialogue_panel.gd")
 const BookViewerScript := preload("res://src/core/ui/book_viewer.gd")
 const MWDialogueProviderScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_provider.gd")
-const DialogueContextScript := preload("res://src/core/dialogue/dialogue_context.gd")
+const MWDialogueContextScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_context.gd")
 const QuestManagerScript := preload("res://src/core/dialogue/quest_manager.gd")
 const MWQuestAdapterScript := preload("res://src/core/dialogue/morrowind/mw_quest_adapter.gd")
 
 const TEST_NPC_ID := "fargoth"
 const TEST_BOOK_ID := "book_text_clsg"  # A known Morrowind book
 
-var _camera: Camera3D
+var _camera: FlyCamera
 var _raycaster: InteractionRaycaster
 var _dialogue_ui: DialogueUI
 var _book_viewer: BookViewer
 var _provider: DialogueProvider
-var _context: DialogueContext
+var _context: MWDialogueContext
+var _session: DialogueSession
 var _quest_manager: QuestManager
 var _quest_adapter: MWQuestAdapter
 var _prompt_label: Label
@@ -43,6 +45,14 @@ var _loading_screen: LoadingScreen
 
 
 func _ready() -> void:
+	# Ensure the `interact` action is bound (test scene doesn't use
+	# PlayerController, which would otherwise bind it via _ensure_input_actions).
+	if not InputMap.has_action("interact"):
+		InputMap.add_action("interact")
+		var key_event := InputEventKey.new()
+		key_event.physical_keycode = KEY_E
+		InputMap.action_add_event("interact", key_event)
+
 	_loading_screen = LoadingScreen.new()
 	add_child(_loading_screen)
 	var success = await _loading_screen.load_game_data()
@@ -55,7 +65,7 @@ func _ready() -> void:
 
 	# Set up the generic dialogue pipeline
 	_provider = MWDialogueProviderScript.new()
-	_context = DialogueContextScript.new()
+	_context = MWDialogueContextScript.new()
 	_context.pc_race = "imperial"
 	_context.pc_class = "rogue"
 	_context.pc_gender = 0
@@ -72,35 +82,33 @@ func _ready() -> void:
 	_quest_manager = QuestManagerScript.new()
 	_quest_adapter = MWQuestAdapterScript.new(_quest_manager)
 
-	# 3D world
-	_build_world()
-	_build_player()
-	_spawn_test_npc()
-	_spawn_test_book()
-
-	# Shared UI panels (persistent singletons)
+	# Shared UI panels (persistent singletons) — built BEFORE spawning
+	# interactables so the session is ready when NPCInteractable._ready() runs.
 	_dialogue_ui = DialogueUIScript.new()
 	add_child(_dialogue_ui)
-	# Wire the quest adapter to consume response_selected events
 	_dialogue_ui.response_selected.connect(_quest_adapter.on_response_selected)
 
 	_book_viewer = BookViewerScript.new()
 	add_child(_book_viewer)
 
+	# Construct + register the DialogueSession. Interactables spawned below
+	# will read their provider/context/panels from DialogueSession.current().
+	_session = DialogueSession.new()
+	_session.provider = _provider
+	_session.context = _context
+	_session.dialogue_ui = _dialogue_ui
+	_session.book_viewer = _book_viewer
+	DialogueSession.set_current(_session)
+
+	# 3D world + interactables (spawn AFTER session registration)
+	_build_world()
+	_build_player()
+	_spawn_test_npc()
+	_spawn_test_book()
+
 	# Prompt UI
 	_build_prompt_label()
 	_raycaster.prompt_changed.connect(_on_prompt_changed)
-
-	# Re-bind each Interactable's UI references now that the panels exist
-	for child in get_tree().get_nodes_in_group("test_interactables"):
-		if child is NPCInteractable:
-			var npc_i: NPCInteractable = child as NPCInteractable
-			npc_i.dialogue_ui = _dialogue_ui
-			npc_i.dialogue_provider = _provider
-			npc_i.dialogue_context = _context
-		elif child is BookInteractable:
-			var book_i: BookInteractable = child as BookInteractable
-			book_i.book_viewer = _book_viewer
 
 
 func _build_world() -> void:
@@ -141,10 +149,12 @@ func _build_world() -> void:
 
 
 func _build_player() -> void:
-	_camera = Camera3D.new()
-	# Place camera in front of the NPC at (-1.5, 1.0, 0).
-	# Looking straight down -Z axis with a slight pitch to aim at NPC body center (1.3m).
-	_camera.position = Vector3(-1.5, 1.7, 2.0)
+	# FlyCamera handles movement + mouse look. Hold right-click to look,
+	# ZQSD (AZERTY) / WASD (QWERTY) / arrows to move, Space/Shift up/down,
+	# Ctrl boost, scroll wheel to adjust speed.
+	_camera = FlyCameraScript.new()
+	_camera.position = Vector3(-1.5, 1.7, 2.5)
+	_camera.move_speed = 5.0  # Indoors-ish, slow it down
 	add_child(_camera)
 	# look_at must happen after add_child — node needs to be in the tree
 	_camera.look_at(Vector3(-1.5, 1.3, 0), Vector3.UP)
@@ -165,7 +175,6 @@ func _spawn_test_npc() -> void:
 	interactable.position = Vector3(-1.5, 1.0, 0)
 	interactable.speaker_id = TEST_NPC_ID
 	interactable.max_interaction_distance = 3.0
-	interactable.add_to_group("test_interactables")
 	add_child(interactable)
 
 	# Visual mesh
@@ -206,7 +215,6 @@ func _spawn_test_book() -> void:
 			break
 	interactable.book_id = book_id_to_use
 	interactable.max_interaction_distance = 2.0
-	interactable.add_to_group("test_interactables")
 	add_child(interactable)
 
 	var mesh_inst := MeshInstance3D.new()
@@ -253,6 +261,38 @@ func _on_prompt_changed(interactable: Interactable, distance: float) -> void:
 		_prompt_label.text = ""
 		return
 	_prompt_label.text = "[E] %s  (%.1fm)" % [interactable.get_prompt_text(), distance]
+
+
+## Test-scene-local interact handler.
+##
+## Phase I.0 made `InteractionRaycaster` pure-state — it no longer reads
+## input. Production scenes use `PlayerController` to read `interact`
+## and route to the raycaster's current target. This test scene runs
+## without a `PlayerController` (uses `FlyCamera` for AZERTY-friendly
+## free-fly per @user's earlier ask), so it replicates the routing here.
+##
+## The modal-gate check (`DialogueSession.is_any_panel_open()`) mirrors
+## what `PlayerController.is_modal_ui_open()` does in production. C.2.5
+## will delete `DialogueSession.is_any_panel_open()` once the dialogue
+## panels register themselves with `PlayerController` directly; this
+## test scene will then either be migrated to `PlayerController` or
+## adopt a tiny inline gate check.
+func _unhandled_input(event: InputEvent) -> void:
+	if not event.is_action_pressed("interact"):
+		return
+	# Modal gate — don't re-fire the raycaster's current target while a
+	# panel is open. The panel's own _unhandled_input handles the close.
+	if _session != null and _session.is_any_panel_open():
+		return
+	if _raycaster == null:
+		return
+	var target := _raycaster.get_current_target()
+	if target == null:
+		return
+	if not target.can_interact(_camera, _raycaster.get_current_distance()):
+		return
+	target.interact(_camera)
+	get_viewport().set_input_as_handled()
 
 
 func _show_error(message: String) -> void:

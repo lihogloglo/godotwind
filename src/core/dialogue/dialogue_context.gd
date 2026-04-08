@@ -1,10 +1,13 @@
-## DialogueContext — Player/world state needed for dialogue evaluation
+## DialogueContext — Player/world state for dialogue evaluation
 ##
-## Generic framework class. Holds the current player state that dialogue systems
-## need to filter and present conversations. Game-specific providers populate this.
+## Generic framework class. Holds the cross-RPG player and world state that
+## any dialogue system needs to filter and present conversations.
 ##
-## This is NOT Morrowind-specific. Any RPG dialogue system can populate these fields.
-## The MW adapter maps these to Morrowind's 74 built-in functions.
+## Game-specific fields (Morrowind's 8-attribute / 27-skill arrays, disease/
+## vampire/werewolf flags, clothing-value disposition modifier, etc.) belong
+## in a subclass under the game's adapter directory — e.g.
+## `src/core/dialogue/morrowind/mw_dialogue_context.gd`. Framework code only
+## ever sees this base class; adapters downcast at their entry points.
 class_name DialogueContext
 extends RefCounted
 
@@ -16,29 +19,13 @@ var pc_level: int = 1
 var pc_faction: String = ""  # Current primary faction
 var pc_rank: int = 0         # Rank in primary faction
 
-# Player stats
+# Player resources / standing — every RPG has some form of these
 var pc_reputation: int = 0
 var pc_crime_level: int = 0
 var pc_health: int = 100
 var pc_health_percent: int = 100
 var pc_magicka: int = 100
 var pc_fatigue: int = 100
-var pc_clothing_value: int = 0  # Sum of equipped clothing/armor base values
-
-# Player attributes (indexed 0-7: Str, Int, Wil, Agi, Spd, End, Per, Lck)
-var pc_attributes: Array[int] = [50, 50, 50, 50, 50, 50, 50, 50]
-
-# Player skills (indexed 0-26)
-var pc_skills: Array[int] = []
-
-# Player status flags
-var pc_expelled: bool = false    # Expelled from faction
-var pc_common_disease: bool = false
-var pc_blight_disease: bool = false
-var pc_corprus: bool = false
-var pc_vampire: bool = false
-var pc_werewolf: bool = false
-var pc_werewolf_kills: int = 0
 
 # NPC interaction state (set per conversation)
 var detected: bool = true        # NPC is aware of the player (true = normal conversation)
@@ -51,12 +38,12 @@ var current_cell: String = ""
 var weather: int = 0             # 0=clear, 1=cloudy, etc.
 
 # Dialogue state
-var known_topics: Dictionary = {}  # topic_id (lowercase) -> bool
+var known_topics: Dictionary = {}    # topic_id (lowercase) -> bool
 var journal_indices: Dictionary = {}  # quest_id (lowercase) -> int (highest journal index)
 var choice: int = -1             # Current dialogue choice index (-1 = not in a choice)
 
 # Per-NPC state
-var disposition: int = 50    # Current NPC disposition toward player
+var disposition: int = 50    # Current NPC disposition toward player (0-100)
 
 # Global variables (game-specific, string -> float)
 var globals: Dictionary = {}
@@ -90,17 +77,3 @@ func get_global(name: String) -> float:
 ## Set a global variable
 func set_global(name: String, value: float) -> void:
 	globals[name.to_lower()] = value
-
-
-## Get a player attribute by index (0-7)
-func get_attribute(index: int) -> int:
-	if index >= 0 and index < pc_attributes.size():
-		return pc_attributes[index]
-	return 0
-
-
-## Get a player skill by index (0-26)
-func get_skill(index: int) -> int:
-	if index >= 0 and index < pc_skills.size():
-		return pc_skills[index]
-	return 0

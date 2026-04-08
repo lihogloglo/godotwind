@@ -10,11 +10,11 @@
 extends Node
 
 const MWDialogueProviderScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_provider.gd")
-const DialogueContextScript := preload("res://src/core/dialogue/dialogue_context.gd")
+const MWDialogueContextScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_context.gd")
 const DialogueUIScript := preload("res://src/core/ui/dialogue_panel.gd")
 
 var _provider: RefCounted  # MWDialogueProvider
-var _context: RefCounted   # DialogueContext
+var _context: RefCounted   # MWDialogueContext
 var _dialogue_ui: DialogueUI
 var _loading_screen: LoadingScreen
 var _npc_selector: OptionButton
@@ -42,7 +42,7 @@ func _ready() -> void:
 
 	# Setup provider and context
 	_provider = MWDialogueProviderScript.new()
-	_context = DialogueContextScript.new()
+	_context = MWDialogueContextScript.new()
 	_context.pc_race = "imperial"
 	_context.pc_class = "rogue"
 	_context.pc_gender = 0  # Male

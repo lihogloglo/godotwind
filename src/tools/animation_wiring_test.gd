@@ -684,18 +684,14 @@ func _create_ui() -> void:
 # =========================================================================
 
 func _physics_process(delta: float) -> void:
-	# --- WASD movement ---
+	# --- WASD movement (K.0 actions, AZERTY-correct via physical_keycode) ---
 	var move_dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_W):
-		move_dir.z -= 1.0
-	if Input.is_key_pressed(KEY_S):
-		move_dir.z += 1.0
-	if Input.is_key_pressed(KEY_A):
-		move_dir.x -= 1.0
-	if Input.is_key_pressed(KEY_D):
-		move_dir.x += 1.0
+	var move_xz := Input.get_vector(
+		&"move_left", &"move_right", &"move_forward", &"move_backward")
+	move_dir.x = move_xz.x
+	move_dir.z = move_xz.y
 
-	var is_running := Input.is_key_pressed(KEY_SHIFT)
+	var is_running := Input.is_action_pressed(&"sprint")
 	var speed := _run_speed if is_running else _move_speed
 
 	if move_dir.length() > 0.01:
@@ -799,8 +795,10 @@ func _input(event: InputEvent) -> void:
 		_pitch = clampf(_pitch - mm.relative.y * 0.3, -85.0, 85.0)
 
 	elif event is InputEventKey and event.pressed and not event.echo:
+		# Debug hotkey outside K.0 namespace — physical_keycode for AZERTY safety,
+		# K.1 GUIDE-managed rebind candidate. See docs/INPUT_SYSTEM.md §8.
 		var key := event as InputEventKey
-		if key.keycode == KEY_F:
+		if key.physical_keycode == KEY_F:
 			_fire_test_signals()
 
 

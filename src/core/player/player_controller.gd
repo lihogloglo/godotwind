@@ -25,6 +25,22 @@ signal exited_water
 ## Emitted when camera mode changes
 signal camera_mode_changed(mode: int)
 
+# --- Interaction (I.0) -------------------------------------------------------
+# `PlayerController` is the SOLE owner of the `interact` InputMap action.
+# All other systems (raycaster, dialogue UI, future CarryController) subscribe
+# to these signals — they MUST NOT read `Input.is_action_pressed("interact")`
+# directly. See docs/INTERACTION_SYSTEM.md §3.1 for the contract.
+
+## Quick press + release inside HOLD_THRESHOLD. Default verb on the
+## current Interactable target (Talk / Read / Take / Open / Activate).
+signal interact_tap()
+
+## Press held longer than HOLD_THRESHOLD. Carry start (I.3+).
+signal interact_hold_begin()
+
+## Release after `interact_hold_begin` already fired. Drop or throw (I.4).
+signal interact_release()
+
 #endregion
 
 
@@ -175,6 +191,43 @@ var _in_water_volume: bool = false
 ## Surface Y of the current static water volume
 var _water_volume_surface_y: float = -INF
 
+# --- Interaction (I.0) -------------------------------------------------------
+
+## Threshold (seconds) above which a press becomes "hold" instead of "tap".
+const HOLD_THRESHOLD: float = 0.20
+
+## Modal UI gate registry. Each entry must implement `is_open() -> bool`.
+## While ANY registered gate is open, interact_* signals are suppressed.
+var _modal_gates: Array[Node] = []
+
+## Time of the current interact press in milliseconds, or -1 if not pressed.
+var _interact_press_time_msec: int = -1
+
+## True after `interact_hold_begin` has fired for the current press, so
+## the polling loop in `_physics_process` does not double-fire.
+var _interact_hold_emitted: bool = false
+
+## Optional reference to the InteractionRaycaster owned by this player.
+## Set via `set_interaction_raycaster()` after the raycaster is parented.
+## When set, `PlayerController` automatically routes interact_tap to the
+## raycaster's current target. Tests/scenes that don't use the raycaster
+## can leave this null and connect to the signals directly.
+var _interaction_raycaster: Node = null
+
+## Optional reference to the CarryController owned by this player (I.3).
+## Set via `set_carry_controller()` after the controller is parented and
+## `setup(camera, player)` has been called. When set, `PlayerController`
+## automatically routes `interact_hold_begin` → `try_grab(target)` and
+## `interact_release` → `release()`. Held-body state lives entirely in
+## CarryController per `INTERACTION_SYSTEM.md` §6.2 MF1.
+var _carry_controller: Node = null
+
+## Tracks the previous frame's modal gate state so we can edge-detect
+## open→closed and re-capture the mouse automatically. Without this the
+## cursor stays visible after closing a dialogue/book and the user has
+## to left-click to re-capture for camera-look.
+var _was_modal_open: bool = false
+
 #endregion
 
 
@@ -198,6 +251,17 @@ func _ready() -> void:
 func _physics_process(delta: float) -> void:
 	if not enabled:
 		return
+
+	# Interact hold polling — input events fire on press/release only,
+	# so "held past threshold" detection requires per-frame polling.
+	# See docs/INTERACTION_SYSTEM.md §3.1.
+	_poll_interact_hold()
+
+	# Modal gate edge detection — re-capture the mouse on the open→closed
+	# falling edge so the player goes straight back to camera-look without
+	# needing a left-click. Symmetric VISIBLE on the rising edge so panels
+	# don't have to set mouse mode themselves (C.2.5 cleanup target).
+	_poll_modal_mouse_mode()
 
 	# Camera (always updated regardless of movement mode)
 	_handle_camera_transition(delta)
@@ -238,6 +302,28 @@ func _physics_process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not enabled or frozen:
 		return
+
+	# Modal UI gate — if any registered modal UI is open, do NOT consume
+	# the interact event. Let it propagate to the panel's own
+	# `_unhandled_input` so panels can handle E-to-close themselves.
+	# See docs/INTERACTION_SYSTEM.md §3.1 + reviewer M1 (id=3945).
+	# The internal checks in `_on_interact_pressed` / `_on_interact_released`
+	# are kept as belt-and-braces for the rare race where a modal opens
+	# between this entry point and the inner dispatch.
+	if is_modal_ui_open():
+		return
+
+	# Interact action — single source of truth for the entire project.
+	# See docs/INTERACTION_SYSTEM.md §3.1. No other site reads "interact".
+	if InputMap.has_action("interact"):
+		if event.is_action_pressed("interact"):
+			_on_interact_pressed()
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_released("interact"):
+			_on_interact_released()
+			get_viewport().set_input_as_handled()
+			return
 
 	# ESC releases mouse
 	if event is InputEventKey and event.physical_keycode == KEY_ESCAPE:
@@ -294,6 +380,16 @@ func _setup_camera() -> void:
 	camera_pivot = Node3D.new()
 	camera_pivot.name = "CameraPivot"
 	camera_pivot.position.y = 1.7  # Eye/head height
+	# Vibration spike (§17.2.1 / @roaster verdict): with project-wide
+	# `physics/common/physics_interpolation = true`, the camera_pivot
+	# must be carved out so mouse rotation in `_unhandled_input` stays
+	# render-rate-fresh. Per Godot 4.4+ advanced physics interpolation
+	# docs: "If you use the traditional get_global_transform() on a
+	# Camera3D target node, it can be better to disable physics
+	# interpolation for the camera node and directly apply the mouse
+	# input to the camera rotation, rather than apply it in
+	# _physics_process." That's exactly our setup.
+	camera_pivot.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	add_child(camera_pivot)
 
 	spring_arm = SpringArm3D.new()
@@ -333,6 +429,7 @@ func _ensure_input_actions() -> void:
 		"jump": KEY_SPACE,
 		"crouch": KEY_C,
 		"toggle_camera": KEY_TAB,
+		"interact": KEY_E,
 	}
 	for action_name: String in actions:
 		if not InputMap.has_action(action_name):
@@ -438,6 +535,203 @@ func get_camera() -> Camera3D:
 ## Enable/disable root motion
 func set_root_motion(p_enabled: bool) -> void:
 	use_root_motion = p_enabled
+
+
+# =============================================================================
+# INTERACTION (I.0 — see docs/INTERACTION_SYSTEM.md §3.1)
+# =============================================================================
+
+## Register a modal UI as an input gate. While ANY registered gate's
+## `is_open()` returns true, PlayerController suppresses interact_*
+## signal emission. Gate must implement `is_open() -> bool`.
+## Idempotent — re-registering an existing gate is a no-op.
+func register_modal_gate(gate: Node) -> void:
+	if gate == null:
+		push_warning("PlayerController.register_modal_gate: null gate")
+		return
+	if gate in _modal_gates:
+		return
+	assert(gate.has_method("is_open"),
+			"modal gate '%s' must implement is_open() -> bool" % gate.name)
+	_modal_gates.append(gate)
+	# Auto-clean if the gate is freed without explicit unregister.
+	if not gate.tree_exiting.is_connected(_on_gate_tree_exiting):
+		gate.tree_exiting.connect(_on_gate_tree_exiting.bind(gate), CONNECT_ONE_SHOT)
+
+
+## Unregister a previously registered modal gate. Idempotent.
+func unregister_modal_gate(gate: Node) -> void:
+	_modal_gates.erase(gate)
+
+
+## Returns true if any registered modal gate is currently open.
+## Used internally to gate interact_* signal emission. Public so external
+## systems (raycaster, FlyCamera) can also consult it during the C.2.5
+## transition; once C.2.5 lands, only PlayerController itself reads this.
+func is_modal_ui_open() -> bool:
+	for gate in _modal_gates:
+		if not is_instance_valid(gate):
+			continue  # Self-heal: stale entry from a freed gate
+		if gate.is_open():
+			return true
+	return false
+
+
+## Number of currently registered modal gates. For tests + diagnostics.
+func get_modal_gate_count() -> int:
+	return _modal_gates.size()
+
+
+## Attach an InteractionRaycaster so PlayerController can route the
+## interact_tap default verb to whatever the raycaster is currently
+## targeting. Without this attachment, consumers must connect to the
+## interact_* signals themselves and read the target via their own means.
+func set_interaction_raycaster(raycaster: Node) -> void:
+	_interaction_raycaster = raycaster
+
+
+## Returns the attached InteractionRaycaster, or null.
+func get_interaction_raycaster() -> Node:
+	return _interaction_raycaster
+
+
+## Attach a CarryController (I.3). When set, PlayerController routes
+## `interact_hold_begin` → `try_grab(raycaster.get_current_target())` and
+## `interact_release` → `release()`. The controller must be parented and
+## `setup(camera, player)` already called.
+func set_carry_controller(cc: Node) -> void:
+	_carry_controller = cc
+
+
+## Returns the attached CarryController, or null.
+func get_carry_controller() -> Node:
+	return _carry_controller
+
+
+func _on_gate_tree_exiting(gate: Node) -> void:
+	_modal_gates.erase(gate)
+
+
+## Called from `_unhandled_input` on `interact` press.
+func _on_interact_pressed() -> void:
+	if is_modal_ui_open():
+		return
+	_interact_press_time_msec = Time.get_ticks_msec()
+	_interact_hold_emitted = false
+
+
+## Called from `_unhandled_input` on `interact` release.
+func _on_interact_released() -> void:
+	if _interact_press_time_msec < 0:
+		# We never recorded a press (modal UI was open at press time, or
+		# the action was rebound mid-press). Ignore the release.
+		return
+	var held_msec := Time.get_ticks_msec() - _interact_press_time_msec
+	_interact_press_time_msec = -1
+	# A modal UI may have opened mid-press; in that case suppress emission.
+	if is_modal_ui_open():
+		_interact_hold_emitted = false
+		return
+	if _interact_hold_emitted:
+		interact_release.emit()
+		_route_carry_release()
+	elif held_msec < int(HOLD_THRESHOLD * 1000):
+		_emit_interact_tap()
+	else:
+		# Held past threshold but `_interact_hold_emitted` is false — physics
+		# tick didn't fire (extreme rare race, e.g. low fps). Treat as a tap
+		# on the fallthrough rather than silently dropping the event.
+		_emit_interact_tap()
+	# `_interact_hold_emitted` is reset on the NEXT press in
+	# `_on_interact_pressed`, no need to reset here.
+
+
+## Polled from `_physics_process`. Edge-detects modal gate state so the
+## mouse cursor mode follows it automatically:
+##   - rising edge (none open → some open): release cursor (VISIBLE)
+##   - falling edge (some open → none open): re-capture (CAPTURED)
+## This is the C.2.5 single-owner replacement for per-panel
+## `Input.set_mouse_mode` writes — panels can stop touching mouse mode
+## entirely once they trust this loop. Until then it is idempotent: any
+## panel that ALSO sets mouse_mode itself will agree on the same value.
+func _poll_modal_mouse_mode() -> void:
+	var open_now: bool = is_modal_ui_open()
+	if open_now == _was_modal_open:
+		return
+	_was_modal_open = open_now
+	if open_now:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## Polled from `_physics_process`. Emits `interact_hold_begin` once when
+## the active press crosses the threshold.
+func _poll_interact_hold() -> void:
+	if _interact_press_time_msec < 0 or _interact_hold_emitted:
+		return
+	if is_modal_ui_open():
+		return
+	var held_msec := Time.get_ticks_msec() - _interact_press_time_msec
+	if held_msec >= int(HOLD_THRESHOLD * 1000):
+		_interact_hold_emitted = true
+		interact_hold_begin.emit()
+		_route_carry_grab()
+
+
+## Default routing for `interact_tap`: forward to the raycaster's current
+## target if one is attached and pointing at an Interactable. External
+## listeners can also connect to `interact_tap` for additional behavior.
+func _emit_interact_tap() -> void:
+	interact_tap.emit()
+	# If a CarryController is attached and currently holding something,
+	# the tap is consumed by the carry stack — don't ALSO forward to the
+	# raycaster target (which would tap-pickup whatever the player is
+	# looking at while still holding the previous item). The hold-vs-tap
+	# discriminator handles this implicitly via _interact_hold_emitted,
+	# but defensive: if a tap somehow leaks through while carrying,
+	# refuse it here.
+	if _carry_controller != null and _carry_controller.has_method("is_carrying"):
+		if _carry_controller.is_carrying():
+			return
+	if _interaction_raycaster == null:
+		return
+	if not _interaction_raycaster.has_method("get_current_target"):
+		return
+	var target: Node = _interaction_raycaster.get_current_target()
+	if target == null:
+		return
+	if not target.has_method("interact"):
+		return
+	target.interact(self)
+
+
+## Default routing for `interact_hold_begin` (I.3): forward the
+## raycaster's current target to the CarryController. The controller
+## decides whether the target is grabbable; we just hand it the target.
+func _route_carry_grab() -> void:
+	if _carry_controller == null:
+		return
+	if not _carry_controller.has_method("try_grab"):
+		return
+	if _interaction_raycaster == null:
+		return
+	if not _interaction_raycaster.has_method("get_current_target"):
+		return
+	var target: Node = _interaction_raycaster.get_current_target()
+	if target == null:
+		return
+	_carry_controller.try_grab(target)
+
+
+## Default routing for `interact_release` (I.3): tell the carry
+## controller to release whatever it's holding. No target lookup needed.
+func _route_carry_release() -> void:
+	if _carry_controller == null:
+		return
+	if not _carry_controller.has_method("release"):
+		return
+	_carry_controller.release()
 
 
 # =============================================================================

@@ -52,6 +52,15 @@ func _find_probes() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# I.5 / INTERACTION_SYSTEM.md §6.4 — frozen-body early-out guard.
+	# Verified mandatory by `tests/diagnostic/frozen_rb_tick_check.tscn`:
+	# Godot 4.6 ticks `_physics_process` on frozen RigidBody3Ds every
+	# physics frame regardless of `freeze = true`. Without this guard,
+	# every clutter item in a cell pays the full ocean wave-height
+	# query each frame even though it's at rest on a table indoors.
+	# With the guard, the cost collapses to one branch per frozen body.
+	if freeze:
+		return
 	if not OceanManager or not OceanManager.is_initialized():
 		return
 	if _probes.is_empty():

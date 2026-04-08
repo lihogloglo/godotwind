@@ -13,12 +13,11 @@ extends RefCounted
 
 const MWConditionParserScript := preload("res://src/core/dialogue/morrowind/mw_condition_parser.gd")
 const MWDialogueFunctionsScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_functions.gd")
-const DialogueContextScript := preload("res://src/core/dialogue/dialogue_context.gd")
 
 
 ## Search a topic's INFO list for the first matching entry
 ## Returns the matching DialogueInfoRecord or null
-static func search(topic_id: String, npc: NPCRecord, context: RefCounted) -> DialogueInfoRecord:
+static func search(topic_id: String, npc: NPCRecord, context: MWDialogueContext) -> DialogueInfoRecord:
 	var infos: Array = ESMManager.get_dialogue_infos(topic_id)
 	if infos.is_empty():
 		return null
@@ -34,7 +33,7 @@ static func search(topic_id: String, npc: NPCRecord, context: RefCounted) -> Dia
 
 ## Search with disposition fallback — returns {info, refused} dict
 ## If conditions 1-3 pass but disposition fails, sets refused=true
-static func search_with_refusal(topic_id: String, npc: NPCRecord, context: RefCounted) -> Dictionary:
+static func search_with_refusal(topic_id: String, npc: NPCRecord, context: MWDialogueContext) -> Dictionary:
 	var infos: Array = ESMManager.get_dialogue_infos(topic_id)
 	if infos.is_empty():
 		return {"info": null, "refused": false}
@@ -60,7 +59,7 @@ static func search_with_refusal(topic_id: String, npc: NPCRecord, context: RefCo
 
 ## Relaxed search: skips SCVR conditions (for testing when game state is incomplete)
 ## Still checks actor, player, and disposition filters
-static func search_relaxed(topic_id: String, npc: NPCRecord, context: RefCounted) -> DialogueInfoRecord:
+static func search_relaxed(topic_id: String, npc: NPCRecord, context: MWDialogueContext) -> DialogueInfoRecord:
 	var infos: Array = ESMManager.get_dialogue_infos(topic_id)
 	if infos.is_empty():
 		return null
@@ -75,7 +74,7 @@ static func search_relaxed(topic_id: String, npc: NPCRecord, context: RefCounted
 
 
 ## Debug search: logs why each INFO was rejected (use sparingly — verbose)
-static func debug_search(topic_id: String, npc: NPCRecord, context: RefCounted, max_log: int = 5) -> DialogueInfoRecord:
+static func debug_search(topic_id: String, npc: NPCRecord, context: MWDialogueContext, max_log: int = 5) -> DialogueInfoRecord:
 	var infos: Array = ESMManager.get_dialogue_infos(topic_id)
 	Log.info("dialogue", "DEBUG: Searching '%s' for %s (%d INFOs)" % [topic_id, npc.record_id, infos.size()])
 
@@ -86,8 +85,7 @@ static func debug_search(topic_id: String, npc: NPCRecord, context: RefCounted, 
 		var actor_ok := _test_actor(info, npc)
 		var player_ok := _test_player(info, npc, context)
 		var select_ok := _test_select_structs(info, npc, context)
-		var ctx_disposition: int = context.disposition
-		var disp_ok: bool = ctx_disposition >= info.disposition
+		var disp_ok: bool = context.disposition >= info.disposition
 
 		if actor_ok and player_ok and select_ok and disp_ok:
 			Log.info("dialogue", "  MATCH: %s (disp=%d)" % [info.record_id, info.disposition])
@@ -98,7 +96,7 @@ static func debug_search(topic_id: String, npc: NPCRecord, context: RefCounted, 
 			if not actor_ok: reasons.append("actor(id=%s race=%s class=%s fac=%s sex=%d)" % [info.actor_id, info.actor_race, info.actor_class, info.actor_faction, info.speaker_sex])
 			if not player_ok: reasons.append("player(fac=%s rank=%d cell=%s)" % [info.pc_faction, info.player_rank, info.actor_cell])
 			if not select_ok: reasons.append("conditions(%d)" % info.conditions.size())
-			if not disp_ok: reasons.append("disposition(%d>=%d)" % [ctx_disposition, info.disposition])
+			if not disp_ok: reasons.append("disposition(%d>=%d)" % [context.disposition, info.disposition])
 			Log.info("dialogue", "  REJECT %s: %s" % [info.record_id, ", ".join(reasons)])
 			logged += 1
 
@@ -165,29 +163,25 @@ static func _test_actor(info: DialogueInfoRecord, npc: NPCRecord) -> bool:
 
 #region Step 2: testPlayer
 
-static func _test_player(info: DialogueInfoRecord, npc: NPCRecord, context: RefCounted) -> bool:
-	var ctx_pc_faction: String = context.pc_faction
-	var ctx_pc_rank: int = context.pc_rank
-	var ctx_cell: String = context.current_cell
-
+static func _test_player(info: DialogueInfoRecord, npc: NPCRecord, context: MWDialogueContext) -> bool:
 	# PC faction filter
 	if not info.pc_faction.is_empty():
-		if info.pc_faction.to_lower() != ctx_pc_faction.to_lower():
+		if info.pc_faction.to_lower() != context.pc_faction.to_lower():
 			return false
-		if info.player_rank >= 0 and ctx_pc_rank < info.player_rank:
+		if info.player_rank >= 0 and context.pc_rank < info.player_rank:
 			return false
 	elif info.player_rank >= 0:
 		# No pc_faction but rank specified: use NPC's faction
 		if npc.faction_id.is_empty():
 			return false
-		if ctx_pc_faction.to_lower() != npc.faction_id.to_lower():
+		if context.pc_faction.to_lower() != npc.faction_id.to_lower():
 			return false
-		if ctx_pc_rank < info.player_rank:
+		if context.pc_rank < info.player_rank:
 			return false
 
 	# Cell filter (prefix match, case-insensitive)
 	if not info.actor_cell.is_empty():
-		if not ctx_cell.to_lower().begins_with(info.actor_cell.to_lower()):
+		if not context.current_cell.to_lower().begins_with(info.actor_cell.to_lower()):
 			return false
 
 	return true
@@ -196,7 +190,7 @@ static func _test_player(info: DialogueInfoRecord, npc: NPCRecord, context: RefC
 
 #region Step 3: testSelectStructs (SCVR conditions)
 
-static func _test_select_structs(info: DialogueInfoRecord, npc: NPCRecord, context: RefCounted) -> bool:
+static func _test_select_structs(info: DialogueInfoRecord, npc: NPCRecord, context: MWDialogueContext) -> bool:
 	if info.conditions.is_empty():
 		return true
 
@@ -209,7 +203,7 @@ static func _test_select_structs(info: DialogueInfoRecord, npc: NPCRecord, conte
 	return true
 
 
-static func _evaluate_condition(cond: MWConditionParserScript.ParsedCondition, npc: NPCRecord, context: RefCounted) -> bool:
+static func _evaluate_condition(cond: MWConditionParserScript.ParsedCondition, npc: NPCRecord, context: MWDialogueContext) -> bool:
 	var target: float = cond.get_value()
 
 	match cond.type:
@@ -256,8 +250,7 @@ static func _evaluate_condition(cond: MWConditionParserScript.ParsedCondition, n
 
 		MWConditionParserScript.ConditionType.NOT_CELL:
 			# Cell prefix match (inverted)
-			var cell_name: String = context.current_cell
-			var cell_matches: bool = cell_name.to_lower().begins_with(cond.variable_name.to_lower())
+			var cell_matches: bool = context.current_cell.to_lower().begins_with(cond.variable_name.to_lower())
 			return not cell_matches
 
 		MWConditionParserScript.ConditionType.NOT_LOCAL:
@@ -270,8 +263,7 @@ static func _evaluate_condition(cond: MWConditionParserScript.ParsedCondition, n
 
 #region Step 4: testDisposition
 
-static func _test_disposition(info: DialogueInfoRecord, _npc: NPCRecord, context: RefCounted) -> bool:
-	var ctx_disposition: int = context.disposition
-	return ctx_disposition >= info.disposition
+static func _test_disposition(info: DialogueInfoRecord, _npc: NPCRecord, context: MWDialogueContext) -> bool:
+	return context.disposition >= info.disposition
 
 #endregion

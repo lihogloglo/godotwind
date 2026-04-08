@@ -65,14 +65,7 @@ enum FuncID {
 
 ## Evaluate a built-in function given the dialogue context
 ## Returns the function's current value as a float
-static func evaluate(function_id: int, npc: NPCRecord, context: RefCounted) -> float:
-	# Extract typed fields from context to avoid Variant inference warnings
-	var ctx_pc_level: int = context.pc_level
-	var ctx_pc_gender: int = context.pc_gender
-	var ctx_pc_race: String = context.pc_race
-	var ctx_pc_faction: String = context.pc_faction
-	var ctx_pc_rank: int = context.pc_rank
-
+static func evaluate(function_id: int, npc: NPCRecord, context: MWDialogueContext) -> float:
 	match function_id:
 		# --- NPC state ---
 		FuncID.REPUTATION:
@@ -84,17 +77,13 @@ static func evaluate(function_id: int, npc: NPCRecord, context: RefCounted) -> f
 
 		# --- NPC AI state ---
 		FuncID.DETECTED:
-			var detected: bool = context.detected
-			return 1.0 if detected else 0.0
+			return 1.0 if context.detected else 0.0
 		FuncID.ATTACKED:
-			var attacked: bool = context.attacked
-			return 1.0 if attacked else 0.0
+			return 1.0 if context.attacked else 0.0
 		FuncID.TALKED_TO_PC:
-			var talked: bool = context.talked_to_pc
-			return 1.0 if talked else 0.0
+			return 1.0 if context.talked_to_pc else 0.0
 		FuncID.ALARMED:
-			var alarmed: bool = context.alarmed
-			return 1.0 if alarmed else 0.0
+			return 1.0 if context.alarmed else 0.0
 		FuncID.SHOULD_ATTACK:
 			return 0.0  # No combat system
 		FuncID.CREATURE_TARGET:
@@ -130,40 +119,32 @@ static func evaluate(function_id: int, npc: NPCRecord, context: RefCounted) -> f
 
 		# --- PC identity ---
 		FuncID.PC_LEVEL:
-			return float(ctx_pc_level)
+			return float(context.pc_level)
 		FuncID.PC_GENDER:
-			return float(ctx_pc_gender)
+			return float(context.pc_gender)
 		FuncID.PC_REPUTATION:
-			var rep: int = context.pc_reputation
-			return float(rep)
+			return float(context.pc_reputation)
 		FuncID.PC_CRIME_LEVEL:
-			var crime: int = context.pc_crime_level
-			return float(crime)
+			return float(context.pc_crime_level)
 
 		# --- PC health/stats ---
 		FuncID.PC_HEALTH_PERCENT:
-			var hp_pct: int = context.pc_health_percent
-			return float(hp_pct)
+			return float(context.pc_health_percent)
 		FuncID.PC_HEALTH:
-			var hp: int = context.pc_health
-			return float(hp)
+			return float(context.pc_health)
 		FuncID.PC_MAGICKA:
-			var mp: int = context.pc_magicka
-			return float(mp)
+			return float(context.pc_magicka)
 		FuncID.PC_FATIGUE:
-			var fat: int = context.pc_fatigue
-			return float(fat)
+			return float(context.pc_fatigue)
 		FuncID.PC_CLOTHING_MODIFIER:
-			var clothing: int = context.pc_clothing_value
-			return float(clothing)
+			return float(context.pc_clothing_value)
 
 		# --- PC attributes (10-17) ---
 		FuncID.PC_STRENGTH, FuncID.PC_INTELLIGENCE, FuncID.PC_WILLPOWER, \
 		FuncID.PC_AGILITY, FuncID.PC_SPEED, FuncID.PC_ENDURANCE, \
 		FuncID.PC_PERSONALITY, FuncID.PC_LUCK:
 			var attr_index: int = function_id - FuncID.PC_STRENGTH  # 0-7
-			var attr_val: int = context.get_attribute(attr_index)
-			return float(attr_val)
+			return float(context.get_attribute(attr_index))
 
 		# --- PC skills (18-37 maps to skill indices 0-19, 38 is gender) ---
 		# Skills 18-37: Block(0) through HandToHand(19+)
@@ -171,60 +152,50 @@ static func evaluate(function_id: int, npc: NPCRecord, context: RefCounted) -> f
 
 		# --- PC status flags ---
 		FuncID.PC_EXPELLED:
-			var expelled: bool = context.pc_expelled
-			return 1.0 if expelled else 0.0
+			return 1.0 if context.pc_expelled else 0.0
 		FuncID.PC_COMMON_DISEASE:
-			var disease: bool = context.pc_common_disease
-			return 1.0 if disease else 0.0
+			return 1.0 if context.pc_common_disease else 0.0
 		FuncID.PC_BLIGHT_DISEASE:
-			var blight: bool = context.pc_blight_disease
-			return 1.0 if blight else 0.0
+			return 1.0 if context.pc_blight_disease else 0.0
 		FuncID.PC_CORPRUS:
-			var corprus: bool = context.pc_corprus
-			return 1.0 if corprus else 0.0
+			return 1.0 if context.pc_corprus else 0.0
 		FuncID.PC_VAMPIRE:
-			var vampire: bool = context.pc_vampire
-			return 1.0 if vampire else 0.0
+			return 1.0 if context.pc_vampire else 0.0
 		FuncID.WEREWOLF:
-			var werewolf: bool = context.pc_werewolf
-			return 1.0 if werewolf else 0.0
+			return 1.0 if context.pc_werewolf else 0.0
 		FuncID.PC_WEREWOLF_KILLS:
-			var kills: int = context.pc_werewolf_kills
-			return float(kills)
+			return float(context.pc_werewolf_kills)
 
 		# --- Comparison functions ---
 		FuncID.SAME_SEX:
 			if npc == null:
 				return 0.0
 			var npc_female: bool = npc.is_female()
-			return 1.0 if (ctx_pc_gender == 1) == npc_female else 0.0
+			return 1.0 if (context.pc_gender == 1) == npc_female else 0.0
 		FuncID.SAME_RACE:
 			if npc == null:
 				return 0.0
-			return 1.0 if ctx_pc_race.to_lower() == npc.race_id.to_lower() else 0.0
+			return 1.0 if context.pc_race.to_lower() == npc.race_id.to_lower() else 0.0
 		FuncID.SAME_FACTION:
 			if npc == null or npc.faction_id.is_empty():
 				return 0.0
-			return 1.0 if ctx_pc_faction.to_lower() == npc.faction_id.to_lower() else 0.0
+			return 1.0 if context.pc_faction.to_lower() == npc.faction_id.to_lower() else 0.0
 		FuncID.FACTION_RANK_DIFFERENCE:
 			if npc == null or npc.faction_id.is_empty():
 				return 0.0
-			if ctx_pc_faction.to_lower() != npc.faction_id.to_lower():
+			if context.pc_faction.to_lower() != npc.faction_id.to_lower():
 				return 0.0
-			return float(ctx_pc_rank - npc.rank)
+			return float(context.pc_rank - npc.rank)
 
 		# --- Dialogue state ---
 		FuncID.CHOICE:
-			var choice_val: int = context.choice
-			return float(choice_val)
+			return float(context.choice)
 		FuncID.WEATHER:
-			var weather_val: int = context.weather
-			return float(weather_val)
+			return float(context.weather)
 
 		_:
 			# Skills range (18-37)
 			if function_id >= 18 and function_id <= 37:
 				var skill_index: int = function_id - 18  # 0-19
-				var skill_val: int = context.get_skill(skill_index)
-				return float(skill_val)
+				return float(context.get_skill(skill_index))
 			return 0.0

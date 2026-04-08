@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/visual/test_input_phase_K0.gd" id="1"]
+
+[node name="TestInputPhaseK0" type="Node3D"]
+script = ExtResource("1")
