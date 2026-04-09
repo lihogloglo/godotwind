@@ -247,47 +247,11 @@ func _do_grab(target: Interactable, rb: RigidBody3D) -> void:
 
 **Future phases:** I.4 throw + impulse, I.5 buoyancy probe writes, I.6 streaming reparent — all must follow the same pattern. Any new code that touches a `RigidBody3D` must do so from a `call_deferred` helper. Reviewer enforces via `grep` on the carry/buoyancy/streaming code paths.
 
-### 6.2.1 KNOWN ISSUE — hold-pose vibration (TODO, not fixed as of 2026-04-07)
+### 6.2.1 ~~KNOWN ISSUE — hold-pose vibration~~ RESOLVED 2026-04-09
 
-**Symptom:** Held objects visibly vibrate / jitter when the player moves the camera or walks while carrying. The carry mechanic otherwise works (object follows, drops correctly, mask flips correctly), but the visual is unstable.
+**Status:** SOLVED by architectural rewrite. `CarryController` no longer uses kinematic direct-transform writes. See §17.5 for the rewrite notes; the short version is that the entire "kinematic reparent + direct `global_transform` writes from `_process` + manual chain composition + per-node interpolation carve-outs + wall-pushback raycast + camera-basis ring buffer + throw lever-arm cross product" stack was replaced by the canonical HL2 physics-gun pattern: body stays DYNAMIC, `linear_velocity` + `angular_velocity` written each `_physics_process` tick, Jolt integrates, engine interpolation smooths. The vibration was a symptom of fighting Godot's physics-interpolation system with render-rate transform writes; stopping that fight eliminated the entire bug class.
 
-**Why this is hard:** It's a physics-tick-vs-render-rate beat, not a logic bug. The full picture:
-
-1. `PlayerController` is a `CharacterBody3D` whose translation is driven by `move_and_slide()` in `_physics_process` → camera position updates **only at the 60 Hz physics tick rate**.
-2. Camera rotation is driven by mouse motion in `_input` → updates at **render rate** (immediately).
-3. `CarryController._process` runs the hold-pose lerp at render rate (e.g. 144 Hz on a 144 Hz monitor) and reads `_hold_target_marker.global_position`. The marker is a child of the camera.
-4. Marker position re-derives from the camera's parent chain. Player translation bakes in only at physics ticks → marker world position only changes 60 times/sec, but the carry loop reads it 144 times/sec.
-5. Result: ~2.4 render frames see the same marker position, then one frame sees it jump a full physics-tick worth, then another 2.4 frames steady, etc. The held body's lerp chases the staircase pattern, producing a ~60 Hz visual beat against the 144 Hz refresh. **That is the vibration.**
-
-**What was tried (none of which fixed it cleanly):**
-
-1. **`Node3D.get_global_transform_interpolated()`** (chat id=4049 from `@reviewer`). Recommended on the assumption that Godot 4.4+ exposes per-node interpolated reads regardless of project settings. **WRONG** — the API is documented as a no-op when `physics/common/physics_interpolation` is disabled (off by default in 4.6 for 3D). Single-line read change shipped, no visible effect. See `feedback_verify_godot_api_before_recommending.md` in `@reviewer`'s memory.
-
-2. **Manual two-snapshot interpolation in `CarryController`** (chat id=4053 from `@interactivity`). Snapshot `_hold_target_marker.global_position` in `_physics_process` into `_marker_pos_prev` / `_marker_pos_current`, then in `_process` lerp `prev → current` using `Engine.get_physics_interpolation_fraction()`. This is the canonical pattern from the [advanced physics interpolation](https://docs.godotengine.org/en/stable/tutorials/physics/interpolation/advanced_physics_interpolation.html) doc when project-wide interpolation is off. **Reduced but did not eliminate** the vibration in playtest. There's still some residual jitter the snapshot pattern doesn't catch — possibly because the camera's mouse-driven rotation injects extra render-rate motion that breaks the prev/current assumption, or because the player capsule itself isn't being interpolated.
-
-3. **Move the lerp from `_process` to `_physics_process`** at fixed 60 Hz. Eliminates the beat against render rate at the cost of visible 60 Hz stepping on a 144 Hz monitor — trades vibration for stutter. Not shipped, but documented as the obvious-but-wrong fallback.
-
-4. **Enable project-wide `physics/common/physics_interpolation = true`** (chat id=4049, alternative path). Affects the entire project — streaming clutter, NPCs, animations, etc. — and would require explicitly setting the camera node to `PHYSICS_INTERPOLATION_MODE_OFF` so mouse-look stays render-rate-fresh. Not shipped because the blast radius is project-wide and wasn't pre-flighted with @user. **This may end up being the right answer** — Godot 4.4 made physics interpolation a first-class supported path; flipping it on is the canonical Godot 4 solution to "I'm running physics at 60 Hz on a 144 Hz monitor". Future agent: validate by spinning a one-off test scene with the setting flipped + camera carved out, see if the carry scene then behaves with manual snapshot logic removed.
-
-**Suspects worth investigating next:**
-
-- **Camera node as the unstable read source.** The carry loop reads `_hold_target_marker.global_position`, which derives from `camera.global_transform`. Camera is parented under `PlayerController` (`CharacterBody3D`) which is the physics-tick-only node. Even if `_marker_pos_current` is snapshotted from `_physics_process`, the snapshot value depends on whatever `camera.global_transform` returns at that exact moment — and if Godot's transform cache hasn't propagated the player's `move_and_slide()` write yet, the snapshot is one tick stale. Try snapshotting from `_integrate_forces` on the player capsule instead, which runs strictly **after** `move_and_slide()`.
-
-- **Jolt's frozen-kinematic interpolation.** Jolt may interpolate the visual position of frozen kinematic bodies between `_physics_process` writes for smoothness. If our `_process` write at 144 Hz fights Jolt's interpolation lerp from the previous tick's value, that's the vibration. The Jolt-canonical "MoveKinematic with velocity" path (from id=4053) sidesteps this by switching the body to a true kinematic mover with a velocity field, NOT a frozen rigid. Bigger refactor — last-resort.
-
-- **Per-node `physics_interpolation_mode = PHYSICS_INTERPOLATION_MODE_ON` on the held body** while leaving the project setting off. Godot 4.6 exposes per-node opt-in. Untested for frozen-kinematic bodies — verify in a one-off test scene first.
-
-- **The visual mesh's position vs the body's position.** After the MF4 mesh-follow restructure, the visual `MeshInstance3D` is a child of the `RigidBody3D`. If the body's transform is jittering, so does the mesh. But if the mesh inherits a different interpolation path than the body, you'd see double-vibration. Check whether the mesh follows the body 1:1 by temporarily disabling the lerp and just snapping `_held_body.global_transform = marker.global_transform` each frame — if the visual still jitters, the mesh-vs-body inheritance is part of the problem.
-
-**Acceptance criteria for "fixed":**
-
-- Hold an apple, walk forward + strafe + look around. The apple sticks to its capture point in the view with smooth inertia from the lerp. Zero high-frequency jitter. Tested at 60 Hz, 120 Hz, and 144 Hz monitor refresh.
-- Tested with and without `physics/common/physics_interpolation`, both end states must work — or one path is documented as the canonical setup.
-- Visible at any held mass — apple (0.2 kg), book (3 kg), sword (12 kg), torch (1 kg).
-
-**Owner:** @interactivity (carry system is yours).
-**Phase ladder placement:** I.3 ships **with this known issue** per @user direction (chat id=4055, "carry on with the next steps"). Re-open as a follow-up after I.7 lands or when @user has time to playtest fixes.
-**File:** `src/core/interaction/carry_controller.gd` (`_process` + `_physics_process` snapshot path, ~lines 320-400 as of the current refactor).
+Canonical lesson preserved in `.claude/CLAUDE.md` "Engineering Principle — Simplicity Over Over-Engineering". Do NOT re-introduce a kinematic direct-write carry loop without escalating first.
 
 ### 6.3 Throw
 
@@ -484,7 +448,91 @@ Each phase ships a `tests/visual/test_interaction_phase_IN.tscn` scene that exer
 
 ---
 
-## 17. Phase Ladder Ship Status + Carry-forward TODOs (2026-04-08 update)
+## 17. Phase Ladder Ship Status + Carry-forward TODOs (2026-04-09 update)
+
+**I.0 through I.7 shipped. CarryController rewrite shipped 2026-04-09. Main-scene integration + I.6 Phase 2 shipped 2026-04-09.** Vibration is SOLVED (not parked). Remaining Phase 2 followups: I.7 container UI + BNAM script interp + lockpicking (all blocked on other systems). Throw mass weighting (§17.2.3) is OBSOLETE — velocity-drive handles weight naturally through Jolt's mass-weighted integration.
+
+### 17.0a Main-scene integration (2026-04-09)
+
+The `InteractionRaycaster` + `CarryController` are now wired into `world_explorer.gd` under the player rig. Launch `scenes/Godotwind.tscn`, press `P` to switch to player mode (which forces first-person and locks `allow_camera_mode_switch = false` — see below), walk up to any carryable or teleport door, press the unified `interact` action.
+
+**Wiring summary (`world_explorer._setup_cameras`):**
+- `InteractionRaycaster` instantiated under `player_controller.get_camera()`, `max_distance = 5.0`, `physics_process` gated on camera mode — disabled in fly mode (the chase camera ≠ player eyes), enabled on player switch.
+- `CarryController` instantiated under `player_controller`, `setup(camera, player)` called, `set_carry_controller()` routed through `PlayerController` so the hold/release input path resolves correctly.
+- `set_streaming_manager()` deferred to `_setup_pocket_manager` so both the carry controller and the streaming manager exist before the I.6 registration hand-off.
+- `cell_manager.set_door_activated_handler(_on_door_interactable_activated)` — plumbs a `Callable` through `CellManager` → `ReferenceInstantiator` so every spawned `DoorInteractable` connects its `door_activated` signal at creation time without any upward dependency.
+
+**Why force first-person on player switch:** the `InteractionRaycaster` casts from the camera, and in third-person the `SpringArm3D` pushes the camera ~3m behind the player. With `max_distance = 5m` the effective reach FROM THE PLAYER was only ~2m and the cast could also angle through the player's head depending on pitch, leaving door targeting broken. The fix is to match the I.3/I.4/I.7 test scenes: call `set_camera_mode(FIRST_PERSON)` in `_switch_to_player_controller` and set `allow_camera_mode_switch = false` so the user can't TAB back to third-person and silently re-introduce the dead-reach bug. This is the canonical pattern — AAA games ship in first-person for reach-limited interactions for exactly this reason.
+
+**DoorInteractable spawn path (`ReferenceInstantiator._instantiate_model_object`):** for every `type_name == "door"` reference whose `ref.is_teleport` is true (DODT subrecord present), the door instance's root `Node3D` is promoted to a `DoorInteractable` via `set_script` (same pattern as `CarryableBodyFactory` wraps the body in a `Pickup` parent — the Interactable has to be on the collider's walk-up path, NOT as a sibling). The helper `_add_interactable_layer_recursive` then ORs the Interactable bit (`1 << 2`, layer 3) onto every `CollisionObject3D` in the door subtree so the raycaster (`collision_mask = 1 << 2`) can hit it. Existing layer 1 (Environment) is preserved so doors still block player movement. Decorative non-teleport doors (no DODT) stay silent — no adapter, no signal, no extra cost.
+
+**Door signal → travel routing (`world_explorer._on_door_interactable_activated`):** the adapter's `door_activated(record_id, door_record, player)` signal carries the authoritative `record_id`. The handler calls `InteriorPocketManager.get_door_info_by_ref_id(ref_id)` (new helper) which scans `_exterior_doors` first (hot path) then `_active_pocket.doors_inside`, returning the pocket manager's canonical `DoorInfo`. That `DoorInfo` is then passed to the new shared `_activate_door(door)` helper, which branches on `_pocket_manager.is_inside()` to pick `enter_interior` / `exit_to_exterior` / `transition_interior_to_interior`. Fade-to-black / streaming pause / seamless transition all unchanged.
+
+**KEY_E fallback:** the hotkey path in `world_explorer._unhandled_input` is now gated on `_camera_mode == FLY_CAMERA`. In fly mode, pressing E still runs the proximity-based `_activate_nearest_door()`. In player mode, the unified `interact` action (also bound to E) drives the raycast path via `PlayerController._emit_interact_tap` → `DoorInteractable.interact()` → signal handler. The gate prevents double-activation.
+
+### 17.0b I.6 Phase 2 — re-home + bound policy + walk-back (2026-04-09)
+
+Shipped the full Phase 2 contract from §10. The streaming manager now:
+
+1. **Re-homes orphans on cell reload.** `_rehome_persistent_nodes_for_cell(cell_node, grid)` is called from both the sync (`_load_cell_sync`) and async (`_process_async_completions`) cell-load paths, immediately after `_loaded_cells[grid] = cell_node`. It walks `_persistent_nodes`, filters to entries whose `original_grid == grid` and whose current parent is `_orphan_container` (NOT held items still under the player camera), and reparents them back into the reloaded cell with `keep_global_transform = true`.
+
+2. **Bound policy (5 min OR 8 cells).** Persistent-node entries now carry `{original_grid, created_ms, last_known_player_grid}` via a `PersistentNodeEntry` inner class instead of a bare `Vector2i`. Every second (`ORPHAN_PRUNE_INTERVAL_S = 1.0`), `_prune_expired_orphans()` walks the registry and expires any orphan whose `age_ms > ORPHAN_EXPIRY_MS` (5 min) or whose `chebyshev(original_grid, _camera_cell) > ORPHAN_EXPIRY_CELL_DISTANCE` (8 cells). Expired orphans get `queue_free()` deferred and their entries are erased. Held items (parent is the camera Marker3D) are skipped — their `last_known_player_grid` is updated in the same walk so the Chebyshev check stays current after any future re-home.
+
+3. **Walk-back ground snap.** `_apply_walkback_ground_snap(node, cell_node)` runs inside `_rehome_persistent_nodes_for_cell` as a safety net. It raycasts downward from `pos.y + 3m` to `pos.y - 50m` against layer 1 (Environment), excluding the node itself, and snaps to `hit_pos.y + 0.05` IF the current position is more than 0.25m off the ground or below it. If the position is stable (resting item already on the cell geometry), it's left alone — we only correct genuinely invalid placements caused by terrain regeneration or deformation between unload and reload.
+
+**Constraint enforcement:** the streaming manager still doesn't import the carry controller. Coupling is still by inversion — `CarryController.set_streaming_manager()` + duck-typed `register_persistent_node` / `unregister_persistent_node` calls. Phase 2 added no new import dependencies; it's purely additive behavior inside the streaming manager.
+
+**Self-tests:** `tests/visual/test_interaction_phase_I6.gd` now covers 7 cases:
+- Test 1: orphan container exists
+- Test 2: register/unregister API + new `PersistentNodeEntry` struct validation
+- Test 3: evacuate persistent node from a fake cell
+- Test 4: stale-entry lazy pruning on free
+- **Test 5 (NEW):** re-home on cell load — register → evacuate → rehome into a fresh cell node → assert reparent + global transform preserved
+- **Test 6 (NEW):** bound policy by Chebyshev distance — register → evacuate → move camera 9 cells away → prune → assert expiry
+- **Test 7 (NEW):** bound policy by age — register → evacuate → rewind `created_ms` by 6 minutes → prune → assert expiry
+
+All 7 pass headless (no real cell stream required — the tests drive `_rehome_persistent_nodes_for_cell` and `_prune_expired_orphans` directly with fake cell Node3Ds). Full gdUnit4 suite (33 test cases) green on 2026-04-09.
+
+### 17.0 Architecture rewrite (2026-04-09) — velocity-drive replaces kinematic direct-write
+
+After three sessions of patching vibration in the kinematic direct-write architecture (see the now-deleted §17.2.1 and the retained §17.5 historical note), the user pasted the canonical HL2 physics-gun pattern and asked why we weren't using it. Answer: we were on the wrong architecture. Ripped out and replaced 2026-04-09.
+
+**What the new CarryController does:**
+- Body stays `freeze = false` during hold (dynamic, Jolt integrates)
+- `gravity_scale = 0` while held (chase target dictates position, no gravity sag)
+- `linear_damp` / `angular_damp` bumped to prevent oscillation
+- Each `_physics_process` tick: `linear_velocity = clamp((target - body) * PULL_STRENGTH, MAX_SPEED)` + shortest-path quaternion angular velocity toward the target basis
+- Release = stop overwriting velocity. Body retains its current chase velocity as the natural throw impulse. Camera-swing release = fast throw, stationary release = soft drop. No threshold, no ring buffer, no cross-product math.
+
+**What the rewrite deleted** (~360 lines net):
+- Manual chain composition (`player_xf_interp * camera_pivot.transform * spring_arm.transform * ...`)
+- Wall pushback raycast + `_hold_capture_local` immutable cache (Jolt collisions handle walls natively now)
+- Camera-basis ring buffer + `CameraSample` class + `_sample_camera_basis` + `_measure_camera_angular_velocity` (throw math is automatic)
+- Throw lever-arm cross product + `is_throw` dispatch + tumble application (physics gives it for free)
+- Exponential lerp rate constants (`HOLD_LERP_RATE`, `HOLD_ROT_LERP_RATE`, `HOLD_PULLBACK_MAX`, `HOLD_PULLBACK_TIMEOUT`)
+- Throw threshold constants (`THROW_THRESHOLD_ANGULAR_RAD_S`, `THROW_THRESHOLD_LINEAR_M_S`, `THROW_IMPULSE_LINEAR`, `THROW_SAMPLE_WINDOW_MS`, `THROW_IMPULSE_ANGULAR_TUMBLE`)
+- Per-node `physics_interpolation_mode = PHYSICS_INTERPOLATION_MODE_OFF` on the held body (the body is INHERIT now, engine smooths it like any other physics body)
+- `reset_physics_interpolation()` calls on grab/release
+- `_pullback_max_time_msec` and force-drop timer
+
+**What the rewrite kept:**
+- Public API (`try_grab`, `release`, `is_carrying`, `get_held_body`, `get_held_pickup`, `get_hold_target_marker`, `set_streaming_manager`, signals) — identical, no consumer changes needed.
+- Weight cap refusal (`MAX_GRAB_MASS_KG = 50`, `grab_refused` signal)
+- Per-grab hold marker capture (camera-local position of body at grab time, clamped to `MIN/MAX_HOLD_DISTANCE`)
+- Mask flip (`LAYER_PLAYER` bit cleared during hold, restored on release per §6.5)
+- Roll lock (target basis = yaw + pitch, roll zeroed per §6.2)
+- Deferred state mutation at grab/release (§6.2 rule — per-tick velocity writes are exempt, they're the canonical safe path)
+- I.6 streaming manager integration (`set_streaming_manager` + `register_persistent_node` / `unregister_persistent_node` duck-typed calls)
+- `_exit_tree` shutdown safety (simpler because body isn't frozen)
+- NaN guard on velocity writes
+
+**Why velocity-drive works when direct-write didn't**: Kinematic direct-transform writes from `_process` fight Godot's physics-interpolation system. The engine interpolates physics body transforms between tick snapshots; when we write `body.global_transform = X` at render rate, Jolt's interpolation state is overwritten mid-frame and the renderer sees a mix of engine-interpolated and directly-written values at different beat frequencies. Velocity-drive sidesteps this: we set the body's velocity in `_physics_process` (the canonical safe path that every physics body uses), Jolt integrates the velocity over the tick, engine interpolation smooths the output between ticks. No fight, no beat frequencies, no vibration.
+
+**Canonical lesson locked in `.claude/CLAUDE.md`** under "Engineering Principle — Simplicity Over Over-Engineering". If a future agent is tempted to add a direct-write path because "the velocity drive lags too much for my use case", escalate first — the answer is almost certainly to tune PULL_STRENGTH + damping, not to bypass Jolt.
+
+**Test scene for the velocity-drive pattern in isolation**: `tests/visual/test_carry_velocity_drive.tscn` — standalone harness with pull-strength tuning (F8), snap mode A/B (F5), auto-wiggle (F7), CSV telemetry (F4). Kept as a reference implementation and tuning sandbox.
+
+---
 
 End-of-session 2026-04-08 snapshot. **I.0 through I.7 shipped.** Vibration residual (§17.2.1) parked. Next deliverables: I.6 Phase 2 (re-home on cell load + bound policy + walk-back), §17.2.3 throw mass weighting (now unparked), main-scene integration of the carry stack into `world_explorer`. Future agents picking up the work should read this section first.
 
@@ -514,41 +562,11 @@ End-of-session 2026-04-08 snapshot. **I.0 through I.7 shipped.** Vibration resid
 
 These are real bugs the user observed in interactive playtest at the end of session 2026-04-07. They are NOT blocking the I.0-I.4 ship state (the framework works) but they degrade the feel and need to be fixed before main-scene integration.
 
-#### 17.2.1 Hold-pose vibration (I.3, parked AGAIN 2026-04-08)
+#### 17.2.1 ~~Hold-pose vibration~~ SOLVED 2026-04-09
 
-See §6.2.1 for the original symptom + first round of attempts. Session 2026-04-08 added a deep diagnostic round; the residual still exists but is significantly smaller than the pre-2026-04-08 state. Parked by user direction with three remaining suspects on the bench.
+The entire vibration saga — three sessions of manual snapshot interpolation, project-wide physics interpolation flips, per-node carve-outs, `get_global_transform_interpolated()` swaps, manual chase compositions, SpringArm spring-length suspects, physics-tick-rate speculation — was a symptom of fighting Godot's physics-interpolation system with kinematic direct-transform writes from `_process`. Session 2026-04-09 replaced the entire architecture with the HL2 physics-gun velocity-drive pattern (see §17.0 above). Result: zero vibration, ~360 lines net deleted, no per-node carve-outs on the held body, no manual composition.
 
-**What was tried this round (in order):**
-
-1. **Manual snapshot interpolation** (Phase 1, the pre-existing patch). Snapshot `marker.global_position` at physics ticks into `_marker_pos_prev/_current`, lerp via `Engine.get_physics_interpolation_fraction()` in `_process`. **Reduced but didn't eliminate.** The lerp endpoints were themselves stepped because the source chain (player capsule → camera_pivot → spring_arm → camera → marker) mixes 60 Hz player position with render-rate mouse rotation. Two endpoint snapshots can't smooth a mixed-rate signal.
-
-2. **Project-wide physics interpolation flip + camera carve-out** ("canonical Godot 4.4+ pattern" — reviewer recommendation). Enabled `physics/common/physics_interpolation = true`, set `camera_pivot.physics_interpolation_mode = PHYSICS_INTERPOLATION_MODE_OFF`, deleted the manual snapshot code path. **Significantly reduced** the vibration to "much better" per user pilot. This is the canonical Glenn Fiedler "Fix Your Timestep!" pattern that every commercial game engine has used for 20 years; the only reason we weren't on it is that Godot 4.4 (April 2025) was the first release to ship 3D physics interpolation as a first-class feature. The pre-existing manual snapshot pattern was correct for pre-4.4 Godot and is now technical debt.
-
-3. **Body MODE_OFF on grab (combination 4, attempted fix for residual)** — set the held body to `PHYSICS_INTERPOLATION_MODE_OFF` in `_do_grab` so the engine wouldn't interpolate over our render-rate writes. **Made it worse** because the body's actual transform writes step at 60 Hz on the position axis (we read `marker.global_position` which is the LIVE composition through an OFF subtree → returns stepped values). Engine smoothing was the only thing masking the underlying step. Reverted.
-
-4. **`get_global_transform_interpolated()` swap** for the marker read (third reviewer recommendation). Replaced `marker.global_position` and `camera.global_rotation` with `marker.get_global_transform_interpolated().origin` and `camera.get_global_transform_interpolated().basis.get_euler()`. **Functionally a no-op** because per the [Godot advanced physics interpolation docs](https://docs.godotengine.org/en/stable/tutorials/physics/interpolation/advanced_physics_interpolation.html), setting `camera_pivot` to `MODE_OFF` recursively cascades to all descendants — the marker is downstream of an OFF subtree, so `get_global_transform_interpolated()` returns the live `global_transform` (no prev/current snapshot pair was ever taken on an OFF node). The swap shipped but was inert.
-
-5. **Combined 4+4 (body MODE_OFF + reset on grab/release + interpolated reads + MSAA 4x)** shipped together as the "Option C manual composition" candidate. Manual composition reads `player.get_global_transform_interpolated()` directly (player is INHERIT, gets engine-side interp) and composes with the live `camera_pivot * spring_arm * camera * marker` chain offset to produce the chase target. This gives smooth player position × live camera rotation in one Transform3D. **Still vibrates a bit.** User parked the issue and moved on.
-
-**Three remaining suspects on the bench (next agent who picks this up):**
-
-1. **Physics tick rate too slow.** Default 60 Hz physics ticks → 16.6 ms between samples → on a 144 Hz monitor that's ~2.4 render frames per physics tick. Even with engine interpolation, the prev→current pair is sampled coarsely. Bumping `physics_ticks_per_second = 120` (or 144) would tighten the sampling. One-line `project.godot` change. Cost: ~2x physics solver work per second. Test with the streaming benchmark to verify FPS impact stays under 5%. Likely the cleanest remaining fix.
-
-2. **SpringArm3D internal collision dynamics.** SpringArm3D internally raycasts every frame (`_notification(NOTIFICATION_INTERNAL_PROCESS)` AND `NOTIFICATION_INTERNAL_PHYSICS_PROCESS` in C++) to shorten its `spring_length` when the camera would clip into geometry. The result lands in `camera.transform` (the camera's local position gets pushed in along negative Z). This adds an additional render-rate noise source that the manual composition picks up automatically — it's not technically jitter, but if the raycast hits/misses oscillate at small distances, the camera local position oscillates too, and so does the chase target. Easy test: temporarily set `spring_arm.spring_length` to a constant via direct write, disable the internal raycast, retest. If chop disappears → SpringArm internals are at fault and the fix is either a custom spring arm or `spring_arm.collision_mask = 0`.
-
-3. **ProcessMode timing relative to render frames.** The chase write happens in `carry_controller.gd::_process` which runs at the default `PROCESS_MODE_INHERIT`. Test scenes may set the world to PROCESS_MODE_PAUSABLE which interacts with the render frame timing in subtle ways. Compare process mode of `carry_controller`, `player_controller`, and the test scene root — they should all be on the same mode. If one is mismatched, the carry write may run on a different cadence than the player movement write, producing per-frame phase slip.
-
-**What was definitively NOT the cause** (already ruled out, don't re-test):
-
-- **C# rebuild needed**: NO. Carry path is 100% GDScript. `git status` shows zero `.cs/.csproj/.sln` modifications. Confirmed by all three reviewers.
-- **Manual snapshot pattern bugs**: deleted in cleanup. The dead snapshot path (`_marker_pos_prev/_current/_snapshot_valid`, `USE_ENGINE_INTERPOLATION` flag) is gone from `carry_controller.gd`. Single-path code now.
-- **Body opting out of interpolation alone**: tried, made it worse.
-- **`get_global_transform_interpolated()` on the marker alone**: tried, no-op due to the recursive OFF cascade.
-- **Aliasing on highlights**: MSAA 4x is now enabled project-wide. If the residual were specular shimmer, it would be gone. The chop persists with MSAA on, so it is geometric.
-
-**Status:** parked by user direction at end-of-session 2026-04-08. The current state is "much better than before but a slight residual chop persists." The canonical pattern (project-wide physics interpolation + carve-outs + manual chase composition) is shipped and is the right architecture going forward; the residual is in one of the three suspects above, not in the architecture itself. Future agent picking this up: try suspect 1 (`physics_ticks_per_second = 120`) FIRST — it's the cheapest test and the most likely cause given that it's the only thing left between "engine-interpolated 60 Hz player" and "render-rate visual frame".
-
-**File + line:** `src/core/interaction/carry_controller.gd::_process` (manual composition lines, currently using `player.get_global_transform_interpolated()` × live rig offset chain).
+Historical chat-trace of what was tried and what the suspects turned out not to matter is preserved in git history (see the commits around 2026-04-07 through 2026-04-09 touching `carry_controller.gd`). The canonical lesson is locked in `.claude/CLAUDE.md` "Engineering Principle — Simplicity Over Over-Engineering" so future agents don't re-derive a bespoke variant of the same wrong answer.
 
 #### 17.2.2 Wall pushback doesn't restore (I.4) — FIXED 2026-04-08
 
@@ -638,20 +656,19 @@ Test scene `tests/visual/test_interaction_phase_I7.tscn` — 4 self-tests PASS (
 - BNAM result-script interpreter — hooks `activator_triggered`, runs MW script bytecode (`PlaySound`, `PlaceItemCell`, `Activate`, etc.)
 - Lock/trap detection on `ContainerInteractable` — read MW lock data, set `locked` + `lock_level` at spawn, integrate with future lockpicking
 
-### 17.5 Architecture note — direct-transform-write vs kinematic reparent
+### 17.5 Architecture history — 3 dead ends, 1 canonical answer
 
-The original spec (§6.2) called for **kinematic reparent**: parent the held body's wrapper to a Marker3D under the camera, lerp the wrapper's local position toward the marker, body inherits via scene-tree transform inheritance. This DID NOT WORK in Godot 4.6:
+The carry architecture went through three iterations before landing on velocity-drive. All three are preserved here for historical context — if you're tempted to re-derive one of them, DON'T, read §17.0 instead.
 
-- `RigidBody3D` is owned by the physics server (Jolt). Its global transform is written by Jolt each tick.
-- Reparenting an RB under a moving Node3D updates the RB's scene-tree parent but does NOT update its physics-server transform. Jolt continues using whatever transform it last computed.
-- The wrapper (Pickup) follows the camera correctly via scene-tree inheritance, but the inner RigidBody3D (and the visual mesh now under the RB after MF4) stays put in world space.
-- Symptom: held items appear to stay where they were grabbed even though the player turns + walks.
+**Iteration 1 (spec §6.2 original) — kinematic reparent**: parent the held body's wrapper to a Marker3D under the camera, lerp the wrapper's local position, body inherits via scene-tree transform inheritance. **Did not work**: `RigidBody3D` is physics-server-owned. Its global transform is written by Jolt each tick. Reparenting the wrapper updates the scene-tree parent but NOT the physics-server transform. The wrapper followed the camera; the inner RB and its mesh stayed put. Symptom: held items appeared stuck at spawn position while the player walked around.
 
-**Fix (id=4041 + id=4042):** stop reparenting. Drive the held body via direct `_held_body.global_transform = ...` writes from `_process` (render rate). The marker is still parked at the camera-local capture point (it rides the camera via standard scene-tree inheritance — this works because the marker is NOT a physics body). Each render frame, read `marker.global_position`, lerp the body toward it, write the body's global_transform.
+**Iteration 2 (id=4041 fix) — kinematic direct-transform-write**: `freeze = true, freeze_mode = KINEMATIC`, drive the body via `_held_body.global_transform = ...` from `_process` at render rate. **Worked BUT vibrated**: render-rate transform writes on a physics body fight Godot's physics-interpolation system in subtle ways (the engine's renderer reads an interpolated position between prev/current snapshots, our writes overwrite the cache mid-frame, and the result is a beat-frequency visual wobble at physics-tick-vs-render-rate LCM). Three sessions of patching followed (manual snapshots, project-wide interp flip, per-node carve-outs, `get_global_transform_interpolated` swaps, MSAA). Each reduced the vibration but none eliminated it. See the now-deleted §17.2.1 for the diagnostic trail (git history).
 
-**Constraint:** transform writes to a physics body from `_process` are normally a bad idea (Jolt may be processing the body), but for FROZEN kinematic bodies it's the canonical Godot pattern — Jolt isn't integrating frozen bodies, so we own the transform completely.
+**Iteration 3 (2026-04-09) — HL2 velocity-drive, the canonical answer**: stop kinematic-writing. Keep the body DYNAMIC (`freeze = false`). Each `_physics_process` tick, set `linear_velocity = (target - body_pos) * PULL_STRENGTH` and `angular_velocity` via shortest-path quaternion chase. Jolt integrates the velocity over the tick; Godot 4.6's engine physics interpolation smooths the rendered position between ticks using the same mechanism CharacterBody3D uses. No carve-outs, no manual composition, no wall pushback hack, no throw ring buffer, no lever-arm cross product. Zero vibration. The released body's chase velocity at the moment of release becomes the throw impulse for free. Details in §17.0.
 
-**Per `INTERACTION_SYSTEM.md` §6.2 deferred-mutation rule:** the rule applies to TRANSITION events (grab / release / despawn) — those go through deferred atomic helpers. Steady-state per-frame transform writes from `_process` are exempt because the body is frozen and Jolt isn't touching it. The rule clarification is the right scoping.
+**Why we went through iterations 1 and 2 before getting to 3**: the `@reviewer` agent initially recommended iteration 2 in response to iteration 1's failure. Iteration 2 *almost* worked, which made each subsequent patch look promising. It took three sessions + the user pasting the HL2 snippet in chat for the agent to recognize the canonical pattern. The process lesson is locked in `.claude/CLAUDE.md` "Engineering Principle — Simplicity Over Over-Engineering" rules 1-6.
+
+**Per `INTERACTION_SYSTEM.md` §6.2 deferred-mutation rule, updated:** the rule applies to RB STATE MUTATIONS at TRANSITION events (grab / release / despawn) — those go through `call_deferred` atomic helpers. Per-tick `linear_velocity` / `angular_velocity` writes from `_physics_process` are EXEMPT because they're the canonical Godot physics-body control path (same as `CharacterBody3D.move_and_slide` and every other Jolt-compatible dynamic body).
 
 ### 17.6 Files of record
 

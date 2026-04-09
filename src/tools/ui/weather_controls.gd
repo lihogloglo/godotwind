@@ -26,8 +26,11 @@ var weather_enabled: bool = false
 ## Whether weather drives ocean parameters (wind, foam, color)
 var ocean_link_enabled: bool = true
 
-## When true, weather system stops overwriting fog/cloud slider values
-var manual_override: bool = false
+## Baseline SunshineClouds2 noise scales captured the first time a cloud
+## parameter slider fires. The "Cloud Size" slider is a coarse multiplier
+## applied on top of these baselines so tweaking it doesn't cumulatively
+## scale the plugin defaults further on every slider move.
+var _noise_scale_baseline: Dictionary = {}  # name → float (captured once)
 
 
 func _init(callbacks: Dictionary) -> void:
@@ -243,13 +246,18 @@ func on_weather_toggled(enabled: bool) -> void:
 	if not enabled and OceanManager.is_system_enabled():
 		OceanManager.reset_weather()
 
+	# Reset volumetric fog albedo to neutral when weather is disabled.
+	# Otherwise the env keeps whichever weather-specific albedo the
+	# renderer last wrote (ashstorm → brown, blight → red, etc.) and the
+	# fog stays tinted even after the weather system stops updating.
+	# Fixes the "fog seems always brown" report from 2026-04-09.
+	if not enabled and _env_controls:
+		var active_env: Environment = _env_controls.get_active_environment()
+		if active_env and active_env.volumetric_fog_enabled:
+			active_env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
+			active_env.volumetric_fog_emission = Color.BLACK
+
 	Log.info("weather", "Weather system %s" % ("enabled" if enabled else "disabled"))
-
-
-## Handle manual override toggle — when ON, weather stops pushing fog/cloud values
-func on_manual_override_toggled(enabled: bool) -> void:
-	manual_override = enabled
-	Log.info("weather", "Manual overrides: %s" % ("ON" if enabled else "OFF"))
 
 
 ## Handle fog density slider change
@@ -257,131 +265,116 @@ func on_fog_density_changed(value: float) -> void:
 	fog_density_multiplier = value
 	if _renderer:
 		_renderer.fog_density_multiplier = value
-	_set_preset_to_custom()
 
 
-## Handle cloud coverage slider change (manual override)
+## Handle cloud coverage slider change — direct binding, no per-frame override.
 func on_cloud_coverage_changed(value: float) -> void:
-	if _sunshine_driver and is_instance_valid(_sunshine_driver):
-		var res: Resource = _sunshine_driver.get("clouds_resource")
-		if res:
-			res.set("clouds_coverage", value)
-	_set_preset_to_custom()
+	_set_cloud_param("clouds_coverage", value)
 
 
-## Weather preset definitions: {weather_type, time, time_scale, paused, auto_weather}
-const PRESETS := {
-	1: {"name": "Morrowind Default", "auto": true, "time": 8.0, "speed": 30.0, "paused": false, "type": -1},
-	2: {"name": "Clear Day", "auto": false, "time": 12.0, "speed": 0.0, "paused": true, "type": WeatherTypes.Type.CLEAR},
-	3: {"name": "Foggy Morning", "auto": false, "time": 7.0, "speed": 0.0, "paused": true, "type": WeatherTypes.Type.FOGGY},
-	4: {"name": "Stormy Night", "auto": false, "time": 22.0, "speed": 0.0, "paused": true, "type": WeatherTypes.Type.THUNDERSTORM},
-	5: {"name": "Ashstorm", "auto": false, "time": 14.0, "speed": 0.0, "paused": true, "type": WeatherTypes.Type.ASHSTORM},
-	6: {"name": "Blizzard", "auto": false, "time": 16.0, "speed": 0.0, "paused": true, "type": WeatherTypes.Type.BLIZZARD},
-	7: {"name": "Golden Hour", "auto": false, "time": 18.5, "speed": 0.0, "paused": true, "type": WeatherTypes.Type.CLEAR},
-}
-
-## Whether we're currently applying a preset (prevents re-entrancy)
-var _applying_preset: bool = false
+## Handle cloud density slider change.
+func on_cloud_density_changed(value: float) -> void:
+	_set_cloud_param("clouds_density", value)
 
 
-## Handle weather preset selection
-func on_weather_preset_changed(index: int) -> void:
-	if index == 0 or not PRESETS.has(index):
-		return  # "Custom" selected or invalid
-
-	_applying_preset = true
-	var preset: Dictionary = PRESETS[index]
-
-	# Enable weather if not already
-	if not weather_enabled:
-		on_weather_toggled(true)
-		if _panels and _panels.weather_enabled_toggle:
-			_panels.weather_enabled_toggle.set_pressed_no_signal(true)
-
-	# Set weather type
-	if preset.auto:
-		WeatherManager.auto_weather = true
-		if _panels and _panels.weather_type_btn:
-			_panels.weather_type_btn.select(0)  # "Auto"
-	else:
-		WeatherManager.auto_weather = false
-		WeatherManager.set_weather(preset.type)
-		if _panels and _panels.weather_type_btn:
-			_panels.weather_type_btn.select(preset.type + 1)  # +1 for "Auto" at index 0
-
-	# Set time
-	WeatherManager.set_game_hour(preset.time)
-	if _panels and _panels.time_of_day_slider:
-		_panels.time_of_day_slider.set_value_no_signal(preset.time)
-		_update_time_label()
-
-	# Set speed
-	WeatherManager.set_time_scale(preset.speed)
-	if _panels and _panels.time_scale_slider:
-		_panels.time_scale_slider.set_value_no_signal(preset.speed)
-
-	# Set pause
-	WeatherManager.time_paused = preset.paused
-	if _panels and _panels.time_pause_toggle:
-		_panels.time_pause_toggle.set_pressed_no_signal(preset.paused)
-
-	Log.info("weather", "Preset applied: %s" % preset.name)
-	_applying_preset = false
+## Handle cloud sharpness slider change.
+func on_cloud_sharpness_changed(value: float) -> void:
+	_set_cloud_param("clouds_sharpness", value)
 
 
-## Reset preset dropdown to "Custom" when user manually changes a control
-func _set_preset_to_custom() -> void:
-	if _applying_preset:
+## Handle cloud size slider change. Coarse multiplier applied to the
+## SunshineClouds2 noise-scale parameters relative to their captured
+## baseline — keeps the plugin defaults as the reference point.
+func on_cloud_size_changed(value: float) -> void:
+	var res: Resource = _get_clouds_resource()
+	if res == null:
 		return
-	if _panels and _panels.weather_preset_btn and _panels.weather_preset_btn.selected != 0:
-		_panels.weather_preset_btn.select(0)
+	# Capture baselines the first time any cloud-size adjustment fires.
+	# Without this, each slider move would compound against the previous
+	# scaled value, causing runaway drift.
+	if _noise_scale_baseline.is_empty():
+		_noise_scale_baseline["extra_large"] = float(res.get("extra_large_noise_scale"))
+		_noise_scale_baseline["large"] = float(res.get("large_noise_scale"))
+		_noise_scale_baseline["medium"] = float(res.get("medium_noise_scale"))
+		_noise_scale_baseline["small"] = float(res.get("small_noise_scale"))
+	res.set("extra_large_noise_scale", _noise_scale_baseline["extra_large"] * value)
+	res.set("large_noise_scale", _noise_scale_baseline["large"] * value)
+	res.set("medium_noise_scale", _noise_scale_baseline["medium"] * value)
+	res.set("small_noise_scale", _noise_scale_baseline["small"] * value)
+
+
+## Handle wind strength slider change. Drives both cloud wind-sweep and
+## the ocean wave system (via OceanManager override).
+func on_wind_strength_changed(value: float) -> void:
+	# Clouds: wind_swept_strength ranges 0-5000. Use a gentle curve so mid
+	# slider values produce visible drift without overshooting the default.
+	var cloud_sweep: float = lerpf(0.0, 2500.0, value)
+	_set_cloud_param("wind_swept_strength", cloud_sweep)
+	# Ocean: delegate to OceanManager — it internally maps 0-1 to cascade
+	# wind_speed + storm-fog multiplier. See OceanManager.set_wind_strength.
+	if OceanManager and OceanManager.is_system_enabled() and OceanManager.has_method("set_wind_strength"):
+		OceanManager.set_wind_strength(value)
+
+
+## Write a single SunshineClouds2 resource parameter. Silently no-ops if
+## the plugin isn't loaded or the driver hasn't wired a resource yet.
+func _set_cloud_param(name: String, value: Variant) -> void:
+	var res: Resource = _get_clouds_resource()
+	if res != null:
+		res.set(name, value)
+
+
+## Fetch the live SunshineClouds2 clouds_resource, or null if unavailable.
+func _get_clouds_resource() -> Resource:
+	if _sunshine_driver == null or not is_instance_valid(_sunshine_driver):
+		return null
+	return _sunshine_driver.get("clouds_resource") as Resource
 
 
 ## Handle time-of-day slider change
 func on_time_of_day_changed(value: float) -> void:
 	WeatherManager.set_game_hour(value)
 	_update_time_label()
-	_set_preset_to_custom()
 
 
 ## Handle time scale slider change
 func on_time_scale_changed(value: float) -> void:
 	WeatherManager.set_time_scale(value)
-	_set_preset_to_custom()
 
 
-## Handle weather type override dropdown
+## Handle weather type override dropdown.
+## index 0 = "Auto" (region-based), index 1+ = locked weather type.
 func on_weather_type_changed(index: int) -> void:
 	if index <= 0:
-		# "Auto" selected — re-enable automatic weather
 		WeatherManager.auto_weather = true
 		Log.info("weather", "Weather set to auto")
 	else:
-		# Manual override — index 1 = CLEAR (0), index 2 = CLOUDY (1), etc.
 		WeatherManager.auto_weather = false
 		WeatherManager.set_weather(index - 1)
-	_set_preset_to_custom()
+	# Ensure the weather system is on — a manual pick implies intent to see it.
+	if not weather_enabled:
+		on_weather_toggled(true)
+		if _panels and _panels.weather_enabled_toggle:
+			_panels.weather_enabled_toggle.set_pressed_no_signal(true)
 
 
 ## Handle time pause toggle
 func on_time_pause_toggled(paused: bool) -> void:
 	WeatherManager.time_paused = paused
-	_set_preset_to_custom()
 
 
-## Base cloud coverage when weather system is disabled
-const BASE_CLOUD_COVERAGE: float = 0.4
-
-## Called each frame by world_explorer to drive rendering
+## Called each frame by world_explorer to drive rendering.
+## Cloud parameters are NOT overridden here — the sliders in the panel are
+## the single source of truth for coverage/density/sharpness/size/wind.
+## When a weather TYPE changes (via the dropdown) the renderer still pushes
+## atmospheric fog/density, but the cloud resource keeps its slider values.
 func process(delta: float) -> void:
 	# Always update SkyManager with current game hour (even when weather is off)
 	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:
 		_env_controls.sky_manager.update(WeatherManager.game_hour)
 
-	# Always drive cloud coverage — clouds should be visible regardless of weather toggle
-	_update_cloud_coverage()
-
-	# Sync cloud ambient color from SkyManager's sky state
+	# Sync cloud ambient color from SkyManager's sky state (time-of-day
+	# driven — not weather-type driven, so runs regardless of toggle).
 	_sync_cloud_ambient()
 
 	if not weather_enabled:
@@ -400,26 +393,6 @@ func process(delta: float) -> void:
 		OceanManager.apply_weather(result)
 
 	_update_status_label()
-
-
-## Drive SunshineClouds2 cloud coverage — skipped when manual_override is ON
-func _update_cloud_coverage() -> void:
-	if manual_override:
-		return
-	if _sunshine_driver == null or not is_instance_valid(_sunshine_driver):
-		return
-	var res: Resource = _sunshine_driver.get("clouds_resource")
-	if res == null:
-		return
-
-	var coverage: float
-	if weather_enabled:
-		var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
-		coverage = result.cloud_coverage
-	else:
-		coverage = BASE_CLOUD_COVERAGE
-
-	res.set("clouds_coverage", coverage)
 
 
 ## Sync SunshineClouds2 ambient color from time of day.

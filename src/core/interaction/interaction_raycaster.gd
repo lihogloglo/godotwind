@@ -58,6 +58,16 @@ signal prompt_changed(interactable: Interactable, distance: float)
 ## The camera this raycaster shoots from. If null at ready, uses parent.
 @export var camera: Camera3D
 
+## Optional node whose global_position overrides the ray origin. When set,
+## the ray starts at `ray_origin_node.global_position` but still points in
+## `camera.global_transform.basis.z` direction. Use this in third-person
+## setups to cast from the CHARACTER'S eye while aiming with the camera —
+## matches the canonical third-person interaction pattern (AC / RDR2 /
+## Skyrim / Dark Souls): origin at head, direction from camera yaw+pitch.
+## When null, the ray starts at `camera.global_position` (first-person
+## default, also matches the I3/I4/I7 test scenes).
+@export var ray_origin_node: Node3D
+
 ## Debug: log every prompt change. Off in release.
 @export var debug_log: bool = false
 
@@ -183,7 +193,11 @@ func _update_target() -> void:
 		_current_distance = 0.0
 
 	var space_state := get_world_3d().direct_space_state
-	var from := camera.global_position
+	# Ray origin: character eye in third-person, camera in first-person.
+	# Direction always matches camera forward so yaw+pitch aim naturally.
+	var from: Vector3 = camera.global_position
+	if ray_origin_node != null and is_instance_valid(ray_origin_node):
+		from = ray_origin_node.global_position
 	var to := from + -camera.global_transform.basis.z * max_distance
 
 	var query := PhysicsRayQueryParameters3D.create(from, to)

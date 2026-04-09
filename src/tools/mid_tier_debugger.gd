@@ -886,7 +886,11 @@ func _audit_near_object(node: Node3D, cam_pos: Vector3, cam_cull_mask: int, stat
 				issues.append("%s @ %.0fm: in range but not visible_in_tree" % [obj_name, dist])
 
 
-## Audit MID-tier static renderer (per-instance RS visibility_range)
+## Audit MID-tier static renderer.
+##
+## Post-B-wide refactor: single RS instance per object with an embedded LOD
+## chain. `lod_rids` is no longer populated (field exists as stub); the only
+## thing to spot-check is the single `instance_rid`.
 func _audit_mid_renderer(static_renderer: Variant) -> Dictionary:
 	var stats := {
 		"mesh_types": 0, "total_instances": 0, "visible_instances": 0,
@@ -901,9 +905,9 @@ func _audit_mid_renderer(static_renderer: Variant) -> Dictionary:
 	stats.mesh_types = renderer_stats.get("mesh_types", 0)
 	stats.total_instances = renderer_stats.get("total_instances", 0)
 	stats.visible_instances = renderer_stats.get("visible_instances", 0)
-	stats.lod_rids = renderer_stats.get("lod_instances", 0)
+	stats.lod_rids = 0  # single-RID path; no per-LOD RID fan-out post-refactor
 
-	# Spot-check: sample instances for valid RIDs and LOD setup
+	# Spot-check: sample instances for valid main RIDs
 	var instances: Dictionary = static_renderer.get("_instances")
 	var issues: Array[String] = stats.issues
 	if instances:
@@ -915,21 +919,10 @@ func _audit_mid_renderer(static_renderer: Variant) -> Dictionary:
 			if not data:
 				continue
 
-			# Check main RID
 			if not data.instance_rid.is_valid():
 				stats.invalid_rids += 1
 				if issues.size() < 50:
 					issues.append("Instance %d: invalid main RID" % id)
-
-			# Check LOD RIDs
-			if data.lod_rids.is_empty():
-				stats.no_lod += 1
-			else:
-				for lod_rid: RID in data.lod_rids:
-					if not lod_rid.is_valid():
-						stats.invalid_rids += 1
-						if issues.size() < 50:
-							issues.append("Instance %d: invalid LOD RID" % id)
 			checked += 1
 
 	return stats

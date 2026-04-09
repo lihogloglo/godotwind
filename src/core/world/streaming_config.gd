@@ -33,33 +33,26 @@ const MID_END := DU.MID_END  # 500.0
 const FAR_END := DU.FAR_END  # 5000.0
 
 # =============================================================================
-# LOD LEVELS WITHIN MID TIER
+# SCREEN-SPACE LOD (post-B-wide refactor)
 # =============================================================================
 
-## MID tier is subdivided into 3 LOD levels
-## LOD1: Highest detail in MID tier
-const MID_LOD1_START := NEAR_END
-const MID_LOD1_END := DU.LOD1_END
+## Viewport `mesh_lod_threshold` — pixel-space size delta at which the engine
+## swaps LOD levels. Lower = higher quality, higher = more aggressive LOD.
+## 1.0 px is Godot's "perceptually lossless" default. Tuned per-preset below.
+const DEFAULT_MESH_LOD_THRESHOLD: float = 1.0
 
-## LOD2: Medium detail
-const MID_LOD2_START := DU.LOD1_END
-const MID_LOD2_END := DU.LOD2_END
-
-## LOD3: Lowest detail in MID tier (transitions to impostor)
-const MID_LOD3_START := DU.LOD2_END
-const MID_LOD3_END := DU.LOD3_END
+## Default per-instance LOD bias. >1.0 keeps higher detail further out, <1.0
+## accelerates LOD drops. Per-type overrides can be added in a registry later.
+const DEFAULT_LOD_BIAS: float = 1.0
 
 # =============================================================================
 # CROSSFADE MARGINS
 # =============================================================================
 
-## Per-boundary crossfade margins (tiered: smaller at close range where mismatch is visible)
-## Total crossfade zone = 2x margin value
-const FADE_MARGIN_NEAR := DU.FADE_MARGIN_NEAR_LOD1  # 5.0 — NEAR/LOD1 at 150m
-const FADE_MARGIN_MID := DU.FADE_MARGIN_LOD1_LOD2   # 10.0 — LOD1/LOD2 at 250m
-const FADE_MARGIN_FAR := DU.FADE_MARGIN_LOD3_FAR    # 20.0 — LOD3/FAR at 500m
+## Canonical render→impostor tier handoff crossfade margin (500m boundary).
+const FADE_MARGIN_RENDER_FAR := DU.FADE_MARGIN_RENDER_FAR  # 20.0
 
-## Generic fade margin (legacy default)
+## Generic fade margin (legacy default — FAR-tier impostor renderer uses this)
 const FADE_MARGIN := DU.FADE_MARGIN  # 10.0
 
 # =============================================================================
@@ -182,12 +175,20 @@ enum QualityPreset {
 	ULTRA     ## Maximum quality for high-end hardware
 }
 
-## Quality preset configurations
-## Returns dictionary with distance overrides for the given preset
+## Quality preset configurations.
+##
+## Post-B-wide refactor: presets drive `mesh_lod_threshold` (viewport-level
+## screen-space LOD bias) + cell counts + FAR tier draw distance. Sub-LOD
+## distance overrides are gone — LOD selection is fully automatic.
+##
+## `mesh_lod_threshold` is in pixels — the engine swaps LOD levels when the
+## projected screen-size difference between adjacent LODs exceeds this value.
+## Lower = higher quality, higher = more aggressive LOD drops.
 static func get_quality_preset_config(preset: QualityPreset) -> Dictionary:
 	match preset:
 		QualityPreset.LOW:
 			return {
+				"mesh_lod_threshold": 4.0,
 				"near_end": 100.0,
 				"mid_end": 300.0,
 				"far_end": 2000.0,
@@ -197,6 +198,7 @@ static func get_quality_preset_config(preset: QualityPreset) -> Dictionary:
 			}
 		QualityPreset.MEDIUM:
 			return {
+				"mesh_lod_threshold": 2.0,
 				"near_end": NEAR_END,
 				"mid_end": MID_END,
 				"far_end": FAR_END,
@@ -206,6 +208,7 @@ static func get_quality_preset_config(preset: QualityPreset) -> Dictionary:
 			}
 		QualityPreset.HIGH:
 			return {
+				"mesh_lod_threshold": 1.0,
 				"near_end": 200.0,
 				"mid_end": 750.0,
 				"far_end": 7500.0,
@@ -215,6 +218,7 @@ static func get_quality_preset_config(preset: QualityPreset) -> Dictionary:
 			}
 		QualityPreset.ULTRA:
 			return {
+				"mesh_lod_threshold": 0.5,
 				"near_end": 300.0,
 				"mid_end": 1000.0,
 				"far_end": 10000.0,
@@ -223,7 +227,6 @@ static func get_quality_preset_config(preset: QualityPreset) -> Dictionary:
 				"max_far_cells": 500
 			}
 
-	# Fallback to medium
 	return get_quality_preset_config(QualityPreset.MEDIUM)
 
 # =============================================================================

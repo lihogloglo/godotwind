@@ -27,6 +27,13 @@ const CarryableRegistryScript := preload("res://src/core/interaction/carryable_r
 const CarryableBodyFactoryScript := preload("res://src/core/interaction/carryable_body_factory.gd")
 const PickupInteractableScript := preload("res://src/core/interaction/morrowind/pickup_interactable.gd")
 
+# I.7 — DOOR adapter. Attached to spawned door nodes so the interaction
+# framework can raycast-target them. The `door_activated` signal payload
+# is routed through `door_activated_handler` (set by CellManager, which
+# in turn gets it from world_explorer). Keeping the handler as a Callable
+# avoids importing world/streaming types into the instantiator.
+const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
+
 # Preload crossfade shader for fade-in effect
 const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
 
@@ -52,6 +59,14 @@ var use_static_renderer: bool = true
 var debug_lod: bool = false
 var enable_fade_in: bool = true  # Smooth fade-in for newly instantiated objects
 var fade_in_duration: float = 0.3  # Duration of fade-in animation in seconds (matches StreamingConfig.FADE_DURATION)
+
+# I.7 — Callback invoked when a spawned DoorInteractable emits
+# `door_activated`. Signature mirrors the signal:
+#   (record_id: String, door_record: Variant, player: Node3D) -> void
+# Set by CellManager (which receives it from world_explorer). If null,
+# spawned DoorInteractables still emit the signal but nothing listens;
+# that is the test-scene / headless-load default.
+var door_activated_handler: Callable = Callable()
 
 # NEAR-tier actor filtering — skip NPC/creature creation beyond this distance from camera
 # 150m matches the NEAR tier boundary in distance_utils.gd
@@ -298,6 +313,15 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 		)
 		if rb == null and debug_lod:
 			Log.debug("interaction", "Carryable %s (%s) has no baked collision — staying static" % [record_id, type_name])
+
+	# I.7 — DOOR adapter attachment. Only teleport doors (DODT subrecord
+	# present on the ref) get a DoorInteractable — decorative non-teleport
+	# doors (e.g. a visual-only door stuck to an exterior wall with no
+	# destination) stay silent. The adapter's signal payload carries the
+	# `record_id` so the handler can look up the authoritative DoorInfo
+	# via `InteriorPocketManager.get_door_info_by_ref_id()`.
+	if type_name == "door" and ref.is_teleport:
+		_attach_door_interactable(instance, ref, base_record, record_id)
 
 	stats["objects_instantiated"] += 1
 
@@ -669,6 +693,77 @@ func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int
 		creature_id, leveled.record_id
 	])
 	return null
+
+
+## I.7 — Promote a spawned teleport door into a DoorInteractable.
+## Called from _instantiate_model_object() for `type_name == "door"` refs
+## whose `is_teleport` is true (DODT subrecord present).
+##
+## Approach: set the DoorInteractable script directly on the door root
+## (it extends Node3D, same as the duplicated prototype), then fill in
+## the adapter's @export fields and add collision layer 3 (Interactable)
+## to the door's StaticBody3D so the InteractionRaycaster can hit it.
+##
+## ## Why set_script on the root instead of adding a child
+##
+## `InteractionRaycaster._find_interactable_ancestor()` walks UP from the
+## hit collider looking for the first `Interactable` node. If the adapter
+## were a sibling of the door's StaticBody3D, the walk-up from the
+## collision shape would pass through the door root (which is NOT an
+## Interactable) and exit the door subtree without ever seeing the
+## adapter. Putting the adapter ON the root puts it directly on the
+## walk-up path — same pattern as `CarryableBodyFactory` wraps the body
+## in a `Pickup` parent.
+##
+## Collision-layer OR: we don't remove the existing Environment layer
+## (bit 0) because the door must still block player movement. We just
+## add the Interactable bit (bit 2) so the raycast can find it without
+## disturbing physics.
+func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_record: Variant, record_id: String) -> void:
+	var display_name: String = ""
+	if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
+		display_name = base_record.name
+	elif not record_id.is_empty():
+		display_name = record_id
+
+	var destination_name: String = ref.teleport_cell
+	var has_destination: bool = not destination_name.is_empty()
+
+	# Promote the root Node3D into a DoorInteractable by attaching the
+	# script. The node identity survives the set_script call; any existing
+	# metadata stamped by `_apply_metadata` is preserved. After the call
+	# the instance IS a DoorInteractable and we cast to fill @export fields.
+	door_instance.set_script(DoorInteractableScript)
+	var adapter := door_instance as DoorInteractable
+	if adapter == null:
+		Log.warn("interaction", "Door %s set_script failed — adapter cast null" % record_id)
+		return
+	adapter.record_id = record_id
+	adapter.display_name = display_name
+	adapter.destination_name = destination_name
+	adapter.has_destination = has_destination
+	adapter.door_record = base_record
+
+	# Add the Interactable collision layer (bit 2 → layer 3) to every
+	# CollisionObject3D in the door subtree so the InteractionRaycaster
+	# ray cast (mask = 1 << 2) can hit it. Existing layers are preserved.
+	_add_interactable_layer_recursive(door_instance)
+
+	if door_activated_handler.is_valid():
+		adapter.door_activated.connect(door_activated_handler)
+
+
+## Walk a subtree and OR the Interactable bit (layer 3, bit index 2) onto
+## every CollisionObject3D's collision_layer. Used by the DOOR adapter
+## wiring above so door StaticBody3Ds become raycast-targetable without
+## losing their existing Environment layer.
+func _add_interactable_layer_recursive(node: Node) -> void:
+	const INTERACTABLE_BIT: int = 1 << 2  # layer 3 = Interactable
+	if node is CollisionObject3D:
+		var co := node as CollisionObject3D
+		co.collision_layer |= INTERACTABLE_BIT
+	for child in node.get_children():
+		_add_interactable_layer_recursive(child)
 
 
 ## Auto-play NIF keyframe animations on objects within NEAR tier (0-150m)

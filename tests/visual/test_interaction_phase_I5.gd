@@ -71,7 +71,13 @@ func _ready() -> void:
 
 	# Bring the ocean online before spawning carryables — the factory
 	# checks `OceanManager.is_initialized()` at convert time.
+	# Disable the prebaked shore mask first — it's baked against the
+	# Morrowind world bounds and says "land" at (0,0,0), which would
+	# make the FFT shader `discard` every fragment and hide the ocean
+	# mesh. Falling back to the shader's `hint_default_white` sampler
+	# makes `sample_shore` return 1.0 everywhere so the ocean renders.
 	if OceanManager and not OceanManager.is_initialized():
+		OceanManager.use_prebaked_shore_mask = false
 		OceanManager.force_initialize()
 		OceanManager.set_enabled(true)
 

@@ -7,7 +7,7 @@ What works, what doesn't.
 | System | Notes |
 |--------|-------|
 | World Streaming | Async cell loading, shared 8ms/frame budget across all phases, frustum priority, object pooling, deferred RS cleanup with immediate-hide |
-| 3-Tier LOD | NEAR 0-150m (Node3D), MID 150-500m (RS instances), FAR 500-5km (impostors). Differential impostor updates on cell crossing (~1ms vs 14-158ms before) |
+| 3-Tier LOD | NEAR 0-150m (Node3D+physics), MID 150-500m (single raw RS instance per object with embedded `ImporterMesh.generate_lods()` cascade, engine-driven screen-space LOD selection via `mesh_lod_threshold`+`lod_bias`), FAR 500-5km (octahedral impostors). Canonical B-wide rewrite landed in working tree on `refactor/lod-b-wide` 2026-04-10 — see `docs/DISTANCE_RENDERING.md` + `docs/audit/LOD_REFACTOR_B_WIDE.md`. Phase G visual + perf validation pending user-piloted pass. Differential impostor updates on cell crossing (~1ms vs 14-158ms before). |
 | Interior Transitions | Async pocket load via CellManager.request_cell_async + LoadProfile + priority lane + fade-to-black bridge fallback. NORMAL-path transitions peak ≤ ~6 ms real-renderer (verified 2026-04-06, Seyda Neen, Census and Excise Office 268 refs). First-visit cells may hit ~10 ms due to shader warm-up. BRIDGE path (player rushes load) ~12 ms, bounded. See `src/core/world/interior_pocket_manager.gd` + `src/core/world/cell_manager.gd` LoadProfile class. |
 | Terrain | Terrain3D, multi-region, edge stitching |
 | ESM Parsing | 47 record types, grid-indexed cells, thread-safe |

@@ -19,9 +19,9 @@ const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFParseResult := preload("res://src/core/nif/nif_parse_result.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
-const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
@@ -44,9 +44,6 @@ var _static_renderer: Node = null  # StaticObjectRenderer
 
 # GPU scene database for SSBO-backed world state (Phase 2)
 var _gpu_scene_db: RefCounted = null  # GPUSceneDatabase
-
-# LOD configurator for setting visibility ranges
-var _lod_configurator: LODConfigurator = null
 
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
@@ -108,6 +105,15 @@ func get_object_pool() -> RefCounted:
 func set_mod_registry(registry: ModRegistry) -> void:
 	if _model_loader:
 		_model_loader.set_mod_registry(registry)
+
+
+## I.7 — Install a callback that receives every DoorInteractable's
+## `door_activated` signal. Called by world_explorer after the pocket
+## manager is ready so door taps can drive `enter_interior()`.
+## Headless / test-scene callers can leave it unset — teleport doors
+## still emit their signal but no listener consumes it.
+func set_door_activated_handler(handler: Callable) -> void:
+	_instantiator.door_activated_handler = handler
 
 
 # REMOVED: set_object_streamer()
@@ -500,9 +506,12 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		mmi.material_override = mesh_instance.material_override
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-		# Configure visibility range (NEAR tier: 0-150m)
-		if _lod_configurator:
-			_lod_configurator.configure_near_object(mmi)
+		# Render-tier visibility_range — single band 0-500m → impostor handoff.
+		mmi.visibility_range_begin = 0.0
+		mmi.visibility_range_end = DU.MID_END
+		mmi.visibility_range_begin_margin = 0.0
+		mmi.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
+		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
 		parent_node.add_child(mmi)
 		total_count += count
@@ -512,14 +521,13 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 	return total_count
 
 
-## Find first MeshInstance3D in a node hierarchy
-## Skips LOD nodes (_LOD1, _LOD2, _LOD3) which are for MID tier, not direct rendering
+## Find first MeshInstance3D in a node hierarchy.
+## Post-B-wide refactor: there are no sibling `_LODn` nodes — LODs live inside
+## the ArrayMesh via surface_lod_indices — so the old skip clause is gone.
+## (Narrow-scope Priority-0-allowed edit, LOD_REFACTOR_B_WIDE.md Part 3.3.)
 func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
 	if node is MeshInstance3D:
-		var node_name: String = node.name
-		# Skip LOD meshes - they are used for MID tier MultiMesh batching, not main rendering
-		if not (node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3")):
-			return node as MeshInstance3D
+		return node as MeshInstance3D
 
 	for child in node.get_children():
 		var found := _find_first_mesh_instance(child)
@@ -989,14 +997,9 @@ var _immediate_promotions: Array[Dictionary] = []
 var _aabb_cache: Dictionary = {}  # String -> float
 
 
-## Set the LOD configurator for visibility range configuration
 ## Update camera position for NEAR-tier actor filtering
 func set_camera_position(pos: Vector3) -> void:
 	_instantiator.camera_position = pos
-
-
-func set_lod_configurator(configurator: LODConfigurator) -> void:
-	_lod_configurator = configurator
 
 
 ## Set the GPU scene database for SSBO-backed world state
@@ -1462,10 +1465,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_diag_duplicate_count += 1
 
 		if obj:
-			# Always reconfigure visibility_range BEFORE the object enters the scene tree.
-			# Even prebaked .res files are reconfigured to pick up runtime fixes
-			# (e.g., FADE_SELF for standalone objects instead of baked FADE_DEPENDENCIES).
-			LODConfigurator.configure_for_prebake(obj)
+			# Post-B-wide refactor: visibility_range (0-500m, FADE_SELF) + the
+			# LOD chain are baked into every prototype by nif_converter. The
+			# visibility_prebaked meta is kept for backwards compatibility with
+			# the fallback safety path in native_streaming_manager.
 			obj.set_meta("visibility_prebaked", true)
 
 			# Double-check parent is still valid before queuing (defensive)
@@ -1482,12 +1485,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				})
 				instantiated += 1
 
-				# Immediate promotion: hide RS LOD instances overlapping with Node3D.
-				# If the Node3D has visible LOD children (150-500m), also hide LOD1-3
-				# RS instances to prevent double-rendering (Issue #2).
+				# Immediate promotion: hide the RS instance since the NEAR Node3D
+				# now covers 0-150m. Post-B-wide refactor: single RS instance per
+				# object, no per-LOD RID fan-out, so no LOD-children check needed.
 				if mid_instance_id >= 0:
-					var has_lods := _has_visible_lod_children(obj)
-					_static_renderer.set_instance_promoted(mid_instance_id, true, has_lods)
+					_static_renderer.set_instance_promoted(mid_instance_id, true)
 					_immediate_promotions.append({
 						"id": mid_instance_id,
 						"node": obj,
@@ -2222,17 +2224,6 @@ func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node)
 
 
-## Check if a node tree has visible LOD children (used for double-rendering prevention)
-static func _has_visible_lod_children(node: Node) -> bool:
-	for child in node.get_children():
-		if child is MeshInstance3D and child.visible:
-			if MeshVisibilityUtils.is_lod_node_name(child.name):
-				return true
-		if _has_visible_lod_children(child):
-			return true
-	return false
-
-
 ## Get the maximum AABB dimension for a model, with caching.
 ## First call loads/caches the prototype. Subsequent calls are O(1) dict lookup.
 ## Used for runtime MID-worthy upgrade — objects > threshold get RS instances.
@@ -2311,13 +2302,12 @@ func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D
 	# Set transform directly (already in Godot coords from when MID instance was created)
 	instance.transform = xform
 
-	# Bake visibility_range BEFORE tree entry
-	LODConfigurator.configure_for_prebake(instance)
+	# Post-B-wide refactor: visibility_range + LOD chain are prebaked.
 	instance.set_meta("visibility_prebaked", true)
 	instance.set_meta("promoted_from_mid", true)
 
-	# MID RS instances are hidden on promotion by set_instance_promoted().
-	# The NEAR Node3D covers 0-500m via configure_for_prebake() LOD children.
+	# MID RS instance is hidden on promotion by set_instance_promoted().
+	# The NEAR Node3D replaces it for 0-500m via the embedded LOD chain.
 
 	_stats["objects_instantiated"] += 1
 	_stats["mid_promotions"] = _stats.get("mid_promotions", 0) + 1

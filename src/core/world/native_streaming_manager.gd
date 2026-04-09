@@ -28,7 +28,6 @@ static var instance: NativeStreamingManager = null
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const SC := preload("res://src/core/world/streaming_config.gd")
-const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ModelLoaderScript := preload("res://src/core/world/model_loader.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
@@ -113,9 +112,6 @@ signal startup_complete()
 
 #region Internal State
 
-## LOD configurator helper
-var _lod_configurator: LODConfigurator = LODConfigurator.new()
-
 ## Static object renderer for MID-tier + flora (RenderingServer direct, no Node3D)
 ## Now with per-instance LOD visibility_range (replaces broken MultiMesh batch pool)
 var _static_renderer: StaticObjectRendererScript = null
@@ -148,17 +144,39 @@ var _unload_container: Node3D = null
 
 ## I.6 — orphan registry for nodes that must survive cell unload
 ## (held / carried items, future: dropped items, NPC corpses, etc.).
-## Persistent across cell unloads. Keyed by registered node → original
-## grid coordinates so we can re-home items when their cell reloads.
+## Persistent across cell unloads. Keyed by registered node → entry
+## struct holding origin grid + timestamps so Phase 2 can re-home on
+## cell reload and expire stale orphans per the §13 Q7 bound policy.
 ## Per `docs/INTERACTION_SYSTEM.md` §9 ownership note: this is a child
 ## of NativeStreamingManager, NOT a fourth singleton. Registration API
 ## is `register_persistent_node()` / `unregister_persistent_node()`.
 var _orphan_container: Node3D = null
-# Untyped Dictionary intentional — typed `Dictionary[Node3D, Vector2i]`
-# crashes the iterator if a key has been freed (Godot 4.6 strict typed
-# dict validation). Lazy pruning via `is_instance_valid` requires us to
-# iterate past possibly-freed keys, which only the untyped dict allows.
+# Untyped Dictionary intentional — typed `Dictionary[Node3D, ...]` crashes
+# the iterator if a key has been freed (Godot 4.6 strict typed dict
+# validation). Lazy pruning via `is_instance_valid` requires us to iterate
+# past possibly-freed keys, which only the untyped dict allows.
 var _persistent_nodes: Dictionary = {}
+
+# I.6 Phase 2 — bound policy tuning. Spec §13 Q7: orphans expire after
+# 5 min OR once the player has walked 8 cells away (whichever first).
+# Both limits are applied conservatively — the first to trip wins, so
+# a long session doesn't leak memory and a quick walk-away doesn't
+# trap the item if the player teleports across the map.
+const ORPHAN_EXPIRY_MS: int = 5 * 60 * 1000        # 5 minutes wall time
+const ORPHAN_EXPIRY_CELL_DISTANCE: int = 8          # Chebyshev cells
+# Prune tick rate — we don't need per-frame checks. 1 Hz is plenty
+# because neither expiry condition is latency-sensitive.
+const ORPHAN_PRUNE_INTERVAL_S: float = 1.0
+var _orphan_prune_accum: float = 0.0
+
+## Phase 2 persistent-node entry. Holds the origin grid (re-home key
+## on cell reload), creation timestamp (wall-clock expiry), and last-
+## known player grid at registration (walk-away expiry). Inner class so
+## it's trivially constructable and type-checked.
+class PersistentNodeEntry:
+	var original_grid: Vector2i
+	var created_ms: int
+	var last_known_player_grid: Vector2i
 
 ## Background processor for async NIF parsing
 var _background_processor: BackgroundProcessorScript = null
@@ -343,7 +361,6 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		return ERR_INVALID_PARAMETER
 
 	_cell_manager = cell_manager
-	_cell_manager.set_lod_configurator(_lod_configurator)
 	_cell_manager._static_renderer = _static_renderer
 	_cell_manager.set_gpu_scene_db(_gpu_scene_db)
 	_cell_manager._sync_instantiator_config()
@@ -400,8 +417,6 @@ func set_sun_elevation(elevation_rad: float) -> void:
 ## Set cell manager
 func set_cell_manager(cell_manager: CellManagerScript) -> void:
 	_cell_manager = cell_manager
-	if _cell_manager and _lod_configurator:
-		_cell_manager.set_lod_configurator(_lod_configurator)
 
 #endregion
 
@@ -470,6 +485,14 @@ func _process(delta: float) -> void:
 	# Update distant light manager (camera pos + time-of-day)
 	if _distant_light_manager:
 		_distant_light_manager.update(_camera_position, _sun_elevation_rad)
+
+	# I.6 Phase 2 — orphan expiry tick. Off the frame-budget hot path
+	# because it runs at 1 Hz max, and the walk is bounded by the tiny
+	# size of `_persistent_nodes` (a handful of held items, if that).
+	_orphan_prune_accum += delta
+	if _orphan_prune_accum >= ORPHAN_PRUNE_INTERVAL_S:
+		_orphan_prune_accum = 0.0
+		_prune_expired_orphans()
 
 	# Predictive loading — pre-queue cells in movement direction
 	if not _startup_phase:
@@ -759,6 +782,9 @@ func _load_cell_sync(grid: Vector2i) -> void:
 		_configure_cell_visibility(cell_node)
 		_world_container.add_child(cell_node)
 		_loaded_cells[grid] = cell_node
+
+		# I.6 Phase 2 — re-home any orphans whose origin grid matches.
+		_rehome_persistent_nodes_for_cell(cell_node, grid)
 
 		var object_count := _count_mesh_instances(cell_node)
 		_stats["loaded_cells"] = _loaded_cells.size()
@@ -1083,10 +1109,10 @@ func _process_mid_to_near_promotions() -> void:
 			_disable_collision_shapes(near_obj)
 
 			cell_node.add_child(near_obj)
-			# Check if NEAR Node3D has visible LOD children covering 150-500m.
-			# If yes, hide LOD1-3 RS instances to prevent double-rendering (Issue #2).
-			var near_has_lods := _near_has_visible_lod_children(near_obj)
-			_static_renderer.set_instance_promoted(id, true, near_has_lods)
+			# Post-B-wide refactor: single RS instance per object, no per-LOD
+			# RID fan-out, so no LOD-children check needed — promotion just hides
+			# the single instance since the NEAR Node3D replaces it 0-500m.
+			_static_renderer.set_instance_promoted(id, true)
 			_promoted_objects[id] = near_obj
 			# Maintain spatial index
 			if data.cell_grid not in _promoted_by_cell:
@@ -1143,20 +1169,6 @@ static func _enable_collision_shapes(node: Node) -> void:
 		node.remove_meta("collision_disabled")
 
 
-## Check if a NEAR Node3D has visible LOD children (e.g., _LOD1, _LOD2, _LOD3 meshes)
-## that cover the 150-500m range. Used to decide whether to hide LOD1-3 RS instances
-## on promotion (Issue #2: avoid double-rendering).
-static func _near_has_visible_lod_children(node: Node) -> bool:
-	for child in node.get_children():
-		if child is MeshInstance3D and child.visible:
-			if MeshVisibilityUtils.is_lod_node_name(child.name):
-				return true
-		# Check one level deeper (some NIFs nest meshes under transform nodes)
-		if _near_has_visible_lod_children(child):
-			return true
-	return false
-
-
 ## Batch-free all promoted objects (used after teleport to avoid stale physics bodies)
 func _demote_all_promoted() -> void:
 	var count := _promoted_objects.size()
@@ -1207,14 +1219,15 @@ func _process_deferred_near_instantiation() -> void:
 		_debug("Deferred NEAR: instantiated %d objects" % results.size())
 
 
-## Configure visibility_range on all MeshInstance3D nodes in a cell
-## Skips if models were prebaked with visibility_range already set
+## Configure visibility_range on mesh nodes for cells loaded from non-prebaked
+## sources (editor scenes, test scenes). Post-B-wide refactor: prebaked NIFs
+## carry `visibility_prebaked` meta AND the embedded LOD chain + 0-500m range
+## is set at bake time, so this path is a no-op safety net for edge cases.
 func _configure_cell_visibility(cell_node: Node3D) -> void:
 	if not use_native_visibility:
 		return
 
 	# Skip if visibility_range was already baked into the prebaked models
-	# Check each child (each child is an instantiated model from prebaked cache)
 	var all_prebaked := true
 	for child in cell_node.get_children():
 		if not child.has_meta("visibility_prebaked"):
@@ -1222,60 +1235,28 @@ func _configure_cell_visibility(cell_node: Node3D) -> void:
 			break
 
 	if all_prebaked and cell_node.get_child_count() > 0:
-		_debug("Skipping visibility config for cell %s — all %d children prebaked" % [cell_node.name, cell_node.get_child_count()])
 		return
 
-	# Collect stats for compact logging
-	var stats := {"near": 0, "lod1": 0, "lod2": 0, "lod3": 0}
-	_configure_node_visibility_recursive(cell_node, stats)
-
-	if debug_enabled:
-		var parts: Array[String] = []
-		if stats["near"] > 0:
-			parts.append("NEAR:%d" % stats["near"])
-		if stats["lod1"] > 0:
-			parts.append("LOD1:%d" % stats["lod1"])
-		if stats["lod2"] > 0:
-			parts.append("LOD2:%d" % stats["lod2"])
-		if stats["lod3"] > 0:
-			parts.append("LOD3:%d" % stats["lod3"])
-		if not parts.is_empty():
-			_debug("Configured visibility: %s (total: %d)" % [", ".join(parts), stats["near"] + stats["lod1"] + stats["lod2"] + stats["lod3"]])
+	# Safety fallback: apply the render-tier visibility_range to any
+	# non-prebaked GeometryInstance3D so FAR-tier culling still fires.
+	var count := 0
+	count = _apply_fallback_visibility_recursive(cell_node, count)
+	if debug_enabled and count > 0:
+		_debug("Fallback visibility applied to %d nodes in cell %s" % [count, cell_node.name])
 
 
-## Recursively configure visibility_range on a node and its children
-func _configure_node_visibility_recursive(node: Node, stats: Dictionary) -> void:
+func _apply_fallback_visibility_recursive(node: Node, count: int) -> int:
 	if node is GeometryInstance3D:
 		var geo := node as GeometryInstance3D
-		var node_name := node.name
-
-		# Determine appropriate visibility based on node name/type
-		if MeshVisibilityUtils.is_lod_node_name(node_name):
-			# LOD nodes get their specific range based on their level
-			var lod_level := _get_lod_level(node_name)
-			_lod_configurator.configure_mid_object(geo, lod_level)
-			stats["lod%d" % lod_level] += 1
-		else:
-			# Default: NEAR tier visibility (0-150m)
-			_lod_configurator.configure_near_object(geo)
-			if node is MeshInstance3D:
-				stats["near"] += 1
-
-	# Recurse to children
+		geo.visibility_range_begin = 0.0
+		geo.visibility_range_end = DU.MID_END
+		geo.visibility_range_begin_margin = 0.0
+		geo.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
+		geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		count += 1
 	for child in node.get_children():
-		_configure_node_visibility_recursive(child, stats)
-
-
-## Get LOD level from node name (1, 2, or 3)
-func _get_lod_level(node_name: String) -> int:
-	var name := node_name.to_lower()
-	if "_lod1" in name:
-		return 1
-	elif "_lod2" in name:
-		return 2
-	elif "_lod3" in name:
-		return 3
-	return 1  # Default to LOD1
+		count = _apply_fallback_visibility_recursive(child, count)
+	return count
 
 
 ## Get human-readable distance range string for LOD level (debug helper)
@@ -1363,6 +1344,12 @@ func _process_async_completions() -> void:
 					_world_container.add_child(cell_node)
 
 				_loaded_cells[grid] = cell_node
+
+				# I.6 Phase 2 — re-home any orphans whose origin grid
+				# matches this one. Must run AFTER the cell_node is
+				# parented under _world_container so reparent(..., true)
+				# resolves the orphan's global transform correctly.
+				_rehome_persistent_nodes_for_cell(cell_node, grid)
 
 				var object_count := _count_mesh_instances(cell_node)
 				_stats["loaded_cells"] = _loaded_cells.size()
@@ -1569,11 +1556,16 @@ func is_cell_loaded(grid: Vector2i) -> bool:
 ## The `original_grid` is the grid coordinate of the cell that contains
 ## the node at registration time. Used as the re-home key when the cell
 ## reloads. Pass `find_grid_for_node(node)` if you don't track it
-## yourself.
+## yourself. Timestamp + last-known-player grid are captured for the
+## Phase 2 bound policy (5 min / 8 cell expiry).
 func register_persistent_node(node: Node3D, original_grid: Vector2i) -> void:
 	if node == null:
 		return
-	_persistent_nodes[node] = original_grid
+	var entry := PersistentNodeEntry.new()
+	entry.original_grid = original_grid
+	entry.created_ms = Time.get_ticks_msec()
+	entry.last_known_player_grid = _camera_cell
+	_persistent_nodes[node] = entry
 
 
 ## Unregister a previously-registered persistent node. Idempotent.
@@ -1631,7 +1623,13 @@ func _evacuate_persistent_nodes_from_cell(cell_node: Node3D, grid: Vector2i) -> 
 				to_evacuate.append(node)
 				# Re-key to the actual current grid (which is the same
 				# as the unload grid; explicit re-record for clarity).
-				_persistent_nodes[node] = grid
+				var entry: PersistentNodeEntry = _persistent_nodes[node]
+				if entry == null:
+					entry = PersistentNodeEntry.new()
+					entry.created_ms = Time.get_ticks_msec()
+				entry.original_grid = grid
+				entry.last_known_player_grid = _camera_cell
+				_persistent_nodes[node] = entry
 				break
 			ancestor = ancestor.get_parent()
 	# Lazy prune dead entries discovered during the walk.
@@ -1642,6 +1640,140 @@ func _evacuate_persistent_nodes_from_cell(cell_node: Node3D, grid: Vector2i) -> 
 		# pos shouldn't jump on unload.
 		node.reparent(_orphan_container, true)
 		_debug("Evacuated persistent node '%s' from cell %s to orphan registry" % [node.name, grid])
+
+
+## I.6 Phase 2 — called from `_load_cell_sync` and the async loader
+## after a cell_node enters `_world_container`. Walks the orphan
+## registry, finds entries whose `original_grid` matches the loading
+## cell, and reparents the node back into the newly loaded cell with
+## global transform preserved. If the re-home position is off the
+## cell's terrain / inside a wall / otherwise invalid, the walk-back
+## fallback raycasts downward against layer 1 (Environment) and drops
+## the body to the first hit — prevents items from vanishing through
+## deformed terrain between unload and reload.
+func _rehome_persistent_nodes_for_cell(cell_node: Node3D, grid: Vector2i) -> void:
+	if _persistent_nodes.is_empty() or cell_node == null:
+		return
+	var keys: Array = _persistent_nodes.keys()
+	var dead_keys: Array = []
+	var rehomed_count := 0
+	for key in keys:
+		if not is_instance_valid(key):
+			dead_keys.append(key)
+			continue
+		var node: Node3D = key as Node3D
+		if node == null:
+			dead_keys.append(key)
+			continue
+		var entry: PersistentNodeEntry = _persistent_nodes[key]
+		if entry == null:
+			dead_keys.append(key)
+			continue
+		if entry.original_grid != grid:
+			continue
+		# Only re-home nodes that were actually evacuated to the orphan
+		# container. A held item's _held_body is still under the player
+		# camera Marker3D — we don't touch those. Evacuated nodes live
+		# directly under `_orphan_container` (reparent is not deep).
+		if node.get_parent() != _orphan_container:
+			continue
+		node.reparent(cell_node, true)
+		_apply_walkback_ground_snap(node, cell_node)
+		rehomed_count += 1
+		_debug("Re-homed persistent node '%s' back into cell %s" % [node.name, grid])
+	for k in dead_keys:
+		_persistent_nodes.erase(k)
+	if rehomed_count > 0 and debug_enabled:
+		_debug("Cell %s reload re-homed %d orphan(s)" % [grid, rehomed_count])
+
+
+## Walk-back ground-snap safety net. After a re-home `reparent` the
+## node's global_position is whatever it was at evacuation. If that
+## point is (a) below the reloaded cell's terrain (terrain tile was
+## deformed or regenerated while the cell was gone) or (b) inside a
+## collider, a short downward raycast from a safe offset above the
+## original position picks the nearest layer 1 (Environment) contact
+## and drops the body there. Cheap, bounded, and avoids the
+## "item falls through the world on cell reload" edge case.
+func _apply_walkback_ground_snap(node: Node3D, _cell_node: Node3D) -> void:
+	const WALKBACK_PROBE_UP: float = 3.0
+	const WALKBACK_PROBE_DOWN: float = 50.0
+	const ENV_LAYER_BIT: int = 1 << 0  # Layer 1 = Environment
+	var space := node.get_world_3d().direct_space_state if node.is_inside_tree() else null
+	if space == null:
+		return
+	var pos := node.global_position
+	var from := Vector3(pos.x, pos.y + WALKBACK_PROBE_UP, pos.z)
+	var to := Vector3(pos.x, pos.y - WALKBACK_PROBE_DOWN, pos.z)
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collision_mask = ENV_LAYER_BIT
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	# Exclude the node itself so a held body doesn't self-hit.
+	if node is CollisionObject3D:
+		query.exclude = [(node as CollisionObject3D).get_rid()]
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return
+	var hit_pos: Vector3 = hit.get("position", pos)
+	# If the current position is within 0.25m of the ground hit, leave
+	# it alone — we don't want to snap a stable resting item. Only
+	# correct genuinely invalid placements.
+	if absf(pos.y - hit_pos.y) < 0.25 and pos.y >= hit_pos.y:
+		return
+	node.global_position = Vector3(pos.x, hit_pos.y + 0.05, pos.z)
+
+
+## I.6 Phase 2 — periodic orphan expiry pass. Walks `_persistent_nodes`
+## filtering to entries whose current parent is `_orphan_container`
+## (i.e. actually orphaned right now, not held). Nodes that exceed the
+## 5-minute wall-clock budget OR whose `original_grid` is more than
+## ORPHAN_EXPIRY_CELL_DISTANCE Chebyshev cells from the current player
+## grid get deferred-queue-freed and their entries erased. Held items
+## (parent is camera Marker3D) are never touched — the player still
+## owns them.
+##
+## Called at ORPHAN_PRUNE_INTERVAL_S from `_process`.
+func _prune_expired_orphans() -> void:
+	if _persistent_nodes.is_empty() or _orphan_container == null:
+		return
+	var keys: Array = _persistent_nodes.keys()
+	var dead_keys: Array = []
+	var now_ms: int = Time.get_ticks_msec()
+	var expired_count := 0
+	for key in keys:
+		if not is_instance_valid(key):
+			dead_keys.append(key)
+			continue
+		var node: Node3D = key as Node3D
+		if node == null:
+			dead_keys.append(key)
+			continue
+		var entry: PersistentNodeEntry = _persistent_nodes[key]
+		if entry == null:
+			dead_keys.append(key)
+			continue
+		# Only expire actually-orphaned nodes. Held items live under
+		# the player camera and must stay alive until released.
+		if node.get_parent() != _orphan_container:
+			# Update the last-known-player grid while we're here so the
+			# Chebyshev check stays current after re-home.
+			entry.last_known_player_grid = _camera_cell
+			continue
+		var age_ms: int = now_ms - entry.created_ms
+		var dx: int = absi(entry.original_grid.x - _camera_cell.x)
+		var dy: int = absi(entry.original_grid.y - _camera_cell.y)
+		var chebyshev: int = maxi(dx, dy)
+		if age_ms > ORPHAN_EXPIRY_MS or chebyshev > ORPHAN_EXPIRY_CELL_DISTANCE:
+			dead_keys.append(key)
+			if is_instance_valid(node) and not node.is_queued_for_deletion():
+				node.queue_free()
+			expired_count += 1
+	for k in dead_keys:
+		_persistent_nodes.erase(k)
+	if expired_count > 0:
+		_debug("Expired %d orphan(s) (age>5min or chebyshev>%d cells)" % [
+			expired_count, ORPHAN_EXPIRY_CELL_DISTANCE])
 
 
 ## Get the impostor renderer (for console commands and diagnostics)

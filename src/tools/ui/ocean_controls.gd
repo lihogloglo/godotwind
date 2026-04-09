@@ -91,6 +91,14 @@ func on_wave_scale_changed(value: float) -> void:
 			OceanManager._ocean_mesh.set_wave_scale(value)
 
 
+## Handle choppiness change. Routes through OceanManager.set_choppiness
+## which writes per-cascade swell + spread (directionality).
+func on_choppiness_changed(value: float) -> void:
+	_panels.update_slider_label(_panels.choppiness_slider, value)
+	if OceanManager and OceanManager.has_method("set_choppiness"):
+		OceanManager.set_choppiness(value)
+
+
 ## Toggle debug shore mask visualization.
 func on_debug_shore_toggled(enabled: bool) -> void:
 	if OceanManager and OceanManager._ocean_mesh:

@@ -175,6 +175,7 @@ class PendingImpostor:
 	var scale: Vector3
 	var texture_size: Vector2
 	var aabb_center_y: float = 0.0
+	var variant_flag: float = 0.0  # See ImpostorData.variant_flag
 
 
 class ImpostorData:
@@ -189,6 +190,13 @@ class ImpostorData:
 	var scale: Vector3
 	var texture_size: Vector2
 	var aabb_center_y: float = 0.0
+	## Bake variant flag, packed into INSTANCE_CUSTOM.w for the shader.
+	## Lets the shader pick between Variant A (legacy 16-frame azimuthal) and
+	## Variant B (octahedral nearest-neighbor) at sample time.
+	##   0.0 = v4 azimuthal (legacy)
+	##   1.0 = v5 hemi octahedral
+	##   2.0 = v5 sphere octahedral
+	var variant_flag: float = 0.0
 
 #endregion
 
@@ -236,6 +244,13 @@ func _setup_master_multimesh() -> void:
 	_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
 	_master_instance.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
 	_master_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+
+	# Receive shadows YES, cast shadows NO (per audit fix #6 / reviewer addendum D).
+	# Casting shadows from a flat camera-facing quad would produce rectangular
+	# billboard shadows on the terrain at 500m+ — worse than the original "flat
+	# lighting" problem. The shader render_mode no longer has `shadows_disabled`,
+	# so receive is on; this property turns off cast.
+	_master_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	add_child(_master_instance)
 
@@ -325,41 +340,94 @@ func set_shader_debug_mode(enabled: bool) -> void:
 #region Octahedral Billboard Shader (Lit with Normal Maps)
 
 func _get_octahedral_shader_code() -> String:
-	# Lit octahedral impostor shader with normal map support and backward compatibility.
-	# Per-impostor distance culling is done in shader because MultiMesh visibility_range
-	# checks distance from the MultiMeshInstance3D node position, not per-instance.
+	# Lit billboard impostor shader. Two variants live in the same shader,
+	# selected per-instance via INSTANCE_CUSTOM.w (the variant flag):
+	#   0.0 = Variant A — legacy v4 azimuthal 16-frame (4×4 atlas, Y-only)
+	#   1.0 = Variant B — v5 hemi octahedral nearest-neighbor (8×8 atlas)
+	#   2.0 = Variant B — v5 sphere octahedral nearest-neighbor (8×8 atlas)
 	#
 	# INSTANCE_CUSTOM layout:
-	#   .x = texture array layer index (albedo)
-	#   .y = rotation offset (radians)
-	#   .z = normal texture array layer index (-1.0 = no normals, use legacy unlit path)
+	#   .x = albedo texture array layer index
+	#   .y = rotation offset (instance yaw, radians)
+	#   .z = normal texture array layer index (-1 = no normals)
+	#   .w = variant flag (0/1/2 — see above)
+	#
+	# Variant B fixes the audit bugs that wrecked Variant A:
+	# - True octahedral direction sampling (not Y-only) so above/below views
+	#   render the correct silhouette.
+	# - Yaw-rotated decoded normals: the baked normal is in bake-time local
+	#   space (instance was at rotation 0). At runtime we rotate it FORWARD
+	#   by the instance yaw to get the actual world-space normal. The view
+	#   direction used for frame selection is correspondingly rotated
+	#   BACKWARD by yaw to express it in local space.
+	# - Shadow receive enabled (no `shadows_disabled` in render_mode).
+	# - Renormalize after sample.
+	#
+	# Variant B intentionally does NOT do tri-sample blending or parallax —
+	# both were dropped per the simplification pass. They can be added later
+	# if the validation scene shows visible cell popping or missing depth.
+	#
+	# Per-impostor distance culling stays in fragment because MultiMesh
+	# visibility_range checks node position not per-instance position.
 	return """
 shader_type spatial;
-render_mode blend_mix, depth_prepass_alpha, cull_disabled, shadows_disabled;
+render_mode blend_mix, depth_prepass_alpha, cull_disabled;
 
 uniform sampler2DArray texture_atlas : source_color, filter_linear_mipmap;
 uniform sampler2DArray normal_atlas : filter_linear_mipmap;
-uniform int atlas_columns = 4;
-uniform int atlas_rows = 4;
+uniform int atlas_columns = 4;  // Variant A only — 4×4
+uniform int atlas_rows = 4;     // Variant A only — 4×4
 uniform float fade_distance = 500.0;
 uniform float fade_margin = 50.0;
 uniform bool debug_mode = false;
-uniform float parallax_depth : hint_range(0.0, 0.2) = 0.1;
 uniform float impostor_roughness : hint_range(0.0, 1.0) = 0.85;
 uniform float impostor_specular : hint_range(0.0, 1.0) = 0.3;
+
+// Variant B grid size — must match impostor_baker_v3.GRID_SIZE
+const int V5_GRID_SIZE = 8;
 
 varying flat float texture_layer;
 varying flat float normal_layer;
 varying flat float rotation_offset;
+varying flat float variant_flag;
 varying float dist_to_camera;
 
+// === Octahedral encoding (must match GDScript baker) ===
+
+vec2 oct_encode_sphere(vec3 n) {
+	n = normalize(n);
+	float sum = abs(n.x) + abs(n.y) + abs(n.z);
+	vec2 p = n.xz / sum;
+	if (n.y < 0.0) {
+		vec2 old = p;
+		p.x = (1.0 - abs(old.y)) * sign(old.x);
+		p.y = (1.0 - abs(old.x)) * sign(old.y);
+	}
+	return p;
+}
+
+vec2 oct_encode_hemi(vec3 n) {
+	n = normalize(n);
+	// Project to octahedron, then rotate 45° to fill the unit square.
+	float sum = abs(n.x) + abs(n.y) + abs(n.z);
+	vec2 p = n.xz / sum;
+	return vec2(p.x - p.y, p.x + p.y);
+}
+
+// === Yaw rotation around Y axis ===
+
+vec3 rotate_y(vec3 v, float angle) {
+	float c = cos(angle);
+	float s = sin(angle);
+	return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
 void vertex() {
-	// Get texture layer, rotation, and normal layer from instance custom data
 	texture_layer = INSTANCE_CUSTOM.x;
 	rotation_offset = INSTANCE_CUSTOM.y;
 	normal_layer = INSTANCE_CUSTOM.z;
+	variant_flag = INSTANCE_CUSTOM.w;
 
-	// Calculate distance to camera for fading
 	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	vec3 impostor_center = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	dist_to_camera = distance(camera_pos, impostor_center);
@@ -367,16 +435,12 @@ void vertex() {
 	// Y-axis billboard (face camera horizontally, keep vertical axis)
 	vec3 to_camera = camera_pos - impostor_center;
 	vec3 look_dir = normalize(vec3(to_camera.x, 0.0, to_camera.z));
-
-	// Handle edge case when camera is directly above/below
 	if (length(vec2(to_camera.x, to_camera.z)) < 0.001) {
 		look_dir = vec3(0.0, 0.0, 1.0);
 	}
-
 	vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), look_dir));
 	vec3 up = vec3(0.0, 1.0, 0.0);
 
-	// Build billboard matrix preserving scale
 	float scale_x = length(MODEL_MATRIX[0].xyz);
 	float scale_y = length(MODEL_MATRIX[1].xyz);
 
@@ -391,45 +455,56 @@ void vertex() {
 }
 
 void fragment() {
-	// Per-impostor distance culling
+	// Per-impostor distance culling (visibility_range hits node, not instance)
 	if (!debug_mode && dist_to_camera < fade_distance - fade_margin) {
 		discard;
 	}
 
-	// Calculate view angle for frame selection
 	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	vec3 impostor_center = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	vec3 view_dir = normalize(camera_pos - impostor_center);
-
-	float angle = atan(view_dir.x, view_dir.z) - rotation_offset;
-	float normalized_angle = (angle + PI) / (2.0 * PI);
-	int total_frames = atlas_columns * atlas_rows;
-	int frame = int(normalized_angle * float(total_frames)) % total_frames;
-
-	// Calculate UV within the atlas
-	int col = frame % atlas_columns;
-	int row = frame / atlas_columns;
-	vec2 frame_size_uv = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-	vec2 base_uv = UV;
-
-	// Parallax offset from depth (only if we have normal atlas)
+	vec3 view_dir_world = normalize(camera_pos - impostor_center);
 	bool has_normals = normal_layer >= 0.0;
-	if (has_normals && parallax_depth > 0.0) {
-		vec2 pre_parallax_uv = vec2(float(col), float(row)) * frame_size_uv + base_uv * frame_size_uv;
-		vec4 normal_sample = texture(normal_atlas, vec3(pre_parallax_uv, normal_layer));
-		float depth = normal_sample.a;  // 1=near, 0=far
-		// Distance-based parallax falloff: full strength at fade_distance, zero at 5x fade_distance
-		float parallax_fade = clamp(1.0 - (dist_to_camera - fade_distance) / (fade_distance * 4.0), 0.0, 1.0);
-		vec2 parallax_offset = vec2(view_dir.x, -view_dir.y) * parallax_depth * (1.0 - depth) * parallax_fade;
-		base_uv = clamp(base_uv + parallax_offset, vec2(0.001), vec2(0.999));
+
+	vec2 atlas_uv;
+	bool is_v5 = variant_flag > 0.5;
+
+	if (is_v5) {
+		// === Variant B — v5 octahedral nearest-neighbor ===
+		// Express the world-space view direction in instance local space by
+		// rotating BACKWARD by the instance yaw. This is the frame the baker
+		// used (instance at rotation 0), so the octahedral lookup matches.
+		vec3 view_dir_local = rotate_y(view_dir_world, -rotation_offset);
+
+		vec2 oct_uv;
+		if (variant_flag > 1.5) {
+			oct_uv = oct_encode_sphere(view_dir_local);  // sphere
+		} else {
+			oct_uv = oct_encode_hemi(view_dir_local);    // hemi
+		}
+
+		// Map [-1, 1]² → cell coords [0, GRID_SIZE)
+		vec2 cell_coord = (oct_uv * 0.5 + 0.5) * float(V5_GRID_SIZE);
+		ivec2 cell = ivec2(floor(cell_coord));
+		cell = clamp(cell, ivec2(0), ivec2(V5_GRID_SIZE - 1));
+
+		float inv_grid = 1.0 / float(V5_GRID_SIZE);
+		atlas_uv = (vec2(cell) + UV) * inv_grid;
+	} else {
+		// === Variant A — legacy v4 azimuthal 16-frame ===
+		float angle = atan(view_dir_world.x, view_dir_world.z) - rotation_offset;
+		float normalized_angle = (angle + PI) / (2.0 * PI);
+		int total_frames = atlas_columns * atlas_rows;
+		int frame = int(normalized_angle * float(total_frames)) % total_frames;
+
+		int col = frame % atlas_columns;
+		int row = frame / atlas_columns;
+		vec2 frame_size_uv = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
+		atlas_uv = vec2(float(col), float(row)) * frame_size_uv + UV * frame_size_uv;
 	}
 
-	vec2 atlas_uv = vec2(float(col), float(row)) * frame_size_uv + base_uv * frame_size_uv;
-
-	// Sample albedo from texture array
+	// Sample albedo
 	vec4 tex = texture(texture_atlas, vec3(atlas_uv, texture_layer));
 
-	// DEBUG MODE
 	if (debug_mode) {
 		ALBEDO = vec3(1.0, 0.0, 1.0);
 		ALPHA = 1.0;
@@ -443,20 +518,27 @@ void fragment() {
 		ALPHA = tex.a;
 
 		if (has_normals) {
-			// Sample normal atlas (RGB = world-space normal encoded as [0,1])
 			vec4 normal_data = texture(normal_atlas, vec3(atlas_uv, normal_layer));
-			vec3 world_normal = normalize(normal_data.rgb * 2.0 - 1.0);
+			vec3 baked_normal = normalize(normal_data.rgb * 2.0 - 1.0);
 
-			// Convert world-space normal to view-space (Godot's NORMAL is view-space)
-			// The normals are baked in world space by the capture shader, so we just
-			// need VIEW_MATRIX to bring them into the current camera's view space.
+			vec3 world_normal;
+			if (is_v5) {
+				// v5 baked normals are in instance local space (bake camera was
+				// world-aligned with the model at rotation 0). Rotate FORWARD
+				// by instance yaw to get the actual runtime world normal.
+				world_normal = rotate_y(baked_normal, rotation_offset);
+			} else {
+				// v4 baked normals were stored as bake-time world-space; the
+				// renderer's instances were always at rotation 0 in v4 (the
+				// runtime never rotated them) so no yaw correction needed
+				// here. Keeping the original behavior for v4 compat.
+				world_normal = baked_normal;
+			}
+
 			NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
-
 			ROUGHNESS = impostor_roughness;
 			SPECULAR = impostor_specular;
 		}
-		// else: no normals = legacy v3 bake, stays unlit (NORMAL not set = flat plane lit)
-		// For legacy bakes, the albedo already has lighting baked in, so flat lighting is acceptable
 	}
 }
 """
@@ -520,8 +602,11 @@ func _load_texture_sync(hash_key: String, texture_path: String) -> void:
 		_on_texture_loaded(hash_key, _get_fallback_image())
 
 
-## Submit async job to load a normal texture
-func _submit_normal_load_job(hash_key: String, normal_path: String) -> void:
+## Submit async job to load a normal texture.
+## `is_res` selects between async PNG decode (Image.load) and Godot
+## ResourceLoader (.res ImageTexture for v5 bakes). ResourceLoader IS
+## thread-safe in Godot 4.6 for runtime resource files outside res://.
+func _submit_normal_load_job(hash_key: String, normal_path: String, is_res: bool = false) -> void:
 	if _job_system == null:
 		return
 
@@ -530,9 +615,8 @@ func _submit_normal_load_job(hash_key: String, normal_path: String) -> void:
 		return  # Already loading
 
 	var load_callable := func() -> Dictionary:
-		var image := Image.new()
-		var err := image.load(normal_path)
-		if err == OK:
+		var image := _load_normal_image(normal_path, is_res)
+		if image:
 			return {"hash_key": hash_key, "image": image, "success": true, "is_normal": true}
 		else:
 			return {"hash_key": hash_key, "image": null, "success": false, "is_normal": true}
@@ -542,15 +626,30 @@ func _submit_normal_load_job(hash_key: String, normal_path: String) -> void:
 		_pending_job_ids[normal_job_key] = job_id
 
 
-## Synchronous normal texture loading fallback
-func _load_normal_sync(hash_key: String, normal_path: String) -> void:
-	var image := Image.new()
-	var err := image.load(normal_path)
-	if err == OK:
+## Synchronous normal texture loading fallback.
+func _load_normal_sync(hash_key: String, normal_path: String, is_res: bool = false) -> void:
+	var image := _load_normal_image(normal_path, is_res)
+	if image:
 		_on_normal_loaded(hash_key, image)
 	else:
 		if debug_enabled:
 			_debug("Failed to load normal texture: %s" % normal_path)
+
+
+## Shared loader: PNG via Image.load, .res via ResourceLoader+get_image.
+## Returns null on any failure.
+func _load_normal_image(normal_path: String, is_res: bool) -> Image:
+	if is_res:
+		var res := ResourceLoader.load(normal_path, "", ResourceLoader.CACHE_MODE_IGNORE)
+		if not res or not (res is Texture2D):
+			return null
+		var tex: Texture2D = res as Texture2D
+		var img := tex.get_image()
+		return img if img else null
+	else:
+		var image := Image.new()
+		var err := image.load(normal_path)
+		return image if err == OK else null
 
 
 ## Called when a normal texture finishes loading
@@ -806,23 +905,37 @@ func add_impostor(
 		_stats["skipped_not_candidate"] += 1
 		return -1
 
-	# Check if prebaked texture actually exists on disk (cached to avoid repeated I/O)
-	var texture_path := ImpostorCandidatesScript.get_impostor_texture_path(model_path)
-	if not _cached_file_exists(texture_path):
-		_stats["skipped_no_texture"] += 1
-		return -1
+	# Resolve which bake version to use. v5 (octahedral) takes priority over
+	# v4 (azimuthal) when both are present, so re-baking a single asset
+	# automatically opts it into Variant B at runtime.
+	var v5_albedo_path := ImpostorCandidatesScript.get_impostor_texture_path_v5(model_path)
+	var has_v5 := _cached_file_exists(v5_albedo_path)
 
-	# Also check for normal texture (v4 bakes)
-	var normal_path := ImpostorCandidatesScript.get_impostor_normal_path(model_path)
+	var texture_path: String
+	var normal_path: String
+	var normal_is_res: bool
+	if has_v5:
+		texture_path = v5_albedo_path
+		normal_path = ImpostorCandidatesScript.get_impostor_normal_res_path_v5(model_path)
+		normal_is_res = true
+	else:
+		texture_path = ImpostorCandidatesScript.get_impostor_texture_path(model_path)
+		if not _cached_file_exists(texture_path):
+			_stats["skipped_no_texture"] += 1
+			return -1
+		normal_path = ImpostorCandidatesScript.get_impostor_normal_path(model_path)
+		normal_is_res = false
+
 	var has_normal_texture := _cached_file_exists(normal_path)
 
 	var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
 
-	# Get impostor metadata for size
+	# Get impostor metadata for size + variant flag
 	var metadata := _get_or_load_metadata(model_path)
 	var impostor_size := Vector2(10.0, 10.0)
 	var aabb_center_y: float = 0.0
-	
+	var variant_flag: float = 0.0  # 0 = v4 azimuthal (default)
+
 	if not metadata.is_empty():
 		var bounds: Dictionary = metadata.get("bounds", {})
 		if not bounds.is_empty():
@@ -831,10 +944,20 @@ func add_impostor(
 			var center_arr: Variant = bounds.get("center", [])
 			if center_arr is Array and (center_arr as Array).size() >= 2:
 				aabb_center_y = (center_arr as Array)[1] as float
-	
+
+		# v5 bake variant resolution
+		var bake_version: int = int(metadata.get("version", metadata.get("bake_version", 4)))
+		if bake_version >= 5:
+			var projection: String = str(metadata.get("projection", "hemi"))
+			variant_flag = 2.0 if projection == "sphere" else 1.0
+
 	# If texture already loaded, create impostor immediately
 	if hash_key in _impostor_textures:
-		return _create_impostor(model_path, cell_grid, hash_key, world_position, world_rotation, world_scale, impostor_size, aabb_center_y)
+		var existing_id := _create_impostor(model_path, cell_grid, hash_key, world_position, world_rotation, world_scale, impostor_size, aabb_center_y)
+		if existing_id >= 0 and existing_id in _impostors:
+			(_impostors[existing_id] as ImpostorData).variant_flag = variant_flag
+			_impostors_dirty = true
+		return existing_id
 
 	# Create pending impostor data FIRST (before texture load which may be sync)
 	var pending := PendingImpostor.new()
@@ -845,6 +968,7 @@ func add_impostor(
 	pending.scale = world_scale
 	pending.texture_size = impostor_size
 	pending.aabb_center_y = aabb_center_y
+	pending.variant_flag = variant_flag
 
 	# Queue for async load (or sync if texture missing)
 	var need_texture_load := false
@@ -856,28 +980,26 @@ func add_impostor(
 	(_pending_impostors[hash_key] as Array).append(pending)
 
 	# Now start texture load if needed
-	# Note: We already verified texture_path exists at the start of this function
 	if need_texture_load:
 		if debug_enabled:
 			var normalized := ImpostorCandidatesScript.normalize_model_path(model_path)
-			_debug("=== Impostor Texture Loading ===")
+			_debug("=== Impostor Texture Loading (v%s) ===" % ("5" if has_v5 else "4"))
 			_debug("  Model path (input): %s" % model_path)
 			_debug("  Normalized path: %s" % normalized)
 			_debug("  Hash key: %s" % hash_key)
 			_debug("  Texture path: %s" % texture_path)
-			_debug("  Normal path: %s (exists: %s)" % [normal_path, has_normal_texture])
+			_debug("  Normal path: %s (exists: %s, .res: %s)" % [normal_path, has_normal_texture, normal_is_res])
 
 		# Try async loading first
 		if _job_system != null:
 			_submit_texture_load_job(hash_key, texture_path)
-			# Also load normal texture if it exists (v4 bakes)
 			if has_normal_texture:
-				_submit_normal_load_job(hash_key, normal_path)
+				_submit_normal_load_job(hash_key, normal_path, normal_is_res)
 		else:
 			# Fallback to synchronous loading if job system failed
 			_load_texture_sync(hash_key, texture_path)
 			if has_normal_texture:
-				_load_normal_sync(hash_key, normal_path)
+				_load_normal_sync(hash_key, normal_path, normal_is_res)
 
 	return -1
 
@@ -1372,9 +1494,12 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 			pending.texture_size,
 			pending.aabb_center_y
 		)
-		# Set normal index if available
-		if imp_id >= 0 and normal_idx >= 0 and imp_id in _impostors:
-			_impostors[imp_id].normal_texture_index = normal_idx
+		if imp_id >= 0 and imp_id in _impostors:
+			# Set normal index if available
+			if normal_idx >= 0:
+				_impostors[imp_id].normal_texture_index = normal_idx
+			# Propagate the bake variant flag from pending → live impostor
+			(_impostors[imp_id] as ImpostorData).variant_flag = pending.variant_flag
 	_pending_impostors.erase(hash_key)
 	if debug_enabled:
 		_debug("Texture loaded, created %d impostors for hash %s" % [created_count, hash_key])
@@ -1624,11 +1749,15 @@ func _rebuild_multimesh() -> void:
 		buffer[offset +  9] = 0.0
 		buffer[offset + 10] = 1.0
 		buffer[offset + 11] = billboard_pos.z
-		# Custom data: texture_index, rotation_y, normal_index, 1.0
+		# Custom data: texture_index, rotation_y, normal_index, variant_flag
+		# .w (variant_flag) selects shader path:
+		#   0.0 = Variant A — legacy v4 azimuthal 16-frame
+		#   1.0 = Variant B — v5 hemi octahedral
+		#   2.0 = Variant B — v5 sphere octahedral
 		buffer[offset + 12] = float(impostor.texture_index)
 		buffer[offset + 13] = impostor.rotation.y
 		buffer[offset + 14] = float(impostor.normal_texture_index)
-		buffer[offset + 15] = 1.0
+		buffer[offset + 15] = impostor.variant_flag
 
 		offset += stride
 
@@ -1642,28 +1771,32 @@ func _rebuild_multimesh() -> void:
 
 func _get_or_load_metadata(model_path: String) -> Dictionary:
 	var hash_key := ImpostorCandidatesScript.get_hash_key(model_path)
-	
+
 	if hash_key in _impostor_metadata:
 		return _impostor_metadata[hash_key]
-	
-	var metadata_path := ImpostorCandidatesScript.get_impostor_metadata_path(model_path)
+
+	# Prefer v5 metadata if present (octahedral bakes), otherwise fall back to
+	# v4 (legacy azimuthal bakes). Same hash key for both — only the filename
+	# suffix differs.
+	var v5_path := ImpostorCandidatesScript.get_impostor_metadata_path_v5(model_path)
+	var metadata_path := v5_path if FileAccess.file_exists(v5_path) else ImpostorCandidatesScript.get_impostor_metadata_path(model_path)
 	if not FileAccess.file_exists(metadata_path):
 		return {}
-	
+
 	var file := FileAccess.open(metadata_path, FileAccess.READ)
 	if not file:
 		return {}
-	
+
 	var json_str := file.get_as_text()
 	file.close()
-	
+
 	var json := JSON.new()
 	if json.parse(json_str) != OK:
 		return {}
-	
+
 	var metadata: Dictionary = json.data
 	_impostor_metadata[hash_key] = metadata
-	
+
 	return metadata
 
 #endregion

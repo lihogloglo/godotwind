@@ -1,0 +1,35 @@
+=== LOD BASELINE TEST ===
+Timestamp: 2026-04-09T11:20:09
+Cache file: f_flora_bc_mushroom_01_nif.res
+Output label: baseline_mushroom_bc_01
+Branch: refactor/lod-b-wide (Phase A baseline)
+
+Loading: C:\Users\metzo/Documents/Godotwind/cache/models/f_flora_bc_mushroom_01_nif.res
+Format detection: MINIMAL (LOD0 only, no sibling nodes, no embedded chain — small mesh skipped LOD gen)
+
+Per-LOD summary (aggregated across all MeshInstance3D nodes with the matching suffix):
+  lod0: 150 tris across 3 nodes, AABB (0.6×0.8×0.6), vol 0, vis_range 0-150, mat <inline>
+    nodes: MergedMesh_0, MergedMesh_1, MergedMesh_2
+
+Hypothesis tests:
+  H1 [LOD0 > 100 tris]: PASS (150)
+  H2 [lod1 tri ratio]: SKIP (no lod1)
+  H3 [lod2 tri ratio]: SKIP (no lod2)
+  H4 [lod3 tri ratio]: SKIP (no lod3)
+  H5 lod1 [AABB vol]: SKIP (no lod1)
+  H5 lod2 [AABB vol]: SKIP (no lod2)
+  H5 lod3 [AABB vol]: SKIP (no lod3)
+  H6 lod1 [AABB dims]: SKIP (no lod1)
+  H6 lod2 [AABB dims]: SKIP (no lod2)
+  H6 lod3 [AABB dims]: SKIP (no lod3)
+  H7 lod1: SKIP (no lod1)
+  H7 lod2: SKIP (no lod2)
+  H7 lod3: SKIP (no lod3)
+  H8 lod1: SKIP (no lod1)
+  H8 lod2: SKIP (no lod2)
+  H8 lod3: SKIP (no lod3)
+
+Diagnosis:
+  All LODs have the expected sub-mesh count and distinct triangle budgets.
+  If you still see missing faces visually, the bug is subtle — likely in TRIANGLE
+  selection by the simplifier (panels collapsed but AABB preserved).

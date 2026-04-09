@@ -26,7 +26,7 @@ const NativeStreamingManagerScript := preload("res://src/core/world/native_strea
 
 
 func _ready() -> void:
-	_run_self_tests()
+	await _run_self_tests()
 	_build_ui()
 
 
@@ -39,7 +39,10 @@ func _run_self_tests() -> void:
 	_test_register_unregister_api()
 	_test_evacuate_persistent_node()
 	_test_auto_cleanup_on_free()
-	Log.info("interaction", "[self-test] I.6 streaming plumbing — PASS")
+	await _test_rehome_on_cell_load()
+	await _test_orphan_expiry_by_distance()
+	await _test_orphan_expiry_by_age()
+	Log.info("interaction", "[self-test] I.6 streaming plumbing + Phase 2 — PASS")
 
 
 # Test 1 — orphan container is created in _ready
@@ -72,8 +75,13 @@ func _test_register_unregister_api() -> void:
 	sm.register_persistent_node(fake_body, Vector2i(3, -7))
 	assert(sm._persistent_nodes.size() == 1,
 		"persistent_nodes should have 1 entry after register, got %d" % sm._persistent_nodes.size())
-	assert(sm._persistent_nodes[fake_body] == Vector2i(3, -7),
+	# Phase 2 — value is now a PersistentNodeEntry struct with
+	# original_grid + timestamps rather than a raw Vector2i.
+	var entry = sm._persistent_nodes[fake_body]
+	assert(entry != null, "entry null after register")
+	assert(entry.original_grid == Vector2i(3, -7),
 		"grid mismatch on register")
+	assert(entry.created_ms > 0, "created_ms not set on register")
 
 	# Unregister
 	sm.unregister_persistent_node(fake_body)
@@ -166,6 +174,126 @@ func _test_auto_cleanup_on_free() -> void:
 	# walk, only skipped. Lazy pruning is intentional.)
 	fake_cell.queue_free()
 
+	sm.queue_free()
+	await get_tree().process_frame
+
+
+# ----------------------------------------------------------------------------
+# Phase 2 tests (2026-04-09)
+# ----------------------------------------------------------------------------
+
+# Test 5 — re-home on cell load. Sequence: register body in cell A,
+# evacuate (cell A unloads), then call _rehome_persistent_nodes_for_cell
+# with a fresh fake cell A' at the same grid coord. Body should end up
+# parented under the new cell node with global transform preserved.
+func _test_rehome_on_cell_load() -> void:
+	var sm := NativeStreamingManagerScript.new()
+	add_child(sm)
+
+	var cell_a := Node3D.new()
+	cell_a.name = "CellA"
+	cell_a.position = Vector3(351, 0, -819)
+	add_child(cell_a)
+
+	var body := Node3D.new()
+	body.name = "PersistentBody"
+	cell_a.add_child(body)
+	body.global_position = Vector3(355, 5, -820)
+	var captured_world_pos: Vector3 = body.global_position
+
+	sm.register_persistent_node(body, Vector2i(3, -7))
+	sm._evacuate_persistent_nodes_from_cell(cell_a, Vector2i(3, -7))
+	var orphan := sm.get_node("OrphanedCarriedItems")
+	assert(body.get_parent() == orphan, "body not evacuated to orphan container")
+
+	# Simulate cell A reloading with a fresh node at the same grid.
+	var cell_a_reloaded := Node3D.new()
+	cell_a_reloaded.name = "CellA_reloaded"
+	cell_a_reloaded.position = Vector3(351, 0, -819)
+	add_child(cell_a_reloaded)
+
+	sm._rehome_persistent_nodes_for_cell(cell_a_reloaded, Vector2i(3, -7))
+
+	assert(body.get_parent() == cell_a_reloaded,
+		"body not re-homed into reloaded cell, parent=%s" %
+		(body.get_parent().name if body.get_parent() else "null"))
+	# Global transform should be preserved through the reparent (within
+	# a small epsilon for the walk-back ground snap, which is a no-op
+	# here because there's no physics environment for the raycast).
+	assert(body.global_position.distance_to(captured_world_pos) < 0.1,
+		"global position lost through re-home: %s → %s" %
+		[captured_world_pos, body.global_position])
+
+	body.queue_free()
+	cell_a.queue_free()
+	cell_a_reloaded.queue_free()
+	sm.queue_free()
+	await get_tree().process_frame
+
+
+# Test 6 — bound policy by Chebyshev distance. Register body in cell A,
+# evacuate, move the camera 9 cells away, run the prune tick, assert the
+# body is queued for deletion.
+func _test_orphan_expiry_by_distance() -> void:
+	var sm := NativeStreamingManagerScript.new()
+	add_child(sm)
+
+	var cell_a := Node3D.new()
+	cell_a.name = "CellA"
+	add_child(cell_a)
+	var body := Node3D.new()
+	body.name = "OrphanBody"
+	cell_a.add_child(body)
+	body.global_position = Vector3(0, 0, 0)
+
+	sm.register_persistent_node(body, Vector2i(0, 0))
+	sm._evacuate_persistent_nodes_from_cell(cell_a, Vector2i(0, 0))
+
+	# Simulate the camera walking 9 cells away (Chebyshev = 9 > 8).
+	sm._camera_cell = Vector2i(9, 0)
+	sm._prune_expired_orphans()
+
+	# The body should now be queued for deletion and its entry erased.
+	assert(not sm._persistent_nodes.has(body),
+		"expired orphan should have been removed from registry")
+	assert(body.is_queued_for_deletion() or not is_instance_valid(body),
+		"expired orphan should be queue_freed")
+
+	cell_a.queue_free()
+	sm.queue_free()
+	await get_tree().process_frame
+
+
+# Test 7 — bound policy by age. Register body, evacuate, rewind the
+# entry's `created_ms` by > 5 minutes, run the prune, assert expiry.
+func _test_orphan_expiry_by_age() -> void:
+	var sm := NativeStreamingManagerScript.new()
+	add_child(sm)
+
+	var cell_a := Node3D.new()
+	cell_a.name = "CellA"
+	add_child(cell_a)
+	var body := Node3D.new()
+	body.name = "AgedOrphan"
+	cell_a.add_child(body)
+
+	sm.register_persistent_node(body, Vector2i(0, 0))
+	sm._evacuate_persistent_nodes_from_cell(cell_a, Vector2i(0, 0))
+
+	# Rewind the entry's creation time by 6 minutes (> ORPHAN_EXPIRY_MS).
+	var entry = sm._persistent_nodes[body]
+	entry.created_ms -= 6 * 60 * 1000
+
+	# Keep the camera on the same cell so only age triggers expiry.
+	sm._camera_cell = Vector2i(0, 0)
+	sm._prune_expired_orphans()
+
+	assert(not sm._persistent_nodes.has(body),
+		"aged orphan should have been removed from registry")
+	assert(body.is_queued_for_deletion() or not is_instance_valid(body),
+		"aged orphan should be queue_freed")
+
+	cell_a.queue_free()
 	sm.queue_free()
 	await get_tree().process_frame
 

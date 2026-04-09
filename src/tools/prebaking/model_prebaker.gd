@@ -17,8 +17,6 @@ extends RefCounted
 
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
-const LODResource := preload("res://src/core/world/lod_resource.gd")
-const LODConfigurator := preload("res://src/core/world/lod_configurator.gd")
 
 ## Output directory (set from SettingsManager)
 var output_dir: String = ""
@@ -112,6 +110,7 @@ func bake_model(model_path: String) -> Dictionary:
 	# Load NIF from BSA
 	var nif_data := _load_nif(model_path)
 	if nif_data.is_empty():
+		Log.warn("prebaking", "FAIL (not in BSA): %s" % model_path)
 		model_baked.emit(model_path, false, 0)
 		return {"success": false, "error": "NIF not found in BSA"}
 
@@ -134,6 +133,7 @@ func bake_model(model_path: String) -> Dictionary:
 
 	var model := converter.convert_buffer(nif_data, model_path)
 	if not model:
+		Log.warn("prebaking", "FAIL (conversion): %s" % model_path)
 		model_baked.emit(model_path, false, 0)
 		return {"success": false, "error": "NIF conversion failed"}
 
@@ -147,6 +147,7 @@ func bake_model(model_path: String) -> Dictionary:
 		model_baked.emit(model_path, true, mesh_count)
 		return {"success": true, "mesh_count": mesh_count}
 	else:
+		Log.warn("prebaking", "FAIL (no meshes): %s" % model_path)
 		model_baked.emit(model_path, false, 0)
 		return {"success": false, "error": "No meshes to save"}
 
@@ -270,18 +271,9 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	# Prepare all resources for embedding (makes them local to scene)
 	_prepare_resources_for_embedding(node)
 
-	# OPTION A: Keep LOD nodes in main scene for native visibility_range
-	# LOD nodes (named _LOD1, _LOD2, _LOD3) remain as siblings to the main mesh.
-	# NativeStreamingManager will configure visibility_range at runtime.
-	# This enables Godot's native FADE_DEPENDENCIES crossfade between LODs.
-	#
-	# Previously we extracted LODs to separate .lod.res files, but they were
-	# never loaded at runtime, breaking the MID tier (150-500m).
-	var lod_count := _count_lod_nodes(node)
-	if lod_count > 0:
-		Log.debug("prebaking", "Keeping %d LOD nodes in %s for native visibility_range" % [lod_count, cache_key])
-
-	# Count meshes for return value
+	# Post-B-wide refactor: LODs are embedded inside the ArrayMesh via
+	# surface_lod_indices. No sibling _LODn nodes. visibility_range is set by
+	# nif_converter._apply_render_tier_visibility_range at bake time.
 	var mesh_count := _count_meshes(node)
 	if mesh_count == 0:
 		return 0
@@ -289,11 +281,10 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	# Set owner on all children so PackedScene.pack() includes them
 	_set_owner_recursive(node, node)
 
-	# Prebake visibility_range on all GeometryInstance3D nodes
-	# This eliminates the runtime _configure_cell_visibility() recursive walk
-	var vis_configured := LODConfigurator.configure_for_prebake(node)
-	if vis_configured > 0:
-		node.set_meta("visibility_prebaked", true)
+	# nif_converter already configured visibility_range (0-500m → impostor handoff).
+	# The old LODConfigurator.configure_for_prebake walk is obsolete — it would
+	# clobber our single-band range with the old per-sub-LOD cascade math.
+	node.set_meta("visibility_prebaked", true)
 
 	# Save scene (meshes, materials, textures all embedded)
 	var scene_path := base_path + ".res"
@@ -320,16 +311,6 @@ func _count_meshes(node: Node) -> int:
 			count += 1
 	for child in node.get_children():
 		count += _count_meshes(child)
-	return count
-
-
-## Count LOD nodes in tree
-func _count_lod_nodes(node: Node) -> int:
-	var count := 0
-	if _is_lod_node(node):
-		count += 1
-	for child in node.get_children():
-		count += _count_lod_nodes(child)
 	return count
 
 
@@ -397,146 +378,6 @@ func _make_texture_local(tex: Texture2D) -> void:
 
 	tex.resource_local_to_scene = true
 	tex.resource_path = ""  # Clear path so it embeds instead of references
-
-
-## Check if a node is a LOD mesh (named _LOD1, _LOD2, _LOD3)
-func _is_lod_node(node: Node) -> bool:
-	var node_name: String = node.name
-	return node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3")
-
-
-## Extract LOD meshes from the scene tree and save them as separate .mesh files
-## Returns number of LOD meshes saved
-## Output files:
-##   - <base_path>_lod1.mesh, <base_path>_lod2.mesh, etc. (individual LOD meshes)
-##   - <base_path>.lod.res (LODResource referencing the mesh files)
-func _extract_and_save_lods(node: Node3D, base_path: String) -> int:
-	var lod_data: Dictionary = {}  # lod_level -> {mesh: ArrayMesh, material: Material}
-
-	_collect_lod_meshes_recursive(node, lod_data)
-
-	if lod_data.is_empty():
-		return 0
-
-	# Save each LOD mesh as a separate .mesh file
-	# Materials and textures are embedded in each mesh file
-	var saved_lod_data: Dictionary = {}  # For LODResource - references saved meshes
-
-	for lod_level: int in lod_data:
-		var entry: Dictionary = lod_data[lod_level]
-		var mesh: ArrayMesh = entry.get("mesh")
-		var material: Material = entry.get("material")
-
-		if not mesh:
-			continue
-
-		# Prepare material for embedding (mark as local, clear external paths)
-		if material:
-			_make_material_local(material)
-			# Embed material in mesh surface so it saves with the mesh
-			if mesh.get_surface_count() > 0:
-				mesh.surface_set_material(0, material)
-
-		# Save mesh to its own file
-		var mesh_path := "%s_lod%d.mesh" % [base_path, lod_level]
-		var save_result := ResourceSaver.save(mesh, mesh_path)
-		if save_result != OK:
-			push_warning("ModelPrebaker: Failed to save LOD mesh: %s (%s)" % [mesh_path, error_string(save_result)])
-			continue
-
-		# Load the saved mesh back so LODResource references the file, not in-memory copy
-		var saved_mesh := ResourceLoader.load(mesh_path, "ArrayMesh") as ArrayMesh
-		if saved_mesh:
-			saved_lod_data[lod_level] = {
-				"mesh": saved_mesh,
-				"material": saved_mesh.surface_get_material(0) if saved_mesh.get_surface_count() > 0 else null
-			}
-
-	if saved_lod_data.is_empty():
-		return 0
-
-	# Save LODResource referencing the saved mesh files
-	var lod_resource := LODResource.new()
-	lod_resource.lod_data = saved_lod_data
-
-	var lod_path := base_path + ".lod.res"
-	var save_result := ResourceSaver.save(lod_resource, lod_path)
-	if save_result != OK:
-		push_warning("ModelPrebaker: Failed to save LOD resource: %s (%s)" % [lod_path, error_string(save_result)])
-		return 0
-
-	return saved_lod_data.size()
-
-
-## Recursively collect LOD meshes from scene tree
-func _collect_lod_meshes_recursive(node: Node, lod_data: Dictionary) -> void:
-	if node is MeshInstance3D:
-		var mesh_inst := node as MeshInstance3D
-		var node_name: String = node.name
-
-		for lod_level in [1, 2, 3]:
-			var suffix := "_LOD%d" % lod_level
-			if node_name.ends_with(suffix) and mesh_inst.mesh is ArrayMesh:
-				# Extract mesh and material
-				var entry: Dictionary = {
-					"mesh": mesh_inst.mesh,
-					"material": mesh_inst.material_override
-				}
-
-				# If no material_override, try surface material
-				if entry["material"] == null and mesh_inst.mesh.get_surface_count() > 0:
-					entry["material"] = mesh_inst.mesh.surface_get_material(0)
-
-				lod_data[lod_level] = entry
-				break
-
-	for child in node.get_children():
-		_collect_lod_meshes_recursive(child, lod_data)
-
-
-## Remove LOD nodes from scene tree after extracting them
-## This keeps the main .res file lean (NEAR tier only)
-## IMPORTANT: Uses free() not queue_free() because we need immediate removal
-## before PackedScene.pack() is called on the same frame
-##
-## FIX: Two-pass approach - collect ALL LOD nodes first (depth-first), then remove
-## This prevents parent removal invalidating child references during iteration
-func _remove_lod_nodes(node: Node) -> void:
-	# Pass 1: Collect ALL LOD nodes at all depths (depth-first order)
-	var all_lod_nodes: Array[Node] = []
-	_collect_lod_nodes_for_removal(node, all_lod_nodes)
-
-	if all_lod_nodes.size() > 0:
-		Log.debug("prebaking", "Removing %d LOD nodes from %s" % [all_lod_nodes.size(), node.name])
-
-	# Pass 2: Remove all collected nodes
-	for lod_node in all_lod_nodes:
-		if is_instance_valid(lod_node):
-			var parent: Node = lod_node.get_parent()
-			if parent:
-				parent.remove_child(lod_node)
-			lod_node.free()
-
-	# Pass 3: Verify no LOD nodes remain
-	_verify_no_lod_nodes_remain(node)
-
-
-## Collect all LOD nodes recursively (depth-first for safe removal order)
-func _collect_lod_nodes_for_removal(node: Node, result: Array[Node]) -> void:
-	for child in node.get_children():
-		# Recurse into children first (depth-first)
-		_collect_lod_nodes_for_removal(child, result)
-		# Then check if this child is a LOD node
-		if _is_lod_node(child):
-			result.append(child)
-
-
-## Verify no LOD nodes remain after removal (diagnostic)
-func _verify_no_lod_nodes_remain(node: Node) -> void:
-	for child in node.get_children():
-		if _is_lod_node(child):
-			push_error("[ModelPrebaker] LOD NODE STILL PRESENT: %s in %s - prebaking incomplete!" % [child.name, node.name])
-		_verify_no_lod_nodes_remain(child)
 
 
 ## Get statistics

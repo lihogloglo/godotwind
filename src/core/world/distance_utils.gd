@@ -29,10 +29,14 @@ const MID_END: float = 500.0
 ## FAR tier: Impostors/billboards (MID_END to FAR_END)
 const FAR_END: float = 5000.0
 
-## Sub-LOD boundaries within MID tier
-const LOD1_END: float = 250.0   # LOD0 -> LOD1 at 150-250m
-const LOD2_END: float = 375.0   # LOD1 -> LOD2 at 250-375m
-const LOD3_END: float = 500.0   # LOD2 -> LOD3 at 375-500m (then -> impostor)
+## LEGACY: sub-LOD boundaries from the pre-B-wide 3-band MID scheme.
+## Post-refactor the engine picks LOD levels from screen-space coverage +
+## `mesh_lod_threshold`, so these no longer gate anything. Kept here ONLY so
+## the few remaining consumers (debug_overlay distance classifier, HUD labels)
+## compile during the transition. Delete after Phase F debug-overlay rewrite.
+const LOD1_END: float = 250.0
+const LOD2_END: float = 375.0
+const LOD3_END: float = 500.0
 
 ## Tier start distances (for convenience)
 const NEAR_START: float = 0.0
@@ -43,11 +47,16 @@ const FAR_START: float = MID_END
 ## Tiered: smaller at close range (geometry mismatch visible), larger at distance
 const FADE_MARGIN: float = 10.0  ## Default / legacy (used by FAR tier impostor renderer)
 
-## Per-boundary fade margins (total crossfade zone = 2x margin)
-const FADE_MARGIN_NEAR_LOD1: float = 5.0   ## NEAR/LOD1 at 150m — near-hard-cut, mismatch very visible
-const FADE_MARGIN_LOD1_LOD2: float = 10.0  ## LOD1/LOD2 at 250m — small crossfade
-const FADE_MARGIN_LOD2_LOD3: float = 15.0  ## LOD2/LOD3 at 375m — moderate crossfade
-const FADE_MARGIN_LOD3_FAR: float = 20.0   ## LOD3/FAR  at 500m — comfortable crossfade
+## Post-B-wide canonical fade margin: single render→impostor tier handoff at 500m.
+const FADE_MARGIN_RENDER_FAR: float = 20.0
+
+## LEGACY per-boundary fade margins from the pre-B-wide 3-band MID scheme.
+## Kept as aliases so the impostor renderer + collision-enable hysteresis still
+## have a margin to reference. Collapse these at the same time as LOD{1,2,3}_END.
+const FADE_MARGIN_NEAR_LOD1: float = 5.0
+const FADE_MARGIN_LOD1_LOD2: float = 10.0
+const FADE_MARGIN_LOD2_LOD3: float = 15.0
+const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 
 #endregion
 

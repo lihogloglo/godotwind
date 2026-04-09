@@ -49,7 +49,8 @@ var resolution_btn: OptionButton = null
 
 ## Ocean panel widgets
 var water_quality_btn: OptionButton = null
-var wave_scale_slider: HSlider = null
+var wave_scale_slider: HSlider = null  # Labelled "Wave Height" in UI
+var choppiness_slider: HSlider = null
 var debug_shore_toggle: CheckBox = null
 var ocean_controls_container: VBoxContainer = null
 
@@ -69,16 +70,20 @@ var color_grading_toggle: CheckBox = null
 
 ## Weather panel widgets
 var weather_enabled_toggle: CheckBox = null
-var weather_preset_btn: OptionButton = null
-var weather_type_btn: OptionButton = null
+var weather_type_btn: OptionButton = null  # Unified weather dropdown (Auto + 11 types)
 var fog_density_slider: HSlider = null
 var cloud_coverage_slider: HSlider = null
+var cloud_density_slider: HSlider = null
+var cloud_sharpness_slider: HSlider = null
+var cloud_size_slider: HSlider = null
+var wind_strength_slider: HSlider = null
 var time_of_day_slider: HSlider = null
 var time_scale_slider: HSlider = null
 var time_pause_toggle: CheckBox = null
 var weather_status_label: Label = null
-var manual_override_toggle: CheckBox = null
-var cirrus_slider: HSlider = null
+var cirrus_slider: HSlider = null  # cirrus_coverage
+var cirrus_size_slider: HSlider = null
+var cirrus_thickness_slider: HSlider = null
 
 ## Debug panel widgets
 var lod_mode_btn: Button = null
@@ -265,9 +270,17 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	show_sky_toggle.tooltip_text = "Toggle sky/day-night cycle toggle in Environment tab"
 	vbox.add_child(show_sky_toggle)
 
-	cirrus_slider = create_slider_row(vbox, "Cirrus:", 0.0, 1.0, 0.4, _cb.get("cirrus_changed", Callable()) if _cb.has("cirrus_changed") else Callable())
+	cirrus_slider = create_slider_row(vbox, "Cirrus:", 0.0, 1.0, 0.55, _cb.get("cirrus_changed", Callable()) if _cb.has("cirrus_changed") else Callable())
 	cirrus_slider.step = 0.05
 	cirrus_slider.tooltip_text = "High-altitude cirrus cloud coverage (0 = clear, 1 = overcast wisps)"
+
+	cirrus_size_slider = create_slider_row(vbox, "Cirrus Size:", 0.3, 2.5, 0.7, _cb.get("cirrus_size_changed", Callable()) if _cb.has("cirrus_size_changed") else Callable())
+	cirrus_size_slider.step = 0.05
+	cirrus_size_slider.tooltip_text = "Cirrus noise scale — LOWER = bigger individual wisps, HIGHER = tighter streaks"
+
+	cirrus_thickness_slider = create_slider_row(vbox, "Cirrus Thick:", 0.0, 1.0, 0.6, _cb.get("cirrus_thickness_changed", Callable()) if _cb.has("cirrus_thickness_changed") else Callable())
+	cirrus_thickness_slider.step = 0.05
+	cirrus_thickness_slider.tooltip_text = "Cirrus layer thickness (higher = denser wisps)"
 
 	time_of_day_slider = create_slider_row(vbox, "Time:", 0.0, 24.0, 8.0, _cb.get("time_of_day_changed", Callable()))
 	time_of_day_slider.step = 0.1
@@ -305,56 +318,23 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	# ── Weather ──
 	_add_section(vbox, "Weather")
 
-	var weather_row := HBoxContainer.new()
-	weather_row.add_theme_constant_override("separation", 8)
-
 	weather_enabled_toggle = CheckBox.new()
 	weather_enabled_toggle.text = "Enable Weather"
 	weather_enabled_toggle.button_pressed = false
 	weather_enabled_toggle.toggled.connect(_cb.get("weather_toggled", Callable()))
-	weather_enabled_toggle.tooltip_text = "Enable dynamic weather system"
-	weather_row.add_child(weather_enabled_toggle)
+	weather_enabled_toggle.tooltip_text = "Enable dynamic weather system (drives fog color + density from weather state)"
+	vbox.add_child(weather_enabled_toggle)
 
-	manual_override_toggle = CheckBox.new()
-	manual_override_toggle.text = "Manual Overrides"
-	manual_override_toggle.button_pressed = false
-	manual_override_toggle.toggled.connect(_cb.get("manual_override_toggled", Callable()) if _cb.has("manual_override_toggled") else Callable())
-	manual_override_toggle.tooltip_text = "When ON, weather stops pushing fog/cloud values — sliders take priority"
-	weather_row.add_child(manual_override_toggle)
-
-	vbox.add_child(weather_row)
-
-	# Preset dropdown
-	var preset_row := HBoxContainer.new()
-	var preset_label := Label.new()
-	preset_label.text = "Preset:"
-	preset_label.add_theme_font_size_override("font_size", 11)
-	preset_label.custom_minimum_size.x = 45
-	preset_row.add_child(preset_label)
-
-	weather_preset_btn = OptionButton.new()
-	weather_preset_btn.add_item("Custom")
-	weather_preset_btn.add_item("Morrowind Default")
-	weather_preset_btn.add_item("Clear Day")
-	weather_preset_btn.add_item("Foggy Morning")
-	weather_preset_btn.add_item("Stormy Night")
-	weather_preset_btn.add_item("Ashstorm")
-	weather_preset_btn.add_item("Blizzard")
-	weather_preset_btn.add_item("Golden Hour")
-	weather_preset_btn.selected = 0
-	weather_preset_btn.item_selected.connect(_cb.get("weather_preset_changed", Callable()))
-	weather_preset_btn.tooltip_text = "Quick presets that set weather type + time + speed"
-	weather_preset_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	preset_row.add_child(weather_preset_btn)
-	vbox.add_child(preset_row)
-
-	# Weather type dropdown
-	var type_row := HBoxContainer.new()
-	var type_label := Label.new()
-	type_label.text = "Type:"
-	type_label.add_theme_font_size_override("font_size", 11)
-	type_label.custom_minimum_size.x = 45
-	type_row.add_child(type_label)
+	# Unified weather dropdown — single source of truth for the active weather.
+	# "Auto" lets the region-based auto-weather system pick; any other entry
+	# locks the weather to that type. Time-of-day / speed / pause live in the
+	# Sky & Time section above — no duplication here.
+	var weather_row := HBoxContainer.new()
+	var weather_label := Label.new()
+	weather_label.text = "Weather:"
+	weather_label.add_theme_font_size_override("font_size", 11)
+	weather_label.custom_minimum_size.x = 60
+	weather_row.add_child(weather_label)
 
 	weather_type_btn = OptionButton.new()
 	weather_type_btn.add_item("Auto", -1)
@@ -362,20 +342,39 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 		weather_type_btn.add_item(WeatherTypes.TYPE_NAMES[i], i)
 	weather_type_btn.selected = 0
 	weather_type_btn.item_selected.connect(_cb.get("weather_type_changed", Callable()))
-	weather_type_btn.tooltip_text = "Weather type override (Auto = region-based)"
+	weather_type_btn.tooltip_text = "Active weather (Auto = region-based, otherwise locks to the selected type)"
 	weather_type_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	type_row.add_child(weather_type_btn)
-	vbox.add_child(type_row)
+	weather_row.add_child(weather_type_btn)
+	vbox.add_child(weather_row)
 
 	# Fog density multiplier
 	fog_density_slider = create_slider_row(vbox, "Fog:", 0.1, 3.0, 1.0, _cb.get("fog_density_changed", Callable()))
 	fog_density_slider.step = 0.1
 	fog_density_slider.tooltip_text = "Fog density multiplier (1.0 = default, higher = thicker)"
 
-	# Cloud coverage
-	cloud_coverage_slider = create_slider_row(vbox, "Clouds:", 0.0, 1.0, 0.4, _cb.get("cloud_coverage_changed", Callable()))
-	cloud_coverage_slider.step = 0.05
-	cloud_coverage_slider.tooltip_text = "Cloud coverage — enable 'Manual Overrides' above for slider to persist (weather overwrites this otherwise)"
+	# --- Volumetric cloud parameters (SunshineClouds2) --------------------
+	# Direct bindings onto the SunshineClouds2 resource. Weather presets
+	# call on_* handlers to push their values here — there is NO per-frame
+	# override, the slider is the single source of truth.
+	cloud_coverage_slider = create_slider_row(vbox, "Clouds:", 0.0, 1.0, 0.45, _cb.get("cloud_coverage_changed", Callable()))
+	cloud_coverage_slider.step = 0.02
+	cloud_coverage_slider.tooltip_text = "SunshineClouds2 clouds_coverage (0 = clear, 1 = overcast)"
+
+	cloud_density_slider = create_slider_row(vbox, "Cloud Density:", 0.0, 20.0, 2.0, _cb.get("cloud_density_changed", Callable()) if _cb.has("cloud_density_changed") else Callable())
+	cloud_density_slider.step = 0.1
+	cloud_density_slider.tooltip_text = "SunshineClouds2 clouds_density — thickness/opacity of each cloud"
+
+	cloud_sharpness_slider = create_slider_row(vbox, "Cloud Sharpness:", 0.0, 2.0, 0.75, _cb.get("cloud_sharpness_changed", Callable()) if _cb.has("cloud_sharpness_changed") else Callable())
+	cloud_sharpness_slider.step = 0.02
+	cloud_sharpness_slider.tooltip_text = "SunshineClouds2 clouds_sharpness — edge definition"
+
+	cloud_size_slider = create_slider_row(vbox, "Cloud Size:", 0.3, 3.0, 1.0, _cb.get("cloud_size_changed", Callable()) if _cb.has("cloud_size_changed") else Callable())
+	cloud_size_slider.step = 0.05
+	cloud_size_slider.tooltip_text = "Coarse multiplier applied to SunshineClouds2 noise scales (larger = bigger clumps)"
+
+	wind_strength_slider = create_slider_row(vbox, "Wind:", 0.0, 1.0, 0.25, _cb.get("wind_strength_changed", Callable()) if _cb.has("wind_strength_changed") else Callable())
+	wind_strength_slider.step = 0.02
+	wind_strength_slider.tooltip_text = "Wind strength — drives cloud wind sweep + ocean wave chaos"
 
 	# Weather status
 	weather_status_label = Label.new()
@@ -420,9 +419,13 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	ocean_controls_container.name = "OceanControls"
 	ocean_controls_container.visible = false
 
-	wave_scale_slider = create_slider_row(ocean_controls_container, "Scale:", 0.0, 3.0, 1.0, _cb.get("wave_scale_changed", Callable()))
-	wave_scale_slider.step = 0.1
-	wave_scale_slider.tooltip_text = "Wave height multiplier"
+	wave_scale_slider = create_slider_row(ocean_controls_container, "Wave Height:", 0.0, 3.0, 1.0, _cb.get("wave_scale_changed", Callable()))
+	wave_scale_slider.step = 0.05
+	wave_scale_slider.tooltip_text = "Wave height multiplier — scales vertical displacement on all cascades"
+
+	choppiness_slider = create_slider_row(ocean_controls_container, "Choppiness:", 0.0, 1.0, 0.3, _cb.get("choppiness_changed", Callable()) if _cb.has("choppiness_changed") else Callable())
+	choppiness_slider.step = 0.02
+	choppiness_slider.tooltip_text = "Wave directionality — 0 = smooth aligned swell, 1 = chaotic omnidirectional chop"
 
 	debug_shore_toggle = CheckBox.new()
 	debug_shore_toggle.text = "Debug Shore Mask"

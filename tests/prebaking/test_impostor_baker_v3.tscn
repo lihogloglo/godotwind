@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://b0imp0st0rbaker3"]
+
+[ext_resource type="Script" path="res://tests/prebaking/test_impostor_baker_v3.gd" id="1_script"]
+
+[node name="TestImpostorBakerV3" type="Node"]
+script = ExtResource("1_script")

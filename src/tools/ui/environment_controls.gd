@@ -141,6 +141,18 @@ func on_cirrus_changed(value: float) -> void:
 	_log("Cirrus coverage: %.2f" % value)
 
 
+func on_cirrus_size_changed(value: float) -> void:
+	if sky_manager:
+		sky_manager.cirrus_size = value
+	_log("Cirrus size: %.2f" % value)
+
+
+func on_cirrus_thickness_changed(value: float) -> void:
+	if sky_manager:
+		sky_manager.cirrus_thickness = value
+	_log("Cirrus thickness: %.2f" % value)
+
+
 # ── Shader Effect Callbacks ──
 
 ## Ensure ShaderManager is attached to the scene.

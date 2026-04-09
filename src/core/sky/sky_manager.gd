@@ -117,15 +117,18 @@ var _current_ambient_energy: float = 1.0
 ## Whether cirrus clouds are visible.
 var cirrus_visible: bool = true
 ## Cirrus coverage (0=clear, 1=full coverage).
-var cirrus_coverage: float = 0.4
+## Default bumped 2026-04-09 from 0.4 → 0.55 for clearer baseline visibility.
+var cirrus_coverage: float = 0.55
 ## Cirrus absorption (Beer's law extinction strength).
 var cirrus_absorption: float = 2.0
 ## Cirrus brightness.
 var cirrus_intensity: float = 8.0
 ## Cirrus alpha thickness.
-var cirrus_thickness: float = 0.4
+## Default bumped 2026-04-09 from 0.4 → 0.6 so the layer reads as proper wisps.
+var cirrus_thickness: float = 0.6
 ## Cirrus noise scale (higher = smaller wisps).
-var cirrus_size: float = 1.0
+## Default dropped 2026-04-09 from 1.0 → 0.7 so individual streaks are larger.
+var cirrus_size: float = 0.7
 ## Cirrus wind scroll speed (UV units per second). Two layers at different speeds.
 var cirrus_wind_speed1: Vector2 = Vector2(0.06, 0.02)
 var cirrus_wind_speed2: Vector2 = Vector2(-0.04, 0.03)

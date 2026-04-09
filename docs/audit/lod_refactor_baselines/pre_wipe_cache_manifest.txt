@@ -1,0 +1,67 @@
+LOD Refactor B-Wide — Pre-Wipe Cache Manifest
+Captured: 2026-04-09 (Phase A baseline)
+Cache path: C:/Users/metzo/Documents/Godotwind/cache/models/
+
+========================================
+SUMMARY
+========================================
+File count:       5172 .res files
+Total size:       3,222,796,481 bytes (3.22 GB)
+Layout:           flat (no subdirectories at top level)
+File extension:   .res exclusively
+
+========================================
+MTIME DISTRIBUTION
+========================================
+All 5172 files:   mtime clustered in 2026-04-08 22:23-22:26 window
+Earliest sample:  2026-04-08 22:23 a_a_bonemold_boot_gnd_nif.res
+Latest sample:    2026-04-08 22:26 w_w_dart_daedric_nif.res
+Histogram:        5172 files on 2026-04-08 (single day)
+
+This mtime uniformity suggests a single full rebake pass. Provenance is
+ambiguous between:
+  (a) Session 0 Layer 1+2 experimental pipeline
+      (weld + SimplifyLockBorder + tighter error + uv_weight=1.0),
+      applied to all 5172 models in a subsequent full rebake
+  (b) Post-Session 0 full rebake on reverted-to-HEAD nif_converter.gd
+      (i.e., the original "missing faces" production pipeline)
+
+mtime alone does not disambiguate. The baseline captures the current
+observable visual + perf state regardless of pipeline provenance — this is
+the only thing that matters for before/after comparison of the B-wide
+refactor.
+
+========================================
+PRIOR COUNT (for reference)
+========================================
+LOD_OVER_ENGINEERING.md (Session 0, 2026-04-08) reported 4884 files:
+  - 4667 original-pipeline
+  - 217 Layer 1+2 experimental-pipeline partial rebake
+Current count (5172) is 288 higher than Session 0. Delta not attributed.
+
+========================================
+ARTIFACTS
+========================================
+pre_wipe_cache_filelist.txt    — sorted filename list (5172 entries)
+pre_wipe_cache_filesizes.txt   — filename + size in bytes (5172 entries)
+
+The filelist + filesizes are the load-bearing rollback + verification
+artifacts. After Phase G full rebake, a post-refactor manifest with the
+same fields can be diffed against this one to confirm:
+  - Coverage: every .res file that existed pre-refactor exists post-refactor
+  - Size shift: per-file size deltas trend in expected direction
+    (smaller meshes with embedded LOD chain should be smaller in total
+    vs separate LOD meshes; larger if engine pipeline preserves more
+    detail, acceptable if offset by fewer RIDs at runtime)
+
+========================================
+ROLLBACK REFERENCE
+========================================
+If refactor needs rollback:
+  git checkout pre-lod-refactor
+  (nuke cache)
+  prebaking_manager full rebake
+  verify file count matches this manifest (5172)
+
+This manifest serves as the pre-refactor ground truth for the rollback
+validation step.

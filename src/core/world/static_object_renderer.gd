@@ -1,32 +1,22 @@
 ## StaticObjectRenderer - RenderingServer-based renderer for static world objects
 ##
 ## Uses RenderingServer directly instead of Node3D for maximum performance.
-## Best for objects that are purely visual with no interaction:
-## - Flora (grass, flowers, kelp)
-## - Small rocks and debris
-## - Distant buildings (MID LOD)
-## - Ground clutter
+## Best for objects that are purely visual with no interaction.
 ##
-## Benefits over Node3D:
-## - No scene tree overhead (~40 bytes per Node vs ~16 bytes per RID)
-## - Faster instantiation (no node creation, parenting, notifications)
-## - Per-instance visibility_range via RS (correct per-object LOD)
-## - Godot auto-batches identical mesh+material RS instances
+## LOD Support (post-B-wide refactor):
+## Each object is **one** RS instance. LODs live inside the ArrayMesh via
+## `surface_lod_indices`, stamped at prebake time by `nif_converter`. Godot's
+## C++ LOD selector picks the right level per frame from screen-space coverage
+## + `lod_bias` — no sibling LOD nodes, no manual distance cascade, no
+## per-LOD RS instances.
 ##
-## Limitations:
-## - No physics - use for visual-only objects
-## - No signals or scripting on instances
-##
-## LOD Support:
-## When registered via register_lod_from_prototype(), each object gets up to 4 RS
-## instances (LOD0/LOD1/LOD2/LOD3) with per-instance visibility_range set via
-## RenderingServer.instance_geometry_set_visibility_range(). Godot handles
-## distance-based LOD switching entirely in C++ — zero GDScript overhead.
+## The instance carries a single hard-cull `visibility_range` at 500m for the
+## render→impostor tier handoff; sub-LOD selection is fully engine-driven.
 ##
 ## Usage:
 ##   var renderer := StaticObjectRenderer.new()
 ##   add_child(renderer)  # Needs to be in tree for scenario
-##   renderer.register_lod_from_prototype("flora_kelp", kelp_prototype)
+##   renderer.register_from_prototype("flora_kelp", kelp_prototype)
 ##   var id := renderer.add_instance("flora_kelp", transform, cell_grid)
 ##   renderer.set_instance_visible(id, false)  # Hide for promotion
 ##   renderer.remove_instance(id)  # When cell unloads
@@ -56,27 +46,15 @@ var _stats: Dictionary = {
 	"mesh_types": 0,
 	"total_instances": 0,
 	"visible_instances": 0,
-	"lod_instances": 0,
 }
 
 
 #region Data Classes
 
-## Per-LOD mesh entry (mesh + material for one LOD level)
-class LodMeshEntry:
-	var mesh: Mesh              ## Strong ref to prevent GC
-	var mesh_rid: RID
-	var material: Material      ## Strong ref to prevent GC (nullable, whole-mesh override)
-	var material_rid: RID
-	## Per-surface materials: surface_index -> Material (strong ref)
-	## Used when there's no material_override but surface materials exist on the mesh
-	## or as MeshInstance3D surface overrides. Applied via RS per-surface override.
-	var surface_materials: Array[Material] = []
-
 ## Mesh type registration data
 class MeshType:
 	var name: String
-	var mesh_rid: RID          ## Primary mesh RID (LOD0/fallback)
+	var mesh_rid: RID          ## Primary mesh RID (carries embedded LOD chain)
 	var material_rid: RID      ## Primary material RID (optional, whole-mesh override)
 	var mesh_resource: Mesh    ## Strong reference — prevents GC when prototype is LRU-evicted
 	var material_resource: Material  ## Strong reference — same reason
@@ -84,36 +62,23 @@ class MeshType:
 	var owns_material: bool    ## Whether we created the material RID
 	var aabb: AABB             ## Bounding box for culling
 	var instance_count: int = 0
-	## Per-surface materials (strong refs) for single-mesh path
-	## Used when there's no material_override but per-surface materials exist
+	## Per-surface materials (strong refs) for meshes without whole-mesh material_override
 	var surface_materials: Array[Material] = []
-	## LOD meshes for MID tier (lod_level -> Array[LodMeshEntry])
-	## Multi-material buildings have multiple meshes per LOD level.
-	## If populated, add_instance() creates per-LOD RS instances with visibility_range.
-	var lod_meshes: Dictionary = {}  ## {int -> Array[LodMeshEntry]}
-	## When duplicate LOD bands are collapsed (e.g., LOD1==LOD2==LOD3), this stores
-	## the highest collapsed level. LOD1's visibility_range extends to this level's end.
-	## -1 means no collapsing (all LOD levels are unique).
-	var lod_collapsed_to: int = -1
+	## Whether the embedded ArrayMesh carries a prebaked LOD chain (has_lod_chain meta).
+	## Used by debug tooling + diagnostic reporting.
+	var has_lod_chain: bool = false
 
 
 ## Instance data
 class InstanceData:
 	var id: int
 	var type_name: String
-	var instance_rid: RID      ## Primary RenderingServer instance (LOD0 or single-mesh fallback)
+	var instance_rid: RID      ## Single RenderingServer instance (holds embedded LOD chain)
 	var transform: Transform3D
 	var visible: bool = true
 	var promoted: bool = false  ## True when a NEAR Node3D exists for this instance
 	var cell_grid: Vector2i    ## Which cell this belongs to
 	var gpu_slot: int = -1     ## Slot index in GPUSceneDatabase (-1 if not tracked)
-	## LOD instance RIDs — multiple per LOD level (one per mesh per LOD level)
-	## Each has its own mesh, visibility_range, and transform
-	## Empty for non-LOD types (single instance_rid used instead)
-	## Layout: [LOD0 RIDs...][LOD1+ RIDs...] — lod0_count separates them
-	var lod_rids: Array[RID] = []
-	## Number of LOD0 RIDs at the start of lod_rids (for promotion hiding)
-	var lod0_count: int = 0
 	## Metadata for MID→NEAR promotion (Phase 5b)
 	var model_path: String     ## Original model path for prototype lookup
 	var item_id: String        ## Item variant ID
@@ -136,7 +101,7 @@ func _exit_tree() -> void:
 
 #region Mesh Registration
 
-## Register a mesh type that can be instanced (single mesh, no LOD)
+## Register a mesh type that can be instanced
 ## mesh: Can be ArrayMesh, or null to create from arrays
 ## material: Optional material to apply
 func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null) -> void:
@@ -146,7 +111,6 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 	var mesh_type := MeshType.new()
 	mesh_type.name = type_name
 
-	# Get or create mesh RID
 	# CRITICAL: Store strong references to Mesh/Material resources to keep them alive.
 	# Without these, LRU cache eviction of prototypes can free the underlying resources,
 	# invalidating the RIDs and causing RS instances to disappear.
@@ -155,12 +119,12 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 		mesh_type.mesh_resource = mesh
 		mesh_type.owns_mesh = false
 		mesh_type.aabb = mesh.get_aabb()
+		mesh_type.has_lod_chain = mesh.has_meta("has_lod_chain")
 	else:
 		mesh_type.mesh_rid = RenderingServer.mesh_create()
 		mesh_type.owns_mesh = true
 		mesh_type.aabb = AABB()
 
-	# Get or create material RID
 	if material:
 		mesh_type.material_rid = material.get_rid()
 		mesh_type.material_resource = material
@@ -173,13 +137,16 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 	_stats["mesh_types"] += 1
 
 
-## Register a mesh type from a Node3D prototype (extracts first non-LOD mesh)
-## For MID-tier with LOD support, use register_lod_from_prototype() instead.
+## Register a mesh type from a Node3D prototype.
+##
+## Post-B-wide refactor: walks the prototype tree for a single MeshInstance3D
+## carrying an ArrayMesh with an embedded LOD chain (or a plain mesh if the
+## asset is too small for LOD generation). The embedded chain is driven by
+## Godot's C++ LOD selector automatically once the RS instance exists.
 func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 	if type_name in _mesh_types:
 		return
 
-	# Find first MeshInstance3D in prototype
 	var mesh_instance := _find_mesh_instance(prototype)
 	if not mesh_instance or not mesh_instance.mesh:
 		push_warning("StaticObjectRenderer: No mesh found in prototype for '%s'" % type_name)
@@ -195,7 +162,6 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 	if mesh_instance.material_override:
 		material = mesh_instance.material_override
 	else:
-		# Collect per-surface materials
 		var surface_count: int = mesh_instance.mesh.get_surface_count()
 		for si in range(surface_count):
 			var mat: Material = mesh_instance.get_surface_override_material(si)
@@ -205,207 +171,30 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 		# For single-surface, use as primary material
 		if surface_count == 1 and not surface_mats.is_empty() and surface_mats[0]:
 			material = surface_mats[0]
-			surface_mats.clear()  # Will use primary material_rid instead
+			surface_mats.clear()
 
 	register_mesh_type(type_name, mesh_instance.mesh, material)
 
-	# Store per-surface materials if no whole-mesh override was found
 	if not surface_mats.is_empty() and type_name in _mesh_types:
 		_mesh_types[type_name].surface_materials = surface_mats
 
 
-## Register a mesh type with LOD meshes extracted from a prototype Node3D.
-## Finds LOD0 (main mesh) and _LOD1/_LOD2/_LOD3 sibling meshes.
-## Creates per-instance visibility_range on each LOD level for correct per-object LOD.
-## Returns true if at least one LOD mesh was found.
+## Compatibility alias — post-B-wide there's no difference between the two
+## registration paths. Kept so existing callers (cell_manager.gd, test scenes)
+## continue to work without edits until they're cleaned up in Phase F.
 func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
-	if type_name in _mesh_types:
-		return not _mesh_types[type_name].lod_meshes.is_empty()
-
-	var mesh_type := MeshType.new()
-	mesh_type.name = type_name
-
-	# Walk the prototype tree and extract LOD meshes
-	_extract_lod_meshes(prototype, mesh_type)
-
-	# Fill missing LOD bands with best available fallback
-	# Ensures objects are visible across ALL bands (0-500m)
-	# lod_meshes is now Dict[int → Array[LodMeshEntry]]
-	if not mesh_type.lod_meshes.is_empty():
-		# Ensure LOD0 (NEAR, 0-150m) always exists — use best available
-		if 0 not in mesh_type.lod_meshes:
-			for fallback: int in [1, 2, 3]:
-				if fallback in mesh_type.lod_meshes:
-					mesh_type.lod_meshes[0] = (mesh_type.lod_meshes[fallback] as Array).duplicate()
-					break
-
-		# Fill MID bands (LOD1-3) with best available fallback
-		for level: int in [1, 2, 3]:
-			if level not in mesh_type.lod_meshes:
-				for fallback: int in range(level - 1, -1, -1):
-					if fallback in mesh_type.lod_meshes:
-						mesh_type.lod_meshes[level] = (mesh_type.lod_meshes[fallback] as Array).duplicate()
-						break
-
-		# Collapse duplicate MID LOD bands (Issue #9).
-		# When LOD2/LOD3 are fallback copies of LOD1 (identical mesh RIDs), rendering
-		# them as separate bands wastes RS instances. Detect and collapse:
-		# - If LOD1 == LOD2 == LOD3: keep LOD1 covering 150-500m, erase LOD2/LOD3
-		# - If LOD1 == LOD2 but LOD3 differs: keep LOD1 covering 150-375m, erase LOD2
-		if 1 in mesh_type.lod_meshes:
-			var collapsed_to := 1
-			for level: int in [2, 3]:
-				if level in mesh_type.lod_meshes and _lod_entries_same_meshes(
-						mesh_type.lod_meshes[1] as Array, mesh_type.lod_meshes[level] as Array):
-					mesh_type.lod_meshes.erase(level)
-					collapsed_to = level
-				else:
-					break  # Stop collapsing at first different LOD
-			if collapsed_to > 1:
-				mesh_type.lod_collapsed_to = collapsed_to
-
-	if mesh_type.lod_meshes.is_empty():
-		# No LOD meshes found — fall back to single-mesh registration
-		register_from_prototype(type_name, prototype)
-		return type_name in _mesh_types
-
-	# Use the first entry of the highest-detail available LOD for AABB and primary mesh
-	for level: int in [0, 1, 2, 3]:
-		if level in mesh_type.lod_meshes:
-			var entries: Array = mesh_type.lod_meshes[level]
-			if entries.is_empty():
-				continue
-			var entry: LodMeshEntry = entries[0]
-			mesh_type.mesh_rid = entry.mesh_rid
-			mesh_type.mesh_resource = entry.mesh
-			mesh_type.material_rid = entry.material_rid if entry.material_rid.is_valid() else RID()
-			mesh_type.material_resource = entry.material
-			# Compute combined AABB across all meshes at this level
-			var combined_aabb := entry.mesh.get_aabb() if entry.mesh else AABB()
-			for i in range(1, entries.size()):
-				var e: LodMeshEntry = entries[i]
-				if e.mesh:
-					combined_aabb = combined_aabb.merge(e.mesh.get_aabb())
-			mesh_type.aabb = combined_aabb
-			mesh_type.owns_mesh = false
-			mesh_type.owns_material = false
-			break
-
-	_mesh_types[type_name] = mesh_type
-	_stats["mesh_types"] = _mesh_types.size()
-	return true
+	register_from_prototype(type_name, prototype)
+	return type_name in _mesh_types and _mesh_types[type_name].has_lod_chain
 
 
-## Extract LOD meshes from a prototype node tree
-func _extract_lod_meshes(node: Node, mesh_type: MeshType) -> void:
-	if node is MeshInstance3D:
-		var mi := node as MeshInstance3D
-		if not mi.mesh:
-			return
-		# Skip hidden meshes — these were filtered by MeshVisibilityUtils
-		# (materialless/white-only nodes).
-		if not mi.visible:
-			return
-
-		var node_name: String = node.name
-		var lod_level := _get_lod_level_from_name(node_name)
-
-		# Skip LOD nodes whose base mesh is hidden (collision geometry that
-		# got LODs generated before the prebake fix). Base mesh name = strip _LODn.
-		if lod_level > 0:
-			var lower_name: String = node_name.to_lower()
-			var lod_pos: int = lower_name.rfind("_lod")
-			if lod_pos > 0:
-				var base_name: String = node_name.substr(0, lod_pos)
-				var parent_node: Node = mi.get_parent()
-				if parent_node:
-					var base_mesh: Node = parent_node.find_child(base_name, false, false)
-					if base_mesh is MeshInstance3D and not base_mesh.visible:
-						return
-
-		# Skip meshes that would be hidden by _hide_lod_nodes() in the NEAR path.
-		# The prototype passed to register_lod_from_prototype() is the RAW prototype
-		# (not processed by _hide_lod_nodes), so materialless/white meshes are still
-		# visible. Without this check, they'd create plain-colored RS instances that
-		# overlap with textured ones.
-		if not MeshVisibilityUtils.has_valid_material(mi, false):
-			return
-
-		var entry := LodMeshEntry.new()
-		entry.mesh = mi.mesh
-		entry.mesh_rid = mi.mesh.get_rid()
-
-		# Material resolution priority:
-		# 1. material_override (whole-mesh override, set by NIF converter)
-		# 2. MeshInstance3D surface override materials (per-surface on the node)
-		# 3. Mesh resource surface materials (baked into the mesh)
-		# The RS instance needs explicit material assignment for #1 and #2 since
-		# it only sees the mesh RID (not the MeshInstance3D node).
-		# For #3, the RS instance inherits mesh surface materials automatically.
-		if mi.material_override:
-			entry.material = mi.material_override
-			entry.material_rid = mi.material_override.get_rid()
-		else:
-			entry.material_rid = RID()
-			# Collect per-surface materials for RS per-surface override
-			var surface_count: int = mi.mesh.get_surface_count()
-			var has_surface_mats := false
-			for si in range(surface_count):
-				# Check MeshInstance3D surface override first, then mesh surface material
-				var mat: Material = mi.get_surface_override_material(si)
-				if not mat:
-					mat = mi.mesh.surface_get_material(si)
-				if mat:
-					has_surface_mats = true
-				entry.surface_materials.append(mat)
-			# If single-surface with a material, also set as primary for fallback
-			if has_surface_mats and surface_count == 1 and entry.surface_materials[0]:
-				entry.material = entry.surface_materials[0]
-				entry.material_rid = entry.surface_materials[0].get_rid()
-
-		# Append to the array for this LOD level (multiple meshes per level)
-		# Multi-material buildings have several MeshInstance3Ds at each LOD level
-		if lod_level not in mesh_type.lod_meshes:
-			mesh_type.lod_meshes[lod_level] = [] as Array
-		(mesh_type.lod_meshes[lod_level] as Array).append(entry)
-		return  # Don't recurse into MeshInstance3D children
-
-	for child in node.get_children():
-		_extract_lod_meshes(child, mesh_type)
-
-
-## Get LOD level from node name (0 = LOD0/base, 1-3 = LOD levels)
-func _get_lod_level_from_name(node_name: String) -> int:
-	var lower := node_name.to_lower()
-	if lower.ends_with("_lod3"):
-		return 3
-	elif lower.ends_with("_lod2"):
-		return 2
-	elif lower.ends_with("_lod1"):
-		return 1
-	return 0  # Base mesh (LOD0)
-
-
-## Check if two LOD entry arrays reference the same meshes (by RID).
-## Used to detect fallback-filled bands that duplicate an existing LOD level.
-static func _lod_entries_same_meshes(a: Array, b: Array) -> bool:
-	if a.size() != b.size():
-		return false
-	for i in range(a.size()):
-		if (a[i] as LodMeshEntry).mesh_rid != (b[i] as LodMeshEntry).mesh_rid:
-			return false
-	return true
-
-
-## Find first MeshInstance3D in prototype, skipping LOD nodes
+## Find first MeshInstance3D in prototype.
+## Post-B-wide: there are no sibling `_LODn` nodes, so the old skip clause is
+## dead. Picks the first visible MeshInstance3D with a mesh.
 func _find_mesh_instance(node: Node) -> MeshInstance3D:
 	if node is MeshInstance3D:
-		var node_name: String = node.name
-		var is_lod := node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3")
-		if is_lod:
-			Log.debug("streaming", "[StaticRenderer] Skipping LOD node: %s" % node_name)
-		else:
-			return node
+		var mi := node as MeshInstance3D
+		if mi.mesh and mi.visible:
+			return mi
 	for child in node.get_children():
 		var result := _find_mesh_instance(child)
 		if result:
@@ -418,7 +207,12 @@ func _find_mesh_instance(node: Node) -> MeshInstance3D:
 #region Instance Add/Remove
 
 ## Add an instance of a registered mesh type.
-## If the type has LOD meshes, creates per-LOD RS instances with visibility_range.
+##
+## Post-B-wide: single RS instance per object with a single hard-cull
+## visibility_range at 500m (render→impostor tier handoff). Sub-LOD selection
+## is driven by the embedded `surface_lod_indices` chain + Godot's C++ screen-
+## space LOD selector, not by manual distance bands.
+##
 ## Returns instance ID for later manipulation, or -1 on failure.
 func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
 		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
@@ -445,89 +239,35 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	data.ref_id = ref_id
 	data.ref_num = ref_num
 
-	if not mesh_type.lod_meshes.is_empty():
-		# LOD path: create RS instances for ALL meshes at each LOD level.
-		# Multi-material buildings have multiple meshes per LOD level (one per material group).
-		# Godot handles distance-based LOD switching entirely in C++.
-		# Layout in lod_rids: [all LOD0 meshes][all LOD1+ meshes] — lod0_count separates them.
-		# Process LOD0 first (regardless of dictionary key order) so LOD0 RIDs are at the front.
-		var lod0_entries: Array = mesh_type.lod_meshes.get(0, []) as Array
-		data.lod0_count = lod0_entries.size()
-		var sorted_levels: Array = mesh_type.lod_meshes.keys()
-		sorted_levels.sort()
-		for lod_level: int in sorted_levels:
-			var entries: Array = mesh_type.lod_meshes[lod_level]
-			for lod_entry: LodMeshEntry in entries:
-				var lod_rid := rs.instance_create()
-				rs.instance_set_base(lod_rid, lod_entry.mesh_rid)
-				rs.instance_set_scenario(lod_rid, _scenario)
-				rs.instance_set_transform(lod_rid, transform)
+	var instance_rid := rs.instance_create()
+	rs.instance_set_base(instance_rid, mesh_type.mesh_rid)
+	rs.instance_set_scenario(instance_rid, _scenario)
+	rs.instance_set_transform(instance_rid, transform)
 
-				# Apply material: prefer whole-mesh override, fall back to per-surface
-				if lod_entry.material_rid.is_valid():
-					rs.instance_geometry_set_material_override(lod_rid, lod_entry.material_rid)
-				elif not lod_entry.surface_materials.is_empty():
-					for si in range(lod_entry.surface_materials.size()):
-						var mat: Material = lod_entry.surface_materials[si]
-						if mat:
-							rs.instance_set_surface_override_material(lod_rid, si, mat.get_rid())
+	# Apply material: prefer whole-mesh override, fall back to per-surface
+	if mesh_type.material_rid.is_valid():
+		rs.instance_geometry_set_material_override(instance_rid, mesh_type.material_rid)
+	elif not mesh_type.surface_materials.is_empty():
+		for si in range(mesh_type.surface_materials.size()):
+			var mat: Material = mesh_type.surface_materials[si]
+			if mat:
+				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
 
-				# LOD0 (NEAR, 0-150m) keeps shadow casting for nearby visual quality.
-				# LOD1-3 (MID, 150-500m) disable shadows to save GPU budget.
-				if lod_level > 0:
-					rs.instance_geometry_set_cast_shadows_setting(
-						lod_rid, RenderingServer.SHADOW_CASTING_SETTING_OFF
-					)
+	# Single render-tier→impostor-handoff visibility_range.
+	# 0-500m covers NEAR + MID. The embedded LOD chain handles sub-band selection.
+	# The FAR tier (500-5000m) is the impostor renderer's job; this band's end
+	# margin provides the dither crossfade into it.
+	rs.instance_geometry_set_visibility_range(
+		instance_rid,
+		0.0, DU.MID_END,                        # 0-500m
+		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade into impostor
+		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+	)
 
-				# Set per-instance visibility_range for this LOD band.
-				# If duplicate LOD bands were collapsed (Issue #9), extend LOD1's
-				# end distance to cover the full MID range (e.g., 150-500m instead
-				# of 150-250m). This eliminates redundant RS instances.
-				var vis := _get_lod_visibility_range(lod_level)
-				if lod_level == 1 and mesh_type.lod_collapsed_to > 1:
-					var collapsed_vis := _get_lod_visibility_range(mesh_type.lod_collapsed_to)
-					vis.end = collapsed_vis.end
-					vis.end_margin = collapsed_vis.end_margin
-				rs.instance_geometry_set_visibility_range(
-					lod_rid,
-					vis.begin, vis.end,
-					vis.begin_margin, vis.end_margin,
-					RenderingServer.VISIBILITY_RANGE_FADE_SELF
-				)
+	# Default LOD bias — tunable per type later via streaming_config.
+	rs.instance_geometry_set_lod_bias(instance_rid, 1.0)
 
-				data.lod_rids.append(lod_rid)
-
-		# Use first LOD RID as primary for backwards compatibility
-		data.instance_rid = data.lod_rids[0] if not data.lod_rids.is_empty() else RID()
-		_stats["lod_instances"] += data.lod_rids.size()
-	else:
-		# Single-mesh path: one RS instance with NEAR visibility_range (0-150m)
-		# Small objects without LODs are only visible up close
-		var instance_rid := rs.instance_create()
-		rs.instance_set_base(instance_rid, mesh_type.mesh_rid)
-		rs.instance_set_scenario(instance_rid, _scenario)
-		rs.instance_set_transform(instance_rid, transform)
-
-		# Apply material: prefer whole-mesh override, fall back to per-surface
-		if mesh_type.material_rid.is_valid():
-			rs.instance_geometry_set_material_override(instance_rid, mesh_type.material_rid)
-		elif not mesh_type.surface_materials.is_empty():
-			for si in range(mesh_type.surface_materials.size()):
-				var mat: Material = mesh_type.surface_materials[si]
-				if mat:
-					rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
-
-		# Set NEAR visibility range so single-mesh objects aren't rendered at all distances
-		var vis := _get_lod_visibility_range(0)
-		rs.instance_geometry_set_visibility_range(
-			instance_rid,
-			vis.begin, vis.end,
-			vis.begin_margin, vis.end_margin,
-			RenderingServer.VISIBILITY_RANGE_FADE_SELF
-		)
-
-		data.instance_rid = instance_rid
-
+	data.instance_rid = instance_rid
 	_instances[id] = data
 	mesh_type.instance_count += 1
 	_stats["total_instances"] += 1
@@ -541,67 +281,16 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	return id
 
 
-## Get visibility_range parameters for a LOD level
-## Returns {begin, end, begin_margin, end_margin}
-## Level 0 = NEAR range (0-150m), ensures objects are visible at all distances
-## Level 1-3 = MID sub-bands
-static func _get_lod_visibility_range(lod_level: int) -> Dictionary:
-	match lod_level:
-		0:
-			return {
-				"begin": 0.0,                             # Visible from camera
-				"end": DU.NEAR_END,                       # 150
-				"begin_margin": 0.0,
-				"end_margin": DU.FADE_MARGIN_NEAR_LOD1,   # 5
-			}
-		1:
-			return {
-				"begin": DU.NEAR_END,                     # 150
-				"end": DU.LOD1_END,                       # 250
-				"begin_margin": DU.FADE_MARGIN_NEAR_LOD1, # 5
-				"end_margin": DU.FADE_MARGIN_LOD1_LOD2,   # 10
-			}
-		2:
-			return {
-				"begin": DU.LOD1_END,                     # 250
-				"end": DU.LOD2_END,                       # 375
-				"begin_margin": DU.FADE_MARGIN_LOD1_LOD2, # 10
-				"end_margin": DU.FADE_MARGIN_LOD2_LOD3,   # 15
-			}
-		3:
-			return {
-				"begin": DU.LOD2_END,                     # 375
-				"end": DU.LOD3_END,                       # 500
-				"begin_margin": DU.FADE_MARGIN_LOD2_LOD3, # 15
-				"end_margin": DU.FADE_MARGIN_LOD3_FAR,    # 20
-			}
-		_:
-			return {
-				"begin": 0.0,
-				"end": DU.NEAR_END,
-				"begin_margin": 0.0,
-				"end_margin": DU.FADE_MARGIN_NEAR_LOD1,
-			}
-
-
-## Remove an instance and all its LOD RIDs
+## Remove an instance
 func remove_instance(id: int) -> void:
 	if id not in _instances:
 		return
 
 	var data: InstanceData = _instances[id]
 
-	# Free LOD RS instances
-	for lod_rid: RID in data.lod_rids:
-		if lod_rid.is_valid():
-			RenderingServer.free_rid(lod_rid)
-	_stats["lod_instances"] -= data.lod_rids.size()
-
-	# Free primary instance (only if not already freed as part of lod_rids)
-	if data.lod_rids.is_empty() and data.instance_rid.is_valid():
+	if data.instance_rid.is_valid():
 		RenderingServer.free_rid(data.instance_rid)
 
-	# Update stats
 	if data.type_name in _mesh_types:
 		var mesh_type: MeshType = _mesh_types[data.type_name]
 		mesh_type.instance_count -= 1
@@ -629,9 +318,7 @@ func remove_cell_instances(cell_grid: Vector2i) -> int:
 	if cell_grid not in _cell_index:
 		return 0
 
-	# Copy the IDs since remove_instance modifies _cell_index
 	var to_remove: Array = _cell_index[cell_grid].duplicate()
-
 	for id: int in to_remove:
 		remove_instance(id)
 
@@ -649,11 +336,7 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 		if id not in _instances:
 			continue
 		var data: InstanceData = _instances[id]
-		if not data.lod_rids.is_empty():
-			for lod_rid: RID in data.lod_rids:
-				if lod_rid.is_valid():
-					RenderingServer.instance_set_visible(lod_rid, false)
-		elif data.instance_rid.is_valid():
+		if data.instance_rid.is_valid():
 			RenderingServer.instance_set_visible(data.instance_rid, false)
 		data.visible = false
 		count += 1
@@ -681,13 +364,8 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		var id: int = cell_ids[i]
 		if id in _instances:
 			var data: InstanceData = _instances[id]
-			if data.visible:
-				if not data.lod_rids.is_empty():
-					for lod_rid: RID in data.lod_rids:
-						if lod_rid.is_valid():
-							RenderingServer.instance_set_visible(lod_rid, false)
-				elif data.instance_rid.is_valid():
-					RenderingServer.instance_set_visible(data.instance_rid, false)
+			if data.visible and data.instance_rid.is_valid():
+				RenderingServer.instance_set_visible(data.instance_rid, false)
 				data.visible = false
 				hidden += 1
 		i += 1
@@ -704,7 +382,7 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 
 #region Visibility & Transform
 
-## Set instance visibility (hides/shows all LOD instances)
+## Set instance visibility
 func set_instance_visible(id: int, visible: bool) -> void:
 	if id not in _instances:
 		return
@@ -715,11 +393,7 @@ func set_instance_visible(id: int, visible: bool) -> void:
 
 	data.visible = visible
 
-	# Hide/show all LOD instances
-	if not data.lod_rids.is_empty():
-		for lod_rid: RID in data.lod_rids:
-			RenderingServer.instance_set_visible(lod_rid, visible)
-	else:
+	if data.instance_rid.is_valid():
 		RenderingServer.instance_set_visible(data.instance_rid, visible)
 
 	if visible:
@@ -728,14 +402,14 @@ func set_instance_visible(id: int, visible: bool) -> void:
 		_stats["visible_instances"] -= 1
 
 
-## Mark an instance as promoted (NEAR Node3D exists) and hide overlapping RS LODs.
-## On promotion (is_promoted=true):
-##   - Always hides LOD0 (0-150m, duplicated by NEAR Node3D)
-##   - If near_has_lods=true, also hides LOD1-3 (150-500m) to prevent double-rendering
-##     (Issue #2: NEAR Node3D's LOD children already cover this range)
-##   - If near_has_lods=false, keeps LOD1-3 visible as a safety net for 150-500m
-## On demotion (is_promoted=false): shows ALL LOD RIDs.
-func set_instance_promoted(id: int, is_promoted: bool, near_has_lods: bool = true) -> void:
+## Mark an instance as promoted (NEAR Node3D exists) and hide the RS instance.
+##
+## Post-B-wide: a promoted object is replaced by a full scene-tree Node3D for
+## 0-150m (with physics), so we hide the single RS instance completely.
+## Demotion shows it again. The `near_has_lods` parameter is preserved for
+## signature compatibility with `native_streaming_manager.gd` but no longer
+## affects behavior — there are no LOD1-3 RIDs to selectively hide.
+func set_instance_promoted(id: int, is_promoted: bool, _near_has_lods: bool = true) -> void:
 	if id not in _instances:
 		return
 	var data: InstanceData = _instances[id]
@@ -743,26 +417,11 @@ func set_instance_promoted(id: int, is_promoted: bool, near_has_lods: bool = tru
 		return
 	data.promoted = is_promoted
 
-	if not data.lod_rids.is_empty():
-		if is_promoted:
-			# Hide LOD0 RIDs — NEAR Node3D covers 0-150m
-			var lod0_end: int = data.lod0_count if data.lod0_count > 0 else 1
-			for i in range(mini(lod0_end, data.lod_rids.size())):
-				RenderingServer.instance_set_visible(data.lod_rids[i], false)
-			# Hide LOD1-3 too if NEAR has its own LOD children (prevents double-rendering)
-			if near_has_lods:
-				for i in range(lod0_end, data.lod_rids.size()):
-					RenderingServer.instance_set_visible(data.lod_rids[i], false)
-		else:
-			# Demotion: show ALL LOD RIDs (LOD0 + LOD1-3)
-			for lod_rid: RID in data.lod_rids:
-				RenderingServer.instance_set_visible(lod_rid, true)
-	elif data.instance_rid.is_valid():
-		# Single-mesh path: hide the whole instance (NEAR Node3D replaces it)
+	if data.instance_rid.is_valid():
 		RenderingServer.instance_set_visible(data.instance_rid, not is_promoted)
 
 
-## Set instance transform (updates all LOD instances)
+## Set instance transform
 func set_instance_transform(id: int, transform: Transform3D) -> void:
 	if id not in _instances:
 		return
@@ -770,11 +429,7 @@ func set_instance_transform(id: int, transform: Transform3D) -> void:
 	var data: InstanceData = _instances[id]
 	data.transform = transform
 
-	# Update all LOD instances
-	if not data.lod_rids.is_empty():
-		for lod_rid: RID in data.lod_rids:
-			RenderingServer.instance_set_transform(lod_rid, transform)
-	else:
+	if data.instance_rid.is_valid():
 		RenderingServer.instance_set_transform(data.instance_rid, transform)
 
 
@@ -820,18 +475,13 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 func clear(clear_mesh_types: bool = true) -> void:
 	var rs := RenderingServer
 
-	# Free all instances (including LOD RIDs)
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
-		for lod_rid: RID in data.lod_rids:
-			if lod_rid.is_valid():
-				rs.free_rid(lod_rid)
-		if data.lod_rids.is_empty() and data.instance_rid.is_valid():
+		if data.instance_rid.is_valid():
 			rs.free_rid(data.instance_rid)
 	_instances.clear()
 	_cell_index.clear()
 
-	# Free mesh types if requested
 	if clear_mesh_types:
 		for type_name: String in _mesh_types:
 			var mesh_type: MeshType = _mesh_types[type_name]
@@ -844,7 +494,6 @@ func clear(clear_mesh_types: bool = true) -> void:
 
 	_stats["total_instances"] = 0
 	_stats["visible_instances"] = 0
-	_stats["lod_instances"] = 0
 
 #endregion
 
@@ -866,8 +515,7 @@ func get_mesh_type_stats(type_name: String) -> Dictionary:
 		"name": mesh_type.name,
 		"instance_count": mesh_type.instance_count,
 		"aabb": mesh_type.aabb,
-		"has_lod": not mesh_type.lod_meshes.is_empty(),
-		"lod_levels": mesh_type.lod_meshes.keys(),
+		"has_lod_chain": mesh_type.has_lod_chain,
 	}
 
 
@@ -893,7 +541,7 @@ func get_promotable_instances(camera_pos: Vector3, max_distance_sq: float, cell_
 			if not data:
 				continue
 			if data.promoted:
-				continue  # Already has a NEAR Node3D
+				continue
 			if data.model_path.is_empty():
 				continue
 			var dist_sq := camera_pos.distance_squared_to(data.transform.origin)
@@ -912,10 +560,10 @@ func has_type(type_name: String) -> bool:
 	return type_name in _mesh_types
 
 
-## Check if a type has LOD meshes
+## Check if a type has a prebaked LOD chain
 func has_lod(type_name: String) -> bool:
 	if type_name not in _mesh_types:
 		return false
-	return not _mesh_types[type_name].lod_meshes.is_empty()
+	return _mesh_types[type_name].has_lod_chain
 
 #endregion

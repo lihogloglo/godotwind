@@ -139,112 +139,174 @@ func is_ready() -> bool:
 
 
 # =============================================================================
-# STEP-UP — Separate body for step detection + smooth Y interpolation
+# MOVEMENT — Canonical pre-move step probe + unstuck recovery
 # =============================================================================
+# Pattern matches HL2 `CGameMovement::StepMove` / OpenMW `Stepper::step` +
+# `MovementSolver::unstuck` / UE `CharacterMovementComponent::StepUp`:
+# trace obstruction FIRST, try an up/forward/down probe BEFORE committing the
+# slide. This avoids the post-slide-rewind fragility of the earlier bespoke
+# implementation and eliminates the "horizontal_gain heuristic" that could
+# reject legitimate step-ups against angled walls.
+#
+# See CLAUDE.md § Engineering Principle — Industry Standard, Never Kludge
+# and § Simplicity Over Over-Engineering for the rationale behind replacing
+# the previous bespoke version wholesale instead of patching it further.
 
-## Smoothed Y position for visual step climbing (avoids jerky teleports)
-var _step_target_y: float = 0.0
-var _step_initialized: bool = false
-## Speed at which the body interpolates to step height
-var step_smooth_speed: float = 12.0
+## Small upward offset used when testing penetration recovery.
+const _UNSTUCK_STEP: float = 0.02
+## Maximum total upward displacement permitted during unstuck recovery.
+const _UNSTUCK_MAX: float = 0.5
+## Safety margin used when consuming traced travel (prevents re-catching the
+## edge we just cleared). Matches OpenMW's `sCollisionMargin` role.
+const _STEP_COLLISION_MARGIN: float = 0.001
+## Minimum horizontal progress (meters) required at raised height to justify
+## committing the step — below this, revert and slide normally.
+const _STEP_MIN_FORWARD: float = 0.01
+## Cosine threshold for a "walkable-looking" hit normal during the probe —
+## hits with `normal.y >= 0.7` (~45°) are treated as slopes, not walls.
+const _STEP_WALL_NORMAL_Y: float = 0.7
 
-## Move with automatic step-up over small obstacles (stairs, curbs, bumps).
-## Uses a two-phase approach:
-## 1. test_move() probes ahead at raised height to detect climbable steps
-## 2. If step found, smoothly interpolate Y up instead of teleporting
+
 func _move_with_step_up() -> void:
-	if not _step_initialized:
-		_step_target_y = player.global_position.y
-		_step_initialized = true
+	# ----- Phase A: unstuck recovery --------------------------------------
+	# Push the body out of any penetrating geometry before it tries to move.
+	# Fixes spawn-into-terrain, thin-mesh tunneling, and edge penetration
+	# around bridges / interior seams.
+	_unstuck_if_penetrating()
 
-	var has_horizontal := absf(player.velocity.x) > 0.01 or absf(player.velocity.z) > 0.01
+	var delta: float = get_physics_process_delta_time()
+	var horizontal_vel: Vector3 = Vector3(player.velocity.x, 0.0, player.velocity.z)
+	var has_horizontal: bool = horizontal_vel.length_squared() > 0.0001
+
+	# Only attempt step-up when grounded, moving horizontally, and not jumping.
+	# Airborne / idle / ascending frames go straight through move_and_slide.
 	if not player.is_on_floor() or not has_horizontal or player.velocity.y > 0.1:
-		# Not grounded, not moving, or jumping — normal move
 		player.move_and_slide()
-		_step_target_y = player.global_position.y
+		_push_rigid_bodies()
 		return
 
-	# Save pre-move state
-	var original_pos := player.global_position
-	var original_vel := player.velocity
+	# ----- Phase B: pre-move obstruction probe ----------------------------
+	var motion: Vector3 = horizontal_vel * delta
+	var probe: KinematicCollision3D = KinematicCollision3D.new()
+	var blocked: bool = player.test_move(player.global_transform, motion, probe)
 
-	# Normal move first
-	player.move_and_slide()
-
-	# Check if we hit a static obstacle (wall-like normal) — skip RigidBody3D (pushable)
-	var hit_wall := false
-	for i in player.get_slide_collision_count():
-		var col := player.get_slide_collision(i)
-		if col.get_normal().y < 0.5 and not (col.get_collider() is RigidBody3D):
-			hit_wall = true
-			break
-
-	if not hit_wall:
-		_step_target_y = player.global_position.y
-		return  # Normal move succeeded
-
-	# Step detection: try moving from a raised position
-	var post_normal_pos := player.global_position
-	var post_normal_vel := player.velocity
-
-	# Reset to original position for the raised test
-	player.global_position = original_pos
-	player.velocity = original_vel
-
-	# Check ceiling clearance
-	var raise_height := max_step_height + 0.05
-	if player.test_move(player.global_transform, Vector3.UP * raise_height):
-		# No room above — stick with normal result
-		player.global_position = post_normal_pos
-		player.velocity = post_normal_vel
-		_step_target_y = player.global_position.y
+	if not blocked:
+		# Clear path — let the slide handle gravity, floor snap, and slope slide.
+		player.move_and_slide()
+		_push_rigid_bodies()
 		return
 
-	# Raise, move forward, snap down — all via test_move (no move_and_slide)
-	player.global_position.y += raise_height
+	# Ignore pushable rigid bodies (barrels, crates) — handled by the push loop.
+	if probe.get_collider() is RigidBody3D:
+		player.move_and_slide()
+		_push_rigid_bodies()
+		return
 
-	# Test horizontal movement at raised height.
-	# Use enough forward distance to clear the step's depth — per-frame velocity
-	# (0.08m at 5m/s) is often too short to reach past a step edge.
-	var h_vel := Vector3(original_vel.x, 0.0, original_vel.z)
-	var h_speed := h_vel.length()
-	var h_dir := h_vel / h_speed if h_speed > 0.01 else Vector3.ZERO
-	var h_motion := h_dir * maxf(h_speed * get_physics_process_delta_time(), 0.4)
-	var h_collision := KinematicCollision3D.new()
-	var h_blocked := player.test_move(player.global_transform, h_motion, h_collision)
+	# Walkable-slope obstructions fall through to slide — slope handling
+	# belongs to move_and_slide + floor_max_angle, not the step-up probe.
+	var hit_normal: Vector3 = probe.get_normal()
+	if hit_normal.y >= _STEP_WALL_NORMAL_Y:
+		player.move_and_slide()
+		_push_rigid_bodies()
+		return
 
-	# Apply horizontal travel (full or partial)
-	if h_blocked:
-		player.global_position += h_collision.get_travel()
-	else:
-		player.global_position += h_motion
-
-	# Snap down to find the step surface
-	var down_motion := Vector3.DOWN * (raise_height + max_step_height)
-	var down_collision := KinematicCollision3D.new()
-	if player.test_move(player.global_transform, down_motion, down_collision):
-		var landed_y := player.global_position.y + down_collision.get_travel().y
-		var horizontal_gain := Vector2(
-			player.global_position.x - original_pos.x,
-			player.global_position.z - original_pos.z).length()
-		var normal_gain := Vector2(
-			post_normal_pos.x - original_pos.x,
-			post_normal_pos.z - original_pos.z).length()
-
-		if horizontal_gain > normal_gain * 1.1 and landed_y >= original_pos.y - 0.1:
-			# Step-up succeeded — use the new position
-			player.global_position.y = landed_y
-			player.velocity = original_vel
-			player.velocity.y = 0.0
-			# Force floor detection with a tiny move_and_slide
+	# ----- Phase C: up / forward / down probe -----------------------------
+	# 1. Up-trace: how high can we raise before hitting a ceiling?
+	var up_motion: Vector3 = Vector3.UP * (max_step_height + 0.02)
+	var up_collision: KinematicCollision3D = KinematicCollision3D.new()
+	var up_blocked: bool = player.test_move(player.global_transform, up_motion, up_collision)
+	var up_distance: float = max_step_height + 0.02
+	if up_blocked:
+		up_distance = up_collision.get_travel().y - _STEP_COLLISION_MARGIN
+		if up_distance <= 0.0:
+			# No vertical clearance — can't step, slide instead.
 			player.move_and_slide()
-			_step_target_y = player.global_position.y
+			_push_rigid_bodies()
 			return
 
-	# Step-up didn't improve — revert to normal move result
-	player.global_position = post_normal_pos
-	player.velocity = post_normal_vel
-	_step_target_y = player.global_position.y
+	# 2. Save state, warp to raised height, probe forward.
+	var original_position: Vector3 = player.global_position
+	var original_velocity: Vector3 = player.velocity
+	player.global_position.y += up_distance
+
+	# Forward reach: bump to a minimum clearance so a single-frame velocity
+	# at 5 m/s (≈ 0.08 m per tick) still reaches past a typical step depth.
+	var forward_dir: Vector3 = horizontal_vel.normalized()
+	var forward_len: float = maxf(motion.length(), 0.1)
+	var forward_motion: Vector3 = forward_dir * forward_len
+	var forward_collision: KinematicCollision3D = KinematicCollision3D.new()
+	var forward_blocked: bool = player.test_move(
+		player.global_transform, forward_motion, forward_collision)
+	var forward_travel: Vector3 = forward_motion
+	if forward_blocked:
+		forward_travel = forward_collision.get_travel()
+		if forward_travel.length() < _STEP_MIN_FORWARD:
+			# The raised path is ALSO walled off — this wasn't a step, it was
+			# a tall wall. Revert and slide normally.
+			player.global_position = original_position
+			player.velocity = original_velocity
+			player.move_and_slide()
+			_push_rigid_bodies()
+			return
+	player.global_position += forward_travel
+
+	# 3. Down-trace: snap onto the step surface below.
+	var down_motion: Vector3 = Vector3.DOWN * (up_distance + max_step_height)
+	var down_collision: KinematicCollision3D = KinematicCollision3D.new()
+	var down_hit: bool = player.test_move(
+		player.global_transform, down_motion, down_collision)
+	if not down_hit:
+		# No ground within step range — not a step, revert.
+		player.global_position = original_position
+		player.velocity = original_velocity
+		player.move_and_slide()
+		_push_rigid_bodies()
+		return
+
+	# Reject landing on slopes steeper than the character can walk — matches
+	# OpenMW's `canStepDown` + CharacterBody3D's own floor_max_angle gate.
+	var down_normal: Vector3 = down_collision.get_normal()
+	var floor_cos: float = cos(player.floor_max_angle)
+	if down_normal.y < floor_cos:
+		player.global_position = original_position
+		player.velocity = original_velocity
+		player.move_and_slide()
+		_push_rigid_bodies()
+		return
+
+	# ----- Phase D: commit the step ---------------------------------------
+	# Apply the downward travel, restore horizontal velocity, null vy so
+	# gravity doesn't immediately fight the new floor contact. A single
+	# move_and_slide then establishes floor state + consumes any remaining
+	# motion (slope slide, residual collision) — same idiom OpenMW uses
+	# between its step loop and the ground test.
+	player.global_position += down_collision.get_travel()
+	player.velocity = original_velocity
+	player.velocity.y = 0.0
+	player.move_and_slide()
+	_push_rigid_bodies()
+
+
+## Push the player out of penetrating geometry. Runs every frame at the top
+## of `_move_with_step_up()`. Mirrors OpenMW `MovementSolver::unstuck`: if the
+## body is currently overlapping the world, raise it in small increments up
+## to `_UNSTUCK_MAX` until clear. Beyond that cap we stop and warn — deeper
+## penetration is a signal of bad geometry, not something to silently patch.
+func _unstuck_if_penetrating() -> void:
+	# test_move with Vector3.ZERO reports true when the current transform is
+	# already intersecting world geometry. Cheap: no sweep, pure contact test.
+	if not player.test_move(player.global_transform, Vector3.ZERO):
+		return
+	var total_pushed: float = 0.0
+	while total_pushed < _UNSTUCK_MAX:
+		player.global_position.y += _UNSTUCK_STEP
+		total_pushed += _UNSTUCK_STEP
+		if not player.test_move(player.global_transform, Vector3.ZERO):
+			return
+	# Still penetrating after the cap — revert and warn rather than teleport.
+	player.global_position.y -= total_pushed
+	Log.warn("controller", "unstuck: unable to escape penetration after %.2fm at %s" % [
+		total_pushed, player.global_position])
 
 
 ## Push any RigidBody3D objects the player collided with during move_and_slide().

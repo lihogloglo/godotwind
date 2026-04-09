@@ -1,0 +1,63 @@
+=== LOD BASELINE TEST ===
+Timestamp: 2026-04-09T11:21:14
+Cache file: d_ex_redoran_hut_01_a_nif.res
+Output label: baseline_redoran_hut
+Branch: refactor/lod-b-wide (Phase A baseline)
+
+Loading: C:\Users\metzo/Documents/Godotwind/cache/models/d_ex_redoran_hut_01_a_nif.res
+Format detection: OLD (sibling _LODn MeshInstance3D nodes, pre-refactor hand-rolled pipeline)
+
+Per-LOD summary (aggregated across all MeshInstance3D nodes with the matching suffix):
+  lod0: 253 tris across 6 nodes, AABB (2.1×3.1×0.2), vol 1, vis_range 0-150, mat <inline>
+    nodes: MergedMesh_0, MergedMesh_1, MergedMesh_2, MergedMesh_3, MergedMesh_4, MergedMesh_5
+  lod1: 100 tris across 1 nodes, AABB (0.1×0.3×0.1), vol 0, vis_range 150-250, mat <inline>
+  lod2: 100 tris across 1 nodes, AABB (0.1×0.3×0.1), vol 0, vis_range 250-375, mat <inline>
+  lod3: 100 tris across 1 nodes, AABB (0.1×0.3×0.1), vol 0, vis_range 375-500, mat <inline>
+
+Hypothesis tests:
+  H1 [LOD0 > 100 tris]: PASS (253)
+  H2 [lod1 tri ratio 40-60%]: FAIL (100 tris, 39.5% of LOD0)
+  H3 [lod2 tri ratio 20-35%]: FAIL (100 tris, 39.5% of LOD0)
+  H4 [lod3 tri ratio 5-15%]: FAIL (100 tris, 39.5% of LOD0)
+  H5 lod1 [AABB vol >= 95% of LOD0]: FAIL (vol 0, 0.4% of LOD0)
+  H5 lod2 [AABB vol >= 95% of LOD0]: FAIL (vol 0, 0.4% of LOD0)
+  H5 lod3 [AABB vol >= 95% of LOD0]: FAIL (vol 0, 0.4% of LOD0)
+  H6 lod1 [AABB dims X/Y/Z >= 95%]: FAIL (ratios 6.9/10.8/52.3)
+  H6 lod2 [AABB dims X/Y/Z >= 95%]: FAIL (ratios 6.9/10.8/52.3)
+  H6 lod3 [AABB dims X/Y/Z >= 95%]: FAIL (ratios 6.9/10.8/52.3)
+  H7 lod1 [material present]: PASS
+  H7 lod2 [material present]: PASS
+  H7 lod3 [material present]: PASS
+  H8 lod1 [node count == LOD0 (6)]: FAIL (1) — 5 sub-meshes DROPPED
+  H8 lod2 [node count == LOD0 (6)]: FAIL (1) — 5 sub-meshes DROPPED
+  H8 lod3 [node count == LOD0 (6)]: FAIL (1) — 5 sub-meshes DROPPED
+  H9 [LOD1/2/3 tri counts distinct]: FAIL (100 / 100 / 100)
+
+Diagnosis:
+  [DROPPED SUB-MESHES] The canonical 'missing faces' bug manifestation:
+    - lod1 has 1 nodes, LOD0 has 6 → 5 sub-meshes MISSING
+    - lod2 has 1 nodes, LOD0 has 6 → 5 sub-meshes MISSING
+    - lod3 has 1 nodes, LOD0 has 6 → 5 sub-meshes MISSING
+  At distance > 150m, the MID-tier RS instances for the dropped merge groups
+  are literally absent — the geometry was never placed in LOD1/2/3 sibling nodes.
+  Visible effect: large wall panels or entire building sections disappear at distance.
+
+  [SIMPLIFIER NO-OP] LOD1, LOD2, LOD3 have identical triangle counts.
+  The simplifier produced the SAME mesh 3 times instead of distinct 50/25/10% levels.
+  Either the simplifier bailed early on per-surface triangle minima or the reduction
+  targets aren't being honored by the current MeshOptimizer GDExt call path.
+
+  Root cause analysis (per docs/audit/LOD_OVER_ENGINEERING.md):
+  - _add_visibility_range_lods() in nif_converter.gd iterates LOD surfaces independently
+  - Calls MeshOptimizer.simplify_arrays() without pre-welding shared vertices
+  - Multi-material building uses MERGED_MESH split (see nif_converter _convert_merged)
+  - The LOD generator may only run against the FIRST merged surface group, leaving the
+    other N-1 groups without any LOD1/2/3 representation.
+
+  Expected fix (Phase D B-wide refactor):
+  - Replace _add_visibility_range_lods() with ImporterMesh.generate_lods()
+  - ImporterMesh handles multi-surface meshes natively (processes EVERY surface)
+  - Produces embedded surface_lod_indices on the SAME ArrayMesh, so no sibling nodes
+  - Godot's C++ LOD selector picks per-screen-space-size at runtime
+  - Expected post-refactor state: format=NEW, single MeshInstance3D per merge group with
+    embedded LOD chain covering all distances, no dropped sub-meshes.

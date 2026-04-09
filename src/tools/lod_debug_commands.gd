@@ -11,6 +11,8 @@
 class_name LodDebugCommands
 extends RefCounted
 
+const DU := preload("res://src/core/world/distance_utils.gd")
+
 var _streaming_manager: Node3D = null
 
 
@@ -96,6 +98,38 @@ func register_commands(console: Console) -> void:
 		"reload_compare",
 		_cmd_reload_compare,
 		"Compare NEAR-tier object state: shows LOD0 visibility, cull_mode, material for loaded buildings",
+		"debug"
+	)
+	console.register_command(
+		"lod_baseline_dump",
+		_cmd_lod_baseline_dump,
+		"Dump combined LOD+streaming diagnostics for the current camera position to user://lod_baselines/<label>.txt. Used for LOD refactor B-wide before/after comparison (see docs/audit/LOD_REFACTOR_B_WIDE.md).",
+		"debug",
+		PackedStringArray(),
+		[CommandRegistry.ParameterInfo.new("label", TYPE_STRING, "Baseline label (e.g. vivec_canton)")] as Array[CommandRegistry.ParameterInfo]
+	)
+
+	# Post-B-wide refactor: screen-space LOD tuning commands.
+	console.register_command(
+		"lod_threshold",
+		_cmd_lod_threshold,
+		"Get or set viewport.mesh_lod_threshold (pixels). Lower = higher quality, higher = more aggressive LOD. 1.0 is Godot default.",
+		"debug",
+		PackedStringArray(),
+		[CommandRegistry.ParameterInfo.new("value", TYPE_FLOAT, "Threshold in pixels (omit to query)", true)] as Array[CommandRegistry.ParameterInfo]
+	)
+	console.register_command(
+		"lod_bias_global",
+		_cmd_lod_bias_global,
+		"Set default lod_bias on all currently-loaded static MID-tier instances. >1.0 keeps higher detail further out, <1.0 accelerates LOD drops.",
+		"debug",
+		PackedStringArray(),
+		[CommandRegistry.ParameterInfo.new("bias", TYPE_FLOAT, "LOD bias (default 1.0)")] as Array[CommandRegistry.ParameterInfo]
+	)
+	console.register_command(
+		"lod_info",
+		_cmd_lod_info,
+		"Print post-B-wide LOD pipeline status: viewport threshold, mesh type count, instance count, how many mesh types carry an embedded LOD chain.",
 		"debug"
 	)
 
@@ -733,19 +767,6 @@ func _audit_rs_materials(renderer: Node3D) -> Dictionary:
 					if sm is StandardMaterial3D and (sm as StandardMaterial3D).albedo_texture:
 						has_tex = true
 
-		# Check LOD mesh entries
-		if not has_mat and not mt.lod_meshes.is_empty():
-			for lod_level: int in mt.lod_meshes:
-				var entries: Array = mt.lod_meshes[lod_level]
-				for lod_entry: StaticObjectRenderer.LodMeshEntry in entries:
-					if lod_entry.material:
-						has_mat = true
-						if lod_entry.material is StandardMaterial3D:
-							has_tex = (lod_entry.material as StandardMaterial3D).albedo_texture != null
-						break
-				if has_mat:
-					break
-
 		if has_tex:
 			result.textured += 1
 		elif has_mat:
@@ -955,9 +976,13 @@ func _transparency_name(mode: int) -> String:
 
 #region MID LOD Texture Audit
 
-## Audit MID-tier RS LOD materials for missing textures.
-## Checks StaticObjectRenderer._mesh_types to find models where LOD meshes
-## have materials without albedo_texture (renders as plain color at 150-500m).
+## Audit MID-tier RS mesh materials for missing textures.
+##
+## Post-B-wide refactor: there's no per-LOD mesh array anymore — each mesh_type
+## holds a single ArrayMesh with an embedded LOD chain, so "LOD texture" is
+## identical to "mesh texture". This command now audits surface materials
+## (whole-mesh override + per-surface + baked-in mesh materials) across all
+## registered mesh types.
 @warning_ignore("untyped_declaration")
 func _cmd_mid_lod_textures(_args: Dictionary) -> String:
 	if not _streaming_manager or not _streaming_manager._static_renderer:
@@ -967,50 +992,53 @@ func _cmd_mid_lod_textures(_args: Dictionary) -> String:
 	var mesh_types: Dictionary = renderer._mesh_types
 
 	var total_types := 0
-	var textured_lods := 0
-	var textureless_lods := 0
+	var textured := 0
+	var textureless := 0
 	var building_textureless: Array[String] = []
 	var other_textureless: Array[String] = []
 
 	for type_name: String in mesh_types:
 		var mt: StaticObjectRenderer.MeshType = mesh_types[type_name]
-		if mt.lod_meshes.is_empty():
+		if not mt.mesh_resource:
 			continue
 
 		total_types += 1
 		var is_building := type_name.begins_with("ex_") or type_name.begins_with("in_")
 
-		for lod_level: int in mt.lod_meshes:
-			if lod_level == 0:
-				continue  # Skip LOD0, we care about LOD1-3
-			var entries: Array = mt.lod_meshes[lod_level]
-			for entry: StaticObjectRenderer.LodMeshEntry in entries:
-				var has_texture := _lod_entry_has_texture(entry)
-				if has_texture:
-					textured_lods += 1
-				else:
-					textureless_lods += 1
-					var info := "%s LOD%d" % [type_name, lod_level]
-					if entry.material:
-						info += " (mat: %s)" % _mat_summary(entry.material)
-					elif not entry.surface_materials.is_empty():
-						info += " (surf[0]: %s)" % _mat_summary(entry.surface_materials[0])
-					else:
-						info += " (NO MATERIAL)"
-					if is_building:
-						building_textureless.append(info)
-					else:
-						other_textureless.append(info)
+		var has_texture := false
+		if mt.material_resource and _material_has_texture(mt.material_resource):
+			has_texture = true
+		if not has_texture:
+			for sm: Material in mt.surface_materials:
+				if sm and _material_has_texture(sm):
+					has_texture = true
+					break
+		if not has_texture:
+			for si in range(mt.mesh_resource.get_surface_count()):
+				var smat: Material = mt.mesh_resource.surface_get_material(si)
+				if smat and _material_has_texture(smat):
+					has_texture = true
+					break
+
+		if has_texture:
+			textured += 1
+		else:
+			textureless += 1
+			var info := "%s%s" % [type_name, " [lod_chain]" if mt.has_lod_chain else ""]
+			if is_building:
+				building_textureless.append(info)
+			else:
+				other_textureless.append(info)
 
 	var lines: PackedStringArray = []
-	lines.append("=== MID-TIER LOD TEXTURE AUDIT ===")
-	lines.append("Registered mesh types with LODs: %d" % total_types)
-	lines.append("LOD1-3 entries with texture: %d" % textured_lods)
-	lines.append("LOD1-3 entries WITHOUT texture: %d" % textureless_lods)
+	lines.append("=== MID-TIER MESH TEXTURE AUDIT ===")
+	lines.append("Registered mesh types: %d" % total_types)
+	lines.append("With texture:    %d" % textured)
+	lines.append("Without texture: %d" % textureless)
 
 	if not building_textureless.is_empty():
 		lines.append("")
-		lines.append("BUILDINGS without LOD texture (%d):" % building_textureless.size())
+		lines.append("BUILDINGS without texture (%d):" % building_textureless.size())
 		for info in building_textureless.slice(0, 15):
 			lines.append("  %s" % info)
 		if building_textureless.size() > 15:
@@ -1018,37 +1046,13 @@ func _cmd_mid_lod_textures(_args: Dictionary) -> String:
 
 	if not other_textureless.is_empty():
 		lines.append("")
-		lines.append("Other models without LOD texture (%d):" % other_textureless.size())
+		lines.append("Other models without texture (%d):" % other_textureless.size())
 		for info in other_textureless.slice(0, 10):
 			lines.append("  %s" % info)
 		if other_textureless.size() > 10:
 			lines.append("  ... and %d more" % (other_textureless.size() - 10))
 
-	if textureless_lods == 0 and textured_lods > 0:
-		lines.append("")
-		lines.append("All LOD materials have textures. Issue may be in RS instance material application.")
-
-	var result := "\n".join(lines)
-	return result
-
-
-## Check if a LodMeshEntry has a material with an albedo texture
-func _lod_entry_has_texture(entry: StaticObjectRenderer.LodMeshEntry) -> bool:
-	# Check primary material
-	if entry.material:
-		if _material_has_texture(entry.material):
-			return true
-	# Check per-surface materials
-	for mat: Material in entry.surface_materials:
-		if mat and _material_has_texture(mat):
-			return true
-	# Check mesh resource surface materials (auto-inherited by RS)
-	if entry.mesh:
-		for si in range(entry.mesh.get_surface_count()):
-			var mat: Material = entry.mesh.surface_get_material(si)
-			if mat and _material_has_texture(mat):
-				return true
-	return false
+	return "\n".join(lines)
 
 
 func _material_has_texture(mat: Material) -> bool:
@@ -1172,5 +1176,150 @@ func _audit_building_meshes(node: Node, lines: PackedStringArray, verbose: bool,
 
 	for child in node.get_children():
 		_audit_building_meshes(child, lines, verbose, counts, is_promoted)
+
+
+## Console command: lod_baseline_dump <label>
+## Combines lod_stats + mid_batch_stats + visibility_gaps + streaming_diag + look
+## into one text file under user://lod_baselines/<label>.txt with a header
+## capturing camera position + cell + frame time. One-shot baseline capture
+## for the LOD B-wide refactor (pre vs post comparison).
+## On Windows, user:// resolves to
+##   %APPDATA%/Godot/app_userdata/Godotwind/lod_baselines/<label>.txt
+func _cmd_lod_baseline_dump(args: Dictionary) -> String:
+	var label: String = str(args.get("label", "")).strip_edges()
+	if label.is_empty():
+		return "Usage: lod_baseline_dump <label>  (e.g. vivec_canton)"
+	# Sanitise label for filename use
+	var sanitised := ""
+	for ch in label:
+		if ch.to_lower() in "abcdefghijklmnopqrstuvwxyz0123456789_-":
+			sanitised += ch
+		else:
+			sanitised += "_"
+	if sanitised.is_empty():
+		return "Invalid label after sanitisation"
+
+	var out_dir := "user://lod_baselines"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(out_dir))
+	var out_path := "%s/%s.txt" % [out_dir, sanitised]
+
+	var camera: Camera3D = null
+	if _streaming_manager:
+		camera = _streaming_manager.get_viewport().get_camera_3d()
+	var cam_pos := camera.global_position if camera else Vector3.ZERO
+	var cam_rot_deg := camera.rotation_degrees if camera else Vector3.ZERO
+	var cam_fov: float = camera.fov if camera else 0.0
+	var cam_cell := Vector2i.ZERO
+	if _streaming_manager:
+		cam_cell = _streaming_manager._camera_cell
+
+	var header := "=== LOD BASELINE DUMP: %s ===\n" % sanitised
+	header += "Timestamp: %s\n" % Time.get_datetime_string_from_system(true)
+	header += "Frames drawn: %d\n" % Engine.get_frames_drawn()
+	header += "Frame time (ms): %.2f\n" % (1000.0 / maxf(Engine.get_frames_per_second(), 1.0))
+	header += "Camera pos: (%.1f, %.1f, %.1f)\n" % [cam_pos.x, cam_pos.y, cam_pos.z]
+	header += "Camera rot (deg): (%.1f, %.1f, %.1f)\n" % [cam_rot_deg.x, cam_rot_deg.y, cam_rot_deg.z]
+	header += "Camera FOV: %.1f\n" % cam_fov
+	header += "Camera cell: %s\n" % str(cam_cell)
+	header += "mesh_lod_threshold: %.2f\n" % (camera.get_viewport().mesh_lod_threshold if camera else 0.0)
+	header += "================================\n\n"
+
+	var sections: Array[String] = [
+		"--- lod_stats ---\n" + _cmd_lod_stats({}),
+		"--- mid_batch_stats ---\n" + _cmd_mid_batch_stats({}),
+		"--- visibility_gaps ---\n" + _cmd_visibility_gaps({}),
+		"--- streaming_diag ---\n" + _cmd_streaming_diag({}),
+		"--- look ---\n" + _cmd_look({}),
+		"--- mid_lod_textures ---\n" + _cmd_mid_lod_textures({}),
+	]
+	var body := "\n\n".join(sections)
+
+	var file := FileAccess.open(out_path, FileAccess.WRITE)
+	if not file:
+		return "FAILED to open %s for writing (error %d)" % [out_path, FileAccess.get_open_error()]
+	file.store_string(header + body)
+	file.close()
+
+	var globalised := ProjectSettings.globalize_path(out_path)
+	Log.info("tools", "Baseline dump written: %s" % globalised)
+	return "Baseline dump written: %s\n(%d bytes, %d sections)" % [globalised, header.length() + body.length(), sections.size()]
+
+#endregion
+
+
+#region Post-B-wide LOD tuning commands
+
+## Get or set the viewport `mesh_lod_threshold` (screen-space LOD bias).
+## Lower values = higher quality (LOD transitions happen later), higher values
+## = more aggressive LOD drops. Godot default 1.0 is "perceptually lossless".
+@warning_ignore("untyped_declaration")
+func _cmd_lod_threshold(args: Dictionary) -> String:
+	var viewport := _streaming_manager.get_viewport() if _streaming_manager else null
+	if not viewport:
+		return "No viewport available"
+	if not args.has("value"):
+		return "Current viewport.mesh_lod_threshold = %.3f px" % viewport.mesh_lod_threshold
+	var value: float = args["value"]
+	if value < 0.0:
+		return "mesh_lod_threshold must be >= 0.0"
+	viewport.mesh_lod_threshold = value
+	return "viewport.mesh_lod_threshold = %.3f px (was %s)" % [value, str(viewport.mesh_lod_threshold)]
+
+
+## Apply a new lod_bias to every currently-loaded static MID-tier RS instance.
+## Does not affect the NEAR tier scene-tree path (use per-type overrides there).
+@warning_ignore("untyped_declaration")
+func _cmd_lod_bias_global(args: Dictionary) -> String:
+	if not _streaming_manager or not _streaming_manager._static_renderer:
+		return "MID-tier static renderer not available"
+	var bias: float = args.get("bias", 1.0)
+	var renderer: StaticObjectRenderer = _streaming_manager._static_renderer
+	var updated := 0
+	for id: int in renderer._instances:
+		var data: StaticObjectRenderer.InstanceData = renderer._instances[id]
+		if data.instance_rid.is_valid():
+			RenderingServer.instance_geometry_set_lod_bias(data.instance_rid, bias)
+			updated += 1
+	return "Applied lod_bias=%.2f to %d RS instances" % [bias, updated]
+
+
+## Post-B-wide LOD pipeline status readout.
+@warning_ignore("untyped_declaration")
+func _cmd_lod_info(_args: Dictionary) -> String:
+	var lines: PackedStringArray = []
+	lines.append("=== LOD pipeline status (post-B-wide) ===")
+
+	var viewport := _streaming_manager.get_viewport() if _streaming_manager else null
+	if viewport:
+		lines.append("Viewport mesh_lod_threshold: %.3f px" % viewport.mesh_lod_threshold)
+		lines.append("Viewport size: %s" % str(viewport.get_visible_rect().size))
+
+	if _streaming_manager and _streaming_manager._static_renderer:
+		var renderer: StaticObjectRenderer = _streaming_manager._static_renderer
+		var stats: Dictionary = renderer.get_stats()
+		lines.append("")
+		lines.append("StaticObjectRenderer:")
+		lines.append("  mesh_types:        %d" % int(stats.get("mesh_types", 0)))
+		lines.append("  total_instances:   %d" % int(stats.get("total_instances", 0)))
+		lines.append("  visible_instances: %d" % int(stats.get("visible_instances", 0)))
+
+		var with_chain := 0
+		var without_chain := 0
+		for type_name: String in renderer._mesh_types:
+			var mt: StaticObjectRenderer.MeshType = renderer._mesh_types[type_name]
+			if mt.has_lod_chain:
+				with_chain += 1
+			else:
+				without_chain += 1
+		lines.append("  with embedded LOD chain:    %d" % with_chain)
+		lines.append("  without embedded LOD chain: %d" % without_chain)
+
+	lines.append("")
+	lines.append("Render tier band: 0-%.0fm (single visibility_range, FADE_SELF, %.0fm margin)" % [
+		DU.MID_END, DU.FADE_MARGIN_RENDER_FAR
+	])
+	lines.append("Sub-LOD selection: automatic (Godot RendererSceneCull screen-space coverage)")
+
+	return "\n".join(lines)
 
 #endregion

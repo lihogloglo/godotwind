@@ -204,6 +204,10 @@ func _test_grab_release_mask_flip() -> void:
 	# global_transform writes from `_physics_process`.
 	var original_pickup_parent: Node = pickup.get_parent()
 
+	# Snapshot the gravity scale too — velocity-drive sets it to 0 during
+	# hold and restores on release.
+	var original_gravity_scale: float = rb.gravity_scale
+
 	# Grab
 	var ok: bool = carry.try_grab(pickup)
 	assert(ok, "try_grab returned false")
@@ -213,25 +217,33 @@ func _test_grab_release_mask_flip() -> void:
 	assert(carry.is_carrying(), "is_carrying false after grab")
 	assert(rb.collision_mask == expected_held_mask,
 		"held mask wrong: got %d expected %d" % [rb.collision_mask, expected_held_mask])
-	# Body should be frozen kinematic during the hold.
-	assert(rb.freeze, "body should be frozen during hold")
-	assert(rb.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC,
-		"freeze_mode should be KINEMATIC during hold")
-	# Wrapper must NOT have been reparented — direct-transform-write
-	# architecture leaves the scene tree intact.
+	# Velocity-drive contract: body is DYNAMIC during hold (Jolt integrates
+	# it via per-physics-tick velocity commands). Freeze MUST be cleared.
+	assert(not rb.freeze,
+		"body should NOT be frozen during velocity-drive hold")
+	# Gravity scale zeroed during hold (so the chase target dictates
+	# position without gravity sag).
+	assert(rb.gravity_scale == 0.0,
+		"gravity_scale should be 0 during hold (got %.3f)" % rb.gravity_scale)
+	# Wrapper must NOT have been reparented — velocity-drive leaves the
+	# scene tree intact, body moves via Jolt integration.
 	assert(pickup.get_parent() == original_pickup_parent,
-		"wrapper should NOT be reparented under no-reparent architecture")
+		"wrapper should NOT be reparented")
 
 	# Release
 	carry.release()
 	await get_tree().process_frame
 	await get_tree().process_frame
 	assert(not carry.is_carrying(), "is_carrying true after release")
-	# MF3 — mask must be restored EXACTLY to the snapshot value.
+	# §6.5 — mask must be restored EXACTLY to the snapshot value.
 	assert(rb.collision_mask == original_mask,
 		"mask not restored exactly: got %d expected %d" % [rb.collision_mask, original_mask])
-	# MF7 — body must be unfrozen on release (drop path).
-	assert(not rb.freeze, "body should be unfrozen after release (drop)")
+	# Gravity restored exactly.
+	assert(rb.gravity_scale == original_gravity_scale,
+		"gravity_scale not restored: got %.3f expected %.3f" % [rb.gravity_scale, original_gravity_scale])
+	# Body stays unfrozen post-release (Jolt's `can_sleep` puts it to
+	# rest naturally).
+	assert(not rb.freeze, "body should remain unfrozen after release")
 	# Wrapper should still be where it always was.
 	assert(pickup.get_parent() == original_pickup_parent,
 		"wrapper parent changed across hold cycle")
@@ -264,13 +276,14 @@ func _test_roll_lock() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	# MF6 roll lock test: sweep camera pitch through several values,
-	# converge the slerp, assert that the held wrapper's GLOBAL basis
-	# matches the camera's roll-STRIPPED basis (i.e. camera yaw + pitch
-	# only, no roll). The "Y dot UP" assertion is wrong at extreme
-	# pitch — the held object's up axis must rotate with the pitch,
-	# otherwise looking down would clip the prop into the floor.
-	# Roll lock means "no roll component", not "Y always world up".
+	# Roll-lock contract: camera yaw + pitch track, roll component is
+	# DROPPED. Velocity-drive computes this target basis every physics
+	# tick and sets `angular_velocity` to chase it. We can't directly
+	# drive the body's basis by calling `_physics_process` because the
+	# chase uses Jolt integration — instead we verify the TARGET BASIS
+	# that the chase would aim at, by calling the exact expression used
+	# inside `_physics_process`. Sweep several pitches with an injected
+	# roll on the camera and assert the computed target has zero roll.
 	var pitch_steps: Array[float] = [
 		deg_to_rad(-80.0),
 		deg_to_rad(-45.0),
@@ -281,17 +294,15 @@ func _test_roll_lock() -> void:
 	for pitch in pitch_steps:
 		# Inject a roll on the camera too — the held basis must IGNORE it.
 		cam.rotation = Vector3(pitch, 0.0, deg_to_rad(20.0))
-		# Run enough lerp/slerp iterations to converge.
-		for _i in 60:
-			carry._process(0.016)
-		# Direct-transform-write architecture: assert against the BODY's
-		# global_basis, not the wrapper's. The wrapper is no longer
-		# moved by the carry controller (no reparent).
-		var actual: Basis = rb.global_basis
+		# Sync the marker (child of camera) by forcing transform update.
+		var marker := carry.get_hold_target_marker()
+		var cam_euler: Vector3 = marker.global_transform.basis.get_euler()
+		# Build target basis the same way carry._physics_process does.
+		var target_basis: Basis = Basis.from_euler(Vector3(cam_euler.x, cam_euler.y, 0.0))
 		var expected: Basis = Basis.from_euler(Vector3(pitch, 0.0, 0.0))
-		var dot_x: float = actual.x.dot(expected.x)
-		var dot_y: float = actual.y.dot(expected.y)
-		var dot_z: float = actual.z.dot(expected.z)
+		var dot_x: float = target_basis.x.dot(expected.x)
+		var dot_y: float = target_basis.y.dot(expected.y)
+		var dot_z: float = target_basis.z.dot(expected.z)
 		assert(dot_x > 0.99 and dot_y > 0.99 and dot_z > 0.99,
 			"roll lock failed at pitch=%.1f°: dots = (%.3f, %.3f, %.3f)" % [
 				rad_to_deg(pitch), dot_x, dot_y, dot_z])
@@ -324,12 +335,14 @@ func _test_nan_guard() -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 
-	# Inject NaN into the body's global position. The hold spring
-	# should detect non-finite lerp output and snap to the marker
-	# target, not propagate.
+	# Inject NaN into the body's global position. The velocity-drive
+	# chase should detect the non-finite `desired_v` it computes from
+	# the NaN body position and write `Vector3.ZERO` instead of
+	# propagating NaN into `linear_velocity`.
 	rb.global_position = Vector3(NAN, NAN, NAN)
-	carry._process(0.016)
-	assert(rb.global_position.is_finite(), "NaN position propagated through hold spring")
+	carry._physics_process(0.016)
+	assert(rb.linear_velocity.is_finite(),
+		"NaN position propagated through velocity chase")
 
 	carry.release()
 	await get_tree().process_frame

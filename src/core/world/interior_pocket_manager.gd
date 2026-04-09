@@ -1691,6 +1691,28 @@ func get_closest_preload_door() -> DoorInfo:
 	return null
 
 
+## Look up a DoorInfo by its ref_id. Used by the interaction framework
+## (`DoorInteractable.door_activated` signal) to map a ray-cast door hit
+## to the authoritative DoorInfo owned by this manager, which is then
+## passed to `enter_interior()` / `exit_to_exterior()` /
+## `transition_interior_to_interior()`.
+##
+## Search order: exterior doors first (hot path — player is usually
+## standing outside pressing E on a house), then doors inside the
+## active interior pocket if one is loaded. Returns null if no match.
+func get_door_info_by_ref_id(ref_id: StringName) -> DoorInfo:
+	if ref_id == &"":
+		return null
+	for door: DoorInfo in _exterior_doors:
+		if door.ref_id == ref_id:
+			return door
+	if _active_pocket:
+		for door: DoorInfo in _active_pocket.doors_inside:
+			if door.ref_id == ref_id:
+				return door
+	return null
+
+
 ## Whether the player is currently inside an interior
 func is_inside() -> bool:
 	return _is_inside

@@ -53,13 +53,16 @@ var _BatchDebugHUDScript: GDScript
 var _CrashReporterScript: GDScript
 var _DebugSystemScript: GDScript
 var _StreamingBenchmarkScript: GDScript
-var _LodTransitionTestScript: GDScript
 var _MidTierDebuggerScript: GDScript
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
 const MWCarryableRegistryScript := preload("res://src/core/interaction/morrowind/mw_carryable_registry.gd")
 const InventoryServiceScript := preload("res://src/core/interaction/inventory_service.gd")
 const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/mw_inventory_service.gd")
+# Interaction framework main-scene integration (2026-04-09).
+const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
+const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
+const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -146,6 +149,10 @@ enum CameraMode { FLY_CAMERA, PLAYER_CONTROLLER }
 var _camera_mode: CameraMode = CameraMode.FLY_CAMERA
 var fly_camera: FlyCamera = null  # FlyCamera instance (with script)
 var player_controller: PlayerController = null  # PlayerController instance
+
+# Interaction framework main-scene integration (2026-04-09)
+var _interaction_raycaster: InteractionRaycaster = null
+var _carry_controller: Node = null  # CarryController (no class_name export to avoid preload cycle)
 
 
 func _notification(what: int) -> void:
@@ -473,6 +480,42 @@ func _setup_cameras() -> void:
 	player_controller.set_physics_process(true)
 	player_controller.set_process_input(true)
 
+	# Interaction framework wiring (2026-04-09 main-scene integration).
+	# PlayerController._ready has already run at this point (it ran on
+	# add_child above), so get_camera() returns a valid first-person
+	# Camera3D under the SpringArm3D. Raycaster sits as a child of the
+	# camera so its forward cast tracks the look direction; CarryController
+	# sits as a child of the player rig and uses a Marker3D under the
+	# camera as the hold target. Same wiring as
+	# tests/visual/test_interaction_phase_I3.gd.
+	var player_camera := player_controller.get_camera()
+	if player_camera != null:
+		_interaction_raycaster = InteractionRaycasterScript.new()
+		_interaction_raycaster.name = "InteractionRaycaster"
+		_interaction_raycaster.camera = player_camera
+		# Cast from the player's eye (camera_pivot = head at 1.7m) in the
+		# camera's forward direction. Works in both first- and third-person:
+		# in third-person the SpringArm3D pushes the camera ~3m back, but
+		# the ray origin stays at the character's head so interaction reach
+		# is measured from the player, not from the chase cam. Canonical
+		# third-person interaction pattern — matches AC / RDR2 / Skyrim.
+		_interaction_raycaster.ray_origin_node = player_controller.camera_pivot
+		_interaction_raycaster.max_distance = 5.0
+		player_camera.add_child(_interaction_raycaster)
+		# Start disabled — scene opens in fly-camera mode. The
+		# player-mode switch re-enables physics_process below.
+		_interaction_raycaster.set_physics_process(false)
+		player_controller.set_interaction_raycaster(_interaction_raycaster)
+
+		_carry_controller = CarryControllerScript.new()
+		_carry_controller.name = "CarryController"
+		player_controller.add_child(_carry_controller)
+		_carry_controller.setup(player_camera, player_controller)
+		player_controller.set_carry_controller(_carry_controller)
+		_log("Interaction framework wired (raycaster + carry controller)")
+	else:
+		Log.warn("interaction", "PlayerController.get_camera() returned null — interaction framework NOT wired")
+
 	# Start in fly camera mode
 	_camera_mode = CameraMode.FLY_CAMERA
 	player_controller.disable()
@@ -706,6 +749,14 @@ func _switch_to_player_controller() -> void:
 
 	# Enable and position player controller
 	player_controller.teleport_to(player_pos)
+	# Third-person is the default. InteractionRaycaster casts from the
+	# player's eye (camera_pivot) in the camera's forward direction, so
+	# it works at full reach regardless of where the SpringArm3D puts the
+	# camera. See world_explorer._setup_cameras where ray_origin_node is
+	# wired, and docs/INTERACTION_SYSTEM.md for the third-person pattern.
+	# TAB still toggles first/third-person freely.
+	player_controller.set_camera_mode(PlayerControllerScript.CameraMode.THIRD_PERSON)
+	player_controller.allow_camera_mode_switch = true
 	player_controller.enable()
 
 	# Update camera reference for systems that need it
@@ -732,6 +783,11 @@ func _switch_to_player_controller() -> void:
 	if _pocket_manager:
 		_pocket_manager.set_player_body(player_controller)
 		_pocket_manager.set_camera(camera)
+
+	# Enable the interaction raycaster — it sits under the player camera
+	# and was idle in fly mode.
+	if _interaction_raycaster:
+		_interaction_raycaster.set_physics_process(true)
 
 	_log("[color=cyan]Switched to PLAYER mode[/color]")
 	_log("WASD to move, Space to jump, Shift to run")
@@ -778,6 +834,12 @@ func _switch_to_fly_camera() -> void:
 	# Update pocket manager camera for transitions
 	if _pocket_manager:
 		_pocket_manager.set_camera(camera)
+
+	# Disable the interaction raycaster in fly mode — its cast is from
+	# the player camera, not the fly camera, so results would be nonsense
+	# and the fly-camera KEY_E proximity fallback handles door travel.
+	if _interaction_raycaster:
+		_interaction_raycaster.set_physics_process(false)
 
 	_log("[color=cyan]Switched to FLY CAMERA mode[/color]")
 	_log("Hold Right-click to look, WASD to move")
@@ -920,18 +982,23 @@ func _setup_visibility_toggles() -> void:
 		"show_ocean_toggled": _ocean_controls.on_show_ocean_toggled,
 		"show_sky_toggled": _on_show_sky_toggled,
 		"cirrus_changed": _env_controls.on_cirrus_changed,
+		"cirrus_size_changed": _env_controls.on_cirrus_size_changed,
+		"cirrus_thickness_changed": _env_controls.on_cirrus_thickness_changed,
 		"weather_toggled": _weather_controls.on_weather_toggled,
-		"weather_preset_changed": _weather_controls.on_weather_preset_changed,
 		"weather_type_changed": _weather_controls.on_weather_type_changed,
 		"time_of_day_changed": _weather_controls.on_time_of_day_changed,
 		"time_scale_changed": _weather_controls.on_time_scale_changed,
 		"time_pause_toggled": _weather_controls.on_time_pause_toggled,
 		"fog_density_changed": _weather_controls.on_fog_density_changed,
 		"cloud_coverage_changed": _weather_controls.on_cloud_coverage_changed,
-		"manual_override_toggled": _weather_controls.on_manual_override_toggled,
+		"cloud_density_changed": _weather_controls.on_cloud_density_changed,
+		"cloud_sharpness_changed": _weather_controls.on_cloud_sharpness_changed,
+		"cloud_size_changed": _weather_controls.on_cloud_size_changed,
+		"wind_strength_changed": _weather_controls.on_wind_strength_changed,
 		"resolution_changed": _on_resolution_changed,
 		"water_quality_changed": _ocean_controls.on_water_quality_changed,
 		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
+		"choppiness_changed": _ocean_controls.on_choppiness_changed,
 		"debug_shore_toggled": _ocean_controls.on_debug_shore_toggled,
 		"taa_toggled": _env_controls.on_taa_toggled,
 		"ssao_toggled": _env_controls.on_ssao_toggled,
@@ -1314,15 +1381,9 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		else:
 			push_warning("WorldExplorer: Failed to load streaming_benchmark.gd")
 
-		# Register LOD transition test commands
-		if not _LodTransitionTestScript:
-			_LodTransitionTestScript = load("res://src/tools/lod_transition_test.gd")
-		if _LodTransitionTestScript:
-			_LodTransitionTestScript.register_console_commands(
-				console, native_streaming_manager, cell_manager, camera
-			)
-		else:
-			push_warning("WorldExplorer: Failed to load lod_transition_test.gd")
+		# Phase B-wide refactor: lod_transition_test.gd deleted (tested the old
+		# sibling-LOD scheme). Replacement screen-space LOD tuning commands live
+		# in lod_debug_commands.gd — `lod_threshold`, `lod_bias`, `lod_stats`.
 
 	# Initialize profiling report (extracted to ProfilingReport)
 	_profiling_report = ProfilingReport.new(
@@ -1635,8 +1696,13 @@ func _input(event: InputEvent) -> void:
 				# Toggle between fly camera and player controller
 				_toggle_camera_mode()
 			KEY_E:
-				# Enter/exit interior doors
-				_activate_nearest_door()
+				# Enter/exit interior doors — proximity fallback for
+				# fly-camera mode only. In player mode the unified
+				# `interact` action (also bound to E) drives the
+				# DoorInteractable signal path via the raycaster, so
+				# running both would double-trigger enter_interior.
+				if _camera_mode == CameraMode.FLY_CAMERA:
+					_activate_nearest_door()
 			# KEY_TAB removed — interior browser mode is accessible via UI button only
 			KEY_F3:
 				# Toggle performance overlay
@@ -1767,6 +1833,16 @@ func _setup_pocket_manager() -> void:
 			if cell:
 				_pocket_manager.register_exterior_cell_doors(cell, grid)
 
+	# Interaction framework: now that the pocket manager + streaming
+	# manager both exist, install the DoorInteractable.door_activated
+	# callback on the ReferenceInstantiator via CellManager, and hand
+	# the streaming manager reference to the carry controller for I.6
+	# persistent-node registration during carry.
+	if cell_manager:
+		cell_manager.set_door_activated_handler(_on_door_interactable_activated)
+	if _carry_controller and world_streaming_manager:
+		_carry_controller.set_streaming_manager(world_streaming_manager)
+
 	Log.info("streaming", "Interior pocket manager initialized")
 
 
@@ -1830,13 +1906,50 @@ func _update_door_prompt() -> void:
 		_door_prompt_label.visible = false
 
 
-## Activate the nearest door (enter/exit interior)
+## I.7 main-scene integration (2026-04-09) — DoorInteractable callback.
+##
+## Fires when a ray-cast DoorInteractable's `interact()` method runs
+## (triggered by PlayerController routing `interact_tap` to the
+## raycaster's current target). We receive the authoritative record_id
+## from the adapter, look up the matching DoorInfo in the pocket
+## manager, and hand it to the same enter/exit routing the old
+## proximity path used. That keeps fade-to-black, streaming pause,
+## seamless transition, interior-to-interior all working unchanged.
+##
+## Why look up via ref_id instead of the adapter's position: the
+## DoorInfo owned by the pocket manager is the single source of truth
+## for teleport destinations (DODT data) and building metadata. The
+## adapter only carries what the interaction framework needs. Looking
+## up by ref_id keeps the adapter lean without duplicating authoritative
+## data into it.
+func _on_door_interactable_activated(record_id: String, _door_record: Variant, _player: Node3D) -> void:
+	if not _pocket_manager:
+		return
+	var door: Variant = _pocket_manager.get_door_info_by_ref_id(StringName(record_id))
+	if door == null:
+		Log.warn("streaming", "[DOOR_INTERACT] no DoorInfo for ref_id '%s' — ignoring tap" % record_id)
+		return
+	_activate_door(door)
+
+
+## Activate the nearest door (proximity fallback — used by fly-camera
+## mode where the InteractionRaycaster isn't available).
 func _activate_nearest_door() -> void:
 	if not _pocket_manager:
 		return
 
 	var door: Variant = _pocket_manager.get_closest_door()
 	if not door:
+		return
+	await _activate_door(door)
+
+
+## Shared door transition routing — used by both the ray-cast
+## DoorInteractable path (player mode) and the proximity fallback
+## (fly-camera mode). Branches on `_pocket_manager.is_inside()` to
+## pick enter / exit / interior-to-interior.
+func _activate_door(door: Variant) -> void:
+	if not _pocket_manager or door == null:
 		return
 
 	Log.info("streaming", "[DOOR_ACTIVATE] Door: '%s' -> '%s', inside=%s" % [

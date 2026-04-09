@@ -1,0 +1,11 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/visual/test_lod_baseline.gd" id="1"]
+
+[node name="TestLodBaseline" type="Node3D"]
+script = ExtResource("1")
+cache_model_filename = "x_ex_hlaalu_b_01_nif.res"
+output_label = "phase_g_hlaalu_b_01"
+auto_run = true
+lod_spacing = 20.0
+aabb_tolerance = 0.05

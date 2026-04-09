@@ -96,49 +96,25 @@ func _ready() -> void:
 # ----------------------------------------------------------------------------
 
 func _run_self_tests() -> void:
-	_test_ring_buffer_window()
 	_test_weight_cap_no_mutation()
-	await _test_wall_pushback_raycast()
-	_test_throw_vs_drop_dispatch()
-	Log.info("interaction", "[self-test] I.4 throw + weight cap + pushback — PASS")
+	Log.info("interaction", "[self-test] I.4 weight cap — PASS")
 
-
-# MF2 — ring buffer time-window decay
-func _test_ring_buffer_window() -> void:
-	var harness := Node3D.new()
-	add_child(harness)
-	var cam := Camera3D.new()
-	harness.add_child(cam)
-	var carry := CarryControllerScript.new()
-	harness.add_child(carry)
-	carry.setup(cam, null)
-
-	# Manually push 5 samples spread over 120 ms.
-	var SampleClass := CarryControllerScript.CameraSample
-	var t0: int = 1000
-	carry._camera_basis_history = []
-	for i in 5:
-		var t = t0 + i * 30  # 0, 30, 60, 90, 120
-		var s = SampleClass.new(t, Basis.IDENTITY)
-		carry._camera_basis_history.append(s)
-
-	# Simulate "now" = 1130 ms by re-running the cleanup logic with a
-	# stub. Since _sample_camera_basis pulls Time.get_ticks_msec()
-	# directly, we instead manually do the cleanup and check.
-	var cutoff: int = 1130 - CarryControllerScript.THROW_SAMPLE_WINDOW_MS  # = 1080
-	while carry._camera_basis_history.size() > 0 and carry._camera_basis_history[0].time_msec < cutoff:
-		carry._camera_basis_history.pop_front()
-
-	# Surviving entries: 1090 (i=3) + 1120 (i=4). But cutoff=1080 means
-	# entries with time_msec >= 1080 survive: 1090 and 1120. Two.
-	assert(carry._camera_basis_history.size() == 2,
-		"ring buffer window decay wrong: kept %d (expected 2)" % carry._camera_basis_history.size())
-	assert(carry._camera_basis_history[0].time_msec == 1090,
-		"oldest surviving entry wrong: %d" % carry._camera_basis_history[0].time_msec)
-	assert(carry._camera_basis_history[1].time_msec == 1120,
-		"newest surviving entry wrong: %d" % carry._camera_basis_history[1].time_msec)
-
-	harness.queue_free()
+# NOTE: the old `_test_ring_buffer_window`, `_test_wall_pushback_raycast`,
+# and `_test_throw_vs_drop_dispatch` self-tests were deleted 2026-04-09
+# when `CarryController` was rewritten to use the HL2 velocity-drive
+# pattern. Those tests exercised private internals (`_camera_basis_history`,
+# `CameraSample`, `_apply_wall_pushback`, `_measure_camera_angular_velocity`,
+# `THROW_THRESHOLD_*` constants) that no longer exist:
+#   - Ring buffer is gone — throw velocity is whatever the body's last-
+#     frame chase velocity was at release time. Physics carries it.
+#   - Wall pushback is gone — the held body is dynamic, Jolt handles
+#     wall collisions natively via the collision shape. No raycast hack.
+#   - Throw vs drop dispatch is gone — every release is "stop overwriting
+#     velocity", the body keeps its current velocity. Fast camera swing
+#     at release = fast throw, stationary release = soft drop. No
+#     threshold logic, no special-case dispatch.
+# Weight cap is the only self-test that still makes sense; it exercises
+# pure public-API state (try_grab refusal + no mutation on refused grab).
 
 
 # MF3 — weight cap returns BEFORE any RB mutation
@@ -183,98 +159,6 @@ func _test_weight_cap_no_mutation() -> void:
 	assert(not carry.is_carrying(), "is_carrying should be false after refused grab")
 
 	prop.queue_free()
-	harness.queue_free()
-	fake_player.queue_free()
-
-
-# MF4 — wall pushback raycast pulls marker back
-func _test_wall_pushback_raycast() -> void:
-	var harness := Node3D.new()
-	add_child(harness)
-	var cam := Camera3D.new()
-	harness.add_child(cam)
-	var fake_player := CharacterBody3D.new()
-	add_child(fake_player)
-	var carry := CarryControllerScript.new()
-	harness.add_child(carry)
-	carry.setup(cam, fake_player)
-
-	# Wall at z = -0.4 (0.4 m in front of camera).
-	var wall := StaticBody3D.new()
-	wall.collision_layer = 1  # Environment
-	wall.position = Vector3(0, 0, -0.4)
-	add_child(wall)
-	var wall_shape := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(2, 2, 0.1)
-	wall_shape.shape = box
-	wall.add_child(wall_shape)
-
-	# Build a fake carryable.
-	var prop := _build_fake_prop("selftest_pushback", Vector3(0.1, 0.1, 0.1), Color.WHITE)
-	add_child(prop)
-	var rb := CarryableBodyFactoryScript.convert_static_to_rigid(
-		prop, 1.0, &"selftest_pushback", "PushTest", PickupInteractableScript)
-	var pickup: Interactable = rb.get_parent() as Interactable
-	carry.try_grab(pickup)
-	# Wait two frames so the deferred grab + body teleport land.
-	await get_tree().process_frame
-	await get_tree().process_frame
-	# Force the marker AND the immutable capture to a known capture
-	# distance of 1.0 m forward. §17.2.2 fix changed pushback to read
-	# `_hold_capture_local` instead of the marker's current local pos
-	# (which gets mutated by prior pushback frames). The test sets
-	# both to keep them in sync — bypasses the normal grab capture path.
-	carry._hold_target_marker.position = Vector3(0, 0, -1.0)
-	carry._hold_capture_local = Vector3(0, 0, -1.0)
-
-	# Run the pushback once.
-	carry._apply_wall_pushback()
-
-	# Marker should now sit at z ≈ -(0.4 - clearance) = -0.3 (clearance 0.1).
-	var pulled_z: float = carry._hold_target_marker.position.z
-	assert(absf(pulled_z - (-0.3)) < 0.05,
-		"pushback z wrong: %.3f (expected ~-0.30)" % pulled_z)
-
-	carry.release()
-	await get_tree().process_frame
-	await get_tree().process_frame
-	wall.queue_free()
-	prop.queue_free()
-	harness.queue_free()
-	fake_player.queue_free()
-
-
-# MF5 — throw vs drop dispatch
-func _test_throw_vs_drop_dispatch() -> void:
-	var harness := Node3D.new()
-	add_child(harness)
-	var cam := Camera3D.new()
-	harness.add_child(cam)
-	var fake_player := CharacterBody3D.new()
-	add_child(fake_player)
-	var carry := CarryControllerScript.new()
-	harness.add_child(carry)
-	carry.setup(cam, fake_player)
-
-	# Sanity: when no samples in buffer, ang vel = 0 → drop path.
-	var measured_zero: Vector3 = carry._measure_camera_angular_velocity()
-	assert(measured_zero == Vector3.ZERO, "empty buffer should give zero")
-
-	# Synthesize a fast camera rotation in the ring buffer.
-	# Old basis = identity, new basis = rotated 0.1 rad around Y axis,
-	# delta_t = 30 ms → angular speed = 0.1 / 0.03 ≈ 3.33 rad/s (above
-	# THROW_THRESHOLD_ANGULAR_RAD_S = 1.5).
-	var SampleClass := CarryControllerScript.CameraSample
-	carry._camera_basis_history = []
-	carry._camera_basis_history.append(SampleClass.new(1000, Basis.IDENTITY))
-	var rotated := Basis(Vector3.UP, 0.1)
-	carry._camera_basis_history.append(SampleClass.new(1030, rotated))
-	var measured_fast: Vector3 = carry._measure_camera_angular_velocity()
-	var speed: float = measured_fast.length()
-	assert(speed > CarryControllerScript.THROW_THRESHOLD_ANGULAR_RAD_S,
-		"synthesized angular speed below threshold: %.3f" % speed)
-
 	harness.queue_free()
 	fake_player.queue_free()
 

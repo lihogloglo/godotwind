@@ -663,7 +663,7 @@ func _add_lods_to_scene(node: Node) -> void:
 		elif not mesh_instance.has_meta("_has_skeleton") and mesh_instance.mesh != null:
 			var mesh := mesh_instance.mesh as ArrayMesh
 			if mesh:
-				_add_visibility_range_lods(mesh_instance, mesh)
+				_generate_lod_chain(mesh_instance, mesh)
 
 	# Recurse into children
 	for child in node.get_children():
@@ -1179,14 +1179,23 @@ func _should_generate_lods() -> bool:
 	return StreamingPolicyScript.should_generate_lods(_source_path)
 
 
-## Add VisibilityRange-based LOD system to a MeshInstance3D
-## Creates LOD hierarchy by generating simplified meshes and wrapping them in visibility range nodes
-func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh) -> void:
+## Generate an embedded LOD chain on a MeshInstance3D using Godot's native
+## ImporterMesh pipeline (the same path used by glTF/FBX/OBJ importers).
+##
+## Canonical pattern — replaces the old hand-rolled sibling-`_LODn` scheme
+## (see docs/audit/LOD_REFACTOR_B_WIDE.md §4.1). The engine runs meshoptimizer
+## internally with the correct weld + SimplifyLockBorder + attribute remap flags
+## and embeds the cascade inside the ArrayMesh via `surface_lod_indices`. The
+## renderer then picks the right LOD per frame from screen-space coverage.
+##
+## No sibling nodes. No per-band visibility_range cascade. Single hard-cull
+## visibility_range drives the tier→impostor handoff at 500m.
+func _generate_lod_chain(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh) -> void:
 	var surface_count := original_mesh.get_surface_count()
 	if surface_count == 0:
 		return
 
-	# Count total triangles across ALL surfaces (not just surface 0)
+	# Count total triangles across all surfaces.
 	var num_triangles: int = 0
 	for si in range(surface_count):
 		var surf_arrays := original_mesh.surface_get_arrays(si)
@@ -1201,29 +1210,26 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 			Log.debug("nif", "NIFConverter: Skipping LOD for '%s' with %d triangles (min: %d)" % [
 				_source_path.get_file(), num_triangles, min_triangles_for_lod
 			])
+		# Even for small meshes, set the single hard-cull visibility_range so the
+		# tier→impostor handoff still fires correctly.
+		_apply_render_tier_visibility_range(mesh_instance)
 		return
 
-	# visibility_range IS set here at prebake time (see lines below).
-	# This ensures LOD nodes have correct ranges when loaded from cache.
-	# NativeStreamingManager may also reconfigure at runtime if needed.
-	#
-	# LOD0 (original mesh): NEAR tier (0-150m)
-	# LOD1/2/3: MID tier sub-levels (150-250m, 250-375m, 375-500m)
-
 	if debug_lod:
-		Log.debug("nif", "NIFConverter: Generating %d LOD levels for '%s' (%d triangles, %d surfaces)" % [
-			lod_levels, _source_path.get_file(), num_triangles, surface_count
+		Log.debug("nif", "NIFConverter: Generating LOD chain for '%s' (%d triangles, %d surfaces)" % [
+			_source_path.get_file(), num_triangles, surface_count
 		])
 
-	# Collect per-surface materials for multi-surface LODs.
-	# material_override applies to ALL surfaces — if set, LOD gets it too.
-	# Otherwise, each surface keeps its own material from the mesh.
+	# Resolve the effective material for each surface BEFORE feeding ImporterMesh.
+	# Priority (preserved from the old pipeline):
+	#   1. mesh_instance.material_override (applies to all surfaces)
+	#   2. per-surface override material
+	#   3. per-surface mesh material
+	#   4. fallback search on parent/sibling MeshInstance3D (only if mesh has no
+	#      per-surface materials at all)
 	var override_material: Material = mesh_instance.material_override
-
-	# Fallback material search (parent/sibling) — only used if no override AND no surface materials
 	var fallback_material: Material = null
 	if override_material == null:
-		# Check if the mesh itself has any surface materials
 		var has_any_surface_mat := false
 		for si in range(surface_count):
 			var smat: Material = mesh_instance.get_surface_override_material(si)
@@ -1233,7 +1239,6 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 				has_any_surface_mat = true
 				break
 
-		# Only search parent/sibling if mesh has NO materials at all
 		if not has_any_surface_mat:
 			var parent_node: Node = mesh_instance.get_parent()
 			while parent_node and fallback_material == null:
@@ -1254,122 +1259,85 @@ func _add_visibility_range_lods(mesh_instance: MeshInstance3D, original_mesh: Ar
 						if fallback_material:
 							break
 
-	var simplifier := MeshOptimizer.new()
-	var parent := mesh_instance.get_parent()
-
-	# Generate each LOD level
-	for lod_idx in range(lod_levels):
-		if lod_idx >= lod_reduction_ratios.size():
-			break
-
-		var reduction := lod_reduction_ratios[lod_idx]
-
-		# Create LOD mesh with ALL surfaces simplified independently
-		var lod_mesh := ArrayMesh.new()
-		lod_mesh.set_blend_shape_mode(Mesh.BLEND_SHAPE_MODE_RELATIVE)
-		var lod_total_tris: int = 0
-		var surfaces_added: int = 0
-
-		for si in range(surface_count):
-			var surf_arrays := original_mesh.surface_get_arrays(si)
-			if surf_arrays.is_empty():
-				continue
-			var surf_indices: PackedInt32Array = surf_arrays[Mesh.ARRAY_INDEX]
-			if surf_indices == null or surf_indices.is_empty():
-				continue
-
-			var lod_arrays := simplifier.simplify_arrays(surf_arrays, reduction)
-			if lod_arrays.is_empty() or lod_arrays[Mesh.ARRAY_VERTEX] == null:
-				continue
-			var lod_indices: PackedInt32Array = lod_arrays[Mesh.ARRAY_INDEX]
-			if lod_indices == null or lod_indices.is_empty():
-				continue
-
-			lod_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, lod_arrays)
-
-			# Set per-surface material (override_material covers all via material_override below)
-			var surf_mat: Material = null
-			if override_material == null:
-				surf_mat = mesh_instance.get_surface_override_material(si)
-				if surf_mat == null:
-					surf_mat = original_mesh.surface_get_material(si)
-				if surf_mat == null:
-					surf_mat = fallback_material
-			if surf_mat:
-				lod_mesh.surface_set_material(surfaces_added, surf_mat)
-
-			lod_total_tris += lod_indices.size() / 3
-			surfaces_added += 1
-
-		if surfaces_added == 0:
-			if debug_lod:
-				Log.debug("nif", "  LOD%d: Failed to generate (all surfaces empty)" % (lod_idx + 1))
+	# Feed every surface into ImporterMesh. The engine runs meshoptimizer
+	# per-surface internally with LockBorder + attribute remap + vertex cache opt.
+	var importer := ImporterMesh.new()
+	var surfaces_added: int = 0
+	for si in range(surface_count):
+		var surf_arrays := original_mesh.surface_get_arrays(si)
+		if surf_arrays.is_empty():
+			continue
+		var surf_indices: PackedInt32Array = surf_arrays[Mesh.ARRAY_INDEX]
+		if surf_indices == null or surf_indices.is_empty():
 			continue
 
-		# Create LOD mesh instance
-		var lod_instance := MeshInstance3D.new()
-		lod_instance.name = "%s_LOD%d" % [mesh_instance.name, lod_idx + 1]
-		lod_instance.mesh = lod_mesh
-		# Apply material_override only if the original has one (covers all surfaces)
-		if override_material:
-			lod_instance.material_override = override_material
+		var effective_material: Material = null
+		if override_material != null:
+			effective_material = override_material
+		else:
+			effective_material = mesh_instance.get_surface_override_material(si)
+			if effective_material == null:
+				effective_material = original_mesh.surface_get_material(si)
+			if effective_material == null:
+				effective_material = fallback_material
 
-		# Copy transform from original
-		lod_instance.transform = mesh_instance.transform
+		# blend_shapes empty, lods dict empty (ImporterMesh auto-generates).
+		importer.add_surface(
+			Mesh.PRIMITIVE_TRIANGLES,
+			surf_arrays,
+			[],
+			{},
+			effective_material
+		)
+		surfaces_added += 1
 
-		# Configure visibility_range at prebake time to ensure correct LOD behavior
-		# This avoids relying on runtime configuration which may fail during async loading
-		# Distance constants from distance_utils.gd (tiered margins)
-		lod_instance.visible = true
+	if surfaces_added == 0:
+		_apply_render_tier_visibility_range(mesh_instance)
+		return
 
-		# Set visibility_range based on LOD level (lod_idx is 0-based, LOD level is 1-based)
-		match lod_idx + 1:
-			1:  # LOD1: 150-250m (MID tier, first level)
-				lod_instance.visibility_range_begin = 150.0
-				lod_instance.visibility_range_end = 250.0
-				lod_instance.visibility_range_begin_margin = 5.0   # FADE_MARGIN_NEAR_LOD1
-				lod_instance.visibility_range_end_margin = 10.0    # FADE_MARGIN_LOD1_LOD2
-			2:  # LOD2: 250-375m (MID tier, second level)
-				lod_instance.visibility_range_begin = 250.0
-				lod_instance.visibility_range_end = 375.0
-				lod_instance.visibility_range_begin_margin = 10.0  # FADE_MARGIN_LOD1_LOD2
-				lod_instance.visibility_range_end_margin = 15.0    # FADE_MARGIN_LOD2_LOD3
-			3:  # LOD3: 375-500m (MID tier, third level)
-				lod_instance.visibility_range_begin = 375.0
-				lod_instance.visibility_range_end = 500.0
-				lod_instance.visibility_range_begin_margin = 15.0  # FADE_MARGIN_LOD2_LOD3
-				lod_instance.visibility_range_end_margin = 20.0    # FADE_MARGIN_LOD3_FAR
-			_:  # Fallback for any additional levels
-				lod_instance.visibility_range_begin = 375.0
-				lod_instance.visibility_range_end = 500.0
-				lod_instance.visibility_range_begin_margin = 15.0
-				lod_instance.visibility_range_end_margin = 20.0
+	# glTF importer defaults — 60° merge angle, 25° split angle (unused in 4.6+
+	# but kept for API compatibility), empty bone_transform_array for static meshes.
+	importer.generate_lods(60.0, 25.0, [])
 
-		# FADE_DEPENDENCIES enables smooth crossfade between sibling LOD nodes
-		lod_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+	# Replace the source mesh on the instance with the LOD-chained version.
+	var lod_mesh: ArrayMesh = importer.get_mesh()
+	if lod_mesh == null:
+		push_warning("NIFConverter: ImporterMesh.get_mesh() returned null for '%s'" % _source_path.get_file())
+		_apply_render_tier_visibility_range(mesh_instance)
+		return
 
-		# Add as sibling to original mesh
-		if parent:
-			parent.add_child(lod_instance)
+	# Preserve metadata that the source mesh may have carried (e.g. skin data,
+	# bone names) — ImporterMesh.get_mesh() produces a fresh ArrayMesh.
+	for meta_key in original_mesh.get_meta_list():
+		lod_mesh.set_meta(meta_key, original_mesh.get_meta(meta_key))
 
-		if debug_lod:
-			Log.debug("nif", "  LOD%d: %d -> %d triangles (%.1f%%), %d surfaces, range: %.0f-%.0fm" % [
-				lod_idx + 1, num_triangles, lod_total_tris,
-				100.0 * lod_total_tris / num_triangles if num_triangles > 0 else 0.0,
-				surfaces_added,
-				lod_instance.visibility_range_begin, lod_instance.visibility_range_end
-			])
+	# Metadata stamp so cache-detection code (targeted_rebake._cache_has_lods)
+	# can tell whether a cached .res file was baked with the new pipeline.
+	# ArrayMesh does NOT expose surface_get_lod_count in the scripting API in
+	# 4.6, so we rely on this meta flag instead.
+	lod_mesh.set_meta("has_lod_chain", true)
 
-	# Configure the original mesh (LOD0) as NEAR tier (0-150m)
-	# This ensures LOD0 is only visible at close range, transitioning to LOD1 at 150m
-	mesh_instance.visibility_range_begin = 0.0
-	mesh_instance.visibility_range_end = 150.0  # NEAR_END
-	mesh_instance.visibility_range_begin_margin = 0.0
-	mesh_instance.visibility_range_end_margin = 5.0  # FADE_MARGIN_NEAR_LOD1
-	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DEPENDENCIES
+	mesh_instance.mesh = lod_mesh
+	_apply_render_tier_visibility_range(mesh_instance)
 
 	if debug_lod:
-		Log.debug("nif", "  LOD0 (original): configured for NEAR tier (0-150m)")
+		var lod_count := importer.get_surface_lod_count(0)
+		var lod_summary := "[count=%d" % lod_count
+		for i in range(lod_count):
+			var idx: PackedInt32Array = importer.get_surface_lod_indices(0, i)
+			lod_summary += " L%d=%d" % [i + 1, idx.size() / 3]
+		lod_summary += "]"
+		Log.debug("nif", "  LOD chain for surface 0: base=%d %s" % [num_triangles, lod_summary])
+
+
+## Apply the single render-tier→impostor-handoff visibility_range on a mesh
+## instance. Used by the new LOD pipeline to replace the per-sub-band cascade.
+static func _apply_render_tier_visibility_range(mesh_instance: MeshInstance3D) -> void:
+	mesh_instance.visibility_range_begin = 0.0
+	mesh_instance.visibility_range_end = 500.0  # MID_END — tier→impostor handoff
+	mesh_instance.visibility_range_begin_margin = 0.0
+	mesh_instance.visibility_range_end_margin = 20.0  # FADE_MARGIN_RENDER_FAR
+	mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
 
 ## Create ArrayMesh from NiTriShapeData

@@ -14,12 +14,24 @@ const NUM_LOD_RINGS: int = 11
 const BASE_QUAD_SIZE: float = 2.0  # Innermost ring quad size in meters
 const RING_VERTEX_COUNT: int = 64   # Vertices per side for each ring
 
+# Projected grid configuration — single flat N×N mesh in local [0,1]²; the
+# vertex shader unprojects each vertex from NDC → world via INV_VIEW_PROJECTION
+# and ray-intersects the water plane. 192 = ~36k vertices which matches the
+# clipmap path's fine-ring density while giving uniform screen-space coverage.
+const PROJECTED_GRID_DIM: int = 192
+
 enum QualityMode { FLAT, STANDARD, HIGH }
+# MeshMode is independent of QualityMode. CLIPMAP is the 11-ring concentric
+# mesh built by `_create_clipmap_mesh()`. PROJECTED is the Sea of Thieves /
+# Wicked Engine flat grid + vertex-shader unproject path. PROJECTED is only
+# meaningful in HIGH quality (FFT) — FLAT and STANDARD ignore it.
+enum MeshMode { CLIPMAP, PROJECTED }
 
 # Shader state
 var _material: ShaderMaterial = null
 var _shader: Shader = null
 var _quality: QualityMode = QualityMode.STANDARD
+var _mesh_mode: MeshMode = MeshMode.CLIPMAP
 
 # Cached state for quality switching
 var _cached_shore_mask: Texture2D = null
@@ -29,13 +41,26 @@ var _cached_foam_texture: Texture2D = null
 var _debug_shore_mask: bool = false
 
 
-func initialize(radius: float, quality_override: int = -1) -> void:
+func initialize(radius: float, quality_override: int = -1, mesh_mode: int = -1) -> void:
 	_select_quality(quality_override)
+	if mesh_mode >= 0:
+		_mesh_mode = mesh_mode as MeshMode
+	# Projected grid is FFT-only. Downgrade silently if the user asked for
+	# PROJECTED at a lower quality — there's no point unprojecting for a
+	# Gerstner shader that reads flat vertex positions.
+	if _mesh_mode == MeshMode.PROJECTED and _quality != QualityMode.HIGH:
+		Log.warn("water", "OceanMesh: PROJECTED mesh mode requested but quality is not HIGH (FFT); falling back to CLIPMAP")
+		_mesh_mode = MeshMode.CLIPMAP
+
 	_create_shader()
 	_create_material()
-	_create_clipmap_mesh(radius)
+	if _mesh_mode == MeshMode.PROJECTED:
+		_create_projected_mesh(radius)
+	else:
+		_create_clipmap_mesh(radius)
 
-	Log.info("water", "OceanMesh: Initialized - radius: %.0fm, mode: %s" % [radius, _quality_name()])
+	Log.info("water", "OceanMesh: Initialized - radius: %.0fm, quality: %s, mesh: %s" % [
+		radius, _quality_name(), _mesh_mode_name()])
 
 
 func _select_quality(quality_override: int) -> void:
@@ -65,14 +90,20 @@ func _select_quality(quality_override: int) -> void:
 func _create_shader() -> void:
 	match _quality:
 		QualityMode.HIGH:
+			# Pick the FFT shader matching the current mesh mode. Both shaders
+			# share `ocean_fft_common.gdshaderinc` — fragment + light + all
+			# uniforms — so switching mesh mode is literally just swapping
+			# the vertex path.
 			var shader_path := "res://src/core/water/shaders/ocean_fft.gdshader"
+			if _mesh_mode == MeshMode.PROJECTED:
+				shader_path = "res://src/core/water/shaders/ocean_fft_projected.gdshader"
 			_shader = load(shader_path) as Shader
 			if not _shader:
-				Log.warn("water", "OceanMesh: FFT shader not found, falling back to Gerstner")
+				Log.warn("water", "OceanMesh: FFT shader not found at %s, falling back to Gerstner" % shader_path)
 				_quality = QualityMode.STANDARD
 				_create_shader()
 				return
-			Log.info("water", "OceanMesh: Using ocean_fft.gdshader (FFT)")
+			Log.info("water", "OceanMesh: Using %s" % shader_path.get_file())
 
 		QualityMode.STANDARD:
 			var shader_path := "res://src/core/water/shaders/ocean_standard.gdshader"
@@ -225,7 +256,21 @@ func _create_clipmap_mesh(radius: float) -> void:
 
 	for ring in range(NUM_LOD_RINGS):
 		var quad_size := BASE_QUAD_SIZE * pow(2.0, float(ring))
+		# 2026-04-09 — clipmap seam fix. Successive rings have 2x quad_size
+		# so the inner ring's outer edge has twice as many vertices as the
+		# outer ring's inner edge, creating T-junctions. When the FFT
+		# displacement lifts wave crests and `depth_draw_always` is honest
+		# about depth (prior fix), those T-junctions surface as gaping
+		# holes at ring boundaries. Canonical fix = CDLOD quadtree morph,
+		# tracked for a later session. Interim: overlap rings 1+ inward
+		# by one outer-ring quad so the fine inner ring and coarse outer
+		# ring share a covered strip. Both rings sample the same
+		# displacement at the same world XZ, so the vertices land at the
+		# same Y — no z-fighting, just twice the triangle work in a thin
+		# band. Ring 0 stays centered on origin (its inner_radius is 0).
 		var inner_radius := prev_outer_radius
+		if ring > 0:
+			inner_radius = maxf(0.0, prev_outer_radius - quad_size)
 		var outer_radius := quad_size * RING_VERTEX_COUNT * 0.5
 		outer_radius = minf(outer_radius, radius)
 
@@ -266,6 +311,90 @@ func _create_clipmap_mesh(radius: float) -> void:
 
 	Log.info("water", "OceanMesh: Created mesh with %d vertices, %d triangles, %d rings" % [
 		vertices.size(), indices.size() / 3, NUM_LOD_RINGS])
+
+
+# ============================================================================
+# PROJECTED GRID MESH CREATION
+# ============================================================================
+# Single flat N×N grid in local [0,1]² coordinates. The vertex shader unprojects
+# each vertex from NDC → world ray → water plane intersection, so the mesh
+# itself stays at origin with identity transform. Its job is just to provide
+# PROJECTED_GRID_DIM² × 2 triangles worth of vertex-shader invocations.
+#
+# `custom_aabb` is set to an enormous box so the MeshInstance3D never gets
+# frustum-culled regardless of where the camera is. Without this Godot would
+# test the [0,1]² box against the frustum and cull the mesh away as soon as
+# the camera stopped being inside the tiny local volume.
+#
+# Reference: Claes Johanson 2004, Wicked Engine `oceanSurfaceVS.hlsl`.
+
+func _create_projected_mesh(radius: float) -> void:
+	var dim := PROJECTED_GRID_DIM
+	var vert_count := (dim + 1) * (dim + 1)
+	var quad_count := dim * dim
+
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	vertices.resize(vert_count)
+	uvs.resize(vert_count)
+	indices.resize(quad_count * 6)
+
+	var inv_dim := 1.0 / float(dim)
+	var vi := 0
+	for z in range(dim + 1):
+		for x in range(dim + 1):
+			var u := float(x) * inv_dim
+			var v := float(z) * inv_dim
+			# Local grid position in [0,1]². Shader reads VERTEX.xz as the
+			# normalized NDC seed.
+			vertices[vi] = Vector3(u, 0.0, v)
+			uvs[vi] = Vector2(u, v)
+			vi += 1
+
+	var ii := 0
+	for z in range(dim):
+		for x in range(dim):
+			var i00 := z * (dim + 1) + x
+			var i10 := i00 + 1
+			var i01 := i00 + (dim + 1)
+			var i11 := i01 + 1
+			indices[ii + 0] = i00
+			indices[ii + 1] = i01
+			indices[ii + 2] = i10
+			indices[ii + 3] = i10
+			indices[ii + 4] = i01
+			indices[ii + 5] = i11
+			ii += 6
+
+	var normals := PackedVector3Array()
+	normals.resize(vert_count)
+	normals.fill(Vector3.UP)
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+
+	var array_mesh := ArrayMesh.new()
+	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	# Enormous custom AABB — the vertex shader writes world positions anywhere
+	# in space, so frustum culling based on the local mesh bounds is wrong.
+	# 1e6 meters on each axis is safely beyond any realistic camera view.
+	array_mesh.custom_aabb = AABB(
+		Vector3(-1.0e6, -1.0e4, -1.0e6),
+		Vector3( 2.0e6,  2.0e4,  2.0e6)
+	)
+	mesh = array_mesh
+
+	# Belt-and-suspenders: in case a scene camera has a very tight frustum,
+	# force a huge cull margin too.
+	extra_cull_margin = 1.0e6
+
+	Log.info("water", "OceanMesh: Created projected grid - %d×%d (%d vertices, %d triangles)" % [
+		dim, dim, vert_count, quad_count * 2])
 
 
 func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, vertex_offset: int) -> Dictionary:
@@ -348,7 +477,13 @@ func _create_ring(inner_radius: float, outer_radius: float, quad_size: float, ve
 # ============================================================================
 
 func update_position(center: Vector3) -> void:
-	# Snap mesh position to large grid to prevent vertex swimming
+	# In PROJECTED mode the mesh stays at origin — the vertex shader unprojects
+	# the camera's NDC and intersects the water plane, so "moving" the mesh is
+	# a no-op (and would actually break things by pushing the mesh out from
+	# under its enormous custom AABB).
+	if _mesh_mode == MeshMode.PROJECTED:
+		return
+	# CLIPMAP mode: snap mesh position to large grid to prevent vertex swimming.
 	# 64m snap = inner ring half-size. Vertices stable between rare jumps.
 	# Must move mesh (not shader offset) so Godot's AABB frustum culling stays correct.
 	const SNAP_SIZE: float = 64.0
@@ -357,6 +492,14 @@ func update_position(center: Vector3) -> void:
 		center.y,
 		snappedf(center.z, SNAP_SIZE)
 	)
+
+
+func get_mesh_mode() -> MeshMode:
+	return _mesh_mode
+
+
+func _mesh_mode_name() -> String:
+	return "Projected" if _mesh_mode == MeshMode.PROJECTED else "Clipmap"
 
 
 func set_wave_scale(scale: float) -> void:

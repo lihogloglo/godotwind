@@ -161,15 +161,36 @@ func _get_cache_path(model_path: String, models_dir: String) -> String:
 	return models_dir.path_join(safe_name + ".res")
 
 
-## Check if a cached PackedScene contains LOD nodes (without full instantiation)
+## Check if a cached PackedScene was baked with the new-format LOD chain.
+##
+## Post-B-wide refactor: LODs are embedded inside the ArrayMesh via
+## `surface_lod_indices`, there are no sibling `_LODn` nodes. ArrayMesh does NOT
+## expose `surface_get_lod_count` in the scripting API in 4.6, so `nif_converter`
+## stamps `mesh.set_meta("has_lod_chain", true)` at bake time and we read it here.
+##
+## Returns true if at least one mesh in the cached scene carries the meta marker.
 func _cache_has_lods(cache_path: String) -> bool:
 	var packed := ResourceLoader.load(cache_path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
 	if not packed:
 		return false
-	var state := packed.get_state()
-	for i in state.get_node_count():
-		var node_name: String = state.get_node_name(i)
-		if node_name.ends_with("_LOD1") or node_name.ends_with("_LOD2") or node_name.ends_with("_LOD3"):
+	# Instantiate in order to reach the ArrayMesh resources — PackedScene.get_state()
+	# doesn't expose sub-resource metadata directly. Instantiation is the only way
+	# to read meta flags on embedded resources without a manual deserializer.
+	var root := packed.instantiate()
+	if not root:
+		return false
+	var has_chain := _scan_for_lod_chain(root)
+	root.queue_free()
+	return has_chain
+
+
+func _scan_for_lod_chain(node: Node) -> bool:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		if mi.mesh and mi.mesh.has_meta("has_lod_chain"):
+			return true
+	for child in node.get_children():
+		if _scan_for_lod_chain(child):
 			return true
 	return false
 

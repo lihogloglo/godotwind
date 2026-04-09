@@ -1,0 +1,42 @@
+=== LOD BASELINE TEST ===
+Timestamp: 2026-04-09T11:19:23
+Cache file: f_flora_tree_01_nif.res
+Output label: baseline_tree_01
+Branch: refactor/lod-b-wide (Phase A baseline)
+
+Loading: C:\Users\metzo/Documents/Godotwind/cache/models/f_flora_tree_01_nif.res
+Format detection: OLD (sibling _LODn MeshInstance3D nodes, pre-refactor hand-rolled pipeline)
+
+Per-LOD summary (aggregated across all MeshInstance3D nodes with the matching suffix):
+  lod0: 676 tris across 2 nodes, AABB (9.0×11.1×8.9), vol 890, vis_range 0-150, mat <inline>
+    nodes: MergedMesh_0, MergedMesh_1
+  lod1: 484 tris across 2 nodes, AABB (9.0×11.1×8.9), vol 890, vis_range 150-250, mat <inline>
+    nodes: MergedMesh_0_LOD1, MergedMesh_1_LOD1
+  lod2: 468 tris across 2 nodes, AABB (9.0×11.1×8.9), vol 890, vis_range 250-375, mat <inline>
+    nodes: MergedMesh_0_LOD2, MergedMesh_1_LOD2
+  lod3: 468 tris across 2 nodes, AABB (9.0×11.1×8.9), vol 890, vis_range 375-500, mat <inline>
+    nodes: MergedMesh_0_LOD3, MergedMesh_1_LOD3
+
+Hypothesis tests:
+  H1 [LOD0 > 100 tris]: PASS (676)
+  H2 [lod1 tri ratio 40-60%]: FAIL (484 tris, 71.6% of LOD0)
+  H3 [lod2 tri ratio 20-35%]: FAIL (468 tris, 69.2% of LOD0)
+  H4 [lod3 tri ratio 5-15%]: FAIL (468 tris, 69.2% of LOD0)
+  H5 lod1 [AABB vol >= 95% of LOD0]: PASS (vol 890, 100.0% of LOD0)
+  H5 lod2 [AABB vol >= 95% of LOD0]: PASS (vol 890, 100.0% of LOD0)
+  H5 lod3 [AABB vol >= 95% of LOD0]: PASS (vol 890, 100.0% of LOD0)
+  H6 lod1 [AABB dims X/Y/Z >= 95%]: PASS (ratios 100.0/100.0/100.0)
+  H6 lod2 [AABB dims X/Y/Z >= 95%]: PASS (ratios 100.0/100.0/100.0)
+  H6 lod3 [AABB dims X/Y/Z >= 95%]: PASS (ratios 100.0/100.0/100.0)
+  H7 lod1 [material present]: PASS
+  H7 lod2 [material present]: PASS
+  H7 lod3 [material present]: PASS
+  H8 lod1 [node count == LOD0 (2)]: PASS (2)
+  H8 lod2 [node count == LOD0 (2)]: PASS (2)
+  H8 lod3 [node count == LOD0 (2)]: PASS (2)
+  H9 [LOD1/2/3 tri counts distinct]: PASS (484 / 468 / 468)
+
+Diagnosis:
+  All LODs have the expected sub-mesh count and distinct triangle budgets.
+  If you still see missing faces visually, the bug is subtle — likely in TRIANGLE
+  selection by the simplifier (panels collapsed but AABB preserved).
