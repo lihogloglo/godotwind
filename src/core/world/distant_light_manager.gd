@@ -331,7 +331,7 @@ void vertex() {
 	v_emission = light_col * brightness * 3.0;
 
 	// Billboard: camera-facing quad using MODELVIEW_MATRIX bypass
-	// Set MODELVIEW_MATRIX directly to a billboard transform (same pattern as octahedral_impostor.gdshader)
+	// Set MODELVIEW_MATRIX directly to a billboard transform (same pattern as impostor inline shader)
 	// This avoids the MODEL_MATRIX double-transform issue with RenderingServer instances
 	vec3 to_cam = camera_position - world_pos;
 	to_cam.y = 0.0; // Y-axis locked billboard

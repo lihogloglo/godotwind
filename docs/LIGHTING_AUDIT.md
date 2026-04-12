@@ -104,10 +104,14 @@
 
 ### 1.8 Impostor Lighting (FAR Tier, 500m–5km)
 
-- `octahedral_impostor.gdshader` — 16-frame octahedral atlas (4x4)
+- Inline shader in `native_impostor_renderer.gd::_get_octahedral_shader_code()` (~240 lines)
+- Two variants: v4 (legacy azimuthal 16-frame 4x4) and v5 (octahedral tri-sample 8x8 with yaw-rotated normals)
+- Standalone `octahedral_impostor.gdshader` deleted (was dead code, diverged from inline shader)
 - 2-pass baking: albedo (unlit) + normals (world-space RGB + depth A)
 - PBR lighting applied: roughness=0.85, specular=0.3
-- Frame interpolation with angular blending
+- v5: Brucks tri-sample blending (barycentric weights across 3 nearest octahedral grid cells)
+- v5: normals rotated by per-instance yaw before view-space transform (fixes inverted lighting on rotated instances)
+- Shadow receive YES, shadow cast NO (avoids rectangular billboard shadows at 500m+)
 - **No emissive data baked** — impostors are dark at night
 
 ### 1.9 Distance Rendering & Lights
@@ -408,8 +412,8 @@ light.shadow_contact = 0.3  # Small-scale contact darkening
 | `src/core/sky/sky_manager.gd` | ~150 | Celestial lights + sky shader |
 | `src/tools/ui/environment_controls.gd` | ~400 | Environment/post-processing setup |
 | `src/core/weather/weather_renderer.gd` | ~150 | Weather → visual state |
-| `src/tools/prebaking/impostor_baker_v2.gd` | ~150 | FAR tier impostor baking |
-| `src/tools/prebaking/shaders/octahedral_impostor.gdshader` | 123 | Impostor rendering shader |
+| `src/tools/prebaking/impostor_baker_v3.gd` | ~300 | FAR tier impostor baking (v5 octahedral) |
+| `native_impostor_renderer.gd::_get_octahedral_shader_code()` | ~240 | Impostor rendering shader (inline, v4+v5 variants) |
 | `src/core/sky/shaders/sky.gdshader` | ~180 | Atmospheric scattering |
 | `src/core/water/shaders/ocean_fft.gdshader` | ~180 | Ocean SSS lighting |
 | `src/core/world/terrain_horizon.gdshader` | 366 | Terrain horizon self-shadow |

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://d2impostor_v5_test"]
+
+[ext_resource type="Script" path="res://tests/visual/test_impostor_v5.gd" id="1"]
+
+[node name="TestImpostorV5" type="Node3D"]
+script = ExtResource("1")

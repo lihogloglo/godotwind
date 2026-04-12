@@ -42,12 +42,17 @@ Key details:
 Custom octahedral impostor system (Godot has no built-in equivalent).
 - Single MultiMeshInstance3D renders all FAR objects in one draw call
 - Albedo + normal maps packed into parallel Texture2DArray
-- Per-impostor transforms stored in MultiMesh custom data
-- Visibility range: begin=480m, end=5km (set on the MultiMeshInstance3D)
+- Per-impostor transforms stored in MultiMesh custom data (INSTANCE_CUSTOM: .x=albedo layer, .y=yaw rad, .z=normal layer, .w=variant)
+- Two shader variants via INSTANCE_CUSTOM.w: v4 (legacy azimuthal 16-frame 4x4) and v5 (octahedral tri-sample 8x8, Brucks barycentric blending, yaw-rotated normals)
+- Visibility range: begin=480m, end=5km, begin_margin=20m, end_margin=20m, FADE_SELF (set on the MultiMeshInstance3D)
+- Shadow receive YES, shadow cast NO (avoids billboard shadow artifacts at distance)
 - Texture array rebuild debounced (0.2s after last add, 0.5s min between rebuilds)
 - **MultiMesh rebuild uses `set_buffer(PackedFloat32Array)`** — single bulk upload instead of N×2 RS calls
 - **Differential impostor area update** — on cell crossing, only scans border strip (~242 cells) instead of full 14K grid. Cost: ~1ms per crossing (was 14-158ms)
 - ~63K impostors across ~497 texture layers at full load. ~40% are ≤2px on screen (filtering candidate)
+- Inline shader in `native_impostor_renderer.gd::_get_octahedral_shader_code()` (~240 lines). Standalone `octahedral_impostor.gdshader` deleted (was dead code).
+- Baker: `impostor_baker_v3.gd` (v5 octahedral). Legacy `impostor_baker_v2.gd` (v4 azimuthal) still present for reference.
+- Design doc: `docs/audit/IMPOSTOR_REBUILD.md`
 
 ## Streaming Orchestration
 

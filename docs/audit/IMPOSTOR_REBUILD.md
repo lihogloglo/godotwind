@@ -1,11 +1,11 @@
 # Impostor Pipeline Rebuild — Design Doc
 
-**Status:** Proposal — reviewed by `@master-reviewer` 2026-04-08 (APPROVE with 4 addenda, folded in below). Pending `@user` sign-off.
+**Status:** Phases 1-3 shipped. v5 baker + inline shader (v4+v5 dual variant) live. Dead `octahedral_impostor.gdshader` deleted 2026-04-12. 12/937 impostors rebaked to v5; rest still v4 (functional, lower quality). Full v5 rebake pending.
 **Owner:** `@impostors` (claude)
 **Scope:**
 - `src/tools/prebaking/impostor_baker_v2.gd` → rebuilt as `impostor_baker_v3.gd`
 - `src/core/world/native_impostor_renderer.gd` `_get_octahedral_shader_code()` (embedded runtime shader block) → rebuilt as Variant B below
-- `src/tools/prebaking/shaders/octahedral_impostor.gdshader` → **dead code, delete in same PR**. Verified not referenced by any code path — only appears in `docs/LIGHTING_AUDIT.md` (doc text) and a `distant_light_manager.gd:334` comment. Leaving two impostor shaders in the repo means they drift out of sync.
+- `src/tools/prebaking/shaders/octahedral_impostor.gdshader` → **DELETED 2026-04-12**. Was dead code — not referenced by any runtime code path. `distant_light_manager.gd` comment updated to reference inline shader. `LIGHTING_AUDIT.md` updated.
 **Related:** `docs/DISTANCE_RENDERING.md` (FAR tier 500m–5km), `src/core/world/distance_utils.gd`, `docs/audit/AAA_FRAMEWORK_PLAN.md` §3 (grass is a separate pipeline — see "Relation to groundcover" below)
 
 ---
@@ -131,7 +131,7 @@ The vertex shader at `native_impostor_renderer.gd:390` rebuilds `MODELVIEW_MATRI
 
 ### Phase 2 — Shader rebuild
 
-Two shader variants needed, both in `octahedral_impostor.gdshader` as branches or uber-shader uniforms:
+Two shader variants, both in `native_impostor_renderer.gd::_get_octahedral_shader_code()` as INSTANCE_CUSTOM.w-driven branches:
 
 **Variant A — legacy v4 bakes:** keep the current azimuthal 16-frame path unchanged. Selected when `has_octahedral == false`. Ensures we don't break existing bakes mid-migration.
 

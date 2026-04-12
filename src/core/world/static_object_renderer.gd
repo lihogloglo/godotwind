@@ -51,29 +51,44 @@ var _stats: Dictionary = {
 
 #region Data Classes
 
+## Per-child-mesh entry inside a multi-mesh prototype
+class SubMeshEntry:
+	var mesh_resource: Mesh        ## Strong ref — prevents GC
+	var mesh_rid: RID
+	var material_resource: Material  ## Strong ref (whole-mesh override, may be null)
+	var material_rid: RID
+	var surface_materials: Array[Material] = []  ## Per-surface mats (strong refs)
+	var local_transform: Transform3D  ## Child's transform relative to prototype root
+	var has_lod_chain: bool = false
+
+
 ## Mesh type registration data
 class MeshType:
 	var name: String
-	var mesh_rid: RID          ## Primary mesh RID (carries embedded LOD chain)
+	var mesh_rid: RID          ## Primary mesh RID (first child, for backwards compat)
 	var material_rid: RID      ## Primary material RID (optional, whole-mesh override)
 	var mesh_resource: Mesh    ## Strong reference — prevents GC when prototype is LRU-evicted
 	var material_resource: Material  ## Strong reference — same reason
 	var owns_mesh: bool        ## Whether we created the mesh RID
 	var owns_material: bool    ## Whether we created the material RID
-	var aabb: AABB             ## Bounding box for culling
+	var aabb: AABB             ## Bounding box for culling (union of all sub-meshes)
 	var instance_count: int = 0
 	## Per-surface materials (strong refs) for meshes without whole-mesh material_override
 	var surface_materials: Array[Material] = []
 	## Whether the embedded ArrayMesh carries a prebaked LOD chain (has_lod_chain meta).
 	## Used by debug tooling + diagnostic reporting.
 	var has_lod_chain: bool = false
+	## All child meshes in the prototype. Single-mesh prototypes have one entry.
+	## Multi-mesh buildings (Vivec cantons, Hlaalu, etc.) have 3-8 entries.
+	var sub_meshes: Array[SubMeshEntry] = []
 
 
 ## Instance data
 class InstanceData:
 	var id: int
 	var type_name: String
-	var instance_rid: RID      ## Single RenderingServer instance (holds embedded LOD chain)
+	var instance_rid: RID      ## Primary RS instance (first sub-mesh, for backwards compat)
+	var sub_rids: Array[RID] = []  ## ALL RS instances (includes primary). Multi-mesh buildings have N.
 	var transform: Transform3D
 	var visible: bool = true
 	var promoted: bool = false  ## True when a NEAR Node3D exists for this instance
@@ -139,44 +154,77 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 
 ## Register a mesh type from a Node3D prototype.
 ##
-## Post-B-wide refactor: walks the prototype tree for a single MeshInstance3D
-## carrying an ArrayMesh with an embedded LOD chain (or a plain mesh if the
-## asset is too small for LOD generation). The embedded chain is driven by
-## Godot's C++ LOD selector automatically once the RS instance exists.
+## Post-B-wide: walks ALL visible MeshInstance3D children in the prototype tree
+## and stores each as a SubMeshEntry. Multi-mesh buildings (3-8 children) get
+## one RS instance per child at add_instance time, all tracked under one ID.
+## Single-mesh prototypes (flora, small clutter) work exactly as before.
 func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 	if type_name in _mesh_types:
 		return
 
-	var mesh_instance := _find_mesh_instance(prototype)
-	if not mesh_instance or not mesh_instance.mesh:
+	var all_mis := _find_all_mesh_instances(prototype)
+	if all_mis.is_empty():
 		push_warning("StaticObjectRenderer: No mesh found in prototype for '%s'" % type_name)
 		return
 
-	# Material resolution priority:
-	# 1. material_override (whole-mesh, set by NIF converter)
-	# 2. MeshInstance3D surface override materials
-	# 3. Mesh resource surface materials
-	var material: Material = null
-	var surface_mats: Array[Material] = []
+	# Build sub-mesh entries for every child MeshInstance3D
+	var sub_entries: Array[SubMeshEntry] = []
+	var union_aabb := AABB()
+	var any_has_lod := false
 
-	if mesh_instance.material_override:
-		material = mesh_instance.material_override
-	else:
-		var surface_count: int = mesh_instance.mesh.get_surface_count()
-		for si in range(surface_count):
-			var mat: Material = mesh_instance.get_surface_override_material(si)
-			if not mat:
-				mat = mesh_instance.mesh.surface_get_material(si)
-			surface_mats.append(mat)
-		# For single-surface, use as primary material
-		if surface_count == 1 and not surface_mats.is_empty() and surface_mats[0]:
-			material = surface_mats[0]
-			surface_mats.clear()
+	for mi: MeshInstance3D in all_mis:
+		var entry := SubMeshEntry.new()
+		entry.mesh_resource = mi.mesh
+		entry.mesh_rid = mi.mesh.get_rid()
+		# Local transform relative to prototype root
+		if mi.get_parent() == prototype or mi == prototype:
+			entry.local_transform = mi.transform
+		else:
+			# Deep child — accumulate transforms up to root
+			entry.local_transform = _get_relative_transform(mi, prototype)
+		entry.has_lod_chain = mi.mesh.has_meta("has_lod_chain") if mi.mesh is ArrayMesh else false
+		if entry.has_lod_chain:
+			any_has_lod = true
 
-	register_mesh_type(type_name, mesh_instance.mesh, material)
+		# Material resolution: override > surface override > mesh surface
+		if mi.material_override:
+			entry.material_resource = mi.material_override
+			entry.material_rid = mi.material_override.get_rid()
+		else:
+			var surface_count: int = mi.mesh.get_surface_count()
+			for si in range(surface_count):
+				var mat: Material = mi.get_surface_override_material(si)
+				if not mat:
+					mat = mi.mesh.surface_get_material(si)
+				entry.surface_materials.append(mat)
+			# Single-surface shortcut
+			if surface_count == 1 and not entry.surface_materials.is_empty() and entry.surface_materials[0]:
+				entry.material_resource = entry.surface_materials[0]
+				entry.material_rid = entry.surface_materials[0].get_rid()
+				entry.surface_materials.clear()
 
-	if not surface_mats.is_empty() and type_name in _mesh_types:
-		_mesh_types[type_name].surface_materials = surface_mats
+		# Expand union AABB
+		var child_aabb := mi.mesh.get_aabb()
+		var transformed_aabb := entry.local_transform * child_aabb
+		if sub_entries.is_empty():
+			union_aabb = transformed_aabb
+		else:
+			union_aabb = union_aabb.merge(transformed_aabb)
+
+		sub_entries.append(entry)
+
+	# Register using first child as primary (backwards compat for get_mesh_type_stats etc.)
+	var first := sub_entries[0]
+	register_mesh_type(type_name, first.mesh_resource,
+		first.material_resource if first.material_resource else null)
+
+	if type_name in _mesh_types:
+		var mt: MeshType = _mesh_types[type_name]
+		mt.sub_meshes = sub_entries
+		mt.aabb = union_aabb
+		mt.has_lod_chain = any_has_lod
+		if not first.surface_materials.is_empty():
+			mt.surface_materials = first.surface_materials
 
 
 ## Compatibility alias — post-B-wide there's no difference between the two
@@ -187,19 +235,26 @@ func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
 	return type_name in _mesh_types and _mesh_types[type_name].has_lod_chain
 
 
-## Find first MeshInstance3D in prototype.
-## Post-B-wide: there are no sibling `_LODn` nodes, so the old skip clause is
-## dead. Picks the first visible MeshInstance3D with a mesh.
-func _find_mesh_instance(node: Node) -> MeshInstance3D:
+## Find ALL visible MeshInstance3D nodes in prototype tree (depth-first).
+func _find_all_mesh_instances(node: Node) -> Array[MeshInstance3D]:
+	var result: Array[MeshInstance3D] = []
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
 		if mi.mesh and mi.visible:
-			return mi
+			result.append(mi)
 	for child in node.get_children():
-		var result := _find_mesh_instance(child)
-		if result:
-			return result
-	return null
+		result.append_array(_find_all_mesh_instances(child))
+	return result
+
+
+## Get a node's transform relative to a given ancestor.
+func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
+	var xform := Transform3D.IDENTITY
+	var current := node
+	while current != null and current != ancestor:
+		xform = current.transform * xform
+		current = current.get_parent() as Node3D
+	return xform
 
 #endregion
 
@@ -239,35 +294,25 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	data.ref_id = ref_id
 	data.ref_num = ref_num
 
-	var instance_rid := rs.instance_create()
-	rs.instance_set_base(instance_rid, mesh_type.mesh_rid)
-	rs.instance_set_scenario(instance_rid, _scenario)
-	rs.instance_set_transform(instance_rid, transform)
+	# Create one RS instance per sub-mesh in the prototype.
+	# Multi-mesh buildings (cantons, huts) get N RS instances; single-mesh
+	# flora/clutter get 1. All tracked under the same instance ID.
+	var sub_entries := mesh_type.sub_meshes
+	if sub_entries.is_empty():
+		# Fallback: legacy registration path (register_mesh_type called directly)
+		var rid := _create_rs_instance(mesh_type.mesh_rid, mesh_type.material_rid,
+			mesh_type.surface_materials, transform)
+		data.instance_rid = rid
+		data.sub_rids.append(rid)
+	else:
+		for entry: SubMeshEntry in sub_entries:
+			var child_xform := transform * entry.local_transform
+			var rid := _create_rs_instance(entry.mesh_rid, entry.material_rid,
+				entry.surface_materials, child_xform)
+			data.sub_rids.append(rid)
+		# Primary RID = first (backwards compat)
+		data.instance_rid = data.sub_rids[0]
 
-	# Apply material: prefer whole-mesh override, fall back to per-surface
-	if mesh_type.material_rid.is_valid():
-		rs.instance_geometry_set_material_override(instance_rid, mesh_type.material_rid)
-	elif not mesh_type.surface_materials.is_empty():
-		for si in range(mesh_type.surface_materials.size()):
-			var mat: Material = mesh_type.surface_materials[si]
-			if mat:
-				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
-
-	# Single render-tier→impostor-handoff visibility_range.
-	# 0-500m covers NEAR + MID. The embedded LOD chain handles sub-band selection.
-	# The FAR tier (500-5000m) is the impostor renderer's job; this band's end
-	# margin provides the dither crossfade into it.
-	rs.instance_geometry_set_visibility_range(
-		instance_rid,
-		0.0, DU.MID_END,                        # 0-500m
-		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade into impostor
-		RenderingServer.VISIBILITY_RANGE_FADE_SELF
-	)
-
-	# Default LOD bias — tunable per type later via streaming_config.
-	rs.instance_geometry_set_lod_bias(instance_rid, 1.0)
-
-	data.instance_rid = instance_rid
 	_instances[id] = data
 	mesh_type.instance_count += 1
 	_stats["total_instances"] += 1
@@ -281,15 +326,49 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	return id
 
 
-## Remove an instance
+## Create a single RS instance with visibility_range + LOD bias + material.
+func _create_rs_instance(mesh_rid: RID, material_rid: RID,
+		surface_materials: Array[Material], xform: Transform3D) -> RID:
+	var rs := RenderingServer
+	var instance_rid := rs.instance_create()
+	rs.instance_set_base(instance_rid, mesh_rid)
+	rs.instance_set_scenario(instance_rid, _scenario)
+	rs.instance_set_transform(instance_rid, xform)
+
+	# Apply material: prefer whole-mesh override, fall back to per-surface
+	if material_rid.is_valid():
+		rs.instance_geometry_set_material_override(instance_rid, material_rid)
+	elif not surface_materials.is_empty():
+		for si in range(surface_materials.size()):
+			var mat: Material = surface_materials[si]
+			if mat:
+				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
+
+	# Single render-tier→impostor-handoff visibility_range.
+	# 0-500m covers NEAR + MID. The embedded LOD chain handles sub-band selection.
+	rs.instance_geometry_set_visibility_range(
+		instance_rid,
+		0.0, DU.MID_END,                        # 0-500m
+		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade into impostor
+		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+	)
+
+	# Default LOD bias — tunable per type later via streaming_config.
+	rs.instance_geometry_set_lod_bias(instance_rid, 1.0)
+
+	return instance_rid
+
+
+## Remove an instance (frees all sub-mesh RS instances)
 func remove_instance(id: int) -> void:
 	if id not in _instances:
 		return
 
 	var data: InstanceData = _instances[id]
 
-	if data.instance_rid.is_valid():
-		RenderingServer.free_rid(data.instance_rid)
+	for rid: RID in data.sub_rids:
+		if rid.is_valid():
+			RenderingServer.free_rid(rid)
 
 	if data.type_name in _mesh_types:
 		var mesh_type: MeshType = _mesh_types[data.type_name]
@@ -336,8 +415,9 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 		if id not in _instances:
 			continue
 		var data: InstanceData = _instances[id]
-		if data.instance_rid.is_valid():
-			RenderingServer.instance_set_visible(data.instance_rid, false)
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_set_visible(rid, false)
 		data.visible = false
 		count += 1
 
@@ -364,8 +444,10 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		var id: int = cell_ids[i]
 		if id in _instances:
 			var data: InstanceData = _instances[id]
-			if data.visible and data.instance_rid.is_valid():
-				RenderingServer.instance_set_visible(data.instance_rid, false)
+			if data.visible:
+				for rid: RID in data.sub_rids:
+					if rid.is_valid():
+						RenderingServer.instance_set_visible(rid, false)
 				data.visible = false
 				hidden += 1
 		i += 1
@@ -382,7 +464,7 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 
 #region Visibility & Transform
 
-## Set instance visibility
+## Set instance visibility (all sub-mesh RS instances)
 func set_instance_visible(id: int, visible: bool) -> void:
 	if id not in _instances:
 		return
@@ -393,8 +475,9 @@ func set_instance_visible(id: int, visible: bool) -> void:
 
 	data.visible = visible
 
-	if data.instance_rid.is_valid():
-		RenderingServer.instance_set_visible(data.instance_rid, visible)
+	for rid: RID in data.sub_rids:
+		if rid.is_valid():
+			RenderingServer.instance_set_visible(rid, visible)
 
 	if visible:
 		_stats["visible_instances"] += 1
@@ -417,11 +500,12 @@ func set_instance_promoted(id: int, is_promoted: bool, _near_has_lods: bool = tr
 		return
 	data.promoted = is_promoted
 
-	if data.instance_rid.is_valid():
-		RenderingServer.instance_set_visible(data.instance_rid, not is_promoted)
+	for rid: RID in data.sub_rids:
+		if rid.is_valid():
+			RenderingServer.instance_set_visible(rid, not is_promoted)
 
 
-## Set instance transform
+## Set instance transform (updates all sub-mesh RS instances with their local offsets)
 func set_instance_transform(id: int, transform: Transform3D) -> void:
 	if id not in _instances:
 		return
@@ -429,8 +513,16 @@ func set_instance_transform(id: int, transform: Transform3D) -> void:
 	var data: InstanceData = _instances[id]
 	data.transform = transform
 
-	if data.instance_rid.is_valid():
-		RenderingServer.instance_set_transform(data.instance_rid, transform)
+	if data.type_name in _mesh_types:
+		var mt: MeshType = _mesh_types[data.type_name]
+		for i in range(mini(data.sub_rids.size(), mt.sub_meshes.size())):
+			var rid: RID = data.sub_rids[i]
+			if rid.is_valid():
+				RenderingServer.instance_set_transform(rid, transform * mt.sub_meshes[i].local_transform)
+	else:
+		# Fallback: no sub_meshes info, just set primary
+		if data.instance_rid.is_valid():
+			RenderingServer.instance_set_transform(data.instance_rid, transform)
 
 
 ## Get instance transform
@@ -477,8 +569,9 @@ func clear(clear_mesh_types: bool = true) -> void:
 
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
-		if data.instance_rid.is_valid():
-			rs.free_rid(data.instance_rid)
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				rs.free_rid(rid)
 	_instances.clear()
 	_cell_index.clear()
 

@@ -116,6 +116,7 @@ signal startup_complete()
 ## Now with per-instance LOD visibility_range (replaces broken MultiMesh batch pool)
 var _static_renderer: StaticObjectRendererScript = null
 
+
 ## Native Impostor Renderer
 var _impostor_renderer: Node3D = null
 
@@ -457,7 +458,7 @@ func _process(delta: float) -> void:
 		_camera_velocity_xz = _camera_velocity_xz.lerp(raw_vel, 0.3)
 	_prev_camera_position = _camera_position
 
-	# Track startup frames for staggered loading
+# Track startup frames for staggered loading
 	if _startup_phase:
 		_startup_frames += 1
 		_emit_startup_progress()

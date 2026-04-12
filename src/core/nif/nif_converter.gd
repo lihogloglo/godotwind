@@ -1195,7 +1195,7 @@ func _generate_lod_chain(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh
 	if surface_count == 0:
 		return
 
-	# Count total triangles across all surfaces.
+	# Count total triangles across all surfaces (indexed + non-indexed).
 	var num_triangles: int = 0
 	for si in range(surface_count):
 		var surf_arrays := original_mesh.surface_get_arrays(si)
@@ -1204,6 +1204,11 @@ func _generate_lod_chain(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh
 		var surf_indices: PackedInt32Array = surf_arrays[Mesh.ARRAY_INDEX]
 		if surf_indices != null and not surf_indices.is_empty():
 			num_triangles += surf_indices.size() / 3
+		else:
+			# Non-indexed surface: 3 vertices per triangle
+			var surf_verts: PackedVector3Array = surf_arrays[Mesh.ARRAY_VERTEX]
+			if surf_verts != null and not surf_verts.is_empty():
+				num_triangles += surf_verts.size() / 3
 
 	if num_triangles < min_triangles_for_lod:
 		if debug_lod:
@@ -1261,15 +1266,33 @@ func _generate_lod_chain(mesh_instance: MeshInstance3D, original_mesh: ArrayMesh
 
 	# Feed every surface into ImporterMesh. The engine runs meshoptimizer
 	# per-surface internally with LockBorder + attribute remap + vertex cache opt.
+	# Non-indexed surfaces (sequential vertex lists) are included — ImporterMesh
+	# handles them correctly. Skipping them previously caused entire building
+	# faces (especially vertical walls) to vanish from the LOD mesh.
 	var importer := ImporterMesh.new()
 	var surfaces_added: int = 0
 	for si in range(surface_count):
 		var surf_arrays := original_mesh.surface_get_arrays(si)
 		if surf_arrays.is_empty():
 			continue
-		var surf_indices: PackedInt32Array = surf_arrays[Mesh.ARRAY_INDEX]
-		if surf_indices == null or surf_indices.is_empty():
+		# Require at least vertex data
+		var surf_verts: PackedVector3Array = surf_arrays[Mesh.ARRAY_VERTEX]
+		if surf_verts == null or surf_verts.is_empty():
 			continue
+
+		# Non-indexed triangle lists need an explicit identity index buffer.
+		# meshoptimizer's simplify() requires indices — without them it either
+		# silently drops surfaces (missing faces) or generates corrupt mesh data
+		# (signal 11 crash on instantiate). Canonical pattern: OpenGL/Vulkan
+		# treat non-indexed draws as sequential [0,1,2,...]; we make it explicit.
+		var surf_indices: Variant = surf_arrays[Mesh.ARRAY_INDEX]
+		if surf_indices == null or (surf_indices is PackedInt32Array and surf_indices.is_empty()):
+			var vert_count: int = surf_verts.size()
+			var identity_indices := PackedInt32Array()
+			identity_indices.resize(vert_count)
+			for vi in range(vert_count):
+				identity_indices[vi] = vi
+			surf_arrays[Mesh.ARRAY_INDEX] = identity_indices
 
 		var effective_material: Material = null
 		if override_material != null:

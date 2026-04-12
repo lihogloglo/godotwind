@@ -330,7 +330,7 @@ func set_shader_debug_mode(enabled: bool) -> void:
 			# Normal mode: restore FAR tier visibility (450m+)
 			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR  # 480m
 			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
-			Log.debug("impostors", "visibility_range_begin restored to 450m")
+			Log.debug("impostors", "visibility_range_begin restored to 480m")
 
 	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (500m+)"))
 
@@ -340,32 +340,24 @@ func set_shader_debug_mode(enabled: bool) -> void:
 #region Octahedral Billboard Shader (Lit with Normal Maps)
 
 func _get_octahedral_shader_code() -> String:
-	# Lit billboard impostor shader. Two variants live in the same shader,
-	# selected per-instance via INSTANCE_CUSTOM.w (the variant flag):
-	#   0.0 = Variant A — legacy v4 azimuthal 16-frame (4×4 atlas, Y-only)
-	#   1.0 = Variant B — v5 hemi octahedral nearest-neighbor (8×8 atlas)
-	#   2.0 = Variant B — v5 sphere octahedral nearest-neighbor (8×8 atlas)
+	# Lit billboard impostor shader. Two variants, per-instance via
+	# INSTANCE_CUSTOM.w:
+	#   0.0 = Variant A — legacy v4 azimuthal 16-frame (4x4, Y-only)
+	#   1.0 = Variant B — v5 hemi octahedral tri-sample (8x8)
+	#   2.0 = Variant B — v5 sphere octahedral tri-sample (8x8)
 	#
-	# INSTANCE_CUSTOM layout:
-	#   .x = albedo texture array layer index
-	#   .y = rotation offset (instance yaw, radians)
-	#   .z = normal texture array layer index (-1 = no normals)
-	#   .w = variant flag (0/1/2 — see above)
+	# INSTANCE_CUSTOM: .x=albedo layer, .y=yaw rad, .z=normal layer, .w=variant
 	#
-	# Variant B fixes the audit bugs that wrecked Variant A:
-	# - True octahedral direction sampling (not Y-only) so above/below views
-	#   render the correct silhouette.
-	# - Yaw-rotated decoded normals: the baked normal is in bake-time local
-	#   space (instance was at rotation 0). At runtime we rotate it FORWARD
-	#   by the instance yaw to get the actual world-space normal. The view
-	#   direction used for frame selection is correspondingly rotated
-	#   BACKWARD by yaw to express it in local space.
-	# - Shadow receive enabled (no `shadows_disabled` in render_mode).
-	# - Renormalize after sample.
+	# Variant B addresses IMPOSTOR_REBUILD.md audit:
+	# §2.1 true octahedral sampling, §2.3 tri-sample + renormalize,
+	# §2.4 yaw-rotated normals, §2.6 shadow receive.
+	# §2.5 parallax deferred. §2.7 NORMAL_MATRIX is read-only in 4.6 (moot
+	# since fragment overrides NORMAL from atlas).
 	#
-	# Variant B intentionally does NOT do tri-sample blending or parallax —
-	# both were dropped per the simplification pass. They can be added later
-	# if the validation scene shows visible cell popping or missing depth.
+	# Variant B uses Brucks tri-sample blending (barycentric weights across
+	# the 3 nearest octahedral grid cells) for smooth angular transitions
+	# with no visible frame popping. Parallax deferred — add if validation
+	# shows missing depth cues.
 	#
 	# Per-impostor distance culling stays in fragment because MultiMesh
 	# visibility_range checks node position not per-instance position.
@@ -375,11 +367,12 @@ render_mode blend_mix, depth_prepass_alpha, cull_disabled;
 
 uniform sampler2DArray texture_atlas : source_color, filter_linear_mipmap;
 uniform sampler2DArray normal_atlas : filter_linear_mipmap;
-uniform int atlas_columns = 4;  // Variant A only — 4×4
-uniform int atlas_rows = 4;     // Variant A only — 4×4
+uniform int atlas_columns = 4;  // Variant A only — 4x4
+uniform int atlas_rows = 4;     // Variant A only — 4x4
 uniform float fade_distance = 500.0;
 uniform float fade_margin = 50.0;
 uniform bool debug_mode = false;
+uniform bool debug_normals = false;
 uniform float impostor_roughness : hint_range(0.0, 1.0) = 0.85;
 uniform float impostor_specular : hint_range(0.0, 1.0) = 0.3;
 
@@ -408,7 +401,6 @@ vec2 oct_encode_sphere(vec3 n) {
 
 vec2 oct_encode_hemi(vec3 n) {
 	n = normalize(n);
-	// Project to octahedron, then rotate 45° to fill the unit square.
 	float sum = abs(n.x) + abs(n.y) + abs(n.z);
 	vec2 p = n.xz / sum;
 	return vec2(p.x - p.y, p.x + p.y);
@@ -452,6 +444,9 @@ void vertex() {
 	);
 
 	MODELVIEW_MATRIX = VIEW_MATRIX * billboard;
+	// Audit S2.7: NORMAL_MATRIX is read-only in Godot 4.6. Not a problem —
+	// the fragment shader overrides NORMAL directly from the baked normal
+	// atlas, so the stale NORMAL_MATRIX is never consumed.
 }
 
 void fragment() {
@@ -464,31 +459,74 @@ void fragment() {
 	vec3 impostor_center = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	vec3 view_dir_world = normalize(camera_pos - impostor_center);
 	bool has_normals = normal_layer >= 0.0;
-
-	vec2 atlas_uv;
 	bool is_v5 = variant_flag > 0.5;
 
+	// Tri-sample blending state (Variant B only, Variant A uses single sample)
+	vec4 tex;
+	vec4 normal_data;
+
 	if (is_v5) {
-		// === Variant B — v5 octahedral nearest-neighbor ===
-		// Express the world-space view direction in instance local space by
-		// rotating BACKWARD by the instance yaw. This is the frame the baker
-		// used (instance at rotation 0), so the octahedral lookup matches.
+		// === Variant B — v5 octahedral with Brucks tri-sample blending ===
+		// Reference: Ryan Brucks, "Octahedral Impostors Part 2: Triangle
+		// Blending" (shaderbits.com). Three nearest grid cells blended by
+		// barycentric weights = smooth angular transitions, no frame popping.
 		vec3 view_dir_local = rotate_y(view_dir_world, -rotation_offset);
 
 		vec2 oct_uv;
 		if (variant_flag > 1.5) {
-			oct_uv = oct_encode_sphere(view_dir_local);  // sphere
+			oct_uv = oct_encode_sphere(view_dir_local);
 		} else {
-			oct_uv = oct_encode_hemi(view_dir_local);    // hemi
+			oct_uv = oct_encode_hemi(view_dir_local);
 		}
 
-		// Map [-1, 1]² → cell coords [0, GRID_SIZE)
-		vec2 cell_coord = (oct_uv * 0.5 + 0.5) * float(V5_GRID_SIZE);
-		ivec2 cell = ivec2(floor(cell_coord));
-		cell = clamp(cell, ivec2(0), ivec2(V5_GRID_SIZE - 1));
+		// Continuous grid coordinate
+		vec2 grid_coord = (oct_uv * 0.5 + 0.5) * float(V5_GRID_SIZE);
+		vec2 base = floor(grid_coord);
+		vec2 f = grid_coord - base;
 
+		// The unit cell splits into two triangles along the diagonal.
+		// Determine which triangle contains the sample point.
+		ivec2 cell_a, cell_b, cell_c;
+		vec3 bary;
+
+		if (f.x + f.y > 1.0) {
+			// Lower-right triangle: vertices (1,0), (0,1), (1,1)
+			cell_a = ivec2(base) + ivec2(1, 0);
+			cell_b = ivec2(base) + ivec2(0, 1);
+			cell_c = ivec2(base) + ivec2(1, 1);
+			vec2 g = 1.0 - f;
+			bary = vec3(g.y, g.x, 1.0 - g.x - g.y);
+		} else {
+			// Upper-left triangle: vertices (0,0), (1,0), (0,1)
+			cell_a = ivec2(base);
+			cell_b = ivec2(base) + ivec2(1, 0);
+			cell_c = ivec2(base) + ivec2(0, 1);
+			bary = vec3(1.0 - f.x - f.y, f.x, f.y);
+		}
+
+		// Clamp to grid bounds
+		ivec2 grid_max = ivec2(V5_GRID_SIZE - 1);
+		cell_a = clamp(cell_a, ivec2(0), grid_max);
+		cell_b = clamp(cell_b, ivec2(0), grid_max);
+		cell_c = clamp(cell_c, ivec2(0), grid_max);
+
+		// Sample all three cells and blend by barycentric weights
 		float inv_grid = 1.0 / float(V5_GRID_SIZE);
-		atlas_uv = (vec2(cell) + UV) * inv_grid;
+		vec2 uv_a = (vec2(cell_a) + UV) * inv_grid;
+		vec2 uv_b = (vec2(cell_b) + UV) * inv_grid;
+		vec2 uv_c = (vec2(cell_c) + UV) * inv_grid;
+
+		vec4 tex_a = texture(texture_atlas, vec3(uv_a, texture_layer));
+		vec4 tex_b = texture(texture_atlas, vec3(uv_b, texture_layer));
+		vec4 tex_c = texture(texture_atlas, vec3(uv_c, texture_layer));
+		tex = tex_a * bary.x + tex_b * bary.y + tex_c * bary.z;
+
+		if (has_normals) {
+			vec4 nd_a = texture(normal_atlas, vec3(uv_a, normal_layer));
+			vec4 nd_b = texture(normal_atlas, vec3(uv_b, normal_layer));
+			vec4 nd_c = texture(normal_atlas, vec3(uv_c, normal_layer));
+			normal_data = nd_a * bary.x + nd_b * bary.y + nd_c * bary.z;
+		}
 	} else {
 		// === Variant A — legacy v4 azimuthal 16-frame ===
 		float angle = atan(view_dir_world.x, view_dir_world.z) - rotation_offset;
@@ -499,17 +537,18 @@ void fragment() {
 		int col = frame % atlas_columns;
 		int row = frame / atlas_columns;
 		vec2 frame_size_uv = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-		atlas_uv = vec2(float(col), float(row)) * frame_size_uv + UV * frame_size_uv;
-	}
+		vec2 atlas_uv = vec2(float(col), float(row)) * frame_size_uv + UV * frame_size_uv;
 
-	// Sample albedo
-	vec4 tex = texture(texture_atlas, vec3(atlas_uv, texture_layer));
+		tex = texture(texture_atlas, vec3(atlas_uv, texture_layer));
+		if (has_normals) {
+			normal_data = texture(normal_atlas, vec3(atlas_uv, normal_layer));
+		}
+	}
 
 	if (debug_mode) {
 		ALBEDO = vec3(1.0, 0.0, 1.0);
 		ALPHA = 1.0;
 	} else {
-		// Alpha test
 		if (tex.a < 0.1) {
 			discard;
 		}
@@ -518,26 +557,28 @@ void fragment() {
 		ALPHA = tex.a;
 
 		if (has_normals) {
-			vec4 normal_data = texture(normal_atlas, vec3(atlas_uv, normal_layer));
+			// Decode and renormalize (critical after tri-sample blending —
+			// linear interpolation of encoded normals shortens the vector)
 			vec3 baked_normal = normalize(normal_data.rgb * 2.0 - 1.0);
 
 			vec3 world_normal;
 			if (is_v5) {
-				// v5 baked normals are in instance local space (bake camera was
-				// world-aligned with the model at rotation 0). Rotate FORWARD
-				// by instance yaw to get the actual runtime world normal.
+				// v5: rotate from bake-local to runtime world space
 				world_normal = rotate_y(baked_normal, rotation_offset);
 			} else {
-				// v4 baked normals were stored as bake-time world-space; the
-				// renderer's instances were always at rotation 0 in v4 (the
-				// runtime never rotated them) so no yaw correction needed
-				// here. Keeping the original behavior for v4 compat.
+				// v4: already in bake-time world space, no rotation
 				world_normal = baked_normal;
 			}
 
 			NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
 			ROUGHNESS = impostor_roughness;
 			SPECULAR = impostor_specular;
+
+			if (debug_normals) {
+				// Visualize world-space normals as RGB: R=+X, G=+Y, B=+Z
+				ALBEDO = world_normal * 0.5 + 0.5;
+				EMISSION = ALBEDO * 0.5;
+			}
 		}
 	}
 }

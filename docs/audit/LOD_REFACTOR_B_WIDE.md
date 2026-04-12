@@ -1,6 +1,6 @@
 # LOD System B-Wide Refactor — Canonical Pattern Migration
 
-**Status:** In progress — Session 2.5 end state (2026-04-10). Phases **B.0 → B.1 → C → D → E → F (partial)** all landed in working tree on `refactor/lod-b-wide`, all 35 unit tests green. **Phase G (full rebake + structural verification) partially executed**: full cache rebake succeeded (4884 / 4948 models, 154s, 64 pre-existing parser failures unchanged), 3 structural baselines re-ran and confirm the "Bug A — 4 of 5 sub-meshes dropped" is fixed. **Main-scene launch reproduced a signal 11 crash after ~2 min of unattended running** — crash investigation deferred by user ("we'll debug all that later"). Interactive visual pass + `StreamingBenchmark` perf diff + final doc sync still pending. Phase A.5 (NIF collision coordinate fix bundle) still pending. See Session 2 + Session 2.5 entries in the Progress Log for the full rundown, including the crash hypothesis ladder and next-debug-session recipe.
+**Status:** Phase G in progress — Session 3 (2026-04-12). Phases **B.0 → B.1 → C → D → E → F** all landed on `refactor/lod-b-wide`. **Phase G**: full cache wipe + rebake complete (4884 / 4948 models, 127.7s, 64 pre-existing parser failures unchanged). Doc sync complete (`DISTANCE_RENDERING.md`, `STATUS.md`, `CLAUDE.md` all reflect B-wide architecture). Interactive visual pass + `StreamingBenchmark` perf diff in progress (user-piloted). Phase A.5 (NIF collision coordinate fix bundle) still pending. Signal 11 crash from Session 2.5 still open — user deferred ("we'll debug all that later").
 **Owner:** `@lods` (claude)
 **Scope:**
 - Delete the hand-rolled LOD pipeline (`_add_visibility_range_lods` in `src/core/nif/nif_converter.gd`, all of `src/core/world/lod_configurator.gd`, sibling `_LODn` node convention, per-LOD `RenderingServer` instance cascade in `src/core/world/static_object_renderer.gd`)
@@ -1121,6 +1121,43 @@ ERROR: Condition "bs > sbs" is true. Continuing.
 - Modified: `tests/visual/test_lod_baseline.tscn` (target updated to `x_ex_hlaalu_b_01_nif.res`)
 - Cache: 2.9 GB, 4884 `.res` files, all new-format
 - User has been informed of the crash (#lod msg 264) and said "we'll debug all that later" (msg 265) — crash investigation deferred to a later session, docs updated instead
+
+### 2026-04-12 — Session 3 (Phase G continuation — clean rebake + doc sync + visual pass)
+
+- **Phase:** G (full rebake, performance validation, documentation sync)
+- **Owner:** `@coder` (claude)
+- **Outcome:** Cache wipe + full rebake complete, doc sync verified, visual pass in progress.
+
+#### What was done
+
+1. **Full cache wipe + rebake.** Deleted all 4887 cached `.res`/`.tres` files from `C:/Users/metzo/Documents/Godotwind/cache/models/`. Ran `full_rebake_headless.tscn` — **4884 baked, 64 failed, 0 skipped, 127.7s** (faster than Session 2.5's 154s, same model count, same 64 pre-existing parser failures: glass armor, magic VFX, particle system NIFs). C# native parsing active (`use_native_parsing = true`).
+
+2. **Doc sync verification.** Confirmed all three live documents already reflect the B-wide architecture from Session 2.5 updates:
+   - `docs/DISTANCE_RENDERING.md` — correctly describes single RS instance per object, embedded LOD chain via `ImporterMesh.generate_lods()`, screen-space selection, `mesh_lod_threshold`/`lod_bias` tuning, no sub-band references.
+   - `docs/STATUS.md` — "3-Tier LOD" row references B-wide rewrite, `ImporterMesh.generate_lods()` cascade, Phase G pending note.
+   - `.claude/CLAUDE.md` — Distance Rendering table says "Single raw RS instance per object with embedded LOD chain" for MID tier. No stale sub-band references.
+   - Historical/audit docs (`LOD_OVER_ENGINEERING.md`, baselines) correctly reference old system in past tense — no updates needed.
+
+3. **Launched `test_lod_baseline.tscn`** for user to inspect Vivec canton model side-by-side. User-piloted interactive visual pass in progress.
+
+#### Phase G checklist status
+
+- [x] Full cache wipe and rebake of all ~4884 models
+- [ ] `StreamingBenchmark` run on scripted path, diff vs Phase A baseline
+- [ ] Compare P50/P95/P99 frame times, RS instance counts, memory footprint
+- [x] Rewrite `docs/DISTANCE_RENDERING.md` (done in Session 2.5, verified Session 3)
+- [x] Update `docs/STATUS.md` (done in Session 2.5, verified Session 3)
+- [x] Update `.claude/CLAUDE.md` (done in Session 2.5, verified Session 3)
+- [ ] Final visual walk-through of all four baseline locations at LOW/MEDIUM/HIGH/ULTRA
+- [ ] Close out this plan doc with Phase G retrospective
+- [ ] Performance deltas captured and attached
+- [ ] Merge `refactor/lod-b-wide` → `master`
+
+#### Still pending from prior sessions
+
+- **Phase A.5 (NIF collision coordinate fix bundle)** — not yet executed, owner TBD.
+- **Signal 11 crash** — reproduced in Session 2.5 during unattended main-scene running. User deferred debugging. Hypothesis ladder in Session 2.5 notes.
+- **`mesh_lod_threshold` tuning** — needs interactive observation at baseline locations before setting final value.
 
 ### 2026-04-09 — Session 1 (original entry, pre-audit updates kept below for reference)
 
