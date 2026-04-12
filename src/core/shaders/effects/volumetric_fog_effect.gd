@@ -107,14 +107,14 @@ func _define_parameters() -> void:
 		"Valley Multiplier", "Extra fog density in valleys (below camera)")
 
 	# Animation
-	register_parameter("fog_speed", 5.0, 0.0, 25.0, 0.5,
+	register_parameter("fog_speed", 8.0, 0.0, 25.0, 0.5,
 		"Animation Speed", "How fast the fog moves/animates")
 
 	# Stamping (detail texturing)
-	register_parameter("stamp_intensity", 0.35, 0.0, 1.0, 0.05,
+	register_parameter("stamp_intensity", 0.6, 0.0, 1.0, 0.05,
 		"Stamp Intensity", "Adds texture detail to fog (0 = smooth, 1 = textured)")
 
-	register_parameter("stamp_contrast", 1.4, 1.0, 2.0, 0.1,
+	register_parameter("stamp_contrast", 1.6, 1.0, 2.0, 0.1,
 		"Stamp Contrast", "Contrast of the stamp texture effect")
 
 	# Sun scattering

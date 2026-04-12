@@ -1303,14 +1303,23 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	if camera_fwd != Vector3.INF:
 		_camera_forward = camera_fwd
 
+	# Start budget clock BEFORE pre-loop work — disk loads, conversions, and
+	# pool prewarm all consume frame time that must count against the budget.
+	# Without this, these operations can blow the budget before the main
+	# instantiation loop even begins (root cause of 112ms frame overruns).
+	var start_time := Time.get_ticks_usec()
+
 	# First process any pending async disk loads (non-blocking check)
 	process_async_disk_loads()
 
 	# Then process any pending conversions to feed the cache
-	process_pending_conversions(MAX_CONVERSION_TIME_MS)
+	# Cap conversion time to half the budget so instantiation still gets time
+	var conversion_budget_ms := budget_ms * 0.5
+	process_pending_conversions(conversion_budget_ms)
 
-	# Process pool pre-warming in background
-	if pool_prewarm_enabled:
+	# Process pool pre-warming in background (only if budget permits)
+	var pre_loop_elapsed := float(Time.get_ticks_usec() - start_time) / 1000.0
+	if pool_prewarm_enabled and pre_loop_elapsed < budget_ms * 0.7:
 		_process_pool_prewarm()
 
 	if _instantiation_queue.is_empty():
@@ -1340,7 +1349,6 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		else:
 			_burst_loading_active = false
 
-	var start_time := Time.get_ticks_usec()
 	var budget_usec := effective_budget_ms * 1000.0
 	var instantiated := 0
 	var exit_reason := ""

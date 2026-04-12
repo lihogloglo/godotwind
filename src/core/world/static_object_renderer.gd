@@ -41,6 +41,11 @@ var _next_id: int = 0
 ## World scenario RID (set when entering tree)
 var _scenario: RID = RID()
 
+## Maximum visibility range for individual MID instances.
+## Default: MID_END (500m). When HLOD cells are available, set to HLOD_START (300m)
+## so the HLOD cell mesh takes over at distance.
+var visibility_range_end: float = DU.MID_END
+
 ## Stats
 var _stats: Dictionary = {
 	"mesh_types": 0,
@@ -344,12 +349,12 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 			if mat:
 				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
 
-	# Single render-tier→impostor-handoff visibility_range.
-	# 0-500m covers NEAR + MID. The embedded LOD chain handles sub-band selection.
+	# Visibility range: 0 to visibility_range_end (default 500m, 300m with HLOD).
+	# The embedded LOD chain handles sub-band selection within this range.
 	rs.instance_geometry_set_visibility_range(
 		instance_rid,
-		0.0, DU.MID_END,                        # 0-500m
-		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade into impostor
+		0.0, visibility_range_end,
+		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade at far end
 		RenderingServer.VISIBILITY_RANGE_FADE_SELF
 	)
 

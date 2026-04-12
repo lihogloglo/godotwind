@@ -54,7 +54,6 @@ var _fog_density: float = 0.00001  # Default very low fog for extended view
 # ShaderManager post-processing effects
 var _shader_manager_attached: bool = false
 var _volumetric_fog_toggle: CheckBox = null
-var _volumetric_clouds_toggle: CheckBox = null
 var _color_grading_toggle: CheckBox = null
 
 # SkyManager is created lazily - only on first toggle
@@ -247,13 +246,6 @@ func _setup_sky_toggle() -> void:
 	_volumetric_fog_toggle.button_pressed = false
 	_volumetric_fog_toggle.toggled.connect(_on_volumetric_fog_toggled)
 	toggle_container.add_child(_volumetric_fog_toggle)
-
-	# Create volumetric clouds toggle
-	_volumetric_clouds_toggle = CheckBox.new()
-	_volumetric_clouds_toggle.text = "Vol. Clouds [C]"
-	_volumetric_clouds_toggle.button_pressed = false
-	_volumetric_clouds_toggle.toggled.connect(_on_volumetric_clouds_toggled)
-	toggle_container.add_child(_volumetric_clouds_toggle)
 
 	# Create color grading toggle
 	_color_grading_toggle = CheckBox.new()
@@ -451,18 +443,6 @@ func _on_volumetric_fog_toggled(enabled: bool) -> void:
 	else:
 		ShaderManager.disable_effect("volumetric_fog", 0.3)
 		_log("Volumetric Fog: OFF")
-
-
-## Toggle volumetric clouds effect
-func _on_volumetric_clouds_toggled(enabled: bool) -> void:
-	_ensure_shader_manager_attached()
-
-	if enabled:
-		ShaderManager.enable_effect("volumetric_clouds", 0.3)
-		_log("Volumetric Clouds: ON")
-	else:
-		ShaderManager.disable_effect("volumetric_clouds", 0.3)
-		_log("Volumetric Clouds: OFF")
 
 
 ## Toggle color grading effect
@@ -705,9 +685,6 @@ func _input(event: InputEvent) -> void:
 				KEY_F:  # Toggle volumetric fog
 					if _volumetric_fog_toggle:
 						_volumetric_fog_toggle.button_pressed = not _volumetric_fog_toggle.button_pressed
-				KEY_C:  # Toggle volumetric clouds
-					if _volumetric_clouds_toggle:
-						_volumetric_clouds_toggle.button_pressed = not _volumetric_clouds_toggle.button_pressed
 				KEY_G:  # Toggle color grading
 					if _color_grading_toggle:
 						_color_grading_toggle.button_pressed = not _color_grading_toggle.button_pressed

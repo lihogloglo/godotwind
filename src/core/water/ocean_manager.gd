@@ -189,7 +189,8 @@ func _deferred_init() -> void:
 
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
 	_update_shader_parameters()
-	_load_shore_mask()
+	# Shore mask removed — depth buffer handles shore boundary (SoT pattern).
+	# _load_shore_mask() no longer called.
 
 	# Initialize FFT pipeline if HIGH quality
 	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:

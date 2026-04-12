@@ -309,26 +309,27 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 
 	# ── Compute sun screen position on CPU ──
 	var cam_transform := scene_data.get_cam_transform()
-	var cam_position := cam_transform.origin
 	var projection := scene_data.get_cam_projection()
-	var view_matrix := cam_transform.affine_inverse()
+	var view_basis := cam_transform.affine_inverse().basis
 
 	var toward_sun := _active_sun.global_basis.z  # direction toward sun
-	var cam_forward := -cam_transform.basis.z
 
-	# forward_dot < 0 means sun is in front of camera
-	var forward_dot: float = (-toward_sun).dot(cam_forward)
+	# Project sun direction to screen — rotation only, no translation.
+	# Sun is at infinity, so we project the direction through the view
+	# matrix's rotation and then the projection matrix. This avoids the
+	# camera-position dependency that caused the sun disc to shift with
+	# camera movement (old code: cam_pos + dir * 100000 at MW world coords
+	# made cam_pos a non-negligible fraction of the "sun distance").
+	var sun_view_dir: Vector3 = view_basis * toward_sun
 
-	# Project sun position to screen UV
 	var sun_uv := Vector2(0.5, 0.5)
-	if forward_dot < 0.0:
-		var sun_world := cam_position + toward_sun * 100000.0
-		var sun_view := view_matrix * sun_world
-		var sun_clip := projection * Vector4(sun_view.x, sun_view.y, sun_view.z, 1.0)
+	# sun_view_dir.z < 0 means sun is in front of camera (Godot view space: -Z = forward)
+	if sun_view_dir.z < 0.0:
+		var sun_clip := projection * Vector4(sun_view_dir.x, sun_view_dir.y, sun_view_dir.z, 1.0)
 		if sun_clip.w > 0.001:
 			var ndc_x: float = sun_clip.x / sun_clip.w
 			var ndc_y: float = sun_clip.y / sun_clip.w
-			sun_uv = Vector2(ndc_x * 0.5 + 0.5, -ndc_y * 0.5 + 0.5)
+			sun_uv = Vector2(ndc_x * 0.5 + 0.5, ndc_y * 0.5 + 0.5)
 
 	# Sun color from DirectionalLight3D
 	var sun_color := _active_sun.light_color * _active_sun.light_energy
@@ -363,7 +364,9 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 	# ── Build push constants (128 bytes = 32 floats, Godot hard limit) ──
 	var pc := PackedFloat32Array()
 
-	# sun_screen_pos: xy=uv, z=forward_dot, w=time
+	# sun_screen_pos: xy=uv, z=forward_dot (negative = sun in front), w=time
+	# forward_dot derived from view-space direction: z < 0 means in front
+	var forward_dot: float = sun_view_dir.z
 	pc.append(sun_uv.x)
 	pc.append(sun_uv.y)
 	pc.append(forward_dot)

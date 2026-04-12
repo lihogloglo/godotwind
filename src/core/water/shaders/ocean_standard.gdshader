@@ -31,10 +31,7 @@ uniform vec3 color_shallow : source_color = vec3(0.1, 0.3, 0.4);
 uniform vec3 color_deep : source_color = vec3(0.02, 0.08, 0.12);
 uniform float color_depth_range : hint_range(1.0, 100.0) = 8.0;
 
-// Shore mask
-group_uniforms shore;
-uniform sampler2D shore_mask : hint_default_white, filter_linear;
-uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+// Shore — depth buffer is the sole authority for shore boundary (no prebaked mask).
 
 // Foam
 group_uniforms foam;
@@ -60,7 +57,6 @@ uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
 
 // Varyings
 varying vec3 v_world_pos;
-varying float v_shore_factor;
 
 // ============================================================================
 // WAVE CONSTANTS — Must match GerstnerMath.gd WAVES array
@@ -126,30 +122,16 @@ vec2 gerstner_norm(vec2 pos, float t, vec4 df, vec2 ss) {
 }
 
 // ============================================================================
-// SHORE MASK
-// ============================================================================
-float sample_shore(vec2 world_xz) {
-	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
-	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-		return 1.0;
-	}
-	return texture(shore_mask, uv).r;
-}
-
-// ============================================================================
 // VERTEX
 // ============================================================================
 void vertex() {
-	v_shore_factor = sample_shore(VERTEX.xz);
-
 	float dist = length(VERTEX.xz - CAMERA_POSITION_WORLD.xz);
-	float shore = v_shore_factor * wave_scale;
 	float t = TIME;
 
 	// Octave fades
-	float swell_f = shore * smoothstep(SWELL_FADE, SWELL_FADE * 0.8, dist);
-	float chop_f = shore * smoothstep(CHOP_FADE, CHOP_FADE * 0.7, dist);
-	float ripple_f = shore * smoothstep(RIPPLE_FADE, RIPPLE_FADE * 0.5, dist);
+	float swell_f = wave_scale * smoothstep(SWELL_FADE, SWELL_FADE * 0.8, dist);
+	float chop_f = wave_scale * smoothstep(CHOP_FADE, CHOP_FADE * 0.7, dist);
+	float ripple_f = wave_scale * smoothstep(RIPPLE_FADE, RIPPLE_FADE * 0.5, dist);
 
 	vec3 d = vec3(0.0);
 
@@ -179,18 +161,21 @@ void vertex() {
 // FRAGMENT
 // ============================================================================
 void fragment() {
-	if (v_shore_factor < 0.01) {
-		discard;
-	}
-
 	float dist = length(v_world_pos.xz - CAMERA_POSITION_WORLD.xz);
-	float shore = v_shore_factor * wave_scale;
 	float t = TIME;
 
-	// Compute analytical normal
-	float swell_f = shore * smoothstep(SWELL_FADE, SWELL_FADE * 0.8, dist);
-	float chop_f = shore * smoothstep(CHOP_FADE, CHOP_FADE * 0.7, dist);
-	float ripple_f = shore * smoothstep(RIPPLE_FADE, RIPPLE_FADE * 0.5, dist);
+	// Depth reconstruction — Godot 4.6 reversed-Z
+	float surface_dist_pre = -(VIEW_MATRIX * vec4(v_world_pos, 1.0)).z;
+	float bg_ndc_z_pre = texture(DEPTH_TEX, SCREEN_UV).r;
+	float bg_view_z_pre = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z_pre, 1e-5);
+	float water_thickness_pre = max(0.0, -surface_dist_pre - bg_view_z_pre);
+	float water_depth_clamped = min(water_thickness_pre, 20.0);
+
+	// Compute analytical normal — dampened by depth near shore
+	float depth_damp = smoothstep(0.0, 1.0, water_depth_clamped);
+	float swell_f = wave_scale * depth_damp * smoothstep(SWELL_FADE, SWELL_FADE * 0.8, dist);
+	float chop_f = wave_scale * depth_damp * smoothstep(CHOP_FADE, CHOP_FADE * 0.7, dist);
+	float ripple_f = wave_scale * depth_damp * smoothstep(RIPPLE_FADE, RIPPLE_FADE * 0.5, dist);
 
 	vec2 n = vec2(0.0);
 	n += gerstner_norm(v_world_pos.xz, t, W0_DF, W0_SS) * swell_f;
@@ -255,11 +240,11 @@ void fragment() {
 		float edge_t = 1.0 - water_depth / foam_edge_width;
 		vec2 foam_uv = v_world_pos.xz * FOAM_TILING + TIME * foam_scroll_speed;
 		float foam_tex = texture(foam_texture, foam_uv).r;
-		foam_mask = step(edge_t, foam_tex) * edge_t * v_shore_factor;
+		foam_mask = step(edge_t, foam_tex) * edge_t;
 	}
 
-	// Compose — shore edges blend toward shore color (no alpha, stays opaque for SSR)
-	float shore_blend = smoothstep(0.01, 0.15, v_shore_factor) * clamp(water_depth * 4.0, 0.0, 1.0);
+	// Compose — depth-driven shore blend (no alpha, stays opaque for SSR)
+	float shore_blend = smoothstep(0.0, 0.5, water_depth_clamped);
 	vec3 final_col = mix(color_shore, mix(underwater, foam_color, foam_mask), shore_blend);
 
 	// Output — fully opaque PBR surface. Godot's SSR + sky reflections work via specular path.

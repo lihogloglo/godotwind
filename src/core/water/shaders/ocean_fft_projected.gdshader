@@ -136,10 +136,8 @@ void vertex() {
 	// displacement at the world XZ we just computed, accumulate choppiness
 	// for SSS, and write v_world_pos + v_choppiness for the fragment stage.
 	UV = world_pos.xz;
-	v_shore_factor = sample_shore(world_pos.xz);
 	float dist = length(world_pos - CAMERA_POSITION_WORLD);
 	v_vertex_dist = dist;
-	float shore = v_shore_factor * wave_scale;
 
 	vec3 displacement = vec3(0);
 	float chop_accum = 0.0;
@@ -151,11 +149,10 @@ void vertex() {
 		displacement += cascade_disp;
 		chop_accum += length(cascade_disp.xz);
 	}
-	world_pos += displacement * shore;
-	world_pos.y += 0.15; // slight bias prevents z-fighting with terrain
+	world_pos += displacement * wave_scale;
 	wave_height = displacement.y;
 	v_world_pos = world_pos;
-	v_choppiness = chop_accum * shore;
+	v_choppiness = chop_accum * wave_scale;
 
 	// Write POSITION directly — bypasses the default `PROJECTION_MATRIX *
 	// MODELVIEW_MATRIX * vec4(VERTEX, 1.0)` Godot applies. The MeshInstance3D

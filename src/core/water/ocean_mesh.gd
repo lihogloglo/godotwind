@@ -128,28 +128,8 @@ render_mode depth_draw_opaque, cull_disabled;
 
 uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform float roughness = 0.3;
-uniform sampler2D shore_mask : hint_default_white, filter_linear;
-uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
-
-varying float shore_factor;
-
-float sample_shore(vec2 world_xz) {
-	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
-	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-		return 1.0;
-	}
-	return texture(shore_mask, uv).r;
-}
-
-void vertex() {
-	vec3 world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	shore_factor = sample_shore(world_pos.xz);
-}
 
 void fragment() {
-	if (shore_factor < 0.01) {
-		discard;
-	}
 	float fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0), 1.0, 0.02);
 	ALBEDO = water_color.rgb;
 	ROUGHNESS = roughness;
@@ -187,12 +167,6 @@ func _setup_fft_defaults() -> void:
 	_material.set_shader_parameter("foam_texture", foam_tex)
 	_cached_foam_texture = foam_tex
 
-	# Default white shore mask
-	var white_img := Image.create(1, 1, false, Image.FORMAT_L8)
-	white_img.set_pixel(0, 0, Color.WHITE)
-	var white_tex := ImageTexture.create_from_image(white_img)
-	_material.set_shader_parameter("shore_mask", white_tex)
-
 	Log.debug("water", "OceanMesh: FFT shader defaults configured")
 
 
@@ -204,13 +178,6 @@ func _setup_standard_defaults() -> void:
 	var foam_tex := _load_foam_texture()
 	_material.set_shader_parameter("foam_texture", foam_tex)
 	_cached_foam_texture = foam_tex
-
-	# Set a default white shore mask so water renders everywhere
-	# (until a real shore mask is provided via set_shore_mask)
-	var white_img := Image.create(1, 1, false, Image.FORMAT_L8)
-	white_img.set_pixel(0, 0, Color.WHITE)
-	var white_tex := ImageTexture.create_from_image(white_img)
-	_material.set_shader_parameter("shore_mask", white_tex)
 
 	Log.debug("water", "OceanMesh: Standard shader defaults configured")
 

@@ -69,6 +69,40 @@ func is_active() -> bool:
 	return _active
 
 
+## Clean up Environment properties that weather was writing.
+## Called synchronously when weather deactivates, BEFORE EnvironmentControls
+## re-asserts its defaults. Prevents stale values (e.g. thunder emission color)
+## from persisting after weather is turned off.
+func cleanup_on_deactivate() -> void:
+	var env: Environment = _get_environment()
+	if not env:
+		return
+
+	# Reset volumetric fog emission (thunder flash residue)
+	env.volumetric_fog_emission = Color.BLACK
+
+	# Reset ambient energy spike from thunder
+	var sky_mgr: Node = _get_sky_manager()
+	if sky_mgr:
+		var sky_env: Environment = sky_mgr.get_environment() if sky_mgr.has_method("get_environment") else null
+		if sky_env and sky_env.ambient_light_energy > 1.01:
+			sky_env.ambient_light_energy = 1.0
+	elif env.ambient_light_energy > 1.01:
+		env.ambient_light_energy = 1.0
+
+	# Reset sun volumetric energy to neutral
+	if sky_mgr and sky_mgr.has_method("get_sun_light"):
+		var sun: DirectionalLight3D = sky_mgr.get_sun_light()
+		if sun:
+			sun.light_volumetric_fog_energy = 1.0
+	else:
+		var light: DirectionalLight3D = _get_light()
+		if light:
+			light.light_volumetric_fog_energy = 1.0
+
+	_log("Weather renderer cleaned up Environment state")
+
+
 #region Depth Fog — Exponential distance fog + height fog + sun scatter
 
 func _apply_depth_fog(env: Environment, result: WeatherTypes.WeatherResult) -> void:

@@ -74,6 +74,7 @@ var models := ComponentState.new()  # LODs are embedded in models via NIFConvert
 var impostors := ComponentState.new()
 var navmeshes := ComponentState.new()
 var shore_mask := ComponentState.new()
+var hlod := ComponentState.new()
 
 ## Global state
 var version: int = 1
@@ -98,6 +99,7 @@ func load_state() -> bool:
 	_load_component(config, "impostors", impostors)
 	_load_component(config, "navmeshes", navmeshes)
 	_load_component(config, "shore_mask", shore_mask)
+	_load_component(config, "hlod", hlod)
 
 	Log.info("prebaking", "Loaded state from %s" % STATE_FILE)
 	_print_summary()
@@ -117,6 +119,7 @@ func save_state() -> bool:
 	_save_component(config, "impostors", impostors)
 	_save_component(config, "navmeshes", navmeshes)
 	_save_component(config, "shore_mask", shore_mask)
+	_save_component(config, "hlod", hlod)
 
 	var err := config.save(STATE_FILE)
 	if err != OK:
@@ -134,6 +137,7 @@ func clear_state() -> void:
 	impostors.reset()
 	navmeshes.reset()
 	shore_mask.reset()
+	hlod.reset()
 	is_running = false
 
 	# Delete state file
@@ -150,13 +154,14 @@ func has_pending_work() -> bool:
 		not models.pending.is_empty() or
 		not impostors.pending.is_empty() or
 		not navmeshes.pending.is_empty() or
-		not shore_mask.pending.is_empty()
+		not shore_mask.pending.is_empty() or
+		not hlod.pending.is_empty()
 	)
 
 
 ## Get overall progress (0.0 - 1.0)
 func get_overall_progress() -> float:
-	var components := [terrain, models, impostors, navmeshes, shore_mask]
+	var components := [terrain, models, hlod, impostors, navmeshes, shore_mask]
 	var enabled_components := components.filter(func(c: ComponentState) -> bool: return c.enabled)
 
 	if enabled_components.is_empty():
@@ -177,6 +182,7 @@ func get_summary() -> Dictionary:
 		"impostors": impostors.to_dict(),
 		"navmeshes": navmeshes.to_dict(),
 		"shore_mask": shore_mask.to_dict(),
+		"hlod": hlod.to_dict(),
 		"overall_progress": get_overall_progress(),
 		"has_pending": has_pending_work(),
 		"is_running": is_running,
@@ -217,4 +223,6 @@ func _print_summary() -> void:
 		impostors.completed.size(), impostors.pending.size(), impostors.failed.size()])
 	Log.info("prebaking", "Navmeshes: %d completed, %d pending, %d failed" % [
 		navmeshes.completed.size(), navmeshes.pending.size(), navmeshes.failed.size()])
+	Log.info("prebaking", "HLOD: %d completed, %d pending, %d failed" % [
+		hlod.completed.size(), hlod.pending.size(), hlod.failed.size()])
 	Log.info("prebaking", "Shore Mask: %s" % ("complete" if shore_mask.is_complete() else "pending"))

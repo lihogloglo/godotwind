@@ -131,7 +131,13 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# Set clouds_resource AFTER add_child — the setter calls clouds_res_added()
 		# which registers the CompositorEffect on the active WorldEnvironment
 		_sunshine_driver.clouds_resource = clouds_res
-		Log.info("weather", "SunshineClouds2 driver initialized with compositor effect")
+
+		# Disable clouds until weather or sky is explicitly enabled.
+		# CompositorEffect defaults enabled=true, so clouds would render at startup
+		# even with sky/weather toggles OFF.
+		clouds_res.enabled = false
+
+		Log.info("weather", "SunshineClouds2 driver initialized (disabled until weather/sky enabled)")
 	else:
 		Log.warn("weather", "SunshineClouds2 clouds script not found")
 		parent.add_child(_sunshine_driver)
@@ -236,8 +242,21 @@ func on_weather_toggled(enabled: bool) -> void:
 				_panels.depth_fog_toggle.set_pressed_no_signal(true)
 
 	if _renderer:
+		if not enabled:
+			# Synchronous handoff: weather cleans up its writes FIRST,
+			# then EnvironmentControls re-asserts defaults. Same call stack,
+			# no deferred — avoids one-frame stale emission/ambient.
+			_renderer.cleanup_on_deactivate()
 		_renderer.set_active(enabled)
 		_renderer.fog_density_multiplier = fog_density_multiplier
+
+	# After weather cleanup, re-assert environment defaults so fog
+	# returns to neutral colors (replaces the old manual albedo reset)
+	if not enabled and _env_controls:
+		_env_controls.reassert_fog_defaults()
+
+	# Enable/disable SunshineClouds2 rendering
+	_set_clouds_enabled(enabled or (_env_controls and _env_controls.show_sky))
 
 	if _particles:
 		_particles.visible = enabled
@@ -245,17 +264,6 @@ func on_weather_toggled(enabled: bool) -> void:
 	# Reset ocean to calm defaults when weather is disabled
 	if not enabled and OceanManager.is_system_enabled():
 		OceanManager.reset_weather()
-
-	# Reset volumetric fog albedo to neutral when weather is disabled.
-	# Otherwise the env keeps whichever weather-specific albedo the
-	# renderer last wrote (ashstorm → brown, blight → red, etc.) and the
-	# fog stays tinted even after the weather system stops updating.
-	# Fixes the "fog seems always brown" report from 2026-04-09.
-	if not enabled and _env_controls:
-		var active_env: Environment = _env_controls.get_active_environment()
-		if active_env and active_env.volumetric_fog_enabled:
-			active_env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
-			active_env.volumetric_fog_emission = Color.BLACK
 
 	Log.info("weather", "Weather system %s" % ("enabled" if enabled else "disabled"))
 
@@ -314,6 +322,20 @@ func on_wind_strength_changed(value: float) -> void:
 	# wind_speed + storm-fog multiplier. See OceanManager.set_wind_strength.
 	if OceanManager and OceanManager.is_system_enabled() and OceanManager.has_method("set_wind_strength"):
 		OceanManager.set_wind_strength(value)
+
+
+## Enable/disable SunshineClouds2 rendering (CompositorEffect.enabled).
+## Called when weather or sky toggles change.
+func _set_clouds_enabled(on: bool) -> void:
+	var res: Resource = _get_clouds_resource()
+	if res != null:
+		res.set("enabled", on)
+
+
+## Notify weather_controls that sky visibility changed.
+## Called by environment_controls so clouds enable/disable tracks sky state.
+func on_sky_visibility_changed(sky_visible: bool) -> void:
+	_set_clouds_enabled(weather_enabled or sky_visible)
 
 
 ## Write a single SunshineClouds2 resource parameter. Silently no-ops if

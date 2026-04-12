@@ -7,8 +7,11 @@
 | Tier | Range | Technique | Key File |
 |------|-------|-----------|----------|
 | NEAR | 0-150m | Full Node3D + physics | `cell_manager.gd` |
-| MID | 150-500m | Single raw RS instance per object with embedded LOD chain, engine picks level from screen-space coverage | `static_object_renderer.gd` |
-| FAR | 500-5km | Octahedral impostors, single MultiMesh draw call | `native_impostor_renderer.gd` |
+| MID | 0-300m* | Single raw RS instance per object with embedded LOD chain, engine picks level from screen-space coverage | `static_object_renderer.gd` |
+| HLOD | 300-1000m | One RS instance per cell — merged static geometry with LOD chain | `hlod_loader.gd` |
+| FAR | 1000-5km | Octahedral impostors, single MultiMesh draw call | `native_impostor_renderer.gd` |
+
+\* MID range is 0-500m when HLOD cache is not available (graceful fallback).
 
 Constants defined in `src/core/world/distance_utils.gd`. Post-refactor, NEAR and MID share **one** visibility_range band (0-500m) on a single MeshInstance3D / RS instance, and Godot's C++ LOD selector picks which level of the embedded cascade to draw per frame. The NEAR/MID split is a *streaming-layer* concept (NEAR adds physics + scene-tree nodes), not a rendering-layer distinction.
 
@@ -27,24 +30,41 @@ MID→NEAR promotion pre-creates Node3Ds at 250m while they are invisible, then 
 Bypasses the scene tree. Uses `RenderingServer.instance_create() + instance_set_base()` — **one** RS instance per object, holding the embedded LOD chain.
 
 Key details:
-- `ImporterMesh.generate_lods(60.0, 25.0, [])` at prebake time produces a 4-5 level cascade with clean 50/25/12.5/6.25% reduction (weld + SimplifyLockBorder + attribute remap + vertex cache opt, all handled by the engine pipeline).
+- **Prebake merge:** `model_prebaker.gd` merges all visible MeshInstance3D children of a prototype into a single ArrayMesh at prebake time (vertices/normals transformed into root space, inverse-transpose for normals). Multi-material buildings (3-8 child meshes for walls/roof/door) become one mesh with N surfaces. Character models are excluded (skeleton hierarchy preserved).
+- `ImporterMesh.generate_lods(60.0, 25.0, [])` runs on the merged mesh, producing a 4-5 level LOD cascade covering the entire building in one embedded chain.
 - `ArrayMesh.set_meta("has_lod_chain", true)` stamped at bake time so cache-scan tooling can tell whether a `.res` file is new-format.
 - Single visibility_range band on the RS instance: `0 → DU.MID_END (500m)`, `end_margin=20m`, `VISIBILITY_RANGE_FADE_SELF`. The 20m margin provides the dither crossfade into the impostor tier.
 - `instance_geometry_set_lod_bias(rid, 1.0)` — per-instance LOD bias (tunable later via a per-type registry in `streaming_config.gd`).
 - Sub-LOD selection is driven by Godot's C++ `RendererSceneCull` from the projected screen-space size of the object's bounding volume, resolution- and FOV-aware. Threshold controlled by `viewport.mesh_lod_threshold` (default 1.0 px, quality presets override to 0.5-4.0 px).
 - Godot auto-batches identical mesh+material RS instances in C++ — zero GDScript overhead.
 - **Must hold strong refs** to Mesh/Material resources — LRU cache eviction frees resources, invalidating RIDs silently.
+- **Fallback multi-RID path:** if a cached prototype still has multiple MeshInstance3D children (character models, edge cases), `static_object_renderer.gd` creates one RS instance per child via `SubMeshEntry`, each preserving its own LOD chain. All tracked under a single instance ID.
 
-**RS instance count impact:** pre-refactor each MID object had up to 4 RS instances (LOD0/LOD1/LOD2/LOD3 with per-band visibility_range). Post-refactor each object has 1 RS instance. At ~63k MID-tier objects, that's ~189k fewer RIDs and ~189k fewer per-frame culling tests.
+**RS instance count impact:** pre-refactor each MID object had up to 4 RS instances (LOD0/LOD1/LOD2/LOD3 with per-band visibility_range). Post-refactor each object has 1 RS instance (prebake-merged) or N RS instances (multi-mesh fallback, N = child count, typically 1-8). At ~63k MID-tier objects, the prebake merge path eliminates ~189k RIDs and ~189k per-frame culling tests.
 
-## FAR Tier (500-5km)
+## HLOD Tier (300-1000m)
+
+Cell-level merged geometry. At prebake time, all mid-worthy static objects in each cell are merged into a single ArrayMesh with LOD chain. At runtime, one RS instance per cell replaces ~100+ individual RS instances.
+
+Key details:
+- **Prebake:** `model_prebaker.gd::bake_cell_hlod()` merges all mid-worthy refs (STAT, DOOR, CONT, ACTI) per cell. Vertices transformed into cell-local space. Surfaces grouped by material for dedup. `ImporterMesh.generate_lods(60.0, 25.0, [])` generates LOD chain.
+- **Cache:** `Documents/Godotwind/cache/hlod/cell_{x}_{y}.res` — one ArrayMesh per cell.
+- **Runtime:** `hlod_loader.gd` loads/unloads HLOD meshes as camera crosses cells. RS instance positioned at cell origin with `visibility_range(300, 1000, 20m, 20m, FADE_SELF)`.
+- **Transition:** At 300m, individual MID RS instances fade out (visibility_range_end=300m), HLOD mesh fades in. At 1000m, HLOD fades out, impostors take over.
+- **Fallback:** When HLOD cache does not exist, MID instances keep their 0-500m range and impostors start at 500m. System degrades gracefully.
+- **Bake trigger:** Console command `bake_hlod` in world explorer. Takes several minutes for ~2500 cells.
+- **Based on:** OpenMW `objectpaging.cpp` (FLATTEN_STATIC_TRANSFORMS + MERGE_GEOMETRY), adapted for Godot RS API.
+
+Constants in `distance_utils.gd`: `HLOD_START=300m`, `HLOD_END=1000m`.
+
+## FAR Tier (1000-5km)
 
 Custom octahedral impostor system (Godot has no built-in equivalent).
 - Single MultiMeshInstance3D renders all FAR objects in one draw call
 - Albedo + normal maps packed into parallel Texture2DArray
 - Per-impostor transforms stored in MultiMesh custom data (INSTANCE_CUSTOM: .x=albedo layer, .y=yaw rad, .z=normal layer, .w=variant)
 - Two shader variants via INSTANCE_CUSTOM.w: v4 (legacy azimuthal 16-frame 4x4) and v5 (octahedral tri-sample 8x8, Brucks barycentric blending, yaw-rotated normals)
-- Visibility range: begin=480m, end=5km, begin_margin=20m, end_margin=20m, FADE_SELF (set on the MultiMeshInstance3D)
+- Visibility range: begin=980m (with HLOD) or 480m (without HLOD), end=5km, begin_margin=20m, end_margin=20m, FADE_SELF (set on the MultiMeshInstance3D)
 - Shadow receive YES, shadow cast NO (avoids billboard shadow artifacts at distance)
 - Texture array rebuild debounced (0.2s after last add, 0.5s min between rebuilds)
 - **MultiMesh rebuild uses `set_buffer(PackedFloat32Array)`** — single bulk upload instead of N×2 RS calls

@@ -46,10 +46,9 @@ uniform float foam_edge_width : hint_range(0.01, 2.0) = 0.3;
 uniform float foam_flow_speed : hint_range(0.0, 0.1) = 0.03;
 uniform float foam_intensity : hint_range(0.0, 1.0) = 1.0;  // Weather-driven: 0=calm, 1=storm
 
-// Shore
-group_uniforms shore;
-uniform sampler2D shore_mask : hint_default_white, filter_linear;
-uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+// Shore — prebaked shore mask removed. Depth buffer is the sole authority for
+// the visual shore boundary (Sea of Thieves pattern). Wave dampening, foam,
+// and color blend are all driven by screen-space water_thickness.
 
 // Refraction — real depth-driven Beer-Lambert from DEPTH_TEXTURE + SCREEN_TEXTURE.
 // Declaring these samplers disables Godot 4.6 native SSR on this material
@@ -107,8 +106,8 @@ uniform float wave_scale : hint_range(0.0, 3.0) = 1.0;
 // Debug visualization — cycles through views of the fragment-shader
 // intermediate state. 0 = normal render. Set via `OceanManager.set_debug_mode(int)`.
 //   0 = Normal (production)
-//   1 = Shore factor (R=0, G=1)
-//   2 = Shore discard zone (pixels that WOULD discard, as red overlay)
+//   1 = Shore depth (R=thin/near shore, G=deep)
+//   2 = Shore intersection zone (red = ocean behind terrain)
 //   3 = Water thickness / max_visible_depth (blue=thin, red=thick)
 //   4 = Transmittance (beer-lambert absorption, gray)
 //   5 = Fresnel (gray)
@@ -156,23 +155,13 @@ varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
 varying vec3 v_world_pos;      // displaced world position (for normals, SSS, refraction)
-varying float v_shore_factor;
 varying float v_vertex_dist;
 // FFT choppiness magnitude — horizontal displacement length summed across all
 // cascades, with shore mask applied. This is SoT's canonical "wave peak mask".
 // Large values = sharp crest with short light path through water = more scatter.
 varying float v_choppiness;
 
-// ============================================================================
-// SHORE MASK
-// ============================================================================
-float sample_shore(vec2 world_xz) {
-	vec2 uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
-	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-		return 1.0;
-	}
-	return texture(shore_mask, uv).r;
-}
+// Shore mask sampling removed — depth buffer handles shore boundary.
 
 // ============================================================================
 // BICUBIC FILTERING (for normal maps — reduces aliasing at distance)
@@ -309,6 +298,21 @@ void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
 	float dist = v_vertex_dist;
 
+	// ========================================================================
+	// DEPTH RECONSTRUCTION — moved to top of fragment so water_thickness is
+	// available for gradient dampening, shore blend, and foam. Canonical
+	// Godot 4.6 reversed-Z depth→view-space-Z. Forward+ / D3D12 / Vulkan use
+	// infinite reversed-Z: 1.0 at near, 0.0 at far. PROJECTION_MATRIX[3][2]
+	// encodes the negated near distance.
+	// ========================================================================
+	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
+	vec3 surf_view = surf_view4.xyz / surf_view4.w;
+	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
+	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
+	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
+	bool is_sky_or_far = raw_thickness >= max_visible_depth;
+	float water_thickness = min(raw_thickness, max_visible_depth);
+
 	// Read gradient and foam from normal maps (all cascades)
 	vec3 gradient = vec3(0);
 	for (uint i = 0U; i < num_cascades; ++i) {
@@ -317,19 +321,16 @@ void fragment() {
 		float ppm = map_size * min(scales.x, scales.y);
 		gradient += mix(texture_bicubic(normals, coords), texture(normals, coords), min(1.0, ppm * 0.1)).xyw * vec3(scales.ww, 1.0);
 	}
-	gradient *= v_shore_factor;
+	// Dampen normals near shore — depth-driven replacement for prebaked mask.
+	// At shore (water_thickness → 0), gradient → 0, giving calm flat normals.
+	// At depth > 1m, full gradient. Prevents visual noise at the thin-water zone.
+	gradient *= smoothstep(0.0, 1.0, water_thickness);
 
 	// ========================================================================
-	// SHORE — prebaked mask is the single authority for land/water boundary.
+	// SHORE BLEND — depth-driven. Thin water blends toward shallow color,
+	// deep water gets full water rendering (refraction, SSR, SSS).
 	// ========================================================================
-	// Debug modes DISABLE the discard so we can SEE the geometry that would
-	// normally be killed. In production (debug_mode == 0) the discard still
-	// runs unchanged.
-	if (v_shore_factor < 0.01 && debug_mode == 0) {
-		discard;
-	}
-	// Shore blend factor from prebaked mask (0=land, 1=open ocean)
-	float shore_blend = smoothstep(0.01, 0.3, v_shore_factor);
+	float shore_blend = smoothstep(0.0, 0.5, water_thickness);
 
 	// ========================================================================
 	// FOAM — Jacobian whitecaps + flow-mapped detail + shore edge foam
@@ -347,29 +348,8 @@ void fragment() {
 	// Jacobian drives where foam appears, texture gives it detail
 	jacobian_foam *= mix(0.6, 1.0, foam_detail);
 
-	// Shore edge foam — depth-buffer driven. Reconstruct view-space thickness
-	// here (before NORMAL/fresnel) so foam can use real water depth instead of
-	// the prebaked shore mask. This also rings foam around submerged rocks for
-	// free, since DEPTH_TEXTURE sees any opaque geometry below the surface.
-	// Unit semantics: foam_edge_width is meters of water depth (matches
-	// ocean_standard.gdshader). OceanManager wind animation (0.1→1.5m) still
-	// reads sensibly: calm = thin shoreline, storm = wider band.
-	//
-	// Canonical Godot 4.6 reversed-Z depth→view-space-Z reconstruction. Forward+
-	// / D3D12 / Vulkan use infinite reversed-Z where the depth buffer stores
-	// 1.0 at near plane, 0.0 at far plane, and PROJECTION_MATRIX[3][2] encodes
-	// the negated near distance. Avoids the numerical blowup near the near
-	// plane that a full INV_PROJECTION_MATRIX * clip pipeline produces when
-	// bg_view4.w approaches zero.
-	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
-	vec3 surf_view = surf_view4.xyz / surf_view4.w;
-	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
-	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
-	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
-	bool is_sky_or_far = raw_thickness >= max_visible_depth;
-	float water_thickness = min(raw_thickness, max_visible_depth);
-
-	// Smoothstep on depth: 1.0 at zero depth → 0.0 past foam_edge_width meters.
+	// Shore edge foam — depth-buffer driven. Foam rings around any opaque
+	// geometry below the surface (terrain, rocks) for free.
 	float shore_foam = (1.0 - smoothstep(0.0, foam_edge_width, water_thickness)) * foam_detail;
 	foam_factor = max(jacobian_foam, shore_foam);
 
@@ -526,9 +506,12 @@ void fragment() {
 	if (debug_mode != 0) {
 		vec3 debug_col = vec3(0.0);
 		if (debug_mode == 1) {
-			debug_col = vec3(1.0 - v_shore_factor, v_shore_factor, 0.0);
+			// Shore depth: red = thin water (near shore), green = deep
+			float shore_t = clamp(water_thickness / 2.0, 0.0, 1.0);
+			debug_col = vec3(1.0 - shore_t, shore_t, 0.0);
 		} else if (debug_mode == 2) {
-			debug_col = v_shore_factor < 0.01
+			// Shore intersection zone: red = ocean behind terrain (would be occluded)
+			debug_col = water_thickness < 0.05
 				? vec3(1.0, 0.0, 0.0)
 				: vec3(0.05, 0.1, 0.2);
 		} else if (debug_mode == 3) {

@@ -26,6 +26,11 @@ const NEAR_END: float = 150.0
 ## MID tier: Per-object LOD meshes (NEAR_END to MID_END)
 const MID_END: float = 500.0
 
+## HLOD tier: Cell-level merged meshes (HLOD_START to HLOD_END)
+## Bridges individual MID instances and impostor billboards
+const HLOD_START: float = 300.0
+const HLOD_END: float = 1000.0
+
 ## FAR tier: Impostors/billboards (MID_END to FAR_END)
 const FAR_END: float = 5000.0
 

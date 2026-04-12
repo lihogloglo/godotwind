@@ -32,13 +32,9 @@ render_mode world_vertex_coords, cull_disabled, shadows_disabled, depth_draw_alw
 void vertex() {
 	// Mesh position snapped to 64m grid by ocean_mesh.gd (scrolling clipmap)
 	UV = VERTEX.xz;
-	// Shore mask dampens wave displacement near shore to prevent geometry clipping
-	v_shore_factor = sample_shore(VERTEX.xz);
-
 	// 3D distance for altitude-aware cascade fading
 	float dist = length(VERTEX - CAMERA_POSITION_WORLD);
 	v_vertex_dist = dist;
-	float shore = v_shore_factor * wave_scale;
 
 	// Accumulate displacement from all cascades with per-cascade distance fade.
 	// Also accumulate horizontal-displacement magnitude (`chop_accum`) per
@@ -56,9 +52,8 @@ void vertex() {
 		displacement += cascade_disp;
 		chop_accum += length(cascade_disp.xz);
 	}
-	VERTEX += displacement * shore;
-	VERTEX.y += 0.15; // slight bias prevents z-fighting with terrain
+	VERTEX += displacement * wave_scale;
 	wave_height = displacement.y;
 	v_world_pos = VERTEX;
-	v_choppiness = chop_accum * shore;
+	v_choppiness = chop_accum * wave_scale;
 }

@@ -32,7 +32,7 @@ const SEGMENT_NAMES: Array[String] = [
 ]
 
 ## CSV column headers
-const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects"
+const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us"
 
 #endregion
 
@@ -475,7 +475,7 @@ func _update_segment_index() -> void:
 
 func _log_frame() -> void:
 	var entry := PackedFloat64Array()
-	entry.resize(20)
+	entry.resize(29)
 	entry[0] = float(Engine.get_frames_drawn())
 	entry[1] = _last_frame_time_ms
 	entry[2] = Engine.get_frames_per_second()
@@ -500,6 +500,12 @@ func _log_frame() -> void:
 	entry[18] = Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED) / 1048576.0
 	# Promoted objects count
 	entry[19] = float(_get_promoted_count())
+	# Per-phase streaming timing from NativeStreamingManager
+	if _streaming_manager and _streaming_manager.has_method("get_phase_times"):
+		entry[20] = _streaming_manager.get_frame_streaming_ms()
+		var pt: PackedFloat64Array = _streaming_manager.get_phase_times()
+		for i in range(mini(pt.size(), 8)):
+			entry[21 + i] = pt[i]
 	_frame_log.append(entry)
 
 	# Sample visibility for appear/disappear detection
@@ -619,6 +625,12 @@ func _finish_benchmark() -> void:
 	var results := _calculate_results()
 	_save_csv()
 	_save_events_csv()
+
+	# In sweep mode, feed results to sweep handler instead of printing individual summary
+	if _sweep_mode:
+		_on_sweep_pass_complete(results)
+		return
+
 	_print_summary(results)
 
 	benchmark_complete.emit(results)
@@ -770,12 +782,14 @@ func _save_csv() -> void:
 
 	file.store_line(CSV_HEADERS)
 	for entry in _frame_log:
-		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d" % [
+		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d,%.2f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f" % [
 			int(entry[0]), entry[1], entry[2], int(entry[3]), int(entry[4]),
 			int(entry[5]), int(entry[6]), int(entry[7]), int(entry[8]),
 			int(entry[9]), entry[10], entry[11], entry[12], entry[13],
 			int(entry[14]), int(entry[15]), int(entry[16]),
-			entry[17], entry[18], int(entry[19])
+			entry[17], entry[18], int(entry[19]),
+			entry[20], entry[21], entry[22], entry[23], entry[24],
+			entry[25], entry[26], entry[27], entry[28]
 		]
 		file.store_line(line)
 
@@ -897,6 +911,37 @@ func _print_summary(results: Dictionary) -> void:
 		if _visibility_change_count > 0:
 			lines.append("  Visibility drops (>5 objects): %d" % _visibility_change_count)
 
+	# Per-phase streaming timing breakdown (I/O stall profiling)
+	if _frame_log.size() > 0 and _frame_log[0].size() >= 29:
+		var phase_names: Array[String] = ["unload", "async", "instantiate", "promote", "collision", "deferred", "queue", "cell_update"]
+		var phase_avgs: PackedFloat64Array = PackedFloat64Array()
+		var phase_maxes: PackedFloat64Array = PackedFloat64Array()
+		var stream_total_avg := 0.0
+		var stream_total_max := 0.0
+		phase_avgs.resize(8)
+		phase_maxes.resize(8)
+		var count := 0
+		for entry: PackedFloat64Array in _frame_log:
+			if entry[20] > 0.001:  # Only count frames where streaming actually ran
+				stream_total_avg += entry[20]
+				stream_total_max = maxf(stream_total_max, entry[20])
+				for i in range(8):
+					phase_avgs[i] += entry[21 + i]
+					phase_maxes[i] = maxf(phase_maxes[i], entry[21 + i])
+				count += 1
+		if count > 0:
+			stream_total_avg /= float(count)
+			for i in range(8):
+				phase_avgs[i] /= float(count)
+			lines.append("")
+			lines.append("Streaming Phase Timing (I/O stall analysis):")
+			lines.append("  Total streaming work: avg %.2fms, max %.2fms (%d active frames)" % [stream_total_avg, stream_total_max, count])
+			for i in range(8):
+				var avg_ms := phase_avgs[i] / 1000.0
+				var max_ms := phase_maxes[i] / 1000.0
+				var pct := (phase_avgs[i] / (stream_total_avg * 1000.0)) * 100.0 if stream_total_avg > 0.001 else 0.0
+				lines.append("  %-14s avg %6.2fms  max %6.2fms  (%4.1f%%)" % [phase_names[i] + ":", avg_ms, max_ms, pct])
+
 	lines.append("")
 
 	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
@@ -945,5 +990,148 @@ static func register_console_commands(console: Node, streaming_manager: Variant,
 		"debug",
 		PackedStringArray(["bench_quick"]),
 	)
+
+	var run_lod_sweep := func(args: Dictionary) -> Variant:
+		var benchmark := StreamingBenchmark.new()
+		benchmark.name = "StreamingBenchmarkLODSweep"
+		console.get_tree().root.add_child(benchmark)
+		benchmark.init_lod_sweep(streaming_manager, cell_manager, camera, console)
+		return "LOD threshold sweep started (6 passes)..."
+
+	console.register_command(
+		"benchmark_lod_sweep", run_lod_sweep,
+		"Sweep mesh_lod_threshold (0.25/0.5/1/2/4/8) and compare FPS",
+		"debug",
+		PackedStringArray(["lod_sweep"]),
+	)
+
+#endregion
+
+
+#region LOD Threshold Sweep
+
+const LOD_SWEEP_THRESHOLDS: Array[float] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+
+var _sweep_mode: bool = false
+var _sweep_index: int = 0
+var _sweep_results: Array[Dictionary] = []
+var _sweep_console: Node = null
+var _sweep_camera: Camera3D = null
+var _sweep_streaming_manager: NativeStreamingManagerScript = null
+var _sweep_cell_manager: CellManagerScript = null
+
+
+func init_lod_sweep(sm: NativeStreamingManagerScript, cm: CellManagerScript,
+		cam: Camera3D, console: Node = null) -> void:
+	_sweep_mode = true
+	_sweep_index = 0
+	_sweep_results.clear()
+	_sweep_console = console
+	_sweep_camera = cam
+	_sweep_streaming_manager = sm
+	_sweep_cell_manager = cm
+	_start_sweep_pass()
+
+
+func _start_sweep_pass() -> void:
+	if _sweep_index >= LOD_SWEEP_THRESHOLDS.size():
+		_finish_sweep()
+		return
+
+	var threshold := LOD_SWEEP_THRESHOLDS[_sweep_index]
+	var vp := get_viewport()
+	if vp:
+		vp.mesh_lod_threshold = threshold
+	Log.info("tools", "LOD sweep: pass %d/%d — threshold=%.2f px" % [
+		_sweep_index + 1, LOD_SWEEP_THRESHOLDS.size(), threshold])
+
+	# Run quick benchmark (orbit only)
+	_streaming_manager = _sweep_streaming_manager
+	_cell_manager = _sweep_cell_manager
+	_camera = _sweep_camera
+	_console = _sweep_console
+	_owns_streaming = false
+	_quick_mode = true
+	_setup_ui()
+	_build_waypoints()
+	_start_benchmark()
+
+
+func _on_sweep_pass_complete(results: Dictionary) -> void:
+	var threshold := LOD_SWEEP_THRESHOLDS[_sweep_index]
+	results["mesh_lod_threshold"] = threshold
+	_sweep_results.append(results)
+
+	_sweep_index += 1
+	if _sweep_index < LOD_SWEEP_THRESHOLDS.size():
+		# Reset and run next pass
+		_frame_log.clear()
+		_event_log.clear()
+		_running = false
+		_finished = false
+		_start_sweep_pass()
+	else:
+		_finish_sweep()
+
+
+func _finish_sweep() -> void:
+	# Restore default threshold
+	var vp := get_viewport()
+	if vp:
+		vp.mesh_lod_threshold = 1.0
+
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("========== LOD THRESHOLD SWEEP RESULTS ==========")
+	lines.append("%-12s %8s %8s %8s %8s %10s" % ["threshold", "avg_fps", "p50_ms", "p95_ms", "p99_ms", "draw_calls"])
+	lines.append("------------------------------------------------------------")
+	for r: Dictionary in _sweep_results:
+		lines.append("%-12.2f %8.1f %8.1f %8.1f %8.1f %10d" % [
+			r.get("mesh_lod_threshold", 0.0),
+			r.get("avg_fps", 0.0),
+			r.get("p50_ms", 0.0),
+			r.get("p95_ms", 0.0),
+			r.get("p99_ms", 0.0),
+			r.get("avg_draw_calls", 0),
+		])
+	lines.append("==================================================")
+
+	var output := "\n".join(lines)
+	Log.info("tools", output)
+	if _sweep_console and _sweep_console.has_method("print_line"):
+		for line: String in lines:
+			_sweep_console.print_line(line)
+
+	# Save sweep CSV
+	_save_sweep_csv()
+	queue_free()
+
+
+func _save_sweep_csv() -> void:
+	var dir_path := "user://benchmark_results"
+	if not DirAccess.dir_exists_absolute(dir_path):
+		DirAccess.make_dir_recursive_absolute(dir_path)
+
+	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	var file_path := "%s/lod_sweep_%s.csv" % [dir_path, timestamp]
+	var file := FileAccess.open(file_path, FileAccess.WRITE)
+	if not file:
+		return
+
+	file.store_line("threshold,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_draw_calls,peak_vram_mb")
+	for r: Dictionary in _sweep_results:
+		file.store_line("%.2f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.0f" % [
+			r.get("mesh_lod_threshold", 0.0),
+			r.get("avg_fps", 0.0),
+			r.get("avg_time_ms", 0.0),
+			r.get("p50_ms", 0.0),
+			r.get("p95_ms", 0.0),
+			r.get("p99_ms", 0.0),
+			r.get("max_time_ms", 0.0),
+			r.get("avg_draw_calls", 0),
+			r.get("peak_draw_calls", 0),
+			r.get("peak_vram_mb", 0.0),
+		])
+	file.close()
+	Log.info("tools", "LOD sweep CSV saved to %s" % file_path)
 
 #endregion

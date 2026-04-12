@@ -1130,34 +1130,47 @@ ERROR: Condition "bs > sbs" is true. Continuing.
 
 #### What was done
 
-1. **Full cache wipe + rebake.** Deleted all 4887 cached `.res`/`.tres` files from `C:/Users/metzo/Documents/Godotwind/cache/models/`. Ran `full_rebake_headless.tscn` — **4884 baked, 64 failed, 0 skipped, 127.7s** (faster than Session 2.5's 154s, same model count, same 64 pre-existing parser failures: glass armor, magic VFX, particle system NIFs). C# native parsing active (`use_native_parsing = true`).
+1. **Full cache wipe + rebake (×3).** Three rebake cycles during this session:
+   - First: 4884 baked, 127.7s — baseline with multi-RID but no index buffer fix.
+   - Second: 4884 baked, 126.5s — after identity index buffer fix for non-indexed surfaces.
+   - Third: 4884 baked, 146.4s — after prebake-merge optimization (slightly slower due to merge + LOD gen on combined meshes).
 
-2. **Doc sync verification.** Confirmed all three live documents already reflect the B-wide architecture from Session 2.5 updates:
-   - `docs/DISTANCE_RENDERING.md` — correctly describes single RS instance per object, embedded LOD chain via `ImporterMesh.generate_lods()`, screen-space selection, `mesh_lod_threshold`/`lod_bias` tuning, no sub-band references.
-   - `docs/STATUS.md` — "3-Tier LOD" row references B-wide rewrite, `ImporterMesh.generate_lods()` cascade, Phase G pending note.
-   - `.claude/CLAUDE.md` — Distance Rendering table says "Single raw RS instance per object with embedded LOD chain" for MID tier. No stale sub-band references.
-   - Historical/audit docs (`LOD_OVER_ENGINEERING.md`, baselines) correctly reference old system in past tense — no updates needed.
+2. **Bug fix: identity index buffer (nif_converter.gd).** Non-indexed surfaces fed to `ImporterMesh.generate_lods()` without explicit indices caused meshoptimizer to corrupt mesh data → `instance_set_base` errors → signal 11 crash. Fix: generate sequential identity index buffer `[0,1,2,...]` before feeding `importer.add_surface()`. Canonical pattern — OpenGL/Vulkan treat non-indexed draws as implicitly sequential.
 
-3. **Launched `test_lod_baseline.tscn`** for user to inspect Vivec canton model side-by-side. User-piloted interactive visual pass in progress.
+3. **Bug fix: multi-mesh registration (static_object_renderer.gd).** `_find_mesh_instance()` returned only the FIRST visible MeshInstance3D in a prototype. Multi-mesh buildings (3-8 children for walls/roof/door) showed only one sub-mesh at MID distances. Fix: `_find_all_mesh_instances()` walks all children, each stored as `SubMeshEntry` with mesh/material/local_transform. `add_instance()` creates one RS instance per sub-mesh, all tracked under one ID. All visibility/removal/promotion ops iterate `sub_rids`. User confirmed visual fix ("no more holes in the meshes, entire buildings").
+
+4. **Performance optimization: prebake merge (model_prebaker.gd).** Multi-mesh buildings had N RS instances per object, degrading orbit-segment performance. Fix: merge all child MeshInstance3D surfaces into a single ArrayMesh at prebake time (vertices/normals transformed to root space with inverse-transpose normals), then run `ImporterMesh.generate_lods()` on the combined mesh. Produces truly 1 RS instance per object with proper LOD chain. Character models excluded. The multi-RID `SubMeshEntry` path in `static_object_renderer.gd` remains as fallback for edge cases.
+
+5. **Benchmark comparison: master vs B-wide (multi-RID, pre-prebake-merge).**
+   - Master: 45 FPS avg, P50=16.4ms, orbit=20.3ms, sprint=16.8ms
+   - B-wide: 40 FPS avg, P50=18.0ms, orbit=27.7ms, sprint=17.0ms
+   - Steady-state (sprint/return) nearly identical. Orbit 36% slower because B-wide correctly renders all sub-meshes (master had the same missing-faces bug — faster because incomplete geometry).
+   - Prebake-merge benchmark not yet run (next session).
+
+6. **Attempted runtime mesh merge (reverted).** Tried merging sub-meshes at registration time in `static_object_renderer.gd`. Benchmark showed regression (40→36 FPS) because runtime merge destroys embedded LOD chains (`surface_get_arrays` doesn't include `surface_lod_indices`). @roaster had warned about this before implementation. Reverted to multi-RID, then implemented the correct prebake-merge approach instead.
+
+7. **Doc sync.** Updated `DISTANCE_RENDERING.md` with prebake-merge architecture, fallback multi-RID path, and identity index buffer details.
 
 #### Phase G checklist status
 
-- [x] Full cache wipe and rebake of all ~4884 models
-- [ ] `StreamingBenchmark` run on scripted path, diff vs Phase A baseline
-- [ ] Compare P50/P95/P99 frame times, RS instance counts, memory footprint
-- [x] Rewrite `docs/DISTANCE_RENDERING.md` (done in Session 2.5, verified Session 3)
+- [x] Full cache wipe and rebake of all ~4884 models (×3 iterations)
+- [x] `StreamingBenchmark` run — B-wide vs master comparison captured
+- [x] Performance deltas captured (see item 5 above; prebake-merge benchmark pending next session)
+- [x] Rewrite `docs/DISTANCE_RENDERING.md` (updated with prebake-merge, multi-RID fallback)
 - [x] Update `docs/STATUS.md` (done in Session 2.5, verified Session 3)
 - [x] Update `.claude/CLAUDE.md` (done in Session 2.5, verified Session 3)
-- [ ] Final visual walk-through of all four baseline locations at LOW/MEDIUM/HIGH/ULTRA
+- [ ] Final visual walk-through at all four baseline locations (user confirmed buildings fixed, full preset sweep pending)
+- [ ] `mesh_lod_threshold` tuning
+- [ ] Prebake-merge benchmark run + comparison
 - [ ] Close out this plan doc with Phase G retrospective
-- [ ] Performance deltas captured and attached
 - [ ] Merge `refactor/lod-b-wide` → `master`
 
-#### Still pending from prior sessions
+#### Still pending
 
 - **Phase A.5 (NIF collision coordinate fix bundle)** — not yet executed, owner TBD.
-- **Signal 11 crash** — reproduced in Session 2.5 during unattended main-scene running. User deferred debugging. Hypothesis ladder in Session 2.5 notes.
-- **`mesh_lod_threshold` tuning** — needs interactive observation at baseline locations before setting final value.
+- **Signal 11 crash** — FIXED by identity index buffer. Crash at `model_loader.gd:398` during `packed_scene.instantiate()` no longer reproduces. The pre-existing shutdown RID teardown race (exit code 139) remains but is a Godot engine issue, not refactor-related.
+- **Optimization pass** — user requested dedicated session for streaming/rendering optimization. Topics: cell-merge (OpenMW-style), LOD range extension (750m/1km), `mesh_lod_threshold` tuning, I/O stall profiling.
+- **Prebake-merge benchmark** — final rebake done, benchmark not yet run. Next session.
 
 ### 2026-04-09 — Session 1 (original entry, pre-audit updates kept below for reference)
 
@@ -1255,3 +1268,91 @@ This checklist is populated during Phase D execution. Leave unchecked until Phas
 - [ ] All unit tests in `tests/unit/` pass
 - [ ] Interactive visual pass at all four baseline locations
 - [ ] `StreamingBenchmark` run, archive CSV
+
+---
+
+## Session 4 — HLOD Cell-Merge + Optimization (2026-04-13)
+
+**Focus:** Performance optimization — faster loading, reduce cell-transition stuttering, increase FPS.
+
+### Baseline Profiling
+
+Streaming benchmark (RTX 4060 Laptop GPU, full Morrowind data, 5km view):
+
+| Segment | Avg FPS | Avg ms | Max Spike | Avg Draw Calls |
+|---------|---------|--------|-----------|----------------|
+| idle (startup) | 22 | 45.8 | 142ms | 174 |
+| approach | 23 | 43.7 | 147ms | 510 |
+| orbit 200m | 49 | 20.3 | 144ms | 1,633 |
+| sprint 600m | 59 | 16.8 | 131ms | 1,134 |
+| teleport | 55 | 18.3 | 117ms | 368 |
+
+I/O stall breakdown: `inst:112.0ms` out of 112.1ms total. **Instantiation dominates** — RS instance creation from loaded prototypes, not ESM/disk/parse.
+
+### Changes Implemented
+
+**1. Budget enforcement fix** (`cell_manager.gd`)
+- `start_time` moved before pre-loop work (`process_async_disk_loads`, `process_pending_conversions`, `_process_pool_prewarm`)
+- Conversion budget capped to 50% of frame budget
+- Pool prewarm gated at 70% budget consumed
+- Reduces cell-load spike magnitude independently of HLOD
+
+**2. HLOD cell-merge system** (OpenMW "object paging" adapted to Godot)
+- **Prebaker** (`model_prebaker.gd::bake_cell_hlod()`): merges all mid-worthy refs per exterior cell into single ArrayMesh. Vertices transformed into cell-local space, surfaces grouped by material hash, `ImporterMesh.generate_lods(60.0, 25.0, [])` for LOD chain. Saves to `cache/hlod/cell_{x}_{y}.res`.
+- **Runtime loader** (`hlod_loader.gd`, NEW): loads/unloads HLOD meshes as camera crosses cells. One RS instance per cell with `visibility_range(300, 1000, 20m, 20m, FADE_SELF)`.
+- **Streaming integration** (`native_streaming_manager.gd`): HLODLoader lifecycle (init, cell-change update, cleanup, stats). Detects HLOD cache on init — narrows individual MID instance range to 0-300m.
+- **Visibility narrowing** (`static_object_renderer.gd`): `visibility_range_end` configurable (500m default, 300m with HLOD cache).
+- **Constants** (`distance_utils.gd`): `HLOD_START=300m`, `HLOD_END=1000m`.
+- **Console command** (`world_explorer.gd`): `bake_hlod` triggers prebake of all ~2500 cells.
+
+**New tier structure (with HLOD):**
+```
+NEAR    0-150m    Full Node3D + physics (unchanged)
+MID     0-300m    Individual RS instances (was 0-500m)
+HLOD    300-1000m One RS instance per cell (NEW)
+FAR     1000-5km  Impostors (unchanged)
+```
+
+**3. Per-phase profiling** (`native_streaming_manager.gd`)
+- `_last_phase_times` (PackedFloat64Array, 8 phases) set every frame
+- `get_phase_times()` + `get_frame_streaming_ms()` public API
+- Streaming benchmark CSV extended with 9 phase timing columns
+
+**4. LOD threshold sweep** (`streaming_benchmark.gd`)
+- `benchmark_lod_sweep` console command: runs 6 quick benchmark passes at mesh_lod_threshold [0.25, 0.5, 1.0, 2.0, 4.0, 8.0], outputs comparison table + CSV.
+
+### Expected Impact (after HLOD cache bake)
+
+- Cell loading: ~875 RS calls/cell → ~40-60 surfaces + 1 HLOD instance (~3x reduction)
+- Draw calls at orbit: ~1,633 → ~200-400 estimated (with HLOD replacing individual instances at 300m+)
+- FPS: 49 → estimated 70-100+ at distance (draw-call bound, not fill rate)
+
+### Status
+
+- All changes compile clean (no GDScript parse errors)
+- Scene launches without HLOD-related errors (HLOD degrades gracefully when no cache)
+- HLOD cache not yet baked (needs `bake_hlod` console command)
+- Visual verification pending by user
+- Pre-existing segfault on shutdown (Jolt/C#/mono race) unrelated to changes
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/core/world/cell_manager.gd` | Budget enforcement: start_time before pre-loop work |
+| `src/core/world/distance_utils.gd` | HLOD_START, HLOD_END constants |
+| `src/core/world/hlod_loader.gd` | **NEW** — runtime HLOD cell management |
+| `src/core/world/native_streaming_manager.gd` | HLOD integration, per-phase timing API |
+| `src/core/world/static_object_renderer.gd` | Configurable visibility_range_end |
+| `src/tools/prebaking/model_prebaker.gd` | HLOD cell merge prebaker |
+| `src/tools/streaming_benchmark.gd` | Per-phase CSV columns, LOD sweep mode |
+| `src/tools/world_explorer.gd` | bake_hlod console command |
+| `docs/DISTANCE_RENDERING.md` | Updated tier table + HLOD section |
+
+### Next Steps
+
+1. Bake HLOD cache (`bake_hlod` in console)
+2. Visual verification of HLOD tier transitions (300m boundary)
+3. Run streaming benchmark with HLOD active — compare FPS/draw calls
+4. mesh_lod_threshold sweep (`benchmark_lod_sweep`)
+5. LOD range extension test (push MID_END further with HLOD backing)

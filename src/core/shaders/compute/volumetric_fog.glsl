@@ -155,14 +155,14 @@ float mie_phase(float cos_theta, float g) {
 
 // Sample 3D noise with wind animation
 float sample_noise_3d(vec3 pos, float time) {
-    vec3 animated_pos = pos * 0.00011 - vec3(time * params.fog_params2.x * 0.002);
+    vec3 animated_pos = pos * 0.00018 - vec3(time * params.fog_params2.x * 0.002);
     animated_pos.y *= -1.17;  // Y-up: height axis distortion for noise variation
     return texture(noise_texture, animated_pos).r;
 }
 
 // Sample 2D noise for stamping / low-frequency variation
 float sample_noise_2d(vec2 uv, float time) {
-    vec2 animated_uv = uv * 0.00012 - vec2(time * params.fog_params2.x * 0.0021);
+    vec2 animated_uv = uv * 0.0002 - vec2(time * params.fog_params2.x * 0.0021);
     return texture(noise_2d_texture, animated_uv).r;
 }
 

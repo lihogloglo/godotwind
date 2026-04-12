@@ -28,6 +28,7 @@ static var instance: NativeStreamingManager = null
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const SC := preload("res://src/core/world/streaming_config.gd")
+const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ModelLoaderScript := preload("res://src/core/world/model_loader.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
@@ -38,6 +39,7 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
+const HLODLoaderScript := preload("res://src/core/world/hlod_loader.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
 # replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
@@ -216,6 +218,11 @@ var _initialized: bool = false
 var _frame_overrun_count: int = 0
 var _last_overrun_log_frame: int = 0
 
+## Per-frame phase timing (usec) — set every frame, readable by benchmark/profiler.
+## Indices: 0=unload, 1=async_complete, 2=instantiate, 3=promote, 4=collision, 5=deferred, 6=queue, 7=cell_update
+var _last_phase_times: PackedFloat64Array = PackedFloat64Array()
+var _last_frame_total_ms: float = 0.0
+
 ## Startup phase state - controls staggered loading during initial population
 var _startup_phase: bool = true
 var _startup_frames: int = 0
@@ -228,12 +235,24 @@ var _impostor_update_pending: bool = false
 ## Distant light manager — billboard sprites for lights beyond NEAR tier (150m–5km)
 var _distant_light_manager: DistantLightManager = null
 
+## HLOD loader — cell-level merged meshes for 300-1000m range
+var _hlod_loader: HLODLoaderScript = null
+
 ## Sun elevation in radians (set externally by world_explorer via set_sun_elevation)
 var _sun_elevation_rad: float = 0.5  # Default: daytime
 
 ## Predictive loading — pre-queue cells in the camera's movement direction
 var _prev_camera_position: Vector3 = Vector3.ZERO
 var _camera_velocity_xz: Vector2 = Vector2.ZERO  # EMA-smoothed, XZ plane only
+
+## HLOD needs initial population on first frame after startup
+var _hlod_needs_initial_update: bool = true
+## Tracks whether camera crossed a cell boundary this frame
+var _cell_changed_this_frame: bool = false
+
+## Per-phase profiler. Created lazily on first access when SC.ENABLE_PROFILING is true.
+## External consumers (benchmark, debug overlay) read via get_profiler().
+var _profiler: StreamingProfilerScript = null
 
 #endregion
 
@@ -261,6 +280,9 @@ func fast_cleanup() -> void:
 	if _distant_light_manager:
 		_distant_light_manager.cleanup()
 		_distant_light_manager = null
+	if _hlod_loader:
+		_hlod_loader.cleanup()
+		_hlod_loader = null
 	_promoted_objects.clear()
 	_promoted_by_cell.clear()
 
@@ -346,6 +368,9 @@ func _ready() -> void:
 	_distant_light_manager = DistantLightManagerScript.new()
 	_distant_light_manager.setup(_world_container)
 
+	# Create HLOD loader for cell-level merged meshes (300-1000m)
+	_hlod_loader = HLODLoaderScript.new()
+
 	# Create GPU scene database for SSBO-backed world state (Phase 2)
 	_gpu_scene_db = GPUSceneDatabaseScript.new()
 
@@ -380,6 +405,19 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		# Startup burst: 15ms impostor budget while loading screen is visible
 		# Normal budget (4ms) is restored when startup phase completes
 		_impostor_renderer.set_load_budget_usec(15000.0)
+
+	# Initialize HLOD loader with viewport scenario.
+	# If HLOD cache exists, narrow individual MID instance range to 300m (HLOD takes 300-1000m).
+	if _hlod_loader:
+		var scenario := get_viewport().get_world_3d().scenario
+		_hlod_loader.initialize(scenario)
+		# Check if HLOD cache exists (at least one cell file present)
+		var hlod_dir: String = SettingsManager.get_cache_base_path().path_join("hlod")
+		if DirAccess.dir_exists_absolute(hlod_dir):
+			if _static_renderer:
+				_static_renderer.visibility_range_end = DU.HLOD_START
+				Log.info("streaming", "HLOD cache found — MID instances narrowed to 0-%dm, HLOD covers %d-%dm" % [
+					int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END)])
 
 	_initialized = true
 	Log.info("streaming", "Initialized with native visibility_range streaming")
@@ -440,8 +478,14 @@ func _process(delta: float) -> void:
 	# Start timing for frame budget telemetry
 	var frame_start_usec := Time.get_ticks_usec()
 	var phase_times: PackedFloat64Array = PackedFloat64Array()  # usec per phase
-	phase_times.resize(7)  # 0:unload, 1:async_complete, 2:instantiate, 3:promote, 4:collision, 5:deferred, 6:queue
+	phase_times.resize(8)  # 0:unload, 1:async_complete, 2:instantiate, 3:promote, 4:collision, 5:deferred, 6:queue, 7:cell_update
 	var budget_usec := frame_budget_ms * 1000.0
+
+	# Per-phase profiler — lightweight begin/end section pairs.
+	# Gated by SC.ENABLE_PROFILING; zero overhead when disabled.
+	var prof: StreamingProfilerScript = _profiler
+	if prof:
+		prof.begin_frame()
 
 	# Update camera position and velocity
 	_camera_position = _camera.global_position
@@ -466,22 +510,37 @@ func _process(delta: float) -> void:
 
 	# Check if we moved to a new cell
 	var cell_update_usec: float = 0.0
-	if new_cell != _camera_cell:
+	_cell_changed_this_frame = (new_cell != _camera_cell)
+	if _cell_changed_this_frame:
 		_debug("Camera moved to new cell: %s (was %s)" % [new_cell, _camera_cell])
 		_camera_cell = new_cell
+		if prof:
+			prof.begin_section("cell_update")
 		var cu_start := Time.get_ticks_usec()
 		_update_loaded_cells()
 		cell_update_usec = float(Time.get_ticks_usec() - cu_start)
+		if prof:
+			prof.end_section("cell_update")
 	elif _impostor_update_pending:
 		# Deferred impostor update — runs on the frame AFTER cell change
 		# Prevents impostor scan (170ms+ initial) from stacking with cell load/unload
 		_impostor_update_pending = false
+		if prof:
+			prof.begin_section("impostor_update")
 		var imp_start := Time.get_ticks_usec()
 		if _impostor_renderer:
 			_impostor_renderer.update_impostor_area(_camera_cell, impostor_radius_cells)
 		var imp_ms := float(Time.get_ticks_usec() - imp_start) / 1000.0
+		if prof:
+			prof.end_section("impostor_update")
 		if imp_ms > 2.0:
 			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
+
+	# Update HLOD cells on camera cell change (runs AFTER impostor deferred update)
+	if _hlod_loader and not _startup_phase:
+		if _cell_changed_this_frame or _hlod_needs_initial_update:
+			_hlod_loader.update_for_camera(_camera_cell, load_radius_cells)
+			_hlod_needs_initial_update = false
 
 	# Update distant light manager (camera pos + time-of-day)
 	if _distant_light_manager:
@@ -502,15 +561,23 @@ func _process(delta: float) -> void:
 	# Phase 0: Budgeted unloading — free children of departing cells gradually
 	# Runs BEFORE loading so freed memory is available for new cells
 	var phase_start := Time.get_ticks_usec()
+	if prof:
+		prof.begin_section("unload")
 	if not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty():
 		_process_budgeted_unloading()
+	if prof:
+		prof.end_section("unload")
 	phase_times[0] = float(Time.get_ticks_usec() - phase_start)
 
 	# Process async loading (three-phase approach)
 	if async_loading_enabled:
 		# Phase 1: Check for completed async requests
 		phase_start = Time.get_ticks_usec()
+		if prof:
+			prof.begin_section("async_complete")
 		_process_async_completions()
+		if prof:
+			prof.end_section("async_complete")
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
 		# Phase 2: Process async instantiation (progressive object creation)
@@ -557,8 +624,13 @@ func _process(delta: float) -> void:
 		# Fallback: synchronous loading (blocks frame)
 		_process_pending_loads_sync(delta)
 
+	# Store per-phase timing for external consumers (benchmark, profiler)
+	phase_times[7] = cell_update_usec
+	_last_phase_times = phase_times
+
 	# Frame budget telemetry — detect when combined streaming work exceeds budget
 	var total_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	_last_frame_total_ms = total_ms
 	if total_ms > frame_budget_ms * 1.5:
 		_frame_overrun_count += 1
 		# Log with per-phase breakdown (at most once per 60 frames)
@@ -1451,7 +1523,35 @@ func get_stats() -> Dictionary:
 		s["mid_visible"] = sr_stats.get("visible_instances", 0)
 		s["mid_mesh_types"] = sr_stats.get("mesh_types", 0)
 
+	# Merge HLOD stats
+	if _hlod_loader:
+		var hlod_stats: Dictionary = _hlod_loader.get_stats()
+		s["hlod_cells"] = hlod_stats.get("loaded_cells", 0)
+		s["hlod_surfaces"] = hlod_stats.get("total_surfaces", 0)
+
 	return s
+
+
+## Get last frame's per-phase timing breakdown (usec).
+## Indices: 0=unload, 1=async_complete, 2=instantiate, 3=promote, 4=collision,
+##          5=deferred, 6=queue, 7=cell_update
+## Returns empty array if not yet initialized.
+func get_phase_times() -> PackedFloat64Array:
+	return _last_phase_times
+
+
+## Get last frame's total streaming work in ms.
+func get_frame_streaming_ms() -> float:
+	return _last_frame_total_ms
+
+
+## Get or create the per-phase StreamingProfiler.
+## Benchmark / debug overlay reads this to display per-phase timing.
+func get_profiler() -> StreamingProfilerScript:
+	if not _profiler:
+		_profiler = StreamingProfilerScript.new()
+		_profiler.enabled = SC.ENABLE_PROFILING
+	return _profiler
 
 
 ## Get StaticObjectRenderer stats (for benchmark diagnostics)

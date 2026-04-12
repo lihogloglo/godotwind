@@ -56,8 +56,11 @@ void sky_mask() {
 
 	vec2 uv = (vec2(pixel) + 0.5) / full_res;
 
-	// Single depth sample at full-res (no supersampling needed at native resolution)
-	const float SKY_THRESHOLD = 0.001;
+	// Single depth sample at full-res (no supersampling needed at native resolution).
+	// Godot reversed-Z: sky = 0.0, geometry = near/distance. Use tight threshold
+	// so distant geometry (depth > 1e-6) still occludes — old 0.001 missed everything
+	// beyond ~50m with near=0.05.
+	const float SKY_THRESHOLD = 1e-6;
 	float mask = step(texture(tex_a, uv).r, SKY_THRESHOLD);
 
 	imageStore(img_out, pixel, vec4(mask));
@@ -116,8 +119,8 @@ void compute_rays() {
 	vec2 sun_uv = params.sun_screen_pos.xy;
 	float raspect = half_res.y / half_res.x;
 
-	// Blue noise temporal offset
-	float timer = params.sun_screen_pos.w * 0.5;
+	// Blue noise temporal offset — slow cycle to reduce shimmer
+	float timer = params.sun_screen_pos.w * 0.15;
 	float offset = texture(tex_b, 3.2 * uv * vec2(1.0, raspect)).r;
 	offset = fract(offset + timer * 0.61803398875);
 
@@ -216,9 +219,9 @@ void combine() {
 		vec2 screen_offset = uv - sun_uv;
 		screen_offset.y *= raspect;
 
-		// Depth check: only in sky (reversed-Z: depth < 0.001)
+		// Depth check: only in sky (reversed-Z: sky = 0.0, geometry > 1e-6)
 		float depth = texture(tex_b, uv).r;
-		float is_sky = step(depth, 0.001);
+		float is_sky = step(depth, 1e-6);
 		float disc_occl = light * is_sky;
 		// Disc sharpness: higher = sharper edge. Precomputed fog_near_ratio affects this.
 		float disc_radius = params.disc_params.x;

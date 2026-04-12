@@ -953,6 +953,9 @@ func _setup_visibility_toggles() -> void:
 		"remove_child": remove_child,
 		"update_stats": _update_stats,
 		"get_viewport": get_viewport,
+		"sky_visibility_changed": func(visible: bool) -> void:
+			if _weather_controls:
+				_weather_controls.on_sky_visibility_changed(visible),
 	}
 	_env_controls = EnvironmentControlsScript.new(env_callbacks)
 	_env_controls.setup_fallback_environment()
@@ -1371,6 +1374,13 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"tools"
 		)
 
+		console.register_command(
+			"bake_hlod",
+			_cmd_bake_hlod,
+			"Bake HLOD cell-merged meshes for all exterior cells",
+			"tools"
+		)
+
 		# Register streaming benchmark commands
 		if not _StreamingBenchmarkScript:
 			_StreamingBenchmarkScript = load("res://src/tools/streaming_benchmark.gd")
@@ -1436,6 +1446,24 @@ func _cmd_prebake_animations(_args: Dictionary) -> String:
 	var elapsed := Time.get_ticks_msec() - t0
 	return "Prebaked %d animations in %d ms (%d failed)" % [
 		result.get("success", 0), elapsed, result.get("failed", 0)]
+
+
+func _cmd_bake_hlod(_args: Dictionary) -> String:
+	_log("Starting HLOD bake — merging cell geometry. This may take several minutes...")
+	var prebaker := ModelPrebaker.new()
+	prebaker.initialize()
+	prebaker.hlod_progress.connect(func(current: int, total: int, cell_name: String) -> void:
+		if current % 50 == 0 or current == total:
+			_log("HLOD: %d/%d — %s" % [current, total, cell_name])
+	)
+	var t0 := Time.get_ticks_msec()
+	var result: Dictionary = await prebaker.bake_all_hlods()
+	var elapsed := Time.get_ticks_msec() - t0
+	var msg := "HLOD bake complete: %d baked, %d skipped, %d failed (of %d cells) in %d ms" % [
+		result.get("success", 0), result.get("skipped", 0),
+		result.get("failed", 0), result.get("total", 0), elapsed]
+	_log(msg)
+	return msg
 
 
 ## Callback for native streaming manager cell loaded

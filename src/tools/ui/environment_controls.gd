@@ -156,7 +156,18 @@ func on_cirrus_thickness_changed(value: float) -> void:
 # ── Shader Effect Callbacks ──
 
 ## Ensure ShaderManager is attached to the scene.
+## Prefers SkyManager's WorldEnvironment when sky is active, falls back to
+## the fallback environment. Re-attaches when the active target changes
+## (e.g. sky toggled on after initial attach to fallback).
 func ensure_shader_manager_attached() -> void:
+	# When sky is active, prefer SkyManager's WorldEnvironment
+	if show_sky and sky_manager and sky_manager.is_inside_tree():
+		var sky_world_env: WorldEnvironment = sky_manager.get_world_environment()
+		if sky_world_env and sky_world_env.is_inside_tree():
+			ShaderManager.attach_to(sky_world_env)
+			_shader_manager_attached = true
+			return
+
 	if _shader_manager_attached:
 		return
 
@@ -282,33 +293,57 @@ func _apply_visual_state(env: Environment) -> void:
 	# Godot native volumetric fog (god rays via anisotropy)
 	env.volumetric_fog_enabled = _visual_state["volumetric_fog"]
 	if _visual_state["volumetric_fog"]:
-		env.volumetric_fog_density = 0.0015
-		env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
-		env.volumetric_fog_emission = Color.BLACK
-		env.volumetric_fog_anisotropy = 0.55
-		env.volumetric_fog_length = 800.0
-		env.volumetric_fog_detail_spread = 2.0
-		env.volumetric_fog_gi_inject = 0.5
-		env.volumetric_fog_sky_affect = 0.15
-		env.volumetric_fog_temporal_reprojection_enabled = true
-		env.volumetric_fog_temporal_reprojection_amount = 0.7
+		_apply_volumetric_fog_defaults(env)
 
 	# Depth fog (aerial perspective + height fog)
 	env.fog_enabled = _visual_state["depth_fog"]
 	if _visual_state["depth_fog"]:
-		env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-		env.fog_density = 0.00008
-		env.fog_light_color = Color(0.7, 0.75, 0.82)
-		env.fog_light_energy = 1.0
-		env.fog_sun_scatter = 0.5
-		env.fog_aerial_perspective = 0.8
-		env.fog_sky_affect = 0.15
-		# Height fog at sea level — pools in valleys and coastal areas
-		env.fog_height = 0.0
-		env.fog_height_density = 0.003
+		_apply_depth_fog_defaults(env)
 
 	# Tonemapping
 	env.tonemap_mode = _visual_state["tonemap_mode"]
+
+
+## Apply default volumetric fog parameters to an Environment.
+## Single source of truth — called by _apply_visual_state() and on_native_volumetric_fog_toggled().
+func _apply_volumetric_fog_defaults(env: Environment) -> void:
+	env.volumetric_fog_density = 0.0015
+	env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
+	env.volumetric_fog_emission = Color.BLACK
+	env.volumetric_fog_anisotropy = 0.55
+	env.volumetric_fog_length = 800.0
+	env.volumetric_fog_detail_spread = 2.0
+	env.volumetric_fog_gi_inject = 0.5
+	env.volumetric_fog_sky_affect = 0.15
+	env.volumetric_fog_temporal_reprojection_enabled = true
+	env.volumetric_fog_temporal_reprojection_amount = 0.7
+
+
+## Apply default depth fog parameters to an Environment.
+## Single source of truth — called by _apply_visual_state() and on_depth_fog_toggled().
+func _apply_depth_fog_defaults(env: Environment) -> void:
+	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	env.fog_density = 0.00008
+	env.fog_light_color = Color(0.7, 0.75, 0.82)
+	env.fog_light_energy = 1.0
+	env.fog_sun_scatter = 0.5
+	env.fog_aerial_perspective = 0.8
+	env.fog_sky_affect = 0.15
+	env.fog_height = 0.0
+	env.fog_height_density = 0.003
+
+
+## Re-assert fog defaults after weather deactivation.
+## Called synchronously by WeatherControls AFTER WeatherRenderer.cleanup_on_deactivate().
+## Ensures EnvironmentControls reclaims authority over fog parameter values.
+func reassert_fog_defaults() -> void:
+	var env := _get_active_environment()
+	if not env:
+		return
+	if _visual_state["volumetric_fog"]:
+		_apply_volumetric_fog_defaults(env)
+	if _visual_state["depth_fog"]:
+		_apply_depth_fog_defaults(env)
 
 
 ## Apply shadow cascade settings to a DirectionalLight3D.
@@ -388,19 +423,13 @@ func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 	var env := _get_active_environment()
 	if env:
 		env.volumetric_fog_enabled = enabled
-		if enabled:
-			env.volumetric_fog_density = 0.0015
-			env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
-			env.volumetric_fog_emission = Color.BLACK
-			env.volumetric_fog_anisotropy = 0.55
-			env.volumetric_fog_length = 800.0
-			env.volumetric_fog_detail_spread = 2.0
-			env.volumetric_fog_gi_inject = 0.5
-			env.volumetric_fog_sky_affect = 0.15
-			env.volumetric_fog_temporal_reprojection_enabled = true
-			env.volumetric_fog_temporal_reprojection_amount = 0.7
+		# Only write parameter values when weather is NOT active.
+		# When weather is active, WeatherRenderer owns these values.
+		if enabled and not weather_active:
+			_apply_volumetric_fog_defaults(env)
 	# Boost sun's volumetric fog energy for stronger god rays
-	_set_sun_volumetric_energy(6.0 if enabled else 1.0)
+	if not weather_active:
+		_set_sun_volumetric_energy(6.0 if enabled else 1.0)
 	# Enable custom VAIO fog (animated, swirling, weather-aware) on top of native fog
 	ensure_shader_manager_attached()
 	if enabled:
@@ -415,20 +444,11 @@ func on_depth_fog_toggled(enabled: bool) -> void:
 	var env := _get_active_environment()
 	if env:
 		env.fog_enabled = enabled
-		if enabled:
-			env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-			env.fog_density = 0.00008
-			env.fog_light_color = Color(0.7, 0.75, 0.82)
-			env.fog_light_energy = 1.0
-			env.fog_sun_scatter = 0.5
-			env.fog_aerial_perspective = 0.8
-			env.fog_sky_affect = 0.15
-			# Height fog at sea level — pools in valleys and coastal areas
-			env.fog_height = 0.0
-			env.fog_height_density = 0.003
+		# Only write parameter values when weather is NOT active.
+		# When weather is active, WeatherRenderer owns these values.
+		if enabled and not weather_active:
+			_apply_depth_fog_defaults(env)
 	_log("Depth Fog: %s" % ("ON" if enabled else "OFF"))
-	if weather_active and not enabled:
-		_log("Note: weather fog also disabled (weather drives depth fog density)")
 
 
 func on_tonemapper_changed(index: int) -> void:
@@ -544,6 +564,11 @@ func on_show_sky_toggled(enabled: bool) -> void:
 		_panels.godrays_toggle.disabled = not enabled
 		if not enabled and _panels.godrays_toggle.button_pressed:
 			_panels.godrays_toggle.set_pressed_no_signal(false)
+
+	# Notify weather_controls so SunshineClouds2 enables/disables with sky
+	var sky_cb: Callable = _cb.get("sky_visibility_changed", Callable())
+	if sky_cb.is_valid():
+		sky_cb.call(enabled)
 
 	_log("Sky/Day-Night: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()

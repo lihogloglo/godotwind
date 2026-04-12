@@ -1,5 +1,7 @@
 ## Godray showcase — objects orbit in front of the sun, godrays always on.
-## No camera input needed. Just watch.
+## Free-fly camera + moving sun for visual verification.
+##   Hold right-click + WASD/ZQSD to fly, mouse to look
+##   T/Y = advance/rewind sun, R = toggle godrays
 extends Node3D
 
 var _sun: DirectionalLight3D
@@ -8,6 +10,10 @@ var _world_env: WorldEnvironment
 var _orbit_root: Node3D
 var _debug_label: RichTextLabel
 var _godrays_enabled: bool = true
+var _sun_angle: float = -10.0  # elevation in degrees (negative = above horizon)
+var _sun_yaw: float = 45.0
+var _fly_speed: float = 30.0
+var _mouse_captured: bool = false
 
 
 func _ready() -> void:
@@ -46,28 +52,18 @@ func _setup_environment() -> void:
 	env.ambient_light_energy = 0.3
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.tonemap_exposure = 1.0
-	env.tonemap_white = 6.0
+	env.tonemap_white = 1.0
 
-	# Glow/bloom to make rays bloom
+	# Subtle glow
 	env.glow_enabled = true
-	env.glow_intensity = 0.6
-	env.glow_strength = 0.8
-	env.glow_bloom = 0.1
-	env.glow_hdr_threshold = 0.8
+	env.glow_intensity = 0.3
+	env.glow_strength = 0.5
+	env.glow_bloom = 0.0
+	env.glow_hdr_threshold = 1.2
 
-	# Volumetric fog for light shafts
-	env.volumetric_fog_enabled = true
-	env.volumetric_fog_density = 0.003
-	env.volumetric_fog_albedo = Color(0.9, 0.85, 0.8)
-	env.volumetric_fog_anisotropy = 0.6
-	env.volumetric_fog_length = 500.0
-	env.volumetric_fog_sky_affect = 0.05
-
-	# Depth fog for atmosphere
-	env.fog_enabled = true
-	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-	env.fog_density = 0.0002
-	env.fog_light_color = Color(0.6, 0.5, 0.4)
+	# No volumetric or depth fog — isolate godrays only
+	env.volumetric_fog_enabled = false
+	env.fog_enabled = false
 	env.fog_sun_scatter = 0.8
 
 	_world_env.environment = env
@@ -90,9 +86,9 @@ func _setup_sun() -> void:
 	_sun = DirectionalLight3D.new()
 	_sun.name = "ShowcaseSun"
 	_sun.shadow_enabled = true
-	_sun.light_energy = 1.5
-	_sun.light_color = Color(1.0, 0.9, 0.75)
-	_sun.light_volumetric_fog_energy = 8.0
+	_sun.light_energy = 0.8
+	_sun.light_color = Color(1.0, 0.95, 0.85)
+	_sun.light_volumetric_fog_energy = 1.0
 	_sun.directional_shadow_max_distance = 200.0
 	# Sun IN FRONT of camera: light (-Z) shines toward camera, sun (+Z) is in camera's look direction
 	# Camera yaw=-135, so sun yaw=-135+180=45 makes the light point back toward the camera
@@ -194,10 +190,14 @@ func _setup_ui() -> void:
 	_debug_label.scroll_active = false
 	_debug_label.fit_content = true
 	_debug_label.position = Vector2(10, 10)
-	_debug_label.size = Vector2(400, 80)
+	_debug_label.size = Vector2(500, 100)
 	_debug_label.add_theme_font_size_override("normal_font_size", 14)
-	_debug_label.text = "[b]GODRAY SHOWCASE[/b]\nR = toggle godrays | Watch objects cross the sun"
+	_update_label()
 	canvas.add_child(_debug_label)
+
+
+func _update_label() -> void:
+	_debug_label.text = "[b]GODRAY SHOWCASE[/b]\nRMB+WASD = fly | T/Y = move sun | R = toggle godrays\nSun elevation: %.1f° | Godrays: %s" % [_sun_angle, "ON" if _godrays_enabled else "OFF"]
 
 
 func _enable_godrays() -> void:
@@ -222,17 +222,51 @@ func _enable_godrays() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
-		if (event as InputEventKey).keycode == KEY_R:
-			_godrays_enabled = not _godrays_enabled
-			if _godrays_enabled:
-				ShaderManager.enable_effect("godrays", 0.0)
-			else:
-				ShaderManager.disable_effect("godrays", 0.0)
-			_debug_label.text = "[b]GODRAY SHOWCASE[/b]\nR = toggle godrays | Godrays: %s" % ("ON" if _godrays_enabled else "OFF")
-			Log.info("testing", "Godrays: %s" % ("ON" if _godrays_enabled else "OFF"))
+		match (event as InputEventKey).physical_keycode:
+			KEY_R:
+				_godrays_enabled = not _godrays_enabled
+				if _godrays_enabled:
+					ShaderManager.enable_effect("godrays", 0.0)
+				else:
+					ShaderManager.disable_effect("godrays", 0.0)
+				_update_label()
+			KEY_T:
+				_sun_angle -= 5.0
+				_sun.rotation_degrees.x = _sun_angle
+				_update_label()
+			KEY_Y:
+				_sun_angle += 5.0
+				_sun.rotation_degrees.x = _sun_angle
+				_update_label()
+
+	# Right-click capture for fly camera
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_RIGHT:
+			_mouse_captured = mb.pressed
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _mouse_captured else Input.MOUSE_MODE_VISIBLE
+
+	# Mouse look while captured
+	if event is InputEventMouseMotion and _mouse_captured:
+		var mm := event as InputEventMouseMotion
+		_camera.rotation_degrees.y -= mm.relative.x * 0.2
+		_camera.rotation_degrees.x -= mm.relative.y * 0.2
+		_camera.rotation_degrees.x = clampf(_camera.rotation_degrees.x, -89, 89)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	# Fly camera
+	if _mouse_captured:
+		var move := Vector3.ZERO
+		if Input.is_physical_key_pressed(KEY_W): move.z -= 1.0
+		if Input.is_physical_key_pressed(KEY_S): move.z += 1.0
+		if Input.is_physical_key_pressed(KEY_A): move.x -= 1.0
+		if Input.is_physical_key_pressed(KEY_D): move.x += 1.0
+		if Input.is_physical_key_pressed(KEY_SPACE): move.y += 1.0
+		if Input.is_physical_key_pressed(KEY_SHIFT): move.y -= 1.0
+		if move.length_squared() > 0.0:
+			_camera.position += _camera.basis * move.normalized() * _fly_speed * delta
+
 	var time: float = Time.get_ticks_msec() / 1000.0
 
 	# Orbit objects around the pivot

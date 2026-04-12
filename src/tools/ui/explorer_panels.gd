@@ -352,6 +352,29 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	fog_density_slider.step = 0.1
 	fog_density_slider.tooltip_text = "Fog density multiplier (1.0 = default, higher = thicker)"
 
+	# Fog & atmosphere toggles — grouped with weather because weather drives
+	# fog/godray parameters when active (authority model: Phase B refactor)
+	depth_fog_toggle = CheckBox.new()
+	depth_fog_toggle.text = "Depth Fog (aerial perspective)"
+	depth_fog_toggle.button_pressed = false
+	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
+	depth_fog_toggle.tooltip_text = "Distance haze — makes far objects fade to sky color for depth"
+	vbox.add_child(depth_fog_toggle)
+
+	native_vfog_toggle = CheckBox.new()
+	native_vfog_toggle.text = "Volumetric Fog"
+	native_vfog_toggle.button_pressed = false
+	native_vfog_toggle.toggled.connect(_cb.get("native_vfog_toggled", Callable()))
+	native_vfog_toggle.tooltip_text = "Godot native volumetric fog — produces god rays via forward scattering"
+	vbox.add_child(native_vfog_toggle)
+
+	godrays_toggle = CheckBox.new()
+	godrays_toggle.text = "God Rays (compute)"
+	godrays_toggle.button_pressed = false
+	godrays_toggle.toggled.connect(_cb.get("godrays_toggled", Callable()))
+	godrays_toggle.tooltip_text = "Compute shader god rays — requires Sky to be enabled"
+	vbox.add_child(godrays_toggle)
+
 	# --- Volumetric cloud parameters (SunshineClouds2) --------------------
 	# Direct bindings onto the SunshineClouds2 resource. Weather presets
 	# call on_* handlers to push their values here — there is NO per-frame
@@ -521,29 +544,8 @@ func _build_rendering_tab(vbox: VBoxContainer) -> void:
 	glow_toggle.tooltip_text = "HDR bloom on bright surfaces (sun, torches, lava)"
 	vbox.add_child(glow_toggle)
 
-	# ── Fog & Atmosphere ──
-	_add_section(vbox, "Fog & Atmosphere")
-
-	godrays_toggle = CheckBox.new()
-	godrays_toggle.text = "God Rays (compute)"
-	godrays_toggle.button_pressed = false
-	godrays_toggle.toggled.connect(_cb.get("godrays_toggled", Callable()))
-	godrays_toggle.tooltip_text = "Compute shader god rays — requires Sky to be enabled"
-	vbox.add_child(godrays_toggle)
-
-	native_vfog_toggle = CheckBox.new()
-	native_vfog_toggle.text = "Volumetric Fog"
-	native_vfog_toggle.button_pressed = false
-	native_vfog_toggle.toggled.connect(_cb.get("native_vfog_toggled", Callable()))
-	native_vfog_toggle.tooltip_text = "Godot native volumetric fog — produces god rays via forward scattering"
-	vbox.add_child(native_vfog_toggle)
-
-	depth_fog_toggle = CheckBox.new()
-	depth_fog_toggle.text = "Depth Fog (aerial perspective)"
-	depth_fog_toggle.button_pressed = false
-	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
-	depth_fog_toggle.tooltip_text = "Distance haze — makes far objects fade to sky color for depth"
-	vbox.add_child(depth_fog_toggle)
+	# ── Shadows ──
+	_add_section(vbox, "Shadows")
 
 	shadow_cascade_toggle = CheckBox.new()
 	shadow_cascade_toggle.text = "Shadow 4-Split Cascades"
