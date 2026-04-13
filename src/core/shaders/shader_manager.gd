@@ -97,6 +97,15 @@ func set_sun(sun: DirectionalLight3D) -> void:
 			effect.set_sun(sun)
 
 
+## Set the cloud density source on all effects that support it (godrays disc occlusion).
+## Pass the SunshineCloudsGD resource; effects read accumulation_textures live per frame.
+func set_cloud_source(resource: Resource) -> void:
+	for effect_name in _effects:
+		var effect: PostProcessEffect = _effects[effect_name]
+		if effect.has_method("set_cloud_source"):
+			effect.set_cloud_source(resource)
+
+
 ## Detach from current target
 func detach() -> void:
 	if _target_node is WorldEnvironment:

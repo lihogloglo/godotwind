@@ -1375,10 +1375,24 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		)
 
 		console.register_command(
-			"bake_hlod",
-			_cmd_bake_hlod,
-			"Bake HLOD cell-merged meshes for all exterior cells",
-			"tools"
+			"hlod_enable",
+			_cmd_hlod_enable,
+			"Enable runtime HLOD merging (300-1000m cell merge)",
+			"streaming"
+		)
+
+		console.register_command(
+			"hlod_disable",
+			_cmd_hlod_disable,
+			"Disable runtime HLOD merging",
+			"streaming"
+		)
+
+		console.register_command(
+			"hlod_stats",
+			_cmd_hlod_stats,
+			"Show runtime HLOD merger stats",
+			"streaming"
 		)
 
 		# Register streaming benchmark commands
@@ -1448,22 +1462,38 @@ func _cmd_prebake_animations(_args: Dictionary) -> String:
 		result.get("success", 0), elapsed, result.get("failed", 0)]
 
 
-func _cmd_bake_hlod(_args: Dictionary) -> String:
-	_log("Starting HLOD bake — merging cell geometry. This may take several minutes...")
-	var prebaker := ModelPrebaker.new()
-	prebaker.initialize()
-	prebaker.hlod_progress.connect(func(current: int, total: int, cell_name: String) -> void:
-		if current % 50 == 0 or current == total:
-			_log("HLOD: %d/%d — %s" % [current, total, cell_name])
-	)
-	var t0 := Time.get_ticks_msec()
-	var result: Dictionary = await prebaker.bake_all_hlods()
-	var elapsed := Time.get_ticks_msec() - t0
-	var msg := "HLOD bake complete: %d baked, %d skipped, %d failed (of %d cells) in %d ms" % [
-		result.get("success", 0), result.get("skipped", 0),
-		result.get("failed", 0), result.get("total", 0), elapsed]
-	_log(msg)
-	return msg
+func _cmd_hlod_enable(_args: Dictionary) -> String:
+	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
+		return "HLOD merger not initialized"
+	native_streaming_manager._hlod_merger.enabled = true
+	# Narrow MID to 300m so HLOD covers 300-1000m
+	if native_streaming_manager._static_renderer:
+		var DU := preload("res://src/core/world/distance_utils.gd")
+		native_streaming_manager._static_renderer.visibility_range_end = DU.HLOD_START
+	return "HLOD merging ENABLED — MID narrowed to 300m, HLOD covers 300-1000m"
+
+
+func _cmd_hlod_disable(_args: Dictionary) -> String:
+	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
+		return "HLOD merger not initialized"
+	native_streaming_manager._hlod_merger.enabled = false
+	native_streaming_manager._hlod_merger.cleanup()
+	# Restore MID to 500m (no HLOD coverage)
+	if native_streaming_manager._static_renderer:
+		var DU := preload("res://src/core/world/distance_utils.gd")
+		native_streaming_manager._static_renderer.visibility_range_end = DU.MID_END
+	return "HLOD merging DISABLED — MID restored to 500m"
+
+
+func _cmd_hlod_stats(_args: Dictionary) -> String:
+	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
+		return "HLOD merger not initialized"
+	var stats: Dictionary = native_streaming_manager._hlod_merger.get_stats()
+	return "HLOD: enabled=%s, active=%d, pending=%d, cache=%d entries (%.1f MB), total_merged=%d, skipped_refs=%d" % [
+		str(native_streaming_manager._hlod_merger.enabled),
+		stats.get("active_cells", 0), stats.get("pending_merges", 0),
+		stats.get("cache_entries", 0), stats.get("cache_bytes", 0) / (1024.0 * 1024.0),
+		stats.get("total_merges_completed", 0), stats.get("total_refs_skipped", 0)]
 
 
 ## Callback for native streaming manager cell loaded

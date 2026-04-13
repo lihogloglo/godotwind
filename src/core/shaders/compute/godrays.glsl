@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform sampler2D tex_a;              // primary in
 layout(set = 0, binding = 1) uniform sampler2D tex_b;              // secondary input sampler
 layout(r16f, set = 0, binding = 2) uniform image2D img_out;        // intermediate output
 layout(rgba16f, set = 0, binding = 3) uniform image2D color_image; // scene color (pass 3)
+layout(set = 0, binding = 4) uniform sampler2D tex_cloud;          // cloud density (.a) from SunshineClouds2
 
 layout(push_constant, std430) uniform Params {
 	vec4 sun_screen_pos;   // xy = sun UV, z = forward_dot (<0 = visible), w = time
@@ -219,10 +220,12 @@ void combine() {
 		vec2 screen_offset = uv - sun_uv;
 		screen_offset.y *= raspect;
 
-		// Depth check: only in sky (reversed-Z: sky = 0.0, geometry > 1e-6)
-		float depth = texture(tex_b, uv).r;
-		float is_sky = step(depth, 1e-6);
-		float disc_occl = light * is_sky;
+		// Sky mask from Pass 0 (single source of truth — same signal the rays use).
+		float is_sky = texture(tex_b, uv).r;
+		// Cloud occlusion from SunshineClouds2 accumulation (.a = density).
+		// When clouds are absent, tex_cloud is a 1x1 zero-alpha dummy → no attenuation.
+		float cloud_density = texture(tex_cloud, uv).a;
+		float disc_occl = light * is_sky * (1.0 - clamp(cloud_density, 0.0, 1.0));
 		// Disc sharpness: higher = sharper edge. Precomputed fog_near_ratio affects this.
 		float disc_radius = params.disc_params.x;
 		float sharpness = mix(60.0, 660.0, clamp(sun_height + 0.5, 0.0, 1.0));

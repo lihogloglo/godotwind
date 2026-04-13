@@ -402,6 +402,7 @@ func process_async_loads() -> int:
 							DirAccess.remove_absolute(disk_path)
 							_file_exists_cache.erase(disk_path)
 						elif instance is Node3D:
+							_strip_occluders(instance)
 							model = instance as Node3D
 						else:
 							# Wrong type - corrupted cache
@@ -602,6 +603,10 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 		_file_exists_cache.erase(disk_path)
 		return null
 
+	# Strip OccluderInstance3D nodes — cached .res files may contain occluders
+	# with corrupt data that crash the renderer (invalid RID, null occluder resource)
+	_strip_occluders(instance)
+
 	# DEBUG: Log all MeshInstance3D nodes in the loaded model to audit for LOD nodes
 	if _stats["models_from_disk"] < 5:  # Only log first 5 models to avoid spam
 		Log.debug("models", "Loaded from disk: %s" % disk_path.get_file())
@@ -692,6 +697,23 @@ func _clear_resource_paths(node: Node) -> void:
 
 	for child in node.get_children():
 		_clear_resource_paths(child)
+
+
+## Remove OccluderInstance3D nodes from a loaded model.
+## Cached .res files may contain occluders with corrupt BoxOccluder3D data
+## that triggers "Parameter 'occluder' is null" errors on instantiate,
+## corrupting renderer state and eventually causing signal 11 crashes.
+## Occluders are optional performance hints — safe to strip.
+func _strip_occluders(node: Node) -> void:
+	var to_remove: Array[Node] = []
+	for child in node.get_children():
+		if child is OccluderInstance3D:
+			to_remove.append(child)
+		else:
+			_strip_occluders(child)
+	for child in to_remove:
+		child.get_parent().remove_child(child)
+		child.queue_free()
 
 
 ## Clear all resource paths from a material and its textures

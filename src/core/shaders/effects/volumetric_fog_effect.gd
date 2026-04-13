@@ -262,23 +262,22 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 
 	# Get camera matrices
 	var projection := scene_data.get_cam_projection()
-	var view_matrix := scene_data.get_cam_transform().affine_inverse()
-	var cam_position := scene_data.get_cam_transform().origin
+	var cam_transform := scene_data.get_cam_transform()
+	var cam_position := cam_transform.origin
 
-	# Build push constants
-	var push_constants := PackedFloat32Array()
-
-	# inv_projection (mat4 = 16 floats)
+	# Build camera matrix buffer (binding 5) — two mat4s exceed 128-byte push constant limit
+	var matrix_data := PackedFloat32Array()
 	var inv_proj := projection.inverse()
 	for row in 4:
 		for col in 4:
-			push_constants.append(inv_proj[col][row])
-
-	# inv_view (mat4 = 16 floats)
-	var inv_view := view_matrix.inverse()
+			matrix_data.append(inv_proj[col][row])
+	var inv_view := Projection(cam_transform)
 	for row in 4:
 		for col in 4:
-			push_constants.append(inv_view[col][row])
+			matrix_data.append(inv_view[col][row])
+
+	# Build push constants (112 bytes — within 128-byte Vulkan limit)
+	var push_constants := PackedFloat32Array()
 
 	# camera_position (vec4)
 	push_constants.append(cam_position.x)
@@ -379,9 +378,18 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_transmittance.add_id(lut_rid)
 	uniforms.append(u_transmittance)
 
+	# Camera matrices storage buffer (binding 5) — mat4s exceed push constant limit
+	var matrix_buffer := rd.storage_buffer_create(matrix_data.size() * 4, matrix_data.to_byte_array())
+	var u_matrices := RDUniform.new()
+	u_matrices.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_matrices.binding = 5
+	u_matrices.add_id(matrix_buffer)
+	uniforms.append(u_matrices)
+
 	# Create uniform set
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
+		rd.free_rid(matrix_buffer)
 		return
 
 	# Dispatch compute shader
@@ -395,8 +403,9 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	rd.compute_list_dispatch(compute_list, groups_x, groups_y, 1)
 	rd.compute_list_end()
 
-	# Free uniform set (created per frame)
+	# Free per-frame resources
 	rd.free_rid(uniform_set)
+	rd.free_rid(matrix_buffer)
 
 
 func on_effect_removed() -> void:

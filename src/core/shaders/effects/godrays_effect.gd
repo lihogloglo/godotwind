@@ -41,6 +41,9 @@ var _current_half_size: Vector2i
 ## Active sun for ray direction — set by world_explorer or test scenes
 var _active_sun: DirectionalLight3D = null
 
+## Cloud density source — SunshineCloudsGD resource (read live, never cached)
+var _cloud_source: Resource = null
+
 ## Cached weather data — written on main thread, read on render thread
 var _cached_weather_id: float = 0.0
 var _cached_next_weather_id: float = 0.0
@@ -58,6 +61,13 @@ var _dummy_rgba16f: RID
 ## Set the active sun for god ray direction
 func set_sun(sun: DirectionalLight3D) -> void:
 	_active_sun = sun
+
+
+## Set the cloud density source (SunshineCloudsGD resource).
+## GodraysEffect reads accumulation_textures live in _render_view — never cached,
+## so resize-triggered texture recreation is handled transparently.
+func set_cloud_source(resource: Resource) -> void:
+	_cloud_source = resource
 
 
 ## Call from main thread to cache weather state (avoids render-thread data race)
@@ -102,7 +112,7 @@ func _define_parameters() -> void:
 	register_parameter("ray_radius", 0.25, 0.1, 10.0, 0.1,
 		"Ray Radius", "Radius around sun center that emits rays")
 
-	register_parameter("ray_strength", 1.85, 0.1, 10.0, 0.05,
+	register_parameter("ray_strength", 0.6, 0.1, 10.0, 0.05,
 		"Ray Strength", "Brightness of sun rays")
 
 	register_parameter("ray_falloff", 1.10, 0.1, 10.0, 0.1,
@@ -114,10 +124,10 @@ func _define_parameters() -> void:
 	register_parameter("ray_sun_falloff", 1.5, 0.1, 10.0, 0.1,
 		"Ray Falloff Exponent", "Ray strength falloff exponent near sun")
 
-	register_parameter("center_vis", 0.35, 0.1, 10.0, 0.01,
+	register_parameter("center_vis", 0.2, 0.1, 10.0, 0.01,
 		"Center Opacity", "Ray opacity at center of sun")
 
-	register_parameter("ray_occlude", 0.75, 0.1, 10.0, 0.025,
+	register_parameter("ray_occlude", 0.3, 0.1, 10.0, 0.025,
 		"Ray Occlude", "How much rays darken the underlying image")
 
 	register_parameter("ray_brightness", 1.0, 0.1, 10.0, 0.05,
@@ -130,7 +140,7 @@ func _define_parameters() -> void:
 	register_parameter("sun_disc_radius", 0.025, 0.01, 10.0, 0.005,
 		"Sun Radius", "Radius of the sun disc on screen")
 
-	register_parameter("sun_disc_brightness", 1.2, 0.1, 10.0, 0.1,
+	register_parameter("sun_disc_brightness", 0.5, 0.1, 10.0, 0.1,
 		"Sun Brightness", "Brightness of the sun disc")
 
 	register_parameter("sun_disc_desaturate", 0.4, -10.0, 10.0, 0.1,
@@ -139,7 +149,7 @@ func _define_parameters() -> void:
 	register_parameter("sun_disc_occlude", 0.1, 0.1, 10.0, 0.1,
 		"Sun Disc Occlude", "How much the sun disc overwrites the original image")
 
-	register_parameter("horizon_multiplier", 2.0, 0.0, 10.0, 0.1,
+	register_parameter("horizon_multiplier", 1.0, 0.0, 10.0, 0.1,
 		"Horizon Multiplier", "Extra brightness for sun disc at the horizon (colorful sunsets)")
 
 
@@ -215,14 +225,18 @@ func _create_dummy_textures() -> void:
 	fmt_r16f.texture_type = RenderingDevice.TEXTURE_TYPE_2D
 	_dummy_r16f = rd.texture_create(fmt_r16f, RDTextureView.new())
 
-	# 1x1 RGBA16F dummy for unused color_image bindings
+	# 1x1 RGBA16F dummy for unused color_image / cloud density bindings.
+	# Zero-initialized so .a = 0.0 → no cloud attenuation when no cloud source.
 	var fmt_rgba := RDTextureFormat.new()
 	fmt_rgba.width = 1
 	fmt_rgba.height = 1
 	fmt_rgba.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
 	fmt_rgba.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
 	fmt_rgba.texture_type = RenderingDevice.TEXTURE_TYPE_2D
-	_dummy_rgba16f = rd.texture_create(fmt_rgba, RDTextureView.new())
+	var zero_rgba := PackedByteArray()
+	zero_rgba.resize(8)  # 1×1 × 4 channels × 2 bytes (half-float)
+	zero_rgba.fill(0)
+	_dummy_rgba16f = rd.texture_create(fmt_rgba, RDTextureView.new(), [zero_rgba])
 
 
 func _create_internal_textures(full_size: Vector2i, half_size: Vector2i) -> void:
@@ -485,11 +499,16 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 	rd.free_rid(us2)
 
 	# ═══ Pass 3: Combine ═══
-	# tex_a=rt_rays(sampler), tex_b=depth, img_out=dummy, color_image=scene color
+	# tex_a=rt_rays, tex_b=sky_mask (Pass 0), img_out=dummy, color=scene, cloud=density
+	# Sky mask: single source of truth for geometry occlusion (same signal as rays).
+	# Cloud density: read LIVE from SunshineClouds2 accumulation_textures — never cached,
+	# so resize-triggered texture recreation is handled transparently.
 	pc_bytes.encode_float(pass_id_byte_offset, float(PASS_COMBINE))
+	var cloud_tex_rid := _get_cloud_density_rid(view)
 	var us3 := _create_uniform_set(_rt_rays, _linear_sampler,
-		depth_texture, _depth_sampler,
-		_dummy_r16f, color_image)
+		_rt_mask, _linear_sampler,
+		_dummy_r16f, color_image,
+		cloud_tex_rid, _linear_sampler)
 	if not us3.is_valid():
 		return
 
@@ -502,14 +521,38 @@ func _render_view(view: int, size: Vector2i, half_size: Vector2i,
 	rd.free_rid(us3)
 
 
+## Read the cloud color accumulation texture RID live from the SunshineCloudsGD resource.
+## Returns invalid RID if cloud source is absent, disabled, or textures not yet created.
+## Called every frame inside _render_view — never cached, survives resize transparently.
+func _get_cloud_density_rid(view: int) -> RID:
+	if _cloud_source == null or not is_instance_valid(_cloud_source):
+		return RID()
+	if not _cloud_source.get("enabled"):
+		return RID()
+	var accum: Array = _cloud_source.get("accumulation_textures")
+	if accum == null:
+		return RID()
+	var idx: int = view * 7 + 1  # cloud color+density texture for this view
+	if idx >= accum.size():
+		return RID()
+	var rid: RID = accum[idx]
+	return rid if rid.is_valid() else RID()
+
+
 ## Create a uniform set for one pass
 ## tex_a_rid + tex_a_sampler → binding 0 (sampler_with_texture)
 ## tex_b_rid + tex_b_sampler → binding 1 (sampler_with_texture)
 ## img_out_rid              → binding 2 (storage image, r16f)
 ## color_rid                → binding 3 (storage image, rgba16f)
+## cloud_rid + cloud_sampler → binding 4 (sampler_with_texture, cloud density)
 func _create_uniform_set(tex_a_rid: RID, tex_a_sampler: RID,
 		tex_b_rid: RID, tex_b_sampler: RID,
-		img_out_rid: RID, color_rid: RID) -> RID:
+		img_out_rid: RID, color_rid: RID,
+		cloud_rid: RID = RID(), cloud_sampler: RID = RID()) -> RID:
+
+	# Default cloud binding to dummy when not provided
+	var actual_cloud_rid := cloud_rid if cloud_rid.is_valid() else _dummy_rgba16f
+	var actual_cloud_sampler := cloud_sampler if cloud_sampler.is_valid() else _linear_sampler
 
 	var uniforms: Array[RDUniform] = []
 
@@ -542,6 +585,14 @@ func _create_uniform_set(tex_a_rid: RID, tex_a_sampler: RID,
 	u3.binding = 3
 	u3.add_id(color_rid)
 	uniforms.append(u3)
+
+	# Binding 4: tex_cloud (sampler with texture — cloud density alpha)
+	var u4 := RDUniform.new()
+	u4.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u4.binding = 4
+	u4.add_id(actual_cloud_sampler)
+	u4.add_id(actual_cloud_rid)
+	uniforms.append(u4)
 
 	return rd.uniform_set_create(uniforms, shader_rid, 0)
 

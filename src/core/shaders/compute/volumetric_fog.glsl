@@ -29,10 +29,14 @@ layout(set = 0, binding = 3) uniform sampler2D noise_2d_texture;
 // When available, tints fog scattering with physically-correct atmospheric extinction.
 layout(set = 0, binding = 4) uniform sampler2D transmittance_lut;
 
-// Push constants for parameters
-layout(push_constant, std430) uniform Params {
+// Camera matrices in storage buffer (128 bytes each mat4, exceeds 128-byte push constant limit)
+layout(std430, set = 0, binding = 5) readonly buffer CameraMatrices {
     mat4 inv_projection;
     mat4 inv_view;
+} camera;
+
+// Push constants (112 bytes — within 128-byte Vulkan limit)
+layout(push_constant, std430) uniform Params {
     vec4 camera_position;   // xyz = position, w = time
     vec4 fog_color;         // rgb = color, a = intensity
     vec4 fog_params;        // x = density, y = height_falloff, z = start_distance, w = end_distance
@@ -137,9 +141,9 @@ float get_time_fog_modifier() {
 // Reconstruct world position from depth
 vec3 get_world_position(vec2 uv, float depth) {
     vec4 clip_pos = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view_pos = params.inv_projection * clip_pos;
+    vec4 view_pos = camera.inv_projection * clip_pos;
     view_pos /= view_pos.w;
-    vec4 world_pos = params.inv_view * view_pos;
+    vec4 world_pos = camera.inv_view * view_pos;
     return world_pos.xyz;
 }
 

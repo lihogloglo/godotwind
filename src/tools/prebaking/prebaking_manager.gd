@@ -40,10 +40,10 @@ enum Component {
 	IMPOSTORS,     # Octahedral impostor textures (FAR tier)
 	NAVMESHES,     # Navigation meshes
 	SHORE_MASK,    # Ocean visibility mask
-	HLOD,          # Cell-level merged meshes (300-1000m tier)
 	CLOUD_NOISE,   # 3D noise textures for volumetric clouds
 	# REMOVED: LODS - now embedded in MODELS via NIFConverter
 	# REMOVED: MERGED_MESHES - deprecated cell merging
+	# REMOVED: HLOD - now runtime-merged by RuntimeHLODMerger (no prebake needed)
 }
 
 ## Baking status
@@ -74,7 +74,6 @@ var enable_models: bool = true
 var enable_impostors: bool = true
 var enable_navmeshes: bool = true
 var enable_shore_mask: bool = true
-var enable_hlod: bool = true
 var enable_cloud_noise: bool = true
 
 ## Current component being processed
@@ -245,10 +244,7 @@ func start_prebaking() -> void:
 		_current_component = Component.MODELS
 		results["models"] = await _bake_models()
 
-	# HLOD after models — needs prebaked .res files to merge per-cell
-	if enable_hlod and not _should_stop:
-		_current_component = Component.HLOD
-		results["hlod"] = await _bake_hlod()
+	# HLOD removed — RuntimeHLODMerger handles cell merging at runtime (no prebake)
 
 	if enable_impostors and not _should_stop:
 		_current_component = Component.IMPOSTORS
@@ -313,8 +309,8 @@ func _clear_cache_directories() -> void:
 		SettingsManager.get_impostors_path(),
 		SettingsManager.get_navmeshes_path(),
 		SettingsManager.get_ocean_path(),
-		SettingsManager.get_cache_base_path().path_join("hlod"),
-		# NOTE: merged_cells and lods directories no longer used - LODs embedded in models
+		# NOTE: merged_cells, lods, hlod directories no longer used
+		# LODs embedded in models; HLOD now runtime-merged
 	]
 
 	for dir_path: String in directories:
@@ -688,46 +684,6 @@ func _bake_models() -> Dictionary:
 # REMOVED: _bake_lods() - LODs now embedded in models via NIFConverter.generate_lods = true
 
 
-## Bake HLOD cell-merged meshes (300-1000m tier)
-## Merges all static geometry per exterior cell into a single ArrayMesh with LOD chain.
-## Runs after models so prebaked .res files are available for merging.
-func _bake_hlod() -> Dictionary:
-	Log.info("prebaking", "=".repeat(80))
-	Log.info("prebaking", "HLOD: Merging cell-level geometry for 300-1000m tier")
-	Log.info("prebaking", "=".repeat(80))
-
-	component_started.emit("HLOD")
-
-	var baker := ModelPrebaker.new()
-	if baker.initialize() != OK:
-		error_occurred.emit("HLOD", "Failed to initialize model prebaker")
-		return {"success": 0, "failed": 0, "skipped": 0, "error": "Initialization failed"}
-
-	# Connect progress signals
-	baker.hlod_progress.connect(func(current: int, total: int, cell_name: String) -> void:
-		component_progress.emit("HLOD", current, total, cell_name)
-	)
-	baker.hlod_cell_baked.connect(func(grid: Vector2i, success: bool, surface_count: int) -> void:
-		var name := "cell_%d_%d" % [grid.x, grid.y]
-		item_baked.emit("HLOD", name, success)
-		# Update persistent state
-		var hlod_state: PrebakeState.ComponentState = _state_manager.hlod
-		if success:
-			hlod_state.completed.append(name)
-			hlod_state.last_baked = name
-		else:
-			hlod_state.failed.append(name)
-		hlod_state.pending.erase(name)
-		_state_manager.save_state()
-	)
-
-	var result: Dictionary = await baker.bake_all_hlods()
-
-	component_completed.emit("HLOD", result.get("success", 0), result.get("failed", 0), result.get("skipped", 0))
-
-	return result
-
-
 ## Bake impostors
 func _bake_impostors() -> Dictionary:
 	Log.info("prebaking", "=".repeat(80))
@@ -955,8 +911,6 @@ func bake_component(component: Component) -> void:
 			result = await _bake_terrain()
 		Component.MODELS:
 			result = await _bake_models()
-		Component.HLOD:
-			result = await _bake_hlod()
 		Component.IMPOSTORS:
 			result = await _bake_impostors()
 		Component.NAVMESHES:
@@ -978,7 +932,6 @@ func _component_name(component: Component) -> String:
 	match component:
 		Component.TERRAIN: return "terrain"
 		Component.MODELS: return "models"
-		Component.HLOD: return "hlod"
 		Component.IMPOSTORS: return "impostors"
 		Component.NAVMESHES: return "navmeshes"
 		Component.SHORE_MASK: return "shore_mask"

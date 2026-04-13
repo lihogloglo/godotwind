@@ -39,7 +39,7 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
-const HLODLoaderScript := preload("res://src/core/world/hlod_loader.gd")
+const RuntimeHLODMergerScript := preload("res://src/core/world/runtime_hlod_merger.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
 # replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
@@ -235,8 +235,8 @@ var _impostor_update_pending: bool = false
 ## Distant light manager — billboard sprites for lights beyond NEAR tier (150m–5km)
 var _distant_light_manager: DistantLightManager = null
 
-## HLOD loader — cell-level merged meshes for 300-1000m range
-var _hlod_loader: HLODLoaderScript = null
+## Runtime HLOD merger — cell-level merged meshes for 300-1000m range (OpenMW-style)
+var _hlod_merger: RuntimeHLODMergerScript = null
 
 ## Sun elevation in radians (set externally by world_explorer via set_sun_elevation)
 var _sun_elevation_rad: float = 0.5  # Default: daytime
@@ -280,9 +280,9 @@ func fast_cleanup() -> void:
 	if _distant_light_manager:
 		_distant_light_manager.cleanup()
 		_distant_light_manager = null
-	if _hlod_loader:
-		_hlod_loader.cleanup()
-		_hlod_loader = null
+	if _hlod_merger:
+		_hlod_merger.cleanup()
+		_hlod_merger = null
 	_promoted_objects.clear()
 	_promoted_by_cell.clear()
 
@@ -368,8 +368,8 @@ func _ready() -> void:
 	_distant_light_manager = DistantLightManagerScript.new()
 	_distant_light_manager.setup(_world_container)
 
-	# Create HLOD loader for cell-level merged meshes (300-1000m)
-	_hlod_loader = HLODLoaderScript.new()
+	# Create runtime HLOD merger for cell-level merged meshes (300-1000m)
+	_hlod_merger = RuntimeHLODMergerScript.new()
 
 	# Create GPU scene database for SSBO-backed world state (Phase 2)
 	_gpu_scene_db = GPUSceneDatabaseScript.new()
@@ -406,18 +406,18 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		# Normal budget (4ms) is restored when startup phase completes
 		_impostor_renderer.set_load_budget_usec(15000.0)
 
-	# Initialize HLOD loader with viewport scenario.
-	# If HLOD cache exists, narrow individual MID instance range to 300m (HLOD takes 300-1000m).
-	if _hlod_loader:
+	# Initialize runtime HLOD merger with viewport scenario + static renderer.
+	# Disabled by default — enable via console `hlod_enable` for benchmarking.
+	# When enabled, MID narrows to 300m and HLOD covers 300-1000m.
+	if _hlod_merger:
 		var scenario := get_viewport().get_world_3d().scenario
-		_hlod_loader.initialize(scenario)
-		# Check if HLOD cache exists (at least one cell file present)
-		var hlod_dir: String = SettingsManager.get_cache_base_path().path_join("hlod")
-		if DirAccess.dir_exists_absolute(hlod_dir):
-			if _static_renderer:
-				_static_renderer.visibility_range_end = DU.HLOD_START
-				Log.info("streaming", "HLOD cache found — MID instances narrowed to 0-%dm, HLOD covers %d-%dm" % [
-					int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END)])
+		_hlod_merger.initialize(scenario, _static_renderer, _background_processor)
+		if _hlod_merger.enabled and _static_renderer:
+			_static_renderer.visibility_range_end = DU.HLOD_START
+			Log.info("streaming", "Runtime HLOD merger active — MID 0-%dm, HLOD %d-%dm" % [
+				int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END)])
+		else:
+			Log.info("streaming", "Runtime HLOD merger initialized but DISABLED (enable via console: hlod_enable)")
 
 	_initialized = true
 	Log.info("streaming", "Initialized with native visibility_range streaming")
@@ -536,10 +536,12 @@ func _process(delta: float) -> void:
 		if imp_ms > 2.0:
 			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
 
-	# Update HLOD cells on camera cell change (runs AFTER impostor deferred update)
-	if _hlod_loader and not _startup_phase:
+	# Runtime HLOD merger: process completed merges every frame, update on cell change
+	if _hlod_merger and not _startup_phase:
+		_hlod_merger.process_merge_queue()  # Staggered: max 2 cells/frame
+		_hlod_merger.process_completions()
 		if _cell_changed_this_frame or _hlod_needs_initial_update:
-			_hlod_loader.update_for_camera(_camera_cell, load_radius_cells)
+			_hlod_merger.update_for_camera(_camera_cell)
 			_hlod_needs_initial_update = false
 
 	# Update distant light manager (camera pos + time-of-day)
@@ -1524,10 +1526,11 @@ func get_stats() -> Dictionary:
 		s["mid_mesh_types"] = sr_stats.get("mesh_types", 0)
 
 	# Merge HLOD stats
-	if _hlod_loader:
-		var hlod_stats: Dictionary = _hlod_loader.get_stats()
-		s["hlod_cells"] = hlod_stats.get("loaded_cells", 0)
-		s["hlod_surfaces"] = hlod_stats.get("total_surfaces", 0)
+	if _hlod_merger:
+		var hlod_stats: Dictionary = _hlod_merger.get_stats()
+		s["hlod_cells"] = hlod_stats.get("active_cells", 0)
+		s["hlod_pending"] = hlod_stats.get("pending_merges", 0)
+		s["hlod_cache_mb"] = hlod_stats.get("cache_bytes", 0) / (1024.0 * 1024.0)
 
 	return s
 

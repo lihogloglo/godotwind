@@ -664,4 +664,12 @@ func has_lod(type_name: String) -> bool:
 		return false
 	return _mesh_types[type_name].has_lod_chain
 
+
+## Get sub-mesh entries for a registered type (used by RuntimeHLODMerger).
+## Returns empty array if type not registered.
+func get_sub_meshes(type_name: String) -> Array[SubMeshEntry]:
+	if type_name not in _mesh_types:
+		return []
+	return _mesh_types[type_name].sub_meshes
+
 #endregion

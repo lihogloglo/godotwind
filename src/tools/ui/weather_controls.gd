@@ -137,6 +137,10 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# even with sky/weather toggles OFF.
 		clouds_res.enabled = false
 
+		# Wire cloud density source into ShaderManager so godrays can read
+		# accumulation_textures live for sun disc occlusion behind clouds.
+		ShaderManager.set_cloud_source(clouds_res)
+
 		Log.info("weather", "SunshineClouds2 driver initialized (disabled until weather/sky enabled)")
 	else:
 		Log.warn("weather", "SunshineClouds2 clouds script not found")

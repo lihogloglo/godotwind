@@ -549,10 +549,11 @@ func on_show_sky_toggled(enabled: bool) -> void:
 		_apply_shadow_cascades(sky_manager.get_sun_light())
 		# Wire sun into ShaderManager so godrays/fog get the sun reference
 		ShaderManager.set_sun(sky_manager.get_sun_light())
-		# Enable sun-dependent effects
+		# Enable sun-dependent effects (only if their toggle is actually ON)
 		ensure_shader_manager_attached()
 		ShaderManager.enable_effect("sky_transmittance", 0.0)
-		ShaderManager.enable_effect("godrays", 0.3)
+		if _panels and _panels.godrays_toggle and _panels.godrays_toggle.button_pressed:
+			ShaderManager.enable_effect("godrays", 0.3)
 	else:
 		_apply_shadow_cascades(_fallback_light)
 		# Disable sun-dependent effects when sky is off
