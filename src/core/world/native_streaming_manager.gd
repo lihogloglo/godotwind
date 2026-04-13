@@ -714,9 +714,12 @@ func _update_loaded_cells() -> void:
 	)
 	var t_queue := Time.get_ticks_usec()
 
-	# Defer impostor update to next frame to avoid stacking with cell load/unload
-	# The impostor scan (especially first call with 11K+ cells) is expensive
-	_impostor_update_pending = true
+	# Defer impostor update to next frame to avoid stacking with cell load/unload.
+	# During startup phase, defer further — impostor scan (11K+ cells) overwhelms
+	# the resource pipeline when combined with cell model loading. The startup_complete
+	# signal handler below triggers the impostor scan once initial cells are done.
+	if not _startup_phase:
+		_impostor_update_pending = true
 
 	# Scan for distant lights in a wider radius than loaded cells
 	# Uses impostor_radius since distant lights should be visible as far as impostors
@@ -1998,6 +2001,8 @@ func _check_startup_complete() -> void:
 		_startup_phase = false
 		if _impostor_renderer:
 			_impostor_renderer.set_load_budget_usec(4000.0)
+		# Deferred impostor scan — was blocked during startup to reduce load pressure
+		_impostor_update_pending = true
 		startup_complete.emit()
 		return
 	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
@@ -2022,6 +2027,8 @@ func _check_startup_complete() -> void:
 		# Restore normal impostor budget
 		if _impostor_renderer:
 			_impostor_renderer.set_load_budget_usec(4000.0)
+		# Deferred impostor scan — was blocked during startup to reduce load pressure
+		_impostor_update_pending = true
 		startup_complete.emit()
 		Log.info("streaming", "Startup phase complete after %d frames, %d cells loaded, %d impostor cells remaining (inner ring: %d/%d processed)" % [
 			_startup_frames, _loaded_cells.size(), impostor_pending, impostor_processed, inner_ring_count])

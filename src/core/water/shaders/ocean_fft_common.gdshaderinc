@@ -46,9 +46,12 @@ uniform float foam_edge_width : hint_range(0.01, 2.0) = 0.3;
 uniform float foam_flow_speed : hint_range(0.0, 0.1) = 0.03;
 uniform float foam_intensity : hint_range(0.0, 1.0) = 1.0;  // Weather-driven: 0=calm, 1=storm
 
-// Shore — prebaked shore mask removed. Depth buffer is the sole authority for
-// the visual shore boundary (Sea of Thieves pattern). Wave dampening, foam,
-// and color blend are all driven by screen-space water_thickness.
+// Shore — prebaked shore mask for VERTEX dampening only (CREST OceanDepthCache
+// pattern). Fragment-side shore visuals (foam, color blend, normals) remain
+// depth-driven via screen-space water_thickness — no fragment mask reads.
+group_uniforms shore;
+uniform sampler2D shore_mask : filter_linear_mipmap;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
 
 // Refraction — real depth-driven Beer-Lambert from DEPTH_TEXTURE + SCREEN_TEXTURE.
 // Declaring these samplers disables Godot 4.6 native SSR on this material
@@ -161,7 +164,7 @@ varying float v_vertex_dist;
 // Large values = sharp crest with short light path through water = more scatter.
 varying float v_choppiness;
 
-// Shore mask sampling removed — depth buffer handles shore boundary.
+// Shore mask sampled in vertex() of each .gdshader — not here in fragment.
 
 // ============================================================================
 // BICUBIC FILTERING (for normal maps — reduces aliasing at distance)

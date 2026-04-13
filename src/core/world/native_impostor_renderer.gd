@@ -25,8 +25,9 @@ const CS := preload("res://src/core/coordinate_system.gd")
 
 #region Configuration
 
-## Maximum texture array layers (most GPUs support 512+)
-const MAX_TEXTURE_ARRAY_LAYERS: int = 512
+## Maximum texture array layers. 256 layers × 256×256 RGBA8 = ~64 MB VRAM (albedo + normals).
+## Previous: 512 layers × 512×512 = ~1 GB VRAM, triggered c0000005 in Vulkan on RTX 4060 Laptop.
+const MAX_TEXTURE_ARRAY_LAYERS: int = 256
 
 ## Texture array rebuild delay (batch multiple additions)
 const TEXTURE_ARRAY_REBUILD_DELAY: float = 0.1
@@ -269,14 +270,14 @@ func _setup_billboard_material() -> void:
 	_billboard_material.set_shader_parameter("atlas_rows", 4)
 
 	# Create initial empty texture arrays (albedo + normal)
-	var default_img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
+	var default_img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
 	default_img.fill(Color(0, 0, 0, 0))
 	var default_array := Texture2DArray.new()
 	default_array.create_from_images([default_img])
 	_billboard_material.set_shader_parameter("texture_atlas", default_array)
 
 	# Normal atlas: default to up-facing normal (0.5, 1.0, 0.5), zero depth
-	var default_normal_img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
+	var default_normal_img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
 	default_normal_img.fill(Color(0.5, 1.0, 0.5, 0.0))
 	var default_normal_array := Texture2DArray.new()
 	default_normal_array.create_from_images([default_normal_img])
@@ -695,10 +696,10 @@ func _load_normal_image(normal_path: String, is_res: bool) -> Image:
 
 ## Called when a normal texture finishes loading
 func _on_normal_loaded(hash_key: String, image: Image) -> void:
-	# Resize to standard size
+	# Resize to standard size (256×256 matches albedo array resolution)
 	var img_copy := image.duplicate() as Image
-	if img_copy.get_size() != Vector2i(512, 512):
-		img_copy.resize(512, 512, Image.INTERPOLATE_LANCZOS)
+	if img_copy.get_size() != Vector2i(256, 256):
+		img_copy.resize(256, 256, Image.INTERPOLATE_LANCZOS)
 
 	_impostor_normal_images[hash_key] = img_copy
 
@@ -734,7 +735,7 @@ func _add_to_normal_array(hash_key: String, image: Image) -> int:
 ## Get or create fallback texture image (magenta/pink for visibility)
 func _get_fallback_image() -> Image:
 	if _fallback_texture == null:
-		var img := Image.create(512, 512, false, Image.FORMAT_RGBA8)
+		var img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
 		img.fill(Color(1.0, 0.0, 1.0, 1.0))  # Magenta
 		_fallback_texture = ImageTexture.create_from_image(img)
 		if debug_enabled:
@@ -1613,10 +1614,10 @@ func _add_to_texture_array(hash_key: String, image: Image) -> int:
 	_texture_index_map[hash_key] = index
 	_texture_array_size += 1
 
-	# Resize image to standard size
+	# Resize image to standard size (256×256 balances quality vs VRAM)
 	var img_copy := image.duplicate() as Image
-	if img_copy.get_size() != Vector2i(512, 512):
-		img_copy.resize(512, 512, Image.INTERPOLATE_LANCZOS)
+	if img_copy.get_size() != Vector2i(256, 256):
+		img_copy.resize(256, 256, Image.INTERPOLATE_LANCZOS)
 
 	_all_array_images.append(img_copy)
 	_texture_array_dirty = true

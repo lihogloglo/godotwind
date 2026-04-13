@@ -52,8 +52,14 @@ void vertex() {
 		displacement += cascade_disp;
 		chop_accum += length(cascade_disp.xz);
 	}
-	VERTEX += displacement * wave_scale;
-	wave_height = displacement.y;
+	// Shore dampening — fade displacement to zero near coastline (CREST pattern).
+	// Outside mask bounds (open sea) → shore = 1.0 (full waves).
+	vec2 shore_uv = (VERTEX.xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	float shore = (shore_uv.x < 0.0 || shore_uv.x > 1.0 || shore_uv.y < 0.0 || shore_uv.y > 1.0)
+		? 1.0 : texture(shore_mask, shore_uv).r;
+
+	VERTEX += displacement * wave_scale * shore;
+	wave_height = displacement.y * shore;
 	v_world_pos = VERTEX;
-	v_choppiness = chop_accum * wave_scale;
+	v_choppiness = chop_accum * wave_scale * shore;
 }

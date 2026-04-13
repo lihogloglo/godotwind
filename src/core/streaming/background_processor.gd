@@ -52,9 +52,11 @@ var _running: bool = false
 func _ready() -> void:
 	_results_mutex = Mutex.new()
 
-	# Auto-detect concurrent limit based on CPU cores
+	# Auto-detect concurrent limit based on CPU cores.
+	# Capped at 8 to avoid overwhelming ResourceLoader and GPU upload queues.
+	# 15+ concurrent tasks triggers c0000005 segfaults in Godot 4.6's C++ loader.
 	if max_concurrent_tasks <= 0:
-		_concurrent_limit = maxi(1, OS.get_processor_count() - 1)
+		_concurrent_limit = mini(8, maxi(1, OS.get_processor_count() - 1))
 	else:
 		_concurrent_limit = max_concurrent_tasks
 

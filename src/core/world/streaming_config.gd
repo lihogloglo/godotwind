@@ -138,11 +138,11 @@ const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
 const MAX_POOLED_OBJECTS := 2048
 
 ## Maximum number of impostor textures in texture array
-## GPU hardware limit (most GPUs support 512+ layers)
-const MAX_IMPOSTOR_TEXTURES := 512
+## 256 layers × 256×256 RGBA8 = ~64 MB VRAM (vs ~1 GB at 512×512×512)
+const MAX_IMPOSTOR_TEXTURES := 256
 
 ## Warning threshold (90% of max)
-const IMPOSTOR_TEXTURE_WARNING_THRESHOLD := 450
+const IMPOSTOR_TEXTURE_WARNING_THRESHOLD := 230
 
 ## Maximum number of NEAR tier cells loaded simultaneously
 ## NEAR tier: ~150m radius = ~13 cells (117m cell size)

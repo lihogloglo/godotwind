@@ -26,6 +26,12 @@ const LODResource := preload("res://src/core/world/lod_resource.gd")
 ## When exceeded, least-recently-accessed entries are evicted to 80% capacity
 const MAX_CACHE_SIZE := 500
 
+## Maximum concurrent ResourceLoader.load_threaded_request calls in flight.
+## Godot 4.6's internal resource loader can segfault (c0000005) when hammered
+## with hundreds of concurrent threaded load requests during heavy startup.
+## 16 is conservative enough to avoid the crash while keeping throughput high.
+const MAX_CONCURRENT_ASYNC_LOADS := 16
+
 ## Cache for loaded models: model_path (lowercase) -> Node3D prototype
 var _model_cache: Dictionary = {}
 
@@ -59,6 +65,10 @@ var _file_exists_cache: Dictionary = {}
 ## Pending async load requests: disk_path -> {cache_key: String, callbacks: Array[Callable]}
 ## Multiple requests for the same model share one load operation
 var _pending_async_loads: Dictionary = {}
+
+## Deferred async requests waiting for a slot (throttled by MAX_CONCURRENT_ASYNC_LOADS)
+## Each entry: {disk_path: String, cache_key: String, callback: Callable, model_path: String, item_id: String}
+var _deferred_async_queue: Array[Dictionary] = []
 
 ## Statistics
 var _stats: Dictionary = {
@@ -340,7 +350,18 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 				callback.call(model_path, item_id, null)
 		return false
 
-	# 4. Start async load
+	# 4. Throttle: defer if too many concurrent loads in flight
+	if _pending_async_loads.size() >= MAX_CONCURRENT_ASYNC_LOADS:
+		_deferred_async_queue.append({
+			"disk_path": disk_path,
+			"cache_key": cache_key,
+			"callback": callback,
+			"model_path": model_path,
+			"item_id": item_id
+		})
+		return true  # Will be started later by _drain_deferred_queue
+
+	# 5. Start async load
 	var err := ResourceLoader.load_threaded_request(disk_path, "PackedScene")
 	if err != OK:
 		push_warning("ModelLoader: Failed to start async load for %s: %s" % [disk_path, error_string(err)])
@@ -376,7 +397,10 @@ func is_loading_async(model_path: String, item_id: String = "") -> bool:
 ## Process pending async loads - call this every frame
 ## Returns number of loads completed this frame
 func process_async_loads() -> int:
+	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
+		return 0
 	if _pending_async_loads.is_empty():
+		_drain_deferred_queue()
 		return 0
 
 	var completed := 0
@@ -459,12 +483,61 @@ func process_async_loads() -> int:
 	for disk_path: String in to_remove:
 		_pending_async_loads.erase(disk_path)
 
+	# Drain deferred queue into freed slots
+	_drain_deferred_queue()
+
 	return completed
 
 
-## Get count of pending async loads
+## Get count of pending async loads (in-flight + deferred)
 func get_pending_async_count() -> int:
-	return _pending_async_loads.size()
+	return _pending_async_loads.size() + _deferred_async_queue.size()
+
+
+## Start deferred requests that were throttled by MAX_CONCURRENT_ASYNC_LOADS.
+## Called each frame after completed loads are reaped, so freed slots get reused.
+func _drain_deferred_queue() -> void:
+	while not _deferred_async_queue.is_empty() and _pending_async_loads.size() < MAX_CONCURRENT_ASYNC_LOADS:
+		var entry: Dictionary = _deferred_async_queue.pop_back()
+		var disk_path: String = entry.disk_path
+		var cache_key: String = entry.cache_key
+
+		# Skip if model was loaded by another path while waiting in the queue
+		if cache_key in _model_cache:
+			var callback: Callable = entry.callback
+			if callback.is_valid():
+				callback.call(entry.model_path, entry.item_id, _model_cache[cache_key])
+			continue
+
+		# Skip if already in-flight (another request for the same model started)
+		if disk_path in _pending_async_loads:
+			var callback: Callable = entry.callback
+			if callback.is_valid():
+				_pending_async_loads[disk_path].callbacks.append({
+					"callback": callback,
+					"model_path": entry.model_path,
+					"item_id": entry.item_id
+				})
+			continue
+
+		var err := ResourceLoader.load_threaded_request(disk_path, "PackedScene")
+		if err != OK:
+			var callback: Callable = entry.callback
+			if callback.is_valid():
+				callback.call(entry.model_path, entry.item_id, null)
+			continue
+
+		_pending_async_loads[disk_path] = {
+			"cache_key": cache_key,
+			"callbacks": [] as Array[Dictionary]
+		}
+		var callback: Callable = entry.callback
+		if callback.is_valid():
+			_pending_async_loads[disk_path].callbacks.append({
+				"callback": callback,
+				"model_path": entry.model_path,
+				"item_id": entry.item_id
+			})
 
 
 ## Directly add a model to the cache (for async loading)
