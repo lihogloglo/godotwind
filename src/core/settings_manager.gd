@@ -309,10 +309,10 @@ func remove_external_texture_directory(dir: String) -> void:
 enum AntiAliasing {
 	DISABLED,
 	FXAA,
-	TAA,
+	SMAA,
 	MSAA_2X,
-	MSAA_4X,
-	MSAA_8X
+	FSR2_QUALITY,  ## FSR 2.2 at 75% scale (performance + AA)
+	FSR2_NATIVE,   ## FSR 2.2 at native res (best temporal AA)
 }
 
 ## Quality presets matching StreamingConfig
@@ -327,7 +327,7 @@ enum QualityPreset {
 ## Gets the anti-aliasing mode
 func get_anti_aliasing() -> AntiAliasing:
 	_load_config()
-	return _config.get_value("graphics", "anti_aliasing", AntiAliasing.TAA) as AntiAliasing
+	return _config.get_value("graphics", "anti_aliasing", AntiAliasing.FSR2_NATIVE) as AntiAliasing
 
 ## Sets the anti-aliasing mode
 func set_anti_aliasing(mode: AntiAliasing) -> void:

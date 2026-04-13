@@ -52,6 +52,16 @@ uniform float foam_intensity : hint_range(0.0, 1.0) = 1.0;  // Weather-driven: 0
 group_uniforms shore;
 uniform sampler2D shore_mask : filter_linear_mipmap;
 uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+// Shore fade distance in meters — matches ShoreMaskGenerator's fade_distance.
+// Used to denormalize the raw distance stored in shore_mask.a.
+uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
+// Shore wave parameters (Outerra-style trochoidal waves oriented by SDF gradient)
+uniform float shore_wave_amplitude : hint_range(0.0, 2.0) = 0.5;
+// Waves per meter of shore distance — 0.1 = 10m wavelength, 0.05 = 20m.
+// Must be low enough that wavelength exceeds clipmap vertex spacing (~2-4m inner rings).
+uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
+uniform float shore_wave_speed : hint_range(0.1, 5.0) = 1.2;
+uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
 
 // Refraction — real depth-driven Beer-Lambert from DEPTH_TEXTURE + SCREEN_TEXTURE.
 // Declaring these samplers disables Godot 4.6 native SSR on this material

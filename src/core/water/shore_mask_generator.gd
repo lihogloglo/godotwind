@@ -99,8 +99,10 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 		_jfa_pass(step, binary_mask)
 		step /= 2
 
-	# Step 3: Compute shore factor with smoothstep
-	_shore_image = Image.create(_mask_resolution, _mask_resolution, false, Image.FORMAT_R8)
+	# Step 3: Compute shore factor, gradient direction, and raw distance
+	# RGBA8: R = shore factor (smoothstepped), G = gradient dir X, B = gradient dir Y,
+	# A = raw distance (linear, normalized to fade_distance)
+	_shore_image = Image.create(_mask_resolution, _mask_resolution, false, Image.FORMAT_RGBA8)
 	var texel_size := _world_bounds.size.x / float(_mask_resolution)
 
 	for y in range(_mask_resolution):
@@ -109,33 +111,46 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 			var is_water := binary_mask[idx] == 1
 
 			if not is_water:
-				_shore_image.set_pixel(x, y, Color(0.0, 0, 0, 1))
+				_shore_image.set_pixel(x, y, Color(0.0, 0.5, 0.5, 0.0))
 			else:
 				var seed_idx := _seeds[idx]
 				var shore_factor: float
+				var grad_x: float = 0.0
+				var grad_y: float = 0.0
+				var raw_norm: float = 1.0
 
 				if seed_idx < 0:
 					shore_factor = 1.0
+					raw_norm = 1.0
 				elif seed_idx == idx:
 					shore_factor = 0.0
+					raw_norm = 0.0
 				else:
 					var seed_x := seed_idx % _mask_resolution
 					var seed_y := seed_idx / _mask_resolution
-					var dx := float(x - seed_x)
-					var dy := float(y - seed_y)
-					var pixel_distance := sqrt(dx * dx + dy * dy)
+					var fdx := float(x - seed_x)
+					var fdy := float(y - seed_y)
+					var pixel_distance := sqrt(fdx * fdx + fdy * fdy)
 					var world_distance := pixel_distance * texel_size
 					shore_factor = _smoothstep(0.0, _fade_distance, world_distance)
+					raw_norm = clampf(world_distance / _fade_distance, 0.0, 1.0)
+					# Gradient: normalize(pixel - seed) → points away from shore
+					if pixel_distance > 0.001:
+						grad_x = fdx / pixel_distance
+						grad_y = fdy / pixel_distance
 
-				_shore_image.set_pixel(x, y, Color(shore_factor, 0, 0, 1))
+				# Encode gradient direction from [-1,1] to [0,1]
+				var enc_gx := grad_x * 0.5 + 0.5
+				var enc_gy := grad_y * 0.5 + 0.5
+				_shore_image.set_pixel(x, y, Color(shore_factor, enc_gx, enc_gy, raw_norm))
 
-	# Apply user override if available
+	# Apply user override if available (multiplies shore factor only, preserves gradient)
 	if _user_mask:
 		for y in range(_mask_resolution):
 			for x in range(_mask_resolution):
-				var current := _shore_image.get_pixel(x, y).r
+				var px := _shore_image.get_pixel(x, y)
 				var user_value := _user_mask.get_pixel(x, y).r
-				_shore_image.set_pixel(x, y, Color(current * user_value, 0, 0, 1))
+				_shore_image.set_pixel(x, y, Color(px.r * user_value, px.g, px.b, px.a * user_value))
 
 	# Create texture from image
 	_shore_mask = ImageTexture.create_from_image(_shore_image)

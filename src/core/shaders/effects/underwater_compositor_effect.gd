@@ -107,7 +107,7 @@ func set_camera_state(pos: Vector3, basis: Basis) -> void:
 	_camera_basis = basis
 
 
-func set_sun(direction: Vector3, visibility: float) -> void:
+func set_sun_direction(direction: Vector3, visibility: float) -> void:
 	_sun_dir = direction.normalized()
 	_sun_vis = visibility
 

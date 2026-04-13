@@ -1,13 +1,14 @@
-## BookViewer — Displays Morrowind books and scrolls
+## BookViewer — Displays books and scrolls
 ##
 ## Usage:
 ##   var viewer := BookViewer.new()
 ##   add_child(viewer)
-##   viewer.show_book(book_record)  # or show_book_by_id("book_id")
+##   viewer.show_book("Book Title", "<html>text</html>")
 ##   viewer.closed.connect(_on_book_closed)
 ##
-## Renders MW book markup as formatted BBCode in a RichTextLabel.
-## Images from <IMG SRC="..."> are loaded from BSA and inserted programmatically.
+## Renders HTML-tagged book text as formatted BBCode in a RichTextLabel.
+## Images from <IMG SRC="..."> are resolved by the TextFormatter image callback
+## (injected by the game-specific adapter at boot, e.g. MWTextFormatter.setup()).
 class_name BookViewer
 extends CanvasLayer
 
@@ -22,7 +23,6 @@ var _title_label: Label
 var _text_display: RichTextLabel
 var _close_button: Button
 var _scroll_container: ScrollContainer
-var _current_book: BookRecord
 
 
 func _ready() -> void:
@@ -41,17 +41,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
-## Show a book from a BookRecord
-func show_book(book: BookRecord) -> void:
-	if book == null:
-		Log.warn("ui", "BookViewer.show_book() called with null book")
-		return
-
-	_current_book = book
-	_title_label.text = book.name if not book.name.is_empty() else book.record_id
+## Show a book with the given title and HTML-tagged text.
+## The caller (game-specific adapter) is responsible for resolving the book
+## data from whatever source it uses — this panel just renders what it gets.
+func show_book(title: String, text: String) -> void:
+	_title_label.text = title
 
 	# Format the text
-	var formatted := TextFormatterScript.to_formatted_text(book.text)
+	var formatted := TextFormatterScript.to_formatted_text(text)
 
 	# Clear and set BBCode
 	_text_display.clear()
@@ -68,21 +65,11 @@ func show_book(book: BookRecord) -> void:
 	_text_display.scroll_to_line(0)
 
 
-## Show a book by its ESM record ID
-func show_book_by_id(book_id: String) -> void:
-	var book: BookRecord = ESMManager.get_book(book_id)
-	if book == null:
-		Log.warn("ui", "BookViewer: book '%s' not found in ESM" % book_id)
-		return
-	show_book(book)
-
-
 ## Hide the book viewer
 func hide_book() -> void:
 	_panel.visible = false
 	if _overlay != null:
 		_overlay.visible = false
-	_current_book = null
 	closed.emit()
 
 

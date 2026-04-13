@@ -63,6 +63,17 @@ const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/
 const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
 const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
 const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
+# Dialogue system integration (C.3-C.7)
+const DialogueUIScript := preload("res://src/core/ui/dialogue_panel.gd")
+const BookViewerScript := preload("res://src/core/ui/book_viewer.gd")
+const JournalPanelScript := preload("res://src/core/ui/journal_panel.gd")
+const DialogueSessionScript := preload("res://src/core/dialogue/dialogue_session.gd")
+const QuestManagerScript := preload("res://src/core/dialogue/quest_manager.gd")
+const MWDialogueProviderScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_provider.gd")
+const MWDialogueContextScript := preload("res://src/core/dialogue/morrowind/mw_dialogue_context.gd")
+const MWQuestAdapterScript := preload("res://src/core/dialogue/morrowind/mw_quest_adapter.gd")
+const MWResultScriptHandlerScript := preload("res://src/core/dialogue/morrowind/mw_result_script_handler.gd")
+const MWTextFormatterScript := preload("res://src/core/dialogue/morrowind/mw_text_formatter.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -152,7 +163,19 @@ var player_controller: PlayerController = null  # PlayerController instance
 
 # Interaction framework main-scene integration (2026-04-09)
 var _interaction_raycaster: InteractionRaycaster = null
+var _fly_raycaster: InteractionRaycaster = null  # Separate raycaster for fly camera mode
 var _carry_controller: Node = null  # CarryController (no class_name export to avoid preload cycle)
+
+# Dialogue system (C.3-C.7)
+var _dialogue_ui: DialogueUI = null
+var _book_viewer: BookViewer = null
+var _journal_panel: JournalPanel = null
+var _dialogue_session: DialogueSession = null
+var _quest_manager: QuestManager = null
+var _mw_quest_adapter: MWQuestAdapter = null
+var _mw_result_handler: MWResultScriptHandler = null
+var _mw_dialogue_provider: MWDialogueProvider = null
+var _mw_dialogue_context: MWDialogueContext = null
 
 
 func _notification(what: int) -> void:
@@ -218,6 +241,10 @@ func _ready() -> void:
 	# Setup camera systems
 	_setup_cameras()
 	_t_step = _log_timing(_t_step, "cameras")
+
+	# Setup dialogue system (must be after cameras — needs PlayerController for modal gates)
+	_setup_dialogue()
+	_t_step = _log_timing(_t_step, "dialogue")
 
 	# Setup developer console
 	_setup_console()
@@ -356,6 +383,9 @@ func _init_async() -> void:
 	var sun: DirectionalLight3D = _find_sun_light()
 	if terrain_3d and sun:
 		_horizon_map_manager.initialize(terrain_3d, sun)
+		# Push wet map uniforms (sea_level from OceanManager or project settings)
+		var sea_lvl: float = ProjectSettings.get_setting("ocean/sea_level", 0.0)
+		_horizon_map_manager.push_wet_map(sea_lvl)
 	_ta = _log_timing(_ta, "horizon maps")
 
 	# Ocean system is now lazy-loaded - created on first toggle
@@ -506,6 +536,7 @@ func _setup_cameras() -> void:
 		# player-mode switch re-enables physics_process below.
 		_interaction_raycaster.set_physics_process(false)
 		player_controller.set_interaction_raycaster(_interaction_raycaster)
+		_interaction_raycaster.prompt_changed.connect(_on_interact_prompt_changed)
 
 		_carry_controller = CarryControllerScript.new()
 		_carry_controller.name = "CarryController"
@@ -516,11 +547,86 @@ func _setup_cameras() -> void:
 	else:
 		Log.warn("interaction", "PlayerController.get_camera() returned null — interaction framework NOT wired")
 
+	# Fly camera raycaster — same Interactable layer 3, child of fly camera
+	# so the cast direction tracks the look direction. Enabled by default
+	# since the scene starts in fly camera mode.
+	if fly_camera:
+		_fly_raycaster = InteractionRaycasterScript.new()
+		_fly_raycaster.name = "FlyRaycaster"
+		_fly_raycaster.camera = fly_camera
+		_fly_raycaster.max_distance = 5.0
+		fly_camera.add_child(_fly_raycaster)
+		_fly_raycaster.prompt_changed.connect(_on_interact_prompt_changed)
+
 	# Start in fly camera mode
 	_camera_mode = CameraMode.FLY_CAMERA
 	player_controller.disable()
 
 	_log("Camera systems initialized (P to toggle)")
+
+
+## Setup dialogue system (C.3-C.7)
+## Spawns persistent UI singletons, wires MW adapters, registers modal gates.
+## Must run AFTER _setup_cameras() so PlayerController exists for modal gates.
+func _setup_dialogue() -> void:
+	# MW text formatting callbacks (image loading from BSA, font size mapping)
+	MWTextFormatterScript.setup()
+
+	# Framework UI panels — persistent CanvasLayers, opened/closed per conversation.
+	_dialogue_ui = DialogueUIScript.new()
+	_dialogue_ui.name = "DialogueUI"
+	add_child(_dialogue_ui)
+
+	_book_viewer = BookViewerScript.new()
+	_book_viewer.name = "BookViewer"
+	add_child(_book_viewer)
+
+	_journal_panel = JournalPanelScript.new()
+	_journal_panel.name = "JournalPanel"
+	add_child(_journal_panel)
+
+	# Quest manager (framework)
+	_quest_manager = QuestManagerScript.new()
+	_journal_panel.set_quest_manager(_quest_manager)
+
+	# MW adapters
+	_mw_dialogue_provider = MWDialogueProviderScript.new()
+	_mw_dialogue_context = MWDialogueContextScript.new()
+	# Default context values — updated per-conversation in production,
+	# but need sane defaults so the first greeting doesn't crash.
+	_mw_dialogue_context.detected = true
+	_mw_dialogue_context.set_global("chargenstate", 10.0)
+
+	# Quest adapter — advances journal from response metadata (C.6)
+	_mw_quest_adapter = MWQuestAdapterScript.new(_quest_manager)
+	_dialogue_ui.response_selected.connect(_mw_quest_adapter.on_response_selected)
+
+	# BNAM result script handler — executes dialogue scripts
+	_mw_result_handler = MWResultScriptHandlerScript.new(_quest_manager, _mw_dialogue_context)
+	_dialogue_ui.response_selected.connect(_mw_result_handler.on_response_selected)
+	_dialogue_ui.greeting_shown.connect(_mw_result_handler.on_greeting_shown)
+	_mw_result_handler.goodbye_requested.connect(_dialogue_ui.close)
+
+	# DialogueSession — shared reference holder for interactables
+	_dialogue_session = DialogueSessionScript.new()
+	_dialogue_session.provider = _mw_dialogue_provider
+	_dialogue_session.context = _mw_dialogue_context
+	_dialogue_session.dialogue_ui = _dialogue_ui
+	_dialogue_session.book_viewer = _book_viewer
+	DialogueSession.set_current(_dialogue_session)
+
+	# Modal gates — PlayerController suppresses interact_* while any panel is open
+	if player_controller:
+		player_controller.register_modal_gate(_dialogue_ui)
+		player_controller.register_modal_gate(_book_viewer)
+		player_controller.register_modal_gate(_journal_panel)
+
+	# FlyCamera modal check — same gate logic via Callable injection
+	if fly_camera:
+		fly_camera.modal_check = func() -> bool:
+			return _dialogue_session.is_any_panel_open()
+
+	_log("Dialogue system initialized (dialogue + books + journal + quest adapter + BNAM handler)")
 
 
 ## Setup developer console
@@ -784,10 +890,11 @@ func _switch_to_player_controller() -> void:
 		_pocket_manager.set_player_body(player_controller)
 		_pocket_manager.set_camera(camera)
 
-	# Enable the interaction raycaster — it sits under the player camera
-	# and was idle in fly mode.
+	# Enable the player raycaster, disable the fly raycaster.
 	if _interaction_raycaster:
 		_interaction_raycaster.set_physics_process(true)
+	if _fly_raycaster:
+		_fly_raycaster.set_physics_process(false)
 
 	_log("[color=cyan]Switched to PLAYER mode[/color]")
 	_log("WASD to move, Space to jump, Shift to run")
@@ -835,11 +942,11 @@ func _switch_to_fly_camera() -> void:
 	if _pocket_manager:
 		_pocket_manager.set_camera(camera)
 
-	# Disable the interaction raycaster in fly mode — its cast is from
-	# the player camera, not the fly camera, so results would be nonsense
-	# and the fly-camera KEY_E proximity fallback handles door travel.
+	# Disable the player raycaster, enable the fly raycaster.
 	if _interaction_raycaster:
 		_interaction_raycaster.set_physics_process(false)
+	if _fly_raycaster:
+		_fly_raycaster.set_physics_process(true)
 
 	_log("[color=cyan]Switched to FLY CAMERA mode[/color]")
 	_log("Hold Right-click to look, WASD to move")
@@ -1754,13 +1861,18 @@ func _input(event: InputEvent) -> void:
 				# Toggle between fly camera and player controller
 				_toggle_camera_mode()
 			KEY_E:
-				# Enter/exit interior doors — proximity fallback for
-				# fly-camera mode only. In player mode the unified
-				# `interact` action (also bound to E) drives the
-				# DoorInteractable signal path via the raycaster, so
-				# running both would double-trigger enter_interior.
+				# Fly camera interaction — uses its own raycaster to
+				# target NPCs, doors, books, etc. Same interact() call
+				# path as PlayerController uses for player mode.
 				if _camera_mode == CameraMode.FLY_CAMERA:
-					_activate_nearest_door()
+					_fly_camera_interact()
+			KEY_J:
+				# C.7 — Toggle quest journal
+				if _journal_panel:
+					if _journal_panel.is_open():
+						_journal_panel.hide_journal()
+					else:
+						_journal_panel.show_journal()
 			# KEY_TAB removed — interior browser mode is accessible via UI button only
 			KEY_F3:
 				# Toggle performance overlay
@@ -1821,7 +1933,6 @@ func _process(delta: float) -> void:
 	# Update interior pocket manager (door detection, eviction)
 	if _pocket_manager:
 		_pocket_manager.update(camera.global_position, delta)
-		_update_door_prompt()
 
 	# Update weather rendering
 	if _weather_controls:
@@ -1990,8 +2101,35 @@ func _on_door_interactable_activated(record_id: String, _door_record: Variant, _
 	_activate_door(door)
 
 
-## Activate the nearest door (proximity fallback — used by fly-camera
-## mode where the InteractionRaycaster isn't available).
+## Shared prompt callback for both raycasters (fly + player).
+## Shows "[E] Talk to Fargoth (2.3m)" at screen bottom.
+func _on_interact_prompt_changed(interactable: Interactable, distance: float) -> void:
+	if not _door_prompt_label:
+		return
+	if interactable == null:
+		_door_prompt_label.visible = false
+		return
+	_door_prompt_label.text = "[E] %s  (%.1fm)" % [interactable.get_prompt_text(), distance]
+	_door_prompt_label.visible = true
+
+
+## Fly camera interaction — reads the fly raycaster's current target
+## and calls interact(). Replaces the old proximity-based door activation.
+## The fly camera acts as the "player" node for interact() calls.
+func _fly_camera_interact() -> void:
+	if _fly_raycaster == null:
+		return
+	# Modal gate — don't interact while a panel is open
+	if _dialogue_session and _dialogue_session.is_any_panel_open():
+		return
+	var target: Interactable = _fly_raycaster.get_current_target()
+	if target == null:
+		return
+	target.interact(fly_camera)
+
+
+## Activate the nearest door (legacy proximity fallback — kept for
+## headless/test scenarios where no raycaster is available).
 func _activate_nearest_door() -> void:
 	if not _pocket_manager:
 		return

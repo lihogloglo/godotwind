@@ -10,10 +10,11 @@
 ##   floating assets via `SPHERE_OVERRIDE_PATTERNS`. Framework-generic per the
 ##   user's requirement: anything that needs full-sphere views can opt in
 ##   without touching the rest of the pipeline.
-## - **Single grid size for all assets** (8×8 = 64 views, 128 px frames →
-##   1024² atlas). Earlier versions had hero/prop tiering, which was bespoke
-##   complexity for a problem we can solve with one well-chosen size. UE
-##   Impostor Baker default is 8×8 hemi for vegetation; we adopt the same.
+## - **Single grid size for all assets** (8×8 = 64 views, 32 px frames →
+##   256² atlas). Matches runtime texture array layer size directly.
+##   Earlier versions had hero/prop tiering, which was bespoke complexity
+##   for a problem we can solve with one well-chosen size. UE Impostor
+##   Baker default is 8×8 hemi for vegetation; we adopt the same.
 ## - **Two viewports**: albedo with MSAA 4×, normal with MSAA off. The
 ##   v2 baker shared one MSAA viewport, which corrupted encoded normals on
 ##   silhouette edges (linear resolve averaging). Two viewports is simpler
@@ -35,7 +36,7 @@
 ## - Metadata JSON: `<name>_<hash>_v5.json` with:
 ##     "projection": "hemi" | "sphere"  (per-asset)
 ##     "grid_size": 8
-##     "frame_size": 128
+##     "frame_size": 32
 ##     "normal_format": "rgba8_res"
 ##     "directions": flat list of unit Vector3 per cell (row-major)
 ##
@@ -50,16 +51,15 @@ const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 
 ## Single grid configuration for all assets.
-## 8×8 = 64 views, 64 px frames, 512² atlas. Drop-in compatible with the
-## existing runtime texture array (also 512²) so v5 bakes share the same
-## texture array layer infrastructure as v4 — zero plumbing changes.
+## 8×8 = 64 views, 32 px frames, 256² atlas. Matches the runtime texture array
+## layer size (256×256) — no resize needed at load time, saves disk + memory.
 ##
-## 64 px frames are adequate for the FAR tier viewing distance: a 10 m tree
-## at 500 m occupies ~38 screen pixels at 60° FOV / 1080p, well within a
-## 64 px frame. At 5 km it's < 4 px. 128 px frames would be overkill at
-## these distances and break the texture array compat for no visible win.
+## 32 px frames are adequate for FAR tier (1-5 km): a 10 m tree at 1 km
+## occupies ~19 screen pixels at 60° FOV / 1080p; at 5 km it's < 4 px.
+## Previous 64 px frames produced 512² atlases that the runtime downsampled
+## to 256² anyway — wasted bake time and disk space.
 const GRID_SIZE: int = 8
-const FRAME_SIZE: int = 64
+const FRAME_SIZE: int = 32
 
 ## Patterns that opt an asset into full-sphere projection instead of hemi.
 ## Hemi (upper hemisphere only) is correct for ground-rooted assets — the

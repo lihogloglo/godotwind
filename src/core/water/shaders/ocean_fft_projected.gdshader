@@ -151,10 +151,27 @@ void vertex() {
 	}
 	// Shore dampening — fade displacement to zero near coastline (CREST pattern).
 	vec2 shore_uv = (world_pos.xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
-	float shore = (shore_uv.x < 0.0 || shore_uv.x > 1.0 || shore_uv.y < 0.0 || shore_uv.y > 1.0)
-		? 1.0 : texture(shore_mask, shore_uv).r;
+	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
+	vec4 shore_data = in_mask ? texture(shore_mask, shore_uv) : vec4(1.0, 0.5, 0.5, 1.0);
+	float shore = shore_data.r;
 
 	world_pos += displacement * wave_scale * shore;
+
+	// Shore waves — analytical Gerstner oriented perpendicular to coastline
+	float raw_dist = shore_data.a * shore_fade_distance;
+	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
+	float shore_dir_len = length(shore_dir);
+	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.5) {
+		shore_dir /= shore_dir_len;
+		float amp_env = smoothstep(0.0, shore_fade_distance * 0.1, raw_dist)
+					  * (1.0 - smoothstep(shore_fade_distance * 0.5, shore_fade_distance * 0.9, raw_dist));
+		float phase = raw_dist * shore_wave_frequency * 6.2832 - TIME * shore_wave_speed * 6.2832;
+		float shore_y = shore_wave_amplitude * amp_env * sin(phase);
+		float shore_xz = shore_wave_amplitude * amp_env * shore_wave_steepness * cos(phase);
+		world_pos.y += shore_y;
+		world_pos.xz -= shore_dir * shore_xz;
+	}
+
 	wave_height = displacement.y * shore;
 	v_world_pos = world_pos;
 	v_choppiness = chop_accum * wave_scale * shore;

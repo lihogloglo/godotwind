@@ -280,6 +280,20 @@ public partial class NativeFactory : RefCounted
     }
 
     // =========================================================================
+    // Shore Mask Baking
+    // =========================================================================
+
+    /// <summary>
+    /// Create a new shore mask baker instance.
+    /// JFA-based distance field with parallel row processing.
+    /// GDScript caller samples terrain heights, C# does the heavy JFA + gradient.
+    /// </summary>
+    public NativeShoreMaskBaker CreateShoreMaskBaker()
+    {
+        return new NativeShoreMaskBaker();
+    }
+
+    // =========================================================================
     // Utility
     // =========================================================================
 

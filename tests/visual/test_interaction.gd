@@ -155,6 +155,8 @@ func _build_player() -> void:
 	_camera = FlyCameraScript.new()
 	_camera.position = Vector3(-1.5, 1.7, 2.5)
 	_camera.move_speed = 5.0  # Indoors-ish, slow it down
+	# Modal gate: freeze camera while dialogue/book panel is open.
+	_camera.modal_check = func() -> bool: return _session != null and _session.is_any_panel_open()
 	add_child(_camera)
 	# look_at must happen after add_child — node needs to be in the tree
 	_camera.look_at(Vector3(-1.5, 1.3, 0), Vector3.UP)
@@ -272,11 +274,8 @@ func _on_prompt_changed(interactable: Interactable, distance: float) -> void:
 ## free-fly per @user's earlier ask), so it replicates the routing here.
 ##
 ## The modal-gate check (`DialogueSession.is_any_panel_open()`) mirrors
-## what `PlayerController.is_modal_ui_open()` does in production. C.2.5
-## will delete `DialogueSession.is_any_panel_open()` once the dialogue
-## panels register themselves with `PlayerController` directly; this
-## test scene will then either be migrated to `PlayerController` or
-## adopt a tiny inline gate check.
+## what `PlayerController.is_modal_ui_open()` does in production.
+## FlyCamera's modal_check callable is injected in _build_player().
 func _unhandled_input(event: InputEvent) -> void:
 	if not event.is_action_pressed("interact"):
 		return

@@ -11,8 +11,8 @@
 ## - Resume capability via prebake state
 ##
 ## Output format (v4):
-## - Albedo atlas PNG: 512x512 (4x4 of 128x128 frames), RGB=unlit color, A=cutout
-## - Normal atlas PNG: 512x512 (4x4 of 128x128 frames), RGB=world-space normals, A=depth
+## - Albedo atlas PNG: 256x256 (4x4 of 64x64 frames), RGB=unlit color, A=cutout
+## - Normal atlas PNG: 256x256 (4x4 of 64x64 frames), RGB=world-space normals, A=depth
 ## - JSON metadata with bounds, directions, UVs, bake_version=4
 class_name ImpostorBakerV2
 extends Node
@@ -40,9 +40,11 @@ const OCTAHEDRAL_DIRECTIONS: Array[Vector3] = [
 	Vector3(-0.383, 0.0, 0.924),  # 15: N-NW (337.5°)
 ]
 
-## Settings
-var texture_size: int = 512        ## Total atlas size
-var frame_size: int = 128          ## Size per frame (512/4 = 128)
+## Settings — 256×256 atlas (4×4 grid of 64px frames).
+## Matches runtime texture array layer size. Previous 512×512 was
+## downsampled to 256 at runtime — wasted disk space.
+var texture_size: int = 256        ## Total atlas size
+var frame_size: int = 64           ## Size per frame (256/4 = 64)
 var atlas_columns: int = 4         ## Atlas layout columns
 var atlas_rows: int = 4            ## Atlas layout rows (16 frames = 4x4)
 var camera_fov: float = 45.0       ## Camera FOV for perspective rendering

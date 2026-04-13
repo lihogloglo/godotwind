@@ -30,8 +30,10 @@
 ## - `opened(speaker_id)` — fired right before the first greeting is displayed
 ## - `closed(speaker_id)` — fired when the conversation ends
 ## - `response_selected(topic_id, response)` — fired each time the player
-##   picks a topic and a response is shown. Phase B-5 hooks this to advance
-##   the journal based on `response.quest_updated`.
+##   picks a topic and a response is shown. Adapters hook this to advance
+##   the journal and execute result scripts.
+## - `greeting_shown(speaker_id, response)` — fired after the greeting is
+##   displayed. Greetings can carry result scripts (BNAM in MW).
 ##
 ## ## Usage
 ##
@@ -53,6 +55,7 @@ const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
 signal opened(speaker_id: String)
 signal closed(speaker_id: String)
 signal response_selected(topic_id: String, response: DialogueProvider.Response)
+signal greeting_shown(speaker_id: String, response: DialogueProvider.Response)
 
 
 var _provider: DialogueProvider
@@ -193,6 +196,10 @@ func _show_greeting() -> void:
 	_info_label.text = "Disposition: %d | Known topics: %d" % [
 		_context.disposition, _context.known_topics.size()
 	]
+
+	# Let listeners (e.g. result script handler) react to greeting metadata.
+	# Greetings can carry result scripts just like topic responses.
+	greeting_shown.emit(_speaker_id, greeting)
 
 
 func _rebuild_topic_list(topics: Array) -> void:

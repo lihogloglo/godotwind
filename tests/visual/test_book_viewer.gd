@@ -72,7 +72,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _show_current_book() -> void:
 	var book: BookRecord = _book_list[_current_index]
-	_book_viewer.show_book(book)
+	var title: String = book.name if not book.name.is_empty() else book.record_id
+	_book_viewer.show_book(title, book.text)
 	_info_label.text = "Book %d/%d — Left/Right arrows to browse, Escape to close" % [
 		_current_index + 1, _book_list.size()
 	]

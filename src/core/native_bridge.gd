@@ -600,3 +600,15 @@ func get_esm_stats(loader: RefCounted) -> Dictionary:
 		"cells_count": cells_count,
 		"exterior_cells_count": exterior_count,
 	}
+
+
+# ==========================================================================
+# Shore Mask Baking
+# ==========================================================================
+
+## Create a native shore mask baker (C# JFA with parallel row processing)
+## Returns: NativeShoreMaskBaker C# object or null if not available
+func create_shore_mask_baker() -> RefCounted:
+	if _factory == null:
+		return null
+	return _factory.call("CreateShoreMaskBaker")

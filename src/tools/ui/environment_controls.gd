@@ -39,13 +39,13 @@ var _cb: Dictionary = {}
 ## Tracks native environment toggles so they survive sky <-> fallback swaps.
 ## Keys match Environment property groups; values are Dictionaries of property->value.
 var _visual_state: Dictionary = {
-	"taa": false,
 	"ssao": false,
 	"ssil": false,
 	"ssr": true,
 	"glow": false,
 	"volumetric_fog": false,
 	"depth_fog": false,
+	"sdfgi": true,
 	"tonemap_mode": Environment.TONE_MAPPER_FILMIC,
 	"shadow_cascades": false,
 }
@@ -117,7 +117,8 @@ func setup_fallback_environment() -> void:
 	_fallback_light.light_color = Color(1.0, 0.98, 0.95)
 	_fallback_light.light_energy = 1.2
 	_fallback_light.shadow_enabled = true
-	_fallback_light.shadow_bias = 0.03
+	_fallback_light.shadow_bias = 0.02
+	_fallback_light.shadow_normal_bias = 1.5
 	_fallback_light.directional_shadow_max_distance = 500.0
 
 	# Point downward at an angle (like midday sun)
@@ -300,6 +301,18 @@ func _apply_visual_state(env: Environment) -> void:
 	if _visual_state["depth_fog"]:
 		_apply_depth_fog_defaults(env)
 
+	# SDFGI (cascaded SDF global illumination)
+	env.sdfgi_enabled = _visual_state["sdfgi"]
+	if _visual_state["sdfgi"]:
+		env.sdfgi_cascades = 4
+		env.sdfgi_y_scale = Environment.SDFGI_Y_SCALE_75_PERCENT
+		env.sdfgi_use_occlusion = true
+		env.sdfgi_bounce_feedback = 0.3
+		env.sdfgi_read_sky_light = true
+		env.sdfgi_energy = 1.0
+		env.sdfgi_normal_bias = 1.1
+		env.sdfgi_probe_bias = 1.1
+
 	# Tonemapping
 	env.tonemap_mode = _visual_state["tonemap_mode"]
 
@@ -350,24 +363,52 @@ func reassert_fog_defaults() -> void:
 func _apply_shadow_cascades(light: DirectionalLight3D) -> void:
 	if not light:
 		return
+	# Always set bias values to reduce blockiness/swimming
+	light.shadow_bias = 0.02
+	light.shadow_normal_bias = 1.5
 	if _visual_state["shadow_cascades"]:
 		light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 		light.directional_shadow_blend_splits = true
 		light.directional_shadow_fade_start = 0.8
-		light.directional_shadow_split_1 = 0.05
-		light.directional_shadow_split_2 = 0.15
-		light.directional_shadow_split_3 = 0.4
+		light.directional_shadow_split_1 = 0.1
+		light.directional_shadow_split_2 = 0.25
+		light.directional_shadow_split_3 = 0.5
 	else:
 		light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 		light.directional_shadow_blend_splits = false
 
 
 func on_taa_toggled(enabled: bool) -> void:
-	_visual_state["taa"] = enabled
+	# Legacy toggle — now controls FSR 2.2 (superior temporal AA replacement for TAA)
 	var viewport := _get_viewport()
 	if viewport:
-		viewport.use_taa = enabled
-	_log("TAA: %s" % ("ON" if enabled else "OFF"))
+		if enabled:
+			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR2
+			viewport.scaling_3d_scale = 1.0
+			viewport.fsr_sharpness = 0.2
+			viewport.use_taa = false
+		else:
+			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
+			viewport.scaling_3d_scale = 1.0
+			viewport.use_taa = false
+	_log("FSR 2.2: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_sdfgi_toggled(enabled: bool) -> void:
+	_visual_state["sdfgi"] = enabled
+	var env := _get_active_environment()
+	if env:
+		env.sdfgi_enabled = enabled
+		if enabled:
+			env.sdfgi_cascades = 4
+			env.sdfgi_y_scale = Environment.SDFGI_Y_SCALE_75_PERCENT
+			env.sdfgi_use_occlusion = true
+			env.sdfgi_bounce_feedback = 0.3
+			env.sdfgi_read_sky_light = true
+			env.sdfgi_energy = 1.0
+			env.sdfgi_normal_bias = 1.1
+			env.sdfgi_probe_bias = 1.1
+	_log("SDFGI: %s" % ("ON" if enabled else "OFF"))
 
 
 func on_ssao_toggled(enabled: bool) -> void:
@@ -537,12 +578,6 @@ func on_show_sky_toggled(enabled: bool) -> void:
 
 	# Re-apply visual state to the newly active environment
 	_apply_visual_state(_get_active_environment())
-
-	# Re-apply TAA to viewport (not env-dependent but needs to persist across toggles)
-	if _visual_state["taa"]:
-		var viewport := _get_viewport()
-		if viewport:
-			viewport.use_taa = true
 
 	# Re-apply shadow cascades to the active light
 	if enabled and sky_manager:

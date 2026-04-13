@@ -90,10 +90,14 @@ func attach_to(node: Node) -> void:
 
 
 ## Set the active sun on all effects that support it (fog, godrays, etc.)
+## Most effects accept set_sun(DirectionalLight3D). UnderwaterCompositorEffect
+## uses set_sun_direction(Vector3, float) to avoid the signature collision.
 func set_sun(sun: DirectionalLight3D) -> void:
 	for effect_name in _effects:
 		var effect: PostProcessEffect = _effects[effect_name]
-		if effect.has_method("set_sun"):
+		if effect.has_method("set_sun_direction"):
+			effect.set_sun_direction(-sun.global_basis.z, 1.0)
+		elif effect.has_method("set_sun"):
 			effect.set_sun(sun)
 
 

@@ -64,7 +64,8 @@ func interact(player: Node3D) -> void:
 	if book == null:
 		Log.warn("dialogue", "BookInteractable: book '%s' not found in ESM" % book_id)
 		return
-	session.book_viewer.show_book(book)
+	var title := book.name if not book.name.is_empty() else book.record_id
+	session.book_viewer.show_book(title, book.text)
 	# Fire the base class signal so any raycaster listeners can react
 	super.interact(player)
 

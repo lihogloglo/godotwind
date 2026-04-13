@@ -263,26 +263,31 @@ func _get_fallback_sun_energy(result: WeatherTypes.WeatherResult) -> float:
 #region SunshineClouds2
 
 func _apply_sunshine_clouds(driver: Node, result: WeatherTypes.WeatherResult) -> void:
-	# Wind direction
+	# Wind direction + speed — always driven per-frame from weather
 	if result.wind_speed > 0.01:
 		var wind_dir: Vector3 = result.storm_direction if result.storm_direction.length_squared() > 0.01 else Vector3(1.0, 0.0, 1.0).normalized()
 		driver.wind_direction = wind_dir
-		driver.small_structures_wind_speed = result.wind_speed * 30.0
-		driver.medium_structures_wind_speed = result.wind_speed * 100.0
-		driver.large_structures_wind_speed = result.wind_speed * 250.0
-		driver.extra_large_structures_wind_speed = result.wind_speed * 350.0
+		# Multipliers tuned so Clear (0.1) ≈ plugin defaults (12/40/100/140),
+		# storms (0.5-0.9) give dramatic drift visible against the sky.
+		driver.small_structures_wind_speed = result.wind_speed * 120.0
+		driver.medium_structures_wind_speed = result.wind_speed * 400.0
+		driver.large_structures_wind_speed = result.wind_speed * 1000.0
+		driver.extra_large_structures_wind_speed = result.wind_speed * 1400.0
+	# Cloud coverage/density/sharpness are NOT set here per-frame.
+	# They are set once on weather type change via apply_cloud_preset(),
+	# then the user can tweak via sliders. Re-picking a preset resets them.
 
-	# Drive cloud visuals from weather preset (interpolated via WeatherResult).
-	# Maps weather cloud_coverage (0-1) to SunshineClouds2 params at safe ranges.
-	var clouds_res: Resource = driver.get("clouds_resource") as Resource
-	if clouds_res:
-		clouds_res.set("clouds_coverage", result.cloud_coverage)
+
+## Compute cloud preset values from weather cloud_coverage.
+## Returns {coverage, density, sharpness} for SunshineClouds2.
+static func get_cloud_preset_for_coverage(cloud_coverage: float) -> Dictionary:
+	return {
+		"coverage": cloud_coverage,
 		# Density: clear=0.10, fully overcast/storm=0.35. Plugin safe range ~0.02-1.0.
-		var weather_density: float = lerpf(0.10, 0.35, result.cloud_coverage)
-		clouds_res.set("clouds_density", weather_density)
+		"density": lerpf(0.10, 0.35, cloud_coverage),
 		# Sharpness: clear=0.8 (crisp edges), overcast=0.5 (soft diffuse)
-		var weather_sharpness: float = lerpf(0.8, 0.5, result.cloud_coverage)
-		clouds_res.set("clouds_sharpness", weather_sharpness)
+		"sharpness": lerpf(0.8, 0.5, cloud_coverage),
+	}
 
 #endregion
 

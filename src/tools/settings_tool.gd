@@ -493,24 +493,30 @@ func _apply_anti_aliasing(mode: int) -> void:
 	if not viewport:
 		return
 
-	# Reset both MSAA and screen-space AA
+	# Reset all AA state
 	viewport.msaa_3d = Viewport.MSAA_DISABLED
 	viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+	viewport.use_taa = false
+	viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
+	viewport.scaling_3d_scale = 1.0
 
 	match mode:
 		0:  # Disabled
 			pass
 		1:  # FXAA
 			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
-		2:  # TAA
-			# TAA is set via ProjectSettings, requires restart
-			_log("[color=yellow]TAA requires restart to apply.[/color]")
+		2:  # SMAA
+			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_SMAA
 		3:  # MSAA 2x
 			viewport.msaa_3d = Viewport.MSAA_2X
-		4:  # MSAA 4x
-			viewport.msaa_3d = Viewport.MSAA_4X
-		5:  # MSAA 8x
-			viewport.msaa_3d = Viewport.MSAA_8X
+		4:  # FSR2 Quality (75% scale — performance + AA)
+			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR2
+			viewport.scaling_3d_scale = 0.75
+			viewport.fsr_sharpness = 0.2
+		5:  # FSR2 Native (best temporal AA)
+			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR2
+			viewport.scaling_3d_scale = 1.0
+			viewport.fsr_sharpness = 0.2
 
 
 func _on_shadow_quality_changed(index: int) -> void:

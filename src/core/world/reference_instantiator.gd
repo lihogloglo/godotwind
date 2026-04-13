@@ -34,6 +34,12 @@ const PickupInteractableScript := preload("res://src/core/interaction/morrowind/
 # avoids importing world/streaming types into the instantiator.
 const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
 
+# C.5 — NPC dialogue adapter. NPCs get wrapped in an NPCInteractable so
+# the InteractionRaycaster can target them for conversation. The wrapper
+# holds the speaker_id; the actual dialogue lookup happens at interact()
+# time via DialogueSession.current().
+const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_interactable.gd")
+
 # Preload crossfade shader for fade-in effect
 const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
 
@@ -487,6 +493,22 @@ func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: S
 			character.set_meta("ref_id", str(ref.ref_id))
 			character.set_meta("instance_id", ref.ref_num)
 			character.set_meta("actor_type", actor_type)
+
+			# C.5 — NPC dialogue: wrap in NPCInteractable so the
+			# raycaster can walk up from the character's collision shape
+			# to find the Interactable ancestor. The wrapper inherits
+			# the character's world-space transform; the character moves
+			# to identity (local to wrapper). Same layer-3 stamp as doors.
+			if actor_type == "npc" and actor_record is NPCRecord:
+				var wrapper := Node3D.new()
+				wrapper.set_script(NPCInteractableScript)
+				wrapper.name = character.name + "_npc"
+				wrapper.speaker_id = actor_record.record_id.to_lower()
+				wrapper.transform = character.transform
+				character.transform = Transform3D.IDENTITY
+				wrapper.add_child(character)
+				_add_interactable_layer_recursive(wrapper)
+				return wrapper
 
 			return character
 

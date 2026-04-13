@@ -220,22 +220,12 @@ func _load_shore_mask() -> void:
 		if not prebaked.is_empty():
 			var tex: Texture2D = prebaked.texture
 			var bounds: Rect2 = prebaked.bounds
-			_ocean_mesh.set_shore_mask(tex, bounds)
+			_ocean_mesh.set_shore_mask(tex, bounds, shore_fade_distance)
 			shore_mask_loaded = true
 			Log.info("water", "OceanManager: Using prebaked shore mask from %s" % shore_mask_path)
 
-	# Fall back to runtime generation if terrain available
-	if not shore_mask_loaded and _terrain:
-		Log.info("water", "OceanManager: Generating shore mask at runtime...")
-		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
-		_ocean_mesh.set_shore_mask(
-			_shore_mask.get_shore_mask_texture(),
-			_shore_mask.get_world_bounds()
-		)
-		shore_mask_loaded = true
-
 	if not shore_mask_loaded:
-		Log.warn("water", "OceanManager: No shore mask available - ocean will appear everywhere")
+		Log.warn("water", "OceanManager: No prebaked shore mask found — run 'Rebake Shore Mask' in prebake UI. Waves will not dampen at shore.")
 
 
 func _process(delta: float) -> void:
@@ -698,7 +688,7 @@ func _update_underwater_state() -> void:
 		# Find sun for light direction
 		var light: DirectionalLight3D = _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
 		if light:
-			effect.set_sun(-light.global_basis.z, 1.0)
+			effect.set_sun_direction(-light.global_basis.z, 1.0)
 
 
 ## Get the underwater compositor effect
@@ -733,7 +723,8 @@ func set_sea_level(level: float) -> void:
 		if _ocean_mesh:
 			_ocean_mesh.set_shore_mask(
 				_shore_mask.get_shore_mask_texture(),
-				_shore_mask.get_world_bounds()
+				_shore_mask.get_world_bounds(),
+				shore_fade_distance
 			)
 
 
@@ -756,7 +747,8 @@ func regenerate_shore_mask() -> void:
 		if _ocean_mesh:
 			_ocean_mesh.set_shore_mask(
 				_shore_mask.get_shore_mask_texture(),
-				_shore_mask.get_world_bounds()
+				_shore_mask.get_world_bounds(),
+				shore_fade_distance
 			)
 
 
@@ -1070,6 +1062,11 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	# Foam suppression: near-zero in calm weather, full in storms
 	mat.set_shader_parameter("foam_intensity", lerpf(0.05, 1.0, wind_t))
 
+	# Shore waves — calm: gentle lapping, storm: strong rollers
+	mat.set_shader_parameter("shore_wave_amplitude", lerpf(0.15, 0.8, wind_t))
+	mat.set_shader_parameter("shore_wave_speed", lerpf(0.8, 2.5, wind_t))
+	mat.set_shader_parameter("shore_wave_steepness", lerpf(0.3, 0.7, wind_t))
+
 	# FFT-specific uniforms
 	if quality == OceanMesh.QualityMode.HIGH:
 		# Calm water is glassy smooth, storms are rough
@@ -1102,6 +1099,9 @@ func reset_weather() -> void:
 	mat.set_shader_parameter("sky_tint_strength", 0.8)
 	mat.set_shader_parameter("normal_strength", 0.6)
 	mat.set_shader_parameter("wave_scale", wave_scale)
+	mat.set_shader_parameter("shore_wave_amplitude", 0.15)
+	mat.set_shader_parameter("shore_wave_speed", 0.8)
+	mat.set_shader_parameter("shore_wave_steepness", 0.3)
 
 	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
 	if quality == OceanMesh.QualityMode.HIGH:

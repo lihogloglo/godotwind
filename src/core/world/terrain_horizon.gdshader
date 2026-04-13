@@ -21,8 +21,6 @@ render_mode blend_mix,depth_draw_opaque,cull_back,diffuse_burley,specular_schlic
 
 #if CURRENT_RENDERER == RENDERER_COMPATIBILITY
     #define fma(a, b, c) ((a) * (b) + (c))
-    #define dFdxCoarse(a) dFdx(a)
-    #define dFdyCoarse(a) dFdy(a)
 #endif
 
 // Private uniforms
@@ -67,6 +65,13 @@ uniform float noise1_scale : hint_range(0.001, 1.) = 0.04;
 uniform float noise1_angle : hint_range(0, 6.283) = 0.;
 uniform vec2 noise1_offset = vec2(0.5);
 uniform float noise2_scale : hint_range(0.001, 1.) = 0.076;
+
+// Wet map — Lagarde PBR wet surfaces (darken albedo + reduce roughness near sea level)
+uniform float sea_level_wet = 0.0;
+uniform float wet_margin : hint_range(0.0, 5.0) = 1.5; // capillary rise in meters
+uniform float wet_albedo_darken : hint_range(0.0, 1.0) = 0.6; // how much darker wet surfaces get
+uniform float wet_roughness_target : hint_range(0.0, 0.3) = 0.05; // wet surface roughness
+uniform bool wet_debug = false; // show wetness as blue tint for debugging
 
 // Horizon map uniforms
 // Texture arrays with one layer per region, matching Terrain3D's region order.
@@ -207,15 +212,15 @@ void fragment() {
 	index[2] = get_index_coord(index_id + offsets.yx, FRAGMENT_PASS);
 	index[3] = get_index_coord(index_id + offsets.xx, FRAGMENT_PASS);
 
-	vec3 base_ddx = dFdxCoarse(v_vertex);
-	vec3 base_ddy = dFdyCoarse(v_vertex);
+	vec3 base_ddx = dFdx(v_vertex);
+	vec3 base_ddy = dFdy(v_vertex);
 	vec4 base_dd = vec4(base_ddx.xz, base_ddy.xz);
 	float region_mip = log2(max(length(base_ddx.xz), length(base_ddy.xz)) * _vertex_density);
 
 	vec4 color_map = region_uv.z > -1.0 ? textureLod(_color_maps, region_uv, region_mip) : COLOR_MAP;
 
 	if (flat_terrain_normals) {
-		NORMAL = normalize(cross(dFdyCoarse(VERTEX),dFdxCoarse(VERTEX)));
+		NORMAL = normalize(cross(dFdy(VERTEX),dFdx(VERTEX)));
 		TANGENT = normalize(cross(NORMAL, VIEW_MATRIX[2].xyz));
 		BINORMAL = normalize(cross(NORMAL, TANGENT));
 	}
@@ -329,6 +334,22 @@ void fragment() {
 	float ao = (1. - (albedo_height.a * log(2.1 - ao_strength))) * (1. - normal_rough.y);
 	AO = clamp(1. - ao * ao_strength, albedo_height.a, 1.0);
 	AO_LIGHT_AFFECT = (1.0 - albedo_height.a) * clamp(normal_rough.y, 0., 1.);
+
+	// Wet map — Lagarde PBR wet surfaces (Remember Me, 2013).
+	// Terrain below sea_level + wet_margin darkens and gets glossy.
+	// Porosity approximation: rough surfaces absorb more water → stronger effect.
+	{
+		float wetness = smoothstep(sea_level_wet + wet_margin, sea_level_wet, v_vertex.y);
+		if (wet_debug) {
+			// Debug: solid blue tint where wet, red where dry
+			ALBEDO = mix(ALBEDO, vec3(0.0, 0.2, 0.8), wetness * 0.8);
+		} else {
+			float porosity = clamp((ROUGHNESS - 0.2) / 0.6, 0.0, 1.0);
+			float effective_wet = wetness * porosity;
+			ALBEDO *= mix(1.0, 1.0 - wet_albedo_darken, effective_wet);
+			ROUGHNESS = mix(ROUGHNESS, wet_roughness_target, effective_wet);
+		}
+	}
 
 	// Horizon map self-shadowing
 	if (horizon_enabled && region_uv.z > -1.0) {

@@ -70,7 +70,9 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 
 	_sunshine_driver = driver_script.new()
 	_sunshine_driver.name = "SunshineCloudsDriver"
-	_sunshine_driver.update_continuously = true
+	# NOTE: Do NOT set update_continuously here. The driver's _ready() checks
+	# clouds_resource — if null, it sets update_continuously=false permanently.
+	# We set it AFTER clouds_resource is assigned (see below).
 
 	# Create a clouds resource — the example .tres references files that may not exist
 	var clouds_script_path := "res://addons/SunshineClouds2/SunshineClouds.gd"
@@ -117,10 +119,11 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# pink/red wherever the ambient occlusion term is non-zero. Alpha=0 disables
 		# AO coloring entirely; white+alpha would darken uniformly without color shift.
 		clouds_res.set("ambient_occlusion_color", Color(1.0, 1.0, 1.0, 0.0))
-		# Increase post-pass blur to mask dither noise at half-resolution.
-		# Defaults (2.0, 1.0) leave visible shimmer with half-res + temporal decay < 0.7.
-		clouds_res.set("blur_power", 4.0)
-		clouds_res.set("blur_quality", 2.0)
+		# Moderate post-pass blur to mask dither noise at half-resolution.
+		# Defaults (2.0, 1.0) shimmer too much; (4.0, 2.0) costs too much GPU.
+		# 2.5/1.0 is a balance — slightly smoother than default, minimal GPU cost.
+		clouds_res.set("blur_power", 2.5)
+		clouds_res.set("blur_quality", 1.0)
 		# Add driver to tree FIRST — clouds_res_added() needs is_inside_tree()=true
 		# to register the CompositorEffect on the WorldEnvironment's Compositor
 		parent.add_child(_sunshine_driver)
@@ -143,6 +146,11 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# Set clouds_resource AFTER add_child — the setter calls clouds_res_added()
 		# which registers the CompositorEffect on the active WorldEnvironment
 		_sunshine_driver.clouds_resource = clouds_res
+
+		# Enable continuous updates AFTER clouds_resource is set.
+		# Driver._ready() kills update_continuously if clouds_resource is null,
+		# so this must come after the resource assignment.
+		_sunshine_driver.update_continuously = true
 
 		# Disable clouds until weather or sky is explicitly enabled.
 		# CompositorEffect defaults enabled=true, so clouds would render at startup
@@ -384,6 +392,7 @@ func on_time_scale_changed(value: float) -> void:
 
 ## Handle weather type override dropdown.
 ## index 0 = "Auto" (region-based), index 1+ = locked weather type.
+## Sets the weather AND applies cloud preset values + syncs sliders.
 func on_weather_type_changed(index: int) -> void:
 	if index <= 0:
 		WeatherManager.auto_weather = true
@@ -396,6 +405,29 @@ func on_weather_type_changed(index: int) -> void:
 		on_weather_toggled(true)
 		if _panels and _panels.weather_enabled_toggle:
 			_panels.weather_enabled_toggle.set_pressed_no_signal(true)
+	# Apply cloud preset from the new weather type and sync sliders.
+	# User can then tweak; re-picking a preset resets to weather defaults.
+	_apply_cloud_preset_from_weather()
+
+
+## Apply cloud preset values from the current weather and sync sliders.
+## Called on weather type change. Sets cloud params on the resource AND
+## updates slider positions so the user sees what the preset produced.
+func _apply_cloud_preset_from_weather() -> void:
+	var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
+	var preset: Dictionary = WeatherRenderer.get_cloud_preset_for_coverage(result.cloud_coverage)
+	# Apply to SunshineClouds2 resource
+	_set_cloud_param("clouds_coverage", preset["coverage"])
+	_set_cloud_param("clouds_density", preset["density"])
+	_set_cloud_param("clouds_sharpness", preset["sharpness"])
+	# Sync sliders to reflect preset values (no-signal to avoid re-triggering callbacks)
+	if _panels:
+		if _panels.cloud_coverage_slider:
+			_panels.cloud_coverage_slider.set_value_no_signal(preset["coverage"])
+		if _panels.cloud_density_slider:
+			_panels.cloud_density_slider.set_value_no_signal(preset["density"])
+		if _panels.cloud_sharpness_slider:
+			_panels.cloud_sharpness_slider.set_value_no_signal(preset["sharpness"])
 
 
 ## Handle time pause toggle
@@ -404,9 +436,9 @@ func on_time_pause_toggled(paused: bool) -> void:
 
 
 ## Called each frame by world_explorer to drive rendering.
-## When weather is ON, WeatherRenderer drives SunshineClouds2 coverage/density/sharpness
-## from the interpolated weather result. When weather is OFF, UI sliders are the source
-## of truth for those params. Wind/size sliders always apply on top.
+## WeatherRenderer drives wind per-frame. Cloud coverage/density/sharpness are set
+## once on weather type change (via _apply_cloud_preset_from_weather), then the user
+## tweaks via sliders. Re-picking a preset resets the sliders.
 func process(delta: float) -> void:
 	# Always update SkyManager with current game hour (even when weather is off)
 	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:
@@ -469,8 +501,9 @@ func _sync_cloud_ambient() -> void:
 	var day_factor: float = clampf(sun_alt * 5.0 + 0.5, 0.0, 1.0)
 	# Day ambient: warm white tinted by sun color
 	var day_color: Color = sun_color.lerp(Color(0.8, 0.85, 0.9), 0.5)
-	# Night ambient: dark blue (shader uses this directly, no power scaling)
-	var night_color := Color(0.04, 0.05, 0.1)
+	# Night ambient: matches OpenMW night ambient (32,35,42)/255 ≈ (0.125,0.137,0.165).
+	# Previous value (0.04,0.05,0.1) was ~3x too dark — Morrowind nights are dim, not black.
+	var night_color := Color(0.12, 0.13, 0.18)
 	# Sunset/sunrise boost: warm orange when sun is near horizon
 	var sunset_factor: float = clampf(1.0 - absf(sun_alt) * 8.0, 0.0, 1.0) * 0.6
 	var sunset_tint := Color(1.0, 0.6, 0.3)
@@ -483,7 +516,7 @@ func _sync_cloud_ambient() -> void:
 
 	# Atmosphere color: controls distant cloud fog tint
 	var atmo_day := Color(0.9, 0.92, 1.0)
-	var atmo_night := Color(0.1, 0.12, 0.2)
+	var atmo_night := Color(0.15, 0.17, 0.25)  # Brightened to match MW night visibility
 	var atmo_sunset := Color(1.0, 0.55, 0.25)
 	var atmo: Color = atmo_night.lerp(atmo_day, day_factor)
 	atmo = atmo.lerp(atmo_sunset, sunset_factor)
@@ -495,7 +528,7 @@ func _sync_cloud_ambient() -> void:
 		var active_env: Environment = _env_controls.get_active_environment()
 		if active_env:
 			var fog_day := Color(0.8, 0.85, 0.9)
-			var fog_night := Color(0.08, 0.1, 0.18)
+			var fog_night := Color(0.12, 0.13, 0.2)  # Brightened to match MW night ambient
 			var fog_sunset := Color(0.9, 0.6, 0.35)
 			active_env.fog_light_color = fog_night.lerp(fog_day, day_factor).lerp(fog_sunset, sunset_factor)
 

@@ -475,7 +475,7 @@ func set_wave_scale(scale: float) -> void:
 		_material.set_shader_parameter("wave_scale", scale)
 
 
-func set_shore_mask(mask: Texture2D, world_bounds: Rect2) -> void:
+func set_shore_mask(mask: Texture2D, world_bounds: Rect2, fade_distance: float = 50.0) -> void:
 	_cached_shore_mask = mask
 	_cached_shore_bounds = world_bounds
 	if _material:
@@ -486,9 +486,10 @@ func set_shore_mask(mask: Texture2D, world_bounds: Rect2) -> void:
 			world_bounds.size.x,
 			world_bounds.size.y
 		))
-		Log.debug("water", "OceanMesh: Shore mask set - texture: %s, bounds: %s" % [
+		_material.set_shader_parameter("shore_fade_distance", fade_distance)
+		Log.debug("water", "OceanMesh: Shore mask set - texture: %s, bounds: %s, fade: %.0fm" % [
 			mask.get_size() if mask else "null",
-			world_bounds])
+			world_bounds, fade_distance])
 
 
 func set_debug_shore_mask(enabled: bool) -> void:

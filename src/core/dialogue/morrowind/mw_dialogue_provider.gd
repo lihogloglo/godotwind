@@ -76,6 +76,10 @@ func get_greeting(speaker_id: String, context: DialogueContext) -> DialogueProvi
 			line.source_id = info.record_id
 			r.line = line
 			r.error = DialogueProvider.Error.OK
+			r.metadata = {
+				"info_id": info.record_id,
+				"result_script": info.result_script,
+			}
 			return r
 
 	r.error = DialogueProvider.Error.NO_INFO_MATCH
@@ -155,6 +159,7 @@ func get_response(topic_id: String, speaker_id: String, context: DialogueContext
 		"quest_name_flag": info.quest_name,
 		"quest_finish": info.quest_finish,
 		"quest_restart": info.quest_restart,
+		"result_script": info.result_script,
 	}
 	return r
 
@@ -179,6 +184,10 @@ func get_goodbye(speaker_id: String, context: DialogueContext) -> DialogueProvid
 		line.speaker_name = npc.name
 		line.source_id = info.record_id
 		r.line = line
+		r.metadata = {
+			"info_id": info.record_id,
+			"result_script": info.result_script,
+		}
 		return r
 
 	r.error = DialogueProvider.Error.NO_INFO_MATCH

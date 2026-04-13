@@ -285,18 +285,18 @@ text = "Anti-Aliasing:"
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
-selected = 2
+selected = 5
 item_count = 6
 popup/item_0/text = "Disabled"
 popup/item_1/text = "FXAA"
 popup/item_1/id = 1
-popup/item_2/text = "TAA (Recommended)"
+popup/item_2/text = "SMAA"
 popup/item_2/id = 2
 popup/item_3/text = "MSAA 2x"
 popup/item_3/id = 3
-popup/item_4/text = "MSAA 4x"
+popup/item_4/text = "FSR2 Quality (75%)"
 popup/item_4/id = 4
-popup/item_5/text = "MSAA 8x"
+popup/item_5/text = "FSR2 Native (Recommended)"
 popup/item_5/id = 5
 
 [node name="ShadowHBox" type="HBoxContainer" parent="MarginContainer/VBoxContainer/GraphicsPanel/VBoxContainer"]

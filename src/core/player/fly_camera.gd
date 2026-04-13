@@ -37,6 +37,14 @@ var enabled: bool = true
 ## Whether mouse is captured
 var _mouse_captured: bool = false
 
+## Optional modal UI check. When set to a Callable that returns true,
+## _input and _process early-out (no mouse capture, no movement).
+## Injected by the scene at boot — e.g.:
+##   fly_camera.modal_check = player_controller.is_modal_ui_open
+## or in test scenes:
+##   fly_camera.modal_check = session.is_any_panel_open
+var modal_check: Callable
+
 
 func _ready() -> void:
 	# Ensure far plane is adequate for world exploration (20km for distant impostors)
@@ -60,14 +68,9 @@ func _input(event: InputEvent) -> void:
 	if not enabled or not current:
 		return
 
-	# C.2 stopgap: if any dialogue/book/journal panel is holding player input,
-	# don't let right-click re-capture the mouse. Without this, accidentally
-	# right-clicking while reading a book or picking a dialogue topic would
-	# hide the cursor and make the panel uninteractable. Cross-system gate
-	# consumes DialogueSession as a temporary arrangement — C.2.5 replaces
-	# this with PlayerController owning mouse mode per input owner.
-	var _session := DialogueSession.current()
-	if _session != null and _session.is_any_panel_open():
+	# Modal UI gate — if a dialogue/book/journal panel is open, don't let
+	# mouse capture or input through. Injected via modal_check Callable.
+	if modal_check.is_valid() and modal_check.call():
 		return
 
 	# Mouse capture for looking
@@ -101,11 +104,8 @@ func _process(delta: float) -> void:
 	if not enabled or not current:
 		return
 
-	# C.2 stopgap: freeze movement while any dialogue/book/journal panel is open.
-	# Same gate as _input — cross-system, temporary, C.2.5 replaces with
-	# PlayerController input-owner dispatch.
-	var _session := DialogueSession.current()
-	if _session != null and _session.is_any_panel_open():
+	# Modal UI gate — freeze while panel is open.
+	if modal_check.is_valid() and modal_check.call():
 		return
 
 	# Movement only when mouse is captured (right-click held)

@@ -524,7 +524,8 @@ func _setup_fallback_environment() -> void:
 	_fallback_light.light_color = Color(1.0, 0.98, 0.95)  # Slightly warm white
 	_fallback_light.light_energy = 1.2  # Stronger light
 	_fallback_light.shadow_enabled = true
-	_fallback_light.shadow_bias = 0.03
+	_fallback_light.shadow_bias = 0.02
+	_fallback_light.shadow_normal_bias = 1.5
 	_fallback_light.directional_shadow_max_distance = 5000.0  # Larger for La Palma
 
 	# Point downward at an angle (like midday sun)

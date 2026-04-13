@@ -1703,7 +1703,10 @@ func _rebuild_texture_array() -> void:
 		_normal_array_dirty = false
 		return
 
-	# Rebuild albedo texture array
+	# Rebuild albedo texture array (RGBA8 uncompressed).
+	# BC7 (BPTC) compression was tested but triggers c0000005 in Godot 4.6's
+	# Texture2DArray.create_from_images() with compressed images. Revisit when
+	# upgrading to 4.7+. At 256×256 RGBA8, 256 layers = ~64 MB — acceptable.
 	var images: Array[Image] = []
 	for img: Image in _all_array_images:
 		if img.get_format() != Image.FORMAT_RGBA8:

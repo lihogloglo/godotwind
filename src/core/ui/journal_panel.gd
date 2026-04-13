@@ -17,6 +17,7 @@ const DEFAULT_THEME := preload("res://assets/ui/themes/default_theme.tres")
 signal closed
 
 var _quest_manager: RefCounted  # QuestManager
+var _overlay: ColorRect
 var _panel: PanelContainer
 var _quest_list: VBoxContainer
 var _entry_display: RichTextLabel
@@ -49,6 +50,8 @@ func set_quest_manager(qm: RefCounted) -> void:
 ## Show the journal
 func show_journal() -> void:
 	_panel.visible = true
+	if _overlay:
+		_overlay.visible = true
 	_showing_active = true
 	_update_tab_style()
 	_refresh_quest_list()
@@ -57,7 +60,14 @@ func show_journal() -> void:
 ## Hide the journal
 func hide_journal() -> void:
 	_panel.visible = false
+	if _overlay:
+		_overlay.visible = false
 	closed.emit()
+
+
+## Is the journal currently displayed?
+func is_open() -> bool:
+	return _panel != null and _panel.visible
 
 
 func _on_tab_active() -> void:
@@ -140,12 +150,12 @@ func _on_quest_selected(quest_id: String) -> void:
 
 
 func _build_ui() -> void:
-	# Full-screen dimming overlay
-	var overlay := ColorRect.new()
-	overlay.color = Color(0, 0, 0, 0.6)
-	overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	add_child(overlay)
+	# Full-screen dimming overlay (stored as member so hide_journal can toggle it)
+	_overlay = ColorRect.new()
+	_overlay.color = Color(0, 0, 0, 0.6)
+	_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_overlay)
 
 	# Center panel — parchment (theme provides bg/border/padding/font)
 	_panel = PanelContainer.new()

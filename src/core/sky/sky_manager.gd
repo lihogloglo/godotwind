@@ -105,7 +105,9 @@ var day_sky_contribution: float = 1.0
 ## Sky contribution at night (lower allows ambient_energy to fill in).
 var night_sky_contribution: float = 0.4
 ## Ambient light energy at night (boost to prevent pitch black).
-var night_ambient_energy: float = 0.15
+## 0.15 was too dark — Morrowind nights are dim but visible (MW ambient ~32,35,42/255).
+## With AMBIENT_SOURCE_SKY and a dark cubemap, need higher energy to compensate.
+var night_ambient_energy: float = 0.45
 ## Transition speed for ambient changes (per second).
 var ambient_transition_speed: float = 0.5
 
@@ -245,6 +247,17 @@ func _initialize() -> void:
 	_environment.tonemap_exposure = 1.0
 	_environment.tonemap_white = 8.0
 
+	# SDFGI — cascaded signed-distance-field global illumination
+	_environment.sdfgi_enabled = true
+	_environment.sdfgi_cascades = 4
+	_environment.sdfgi_y_scale = Environment.SDFGI_Y_SCALE_75_PERCENT
+	_environment.sdfgi_use_occlusion = true
+	_environment.sdfgi_bounce_feedback = 0.3
+	_environment.sdfgi_read_sky_light = true
+	_environment.sdfgi_energy = 1.0
+	_environment.sdfgi_normal_bias = 1.1
+	_environment.sdfgi_probe_bias = 1.1
+
 	# SSR, fog, glow etc. configured by environment_controls.gd, not here.
 
 	# --- WorldEnvironment ---
@@ -261,6 +274,8 @@ func _initialize() -> void:
 	_sun_light.shadow_enabled = true
 	_sun_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	_sun_light.directional_shadow_max_distance = 200.0
+	_sun_light.shadow_bias = 0.02
+	_sun_light.shadow_normal_bias = 1.5
 	_sun_light.light_bake_mode = Light3D.BAKE_DISABLED
 	add_child(_sun_light)
 

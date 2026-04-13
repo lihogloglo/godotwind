@@ -24,10 +24,11 @@ var shadow_intensity: float = 0.7
 var shadow_softness: float = 0.05
 
 
-## Set a shader parameter via RenderingServer (Terrain3D v1.1 API)
+## Set a shader parameter via Terrain3DMaterial.set_shader_param (v1.0.1 API)
+@warning_ignore("unsafe_method_access")
 func _set_param(param_name: StringName, value: Variant) -> void:
-	if _material_rid.is_valid():
-		RenderingServer.material_set_param(_material_rid, param_name, value)
+	if _terrain and _terrain.material:
+		_terrain.material.set_shader_param(param_name, value)
 
 
 ## Apply the custom horizon shader as Terrain3D's shader override.
@@ -119,15 +120,24 @@ func set_enabled(enabled: bool) -> void:
 		_set_param("horizon_enabled", _enabled)
 
 
+## Push wet map uniforms to the terrain shader override.
+## Call after initialize() and whenever sea_level changes.
+func push_wet_map(sea_level: float, wet_margin: float = 1.5, wet_darken: float = 0.6, wet_rough: float = 0.05) -> void:
+	_set_param("sea_level_wet", sea_level)
+	_set_param("wet_margin", wet_margin)
+	_set_param("wet_albedo_darken", wet_darken)
+	_set_param("wet_roughness_target", wet_rough)
+
+
 func _apply_to_shader(tex1: Texture2DArray, tex2: Texture2DArray) -> void:
 	if not _terrain or not _terrain.material:
 		return
-	# Keep references alive — RIDs don't prevent GC
+	# Keep references alive
 	_tex1_ref = tex1
 	_tex2_ref = tex2
-	# RenderingServer.material_set_param() requires RIDs for textures, not Objects
-	_set_param("horizon_texture_1", tex1.get_rid())
-	_set_param("horizon_texture_2", tex2.get_rid())
+	# set_shader_param accepts Texture objects directly (not RIDs)
+	_set_param("horizon_texture_1", tex1)
+	_set_param("horizon_texture_2", tex2)
 	_set_param("horizon_shadow_intensity", shadow_intensity)
 	_set_param("horizon_shadow_softness", shadow_softness)
 
