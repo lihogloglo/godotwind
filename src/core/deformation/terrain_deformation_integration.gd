@@ -131,7 +131,8 @@ func _inject_deformation_parameters():
 		return
 
 	# Set shader parameters
-	RenderingServer.material_set_param(_terrain_material_rid,"deformation_texture_array", _deformation_texture_array)
+	# RS.material_set_param rejects Variant::OBJECT — pass texture RID
+	RenderingServer.material_set_param(_terrain_material_rid,"deformation_texture_array", _deformation_texture_array.get_rid())
 	RenderingServer.material_set_param(_terrain_material_rid,"deformation_enabled", true)
 	RenderingServer.material_set_param(_terrain_material_rid,"deformation_depth_scale", DeformationManager.deformation_depth_scale)
 

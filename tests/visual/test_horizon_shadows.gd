@@ -189,21 +189,15 @@ func _process(delta: float) -> void:
 
 func _handle_camera_input(delta: float) -> void:
 	var speed: float = 100.0
-	if Input.is_key_pressed(KEY_SHIFT):
+	if Input.is_action_pressed("sprint"):
 		speed = 400.0
 
-	var dir := Vector3.ZERO
-	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_Z):
-		dir -= _camera.global_basis.z
-	if Input.is_key_pressed(KEY_S):
-		dir += _camera.global_basis.z
-	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_Q):
-		dir -= _camera.global_basis.x
-	if Input.is_key_pressed(KEY_D):
-		dir += _camera.global_basis.x
-	if Input.is_key_pressed(KEY_SPACE):
+	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_backward")
+	var dir := Vector3(input.x, 0, input.y)
+	dir = _camera.global_basis * dir
+	if Input.is_action_pressed("jump"):
 		dir.y += 1.0
-	if Input.is_key_pressed(KEY_CTRL):
+	if Input.is_action_pressed("crouch"):
 		dir.y -= 1.0
 
 	if dir.length_squared() > 0.01:

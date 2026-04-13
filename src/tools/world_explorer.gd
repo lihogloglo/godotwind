@@ -74,6 +74,7 @@ const MWDialogueContextScript := preload("res://src/core/dialogue/morrowind/mw_d
 const MWQuestAdapterScript := preload("res://src/core/dialogue/morrowind/mw_quest_adapter.gd")
 const MWResultScriptHandlerScript := preload("res://src/core/dialogue/morrowind/mw_result_script_handler.gd")
 const MWTextFormatterScript := preload("res://src/core/dialogue/morrowind/mw_text_formatter.gd")
+const SubsystemTogglesScript := preload("res://src/tools/subsystem_toggles.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -142,6 +143,9 @@ var _lod_debug_commands: LodDebugCommands = null  # LOD console commands (preven
 var _pocket_manager: Node = null  # InteriorPocketManager
 var _door_prompt_label: Label = null  # "Press E to enter" prompt
 var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
+var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B feature flags
+var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
+var _loading_phase_times: Dictionary = {}  # Per-phase loading times
 
 # State
 var _data_path: String = ""
@@ -421,8 +425,10 @@ func _init_async() -> void:
 	_hide_loading()
 
 	_initialized = true
-	print("[TIMING] _init_async() total: %d ms" % (Time.get_ticks_msec() - _ta0))
+	_loading_time_ms = Time.get_ticks_msec() - _ta0
+	print("[TIMING] _init_async() total: %d ms" % _loading_time_ms)
 	_log("[color=green]World streaming initialized![/color]")
+	_log("Loading time: %d ms" % _loading_time_ms)
 	_log("Use ZQSD to move, Right-click to look")
 	_log("Cells stream automatically based on camera position")
 
@@ -441,6 +447,9 @@ func _init_async() -> void:
 
 	# Connect diagnostic systems now that WSM is ready
 	_connect_diagnostic_systems()
+
+	# Setup subsystem toggles (needs all managers initialized)
+	_setup_subsystem_toggles()
 
 
 func _init_terrain3d() -> void:
@@ -1314,6 +1323,77 @@ func _on_show_characters_toggled(enabled: bool) -> void:
 	_update_stats()
 
 
+## Setup subsystem toggles for benchmark A/B testing.
+## Called from _init_async after all managers are initialized.
+func _setup_subsystem_toggles() -> void:
+	_subsystem_toggles = SubsystemTogglesScript.new()
+
+	# Shadow toggle needs the sun's RID
+	var sun: DirectionalLight3D = _find_sun_light()
+
+	var callbacks: Dictionary = {
+		"terrain": func(on: bool) -> void:
+			if terrain_3d: terrain_3d.visible = on,
+		"ocean": func(on: bool) -> void:
+			if _ocean_controls: _ocean_controls.on_show_ocean_toggled(on),
+		"sky": func(on: bool) -> void:
+			_on_show_sky_toggled(on),
+		"weather": func(on: bool) -> void:
+			if _weather_controls: _weather_controls.on_weather_toggled(on),
+		"characters": func(on: bool) -> void:
+			_on_show_characters_toggled(on),
+		"impostors": func(on: bool) -> void:
+			if native_streaming_manager: native_streaming_manager.set_impostors_visible(on),
+		"mid_objects": func(on: bool) -> void:
+			if native_streaming_manager: native_streaming_manager.set_mid_tier_visible(on),
+		"near_objects": func(on: bool) -> void:
+			if native_streaming_manager: native_streaming_manager.set_near_tier_visible(on),
+		"hlod": func(on: bool) -> void:
+			if native_streaming_manager: native_streaming_manager.set_hlod_visible(on),
+		"shadows": func(on: bool) -> void:
+			if sun: sun.shadow_enabled = on,
+		"postfx": func(on: bool) -> void:
+			if _env_controls:
+				_env_controls.on_taa_toggled(on)
+				_env_controls.on_ssao_toggled(on)
+				_env_controls.on_ssil_toggled(on)
+				_env_controls.on_glow_toggled(on)
+				_env_controls.on_godrays_toggled(on)
+				_env_controls.on_native_volumetric_fog_toggled(on),
+	}
+
+	var defaults: Dictionary = {
+		"terrain": true,
+		"ocean": false,
+		"sky": true,
+		"weather": true,
+		"characters": _show_characters,
+		"impostors": true,
+		"mid_objects": true,
+		"near_objects": true,
+		"hlod": true,
+		"shadows": true,
+		"postfx": true,
+	}
+
+	_subsystem_toggles.setup(callbacks, defaults)
+
+	# Register console commands
+	if console:
+		_subsystem_toggles.register_commands(console)
+
+		# Register isolation benchmark command (needs toggles + streaming manager)
+		if native_streaming_manager and cell_manager:
+			if not _StreamingBenchmarkScript:
+				_StreamingBenchmarkScript = load("res://src/tools/streaming_benchmark.gd")
+			if _StreamingBenchmarkScript:
+				_StreamingBenchmarkScript.register_isolate_command(
+					console, native_streaming_manager, cell_manager, camera, _subsystem_toggles
+				)
+
+	_log("Subsystem toggles initialized (%d flags)" % _subsystem_toggles.get_flag_names().size())
+
+
 ## Handle resolution change
 func _on_resolution_changed(index: int) -> void:
 	_apply_resolution(index)
@@ -1786,10 +1866,16 @@ func _show_loading(title: String, status: String) -> void:
 	loading_label.text = title
 	status_label.text = status
 	progress_bar.value = 0
+	# Suppress 3D rendering during loading — no active camera = no GPU work
+	if camera:
+		camera.current = false
 
 
 func _hide_loading() -> void:
 	loading_overlay.visible = false
+	# Restore camera rendering
+	if camera:
+		camera.current = true
 
 
 func _on_streaming_startup_progress(progress: float, loaded_cells: int, total_cells: int, queued_objects: int) -> void:
@@ -1819,6 +1905,7 @@ func _update_loading(progress: float, status: String) -> void:
 func _log_timing(prev_ticks: int, label: String) -> int:
 	var now := Time.get_ticks_msec()
 	var elapsed := now - prev_ticks
+	_loading_phase_times[label] = elapsed
 	print("[TIMING] %s: %d ms" % [label, elapsed])
 	return now
 

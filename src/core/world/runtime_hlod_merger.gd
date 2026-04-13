@@ -271,6 +271,14 @@ func get_stats() -> Dictionary:
 
 
 ## Clear all loaded HLOD cells and cache
+## Toggle visibility of all active HLOD RS instances (for benchmark A/B testing)
+func set_all_visible(visible: bool) -> void:
+	for grid: Vector2i in _active_cells:
+		var data: HLODCellData = _active_cells[grid]
+		if data.instance_rid.is_valid():
+			RenderingServer.instance_set_visible(data.instance_rid, visible)
+
+
 func cleanup() -> void:
 	# Cancel pending merges
 	if _bg_processor:

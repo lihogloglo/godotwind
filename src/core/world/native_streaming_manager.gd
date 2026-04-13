@@ -1633,6 +1633,34 @@ func is_cell_loaded(grid: Vector2i) -> bool:
 
 
 # ----------------------------------------------------------------------------
+# Subsystem visibility toggles (for benchmark A/B testing)
+# ----------------------------------------------------------------------------
+# Each method delegates to the owning subsystem — no internal reach-around.
+
+## Toggle MID-tier RS instances (StaticObjectRenderer)
+func set_mid_tier_visible(visible: bool) -> void:
+	if _static_renderer:
+		_static_renderer.set_all_visible(visible)
+
+## Toggle FAR-tier impostors (NativeImpostorRenderer)
+func set_impostors_visible(visible: bool) -> void:
+	if _impostor_renderer:
+		_impostor_renderer.visible = visible
+
+## Toggle NEAR-tier Node3D cells (loaded cell containers)
+func set_near_tier_visible(visible: bool) -> void:
+	for grid: Vector2i in _loaded_cells:
+		var cell_node: Node3D = _loaded_cells[grid]
+		if cell_node:
+			cell_node.visible = visible
+
+## Toggle HLOD merged geometry (RuntimeHLODMerger)
+func set_hlod_visible(visible: bool) -> void:
+	if _hlod_merger:
+		_hlod_merger.set_all_visible(visible)
+
+
+# ----------------------------------------------------------------------------
 # I.6 — Persistent node registry (held / carried items)
 # ----------------------------------------------------------------------------
 #

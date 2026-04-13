@@ -397,6 +397,11 @@ func _start_benchmark() -> void:
 
 
 func _process(delta: float) -> void:
+	# Isolation mode: settle timer before starting measurement
+	if _isolate_mode and _settling:
+		_process_isolate_settle(delta)
+		return
+
 	if not _running or _finished:
 		return
 
@@ -631,7 +636,13 @@ func _finish_benchmark() -> void:
 		_on_sweep_pass_complete(results)
 		return
 
+	# In isolate mode, feed results to isolate handler
+	if _isolate_mode:
+		_on_isolate_pass_complete(results)
+		return
+
 	_print_summary(results)
+	_save_json_summary(results)
 
 	benchmark_complete.emit(results)
 
@@ -1005,7 +1016,33 @@ static func register_console_commands(console: Node, streaming_manager: Variant,
 		PackedStringArray(["lod_sweep"]),
 	)
 
+	# Shorthand aliases
+	console.register_command(
+		"benchmark", run_quick,
+		"Run quick streaming benchmark (~18s). Alias for benchmark_streaming_quick",
+		"debug",
+		PackedStringArray(["bench"]),
+	)
+
+
 #endregion
+
+
+## Register isolation benchmark command separately (needs SubsystemToggles, which initializes after streaming manager)
+static func register_isolate_command(console: Node, streaming_manager: Variant, cell_manager: Variant, camera: Camera3D, toggles: RefCounted) -> void:
+	var run_isolate := func(args: Dictionary) -> Variant:
+		var benchmark := StreamingBenchmark.new()
+		benchmark.name = "StreamingBenchmarkIsolate"
+		console.get_tree().root.add_child(benchmark)
+		benchmark.init_isolate_mode(streaming_manager, cell_manager, camera, console, toggles)
+		return "Isolation benchmark started — baseline + one pass per subsystem..."
+
+	console.register_command(
+		"benchmark_isolate", run_isolate,
+		"Run per-subsystem cost isolation (baseline + disable each, ~4min)",
+		"debug",
+		PackedStringArray(["bench_isolate", "isolate"]),
+	)
 
 
 #region LOD Threshold Sweep
@@ -1133,5 +1170,235 @@ func _save_sweep_csv() -> void:
 		])
 	file.close()
 	Log.info("tools", "LOD sweep CSV saved to %s" % file_path)
+
+#endregion
+
+
+#region JSON Summary
+
+## Save a JSON summary alongside the CSV for historical comparison
+func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> String:
+	var dir_path := "user://benchmark_results"
+	if not DirAccess.dir_exists_absolute(dir_path):
+		DirAccess.make_dir_recursive_absolute(dir_path)
+
+	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	var file_path := "%s/summary_%s.json" % [dir_path, timestamp]
+
+	var summary := {
+		"timestamp": Time.get_datetime_string_from_system(),
+		"mode": "quick" if _quick_mode else "full",
+		"toggle_state": toggle_state,
+		"avg_fps": results.get("avg_fps", 0.0),
+		"avg_ms": results.get("avg_time_ms", 0.0),
+		"p50_ms": results.get("p50_ms", 0.0),
+		"p95_ms": results.get("p95_ms", 0.0),
+		"p99_ms": results.get("p99_ms", 0.0),
+		"max_ms": results.get("max_time_ms", 0.0),
+		"avg_draw_calls": results.get("avg_draw_calls", 0),
+		"peak_draw_calls": results.get("peak_draw_calls", 0),
+		"peak_vram_mb": results.get("peak_vram_mb", 0.0),
+		"total_frames": results.get("total_frames", 0),
+		"total_time_s": results.get("total_time_s", 0.0),
+	}
+
+	var file := FileAccess.open(file_path, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(summary, "\t"))
+		file.close()
+		Log.info("tools", "Summary JSON saved to %s" % file_path)
+	return file_path
+
+#endregion
+
+
+#region Subsystem Isolation Benchmark
+
+## Isolation mode: runs baseline + one pass per subsystem with that subsystem disabled.
+## Reports per-subsystem cost ranking sorted by FPS impact.
+var _isolate_mode: bool = false
+var _isolate_index: int = -1  # -1 = baseline, 0..N = each subsystem
+var _isolate_subsystem_names: Array[String] = []
+var _isolate_results: Array[Dictionary] = []
+var _isolate_toggles: RefCounted = null  # SubsystemToggles reference
+var _isolate_console: Node = null
+var _isolate_camera: Camera3D = null
+var _isolate_streaming_manager: NativeStreamingManagerScript = null
+var _isolate_cell_manager: CellManagerScript = null
+
+## Settle timer — 2s pause between toggle change and measurement start
+var _settle_timer: float = 0.0
+var _settling: bool = false
+
+
+func init_isolate_mode(
+	sm: NativeStreamingManagerScript, cm: CellManagerScript,
+	cam: Camera3D, console: Node, toggles: RefCounted
+) -> void:
+	_isolate_mode = true
+	_isolate_index = -1  # Start with baseline
+	_isolate_results.clear()
+	_isolate_console = console
+	_isolate_camera = cam
+	_isolate_streaming_manager = sm
+	_isolate_cell_manager = cm
+	_isolate_toggles = toggles
+	_isolate_subsystem_names = toggles.get_flag_names()
+
+	var pass_count := _isolate_subsystem_names.size() + 1  # baseline + each subsystem
+	var est_time := pass_count * 20  # ~20s per quick pass
+	Log.info("tools", "Isolation benchmark: %d passes (~%ds). Baseline first, then disable one subsystem per pass." % [pass_count, est_time])
+	if _isolate_console and _isolate_console.has_method("print_line"):
+		_isolate_console.print_line("Isolation benchmark: %d passes (~%ds estimated)" % [pass_count, est_time])
+
+	# Ensure all subsystems are ON for baseline
+	toggles.enable_all()
+	_start_isolate_pass()
+
+
+func _start_isolate_pass() -> void:
+	if _isolate_index >= _isolate_subsystem_names.size():
+		_finish_isolate()
+		return
+
+	# Apply toggle for this pass
+	if _isolate_index == -1:
+		# Baseline: all ON
+		_isolate_toggles.enable_all()
+		Log.info("tools", "Isolation pass: BASELINE (all ON)")
+	else:
+		# Disable one subsystem
+		var name: String = _isolate_subsystem_names[_isolate_index]
+		_isolate_toggles.enable_all()
+		_isolate_toggles.set_flag(name, false)
+		Log.info("tools", "Isolation pass: %s OFF" % name)
+
+	# Settle for 2s before starting measurement
+	_settling = true
+	_settle_timer = 2.0
+
+
+func _process_isolate_settle(delta: float) -> void:
+	if not _settling:
+		return
+	_settle_timer -= delta
+	if _settle_timer <= 0.0:
+		_settling = false
+		# Now start the actual benchmark pass
+		_streaming_manager = _isolate_streaming_manager
+		_cell_manager = _isolate_cell_manager
+		_camera = _isolate_camera
+		_console = _isolate_console
+		_owns_streaming = false
+		_quick_mode = true
+		_sweep_mode = false
+		_frame_log.clear()
+		_event_log.clear()
+		_running = false
+		_finished = false
+		_setup_ui()
+		_build_waypoints()
+		_start_benchmark()
+
+
+func _on_isolate_pass_complete(results: Dictionary) -> void:
+	if _isolate_index == -1:
+		results["subsystem"] = "BASELINE"
+	else:
+		results["subsystem"] = _isolate_subsystem_names[_isolate_index]
+	_isolate_results.append(results)
+
+	_isolate_index += 1
+	if _isolate_index < _isolate_subsystem_names.size():
+		_frame_log.clear()
+		_event_log.clear()
+		_running = false
+		_finished = false
+		_start_isolate_pass()
+	else:
+		_finish_isolate()
+
+
+func _finish_isolate() -> void:
+	# Restore all subsystems
+	if _isolate_toggles:
+		_isolate_toggles.reset()
+
+	if _isolate_results.is_empty():
+		queue_free()
+		return
+
+	# Extract baseline
+	var baseline_fps: float = _isolate_results[0].get("avg_fps", 1.0)
+	var baseline_ms: float = _isolate_results[0].get("avg_time_ms", 999.0)
+
+	# Calculate per-subsystem cost and sort by impact
+	var costs: Array[Dictionary] = []
+	for i in range(1, _isolate_results.size()):
+		var r: Dictionary = _isolate_results[i]
+		var fps_without: float = r.get("avg_fps", 0.0)
+		var ms_without: float = r.get("avg_time_ms", 0.0)
+		var fps_delta: float = fps_without - baseline_fps
+		var ms_saved: float = baseline_ms - ms_without
+		costs.append({
+			"subsystem": r.get("subsystem", "?"),
+			"fps_with_disabled": fps_without,
+			"fps_delta": fps_delta,
+			"ms_saved": ms_saved,
+		})
+	costs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.ms_saved > b.ms_saved)
+
+	# Print report
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("========== SUBSYSTEM ISOLATION RESULTS ==========")
+	lines.append("Baseline: %.1f FPS (%.1f ms)" % [baseline_fps, baseline_ms])
+	lines.append("")
+	lines.append("%-16s %10s %10s %10s" % ["subsystem", "fps_delta", "ms_saved", "fps_without"])
+	lines.append("--------------------------------------------------")
+	for c: Dictionary in costs:
+		var sign: String = "+" if c.fps_delta >= 0 else ""
+		lines.append("%-16s %s%9.1f %9.1fms %10.1f" % [
+			c.subsystem, sign, c.fps_delta, c.ms_saved, c.fps_with_disabled
+		])
+	lines.append("==================================================")
+	lines.append("Positive fps_delta = disabling HELPS (subsystem costs performance)")
+
+	var output := "\n".join(lines)
+	Log.info("tools", output)
+	if _isolate_console and _isolate_console.has_method("print_line"):
+		for line: String in lines:
+			_isolate_console.print_line(line)
+
+	# Save CSV
+	_save_isolate_csv()
+	queue_free()
+
+
+func _save_isolate_csv() -> void:
+	var dir_path := "user://benchmark_results"
+	if not DirAccess.dir_exists_absolute(dir_path):
+		DirAccess.make_dir_recursive_absolute(dir_path)
+
+	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	var file_path := "%s/isolate_%s.csv" % [dir_path, timestamp]
+	var file := FileAccess.open(file_path, FileAccess.WRITE)
+	if not file:
+		return
+
+	file.store_line("subsystem,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_vram_mb")
+	for r: Dictionary in _isolate_results:
+		file.store_line("%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.0f" % [
+			r.get("subsystem", "?"),
+			r.get("avg_fps", 0.0),
+			r.get("avg_time_ms", 0.0),
+			r.get("p50_ms", 0.0),
+			r.get("p95_ms", 0.0),
+			r.get("p99_ms", 0.0),
+			r.get("max_time_ms", 0.0),
+			r.get("avg_draw_calls", 0),
+			r.get("peak_vram_mb", 0.0),
+		])
+	file.close()
+	Log.info("tools", "Isolation CSV saved to %s" % file_path)
 
 #endregion

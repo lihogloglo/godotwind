@@ -1007,9 +1007,12 @@ func _apply_fade_in(instance: Node3D) -> void:
 		if not fade_mat:
 			break
 
-		# Get the original material using the 3-source fallback chain
-		# (matches StaticObjectRenderer's material extraction order)
+		# Get the original material_override (may be null for multi-surface meshes).
+		# CRITICAL: We must distinguish "had material_override" from "had no override"
+		# because restoring a surface material as material_override would override ALL
+		# surfaces — the root cause of the texture bug on ships/buildings.
 		var original_mat: Material = mesh_inst.material_override
+		var had_override := original_mat != null
 
 		# Detect stuck fade ShaderMaterial from interrupted tween or pool recycling:
 		# If current override has "fade_amount" parameter, it's a leftover fade material.
@@ -1019,18 +1022,26 @@ func _apply_fade_in(instance: Node3D) -> void:
 			if sm.get_shader_parameter("fade_amount") != null:
 				mesh_inst.material_override = null
 				original_mat = null
+				had_override = false
 
-		if original_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
-			original_mat = mesh_inst.get_surface_override_material(0)
-			if original_mat == null:
-				original_mat = mesh_inst.mesh.surface_get_material(0)
+		# For fade visual: read surface 0 material to copy its texture into the fade shader.
+		# But do NOT use this as the "original" to restore — it's per-surface, not an override.
+		var fade_source_mat: Material = original_mat
+		if fade_source_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
+			fade_source_mat = mesh_inst.get_surface_override_material(0)
+			if fade_source_mat == null:
+				fade_source_mat = mesh_inst.mesh.surface_get_material(0)
 
-		# Store true original as metadata for robust recovery
+		# Store whether this mesh originally had material_override.
+		# If not, restore to null (lets per-surface materials take effect).
 		mesh_inst.set_meta("_pre_fade_material", original_mat)
+		mesh_inst.set_meta("_had_material_override", had_override)
 
-		# Copy texture from original material if it's a StandardMaterial3D
-		if original_mat is StandardMaterial3D:
-			var std_mat: StandardMaterial3D = original_mat as StandardMaterial3D
+		# Copy texture from the fade source material for visual during fade.
+		# This uses surface 0's material for multi-surface meshes — during the brief
+		# fade-in all surfaces show the same texture, which is acceptable for ~0.3s.
+		if fade_source_mat is StandardMaterial3D:
+			var std_mat: StandardMaterial3D = fade_source_mat as StandardMaterial3D
 			if std_mat.albedo_texture:
 				fade_mat.set_shader_parameter("albedo_texture", std_mat.albedo_texture)
 			fade_mat.set_shader_parameter("albedo_color", std_mat.albedo_color)
@@ -1086,10 +1097,18 @@ func _apply_fade_in(instance: Node3D) -> void:
 			if not is_instance_valid(mesh_inst_ref):
 				continue
 			var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D
-			# Prefer metadata (survives edge cases better than closure capture)
-			var original_mat: Material = mesh_inst.get_meta("_pre_fade_material", entry.original_material)
-			mesh_inst.material_override = original_mat
+			# CRITICAL: Only restore material_override if the mesh originally had one.
+			# Multi-surface meshes (ships, buildings) have NO material_override —
+			# their per-surface materials come from the mesh resource.
+			# Setting material_override = surface_0_mat would override ALL surfaces.
+			var had_override: bool = mesh_inst.get_meta("_had_material_override", false)
+			if had_override:
+				var original_mat: Material = mesh_inst.get_meta("_pre_fade_material", entry.original_material)
+				mesh_inst.material_override = original_mat
+			else:
+				mesh_inst.material_override = null
 			mesh_inst.remove_meta("_pre_fade_material")
+			mesh_inst.remove_meta("_had_material_override")
 	)
 
 

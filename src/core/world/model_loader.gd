@@ -685,11 +685,6 @@ func _load_from_disk_cache(disk_path: String) -> Node3D:
 		Log.debug("models", "Loaded from disk: %s" % disk_path.get_file())
 		_debug_log_mesh_nodes(instance, 0)
 
-	# DIAGNOSTIC: Check for textureless materials (Fix 6 investigation)
-	# Counts models where material has albedo_color but no albedo_texture.
-	# If count is high, cache .res files need rebaking with current pipeline.
-	_check_textureless_materials(instance, disk_path)
-
 	# CRITICAL: Clear resource paths on loaded model to allow safe multi-threaded duplication
 	# Without this, concurrent duplicate() calls conflict on the same resource paths
 	_clear_resource_paths(instance)
@@ -708,28 +703,6 @@ func _debug_log_mesh_nodes(node: Node, depth: int) -> void:
 		])
 	for child in node.get_children():
 		_debug_log_mesh_nodes(child, depth + 1)
-
-
-## Diagnostic: Check if a loaded model has materials with color but no texture.
-## Logs warnings for models where textures are missing (Fix 6 investigation).
-## Tracked via _stats for aggregate reporting.
-func _check_textureless_materials(instance: Node, disk_path: String) -> void:
-	for mi: Node in instance.find_children("*", "MeshInstance3D", true, false):
-		var mesh_inst := mi as MeshInstance3D
-		# Check material_override first, then surface materials
-		var mat: Material = mesh_inst.material_override
-		if mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
-			mat = mesh_inst.get_surface_override_material(0)
-			if mat == null:
-				mat = mesh_inst.mesh.surface_get_material(0)
-		if mat is StandardMaterial3D:
-			var std_mat := mat as StandardMaterial3D
-			if std_mat.albedo_texture == null:
-				_stats["textureless_models"] = _stats.get("textureless_models", 0) + 1
-				if _stats["textureless_models"] <= 30:  # Log first 30 only
-					Log.warn("models", "NO TEXTURE in .res: color=%s file=%s mesh=%s" % [
-						std_mat.albedo_color, disk_path.get_file(), mesh_inst.name])
-				return  # One warning per model is enough
 
 
 ## Clear resource paths from a node tree to allow safe duplication

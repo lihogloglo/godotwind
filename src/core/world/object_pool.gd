@@ -379,6 +379,8 @@ func _reset_materials(node: Node) -> void:
 		# Clean up fade metadata if present
 		if mi.has_meta("_pre_fade_material"):
 			mi.remove_meta("_pre_fade_material")
+		if mi.has_meta("_had_material_override"):
+			mi.remove_meta("_had_material_override")
 	for child in node.get_children():
 		_reset_materials(child)
 

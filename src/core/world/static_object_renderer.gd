@@ -218,29 +218,6 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 
 		sub_entries.append(entry)
 
-	# DIAGNOSTIC: Log multi-surface registrations to diagnose texture bug.
-	# Multi-surface merged meshes (ships, buildings) should have unique materials
-	# per surface. If all surfaces share the same material, the merge/save pipeline
-	# is flattening them.
-	for entry_idx in range(sub_entries.size()):
-		var diag_entry: SubMeshEntry = sub_entries[entry_idx]
-		var surf_count: int = diag_entry.mesh_resource.get_surface_count() if diag_entry.mesh_resource else 0
-		if surf_count > 1 or sub_entries.size() > 1:
-			var mat_summary := ""
-			if diag_entry.material_resource:
-				mat_summary = "override=%s" % _diag_mat_tex(diag_entry.material_resource)
-			else:
-				var tex_set: Dictionary = {}
-				for si in range(diag_entry.surface_materials.size()):
-					var tex_str := _diag_mat_tex(diag_entry.surface_materials[si])
-					tex_set[tex_str] = true
-					mat_summary += "s%d=%s " % [si, tex_str]
-				if diag_entry.surface_materials.size() > 1 and tex_set.size() <= 1:
-					Log.warn("textures", "MATERIAL BUG: '%s' sub[%d] has %d surfaces but only %d unique texture(s): %s" % [
-						type_name, entry_idx, diag_entry.surface_materials.size(), tex_set.size(), tex_set.keys()])
-			Log.debug("textures", "register '%s' sub[%d]: surfaces=%d meshes=%d mats=[%s]" % [
-				type_name, entry_idx, surf_count, sub_entries.size(), mat_summary])
-
 	# Register using first child as primary (backwards compat for get_mesh_type_stats etc.)
 	var first := sub_entries[0]
 	register_mesh_type(type_name, first.mesh_resource,
@@ -253,19 +230,6 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 		mt.has_lod_chain = any_has_lod
 		if not first.surface_materials.is_empty():
 			mt.surface_materials = first.surface_materials
-
-
-## Diagnostic helper: get texture path from a Material for logging
-static func _diag_mat_tex(mat: Material) -> String:
-	if mat == null:
-		return "NULL"
-	if mat is StandardMaterial3D:
-		var sm := mat as StandardMaterial3D
-		if sm.albedo_texture:
-			var p: String = sm.albedo_texture.resource_path
-			return p.get_file() if not p.is_empty() else "embedded(%d)" % sm.albedo_texture.get_instance_id()
-		return "no_tex(color=%s)" % sm.albedo_color.to_html()
-	return mat.get_class()
 
 
 ## Compatibility alias — post-B-wide there's no difference between the two
@@ -605,6 +569,18 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 #region Cleanup
 
 ## Clear all instances and optionally mesh types
+## Toggle visibility of ALL RS instances (for benchmark A/B testing).
+## Operates directly on RS instances since they are not in the Node3D tree.
+func set_all_visible(visible: bool) -> void:
+	for id: int in _instances:
+		var data: InstanceData = _instances[id]
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_set_visible(rid, visible)
+		data.visible = visible
+	_stats["visible_instances"] = _instances.size() if visible else 0
+
+
 func clear(clear_mesh_types: bool = true) -> void:
 	var rs := RenderingServer
 
