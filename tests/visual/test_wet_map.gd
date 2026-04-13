@@ -80,13 +80,17 @@ func _ready() -> void:
 	# UI
 	_create_ui()
 
-	# Use HorizonMapManager for shader override — proven working code path
-	await get_tree().process_frame
+	# Use HorizonMapManager for shader override — proven working code path.
+	# Wait several frames for Terrain3D to fully initialize its rendering pipeline.
+	for i in 5:
+		await get_tree().process_frame
 	_horizon_mgr = HorizonMapManager.new()
 	var sun := _find_sun()
 	if _terrain and sun:
 		_horizon_mgr.initialize(_terrain, sun)
 	_horizon_mgr.push_wet_map(_sea_level, _wet_margin, _wet_albedo_darken, _wet_roughness_target)
+	# Also disable texturing since no MW textures are loaded
+	_horizon_mgr._set_param("enable_texturing", false)
 	Log.info("water", "[Wet Map Test] Wet map pushed via HorizonMapManager, sea_level=%.1f" % _sea_level)
 
 	# Start with mouse visible so user can interact with sliders.
@@ -167,6 +171,21 @@ func _create_ui() -> void:
 	_add_slider(vbox, "sea_level_wet", -5.0, 5.0, _sea_level, func(val: float) -> void:
 		_sea_level = val
 		_push_wet_uniforms()
+	)
+
+	# Debug toggle — shows wet zone as blue tint
+	var debug_hbox := HBoxContainer.new()
+	vbox.add_child(debug_hbox)
+	var debug_lbl := Label.new()
+	debug_lbl.text = "wet_debug"
+	debug_lbl.custom_minimum_size.x = 150
+	debug_hbox.add_child(debug_lbl)
+	var debug_check := CheckBox.new()
+	debug_check.button_pressed = false
+	debug_hbox.add_child(debug_check)
+	debug_check.toggled.connect(func(on: bool) -> void:
+		if _horizon_mgr:
+			_horizon_mgr._set_param("wet_debug", on)
 	)
 
 

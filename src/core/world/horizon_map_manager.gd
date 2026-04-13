@@ -48,27 +48,32 @@ func _apply_shader_override() -> bool:
 	return true
 
 
-## Initialize and load horizon maps, building texture arrays that match
-## Terrain3D's region layer order.
+## Initialize with shader override and optionally load horizon maps.
+## Shader override is ALWAYS applied — wet map uniforms live in the override
+## shader and must work even without prebaked horizon textures.
 func initialize(terrain: Terrain3D, sun: DirectionalLight3D) -> void:
 	_terrain = terrain
 	_sun = sun
 	if _terrain and _terrain.material:
 		_material_rid = _terrain.material.get_material_rid()
 
-	var horizon_dir: String = _get_horizon_dir()
-	if not DirAccess.dir_exists_absolute(horizon_dir):
-		Log.info("streaming", "HorizonMapManager: No horizon maps at %s" % horizon_dir)
+	# Shader override first — wet map uniforms require it
+	if not _apply_shader_override():
+		Log.warn("streaming", "HorizonMapManager: Could not apply shader override")
 		return
 
-	# Get Terrain3D's region locations — array index = layer index in shader.
-	# IMPORTANT: horizon Texture2DArray layers MUST match this order.
+	# Try loading horizon maps (optional — wet map works without them)
+	var horizon_dir: String = _get_horizon_dir()
+	if not DirAccess.dir_exists_absolute(horizon_dir):
+		Log.info("streaming", "HorizonMapManager: No horizon maps at %s (shader override active)" % horizon_dir)
+		return
+
 	var region_locations: Array[Vector2i] = terrain.data.get_region_locations()
 	if region_locations.is_empty():
 		Log.info("streaming", "HorizonMapManager: No terrain regions loaded")
 		return
 
-	# Build texture arrays in layer order
+	# Build texture arrays in layer order matching Terrain3D's region order
 	var images_1: Array[Image] = []
 	var images_2: Array[Image] = []
 	var loaded := 0
@@ -103,11 +108,6 @@ func initialize(terrain: Terrain3D, sun: DirectionalLight3D) -> void:
 	tex1_array.create_from_images(images_1)
 	var tex2_array := Texture2DArray.new()
 	tex2_array.create_from_images(images_2)
-
-	# Apply custom shader override so the terrain shader has horizon uniforms
-	if not _apply_shader_override():
-		Log.warn("streaming", "HorizonMapManager: Could not apply shader override — horizon maps will have no effect")
-		return
 
 	_apply_to_shader(tex1_array, tex2_array)
 	set_enabled(true)
