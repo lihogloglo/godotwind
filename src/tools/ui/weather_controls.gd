@@ -105,21 +105,33 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		# Lower cloud altitude for Morrowind scale (default 1500m is too high)
 		clouds_res.set("cloud_floor", 800.0)
 		clouds_res.set("cloud_ceiling", 12000.0)
-		# Reduce accumulation decay to mitigate 1-frame camera lag.
-		# Default 0.7 causes heavy temporal blending. The SunshineClouds2 shader has
-		# reprojection code for Godot 4.6's mat3x4 view matrices (#else branch in
-		# SunshineCloudsCompute.glsl:900-914) but the mat3x4→mat4 reconstruction
-		# via transpose may be subtly wrong, causing reprojected UVs to drift.
-		# Lower decay = less old-frame bleeding = less perceived camera lag.
-		clouds_res.set("accumulation_decay", 0.4)
+		# Temporal accumulation: 0.55 balances shimmer suppression vs camera lag.
+		# Default 0.7 causes heavy camera lag; 0.4 was too low (shimmer).
+		clouds_res.set("accumulation_decay", 0.55)
 		# Enable environment fog color sampling so clouds match the atmosphere
 		clouds_res.set("use_environment_fog", 0.5)
 		# Set ambient tint to neutral — we drive cloud_ambient_color directly from sky state
 		# Default tint (0.133, 0.2, 0.243) is too dark and multiplies with our computed ambient
 		clouds_res.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
+		# Neutralize AO color — plugin default is RED (1,0,0,1) which tints all clouds
+		# pink/red wherever the ambient occlusion term is non-zero. Alpha=0 disables
+		# AO coloring entirely; white+alpha would darken uniformly without color shift.
+		clouds_res.set("ambient_occlusion_color", Color(1.0, 1.0, 1.0, 0.0))
+		# Increase post-pass blur to mask dither noise at half-resolution.
+		# Defaults (2.0, 1.0) leave visible shimmer with half-res + temporal decay < 0.7.
+		clouds_res.set("blur_power", 4.0)
+		clouds_res.set("blur_quality", 2.0)
 		# Add driver to tree FIRST — clouds_res_added() needs is_inside_tree()=true
 		# to register the CompositorEffect on the WorldEnvironment's Compositor
 		parent.add_child(_sunshine_driver)
+
+		# Wire ambience_sample_environment so driver can sync fog color per-frame.
+		# Without this, sampled_environment_fog_color stays at bright default (0.52,0.55,0.61)
+		# and clouds stay white at night even though we darken atmosphere_color.
+		if _env_controls:
+			var active_env: Environment = _env_controls.get_active_environment()
+			if active_env:
+				_sunshine_driver.ambience_sample_environment = active_env
 
 		# Track the directional light for cloud lighting
 		if light:
@@ -279,7 +291,9 @@ func on_fog_density_changed(value: float) -> void:
 		_renderer.fog_density_multiplier = value
 
 
-## Handle cloud coverage slider change — direct binding, no per-frame override.
+## Handle cloud coverage slider change. When weather is active, WeatherRenderer
+## overwrites this each frame from the interpolated preset — slider acts as
+## manual override only when weather is OFF.
 func on_cloud_coverage_changed(value: float) -> void:
 	_set_cloud_param("clouds_coverage", value)
 
@@ -390,10 +404,9 @@ func on_time_pause_toggled(paused: bool) -> void:
 
 
 ## Called each frame by world_explorer to drive rendering.
-## Cloud parameters are NOT overridden here — the sliders in the panel are
-## the single source of truth for coverage/density/sharpness/size/wind.
-## When a weather TYPE changes (via the dropdown) the renderer still pushes
-## atmospheric fog/density, but the cloud resource keeps its slider values.
+## When weather is ON, WeatherRenderer drives SunshineClouds2 coverage/density/sharpness
+## from the interpolated weather result. When weather is OFF, UI sliders are the source
+## of truth for those params. Wind/size sliders always apply on top.
 func process(delta: float) -> void:
 	# Always update SkyManager with current game hour (even when weather is off)
 	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:

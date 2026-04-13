@@ -383,9 +383,9 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	cloud_coverage_slider.step = 0.02
 	cloud_coverage_slider.tooltip_text = "SunshineClouds2 clouds_coverage (0 = clear, 1 = overcast)"
 
-	cloud_density_slider = create_slider_row(vbox, "Cloud Density:", 0.0, 20.0, 2.0, _cb.get("cloud_density_changed", Callable()) if _cb.has("cloud_density_changed") else Callable())
-	cloud_density_slider.step = 0.1
-	cloud_density_slider.tooltip_text = "SunshineClouds2 clouds_density — thickness/opacity of each cloud"
+	cloud_density_slider = create_slider_row(vbox, "Cloud Density:", 0.02, 1.0, 0.14, _cb.get("cloud_density_changed", Callable()) if _cb.has("cloud_density_changed") else Callable())
+	cloud_density_slider.step = 0.01
+	cloud_density_slider.tooltip_text = "SunshineClouds2 clouds_density — safe range 0.02-1.0 (plugin default 0.14)"
 
 	cloud_sharpness_slider = create_slider_row(vbox, "Cloud Sharpness:", 0.0, 2.0, 0.75, _cb.get("cloud_sharpness_changed", Callable()) if _cb.has("cloud_sharpness_changed") else Callable())
 	cloud_sharpness_slider.step = 0.02
