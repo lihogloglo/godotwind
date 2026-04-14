@@ -771,6 +771,9 @@ func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_r
 	# ray cast (mask = 1 << 2) can hit it. Existing layers are preserved.
 	_add_interactable_layer_recursive(door_instance)
 
+	Log.info("interaction", "[DOOR_ATTACH] %s (dest='%s' teleport=%s)" % [
+		record_id, destination_name, has_destination])
+
 	if door_activated_handler.is_valid():
 		adapter.door_activated.connect(door_activated_handler)
 

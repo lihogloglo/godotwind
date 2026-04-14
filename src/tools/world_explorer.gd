@@ -2219,13 +2219,17 @@ func _on_interact_prompt_changed(interactable: Interactable, distance: float) ->
 ## The fly camera acts as the "player" node for interact() calls.
 func _fly_camera_interact() -> void:
 	if _fly_raycaster == null:
+		Log.info("interaction", "[FLY_INTERACT] no raycaster wired")
 		return
 	# Modal gate — don't interact while a panel is open
 	if _dialogue_session and _dialogue_session.is_any_panel_open():
 		return
 	var target: Interactable = _fly_raycaster.get_current_target()
 	if target == null:
+		Log.info("interaction", "[FLY_INTERACT] E pressed, no target under crosshair (cam=%s fwd=%s)" % [
+			fly_camera.global_position, -fly_camera.global_transform.basis.z])
 		return
+	Log.info("interaction", "[FLY_INTERACT] target=%s prompt='%s'" % [target.name, target.get_prompt_text()])
 	target.interact(fly_camera)
 
 
