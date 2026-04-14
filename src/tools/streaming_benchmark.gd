@@ -20,12 +20,34 @@ signal benchmark_complete(results: Dictionary)
 ## Seyda Neen cell coordinates — default Morrowind spawn area
 const SPAWN_CELL := Vector2i(-2, -9)
 
-## Camera height above terrain (fly camera style)
-const CAMERA_HEIGHT := 100.0
+## Camera altitudes for the realistic flyby (ground-level village + high overlook)
+const VILLAGE_ALTITUDE := 5.0  # eye-level above terrain
+const VISTA_ALTITUDE := 80.0   # 80m overlook for FAR-tier/impostor stress
 
-## Segment names for reporting
+## Segment durations (seconds) — v2 realistic player-speed flyby, 85s total
+const SETTLE_DURATION := 10.0  # wait for streaming queue to drain post-launch
+const IDLE_DURATION := 15.0    # still at village center, pure render cost
+const WALK_DURATION := 25.0    # 7 m/s traverse, 175m straight line north
+const VISTA_DURATION := 10.0   # still at altitude, FAR-tier / impostor load
+const PAN_DURATION := 10.0     # 360° rotation in place, frustum-culling cost
+const RUN_DURATION := 15.0     # 15 m/s traverse, 225m stressed streaming
+
+## Player movement speeds (m/s)
+const WALK_SPEED := 7.0   # realistic walking pace
+const RUN_SPEED := 15.0   # realistic running pace
+
+## How many sub-waypoints across the 360° pan. Each holds its look-at for
+## PAN_DURATION / PAN_SEGMENTS seconds; camera position is fixed at vista.
+const PAN_SEGMENTS := 16
+
+## Total scripted flyby duration, reported in logs
+const FLYBY_TOTAL_S := SETTLE_DURATION + IDLE_DURATION + WALK_DURATION \
+	+ VISTA_DURATION + PAN_DURATION + RUN_DURATION
+
+## Segment names for reporting. Order matches the waypoint segments below
+## and the `segment` column index written into the per-frame CSV.
 const SEGMENT_NAMES: Array[String] = [
-	"idle", "approach", "orbit", "sprint", "teleport", "return"
+	"settle", "idle", "walk", "vista", "pan", "run"
 ]
 
 ## CSV column headers
@@ -62,6 +84,10 @@ var _waypoints: Array[Waypoint] = []
 var _current_waypoint_index: int = 0
 var _waypoint_elapsed: float = 0.0
 var _waypoint_start_pos: Vector3 = Vector3.ZERO
+## Start look-at for the current waypoint — paired with _waypoint_start_pos so
+## _advance_camera can linearly interpolate both position and look target
+## (smooth rotation during the 360° pan).
+var _waypoint_start_look: Vector3 = Vector3.ZERO
 var _current_segment_index: int = 0
 
 ## Frame log: array of PackedFloat64Array (one per frame)
@@ -194,45 +220,56 @@ func _build_waypoints() -> void:
 	_waypoints.clear()
 	_segment_starts.clear()
 
-	var center := DU.cell_to_world_center(SPAWN_CELL, CAMERA_HEIGHT)
+	var village_pos := DU.cell_to_world_center(SPAWN_CELL, VILLAGE_ALTITUDE)
+	var village_look := village_pos + Vector3(0, 0, -10)  # look north along walk path
 
-	# Segment 1: Idle (3s) — measure initial loading
+	# Segment 1: Settle (10s) — still at village, let streaming queue drain.
+	# Teleport to the village first in case the harness-owner positioned the
+	# camera elsewhere; otherwise this segment's initial motion would show up
+	# as a ballistic jump and skew the settle measurement.
 	_segment_starts.append(_waypoints.size())
-	_waypoints.append(Waypoint.new(center, center + Vector3(0, -50, -100), 3.0))
+	_waypoints.append(Waypoint.new(village_pos, village_look, 0.0, true))
+	_waypoints.append(Waypoint.new(village_pos, village_look, SETTLE_DURATION))
 
-	# Segment 2: Approach (5s) — from 800m away toward center
+	# Segment 2: Idle (15s) — still at village center, dense geometry render cost
 	_segment_starts.append(_waypoints.size())
-	var approach_start := center + Vector3(0, 50, 800)
-	var look_down := Vector3(0, -50, -100)  # slight downward look target offset
-	_waypoints.append(Waypoint.new(approach_start, center, 0.0, true))  # teleport to start
-	_waypoints.append(Waypoint.new(center, center + look_down, 5.0))  # fly toward center
+	_waypoints.append(Waypoint.new(village_pos, village_look, IDLE_DURATION))
 
-	# Segment 3: Orbit (10s) — 200m circle, split into 4 quadrants
+	# Segment 3: Walk (25s) — 7 m/s straight-line north, 175m traverse
 	_segment_starts.append(_waypoints.size())
-	var orbit_radius := 200.0
-	var orbit_segments := 8
-	var angle_step := TAU / float(orbit_segments)
-	for i in range(orbit_segments + 1):
-		var angle := float(i) * angle_step
-		var orbit_pos := center + Vector3(cos(angle) * orbit_radius, 0, sin(angle) * orbit_radius)
-		_waypoints.append(Waypoint.new(orbit_pos, center, 10.0 / float(orbit_segments)))
+	var walk_end := village_pos + Vector3(0, 0, -WALK_SPEED * WALK_DURATION)
+	_waypoints.append(Waypoint.new(walk_end, walk_end + Vector3(0, 0, -10), WALK_DURATION))
 
-	# Segment 4: Sprint (5s) — 600m north
+	# Segment 4: Vista (10s) — teleport to 80m overlook, still, FAR/impostor load.
+	# Vista look target is deliberately aligned with the pan's 0° direction
+	# (+Z south, matching the pan's angle-0° sub-waypoint) so the vista→pan
+	# handoff is a clean 22.5° step instead of a ~200° re-aim smear that
+	# would contaminate pan-segment p95/max numbers.
 	_segment_starts.append(_waypoints.size())
-	var sprint_end := center + Vector3(0, 0, -600)  # north = -Z in Godot
-	_waypoints.append(Waypoint.new(sprint_end, sprint_end + look_down, 5.0))
+	var vista_pos := DU.cell_to_world_center(SPAWN_CELL, VISTA_ALTITUDE)
+	var vista_look := vista_pos + Vector3(0, -20, 100)  # down + south
+	_waypoints.append(Waypoint.new(vista_pos, vista_look, 0.0, true))
+	_waypoints.append(Waypoint.new(vista_pos, vista_look, VISTA_DURATION))
 
-	# Segment 5: Teleport (3s) — 3 jumps, 500m apart, 1s pause between
+	# Segment 5: Pan (10s) — 360° look_at rotation at vista position. Camera
+	# position is fixed; each sub-waypoint shifts the look target by 360/N
+	# degrees, and _advance_camera interpolates look_at linearly so the
+	# rotation is visually continuous across sub-waypoint boundaries.
 	_segment_starts.append(_waypoints.size())
-	var tp_base := sprint_end
-	for i in range(3):
-		var tp_target := tp_base + Vector3(500.0 * (i + 1), 0, 0)
-		_waypoints.append(Waypoint.new(tp_target, tp_target + look_down, 0.0, true))  # instant teleport
-		_waypoints.append(Waypoint.new(tp_target, tp_target + look_down, 1.0))  # hold 1s
+	var pan_duration_per := PAN_DURATION / float(PAN_SEGMENTS)
+	for i in range(PAN_SEGMENTS):
+		var angle := TAU * float(i + 1) / float(PAN_SEGMENTS)
+		var look_offset := Vector3(sin(angle) * 100.0, -20.0, cos(angle) * 100.0)
+		_waypoints.append(Waypoint.new(vista_pos, vista_pos + look_offset, pan_duration_per))
 
-	# Segment 6: Return (4s) — back to center
+	# Segment 6: Run (15s) — teleport back to village then 15 m/s south, 225m
+	# traverse. South direction (+Z in Godot, per the MW coord convention the
+	# rest of the codebase follows) touches cells not visited by the walk leg,
+	# so this stresses fresh streaming rather than measuring warm-cache cost.
 	_segment_starts.append(_waypoints.size())
-	_waypoints.append(Waypoint.new(center, center + look_down, 4.0))
+	_waypoints.append(Waypoint.new(village_pos, village_pos + Vector3(0, 0, 10), 0.0, true))
+	var run_end := village_pos + Vector3(0, 0, RUN_SPEED * RUN_DURATION)
+	_waypoints.append(Waypoint.new(run_end, run_end + Vector3(0, 0, 10), RUN_DURATION))
 
 #endregion
 
@@ -255,6 +292,7 @@ func _start_benchmark() -> void:
 	var wp := _waypoints[0]
 	_camera.global_position = wp.position
 	_waypoint_start_pos = wp.position
+	_waypoint_start_look = wp.look_at
 	if wp.look_at != wp.position:
 		_camera.look_at(wp.look_at)
 
@@ -267,7 +305,9 @@ func _start_benchmark() -> void:
 		if _streaming_manager.has_signal("cell_unloaded"):
 			_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
 
-	Log.info("tools", "StreamingBenchmark: Started (%d waypoints)" % _waypoints.size())
+	Log.info("tools", "StreamingBenchmark: Started (%d waypoints, %.0fs scripted flyby)" % [
+		_waypoints.size(), FLYBY_TOTAL_S
+	])
 
 
 func _process(delta: float) -> void:
@@ -314,14 +354,19 @@ func _advance_camera(delta: float) -> void:
 
 	_waypoint_elapsed += delta
 
-	# Interpolate from start position to waypoint target
+	# Linear interpolation (no smoothstep) — constant-speed motion gives a
+	# physically meaningful measurement of "walk at 7 m/s" and "run at 15 m/s"
+	# traversal cost. Smoothstep would ease in/out and misrepresent the
+	# streaming pressure the player actually experiences at those speeds.
 	var t := clampf(_waypoint_elapsed / wp.duration, 0.0, 1.0)
-	var smoothed_t := t * t * (3.0 - 2.0 * t)  # smoothstep
-	_camera.global_position = _waypoint_start_pos.lerp(wp.position, smoothed_t)
+	_camera.global_position = _waypoint_start_pos.lerp(wp.position, t)
 
-	# Look at target
-	if wp.look_at.distance_squared_to(_camera.global_position) > 1.0:
-		_camera.look_at(wp.look_at)
+	# Interpolate look_at too — matters for the pan segment, where a series
+	# of short sub-waypoints rotates the target around the camera; without
+	# interpolation each sub-waypoint boundary would jump-cut the view.
+	var look_target := _waypoint_start_look.lerp(wp.look_at, t)
+	if look_target.distance_squared_to(_camera.global_position) > 1.0:
+		_camera.look_at(look_target)
 
 	# Advance to next waypoint when done
 	if _waypoint_elapsed >= wp.duration:
@@ -330,7 +375,11 @@ func _advance_camera(delta: float) -> void:
 
 
 func _advance_to_next_waypoint() -> void:
+	# The waypoint we're LEAVING owns both the ending position and look-at —
+	# these become the starting anchors for the next waypoint's interpolation.
+	var leaving_wp := _waypoints[_current_waypoint_index]
 	_waypoint_start_pos = _camera.global_position
+	_waypoint_start_look = leaving_wp.look_at
 	_current_waypoint_index += 1
 	_waypoint_elapsed = 0.0
 	_update_segment_index()
@@ -874,11 +923,11 @@ static func register_console_commands(console: Node, streaming_manager: Variant,
 		benchmark.name = "StreamingBenchmark"
 		console.get_tree().root.add_child(benchmark)
 		benchmark.init_console_mode(streaming_manager, cell_manager, camera, console)
-		return "Streaming benchmark started (~30s)..."
+		return "Streaming benchmark started (~%ds, realistic flyby)..." % int(FLYBY_TOTAL_S)
 
 	console.register_command(
 		"benchmark_streaming", run_bench,
-		"Run streaming benchmark (~30s)",
+		"Run streaming benchmark (~%ds, realistic player-speed flyby)" % int(FLYBY_TOTAL_S),
 		"debug",
 		PackedStringArray(["bench_stream"]),
 	)
@@ -886,7 +935,7 @@ static func register_console_commands(console: Node, streaming_manager: Variant,
 	# Shorthand aliases
 	console.register_command(
 		"benchmark", run_bench,
-		"Run streaming benchmark (~30s). Alias for benchmark_streaming",
+		"Run streaming benchmark (~%ds). Alias for benchmark_streaming" % int(FLYBY_TOTAL_S),
 		"debug",
 		PackedStringArray(["bench"]),
 	)
