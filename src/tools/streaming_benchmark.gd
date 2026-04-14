@@ -1,11 +1,8 @@
-## StreamingBenchmark — Automated streaming pipeline performance benchmark
+## StreamingBenchmark — in-session streaming pipeline benchmark.
 ##
-## Runs a scripted camera path through the world and logs per-frame metrics.
-## Two modes of operation:
-##   1. Standalone: Open streaming_benchmark.tscn directly (self-initializes)
-##   2. Console command: Called from world_explorer via `benchmark_streaming`
-##
-## Outputs CSV to user://benchmark_results/ and prints summary to console/log.
+## Attached by world_explorer via console command (`benchmark` / `bench`).
+## Runs a scripted camera path around Seyda Neen and logs per-frame metrics
+## to user://benchmark_results/ (CSV + JSON summary + events CSV).
 class_name StreamingBenchmark
 extends Node3D
 
@@ -60,9 +57,6 @@ var _camera: Camera3D = null
 var _streaming_manager: NativeStreamingManagerScript = null
 var _cell_manager: CellManagerScript = null
 
-## Whether we own the streaming manager (standalone mode) or borrowed it
-var _owns_streaming: bool = false
-
 ## Waypoints defining the camera path
 var _waypoints: Array[Waypoint] = []
 var _current_waypoint_index: int = 0
@@ -77,9 +71,8 @@ var _last_frame_time_ms: float = 0.0
 ## Running state
 var _running: bool = false
 var _finished: bool = false
-var _quick_mode: bool = false
 
-## UI references (created in standalone, optional in console mode)
+## UI references
 var _stats_panel: VBoxContainer = null
 var _fps_label: Label = null
 var _frame_time_label: Label = null
@@ -108,127 +101,21 @@ var _visibility_change_count: int = 0
 
 #region Initialization
 
-func _ready() -> void:
-	# If we have no streaming manager, we're in standalone mode — self-initialize
-	if not _streaming_manager:
-		_init_standalone()
-
-
-func _init_standalone() -> void:
-	Log.info("tools", "StreamingBenchmark: Standalone mode — initializing systems")
-	_owns_streaming = true
-
-	# Setup environment
-	_setup_environment()
-
-	# Setup camera
-	_setup_camera()
-
-	# Setup UI
-	_setup_ui()
-
-	# Initialize data (BSA + ESM must be loaded)
-	var data_path: String = SettingsManager.get_data_path()
-	if data_path.is_empty():
-		data_path = SettingsManager.auto_detect_installation()
-
-	if data_path.is_empty():
-		Log.error("tools", "StreamingBenchmark: No Morrowind data path found")
-		return
-
-	# Load BSA if not already loaded
-	if BSAManager.get_archive_count() == 0:
-		BSAManager.load_archives_from_directory(data_path)
-
-	# Load ESM if not already loaded
-	if ESMManager.cells.is_empty():
-		var esm_file: String = SettingsManager.get_esm_file()
-		var esm_path := data_path.path_join(esm_file)
-		var err := ESMManager.load_file(esm_path)
-		if err != OK:
-			Log.error("tools", "StreamingBenchmark: Failed to load ESM: %s" % error_string(err))
-			return
-
-	# Create cell manager
-	_cell_manager = CellManagerScript.new()
-	_cell_manager.load_npcs = false
-	_cell_manager.load_creatures = false
-	var pool_container := Node3D.new()
-	pool_container.name = "PoolContainer"
-	pool_container.visible = false
-	add_child(pool_container)
-	_cell_manager.init_object_pool(pool_container)
-	_cell_manager.preload_common_models()
-
-	# Create streaming manager
-	var nsm := Node3D.new()
-	nsm.set_script(NativeStreamingManagerScript)
-	nsm.name = "NativeStreamingManager"
-	nsm.load_radius_cells = 3
-	nsm.debug_enabled = false
-	add_child(nsm)
-	_streaming_manager = nsm
-
-	_streaming_manager.initialize(_cell_manager, null)
-
-	# Build waypoints and start
-	_build_waypoints()
-	_start_benchmark()
-
-
-## Initialize for console command mode (uses existing systems)
+## Initialize for console command mode (uses existing systems in world_explorer)
 func init_console_mode(
 	streaming_manager: NativeStreamingManagerScript,
 	cell_manager: CellManagerScript,
 	camera: Camera3D,
-	console: Node = null,
-	quick: bool = false
+	console: Node = null
 ) -> void:
 	_streaming_manager = streaming_manager
 	_cell_manager = cell_manager
 	_camera = camera
 	_console = console
-	_quick_mode = quick
-	_owns_streaming = false
 
 	_setup_ui()
 	_build_waypoints()
 	_start_benchmark()
-
-#endregion
-
-
-#region Environment & Camera Setup
-
-func _setup_environment() -> void:
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.4, 0.5, 0.7)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.6, 0.6, 0.7)
-	env.ambient_light_energy = 0.5
-
-	var world_env := WorldEnvironment.new()
-	world_env.environment = env
-	add_child(world_env)
-
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-45, 30, 0)
-	sun.shadow_enabled = true
-	sun.light_energy = 1.0
-	add_child(sun)
-
-
-func _setup_camera() -> void:
-	var rig := Node3D.new()
-	rig.name = "CameraRig"
-	add_child(rig)
-
-	_camera = Camera3D.new()
-	_camera.fov = 75.0
-	_camera.far = 6000.0
-	rig.add_child(_camera)
-	_camera.current = true
 
 #endregion
 
@@ -330,13 +217,6 @@ func _build_waypoints() -> void:
 		var orbit_pos := center + Vector3(cos(angle) * orbit_radius, 0, sin(angle) * orbit_radius)
 		_waypoints.append(Waypoint.new(orbit_pos, center, 10.0 / float(orbit_segments)))
 
-	if _quick_mode:
-		# Quick mode ends after orbit
-		_segment_starts.append(_waypoints.size())  # sprint placeholder
-		_segment_starts.append(_waypoints.size())  # teleport placeholder
-		_segment_starts.append(_waypoints.size())  # return placeholder
-		return
-
 	# Segment 4: Sprint (5s) — 600m north
 	_segment_starts.append(_waypoints.size())
 	var sprint_end := center + Vector3(0, 0, -600)  # north = -Z in Godot
@@ -378,10 +258,6 @@ func _start_benchmark() -> void:
 	if wp.look_at != wp.position:
 		_camera.look_at(wp.look_at)
 
-	# Start streaming if in standalone mode
-	if _owns_streaming and _streaming_manager:
-		_streaming_manager.set_camera(_camera)
-
 	# Connect to streaming manager signals for lifecycle event tracking
 	if _streaming_manager:
 		if _streaming_manager.has_signal("cell_loading"):
@@ -391,17 +267,10 @@ func _start_benchmark() -> void:
 		if _streaming_manager.has_signal("cell_unloaded"):
 			_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
 
-	Log.info("tools", "StreamingBenchmark: Started (%d waypoints, %s mode)" % [
-		_waypoints.size(), "quick" if _quick_mode else "full"
-	])
+	Log.info("tools", "StreamingBenchmark: Started (%d waypoints)" % _waypoints.size())
 
 
 func _process(delta: float) -> void:
-	# Isolation mode: settle timer before starting measurement
-	if _isolate_mode and _settling:
-		_process_isolate_settle(delta)
-		return
-
 	if not _running or _finished:
 		return
 
@@ -630,25 +499,13 @@ func _finish_benchmark() -> void:
 	var results := _calculate_results()
 	_save_csv()
 	_save_events_csv()
-
-	# In sweep mode, feed results to sweep handler instead of printing individual summary
-	if _sweep_mode:
-		_on_sweep_pass_complete(results)
-		return
-
-	# In isolate mode, feed results to isolate handler
-	if _isolate_mode:
-		_on_isolate_pass_complete(results)
-		return
-
 	_print_summary(results)
 	_save_json_summary(results)
 
 	benchmark_complete.emit(results)
 
-	# In console mode, clean up after a short delay
-	if not _owns_streaming:
-		get_tree().create_timer(1.0).timeout.connect(queue_free)
+	# Clean up after a short delay
+	get_tree().create_timer(1.0).timeout.connect(queue_free)
 
 
 func _calculate_results() -> Dictionary:
@@ -970,210 +827,6 @@ func _print_summary(results: Dictionary) -> void:
 #endregion
 
 
-#region Console Command Helpers
-
-## Register benchmark console commands on a Console node
-## streaming_manager: NativeStreamingManager (Node3D), cell_manager: CellManager (RefCounted)
-static func register_console_commands(console: Node, streaming_manager: Variant, cell_manager: Variant, camera: Camera3D) -> void:
-	var run_full := func(args: Dictionary) -> Variant:
-		var benchmark := StreamingBenchmark.new()
-		benchmark.name = "StreamingBenchmark"
-		console.get_tree().root.add_child(benchmark)
-		benchmark.init_console_mode(streaming_manager, cell_manager, camera, console, false)
-		return "Streaming benchmark started (full, ~30s)..."
-
-	var run_quick := func(args: Dictionary) -> Variant:
-		var benchmark := StreamingBenchmark.new()
-		benchmark.name = "StreamingBenchmark"
-		console.get_tree().root.add_child(benchmark)
-		benchmark.init_console_mode(streaming_manager, cell_manager, camera, console, true)
-		return "Streaming benchmark started (quick, ~18s)..."
-
-	console.register_command(
-		"benchmark_streaming", run_full,
-		"Run streaming benchmark (full, ~30s)",
-		"debug",
-		PackedStringArray(["bench_stream"]),
-	)
-	console.register_command(
-		"benchmark_streaming_quick", run_quick,
-		"Quick streaming benchmark (~18s, idle+approach+orbit only)",
-		"debug",
-		PackedStringArray(["bench_quick"]),
-	)
-
-	var run_lod_sweep := func(args: Dictionary) -> Variant:
-		var benchmark := StreamingBenchmark.new()
-		benchmark.name = "StreamingBenchmarkLODSweep"
-		console.get_tree().root.add_child(benchmark)
-		benchmark.init_lod_sweep(streaming_manager, cell_manager, camera, console)
-		return "LOD threshold sweep started (6 passes)..."
-
-	console.register_command(
-		"benchmark_lod_sweep", run_lod_sweep,
-		"Sweep mesh_lod_threshold (0.25/0.5/1/2/4/8) and compare FPS",
-		"debug",
-		PackedStringArray(["lod_sweep"]),
-	)
-
-	# Shorthand aliases
-	console.register_command(
-		"benchmark", run_quick,
-		"Run quick streaming benchmark (~18s). Alias for benchmark_streaming_quick",
-		"debug",
-		PackedStringArray(["bench"]),
-	)
-
-
-#endregion
-
-
-## Register isolation benchmark command separately (needs SubsystemToggles, which initializes after streaming manager)
-static func register_isolate_command(console: Node, streaming_manager: Variant, cell_manager: Variant, camera: Camera3D, toggles: RefCounted) -> void:
-	var run_isolate := func(args: Dictionary) -> Variant:
-		var benchmark := StreamingBenchmark.new()
-		benchmark.name = "StreamingBenchmarkIsolate"
-		console.get_tree().root.add_child(benchmark)
-		benchmark.init_isolate_mode(streaming_manager, cell_manager, camera, console, toggles)
-		return "Isolation benchmark started — baseline + one pass per subsystem..."
-
-	console.register_command(
-		"benchmark_isolate", run_isolate,
-		"Run per-subsystem cost isolation (baseline + disable each, ~4min)",
-		"debug",
-		PackedStringArray(["bench_isolate", "isolate"]),
-	)
-
-
-#region LOD Threshold Sweep
-
-const LOD_SWEEP_THRESHOLDS: Array[float] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
-
-var _sweep_mode: bool = false
-var _sweep_index: int = 0
-var _sweep_results: Array[Dictionary] = []
-var _sweep_console: Node = null
-var _sweep_camera: Camera3D = null
-var _sweep_streaming_manager: NativeStreamingManagerScript = null
-var _sweep_cell_manager: CellManagerScript = null
-
-
-func init_lod_sweep(sm: NativeStreamingManagerScript, cm: CellManagerScript,
-		cam: Camera3D, console: Node = null) -> void:
-	_sweep_mode = true
-	_sweep_index = 0
-	_sweep_results.clear()
-	_sweep_console = console
-	_sweep_camera = cam
-	_sweep_streaming_manager = sm
-	_sweep_cell_manager = cm
-	_start_sweep_pass()
-
-
-func _start_sweep_pass() -> void:
-	if _sweep_index >= LOD_SWEEP_THRESHOLDS.size():
-		_finish_sweep()
-		return
-
-	var threshold := LOD_SWEEP_THRESHOLDS[_sweep_index]
-	var vp := get_viewport()
-	if vp:
-		vp.mesh_lod_threshold = threshold
-	Log.info("tools", "LOD sweep: pass %d/%d — threshold=%.2f px" % [
-		_sweep_index + 1, LOD_SWEEP_THRESHOLDS.size(), threshold])
-
-	# Run quick benchmark (orbit only)
-	_streaming_manager = _sweep_streaming_manager
-	_cell_manager = _sweep_cell_manager
-	_camera = _sweep_camera
-	_console = _sweep_console
-	_owns_streaming = false
-	_quick_mode = true
-	_setup_ui()
-	_build_waypoints()
-	_start_benchmark()
-
-
-func _on_sweep_pass_complete(results: Dictionary) -> void:
-	var threshold := LOD_SWEEP_THRESHOLDS[_sweep_index]
-	results["mesh_lod_threshold"] = threshold
-	_sweep_results.append(results)
-
-	_sweep_index += 1
-	if _sweep_index < LOD_SWEEP_THRESHOLDS.size():
-		# Reset and run next pass
-		_frame_log.clear()
-		_event_log.clear()
-		_running = false
-		_finished = false
-		_start_sweep_pass()
-	else:
-		_finish_sweep()
-
-
-func _finish_sweep() -> void:
-	# Restore default threshold
-	var vp := get_viewport()
-	if vp:
-		vp.mesh_lod_threshold = 1.0
-
-	var lines: PackedStringArray = PackedStringArray()
-	lines.append("========== LOD THRESHOLD SWEEP RESULTS ==========")
-	lines.append("%-12s %8s %8s %8s %8s %10s" % ["threshold", "avg_fps", "p50_ms", "p95_ms", "p99_ms", "draw_calls"])
-	lines.append("------------------------------------------------------------")
-	for r: Dictionary in _sweep_results:
-		lines.append("%-12.2f %8.1f %8.1f %8.1f %8.1f %10d" % [
-			r.get("mesh_lod_threshold", 0.0),
-			r.get("avg_fps", 0.0),
-			r.get("p50_ms", 0.0),
-			r.get("p95_ms", 0.0),
-			r.get("p99_ms", 0.0),
-			r.get("avg_draw_calls", 0),
-		])
-	lines.append("==================================================")
-
-	var output := "\n".join(lines)
-	Log.info("tools", output)
-	if _sweep_console and _sweep_console.has_method("print_line"):
-		for line: String in lines:
-			_sweep_console.print_line(line)
-
-	# Save sweep CSV
-	_save_sweep_csv()
-	queue_free()
-
-
-func _save_sweep_csv() -> void:
-	var dir_path := "user://benchmark_results"
-	if not DirAccess.dir_exists_absolute(dir_path):
-		DirAccess.make_dir_recursive_absolute(dir_path)
-
-	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-	var file_path := "%s/lod_sweep_%s.csv" % [dir_path, timestamp]
-	var file := FileAccess.open(file_path, FileAccess.WRITE)
-	if not file:
-		return
-
-	file.store_line("threshold,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_draw_calls,peak_vram_mb")
-	for r: Dictionary in _sweep_results:
-		file.store_line("%.2f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.0f" % [
-			r.get("mesh_lod_threshold", 0.0),
-			r.get("avg_fps", 0.0),
-			r.get("avg_time_ms", 0.0),
-			r.get("p50_ms", 0.0),
-			r.get("p95_ms", 0.0),
-			r.get("p99_ms", 0.0),
-			r.get("max_time_ms", 0.0),
-			r.get("avg_draw_calls", 0),
-			r.get("peak_draw_calls", 0),
-			r.get("peak_vram_mb", 0.0),
-		])
-	file.close()
-	Log.info("tools", "LOD sweep CSV saved to %s" % file_path)
-
-#endregion
-
-
 #region JSON Summary
 
 ## Save a JSON summary alongside the CSV for historical comparison
@@ -1187,7 +840,6 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 
 	var summary := {
 		"timestamp": Time.get_datetime_string_from_system(),
-		"mode": "quick" if _quick_mode else "full",
 		"toggle_state": toggle_state,
 		"avg_fps": results.get("avg_fps", 0.0),
 		"avg_ms": results.get("avg_time_ms", 0.0),
@@ -1212,193 +864,31 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 #endregion
 
 
-#region Subsystem Isolation Benchmark
+#region Console Command Helpers
 
-## Isolation mode: runs baseline + one pass per subsystem with that subsystem disabled.
-## Reports per-subsystem cost ranking sorted by FPS impact.
-var _isolate_mode: bool = false
-var _isolate_index: int = -1  # -1 = baseline, 0..N = each subsystem
-var _isolate_subsystem_names: Array[String] = []
-var _isolate_results: Array[Dictionary] = []
-var _isolate_toggles: RefCounted = null  # SubsystemToggles reference
-var _isolate_console: Node = null
-var _isolate_camera: Camera3D = null
-var _isolate_streaming_manager: NativeStreamingManagerScript = null
-var _isolate_cell_manager: CellManagerScript = null
+## Register benchmark console commands on a Console node
+## streaming_manager: NativeStreamingManager (Node3D), cell_manager: CellManager (RefCounted)
+static func register_console_commands(console: Node, streaming_manager: Variant, cell_manager: Variant, camera: Camera3D) -> void:
+	var run_bench := func(args: Dictionary) -> Variant:
+		var benchmark := StreamingBenchmark.new()
+		benchmark.name = "StreamingBenchmark"
+		console.get_tree().root.add_child(benchmark)
+		benchmark.init_console_mode(streaming_manager, cell_manager, camera, console)
+		return "Streaming benchmark started (~30s)..."
 
-## Settle timer — 2s pause between toggle change and measurement start
-var _settle_timer: float = 0.0
-var _settling: bool = false
+	console.register_command(
+		"benchmark_streaming", run_bench,
+		"Run streaming benchmark (~30s)",
+		"debug",
+		PackedStringArray(["bench_stream"]),
+	)
 
-
-func init_isolate_mode(
-	sm: NativeStreamingManagerScript, cm: CellManagerScript,
-	cam: Camera3D, console: Node, toggles: RefCounted
-) -> void:
-	_isolate_mode = true
-	_isolate_index = -1  # Start with baseline
-	_isolate_results.clear()
-	_isolate_console = console
-	_isolate_camera = cam
-	_isolate_streaming_manager = sm
-	_isolate_cell_manager = cm
-	_isolate_toggles = toggles
-	_isolate_subsystem_names = toggles.get_flag_names()
-
-	var pass_count := _isolate_subsystem_names.size() + 1  # baseline + each subsystem
-	var est_time := pass_count * 20  # ~20s per quick pass
-	Log.info("tools", "Isolation benchmark: %d passes (~%ds). Baseline first, then disable one subsystem per pass." % [pass_count, est_time])
-	if _isolate_console and _isolate_console.has_method("print_line"):
-		_isolate_console.print_line("Isolation benchmark: %d passes (~%ds estimated)" % [pass_count, est_time])
-
-	# Ensure all subsystems are ON for baseline
-	toggles.enable_all()
-	_start_isolate_pass()
-
-
-func _start_isolate_pass() -> void:
-	if _isolate_index >= _isolate_subsystem_names.size():
-		_finish_isolate()
-		return
-
-	# Apply toggle for this pass
-	if _isolate_index == -1:
-		# Baseline: all ON
-		_isolate_toggles.enable_all()
-		Log.info("tools", "Isolation pass: BASELINE (all ON)")
-	else:
-		# Disable one subsystem
-		var name: String = _isolate_subsystem_names[_isolate_index]
-		_isolate_toggles.enable_all()
-		_isolate_toggles.set_flag(name, false)
-		Log.info("tools", "Isolation pass: %s OFF" % name)
-
-	# Settle for 2s before starting measurement
-	_settling = true
-	_settle_timer = 2.0
-
-
-func _process_isolate_settle(delta: float) -> void:
-	if not _settling:
-		return
-	_settle_timer -= delta
-	if _settle_timer <= 0.0:
-		_settling = false
-		# Now start the actual benchmark pass
-		_streaming_manager = _isolate_streaming_manager
-		_cell_manager = _isolate_cell_manager
-		_camera = _isolate_camera
-		_console = _isolate_console
-		_owns_streaming = false
-		_quick_mode = true
-		_sweep_mode = false
-		_frame_log.clear()
-		_event_log.clear()
-		_running = false
-		_finished = false
-		_setup_ui()
-		_build_waypoints()
-		_start_benchmark()
-
-
-func _on_isolate_pass_complete(results: Dictionary) -> void:
-	if _isolate_index == -1:
-		results["subsystem"] = "BASELINE"
-	else:
-		results["subsystem"] = _isolate_subsystem_names[_isolate_index]
-	_isolate_results.append(results)
-
-	_isolate_index += 1
-	if _isolate_index < _isolate_subsystem_names.size():
-		_frame_log.clear()
-		_event_log.clear()
-		_running = false
-		_finished = false
-		_start_isolate_pass()
-	else:
-		_finish_isolate()
-
-
-func _finish_isolate() -> void:
-	# Restore all subsystems
-	if _isolate_toggles:
-		_isolate_toggles.reset()
-
-	if _isolate_results.is_empty():
-		queue_free()
-		return
-
-	# Extract baseline
-	var baseline_fps: float = _isolate_results[0].get("avg_fps", 1.0)
-	var baseline_ms: float = _isolate_results[0].get("avg_time_ms", 999.0)
-
-	# Calculate per-subsystem cost and sort by impact
-	var costs: Array[Dictionary] = []
-	for i in range(1, _isolate_results.size()):
-		var r: Dictionary = _isolate_results[i]
-		var fps_without: float = r.get("avg_fps", 0.0)
-		var ms_without: float = r.get("avg_time_ms", 0.0)
-		var fps_delta: float = fps_without - baseline_fps
-		var ms_saved: float = baseline_ms - ms_without
-		costs.append({
-			"subsystem": r.get("subsystem", "?"),
-			"fps_with_disabled": fps_without,
-			"fps_delta": fps_delta,
-			"ms_saved": ms_saved,
-		})
-	costs.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.ms_saved > b.ms_saved)
-
-	# Print report
-	var lines: PackedStringArray = PackedStringArray()
-	lines.append("========== SUBSYSTEM ISOLATION RESULTS ==========")
-	lines.append("Baseline: %.1f FPS (%.1f ms)" % [baseline_fps, baseline_ms])
-	lines.append("")
-	lines.append("%-16s %10s %10s %10s" % ["subsystem", "fps_delta", "ms_saved", "fps_without"])
-	lines.append("--------------------------------------------------")
-	for c: Dictionary in costs:
-		var sign: String = "+" if c.fps_delta >= 0 else ""
-		lines.append("%-16s %s%9.1f %9.1fms %10.1f" % [
-			c.subsystem, sign, c.fps_delta, c.ms_saved, c.fps_with_disabled
-		])
-	lines.append("==================================================")
-	lines.append("Positive fps_delta = disabling HELPS (subsystem costs performance)")
-
-	var output := "\n".join(lines)
-	Log.info("tools", output)
-	if _isolate_console and _isolate_console.has_method("print_line"):
-		for line: String in lines:
-			_isolate_console.print_line(line)
-
-	# Save CSV
-	_save_isolate_csv()
-	queue_free()
-
-
-func _save_isolate_csv() -> void:
-	var dir_path := "user://benchmark_results"
-	if not DirAccess.dir_exists_absolute(dir_path):
-		DirAccess.make_dir_recursive_absolute(dir_path)
-
-	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-	var file_path := "%s/isolate_%s.csv" % [dir_path, timestamp]
-	var file := FileAccess.open(file_path, FileAccess.WRITE)
-	if not file:
-		return
-
-	file.store_line("subsystem,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_vram_mb")
-	for r: Dictionary in _isolate_results:
-		file.store_line("%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.0f" % [
-			r.get("subsystem", "?"),
-			r.get("avg_fps", 0.0),
-			r.get("avg_time_ms", 0.0),
-			r.get("p50_ms", 0.0),
-			r.get("p95_ms", 0.0),
-			r.get("p99_ms", 0.0),
-			r.get("max_time_ms", 0.0),
-			r.get("avg_draw_calls", 0),
-			r.get("peak_vram_mb", 0.0),
-		])
-	file.close()
-	Log.info("tools", "Isolation CSV saved to %s" % file_path)
+	# Shorthand aliases
+	console.register_command(
+		"benchmark", run_bench,
+		"Run streaming benchmark (~30s). Alias for benchmark_streaming",
+		"debug",
+		PackedStringArray(["bench"]),
+	)
 
 #endregion

@@ -483,7 +483,7 @@ All Phase B-G work happens on branch **`refactor/lod-b-wide`**. `master` stays c
         - New console command `lod_baseline_dump <label>` added to `src/tools/lod_debug_commands.gd` (on `refactor/lod-b-wide` branch). Runs at current camera position and writes combined output of `lod_stats` + `mid_batch_stats` + `visibility_gaps` + `streaming_diag` + `look` + `mid_lod_textures` to `user://lod_baselines/<label>.txt` with a header (timestamp, frame counter, frame time, camera pos/rot/FOV, camera cell, `mesh_lod_threshold`). ~80 lines. Survives through Phase D post-refactor capture + Phase G full validation.
         - `@user` runs the command at each of 4 baseline locations (Vivec Canton, Balmora dock, Seyda Neen, Ald-ruhn) and copies the 4 resulting text files to `docs/audit/lod_refactor_baselines/programmatic/`.
         - `@user` fills in `visual_qa_baseline.md` per the template in `BASELINE_PROCEDURE.md` §2.1 — ~5 yes/no questions per location, ~20 data points total.
-    6. Baseline performance capture: `StreamingBenchmark` run via standalone scene (`src/tools/streaming_benchmark.tscn`) OR console command `benchmark_streaming` from `world_explorer`. Scripted camera path is Seyda-Neen-centered: idle(3s) → approach from 800m(5s) → orbit at 200m(10s) → sprint 600m north(5s) → 3 teleports 500m apart → return(4s). CSV written to `user://benchmark_results/`. User copies to `docs/audit/lod_refactor_baselines/baseline_perf.csv`.
+    6. Baseline performance capture: `StreamingBenchmark` run via console command `benchmark_streaming` (or the `benchmark` alias) from `world_explorer`. Scripted camera path is Seyda-Neen-centered: idle(3s) → approach from 800m(5s) → orbit at 200m(10s) → sprint 600m north(5s) → 3 teleports 500m apart → return(4s). CSV written to `user://benchmark_results/`. User copies to `docs/audit/lod_refactor_baselines/baseline_perf.csv`. (Historical note: the original procedure also mentioned a standalone `src/tools/streaming_benchmark.tscn` launch path — that scene was removed 2026-04-14 during the v1 benchmark rip-out. Use the console command from a normal scene launch instead. See `docs/audit/BENCHMARK_V2_PLAN.md`.)
     7. Baseline procedure document written for the user (`docs/audit/lod_refactor_baselines/BASELINE_PROCEDURE.md` v2) — step-by-step programmatic + questionnaire + benchmark procedures.
 - Exit criteria:
     - Plan doc review closed (`@roaster` verdict applied, `@user` approval documented in Progress Log) ✓
@@ -988,7 +988,7 @@ Git: `master` at `b89a1f8` (unchanged), `pre-lod-refactor` tag at `b89a1f8`, `re
     - Format auto-detection flips from OLD to whatever the new format looks like (single `MeshInstance3D` per mesh, no sibling `_LODn` children, `has_lod_chain` meta set)
 4. Launch `scenes/Godotwind.tscn`, fly to Vivec / Balmora / Seyda Neen / Ald-ruhn, interactively verify visual quality against the Phase A baselines.
 5. Tune `mesh_lod_threshold` per Phase D exit criterion. Formal log entry required: "mesh_lod_threshold set to X.X based on <specific observation at baseline location Y>".
-6. Run `StreamingBenchmark` via `src/tools/streaming_benchmark.tscn`, diff against `docs/audit/lod_refactor_baselines/baseline_perf.csv`. Check P50/P95/P99 frame time, RS instance count, cell crossing overruns, visibility_drops count. Acceptance = equal or better across all.
+6. Run `StreamingBenchmark` via the `benchmark` console command (the standalone `src/tools/streaming_benchmark.tscn` scene was removed 2026-04-14; see `docs/audit/BENCHMARK_V2_PLAN.md`), diff against `docs/audit/lod_refactor_baselines/baseline_perf.csv`. Check P50/P95/P99 frame time, RS instance count, cell crossing overruns, visibility_drops count. Acceptance = equal or better across all.
 7. **Doc sync:**
     - Rewrite `docs/DISTANCE_RENDERING.md` — remove the 3-sub-band description, describe the single render-tier band + embedded LOD chain + screen-space selection pipeline.
     - Update `docs/STATUS.md` "3-Tier LOD" row.
@@ -1319,7 +1319,7 @@ FAR     1000-5km  Impostors (unchanged)
 - Streaming benchmark CSV extended with 9 phase timing columns
 
 **4. LOD threshold sweep** (`streaming_benchmark.gd`)
-- `benchmark_lod_sweep` console command: runs 6 quick benchmark passes at mesh_lod_threshold [0.25, 0.5, 1.0, 2.0, 4.0, 8.0], outputs comparison table + CSV.
+- `benchmark_lod_sweep` console command: runs 6 quick benchmark passes at mesh_lod_threshold [0.25, 0.5, 1.0, 2.0, 4.0, 8.0], outputs comparison table + CSV. (Removed 2026-04-14 in v1 benchmark rip-out — see `docs/audit/BENCHMARK_V2_PLAN.md`. If a sweep is needed again, hand-roll it as a one-off dev tool per the v2 plan.)
 
 ### Expected Impact (after HLOD cache bake)
 
@@ -1354,5 +1354,5 @@ FAR     1000-5km  Impostors (unchanged)
 1. Bake HLOD cache (`bake_hlod` in console)
 2. Visual verification of HLOD tier transitions (300m boundary)
 3. Run streaming benchmark with HLOD active — compare FPS/draw calls
-4. mesh_lod_threshold sweep (`benchmark_lod_sweep`)
+4. mesh_lod_threshold sweep (`benchmark_lod_sweep` — removed 2026-04-14; hand-roll a one-off sweep if needed, per `docs/audit/BENCHMARK_V2_PLAN.md`)
 5. LOD range extension test (push MID_END further with HLOD backing)

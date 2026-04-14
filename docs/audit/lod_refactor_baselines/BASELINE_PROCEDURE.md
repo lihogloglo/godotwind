@@ -156,7 +156,11 @@ Unchanged from previous versions.
 **What the benchmark does:** scripted Seyda-Neen-centered camera path (idle → approach → orbit → sprint → teleports → return, ~30 s total). Writes CSV to `user://benchmark_results/`.
 
 **How to run:**
+
+> **Updated 2026-04-14:** the standalone `src/tools/streaming_benchmark.tscn` scene referenced below was removed in the v1 benchmark rip-out (see `docs/audit/BENCHMARK_V2_PLAN.md`). Use the console command from a normal scene launch instead: launch `scenes/Godotwind.tscn`, open the console with `` ` ``, run `benchmark` (or the alias `bench`). Same camera path, same CSV output location. The bash invocation below no longer works and is kept for history.
+
 ```bash
+# v1 (removed 2026-04-14, no longer works):
 "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
     --path "D:/Gamedev/Godotwind/godotwind" \
     res://src/tools/streaming_benchmark.tscn

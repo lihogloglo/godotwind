@@ -1382,15 +1382,6 @@ func _setup_subsystem_toggles() -> void:
 	if console:
 		_subsystem_toggles.register_commands(console)
 
-		# Register isolation benchmark command (needs toggles + streaming manager)
-		if native_streaming_manager and cell_manager:
-			if not _StreamingBenchmarkScript:
-				_StreamingBenchmarkScript = load("res://src/tools/streaming_benchmark.gd")
-			if _StreamingBenchmarkScript:
-				_StreamingBenchmarkScript.register_isolate_command(
-					console, native_streaming_manager, cell_manager, camera, _subsystem_toggles
-				)
-
 	_log("Subsystem toggles initialized (%d flags)" % _subsystem_toggles.get_flag_names().size())
 
 
