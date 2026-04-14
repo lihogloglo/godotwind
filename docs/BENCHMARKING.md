@@ -236,9 +236,9 @@ Edit `_build_ui()` to create a new `Label`, then `_rebuild_labels()` to populate
 
 ## Related Files
 
-- `src/tools/streaming_benchmark.gd` — scripted flyby + manual blocks (~1094 lines)
+- `src/tools/streaming_benchmark.gd` — scripted flyby + manual blocks (~1102 lines)
 - `src/tools/benchmark_hud.gd` — live HUD overlay (~302 lines)
-- `src/tools/progressive_benchmark.gd` — additive sweep orchestrator (~267 lines)
+- `src/tools/progressive_benchmark.gd` — additive sweep orchestrator (~297 lines)
 - `src/tools/subsystem_toggles.gd` — flag registry (170 lines)
 - `src/tools/world_explorer.gd` — `_setup_subsystem_toggles()` + command wiring
 - `src/core/world/native_streaming_manager.gd` — `set_*_visible()` public API + `get_stats()`
