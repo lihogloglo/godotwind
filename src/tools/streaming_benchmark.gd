@@ -98,6 +98,19 @@ var _last_frame_time_ms: float = 0.0
 var _running: bool = false
 var _finished: bool = false
 
+## Manual mode (bench_start / bench_stop) — no scripted flyby, no UI overlay,
+## user drives the camera and we just record per-frame metrics between the
+## start / stop calls. Plan §4.3.
+var _manual_mode: bool = false
+var _manual_label: String = ""
+var _manual_start_ms: int = 0
+
+## Tracks the currently-active manual benchmark so bench_start refuses to
+## create a second one while one is already running. Cleared in stop_manual().
+## Static so the two console-command lambdas share it without capturing by
+## reference (GDScript lambda capture semantics get awkward for shared mut state).
+static var _active_manual_bench: StreamingBenchmark = null
+
 ## UI references
 var _stats_panel: VBoxContainer = null
 var _fps_label: Label = null
@@ -142,6 +155,43 @@ func init_console_mode(
 	_setup_ui()
 	_build_waypoints()
 	_start_benchmark()
+
+
+## Initialize for manual measurement mode (bench_start command).
+## No scripted camera path, no on-screen UI overlay — user flies the camera
+## themselves and stop_manual() is called later (bench_stop command) to finalize
+## the capture. The label is embedded into the output filenames so multiple
+## A/B blocks in one session don't overwrite each other.
+func init_manual_mode(
+	streaming_manager: NativeStreamingManagerScript,
+	cell_manager: CellManagerScript,
+	camera: Camera3D,
+	console: Node,
+	label: String
+) -> void:
+	_streaming_manager = streaming_manager
+	_cell_manager = cell_manager
+	_camera = camera
+	_console = console
+	_manual_mode = true
+	_manual_label = label
+	_manual_start_ms = Time.get_ticks_msec()
+	_current_segment_index = 0
+	_frame_log.clear()
+	_event_log.clear()
+	_running = true
+	_finished = false
+
+	# Connect streaming signals for event log (matches _start_benchmark)
+	if _streaming_manager:
+		if _streaming_manager.has_signal("cell_loading"):
+			_streaming_manager.cell_loading.connect(_on_cell_loading)
+		if _streaming_manager.has_signal("cell_loaded"):
+			_streaming_manager.cell_loaded.connect(_on_cell_loaded)
+		if _streaming_manager.has_signal("cell_unloaded"):
+			_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
+
+	Log.info("tools", "StreamingBenchmark: manual recording started (label: '%s')" % label)
 
 #endregion
 
@@ -316,8 +366,13 @@ func _process(delta: float) -> void:
 
 	_last_frame_time_ms = delta * 1000.0
 
-	# Log this frame's metrics
+	# Log this frame's metrics (shared across scripted + manual modes)
 	_log_frame()
+
+	# Manual mode: just record, no scripted camera, no UI, no auto-completion.
+	# User drives the camera and calls stop_manual() via `bench_stop` when done.
+	if _manual_mode:
+		return
 
 	# Advance camera
 	_advance_camera(delta)
@@ -557,6 +612,57 @@ func _finish_benchmark() -> void:
 	get_tree().create_timer(1.0).timeout.connect(queue_free)
 
 
+## Finalize a manual-mode recording (bench_stop command). Mirrors
+## _finish_benchmark but driven externally rather than by waypoint exhaustion.
+func stop_manual() -> void:
+	if not _manual_mode or not _running:
+		return
+	_running = false
+	_finished = true
+
+	var duration_s := float(Time.get_ticks_msec() - _manual_start_ms) / 1000.0
+
+	# Guard against the empty-frame-log crash path: bench_start + bench_stop in
+	# rapid succession (or with the game paused / hung) leaves _frame_log empty.
+	# _calculate_results returns {} in that case, but the subsequent label /
+	# duration assignments would make is_empty() false downstream and
+	# _print_summary would crash dereferencing .total_time_s.
+	if _frame_log.is_empty():
+		Log.warn("tools", "bench_stop: no frames recorded, nothing to save (label: '%s')" % _manual_label)
+		if _active_manual_bench == self:
+			_active_manual_bench = null
+		get_tree().create_timer(1.0).timeout.connect(queue_free)
+		return
+
+	var results := _calculate_results()
+	results["label"] = _manual_label
+	results["manual_duration_s"] = duration_s
+
+	_save_csv()
+	_save_events_csv()
+	_print_summary(results)
+	_save_json_summary(results)
+
+	benchmark_complete.emit(results)
+
+	# Clear the class-level registry so a subsequent bench_start is allowed
+	if _active_manual_bench == self:
+		_active_manual_bench = null
+
+	# Clean up after a short delay
+	get_tree().create_timer(1.0).timeout.connect(queue_free)
+
+
+## Build a filename prefix that embeds the manual label (if any) so multiple
+## named blocks in one session produce distinguishable output files.
+func _file_prefix(base: String) -> String:
+	if _manual_mode and not _manual_label.is_empty():
+		# Sanitize — labels come from user typing at the console
+		var safe_label := _manual_label.validate_filename()
+		return "%s_%s" % [base, safe_label]
+	return base
+
+
 func _calculate_results() -> Dictionary:
 	if _frame_log.is_empty():
 		return {}
@@ -690,7 +796,7 @@ func _save_csv() -> void:
 		DirAccess.make_dir_recursive_absolute(dir_path)
 
 	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-	var file_path := "%s/benchmark_%s.csv" % [dir_path, timestamp]
+	var file_path := "%s/%s_%s.csv" % [dir_path, _file_prefix("benchmark"), timestamp]
 
 	var file := FileAccess.open(file_path, FileAccess.WRITE)
 	if not file:
@@ -723,7 +829,7 @@ func _save_events_csv() -> void:
 		DirAccess.make_dir_recursive_absolute(dir_path)
 
 	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-	var file_path := "%s/events_%s.csv" % [dir_path, timestamp]
+	var file_path := "%s/%s_%s.csv" % [dir_path, _file_prefix("events"), timestamp]
 
 	var file := FileAccess.open(file_path, FileAccess.WRITE)
 	if not file:
@@ -885,10 +991,17 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 		DirAccess.make_dir_recursive_absolute(dir_path)
 
 	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-	var file_path := "%s/summary_%s.json" % [dir_path, timestamp]
+	var file_path := "%s/%s_%s.json" % [dir_path, _file_prefix("summary"), timestamp]
 
 	var summary := {
 		"timestamp": Time.get_datetime_string_from_system(),
+		"label": _manual_label if _manual_mode else "",
+		"mode": "manual" if _manual_mode else "scripted",
+		# Wall-clock duration in manual mode — diverges from total_time_s
+		# (frame-log-derived) when the game hangs / pauses mid-block, so it's
+		# useful for post-hoc "did the game freeze during this measurement?"
+		# diagnostics. 0.0 for scripted runs.
+		"manual_duration_s": results.get("manual_duration_s", 0.0),
 		"toggle_state": toggle_state,
 		"avg_fps": results.get("avg_fps", 0.0),
 		"avg_ms": results.get("avg_time_ms", 0.0),
@@ -938,6 +1051,52 @@ static func register_console_commands(console: Node, streaming_manager: Variant,
 		"Run streaming benchmark (~%ds). Alias for benchmark_streaming" % int(FLYBY_TOTAL_S),
 		"debug",
 		PackedStringArray(["bench"]),
+	)
+
+	# Manual measurement blocks — user-driven capture of arbitrary gameplay
+	# moments. `bench_start <label>` begins recording; `bench_stop` finalizes.
+	var run_bench_start := func(args: Dictionary) -> Variant:
+		if _active_manual_bench != null and is_instance_valid(_active_manual_bench):
+			return "bench_start: already recording '%s' (use bench_stop first)" % (
+				_active_manual_bench._manual_label
+			)
+		var label: String = str(args.get("label", "manual")).strip_edges()
+		if label.is_empty():
+			label = "manual"
+		var benchmark := StreamingBenchmark.new()
+		benchmark.name = "StreamingBenchmarkManual"
+		console.get_tree().root.add_child(benchmark)
+		benchmark.init_manual_mode(streaming_manager, cell_manager, camera, console, label)
+		_active_manual_bench = benchmark
+		return "bench_start: recording as '%s' — use bench_stop to finalize" % label
+
+	var run_bench_stop := func(_args: Dictionary) -> Variant:
+		if _active_manual_bench == null or not is_instance_valid(_active_manual_bench):
+			return "bench_stop: no active manual benchmark (use bench_start first)"
+		var label := _active_manual_bench._manual_label
+		_active_manual_bench.stop_manual()
+		# stop_manual clears _active_manual_bench itself
+		return "bench_stop: finalized '%s' — CSV + JSON written to user://benchmark_results/" % label
+
+	var start_params: Array[CommandRegistry.ParameterInfo] = [
+		CommandRegistry.ParameterInfo.new(
+			"label", TYPE_STRING, "optional label embedded in filename", false, "manual"
+		),
+	]
+
+	console.register_command(
+		"bench_start", run_bench_start,
+		"Start a manual measurement block (user drives the camera). Use bench_stop to finalize.",
+		"debug",
+		PackedStringArray([]),
+		start_params,
+		PackedStringArray(["bench_start village_dense", "bench_start vivec_canton"]),
+	)
+	console.register_command(
+		"bench_stop", run_bench_stop,
+		"Finalize the active manual measurement block (see bench_start)",
+		"debug",
+		PackedStringArray([]),
 	)
 
 #endregion
