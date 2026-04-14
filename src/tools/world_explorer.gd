@@ -76,6 +76,7 @@ const MWResultScriptHandlerScript := preload("res://src/core/dialogue/morrowind/
 const MWTextFormatterScript := preload("res://src/core/dialogue/morrowind/mw_text_formatter.gd")
 const SubsystemTogglesScript := preload("res://src/tools/subsystem_toggles.gd")
 const BenchmarkHUDScript := preload("res://src/tools/benchmark_hud.gd")
+const ProgressiveBenchmarkScript := preload("res://src/tools/progressive_benchmark.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -1397,6 +1398,14 @@ func _setup_subsystem_toggles() -> void:
 		_benchmark_hud.set_subsystem_toggles(_subsystem_toggles)
 		if console:
 			BenchmarkHUDScript.register_console_commands(console, _benchmark_hud)
+
+	# Progressive auto-run — `bench_progressive` command. Needs toggles, so
+	# registered here rather than alongside the other streaming_benchmark
+	# commands (which register earlier, before _subsystem_toggles exists).
+	if console and native_streaming_manager and cell_manager:
+		ProgressiveBenchmarkScript.register_console_commands(
+			console, native_streaming_manager, cell_manager, camera, _subsystem_toggles
+		)
 
 
 ## Handle resolution change
