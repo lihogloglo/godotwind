@@ -41,9 +41,9 @@ var _regions_loaded := 0
 var _textures_loaded := 0
 
 # Draggable test objects for wetness testing
-var _test_objects: Array[Dictionary] = []  # [{node, wet_line_y, mat_rid, mesh_bottom}]
+var _test_objects: Array[Dictionary] = []  # [{node, wet_line_local, mat_rid, mesh_bottom}]
 var _held_object: Dictionary = {}
-var _wet_dry_rate := 0.5  # wet_line_y decay (m/s) when above water
+var _wet_dry_rate := 0.3  # wet_line_local decay (m/s) when above water
 const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
 
 const CS := preload("res://src/core/coordinate_system.gd")
@@ -407,7 +407,7 @@ func _process(delta: float) -> void:
 	# Update HUD
 	var held_info := ""
 	if not _held_object.is_empty():
-		held_info = " | HELD line=%.1f" % _held_object["wet_line_y"]
+		held_info = " | HELD wet=%.2f" % _held_object["wet_line_local"]
 	if _label:
 		_label.text = "Wet Map Test — y=%.1f sea=%.1f spd=%.0f%s" % [
 			_camera.global_position.y, _sea_level, _move_speed, held_info]
@@ -415,7 +415,7 @@ func _process(delta: float) -> void:
 		var obj_info := ""
 		for obj in _test_objects:
 			var n: MeshInstance3D = obj["node"]
-			obj_info += "\n  %s: line=%.1f y=%.1f" % [n.name, obj["wet_line_y"], n.global_position.y]
+			obj_info += "\n  %s: wet=%.2f y=%.1f" % [n.name, obj["wet_line_local"], n.global_position.y]
 		_diag_label.text = "regions=%d tex=%d\nLClick=pick/drop RClick+drag=look\nWASD=move Scroll=speed Shift=sprint%s" % [
 			_regions_loaded, _textures_loaded, obj_info]
 

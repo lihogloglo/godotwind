@@ -1646,7 +1646,7 @@ func _compact_texture_array() -> void:
 
 	# Build new arrays with only used textures
 	var new_images: Array[Image] = []
-	var new_index_map: Dictionary = {}
+	var new_index_map: Dictionary[String, int] = {}
 
 	for i in used_hashes.size():
 		var hash_key: String = used_hashes[i]
@@ -1656,7 +1656,7 @@ func _compact_texture_array() -> void:
 
 	# Also compact normal arrays in parallel
 	var new_normal_images: Array[Image] = []
-	var new_normal_index_map: Dictionary = {}
+	var new_normal_index_map: Dictionary[String, int] = {}
 
 	for i in used_hashes.size():
 		var hash_key: String = used_hashes[i]

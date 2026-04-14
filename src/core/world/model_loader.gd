@@ -33,6 +33,13 @@ const MAX_CACHE_SIZE := 500
 const MAX_CONCURRENT_ASYNC_LOADS := 16
 
 ## Cache for loaded models: model_path (lowercase) -> Node3D prototype
+##
+## LANDMINE: stores Node3D prototypes. Callers MUST .duplicate() before
+## add_child — sharing across parents triggers reparent cascades and dangling
+## references. Every current caller does `prototype.duplicate()` before use;
+## if a future caller add_childs the cache value directly, convert this to
+## `Dictionary[String, PackedScene]` and have callers `.instantiate()` each.
+## See docs/audit/MODEL_LOADER_RACE.md §"Deferred landmines".
 var _model_cache: Dictionary = {}
 
 ## LRU tracking: cache_key -> last access frame number
@@ -411,37 +418,34 @@ func process_async_loads() -> int:
 
 		match status:
 			ResourceLoader.THREAD_LOAD_LOADED:
-				# Load completed successfully
+				# Load completed. Runtime never deletes cache files on failure:
+				# prebake owns disk-cache ownership (Unreal StreamableManager /
+				# Unity Addressables layer split). A failed load here is logged,
+				# cached as null, and left for the next prebake pass to repair.
+				# See docs/audit/MODEL_LOADER_RACE.md.
 				var packed_scene := ResourceLoader.load_threaded_get(disk_path) as PackedScene
 				var model: Node3D = null
 
 				if packed_scene:
-					# Validate PackedScene state before instantiation
-					var state := packed_scene.get_state()
-					if state and state.get_node_count() > 0:
-						var instance := packed_scene.instantiate()
-						if instance == null:
-							# Instantiation failed (corrupted mesh data, invalid RIDs)
-							push_warning("ModelLoader: Async instantiate failed: %s" % disk_path)
-							DirAccess.remove_absolute(disk_path)
-							_file_exists_cache.erase(disk_path)
-						elif instance is Node3D:
-							_strip_occluders(instance)
-							model = instance as Node3D
-						else:
-							# Wrong type - corrupted cache
-							instance.queue_free()
-							DirAccess.remove_absolute(disk_path)
-							_file_exists_cache.erase(disk_path)
+					# DIAGNOSTIC (2026-04-14): log pre-instantiate state to correlate
+					# segfaults at this site with disk_path + file size + concurrent
+					# load count. Remove once root cause is pinned.
+					Log.info("models", "instantiate_attempt path=%s size=%d in_flight=%d" % [
+						disk_path,
+						FileAccess.get_file_as_bytes(disk_path).size(),
+						_pending_async_loads.size()
+					])
+					var instance := packed_scene.instantiate()
+					if instance is Node3D:
+						_strip_occluders(instance)
+						model = instance as Node3D
+					elif instance != null:
+						push_warning("ModelLoader: Async load produced non-Node3D: %s" % disk_path)
+						instance.queue_free()
 					else:
-						# Empty or corrupted state
-						push_warning("ModelLoader: Async load - empty state: %s" % disk_path)
-						DirAccess.remove_absolute(disk_path)
-						_file_exists_cache.erase(disk_path)
+						push_warning("ModelLoader: Async instantiate returned null: %s" % disk_path)
 				else:
-					# Failed to load - corrupted cache
-					DirAccess.remove_absolute(disk_path)
-					_file_exists_cache.erase(disk_path)
+					push_warning("ModelLoader: Async load returned null PackedScene: %s" % disk_path)
 
 				# Cache the result
 				var cache_key: String = _pending_async_loads[disk_path].cache_key
@@ -642,38 +646,26 @@ func _get_disk_cache_path(cache_key: String) -> String:
 ## Load a model from disk cache
 ## Returns Node3D instance or null if loading failed
 func _load_from_disk_cache(disk_path: String) -> Node3D:
+	# Runtime never deletes cache files on failure. Prebake owns the disk cache
+	# (Unreal StreamableManager / Unity Addressables layer split). If a load or
+	# instantiate fails here, we log-and-skip; the next prebake pass repairs.
+	# See docs/audit/MODEL_LOADER_RACE.md for the race this prevents.
 	if not FileAccess.file_exists(disk_path):
 		return null
 
 	var packed_scene := ResourceLoader.load(disk_path, "PackedScene") as PackedScene
 	if not packed_scene:
-		# Cache file is corrupted or incompatible - delete it
-		DirAccess.remove_absolute(disk_path)
-		_file_exists_cache.erase(disk_path)
-		return null
-
-	# Validate PackedScene state before instantiation
-	# This catches some corrupted scenes that load but fail to instantiate
-	var state := packed_scene.get_state()
-	if not state or state.get_node_count() == 0:
-		push_warning("ModelLoader: Corrupted PackedScene (empty state): %s" % disk_path)
-		DirAccess.remove_absolute(disk_path)
-		_file_exists_cache.erase(disk_path)
+		push_warning("ModelLoader: Sync load returned null PackedScene: %s" % disk_path)
 		return null
 
 	var instance := packed_scene.instantiate()
 	if instance == null:
-		# Instantiation failed (corrupted mesh data, invalid RIDs, etc.)
-		push_warning("ModelLoader: Failed to instantiate scene: %s" % disk_path)
-		DirAccess.remove_absolute(disk_path)
-		_file_exists_cache.erase(disk_path)
+		push_warning("ModelLoader: Sync instantiate returned null: %s" % disk_path)
 		return null
 
 	if not instance is Node3D:
-		# Wrong type - delete corrupted cache
+		push_warning("ModelLoader: Sync load produced non-Node3D: %s" % disk_path)
 		instance.queue_free()
-		DirAccess.remove_absolute(disk_path)
-		_file_exists_cache.erase(disk_path)
 		return null
 
 	# Strip OccluderInstance3D nodes — cached .res files may contain occluders
@@ -877,33 +869,6 @@ func _set_owner_recursive(node: Node, owner_node: Node) -> void:
 	for child in node.get_children():
 		child.owner = owner_node
 		_set_owner_recursive(child, owner_node)
-
-
-## Clear the disk cache (deletes all cached .res files)
-## Use this when game assets have been updated
-func clear_disk_cache() -> void:
-	var cache_dir := _get_disk_cache_dir()
-	if not DirAccess.dir_exists_absolute(cache_dir):
-		return
-
-	var dir := DirAccess.open(cache_dir)
-	if not dir:
-		return
-
-	var deleted := 0
-	dir.list_dir_begin()
-	var file_name := dir.get_next()
-	while file_name != "":
-		if not dir.current_is_dir() and file_name.ends_with(".res"):
-			dir.remove(file_name)
-			deleted += 1
-		file_name = dir.get_next()
-	dir.list_dir_end()
-
-	# Invalidate all cached file existence checks
-	_file_exists_cache.clear()
-
-	Log.info("models", "Cleared disk cache (%d files deleted)" % deleted)
 
 
 ## Get disk cache statistics
