@@ -25,7 +25,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const NEAR_END := DU.NEAR_END  # 150.0
 
 ## Distance where MID tier ends and FAR tier begins (meters)
-## MID tier: MultiMesh LOD instances (3 levels)
+## MID tier: one RS instance per object, engine-driven sub-LOD from embedded ArrayMesh surface_lod chain
 const MID_END := DU.MID_END  # 500.0
 
 ## Distance where FAR tier ends and HORIZON begins (meters)

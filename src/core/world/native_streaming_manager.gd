@@ -1337,15 +1337,6 @@ func _apply_fallback_visibility_recursive(node: Node, count: int) -> int:
 	return count
 
 
-## Get human-readable distance range string for LOD level (debug helper)
-func _get_lod_range_str(lod_level: int) -> String:
-	match lod_level:
-		1: return "150-250m"
-		2: return "250-375m"
-		3: return "375-500m"
-		_: return "unknown"
-
-
 ## Count MeshInstance3D nodes in a tree
 func _count_mesh_instances(node: Node) -> int:
 	var count := 0
