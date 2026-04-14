@@ -75,6 +75,7 @@ const MWQuestAdapterScript := preload("res://src/core/dialogue/morrowind/mw_ques
 const MWResultScriptHandlerScript := preload("res://src/core/dialogue/morrowind/mw_result_script_handler.gd")
 const MWTextFormatterScript := preload("res://src/core/dialogue/morrowind/mw_text_formatter.gd")
 const SubsystemTogglesScript := preload("res://src/tools/subsystem_toggles.gd")
+const BenchmarkHUDScript := preload("res://src/tools/benchmark_hud.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -144,6 +145,7 @@ var _pocket_manager: Node = null  # InteriorPocketManager
 var _door_prompt_label: Label = null  # "Press E to enter" prompt
 var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
 var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B feature flags
+var _benchmark_hud: CanvasLayer = null  # BenchmarkHUD — live perf overlay, default hidden
 var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
 var _loading_phase_times: Dictionary = {}  # Per-phase loading times
 
@@ -1383,6 +1385,18 @@ func _setup_subsystem_toggles() -> void:
 		_subsystem_toggles.register_commands(console)
 
 	_log("Subsystem toggles initialized (%d flags)" % _subsystem_toggles.get_flag_names().size())
+
+	# Benchmark HUD overlay — lives at scene tree root so it stays alive across
+	# interior pocket transitions and doesn't get torn down with world_explorer.
+	# Default hidden per docs/audit/BENCHMARK_V2_PLAN.md; user reveals with `hud`.
+	if _benchmark_hud == null:
+		_benchmark_hud = BenchmarkHUDScript.new()
+		_benchmark_hud.name = "BenchmarkHUD"
+		get_tree().root.add_child(_benchmark_hud)
+		_benchmark_hud.set_streaming_manager(native_streaming_manager)
+		_benchmark_hud.set_subsystem_toggles(_subsystem_toggles)
+		if console:
+			BenchmarkHUDScript.register_console_commands(console, _benchmark_hud)
 
 
 ## Handle resolution change
