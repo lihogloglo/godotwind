@@ -567,6 +567,93 @@ func test_paging_hysteresis_matches_existing_scheme() -> void:
 #endregion
 
 
+#region Phase 4b — top-down walk invariants (plan §4.3)
+
+## The top-down walk's critical correctness property: after the walk, no 1×1
+## MW cell is claimed by more than one chunk. Rebuilds the `covered_cells`
+## set from the walk output and asserts uniqueness.
+func test_top_down_walk_no_cell_double_coverage() -> void:
+	var merger := Merger.new()
+	# Camera at origin (0,0), far enough that all three tiers are populated.
+	# World origin is at (0, 0, 0) — MW cell (0, 0) roughly covers x∈[0,117], z∈[-117,0].
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	var owners: Dictionary = {}  # Vector2i (cell) -> Vector3i (owner chunk key)
+	for key: Vector3i in desired:
+		var size: int = 1 << key.z
+		for sy in range(size):
+			for sx in range(size):
+				var cell := Vector2i(key.x + sx, key.y + sy)
+				assert_that(owners.has(cell)).override_failure_message(
+					"Cell %s claimed by multiple chunks: existing=%s, new=%s" % [cell, owners.get(cell, Vector3i.ZERO), key]
+				).is_false()
+				owners[cell] = key
+
+
+## Every returned chunk's center must lie within its tier's band distance
+## from the camera — verifies band classification respected the strict bounds.
+func test_top_down_walk_band_membership() -> void:
+	var merger := Merger.new()
+	var camera_pos := Vector3(0.0, 0.0, 0.0)
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), camera_pos)
+	var camera_xz := Vector2(camera_pos.x, camera_pos.z)
+
+	for key: Vector3i in desired:
+		var center := DU.chunk_center_world(Vector2i(key.x, key.y), key.z)
+		var dist: float = camera_xz.distance_to(center)
+		var band_start: float = DU.paging_band_start(key.z)
+		var band_end: float = DU.paging_band_end(key.z)
+
+		assert_bool(dist >= band_start and dist < band_end).override_failure_message(
+			"Chunk %s center dist=%.1f outside tier band [%.1f, %.1f)" % [key, dist, band_start, band_end]
+		).is_true()
+
+
+## At origin camera, each tier should produce SOME chunks (the band shells
+## always intersect the origin in a populated cell grid).
+func test_top_down_walk_all_tiers_populated_from_origin() -> void:
+	var merger := Merger.new()
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	var tier_counts: Dictionary = {0: 0, 1: 0, 2: 0}
+	for key: Vector3i in desired:
+		tier_counts[key.z] = tier_counts[key.z] + 1
+
+	# The actual numbers depend on how tightly the rings pack, but every
+	# tier should have >0 chunks — shell at each band intersects the grid.
+	assert_int(tier_counts[0]).override_failure_message("No size_level=0 chunks desired — band [150,300) should produce chunks at origin.").is_greater(0)
+	assert_int(tier_counts[1]).override_failure_message("No size_level=1 chunks desired — band [300,600) should produce chunks at origin.").is_greater(0)
+	assert_int(tier_counts[2]).override_failure_message("No size_level=2 chunks desired — band [600,1000) should produce chunks at origin.").is_greater(0)
+
+
+## Verify anti-overlap in a specific geometric setup: a 2×2 chunk
+## accepted in the MID-far tier must prevent 1×1 sub-chunks at those cells
+## from appearing in the MID-near tier. (Top-down walk gives larger tiers
+## priority on overlapping cells.)
+func test_top_down_walk_large_chunk_blocks_smaller_overlap() -> void:
+	var merger := Merger.new()
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	# Build set of cells claimed at size_level >= 1 (the larger tiers)
+	var claimed_by_larger: Dictionary = {}
+	for key: Vector3i in desired:
+		if key.z >= 1:
+			var size: int = 1 << key.z
+			for sy in range(size):
+				for sx in range(size):
+					claimed_by_larger[Vector2i(key.x + sx, key.y + sy)] = true
+
+	# No size_level=0 chunk should land on a cell already claimed by a larger tier
+	for key: Vector3i in desired:
+		if key.z == 0:
+			var cell := Vector2i(key.x, key.y)
+			assert_bool(cell in claimed_by_larger).override_failure_message(
+				"size_level=0 chunk at %s lands in cell claimed by larger tier — anti-overlap violation" % [cell]
+			).is_false()
+
+#endregion
+
+
 #region Phase 2 SizeCache re-evaluation (was here, kept verbatim)
 
 ## Camera-motion parity — cached ref moving into range must re-evaluate.
