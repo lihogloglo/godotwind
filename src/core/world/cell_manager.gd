@@ -1466,7 +1466,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		# assert that catches leaked transients in debug builds.
 		_instantiator._set_transient_profile(entry.load_profile)
 		var inst_start := Time.get_ticks_usec()
-		var obj := _instantiate_reference_from_parsed(ref, model_path, item_id, request)
+		var inst_cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
+		var obj := _instantiator.instantiate_reference(ref, inst_cell_grid)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
 		_instantiator._clear_transient_profile()
 		_diag_duplicate_time_total_us += inst_elapsed
@@ -1925,82 +1926,13 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 	return _instantiator._create_placeholder(ref)
 
 
-## Internal: Instantiate a reference from parsed data
-func _instantiate_reference_from_parsed(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> Node3D:
-	# Handle model-less references (lights without models, etc.)
-	# These were queued with empty model_path and should use the instantiator directly
-	if model_path.is_empty():
-		var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
-		return _instantiator.instantiate_reference(ref, cell_grid)
-
-	# Get the cached model prototype
-	var cache_key := _get_cache_key(model_path, item_id)
-
-	# Try object pool first
-	if use_object_pool and _object_pool and not model_path.is_empty():
-		var pooled: Node3D = _object_pool.call("acquire", model_path)
-		if pooled:
-			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
-			_apply_transform(pooled, ref, true)
-			_hide_lod_nodes(pooled)  # CRITICAL: Hide LODs on pooled objects
-			_stats["objects_from_pool"] = _stats.get("objects_from_pool", 0) + 1
-			return pooled
-
-	# Get from cache (async system should have already cached this)
-	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
-	if not model_prototype:
-		# Model not in cache - use full instantiator path which can load from disk
-		var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
-		return _instantiator.instantiate_reference(ref, cell_grid)
-
-	# Create instance
-	var instance: Node3D = model_prototype.duplicate()
-	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
-
-	# CRITICAL: Hide LOD nodes to prevent white mesh overlays
-	_hide_lod_nodes(instance)
-
-	# Check if this is a light record - needs OmniLight3D in addition to model
-	var record_type: Array = [""]
-	var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-	if base_record and record_type[0] == "light":
-		var light_record: LightRecord = base_record as LightRecord
-		if light_record:
-			# Wrap model in container and add light
-			var container := Node3D.new()
-			container.name = instance.name
-			instance.name = "Model"
-			container.add_child(instance)
-
-			# Create the actual light source (same logic as ReferenceInstantiator._instantiate_light)
-			if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
-				var omni := OmniLight3D.new()
-				omni.name = "Light"
-				omni.omni_range = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
-				omni.light_color = light_record.color
-				if light_record.is_negative():
-					omni.light_negative = true
-				omni.light_energy = 1.2 if light_record.is_fire() else 0.8
-				omni.shadow_enabled = false  # Managed by LightShadowBudget
-				omni.omni_attenuation = 1.0
-				omni.distance_fade_enabled = true
-				omni.distance_fade_begin = 120.0
-				omni.distance_fade_length = 30.0
-				omni.set_meta("mw_flags", light_record.flags)
-				omni.set_meta("mw_radius", light_record.radius)
-				omni.set_meta("base_energy", omni.light_energy)
-				container.add_child(omni)
-				_stats["lights_created"] += 1
-
-			_apply_transform(container, ref, false)
-			_stats["objects_instantiated"] += 1
-			return container
-
-	# Apply transform for non-light objects
-	_apply_transform(instance, ref, true)
-
-	_stats["objects_instantiated"] += 1
-	return instance
+# REMOVED: _instantiate_reference_from_parsed (duplicate fast-path).
+# Streaming now routes directly through _instantiator.instantiate_reference()
+# at the single call site in _process_instantiation_queue. The duplicate
+# silently skipped DoorInteractable attach (I.7), carryable RigidBody
+# conversion (I.1), _apply_metadata, and _auto_play_nif_animation — see
+# the "Simplicity Over Over-Engineering" principle in .claude/CLAUDE.md
+# for why two parallel instantiation paths is a drift landmine.
 
 
 ## Check if a cell reference must always use the NEAR (full Node3D) path
@@ -2149,8 +2081,8 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 		})
 
 	# Only track as mid_tier_instances — objects_instantiated is counted by the
-	# Node3D path (_instantiate_reference_from_parsed). Avoids double-counting
-	# when both RS and Node3D are created for the same object.
+	# NEAR-tier Node3D path via _instantiator.instantiate_reference(). Avoids
+	# double-counting when both RS and Node3D are created for the same object.
 	_stats["mid_tier_instances"] = _stats.get("mid_tier_instances", 0) + 1
 	return instance_id
 
@@ -2282,8 +2214,8 @@ func get_loading_stats() -> Dictionary:
 		"burst_budget_ms": _burst_budget_ms,
 		"burst_max_instantiations": _burst_max_instantiations,
 		"prewarm_pending_count": _prewarm_pending.size(),
-		"objects_instantiated": _stats.get("objects_instantiated", 0),
-		"objects_from_pool": _stats.get("objects_from_pool", 0),
+		"objects_instantiated": int(_stats.get("objects_instantiated", 0)) + int(_instantiator.stats.get("objects_instantiated", 0)),
+		"objects_from_pool": int(_stats.get("objects_from_pool", 0)) + int(_instantiator.stats.get("objects_from_pool", 0)),
 		"avg_duplicate_time_us": (_diag_duplicate_time_total_us / _diag_duplicate_count) if _diag_duplicate_count > 0 else 0
 	}
 
@@ -2401,6 +2333,14 @@ func get_and_clear_immediate_promotions() -> Array[Dictionary]:
 ## Get overall stats including pool stats
 func get_stats() -> Dictionary:
 	var result := _stats.duplicate()
+
+	# Merge instantiator stats. Post-drift-fix the instantiator owns the
+	# objects_instantiated / objects_from_pool / lights_created counters for
+	# the streaming queue path (Step 3 of _process_instantiation_queue).
+	# _stats still tracks promote_mid_to_near and instantiate_deferred_object
+	# contributions, so sum instead of overwrite.
+	for key in ["objects_instantiated", "objects_from_pool", "lights_created"]:
+		result[key] = int(result.get(key, 0)) + int(_instantiator.stats.get(key, 0))
 
 	# Add pool stats if pool is available
 	if _object_pool and _object_pool.has_method("get_stats"):
