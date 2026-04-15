@@ -27,9 +27,11 @@ extends RefCounted
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
-const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
+# StreamingPolicy preload deleted in Phase 2 — `is_mid_worthy` keyword gate
+# replaced by the projected-size filter (`_is_size_worthy`). StreamingPolicy
+# still owns `should_generate_lods` for the prebake pipeline; untouched.
 
 ## LRU cache budget in bytes (default 256 MB)
 const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
@@ -80,7 +82,24 @@ var _task_to_grid: Dictionary = {}  # int (task_id) -> Vector2i (reverse map for
 ## Staggered: max MERGES_PER_FRAME processed per frame to avoid main-thread stalls.
 var _merge_queue: Array[Vector2i] = []
 var _camera_cell_cached: Vector2i = Vector2i.ZERO
+var _camera_world_pos_cached: Vector3 = Vector3.ZERO
 const MERGES_PER_FRAME: int = 2
+
+## Phase 2 — SizeCache for the projected-size filter (OpenMW ObjectPaging §2.2).
+## Refs rejected by `mesh_radius² × scale² < dist² × PAGING_MIN_SIZE²` are
+## memoized here by ref_num so subsequent cell re-evaluations skip the AABB
+## lookup + distance math entirely. Key = ref_num (int). Value = the scaled
+## radius² at rejection time (float, informational — not re-used in the check
+## because dist changes with camera; the presence of the key alone marks the
+## ref as "size-rejected at least once; re-check inexpensive").
+##
+## Note: unlike OpenMW, we re-evaluate the size test every cell re-request
+## rather than trusting the cached value unconditionally — camera can move,
+## and a ref that was sub-threshold last frame might be above-threshold now.
+## The cache short-circuits the AABB lookup (which requires a dict traversal
+## in StaticObjectRenderer), not the whole test.
+var _size_cache: Dictionary = {}  # int (ref_num) -> float (radius² × scale² at last check)
+var _size_cache_mutex: Mutex = Mutex.new()
 
 ## Completed merge results waiting for main-thread RS instance creation
 var _completed_queue: Array = []  # Array of {grid: Vector2i, mesh: ArrayMesh, bytes: int}
@@ -100,6 +119,9 @@ var _stats: Dictionary = {
 	"cache_bytes": 0,
 	"total_merges_completed": 0,
 	"total_refs_skipped": 0,
+	"refs_size_rejected": 0,   # Phase 2 — refs below projected-size threshold
+	"size_cache_hits": 0,      # Phase 2 — short-circuit AABB lookups
+	"size_cache_size": 0,      # Phase 2 — SizeCache entry count
 }
 
 #endregion
@@ -124,10 +146,21 @@ func initialize(scenario: RID, static_renderer: StaticObjectRendererScript,
 ## Call on cell change. Populates merge queue for cells entering HLOD range.
 ## Actual merge requests are staggered via process_merge_queue() (max N per frame).
 ## Returns number of cells changed.
-func update_for_camera(camera_cell: Vector2i) -> int:
+##
+## `camera_world_pos` (Phase 2): actual camera position in world space, used by
+## the projected-size filter (`radius² × scale² < dSqr × minSize²`). Defaults
+## to cell-center if caller hasn't migrated yet — accuracy loss bounded to
+## half a cell (~58m), irrelevant at paging distances of 300-1000m.
+func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector3.INF) -> int:
 	if not enabled:
 		return 0
 	_camera_cell_cached = camera_cell
+	if camera_world_pos == Vector3.INF:
+		# Legacy callers — approximate with cell origin. Phase 2 and later
+		# callers should pass the real camera world position.
+		_camera_world_pos_cached = DU.cell_to_world_origin(camera_cell)
+	else:
+		_camera_world_pos_cached = camera_world_pos
 	var changed := 0
 	var hlod_start_sq := DU.HLOD_START * DU.HLOD_START
 	var hlod_end_sq := DU.HLOD_END * DU.HLOD_END
@@ -203,7 +236,7 @@ func process_merge_queue() -> void:
 		# Skip if already active or pending (could have been cached/loaded since queued)
 		if grid in _active_cells or grid in _pending_merges:
 			continue
-		_request_merge(grid, _camera_cell_cached)
+		_request_merge(grid, _camera_cell_cached, _camera_world_pos_cached)
 		budget -= 1
 
 
@@ -255,7 +288,31 @@ func get_stats() -> Dictionary:
 	_stats["pending_merges"] = _pending_merges.size()
 	_stats["cache_entries"] = _mesh_cache.size()
 	_stats["cache_bytes"] = _cache_used_bytes
+	_size_cache_mutex.lock()
+	_stats["size_cache_size"] = _size_cache.size()
+	_size_cache_mutex.unlock()
 	return _stats.duplicate()
+
+
+## Phase 2 — projected-size test (OpenMW ObjectPaging §2.2).
+## Returns true if the ref should be kept (projected screen-size above threshold).
+##
+## Contract (matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:793-799`):
+##   keep iff  mesh_radius² × scale² >= dist² × min_size²
+##
+## All values squared by caller. Pure static — unit-testable in isolation.
+##
+## **Divergence from OpenMW:** `mesh_radius_sq == 0` returns `true` (conservative
+## keep) instead of OpenMW's implicit skip (`0 < dist²×min²` evaluates true →
+## continue). Rationale: Phase 2 callers guard this case at the call site
+## (`mesh_radius_sq > 0.0` check before invoking) — this helper stays safe to
+## call with degenerate input and lets Phase 3's type filter handle real
+## zero-AABB cases. Caller is responsible for the guard if behaviour must
+## match OpenMW exactly.
+static func _is_size_worthy(mesh_radius_sq: float, scale_f: float, dist_sq: float, min_size_sq: float) -> bool:
+	if mesh_radius_sq <= 0.0 or dist_sq <= 0.0:
+		return true
+	return mesh_radius_sq * scale_f * scale_f >= dist_sq * min_size_sq
 
 
 ## Clear all loaded HLOD cells and cache
@@ -292,6 +349,11 @@ func cleanup() -> void:
 	_cache_used_bytes = 0
 	_completed_queue.clear()
 
+	# Phase 2 SizeCache
+	_size_cache_mutex.lock()
+	_size_cache.clear()
+	_size_cache_mutex.unlock()
+
 #endregion
 
 
@@ -302,7 +364,11 @@ func cleanup() -> void:
 ## Fast path: reads mesh data from StaticObjectRenderer's already-registered MeshTypes.
 ## Slow path: loads prototype from model cache for models not yet registered (deep HLOD cells).
 ## Called max MERGES_PER_FRAME times per frame via process_merge_queue().
-func _request_merge(grid: Vector2i, camera_cell: Vector2i) -> void:
+##
+## Phase 2: refs are filtered by a projected-size test using mesh bounding radius,
+## per-ref scale, and distance to camera — replacing the keyword-substring
+## `is_mid_worthy` gate. See `_is_size_worthy()` + `docs/audit/OBJECT_PAGING_PLAN.md` §2.2.
+func _request_merge(grid: Vector2i, camera_cell: Vector2i, camera_world_pos: Vector3) -> void:
 	if not _static_renderer or not _bg_processor:
 		return
 
@@ -310,28 +376,90 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i) -> void:
 	if not cell_record:
 		return
 
+	var min_size_sq: float = DU.PAGING_MIN_SIZE_SQ
+
 	# Single-pass: collect inputs AND count simultaneously
 	var inputs: Array = []
 	var refs_skipped := 0
+	var refs_size_rejected := 0
+	var size_cache_hits := 0
 
 	for ref in cell_record.references:
 		if ref.is_deleted:
 			continue
 
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		# Phase 2: the record_type out-arg is no longer needed here because
+		# type-based filtering was removed with the keyword gate. Phase 3 will
+		# reintroduce a type table; at that point `get_any_record` caller can
+		# go back to the typed signature. For now we pass a throwaway out-arg
+		# so the existing API is unchanged.
+		var _record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), _record_type)
 		if not base_record:
 			continue
 
-		var type_name_str: String = record_type[0] if record_type.size() > 0 else ""
 		var model_path: String = _get_model_path(base_record)
 		if model_path.is_empty():
 			continue
-		if not StreamingPolicyScript.is_mid_worthy(type_name_str, model_path):
-			continue
+
+		# Compute ref transform once — reused below + passed to worker if accepted.
+		var pos: Vector3 = CS.vector_to_godot(ref.position)
+		var scale: Vector3 = CS.scale_to_godot(ref.scale)
+		var basis: Basis = CS.esm_rotation_to_godot_basis(ref.rotation)
+		basis = basis.scaled(scale)
+		var ref_transform := Transform3D(basis, pos)
+
+		# Phase 2 filter — projected-size test with SizeCache short-circuit.
+		#
+		# Flow:
+		#   1. Check SizeCache for previously-stored `rad² × scale²` under this ref_num.
+		#   2. If hit AND still below `dist² × minSize²` at current camera dist → skip
+		#      without touching the AABB dict (the actual short-circuit). Cached
+		#      `rad² × scale²` is mesh-invariant — only dist changes per-frame.
+		#   3. If hit AND now above threshold → evict cache entry, fall through to
+		#      full path (camera moved close enough; ref is a merge candidate again).
+		#   4. If miss → AABB lookup, test, cache on rejection.
+		var mesh_type_name := model_path.to_lower().replace("/", "\\")
+		var cache_key: int = ref.ref_num
+		var scale_f: float = ref.scale
+		var dist_sq: float = pos.distance_squared_to(camera_world_pos)
+		var size_threshold: float = dist_sq * min_size_sq
+
+		var cached_rs2: float = -1.0
+		_size_cache_mutex.lock()
+		if cache_key in _size_cache:
+			cached_rs2 = _size_cache[cache_key]
+		_size_cache_mutex.unlock()
+
+		if cached_rs2 >= 0.0:
+			if cached_rs2 < size_threshold:
+				# Still rejected — no AABB lookup, no prototype load.
+				refs_size_rejected += 1
+				size_cache_hits += 1
+				continue
+			# Moved into range — evict and fall through to full path.
+			_size_cache_mutex.lock()
+			_size_cache.erase(cache_key)
+			_size_cache_mutex.unlock()
+
+		# Full path: AABB lookup + test. Runs on cold refs and on refs that
+		# just moved into projected-size range.
+		var aabb: AABB = _static_renderer.get_mesh_aabb(mesh_type_name)
+		var mesh_radius_sq: float = 0.0
+		if aabb.size != Vector3.ZERO:
+			# Bounding radius² = (diagonal/2)² = size.length_squared() * 0.25
+			mesh_radius_sq = aabb.size.length_squared() * 0.25
+
+		if mesh_radius_sq > 0.0:
+			var rs2: float = mesh_radius_sq * scale_f * scale_f
+			if rs2 < size_threshold:
+				_size_cache_mutex.lock()
+				_size_cache[cache_key] = rs2
+				_size_cache_mutex.unlock()
+				refs_size_rejected += 1
+				continue
 
 		# Look up in static renderer's MeshType registry (fast path)
-		var mesh_type_name := model_path.to_lower().replace("/", "\\")
 		var sub_meshes: Array = _static_renderer.get_sub_meshes(mesh_type_name)
 
 		if sub_meshes.is_empty():
@@ -346,13 +474,6 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i) -> void:
 		if sub_meshes.is_empty():
 			refs_skipped += 1
 			continue
-
-		# Compute ref transform (cell-local space computed on worker thread)
-		var pos: Vector3 = CS.vector_to_godot(ref.position)
-		var scale: Vector3 = CS.scale_to_godot(ref.scale)
-		var basis: Basis = CS.esm_rotation_to_godot_basis(ref.rotation)
-		basis = basis.scaled(scale)
-		var ref_transform := Transform3D(basis, pos)
 
 		# Snapshot sub-mesh data for worker thread
 		var ref_input := Kernel.RefInput.new()
@@ -373,6 +494,8 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i) -> void:
 			inputs.append(ref_input)
 
 	_stats["total_refs_skipped"] += refs_skipped
+	_stats["refs_size_rejected"] += refs_size_rejected
+	_stats["size_cache_hits"] += size_cache_hits
 
 	# Cost-benefit: sparse cells don't benefit from merging (OpenMW insight)
 	if inputs.size() < MIN_REFS_TO_MERGE:

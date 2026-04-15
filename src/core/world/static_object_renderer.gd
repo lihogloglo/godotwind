@@ -629,6 +629,16 @@ func get_mesh_type_stats(type_name: String) -> Dictionary:
 	}
 
 
+## Get the union AABB for a registered mesh type.
+## Used by the object-paging projected-size filter (plan §2.2) — the bounding
+## radius drives the `radius² × scale² < dist² × minSize²` rejection test.
+## Returns AABB() if the type is not registered (caller skips the ref safely).
+func get_mesh_aabb(type_name: String) -> AABB:
+	if type_name not in _mesh_types:
+		return AABB()
+	return _mesh_types[type_name].aabb
+
+
 ## Get all registered mesh type names
 func get_registered_types() -> Array[String]:
 	var types: Array[String] = []

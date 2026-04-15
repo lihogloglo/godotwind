@@ -541,7 +541,7 @@ func _process(delta: float) -> void:
 		_hlod_merger.process_merge_queue()  # Staggered: max 2 cells/frame
 		_hlod_merger.process_completions()
 		if _cell_changed_this_frame or _hlod_needs_initial_update:
-			_hlod_merger.update_for_camera(_camera_cell)
+			_hlod_merger.update_for_camera(_camera_cell, _camera_position)
 			_hlod_needs_initial_update = false
 
 	# Update distant light manager (camera pos + time-of-day)

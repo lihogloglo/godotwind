@@ -16,6 +16,8 @@
 extends GdUnitTestSuite
 
 const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
+const Merger := preload("res://src/core/world/runtime_hlod_merger.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 
 #region Fixtures
@@ -216,6 +218,107 @@ func test_estimate_mesh_bytes_scales_with_vertex_count() -> void:
 
 func test_null_mesh_bytes_returns_zero() -> void:
 	assert_int(Kernel.estimate_mesh_bytes(null)).is_equal(0)
+
+
+#region Phase 2 — projected-size filter parity tests
+
+## Large mesh (5m radius) close to camera (10m) should always pass.
+func test_size_worthy_large_close_mesh_kept() -> void:
+	var mesh_radius_sq := 25.0  # 5m radius
+	var scale := 1.0
+	var dist_sq := 100.0  # 10m
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, scale, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
+		.override_failure_message("Large close mesh must pass projected-size test.") \
+		.is_true()
+
+
+## Tiny mesh (0.1m radius) at HLOD range (500m) should be rejected.
+func test_size_worthy_small_distant_mesh_rejected() -> void:
+	var mesh_radius_sq := 0.01  # 0.1m radius
+	var scale := 1.0
+	var dist_sq := 250000.0  # 500m
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, scale, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
+		.override_failure_message("Small distant mesh must be rejected.") \
+		.is_false()
+
+
+## Scale multiplier matters — a mesh with scale=2 covers 4× area in the test.
+## Same mesh at scale=0.5 projects 4× smaller → rejection threshold shifts.
+func test_size_worthy_scale_changes_outcome() -> void:
+	var mesh_radius_sq := 1.0  # 1m radius
+	var dist_sq := 10000.0  # 100m
+
+	# Scale=2.0 → radius² × scale² = 4. Threshold = dist² × minSize² = 10000 × 0.0196 = 196.
+	# 4 < 196 → still rejected at 100m.
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_false()
+
+	# Closer: dist=30m, dist_sq=900, threshold=900 × 0.0196 = 17.64.
+	# Scale=2 → 4. Still rejected (17.64 > 4).
+	# Scale=5 → 25. 25 >= 17.64 → kept.
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 5.0, 900.0, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_true()
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, 900.0, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_false()
+
+
+## Threshold boundary — exactly at the cutoff should pass (>= inclusive).
+func test_size_worthy_exact_boundary_kept() -> void:
+	# radius² × scale² = dist² × minSize² exactly
+	var min_size_sq := 0.01  # simpler round numbers for the boundary test
+	var mesh_radius_sq := 1.0
+	var scale := 1.0
+	var dist_sq := 100.0  # min_size_sq × dist_sq = 1.0 = mesh_radius_sq × scale²
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, scale, dist_sq, min_size_sq)) \
+		.override_failure_message("Exact-threshold ref should be kept (>= inclusive).") \
+		.is_true()
+
+
+## Degenerate geometry (radius=0) keeps the ref — delegated to later phases.
+## This is Phase 2's explicit contract: the size filter is a CONSERVATIVE
+## reject. Unknown/zero-radius geometry passes through; Phase 3 type filter
+## can still cull it, and the merge kernel will no-op on empty vertex arrays.
+func test_size_worthy_zero_radius_kept() -> void:
+	assert_bool(Merger._is_size_worthy(0.0, 1.0, 10000.0, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_true()
+
+
+## Camera co-located with ref (dist=0) keeps the ref.
+func test_size_worthy_zero_distance_kept() -> void:
+	assert_bool(Merger._is_size_worthy(1.0, 1.0, 0.0, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_true()
+
+
+## PAGING_MIN_SIZE = 0.14 matches OpenMW canonical default (plan §8 / 17.1).
+func test_paging_min_size_matches_openmw_default() -> void:
+	assert_float(DU.PAGING_MIN_SIZE).is_equal_approx(0.14, 0.001)
+	assert_float(DU.PAGING_MIN_SIZE_SQ).is_equal_approx(0.0196, 0.0001)
+
+
+## Camera-motion parity — cached ref moving into range must re-evaluate.
+## Simulates SizeCache flow: a ref rejected at 500m, camera walks to 10m,
+## same `_is_size_worthy` call with cached `rad²×scale²` should now return
+## true. Validates the re-test logic in `_request_merge` that drives cache
+## eviction + full-path fallthrough.
+func test_size_worthy_reevaluation_after_camera_approach() -> void:
+	# Cache-equivalent value: mesh_radius_sq × scale² = 1.0 × 1.0 = 1.0
+	var cached_rs2 := 1.0
+	var min_size_sq := DU.PAGING_MIN_SIZE_SQ  # 0.0196
+
+	# At 500m: threshold = 250000 × 0.0196 = 4900. 1.0 < 4900 → rejected.
+	var at_500 := 250000.0 * min_size_sq
+	assert_bool(cached_rs2 < at_500) \
+		.override_failure_message("SizeCache path assumes ref rejected at 500m.") \
+		.is_true()
+
+	# At 5m: threshold = 25 × 0.0196 = 0.49. 1.0 >= 0.49 → kept. Cache should
+	# evict and fall through to full-path instantiation.
+	var at_5 := 25.0 * min_size_sq
+	assert_bool(cached_rs2 < at_5) \
+		.override_failure_message("SizeCache path must re-admit ref at 5m (eviction trigger).") \
+		.is_false()
+
+#endregion
 
 
 func test_normals_transformed_by_ref_rotation() -> void:

@@ -286,6 +286,18 @@ Each phase is independently revertible:
 - Phase 2-5 → Phase 1: `git revert` the phase commit; merge kernel unchanged.
 - Phase 6 cannot roll back standalone (deletes the old module); gated behind `bench_progressive` ≥ 1ms/frame win.
 
+## 16b. Known Cold-Start Costs (documented 2026-04-15, Phase 2)
+
+During the first cell re-request for an unregistered mesh type, the projected-size filter path cannot evaluate — `StaticObjectRenderer.get_mesh_aabb()` returns a zero `AABB()` for types that haven't yet been loaded by the streaming pipeline. Those refs bypass the size filter (`mesh_radius_sq == 0.0` → `_is_size_worthy` returns true) and fall through to the slow-path prototype load + register at `runtime_hlod_merger.gd::_load_prototype_from_cache`. On subsequent cell re-requests after the type is registered, the filter works normally and the SizeCache short-circuit kicks in.
+
+**Impact**: worst-case frame-budget spike on first-ever HLOD cell activation per unique mesh type. In typical Morrowind gameplay this front-loads during initial exterior streaming (~30-50 unique architectural mesh types) and settles out once the registry is populated.
+
+**Not a regression**: Phase 1 had no projected-size filter at all — every ref hit the slow path unconditionally. Phase 2 is strictly better on warm cells, no worse on cold ones.
+
+**Not a bug**: deferred-registration is a feature of the pipeline (streaming loads types as you enter their range). The filter correctly treats unknown geometry as "keep" rather than dropping it silently.
+
+**Fix option (if profiling flags it)**: pre-register AABBs during ESM parse by reading NIF header bounding boxes into `StaticObjectRenderer` before the first cell stream. Not scheduled; let bench_progressive prove the cost first.
+
 ## 17. Review Resolutions (closed)
 
 Reviewer pass 2026-04-14 (roaster, chat id 1020) — all six must-fixes applied, three open questions resolved:

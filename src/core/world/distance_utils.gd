@@ -63,6 +63,16 @@ const FADE_MARGIN_LOD1_LOD2: float = 10.0
 const FADE_MARGIN_LOD2_LOD3: float = 15.0
 const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 
+## Object-paging projected-size threshold (OpenMW canonical default).
+## A ref is paged when `mesh_radius² × scale² >= dist² × PAGING_MIN_SIZE²`.
+## Smaller meshes at distance project below a screen-space threshold and
+## don't contribute visually — they're skipped. Replaces the keyword-based
+## `is_mid_worthy` filter. Phase 2 of docs/audit/OBJECT_PAGING_PLAN.md.
+## Source: inspos/openmw/components/settings/categories/terrain.hpp:34
+## and canonical tuned default for Morrowind content density.
+const PAGING_MIN_SIZE: float = 0.14
+const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
+
 #endregion
 
 
