@@ -1,19 +1,27 @@
 ## RuntimeHLODMerger — Runtime cell-level HLOD merging (OpenMW-style)
 ##
-## Replaces the prebake-only HLODLoader. Merges cell geometry on demand using
-## WorkerThreadPool when cells enter HLOD range (300-1000m). No disk prebake needed.
+## Merges cell geometry on demand using WorkerThreadPool when cells enter
+## HLOD range (300-1000m). No disk prebake needed.
+##
+## Phase 1 of the paging refactor (docs/audit/OBJECT_PAGING_PLAN.md §11):
+## the merge math now lives in `object_paging_kernel.gd` as a shared kernel.
+## This module is the HLOD-cell caller; the forthcoming ObjectPaging module
+## will be the distance-adaptive caller. Both call the same verified kernel.
+## Phases 2-6 collapse this module into ObjectPaging — it survives here as
+## the rollback point for the refactor.
 ##
 ## Pipeline:
-##   1. Cell enters HLOD range → main thread collects mesh data from StaticObjectRenderer
-##      (fast path) or loads prototype from model cache (slow path for deep HLOD cells)
-##   2. Background worker: transforms vertices, groups by material, concatenates, generates LODs
-##      (~100-200ms per cell in GDScript, viable on worker thread)
-##   3. Main thread: creates RS instance from merged ArrayMesh, adds to LRU cache
+##   1. Cell enters HLOD range → main thread collects mesh data from
+##      StaticObjectRenderer (fast path) or loads prototype from model cache
+##      (slow path for deep HLOD cells).
+##   2. Background worker: ObjectPagingKernel.merge_refs() transforms vertices,
+##      groups by material, concatenates, generates LODs. Viable on worker.
+##   3. Main thread: creates RS instance from merged ArrayMesh, adds to LRU.
 ##
 ## Thread safety:
-##   - Main thread: CellRecord iteration, MeshType lookup/registration, RS instance creation
-##   - Worker thread: ArrayMesh.surface_get_arrays() (read-only), vertex transforms,
-##     ImporterMesh.generate_lods() (isolated instance). Pure CPU after data collection.
+##   - Main thread: CellRecord iteration, MeshType lookup/registration, RS create.
+##   - Worker thread: ObjectPagingKernel.merge_refs() reads ArrayMesh surfaces
+##     read-only, creates isolated ImporterMesh.
 class_name RuntimeHLODMerger
 extends RefCounted
 
@@ -21,16 +29,10 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
+const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
 
 ## LRU cache budget in bytes (default 256 MB)
 const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
-
-## Max surfaces per merged mesh (Godot hard cap 256, leave headroom)
-const MAX_SURFACES: int = 250
-
-## LOD generation parameters (aggressive — mesh only visible at 300m+)
-const LOD_NORMAL_MERGE_ANGLE: float = 60.0
-const LOD_SCREEN_COVERAGE: float = 25.0
 
 ## Minimum mid-worthy refs to justify merging a cell (OpenMW cost-benefit insight).
 ## Sparse cells with fewer refs → individual MID RS instances are cheaper than a merge.
@@ -45,20 +47,6 @@ class HLODCellData:
 	var mesh: ArrayMesh  ## Strong ref — prevents GC
 	var surface_count: int = 0
 	var estimated_bytes: int = 0
-
-
-## Pre-collected merge input for one object reference (passed to worker thread).
-## Contains only thread-safe data: ArrayMesh resources (read-only), transforms, materials.
-class MergeRefInput:
-	var ref_transform: Transform3D
-	var sub_meshes: Array  ## Array of MergeSubMeshInput
-
-
-class MergeSubMeshInput:
-	var mesh: ArrayMesh
-	var local_transform: Transform3D
-	var material_override: Material  ## Whole-mesh override (may be null)
-	var surface_materials: Array[Material]  ## Per-surface materials
 
 #endregion
 
@@ -367,14 +355,14 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i) -> void:
 		var ref_transform := Transform3D(basis, pos)
 
 		# Snapshot sub-mesh data for worker thread
-		var ref_input := MergeRefInput.new()
+		var ref_input := Kernel.RefInput.new()
 		ref_input.ref_transform = ref_transform
 		ref_input.sub_meshes = []
 
 		for sub: StaticObjectRendererScript.SubMeshEntry in sub_meshes:
 			if not sub.mesh_resource or not sub.mesh_resource is ArrayMesh:
 				continue
-			var sm := MergeSubMeshInput.new()
+			var sm := Kernel.SubMeshInput.new()
 			sm.mesh = sub.mesh_resource as ArrayMesh
 			sm.local_transform = sub.local_transform
 			sm.material_override = sub.material_resource
@@ -405,11 +393,11 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i) -> void:
 ## Worker thread entry point. Runs merge kernel, posts result to completion queue.
 ## Bound via Callable — all data pre-collected, no scene tree or ESMManager access.
 func _merge_cell_worker(grid: Vector2i, inputs: Array, cell_origin: Vector3) -> Dictionary:
-	var mesh := _merge_cell_sync(inputs, cell_origin)
+	var mesh := Kernel.merge_refs(inputs, cell_origin)
 	if not mesh:
 		return {"grid": grid, "mesh": null, "bytes": 0}
 
-	var bytes := _estimate_mesh_bytes(mesh)
+	var bytes := Kernel.estimate_mesh_bytes(mesh)
 
 	# Post to completion queue (thread-safe via mutex)
 	_completed_mutex.lock()
@@ -417,273 +405,6 @@ func _merge_cell_worker(grid: Vector2i, inputs: Array, cell_origin: Vector3) -> 
 	_completed_mutex.unlock()
 
 	return {"grid": grid, "bytes": bytes}
-
-#endregion
-
-
-#region Merge Kernel (runs on worker thread — pure CPU, no I/O)
-
-## Merge all inputs for a cell into a single ArrayMesh with LOD chain.
-## Thread-safe: reads ArrayMesh surface arrays (immutable), creates new ArrayMesh.
-static func _merge_cell_sync(inputs: Array, cell_origin: Vector3) -> ArrayMesh:
-	# Material dedup: hash -> {material: Material, arrays_list: Array[Array]}
-	var material_groups: Dictionary = {}
-
-	for ref_input: MergeRefInput in inputs:
-		for sm: MergeSubMeshInput in ref_input.sub_meshes:
-			for si in range(sm.mesh.get_surface_count()):
-				var arrays: Array = sm.mesh.surface_get_arrays(si)
-				if arrays.is_empty():
-					continue
-				var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-				if verts == null or verts.is_empty():
-					continue
-
-				# Compute full transform: ref_world × sub_local, then subtract cell origin
-				var full_xform := ref_input.ref_transform * sm.local_transform
-				# Move to cell-local space
-				full_xform.origin -= cell_origin
-
-				var is_identity := full_xform.is_equal_approx(Transform3D.IDENTITY)
-
-				# Transform vertices into cell-local space
-				if not is_identity:
-					var xformed_verts := PackedVector3Array()
-					xformed_verts.resize(verts.size())
-					for vi in range(verts.size()):
-						xformed_verts[vi] = full_xform * verts[vi]
-					arrays[Mesh.ARRAY_VERTEX] = xformed_verts
-
-					var normals: Variant = arrays[Mesh.ARRAY_NORMAL]
-					if normals != null and normals is PackedVector3Array and not normals.is_empty():
-						var normal_basis := full_xform.basis.inverse().transposed()
-						var xformed_normals := PackedVector3Array()
-						xformed_normals.resize(normals.size())
-						for ni in range(normals.size()):
-							xformed_normals[ni] = (normal_basis * normals[ni]).normalized()
-						arrays[Mesh.ARRAY_NORMAL] = xformed_normals
-
-				# Ensure index buffer exists
-				var indices: Variant = arrays[Mesh.ARRAY_INDEX]
-				if indices == null or (indices is PackedInt32Array and indices.is_empty()):
-					var vert_count: int = verts.size()
-					var identity_indices := PackedInt32Array()
-					identity_indices.resize(vert_count)
-					for vi in range(vert_count):
-						identity_indices[vi] = vi
-					arrays[Mesh.ARRAY_INDEX] = identity_indices
-
-				# Resolve material
-				var mat: Material = sm.material_override
-				if not mat:
-					if si < sm.surface_materials.size():
-						mat = sm.surface_materials[si]
-				if not mat:
-					mat = sm.mesh.surface_get_material(si)
-
-				# Group by material for merging
-				var mat_hash: int = mat.get_instance_id() if mat else 0
-				if mat_hash not in material_groups:
-					material_groups[mat_hash] = {"material": mat, "arrays_list": []}
-				material_groups[mat_hash]["arrays_list"].append(arrays)
-
-	if material_groups.is_empty():
-		return null
-
-	# Flatten each material group into a single surface
-	var flat_surfaces: Array[Dictionary] = []
-	for mat_hash: int in material_groups:
-		var group: Dictionary = material_groups[mat_hash]
-		var arrays_list: Array = group["arrays_list"]
-		var mat: Material = group["material"]
-		var arrays: Array
-		if arrays_list.size() == 1:
-			arrays = arrays_list[0]
-		else:
-			arrays = _concatenate_surface_arrays(arrays_list)
-		if arrays.is_empty():
-			continue
-		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-		flat_surfaces.append({"arrays": arrays, "material": mat, "vert_count": verts.size()})
-
-	if flat_surfaces.is_empty():
-		return null
-
-	# Handle overflow (Godot caps at 256 surfaces)
-	if flat_surfaces.size() > MAX_SURFACES:
-		flat_surfaces.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			return a["vert_count"] > b["vert_count"]
-		)
-		var overflow_arrays: Array[Array] = []
-		for i in range(MAX_SURFACES - 1, flat_surfaces.size()):
-			overflow_arrays.append(flat_surfaces[i]["arrays"])
-		flat_surfaces.resize(MAX_SURFACES - 1)
-		var combined_overflow := _concatenate_surface_arrays(overflow_arrays)
-		if not combined_overflow.is_empty():
-			flat_surfaces.append({"arrays": combined_overflow, "material": null, "vert_count": 0})
-
-	# Build merged ArrayMesh
-	var merged_mesh := ArrayMesh.new()
-	for entry: Dictionary in flat_surfaces:
-		merged_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, entry["arrays"])
-		if entry["material"]:
-			merged_mesh.surface_set_material(merged_mesh.get_surface_count() - 1, entry["material"])
-
-	if merged_mesh.get_surface_count() == 0:
-		return null
-
-	# Generate LOD chain (aggressive — only visible at 300m+)
-	var lod_mesh := _generate_lods(merged_mesh)
-	if lod_mesh:
-		merged_mesh = lod_mesh
-
-	merged_mesh.set_meta("has_lod_chain", true)
-	return merged_mesh
-
-
-## Generate LOD chain on merged mesh via ImporterMesh.
-static func _generate_lods(mesh: ArrayMesh) -> ArrayMesh:
-	if mesh.get_surface_count() == 0:
-		return null
-
-	var importer := ImporterMesh.new()
-	for si in range(mesh.get_surface_count()):
-		var arrays: Array = mesh.surface_get_arrays(si)
-		if arrays.is_empty():
-			continue
-		var verts: Variant = arrays[Mesh.ARRAY_VERTEX]
-		if verts == null or (verts is PackedVector3Array and verts.is_empty()):
-			continue
-		# Ensure index buffer for LOD generation
-		var indices: Variant = arrays[Mesh.ARRAY_INDEX]
-		if indices == null or (indices is PackedInt32Array and indices.is_empty()):
-			var vert_count: int = verts.size()
-			var identity_indices := PackedInt32Array()
-			identity_indices.resize(vert_count)
-			for vi in range(vert_count):
-				identity_indices[vi] = vi
-			arrays[Mesh.ARRAY_INDEX] = identity_indices
-
-		var mat: Material = mesh.surface_get_material(si)
-		importer.add_surface(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, mat, "", 0)
-
-	importer.generate_lods(LOD_NORMAL_MERGE_ANGLE, LOD_SCREEN_COVERAGE, [])
-	var result: ArrayMesh = importer.get_mesh()
-	if result and result.get_surface_count() > 0:
-		result.set_meta("has_lod_chain", true)
-		return result
-	return null
-
-
-## Concatenate multiple surface arrays with the same material into one surface.
-## Offsets index buffers to account for merged vertex base.
-static func _concatenate_surface_arrays(arrays_list: Array) -> Array:
-	if arrays_list.is_empty():
-		return []
-
-	var all_verts := PackedVector3Array()
-	var all_normals := PackedVector3Array()
-	var all_tangents := PackedFloat32Array()
-	var all_colors := PackedColorArray()
-	var all_uvs := PackedVector2Array()
-	var all_uvs2 := PackedVector2Array()
-	var all_indices := PackedInt32Array()
-	var has_normals := false
-	var has_tangents := false
-	var has_colors := false
-	var has_uvs := false
-	var has_uvs2 := false
-
-	# Probe ALL surfaces for attribute presence (union, not just first)
-	for probe: Array in arrays_list:
-		if not has_normals and probe.size() > Mesh.ARRAY_NORMAL and probe[Mesh.ARRAY_NORMAL] is PackedVector3Array:
-			has_normals = true
-		if not has_tangents and probe.size() > Mesh.ARRAY_TANGENT and probe[Mesh.ARRAY_TANGENT] is PackedFloat32Array:
-			has_tangents = true
-		if not has_colors and probe.size() > Mesh.ARRAY_COLOR and probe[Mesh.ARRAY_COLOR] is PackedColorArray:
-			has_colors = true
-		if not has_uvs and probe.size() > Mesh.ARRAY_TEX_UV and probe[Mesh.ARRAY_TEX_UV] is PackedVector2Array:
-			has_uvs = true
-		if not has_uvs2 and probe.size() > Mesh.ARRAY_TEX_UV2 and probe[Mesh.ARRAY_TEX_UV2] is PackedVector2Array:
-			has_uvs2 = true
-
-	for arrays: Array in arrays_list:
-		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-		var vert_count := verts.size()
-		var base_vertex := all_verts.size()
-		all_verts.append_array(verts)
-
-		if has_normals:
-			var normals: Variant = arrays[Mesh.ARRAY_NORMAL] if arrays.size() > Mesh.ARRAY_NORMAL else null
-			if normals is PackedVector3Array and normals.size() == vert_count:
-				all_normals.append_array(normals)
-			else:
-				var pad := PackedVector3Array()
-				pad.resize(vert_count)
-				pad.fill(Vector3.UP)
-				all_normals.append_array(pad)
-
-		if has_tangents:
-			var tangents: Variant = arrays[Mesh.ARRAY_TANGENT] if arrays.size() > Mesh.ARRAY_TANGENT else null
-			if tangents is PackedFloat32Array and tangents.size() == vert_count * 4:
-				all_tangents.append_array(tangents)
-			else:
-				var pad := PackedFloat32Array()
-				pad.resize(vert_count * 4)
-				all_tangents.append_array(pad)
-
-		if has_colors:
-			var colors: Variant = arrays[Mesh.ARRAY_COLOR] if arrays.size() > Mesh.ARRAY_COLOR else null
-			if colors is PackedColorArray and colors.size() == vert_count:
-				all_colors.append_array(colors)
-			else:
-				var pad := PackedColorArray()
-				pad.resize(vert_count)
-				pad.fill(Color.WHITE)
-				all_colors.append_array(pad)
-
-		if has_uvs:
-			var uvs: Variant = arrays[Mesh.ARRAY_TEX_UV] if arrays.size() > Mesh.ARRAY_TEX_UV else null
-			if uvs is PackedVector2Array and uvs.size() == vert_count:
-				all_uvs.append_array(uvs)
-			else:
-				var pad := PackedVector2Array()
-				pad.resize(vert_count)
-				all_uvs.append_array(pad)
-
-		if has_uvs2:
-			var uvs2: Variant = arrays[Mesh.ARRAY_TEX_UV2] if arrays.size() > Mesh.ARRAY_TEX_UV2 else null
-			if uvs2 is PackedVector2Array and uvs2.size() == vert_count:
-				all_uvs2.append_array(uvs2)
-			else:
-				var pad := PackedVector2Array()
-				pad.resize(vert_count)
-				all_uvs2.append_array(pad)
-
-		# Offset indices by base vertex
-		var indices: Variant = arrays[Mesh.ARRAY_INDEX] if arrays.size() > Mesh.ARRAY_INDEX else null
-		if indices is PackedInt32Array and not indices.is_empty():
-			for idx: int in indices:
-				all_indices.append(idx + base_vertex)
-		else:
-			for vi in range(verts.size()):
-				all_indices.append(vi + base_vertex)
-
-	var result := []
-	result.resize(Mesh.ARRAY_MAX)
-	result[Mesh.ARRAY_VERTEX] = all_verts
-	if has_normals and not all_normals.is_empty():
-		result[Mesh.ARRAY_NORMAL] = all_normals
-	if has_tangents and not all_tangents.is_empty():
-		result[Mesh.ARRAY_TANGENT] = all_tangents
-	if has_colors and not all_colors.is_empty():
-		result[Mesh.ARRAY_COLOR] = all_colors
-	if has_uvs and not all_uvs.is_empty():
-		result[Mesh.ARRAY_TEX_UV] = all_uvs
-	if has_uvs2 and not all_uvs2.is_empty():
-		result[Mesh.ARRAY_TEX_UV2] = all_uvs2
-	result[Mesh.ARRAY_INDEX] = all_indices
-	return result
 
 #endregion
 
@@ -820,20 +541,5 @@ func _load_prototype_from_cache(model_path: String) -> Node3D:
 		return null
 
 	return packed_scene.instantiate() as Node3D
-
-
-## Estimate ArrayMesh memory usage in bytes
-static func _estimate_mesh_bytes(mesh: ArrayMesh) -> int:
-	var total := 0
-	for si in range(mesh.get_surface_count()):
-		var arrays: Array = mesh.surface_get_arrays(si)
-		if arrays.is_empty():
-			continue
-		var verts: Variant = arrays[Mesh.ARRAY_VERTEX]
-		if verts is PackedVector3Array:
-			# pos(12) + normal(12) + uv(8) + index(4) + overhead ≈ 48 bytes/vert
-			# ×1.5 for LOD chain overhead
-			total += verts.size() * 72
-	return total
 
 #endregion

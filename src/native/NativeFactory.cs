@@ -294,6 +294,21 @@ public partial class NativeFactory : RefCounted
     }
 
     // =========================================================================
+    // Object Paging (chunk merge kernel)
+    // =========================================================================
+
+    /// <summary>
+    /// Create a new object-paging merge kernel instance.
+    /// Hot merge math (vertex transform, material grouping, PackedArray concat)
+    /// for OpenMW-style chunk merging. Stateless — one instance may be reused
+    /// across concurrent worker-thread calls.
+    /// </summary>
+    public NativeObjectPagingKernel CreateObjectPagingKernel()
+    {
+        return new NativeObjectPagingKernel();
+    }
+
+    // =========================================================================
     // Utility
     // =========================================================================
 
