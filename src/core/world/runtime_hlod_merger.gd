@@ -11,7 +11,12 @@
 ##
 ## `update_for_camera` runs the top-down anti-overlap walk from plan §4.3:
 ## larger tiers claim their cells first; smaller tiers can't sub-divide an
-## accepted larger chunk. Strict half-open bands; hysteresis lands in Phase 4c.
+## accepted larger chunk. Strict half-open bands for NEW chunk decisions;
+## Phase 4c hysteresis (plan §4.4): already-active chunks are pre-populated
+## into the desired set — and their sub-cells marked covered — as long as
+## their chunk-center distance is within `[band_start - PAGING_HYSTERESIS,
+## band_end + PAGING_HYSTERESIS)`. Margin is NOT baked into the walk's
+## distance test (fuzzes band edges); it applies only to retention.
 ##
 ## Pipeline (per chunk):
 ##   1. Chunk enters a tier band → main thread iterates the size×size covered
@@ -322,10 +327,26 @@ func cleanup() -> void:
 ## Compute desired chunks across all three tiers using the top-down walk.
 ## Returns Dictionary[Vector3i -> true] of chunks that should be active.
 ## Main-thread. Bounded to ~147 chunk candidates per call (plan §4.5).
+##
+## Phase 4c — hysteresis (plan §4.4). Active chunks are pre-populated into
+## `desired` (and pre-mark `covered_cells`) as long as their chunk-center
+## distance lies in the retention window `[band_start - margin, band_end +
+## margin)`. This keeps the walk's strict-band arithmetic unambiguous while
+## letting chunks "stick" through small camera motions at tier boundaries.
 func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -> Dictionary:
 	var desired: Dictionary = {}
 	var covered_cells: Dictionary = {}  # Vector2i -> true (1×1 cells claimed by larger chunks)
 	var camera_xz := Vector2(camera_world_pos.x, camera_world_pos.z)
+
+	# Phase 4c — retention pass. Runs BEFORE the strict-band walk so retained
+	# chunks block re-tier decisions on their sub-cells. Active chunks whose
+	# distance sits outside the expanded window are NOT retained; the walk
+	# decides their fate (and the post-walk diff will unload them).
+	for active_key: Vector3i in _active_chunks:
+		if not _is_within_retention(active_key, camera_xz):
+			continue
+		desired[active_key] = true
+		_mark_sub_cells(Vector2i(active_key.x, active_key.y), 1 << active_key.z, covered_cells)
 
 	# Largest tier first. Smaller tiers can't overlap a larger accepted chunk.
 	for size_level in [2, 1, 0]:
@@ -371,6 +392,26 @@ static func _mark_sub_cells(center_cell: Vector2i, size: int, covered: Dictionar
 	for sy in range(size):
 		for sx in range(size):
 			covered[Vector2i(center_cell.x + sx, center_cell.y + sy)] = true
+
+
+## Phase 4c — retention test (plan §4.4).
+## A chunk is retained at its current tier when its chunk-center distance is
+## within `[band_start - PAGING_HYSTERESIS, band_end + PAGING_HYSTERESIS)`.
+## Pure function of `key` + camera XZ — no merger state touched, safe to
+## call from the strict-band walker's pre-pass. Static (camera_xz passed in)
+## so tests can exercise it without driving `update_for_camera`.
+static func _is_within_retention_for(key: Vector3i, camera_xz: Vector2) -> bool:
+	var center_world: Vector2 = DU.chunk_center_world(Vector2i(key.x, key.y), key.z)
+	var dist: float = camera_xz.distance_to(center_world)
+	var lo: float = DU.paging_band_start(key.z) - DU.PAGING_HYSTERESIS
+	var hi: float = DU.paging_band_end(key.z) + DU.PAGING_HYSTERESIS
+	return dist >= lo and dist < hi
+
+
+## Instance-facing retention check — used by `_compute_desired_chunks`.
+## Thin forwarder so the static implementation stays unit-testable.
+func _is_within_retention(key: Vector3i, camera_xz: Vector2) -> bool:
+	return _is_within_retention_for(key, camera_xz)
 
 
 ## Sort comparator for the merge queue — closer chunks merge first.

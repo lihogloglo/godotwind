@@ -654,6 +654,162 @@ func test_top_down_walk_large_chunk_blocks_smaller_overlap() -> void:
 #endregion
 
 
+#region Phase 4c — hysteresis retention (plan §4.4)
+
+## Pure static helper — chunk inside strict band is always retained; chunks
+## past the upper retention edge are released; the zero-distance case (camera
+## AT chunk center) falls below the lower edge for any positive-distance band.
+func test_is_within_retention_for_tier_0_bounds() -> void:
+	# Tier 0 retention window = [150 - 20, 300 + 20) = [130, 320).
+	# Cell (1,0) at size_level=0 has center ≈ (175.5, -58.5), dist from origin ≈ 185m.
+	var key := Vector3i(1, 0, 0)
+	var center: Vector2 = DU.chunk_center_world(Vector2i(1, 0), 0)
+
+	# Camera at origin → dist ~185m → inside retention window.
+	assert_bool(Merger._is_within_retention_for(key, Vector2.ZERO)) \
+		.override_failure_message("Tier-0 chunk at dist ~185m should be retained (window [130, 320)).") \
+		.is_true()
+
+	# Camera offset along -X so chunk sits at dist ~395m → past retention upper 320.
+	var far_camera := Vector2(-215.0, 0.0)
+	assert_bool(Merger._is_within_retention_for(key, far_camera)) \
+		.override_failure_message("Tier-0 chunk at dist ~395m must NOT be retained (beyond 320).") \
+		.is_false()
+
+	# Camera AT chunk center → dist 0 → below retention lower 130.
+	assert_bool(Merger._is_within_retention_for(key, center)) \
+		.override_failure_message("Tier-0 chunk at dist 0 must NOT be retained (below 130).") \
+		.is_false()
+
+
+## A chunk whose strict-band-exit (just past band_end) still sits inside
+## the +hysteresis upper edge must be pre-populated into desired.
+func test_hysteresis_retains_active_chunk_past_strict_band() -> void:
+	var merger := Merger.new()
+	var retained_key := Vector3i(2, 0, 0)
+	# Cell (2,0) size_level=0 center ≈ (292.6, -58.5), dist from origin ≈ 298m.
+	# Shifting camera -20m along X: dist grows to ≈ 318m — still inside [130, 320).
+	var data := Merger.HLODChunkData.new()
+	data.key = retained_key
+	merger._active_chunks[retained_key] = data
+
+	var camera_pos := Vector3(-20.0, 0.0, 0.0)
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), camera_pos)
+
+	assert_bool(retained_key in desired).override_failure_message(
+		"Retained tier-0 chunk at dist ~318m (retention [130, 320)) must survive the pre-pass."
+	).is_true()
+
+
+## A chunk beyond the +hysteresis upper edge is NOT pre-populated — the walk
+## is free to re-tier, and the post-walk diff will unload it.
+func test_hysteresis_releases_active_chunk_past_retention_edge() -> void:
+	var merger := Merger.new()
+	var released_key := Vector3i(2, 0, 0)
+	var data := Merger.HLODChunkData.new()
+	data.key = released_key
+	merger._active_chunks[released_key] = data
+
+	# Camera shifted -50m along X → chunk dist ≈ 347m, past retention upper 320.
+	var camera_pos := Vector3(-50.0, 0.0, 0.0)
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), camera_pos)
+
+	assert_bool(released_key in desired).override_failure_message(
+		"Active tier-0 chunk at dist ~347m must NOT be retained (retention upper = 320)."
+	).is_false()
+
+
+## Retained chunk pre-marks its sub-cells covered, blocking the strict-band
+## walk from accepting an overlapping chunk at a different tier. The specific
+## invariant plan §4.4 protects — hysteresis applies to TRANSITIONS, not
+## membership; a retained chunk locks out its area until it releases.
+func test_hysteresis_retained_chunk_blocks_retiering_walk() -> void:
+	var merger := Merger.new()
+	# Seed tier-0 chunk at (2,0,0). Camera at origin → chunk dist ~298m, inside
+	# strict band [150, 300) AND retention [130, 320). Retention adds it first,
+	# marking cell (2,0) covered so the tier-1 walk can't claim it.
+	var retained_key := Vector3i(2, 0, 0)
+	var data := Merger.HLODChunkData.new()
+	data.key = retained_key
+	merger._active_chunks[retained_key] = data
+
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	assert_bool(retained_key in desired).override_failure_message(
+		"Retained tier-0 chunk at ~298m must be present in desired."
+	).is_true()
+
+	# Tier-1 chunk at (2,0,1) would cover cells (2,0),(3,0),(2,1),(3,1).
+	# Cell (2,0) is claimed by retained tier-0 → tier-1 walk must skip it.
+	assert_bool(Vector3i(2, 0, 1) in desired).override_failure_message(
+		"Tier-1 chunk (2,0,1) overlaps retained tier-0's cell (2,0) — walker must skip."
+	).is_false()
+
+
+## Empty active set = Phase 4b behavior. Sanity check that the pre-pass is a
+## no-op when `_active_chunks` is empty — every Phase 4b walker-invariant test
+## relies on this.
+func test_hysteresis_no_effect_with_empty_active_chunks() -> void:
+	var merger := Merger.new()
+	assert_int(merger._active_chunks.size()).is_equal(0)
+
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	# Same walker invariants as Phase 4b: every sub-cell claimed by at most one chunk.
+	var owners: Dictionary = {}
+	for key: Vector3i in desired:
+		var size: int = 1 << key.z
+		for sy in range(size):
+			for sx in range(size):
+				var cell := Vector2i(key.x + sx, key.y + sy)
+				assert_bool(owners.has(cell)).override_failure_message(
+					"Cell %s double-covered with empty active set — pre-pass must be a no-op." % [cell]
+				).is_false()
+				owners[cell] = key
+
+
+## Pre-pass + strict walk must never produce double-coverage. Tests the
+## interaction: an active chunk inside its strict band is both retained AND
+## what the walk would have produced — the dict-write is idempotent (same key)
+## and the `covered_cells` marking prevents the walk from re-accepting a
+## sibling chunk on the same sub-cells.
+func test_hysteresis_pre_pass_and_walk_never_double_cover() -> void:
+	var merger := Merger.new()
+	# Three active chunks spanning all tiers, each inside both strict band AND
+	# retention window at origin camera.
+	var seeds: Array[Vector3i] = [
+		Vector3i(1, 0, 0),   # tier-0 ~175m → strict [150,300)
+		Vector3i(2, 2, 1),   # tier-1 ~391m → strict [300,600)
+		Vector3i(4, 4, 2),   # tier-2 ~828m → strict [600,1000)
+	]
+	for key: Vector3i in seeds:
+		var data := Merger.HLODChunkData.new()
+		data.key = key
+		merger._active_chunks[key] = data
+
+	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	# Every seeded chunk must still be in desired.
+	for key: Vector3i in seeds:
+		assert_bool(key in desired).override_failure_message(
+			"Seeded active chunk %s dropped from desired — retention failed." % [key]
+		).is_true()
+
+	# Walker invariant: no cell is owned by more than one chunk.
+	var owners: Dictionary = {}
+	for key: Vector3i in desired:
+		var size: int = 1 << key.z
+		for sy in range(size):
+			for sx in range(size):
+				var cell := Vector2i(key.x + sx, key.y + sy)
+				assert_bool(owners.has(cell)).override_failure_message(
+					"Cell %s claimed by multiple chunks: existing=%s, new=%s" % [cell, owners.get(cell, Vector3i.ZERO), key]
+				).is_false()
+				owners[cell] = key
+
+#endregion
+
+
 #region Phase 2 SizeCache re-evaluation (was here, kept verbatim)
 
 ## Camera-motion parity — cached ref moving into range must re-evaluate.
