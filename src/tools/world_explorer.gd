@@ -142,6 +142,7 @@ var debug_system: Node = null  # Unified debug system (DebugSystem - F4/F9/F11/F
 var _profiling_report: ProfilingReport = null  # UI log panel profiling report
 var _batch_debug_hud: Node = null  # Batch pool debug visualization (BatchDebugHUD)
 var _lod_debug_commands: LodDebugCommands = null  # LOD console commands (prevent GC)
+var _debug_view_commands: DebugViewCommands = null  # wireframe + collision viz console commands (prevent GC)
 var _pocket_manager: Node = null  # InteriorPocketManager
 var _door_prompt_label: Label = null  # "Press E to enter" prompt
 var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
@@ -193,6 +194,12 @@ func _notification(what: int) -> void:
 ## Immediate shutdown: free GPU resources, set quitting flag, skip slow tree teardown.
 ## Called from both Alt+F4 (NOTIFICATION_WM_CLOSE_REQUEST) and the escape menu Quit button.
 func _do_fast_quit() -> void:
+	# Sentinel log marker — lets log readers distinguish a runtime crash
+	# from a user-initiated quit (any sig 11 / exit 139 after this line is
+	# a teardown crash, not a streaming bug). See MODEL_LOADER_RACE.md
+	# §"Not in scope" for the teardown-crash separate work item.
+	Log.info("shutdown", "USER_QUIT — WM_CLOSE_REQUEST received, beginning fast quit")
+
 	# Global quitting flag — checked by _exit_tree handlers to bail immediately
 	Engine.set_meta("_quitting", true)
 
@@ -209,6 +216,13 @@ func _do_fast_quit() -> void:
 func _ready() -> void:
 	# Intercept window close to do fast cleanup instead of slow tree teardown
 	get_tree().set_auto_accept_quit(false)
+
+	# Enable wireframe debug-buffer generation BEFORE any mesh loads. The flag
+	# affects mesh-creation time only, so toggling `wireframe on` in the
+	# console mid-session would otherwise leave pre-existing meshes broken.
+	# Cost is the index buffer doubling for affected meshes — fine for a dev
+	# tool. Console command lives in DebugViewCommands.
+	DebugViewCommands.enable_wireframe_generation()
 
 	var _t0 := Time.get_ticks_msec()
 	var _t_step := _t0
@@ -1541,6 +1555,12 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		_lod_debug_commands = LodDebugCommands.new(native_streaming_manager)
 		_lod_debug_commands.register_commands(console)
 
+		# Register wireframe + collision visualization commands.
+		# World root used as the recursion start for collision-shape walking,
+		# covering both streamed cells and any in-scene-tree statics.
+		_debug_view_commands = DebugViewCommands.new(get_viewport(), self)
+		_debug_view_commands.register_commands(console)
+
 		# Register batch pool debug commands (legacy HUD)
 		console.register_command(
 			"mid_hud",
@@ -1707,6 +1727,13 @@ func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 		var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
 		if cell:
 			_pocket_manager.register_exterior_cell_doors(cell, grid)
+
+	# Autoregister collision visualizers on the new cell when the toggle is ON.
+	# No-op when toggle is off. Cell node lookup defers to NativeStreamingManager.
+	if _debug_view_commands and native_streaming_manager:
+		var cell_node: Node = native_streaming_manager._loaded_cells.get(grid) if "_loaded_cells" in native_streaming_manager else null
+		if cell_node:
+			_debug_view_commands.on_cell_loaded(cell_node)
 
 
 ## Callback for native streaming manager cell unloaded
