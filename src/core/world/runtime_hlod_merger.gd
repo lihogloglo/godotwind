@@ -556,8 +556,12 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i, camera_world_pos: Vec
 
 ## Worker thread entry point. Runs merge kernel, posts result to completion queue.
 ## Bound via Callable — all data pre-collected, no scene tree or ESMManager access.
+##
+## Phase 3b: passes `size_level = 0` explicitly — current HLOD merger operates
+## at fixed 1-cell granularity. Phase 4 adaptive chunks thread the real
+## size_level through when they ship.
 func _merge_cell_worker(grid: Vector2i, inputs: Array, cell_origin: Vector3) -> Dictionary:
-	var mesh := Kernel.merge_refs(inputs, cell_origin)
+	var mesh := Kernel.merge_refs(inputs, cell_origin, 0)
 	if not mesh:
 		return {"grid": grid, "mesh": null, "bytes": 0}
 

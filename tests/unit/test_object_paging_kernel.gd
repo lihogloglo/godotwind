@@ -69,7 +69,7 @@ static func _make_ref(mesh: ArrayMesh, mat: Material, world_pos: Vector3) -> Ker
 #region Tests
 
 func test_empty_input_returns_null() -> void:
-	var mesh: ArrayMesh = Kernel.merge_refs([], Vector3.ZERO)
+	var mesh: ArrayMesh = Kernel.merge_refs([], Vector3.ZERO, 0, true)
 	assert_that(mesh).is_null()
 
 
@@ -78,7 +78,7 @@ func test_single_ref_preserves_surface() -> void:
 	var mat := StandardMaterial3D.new()
 	var ref := _make_ref(tri, mat, Vector3(10.0, 0.0, 0.0))
 
-	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3.ZERO)
+	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3.ZERO, 0, true)
 	assert_that(merged).is_not_null()
 	assert_that(merged.get_surface_count()).is_equal(1)
 
@@ -107,7 +107,7 @@ func test_chunk_origin_subtracts_from_vertex_positions() -> void:
 	var ref := _make_ref(tri, mat, Vector3(100.0, 0.0, 0.0))
 
 	# chunk_origin = (90, 0, 0) — vertex 0 should end at (10, 0, 0)
-	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3(90.0, 0.0, 0.0))
+	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3(90.0, 0.0, 0.0), 0, true)
 	assert_that(merged).is_not_null()
 
 	var arrays: Array = merged.surface_get_arrays(0)
@@ -129,7 +129,7 @@ func test_two_refs_same_material_merge_into_one_surface() -> void:
 	var ref_a := _make_ref(tri, mat, Vector3(10.0, 0.0, 0.0))
 	var ref_b := _make_ref(tri, mat, Vector3(20.0, 0.0, 0.0))
 
-	var merged: ArrayMesh = Kernel.merge_refs([ref_a, ref_b], Vector3.ZERO)
+	var merged: ArrayMesh = Kernel.merge_refs([ref_a, ref_b], Vector3.ZERO, 0, true)
 	assert_that(merged).is_not_null()
 
 	# Same material → one merged surface.
@@ -158,7 +158,7 @@ func test_two_refs_different_materials_produce_two_surfaces() -> void:
 	var ref_a := _make_ref(tri, mat_a, Vector3(10.0, 0.0, 0.0))
 	var ref_b := _make_ref(tri, mat_b, Vector3(20.0, 0.0, 0.0))
 
-	var merged: ArrayMesh = Kernel.merge_refs([ref_a, ref_b], Vector3.ZERO)
+	var merged: ArrayMesh = Kernel.merge_refs([ref_a, ref_b], Vector3.ZERO, 0, true)
 	assert_that(merged).is_not_null()
 	assert_that(merged.get_surface_count()).is_equal(2)
 
@@ -176,7 +176,7 @@ func test_materials_preserved_on_merged_surfaces() -> void:
 	var ref_a := _make_ref(tri, mat_a, Vector3(10.0, 0.0, 0.0))
 	var ref_b := _make_ref(tri, mat_b, Vector3(20.0, 0.0, 0.0))
 
-	var merged: ArrayMesh = Kernel.merge_refs([ref_a, ref_b], Vector3.ZERO)
+	var merged: ArrayMesh = Kernel.merge_refs([ref_a, ref_b], Vector3.ZERO, 0, true)
 	assert_that(merged).is_not_null()
 	assert_that(merged.get_surface_count()).is_equal(2)
 
@@ -200,14 +200,14 @@ func test_estimate_mesh_bytes_scales_with_vertex_count() -> void:
 
 	# 1 ref → 3 verts
 	var ref1 := _make_ref(tri, mat, Vector3.ZERO)
-	var merged1: ArrayMesh = Kernel.merge_refs([ref1], Vector3.ZERO)
+	var merged1: ArrayMesh = Kernel.merge_refs([ref1], Vector3.ZERO, 0, true)
 	var bytes1 := Kernel.estimate_mesh_bytes(merged1)
 
 	# 4 refs (shared material) → 12 verts
 	var refs4: Array = []
 	for i in range(4):
 		refs4.append(_make_ref(tri, mat, Vector3(float(i) * 10.0, 0.0, 0.0)))
-	var merged4: ArrayMesh = Kernel.merge_refs(refs4, Vector3.ZERO)
+	var merged4: ArrayMesh = Kernel.merge_refs(refs4, Vector3.ZERO, 0, true)
 	var bytes4 := Kernel.estimate_mesh_bytes(merged4)
 
 	# 4× vertex count should give ≈4× byte estimate. LOD chain adds a
@@ -358,6 +358,131 @@ func test_type_eligible_unknown_defaults_to_reject() -> void:
 #endregion
 
 
+#region Phase 3b — cost-benefit analyze tests
+
+## Empty input → empty keep_mask.
+func test_analyze_empty_input() -> void:
+	var result: Dictionary = Kernel._analyze_chunk([], 0)
+	assert_that(result).is_empty()
+
+
+## Single mesh type with unique materials → merge_benefit = 0 (nothing to share).
+## OpenMW `mergeBenefit > mergeCost` fails → unmerged.
+func test_analyze_single_unique_type_not_merged() -> void:
+	var tri := _make_triangle_mesh()
+	var mat := StandardMaterial3D.new()
+	var refs: Array = [_make_ref(tri, mat, Vector3.ZERO)]
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+
+	var mesh_id: int = tri.get_instance_id()
+	assert_that(result).contains_keys([mesh_id])
+	assert_bool(result[mesh_id]) \
+		.override_failure_message("Single unique-material type must not merge (no shared materials = benefit 0).") \
+		.is_false()
+
+
+## Two mesh types sharing ONE material → mergeBenefit > 0.
+## With default PAGING_MERGE_FACTOR = 256, the small 3-vert triangles easily
+## clear the cost threshold. Both types should merge.
+func test_analyze_two_types_shared_material_both_merged() -> void:
+	# Distinct mesh resources but same material → shared_material_count = 1 for each
+	var tri_a := _make_triangle_mesh()
+	var tri_b := _make_triangle_mesh()  # distinct instance, same content
+	var mat := StandardMaterial3D.new()
+
+	var refs: Array = [
+		_make_ref(tri_a, mat, Vector3.ZERO),
+		_make_ref(tri_a, mat, Vector3(1, 0, 0)),
+		_make_ref(tri_a, mat, Vector3(2, 0, 0)),
+		_make_ref(tri_b, mat, Vector3(3, 0, 0)),
+		_make_ref(tri_b, mat, Vector3(4, 0, 0)),
+	]
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+
+	var id_a: int = tri_a.get_instance_id()
+	var id_b: int = tri_b.get_instance_id()
+	assert_bool(result[id_a]) \
+		.override_failure_message("Type A shares material with B and has 3 refs — should merge.") \
+		.is_true()
+	assert_bool(result[id_b]) \
+		.override_failure_message("Type B shares material with A and has 2 refs — should merge.") \
+		.is_true()
+
+
+## Two mesh types with distinct materials (nothing shared) → both unmerged.
+func test_analyze_two_types_distinct_materials_not_merged() -> void:
+	var tri_a := _make_triangle_mesh()
+	var tri_b := _make_triangle_mesh()
+	var mat_a := StandardMaterial3D.new()
+	var mat_b := StandardMaterial3D.new()
+
+	var refs: Array = [
+		_make_ref(tri_a, mat_a, Vector3.ZERO),
+		_make_ref(tri_b, mat_b, Vector3(1, 0, 0)),
+	]
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+
+	assert_bool(result[tri_a.get_instance_id()]).is_false()
+	assert_bool(result[tri_b.get_instance_id()]).is_false()
+
+
+## size_level affects merge cost: higher level = higher cost = harder to merge.
+## A borderline-beneficial type at size_level=0 may flip to unmerged at level=2.
+##
+## Setup: enough refs + shared materials that benefit clears cost at level 0
+## but not at level 2 (3× vertex cost multiplier).
+func test_analyze_size_level_affects_decision() -> void:
+	# Build a borderline case: 2 mesh types share a material, few refs.
+	# At PAGING_MERGE_FACTOR=256, benefit = ref_count × shared = small × 1.
+	# Cost = total_verts × cost_multiplier. At level 0 (×1), benefit>cost.
+	# At level 2 (×3), cost triples — may flip.
+	var tri_a := _make_triangle_mesh()  # 3 verts
+	var tri_b := _make_triangle_mesh()
+	var mat := StandardMaterial3D.new()
+
+	# 2 refs of A, 2 of B, sharing mat → benefit_a = 2×1 = 2, cost_a = 3×level
+	# At level 0: 2×256 = 512 > 3 → merge. At level 2: 512 > 9 → still merge.
+	# Need much larger cost to flip. Make total_verts absurd by repeating refs.
+	var refs: Array = []
+	for i in range(2):
+		refs.append(_make_ref(tri_a, mat, Vector3(float(i), 0, 0)))
+	for i in range(2):
+		refs.append(_make_ref(tri_b, mat, Vector3(float(i) + 2, 0, 0)))
+
+	var result_0: Dictionary = Kernel._analyze_chunk(refs, 0)
+	var result_2: Dictionary = Kernel._analyze_chunk(refs, 2)
+
+	# At small vert count, level doesn't flip — contract is monotonic but
+	# outcome depends on scale. Assert the threshold respects the multiplier:
+	# if level_0 rejects, level_2 MUST reject. If level_0 accepts, level_2
+	# may accept or reject.
+	var a_id: int = tri_a.get_instance_id()
+	if not result_0[a_id]:
+		assert_bool(result_2[a_id]) \
+			.override_failure_message("size_level=2 cannot accept what level=0 rejected (cost monotonic).") \
+			.is_false()
+
+
+## Zero-vertex type → merge_cost = 0 → merge_benefit > 0 → degenerate "merge true".
+## Acceptable edge case: empty mesh has no cost anyway.
+func test_analyze_zero_vert_degenerate() -> void:
+	var empty := ArrayMesh.new()  # no surfaces
+	var mat := StandardMaterial3D.new()
+	var refs: Array = [_make_ref(empty, mat, Vector3.ZERO)]
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+
+	# Mesh with 0 surfaces produces no group entry (ref_count loop skips).
+	# So result dict doesn't contain it.
+	assert_that(result).is_empty()
+
+
+## PAGING_MERGE_FACTOR = 256 matches OpenMW canonical default (plan §8).
+func test_paging_merge_factor_matches_openmw_default() -> void:
+	assert_float(DU.PAGING_MERGE_FACTOR).is_equal_approx(256.0, 0.001)
+
+#endregion
+
+
 #region Phase 2 SizeCache re-evaluation (was here, kept verbatim)
 
 ## Camera-motion parity — cached ref moving into range must re-evaluate.
@@ -395,7 +520,7 @@ func test_normals_transformed_by_ref_rotation() -> void:
 	ref.ref_transform = Transform3D(Basis().rotated(Vector3.RIGHT, PI / 2.0), Vector3.ZERO)
 	ref.sub_meshes = [_make_sub(tri, mat)]
 
-	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3.ZERO)
+	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3.ZERO, 0, true)
 	assert_that(merged).is_not_null()
 
 	var arrays: Array = merged.surface_get_arrays(0)

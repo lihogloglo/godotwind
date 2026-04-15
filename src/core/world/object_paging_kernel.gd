@@ -29,6 +29,7 @@ class_name ObjectPagingKernel
 extends RefCounted
 
 const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 
 ## LOD generation parameters for merged chunks. Aggressive because merged
@@ -92,8 +93,24 @@ static func _get_native() -> RefCounted:
 ## Vertices expressed in chunk-local space (caller passes chunk_origin; we
 ## subtract it per-ref here so C# sees world-minus-origin transforms directly).
 ## Returns null if inputs produce no geometry.
-static func merge_refs(inputs: Array, chunk_origin: Vector3) -> ArrayMesh:
-	var triplets: Array = _flatten_to_triplets(inputs, chunk_origin)
+##
+## `size_level` (Phase 3b, default 0) scales the merge cost in the cost-benefit
+## analyze. `size_level=0` = 1×1 cell chunks (near-MID), `size_level=1` = 2×2
+## (MID-far), `size_level=2` = 4×4 (HLOD). Larger chunks pay more per-vertex
+## cost so only truly shared mesh types survive cost-benefit.
+##
+## `force_merge_all` (Phase 3b, default false) bypasses the cost-benefit analyze
+## and merges every input mesh-type. Primarily for Phase 1 kernel parity tests
+## with synthetic single-type / single-material fixtures — real callers leave
+## this at the default and trust the analyze to decide.
+static func merge_refs(inputs: Array, chunk_origin: Vector3, size_level: int = 0, force_merge_all: bool = false) -> ArrayMesh:
+	# Phase 3b — cost-benefit analyze on worker thread, before materialization.
+	# Decides per-mesh-type whether merging pays back the vertex-duplication tax.
+	var keep_mask: Dictionary = {}
+	if not force_merge_all:
+		keep_mask = _analyze_chunk(inputs, size_level)
+
+	var triplets: Array = _flatten_to_triplets(inputs, chunk_origin, keep_mask)
 	if triplets.is_empty():
 		return null
 
@@ -167,12 +184,21 @@ static func generate_lods(mesh: ArrayMesh) -> ArrayMesh:
 ## Precomputes `full_xform = ref_transform * sub.local_transform` minus chunk_origin
 ## and resolves the material-override/per-surface chain here so the C# side
 ## doesn't need to unpack the RefInput/SubMeshInput Variant structure.
-static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3) -> Array:
+##
+## `keep_mask` (Phase 3b, optional): when non-empty, only sub_meshes whose
+## `mesh.get_instance_id()` appears in the mask (with value true) are flattened.
+## Empty mask = keep everything (backward-compat + "no cost-benefit yet" callers).
+static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask: Dictionary = {}) -> Array:
 	var triplets: Array = []
+	var filter_enabled: bool = not keep_mask.is_empty()
 	for ref_input: RefInput in inputs:
 		for sm: SubMeshInput in ref_input.sub_meshes:
 			if sm.mesh == null:
 				continue
+			if filter_enabled:
+				var mesh_id: int = sm.mesh.get_instance_id()
+				if not keep_mask.get(mesh_id, false):
+					continue
 			var sub_count: int = sm.mesh.get_surface_count()
 			if sub_count == 0:
 				continue
@@ -197,5 +223,81 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3) -> Array:
 
 				triplets.append([arrays, full_xform, mat])
 	return triplets
+
+
+## Phase 3b — cost-benefit analyze (OpenMW ObjectPaging §2.3).
+##
+## Matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:823-836`:
+##     mergeCost    = numVerts × size            (larger chunks pay more)
+##     mergeBenefit = avgStateSetReuse × mergeFactor
+##     merge        = mergeBenefit > mergeCost
+##
+## Godotwind port per plan §2.3:
+##     mergeBenefit_type = ref_count_in_chunk × shared_material_count
+## where `shared_material_count` is the number of distinct materials on this
+## mesh-type that are also used by ≥2 distinct mesh-types in the chunk (the
+## Godotwind proxy for OpenMW's StateSet reuse average). A mesh-type whose
+## materials appear nowhere else has shared_material_count = 0 →
+## mergeBenefit = 0 → merge=false → stays as individual RS instances.
+##
+## Returns `Dictionary[mesh_instance_id: int -> merge: bool]` — the keep-mask
+## consumed by `_flatten_to_triplets`.
+##
+## Thread-safe: reads input ArrayMesh / Material instance IDs (immutable),
+## creates local dicts. Safe for worker-thread execution.
+static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
+	# Per-mesh-type aggregation
+	var groups: Dictionary = {}      # mesh_id -> {"ref_count": int, "verts": int, "mats": Dictionary[mat_id: true]}
+	# Per-material: set of mesh_ids that use it (for shared_material_count)
+	var mat_to_mesh_ids: Dictionary = {}  # mat_id -> Dictionary[mesh_id: true]
+
+	for ref_input: RefInput in inputs:
+		for sm: SubMeshInput in ref_input.sub_meshes:
+			if sm.mesh == null:
+				continue
+			var sub_count: int = sm.mesh.get_surface_count()
+			if sub_count == 0:
+				continue
+
+			var mesh_id: int = sm.mesh.get_instance_id()
+			if mesh_id not in groups:
+				groups[mesh_id] = {"ref_count": 0, "verts": 0, "mats": {}}
+			var group: Dictionary = groups[mesh_id]
+			group["ref_count"] += 1
+
+			for si in range(sub_count):
+				var arrays: Array = sm.mesh.surface_get_arrays(si)
+				if arrays.is_empty():
+					continue
+				var verts: Variant = arrays[Mesh.ARRAY_VERTEX]
+				if verts is PackedVector3Array and not verts.is_empty():
+					group["verts"] += verts.size()
+
+				# Resolve material (same chain as _flatten_to_triplets)
+				var mat: Material = sm.material_override
+				if mat == null and si < sm.surface_materials.size():
+					mat = sm.surface_materials[si]
+				if mat == null:
+					mat = sm.mesh.surface_get_material(si)
+
+				var mat_id: int = mat.get_instance_id() if mat else 0
+				group["mats"][mat_id] = true
+				if mat_id not in mat_to_mesh_ids:
+					mat_to_mesh_ids[mat_id] = {}
+				mat_to_mesh_ids[mat_id][mesh_id] = true
+
+	# Compute merge decision per mesh-type
+	var result: Dictionary = {}
+	var cost_multiplier: float = float(size_level + 1)
+	for mesh_id: int in groups:
+		var group: Dictionary = groups[mesh_id]
+		var shared_count: int = 0
+		for mat_id: int in group["mats"]:
+			if mat_to_mesh_ids.get(mat_id, {}).size() >= 2:
+				shared_count += 1
+		var merge_benefit: float = float(group["ref_count"]) * float(shared_count)
+		var merge_cost: float = float(group["verts"]) * cost_multiplier
+		result[mesh_id] = merge_benefit * DU.PAGING_MERGE_FACTOR > merge_cost
+	return result
 
 #endregion

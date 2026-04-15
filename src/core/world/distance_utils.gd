@@ -73,6 +73,15 @@ const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 const PAGING_MIN_SIZE: float = 0.14
 const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
 
+## Cost-benefit merge decision multiplier (OpenMW `mObjectPagingMergeFactor`).
+## A mesh-type is merged when `mergeBenefit × PAGING_MERGE_FACTOR > mergeCost`,
+## where mergeBenefit = ref_count × shared_material_count and
+## mergeCost = total_verts × (size_level + 1). 256.0 is OpenMW's canonical
+## default for Morrowind content (inspos/openmw/components/settings/
+## categories/terrain.hpp:32). Raise → merge more aggressively; lower →
+## leave more types as individual RS instances.
+const PAGING_MERGE_FACTOR: float = 256.0
+
 #endregion
 
 
