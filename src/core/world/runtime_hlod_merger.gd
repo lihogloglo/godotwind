@@ -310,6 +310,11 @@ func get_stats() -> Dictionary:
 ## the real `size_level` through; until then all paging work is size_level=0
 ## so the table is effectively `static/door/acti/cont → keep`.
 ##
+## **TES4 records** (REC_FURN4, REC_TREE4, REC_STAT4, etc.) intentionally
+## omitted — Godotwind ships Morrowind (TES3) data only. If a future port
+## adds TES4 support, the OpenMW `typeFilter` table in `objectpaging.cpp:55-75`
+## has the reference implementation for REC_FURN4/REC_TREE4/REC_DOOR4 etc.
+##
 ## Pure static — unit-testable without a merger instance.
 static func _type_eligible(type_name: String, size_level: int) -> bool:
 	match type_name:

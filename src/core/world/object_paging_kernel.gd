@@ -180,6 +180,19 @@ static func generate_lods(mesh: ArrayMesh) -> ArrayMesh:
 
 #region Internal — triplet flattening
 
+## Resolve the effective material for a sub-mesh surface.
+## Precedence: whole-mesh override → per-surface material → mesh default.
+## Used by both `_flatten_to_triplets` and `_analyze_chunk` — central to keep
+## material identity consistent across the cost-benefit decision and the
+## actual merge output.
+static func _resolve_material(sm: SubMeshInput, surface_index: int) -> Material:
+	if sm.material_override != null:
+		return sm.material_override
+	if surface_index < sm.surface_materials.size() and sm.surface_materials[surface_index] != null:
+		return sm.surface_materials[surface_index]
+	return sm.mesh.surface_get_material(surface_index)
+
+
 ## Flatten `Array[RefInput]` → `Array[[ArrayMesh-surface-arrays, fullXform, Material]]`.
 ## Precomputes `full_xform = ref_transform * sub.local_transform` minus chunk_origin
 ## and resolves the material-override/per-surface chain here so the C# side
@@ -214,13 +227,7 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask
 				if verts == null or (verts is PackedVector3Array and verts.is_empty()):
 					continue
 
-				# Resolve material: whole-mesh override → per-surface → mesh default
-				var mat: Material = sm.material_override
-				if mat == null and si < sm.surface_materials.size():
-					mat = sm.surface_materials[si]
-				if mat == null:
-					mat = sm.mesh.surface_get_material(si)
-
+				var mat: Material = _resolve_material(sm, si)
 				triplets.append([arrays, full_xform, mat])
 	return triplets
 
@@ -273,13 +280,7 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 				if verts is PackedVector3Array and not verts.is_empty():
 					group["verts"] += verts.size()
 
-				# Resolve material (same chain as _flatten_to_triplets)
-				var mat: Material = sm.material_override
-				if mat == null and si < sm.surface_materials.size():
-					mat = sm.surface_materials[si]
-				if mat == null:
-					mat = sm.mesh.surface_get_material(si)
-
+				var mat: Material = _resolve_material(sm, si)
 				var mat_id: int = mat.get_instance_id() if mat else 0
 				group["mats"][mat_id] = true
 				if mat_id not in mat_to_mesh_ids:
