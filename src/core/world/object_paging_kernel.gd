@@ -43,9 +43,15 @@ const LOD_SCREEN_COVERAGE: float = 25.0
 ## Pre-collected merge input for one object reference.
 ## Populated on main thread from StaticObjectRenderer / ESM data; handed to
 ## worker thread for merging. Contains only thread-safe fields.
+##
+## Phase 5 — `rs2` and `dist_sq` feed the second-pass `minSizeMergeFactor`
+## filter inside `_flatten_to_triplets`. Callers that don't need Phase 5
+## filtering leave them at 0.0; the filter is a no-op when either is zero.
 class RefInput:
 	var ref_transform: Transform3D
 	var sub_meshes: Array  ## Array[SubMeshInput]
+	var rs2: float = 0.0         ## mesh_radius² × scale² (Phase 2 size metric)
+	var dist_sq: float = 0.0     ## pos.distance_squared_to(camera) at merge-request time
 
 
 ## One child sub-mesh of a RefInput.
@@ -198,9 +204,15 @@ static func _resolve_material(sm: SubMeshInput, surface_index: int) -> Material:
 ## and resolves the material-override/per-surface chain here so the C# side
 ## doesn't need to unpack the RefInput/SubMeshInput Variant structure.
 ##
-## `keep_mask` (Phase 3b, optional): when non-empty, only sub_meshes whose
-## `mesh.get_instance_id()` appears in the mask (with value true) are flattened.
-## Empty mask = keep everything (backward-compat + "no cost-benefit yet" callers).
+## `keep_mask` (Phase 3b/5, optional): when non-empty, only sub_meshes whose
+## `mesh.get_instance_id()` appears in the mask are flattened. Two accepted
+## shapes for backward compatibility:
+##   • `Dictionary[mesh_id -> bool]` — legacy boolean form from pre-Phase 5.
+##   • `Dictionary[mesh_id -> Dictionary{merge: bool, min_size_merged_sq: float}]` —
+##     Phase 5 rich form. When `min_size_merged_sq > 0` AND the ref's `rs2`
+##     and `dist_sq` are both set, `rs2 < dist_sq × min_size_merged_sq`
+##     rejects the ref (second-pass size filter, OpenMW §2.5).
+## Empty mask = keep everything (no cost-benefit pass).
 static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask: Dictionary = {}) -> Array:
 	var triplets: Array = []
 	var filter_enabled: bool = not keep_mask.is_empty()
@@ -208,10 +220,25 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask
 		for sm: SubMeshInput in ref_input.sub_meshes:
 			if sm.mesh == null:
 				continue
+			var mesh_id: int = sm.mesh.get_instance_id()
 			if filter_enabled:
-				var mesh_id: int = sm.mesh.get_instance_id()
-				if not keep_mask.get(mesh_id, false):
+				var entry: Variant = keep_mask.get(mesh_id)
+				if entry == null:
 					continue
+				var merge_ok: bool = false
+				var min_size_merged_sq: float = 0.0
+				if entry is bool:
+					merge_ok = entry
+				elif entry is Dictionary:
+					merge_ok = entry.get("merge", false)
+					min_size_merged_sq = entry.get("min_size_merged_sq", 0.0)
+				if not merge_ok:
+					continue
+				# Phase 5 second-pass per-ref size filter — skip refs whose
+				# projected size is below the merge-benefit-scaled threshold.
+				if min_size_merged_sq > 0.0 and ref_input.rs2 > 0.0 and ref_input.dist_sq > 0.0:
+					if ref_input.rs2 < ref_input.dist_sq * min_size_merged_sq:
+						continue
 			var sub_count: int = sm.mesh.get_surface_count()
 			if sub_count == 0:
 				continue
@@ -247,8 +274,12 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask
 ## materials appear nowhere else has shared_material_count = 0 →
 ## mergeBenefit = 0 → merge=false → stays as individual RS instances.
 ##
-## Returns `Dictionary[mesh_instance_id: int -> merge: bool]` — the keep-mask
-## consumed by `_flatten_to_triplets`.
+## Returns `Dictionary[mesh_instance_id: int -> Dictionary{merge: bool,
+## min_size_merged_sq: float}]` — the keep-mask consumed by
+## `_flatten_to_triplets`. `min_size_merged_sq` is the squared threshold for
+## the Phase 5 second-pass filter (OpenMW §2.5 `minSizeMergeFactor`) computed
+## from the per-type mergeBenefit / mergeCost ratio. It is `0.0` when merge
+## is rejected (filter is a no-op for unmerged types).
 ##
 ## Thread-safe: reads input ArrayMesh / Material instance IDs (immutable),
 ## creates local dicts. Safe for worker-thread execution.
@@ -287,7 +318,7 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 					mat_to_mesh_ids[mat_id] = {}
 				mat_to_mesh_ids[mat_id][mesh_id] = true
 
-	# Compute merge decision per mesh-type
+	# Compute merge decision + Phase 5 per-type min-size threshold.
 	var result: Dictionary = {}
 	var cost_multiplier: float = float(size_level + 1)
 	for mesh_id: int in groups:
@@ -296,9 +327,29 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 		for mat_id: int in group["mats"]:
 			if mat_to_mesh_ids.get(mat_id, {}).size() >= 2:
 				shared_count += 1
-		var merge_benefit: float = float(group["ref_count"]) * float(shared_count)
+		var merge_benefit_raw: float = float(group["ref_count"]) * float(shared_count)
 		var merge_cost: float = float(group["verts"]) * cost_multiplier
-		result[mesh_id] = merge_benefit * DU.PAGING_MERGE_FACTOR > merge_cost
+		var merge_benefit: float = merge_benefit_raw * DU.PAGING_MERGE_FACTOR
+		var merge: bool = merge_benefit > merge_cost
+
+		var min_size_merged_sq: float = 0.0
+		if merge:
+			min_size_merged_sq = _compute_min_size_merged_sq(merge_benefit, merge_cost)
+
+		result[mesh_id] = {"merge": merge, "min_size_merged_sq": min_size_merged_sq}
 	return result
+
+
+## Phase 5 — OpenMW `minSizeMerged` formula (objectpaging.cpp:833-836).
+## Returns the SQUARED threshold for direct comparison with `rs2 / dist_sq`.
+## Benefit==0 collapses to `MIN_SIZE²` (base filter) — merge is rejected in
+## that case anyway, so this branch only trips for caller parity tests.
+static func _compute_min_size_merged_sq(merge_benefit: float, merge_cost: float) -> float:
+	var factor2: float = 1.0
+	if merge_benefit > 0.0:
+		factor2 = minf(1.0, merge_cost * DU.PAGING_MIN_SIZE_COST_MULTIPLIER / merge_benefit)
+	var min_size_merge_factor_2: float = (1.0 - factor2) * DU.PAGING_MIN_SIZE_MERGE_FACTOR + factor2
+	var min_size_merged: float = DU.PAGING_MIN_SIZE * min_size_merge_factor_2
+	return min_size_merged * min_size_merged
 
 #endregion

@@ -376,7 +376,7 @@ func test_analyze_single_unique_type_not_merged() -> void:
 
 	var mesh_id: int = tri.get_instance_id()
 	assert_that(result).contains_keys([mesh_id])
-	assert_bool(result[mesh_id]) \
+	assert_bool(result[mesh_id]["merge"]) \
 		.override_failure_message("Single unique-material type must not merge (no shared materials = benefit 0).") \
 		.is_false()
 
@@ -401,10 +401,10 @@ func test_analyze_two_types_shared_material_both_merged() -> void:
 
 	var id_a: int = tri_a.get_instance_id()
 	var id_b: int = tri_b.get_instance_id()
-	assert_bool(result[id_a]) \
+	assert_bool(result[id_a]["merge"]) \
 		.override_failure_message("Type A shares material with B and has 3 refs — should merge.") \
 		.is_true()
-	assert_bool(result[id_b]) \
+	assert_bool(result[id_b]["merge"]) \
 		.override_failure_message("Type B shares material with A and has 2 refs — should merge.") \
 		.is_true()
 
@@ -422,8 +422,8 @@ func test_analyze_two_types_distinct_materials_not_merged() -> void:
 	]
 	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
 
-	assert_bool(result[tri_a.get_instance_id()]).is_false()
-	assert_bool(result[tri_b.get_instance_id()]).is_false()
+	assert_bool(result[tri_a.get_instance_id()]["merge"]).is_false()
+	assert_bool(result[tri_b.get_instance_id()]["merge"]).is_false()
 
 
 ## size_level affects merge cost: higher level = higher cost = harder to merge.
@@ -457,8 +457,8 @@ func test_analyze_size_level_affects_decision() -> void:
 	# if level_0 rejects, level_2 MUST reject. If level_0 accepts, level_2
 	# may accept or reject.
 	var a_id: int = tri_a.get_instance_id()
-	if not result_0[a_id]:
-		assert_bool(result_2[a_id]) \
+	if not result_0[a_id]["merge"]:
+		assert_bool(result_2[a_id]["merge"]) \
 			.override_failure_message("size_level=2 cannot accept what level=0 rejected (cost monotonic).") \
 			.is_false()
 
@@ -806,6 +806,192 @@ func test_hysteresis_pre_pass_and_walk_never_double_cover() -> void:
 					"Cell %s claimed by multiple chunks: existing=%s, new=%s" % [cell, owners.get(cell, Vector3i.ZERO), key]
 				).is_false()
 				owners[cell] = key
+
+#endregion
+
+
+#region Phase 4d — teleport detection (plan §11 Phase 3)
+
+## Pure predicate — first-ever call (prev == INF) never fires teleport.
+## Protects against spurious warmup on initial enable.
+func test_teleport_first_call_never_fires() -> void:
+	assert_bool(Merger._is_teleport(Vector3.INF, Vector3.ZERO)) \
+		.override_failure_message("Sentinel prev position (INF) must not count as teleport.") \
+		.is_false()
+
+
+## Small camera motion within threshold stays false.
+func test_teleport_small_motion_below_threshold() -> void:
+	var prev := Vector3(100.0, 0.0, 0.0)
+	var curr := Vector3(100.0 + Merger.TELEPORT_THRESHOLD * 0.5, 0.0, 0.0)
+	assert_bool(Merger._is_teleport(prev, curr)) \
+		.override_failure_message("Half-threshold motion must not fire teleport.") \
+		.is_false()
+
+
+## Jump past threshold fires teleport.
+func test_teleport_large_jump_fires() -> void:
+	var prev := Vector3.ZERO
+	var curr := Vector3(Merger.TELEPORT_THRESHOLD + 10.0, 0.0, 0.0)
+	assert_bool(Merger._is_teleport(prev, curr)) \
+		.override_failure_message("Jump past TELEPORT_THRESHOLD must fire teleport.") \
+		.is_true()
+
+
+## Threshold constant sanity — 500m matches the plan §11 Phase 3 callout.
+func test_teleport_threshold_matches_plan() -> void:
+	assert_float(Merger.TELEPORT_THRESHOLD).is_equal_approx(500.0, 0.01)
+
+#endregion
+
+
+#region Phase 5 — minSizeMergeFactor second-pass (OpenMW §2.5)
+
+## Constant parity — matches OpenMW canonical defaults (plan §8).
+func test_paging_min_size_merge_factor_matches_openmw() -> void:
+	assert_float(DU.PAGING_MIN_SIZE_MERGE_FACTOR).is_equal_approx(0.5, 0.001)
+	assert_float(DU.PAGING_MIN_SIZE_COST_MULTIPLIER).is_equal_approx(1.0, 0.001)
+
+
+## Formula corner case — benefit == 0 collapses to MIN_SIZE² (base threshold).
+## This branch is only ever reached by callers that pass zero benefit through
+## the helper directly; production `_analyze_chunk` skips the formula when
+## merge is rejected.
+func test_min_size_merged_sq_zero_benefit_collapses_to_base() -> void:
+	var threshold: float = Kernel._compute_min_size_merged_sq(0.0, 1000.0)
+	var expected: float = DU.PAGING_MIN_SIZE * DU.PAGING_MIN_SIZE
+	assert_float(threshold).is_equal_approx(expected, 0.0001)
+
+
+## Strong merge (benefit >> cost) — factor2 → 0 → minSizeMergeFactor2 → 0.5 →
+## threshold = (MIN_SIZE × 0.5)². Loosest filter, most refs survive.
+func test_min_size_merged_sq_strong_merge_loosens_threshold() -> void:
+	# benefit = 1000, cost = 1 → factor2 = clamp(1 × 1.0 / 1000, 0, 1) = 0.001
+	# minSizeMergeFactor2 = 0.999 × 0.5 + 0.001 ≈ 0.5005
+	var threshold: float = Kernel._compute_min_size_merged_sq(1000.0, 1.0)
+	var loose_expected: float = (DU.PAGING_MIN_SIZE * 0.5) * (DU.PAGING_MIN_SIZE * 0.5)
+	# Should be close to the loose end — within 2% because factor2 isn't exactly 0.
+	var ratio := threshold / loose_expected
+	assert_bool(ratio >= 0.99 and ratio <= 1.05) \
+		.override_failure_message("Strong merge threshold %f should be near loose bound %f (ratio=%f)" % [threshold, loose_expected, ratio]) \
+		.is_true()
+
+
+## Weak merge (benefit barely > cost) — factor2 → 1 → minSizeMergeFactor2 → 1 →
+## threshold = MIN_SIZE² (tight, equal to base filter).
+func test_min_size_merged_sq_weak_merge_tightens_to_base() -> void:
+	# benefit == cost → factor2 = 1.0 → minSizeMergeFactor2 = 1.0 → base threshold.
+	var threshold: float = Kernel._compute_min_size_merged_sq(100.0, 100.0)
+	var base_expected: float = DU.PAGING_MIN_SIZE * DU.PAGING_MIN_SIZE
+	assert_float(threshold).is_equal_approx(base_expected, 0.0001)
+
+
+## Analyze now emits rich per-type dicts: merge:bool + min_size_merged_sq:float.
+## Rejected types get min_size_merged_sq = 0 (filter is no-op).
+func test_analyze_rejected_type_has_zero_min_size_merged() -> void:
+	var tri := _make_triangle_mesh()
+	var mat := StandardMaterial3D.new()
+	var refs: Array = [_make_ref(tri, mat, Vector3.ZERO)]
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+
+	var mesh_id: int = tri.get_instance_id()
+	assert_bool(result[mesh_id]["merge"]).is_false()
+	assert_float(result[mesh_id]["min_size_merged_sq"]).is_equal_approx(0.0, 0.0001)
+
+
+## Accepted types get a positive min_size_merged_sq in [0, MIN_SIZE²].
+func test_analyze_merged_type_has_positive_min_size_merged() -> void:
+	var tri_a := _make_triangle_mesh()
+	var tri_b := _make_triangle_mesh()
+	var mat := StandardMaterial3D.new()
+	var refs: Array = [
+		_make_ref(tri_a, mat, Vector3.ZERO),
+		_make_ref(tri_a, mat, Vector3(1, 0, 0)),
+		_make_ref(tri_b, mat, Vector3(2, 0, 0)),
+		_make_ref(tri_b, mat, Vector3(3, 0, 0)),
+	]
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+
+	var base_sq: float = DU.PAGING_MIN_SIZE * DU.PAGING_MIN_SIZE
+	for mesh_id: int in result:
+		var entry: Dictionary = result[mesh_id]
+		if not entry["merge"]:
+			continue
+		var t: float = entry["min_size_merged_sq"]
+		assert_bool(t > 0.0 and t <= base_sq + 0.0001) \
+			.override_failure_message("Merged type must have min_size_merged_sq in (0, MIN_SIZE²]; got %f (base %f)" % [t, base_sq]) \
+			.is_true()
+
+
+## Integration: a ref whose projected size is below the merged type's
+## second-pass threshold must be dropped during flatten, even when its
+## mesh-type is approved for merging.
+func test_flatten_drops_sub_threshold_ref_via_second_pass() -> void:
+	var tri_a := _make_triangle_mesh()
+	var tri_b := _make_triangle_mesh()
+	var mat := StandardMaterial3D.new()
+	# Analyze-approvable setup (shared material, multiple refs per type).
+	var big := _make_ref(tri_a, mat, Vector3.ZERO)
+	var big2 := _make_ref(tri_a, mat, Vector3(1, 0, 0))
+	var small := _make_ref(tri_b, mat, Vector3(2, 0, 0))
+	var small2 := _make_ref(tri_b, mat, Vector3(3, 0, 0))
+
+	# Configure refs so the second-pass filter rejects `small` and `small2`
+	# but keeps `big` and `big2`. rs2=1000, dist_sq=10000, threshold worst-case
+	# at MIN_SIZE² ≈ 0.0196 → dist_sq × threshold ≈ 196. Big's rs2=1000 > 196 kept.
+	# Small's rs2=0.01, threshold same → 0.01 < 196 rejected.
+	big.rs2 = 1000.0
+	big.dist_sq = 10000.0
+	big2.rs2 = 1000.0
+	big2.dist_sq = 10000.0
+	small.rs2 = 0.01
+	small.dist_sq = 10000.0
+	small2.rs2 = 0.01
+	small2.dist_sq = 10000.0
+
+	var result: Dictionary = Kernel._analyze_chunk([big, big2, small, small2], 0)
+	var triplets: Array = Kernel._flatten_to_triplets([big, big2, small, small2], Vector3.ZERO, result)
+
+	# Only triplets from approved + size-passing refs survive. We can't easily
+	# map triplets back to the original ref, but the COUNT must be lower than
+	# the all-approved case. Compare against a baseline where rs2/dist_sq are
+	# zeroed (second-pass disabled per our guard).
+	for r: Kernel.RefInput in [big, big2, small, small2]:
+		r.rs2 = 0.0
+		r.dist_sq = 0.0
+	var baseline_triplets: Array = Kernel._flatten_to_triplets([big, big2, small, small2], Vector3.ZERO, result)
+
+	assert_int(triplets.size()) \
+		.override_failure_message("Second-pass filter must reject ≥1 ref (triplets=%d vs baseline=%d)" % [triplets.size(), baseline_triplets.size()]) \
+		.is_less(baseline_triplets.size())
+
+
+## Zeroed rs2/dist_sq disables the Phase 5 filter (backward compat).
+func test_flatten_second_pass_noop_when_ref_metrics_missing() -> void:
+	var tri_a := _make_triangle_mesh()
+	var tri_b := _make_triangle_mesh()
+	var mat := StandardMaterial3D.new()
+	var refs: Array = [
+		_make_ref(tri_a, mat, Vector3.ZERO),
+		_make_ref(tri_a, mat, Vector3(1, 0, 0)),
+		_make_ref(tri_b, mat, Vector3(2, 0, 0)),
+		_make_ref(tri_b, mat, Vector3(3, 0, 0)),
+	]
+	# Default RefInput.rs2 = 0.0, dist_sq = 0.0 → filter skipped.
+	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
+	var triplets: Array = Kernel._flatten_to_triplets(refs, Vector3.ZERO, result)
+
+	# With all refs contributing a surface each, we should see 4 triplets (one
+	# per ref) when analyze approves the merge. If any were rejected we'd see
+	# fewer — this locks in that zero-metrics refs pass through.
+	var merged_count := 0
+	for mesh_id: int in result:
+		if result[mesh_id]["merge"]:
+			merged_count += 1
+	if merged_count == 2:
+		assert_int(triplets.size()) \
+			.override_failure_message("With 4 approved refs and zero-metrics, expected 4 triplets.") \
+			.is_equal(4)
 
 #endregion
 

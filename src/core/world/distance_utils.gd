@@ -99,6 +99,17 @@ const PAGING_TIER_2_END: float = 1000.0
 ## NEAR↔MID promotion at 250m/270m.
 const PAGING_HYSTERESIS: float = 20.0
 
+## Phase 5 — second-pass `minSizeMergeFactor` (OpenMW canonical defaults).
+## After the cost-benefit decision accepts a mesh type, its refs face a
+## second size filter whose threshold scales with how merge-beneficial the
+## type turned out to be. Formula (matches `objectpaging.cpp:833-836`):
+##     factor2               = clamp(mergeCost × cost_multiplier / mergeBenefit, 0, 1)  [or 1 if benefit == 0]
+##     minSizeMergeFactor2   = (1 − factor2) × MIN_SIZE_MERGE_FACTOR + factor2
+##     minSizeMerged         = MIN_SIZE × minSizeMergeFactor2
+## Source: `inspos/openmw/components/settings/categories/terrain.hpp:35-39`.
+const PAGING_MIN_SIZE_MERGE_FACTOR: float = 0.5
+const PAGING_MIN_SIZE_COST_MULTIPLIER: float = 1.0
+
 #endregion
 
 #region Phase 4 — ChunkKey helpers (plan §4.1-4.2)

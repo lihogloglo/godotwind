@@ -55,6 +55,20 @@ const MERGES_PER_FRAME: int = 2
 ## visibility_range fade margins (same on both sides of a tier handoff).
 const TIER_FADE_MARGIN: float = 20.0
 
+## Phase 4d — teleport warmup (plan §11 Phase 3 / session log §7).
+## A camera translation larger than this threshold between consecutive
+## `update_for_camera` calls triggers a warmup pass: the merger pre-loads
+## `.res` prototypes for the incoming chunk ring over several frames BEFORE
+## submitting any merges, so the merge burst doesn't stall the main thread
+## on cold ResourceLoader I/O inside `_request_chunk_merge`.
+const TELEPORT_THRESHOLD: float = 500.0
+
+## Max prototype loads per `process_merge_queue` call while warmup is active.
+## Tuned so a typical teleport ring (~40-60 unique architectural mesh types)
+## drains in 3-4 frames. Each load is `.res` deserialize + register — low
+## single-digit ms each.
+const WARMUP_LOADS_PER_FRAME: int = 15
+
 
 #region Internal Data Classes
 
@@ -101,6 +115,20 @@ var _merge_queue: Array[Vector3i] = []
 var _camera_cell_cached: Vector2i = Vector2i.ZERO
 var _camera_world_pos_cached: Vector3 = Vector3.ZERO
 
+## Phase 4d — teleport warmup state.
+## `_last_camera_world_pos` is the camera position from the previous
+## `update_for_camera` call, used to detect a jump > TELEPORT_THRESHOLD.
+## `Vector3.INF` sentinel = no prior call (first-ever frame, never triggers).
+var _last_camera_world_pos: Vector3 = Vector3.INF
+
+## Pending prototype-load paths to pre-register. Drained by `process_merge_queue`
+## before any merges are submitted. Main-thread only.
+var _warmup_queue: Array[String] = []
+
+## Dedup guard — mesh_type_names we've already enqueued in the current warmup
+## burst. Cleared when the queue fully drains (or when cleanup() runs).
+var _warmup_dispatched: Dictionary = {}
+
 ## Phase 2 — SizeCache for the projected-size filter (OpenMW ObjectPaging §2.2).
 ## Key = ref_num (int). Value = radius²×scale² at last rejection. Mesh-invariant
 ## value — re-tested against current dist²×min_size² without re-reading AABB.
@@ -132,6 +160,8 @@ var _stats: Dictionary = {
 	"chunks_tier_0": 0,        # Phase 4 — per-tier active chunk counts
 	"chunks_tier_1": 0,
 	"chunks_tier_2": 0,
+	"warmup_queue_size": 0,    # Phase 4d — prototype pre-load queue depth
+	"total_teleports": 0,      # Phase 4d — cumulative teleport events detected
 }
 
 #endregion
@@ -170,9 +200,22 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	else:
 		_camera_world_pos_cached = camera_world_pos
 
+	# Phase 4d — teleport detection. A jump beyond TELEPORT_THRESHOLD between
+	# consecutive calls means cold prototypes are about to be slammed onto the
+	# main thread inside _request_chunk_merge. Prime the warmup queue so
+	# process_merge_queue pre-loads them over the next few frames instead.
+	var is_teleport: bool = _is_teleport(_last_camera_world_pos, _camera_world_pos_cached)
+	if is_teleport:
+		_stats["total_teleports"] += 1
+	_last_camera_world_pos = _camera_world_pos_cached
+
 	# Plan §4.3 — top-down anti-overlap walk. Larger tiers claim their cells
 	# first; smaller tiers skip any chunk whose 1×1 sub-cells are covered.
 	var desired_chunks: Dictionary = _compute_desired_chunks(camera_cell, _camera_world_pos_cached)
+
+	# Phase 4d — on teleport, enqueue unregistered prototypes for the new ring.
+	if is_teleport:
+		_prime_warmup_queue(desired_chunks)
 
 	var changed := 0
 
@@ -223,8 +266,23 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 ## Process staggered merge queue — max MERGES_PER_FRAME chunks per call.
 ## Each call does main-thread data collection + submits to worker.
 ## Call once per frame from streaming manager (BEFORE process_completions).
+##
+## Phase 4d — when the warmup queue is non-empty (post-teleport), we drain up
+## to WARMUP_LOADS_PER_FRAME prototype loads and then return WITHOUT advancing
+## the merge queue. Merges resume on the frame after warmup completes. The
+## reason for the hard split: prototype loading + merge submission on the
+## same frame was the pre-Phase-4d pathology — warmup is exactly the "don't
+## do both at once" budget partitioner.
 func process_merge_queue() -> void:
-	if not enabled or _merge_queue.is_empty():
+	if not enabled:
+		return
+
+	# Phase 4d — warmup drain has priority over merges.
+	if not _warmup_queue.is_empty():
+		_drain_warmup_queue()
+		return
+
+	if _merge_queue.is_empty():
 		return
 
 	var budget := MERGES_PER_FRAME
@@ -318,6 +376,90 @@ func cleanup() -> void:
 	_size_cache_mutex.lock()
 	_size_cache.clear()
 	_size_cache_mutex.unlock()
+
+	# Phase 4d warmup state
+	_warmup_queue.clear()
+	_warmup_dispatched.clear()
+	_last_camera_world_pos = Vector3.INF
+
+#endregion
+
+
+#region Phase 4d — teleport warmup (plan §11 Phase 3 / session log §7)
+
+## Pure teleport predicate. `Vector3.INF` sentinel (first-ever frame) is
+## never a teleport — otherwise the merger would warmup on its initial
+## enable even when the camera hasn't moved. Threshold kept at module
+## constant scope so bench tuning can override without touching the helper.
+static func _is_teleport(prev_pos: Vector3, curr_pos: Vector3) -> bool:
+	if prev_pos == Vector3.INF:
+		return false
+	return prev_pos.distance_to(curr_pos) > TELEPORT_THRESHOLD
+
+
+## Populate the warmup queue with unregistered prototype paths for every
+## desired chunk. Skips paths already enqueued in the current burst. Called
+## exactly once per teleport event, from `update_for_camera`.
+func _prime_warmup_queue(desired_chunks: Dictionary) -> void:
+	if not _static_renderer:
+		return
+	for key: Vector3i in desired_chunks:
+		var size: int = 1 << key.z
+		for cy in range(size):
+			for cx in range(size):
+				var cell_grid := Vector2i(key.x + cx, key.y + cy)
+				var cell_record: Variant = ESMManager.get_exterior_cell(cell_grid.x, cell_grid.y)
+				if not cell_record:
+					continue
+				for ref in cell_record.references:
+					if ref.is_deleted:
+						continue
+					var record_type: Array = [""]
+					var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+					if not base_record:
+						continue
+					var type_name: String = record_type[0] if record_type.size() > 0 else ""
+					if not _type_eligible(type_name, key.z):
+						continue
+					var model_path: String = _get_model_path(base_record)
+					if model_path.is_empty():
+						continue
+					var mesh_type_name := model_path.to_lower().replace("/", "\\")
+					if mesh_type_name in _warmup_dispatched:
+						continue
+					# Skip already-registered prototypes — nothing to warm up.
+					if not _static_renderer.get_sub_meshes(mesh_type_name).is_empty():
+						continue
+					_warmup_dispatched[mesh_type_name] = true
+					_warmup_queue.append(model_path)
+
+
+## Drain up to WARMUP_LOADS_PER_FRAME prototypes from the warmup queue.
+## Each load = ResourceLoader `.res` fetch + StaticObjectRenderer registration.
+## When the queue fully drains, `_warmup_dispatched` clears so a future
+## teleport gets a fresh dedup set.
+func _drain_warmup_queue() -> void:
+	if not _static_renderer:
+		_warmup_queue.clear()
+		_warmup_dispatched.clear()
+		return
+	var budget := WARMUP_LOADS_PER_FRAME
+	while budget > 0 and not _warmup_queue.is_empty():
+		# pop_back is O(1); order doesn't matter — we pre-load everything.
+		var model_path: String = _warmup_queue.pop_back()
+		var mesh_type_name := model_path.to_lower().replace("/", "\\")
+		# Re-check registration — another path (e.g. a slow-path merge for an
+		# active chunk on a previous frame) may have already registered it.
+		if not _static_renderer.get_sub_meshes(mesh_type_name).is_empty():
+			budget -= 1
+			continue
+		var prototype := _load_prototype_from_cache(model_path)
+		if prototype:
+			_static_renderer.register_from_prototype(mesh_type_name, prototype)
+			prototype.free()
+		budget -= 1
+	if _warmup_queue.is_empty():
+		_warmup_dispatched.clear()
 
 #endregion
 
@@ -540,8 +682,10 @@ func _request_chunk_merge(key: Vector3i, camera_cell: Vector2i, camera_world_pos
 				if aabb.size != Vector3.ZERO:
 					mesh_radius_sq = aabb.size.length_squared() * 0.25
 
+				# Phase 5 — compute rs2 unconditionally (zero when AABB missing)
+				# so it can be threaded to the kernel for second-pass filtering.
+				var rs2: float = mesh_radius_sq * scale_f * scale_f
 				if mesh_radius_sq > 0.0:
-					var rs2: float = mesh_radius_sq * scale_f * scale_f
 					if rs2 < size_threshold:
 						_size_cache_mutex.lock()
 						_size_cache[cache_key] = rs2
@@ -563,6 +707,9 @@ func _request_chunk_merge(key: Vector3i, camera_cell: Vector2i, camera_world_pos
 				var ref_input := Kernel.RefInput.new()
 				ref_input.ref_transform = ref_transform
 				ref_input.sub_meshes = []
+				# Phase 5 — propagate per-ref size metrics for second-pass filter.
+				ref_input.rs2 = rs2
+				ref_input.dist_sq = dist_sq
 				for sub: StaticObjectRendererScript.SubMeshEntry in sub_meshes:
 					if not sub.mesh_resource or not sub.mesh_resource is ArrayMesh:
 						continue
@@ -746,6 +893,8 @@ func _refresh_stats() -> void:
 	_size_cache_mutex.lock()
 	_stats["size_cache_size"] = _size_cache.size()
 	_size_cache_mutex.unlock()
+
+	_stats["warmup_queue_size"] = _warmup_queue.size()
 
 #endregion
 
