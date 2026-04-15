@@ -74,7 +74,7 @@ var models := ComponentState.new()  # LODs are embedded in models via NIFConvert
 var impostors := ComponentState.new()
 var navmeshes := ComponentState.new()
 var shore_mask := ComponentState.new()
-# hlod removed — RuntimeHLODMerger handles cell merging at runtime
+# hlod removed — ObjectPaging handles runtime merging
 
 ## Global state
 var version: int = 1

@@ -1,4 +1,4 @@
-## RuntimeHLODMerger — OpenMW-style distance-adaptive chunk paging
+## ObjectPaging — OpenMW-style distance-adaptive chunk paging
 ##
 ## Phase 4b of docs/audit/OBJECT_PAGING_PLAN.md §11: evolves from a single-tier
 ## HLOD cell merger (phases 1-3) into a multi-tier adaptive pager. Chunks are
@@ -33,7 +33,7 @@
 ##     read-only, creates isolated ImporterMesh.
 ##   - SizeCache guarded by mutex (written from main, read from main; mutex is
 ##     future-proofing for worker reads if that path ever ships).
-class_name RuntimeHLODMerger
+class_name ObjectPaging
 extends RefCounted
 
 const DU := preload("res://src/core/world/distance_utils.gd")
@@ -74,7 +74,7 @@ const WARMUP_LOADS_PER_FRAME: int = 15
 
 ## Per-chunk state for an active merged region.
 ## `key.xy` = aligned center_cell, `key.z` = size_level (0/1/2).
-class HLODChunkData:
+class PagingChunkData:
 	var key: Vector3i
 	var instance_rid: RID
 	var mesh: ArrayMesh  ## Strong ref — prevents GC
@@ -103,7 +103,7 @@ var _bg_processor: BackgroundProcessor = null
 var _models_dir: String = ""
 
 ## Active paging chunks with RS instances. Keyed by Vector3i = (center_cell.x, center_cell.y, size_level).
-var _active_chunks: Dictionary = {}  # Vector3i -> HLODChunkData
+var _active_chunks: Dictionary = {}  # Vector3i -> PagingChunkData
 
 ## Pending merge tasks (submitted to background processor)
 var _pending_merges: Dictionary = {}  # Vector3i -> int (task_id)
@@ -342,7 +342,7 @@ func get_stats() -> Dictionary:
 ## Toggle visibility of all active chunk RS instances (benchmark A/B helper).
 func set_all_visible(visible: bool) -> void:
 	for key: Vector3i in _active_chunks:
-		var data: HLODChunkData = _active_chunks[key]
+		var data: PagingChunkData = _active_chunks[key]
 		if data.instance_rid.is_valid():
 			RenderingServer.instance_set_visible(data.instance_rid, visible)
 
@@ -360,7 +360,7 @@ func cleanup() -> void:
 
 	# Free RS instances
 	for key: Vector3i in _active_chunks:
-		var data: HLODChunkData = _active_chunks[key]
+		var data: PagingChunkData = _active_chunks[key]
 		if data.instance_rid.is_valid():
 			RenderingServer.free_rid(data.instance_rid)
 	_active_chunks.clear()
@@ -798,7 +798,7 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int) -
 	)
 	rs.instance_geometry_set_lod_bias(rid, 1.0)
 
-	var data := HLODChunkData.new()
+	var data := PagingChunkData.new()
 	data.key = key
 	data.instance_rid = rid
 	data.mesh = mesh
@@ -812,7 +812,7 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int) -
 func _unload_chunk(key: Vector3i) -> void:
 	if key not in _active_chunks:
 		return
-	var data: HLODChunkData = _active_chunks[key]
+	var data: PagingChunkData = _active_chunks[key]
 	if data.instance_rid.is_valid():
 		RenderingServer.free_rid(data.instance_rid)
 	_active_chunks.erase(key)
@@ -836,7 +836,7 @@ func _cache_evict_to_fit(needed_bytes: int) -> void:
 
 		# If chunk is still active, free its RS instance too
 		if oldest in _active_chunks:
-			var data: HLODChunkData = _active_chunks[oldest]
+			var data: PagingChunkData = _active_chunks[oldest]
 			if data.instance_rid.is_valid():
 				RenderingServer.free_rid(data.instance_rid)
 			_active_chunks.erase(oldest)

@@ -39,7 +39,7 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
-const RuntimeHLODMergerScript := preload("res://src/core/world/runtime_hlod_merger.gd")
+const ObjectPagingScript := preload("res://src/core/world/object_paging.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
 # replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
@@ -236,7 +236,7 @@ var _impostor_update_pending: bool = false
 var _distant_light_manager: DistantLightManager = null
 
 ## Runtime HLOD merger — cell-level merged meshes for 300-1000m range (OpenMW-style)
-var _hlod_merger: RuntimeHLODMergerScript = null
+var _hlod_merger: ObjectPagingScript = null
 
 ## Sun elevation in radians (set externally by world_explorer via set_sun_elevation)
 var _sun_elevation_rad: float = 0.5  # Default: daytime
@@ -369,7 +369,7 @@ func _ready() -> void:
 	_distant_light_manager.setup(_world_container)
 
 	# Create runtime HLOD merger for cell-level merged meshes (300-1000m)
-	_hlod_merger = RuntimeHLODMergerScript.new()
+	_hlod_merger = ObjectPagingScript.new()
 
 	# Create GPU scene database for SSBO-backed world state (Phase 2)
 	_gpu_scene_db = GPUSceneDatabaseScript.new()
@@ -1645,7 +1645,7 @@ func set_near_tier_visible(visible: bool) -> void:
 		if cell_node:
 			cell_node.visible = visible
 
-## Toggle HLOD merged geometry (RuntimeHLODMerger)
+## Toggle HLOD merged geometry (ObjectPaging)
 func set_hlod_visible(visible: bool) -> void:
 	if _hlod_merger:
 		_hlod_merger.set_all_visible(visible)

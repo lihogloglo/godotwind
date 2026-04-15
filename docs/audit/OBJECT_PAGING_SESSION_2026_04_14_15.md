@@ -284,4 +284,94 @@ Per plan §14b, all distances read from constants — never hardcoded inline. A 
 
 ---
 
-*End of session log. Continue at Phase 4c or wait for bench validation post-sig-139.*
+*Initial session ended 2026-04-15 with Phases 1-4b shipped.*
+
+---
+
+## 14. Session Addendum — 2026-04-15 (Phases 4c / 4d / 5 / 6)
+
+**Author:** @coder (Claude Opus 4.6) · **Reviewer:** @roaster · **Branch:** `refactor/lod-b-wide`
+
+Phases 4c, 4d, 5, and a partial Phase 6 sweep landed in the same day, directly after the Phase 4b close. Commits (in order, all local):
+
+```
+f0e2fb3 refactor(paging): Phase 4c — tier-boundary hysteresis (plan §4.4)
+1762ae7 refactor(paging): Phase 4d + 5 — teleport warmup + minSizeMergeFactor
+<TBD>   refactor(paging): Phase 6 — rename + docs sweep
+```
+
+Test suite grew `86 → 92 → 104` over this addendum (+18 tests: 6 hysteresis, 4 teleport predicate, 8 Phase 5).
+
+### 14.1 Phase 4c — tier-boundary hysteresis (`f0e2fb3`)
+
+Active chunks retain their current tier across `update_for_camera` calls when chunk-center distance sits in `[band_start - 20, band_end + 20)`. Pre-pass in `_compute_desired_chunks` populates `desired` and marks `covered_cells` for retained chunks BEFORE the strict-band top-down walk — retained chunks block re-tier decisions on their sub-cells. Margin is deliberately NOT baked into the walk's distance test (plan §4.4: fuzzes band edges).
+
+Files: `src/core/world/runtime_hlod_merger.gd` (+43 LOC), `tests/unit/test_object_paging_kernel.gd` (+156 LOC).
+
+New static helper `_is_within_retention_for(key, camera_xz)` + instance forwarder. Tests cover: retention bounds (base-in / past-strict / past-upper / at-center), retained-chunk blocks retiering, empty-active no-op, multi-tier pre-pass + walk never double-cover.
+
+### 14.2 Phase 4d — teleport warmup (`1762ae7` part 1)
+
+Camera jumps larger than `TELEPORT_THRESHOLD = 500m` between consecutive `update_for_camera` calls trigger a warmup pass. `_prime_warmup_queue` collects unregistered prototype paths for every desired chunk (unique per type, dedup via `_warmup_dispatched`). `process_merge_queue` drains up to `WARMUP_LOADS_PER_FRAME = 15` prototype loads per frame BEFORE any merges are submitted — when the warmup queue is non-empty, merges are deferred entirely. Pure main-thread budget partitioner: splits the teleport-ring prototype-load burst away from the merge submission burst so neither drops a frame alone.
+
+Pure helper `_is_teleport(prev, curr)` lifted for unit-test coverage. `Vector3.INF` sentinel (first-ever frame) is never a teleport.
+
+New stats: `warmup_queue_size`, `total_teleports`.
+
+### 14.3 Phase 5 — minSizeMergeFactor second-pass (`1762ae7` part 2)
+
+Two new constants in `distance_utils.gd` (OpenMW canonical defaults, `terrain.hpp:35-39`):
+```
+PAGING_MIN_SIZE_MERGE_FACTOR = 0.5
+PAGING_MIN_SIZE_COST_MULTIPLIER = 1.0
+```
+
+`ObjectPagingKernel._analyze_chunk` return shape evolves from `Dictionary[mesh_id -> bool]` to `Dictionary[mesh_id -> Dictionary{merge: bool, min_size_merged_sq: float}]`. The per-type `min_size_merged_sq` is computed via OpenMW formula (`objectpaging.cpp:833-836`):
+```
+factor2             = clamp(mergeCost × cost_multiplier / mergeBenefit, 0, 1)   [or 1 if benefit == 0]
+minSizeMergeFactor2 = (1 − factor2) × MIN_SIZE_MERGE_FACTOR + factor2
+minSizeMerged²      = (MIN_SIZE × minSizeMergeFactor2)²
+```
+
+Strong-benefit merges → threshold approaches `(0.14 × 0.5)² ≈ 0.0049` (loose, most refs pass). Weak-benefit merges → threshold → `0.14²` (tight, matches base filter).
+
+`_flatten_to_triplets` accepts both old `bool` and new `Dictionary` keep_mask shapes (backward-compat for tests that pass bool directly). For each ref in a merged type, if `ref.rs2 < ref.dist_sq × min_size_merged_sq`, the ref is dropped from the triplet list. `RefInput` gained two new fields `rs2: float` and `dist_sq: float` (default 0 = filter no-op); merger populates both during the Phase 2 size-filter pass — work was already being done, now captured.
+
+4 pre-existing Phase 3b analyze tests updated to read `result[mesh_id]["merge"]`.
+
+### 14.4 Phase 6 — rename + docs sweep (partial)
+
+**Completed:**
+- File renamed: `src/core/world/runtime_hlod_merger.gd` → `src/core/world/object_paging.gd` via `git mv` (git tracks the rename — `git log --follow` sees history).
+- Class renamed: `class_name RuntimeHLODMerger` → `class_name ObjectPaging`.
+- Inner class renamed: `HLODChunkData` → `PagingChunkData`.
+- Import updated: `native_streaming_manager.gd` (constant renamed to `ObjectPagingScript`).
+- Comment + test references updated across `static_object_renderer.gd`, `src/tools/prebaking/{model_prebaker,prebaking_manager,prebake_state,prebaking_ui}.gd`, and `tests/unit/test_object_paging_kernel.gd`.
+- Docs updated: `docs/STATUS.md` (new "ObjectPaging" row under Framework Ready), `docs/DISTANCE_RENDERING.md` (new "Runtime ObjectPaging" subsection under HLOD), `docs/audit/MASTERPLAN.md` (Phase 4.2 annotated).
+
+**Deferred / out-of-scope:**
+- **`is_mid_worthy` call-site deletion (`cell_manager.gd:1952-53, :2124`, `mid_tier_debugger.gd:319`).** Initial session §7 item was overreach. Reading the call sites reveals `cell_manager.gd:2124` feeds `InstantiationEntry.mid_worthy`, which drives the NEAR-instantiation deferral pipeline at `cell_manager.gd:1404-1457` (MID RS instance creation, `_defer_for_near`, `_create_near_only_rs_instance`, AABB-upgrade stats). That classifier is NOT a paging concern — plan §9 confirms individual-MID tier is STILL LIVE for non-paged refs. `mid_tier_debugger.gd:319` mirrors the same classifier for its expected-object census. Deleting would break NEAR-instantiation behavior and misreport in the debugger. Roaster adjudication needed.
+- **Exported-build `ImporterMesh.generate_lods()` gate (plan §14 risk 2 / §11 Phase 6 gate).** Cannot run from an interactive session. Paging cannot ship enabled until this is verified (or the code re-planned per §14).
+- **Bench CSV regeneration** (`docs/audit/lod_refactor_baselines/`). Blocked on sig 139 streaming crash (@roaster's scope).
+
+### 14.5 Test Suite Growth
+
+```
+Pre-addendum:   86 tests (end of Phase 4b)
+Post-Phase 4c:  92 tests (+6 hysteresis)
+Post-Phase 4d:  96 tests (+4 teleport predicate)
+Post-Phase 5:  104 tests (+8 formula + analyze shape + flatten integration)
+```
+
+Phase 6 added 0 tests (rename + doc-only, no new behavior surface).
+
+### 14.6 Phases Remaining (handoff)
+
+After this addendum, the open items are:
+1. **Impl-draft review** by @roaster on commits `f0e2fb3` + `1762ae7` + Phase 6 commit.
+2. **`is_mid_worthy` deletion adjudication** — see §14.4 deferred list.
+3. **sig 139 resolution** — unblocks bench CSV regeneration.
+4. **Exported-build `generate_lods()` smoke test** — unblocks paging ship-enabled.
+5. **Paging ship-enable** — flip `enabled = true` default, measure bench, commit baseline.
+
+*End of session log. 2026-04-15.*

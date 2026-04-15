@@ -1,7 +1,7 @@
 ## Parity + correctness test for ObjectPagingKernel.
 ##
 ## Covers the Phase 1 extraction (docs/audit/OBJECT_PAGING_PLAN.md §11):
-## hot merge math moved from RuntimeHLODMerger into the C# kernel via a
+## hot merge math moved from ObjectPaging into the C# kernel via a
 ## thin GDScript facade. These tests are the rollback anchor — a failure
 ## here means the C# kernel diverges from the pre-extraction GDScript
 ## contract and the phase should revert.
@@ -16,7 +16,7 @@
 extends GdUnitTestSuite
 
 const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
-const Merger := preload("res://src/core/world/runtime_hlod_merger.gd")
+const Merger := preload("res://src/core/world/object_paging.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 
 
@@ -689,7 +689,7 @@ func test_hysteresis_retains_active_chunk_past_strict_band() -> void:
 	var retained_key := Vector3i(2, 0, 0)
 	# Cell (2,0) size_level=0 center ≈ (292.6, -58.5), dist from origin ≈ 298m.
 	# Shifting camera -20m along X: dist grows to ≈ 318m — still inside [130, 320).
-	var data := Merger.HLODChunkData.new()
+	var data := Merger.PagingChunkData.new()
 	data.key = retained_key
 	merger._active_chunks[retained_key] = data
 
@@ -706,7 +706,7 @@ func test_hysteresis_retains_active_chunk_past_strict_band() -> void:
 func test_hysteresis_releases_active_chunk_past_retention_edge() -> void:
 	var merger := Merger.new()
 	var released_key := Vector3i(2, 0, 0)
-	var data := Merger.HLODChunkData.new()
+	var data := Merger.PagingChunkData.new()
 	data.key = released_key
 	merger._active_chunks[released_key] = data
 
@@ -729,7 +729,7 @@ func test_hysteresis_retained_chunk_blocks_retiering_walk() -> void:
 	# strict band [150, 300) AND retention [130, 320). Retention adds it first,
 	# marking cell (2,0) covered so the tier-1 walk can't claim it.
 	var retained_key := Vector3i(2, 0, 0)
-	var data := Merger.HLODChunkData.new()
+	var data := Merger.PagingChunkData.new()
 	data.key = retained_key
 	merger._active_chunks[retained_key] = data
 
@@ -783,7 +783,7 @@ func test_hysteresis_pre_pass_and_walk_never_double_cover() -> void:
 		Vector3i(4, 4, 2),   # tier-2 ~828m → strict [600,1000)
 	]
 	for key: Vector3i in seeds:
-		var data := Merger.HLODChunkData.new()
+		var data := Merger.PagingChunkData.new()
 		data.key = key
 		merger._active_chunks[key] = data
 

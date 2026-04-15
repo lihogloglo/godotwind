@@ -57,6 +57,20 @@ Key details:
 
 Constants in `distance_utils.gd`: `HLOD_START=300m`, `HLOD_END=1000m`.
 
+### Runtime ObjectPaging (staged, disabled by default)
+
+`src/core/world/object_paging.gd` — distance-adaptive OpenMW-style chunk pager that will replace the prebaked per-cell HLOD when bench-validated. Three-tier adaptive walker:
+
+| size_level | chunk footprint | band | source LOD |
+|------------|-----------------|------|------------|
+| 0 | 1×1 cell | [150, 300)m | LOD 0 |
+| 1 | 2×2 cells | [300, 600)m | LOD 1 |
+| 2 | 4×4 cells | [600, 1000)m | LOD 2 |
+
+Replaces `is_mid_worthy` keyword filter with a projected-size test (`radius² × scale² < dist² × PAGING_MIN_SIZE²`, OpenMW canonical `PAGING_MIN_SIZE = 0.14`). Adds per-mesh-type cost-benefit merge decision, tier-hysteresis retention (20m), teleport warmup (prototype preload on camera jumps >500m), and a second-pass `minSizeMergeFactor` filter that trims tiny refs from merged types based on merge-benefit. Merge kernel lives in `src/native/NativeObjectPagingKernel.cs` (C# hot path).
+
+**Status 2026-04-15:** Phases 1-5 implemented + 104 unit tests. Master toggle `enabled = false` — runtime performance validation blocked on sig 139 streaming crash. Console: `hlod_enable` / `hlod_disable`. Plan doc: `docs/audit/OBJECT_PAGING_PLAN.md`. Execution log: `docs/audit/OBJECT_PAGING_SESSION_2026_04_14_15.md`.
+
 ## FAR Tier (1000-5km)
 
 Custom octahedral impostor system (Godot has no built-in equivalent).

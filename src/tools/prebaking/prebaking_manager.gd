@@ -43,7 +43,7 @@ enum Component {
 	CLOUD_NOISE,   # 3D noise textures for volumetric clouds
 	# REMOVED: LODS - now embedded in MODELS via NIFConverter
 	# REMOVED: MERGED_MESHES - deprecated cell merging
-	# REMOVED: HLOD - now runtime-merged by RuntimeHLODMerger (no prebake needed)
+	# REMOVED: HLOD - now runtime-merged by ObjectPaging (no prebake needed)
 }
 
 ## Baking status
@@ -244,7 +244,7 @@ func start_prebaking() -> void:
 		_current_component = Component.MODELS
 		results["models"] = await _bake_models()
 
-	# HLOD removed — RuntimeHLODMerger handles cell merging at runtime (no prebake)
+	# HLOD removed — ObjectPaging handles runtime merging (no prebake)
 
 	if enable_impostors and not _should_stop:
 		_current_component = Component.IMPOSTORS

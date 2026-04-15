@@ -22,7 +22,7 @@ var _status_label: Label
 var _terrain_section: Dictionary = {}
 var _model_section: Dictionary = {}
 # NOTE: LODs are now embedded in models via NIFConverter, no separate LOD prebaking
-# HLOD removed — now runtime-merged by RuntimeHLODMerger (no prebake needed)
+# HLOD removed — now runtime-merged by ObjectPaging (no prebake needed)
 var _impostor_section: Dictionary = {}
 var _navmesh_section: Dictionary = {}
 var _shore_section: Dictionary = {}

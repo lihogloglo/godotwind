@@ -53,7 +53,7 @@ This document outlines the high-level roadmap for stabilizing, cleaning, and fut
 **Goal:** High-fidelity visuals and advanced character interaction.
 
 1. **Modular IK Integration** — Godot 4.6 SkeletonModifier3D for foot planting and LookAt
-2. **HLOD Prebake Pipeline** — Spatially clustered mesh merging (MeshOptimizer)
+2. **HLOD Prebake Pipeline** — Spatially clustered mesh merging (MeshOptimizer). **Runtime alternative in progress:** `object_paging.gd` ships OpenMW-style distance-adaptive merging; Phases 1-5 done as of 2026-04-15. Disabled by default pending bench validation. Plan: `docs/audit/OBJECT_PAGING_PLAN.md`.
 3. **Ocean/Water Integration** — FFT ocean with SSR/Octahedral probe polish (Godot 4.6)
 4. **Weather & Day/Night** — Sky3D + DirectionalLight3D + Weather-Audio Sync
 5. **Interior Transitions** — Stencil buffer portal rendering at doorways

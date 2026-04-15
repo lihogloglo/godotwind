@@ -696,5 +696,5 @@ static func load_cached_animations(anim_path: String) -> AnimationLibrary:
 
 
 
-## HLOD baking removed — RuntimeHLODMerger (src/core/world/runtime_hlod_merger.gd)
-## handles cell merging at runtime, OpenMW-style. No disk prebake needed.
+## HLOD baking removed — ObjectPaging (src/core/world/object_paging.gd)
+## handles runtime merging, OpenMW-style. No disk prebake needed.
