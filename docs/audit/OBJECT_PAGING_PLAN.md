@@ -106,16 +106,126 @@ Fallback when a prototype's LOD chain is shorter than `source_lod`: use `min(sou
 
 Tiers and adaptive chunk sizing:
 
-| Tier | Distance band | Chunk size (MW cells) | Chunk world extent | Typical live count |
-|---|---|---|---|---|
-| MID-near | 150-300m | 1×1 | 117m | 8-12 chunks around camera |
-| MID-far | 300-600m | 2×2 | 234m | 8-12 chunks |
-| HLOD | 600-1000m | 4×4 | 468m | 4-8 chunks |
-| FAR | 1000-5000m | (impostors unchanged) | — | — |
+| size_level | Tier | Distance band | Chunk size (MW cells) | Chunk world extent | Typical live count |
+|---|---|---|---|---|---|
+| 0 | MID-near | 150-300m | 1×1 | 117m | 8-12 chunks around camera |
+| 1 | MID-far | 300-600m | 2×2 | 234m | 8-12 chunks |
+| 2 | HLOD | 600-1000m | 4×4 | 468m | 4-8 chunks |
+| — | FAR | 1000-5000m | (impostors unchanged) | — | — |
 
-Hysteresis between bands: 20m margin at each handoff, matching the existing NEAR↔MID 250m/280m scheme in `cell_manager.gd`. Chunk at tier N+1 demotes when camera moves inward past N+1→N start minus margin.
+`ChunkKey = (center_cell: Vector2i, size_level: int)`. `center_cell` is the lower-left MW cell of the chunk, aligned to the chunk's size in cells (`size = 1 << size_level`) so neighbours tile without overlap and the cache survives camera jiggle within a tier band.
 
-`ChunkKey = (center_cell: Vector2i, size_level: int)`. `center_cell` is the lower-left MW cell of the chunk (aligned to size — a 2×2 chunk at size_level=1 has `center_cell.x % 2 == 0`, same for y). This keeps neighbors non-overlapping and lets the cache survive small camera movements (same chunk stays valid if camera jiggles within a tier band).
+### 4.1 Alignment math (roaster Phase-4 pre-pass §1)
+
+**Two's-complement bitwise alignment** — handles negative cells correctly. Naïve `(cell.x // size) * size` in GDScript truncates toward zero, mis-aligning negative cells:
+
+```gdscript
+# WRONG — `cell.x = -5` with size=4 gives `(-5 // 4) * 4 = -1 * 4 = -4`
+# but cell -5 belongs to the chunk starting at -8, not -4.
+var aligned_x = (cell.x / size) * size
+
+# RIGHT — bitwise AND with mask. -5 & ~3 = -8 (floor-toward-negative-infinity
+# for signed ints in GDScript's two's-complement representation).
+var aligned_x = cell.x & ~(size - 1)
+```
+
+Verified boundaries: `0 & ~3 = 0`, `3 & ~3 = 0`, `4 & ~3 = 4`, `-1 & ~3 = -4`, `-5 & ~3 = -8`. Single instruction, works for all sign regions including zero. **Ship as** `distance_utils.gd::chunk_key_for_cell(cell: Vector2i, size_level: int) -> Vector2i` — unit-test the negative-cell boundary explicitly.
+
+### 4.2 Band classification by chunk CENTER (roaster pre-pass §2)
+
+Classify a chunk into a tier by the world-space distance from the chunk CENTER to the camera, not nearest-edge. Matches OpenMW's `getDistance(centerWorld, viewPoint)` pattern and sidesteps the per-edge `min/max` math nearest-edge would require:
+
+```gdscript
+var size := 1 << size_level
+var center_cell_world := Vector2(
+    (center_cell.x + size * 0.5) * MW_CELL_SIZE,
+    (center_cell.y + size * 0.5) * MW_CELL_SIZE
+)
+var distance := camera_world_xz.distance_to(center_cell_world)
+```
+
+Bands are strict half-open intervals against center distance: MID-near = `[150, 300)`, MID-far = `[300, 600)`, HLOD = `[600, 1000)`.
+
+### 4.3 Top-down anti-overlap walk (roaster pre-pass §3 — CRITICAL)
+
+**The load-bearing piece.** Naïve per-tier ring computation produces double-draw: a 2×2 chunk at size_level=1 covering cells `(2,0)(3,0)(2,1)(3,1)` at center 350m is in MID-far band; the 1×1 sub-chunk `(2,0)` at center 292m is simultaneously in MID-near band. Both desired → both rendered → cell (2,0) draws twice.
+
+OpenMW solves via quadtree descent (each node chooses "render at this level" XOR "descend"). With our flat-hash we do an explicit top-down exclusion pass:
+
+```gdscript
+# Pseudocode. Runs once per update_for_camera().
+# Walks size_levels from largest (HLOD 4×4) to smallest (MID-near 1×1).
+# Each smaller level excludes cells covered by an already-accepted larger chunk.
+
+var desired_chunks: Dictionary = {}    # ChunkKey -> true
+var covered_cells: Dictionary = {}     # Vector2i (1×1 cell) -> true, set by larger chunks
+
+for size_level in [2, 1, 0]:                 # HLOD → MID-far → MID-near
+    var size := 1 << size_level
+    var band_start := band_start_for(size_level)
+    var band_end := band_end_for(size_level)
+
+    # Ring radius: (band_end / chunk_world_extent) cells
+    var ring_radius := ceil(band_end / (size * MW_CELL_SIZE))
+
+    for dy in range(-ring_radius, ring_radius + 1):
+        for dx in range(-ring_radius, ring_radius + 1):
+            var chunk_cell := chunk_key_for_cell(
+                camera_cell + Vector2i(dx * size, dy * size),
+                size_level
+            )
+            var dist := chunk_center_distance(chunk_cell, size_level, camera_world)
+            if dist < band_start or dist >= band_end:
+                continue
+
+            # Anti-overlap: if any 1×1 sub-cell of this chunk is already covered
+            # by a larger accepted chunk, skip entirely. Smaller chunks never
+            # subdivide larger accepted ones.
+            var overlap := false
+            for sy in range(size):
+                for sx in range(size):
+                    if Vector2i(chunk_cell.x + sx, chunk_cell.y + sy) in covered_cells:
+                        overlap = true
+                        break
+                if overlap: break
+            if overlap:
+                continue
+
+            # Accept chunk, mark its 1×1 sub-cells covered.
+            desired_chunks[ChunkKey.new(chunk_cell, size_level)] = true
+            for sy in range(size):
+                for sx in range(size):
+                    covered_cells[Vector2i(chunk_cell.x + sx, chunk_cell.y + sy)] = true
+```
+
+Complexity: dominated by the `size × size` covered-cell marking at level 2 (16 cells × ~49 chunks = 784 dict writes, once per cell-change event). Trivial. Correctness invariant: **after the walk, every cell in the active radius is covered by exactly one chunk** across the three tiers.
+
+### 4.4 Hysteresis on transitions, not membership (roaster pre-pass §4)
+
+Do NOT bake the 20m margin into the desired-chunks distance test — that fuzzes band edges and makes the overlap math ambiguous.
+
+Instead: desired-chunks walk uses strict band bounds (§4.2). Active chunks retain their previous tier assignment across `update_for_camera` calls and only demote to the next band when camera moves 20m past the demotion threshold. Same pattern as `cell_manager.gd`'s NEAR↔MID `250m / 280m` asymmetry.
+
+```gdscript
+# Per-active-chunk state:
+# { tier: size_level, demote_threshold: float }
+# On each update_for_camera:
+for chunk in active_chunks:
+    var dist := chunk_center_distance(chunk.cell, chunk.tier, camera_world)
+    if dist < chunk.demote_threshold:
+        # Stay at current tier — within hysteresis window.
+        continue
+    # Camera moved out → chunk is up for re-tier.
+    mark_for_reassignment(chunk)
+```
+
+Margin value: `PAGING_HYSTERESIS = 20.0` (new const in `distance_utils.gd`). Same 20m used by existing NEAR↔MID handoff, for consistency.
+
+### 4.5 Ring-walk bound (roaster pre-pass §5)
+
+Per tier: `ring_radius = ceil(band_end / (size × MW_CELL_SIZE))`. Worst case HLOD: `ceil(1000 / (4 × 117)) = 3 chunks radius`. Square ring = `(2×3+1)² = 49 candidates`. Three tiers = `49 × 3 = 147 candidates` per cell-change event. Total main-thread cost per walk: **< 200µs** including the overlap dict ops. No optimisation needed.
+
+Also unchanged from earlier §4: cache survives camera jiggle within a tier because `chunk_key_for_cell` is idempotent for small camera translations that don't cross a `size`-cell boundary.
 
 ## 5. Data Flow
 
