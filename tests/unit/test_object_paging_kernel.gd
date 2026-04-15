@@ -483,6 +483,90 @@ func test_paging_merge_factor_matches_openmw_default() -> void:
 #endregion
 
 
+#region Phase 4a — chunk-key alignment & center-distance math (plan §4.1-4.2, 4.5)
+
+## Positive-cell alignment at size_level=0 (size=1) is identity.
+func test_chunk_key_size_level_0_identity() -> void:
+	for x in [-3, -1, 0, 1, 5, 100]:
+		for y in [-3, 0, 7]:
+			var cell := Vector2i(x, y)
+			assert_that(DU.chunk_key_for_cell(cell, 0)).is_equal(cell)
+
+
+## size_level=1 (size=2) aligns to even values.
+func test_chunk_key_size_level_1_aligns_to_even() -> void:
+	assert_that(DU.chunk_key_for_cell(Vector2i(0, 0), 1)).is_equal(Vector2i(0, 0))
+	assert_that(DU.chunk_key_for_cell(Vector2i(1, 1), 1)).is_equal(Vector2i(0, 0))
+	assert_that(DU.chunk_key_for_cell(Vector2i(2, 2), 1)).is_equal(Vector2i(2, 2))
+	assert_that(DU.chunk_key_for_cell(Vector2i(3, 3), 1)).is_equal(Vector2i(2, 2))
+
+
+## size_level=2 (size=4) aligns to multiples of 4. Critical — covers the
+## negative-cell boundary roaster flagged (plan §4.1).
+func test_chunk_key_size_level_2_handles_negative_cells() -> void:
+	# Boundaries verified in the plan doc:
+	assert_that(DU.chunk_key_for_cell(Vector2i(0, 0), 2)).is_equal(Vector2i(0, 0))
+	assert_that(DU.chunk_key_for_cell(Vector2i(3, 3), 2)).is_equal(Vector2i(0, 0))
+	assert_that(DU.chunk_key_for_cell(Vector2i(4, 4), 2)).is_equal(Vector2i(4, 4))
+	# Negative cells — the floor-toward-negative-infinity case.
+	assert_that(DU.chunk_key_for_cell(Vector2i(-1, -1), 2)).is_equal(Vector2i(-4, -4))
+	assert_that(DU.chunk_key_for_cell(Vector2i(-4, -4), 2)).is_equal(Vector2i(-4, -4))
+	assert_that(DU.chunk_key_for_cell(Vector2i(-5, -5), 2)).is_equal(Vector2i(-8, -8))
+	assert_that(DU.chunk_key_for_cell(Vector2i(-8, -8), 2)).is_equal(Vector2i(-8, -8))
+	# Mixed-sign.
+	assert_that(DU.chunk_key_for_cell(Vector2i(-5, 3), 2)).is_equal(Vector2i(-8, 0))
+
+
+## Chunk center at (0,0) level 0 sits at half-cell offset. Z is flipped
+## per Godot convention (MW +Y → Godot -Z), matching cell_to_world_center.
+func test_chunk_center_world_origin_cell() -> void:
+	var center := DU.chunk_center_world(Vector2i(0, 0), 0)
+	assert_float(center.x).is_equal_approx(DU.HALF_CELL_SIZE, 0.01)
+	# Z flipped — cell y=0 center is -half_cell_size
+	assert_float(center.y).is_equal_approx(-DU.HALF_CELL_SIZE, 0.01)
+
+
+## Chunk center at size_level=2 covers 4 cells — center = (2, 2) cell offsets.
+func test_chunk_center_world_size_level_2() -> void:
+	var center := DU.chunk_center_world(Vector2i(0, 0), 2)
+	# Chunk (0,0) at size=4 covers cells (0,0)...(3,3). Center = (2, 2) cells.
+	assert_float(center.x).is_equal_approx(2.0 * DU.CELL_SIZE_METERS, 0.01)
+	assert_float(center.y).is_equal_approx(-2.0 * DU.CELL_SIZE_METERS, 0.01)
+
+
+## Band-end constants match plan §4 table.
+func test_paging_band_end_values() -> void:
+	assert_float(DU.paging_band_end(0)).is_equal_approx(300.0, 0.01)
+	assert_float(DU.paging_band_end(1)).is_equal_approx(600.0, 0.01)
+	assert_float(DU.paging_band_end(2)).is_equal_approx(1000.0, 0.01)
+
+
+## Band boundaries form a contiguous sequence — tier N end = tier N+1 start.
+func test_paging_band_boundaries_contiguous() -> void:
+	assert_float(DU.paging_band_start(0)).is_equal_approx(150.0, 0.01)
+	assert_float(DU.paging_band_start(1)).is_equal_approx(DU.paging_band_end(0), 0.01)
+	assert_float(DU.paging_band_start(2)).is_equal_approx(DU.paging_band_end(1), 0.01)
+
+
+## Ring radius bounds per plan §4.5. Worst case size_level=2 = 3 chunks.
+func test_paging_ring_radius_bounds() -> void:
+	# size_level=0: band_end=300, chunk_extent=117 → ceil(300/117) = 3 (actually 300/117=2.56)
+	# Let's check what we get and assert it's <= a reasonable bound.
+	for sl in range(3):
+		var r := DU.paging_ring_radius(sl)
+		assert_int(r).is_greater_equal(1)
+		assert_int(r).is_less_equal(10)
+	# HLOD (size_level=2) per plan §4.5 = 3
+	assert_int(DU.paging_ring_radius(2)).is_equal(3)
+
+
+## PAGING_HYSTERESIS matches cell_manager's 20m convention (plan §4.4).
+func test_paging_hysteresis_matches_existing_scheme() -> void:
+	assert_float(DU.PAGING_HYSTERESIS).is_equal_approx(20.0, 0.01)
+
+#endregion
+
+
 #region Phase 2 SizeCache re-evaluation (was here, kept verbatim)
 
 ## Camera-motion parity — cached ref moving into range must re-evaluate.

@@ -82,6 +82,95 @@ const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
 ## leave more types as individual RS instances.
 const PAGING_MERGE_FACTOR: float = 256.0
 
+## Phase 4 — adaptive chunk tier band ends (strict half-open intervals).
+## Plan §4.2. Band classification uses chunk-CENTER distance from camera.
+##   size_level 0 (1×1 chunks) = [150, 300)
+##   size_level 1 (2×2 chunks) = [300, 600)
+##   size_level 2 (4×4 chunks) = [600, 1000)
+## FAR tier (impostors) picks up at PAGING_TIER_2_END.
+const PAGING_TIER_0_START: float = 150.0
+const PAGING_TIER_0_END: float = 300.0
+const PAGING_TIER_1_END: float = 600.0
+const PAGING_TIER_2_END: float = 1000.0
+
+## Phase 4 — hysteresis margin for chunk tier transitions (plan §4.4).
+## Active chunks retain their current tier until the camera moves this far
+## past the demote threshold. Matches the 20m margin used by cell_manager's
+## NEAR↔MID promotion at 250m/270m.
+const PAGING_HYSTERESIS: float = 20.0
+
+#endregion
+
+#region Phase 4 — ChunkKey helpers (plan §4.1-4.2)
+
+## Convert a 1×1 cell coordinate to the aligned center_cell of the chunk
+## at the given size_level. Plan §4.1.
+##
+## Chunk width in cells: `size = 1 << size_level` (1, 2, 4 for levels 0/1/2).
+## Alignment: bitwise AND with `~(size - 1)` — gives correct floor-toward-
+## negative-infinity behaviour in GDScript's two's-complement ints.
+## Naive `(cell.x / size) * size` truncates toward zero and mis-aligns
+## negative cells (e.g. cell.x=-5 with size=4 would give -4 instead of -8).
+##
+## Boundaries verified:
+##   cell=0,  size=4 → 0
+##   cell=3,  size=4 → 0
+##   cell=4,  size=4 → 4
+##   cell=-1, size=4 → -4
+##   cell=-5, size=4 → -8
+##   cell=-8, size=4 → -8
+static func chunk_key_for_cell(cell: Vector2i, size_level: int) -> Vector2i:
+	var size: int = 1 << size_level
+	var mask: int = ~(size - 1)
+	return Vector2i(cell.x & mask, cell.y & mask)
+
+
+## World-space (XZ-plane) center of a chunk. Plan §4.2.
+## `center_cell` must be aligned — pass the output of `chunk_key_for_cell`.
+## Returns Vector2(x, z) in Godot world coordinates — the Z axis is flipped
+## from ESM-space to match `cell_to_world_center`/`cell_to_world_origin`
+## conventions (Morrowind Y → Godot -Z).
+##
+## Used by band classification: build `camera_xz = Vector2(cam.x, cam.z)`
+## and compare `camera_xz.distance_to(chunk_center_world(...))`.
+static func chunk_center_world(center_cell: Vector2i, size_level: int) -> Vector2:
+	var size: int = 1 << size_level
+	var half_extent: float = float(size) * CELL_SIZE_METERS * 0.5
+	return Vector2(
+		float(center_cell.x) * CELL_SIZE_METERS + half_extent,
+		-float(center_cell.y) * CELL_SIZE_METERS - half_extent
+	)
+
+
+## Band-end distance for a given chunk size_level. Plan §4.2.
+## Returns the outer (exclusive) distance at which a chunk of this size_level
+## stops being active. The complementary band START is the previous tier's
+## END (or `PAGING_TIER_0_START` for size_level 0).
+static func paging_band_end(size_level: int) -> float:
+	match size_level:
+		0: return PAGING_TIER_0_END
+		1: return PAGING_TIER_1_END
+		2: return PAGING_TIER_2_END
+		_: return 0.0
+
+
+## Band-start distance for a given chunk size_level (plan §4.2).
+static func paging_band_start(size_level: int) -> float:
+	match size_level:
+		0: return PAGING_TIER_0_START
+		1: return PAGING_TIER_0_END
+		2: return PAGING_TIER_1_END
+		_: return 0.0
+
+
+## Ring radius (in chunks) for the given size_level, per plan §4.5.
+## `ceil(band_end / (size × cell_size))`. Worst case at size_level=2:
+## ceil(1000 / (4 × 117)) = 3.
+static func paging_ring_radius(size_level: int) -> int:
+	var size: int = 1 << size_level
+	var chunk_extent: float = float(size) * CELL_SIZE_METERS
+	return int(ceil(paging_band_end(size_level) / chunk_extent))
+
 #endregion
 
 
