@@ -77,6 +77,24 @@ var _pending_async_loads: Dictionary = {}
 ## Each entry: {disk_path: String, cache_key: String, callback: Callable, model_path: String, item_id: String}
 var _deferred_async_queue: Array[Dictionary] = []
 
+## Frame-deferred instantiate queue.
+## TIME-BOXED BRIDGE (2026-04-15, owner @roaster) for the `load_threaded_get` race
+## documented in docs/audit/MODEL_LOADER_RACE.md case (c2): `THREAD_LOAD_LOADED`
+## fires before the worker has fully resolved embedded sub-resources, so an
+## immediate `packed_scene.instantiate()` can dereference a half-built RID and
+## segfault. Holding the PackedScene for one extra frame gives the engine time
+## to finalize sub-resources before instantiate runs.
+##
+## Bridge to: doc rec #2 — switch `_model_cache` to store PackedScene and let
+## callers `instantiate()` themselves on demand. That refactor touches 18+
+## callsites across cell_manager.gd / reference_instantiator.gd / static_object_renderer.gd
+## and is its own work item. Until then, the deferred instantiate puts the
+## same temporal gap between `load_threaded_get` and `instantiate()` without
+## changing the public API.
+##
+## Each entry: {disk_path: String, packed_scene: PackedScene, cache_key: String, callbacks: Array[Dictionary]}
+var _pending_instantiate_queue: Array[Dictionary] = []
+
 ## Statistics
 var _stats: Dictionary = {
 	"models_loaded": 0,
@@ -403,16 +421,33 @@ func is_loading_async(model_path: String, item_id: String = "") -> bool:
 
 ## Process pending async loads - call this every frame
 ## Returns number of loads completed this frame
+##
+## Two-phase pipeline (TIME-BOXED BRIDGE for MODEL_LOADER_RACE.md case (c2)):
+##   Phase A: instantiate PackedScenes that completed loading on the PREVIOUS
+##            frame. The one-frame gap gives Godot's worker thread time to
+##            finish resolving embedded sub-resources before the main thread
+##            calls `instantiate()` — without it, `instantiate()` can
+##            dereference a half-built mesh RID and segfault.
+##   Phase B: poll currently in-flight loads. Loads that flipped to
+##            THREAD_LOAD_LOADED this frame are moved into the pending
+##            instantiate queue (NOT instantiated yet); they'll be
+##            instantiated in next frame's Phase A.
+##
+## "Completed" is counted at instantiate time (Phase A), not at load time
+## (Phase B), so the public count semantics are unchanged.
 func process_async_loads() -> int:
+	# Phase A: instantiate everything that loaded last frame.
+	var completed := _drain_pending_instantiate_queue()
+
 	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
-		return 0
+		return completed
 	if _pending_async_loads.is_empty():
 		_drain_deferred_queue()
-		return 0
+		return completed
 
-	var completed := 0
 	var to_remove: Array[String] = []
 
+	# Phase B: poll in-flight loads, defer instantiate for next frame.
 	for disk_path: String in _pending_async_loads:
 		var status := ResourceLoader.load_threaded_get_status(disk_path)
 
@@ -424,45 +459,31 @@ func process_async_loads() -> int:
 				# cached as null, and left for the next prebake pass to repair.
 				# See docs/audit/MODEL_LOADER_RACE.md.
 				var packed_scene := ResourceLoader.load_threaded_get(disk_path) as PackedScene
-				var model: Node3D = null
-
-				if packed_scene:
-					# DIAGNOSTIC (2026-04-14): log pre-instantiate state to correlate
-					# segfaults at this site with disk_path + file size + concurrent
-					# load count. Remove once root cause is pinned.
-					Log.info("models", "instantiate_attempt path=%s size=%d in_flight=%d" % [
-						disk_path,
-						FileAccess.get_file_as_bytes(disk_path).size(),
-						_pending_async_loads.size()
-					])
-					var instance := packed_scene.instantiate()
-					if instance is Node3D:
-						_strip_occluders(instance)
-						model = instance as Node3D
-					elif instance != null:
-						push_warning("ModelLoader: Async load produced non-Node3D: %s" % disk_path)
-						instance.queue_free()
-					else:
-						push_warning("ModelLoader: Async instantiate returned null: %s" % disk_path)
-				else:
-					push_warning("ModelLoader: Async load returned null PackedScene: %s" % disk_path)
-
-				# Cache the result
 				var cache_key: String = _pending_async_loads[disk_path].cache_key
-				_model_cache[cache_key] = model
-				_last_access[cache_key] = Engine.get_frames_drawn()
-				if model:
-					_stats["models_from_disk_async"] += 1
-					_evict_if_over_budget()
+				var callbacks: Array = _pending_async_loads[disk_path].callbacks
 
-				# Call all callbacks
-				for cb_info: Dictionary in _pending_async_loads[disk_path].callbacks:
-					var cb: Callable = cb_info.callback
-					if cb.is_valid():
-						cb.call(cb_info.model_path, cb_info.item_id, model)
+				if packed_scene == null:
+					# Load returned null — cache miss, fire callbacks immediately
+					# (no instantiate to defer).
+					push_warning("ModelLoader: Async load returned null PackedScene: %s" % disk_path)
+					_model_cache[cache_key] = null
+					_last_access[cache_key] = Engine.get_frames_drawn()
+					for cb_info: Dictionary in callbacks:
+						var cb: Callable = cb_info.callback
+						if cb.is_valid():
+							cb.call(cb_info.model_path, cb_info.item_id, null)
+					completed += 1
+				else:
+					# Defer instantiate to next frame. See _pending_instantiate_queue
+					# field comment for the race this avoids.
+					_pending_instantiate_queue.append({
+						"disk_path": disk_path,
+						"packed_scene": packed_scene,
+						"cache_key": cache_key,
+						"callbacks": callbacks,
+					})
 
 				to_remove.append(disk_path)
-				completed += 1
 
 			ResourceLoader.THREAD_LOAD_FAILED, ResourceLoader.THREAD_LOAD_INVALID_RESOURCE:
 				# Load failed
@@ -493,9 +514,72 @@ func process_async_loads() -> int:
 	return completed
 
 
-## Get count of pending async loads (in-flight + deferred)
+## Phase A of process_async_loads: drain PackedScenes that loaded last frame
+## and instantiate them now. The one-frame gap between `load_threaded_get` and
+## `instantiate()` mitigates the case (c2) race in MODEL_LOADER_RACE.md.
+##
+## Returns count of entries instantiated (counted toward completed loads).
+func _drain_pending_instantiate_queue() -> int:
+	if _pending_instantiate_queue.is_empty():
+		return 0
+
+	# Snapshot + clear so a callback that triggers another async load doesn't
+	# mutate the queue we're iterating.
+	var to_process := _pending_instantiate_queue.duplicate()
+	_pending_instantiate_queue.clear()
+
+	var completed := 0
+	for entry: Dictionary in to_process:
+		var disk_path: String = entry.disk_path
+		var packed_scene: PackedScene = entry.packed_scene
+		var cache_key: String = entry.cache_key
+		var callbacks: Array = entry.callbacks
+
+		var model: Node3D = null
+		if packed_scene:
+			# DIAGNOSTIC (2026-04-14): log pre-instantiate state to correlate
+			# segfaults at this site with disk_path + file size + concurrent
+			# load count. Remove once root cause is pinned.
+			Log.info("models", "instantiate_attempt path=%s size=%d in_flight=%d" % [
+				disk_path,
+				FileAccess.get_file_as_bytes(disk_path).size(),
+				_pending_async_loads.size()
+			])
+			var instance := packed_scene.instantiate()
+			if instance is Node3D:
+				_strip_occluders(instance)
+				# Parity with sync `_load_from_disk_cache` — without this, future
+				# duplicates of the cached prototype share resource paths and can
+				# conflict on multi-thread access. Pre-existing bug fixed here.
+				_clear_resource_paths(instance)
+				model = instance as Node3D
+			elif instance != null:
+				push_warning("ModelLoader: Async load produced non-Node3D: %s" % disk_path)
+				instance.queue_free()
+			else:
+				push_warning("ModelLoader: Async instantiate returned null: %s" % disk_path)
+
+		# Cache the result
+		_model_cache[cache_key] = model
+		_last_access[cache_key] = Engine.get_frames_drawn()
+		if model:
+			_stats["models_from_disk_async"] += 1
+			_evict_if_over_budget()
+
+		# Fire callbacks
+		for cb_info: Dictionary in callbacks:
+			var cb: Callable = cb_info.callback
+			if cb.is_valid():
+				cb.call(cb_info.model_path, cb_info.item_id, model)
+
+		completed += 1
+
+	return completed
+
+
+## Get count of pending async loads (in-flight + deferred + pending-instantiate)
 func get_pending_async_count() -> int:
-	return _pending_async_loads.size() + _deferred_async_queue.size()
+	return _pending_async_loads.size() + _deferred_async_queue.size() + _pending_instantiate_queue.size()
 
 
 ## Start deferred requests that were throttled by MAX_CONCURRENT_ASYNC_LOADS.

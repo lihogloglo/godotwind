@@ -1,9 +1,38 @@
 # ModelLoader Async Instantiation Race — Diagnosis
 
-**Status:** open; v1 repro path removed — needs a v2 repro
-**Date:** 2026-04-14 (diagnosis), repro-section updated 2026-04-14 after v1 benchmark rip-out
-**Author:** @coder
+**Status:** time-boxed bridge landed 2026-04-15 (deferred-instantiate, see "Bridge fix" below); canonical PackedScene-cache refactor still pending
+**Date:** 2026-04-14 (diagnosis), 2026-04-15 (bridge fix)
+**Author:** @coder (diagnosis), @roaster (bridge fix)
 **Reviewer:** @docs (not yet reviewed)
+
+## Bridge fix (2026-04-15, @roaster)
+
+**Symptom papered over:** segfault at `model_loader.gd::process_async_loads`
+`packed_scene.instantiate()` (case (c2) below — `THREAD_LOAD_LOADED` fires
+before sub-resources finalized).
+
+**Canonical pattern this stands in for:** doc recommendation #2 below — switch
+`_model_cache` from `Node3D` to `PackedScene`, callers `instantiate()` themselves
+on demand. That's the Unreal StreamableManager / Unity Addressables pattern
+called out in §"Canonical patterns".
+
+**What landed:** two-phase pipeline in `process_async_loads`. Phase B polls
+`THREAD_LOAD_LOADED` and parks the PackedScene in `_pending_instantiate_queue`
+without instantiating. Phase A on the NEXT frame instantiates from the queue.
+The one-frame gap gives Godot's worker thread time to finish resolving embedded
+sub-resources before the main thread touches `instantiate()`. Also adds the
+missing `_clear_resource_paths(instance)` call (parity with sync
+`_load_from_disk_cache:682`).
+
+**Follow-up commit owner:** @roaster — schedule the canonical PackedScene
+cache refactor (~18 callsites across `cell_manager.gd`,
+`reference_instantiator.gd`, `runtime_hlod_merger.gd`,
+`static_object_renderer.gd`) as its own work item once Phase 3 paging settles.
+Until then, the bridge prevents the segfault without API churn.
+
+**Removal trigger:** when `_model_cache` is converted to `PackedScene`, delete
+`_pending_instantiate_queue`, `_drain_pending_instantiate_queue`, and the
+two-phase split — callers will own the instantiate timing themselves.
 
 > **Note (2026-04-14):** the original repro used `-- --benchmark` CLI auto-mode + `_wait_for_streaming_idle` gate in `world_explorer.gd`. Both were deleted in the v1 benchmark rip-out (see `docs/audit/BENCHMARK_V2_PLAN.md`). The crash signature below is unchanged — it fires on the normal play path too, intermittently — but the deterministic repro harness no longer exists. A replacement repro tool needs to ship with v2's progressive auto-run or a dedicated streaming-stress command. Until then, use the "normal play path" branch below to trigger it manually.
 
