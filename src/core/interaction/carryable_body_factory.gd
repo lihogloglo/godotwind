@@ -191,8 +191,18 @@ static func convert_static_to_rigid(
 	# Reparent the CollisionShape3D children. Resources are shared by
 	# reference; the BoxShape3D / ConvexPolygonShape3D / etc. don't need
 	# duplication.
+	#
+	# Clear `owner` before reparent: `duplicate()` copies owner chains from
+	# the prototype, so children here carry `owner == prototype_root`. When
+	# we re-add them under `rb` (whose ancestor chain does NOT include the
+	# prototype root), Godot emits the "make owner inconsistent" warning
+	# AND may corrupt internal state (RID errors, unimplemented-base-type
+	# on the renderer side — see `docs/audit/MODEL_LOADER_RACE.md` §Post-
+	# bridge sig 139). `owner` is only meaningful for editor-time scene
+	# persistence; at runtime-spawn it must be null.
 	var children := static_body.get_children()
 	for child in children:
+		_clear_owner_recursive(child)
 		static_body.remove_child(child)
 		rb.add_child(child)
 
@@ -239,6 +249,7 @@ static func convert_static_to_rigid(
 			continue
 		movable.append(child)
 	for child in movable:
+		_clear_owner_recursive(child)
 		parent.remove_child(child)
 		rb.add_child(child)
 
@@ -251,6 +262,29 @@ static func convert_static_to_rigid(
 		parent.set_meta("carryable_wrapper", true)
 
 	return rb
+
+
+## Clear `owner` on `node` and every descendant. Called before a reparent
+## hop so Godot doesn't emit "owner inconsistent" warnings and, more
+## importantly, doesn't leave a dangling owner pointer into the old tree.
+##
+## Rationale: `duplicate()` on a scene prototype copies the owner chain
+## onto the duplicated subtree (each inner node's `owner` points at the
+## duplicated root). When we reparent one of those inner nodes out from
+## under the duplicated root and into a freshly-constructed RigidBody3D,
+## the node's `owner` no longer lies on its new ancestor chain — Godot
+## treats that as a latent corruption and has been observed to emit RID
+## errors (`wrong RID`, `occluder null`, `unimplemented base type`) and
+## eventually segfault on the renderer side. See `docs/audit/
+## MODEL_LOADER_RACE.md` §Post-bridge sig 139.
+##
+## `owner` is an editor-persistence concept; at runtime-spawn it must be
+## null. Walks the full subtree because any descendant's owner can be the
+## source of the dangling reference.
+static func _clear_owner_recursive(node: Node) -> void:
+	node.owner = null
+	for child in node.get_children():
+		_clear_owner_recursive(child)
 
 
 ## Recursively find the first StaticBody3D inside `node`.

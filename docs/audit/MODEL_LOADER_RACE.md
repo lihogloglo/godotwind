@@ -5,7 +5,44 @@
 **Author:** @coder (diagnosis), @roaster (bridge fix)
 **Reviewer:** @docs (not yet reviewed)
 
-## Bridge fix (2026-04-15, @roaster)
+## Bridge fix #2 (2026-04-15, @roaster) — carryable owner-inconsistent reparent
+
+**Symptom papered over:** post-bridge-#1 the original `model_loader.gd:438`
+stack disappeared but a distinct native-side crash replaced it (no GDScript
+backtrace, RID errors `Attempting to initialize the wrong RID` /
+`Parameter "mem" is null` / `Parameter "occluder" is null` /
+`unimplemented base type encountered in renderer scene cull`). Session log
+§6 of `OBJECT_PAGING_SESSION_2026_04_14_15.md` tracks the regression.
+
+**Root cause:** `CarryableBodyFactory.convert_static_to_rigid` reparented
+`CollisionShape3D` (and other prop descendants) from the duplicated
+prototype into a freshly-constructed `RigidBody3D` without clearing
+`owner`. `duplicate()` copies owner chains onto the duplicated subtree —
+every descendant's `owner` points at the duplicated root, and after the
+hop that root is no longer on the ancestor chain. Godot treats that as
+latent corruption (owner pointer dangles into a subtree that will soon
+queue_free), emits the "make owner inconsistent" warning, and has been
+observed to segfault on the renderer side a few frames later when the
+dangling ref is touched.
+
+**Canonical pattern:** Godot docs — `owner` is an editor-persistence
+concept; runtime-spawned nodes must have `owner == null` unless they
+need `PackedScene`-save participation. Any runtime reparent hop between
+subtrees must null the moved node's `owner` (and descendants', since
+`duplicate()` propagates the old root through the whole subtree).
+
+**What landed (2026-04-15):** `_clear_owner_recursive(child)` helper in
+`carryable_body_factory.gd`, called at both reparent sites
+(`static_body.children → rb` and `parent.siblings → rb`). Walks the full
+subtree because any descendant can be the dangling-pointer source, not
+just the direct child being moved. 104/104 unit tests green.
+
+**Removal trigger:** none — this is the canonical pattern, not a bridge.
+Keep the helper as the idiomatic reparent-owner-clear utility.
+
+---
+
+## Bridge fix #1 (2026-04-15, @roaster)
 
 **Symptom papered over:** segfault at `model_loader.gd::process_async_loads`
 `packed_scene.instantiate()` (case (c2) below — `THREAD_LOAD_LOADED` fires
