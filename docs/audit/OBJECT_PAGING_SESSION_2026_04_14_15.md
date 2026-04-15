@@ -192,7 +192,7 @@ Tightens cost-benefit by re-filtering merged refs against `mesh_radius² × scal
 ### Phase 6 — Rename + deprecation sweep
 
 - `runtime_hlod_merger.gd` → `object_paging.gd` (rename, update imports).
-- Delete residual `is_mid_worthy` call sites: `cell_manager.gd:1952-1953, :2124`, `mid_tier_debugger.gd:319`. Phase 2 only removed the merger-internal usage.
+- ~~Delete residual `is_mid_worthy` call sites: `cell_manager.gd:1952-1953, :2124`, `mid_tier_debugger.gd:319`.~~ **DECLINED 2026-04-15 (roaster adjudication, §14.4).** Those sites drive the individual-MID-tier classifier pipeline (`_defer_for_near` / `_instantiate_mid_tier` / `_create_near_only_rs_instance`) — orthogonal to paging. Plan §9 explicitly preserves individual MID for non-paged refs (cost-benefit losers, sparse chunks, type-rejected statics). Deleting would break NEAR instantiation-deferral + MID-debugger census. Bullet was overreach by the previous session author, written on the false premise that paging replaces MID wholesale. Out of scope for paging rename.
 - Update `docs/STATUS.md`, `docs/DISTANCE_RENDERING.md`, `docs/audit/MASTERPLAN.md` with final architecture.
 - **Exported-build smoke test**: verify `ImporterMesh.generate_lods()` works on worker thread in release build (plan §14 risk 2). If editor-only, re-plan Phase 2: either use prebake-time LOD chains (bypass runtime gen) or move LOD gen to main thread only in release.
 - Regenerate `docs/audit/lod_refactor_baselines/` CSV post-fix.
