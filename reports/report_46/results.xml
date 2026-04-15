@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-04-15" name="report_46" tests="60" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_basis_packing" package="tests/unit" timestamp="2026-04-15T01:19:31" hostname="localhost" tests="3" failures="0" errors="0" skipped="0" flaky="0" time="0.685">
+		<testcase name="test_basis_index_returns_columns" classname="test_basis_packing" time="0.079">
+		</testcase>
+		<testcase name="test_projection_index_returns_columns" classname="test_basis_packing" time="0.097">
+		</testcase>
+		<testcase name="test_transform_basis_matches_direct_access" classname="test_basis_packing" time="0.095">
+		</testcase>
+	</testsuite>
+	<testsuite id="1" name="test_coordinate_system" package="tests/unit" timestamp="2026-04-15T01:19:32" hostname="localhost" tests="4" failures="0" errors="0" skipped="0" flaky="0" time="0.917">
+		<testcase name="test_vector_to_godot_zero" classname="test_coordinate_system" time="0.094">
+		</testcase>
+		<testcase name="test_vector_to_godot_axes" classname="test_coordinate_system" time="0.096">
+		</testcase>
+		<testcase name="test_vector_roundtrip" classname="test_coordinate_system" time="0.094">
+		</testcase>
+		<testcase name="test_cell_size_is_positive" classname="test_coordinate_system" time="0.095">
+		</testcase>
+	</testsuite>
+	<testsuite id="2" name="test_distance_utils" package="tests/unit" timestamp="2026-04-15T01:19:33" hostname="localhost" tests="9" failures="0" errors="0" skipped="0" flaky="0" time="1.998">
+		<testcase name="test_cell_distance_squared_same_cell" classname="test_distance_utils" time="0.093">
+		</testcase>
+		<testcase name="test_cell_distance_squared_adjacent" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_cell_distance_squared_diagonal" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_cell_distance_is_sqrt_of_squared" classname="test_distance_utils" time="0.094">
+		</testcase>
+		<testcase name="test_cell_to_world_center_origin" classname="test_distance_utils" time="0.095">
+		</testcase>
+		<testcase name="test_world_to_cell_roundtrip" classname="test_distance_utils" time="0.096">
+		</testcase>
+		<testcase name="test_tier_constants_are_ordered" classname="test_distance_utils" time="0.092">
+		</testcase>
+		<testcase name="test_distance_to_cell_radius" classname="test_distance_utils" time="0.094">
+		</testcase>
+		<testcase name="test_is_cell_in_range" classname="test_distance_utils" time="0.095">
+		</testcase>
+	</testsuite>
+	<testsuite id="3" name="test_importermesh_smoke" package="tests/unit" timestamp="2026-04-15T01:19:35" hostname="localhost" tests="2" failures="0" errors="0" skipped="0" flaky="0" time="0.626">
+		<testcase name="test_importermesh_generates_lods_at_runtime" classname="test_importermesh_smoke" time="0.208">
+		</testcase>
+		<testcase name="test_importermesh_preserves_material" classname="test_importermesh_smoke" time="0.127">
+		</testcase>
+	</testsuite>
+	<testsuite id="4" name="test_material_audit" package="tests/unit" timestamp="2026-04-15T01:19:36" hostname="localhost" tests="1" failures="0" errors="0" skipped="0" flaky="0" time="1.815">
+		<testcase name="test_multi_surface_materials" classname="test_material_audit" time="1.651">
+		</testcase>
+	</testsuite>
+	<testsuite id="5" name="test_object_paging_kernel" package="tests/unit" timestamp="2026-04-15T01:19:38" hostname="localhost" tests="17" failures="0" errors="0" skipped="0" flaky="0" time="3.898">
+		<testcase name="test_empty_input_returns_null" classname="test_object_paging_kernel" time="0.095">
+		</testcase>
+		<testcase name="test_single_ref_preserves_surface" classname="test_object_paging_kernel" time="0.220">
+		</testcase>
+		<testcase name="test_chunk_origin_subtracts_from_vertex_positions" classname="test_object_paging_kernel" time="0.103">
+		</testcase>
+		<testcase name="test_two_refs_same_material_merge_into_one_surface" classname="test_object_paging_kernel" time="0.105">
+		</testcase>
+		<testcase name="test_two_refs_different_materials_produce_two_surfaces" classname="test_object_paging_kernel" time="0.098">
+		</testcase>
+		<testcase name="test_materials_preserved_on_merged_surfaces" classname="test_object_paging_kernel" time="0.098">
+		</testcase>
+		<testcase name="test_estimate_mesh_bytes_scales_with_vertex_count" classname="test_object_paging_kernel" time="0.108">
+		</testcase>
+		<testcase name="test_null_mesh_bytes_returns_zero" classname="test_object_paging_kernel" time="0.095">
+		</testcase>
+		<testcase name="test_size_worthy_large_close_mesh_kept" classname="test_object_paging_kernel" time="0.095">
+		</testcase>
+		<testcase name="test_size_worthy_small_distant_mesh_rejected" classname="test_object_paging_kernel" time="0.093">
+		</testcase>
+		<testcase name="test_size_worthy_scale_changes_outcome" classname="test_object_paging_kernel" time="0.094">
+		</testcase>
+		<testcase name="test_size_worthy_exact_boundary_kept" classname="test_object_paging_kernel" time="0.093">
+		</testcase>
+		<testcase name="test_size_worthy_zero_radius_kept" classname="test_object_paging_kernel" time="0.093">
+		</testcase>
+		<testcase name="test_size_worthy_zero_distance_kept" classname="test_object_paging_kernel" time="0.095">
+		</testcase>
+		<testcase name="test_paging_min_size_matches_openmw_default" classname="test_object_paging_kernel" time="0.096">
+		</testcase>
+		<testcase name="test_size_worthy_reevaluation_after_camera_approach" classname="test_object_paging_kernel" time="0.094">
+		</testcase>
+		<testcase name="test_normals_transformed_by_ref_rotation" classname="test_object_paging_kernel" time="0.098">
+		</testcase>
+	</testsuite>
+	<testsuite id="6" name="test_octahedral_encoding" package="tests/unit" timestamp="2026-04-15T01:19:42" hostname="localhost" tests="5" failures="0" errors="0" skipped="0" flaky="0" time="1.134">
+		<testcase name="test_sphere_round_trip" classname="test_octahedral_encoding" time="0.100">
+		</testcase>
+		<testcase name="test_hemi_round_trip" classname="test_octahedral_encoding" time="0.098">
+		</testcase>
+		<testcase name="test_hemi_all_above_horizon" classname="test_octahedral_encoding" time="0.095">
+		</testcase>
+		<testcase name="test_sphere_covers_both_hemispheres" classname="test_octahedral_encoding" time="0.094">
+		</testcase>
+		<testcase name="test_generate_directions_count_and_unit_length" classname="test_octahedral_encoding" time="0.094">
+		</testcase>
+	</testsuite>
+	<testsuite id="7" name="test_player_controller_interaction" package="tests/unit" timestamp="2026-04-15T01:19:43" hostname="localhost" tests="12" failures="0" errors="0" skipped="0" flaky="0" time="2.704">
+		<testcase name="test_register_gate_increments_count" classname="test_player_controller_interaction" time="0.095">
+		</testcase>
+		<testcase name="test_register_gate_idempotent" classname="test_player_controller_interaction" time="0.095">
+		</testcase>
+		<testcase name="test_unregister_gate_removes" classname="test_player_controller_interaction" time="0.096">
+		</testcase>
+		<testcase name="test_register_null_gate_is_safe" classname="test_player_controller_interaction" time="0.127">
+		</testcase>
+		<testcase name="test_tree_exiting_self_heal_removes_freed_gate" classname="test_player_controller_interaction" time="0.101">
+		</testcase>
+		<testcase name="test_is_modal_ui_open_reflects_state" classname="test_player_controller_interaction" time="0.095">
+		</testcase>
+		<testcase name="test_tap_emits_on_quick_press_release" classname="test_player_controller_interaction" time="0.103">
+		</testcase>
+		<testcase name="test_hold_begin_emits_after_threshold" classname="test_player_controller_interaction" time="0.102">
+		</testcase>
+		<testcase name="test_release_emits_after_hold" classname="test_player_controller_interaction" time="0.102">
+		</testcase>
+		<testcase name="test_modal_gate_suppresses_press" classname="test_player_controller_interaction" time="0.096">
+		</testcase>
+		<testcase name="test_emit_interact_tap_routes_to_raycaster_target" classname="test_player_controller_interaction" time="0.095">
+		</testcase>
+		<testcase name="test_emit_interact_tap_no_raycaster_is_safe" classname="test_player_controller_interaction" time="0.095">
+		</testcase>
+	</testsuite>
+	<testsuite id="8" name="test_static_object_renderer_bwide" package="tests/unit" timestamp="2026-04-15T01:19:46" hostname="localhost" tests="7" failures="0" errors="0" skipped="0" flaky="0" time="1.582">
+		<testcase name="test_register_mesh_type_detects_lod_chain" classname="test_static_object_renderer_bwide" time="0.099">
+		</testcase>
+		<testcase name="test_register_simple_mesh_no_lod" classname="test_static_object_renderer_bwide" time="0.097">
+		</testcase>
+		<testcase name="test_single_instance_per_object" classname="test_static_object_renderer_bwide" time="0.102">
+		</testcase>
+		<testcase name="test_promotion_hides_single_instance" classname="test_static_object_renderer_bwide" time="0.103">
+		</testcase>
+		<testcase name="test_cell_spatial_index" classname="test_static_object_renderer_bwide" time="0.102">
+		</testcase>
+		<testcase name="test_register_lod_from_prototype_compat" classname="test_static_object_renderer_bwide" time="0.100">
+		</testcase>
+		<testcase name="test_remove_cell_instances" classname="test_static_object_renderer_bwide" time="0.102">
+		</testcase>
+	</testsuite>
+</testsuites>
