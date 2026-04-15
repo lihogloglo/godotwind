@@ -295,6 +295,71 @@ func test_paging_min_size_matches_openmw_default() -> void:
 	assert_float(DU.PAGING_MIN_SIZE_SQ).is_equal_approx(0.0196, 0.0001)
 
 
+#endregion
+
+
+#region Phase 3a — type filter parity tests
+
+## static record types are always paging-eligible at every size_level.
+func test_type_eligible_static_always_paged() -> void:
+	for size_level in range(3):
+		assert_bool(Merger._type_eligible("static", size_level)) \
+			.override_failure_message("static must be paging-eligible at size_level=%d" % size_level) \
+			.is_true()
+
+
+## door + activator same contract — architectural, always eligible.
+func test_type_eligible_door_and_activator_always_paged() -> void:
+	for size_level in range(3):
+		assert_bool(Merger._type_eligible("door", size_level)).is_true()
+		assert_bool(Merger._type_eligible("activator", size_level)).is_true()
+
+
+## container is size-aware: paged at size_level=0, dropped at higher.
+## Matches OpenMW `typeFilter(REC_CONT, far)` → `!far` (keep for near chunks only).
+func test_type_eligible_container_size_aware() -> void:
+	assert_bool(Merger._type_eligible("container", 0)) \
+		.override_failure_message("container must be paged at near (size_level=0)") \
+		.is_true()
+	assert_bool(Merger._type_eligible("container", 1)) \
+		.override_failure_message("container must NOT be paged at size_level=1 (MID-far)") \
+		.is_false()
+	assert_bool(Merger._type_eligible("container", 2)) \
+		.override_failure_message("container must NOT be paged at size_level=2 (HLOD)") \
+		.is_false()
+
+
+## light is never paged — owned by distant_light_manager tier.
+func test_type_eligible_light_never_paged() -> void:
+	for size_level in range(3):
+		assert_bool(Merger._type_eligible("light", size_level)) \
+			.override_failure_message("light must never be paged (owned by distant_light_manager)") \
+			.is_false()
+
+
+## Inventory items + actors must never page — they're dynamic or
+## covered by other tiers.
+func test_type_eligible_inventory_and_actors_rejected() -> void:
+	var rejected := ["npc", "creature", "weapon", "armor", "clothing",
+			"book", "potion", "ingredient", "misc", "apparatus",
+			"lockpick", "probe", "repair", "leveled_item", "body_part"]
+	for tn in rejected:
+		assert_bool(Merger._type_eligible(tn, 0)) \
+			.override_failure_message("Type '%s' must not be paging-eligible." % tn) \
+			.is_false()
+
+
+## Unknown / empty type strings default to reject — conservative.
+func test_type_eligible_unknown_defaults_to_reject() -> void:
+	assert_bool(Merger._type_eligible("", 0)).is_false()
+	assert_bool(Merger._type_eligible("spell", 0)).is_false()
+	assert_bool(Merger._type_eligible("dialogue_info", 0)).is_false()
+
+#endregion
+
+
+#region Phase 2 SizeCache re-evaluation (was here, kept verbatim)
+
 ## Camera-motion parity — cached ref moving into range must re-evaluate.
 ## Simulates SizeCache flow: a ref rejected at 500m, camera walks to 10m,
 ## same `_is_size_worthy` call with cached `rad²×scale²` should now return

@@ -122,6 +122,7 @@ var _stats: Dictionary = {
 	"refs_size_rejected": 0,   # Phase 2 — refs below projected-size threshold
 	"size_cache_hits": 0,      # Phase 2 — short-circuit AABB lookups
 	"size_cache_size": 0,      # Phase 2 — SizeCache entry count
+	"refs_type_rejected": 0,   # Phase 3a — refs rejected by record-type table
 }
 
 #endregion
@@ -294,6 +295,35 @@ func get_stats() -> Dictionary:
 	return _stats.duplicate()
 
 
+## Phase 3a — record-type eligibility for paging (OpenMW ObjectPaging §2.4).
+##
+## Contract (matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:55-75`):
+##   STAT, DOOR, ACTI            → always eligible (world architecture + interaction markers)
+##   CONT                        → eligible only at size_level == 0 (1×1 chunks)
+##   LIGH, NPC_, CREA, inventory → never eligible (lights own their tier;
+##                                 actors + inventory aren't static cell geometry)
+##
+## `size_level` matches OpenMW's `far = size >= 2` / `!far` distinction: at
+## size_level=0 (near 1×1 chunks in §4), small per-cell clutter like barrels
+## and crates is worth the draw-call cost; at size_level >= 1 those types
+## project sub-pixel and add overhead without visual gain. Phase 4 wires
+## the real `size_level` through; until then all paging work is size_level=0
+## so the table is effectively `static/door/acti/cont → keep`.
+##
+## Pure static — unit-testable without a merger instance.
+static func _type_eligible(type_name: String, size_level: int) -> bool:
+	match type_name:
+		"static", "door", "activator":
+			return true
+		"container":
+			# size_level == 0 → near-chunk tier → keep. Phase 4 enables levels 1/2.
+			return size_level == 0
+		_:
+			# Everything else: light (own tier), npc/creature (dynamic, not paged),
+			# weapon/armor/clothing/book/misc (small inventory items).
+			return false
+
+
 ## Phase 2 — projected-size test (OpenMW ObjectPaging §2.2).
 ## Returns true if the ref should be kept (projected screen-size above threshold).
 ##
@@ -382,20 +412,30 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i, camera_world_pos: Vec
 	var inputs: Array = []
 	var refs_skipped := 0
 	var refs_size_rejected := 0
+	var refs_type_rejected := 0
 	var size_cache_hits := 0
+
+	# Phase 3 — fixed size_level=0 until Phase 4 ships adaptive chunks.
+	# Passed through to `_type_eligible` so the table encodes tier rules
+	# once and doesn't need rewiring when chunks grow.
+	var size_level: int = 0
 
 	for ref in cell_record.references:
 		if ref.is_deleted:
 			continue
 
-		# Phase 2: the record_type out-arg is no longer needed here because
-		# type-based filtering was removed with the keyword gate. Phase 3 will
-		# reintroduce a type table; at that point `get_any_record` caller can
-		# go back to the typed signature. For now we pass a throwaway out-arg
-		# so the existing API is unchanged.
-		var _record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), _record_type)
+		var record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 		if not base_record:
+			continue
+
+		# Phase 3 — type filter (OpenMW ObjectPaging §2.4, objectpaging.cpp:55-75).
+		# Pre-rejects record types that should never page (light, npc, creature,
+		# misc items) and size-aware types (container only at size_level=0).
+		# Cheap switch before the AABB dict lookup.
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+		if not _type_eligible(type_name, size_level):
+			refs_type_rejected += 1
 			continue
 
 		var model_path: String = _get_model_path(base_record)
@@ -495,6 +535,7 @@ func _request_merge(grid: Vector2i, camera_cell: Vector2i, camera_world_pos: Vec
 
 	_stats["total_refs_skipped"] += refs_skipped
 	_stats["refs_size_rejected"] += refs_size_rejected
+	_stats["refs_type_rejected"] += refs_type_rejected
 	_stats["size_cache_hits"] += size_cache_hits
 
 	# Cost-benefit: sparse cells don't benefit from merging (OpenMW insight)
