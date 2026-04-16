@@ -50,6 +50,8 @@ var _panel_bg: PanelContainer = null
 var _vbox: VBoxContainer = null
 var _label_frame: Label = null
 var _label_rolling: Label = null
+var _label_cpu: Label = null
+var _label_phases: Label = null
 var _label_memory: Label = null
 var _label_streaming: Label = null
 var _label_toggles: Label = null
@@ -193,6 +195,8 @@ func _build_ui() -> void:
 
 	_label_frame = _add_label("frame: --")
 	_label_rolling = _add_label("5s avg: -- | p95: --")
+	_label_cpu = _add_label("proc: --ms | phys: --ms | objs: --")
+	_label_phases = _add_label("stream: inst=-- async=-- promo=-- unload=-- (ms)")
 	_label_memory = _add_label("vram: -- | tex: -- | nodes: --")
 	_label_streaming = _add_label("cells: -- | queue: -- | async: --")
 	_label_toggles = _add_label("toggles: --")
@@ -233,21 +237,50 @@ func _rebuild_labels(frame_ms: float) -> void:
 		avg_fps, p95_ms, _rolling_times_ms.size()
 	]
 
+	# CPU breakdown — key for GPU vs CPU diagnosis
+	# proc_ms ≈ total GDScript _process time; phys_ms ≈ Jolt tick time.
+	# If frame_ms >> proc_ms + phys_ms → GPU bound. If proc_ms ≈ frame_ms → GDScript bound.
+	var p := Performance
+	var proc_ms := p.get_monitor(p.TIME_PROCESS) * 1000.0
+	var phys_ms := p.get_monitor(p.TIME_PHYSICS_PROCESS) * 1000.0
+	var rendered_objs := int(p.get_monitor(p.RENDER_TOTAL_OBJECTS_IN_FRAME))
+	_label_cpu.text = "proc: %.1fms | phys: %.1fms | objs: %d" % [proc_ms, phys_ms, rendered_objs]
+
+	# Fetch streaming stats once — shared by phase breakdown + streaming row below.
+	var sm_stats: Dictionary = {}
+	if _streaming_manager and _streaming_manager.has_method("get_stats"):
+		sm_stats = _streaming_manager.get_stats()
+
+	# Streaming phase breakdown — reads _last_phase_times from streaming manager.
+	# Key: if inst≈frame_ms → streaming is bottleneck; if all phases small → GPU-bound.
+	if _streaming_manager and _streaming_manager.has_method("get_phase_times"):
+		var pt: PackedFloat64Array = _streaming_manager.get_phase_times()
+		var n := pt.size()
+		var burst := bool(sm_stats.get("burst_loading", false))
+		var sm_total := float(sm_stats.get("frame_total_ms", 0.0))
+		var startup := bool(sm_stats.get("startup_phase", false))
+		_label_phases.text = "stream[%s%s]: inst=%.1f async=%.1f promo=%.1f unload=%.1f total=%.1f (ms)" % [
+			"STARTUP " if startup else "",
+			"BURST" if burst else "norm",
+			pt[2]/1000.0 if n > 2 else 0.0,
+			pt[1]/1000.0 if n > 1 else 0.0,
+			pt[3]/1000.0 if n > 3 else 0.0,
+			pt[0]/1000.0 if n > 0 else 0.0,
+			sm_total
+		]
+	else:
+		_label_phases.text = "stream: (no manager)"
+
 	# Memory
 	var vram_mb := Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
 	var tex_mb := Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED) / 1048576.0
 	var nodes := int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
 	_label_memory.text = "vram: %dMB | tex: %dMB | nodes: %d" % [int(vram_mb), int(tex_mb), nodes]
 
-	# Streaming state (defensively handle missing manager)
-	var cells := 0
-	var queue := 0
-	var async_req := 0
-	if _streaming_manager and _streaming_manager.has_method("get_stats"):
-		var stats: Dictionary = _streaming_manager.get_stats()
-		cells = int(stats.get("loaded_cells", 0))
-		queue = int(stats.get("instantiation_queue", 0))
-		async_req = int(stats.get("async_requests", 0))
+	# Streaming state
+	var cells := int(sm_stats.get("loaded_cells", 0))
+	var queue := int(sm_stats.get("instantiation_queue", 0))
+	var async_req := int(sm_stats.get("async_requests", 0))
 	_label_streaming.text = "cells: %d | queue: %d | async: %d" % [cells, queue, async_req]
 
 	# Active toggles — list only the ones currently OFF (inverted default).

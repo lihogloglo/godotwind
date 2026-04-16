@@ -77,6 +77,7 @@ const MWTextFormatterScript := preload("res://src/core/dialogue/morrowind/mw_tex
 const SubsystemTogglesScript := preload("res://src/tools/subsystem_toggles.gd")
 const BenchmarkHUDScript := preload("res://src/tools/benchmark_hud.gd")
 const ProgressiveBenchmarkScript := preload("res://src/tools/progressive_benchmark.gd")
+const PerfSweepScript := preload("res://src/tools/perf_sweep.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -1439,6 +1440,56 @@ func _setup_subsystem_toggles() -> void:
 	if console and native_streaming_manager and cell_manager:
 		ProgressiveBenchmarkScript.register_console_commands(
 			console, native_streaming_manager, cell_manager, camera, _subsystem_toggles
+		)
+
+	# Quick isolation sweep — `perf_sweep` command (~60s, per-subsystem FPS cost table).
+	if console and _subsystem_toggles:
+		PerfSweepScript.register_console_commands(
+			console, native_streaming_manager, cell_manager, _subsystem_toggles
+		)
+
+	# On-demand streaming phase dump — instant snapshot of current phase times.
+	# Use after `hud` to correlate live overlay data with raw phase breakdown.
+	if console and native_streaming_manager and cell_manager:
+		var _sm := native_streaming_manager  # capture for closure
+		var phases_cmd := func(_args: Dictionary) -> Variant:
+			var stats: Dictionary = _sm.get_stats()
+			var pt: PackedFloat64Array = _sm.get_phase_times()
+			var fps := Engine.get_frames_per_second()
+			var proc_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+			var q := int(stats.get("instantiation_queue", -1))
+			var burst := bool(stats.get("burst_loading", false))
+			var sm_total := float(stats.get("frame_total_ms", 0.0))
+			var startup := bool(stats.get("startup_phase", false))
+			var n := pt.size()
+			var lines := PackedStringArray()
+			lines.append("=== streaming_phases snapshot ===")
+			lines.append("fps=%d  proc=%.1fms  stream_total=%.1fms  [%s%s]" % [
+				fps, proc_ms, sm_total,
+				"STARTUP " if startup else "",
+				"BURST" if burst else "norm"
+			])
+			lines.append("queue=%d  cells=%d  async_req=%d" % [
+				q, int(stats.get("loaded_cells", 0)), int(stats.get("async_requests", 0))
+			])
+			lines.append("phases (ms):")
+			lines.append("  unload   = %.2f" % (pt[0]/1000.0 if n > 0 else 0.0))
+			lines.append("  async    = %.2f" % (pt[1]/1000.0 if n > 1 else 0.0))
+			lines.append("  inst     = %.2f  ← instantiation budget" % (pt[2]/1000.0 if n > 2 else 0.0))
+			lines.append("  promo    = %.2f" % (pt[3]/1000.0 if n > 3 else 0.0))
+			lines.append("  coll     = %.2f" % (pt[4]/1000.0 if n > 4 else 0.0))
+			lines.append("  defer    = %.2f" % (pt[5]/1000.0 if n > 5 else 0.0))
+			lines.append("  queue_io = %.2f" % (pt[6]/1000.0 if n > 6 else 0.0))
+			lines.append("  cell_upd = %.2f" % (pt[7]/1000.0 if n > 7 else 0.0))
+			lines.append("Δ GPU = frame_ms - proc_ms (if proc_ms large → GDScript bound)")
+			for line: String in lines:
+				console.print_line(line)
+			return "streaming_phases: done"
+		console.register_command(
+			"streaming_phases", phases_cmd,
+			"Dump current per-phase streaming timings + FPS/proc breakdown",
+			"benchmark",
+			PackedStringArray([])
 		)
 
 

@@ -31,10 +31,10 @@ const MAX_CACHE_SIZE := 500
 ## with hundreds of concurrent threaded load requests during heavy startup.
 const MAX_CONCURRENT_ASYNC_LOADS := 16
 
-## Maximum PackedScene instantiations per frame in _drain_pending_instantiate_queue.
-## Each instantiate costs 1-5ms; unbounded drain can block the main thread for
-## hundreds of ms when a burst of async loads complete simultaneously.
-const MAX_INSTANTIATE_PER_FRAME := 8
+## Fallback instantiation budget when no caller-supplied budget is available.
+## 8ms matches INSTANTIATION_BUDGET_MS in StreamingConfig — used only if
+## process_async_loads() is called without an explicit budget_usec argument.
+const DRAIN_FALLBACK_BUDGET_USEC := 8000
 
 ## Cache for loaded models: model_path (lowercase) -> PackedScene | null
 ##
@@ -429,15 +429,16 @@ func is_loading_async(model_path: String, item_id: String = "") -> bool:
 ## Returns number of loads completed this frame
 ##
 ## Two-phase pipeline:
-##   Phase A: instantiate up to MAX_INSTANTIATE_PER_FRAME entries from the
-##            pending queue (rate-limited to keep main thread responsive).
+##   Phase A: instantiate pending entries up to budget_usec microseconds.
 ##            Uses the async-loaded PackedScene with can_instantiate() guard;
 ##            falls back to sync re-load on validation failure.
 ##   Phase B: poll in-flight async loads. Completed loads move to the pending
 ##            instantiate queue for Phase A next frame.
-func process_async_loads() -> int:
-	# Phase A: instantiate everything that loaded last frame.
-	var completed := _drain_pending_instantiate_queue()
+## budget_usec: time budget for Phase A; 0 uses DRAIN_FALLBACK_BUDGET_USEC.
+func process_async_loads(budget_usec: int = 0) -> int:
+	# Phase A: instantiate within budget.
+	var effective_budget := budget_usec if budget_usec > 0 else DRAIN_FALLBACK_BUDGET_USEC
+	var completed := _drain_pending_instantiate_queue(effective_budget)
 
 	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
 		return completed
@@ -515,22 +516,30 @@ func process_async_loads() -> int:
 
 
 ## Phase A of process_async_loads: cache the PackedScene and fire callbacks with
-## fresh Node3D instances. Rate-limited to MAX_INSTANTIATE_PER_FRAME.
+## fresh Node3D instances. Time-budgeted: stops when budget_usec is exhausted.
+## Time is measured per item so variable-cost items (complex meshes) self-limit.
 ##
 ## Each callback receives a distinct Node3D instantiated from the shared PackedScene —
 ## no shared-instance hazard. PackedScene is cached for future sync get_model() calls.
 ##
 ## Returns count of entries processed this frame.
-func _drain_pending_instantiate_queue() -> int:
+func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 	if _pending_instantiate_queue.is_empty():
 		return 0
 
-	var batch_size := mini(_pending_instantiate_queue.size(), MAX_INSTANTIATE_PER_FRAME)
-	var to_process := _pending_instantiate_queue.slice(0, batch_size)
-	_pending_instantiate_queue = _pending_instantiate_queue.slice(batch_size)
-
+	var start_us := Time.get_ticks_usec()
 	var completed := 0
-	for entry: Dictionary in to_process:
+	var i := 0
+
+	while i < _pending_instantiate_queue.size():
+		# Check budget before each item — one expensive instantiation can eat
+		# the whole budget; we stop cleanly rather than overshooting.
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
+
+		var entry: Dictionary = _pending_instantiate_queue[i]
+		i += 1
+
 		var packed_scene: PackedScene = entry.packed_scene
 		var cache_key: String = entry.cache_key
 		var callbacks: Array = entry.callbacks
@@ -561,6 +570,10 @@ func _drain_pending_instantiate_queue() -> int:
 				cb.call(cb_info.model_path, cb_info.item_id, instance)
 
 		completed += 1
+
+	# Remove processed entries in one slice — avoids O(n²) per-item removal.
+	if i > 0:
+		_pending_instantiate_queue = _pending_instantiate_queue.slice(i)
 
 	return completed
 

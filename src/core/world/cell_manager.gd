@@ -1273,9 +1273,10 @@ func process_pending_conversions(_budget_ms: float) -> bool:
 
 
 ## Process async disk loads - call this every frame to complete pending model loads
+## budget_usec: time budget for PackedScene instantiation; 0 uses loader fallback.
 ## Returns number of models that finished loading this frame
-func process_async_disk_loads() -> int:
-	return _model_loader.process_async_loads()
+func process_async_disk_loads(budget_usec: int = 0) -> int:
+	return _model_loader.process_async_loads(budget_usec)
 
 
 ## Get count of pending async disk loads
@@ -1308,8 +1309,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# instantiation loop even begins (root cause of 112ms frame overruns).
 	var start_time := Time.get_ticks_usec()
 
-	# First process any pending async disk loads (non-blocking check)
-	process_async_disk_loads()
+	# First process any pending async disk loads, budgeted so they can't eat the
+	# entire frame allocation before the main instantiation loop runs.
+	# Half the caller budget: leaves the other half for _instantiation_queue items.
+	process_async_disk_loads(int(budget_ms * 500.0))  # budget_ms*0.5 in usec
 
 	# Then process any pending conversions to feed the cache
 	# Cap conversion time to half the budget so instantiation still gets time

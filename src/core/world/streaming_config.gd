@@ -113,6 +113,12 @@ const INSTANTIATION_BUDGET_FRACTION := 0.48  ## 48% of frame time
 const INSTANTIATION_BUDGET_MIN_MS := 2.0     ## Floor: never go below 2ms (even at 240 FPS)
 const INSTANTIATION_BUDGET_MAX_MS := 16.0    ## Cap: never exceed 16ms (even at 15 FPS)
 
+## Post-startup instantiation budget (after loading screen hides).
+## 48% of frame time (~9.6ms at 50 FPS) causes a death spiral: render + streaming > 16.67ms
+## → FPS stays at 50 → budget stays high → queue never drains → FPS stays low.
+## Fix: fixed 4ms post-startup gives ~12ms for rendering → 60+ FPS while queue drains.
+const POST_STARTUP_INSTANTIATION_BUDGET_MS := 4.0
+
 ## NEAR TIER BURST LOADING - Moderate priority for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
 ## use these limits to populate objects faster without exceeding frame budget.

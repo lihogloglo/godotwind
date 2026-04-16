@@ -247,6 +247,13 @@ var _camera_velocity_xz: Vector2 = Vector2.ZERO  # EMA-smoothed, XZ plane only
 
 ## HLOD needs initial population on first frame after startup
 var _hlod_needs_initial_update: bool = true
+
+## Queue drain tracker: time when loading screen hid (startup_complete), 0 = not yet fired
+var _post_startup_start_ms: int = 0
+## Whether we've logged the queue-empty event post startup (one-shot)
+var _queue_drain_logged: bool = false
+## Accumulator for post-startup audit logging (seconds since last log)
+var _post_startup_audit_accum: float = 0.0
 ## Tracks whether camera crossed a cell boundary this frame
 var _cell_changed_this_frame: bool = false
 
@@ -621,15 +628,27 @@ func _process(delta: float) -> void:
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
 		# Phase 2: Process async instantiation (progressive object creation)
-		# During startup: aggressive 15ms budget (player can't see anything behind loading screen)
-		# During gameplay: conservative dynamic budget (48% of delta, clamped 2-16ms)
+		# During startup:     aggressive 15ms budget (loading screen is visible)
+		# Post-startup:       fixed 4ms — prevents the 48%-of-frame death spiral
+		#                     (render ~12ms + 4ms streaming = 16ms → 60+ FPS while queue drains)
+		# _get_dynamic_budget (48% of delta) is intentionally NOT used post-startup; at 50 FPS
+		# it yields 9.6ms/frame which keeps total > 16.67ms and FPS stuck at 50 indefinitely.
 		phase_start = Time.get_ticks_usec()
-		var instantiation_budget_ms := 15.0 if _startup_phase else _get_dynamic_budget(delta)
+		var instantiation_budget_ms := 15.0 if _startup_phase else SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
 		var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
 		var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
 		phase_times[2] = float(Time.get_ticks_usec() - phase_start)
 		if instantiated > 0 and debug_enabled:
 			_debug("Instantiated %d objects this frame" % instantiated)
+
+		# Post-startup queue drain telemetry — log once when queue empties after loading screen
+		if not _startup_phase and not _queue_drain_logged and _post_startup_start_ms > 0 and _cell_manager:
+			var q := _cell_manager.get_instantiation_queue_size()
+			if q == 0:
+				var elapsed_ms := Time.get_ticks_msec() - _post_startup_start_ms
+				Log.info("streaming", "Post-startup queue drained in %.1fs (%d frames since loading screen)" % [
+					elapsed_ms / 1000.0, Engine.get_frames_drawn()])
+				_queue_drain_logged = true
 
 		# Skip remaining phases if budget already exceeded
 		var total_elapsed_usec := Time.get_ticks_usec() - frame_start_usec
@@ -683,6 +702,31 @@ func _process(delta: float) -> void:
 				phase_times[6] / 1000.0,
 				frame_budget_ms, _frame_overrun_count])
 			_last_overrun_log_frame = Engine.get_frames_drawn()
+
+	# Post-startup audit — auto-logs every 5s for 60s so FPS/queue/phase breakdown
+	# is captured during the slow loading period without requiring user interaction.
+	# Key output: proc_ms vs frame_ms tells GPU vs GDScript; inst vs frame tells budget violation.
+	if not _startup_phase and _post_startup_start_ms > 0:
+		_post_startup_audit_accum += delta
+		if _post_startup_audit_accum >= 5.0:
+			_post_startup_audit_accum = 0.0
+			var elapsed_s := float(Time.get_ticks_msec() - _post_startup_start_ms) / 1000.0
+			if elapsed_s < 60.0 and _cell_manager:
+				var q := _cell_manager.get_instantiation_queue_size()
+				var fps := Engine.get_frames_per_second()
+				var proc_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+				var burst := _cell_manager.is_burst_loading()
+				var pt := _last_phase_times
+				var n := pt.size()
+				Log.info("streaming", "[audit +%.0fs] fps=%d proc=%.1fms frame=%.1fms queue=%d burst=%s | unload=%.1f async=%.1f inst=%.1f promo=%.1f coll=%.1f defer=%.1f (ms)" % [
+					elapsed_s, fps, proc_ms, total_ms, q, "Y" if burst else "N",
+					pt[0]/1000.0 if n > 0 else 0.0,
+					pt[1]/1000.0 if n > 1 else 0.0,
+					pt[2]/1000.0 if n > 2 else 0.0,
+					pt[3]/1000.0 if n > 3 else 0.0,
+					pt[4]/1000.0 if n > 4 else 0.0,
+					pt[5]/1000.0 if n > 5 else 0.0
+				])
 
 
 ## Update which cells should be loaded based on camera position
@@ -1429,10 +1473,13 @@ func _process_pending_loads_async() -> void:
 
 ## Process completed async requests
 ## Checks for finished cell loads and finalizes them
-## Budget-capped: processes at most 2 completions per frame to prevent spikes
+## Cell completion is atomic (add_child + scene-tree emit can't be time-sliced),
+## so we cap at 1 per frame. Empirical: each completion ≈ 13ms at 60 FPS load;
+## 2 in one frame = 26ms overrun. A time budget wouldn't help here — the work
+## is indivisible. The right lever is throughput (cells/s), not latency (ms/cell).
 func _process_async_completions() -> void:
 	var completed_grids: Array[Vector2i] = []
-	var max_completions_per_frame := 2
+	var max_completions_per_frame := 1
 
 	for grid: Vector2i in _async_requests:
 		if completed_grids.size() >= max_completions_per_frame:
@@ -1538,6 +1585,8 @@ func get_stats() -> Dictionary:
 	s["camera_cell"] = _camera_cell
 	s["camera_position"] = _camera_position
 	s["frame_budget_ms"] = frame_budget_ms
+	s["frame_total_ms"] = _last_frame_total_ms
+	s["startup_phase"] = _startup_phase
 
 	# Add CellManager async stats if available
 	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
@@ -1545,6 +1594,7 @@ func get_stats() -> Dictionary:
 		s["instantiation_queue"] = cm_stats.get("instantiation_queue_size", 0)
 		s["pending_conversions"] = cm_stats.get("pending_conversions", 0)
 		s["pending_disk_loads"] = cm_stats.get("pending_disk_loads", 0)
+		s["burst_loading"] = cm_stats.get("burst_loading_active", false)
 
 	# Merge impostor stats if available
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
@@ -2085,6 +2135,7 @@ func _check_startup_complete() -> void:
 			impostor_pending])
 	if nearby_cells_loaded and queue_size < 50 and impostor_inner_ring_done:
 		_startup_phase = false
+		_post_startup_start_ms = Time.get_ticks_msec()
 		# Restore normal impostor budget
 		if _impostor_renderer:
 			_impostor_renderer.set_load_budget_usec(4000.0)
