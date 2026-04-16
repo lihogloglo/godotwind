@@ -116,23 +116,35 @@ static func merge_refs(inputs: Array, chunk_origin: Vector3, size_level: int = 0
 	if not force_merge_all:
 		keep_mask = _analyze_chunk(inputs, size_level)
 
+	# Count types accepted vs. rejected by cost-benefit for diagnostics.
+	var accepted_types: int = 0
+	var rejected_types: int = 0
+	for mesh_id: int in keep_mask:
+		var entry: Variant = keep_mask[mesh_id]
+		if (entry is bool and entry) or (entry is Dictionary and entry.get("merge", false)):
+			accepted_types += 1
+		else:
+			rejected_types += 1
+
 	var triplets: Array = _flatten_to_triplets(inputs, chunk_origin, keep_mask)
 	if triplets.is_empty():
+		Log.info("streaming", "HLOD merge_refs: 0 triplets (cost_reject=%d types, cost_accept=%d, force=%s)" % [
+			rejected_types, accepted_types, force_merge_all])
 		return null
 
 	var native: RefCounted = _get_native()
 	if native == null:
+		Log.warn("streaming", "HLOD merge_refs: C# native unavailable")
 		return null
 	var merged: ArrayMesh = native.call("MergeSurfaceTriplets", triplets) as ArrayMesh
 	if merged == null or merged.get_surface_count() == 0:
+		Log.info("streaming", "HLOD merge_refs: C# returned null/0-surface mesh (%d triplets)" % triplets.size())
 		return null
 
-	# LOD chain generation lives here (Godot API heavy — C# gains nothing).
-	var lod_mesh := generate_lods(merged)
-	if lod_mesh:
-		merged = lod_mesh
-
-	merged.set_meta("has_lod_chain", true)
+	# LOD generation MUST run on the main thread — ImporterMesh.new() +
+	# generate_lods() + get_mesh() all touch the RenderingServer, which is
+	# not safe from WorkerThreadPool background threads. Caller (process_completions)
+	# runs generate_lods() on the main thread after receiving this raw mesh.
 	return merged
 
 
@@ -285,9 +297,7 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask
 ## creates local dicts. Safe for worker-thread execution.
 static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 	# Per-mesh-type aggregation
-	var groups: Dictionary = {}      # mesh_id -> {"ref_count": int, "verts": int, "mats": Dictionary[mat_id: true]}
-	# Per-material: set of mesh_ids that use it (for shared_material_count)
-	var mat_to_mesh_ids: Dictionary = {}  # mat_id -> Dictionary[mesh_id: true]
+	var groups: Dictionary = {}  # mesh_id -> {"ref_count": int, "verts": int, "mats": Dictionary[mat_id: true]}
 
 	for ref_input: RefInput in inputs:
 		for sm: SubMeshInput in ref_input.sub_meshes:
@@ -299,7 +309,7 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 
 			var mesh_id: int = sm.mesh.get_instance_id()
 			if mesh_id not in groups:
-				groups[mesh_id] = {"ref_count": 0, "verts": 0, "mats": {}}
+				groups[mesh_id] = {"ref_count": 0, "verts_per_instance": 0, "mats": {}}
 			var group: Dictionary = groups[mesh_id]
 			group["ref_count"] += 1
 
@@ -308,27 +318,46 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 				if arrays.is_empty():
 					continue
 				var verts: Variant = arrays[Mesh.ARRAY_VERTEX]
-				if verts is PackedVector3Array and not verts.is_empty():
-					group["verts"] += verts.size()
+				# verts_per_instance: vertex count for ONE prototype copy.
+				# Only count on first encounter (all refs share the same ArrayMesh
+				# instance, so verts are identical across refs — no need to re-read).
+				if group["ref_count"] == 1 and verts is PackedVector3Array and not verts.is_empty():
+					group["verts_per_instance"] += verts.size()
 
 				var mat: Material = _resolve_material(sm, si)
 				var mat_id: int = mat.get_instance_id() if mat else 0
 				group["mats"][mat_id] = true
-				if mat_id not in mat_to_mesh_ids:
-					mat_to_mesh_ids[mat_id] = {}
-				mat_to_mesh_ids[mat_id][mesh_id] = true
 
 	# Compute merge decision + Phase 5 per-type min-size threshold.
+	#
+	# OpenMW formula: mergeBenefit = MERGE_FACTOR × avgStateSetReuse × numRefs
+	# `avgStateSetReuse` in OpenMW is INTRA-NIF: nodes within one NIF sharing
+	# the same material state. Godotwind's original implementation mis-ported
+	# this as CROSS-NIF material sharing (different mesh types sharing a Material
+	# instance), which is essentially zero for Morrowind content (each model has
+	# unique materials) → cost_accept=0 for all chunks.
+	#
+	# Fix: use surface_count as a proxy for intra-NIF state reuse. A model with
+	# N surfaces that all share materials has high intra-NIF reuse. We clamp to
+	# max(1, distinct_mat_count) to avoid zero-benefit when a model has 1 surface.
+	# This matches OpenMW's intent: multi-surface models with shared state are
+	# worth merging; single-surface unique models are also merged if ref_count
+	# is high enough to overcome the vertex cost.
 	var result: Dictionary = {}
 	var cost_multiplier: float = float(size_level + 1)
 	for mesh_id: int in groups:
 		var group: Dictionary = groups[mesh_id]
-		var shared_count: int = 0
-		for mat_id: int in group["mats"]:
-			if mat_to_mesh_ids.get(mat_id, {}).size() >= 2:
-				shared_count += 1
-		var merge_benefit_raw: float = float(group["ref_count"]) * float(shared_count)
-		var merge_cost: float = float(group["verts"]) * cost_multiplier
+		# OpenMW cost-benefit (objectpaging.cpp §823-836):
+		#   mergeCost    = verts_per_instance × (size_level + 1)
+		#   mergeBenefit = ref_count × avgStateSetReuse × MERGE_FACTOR
+		# `avgStateSetReuse` proxy: distinct material count within this mesh type
+		# (clamped to 1). A model with 1 surface has reuse=1; one with many
+		# surfaces sharing fewer materials has higher reuse. This matches OpenMW's
+		# intra-NIF sharing metric more closely than the old cross-NIF approach.
+		var mat_count: int = maxi(1, group["mats"].size())
+		var verts_per_instance: int = group["verts_per_instance"]
+		var merge_benefit_raw: float = float(group["ref_count"]) * float(mat_count)
+		var merge_cost: float = float(verts_per_instance) * cost_multiplier
 		var merge_benefit: float = merge_benefit_raw * DU.PAGING_MERGE_FACTOR
 		var merge: bool = merge_benefit > merge_cost
 

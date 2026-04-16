@@ -1,9 +1,8 @@
 # ModelLoader Async Instantiation Race — Diagnosis
 
-**Status:** Crash mitigated to 0% (was 66%). Three layered fixes applied (pending commit). Canonical PackedScene-cache refactor still pending.
-**Date:** 2026-04-14 (diagnosis), 2026-04-15 (bridge fixes), 2026-04-16 (status update)
-**Author:** @coder (diagnosis + F3b-lite), @roaster (bridge fixes + audit)
-**Reviewer:** @docs (not yet reviewed)
+**Status:** DONE. Canonical PackedScene refactor shipped 2026-04-16. All `.duplicate()` callsites removed. Jolt broadphase deferred to NEAR tier only.
+**Date:** 2026-04-14 (diagnosis), 2026-04-15 (bridge fixes), 2026-04-16 (canonical refactor shipped)
+**Author:** @coder (diagnosis + F3b-lite), @roaster (bridge fixes + audit + canonical refactor)
 
 ### Current mitigations (2026-04-16)
 - **Bridge fix #1** (deferred instantiate, 2026-04-15): 1-frame gap between `load_threaded_get` and `instantiate()`. Reduced crash rate but did not eliminate.
@@ -12,7 +11,7 @@
 - **Occluder strip at prebake** (2026-04-16): `OccluderInstance3D` nodes stripped before `PackedScene.pack()` in prebaker. Model cache rebuilt 2026-04-16.
 - **Cache deletion removed** (@roaster audit): 17 `DirAccess.remove_absolute` calls removed from runtime — prebake owns cache. Eliminates case (c1) race trigger.
 
-**Canonical end-state** (not yet implemented): change `_model_cache` to store `PackedScene` instead of `Node3D` (rec #2 below). ~18 callsites. Tracked in `docs/audit/PERF_STABILITY_TRACKER.md`.
+**Canonical end-state** (DONE 2026-04-16): `_model_cache` stores `PackedScene`. `get_model()` / `get_cached()` / `add_to_cache()` all updated. `_instantiate_from_scene()` disables all `CollisionShape3D` at instantiate time. Collision re-enabled only within NEAR tier (<150m) by `reference_instantiator` at placement, and by `native_streaming_manager._process_promoted_collision_enable()` on MID→NEAR promotion. All 5 `.duplicate()` callsites removed from `cell_manager.gd` + `reference_instantiator.gd`.
 
 **Note:** `runtime_hlod_merger.gd` referenced below was renamed to `object_paging.gd` in the paging refactor.
 

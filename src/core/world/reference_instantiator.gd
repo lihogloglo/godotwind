@@ -13,6 +13,7 @@ extends RefCounted
 
 # Dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
@@ -274,18 +275,20 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 			stats["objects_from_pool"] += 1
 			return pooled
 
-	# Load or get cached model (with item_id for collision shape lookup)
-	var model_prototype: Node3D = model_loader.call("get_model", model_path, record_id)
-	if not model_prototype:
+	# Load — get_model() returns a fresh Node3D (collision disabled) from PackedScene cache.
+	var instance: Node3D = model_loader.call("get_model", model_path, record_id)
+	if not instance:
 		# Create a placeholder for missing models
 		return _create_placeholder(ref)
 
-	# Note: Object pool registration is handled by CellManager during cell loading
-	# to avoid tight coupling with ObjectPool implementation details
-
-	# Create instance
-	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+
+	# Enable collision immediately for objects within NEAR tier (<150m).
+	# model_loader disables all CollisionShape3D at instantiate time to prevent
+	# Jolt overwhelm during startup bursts. Re-enable here for close objects.
+	var ref_pos := CS.vector_to_godot(ref.position)
+	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
+		_enable_collision_shapes_in_tree(instance)
 
 	# Hide materialless meshes (collision geometry, placeholders)
 	# LOD nodes (_LOD1, _LOD2, _LOD3) are now kept visible and configured with visibility_range
@@ -317,8 +320,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 			display_name,
 			PickupInteractableScript,
 		)
-		if rb == null and debug_lod:
-			Log.debug("interaction", "Carryable %s (%s) has no baked collision — staying static" % [record_id, type_name])
+		if rb == null:
+			Log.info("interaction", "Carryable %s (%s) has no collision/mesh — staying static (non-interactable)" % [record_id, type_name])
 
 	# I.7 — DOOR adapter attachment. Only teleport doors (DODT subrecord
 	# present on the ref) get a DoorInteractable — decorative non-teleport
@@ -328,6 +331,18 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# via `InteriorPocketManager.get_door_info_by_ref_id()`.
 	if type_name == "door" and ref.is_teleport:
 		_attach_door_interactable(instance, ref, base_record, record_id)
+
+	# Interior collision fallback — generate a StaticBody3D from the mesh
+	# AABB for non-carryable, non-door objects that lack baked collision.
+	# Interior pockets bypass the static renderer (all objects are Node3D),
+	# so floors, walls, and furniture need collision for physics to work
+	# (rigid body items resting on surfaces, player walking). The per-call
+	# load_profile tells us if we're in an interior context. Exterior objects
+	# that already have collision from the NIF converter are unaffected.
+	if not is_carryable and not (type_name == "door" and ref.is_teleport):
+		if not _effective_use_static_renderer():
+			if not _has_static_body(instance):
+				_generate_static_collision(instance)
 
 	stats["objects_instantiated"] += 1
 
@@ -395,11 +410,14 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 
 	# Load the model if it has one
 	if not light_record.model.is_empty():
-		var model_prototype: Node3D = model_loader.call("get_model", light_record.model)
-		if model_prototype:
-			var model_instance: Node3D = model_prototype.duplicate()
+		var model_instance: Node3D = model_loader.call("get_model", light_record.model)
+		if model_instance:
 			model_instance.name = "Model"
 			_hide_lod_nodes(model_instance)  # Hide materialless meshes only
+			# Lights are always within NEAR tier (150m fade-out set on OmniLight3D)
+			var ref_pos := CS.vector_to_godot(ref.position)
+			if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
+				_enable_collision_shapes_in_tree(model_instance)
 			# Auto-play NIF animations on light models (rotating lights, animated lanterns)
 			_auto_play_nif_animation(model_instance, ref)
 			light_node.add_child(model_instance)
@@ -534,12 +552,14 @@ func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_
 		# Create a simple placeholder for now
 		return _create_actor_placeholder(ref, actor_record, actor_type)
 
-	var model_prototype: Node3D = model_loader.call("get_model", model_path)
-	if not model_prototype:
+	var instance: Node3D = model_loader.call("get_model", model_path)
+	if not instance:
 		return _create_actor_placeholder(ref, actor_record, actor_type)
 
-	var instance: Node3D = model_prototype.duplicate()
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+
+	# Actors are NEAR-only — enable collision (actor loading skips > max_actor_distance)
+	_enable_collision_shapes_in_tree(instance)
 
 	# Hide materialless meshes only
 	_hide_lod_nodes(instance)
@@ -766,13 +786,21 @@ func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_r
 	adapter.has_destination = has_destination
 	adapter.door_record = base_record
 
-	# Add the Interactable collision layer (bit 2 → layer 3) to every
-	# CollisionObject3D in the door subtree so the InteractionRaycaster
-	# ray cast (mask = 1 << 2) can hit it. Existing layers are preserved.
-	_add_interactable_layer_recursive(door_instance)
+	# Always generate a passive Area3D interaction target from the full mesh
+	# AABB. This box covers the entire door model and is detectable from ANY
+	# approach direction — both exterior and interior faces.
+	#
+	# We do NOT use _add_interactable_layer_recursive on the baked StaticBody3D
+	# here. MW door NIF collision is often a one-sided concave trimesh that
+	# faces the interior cell; stamping layer 3 onto it makes the door
+	# interactable only from the wall-side (the bug: "flip somewhere").
+	# The baked StaticBody3D keeps layer 1 (Environment) only — it handles
+	# physics blocking. The Area3D below handles all interaction detection.
+	_generate_interaction_area(door_instance)
 
-	Log.info("interaction", "[DOOR_ATTACH] %s (dest='%s' teleport=%s)" % [
-		record_id, destination_name, has_destination])
+	Log.info("interaction", "[DOOR_ATTACH] %s (dest='%s' teleport=%s has_collision=%s)" % [
+		record_id, destination_name, has_destination,
+		_has_interactable_collision(door_instance)])
 
 	if door_activated_handler.is_valid():
 		adapter.door_activated.connect(door_activated_handler)
@@ -789,6 +817,130 @@ func _add_interactable_layer_recursive(node: Node) -> void:
 		co.collision_layer |= INTERACTABLE_BIT
 	for child in node.get_children():
 		_add_interactable_layer_recursive(child)
+
+
+## Check if any CollisionObject3D in the subtree has the Interactable bit set.
+## Used after _add_interactable_layer_recursive to verify the stamp took effect
+## (false when the door/item model has no baked collision shapes at all).
+static func _has_interactable_collision(node: Node) -> bool:
+	const INTERACTABLE_BIT: int = 1 << 2
+	if node is CollisionObject3D:
+		var co := node as CollisionObject3D
+		if co.collision_layer & INTERACTABLE_BIT:
+			return true
+	for child in node.get_children():
+		if _has_interactable_collision(child):
+			return true
+	return false
+
+
+## Generate a passive Area3D with a BoxShape3D derived from the combined
+## mesh AABB of the subtree. Used as a raycast target for doors/items
+## whose NIF models lack baked collision shapes. The Area3D sits on layer 3
+## only (Interactable) with monitoring/monitorable OFF — it's a passive
+## raycast target, not an overlap detector. Matches Jolt perf guidance.
+static func _generate_interaction_area(root: Node3D) -> Area3D:
+	var aabb := _compute_mesh_aabb(root)
+	if not aabb.has_volume():
+		# Degenerate AABB — no meshes or zero-size. Use a small default box
+		# centered on the root so the door is at least clickable from close range.
+		aabb = AABB(Vector3(-0.3, -0.3, -0.3), Vector3(0.6, 0.6, 0.6))
+
+	var area := Area3D.new()
+	area.name = "InteractionArea"
+	area.collision_layer = 1 << 2  # Layer 3 only — Interactable
+	area.collision_mask = 0        # Detects nothing
+	area.monitoring = false
+	area.monitorable = false
+
+	var shape := CollisionShape3D.new()
+	shape.name = "InteractionShape"
+	var box := BoxShape3D.new()
+	box.size = aabb.size
+	shape.shape = box
+	# Center the shape on the AABB center (local to root)
+	shape.position = aabb.get_center()
+	area.add_child(shape)
+
+	root.add_child(area)
+	return area
+
+
+## Compute the combined AABB of all MeshInstance3D nodes under root,
+## expressed in root's LOCAL space. Uses local transforms only — safe
+## to call before the node enters the scene tree.
+static func _compute_mesh_aabb(root: Node3D) -> AABB:
+	var aabbs: Array[AABB] = []
+	# Check root itself (if it has a mesh)
+	if root is MeshInstance3D and (root as MeshInstance3D).mesh != null:
+		aabbs.append((root as MeshInstance3D).mesh.get_aabb())
+	# Recurse children — their transforms are relative to root
+	for child in root.get_children():
+		_collect_mesh_aabbs(child, Transform3D.IDENTITY, aabbs)
+	if aabbs.is_empty():
+		return AABB()
+	var combined: AABB = aabbs[0]
+	for i in range(1, aabbs.size()):
+		combined = combined.merge(aabbs[i])
+	return combined
+
+
+## Recursive AABB collector. Accumulates mesh AABBs into `out` array,
+## each transformed by the cumulative local transform chain from root.
+static func _collect_mesh_aabbs(node: Node, parent_xf: Transform3D, out: Array[AABB]) -> void:
+	var xf: Transform3D = parent_xf
+	if node is Node3D:
+		xf = parent_xf * (node as Node3D).transform
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		if mi.mesh != null:
+			out.append(xf * mi.mesh.get_aabb())
+	for child in node.get_children():
+		_collect_mesh_aabbs(child, xf, out)
+
+
+## Re-enable all CollisionShape3D nodes disabled by model_loader at instantiate time.
+## Mirror of NativeStreamingManager._enable_collision_shapes(). Call when an object
+## is confirmed to be within NEAR tier (<150m from camera).
+static func _enable_collision_shapes_in_tree(node: Node) -> void:
+	if node is CollisionShape3D:
+		(node as CollisionShape3D).disabled = false
+	for child in node.get_children():
+		_enable_collision_shapes_in_tree(child)
+	if node is Node3D:
+		(node as Node3D).remove_meta("collision_disabled")
+
+
+## Check if a node subtree contains any StaticBody3D.
+static func _has_static_body(node: Node) -> bool:
+	if node is StaticBody3D:
+		return true
+	for child in node.get_children():
+		if _has_static_body(child):
+			return true
+	return false
+
+
+## Generate a StaticBody3D + BoxShape3D from the mesh AABB for objects
+## that lack baked collision. Used for interior statics (floors, walls,
+## furniture) so physics objects can rest on surfaces. Layer 1 (Environment)
+## only — consistent with NIF-baked collision.
+static func _generate_static_collision(root: Node3D) -> void:
+	var aabb := _compute_mesh_aabb(root)
+	if not aabb.has_volume():
+		return
+	var body := StaticBody3D.new()
+	body.name = "GeneratedCollision"
+	body.collision_layer = 1  # Environment
+	body.collision_mask = 0   # Static — doesn't need to detect anything
+	var shape := CollisionShape3D.new()
+	shape.name = "AABBShape"
+	var box := BoxShape3D.new()
+	box.size = aabb.size
+	shape.shape = box
+	shape.position = aabb.get_center()
+	body.add_child(shape)
+	root.add_child(body)
 
 
 ## Auto-play NIF keyframe animations on objects within NEAR tier (0-150m)

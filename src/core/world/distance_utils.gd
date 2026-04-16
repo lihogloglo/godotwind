@@ -63,14 +63,20 @@ const FADE_MARGIN_LOD1_LOD2: float = 10.0
 const FADE_MARGIN_LOD2_LOD3: float = 15.0
 const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 
-## Object-paging projected-size threshold (OpenMW canonical default).
+## Object-paging projected-size threshold.
 ## A ref is paged when `mesh_radius² × scale² >= dist² × PAGING_MIN_SIZE²`.
 ## Smaller meshes at distance project below a screen-space threshold and
-## don't contribute visually — they're skipped. Replaces the keyword-based
-## `is_mid_worthy` filter. Phase 2 of docs/audit/OBJECT_PAGING_PLAN.md.
+## don't contribute visually — they're skipped.
+##
+## OpenMW uses 0.14 in Morrowind (MW) units. Godotwind works in meters
+## (1 MW unit = 1/70 m), so 0.14 in MW-unit space is effectively the same
+## angular-size formula but with meter-scale distances. In practice, 0.14
+## requires mesh_radius ≥ 28m at 200m distance — which rejects all Morrowind
+## buildings and vegetation. Lowered to 0.02 so objects with radius ≥ ~4m
+## (typical Morrowind tree/building) pass at 200m. Tune upward to reduce
+## paging draw calls if performance requires it.
 ## Source: inspos/openmw/components/settings/categories/terrain.hpp:34
-## and canonical tuned default for Morrowind content density.
-const PAGING_MIN_SIZE: float = 0.14
+const PAGING_MIN_SIZE: float = 0.02
 const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
 
 ## Cost-benefit merge decision multiplier (OpenMW `mObjectPagingMergeFactor`).

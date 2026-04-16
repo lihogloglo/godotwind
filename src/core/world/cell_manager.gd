@@ -755,16 +755,15 @@ func instantiate_deferred_object(
 			pooled.name = ref_id + "_" + str(ref_num)
 			pooled.global_transform = world_transform
 			_hide_lod_nodes(pooled)  # CRITICAL: Hide LODs on pooled objects
+			ModelLoader._disable_collision_shapes_in_tree(pooled)  # reset: may have been NEAR before pool release
 			_stats["objects_from_pool"] += 1
 			return pooled
 
-	# Load or get cached model
-	var model_prototype: Node3D = _model_loader.get_model(model_path, record_id)
-	if not model_prototype:
+	# Load — get_model() returns a fresh Node3D (collision disabled) from PackedScene cache.
+	var instance: Node3D = _model_loader.get_model(model_path, record_id)
+	if not instance:
 		return null
 
-	# Create instance
-	var instance: Node3D = model_prototype.duplicate()
 	instance.name = ref_id + "_" + str(ref_num)
 	instance.global_transform = world_transform
 
@@ -819,8 +818,8 @@ const MAX_INSTANTIATIONS_PER_FRAME := 50
 var diagnostic_logging: bool = true
 
 ## Diagnostic counters (reset periodically)
-var _diag_duplicate_time_total_us: int = 0
-var _diag_duplicate_count: int = 0
+var _diag_instantiate_time_total_us: int = 0
+var _diag_instantiate_count: int = 0
 var _diag_last_log_frame: int = 0
 
 ## Queue for pending NIF conversions (deferred to avoid main thread stall)
@@ -1430,8 +1429,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			var mid_start := Time.get_ticks_usec()
 			mid_instance_id = _instantiate_mid_tier(ref, model_path, item_id, request)
 			var mid_elapsed := Time.get_ticks_usec() - mid_start
-			_diag_duplicate_time_total_us += mid_elapsed
-			_diag_duplicate_count += 1
+			_diag_instantiate_time_total_us += mid_elapsed
+			_diag_instantiate_count += 1
 
 			if beyond_near:
 				if mid_instance_id >= 0:
@@ -1470,8 +1469,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		var obj := _instantiator.instantiate_reference(ref, inst_cell_grid)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
 		_instantiator._clear_transient_profile()
-		_diag_duplicate_time_total_us += inst_elapsed
-		_diag_duplicate_count += 1
+		_diag_instantiate_time_total_us += inst_elapsed
+		_diag_instantiate_count += 1
 
 		if obj:
 			# Post-B-wide refactor: visibility_range (0-500m, FADE_SELF) + the
@@ -2033,16 +2032,22 @@ func _create_near_only_rs_instance(ref: CellReference, model_path: String, item_
 ## Godot handles distance-based LOD switching entirely in C++.
 ## Returns true if the instance was successfully created
 func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> int:
-	# Get the prototype from cache (need it for mesh data)
-	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
-	if not model_prototype:
-		# Prototype not cached yet — try loading it
-		model_prototype = _model_loader.get_model(model_path, item_id)
-		if not model_prototype:
-			return -1
-
 	# Normalize model path as the type name
 	var type_name := model_path.to_lower().replace("/", "\\")
+
+	# Prototype is only needed once per unique model type for RS mesh registration.
+	# Skip the instantiate() call for already-registered types — this is the hot path
+	# for cells with many instances of the same model (e.g. 251 rocks = 1 instantiate,
+	# not 251).
+	if not _static_renderer.has_type(type_name):
+		var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
+		if not model_prototype:
+			model_prototype = _model_loader.get_model(model_path, item_id)
+			if not model_prototype:
+				return -1
+		_static_renderer.register_lod_from_prototype(type_name, model_prototype)
+		if not _static_renderer.has_type(type_name):
+			return -1
 
 	# Calculate transform from ESM reference
 	var pos := CS.vector_to_godot(ref.position)
@@ -2053,13 +2058,6 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 
 	# Get cell grid for cleanup tracking
 	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
-
-	# Register with LOD support (extracts LOD1/LOD2/LOD3 meshes from prototype)
-	# Falls back to single-mesh if no LOD nodes found in prototype
-	if not _static_renderer.has_type(type_name):
-		_static_renderer.register_lod_from_prototype(type_name, model_prototype)
-		if not _static_renderer.has_type(type_name):
-			return -1
 
 	var instance_id: int = _static_renderer.add_instance(
 		type_name, xform, cell_grid,
@@ -2216,7 +2214,7 @@ func get_loading_stats() -> Dictionary:
 		"prewarm_pending_count": _prewarm_pending.size(),
 		"objects_instantiated": int(_stats.get("objects_instantiated", 0)) + int(_instantiator.stats.get("objects_instantiated", 0)),
 		"objects_from_pool": int(_stats.get("objects_from_pool", 0)) + int(_instantiator.stats.get("objects_from_pool", 0)),
-		"avg_duplicate_time_us": (_diag_duplicate_time_total_us / _diag_duplicate_count) if _diag_duplicate_count > 0 else 0
+		"avg_instantiate_time_us": (_diag_instantiate_time_total_us / _diag_instantiate_count) if _diag_instantiate_count > 0 else 0
 	}
 
 
@@ -2227,15 +2225,13 @@ func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D
 	if model_path.is_empty():
 		return null
 
-	# Get prototype from cache
-	var prototype: Node3D = _model_loader.get_cached(model_path, item_id)
-	if not prototype:
-		prototype = _model_loader.get_model(model_path, item_id)
-		if not prototype:
+	# get_cached() / get_model() return a fresh Node3D (collision disabled) from PackedScene cache.
+	var instance: Node3D = _model_loader.get_cached(model_path, item_id)
+	if not instance:
+		instance = _model_loader.get_model(model_path, item_id)
+		if not instance:
 			return null
 
-	# Duplicate and configure
-	var instance: Node3D = prototype.duplicate()
 	instance.name = str(ref_id) + "_" + str(ref_num)
 	_hide_lod_nodes(instance)
 

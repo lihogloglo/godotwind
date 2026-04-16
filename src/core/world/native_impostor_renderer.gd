@@ -335,6 +335,18 @@ func set_shader_debug_mode(enabled: bool) -> void:
 
 	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (500m+)"))
 
+
+## Adjust impostor visibility_range_begin to match the active tier layout.
+## When HLOD is active (300-1000m), impostors should start at HLOD_END.
+## When HLOD is off, impostors start at MID_END (default).
+func set_visibility_range_begin(begin_distance: float, fade_margin: float = DU.FADE_MARGIN_RENDER_FAR) -> void:
+	if not _master_instance:
+		return
+	_master_instance.visibility_range_begin = begin_distance - fade_margin
+	_master_instance.visibility_range_begin_margin = fade_margin
+	Log.info("impostors", "visibility_range_begin set to %.0fm (fade margin %.0fm)" % [
+		begin_distance - fade_margin, fade_margin])
+
 #endregion
 
 

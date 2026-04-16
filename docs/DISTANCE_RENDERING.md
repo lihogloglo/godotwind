@@ -57,9 +57,9 @@ Key details:
 
 Constants in `distance_utils.gd`: `HLOD_START=300m`, `HLOD_END=1000m`.
 
-### Runtime ObjectPaging (staged, disabled by default)
+### Runtime ObjectPaging
 
-`src/core/world/object_paging.gd` — distance-adaptive OpenMW-style chunk pager that will replace the prebaked per-cell HLOD when bench-validated. Three-tier adaptive walker:
+`src/core/world/object_paging.gd` — distance-adaptive OpenMW-style chunk pager. Three-tier adaptive walker:
 
 | size_level | chunk footprint | band | source LOD |
 |------------|-----------------|------|------------|
@@ -69,7 +69,21 @@ Constants in `distance_utils.gd`: `HLOD_START=300m`, `HLOD_END=1000m`.
 
 Replaces `is_mid_worthy` keyword filter with a projected-size test (`radius² × scale² < dist² × PAGING_MIN_SIZE²`, OpenMW canonical `PAGING_MIN_SIZE = 0.14`). Adds per-mesh-type cost-benefit merge decision, tier-hysteresis retention (20m), teleport warmup (prototype preload on camera jumps >500m), and a second-pass `minSizeMergeFactor` filter that trims tiny refs from merged types based on merge-benefit. Merge kernel lives in `src/native/NativeObjectPagingKernel.cs` (C# hot path).
 
-**Status 2026-04-15:** Phases 1-5 implemented + 104 unit tests. Master toggle `enabled = false` — runtime performance validation blocked on sig 139 streaming crash. Console: `hlod_enable` / `hlod_disable`. Plan doc: `docs/audit/OBJECT_PAGING_PLAN.md`. Execution log: `docs/audit/OBJECT_PAGING_SESSION_2026_04_14_15.md`.
+**Status 2026-04-16:** Phases 1-6 implemented + 104 unit tests. **Confirmed working** (~32 active chunks observed). Enabled by default via `hlod_enable` console command. Three bugs fixed in the 2026-04-16 debug session (see `docs/audit/OBJECT_PAGING_SESSION_2026_04_16.md`):
+
+1. **`generate_lods` on BG thread** — `ImporterMesh.new()` + `importer.generate_lods()` + `importer.get_mesh()` are RenderingServer calls, not safe from WorkerThreadPool. Moved from `merge_refs` (BG thread) to `process_completions` (main thread).
+
+2. **Cross-NIF material metric** — OpenMW's `avgStateSetReuse` is INTRA-NIF (nodes within one model sharing a state set), not cross-NIF (different mesh types sharing a Material instance). Morrowind NIFs each have unique materials, so cross-NIF `shared_count` was always 0 → merge_benefit always 0. Fixed: `mat_count = maxi(1, group["mats"].size())` (distinct materials within one mesh type).
+
+3. **Total-verts vs per-instance-verts** — `mergeCost` accumulated total verts across ALL refs (`ref_count × per_instance_verts`). OpenMW uses per-instance vertex count. Result: `ref_count` cancelled from both sides, leaving `256 × mat_count > verts_per_instance` — fails for any model >256 verts. Fixed: only accumulate verts from the first ref occurrence.
+
+**Thread safety rule** (load-bearing): Background thread workers (WorkerThreadPool) may only execute GDScript math and `NativeObjectPagingKernel.cs`. `ImporterMesh.new()`, `generate_lods()`, and all RenderingServer calls MUST run on the main thread. Violating this causes non-deterministic SIGSEGV under concurrent merge load.
+
+**Known open issues:**
+- Missing objects in merged cells — many objects that should appear 300-1000m don't. Likely `PAGING_MIN_SIZE` threshold, type filter, or cost-benefit rejections. Next session's focus.
+- Startup SIGSEGV (pre-existing, separate agent) — `packed_scene.instantiate()` crash during burst startup. Probabilistic (~2/5 runs survive). Workaround: rerun scene.
+
+Console: `hlod_enable` / `hlod_disable`. Plan doc: `docs/audit/OBJECT_PAGING_PLAN.md`. Implementation log: `docs/audit/OBJECT_PAGING_SESSION_2026_04_14_15.md`. Debug log: `docs/audit/OBJECT_PAGING_SESSION_2026_04_16.md`.
 
 ## FAR Tier (1000-5km)
 

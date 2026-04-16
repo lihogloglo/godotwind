@@ -47,7 +47,9 @@ const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
 ## Minimum refs to justify merging a chunk (OpenMW cost-benefit insight).
 ## Sparse chunks with fewer refs aren't worth the merge overhead — refs stay
 ## as individual RS instances through StaticObjectRenderer.
-const MIN_REFS_TO_MERGE: int = 15
+## Lowered from 15 to 5: Morrowind near-coast cells can be sparse; 5 is still
+## enough for the cost-benefit analysis to find shared materials.
+const MIN_REFS_TO_MERGE: int = 5
 
 ## Merge-queue stagger budget (main-thread work per frame).
 const MERGES_PER_FRAME: int = 2
@@ -212,6 +214,8 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# Plan §4.3 — top-down anti-overlap walk. Larger tiers claim their cells
 	# first; smaller tiers skip any chunk whose 1×1 sub-cells are covered.
 	var desired_chunks: Dictionary = _compute_desired_chunks(camera_cell, _camera_world_pos_cached)
+	Log.info("streaming", "HLOD update_for_camera: %d desired chunks, %d active, %d pending, %d queued (cell=%s)" % [
+		desired_chunks.size(), _active_chunks.size(), _pending_merges.size(), _merge_queue.size(), camera_cell])
 
 	# Phase 4d — on teleport, enqueue unregistered prototypes for the new ring.
 	if is_teleport:
@@ -317,6 +321,14 @@ func process_completions() -> int:
 		# Chunk may have left range while merge was in progress
 		if key in _active_chunks:
 			continue
+
+		# Generate LOD chain on the main thread. ImporterMesh.new() +
+		# generate_lods() + get_mesh() touch RenderingServer — unsafe on BG threads.
+		# Worker returns a raw ArrayMesh; we finalize the LOD chain here.
+		var lod_mesh := Kernel.generate_lods(mesh)
+		if lod_mesh:
+			mesh = lod_mesh
+		mesh.set_meta("has_lod_chain", true)
 
 		_cache_evict_to_fit(bytes)
 		_mesh_cache[key] = mesh
@@ -729,6 +741,11 @@ func _request_chunk_merge(key: Vector3i, camera_cell: Vector2i, camera_world_pos
 
 	# Cost-benefit minimum — sparse chunks aren't worth merging
 	if inputs.size() < MIN_REFS_TO_MERGE:
+		if refs_skipped > 0 or refs_type_rejected > 0 or refs_size_rejected > 0:
+			Log.info("streaming", "HLOD chunk %s: %d inputs (below MIN %d). skipped=%d type_rej=%d size_rej=%d" % [
+				key, inputs.size(), MIN_REFS_TO_MERGE, refs_skipped, refs_type_rejected, refs_size_rejected])
+		elif inputs.size() == 0:
+			Log.info("streaming", "HLOD chunk %s: no ESM refs (all cells empty or missing)" % key)
 		return
 
 	# Priority = chunk-center distance² (closer first)
@@ -737,6 +754,8 @@ func _request_chunk_merge(key: Vector3i, camera_cell: Vector2i, camera_world_pos
 	var center_xz := Vector2(chunk_origin.x, chunk_origin.z)
 	var priority_sq := camera_xz.distance_squared_to(center_xz)
 
+	Log.info("streaming", "HLOD chunk %s: merging %d inputs (skipped=%d type_rej=%d size_rej=%d)" % [
+		key, inputs.size(), refs_skipped, refs_type_rejected, refs_size_rejected])
 	var task_id := _bg_processor.submit_task(
 		_merge_chunk_worker.bind(key, inputs, chunk_origin),
 		priority_sq

@@ -1607,6 +1607,20 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"debug"
 		)
 
+		console.register_command(
+			"raycast_debug",
+			_cmd_raycast_debug,
+			"Toggle interaction raycast debug line (GREEN=hit, YELLOW=layer3 no interactable, RED=miss)",
+			"debug"
+		)
+
+		console.register_command(
+			"vel_scan",
+			_cmd_vel_scan,
+			"Scan all RigidBody3D in scene — list any unfrozen or moving (>0.1 m/s); check for fallen items",
+			"debug"
+		)
+
 		# Register animation prebake command
 		console.register_command(
 			"prebake_anims",
@@ -1692,6 +1706,59 @@ func _cmd_dump_doors(_args: Dictionary) -> String:
 	return "Interior pocket manager not available"
 
 
+func _cmd_raycast_debug(_args: Dictionary) -> String:
+	# Toggle debug_draw on both raycasters so the active one always shows.
+	var enabled := false
+	if _fly_raycaster:
+		enabled = not _fly_raycaster.debug_draw
+		_fly_raycaster.debug_draw = enabled
+	if _interaction_raycaster:
+		_interaction_raycaster.debug_draw = enabled
+	return "Raycast debug: %s" % ("ON" if enabled else "OFF")
+
+
+func _cmd_vel_scan(_args: Dictionary) -> String:
+	# Walk the full scene tree, collect every RigidBody3D (incl. BuoyancyBody3D
+	# subclass), flag any that are unfrozen or have significant velocity.
+	# Interior pocket items live at Y ≈ -500; anything < -490 is suspect.
+	var bodies: Array[RigidBody3D] = []
+	_collect_rigid_bodies_recursive(get_tree().root, bodies)
+	if bodies.is_empty():
+		return "No RigidBody3D in scene"
+	var unfrozen := 0
+	var moving := 0
+	var fallen := 0
+	for rb: RigidBody3D in bodies:
+		var vel := rb.linear_velocity.length()
+		var pos := rb.global_position
+		var is_moving := vel > 0.1
+		var is_fallen := pos.y < -490.0 and pos.y > -600.0
+		if not rb.freeze:
+			unfrozen += 1
+		if is_moving:
+			moving += 1
+		if is_fallen:
+			fallen += 1
+		if is_moving or not rb.freeze or is_fallen:
+			Log.warn("interaction", "[VEL_SCAN] %s pos=(%.1f,%.1f,%.1f) vel=%.2fm/s frozen=%s%s" % [
+				rb.name, pos.x, pos.y, pos.z, vel, rb.freeze,
+				" FALLEN" if is_fallen else "",
+			])
+	if unfrozen == 0 and moving == 0 and fallen == 0:
+		Log.info("interaction", "[VEL_SCAN] All %d bodies frozen at rest — no flying items" % bodies.size())
+	return "vel_scan: %d bodies, %d unfrozen, %d moving, %d fallen — check log" % [
+		bodies.size(), unfrozen, moving, fallen
+	]
+
+
+## Depth-first tree walk collecting all RigidBody3D nodes (incl. subclasses).
+func _collect_rigid_bodies_recursive(node: Node, out: Array[RigidBody3D]) -> void:
+	if node is RigidBody3D:
+		out.append(node as RigidBody3D)
+	for child: Node in node.get_children():
+		_collect_rigid_bodies_recursive(child, out)
+
+
 func _cmd_prebake_animations(_args: Dictionary) -> String:
 	var prebaker := ModelPrebaker.new()
 	prebaker.animation_output_dir = SettingsManager.get_models_path()
@@ -1706,24 +1773,32 @@ func _cmd_prebake_animations(_args: Dictionary) -> String:
 func _cmd_hlod_enable(_args: Dictionary) -> String:
 	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
 		return "HLOD merger not initialized"
+	var DU := preload("res://src/core/world/distance_utils.gd")
 	native_streaming_manager._hlod_merger.enabled = true
 	# Narrow MID to 300m so HLOD covers 300-1000m
 	if native_streaming_manager._static_renderer:
-		var DU := preload("res://src/core/world/distance_utils.gd")
 		native_streaming_manager._static_renderer.visibility_range_end = DU.HLOD_START
-	return "HLOD merging ENABLED — MID narrowed to 300m, HLOD covers 300-1000m"
+	# Push impostor begin to HLOD_END — HLOD fills 300-1000m, impostors take over at 1000m
+	if native_streaming_manager._impostor_renderer:
+		native_streaming_manager._impostor_renderer.set_visibility_range_begin(DU.HLOD_END)
+	# Trigger immediate HLOD update for current camera position
+	native_streaming_manager._hlod_needs_initial_update = true
+	return "HLOD merging ENABLED — MID 0-300m, HLOD 300-1000m, impostors 1000m+"
 
 
 func _cmd_hlod_disable(_args: Dictionary) -> String:
 	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
 		return "HLOD merger not initialized"
+	var DU := preload("res://src/core/world/distance_utils.gd")
 	native_streaming_manager._hlod_merger.enabled = false
 	native_streaming_manager._hlod_merger.cleanup()
 	# Restore MID to 500m (no HLOD coverage)
 	if native_streaming_manager._static_renderer:
-		var DU := preload("res://src/core/world/distance_utils.gd")
 		native_streaming_manager._static_renderer.visibility_range_end = DU.MID_END
-	return "HLOD merging DISABLED — MID restored to 500m"
+	# Restore impostor begin to FAR_START — MID handles 0-500m, impostors at 500m
+	if native_streaming_manager._impostor_renderer:
+		native_streaming_manager._impostor_renderer.set_visibility_range_begin(DU.FAR_START)
+	return "HLOD merging DISABLED — MID restored to 500m, impostors at 500m"
 
 
 func _cmd_hlod_stats(_args: Dictionary) -> String:
@@ -2349,6 +2424,10 @@ func _fly_camera_interact() -> void:
 	# Modal gate — don't interact while a panel is open
 	if _dialogue_session and _dialogue_session.is_any_panel_open():
 		return
+	# Carry gate — don't tap-interact while holding something.
+	# Mirrors PlayerController._emit_interact_tap (line 694).
+	if _fly_carry_controller != null and _fly_carry_controller.is_carrying():
+		return
 	var target: Interactable = _fly_raycaster.get_current_target()
 	if target == null:
 		Log.info("interaction", "[FLY_INTERACT] E pressed, no target under crosshair (cam=%s fwd=%s)" % [
@@ -2358,22 +2437,9 @@ func _fly_camera_interact() -> void:
 	target.interact(fly_camera)
 
 
-## Activate the nearest door (legacy proximity fallback — kept for
-## headless/test scenarios where no raycaster is available).
-func _activate_nearest_door() -> void:
-	if not _pocket_manager:
-		return
-
-	var door: Variant = _pocket_manager.get_closest_door()
-	if not door:
-		return
-	await _activate_door(door)
-
-
-## Shared door transition routing — used by both the ray-cast
-## DoorInteractable path (player mode) and the proximity fallback
-## (fly-camera mode). Branches on `_pocket_manager.is_inside()` to
-## pick enter / exit / interior-to-interior.
+## Shared door transition routing — used by the ray-cast DoorInteractable
+## path. Branches on `_pocket_manager.is_inside()` to pick
+## enter / exit / interior-to-interior.
 func _activate_door(door: Variant) -> void:
 	if not _pocket_manager or door == null:
 		return

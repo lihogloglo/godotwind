@@ -36,14 +36,12 @@ const MAX_CONCURRENT_ASYNC_LOADS := 16
 ## hundreds of ms when a burst of async loads complete simultaneously.
 const MAX_INSTANTIATE_PER_FRAME := 8
 
-## Cache for loaded models: model_path (lowercase) -> Node3D prototype
+## Cache for loaded models: model_path (lowercase) -> PackedScene | null
 ##
-## LANDMINE: stores Node3D prototypes. Callers MUST .duplicate() before
-## add_child — sharing across parents triggers reparent cascades and dangling
-## references. Every current caller does `prototype.duplicate()` before use;
-## if a future caller add_childs the cache value directly, convert this to
-## `Dictionary[String, PackedScene]` and have callers `.instantiate()` each.
-## See docs/audit/MODEL_LOADER_RACE.md §"Deferred landmines".
+## Each `get_model()` call instantiates a fresh Node3D from the cached PackedScene.
+## Callers never need to `.duplicate()` — they always receive a distinct instance.
+## Null entries are "not found" markers (runtime-mode miss, model not in disk cache).
+## Canonical fix for the shared-instance hazard described in MODEL_LOADER_RACE.md.
 var _model_cache: Dictionary = {}
 
 ## LRU tracking: cache_key -> last access frame number
@@ -119,23 +117,26 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 	if not item_id.is_empty():
 		cache_key = normalized + ":" + item_id.to_lower()
 
-	# 1. Check memory cache first (fastest)
+	# 1. Check memory cache first (fastest) — stores PackedScene, returns fresh Node3D
 	if cache_key in _model_cache:
+		var cached: Variant = _model_cache[cache_key]
+		if cached == null:
+			return null
 		_stats["models_from_cache"] += 1
 		_last_access[cache_key] = Engine.get_frames_drawn()
-		return _model_cache[cache_key]
+		return _instantiate_from_scene(cached as PackedScene)
 
 	# 2. Check disk cache if enabled (fast - direct resource load)
 	if enable_disk_cache:
 		var disk_path := _get_disk_cache_path(cache_key)
 		if _cached_file_exists(disk_path):
-			var loaded := _load_from_disk_cache(disk_path)
-			if loaded:
-				_model_cache[cache_key] = loaded
+			var packed_scene := _load_packed_scene_from_disk(disk_path)
+			if packed_scene:
+				_model_cache[cache_key] = packed_scene
 				_last_access[cache_key] = Engine.get_frames_drawn()
 				_stats["models_from_disk"] += 1
 				_evict_if_over_budget()
-				return loaded
+				return _instantiate_from_scene(packed_scene)
 
 	# 3. RUNTIME MODE: Return null for uncached models (no NIF conversion at runtime)
 	# NIF conversion should ONLY happen during prebaking, never during gameplay
@@ -182,15 +183,28 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 		_model_cache[cache_key] = null
 		return null
 
-	# 5. Save to disk cache for next time (async-friendly)
+	# 5. Save to disk cache for next time. _save_to_disk_cache strips occluders and
+	# sets owner on the node tree, so we pack AFTER the save call.
 	if enable_disk_cache:
 		_save_to_disk_cache(node, cache_key)
 
-	_model_cache[cache_key] = node
-	_last_access[cache_key] = Engine.get_frames_drawn()
-	_stats["models_loaded"] += 1
-	_evict_if_over_budget()
-	return node
+	# Pack to PackedScene for memory cache (owners already set by _save_to_disk_cache).
+	# If disk cache was not used, strip and set owners manually before packing.
+	if not enable_disk_cache:
+		_strip_occluders(node)
+		_set_owner_recursive(node, node)
+	var ps := PackedScene.new()
+	if ps.pack(node) == OK:
+		_model_cache[cache_key] = ps
+		_last_access[cache_key] = Engine.get_frames_drawn()
+		_stats["models_loaded"] += 1
+		_evict_if_over_budget()
+		return _instantiate_from_scene(ps)
+	else:
+		push_warning("ModelLoader: Failed to pack prebaked node: %s" % cache_key)
+		_model_cache[cache_key] = null
+		node.queue_free()
+		return null
 
 
 ## Clear the model cache and reset statistics
@@ -338,11 +352,12 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 
 	# 1. Check memory cache first
 	if cache_key in _model_cache:
+		var cached: Variant = _model_cache[cache_key]
 		_stats["models_from_cache"] += 1
 		_last_access[cache_key] = Engine.get_frames_drawn()
-		var model: Node3D = _model_cache[cache_key]
 		if callback.is_valid():
-			callback.call(model_path, item_id, model)
+			var instance: Node3D = _instantiate_from_scene(cached as PackedScene) if cached != null else null
+			callback.call(model_path, item_id, instance)
 		return true
 
 	# 2. Check if already loading this model
@@ -499,16 +514,13 @@ func process_async_loads() -> int:
 	return completed
 
 
-## Phase A of process_async_loads: instantiate a bounded batch of entries from
-## the pending queue. Rate-limited to MAX_INSTANTIATE_PER_FRAME to keep the
-## main thread responsive (each instantiate costs 1-5ms). Remaining entries
-## stay in the queue for next frame.
+## Phase A of process_async_loads: cache the PackedScene and fire callbacks with
+## fresh Node3D instances. Rate-limited to MAX_INSTANTIATE_PER_FRAME.
 ##
-## Uses the async-loaded PackedScene with a `can_instantiate()` guard. If the
-## guard fails (stale sub-resources from c2 race), falls back to a sync re-load
-## with CACHE_MODE_IGNORE. See MODEL_LOADER_RACE.md and STABILITY_PERF §A2.
+## Each callback receives a distinct Node3D instantiated from the shared PackedScene —
+## no shared-instance hazard. PackedScene is cached for future sync get_model() calls.
 ##
-## Returns count of entries instantiated (counted toward completed loads).
+## Returns count of entries processed this frame.
 func _drain_pending_instantiate_queue() -> int:
 	if _pending_instantiate_queue.is_empty():
 		return 0
@@ -519,67 +531,76 @@ func _drain_pending_instantiate_queue() -> int:
 
 	var completed := 0
 	for entry: Dictionary in to_process:
-		var disk_path: String = entry.disk_path
 		var packed_scene: PackedScene = entry.packed_scene
 		var cache_key: String = entry.cache_key
 		var callbacks: Array = entry.callbacks
 
-		var model: Node3D = _safe_instantiate(packed_scene, disk_path)
+		# Validate before caching — if can_instantiate() fails, cache null
+		if packed_scene == null or not packed_scene.can_instantiate():
+			if packed_scene != null:
+				Log.warn("models", "async can_instantiate() false: %s" % (entry.disk_path as String).get_file())
+			_model_cache[cache_key] = null
+			for cb_info: Dictionary in callbacks:
+				var cb: Callable = cb_info.callback
+				if cb.is_valid():
+					cb.call(cb_info.model_path, cb_info.item_id, null)
+			completed += 1
+			continue
 
-		_model_cache[cache_key] = model
+		# Cache the PackedScene — subsequent get_model() calls instantiate from this
+		_model_cache[cache_key] = packed_scene
 		_last_access[cache_key] = Engine.get_frames_drawn()
-		if model:
-			_stats["models_from_disk_async"] += 1
-			_evict_if_over_budget()
+		_stats["models_from_disk_async"] += 1
+		_evict_if_over_budget()
 
+		# Each callback gets its own fresh instance (distinct Node3D, collision disabled)
 		for cb_info: Dictionary in callbacks:
 			var cb: Callable = cb_info.callback
 			if cb.is_valid():
-				cb.call(cb_info.model_path, cb_info.item_id, model)
+				var instance := _instantiate_from_scene(packed_scene)
+				cb.call(cb_info.model_path, cb_info.item_id, instance)
 
 		completed += 1
 
 	return completed
 
 
-## Instantiate a PackedScene with validation. Uses the async-loaded reference
-## directly (rate-limited to MAX_INSTANTIATE_PER_FRAME). Falls back to sync
-## re-load only if can_instantiate() fails.
-func _safe_instantiate(packed_scene: PackedScene, disk_path: String) -> Node3D:
-	if packed_scene == null:
+## Instantiate a PackedScene into a fresh Node3D.
+## Strips occluders and disables all CollisionShape3D nodes
+## (sets "collision_disabled" meta). Collision is re-enabled by the streaming manager
+## when the object enters NEAR tier (<150m from camera).
+##
+## NOTE: _clear_resource_paths is intentionally NOT called here. That function
+## mutates shared sub-resources (meshes, materials) which are shared between the
+## PackedScene and all its instances. Clearing paths on an instance would corrupt
+## the PackedScene's resource references for subsequent instantiate() calls.
+## Path clearing was needed for the old .duplicate() approach; PackedScene handles
+## resource resolution internally.
+func _instantiate_from_scene(packed_scene: PackedScene) -> Node3D:
+	if packed_scene == null or not packed_scene.can_instantiate():
 		return null
-	if not packed_scene.can_instantiate():
-		Log.warn("models", "can_instantiate() false: %s" % disk_path.get_file())
-		return null
-
 	var instance := packed_scene.instantiate()
 	if instance == null:
 		return null
 	if not instance is Node3D:
 		instance.queue_free()
 		return null
-
 	_strip_occluders(instance)
-	_clear_resource_paths(instance)
+	_disable_collision_shapes_in_tree(instance)
 	return instance as Node3D
 
 
-## Sync re-load + instantiate as fallback when the async-loaded PackedScene is
-## invalid. Uses CACHE_MODE_IGNORE for a fresh copy from disk.
-func _sync_instantiate_from_disk(disk_path: String) -> Node3D:
-	var fresh := ResourceLoader.load(disk_path, "PackedScene") as PackedScene
-	if fresh == null or not fresh.can_instantiate():
-		return null
-
-	var instance := fresh.instantiate()
-	if instance == null or not instance is Node3D:
-		if instance != null:
-			instance.queue_free()
-		return null
-
-	_strip_occluders(instance)
-	_clear_resource_paths(instance)
-	return instance as Node3D
+## Disable all CollisionShape3D nodes in a subtree and mark the root with
+## "collision_disabled" meta. Mirror of NativeStreamingManager._disable_collision_shapes().
+## Jolt bodies are registered with no shapes until NEAR-tier entry — this keeps
+## the broadphase budget at zero for MID/FAR objects.
+static func _disable_collision_shapes_in_tree(node: Node) -> void:
+	if node is CollisionShape3D:
+		(node as CollisionShape3D).disabled = true
+	for child in node.get_children():
+		_disable_collision_shapes_in_tree(child)
+	if node is Node3D:
+		(node as Node3D).set_meta("collision_disabled", true)
 
 
 ## Get count of pending async loads (in-flight + deferred + pending-instantiate)
@@ -599,7 +620,9 @@ func _drain_deferred_queue() -> void:
 		if cache_key in _model_cache:
 			var callback: Callable = entry.callback
 			if callback.is_valid():
-				callback.call(entry.model_path, entry.item_id, _model_cache[cache_key])
+				var cached: Variant = _model_cache[cache_key]
+				var instance: Node3D = _instantiate_from_scene(cached as PackedScene) if cached != null else null
+				callback.call(entry.model_path, entry.item_id, instance)
 			continue
 
 		# Skip if already in-flight (another request for the same model started)
@@ -633,32 +656,42 @@ func _drain_deferred_queue() -> void:
 			})
 
 
-## Directly add a model to the cache (for async loading)
-## Use this when you've already converted a model and want to cache it.
-## Also saves to disk cache if enabled.
+## Cache a freshly converted Node3D (prebaking path only).
+## Packs to PackedScene for memory cache; saves to disk if enabled.
 ## Parameters:
 ##   model_path: Path to cache under
-##   model: The Node3D prototype to cache
+##   model: The Node3D to pack and cache
 ##   item_id: Optional item ID for collision variations
 func add_to_cache(model_path: String, model: Node3D, item_id: String = "") -> void:
 	var normalized := model_path.to_lower().replace("/", "\\")
 	var cache_key := normalized
 	if not item_id.is_empty():
 		cache_key = normalized + ":" + item_id.to_lower()
-	_model_cache[cache_key] = model
+
+	if not model:
+		_model_cache[cache_key] = null
+		return
+
+	var mesh_count := _count_meshes(model)
+
+	# Save to disk first — _save_to_disk_cache strips occluders + sets owners
+	if enable_disk_cache and mesh_count > 0:
+		_save_to_disk_cache(model, cache_key)
+
+	# Pack to PackedScene for memory cache (owners set by _save_to_disk_cache above,
+	# or set manually if disk cache was skipped)
+	if not enable_disk_cache or mesh_count == 0:
+		_strip_occluders(model)
+		_set_owner_recursive(model, model)
+	var ps := PackedScene.new()
+	if ps.pack(model) == OK:
+		_model_cache[cache_key] = ps
+	else:
+		_model_cache[cache_key] = null
+
 	_last_access[cache_key] = Engine.get_frames_drawn()
-	if model:
-		_stats["models_loaded"] += 1
-		_evict_if_over_budget()
-		# Count meshes for debugging
-		var mesh_count := _count_meshes(model)
-		# Also save to disk cache for next session
-		if enable_disk_cache:
-			if mesh_count > 0:
-				_save_to_disk_cache(model, cache_key)
-			else:
-				# Don't cache empty models - they're placeholders like doors/sounds
-				pass
+	_stats["models_loaded"] += 1
+	_evict_if_over_budget()
 
 
 ## Count MeshInstance3D nodes with valid meshes
@@ -673,13 +706,13 @@ func _count_meshes(node: Node) -> int:
 	return count
 
 
-## Get a model from cache only (doesn't load if not cached)
+## Get a fresh Node3D from cache (doesn't load from disk if not cached).
 ## Returns null if not in cache or if cache entry is null.
 ## Parameters:
 ##   model_path: Path to retrieve
 ##   item_id: Optional item ID for collision variations
 ## Returns:
-##   Cached Node3D or null if not cached
+##   Fresh Node3D (collision disabled) or null if not cached
 func get_cached(model_path: String, item_id: String = "") -> Node3D:
 	var normalized := model_path.to_lower().replace("/", "\\")
 	var cache_key := normalized
@@ -687,9 +720,12 @@ func get_cached(model_path: String, item_id: String = "") -> Node3D:
 		cache_key = normalized + ":" + item_id.to_lower()
 
 	if cache_key in _model_cache:
+		var cached: Variant = _model_cache[cache_key]
+		if cached == null:
+			return null
 		_stats["models_from_cache"] += 1
 		_last_access[cache_key] = Engine.get_frames_drawn()
-		return _model_cache[cache_key]
+		return _instantiate_from_scene(cached as PackedScene)
 	return null
 
 
@@ -732,98 +768,17 @@ func _get_disk_cache_path(cache_key: String) -> String:
 	return _get_disk_cache_dir().path_join(file_name)
 
 
-## Load a model from disk cache
-## Returns Node3D instance or null if loading failed
-func _load_from_disk_cache(disk_path: String) -> Node3D:
-	# Runtime never deletes cache files on failure. Prebake owns the disk cache
-	# (Unreal StreamableManager / Unity Addressables layer split). If a load or
-	# instantiate fails here, we log-and-skip; the next prebake pass repairs.
-	# See docs/audit/MODEL_LOADER_RACE.md for the race this prevents.
+## Load a PackedScene from disk. Does NOT instantiate — callers use _instantiate_from_scene().
+## Prebake owns disk cache; runtime never deletes cache files on failure.
+## See docs/audit/MODEL_LOADER_RACE.md.
+func _load_packed_scene_from_disk(disk_path: String) -> PackedScene:
 	if not FileAccess.file_exists(disk_path):
 		return null
-
 	var packed_scene := ResourceLoader.load(disk_path, "PackedScene") as PackedScene
 	if not packed_scene:
 		push_warning("ModelLoader: Sync load returned null PackedScene: %s" % disk_path)
 		return null
-
-	var instance := packed_scene.instantiate()
-	if instance == null:
-		push_warning("ModelLoader: Sync instantiate returned null: %s" % disk_path)
-		return null
-
-	if not instance is Node3D:
-		push_warning("ModelLoader: Sync load produced non-Node3D: %s" % disk_path)
-		instance.queue_free()
-		return null
-
-	# Strip OccluderInstance3D nodes — cached .res files may contain occluders
-	# with corrupt data that crash the renderer (invalid RID, null occluder resource)
-	_strip_occluders(instance)
-
-	# DEBUG: Log all MeshInstance3D nodes in the loaded model to audit for LOD nodes
-	if _stats["models_from_disk"] < 5:  # Only log first 5 models to avoid spam
-		Log.debug("models", "Loaded from disk: %s" % disk_path.get_file())
-		_debug_log_mesh_nodes(instance, 0)
-
-	# CRITICAL: Clear resource paths on loaded model to allow safe multi-threaded duplication
-	# Without this, concurrent duplicate() calls conflict on the same resource paths
-	_clear_resource_paths(instance)
-
-	return instance as Node3D
-
-
-## Debug: Log all mesh nodes in a model hierarchy
-func _debug_log_mesh_nodes(node: Node, depth: int) -> void:
-	if node is MeshInstance3D:
-		var mi := node as MeshInstance3D
-		var is_lod := mi.name.ends_with("_LOD1") or mi.name.ends_with("_LOD2") or mi.name.ends_with("_LOD3")
-		var has_mat := mi.material_override != null or (mi.mesh and mi.mesh.get_surface_count() > 0 and mi.mesh.surface_get_material(0) != null)
-		Log.debug("models", "  %s%s: visible=%s, is_lod=%s, has_material=%s" % [
-			"  ".repeat(depth), mi.name, mi.visible, is_lod, has_mat
-		])
-	for child in node.get_children():
-		_debug_log_mesh_nodes(child, depth + 1)
-
-
-## Clear resource paths from a node tree to allow safe duplication
-## This prevents "Another resource is loaded from path" errors when duplicating
-## CRITICAL: Must clear ALL paths unconditionally to prevent multi-thread conflicts
-func _clear_resource_paths(node: Node) -> void:
-	if node is MeshInstance3D:
-		var mesh_inst := node as MeshInstance3D
-		if mesh_inst.mesh:
-			# Always clear mesh path, even if empty (ensures no conflicts)
-			mesh_inst.mesh.resource_path = ""
-			# Also clear material paths on all surfaces
-			for i in range(mesh_inst.mesh.get_surface_count()):
-				var mat := mesh_inst.mesh.surface_get_material(i)
-				if mat:
-					_clear_material_paths(mat)
-		# Clear material_override (used by LOD meshes from NIFConverter)
-		if mesh_inst.material_override:
-			_clear_material_paths(mesh_inst.material_override)
-		# Clear surface override materials too
-		for i in range(mesh_inst.get_surface_override_material_count()):
-			var mat := mesh_inst.get_surface_override_material(i)
-			if mat:
-				_clear_material_paths(mat)
-
-	if node is CollisionShape3D:
-		var shape := (node as CollisionShape3D).shape
-		if shape:
-			shape.resource_path = ""
-
-	# Also handle MultiMeshInstance3D which can contain resource paths
-	if node is MultiMeshInstance3D:
-		var mmi := node as MultiMeshInstance3D
-		if mmi.multimesh:
-			mmi.multimesh.resource_path = ""
-			if mmi.multimesh.mesh:
-				mmi.multimesh.mesh.resource_path = ""
-
-	for child in node.get_children():
-		_clear_resource_paths(child)
+	return packed_scene
 
 
 ## Remove OccluderInstance3D nodes from a loaded model.
@@ -841,39 +796,6 @@ func _strip_occluders(node: Node) -> void:
 	for child in to_remove:
 		child.get_parent().remove_child(child)
 		child.queue_free()
-
-
-## Clear all resource paths from a material and its textures
-## CRITICAL: Always clear paths unconditionally to prevent multi-thread conflicts
-func _clear_material_paths(mat: Material) -> void:
-	# Always clear material path
-	mat.resource_path = ""
-
-	if mat is StandardMaterial3D:
-		var std_mat := mat as StandardMaterial3D
-		# Clear all texture slots that could have paths
-		var textures: Array[Texture2D] = [
-			std_mat.albedo_texture,
-			std_mat.normal_texture,
-			std_mat.roughness_texture,
-			std_mat.metallic_texture,
-			std_mat.emission_texture,
-			std_mat.ao_texture,
-			std_mat.heightmap_texture,
-			std_mat.rim_texture,
-			std_mat.clearcoat_texture,
-			std_mat.backlight_texture,
-			std_mat.refraction_texture,
-			std_mat.detail_albedo,
-			std_mat.detail_normal,
-		]
-		for tex in textures:
-			if tex:
-				tex.resource_path = ""
-	elif mat is ShaderMaterial:
-		var shader_mat := mat as ShaderMaterial
-		if shader_mat.shader:
-			shader_mat.shader.resource_path = ""
 
 
 ## Save a model to disk cache

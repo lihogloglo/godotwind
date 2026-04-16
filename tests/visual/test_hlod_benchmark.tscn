@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://dhlod_bench_test"]
+
+[ext_resource type="Script" path="res://tests/visual/test_hlod_benchmark.gd" id="1"]
+
+[node name="TestHLODBenchmark" type="Node3D"]
+script = ExtResource("1")

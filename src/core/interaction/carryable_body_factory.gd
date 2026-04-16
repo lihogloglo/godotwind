@@ -152,8 +152,14 @@ static func convert_static_to_rigid(
 
 	var static_body: StaticBody3D = _find_first_static_body(instance)
 	if static_body == null:
-		# No baked collision — caller should fall through to non-carryable path.
-		return null
+		# No baked collision from NIF. MW item models (weapons, potions,
+		# books) are often purely visual — the original game used click-
+		# raycast, not physics. Generate a BoxShape3D from the mesh AABB
+		# so the item can become a carryable RigidBody3D.
+		static_body = _generate_static_body_from_aabb(instance)
+		if static_body == null:
+			# No meshes either — can't generate collision. Stay static.
+			return null
 
 	var clamped_mass: float = clampf(mass_kg, MASS_MIN_KG, MASS_MAX_KG)
 
@@ -298,6 +304,58 @@ static func _find_first_static_body(node: Node) -> StaticBody3D:
 		if found != null:
 			return found
 	return null
+
+
+## Generate a StaticBody3D + BoxShape3D from the combined mesh AABB of
+## `instance`. Used as fallback when the NIF model has no baked collision
+## shapes. Returns null if no meshes found. The generated body uses
+## collision layers matching the standard spawn config so the subsequent
+## rigid body conversion path proceeds normally.
+static func _generate_static_body_from_aabb(instance: Node3D) -> StaticBody3D:
+	var aabb := _compute_item_aabb(instance)
+	if not aabb.has_volume():
+		return null
+	var body := StaticBody3D.new()
+	body.name = "GeneratedCollision"
+	body.collision_layer = LAYER_ENVIRONMENT
+	body.collision_mask = LAYER_ENVIRONMENT
+	var shape := CollisionShape3D.new()
+	shape.name = "AABBShape"
+	var box := BoxShape3D.new()
+	box.size = aabb.size
+	shape.shape = box
+	shape.position = aabb.get_center()
+	body.add_child(shape)
+	instance.add_child(body)
+	return body
+
+
+## Compute combined local-space AABB from all MeshInstance3D descendants.
+## Uses local transforms only — safe before the node enters the tree.
+static func _compute_item_aabb(root: Node3D) -> AABB:
+	var aabbs: Array[AABB] = []
+	if root is MeshInstance3D and (root as MeshInstance3D).mesh != null:
+		aabbs.append((root as MeshInstance3D).mesh.get_aabb())
+	for child in root.get_children():
+		_collect_item_aabbs(child, Transform3D.IDENTITY, aabbs)
+	if aabbs.is_empty():
+		return AABB()
+	var combined: AABB = aabbs[0]
+	for i in range(1, aabbs.size()):
+		combined = combined.merge(aabbs[i])
+	return combined
+
+
+static func _collect_item_aabbs(node: Node, parent_xf: Transform3D, out: Array[AABB]) -> void:
+	var xf: Transform3D = parent_xf
+	if node is Node3D:
+		xf = parent_xf * (node as Node3D).transform
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		if mi.mesh != null:
+			out.append(xf * mi.mesh.get_aabb())
+	for child in node.get_children():
+		_collect_item_aabbs(child, xf, out)
 
 
 ## I.5 — is the ocean system live? Used to decide whether spawned

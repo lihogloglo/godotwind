@@ -139,8 +139,8 @@ func dump_report() -> void:
 			loading_stats.get("objects_instantiated", 0),
 			loading_stats.get("objects_from_pool", 0)
 		])
-		var avg_dup_us: int = loading_stats.get("avg_duplicate_time_us", 0)
-		_log("  Avg duplicate time: %d us (%.2f ms)" % [avg_dup_us, avg_dup_us / 1000.0])
+		var avg_inst_us: int = loading_stats.get("avg_instantiate_time_us", 0)
+		_log("  Avg instantiate time: %d us (%.2f ms)" % [avg_inst_us, avg_inst_us / 1000.0])
 		_log("  Pre-warm pending: %d models" % loading_stats.get("prewarm_pending_count", 0))
 
 	# BSA cache stats

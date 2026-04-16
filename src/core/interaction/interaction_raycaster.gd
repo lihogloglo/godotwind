@@ -71,6 +71,12 @@ signal prompt_changed(interactable: Interactable, distance: float)
 ## Debug: log every prompt change. Off in release.
 @export var debug_log: bool = false
 
+## Debug: draw the cast ray each frame.
+## GREEN = active Interactable. YELLOW = layer-3 hit but no Interactable.
+## RED = no hit. Visible through walls (no_depth_test). Toggle via
+## `raycast_debug` console command.
+@export var debug_draw: bool = false
+
 
 var _current_target: Interactable = null
 var _current_distance: float = 0.0
@@ -78,6 +84,13 @@ var _current_distance: float = 0.0
 # signal. We can't query a Node's connection list cheaply at every read,
 # so we mirror the connection state ourselves.
 var _target_exiting_connected: bool = false
+
+# Debug-draw state — only valid / meaningful when debug_draw is true.
+var _debug_ray_from: Vector3 = Vector3.ZERO
+var _debug_ray_to: Vector3 = Vector3.ZERO
+var _debug_physics_hit: bool = false  # true = layer-3 hit (regardless of Interactable)
+var _debug_mi: MeshInstance3D = null
+var _debug_mesh: ImmediateMesh = null
 
 
 func _ready() -> void:
@@ -94,6 +107,10 @@ func _ready() -> void:
 
 func _physics_process(_delta: float) -> void:
 	_update_target()
+	if debug_draw:
+		_refresh_debug_draw()
+	elif _debug_mi != null:
+		_debug_mi.visible = false
 
 
 ## Returns the Interactable currently under the crosshair, or null.
@@ -206,6 +223,14 @@ func _update_target() -> void:
 	query.collide_with_bodies = true
 
 	var hit := space_state.intersect_ray(query)
+
+	# Capture debug state before Interactable filtering so we can distinguish
+	# "no layer-3 hit" (RED) from "hit layer-3 but no Interactable" (YELLOW).
+	if debug_draw:
+		_debug_ray_from = from
+		_debug_physics_hit = not hit.is_empty()
+		_debug_ray_to = hit.get("position", to) if _debug_physics_hit else to
+
 	var new_target: Interactable = null
 	var new_distance: float = 0.0
 
@@ -231,6 +256,62 @@ func _update_target() -> void:
 			Log.debug("interaction", "Target → %s @ %.2fm" % [label, new_distance])
 	elif new_target != null:
 		_current_distance = new_distance
+
+
+## ── Debug draw ────────────────────────────────────────────────────────────
+
+## Create the ImmediateMesh line renderer lazily on first use.
+## Safe to call from _physics_process — MeshInstance3D has no physics body.
+func _setup_debug_draw() -> void:
+	_debug_mesh = ImmediateMesh.new()
+	_debug_mi = MeshInstance3D.new()
+	_debug_mi.name = "RaycastDebugLine"
+	_debug_mi.mesh = _debug_mesh
+	_debug_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	mat.no_depth_test = true
+	mat.render_priority = 1
+	_debug_mi.material_override = mat
+	add_child(_debug_mi)
+
+
+## Called each physics frame when debug_draw is true.
+## Creates the mesh node on first use, then delegates to _draw_debug_ray.
+func _refresh_debug_draw() -> void:
+	if _debug_mi == null:
+		_setup_debug_draw()
+	_debug_mi.visible = true
+	_draw_debug_ray()
+
+
+## Rebuild the ImmediateMesh line for this frame.
+## GREEN  = active Interactable under crosshair.
+## YELLOW = layer-3 physics hit but no Interactable (wrong side, no script, etc.)
+## RED    = no layer-3 hit at all.
+func _draw_debug_ray() -> void:
+	_debug_mesh.clear_surfaces()
+	if camera == null or _debug_ray_from == _debug_ray_to:
+		return
+	var color: Color
+	if _current_target != null:
+		color = Color.GREEN
+	elif _debug_physics_hit:
+		color = Color(1.0, 0.8, 0.0)  # Yellow
+	else:
+		color = Color.RED
+	# Convert world-space endpoints to local space of the MeshInstance3D.
+	# _debug_mi is a child of the raycaster (child of camera) at identity, so
+	# its local space == camera local space. to_local() handles any drift cleanly.
+	var lf: Vector3 = _debug_mi.to_local(_debug_ray_from)
+	var lt: Vector3 = _debug_mi.to_local(_debug_ray_to)
+	_debug_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	_debug_mesh.surface_set_color(color)
+	_debug_mesh.surface_add_vertex(lf)
+	_debug_mesh.surface_set_color(color)
+	_debug_mesh.surface_add_vertex(lt)
+	_debug_mesh.surface_end()
 
 
 ## Walk up the scene tree from a colliding Node, looking for the first

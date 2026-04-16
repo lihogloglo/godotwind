@@ -23,8 +23,11 @@ var pc_attributes: Array[int] = [50, 50, 50, 50, 50, 50, 50, 50]
 # Player skills (MW's 27, indexed 0-26: Block through HandToHand)
 var pc_skills: Array[int] = []
 
-# Sum of equipped clothing/armor base values — feeds MW's disposition formula
-var pc_clothing_value: int = 0
+# Sum of equipped clothing/armor base values — feeds MW's disposition formula.
+# Default 100 = "wearing basic clothes". MW's naked threshold is ~40; 0 makes
+# every NPC treat the player as naked. When the equipment system ships, call
+# sync_clothing_value() to compute the real sum from equipped items.
+var pc_clothing_value: int = 100
 
 # MW-specific player status flags
 var pc_expelled: bool = false      # Expelled from primary faction
@@ -48,3 +51,21 @@ func get_skill(index: int) -> int:
 	if index >= 0 and index < pc_skills.size():
 		return pc_skills[index]
 	return 0
+
+
+## Recalculate pc_clothing_value from equipped items. Call this whenever
+## the player equips or unequips clothing/armor. MW formula: sum of base
+## values from all equipped clothing + armor records.
+## TODO: Wire to equipment system when it ships. Until then, the default
+## value (100) prevents NPCs from treating the player as naked.
+func sync_clothing_value(equipped_record_ids: Array[StringName]) -> void:
+	var total: int = 0
+	for rid: StringName in equipped_record_ids:
+		# Look up armor/clothing record from ESM and read base value
+		var type_out: Array = [""]
+		var record: Variant = ESMManager.get_any_record(String(rid), type_out)
+		if record == null:
+			continue
+		if "value" in record:
+			total += int(record.value)
+	pc_clothing_value = total
