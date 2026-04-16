@@ -56,8 +56,12 @@ var using_navmesh_path: bool = false
 
 
 func _ready() -> void:
-	# Set up collision layers
-	collision_layer = 2  # Actor layer
+	# Set up collision layers. OR rather than assign so pre-tree layer
+	# stamping survives — `ReferenceInstantiator._add_interactable_layer_recursive`
+	# writes bit 2 (Interactable, layer 3) onto the NPC's CollisionObject3D
+	# before it enters the tree. A plain `collision_layer = 2` here would
+	# overwrite that bit and make NPCs invisible to the interaction raycaster.
+	collision_layer |= 2  # Actor layer (bit 1); preserves any pre-set bits
 	collision_mask = 1   # World collision
 
 	# Motion mode

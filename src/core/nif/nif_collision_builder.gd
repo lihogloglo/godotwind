@@ -185,8 +185,10 @@ func _process_collision_node(node: Defs.NiAVObject, parent_transform: Transform3
 	if node.name == "Bounding Box":
 		return
 
-	# Calculate world transform
-	var local_transform := node.transform.to_transform3d()
+	# Calculate world transform in Godot space. Converting each local transform
+	# at the leaf mirrors the visual-mesh path in nif_converter.gd; parent_transform
+	# is already Godot-space from the prior recursion (initial call passes IDENTITY).
+	var local_transform := CS.transform_to_godot(node.transform.to_transform3d())
 	var world_transform := parent_transform * local_transform
 
 	# Determine if we should generate collision for this node
@@ -240,7 +242,8 @@ func _process_collision_geometry(node: Defs.NiAVObject, parent_transform: Transf
 	if node.is_hidden():
 		return
 
-	var local_transform := node.transform.to_transform3d()
+	# Same Godot-space-at-leaf convention as _process_collision_node above.
+	var local_transform := CS.transform_to_godot(node.transform.to_transform3d())
 	var world_transform := parent_transform * local_transform
 
 	# Generate collision from geometry

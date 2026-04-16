@@ -1,9 +1,20 @@
 # ModelLoader Async Instantiation Race — Diagnosis
 
-**Status:** time-boxed bridge landed 2026-04-15 (deferred-instantiate, see "Bridge fix" below); canonical PackedScene-cache refactor still pending
-**Date:** 2026-04-14 (diagnosis), 2026-04-15 (bridge fix)
-**Author:** @coder (diagnosis), @roaster (bridge fix)
+**Status:** Crash mitigated to 0% (was 66%). Three layered fixes applied (pending commit). Canonical PackedScene-cache refactor still pending.
+**Date:** 2026-04-14 (diagnosis), 2026-04-15 (bridge fixes), 2026-04-16 (status update)
+**Author:** @coder (diagnosis + F3b-lite), @roaster (bridge fixes + audit)
 **Reviewer:** @docs (not yet reviewed)
+
+### Current mitigations (2026-04-16)
+- **Bridge fix #1** (deferred instantiate, 2026-04-15): 1-frame gap between `load_threaded_get` and `instantiate()`. Reduced crash rate but did not eliminate.
+- **F3a** (2026-04-16): Dropped cached `mesh_rid` in `static_object_renderer.gd`, derive from `mesh_resource.get_rid()` at use-time. Eliminated RID-lifecycle errors (B1).
+- **F3b-lite** (2026-04-16): Rate-limited `_drain_pending_instantiate_queue` to 8 models/frame + `can_instantiate()` guard. Reduced crash rate from 66% to 0%.
+- **Occluder strip at prebake** (2026-04-16): `OccluderInstance3D` nodes stripped before `PackedScene.pack()` in prebaker. Model cache rebuilt 2026-04-16.
+- **Cache deletion removed** (@roaster audit): 17 `DirAccess.remove_absolute` calls removed from runtime — prebake owns cache. Eliminates case (c1) race trigger.
+
+**Canonical end-state** (not yet implemented): change `_model_cache` to store `PackedScene` instead of `Node3D` (rec #2 below). ~18 callsites. Tracked in `docs/audit/PERF_STABILITY_TRACKER.md`.
+
+**Note:** `runtime_hlod_merger.gd` referenced below was renamed to `object_paging.gd` in the paging refactor.
 
 ## Bridge fix #2 (2026-04-15, @roaster) — carryable owner-inconsistent reparent
 

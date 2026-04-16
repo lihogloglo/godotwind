@@ -80,6 +80,20 @@ const INTERIOR_PHYSICS_BASE: int = 4          # First interior physics layer bit
 ## Fade duration for transitions
 const FADE_DURATION: float = 0.3
 
+## Interior environment tunables.
+## MW fog_density values are typically 0.8-2.0; Godot exp-height-fog density is
+## in 0.001-0.005 range. Previous 0.01 scale produced fog-walls inside. 0.003
+## matches the MW-authored feel at Godot's exp-height falloff rate. Tune by
+## flipping this const — no per-cell overrides needed.
+const INTERIOR_FOG_DENSITY_SCALE: float = 0.003
+
+## OpenMW-style minimum interior relative-luminance floor. MW AMBI data is
+## often near-black (e.g. RGB ~15,13,10). Without a floor the ambient barely
+## lights the pocket. OpenMW scales up to hit this threshold
+## (`mMinimumInteriorBrightness`). Port: `relativeLuminance = 0.2126R + 0.7152G
+## + 0.0722B`. Matches OpenMW default of 0.08.
+const MIN_INTERIOR_LUMA: float = 0.08
+
 ## Building model path patterns for seamless transition support.
 ## Matched against ESM STAT model paths to identify the building containing a door.
 ## Order: most specific first. Patterns are substring-matched (lowercase).
@@ -1175,6 +1189,9 @@ func enter_interior(door: DoorInfo) -> bool:
 				# Fade back in to exterior
 				await _fade(1.0, 0.0, FADE_DURATION)
 				_is_transitioning = false
+				# Pair the `transition_started` emitted above so subscribers
+				# (e.g. sky/terrain restore in world_explorer) see a clean exit.
+				transition_completed.emit("exterior")
 				return false
 			await get_tree().process_frame
 
@@ -1185,6 +1202,9 @@ func enter_interior(door: DoorInfo) -> bool:
 			Log.error("streaming", "[ENTER] Load completed but slot invalid for '%s'" % door.target_cell_name)
 			await _fade(1.0, 0.0, FADE_DURATION)
 			_is_transitioning = false
+			# Pair the `transition_started` emitted above (line 1153) so
+			# subscribers clean up (sky/terrain restore).
+			transition_completed.emit("exterior")
 			return false
 
 		var dest_pos_br: Vector3 = door.get_teleport_pos_godot() + slot.get_offset()
@@ -1233,6 +1253,9 @@ func enter_interior(door: DoorInfo) -> bool:
 	if not slot.is_occupied or not slot.cell_node or not is_instance_valid(slot.cell_node):
 		Log.error("streaming", "[ENTER] FAILED — slot became invalid during transition for '%s'" % door.target_cell_name)
 		_is_transitioning = false
+		# Pair the `transition_started` emitted above (line 1213) so
+		# subscribers clean up (sky/terrain restore).
+		transition_completed.emit("exterior")
 		return false
 
 	_active_pocket = slot
@@ -1594,16 +1617,28 @@ func _build_interior_environment(cell: CellRecord) -> Environment:
 	var env := Environment.new()
 
 	if cell.has_ambient:
-		# Interior ambient from AMBI record
+		# Interior ambient from AMBI record, with OpenMW-style luminance floor.
+		# Port of `apps/openmw/mwrender/renderingmanager.cpp::configureAmbient`:
+		# Rec.709 relative luminance, scale up to MIN_INTERIOR_LUMA if darker.
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		env.ambient_light_color = cell.ambient_color
+		var c: Color = cell.ambient_color
+		var luma: float = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+		if luma < MIN_INTERIOR_LUMA:
+			if luma < 0.001:
+				# Near-black: use grayscale floor (no hue to preserve).
+				env.ambient_light_color = Color(MIN_INTERIOR_LUMA, MIN_INTERIOR_LUMA, MIN_INTERIOR_LUMA)
+			else:
+				# Preserve AMBI hue, scale RGB to hit the luma floor.
+				env.ambient_light_color = c * (MIN_INTERIOR_LUMA / luma)
+		else:
+			env.ambient_light_color = c
 		env.ambient_light_energy = 0.8
 
 		# Fog from AMBI
 		if cell.fog_density > 0.001:
 			env.fog_enabled = true
 			env.fog_light_color = cell.fog_color
-			env.fog_density = cell.fog_density * 0.01  # Scale MW density to Godot
+			env.fog_density = cell.fog_density * INTERIOR_FOG_DENSITY_SCALE
 	else:
 		# Default interior: dim ambient, no fog
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR

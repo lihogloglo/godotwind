@@ -1,0 +1,55 @@
+=== GODOTWIND CRASH REPORT ===
+Generated: 2026-04-15T21:44:49
+Session duration: 43.5 seconds
+
+=== CAMERA STATE ===
+Position: (-175.5, 101.0, 1044.7)
+Cell: (-2, -9)
+Camera mode: FLY_CAMERA
+Models: ON (always), Ocean: OFF, Sky: OFF
+
+=== STREAMING STATE ===
+Queue: 16 pending
+NEAR (cells): 75 | MID: 9664 | FAR: 4791
+Total objects: 524
+
+=== LAST 30 OPERATIONS ===
+[+35.215s] CELL_LOADED: (-2, -13) with 0 objects
+[+35.323s] CELL_LOADED: (0, -6) with 0 objects
+[+35.369s] CELL_LOADED: (-6, -9) with 0 objects
+[+35.385s] CELL_LOADED: (-6, -8) with 0 objects
+[+35.431s] CELL_LOADED: (2, -9) with 0 objects
+[+36.068s] CELL_LOADED: (-1, -5) with 0 objects
+[+36.503s] CELL_LOADED: (-6, -10) with 0 objects
+[+36.597s] CELL_LOADED: (-3, -5) with 0 objects
+[+36.613s] CELL_LOADED: (-1, -13) with 0 objects
+[+36.690s] CELL_LOADED: (2, -8) with 3 objects
+[+36.736s] CELL_LOADED: (2, -10) with 4 objects
+[+36.861s] CELL_LOADED: (-3, -13) with 0 objects
+[+37.094s] CELL_LOADED: (1, -6) with 0 objects
+[+37.110s] CELL_LOADED: (-5, -12) with 0 objects
+[+37.233s] CELL_LOADED: (1, -12) with 0 objects
+[+37.432s] CELL_LOADED: (-4, -13) with 0 objects
+[+37.509s] CELL_LOADED: (0, -13) with 0 objects
+[+37.650s] CELL_LOADED: (-5, -6) with 0 objects
+[+37.665s] CELL_LOADED: (-6, -7) with 0 objects
+[+38.944s] CELL_LOADED: (-6, -11) with 0 objects
+[+39.269s] CELL_LOADED: (2, -11) with 10 objects
+[+39.626s] CELL_LOADED: (2, -7) with 16 objects
+[+39.641s] CELL_LOADED: (0, -5) with 0 objects
+[+39.749s] CELL_LOADED: (-7, -9) with 0 objects
+[+39.906s] CELL_LOADED: (-4, -5) with 0 objects
+[+41.277s] CELL_LOADED: (-6, -12) with 0 objects
+[+41.606s] CELL_LOADED: (2, -12) with 0 objects
+[+41.652s] CELL_LOADED: (3, -9) with 0 objects
+[+41.869s] CELL_LOADED: (1, -5) with 0 objects
+[+42.120s] CELL_LOADED: (1, -13) with 70 objects
+
+=== ERRORS (session) ===
+No errors recorded
+
+=== PERFORMANCE ===
+FPS: 0.0
+Frame time: 0.0ms
+
+=== COPY THIS TO CLAUDE FOR ANALYSIS ===

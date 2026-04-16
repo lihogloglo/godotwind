@@ -1,7 +1,8 @@
 # NIF Collision Coordinate Bug — Prebaker Hand-Off
 
-**Status:** diagnosed, NOT fixed
+**Status:** fixed 2026-04-15 (Part 1). Part 2 (trimesh fallback) deferred.
 **Discovered:** 2026-04-09 during character controller debug session
+**Amended:** 2026-04-15 — Part 1 steps 3 + 4 corrected. Original draft proposed removing vertex / BV-component conversions on the theory "double conversion would scramble them back". That is mathematically wrong — both vertices and transforms must live in the same coordinate frame, and the CollisionShape3D scene-graph side expects Godot space, so the vertex conversions must be KEPT. Agents `collisions` + `roaster` reviewed the math independently, see §Canonical Fix below.
 **Scope:** `src/core/nif/nif_collision_builder.gd`, cascades into every cached model with non-trivial NIF hierarchy
 **Impact:** stair clipping, floating collision wireframes hundreds of meters from their visual meshes, characters falling through static geometry
 
@@ -107,13 +108,37 @@ In `nif_collision_builder.gd`:
 
 2. **`_process_collision_geometry` (`:243-244`)** — same conversion.
 
-3. **`_create_shape_from_geometry` (`:352`)** — REMOVE the `_convert_nif_vector` loop on vertices. The parent `transform` is now in Godot space, so the vertices must stay in NIF-local space and be positioned by the converted transform. Double conversion would scramble them back.
+3. **`_create_shape_from_geometry` (`:352`)** — KEEP the `_convert_nif_vector` loop on vertices. Vertices live in Godot-space meters; the now-Godot-space `transform` positions them. The math below explains why both sides must be converted.
 
-4. **`_create_shape_from_bounding_volume` (`:275, 288, 290, 303, 305`)** — remove the per-component `_convert_nif_vector` / `_convert_nif_basis` calls. The enclosing `transform` parameter now handles placement correctly.
+4. **`_create_shape_from_bounding_volume` (`:275, 288, 290, 303, 305`)** — KEEP the per-component `_convert_nif_vector` / `_convert_nif_basis` calls for the BV center / extents / axis. Same reason — shape_transform origin / basis live in Godot space, and `transform * shape_transform` is now a coherent Godot-space product.
 
-5. **`create_actor_collision` (`:756, 778`)** — same: stop converting `bounding_box_extents` and `bounding_box_center` if those are being combined with an already-converted parent. Audit the call site at `nif_converter.gd:641-642` to see what space the metadata is stored in.
+5. **`create_actor_collision` (`:756, 778`)** — no change. This is a leaf collision shape attached directly to an actor body; callers do NOT multiply it by a NIF-space parent. Audited at `nif_converter.gd:641-642` — confirmed leaf usage. Keep the existing `_convert_nif_vector` calls.
 
-Expected change: ~15 lines modified + several conversion calls removed.
+Expected change: ~2 lines modified (just the two accumulation sites). No conversions removed.
+
+### Math — why both sides must be converted (not only transforms)
+
+Let `v_nif` be a vertex in NIF-local coordinates and `T_nif = (R_nif, t_nif)` its world transform. `CS.transform_to_godot(T_nif) = (C R_nif C^T, C t_nif * s)` where `C` is the axis-swap matrix and `s = 1/70` is the unit scale. `CS.vector_to_godot(v_nif) = C v_nif * s`.
+
+We want `CollisionShape3D.transform * local_vertex = v_world_godot`, and `v_world_godot = C (R_nif v_nif + t_nif) s = C R_nif v_nif s + C t_nif s`.
+
+- **Both converted (correct):** `T_godot * v_godot = (C R_nif C^T)(C v_nif s) + C t_nif s = C R_nif v_nif s + C t_nif s` ✓
+- **Only transform converted (the removed plan):** `T_godot * v_nif = (C R_nif C^T) v_nif + C t_nif s`. Missing the `s` on the rotated vertex, and `C^T v_nif ≠ v_nif` in general — axes re-scrambled.
+
+Concrete counterexample: `v_nif = (70, 0, 0)` (1 m east), `t_nif = (0, 70, 0)` (1 m north), `R_nif = I`. Expected Godot world: `(1, 0, -1)`. Both-converted yields `(1, 0, -1)` ✓. Only-transform-converted yields `(70, 0, -1)` — 70 m east. ✗
+
+### Part 1 — implemented form (applied 2026-04-15)
+
+Two accumulation sites only. Everything downstream kept as-is.
+
+`_process_collision_node` (`:189-190`) and `_process_collision_geometry` (`:243-244`):
+
+```gdscript
+var local_transform := CS.transform_to_godot(node.transform.to_transform3d())
+var world_transform := parent_transform * local_transform
+```
+
+`parent_transform` enters both functions as `Transform3D.IDENTITY` from `build_collision:120`; identity is space-invariant, so the first recursion level converts its local, and every deeper level inherits a Godot-space `parent_transform`. Invariant: after the fix, every `Transform3D` in the file is Godot space.
 
 ### Part 2 — Safety net for NIFs with no collision at all (independent)
 
