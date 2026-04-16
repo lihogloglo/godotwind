@@ -173,6 +173,15 @@ var player_controller: PlayerController = null  # PlayerController instance
 var _interaction_raycaster: InteractionRaycaster = null
 var _fly_raycaster: InteractionRaycaster = null  # Separate raycaster for fly camera mode
 var _carry_controller: Node = null  # CarryController (no class_name export to avoid preload cycle)
+var _fly_carry_controller: Node = null  # CarryController bound to fly_camera (same class, separate instance)
+
+# Fly-camera interact press/release discriminator — mirrors the PlayerController
+# pattern so tap vs hold routing works identically in flycam mode. The
+# `interact` action is already bound to E in project.godot; we consume press +
+# release events when the fly camera is active.
+const FLY_INTERACT_HOLD_THRESHOLD_S: float = 0.20
+var _fly_interact_press_time_msec: int = -1
+var _fly_interact_hold_emitted: bool = false
 
 # Dialogue system (C.3-C.7)
 var _dialogue_ui: DialogueUI = null
@@ -581,8 +590,19 @@ func _setup_cameras() -> void:
 		_fly_raycaster.name = "FlyRaycaster"
 		_fly_raycaster.camera = fly_camera
 		_fly_raycaster.max_distance = 5.0
+		_fly_raycaster.debug_log = true
 		fly_camera.add_child(_fly_raycaster)
 		_fly_raycaster.prompt_changed.connect(_on_interact_prompt_changed)
+
+		# Dedicated CarryController for flycam mode. CarryController only uses
+		# the `player` arg for nothing currently (see carry_controller.gd:126
+		# — `player` is assigned in setup but never read in the hold loop),
+		# so passing null is safe. Streaming manager wired later in
+		# _initialize_interior_pocket_manager alongside the player-mode one.
+		_fly_carry_controller = CarryControllerScript.new()
+		_fly_carry_controller.name = "FlyCarryController"
+		fly_camera.add_child(_fly_carry_controller)
+		_fly_carry_controller.setup(fly_camera, null)
 
 	# Start in fly camera mode
 	_camera_mode = CameraMode.FLY_CAMERA
@@ -1979,6 +1999,20 @@ func _input(event: InputEvent) -> void:
 	if console and console.is_visible():
 		return
 
+	# Fly-camera interact press/release — bound to the `interact` action
+	# (default E). Mirrors the PlayerController tap/hold discriminator so
+	# the same raycaster target drives tap→interact and hold→carry.grab.
+	# Only active in FLY_CAMERA mode; PlayerController handles its own.
+	if _camera_mode == CameraMode.FLY_CAMERA:
+		if event.is_action_pressed(&"interact"):
+			_fly_on_interact_pressed()
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_released(&"interact"):
+			_fly_on_interact_released()
+			get_viewport().set_input_as_handled()
+			return
+
 	# Hotkeys (these work regardless of camera mode)
 	if event is InputEventKey:
 		var key_event := event as InputEventKey
@@ -1988,12 +2022,6 @@ func _input(event: InputEvent) -> void:
 			KEY_P:
 				# Toggle between fly camera and player controller
 				_toggle_camera_mode()
-			KEY_E:
-				# Fly camera interaction — uses its own raycaster to
-				# target NPCs, doors, books, etc. Same interact() call
-				# path as PlayerController uses for player mode.
-				if _camera_mode == CameraMode.FLY_CAMERA:
-					_fly_camera_interact()
 			KEY_J:
 				# C.7 — Toggle quest journal
 				if _journal_panel:
@@ -2038,25 +2066,17 @@ func _process(delta: float) -> void:
 	if not _initialized:
 		return
 
+	# Fly-camera interact hold-threshold polling. Cheap; safe to run every
+	# frame even when the press state is inactive (early-outs immediately).
+	_poll_fly_interact_hold()
+
 	# Record frame timing for profiler
 	if profiler:
 		profiler.record_frame(delta)
 
-	# Process async cell instantiation with dynamic time budget
-	# Industry standard: Spend more time when queue is large to drain backlog faster
-	if cell_manager:
-		var queue_size: int = cell_manager.get_instantiation_queue_size()
-		var budget_ms: float = 4.0  # Default budget
-
-		# Adaptive budget based on queue size
-		if queue_size > 2000:
-			budget_ms = 12.0  # Burst mode - large backlog
-		elif queue_size > 500:
-			budget_ms = 8.0   # Catch-up mode - moderate backlog
-		elif queue_size > 100:
-			budget_ms = 6.0   # Slightly elevated
-
-		cell_manager.process_async_instantiation(budget_ms)
+	# NOTE: cell_manager.process_async_instantiation is called by
+	# native_streaming_manager._process with proper frame-budget-aware timing.
+	# Do NOT call it here too — duplicate calls double the CPU cost.
 
 	# Update interior pocket manager (door detection, eviction)
 	if _pocket_manager:
@@ -2098,7 +2118,14 @@ func _setup_pocket_manager() -> void:
 	_pocket_manager.name = "InteriorPocketManager"
 	add_child(_pocket_manager)
 
-	# Find the WorldEnvironment node in scene tree
+	# Find the WorldEnvironment node in scene tree. INVARIANT: at setup time,
+	# `show_sky` defaults off so EnvironmentControls' `_fallback_world_env` is a
+	# direct child here. IPM caches this ref for the session — must stay valid.
+	# `_on_interior_transition_started` toggles sky off (which re-adds fallback
+	# to tree) BEFORE IPM's env swap runs, so the cached ref is always in-tree
+	# when IPM writes to `.environment`. If setup order ever changes (sky
+	# enabled before pocket-manager init), IPM's ref would point to SkyManager's
+	# detached WE after the toggle flip — add a re-capture path if that happens.
 	var world_env: WorldEnvironment = null
 	for child in get_children():
 		if child is WorldEnvironment:
@@ -2139,6 +2166,8 @@ func _setup_pocket_manager() -> void:
 		cell_manager.set_door_activated_handler(_on_door_interactable_activated)
 	if _carry_controller and world_streaming_manager:
 		_carry_controller.set_streaming_manager(world_streaming_manager)
+	if _fly_carry_controller and world_streaming_manager:
+		_fly_carry_controller.set_streaming_manager(world_streaming_manager)
 
 	Log.info("streaming", "Interior pocket manager initialized")
 
@@ -2241,6 +2270,75 @@ func _on_interact_prompt_changed(interactable: Interactable, distance: float) ->
 	_door_prompt_label.visible = true
 
 
+## Record the press time; reset hold flag. Poll in _process decides when
+## the press crosses the hold threshold and fires the grab path.
+func _fly_on_interact_pressed() -> void:
+	if _dialogue_session and _dialogue_session.is_any_panel_open():
+		return
+	_fly_interact_press_time_msec = Time.get_ticks_msec()
+	_fly_interact_hold_emitted = false
+
+
+## Discriminate tap vs post-hold release. Same rules as
+## PlayerController._on_interact_released. Tap → interact(); release after
+## hold → carry_controller.release().
+func _fly_on_interact_released() -> void:
+	if _fly_interact_press_time_msec < 0:
+		return
+	var held_msec := Time.get_ticks_msec() - _fly_interact_press_time_msec
+	_fly_interact_press_time_msec = -1
+	if _dialogue_session and _dialogue_session.is_any_panel_open():
+		_fly_interact_hold_emitted = false
+		return
+	if _fly_interact_hold_emitted:
+		_fly_carry_release()
+	elif held_msec < int(FLY_INTERACT_HOLD_THRESHOLD_S * 1000):
+		_fly_camera_interact()
+	else:
+		# Past threshold but poll didn't fire (low fps race). Fallthrough
+		# as a tap so the event isn't silently dropped.
+		_fly_camera_interact()
+
+
+## Polled from _process. Fires hold-begin once when the press crosses the
+## threshold; that routes to the carry controller to grab whatever the
+## fly raycaster is currently targeting.
+func _poll_fly_interact_hold() -> void:
+	if _camera_mode != CameraMode.FLY_CAMERA:
+		return
+	if _fly_interact_press_time_msec < 0 or _fly_interact_hold_emitted:
+		return
+	if _dialogue_session and _dialogue_session.is_any_panel_open():
+		return
+	var held_msec := Time.get_ticks_msec() - _fly_interact_press_time_msec
+	if held_msec >= int(FLY_INTERACT_HOLD_THRESHOLD_S * 1000):
+		_fly_interact_hold_emitted = true
+		_fly_carry_grab()
+
+
+## Route the fly raycaster's current target to the CarryController. Refuses
+## silently if the target isn't a carryable wrapper (NPC, door, etc.) — the
+## controller's own validation handles that.
+func _fly_carry_grab() -> void:
+	if _fly_carry_controller == null or _fly_raycaster == null:
+		return
+	var target: Interactable = _fly_raycaster.get_current_target()
+	if target == null:
+		Log.info("interaction", "[FLY_GRAB] hold fired, no target under crosshair")
+		return
+	Log.info("interaction", "[FLY_GRAB] try_grab target=%s" % target.name)
+	_fly_carry_controller.try_grab(target)
+
+
+## Tell the fly-mode carry controller to release whatever it's holding.
+func _fly_carry_release() -> void:
+	if _fly_carry_controller == null:
+		return
+	if not _fly_carry_controller.has_method("release"):
+		return
+	_fly_carry_controller.release()
+
+
 ## Fly camera interaction — reads the fly raycaster's current target
 ## and calls interact(). Replaces the old proximity-based door activation.
 ## The fly camera acts as the "player" node for interact() calls.
@@ -2320,20 +2418,71 @@ func _set_streaming_paused(paused: bool) -> void:
 	Log.info("streaming", "[STREAMING] Paused=%s" % paused)
 
 
+## Tracks whether we were the ones who disabled sky on interior entry, so we
+## only re-enable on exit if we actually toggled it off ourselves.
+var _sky_was_on_pre_interior: bool = false
+
+## Tracks fallback directional light visibility before interior entry, so we
+## can restore it on exit when sky toggle isn't responsible for it (the case
+## where sky was already off when we entered).
+var _fallback_light_was_visible_pre_interior: bool = false
+
+
 ## Hide Terrain3D when entering interior — camera at Y=-500 causes
 ## Terrain3D GDExtension to crash (clipmap generation at underground position).
+## Also disable SkyManager in classic mode so the pocket manager's interior
+## Environment swap actually applies (SkyManager owns its own WorldEnvironment
+## and would otherwise override the interior env, leaking clouds/sun/sky fog
+## into the interior and wasting GPU on offscreen cloud rendering).
+## And disable the fallback DirectionalLight3D so exterior sun direction
+## doesn't leak into the interior as a second fake sun (hard cut-over — the
+## interior is lit entirely by its baked point/spot lights).
 func _on_interior_transition_started(_cell_name: String) -> void:
 	if terrain_3d:
 		terrain_3d.visible = false
 		Log.info("streaming", "[TRANSITION] Terrain3D hidden (entering interior)")
 
+	# Seamless mode keeps the sky visible (used for windows/portal continuity).
+	# Only the classic fade-to-black path wants the sky hard-disabled.
+	if _pocket_manager and _pocket_manager.seamless_enabled:
+		return
+	if _env_controls and _env_controls.show_sky:
+		_sky_was_on_pre_interior = true
+		_env_controls.on_show_sky_toggled(false)
+		Log.info("streaming", "[TRANSITION] Sky disabled (entering interior)")
 
-## Restore Terrain3D when exiting to exterior.
+	# Always kill the fallback directional light on interior entry, regardless
+	# of whether sky was on (toggling sky off would have turned it on; sky
+	# already off means it was on as the sole exterior light). Interior wants
+	# zero directional light — matches OpenMW interior handling.
+	if _env_controls:
+		var fb_light: DirectionalLight3D = _env_controls.get_fallback_light()
+		if fb_light:
+			_fallback_light_was_visible_pre_interior = fb_light.visible
+			fb_light.visible = false
+
+
+## Restore Terrain3D and sky when exiting to exterior. `is_inside()` is still
+## true on interior->interior hops, so we only restore on a real exit.
 func _on_interior_transition_completed(cell_name: String) -> void:
 	if not _pocket_manager or not _pocket_manager.is_inside():
 		if terrain_3d:
 			terrain_3d.visible = true
 			Log.info("streaming", "[TRANSITION] Terrain3D restored (exited to exterior)")
+		if _sky_was_on_pre_interior:
+			# `on_show_sky_toggled(true)` handles fallback_light visibility
+			# (sets it false when sky comes back on) — don't double-manage it.
+			if _env_controls:
+				_env_controls.on_show_sky_toggled(true)
+			_sky_was_on_pre_interior = false
+			Log.info("streaming", "[TRANSITION] Sky restored (exited to exterior)")
+		else:
+			# Sky was already off — the sky toggle isn't running, so manually
+			# restore the fallback light we disabled on entry.
+			if _env_controls:
+				var fb_light: DirectionalLight3D = _env_controls.get_fallback_light()
+				if fb_light:
+					fb_light.visible = _fallback_light_was_visible_pre_interior
 
 
 # ==================== Interior Cell Browser ====================

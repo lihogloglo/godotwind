@@ -29,8 +29,12 @@ const MAX_CACHE_SIZE := 500
 ## Maximum concurrent ResourceLoader.load_threaded_request calls in flight.
 ## Godot 4.6's internal resource loader can segfault (c0000005) when hammered
 ## with hundreds of concurrent threaded load requests during heavy startup.
-## 16 is conservative enough to avoid the crash while keeping throughput high.
 const MAX_CONCURRENT_ASYNC_LOADS := 16
+
+## Maximum PackedScene instantiations per frame in _drain_pending_instantiate_queue.
+## Each instantiate costs 1-5ms; unbounded drain can block the main thread for
+## hundreds of ms when a burst of async loads complete simultaneously.
+const MAX_INSTANTIATE_PER_FRAME := 8
 
 ## Cache for loaded models: model_path (lowercase) -> Node3D prototype
 ##
@@ -77,21 +81,8 @@ var _pending_async_loads: Dictionary = {}
 ## Each entry: {disk_path: String, cache_key: String, callback: Callable, model_path: String, item_id: String}
 var _deferred_async_queue: Array[Dictionary] = []
 
-## Frame-deferred instantiate queue.
-## TIME-BOXED BRIDGE (2026-04-15, owner @roaster) for the `load_threaded_get` race
-## documented in docs/audit/MODEL_LOADER_RACE.md case (c2): `THREAD_LOAD_LOADED`
-## fires before the worker has fully resolved embedded sub-resources, so an
-## immediate `packed_scene.instantiate()` can dereference a half-built RID and
-## segfault. Holding the PackedScene for one extra frame gives the engine time
-## to finalize sub-resources before instantiate runs.
-##
-## Bridge to: doc rec #2 — switch `_model_cache` to store PackedScene and let
-## callers `instantiate()` themselves on demand. That refactor touches 18+
-## callsites across cell_manager.gd / reference_instantiator.gd / static_object_renderer.gd
-## and is its own work item. Until then, the deferred instantiate puts the
-## same temporal gap between `load_threaded_get` and `instantiate()` without
-## changing the public API.
-##
+## Deferred instantiate queue. Async pipeline fills this; drain uses sync
+## re-load (CACHE_MODE_IGNORE) to bypass the c2 sub-resource race.
 ## Each entry: {disk_path: String, packed_scene: PackedScene, cache_key: String, callbacks: Array[Dictionary]}
 var _pending_instantiate_queue: Array[Dictionary] = []
 
@@ -422,19 +413,13 @@ func is_loading_async(model_path: String, item_id: String = "") -> bool:
 ## Process pending async loads - call this every frame
 ## Returns number of loads completed this frame
 ##
-## Two-phase pipeline (TIME-BOXED BRIDGE for MODEL_LOADER_RACE.md case (c2)):
-##   Phase A: instantiate PackedScenes that completed loading on the PREVIOUS
-##            frame. The one-frame gap gives Godot's worker thread time to
-##            finish resolving embedded sub-resources before the main thread
-##            calls `instantiate()` — without it, `instantiate()` can
-##            dereference a half-built mesh RID and segfault.
-##   Phase B: poll currently in-flight loads. Loads that flipped to
-##            THREAD_LOAD_LOADED this frame are moved into the pending
-##            instantiate queue (NOT instantiated yet); they'll be
-##            instantiated in next frame's Phase A.
-##
-## "Completed" is counted at instantiate time (Phase A), not at load time
-## (Phase B), so the public count semantics are unchanged.
+## Two-phase pipeline:
+##   Phase A: instantiate up to MAX_INSTANTIATE_PER_FRAME entries from the
+##            pending queue (rate-limited to keep main thread responsive).
+##            Uses the async-loaded PackedScene with can_instantiate() guard;
+##            falls back to sync re-load on validation failure.
+##   Phase B: poll in-flight async loads. Completed loads move to the pending
+##            instantiate queue for Phase A next frame.
 func process_async_loads() -> int:
 	# Phase A: instantiate everything that loaded last frame.
 	var completed := _drain_pending_instantiate_queue()
@@ -514,19 +499,23 @@ func process_async_loads() -> int:
 	return completed
 
 
-## Phase A of process_async_loads: drain PackedScenes that loaded last frame
-## and instantiate them now. The one-frame gap between `load_threaded_get` and
-## `instantiate()` mitigates the case (c2) race in MODEL_LOADER_RACE.md.
+## Phase A of process_async_loads: instantiate a bounded batch of entries from
+## the pending queue. Rate-limited to MAX_INSTANTIATE_PER_FRAME to keep the
+## main thread responsive (each instantiate costs 1-5ms). Remaining entries
+## stay in the queue for next frame.
+##
+## Uses the async-loaded PackedScene with a `can_instantiate()` guard. If the
+## guard fails (stale sub-resources from c2 race), falls back to a sync re-load
+## with CACHE_MODE_IGNORE. See MODEL_LOADER_RACE.md and STABILITY_PERF §A2.
 ##
 ## Returns count of entries instantiated (counted toward completed loads).
 func _drain_pending_instantiate_queue() -> int:
 	if _pending_instantiate_queue.is_empty():
 		return 0
 
-	# Snapshot + clear so a callback that triggers another async load doesn't
-	# mutate the queue we're iterating.
-	var to_process := _pending_instantiate_queue.duplicate()
-	_pending_instantiate_queue.clear()
+	var batch_size := mini(_pending_instantiate_queue.size(), MAX_INSTANTIATE_PER_FRAME)
+	var to_process := _pending_instantiate_queue.slice(0, batch_size)
+	_pending_instantiate_queue = _pending_instantiate_queue.slice(batch_size)
 
 	var completed := 0
 	for entry: Dictionary in to_process:
@@ -535,38 +524,14 @@ func _drain_pending_instantiate_queue() -> int:
 		var cache_key: String = entry.cache_key
 		var callbacks: Array = entry.callbacks
 
-		var model: Node3D = null
-		if packed_scene:
-			# DIAGNOSTIC (2026-04-14): log pre-instantiate state to correlate
-			# segfaults at this site with disk_path + file size + concurrent
-			# load count. Remove once root cause is pinned.
-			Log.info("models", "instantiate_attempt path=%s size=%d in_flight=%d" % [
-				disk_path,
-				FileAccess.get_file_as_bytes(disk_path).size(),
-				_pending_async_loads.size()
-			])
-			var instance := packed_scene.instantiate()
-			if instance is Node3D:
-				_strip_occluders(instance)
-				# Parity with sync `_load_from_disk_cache` — without this, future
-				# duplicates of the cached prototype share resource paths and can
-				# conflict on multi-thread access. Pre-existing bug fixed here.
-				_clear_resource_paths(instance)
-				model = instance as Node3D
-			elif instance != null:
-				push_warning("ModelLoader: Async load produced non-Node3D: %s" % disk_path)
-				instance.queue_free()
-			else:
-				push_warning("ModelLoader: Async instantiate returned null: %s" % disk_path)
+		var model: Node3D = _safe_instantiate(packed_scene, disk_path)
 
-		# Cache the result
 		_model_cache[cache_key] = model
 		_last_access[cache_key] = Engine.get_frames_drawn()
 		if model:
 			_stats["models_from_disk_async"] += 1
 			_evict_if_over_budget()
 
-		# Fire callbacks
 		for cb_info: Dictionary in callbacks:
 			var cb: Callable = cb_info.callback
 			if cb.is_valid():
@@ -575,6 +540,46 @@ func _drain_pending_instantiate_queue() -> int:
 		completed += 1
 
 	return completed
+
+
+## Instantiate a PackedScene with validation. Uses the async-loaded reference
+## directly (rate-limited to MAX_INSTANTIATE_PER_FRAME). Falls back to sync
+## re-load only if can_instantiate() fails.
+func _safe_instantiate(packed_scene: PackedScene, disk_path: String) -> Node3D:
+	if packed_scene == null:
+		return null
+	if not packed_scene.can_instantiate():
+		Log.warn("models", "can_instantiate() false: %s" % disk_path.get_file())
+		return null
+
+	var instance := packed_scene.instantiate()
+	if instance == null:
+		return null
+	if not instance is Node3D:
+		instance.queue_free()
+		return null
+
+	_strip_occluders(instance)
+	_clear_resource_paths(instance)
+	return instance as Node3D
+
+
+## Sync re-load + instantiate as fallback when the async-loaded PackedScene is
+## invalid. Uses CACHE_MODE_IGNORE for a fresh copy from disk.
+func _sync_instantiate_from_disk(disk_path: String) -> Node3D:
+	var fresh := ResourceLoader.load(disk_path, "PackedScene") as PackedScene
+	if fresh == null or not fresh.can_instantiate():
+		return null
+
+	var instance := fresh.instantiate()
+	if instance == null or not instance is Node3D:
+		if instance != null:
+			instance.queue_free()
+		return null
+
+	_strip_occluders(instance)
+	_clear_resource_paths(instance)
+	return instance as Node3D
 
 
 ## Get count of pending async loads (in-flight + deferred + pending-instantiate)
@@ -892,6 +897,10 @@ func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 
 	if mesh_count == 0:
 		return  # Nothing to cache
+
+	# Strip OccluderInstance3D BEFORE packing — cached .res files with corrupt
+	# occluder data crash packed_scene.instantiate() at load time (sig 11).
+	_strip_occluders(node)
 
 	# CRITICAL: Set owner on all children so PackedScene.pack() includes them
 	# Without this, pack() only saves the root node when not in scene tree

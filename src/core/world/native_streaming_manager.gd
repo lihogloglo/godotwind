@@ -250,6 +250,14 @@ var _hlod_needs_initial_update: bool = true
 ## Tracks whether camera crossed a cell boundary this frame
 var _cell_changed_this_frame: bool = false
 
+## DIAGNOSTIC (2026-04-15, silent-crash pin): heartbeat emitter. Log tail
+## distinguishes silent native death from clean shutdown: if the last line of
+## the log is recent-ish and has no `heartbeat` suffix, the main thread froze
+## or the process was killed between heartbeats. Interval is coarse (5 s) —
+## crash resolution still relies on per-instantiate sentinels.
+var _last_heartbeat_sec: int = -1
+var _last_heartbeat_frame: int = -1
+
 ## Per-phase profiler. Created lazily on first access when SC.ENABLE_PROFILING is true.
 ## External consumers (benchmark, debug overlay) read via get_profiler().
 var _profiler: StreamingProfilerScript = null
@@ -475,6 +483,36 @@ func _process(delta: float) -> void:
 				Log.debug("streaming", "_process skipped: no camera")
 			return
 
+	# DIAGNOSTIC heartbeat (2026-04-15, silent-crash pin). 5 s cadence, main-thread only.
+	# Crash triage: last heartbeat line marks the frame range where the main
+	# thread was alive; the last `instantiate_attempt`/`instantiate_done` pair
+	# in model_loader pins the PackedScene at the instant of the crash.
+	var now_sec: int = int(Time.get_ticks_msec() / 1000)
+	if now_sec >= _last_heartbeat_sec + 5:
+		var elapsed := now_sec - _last_heartbeat_sec if _last_heartbeat_sec >= 0 else 0
+		var frames_since := Engine.get_frames_drawn() - _last_heartbeat_frame if _last_heartbeat_frame >= 0 else 0
+		var fps_est := float(frames_since) / float(elapsed) if elapsed > 0 else 0.0
+		_last_heartbeat_sec = now_sec
+		_last_heartbeat_frame = Engine.get_frames_drawn()
+		var p := Performance
+		var process_ms := p.get_monitor(p.TIME_PROCESS) * 1000.0
+		var physics_ms := p.get_monitor(p.TIME_PHYSICS_PROCESS) * 1000.0
+		var draws := int(p.get_monitor(p.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+		var objects := int(p.get_monitor(p.RENDER_TOTAL_OBJECTS_IN_FRAME))
+		var prims := int(p.get_monitor(p.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d" % [
+			now_sec,
+			Engine.get_frames_drawn(),
+			fps_est,
+			process_ms,
+			physics_ms,
+			draws,
+			objects,
+			prims / 1000,
+			_loaded_cells.size(),
+			_loading_cells.size(),
+		])
+
 	# Start timing for frame budget telemetry
 	var frame_start_usec := Time.get_ticks_usec()
 	var phase_times: PackedFloat64Array = PackedFloat64Array()  # usec per phase
@@ -667,7 +705,7 @@ func _update_loaded_cells() -> void:
 				# Move back to world container
 				if cell_node.get_parent():
 					cell_node.get_parent().remove_child(cell_node)
-				cell_node.visible = true
+				cell_node.visible = _near_tier_visible
 				_world_container.add_child(cell_node)
 				_loaded_cells[grid] = cell_node
 				reclaimed.append(grid)
@@ -838,6 +876,7 @@ func _request_cell_async(grid: Vector2i) -> bool:
 	# Objects will appear progressively as they are instantiated
 	var cell_node := _cell_manager.get_async_cell_node(request_id)
 	if cell_node:
+		cell_node.visible = _near_tier_visible
 		_world_container.add_child(cell_node)
 		_loaded_cells[grid] = cell_node
 
@@ -858,6 +897,7 @@ func _load_cell_sync(grid: Vector2i) -> void:
 
 	if cell_node:
 		_configure_cell_visibility(cell_node)
+		cell_node.visible = _near_tier_visible
 		_world_container.add_child(cell_node)
 		_loaded_cells[grid] = cell_node
 
@@ -1404,10 +1444,8 @@ func _process_async_completions() -> void:
 			var cell_node := _cell_manager.get_async_result(request_id)
 
 			if cell_node:
-				# Per-object visibility_range is now applied during instantiation
-				# (cell_manager.process_async_instantiation sets visibility_prebaked meta)
-				# Only run the cell-level pass as a safety net for edge cases
 				_configure_cell_visibility(cell_node)
+				cell_node.visible = _near_tier_visible
 
 				if cell_node.get_parent() != _world_container:
 					_world_container.add_child(cell_node)
@@ -1638,8 +1676,12 @@ func set_impostors_visible(visible: bool) -> void:
 	if _impostor_renderer:
 		_impostor_renderer.visible = visible
 
-## Toggle NEAR-tier Node3D cells (loaded cell containers)
+## Toggle NEAR-tier Node3D cells (loaded cell containers).
+## Remembers state so cells loaded after the toggle respect it.
+var _near_tier_visible: bool = true
+
 func set_near_tier_visible(visible: bool) -> void:
+	_near_tier_visible = visible
 	for grid: Vector2i in _loaded_cells:
 		var cell_node: Node3D = _loaded_cells[grid]
 		if cell_node:

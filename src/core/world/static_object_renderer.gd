@@ -46,6 +46,11 @@ var _scenario: RID = RID()
 ## so the HLOD cell mesh takes over at distance.
 var visibility_range_end: float = DU.MID_END
 
+## Global visibility override for benchmark A/B testing. When false, all RS
+## instances are hidden and newly-created instances start hidden. Toggled by
+## SubsystemToggles "mid_objects" flag via set_all_visible().
+var _globally_visible: bool = true
+
 ## Stats
 var _stats: Dictionary = {
 	"mesh_types": 0,
@@ -56,10 +61,15 @@ var _stats: Dictionary = {
 
 #region Data Classes
 
-## Per-child-mesh entry inside a multi-mesh prototype
+## Per-child-mesh entry inside a multi-mesh prototype.
+##
+## `mesh_rid` is intentionally NOT cached here (F3a, 2026-04-15). Derive it at
+## use-time from `mesh_resource.get_rid()` — the strong ref guarantees the RID
+## is valid as long as the entry exists. Caching the RID at registration was
+## the root of the B1 RID-lifecycle hazard (static_object_renderer.gd:339
+## `Initializing already initialized RID` / `Parameter mem is null` cluster).
 class SubMeshEntry:
-	var mesh_resource: Mesh        ## Strong ref — prevents GC
-	var mesh_rid: RID
+	var mesh_resource: Mesh        ## Strong ref — prevents GC; derive .get_rid() at use-time
 	var material_resource: Material  ## Strong ref (whole-mesh override, may be null)
 	var material_rid: RID
 	var surface_materials: Array[Material] = []  ## Per-surface mats (strong refs)
@@ -178,9 +188,10 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 	var any_has_lod := false
 
 	for mi: MeshInstance3D in all_mis:
+		if mi.mesh == null:
+			continue  # Defensive: _find_all_mesh_instances filters but guard against future edits
 		var entry := SubMeshEntry.new()
 		entry.mesh_resource = mi.mesh
-		entry.mesh_rid = mi.mesh.get_rid()
 		# Local transform relative to prototype root
 		if mi.get_parent() == prototype or mi == prototype:
 			entry.local_transform = mi.transform
@@ -302,21 +313,32 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	# Create one RS instance per sub-mesh in the prototype.
 	# Multi-mesh buildings (cantons, huts) get N RS instances; single-mesh
 	# flora/clutter get 1. All tracked under the same instance ID.
+	# F3a (2026-04-15): derive mesh_rid at use-time from the strongly-held
+	# mesh_resource. Caching the RID at registration was the root of the B1
+	# `Initializing already initialized RID` / `mem is null` cluster.
 	var sub_entries := mesh_type.sub_meshes
 	if sub_entries.is_empty():
-		# Fallback: legacy registration path (register_mesh_type called directly)
-		var rid := _create_rs_instance(mesh_type.mesh_rid, mesh_type.material_rid,
+		# Fallback: legacy registration path (register_mesh_type called directly).
+		# If we have the mesh resource, re-derive; else trust the owned/cached RID.
+		var legacy_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
+			else mesh_type.mesh_rid
+		var rid := _create_rs_instance(legacy_mesh_rid, mesh_type.material_rid,
 			mesh_type.surface_materials, transform)
+		if rid.is_valid():
+			data.sub_rids.append(rid)
 		data.instance_rid = rid
-		data.sub_rids.append(rid)
 	else:
 		for entry: SubMeshEntry in sub_entries:
+			if entry.mesh_resource == null:
+				continue
 			var child_xform := transform * entry.local_transform
-			var rid := _create_rs_instance(entry.mesh_rid, entry.material_rid,
+			var rid := _create_rs_instance(entry.mesh_resource.get_rid(), entry.material_rid,
 				entry.surface_materials, child_xform)
-			data.sub_rids.append(rid)
-		# Primary RID = first (backwards compat)
-		data.instance_rid = data.sub_rids[0]
+			if rid.is_valid():
+				data.sub_rids.append(rid)
+		if not data.sub_rids.is_empty():
+			# Primary RID = first (backwards compat)
+			data.instance_rid = data.sub_rids[0]
 
 	_instances[id] = data
 	mesh_type.instance_count += 1
@@ -332,8 +354,15 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 
 
 ## Create a single RS instance with visibility_range + LOD bias + material.
+## Returns RID() on invalid mesh_rid — caller must guard against non-valid return.
 func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 		surface_materials: Array[Material], xform: Transform3D) -> RID:
+	# F3a (2026-04-15): defensive guard. An invalid mesh_rid reaching
+	# instance_set_base was the B1 crash vector (`Initializing already initialized
+	# RID` + `Parameter mem is null` cluster). Log once, skip cleanly.
+	if not mesh_rid.is_valid():
+		push_warning("StaticObjectRenderer: _create_rs_instance received invalid mesh_rid — skipping")
+		return RID()
 	var rs := RenderingServer
 	var instance_rid := rs.instance_create()
 	rs.instance_set_base(instance_rid, mesh_rid)
@@ -360,6 +389,9 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 
 	# Default LOD bias — tunable per type later via streaming_config.
 	rs.instance_geometry_set_lod_bias(instance_rid, 1.0)
+
+	if not _globally_visible:
+		rs.instance_set_visible(instance_rid, false)
 
 	return instance_rid
 
@@ -572,6 +604,7 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 ## Toggle visibility of ALL RS instances (for benchmark A/B testing).
 ## Operates directly on RS instances since they are not in the Node3D tree.
 func set_all_visible(visible: bool) -> void:
+	_globally_visible = visible
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
 		for rid: RID in data.sub_rids:
