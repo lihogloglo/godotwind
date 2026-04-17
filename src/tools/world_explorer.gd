@@ -1558,6 +1558,17 @@ func _setup_subsystem_toggles() -> void:
 
 	_subsystem_toggles.setup(callbacks, defaults)
 
+	# CLI: --near-only disables MID + HLOD + FAR (impostors) at boot.
+	# Diagnostic mode: user wants to see what only-NEAR looks like under
+	# the current streaming pipeline without touching production defaults.
+	for a in OS.get_cmdline_args():
+		if a == "--near-only":
+			_subsystem_toggles.set_flag("mid_objects", false)
+			_subsystem_toggles.set_flag("hlod", false)
+			_subsystem_toggles.set_flag("impostors", false)
+			_log("[color=yellow]--near-only: mid/hlod/impostors OFF[/color]")
+			break
+
 	# Register console commands
 	if console:
 		_subsystem_toggles.register_commands(console)
