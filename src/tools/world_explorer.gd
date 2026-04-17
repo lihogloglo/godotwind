@@ -491,18 +491,16 @@ func _init_async() -> void:
 	# Setup subsystem toggles (needs all managers initialized)
 	_setup_subsystem_toggles()
 
-	# Phase 8 — boot gate + teleport hook temporarily disabled
-	# 2026-04-17 after back-to-back cold-boot sig11 crashes in the
-	# streaming pipeline (model_loader.gd:595, object_paging.gd:963 —
-	# both `packed_scene.instantiate()` sites, both pre-existing per
-	# STATUS.md "crashes periodically"). Phase 8 didn't introduce the
-	# crashes but may be rolling the dice differently. Keep the
-	# LoadingStateMachine + SceneLoadingScreen files in-tree so the
-	# next session can re-enable after the instantiate-race fix lands.
-	#
-	# _enter_boot_loading_gate()
-	# if native_streaming_manager.has_signal("teleport_happened"):
-	# 	native_streaming_manager.teleport_happened.connect(_on_teleport_happened)
+	# Phase 8 — boot gate + teleport hook re-enabled 2026-04-17 after
+	# pass-3 diagnostic launch (Phase 8 disabled) reproduced the same
+	# sig11 at model_loader.gd:595. Phase 8 is architecturally innocent;
+	# the crash is the pre-existing packed_scene.instantiate() race
+	# flagged in STATUS.md ("crashes periodically"). Root-cause fix is
+	# a separate session. pause_gameplay stays false in _enter_boot_
+	# loading_gate / _on_teleport_happened until that lands.
+	_enter_boot_loading_gate()
+	if native_streaming_manager.has_signal("teleport_happened"):
+		native_streaming_manager.teleport_happened.connect(_on_teleport_happened)
 
 	# Autonomous performance audit — wire AutoBenchRunner when invoked with
 	# `--bench-auto [stamp]` on the command line. Runs scenarios C-F from
