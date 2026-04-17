@@ -405,7 +405,7 @@ No mid-phase acks. If the implementer drifts (e.g. Phase 3 grows a second epicyc
 | 0 — Baseline | SKIPPED (verbal) | user-reported ~14→50 FPS; §4.1 recorded |
 | 1 — Free wins | DONE (partial) | GPUSceneDatabase deleted + LightAnimator gated; batch_cell_into_multimesh disable parked pending user auth |
 | 2 — Shader fade | DONE | Tween removed, shader reads TIME+spawn_time; crash-free flight test pending user run |
-| 3 — World-scoped MultiMesh | IN_PROGRESS — step 1/8 done | draw_calls <3k @ horizon, FPS ≥100 @ vista. Design v2 @ `docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md`. Step 1: skeletons + tests shipped (commit 89780df). Steps 2-8 pending. |
+| 3 — World-scoped MultiMesh | IN_PROGRESS — steps 1-4/8 done | draw_calls <3k @ horizon, FPS ≥100 @ vista. Design v2 @ `docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md`. Step 1: skeletons + tests (89780df). Step 2: StaticObjectRenderer feature flag + registry routing (d71302c, f5472b1, 5e2450a). Step 3: batch render correctness without cull (93973df). Step 4: GDScript cull pass + registry.tick_cull_if_needed driver (f3105ca). Steps 5-8 (C#, shader, dead-code delete) pending; runtime A/B of GDScript cull pending user. |
 | 4 — HLOD/MID dedup | TODO | rendered_objects HLOD-on drops ≥30% |
 | 5 — FAR_START = 1 km | TODO | impostors >980 m only, vista FPS -10% ceiling |
 | 6 — Impostor double-buffer | TODO | p99-p50 gap -5 ms |
