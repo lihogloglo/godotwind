@@ -1279,12 +1279,24 @@ func _cmd_lod_bias_global(args: Dictionary) -> String:
 	var bias: float = args.get("bias", 1.0)
 	var renderer: StaticObjectRenderer = _streaming_manager._static_renderer
 	var updated := 0
+	# Phase 3 registry path — one RS instance per PrototypeBatch (not per
+	# instance). Iterate batches for the full MID-tier set.
+	var registry: RefCounted = renderer._prototype_registry
+	if registry != null:
+		var batches: Array[RefCounted] = registry.iter_batches()
+		for batch: RefCounted in batches:
+			var rid: RID = batch.rs_instance
+			if rid.is_valid():
+				RenderingServer.instance_geometry_set_lod_bias(rid, bias)
+				updated += 1
+	# Legacy fallback — register_mesh_type direct callers (tests + debug) still
+	# keep per-object RS instances. Cover them too for completeness.
 	for id: int in renderer._instances:
 		var data: StaticObjectRenderer.InstanceData = renderer._instances[id]
 		if data.instance_rid.is_valid():
 			RenderingServer.instance_geometry_set_lod_bias(data.instance_rid, bias)
 			updated += 1
-	return "Applied lod_bias=%.2f to %d RS instances" % [bias, updated]
+	return "Applied lod_bias=%.2f to %d RS instances (registry batches + legacy fallback)" % [bias, updated]
 
 
 ## Post-B-wide LOD pipeline status readout.

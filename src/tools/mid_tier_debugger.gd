@@ -888,13 +888,17 @@ func _audit_near_object(node: Node3D, cam_pos: Vector3, cam_cull_mask: int, stat
 
 ## Audit MID-tier static renderer.
 ##
-## Post-B-wide refactor: single RS instance per object with an embedded LOD
-## chain. `lod_rids` is no longer populated (field exists as stub); the only
-## thing to spot-check is the single `instance_rid`.
+## Phase 3 registry path (post-step-7): one RS instance per PrototypeBatch,
+## spanning all loaded cells. Instances themselves don't own an RS RID —
+## they occupy slots in a batch's MultiMesh. Audit spot-checks batch RIDs
+## (there are ~N batches for ~N_prototypes, not N_instances), and falls
+## back to per-instance RID spot-check for the legacy register_mesh_type
+## direct path.
 func _audit_mid_renderer(static_renderer: Variant) -> Dictionary:
 	var stats := {
 		"mesh_types": 0, "total_instances": 0, "visible_instances": 0,
 		"lod_rids": 0, "invalid_rids": 0, "no_lod": 0,
+		"registry_batches": 0, "registry_slots": 0,
 		"issues": [] as Array[String]
 	}
 
@@ -906,10 +910,26 @@ func _audit_mid_renderer(static_renderer: Variant) -> Dictionary:
 	stats.total_instances = renderer_stats.get("total_instances", 0)
 	stats.visible_instances = renderer_stats.get("visible_instances", 0)
 	stats.lod_rids = 0  # single-RID path; no per-LOD RID fan-out post-refactor
+	stats.registry_batches = renderer_stats.get("registry_batches", 0)
+	stats.registry_slots = renderer_stats.get("registry_slots", 0)
 
-	# Spot-check: sample instances for valid main RIDs
-	var instances: Dictionary = static_renderer.get("_instances")
 	var issues: Array[String] = stats.issues
+
+	# Primary path: Phase 3 registry batches. Spot-check every batch's
+	# single world-origin RS instance (cheap — there are only ~N_prototypes).
+	var registry: RefCounted = static_renderer.get("_prototype_registry")
+	if registry != null:
+		var batches: Array[RefCounted] = registry.iter_batches()
+		for batch: RefCounted in batches:
+			var rid: RID = batch.rs_instance
+			if not rid.is_valid():
+				stats.invalid_rids += 1
+				if issues.size() < 50:
+					issues.append("PrototypeBatch @ %d slots: invalid RS instance RID" % batch.slot_count_live)
+
+	# Legacy fallback: register_mesh_type direct callers still keep per-object
+	# RIDs. Spot-check a sample of them.
+	var instances: Dictionary = static_renderer.get("_instances")
 	if instances:
 		var checked := 0
 		for id: int in instances:
@@ -918,11 +938,14 @@ func _audit_mid_renderer(static_renderer: Variant) -> Dictionary:
 			var data = instances[id]
 			if not data:
 				continue
-
+			# Skip registry-routed instances — they have registry_id >= 0 and
+			# an always-invalid instance_rid under the current codepath.
+			if data.registry_id >= 0:
+				continue
 			if not data.instance_rid.is_valid():
 				stats.invalid_rids += 1
 				if issues.size() < 50:
-					issues.append("Instance %d: invalid main RID" % id)
+					issues.append("Legacy instance %d: invalid main RID" % id)
 			checked += 1
 
 	return stats
