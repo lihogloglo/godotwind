@@ -24,6 +24,21 @@ class_name StaticObjectRenderer
 extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
+const PrototypeRegistryScript := preload("res://src/core/world/prototype_registry.gd")
+
+## Phase 3 step 2 coexistence flag. When ON, add_instance routes through the
+## world-scoped PrototypeRegistry (one MultiMesh per (mesh, material) hash
+## across all loaded cells) instead of creating per-object RS instances.
+## OFF (default) keeps the legacy per-object / per-cell-batch path.
+##
+## Toggle via the `proto_registry on|off` console command. Flag flips apply
+## to NEWLY LOADED cells only — the caller is expected to reload cells or
+## restart the scene for a clean A/B.
+var use_prototype_registry: bool = false
+
+## Lazily created registry — one per StaticObjectRenderer, shared across all
+## cells loaded while the flag is ON. Null until first registry-routed add.
+var _prototype_registry: RefCounted = null
 
 ## Registered mesh types: type_name -> MeshType
 var _mesh_types: Dictionary[String, MeshType] = {}
@@ -134,6 +149,12 @@ class InstanceData:
 	## mm_slot + batch. -1 = not batched.
 	var mm_slot: int = -1
 	var batch: CellBatch = null
+	## Phase 3 registry routing. When >= 0, this instance's slots live inside
+	## the world-scoped PrototypeRegistry. sub_rids is empty; visibility /
+	## promotion / removal route through the registry instead of RS RIDs.
+	## Mutually exclusive with mm_slot / batch (registry path skips per-cell
+	## batching entirely).
+	var registry_id: int = -1
 	## Metadata for MID→NEAR promotion (Phase 5b)
 	var model_path: String     ## Original model path for prototype lookup
 	var item_id: String        ## Item variant ID
@@ -327,6 +348,32 @@ func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
 
 #region Instance Add/Remove
 
+## Lazily instantiate the PrototypeRegistry on first registry-routed add.
+## Returns null if the scenario isn't set yet.
+func _ensure_registry() -> RefCounted:
+	if _prototype_registry != null:
+		return _prototype_registry
+	if not _scenario.is_valid():
+		return null
+	_prototype_registry = PrototypeRegistryScript.new(_scenario)
+	return _prototype_registry
+
+
+## Convert MeshType.sub_meshes into the dict-shape the registry expects.
+## Mirrors prototype_registry.gd add_instance() input schema.
+func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
+	var out: Array = []
+	out.resize(mesh_type.sub_meshes.size())
+	for i in range(mesh_type.sub_meshes.size()):
+		var entry: SubMeshEntry = mesh_type.sub_meshes[i]
+		out[i] = {
+			"mesh": entry.mesh_resource,
+			"material": entry.material_resource,
+			"local_transform": entry.local_transform,
+		}
+	return out
+
+
 ## Add an instance of a registered mesh type.
 ##
 ## Post-B-wide: single RS instance per object with a single hard-cull
@@ -359,6 +406,26 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	data.item_id = item_id
 	data.ref_id = ref_id
 	data.ref_num = ref_num
+
+	# Phase 3 registry path — feature-flagged, coexists with legacy.
+	# Branches early: skips per-sub-mesh RS.instance_create entirely and lets
+	# the registry's world-scoped MultiMesh absorb this instance's slots.
+	# Requires sub_meshes populated (register_from_prototype path); legacy
+	# register_mesh_type callers fall through to the RS path below.
+	if use_prototype_registry and not mesh_type.sub_meshes.is_empty():
+		var registry := _ensure_registry()
+		if registry != null:
+			var subs: Array = _build_registry_sub_meshes(mesh_type)
+			registry.add_instance(id, subs, transform, 0.0, DU.FADE_MARGIN_LOD3_FAR)
+			data.registry_id = id
+			_instances[id] = data
+			mesh_type.instance_count += 1
+			_stats["total_instances"] += 1
+			_stats["visible_instances"] += 1
+			if cell_grid not in _cell_index:
+				_cell_index[cell_grid] = [] as Array[int]
+			_cell_index[cell_grid].append(id)
+			return id
 
 	# Create one RS instance per sub-mesh in the prototype.
 	# Multi-mesh buildings (cantons, huts) get N RS instances; single-mesh
@@ -454,7 +521,11 @@ func remove_instance(id: int) -> void:
 
 	var data: InstanceData = _instances[id]
 
-	if data.mm_slot >= 0 and data.batch != null:
+	if data.registry_id >= 0 and _prototype_registry != null:
+		# Registry owns the slots — release them back to the freelist. MultiMesh
+		# + RS instance stay live (shared across all instances of the prototype).
+		_prototype_registry.remove_instance(data.registry_id)
+	elif data.mm_slot >= 0 and data.batch != null:
 		# Vacate the MM slot. The slot index stays burned — compacting would
 		# require rewriting every sibling InstanceData.mm_slot, which costs
 		# more than the GPU price of a few degenerate triangles per cell.
@@ -523,7 +594,9 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 			if id not in _instances:
 				continue
 			var data: InstanceData = _instances[id]
-			if data.mm_slot < 0:
+			if data.registry_id >= 0 and _prototype_registry != null:
+				_prototype_registry.hide_instance(data.registry_id)
+			elif data.mm_slot < 0:
 				for rid: RID in data.sub_rids:
 					if rid.is_valid():
 						RenderingServer.instance_set_visible(rid, false)
@@ -562,7 +635,9 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		if id in _instances:
 			var data: InstanceData = _instances[id]
 			if data.visible:
-				if data.mm_slot < 0:
+				if data.registry_id >= 0 and _prototype_registry != null:
+					_prototype_registry.hide_instance(data.registry_id)
+				elif data.mm_slot < 0:
 					for rid: RID in data.sub_rids:
 						if rid.is_valid():
 							RenderingServer.instance_set_visible(rid, false)
@@ -792,7 +867,12 @@ func set_instance_visible(id: int, visible: bool) -> void:
 
 	data.visible = visible
 
-	if data.mm_slot >= 0 and data.batch != null:
+	if data.registry_id >= 0 and _prototype_registry != null:
+		if visible:
+			_prototype_registry.show_instance(data.registry_id, data.transform)
+		else:
+			_prototype_registry.hide_instance(data.registry_id)
+	elif data.mm_slot >= 0 and data.batch != null:
 		if visible:
 			_show_batch_slot(data.batch, data.mm_slot, data.transform * _sub_local(data))
 		else:
@@ -832,7 +912,12 @@ func set_instance_promoted(id: int, is_promoted: bool, _near_has_lods: bool = tr
 		return
 	data.promoted = is_promoted
 
-	if data.mm_slot >= 0 and data.batch != null:
+	if data.registry_id >= 0 and _prototype_registry != null:
+		if is_promoted:
+			_prototype_registry.hide_instance(data.registry_id)
+		else:
+			_prototype_registry.show_instance(data.registry_id, data.transform)
+	elif data.mm_slot >= 0 and data.batch != null:
 		if is_promoted:
 			# NEAR Node3D takes over; collapse MultiMesh slot to degenerate triangles.
 			_hide_batch_slot(data.batch, data.mm_slot, data.transform.origin)
@@ -851,6 +936,14 @@ func set_instance_transform(id: int, transform: Transform3D) -> void:
 
 	var data: InstanceData = _instances[id]
 	data.transform = transform
+
+	if data.registry_id >= 0 and _prototype_registry != null:
+		# Skip writing live transform to the registry while the instance is
+		# hidden/promoted — the registry hide path zero-scaled the slots;
+		# restoring them here would resurrect a promoted object.
+		if data.visible and not data.promoted:
+			_prototype_registry.set_instance_transform(data.registry_id, transform)
+		return
 
 	if data.mm_slot >= 0 and data.batch != null:
 		# Only write the live transform if the slot isn't currently hidden —
@@ -921,7 +1014,12 @@ func set_all_visible(visible: bool) -> void:
 				RenderingServer.instance_set_visible(batch.rs_instance, visible)
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
-		if data.mm_slot < 0:
+		if data.registry_id >= 0 and _prototype_registry != null:
+			if visible:
+				_prototype_registry.show_instance(data.registry_id, data.transform)
+			else:
+				_prototype_registry.hide_instance(data.registry_id)
+		elif data.mm_slot < 0:
 			for rid: RID in data.sub_rids:
 				if rid.is_valid():
 					RenderingServer.instance_set_visible(rid, visible)
@@ -941,6 +1039,11 @@ func clear(clear_mesh_types: bool = true) -> void:
 			batch.multimesh = null
 			batch.multimesh_rid = RID()
 	_cell_batches.clear()
+
+	# Tear down the registry first — it owns its own RS instances + MultiMeshes.
+	if _prototype_registry != null:
+		_prototype_registry.cleanup()
+		_prototype_registry = null
 
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
@@ -985,6 +1088,15 @@ func get_stats() -> Dictionary:
 	result["mm_batches"] = mm_batches
 	result["mm_slots"] = mm_slots
 	result["mm_cells"] = _cell_batches.size()
+
+	# Registry (Phase 3) stats — zero when flag OFF.
+	result["registry_enabled"] = use_prototype_registry
+	if _prototype_registry != null:
+		result["registry_batches"] = _prototype_registry.get_batch_count()
+		result["registry_slots"] = _prototype_registry.get_total_live_slots()
+	else:
+		result["registry_batches"] = 0
+		result["registry_slots"] = 0
 	return result
 
 

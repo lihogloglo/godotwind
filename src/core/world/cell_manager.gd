@@ -2089,7 +2089,12 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 	# batch RS instances weren't offset by the individual draws saved. Kept in
 	# the tree for iteration against the 150 FPS target. Toggle by commenting
 	# out this single call.
-	if not request.is_interior and _static_renderer:
+	# Phase 3 step 2: when the per-prototype registry is ON, instances are
+	# already routed into world-scoped MultiMeshes at add-time. Skip per-cell
+	# batching entirely — running both would stomp the already-freed sub_rids
+	# path and double-register slots.
+	if not request.is_interior and _static_renderer \
+			and not _static_renderer.use_prototype_registry:
 		_static_renderer.batch_cell_into_multimesh(request.grid)
 
 	request.completed = true
