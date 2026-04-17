@@ -603,6 +603,19 @@ func get_esm_stats(loader: RefCounted) -> Dictionary:
 
 
 # ==========================================================================
+# World MID Cull (Phase 3 step 5)
+# ==========================================================================
+
+## Create a native WorldMidCuller for the per-prototype MultiMesh cull pass.
+## Returns null if C# isn't available (GDScript fallback in
+## prototype_batch.gd handles that case).
+func create_world_mid_culler() -> RefCounted:
+	if not _native_available or _factory == null:
+		return null
+	return _factory.call("CreateWorldMidCuller")
+
+
+# ==========================================================================
 # Shore Mask Baking
 # ==========================================================================
 

@@ -258,7 +258,13 @@ func _resize_capacity_internal(new_capacity: int) -> void:
 ## The C# port can add it if profiling says it's worth it.
 ##
 ## Returns the number of visible slots post-cull.
-func cull_and_upload(cam_pos: Vector3, max_dist_sq: float) -> int:
+##
+## `native_culler` is an optional WorldMidCuller C# instance (from
+## NativeBridge.create_world_mid_culler). When non-null the hot cull loop
+## runs in C# — 20-50× faster than GDScript on ~30k slots per the
+## NativeBridge benchmark note. When null, falls back to the GDScript loop
+## below.
+func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounted = null) -> int:
 	if not multimesh_rid.is_valid():
 		return 0
 
@@ -266,6 +272,9 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float) -> int:
 	if slot_count_live == 0:
 		rs.multimesh_set_visible_instances(multimesh_rid, 0)
 		return 0
+
+	if native_culler != null:
+		return _cull_native(cam_pos, max_dist_sq, native_culler)
 
 	var visible: int = 0
 	var out_off: int = 0
@@ -300,6 +309,43 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float) -> int:
 		_cull_buffer[i] = 0.0
 
 	rs.multimesh_set_buffer(multimesh_rid, _cull_buffer)
+	rs.multimesh_set_visible_instances(multimesh_rid, visible)
+	return visible
+
+
+## Native C# cull path. Keeps the whole hot loop in managed code; GDScript
+## just reads the returned {visible, buffer} dict and uploads.
+##
+## On marshalling — per @roaster review:
+##   - slot_live / slot_transforms / slot_custom_data cross as byte[] /
+##     float[] (Godot auto-marshals PackedByteArray / PackedFloat32Array).
+##     The marshal is O(1) when the backing storage is shared; worst case
+##     is a single copy per array per frame. Cheaper than the GDScript
+##     hot loop regardless.
+##   - Camera position passes as Vector3 (Variant).
+##   - Return is a Godot.Collections.Dictionary: { "visible": int,
+##     "buffer": PackedFloat32Array }. GDScript reads both fields, pushes
+##     buffer to multimesh_set_buffer, sets visible_instance_count.
+@warning_ignore("unsafe_method_access")
+func _cull_native(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounted) -> int:
+	var result: Dictionary = native_culler.call(
+		"CullAndPack",
+		slot_live,
+		slot_transforms,
+		slot_custom_data,
+		cam_pos,
+		max_dist_sq,
+		slot_capacity,
+	)
+	var visible: int = result.get("visible", 0)
+	var buffer_variant: Variant = result.get("buffer")
+	if not (buffer_variant is PackedFloat32Array):
+		push_warning("PrototypeBatch._cull_native: CullAndPack returned no buffer, falling back to GDScript")
+		return cull_and_upload(cam_pos, max_dist_sq, null)
+	var buffer: PackedFloat32Array = buffer_variant
+
+	var rs := RenderingServer
+	rs.multimesh_set_buffer(multimesh_rid, buffer)
 	rs.multimesh_set_visible_instances(multimesh_rid, visible)
 	return visible
 

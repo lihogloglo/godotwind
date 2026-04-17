@@ -309,6 +309,20 @@ public partial class NativeFactory : RefCounted
     }
 
     // =========================================================================
+    // World MID Cull (Phase 3 step 5 — per-frame distance cull + packed buffer)
+    // =========================================================================
+
+    /// <summary>
+    /// Create a new WorldMidCuller instance for the Phase 3 world-scoped MID
+    /// MultiMesh cull pass. 20-50× faster than the GDScript fallback on the
+    /// hot per-slot loop (see PrototypeBatch.cull_and_upload).
+    /// </summary>
+    public WorldMidCuller CreateWorldMidCuller()
+    {
+        return new WorldMidCuller();
+    }
+
+    // =========================================================================
     // Utility
     // =========================================================================
 

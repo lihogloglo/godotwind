@@ -73,6 +73,12 @@ var _last_cull_cam_pos: Vector3 = Vector3.INF
 ## "static world" frame. §5 of the design doc calls for 10 m.
 const CULL_DISTANCE_HYSTERESIS: float = 10.0
 
+## Native C# cull kernel (WorldMidCuller). Lazily instantiated via
+## NativeBridge on the first tick. Null when C# isn't available; batches
+## then fall back to the GDScript cull_and_upload path.
+var _native_culler: RefCounted = null
+var _native_checked: bool = false
+
 #endregion
 
 
@@ -252,11 +258,17 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float) -> int:
 	if not needs_tick:
 		return -1
 
+	## Lazily spin up the C# culler on first real tick.
+	if not _native_checked:
+		_native_checked = true
+		var bridge := NativeBridge.new()
+		_native_culler = bridge.create_world_mid_culler()
+
 	var total_visible: int = 0
 	for key: int in _batches:
 		var batch: RefCounted = _batches[key]
 		if batch != null:
-			total_visible += batch.cull_and_upload(cam_pos, max_dist_sq)
+			total_visible += batch.cull_and_upload(cam_pos, max_dist_sq, _native_culler)
 
 	_cull_dirty = false
 	_last_cull_cam_pos = cam_pos
