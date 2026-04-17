@@ -438,10 +438,11 @@ No mid-phase acks. If the implementer drifts (e.g. Phase 3 grows a second epicyc
 | 1 — Free wins | DONE (partial) | GPUSceneDatabase deleted + LightAnimator gated; batch_cell_into_multimesh disable parked pending user auth |
 | 2 — Shader fade | DONE | Tween removed, shader reads TIME+spawn_time; crash-free flight test pending user run |
 | 3 — World-scoped MultiMesh | DONE (code) — runtime verify pending user | draw_calls <3k @ horizon, FPS ≥100 @ vista. Design v2 @ `docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md`. Step 1: skeletons + tests (89780df). Step 2: StaticObjectRenderer feature flag + registry routing (d71302c, f5472b1, 5e2450a). Step 3: batch render correctness without cull (93973df). Step 4: GDScript cull pass + registry.tick_cull_if_needed driver (f3105ca). Step 5: C# WorldMidCuller.cs (b35cd1c). Step 6: spawn_time fade shader (1291655). Step 7: legacy batch_cell_into_multimesh + CellBatch + feature flag deleted. Registry path is the only MID-tier path; user runtime A/B next. |
-| 4 — HLOD/MID dedup | TODO | rendered_objects HLOD-on drops ≥30% |
-| 5 — FAR_START = 1 km | TODO | impostors >980 m only, vista FPS -10% ceiling |
-| 6 — Impostor double-buffer | TODO | p99-p50 gap -5 ms |
-| 7 — Burst cold-start | DONE (partial) | startup budget 15→25 ms; post-startup 4 ms kept; teleport detection not implemented |
+| 4 — HLOD/MID dedup | DONE (code) — runtime verify pending user | rendered_objects HLOD-on drops ≥30%. Commit 8f7d6f9: HLOD-on by default + retired size_level=0 chunks (MID registry owns 150-300m). Tier bands now strictly non-overlapping (NEAR 0-150, MID 150-300, HLOD 300-1000, FAR 1000+). HLOD-off path cuts MID at NEAR_END + hides impostors per user "Keep it simple" rule. |
+| 5 — FAR_START = 1 km | DONE (code) — runtime verify pending user | impostors >980 m only, vista FPS -10% ceiling. Commit 0983507: FAR_START broken from MID_END, pinned at HLOD_END (1000m). Impostor fade_distance + visibility_range_begin derive from FAR_START. |
+| 6 — Impostor double-buffer | DONE (code) — runtime verify pending user | p99-p50 gap -5 ms. Commit 387ac49: CPU image-conversion loop offloaded to WorkerThreadPool; main-thread finalises create_from_images + atomic shader-param swap; _old_texture_array held one frame for GPU-side double-buffer safety. Note: RenderingServer allocation is main-thread only in 4.6 — a fuller fix requires a RenderingDevice rewrite (scope creep). |
+| 7 — Burst cold-start | DONE | startup budget 15→25 ms; post-startup 4 ms kept. Commit 134ec06: teleport detection — camera jump >500m re-enters startup_phase (budget burst back to 25ms). Matches ObjectPaging.TELEPORT_THRESHOLD so streaming + HLOD warmup enter burst mode in lockstep. EMA velocity skip on teleport frames prevents predictive pre-queue poisoning. |
+| Phase 3 cleanup | DONE | Commit 574c204: mid_tier_debugger + lod_debug_commands iterate registry batches (was iterating always-RID() instance_rids, producing "0 valid RIDs" noise + silent no-op on lod_bias). |
 | X — Skip Node3D (stretch) | PARKED | revisit post-7 |
 | X — Compute cull (stretch) | PARKED | revisit post-3 |
 
