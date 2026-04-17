@@ -1,0 +1,4 @@
+ERROR: Attempting to initialize the wrong RID
+ERROR: Parameter "mem" is null.
+ERROR: Parameter "occluder" is null.
+ERROR: unimplemented base type encountered in renderer scene cull

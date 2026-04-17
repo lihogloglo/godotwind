@@ -1,0 +1,1 @@
+[INFO] [streaming] Startup phase complete after 57 frames, 8 cells loaded, 0 impostor cells remaining (inner ring: 0/153 processed)

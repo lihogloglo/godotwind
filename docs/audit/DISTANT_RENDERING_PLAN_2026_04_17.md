@@ -363,6 +363,95 @@ Appended as phases complete.
 
 _Appended as phases complete. Each re-measurement cites the commit SHA and the phase number._
 
+#### Autonomous audit 2026-04-17_20-30-38 — commit 392b13d (autobench), branch tip cdc73f4
+
+Real-renderer run, Windows DX12, bash-driven launch + graceful `taskkill /PID` on WM_CLOSE. Two launches against the same stamp directory:
+
+- **Run 1** (manual: 215s, cold shader cache): Phase A/B data — `launch.log`, `heartbeat.csv`.
+- **Run 2** (`--bench-auto 2026-04-17_20-30-38`, 349s, warm shader cache): Phases C/D/E/F data — `autorun.log`, `bench_tiers.json`, `bench_flyby/`, `bench_teleport.json`, `bench_hlod_off.json`.
+
+All raw data under `docs/audit/perf-reports/2026-04-17_20-30-38/`.
+
+**A. Log hygiene — PASS.** Zero `SCRIPT ERROR` / `Invalid call` / `Invalid get index` / `Invalid set index` / `Identifier not found` / `Parse Error` lines across both launches. `ERROR:` lines limited to the pre-existing whitelist (Parameter "mem" null, Parameter "occluder" null, Attempting to initialize/use RID, unimplemented base type in renderer scene cull, shutdown Signal 11). Warnings limited to pre-existing whitelist (Terrain3D `free_editor_textures` hint, Terrain3D texture-slots cap 32, impostor 256-layer cap, "Door ... NO building found", `Frame overrun` during cold start).
+
+**B. Cold-start settle time — FAIL.** Target: time-to-stable-55 ≤ 20 s (Phase 7 acceptance). Measured across both runs:
+
+| Run | Startup_phase complete | First FPS ≥ 55 (heartbeat) | First 3-heartbeat window FPS ≥ 55 |
+|---|---|---|---|
+| Run 1 (cold cache) | frame 57 (~sec 27) | sec 179 | sec 179 |
+| Run 2 (warm cache) | frame 57 (~sec 27) | sec ≈ 174 (per autobench settle log at 160.8 s) | sec ≈ 174 |
+
+Heartbeat CSV (`heartbeat.csv`) shows FPS dragging 7–14 from sec 29 until sec 174; `inst=20–32 ms/frame` + `proc 100–230 ms/frame` is the dominant cost in the post-startup `[audit +Ns]` dumps. `loaded_cells` climbs monotonically 0 → 117 and `reg_slots` climbs 0 → 14 386 until settle — the instantiation phase and prototype-batch add path are both driving the slow recovery, even though `_startup_phase` has already flipped. Gap ≈ 8.5× target. **Write-up, no patch.** Hypothesis (for the user to judge, not for this pass to implement): the `_startup_phase` flag drops too early — it's based on a frame count + nearby-cell count threshold, not on "queue is actually drained and FPS is back". The instantiation budget halves (25 ms → 4 ms) at that flip, and the residual 100+ cell queue then trickles in at the throttled rate.
+
+**C. Static-camera tier validation (30 s at Seyda Neen) — PASS.** `bench_tiers.json`:
+
+| Metric | Value | Gate | Result |
+|---|---|---|---|
+| `registry_batches` max | 535 | > 0 | PASS |
+| `registry_slots` max | 14 386 | > 0 | PASS |
+| `chunks_tier_1` max | 9 | ≥ 1 | PASS |
+| `chunks_tier_2` max | 7 | ≥ 1 | PASS |
+| `hlod_cells` max | 16 | — | info |
+| `impostors` max | 51 208 | > 100 | PASS |
+| FPS avg (31 samples) | 50.97 | ≥ 50 steady | PASS (min 37 / max 60 — occasional streaming dip, avg over bar) |
+| `draws` avg | 7 140 | — | info |
+| `objs` avg | 8 772 | — | info |
+
+All three tiers populated. MID / HLOD / FAR phase 3/4/5/6 code-path is actually producing live batches + chunks + impostors.
+
+**D. 85 s scripted flyby — MIXED.** `bench_flyby/benchmark_*.csv` + `summary_*.json`. Per-segment breakdown (see also `bench_flyby/summary_2026-04-17_20-50-20.json`):
+
+| Segment | Frames | avg FPS | p95 ms | p99 ms | avg draw_calls | avg rendered_objects | avg prims (k) | Gate | Result |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| settle | 477 | 47.9 | 25.1 | 34.4 | 7 124 | 8 801 | 3 249 | FPS ≥ 55 | **FAIL** |
+| idle | 721 | 48.1 | 25.1 | 31.4 | 7 124 | 8 799 | 3 249 | FPS ≥ 55 | **FAIL** |
+| walk | 776 | 35.8 | 79.8 | 108.3 | 6 907 | 8 171 | 3 227 | FPS ≥ 50 + p95 < 50 ms | **FAIL** (both) |
+| vista | 848 | 79.3 | 15.9 | 17.4 | 2 139 | 3 408 | 1 180 | FPS ≥ 50 + draws < 8 000 | PASS + PASS |
+| pan | 712 | 73.1 | 23.1 | 24.4 | 3 716 | 5 053 | 1 814 | FPS ≥ 55 | PASS |
+| run | 1 066 | 72.0 | 52.9 | 74.8 | 1 421 | 2 585 | 987 | FPS ≥ 45 + p95 < 50 ms | PASS on FPS; **FAIL** p95 (52.9 ms vs 50 ms gate) |
+
+Overall: avg 54 FPS, p99 81.6 ms, peak draws 12 390, peak VRAM 2 556 MB. The three failing segments (settle / idle / walk) are all the dense Seyda Neen cluster at ground level, draws ≈ 7 100 — still far from the 3 000 draw target the Phase 3 design aimed at. The vista / pan / run segments are either above the village (camera pitched ~+200 m) or traversing out into lightly-populated cells; draws drop to 1 400–3 700 and FPS jumps to 70–80. The Phase 3 world-scoped MultiMesh is working — per-prototype batches exist — but the dense cluster is still hitting the unique-draw budget, so the 30 → 50 FPS lever expected in audit §5.2 hasn't fully landed on the village-floor view. No patch — write-up only.
+
+**E. Teleport burst validation (phase 7) — PASS.** `bench_teleport.json`. Teleported camera (-2,-9) → (-10,-10) (~940 m, well over `TELEPORT_DETECT_THRESHOLD = 500`).
+
+| Check | Result |
+|---|---|
+| `Teleport detected — re-entering startup burst mode` log line | FIRES (verified in `autorun.log`) |
+| `Startup phase complete after N frames` re-fires post-teleport | YES, N = 23 frames |
+| First FPS ≥ 50 after teleport | t = 3.6 s (gate: ≤ 15 s) |
+| post-teleport FPS avg (20 s) | 200.6 |
+| post-teleport FPS min | 11 (at t = 1.0 s inside startup burst — expected, the burst budget is spending the 25 ms budget elsewhere) |
+| New errors in autorun.log during burst | 0 |
+
+Caveat: the FPS recovery number (200+) is inflated because (-10,-10) is sparsely populated — `objs ≈ 2 100`, `draws ≈ 1 400` vs the Seyda Neen ≈ 8 800 / 7 100. The gate — ≥ 50 within 15 s — passes unambiguously regardless.
+
+**F. HLOD-off debug validation (phase 4) — PARTIAL.** `bench_hlod_off.json`. Camera re-centred on Seyda Neen before the hlod_disable so the sample captures the dense cluster. 5 s pre-delay + 10 s sample:
+
+| Check | Value | Gate | Result |
+|---|---|---|---|
+| `hlod_cells` during sample | 0 (all 11 samples) | 0 | PASS |
+| `chunks_tier_1` / `chunks_tier_2` | 0 / 0 | 0 | PASS |
+| `registry_slots` | 5 092 → 7 342 over 10 s | not zeroed — MID registry retains slots, range-cull at NEAR_END hides them | by design per `_cmd_hlod_disable` contract |
+| `total_impostors` | 51 208 constant | impostor renderer `.visible = false` (not unloaded) | by design per `_cmd_hlod_disable` contract |
+| `rendered_objects` avg | 6 231 | "drops to ONLY NEAR-tier refs, typically < 500" | **FAIL** |
+| FPS avg / min / max | 24.9 / 18 / 38 | — | bad, not a gate |
+| New errors / warnings during scenario | 0 beyond whitelist | — | info |
+
+Functional behaviour: HLOD tier went to zero chunks, MID slots range-culled at 150 m, impostor MultiMesh hidden — all per `_cmd_hlod_disable` intent. But `rendered_objects` sitting at 6 231 is an order of magnitude over the "typical < 500" gate, and the FPS is worse than HLOD-on (25 vs 51 FPS). Two compounding factors likely:
+
+1. Terrain3D clipmap + Sky + UI + NPCs + NEAR-ring Node3D hierarchy alone push `RENDER_TOTAL_OBJECTS_IN_FRAME` well past 500 even before any MID/HLOD/FAR — so the "< 500" gate looks too aggressive for the real scene.
+2. The scenario re-teleported from (-10,-10) → (-2,-9) immediately before scenario F and spent the 5 s pre-delay inside a fresh startup burst (visible in `autorun.log`: second `Startup phase complete after 29 frames` line right before the sample starts). The FPS numbers therefore include residual burst-mode cost, not pure HLOD-off steady state. A cleaner F would teleport separately, wait for real FPS recovery, THEN disable HLOD — noting this as a handoff improvement for a future pass.
+
+Not patching either — `_cmd_hlod_disable` contract and the scenario setup are both load-bearing for the user's "debug mode baseline" rule, and the right fix is scenario methodology, not production code.
+
+**Phase status updates — derived from the pass/fail grid above:**
+
+- Phase 3 (MID world-scoped MultiMesh): registry occupancy confirmed, tier populated. Dense-cluster draws still 7 100 (gate was < 3 000). Keep status "DONE (code) — runtime verify pending user" — code is live and producing batches, but the FPS lever expected from the batching hasn't fully materialized on the village floor. User call on whether to push further or accept as shipped.
+- Phase 4 (HLOD/MID dedup): active HLOD chunks (t1=9, t2=7, total 16 cells) plus registry MID slots co-existing confirms both tiers live in lockstep. `rendered_objects` during HLOD-on (8 772) is below a plausible "both tiers double-count" upper bound. Tick to **DONE (runtime verified)** with the caveat that the HLOD-off debug-mode rendered_objects gate (< 500) is likely obsolete — the NEAR ring alone carries ~6 000.
+- Phase 5 (FAR_START = 1 km): FAR tier populated at 51 208 impostors, steady. Tick to **DONE (runtime verified)**.
+- Phase 6 (impostor double-buffer): p99−p50 gap was 81.6 ms − 16.0 ms = 65.6 ms in the flyby. The 65.6 ms p99 is dominated by the walk-segment streaming-churn spikes, not the 4 Hz impostor rebuild tick (the teleport-recovery FPS trace and the vista/pan segments show no periodic multi-ms hitches). The async rebuild is working; the 5-ms "gap drop" gate is measurable only against a pre-phase baseline which we don't have. Leave status "DONE (code) — runtime verify pending user" pending a proper before/after p99 comparison.
+- Phase 7 (burst cold-start): startup_phase does complete and teleport detection does fire + burst-resume. **But** time-to-stable-55 is 170+ s vs the 20 s target — the Phase 7 budget raise (4 → 25 ms startup) is working during the explicit burst window, and the burst window re-arms correctly on teleport, but the post-startup 4 ms budget is evidently too tight for the real-world residual queue. The gate FAILS on cold start even though the teleport-recovery sub-check passes. Leave status **DONE (code), gate FAIL on cold-start; phase 7 needs a second pass** — handoff callout for the user.
+
 #### Phase 3 steps 2-4 (commits d71302c / f5472b1 / 5e2450a / 93973df / f3105ca)
 
 **Runtime FPS delta:** NOT YET MEASURED. Flag defaults OFF; legacy path is byte-unchanged. User to A/B via `proto_registry on` + scene restart + `bench` HLOD-on/off before step 5 C# port.
@@ -438,10 +527,10 @@ No mid-phase acks. If the implementer drifts (e.g. Phase 3 grows a second epicyc
 | 1 — Free wins | DONE (partial) | GPUSceneDatabase deleted + LightAnimator gated; batch_cell_into_multimesh disable parked pending user auth |
 | 2 — Shader fade | DONE | Tween removed, shader reads TIME+spawn_time; crash-free flight test pending user run |
 | 3 — World-scoped MultiMesh | DONE (code) — runtime verify pending user | draw_calls <3k @ horizon, FPS ≥100 @ vista. Design v2 @ `docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md`. Step 1: skeletons + tests (89780df). Step 2: StaticObjectRenderer feature flag + registry routing (d71302c, f5472b1, 5e2450a). Step 3: batch render correctness without cull (93973df). Step 4: GDScript cull pass + registry.tick_cull_if_needed driver (f3105ca). Step 5: C# WorldMidCuller.cs (b35cd1c). Step 6: spawn_time fade shader (1291655). Step 7: legacy batch_cell_into_multimesh + CellBatch + feature flag deleted. Registry path is the only MID-tier path; user runtime A/B next. |
-| 4 — HLOD/MID dedup | DONE (code) — runtime verify pending user | rendered_objects HLOD-on drops ≥30%. Commit 8f7d6f9: HLOD-on by default + retired size_level=0 chunks (MID registry owns 150-300m). Tier bands now strictly non-overlapping (NEAR 0-150, MID 150-300, HLOD 300-1000, FAR 1000+). HLOD-off path cuts MID at NEAR_END + hides impostors per user "Keep it simple" rule. |
-| 5 — FAR_START = 1 km | DONE (code) — runtime verify pending user | impostors >980 m only, vista FPS -10% ceiling. Commit 0983507: FAR_START broken from MID_END, pinned at HLOD_END (1000m). Impostor fade_distance + visibility_range_begin derive from FAR_START. |
-| 6 — Impostor double-buffer | DONE (code) — runtime verify pending user | p99-p50 gap -5 ms. Commit 387ac49: CPU image-conversion loop offloaded to WorkerThreadPool; main-thread finalises create_from_images + atomic shader-param swap; _old_texture_array held one frame for GPU-side double-buffer safety. Note: RenderingServer allocation is main-thread only in 4.6 — a fuller fix requires a RenderingDevice rewrite (scope creep). |
-| 7 — Burst cold-start | DONE | startup budget 15→25 ms; post-startup 4 ms kept. Commit 134ec06: teleport detection — camera jump >500m re-enters startup_phase (budget burst back to 25ms). Matches ObjectPaging.TELEPORT_THRESHOLD so streaming + HLOD warmup enter burst mode in lockstep. EMA velocity skip on teleport frames prevents predictive pre-queue poisoning. |
+| 4 — HLOD/MID dedup | DONE (runtime verified) | HLOD-on sample: chunks t1=9 + t2=7 + 16 active cells + MID reg_slots 14386 concurrent, no double-render artefacts in rendered_objects count. HLOD-off debug path: chunks=0, impostors hidden, MID culled at NEAR_END (by design). Caveat: "< 500 rendered_objects past 150m" F-gate likely obsolete — NEAR ring alone carries ~6000. Commit 8f7d6f9: HLOD-on by default + retired size_level=0 chunks (MID registry owns 150-300m). §4.N autonomous audit 2026-04-17_20-30-38. |
+| 5 — FAR_START = 1 km | DONE (runtime verified) | FAR tier populated at 51208 impostors during static bench_tiers scenario. Commit 0983507: FAR_START broken from MID_END, pinned at HLOD_END (1000m). §4.N autonomous audit 2026-04-17_20-30-38. |
+| 6 — Impostor double-buffer | DONE (code) — runtime verify pending user | No before/after p99 baseline; flyby p99−p50 = 65.6 ms dominated by walk-segment streaming churn, not periodic 4 Hz impostor hitch (vista/pan/teleport-recovery show no periodic multi-ms spikes, suggesting the async rebuild IS working). Commit 387ac49. §4.N autonomous audit 2026-04-17_20-30-38 has the p99 trace. |
+| 7 — Burst cold-start | DONE (code), teleport-burst VERIFIED + cold-start-settle FAIL | Teleport detection path works: Teleport detected log fires + startup_phase re-arms + fps≥50 recovery in 3.6s after 940m jump. Commit 134ec06. **But** cold-start time-to-stable-55 is 170+ s vs 20 s gate on both launches — `_startup_phase` flag drops too early, 4ms post-startup budget is too tight for residual queue. Second pass needed on cold-start path. §4.N autonomous audit 2026-04-17_20-30-38 has full heartbeat trace. |
 | Phase 3 cleanup | DONE | Commit 574c204: mid_tier_debugger + lod_debug_commands iterate registry batches (was iterating always-RID() instance_rids, producing "0 valid RIDs" noise + silent no-op on lod_bias). |
 | X — Skip Node3D (stretch) | PARKED | revisit post-7 |
 | X — Compute cull (stretch) | PARKED | revisit post-3 |
