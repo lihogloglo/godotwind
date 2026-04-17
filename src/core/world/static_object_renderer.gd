@@ -348,6 +348,19 @@ func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
 
 #region Instance Add/Remove
 
+## Per-frame cull tick. No-op unless use_prototype_registry is ON and the
+## registry has been instantiated. Returns the visible slot total (or -1
+## when the registry decided the tick was unnecessary — e.g. static scene
+## with no camera movement).
+##
+## Driver: native_streaming_manager._process. Passes current camera position
+## and the active max-visible-distance squared (visibility_range_end²).
+func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float) -> int:
+	if not use_prototype_registry or _prototype_registry == null:
+		return -1
+	return _prototype_registry.tick_cull_if_needed(cam_pos, max_dist_sq)
+
+
 ## Lazily instantiate the PrototypeRegistry on first registry-routed add.
 ## Returns null if the scenario isn't set yet.
 func _ensure_registry() -> RefCounted:

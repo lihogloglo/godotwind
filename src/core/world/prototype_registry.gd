@@ -60,6 +60,19 @@ var _instance_slots: Dictionary[int, Array] = {}
 ## Configurable initial capacity for newly-created batches.
 var initial_batch_capacity: int = 1024
 
+## Cull tick gate — set true by any mutation (add/remove/transform/hide/show)
+## and consumed on the next tick_cull_if_needed call. Eliminates the no-op
+## path when the frame had zero churn and the camera didn't move.
+var _cull_dirty: bool = true
+
+## Last camera position we ticked a cull from. Used with _cull_dist_threshold²
+## to decide whether movement alone warrants a fresh tick.
+var _last_cull_cam_pos: Vector3 = Vector3.INF
+
+## Distance (in world units) the camera must move before we re-cull on a
+## "static world" frame. §5 of the design doc calls for 10 m.
+const CULL_DISTANCE_HYSTERESIS: float = 10.0
+
 #endregion
 
 
@@ -153,6 +166,7 @@ func add_instance(
 		slots[i] = InstanceSlot.new(batch, slot, local_xform)
 
 	_instance_slots[p_instance_id] = slots
+	_cull_dirty = true
 
 
 ## Release all slots owned by this instance. Idempotent — calling with an
@@ -166,6 +180,7 @@ func remove_instance(p_instance_id: int) -> bool:
 		if entry.batch != null:
 			entry.batch.release_slot(entry.slot)
 	_instance_slots.erase(p_instance_id)
+	_cull_dirty = true
 	return true
 
 
@@ -191,6 +206,7 @@ func set_instance_transform(p_instance_id: int, p_world_transform: Transform3D) 
 	for entry: InstanceSlot in slots:
 		if entry.batch != null:
 			entry.batch.set_slot_transform(entry.slot, p_world_transform * entry.local_transform)
+	_cull_dirty = true
 
 
 ## Hide all slots of an instance (zero-scale degenerate transform). Slot stays
@@ -204,6 +220,7 @@ func hide_instance(p_instance_id: int) -> void:
 	for entry: InstanceSlot in slots:
 		if entry.batch != null:
 			entry.batch.set_slot_transform(entry.slot, _HIDDEN_XFORM)
+	_cull_dirty = true
 
 
 ## Restore a hidden/promoted instance's slots to a live world transform.
@@ -215,6 +232,41 @@ func show_instance(p_instance_id: int, p_world_transform: Transform3D) -> void:
 const _HIDDEN_XFORM: Transform3D = Transform3D(
 	Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO), Vector3.ZERO
 )
+
+#endregion
+
+
+#region Cull driver (step 4)
+
+## Per-frame entry point from native_streaming_manager._process. Ticks a
+## full cull pass across every batch if the set is dirty OR the camera has
+## moved at least CULL_DISTANCE_HYSTERESIS since the previous tick.
+##
+## Returns the total visible slot count this tick (0 if skipped).
+func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float) -> int:
+	var dx: float = cam_pos.x - _last_cull_cam_pos.x
+	var dz: float = cam_pos.z - _last_cull_cam_pos.z
+	var moved_sq: float = dx * dx + dz * dz
+	var needs_tick: bool = _cull_dirty or moved_sq >= CULL_DISTANCE_HYSTERESIS * CULL_DISTANCE_HYSTERESIS
+
+	if not needs_tick:
+		return -1
+
+	var total_visible: int = 0
+	for key: int in _batches:
+		var batch: RefCounted = _batches[key]
+		if batch != null:
+			total_visible += batch.cull_and_upload(cam_pos, max_dist_sq)
+
+	_cull_dirty = false
+	_last_cull_cam_pos = cam_pos
+	return total_visible
+
+
+## Force the next tick_cull_if_needed to actually run, regardless of camera
+## distance / dirty state. Exposed for console diagnostics.
+func force_cull_next_tick() -> void:
+	_cull_dirty = true
 
 #endregion
 

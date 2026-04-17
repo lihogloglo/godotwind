@@ -6,10 +6,16 @@
 ## owning PrototypeRegistry (Phase 3 of
 ## docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md).
 ##
-## Scope (step 1 skeleton):
-## - Slot lifecycle only (acquire / release / transform / custom_data writes).
-## - No per-frame cull pass — that is the registry's job (step 4+ of §13).
-## - No C# integration — lands in step 5.
+## Ownership model (post-step-4 refactor):
+##   - Per-slot transforms + custom_data live in PrototypeBatch's own
+##     PackedFloat32Array fields (slot_transforms, slot_custom_data).
+##   - The MultiMesh's internal buffer is only ever written via
+##     RenderingServer.multimesh_set_buffer during cull_and_upload — never via
+##     per-slot set_instance_transform. This keeps slot indexing coherent
+##     with visible_instance_count (engine renders the first N slots in the
+##     packed buffer; our packing decides which live slots go in first).
+##   - Pre-cull state: visible_instance_count = 0, nothing renders. Caller
+##     MUST tick cull_and_upload after adds for the instances to appear.
 ##
 ## Usage:
 ##   var batch := PrototypeBatch.new(mesh_resource, material_resource, scenario, 1024)
@@ -17,6 +23,7 @@
 ##   batch.set_slot_transform(slot, xform)
 ##   batch.set_slot_custom_data(slot, Color(spawn_time, fade_duration, 0, 0))
 ##   ...
+##   batch.cull_and_upload(cam_pos, max_dist_sq)
 ##   batch.release_slot(slot)
 ##   batch.cleanup()
 ##
@@ -33,6 +40,9 @@ const TRANSFORM_STRIDE: int = 12
 
 ## Stride for custom_data rows (floats).
 const CUSTOM_DATA_STRIDE: int = 4
+
+## Total packed stride per slot in the cull output buffer.
+const PACKED_STRIDE: int = TRANSFORM_STRIDE + CUSTOM_DATA_STRIDE  # 16
 
 ## Default grow factor for capacity.
 const GROW_FACTOR: int = 2
@@ -63,8 +73,22 @@ var slot_count_live: int = 0
 var slot_freelist: PackedInt32Array = PackedInt32Array()
 
 ## Per-slot aliveness byte. 1 = live (part of the render set), 0 = free.
-## Indexed by slot id. Used by the cull pass (step 4+) to iterate only live slots.
+## Indexed by slot id. cull_and_upload iterates this.
 var slot_live: PackedByteArray = PackedByteArray()
+
+## Per-slot world transform, row-major 3x4 (12 floats per slot).
+## Total size = slot_capacity * TRANSFORM_STRIDE.
+var slot_transforms: PackedFloat32Array = PackedFloat32Array()
+
+## Per-slot custom data (4 floats per slot). Maps to INSTANCE_CUSTOM in the
+## shader — (spawn_time, fade_duration, reserved, reserved) per §6 of the
+## design doc.
+## Total size = slot_capacity * CUSTOM_DATA_STRIDE.
+var slot_custom_data: PackedFloat32Array = PackedFloat32Array()
+
+## Reusable packed buffer consumed by multimesh_set_buffer. Sized
+## slot_capacity * PACKED_STRIDE. Grown on capacity grow, never shrunk.
+var _cull_buffer: PackedFloat32Array = PackedFloat32Array()
 
 #endregion
 
@@ -103,16 +127,10 @@ func _init(
 	if material_rid.is_valid():
 		rs.instance_geometry_set_material_override(rs_instance, material_rid)
 
-	## Start with nothing visible. visible_instance_count is bumped up to cover
-	## live slots as acquire_slot / release_slot touch capacity. Once a cull
-	## pass (step 4) lands, the cull driver will overwrite this per tick.
+	## Nothing renders until cull_and_upload runs.
 	rs.multimesh_set_visible_instances(multimesh_rid, 0)
 
 	_resize_capacity_internal(p_initial_capacity)
-	## Free slots default to zero-scale degenerate triangles — safe to leave
-	## inside the render set (visible_count can cover the whole capacity) with
-	## no visible cost until a real acquire_slot writes a live transform.
-	_zero_all_slots_below(p_initial_capacity, 0)
 
 
 #region Slot lifecycle
@@ -130,19 +148,12 @@ func acquire_slot() -> int:
 
 	slot_live[slot] = 1
 	slot_count_live += 1
-	## Pre-cull rendering: visible_instance_count covers the whole capacity so
-	## newly-acquired slots render immediately. Free slots inside the range
-	## are degenerate (zero-scale from _zero_all_slots_below / release_slot)
-	## and cost ~0 on GPU. Step 4 cull driver will replace this with per-tick
-	## packed buffer + multimesh_set_visible_instances.
-	_sync_visible_count()
 	return slot
 
 
-## Release a previously-acquired slot back to the freelist.
-## The slot's transform is collapsed to zero-scale so pre-cull state is safe
-## (degenerate triangles cost effectively nothing on GPU if they somehow leak
-## into the render set before the next cull tick clears visible_instance_count).
+## Release a previously-acquired slot back to the freelist. Leaves its
+## slot_transforms / slot_custom_data entries in place — cull skips them via
+## slot_live anyway; overwriting would waste cycles for the common case.
 func release_slot(slot: int) -> void:
 	if slot < 0 or slot >= slot_capacity:
 		push_warning("PrototypeBatch.release_slot: out-of-range slot %d (cap=%d)" % [slot, slot_capacity])
@@ -155,22 +166,30 @@ func release_slot(slot: int) -> void:
 	slot_count_live -= 1
 	slot_freelist.append(slot)
 
-	## Zero-scale the transform defensively. The cull pass would normally
-	## overwrite this on the next tick, but if a cell unload triggers a
-	## release without an immediate cull tick we don't want the stale
-	## transform to be rendered.
-	multimesh.set_instance_transform(slot, _ZERO_SCALE_XFORM)
-	## No need to shrink visible_count on release — the slot is already
-	## degenerate and cost-free on GPU. Pre-cull mode just keeps visible_count
-	## at slot_capacity (see _sync_visible_count).
 
-
-## Write a world transform into a slot.
+## Write a world transform into a slot's storage. NOT pushed to the GPU
+## until the next cull_and_upload.
 func set_slot_transform(slot: int, xform: Transform3D) -> void:
 	if slot < 0 or slot >= slot_capacity:
 		push_error("PrototypeBatch.set_slot_transform: out-of-range slot %d (cap=%d)" % [slot, slot_capacity])
 		return
-	multimesh.set_instance_transform(slot, xform)
+	var off := slot * TRANSFORM_STRIDE
+	var b := xform.basis
+	var o := xform.origin
+	## Row-major 3x4 — matches native_impostor_renderer.gd:1794-1808
+	## (the known-good multimesh_set_buffer layout for TRANSFORM_3D).
+	slot_transforms[off +  0] = b.x.x
+	slot_transforms[off +  1] = b.y.x
+	slot_transforms[off +  2] = b.z.x
+	slot_transforms[off +  3] = o.x
+	slot_transforms[off +  4] = b.x.y
+	slot_transforms[off +  5] = b.y.y
+	slot_transforms[off +  6] = b.z.y
+	slot_transforms[off +  7] = o.y
+	slot_transforms[off +  8] = b.x.z
+	slot_transforms[off +  9] = b.y.z
+	slot_transforms[off + 10] = b.z.z
+	slot_transforms[off + 11] = o.z
 
 
 ## Write a 4-float custom data payload into a slot. Layout documented in
@@ -180,7 +199,11 @@ func set_slot_custom_data(slot: int, data: Color) -> void:
 	if slot < 0 or slot >= slot_capacity:
 		push_error("PrototypeBatch.set_slot_custom_data: out-of-range slot %d (cap=%d)" % [slot, slot_capacity])
 		return
-	multimesh.set_instance_custom_data(slot, data)
+	var off := slot * CUSTOM_DATA_STRIDE
+	slot_custom_data[off + 0] = data.r
+	slot_custom_data[off + 1] = data.g
+	slot_custom_data[off + 2] = data.b
+	slot_custom_data[off + 3] = data.a
 
 #endregion
 
@@ -200,37 +223,85 @@ func _resize_capacity_internal(new_capacity: int) -> void:
 	for i in range(old_capacity, new_capacity):
 		slot_live[i] = 0
 
+	## PackedFloat32Array.resize zero-fills the new tail — exactly what we
+	## want for newly-allocated slots (they should be degenerate transforms
+	## until a real acquire + set_slot_transform).
+	slot_transforms.resize(new_capacity * TRANSFORM_STRIDE)
+	slot_custom_data.resize(new_capacity * CUSTOM_DATA_STRIDE)
+	_cull_buffer.resize(new_capacity * PACKED_STRIDE)
+
 	## Push newly-available slots onto the freelist in descending order so
 	## acquire_slot (pop_back) hands back ascending indices — better spatial
-	## coherency in the packed buffer and in the MultiMesh internal layout.
+	## coherency in the packed buffer.
 	for i in range(new_capacity - 1, old_capacity - 1, -1):
 		slot_freelist.append(i)
 
 	if multimesh != null:
 		multimesh.instance_count = new_capacity
-		## Degenerate new slots so it's safe to render them (visible_count
-		## covers the whole capacity in pre-cull mode).
-		_zero_all_slots_below(new_capacity, old_capacity)
 	slot_capacity = new_capacity
 
-
-## Zero-scale the transform for every slot in [from_index, cap). Used on init
-## and on grow so the gap between `last live slot` and `capacity` is always
-## safe to render.
-func _zero_all_slots_below(cap: int, from_index: int) -> void:
-	if multimesh == null:
-		return
-	for i in range(from_index, cap):
-		multimesh.set_instance_transform(i, _ZERO_SCALE_XFORM)
+#endregion
 
 
-## Pre-cull pass: visible_instance_count = slot_capacity so every acquired
-## slot renders + every free slot renders as a degenerate (zero) triangle.
-## Step 4 cull replaces this with per-tick packed buffer + precise visible
-## count.
-func _sync_visible_count() -> void:
-	if multimesh_rid.is_valid():
-		RenderingServer.multimesh_set_visible_instances(multimesh_rid, slot_capacity)
+#region Cull pass (step 4 — GDScript naive; step 5 ports to C#)
+
+## Distance-cull live slots against the camera, pack survivors into the
+## MultiMesh buffer, upload, set visible_instance_count.
+##
+## O(slot_capacity) GDScript per batch. Step 5 replaces this body with a
+## C# kernel via NativeBridge.
+##
+## Frustum culling is NOT applied per-slot: (a) the RS instance's
+## engine-computed AABB already frustum-culls the whole batch when the
+## camera faces away from all slots' world coverage; (b) per-slot frustum
+## in GDScript doesn't pay off vs. the engine's vectorized AABB check.
+## The C# port can add it if profiling says it's worth it.
+##
+## Returns the number of visible slots post-cull.
+func cull_and_upload(cam_pos: Vector3, max_dist_sq: float) -> int:
+	if not multimesh_rid.is_valid():
+		return 0
+
+	var rs := RenderingServer
+	if slot_count_live == 0:
+		rs.multimesh_set_visible_instances(multimesh_rid, 0)
+		return 0
+
+	var visible: int = 0
+	var out_off: int = 0
+	for slot in range(slot_capacity):
+		if slot_live[slot] == 0:
+			continue
+		var trs_off := slot * TRANSFORM_STRIDE
+		var ox: float = slot_transforms[trs_off +  3]
+		var oy: float = slot_transforms[trs_off +  7]
+		var oz: float = slot_transforms[trs_off + 11]
+		var dx: float = ox - cam_pos.x
+		var dy: float = oy - cam_pos.y
+		var dz: float = oz - cam_pos.z
+		var dist_sq: float = dx * dx + dy * dy + dz * dz
+		if dist_sq > max_dist_sq:
+			continue
+
+		## Copy 12-float transform row then 4-float custom_data row into the
+		## output buffer at position `out_off`.
+		for k in range(TRANSFORM_STRIDE):
+			_cull_buffer[out_off + k] = slot_transforms[trs_off + k]
+		var cd_off := slot * CUSTOM_DATA_STRIDE
+		for k in range(CUSTOM_DATA_STRIDE):
+			_cull_buffer[out_off + TRANSFORM_STRIDE + k] = slot_custom_data[cd_off + k]
+
+		out_off += PACKED_STRIDE
+		visible += 1
+
+	## Zero-fill the remainder so the previous cull's stale data doesn't
+	## leak through. PackedFloat32Array has no memset — loop is required.
+	for i in range(out_off, _cull_buffer.size()):
+		_cull_buffer[i] = 0.0
+
+	rs.multimesh_set_buffer(multimesh_rid, _cull_buffer)
+	rs.multimesh_set_visible_instances(multimesh_rid, visible)
+	return visible
 
 #endregion
 
@@ -263,18 +334,10 @@ func cleanup() -> void:
 	material_resource = null
 	slot_live = PackedByteArray()
 	slot_freelist = PackedInt32Array()
+	slot_transforms = PackedFloat32Array()
+	slot_custom_data = PackedFloat32Array()
+	_cull_buffer = PackedFloat32Array()
 	slot_capacity = 0
 	slot_count_live = 0
-
-#endregion
-
-
-#region Helpers
-
-## Cached zero-scale transform for released slots — degenerate triangles at the
-## origin, effectively free on GPU.
-const _ZERO_SCALE_XFORM: Transform3D = Transform3D(
-	Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO), Vector3.ZERO
-)
 
 #endregion
