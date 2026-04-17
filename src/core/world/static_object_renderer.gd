@@ -70,6 +70,12 @@ var _cell_batches: Dictionary[Vector2i, Array] = {}  # Array[CellBatch]
 ## the draw-call saving for tiny groups.
 const MM_BATCH_MIN_COUNT: int = 4
 
+## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
+## default — see lod_crossfade.gdshader. The shader reads this per-slot via
+## INSTANCE_CUSTOM.y so it could be tuned per-instance in the future; today
+## every slot uses this single value.
+const REGISTRY_FADE_DURATION_S: float = 0.3
+
 ## Next instance ID
 var _next_id: int = 0
 
@@ -429,7 +435,11 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 		var registry := _ensure_registry()
 		if registry != null:
 			var subs: Array = _build_registry_sub_meshes(mesh_type)
-			registry.add_instance(id, subs, transform, 0.0, DU.FADE_MARGIN_LOD3_FAR)
+			## spawn_time + fade_duration drive the shader crossfade (see
+			## lod_crossfade_multimesh.gdshader). fade_duration is seconds,
+			## not metres — DU.FADE_MARGIN_LOD3_FAR was the wrong constant.
+			var spawn_time: float = float(Time.get_ticks_msec()) / 1000.0
+			registry.add_instance(id, subs, transform, spawn_time, REGISTRY_FADE_DURATION_S)
 			data.registry_id = id
 			_instances[id] = data
 			mesh_type.instance_count += 1

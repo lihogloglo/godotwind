@@ -47,6 +47,12 @@ const PACKED_STRIDE: int = TRANSFORM_STRIDE + CUSTOM_DATA_STRIDE  # 16
 ## Default grow factor for capacity.
 const GROW_FACTOR: int = 2
 
+## Phase 3 fade shader — same spawn-time/fade-duration formula as Phase 2's
+## lod_crossfade.gdshader, rewritten to read per-slot timing from
+## INSTANCE_CUSTOM (see lod_crossfade_multimesh.gdshader comment header).
+## Loaded once and shared as the `shader` of every per-batch fade ShaderMaterial.
+const FADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade_multimesh.gdshader")
+
 
 #region Fields
 
@@ -60,6 +66,17 @@ var material_resource: Material
 
 var mesh_rid: RID                    ## Cached = mesh_resource.get_rid()
 var material_rid: RID                ## Cached = material_resource.get_rid() or invalid
+
+## Per-batch fade ShaderMaterial. Built lazily in _init when the prototype
+## material is a StandardMaterial3D: we create a ShaderMaterial wrapping
+## FADE_SHADER, copy the albedo/roughness/metallic/alpha_cutout uniforms
+## from the StandardMaterial3D, and use it as the RS instance's
+## material_override. Per-slot fade timing is driven by INSTANCE_CUSTOM,
+## so the single shared ShaderMaterial handles the whole batch.
+## Null when the prototype uses per-surface baked materials or a custom
+## shader — those batches render without the fade (mesh surface materials
+## render normally).
+var fade_material: ShaderMaterial
 
 var multimesh: MultiMesh             ## Strong ref
 var multimesh_rid: RID               ## Cached = multimesh.get_rid()
@@ -124,13 +141,46 @@ func _init(
 	rs.instance_set_scenario(rs_instance, scenario)
 	rs.instance_set_transform(rs_instance, Transform3D.IDENTITY)  ## World-origin anchor.
 
-	if material_rid.is_valid():
+	## Prefer a fade ShaderMaterial wrapping FADE_SHADER when the prototype's
+	## material is a StandardMaterial3D — this gives per-slot spawn-time
+	## crossfade via INSTANCE_CUSTOM. For per-surface baked materials
+	## (material_resource == null) or custom shaders, keep whatever the
+	## original material was so we don't replace authored shading.
+	if material_resource is StandardMaterial3D:
+		fade_material = _build_fade_material(material_resource as StandardMaterial3D)
+		rs.instance_geometry_set_material_override(rs_instance, fade_material.get_rid())
+	elif material_rid.is_valid():
 		rs.instance_geometry_set_material_override(rs_instance, material_rid)
 
 	## Nothing renders until cull_and_upload runs.
 	rs.multimesh_set_visible_instances(multimesh_rid, 0)
 
 	_resize_capacity_internal(p_initial_capacity)
+
+
+#region Fade material
+
+## Build a ShaderMaterial wrapping FADE_SHADER, with texture/color/PBR
+## uniforms copied from the source StandardMaterial3D. Mirrors
+## reference_instantiator.gd's Phase 2 pattern (pool + per-instance
+## ShaderMaterial), except Phase 3 has ONE per batch, driven per-slot by
+## INSTANCE_CUSTOM instead of per-frame by Tween.
+func _build_fade_material(std_mat: StandardMaterial3D) -> ShaderMaterial:
+	var sm := ShaderMaterial.new()
+	sm.shader = FADE_SHADER
+	if std_mat.albedo_texture:
+		sm.set_shader_parameter("albedo_texture", std_mat.albedo_texture)
+	sm.set_shader_parameter("albedo_color", std_mat.albedo_color)
+	sm.set_shader_parameter("roughness", std_mat.roughness)
+	sm.set_shader_parameter("metallic", std_mat.metallic)
+	sm.set_shader_parameter("specular", std_mat.metallic_specular)
+	## Vegetation / fence cutout — preserve alpha scissor behaviour.
+	if std_mat.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+		sm.set_shader_parameter("use_alpha_cutout", true)
+		sm.set_shader_parameter("alpha_cutout", std_mat.alpha_scissor_threshold)
+	return sm
+
+#endregion
 
 
 #region Slot lifecycle
@@ -378,6 +428,7 @@ func cleanup() -> void:
 	multimesh_rid = RID()
 	mesh_resource = null
 	material_resource = null
+	fade_material = null
 	slot_live = PackedByteArray()
 	slot_freelist = PackedInt32Array()
 	slot_transforms = PackedFloat32Array()

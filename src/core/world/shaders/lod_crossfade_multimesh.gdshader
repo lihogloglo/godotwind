@@ -2,11 +2,23 @@ shader_type spatial;
 render_mode cull_back;
 
 // =============================================================================
-// LOD Crossfade Shader for MultiMesh Batching
+// LOD Crossfade Shader for MultiMesh Batching (Phase 3 MID registry)
 // =============================================================================
-// Reads per-instance fade amount from INSTANCE_CUSTOM.x
-// Uses Bayer 4x4 dithering for smooth screen-door transitions.
-// Matches ImpostorManager's dithering pattern for visual consistency.
+// Per-instance spawn-driven fade. Each MultiMesh slot's INSTANCE_CUSTOM is
+// written once at slot claim by PrototypeRegistry.add_instance:
+//   INSTANCE_CUSTOM.x = spawn_time     (Engine TIME value at add)
+//   INSTANCE_CUSTOM.y = fade_duration  (typically 0.3 s)
+//   INSTANCE_CUSTOM.z = reserved
+//   INSTANCE_CUSTOM.w = reserved
+//
+// The shader computes fade_amount internally — no CPU-side Tween, no
+// per-frame material-parameter updates. Once TIME - spawn_time >=
+// fade_duration the pixel is at full opacity and the dither is a no-op
+// (the discard path is never taken once fade_amount >= 1).
+//
+// Mirrors Phase 2's lod_crossfade.gdshader — same formula, same dither
+// include, just fed from per-instance custom data instead of a whole-
+// material uniform.
 // =============================================================================
 
 #include "res://src/core/world/shaders/dither_include.gdshaderinc"
@@ -33,13 +45,16 @@ uniform bool debug_lod_colors = false;
 // LOD level for this batch (0-3, set by batcher)
 uniform int lod_level : hint_range(0, 3) = 1;
 
-// Per-instance fade amount passed via varying
-varying flat float v_fade_amount;
+// Per-instance fade timing passed through varying (flat — same per primitive).
+varying flat float v_spawn_time;
+varying flat float v_fade_duration;
 
 void vertex() {
-	// Read per-instance fade amount from custom data
-	// x = fade amount (0.0 = invisible, 1.0 = fully visible)
-	v_fade_amount = INSTANCE_CUSTOM.x;
+	// INSTANCE_CUSTOM is written once per slot by PrototypeRegistry. Layout:
+	//   .x = spawn_time, .y = fade_duration (see prototype_registry.gd
+	//   add_instance + design doc §6).
+	v_spawn_time = INSTANCE_CUSTOM.x;
+	v_fade_duration = INSTANCE_CUSTOM.y;
 }
 
 void fragment() {
@@ -51,13 +66,23 @@ void fragment() {
 		discard;
 	}
 
-	// Screen-door dithering for LOD crossfade (uses shared include)
-	// When fade_amount = 1.0: all pixels pass (fully visible)
-	// When fade_amount = 0.5: ~50% of pixels pass (half visible)
-	// When fade_amount = 0.0: no pixels pass (invisible)
+	// Auto-computed fade from slot's spawn_time + fade_duration. Once
+	// TIME - spawn_time >= fade_duration, fade_amount stays clamped to 1.0
+	// and the shader is functionally identical to the unfaded path.
+	// max() on denominator guards a zero-duration custom data row (never
+	// intended, but cheaper to clamp than branch).
+	float fade_amount = clamp(
+		(TIME - v_spawn_time) / max(v_fade_duration, 0.0001),
+		0.0, 1.0
+	);
+
+	// Screen-door dithering for smooth in/out transitions (shared include).
+	// When fade_amount = 1.0: all pixels pass (fully visible).
+	// When fade_amount = 0.5: ~50% of pixels pass (half visible).
+	// When fade_amount = 0.0: no pixels pass (invisible).
 	float dither_threshold = get_dither_threshold(ivec2(FRAGCOORD.xy));
 
-	if (dither_threshold >= v_fade_amount) {
+	if (dither_threshold >= fade_amount) {
 		discard;
 	}
 
@@ -83,14 +108,6 @@ void fragment() {
 	// Many prebaked LOD meshes don't have tangent data. If you need normal maps:
 	// 1. Enable use_normal_map in the material
 	// 2. Ensure the mesh has tangents (generate_tangents() in SurfaceTool)
-	// Uncomment below if tangents are guaranteed:
-	// if (use_normal_map) {
-	//     vec3 normal_map = texture(normal_texture, UV).rgb;
-	//     if (length(normal_map) > 0.01) {
-	//         NORMAL_MAP = normal_map;
-	//         NORMAL_MAP_DEPTH = normal_scale;
-	//     }
-	// }
 
 	ROUGHNESS = roughness;
 	METALLIC = metallic;
