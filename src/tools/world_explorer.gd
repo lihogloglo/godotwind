@@ -526,6 +526,11 @@ func _enter_boot_loading_gate() -> void:
 	_boot_gate_entered = true
 	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
 	var progress_fn := Callable(self, "_format_boot_progress")
+	# pause_gameplay=false for the 2026-04-17 first-runtime pass — the
+	# tree.paused=true path triggers an intermittent sig11 inside
+	# model_loader.gd:595 (PackedScene.instantiate during pause). Root-
+	# cause fix is its own phase; overlay-only gate still achieves the
+	# "hide the cold-start churn" UX win.
 	_loading_state_machine.enter_loading(
 		"boot",
 		predicate,
@@ -533,7 +538,8 @@ func _enter_boot_loading_gate() -> void:
 		"Streaming cells around Seyda Neen…",
 		progress_fn,
 		30.0,
-		true  # fade_in — prior _hide_loading left the screen transparent
+		true,   # fade_in
+		false,  # pause_gameplay — OFF pending model_loader pause-safety fix
 	)
 
 
@@ -585,7 +591,8 @@ func _on_teleport_happened(_from_pos: Vector3, _to_pos: Vector3, distance: float
 		"Streaming new area (%.0f m jump)" % distance,
 		progress_fn,
 		30.0,
-		true  # fade_in — masks the warp
+		true,   # fade_in — masks the warp
+		false,  # pause_gameplay — see boot-gate comment above
 	)
 
 
