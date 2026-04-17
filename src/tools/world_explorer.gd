@@ -491,22 +491,18 @@ func _init_async() -> void:
 	# Setup subsystem toggles (needs all managers initialized)
 	_setup_subsystem_toggles()
 
-	# Phase 8 — now that the streaming manager is tracking the camera and
-	# the initial ring is queued up, hand the boot-sequence off to the
-	# LoadingStateMachine. The old data-loading overlay faded out at
-	# `_hide_loading()` a few lines up; without this gate the player
-	# would see ~3 min of 10-FPS streaming churn before the world is
-	# actually playable. Inner-ring readiness predicate = option A
-	# (see docs/audit/LOADING_STATE_MACHINE_DESIGN.md).
-	_enter_boot_loading_gate()
-
-	# Phase 8 — also connect the teleport trigger. Any camera jump >
-	# TELEPORT_DETECT_THRESHOLD (500 m) inside NativeStreamingManager
-	# emits `teleport_happened`; we enter LoadingStateMachine with a
-	# fade-out-then-pause so the warp is hidden while the new area's
-	# inner ring spins up. Same predicate as boot, shorter fade budget.
-	if native_streaming_manager.has_signal("teleport_happened"):
-		native_streaming_manager.teleport_happened.connect(_on_teleport_happened)
+	# Phase 8 — boot gate + teleport hook temporarily disabled
+	# 2026-04-17 after back-to-back cold-boot sig11 crashes in the
+	# streaming pipeline (model_loader.gd:595, object_paging.gd:963 —
+	# both `packed_scene.instantiate()` sites, both pre-existing per
+	# STATUS.md "crashes periodically"). Phase 8 didn't introduce the
+	# crashes but may be rolling the dice differently. Keep the
+	# LoadingStateMachine + SceneLoadingScreen files in-tree so the
+	# next session can re-enable after the instantiate-race fix lands.
+	#
+	# _enter_boot_loading_gate()
+	# if native_streaming_manager.has_signal("teleport_happened"):
+	# 	native_streaming_manager.teleport_happened.connect(_on_teleport_happened)
 
 	# Autonomous performance audit — wire AutoBenchRunner when invoked with
 	# `--bench-auto [stamp]` on the command line. Runs scenarios C-F from
