@@ -224,6 +224,16 @@ var _startup_phase: bool = true
 var _startup_frames: int = 0
 const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit condition
 
+## Phase 7 finish (2026-04-17) — teleport detection.
+## A camera translation between consecutive _process frames larger than
+## TELEPORT_DETECT_THRESHOLD re-enters the startup burst mode (aggressive
+## 25ms instantiation budget, higher HLOD merge throughput) so the post-
+## teleport ring loads without the ~50 FPS steady-state budget caps.
+## Threshold = 500m matches ObjectPaging.TELEPORT_THRESHOLD so both
+## systems enter warmup in lockstep.
+const TELEPORT_DETECT_THRESHOLD: float = 500.0
+var _teleport_detected: bool = false  ## Consumed by _process to re-arm startup mode
+
 ## Deferred impostor update — set when camera cell changes, processed next frame
 ## Prevents impostor scan (170ms+ on first call) from stacking with cell load/unload
 var _impostor_update_pending: bool = false
@@ -537,14 +547,41 @@ func _process(delta: float) -> void:
 		_cell_manager.set_camera_position(_camera_position)
 	var new_cell := DU.world_to_cell(_camera_position)
 
-	# EMA-smoothed velocity on XZ plane (for predictive cell loading)
-	if delta > 0.0 and _prev_camera_position != Vector3.ZERO:
+	# Phase 7 finish (2026-04-17) — teleport detection. A single-frame camera
+	# jump beyond TELEPORT_DETECT_THRESHOLD re-enters startup_phase so the
+	# post-teleport ring loads at the aggressive 25ms budget instead of
+	# post-startup 4ms. Must run BEFORE the _camera_velocity_xz update so
+	# the teleport jump doesn't poison the EMA-smoothed velocity.
+	if _prev_camera_position != Vector3.ZERO \
+			and _camera_position.distance_to(_prev_camera_position) > TELEPORT_DETECT_THRESHOLD:
+		_teleport_detected = true
+
+	# EMA-smoothed velocity on XZ plane (for predictive cell loading).
+	# Teleport frames skip the EMA so the huge jump doesn't throw predictive
+	# pre-queue into a nonsense direction for the following seconds.
+	if delta > 0.0 and _prev_camera_position != Vector3.ZERO and not _teleport_detected:
 		var raw_vel := Vector2(
 			(_camera_position.x - _prev_camera_position.x) / delta,
 			(_camera_position.z - _prev_camera_position.z) / delta
 		)
 		_camera_velocity_xz = _camera_velocity_xz.lerp(raw_vel, 0.3)
 	_prev_camera_position = _camera_position
+
+	# On teleport, re-arm startup_phase so the instantiation/merge budget
+	# switches back to burst mode. ObjectPaging has its own TELEPORT_THRESHOLD
+	# (500m, identical) which primes the HLOD warmup queue — the two systems
+	# enter burst mode on the same frame.
+	if _teleport_detected:
+		_teleport_detected = false
+		if not _startup_phase:
+			Log.info("streaming", "Teleport detected — re-entering startup burst mode")
+			_startup_phase = true
+			_startup_frames = 0
+			_post_startup_start_ms = 0
+			_queue_drain_logged = false
+			_post_startup_audit_accum = 0.0
+			if _impostor_renderer:
+				_impostor_renderer.set_load_budget_usec(15000.0)
 
 # Track startup frames for staggered loading
 	if _startup_phase:
