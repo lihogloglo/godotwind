@@ -102,6 +102,12 @@ func _process(delta: float) -> void:
 		if not is_instance_valid(state.light):
 			continue
 
+		# Skip animation for lights not currently visible (culled, unloaded cell,
+		# or behind a closed interior portal). Saves per-tick CPU + a RS energy
+		# write that would otherwise fire every 66 ms for off-screen lights.
+		if not state.light.is_visible_in_tree():
+			continue
+
 		# Move brightness toward phase target
 		if state.brightness < state.phase:
 			state.brightness = minf(state.brightness + state.speed, state.phase)
