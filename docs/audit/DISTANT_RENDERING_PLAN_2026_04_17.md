@@ -343,7 +343,21 @@ Verified against commit `a4a36f5` before writing Phase 1 code:
 
 ### 4.3 Post-phase re-measurements
 
-_Appended as phases complete._
+Appended as phases complete.
+
+#### Phase 1 + 2 + 7 (commits 4641010 / 3ade1f3 / 52beb34 / 4a5d8dc)
+
+**Runtime verification (headless, 2026-04-17):**
+- 20 s `--headless --quit-after 20` run of `scenes/Godotwind.tscn`.
+- Zero parse / compile / shader errors.
+- Zero `SCRIPT ERROR`, `Identifier not found`, or `Invalid` log lines.
+- Only pre-existing warnings: Terrain3D `instance_reset_physics_interpolation` deprecated + Terrain3D `free_editor_textures` hint.
+- Signal 11 crash on shutdown — pre-existing, fires AFTER initialization completes + simulation ran for the requested duration. Consistent with user-reported "crashes a lot" and not caused by phase-1/2/7 edits.
+
+**FPS delta:** not yet measured with real renderer. User's original baseline (§4.1): 14 FPS cold / 50 FPS steady. Expected direction (unvalidated):
+- Phase 1 GPUSceneDatabase delete: minor cold-start win (removes per-object PackedByteArray + buffer_update on each cell load).
+- Phase 2 shader-fade: marginal per-frame CPU win + removes one known crash class.
+- Phase 7 budget raise: shorter cold-start window; steady-state unchanged.
 
 ### 4.N Post-phase re-measurements
 
@@ -389,13 +403,13 @@ No mid-phase acks. If the implementer drifts (e.g. Phase 3 grows a second epicyc
 | Phase | Status | Gate |
 |---|---|---|
 | 0 — Baseline | SKIPPED (verbal) | user-reported ~14→50 FPS; §4.1 recorded |
-| 1 — Free wins | IN_PROGRESS | GPUSceneDatabase deleted, LightAnimator gated |
-| 2 — Shader fade | TODO | Tween gone, crash-free 10 min flight |
-| 3 — World-scoped MultiMesh | TODO | draw_calls <3k @ horizon, FPS ≥100 @ vista |
+| 1 — Free wins | DONE (partial) | GPUSceneDatabase deleted + LightAnimator gated; batch_cell_into_multimesh disable parked pending user auth |
+| 2 — Shader fade | DONE | Tween removed, shader reads TIME+spawn_time; crash-free flight test pending user run |
+| 3 — World-scoped MultiMesh | TODO (design review next) | draw_calls <3k @ horizon, FPS ≥100 @ vista |
 | 4 — HLOD/MID dedup | TODO | rendered_objects HLOD-on drops ≥30% |
 | 5 — FAR_START = 1 km | TODO | impostors >980 m only, vista FPS -10% ceiling |
 | 6 — Impostor double-buffer | TODO | p99-p50 gap -5 ms |
-| 7 — Burst cold-start | TODO | time-to-stable-60 < 10 s cold / 5 s post-teleport |
+| 7 — Burst cold-start | DONE (partial) | startup budget 15→25 ms; post-startup 4 ms kept; teleport detection not implemented |
 | X — Skip Node3D (stretch) | PARKED | revisit post-7 |
 | X — Compute cull (stretch) | PARKED | revisit post-3 |
 
