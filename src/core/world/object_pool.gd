@@ -368,13 +368,14 @@ func _reset_instance(instance: Node3D) -> void:
 
 
 ## Internal: Clear fade ShaderMaterial overrides from interrupted fade-in animations
-## Only clears materials with "fade_amount" parameter — leaves legitimate ShaderMaterials intact
+## Detects the fade material by the `spawn_time` uniform (post-phase-2 rename
+## from `fade_amount`). Only clears those — legitimate ShaderMaterials intact.
 func _reset_materials(node: Node) -> void:
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
 		if mi.material_override is ShaderMaterial:
 			var sm := mi.material_override as ShaderMaterial
-			if sm.get_shader_parameter("fade_amount") != null:
+			if sm.get_shader_parameter("spawn_time") != null:
 				mi.material_override = null
 		# Clean up fade metadata if present
 		if mi.has_meta("_pre_fade_material"):

@@ -22,9 +22,13 @@ uniform float metallic : hint_range(0.0, 1.0) = 0.0;
 uniform float specular : hint_range(0.0, 1.0) = 0.5;
 
 group_uniforms Crossfade;
-// Crossfade parameters
-// fade_amount: 1.0 = fully visible, 0.0 = fully invisible
-uniform float fade_amount : hint_range(0.0, 1.0) = 1.0;
+// Spawn-driven fade. Shader computes fade_amount internally from
+//     fade_amount = clamp((TIME - spawn_time) / fade_duration, 0, 1)
+// so no per-frame CPU work / Tween is needed. GDScript just sets spawn_time
+// once at material application and schedules a single SceneTreeTimer for
+// material restoration.
+uniform float spawn_time = 0.0;
+uniform float fade_duration : hint_range(0.0001, 10.0) = 0.3;
 
 // Alpha cutout threshold for transparent materials
 uniform float alpha_cutout : hint_range(0.0, 1.0) = 0.5;
@@ -42,10 +46,12 @@ void fragment() {
 	// Calculate dither threshold from screen position (uses shared include)
 	float dither_threshold = get_dither_threshold(ivec2(FRAGCOORD.xy));
 
+	// Auto-computed fade amount from clock. 1.0 = fully visible, 0.0 = invisible.
+	// Once TIME - spawn_time >= fade_duration, fade_amount stays clamped to 1.0
+	// and the shader is functionally identical to the unfaded path.
+	float fade_amount = clamp((TIME - spawn_time) / fade_duration, 0.0, 1.0);
+
 	// Screen-door dithering: discard pixel if threshold exceeds visibility
-	// When fade_amount = 1.0, all pixels pass (fully visible)
-	// When fade_amount = 0.5, ~50% of pixels pass (half visible)
-	// When fade_amount = 0.0, no pixels pass (invisible)
 	if (dither_threshold >= fade_amount) {
 		discard;
 	}

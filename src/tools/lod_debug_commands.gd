@@ -909,9 +909,13 @@ func _format_mesh_info(mi: MeshInstance3D, cam_pos: Vector3) -> String:
 		lines.append("Transparency: %s" % _transparency_name(std.transparency))
 	elif mat is ShaderMaterial:
 		var sm := mat as ShaderMaterial
-		var fade_val: Variant = sm.get_shader_parameter("fade_amount")
-		if fade_val != null:
-			lines.append("Type: FADE ShaderMaterial (fade_amount=%.3f)" % [fade_val])
+		var spawn_val: Variant = sm.get_shader_parameter("spawn_time")
+		if spawn_val != null:
+			var dur_val: Variant = sm.get_shader_parameter("fade_duration")
+			var dur: float = float(dur_val) if dur_val != null else 0.3
+			var age: float = float(Time.get_ticks_msec()) / 1000.0 - float(spawn_val)
+			var progress: float = (clamp(age / dur, 0.0, 1.0) if dur > 0.0 else 1.0)
+			lines.append("Type: FADE ShaderMaterial (progress=%.3f, spawn_time=%.2f)" % [progress, float(spawn_val)])
 		else:
 			lines.append("Type: ShaderMaterial (custom)")
 	elif mat:

@@ -1522,9 +1522,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		if is_instance_valid(parent) and is_instance_valid(child):
 			if use_deferred:
 				parent.call_deferred("add_child", child)
-				# Defer fade-in until child enters scene tree — create_tween() requires it.
-				# Without this, material_override gets set to fade ShaderMaterial but the
-				# tween never runs, leaving objects invisible (fade_amount stuck at 0.0).
+				# Defer fade-in until child enters scene tree — SceneTreeTimer requires
+				# an active scene_tree. Without this, material_override gets set to the
+				# fade ShaderMaterial but no restoration timer is scheduled, leaving
+				# objects stuck in the fade-in window indefinitely.
 				if entry_fade_in:
 					child.tree_entered.connect(
 						func() -> void:

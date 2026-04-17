@@ -1116,7 +1116,9 @@ func _release_fade_material(mat: ShaderMaterial) -> void:
 	mat.set_shader_parameter("albedo_color", Color.WHITE)
 	mat.set_shader_parameter("roughness", 1.0)
 	mat.set_shader_parameter("metallic", 0.0)
-	mat.set_shader_parameter("fade_amount", 0.0)
+	# Reset clock uniforms so the pooled material starts cleanly on reuse.
+	mat.set_shader_parameter("spawn_time", 0.0)
+	mat.set_shader_parameter("fade_duration", 0.3)
 	mat.set_shader_parameter("use_alpha_cutout", false)
 	mat.set_shader_parameter("alpha_cutout", 0.5)
 	_fade_pool.append(mat)
@@ -1152,6 +1154,10 @@ func _apply_fade_in(instance: Node3D) -> void:
 	if debug_lod:
 		Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
 
+	# Current engine clock, passed to the fade shader via `spawn_time`. Matches
+	# the `TIME` built-in Godot exposes inside fragment shaders.
+	var now_sec: float = float(Time.get_ticks_msec()) / 1000.0
+
 	# Store original materials and apply pooled fade materials
 	var fade_data: Array[Dictionary] = []
 
@@ -1168,12 +1174,13 @@ func _apply_fade_in(instance: Node3D) -> void:
 		var original_mat: Material = mesh_inst.material_override
 		var had_override := original_mat != null
 
-		# Detect stuck fade ShaderMaterial from interrupted tween or pool recycling:
-		# If current override has "fade_amount" parameter, it's a leftover fade material.
-		# Discard it and fall through to the surface material chain.
+		# Detect stuck fade ShaderMaterial from pool recycling: if the current
+		# override carries our fade uniforms (post-phase-2 rename: spawn_time),
+		# it's a leftover fade material. Discard it and fall through to the
+		# surface material chain.
 		if original_mat is ShaderMaterial:
 			var sm := original_mat as ShaderMaterial
-			if sm.get_shader_parameter("fade_amount") != null:
+			if sm.get_shader_parameter("spawn_time") != null:
 				mesh_inst.material_override = null
 				original_mat = null
 				had_override = false
@@ -1206,8 +1213,12 @@ func _apply_fade_in(instance: Node3D) -> void:
 				fade_mat.set_shader_parameter("use_alpha_cutout", true)
 				fade_mat.set_shader_parameter("alpha_cutout", std_mat.alpha_scissor_threshold)
 
-		# Start fully invisible
-		fade_mat.set_shader_parameter("fade_amount", 0.0)
+		# Shader auto-fades from (spawn_time) to (spawn_time + fade_duration) using
+		# the engine's TIME built-in, so there is no per-frame CPU work and no
+		# Tween lifecycle. One SceneTreeTimer per call triggers material
+		# restoration; see the tail of this function.
+		fade_mat.set_shader_parameter("spawn_time", now_sec)
+		fade_mat.set_shader_parameter("fade_duration", fade_in_duration)
 		mesh_inst.material_override = fade_mat
 
 		fade_data.append({
@@ -1219,51 +1230,48 @@ func _apply_fade_in(instance: Node3D) -> void:
 	if fade_data.is_empty():
 		return
 
-	# Create tween to animate fade_amount from 0 to 1
-	# IMPORTANT: Bind to the instance node so tween is killed when node is freed
-	# This prevents "Lambda capture was freed" errors when cells unload during fade
-	var tween: Tween = instance.create_tween()
-	tween.set_parallel(true)  # Animate all meshes simultaneously
+	# Schedule material restoration via a single SceneTreeTimer. Replaces the
+	# prior per-object Tween whose lambda capture of `instance` was the root
+	# cause of the "Lambda capture was freed" crash class when cells unloaded
+	# mid-fade. The timer is owned by the SceneTree, independent of any
+	# instance's lifetime — `is_instance_valid()` guards in `_restore_fade_data`
+	# handle the freed-instance case cleanly, and the pool is always recovered.
+	var timer: SceneTreeTimer = scene_tree.create_timer(fade_in_duration)
+	timer.timeout.connect(_restore_fade_data.bind(fade_data))
 
+
+## Restore original materials + return fade materials to the pool. Called by
+## the SceneTreeTimer timeout scheduled from `_apply_fade_in`. Safe to call
+## when meshes have been freed during the fade — `is_instance_valid()` guards
+## every access, and the pool is always recovered regardless.
+func _restore_fade_data(fade_data: Array[Dictionary]) -> void:
 	for entry: Dictionary in fade_data:
-		var fade_mat: ShaderMaterial = entry.fade_material
-		var mesh_inst: MeshInstance3D = entry.mesh_instance
-		tween.tween_method(
-			func(value: float) -> void:
-				# Check if mesh still exists before setting shader parameter
-				if is_instance_valid(mesh_inst) and is_instance_valid(fade_mat):
-					fade_mat.set_shader_parameter("fade_amount", value),
-			0.0, 1.0, fade_in_duration
-		)
+		var fade_mat_ref: Variant = entry.get("fade_material")
+		var mesh_inst_ref: Variant = entry.get("mesh_instance")
 
-	# When complete, restore original materials and return fade mats to pool
-	tween.chain()  # Wait for parallel tweens
-	tween.tween_callback(func() -> void:
-		for entry: Dictionary in fade_data:
-			var fade_mat_ref: Variant = entry.get("fade_material")
-			var mesh_inst_ref: Variant = entry.get("mesh_instance")
+		# Return the fade material to the pool regardless of mesh validity.
+		if is_instance_valid(fade_mat_ref):
+			_release_fade_material(fade_mat_ref as ShaderMaterial)
 
-			# Return the fade material to the pool regardless of mesh validity
-			if is_instance_valid(fade_mat_ref):
-				_release_fade_material(fade_mat_ref as ShaderMaterial)
-
-			# Restore original material if mesh still exists
-			if not is_instance_valid(mesh_inst_ref):
-				continue
-			var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D
-			# CRITICAL: Only restore material_override if the mesh originally had one.
-			# Multi-surface meshes (ships, buildings) have NO material_override —
-			# their per-surface materials come from the mesh resource.
-			# Setting material_override = surface_0_mat would override ALL surfaces.
-			var had_override: bool = mesh_inst.get_meta("_had_material_override", false)
-			if had_override:
-				var original_mat: Material = mesh_inst.get_meta("_pre_fade_material", entry.original_material)
-				mesh_inst.material_override = original_mat
-			else:
-				mesh_inst.material_override = null
-			mesh_inst.remove_meta("_pre_fade_material")
-			mesh_inst.remove_meta("_had_material_override")
-	)
+		# Restore original material only when the mesh is still alive.
+		if not is_instance_valid(mesh_inst_ref):
+			continue
+		var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D
+		# Only restore material_override if the mesh originally had one.
+		# Multi-surface meshes (ships, buildings) have no material_override —
+		# their per-surface materials come from the mesh resource. Writing a
+		# per-surface material back into material_override would override ALL
+		# surfaces and break texture routing.
+		var had_override: bool = mesh_inst.get_meta("_had_material_override", false)
+		if had_override:
+			var original_mat: Material = mesh_inst.get_meta(
+				"_pre_fade_material", entry.get("original_material")
+			)
+			mesh_inst.material_override = original_mat
+		else:
+			mesh_inst.material_override = null
+		mesh_inst.remove_meta("_pre_fade_material")
+		mesh_inst.remove_meta("_had_material_override")
 
 
 ## Find all MeshInstance3D nodes in a hierarchy
