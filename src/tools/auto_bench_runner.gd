@@ -1,0 +1,416 @@
+## AutoBenchRunner — autonomous performance-audit orchestrator.
+##
+## Wires in when `--bench-auto` is present on the command line. Waits for the
+## streaming pipeline to actually settle (FPS ≥ 50 for 3 consecutive seconds,
+## OR absolute 4-minute fallback), then runs the four scenarios required by
+## the autonomous-perf-audit handoff (docs/audit/AUTONOMOUS_PERF_AUDIT_HANDOFF_
+## 2026_04_17.md §1, missions C-F):
+##
+##   C. bench_tiers   — 30s static sample at Seyda Neen spawn. Captures per-sec
+##                      rendered_objects / draw_calls / primitives / FPS plus
+##                      registry_batches / registry_slots / hlod chunks /
+##                      impostor count. Writes `bench_tiers.json`.
+##   D. bench_flyby   — delegates to StreamingBenchmark's existing 85s scripted
+##                      path via init_console_mode. CSV + JSON land in
+##                      user://benchmark_results/ as usual; we pick them up
+##                      post-hoc from the stamped output directory.
+##   E. bench_teleport — teleports camera (-2,-9) → (-10,-10) in one frame
+##                      (~940m, well over TELEPORT_DETECT_THRESHOLD=500m),
+##                      samples 20s of post-teleport metrics, writes
+##                      `bench_teleport.json`. The log-line assertion
+##                      ("Teleport detected — re-entering startup burst mode")
+##                      is validated offline by the outer harness.
+##   F. bench_hlod_off — calls world_explorer._cmd_hlod_disable, waits 5s,
+##                      samples 10s, restores hlod, writes `bench_hlod_off.json`.
+##
+## On completion the scene quits via `get_tree().quit()`. A 15-minute watchdog
+## guards against a hang stalling the autonomous session indefinitely.
+class_name AutoBenchRunner
+extends Node
+
+const DU := preload("res://src/core/world/distance_utils.gd")
+const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
+const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
+
+## Seconds of FPS >= SETTLE_FPS_TARGET required to call the pipeline settled.
+const SETTLE_WINDOW_SEC: float = 3.0
+const SETTLE_FPS_TARGET: float = 50.0
+
+## Hard cap — if FPS never recovers, start the bench anyway at this point so
+## the report captures a "never settled" run instead of spinning forever.
+const SETTLE_FALLBACK_SEC: float = 240.0
+
+## Watchdog — if the full run exceeds this wall-clock, force-quit.
+const RUN_WATCHDOG_SEC: float = 900.0
+
+## Post-teleport / hlod-off sample windows (seconds).
+const TIERS_SAMPLE_SEC: float = 30.0
+const TELEPORT_SAMPLE_SEC: float = 20.0
+const HLOD_OFF_PRE_DELAY_SEC: float = 5.0
+const HLOD_OFF_SAMPLE_SEC: float = 10.0
+
+## Output directory. Created on demand; all 4 JSON files land here.
+const OUTPUT_DIR_BASE: String = "user://benchmark_results"
+
+var _streaming_manager: NativeStreamingManagerScript = null
+var _cell_manager: CellManagerScript = null
+var _camera: Camera3D = null
+var _world_explorer: Node = null
+var _stamp: String = ""
+var _output_dir: String = ""
+var _started_msec: int = 0
+var _settle_elapsed: float = 0.0
+
+var _state: String = "waiting_settle"
+var _state_elapsed: float = 0.0
+
+## Per-scenario sampled points: Array[Dictionary]
+var _tiers_samples: Array[Dictionary] = []
+var _teleport_samples: Array[Dictionary] = []
+var _hlod_off_samples: Array[Dictionary] = []
+var _teleport_t0_sec: int = 0
+var _teleport_first_55_after_sec: float = -1.0
+
+var _last_sample_sec_bucket: int = -1
+var _flyby_bench: StreamingBenchmarkScript = null
+
+
+func configure(
+	streaming_manager: NativeStreamingManagerScript,
+	cell_manager: CellManagerScript,
+	camera: Camera3D,
+	world_explorer: Node,
+	stamp: String
+) -> void:
+	_streaming_manager = streaming_manager
+	_cell_manager = cell_manager
+	_camera = camera
+	_world_explorer = world_explorer
+	_stamp = stamp if not stamp.is_empty() else Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	_output_dir = "%s/autobench_%s" % [OUTPUT_DIR_BASE, _stamp]
+	if not DirAccess.dir_exists_absolute(_output_dir):
+		DirAccess.make_dir_recursive_absolute(_output_dir)
+	_started_msec = Time.get_ticks_msec()
+	Log.info("tools", "[AUTOBENCH] configured — output dir: %s" % _output_dir)
+
+
+func _process(delta: float) -> void:
+	# Watchdog — never hang the harness past 15 minutes total.
+	var total_elapsed_s := float(Time.get_ticks_msec() - _started_msec) / 1000.0
+	if total_elapsed_s > RUN_WATCHDOG_SEC:
+		Log.warn("tools", "[AUTOBENCH] watchdog fired at %.0fs — force quit" % total_elapsed_s)
+		_finish()
+		return
+
+	match _state:
+		"waiting_settle":
+			_tick_waiting_settle(delta, total_elapsed_s)
+		"tiers":
+			_tick_tiers(delta)
+		"flyby_pending":
+			_start_flyby()
+		"flyby_running":
+			pass  # StreamingBenchmark owns its own timing; we wait on its signal.
+		"teleport_pending":
+			_start_teleport()
+		"teleport":
+			_tick_teleport(delta)
+		"hlod_off_pending":
+			_start_hlod_off()
+		"hlod_off_predelay":
+			_tick_hlod_off_predelay(delta)
+		"hlod_off_sample":
+			_tick_hlod_off_sample(delta)
+		"done":
+			pass
+
+
+# -----------------------------------------------------------------------------
+# Settle detection
+# -----------------------------------------------------------------------------
+
+func _tick_waiting_settle(delta: float, total_elapsed_s: float) -> void:
+	if _streaming_manager and _streaming_manager.is_in_startup_phase():
+		# Still in startup — do not count the FPS window yet.
+		_settle_elapsed = 0.0
+		return
+	var fps := Engine.get_frames_per_second()
+	if fps >= SETTLE_FPS_TARGET:
+		_settle_elapsed += delta
+	else:
+		_settle_elapsed = 0.0
+	if _settle_elapsed >= SETTLE_WINDOW_SEC:
+		Log.info("tools", "[AUTOBENCH] settle reached — fps=%d, total_elapsed=%.1fs" % [fps, total_elapsed_s])
+		_enter_tiers()
+		return
+	if total_elapsed_s >= SETTLE_FALLBACK_SEC:
+		Log.warn("tools", "[AUTOBENCH] settle fallback — never reached %ds of FPS>=%d, forcing scenarios at %.1fs (current fps=%d)" % [
+			int(SETTLE_WINDOW_SEC), int(SETTLE_FPS_TARGET), total_elapsed_s, fps
+		])
+		_enter_tiers()
+
+
+# -----------------------------------------------------------------------------
+# Scenario C — bench_tiers
+# -----------------------------------------------------------------------------
+
+func _enter_tiers() -> void:
+	# Teleport camera to Seyda Neen spawn so the sample captures the expected
+	# cell. Below TELEPORT_DETECT_THRESHOLD (500m) if we're already near — safe
+	# no-op — but if the camera drifted somewhere else we re-center here.
+	var spawn := DU.cell_to_world_center(Vector2i(-2, -9), 5.0)
+	if _camera:
+		_camera.global_position = spawn
+		if _camera.has_method("look_at"):
+			_camera.look_at(spawn + Vector3(0, 0, -10))
+	_state = "tiers"
+	_state_elapsed = 0.0
+	_last_sample_sec_bucket = -1
+	_tiers_samples.clear()
+	Log.info("tools", "[AUTOBENCH] scenario C (bench_tiers) — sampling %.0fs static at Seyda Neen" % TIERS_SAMPLE_SEC)
+
+
+func _tick_tiers(delta: float) -> void:
+	_state_elapsed += delta
+	_sample_once_per_second(_state_elapsed, _tiers_samples)
+	if _state_elapsed >= TIERS_SAMPLE_SEC:
+		_write_scenario_json("bench_tiers.json", _tiers_samples, {
+			"scenario": "bench_tiers",
+			"camera_cell": "(-2,-9)",
+			"duration_s": TIERS_SAMPLE_SEC,
+		})
+		_state = "flyby_pending"
+
+
+# -----------------------------------------------------------------------------
+# Scenario D — bench_flyby (delegate to existing scripted path)
+# -----------------------------------------------------------------------------
+
+func _start_flyby() -> void:
+	if not _streaming_manager or not _cell_manager or not _camera:
+		Log.error("tools", "[AUTOBENCH] flyby skipped — missing streaming_manager / cell_manager / camera")
+		_state = "teleport_pending"
+		return
+	Log.info("tools", "[AUTOBENCH] scenario D (bench_flyby) — delegating to StreamingBenchmark.init_console_mode, ~85s")
+	_flyby_bench = StreamingBenchmarkScript.new()
+	_flyby_bench.name = "AutoBenchFlyby"
+	get_tree().root.add_child(_flyby_bench)
+	_flyby_bench.benchmark_complete.connect(_on_flyby_complete)
+	_flyby_bench.init_console_mode(_streaming_manager, _cell_manager, _camera)
+	_state = "flyby_running"
+
+
+func _on_flyby_complete(_results: Dictionary) -> void:
+	Log.info("tools", "[AUTOBENCH] flyby complete — CSV/JSON written under user://benchmark_results/")
+	_state = "teleport_pending"
+
+
+# -----------------------------------------------------------------------------
+# Scenario E — bench_teleport (>500m jump, sample post-teleport recovery)
+# -----------------------------------------------------------------------------
+
+func _start_teleport() -> void:
+	# (-2,-9) centred at ~(-234, 5, -1053) depending on cell_to_world_center convention.
+	# (-10,-10) is ~8 cells west and ~1 cell south → ~940m XZ, safely > 500m
+	# TELEPORT_DETECT_THRESHOLD. Grazes the warmup-burst re-entry logic in
+	# native_streaming_manager._process + object_paging teleport handling.
+	var target := DU.cell_to_world_center(Vector2i(-10, -10), 5.0)
+	if _camera:
+		_camera.global_position = target
+		if _camera.has_method("look_at"):
+			_camera.look_at(target + Vector3(0, 0, -10))
+	_teleport_t0_sec = int((Time.get_ticks_msec() - _started_msec) / 1000)
+	_teleport_samples.clear()
+	_teleport_first_55_after_sec = -1.0
+	_state = "teleport"
+	_state_elapsed = 0.0
+	_last_sample_sec_bucket = -1
+	Log.info("tools", "[AUTOBENCH] scenario E (bench_teleport) — teleported to (-10,-10), sampling %.0fs" % TELEPORT_SAMPLE_SEC)
+
+
+func _tick_teleport(delta: float) -> void:
+	_state_elapsed += delta
+	_sample_once_per_second(_state_elapsed, _teleport_samples)
+	if _teleport_first_55_after_sec < 0.0 and Engine.get_frames_per_second() >= SETTLE_FPS_TARGET:
+		_teleport_first_55_after_sec = _state_elapsed
+	if _state_elapsed >= TELEPORT_SAMPLE_SEC:
+		_write_scenario_json("bench_teleport.json", _teleport_samples, {
+			"scenario": "bench_teleport",
+			"jump_cells": "(-2,-9) -> (-10,-10)",
+			"duration_s": TELEPORT_SAMPLE_SEC,
+			"first_fps_ge_50_after_s": _teleport_first_55_after_sec,
+		})
+		_state = "hlod_off_pending"
+
+
+# -----------------------------------------------------------------------------
+# Scenario F — bench_hlod_off (hlod_disable, settle, sample, restore)
+# -----------------------------------------------------------------------------
+
+func _start_hlod_off() -> void:
+	# Recentre on Seyda Neen before the hlod-off sample so F always measures
+	# from the same cell as C. Scenario E left the camera at (-10,-10) in a
+	# freshly-loading area, which would confound the "only NEAR renders" drop
+	# check with ongoing streaming churn.
+	var spawn := DU.cell_to_world_center(Vector2i(-2, -9), 5.0)
+	if _camera:
+		_camera.global_position = spawn
+		if _camera.has_method("look_at"):
+			_camera.look_at(spawn + Vector3(0, 0, -10))
+	if _world_explorer and _world_explorer.has_method("_cmd_hlod_disable"):
+		var resp = _world_explorer._cmd_hlod_disable({})
+		Log.info("tools", "[AUTOBENCH] hlod_disable => %s" % str(resp))
+	else:
+		Log.warn("tools", "[AUTOBENCH] world_explorer missing _cmd_hlod_disable — scenario F degraded")
+	_state = "hlod_off_predelay"
+	_state_elapsed = 0.0
+	_hlod_off_samples.clear()
+
+
+func _tick_hlod_off_predelay(delta: float) -> void:
+	_state_elapsed += delta
+	if _state_elapsed >= HLOD_OFF_PRE_DELAY_SEC:
+		_state = "hlod_off_sample"
+		_state_elapsed = 0.0
+		_last_sample_sec_bucket = -1
+		Log.info("tools", "[AUTOBENCH] hlod_off pre-delay done, sampling %.0fs" % HLOD_OFF_SAMPLE_SEC)
+
+
+func _tick_hlod_off_sample(delta: float) -> void:
+	_state_elapsed += delta
+	_sample_once_per_second(_state_elapsed, _hlod_off_samples)
+	if _state_elapsed >= HLOD_OFF_SAMPLE_SEC:
+		# Restore HLOD before we leave so a human inspecting the scene isn't
+		# left in degraded debug mode if they re-attach later.
+		if _world_explorer and _world_explorer.has_method("_cmd_hlod_enable"):
+			_world_explorer._cmd_hlod_enable({})
+		_write_scenario_json("bench_hlod_off.json", _hlod_off_samples, {
+			"scenario": "bench_hlod_off",
+			"pre_delay_s": HLOD_OFF_PRE_DELAY_SEC,
+			"duration_s": HLOD_OFF_SAMPLE_SEC,
+		})
+		_finish()
+
+
+# -----------------------------------------------------------------------------
+# Sampling + JSON output
+# -----------------------------------------------------------------------------
+
+## Sample exactly once per integer second of elapsed time. Prevents duplicate
+## samples within the same frame and guarantees 1 Hz sampling regardless of
+## frame rate.
+func _sample_once_per_second(elapsed_s: float, out: Array[Dictionary]) -> void:
+	var bucket := int(elapsed_s)
+	if bucket == _last_sample_sec_bucket:
+		return
+	_last_sample_sec_bucket = bucket
+	out.append(_snapshot_sample(elapsed_s))
+
+
+func _snapshot_sample(elapsed_s: float) -> Dictionary:
+	var sample := {
+		"elapsed_s": elapsed_s,
+		"fps": Engine.get_frames_per_second(),
+		"draws": int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
+		"objs": int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)),
+		"prims": int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)),
+	}
+	if _streaming_manager:
+		var stats: Dictionary = _streaming_manager.get_stats()
+		sample["startup_phase"] = stats.get("startup_phase", false)
+		sample["loaded_cells"] = stats.get("loaded_cells", 0)
+		sample["loading_cells"] = stats.get("loading_cells", 0)
+		sample["mid_instances"] = stats.get("mid_instances", 0)
+		sample["mid_visible"] = stats.get("mid_visible", 0)
+		sample["mid_mesh_types"] = stats.get("mid_mesh_types", 0)
+		sample["hlod_cells"] = stats.get("hlod_cells", 0)
+		sample["total_impostors"] = stats.get("total_impostors", 0)
+		if _streaming_manager.has_method("get_static_renderer_stats"):
+			var srs := _streaming_manager.get_static_renderer_stats()
+			sample["registry_batches"] = srs.get("registry_batches", 0)
+			sample["registry_slots"] = srs.get("registry_slots", 0)
+		# HLOD per-tier breakdown
+		if _streaming_manager._hlod_merger:
+			var hls: Dictionary = _streaming_manager._hlod_merger.get_stats()
+			sample["chunks_tier_0"] = hls.get("chunks_tier_0", 0)
+			sample["chunks_tier_1"] = hls.get("chunks_tier_1", 0)
+			sample["chunks_tier_2"] = hls.get("chunks_tier_2", 0)
+			sample["hlod_pending"] = hls.get("pending_merges", 0)
+	return sample
+
+
+func _write_scenario_json(filename: String, samples: Array[Dictionary], meta: Dictionary) -> void:
+	var path := "%s/%s" % [_output_dir, filename]
+	var summary: Dictionary = _summarize(samples)
+	var out := {
+		"meta": meta,
+		"stamp": _stamp,
+		"summary": summary,
+		"samples": samples,
+	}
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if not file:
+		Log.error("tools", "[AUTOBENCH] failed to open %s" % path)
+		return
+	file.store_string(JSON.stringify(out, "\t"))
+	file.close()
+	Log.info("tools", "[AUTOBENCH] wrote %s (samples=%d, summary=%s)" % [
+		path, samples.size(), JSON.stringify(summary)])
+
+
+func _summarize(samples: Array[Dictionary]) -> Dictionary:
+	if samples.is_empty():
+		return {"samples": 0}
+	var fps_min := 1e9
+	var fps_max := 0.0
+	var fps_sum := 0.0
+	var draws_sum := 0.0
+	var objs_sum := 0.0
+	var batches_max := 0
+	var slots_max := 0
+	var imp_max := 0
+	var hlod_cells_max := 0
+	var t1_max := 0
+	var t2_max := 0
+	for s: Dictionary in samples:
+		var f := float(s.get("fps", 0.0))
+		fps_min = minf(fps_min, f)
+		fps_max = maxf(fps_max, f)
+		fps_sum += f
+		draws_sum += float(s.get("draws", 0))
+		objs_sum += float(s.get("objs", 0))
+		batches_max = maxi(batches_max, int(s.get("registry_batches", 0)))
+		slots_max = maxi(slots_max, int(s.get("registry_slots", 0)))
+		imp_max = maxi(imp_max, int(s.get("total_impostors", 0)))
+		hlod_cells_max = maxi(hlod_cells_max, int(s.get("hlod_cells", 0)))
+		t1_max = maxi(t1_max, int(s.get("chunks_tier_1", 0)))
+		t2_max = maxi(t2_max, int(s.get("chunks_tier_2", 0)))
+	var n := float(samples.size())
+	return {
+		"samples": samples.size(),
+		"fps_min": fps_min,
+		"fps_max": fps_max,
+		"fps_avg": fps_sum / n,
+		"draws_avg": draws_sum / n,
+		"objs_avg": objs_sum / n,
+		"registry_batches_max": batches_max,
+		"registry_slots_max": slots_max,
+		"impostors_max": imp_max,
+		"hlod_cells_max": hlod_cells_max,
+		"chunks_tier_1_max": t1_max,
+		"chunks_tier_2_max": t2_max,
+	}
+
+
+# -----------------------------------------------------------------------------
+# Finish
+# -----------------------------------------------------------------------------
+
+func _finish() -> void:
+	_state = "done"
+	Log.info("tools", "[AUTOBENCH] sequence complete — output dir: %s — quitting" % _output_dir)
+	# Deferred quit so the log line makes it to disk before shutdown flushes.
+	get_tree().create_timer(1.0).timeout.connect(func() -> void:
+		get_tree().quit()
+	)

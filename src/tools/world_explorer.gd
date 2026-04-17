@@ -78,6 +78,7 @@ const SubsystemTogglesScript := preload("res://src/tools/subsystem_toggles.gd")
 const BenchmarkHUDScript := preload("res://src/tools/benchmark_hud.gd")
 const ProgressiveBenchmarkScript := preload("res://src/tools/progressive_benchmark.gd")
 const PerfSweepScript := preload("res://src/tools/perf_sweep.gd")
+const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -477,6 +478,44 @@ func _init_async() -> void:
 
 	# Setup subsystem toggles (needs all managers initialized)
 	_setup_subsystem_toggles()
+
+	# Autonomous performance audit — wire AutoBenchRunner when invoked with
+	# `--bench-auto [stamp]` on the command line. Runs scenarios C-F from
+	# docs/audit/AUTONOMOUS_PERF_AUDIT_HANDOFF_2026_04_17.md once streaming has
+	# settled, then calls get_tree().quit() on completion. No-op when the flag
+	# is absent.
+	_maybe_start_auto_bench()
+
+
+## Parse OS.get_cmdline_args() for --bench-auto [stamp] and instantiate the
+## AutoBenchRunner when present. Accepts both `--bench-auto` (next arg is the
+## timestamp) and `--bench-auto=<stamp>` forms. Only attaches when we have a
+## streaming manager + camera + cell manager (all post-_setup_subsystem_toggles).
+func _maybe_start_auto_bench() -> void:
+	var args := OS.get_cmdline_args()
+	var stamp := ""
+	var flag_found := false
+	for i in range(args.size()):
+		var a: String = args[i]
+		if a == "--bench-auto":
+			flag_found = true
+			if i + 1 < args.size() and not args[i + 1].begins_with("--"):
+				stamp = args[i + 1]
+			break
+		if a.begins_with("--bench-auto="):
+			flag_found = true
+			stamp = a.substr("--bench-auto=".length())
+			break
+	if not flag_found:
+		return
+	if not native_streaming_manager or not cell_manager or not camera:
+		push_warning("[AUTOBENCH] --bench-auto flag set but required refs missing — skipping")
+		return
+	var runner := AutoBenchRunnerScript.new()
+	runner.name = "AutoBenchRunner"
+	get_tree().root.add_child(runner)
+	runner.configure(native_streaming_manager, cell_manager, camera, self, stamp)
+	_log("[AUTOBENCH] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
 
 func _init_terrain3d() -> void:
