@@ -5,7 +5,11 @@
 ## keyed by `Vector3i(center_cell.x, center_cell.y, size_level)` and sized
 ## adaptively per the plan §4 table:
 ##
-##     size_level 0 (1×1 cells) — band [150, 300)m — near-MID
+##     size_level 0 (1×1 cells) — [150, 300)m — RETIRED 2026-04-17 Phase 4.
+##                                 PrototypeRegistry (MID tier) owns this band
+##                                 as a world-scoped per-prototype MultiMesh.
+##                                 Running an HLOD merger over the same range
+##                                 double-rendered the same refs.
 ##     size_level 1 (2×2 cells) — band [300, 600)m — far-MID
 ##     size_level 2 (4×4 cells) — band [600, 1000)m — HLOD
 ##
@@ -88,9 +92,13 @@ class PagingChunkData:
 
 #region State
 
-## Master toggle — disabled by default until performance is validated.
-## Enable via console: `hlod_enable` / disable: `hlod_disable`
-var enabled: bool = false
+## Master toggle.
+## Phase 4 (2026-04-17) — ON by default. HLOD is the production path:
+## HLOD-on = full pipeline (MID 150-300m → HLOD 300-1000m → FAR 1km+);
+## HLOD-off = debug/baseline (only NEAR renders past 150m, per user
+## "Keep it simple" rule in DISTANT_RENDERING_PLAN_2026_04_17.md).
+## Toggle at runtime via console: `hlod_enable` / `hlod_disable`.
+var enabled: bool = true
 
 ## Scenario RID for creating RS instances
 var _scenario: RID = RID()
@@ -503,7 +511,11 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 		_mark_sub_cells(Vector2i(active_key.x, active_key.y), 1 << active_key.z, covered_cells)
 
 	# Largest tier first. Smaller tiers can't overlap a larger accepted chunk.
-	for size_level in [2, 1, 0]:
+	# Phase 4 (2026-04-17): size_level 0 (1×1, 150-300m) retired — the
+	# PrototypeRegistry MID MultiMesh owns that band. Merging the same refs at
+	# tier 0 was the double-render hazard called out in
+	# DISTANT_RENDERING_AUDIT §5.1.
+	for size_level in [2, 1]:
 		var size: int = 1 << size_level
 		var band_start: float = DU.paging_band_start(size_level)
 		var band_end: float = DU.paging_band_end(size_level)

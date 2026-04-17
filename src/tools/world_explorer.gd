@@ -1836,8 +1836,10 @@ func _cmd_hlod_enable(_args: Dictionary) -> String:
 	# Narrow MID to 300m so HLOD covers 300-1000m
 	if native_streaming_manager._static_renderer:
 		native_streaming_manager._static_renderer.visibility_range_end = DU.HLOD_START
-	# Push impostor begin to HLOD_END — HLOD fills 300-1000m, impostors take over at 1000m
+	# Push impostor begin to HLOD_END — HLOD fills 300-1000m, impostors take over at 1000m.
+	# Restore visibility in case `hlod_disable` hid the impostor renderer (debug mode).
 	if native_streaming_manager._impostor_renderer:
+		native_streaming_manager._impostor_renderer.visible = true
 		native_streaming_manager._impostor_renderer.set_visibility_range_begin(DU.HLOD_END)
 	# Trigger immediate HLOD update for current camera position
 	native_streaming_manager._hlod_needs_initial_update = true
@@ -1850,13 +1852,14 @@ func _cmd_hlod_disable(_args: Dictionary) -> String:
 	var DU := preload("res://src/core/world/distance_utils.gd")
 	native_streaming_manager._hlod_merger.enabled = false
 	native_streaming_manager._hlod_merger.cleanup()
-	# Restore MID to 500m (no HLOD coverage)
+	# Phase 4 (2026-04-17): HLOD-off is the debug/baseline path per user rule
+	# "only NEAR renders past 150m, no middle ground". Cut MID at 150m and
+	# disable impostors entirely — nothing past NEAR.
 	if native_streaming_manager._static_renderer:
-		native_streaming_manager._static_renderer.visibility_range_end = DU.MID_END
-	# Restore impostor begin to FAR_START — MID handles 0-500m, impostors at 500m
+		native_streaming_manager._static_renderer.visibility_range_end = DU.NEAR_END
 	if native_streaming_manager._impostor_renderer:
-		native_streaming_manager._impostor_renderer.set_visibility_range_begin(DU.FAR_START)
-	return "HLOD merging DISABLED — MID restored to 500m, impostors at 500m"
+		native_streaming_manager._impostor_renderer.visible = false
+	return "HLOD DISABLED — debug mode: NEAR only (0-150m), MID/HLOD/FAR off"
 
 
 func _cmd_proto_registry(_args: Dictionary) -> String:

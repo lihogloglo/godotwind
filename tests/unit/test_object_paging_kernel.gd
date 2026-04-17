@@ -609,8 +609,10 @@ func test_top_down_walk_band_membership() -> void:
 		).is_true()
 
 
-## At origin camera, each tier should produce SOME chunks (the band shells
-## always intersect the origin in a populated cell grid).
+## At origin camera, each active tier should produce SOME chunks.
+## Phase 4 (2026-04-17): size_level=0 was retired — PrototypeRegistry (MID)
+## owns the 150-300m band. The walk only visits tiers 1 and 2 now. No tier-0
+## chunks must be emitted.
 func test_top_down_walk_all_tiers_populated_from_origin() -> void:
 	var merger := Merger.new()
 	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
@@ -619,9 +621,7 @@ func test_top_down_walk_all_tiers_populated_from_origin() -> void:
 	for key: Vector3i in desired:
 		tier_counts[key.z] = tier_counts[key.z] + 1
 
-	# The actual numbers depend on how tightly the rings pack, but every
-	# tier should have >0 chunks — shell at each band intersects the grid.
-	assert_int(tier_counts[0]).override_failure_message("No size_level=0 chunks desired — band [150,300) should produce chunks at origin.").is_greater(0)
+	assert_int(tier_counts[0]).override_failure_message("size_level=0 chunks must NOT be produced — MID registry owns 150-300m post-Phase-4.").is_equal(0)
 	assert_int(tier_counts[1]).override_failure_message("No size_level=1 chunks desired — band [300,600) should produce chunks at origin.").is_greater(0)
 	assert_int(tier_counts[2]).override_failure_message("No size_level=2 chunks desired — band [600,1000) should produce chunks at origin.").is_greater(0)
 

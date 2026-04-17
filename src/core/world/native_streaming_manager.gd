@@ -406,15 +406,21 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		_impostor_renderer.set_load_budget_usec(15000.0)
 
 	# Initialize runtime HLOD merger with viewport scenario + static renderer.
-	# Disabled by default — enable via console `hlod_enable` for benchmarking.
-	# When enabled, MID narrows to 300m and HLOD covers 300-1000m.
+	# Phase 4 (2026-04-17): ON by default. HLOD is the production pipeline —
+	# MID registry (150-300m) → HLOD merged chunks (300-1000m) → impostors
+	# (1000m+). HLOD-off is debug/baseline only (MID+HLOD disabled past 150m
+	# per the user "Keep it simple" rule). Toggle: `hlod_enable` / `hlod_disable`.
 	if _hlod_merger:
 		var scenario := get_viewport().get_world_3d().scenario
 		_hlod_merger.initialize(scenario, _static_renderer, _background_processor)
 		if _hlod_merger.enabled and _static_renderer:
 			_static_renderer.visibility_range_end = DU.HLOD_START
-			Log.info("streaming", "Runtime HLOD merger active — MID 0-%dm, HLOD %d-%dm" % [
-				int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END)])
+			# Impostors pick up where HLOD ends — 1km+. Keeps tier bands
+			# strictly non-overlapping (DISTANT_RENDERING_AUDIT §5.1 dedup).
+			if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
+				_impostor_renderer.set_visibility_range_begin(DU.HLOD_END)
+			Log.info("streaming", "Runtime HLOD merger active — MID 0-%dm, HLOD %d-%dm, impostors %dm+" % [
+				int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END), int(DU.HLOD_END)])
 		else:
 			Log.info("streaming", "Runtime HLOD merger initialized but DISABLED (enable via console: hlod_enable)")
 
