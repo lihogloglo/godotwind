@@ -33,10 +33,12 @@ const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
 class InstanceSlot:
 	var batch: RefCounted
 	var slot: int
+	var local_transform: Transform3D  ## sub-mesh local — composed with world at show/transform time
 
-	func _init(p_batch: RefCounted, p_slot: int) -> void:
+	func _init(p_batch: RefCounted, p_slot: int, p_local: Transform3D = Transform3D.IDENTITY) -> void:
 		batch = p_batch
 		slot = p_slot
+		local_transform = p_local
 
 #endregion
 
@@ -148,7 +150,7 @@ func add_instance(
 		batch.set_slot_transform(slot, p_world_transform * local_xform)
 		batch.set_slot_custom_data(slot, custom_data)
 
-		slots[i] = InstanceSlot.new(batch, slot)
+		slots[i] = InstanceSlot.new(batch, slot, local_xform)
 
 	_instance_slots[p_instance_id] = slots
 
@@ -177,6 +179,42 @@ func has_instance(p_instance_id: int) -> bool:
 ## to read the slot's world transform to position the Node3D, then release it).
 func get_instance_slots(p_instance_id: int) -> Array:
 	return _instance_slots.get(p_instance_id, [] as Array)
+
+
+## Rewrite every slot of an instance with a new world transform. Per-slot world
+## xform = p_world_transform * slot.local_transform. No-op for unknown ids.
+func set_instance_transform(p_instance_id: int, p_world_transform: Transform3D) -> void:
+	var slots_variant: Variant = _instance_slots.get(p_instance_id)
+	if slots_variant == null:
+		return
+	var slots: Array = slots_variant
+	for entry: InstanceSlot in slots:
+		if entry.batch != null:
+			entry.batch.set_slot_transform(entry.slot, p_world_transform * entry.local_transform)
+
+
+## Hide all slots of an instance (zero-scale degenerate transform). Slot stays
+## allocated — paired with show_instance() / set_instance_transform() to restore.
+## Used for promote (MID→NEAR handoff) and cell hide.
+func hide_instance(p_instance_id: int) -> void:
+	var slots_variant: Variant = _instance_slots.get(p_instance_id)
+	if slots_variant == null:
+		return
+	var slots: Array = slots_variant
+	for entry: InstanceSlot in slots:
+		if entry.batch != null:
+			entry.batch.set_slot_transform(entry.slot, _HIDDEN_XFORM)
+
+
+## Restore a hidden/promoted instance's slots to a live world transform.
+func show_instance(p_instance_id: int, p_world_transform: Transform3D) -> void:
+	set_instance_transform(p_instance_id, p_world_transform)
+
+
+## Zero-scale transform at origin — degenerate triangles, free on GPU.
+const _HIDDEN_XFORM: Transform3D = Transform3D(
+	Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO), Vector3.ZERO
+)
 
 #endregion
 
