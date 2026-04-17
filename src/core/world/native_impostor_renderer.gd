@@ -73,6 +73,24 @@ var _all_normal_images: Array[Image] = []
 var _normal_array_size: int = 0
 var _normal_array_dirty: bool = false
 
+## Phase 6 (2026-04-17) — async texture-array rebuild.
+##
+## The CPU-side work of converting + deep-copying the full 256-layer image
+## set runs on a worker thread. Main thread finalises with the synchronous
+## `Texture2DArray.new() + create_from_images()` call (RenderingServer
+## texture allocation is main-thread only in Godot 4.6, verified against
+## docs — offloading this last step would require a `RenderingDevice`
+## rewrite).
+##
+## Double-buffer: the previous `_texture_array` is held in `_old_texture_array`
+## for one frame after the swap to avoid a GPU-side use-after-free on
+## drivers that batch texture binds across command buffers.
+var _rebuild_task_id: int = -1                       ## -1 = idle
+var _rebuild_pending_albedo: Array[Image] = []       ## worker output
+var _rebuild_pending_normals: Array[Image] = []      ## worker output
+var _old_texture_array: Texture2DArray = null        ## one-frame double-buffer
+var _old_normal_array: Texture2DArray = null
+
 ## Reference count for textures: hash_key -> count of impostors using it
 var _texture_ref_counts: Dictionary[String, int] = {}
 
@@ -216,6 +234,13 @@ func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
 	_stop_job_system()
+	# Phase 6: drain any in-flight rebuild worker task so its closure and
+	# Image refs release before we go. Cheap — the task is CPU-only.
+	if _rebuild_task_id != -1:
+		WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
+		_rebuild_task_id = -1
+		_rebuild_pending_albedo = []
+		_rebuild_pending_normals = []
 	clear()
 
 
@@ -776,6 +801,11 @@ const COMPACTION_THRESHOLD: float = 0.75  # Compact when 75% full
 func _process(delta: float) -> void:
 	# Poll for completed texture loads
 	_poll_job_results()
+
+	# Phase 6 (2026-04-17): poll async texture-array rebuild. No-op when no
+	# task is in flight. When the worker completes, finalises the rebuild
+	# on this frame (main-thread create_from_images + shader param swap).
+	_poll_rebuild_task()
 
 	# Process deferred impostor cell loading (progressive to avoid freezing)
 	_process_pending_impostor_cells()
@@ -1718,48 +1748,131 @@ func _compact_texture_array() -> void:
 		_stats["_logged_array_full"] = false
 
 
+## Phase 6 (2026-04-17): async rebuild.
+## Kicks a WorkerThreadPool task to do the image-conversion + copy loop on a
+## worker, returns immediately. Completion is polled by `_poll_rebuild_task`
+## each frame (called from _process). Main thread does the final
+## `Texture2DArray.create_from_images` (RenderingServer allocation is main-
+## thread only in Godot 4.6) then atomic-swaps the shader param.
+##
+## If a rebuild task is already in flight, re-queue is a no-op — the task's
+## completion will pick up the latest dirty images once it lands. This
+## matches the debounce contract at the _process call site.
 func _rebuild_texture_array() -> void:
 	if _all_array_images.is_empty():
 		_texture_array_dirty = false
 		_normal_array_dirty = false
 		return
 
-	# Rebuild albedo texture array (RGBA8 uncompressed).
-	# BC7 (BPTC) compression was tested but triggers c0000005 in Godot 4.6's
-	# Texture2DArray.create_from_images() with compressed images. Revisit when
-	# upgrading to 4.7+. At 256×256 RGBA8, 256 layers = ~64 MB — acceptable.
-	var images: Array[Image] = []
-	for img: Image in _all_array_images:
-		if img.get_format() != Image.FORMAT_RGBA8:
-			img.convert(Image.FORMAT_RGBA8)
-		images.append(img)
+	if _rebuild_task_id != -1:
+		## Still running — the next debounce tick will retry.
+		return
 
-	_texture_array = Texture2DArray.new()
-	var err := _texture_array.create_from_images(images)
+	## Snapshot current inputs so the worker sees a stable view even if
+	## new impostors land mid-rebuild. Images are RefCounted; the snapshot
+	## is a cheap shallow copy.
+	var albedo_snapshot: Array[Image] = _all_array_images.duplicate()
+	var normal_snapshot: Array[Image] = _all_normal_images.duplicate()
+
+	_rebuild_task_id = WorkerThreadPool.add_task(
+		_rebuild_worker.bind(albedo_snapshot, normal_snapshot),
+		true,
+		"impostor texture array rebuild"
+	)
+
+
+## Worker-thread body. CPU-only work: iterate images, convert format to
+## RGBA8 in place on a duplicate (not the original — the original is still
+## referenced by the index map), stash the results for the main thread.
+## No RenderingServer calls — those are main-thread only in Godot 4.6.
+func _rebuild_worker(albedo: Array[Image], normals: Array[Image]) -> void:
+	var albedo_out: Array[Image] = []
+	albedo_out.resize(albedo.size())
+	for i in range(albedo.size()):
+		var img: Image = albedo[i]
+		if img.get_format() != Image.FORMAT_RGBA8:
+			## Duplicate before mutating — the source Image may be shared with
+			## the shader's live texture array via an internal RID.
+			img = img.duplicate()
+			img.convert(Image.FORMAT_RGBA8)
+		albedo_out[i] = img
+
+	var normal_out: Array[Image] = []
+	if not normals.is_empty():
+		normal_out.resize(normals.size())
+		for i in range(normals.size()):
+			var img: Image = normals[i]
+			if img.get_format() != Image.FORMAT_RGBA8:
+				img = img.duplicate()
+				img.convert(Image.FORMAT_RGBA8)
+			normal_out[i] = img
+
+	_rebuild_pending_albedo = albedo_out
+	_rebuild_pending_normals = normal_out
+
+
+## Poll the worker rebuild task. Called from _process every frame.
+## When the task completes, do the main-thread finalisation:
+##   1. Create new Texture2DArray via create_from_images (main-thread only).
+##   2. Hold the OLD texture_array in _old_texture_array for one frame
+##      (double-buffer — frees any GPU-side command-buffer reference).
+##   3. Swap the shader param.
+##   4. Release last frame's _old_texture_array.
+func _poll_rebuild_task() -> void:
+	## One-frame-delayed free of the previous texture array. Keeps the
+	## old GPU texture alive for at least one command buffer submit after
+	## the shader rebind, avoiding a use-after-free on batched drivers.
+	if _old_texture_array != null:
+		_old_texture_array = null
+	if _old_normal_array != null:
+		_old_normal_array = null
+
+	if _rebuild_task_id == -1:
+		return
+	if not WorkerThreadPool.is_task_completed(_rebuild_task_id):
+		return
+
+	WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
+	_rebuild_task_id = -1
+
+	var albedo_images: Array[Image] = _rebuild_pending_albedo
+	var normal_images: Array[Image] = _rebuild_pending_normals
+	_rebuild_pending_albedo = []
+	_rebuild_pending_normals = []
+
+	if albedo_images.is_empty():
+		_texture_array_dirty = false
+		_normal_array_dirty = false
+		return
+
+	## Main-thread RenderingServer allocation. This is the unavoidable
+	## residual main-thread cost per rebuild — the texture upload itself.
+	## Converting + duplicating the images (the CPU half) already ran on
+	## the worker.
+	var new_array := Texture2DArray.new()
+	var err := new_array.create_from_images(albedo_images)
 	if err != OK:
 		push_error("[NativeImpostorRenderer] Failed to create texture array: %s" % error_string(err))
 		_texture_array_dirty = false
 		return
 
-	Log.debug("impostors", "Rebuilt texture array with %d layers" % images.size())
+	## Swap. Old array kept alive one frame via _old_texture_array.
+	_old_texture_array = _texture_array
+	_texture_array = new_array
 	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
 	_texture_array_dirty = false
+	Log.debug("impostors", "Rebuilt texture array with %d layers (async)" % albedo_images.size())
 
-	# Rebuild normal texture array (if any normals loaded)
-	if not _all_normal_images.is_empty():
-		var normal_images: Array[Image] = []
-		for img: Image in _all_normal_images:
-			if img.get_format() != Image.FORMAT_RGBA8:
-				img.convert(Image.FORMAT_RGBA8)
-			normal_images.append(img)
-
-		_normal_texture_array = Texture2DArray.new()
-		err = _normal_texture_array.create_from_images(normal_images)
+	if not normal_images.is_empty():
+		var new_normal := Texture2DArray.new()
+		err = new_normal.create_from_images(normal_images)
 		if err != OK:
 			push_error("[NativeImpostorRenderer] Failed to create normal texture array: %s" % error_string(err))
 		else:
-			Log.debug("impostors", "Rebuilt normal texture array with %d layers" % normal_images.size())
+			_old_normal_array = _normal_texture_array
+			_normal_texture_array = new_normal
 			_billboard_material.set_shader_parameter("normal_atlas", _normal_texture_array)
+			Log.debug("impostors", "Rebuilt normal texture array with %d layers (async)" % normal_images.size())
 	_normal_array_dirty = false
 
 
