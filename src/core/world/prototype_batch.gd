@@ -103,12 +103,16 @@ func _init(
 	if material_rid.is_valid():
 		rs.instance_geometry_set_material_override(rs_instance, material_rid)
 
-	## Start with nothing visible — visible_instance_count = 0 until a cull pass
-	## fills in. Prevents zero-transformed slots from leaking into the render
-	## set before any instance is added.
+	## Start with nothing visible. visible_instance_count is bumped up to cover
+	## live slots as acquire_slot / release_slot touch capacity. Once a cull
+	## pass (step 4) lands, the cull driver will overwrite this per tick.
 	rs.multimesh_set_visible_instances(multimesh_rid, 0)
 
 	_resize_capacity_internal(p_initial_capacity)
+	## Free slots default to zero-scale degenerate triangles — safe to leave
+	## inside the render set (visible_count can cover the whole capacity) with
+	## no visible cost until a real acquire_slot writes a live transform.
+	_zero_all_slots_below(p_initial_capacity, 0)
 
 
 #region Slot lifecycle
@@ -126,6 +130,12 @@ func acquire_slot() -> int:
 
 	slot_live[slot] = 1
 	slot_count_live += 1
+	## Pre-cull rendering: visible_instance_count covers the whole capacity so
+	## newly-acquired slots render immediately. Free slots inside the range
+	## are degenerate (zero-scale from _zero_all_slots_below / release_slot)
+	## and cost ~0 on GPU. Step 4 cull driver will replace this with per-tick
+	## packed buffer + multimesh_set_visible_instances.
+	_sync_visible_count()
 	return slot
 
 
@@ -150,6 +160,9 @@ func release_slot(slot: int) -> void:
 	## release without an immediate cull tick we don't want the stale
 	## transform to be rendered.
 	multimesh.set_instance_transform(slot, _ZERO_SCALE_XFORM)
+	## No need to shrink visible_count on release — the slot is already
+	## degenerate and cost-free on GPU. Pre-cull mode just keeps visible_count
+	## at slot_capacity (see _sync_visible_count).
 
 
 ## Write a world transform into a slot.
@@ -195,7 +208,29 @@ func _resize_capacity_internal(new_capacity: int) -> void:
 
 	if multimesh != null:
 		multimesh.instance_count = new_capacity
+		## Degenerate new slots so it's safe to render them (visible_count
+		## covers the whole capacity in pre-cull mode).
+		_zero_all_slots_below(new_capacity, old_capacity)
 	slot_capacity = new_capacity
+
+
+## Zero-scale the transform for every slot in [from_index, cap). Used on init
+## and on grow so the gap between `last live slot` and `capacity` is always
+## safe to render.
+func _zero_all_slots_below(cap: int, from_index: int) -> void:
+	if multimesh == null:
+		return
+	for i in range(from_index, cap):
+		multimesh.set_instance_transform(i, _ZERO_SCALE_XFORM)
+
+
+## Pre-cull pass: visible_instance_count = slot_capacity so every acquired
+## slot renders + every free slot renders as a degenerate (zero) triangle.
+## Step 4 cull replaces this with per-tick packed buffer + precise visible
+## count.
+func _sync_visible_count() -> void:
+	if multimesh_rid.is_valid():
+		RenderingServer.multimesh_set_visible_instances(multimesh_rid, slot_capacity)
 
 #endregion
 
