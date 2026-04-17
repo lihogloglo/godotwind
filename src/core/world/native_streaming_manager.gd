@@ -63,6 +63,14 @@ signal startup_progress(progress: float, loaded_cells: int, total_cells: int, qu
 ## Emitted when startup phase completes
 signal startup_complete()
 
+## Phase 8 — fires on the same frame `_teleport_detected` becomes true
+## (camera jumped > TELEPORT_DETECT_THRESHOLD = 500 m between two
+## frames). Arguments describe the jump so consumers can classify it
+## (e.g. fast-travel vs respawn vs debug teleport). Paired with
+## LoadingStateMachine to show the fade-to-black overlay during the
+## post-teleport streaming burst.
+signal teleport_happened(from_position: Vector3, to_position: Vector3, distance: float)
+
 #endregion
 
 
@@ -334,7 +342,16 @@ func _exit_tree() -> void:
 
 func _ready() -> void:
 	instance = self
-	
+
+	# Phase 8 — LoadingStateMachine pauses SceneTree during boot and big
+	# teleports, but the streaming pipeline HAS TO keep loading cells
+	# during that pause (otherwise the ring never completes and the
+	# predicate never returns true). PROCESS_MODE_ALWAYS keeps this
+	# node's _process firing regardless of tree.paused state. Gameplay
+	# nodes (player controller, NPCs, physics bodies) stay on the
+	# default PAUSABLE so they freeze as expected.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+
 	# Create world container
 	_world_container = Node3D.new()
 	_world_container.name = "WorldContainer"
@@ -557,6 +574,16 @@ func _process(delta: float) -> void:
 	if _prev_camera_position != Vector3.ZERO \
 			and _camera_position.distance_to(_prev_camera_position) > TELEPORT_DETECT_THRESHOLD:
 		_teleport_detected = true
+		# Phase 8 — emit BEFORE the startup_phase re-arm below so a
+		# LoadingStateMachine consumer can fade to black and pause the
+		# tree on the same frame the jump happens. NativeStreamingManager
+		# is PROCESS_MODE_ALWAYS so the post-teleport streaming burst
+		# will keep running while the tree is paused.
+		teleport_happened.emit(
+			_prev_camera_position,
+			_camera_position,
+			_camera_position.distance_to(_prev_camera_position)
+		)
 
 	# EMA-smoothed velocity on XZ plane (for predictive cell loading).
 	# Teleport frames skip the EMA so the huge jump doesn't throw predictive
@@ -2197,5 +2224,76 @@ func _check_startup_complete() -> void:
 ## Check if currently in startup phase
 func is_in_startup_phase() -> bool:
 	return _startup_phase
+
+
+# -----------------------------------------------------------------------------
+# Inner-ring readiness API (Phase 8 — LoadingStateMachine consumer)
+# -----------------------------------------------------------------------------
+
+## Size of the inner ring in "cell radius". Inner ring = (2r+1)² cells
+## centred on the camera cell. INNER_RING_RADIUS=1 means the 3×3 block
+## right under the player. Tighter than load_radius_cells (3) on purpose —
+## the loading gate wants "playable at arm's reach", not "whole visible
+## range ready".
+const INNER_RING_RADIUS: int = 1
+
+## Soft cap on the instantiation queue for the "ready" gate. The queue
+## trickles down steady-state; we don't require 0, just low enough that
+## the next 2–3 s of gameplay won't stall. 8 picked empirically — matches
+## the 2 cells/frame HLOD merge rate × ~4 frames of tolerable post-unpause
+## trickling.
+const INNER_RING_MAX_QUEUE: int = 8
+
+
+## Return a snapshot of inner-ring load state. Read by LoadingStateMachine's
+## predicate + progress callables; also surfaced to the perf-audit
+## autobench JSON for post-hoc analysis.
+##
+## Fields:
+##   ring_loaded       — how many of the (2r+1)² cells in the inner ring
+##                       are fully loaded (present in _loaded_cells and
+##                       not still async-pending).
+##   ring_total        — (2 * INNER_RING_RADIUS + 1) ** 2 — constant, for
+##                       convenience.
+##   ring_pending_async — cells in the ring still waiting on the worker
+##                        thread (in _async_requests or _loading_cells).
+##   instantiation_queue — CellManager's queued instantiation batches.
+##                         Drains ~2 per frame; treated as a soft cap.
+##   camera_cell       — the cell the ring is centred on.
+func get_inner_ring_status() -> Dictionary:
+	var center: Vector2i = _camera_cell
+	var ring_total: int = (2 * INNER_RING_RADIUS + 1) * (2 * INNER_RING_RADIUS + 1)
+	var ring_loaded: int = 0
+	var ring_pending_async: int = 0
+	for dx in range(-INNER_RING_RADIUS, INNER_RING_RADIUS + 1):
+		for dy in range(-INNER_RING_RADIUS, INNER_RING_RADIUS + 1):
+			var grid := Vector2i(center.x + dx, center.y + dy)
+			if grid in _loaded_cells and grid not in _async_requests:
+				ring_loaded += 1
+			elif grid in _loading_cells or grid in _async_requests:
+				ring_pending_async += 1
+	var inst_queue: int = 0
+	if _cell_manager and _cell_manager.has_method("get_instantiation_queue_size"):
+		inst_queue = _cell_manager.get_instantiation_queue_size()
+	return {
+		"ring_loaded": ring_loaded,
+		"ring_total": ring_total,
+		"ring_pending_async": ring_pending_async,
+		"instantiation_queue": inst_queue,
+		"camera_cell": center,
+	}
+
+
+## Option-A acceptance gate (see docs/audit/LOADING_STATE_MACHINE_DESIGN.md):
+## every cell in the (2r+1)² inner ring is loaded, no ring cell is still
+## async-pending, and the global instantiation queue is below
+## INNER_RING_MAX_QUEUE so the next few seconds of gameplay won't stall.
+func is_inner_ring_ready() -> bool:
+	var s := get_inner_ring_status()
+	return (
+		int(s["ring_loaded"]) >= int(s["ring_total"])
+		and int(s["ring_pending_async"]) == 0
+		and int(s["instantiation_queue"]) < INNER_RING_MAX_QUEUE
+	)
 
 #endregion

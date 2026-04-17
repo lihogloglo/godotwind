@@ -286,6 +286,42 @@ In `src/core/world/native_streaming_manager.gd`, track a `startup_mode` flag tha
 
 ---
 
+### PHASE 8 — Loading state machine (canonical pause-gated boot + teleport) (status: DONE (code) — runtime verify pending user)
+
+**Goal:** stop showing the player ~150 s of 10-FPS streaming churn on cold boot. Canonical Godot-4.6 pattern: `SceneTree.paused = true` + `PROCESS_MODE_ALWAYS` on streaming/UI + a predicate-driven overlay. Mirrors OpenMW's `Loading::ScopedLoad` scope guard. Direct response to §4.N autonomous-audit FAIL on Phase 7's 20 s cold-start gate (actual 170-180 s).
+
+**Scope:** cold boot + large teleport (> 500 m, already detected by Phase 7). Interior-door transitions stay on the existing pocket-preload + fade-to-black bridge — they're effectively instant in practice.
+
+**Changes:**
+1. `src/core/loading/loading_screen.gd` (new) — `SceneLoadingScreen` CanvasLayer with fade-tween on root ColorRect. `PROCESS_MODE_ALWAYS` on every child so fade + label updates tick during the tree pause.
+2. `src/core/loading/loading_state_machine.gd` (new) — `LoadingStateMachine` Node with `IDLE / ENTERING / LOADING / EXITING` states, predicate-polled exit, 30 s timeout fallback. `enter_loading(reason, predicate, title, subtitle, progress_fn, timeout_s, fade_in, pause_gameplay)` API.
+3. `src/core/world/native_streaming_manager.gd`:
+   - `_ready` now sets `process_mode = Node.PROCESS_MODE_ALWAYS`.
+   - New signal `teleport_happened(from_position, to_position, distance)` fired alongside the existing `_teleport_detected = true` flag.
+   - New `get_inner_ring_status()` returning `{ring_loaded, ring_total, ring_pending_async, instantiation_queue, camera_cell}` + `is_inner_ring_ready()` — the Phase 8 Option-A exit predicate.
+4. `src/tools/world_explorer.gd`:
+   - Instantiates `LoadingStateMachine` in `_ready` (early).
+   - Calls `enter_loading("boot", …, fade_in=true)` at the end of `_init_async`, right after `set_camera`.
+   - Connects `teleport_happened` → `_on_teleport_happened` which enters `loading` with `reason="teleport"`, `fade_in=true`.
+   - Teleport trigger opts out when `--bench-auto` is on the command line (the autobench measures raw recovery, not gated UX).
+
+**Measurement:**
+- Observable `loading_finished` signal payload: `reason, duration_s, timed_out`. `duration_s` becomes the canonical "time to playable" metric, replacing the misleading `startup_complete` frame-count which drops too early.
+- Target: cold-boot `loading_finished("boot", d, timed_out=false)` with `d < 20 s` on the autobench-free path.
+- Verified via interactive launch (watch for the `LoadingState 'boot' complete in X.Xs` log line in the world_explorer overlay).
+
+**Acceptance:**
+- Cold-boot `loading_finished("boot")` fires with `timed_out=false` and `duration_s < 20 s`.
+- Teleport (> 500 m) during normal gameplay: `loading_finished("teleport")` fires with `timed_out=false` and `duration_s < 15 s`.
+- Zero new script errors / parse errors during either path.
+- `--bench-auto` launches still complete all 4 scenarios (teleport trigger opt-out verified).
+
+**Rollback:** revert the phase commits. State machine is additive — removing it restores the pre-Phase-8 "play through the churn" behaviour exactly.
+
+**Design doc:** `docs/audit/LOADING_STATE_MACHINE_DESIGN.md` (locked 2026-04-17). Covers the OpenMW side-by-side, Godot `process_mode` exemptions, Option-A exit condition math, and non-obvious pitfalls (CanvasLayer lacks `modulate`, `Tween.TWEEN_PAUSE_PROCESS`, double-enter semantics).
+
+---
+
 ### PHASE X (stretch) — Skip Node3D for pure-static refs (status: PARKED)
 
 **Why parked:** high reward, high risk, premature before the phases above ship.
@@ -532,6 +568,7 @@ No mid-phase acks. If the implementer drifts (e.g. Phase 3 grows a second epicyc
 | 6 — Impostor double-buffer | DONE (code) — runtime verify pending user | No before/after p99 baseline; flyby p99−p50 = 65.6 ms dominated by walk-segment streaming churn, not periodic 4 Hz impostor hitch (vista/pan/teleport-recovery show no periodic multi-ms spikes, suggesting the async rebuild IS working). Commit 387ac49. §4.N autonomous audit 2026-04-17_20-30-38 has the p99 trace. |
 | 7 — Burst cold-start | DONE (code), teleport-burst VERIFIED + cold-start-settle FAIL | Teleport detection path works: Teleport detected log fires + startup_phase re-arms + fps≥50 recovery in 3.6s after 940m jump. Commit 134ec06. **But** cold-start time-to-stable-55 is 170+ s vs 20 s gate on both launches — `_startup_phase` flag drops too early, 4ms post-startup budget is too tight for residual queue. Second pass needed on cold-start path. §4.N autonomous audit 2026-04-17_20-30-38 has full heartbeat trace. |
 | Phase 3 cleanup | DONE | Commit 574c204: mid_tier_debugger + lod_debug_commands iterate registry batches (was iterating always-RID() instance_rids, producing "0 valid RIDs" noise + silent no-op on lod_bias). |
+| 8 — Loading state machine | DONE (code) — runtime verify pending user | Canonical Godot `SceneTree.paused` + `PROCESS_MODE_ALWAYS` on streaming/UI + predicate-driven overlay. SceneLoadingScreen + LoadingStateMachine + world_explorer cold-boot + teleport hooks. 7 unit tests pass. Design doc: `docs/audit/LOADING_STATE_MACHINE_DESIGN.md`. Direct response to Phase 7 cold-start FAIL in §4.N autonomous audit. |
 | X — Skip Node3D (stretch) | PARKED | revisit post-7 |
 | X — Compute cull (stretch) | PARKED | revisit post-3 |
 

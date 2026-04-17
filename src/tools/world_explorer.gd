@@ -79,6 +79,7 @@ const BenchmarkHUDScript := preload("res://src/tools/benchmark_hud.gd")
 const ProgressiveBenchmarkScript := preload("res://src/tools/progressive_benchmark.gd")
 const PerfSweepScript := preload("res://src/tools/perf_sweep.gd")
 const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
+const LoadingStateMachineScript := preload("res://src/core/loading/loading_state_machine.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -151,6 +152,8 @@ var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
 var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B feature flags
 var _benchmark_hud: CanvasLayer = null  # BenchmarkHUD — live perf overlay, default hidden
 var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
+var _loading_state_machine: LoadingStateMachineScript = null  # Phase 8 — canonical loading gate (boot + teleport)
+var _boot_gate_entered: bool = false  # Latches the one-shot boot enter_loading call
 var _loading_phase_times: Dictionary = {}  # Per-phase loading times
 
 # State
@@ -227,6 +230,15 @@ func _do_fast_quit() -> void:
 func _ready() -> void:
 	# Intercept window close to do fast cleanup instead of slow tree teardown
 	get_tree().set_auto_accept_quit(false)
+
+	# Phase 8 — LoadingStateMachine. Instantiated early so the overlay
+	# node exists before _init_async's first await; the actual
+	# enter_loading("boot") fires later, once the streaming manager is
+	# live and its is_inner_ring_ready predicate is meaningful.
+	_loading_state_machine = LoadingStateMachineScript.new()
+	_loading_state_machine.name = "LoadingStateMachine"
+	add_child(_loading_state_machine)
+	_loading_state_machine.loading_finished.connect(_on_loading_finished)
 
 	# Enable wireframe debug-buffer generation BEFORE any mesh loads. The flag
 	# affects mesh-creation time only, so toggling `wireframe on` in the
@@ -479,12 +491,102 @@ func _init_async() -> void:
 	# Setup subsystem toggles (needs all managers initialized)
 	_setup_subsystem_toggles()
 
+	# Phase 8 — now that the streaming manager is tracking the camera and
+	# the initial ring is queued up, hand the boot-sequence off to the
+	# LoadingStateMachine. The old data-loading overlay faded out at
+	# `_hide_loading()` a few lines up; without this gate the player
+	# would see ~3 min of 10-FPS streaming churn before the world is
+	# actually playable. Inner-ring readiness predicate = option A
+	# (see docs/audit/LOADING_STATE_MACHINE_DESIGN.md).
+	_enter_boot_loading_gate()
+
+	# Phase 8 — also connect the teleport trigger. Any camera jump >
+	# TELEPORT_DETECT_THRESHOLD (500 m) inside NativeStreamingManager
+	# emits `teleport_happened`; we enter LoadingStateMachine with a
+	# fade-out-then-pause so the warp is hidden while the new area's
+	# inner ring spins up. Same predicate as boot, shorter fade budget.
+	if native_streaming_manager.has_signal("teleport_happened"):
+		native_streaming_manager.teleport_happened.connect(_on_teleport_happened)
+
 	# Autonomous performance audit — wire AutoBenchRunner when invoked with
 	# `--bench-auto [stamp]` on the command line. Runs scenarios C-F from
 	# docs/audit/AUTONOMOUS_PERF_AUDIT_HANDOFF_2026_04_17.md once streaming has
 	# settled, then calls get_tree().quit() on completion. No-op when the flag
 	# is absent.
 	_maybe_start_auto_bench()
+
+
+## Phase 8 — Cold-boot handoff into LoadingStateMachine. Called once
+## streaming is live + camera is tracking. Idempotent via _boot_gate_entered.
+func _enter_boot_loading_gate() -> void:
+	if _boot_gate_entered:
+		return
+	if not _loading_state_machine or not native_streaming_manager:
+		return
+	_boot_gate_entered = true
+	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
+	var progress_fn := Callable(self, "_format_boot_progress")
+	_loading_state_machine.enter_loading(
+		"boot",
+		predicate,
+		"Loading Morrowind",
+		"Streaming cells around Seyda Neen…",
+		progress_fn,
+		30.0,
+		true  # fade_in — prior _hide_loading left the screen transparent
+	)
+
+
+## Consumed by LoadingStateMachine as the overlay's third-line progress
+## label. Formats the inner-ring status dict into a single short string.
+func _format_boot_progress() -> String:
+	if not native_streaming_manager or not native_streaming_manager.has_method("get_inner_ring_status"):
+		return ""
+	var s: Dictionary = native_streaming_manager.get_inner_ring_status()
+	return "cells %d/%d · async %d · queue %d" % [
+		int(s.get("ring_loaded", 0)),
+		int(s.get("ring_total", 0)),
+		int(s.get("ring_pending_async", 0)),
+		int(s.get("instantiation_queue", 0)),
+	]
+
+
+## Phase 8 — signal handler. LoadingStateMachine emits loading_finished
+## when the predicate returns true OR the 30s timeout fires. We log it
+## here; `duration_s` becomes the canonical "time-to-playable" number
+## going forward, replacing the misleading `startup_complete` frame-count
+## metric that currently drops too early.
+func _on_loading_finished(reason: String, duration_s: float, timed_out: bool) -> void:
+	var suffix := " (TIMEOUT)" if timed_out else ""
+	_log("[color=green]LoadingState '%s' complete in %.1fs%s[/color]" % [reason, duration_s, suffix])
+
+
+## Phase 8 — teleport trigger. NativeStreamingManager emits
+## `teleport_happened` when the camera jumps > 500 m between two frames;
+## we enter LoadingStateMachine with fade_in=true so the warp itself is
+## hidden behind the fade-to-black. The `autobench` run doesn't want
+## this gate because it's measuring raw teleport recovery — so skip
+## when `--bench-auto` was on the command line.
+func _on_teleport_happened(_from_pos: Vector3, _to_pos: Vector3, distance: float) -> void:
+	if not _loading_state_machine:
+		return
+	# Autobench opt-out — preserves the measurement contract in the
+	# perf-audit runs (we want to see the raw teleport-burst FPS trace,
+	# not 30 s of gated black screen).
+	for a in OS.get_cmdline_args():
+		if a == "--bench-auto" or a.begins_with("--bench-auto="):
+			return
+	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
+	var progress_fn := Callable(self, "_format_boot_progress")
+	_loading_state_machine.enter_loading(
+		"teleport",
+		predicate,
+		"Traveling…",
+		"Streaming new area (%.0f m jump)" % distance,
+		progress_fn,
+		30.0,
+		true  # fade_in — masks the warp
+	)
 
 
 ## Parse OS.get_cmdline_args() for --bench-auto [stamp] and instantiate the
