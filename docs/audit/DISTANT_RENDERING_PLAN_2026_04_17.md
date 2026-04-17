@@ -363,13 +363,45 @@ Appended as phases complete.
 
 _Appended as phases complete. Each re-measurement cites the commit SHA and the phase number._
 
+#### Phase 3 steps 2-4 (commits d71302c / f5472b1 / 5e2450a / 93973df / f3105ca)
+
+**Runtime FPS delta:** NOT YET MEASURED. Flag defaults OFF; legacy path is byte-unchanged. User to A/B via `proto_registry on` + scene restart + `bench` HLOD-on/off before step 5 C# port.
+
+**Test-suite verification (headless, 2026-04-17):**
+- All 10 `test_prototype_registry.gd` tests pass (slot lifecycle, registry dedup, multi-sub-mesh, remove idempotency, batch_key stability).
+- All 7 `test_static_object_renderer_bwide.gd` tests pass.
+- 9 `test_object_paging_kernel.gd` failures remain pre-existing (per handoff — unrelated to Phase 3).
+- Zero new script errors / parse errors / Identifier-not-found on `--headless --quit-after 20`.
+
 ---
 
 ## 5. Design Decisions Log
 
 Append decisions made during implementation that future sessions will inherit. Format: one H3 per decision, dated, with the alternatives considered.
 
-_(empty — populated as phases execute)_
+### 2026-04-17 — PrototypeBatch owns slot storage, MM is a write-through sink (Phase 3 step 4)
+
+**Context:** step-3 first-draft had `set_slot_transform` writing to `multimesh.set_instance_transform(slot, xform)` directly, with a fallback "visible=capacity, degenerate holes" rendering mode. Once the step-4 cull pass packed visible slots into buffer positions 0..N, sparse `slot_id > N` writes started stomping packed-slot data and never became visible until the next cull tick. One-frame glitches on cell load.
+
+**Decision:** PrototypeBatch now owns two PackedFloat32Array fields (`slot_transforms`, `slot_custom_data`) indexed by slot id. `set_slot_transform` / `set_slot_custom_data` write only to these. The MultiMesh's internal buffer is written exclusively via `RenderingServer.multimesh_set_buffer` during `cull_and_upload`. Pre-cull state = `visible_instance_count = 0`, nothing renders until driver ticks.
+
+**Alternatives rejected:**
+- "Dual-write + always-tick every frame" — avoids the stomp but costs O(total_slots) per frame even with zero churn. Kills battery / perf on idle.
+- "Sparse→packed index map maintained per-batch" — lets `set_instance_transform` find packed position. Extra bookkeeping, subtle race if cull runs mid-add. More code than the single-source-of-truth fix.
+
+**Canonical reference:** `native_impostor_renderer.gd:1757-1826` — same pattern (own the buffer, upload via `set_buffer`). Confirmed good on Godot 4.6.
+
+### 2026-04-17 — GDScript cull pass gates on dirty flag OR camera-moved (Phase 3 step 4)
+
+**Context:** running cull every frame is O(total_slots) regardless of churn. At steady-state ~30k slots it's ~5-10 ms GDScript per frame — bigger than the draw-call win for a non-moving camera.
+
+**Decision:** `PrototypeRegistry._cull_dirty` set by any add/remove/transform/hide mutation. `tick_cull_if_needed(cam_pos, max_dist_sq)` re-culls only when dirty OR camera moved ≥ `CULL_DISTANCE_HYSTERESIS` (10 m, §5 of the design doc). Angle hysteresis is not implemented yet; distance is sufficient for step-4 correctness.
+
+**Alternatives rejected:**
+- "Cull every frame" — cost listed above.
+- "Cull on cell change only" — doesn't handle camera movement within a cell where a previously-out-of-range slot enters range.
+
+
 
 ---
 

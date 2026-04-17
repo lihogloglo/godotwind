@@ -271,13 +271,13 @@ Estimated net delta: -200 lines from `static_object_renderer.gd`, +500 lines spr
 - Verify `RenderingServer.multimesh_set_visible_instances(mm_rid, n)` exists in Godot 4.6 (vs. property-only path `MultiMesh.visible_instance_count`). If the RS call doesn't exist, switch to the property path — semantics identical, threading assumptions differ.
 
 **Implementation:**
-1. Write `prototype_batch.gd` + `prototype_registry.gd` skeletons. Tests for add / remove / grow-on-exhaustion / freelist correctness. GDScript. No cull yet.
-2. Wire `static_object_renderer` to use registry for `add_instance`. Keep the OLD per-cell batch path side-by-side (feature flag, env-var or console cmd toggle). Verify: scene launches, MID renders correctly under BOTH toggles.
-3. Disable old per-cell batch path. Verify scene still renders + `bench` HLOD-on numbers don't regress. A/B measurement: prior-session "-15-20 FPS" claim validated or falsified here.
-4. Add naive GDScript cull pass (per-slot distance + frustum). Measure. Should already be a win over unbatched or batched-but-not-culled state.
-5. Port cull pass to C# (`WorldMidCuller.cs`). Marshalling layout per @roaster: `PackedFloat32Array` for positions, 6×4 float array for frustum planes (not `Plane[]`), `Span<float>` C#-side. NativeBridge pattern mirrors `src/core/native_bridge.gd`. Re-measure.
-6. Rewrite `lod_crossfade_multimesh.gdshader` for spawn-time fade via `INSTANCE_CUSTOM.x`. Verify fade visible when a cell streams in.
-7. Delete dead code: `batch_cell_into_multimesh`, `_create_cell_batch`, `CellBatch` class.
+1. ✅ Write `prototype_batch.gd` + `prototype_registry.gd` skeletons. Tests for add / remove / grow-on-exhaustion / freelist correctness. GDScript. No cull yet. (commit `89780df`)
+2. ✅ Wire `static_object_renderer` to use registry for `add_instance`. Keep the OLD per-cell batch path side-by-side (feature flag). Verify: scene launches, parse clean, tests pass under both toggles. (commits `d71302c`, `f5472b1`, `5e2450a` — adds registry APIs, renderer flag wiring, `proto_registry on|off|status` console command)
+3. ✅ Render correctness without a cull pass. Before step 4 landed, MultiMesh had `visible_instance_count = 0` at init; first attempt leaked sparse `set_instance_transform` writes past `visible_count` post-cull. (commit `93973df` — initially degenerate-hole approach; **superseded by step 4 refactor** — PrototypeBatch now owns slot_transforms/custom_data outright, MM buffer is write-only via `set_buffer`.) **Note:** the "disable old per-cell batch path + measure FPS regression claim" portion of this step is PARKED pending user runtime A/B. `cell_manager._finalize_request` already skips `batch_cell_into_multimesh` when `use_prototype_registry` is true; legacy path remains intact for off-flag runs.
+4. ✅ Add naive GDScript cull pass (per-slot distance only — frustum deferred to step 5 C#). (commit `f3105ca` — PrototypeBatch.cull_and_upload + PrototypeRegistry.tick_cull_if_needed driver + native_streaming_manager._process hook, gated by `_cull_dirty` or camera-moved ≥ 10 m.) Runtime measurement pending user A/B.
+5. ⏳ Port cull pass to C# (`WorldMidCuller.cs`). Marshalling layout per @roaster: `PackedFloat32Array` for positions, 6×4 float array for frustum planes (not `Plane[]`), `Span<float>` C#-side. NativeBridge pattern mirrors `src/core/native_bridge.gd`. Re-measure.
+6. ⏳ Rewrite `lod_crossfade_multimesh.gdshader` for spawn-time fade via `INSTANCE_CUSTOM.x`. Verify fade visible when a cell streams in.
+7. ⏳ Delete dead code: `batch_cell_into_multimesh`, `_create_cell_batch`, `CellBatch` class, mm_slot/batch fallback paths in InstanceData.
 8. Commit per step. Branch isolated.
 
 ---
