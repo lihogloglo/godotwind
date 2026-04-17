@@ -239,8 +239,12 @@ func _setup_master_multimesh() -> void:
 	# Configure native visibility_range for FAR tier
 	# CRITICAL FIX: Use Godot's native visibility_range to hide impostors at close range
 	# This is more reliable than shader-only discard because Godot culls BEFORE rendering
-	# Begin at FAR_START (500m) minus margin for smooth transition
-	_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR  # 480m
+	# Begin at FAR_START minus margin for smooth transition. Phase 5
+	# (2026-04-17) pushed FAR_START from 500m → 1000m, so the default is
+	# now 980m. native_streaming_manager's init re-applies HLOD_END at
+	# startup anyway, but keeping the default consistent avoids a 500m
+	# flash between _init and the post-initialize override.
+	_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR
 	_master_instance.visibility_range_end = DU.FAR_END  # 5000m
 	_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
 	_master_instance.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
@@ -283,8 +287,11 @@ func _setup_billboard_material() -> void:
 	default_normal_array.create_from_images([default_normal_img])
 	_billboard_material.set_shader_parameter("normal_atlas", default_normal_array)
 
-	_billboard_material.set_shader_parameter("fade_distance", DU.MID_END) # 500m
-	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN_LOD3_FAR) # 20m
+	# Phase 5 (2026-04-17): impostor fade-in centered on FAR_START (1km post-phase-5),
+	# matching the engine visibility_range_begin below. Was MID_END (500m) before
+	# the pipeline pushed impostors out to 1km.
+	_billboard_material.set_shader_parameter("fade_distance", DU.FAR_START)
+	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN_LOD3_FAR)
 	_billboard_material.set_shader_parameter("debug_mode", false)
 
 	# Set material on both the mesh surface AND as override (belt and suspenders)
@@ -328,12 +335,14 @@ func set_shader_debug_mode(enabled: bool) -> void:
 			_master_instance.visibility_range_begin_margin = 0.0
 			Log.debug("impostors", "visibility_range_begin set to 0 (debug mode)")
 		else:
-			# Normal mode: restore FAR tier visibility (450m+)
-			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR  # 480m
-			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
-			Log.debug("impostors", "visibility_range_begin restored to 480m")
+			# Normal mode: restore FAR tier visibility (FAR_START − margin).
+			# Phase 5: default is now 980m (was 480m) since FAR_START moved
+			# from 500m → 1000m.
+			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR
+			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR
+			Log.debug("impostors", "visibility_range_begin restored to %.0fm" % [DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR])
 
-	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (500m+)"))
+	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (FAR tier)"))
 
 
 ## Adjust impostor visibility_range_begin to match the active tier layout.

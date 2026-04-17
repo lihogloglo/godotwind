@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS: Dictionary = {
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
 	"optimize_size": true,     # Compress texture
-	"min_distance": DU.FAR_START,  # Start showing at FAR tier (500m)
+	"min_distance": DU.FAR_START,  # Start showing at FAR tier (1km post-Phase-5)
 	"max_distance": DU.FAR_END,    # Stop showing at FAR end (5km)
 }
 
