@@ -37,7 +37,6 @@ const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils
 const CS := preload("res://src/core/coordinate_system.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
-const GPUSceneDatabaseScript := preload("res://src/core/gpu_driven/gpu_scene_database.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 const ObjectPagingScript := preload("res://src/core/world/object_paging.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
@@ -190,9 +189,6 @@ var _world_container: Node3D = null
 ## Cell manager for loading cells
 var _cell_manager: CellManagerScript = null
 
-## GPU scene database for SSBO-backed world state (Phase 2)
-var _gpu_scene_db: GPUSceneDatabaseScript = null
-
 ## Current camera position
 var _camera_position: Vector3 = Vector3.ZERO
 
@@ -289,9 +285,6 @@ func fast_cleanup() -> void:
 		_static_renderer.clear()
 	if _impostor_renderer and _impostor_renderer.has_method("clear"):
 		_impostor_renderer.clear()
-	if _gpu_scene_db:
-		_gpu_scene_db.cleanup()
-		_gpu_scene_db = null
 	if _distant_light_manager:
 		_distant_light_manager.cleanup()
 		_distant_light_manager = null
@@ -309,11 +302,6 @@ func _exit_tree() -> void:
 	# If quitting, fast_cleanup() already freed everything — bail immediately
 	if Engine.has_meta("_quitting"):
 		return
-
-	# Clean up GPU Scene Database
-	if _gpu_scene_db:
-		_gpu_scene_db.cleanup()
-		_gpu_scene_db = null
 
 	# Force-clear RS instances first (before cell tree cleanup)
 	# StaticObjectRenderer holds thousands of RenderingServer RIDs that must be freed
@@ -386,9 +374,6 @@ func _ready() -> void:
 	# Create runtime HLOD merger for cell-level merged meshes (300-1000m)
 	_hlod_merger = ObjectPagingScript.new()
 
-	# Create GPU scene database for SSBO-backed world state (Phase 2)
-	_gpu_scene_db = GPUSceneDatabaseScript.new()
-
 
 ## Initialize the streaming manager
 ## cell_manager: CellManager instance for loading cell data
@@ -403,7 +388,6 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 
 	_cell_manager = cell_manager
 	_cell_manager._static_renderer = _static_renderer
-	_cell_manager.set_gpu_scene_db(_gpu_scene_db)
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
 
@@ -507,7 +491,14 @@ func _process(delta: float) -> void:
 		var draws := int(p.get_monitor(p.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 		var objects := int(p.get_monitor(p.RENDER_TOTAL_OBJECTS_IN_FRAME))
 		var prims := int(p.get_monitor(p.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d" % [
+		# MultiMesh batch stats from StaticObjectRenderer (0 if renderer absent).
+		var mm_batches := 0
+		var mm_slots := 0
+		if _static_renderer and _static_renderer.has_method("get_stats"):
+			var srs: Dictionary = _static_renderer.get_stats()
+			mm_batches = int(srs.get("mm_batches", 0))
+			mm_slots = int(srs.get("mm_slots", 0))
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d mm_batches=%d mm_slots=%d" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
@@ -518,6 +509,8 @@ func _process(delta: float) -> void:
 			prims / 1000,
 			_loaded_cells.size(),
 			_loading_cells.size(),
+			mm_batches,
+			mm_slots,
 		])
 
 	# Start timing for frame budget telemetry

@@ -42,9 +42,6 @@ var _static_renderer: Node = null  # StaticObjectRenderer
 
 # MID-tier batch pool removed — StaticObjectRenderer now handles MID with per-instance LOD
 
-# GPU scene database for SSBO-backed world state (Phase 2)
-var _gpu_scene_db: RefCounted = null  # GPUSceneDatabase
-
 # Statistics (instantiation stats now in ReferenceInstantiator, model stats in ModelLoader)
 var _stats: Dictionary = {
 	"multimesh_instances": 0,
@@ -932,7 +929,6 @@ class AsyncCellRequest:
 	var error_message: String = ""  # Error description if failed
 	var retry_count: int = 0  # Number of retries attempted
 	var failed_models: Array[String] = []  # Models that failed to parse
-	var gpu_objects: Array[Dictionary] = [] # Buffer for GPU Scene Database objects (Phase 2)
 
 
 ## Next async request ID
@@ -999,12 +995,6 @@ var _aabb_cache: Dictionary = {}  # String -> float
 ## Update camera position for NEAR-tier actor filtering
 func set_camera_position(pos: Vector3) -> void:
 	_instantiator.camera_position = pos
-
-
-## Set the GPU scene database for SSBO-backed world state
-func set_gpu_scene_db(db: RefCounted) -> void:
-	_gpu_scene_db = db
-	_sync_instantiator_config()
 
 
 ## Set the background processor to use for async loading
@@ -1440,13 +1430,16 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 					# Beyond NEAR range: RS-only. Promotion system creates Node3D later.
 					instantiated += 1
 					if _is_request_complete(request):
-						request.completed = true
+						# Route through _finalize_request so the MM batching hook
+						# + GPU scene DB upload run for content cells. Inline
+						# `request.completed = true` was a pre-existing bypass.
+						_finalize_request(request)
 					continue
 				else:
 					# MID failed AND too far for NEAR — skip entirely (Node3D at >150m is invisible)
 					instantiated += 1
 					if _is_request_complete(request):
-						request.completed = true
+						_finalize_request(request)
 					continue
 			# Within NEAR range (or MID failed at close range): fall through to create Node3D
 
@@ -1508,9 +1501,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			else:
 				obj.queue_free()
 
-		# Check if this was the last reference
+		# Check if this was the last reference — route through _finalize_request
+		# so batching + GPU scene DB upload fire (inline `request.completed = true`
+		# was a pre-existing bypass for content cells).
 		if _is_request_complete(request):
-			request.completed = true
+			_finalize_request(request)
 
 	# Batch add all children at once (significantly reduces scene tree overhead)
 	# For large batches (>20), use call_deferred to spread work across frames
@@ -2069,18 +2064,6 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	if instance_id < 0:
 		return -1
 
-	# If GPU Scene Database is active, collect data for batch upload
-	if _gpu_scene_db:
-		var mesh_stats: Dictionary = _static_renderer.get_mesh_type_stats(type_name)
-		var aabb: AABB = mesh_stats.get("aabb", AABB())
-
-		request.gpu_objects.append({
-			"transform": xform,
-			"aabb": aabb,
-			"mesh_id": float(type_name.hash()),
-			"lod_mask": 0
-		})
-
 	# Only track as mid_tier_instances — objects_instantiated is counted by the
 	# NEAR-tier Node3D path via _instantiator.instantiate_reference(). Avoids
 	# double-counting when both RS and Node3D are created for the same object.
@@ -2088,16 +2071,25 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	return instance_id
 
 
-## Internal: Finalize a request (upload GPU objects, mark completed)
+## Internal: Finalize a request (mark completed, run per-cell batching)
 func _finalize_request(request: AsyncCellRequest) -> void:
 	if request.completed:
 		return
 
-	# Upload buffered GPU objects to scene database
-	if _gpu_scene_db and not request.gpu_objects.is_empty():
-		_gpu_scene_db.call("add_cell_objects", request.grid, request.gpu_objects)
-		# Clear buffer to free memory
-		request.gpu_objects.clear()
+	# Collapse same-type MID instances in this cell into per-cell MultiMesh
+	# batches. One draw call per (cell, mesh_type) instead of one per object,
+	# while preserving LOD / visibility_range / promotion semantics. Interior
+	# pockets skip the batch — their contents are few and tightly interactive,
+	# so per-instance bookkeeping wins.
+	#
+	# Measured 2026-04-17: regressed ~15-20 FPS at steady state against the
+	# unbatched path on this branch — centroid-based visibility_range kept more
+	# geometry alive past 500m than per-instance culling did, and 1000+ extra
+	# batch RS instances weren't offset by the individual draws saved. Kept in
+	# the tree for iteration against the 150 FPS target. Toggle by commenting
+	# out this single call.
+	if not request.is_interior and _static_renderer:
+		_static_renderer.batch_cell_into_multimesh(request.grid)
 
 	request.completed = true
 

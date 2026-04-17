@@ -35,6 +35,26 @@ var _instances: Dictionary[int, InstanceData] = {}
 ## Enables O(cell_count) lookups instead of O(total_instances) for promotion/removal
 var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
 
+## Per-cell MultiMesh batches. Populated by batch_cell_into_multimesh(), freed
+## by remove_cell_instances() / clear(). Each entry is an Array[CellBatch] —
+## one entry per mesh type that was batched in that cell.
+##
+## NOTE 2026-04-17: shipped once, measured a regression (~15-20 FPS at steady
+## state vs unbatched) because the per-cell centroid RS instance extends the
+## effective visibility_range past what per-individual 500m culling would drop,
+## and the 1000+ extra batch RS instances aren't offset by saved individual
+## draws beyond 500m. Kept in the tree for iteration against a 150 FPS target —
+## run with this path on if you want to tune MM_BATCH_MIN_COUNT, slot visibility,
+## or switch to swap-pop compaction. `cell_manager.gd` calls
+## `batch_cell_into_multimesh(grid)` at the end of `_finalize_request`.
+var _cell_batches: Dictionary[Vector2i, Array] = {}  # Array[CellBatch]
+
+## Minimum number of same-type instances in a cell before MultiMesh batching
+## kicks in. Below this threshold the instances stay as individual RS instances —
+## the per-batch overhead (MultiMesh allocation + one extra RS instance) outweighs
+## the draw-call saving for tiny groups.
+const MM_BATCH_MIN_COUNT: int = 4
+
 ## Next instance ID
 var _next_id: int = 0
 
@@ -108,12 +128,42 @@ class InstanceData:
 	var visible: bool = true
 	var promoted: bool = false  ## True when a NEAR Node3D exists for this instance
 	var cell_grid: Vector2i    ## Which cell this belongs to
-	var gpu_slot: int = -1     ## Slot index in GPUSceneDatabase (-1 if not tracked)
+	## MultiMesh batching (populated by batch_cell_into_multimesh). When batched,
+	## sub_rids is cleared (the per-instance RS RIDs were freed and replaced by a
+	## shared MultiMesh slot). visibility / promotion / removal route through
+	## mm_slot + batch. -1 = not batched.
+	var mm_slot: int = -1
+	var batch: CellBatch = null
 	## Metadata for MID→NEAR promotion (Phase 5b)
 	var model_path: String     ## Original model path for prototype lookup
 	var item_id: String        ## Item variant ID
 	var ref_id: StringName     ## ESM reference ID (e.g., "barrel_01")
 	var ref_num: int           ## ESM unique reference number
+
+
+## Per-cell MultiMesh batch.
+##
+## Collapses N individual RS instances of the same mesh type within a cell into
+## one draw call while preserving per-cell visibility_range + LOD behaviour.
+## Canonical pattern (Unity StaticBatchingUtility / Unreal HISM): one MultiMesh
+## per (cell, type), RS instance positioned at cell centroid so Godot's screen-
+## space LOD selector evaluates against the cell's distance, and visibility_range
+## fades the batch out at the same distance as individual instances would.
+##
+## Slot indexing: instance_data.mm_slot maps 1:1 to the slot the instance's
+## transform was written into at batch creation. Promotion/visibility toggles
+## that slot's transform to a zero-scale degenerate placeholder rather than
+## compacting the MultiMesh (compaction would reshuffle every InstanceData's
+## mm_slot — not worth the bookkeeping for a ~free GPU cost).
+class CellBatch:
+	var type_name: String
+	var cell_grid: Vector2i
+	var rs_instance: RID              ## Single RS instance with MultiMesh base
+	var multimesh: MultiMesh          ## Strong ref — holds slot transforms + mesh ref
+	var multimesh_rid: RID            ## Derived at use-time from multimesh.get_rid()
+	var centroid: Vector3             ## RS instance origin (slots stored relative to this)
+	var instance_ids: Array[int] = [] ## Instance IDs in this batch (parallel to slot index)
+	var slot_count: int = 0
 
 #endregion
 
@@ -396,16 +446,23 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 	return instance_rid
 
 
-## Remove an instance (frees all sub-mesh RS instances)
+## Remove an instance — frees per-instance RS RIDs for unbatched, or zero-scales
+## the MultiMesh slot for batched (slot stays allocated to avoid reshuffling).
 func remove_instance(id: int) -> void:
 	if id not in _instances:
 		return
 
 	var data: InstanceData = _instances[id]
 
-	for rid: RID in data.sub_rids:
-		if rid.is_valid():
-			RenderingServer.free_rid(rid)
+	if data.mm_slot >= 0 and data.batch != null:
+		# Vacate the MM slot. The slot index stays burned — compacting would
+		# require rewriting every sibling InstanceData.mm_slot, which costs
+		# more than the GPU price of a few degenerate triangles per cell.
+		_hide_batch_slot(data.batch, data.mm_slot, data.transform.origin)
+	else:
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.free_rid(rid)
 
 	if data.type_name in _mesh_types:
 		var mesh_type: MeshType = _mesh_types[data.type_name]
@@ -429,34 +486,49 @@ func remove_instance(id: int) -> void:
 
 
 ## Remove all instances belonging to a cell
-## Uses spatial index for O(cell_size) instead of O(total_instances)
+## Uses spatial index for O(cell_size) instead of O(total_instances).
+## Also frees any per-cell MultiMesh batches (RS instance + MM resource).
 func remove_cell_instances(cell_grid: Vector2i) -> int:
-	if cell_grid not in _cell_index:
+	if cell_grid not in _cell_index and cell_grid not in _cell_batches:
 		return 0
 
-	var to_remove: Array = _cell_index[cell_grid].duplicate()
-	for id: int in to_remove:
-		remove_instance(id)
+	var removed := 0
+	if cell_grid in _cell_index:
+		var to_remove: Array = _cell_index[cell_grid].duplicate()
+		for id: int in to_remove:
+			remove_instance(id)
+		removed = to_remove.size()
 
-	return to_remove.size()
+	# Batches freed AFTER per-instance removal (remove_instance zeroes the slots
+	# but the RS instance + MM resource live on until here).
+	_free_cell_batches(cell_grid)
+	return removed
 
 
 ## Hide all instances belonging to a cell (fast — no GPU resource cleanup)
-## Used for immediate visual removal before deferred free_rid() cleanup
+## Used for immediate visual removal before deferred free_rid() cleanup.
+## Batched cells are hidden by toggling the cell's MM RS instances; individual
+## instances are hidden per-RID.
 func hide_cell_instances(cell_grid: Vector2i) -> int:
-	if cell_grid not in _cell_index:
-		return 0
-
 	var count := 0
-	for id: int in _cell_index[cell_grid]:
-		if id not in _instances:
-			continue
-		var data: InstanceData = _instances[id]
-		for rid: RID in data.sub_rids:
-			if rid.is_valid():
-				RenderingServer.instance_set_visible(rid, false)
-		data.visible = false
-		count += 1
+
+	# Batched: one visibility toggle per batch covers all its slots.
+	if cell_grid in _cell_batches:
+		for batch: CellBatch in _cell_batches[cell_grid]:
+			if batch.rs_instance.is_valid():
+				RenderingServer.instance_set_visible(batch.rs_instance, false)
+
+	if cell_grid in _cell_index:
+		for id: int in _cell_index[cell_grid]:
+			if id not in _instances:
+				continue
+			var data: InstanceData = _instances[id]
+			if data.mm_slot < 0:
+				for rid: RID in data.sub_rids:
+					if rid.is_valid():
+						RenderingServer.instance_set_visible(rid, false)
+			data.visible = false
+			count += 1
 
 	return count
 
@@ -477,14 +549,23 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 	var hidden := 0
 
 	var i := start_idx
+	# On the first pass, toggle the cell's batch RS instances off cheaply — one
+	# call per batch hides all its slots. The per-instance loop below still runs
+	# for data.visible bookkeeping but skips RS work for batched instances.
+	if start_idx == 0 and cell_grid in _cell_batches:
+		for batch: CellBatch in _cell_batches[cell_grid]:
+			if batch.rs_instance.is_valid():
+				RenderingServer.instance_set_visible(batch.rs_instance, false)
+
 	while i < cell_ids.size() and hidden < max_count:
 		var id: int = cell_ids[i]
 		if id in _instances:
 			var data: InstanceData = _instances[id]
 			if data.visible:
-				for rid: RID in data.sub_rids:
-					if rid.is_valid():
-						RenderingServer.instance_set_visible(rid, false)
+				if data.mm_slot < 0:
+					for rid: RID in data.sub_rids:
+						if rid.is_valid():
+							RenderingServer.instance_set_visible(rid, false)
 				data.visible = false
 				hidden += 1
 		i += 1
@@ -496,12 +577,211 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		_cell_hide_progress[cell_grid] = i
 	return [hidden, is_complete]
 
+
+## Collapse same-type instances in a cell into MultiMesh batches.
+##
+## Called once per cell after all of its instances have been created (hooked
+## from `cell_manager._finalize_request`). For each mesh type in the cell whose
+## prototype is single-sub-mesh AND has at least `MM_BATCH_MIN_COUNT` instances,
+## creates a MultiMesh with one slot per instance and a single RS instance
+## positioned at the centroid. The per-instance RS instances are freed and
+## replaced by slot indexing; promotion / visibility / removal are routed to
+## the batch slot by the other methods on this class.
+##
+## Types NOT batched (left as individuals):
+##   - Multi-sub-mesh prototypes (buildings, cantons) — per-instance frustum
+##     culling beats batching for high-vertex-count objects
+##   - Types below the count threshold — batch overhead exceeds saving
+##
+## Returns the number of batches created (0 when nothing qualifies).
+func batch_cell_into_multimesh(cell_grid: Vector2i) -> int:
+	if cell_grid not in _cell_index:
+		return 0
+	if not _scenario.is_valid():
+		return 0
+	# Already batched — bail (batch_cell_into_multimesh is idempotent per cell).
+	if cell_grid in _cell_batches:
+		return 0
+
+	# Snapshot the cell's instance IDs — downstream work touches _instances /
+	# _mesh_types via MultiMesh allocation, so avoid any chance of concurrent
+	# mutation invalidating the iterator.
+	var cell_ids_snapshot: Array = (_cell_index[cell_grid] as Array).duplicate()
+
+	var by_type: Dictionary[String, Array] = {}
+	for id: int in cell_ids_snapshot:
+		var data: InstanceData = _instances.get(id)
+		if data == null:
+			continue
+		if data.mm_slot >= 0:
+			continue  # Already batched (defensive)
+		if data.promoted or not data.visible:
+			continue  # Don't batch hidden/promoted instances
+		var mt: MeshType = _mesh_types.get(data.type_name)
+		if mt == null:
+			continue
+		if mt.sub_meshes.size() != 1:
+			continue  # Multi-sub-mesh — keep individual
+		if mt.sub_meshes[0].mesh_resource == null:
+			continue
+		# Instance must have at least one live RS RID to be a batch candidate —
+		# if it's already been torn down we cannot reliably free it.
+		if data.sub_rids.is_empty():
+			continue
+		if data.type_name not in by_type:
+			by_type[data.type_name] = ([] as Array[int])
+		(by_type[data.type_name] as Array).append(id)
+
+	var batches_created := 0
+	for type_name: String in by_type:
+		var ids: Array = by_type[type_name]
+		if ids.size() < MM_BATCH_MIN_COUNT:
+			continue
+		var batch := _create_cell_batch(cell_grid, type_name, ids)
+		if batch != null:
+			if cell_grid not in _cell_batches:
+				_cell_batches[cell_grid] = ([] as Array[CellBatch])
+			(_cell_batches[cell_grid] as Array).append(batch)
+			batches_created += 1
+	return batches_created
+
+
+## Build a single CellBatch for `type_name` in `cell_grid`. Consumes the
+## per-instance RS RIDs (frees them) and writes slot transforms into a fresh
+## MultiMesh. Caller handles registering the batch in `_cell_batches`.
+func _create_cell_batch(cell_grid: Vector2i, type_name: String, ids: Array) -> CellBatch:
+	var mt: MeshType = _mesh_types.get(type_name)
+	if mt == null or mt.sub_meshes.is_empty():
+		return null
+	var sub: SubMeshEntry = mt.sub_meshes[0]
+	if sub.mesh_resource == null:
+		return null
+	var mesh_rid := sub.mesh_resource.get_rid()
+	if not mesh_rid.is_valid():
+		return null
+
+	# Filter to instances that are still live (snapshot may pre-date a removal).
+	var live_ids: Array[int] = []
+	for id: int in ids:
+		if _instances.has(id):
+			live_ids.append(id)
+	if live_ids.size() < MM_BATCH_MIN_COUNT:
+		return null
+
+	# Centroid anchor — RS instance origin. MM slot transforms are stored
+	# relative so visibility_range / LOD evaluate at the cluster's position,
+	# not at world origin.
+	var centroid := Vector3.ZERO
+	for id: int in live_ids:
+		centroid += (_instances[id] as InstanceData).transform.origin
+	centroid /= float(live_ids.size())
+
+	var inv_anchor := Transform3D(Basis.IDENTITY, -centroid)
+
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = sub.mesh_resource
+	mm.instance_count = live_ids.size()
+
+	for i in range(live_ids.size()):
+		var data: InstanceData = _instances[live_ids[i]]
+		var world_xform := data.transform * sub.local_transform
+		# Slot stored relative to centroid: final world = centroid * (inv_anchor * world)
+		#                                              = centroid * (centroid.inverse() * world) = world.
+		mm.set_instance_transform(i, inv_anchor * world_xform)
+
+	var rs := RenderingServer
+	var rid := rs.instance_create()
+	rs.instance_set_base(rid, mm.get_rid())
+	rs.instance_set_scenario(rid, _scenario)
+	rs.instance_set_transform(rid, Transform3D(Basis.IDENTITY, centroid))
+
+	# Material routing: MultiMesh renders with the mesh's baked-in surface
+	# materials automatically. Only apply a whole-mesh override when the
+	# prototype had one — per-surface override isn't supported on MULTIMESH-
+	# backed instances (instance->materials is unallocated for MM).
+	if sub.material_rid.is_valid():
+		rs.instance_geometry_set_material_override(rid, sub.material_rid)
+
+	# visibility_range is evaluated against the RS instance origin (= centroid),
+	# so the batch fades out at the same distance a per-cell single instance
+	# would. FADE_SELF + 20m margin matches the individual path's dither.
+	rs.instance_geometry_set_visibility_range(
+		rid,
+		0.0, visibility_range_end,
+		0.0, DU.FADE_MARGIN_LOD3_FAR,
+		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+	)
+	rs.instance_geometry_set_lod_bias(rid, 1.0)
+
+	if not _globally_visible:
+		rs.instance_set_visible(rid, false)
+
+	var batch := CellBatch.new()
+	batch.type_name = type_name
+	batch.cell_grid = cell_grid
+	batch.rs_instance = rid
+	batch.multimesh = mm
+	batch.multimesh_rid = mm.get_rid()
+	batch.centroid = centroid
+	batch.slot_count = live_ids.size()
+	batch.instance_ids = []
+	batch.instance_ids.resize(live_ids.size())
+
+	# Retire the per-instance RS RIDs, keeping InstanceData alive so promotion /
+	# visibility / removal can still address the object via its batch slot.
+	for i in range(live_ids.size()):
+		var data: InstanceData = _instances[live_ids[i]]
+		for r: RID in data.sub_rids:
+			if r.is_valid():
+				rs.free_rid(r)
+		data.sub_rids.clear()
+		data.instance_rid = RID()
+		data.mm_slot = i
+		data.batch = batch
+		batch.instance_ids[i] = live_ids[i]
+
+	return batch
+
+
+## Hide a batch slot by collapsing its transform to a zero-scale placeholder
+## (degenerate triangles, ~free on GPU). Used by visibility / promotion.
+func _hide_batch_slot(batch: CellBatch, slot: int, origin: Vector3) -> void:
+	if batch.multimesh == null or slot < 0 or slot >= batch.slot_count:
+		return
+	var hidden := Transform3D(Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO), origin - batch.centroid)
+	batch.multimesh.set_instance_transform(slot, hidden)
+
+
+## Restore a batch slot to its live world transform. Used on demotion / unhide.
+func _show_batch_slot(batch: CellBatch, slot: int, world_xform: Transform3D) -> void:
+	if batch.multimesh == null or slot < 0 or slot >= batch.slot_count:
+		return
+	var inv_anchor := Transform3D(Basis.IDENTITY, -batch.centroid)
+	batch.multimesh.set_instance_transform(slot, inv_anchor * world_xform)
+
+
+## Free every batch belonging to a cell (frees RS instances, drops MultiMesh refs).
+## Called by remove_cell_instances + clear.
+func _free_cell_batches(cell_grid: Vector2i) -> void:
+	if cell_grid not in _cell_batches:
+		return
+	var rs := RenderingServer
+	for batch: CellBatch in _cell_batches[cell_grid]:
+		if batch.rs_instance.is_valid():
+			rs.free_rid(batch.rs_instance)
+			batch.rs_instance = RID()
+		batch.multimesh = null
+		batch.multimesh_rid = RID()
+	_cell_batches.erase(cell_grid)
+
 #endregion
 
 
 #region Visibility & Transform
 
-## Set instance visibility (all sub-mesh RS instances)
+## Set instance visibility — routes through MultiMesh slot when batched,
+## per-RS-instance otherwise.
 func set_instance_visible(id: int, visible: bool) -> void:
 	if id not in _instances:
 		return
@@ -512,14 +792,29 @@ func set_instance_visible(id: int, visible: bool) -> void:
 
 	data.visible = visible
 
-	for rid: RID in data.sub_rids:
-		if rid.is_valid():
-			RenderingServer.instance_set_visible(rid, visible)
+	if data.mm_slot >= 0 and data.batch != null:
+		if visible:
+			_show_batch_slot(data.batch, data.mm_slot, data.transform * _sub_local(data))
+		else:
+			_hide_batch_slot(data.batch, data.mm_slot, data.transform.origin)
+	else:
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_set_visible(rid, visible)
 
 	if visible:
 		_stats["visible_instances"] += 1
 	else:
 		_stats["visible_instances"] -= 1
+
+
+## Helper — return the single sub_mesh local transform for a batched instance's
+## type (batched types are guaranteed single-sub-mesh by batch_cell_into_multimesh).
+func _sub_local(data: InstanceData) -> Transform3D:
+	var mt: MeshType = _mesh_types.get(data.type_name)
+	if mt and not mt.sub_meshes.is_empty():
+		return mt.sub_meshes[0].local_transform
+	return Transform3D.IDENTITY
 
 
 ## Mark an instance as promoted (NEAR Node3D exists) and hide the RS instance.
@@ -537,18 +832,32 @@ func set_instance_promoted(id: int, is_promoted: bool, _near_has_lods: bool = tr
 		return
 	data.promoted = is_promoted
 
-	for rid: RID in data.sub_rids:
-		if rid.is_valid():
-			RenderingServer.instance_set_visible(rid, not is_promoted)
+	if data.mm_slot >= 0 and data.batch != null:
+		if is_promoted:
+			# NEAR Node3D takes over; collapse MultiMesh slot to degenerate triangles.
+			_hide_batch_slot(data.batch, data.mm_slot, data.transform.origin)
+		else:
+			_show_batch_slot(data.batch, data.mm_slot, data.transform * _sub_local(data))
+	else:
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_set_visible(rid, not is_promoted)
 
 
-## Set instance transform (updates all sub-mesh RS instances with their local offsets)
+## Set instance transform (updates all sub-mesh RS instances or MultiMesh slot)
 func set_instance_transform(id: int, transform: Transform3D) -> void:
 	if id not in _instances:
 		return
 
 	var data: InstanceData = _instances[id]
 	data.transform = transform
+
+	if data.mm_slot >= 0 and data.batch != null:
+		# Only write the live transform if the slot isn't currently hidden —
+		# otherwise we'd resurrect a promoted/hidden slot.
+		if data.visible and not data.promoted:
+			_show_batch_slot(data.batch, data.mm_slot, transform * _sub_local(data))
+		return
 
 	if data.type_name in _mesh_types:
 		var mt: MeshType = _mesh_types[data.type_name]
@@ -605,17 +914,33 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 ## Operates directly on RS instances since they are not in the Node3D tree.
 func set_all_visible(visible: bool) -> void:
 	_globally_visible = visible
+	# Per-cell batch RS instances — one toggle covers all slots.
+	for cell_grid: Vector2i in _cell_batches:
+		for batch: CellBatch in _cell_batches[cell_grid]:
+			if batch.rs_instance.is_valid():
+				RenderingServer.instance_set_visible(batch.rs_instance, visible)
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
-		for rid: RID in data.sub_rids:
-			if rid.is_valid():
-				RenderingServer.instance_set_visible(rid, visible)
+		if data.mm_slot < 0:
+			for rid: RID in data.sub_rids:
+				if rid.is_valid():
+					RenderingServer.instance_set_visible(rid, visible)
 		data.visible = visible
 	_stats["visible_instances"] = _instances.size() if visible else 0
 
 
 func clear(clear_mesh_types: bool = true) -> void:
 	var rs := RenderingServer
+
+	# Free per-cell batch RS instances (MultiMesh resources drop with the batch).
+	for cell_grid: Vector2i in _cell_batches:
+		for batch: CellBatch in _cell_batches[cell_grid]:
+			if batch.rs_instance.is_valid():
+				rs.free_rid(batch.rs_instance)
+				batch.rs_instance = RID()
+			batch.multimesh = null
+			batch.multimesh_rid = RID()
+	_cell_batches.clear()
 
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
@@ -643,9 +968,24 @@ func clear(clear_mesh_types: bool = true) -> void:
 
 #region Queries
 
-## Get statistics
+## Get statistics, including MultiMesh batch breakdown.
+##
+## Extra fields:
+##   `mm_batches`   — number of active CellBatch instances (= one RS draw each)
+##   `mm_slots`     — total MultiMesh slots across all batches
+##   `mm_cells`     — cells that have at least one batch
 func get_stats() -> Dictionary:
-	return _stats.duplicate()
+	var result: Dictionary = _stats.duplicate()
+	var mm_batches := 0
+	var mm_slots := 0
+	for cell_grid: Vector2i in _cell_batches:
+		for batch: CellBatch in _cell_batches[cell_grid]:
+			mm_batches += 1
+			mm_slots += batch.slot_count
+	result["mm_batches"] = mm_batches
+	result["mm_slots"] = mm_slots
+	result["mm_cells"] = _cell_batches.size()
+	return result
 
 
 ## Get mesh type info

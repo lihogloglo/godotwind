@@ -48,7 +48,6 @@ const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfad
 var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
-var gpu_scene_db: RefCounted = null  # GPUSceneDatabase (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
 
 # Impostor candidates for determining significant objects
