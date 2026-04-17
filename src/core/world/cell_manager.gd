@@ -2072,31 +2072,12 @@ func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: Stri
 	return instance_id
 
 
-## Internal: Finalize a request (mark completed, run per-cell batching)
+## Internal: Finalize a request (mark completed). Phase 3 step 7 removed the
+## per-cell MultiMesh batcher — MID instances are already routed through the
+## world-scoped PrototypeRegistry at add-time by static_object_renderer.
 func _finalize_request(request: AsyncCellRequest) -> void:
 	if request.completed:
 		return
-
-	# Collapse same-type MID instances in this cell into per-cell MultiMesh
-	# batches. One draw call per (cell, mesh_type) instead of one per object,
-	# while preserving LOD / visibility_range / promotion semantics. Interior
-	# pockets skip the batch — their contents are few and tightly interactive,
-	# so per-instance bookkeeping wins.
-	#
-	# Measured 2026-04-17: regressed ~15-20 FPS at steady state against the
-	# unbatched path on this branch — centroid-based visibility_range kept more
-	# geometry alive past 500m than per-instance culling did, and 1000+ extra
-	# batch RS instances weren't offset by the individual draws saved. Kept in
-	# the tree for iteration against the 150 FPS target. Toggle by commenting
-	# out this single call.
-	# Phase 3 step 2: when the per-prototype registry is ON, instances are
-	# already routed into world-scoped MultiMeshes at add-time. Skip per-cell
-	# batching entirely — running both would stomp the already-freed sub_rids
-	# path and double-register slots.
-	if not request.is_interior and _static_renderer \
-			and not _static_renderer.use_prototype_registry:
-		_static_renderer.batch_cell_into_multimesh(request.grid)
-
 	request.completed = true
 
 

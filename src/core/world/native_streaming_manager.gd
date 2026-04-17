@@ -678,11 +678,11 @@ func _process(delta: float) -> void:
 		# Fallback: synchronous loading (blocks frame)
 		_process_pending_loads_sync(delta)
 
-	# Phase 3 world-scoped MultiMesh cull tick. No-op when
-	# use_prototype_registry is OFF (default) or registry hasn't been
-	# touched. Runs after all add/remove/transform work this frame so the
-	# packed buffer reflects the latest state.
-	if _static_renderer and _static_renderer.use_prototype_registry:
+	# Phase 3 world-scoped MultiMesh cull tick. tick_prototype_cull no-ops
+	# internally when the registry hasn't been instantiated yet (cold
+	# boot, empty world). Runs after all add/remove/transform work this
+	# frame so the packed buffer reflects the latest state.
+	if _static_renderer:
 		var vr_end: float = _static_renderer.visibility_range_end
 		_static_renderer.tick_prototype_cull(_camera_position, vr_end * vr_end)
 

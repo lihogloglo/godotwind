@@ -1701,19 +1701,11 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"streaming"
 		)
 
-		var proto_params: Array[CommandRegistry.ParameterInfo] = [
-			CommandRegistry.ParameterInfo.new(
-				"action", TYPE_STRING, "on|off|status", false, "status"
-			),
-		]
 		console.register_command(
 			"proto_registry",
 			_cmd_proto_registry,
-			"Phase 3 world-scoped MID MultiMesh registry. Usage: proto_registry on|off|status. Flag flip affects newly loaded cells only — restart scene for clean A/B.",
-			"streaming",
-			PackedStringArray(),
-			proto_params,
-			PackedStringArray(["proto_registry on", "proto_registry off", "proto_registry status"])
+			"Show Phase 3 world-scoped MID MultiMesh registry stats (batch / slot counts).",
+			"streaming"
 		)
 
 		# Register streaming benchmark commands
@@ -1867,30 +1859,16 @@ func _cmd_hlod_disable(_args: Dictionary) -> String:
 	return "HLOD merging DISABLED — MID restored to 500m, impostors at 500m"
 
 
-func _cmd_proto_registry(args: Dictionary) -> String:
+func _cmd_proto_registry(_args: Dictionary) -> String:
 	if not native_streaming_manager or not native_streaming_manager._static_renderer:
 		return "Static renderer not initialized"
 	var renderer: Node = native_streaming_manager._static_renderer
-	var action: String = String(args.get("action", "status")).strip_edges().to_lower()
-	match action:
-		"on":
-			renderer.use_prototype_registry = true
-			return "proto_registry ON — future-loaded cells route through PrototypeRegistry (restart scene for clean A/B)"
-		"off":
-			renderer.use_prototype_registry = false
-			return "proto_registry OFF — future-loaded cells use legacy per-object / per-cell-batch path"
-		"status":
-			var stats: Dictionary = renderer.get_stats()
-			return "proto_registry: enabled=%s, batches=%d, slots=%d, total_instances=%d, mm_batches=%d, mm_slots=%d" % [
-				str(stats.get("registry_enabled", false)),
-				stats.get("registry_batches", 0),
-				stats.get("registry_slots", 0),
-				stats.get("total_instances", 0),
-				stats.get("mm_batches", 0),
-				stats.get("mm_slots", 0),
-			]
-		_:
-			return "Usage: proto_registry on|off|status"
+	var stats: Dictionary = renderer.get_stats()
+	return "proto_registry: batches=%d, slots=%d, total_instances=%d (world-scoped MultiMesh path is default — legacy per-cell batcher removed in step 7)" % [
+		stats.get("registry_batches", 0),
+		stats.get("registry_slots", 0),
+		stats.get("total_instances", 0),
+	]
 
 
 func _cmd_hlod_stats(_args: Dictionary) -> String:
