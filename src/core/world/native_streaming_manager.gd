@@ -507,14 +507,16 @@ func _process(delta: float) -> void:
 		var draws := int(p.get_monitor(p.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 		var objects := int(p.get_monitor(p.RENDER_TOTAL_OBJECTS_IN_FRAME))
 		var prims := int(p.get_monitor(p.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
-		# MultiMesh batch stats from StaticObjectRenderer (0 if renderer absent).
-		var mm_batches := 0
-		var mm_slots := 0
+		# Phase 3 registry batch stats from StaticObjectRenderer (0 if absent).
+		# Legacy mm_batches/mm_slots fields kept at 0 post-step-7; registry
+		# fields are the ground truth for MID-tier occupancy.
+		var reg_batches := 0
+		var reg_slots := 0
 		if _static_renderer and _static_renderer.has_method("get_stats"):
 			var srs: Dictionary = _static_renderer.get_stats()
-			mm_batches = int(srs.get("mm_batches", 0))
-			mm_slots = int(srs.get("mm_slots", 0))
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d mm_batches=%d mm_slots=%d" % [
+			reg_batches = int(srs.get("registry_batches", 0))
+			reg_slots = int(srs.get("registry_slots", 0))
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
@@ -525,8 +527,8 @@ func _process(delta: float) -> void:
 			prims / 1000,
 			_loaded_cells.size(),
 			_loading_cells.size(),
-			mm_batches,
-			mm_slots,
+			reg_batches,
+			reg_slots,
 		])
 
 	# Start timing for frame budget telemetry
