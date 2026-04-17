@@ -621,13 +621,15 @@ func _process(delta: float) -> void:
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
 		# Phase 2: Process async instantiation (progressive object creation)
-		# During startup:     aggressive 15ms budget (loading screen is visible)
+		# During startup:     aggressive 25ms budget (loading screen visible; user
+		#                     already accepts low FPS here, so burst harder to
+		#                     shrink the "14 FPS for 1-2 min" cold-start window)
 		# Post-startup:       fixed 4ms — prevents the 48%-of-frame death spiral
 		#                     (render ~12ms + 4ms streaming = 16ms → 60+ FPS while queue drains)
 		# _get_dynamic_budget (48% of delta) is intentionally NOT used post-startup; at 50 FPS
 		# it yields 9.6ms/frame which keeps total > 16.67ms and FPS stuck at 50 indefinitely.
 		phase_start = Time.get_ticks_usec()
-		var instantiation_budget_ms := 15.0 if _startup_phase else SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
+		var instantiation_budget_ms := 25.0 if _startup_phase else SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
 		var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
 		var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
 		phase_times[2] = float(Time.get_ticks_usec() - phase_start)
