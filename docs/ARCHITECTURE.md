@@ -63,7 +63,7 @@ Constants in `src/core/world/distance_utils.gd`.
 
 **MID→NEAR promotion at 250m, demotion at 280m** (20m hysteresis, `streaming_config.gd:78-81`) — physics bodies and scene-tree NEAR nodes are pre-created while the MID RS instance stays visible, then the RS instance is hidden and the Node3D becomes the active renderer when the camera enters the 150m band.
 
-See `docs/systems/distance_rendering.md` (and `docs/audit/LOD_REFACTOR_B_WIDE.md` for the B-wide migration history).
+See `docs/systems/distance_rendering.md` (and `docs/archive/plans/lod_refactor_b_wide.md` for the B-wide migration history).
 
 ## Key Patterns
 

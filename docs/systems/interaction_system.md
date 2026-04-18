@@ -42,7 +42,7 @@ Implementation rule: the player controller is the **only** node in the project t
 
 Decided 2026-04-07. Signal-based modal gate registry (rejected: counter, enum stack — see archived session log `docs/archive/sessions/interaction_c2_bughunt_2026_04_07.md` for Decision History). `PlayerController` is the single input owner; modal UIs register themselves as gates.
 
-> **Cross-ref to `docs/INPUT_SYSTEM.md` (K.0, owned by @keys):** the `interact` action is defined once in `project.godot [input]` (physical_keycode 69 = E). K.0 deliberately did NOT add a gamepad binding to `interact` because the action definition is owned by I.0 — any change goes through #interactivity coordination. K.0's `src/core/input/input_actions.gd` lists `interact` in `REQUIRED_ACTIONS` for verification only, never reads it. The `_ensure_input_actions` runtime safety net at `player_controller.gd:381` is REDUNDANT after K.0 ships, but **deliberately left in place** because removing it would force a `PlayerController` edit which K.0 forbids; cleanup is queued for a follow-up phase after K.0.5. See `docs/INPUT_SYSTEM.md` §3.3.
+> **Cross-ref to `docs/systems/input_system.md` (K.0, owned by @keys):** the `interact` action is defined once in `project.godot [input]` (physical_keycode 69 = E). K.0 deliberately did NOT add a gamepad binding to `interact` because the action definition is owned by I.0 — any change goes through #interactivity coordination. K.0's `src/core/input/input_actions.gd` lists `interact` in `REQUIRED_ACTIONS` for verification only, never reads it. The `_ensure_input_actions` runtime safety net at `player_controller.gd:421` is REDUNDANT after K.0 ships, but **deliberately left in place** because removing it would force a `PlayerController` edit which K.0 forbids; cleanup is queued for a follow-up phase after K.0.5. See `docs/systems/input_system.md` §3.3.
 
 ```gdscript
 # src/core/player/player_controller.gd
@@ -54,8 +54,8 @@ signal interact_release()
 const HOLD_THRESHOLD: float = 0.20  # seconds
 
 var _modal_gates: Array[Node] = []
-var _press_time_msec: int = -1
-var _hold_emitted: bool = false
+var _interact_press_time_msec: int = -1
+var _interact_hold_emitted: bool = false
 
 ## Register a modal UI as an input gate. While ANY registered gate's
 ## is_open() returns true, PlayerController suppresses interact_*

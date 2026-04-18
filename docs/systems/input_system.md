@@ -2,7 +2,7 @@
 
 **Owner:** @keys
 **Status:** K.0 + K.0.5 shipped 2026-04-07
-**Coordination:** Reads `interact` action only — owned by `PlayerController` per `docs/INTERACTION_SYSTEM.md` §3.1.
+**Coordination:** Reads `interact` action only — owned by `PlayerController` per `docs/systems/interaction_system.md` §3.1.
 
 ---
 
@@ -70,7 +70,7 @@ Godotwind defines all input via Godot's native `InputMap`, with action definitio
 
 ### 3.1 The `interact` action
 
-`interact` is **owned exclusively by `PlayerController`** per `docs/INTERACTION_SYSTEM.md` §3.1. Input code does NOT redefine, rebind, or add a second listener on this action. The pre-existing definition (`physical_keycode = 69` = E) in `project.godot [input]` is left untouched. `InputActions.verify()` asserts it exists but does not bind it.
+`interact` is **owned exclusively by `PlayerController`** per `docs/systems/interaction_system.md` §3.1. Input code does NOT redefine, rebind, or add a second listener on this action. The pre-existing definition (`physical_keycode = 69` = E) in `project.godot [input]` is left untouched. `InputActions.verify()` asserts it exists but does not bind it.
 
 K.0 deliberately does NOT add a gamepad binding to `interact`. Adding one requires editing the action definition, which is owned by `PlayerController`. If/when @interactivity wants `interact` on the X button, that change goes through #interactivity coordination first.
 

@@ -97,7 +97,7 @@ Several factors cap terrain texture quality with vanilla Morrowind data:
 - Impostor system for distant objects
 - Terrain3D's clipmap handles geometry LOD, but not texture LOD
 
-This is identified in `docs/FUTURE_STEPS.md` as one of the **biggest scalability constraints**.
+This remains one of the **biggest scalability constraints** — no central `FUTURE_STEPS` doc anymore; tracked per-system.
 
 ---
 

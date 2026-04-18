@@ -22,7 +22,7 @@ At instantiation time, every `CollisionShape3D` in the prefab is disabled — ei
 
 **Why this invariant exists:** streaming bursts (initial exterior cold-boot, teleport, fast flyby across cell boundaries) instantiate hundreds of prefabs in a handful of frames. If every `CollisionShape3D` registers with Jolt's broadphase at `add_child()` time, Jolt stalls the main thread recomputing AABB hierarchies. Deferring to the NEAR tier caps the live-shape count to whatever fits inside the 150m physics radius — the rest sit cheap in the scene tree with physics off.
 
-This is the root-cause fix for the `process_async_loads` signal-11 signature diagnosed in the now-archived `docs/audit/MODEL_LOADER_RACE.md`. Bridge fixes #1 (deferred instantiate queue) and #2 (`_clear_owner_recursive` on carryable reparent) landed first; the canonical PackedScene refactor removed their need.
+This is the root-cause fix for the `process_async_loads` signal-11 signature diagnosed during the 2026-04-16 model-loader-race investigation. Bridge fixes #1 (deferred instantiate queue) and #2 (`_clear_owner_recursive` on carryable reparent) landed first; the canonical PackedScene refactor removed their need.
 
 ## Related carve-outs
 
@@ -30,4 +30,4 @@ Carry held-body vibration saga — the held `RigidBody3D` keeps its own physics 
 
 ## History
 
-- `docs/audit/MODEL_LOADER_RACE.md` — diagnosis + canonical-pattern analysis + bridge-fix log. Archived after this doc lands.
+- 2026-04-16 model-loader-race investigation — diagnosis + canonical-pattern analysis + bridge-fix log folded into this doc.

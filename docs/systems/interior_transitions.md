@@ -371,7 +371,7 @@ a separate depth layer).
 
 ## Left To Do / Open Follow-ups
 
-Tracked here and in `docs/FUTURE_STEPS.md` under "Tracked Follow-ups".
+Tracked here (`docs/FUTURE_STEPS.md` no longer exists — consolidated into per-system docs).
 
 1. **`NativeStreamingManager.pause()/resume()` wiring in `world_explorer.gd`** — the
    test scene doesn't run the streaming manager so the fix couldn't be validated

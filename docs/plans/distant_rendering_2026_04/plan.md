@@ -1,6 +1,6 @@
 # Distant Rendering Plan — 2026-04-17
 
-**Paired with:** `docs/audit/DISTANT_RENDERING_AUDIT_2026_04_17.md` (the problem map — read first).
+**Paired with:** `docs/plans/distant_rendering_2026_04/audit.md` (the problem map — read first).
 **Targets set by user 2026-04-17:**
 1. Shorter time-to-stable-60 (currently "very very long" post-launch / post-teleport).
 2. 140 FPS steady state (currently ~50 FPS floor at horizon range per audit §0).
@@ -15,7 +15,7 @@
 
 **Read in this order:**
 1. This file's §2 (Ground Rules) — non-negotiable.
-2. `docs/audit/DISTANT_RENDERING_AUDIT_2026_04_17.md` §5-7 (the problem catalog and why).
+2. `docs/plans/distant_rendering_2026_04/audit.md` §5-7 (the problem catalog and why).
 3. §3 of this file — find the first phase with status `TODO` and start there.
 4. At the top of every phase, the **Acceptance** block is the gate. Do not mark a phase done without recording the before/after numbers in §4 (Measurement Log).
 
@@ -318,7 +318,7 @@ In `src/core/world/native_streaming_manager.gd`, track a `startup_mode` flag tha
 
 **Rollback:** revert the phase commits. State machine is additive — removing it restores the pre-Phase-8 "play through the churn" behaviour exactly.
 
-**Design doc:** `docs/audit/LOADING_STATE_MACHINE_DESIGN.md` (locked 2026-04-17). Covers the OpenMW side-by-side, Godot `process_mode` exemptions, Option-A exit condition math, and non-obvious pitfalls (CanvasLayer lacks `modulate`, `Tween.TWEEN_PAUSE_PROCESS`, double-enter semantics).
+**Design doc:** `docs/systems/loading.md` (locked 2026-04-17). Covers the OpenMW side-by-side, Godot `process_mode` exemptions, Option-A exit condition math, and non-obvious pitfalls (CanvasLayer lacks `modulate`, `Tween.TWEEN_PAUSE_PROCESS`, double-enter semantics).
 
 ---
 
@@ -642,7 +642,7 @@ Append decisions made during implementation that future sessions will inherit. F
 | Phase | Files |
 |---|---|
 | 0 | none — measurement only |
-| 1 | `src/core/world/sky_manager.gd` (verify location), `src/core/world/light_animator.gd`, delete `src/core/gpu_driven/gpu_scene_database.gd`, trim `src/core/world/cell_manager.gd` + `static_object_renderer.gd` + `reference_instantiator.gd` + `native_streaming_manager.gd` GPU-scene references |
+| 1 | `src/core/sky/sky_manager.gd`, `src/core/world/light_animator.gd`, delete `src/core/gpu_driven/gpu_scene_database.gd`, trim `src/core/world/cell_manager.gd` + `static_object_renderer.gd` + `reference_instantiator.gd` + `native_streaming_manager.gd` GPU-scene references |
 | 2 | `src/core/world/reference_instantiator.gd`, the fade shader asset |
 | 3 | `src/core/world/static_object_renderer.gd` (major), `src/core/world/cell_manager.gd` (minor), possibly new `src/core/world/prototype_registry.gd` |
 | 4 | `src/core/world/object_paging.gd`, `src/core/world/static_object_renderer.gd`, `src/core/world/native_streaming_manager.gd` |
@@ -669,13 +669,13 @@ No mid-phase acks. If the implementer drifts (e.g. Phase 3 grows a second epicyc
 | 0 — Baseline | SKIPPED (verbal) | user-reported ~14→50 FPS; §4.1 recorded |
 | 1 — Free wins | DONE (partial) | GPUSceneDatabase deleted + LightAnimator gated; batch_cell_into_multimesh disable parked pending user auth |
 | 2 — Shader fade | DONE | Tween removed, shader reads TIME+spawn_time; crash-free flight test pending user run |
-| 3 — World-scoped MultiMesh | DONE (code) — runtime verify pending user | draw_calls <3k @ horizon, FPS ≥100 @ vista. Design v2 @ `docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md`. Step 1: skeletons + tests (89780df). Step 2: StaticObjectRenderer feature flag + registry routing (d71302c, f5472b1, 5e2450a). Step 3: batch render correctness without cull (93973df). Step 4: GDScript cull pass + registry.tick_cull_if_needed driver (f3105ca). Step 5: C# WorldMidCuller.cs (b35cd1c). Step 6: spawn_time fade shader (1291655). Step 7: legacy batch_cell_into_multimesh + CellBatch + feature flag deleted. Registry path is the only MID-tier path; user runtime A/B next. |
+| 3 — World-scoped MultiMesh | DONE (code) — runtime verify pending user | draw_calls <3k @ horizon, FPS ≥100 @ vista. Design v2 @ `docs/plans/phase_3_mid_multimesh.md`. Step 1: skeletons + tests (89780df). Step 2: StaticObjectRenderer feature flag + registry routing (d71302c, f5472b1, 5e2450a). Step 3: batch render correctness without cull (93973df). Step 4: GDScript cull pass + registry.tick_cull_if_needed driver (f3105ca). Step 5: C# WorldMidCuller.cs (b35cd1c). Step 6: spawn_time fade shader (1291655). Step 7: legacy batch_cell_into_multimesh + CellBatch + feature flag deleted. Registry path is the only MID-tier path; user runtime A/B next. |
 | 4 — HLOD/MID dedup | DONE (runtime verified) | HLOD-on sample: chunks t1=9 + t2=7 + 16 active cells + MID reg_slots 14386 concurrent, no double-render artefacts in rendered_objects count. HLOD-off debug path: chunks=0, impostors hidden, MID culled at NEAR_END (by design). Caveat: "< 500 rendered_objects past 150m" F-gate likely obsolete — NEAR ring alone carries ~6000. Commit 8f7d6f9: HLOD-on by default + retired size_level=0 chunks (MID registry owns 150-300m). §4.N autonomous audit 2026-04-17_20-30-38. |
 | 5 — FAR_START = 1 km | DONE (runtime verified) | FAR tier populated at 51208 impostors during static bench_tiers scenario. Commit 0983507: FAR_START broken from MID_END, pinned at HLOD_END (1000m). §4.N autonomous audit 2026-04-17_20-30-38. |
 | 6 — Impostor double-buffer | DONE (code) — runtime verify pending user | No before/after p99 baseline; flyby p99−p50 = 65.6 ms dominated by walk-segment streaming churn, not periodic 4 Hz impostor hitch (vista/pan/teleport-recovery show no periodic multi-ms spikes, suggesting the async rebuild IS working). Commit 387ac49. §4.N autonomous audit 2026-04-17_20-30-38 has the p99 trace. |
 | 7 — Burst cold-start | DONE (code), teleport-burst VERIFIED + cold-start-settle FAIL | Teleport detection path works: Teleport detected log fires + startup_phase re-arms + fps≥50 recovery in 3.6s after 940m jump. Commit 134ec06. **But** cold-start time-to-stable-55 is 170+ s vs 20 s gate on both launches — `_startup_phase` flag drops too early, 4ms post-startup budget is too tight for residual queue. Second pass needed on cold-start path. §4.N autonomous audit 2026-04-17_20-30-38 has full heartbeat trace. |
 | Phase 3 cleanup | DONE | Commit 574c204: mid_tier_debugger + lod_debug_commands iterate registry batches (was iterating always-RID() instance_rids, producing "0 valid RIDs" noise + silent no-op on lod_bias). |
-| 8 — Loading state machine | DONE (code) — runtime verify pending user | Canonical Godot `SceneTree.paused` + `PROCESS_MODE_ALWAYS` on streaming/UI + predicate-driven overlay. SceneLoadingScreen + LoadingStateMachine + world_explorer cold-boot + teleport hooks. 7 unit tests pass. Design doc: `docs/audit/LOADING_STATE_MACHINE_DESIGN.md`. Direct response to Phase 7 cold-start FAIL in §4.N autonomous audit. |
+| 8 — Loading state machine | DONE (code) — runtime verify pending user | Canonical Godot `SceneTree.paused` + `PROCESS_MODE_ALWAYS` on streaming/UI + predicate-driven overlay. SceneLoadingScreen + LoadingStateMachine + world_explorer cold-boot + teleport hooks. 7 unit tests pass. Design doc: `docs/systems/loading.md`. Direct response to Phase 7 cold-start FAIL in §4.N autonomous audit. |
 | X — Skip Node3D (stretch) | PARKED | revisit post-7 |
 | X — Compute cull (stretch) | PARKED | revisit post-3 |
 

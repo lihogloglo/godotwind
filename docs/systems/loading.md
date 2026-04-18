@@ -79,8 +79,8 @@ Everything else — `PlayerController`, `FlyCamera`, NPCs, Area3D monitors, phys
 
 ## Open question
 
-Phase 7 second pass is still open: even with the loading screen hiding the churn, the underlying streaming pipeline still takes ~170s cold-start to reach 55 FPS. This is a UX fix for the symptom; the `inst=20-30 ms/frame` cost of cold-start instantiation needs its own pass (probably widening post-startup `INSTANTIATION_BUDGET_MS`). Tracked in `docs/audit/DISTANT_RENDERING_PLAN_2026_04_17.md`.
+Phase 7 second pass is still open: even with the loading screen hiding the churn, the underlying streaming pipeline still takes ~170s cold-start to reach 55 FPS. This is a UX fix for the symptom; the `inst=20-30 ms/frame` cost of cold-start instantiation needs its own pass (probably widening post-startup `INSTANTIATION_BUDGET_MS`). Tracked in `docs/plans/distant_rendering_2026_04/plan.md`.
 
 ## History
 
-- `docs/audit/LOADING_STATE_MACHINE_DESIGN.md` — full design doc + OpenMW side-by-side. Archive after this doc lands.
+- 2026-04-17 loading-state-machine design (Phase 8) — full design doc + OpenMW side-by-side folded into this doc.

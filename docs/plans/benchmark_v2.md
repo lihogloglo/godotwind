@@ -3,7 +3,7 @@
 **Status:** draft
 **Date:** 2026-04-14
 **Author:** @docs (reviewer)
-**Supersedes:** `docs/audit/BENCHMARK_FRAMEWORK_PLAN.md`
+**Supersedes:** `docs/archive/plans/benchmark_v1_plan.md`
 
 ---
 
@@ -156,7 +156,7 @@ For ad-hoc investigation:
 3. **HUD overlay.** Build `benchmark_hud.gd` as a Control scene. Wire to console `hud` / `hud_reset`.
 4. **Manual measurement blocks.** `bench_start` / `bench_stop` — reuse existing `_log_frame()` + `_calculate_results()` + `_save_csv()` + `_save_json_summary()`.
 5. **Progressive auto-run.** `bench_progressive` orchestrator: drives SubsystemToggles through the 11 states, runs waypoints between each, accumulates results. ~150 lines.
-6. **Update `docs/BENCHMARKING.md`** to reflect v2 surface. Remove references to isolation/sweep/auto-CLI.
+6. **Update `docs/systems/benchmarking.md`** to reflect v2 surface. Remove references to isolation/sweep/auto-CLI.
 
 Steps 1-2 can ship in one commit. Steps 3-4 in a second. Step 5 in a third. Step 6 alongside whichever commit ships first.
 

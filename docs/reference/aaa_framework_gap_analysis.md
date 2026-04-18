@@ -359,7 +359,7 @@ Detailed feature-by-feature gap tables. Decisions are summarized in Part 2.
 ### 8. Main-scene integration (dialogue/books/interaction/ocean/water)
 - **Options:** Build only — wiring task
 - **Recommendation:** **Build (b)** — pure integration sprint
-- **Rationale:** Frameworks exist, ship in `tests/visual/test_interaction.tscn`. Lift-and-shift into `scenes/Godotwind.tscn` per `docs/TEXT_DIALOGUE_SYSTEM.md` Phase C carry-forwards.
+- **Rationale:** Frameworks exist, ship in `tests/visual/test_interaction.tscn`. Lift-and-shift into `scenes/Godotwind.tscn` per `docs/systems/dialogue.md` Phase C carry-forwards.
 - **Effort:** S per system, M total
 - **Risks:** Autoload ordering, signal lifetime, save/load coupling not yet defined → bolt rough but document touchpoints.
 - **Note:** This is the **cheapest morale + validation win** on the list. Resequenced to #2 in the suggested order — it becomes the testbed for everything downstream.
@@ -482,4 +482,4 @@ Driven by **dependencies** and **what unblocks the most other systems**, not pur
 
 ---
 
-*See also: `docs/STATUS.md`, `docs/audit/MASTERPLAN.md`, `docs/FUTURE_STEPS.md`, `docs/TEXT_DIALOGUE_SYSTEM.md`.*
+*See also: `docs/STATUS.md`, `docs/archive/plans/masterplan.md`, `docs/systems/dialogue.md`.*

@@ -1,6 +1,6 @@
 # NIF Collision — Part 2: Trimesh Fallback
 
-> Open plan. Split out from `docs/audit/NIF_COLLISION_COORDINATE_BUG.md` during 2026-04-18 cleanup. Part 1 (primitive-collision coordinate fix) shipped 2026-04-15. Part 2 below is still open. Current coordinate invariant documented in `docs/systems/nif_pipeline.md`.
+> Open plan. Split out from `docs/systems/nif_pipeline.md` during 2026-04-18 cleanup. Part 1 (primitive-collision coordinate fix) shipped 2026-04-15. Part 2 below is still open. Current coordinate invariant documented in `docs/systems/nif_pipeline.md`.
 
 **Status:** deferred. Run Part 1 verification first (clear cache, rebake, launch with `--debug-collisions`) and see what's still missing before committing to Part 2 — most stairs actually have collision blocks, they were just placed wrong, and Part 1 may have unblocked them.
 
@@ -44,6 +44,6 @@ After adding the fallback:
 
 ## References
 
-- `docs/audit/NIF_COLLISION_COORDINATE_BUG.md` — full diagnostic + Part 1 math
+- `docs/systems/nif_pipeline.md` — full diagnostic + Part 1 math
 - `docs/systems/nif_pipeline.md` — coordinate invariant post-Part-1
 - Canonical step-up: `inspos/openmw/apps/openmw/mwphysics/stepper.cpp`

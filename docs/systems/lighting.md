@@ -1,6 +1,6 @@
 # Godotwind Lighting — Current State
 
-> This is the current Godotwind lighting configuration. The shadow / GI / AA settings from `docs/audit/SHADOW_GI_AA_AUDIT.md` have been folded in where still current. For industry-practice comparison see `docs/reference/lighting_research.md`. For the open roadmap (distant-light billboards, SDFGI tuning, etc.) see `docs/plans/lighting_roadmap.md`.
+> This is the current Godotwind lighting configuration. Shadow / GI / AA audit findings have been folded in where still current. For industry-practice comparison see `docs/reference/lighting_research.md`. For the open roadmap (distant-light billboards, SDFGI tuning, etc.) see `docs/plans/lighting_roadmap.md`.
 
 ---
 
@@ -40,9 +40,9 @@
 
 **File:** `light_shadow_budget.gd` (161 lines)
 - **Budget:** Max 8 shadow-casting lights simultaneously
-- **Distance tiers (with hysteresis):**
-  - 0–8m: SHADOW_CUBE (6 passes, best quality)
-  - 8–30m: SHADOW_DUAL_PARABOLOID (2 passes)
+- **Distance tiers (with hysteresis) per `light_shadow_budget.gd:23-26`:**
+  - 0–8m: SHADOW_CUBE (6 passes, best quality) — CUBE enables when closer than 8m, disables beyond 10m
+  - 8–28m: SHADOW_DUAL_PARABOLOID (2 passes) — DUAL enables when closer than 28m, disables beyond 30m
   - 30m+: No shadows
 - Update interval: 0.5s, purge interval: 5s
 - This is a solid system — well-architected for performance
@@ -52,7 +52,7 @@
 - `directional_shadow_max_distance = 200.0`
 - `shadow_bias = 0.02`
 - `shadow_normal_bias = 1.5`
-- Cascade splits: 4 splits, blend enabled, splits [0.05, 0.15, 0.4] (per `environment_controls.gd:370-378`)
+- Cascade splits: 4 splits. When `shadow_cascades` dev toggle is ON (`environment_controls.gd:373-375`), splits are `[0.1, 0.25, 0.5]` with `blend_splits = true`; otherwise Godot defaults apply.
 - Project setting: `lights_and_shadows/directional_shadow/size = 2048`
 
 ### 1.4 Environment & Post-Processing

@@ -2,9 +2,9 @@
 
 OpenMW-style distance-adaptive chunk paging. One RS instance per merged chunk across the MID+HLOD band (150-1000m). Replaces the old cell-scoped `runtime_hlod_merger.gd` and the keyword-substring `is_mid_worthy` gate.
 
-**Status:** Phases 1-6 shipped. 104 unit tests. Enabled by default on 2026-04-17 (`object_paging.gd:101 → enabled: bool = true`). Runtime toggle via console: `hlod_enable` / `hlod_disable` / `hlod_stats` (`world_explorer.gd:1877-1892`).
+**Status:** Phases 1-6 shipped. 61 unit tests (`tests/unit/test_object_paging_kernel.gd`). Enabled by default on 2026-04-17 (`object_paging.gd:101 → enabled: bool = true`). Runtime toggle via console: `hlod_enable` / `hlod_disable` / `hlod_stats` (`world_explorer.gd:1877-1892`).
 
-**Canonical pattern:** OpenMW `ObjectPaging` (`inspos/openmw/apps/openmw/mwrender/objectpaging.cpp`). Full design doc was `docs/audit/OBJECT_PAGING_PLAN.md` (archive the audit after doc move).
+**Canonical pattern:** OpenMW `ObjectPaging` (`inspos/openmw/apps/openmw/mwrender/objectpaging.cpp`). Design + OpenMW mapping folded into this doc.
 
 ## Files
 
@@ -85,6 +85,5 @@ First cell re-request for an unregistered mesh type bypasses the projected-size 
 
 ## History
 
-- `docs/audit/OBJECT_PAGING_PLAN.md` — full design doc + OpenMW mapping.
-- `docs/audit/OBJECT_PAGING_SESSION_2026_04_14_15.md` — Phases 1-3 session log (kernel extraction, projected-size filter, cost-benefit).
-- `docs/audit/OBJECT_PAGING_SESSION_2026_04_16.md` — Phase 4-6 session log (adaptive quadtree, warmup, default-on flip).
+- `docs/archive/sessions/object_paging_2026_04_14_15.md` — Phases 1-3 session log (kernel extraction, projected-size filter, cost-benefit).
+- `docs/archive/sessions/object_paging_2026_04_16.md` — Phase 4-6 session log (adaptive quadtree, warmup, default-on flip).

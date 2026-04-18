@@ -103,6 +103,6 @@ Fix target is `src/core/nif/nif_reader.gd::_read_record` — the prebake path is
 
 ## History
 
-- `docs/NIF_AUDIT_RESULTS.md` — 2026-04-05 statistical dump, source for §Audit statistics.
-- `docs/audit/NIF_COLLISION_COORDINATE_BUG.md` — 2026-04-09 diagnosis + 2026-04-15 Part 1 fix; Part 2 split out to `docs/plans/nif_collision_part2.md`.
-- `docs/audit/NIF_UNSUPPORTED.md` — 2026-04-08 bake failure catalog; verbatim copy at `docs/reference/nif_unsupported.md`.
+- `docs/reference/nif_audit_statistics.md` — 2026-04-05 statistical dump, source for §Audit statistics.
+- Collision coordinate bug — 2026-04-09 diagnosis + 2026-04-15 Part 1 fix folded into this doc above; Part 2 split out to `docs/plans/nif_collision_part2.md`.
+- `docs/reference/nif_unsupported.md` — 2026-04-08 bake failure catalog.

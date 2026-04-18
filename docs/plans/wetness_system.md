@@ -331,7 +331,7 @@ Per-object memory holders (§6) track their own `holder_decay_state` locally via
 
 ### Reservation register
 
-Stencil bit allocation (document at implementation time in `docs/audit/STENCIL_BITS.md`):
+Stencil bit allocation (document at implementation time in `docs/systems/stencil_bits.md`):
 - Bit 0x1 — memory-holder marker (this system).
 - Bits 0x2–0x80 — unreserved, available for future systems.
 
@@ -453,7 +453,7 @@ func _update_memory_holders(delta: float) -> void
 - `tests/visual/test_wet_compositor.tscn` + `.gd` — submersion + (Phase 2) rain sliders.
 - `tests/visual/test_wet_memory.tscn` + `.gd` — dunk + decay curve validation.
 - `tests/unit/test_wetness_manager.gd` — pure-logic decay curve test.
-- `docs/audit/STENCIL_BITS.md` — stencil bit allocation registry (created alongside stencil work).
+- `docs/systems/stencil_bits.md` — stencil bit allocation registry (created alongside stencil work).
 
 ### Modified files
 

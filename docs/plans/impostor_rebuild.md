@@ -6,7 +6,7 @@
 - `src/tools/prebaking/impostor_baker_v2.gd` → rebuilt as `impostor_baker_v3.gd`
 - `src/core/world/native_impostor_renderer.gd` `_get_octahedral_shader_code()` (embedded runtime shader block) → rebuilt as Variant B below
 - `src/tools/prebaking/shaders/octahedral_impostor.gdshader` → **DELETED 2026-04-12**. Was dead code — not referenced by any runtime code path. `distant_light_manager.gd` comment updated to reference inline shader. `LIGHTING_AUDIT.md` updated.
-**Related:** `docs/DISTANCE_RENDERING.md` (FAR tier 500m–5km), `src/core/world/distance_utils.gd`, `docs/audit/AAA_FRAMEWORK_PLAN.md` §3 (grass is a separate pipeline — see "Relation to groundcover" below)
+**Related:** `docs/systems/distance_rendering.md` (FAR tier 500m–5km), `src/core/world/distance_utils.gd`, `docs/reference/aaa_framework_gap_analysis.md` §3 (grass is a separate pipeline — see "Relation to groundcover" below)
 
 ---
 
@@ -165,7 +165,7 @@ Per `.claude/CLAUDE.md` no-auto-capture rule: all visual verification is interac
 
 - [ ] **Test scene** `tests/visual/test_impostor_v5.tscn`:
   - 10×10 grid of baked Vvardenfell trees (`flora_tree_*.nif`) at random yaw rotations.
-  - Sun direction bound to a slider (0–360° azimuth, 0–90° elevation) — drive from the unified input system per `docs/INPUT_SYSTEM.md` §6.
+  - Sun direction bound to a slider (0–360° azimuth, 0–90° elevation) — drive from the unified input system per `docs/systems/input_system.md` §6.
   - Side-by-side: NEAR tier ground truth on the left, FAR tier impostor on the right. User pilots between them.
   - Visual pass/fail criteria:
     - (a) Rotated instances light correctly as the sun moves. (Audit §2.4.)
@@ -191,7 +191,7 @@ Per `.claude/CLAUDE.md` no-auto-capture rule: all visual verification is interac
 
 ## 5. Relation To Groundcover / Grass
 
-Per `docs/audit/AAA_FRAMEWORK_PLAN.md` §3, the grass pipeline is planned as **Terrain3D Instancer + `grass_wind.gdshader`**, not impostors. Grass blades are tiny, billions of them, and they live inside Terrain3D's region streaming — impostoring them would be both overkill (their geometry is already a single quad/cross) and under-kill (their count demands compute-driven instancing, not per-instance custom data).
+Per `docs/reference/aaa_framework_gap_analysis.md` §3, the grass pipeline is planned as **Terrain3D Instancer + `grass_wind.gdshader`**, not impostors. Grass blades are tiny, billions of them, and they live inside Terrain3D's region streaming — impostoring them would be both overkill (their geometry is already a single quad/cross) and under-kill (their count demands compute-driven instancing, not per-instance custom data).
 
 **However:** the far-tier distant grass band (the fuzzy color strip on the horizon in any open-world game) could share infrastructure with this system. That's a phase-5 exploration — out of scope for this rebuild. Flag for future work: if distant grass lands in the 500 m+ range, evaluate whether a "grass card" impostor variant (1 frame, no rotation, depth-faded) fits into the octahedral pipeline or needs its own path.
 
@@ -233,5 +233,5 @@ _To be filled in during Phase 2.5 before any rebuild work lands. Placeholder._
 - Epic Games, UE4/5 Impostor Baker plugin source
 - Crytek, "Vegetation in CryEngine 3" (GDC 2013)
 - `.claude/CLAUDE.md` — "Industry Standard, Never Kludge" engineering principle
-- `docs/DISTANCE_RENDERING.md` — 3-tier LOD contract
-- `docs/audit/AAA_FRAMEWORK_PLAN.md` §3 — groundcover plan (separate pipeline)
+- `docs/systems/distance_rendering.md` — 3-tier LOD contract
+- `docs/reference/aaa_framework_gap_analysis.md` §3 — groundcover plan (separate pipeline)

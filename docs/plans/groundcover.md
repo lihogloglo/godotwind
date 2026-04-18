@@ -3,7 +3,7 @@
 **Status:** Proposal — not yet implemented
 **Owner:** @groundcover
 **Drafted:** 2026-04-09
-**Related:** `docs/DISTANCE_RENDERING.md`, `src/core/world/static_object_renderer.gd`, `src/core/world/distance_utils.gd`
+**Related:** `docs/systems/distance_rendering.md`, `src/core/world/static_object_renderer.gd`, `src/core/world/distance_utils.gd`
 
 ---
 

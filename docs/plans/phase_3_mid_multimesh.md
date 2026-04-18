@@ -1,8 +1,8 @@
 # Phase 3 — World-Scoped Per-Prototype MultiMesh for MID Tier
 
 **Status:** DRAFT v2 — scope simplified per user call 2026-04-17 (see §1.1). Pending final sign-off before implementation.
-**Parent plan:** `docs/audit/DISTANT_RENDERING_PLAN_2026_04_17.md` §Phase 3.
-**Audit ref:** `docs/audit/DISTANT_RENDERING_AUDIT_2026_04_17.md` §5.2.
+**Parent plan:** `docs/plans/distant_rendering_2026_04/plan.md` §Phase 3.
+**Audit ref:** `docs/plans/distant_rendering_2026_04/audit.md` §5.2.
 **Reviewer pass:** @roaster 2026-04-17 — flagged LOD blocker at horizon range under HLOD-off. Blocker dissolved by §1.1 scope change (MID is no longer authoritative past 300 m).
 
 ---

@@ -48,7 +48,7 @@ Key details:
 
 ### MultiMesh batching vs HLOD
 
-These two draw-call reduction strategies operate on **different distance bands and are complementary, not alternatives** (see `docs/audit/MULTIMESH_VS_HLOD.md`):
+These two draw-call reduction strategies operate on **different distance bands and are complementary, not alternatives**:
 
 - **MultiMesh batching** — "same mesh type batched for one draw call inside the MID band." Groups all MID-tier RS instances of the *same mesh* into a single `MultiMesh` resource so the GPU draws them via one `DrawIndexedInstanced` call. Each instance keeps its own transform; no geometry merging. Targets the 150-300m slice (when HLOD is on).
 - **HLOD chunk merging** — "a chunk merged into one composite mesh for the far band." Merges the static geometry of multiple objects within a chunk into a *single combined ArrayMesh* with its own LOD chain, then one RS instance per chunk. Unreal's HISM / Unity's StaticBatchingUtility pattern. Targets 300-1000m.
@@ -101,7 +101,7 @@ Custom octahedral impostor system (Godot has no built-in equivalent).
 - ~63K impostors across ~497 texture layers at full load. ~40% are ≤2px on screen (filtering candidate)
 - Inline shader in `native_impostor_renderer.gd::_get_octahedral_shader_code()` (~240 lines). Standalone `octahedral_impostor.gdshader` deleted (was dead code).
 - Baker: `impostor_baker_v3.gd` (v5 octahedral). Legacy `impostor_baker_v2.gd` (v4 azimuthal) still present for reference.
-- Design doc: `docs/audit/IMPOSTOR_REBUILD.md`
+- Design doc: `docs/plans/impostor_rebuild.md`
 
 ## Streaming Orchestration
 

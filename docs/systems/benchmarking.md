@@ -2,7 +2,7 @@
 
 Operator manual for Godotwind's v2 benchmark + subsystem-toggle framework. Use this before touching `streaming_benchmark.gd`, `benchmark_hud.gd`, `progressive_benchmark.gd`, `subsystem_toggles.gd`, or the benchmark command wiring in `world_explorer.gd`.
 
-Plan of record: `docs/audit/BENCHMARK_V2_PLAN.md`. This doc is the operator manual — how to run it, read results, extend it — not the design rationale.
+Plan of record: `docs/plans/benchmark_v2.md`. This doc is the operator manual — how to run it, read results, extend it — not the design rationale.
 
 ---
 
@@ -242,5 +242,5 @@ Edit `_build_ui()` to create a new `Label`, then `_rebuild_labels()` to populate
 - `src/tools/subsystem_toggles.gd` — flag registry (170 lines)
 - `src/tools/world_explorer.gd` — `_setup_subsystem_toggles()` + command wiring
 - `src/core/world/native_streaming_manager.gd` — `set_*_visible()` public API + `get_stats()`
-- `docs/audit/BENCHMARK_V2_PLAN.md` — v2 design + rationale (plan of record)
-- `docs/audit/BENCHMARK_FRAMEWORK_PLAN.md` — v1 design (superseded, retained for history)
+- `docs/plans/benchmark_v2.md` — v2 design + rationale (plan of record)
+- `docs/archive/plans/benchmark_v1_plan.md` — v1 design (superseded, retained for history)

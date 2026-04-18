@@ -11,7 +11,7 @@ Move-as-Node state machine pattern (adapted from Gab-ani's Universal Controller)
 ## Architecture
 
 ```
-PlayerController (CharacterBody3D, 624 lines)
+PlayerController (CharacterBody3D, 920 lines)
  └─ MoveContainer (state machine orchestrator)
      ├─ IdleMove (priority 0)
      ├─ WalkMove (priority 1)

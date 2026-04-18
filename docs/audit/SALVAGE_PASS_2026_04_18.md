@@ -180,7 +180,7 @@ Each rung = one commit, tests, before/after bench, plan-doc append. No new tools
 - Autobench baseline: `docs/audit/perf-reports/2026-04-18_09-45-24_b0/autobench/` (tiers/flyby/teleport/hlod_off JSONs + flyby CSV)
 - Commit `2cc1f64` — `BenchLadderRunner` landing (will be reverted / migrated per Option A)
 - Commit `ab4244c` — this pass's data + plan-doc append
-- Findings appended to `docs/audit/DISTANT_RENDERING_PLAN_2026_04_17.md §4.N`
+- Findings appended to `docs/plans/distant_rendering_2026_04/plan.md §4.N`
 
 ---
 

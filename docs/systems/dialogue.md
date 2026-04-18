@@ -87,7 +87,7 @@ tests/tools/
 - **Greeting key format**: `"greeting 0"` through `"greeting 9"` (lowercase, space, digit)
 - **Topic discovery**: scans response text for topic keywords with word boundary matching. Topics sorted longest-first to prevent partial matches ("little secret" before "little")
 - **Pre-filter optimization**: `could_match_npc()` skips 90%+ of topics before running full filter
-- 2675 NPCs, 2358 dialogue topics, ~24k INFO records loaded
+- 2675 NPCs, 1698 dialogue topics + 632 journal topics + 10 greetings, ~24k INFO records loaded (see ESM Data Summary table below for canonical counts)
 
 ### Conversation Flow (Phase 3)
 - **Topic keyword highlighting**: words in response text matching known topics rendered as clickable `[url]` BBCode links with `meta_clicked` handler
