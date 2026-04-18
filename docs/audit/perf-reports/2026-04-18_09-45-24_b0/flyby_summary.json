@@ -1,0 +1,20 @@
+{
+	"avg_draw_calls": 4348,
+	"avg_fps": 48.3290359921768,
+	"avg_ms": 20.6914948637062,
+	"label": "",
+	"manual_duration_s": 0.0,
+	"max_ms": 144.930666666667,
+	"mode": "scripted",
+	"p50_ms": 17.238,
+	"p95_ms": 54.43,
+	"p99_ms": 84.519,
+	"peak_draw_calls": 12296,
+	"peak_vram_mb": 2594.07106018066,
+	"timestamp": "2026-04-18T09:51:05",
+	"toggle_state": {
+
+	},
+	"total_frames": 4121,
+	"total_time_s": 85.2696503333333
+}

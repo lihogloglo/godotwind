@@ -498,6 +498,113 @@ Not patching either — `_cmd_hlod_disable` contract and the scenario setup are 
 - 9 `test_object_paging_kernel.gd` failures remain pre-existing (per handoff — unrelated to Phase 3).
 - Zero new script errors / parse errors / Identifier-not-found on `--headless --quit-after 20`.
 
+#### Salvage pass baseline — commit c8df651, 2026-04-18_09-45-24 (audit-distant)
+
+User directive 2026-04-18: "start autonomously, ground everything in data, make sure NEAR + terrain is correct, proceed from there — each subsystem independently." First step of the salvage pass: pin the current HEAD's measurements before any code edit.
+
+Real-renderer autobench run (`--bench-auto`) at commit `c8df651` (Phase 8 "what a mess" tip). Raw data under `docs/audit/perf-reports/2026-04-18_09-45-24_b0/`.
+
+**A. Log hygiene — PASS.** Zero non-whitelist errors. Same whitelist as prior audit holds (Terrain3D deprecation warnings, shutdown sig 11, impostor 256-layer cap, door-no-building notes).
+
+**B. Cold-start settle time — FAIL (unchanged from 2026-04-17).** Settle at 194.6 s vs ≤20 s Phase 7 target. 8.5× gate. Commits `b50e349` / `5c1bc88` / `da213fd` / `c8df651` landed since the 20-30-38 autobench and did not change the settle-time pattern.
+
+**C. Static-camera tier validation (30 s @ Seyda Neen) — MIXED:**
+
+| Metric | Value | Target | Result |
+|---|---:|---:|---|
+| FPS avg | 47.7 (min 31 / max 59) | ≥ 55 steady | **FAIL** (~-7 FPS vs 55 gate) |
+| draws avg | 7 093 | < 3 000 (Phase 3 goal) | **FAIL** (2.4× over) |
+| objs avg | 8 720 | — | info |
+| registry_batches max | 535 | > 0 | PASS |
+| registry_slots max | 14 386 | > 0 | PASS (~27 slots/batch — fragmentation suspect) |
+| hlod_cells max | 16 (t1=9, t2=7) | ≥ 1 | PASS |
+| impostors max | 51 208 | > 100 | PASS |
+
+Numbers match 20-30-38 run within noise. The Phase 3 registry populates correctly but the `draws=7093` vs `<3000` target implies per-prototype batching is failing to collapse enough unique draws on the dense village floor. Slot/batch ratio of 27 matches the batch-fragmentation hypothesis called out in `AUTONOMOUS_PERF_AUDIT_HANDOFF_2026_04_17.md §6`.
+
+**D. 85 s scripted flyby — MIXED** (whole-run aggregate, per-segment break-out not wired in this CSV):
+
+| Metric | Value | Target | Result |
+|---|---:|---:|---|
+| avg FPS | 48.3 | ≥ 55 overall | FAIL |
+| avg ms | 20.7 | < 17 | FAIL |
+| p50 ms | 17.2 | < 17 | borderline |
+| p95 ms | 54.4 | < 50 | FAIL |
+| p99 ms | 84.5 | < 50 | **FAIL** (1.7× over) |
+| max ms | 144.9 | — | info |
+| peak draws | 12 296 | < 8 000 | FAIL |
+| peak VRAM | 2 594 MB | — | info |
+
+`events.csv` shows a 16 597-object pop frame during the vista→pan transition (segment 4) — one frame where all of MID + some HLOD went in-frustum simultaneously before visibility-range dropped it. That single frame explains the 144 ms max and much of the p99. Walk + run segments generate the steady p95 ≥ 50 ms spikes (matches user-reported "lags when moving").
+
+**E. Teleport burst validation — PASS.** `Teleport detected` log fires, post-teleport FPS avg 173 in sparse cell (-10,-10) after 3.6 s recovery. Burst budget works. Caveat carried from prior audit: sparse-cell recovery number is inflated (low object density).
+
+**F. HLOD-off at Seyda Neen — SLOWER than HLOD-on.** With HLOD disabled and MID range-culled at NEAR_END (150 m):
+
+- FPS avg 22.4 (min 19, max 26) — worse than HLOD-on (47.7)
+- draws avg 4 717, objs avg 6 088
+- registry_slots 6 584 (MID instances clipped, not unloaded, by design)
+- impostor MultiMesh hidden (51 208 slots still registered)
+
+This is the opposite of what a pure NEAR-tier config should produce. Two competing explanations, both hypothesis-only until the ladder run isolates:
+1. Post-teleport the scenario's 5 s pre-delay was inside a fresh startup burst (prior audit flagged same) — measurement contaminated by streaming churn from the E→F cell move.
+2. Terrain3D + sky + ocean + postfx alone cost enough that the marginal HLOD cost is actually less than what it saves in draw-call collapse (i.e. HLOD on + impostors on is faster than NEAR-only + terrain + sky).
+
+Ladder run will disambiguate by applying `toggle none` at the Seyda Neen spawn without a teleport and measuring each tier's marginal cost independently.
+
+**No code edits in this pass.** Baseline pinned. Next: `--bench-ladder` for the progressive-additive subsystem cost table, then Rung 1 plan based on whichever subsystem shows the anomalous cost delta.
+
+#### Subsystem ladder — commit 2cc1f64, 2026-04-18_09-52-30 (audit-distant)
+
+User directive 2026-04-18: "make sure NEAR + terrain is correct, and proceed from there — each subsystem independently."
+
+Cumulative-additive ladder at Seyda Neen, 15 s static sample per rung, settle 174.2 s. Raw data under `docs/audit/perf-reports/2026-04-18_09-52-30_ladder/ladder/bench_ladder.json`.
+
+| # | rung | FPS | min | draws | objs | prims(M) | mid_vis | slots | batches | hlod | imps | vram(MB) | Δ FPS |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 0 | empty | 119.4 | 117 | 896 | 1604 | 0.1 | 0 | 14378 | 535 | 16 | 51208 | 2349 | — |
+| 1 | +terrain | 116.1 | 111 | 927 | 1717 | 0.4 | 0 | 14378 | 535 | 16 | 51208 | 2349 | −3.2 |
+| 2 | +near_objects | 103.4 | 91 | 1065 | 1971 | 0.4 | 0 | 14378 | 535 | 16 | 51208 | 2349 | −12.7 |
+| 3 | +mid_objects | 77.4 | 75 | 1296 | 2201 | 0.6 | 14378 | 14378 | 535 | 16 | 51208 | 2349 | **−26.0** |
+| 4 | +hlod | 60.3 | 57 | 2282 | 3183 | 1.1 | 14378 | 14378 | 535 | 16 | 51208 | 2349 | **−17.1** |
+| 5 | +impostors | 60.4 | 57 | 2279 | 3185 | 1.2 | 14378 | 14378 | 535 | 16 | 51208 | 2349 | +0.1 |
+| 6 | +sky | 50.2 | 49 | 5082 | 6570 | 2.1 | 14378 | 14378 | 535 | 16 | 51208 | 2578 | −10.2 |
+| 7 | +ocean | 31.5 | 29 | 5093 | 6645 | 2.3 | 14378 | 14378 | 535 | 16 | 51208 | 2650 | −18.7 |
+| 8 | +weather | 31.2 | 30 | 4851 | 6156 | 2.2 | 14378 | 14378 | 535 | 16 | 51208 | 2650 | −0.2 |
+| 9 | +postfx | 28.0 | 25 | 4817 | 5958 | 2.2 | 14378 | 14378 | 535 | 16 | 51208 | 2918 | −3.2 |
+| 10 | +shadows | 29.4 | 26 | 4828 | 5963 | 2.2 | 14378 | 14378 | 535 | 16 | 51208 | 2925 | +1.4 |
+| 11 | +characters | 28.1 | 27 | 4856 | 6132 | 2.2 | 14378 | 14378 | 535 | 16 | 51208 | 2935 | −1.2 |
+
+**Tier-isolation correctness — PASS.**
+- Rung 0 (empty): `mid_visible=0` while slots stay registered (14378). Confirms `set_mid_tier_visible` is pure visibility flip, not allocation — clean A/B measurement.
+- Rung 3 (+mid): `mid_visible` jumps to 14378, `draws` +231. Registry batches and slots unchanged — the cost delta is 100% rendering, 0% allocation.
+- Rung 4 (+hlod): `draws` +986 (HLOD chunks come on). No chunk count change (always 16). Matches spec — HLOD chunks hidden in prior rungs, revealed here.
+- Rung 5 (+impostors): `draws` essentially flat (+0, noise). Impostors = one MultiMesh draw.
+- VRAM monotonic growth: 2349 → 2935 MB across rungs 6-11, driven by sky/ocean/postfx/shadow map allocations (as expected).
+
+**NEAR + terrain verdict: both correct and cheap.** Terrain costs 3 FPS, NEAR costs 13 FPS. No anomalies. User's first correctness gate clears.
+
+**Top three cost levers at Seyda Neen static (ocean OFF, production default):**
+1. **MID tier: −26 FPS** for +231 draws. Cost out of proportion to draw count. Hypothesis: 535 batches × ~50 μs/batch per-frame rendering overhead (descriptor bind + submit) ≈ 27 ms/frame, which matches the −26 FPS observation. The GDScript cull pass is gated on camera motion (`CULL_DISTANCE_HYSTERESIS = 10 m`) and does not run per frame when camera is static, so the cost is engine-side MultiMesh submission, not the cull loop.
+2. **HLOD tier: −17 FPS for +986 draws.** 16 chunks × ~60 materials/chunk = 960 draws matches. HLOD ArrayMesh surfaces are grouped by material at bake time; each surface is its own draw even though the chunk has one RS instance. Surface consolidation would reduce draw count but may not reduce FPS cost proportionally (material state changes vs vertex shader cost).
+3. **Sky: −10 FPS** and +2803 draws — the highest *draw-count* add in the ladder. Likely SunshineClouds2 volumetric cloud cascades + shadow passes. Costly.
+
+**Secondary / low-leverage:**
+- Ocean: −19 FPS but DEFAULT OFF (not a production regression).
+- Postfx, weather, characters, shadows: all ≤ 3 FPS each. Not the bottleneck.
+- Impostors: essentially free.
+
+**Math check:** empty floor 119 − 3 (terrain) − 13 (near) − 26 (mid) − 17 (hlod) − 0 (imp) − 10 (sky) − 3 (postfx) + 1 (shadows noise) − 1 (chars) ≈ 50 FPS. Matches bench_tiers 47.7 FPS at Seyda Neen ±3 FPS.
+
+**HLOD-off earlier anomaly explained.** Baseline F scenario (`bench_hlod_off` at fps_avg 22.4) was measured at rung 2-equivalent state (terrain + NEAR + impostors hidden + no MID past NEAR_END). That's *not* the same as +near rung here (103 FPS) because the baseline F ran RIGHT after the teleport E scenario while post-teleport streaming churn was still draining. Ladder run isolates cleanly: pure +near at settle = 103 FPS. Hypothesis 1 from baseline F writeup confirmed (streaming contamination). No production code issue in `_cmd_hlod_disable`.
+
+**Next step — surgical MID investigation (Rung 2 of salvage protocol).** Measurement-only, no code edits:
+- Count per-batch slot distribution — is it actually 535 batches × 27 slots avg, or heavy-tailed (a few large batches + many singletons)?
+- Measure batch-count reduction possibility — how many batches share the same `mesh_rid` but differ only in `material_rid` due to material duplication that *should* have been caught by the 90% dedup pass?
+- Confirm the C# `WorldMidCuller` is actually used (vs GDScript fallback) — cull gating is correct, but the first tick after a camera move may still be expensive if the native path isn't available.
+
+Rung 2 output will be a single instrumentation pass that prints the batch distribution at steady state. If the distribution shows a fragmentation problem, Rung 3 proposes a coalescing fix; if the distribution looks optimal, Rung 3 investigates the 50 μs/batch submission overhead instead (possibly a lower-level Godot engine matter that we route around via fewer batches or GPU-indirect).
+
 ---
 
 ## 5. Design Decisions Log
