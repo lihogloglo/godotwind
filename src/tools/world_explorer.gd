@@ -1894,11 +1894,17 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"streaming"
 		)
 
+		var proto_registry_params: Array[CommandRegistry.ParameterInfo] = [
+			CommandRegistry.ParameterInfo.new("action", TYPE_STRING, "''|dist", false, ""),
+		]
 		console.register_command(
 			"proto_registry",
 			_cmd_proto_registry,
-			"Show Phase 3 world-scoped MID MultiMesh registry stats (batch / slot counts).",
-			"streaming"
+			"Show Phase 3 world-scoped MID MultiMesh registry stats. 'dist' subcmd prints batch-size distribution + mesh sharing stats.",
+			"streaming",
+			PackedStringArray([]),
+			proto_registry_params,
+			PackedStringArray(["proto_registry", "proto_registry dist"]),
 		)
 
 		# Register streaming benchmark commands
@@ -2055,16 +2061,61 @@ func _cmd_hlod_disable(_args: Dictionary) -> String:
 	return "HLOD DISABLED — debug mode: NEAR only (0-150m), MID/HLOD/FAR off"
 
 
-func _cmd_proto_registry(_args: Dictionary) -> String:
+func _cmd_proto_registry(args: Dictionary) -> String:
 	if not native_streaming_manager or not native_streaming_manager._static_renderer:
 		return "Static renderer not initialized"
 	var renderer: Node = native_streaming_manager._static_renderer
+	var action: String = str(args.get("action", "")).strip_edges().to_lower()
+	if action == "dist":
+		return _format_proto_registry_distribution(renderer)
 	var stats: Dictionary = renderer.get_stats()
-	return "proto_registry: batches=%d, slots=%d, total_instances=%d (world-scoped MultiMesh path is default — legacy per-cell batcher removed in step 7)" % [
+	return "proto_registry: batches=%d, slots=%d, total_instances=%d  (sub-cmds: 'dist' for batch size distribution)" % [
 		stats.get("registry_batches", 0),
 		stats.get("registry_slots", 0),
 		stats.get("total_instances", 0),
 	]
+
+
+## Format Phase 3 registry batch size distribution for the console.
+## Measurement-only — calls PrototypeRegistry.get_batch_distribution() which is
+## O(batches) walk, no RS calls.
+func _format_proto_registry_distribution(renderer: Node) -> String:
+	if not renderer or not "_prototype_registry" in renderer or renderer._prototype_registry == null:
+		return "proto_registry dist: registry not available"
+	var dist: Dictionary = renderer._prototype_registry.get_batch_distribution()
+	var hist: Dictionary = dist.get("histogram", {})
+	var top_lines: PackedStringArray = PackedStringArray()
+	for entry: Dictionary in dist.get("top_meshes_by_slots", []):
+		top_lines.append("    mesh=%d slots=%d batches=%d" % [
+			entry.get("mesh_id", 0),
+			entry.get("total_slots", 0),
+			entry.get("batches", 0),
+		])
+	return (
+		"proto_registry dist:\n" +
+		"  batches=%d (empty=%d)  total_live_slots=%d\n" % [
+			dist.get("batches", 0),
+			dist.get("empty_batches", 0),
+			dist.get("total_live_slots", 0),
+		] +
+		"  slots/batch min=%d p50=%d mean=%.1f p90=%d p95=%d max=%d\n" % [
+			dist.get("slots_min", 0),
+			dist.get("slots_median", 0),
+			dist.get("slots_mean", 0.0),
+			dist.get("slots_p90", 0),
+			dist.get("slots_p95", 0),
+			dist.get("slots_max", 0),
+		] +
+		"  histogram  1:%d  2-5:%d  6-20:%d  21-100:%d  100+:%d\n" % [
+			hist.get("1", 0), hist.get("2-5", 0), hist.get("6-20", 0),
+			hist.get("21-100", 0), hist.get("100+", 0),
+		] +
+		"  mesh_shared_count=%d  mesh_shared_fanout_max=%d (dedup candidates)\n" % [
+			dist.get("mesh_shared_count", 0),
+			dist.get("mesh_shared_fanout_max", 0),
+		] +
+		"  top meshes by slot count:\n" + "\n".join(top_lines)
+	)
 
 
 func _cmd_hlod_stats(_args: Dictionary) -> String:

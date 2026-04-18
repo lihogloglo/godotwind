@@ -308,6 +308,131 @@ func get_total_live_slots() -> int:
 		total += (_batches[key] as RefCounted).slot_count_live
 	return total
 
+
+## Diagnostic: batch size distribution + mesh/material sharing stats.
+##
+## Returns a dict with per-batch live-slot histogram, slot distribution summary
+## (min/mean/median/p90/p95/max), and the count of mesh_rids that appear across
+## multiple batches (keyed by differing material_rid). Material-sharing across
+## distinct meshes is the main dedup-candidate signal — if many batches have
+## the same mesh_rid but different material_rids, the prebaker's material dedup
+## missed them and they'd coalesce if the key widened. Conversely, if the
+## distribution is flat with 27 slots/batch everywhere, the 535-batch count is
+## intrinsic to the world and the render cost is submission overhead, not
+## fragmentation.
+##
+## Cheap: O(batches) walk, no RS calls, safe to invoke every frame (though
+## consumers should gate on a console command or benchmark hook).
+##
+## Output keys:
+##   - batches                 total batch count
+##   - total_live_slots        sum of slot_count_live across batches
+##   - empty_batches           count of batches with 0 live slots (held but unused)
+##   - slots_min/max/mean/median/p90/p95
+##   - histogram {1, 2-5, 6-20, 21-100, 100+}
+##   - mesh_shared_count       number of mesh_rids present in ≥2 distinct batches
+##   - mesh_shared_fanout_max  the highest per-mesh-rid batch count (worst offender)
+##   - top_meshes_by_slots     array of {mesh_id, total_slots, batches} for the
+##                             top 10 mesh_rids by aggregate slot count
+func get_batch_distribution() -> Dictionary:
+	var slot_counts: PackedInt32Array = PackedInt32Array()
+	var total_live := 0
+	var empty := 0
+	var hist_1 := 0
+	var hist_2_5 := 0
+	var hist_6_20 := 0
+	var hist_21_100 := 0
+	var hist_100p := 0
+	var mesh_to_slots: Dictionary[int, int] = {}
+	var mesh_to_batches: Dictionary[int, int] = {}
+
+	for key: int in _batches:
+		var batch: RefCounted = _batches[key]
+		if batch == null:
+			continue
+		var live: int = batch.slot_count_live
+		slot_counts.append(live)
+		total_live += live
+		if live == 0:
+			empty += 1
+		if live == 1:
+			hist_1 += 1
+		elif live <= 5:
+			hist_2_5 += 1
+		elif live <= 20:
+			hist_6_20 += 1
+		elif live <= 100:
+			hist_21_100 += 1
+		else:
+			hist_100p += 1
+		var mesh_id: int = int(batch.mesh_rid.get_id()) if batch.mesh_rid.is_valid() else 0
+		mesh_to_slots[mesh_id] = mesh_to_slots.get(mesh_id, 0) + live
+		mesh_to_batches[mesh_id] = mesh_to_batches.get(mesh_id, 0) + 1
+
+	slot_counts.sort()
+	var n: int = slot_counts.size()
+	var slots_min: int = 0
+	var slots_max: int = 0
+	var slots_mean: float = 0.0
+	var slots_median: int = 0
+	var slots_p90: int = 0
+	var slots_p95: int = 0
+	if n > 0:
+		slots_min = slot_counts[0]
+		slots_max = slot_counts[n - 1]
+		slots_mean = float(total_live) / float(n)
+		slots_median = slot_counts[n / 2]
+		slots_p90 = slot_counts[mini(n - 1, int(float(n) * 0.90))]
+		slots_p95 = slot_counts[mini(n - 1, int(float(n) * 0.95))]
+
+	var mesh_shared_count: int = 0
+	var mesh_shared_fanout_max: int = 0
+	for mesh_id: int in mesh_to_batches:
+		var c: int = mesh_to_batches[mesh_id]
+		if c >= 2:
+			mesh_shared_count += 1
+		if c > mesh_shared_fanout_max:
+			mesh_shared_fanout_max = c
+
+	# Top-10 mesh_rids by aggregate slot count — helps narrow where the
+	# biggest coalesce wins would land (e.g. "terrain_rock_01 appears in 12
+	# batches with 8 000 total slots → biggest lever if its materials dedup").
+	var mesh_ids: Array[int] = []
+	mesh_ids.assign(mesh_to_slots.keys())
+	mesh_ids.sort_custom(func(a: int, b: int) -> bool:
+		return mesh_to_slots[a] > mesh_to_slots[b])
+	var top: Array[Dictionary] = []
+	var top_limit: int = mini(10, mesh_ids.size())
+	for i in range(top_limit):
+		var mid: int = mesh_ids[i]
+		top.append({
+			"mesh_id": mid,
+			"total_slots": mesh_to_slots[mid],
+			"batches": mesh_to_batches[mid],
+		})
+
+	return {
+		"batches": n,
+		"total_live_slots": total_live,
+		"empty_batches": empty,
+		"slots_min": slots_min,
+		"slots_max": slots_max,
+		"slots_mean": slots_mean,
+		"slots_median": slots_median,
+		"slots_p90": slots_p90,
+		"slots_p95": slots_p95,
+		"histogram": {
+			"1": hist_1,
+			"2-5": hist_2_5,
+			"6-20": hist_6_20,
+			"21-100": hist_21_100,
+			"100+": hist_100p,
+		},
+		"mesh_shared_count": mesh_shared_count,
+		"mesh_shared_fanout_max": mesh_shared_fanout_max,
+		"top_meshes_by_slots": top,
+	}
+
 #endregion
 
 

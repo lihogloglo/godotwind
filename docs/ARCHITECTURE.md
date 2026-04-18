@@ -50,17 +50,20 @@ Systems overview derived from the actual codebase.
 | NativeBinaryReader.cs | Binary I/O utilities |
 | NativeFactory.cs | Factory for native parsers |
 
-## 3-Tier Distance Rendering
+## 4-Tier Distance Rendering
 
 Constants in `src/core/world/distance_utils.gd`.
 
 | Tier | Range | Technique |
 |------|-------|-----------|
-| NEAR | 0-150m | Full Node3D + physics. `visibility_range` on nodes. |
-| MID | 150-500m | RenderingServer instances, per-instance visibility_range, 3 LOD levels |
-| FAR | 500-5km | Octahedral impostors via single MultiMesh draw call |
+| NEAR | 0-150m | Full Node3D + physics in the scene tree. Root `visibility_range` band on each Node3D. |
+| MID | 0-300m (HLOD on) / 0-500m (HLOD off) | Single raw `RenderingServer` instance per object with embedded `ImporterMesh.generate_lods()` chain. Engine C++ `RendererSceneCull` picks the LOD level from screen-space coverage. No per-band visibility cascades. |
+| HLOD | 300-1000m | One RS instance per paged chunk — runtime-merged static geometry with its own LOD chain. OpenMW-style distance-adaptive walker (1×1 / 2×2 / 4×4 cells at [150,300) / [300,600) / [600,1000)m bands) in `src/core/world/object_paging.gd`. Enabled by default via `hlod_enable` console command. |
+| FAR | 1000-5km | Custom octahedral impostors via a single `MultiMeshInstance3D` draw call. |
 
-Promotion at 130m / demotion at 190m (hysteresis prevents oscillation).
+**MID→NEAR promotion at 250m, demotion at 280m** (20m hysteresis, `streaming_config.gd:78-81`) — physics bodies and scene-tree NEAR nodes are pre-created while the MID RS instance stays visible, then the RS instance is hidden and the Node3D becomes the active renderer when the camera enters the 150m band.
+
+See `docs/systems/distance_rendering.md` (and `docs/audit/LOD_REFACTOR_B_WIDE.md` for the B-wide migration history).
 
 ## Key Patterns
 
