@@ -79,6 +79,7 @@ const BenchmarkHUDScript := preload("res://src/tools/benchmark_hud.gd")
 const ProgressiveBenchmarkScript := preload("res://src/tools/progressive_benchmark.gd")
 const PerfSweepScript := preload("res://src/tools/perf_sweep.gd")
 const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
+const BenchLadderRunnerScript := preload("res://src/tools/bench_ladder_runner.gd")
 const LoadingStateMachineScript := preload("res://src/core/loading/loading_state_machine.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
@@ -509,6 +510,13 @@ func _init_async() -> void:
 	# is absent.
 	_maybe_start_auto_bench()
 
+	# Subsystem-isolation ladder — parallel CLI orchestrator for
+	# `--bench-ladder [stamp]`. Progressive-additive sweep across the 11
+	# SubsystemToggles flags at Seyda Neen, one JSON per run. No-op when
+	# the flag is absent. See docs/audit/DISTANT_RENDERING_PLAN_2026_04_17.md
+	# §Rung 0 of the 2026-04-18 salvage pass.
+	_maybe_start_bench_ladder()
+
 
 ## Phase 8 — Cold-boot handoff into LoadingStateMachine. Called once
 ## streaming is live + camera is tracking. Idempotent via _boot_gate_entered.
@@ -619,6 +627,38 @@ func _maybe_start_auto_bench() -> void:
 	get_tree().root.add_child(runner)
 	runner.configure(native_streaming_manager, cell_manager, camera, self, stamp)
 	_log("[AUTOBENCH] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
+
+
+## Parse OS.get_cmdline_args() for --bench-ladder [stamp] and instantiate the
+## BenchLadderRunner when present. Mirrors _maybe_start_auto_bench but targets
+## the progressive-additive subsystem-isolation ladder. No-op when absent.
+func _maybe_start_bench_ladder() -> void:
+	var args := OS.get_cmdline_args()
+	var stamp := ""
+	var flag_found := false
+	for i in range(args.size()):
+		var a: String = args[i]
+		if a == "--bench-ladder":
+			flag_found = true
+			if i + 1 < args.size() and not args[i + 1].begins_with("--"):
+				stamp = args[i + 1]
+			break
+		if a.begins_with("--bench-ladder="):
+			flag_found = true
+			stamp = a.substr("--bench-ladder=".length())
+			break
+	if not flag_found:
+		return
+	if not native_streaming_manager or not cell_manager or not camera or not _subsystem_toggles:
+		push_warning("[LADDER] --bench-ladder flag set but required refs missing — skipping")
+		return
+	var runner := BenchLadderRunnerScript.new()
+	runner.name = "BenchLadderRunner"
+	get_tree().root.add_child(runner)
+	runner.configure(
+		native_streaming_manager, cell_manager, camera, self, _subsystem_toggles, stamp
+	)
+	_log("[LADDER] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
 
 func _init_terrain3d() -> void:
