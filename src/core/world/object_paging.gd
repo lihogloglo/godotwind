@@ -100,6 +100,11 @@ class PagingChunkData:
 ## Toggle at runtime via console: `hlod_enable` / `hlod_disable`.
 var enabled: bool = true
 
+## SubsystemToggles "hlod" flag state. Persists across chunk creation so
+## chunks merged AFTER a `toggle hlod off` don't pop back as visible.
+## Mirrors the same pattern used by StaticObjectRenderer._globally_visible.
+var _globally_visible: bool = true
+
 ## Scenario RID for creating RS instances
 var _scenario: RID = RID()
 
@@ -202,6 +207,11 @@ func initialize(scenario: RID, static_renderer: StaticObjectRendererScript,
 func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector3.INF) -> int:
 	if not enabled:
 		return 0
+	# Dual-purpose SubsystemToggles gate: when HLOD is toggled off, stop
+	# queuing new chunk merges entirely — not just hide the output. Lets the
+	# toggle measure "HLOD streaming + render" vs "HLOD dark" cleanly.
+	if not _globally_visible:
+		return 0
 	_camera_cell_cached = camera_cell
 	if camera_world_pos == Vector3.INF:
 		# Legacy fallback — approximate with cell center. Phase 2+ callers pass
@@ -288,6 +298,12 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 func process_merge_queue() -> void:
 	if not enabled:
 		return
+	# Dual-purpose SubsystemToggles gate: stop draining merge queue when
+	# HLOD is toggled off. In-flight merges already dispatched to the BG
+	# worker will still complete; their RS instances get hidden by the
+	# `_globally_visible` check in `_create_rs_instance`.
+	if not _globally_visible:
+		return
 
 	# Phase 4d — warmup drain has priority over merges.
 	if not _warmup_queue.is_empty():
@@ -359,12 +375,20 @@ func get_stats() -> Dictionary:
 	return _stats.duplicate()
 
 
-## Toggle visibility of all active chunk RS instances (benchmark A/B helper).
+## Dual-purpose SubsystemToggles handler: hide output AND stop streaming work.
+## Persists via `_globally_visible` so:
+##  - chunks merged AFTER this call respect visibility (see `_create_rs_instance`)
+##  - `update_for_camera` + `process_merge_queue` early-return while disabled
+##  - queued-but-not-yet-dispatched merges are flushed to avoid stale backlog
 func set_all_visible(visible: bool) -> void:
+	_globally_visible = visible
 	for key: Vector3i in _active_chunks:
 		var data: PagingChunkData = _active_chunks[key]
 		if data.instance_rid.is_valid():
 			RenderingServer.instance_set_visible(data.instance_rid, visible)
+	if not visible:
+		_merge_queue.clear()
+		_warmup_queue.clear()
 
 
 func cleanup() -> void:
@@ -828,6 +852,9 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int) -
 		RenderingServer.VISIBILITY_RANGE_FADE_SELF
 	)
 	rs.instance_geometry_set_lod_bias(rid, 1.0)
+
+	if not _globally_visible:
+		rs.instance_set_visible(rid, false)
 
 	var data := PagingChunkData.new()
 	data.key = key

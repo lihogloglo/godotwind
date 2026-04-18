@@ -57,6 +57,7 @@ static var LADDER_ADD_ORDER: Array[String] = [
 	"mid_objects",
 	"hlod",
 	"impostors",
+	"distant_lights",
 	"sky",
 	"ocean",
 	"weather",

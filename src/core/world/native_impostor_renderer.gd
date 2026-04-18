@@ -170,6 +170,12 @@ var _stats: Dictionary = {
 ## Debug logging
 var debug_enabled: bool = false
 
+## SubsystemToggles "impostors" flag state. When false, `_process` skips the
+## streaming work (pending-cell loader, texture-array rebuild, MultiMesh
+## rebuild) so the impostor tier measures as fully-off, not just hidden.
+## Mirrors the dual-purpose gate pattern used by ObjectPaging + StaticObjectRenderer.
+var _streaming_enabled: bool = true
+
 ## Benchmark timer for periodic stats logging
 var _benchmark_timer: float = 0.0
 const BENCHMARK_LOG_INTERVAL: float = 5.0
@@ -218,6 +224,12 @@ class ImpostorData:
 	var variant_flag: float = 0.0
 
 #endregion
+
+
+## SubsystemToggles handler: hide MultiMesh AND stop per-frame streaming work.
+func set_enabled(enabled: bool) -> void:
+	_streaming_enabled = enabled
+	visible = enabled
 
 
 #region Initialization
@@ -799,6 +811,12 @@ const COMPACTION_INTERVAL: float = 5.0  # Run compaction check every 5 seconds
 const COMPACTION_THRESHOLD: float = 0.75  # Compact when 75% full
 
 func _process(delta: float) -> void:
+	# Dual-purpose SubsystemToggles gate: when `impostors` is toggled off,
+	# stop the whole per-frame streaming pipeline. Existing MultiMesh already
+	# hidden by `.visible = false`. This early-return kills ingress work.
+	if not _streaming_enabled:
+		return
+
 	# Poll for completed texture loads
 	_poll_job_results()
 

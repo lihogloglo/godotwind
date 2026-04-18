@@ -344,6 +344,13 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 ## Returns instance ID for later manipulation, or -1 on failure.
 func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
 		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
+	# Dual-purpose SubsystemToggles gate: when `mid_objects` is toggled off,
+	# stop creating MID instances entirely — not just hide them. Caller
+	# (reference_instantiator) treats -1 as "add failed, skip this ref" which
+	# is the correct behavior for the benchmark isolation case.
+	if not _globally_visible:
+		return -1
+
 	if type_name not in _mesh_types:
 		return -1
 
@@ -381,11 +388,19 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 			## not metres — DU.FADE_MARGIN_LOD3_FAR was the wrong constant.
 			var spawn_time: float = float(Time.get_ticks_msec()) / 1000.0
 			registry.add_instance(id, subs, transform, spawn_time, REGISTRY_FADE_DURATION_S)
+			# Registry path mirror of the legacy-path `_globally_visible` check
+			# (line 476). Without this, instances added via the registry after
+			# `set_all_visible(false)` come back as visible MultiMesh slots —
+			# the "groups of meshes appear when moving after toggle none" bug.
+			if not _globally_visible:
+				registry.hide_instance(id)
+				data.visible = false
 			data.registry_id = id
 			_instances[id] = data
 			mesh_type.instance_count += 1
 			_stats["total_instances"] += 1
-			_stats["visible_instances"] += 1
+			if _globally_visible:
+				_stats["visible_instances"] += 1
 			if cell_grid not in _cell_index:
 				_cell_index[cell_grid] = [] as Array[int]
 			_cell_index[cell_grid].append(id)

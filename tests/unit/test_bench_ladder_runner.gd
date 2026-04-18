@@ -120,7 +120,7 @@ func test_ladder_add_order_covers_all_toggle_names() -> void:
 	var expected_flags: Array[String] = [
 		"terrain", "ocean", "sky", "weather", "characters",
 		"impostors", "mid_objects", "near_objects", "hlod",
-		"shadows", "postfx",
+		"distant_lights", "shadows", "postfx",
 	]
 	var ladder: Array[String] = BenchLadderRunnerScript.LADDER_ADD_ORDER
 	assert_int(ladder.size()).is_equal(expected_flags.size())

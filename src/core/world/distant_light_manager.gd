@@ -79,6 +79,11 @@ var _is_setup: bool = false
 ## Number of active lights in the MultiMesh
 var _active_count: int = 0
 
+## SubsystemToggles "distant_lights" flag state. When false, `scan_cells_around`
+## and `update` early-return so the tier measures as fully-off (no new cells
+## scanned, no billboard rebuilds) — not just hidden.
+var _streaming_enabled: bool = true
+
 #endregion
 
 
@@ -95,6 +100,10 @@ func setup(parent: Node3D) -> void:
 ## Only scans cells not previously scanned. Call when camera moves to new cell.
 func scan_cells_around(center_cell: Vector2i, radius_cells: int) -> void:
 	if not _is_setup:
+		return
+	# Dual-purpose SubsystemToggles gate: when `distant_lights` is off, skip
+	# ESM cell scanning + MultiMesh rebuild entirely.
+	if not _streaming_enabled:
 		return
 
 	var added: int = 0
@@ -182,6 +191,20 @@ func clear() -> void:
 	_active_count = 0
 	if _multi_mesh:
 		_multi_mesh.instance_count = 0
+
+
+## SubsystemToggles handler: hide MultiMesh AND stop cell scanning.
+## Dual-purpose so the tier measures as fully-off when disabled, not just hidden.
+func set_enabled(enabled: bool) -> void:
+	_streaming_enabled = enabled
+	if _multi_mesh_instance.is_valid():
+		RenderingServer.instance_set_visible(_multi_mesh_instance, enabled)
+
+
+## Deprecated alias — kept briefly for any callers still using old name.
+## New callers: use set_enabled(bool).
+func set_visible(visible: bool) -> void:
+	set_enabled(visible)
 
 
 ## Clean up rendering resources.

@@ -1570,6 +1570,8 @@ func _setup_subsystem_toggles() -> void:
 			if native_streaming_manager: native_streaming_manager.set_near_tier_visible(on),
 		"hlod": func(on: bool) -> void:
 			if native_streaming_manager: native_streaming_manager.set_hlod_visible(on),
+		"distant_lights": func(on: bool) -> void:
+			if native_streaming_manager: native_streaming_manager.set_distant_lights_visible(on),
 		"shadows": func(on: bool) -> void:
 			if sun: sun.shadow_enabled = on,
 		"postfx": func(on: bool) -> void:
@@ -1592,6 +1594,7 @@ func _setup_subsystem_toggles() -> void:
 		"mid_objects": true,
 		"near_objects": true,
 		"hlod": true,
+		"distant_lights": true,
 		"shadows": true,
 		"postfx": true,
 	}

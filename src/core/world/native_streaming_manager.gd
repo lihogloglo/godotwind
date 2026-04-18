@@ -806,6 +806,13 @@ func _process(delta: float) -> void:
 
 ## Update which cells should be loaded based on camera position
 func _update_loaded_cells() -> void:
+	# Dual-purpose SubsystemToggles gate: freeze the cell set entirely when
+	# `near_objects` is off. Both loads AND unloads pause. Prevents the
+	# asymmetric-drain bug where `_loaded_cells` shrinks during the off period
+	# (unloads run) but can't be refilled (loads gated). On toggle back to ON,
+	# `set_near_tier_visible` forces a single catch-up call.
+	if not _near_tier_visible:
+		return
 	var ulc_start := Time.get_ticks_usec()
 
 	# Calculate which cells should be loaded
@@ -1510,6 +1517,12 @@ func _count_mesh_instances(node: Node) -> int:
 ## Submits async requests for cells in the queue
 ## Uses staggered loading during startup to prevent freeze
 func _process_pending_loads_async() -> void:
+	# Dual-purpose SubsystemToggles gate: when `near_objects` is off, stop
+	# submitting new cell-load async requests. This kills both NEAR ingress
+	# AND the MID flora adds that piggyback on ReferenceInstantiator during
+	# the cell load. HLOD + impostors are independent (they read ESM direct).
+	if not _near_tier_visible:
+		return
 	if _pending_load_queue.is_empty():
 		return
 
@@ -1613,6 +1626,10 @@ func _process_pending_loads_sync(_delta: float) -> void:
 	# Warn about sync loading usage - it causes stuttering
 	if Engine.get_frames_drawn() == 1:
 		push_warning("[NativeStreamingManager] Using synchronous cell loading - this can cause stuttering. Set async_loading_enabled = true for better performance.")
+
+	# Dual-purpose SubsystemToggles gate — mirror of async path.
+	if not _near_tier_visible:
+		return
 
 	if _pending_load_queue.is_empty():
 		return
@@ -1796,26 +1813,38 @@ func set_mid_tier_visible(visible: bool) -> void:
 	if _static_renderer:
 		_static_renderer.set_all_visible(visible)
 
-## Toggle FAR-tier impostors (NativeImpostorRenderer)
+## Toggle FAR-tier impostors (NativeImpostorRenderer) — hides + stops streaming.
 func set_impostors_visible(visible: bool) -> void:
 	if _impostor_renderer:
-		_impostor_renderer.visible = visible
+		_impostor_renderer.set_enabled(visible)
 
 ## Toggle NEAR-tier Node3D cells (loaded cell containers).
 ## Remembers state so cells loaded after the toggle respect it.
 var _near_tier_visible: bool = true
 
 func set_near_tier_visible(visible: bool) -> void:
+	var was_visible := _near_tier_visible
 	_near_tier_visible = visible
 	for grid: Vector2i in _loaded_cells:
 		var cell_node: Node3D = _loaded_cells[grid]
 		if cell_node:
 			cell_node.visible = visible
+	# When flipping from OFF to ON, force one catch-up pass so cells around
+	# the current camera position re-queue for loading immediately — don't
+	# wait for the next cell change. Mirrors the "freeze while off, thaw
+	# cleanly on" semantics of the `_update_loaded_cells` gate.
+	if visible and not was_visible:
+		_update_loaded_cells()
 
 ## Toggle HLOD merged geometry (ObjectPaging)
 func set_hlod_visible(visible: bool) -> void:
 	if _hlod_merger:
 		_hlod_merger.set_all_visible(visible)
+
+## Toggle distant-light billboard MultiMesh (DistantLightManager) — hides + stops streaming.
+func set_distant_lights_visible(visible: bool) -> void:
+	if _distant_light_manager:
+		_distant_light_manager.set_enabled(visible)
 
 
 # ----------------------------------------------------------------------------
