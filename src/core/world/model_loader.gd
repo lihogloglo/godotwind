@@ -21,6 +21,7 @@ class_name ModelLoader
 extends RefCounted
 
 const LODResource := preload("res://src/core/world/lod_resource.gd")
+const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
 
 ## Maximum number of prototypes kept in memory cache
 ## When exceeded, least-recently-accessed entries are evicted to 80% capacity
@@ -603,14 +604,24 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 func _instantiate_from_scene(packed_scene: PackedScene) -> Node3D:
 	if packed_scene == null or not packed_scene.can_instantiate():
 		return null
+	# S.1 follow-up: breadcrumb the PackedScene path step-by-step.
+	# Native SIGSEGV persists after the 2026-04-16 canonical PackedScene refactor;
+	# breadcrumb is the only way to see which model / step crashes because release
+	# build has no debug symbols. Pulled once the race is fixed.
+	var res_path := packed_scene.resource_path
+	CrashBreadcrumb.write("instantiate_begin", res_path)
 	var instance := packed_scene.instantiate()
+	CrashBreadcrumb.write("instantiate_ok", res_path)
 	if instance == null:
 		return null
 	if not instance is Node3D:
 		instance.queue_free()
 		return null
+	CrashBreadcrumb.write("strip_occluders_begin", res_path)
 	_strip_occluders(instance)
+	CrashBreadcrumb.write("disable_collision_begin", res_path)
 	_disable_collision_shapes_in_tree(instance)
+	CrashBreadcrumb.write("instantiate_return", res_path)
 	return instance as Node3D
 
 

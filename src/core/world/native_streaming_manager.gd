@@ -31,6 +31,7 @@ const SC := preload("res://src/core/world/streaming_config.gd")
 const StreamingProfilerScript := preload("res://src/core/world/streaming_profiler.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ModelLoaderScript := preload("res://src/core/world/model_loader.gd")
+const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
@@ -1031,6 +1032,8 @@ func _load_cell_sync(grid: Vector2i) -> void:
 
 ## Unload a cell at the given grid position (budgeted — gradual over multiple frames)
 func _unload_cell(grid: Vector2i) -> void:
+	# S.1 follow-up: breadcrumb the unload path so if SIGSEGV fires here we know.
+	CrashBreadcrumb.write("unload_cell_begin", str(grid))
 	# Cancel any pending async request for this cell
 	if grid in _async_requests:
 		var request_id: int = _async_requests[grid]
@@ -1075,6 +1078,7 @@ func _unload_cell(grid: Vector2i) -> void:
 	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
 	cell_unloaded.emit(grid)
 	stats_updated.emit(_stats)
+	CrashBreadcrumb.write("unload_cell_end", str(grid))
 
 
 ## Process gradual unloading of departing cells within time budget
@@ -1119,6 +1123,8 @@ func _process_budgeted_unloading() -> void:
 
 			# Remove last child (pop from end = O(1))
 			var child := cell_node.get_child(cell_node.get_child_count() - 1)
+			var child_name: String = str(child.name) if is_instance_valid(child) else "?"
+			CrashBreadcrumb.write("unload_child", "%s <- %s" % [str(cell_node.name), child_name])
 			cell_node.remove_child(child)
 
 			# Try to return to object pool instead of destroying
