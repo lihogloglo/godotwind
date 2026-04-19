@@ -220,7 +220,7 @@ User asked 2026-04-19: "we have done a few things since master that might be use
 
 Each phase is small, independently testable, and ends with a measurement (§9). Phases are ordered so the game stays runnable throughout — we never leave `master` in a broken state.
 
-### Phase S.0 — Park non-NEAR tiers + banner
+### Phase S.0 — Park non-NEAR tiers + banner — STATUS: DONE 2026-04-19 (commit `0a35ca6`)
 
 **Goal:** isolate NEAR tier. Boot-time defaults: MID/HLOD/IMPOSTORS off. Does NOT delete tier code — just gates it at the default-flag level.
 
@@ -244,7 +244,7 @@ Each phase is small, independently testable, and ends with a measurement (§9). 
 
 ---
 
-### Phase S.1 — Delete per-object distance gating in cell insert
+### Phase S.1 — Delete per-object distance gating in cell insert — STATUS: DONE-WITH-KNOWN-ISSUES 2026-04-19 (commits `d979373`, `6a63eac`, `095c8f8`)
 
 **Goal:** collapse the 4-way branch in `process_async_instantiation` to one path: every ref in an active cell → Node3D.
 
@@ -448,17 +448,22 @@ Record before/after for each phase. Canonical metrics:
 
 | Phase | Metric | Before | After | Notes |
 |---|---|---|---|---|
-| S.0 | FPS steady state, Seyda Neen dock | TBD | TBD | Only NEAR + terrain active |
-| S.0 | Draw calls | TBD | TBD | |
-| S.0 | `loaded` cell count | TBD | TBD | |
-| S.1 | P95 instantiation budget | TBD | TBD | Per-frame `process_async_instantiation` time |
-| S.1 | NEAR ring fill test | fail | pass | `toggle none → terrain → near_objects` + walk: circle follows camera |
-| S.2 | Source-query cost per frame | N/A | TBD | New metric |
-| S.3 | Tier state machine overhead | N/A | TBD | `request_cell_tier` call cost |
-| S.4 | P95 cell attach time, preload-warm | TBD | TBD | Cold cache vs warm cache |
+| S.0 | FPS steady state, Seyda Neen dock | — | 206 | NEAR + terrain only, `reg_slots=0`, `imp_pending=0` — MID/HLOD/IMPOSTORS truly off |
+| S.0 | Draw calls | — | 2593 | heartbeat sec=64 |
+| S.0 | `loaded` cell count | — | 117 | radius 3 = 7×7 grid = 49 cells in steady, more during traversal |
+| S.0 | Objects rendered | — | 5134 | |
+| S.0 | Primitives | — | 590k | |
+| S.1 | NEAR ring fill test | fail | pass | User walked + confirmed "NEAR seems to be working correctly now. Nothing seems rendering past the NEAR" |
+| S.1 | Per-cell Node3D count (Seyda Neen `(-1,-9)`) | 45 | 123 | ~3× — confirms every-ref-is-Node3D rule works |
+| S.1 (broken draft) | FPS mid-load | — | 35 | VR override accidentally deleted → 500m prebaked VR leaked |
+| S.1 (VR fix, commit `6a63eac`) | FPS mid-load | 35 | 89-92 | `_apply_near_visibility_range` restored |
+| S.1 (steady state, user walk) | FPS | — | **50-60** | **Regression vs S.0's 206** — see §12 Known Issues |
+| S.2 | Source-query cost per frame | N/A | TBD | |
+| S.3 | Tier state machine overhead | N/A | TBD | |
+| S.4 | P95 cell attach time, preload-warm | TBD | TBD | |
 | S.4 | P99 frame spike during fast traversal | TBD | TBD | |
-| S.5 | P99 frame spike during unload | TBD | TBD | Bulk unload vs budgeted |
-| S.6 | NEAR baseline complete | — | — | User sign-off |
+| S.5 | P99 frame spike during unload | TBD | TBD | |
+| S.6 | NEAR baseline complete | — | — | Blocked: FPS regression + second crash site (see §12) |
 
 ---
 
@@ -479,5 +484,91 @@ Record before/after for each phase. Canonical metrics:
 
 ## 11. Patch Log
 
+- **v3 (2026-04-19, post-S.1 launch):** S.0 + S.1 marked DONE with commit refs. §9 populated with real numbers. Added §12 Known Issues (corrupt `.res`, second crash site, FPS regression root cause). Added §13 Next-Session Pickup. S.1 acceptance confirmed by user interactive walk: "NEAR seems to be working correctly now. Nothing seems rendering past the NEAR." But FPS regressed 206 → 50-60 due to architectural hole: 49 cells × ~150-250 refs each = ~10k Node3Ds with Jolt bodies, all ticking every frame, for content that VR-culls past 155m. Per-ref distance gate (Option A) proposed but not implemented — user paused session.
 - **v2 (2026-04-19, post-coder-review):** added §0 user-locked acceptance criterion + parent PHASE 0 prerequisite. Added §3.1 player-cell pin (OpenMW invariant). Added §4.5 Salvage Strategy with KEEP/DELETE/REWRITE tables. S.0 acceptance now lists explicit launch-and-walk gate. S.1 deletes promotion code (not const-gate per CLAUDE.md Simplicity), adds AABB-upgrade prebake fix. S.3 §3.3 honest about `object_paging.gd` ≠ UE5 HLOD layers (it's UE5 World Composition runtime merger). S.4 thread-safety claim corrected — `Mutex` required, "lockless dictionary read" claim was wrong; added `model_loader` race prerequisite from commit `5c1bc88`. S.4 prediction time velocity-scaled. S.6 acceptance binds user's launch-and-walk gate as the sign-off contract. §8.1 questions locked. §8.2 holds 3 still-open items for later phases.
 - **v1 (2026-04-19):** initial DRAFT. Superseded the prior ring-based sketch.
+
+---
+
+## 12. Known Issues (post-S.1)
+
+### 12.1 Corrupt `.res` cache file — `f_terrain_rock_bc_11_nif.res`
+
+**Symptom:** `PackedScene.instantiate()` on this specific `.res` reliably SIGSEGVs ~57s into any session (the time it takes for a cell containing this rock to stream in). Native-level crash, no GDScript backtrace in release builds.
+
+**Proof:** breadcrumb diagnostic (`src/core/logging/crash_breadcrumb.gd`) caught the exact file. `instantiate_begin :: f_terrain_rock_bc_11_nif.res` recorded with no matching `instantiate_end` = crash occurred inside `packed_scene.instantiate()`.
+
+**Status:** QUARANTINED 2026-04-19. File renamed to `.crashtest` suffix in `C:/Users/metzo/Documents/Godotwind/cache/models/`. Game survives 3× longer after quarantine. Proper fix: rebake JUST this file via the prebake pipeline (user said rebake takes a few minutes). Or: full cache rebake + hash validation so corrupt files are regenerated automatically at boot.
+
+**Why it's corrupt:** unknown. All 4884 `.res` files in cache are dated `Apr 19` (today's rebake), so not a stale file. File size matches siblings (360215 bytes, same as `bc_02`). Either:
+(a) prebake pipeline occasionally produces a malformed subresource reference (rare, non-deterministic)
+(b) NIF source has something the converter handles incorrectly for `_bc_11` specifically
+(c) filesystem corruption during the Apr 19 rebake pass
+
+Next-session action: rebake + hash-validate. If it corrupts again, investigate the `nif_converter.gd` path for `bc_11` specifically.
+
+### 12.2 Second crash site at sec=~183 — outside `_instantiate_from_scene`
+
+**Symptom:** after quarantining `bc_11`, a second SIGSEGV fires ~180-185s into session, only when game runs unattended under heavy streaming. User's interactive walk completed without hitting it.
+
+**Breadcrumb signature:** last successful breadcrumb = `instantiate_return :: f_terrain_rock_ai_12_nif.res` (or `f_flora_muckspunge_06_nif.res` on other runs) — meaning `_instantiate_from_scene` completed FULLY for that file. Crash happens AFTER that, in an uninstrumented code path.
+
+**Suspect list (un-instrumented hazards):**
+- `reference_instantiator.gd::_instantiate_model_object` — `_enable_collision_shapes_in_tree` for NEAR refs, `_hide_lod_nodes`, `_apply_transform`, carryable conversion at line 315.
+- `cell_manager.gd::process_async_instantiation` — batch `add_child` / `queue_free` loop.
+- `native_streaming_manager._process_budgeted_unloading` — `queue_free` on children with disabled Jolt bodies still registered in broadphase. Rapid unload churn (13+ cells/2s during fast player movement) is a known trigger.
+- Jolt broadphase corruption from concurrent body register/unregister.
+
+**Next-session action:** extend breadcrumbs into the above paths. Run until crash, read last breadcrumb, narrow down. Probably one more diagnostic pass before root cause is visible.
+
+### 12.3 FPS regression — S.0's 206 FPS → S.1's 50-60 FPS
+
+**Root cause (identified, not fixed):** S.1's architectural rule "every ref in a resident cell becomes a Node3D" created a hidden cost. Per-frame math:
+- Cell = 117m × 117m (`CELL_SIZE_GODOT`)
+- `load_radius_cells = 3` → `_get_cells_in_radius` returns 49 cells (7×7 grid)
+- Each cell contains 150-250 refs after mid-range Morrowind content (Seyda Neen region)
+- ~10,000 Node3Ds in steady state, **all with Jolt StaticBody3D + CollisionShape3D children** (collision `disabled = true` for refs beyond NEAR, but the BODIES are still registered in Jolt broadphase)
+- Jolt ticks ~10k bodies per physics frame = 600k body-ops/sec at 60Hz
+
+S.0 was 206 FPS because MID-tier refs (80% of cell content) were **RS instances** (single RID, zero physics, zero scene-tree processing). Only NEAR Node3Ds had bodies. Total bodies: ~5k not ~10k. **S.0 had fewer bodies than S.1 currently does.**
+
+**Fix (proposed, not shipped) — Option A:** per-ref distance gate at instantiation time. `if ref.position.distance_to(camera) > NEAR_END + hysteresis: skip spawn`. Deferred refs stay in the instantiation queue; when camera approaches, they spawn. Pure distance check, no tier classification (NOT a revert to the S.0 4-way branch). Forward-compatible with S.7: the gate extends to "close enough for Node3D, else spawn RS instance" once MID returns.
+
+**Why Option A works without compromising radius:** user vetoed reducing `load_radius_cells` 3 → 2. Option A keeps radius at 3 (cells still LOAD out to 351m) but stops creating physics-body Node3Ds for refs the player can't interact with. Matches the plan's §3.1 intent that "attach is incremental across frames" — Option A makes attach distance-aware rather than all-or-nothing.
+
+**Alternative — Option C:** dynamic Jolt body unregister (keep every Node3D, detach StaticBody3D from Jolt when >NEAR_END). More complex, introduces physics state lifecycle bugs.
+
+### 12.4 `_apply_near_visibility_range` is PERMANENT, not time-boxed
+
+Updated in v2 patch: the NEAR Node3D VR override (`_apply_near_visibility_range` in `cell_manager.gd`) stays forever. Prebaked NIFs carry 0-500m VR (stale MID-tier artifact); NEAR Node3Ds MUST cull at NEAR_END. MID RS instances (S.7+) get their own VR via `RenderingServer.instance_geometry_set_visibility_range` at add-time — orthogonal to Node3D VR. Initial S.1 draft deleted the override per plan; restored in commit `6a63eac` after launch revealed the regression.
+
+---
+
+## 13. Next-Session Pickup
+
+**Priorities in order:**
+
+1. **Implement Option A (per-ref distance gate).** Expected to recover most of the S.0 FPS. In `cell_manager.process_async_instantiation` add a distance check before the Node3D spawn path. If ref is beyond `NEAR_END + hysteresis`, skip — leave entry in the instantiation queue for a future frame when camera is closer. Re-process the queue on camera cell change. Acceptance: Seyda Neen dock FPS back to >150, Node3D count drops from ~10k to ~3-5k.
+
+2. **Rebake `f_terrain_rock_bc_11_nif.res`.** Delete from cache, trigger re-prebake. If it corrupts again, investigate `nif_converter.gd` for the specific NIF. User said rebake is a few minutes. Un-quarantine the `.crashtest` file once rebake succeeds.
+
+3. **Extend breadcrumbs to find second crash site.** Add write calls in:
+   - `reference_instantiator._instantiate_model_object` — before/after `_enable_collision_shapes_in_tree`, `_apply_transform`, carryable conversion
+   - `cell_manager.process_async_instantiation` — before batch `add_child`
+   - `native_streaming_manager._process_budgeted_unloading` — already has `unload_child` but consider per-`queue_free` granularity
+
+4. **Once both crashes are fixed**, remove `CrashBreadcrumb` calls (keep the utility file — cheap insurance for future diagnostics). Commit message should explicitly remove the overhead.
+
+5. **Then resume S.2 / S.3** (StreamingSource + per-cell FSM). The FSM is the proper long-term home for tier-based distance gating; Option A is a compatible scaffold.
+
+**Code state pointers for next agent:**
+- `src/core/logging/crash_breadcrumb.gd` — the diagnostic utility, 35 lines, static functions
+- `src/core/world/model_loader.gd:_instantiate_from_scene` — 4 breadcrumb calls installed
+- `src/core/world/native_streaming_manager.gd:_unload_cell` + `_process_budgeted_unloading` — 3 breadcrumb calls installed
+- Quarantined file: `C:/Users/metzo/Documents/Godotwind/cache/models/f_terrain_rock_bc_11_nif.res.crashtest` — verify before rebake
+- Commits: `0a35ca6` (S.0), `d979373` (S.1), `6a63eac` (VR fix), `095c8f8` (doc correction), `3d1eabd` (breadcrumb diagnostic)
+
+**DO NOT:**
+- Revert the VR override deletion. Override stays; it's correct NEAR-tier behavior (see §12.4).
+- Re-introduce the per-object tier-classification branch. Per-ref DISTANCE gate only, no `mid_worthy` / `always_near` classification.
+- Reduce `load_radius_cells` below 3 to work around FPS — user vetoed.

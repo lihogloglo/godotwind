@@ -67,6 +67,7 @@ Combat, magic, AI, inventory, save/load, character creation.
 3. Interior lighting exists but not tuned
 4. Animation action layers stubbed (upper body blend not wired)
 5. Automated tests: gdUnit4 13 unit tests + visual test scenes in tests/visual/
+6. **NEAR-tier refactor in progress (S.0 + S.1 shipped 2026-04-19, branch `perf/distant-rendering-2026-04-17`).** MID / HLOD / IMPOSTORS parked at boot. Per-object tier branching deleted. Open issues: (a) `f_terrain_rock_bc_11_nif.res` quarantined as `.crashtest` — file crashes `PackedScene.instantiate()` reliably; rebake pending. (b) Second native SIGSEGV site at sec=~183 in uninstrumented path; breadcrumb diagnostic (`src/core/logging/crash_breadcrumb.gd`) needs extension to `reference_instantiator` + unload queue_free path. (c) FPS regression 206 → 50-60 due to ~10k Node3Ds + Jolt bodies steady state (S.1 rule "every ref → Node3D"); fix = per-ref distance gate, proposed as Option A in `docs/plans/distant_rendering_2026_04/near_tier_refactor.md` §13. See that doc for full next-session pickup.
 
 ## Performance
 
