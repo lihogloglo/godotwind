@@ -159,12 +159,32 @@ var stats: Dictionary = {
 # Morrowind light radius to Godot light range conversion factor
 const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to meters
 
+## Lazy-spawn distance for interactive refs (containers, doors, activators,
+## carryables). Refs beyond this distance are deferred and re-queued on camera
+## approach. OpenMW pattern: Node3D creation for 12-20 ms/ref interactives is
+## skipped until gameplay can plausibly interact — eliminates 70-80% of the
+## `inst:` overrun during cell-crossing bursts while preserving the invariant
+## "containers appear before you can touch them." Set to 80 m = below NEAR
+## render end (150 m) so interactives always arrive before they enter view.
+const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 80.0
+
+## Set true by `_instantiate_model_object` when a ref is skipped due to the
+## lazy-spawn distance gate. Read by `cell_manager.process_async_instantiation`
+## to route the ref into `_proximity_deferred` instead of treating as failed.
+var last_proximity_deferred: bool = false
+
 
 ## Instantiate a cell reference into a Node3D
 ## Returns null if the reference cannot be instantiated or uses StaticObjectRenderer
 var _inst_call_count: int = 0
+## Diagnostic — set to the type_name of the most recent instantiate_reference
+## call. Read by `cell_manager.process_async_instantiation` for per-type
+## timing breakdown. Scientific-approach instrumentation, not hypothesis.
+var last_type_name: String = ""
 func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	_inst_call_count += 1
+	# Reset per-call state — caller (cell_manager) reads these after return.
+	last_proximity_deferred = false
 
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
@@ -178,9 +198,11 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 
 	if not base_record:
 		# Not an error - some refs are for types we don't handle yet
+		last_type_name = "unknown"
 		return null
 
 	var type_name: String = record_type[0] if record_type.size() > 0 else ""
+	last_type_name = type_name
 
 	# Handle different record types
 	match type_name:
@@ -275,7 +297,21 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# - effective_use_static false — interior pockets (§5.3 carve-out locked)
 	# - has_animation — flags, banners, rotating objects need AnimationPlayer lifecycle
 	if _should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static):
+		last_proximity_deferred = false
 		return _instantiate_static_object(ref, model_path, cell_grid)
+
+	# Lazy-spawn distance gate (statics_no_node3d follow-up 2026-04-19).
+	# Containers/doors/activators/carryables cost 12-20 ms per instantiate —
+	# defer until player is within interaction range. Re-queued by
+	# `cell_manager.tick_proximity_deferred` when camera approaches.
+	# Interior pockets always use_static=false → skip gate (pockets are
+	# bounded, every ref is expected to spawn immediately).
+	if effective_use_static and _is_proximity_gated(type_name, is_carryable):
+		var ref_world_pos := CS.vector_to_godot(ref.position)
+		if ref_world_pos.distance_squared_to(camera_position) > INTERACTIVE_PROXIMITY_THRESHOLD_M * INTERACTIVE_PROXIMITY_THRESHOLD_M:
+			last_proximity_deferred = true
+			return null
+	last_proximity_deferred = false
 
 	# Try to get from object pool first (if enabled). Skip for carryables —
 	# the pool isn't keyed by body_type so a previously-converted RigidBody3D
@@ -1113,6 +1149,19 @@ func _is_static_render_model(model_path: String) -> bool:
 	if "rock_" in lower and "_small" in lower:
 		return true
 
+	return false
+
+
+## Check if a ref type qualifies for the lazy-spawn distance gate.
+## Interactive refs whose instantiate cost is dominated by PackedScene.instantiate
+## (~12-20 ms per container/door/activator per [inst-breakdown] measurement).
+## Actors (npc/creature) already use `max_actor_distance` at line ~195, separate path.
+func _is_proximity_gated(type_name: String, is_carryable: bool) -> bool:
+	if is_carryable:
+		return true
+	match type_name:
+		"door", "activator", "container":
+			return true
 	return false
 
 

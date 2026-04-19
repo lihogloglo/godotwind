@@ -577,3 +577,113 @@ Updated in v2 patch: the NEAR Node3D VR override (`_apply_near_visibility_range`
 - Revert the VR override deletion. Override stays; it's correct NEAR-tier behavior (see §12.4).
 - Re-introduce the per-object tier-classification branch. Per-ref DISTANCE gate only, no `mid_worthy` / `always_near` classification.
 - Reduce `load_radius_cells` below 3 to work around FPS — user vetoed.
+
+---
+
+## 14. Session 2026-04-19 (late) — `statics_no_node3d` T.0/T.1 + lazy-spawn + data-driven perf session
+
+**Agents:** @coder then @roaster (role swap due to coder context pressure).
+
+### 14.1 What shipped (uncommitted — UNCOMMITTED as of this entry)
+
+Single slice, modified files:
+- `src/core/world/static_object_renderer.gd` — deleted `_globally_visible` early-return gate at `add_instance`. Old behavior dropped spawns entirely when `mid_objects` toggle was off; new behavior always spawns + hides via the existing line-399 + line-495 hide paths. Matches UE5 / OpenMW visibility toggle semantics (hide, don't refuse creation).
+- `src/core/world/reference_instantiator.gd` — three additions:
+  - `has_animation(model_path)` cache entry point via `model_loader.has_animation` (per-prototype AnimationPlayer detection, ~500 prototypes vs ~316k refs = 600× dedup)
+  - `_should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static)` — STAT-type routing to `_instantiate_static_object` (RS path). Interactive types (door/activator/container/carryable/animated) stay Node3D.
+  - **Lazy-spawn distance gate** (`INTERACTIVE_PROXIMITY_THRESHOLD_M = 80.0`): containers/doors/activators/carryables beyond 80m from camera return null with `last_proximity_deferred = true`. Caller (cell_manager) parks them on a deferred list.
+  - `last_type_name` exposed for cell_manager per-type breakdown.
+- `src/core/world/model_loader.gd` — `_has_animation_cache` + `has_animation(path)` that instantiate-once per unique prototype to detect AnimationPlayer.
+- `src/core/world/cell_manager.gd` — four additions:
+  - Per-type `[inst-breakdown 5s]` log (scientific-approach instrumentation — answers "which type_name dominates inst:")
+  - `_proximity_deferred: Array[InstantiationEntry]` + `PROXIMITY_TICK_INTERVAL_MSEC = 250`
+  - `tick_proximity_deferred(camera_pos)` — re-queues deferred interactives within 80m, drops entries whose cells are gone
+  - State-reversal pattern (`finalize_unloaded_cell` + `_unloading_request_ids`) was actually committed earlier in `e450dd1` but is carryover here
+- `src/core/world/native_streaming_manager.gd` — calls `tick_proximity_deferred(_camera_position)` in `_update_loaded_cells`. State-reversal limbo dict for request IDs.
+- `src/tools/world_explorer.gd` — four additions:
+  - `mid_objects` default flipped `false` → `true` (stale S.0 coupling broke statics post-T.1 migration — the toggle was MID-distance-band intent, but `static_object_renderer` is now the universal static renderer)
+  - `--near-only` handler dropped `set_flag("mid_objects", false)` — same reason
+  - Terrain3D `collision_mode = 1` (Dynamic_Game) + `collision_shape_size = 16` + `collision_radius = 64` — was booting with collision DISABLED (default)
+  - Left-click in fly-cam spawns a `RigidBody3D` debug ball forward at 20 m/s, auto-frees after 15 s. For collision verification piloting.
+
+Also: `statics_no_node3d.md` primary plan + `lazy_jolt_activation.md` and `csharp_instantiate_bridge.md` superseded/cancelled.
+
+### 14.2 What the data says (scientific, not hypothesis)
+
+Captured via `[inst-breakdown 5s]` instrumentation across a ~4-min pilot:
+
+**Pre-T.1 (prior branch state, reconstructed from user report):**
+- Steady Seyda Neen dock: 250-300 FPS
+- Moving: 19-35 FPS
+- Jolt broadphase body count: ~1800 (per-object StaticBody3D for every rock/arch/clutter)
+
+**Post-T.1 routing + lazy-spawn (this session, last run):**
+- `reg_slots = 1301` — statics rendering via `RS.instance_create2` MultiMesh path (was `reg_slots = 0`)
+- `phys_pairs = 1` — Jolt broadphase nearly empty (was ~1800)
+- `static` per-type avg: 19826 µs (cold) → 5785 → 1707 → 1489 → 689 → **161 µs** as shape cache warms — 120× reduction
+- `container` avg: 10-20 µs in windows where player is in open terrain (lazy-spawn deferral works), 4000-14000 µs in windows where player is in dense city (~50% of refs still instantiate)
+- Steady: 208-**229 FPS**, briefly crossed the 240 target
+- Moving: 65-152 FPS (was 19-35), **4× improvement** on movement
+- Worst cell-crossing hitches: 25-65 FPS momentarily
+
+**New bottleneck revealed:** `cellupd: 50-71 ms` spikes — `_update_loaded_cells` is the new ceiling. Was masked by inst: dominance before. Suspects (unverified — to be measured next session):
+1. `_distant_light_manager.scan_cells_around` (walks 11k cells)
+2. `_get_cells_in_radius` + sort
+3. `tick_proximity_deferred` walking deferred list (unlikely — throttled 4×/sec)
+
+### 14.3 What's still broken
+
+- **FPS on movement still dips to 35.** Lazy-spawn closed half the gap (inst: 60-100 ms → 20-30 ms) but cellupd spikes are now the ceiling. 240 FPS target NOT achieved in movement.
+- **Ball does not collide with anything** — terrain collision was enabled via `collision_mode=1` but ball still falls through. Possible root causes to verify next session:
+  - Terrain3D v1.0.1 may use different property names for collision (collision_enabled vs collision_mode)
+  - collision_radius/shape_size may need adjustment
+  - Ball's default collision_layer/mask may not align with terrain layer
+  - Physics frame race with Dynamic_Game tile generation on ball spawn
+- **T.2 not shipped** — statics have no collision (cell-level merged trimesh body never implemented). Ball will pass through rocks even if terrain collision works.
+- **Second crash site** still pending (see §12.2 from prior session) — no repro this session, but not confirmed fixed.
+
+### 14.4 Honest engine assessment (user raised the question)
+
+> "Seriously asking myself if Godot is the right pick for this project at all"
+
+**Where Godot hits walls for open-world MW-scale:**
+- `PackedScene.instantiate()` is main-thread-only per Godot threading rules. 12-20 ms per complex interactive ref × 100 refs per cell-crossing = 1-2 seconds of spawn work on main thread. Only workaround: reduce the per-ref cost (shape extraction to sidecar, not PackedScene) or reduce the ref count on main thread (lazy-spawn, pooling).
+- `add_child` fires scene-tree notifications to every ancestor. Open-world needs large-grain scene tree ops, not per-ref.
+- Jolt broadphase scales to ~10k bodies but per-body insert/remove is ~100 µs; 1800 bodies × cell-crossing = 180 ms. **Killed the FPS** pre-T.1. Fixed by routing statics to RS (no Node3D, no body).
+- `Shape3D` runtime extraction lacks a uniform triangle-accessor API; requires per-shape-type adapters (ConcavePolygon has `get_faces()`, primitives need analytical triangulation).
+
+**Where Godot is competitive/better than alternatives:**
+- `RenderingServer.instance_create2` with MultiMesh is extremely fast — `reg_slots = 1301` at stable 200+ FPS.
+- `WorkerThreadPool` + `BackgroundProcessor` work well for ESM parse + NIF conversion.
+- `visibility_range` on RS instances is engine-driven LOD that's faster than any manual distance check loop.
+- Terrain3D (GDExtension) is a solid addon once collision is turned on.
+
+**Net verdict:** Godot CAN do this. The NEAR-tier pain is because we're paying Node3D tax on refs that don't need Node3D lifecycle. **T.2 (cell-level merged trimesh) + fuller eliding of interactive Node3D is the remaining architectural delta.** Not a Godot failure — a "we haven't finished the canonical pattern" state. Unity/Unreal would hit similar Main-thread instantiation walls with 1800 GameObjects; they solve it with ISMC / HISMC (instanced static mesh components), which is exactly the pattern `PrototypeRegistry` emulates.
+
+Switching engines from Godot → Unreal would RESTART this whole refactor at zero (we'd re-learn Unreal's World Partition, re-port the MW data pipeline, re-build the ocean / dialogue / interaction systems). **Continuation cost in Godot < switch cost to any other engine** by roughly 100×.
+
+### 14.5 Next-session priorities (ranked)
+
+1. **Commit session 2026-04-19 late work.** Single commit, message draft: `perf(streaming): statics_no_node3d T.0/T.1 + lazy-spawn interactives + terrain collision`. Five modified files + three new plan docs. Uncommitted as of this entry.
+
+2. **Investigate cellupd 50-71 ms spikes.** Add breakdown timing to each phase within `_update_loaded_cells` (grid/reclaim/unload/queue/lights/proximity). Same pattern as inst: breakdown. Run pilot, read data, target the biggest slice. Probably `_distant_light_manager.scan_cells_around`.
+
+3. **Fix ball / terrain collision.** Verify Terrain3D v1.0.1 actual property names. Check ball collision_layer/mask. Test in an empty scene with a known-good StaticBody3D to isolate whether ball or terrain is the problem.
+
+4. **Complete T.2 (statics_no_node3d).** `cell_static_collision.gd` merged trimesh builder + spawn-time shape collector + cell_manager wiring + test scene. Would let ball bounce off rocks. ~4 h work per `statics_no_node3d.md`.
+
+5. **Verify second-crash-site** is not masked by this session's changes. Run pilot for ≥5 min continuous cell crossings, read breadcrumb.
+
+### 14.6 Code state pointers for next agent
+
+- Uncommitted diff across 5 files listed in §14.1. `git status` and `git diff HEAD` will show.
+- New plan docs (untracked): `statics_no_node3d.md` (primary), `lazy_jolt_activation.md` (superseded), `csharp_instantiate_bridge.md` (cancelled).
+- `src/core/world/static_shape_cache.gd` — shipped from coder's pre-handover work, NOT YET WIRED into T.2 collision path. Dead code until T.2 implementation uses it.
+- Commits from this session so far: `e450dd1` (state-reversal fix + early T.0/T.1 + plan docs). Work since that commit is uncommitted.
+
+### 14.7 DO NOT
+
+- Don't flip `mid_objects` default back to false. The coupling to statics_no_node3d is now load-bearing — false would hide all statics.
+- Don't remove the `--near-only` fix. Same reason.
+- Don't assume lazy-spawn is the final shape. With T.2 collision wired in, some deferred refs may need bodies immediately for carryable drop / NPC pathfinding. Revisit threshold + gate at T.2 completion.
+- Don't revert `collision_mode=1` on Terrain3D until ball collision is actually debugged. Disabled terrain collision is worse than "might be wrong collision mode."

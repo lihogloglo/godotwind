@@ -348,12 +348,11 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 ## Returns instance ID for later manipulation, or -1 on failure.
 func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
 		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
-	# Dual-purpose SubsystemToggles gate: when `mid_objects` is toggled off,
-	# stop creating MID instances entirely — not just hide them. Caller
-	# (reference_instantiator) treats -1 as "add failed, skip this ref" which
-	# is the correct behavior for the benchmark isolation case.
-	if not _globally_visible:
-		return -1
+	# NOTE: no early-return on `_globally_visible`. Post-statics_no_node3d T.1
+	# the renderer is the universal static-render path (NEAR + flora + rocks +
+	# arch + clutter). Dropping spawns when invisible = losing statics that a
+	# subsequent `set_all_visible(true)` can never recover. Hide-on-add is
+	# handled below at the registry (line ~399) + legacy (line ~495) branches.
 
 	if type_name not in _mesh_types:
 		return -1

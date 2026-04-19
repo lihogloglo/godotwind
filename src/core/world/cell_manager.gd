@@ -822,6 +822,23 @@ var _diag_instantiate_time_total_us: int = 0
 var _diag_instantiate_count: int = 0
 var _diag_last_log_frame: int = 0
 
+## Per-type breakdown (scientific-approach instrumentation 2026-04-19).
+## Answers "inside inst: 60ms, which type_name dominates?" Reset every
+## ~5s after a log dump in `_maybe_log_per_type_breakdown`.
+var _diag_per_type_time_us: Dictionary[String, int] = {}
+var _diag_per_type_count: Dictionary[String, int] = {}
+var _diag_per_type_last_log_msec: int = 0
+
+## Proximity-deferred interactives (containers, doors, activators, carryables).
+## Each entry mirrors `InstantiationEntry` but lives off the main queue until
+## the camera approaches the ref. Re-queued by `tick_proximity_deferred`.
+## OpenMW lazy-spawn pattern: Node3D interactives at 12-20 ms/ref don't
+## instantiate until gameplay can plausibly interact (< 80 m from camera).
+var _proximity_deferred: Array[InstantiationEntry] = []
+## Enforce retry budget so we don't re-queue the entire deferred list every frame.
+var _proximity_last_tick_msec: int = 0
+const PROXIMITY_TICK_INTERVAL_MSEC: int = 250
+
 ## Queue for pending NIF conversions (deferred to avoid main thread stall)
 ## Each entry: {parse_result: NIFParseResult, model_path: String, request_id: int, item_id: String}
 var _pending_conversions: Array[Dictionary] = []
@@ -1147,6 +1164,74 @@ func get_async_cell_node(request_id: int) -> Node3D:
 	return request.cell_node if request else null
 
 
+## Re-queue proximity-deferred refs that are now within spawn distance.
+## Called from `native_streaming_manager._update_loaded_cells` after the
+## load/unload dispatch. Throttled to PROXIMITY_TICK_INTERVAL_MSEC so walking
+## the deferred list is bounded (targets ~4 checks/sec = cheap even at 10k refs).
+## Also drops entries whose request is gone (cell fully unloaded).
+func tick_proximity_deferred(camera_pos: Vector3) -> void:
+	var now_msec := Time.get_ticks_msec()
+	if now_msec - _proximity_last_tick_msec < PROXIMITY_TICK_INTERVAL_MSEC:
+		return
+	_proximity_last_tick_msec = now_msec
+	if _proximity_deferred.is_empty():
+		return
+
+	var threshold_sq: float = ReferenceInstantiator.INTERACTIVE_PROXIMITY_THRESHOLD_M * ReferenceInstantiator.INTERACTIVE_PROXIMITY_THRESHOLD_M
+	var kept: Array[InstantiationEntry] = []
+	var requeued: int = 0
+	var dropped: int = 0
+	for entry: InstantiationEntry in _proximity_deferred:
+		# Drop entries whose request vanished (cell unloaded or finalized).
+		if entry.request_id not in _async_requests:
+			dropped += 1
+			continue
+		var request: AsyncCellRequest = _async_requests[entry.request_id]
+		if not is_instance_valid(request.cell_node):
+			dropped += 1
+			# `pending_instantiations` gets resolved at cell-fail finalize.
+			continue
+		if entry.position.distance_squared_to(camera_pos) <= threshold_sq:
+			_instantiation_queue.push_back(entry)
+			requeued += 1
+		else:
+			kept.append(entry)
+	# Rebuild to kept entries — avoid O(N²) from in-place remove.
+	_proximity_deferred = kept
+	if requeued > 0 or dropped > 0:
+		Log.debug("streaming", "[proximity-tick] requeued=%d dropped=%d still_deferred=%d" % [
+			requeued, dropped, _proximity_deferred.size()
+		])
+
+
+## Periodic dump of per-type instantiate breakdown. Logs every 5s when any
+## instantiate activity happened in the window. Resets counters after dump.
+func _maybe_log_per_type_breakdown() -> void:
+	var now_msec := Time.get_ticks_msec()
+	if _diag_per_type_last_log_msec == 0:
+		_diag_per_type_last_log_msec = now_msec
+		return
+	if now_msec - _diag_per_type_last_log_msec < 5000:
+		return
+	_diag_per_type_last_log_msec = now_msec
+	if _diag_per_type_count.is_empty():
+		return
+	# Sort by total time descending
+	var entries: Array = []
+	for t_name: String in _diag_per_type_time_us:
+		var total_us: int = _diag_per_type_time_us[t_name]
+		var count: int = _diag_per_type_count.get(t_name, 0)
+		var avg_us: float = float(total_us) / float(count) if count > 0 else 0.0
+		entries.append({"type": t_name, "total_ms": total_us / 1000.0, "count": count, "avg_us": avg_us})
+	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["total_ms"] > b["total_ms"])
+	var summary_parts: Array[String] = []
+	for e: Dictionary in entries:
+		summary_parts.append("%s(n=%d tot=%.1fms avg=%dµs)" % [e["type"], e["count"], e["total_ms"], int(e["avg_us"])])
+	Log.info("streaming", "[inst-breakdown 5s] " + "  ".join(summary_parts))
+	_diag_per_type_time_us.clear()
+	_diag_per_type_count.clear()
+
+
 ## Cancel an async request — HARD cancel, destroys everything.
 ##
 ## Used by interior-pocket teardown where there is no unload-container limbo
@@ -1376,6 +1461,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var instantiated := 0
 	var exit_reason := ""
 
+	# Periodic per-type breakdown dump (every 5s). Answers "inside inst:, which
+	# ref type dominates" with real data, not intuition.
+	_maybe_log_per_type_breakdown()
+
 	# Batch children for deferred add_child (reduces scene tree churn)
 	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
 
@@ -1431,6 +1520,23 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_instantiator._clear_transient_profile()
 		_diag_instantiate_time_total_us += inst_elapsed
 		_diag_instantiate_count += 1
+		# Per-type breakdown — direct attribution of inst: cost to specific ref types.
+		var t_name: String = _instantiator.last_type_name
+		if t_name.is_empty():
+			t_name = "unknown"
+		_diag_per_type_time_us[t_name] = _diag_per_type_time_us.get(t_name, 0) + inst_elapsed
+		_diag_per_type_count[t_name] = _diag_per_type_count.get(t_name, 0) + 1
+
+		# Lazy-spawn deferral — interactive ref too far, park it for later.
+		# The reference_instantiator returned null without decrementing our
+		# pending counter (see below). Push to the deferred list; it'll be
+		# re-queued when the camera is within 80 m via tick_proximity_deferred.
+		if obj == null and _instantiator.last_proximity_deferred:
+			_proximity_deferred.append(entry)
+			# Rewind the pending counter — this ref isn't instantiated OR failed,
+			# it's paused. `_is_request_complete` must still see it as in-flight.
+			request.pending_instantiations += 1
+			continue
 
 		if obj:
 			# Override prebaked 0-500m VR (legacy MID-tier artifact) → 0-NEAR_END

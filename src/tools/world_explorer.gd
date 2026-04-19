@@ -676,6 +676,14 @@ func _init_terrain3d() -> void:
 		_log("[color=red]ERROR: Failed to configure Terrain3D[/color]")
 		return
 
+	# Enable terrain collision — DYNAMIC_GAME mode builds a tiled StaticBody3D
+	# around the camera at runtime, freeing tiles as the camera moves. Matches
+	# UE5 Landscape / Unity Terrain "dynamic chunked collision" pattern.
+	# collision_mode: 0=Disabled, 1=Dynamic_Game, 2=Dynamic_Editor, 3=Full_Game, 4=Full_Editor.
+	terrain_3d.set("collision_mode", 1)  # Dynamic_Game
+	terrain_3d.set("collision_shape_size", 16)  # 16m chunks
+	terrain_3d.set("collision_radius", 64)  # 64 chunks radius (~1km dynamic collision ring)
+
 	# Load terrain textures
 	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
 	_log("Loaded %d terrain textures" % textures_loaded)
@@ -1588,6 +1596,15 @@ func _setup_subsystem_toggles() -> void:
 	# parked at boot while open-world streaming refactor is in flight.
 	# Flip back to true individually once each tier re-lands under the
 	# per-cell state machine (phases S.7+).
+	#
+	# `mid_objects: true` post-statics_no_node3d T.1 (2026-04-19): the
+	# static_object_renderer is now the universal statics render path
+	# (NEAR + flora + rocks + arches + clutter), not MID-only. Keeping
+	# this `false` at boot would hide ALL statics — the S.0 parking
+	# intent was to disable the MID DISTANCE BAND (visibility_range), not
+	# the renderer itself. MID-distance behavior is already inert (no
+	# `_apply_mid_visibility_range`, deleted in S.1). The UI toggle still
+	# exists for benchmark A/B isolation; it now toggles all statics.
 	var defaults: Dictionary = {
 		"terrain": true,
 		"ocean": false,
@@ -1595,7 +1612,7 @@ func _setup_subsystem_toggles() -> void:
 		"weather": true,
 		"characters": _show_characters,
 		"impostors": false,
-		"mid_objects": false,
+		"mid_objects": true,
 		"near_objects": true,
 		"hlod": false,
 		"distant_lights": true,
@@ -1611,12 +1628,14 @@ func _setup_subsystem_toggles() -> void:
 
 	# CLI: --near-only is now the default behavior; flag retained as a
 	# no-op for any launch scripts / docs that still pass it explicitly.
+	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
+	# now controls the universal statics renderer, flipping it off would
+	# hide all rocks/arches/clutter.
 	for a in OS.get_cmdline_args():
 		if a == "--near-only":
-			_subsystem_toggles.set_flag("mid_objects", false)
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
-			_log("[color=yellow]--near-only: mid/hlod/impostors OFF (now default — flag is redundant)[/color]")
+			_log("[color=yellow]--near-only: hlod/impostors OFF (now default — flag is redundant)[/color]")
 			break
 
 	# Register console commands
@@ -2462,6 +2481,56 @@ func _input(event: InputEvent) -> void:
 				if not debug_system and crash_reporter:
 					crash_reporter.dump_state_now()
 					_log("[color=cyan]State dumped to crash report log[/color]")
+
+	# Debug: left-click in fly-camera mode spawns a physics ball and throws
+	# it forward. Use for collision verification (walk-into-rock tests during
+	# statics_no_node3d T.2 before player controller collision is ready).
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT and _camera_mode == CameraMode.FLY_CAMERA:
+			_spawn_debug_ball()
+			get_viewport().set_input_as_handled()
+
+
+func _spawn_debug_ball() -> void:
+	if camera == null:
+		return
+	var ball := RigidBody3D.new()
+	ball.name = "DebugBall"
+	ball.mass = 5.0
+	var shape := SphereShape3D.new()
+	shape.radius = 0.25
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	ball.add_child(cs)
+	var mesh := MeshInstance3D.new()
+	var sphere_mesh := SphereMesh.new()
+	sphere_mesh.radius = 0.25
+	sphere_mesh.height = 0.5
+	mesh.mesh = sphere_mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.3, 0.1)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 0.3, 0.1)
+	mat.emission_energy_multiplier = 0.5
+	mesh.material_override = mat
+	ball.add_child(mesh)
+	var spawn_xf := camera.global_transform
+	spawn_xf.origin += -spawn_xf.basis.z * 1.5
+	ball.global_transform = spawn_xf
+	add_child(ball)
+	ball.linear_velocity = -spawn_xf.basis.z * 20.0
+	var timer := Timer.new()
+	timer.wait_time = 15.0
+	timer.one_shot = true
+	timer.timeout.connect(func() -> void:
+		if is_instance_valid(ball):
+			ball.queue_free()
+		timer.queue_free()
+	)
+	add_child(timer)
+	timer.start()
+	_log("[color=cyan]Debug ball spawned[/color]")
 
 
 func _process(delta: float) -> void:

@@ -907,6 +907,13 @@ func _update_loaded_cells() -> void:
 	if _distant_light_manager:
 		_distant_light_manager.scan_cells_around(_camera_cell, impostor_radius_cells)
 
+	# Lazy-spawn re-queue (statics_no_node3d follow-up 2026-04-19): walk the
+	# proximity-deferred list, re-queue any interactive refs that are now
+	# within INTERACTIVE_PROXIMITY_THRESHOLD_M (80 m) of the camera. Throttled
+	# internally to ~4 checks/sec.
+	if _cell_manager:
+		_cell_manager.tick_proximity_deferred(_camera_position)
+
 	# Log breakdown if total exceeds 2ms
 	var total_ulc_ms := float(Time.get_ticks_usec() - ulc_start) / 1000.0
 	if total_ulc_ms > 2.0:
