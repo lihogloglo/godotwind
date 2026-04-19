@@ -426,7 +426,7 @@ From `docs/plans/distant_rendering_2026_04/plan.md §2`:
 
 ### 8.1 Locked 2026-04-19 (user answers via coder review)
 
-1. **Cell activation range per source.** `active_range = 2 cells = 234 m` for the player source. (OpenMW 3×3 / UE5 256 m equivalents.) **LOCKED.**
+1. **Cell activation range per source.** `active_range = 1 cell = 117 m` for the player source → 3×3 grid = 9 cells total. Matches OpenMW `exterior cell load distance=1` default AND the visible NEAR footprint (CELL=117m, NEAR_END≈150m → 3×3 is exactly what's on screen). **LOCKED 2026-04-19 (v4, overrides prior "2 cells" lock).** Prior 2-cell lock was never measured — S.1 ran at radius=3 (legacy default) and regressed FPS 206→50-60 because 49 loaded cells × ~200 refs ≈ 10k Node3Ds/Jolt bodies for content that isn't rendered anyway.
 2. **Hysteresis margin.** `HYSTERESIS_MARGIN = 15 m` past cell boundary. **LOCKED.** Plus player-cell pin per §3.1.
 3. **Preload prediction time.** Velocity-scaled: `clamp(5.0 / max(speed, 1.0), 0.3, 1.5)` seconds. **LOCKED.** Replaces fixed 0.5 s.
 4. **Preload cache eviction.** `expiry_delay = 60 s`, `max_cache_size = 128 cells`. **LOCKED.** (128 not 64 — backtrack support.) Tune against §9 numbers.
@@ -458,6 +458,10 @@ Record before/after for each phase. Canonical metrics:
 | S.1 (broken draft) | FPS mid-load | — | 35 | VR override accidentally deleted → 500m prebaked VR leaked |
 | S.1 (VR fix, commit `6a63eac`) | FPS mid-load | 35 | 89-92 | `_apply_near_visibility_range` restored |
 | S.1 (steady state, user walk) | FPS | — | **50-60** | **Regression vs S.0's 206** — see §12 Known Issues |
+| S.1b (v4 `load_radius_cells` 3→1) | FPS steady state | 50-60 | TBD | Seyda Neen dock, 9-cell footprint |
+| S.1b | `loaded` cell count | 49 (radius=3) | TBD | expect 9 steady, ≤12 during traversal |
+| S.1b | Node3D count | ~10k | TBD | expect ~1.5-2k |
+| S.1b | Draw calls | TBD | TBD | |
 | S.2 | Source-query cost per frame | N/A | TBD | |
 | S.3 | Tier state machine overhead | N/A | TBD | |
 | S.4 | P95 cell attach time, preload-warm | TBD | TBD | |
@@ -484,6 +488,7 @@ Record before/after for each phase. Canonical metrics:
 
 ## 11. Patch Log
 
+- **v4 (2026-04-19, post-user-pilot 2):** user observation — 49 cells loaded but only 9 visible on screen. Root cause of the S.0 → S.1 FPS regression NOT the per-object gate deletion; it was `load_radius_cells = 3` (= 7×7 = 49 cells) inherited default that S.0 masked via MID RS instances. §8.1 item #1 relocked 2 → 1 cells (3×3 grid = 9 cells, matches OpenMW default + matches visible NEAR footprint). §12.3 rewritten: Option A / Option C abandoned; `load_radius_cells` default change shipped instead. §13 pickup #1 replaced with DONE entry pointing to this patch.
 - **v3 (2026-04-19, post-S.1 launch):** S.0 + S.1 marked DONE with commit refs. §9 populated with real numbers. Added §12 Known Issues (corrupt `.res`, second crash site, FPS regression root cause). Added §13 Next-Session Pickup. S.1 acceptance confirmed by user interactive walk: "NEAR seems to be working correctly now. Nothing seems rendering past the NEAR." But FPS regressed 206 → 50-60 due to architectural hole: 49 cells × ~150-250 refs each = ~10k Node3Ds with Jolt bodies, all ticking every frame, for content that VR-culls past 155m. Per-ref distance gate (Option A) proposed but not implemented — user paused session.
 - **v2 (2026-04-19, post-coder-review):** added §0 user-locked acceptance criterion + parent PHASE 0 prerequisite. Added §3.1 player-cell pin (OpenMW invariant). Added §4.5 Salvage Strategy with KEEP/DELETE/REWRITE tables. S.0 acceptance now lists explicit launch-and-walk gate. S.1 deletes promotion code (not const-gate per CLAUDE.md Simplicity), adds AABB-upgrade prebake fix. S.3 §3.3 honest about `object_paging.gd` ≠ UE5 HLOD layers (it's UE5 World Composition runtime merger). S.4 thread-safety claim corrected — `Mutex` required, "lockless dictionary read" claim was wrong; added `model_loader` race prerequisite from commit `5c1bc88`. S.4 prediction time velocity-scaled. S.6 acceptance binds user's launch-and-walk gate as the sign-off contract. §8.1 questions locked. §8.2 holds 3 still-open items for later phases.
 - **v1 (2026-04-19):** initial DRAFT. Superseded the prior ring-based sketch.
@@ -523,20 +528,20 @@ Next-session action: rebake + hash-validate. If it corrupts again, investigate t
 
 ### 12.3 FPS regression — S.0's 206 FPS → S.1's 50-60 FPS
 
-**Root cause (identified, not fixed):** S.1's architectural rule "every ref in a resident cell becomes a Node3D" created a hidden cost. Per-frame math:
-- Cell = 117m × 117m (`CELL_SIZE_GODOT`)
-- `load_radius_cells = 3` → `_get_cells_in_radius` returns 49 cells (7×7 grid)
+**Root cause (identified + FIX SHIPPED v4 2026-04-19):** S.1's architectural rule "every ref in a resident cell becomes a Node3D" × wrong `load_radius_cells` = 5.4× waste. Math:
+- Cell = 117m × 117m (`CELL_SIZE_GODOT`), NEAR_END ≈ 150 m
+- Visible NEAR footprint from camera center = 3×3 grid = 9 cells (any cell whose edge falls within NEAR_END)
+- Legacy `load_radius_cells = 3` → `_get_cells_in_radius` returns 49 cells (7×7 grid) — **40 of 49 cells load content that is never rendered** (VR-culled past NEAR_END)
 - Each cell contains 150-250 refs after mid-range Morrowind content (Seyda Neen region)
-- ~10,000 Node3Ds in steady state, **all with Jolt StaticBody3D + CollisionShape3D children** (collision `disabled = true` for refs beyond NEAR, but the BODIES are still registered in Jolt broadphase)
-- Jolt ticks ~10k bodies per physics frame = 600k body-ops/sec at 60Hz
+- ~10,000 Node3Ds in steady state, all with Jolt StaticBody3D + CollisionShape3D. Collision `disabled = true` past NEAR, but bodies stay registered in Jolt broadphase → 600k body-ops/sec at 60Hz for zero visible content.
 
-S.0 was 206 FPS because MID-tier refs (80% of cell content) were **RS instances** (single RID, zero physics, zero scene-tree processing). Only NEAR Node3Ds had bodies. Total bodies: ~5k not ~10k. **S.0 had fewer bodies than S.1 currently does.**
+S.0 was 206 FPS because MID-tier refs (80% of cell content) were **RS instances** (single RID, zero physics). Only the visible 9-cell NEAR footprint had bodies. S.1 converted all 49 cells' content to Node3Ds. **S.1 had ~2× the bodies of S.0 for identical on-screen content.**
 
-**Fix (proposed, not shipped) — Option A:** per-ref distance gate at instantiation time. `if ref.position.distance_to(camera) > NEAR_END + hysteresis: skip spawn`. Deferred refs stay in the instantiation queue; when camera approaches, they spawn. Pure distance check, no tier classification (NOT a revert to the S.0 4-way branch). Forward-compatible with S.7: the gate extends to "close enough for Node3D, else spawn RS instance" once MID returns.
+**Fix (shipped v4):** `load_radius_cells: int = 3 → 1`. Load radius now matches visible NEAR footprint. 49 → 9 cells, ~10k → ~1800 Node3Ds. User observation 2026-04-19 ("49 cells loaded, only 9 visible") was decisive — radius was mis-tuned since before the refactor began; not an S.1 regression, an inherited default that S.0 masked via MID RS instances.
 
-**Why Option A works without compromising radius:** user vetoed reducing `load_radius_cells` 3 → 2. Option A keeps radius at 3 (cells still LOAD out to 351m) but stops creating physics-body Node3Ds for refs the player can't interact with. Matches the plan's §3.1 intent that "attach is incremental across frames" — Option A makes attach distance-aware rather than all-or-nothing.
-
-**Alternative — Option C:** dynamic Jolt body unregister (keep every Node3D, detach StaticBody3D from Jolt when >NEAR_END). More complex, introduces physics state lifecycle bugs.
+**Not-chosen alternatives** (documented for future reference; both were preserved in plan drafts before v4):
+- Option A: per-ref distance gate in `process_async_instantiation`. Unnecessary at radius=1. Re-emerges as a tier-classification problem in S.7+ (per-cell MID vs NEAR tier) but is not a distance gate at that point.
+- Option C: dynamic Jolt body unregister. Over-engineered. Violates CLAUDE.md Simplicity rule.
 
 ### 12.4 `_apply_near_visibility_range` is PERMANENT, not time-boxed
 
@@ -548,18 +553,18 @@ Updated in v2 patch: the NEAR Node3D VR override (`_apply_near_visibility_range`
 
 **Priorities in order:**
 
-1. **Implement Option A (per-ref distance gate).** Expected to recover most of the S.0 FPS. In `cell_manager.process_async_instantiation` add a distance check before the Node3D spawn path. If ref is beyond `NEAR_END + hysteresis`, skip — leave entry in the instantiation queue for a future frame when camera is closer. Re-process the queue on camera cell change. Acceptance: Seyda Neen dock FPS back to >150, Node3D count drops from ~10k to ~3-5k.
+1. **DONE (v4 2026-04-19):** `load_radius_cells` 3 → 1 in `native_streaming_manager.gd:81`. Load footprint now matches visible NEAR (3×3 = 9 cells). Measurements in §9. Supersedes the Option A / Option C proposals from v3.
 
 2. **Rebake `f_terrain_rock_bc_11_nif.res`.** Delete from cache, trigger re-prebake. If it corrupts again, investigate `nif_converter.gd` for the specific NIF. User said rebake is a few minutes. Un-quarantine the `.crashtest` file once rebake succeeds.
 
-3. **Extend breadcrumbs to find second crash site.** Add write calls in:
+3. **Extend breadcrumbs to find second crash site** (§12.2). Second SIGSEGV at sec=~183, signature post-`_instantiate_from_scene`. Add write calls in:
    - `reference_instantiator._instantiate_model_object` — before/after `_enable_collision_shapes_in_tree`, `_apply_transform`, carryable conversion
    - `cell_manager.process_async_instantiation` — before batch `add_child`
    - `native_streaming_manager._process_budgeted_unloading` — already has `unload_child` but consider per-`queue_free` granularity
 
 4. **Once both crashes are fixed**, remove `CrashBreadcrumb` calls (keep the utility file — cheap insurance for future diagnostics). Commit message should explicitly remove the overhead.
 
-5. **Then resume S.2 / S.3** (StreamingSource + per-cell FSM). The FSM is the proper long-term home for tier-based distance gating; Option A is a compatible scaffold.
+5. **Then resume S.2 / S.3** (StreamingSource + per-cell FSM). With radius=1 the FSM's cell-count pressure is much lower, makes the refactor cheaper to verify.
 
 **Code state pointers for next agent:**
 - `src/core/logging/crash_breadcrumb.gd` — the diagnostic utility, 35 lines, static functions

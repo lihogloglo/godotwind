@@ -77,8 +77,11 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 
 #region Configuration
 
-## Radius (in cells) to keep loaded around camera
-@export var load_radius_cells: int = 3
+## Radius (in cells) to keep loaded around camera.
+## 1 = 3×3 grid = 9 cells (OpenMW `exterior cell load distance=1` default,
+## matches NEAR-tier visible footprint of ~150 m at CELL=117 m).
+## See docs/plans/distant_rendering_2026_04/near_tier_refactor.md §8.1 #1.
+@export var load_radius_cells: int = 1
 
 ## Maximum distance at which to load cells (in meters)
 ## Cells beyond this are never loaded, even if within radius
@@ -104,7 +107,7 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 @export var impostor_radius_cells: int = 60
 
 ## View distance in cells (alias for load_radius_cells, backwards compatibility)
-@export var view_distance_cells: int = 3:
+@export var view_distance_cells: int = 1:
 	set(value):
 		view_distance_cells = value
 		load_radius_cells = value
@@ -1932,7 +1935,7 @@ func _debug(msg: String) -> void:
 
 ## Emit startup progress signal for parent UI to handle
 func _emit_startup_progress() -> void:
-	var target_cells := load_radius_cells * load_radius_cells  # Approximate
+	var target_cells := (2 * load_radius_cells + 1) * (2 * load_radius_cells + 1)  # (2r+1)² grid
 	var loaded := _loaded_cells.size()
 	var loading := _loading_cells.size()
 	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
@@ -2015,9 +2018,9 @@ func is_in_startup_phase() -> bool:
 
 ## Size of the inner ring in "cell radius". Inner ring = (2r+1)² cells
 ## centred on the camera cell. INNER_RING_RADIUS=1 means the 3×3 block
-## right under the player. Tighter than load_radius_cells (3) on purpose —
-## the loading gate wants "playable at arm's reach", not "whole visible
-## range ready".
+## right under the player. Matches the post-v4 `load_radius_cells = 1`
+## default (the loading gate and the streaming radius are now identical —
+## "playable at arm's reach" IS the whole visible range at NEAR-only tier).
 const INNER_RING_RADIUS: int = 1
 
 ## Soft cap on the instantiation queue for the "ready" gate. The queue

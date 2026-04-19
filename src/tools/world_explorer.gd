@@ -162,7 +162,7 @@ var _data_path: String = ""
 var _initialized: bool = false
 var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
-var _current_view_distance: int = 5  # Must be at least 5 cells (585m) to cover MID tier (500m)
+var _current_view_distance: int = 1  # 3×3 grid = 9 cells, matches NEAR-tier visible footprint. See near_tier_refactor.md §8.1 #1 (v4).
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
 var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 
