@@ -280,6 +280,9 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float) -> int:
 func force_cull_next_tick() -> void:
 	_cull_dirty = true
 
+func is_cull_dirty() -> bool:
+	return _cull_dirty
+
 #endregion
 
 

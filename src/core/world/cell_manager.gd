@@ -1436,7 +1436,9 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 						_finalize_request(request)
 					continue
 				else:
-					# MID failed AND too far for NEAR — skip entirely (Node3D at >150m is invisible)
+					# MID RS failed (mid_objects off) — defer so object appears as Node3D
+					# when camera enters NEAR_END. No RS placeholder; demotion just frees Node3D.
+					_defer_for_near(ref, model_path, item_id, request, obj_position)
 					instantiated += 1
 					if _is_request_complete(request):
 						_finalize_request(request)
@@ -1469,10 +1471,9 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_diag_instantiate_count += 1
 
 		if obj:
-			# Post-B-wide refactor: visibility_range (0-500m, FADE_SELF) + the
-			# LOD chain are baked into every prototype by nif_converter. The
-			# visibility_prebaked meta is kept for backwards compatibility with
-			# the fallback safety path in native_streaming_manager.
+			# Post-B-wide refactor: prebaked VR is 0-500m (MID range). Override
+			# to 0-NEAR_END so NEAR Node3Ds cull at 150m, not 500m.
+			_apply_near_visibility_range(obj)
 			obj.set_meta("visibility_prebaked", true)
 
 			# Double-check parent is still valid before queuing (defensive)
@@ -1988,6 +1989,10 @@ func _defer_for_near(ref: CellReference, model_path: String, item_id: String,
 func _create_near_only_rs_instance(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> void:
 	if not _static_renderer:
 		return
+	# mid_objects off → add_instance will reject anyway; skip model loading to avoid
+	# triggering the packed_scene.instantiate() sig11 on stale cached .res files.
+	if not _static_renderer.is_globally_visible():
+		return
 
 	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
 	if not model_prototype:
@@ -2220,12 +2225,13 @@ func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D
 	# Set transform directly (already in Godot coords from when MID instance was created)
 	instance.transform = xform
 
-	# Post-B-wide refactor: visibility_range + LOD chain are prebaked.
+	# Override prebaked 0-500m VR → NEAR range so promoted Node3D culls at 150m.
+	_apply_near_visibility_range(instance)
 	instance.set_meta("visibility_prebaked", true)
 	instance.set_meta("promoted_from_mid", true)
 
 	# MID RS instance is hidden on promotion by set_instance_promoted().
-	# The NEAR Node3D replaces it for 0-500m via the embedded LOD chain.
+	# The NEAR Node3D replaces it for 0-NEAR_END via the overridden VR.
 
 	_stats["objects_instantiated"] += 1
 	_stats["mid_promotions"] = _stats.get("mid_promotions", 0) + 1
@@ -2335,3 +2341,16 @@ func get_stats() -> Dictionary:
 	result["deferred_near_count"] = get_deferred_near_count()
 
 	return result
+
+
+## Override VR on every GeometryInstance3D descendant to the NEAR range (0-155m).
+## Prebaked prototypes carry 0-500m (MID range). NEAR Node3Ds must cull at 150m
+## so the visible circle follows the camera instead of bleeding to impostor range.
+func _apply_near_visibility_range(node: Node3D) -> void:
+	for geo: Node in node.find_children("*", "GeometryInstance3D", true, false):
+		var g := geo as GeometryInstance3D
+		g.visibility_range_begin = 0.0
+		g.visibility_range_end = DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1
+		g.visibility_range_begin_margin = 0.0
+		g.visibility_range_end_margin = DU.FADE_MARGIN_NEAR_LOD1
+		g.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF

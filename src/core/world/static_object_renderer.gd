@@ -305,6 +305,10 @@ func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
 func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float) -> int:
 	if _prototype_registry == null:
 		return 0
+	# When invisible: only run if dirty (flushes hide_instance zero-scale transforms to GPU).
+	# Skip movement-driven re-culls entirely — no per-frame cost while MID is off.
+	if not _globally_visible and not _prototype_registry.is_cull_dirty():
+		return 0
 	return _prototype_registry.tick_cull_if_needed(cam_pos, max_dist_sq)
 
 
@@ -878,6 +882,10 @@ func get_instance_data(id: int) -> InstanceData:
 ## Check if a type is registered
 func has_type(type_name: String) -> bool:
 	return type_name in _mesh_types
+
+## Whether mid_objects is toggled on. Used by callers to skip work that would be discarded.
+func is_globally_visible() -> bool:
+	return _globally_visible
 
 
 ## Check if a type has a prebaked LOD chain

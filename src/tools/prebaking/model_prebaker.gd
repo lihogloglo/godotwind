@@ -132,7 +132,10 @@ func bake_model(model_path: String) -> Dictionary:
 	converter.load_animations = is_character_model
 	converter.load_collision = not is_character_model
 	converter.generate_lods = false  # Deferred — applied after merge below
-	converter.generate_occluders = not is_character_model
+	# Occluders disabled 2026-04-19: suspected crash source on load (sig11 in
+	# packed_scene.instantiate). Godot occlusion culling is also flagged buggy
+	# outdoors in CLAUDE.md. Re-evaluate if/when interior-only occlusion lands.
+	converter.generate_occluders = false
 
 	var model := converter.convert_buffer(nif_data, model_path)
 	if not model:

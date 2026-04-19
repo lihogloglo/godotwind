@@ -336,6 +336,12 @@ func process_completions() -> int:
 	_completed_queue.clear()
 	_completed_mutex.unlock()
 
+	# When invisible, drain and discard — avoids main-thread generate_lods() stall
+	# from in-flight BG merges that completed while HLOD was toggled off.
+	# _pending_merges is already cleaned by _on_task_completed callback; safe to drop.
+	if not _globally_visible:
+		return 0
+
 	var count := 0
 	for entry: Dictionary in queue:
 		var key: Vector3i = entry["key"]

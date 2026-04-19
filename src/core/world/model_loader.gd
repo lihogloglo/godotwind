@@ -79,8 +79,9 @@ var _pending_async_loads: Dictionary = {}
 ## Each entry: {disk_path: String, cache_key: String, callback: Callable, model_path: String, item_id: String}
 var _deferred_async_queue: Array[Dictionary] = []
 
-## Deferred instantiate queue. Async pipeline fills this; drain uses sync
-## re-load (CACHE_MODE_IGNORE) to bypass the c2 sub-resource race.
+## Deferred instantiate queue. Async pipeline fills this; drain does a sync
+## CACHE_MODE_REUSE reload to complete any deferred c2 sub-resource initialization
+## before calling instantiate() — avoids SIGSEGV from partially-settled async loads.
 ## Each entry: {disk_path: String, packed_scene: PackedScene, cache_key: String, callbacks: Array[Dictionary]}
 var _pending_instantiate_queue: Array[Dictionary] = []
 
@@ -540,9 +541,18 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		var entry: Dictionary = _pending_instantiate_queue[i]
 		i += 1
 
-		var packed_scene: PackedScene = entry.packed_scene
 		var cache_key: String = entry.cache_key
 		var callbacks: Array = entry.callbacks
+
+		# Sync re-load via CACHE_MODE_REUSE to flush any pending c2 sub-resource
+		# initialization left over from the background thread (see field comment).
+		# ResourceLoader.load() on the main thread completes deferred sub-resource
+		# finalization before returning — the async packed_scene may still have
+		# partially-initialized sub-resources that cause SIGSEGV on instantiate().
+		var packed_scene := ResourceLoader.load(entry.disk_path, "PackedScene",
+				ResourceLoader.CACHE_MODE_REUSE) as PackedScene
+		if packed_scene == null:
+			packed_scene = entry.packed_scene  # fallback: use async result
 
 		# Validate before caching — if can_instantiate() fails, cache null
 		if packed_scene == null or not packed_scene.can_instantiate():
@@ -563,6 +573,7 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		_evict_if_over_budget()
 
 		# Each callback gets its own fresh instance (distinct Node3D, collision disabled)
+		Log.debug("models", "instantiate %s" % entry.disk_path)
 		for cb_info: Dictionary in callbacks:
 			var cb: Callable = cb_info.callback
 			if cb.is_valid():

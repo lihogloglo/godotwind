@@ -681,9 +681,14 @@ func _process(delta: float) -> void:
 		prof.end_section("unload")
 	phase_times[0] = float(Time.get_ticks_usec() - phase_start)
 
-	# Process async loading (three-phase approach)
+	# Process async loading.
+	# Architecture: Phase 1 (completions) always runs — finalizes in-flight BG
+	# requests and keeps _async_requests from stalling. Phases 2-4 are gated on
+	# _near_tier_visible as a single block: no scattered per-function checks.
+	# When near is off ALL per-frame near work stops: no instantiation, no
+	# promotions, no collision re-enable, no new load submissions.
 	if async_loading_enabled:
-		# Phase 1: Check for completed async requests
+		# Phase 1: completions — always runs (even when near is off)
 		phase_start = Time.get_ticks_usec()
 		if prof:
 			prof.begin_section("async_complete")
@@ -692,63 +697,70 @@ func _process(delta: float) -> void:
 			prof.end_section("async_complete")
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
-		# Phase 2: Process async instantiation (progressive object creation)
-		# During startup:     aggressive 25ms budget (loading screen visible; user
-		#                     already accepts low FPS here, so burst harder to
-		#                     shrink the "14 FPS for 1-2 min" cold-start window)
-		# Post-startup:       fixed 4ms — prevents the 48%-of-frame death spiral
-		#                     (render ~12ms + 4ms streaming = 16ms → 60+ FPS while queue drains)
-		# _get_dynamic_budget (48% of delta) is intentionally NOT used post-startup; at 50 FPS
-		# it yields 9.6ms/frame which keeps total > 16.67ms and FPS stuck at 50 indefinitely.
-		phase_start = Time.get_ticks_usec()
-		var instantiation_budget_ms := 25.0 if _startup_phase else SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
-		var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
-		var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
-		phase_times[2] = float(Time.get_ticks_usec() - phase_start)
-		if instantiated > 0 and debug_enabled:
-			_debug("Instantiated %d objects this frame" % instantiated)
-
-		# Post-startup queue drain telemetry — log once when queue empties after loading screen
-		if not _startup_phase and not _queue_drain_logged and _post_startup_start_ms > 0 and _cell_manager:
-			var q := _cell_manager.get_instantiation_queue_size()
-			if q == 0:
-				var elapsed_ms := Time.get_ticks_msec() - _post_startup_start_ms
-				Log.info("streaming", "Post-startup queue drained in %.1fs (%d frames since loading screen)" % [
-					elapsed_ms / 1000.0, Engine.get_frames_drawn()])
-				_queue_drain_logged = true
-
-		# Skip remaining phases if budget already exceeded
-		var total_elapsed_usec := Time.get_ticks_usec() - frame_start_usec
-		if total_elapsed_usec < budget_usec:
-			# Phase 3: MID→NEAR promotion for nearby objects (Phase 5b)
+		if _near_tier_visible:
+			# Phase 2: instantiation
+			# During startup / burst drain: 25ms budget.
+			# Post-startup normal: 4ms — prevents 48%-of-frame death spiral.
 			phase_start = Time.get_ticks_usec()
-			_process_mid_to_near_promotions()
-			phase_times[3] = float(Time.get_ticks_usec() - phase_start)
+			var instantiation_budget_ms: float
+			if _startup_phase or _near_burst_drain:
+				instantiation_budget_ms = 25.0
+			else:
+				instantiation_budget_ms = SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
+			var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
+			var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
+			phase_times[2] = float(Time.get_ticks_usec() - phase_start)
+			if instantiated > 0 and debug_enabled:
+				_debug("Instantiated %d objects this frame" % instantiated)
 
-		total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
-		if total_elapsed_usec < budget_usec:
-			# Phase 3a: Re-enable collision on promoted NEAR objects entering visibility
-			phase_start = Time.get_ticks_usec()
-			_process_promoted_collision_enable()
-			phase_times[4] = float(Time.get_ticks_usec() - phase_start)
+			# Burst drain: clear when queue is empty
+			if _near_burst_drain and _cell_manager:
+				if _cell_manager.get_instantiation_queue_size() == 0 and _async_requests.is_empty():
+					_near_burst_drain = false
+					Log.info("streaming", "NEAR burst drain complete")
 
-		total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
-		if total_elapsed_usec < budget_usec:
-			# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
-			phase_start = Time.get_ticks_usec()
-			_process_deferred_near_instantiation()
-			phase_times[5] = float(Time.get_ticks_usec() - phase_start)
+			# Post-startup queue drain telemetry
+			if not _startup_phase and not _queue_drain_logged and _post_startup_start_ms > 0 and _cell_manager:
+				var q := _cell_manager.get_instantiation_queue_size()
+				if q == 0:
+					var elapsed_ms := Time.get_ticks_msec() - _post_startup_start_ms
+					Log.info("streaming", "Post-startup queue drained in %.1fs (%d frames since loading screen)" % [
+						elapsed_ms / 1000.0, Engine.get_frames_drawn()])
+					_queue_drain_logged = true
 
-		total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
-		if total_elapsed_usec < budget_usec:
-			# Phase 4: Queue new cell requests (non-blocking)
-			phase_start = Time.get_ticks_usec()
-			_process_pending_loads_async()
-			phase_times[6] = float(Time.get_ticks_usec() - phase_start)
+			# Skip remaining phases if budget already exceeded
+			var total_elapsed_usec := Time.get_ticks_usec() - frame_start_usec
+			if total_elapsed_usec < budget_usec:
+				# Phase 3: MID→NEAR promotion for nearby objects
+				phase_start = Time.get_ticks_usec()
+				_process_mid_to_near_promotions()
+				phase_times[3] = float(Time.get_ticks_usec() - phase_start)
+
+			total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
+			if total_elapsed_usec < budget_usec:
+				# Phase 3a: Re-enable collision on promoted NEAR objects
+				phase_start = Time.get_ticks_usec()
+				_process_promoted_collision_enable()
+				phase_times[4] = float(Time.get_ticks_usec() - phase_start)
+
+			total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
+			if total_elapsed_usec < budget_usec:
+				# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
+				phase_start = Time.get_ticks_usec()
+				_process_deferred_near_instantiation()
+				phase_times[5] = float(Time.get_ticks_usec() - phase_start)
+
+			total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
+			if total_elapsed_usec < budget_usec:
+				# Phase 4: Queue new cell requests (non-blocking)
+				phase_start = Time.get_ticks_usec()
+				_process_pending_loads_async()
+				phase_times[6] = float(Time.get_ticks_usec() - phase_start)
 
 	else:
 		# Fallback: synchronous loading (blocks frame)
-		_process_pending_loads_sync(delta)
+		if _near_tier_visible:
+			_process_pending_loads_sync(delta)
 
 	# Phase 3 world-scoped MultiMesh cull tick. tick_prototype_cull no-ops
 	# internally when the registry hasn't been instantiated yet (cold
@@ -1821,6 +1833,9 @@ func set_impostors_visible(visible: bool) -> void:
 ## Toggle NEAR-tier Node3D cells (loaded cell containers).
 ## Remembers state so cells loaded after the toggle respect it.
 var _near_tier_visible: bool = true
+## Set when near tier is thawed after being off — forces 25ms instantiation budget
+## until the queue drains, without touching _startup_phase (which has broader effects).
+var _near_burst_drain: bool = false
 
 func set_near_tier_visible(visible: bool) -> void:
 	var was_visible := _near_tier_visible
@@ -1829,11 +1844,10 @@ func set_near_tier_visible(visible: bool) -> void:
 		var cell_node: Node3D = _loaded_cells[grid]
 		if cell_node:
 			cell_node.visible = visible
-	# When flipping from OFF to ON, force one catch-up pass so cells around
-	# the current camera position re-queue for loading immediately — don't
-	# wait for the next cell change. Mirrors the "freeze while off, thaw
-	# cleanly on" semantics of the `_update_loaded_cells` gate.
+	# On thaw: arm burst drain + force catch-up cell scan.
 	if visible and not was_visible:
+		_near_burst_drain = true
+		Log.info("streaming", "NEAR thaw — burst drain armed")
 		_update_loaded_cells()
 
 ## Toggle HLOD merged geometry (ObjectPaging)
