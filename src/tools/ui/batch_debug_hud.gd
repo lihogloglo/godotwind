@@ -217,8 +217,8 @@ func _update_stats() -> void:
 		return
 
 	var stats: Dictionary = static_renderer.get_stats()
-	var promoted: Dictionary = _streaming_manager.get("_promoted_objects")
-	var promoted_count: int = promoted.size() if promoted else 0
+	# S.1: promoted tracking deleted — per-cell tier FSM replaces it in S.7+.
+	var promoted_count: int = 0
 
 	# Build BBCode text
 	var text := "[b][color=#7799ff]MID-Tier Static Renderer[/color][/b]\n"

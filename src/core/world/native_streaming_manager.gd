@@ -309,8 +309,6 @@ func fast_cleanup() -> void:
 	if _hlod_merger:
 		_hlod_merger.cleanup()
 		_hlod_merger = null
-	_promoted_objects.clear()
-	_promoted_by_cell.clear()
 
 
 func _exit_tree() -> void:
@@ -325,13 +323,6 @@ func _exit_tree() -> void:
 	# StaticObjectRenderer holds thousands of RenderingServer RIDs that must be freed
 	if _static_renderer:
 		_static_renderer.clear()
-	_promoted_objects.clear()
-	_promoted_by_cell.clear()
-
-	# Clear deferred NEAR refs (data only, no RIDs)
-	if _cell_manager:
-		for grid: Vector2i in _loaded_cells:
-			_cell_manager.clear_deferred_for_cell(grid)
 
 	# Clear tracking dictionaries — let Godot's tree cleanup handle the Node3D children
 	# Manually freeing thousands of nodes in _exit_tree causes a long freeze
@@ -729,28 +720,11 @@ func _process(delta: float) -> void:
 					_queue_drain_logged = true
 
 			# Skip remaining phases if budget already exceeded
+			# S.1: Phase 3 (MID→NEAR promote) / 3a (collision enable) / 3b
+			# (deferred NEAR instantiate) deleted — per-cell tier FSM in S.7+
+			# replaces the per-actor promotion dance. phase_times[3..5] stay
+			# zero; the HUD still reads the slots but values will be 0.
 			var total_elapsed_usec := Time.get_ticks_usec() - frame_start_usec
-			if total_elapsed_usec < budget_usec:
-				# Phase 3: MID→NEAR promotion for nearby objects
-				phase_start = Time.get_ticks_usec()
-				_process_mid_to_near_promotions()
-				phase_times[3] = float(Time.get_ticks_usec() - phase_start)
-
-			total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
-			if total_elapsed_usec < budget_usec:
-				# Phase 3a: Re-enable collision on promoted NEAR objects
-				phase_start = Time.get_ticks_usec()
-				_process_promoted_collision_enable()
-				phase_times[4] = float(Time.get_ticks_usec() - phase_start)
-
-			total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
-			if total_elapsed_usec < budget_usec:
-				# Phase 3b: Deferred NEAR instantiation (objects that skipped MID tier)
-				phase_start = Time.get_ticks_usec()
-				_process_deferred_near_instantiation()
-				phase_times[5] = float(Time.get_ticks_usec() - phase_start)
-
-			total_elapsed_usec = Time.get_ticks_usec() - frame_start_usec
 			if total_elapsed_usec < budget_usec:
 				# Phase 4: Queue new cell requests (non-blocking)
 				phase_start = Time.get_ticks_usec()
@@ -1072,15 +1046,9 @@ func _unload_cell(grid: Vector2i) -> void:
 	_loaded_cells.erase(grid)
 	_stats["loaded_cells"] = _loaded_cells.size()
 
-	# Clean up promoted object tracking for this cell using spatial index (O(1) lookup)
-	var promoted_cleanup := 0
-	if grid in _promoted_by_cell:
-		var cell_promoted: Array = _promoted_by_cell[grid]
-		for rs_id: int in cell_promoted:
-			_static_renderer.set_instance_promoted(rs_id, false)
-			_promoted_objects.erase(rs_id)
-			promoted_cleanup += 1
-		_promoted_by_cell.erase(grid)
+	# S.1: promoted-object tracking deleted. MID re-enable in S.7 will hide
+	# MID RS instances via per-cell tier transition (request_cell_tier), not
+	# per-actor promote clear.
 
 	# Queue MID-tier RS instances for BUDGETED hiding across frames.
 	# Previously this called hide_cell_instances() synchronously (1000+ RS calls, 10-32ms).
@@ -1089,11 +1057,6 @@ func _unload_cell(grid: Vector2i) -> void:
 		_pending_rs_hide_cells.append(grid)
 		_pending_rs_hide_set[grid] = true
 		_pending_rs_cleanup_cells.append(grid)
-		if promoted_cleanup > 0:
-			_debug("Queued cell %s for budgeted RS hide (+ %d promoted cleanup)" % [grid, promoted_cleanup])
-
-	# Clean up deferred NEAR refs for this cell
-	_cell_manager.clear_deferred_for_cell(grid)
 
 	# I.6 — evacuate any persistent nodes (held items, etc.) from this
 	# cell BEFORE moving it to the unload container. Otherwise the
@@ -1224,14 +1187,6 @@ func _process_budgeted_unloading() -> void:
 			_debug("Budgeted RS cleanup: freed %d instances, %d cells remaining" % [rs_freed, _pending_rs_cleanup_cells.size()])
 
 
-## Track promoted objects: object_id (batch pool) or rs_id (legacy) -> NEAR Node3D
-## Used for demotion when camera moves away
-var _promoted_objects: Dictionary = {}  # {id: int -> near_node: Node3D}
-
-## Spatial index for promoted objects: cell_grid -> Array[int] of promoted rs_ids
-## Enables O(1) per-cell lookup instead of scanning all promoted objects
-var _promoted_by_cell: Dictionary = {}  # {Vector2i -> Array[int]}
-
 ## Cells with RS instances that need budgeted visibility hiding
 ## Hides ~200 RS instances per frame to avoid 10-32ms synchronous spikes
 var _pending_rs_hide_cells: Array[Vector2i] = []
@@ -1241,238 +1196,18 @@ var _pending_rs_hide_set: Dictionary[Vector2i, bool] = {}
 ## Cells with RS instances that need deferred free_rid() cleanup (after hiding)
 var _pending_rs_cleanup_cells: Array[Vector2i] = []
 
-
-## Promote MID-tier objects to full NEAR-tier Node3D when camera approaches.
-## On promotion, MID RS instances are HIDDEN (the NEAR Node3D covers 0-500m via
-## its own LOD children from configure_for_prebake). This prevents double-rendering.
-## On demotion, RS instances are shown again.
-## Budget-controlled: max 3ms every 2 frames.
-## Scans a 7×7 cell grid around camera (covers 351m > 250m promotion distance).
-func _process_mid_to_near_promotions() -> void:
-	if not _cell_manager:
-		return
-	if not _static_renderer:
-		return
-
-	# Absorb immediate promotions from cell_manager (created in same frame as RS instances).
-	# These are mid-worthy objects that got BOTH RS + Node3D because camera was within NEAR range.
-	# Must run every frame to avoid stale entries.
-	var imm_promos := _cell_manager.get_and_clear_immediate_promotions()
-	for entry: Dictionary in imm_promos:
-		var rs_id: int = entry["id"]
-		var near_node: Node3D = entry["node"]
-		if is_instance_valid(near_node) and rs_id not in _promoted_objects:
-			_promoted_objects[rs_id] = near_node
-			# Maintain spatial index
-			var _promo_data: Variant = _static_renderer.get_instance_data(rs_id)
-			if _promo_data:
-				var _promo_cell: Vector2i = _promo_data.cell_grid
-				if _promo_cell not in _promoted_by_cell:
-					_promoted_by_cell[_promo_cell] = []
-				(_promoted_by_cell[_promo_cell] as Array).append(rs_id)
-			_stats["mid_to_near_promotions"] += 1
-
-	# Run every N frames (configurable)
-	if Engine.get_frames_drawn() % SC.PROMOTION_FRAME_INTERVAL != 0:
-		return
-
-	var start_time := Time.get_ticks_usec()
-	var budget_usec := SC.PROMOTION_BUDGET_USEC
-
-	# --- DEMOTION: NEAR objects that are now far enough to free ---
-	var demote_distance_sq: float = SC.DEMOTION_DISTANCE * SC.DEMOTION_DISTANCE
-	var demoted := 0
-	var demote_remove: Array[int] = []
-
-	for obj_id: int in _promoted_objects:
-		if Time.get_ticks_usec() - start_time >= budget_usec:
-			break
-
-		var near_node: Node3D = _promoted_objects[obj_id]
-		if not is_instance_valid(near_node):
-			demote_remove.append(obj_id)
-			continue
-
-		# Guard: deferred add_child may not have parented the node yet.
-		# global_position is unreliable until the node is inside the tree.
-		if not near_node.is_inside_tree():
-			continue
-
-		var dist_sq := _camera_position.distance_squared_to(near_node.global_position)
-		if dist_sq > demote_distance_sq:
-			# Demote: clear promoted flag (shows LOD0 RS instance), free NEAR Node3D
-			_static_renderer.set_instance_promoted(obj_id, false)
-			near_node.queue_free()
-			demote_remove.append(obj_id)
-			demoted += 1
-
-	for obj_id: int in demote_remove:
-		# Remove from spatial index
-		var _dem_data: Variant = _static_renderer.get_instance_data(obj_id)
-		if _dem_data and _dem_data.cell_grid in _promoted_by_cell:
-			var _dem_arr: Array = _promoted_by_cell[_dem_data.cell_grid]
-			var _dem_idx := _dem_arr.find(obj_id)
-			if _dem_idx >= 0:
-				_dem_arr[_dem_idx] = _dem_arr.back()
-				_dem_arr.pop_back()
-			if _dem_arr.is_empty():
-				_promoted_by_cell.erase(_dem_data.cell_grid)
-		_promoted_objects.erase(obj_id)
-
-	# --- PROMOTION: MID objects within promotion distance get a NEAR Node3D ---
-	# The NEAR Node3D is invisible at 250m (its visibility_range is 0-155m)
-	# but will be ready when the camera reaches the 145-155m crossfade zone.
-	var promote_distance_sq: float = SC.PROMOTION_DISTANCE * SC.PROMOTION_DISTANCE
-
-	# Scan cells in radius around camera
-	var r: int = SC.PROMOTION_CELL_RADIUS
-	var nearby_cells: Array[Vector2i] = []
-	for dx in range(-r, r + 1):
-		for dy in range(-r, r + 1):
-			var g := _camera_cell + Vector2i(dx, dy)
-			if g in _loaded_cells:
-				nearby_cells.append(g)
-
-	var promoted := 0
-	if not nearby_cells.is_empty():
-		var promotable := _static_renderer.get_promotable_instances(
-			_camera_position, promote_distance_sq, nearby_cells
-		)
-		for id: int in promotable:
-			if Time.get_ticks_usec() - start_time >= budget_usec:
-				break
-			if id in _promoted_objects:
-				continue
-
-			var data: Variant = _static_renderer.get_instance_data(id)
-			if not data:
-				continue
-
-			var cell_node: Node3D = _loaded_cells.get(data.cell_grid) as Node3D
-			if not cell_node or not is_instance_valid(cell_node):
-				continue
-
-			var near_obj: Node3D = _cell_manager.promote_mid_to_near(
-				data.model_path, data.item_id, data.transform,
-				data.ref_id, data.ref_num
-			)
-			if not near_obj:
-				continue
-
-			# Disable collision shapes on the pre-created NEAR Node3D.
-			# The object is invisible beyond 155m — active physics on invisible
-			# objects wastes broadphase budget and causes raycast hits on nothing.
-			_disable_collision_shapes(near_obj)
-
-			cell_node.add_child(near_obj)
-			# Post-B-wide refactor: single RS instance per object, no per-LOD
-			# RID fan-out, so no LOD-children check needed — promotion just hides
-			# the single instance since the NEAR Node3D replaces it 0-500m.
-			_static_renderer.set_instance_promoted(id, true)
-			_promoted_objects[id] = near_obj
-			# Maintain spatial index
-			if data.cell_grid not in _promoted_by_cell:
-				_promoted_by_cell[data.cell_grid] = []
-			(_promoted_by_cell[data.cell_grid] as Array).append(id)
-			promoted += 1
-
-	if promoted > 0 or demoted > 0:
-		_stats["mid_to_near_promotions"] += promoted
-		_stats["near_to_mid_demotions"] += demoted
-		_debug("Tier transitions: promoted %d MID→NEAR, demoted %d NEAR→MID (%.1fms, tracking %d)" % [
-			promoted, demoted, (Time.get_ticks_usec() - start_time) / 1000.0,
-			_promoted_objects.size()
-		])
-
-
-## Re-enable collision shapes on promoted NEAR Node3Ds that have entered visibility range.
-## Collision shapes are disabled at promotion time (object is at 150-250m, invisible).
-## We re-enable once within NEAR_END + margin so physics are active when visible.
-func _process_promoted_collision_enable() -> void:
-	if _promoted_objects.is_empty():
-		return
-	# Run on odd frames, offset from promotion tick
-	if Engine.get_frames_drawn() % SC.PROMOTION_FRAME_INTERVAL != 1:
-		return
-	var enable_dist_sq: float = (DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1) * (DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1)
-	for obj_id: int in _promoted_objects:
-		var near_node: Node3D = _promoted_objects[obj_id]
-		if not is_instance_valid(near_node):
-			continue
-		if near_node.has_meta("collision_disabled"):
-			var dist_sq := _camera_position.distance_squared_to(near_node.global_position)
-			if dist_sq < enable_dist_sq:
-				_enable_collision_shapes(near_node)
-
-
-## Disable all CollisionShape3D nodes in a tree (for pre-created invisible NEAR objects)
-static func _disable_collision_shapes(node: Node) -> void:
-	if node is CollisionShape3D:
-		(node as CollisionShape3D).disabled = true
-	for child in node.get_children():
-		_disable_collision_shapes(child)
-	if node is Node3D:
-		node.set_meta("collision_disabled", true)
-
-
-## Re-enable all CollisionShape3D nodes in a tree
-static func _enable_collision_shapes(node: Node) -> void:
-	if node is CollisionShape3D:
-		(node as CollisionShape3D).disabled = false
-	for child in node.get_children():
-		_enable_collision_shapes(child)
-	if node is Node3D:
-		node.remove_meta("collision_disabled")
-
-
-## Batch-free all promoted objects (used after teleport to avoid stale physics bodies)
-func _demote_all_promoted() -> void:
-	var count := _promoted_objects.size()
-	for obj_id: int in _promoted_objects:
-		_static_renderer.set_instance_promoted(obj_id, false)
-		var near_node: Node3D = _promoted_objects[obj_id]
-		if is_instance_valid(near_node):
-			near_node.queue_free()
-	_promoted_objects.clear()
-	_promoted_by_cell.clear()
-	if count > 0:
-		_stats["near_to_mid_demotions"] += count
-		_debug("Teleport: batch-demoted %d promoted objects" % count)
-
-
-## Instantiate deferred NEAR objects that skipped MID tier and are now close enough.
-## Runs every 4 frames (offset from promotion tick) with a 1ms budget.
-func _process_deferred_near_instantiation() -> void:
-	if not _cell_manager:
-		return
-
-	# Run every 4 frames, offset from promotion tick (which uses % 4 == 0)
-	if Engine.get_frames_drawn() % 4 != 2:
-		return
-
-	# Get nearby cells (same 3x3 grid as promotion system)
-	var nearby_cells: Array[Vector2i] = []
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var g := _camera_cell + Vector2i(dx, dy)
-			if g in _loaded_cells:
-				nearby_cells.append(g)
-
-	if nearby_cells.is_empty():
-		return
-
-	var results := _cell_manager.process_deferred_near(
-		_camera_position, nearby_cells, _loaded_cells
-	)
-
-	for entry in results:
-		var parent: Node3D = entry.parent
-		var child: Node3D = entry.child
-		if is_instance_valid(parent) and is_instance_valid(child):
-			parent.add_child(child)
-
-	if not results.is_empty() and debug_enabled:
-		_debug("Deferred NEAR: instantiated %d objects" % results.size())
+# S.1 refactor (near_tier_refactor.md 2026-04-19): MID↔NEAR promotion / demotion
+# loops deleted. Per-cell tier is the axis of variation; MID re-enable in S.7
+# will run through request_cell_tier, not per-actor promote. Git restores
+# the deleted functions (previous commit touching this file) if reference is
+# needed for the future re-add. Removed:
+#   _promoted_objects / _promoted_by_cell fields
+#   _process_mid_to_near_promotions
+#   _process_promoted_collision_enable
+#   _disable_collision_shapes / _enable_collision_shapes (local; model_loader +
+#     reference_instantiator keep their own copies for the Node3D spawn path)
+#   _demote_all_promoted
+#   _process_deferred_near_instantiation
 
 
 ## Configure visibility_range on mesh nodes for cells loaded from non-prebaked
@@ -2122,8 +1857,7 @@ func teleport_to(position: Vector3) -> void:
 	_camera_position = position
 	_camera_cell = DU.world_to_cell(position)
 
-	# Batch-free all promoted NEAR objects — MID RS instances handle visibility
-	_demote_all_promoted()
+	# S.1: promotion tracking deleted — no promoted objects to batch-free.
 
 	# Unload all cells
 	for grid: Vector2i in _loaded_cells.keys():

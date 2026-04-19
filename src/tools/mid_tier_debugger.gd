@@ -238,9 +238,8 @@ func _run_census() -> void:
 	# Get static renderer for MID counts
 	var static_renderer = _streaming_manager.get("_static_renderer")
 
-	# Get promoted objects count
-	var promoted: Dictionary = _streaming_manager.get("_promoted_objects")
-	_total_promoted = promoted.size() if promoted else 0
+	# S.1: promoted tracking deleted — per-cell tier FSM replaces it in S.7+.
+	_total_promoted = 0
 
 	# Get queue size
 	_total_queued = _cell_manager.get_instantiation_queue_size()

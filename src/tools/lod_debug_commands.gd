@@ -541,7 +541,6 @@ func _cmd_visibility_gaps(_args: Dictionary) -> String:
 	var near_invisible := 0
 	var near_no_vis_range := 0
 	var mid_rs_count := 0
-	var promoted_count: int = _streaming_manager._promoted_objects.size()
 
 	for grid: Vector2i in _streaming_manager._loaded_cells:
 		var cell: Node3D = _streaming_manager._loaded_cells[grid]
@@ -561,14 +560,9 @@ func _cmd_visibility_gaps(_args: Dictionary) -> String:
 		var vis_rs: int = sr_stats.get("visible_instances", 0)
 		output += "\nMID RS Instances: %d total, %d LOD RIDs, %d visible\n" % [mid_rs_count, lod_rs, vis_rs]
 
-	# Check deferred NEAR
-	var deferred := 0
-	if _streaming_manager._cell_manager:
-		deferred = _streaming_manager._cell_manager.get_deferred_near_count()
+	# S.1: promoted / deferred-NEAR tracking removed — per-cell tier FSM in S.7+.
 
 	output += "NEAR Node3Ds: %d total, %d invisible, %d missing vis_range\n" % [near_count, near_invisible, near_no_vis_range]
-	output += "Promoted (MID->NEAR): %d\n" % promoted_count
-	output += "Deferred NEAR (waiting): %d\n" % deferred
 
 	# Queue status
 	output += "\nQueues:\n"

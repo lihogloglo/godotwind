@@ -945,8 +945,6 @@ class InstantiationEntry:
 	var model_path: String
 	var item_id: String
 	var position: Vector3
-	var always_near: bool
-	var mid_worthy: bool
 	## Per-entry load profile copied from the owning AsyncCellRequest at queue
 	## time. Read during _process_instantiation_queue so that concurrent loads
 	## with different profiles don't stomp on each other.
@@ -978,17 +976,10 @@ const QUEUE_SORT_INTERVAL: int = 10  # Re-sort every N frames
 ## Parsed model prototypes waiting to be cached (from async results)
 var _pending_prototype_cache: Dictionary = {}  # cache_key -> NIFParseResult
 
-## Deferred NEAR refs — objects that skipped MID tier, waiting for player to approach
-## Keyed by Vector2i (cell_grid) -> Array of pre-computed instantiation data
-var _deferred_near_refs: Dictionary = {}  # Vector2i -> Array[Dictionary]
-
-## Immediate promotions — mid-worthy objects that got BOTH RS instances AND Node3D
-## in the same frame. The streaming manager picks these up and tracks them for demotion.
-## Each entry: { "id": int (RS instance ID), "node": Node3D (NEAR object) }
-var _immediate_promotions: Array[Dictionary] = []
-
 ## AABB max dimension cache — avoids recomputing for same model path.
 ## Maps model_path -> float (max dimension in meters). 0.0 = unknown/no mesh.
+## Retained for future use (projected-size metric, interaction reach, etc).
+## S.1: AABB-based mid-worthy upgrade moved to prebake; runtime cache kept idle.
 var _aabb_cache: Dictionary = {}  # String -> float
 
 
@@ -1386,81 +1377,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		# Decrement pending count
 		request.pending_instantiations -= 1
 
-		# ALWAYS-RS ARCHITECTURE: Mid-worthy objects ALWAYS get RS instances (0-500m)
-		# as the permanent rendering backbone. Node3D is an upgrade overlay for
-		# physics/interaction when the camera is within NEAR range (0-150m).
-		# Non-mid-worthy objects beyond NEAR get deferred + "near:" RS instance.
-		# Lights, NPCs, creatures (always_near) always use the full Node3D path.
-		var obj_position: Vector3 = entry.position
-		var distance_sq := _camera_position.distance_squared_to(obj_position)
-		var always_near: bool = entry.always_near  # Pre-classified at queue time (Phase 5c)
-		var mid_worthy: bool = entry.mid_worthy  # Pre-classified at queue time
-		var beyond_near := distance_sq > SC.NEAR_END * SC.NEAR_END
-		var mid_instance_id := -1
-
-		# Per-entry static-renderer gate. Interior pockets set this false so
-		# RS instances don't render at ESM world position while the pocket
-		# node lives at Y=-500. Null profile = use legacy behavior (always use
-		# _static_renderer if present).
-		var entry_use_static: bool = true
-		if entry.load_profile:
-			entry_use_static = entry.load_profile.use_static_renderer
-		var effective_static_renderer: Node = _static_renderer if entry_use_static else null
-
-		# Step 0: AABB-based upgrade — non-mid-worthy objects that are actually large.
-		# Pre-classification only has the model path (no mesh data). Now at instantiation
-		# time the prototype is available, so check its AABB max dimension.
-		# Objects > 2m in any axis get upgraded to mid-worthy for RS coverage.
-		if effective_static_renderer and not mid_worthy and not always_near and not model_path.is_empty():
-			var max_dim := _get_aabb_max_dim(model_path, item_id)
-			if max_dim > SC.AABB_MID_WORTHY_THRESHOLD:
-				mid_worthy = true
-				_stats["aabb_upgrades"] = _stats.get("aabb_upgrades", 0) + 1
-
-		# Step 1: Mid-worthy objects ALWAYS get RS instances regardless of distance
-		if effective_static_renderer and not model_path.is_empty() and not always_near and mid_worthy:
-			var mid_start := Time.get_ticks_usec()
-			mid_instance_id = _instantiate_mid_tier(ref, model_path, item_id, request)
-			var mid_elapsed := Time.get_ticks_usec() - mid_start
-			_diag_instantiate_time_total_us += mid_elapsed
-			_diag_instantiate_count += 1
-
-			if beyond_near:
-				if mid_instance_id >= 0:
-					# Beyond NEAR range: RS-only. Promotion system creates Node3D later.
-					instantiated += 1
-					if _is_request_complete(request):
-						# Route through _finalize_request so the MM batching hook
-						# + GPU scene DB upload run for content cells. Inline
-						# `request.completed = true` was a pre-existing bypass.
-						_finalize_request(request)
-					continue
-				else:
-					# MID RS failed (mid_objects off) — defer so object appears as Node3D
-					# when camera enters NEAR_END. No RS placeholder; demotion just frees Node3D.
-					_defer_for_near(ref, model_path, item_id, request, obj_position)
-					instantiated += 1
-					if _is_request_complete(request):
-						_finalize_request(request)
-					continue
-			# Within NEAR range (or MID failed at close range): fall through to create Node3D
-
-		# Step 2: Non-mid-worthy objects beyond NEAR: defer + "near:" RS instance
-		if effective_static_renderer and beyond_near and not model_path.is_empty() and not always_near and not mid_worthy:
-			_defer_for_near(ref, model_path, item_id, request, obj_position)
-			_create_near_only_rs_instance(ref, model_path, item_id, request)
-			_stats["mid_filtered"] = _stats.get("mid_filtered", 0) + 1
-			instantiated += 1
-			continue
-
-		# Step 3: NEAR-TIER — Full Node3D pipeline (duplicate + scene tree)
-		# Set the instantiator transient profile BEFORE the call. The
-		# instantiator reads it via _effective_* helpers for actor distance
-		# and static-renderer gating. The set/clear pair is intentionally
-		# kept tight (no awaits, no exceptions can escape an intermediate
-		# GDScript error — push_error/push_warning return normally — so the
-		# clear is guaranteed to run). The _set/_clear helpers carry an
-		# assert that catches leaked transients in debug builds.
+		# S.1 refactor (near_tier_refactor.md 2026-04-19): per-object distance +
+		# tier branching removed. Cell-level tier is the axis of variation, not
+		# per-object. If a cell is in the active set, every ref in it becomes a
+		# Node3D — no defer queue, no MID RS instances, no "near:" RS shims.
+		# MID / HLOD / impostor re-enable is driven by `request_cell_tier` in
+		# phases S.7+. Until then, NEAR is the only tier and the only codepath.
 		_instantiator._set_transient_profile(entry.load_profile)
 		var inst_start := Time.get_ticks_usec()
 		var inst_cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
@@ -1471,11 +1393,6 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_diag_instantiate_count += 1
 
 		if obj:
-			# Post-B-wide refactor: prebaked VR is 0-500m (MID range). Override
-			# to 0-NEAR_END so NEAR Node3Ds cull at 150m, not 500m.
-			_apply_near_visibility_range(obj)
-			obj.set_meta("visibility_prebaked", true)
-
 			# Double-check parent is still valid before queuing (defensive)
 			if is_instance_valid(request.cell_node):
 				# Capture per-entry fade-in decision now so the pending_children
@@ -1489,16 +1406,6 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 					"fade_in": entry_fade_in_decision,
 				})
 				instantiated += 1
-
-				# Immediate promotion: hide the RS instance since the NEAR Node3D
-				# now covers 0-150m. Post-B-wide refactor: single RS instance per
-				# object, no per-LOD RID fan-out, so no LOD-children check needed.
-				if mid_instance_id >= 0:
-					_static_renderer.set_instance_promoted(mid_instance_id, true)
-					_immediate_promotions.append({
-						"id": mid_instance_id,
-						"node": obj,
-					})
 			else:
 				obj.queue_free()
 
@@ -1936,147 +1843,6 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 
 ## Check if a cell reference must always use the NEAR (full Node3D) path
 ## Returns true for lights, NPCs, creatures — these need physics, interaction, or animation
-func _is_always_near_ref(ref: CellReference) -> bool:
-	var record_type: Array = [""]
-	ESMManager.get_any_record(str(ref.ref_id), record_type)
-	var type_name: String = record_type[0] if record_type.size() > 0 else ""
-
-	# Lights need OmniLight3D, actors need animation/collision
-	return type_name in ["light", "npc", "creature", "leveled_creature"]
-
-
-## MID-tier significance filter — delegates to StreamingPolicy (single source of truth).
-## Small items (potions, forks, books, etc.) are invisible at 150m+ and waste resources.
-## Filtered objects are deferred and instantiated at NEAR range when the player approaches.
-func _is_mid_worthy(type_name: String, model_path: String) -> bool:
-	return StreamingPolicyScript.is_mid_worthy(type_name, model_path)
-
-
-## Store a non-mid-worthy object for deferred NEAR instantiation.
-## Pre-computes the transform so it's ready when the player approaches.
-func _defer_for_near(ref: CellReference, model_path: String, item_id: String,
-		request: AsyncCellRequest, position: Vector3) -> void:
-	var cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
-	var pos := CS.vector_to_godot(ref.position)
-	var scl := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scl)
-	var xform := Transform3D(basis, pos)
-
-	if cell_grid not in _deferred_near_refs:
-		_deferred_near_refs[cell_grid] = []
-
-	_deferred_near_refs[cell_grid].append({
-		"model_path": model_path,
-		"item_id": item_id,
-		"transform": xform,
-		"ref_id": ref.ref_id,
-		"ref_num": ref.ref_num,
-		"position": position,
-		"cell_grid": cell_grid,
-	})
-
-
-## Create a NEAR-only RS instance (0-150m) for a deferred object.
-## These objects are too small for MID-tier but should still be visible up close.
-## The StaticObjectRenderer handles the RS instance with LOD0 visibility_range.
-## The instance ID is stored in the last deferred entry for cleanup when the full
-## Node3D is created (prevents double-rendering).
-## NOTE: Uses "near:" prefix on type_name to avoid collision with MID-tier LOD
-## registration. Without this, deferred (single-mesh) registration could preempt
-## the LOD registration for the same model path, causing MID-tier instances to
-## only get 0-150m visibility instead of 0-500m with LODs.
-func _create_near_only_rs_instance(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> void:
-	if not _static_renderer:
-		return
-	# mid_objects off → add_instance will reject anyway; skip model loading to avoid
-	# triggering the packed_scene.instantiate() sig11 on stale cached .res files.
-	if not _static_renderer.is_globally_visible():
-		return
-
-	var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
-	if not model_prototype:
-		model_prototype = _model_loader.get_model(model_path, item_id)
-		if not model_prototype:
-			return
-
-	# Prefix with "near:" to avoid colliding with MID-tier LOD registration
-	var type_name := "near:" + model_path.to_lower().replace("/", "\\")
-	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
-
-	# Register as single-mesh (no LOD levels) — uses fallback LOD0 range (0-150m)
-	if not _static_renderer.has_type(type_name):
-		_static_renderer.register_from_prototype(type_name, model_prototype)
-		if not _static_renderer.has_type(type_name):
-			return
-
-	var pos := CS.vector_to_godot(ref.position)
-	var scl := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scl)
-	var xform := Transform3D(basis, pos)
-
-	var instance_id: int = _static_renderer.add_instance(
-		type_name, xform, cell_grid,
-		model_path, item_id, ref.ref_id, ref.ref_num
-	)
-
-	# Store the RS instance ID in the corresponding deferred entry for later cleanup
-	if instance_id >= 0 and cell_grid in _deferred_near_refs:
-		var refs: Array = _deferred_near_refs[cell_grid]
-		if not refs.is_empty():
-			refs[-1]["rs_instance_id"] = instance_id
-
-
-## MID-TIER: Create a lightweight RenderingServer instance instead of full Node3D
-## Uses StaticObjectRenderer with per-instance RS visibility_range — no Node3D overhead.
-## Creates up to 4 RS instances per object (LOD0/LOD1/LOD2/LOD3), each with per-instance
-## visibility_range via RenderingServer.instance_geometry_set_visibility_range().
-## LOD0 covers 0-150m, ensuring objects are always visible at all distances.
-## Godot handles distance-based LOD switching entirely in C++.
-## Returns true if the instance was successfully created
-func _instantiate_mid_tier(ref: CellReference, model_path: String, item_id: String, request: AsyncCellRequest) -> int:
-	# Normalize model path as the type name
-	var type_name := model_path.to_lower().replace("/", "\\")
-
-	# Prototype is only needed once per unique model type for RS mesh registration.
-	# Skip the instantiate() call for already-registered types — this is the hot path
-	# for cells with many instances of the same model (e.g. 251 rocks = 1 instantiate,
-	# not 251).
-	if not _static_renderer.has_type(type_name):
-		var model_prototype: Node3D = _model_loader.get_cached(model_path, item_id)
-		if not model_prototype:
-			model_prototype = _model_loader.get_model(model_path, item_id)
-			if not model_prototype:
-				return -1
-		_static_renderer.register_lod_from_prototype(type_name, model_prototype)
-		if not _static_renderer.has_type(type_name):
-			return -1
-
-	# Calculate transform from ESM reference
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
-	var xform := Transform3D(basis, pos)
-
-	# Get cell grid for cleanup tracking
-	var cell_grid := request.grid if not request.is_interior else Vector2i.ZERO
-
-	var instance_id: int = _static_renderer.add_instance(
-		type_name, xform, cell_grid,
-		model_path, item_id, ref.ref_id, ref.ref_num
-	)
-	if instance_id < 0:
-		return -1
-
-	# Only track as mid_tier_instances — objects_instantiated is counted by the
-	# NEAR-tier Node3D path via _instantiator.instantiate_reference(). Avoids
-	# double-counting when both RS and Node3D are created for the same object.
-	_stats["mid_tier_instances"] = _stats.get("mid_tier_instances", 0) + 1
-	return instance_id
-
-
 ## Internal: Finalize a request (mark completed). Phase 3 step 7 removed the
 ## per-cell MultiMesh batcher — MID instances are already routed through the
 ## world-scoped PrototypeRegistry at add-time by static_object_renderer.
@@ -2088,7 +1854,8 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 
 ## Internal: Queue an object for instantiation with limit checking
 ## Includes object position for distance-priority sorting
-## Pre-classifies ref type at queue time to avoid ESM lookup during instantiation (Phase 5c)
+## S.1: queue-time classification (always_near / mid_worthy) removed — per-cell
+## tier is the axis of variation, every queued ref becomes a Node3D.
 func _queue_instantiation(request_id: int, ref: CellReference, model_path: String, item_id: String) -> bool:
 	# Check queue limit to prevent memory buildup
 	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
@@ -2098,24 +1865,12 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	# Get object position for distance-priority sorting
 	var position := CS.vector_to_godot(ref.position)
 
-	# Pre-classify ref type at queue time (Phase 5c optimization)
-	# Single ESM lookup reused for both always_near and mid_worthy flags
-	var record_type: Array = [""]
-	ESMManager.get_any_record(str(ref.ref_id), record_type)
-	var type_name: String = record_type[0] if record_type.size() > 0 else ""
-	var always_near := type_name in ["light", "npc", "creature", "leveled_creature"]
-	var mid_worthy := true
-	if not always_near:
-		mid_worthy = _is_mid_worthy(type_name, model_path)
-
 	var entry := InstantiationEntry.new()
 	entry.request_id = request_id
 	entry.ref = ref
 	entry.model_path = model_path
 	entry.item_id = item_id
 	entry.position = position
-	entry.always_near = always_near
-	entry.mid_worthy = mid_worthy
 
 	# Copy the per-request LoadProfile onto the entry so the instantiation
 	# queue processor can read it without a dictionary lookup, and so that
@@ -2149,33 +1904,6 @@ func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node)
 
 
-## Get the maximum AABB dimension for a model, with caching.
-## First call loads/caches the prototype. Subsequent calls are O(1) dict lookup.
-## Used for runtime MID-worthy upgrade — objects > threshold get RS instances.
-func _get_aabb_max_dim(model_path: String, item_id: String) -> float:
-	if model_path in _aabb_cache:
-		return _aabb_cache[model_path]
-
-	var prototype: Node3D = _model_loader.get_cached(model_path, item_id)
-	if not prototype:
-		prototype = _model_loader.get_model(model_path, item_id)
-	if not prototype:
-		_aabb_cache[model_path] = 0.0
-		return 0.0
-
-	# Recursively find ALL MeshInstance3D descendants (handles nested NIF structures)
-	var max_dim := 0.0
-	var meshes := prototype.find_children("*", "MeshInstance3D", true, false)
-	for child in meshes:
-		var mi := child as MeshInstance3D
-		if mi and mi.mesh:
-			var s: Vector3 = mi.mesh.get_aabb().size
-			max_dim = maxf(max_dim, maxf(s.x, maxf(s.y, s.z)))
-
-	_aabb_cache[model_path] = max_dim
-	return max_dim
-
-
 ## Get count of pending async requests
 func get_async_pending_count() -> int:
 	var count := 0
@@ -2205,115 +1933,6 @@ func get_loading_stats() -> Dictionary:
 	}
 
 
-## Promote a MID-tier RS instance to a full NEAR-tier Node3D
-## Returns the Node3D, or null on failure. Caller must add_child() to cell_node.
-func promote_mid_to_near(model_path: String, item_id: String, xform: Transform3D,
-		ref_id: StringName, ref_num: int) -> Node3D:
-	if model_path.is_empty():
-		return null
-
-	# get_cached() / get_model() return a fresh Node3D (collision disabled) from PackedScene cache.
-	var instance: Node3D = _model_loader.get_cached(model_path, item_id)
-	if not instance:
-		instance = _model_loader.get_model(model_path, item_id)
-		if not instance:
-			return null
-
-	instance.name = str(ref_id) + "_" + str(ref_num)
-	_hide_lod_nodes(instance)
-
-	# Set transform directly (already in Godot coords from when MID instance was created)
-	instance.transform = xform
-
-	# Override prebaked 0-500m VR → NEAR range so promoted Node3D culls at 150m.
-	_apply_near_visibility_range(instance)
-	instance.set_meta("visibility_prebaked", true)
-	instance.set_meta("promoted_from_mid", true)
-
-	# MID RS instance is hidden on promotion by set_instance_promoted().
-	# The NEAR Node3D replaces it for 0-NEAR_END via the overridden VR.
-
-	_stats["objects_instantiated"] += 1
-	_stats["mid_promotions"] = _stats.get("mid_promotions", 0) + 1
-	return instance
-
-
-## Check deferred NEAR refs and instantiate objects that are now within NEAR range.
-## Called periodically from NativeStreamingManager alongside MID→NEAR promotions.
-## Returns array of {parent: Node3D, child: Node3D} for the caller to add_child().
-func process_deferred_near(camera_pos: Vector3, nearby_cells: Array[Vector2i],
-		loaded_cells: Dictionary) -> Array[Dictionary]:
-	var results: Array[Dictionary] = []
-	var near_dist_sq: float = SC.NEAR_END * SC.NEAR_END
-	var budget_start := Time.get_ticks_usec()
-	var budget_us := 1000  # 1ms budget
-
-	for cell_grid in nearby_cells:
-		if cell_grid not in _deferred_near_refs:
-			continue
-
-		var cell_node: Node3D = loaded_cells.get(cell_grid) as Node3D
-		if not cell_node or not is_instance_valid(cell_node):
-			continue
-
-		var refs: Array = _deferred_near_refs[cell_grid]
-		var i := refs.size() - 1
-		while i >= 0:
-			if Time.get_ticks_usec() - budget_start > budget_us:
-				return results
-
-			var entry: Dictionary = refs[i]
-			var dist_sq := camera_pos.distance_squared_to(entry.position)
-			if dist_sq <= near_dist_sq:
-				# Remove the placeholder RS instance before creating the full Node3D
-				var rs_id: int = entry.get("rs_instance_id", -1)
-				if rs_id >= 0 and _static_renderer:
-					_static_renderer.remove_instance(rs_id)
-
-				var obj: Node3D = promote_mid_to_near(
-					entry.model_path, entry.item_id, entry.transform,
-					entry.ref_id, entry.ref_num
-				)
-				if obj:
-					results.append({"parent": cell_node, "child": obj})
-					_stats["deferred_near_instantiated"] = _stats.get("deferred_near_instantiated", 0) + 1
-				refs.remove_at(i)
-			i -= 1
-
-		if refs.is_empty():
-			_deferred_near_refs.erase(cell_grid)
-
-	return results
-
-
-## Clean up deferred NEAR refs for a cell that is being unloaded
-func clear_deferred_for_cell(grid: Vector2i) -> void:
-	var count := 0
-	if grid in _deferred_near_refs:
-		count = _deferred_near_refs[grid].size()
-		_deferred_near_refs.erase(grid)
-	if count > 0:
-		Log.debug("streaming", "Cleared %d deferred NEAR refs for cell %s" % [count, grid])
-
-
-## Get current count of deferred NEAR refs waiting across all cells
-func get_deferred_near_count() -> int:
-	var count := 0
-	for grid in _deferred_near_refs:
-		count += _deferred_near_refs[grid].size()
-	return count
-
-
-## Get and clear immediate promotions (mid-worthy objects that got both RS + Node3D).
-## Called by NativeStreamingManager to absorb into its _promoted_objects tracking.
-func get_and_clear_immediate_promotions() -> Array[Dictionary]:
-	if _immediate_promotions.is_empty():
-		return []
-	var result := _immediate_promotions.duplicate()
-	_immediate_promotions.clear()
-	return result
-
-
 ## Get overall stats including pool stats
 func get_stats() -> Dictionary:
 	var result := _stats.duplicate()
@@ -2321,8 +1940,6 @@ func get_stats() -> Dictionary:
 	# Merge instantiator stats. Post-drift-fix the instantiator owns the
 	# objects_instantiated / objects_from_pool / lights_created counters for
 	# the streaming queue path (Step 3 of _process_instantiation_queue).
-	# _stats still tracks promote_mid_to_near and instantiate_deferred_object
-	# contributions, so sum instead of overwrite.
 	for key in ["objects_instantiated", "objects_from_pool", "lights_created"]:
 		result[key] = int(result.get(key, 0)) + int(_instantiator.stats.get(key, 0))
 
@@ -2337,20 +1954,4 @@ func get_stats() -> Dictionary:
 		result["pool_acquires"] = pool_stats.get("acquires", 0)
 		result["pool_releases"] = pool_stats.get("releases", 0)
 
-	# Add deferred NEAR stats
-	result["deferred_near_count"] = get_deferred_near_count()
-
 	return result
-
-
-## Override VR on every GeometryInstance3D descendant to the NEAR range (0-155m).
-## Prebaked prototypes carry 0-500m (MID range). NEAR Node3Ds must cull at 150m
-## so the visible circle follows the camera instead of bleeding to impostor range.
-func _apply_near_visibility_range(node: Node3D) -> void:
-	for geo: Node in node.find_children("*", "GeometryInstance3D", true, false):
-		var g := geo as GeometryInstance3D
-		g.visibility_range_begin = 0.0
-		g.visibility_range_end = DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1
-		g.visibility_range_begin_margin = 0.0
-		g.visibility_range_end_margin = DU.FADE_MARGIN_NEAR_LOD1
-		g.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
