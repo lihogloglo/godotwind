@@ -1,7 +1,14 @@
-## AssetViewer - Unified asset visualization tool
+## BakedAssetViewer — Unified viewer for prebaked cache assets (.res, .crashtest).
+## Also hosts the legacy source-NIF and NPC providers for cross-reference.
+##
+## Use this scene to inspect what the prebake pipeline wrote to disk, including
+## quarantined files (`*.crashtest` suffix). The `res` provider loads
+## `.res` PackedScenes from `SettingsManager.get_cache_dir()/models/` and lets
+## the user dump scene-state structure BEFORE attempting `instantiate()` — which
+## is what crashes in `model_loader.gd` when the cache is corrupt.
 ##
 ## Features:
-## - Swappable providers for different asset types (NIF, NPC, etc.)
+## - Swappable providers (res, nif, npc)
 ## - Shared 3D preview with orbit camera
 ## - Common browser with search/filter
 ## - Provider-specific info and custom tabs
@@ -15,8 +22,11 @@
 @warning_ignore("untyped_declaration", "unsafe_method_access", "unsafe_cast", "unsafe_call_argument")
 extends Control
 
-# Available providers
+# Available providers. `res` is default — this viewer exists primarily to
+# inspect prebaked cache files for corruption (the others are kept for
+# cross-reference against source data).
 const PROVIDERS := {
+	"res": preload("res://src/tools/asset_viewer/providers/res_provider.gd"),
 	"nif": preload("res://src/tools/asset_viewer/providers/nif_provider.gd"),
 	"npc": preload("res://src/tools/asset_viewer/providers/npc_provider.gd"),
 }
@@ -120,8 +130,10 @@ func _setup_provider_dropdown() -> void:
 	var idx := 0
 	for provider_key: String in PROVIDERS:
 		var display_name := provider_key.capitalize()
-		if provider_key == "nif":
-			display_name = "NIF Meshes"
+		if provider_key == "res":
+			display_name = "Baked .res Cache"
+		elif provider_key == "nif":
+			display_name = "NIF Meshes (source)"
 		elif provider_key == "npc":
 			display_name = "NPCs & Creatures"
 		provider_dropdown.add_item(display_name, idx)
@@ -190,7 +202,11 @@ func _on_load_pressed() -> void:
 
 
 func _switch_provider(provider: AssetProvider) -> void:
+	if _current_provider and _current_provider.item_loaded.is_connected(_on_provider_item_loaded):
+		_current_provider.item_loaded.disconnect(_on_provider_item_loaded)
+
 	_current_provider = provider
+	provider.item_loaded.connect(_on_provider_item_loaded)
 
 	# Update browser
 	browser.set_categories(provider.get_categories())
@@ -249,6 +265,16 @@ func _on_item_activated(item: Dictionary) -> void:
 		_set_status("Loaded: %s" % item.get("name", "Unknown"))
 	else:
 		_set_status("[color=red]Failed to load: %s[/color]" % item.get("name", "Unknown"))
+
+
+## Provider-driven preview update — used by ResProvider's Instantiate tab so
+## a deferred instantiate swaps the 3D preview + refreshes info text.
+func _on_provider_item_loaded(node: Node3D, _info: Dictionary) -> void:
+	if node == null or not _current_provider:
+		return
+	preview_3d.display_object(node)
+	if _current_item.size() > 0:
+		info_text.text = _current_provider.get_info_text(_current_item)
 
 
 func _rebuild_custom_tab_contents() -> void:

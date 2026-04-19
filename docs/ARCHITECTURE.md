@@ -84,7 +84,7 @@ See `src/core/coordinate_system.gd`.
 | Scene | Purpose |
 |-------|---------|
 | `scenes/Godotwind.tscn` | Main world explorer (production) |
-| `scenes/nif_viewer.tscn` | NIF model browser |
-| `scenes/asset_viewer.tscn` | Asset inspection |
+| `scenes/bsa_viewer.tscn` | NIF model browser — loads live from BSA source data |
+| `scenes/baked_asset_viewer.tscn` | Prebaked `.res` cache inspector (includes `.crashtest` quarantine) |
 | `src/tools/settings_tool.tscn` | Morrowind path config |
 | `src/tools/prebaking/prebaking_ui.tscn` | Asset prebaking |

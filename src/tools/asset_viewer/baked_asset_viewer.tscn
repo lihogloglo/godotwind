@@ -1,8 +1,8 @@
 [gd_scene load_steps=2 format=3 uid="uid://b0fwxlv3yqm2u"]
 
-[ext_resource type="Script" path="res://src/tools/asset_viewer/asset_viewer.gd" id="1_script"]
+[ext_resource type="Script" path="res://src/tools/asset_viewer/baked_asset_viewer.gd" id="1_script"]
 
-[node name="AssetViewer" type="Control"]
+[node name="BakedAssetViewer" type="Control"]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0

@@ -1,4 +1,5 @@
-## NIF Viewer — Browse and inspect individual NIF models from BSA archives
+## BSA Viewer — Browse and inspect NIF models live from BSA archives (source data).
+## For inspecting prebaked .res files in the disk cache, use baked_asset_viewer.tscn.
 ##
 ## Controls:
 ##   Left/Right    — Previous/next model
