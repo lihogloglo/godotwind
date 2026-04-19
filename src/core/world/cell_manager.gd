@@ -1393,6 +1393,16 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_diag_instantiate_count += 1
 
 		if obj:
+			# Override prebaked 0-500m VR (legacy MID-tier artifact) → 0-NEAR_END
+			# so NEAR Node3Ds cull at 150m instead of bleeding to 500m. Without
+			# this, every Node3D in cells 150m-350m draws at full cost (no MID
+			# RS offload during NEAR-only mode). Restored 2026-04-19 after S.1
+			# launch revealed the 35 fps mid-load regression. Stays even after
+			# S.7 brings MID back — NEAR Node3Ds always cull at NEAR_END; MID
+			# RS instances cover 150m+ via PrototypeRegistry.
+			_apply_near_visibility_range(obj)
+			obj.set_meta("visibility_prebaked", true)
+
 			# Double-check parent is still valid before queuing (defensive)
 			if is_instance_valid(request.cell_node):
 				# Capture per-entry fade-in decision now so the pending_children
@@ -1955,3 +1965,18 @@ func get_stats() -> Dictionary:
 		result["pool_releases"] = pool_stats.get("releases", 0)
 
 	return result
+
+
+## Override VR on every GeometryInstance3D descendant to the NEAR range (~155m).
+## Prebaked prototypes carry 0-500m (legacy MID-tier range artifact). NEAR Node3Ds
+## must cull at NEAR_END so the visible disc follows the camera instead of bleeding
+## to impostor range — this matters during the NEAR-only window AND post-S.7 when
+## MID RS instances take over 150m+ via PrototypeRegistry.
+func _apply_near_visibility_range(node: Node3D) -> void:
+	for geo: Node in node.find_children("*", "GeometryInstance3D", true, false):
+		var g := geo as GeometryInstance3D
+		g.visibility_range_begin = 0.0
+		g.visibility_range_end = DU.NEAR_END + DU.FADE_MARGIN_NEAR_LOD1
+		g.visibility_range_begin_margin = 0.0
+		g.visibility_range_end_margin = DU.FADE_MARGIN_NEAR_LOD1
+		g.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
