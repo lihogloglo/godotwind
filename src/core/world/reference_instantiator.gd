@@ -44,6 +44,12 @@ const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_in
 # Preload crossfade shader for fade-in effect
 const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
 
+# S.1 follow-up — §12.2 crash-site diagnostic. Breadcrumbs bracket every
+# post-model-load hazard in _instantiate_model_object so a native SIGSEGV
+# post-instantiate_return narrows to a single named step. Remove once the
+# second crash site is closed.
+const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
+
 # Injected dependencies (set by CellManager)
 var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
@@ -256,10 +262,19 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 			_model_obj_count, model_path.get_file(), is_static, is_sig, is_carryable
 		])
 
-	# Check if this model should use static rendering (flora, small rocks)
-	# Static rendering is ~10x faster but has no physics/interaction.
-	# Carryables are always Node3D-bound — never the static-renderer path.
-	if not is_carryable and effective_use_static and static_renderer and _is_static_render_model(model_path):
+	# Check if this model should use static rendering (statics_no_node3d T.1)
+	# Route statics via RenderingServer.instance_create2 (MultiMesh) instead
+	# of Node3D. ~80% of MW refs are STAT type — eliminates per-object Node3D
+	# + StaticBody3D construction. Cell-level merged trimesh collision
+	# (cell_static_collision.gd) provides the physics. Interactive refs
+	# (doors, activators, containers, carryables, animated statics) stay on
+	# the Node3D path.
+	#
+	# Carve-outs:
+	# - is_carryable — needs RigidBody3D for pickup physics
+	# - effective_use_static false — interior pockets (§5.3 carve-out locked)
+	# - has_animation — flags, banners, rotating objects need AnimationPlayer lifecycle
+	if _should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static):
 		return _instantiate_static_object(ref, model_path, cell_grid)
 
 	# Try to get from object pool first (if enabled). Skip for carryables —
@@ -347,6 +362,14 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	# Auto-play NIF keyframe animations (flags, banners, rotating objects) in NEAR tier only
 	_auto_play_nif_animation(instance, ref)
+	# S.1 follow-up §12.2 — only ri:: breadcrumb kept in hot path. If crash
+	# fires between model_loader's `instantiate_return` and this `ri::ret`,
+	# the culprit is in the reference_instantiator post-load block above
+	# (enable_coll / hide_lod / apply_xf / apply_meta / carryable / door /
+	# gen_static / auto_anim). If `ri::ret` is the last crumb, crash is in
+	# cell_manager post-return (VR apply, pending_children append, or the
+	# batch add_child loop — those have their own `cm::` crumbs).
+	CrashBreadcrumb.write("ri::ret", model_path)
 
 	# NOTE: Fade-in is NOT applied here because the node isn't in the scene tree yet.
 	# Fade-in must be applied AFTER add_child() - see CellManager._instantiate_cell()
@@ -1071,6 +1094,9 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 
 
 ## Check if a model should use StaticObjectRenderer (fast flora/rock rendering)
+## Kept as a fallback for the T.1 routing gate (covers flora + small-rock
+## patterns explicitly). The broader `_should_route_to_renderer` is the
+## primary routing decision post-statics_no_node3d migration.
 func _is_static_render_model(model_path: String) -> bool:
 	var lower := model_path.to_lower()
 
@@ -1088,6 +1114,51 @@ func _is_static_render_model(model_path: String) -> bool:
 		return true
 
 	return false
+
+
+## Route decision for statics_no_node3d T.1 — return true if the ref should
+## render via RS.instance_create2 (MultiMesh) instead of Node3D.
+##
+## True when ALL of:
+## - renderer available + effective_use_static on
+## - NOT carryable (pickup physics requires RigidBody3D)
+## - NOT interactive type (door/activator/container/light — need Node3D lifecycle)
+## - NOT animated (AnimationPlayer requires per-instance state, can't ride MultiMesh)
+## - type is STAT or matches legacy flora/small-rock pattern
+##
+## Interior pockets already self-carve via `effective_use_static == false`
+## (LoadProfile override in cell_manager for interior loads).
+func _should_route_to_renderer(
+	type_name: String,
+	model_path: String,
+	is_carryable: bool,
+	effective_use_static: bool,
+) -> bool:
+	if not effective_use_static:
+		return false  # interior pocket carve-out (§5.3)
+	if static_renderer == null:
+		return false
+	if is_carryable:
+		return false
+
+	# Interactive types always stay on Node3D path
+	match type_name:
+		"door", "activator", "container":
+			return false
+
+	# Animated statics (flags, banners, rotating objects) need AnimationPlayer.
+	# Check via model_loader's per-prototype cache (one-time instantiate per
+	# unique model_path, reused across all refs). ~500 prototypes vs ~316k refs.
+	if model_loader != null and model_loader.has_method("has_animation"):
+		if model_loader.call("has_animation", model_path):
+			return false
+
+	# STAT — the ~80% case. MW architecture, rocks, clutter, containers-without-loot, etc.
+	if type_name == "static":
+		return true
+
+	# Legacy flora + small-rock heuristic (covers some "misc" type refs that are really just clutter).
+	return _is_static_render_model(model_path)
 
 
 ## Initialize the fade material pool (call once after scene_tree is set)

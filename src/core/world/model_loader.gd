@@ -51,6 +51,44 @@ var _last_access: Dictionary = {}
 ## Cache for loaded LOD resources: model_path (lowercase) -> LODResource
 var _lod_cache: Dictionary = {}
 
+## Per-prototype animation flag cache (statics_no_node3d.md T.1 routing).
+## Populated on first `_instantiate_from_scene` for a given resource_path:
+## if the instantiated Node3D contains an AnimationPlayer, we stamp true here
+## and all future routing queries short-circuit. Canonical per-prototype
+## cache (one entry per unique model, not per ref) — ~500 prototypes across
+## ~316k refs → 600× reduction in animation-check cost.
+var _has_animation_cache: Dictionary[String, bool] = {}
+
+
+## Query whether the prototype at `model_path` contains an AnimationPlayer.
+## Used by the statics routing gate to carve out animated statics (flags,
+## banners, rotating objects) that can't ride the MultiMesh path.
+## Returns the cached value if known; otherwise instantiates once to inspect
+## then caches. Subsequent queries are O(1) dictionary hits.
+func has_animation(model_path: String) -> bool:
+	var key := model_path.to_lower()
+	if key in _has_animation_cache:
+		return _has_animation_cache[key]
+	# Cache miss — instantiate to inspect. This costs one PackedScene.instantiate
+	# per unique prototype, amortized across all refs of the same model.
+	var instance := get_model(model_path, "")
+	if instance == null:
+		_has_animation_cache[key] = false
+		return false
+	var has_anim := _subtree_has_animation_player(instance)
+	_has_animation_cache[key] = has_anim
+	instance.queue_free()  # inspection-only, discard
+	return has_anim
+
+
+static func _subtree_has_animation_player(node: Node) -> bool:
+	if node is AnimationPlayer:
+		return true
+	for child in node.get_children():
+		if _subtree_has_animation_player(child):
+			return true
+	return false
+
 ## The mod registry for asset resolution
 var _mod_registry: ModRegistry = null
 

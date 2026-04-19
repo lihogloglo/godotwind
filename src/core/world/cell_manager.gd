@@ -22,6 +22,9 @@ const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+# S.1 follow-up §12.2 — second crash-site breadcrumbs for the post-instantiate
+# batch add_child loop.
+const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
 
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
@@ -1144,7 +1147,14 @@ func get_async_cell_node(request_id: int) -> Node3D:
 	return request.cell_node if request else null
 
 
-## Cancel an async request
+## Cancel an async request — HARD cancel, destroys everything.
+##
+## Used by interior-pocket teardown where there is no unload-container limbo
+## and no state-reversal path. Exterior cell unload DOES have state reversal
+## (see `finalize_unloaded_cell` below) — don't use this from the exterior
+## `_unload_cell` path, that would re-introduce the missing-objects-on-return
+## bug (2026-04-19): filtering the queue during unload discards 100-300 pending
+## instantiations per cell; reclaim then returns a half-populated cell_node.
 func cancel_async_request(request_id: int) -> void:
 	if request_id not in _async_requests:
 		return
@@ -1171,6 +1181,36 @@ func cancel_async_request(request_id: int) -> void:
 	if request.cell_node:
 		request.cell_node.queue_free()
 
+	_async_requests.erase(request_id)
+
+
+## Finalize an unloaded cell — SOFT cleanup after state-reversal window closes.
+##
+## Call when a cell's unload-container entry has fully drained to empty and the
+## cell_node is being queue_free'd by `_process_budgeted_unloading`. Cleans up
+## residual async request state WITHOUT touching cell_node (already dying on
+## the caller's side) and WITHOUT any early queue filter (drain path's existing
+## is_instance_valid guard handles orphaned entries).
+##
+## This is the exterior-cell counterpart to `cancel_async_request`. Canonical
+## state-reversal pattern per UE5 World Partition + OpenMW UnrefQueue: keep
+## request + queue intact through the unload-container limbo so reclaim can
+## reverse the transition without losing pending instantiation work.
+func finalize_unloaded_cell(request_id: int) -> void:
+	if request_id not in _async_requests:
+		return
+	var request: AsyncCellRequest = _async_requests[request_id]
+	# Cancel any still-in-flight parse tasks (cell's gone, results have no home).
+	for task_id: int in request.pending_parses.values():
+		_background_processor.call("cancel_task", task_id)
+	# Filter any remaining queue entries for this request. Unlike the unload-
+	# path filter (which was the bug), this runs AFTER the cell has truly died
+	# and the state-reversal window is closed — no reclaim can use these.
+	_instantiation_queue = _instantiation_queue.filter(
+		func(entry: InstantiationEntry) -> bool: return entry.request_id != request_id
+	)
+	# Note: DON'T queue_free(request.cell_node) — caller (_process_budgeted_unloading)
+	# owns the cell_node teardown and has already queue_free'd it.
 	_async_requests.erase(request_id)
 
 
@@ -1430,6 +1470,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	const DEFERRED_THRESHOLD := 20
 	var add_child_start := Time.get_ticks_usec()
 	var use_deferred := pending_children.size() > DEFERRED_THRESHOLD
+	CrashBreadcrumb.write("cm::batch_start", "n=%d deferred=%s" % [pending_children.size(), str(use_deferred)])
 	for entry in pending_children:
 		var parent: Node3D = entry.parent
 		var child: Node3D = entry.child
@@ -1455,6 +1496,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				parent.add_child(child)
 				if entry_fade_in:
 					apply_fade_in_to_object(child)
+	CrashBreadcrumb.write("cm::batch_done", "n=%d" % pending_children.size())
 	return instantiated
 
 

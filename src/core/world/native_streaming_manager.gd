@@ -153,6 +153,16 @@ var _pending_load_set: Dictionary[Vector2i, bool] = {}
 ## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
 var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
 
+## Request IDs of cells currently in unload-container limbo. Canonical
+## state-reversal pattern (UE5 World Partition, OpenMW UnrefQueue): keep the
+## async request alive while the cell sits in limbo so reclaim can reverse
+## the transition without losing in-flight instantiation work. Moved out of
+## `_async_requests` at `_unload_cell` time; moved BACK to `_async_requests`
+## at reclaim time; finalized via `cell_manager.finalize_unloaded_cell()`
+## when the cell drains to empty in `_process_budgeted_unloading`.
+## Fix landed 2026-04-19 for the missing-objects-on-return bug.
+var _unloading_request_ids: Dictionary[Vector2i, int] = {}
+
 ## Hidden container for cells being unloaded (keeps them out of rendering)
 var _unload_container: Node3D = null
 
@@ -528,7 +538,14 @@ func _process(delta: float) -> void:
 			var srs: Dictionary = _static_renderer.get_stats()
 			reg_batches = int(srs.get("registry_batches", 0))
 			reg_slots = int(srs.get("registry_slots", 0))
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d" % [
+		# T.0 baseline instrumentation — Jolt broadphase workload proxies.
+		# `active` = dynamic RigidBody3Ds being simulated (carryables, NPCs).
+		# `pairs` = collision pairs broadphase is tracking — this is the
+		# direct proxy for per-object StaticBody3D cost. Before-number target
+		# per §6: pairs should drop ~100× post-T.2 (merged cell trimesh).
+		var phys_active := int(p.get_monitor(p.PHYSICS_3D_ACTIVE_OBJECTS))
+		var phys_pairs := int(p.get_monitor(p.PHYSICS_3D_COLLISION_PAIRS))
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d phys_active=%d phys_pairs=%d" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
@@ -541,6 +558,8 @@ func _process(delta: float) -> void:
 			_loading_cells.size(),
 			reg_batches,
 			reg_slots,
+			phys_active,
+			phys_pairs,
 		])
 
 	# Start timing for frame budget telemetry
@@ -809,7 +828,10 @@ func _update_loaded_cells() -> void:
 	var cells_to_load := _get_cells_in_radius(_camera_cell, load_radius_cells)
 	var t_grid := Time.get_ticks_usec()
 
-	# Reclaim cells that re-entered radius while still being unloaded
+	# Reclaim cells that re-entered radius while still being unloaded.
+	# State-reversal window closes here: move the async request back out of
+	# `_unloading_request_ids` limbo into `_async_requests` so pending queue
+	# entries resume draining into the (now-active) cell_node.
 	var reclaimed: Array[Vector2i] = []
 	for grid: Vector2i in _unloading_cells:
 		if grid in cells_to_load:
@@ -825,7 +847,12 @@ func _update_loaded_cells() -> void:
 				_world_container.add_child(cell_node)
 				_loaded_cells[grid] = cell_node
 				reclaimed.append(grid)
-				_debug("Reclaimed unloading cell %s (%d children remaining)" % [grid, cell_node.get_child_count()])
+				# Restore the async request from limbo so in-flight queue
+				# entries continue landing in the now-live cell.
+				if grid in _unloading_request_ids:
+					_async_requests[grid] = _unloading_request_ids[grid]
+					_unloading_request_ids.erase(grid)
+				_debug("Reclaimed unloading cell %s (%d children remaining, request restored)" % [grid, cell_node.get_child_count()])
 	for grid in reclaimed:
 		_unloading_cells.erase(grid)
 	var t_reclaim := Time.get_ticks_usec()
@@ -1034,16 +1061,27 @@ func _load_cell_sync(grid: Vector2i) -> void:
 
 
 ## Unload a cell at the given grid position (budgeted — gradual over multiple frames)
+##
+## State-reversal pattern: the cell_node enters unload-container LIMBO, where
+## it remains fully valid (queue entries keep draining into it, reclaim can
+## pull it back to `_loaded_cells` without any state rebuild). The async
+## request is NOT cancelled here — canceling the queue during unload would
+## discard 100-300 pending refs per cell and leave reclaim with a half-
+## populated cell_node. Instead the request_id parks in `_unloading_request_ids`
+## until the cell truly dies in `_process_budgeted_unloading`, where
+## `finalize_unloaded_cell` does the soft cleanup.
 func _unload_cell(grid: Vector2i) -> void:
 	# S.1 follow-up: breadcrumb the unload path so if SIGSEGV fires here we know.
 	CrashBreadcrumb.write("unload_cell_begin", str(grid))
-	# Cancel any pending async request for this cell
+	# Park any pending async request for this cell in the limbo registry.
+	# Do NOT call cell_manager.cancel_async_request — that filters the queue
+	# and frees the cell_node, which defeats state reversal on reclaim.
 	if grid in _async_requests:
 		var request_id: int = _async_requests[grid]
-		_cell_manager.cancel_async_request(request_id)
 		_async_requests.erase(grid)
 		_loading_cells.erase(grid)
-		_debug("Cancelled async request %d for cell %s" % [request_id, grid])
+		_unloading_request_ids[grid] = request_id
+		_debug("Parked async request %d for cell %s (state-reversal limbo)" % [request_id, grid])
 
 	if grid not in _loaded_cells:
 		return
@@ -1100,13 +1138,23 @@ func _process_budgeted_unloading() -> void:
 	for grid: Vector2i in _unloading_cells:
 		var cell_ref: Variant = _unloading_cells[grid]
 		if not is_instance_valid(cell_ref):
+			# Cell_node was freed externally — finalize the parked request
+			# so its queue entries don't leak past the cell's death.
+			if grid in _unloading_request_ids:
+				_cell_manager.finalize_unloaded_cell(_unloading_request_ids[grid])
+				_unloading_request_ids.erase(grid)
 			completed_grids.append(grid)
 			continue
 		var cell_node: Node3D = cell_ref as Node3D
 
 		var children_count := cell_node.get_child_count()
 		if children_count == 0:
-			# Cell is empty, free the container
+			# Cell is empty, free the container. State-reversal window closes
+			# here — cell is truly dying, finalize the parked async request.
+			CrashBreadcrumb.write("bu::cell_qfree_empty", str(grid))
+			if grid in _unloading_request_ids:
+				_cell_manager.finalize_unloaded_cell(_unloading_request_ids[grid])
+				_unloading_request_ids.erase(grid)
 			cell_node.queue_free()
 			completed_grids.append(grid)
 			continue
@@ -1144,8 +1192,12 @@ func _process_budgeted_unloading() -> void:
 			batch += 1
 			total_freed += 1
 
-		# Check if cell is now empty
+		# Check if cell is now empty — state-reversal window closes, finalize.
 		if cell_node.get_child_count() == 0:
+			CrashBreadcrumb.write("bu::cell_qfree_drained", str(grid))
+			if grid in _unloading_request_ids:
+				_cell_manager.finalize_unloaded_cell(_unloading_request_ids[grid])
+				_unloading_request_ids.erase(grid)
 			cell_node.queue_free()
 			completed_grids.append(grid)
 
