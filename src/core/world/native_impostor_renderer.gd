@@ -1268,6 +1268,13 @@ func dump_diagnostic() -> String:
 ## Called by streaming manager
 func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 	_last_center_cell = center_cell
+	# SubsystemToggles gate: when `impostors` is toggled off, refuse to queue
+	# any impostor cells. `_process` already bails early on `_streaming_enabled`,
+	# but the producer side needs the same gate or `_pending_impostor_cells`
+	# grows unbounded as the camera moves. Matches the pattern in
+	# static_object_renderer.add_instance / object_paging.update_for_camera.
+	if not _streaming_enabled:
+		return
 	if not impostor_candidates:
 		push_warning("[NativeImpostorRenderer] update_impostor_area called but impostor_candidates is null!")
 		return

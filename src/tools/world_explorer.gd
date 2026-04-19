@@ -1584,16 +1584,20 @@ func _setup_subsystem_toggles() -> void:
 				_env_controls.on_native_volumetric_fog_toggled(on),
 	}
 
+	# S.0 (near_tier_refactor.md 2026-04-19): MID / HLOD / IMPOSTORS
+	# parked at boot while open-world streaming refactor is in flight.
+	# Flip back to true individually once each tier re-lands under the
+	# per-cell state machine (phases S.7+).
 	var defaults: Dictionary = {
 		"terrain": true,
 		"ocean": false,
 		"sky": true,
 		"weather": true,
 		"characters": _show_characters,
-		"impostors": true,
-		"mid_objects": true,
+		"impostors": false,
+		"mid_objects": false,
 		"near_objects": true,
-		"hlod": true,
+		"hlod": false,
 		"distant_lights": true,
 		"shadows": true,
 		"postfx": true,
@@ -1601,15 +1605,18 @@ func _setup_subsystem_toggles() -> void:
 
 	_subsystem_toggles.setup(callbacks, defaults)
 
-	# CLI: --near-only disables MID + HLOD + FAR (impostors) at boot.
-	# Diagnostic mode: user wants to see what only-NEAR looks like under
-	# the current streaming pipeline without touching production defaults.
+	# Boot banner: make the parked state impossible to miss.
+	_log("[color=yellow][NEAR-only mode][/color] MID / HLOD / IMPOSTORS parked — open_world_streaming refactor in progress (docs/plans/distant_rendering_2026_04/near_tier_refactor.md)")
+	Log.info("streaming", "[NEAR-only mode] MID / HLOD / IMPOSTORS defaults=false; NEAR-tier refactor in progress")
+
+	# CLI: --near-only is now the default behavior; flag retained as a
+	# no-op for any launch scripts / docs that still pass it explicitly.
 	for a in OS.get_cmdline_args():
 		if a == "--near-only":
 			_subsystem_toggles.set_flag("mid_objects", false)
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
-			_log("[color=yellow]--near-only: mid/hlod/impostors OFF[/color]")
+			_log("[color=yellow]--near-only: mid/hlod/impostors OFF (now default — flag is redundant)[/color]")
 			break
 
 	# Register console commands

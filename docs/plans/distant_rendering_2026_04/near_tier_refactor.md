@@ -1,7 +1,7 @@
 # Open-World Streaming Architecture — Godotwind 2026-04-19
 
-**Status:** DRAFT — master architecture doc. Awaiting user review. No code changes authorized yet.
-**Paired with:** `docs/plans/distant_rendering_2026_04/plan.md` (parent distant-rendering work log, inherits its §2 ground rules).
+**Status:** DRAFT v2 — patched 2026-04-19 after coder review. User authorized doc patch + NEAR-only scope. No code changes authorized yet.
+**Paired with:** `docs/plans/distant_rendering_2026_04/plan.md` (parent distant-rendering work log, inherits its §2 ground rules; PHASE 0 baseline must run BEFORE this doc's S.0).
 **Supersedes:** the earlier "ring-based tier" sketch in revisions of this file prior to 2026-04-19.
 
 Godotwind is a **generic open-world RPG framework**, not a Morrowind-specific streamer. The architecture must therefore reflect **modern AAA streaming patterns**, not legacy Bethesda cell-grid idioms. Morrowind data is one adapter on top; the core streaming layer should look like what a team at Epic / Guerrilla / CDPR would build in 2026.
@@ -15,10 +15,18 @@ Read in this order:
 2. §2 — Problem Statement (why we're here).
 3. §3 — Target Architecture (the shape we're building toward).
 4. §4 — Current Code Mapping (what we already have; what needs to change).
-5. §5 — Refactor Phases. Pick the first phase with status `TODO`.
-6. §6 — Godot-Native Innovations to preserve. Non-negotiable.
-7. §7 — Ground Rules (inherited from parent plan).
-8. §8 — Open Questions.
+5. §4.5 — Salvage Strategy (KEEP / DELETE / REWRITE — what survives the refactor).
+6. §5 — Refactor Phases. Pick the first phase with status `TODO`.
+7. §6 — Godot-Native Innovations to preserve. Non-negotiable.
+8. §7 — Ground Rules (inherited from parent plan).
+9. §8 — Open Questions (user answers locked 2026-04-19, see §8.1).
+
+**User-locked acceptance criterion (2026-04-19):**
+> "When launching the game, only NEAR loads. When I move: circle of meshes follows my steps neatly, and unloads where I left."
+
+This is the S.6 sign-off gate. Every phase S.0-S.5 must preserve or improve toward this behavior. NO MID / HLOD / IMPOSTOR work until the user signs off on this in chat.
+
+**Hard prerequisite:** parent `plan.md` PHASE 0 (baseline measurement on `Godotwind.tscn` with `bench`) MUST be run BEFORE this doc's S.0 starts. Without baseline numbers in parent §4, none of S.0-S.6 have a measurable acceptance gate.
 
 Acceptance gate: every phase ends with before/after numbers recorded in §9 (Measurement Log). No numbers = phase not done.
 
@@ -64,6 +72,7 @@ The cell is the **only** I/O and scene-graph attach unit.
 - Cell size: `DistanceUtils.CELL_SIZE_METERS = 8192 MW units ≈ 117 m`. Morrowind-derived but engine-generic — arbitrary game data can author cells at any size by changing this constant.
 - Active set = union over all `StreamingSource` query ranges. NOT a fixed ring around the player.
 - Transitions on boundary crossings use `mCellLoadingThreshold`-style hysteresis: a cell unloads when `min_dist_from_source > cell_size/2 + HYSTERESIS_MARGIN`, not the same threshold that loaded it. Prevents thrash.
+- **Player-cell pin (OpenMW invariant).** The cell that contains the player position (`mCurrentCell`) NEVER unloads regardless of the distance formula. At cell size 117 m, half is 58 m; with a 15 m hysteresis margin, naive math allows the player's own cell to drop when the camera sits near a corner. Explicit guard in `cell_manager`: `if cell_grid == _current_player_cell_grid: do not unload`.
 - Attach is incremental across frames (main-thread budget), but is NOT per-object distance-gated. If a cell is resident, every NEAR actor in it becomes a Node3D.
 
 References:
@@ -104,7 +113,7 @@ Transitions are driven by `min(dist_from_any_source)` against per-layer threshol
 
 References:
 - UE5 HLOD: independent grids per layer, `OnScreenSize` / loading-range metric.
-- Our `src/core/world/object_paging.gd` already implements adaptive 1×1 / 2×2 / 4×4 chunk sizes — **this IS the canonical pattern**, just not formalized as explicit HLOD layers.
+- Our `src/core/world/object_paging.gd` already implements adaptive 1×1 / 2×2 / 4×4 chunk sizes — **closest Godot equivalent of UE5 World Composition's runtime merger, NOT UE5 HLOD layers proper.** UE5 HLOD layers are authored bake-time meshes referenced by GUID; our merger thread-builds at runtime from prototype data. The two patterns reach the same end (one draw call per chunk footprint) via different paths. Plan keeps the runtime-merger implementation; only the activation API formalizes as "HLOD-style layers" so the FSM can drive it.
 
 ### 3.4 Per-Cell State Machine
 
@@ -163,6 +172,50 @@ What we already have vs. what needs to change.
 
 ---
 
+## 4.5 Salvage Strategy — KEEP / DELETE / REWRITE
+
+User asked 2026-04-19: "we have done a few things since master that might be useful, can't just revert." Correct. Branch has real wins. Salvage > revert.
+
+### KEEP (survives refactor unchanged or near-unchanged)
+| File / system | Why it stays |
+|---|---|
+| `prototype_registry.gd` (450 lines) + `prototype_batch.gd` (440 lines) | World-scoped MultiMesh batching IS the canonical Godot MID pattern. Becomes the implementation under `request_cell_tier(grid, MID)` in S.7. |
+| `object_paging.gd` (998 lines) | Runtime chunk merger. Re-frames as HLOD layer impl in S.7. Code stays, semantics tighten. |
+| `streaming_benchmark.gd` + `benchmark_hud.gd` + `subsystem_toggles.gd` | Non-negotiable. The acceptance-gate harness for every phase. |
+| Phase 8 loading state machine (`85018f9` cold-boot + teleport gate) | Composes cleanly with per-cell FSM. Becomes the global state above the per-cell layer. |
+| Async impostor texture-array rebuild (`387ac49`) | Standalone win. |
+| `WorldMidCuller.cs` C# cull kernel (`b35cd1c`) | Standalone win, used by registry path. |
+| `distance_utils.gd` centralized constants | Single source of truth for ranges. |
+| ESM grid-indexed cell lookup (`ESMManager.get_cell_by_grid`) | Independent of streaming layer. |
+| `native_impostor_renderer.gd` | FAR tier stays as-is per §1 Non-Goals. |
+| Audit docs + `STATUS.md` + `docs/audit/` salvage pass | Reference material. |
+
+### DELETE (the actual debt — this is what's been broken)
+| Code | File | Reason |
+|---|---|---|
+| Per-object 4-way `(mid_worthy, beyond_near, always_near)` branch | `cell_manager.gd:1389-1470` | Wrong axis of variation. Replaced by per-cell tier. |
+| `_defer_for_near` + `_deferred_near_refs` + `_create_near_only_rs_instance` + `process_deferred_near` + `clear_deferred_for_cell` + `get_deferred_near_count` | `cell_manager.gd` | Defer queue exists ONLY because per-object gating exists. |
+| `_process_deferred_near_instantiation` | `native_streaming_manager.gd` | Same. |
+| `_process_mid_to_near_promotions` + `_promoted_objects` + `_demote_all_promoted` + `promote_mid_to_near` | `native_streaming_manager.gd` | Per-actor promote/demote dance. Replaced by cell-level tier swap. |
+| `_apply_near_visibility_range` per-object override | `cell_manager.gd` | VR will be driven by per-cell tier, not per-object override. |
+| `lod_configurator.gd` | already removed in current branch | — |
+
+### REWRITE (against new FSM, NOT delete + re-add later)
+| Concern | Current shape | Target shape |
+|---|---|---|
+| Cell activation loop | `native_streaming_manager._update_loaded_cells` walks a fixed radius around camera | `StreamingSourceRegistry.get_active_cells()` — union over all sources, returns Set[Vector2i] |
+| Cell load entry point | `_queue_cell_load(grid, ...)` | `cell_manager.request_cell_tier(grid, target_tier)` — single atomic transition function |
+| AABB-upgrade decision | runtime check at `cell_manager.gd:1414-1418` | moved to prebake (`model_prebaker.gd`) so the prototype's `mid_worthy` flag is correct from disk; no runtime upgrade needed |
+| `_model_loader` cache write/read | informal — write under no lock, read under no lock | `RWMutex` (`Mutex` for writes; reads acquire shared) OR double-buffered immutable snapshot. Audit every cache site. |
+
+### HONEST ACCOUNTING
+- Net code AFTER refactor will sit between current branch and master.
+- Most of the 5,497 line `src/core/world/` insertion since master is debt the per-object branch dragged with it (defer queue, promotion, AABB upgrade, etc.). That goes.
+- The genuine wins (registry/batch/paging/bench/Phase 8) — ~2,400 lines — survive.
+- Expect ~-2,500 to -3,000 net lines vs current branch after S.6, with NEAR ring actually working.
+
+---
+
 ## 5. Refactor Phases
 
 Each phase is small, independently testable, and ends with a measurement (§9). Phases are ordered so the game stays runnable throughout — we never leave `master` in a broken state.
@@ -171,12 +224,21 @@ Each phase is small, independently testable, and ends with a measurement (§9). 
 
 **Goal:** isolate NEAR tier. Boot-time defaults: MID/HLOD/IMPOSTORS off. Does NOT delete tier code — just gates it at the default-flag level.
 
+**Prerequisite:** parent `plan.md` PHASE 0 baseline run. §9 §4.1 numbers exist before S.0 starts.
+
 **Changes:**
 - `src/tools/world_explorer.gd` defaults dict (~line 1587): flip `mid_objects`, `hlod`, `impostors` to `false`.
 - Console banner on boot: `"[NEAR-only mode] MID/HLOD/IMPOSTORS parked — open_world_streaming refactor in progress"` so the user knows.
 - No code deletion yet.
 
-**Acceptance:** `toggle list` on boot shows NEAR + TERRAIN on, everything else off. Scene launches with only NEAR + terrain rendering. No regressions to NEAR behavior (the bugs we're fixing persist — this phase just isolates them).
+**Acceptance:**
+- `toggle list` on boot shows NEAR + TERRAIN on, everything else off.
+- Scene launches with only NEAR + terrain rendering.
+- User-locked behavior gate (the bug-of-record from §2 — these still fail at S.0; they pass at S.6):
+  - Launch `Godotwind.tscn`, walk in any direction.
+  - Only NEAR objects appear (no MID RS instances, no HLOD chunks, no impostors).
+  - Per the user's 2026-04-19 acceptance: "circle of meshes follows my steps neatly, and unloads where I left." S.0 alone does NOT pass this — phase exists to isolate the failure for S.1+ to fix.
+- Measurement (§9): FPS, draw calls, `rendered_objects` count at Seyda Neen dock with NEAR + TERRAIN only.
 
 **Risk:** trivial. Pure default flip.
 
@@ -190,15 +252,18 @@ Each phase is small, independently testable, and ends with a measurement (§9). 
 - `cell_manager.gd::process_async_instantiation` (line ~1351): delete Step 1 (mid-worthy branch) and Step 2 (non-mid-worthy beyond-near branch). Keep only Step 3 (full Node3D instantiation).
 - Delete: `_defer_for_near`, `_deferred_near_refs`, `_create_near_only_rs_instance`, `process_deferred_near`, `clear_deferred_for_cell`, `get_deferred_near_count`.
 - Delete: `_process_deferred_near_instantiation` in `native_streaming_manager.gd`.
-- Gate behind `const ENABLE_MID_PROMOTION := false` (top of `native_streaming_manager.gd`): the promotion/demotion loops (`_process_mid_to_near_promotions`, `_promoted_objects`, `_demote_all_promoted`, etc.) — keeps the code readable for when MID comes back, dead-code eliminated by the const.
+- **Delete (don't const-gate)** the promotion/demotion loops in `native_streaming_manager.gd`: `_process_mid_to_near_promotions`, `_promoted_objects`, `_demote_all_promoted`, `promote_mid_to_near`. CLAUDE.md Simplicity rule: replace, don't extend bad architecture. When MID comes back in S.7 it will be driven by `request_cell_tier(grid, MID)`, not per-actor promote. Git restores the deleted code if a reference is needed.
 - Delete `_apply_near_visibility_range` added last session (no longer needed — VR will be driven by per-cell tier, not per-object override).
+- **AABB upgrade orphan fix (gap #1).** Current `cell_manager.gd:1414-1418` runtime-upgrades non-mid-worthy objects with AABB max-dim > 2 m. Pre-classifier is broken because it sees only the path. **Move the AABB upgrade decision into the prebake pipeline** (`src/tools/prebaking/model_prebaker.gd`) so the prototype's `mid_worthy` flag is correct from disk. One-time prebake re-run regenerates `.res` files with the corrected flag. After this, runtime upgrade is deleted; `mid_worthy` is read from disk and trusted. (S.1's deletion of Step 1 makes the runtime upgrade unreachable anyway during NEAR-only mode, but the prebake fix is required before S.7's MID re-enable.)
 
 **Acceptance:**
 - `toggle none → toggle terrain → toggle near_objects` + walk anywhere. Every object in every loaded cell appears as a Node3D. No ghost objects beyond 150 m. NEAR Node3Ds cull via the cell's visibility, not per-object VR.
+- **User-locked NEAR criterion (2026-04-19):** "circle of meshes follows my steps neatly, and unloads where I left." S.1 should already approach this — defer queue is gone, every active-cell ref is a Node3D. Residual unload glitches expected, fixed in S.5.
 - No compile errors. No runtime warnings about missing `_defer_for_near` callers.
-- Measurement: record frame time + loaded-object count before and after.
+- `git grep` returns 0 hits for: `_defer_for_near|_deferred_near_refs|_create_near_only_rs_instance|process_deferred_near|_process_mid_to_near_promotions|_promoted_objects|_demote_all_promoted|promote_mid_to_near|_apply_near_visibility_range`.
+- Measurement (§9): record frame time + loaded-object count + per-frame `process_async_instantiation` time before vs after.
 
-**Risk:** medium. Removing the defer path surfaces any downstream assumption that MID RS instances exist (e.g. promotion callers). Follow up with compile pass + a quick grep for leftover references.
+**Risk:** medium. Removing the defer path + promotion loops surfaces any downstream assumption that MID RS instances exist. Follow up with compile pass + grep for leftover references. Likely 5-10 cleanup edits in adjacent files.
 
 ---
 
@@ -245,14 +310,19 @@ Each phase is small, independently testable, and ends with a measurement (§9). 
 
 **Goal:** warm assets one cell ahead of the player's predicted position so the attach phase sees pre-parsed data. Eliminates the "crested a hill, nothing loaded" symptom.
 
+**Hard prerequisite:** the `model_loader` instantiate-race noted in commit `5c1bc88` ("disable auto-trigger pending model_loader instantiate-race fix") must be resolved BEFORE S.4 ships, OR S.4 fixes it as part of the cache thread-safety work below. Worker-thread preload warm WILL amplify the existing race if not addressed. Block S.4 acceptance until race is closed.
+
 **Changes:**
 - New class `CellPreloader` in `src/core/world/cell_preloader.gd`. Per-frame call: `preload_cells(sources, prediction_time)`.
 - Implementation:
-  - For each source, compute `predicted_pos = source.position + source.velocity * prediction_time`.
+  - For each source, compute `predicted_pos = source.position + source.velocity * prediction_time`. `prediction_time` is **velocity-scaled**: `clamp(k_distance / max(speed, 1.0), 0.3, 1.5)` seconds — short look-ahead for slow walk, longer for fast traversal. Default `k_distance = 5 m`.
   - Query cells within `preload_range` of predicted_pos.
-  - Submit `WorkerThreadPool.add_task` per cell: parse refs from ESM, warm `_model_loader` cache (load `.res` files, unpack materials — NO scene-tree attach on worker thread).
+  - Submit `WorkerThreadPool.add_task` per cell: parse refs from ESM, warm `_model_loader` cache (load `.res` files, unpack materials — NO scene-tree attach on worker thread, NO `instantiate()` from worker thread per CLAUDE.md anti-pattern list).
   - Cache resident for `expiry_delay` seconds after last source proximity — if player backtracks, cell is instant-attach.
-- Thread-safety: `_model_loader` cache writes behind a `Mutex`; reads are lockless (Godot `Dictionary` reads are safe concurrent with no writes).
+- **Thread-safety (gap #3 — corrected from prior draft).** Earlier draft claimed "Godot `Dictionary` reads are safe concurrent with no writes." That is NOT a documented Godot guarantee — `Variant` copies on read mutate refcount on shared objects. Use **one of:**
+  - **Option A (preferred): `Mutex` on every read AND write site of the cache.** Simple, safe, lock contention is negligible for the read-mostly workload (cells parse once, get read N times during attach). Audit every call site of `_model_loader` cache reads — they ALL acquire the mutex.
+  - **Option B (faster, more code): double-buffered immutable snapshot.** Worker writes into a "next" dictionary; on completion atomically swaps (`atomic_exchange` on the `Object` pointer / via Godot's `Mutex` + pointer swap). Readers always see a consistent snapshot. Requires ~50 extra lines + careful ownership.
+  - **Pick A unless A measures > 0.5 ms/frame in profiling.** Premature optimization otherwise.
 - Main-thread attach path (unchanged API) hits warm cache → no parse cost in the attach frame.
 
 **Acceptance:**
@@ -260,9 +330,10 @@ Each phase is small, independently testable, and ends with a measurement (§9). 
 - Fast traversal (`player.speed = 50`): degraded gracefully (some cells miss the preload window but don't crash).
 - Preload budget < 2 ms / frame main thread (worker threads do the heavy lift).
 - Cache eviction works: leave a region, return 60 s later, no stale cache.
+- **Stress test:** 5-minute looped flyby with `bench`. No sig11 or `model_loader` race assert. Closes commit `5c1bc88`'s open race.
 - Measurement: P95 attach time per cell, pre-vs-post preload.
 
-**Risk:** medium. Thread-safety of `_model_loader`. Needs careful audit of cache write sites.
+**Risk:** medium-high. Thread-safety of `_model_loader` is the biggest open risk in the entire refactor. Audit every cache write AND read site. Add a debug assert (`# debug-only Mutex.try_lock() / unlock()` pair) that the lock is held during cache mutations during early phases.
 
 ---
 
@@ -288,7 +359,20 @@ Each phase is small, independently testable, and ends with a measurement (§9). 
 
 **Goal:** record perf numbers for NEAR-only mode in §9. User verifies NEAR behavior before any of MID / HLOD / IMPOSTORS comes back.
 
-**Acceptance:** before/after table in §9 for each phase S.0-S.5. User confirms "NEAR is satisfying" in chat. Any outstanding bugs blocked here until resolved.
+**Acceptance — user-locked 2026-04-19:**
+> "When launching the game, only NEAR loads. When I move: circle of meshes follows my steps neatly, and unloads where I left."
+
+Concrete pass criteria (must ALL hold during interactive user pilot):
+1. Boot `Godotwind.tscn`. Wait for streaming settle (HUD `rendered_objects` flat). Only NEAR objects + terrain visible. No ghost MID RS instances. No HLOD chunks. No impostors.
+2. Walk in any direction at default speed for 30 s. Visible NEAR set forms a clean disc / band around the player position; new objects enter on the leading edge as the player moves into them.
+3. Turn around, walk back. Cells re-activate from cache (fast path); no parse hitch.
+4. Walk past the cells, keep going. Cells behind the player unload after `cell_size/2 + HYSTERESIS` of distance crossed. NO orphan objects left in world. NO ghost RS instances visible past the unload boundary.
+5. Sprint (`player.speed = 50`) for 60 s along a straight line. Preload keeps up; no "crested a hill, nothing loaded" symptom.
+6. `bench` run at Seyda Neen dock. Frame time stable. No frame spikes > 25 ms (NEAR-only baseline; we're not at 140 FPS target yet — that requires MID/HLOD/IMPOSTOR re-enable in S.7+).
+7. Before/after table in §9 fully populated for S.0-S.5.
+8. User confirms in chat: "NEAR is satisfying" or equivalent. Until that message lands, S.7+ is blocked.
+
+Any outstanding bug → re-open whichever phase introduced it. Don't paper over in S.6.
 
 ---
 
@@ -340,15 +424,21 @@ From `docs/plans/distant_rendering_2026_04/plan.md §2`:
 
 ## 8. Open Questions
 
-Need user answers before coding phase S.0.
+### 8.1 Locked 2026-04-19 (user answers via coder review)
 
-1. **Cell activation range per source.** OpenMW uses 3×3 cells (1-cell radius). UE5 default is 256 m loading range (~2 cells at our size). Propose: `active_range = 2 cells = 234 m` for the player source. Acceptable?
-2. **Hysteresis margin.** OpenMW uses `1024 units / 70 = ~14 m` past cell boundary. Propose: `HYSTERESIS_MARGIN = 15 m`. OK?
-3. **Preload prediction time.** UE5 exposes as setting, OpenMW uses ~1 s. Propose: `prediction_time = 0.5 s` (at 5 m/s walk = 2.5 m, at 20 m/s run = 10 m). OK?
-4. **Preload cache eviction.** `expiry_delay = 60 s`, `max_cache_size = 64 cells`. Placeholders — we'll tune against runtime numbers. OK to start here?
-5. **Single `StreamingSource` abstraction vs. separate source types?** I can either have one class with a range dict `{near: 234m, mid: 600m, hlod: 1000m, far: 5000m}`, or specialized subclasses (`PlayerSource`, `CinematicSource`). Single class is simpler; UE5 uses one class with priority. Single class OK?
-6. **Parked tier code: gate with `const ENABLE_MID_PROMOTION := false` or delete and git-restore later?** Gating keeps the file readable when the tier comes back; deletion is cleaner. User preference?
-7. **Where does `StreamingSource` live in the scene tree?** Proposal: the camera rig auto-registers. For tests / scripted scenes, code can register manually via `StreamingSourceRegistry.register_source(source)`. OK?
+1. **Cell activation range per source.** `active_range = 2 cells = 234 m` for the player source. (OpenMW 3×3 / UE5 256 m equivalents.) **LOCKED.**
+2. **Hysteresis margin.** `HYSTERESIS_MARGIN = 15 m` past cell boundary. **LOCKED.** Plus player-cell pin per §3.1.
+3. **Preload prediction time.** Velocity-scaled: `clamp(5.0 / max(speed, 1.0), 0.3, 1.5)` seconds. **LOCKED.** Replaces fixed 0.5 s.
+4. **Preload cache eviction.** `expiry_delay = 60 s`, `max_cache_size = 128 cells`. **LOCKED.** (128 not 64 — backtrack support.) Tune against §9 numbers.
+5. **Single `StreamingSource` abstraction.** Single class with range dict + priority. UE5-style. **LOCKED.**
+6. **Parked tier code.** **DELETE, don't const-gate.** CLAUDE.md Simplicity rule. Git restores if needed. **LOCKED.**
+7. **`StreamingSource` scene-tree placement.** Camera rig auto-registers as primary source. Tests / scripted scenes register manually via `StreamingSourceRegistry.register_source(source)`. **LOCKED.**
+
+### 8.2 Still open (need answers if/when phase reaches them)
+
+8. **`model_loader` race.** Is the race in `5c1bc88` already mapped (which files / which functions race)? If not, a discovery sub-task is needed before S.4. Coder can investigate or user can drop a known-bad case in chat.
+9. **Cell-cache memory ceiling.** 128 cells × ~1-3 MB prototype data = ~128-384 MB. Acceptable? Or should we cap at total bytes instead of cell count?
+10. **AABB upgrade prebake re-run.** Moving the AABB-upgrade decision to prebake (S.1 fix) requires regenerating prototype `.res` files. Is the prebake pipeline idempotent + fast enough to re-run without disrupting other work, or does this need its own scheduled session?
 
 ---
 
@@ -374,10 +464,20 @@ Record before/after for each phase. Canonical metrics:
 
 ## 10. Review Checklist (for user)
 
-- [ ] Non-Goals (§1) correctly scope the work.
-- [ ] Problem Statement (§2) matches observed symptoms.
-- [ ] Target Architecture (§3) reflects modern AAA patterns, not a Morrowind-specific idiom.
-- [ ] Current Code Mapping (§4) correctly identifies what to keep, delete, gate, add.
-- [ ] Phase ordering (§5) — park → delete per-object → abstract source → state machine → preload → unload queue → baseline.
-- [ ] Godot-Native Innovations (§6) — confirm the list is complete; anything missing I should preserve?
-- [ ] Open Questions (§8) — answer before coding S.0.
+- [x] Non-Goals (§1) correctly scope the work.
+- [x] Problem Statement (§2) matches observed symptoms.
+- [x] Target Architecture (§3) reflects modern AAA patterns, not a Morrowind-specific idiom.
+- [x] Current Code Mapping (§4) correctly identifies what to keep, delete, gate, add.
+- [x] Salvage Strategy (§4.5) — KEEP / DELETE / REWRITE tables explicit. Honest accounting of net line count.
+- [x] Phase ordering (§5) — park → delete per-object → abstract source → state machine → preload → unload queue → baseline.
+- [x] Godot-Native Innovations (§6) — list confirmed.
+- [x] Open Questions (§8.1) — locked by user 2026-04-19.
+- [ ] Parent `plan.md` PHASE 0 baseline run — gate before S.0.
+- [ ] User-locked NEAR acceptance criterion (§0 + §S.6) — sign-off blocks S.7+.
+
+---
+
+## 11. Patch Log
+
+- **v2 (2026-04-19, post-coder-review):** added §0 user-locked acceptance criterion + parent PHASE 0 prerequisite. Added §3.1 player-cell pin (OpenMW invariant). Added §4.5 Salvage Strategy with KEEP/DELETE/REWRITE tables. S.0 acceptance now lists explicit launch-and-walk gate. S.1 deletes promotion code (not const-gate per CLAUDE.md Simplicity), adds AABB-upgrade prebake fix. S.3 §3.3 honest about `object_paging.gd` ≠ UE5 HLOD layers (it's UE5 World Composition runtime merger). S.4 thread-safety claim corrected — `Mutex` required, "lockless dictionary read" claim was wrong; added `model_loader` race prerequisite from commit `5c1bc88`. S.4 prediction time velocity-scaled. S.6 acceptance binds user's launch-and-walk gate as the sign-off contract. §8.1 questions locked. §8.2 holds 3 still-open items for later phases.
+- **v1 (2026-04-19):** initial DRAFT. Superseded the prior ring-based sketch.
