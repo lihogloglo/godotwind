@@ -683,6 +683,25 @@ func _init_terrain3d() -> void:
 	terrain_3d.set("collision_mode", 1)  # Dynamic_Game
 	terrain_3d.set("collision_shape_size", 16)  # 16m chunks
 	terrain_3d.set("collision_radius", 64)  # 64 chunks radius (~1km dynamic collision ring)
+	terrain_3d.set("collision_layer", 1)
+	terrain_3d.set("collision_mask", 1)
+	# CRITICAL (fix 2026-04-20): Terrain3D v1.0.1 does NOT build collision
+	# shapes automatically — `set_camera()` + `collision.build()` are required
+	# by the API contract. Without them, Dynamic_Game mode silently does
+	# nothing: no StaticBody, no shapes, raycasts hit nothing. See
+	# https://raw.githubusercontent.com/TokisanGames/Terrain3D/v1.0.1/doc/api/class_terrain3dcollision.rst
+	if camera != null:
+		terrain_3d.set_camera(camera)
+	var terrain_collision: Object = terrain_3d.get("collision")
+	if terrain_collision and terrain_collision.has_method("build"):
+		terrain_collision.call("build")
+		Log.info("tools", "Terrain3D collision.build() called")
+	else:
+		push_warning("Terrain3D.collision object missing or has no build() — collision will not work")
+	var dbg_mode: Variant = terrain_3d.get("collision_mode")
+	var dbg_layer: Variant = terrain_3d.get("collision_layer")
+	Log.info("tools", "Terrain3D collision: mode=%s layer=%s shape_size=%d radius=%d camera=%s" % [
+		str(dbg_mode), str(dbg_layer), 16, 64, camera.name if camera else "null"])
 
 	# Load terrain textures
 	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
@@ -2498,6 +2517,10 @@ func _spawn_debug_ball() -> void:
 	var ball := RigidBody3D.new()
 	ball.name = "DebugBall"
 	ball.mass = 5.0
+	ball.collision_layer = 1
+	ball.collision_mask = 1
+	ball.contact_monitor = true
+	ball.max_contacts_reported = 4
 	var shape := SphereShape3D.new()
 	shape.radius = 0.25
 	var cs := CollisionShape3D.new()
@@ -2520,17 +2543,39 @@ func _spawn_debug_ball() -> void:
 	ball.global_transform = spawn_xf
 	add_child(ball)
 	ball.linear_velocity = -spawn_xf.basis.z * 20.0
+	# Diagnostic raycast from spawn pos straight down — if terrain collision is
+	# working, we'll hit something within 500m. If not, the ball will fall
+	# forever. Log result so the user doesn't have to guess.
+	var space_state := get_world_3d().direct_space_state
+	var ray_params := PhysicsRayQueryParameters3D.create(
+		spawn_xf.origin, spawn_xf.origin + Vector3.DOWN * 500.0
+	)
+	ray_params.collision_mask = 1
+	var hit := space_state.intersect_ray(ray_params)
+	if hit.is_empty():
+		_log("[color=red]Ball raycast DOWN 500m hit NOTHING — collision broken at spawn pos %s[/color]" % spawn_xf.origin)
+	else:
+		var hit_body: Object = hit.get("collider")
+		var hit_name: String = str(hit_body.name) if hit_body and hit_body.has_method("get") else "?"
+		var hit_layer: Variant = hit_body.get("collision_layer") if hit_body and hit_body.has_method("get") else "?"
+		_log("[color=lime]Ball raycast hit '%s' at %s (%.1fm below, layer=%s)[/color]" % [
+			hit_name, hit["position"], spawn_xf.origin.y - float(hit["position"].y), str(hit_layer)])
+	# Connect body_entered so we KNOW if the ball actually hits something.
+	ball.body_entered.connect(func(body: Node) -> void:
+		_log("[color=lime]Ball collided with '%s'[/color]" % str(body.name))
+	)
 	var timer := Timer.new()
 	timer.wait_time = 15.0
 	timer.one_shot = true
 	timer.timeout.connect(func() -> void:
 		if is_instance_valid(ball):
+			_log("Ball auto-freed (15s) — final pos %s linvel %s" % [ball.global_position, ball.linear_velocity])
 			ball.queue_free()
 		timer.queue_free()
 	)
 	add_child(timer)
 	timer.start()
-	_log("[color=cyan]Debug ball spawned[/color]")
+	_log("[color=cyan]Debug ball spawned at %s[/color]" % spawn_xf.origin)
 
 
 func _process(delta: float) -> void:
