@@ -124,6 +124,8 @@ func _clear_transient_profile() -> void:
 
 ## Get the effective max_actor_distance for the current call, honoring any
 ## per-call override set via _current_load_profile.
+# PHASE_A:MAIN_ONLY — reads _current_load_profile transient; dispatcher must
+# snapshot this into entry state before enqueue if worker path ever needs it.
 func _effective_max_actor_distance() -> float:
 	if _current_load_profile != null:
 		return _current_load_profile.max_actor_distance
@@ -131,6 +133,7 @@ func _effective_max_actor_distance() -> float:
 
 
 ## Get the effective use_static_renderer for the current call.
+# PHASE_A:MAIN_ONLY — same reason as _effective_max_actor_distance.
 func _effective_use_static_renderer() -> bool:
 	if _current_load_profile != null:
 		return _current_load_profile.use_static_renderer
@@ -181,6 +184,8 @@ var _inst_call_count: int = 0
 ## call. Read by `cell_manager.process_async_instantiation` for per-type
 ## timing breakdown. Scientific-approach instrumentation, not hypothesis.
 var last_type_name: String = ""
+# PHASE_A:MAIN_ONLY — orchestrator. ESMManager.get_any_record autoload read +
+# dispatch to type handlers. Stays main-thread; split lives in _instantiate_model_object.
 func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	_inst_call_count += 1
 	# Reset per-call state — caller (cell_manager) reads these after return.
@@ -236,6 +241,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 ## Check if a model is considered "significant" for per-object LOD
 ## Significant objects include buildings, towers, large rocks, landmarks
 ## Uses ImpostorCandidates patterns (same ones used for impostor generation)
+# PHASE_A:MAIN_ONLY — lazy-inits _impostor_candidates; writable shared state.
 func is_significant_object(model_path: String) -> bool:
 	# Lazy initialization of impostor candidates
 	if not _impostor_candidates:
@@ -253,6 +259,10 @@ func is_significant_object(model_path: String) -> bool:
 ## Instantiate a standard object with a NIF model
 ## For flora/rocks, uses StaticObjectRenderer for ~10x faster instantiation
 var _model_obj_count: int = 0
+# PHASE_A:MAIN_ONLY — the Phase A split point. Current body is fully synchronous;
+# post-Phase-A this function becomes the orchestrator that dispatches worker
+# tasks (lines 328-351 moved off-thread) and runs the main-thread tail
+# (lines 353-410: carryable / door / interior-collision / anim).
 func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO, type_name: String = "") -> Node3D:
 	_model_obj_count += 1
 
@@ -419,6 +429,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 ## Instantiate a flora/rock using StaticObjectRenderer (RenderingServer direct)
 ## Returns null (no Node3D created) - the instance exists only in RenderingServer
 ## This is ~10x faster than Node3D.duplicate()
+# PHASE_A:MAIN_ONLY — touches static_renderer singleton (register_from_prototype,
+# add_instance). RS calls are thread-safe but registry mutation must stay main.
 func _instantiate_static_object(ref: CellReference, model_path: String, cell_grid: Vector2i) -> Node3D:
 	var normalized := model_path.to_lower().replace("/", "\\")
 
@@ -795,6 +807,8 @@ func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int
 	return null
 
 
+# PHASE_A:MAIN_ONLY — set_script + signal connect + door_activated_handler
+# (bound to world_explorer). Plan §5 row 376-383; runs after worker returns.
 ## I.7 — Promote a spawned teleport door into a DoorInteractable.
 ## Called from _instantiate_model_object() for `type_name == "door"` refs
 ## whose `is_teleport` is true (DODT subrecord present).
@@ -868,6 +882,9 @@ func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_r
 ## every CollisionObject3D's collision_layer. Used by the DOOR adapter
 ## wiring above so door StaticBody3Ds become raycast-targetable without
 ## losing their existing Environment layer.
+# PHASE_A:WORKER_SAFE — pure property mutation on a detached subtree. Currently
+# only called from _attach_door_interactable (main-thread tail), but the helper
+# itself is safe either thread.
 func _add_interactable_layer_recursive(node: Node) -> void:
 	const INTERACTABLE_BIT: int = 1 << 2  # layer 3 = Interactable
 	if node is CollisionObject3D:
@@ -880,6 +897,7 @@ func _add_interactable_layer_recursive(node: Node) -> void:
 ## Check if any CollisionObject3D in the subtree has the Interactable bit set.
 ## Used after _add_interactable_layer_recursive to verify the stamp took effect
 ## (false when the door/item model has no baked collision shapes at all).
+# PHASE_A:WORKER_SAFE — pure property read.
 static func _has_interactable_collision(node: Node) -> bool:
 	const INTERACTABLE_BIT: int = 1 << 2
 	if node is CollisionObject3D:
@@ -897,6 +915,9 @@ static func _has_interactable_collision(node: Node) -> bool:
 ## whose NIF models lack baked collision shapes. The Area3D sits on layer 3
 ## only (Interactable) with monitoring/monitorable OFF — it's a passive
 ## raycast target, not an overlap detector. Matches Jolt perf guidance.
+# PHASE_A:MAIN_ONLY — called from _attach_door_interactable (main tail).
+# add_child on a detached root is likely safe off-thread, but keep main until
+# a future phase needs it on worker.
 static func _generate_interaction_area(root: Node3D) -> Area3D:
 	var aabb := _compute_mesh_aabb(root)
 	if not aabb.has_volume():
@@ -927,6 +948,7 @@ static func _generate_interaction_area(root: Node3D) -> Area3D:
 ## Compute the combined AABB of all MeshInstance3D nodes under root,
 ## expressed in root's LOCAL space. Uses local transforms only — safe
 ## to call before the node enters the scene tree.
+# PHASE_A:WORKER_SAFE — pure math on detached subtree.
 static func _compute_mesh_aabb(root: Node3D) -> AABB:
 	var aabbs: Array[AABB] = []
 	# Check root itself (if it has a mesh)
@@ -945,6 +967,7 @@ static func _compute_mesh_aabb(root: Node3D) -> AABB:
 
 ## Recursive AABB collector. Accumulates mesh AABBs into `out` array,
 ## each transformed by the cumulative local transform chain from root.
+# PHASE_A:WORKER_SAFE — pure traversal + math.
 static func _collect_mesh_aabbs(node: Node, parent_xf: Transform3D, out: Array[AABB]) -> void:
 	var xf: Transform3D = parent_xf
 	if node is Node3D:
@@ -960,6 +983,8 @@ static func _collect_mesh_aabbs(node: Node, parent_xf: Transform3D, out: Array[A
 ## Re-enable all CollisionShape3D nodes disabled by model_loader at instantiate time.
 ## Mirror of NativeStreamingManager._enable_collision_shapes(). Call when an object
 ## is confirmed to be within NEAR tier (<150m from camera).
+# PHASE_A:WORKER_SAFE — pure property mutation + remove_meta on detached subtree.
+# Plan §5 row 336-345 confirms worker dispatch.
 static func _enable_collision_shapes_in_tree(node: Node) -> void:
 	if node is CollisionShape3D:
 		(node as CollisionShape3D).disabled = false
@@ -970,6 +995,7 @@ static func _enable_collision_shapes_in_tree(node: Node) -> void:
 
 
 ## Check if a node subtree contains any StaticBody3D.
+# PHASE_A:WORKER_SAFE — pure traversal.
 static func _has_static_body(node: Node) -> bool:
 	if node is StaticBody3D:
 		return true
@@ -983,6 +1009,8 @@ static func _has_static_body(node: Node) -> bool:
 ## that lack baked collision. Used for interior statics (floors, walls,
 ## furniture) so physics objects can rest on surfaces. Layer 1 (Environment)
 ## only — consistent with NIF-baked collision.
+# PHASE_A:MAIN_ONLY — plan §5 row 385-410 keeps interior collision fallback on
+# main thread. add_child on detached root + StaticBody3D construction stay main.
 static func _generate_static_collision(root: Node3D) -> void:
 	var aabb := _compute_mesh_aabb(root)
 	if not aabb.has_volume():
@@ -1004,6 +1032,8 @@ static func _generate_static_collision(root: Node3D) -> void:
 ## Auto-play NIF keyframe animations on objects within NEAR tier (0-150m)
 ## Handles animated world objects like flags, banners, rotating lights, etc.
 ## Only plays if the object has a prebaked AnimationPlayer from NIF conversion.
+# PHASE_A:MAIN_ONLY — reads _current_load_profile via _effective_max_actor_distance.
+# Also called from the post-worker main-thread tail per plan §5 line 400.
 func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
 	# Skip if beyond NEAR tier — animations are only visible up close
 	var effective_actor_dist: float = _effective_max_actor_distance()
@@ -1047,6 +1077,8 @@ func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
 
 ## Apply position, rotation, and scale to a node
 ## Uses unified CoordinateSystem for all conversions
+# PHASE_A:WORKER_SAFE — pure property writes on a detached Node3D.
+# Plan §5 row 347-348 confirms worker dispatch.
 func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: bool) -> void:
 	# Position conversion via CoordinateSystem (outputs in meters)
 	node.position = CS.vector_to_godot(ref.position)
@@ -1058,6 +1090,7 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 
 
 ## Apply metadata to an object for console object picker identification
+# PHASE_A:WORKER_SAFE — set_meta on a detached node. Plan §5 row 350-351.
 func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, model_path: String, type_name: String = "") -> void:
 	# Form ID / record ID
 	if "record_id" in base_record:
@@ -1080,6 +1113,7 @@ func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, mod
 
 
 ## Convert internal type_name string to ESM record type code for metadata (Phase 4)
+# PHASE_A:WORKER_SAFE — pure string match.
 static func _type_name_to_meta(type_name: String) -> String:
 	match type_name:
 		"static": return "STAT"
@@ -1101,6 +1135,7 @@ static func _type_name_to_meta(type_name: String) -> String:
 
 
 ## Get the model path from a base record
+# PHASE_A:WORKER_SAFE — pure Variant property read.
 func _get_model_path(record: Variant) -> String:
 	if "model" in record and record.model:
 		return record.model
@@ -1108,6 +1143,9 @@ func _get_model_path(record: Variant) -> String:
 
 
 ## Create a placeholder for missing models
+# PHASE_A:MAIN_ONLY — called as main-thread fallback when model_loader returns
+# null. Construction is pure, but bundling with the main-thread fallback path
+# keeps the §8.2 Q3 answer in the code.
 func _create_placeholder(ref: CellReference) -> Node3D:
 	var placeholder := MeshInstance3D.new()
 	placeholder.name = str(ref.ref_id) + "_placeholder"
@@ -1133,6 +1171,7 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 ## Kept as a fallback for the T.1 routing gate (covers flora + small-rock
 ## patterns explicitly). The broader `_should_route_to_renderer` is the
 ## primary routing decision post-statics_no_node3d migration.
+# PHASE_A:WORKER_SAFE — pure string ops.
 func _is_static_render_model(model_path: String) -> bool:
 	var lower := model_path.to_lower()
 
@@ -1156,6 +1195,7 @@ func _is_static_render_model(model_path: String) -> bool:
 ## Interactive refs whose instantiate cost is dominated by PackedScene.instantiate
 ## (~12-20 ms per container/door/activator per [inst-breakdown] measurement).
 ## Actors (npc/creature) already use `max_actor_distance` at line ~195, separate path.
+# PHASE_A:WORKER_SAFE — pure match on inputs.
 func _is_proximity_gated(type_name: String, is_carryable: bool) -> bool:
 	if is_carryable:
 		return true
@@ -1177,6 +1217,8 @@ func _is_proximity_gated(type_name: String, is_carryable: bool) -> bool:
 ##
 ## Interior pockets already self-carve via `effective_use_static == false`
 ## (LoadProfile override in cell_manager for interior loads).
+# PHASE_A:MAIN_ONLY — reads static_renderer singleton + calls
+# model_loader.has_animation (cache-accessing method).
 func _should_route_to_renderer(
 	type_name: String,
 	model_path: String,
@@ -1405,6 +1447,7 @@ func _find_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
 
 ## Hide materialless meshes in a scene tree (LOD nodes are kept visible)
 ## Uses centralized MeshVisibilityUtils for consistent behavior across the codebase
+# PHASE_A:WORKER_SAFE — pure property writes on detached subtree. Plan §5 row 345.
 func _hide_lod_nodes(node: Node) -> void:
 	MeshVisibilityUtils.hide_lod_and_materialless(node, debug_lod)
 
