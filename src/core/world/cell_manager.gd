@@ -78,6 +78,12 @@ const POOL_PREWARM_MIN_COUNT: int = 10
 # Default maximum pool size when auto-registering models
 const DEFAULT_POOL_MAX_SIZE: int = 50
 
+# Phase A — off-thread PackedScene.instantiate gate. Slice 4 lands the dispatch
+# pass inert; slice 5 flips this to true AND wires the drain in the same
+# commit. Inert-until-drain keeps the branch free of worker-result leaks
+# between slices. Plan: phase_a_offthread_instantiate.md §7.4–§7.5.
+const PHASE_A_OFFTHREAD_INSTANTIATE: bool = false
+
 
 ## Initialize instantiator with current configuration and dependencies
 func _init() -> void:
@@ -1479,6 +1485,15 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# ref type dominates" with real data, not intuition.
 	_maybe_log_per_type_breakdown()
 
+	# Phase A — dispatch pass. Inert until PHASE_A_OFFTHREAD_INSTANTIATE flips
+	# true in slice 5 (the drain lands alongside). The dispatcher iterates the
+	# queue without popping; any cache-hit entry gets a WorkerThreadPool task
+	# bound with (entry, packed_scene, base_record, type_name). The drain
+	# (slice 5) checks entry.worker_instance before falling back to the
+	# synchronous instantiate_reference call. Plan §3.1.
+	if PHASE_A_OFFTHREAD_INSTANTIATE:
+		_phase_a_dispatch_pass()
+
 	# Batch children for deferred add_child (reduces scene tree churn)
 	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
 
@@ -1618,6 +1633,59 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 					apply_fade_in_to_object(child)
 	CrashBreadcrumb.write("cm::batch_done", "n=%d" % pending_children.size())
 	return instantiated
+
+
+## Phase A — dispatch WorkerThreadPool tasks for every cache-hit entry that
+## hasn't been dispatched yet. Runs ONCE per process_async_instantiation call,
+## before the synchronous drain loop. No popping here — entries stay queued
+## until the drain consumes them.
+##
+## Types excluded (no worker dispatch, synchronous path handles them):
+##   light / npc / creature / leveled_creature / leveled_item — custom
+##     _instantiate_light / _instantiate_actor path, not the cache-hit model
+##     path. Slice 5's drain checks worker_instance; if null these fall
+##     through to sync naturally.
+##
+## Runtime guard: PHASE_A_OFFTHREAD_INSTANTIATE gates the whole thing, so this
+## code is inert until slice 5 flips the flag.
+func _phase_a_dispatch_pass() -> void:
+	if _instantiator == null:
+		return
+	var ml: RefCounted = _instantiator.model_loader
+	if ml == null:
+		return
+	if not ml.has_method("get_cached_packed_scene"):
+		return  # slice 3 API not present — defensive
+	for entry: InstantiationEntry in _instantiation_queue:
+		if entry.worker_dispatched:
+			continue
+		if entry.worker_instance != null:
+			continue
+		# Cache-peek first — cheapest gate, drops ~20% of entries (cache miss)
+		# before we spend ESMManager time. get_cached_packed_scene returns null
+		# on miss / null sentinel / non-PackedScene entry.
+		var packed_scene: PackedScene = ml.call("get_cached_packed_scene", entry.model_path, entry.item_id)
+		if packed_scene == null:
+			continue
+		# Resolve base_record + type_name on main thread — ESMManager is an
+		# autoload and worker-unsafe per plan §5.1. Cheap (dict lookup).
+		var record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(entry.ref.ref_id), record_type)
+		if base_record == null:
+			continue
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+		# Type filter: lights / actors / leveled types don't go through the
+		# _instantiate_model_object cache-hit path — skip worker dispatch for
+		# them. The synchronous drain still handles them.
+		match type_name:
+			"light", "npc", "creature", "leveled_creature", "leveled_item":
+				continue
+		entry.worker_dispatched = true
+		entry.worker_task_id = WorkerThreadPool.add_task(
+			_instantiator._worker_instantiate.bind(entry, packed_scene, base_record, type_name),
+			false,
+			"cell_manager:phase_a_instantiate",
+		)
 
 
 ## Sort instantiation queue by frustum-aware priority
