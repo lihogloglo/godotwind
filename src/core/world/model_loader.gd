@@ -368,6 +368,35 @@ func has_model(model_path: String, item_id: String = "") -> bool:
 	return cache_key in _model_cache
 
 
+## Return the cached PackedScene for a model without instantiating it.
+## Phase A off-thread path: the dispatcher peeks the cache on the main thread,
+## then hands the PackedScene to a WorkerThreadPool task that calls
+## PackedScene.instantiate(GEN_EDIT_STATE_DISABLED) off-thread.
+##
+## Returns null on cache miss, null sentinel, or non-PackedScene entry — the
+## caller MUST fall back to the existing synchronous get_model() path, which
+## handles disk-cache promotion, async request, and the CACHE_MODE_REUSE
+## sub-resource finalization dance (plan §8.1).
+##
+## Updates _last_access for LRU budget correctness (mirrors get_model's
+## cache-hit bookkeeping) so the worker path doesn't make entries look cold.
+func get_cached_packed_scene(model_path: String, item_id: String = "") -> PackedScene:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var cache_key := normalized
+	if not item_id.is_empty():
+		cache_key = normalized + ":" + item_id.to_lower()
+	if not cache_key in _model_cache:
+		return null
+	var cached: Variant = _model_cache[cache_key]
+	if cached == null:
+		return null
+	if not cached is PackedScene:
+		return null
+	_last_access[cache_key] = Engine.get_frames_drawn()
+	_stats["models_from_cache"] += 1
+	return cached as PackedScene
+
+
 # =============================================================================
 # ASYNC DISK LOADING API
 # =============================================================================

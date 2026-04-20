@@ -426,6 +426,62 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	return instance
 
 
+## Phase A — off-thread PackedScene.instantiate worker. Executes on a
+## WorkerThreadPool thread. Touches only the detached Node3D subtree:
+## NO autoloads, NO signals, NO scene-tree ops. The dispatcher (cell_manager)
+## calls WorkerThreadPool.add_task with this bound; the drain (main thread)
+## reads entry.worker_instance only after WorkerThreadPool.is_task_completed
+## returns true — that boundary is the implicit mutex (plan §3.4).
+##
+## base_record + type_name are passed via .bind() rather than on the entry
+## because they live only transiently inside instantiate_reference and the
+## slice-2 schema deliberately didn't grow to hold them. The dispatcher looks
+## them up on main thread (ESMManager call is worker-unsafe per plan §5.1).
+##
+## Mirrors model_loader._instantiate_from_scene's post-processing
+## (strip_occluders + disable_collision) plus the main-thread "setup" tail
+## currently at reference_instantiator.gd:334-351 (name, transform, metadata,
+## hide_lod). Carryable conversion / door attachment / interior-collision
+## fallback / auto-anim stay on the main-thread tail per plan §5.
+##
+## Plan: docs/plans/distant_rendering_2026_04/phase_a_offthread_instantiate.md §3.2
+# PHASE_A:WORKER_SAFE — by design. Zero autoload / signal / scene-tree access.
+func _worker_instantiate(
+	entry: Variant,
+	packed_scene: PackedScene,
+	base_record: Variant,
+	type_name: String,
+) -> void:
+	if packed_scene == null or not packed_scene.can_instantiate():
+		entry.worker_instance = null
+		return
+	var raw: Node = packed_scene.instantiate(PackedScene.GEN_EDIT_STATE_DISABLED)
+	if raw == null:
+		entry.worker_instance = null
+		return
+	if not raw is Node3D:
+		# Not a Node3D — worker can't queue_free safely mid-flight; leave the
+		# node orphaned and main thread will never pick it up (worker_instance
+		# stays null). GC handles the leak because `raw` goes out of scope.
+		entry.worker_instance = null
+		return
+	var instance: Node3D = raw as Node3D
+	# model_loader owns the post-instantiate post-processing helpers. Both are
+	# detached-subtree pure-mutation ops — safe off-thread.
+	if model_loader != null:
+		model_loader.call("_strip_occluders", instance)
+	# Static helper — class-level callable (no instance state).
+	@warning_ignore("unsafe_method_access")
+	model_loader._disable_collision_shapes_in_tree(instance)
+	instance.name = str(entry.ref.ref_id) + "_" + str(entry.ref.ref_num)
+	_apply_transform(instance, entry.ref, true)
+	_apply_metadata(instance, entry.ref, base_record, entry.model_path, type_name)
+	_hide_lod_nodes(instance)
+	# Last write — becomes visible to the main-thread drain once
+	# WorkerThreadPool.is_task_completed returns true.
+	entry.worker_instance = instance
+
+
 ## Instantiate a flora/rock using StaticObjectRenderer (RenderingServer direct)
 ## Returns null (no Node3D created) - the instance exists only in RenderingServer
 ## This is ~10x faster than Node3D.duplicate()
