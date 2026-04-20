@@ -426,6 +426,67 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	return instance
 
 
+## Phase A — main-thread dispatcher pre-flight. Mirrors every bailout the sync
+## `instantiate_reference` → `_instantiate_model_object` path makes BEFORE it
+## would reach `model_loader.get_model`:
+##
+##   1. Type exclusion — light / npc / creature / leveled_* go through custom
+##      paths (`_instantiate_light`, `_instantiate_actor`, leveled resolver).
+##      These NEVER hit the cache-hit PackedScene.instantiate path.
+##   2. STAT → static-renderer routing. `_should_route_to_renderer` returns
+##      true for the ~80% STAT case; sync calls `_instantiate_static_object`
+##      (RS.instance_create2, no Node3D). Dispatching these to worker would
+##      REGRESS the T.1 statics_no_node3d win (reg_slots = 1301 → 0, phys_pairs
+##      1 → ~1800). Never dispatch STAT refs that will route to RS.
+##   3. Proximity gate — `_is_proximity_gated` + > INTERACTIVE_PROXIMITY_THRESHOLD_M
+##      returns null in sync, which cell_manager routes into _proximity_deferred.
+##      Dispatching these to worker would spawn Node3Ds that sync would have
+##      deferred; re-queue on proximity still works but the PackedScene
+##      instantiate burns worker thread for a ref the camera can't interact
+##      with yet.
+##
+## Returns true ONLY when dispatch should proceed. False means sync path
+## handles it; dispatcher MUST fall through (no worker task added).
+##
+## entry is typed Variant (cell_manager.InstantiationEntry inner class — avoids
+## circular import). entry.load_profile may be null (content-cell loads without
+## a LoadProfile fall back to the instantiator's own `use_static_renderer`).
+# PHASE_A:MAIN_ONLY — reads static_renderer singleton + model_loader cache +
+# ESMManager (via caller) + camera_position (main-thread-updated).
+func should_dispatch_to_worker(
+	entry: Variant,
+	base_record: Variant,
+	type_name: String,
+) -> bool:
+	# 1. Type exclusion — custom paths handle these, no cache-hit branch.
+	match type_name:
+		"light", "npc", "creature", "leveled_creature", "leveled_item":
+			return false
+
+	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+
+	# 2. Static-renderer routing — STAT → RS.instance_create2 path. Must mirror
+	# sync's effective_use_static resolution: per-request LoadProfile override
+	# if present, else the instantiator's own `use_static_renderer` field.
+	var effective_use_static: bool = use_static_renderer
+	if entry.load_profile != null:
+		effective_use_static = entry.load_profile.use_static_renderer
+	if _should_route_to_renderer(type_name, entry.model_path, is_carryable, effective_use_static):
+		return false
+
+	# 3. Proximity gate — sync would return null with `last_proximity_deferred`
+	# for interactives beyond INTERACTIVE_PROXIMITY_THRESHOLD_M. Dispatch would
+	# succeed but produce a Node3D the caller was about to defer. Skip.
+	# Interior pockets set effective_use_static=false → skip gate (pockets are
+	# bounded, every ref spawns immediately; matches sync).
+	if effective_use_static and _is_proximity_gated(type_name, is_carryable):
+		var ref_world_pos := CS.vector_to_godot(entry.ref.position)
+		if ref_world_pos.distance_squared_to(camera_position) > INTERACTIVE_PROXIMITY_THRESHOLD_M * INTERACTIVE_PROXIMITY_THRESHOLD_M:
+			return false
+
+	return true
+
+
 ## Phase A — off-thread PackedScene.instantiate worker. Executes on a
 ## WorkerThreadPool thread. Touches only the detached Node3D subtree:
 ## NO autoloads, NO signals, NO scene-tree ops. The dispatcher (cell_manager)
@@ -480,6 +541,82 @@ func _worker_instantiate(
 	# Last write — becomes visible to the main-thread drain once
 	# WorkerThreadPool.is_task_completed returns true.
 	entry.worker_instance = instance
+
+
+## Phase A main-thread tail — completes the per-ref work that couldn't run
+## off-thread. The worker already applied name / transform / metadata /
+## hide_lod / disabled-collision on a detached Node3D. This function runs:
+##
+##   - NEAR-tier collision enable (if ref is < 150m from camera)
+##   - Carryable conversion (StaticBody3D → frozen RigidBody3D + pickup)
+##   - Door attachment (set_script + signal connect for teleport doors)
+##   - Interior collision fallback (generate StaticBody3D from AABB)
+##   - NIF animation autoplay (flags / banners / rotating lights)
+##   - stats + last_type_name bookkeeping so diag counters stay correct
+##
+## Mirrors the tail of _instantiate_model_object (lines 334-410 of the
+## synchronous path). Returns the passed-in instance, or a placeholder if
+## instance is null (worker failure or non-Node3D result).
+##
+## Plan: docs/plans/distant_rendering_2026_04/phase_a_offthread_instantiate.md §3.3
+# PHASE_A:MAIN_ONLY — runs autoload reads, signal connects, add_child.
+func complete_worker_instantiate(
+	entry: Variant,
+	instance: Node3D,
+	base_record: Variant,
+	type_name: String,
+) -> Node3D:
+	# Match the sync path's diagnostic hook so cell_manager's per-type
+	# breakdown picks up worker-path entries under the right type key.
+	last_type_name = type_name
+	last_proximity_deferred = false
+	# Null path removed — the cell_manager drain only calls this when
+	# entry.worker_instance != null. @roaster review 2026-04-20 §4c.
+	var ref: CellReference = entry.ref
+	var record_id: String = ""
+	if base_record != null and "record_id" in base_record:
+		record_id = base_record.record_id
+
+	# NEAR-tier collision enable (mirror of _instantiate_model_object:339-342).
+	var ref_pos := CS.vector_to_godot(ref.position)
+	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
+		_enable_collision_shapes_in_tree(instance)
+
+	# Carryable conversion (mirror of _instantiate_model_object:353-374).
+	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+	if is_carryable:
+		var mass_kg: float = CarryableRegistryScript.get_mass(type_name, base_record)
+		var display_name: String = ""
+		if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
+			display_name = base_record.name
+		else:
+			display_name = record_id
+		var rb := CarryableBodyFactoryScript.convert_static_to_rigid(
+			instance,
+			mass_kg,
+			StringName(record_id),
+			display_name,
+			PickupInteractableScript,
+		)
+		if rb == null:
+			Log.info("interaction", "Carryable %s (%s) has no collision/mesh — staying static (non-interactable)" % [record_id, type_name])
+
+	# Door attachment (mirror of _instantiate_model_object:376-383).
+	if type_name == "door" and ref.is_teleport:
+		_attach_door_interactable(instance, ref, base_record, record_id)
+
+	# Interior collision fallback (mirror of _instantiate_model_object:385-395).
+	if not is_carryable and not (type_name == "door" and ref.is_teleport):
+		if not _effective_use_static_renderer():
+			if not _has_static_body(instance):
+				_generate_static_collision(instance)
+
+	stats["objects_instantiated"] += 1
+
+	# NIF anim autoplay (mirror of _instantiate_model_object:400).
+	_auto_play_nif_animation(instance, ref)
+
+	return instance
 
 
 ## Instantiate a flora/rock using StaticObjectRenderer (RenderingServer direct)

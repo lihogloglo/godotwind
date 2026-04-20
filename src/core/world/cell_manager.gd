@@ -78,11 +78,28 @@ const POOL_PREWARM_MIN_COUNT: int = 10
 # Default maximum pool size when auto-registering models
 const DEFAULT_POOL_MAX_SIZE: int = 50
 
-# Phase A — off-thread PackedScene.instantiate gate. Slice 4 lands the dispatch
-# pass inert; slice 5 flips this to true AND wires the drain in the same
-# commit. Inert-until-drain keeps the branch free of worker-result leaks
-# between slices. Plan: phase_a_offthread_instantiate.md §7.4–§7.5.
-const PHASE_A_OFFTHREAD_INSTANTIATE: bool = false
+# Phase A — off-thread PackedScene.instantiate gate. Slice 5 + 6 + 7 shipped
+# 2026-04-20; dispatch + drain + cancellation are all live.
+#
+# Dispatch pass (`_phase_a_dispatch_pass`, called before the drain loop) walks
+# _instantiation_queue, resolves base_record + type_name on main thread, gates
+# via `ReferenceInstantiator.should_dispatch_to_worker` (mirrors every sync
+# bailout before get_model: type exclusion, static-renderer routing, proximity
+# gate), and submits WorkerThreadPool tasks for survivors.
+#
+# Drain loop: dispatched entries NEVER fall back to sync. Ready ones run the
+# main-thread tail via `complete_worker_instantiate`. In-flight ones get
+# parked into `phase_a_deferred` + re-queued for next frame. Worker failures
+# drop the ref silently (pending_instantiations already decremented).
+#
+# Cancellation: `_phase_a_cancel_workers_for_request` is called from both
+# `cancel_async_request` (interior-pocket teardown) and `finalize_unloaded_cell`
+# (exterior cell unload), BEFORE the queue filter. Waits on any in-flight
+# worker for the cancelled request, then queue_frees orphaned Node3Ds.
+#
+# Plan: docs/plans/distant_rendering_2026_04/phase_a_offthread_instantiate.md
+# §3.1-§3.4, §4, §7.4-§7.7.
+const PHASE_A_OFFTHREAD_INSTANTIATE: bool = true
 
 
 ## Initialize instantiator with current configuration and dependencies
@@ -994,6 +1011,13 @@ class InstantiationEntry:
 	## is_task_completed polling (drain pass) and wait_for_task_completion
 	## (cancellation pass). -1 means "never dispatched".
 	var worker_task_id: int = -1
+	## Resolved at dispatch time (main thread, ESMManager is autoload),
+	## consumed by the drain pass to avoid a duplicate ESMManager lookup.
+	## Plan §3.1 binds these into _worker_instantiate; we also stash them
+	## here so the main-thread tail (complete_worker_instantiate) can read
+	## them without a second autoload round-trip.
+	var phase_a_base_record: Variant = null
+	var phase_a_type_name: String = ""
 
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
@@ -1270,6 +1294,13 @@ func cancel_async_request(request_id: int) -> void:
 	for task_id: int in request.pending_parses.values():
 		_background_processor.call("cancel_task", task_id)
 
+	# Phase A (§7.7 2026-04-20) — drain any in-flight worker instantiates for
+	# this request so they don't write to entries we're about to drop, and
+	# queue_free any worker-produced Node3Ds that never reached the scene tree.
+	# MUST run before the queue filter below — once filtered, the entries are
+	# unreachable and their worker tasks would leak their instance.
+	_phase_a_cancel_workers_for_request(request_id)
+
 	# Remove all pending instantiations for this request from the queue
 	# This prevents orphan objects when the cell is unloaded mid-loading
 	var queue_before := _instantiation_queue.size()
@@ -1308,6 +1339,10 @@ func finalize_unloaded_cell(request_id: int) -> void:
 	# Cancel any still-in-flight parse tasks (cell's gone, results have no home).
 	for task_id: int in request.pending_parses.values():
 		_background_processor.call("cancel_task", task_id)
+	# Phase A (§7.7 2026-04-20) — drain any in-flight worker instantiates and
+	# queue_free worker-produced Node3Ds BEFORE filtering the queue. See
+	# cancel_async_request counterpart for rationale.
+	_phase_a_cancel_workers_for_request(request_id)
 	# Filter any remaining queue entries for this request. Unlike the unload-
 	# path filter (which was the bug), this runs AFTER the cell has truly died
 	# and the state-reversal window is closed — no reclaim can use these.
@@ -1485,17 +1520,21 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# ref type dominates" with real data, not intuition.
 	_maybe_log_per_type_breakdown()
 
-	# Phase A — dispatch pass. Inert until PHASE_A_OFFTHREAD_INSTANTIATE flips
-	# true in slice 5 (the drain lands alongside). The dispatcher iterates the
-	# queue without popping; any cache-hit entry gets a WorkerThreadPool task
-	# bound with (entry, packed_scene, base_record, type_name). The drain
-	# (slice 5) checks entry.worker_instance before falling back to the
-	# synchronous instantiate_reference call. Plan §3.1.
+	# Phase A — dispatch pass before drain. Peek-iterates the queue, submits a
+	# WorkerThreadPool task per survivor (see `should_dispatch_to_worker` for
+	# the routing gate). Ready tasks are consumed by the drain loop via
+	# `complete_worker_instantiate`; in-flight tasks park on `phase_a_deferred`
+	# and get re-queued at loop exit. Plan §3.1, §7.4.
 	if PHASE_A_OFFTHREAD_INSTANTIATE:
 		_phase_a_dispatch_pass()
 
 	# Batch children for deferred add_child (reduces scene tree churn)
 	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
+
+	# Phase A — entries whose worker task is still running get parked here
+	# and re-appended to the queue after the loop exits, so they get another
+	# chance next frame without spin-waiting. See phase_a_offthread_instantiate.md §3.3.
+	var phase_a_deferred: Array[InstantiationEntry] = []
 
 	while not _instantiation_queue.is_empty():
 		# Check time budget
@@ -1514,6 +1553,14 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		var ref: CellReference = entry.ref
 		var model_path: String = entry.model_path
 		var item_id: String = entry.item_id
+
+		# Phase A — dispatched-but-running entries get parked. Their worker is
+		# still executing; trying to consume worker_instance now would race
+		# against the writer. Park and retry next frame.
+		if PHASE_A_OFFTHREAD_INSTANTIATE and entry.worker_dispatched:
+			if not WorkerThreadPool.is_task_completed(entry.worker_task_id):
+				phase_a_deferred.append(entry)
+				continue
 
 		# Check if request still exists
 		if request_id not in _async_requests:
@@ -1544,7 +1591,39 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_instantiator._set_transient_profile(entry.load_profile)
 		var inst_start := Time.get_ticks_usec()
 		var inst_cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
-		var obj := _instantiator.instantiate_reference(ref, inst_cell_grid)
+		var obj: Node3D = null
+		# Phase A §7.5 + §7.6 — dispatched entries NEVER fall back to sync
+		# instantiate_reference. Either:
+		#   (a) worker_instance != null → run main-thread tail and publish.
+		#   (b) worker_instance == null → worker produced nothing (malformed
+		#       PackedScene, non-Node3D root, can_instantiate false). Drop
+		#       the ref; pending_instantiations was already decremented so
+		#       the request finalizes cleanly. Sync re-try would just repeat
+		#       the same failure against the same cached PackedScene.
+		# Non-dispatched entries (type-excluded light/npc/creature/leveled,
+		# static-renderer-routed STAT, proximity-deferred, cache-miss,
+		# debug_lod bailout, or PHASE_A flag off) take the sync path — it
+		# owns all non-Node3D routing (_instantiate_light, _instantiate_actor,
+		# _instantiate_static_object, proximity gate).
+		if PHASE_A_OFFTHREAD_INSTANTIATE and entry.worker_dispatched:
+			# Clear stale sync-call state so per-type diag + proximity routing
+			# don't inherit values from a prior iteration. complete_worker_
+			# instantiate resets these on the success branch; the failure
+			# branch needs them zeroed explicitly because it doesn't run.
+			_instantiator.last_type_name = entry.phase_a_type_name
+			_instantiator.last_proximity_deferred = false
+			if entry.worker_instance != null:
+				obj = _instantiator.complete_worker_instantiate(
+					entry,
+					entry.worker_instance,
+					entry.phase_a_base_record,
+					entry.phase_a_type_name,
+				)
+				# Clear so we don't double-consume in any error path.
+				entry.worker_instance = null
+			# else: worker failed, obj stays null, ref drops silently.
+		else:
+			obj = _instantiator.instantiate_reference(ref, inst_cell_grid)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
 		_instantiator._clear_transient_profile()
 		_diag_instantiate_time_total_us += inst_elapsed
@@ -1600,6 +1679,17 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		if _is_request_complete(request):
 			_finalize_request(request)
 
+	# Phase A — restore dispatched-but-running entries to the queue so they
+	# get re-evaluated next frame. pop_back() returned the highest-priority
+	# entry first, so phase_a_deferred is in descending priority order. We
+	# push_back in reverse so the queue ends up with highest priority at the
+	# back (ready for the next pop_back). _sort_queue_by_priority will
+	# re-sort on QUEUE_SORT_INTERVAL anyway, but this keeps the priority
+	# invariant between sorts.
+	if not phase_a_deferred.is_empty():
+		for i in range(phase_a_deferred.size() - 1, -1, -1):
+			_instantiation_queue.push_back(phase_a_deferred[i])
+
 	# Batch add all children at once (significantly reduces scene tree overhead)
 	# For large batches (>20), use call_deferred to spread work across frames
 	const DEFERRED_THRESHOLD := 20
@@ -1637,19 +1727,33 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 ## Phase A — dispatch WorkerThreadPool tasks for every cache-hit entry that
 ## hasn't been dispatched yet. Runs ONCE per process_async_instantiation call,
-## before the synchronous drain loop. No popping here — entries stay queued
-## until the drain consumes them.
+## before the drain loop. No popping here — entries stay queued until the
+## drain consumes them.
 ##
-## Types excluded (no worker dispatch, synchronous path handles them):
-##   light / npc / creature / leveled_creature / leveled_item — custom
-##     _instantiate_light / _instantiate_actor path, not the cache-hit model
-##     path. Slice 5's drain checks worker_instance; if null these fall
-##     through to sync naturally.
+## Per-entry gate (must ALL pass to dispatch):
+##   - not already dispatched / completed (guards re-dispatch)
+##   - `get_cached_packed_scene` returns non-null (cache-hit precondition —
+##     worker only runs .instantiate, it does not disk-load)
+##   - ESMManager.get_any_record returns a record on this ref_id
+##   - `ReferenceInstantiator.should_dispatch_to_worker` passes — mirrors all
+##     sync bailouts before get_model (type exclusion light/npc/creature/
+##     leveled_*, STAT → static-renderer, proximity gate)
 ##
-## Runtime guard: PHASE_A_OFFTHREAD_INSTANTIATE gates the whole thing, so this
-## code is inert until slice 5 flips the flag.
+## Coarse bailouts for the whole pass:
+##   - debug_lod=true (Log.debug calls inside _hide_lod_nodes are autoload
+##     writes → sync path handles the whole frame)
+##   - get_cached_packed_scene method missing (defensive, pre-§7.3 model_loader)
+##
+## Runtime guard: PHASE_A_OFFTHREAD_INSTANTIATE gates the call site; once true
+## this function runs every drain frame.
 func _phase_a_dispatch_pass() -> void:
 	if _instantiator == null:
+		return
+	# §4b (2026-04-20 @roaster review) — debug_lod=true makes
+	# MeshVisibilityUtils.hide_lod_and_materialless call Log.debug() from inside
+	# _hide_lod_nodes. Log is an autoload → worker-unsafe per plan §5.2. Bail
+	# the whole dispatch pass so debug_lod runs stay on the sync path.
+	if _instantiator.debug_lod:
 		return
 	var ml: RefCounted = _instantiator.model_loader
 	if ml == null:
@@ -1674,18 +1778,61 @@ func _phase_a_dispatch_pass() -> void:
 		if base_record == null:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-		# Type filter: lights / actors / leveled types don't go through the
-		# _instantiate_model_object cache-hit path — skip worker dispatch for
-		# them. The synchronous drain still handles them.
-		match type_name:
-			"light", "npc", "creature", "leveled_creature", "leveled_item":
-				continue
+		# Full routing gate — mirrors every sync-path bailout before
+		# model_loader.get_model (type exclusion, static-renderer routing,
+		# proximity gate). Without this, STAT refs that sync routes to
+		# RS.instance_create2 would instead be dispatched as Node3Ds on the
+		# worker, regressing the T.1 statics_no_node3d win. See
+		# reference_instantiator.should_dispatch_to_worker for the full list.
+		if not _instantiator.should_dispatch_to_worker(entry, base_record, type_name):
+			continue
+		# Stash resolved records so the drain's main-thread tail can reuse
+		# them (avoids a duplicate ESMManager lookup in complete_worker_instantiate).
+		entry.phase_a_base_record = base_record
+		entry.phase_a_type_name = type_name
 		entry.worker_dispatched = true
 		entry.worker_task_id = WorkerThreadPool.add_task(
 			_instantiator._worker_instantiate.bind(entry, packed_scene, base_record, type_name),
 			false,
 			"cell_manager:phase_a_instantiate",
 		)
+
+
+## Phase A — cancel worker instantiate tasks for a cancelled/unloaded request
+## BEFORE the caller filters the queue. Plan §4 / §7.7.
+##
+## Worker tasks run off-thread; the caller is about to drop the InstantiationEntry
+## from the queue, which orphans (a) any in-flight write to entry.worker_instance
+## and (b) any already-produced Node3D that never reached the scene tree. This
+## helper closes both leaks:
+##
+##   1. For dispatched-but-running tasks: wait_for_task_completion so the worker
+##      finishes its write before we read worker_instance. Bounded at ~1 × the
+##      per-entry instantiate cost (~11ms) per in-flight entry. Acceptable in
+##      the unload path (already budgeted).
+##   2. For completed tasks with a non-null worker_instance: queue_free it. The
+##      Node3D is still detached (main thread never added_child'd), so this is
+##      a thread-safe deferred destruct.
+##
+## Both cancel_async_request (interior-pocket teardown) and
+## finalize_unloaded_cell (exterior cell unload) call this before their queue
+## filter. Idempotent: entries that were never dispatched, or whose task is
+## already consumed by the drain pass, are no-ops.
+func _phase_a_cancel_workers_for_request(request_id: int) -> void:
+	for entry: InstantiationEntry in _instantiation_queue:
+		if entry.request_id != request_id:
+			continue
+		if not entry.worker_dispatched:
+			continue
+		if entry.worker_task_id >= 0:
+			# Block if the worker is still writing entry.worker_instance.
+			# is_task_completed is the cheap check; wait_for_task_completion
+			# is idempotent once the task is done.
+			if not WorkerThreadPool.is_task_completed(entry.worker_task_id):
+				WorkerThreadPool.wait_for_task_completion(entry.worker_task_id)
+		if entry.worker_instance != null:
+			entry.worker_instance.queue_free()
+			entry.worker_instance = null
 
 
 ## Sort instantiation queue by frustum-aware priority
