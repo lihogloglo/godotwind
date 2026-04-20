@@ -975,6 +975,20 @@ class InstantiationEntry:
 	## that in-flight interior entries drain ahead of exterior work.
 	var interior_priority: bool = false
 
+	# Phase A (off-thread PackedScene.instantiate) — currently unused, wired in
+	# slices 3-5. Plan: docs/plans/distant_rendering_2026_04/phase_a_offthread_instantiate.md §3.
+	## Detached Node3D produced by the worker (null until worker completes).
+	## Main thread reads this ONLY after WorkerThreadPool.is_task_completed
+	## returns true — that boundary is the implicit mutex.
+	var worker_instance: Node3D = null
+	## Set true by the dispatch pass after WorkerThreadPool.add_task succeeds.
+	## Guards against re-dispatching the same entry on subsequent frames.
+	var worker_dispatched: bool = false
+	## Task id returned by WorkerThreadPool.add_task, used by
+	## is_task_completed polling (drain pass) and wait_for_task_completion
+	## (cancellation pass). -1 means "never dispatched".
+	var worker_task_id: int = -1
+
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
 var _background_processor: Node = null
