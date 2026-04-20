@@ -59,7 +59,11 @@ var _colors: PackedColorArray = PackedColorArray()
 var _radii: PackedFloat32Array = PackedFloat32Array()
 var _flags: PackedInt32Array = PackedInt32Array()
 
-## Set of cell grid keys already scanned ("x,y") to avoid double-scanning
+## Set of cell grid keys already scanned to avoid double-scanning.
+## Keyed by Vector2i (cheap native hash) rather than "x,y" String — per-cell
+## String.format allocation was the dominant cellupd cost (~14 ms per cell
+## cross at radius=60 = 14641 cells iterated). Vector2i dict hash is direct
+## int-combo. See cellupd diag 2026-04-20.
 var _scanned_cells: Dictionary = {}
 
 ## MultiMesh instance
@@ -111,7 +115,7 @@ func scan_cells_around(center_cell: Vector2i, radius_cells: int) -> void:
 		for dx: int in range(-radius_cells, radius_cells + 1):
 			var gx: int = center_cell.x + dx
 			var gy: int = center_cell.y + dy
-			var key: String = "%d,%d" % [gx, gy]
+			var key := Vector2i(gx, gy)
 
 			if _scanned_cells.has(key):
 				continue

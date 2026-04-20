@@ -840,11 +840,9 @@ func _update_loaded_cells() -> void:
 				continue
 			var cell_node: Node3D = cell_ref as Node3D
 			if cell_node.get_child_count() > 0:
-				# Move back to world container
-				if cell_node.get_parent():
-					cell_node.get_parent().remove_child(cell_node)
+				# Cell_node never left _world_container (see _unload_cell note);
+				# re-activate by flipping visible. No reparent.
 				cell_node.visible = _near_tier_visible
-				_world_container.add_child(cell_node)
 				_loaded_cells[grid] = cell_node
 				reclaimed.append(grid)
 				# Restore the async request from limbo so in-flight queue
@@ -906,6 +904,7 @@ func _update_loaded_cells() -> void:
 	# Uses impostor_radius since distant lights should be visible as far as impostors
 	if _distant_light_manager:
 		_distant_light_manager.scan_cells_around(_camera_cell, impostor_radius_cells)
+	var t_lights := Time.get_ticks_usec()
 
 	# Lazy-spawn re-queue (statics_no_node3d follow-up 2026-04-19): walk the
 	# proximity-deferred list, re-queue any interactive refs that are now
@@ -913,16 +912,21 @@ func _update_loaded_cells() -> void:
 	# internally to ~4 checks/sec.
 	if _cell_manager:
 		_cell_manager.tick_proximity_deferred(_camera_position)
+	var t_proximity := Time.get_ticks_usec()
 
 	# Log breakdown if total exceeds 2ms
 	var total_ulc_ms := float(Time.get_ticks_usec() - ulc_start) / 1000.0
 	if total_ulc_ms > 2.0:
-		Log.info("streaming", "_update_loaded_cells: %.1fms [grid:%.1f reclaim:%.1f unload:%.1f queue:%.1f]" % [
+		Log.info("streaming", "_update_loaded_cells: %.1fms [grid:%.1f reclaim:%.1f unload:%.1f queue:%.1f lights:%.1f prox:%.1f] cells_loaded=%d cells_unload_q=%d" % [
 			total_ulc_ms,
 			float(t_grid - ulc_start) / 1000.0,
 			float(t_reclaim - t_grid) / 1000.0,
 			float(t_unload - t_reclaim) / 1000.0,
-			float(t_queue - t_unload) / 1000.0])
+			float(t_queue - t_unload) / 1000.0,
+			float(t_lights - t_queue) / 1000.0,
+			float(t_proximity - t_lights) / 1000.0,
+			_loaded_cells.size(),
+			cells_to_unload.size()])
 
 
 ## Pre-queue cells in the camera's movement direction for smoother transitions
@@ -1078,8 +1082,14 @@ func _load_cell_sync(grid: Vector2i) -> void:
 ## until the cell truly dies in `_process_budgeted_unloading`, where
 ## `finalize_unloaded_cell` does the soft cleanup.
 func _unload_cell(grid: Vector2i) -> void:
-	# S.1 follow-up: breadcrumb the unload path so if SIGSEGV fires here we know.
-	CrashBreadcrumb.write("unload_cell_begin", str(grid))
+	# NOTE 2026-04-20: prior `CrashBreadcrumb.write("unload_cell_begin/end", ...)`
+	# calls at entry/exit were each doing FileAccess open/write/close. Per-cell
+	# overhead compounded to 4-8ms/cell on slower disks and masked the real
+	# per-step cost (0.9-2.7ms). Removed — 2 months of crashes never pointed
+	# at `unload_cell_*`, breadcrumbs served their diagnostic purpose. The
+	# budgeted unloader still writes `bu::cell_qfree_*` breadcrumbs which
+	# cover the destructor path if a crash moves there.
+	var t0 := Time.get_ticks_usec()
 	# Park any pending async request for this cell in the limbo registry.
 	# Do NOT call cell_manager.cancel_async_request — that filters the queue
 	# and frees the cell_node, which defeats state reversal on reclaim.
@@ -1096,6 +1106,7 @@ func _unload_cell(grid: Vector2i) -> void:
 	var cell_node: Node3D = _loaded_cells[grid]
 	_loaded_cells.erase(grid)
 	_stats["loaded_cells"] = _loaded_cells.size()
+	var t_req := Time.get_ticks_usec()
 
 	# S.1: promoted-object tracking deleted. MID re-enable in S.7 will hide
 	# MID RS instances via per-cell tier transition (request_cell_tier), not
@@ -1110,23 +1121,37 @@ func _unload_cell(grid: Vector2i) -> void:
 		_pending_rs_cleanup_cells.append(grid)
 
 	# I.6 — evacuate any persistent nodes (held items, etc.) from this
-	# cell BEFORE moving it to the unload container. Otherwise the
+	# cell BEFORE putting it in the unloading set. Otherwise the
 	# budgeted unload pass would free the held body along with the
 	# rest of the cell. Per `docs/INTERACTION_SYSTEM.md` §10.
 	_evacuate_persistent_nodes_from_cell(cell_node, grid)
+	var t_evac := Time.get_ticks_usec()
 
-	# Move cell to hidden unload container for gradual teardown
-	# Reparenting is cheaper than queue_free() on entire subtree
-	if cell_node.get_parent():
-		cell_node.get_parent().remove_child(cell_node)
+	# No reparent. Cell_node stays in _world_container; hide via visible=false
+	# (propagates to subtree rendering). The budgeted unloader walks
+	# `_unloading_cells` by grid key and frees children in place — tree
+	# parent is irrelevant to that loop. process_mode stays INHERIT so
+	# in-flight physics bodies / scripts complete cleanly on their own
+	# frame — matching original behavior, which never touched process_mode.
 	cell_node.visible = false
-	_unload_container.add_child(cell_node)
 	_unloading_cells[grid] = cell_node
+	var t_hide := Time.get_ticks_usec()
 
 	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
 	cell_unloaded.emit(grid)
+	var t_emit1 := Time.get_ticks_usec()
 	stats_updated.emit(_stats)
-	CrashBreadcrumb.write("unload_cell_end", str(grid))
+	var t_emit2 := Time.get_ticks_usec()
+	var total_ms := float(t_emit2 - t0) / 1000.0
+	# Always log — threshold gating was masking the 8ms/call slice (sub-3ms per sub-step).
+	Log.info("streaming", "[_unload_cell %s] %.2fms [req:%.2f evac:%.2f hide:%.2f emit_unload:%.2f emit_stats:%.2f] children=%d" % [
+		grid, total_ms,
+		float(t_req - t0) / 1000.0,
+		float(t_evac - t_req) / 1000.0,
+		float(t_hide - t_evac) / 1000.0,
+		float(t_emit1 - t_hide) / 1000.0,
+		float(t_emit2 - t_emit1) / 1000.0,
+		cell_node.get_child_count()])
 
 
 ## Process gradual unloading of departing cells within time budget
@@ -1179,10 +1204,14 @@ func _process_budgeted_unloading() -> void:
 					_unloading_cells.erase(g)
 				return
 
-			# Remove last child (pop from end = O(1))
+			# Remove last child (pop from end = O(1)).
+			# NOTE 2026-04-20: prior `CrashBreadcrumb.write("unload_child", ...)`
+			# fired per-child — with UNLOAD_BATCH_SIZE=30 it was the dominant
+			# cost inside `_process_budgeted_unloading` (each write is a
+			# FileAccess.open+store+close cycle). Removed; crashes never
+			# landed on `unload_child`, the cell-level `bu::cell_qfree_*`
+			# breadcrumbs still cover the destructor path.
 			var child := cell_node.get_child(cell_node.get_child_count() - 1)
-			var child_name: String = str(child.name) if is_instance_valid(child) else "?"
-			CrashBreadcrumb.write("unload_child", "%s <- %s" % [str(cell_node.name), child_name])
 			cell_node.remove_child(child)
 
 			# Try to return to object pool instead of destroying
