@@ -1160,7 +1160,13 @@ func get_instance_data(id: int) -> InstanceData:
 
 ## Check if a type is registered
 func has_type(type_name: String) -> bool:
-	return type_name in _mesh_types
+	# Mutex-wrapped: worker-thread callers (prototype pre-registration in Phase F,
+	# precompute_instance in Phase E) need to read _mesh_types concurrently with
+	# main-thread registration writes. ~100ns uncontended.
+	_mesh_types_mutex.lock()
+	var result := type_name in _mesh_types
+	_mesh_types_mutex.unlock()
+	return result
 
 ## Whether mid_objects is toggled on. Used by callers to skip work that would be discarded.
 func is_globally_visible() -> bool:

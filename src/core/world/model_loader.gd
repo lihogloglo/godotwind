@@ -848,6 +848,19 @@ func _get_disk_cache_dir() -> String:
 ## Get the disk cache path for a cache key
 ## Converts cache_key to a valid filename and returns full path
 ## NOTE: Strips item_id suffix since prebaked models don't include it
+## Public: resolve an ESM model path to its prebaked disk cache .res path.
+## Returns empty string if the cache file doesn't exist. Used by Phase F
+## prototype pre-registration (reference_instantiator.preregister_cell_statics)
+## to hand disk paths to worker tasks without exposing private cache internals.
+## Worker-safe: pure path math + FileAccess existence check.
+func resolve_disk_path(model_path: String) -> String:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var disk_path := _get_disk_cache_path(normalized)
+	if _cached_file_exists(disk_path):
+		return disk_path
+	return ""
+
+
 func _get_disk_cache_path(cache_key: String) -> String:
 	# Strip item_id suffix if present (e.g., "meshes\x\ex_door.nif:door_01" -> "meshes\x\ex_door.nif")
 	var base_key := cache_key

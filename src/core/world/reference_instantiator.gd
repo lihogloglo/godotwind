@@ -64,6 +64,7 @@ var last_static_data: Dictionary = {}
 
 # Configuration
 var create_lights: bool = true
+var load_lights: bool = true  # Skip ALL light ref instantiation (model + OmniLight3D). A/B benchmark gate.
 var load_npcs: bool = true
 var load_creatures: bool = true
 var use_object_pool: bool = true
@@ -212,6 +213,8 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 	# Handle different record types
 	match type_name:
 		"light":
+			if not load_lights:
+				return null
 			return _instantiate_light(ref, base_record as LightRecord)
 		"npc":
 			if not load_npcs:
@@ -532,6 +535,128 @@ func should_dispatch_static_precompute(
 		return false
 
 	return true
+
+
+## Phase F — Prototype pre-registration dispatcher (main-thread).
+##
+## Scans cell_record.references for unique STAT-routed model paths that are not
+## yet registered, dispatches one WorkerThreadPool task per unique path to
+## `_worker_preregister_prototype`. Runs in parallel with the cell's
+## ResourceLoader.load_threaded_request pipeline so by the time static refs
+## reach the instantiation queue, `should_dispatch_static_precompute` → true
+## (fast path) instead of falling through to sync cold-register (~20ms per
+## unique type). Eliminates the `static avg µs 200-2074 (cold 38050)` spike.
+##
+## Called by cell_manager.request_exterior_cell_async / request_cell_async
+## immediately after ESMManager.get_exterior_cell / get_cell succeeds.
+##
+## Idempotent: if the cell's types are already registered (common after first
+## visit), dispatches 0 tasks. Duplicates across cells are harmless — worker's
+## own fast-path skips already-registered types after mutex-read of _mesh_types.
+##
+## Returns the number of tasks dispatched (for diagnostics).
+##
+## Plan: docs/plans/distant_rendering_2026_04/phase_f_prototype_prereg.md §3
+# PHASE_F:MAIN_ONLY — reads ESMManager autoload + iterates cell refs.
+func preregister_cell_statics(cell_record: Variant) -> int:
+	if static_renderer == null or model_loader == null:
+		return 0
+	if cell_record == null:
+		return 0
+
+	# Dedupe model paths within the cell — many refs share types.
+	var to_register: Dictionary = {}  # normalized_path -> disk_path
+
+	for ref: CellReference in cell_record.references:
+		var record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		if base_record == null:
+			continue
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+		# Resolve model path from base record (STAT/CONT/DOOR/etc all have `model`).
+		if not "model" in base_record:
+			continue
+		var model_path: String = base_record.model
+		if model_path.is_empty():
+			continue
+
+		# Filter to STAT-routed refs only — interactives use _instantiate_model_object
+		# (Phase A), which doesn't need _mesh_types pre-warming.
+		var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+		if not _should_route_to_renderer(type_name, model_path, is_carryable, use_static_renderer):
+			continue
+
+		var normalized: String = model_path.to_lower().replace("/", "\\")
+		if normalized in to_register:
+			continue
+
+		# Already registered? Skip (mutex-wrapped has_type).
+		if static_renderer.call("has_type", normalized):
+			continue
+
+		# Resolve disk path. If missing, sync path will handle it via BSA fallback
+		# (prebake-mode only; runtime_mode returns null and skips the ref).
+		var disk_path: String = model_loader.call("resolve_disk_path", model_path)
+		if disk_path.is_empty():
+			continue
+
+		to_register[normalized] = disk_path
+
+	var dispatched: int = 0
+	for normalized: String in to_register:
+		var disk_path: String = to_register[normalized]
+		# HIGH priority — we're racing the cell's instantiation queue. The worker
+		# pool is shared with Phase A/E tasks; high-priority queueing ensures
+		# pre-reg lands before the static refs are drained.
+		WorkerThreadPool.add_task(
+			_worker_preregister_prototype.bind(normalized, disk_path),
+			true,
+			"ref_instantiator:phase_f_prereg"
+		)
+		dispatched += 1
+	return dispatched
+
+
+## Phase F — Prototype pre-registration worker.
+##
+## Loads the PackedScene off-thread (ResourceLoader.load is thread-safe),
+## instantiates it (PackedScene.instantiate is thread-safe since Godot 4.1 per
+## issue #79194), and calls static_renderer.register_from_prototype to extract
+## sub-meshes into _mesh_types. The register_from_prototype method has a
+## mutex-protected fast-path + atomic-insert under lock, so concurrent callers
+## on the same type_name dedupe safely.
+##
+## Ephemeral prototype node: the detached Node3D subtree is used only to walk
+## sub-meshes. register_from_prototype stores strong refs to mesh + material
+## resources in MeshType; the prototype itself has no other owners after this
+## function returns, so Godot's refcount reaper collects it. No main-thread
+## queue_free needed for un-parented nodes with refcount 0.
+##
+## Plan: docs/plans/distant_rendering_2026_04/phase_f_prototype_prereg.md §4
+# PHASE_F:WORKER_SAFE — by design. Zero autoload / signal / scene-tree access.
+func _worker_preregister_prototype(type_name: String, disk_path: String) -> void:
+	if static_renderer == null:
+		return
+	# Fast-path dedup: skip the ~20ms PackedScene.instantiate if another worker
+	# beat us to this type. Mutex-wrapped via has_type.
+	if static_renderer.call("has_type", type_name):
+		return
+
+	# ResourceLoader.load is thread-safe — returns cached PackedScene if another
+	# worker already loaded the same path.
+	var scene: PackedScene = ResourceLoader.load(disk_path, "PackedScene") as PackedScene
+	if scene == null or not scene.can_instantiate():
+		return
+
+	# PackedScene.instantiate is thread-safe since Godot 4.1 (issue #79194).
+	var raw: Node = scene.instantiate(PackedScene.GEN_EDIT_STATE_DISABLED)
+	if raw == null or not (raw is Node3D):
+		return
+
+	# register_from_prototype has mutex-protected fast-path + atomic insert.
+	# Concurrent callers on the same type_name dedupe safely.
+	static_renderer.call("register_from_prototype", type_name, raw as Node3D)
 
 
 ## Phase E — worker that precomputes a PrecomputedInstance for a STAT ref.

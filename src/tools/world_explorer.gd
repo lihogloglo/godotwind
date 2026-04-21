@@ -269,6 +269,16 @@ func _ready() -> void:
 	cell_manager.load_npcs = _show_characters
 	cell_manager.load_creatures = _show_characters
 
+	# --no-lights: A/B falsification gate for Phase E.3 (light off-thread). When
+	# present, ALL light refs are skipped entirely (model + OmniLight3D). Used to
+	# validate the hypothesis that light instantiation drives FPS hitches before
+	# shipping the off-thread pattern. Remove once E.3 lands and is measured.
+	for arg in OS.get_cmdline_args():
+		if arg == "--no-lights":
+			cell_manager.load_lights = false
+			Log.info("streaming", "[--no-lights] light refs disabled — A/B benchmark gate (Phase E.3 falsification)")
+			break
+
 	# Initialize object pool for frequently used models
 	# Create a hidden container for pooled objects when they're not in use
 	var pool_container := Node3D.new()

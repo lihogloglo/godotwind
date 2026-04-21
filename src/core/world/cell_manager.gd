@@ -55,6 +55,10 @@ var _stats: Dictionary = {
 
 # Configuration
 var create_lights: bool = true   # Whether to create OmniLight3D for light refs
+var load_lights: bool = true:    # Whether to load light refs at all (model + OmniLight3D). A/B gate.
+	set(value):
+		load_lights = value
+		_sync_instantiator_config()
 var load_npcs: bool = true:      # Whether to load NPC models
 	set(value):
 		load_npcs = value
@@ -155,6 +159,7 @@ func _sync_instantiator_config() -> void:
 	_instantiator.static_renderer = _static_renderer
 	_instantiator.character_factory = _character_factory
 	_instantiator.create_lights = create_lights
+	_instantiator.load_lights = load_lights
 	_instantiator.load_npcs = load_npcs
 	_instantiator.load_creatures = load_creatures
 	_instantiator.use_object_pool = use_object_pool
@@ -1136,6 +1141,13 @@ func request_exterior_cell_async(x: int, y: int, profile: LoadProfile = null) ->
 	if not cell_record:
 		return -1
 
+	# Phase F — dispatch prototype pre-registration tasks in parallel with the
+	# cell's ResourceLoader pipeline. Warms _mesh_types off-thread before the
+	# static refs hit the instantiation queue, eliminating the ~20ms cold
+	# PackedScene.instantiate per unique prototype that previously hit main.
+	if _instantiator != null:
+		_instantiator.preregister_cell_statics(cell_record)
+
 	return _start_async_request(cell_record, Vector2i(x, y), false, profile)
 
 
@@ -1159,6 +1171,13 @@ func request_cell_async(cell_name: String, profile: LoadProfile = null) -> int:
 	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
 	if not cell_record:
 		return -1
+
+	# Phase F — pre-register prototypes off-thread (same as exterior path).
+	# Interior pockets still benefit: pocket contents are often dense (tavern,
+	# shop) and the first-entry cold-register stall is exactly what breaks
+	# pocket load latency.
+	if _instantiator != null:
+		_instantiator.preregister_cell_statics(cell_record)
 
 	return _start_async_request(cell_record, Vector2i.ZERO, true, profile)
 
