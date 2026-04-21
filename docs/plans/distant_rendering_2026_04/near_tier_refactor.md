@@ -687,3 +687,43 @@ Switching engines from Godot → Unreal would RESTART this whole refactor at zer
 - Don't remove the `--near-only` fix. Same reason.
 - Don't assume lazy-spawn is the final shape. With T.2 collision wired in, some deferred refs may need bodies immediately for carryable drop / NPC pathfinding. Revisit threshold + gate at T.2 completion.
 - Don't revert `collision_mode=1` on Terrain3D until ball collision is actually debugged. Disabled terrain collision is worse than "might be wrong collision mode."
+
+---
+
+## 15. Session 2026-04-21 — Phase A measured + Phase E started
+
+### 15.1 Phase A measurement (commit `4de77ed` @ PHASE_A_OFFTHREAD_INSTANTIATE=true)
+
+Pilot 179s, Seyda Neen + Bitter Coast, walk + sprint.
+
+| Metric | Value | §6.2 target | Status |
+|---|---|---|---|
+| `inst:` p50 | 13.0 ms | 6 ms | miss (+117%) |
+| `inst:` p95 | 36.5 ms | 12 ms | miss (+204%) |
+| `inst:` max | 60.3 ms | — | — |
+| `container` avg µs | 10-408 | 1000 | **hit (5-100× below target)** |
+| Frame overruns / s | 6.5 | — | — |
+
+**Phase A did what it was scoped for.** `container` collapsed from 4000-14000µs (session 14) to 10-408µs — 100-1000× reduction on the off-thread path. But STAT refs were never dispatched to worker (Phase A's `should_dispatch_to_worker` explicitly excludes them), and STAT is now the dominant cost:
+
+| type | typical n/5s | avg µs | total ms/5s |
+|---|---|---|---|
+| **static** | 200-1000 | 200-2074 (cold 38050) | 60-1300 |
+| **light** | 10-29 | 3000-9000 | 10-175 |
+| container | 13-324 | 10-408 | 0.3-66 (Phase A ✓) |
+| door | 1-31 | 10-1031 | 0.01-32 |
+
+`cellupd:` 7-17ms (already fixed by commit `042d97c`). No longer a priority.
+
+### 15.2 Phase E (NEW plan — see `phase_e_static_bulk_upload.md`)
+
+Phase E extends Phase A's off-thread pattern to STAT refs. Worker precomputes transform math + sub-mesh xform composition; main thread does the MultiMesh/dict writes.
+
+**Slice order:** ops audit → precompute schema → precompute API → main consumer → entry schema → dispatch → drain → cancellation. Same slice discipline as Phase A so branch stays runnable.
+
+**E.1 target:** `static` avg 200-2074µs → 100-1000µs (50% reduction on warm path).
+**E.2 (deferred):** `RS.multimesh_set_buffer` bulk upload — bigger lift, requires PrototypeRegistry refactor.
+
+### 15.3 Do-NOT policy update (2026-04-21)
+- Don't quarantine `.res` files on corruption hypothesis — always visually verify in prebake asset viewer first. Previous session's quarantine of `f_terrain_rock_bc_11_nif.res` was a bad call.
+- Don't split hairs in multi-turn architectural debate between @coder and @builder before shipping. Write plan, review once, code, measure. User directive 2026-04-21.
