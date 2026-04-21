@@ -25,6 +25,7 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const PrototypeRegistryScript := preload("res://src/core/world/prototype_registry.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Phase 3 world-scoped PrototypeRegistry. One MultiMesh per (mesh, material)
 ## hash spans all loaded cells; add_instance routes every MID-tier static
@@ -108,6 +109,33 @@ class MeshType:
 	## All child meshes in the prototype. Single-mesh prototypes have one entry.
 	## Multi-mesh buildings (Vivec cantons, Hlaalu, etc.) have 3-8 entries.
 	var sub_meshes: Array[SubMeshEntry] = []
+
+
+## Phase E — precomputed instance data produced off-thread.
+##
+## The worker fills every field of this struct using thread-safe reads only
+## (`_mesh_types[type_name]` + pure math via `CS.*` static functions). The
+## main-thread drain then publishes the struct via `add_instance_precomputed`
+## which does the MultiMesh buffer writes + dict bookkeeping that can't run
+## off-thread (per research doc §2.1 — MultiMesh.set_instance_transform is
+## main-thread-only).
+##
+## Lifetime contract: allocated on worker, written by worker (every field
+## set), read by main thread ONLY after WorkerThreadPool.is_task_completed
+## returns true. Same implicit-mutex pattern as Phase A's `worker_instance`.
+##
+## Plan: docs/plans/distant_rendering_2026_04/phase_e_static_bulk_upload.md §3.1
+class PrecomputedInstance:
+	var type_name: String                             ## Lowercased normalized model path
+	var world_transform: Transform3D                  ## Full world-space xform (world)
+	var sub_mesh_combined_xforms: Array[Transform3D] = []  ## world * sub.local_transform, per sub-mesh
+	var custom_data: Color                            ## (spawn_time, fade_duration, 0, 0) for the shader
+	var aabb: AABB                                    ## Union AABB (copied from MeshType)
+	var cell_grid: Vector2i
+	var model_path: String
+	var item_id: String
+	var ref_id: StringName
+	var ref_num: int
 
 
 ## Instance data
@@ -338,6 +366,82 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 	return out
 
 
+## Phase E — worker-safe precompute for the STAT off-thread path.
+##
+## Runs on WorkerThreadPool (called by cell_manager's dispatch pass). Reads
+## `_mesh_types[type_name]` which is set-once by `register_from_prototype` on
+## the main thread; the dispatcher gate (§3.3) ensures this entry is fully
+## published before the worker runs. No writes to any shared state.
+##
+## Returns null if:
+##   - type_name is not registered (caller must fall back to sync path to
+##     trigger cold register_from_prototype — this helper never does the cold
+##     register since that walks a scene tree, main-thread only)
+##   - `_scenario.is_valid()` is false (pre-enter-tree — should never happen
+##     since dispatcher gates also check registration state)
+##
+## Non-null return means the caller can route to `add_instance_precomputed`.
+##
+## Thread-safety:
+##   - `_mesh_types` read: dict access, Godot Dictionary reads on a dict
+##     whose layout is stable are safe (no concurrent writer, see §8 of the
+##     plan). Gate in dispatcher blocks cold register race.
+##   - `CS.vector_to_godot/scale_to_godot/esm_rotation_to_godot_basis`: all
+##     static functions on CoordinateSystem, pure math (line 88/141/216 of
+##     coordinate_system.gd). No shared state.
+##   - `Transform3D` / `Basis` / `Vector3` constructors: thread-safe math.
+##   - `Time.get_ticks_msec()`: thread-safe.
+##
+## Plan: phase_e_static_bulk_upload.md §3.2, §5 ops audit
+# PHASE_E:WORKER_SAFE
+func precompute_instance(
+	type_name: String,
+	ref: CellReference,
+	cell_grid: Vector2i,
+) -> PrecomputedInstance:
+	if type_name not in _mesh_types:
+		return null
+	if not _scenario.is_valid():
+		return null
+	var mesh_type: MeshType = _mesh_types[type_name]
+
+	# Transform math (mirrors _instantiate_static_object lines 640-644).
+	var pos := CS.vector_to_godot(ref.position)
+	var scale := CS.scale_to_godot(ref.scale)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scale)
+	var world_transform := Transform3D(basis, pos)
+
+	# Sub-mesh world xforms — pre-multiply world * local. Saves the main-thread
+	# portion of the hot loop in PrototypeRegistry.add_instance. Reg add expects
+	# to compute `p_world_transform * local_xform` per sub-mesh; if we hand it
+	# the combined xform directly (§3.5 `add_instance_precomputed`), it skips
+	# that per-sub multiply. Cost moved off-thread: 3-5 Transform3D mults × N
+	# sub-meshes per ref.
+	var combined: Array[Transform3D] = []
+	combined.resize(mesh_type.sub_meshes.size())
+	for i in range(mesh_type.sub_meshes.size()):
+		var entry: SubMeshEntry = mesh_type.sub_meshes[i]
+		combined[i] = world_transform * entry.local_transform
+
+	# Shader custom data — spawn time + fade duration for lod_crossfade_multimesh.
+	var spawn_time: float = float(Time.get_ticks_msec()) / 1000.0
+	var custom_data := Color(spawn_time, REGISTRY_FADE_DURATION_S, 0.0, 0.0)
+
+	var precomp := PrecomputedInstance.new()
+	precomp.type_name = type_name
+	precomp.world_transform = world_transform
+	precomp.sub_mesh_combined_xforms = combined
+	precomp.custom_data = custom_data
+	precomp.aabb = mesh_type.aabb
+	precomp.cell_grid = cell_grid
+	precomp.model_path = ""  # Caller fills in via ref.model_path if needed
+	precomp.item_id = ""
+	precomp.ref_id = StringName(str(ref.ref_id))
+	precomp.ref_num = ref.ref_num
+	return precomp
+
+
 ## Add an instance of a registered mesh type.
 ##
 ## Post-B-wide: single RS instance per object with a single hard-cull
@@ -346,6 +450,7 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 ## space LOD selector, not by manual distance bands.
 ##
 ## Returns instance ID for later manipulation, or -1 on failure.
+# PHASE_E:MAIN_ONLY
 func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
 		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
 	# NOTE: no early-return on `_globally_visible`. Post-statics_no_node3d T.1
@@ -450,6 +555,106 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	if cell_grid not in _cell_index:
 		_cell_index[cell_grid] = [] as Array[int]
 	_cell_index[cell_grid].append(id)
+
+	return id
+
+
+## Phase E — main-thread consumer of a worker-prepared PrecomputedInstance.
+##
+## Mirrors the registry-path branch of `add_instance` (§3.5 of plan) but
+## skips all the work that `precompute_instance` already did on the worker:
+##   - transform math (pos, scale, basis, compose) — worker
+##   - sub-mesh `world * local` composition — worker
+##   - custom_data Color construction — worker
+##
+## Main-thread-bound work that remains:
+##   - `_next_id` increment (shared counter)
+##   - InstanceData struct population
+##   - `PrototypeRegistry.add_instance_precombined` (MultiMesh slot acquire +
+##     slot transform/custom_data writes — main-thread per research doc §2.1)
+##   - `_instances` / `_cell_index` / `_stats` dict updates
+##
+## `precomp.model_path` + `precomp.item_id` carry the ref metadata for
+## promotion/unload bookkeeping. Callers who have ref-level info they want
+## stored beyond what precompute captured can set those fields on the struct
+## before calling this.
+##
+## Returns the newly-allocated instance_id, or -1 if the type isn't registered
+## or the scenario is invalid. The precompute helper already guards both but
+## the race is closed here too — register can ONLY be completed on main
+## thread, so the time between precompute and add is a window where a
+## `clear(clear_mesh_types=true)` from somewhere else could drop the type.
+##
+## Plan: phase_e_static_bulk_upload.md §3.2, §5.1
+# PHASE_E:MAIN_ONLY
+func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
+	if precomp == null:
+		return -1
+	var type_name := precomp.type_name
+	if type_name not in _mesh_types:
+		return -1
+	if not _scenario.is_valid():
+		return -1
+
+	var mesh_type: MeshType = _mesh_types[type_name]
+	var id := _next_id
+	_next_id += 1
+
+	var data := InstanceData.new()
+	data.id = id
+	data.type_name = type_name
+	data.transform = precomp.world_transform
+	data.visible = true
+	data.cell_grid = precomp.cell_grid
+	data.model_path = precomp.model_path
+	data.item_id = precomp.item_id
+	data.ref_id = precomp.ref_id
+	data.ref_num = precomp.ref_num
+
+	# Registry path — always used for prototypes registered via
+	# register_from_prototype. `sub_meshes` empty ⇒ mismatched registration
+	# state (rare) ⇒ bail; legacy path wouldn't use precomputed data anyway.
+	if mesh_type.sub_meshes.is_empty():
+		return -1
+
+	var registry := _ensure_registry()
+	if registry == null:
+		return -1
+
+	# Build the registry input, feeding pre-combined world transforms (worker
+	# already computed `world * local`). `local_transform` is still stored so
+	# future set_instance_transform re-compositions work.
+	var subs: Array = []
+	subs.resize(mesh_type.sub_meshes.size())
+	for i in range(mesh_type.sub_meshes.size()):
+		var entry: SubMeshEntry = mesh_type.sub_meshes[i]
+		var world_xf: Transform3D = precomp.sub_mesh_combined_xforms[i] \
+			if i < precomp.sub_mesh_combined_xforms.size() else precomp.world_transform
+		subs[i] = {
+			"mesh": entry.mesh_resource,
+			"material": entry.material_resource,
+			"world_transform": world_xf,
+			"local_transform": entry.local_transform,
+		}
+
+	registry.add_instance_precombined(
+		id, subs,
+		precomp.custom_data.r,  # spawn_time packed into custom_data.r
+		precomp.custom_data.g,  # fade_duration packed into custom_data.g
+	)
+
+	if not _globally_visible:
+		registry.hide_instance(id)
+		data.visible = false
+	data.registry_id = id
+	_instances[id] = data
+	mesh_type.instance_count += 1
+	_stats["total_instances"] += 1
+	if _globally_visible:
+		_stats["visible_instances"] += 1
+	if precomp.cell_grid not in _cell_index:
+		_cell_index[precomp.cell_grid] = [] as Array[int]
+	_cell_index[precomp.cell_grid].append(id)
 
 	return id
 

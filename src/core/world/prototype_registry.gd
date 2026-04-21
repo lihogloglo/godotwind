@@ -175,6 +175,55 @@ func add_instance(
 	_cull_dirty = true
 
 
+## Phase E — variant of add_instance that takes pre-combined world transforms.
+##
+## Caller (cell_manager drain via static_object_renderer.add_instance_precomputed)
+## has already computed `world * local_transform` for every sub-mesh on the
+## worker thread. This avoids the per-sub-mesh `p_world_transform * p_local`
+## multiply in the standard add_instance loop.
+##
+## `p_sub_meshes` shape: Array of {mesh: Mesh, material: Material,
+##                                  world_transform: Transform3D,
+##                                  local_transform: Transform3D}.
+## The `local_transform` entry is still stored on the InstanceSlot so future
+## set_instance_transform calls can recompose `new_world * local` correctly.
+##
+## Returns the instance_id (same as add_instance). No cost savings inside the
+## registry — the win is upstream (worker-thread xform math instead of main).
+func add_instance_precombined(
+	p_instance_id: int,
+	p_sub_meshes: Array,
+	p_spawn_time: float,
+	p_fade_duration: float
+) -> void:
+	assert(not _instance_slots.has(p_instance_id),
+		"PrototypeRegistry.add_instance_precombined: instance_id %d already registered" % p_instance_id)
+	assert(not p_sub_meshes.is_empty(),
+		"PrototypeRegistry.add_instance_precombined: sub_meshes must not be empty")
+
+	var slots: Array[InstanceSlot] = []
+	slots.resize(p_sub_meshes.size())
+
+	var custom_data := Color(p_spawn_time, p_fade_duration, 0.0, 0.0)
+
+	for i in range(p_sub_meshes.size()):
+		var sm: Dictionary = p_sub_meshes[i]
+		var mesh: Mesh = sm.get("mesh")
+		var material: Material = sm.get("material")
+		var world_xform: Transform3D = sm.get("world_transform", Transform3D.IDENTITY)
+		var local_xform: Transform3D = sm.get("local_transform", Transform3D.IDENTITY)
+
+		var batch: RefCounted = get_or_create_batch(mesh, material)
+		var slot: int = batch.acquire_slot()
+		batch.set_slot_transform(slot, world_xform)
+		batch.set_slot_custom_data(slot, custom_data)
+
+		slots[i] = InstanceSlot.new(batch, slot, local_xform)
+
+	_instance_slots[p_instance_id] = slots
+	_cull_dirty = true
+
+
 ## Release all slots owned by this instance. Idempotent — calling with an
 ## unknown instance_id is a no-op (returns false).
 func remove_instance(p_instance_id: int) -> bool:
