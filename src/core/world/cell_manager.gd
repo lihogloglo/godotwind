@@ -1839,7 +1839,7 @@ func _phase_a_dispatch_pass() -> void:
 		if _instantiator.should_dispatch_static_precompute(entry, base_record, type_name):
 			if entry.request_id not in _async_requests:
 				continue
-			var request: AsyncRequest = _async_requests[entry.request_id]
+			var request: AsyncCellRequest = _async_requests[entry.request_id]
 			var inst_cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
 			# Stash type_name so the drain's diag path knows to attribute to
 			# "static" (complete_worker_static_precompute sets last_type_name
