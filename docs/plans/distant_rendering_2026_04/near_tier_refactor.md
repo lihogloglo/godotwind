@@ -724,6 +724,8 @@ Phase E extends Phase A's off-thread pattern to STAT refs. Worker precomputes tr
 **E.1 target:** `static` avg 200-2074µs → 100-1000µs (50% reduction on warm path).
 **E.2 (deferred):** `RS.multimesh_set_buffer` bulk upload — bigger lift, requires PrototypeRegistry refactor.
 
+**Shipped 2026-04-21, 4 commits** (`c6a9c03`, `9803bfe`, `5f34f77`, `b412848`) + fix-up commit `b054ce3` after builder review flagged 2 blockers (metadata drop + `_mesh_types` Dictionary race). Both resolved under Mutex `_mesh_types_mutex` in `static_object_renderer.gd` (worker reader + main writer) and `_worker_static_precompute` metadata population. All 138 gdunit4 tests pass; ready for interactive pilot + §9 measurement.
+
 ### 15.3 Do-NOT policy update (2026-04-21)
 - Don't quarantine `.res` files on corruption hypothesis — always visually verify in prebake asset viewer first. Previous session's quarantine of `f_terrain_rock_bc_11_nif.res` was a bad call.
 - Don't split hairs in multi-turn architectural debate between @coder and @builder before shipping. Write plan, review once, code, measure. User directive 2026-04-21.
