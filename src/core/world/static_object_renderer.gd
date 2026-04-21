@@ -35,6 +35,19 @@ var _prototype_registry: RefCounted = null
 ## Registered mesh types: type_name -> MeshType
 var _mesh_types: Dictionary[String, MeshType] = {}
 
+## Phase E — guards _mesh_types against concurrent read (worker via
+## precompute_instance) + write (main via register_from_prototype / clear).
+## Godot Dictionary is NOT thread-safe for concurrent mutation — docs list it
+## as "thread-safe in read-only mode" only. Without this lock, a rehash
+## triggered by insertion on main could corrupt a worker read of an unrelated
+## existing key. Builder review 2026-04-21 flagged this as BLOCKER 2.
+##
+## Hold-time discipline: minimum critical section — build new MeshType
+## structs locally on main, grab the lock only for the dict insert. Worker
+## readers grab the lock, copy out the MeshType reference, release before
+## touching its fields (which are never re-mutated after insertion).
+var _mesh_types_mutex: Mutex = Mutex.new()
+
 ## All instances: instance_id -> InstanceData
 var _instances: Dictionary[int, InstanceData] = {}
 
@@ -182,8 +195,13 @@ func _exit_tree() -> void:
 ## mesh: Can be ArrayMesh, or null to create from arrays
 ## material: Optional material to apply
 func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null) -> void:
-	if type_name in _mesh_types:
-		return  # Already registered
+	# Fast-path check under lock — prevents duplicate-register if two callers
+	# race (rare, but cheap to close).
+	_mesh_types_mutex.lock()
+	var already := type_name in _mesh_types
+	_mesh_types_mutex.unlock()
+	if already:
+		return
 
 	var mesh_type := MeshType.new()
 	mesh_type.name = type_name
@@ -210,8 +228,13 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 		mesh_type.material_rid = RID()
 		mesh_type.owns_material = false
 
-	_mesh_types[type_name] = mesh_type
-	_stats["mesh_types"] += 1
+	# Publish atomically. Re-check inside the lock in case another main-thread
+	# caller (tests, debug paths) registered while we were building.
+	_mesh_types_mutex.lock()
+	if type_name not in _mesh_types:
+		_mesh_types[type_name] = mesh_type
+		_stats["mesh_types"] += 1
+	_mesh_types_mutex.unlock()
 
 
 ## Register a mesh type from a Node3D prototype.
@@ -221,7 +244,13 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 ## one RS instance per child at add_instance time, all tracked under one ID.
 ## Single-mesh prototypes (flora, small clutter) work exactly as before.
 func register_from_prototype(type_name: String, prototype: Node3D) -> void:
-	if type_name in _mesh_types:
+	# Fast-path check under lock — prevents worker tearing on a rehash mid-
+	# register. Releasing the lock before the expensive build is safe because
+	# we re-check under lock before final insert.
+	_mesh_types_mutex.lock()
+	var already := type_name in _mesh_types
+	_mesh_types_mutex.unlock()
+	if already:
 		return
 
 	var all_mis := _find_all_mesh_instances(prototype)
@@ -276,18 +305,48 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 
 		sub_entries.append(entry)
 
-	# Register using first child as primary (backwards compat for get_mesh_type_stats etc.)
-	var first := sub_entries[0]
-	register_mesh_type(type_name, first.mesh_resource,
-		first.material_resource if first.material_resource else null)
+	if sub_entries.is_empty():
+		# All mesh instances were filtered out (no mesh on any MI). Defensive
+		# — _find_all_mesh_instances already pre-filters, but be safe.
+		return
 
-	if type_name in _mesh_types:
-		var mt: MeshType = _mesh_types[type_name]
-		mt.sub_meshes = sub_entries
-		mt.aabb = union_aabb
-		mt.has_lod_chain = any_has_lod
-		if not first.surface_materials.is_empty():
-			mt.surface_materials = first.surface_materials
+	# Build the MeshType struct locally — fully populated, no shared state
+	# access. Mirrors register_mesh_type's field setup + register_from_prototype's
+	# sub_meshes/aabb/has_lod_chain/surface_materials overlay. Atomic publish
+	# at the end (single lock-protected insert) means workers never see a
+	# half-populated entry — they either see this entry fully or not at all.
+	var first := sub_entries[0]
+	var mesh_type := MeshType.new()
+	mesh_type.name = type_name
+	if first.mesh_resource:
+		mesh_type.mesh_rid = first.mesh_resource.get_rid()
+		mesh_type.mesh_resource = first.mesh_resource
+		mesh_type.owns_mesh = false
+	else:
+		mesh_type.mesh_rid = RenderingServer.mesh_create()
+		mesh_type.owns_mesh = true
+	if first.material_resource:
+		mesh_type.material_rid = first.material_resource.get_rid()
+		mesh_type.material_resource = first.material_resource
+		mesh_type.owns_material = false
+	else:
+		mesh_type.material_rid = RID()
+		mesh_type.owns_material = false
+	mesh_type.aabb = union_aabb
+	mesh_type.has_lod_chain = any_has_lod
+	mesh_type.sub_meshes = sub_entries
+	if not first.surface_materials.is_empty():
+		mesh_type.surface_materials = first.surface_materials
+
+	# Atomic publish — re-check under lock to handle the narrow race where
+	# another main-thread caller inserted the same type between our fast-path
+	# check and this point. (Same-frame same-type double-register is rare but
+	# not impossible — defensive.)
+	_mesh_types_mutex.lock()
+	if type_name not in _mesh_types:
+		_mesh_types[type_name] = mesh_type
+		_stats["mesh_types"] += 1
+	_mesh_types_mutex.unlock()
 
 
 ## Compatibility alias — post-B-wide there's no difference between the two
@@ -399,11 +458,19 @@ func precompute_instance(
 	ref: CellReference,
 	cell_grid: Vector2i,
 ) -> PrecomputedInstance:
+	# Short critical section: grab the MeshType reference under lock, release
+	# immediately. MeshType fields (sub_meshes, aabb, etc.) are frozen after
+	# register_from_prototype's atomic publish, so reading them outside the
+	# lock is safe. _scenario is set-once in _enter_tree + never reassigned —
+	# no lock needed.
+	_mesh_types_mutex.lock()
 	if type_name not in _mesh_types:
-		return null
-	if not _scenario.is_valid():
+		_mesh_types_mutex.unlock()
 		return null
 	var mesh_type: MeshType = _mesh_types[type_name]
+	_mesh_types_mutex.unlock()
+	if not _scenario.is_valid():
+		return null
 
 	# Transform math (mirrors _instantiate_static_object lines 640-644).
 	var pos := CS.vector_to_godot(ref.position)
@@ -982,6 +1049,13 @@ func clear(clear_mesh_types: bool = true) -> void:
 	_cell_index.clear()
 
 	if clear_mesh_types:
+		# Lock for the iteration + clear — any in-flight worker read of
+		# _mesh_types must complete or block here before we free the RIDs.
+		# Clear is the teardown path (scene exit / test cleanup); worker
+		# cancellation SHOULD have already run upstream via
+		# _phase_a_cancel_workers_for_request, but this lock is the final
+		# correctness barrier.
+		_mesh_types_mutex.lock()
 		for type_name: String in _mesh_types:
 			var mesh_type: MeshType = _mesh_types[type_name]
 			if mesh_type.owns_mesh and mesh_type.mesh_rid.is_valid():
@@ -990,6 +1064,7 @@ func clear(clear_mesh_types: bool = true) -> void:
 				rs.free_rid(mesh_type.material_rid)
 		_mesh_types.clear()
 		_stats["mesh_types"] = 0
+		_mesh_types_mutex.unlock()
 
 	_stats["total_instances"] = 0
 	_stats["visible_instances"] = 0

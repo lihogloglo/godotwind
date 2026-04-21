@@ -101,8 +101,11 @@ func test_add_instance_precomputed_matches_add_instance() -> void:
 	var transform := Transform3D(basis, pos)
 	var id_sync := renderer_sync.add_instance("test_match", transform, Vector2i(0, 0))
 
-	# Precompute path.
+	# Precompute path. The worker would normally fill these from the
+	# InstantiationEntry; tests populate directly to match the contract.
 	var precomp: Variant = renderer_pc.precompute_instance("test_match", ref, Vector2i(0, 0))
+	precomp.model_path = "meshes/test_match.nif"
+	precomp.item_id = ""
 	var id_pc := renderer_pc.add_instance_precomputed(precomp)
 
 	# Both should succeed.
@@ -119,3 +122,10 @@ func test_add_instance_precomputed_matches_add_instance() -> void:
 	var data_sync := renderer_sync.get_instance_data(id_sync)
 	var data_pc := renderer_pc.get_instance_data(id_pc)
 	assert_that(data_sync.transform.origin.distance_to(data_pc.transform.origin)).is_less(0.0001)
+
+	# Ref metadata parity — builder review BLOCKER 1 regression guard.
+	# Precompute path MUST populate model_path / ref_id / ref_num in
+	# InstanceData; empty strings break find_instances_near promotion query.
+	assert_that(data_pc.model_path).is_equal("meshes/test_match.nif")
+	assert_that(str(data_pc.ref_id)).is_equal("ref_match")
+	assert_that(data_pc.ref_num).is_equal(1)

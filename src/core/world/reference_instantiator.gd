@@ -551,6 +551,16 @@ func _worker_static_precompute(entry: Variant, cell_grid: Vector2i) -> void:
 		return
 	var normalized: String = entry.model_path.to_lower().replace("/", "\\")
 	var precomp: Variant = static_renderer.call("precompute_instance", normalized, entry.ref, cell_grid)
+	# Populate ref-metadata fields the sync add_instance would fill. Builder
+	# review 2026-04-21 BLOCKER 1: precompute_instance can't see
+	# entry.model_path / entry.item_id from its signature (it only takes the
+	# CellReference), so we fill them here. Empty strings break downstream
+	# readers — e.g. `find_instances_near` at static_object_renderer.gd ~1073
+	# skips any InstanceData whose model_path is empty. Future promotion work
+	# relies on this field being populated.
+	if precomp != null:
+		precomp.model_path = entry.model_path
+		precomp.item_id = entry.item_id
 	# Last write — becomes visible to main-thread drain once
 	# WorkerThreadPool.is_task_completed returns true.
 	entry.worker_static_precomp = precomp

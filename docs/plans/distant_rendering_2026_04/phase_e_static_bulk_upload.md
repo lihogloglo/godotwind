@@ -1,6 +1,6 @@
 # Phase E — Per-Cell Bulk Static Upload (DRAFT)
 
-**Status:** DRAFT 2026-04-21. Authored @coder, reviewed @builder.
+**Status:** DRAFT 2026-04-21. Authored @coder. First code pass shipped 2026-04-21, reviewed post-code by @builder (2026-04-21, 14:30). Two blockers flagged (metadata drop + `_mesh_types` race), both fixed in follow-up commit.
 **Supersedes:** nothing — Phase A targeted containers, this targets statics.
 **Source:** 179s pilot 2026-04-21 — see §2 data.
 
@@ -224,10 +224,11 @@ If §7.3-§7.7 measures < 30% reduction, stop and reassess — likely missed a m
 ## 8. Risks
 
 - **`_next_id` increment race.** Currently `_next_id` is incremented in `add_instance`. Worker doesn't touch this — precompute returns a struct with no ID. Main thread assigns ID in `add_instance_precomputed`. No race.
-- **`_mesh_types[type_name]` read-during-register race.** Cold register path writes `_mesh_types` on main thread; worker reads `_mesh_types` for precompute. Dispatcher gate (§3.3 item 2) ensures register is complete before dispatch, so worker sees the fully-written entry or skips.
-- **Transform math uses `CS.vector_to_godot`** — reads `CoordinateSystem` singleton. If `CS` is a static class with no mutable state, worker-safe. Must verify — pre-ship grep.
+- **`_mesh_types[type_name]` read-during-register race — RESOLVED 2026-04-21.** Initial draft claimed dispatcher gate was sufficient. Builder review correctly flagged the cross-type race: main thread writing a NEW key via `register_from_prototype` can trigger a Dictionary rehash that tears an unrelated concurrent worker read. Fix shipped: `Mutex _mesh_types_mutex` wraps every site — writer (`register_mesh_type`, `register_from_prototype`, `clear`) and worker reader (`precompute_instance`). Short critical sections: worker grabs MeshType reference under lock, releases immediately (MeshType fields are frozen after atomic insert). `register_from_prototype` was refactored to build the MeshType fully locally then atomic-insert under lock — no half-populated-entry window. Mutex overhead is ~100ns uncontended.
+- **Transform math uses `CS.vector_to_godot`** — `CoordinateSystem` class has every `CS.*` accessor as `static func`. Pure math, no instance state. Worker-safe ✓ (grep confirmed at `coordinate_system.gd:88/141/216`).
 - **Sub-mesh xform composition** — `world * entry.local_transform` is pure Transform3D math, thread-safe.
 - **PrecomputedInstance struct ownership** — allocated on worker, read on main. Same pattern as Phase A's `entry.worker_instance`; implicit mutex = `WorkerThreadPool.is_task_completed`.
+- **Ref metadata dropped — RESOLVED 2026-04-21.** Initial implementation left `precomp.model_path = ""` / `item_id = ""` with a TODO comment. Builder review flagged: downstream readers (`find_instances_near`, `.data.model_path.is_empty()` filter at `static_object_renderer.gd:1073`) treat empty `model_path` as "skip". Fix: `_worker_static_precompute` populates `precomp.model_path = entry.model_path` + `precomp.item_id = entry.item_id` after the precompute call. Test updated with parity asserts (`test_add_instance_precomputed_matches_add_instance` now checks `data_pc.model_path` + `ref_id` + `ref_num`).
 
 ---
 
