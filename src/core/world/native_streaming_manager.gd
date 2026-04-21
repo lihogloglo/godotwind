@@ -312,6 +312,14 @@ func fast_cleanup() -> void:
 		_background_processor._pending_tasks.clear()
 		_background_processor._orphaned_wtp_handles.clear()
 
+	# Phase F — drain in-flight prototype pre-registration workers BEFORE
+	# clearing the static renderer. Without this, workers mid-`register_from_
+	# prototype` hold pointers into `_mesh_types` that `_static_renderer.clear()`
+	# frees, producing the shutdown sig 11 cluster flagged by @builder in the
+	# Phase F review. Bounded: < 50 pending tasks × ~20ms worst case = < 1s.
+	if _cell_manager:
+		_cell_manager.fast_cleanup()
+
 	# Free GPU resources (RS RIDs)
 	if _static_renderer:
 		_static_renderer.clear()

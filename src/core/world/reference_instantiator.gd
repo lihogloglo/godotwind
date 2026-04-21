@@ -62,6 +62,15 @@ var _impostor_candidates: RefCounted = null
 # Output data for non-Node3D instances (Phase 2)
 var last_static_data: Dictionary = {}
 
+# Phase F — prototype pre-registration task tracking. Stores WorkerThreadPool
+# task_ids dispatched by `preregister_cell_statics` so `drain_prereg_tasks()`
+# can block on them at shutdown. Without this, `native_streaming_manager.
+# fast_cleanup` would call `_static_renderer.clear()` while workers still
+# hold pointers into `_mesh_types`, producing the shutdown sig 11 cluster.
+# Also prevents CLAUDE.md anti-pattern "DON'T skip wait_for_task_completion()
+# on WorkerThreadPool". Plan: phase_f_prototype_prereg.md §5.
+var _prereg_task_ids: Array[int] = []
+
 # Configuration
 var create_lights: bool = true
 var load_lights: bool = true  # Skip ALL light ref instantiation (model + OmniLight3D). A/B benchmark gate.
@@ -603,19 +612,59 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 
 		to_register[normalized] = disk_path
 
+	# Prune completed task_ids before appending new ones. Cheap O(N) walk —
+	# N is the number of in-flight pre-reg tasks, typically bounded by the
+	# uniform prototype count × a small multiple. Prevents unbounded growth
+	# of _prereg_task_ids over a long session.
+	_prune_completed_prereg_tasks()
+
 	var dispatched: int = 0
 	for normalized: String in to_register:
 		var disk_path: String = to_register[normalized]
 		# HIGH priority — we're racing the cell's instantiation queue. The worker
 		# pool is shared with Phase A/E tasks; high-priority queueing ensures
 		# pre-reg lands before the static refs are drained.
-		WorkerThreadPool.add_task(
+		var task_id: int = WorkerThreadPool.add_task(
 			_worker_preregister_prototype.bind(normalized, disk_path),
 			true,
 			"ref_instantiator:phase_f_prereg"
 		)
+		_prereg_task_ids.append(task_id)
 		dispatched += 1
 	return dispatched
+
+
+## Phase F — drop completed task_ids from _prereg_task_ids. Keep array size
+## bounded over long sessions. `is_task_completed` is non-blocking O(1).
+func _prune_completed_prereg_tasks() -> void:
+	if _prereg_task_ids.is_empty():
+		return
+	var still_pending: Array[int] = []
+	for task_id: int in _prereg_task_ids:
+		if not WorkerThreadPool.is_task_completed(task_id):
+			still_pending.append(task_id)
+	_prereg_task_ids = still_pending
+
+
+## Phase F — block until every in-flight prototype pre-reg worker completes.
+##
+## Called from CellManager.fast_cleanup (invoked by native_streaming_manager.
+## fast_cleanup on WM_CLOSE_REQUEST) BEFORE `_static_renderer.clear()` runs.
+## Prevents the shutdown race where a worker mid-`register_from_prototype`
+## would write into freed MeshType storage — exact symptom of the sig 11
+## cluster flagged by @builder in the Phase F review.
+##
+## `wait_for_task_completion` is idempotent once the task is done, and the
+## Phase F worker is bounded (~20ms PackedScene.instantiate + microseconds
+## of subtree walk). Worst-case shutdown delay: ~50ms per in-flight task,
+## typically < 10 tasks pending = < 500ms blocked. Acceptable on quit path.
+##
+## Plan: phase_f_prototype_prereg.md §5
+func drain_prereg_tasks() -> void:
+	for task_id: int in _prereg_task_ids:
+		if not WorkerThreadPool.is_task_completed(task_id):
+			WorkerThreadPool.wait_for_task_completion(task_id)
+	_prereg_task_ids.clear()
 
 
 ## Phase F — Prototype pre-registration worker.

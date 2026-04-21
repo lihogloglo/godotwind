@@ -1308,6 +1308,19 @@ func _maybe_log_per_type_breakdown() -> void:
 	_diag_per_type_count.clear()
 
 
+## Phase F — shutdown cleanup hook. Called by NativeStreamingManager.fast_cleanup
+## on WM_CLOSE_REQUEST (Alt+F4 / quit menu) BEFORE it clears the static
+## renderer. Drains any in-flight prototype pre-registration workers so they
+## complete their writes into `_mesh_types` before the dict is freed. Without
+## this, a worker mid-`register_from_prototype` + a main-thread `_static_renderer.
+## clear()` race produces the shutdown sig 11 cluster.
+##
+## Plan: phase_f_prototype_prereg.md §5
+func fast_cleanup() -> void:
+	if _instantiator != null:
+		_instantiator.drain_prereg_tasks()
+
+
 ## Cancel an async request — HARD cancel, destroys everything.
 ##
 ## Used by interior-pocket teardown where there is no unload-container limbo
