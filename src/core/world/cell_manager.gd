@@ -1019,6 +1019,19 @@ class InstantiationEntry:
 	var phase_a_base_record: Variant = null
 	var phase_a_type_name: String = ""
 
+	# Phase E (off-thread STAT precompute) — parallel to Phase A but for STAT
+	# refs that route to StaticObjectRenderer. Worker fills
+	# `worker_static_precomp` with a PrecomputedInstance; drain publishes via
+	# static_renderer.add_instance_precomputed. Plan:
+	# docs/plans/distant_rendering_2026_04/phase_e_static_bulk_upload.md §3.1.
+	##
+	## Typed as Variant to avoid a hard preload dependency on
+	## static_object_renderer.gd from this inner class (keeps cell_manager
+	## owning its own scope). Runtime guard in drain checks `!= null`.
+	var worker_static_precomp: Variant = null
+	var worker_static_dispatched: bool = false
+	var worker_static_task_id: int = -1
+
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
 var _background_processor: Node = null
@@ -1554,11 +1567,16 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		var model_path: String = entry.model_path
 		var item_id: String = entry.item_id
 
-		# Phase A — dispatched-but-running entries get parked. Their worker is
-		# still executing; trying to consume worker_instance now would race
-		# against the writer. Park and retry next frame.
-		if PHASE_A_OFFTHREAD_INSTANTIATE and entry.worker_dispatched:
-			if not WorkerThreadPool.is_task_completed(entry.worker_task_id):
+		# Phase A / E — dispatched-but-running entries get parked. Their worker
+		# is still executing; trying to consume worker_instance / worker_static_precomp
+		# now would race against the writer. Park and retry next frame.
+		if PHASE_A_OFFTHREAD_INSTANTIATE:
+			if entry.worker_dispatched \
+					and not WorkerThreadPool.is_task_completed(entry.worker_task_id):
+				phase_a_deferred.append(entry)
+				continue
+			if entry.worker_static_dispatched \
+					and not WorkerThreadPool.is_task_completed(entry.worker_static_task_id):
 				phase_a_deferred.append(entry)
 				continue
 
@@ -1622,6 +1640,22 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				# Clear so we don't double-consume in any error path.
 				entry.worker_instance = null
 			# else: worker failed, obj stays null, ref drops silently.
+		elif PHASE_A_OFFTHREAD_INSTANTIATE and entry.worker_static_dispatched:
+			# Phase E — worker precomputed a PrecomputedInstance off-thread;
+			# publish via static_renderer.add_instance_precomputed. Always
+			# returns null (no Node3D). On null precomp (worker failure),
+			# `complete_worker_static_precompute` is a no-op — ref drops
+			# silently, pending_instantiations already decremented.
+			_instantiator.last_type_name = "static"
+			_instantiator.last_proximity_deferred = false
+			if entry.worker_static_precomp != null:
+				obj = _instantiator.complete_worker_static_precompute(
+					entry,
+					entry.worker_static_precomp,
+				)
+				entry.worker_static_precomp = null
+			# else: worker failed (e.g. type unregistered at precompute time,
+			# e.g. clear() ran mid-flight). Drop silently.
 		else:
 			obj = _instantiator.instantiate_reference(ref, inst_cell_grid)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
@@ -1761,41 +1795,63 @@ func _phase_a_dispatch_pass() -> void:
 	if not ml.has_method("get_cached_packed_scene"):
 		return  # slice 3 API not present — defensive
 	for entry: InstantiationEntry in _instantiation_queue:
-		if entry.worker_dispatched:
+		# Skip entries already dispatched on either worker path, or whose
+		# previous-frame worker result hasn't yet been consumed by the drain.
+		if entry.worker_dispatched or entry.worker_static_dispatched:
 			continue
-		if entry.worker_instance != null:
+		if entry.worker_instance != null or entry.worker_static_precomp != null:
 			continue
-		# Cache-peek first — cheapest gate, drops ~20% of entries (cache miss)
-		# before we spend ESMManager time. get_cached_packed_scene returns null
-		# on miss / null sentinel / non-PackedScene entry.
-		var packed_scene: PackedScene = ml.call("get_cached_packed_scene", entry.model_path, entry.item_id)
-		if packed_scene == null:
-			continue
-		# Resolve base_record + type_name on main thread — ESMManager is an
-		# autoload and worker-unsafe per plan §5.1. Cheap (dict lookup).
+
+		# Resolve base_record + type_name on main thread — both Phase A and
+		# Phase E gates need them. ESMManager is an autoload and worker-unsafe
+		# per plan §5.1. Cheap (dict lookup).
 		var record_type: Array = [""]
 		var base_record: Variant = ESMManager.get_any_record(str(entry.ref.ref_id), record_type)
 		if base_record == null:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-		# Full routing gate — mirrors every sync-path bailout before
-		# model_loader.get_model (type exclusion, static-renderer routing,
-		# proximity gate). Without this, STAT refs that sync routes to
-		# RS.instance_create2 would instead be dispatched as Node3Ds on the
-		# worker, regressing the T.1 statics_no_node3d win. See
-		# reference_instantiator.should_dispatch_to_worker for the full list.
-		if not _instantiator.should_dispatch_to_worker(entry, base_record, type_name):
+
+		# ---- Phase A path (off-thread PackedScene.instantiate, interactives) ----
+		# Cache-peek first — cheapest gate, drops ~20% of entries (cache miss)
+		# before we spend the should_dispatch check. get_cached_packed_scene
+		# returns null on miss / null sentinel / non-PackedScene entry.
+		var packed_scene: PackedScene = ml.call("get_cached_packed_scene", entry.model_path, entry.item_id)
+		if packed_scene != null and _instantiator.should_dispatch_to_worker(entry, base_record, type_name):
+			# Stash resolved records so the drain's main-thread tail can reuse
+			# them (avoids duplicate ESMManager lookup in complete_worker_instantiate).
+			entry.phase_a_base_record = base_record
+			entry.phase_a_type_name = type_name
+			entry.worker_dispatched = true
+			entry.worker_task_id = WorkerThreadPool.add_task(
+				_instantiator._worker_instantiate.bind(entry, packed_scene, base_record, type_name),
+				false,
+				"cell_manager:phase_a_instantiate",
+			)
 			continue
-		# Stash resolved records so the drain's main-thread tail can reuse
-		# them (avoids a duplicate ESMManager lookup in complete_worker_instantiate).
-		entry.phase_a_base_record = base_record
-		entry.phase_a_type_name = type_name
-		entry.worker_dispatched = true
-		entry.worker_task_id = WorkerThreadPool.add_task(
-			_instantiator._worker_instantiate.bind(entry, packed_scene, base_record, type_name),
-			false,
-			"cell_manager:phase_a_instantiate",
-		)
+
+		# ---- Phase E path (off-thread STAT precompute, RS-routed clutter) ----
+		# Mirror of Phase A for the ~80% STAT path that routes to
+		# StaticObjectRenderer. Phase E worker reads _mesh_types (set-once
+		# after register_from_prototype) + runs CS.* static math + composes
+		# sub-mesh world xforms. Main-thread drain publishes via
+		# complete_worker_static_precompute. See
+		# phase_e_static_bulk_upload.md §3.
+		if _instantiator.should_dispatch_static_precompute(entry, base_record, type_name):
+			if entry.request_id not in _async_requests:
+				continue
+			var request: AsyncRequest = _async_requests[entry.request_id]
+			var inst_cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
+			# Stash type_name so the drain's diag path knows to attribute to
+			# "static" (complete_worker_static_precompute sets last_type_name
+			# directly but the Phase-A-shaped diag uses entry.phase_a_type_name
+			# to prime the renderer before the call).
+			entry.phase_a_type_name = type_name
+			entry.worker_static_dispatched = true
+			entry.worker_static_task_id = WorkerThreadPool.add_task(
+				_instantiator._worker_static_precompute.bind(entry, inst_cell_grid),
+				false,
+				"cell_manager:phase_e_static_precompute",
+			)
 
 
 ## Phase A — cancel worker instantiate tasks for a cancelled/unloaded request
@@ -1822,17 +1878,26 @@ func _phase_a_cancel_workers_for_request(request_id: int) -> void:
 	for entry: InstantiationEntry in _instantiation_queue:
 		if entry.request_id != request_id:
 			continue
-		if not entry.worker_dispatched:
-			continue
-		if entry.worker_task_id >= 0:
-			# Block if the worker is still writing entry.worker_instance.
-			# is_task_completed is the cheap check; wait_for_task_completion
-			# is idempotent once the task is done.
-			if not WorkerThreadPool.is_task_completed(entry.worker_task_id):
-				WorkerThreadPool.wait_for_task_completion(entry.worker_task_id)
-		if entry.worker_instance != null:
-			entry.worker_instance.queue_free()
-			entry.worker_instance = null
+		# Phase A (PackedScene.instantiate) cancellation.
+		if entry.worker_dispatched:
+			if entry.worker_task_id >= 0:
+				# Block if the worker is still writing entry.worker_instance.
+				# is_task_completed is the cheap check; wait_for_task_completion
+				# is idempotent once the task is done.
+				if not WorkerThreadPool.is_task_completed(entry.worker_task_id):
+					WorkerThreadPool.wait_for_task_completion(entry.worker_task_id)
+			if entry.worker_instance != null:
+				entry.worker_instance.queue_free()
+				entry.worker_instance = null
+		# Phase E (STAT precompute) cancellation. Same wait-for-completion
+		# discipline; unlike Phase A there's no Node3D to free — the worker
+		# only produced a PrecomputedInstance struct, which is RefCounted and
+		# self-destructs when we null the reference.
+		if entry.worker_static_dispatched:
+			if entry.worker_static_task_id >= 0:
+				if not WorkerThreadPool.is_task_completed(entry.worker_static_task_id):
+					WorkerThreadPool.wait_for_task_completion(entry.worker_static_task_id)
+			entry.worker_static_precomp = null
 
 
 ## Sort instantiation queue by frustum-aware priority

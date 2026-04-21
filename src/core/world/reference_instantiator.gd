@@ -487,6 +487,110 @@ func should_dispatch_to_worker(
 	return true
 
 
+## Phase E — main-thread dispatcher pre-flight for STAT refs.
+##
+## MIRROR of `should_dispatch_to_worker` (Phase A) but for the STAT path that
+## routes to StaticObjectRenderer. Returns true ONLY when:
+##
+##   1. The sync path WOULD route this ref to `_instantiate_static_object`
+##      (i.e. `_should_route_to_renderer` returns true). Phase A returns
+##      false for these; Phase E takes the mirror branch.
+##   2. The static_renderer is non-null.
+##   3. The prototype is ALREADY registered via register_from_prototype.
+##      Cold register walks a scene tree and must stay main-thread; the
+##      dispatcher skips unregistered types (they'll fall through to the
+##      sync `_instantiate_static_object` which triggers cold register).
+##
+## Phase E and Phase A dispatch are mutually exclusive — Phase A's gate
+## excludes STAT routing, so a given ref is eligible for at most one of
+## the two worker paths.
+##
+## Plan: phase_e_static_bulk_upload.md §3.3, §5
+# PHASE_E:MAIN_ONLY — reads static_renderer + _mesh_types + camera-derived state.
+func should_dispatch_static_precompute(
+	entry: Variant,
+	base_record: Variant,
+	type_name: String,
+) -> bool:
+	if static_renderer == null:
+		return false
+
+	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+
+	# Effective-use-static mirror (matches should_dispatch_to_worker).
+	var effective_use_static: bool = use_static_renderer
+	if entry.load_profile != null:
+		effective_use_static = entry.load_profile.use_static_renderer
+
+	# Must take the STAT-routed branch in the sync path.
+	if not _should_route_to_renderer(type_name, entry.model_path, is_carryable, effective_use_static):
+		return false
+
+	# Must be already registered — cold register stays main-thread.
+	var normalized: String = entry.model_path.to_lower().replace("/", "\\")
+	if not static_renderer.call("has_type", normalized):
+		return false
+
+	return true
+
+
+## Phase E — worker that precomputes a PrecomputedInstance for a STAT ref.
+##
+## Runs on WorkerThreadPool. Reads `static_renderer._mesh_types` (set-once by
+## register_from_prototype, dispatcher gate blocks race). Writes only to
+## `entry.worker_static_precomp`.
+##
+## On failure (type not registered, scenario invalid) leaves
+## `worker_static_precomp == null`; drain falls back to the sync path which
+## will trigger cold register_from_prototype on main thread.
+##
+## Plan: phase_e_static_bulk_upload.md §3.4
+# PHASE_E:WORKER_SAFE — by design. Zero autoload / signal / scene-tree access.
+func _worker_static_precompute(entry: Variant, cell_grid: Vector2i) -> void:
+	if static_renderer == null:
+		return
+	var normalized: String = entry.model_path.to_lower().replace("/", "\\")
+	var precomp: Variant = static_renderer.call("precompute_instance", normalized, entry.ref, cell_grid)
+	# Last write — becomes visible to main-thread drain once
+	# WorkerThreadPool.is_task_completed returns true.
+	entry.worker_static_precomp = precomp
+
+
+## Phase E main-thread publish — consumes a worker-built PrecomputedInstance.
+##
+## Called from cell_manager drain when a static-precompute task completes.
+## Publishes the instance to StaticObjectRenderer (MultiMesh slot allocation +
+## dict bookkeeping), updates `last_type_name` for diag attribution, and
+## resets `last_proximity_deferred` since STAT refs don't use that path.
+##
+## Returns null unconditionally — statics don't produce a Node3D. The
+## `null` return mirrors the sync `_instantiate_static_object` return contract.
+## On a null precomp (worker failed), returns null and the caller drops the
+## ref silently (pending_instantiations already decremented).
+##
+## Plan: phase_e_static_bulk_upload.md §3.5
+# PHASE_E:MAIN_ONLY
+func complete_worker_static_precompute(entry: Variant, precomp: Variant) -> Node3D:
+	last_type_name = "static"
+	last_proximity_deferred = false
+	if precomp == null or static_renderer == null:
+		return null
+	# `add_instance_precomputed` returns the new instance_id; we don't need it
+	# here (remove_instance happens on cell unload via cell_grid index).
+	var id: int = static_renderer.call("add_instance_precomputed", precomp)
+	if id >= 0:
+		stats["static_renderer_instances"] += 1
+		# Mirror of the sync path's `last_static_data` side-channel for the GPU
+		# Scene Database collector (see cell_manager._collect_static_data).
+		last_static_data = {
+			"transform": precomp.world_transform,
+			"aabb": precomp.aabb,
+			"mesh_id": float(precomp.type_name.hash()),
+			"lod_mask": 0,
+		}
+	return null
+
+
 ## Phase A — off-thread PackedScene.instantiate worker. Executes on a
 ## WorkerThreadPool thread. Touches only the detached Node3D subtree:
 ## NO autoloads, NO signals, NO scene-tree ops. The dispatcher (cell_manager)
