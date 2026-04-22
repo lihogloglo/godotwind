@@ -34,8 +34,14 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 
 ## Seconds of FPS >= SETTLE_FPS_TARGET required to call the pipeline settled.
-const SETTLE_WINDOW_SEC: float = 3.0
-const SETTLE_FPS_TARGET: float = 50.0
+## Phase 0 ablation (2026-04-21): relaxed threshold to TRUE steady state.
+## User reports Balmora eye-level steady = 180-200 FPS. Old 50/3s fired while
+## the instantiation queue was still draining (queue=866 with inst:14ms/frame
+## chronic overrun = 71 FPS cap), giving misleading "steady" numbers. New
+## threshold requires fps>=150 sustained 10s → guarantees queue drained +
+## true GPU-bound steady state.
+const SETTLE_WINDOW_SEC: float = 10.0
+const SETTLE_FPS_TARGET: float = 150.0
 
 ## Hard cap — if FPS never recovers, start the bench anyway at this point so
 ## the report captures a "never settled" run instead of spinning forever.
@@ -156,19 +162,15 @@ func _tick_waiting_settle(delta: float, total_elapsed_s: float) -> void:
 # -----------------------------------------------------------------------------
 
 func _enter_tiers() -> void:
-	# Teleport camera to Seyda Neen spawn so the sample captures the expected
-	# cell. Below TELEPORT_DETECT_THRESHOLD (500m) if we're already near — safe
-	# no-op — but if the camera drifted somewhere else we re-center here.
-	var spawn := DU.cell_to_world_center(Vector2i(-2, -9), 5.0)
-	if _camera:
-		_camera.global_position = spawn
-		if _camera.has_method("look_at"):
-			_camera.look_at(spawn + Vector3(0, 0, -10))
+	# Phase 0 ablation (2026-04-21): no mid-session teleport — launch with
+	# `--start-cell=-3,-2` to boot at Balmora. Teleport-after-settle triggered
+	# tracker §12.2 crash during the 6-cell unload storm. Tiers scenario now
+	# samples at wherever the camera already is (Balmora via boot flag).
 	_state = "tiers"
 	_state_elapsed = 0.0
 	_last_sample_sec_bucket = -1
 	_tiers_samples.clear()
-	Log.info("tools", "[AUTOBENCH] scenario C (bench_tiers) — sampling %.0fs static at Seyda Neen" % TIERS_SAMPLE_SEC)
+	Log.info("tools", "[AUTOBENCH] scenario C (bench_tiers) — sampling %.0fs static at current cell" % TIERS_SAMPLE_SEC)
 
 
 func _tick_tiers(delta: float) -> void:
@@ -211,11 +213,14 @@ func _on_flyby_complete(_results: Dictionary) -> void:
 # -----------------------------------------------------------------------------
 
 func _start_teleport() -> void:
-	# (-2,-9) centred at ~(-234, 5, -1053) depending on cell_to_world_center convention.
+	# Phase 0 (2026-04-21): teleport dest changed from (-10,-10) deep ocean
+	# to (0,-5) Pelagiad area — dense forest + town, tests cell-change under
+	# load. Balmora → Pelagiad ≈ 3 cells diagonal = well over the 500m
+	# TELEPORT_DETECT_THRESHOLD.
 	# (-10,-10) is ~8 cells west and ~1 cell south → ~940m XZ, safely > 500m
 	# TELEPORT_DETECT_THRESHOLD. Grazes the warmup-burst re-entry logic in
 	# native_streaming_manager._process + object_paging teleport handling.
-	var target := DU.cell_to_world_center(Vector2i(-10, -10), 5.0)
+	var target := DU.cell_to_world_center(Vector2i(0, -5), 5.0)
 	if _camera:
 		_camera.global_position = target
 		if _camera.has_method("look_at"):
@@ -249,11 +254,11 @@ func _tick_teleport(delta: float) -> void:
 # -----------------------------------------------------------------------------
 
 func _start_hlod_off() -> void:
-	# Recentre on Seyda Neen before the hlod-off sample so F always measures
-	# from the same cell as C. Scenario E left the camera at (-10,-10) in a
-	# freshly-loading area, which would confound the "only NEAR renders" drop
-	# check with ongoing streaming churn.
-	var spawn := DU.cell_to_world_center(Vector2i(-2, -9), 5.0)
+	# Phase 0: after teleport scenario left us at Pelagiad (0,-5), return to
+	# Balmora (-3,-2) for F. Using a low-cost cell-jump (teleport to recently-
+	# loaded origin cells) avoids the crash-prone unload storm of an ocean
+	# teleport — Balmora was already resident from the boot settle phase.
+	var spawn := DU.cell_to_world_center(Vector2i(-3, -2), 5.0)
 	if _camera:
 		_camera.global_position = spawn
 		if _camera.has_method("look_at"):

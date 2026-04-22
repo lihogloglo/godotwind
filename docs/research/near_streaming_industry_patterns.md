@@ -1,6 +1,6 @@
 # NEAR-Tier Streaming — Industry Pattern Survey + Godotwind Recommendation
 
-**Status:** Research pass, 2026-04-20. Authored by @researcher on branch `perf/distant-rendering-2026-04-17`.
+**Status:** Research pass, 2026-04-20. Updated 2026-04-22 — §7 (streaming granularity, grid vs spatial hierarchy), §8 (production CellPreloader design). Authored by @researcher on branch `perf/distant-rendering-2026-04-17`.
 **Scope:** NEAR tier only (0-150 m). MID / HLOD / FAR are parked per `docs/plans/distant_rendering_2026_04/near_tier_refactor.md` §1.
 **Trigger:** `ReferenceInstantiator.instantiate_reference` + `CellManager.add_child` on the main thread ceils at ~79 scene instantiates × ~11 ms = ~870 ms wall budgeted across frames, producing visible pop-in and 25 fps dips at cell crosses.
 
@@ -378,3 +378,248 @@ Sources (external):
 - [UE Smooth Apparition with Dithering](https://dev.epicgames.com/community/learning/tutorials/oLqa/unreal-engine-smooth-apparition-of-instances-with-dithering)
 - [OpenMW Cell Settings docs](https://openmw.readthedocs.io/en/stable/reference/modding/settings/cells.html)
 - [OpenMW CellPreloader API](https://openmw.github.io/classMWWorld_1_1CellPreloader.html)
+
+---
+
+## 7. Streaming Granularity — Grid vs Spatial Hierarchy vs Per-Object
+
+### 7.1 The question
+
+Should streaming use a flat grid (current), a spatial hierarchy (octree / quadtree), or per-object distance tracking? The answer differs by what is being asked: the **data unit**, the **loading trigger**, and the **instantiation order** are three separate concerns that can and should use different structures.
+
+### 7.2 Why a flat grid is correct for the data unit
+
+Morrowind's ESM format is a flat grid of `ExteriorCellRecord`s. Each cell record contains:
+- a `(grid_x, grid_y)` integer key
+- a flat list of `CellReference`s — every object in that cell
+
+This is not an accident. The choice to organize world data into fixed cells (117 m × 117 m = 8192 × 8192 MW units) reflects the original engine's streaming unit. OpenMW, Bethesda's own toolchain, and every MW-compatible engine all treat the cell record as the atomic unit of world data.
+
+**Consequence for Godotwind:** the data unit cannot be smaller than a cell without rebuilding the entire prebake pipeline to emit a per-object spatial index (object position → file offset). Per-object data streaming is possible but requires a separate spatial index layer over the ESM data. The cost is real and the benefit — for ~79 objects per cell — is marginal. This is not the current bottleneck.
+
+**What a quadtree or BVH over objects would enable:**
+- Sub-cell load granularity: load the NW quadrant of cell (-3,-2) before the SE quadrant based on approach direction.
+- At ~79 refs/cell split into 4 quadrants = ~20 refs per quadrant. Loading granularity drops from 870 ms → ~220 ms per quadrant.
+- **This is a valid future enhancement but premature optimization now.** The CellPreloader + Phase A (off-thread instantiate) already drops the 870 ms wall to ~25 ms (worker thread, 4 cores). Sub-cell quadrant loading buys another 4× but on top of an already small number.
+
+### 7.3 Why an octree is wrong here
+
+An octree subdivides 3D space. It is the right structure for:
+- 3D point-query acceleration (e.g., finding nearby lights, collision broad-phase queries)
+- Worlds with significant vertical variation (underground levels, skyscrapers)
+- Frustum cull acceleration over irregular geometry
+
+It is the wrong structure for an **outdoor world streaming trigger** because:
+- The Y (vertical) dimension in Morrowind is narrow (~2m of terrain height variation per cell, occasional buildings to ~20 m). Subdividing in Y adds 2× depth levels that buy nothing.
+- Morrowind cells are already 2D. The correct projection is a **quadtree**, not an octree.
+- A quadtree for the streaming trigger would help only if cells had variable size — i.e., you wanted to stream a 512 m × 512 m "super-cell" at long distance and a 58 m × 58 m quarter-cell at close range. **We already have this**: the HLOD system (1×1, 2×2, 4×4 merged chunks) IS a crude quadtree for the rendered geometry. For the data side, it buys nothing because all data is in 117 m cells.
+
+**Verdict:** octree = not applicable. Quadtree = already implemented at the HLOD rendering level. For the data + streaming trigger, a flat grid is correct and optimal.
+
+### 7.4 What the industry actually uses
+
+| Engine | Data unit | Streaming trigger | Instantiation order |
+|---|---|---|---|
+| UE5 World Partition | Variable grid (128 / 512 / 2048 m depending on LOD level) | 2D quadtree source query | Per-actor priority (distance + visibility) |
+| Decima | Fixed rect tile | Distance ring (camera + AI sources) | Pre-built GPU buffer — no per-instance order |
+| RAGE | Sector (fixed, hierarchical) | Player-intersects-sector-bounds | Resource priority queue (distance) |
+| OpenMW | Fixed 117 m cell | Camera radius + velocity lookahead | Flat load order (no per-ref priority) |
+| Godotwind today | Fixed 117 m cell | Camera radius (no velocity) | Per-ref distance sort (✓ correct) |
+| **Godotwind target** | **Fixed 117 m cell + ESM** | **Camera radius + velocity-extrapolated preload ring** | **Per-ref distance sort (keep), Phase F prototype pre-register** |
+
+UE5's variable grid is motivated by the need to stream content at multiple LOD levels — large HLOD meshes (baked) at 2048 m, individual actors at 128 m. Godotwind handles this via the NEAR / MID / HLOD / FAR tier system, not by varying cell size. The streaming unit for each tier already differs in spatial extent; the cell boundary is just the data key.
+
+### 7.5 Per-cell vs per-object for the border-spike problem
+
+**The user concern: "per-cell loading is not granular — bulk loading whenever you get close to a cell border."**
+
+This concern is correct but misattributed. The bulk is not a spike — it is a drip. Here is the actual timeline:
+
+```
+t=0    : camera crosses border into cell (-4,-2)
+t=0    : cell record parsed from ESM data (~1 ms, already cached)
+t=0    : 79 CellReference objects enter _instantiation_queue
+t=0    : _instantiation_queue sorted by distance — nearest refs first ✓
+t=4ms  : budget tick 1 — nearest 3-4 Node3D refs instantiated
+t=8ms  : budget tick 2 — next 3-4 refs
+...
+t=870ms: last ref instantiated (79 refs × ~11 ms each / 4ms-per-frame budget = ~218 frames)
+```
+
+The problem is not a spike at `t=0` — the problem is that the cell is STILL LOADING at `t=870 ms`. At 20 m/s (horse), you've moved 17 m. At 50 m/s (flying), you've moved 43 m — over a third of the cell's width. Objects are still popping in after you've covered most of the cell.
+
+**Per-object streaming does not fix this.** If you stream per-object (trigger: "object within radius R"), you move the load trigger earlier — but each object still costs ~11 ms to instantiate. You get more objects loading simultaneously (wider trigger radius), but the instantiation rate is still bounded by the 4 ms/frame budget. You've swapped "load everything in a cell when you cross the border" for "load everything in a ring when you approach" — the throughput is unchanged, only the timing shifts.
+
+**What actually fixes the border spike:**
+
+| Fix | Effect | Where |
+|---|---|---|
+| Phase A: off-thread `PackedScene.instantiate()` | 11 ms → 300 µs per object on main thread. 79 objects complete in ~25 ms wall instead of 870 ms. | `reference_instantiator.gd` |
+| CellPreloader: pre-load PackedScene resources before border | `ResourceLoader.load()` is a cache-hit when you cross — instantiation starts immediately without async wait. | new `cell_preloader.gd` |
+| `find_children` VR cache: per-prototype subtree walk cached | Eliminates the O(subtree) per-instance walk at add_child time. | `cell_manager.gd` |
+| Impostor stand-in until NEAR is fully loaded | FAR-tier impostor stays visible, NEAR geometry fades in as it arrives — zero visible pop. | `native_streaming_manager.gd` |
+
+The correct framing: **per-cell is the right data unit; the instantiation cost is the real problem, not the trigger granularity.** A per-object spatial trigger with the same 11 ms/object instantiation cost produces the same perceived pop-in at a higher implementation cost.
+
+### 7.6 When finer granularity DOES matter (the horse/flying case)
+
+At very high speeds, the issue shifts from "objects pop in" to "the cell ahead is not loaded at all." At 50 m/s crossing a 117 m cell in 2.3 s, the preload must start > 2.3 s before the border is reached. At 100 m/s, > 1.15 s.
+
+The fix here is velocity-extrapolated preload — which IS per-cell, but triggered by predicted position rather than current position. See §8 for the full design.
+
+The sub-cell quadrant loading mentioned in §7.2 would additionally help here: even if the preloader triggers for the full cell, instantiation starts from the nearest quadrant. Phase A (off-thread) collapses this concern: once instantiation costs 300 µs instead of 11 ms, an entire 79-object cell loads in 24 ms, well within any movement budget.
+
+---
+
+## 8. Production CellPreloader Design
+
+### 8.1 Design goals
+
+1. Zero visible pop-in at walk and horse speeds with NEAR full-3D (< 20 m/s).
+2. Reduced (but potentially nonzero) pop-in at flying speeds (> 50 m/s) — impostor fallback covers any gap.
+3. Never spike the main thread. All heavy work off-thread via `WorkerThreadPool`.
+4. LRU-bounded memory. Pre-loaded resources are PackedScenes in the ResourceLoader cache — controlled by cache size, not leaked.
+5. Abort cleanly on teleport. An in-flight preload for the wrong cell is cancelled, not completed.
+6. Integrates with Phase F prototype pre-registration so RS instances are ready before Node3D instantiate begins.
+
+### 8.2 The two-phase model
+
+The key insight from OpenMW's `CellPreloader`: **pre-loading and instantiation are separate phases**. The preloader only runs the DATA phase:
+
+```
+DATA phase (off-thread, CellPreloader):
+  - ESM cell parse (already done by native_streaming_manager; CellPreloader can reuse the async result)
+  - ResourceLoader.load(model_path) for every unique model in the cell → PackedScene
+  - WorkerThreadPool: _worker_preregister_prototype() for every model → RS MultiMesh slots ready
+  - Result: ResourceLoader cache is warm, PrototypeRegistry has all slots
+
+INSTANTIATION phase (main-thread, CellManager, only when camera enters active radius):
+  - For static refs: StaticObjectRenderer.add_instance(rid, xf) — pure RS call, ~10 µs each
+  - For interactive refs: PackedScene.instantiate(EDIT_STATE_DISABLED) off-thread (Phase A),
+    then call_deferred("add_child") on main → ~300 µs main-thread cost per ref
+```
+
+When the DATA phase has run before the INSTANTIATION phase begins, every `ResourceLoader.load()` call is a cache hit (near-zero cost). Every prototype pre-registration is already done. The instantiation wall time drops from ~870 ms to ~25 ms (Phase A cost only).
+
+### 8.3 Speed-scaled lookahead
+
+The prediction window must scale with speed. OpenMW uses a fixed 1s prediction time — sufficient for walk/run but inadequate for flying.
+
+The correct formula:
+
+```
+t_load_budget := measured_avg_cell_load_time  # Phase 0 data: ~1.5s for 79 refs at 4ms/frame
+t_load_budget_phaseA := ~0.025s              # after Phase A: 79 refs × 300µs = 24ms
+speed := _camera_velocity_xz.length()
+t_predict := clamp(t_load_budget / max(speed, 1.0), 0.3, 4.0)
+predicted_pos := camera_xz + velocity_normalized * speed * t_predict
+```
+
+Before Phase A: at 50 m/s, t_predict = 1.5 / 50 = 0.030 s → 1.5 m lookahead. Too short. But the preloader's job is to warm the ResourceLoader cache, which alone saves ~500 ms of the 870 ms wall (resource load is the bottleneck before Phase A). So:
+
+```
+t_cache_warm := measured_avg_resource_load_time_per_cell  # estimate ~0.8-1.0s
+t_predict := clamp(t_cache_warm / max(speed, 1.0), 0.3, 4.0)
+```
+
+This is the lookahead needed to have the CACHE WARM by the time you cross the border. After Phase A, instantiation is so fast that the preloader only needs to fire one cell ahead to avoid any visible pop.
+
+**Multi-cell lookahead for fast movement:**
+
+At > 40 m/s, single-cell lookahead may not be enough if load latency is > 2.3 s. Preload all cells along the movement vector within `preload_depth` cells:
+
+```
+preload_depth := clamp(int(speed / CELL_SIZE_METERS * t_cache_warm) + 1, 1, 4)
+```
+
+At 50 m/s with 1s cache warm: depth = int(50/117 * 1.0) + 1 = 1. Fine.  
+At 100 m/s with 1s cache warm: depth = int(100/117 * 1.0) + 1 = 1. Fine.  
+At 200 m/s (creative-mode fly): depth = int(200/117 * 1.0) + 1 = 2. Pre-queue 2 cells ahead.
+
+So preload_depth ≤ 4 in all practical cases. No need for more.
+
+### 8.4 LRU cache design
+
+```gdscript
+class PreloadEntry:
+    var cell: Vector2i
+    var state: String  # "loading" | "ready" | "activated"
+    var last_touched_msec: int
+    var task_ids: Array[int]  # WorkerThreadPool task IDs, for abort
+    var model_paths: Array[String]  # cached for abort / stats
+
+var _preload_cache: Dictionary  # Vector2i -> PreloadEntry
+```
+
+**Eviction policy:**
+- Max size: 20 cells (OpenMW default). Memory cost: 20 × 79 refs × avg PackedScene ~50KB = ~80 MB. Acceptable.
+- Eviction trigger: `update_cache()` called every frame, evicts entries where `last_touched_msec < now - EXPIRY_DELAY_MS` AND `cache_size > MIN_CACHE_SIZE`.
+- `EXPIRY_DELAY_MS = 5000` (5 s), `MIN_CACHE_SIZE = 12` cells (keep warm for back-tracking).
+- Evicted entries: abort in-flight WorkerThreadPool tasks via `wait_for_task_completion()` (required — skipping is a memory leak per CLAUDE.md anti-patterns).
+
+**Promotion / demotion:**
+- `LOADING` → `READY`: all `task_ids` complete (poll with `is_task_complete(id)`).
+- `READY` → `ACTIVATED`: `native_streaming_manager` calls `notify_activated(cell)` when the cell enters active radius.
+- `ACTIVATED` entries skip eviction (the streaming manager owns them now).
+
+### 8.5 Integration with native_streaming_manager
+
+Replace `_predict_and_prequeue_cells()` (the current naive predictor) with a call to `CellPreloader.update(camera_xz, velocity_xz)`. The preloader returns a `predicted_set: Array[Vector2i]` of cells to pre-queue.
+
+`_update_loaded_cells()` becomes:
+1. Query `_preloader.get_predicted_cells()` — cells to pre-warm but not yet load.
+2. Query `_get_cells_in_radius()` — cells to actually load (current behavior).
+3. Union: cells in predicted_set ∩ not in loaded/loading → preloader.preload(cell).
+4. Cells in active radius ∩ in preloader cache as READY → instantiation fast-path (cache-hit load).
+5. Cells in active radius ∩ not in preloader cache → instantiation cold-path (current behavior, slower).
+
+### 8.6 Phase F integration (prototype pre-registration)
+
+The existing `_worker_preregister_prototype()` in `reference_instantiator.gd` already pre-registers prototypes in the PrototypeRegistry off-thread. The CellPreloader should call this for every model path in the preloaded cell's ref list. By the time the cell enters active radius:
+- ResourceLoader cache: warm (PackedScene parsed)
+- PrototypeRegistry: all MultiMesh slots allocated
+- RS instances: can be created in O(µs) instead of O(ms) cold-start
+
+This is the "Phase F + CellPreloader" combination that eliminates the cold-registration stall that Phase F alone already fixed for the first-boot case.
+
+### 8.7 Door / teleport preload (free bonus)
+
+The same CellPreloader handles door-approach preloading:
+- When the raycaster detects an interactive door ref within `PRELOAD_DOOR_DISTANCE` (e.g. 20 m), call `preloader.preload(door_destination_cell)` and if interior, `preloader.preload_interior(door_destination_cell_ref)`.
+- This eliminates the "touch door → freeze" hitch in interior transitions that `interior_pocket_manager` currently has.
+- Implementation: ~10 LOC in `world_explorer._process` or the raycaster hook.
+
+### 8.8 Abort on teleport
+
+When `native_streaming_manager` detects a teleport (jump > `TELEPORT_DETECT_THRESHOLD = 500 m`):
+1. Call `preloader.abort_all()` — marks all in-flight tasks for cancel, stops all eviction scheduling.
+2. Re-initialize preloader at new camera position with `preloader.reset(new_cell)`.
+3. Preloader re-warms cells around new position at normal load priority (same path, different trigger).
+
+This replicates OpenMW's `abortTerrainPreloadExcept` pattern.
+
+### 8.9 File layout
+
+```
+src/core/world/cell_preloader.gd       # new file, ~250 LOC
+```
+
+No new autoload. Owned by `native_streaming_manager` (instantiated in `configure()`, updated in `_process()`). The existing `_predict_and_prequeue_cells` function is deleted and replaced by `_preloader.update()`.
+
+### 8.10 What NOT to build
+
+- **Sub-cell quadrant loading**: not needed once Phase A reduces instantiation cost to 25 ms/cell. Revisit only if Phase A is skipped.
+- **Octree spatial index over objects**: adds ~300 LOC of spatial bookkeeping for a problem that Phase A + CellPreloader already solve. Do not build.
+- **Per-object distance streaming** (streaming individual refs as camera approaches): replaces the proven data unit (ESM cell) with per-object bookkeeping, adding O(refs) dict lookups per frame. The cost is higher and the benefit is only visible if Phase A is also shipped — at which point the cell-unit approach is already fast enough. Build only if a specific use case (e.g. very large interior pockets > 500 objects) makes per-cell too coarse.
+- **Variable-size streaming cells** (UE5 World Partition style): requires a multi-LOD object indexing pipeline. Godotwind handles multi-LOD via the NEAR/MID/HLOD tier system at the rendering level — the streaming unit stays fixed at 117 m. Not applicable here.
+
+### 8.11 Implementation order
+
+Phase A (off-thread `PackedScene.instantiate()`) and CellPreloader are independent but complementary:
+- **CellPreloader alone** (without Phase A): reduces pop-in from ~870 ms to ~500 ms at walk speed (resource load phase pre-warmed, instantiation still on main thread). Visible improvement but not complete.
+- **Phase A alone** (without CellPreloader): reduces pop-in from ~870 ms to ~25 ms at walk speed. Cell-cross hitches eliminated for walk/run. Horse speed marginal. Flying still pops.
+- **Phase A + CellPreloader**: ~25 ms instantiation wall + cache-warm before border cross = pop-in effectively zero at all speeds ≤ 100 m/s. Impostor fallback covers > 100 m/s edge.
+
+**Recommended order:** Phase A first (highest individual gain, no new file), then CellPreloader (seals the fast-movement gap).
+
+---

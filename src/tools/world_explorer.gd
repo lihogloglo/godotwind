@@ -279,6 +279,20 @@ func _ready() -> void:
 			Log.info("streaming", "[--no-lights] light refs disabled — A/B benchmark gate (Phase E.3 falsification)")
 			break
 
+	# Phase 0 ablation flags — isolate Jolt-broadphase + bespoke-fade cost from
+	# streaming pipeline. Consumers live in reference_instantiator.gd. Always
+	# default to false; command-line only. Remove once Phase 0 data is captured.
+	for arg in OS.get_cmdline_args():
+		if arg == "--disable-jolt-attach":
+			StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH = true
+			Log.info("streaming", "[--disable-jolt-attach] per-object Jolt body attach disabled — Phase 0 ablation")
+		elif arg == "--disable-fade-pool":
+			StreamingConfig.DEBUG_DISABLE_FADE_POOL = true
+			Log.info("streaming", "[--disable-fade-pool] bespoke fade-material pool disabled — Phase 0 ablation (engine FADE_SELF still active)")
+		elif arg == "--disable-phase-f-prereg":
+			StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG = true
+			Log.info("streaming", "[--disable-phase-f-prereg] Phase F prototype pre-reg disabled — works around tracker §12.2 crash site during ablation runs")
+
 	# Initialize object pool for frequently used models
 	# Create a hidden container for pooled objects when they're not in use
 	var pool_container := Node3D.new()
@@ -487,8 +501,17 @@ func _init_async() -> void:
 	# This ensures the sky visibility matches what the toggle shows
 	_env_controls.sync_sky_state()
 
-	# First teleport camera to Seyda Neen BEFORE starting to track
-	_teleport_to_cell(-2, -9)
+	# First teleport camera to Seyda Neen BEFORE starting to track.
+	# --start-cell=X,Y overrides (Phase 0 ablation; booting at Balmora avoids
+	# the mid-session teleport that triggers tracker §12.2 crash).
+	var _start_cell := Vector2i(-2, -9)
+	for _arg in OS.get_cmdline_args():
+		if _arg.begins_with("--start-cell="):
+			var _parts := _arg.substr("--start-cell=".length()).split(",")
+			if _parts.size() == 2:
+				_start_cell = Vector2i(int(_parts[0]), int(_parts[1]))
+				Log.info("streaming", "[--start-cell] booting at cell (%d, %d)" % [_start_cell.x, _start_cell.y])
+	_teleport_to_cell(_start_cell.x, _start_cell.y)
 
 	# NOW start tracking the camera - cells will generate around Seyda Neen
 	world_streaming_manager.set_camera(camera)

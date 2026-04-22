@@ -17,8 +17,12 @@ signal benchmark_complete(results: Dictionary)
 
 #region Constants
 
-## Seyda Neen cell coordinates — default Morrowind spawn area
-const SPAWN_CELL := Vector2i(-2, -9)
+## Balmora cell coordinates — dense city region with buildings, stairs, clutter.
+## Relocated from Seyda Neen 2026-04-21 for Phase 0: coastal spawn's northern
+## walk path hits water/coast, undercounting streaming work. Balmora's north is
+## the Odai river valley (rocks + bridges), south is the Foyada Mamaea road
+## (rocks + tomb clutter). Both directions stress the NEAR pipeline.
+const SPAWN_CELL := Vector2i(-3, -2)
 
 ## Camera altitudes for the realistic flyby (ground-level village + high overlook)
 const VILLAGE_ALTITUDE := 5.0  # eye-level above terrain
@@ -33,8 +37,11 @@ const PAN_DURATION := 10.0     # 360° rotation in place, frustum-culling cost
 const RUN_DURATION := 15.0     # 15 m/s traverse, 225m stressed streaming
 
 ## Player movement speeds (m/s)
+## Phase 0 ablation (2026-04-21): bumped RUN_SPEED 15 → 28 (~100 km/h) per user
+## directive — streaming must handle flight-speed traversal, not just foot pace.
+## WALK stays at 7 m/s so baseline "steady" pace still profiles realistically.
 const WALK_SPEED := 7.0   # realistic walking pace
-const RUN_SPEED := 15.0   # realistic running pace
+const RUN_SPEED := 28.0   # flight-speed traversal (~100 km/h) — stress case
 
 ## How many sub-waypoints across the 360° pan. Each holds its look-at for
 ## PAN_DURATION / PAN_SEGMENTS seconds; camera position is fixed at vista.
