@@ -41,9 +41,6 @@ const DoorInteractableScript := preload("res://src/core/interaction/morrowind/do
 # time via DialogueSession.current().
 const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_interactable.gd")
 
-# Preload crossfade shader for fade-in effect
-const LOD_CROSSFADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade.gdshader")
-
 # S.1 follow-up — §12.2 crash-site diagnostic. Breadcrumbs bracket every
 # post-model-load hazard in _instantiate_model_object so a native SIGSEGV
 # post-instantiate_return narrows to a single named step. Remove once the
@@ -79,8 +76,6 @@ var load_creatures: bool = true
 var use_object_pool: bool = true
 var use_static_renderer: bool = true
 var debug_lod: bool = false
-var enable_fade_in: bool = true  # Smooth fade-in for newly instantiated objects
-var fade_in_duration: float = 0.3  # Duration of fade-in animation in seconds (matches StreamingConfig.FADE_DURATION)
 
 # I.7 — Callback invoked when a spawned DoorInteractable emits
 # `door_activated`. Signature mirrors the signal:
@@ -149,13 +144,8 @@ func _effective_use_static_renderer() -> bool:
 		return _current_load_profile.use_static_renderer
 	return use_static_renderer
 
-# Scene tree reference for tweens (must be set by parent, e.g., CellManager)
+# Scene tree reference (must be set by parent, e.g., CellManager)
 var scene_tree: SceneTree = null
-
-# Fade material pool - pre-allocated ShaderMaterials to avoid per-object allocation
-const FADE_POOL_SIZE := 200  # Matches StreamingConfig.MAX_CONCURRENT_FADES
-var _fade_pool: Array[ShaderMaterial] = []  # Available materials
-var _fade_pool_initialized: bool = false
 
 # Statistics
 var stats: Dictionary = {
@@ -360,7 +350,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# Jolt overwhelm during startup bursts. Re-enable here for close objects.
 	var ref_pos := CS.vector_to_godot(ref.position)
 	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
-		_enable_collision_shapes_in_tree(instance)
+		if not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
+			_enable_collision_shapes_in_tree(instance)
 
 	# Hide materialless meshes (collision geometry, placeholders)
 	# LOD nodes (_LOD1, _LOD2, _LOD3) are now kept visible and configured with visibility_range
@@ -568,6 +559,13 @@ func should_dispatch_static_precompute(
 ## Plan: docs/plans/distant_rendering_2026_04/phase_f_prototype_prereg.md §3
 # PHASE_F:MAIN_ONLY — reads ESMManager autoload + iterates cell refs.
 func preregister_cell_statics(cell_record: Variant) -> int:
+	# Phase 0 ablation escape hatch — tracker §12.2 crash site lives inside
+	# _should_route_to_renderer → has_animation → get_model → ResourceLoader.load.
+	# Short-circuit the entire prereg when the debug flag is on so ablation runs
+	# can complete. Cold-register stalls return (what Phase F eliminated) but
+	# that delta is uniform across the three ablations.
+	if StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG:
+		return 0
 	if static_renderer == null or model_loader == null:
 		return 0
 	if cell_record == null:
@@ -868,11 +866,12 @@ func complete_worker_instantiate(
 	# NEAR-tier collision enable (mirror of _instantiate_model_object:339-342).
 	var ref_pos := CS.vector_to_godot(ref.position)
 	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
-		_enable_collision_shapes_in_tree(instance)
+		if not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
+			_enable_collision_shapes_in_tree(instance)
 
 	# Carryable conversion (mirror of _instantiate_model_object:353-374).
 	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
-	if is_carryable:
+	if is_carryable and not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
 		var mass_kg: float = CarryableRegistryScript.get_mass(type_name, base_record)
 		var display_name: String = ""
 		if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
@@ -896,7 +895,7 @@ func complete_worker_instantiate(
 	# Interior collision fallback (mirror of _instantiate_model_object:385-395).
 	if not is_carryable and not (type_name == "door" and ref.is_teleport):
 		if not _effective_use_static_renderer():
-			if not _has_static_body(instance):
+			if not _has_static_body(instance) and not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
 				_generate_static_collision(instance)
 
 	stats["objects_instantiated"] += 1
@@ -1553,7 +1552,15 @@ func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
 	anim_player.autoplay = first_anim_name
 
 	# Randomize playback position to avoid synchronized animations across instances
-	instance.set_meta("_anim_randomize", true)
+	# (flags, banners, water wheels). autoplay starts the clip on tree_entered,
+	# so we seek to a random offset once the player is in the tree.
+	var player_ref: AnimationPlayer = anim_player
+	instance.tree_entered.connect(
+		func() -> void:
+			if is_instance_valid(player_ref) and player_ref.is_playing():
+				player_ref.seek(randf() * player_ref.current_animation_length),
+		CONNECT_ONE_SHOT,
+	)
 
 
 ## Apply position, rotation, and scale to a node
@@ -1731,199 +1738,6 @@ func _should_route_to_renderer(
 
 	# Legacy flora + small-rock heuristic (covers some "misc" type refs that are really just clutter).
 	return _is_static_render_model(model_path)
-
-
-## Initialize the fade material pool (call once after scene_tree is set)
-func _ensure_fade_pool() -> void:
-	if _fade_pool_initialized:
-		return
-	_fade_pool_initialized = true
-	_fade_pool.resize(FADE_POOL_SIZE)
-	for i in FADE_POOL_SIZE:
-		var mat := ShaderMaterial.new()
-		mat.shader = LOD_CROSSFADE_SHADER
-		_fade_pool[i] = mat
-
-
-## Acquire a fade material from the pool, or null if exhausted
-func _acquire_fade_material() -> ShaderMaterial:
-	if _fade_pool.is_empty():
-		return null
-	return _fade_pool.pop_back()
-
-
-## Return a fade material to the pool after use
-func _release_fade_material(mat: ShaderMaterial) -> void:
-	# Reset params to avoid holding references to textures
-	mat.set_shader_parameter("albedo_texture", null)
-	mat.set_shader_parameter("albedo_color", Color.WHITE)
-	mat.set_shader_parameter("roughness", 1.0)
-	mat.set_shader_parameter("metallic", 0.0)
-	# Reset clock uniforms so the pooled material starts cleanly on reuse.
-	mat.set_shader_parameter("spawn_time", 0.0)
-	mat.set_shader_parameter("fade_duration", 0.3)
-	mat.set_shader_parameter("use_alpha_cutout", false)
-	mat.set_shader_parameter("alpha_cutout", 0.5)
-	_fade_pool.append(mat)
-
-
-## Apply fade-in effect to newly instantiated object
-## Uses pooled dither crossfade shader for smooth appearance (prevents visual pop)
-func _apply_fade_in(instance: Node3D) -> void:
-	if not scene_tree:
-		if debug_lod:
-			Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - no scene_tree")
-		return  # Need scene tree for tweens
-
-	# Guard: create_tween() requires the node to be in the scene tree.
-	# Calling it on a detached node returns null or creates an immediately-killed tween,
-	# leaving material_override stuck as the fade ShaderMaterial (invisible object).
-	if not instance.is_inside_tree():
-		if debug_lod:
-			Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - node not in tree: %s" % instance.name)
-		return
-
-	_ensure_fade_pool()
-
-	# Find all MeshInstance3D nodes in the hierarchy
-	var mesh_instances: Array[MeshInstance3D] = []
-	_find_mesh_instances(instance, mesh_instances)
-
-	if mesh_instances.is_empty():
-		if debug_lod:
-			Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in SKIPPED - no mesh instances in %s" % instance.name)
-		return
-
-	if debug_lod:
-		Log.debug("streaming", "[ReferenceInstantiator] _apply_fade_in: %s with %d meshes" % [instance.name, mesh_instances.size()])
-
-	# Current engine clock, passed to the fade shader via `spawn_time`. Matches
-	# the `TIME` built-in Godot exposes inside fragment shaders.
-	var now_sec: float = float(Time.get_ticks_msec()) / 1000.0
-
-	# Store original materials and apply pooled fade materials
-	var fade_data: Array[Dictionary] = []
-
-	for mesh_inst: MeshInstance3D in mesh_instances:
-		# Acquire from pool — if exhausted, skip fade (object pops in instantly)
-		var fade_mat := _acquire_fade_material()
-		if not fade_mat:
-			break
-
-		# Get the original material_override (may be null for multi-surface meshes).
-		# CRITICAL: We must distinguish "had material_override" from "had no override"
-		# because restoring a surface material as material_override would override ALL
-		# surfaces — the root cause of the texture bug on ships/buildings.
-		var original_mat: Material = mesh_inst.material_override
-		var had_override := original_mat != null
-
-		# Detect stuck fade ShaderMaterial from pool recycling: if the current
-		# override carries our fade uniforms (post-phase-2 rename: spawn_time),
-		# it's a leftover fade material. Discard it and fall through to the
-		# surface material chain.
-		if original_mat is ShaderMaterial:
-			var sm := original_mat as ShaderMaterial
-			if sm.get_shader_parameter("spawn_time") != null:
-				mesh_inst.material_override = null
-				original_mat = null
-				had_override = false
-
-		# For fade visual: read surface 0 material to copy its texture into the fade shader.
-		# But do NOT use this as the "original" to restore — it's per-surface, not an override.
-		var fade_source_mat: Material = original_mat
-		if fade_source_mat == null and mesh_inst.mesh and mesh_inst.mesh.get_surface_count() > 0:
-			fade_source_mat = mesh_inst.get_surface_override_material(0)
-			if fade_source_mat == null:
-				fade_source_mat = mesh_inst.mesh.surface_get_material(0)
-
-		# Store whether this mesh originally had material_override.
-		# If not, restore to null (lets per-surface materials take effect).
-		mesh_inst.set_meta("_pre_fade_material", original_mat)
-		mesh_inst.set_meta("_had_material_override", had_override)
-
-		# Copy texture from the fade source material for visual during fade.
-		# This uses surface 0's material for multi-surface meshes — during the brief
-		# fade-in all surfaces show the same texture, which is acceptable for ~0.3s.
-		if fade_source_mat is StandardMaterial3D:
-			var std_mat: StandardMaterial3D = fade_source_mat as StandardMaterial3D
-			if std_mat.albedo_texture:
-				fade_mat.set_shader_parameter("albedo_texture", std_mat.albedo_texture)
-			fade_mat.set_shader_parameter("albedo_color", std_mat.albedo_color)
-			fade_mat.set_shader_parameter("roughness", std_mat.roughness)
-			fade_mat.set_shader_parameter("metallic", std_mat.metallic)
-			# Handle alpha cutout for vegetation
-			if std_mat.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
-				fade_mat.set_shader_parameter("use_alpha_cutout", true)
-				fade_mat.set_shader_parameter("alpha_cutout", std_mat.alpha_scissor_threshold)
-
-		# Shader auto-fades from (spawn_time) to (spawn_time + fade_duration) using
-		# the engine's TIME built-in, so there is no per-frame CPU work and no
-		# Tween lifecycle. One SceneTreeTimer per call triggers material
-		# restoration; see the tail of this function.
-		fade_mat.set_shader_parameter("spawn_time", now_sec)
-		fade_mat.set_shader_parameter("fade_duration", fade_in_duration)
-		mesh_inst.material_override = fade_mat
-
-		fade_data.append({
-			"mesh_instance": mesh_inst,
-			"fade_material": fade_mat,
-			"original_material": original_mat
-		})
-
-	if fade_data.is_empty():
-		return
-
-	# Schedule material restoration via a single SceneTreeTimer. Replaces the
-	# prior per-object Tween whose lambda capture of `instance` was the root
-	# cause of the "Lambda capture was freed" crash class when cells unloaded
-	# mid-fade. The timer is owned by the SceneTree, independent of any
-	# instance's lifetime — `is_instance_valid()` guards in `_restore_fade_data`
-	# handle the freed-instance case cleanly, and the pool is always recovered.
-	var timer: SceneTreeTimer = scene_tree.create_timer(fade_in_duration)
-	timer.timeout.connect(_restore_fade_data.bind(fade_data))
-
-
-## Restore original materials + return fade materials to the pool. Called by
-## the SceneTreeTimer timeout scheduled from `_apply_fade_in`. Safe to call
-## when meshes have been freed during the fade — `is_instance_valid()` guards
-## every access, and the pool is always recovered regardless.
-func _restore_fade_data(fade_data: Array[Dictionary]) -> void:
-	for entry: Dictionary in fade_data:
-		var fade_mat_ref: Variant = entry.get("fade_material")
-		var mesh_inst_ref: Variant = entry.get("mesh_instance")
-
-		# Return the fade material to the pool regardless of mesh validity.
-		if is_instance_valid(fade_mat_ref):
-			_release_fade_material(fade_mat_ref as ShaderMaterial)
-
-		# Restore original material only when the mesh is still alive.
-		if not is_instance_valid(mesh_inst_ref):
-			continue
-		var mesh_inst: MeshInstance3D = mesh_inst_ref as MeshInstance3D
-		# Only restore material_override if the mesh originally had one.
-		# Multi-surface meshes (ships, buildings) have no material_override —
-		# their per-surface materials come from the mesh resource. Writing a
-		# per-surface material back into material_override would override ALL
-		# surfaces and break texture routing.
-		var had_override: bool = mesh_inst.get_meta("_had_material_override", false)
-		if had_override:
-			var original_mat: Material = mesh_inst.get_meta(
-				"_pre_fade_material", entry.get("original_material")
-			)
-			mesh_inst.material_override = original_mat
-		else:
-			mesh_inst.material_override = null
-		mesh_inst.remove_meta("_pre_fade_material")
-		mesh_inst.remove_meta("_had_material_override")
-
-
-## Find all MeshInstance3D nodes in a hierarchy
-func _find_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
-	if node is MeshInstance3D:
-		result.append(node as MeshInstance3D)
-
-	for child in node.get_children():
-		_find_mesh_instances(child, result)
 
 
 ## Hide materialless meshes in a scene tree (LOD nodes are kept visible)

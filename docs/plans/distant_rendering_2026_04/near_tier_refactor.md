@@ -729,3 +729,21 @@ Phase E extends Phase A's off-thread pattern to STAT refs. Worker precomputes tr
 ### 15.3 Do-NOT policy update (2026-04-21)
 - Don't quarantine `.res` files on corruption hypothesis — always visually verify in prebake asset viewer first. Previous session's quarantine of `f_terrain_rock_bc_11_nif.res` was a bad call.
 - Don't split hairs in multi-turn architectural debate between @coder and @builder before shipping. Write plan, review once, code, measure. User directive 2026-04-21.
+
+### 15.4 Phase 1 — bespoke fade pool deleted (2026-04-22)
+
+Engine-native `VISIBILITY_RANGE_FADE_SELF` at [cell_manager.gd:542](../../../src/core/world/cell_manager.gd#L542) and [:2456](../../../src/core/world/cell_manager.gd#L2456) already handles the NEAR→MID crossfade. Phase 0 ablation `bench_hlod_off` data (43 → 93 FPS, nofade branch) proved the bespoke `lod_crossfade.gdshader` + 200-slot `ShaderMaterial` pool cost ~50 FPS at high object counts with no visual benefit.
+
+**Deleted:**
+- `src/core/world/shaders/lod_crossfade.gdshader` (+ `.uid`)
+- `reference_instantiator.gd`: `LOD_CROSSFADE_SHADER` preload, `enable_fade_in` / `fade_in_duration` flags, `FADE_POOL_SIZE` const, `_fade_pool` / `_fade_pool_initialized` vars, and six functions `_ensure_fade_pool`, `_acquire_fade_material`, `_release_fade_material`, `_apply_fade_in`, `_restore_fade_data`, `_find_mesh_instances` (~200 LOC).
+- `cell_manager.gd`: two `objects_to_fade` accumulation branches in `_load_cell_sync`, `_defer_fade_in` function, public `apply_fade_in_to_object` helper, `LoadProfile.fade_in` field, and the `entry_fade_in_decision` / `entry_fade_in` branches in `process_async_instantiation`'s pending_children capture + batch add-child loop.
+
+**Preserved:**
+- Engine `VISIBILITY_RANGE_FADE_SELF` setup at `cell_manager.gd:542, :2456` (actual crossfade).
+- `lod_crossfade_multimesh.gdshader` — different file, used by `prototype_batch.gd` for Phase 3 multimesh crossfade.
+- `DEBUG_DISABLE_FADE_POOL` flag in `streaming_config.gd` + `--disable-fade-pool` console binding in `world_explorer.gd` — kept as false-default hooks per handoff directive; comment updated to note the pool was removed.
+
+**Relocated:** the `_anim_randomize` meta-driven animation desync (flags, banners, water wheels) moved from the deleted `_defer_fade_in.apply_fades` lambda into a direct `tree_entered.connect` at `reference_instantiator._initialize_animation_player`. Meta removed — one producer, one consumer, no need for cross-site signalling.
+
+**Verification:** `--headless --quit-after 1` parses cleanly (0 errors, `_ready()` 818 ms). Interactive pilot + `--bench-auto=p1_post_fadedelete` pending.

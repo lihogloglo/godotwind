@@ -313,6 +313,33 @@ const DEBUG_VISUALIZATION := false
 const ENABLE_PROFILING := true
 
 # =============================================================================
+# PHASE 0 ABLATION FLAGS (runtime-settable via cmdline)
+# =============================================================================
+# Set by world_explorer._ready() from command-line args:
+#   --disable-jolt-attach   → skip per-object StaticBody3D / CollisionShape3D
+#                             enable + carryable RigidBody3D conversion +
+#                             interior-pocket _generate_static_collision.
+#                             Isolates Jolt broadphase cost from streaming pipe.
+#   --disable-fade-pool     → reserved ablation flag. The bespoke fade-material
+#                             pool was deleted after Phase 0 ablation showed it
+#                             cost ~50 FPS at high object counts. Engine-native
+#                             VISIBILITY_RANGE_FADE_SELF (cell_manager.gd)
+#                             handles the NEAR→MID crossfade. Flag kept as a
+#                             false-default hook for future diagnostic work.
+## Default false — always compile clean, toggled only by boot flag.
+static var DEBUG_DISABLE_JOLT_ATTACH: bool = false
+static var DEBUG_DISABLE_FADE_POOL: bool = false
+
+## --disable-phase-f-prereg — bypass Phase F off-thread prototype pre-registration.
+## Tracker §12.2 "second crash site" hits here during active streaming: the
+## `preregister_cell_statics → has_animation → get_model → ResourceLoader.load`
+## chain SIGSEGVs intermittently on `.res` files. For Phase 0 ablation we want
+## the measurement to COMPLETE, so disable prereg. Absolute FPS numbers drop
+## slightly (Phase F eliminates cold-register stalls) but since all three
+## ablations run identically without it, deltas are clean. NOT for production.
+static var DEBUG_DISABLE_PHASE_F_PREREG: bool = false
+
+# =============================================================================
 # STREAMING MODE - FULL_AAA ONLY (Simplified)
 # =============================================================================
 # NOTE: NEAR_ONLY mode has been removed. All streaming now uses FULL_AAA mode

@@ -279,45 +279,27 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 		# Phase 2: Create MultiMesh instances for suitable groups
 		multimesh_count = _create_multimesh_instances(instance_groups, cell_node)
 
-		# Collect objects for deferred fade-in (must wait until cell_node is in scene tree)
-		var objects_to_fade: Array[Node3D] = []
-
 		# Phase 3: Instantiate remaining objects normally
 		for ref: CellReference in instance_groups.get("individual_refs", []):
 			var obj := _instantiator.instantiate_reference(ref, cell_grid)
 			if obj:
 				cell_node.add_child(obj)
-				if _instantiator.enable_fade_in:
-					objects_to_fade.append(obj)
 				loaded += 1
 			elif use_static_renderer and _static_renderer:
 				static_count += 1
 			else:
 				failed += 1
-
-		# Defer fade-in until cell_node enters scene tree
-		if not objects_to_fade.is_empty():
-			_defer_fade_in(cell_node, objects_to_fade)
 	else:
-		# Collect objects for deferred fade-in
-		var objects_to_fade: Array[Node3D] = []
-
 		# Original path: no batching
 		for ref: CellReference in cell.references:
 			var obj := _instantiator.instantiate_reference(ref, cell_grid)
 			if obj:
 				cell_node.add_child(obj)
-				if _instantiator.enable_fade_in:
-					objects_to_fade.append(obj)
 				loaded += 1
 			elif use_static_renderer and _static_renderer:
 				static_count += 1
 			else:
 				failed += 1
-
-		# Defer fade-in until cell_node enters scene tree
-		if not objects_to_fade.is_empty():
-			_defer_fade_in(cell_node, objects_to_fade)
 
 	var total_objects := loaded + static_count + multimesh_count
 	Log.info("streaming", "CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
@@ -326,34 +308,6 @@ func _instantiate_cell(cell: CellRecord) -> Node3D:
 	_stats["multimesh_instances"] = _stats.get("multimesh_instances", 0) + multimesh_count
 
 	return cell_node
-
-
-## Defer fade-in until cell_node enters the scene tree
-## This is necessary because Node.create_tween() requires the node to be in the scene tree
-func _defer_fade_in(cell_node: Node3D, objects: Array[Node3D]) -> void:
-	Log.debug("streaming", "[CellManager] _defer_fade_in called with %d objects, cell in tree: %s" % [objects.size(), cell_node.is_inside_tree()])
-
-	# Connect to tree_entered signal to apply fade-in once in scene tree
-	var apply_fades := func() -> void:
-		Log.debug("streaming", "[CellManager] apply_fades executing for %d objects" % objects.size())
-		for obj: Node3D in objects:
-			if is_instance_valid(obj):
-				_instantiator._apply_fade_in(obj)
-				# Randomize animation start to desync identical objects (flags, banners)
-				if obj.has_meta("_anim_randomize"):
-					obj.remove_meta("_anim_randomize")
-					for child in obj.get_children():
-						if child is AnimationPlayer:
-							var ap := child as AnimationPlayer
-							if ap.is_playing():
-								ap.seek(randf() * ap.current_animation_length)
-
-	if cell_node.is_inside_tree():
-		# Already in tree, apply immediately
-		apply_fades.call()
-	else:
-		# Wait for tree entry
-		cell_node.tree_entered.connect(apply_fades, CONNECT_ONE_SHOT)
 
 
 ## Group cell references for MultiMesh instancing
@@ -808,17 +762,7 @@ func instantiate_deferred_object(
 
 	_stats["objects_instantiated"] += 1
 
-	# NOTE: Fade-in is NOT applied here - caller must apply after add_child()
-	# Use apply_fade_in_to_object() after adding to scene tree
-
 	return instance
-
-
-## Apply fade-in effect to an object (must be called after add_child)
-## This is a public helper for callers who instantiate objects via instantiate_deferred_object()
-func apply_fade_in_to_object(obj: Node3D) -> void:
-	if _instantiator.enable_fade_in and is_instance_valid(obj):
-		_instantiator._apply_fade_in(obj)
 
 
 # =============================================================================
@@ -930,8 +874,6 @@ var _prewarm_per_frame: int = SC.POOL_PREWARM_MAX_PER_FRAME
 ## instantiations — LoadProfile eliminates that race by making the settings
 ## per-request.
 class LoadProfile:
-	## Apply deferred fade-in after add_child. Off for invisible pocket loads.
-	var fade_in: bool = true
 	## Route mid-worthy objects through the RS / static-renderer batching path.
 	## Must be OFF for interior pockets — RS instances render at ESM world
 	## position and ignore the pocket Y=-500 offset + INTERIOR_RENDER_LAYERS.
@@ -951,7 +893,6 @@ class LoadProfile:
 
 	static func interior_pocket() -> LoadProfile:
 		var p := LoadProfile.new()
-		p.fade_in = false
 		p.use_static_renderer = false
 		p.max_actor_distance = 0.0
 		p.interior_priority = false  # Flipped to true by IPM during transition
@@ -1725,15 +1666,9 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 			# Double-check parent is still valid before queuing (defensive)
 			if is_instance_valid(request.cell_node):
-				# Capture per-entry fade-in decision now so the pending_children
-				# batch loop doesn't have to look up LoadProfile later.
-				var entry_fade_in_decision: bool = _instantiator.enable_fade_in
-				if entry.load_profile:
-					entry_fade_in_decision = entry.load_profile.fade_in
 				pending_children.append({
 					"parent": request.cell_node,
 					"child": obj,
-					"fade_in": entry_fade_in_decision,
 				})
 				instantiated += 1
 			else:
@@ -1765,28 +1700,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	for entry in pending_children:
 		var parent: Node3D = entry.parent
 		var child: Node3D = entry.child
-		# Per-entry fade-in decision captured earlier (pre-batching loop).
-		# Interior pockets flip this off because pocket geometry lives at
-		# Y=-500 while loading and fading is invisible.
-		var entry_fade_in: bool = entry.get("fade_in", _instantiator.enable_fade_in)
 		if is_instance_valid(parent) and is_instance_valid(child):
 			if use_deferred:
 				parent.call_deferred("add_child", child)
-				# Defer fade-in until child enters scene tree — SceneTreeTimer requires
-				# an active scene_tree. Without this, material_override gets set to the
-				# fade ShaderMaterial but no restoration timer is scheduled, leaving
-				# objects stuck in the fade-in window indefinitely.
-				if entry_fade_in:
-					child.tree_entered.connect(
-						func() -> void:
-							if is_instance_valid(child):
-								apply_fade_in_to_object(child),
-						CONNECT_ONE_SHOT
-					)
 			else:
 				parent.add_child(child)
-				if entry_fade_in:
-					apply_fade_in_to_object(child)
 	CrashBreadcrumb.write("cm::batch_done", "n=%d" % pending_children.size())
 	return instantiated
 
