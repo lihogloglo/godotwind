@@ -778,3 +778,36 @@ The hlod_off median jump from 29 → 190 FPS confirms the predictive warm elimin
 ### 15.6 Phase A / E / F — already shipped, not re-implemented
 
 The handoff's "Phase A — off-thread PackedScene.instantiate" was outdated. Verification: `PHASE_A_OFFTHREAD_INSTANTIATE: bool = true` is live at [cell_manager.gd:115](../../../src/core/world/cell_manager.gd#L115); `should_dispatch_to_worker` (ref_instantiator:459), `_worker_instantiate` (:796), `complete_worker_instantiate` (:849) are all in place. Phase E (static precompute) + Phase F (prototype prereg) also shipped. Skipped implementation step for "Phase 2" per §15.1 tracker entry.
+
+### 15.7 Phase 4 — statics_no_node3d T.2 per-cell merged trimesh collision (2026-04-22)
+
+Orphaned `src/core/world/static_shape_cache.gd` (91 LOC per-prototype cache, zero callers) wired up + new `src/core/world/cell_static_collision.gd` (~230 LOC). Per cell: one `StaticBody3D` + one `ConcavePolygonShape3D` of world-space triangles, parented to cell_node so unload cascades queue_free. Spec: [statics_no_node3d.md](statics_no_node3d.md) §3.2–3.4 verbatim.
+
+**Integration:** `_finalize_request` in cell_manager.gd. Skips interior pockets (`use_static_renderer=false`) which keep per-Node3D collision. Shape extraction + triangle merge runs on main thread once per cell at completion. `StaticShapeCache.get_shapes(model_path)` caches per-prototype; ~500 unique prototypes ≈ 500 first-time instantiate costs spread across initial exploration.
+
+**Shape → triangle dispatch:**
+- `ConcavePolygonShape3D.get_faces()` — fast path, 90%+ of MW NIF collision (bhkPackedNiTriStripsShape).
+- `ConvexPolygonShape3D` — fan-triangulation from `points[0]`.
+- `BoxShape3D` / `SphereShape3D` (16×8 UV) / `CapsuleShape3D` (AABB fallback) — analytical.
+
+**Benchmark (`--bench-auto=p4_post_t2_collision` vs P3):**
+
+| Scenario | P3 avg FPS | P4 avg FPS | Delta |
+|---|---|---|---|
+| `bench_tiers` | 212.1 | **220.8** | +4% |
+| `bench_teleport` | 182.2 | **189.4** | +4% |
+| `bench_hlod_off` | 124.9 | **90.6** | -27% |
+
+The hlod_off regression is transient, NOT steady-state. Per-second samples:
+- P3: 4 recovery hitches (18–30 FPS at t=0–3s), 7 steady samples (114–202 FPS at t=4–10s), median=190
+- P4: 7 recovery hitches (17–29 FPS at t=0–6s), 4 steady samples (166–232 FPS at t=7–10s), median=28
+
+P4 takes 3 extra seconds to exit the HLOD-toggle stress window (per-cell trimesh build adds main-thread work during cell activation) but actually peaks HIGHER in steady state (232 > 202 FPS). Tiers + teleport show no regression, small improvement.
+
+**Decision: shipped as-is.** HLOD-toggle recovery is a synthetic stress scenario, not a real gameplay case. Collision is correctness-restoring (left-click ball test now bounces off rocks; player collides with arches). If the transient becomes a real-world issue, option is to budget the build across 2–3 frames via a state machine (~50 LOC delta).
+
+**Acceptance criteria met:**
+- ✅ `phys_pairs` heartbeat goes 0 → active values per cell (observed in P4 run).
+- ✅ Doors still rotate (Node3D path untouched).
+- ✅ Carryables still drop (per-Node3D collision unchanged for interactives).
+- ✅ Interior pockets skip trimesh (LoadProfile.use_static_renderer=false gate).

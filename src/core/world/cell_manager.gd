@@ -22,6 +22,8 @@ const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+const StaticShapeCacheScript := preload("res://src/core/world/static_shape_cache.gd")
+const CellStaticCollisionScript := preload("res://src/core/world/cell_static_collision.gd")
 # S.1 follow-up §12.2 — second crash-site breadcrumbs for the post-instantiate
 # batch add_child loop.
 const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
@@ -42,6 +44,13 @@ var _object_pool: RefCounted = null  # ObjectPool
 
 # Static object renderer for fast flora rendering (uses RenderingServer directly)
 var _static_renderer: Node = null  # StaticObjectRenderer
+
+# Phase 4 / statics_no_node3d T.2 — per-cell merged trimesh collision. Restores
+# physics collision that was dropped when statics moved to RS-direct rendering
+# (no Node3D → no StaticBody3D). One StaticBody3D + one ConcavePolygonShape3D
+# per cell, parented to the cell_node so unload cascades cleanly.
+var _static_shape_cache: StaticShapeCacheScript = StaticShapeCacheScript.new()
+var _cell_static_collision: CellStaticCollisionScript = CellStaticCollisionScript.new()
 
 # MID-tier batch pool removed — StaticObjectRenderer now handles MID with per-instance LOD
 
@@ -109,6 +118,12 @@ const PHASE_A_OFFTHREAD_INSTANTIATE: bool = true
 ## Initialize instantiator with current configuration and dependencies
 func _init() -> void:
 	_sync_instantiator_config()
+	# Phase 4 / T.2 — wire static-shape cache and collision builder.
+	# _static_shape_cache needs the model_loader to miss-fill on first query;
+	# _cell_static_collision pulls shape entries from the cache + classifies
+	# refs via the instantiator (exact mirror of Phase F's static routing).
+	_static_shape_cache.set_model_loader(_model_loader)
+	_cell_static_collision.configure(_static_shape_cache, _instantiator)
 
 
 ## Initialize object pool for frequently used models
@@ -2252,6 +2267,21 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 	if request.completed:
 		return
 	request.completed = true
+
+	# Phase 4 / statics_no_node3d T.2 — build a single merged ConcavePolygonShape3D
+	# collision body for all static refs in this cell. Parented to the cell_node
+	# so unload cascades queue_free cleanly. Interior pockets keep their
+	# per-object StaticBody3D collision (use_static_renderer=false path in the
+	# builder skips the merge).
+	if request.cell_node != null and is_instance_valid(request.cell_node) and request.cell_record != null:
+		var use_static: bool = true
+		if request.load_profile != null:
+			use_static = request.load_profile.use_static_renderer
+		var body: StaticBody3D = _cell_static_collision.build_for_cell(
+			request.grid, request.cell_record, use_static,
+		)
+		if body != null:
+			request.cell_node.add_child(body)
 
 
 ## Internal: Queue an object for instantiation with limit checking
