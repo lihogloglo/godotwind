@@ -558,6 +558,33 @@ func _process(delta: float) -> void:
 		var draws := int(p.get_monitor(p.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 		var objects := int(p.get_monitor(p.RENDER_TOTAL_OBJECTS_IN_FRAME))
 		var prims := int(p.get_monitor(p.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
+
+		# Draw-call audit (2026-04-22) — split totals into VISIBLE vs SHADOW
+		# passes. The total monitor above is sum-over-all-passes, which
+		# conflates main-camera draws with shadow-cascade re-draws. Splitting
+		# reveals the true shadow-pass multiplier.
+		var draws_visible: int = 0
+		var draws_shadow: int = 0
+		var objs_visible: int = 0
+		var objs_shadow: int = 0
+		var vp := get_viewport()
+		if vp != null:
+			draws_visible = int(vp.get_render_info(
+				Viewport.RENDER_INFO_TYPE_VISIBLE,
+				Viewport.RENDER_INFO_DRAW_CALLS_IN_FRAME,
+			))
+			draws_shadow = int(vp.get_render_info(
+				Viewport.RENDER_INFO_TYPE_SHADOW,
+				Viewport.RENDER_INFO_DRAW_CALLS_IN_FRAME,
+			))
+			objs_visible = int(vp.get_render_info(
+				Viewport.RENDER_INFO_TYPE_VISIBLE,
+				Viewport.RENDER_INFO_OBJECTS_IN_FRAME,
+			))
+			objs_shadow = int(vp.get_render_info(
+				Viewport.RENDER_INFO_TYPE_SHADOW,
+				Viewport.RENDER_INFO_OBJECTS_IN_FRAME,
+			))
 		# Phase 3 registry batch stats from StaticObjectRenderer (0 if absent).
 		# Legacy mm_batches/mm_slots fields kept at 0 post-step-7; registry
 		# fields are the ground truth for MID-tier occupancy.
@@ -574,14 +601,18 @@ func _process(delta: float) -> void:
 		# per §6: pairs should drop ~100× post-T.2 (merged cell trimesh).
 		var phys_active := int(p.get_monitor(p.PHYSICS_3D_ACTIVE_OBJECTS))
 		var phys_pairs := int(p.get_monitor(p.PHYSICS_3D_COLLISION_PAIRS))
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d objs=%d prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d phys_active=%d phys_pairs=%d" % [
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d phys_active=%d phys_pairs=%d" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
 			process_ms,
 			physics_ms,
 			draws,
+			draws_visible,
+			draws_shadow,
 			objects,
+			objs_visible,
+			objs_shadow,
 			prims / 1000,
 			_loaded_cells.size(),
 			_loading_cells.size(),
