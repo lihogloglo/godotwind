@@ -36,6 +36,16 @@ var stats: Dictionary = {
 	"total_build_time_us": 0,
 }
 
+## Toggle verbose per-cell Log.debug output. Off by default; flip in
+## `configure` or via the owning cell_manager for collision-related triage.
+var debug_enabled: bool = false
+
+# Per-build diagnostic counters — report why an empty build returned null.
+var _dbg_refs_seen: int = 0
+var _dbg_classified_static: int = 0
+var _dbg_shapes_fetched: int = 0
+var _dbg_shapes_empty: int = 0
+
 
 func configure(shape_cache: RefCounted, instantiator: RefCounted) -> void:
 	_shape_cache = shape_cache
@@ -63,8 +73,14 @@ func build_for_cell(cell_grid: Vector2i, cell_record: Variant, use_static_render
 
 	var t0: int = Time.get_ticks_usec()
 	var vertices: PackedVector3Array = PackedVector3Array()
+	# Diagnostic counters — report WHY we failed to build a body if vertices end empty.
+	_dbg_refs_seen = 0
+	_dbg_classified_static = 0
+	_dbg_shapes_fetched = 0
+	_dbg_shapes_empty = 0
 
 	for ref: CellReference in cell_record.references:
+		_dbg_refs_seen += 1
 		var rec_type: Array = [""]
 		var base: Variant = ESMManager.get_any_record(str(ref.ref_id), rec_type)
 		if base == null or not "model" in base:
@@ -83,9 +99,12 @@ func build_for_cell(cell_grid: Vector2i, cell_record: Variant, use_static_render
 		# public helper.
 		if not _instantiator._should_route_to_renderer(type_name, model_path, is_carryable, use_static_renderer):
 			continue
+		_dbg_classified_static += 1
 
+		_dbg_shapes_fetched += 1
 		var shapes: Array = _shape_cache.get_shapes(model_path)
 		if shapes.is_empty():
+			_dbg_shapes_empty += 1
 			continue
 
 		# Compose ref world transform. Matches `_apply_transform` in the ref
@@ -117,6 +136,10 @@ func build_for_cell(cell_grid: Vector2i, cell_record: Variant, use_static_render
 				i += 3
 
 	if vertices.is_empty():
+		if debug_enabled:
+			Log.debug("streaming", "[T.2] %s — no verts (refs=%d static=%d shapes=%d empty=%d)" % [
+				str(cell_grid), _dbg_refs_seen, _dbg_classified_static, _dbg_shapes_fetched, _dbg_shapes_empty,
+			])
 		return null
 
 	var trimesh: ConcavePolygonShape3D = ConcavePolygonShape3D.new()
@@ -131,6 +154,10 @@ func build_for_cell(cell_grid: Vector2i, cell_record: Variant, use_static_render
 	stats["cells_built"] += 1
 	stats["total_triangles"] += vertices.size() / 3
 	stats["total_build_time_us"] += Time.get_ticks_usec() - t0
+	if debug_enabled:
+		Log.debug("streaming", "[T.2] %s — tris=%d (refs=%d static=%d)" % [
+			str(cell_grid), vertices.size() / 3, _dbg_refs_seen, _dbg_classified_static,
+		])
 	return body
 
 

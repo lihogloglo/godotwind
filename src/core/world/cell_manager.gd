@@ -929,6 +929,10 @@ class AsyncCellRequest:
 	var cell_node: Node3D = null  # The cell node being built
 	var started: bool = false
 	var completed: bool = false
+	## Phase 4 / T.2 — true once the merged static collision body has been
+	## built (or skipped) for this cell. Set by `_tick_static_collision_build`;
+	## one-shot flag so the tick doesn't retry builds each frame.
+	var collision_built: bool = false
 	var failed: bool = false  # Whether the request failed
 	var error_message: String = ""  # Error description if failed
 	var retry_count: int = 0  # Number of retries attempted
@@ -1464,6 +1468,13 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_camera_position = camera_pos
 	if camera_fwd != Vector3.INF:
 		_camera_forward = camera_fwd
+
+	# Phase 4 / T.2 — build merged static collision for any cell whose static
+	# models have fully loaded but hasn't yet been collided. Fires independent
+	# of `_finalize_request` (which is gated by `pending_instantiations == 0`,
+	# a condition that never clears when interactive refs are proximity-
+	# deferred). One build per frame to bound cold-cache stalls.
+	_tick_static_collision_build()
 
 	# Start budget clock BEFORE pre-loop work — disk loads, conversions, and
 	# pool prewarm all consume frame time that must count against the budget.
@@ -2268,12 +2279,32 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 		return
 	request.completed = true
 
-	# Phase 4 / statics_no_node3d T.2 — build a single merged ConcavePolygonShape3D
-	# collision body for all static refs in this cell. Parented to the cell_node
-	# so unload cascades queue_free cleanly. Interior pockets keep their
-	# per-object StaticBody3D collision (use_static_renderer=false path in the
-	# builder skips the merge).
-	if request.cell_node != null and is_instance_valid(request.cell_node) and request.cell_record != null:
+
+## Phase 4 / statics_no_node3d T.2 — per-frame tick that builds the merged
+## collision StaticBody3D for each cell ONCE its static models have loaded.
+##
+## Why a tick and not a `_finalize_request` hook: proximity-deferred interactive
+## refs re-increment `pending_instantiations` at process time, which means
+## `_is_request_complete` stays false forever for any cell where the player
+## hasn't walked within 80m of an interactive ref. The T.2 build only needs
+## static models loaded, not every interactive spawned — so it fires on the
+## earlier signal (`pending_parses.is_empty && pending_disk_loads.is_empty`).
+##
+## Interior pockets (`load_profile.use_static_renderer=false`) skip early via
+## `build_for_cell`'s first guard — their refs have per-Node3D collision.
+## Budget: one cell per frame (cold-cache build ~20-50ms, warm ~2-5ms).
+func _tick_static_collision_build() -> void:
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request.collision_built:
+			continue
+		if not request.pending_parses.is_empty():
+			continue
+		if not request.pending_disk_loads.is_empty():
+			continue
+		request.collision_built = true
+		if not is_instance_valid(request.cell_node) or request.cell_record == null:
+			continue
 		var use_static: bool = true
 		if request.load_profile != null:
 			use_static = request.load_profile.use_static_renderer
@@ -2282,6 +2313,7 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 		)
 		if body != null:
 			request.cell_node.add_child(body)
+		return  # One per frame to bound cold-cache stalls.
 
 
 ## Internal: Queue an object for instantiation with limit checking
