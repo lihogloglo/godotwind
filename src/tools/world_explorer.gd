@@ -2554,6 +2554,7 @@ func _spawn_debug_ball() -> void:
 	ball.collision_mask = 1
 	ball.contact_monitor = true
 	ball.max_contacts_reported = 4
+	ball.continuous_cd = true
 	var shape := SphereShape3D.new()
 	shape.radius = 0.25
 	var cs := CollisionShape3D.new()
@@ -2576,6 +2577,12 @@ func _spawn_debug_ball() -> void:
 	ball.global_transform = spawn_xf
 	add_child(ball)
 	ball.linear_velocity = -spawn_xf.basis.z * 20.0
+	# DIAG 2026-04-22: verify CCD + tick rate actually applied
+	_log("[color=yellow]Ball diag: continuous_cd=%s physics_ticks_per_second=%d|linvel=%.1fm/s step_dist=%.3fm[/color]" % [
+		str(ball.continuous_cd), Engine.physics_ticks_per_second,
+		ball.linear_velocity.length(),
+		ball.linear_velocity.length() / float(Engine.physics_ticks_per_second),
+	])
 	# Diagnostic raycast from spawn pos straight down — if terrain collision is
 	# working, we'll hit something within 500m. If not, the ball will fall
 	# forever. Log result so the user doesn't have to guess.
@@ -2595,7 +2602,14 @@ func _spawn_debug_ball() -> void:
 			hit_name, hit["position"], spawn_xf.origin.y - float(hit["position"].y), str(hit_layer)])
 	# Connect body_entered so we KNOW if the ball actually hits something.
 	ball.body_entered.connect(func(body: Node) -> void:
-		_log("[color=lime]Ball collided with '%s'[/color]" % str(body.name))
+		# DIAG 2026-04-22: log impact velocity so we can tell if CCD is working.
+		# Without CCD: ball hits at peak velocity (20+ m/s). With CCD: may hit at
+		# sub-step velocity (can be higher or matching). Value alone isn't
+		# diagnostic, but a pattern of "ball never collided, appeared below ground"
+		# vs "ball collided at 22 m/s then bounced" is.
+		_log("[color=lime]Ball collided with '%s' at v=%.1fm/s pos=%s[/color]" % [
+			str(body.name), ball.linear_velocity.length(), ball.global_position,
+		])
 	)
 	var timer := Timer.new()
 	timer.wait_time = 15.0

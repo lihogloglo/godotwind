@@ -186,6 +186,7 @@ static func convert_static_to_rigid(
 	rb.contact_monitor = false
 	rb.can_sleep = true
 	rb.gravity_scale = 1.0
+	rb.continuous_cd = true
 
 	# Diagnostic metadata so the console picker and gameplay code can
 	# read carryable info without walking siblings.

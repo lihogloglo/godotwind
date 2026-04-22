@@ -117,6 +117,40 @@ const PAGING_TIER_2_END: float = 1000.0
 ## NEAR↔MID promotion at 250m/270m.
 const PAGING_HYSTERESIS: float = 20.0
 
+## Screen-size cutoff for per-prototype visibility_range_end. Drives BOTH
+## visible-pass and shadow-pass culling by scaling the fade-out distance with
+## object size — canonical UE5 "Detail Cull Distance" / Decima "screen-size
+## LOD" pattern. Replaces the flat-AABB-height shadow-off (2026-04-22 v2).
+##
+## Formula: cutoff_m = aabb_max_dim * SCREEN_SIZE_CUTOFF_RATIO, clamped to
+## [SCREEN_SIZE_MIN_CUTOFF, SCREEN_SIZE_MAX_CUTOFF]. With ratio=200 and a
+## ~5 px threshold at 1080p / 60° FOV (focal_px ≈ 936):
+##   0.3m pebble  → 60m cutoff
+##   0.8m barrel  → 160m cutoff
+##   1.5m crate   → 300m cutoff
+##   3m tree      → 600m → clamped to MID_END (500m)
+## Inside the instance's spatial AABB, Godot reports distance=0 so the fade
+## stays off — close-up shadows preserved. Outside the AABB by more than
+## `cutoff`, VISIBILITY_RANGE_FADE_SELF dithers out → both visible and shadow
+## cost drop. Tune ratio up for stricter culling, down for more shadows.
+const SCREEN_SIZE_CUTOFF_RATIO: float = 200.0
+const SCREEN_SIZE_MIN_CUTOFF: float = 40.0
+const SCREEN_SIZE_MAX_CUTOFF: float = MID_END
+
+## Ceiling for the registry batch path's shadow cutoff. 200m matches the
+## current `directional_shadow_max_distance` in sky_manager.gd — beyond that,
+## the directional light already culls shadow casters. Clamping the per-batch
+## shadow cutoff at SHADOW_CUTOFF_MAX means large prototypes (> 1m) get their
+## full shadow range naturally, and only sub-1m prototypes shrink the toggle
+## distance below the directional max.
+const SHADOW_CUTOFF_MAX: float = 200.0
+
+## Hysteresis band around the per-batch shadow cutoff (meters, not squared).
+## Shadow flips OFF when the nearest slot passes (cutoff + HYSTERESIS).
+## Shadow flips back ON when the nearest slot drops below cutoff. Prevents
+## per-frame toggle thrash when a camera sits exactly at the boundary.
+const SHADOW_CUTOFF_HYSTERESIS: float = 5.0
+
 ## Phase 5 — second-pass `minSizeMergeFactor` (OpenMW canonical defaults).
 ## After the cost-benefit decision accepts a mesh type, its refs face a
 ## second size filter whose threshold scales with how merge-beneficial the

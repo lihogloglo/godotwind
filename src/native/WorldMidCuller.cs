@@ -64,6 +64,10 @@ public partial class WorldMidCuller : RefCounted
         var outBuffer = new float[slotCapacity * PackedStride];
         int visible = 0;
         int outOff = 0;
+        // Nearest live-slot distance — fed back to GDScript for the per-batch
+        // dynamic shadow toggle. Tracked over ALL live slots (not just visible
+        // ones) so shadow state survives the max_dist_sq visible cull.
+        float nearestDistSq = float.PositiveInfinity;
 
         float camX = cameraPos.X;
         float camY = cameraPos.Y;
@@ -97,6 +101,7 @@ public partial class WorldMidCuller : RefCounted
             float dy = oy - camY;
             float dz = oz - camZ;
             float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < nearestDistSq) nearestDistSq = distSq;
             if (distSq > maxDistSq) continue;
 
             // 12-float transform row — block copy (JIT-friendly).
@@ -113,6 +118,7 @@ public partial class WorldMidCuller : RefCounted
         {
             { "visible", visible },
             { "buffer", outBuffer },
+            { "nearest_dist_sq", nearestDistSq },
         };
     }
 }

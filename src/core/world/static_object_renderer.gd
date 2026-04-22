@@ -61,6 +61,7 @@ var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
 ## every slot uses this single value.
 const REGISTRY_FADE_DURATION_S: float = 0.3
 
+
 ## Next instance ID
 var _next_id: int = 0
 
@@ -596,7 +597,7 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 		var legacy_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
 			else mesh_type.mesh_rid
 		var rid := _create_rs_instance(legacy_mesh_rid, mesh_type.material_rid,
-			mesh_type.surface_materials, transform)
+			mesh_type.surface_materials, transform, mesh_type.aabb)
 		if rid.is_valid():
 			data.sub_rids.append(rid)
 		data.instance_rid = rid
@@ -606,7 +607,7 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 				continue
 			var child_xform := transform * entry.local_transform
 			var rid := _create_rs_instance(entry.mesh_resource.get_rid(), entry.material_rid,
-				entry.surface_materials, child_xform)
+				entry.surface_materials, child_xform, entry.mesh_resource.get_aabb())
 			if rid.is_valid():
 				data.sub_rids.append(rid)
 		if not data.sub_rids.is_empty():
@@ -728,8 +729,15 @@ func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
 
 ## Create a single RS instance with visibility_range + LOD bias + material.
 ## Returns RID() on invalid mesh_rid — caller must guard against non-valid return.
+##
+## `aabb` (optional) — caller-supplied local-space AABB for the mesh. When
+## provided, the instance's visibility_range_end is tightened per
+## DU.SCREEN_SIZE_CUTOFF_RATIO (screen-size cull replaces v1's flat shadow-off).
+## Pass the default `AABB()` (zero-size) to keep the class-wide
+## visibility_range_end (500m default, 300m with HLOD).
 func _create_rs_instance(mesh_rid: RID, material_rid: RID,
-		surface_materials: Array[Material], xform: Transform3D) -> RID:
+		surface_materials: Array[Material], xform: Transform3D,
+		aabb: AABB = AABB()) -> RID:
 	# F3a (2026-04-15): defensive guard. An invalid mesh_rid reaching
 	# instance_set_base was the B1 crash vector (`Initializing already initialized
 	# RID` + `Parameter mem is null` cluster). Log once, skip cleanly.
@@ -751,11 +759,23 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 			if mat:
 				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
 
-	# Visibility range: 0 to visibility_range_end (default 500m, 300m with HLOD).
-	# The embedded LOD chain handles sub-band selection within this range.
+	# Visibility range: scales with prototype AABB (screen-size cull) when the
+	# caller supplied an AABB, otherwise falls back to the class-wide
+	# visibility_range_end (500m default, 300m with HLOD). Screen-size cull
+	# replaces the flat shadow-off from v1 — the instance's fade kills BOTH
+	# visible and shadow draws when camera leaves its AABB by more than
+	# `cutoff`, so close-up shadows are preserved (camera inside AABB →
+	# distance=0 → no fade). See DU.SCREEN_SIZE_CUTOFF_RATIO for formula.
+	var effective_end: float = visibility_range_end
+	if aabb.size.y > 0.0:
+		var max_dim: float = maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+		effective_end = minf(
+			visibility_range_end,
+			maxf(DU.SCREEN_SIZE_MIN_CUTOFF, max_dim * DU.SCREEN_SIZE_CUTOFF_RATIO)
+		)
 	rs.instance_geometry_set_visibility_range(
 		instance_rid,
-		0.0, visibility_range_end,
+		0.0, effective_end,
 		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade at far end
 		RenderingServer.VISIBILITY_RANGE_FADE_SELF
 	)

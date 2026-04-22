@@ -53,6 +53,10 @@ const GROW_FACTOR: int = 2
 ## Loaded once and shared as the `shader` of every per-batch fade ShaderMaterial.
 const FADE_SHADER := preload("res://src/core/world/shaders/lod_crossfade_multimesh.gdshader")
 
+## Shared distance constants (SCREEN_SIZE_* for per-prototype visibility_range,
+## FADE_MARGIN_RENDER_FAR for the fade-out band). See distance_utils.gd.
+const DU := preload("res://src/core/world/distance_utils.gd")
+
 
 #region Fields
 
@@ -107,6 +111,22 @@ var slot_custom_data: PackedFloat32Array = PackedFloat32Array()
 ## slot_capacity * PACKED_STRIDE. Grown on capacity grow, never shrunk.
 var _cull_buffer: PackedFloat32Array = PackedFloat32Array()
 
+## Per-batch shadow distance cutoff (squared). Computed in _init from
+## prototype AABB: nearer → smaller cutoff. The cull pass sets cast_shadow
+## OFF when the nearest live slot is past this distance. 0 = never toggle
+## (uninitialized fallback; _init always overwrites).
+var shadow_cutoff_dist_sq: float = 0.0
+
+## Hysteresis upper band — squared (cutoff + hysteresis). Used only when
+## shadow is currently ON; shadow flips off only when nearest slot is past
+## THIS distance, preventing per-frame thrash at the cutoff boundary.
+var _shadow_cutoff_hyst_sq: float = 0.0
+
+## Current cast_shadow state of the batch RS instance. Cached so the
+## per-frame RS call only fires on transitions. Starts true — batches
+## spawn with shadows on until the first cull pass evaluates distance.
+var _shadow_on: bool = true
+
 #endregion
 
 
@@ -140,6 +160,32 @@ func _init(
 	rs.instance_set_base(rs_instance, multimesh_rid)
 	rs.instance_set_scenario(rs_instance, scenario)
 	rs.instance_set_transform(rs_instance, Transform3D.IDENTITY)  ## World-origin anchor.
+
+	## Per-batch shadow cutoff. Godot's `visibility_range` uses distance to
+	## AABB CENTER, which breaks for world-spanning MultiMesh batches whose
+	## centers are far from nearby slots. Instead we do a DYNAMIC per-cull
+	## toggle: compute the nearest-slot distance in cull_and_upload (for
+	## free — the visible cull already walks every slot computing dist_sq),
+	## and flip cast_shadow on/off based on whether any slot is closer than
+	## `shadow_cutoff_dist_sq`. This is the canonical per-batch "screen-size
+	## shadow cull" pattern — preserves close-up shadows while dropping
+	## shadow-pass cost for batches whose cluster has moved out of range.
+	##
+	## Cutoff scales with prototype AABB size, clamped [MIN_CUTOFF, 200m].
+	## 200m is the current directional_shadow_max_distance (sky_manager.gd);
+	## cutoff beyond that has no shadow-cost effect.
+	var proto_aabb := p_mesh.get_aabb()
+	var max_dim: float = maxf(proto_aabb.size.x, maxf(proto_aabb.size.y, proto_aabb.size.z))
+	var shadow_cutoff: float = clampf(
+		max_dim * DU.SCREEN_SIZE_CUTOFF_RATIO,
+		DU.SCREEN_SIZE_MIN_CUTOFF,
+		DU.SHADOW_CUTOFF_MAX
+	)
+	shadow_cutoff_dist_sq = shadow_cutoff * shadow_cutoff
+	## Hysteresis band: squared (cutoff + HYST) vs squared cutoff to avoid
+	## per-frame toggle thrash at the cutoff boundary.
+	var hyst_edge: float = shadow_cutoff + DU.SHADOW_CUTOFF_HYSTERESIS
+	_shadow_cutoff_hyst_sq = hyst_edge * hyst_edge
 
 	## Prefer a fade ShaderMaterial wrapping FADE_SHADER when the prototype's
 	## material is a StandardMaterial3D — this gives per-slot spawn-time
@@ -328,6 +374,11 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 
 	var visible: int = 0
 	var out_off: int = 0
+	## Track nearest-slot distance for the per-batch shadow toggle. Computed
+	## over ALL live slots (not just visible ones) — shadow decision needs
+	## to survive slots that are past max_dist_sq but still close enough to
+	## matter for shadow-caster distance. INF = no live slots seen.
+	var nearest_dist_sq: float = INF
 	for slot in range(slot_capacity):
 		if slot_live[slot] == 0:
 			continue
@@ -339,6 +390,8 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 		var dy: float = oy - cam_pos.y
 		var dz: float = oz - cam_pos.z
 		var dist_sq: float = dx * dx + dy * dy + dz * dz
+		if dist_sq < nearest_dist_sq:
+			nearest_dist_sq = dist_sq
 		if dist_sq > max_dist_sq:
 			continue
 
@@ -360,6 +413,7 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 
 	rs.multimesh_set_buffer(multimesh_rid, _cull_buffer)
 	rs.multimesh_set_visible_instances(multimesh_rid, visible)
+	_update_shadow_state(nearest_dist_sq)
 	return visible
 
 
@@ -393,11 +447,45 @@ func _cull_native(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounte
 		push_warning("PrototypeBatch._cull_native: CullAndPack returned no buffer, falling back to GDScript")
 		return cull_and_upload(cam_pos, max_dist_sq, null)
 	var buffer: PackedFloat32Array = buffer_variant
+	## Nearest-slot distance for the shadow toggle. C# initializes to
+	## float.PositiveInfinity when no live slots; GDScript's Variant
+	## unmarshals that cleanly to INF.
+	var nearest_dist_sq: float = result.get("nearest_dist_sq", INF)
 
 	var rs := RenderingServer
 	rs.multimesh_set_buffer(multimesh_rid, buffer)
 	rs.multimesh_set_visible_instances(multimesh_rid, visible)
+	_update_shadow_state(nearest_dist_sq)
 	return visible
+
+## Flip cast_shadow on the batch RS instance based on the nearest live
+## slot's distance from the camera. Called from both cull paths (GDScript
+## fallback + C# native) with the nearest_dist_sq computed during the cull
+## walk. Hysteresis prevents toggle thrash at the cutoff boundary — once
+## OFF, shadow stays off until nearest drops below cutoff; once ON, stays
+## on until nearest passes cutoff + HYSTERESIS.
+##
+## No-op when shadow_cutoff_dist_sq is 0 (uninitialized — shouldn't happen
+## post-_init but defensive) or when the state matches (avoid redundant
+## RS calls — each one triggers engine-side shadow cache invalidation).
+func _update_shadow_state(nearest_dist_sq: float) -> void:
+	if shadow_cutoff_dist_sq <= 0.0:
+		return
+	if not rs_instance.is_valid():
+		return
+	var want_on: bool
+	if _shadow_on:
+		## Currently on — stay on until past (cutoff + hysteresis).
+		want_on = nearest_dist_sq < _shadow_cutoff_hyst_sq
+	else:
+		## Currently off — turn back on when inside the cutoff.
+		want_on = nearest_dist_sq < shadow_cutoff_dist_sq
+	if want_on == _shadow_on:
+		return
+	_shadow_on = want_on
+	var setting := RenderingServer.SHADOW_CASTING_SETTING_ON if want_on \
+		else RenderingServer.SHADOW_CASTING_SETTING_OFF
+	RenderingServer.instance_geometry_set_cast_shadows_setting(rs_instance, setting)
 
 #endregion
 
@@ -436,5 +524,8 @@ func cleanup() -> void:
 	_cull_buffer = PackedFloat32Array()
 	slot_capacity = 0
 	slot_count_live = 0
+	shadow_cutoff_dist_sq = 0.0
+	_shadow_cutoff_hyst_sq = 0.0
+	_shadow_on = true
 
 #endregion
