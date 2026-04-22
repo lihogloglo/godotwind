@@ -21,6 +21,7 @@ class_name ModelLoader
 extends RefCounted
 
 const LODResource := preload("res://src/core/world/lod_resource.gd")
+const StaticShapePackScript := preload("res://src/core/world/static_shape_pack.gd")
 const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
 
 ## Maximum number of prototypes kept in memory cache
@@ -861,6 +862,29 @@ func resolve_disk_path(model_path: String) -> String:
 	return ""
 
 
+## Public: resolve an ESM model path to its prebaked shape pack `.shapes.res`
+## sidecar path. Returns empty string if the sidecar doesn't exist.
+##
+## Call from main thread only — mutates `_file_exists_cache`. Mirrors
+## `resolve_disk_path` above: Phase F's main-thread dispatcher resolves the
+## pack path, hands it to `_worker_preregister_prototype` which then calls
+## `StaticShapeCache.warm_from_path` with the pre-resolved string. The
+## sidecar carries extracted CollisionShape3D data for the prototype; loading
+## it avoids the 20-50ms PackedScene.instantiate that `StaticShapeCache.
+## get_shapes` otherwise incurs on first sight.
+func resolve_shape_pack_path(model_path: String) -> String:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var scene_path := _get_disk_cache_path(normalized)
+	if scene_path.is_empty():
+		return ""
+	# _get_disk_cache_path always returns paths ending in ".res".
+	# Pack sits alongside with ".shapes.res" suffix (see _save_shape_pack_to_disk).
+	var pack_path := scene_path.get_basename() + ".shapes.res"
+	if _cached_file_exists(pack_path):
+		return pack_path
+	return ""
+
+
 func _get_disk_cache_path(cache_key: String) -> String:
 	# Strip item_id suffix if present (e.g., "meshes\x\ex_door.nif:door_01" -> "meshes\x\ex_door.nif")
 	var base_key := cache_key
@@ -959,6 +983,13 @@ func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 		_file_exists_cache[scene_path] = true
 		_stats["models_saved"] += 1
 
+		# T.6 sidecar — extracted collision shapes as a plain Resource, no scene
+		# round-trip at load. Emitted here because the node is still alive with
+		# CollisionShape3D descendants; StaticShapeCache then reads this directly
+		# on Phase F worker and avoids the 20-50ms PackedScene.instantiate spike
+		# during cell transition. See static_shape_pack.gd header.
+		_save_shape_pack_to_disk(node, base_path)
+
 		# Track first model for condensed logging
 		if _first_saved_model.is_empty():
 			_first_saved_model = cache_key.get_file()
@@ -971,6 +1002,22 @@ func _save_to_disk_cache(node: Node3D, cache_key: String) -> void:
 			else:
 				Log.info("models", "Saved %d models (last: %s)" % [count, cache_key.get_file()])
 			_last_save_report_count = count
+
+
+## T.6 sidecar — write a `StaticShapePack` alongside the scene `.res`.
+## Delegates to the static helper on `StaticShapePack` so the sibling
+## prebake path in `model_prebaker._save_model_to_cache` can reuse the
+## same extraction + save logic.
+func _save_shape_pack_to_disk(node: Node3D, base_path: String) -> void:
+	var result := StaticShapePackScript.save_from_node(node, base_path)
+	if result == OK:
+		# Keep the file-existence cache coherent so `resolve_shape_pack_path`
+		# sees the new sidecar without a disk stat. Empty-entry prototypes
+		# return OK without writing a file, so only cache when the path
+		# actually exists.
+		var pack_path := base_path + ".shapes.res"
+		if FileAccess.file_exists(pack_path):
+			_file_exists_cache[pack_path] = true
 
 
 ## Save all meshes in a node tree to disk and update their resource paths

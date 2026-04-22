@@ -18,6 +18,7 @@ extends RefCounted
 const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const NIFKFLoader := preload("res://src/core/nif/nif_kf_loader.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
+const StaticShapePackScript := preload("res://src/core/world/static_shape_pack.gd")
 
 ## Output directory (set from SettingsManager)
 var output_dir: String = ""
@@ -473,6 +474,11 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	if save_result != OK:
 		push_warning("ModelPrebaker: Failed to save scene for %s: %s" % [cache_key, error_string(save_result)])
 		return 0
+
+	# T.6 sidecar — extracted collision shapes for fast cache warm at cell
+	# activation. No-op if the prototype has no collision. See
+	# docs/plans/distant_rendering_2026_04/statics_no_node3d.md §7.
+	StaticShapePackScript.save_from_node(node, base_path)
 
 	return mesh_count
 

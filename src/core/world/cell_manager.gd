@@ -124,6 +124,11 @@ func _init() -> void:
 	# refs via the instantiator (exact mirror of Phase F's static routing).
 	_static_shape_cache.set_model_loader(_model_loader)
 	_cell_static_collision.configure(_static_shape_cache, _instantiator)
+	# T.6 — expose the same shape cache to Phase F so the worker can warm
+	# `.shapes.res` sidecars off-thread before cell_static_collision asks for
+	# them at cell-activation time. Keeps CellManager as the single owner of
+	# the shape cache lifetime (mirrors the static_renderer/model_loader wiring).
+	_instantiator.shape_cache = _static_shape_cache
 
 
 ## Initialize object pool for frequently used models

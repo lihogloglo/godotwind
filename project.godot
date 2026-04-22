@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Godotwind"
 run/main_scene="uid://clb74pwrqrgok"
-config/features=PackedStringArray("4.6")
+config/features=PackedStringArray("4.6", "C#")
 config/icon="res://icon.svg"
 
 [autoload]
@@ -161,8 +161,8 @@ quality=2
 
 [physics]
 
-3d/physics_engine="JoltPhysics3D"
 common/physics_ticks_per_second=90
+3d/physics_engine="JoltPhysics3D"
 common/physics_interpolation=true
 
 [rendering]

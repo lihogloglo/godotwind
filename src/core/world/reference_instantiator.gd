@@ -52,6 +52,14 @@ var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
+# T.6 — StaticShapeCache used by Phase F worker to warm collision shape
+# packs off-thread from the `.shapes.res` sidecar, avoiding the 20-50ms
+# PackedScene.instantiate + tree-walk that cell-activation otherwise pays
+# through `cell_static_collision.build_for_cell` → `StaticShapeCache.get_shapes`.
+# Optional — if unset (or sidecar missing), cell_static_collision falls back
+# to the legacy walker without error. See docs/plans/distant_rendering_2026_04/
+# statics_no_node3d.md §7.
+var shape_cache: RefCounted = null  # StaticShapeCache
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null
@@ -572,7 +580,10 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 		return 0
 
 	# Dedupe model paths within the cell — many refs share types.
-	var to_register: Dictionary = {}  # normalized_path -> disk_path
+	# Value: { disk: String (scene .res), pack: String (.shapes.res, may be "") }.
+	# The pack path is resolved here on the main thread so the worker can stay
+	# autoload/FileAccess-free — matches the existing disk_path plumbing.
+	var to_register: Dictionary = {}  # normalized_path -> { disk: String, pack: String }
 
 	for ref: CellReference in cell_record.references:
 		var record_type: Array = [""]
@@ -598,8 +609,13 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 		if normalized in to_register:
 			continue
 
-		# Already registered? Skip (mutex-wrapped has_type).
-		if static_renderer.call("has_type", normalized):
+		# Already registered AND shape-cache warm? Skip entirely. If the
+		# renderer knows the type but the shape pack is still cold, we still
+		# want to dispatch so the worker can warm it (has_type doesn't speak
+		# to the collision cache).
+		var renderer_knows: bool = static_renderer.call("has_type", normalized)
+		var needs_shape_warm: bool = shape_cache != null
+		if renderer_knows and not needs_shape_warm:
 			continue
 
 		# Resolve disk path. If missing, sync path will handle it via BSA fallback
@@ -608,7 +624,17 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 		if disk_path.is_empty():
 			continue
 
-		to_register[normalized] = disk_path
+		# Resolve shape pack sidecar (may be empty for legacy caches pre-T.6).
+		# Worker will skip warming when path is empty; main-thread fallback via
+		# `StaticShapeCache.get_shapes` handles those prototypes the old way.
+		var shape_pack_path: String = ""
+		if shape_cache != null:
+			shape_pack_path = model_loader.call("resolve_shape_pack_path", model_path)
+
+		to_register[normalized] = {
+			"disk": disk_path,
+			"pack": shape_pack_path,
+		}
 
 	# Prune completed task_ids before appending new ones. Cheap O(N) walk —
 	# N is the number of in-flight pre-reg tasks, typically bounded by the
@@ -618,12 +644,14 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 
 	var dispatched: int = 0
 	for normalized: String in to_register:
-		var disk_path: String = to_register[normalized]
+		var entry: Dictionary = to_register[normalized]
+		var disk_path: String = entry.disk
+		var shape_pack_path: String = entry.pack
 		# HIGH priority — we're racing the cell's instantiation queue. The worker
 		# pool is shared with Phase A/E tasks; high-priority queueing ensures
 		# pre-reg lands before the static refs are drained.
 		var task_id: int = WorkerThreadPool.add_task(
-			_worker_preregister_prototype.bind(normalized, disk_path),
+			_worker_preregister_prototype.bind(normalized, disk_path, shape_pack_path),
 			true,
 			"ref_instantiator:phase_f_prereg"
 		)
@@ -681,8 +709,19 @@ func drain_prereg_tasks() -> void:
 ## queue_free needed for un-parented nodes with refcount 0.
 ##
 ## Plan: docs/plans/distant_rendering_2026_04/phase_f_prototype_prereg.md §4
+## T.6 addition: also warms StaticShapeCache from the `.shapes.res` sidecar
+## when `shape_pack_path` is non-empty. Matches the rendering warm so both
+## the MID/registry pipeline AND the per-cell merged collision body see
+## warm caches by the time the cell drains its instantiation queue.
 # PHASE_F:WORKER_SAFE — by design. Zero autoload / signal / scene-tree access.
-func _worker_preregister_prototype(type_name: String, disk_path: String) -> void:
+func _worker_preregister_prototype(type_name: String, disk_path: String, shape_pack_path: String) -> void:
+	# Shape cache warm first — independent of renderer registration, cheap
+	# resource deserialize (sub-ms), handles its own dedup via internal mutex.
+	# Done up front so a type that's already renderer-registered but shape-cold
+	# still gets its pack loaded (revisit-of-known-type case).
+	if shape_cache != null and not shape_pack_path.is_empty():
+		shape_cache.call("warm_from_path", type_name, shape_pack_path)
+
 	if static_renderer == null:
 		return
 	# Fast-path dedup: skip the ~20ms PackedScene.instantiate if another worker
