@@ -747,3 +747,34 @@ Engine-native `VISIBILITY_RANGE_FADE_SELF` at [cell_manager.gd:542](../../../src
 **Relocated:** the `_anim_randomize` meta-driven animation desync (flags, banners, water wheels) moved from the deleted `_defer_fade_in.apply_fades` lambda into a direct `tree_entered.connect` at `reference_instantiator._initialize_animation_player`. Meta removed — one producer, one consumer, no need for cross-site signalling.
 
 **Verification:** `--headless --quit-after 1` parses cleanly (0 errors, `_ready()` 818 ms). Interactive pilot + `--bench-auto=p1_post_fadedelete` pending.
+
+### 15.5 Phase 3 — CellPreloader (2026-04-22)
+
+Replaced the naive 1-cell-ahead `_predict_and_prequeue_cells` with a canonical two-phase (DATA / INSTANTIATION) velocity-extrapolated preloader per research doc §8. New file `src/core/world/cell_preloader.gd` (~360 LOC). Owned by `native_streaming_manager`; no new autoload.
+
+**Mechanism:**
+- Each frame, `CellPreloader.update(camera_cell, camera_pos, velocity_xz)` computes predicted cells via §8.3 speed-scaled lookahead (`clamp(int(speed / CELL_SIZE_METERS * t_cache_warm) + 1, 1, 4)` depth in velocity direction + axis-aligned corners on the deepest cell).
+- For each new predicted cell: fetches the `CellRecord`, calls existing `reference_instantiator.preregister_cell_statics` (Phase F integration §8.6) for STAT prototype pre-reg, then dispatches one low-priority `WorkerThreadPool` task per unique non-STAT `model_path` doing `ResourceLoader.load(disk_path, "PackedScene")` to warm the cache.
+- Tasks poll for completion → entry promotes `loading` → `ready`. Streaming manager calls `notify_activated(grid)` on `cell_loaded` signal, `notify_unloaded(grid)` on `cell_unloaded`, promoting to `activated` or erasing respectively.
+- `teleport_happened` signal → `abort_all()` + `reset(new_cell)` with `WorkerThreadPool.wait_for_task_completion` on every in-flight task (§8.8, mirrors OpenMW's `abortTerrainPreloadExcept` + CLAUDE.md anti-pattern on skipping waits).
+- Shutdown: `native_streaming_manager.fast_cleanup` → `_cell_preloader.drain_all()` BEFORE `cell_manager.fast_cleanup`'s Phase F drain, preventing the sig 11 shutdown race cluster.
+
+**Settings in `streaming_config.gd`** (OpenMW defaults per §8.3/§8.4):
+- `PRELOAD_EXPIRY_DELAY_MS = 5000`
+- `PRELOAD_MIN_CACHE_CELLS = 12`
+- `PRELOAD_MAX_CACHE_CELLS = 20`
+- `PRELOAD_PREDICTION_TIME_S = 1.0`
+
+**Benchmark deltas (`--bench-auto=p3_post_preloader` vs `autobench_p0_nofade`, both on branch `perf/distant-rendering-2026-04-17`):**
+
+| Scenario | P0 nofade avg FPS | P3 avg FPS | Delta | Notes |
+|---|---|---|---|---|
+| `bench_tiers` | 218.7 | 212.1 | -3% (noise) | static steady state at spawn; +86 RS slots, -1100 Node3Ds (refs routed to fast path) |
+| `bench_teleport` | 196.9 | 182.2 | -7% | teleport abort + re-warm active; `objs` avg up 3350 → 4248 (more loaded mid-window) |
+| **`bench_hlod_off`** | **93.0** | **124.9** | **+34%** | cell-churn stress scenario; median FPS 29 → **190** (+555%) |
+
+The hlod_off median jump from 29 → 190 FPS confirms the predictive warm eliminates the main-thread instantiate stalls that dominated cell-cross hitches pre-Phase-3.
+
+### 15.6 Phase A / E / F — already shipped, not re-implemented
+
+The handoff's "Phase A — off-thread PackedScene.instantiate" was outdated. Verification: `PHASE_A_OFFTHREAD_INSTANTIATE: bool = true` is live at [cell_manager.gd:115](../../../src/core/world/cell_manager.gd#L115); `should_dispatch_to_worker` (ref_instantiator:459), `_worker_instantiate` (:796), `complete_worker_instantiate` (:849) are all in place. Phase E (static precompute) + Phase F (prototype prereg) also shipped. Skipped implementation step for "Phase 2" per §15.1 tracker entry.

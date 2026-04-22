@@ -40,6 +40,7 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 const ObjectPagingScript := preload("res://src/core/world/object_paging.gd")
+const CellPreloaderScript := preload("res://src/core/world/cell_preloader.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
 # replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
@@ -211,6 +212,12 @@ var _world_container: Node3D = null
 ## Cell manager for loading cells
 var _cell_manager: CellManagerScript = null
 
+## Phase 3 (2026-04-22) — velocity-extrapolated cell preloader. Warms the
+## ResourceLoader PackedScene cache + dispatches Phase F prototype prereg for
+## cells the camera is heading toward. Owned here; wired to `teleport_happened`
+## (abort_all + reset) and `cell_loaded` / `cell_unloaded` signals.
+var _cell_preloader: CellPreloaderScript = null
+
 ## Current camera position
 var _camera_position: Vector3 = Vector3.ZERO
 
@@ -311,6 +318,13 @@ func fast_cleanup() -> void:
 		_background_processor._active_tasks.clear()
 		_background_processor._pending_tasks.clear()
 		_background_processor._orphaned_wtp_handles.clear()
+
+	# Phase 3 — drain CellPreloader BEFORE the cell_manager drain. The preloader
+	# owns its own WorkerThreadPool warm tasks (ResourceLoader.load); they must
+	# finish before static_renderer.clear() runs and before the WTP itself is
+	# torn down. Same shutdown-race shape as Phase F; same remedy.
+	if _cell_preloader:
+		_cell_preloader.drain_all()
 
 	# Phase F — drain in-flight prototype pre-registration workers BEFORE
 	# clearing the static renderer. Without this, workers mid-`register_from_
@@ -430,6 +444,13 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	_cell_manager._static_renderer = _static_renderer
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
+
+	# Phase 3 (2026-04-22) — CellPreloader. Depends on the instantiator (for
+	# preregister_cell_statics) + model_loader (for resolve_disk_path). Both
+	# are owned by cell_manager.
+	_cell_preloader = CellPreloaderScript.new()
+	_cell_preloader.configure(_cell_manager._instantiator, _cell_manager._model_loader)
+	_cell_preloader.set_debug(debug_enabled)
 
 	# Wire up background processor for async loading
 	if _background_processor and async_loading_enabled:
@@ -607,6 +628,15 @@ func _process(delta: float) -> void:
 			_camera_position.distance_to(_prev_camera_position)
 		)
 
+		# Phase 3 (§8.8) — abort in-flight preloads for cells the camera just
+		# jumped away from; re-anchor at the new grid so the next update()
+		# tick re-warms around the destination. `abort_all` blocks on
+		# WorkerThreadPool.wait_for_task_completion (CLAUDE.md anti-pattern
+		# rule). Bounded: worst case <50 tasks × ResourceLoader.load ~20ms.
+		if _cell_preloader != null:
+			_cell_preloader.abort_all()
+			_cell_preloader.reset(DU.world_to_cell(_camera_position))
+
 	# EMA-smoothed velocity on XZ plane (for predictive cell loading).
 	# Teleport frames skip the EMA so the huge jump doesn't throw predictive
 	# pre-queue into a nonsense direction for the following seconds.
@@ -688,9 +718,12 @@ func _process(delta: float) -> void:
 		_orphan_prune_accum = 0.0
 		_prune_expired_orphans()
 
-	# Predictive loading — pre-queue cells in movement direction
-	if not _startup_phase:
-		_predict_and_prequeue_cells()
+	# Predictive loading — velocity-extrapolated two-phase CellPreloader (§8).
+	# Warms ResourceLoader + dispatches Phase F prereg for cells the camera is
+	# heading toward. Skipped during startup burst so the initial ring finishes
+	# with its own aggressive budget first.
+	if not _startup_phase and _cell_preloader != null:
+		_cell_preloader.update(_camera_cell, _camera_position, _camera_velocity_xz)
 
 	# Phase 0: Budgeted unloading — free children of departing cells gradually
 	# Runs BEFORE loading so freed memory is available for new cells
@@ -937,56 +970,6 @@ func _update_loaded_cells() -> void:
 			cells_to_unload.size()])
 
 
-## Pre-queue cells in the camera's movement direction for smoother transitions
-## Uses EMA-smoothed XZ velocity to predict which cells will be needed next
-func _predict_and_prequeue_cells() -> void:
-	# Need meaningful velocity (>2 m/s on XZ plane) to predict
-	var speed_sq := _camera_velocity_xz.length_squared()
-	if speed_sq < 4.0:
-		return
-
-	# Compute which cell offset the camera is heading toward
-	var vel_dir := _camera_velocity_xz.normalized()
-	# Map velocity direction to cell grid offset: +X = +grid.x, +Z = -grid.y (Godot Z is flipped)
-	var predict_x: int = 0
-	var predict_y: int = 0
-	if absf(vel_dir.x) > 0.3:
-		predict_x = 1 if vel_dir.x > 0 else -1
-	if absf(vel_dir.y) > 0.3:
-		predict_y = -1 if vel_dir.y > 0 else 1  # Godot +Z = grid -Y
-
-	if predict_x == 0 and predict_y == 0:
-		return
-
-	# Check how far across the current cell we are in the movement direction
-	var cell_center := DU.cell_to_world_center(_camera_cell)
-	var offset_in_cell := Vector2(_camera_position.x - cell_center.x, _camera_position.z - cell_center.z)
-	var progress := offset_in_cell.dot(vel_dir) / (DU.CELL_SIZE_METERS * 0.5)  # -1 to +1
-	if progress < 0.2:
-		return  # Not far enough across the cell to predict
-
-	# Build list of predicted cells (diagonal + axis-aligned neighbors)
-	var predicted: Array[Vector2i] = []
-	var main_cell := Vector2i(_camera_cell.x + predict_x, _camera_cell.y + predict_y)
-	predicted.append(main_cell)
-	# Axis-aligned neighbors for diagonal movement
-	if predict_x != 0 and predict_y != 0:
-		predicted.append(Vector2i(_camera_cell.x + predict_x, _camera_cell.y))
-		predicted.append(Vector2i(_camera_cell.x, _camera_cell.y + predict_y))
-
-	# Pre-queue cells that aren't already loaded, loading, or pending
-	var queued := 0
-	for grid in predicted:
-		if grid not in _loaded_cells and grid not in _loading_cells and grid not in _pending_load_set:
-			_pending_load_queue.append(grid)
-			_pending_load_set[grid] = true
-			queued += 1
-
-	if queued > 0 and debug_enabled:
-		_debug("Predictive: pre-queued %d cells (vel=%.1f,%.1f dir=%d,%d progress=%.1f)" % [
-			queued, _camera_velocity_xz.x, _camera_velocity_xz.y, predict_x, predict_y, progress])
-
-
 ## Get all cells within a radius of the center cell
 func _get_cells_in_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
@@ -1071,6 +1054,8 @@ func _load_cell_sync(grid: Vector2i) -> void:
 		_stats["total_objects"] += object_count
 
 		cell_loaded.emit(grid, object_count)
+		if _cell_preloader != null:
+			_cell_preloader.notify_activated(grid)
 		_debug("Sync loaded cell %s with %d objects" % [grid, object_count])
 	else:
 		_debug("Failed to load cell %s" % [grid])
@@ -1147,6 +1132,8 @@ func _unload_cell(grid: Vector2i) -> void:
 
 	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
 	cell_unloaded.emit(grid)
+	if _cell_preloader != null:
+		_cell_preloader.notify_unloaded(grid)
 	var t_emit1 := Time.get_ticks_usec()
 	stats_updated.emit(_stats)
 	var t_emit2 := Time.get_ticks_usec()
@@ -1455,6 +1442,8 @@ func _process_async_completions() -> void:
 					_debug("Cell %s completed with %d failed models" % [grid, failed_count])
 
 				cell_loaded.emit(grid, object_count)
+				if _cell_preloader != null:
+					_cell_preloader.notify_activated(grid)
 				_debug("Async cell %s completed with %d objects" % [grid, object_count])
 			else:
 				_debug("Async cell %s returned null" % grid)

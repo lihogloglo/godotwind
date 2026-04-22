@@ -313,6 +313,33 @@ const DEBUG_VISUALIZATION := false
 const ENABLE_PROFILING := true
 
 # =============================================================================
+# CELL PRELOADER (velocity-extrapolated cache warm — research doc §8)
+# =============================================================================
+# Preloaded cells have their ResourceLoader (PackedScene) warmed + prototype
+# pre-registration dispatched BEFORE the cell enters active load radius. When
+# the cell actually loads, the data phase is a cache hit, instantiation runs
+# fast-path. LRU-bounded memory; entries expire after EXPIRY_DELAY_MS.
+# OpenMW defaults; see research doc §8.3 + §8.4.
+
+## LRU expiry — cells untouched for this many ms are candidates for eviction
+## (if cache size exceeds MIN_CACHE_CELLS). 5 s matches OpenMW default.
+const PRELOAD_EXPIRY_DELAY_MS: int = 5000
+
+## Minimum cache size — never evict below this, even if all entries are stale.
+## Keeps a baseline warm window around the camera for back-tracking.
+const PRELOAD_MIN_CACHE_CELLS: int = 12
+
+## Hard cap on preload cache size. 20 cells × ~79 refs × ~50 KB PackedScene
+## ≈ 80 MB peak. Back-pressures new preloads until eviction catches up.
+const PRELOAD_MAX_CACHE_CELLS: int = 20
+
+## Base prediction window (seconds). Speed-scaled at runtime per §8.3 formula:
+## `t_predict = clamp(PRELOAD_PREDICTION_TIME_S / max(speed, 1.0), 0.3, 4.0)`.
+## 1.0 s is the OpenMW baseline; empirically matches the ResourceLoader warm
+## time per cell (~0.8–1.0 s) on the current machine.
+const PRELOAD_PREDICTION_TIME_S: float = 1.0
+
+# =============================================================================
 # PHASE 0 ABLATION FLAGS (runtime-settable via cmdline)
 # =============================================================================
 # Set by world_explorer._ready() from command-line args:
