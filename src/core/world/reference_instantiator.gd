@@ -179,6 +179,71 @@ const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to 
 ## render end (150 m) so interactives always arrive before they enter view.
 const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 80.0
 
+## Win 4a (NEAR refactor 2026-04-25) — lazy-spawn distance for OmniLight3D refs.
+##
+## Lights are the dominant per-type cost post-Phase A (~3000-9000 µs/instance
+## per session 14.2 measurement). Most MW lights have ~3-7m omni range that
+## fades to nothing well within 60 m, so building a Node3D + OmniLight3D + model
+## subtree for a light 100 m from the camera is wasted work — the light won't
+## visibly contribute past ~120 m anyway (existing distance_fade_begin = 120m
+## in `_instantiate_light`).
+##
+## Threshold tighter than INTERACTIVE_PROXIMITY_THRESHOLD_M (80m) because
+## lights cull at shadow distance, not interaction distance. Big lights
+## (radius ≥ LIGHT_ALWAYS_SPAWN_RADIUS_MW) bypass the gate so braziers /
+## templar lanterns / sconces always cast shadows even from far away.
+const LIGHT_PROXIMITY_THRESHOLD_M: float = 60.0
+
+## Win 4a — lights with MW radius >= this value spawn unconditionally,
+## regardless of camera distance. 700 MW units ≈ 10m Godot range — matches
+## "big light" intuition (templar braziers, large sconces). Smaller lights
+## (candles, torches, small lanterns) get the lazy-spawn gate.
+const LIGHT_ALWAYS_SPAWN_RADIUS_MW: float = 700.0
+
+## Win 4b — MW light flag mask for animated lights (flicker / pulse). Lights
+## with any of these flags need per-frame energy writes through the existing
+## OmniLight3D Node3D path because LightAnimator (light_animator.gd) walks
+## the scene tree for `OmniLight3D` instances with `mw_flags` metadata. RS
+## RIDs aren't visible to that walker, so server-direct + animation needs a
+## separate per-RID animator (out of scope this pass — flag-gate to keep
+## existing flicker working).
+##
+## Bits (from LightRecord flag constants):
+##   FLAG_FLICKER       = 0x0008
+##   FLAG_FLICKER_SLOW  = 0x0040
+##   FLAG_PULSE         = 0x0080
+##   FLAG_PULSE_SLOW    = 0x0100
+const MW_LIGHT_ANIMATED_FLAGS_MASK: int = 0x0008 | 0x0040 | 0x0080 | 0x0100
+
+
+## Win 4b — RefCounted holder for the RS RIDs of a server-direct light.
+## Attached as metadata on the light's container Node3D; when the container
+## is queue_freed (via cell_node teardown), the metadata's strong ref drops,
+## the RefCounted destructs, and `_notification(NOTIFICATION_PREDELETE)`
+## frees the RIDs. No signal connection, no per-cell registry — the existing
+## scene-tree teardown drives the cleanup.
+##
+## Reference: server_direct_pattern.md §"Memory ownership model" — RIDs must
+## be explicitly freed; using a RefCounted destructor wires the explicit free
+## into Godot's existing scene-tree lifecycle without bespoke bookkeeping.
+class LightRids:
+	extends RefCounted
+	var light_rid: RID = RID()
+	var instance_rid: RID = RID()
+
+	func _notification(what: int) -> void:
+		if what != NOTIFICATION_PREDELETE:
+			return
+		# Free instance first — removes from rendering scenario before the
+		# underlying light data is released. RS.free_rid is no-op on invalid
+		# RIDs but the validity check keeps the diagnostic clean.
+		if instance_rid.is_valid():
+			RenderingServer.free_rid(instance_rid)
+			instance_rid = RID()
+		if light_rid.is_valid():
+			RenderingServer.free_rid(light_rid)
+			light_rid = RID()
+
 ## Set true by `_instantiate_model_object` when a ref is skipped due to the
 ## lazy-spawn distance gate. Read by `cell_manager.process_async_instantiation`
 ## to route the ref into `_proximity_deferred` instead of treating as failed.
@@ -222,7 +287,16 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 		"light":
 			if not load_lights:
 				return null
-			return _instantiate_light(ref, base_record as LightRecord)
+			var light_record := base_record as LightRecord
+			# Win 4a — lazy-spawn gate. Skip Node3D + OmniLight3D + model
+			# construction when the camera is too far for the light to
+			# meaningfully contribute, unless the light is "big" (braziers /
+			# templar sconces). cell_manager re-queues via
+			# tick_proximity_deferred when the camera approaches.
+			if _is_light_proximity_deferred(light_record, ref):
+				last_proximity_deferred = true
+				return null
+			return _instantiate_light(ref, light_record)
 		"npc":
 			if not load_npcs:
 				return null
@@ -1011,49 +1085,28 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 			_auto_play_nif_animation(model_instance, ref)
 			light_node.add_child(model_instance)
 
+	# Apply transform first — Win 4b needs the world transform up front to
+	# register the server-direct light instance with the correct position.
+	# Reordering is safe: _apply_transform only writes node.position/scale/basis
+	# with no side effects on children (which are already attached above).
+	_apply_transform(light_node, ref, false)
+
 	# Create the actual light source
 	if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
-		var omni := OmniLight3D.new()
-		omni.name = "Light"
-
-		# Convert MW radius to Godot range
-		# MW radius is in game units, Godot uses meters
-		# Enforce minimum 0.125m (16 game units) per OpenMW convention
-		var godot_range: float = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
-		omni.omni_range = godot_range
-
-		# Set light color
-		omni.light_color = light_record.color
-
-		# Negative lights subtract light (Morrowind feature)
-		if light_record.is_negative():
-			omni.light_negative = true
-
-		# Set energy based on whether it's a fire/torch light
-		omni.light_energy = 1.2 if light_record.is_fire() else 0.8
-
-		# Shadows disabled by default — managed by LightShadowBudget if present
-		omni.shadow_enabled = false
-
-		# Attenuation: softer falloff for enclosed spaces
-		omni.omni_attenuation = 1.0
-
-		# Distance fade: remove lights from cluster budget beyond visibility
-		# Begin fading at 120m, fully gone by 150m (matches NEAR tier boundary)
-		omni.distance_fade_enabled = true
-		omni.distance_fade_begin = 120.0
-		omni.distance_fade_length = 30.0
-
-		# Store light flags for animator and shadow budget manager
-		omni.set_meta("mw_flags", light_record.flags)
-		omni.set_meta("mw_radius", light_record.radius)
-		omni.set_meta("base_energy", omni.light_energy)
-
-		light_node.add_child(omni)
+		# Win 4b — server-direct path UNLESS the light needs flicker/pulse
+		# animation. LightAnimator (light_animator.gd) walks the cell tree for
+		# OmniLight3D nodes with `mw_flags` meta; RS RIDs aren't visible to
+		# that walker. Animated lights keep the OmniLight3D Node3D so the
+		# existing flicker/pulse system continues to work. Static lights go
+		# server-direct, saving the OmniLight3D wrapper cost (per
+		# server_direct_pattern.md, OmniLight3D is just a thin Node3D + RID
+		# wrapper around the same underlying server-side light data).
+		var animated: bool = (light_record.flags & MW_LIGHT_ANIMATED_FLAGS_MASK) != 0
+		if animated:
+			_attach_animated_omni_light(light_node, light_record)
+		else:
+			_attach_server_direct_light(light_node, light_record)
 		stats["lights_created"] += 1
-
-	# Apply transform to the container
-	_apply_transform(light_node, ref, false)
 
 	# Add metadata for console object picker
 	light_node.set_meta("form_id", light_record.record_id if "record_id" in light_record else str(ref.ref_id))
@@ -1064,6 +1117,107 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 	light_node.set_meta("instance_id", ref.ref_num)
 
 	return light_node
+
+
+## Legacy OmniLight3D path — used for lights with flicker/pulse flags so
+## LightAnimator's scene-tree walker can find them. Identical to the pre-Win-4b
+## OmniLight3D setup.
+func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) -> void:
+	var omni := OmniLight3D.new()
+	omni.name = "Light"
+
+	# Convert MW radius to Godot range — enforce 0.125m min per OpenMW.
+	var godot_range: float = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
+	omni.omni_range = godot_range
+	omni.light_color = light_record.color
+	if light_record.is_negative():
+		omni.light_negative = true
+	omni.light_energy = 1.2 if light_record.is_fire() else 0.8
+	omni.shadow_enabled = false  # managed by LightShadowBudget if present
+	omni.omni_attenuation = 1.0
+	# Distance fade: 120m begin, 150m end (matches NEAR tier boundary).
+	omni.distance_fade_enabled = true
+	omni.distance_fade_begin = 120.0
+	omni.distance_fade_length = 30.0
+	# Metadata read by LightAnimator (mw_flags / base_energy) + diagnostics.
+	omni.set_meta("mw_flags", light_record.flags)
+	omni.set_meta("mw_radius", light_record.radius)
+	omni.set_meta("base_energy", omni.light_energy)
+
+	light_node.add_child(omni)
+
+
+## Win 4b — server-direct light: RS.omni_light_create + RS.instance_create
+## paired with a LightRids RefCounted attached as metadata. The RefCounted's
+## PREDELETE handler frees both RIDs when light_node is queue_freed via cell
+## teardown.
+##
+## Mirrors `_attach_animated_omni_light` parameters: same range / color / energy
+## / attenuation / shadow defaults / distance-fade band. Distance fade uses
+## RenderingServer.instance_geometry_set_visibility_range with FADE_SELF mode,
+## which is exactly what OmniLight3D.distance_fade_* sets internally.
+##
+## World transform pulled from light_node.transform — _apply_transform ran
+## just above, and light_node hasn't been parented yet, so .transform IS the
+## world transform (cell_node sits at world origin in Godot coords).
+func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) -> void:
+	var world_3d: World3D = null
+	if scene_tree != null and scene_tree.root != null:
+		world_3d = scene_tree.root.world_3d
+	if world_3d == null:
+		# No scene_tree wired — fall back to OmniLight3D so the light still
+		# functions. Surfaces in tests that don't init the streaming layer
+		# fully (rare in production but cheap defensive code).
+		_attach_animated_omni_light(light_node, light_record)
+		return
+
+	var rids := LightRids.new()
+
+	# Create the omni light data RID.
+	rids.light_rid = RenderingServer.omni_light_create()
+
+	# Range — MW radius scaled to meters with 0.125m floor (OpenMW convention).
+	var godot_range: float = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
+	RenderingServer.light_set_param(rids.light_rid, RenderingServer.LIGHT_PARAM_RANGE, godot_range)
+
+	RenderingServer.light_set_color(rids.light_rid, light_record.color)
+
+	if light_record.is_negative():
+		RenderingServer.light_set_negative(rids.light_rid, true)
+
+	var energy: float = 1.2 if light_record.is_fire() else 0.8
+	RenderingServer.light_set_param(rids.light_rid, RenderingServer.LIGHT_PARAM_ENERGY, energy)
+
+	# Attenuation 1.0 matches OmniLight3D default.
+	RenderingServer.light_set_param(rids.light_rid, RenderingServer.LIGHT_PARAM_ATTENUATION, 1.0)
+
+	# Shadows off by default — LightShadowBudget toggles per-light if present.
+	# Server-direct lights are NOT scanned by LightShadowBudget today (it
+	# walks for OmniLight3D Node3Ds the same way LightAnimator does); shadows
+	# stay off for the entire static-light set until that walker is extended
+	# to also drive RIDs. Acceptable tradeoff — most MW omni lights ship with
+	# shadows off anyway, and ambient lighting carries the visual.
+	RenderingServer.light_set_shadow(rids.light_rid, false)
+
+	# Create the scenario instance and bind the light data.
+	rids.instance_rid = RenderingServer.instance_create()
+	RenderingServer.instance_set_base(rids.instance_rid, rids.light_rid)
+	RenderingServer.instance_set_scenario(rids.instance_rid, world_3d.scenario)
+	RenderingServer.instance_set_transform(rids.instance_rid, light_node.transform)
+
+	# Distance fade — fade out from 120m (NEAR fade begin) to 150m (NEAR_END).
+	# VISIBILITY_RANGE_FADE_SELF dithers self-alpha in the band; matches the
+	# OmniLight3D.distance_fade_* behavior.
+	RenderingServer.instance_geometry_set_visibility_range(
+		rids.instance_rid,
+		0.0, 150.0,
+		0.0, 30.0,
+		RenderingServer.VISIBILITY_RANGE_FADE_SELF,
+	)
+
+	# Metadata-attach the RID holder so cell_node.queue_free → light_node
+	# .queue_free → meta release → LightRids destructor → RS.free_rid.
+	light_node.set_meta("rs_light_rids", rids)
 
 
 ## Instantiate an NPC or Creature
@@ -1730,6 +1884,26 @@ func _is_proximity_gated(type_name: String, is_carryable: bool) -> bool:
 		"door", "activator", "container":
 			return true
 	return false
+
+
+## Win 4a — return true when the light should be deferred (skipped this call,
+## re-queued when camera approaches via cell_manager.tick_proximity_deferred).
+##
+## False = spawn now. Big lights (radius >= LIGHT_ALWAYS_SPAWN_RADIUS_MW)
+## always spawn so braziers / large sconces never disappear at distance.
+## Small lights only spawn when camera is within LIGHT_PROXIMITY_THRESHOLD_M.
+##
+## Reads `camera_position` (main-thread updated by streaming manager each frame).
+# PHASE_A:MAIN_ONLY — reads `camera_position`.
+func _is_light_proximity_deferred(light_record: LightRecord, ref: CellReference) -> bool:
+	if light_record == null:
+		return false
+	# Big-light always-spawn override.
+	if light_record.radius >= LIGHT_ALWAYS_SPAWN_RADIUS_MW:
+		return false
+	var ref_world_pos := CS.vector_to_godot(ref.position)
+	var threshold_sq := LIGHT_PROXIMITY_THRESHOLD_M * LIGHT_PROXIMITY_THRESHOLD_M
+	return ref_world_pos.distance_squared_to(camera_position) > threshold_sq
 
 
 ## Route decision for statics_no_node3d T.1 — return true if the ref should

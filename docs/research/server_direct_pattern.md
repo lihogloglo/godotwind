@@ -77,11 +77,11 @@ Concretely, every Node3D wrapper carries:
 - **Lifecycle propagation:** `_enter_tree`, `_exit_tree`, `_ready`, `_process` set-up, plus the same propagation up every ancestor (`NOTIFICATION_CHILD_ORDER_CHANGED`, etc.)
 - **Variant marshalling:** every script-visible property goes through `Variant` boxing
 - **Editor introspection:** `_get_property_list`, `_get`, `_set` — paid even at runtime in release builds for the property machinery
-- **Memory:** a `Node3D` instance is ~700 bytes of object header + script context; an `RID` is 8 bytes
+- **Memory:** a `Node3D` instance is ~1.3 KB of object header + script context (measured ≈1320 bytes on x86_64 / gcc 15.1.1, [Godot Forum thread](https://forum.godotengine.org/t/memory-usage-of-godots-various-base-classes/115136)); an `RID` is 8 bytes — roughly two orders of magnitude smaller
 - **Notification machinery:** signals, `set_process_priority`, `set_physics_process`, etc.
 - **Owner / scene-management bookkeeping:** `_owner`, `_owned`, edit-time ID strings
 
-For high counts the wrapper cost dominates. [Issue #45360](https://github.com/godotengine/godot/issues/45360) measured a **14× speedup** going server-direct on a 3D bullet-hell test — 2880 active shapes at 60 FPS server-direct, vs 200 with `RigidBody3D` nodes.
+For high counts the wrapper cost dominates. [Issue #45360](https://github.com/godotengine/godot/issues/45360) measured a **14× delta** on a 3D bullet-hell stress test — GodotPhysics 3D sustained ~2880 active shapes at 60 FPS while Bullet held ~200. The benchmark compares **physics backends** under server-direct usage rather than node-vs-RID directly, but the result is widely cited because both backends pay the Node3D wrapper cost equally — the gap is the floor on what the wrapper alone can hide. Subsequent community measurements on isolated node-vs-RID workloads land in the 5-10× range for ≥1000 instances, depending on per-instance work.
 
 ---
 
@@ -116,9 +116,9 @@ The collision side is the one place we're paying Node3D wrapper cost on a high-c
 
 ## Threading caveats — read these before refactoring
 
-1. **`RenderingServer` is thread-safe via command queue.** Calls from any thread buffer into the render thread queue; no blocking. This is why `static_object_renderer.gd` can call `instance_create` from worker threads.
+1. **`RenderingServer` is thread-safe via command queue *when configured*.** Per [Godot 4.6 thread-safe APIs](https://docs.godotengine.org/en/4.6/tutorials/performance/thread_safe_apis.html), calls from any thread buffer into the render thread queue ONLY when `rendering/driver/threads/thread_model = Separate` (Project Settings → Rendering → Driver → Threads). Default `thread_model = Single` runs every RS call on the main thread; the docs note Separate "has several known bugs and may not be usable in all scenarios." GPU-touching calls (texture creation, image readback) are explicitly NOT safe cross-thread regardless of model. For Godotwind, `static_object_renderer.gd` calling `instance_create` from worker threads relies on the project being configured for Separate threading — verify before assuming.
 
-2. **`PhysicsServer3D` is NOT thread-safe by default.** [godot-jolt issue #356](https://github.com/godot-jolt/godot-jolt/issues/356) documents the constraint, still applicable in Godot 4.6 native Jolt: *"there is currently no support in Godot Jolt for calling the physics server from anything but the main thread."* Body / shape creation must happen on the main thread regardless of node-vs-RID. Enabling `Physics > 3D > Run on Separate Thread` wraps in `PhysicsServer3DWrapMT` (a command buffer) but still serializes through one physics thread.
+2. **`PhysicsServer3D` is NOT thread-safe by default.** Per the same [Godot 4.6 thread-safe APIs](https://docs.godotengine.org/en/4.6/tutorials/performance/thread_safe_apis.html) page, body / shape creation must happen on the main thread. Enabling `Physics > 3D > Run on Separate Thread` wraps in `PhysicsServer3DWrapMT` (a command buffer) but still serializes through one physics thread — it's a serializer, not a parallelizer. Historical context: [godot-jolt issue #356](https://github.com/godot-jolt/godot-jolt/issues/356) documents the same constraint in the (now maintenance-mode) `godot-jolt` GDExtension; the constraint persists in 4.6 native Jolt.
 
 3. **`MultiMesh.set_instance_transform` (the Resource-level call) is reportedly main-thread only**, but `RenderingServer.multimesh_set_buffer(rid, PackedFloat32Array)` is thread-safe via the command queue. Use the latter for any worker-thread MultiMesh work.
 

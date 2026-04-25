@@ -938,6 +938,27 @@ class AsyncCellRequest:
 	## built (or skipped) for this cell. Set by `_tick_static_collision_build`;
 	## one-shot flag so the tick doesn't retry builds each frame.
 	var collision_built: bool = false
+	## Win 1 (NEAR refactor 2026-04-25) — async collision build state. Dispatch
+	## phase of `_tick_static_collision_build` sets `collision_dispatched=true`
+	## and stores the worker task_id + payload. Drain phase polls the task,
+	## then calls `finalize_body` and clears these. See cell_static_collision.gd
+	## §"Three-step pipeline" for the full flow.
+	## - `collision_dispatched`: false → eligible for dispatch; true → worker
+	##   either in-flight or already finalized (use `collision_built` to tell).
+	## - `collision_payload`: BuildPayload reference held strong across worker.
+	##   RefCounted; reset to null in drain after finalize_body consumes it.
+	## - `collision_task_id`: WorkerThreadPool task id, -1 when no worker is
+	##   tracked. Drain calls `wait_for_task_completion` on cancel paths.
+	## - `collision_body`: Win 2 — server-direct PhysicsServer3D body handle
+	##   (RID + Shape3D strong-ref). Set by drain after finalize_body succeeds;
+	##   freed via CellStaticCollision.free_body() in cancel/unload/shutdown.
+	##   Replaces the implicit "StaticBody3D parented to cell_node" ownership
+	##   that Win 2 deleted — there's no Node3D anymore, so the unload cascade
+	##   has to go through this explicit handle.
+	var collision_dispatched: bool = false
+	var collision_payload: Variant = null  # CellStaticCollision.BuildPayload
+	var collision_task_id: int = -1
+	var collision_body: Variant = null  # CellStaticCollision.FinalizedBody
 	var failed: bool = false  # Whether the request failed
 	var error_message: String = ""  # Error description if failed
 	var retry_count: int = 0  # Number of retries attempted
@@ -1281,9 +1302,18 @@ func _maybe_log_per_type_breakdown() -> void:
 ## clear()` race produces the shutdown sig 11 cluster.
 ##
 ## Plan: phase_f_prototype_prereg.md §5
+##
+## Win 1 (NEAR refactor 2026-04-25): also drains in-flight collision workers
+## so they don't write into a dead payload after `_async_requests` is cleared
+## by the shutdown path. Mirrors Phase F's drain — same wait_for_task_completion
+## contract on every WorkerThreadPool task we own.
 func fast_cleanup() -> void:
 	if _instantiator != null:
 		_instantiator.drain_prereg_tasks()
+	# Win 1 — drain any in-flight per-cell collision workers.
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		_drain_collision_worker_for_request(request)
 
 
 ## Cancel an async request — HARD cancel, destroys everything.
@@ -1310,6 +1340,14 @@ func cancel_async_request(request_id: int) -> void:
 	# MUST run before the queue filter below — once filtered, the entries are
 	# unreachable and their worker tasks would leak their instance.
 	_phase_a_cancel_workers_for_request(request_id)
+
+	# Win 1 (NEAR refactor 2026-04-25) — drain any in-flight collision worker.
+	# The worker writes into request.collision_payload's BuildPayload; if we
+	# erase the request without waiting, the worker would write to a payload
+	# whose only strong ref is gone, then the payload destructs mid-write.
+	# wait_for_task_completion is also required by the WorkerThreadPool contract
+	# to release task resources — same rule that bites Phase F at shutdown.
+	_drain_collision_worker_for_request(request)
 
 	# Remove all pending instantiations for this request from the queue
 	# This prevents orphan objects when the cell is unloaded mid-loading
@@ -1353,6 +1391,10 @@ func finalize_unloaded_cell(request_id: int) -> void:
 	# queue_free worker-produced Node3Ds BEFORE filtering the queue. See
 	# cancel_async_request counterpart for rationale.
 	_phase_a_cancel_workers_for_request(request_id)
+	# Win 1 (NEAR refactor 2026-04-25) — drain any in-flight collision worker.
+	# Same rationale as cancel_async_request: the worker writes into a payload
+	# we're about to drop the last strong ref to.
+	_drain_collision_worker_for_request(request)
 	# Filter any remaining queue entries for this request. Unlike the unload-
 	# path filter (which was the bug), this runs AFTER the cell has truly died
 	# and the state-reversal window is closed — no reclaim can use these.
@@ -2285,8 +2327,9 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 	request.completed = true
 
 
-## Phase 4 / statics_no_node3d T.2 — per-frame tick that builds the merged
-## collision StaticBody3D for each cell ONCE its static models have loaded.
+## Phase 4 / statics_no_node3d T.2 + Win 1 (NEAR refactor 2026-04-25) — per-frame
+## tick that builds the merged collision StaticBody3D for each cell ONCE its
+## static models have loaded.
 ##
 ## Why a tick and not a `_finalize_request` hook: proximity-deferred interactive
 ## refs re-increment `pending_instantiations` at process time, which means
@@ -2296,29 +2339,213 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 ## earlier signal (`pending_parses.is_empty && pending_disk_loads.is_empty`).
 ##
 ## Interior pockets (`load_profile.use_static_renderer=false`) skip early via
-## `build_for_cell`'s first guard — their refs have per-Node3D collision.
-## Budget: one cell per frame (cold-cache build ~20-50ms, warm ~2-5ms).
+## `collect_classified_refs`'s first guard — their refs have per-Node3D collision.
+##
+## Win 1 split: two phases per tick.
+##   1. DISPATCH — for any ready cell that hasn't been dispatched, classify on
+##      main and submit a WorkerThreadPool task to build vertices off-thread.
+##      Cheap; can dispatch many cells per frame because work runs in workers.
+##   2. DRAIN — for any cell whose worker has completed, run `finalize_body`
+##      on main (BVH `set_faces` + StaticBody3D assembly) and attach. Limited
+##      to one finalize per frame to bound the BVH build spike.
+##
+## Cold-cache cell wall-clock used to be 20-50ms entirely on main; post-Win 1
+## the worker absorbs most of it (triangle assembly + transform), main pays
+## only the ~10-20ms BVH build.
 func _tick_static_collision_build() -> void:
+	# Phase 1: dispatch — for each cell ready and not yet dispatched, classify
+	# on main and fire a worker task. Cheap (O(N_refs) main work, no BVH).
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
-		if request.collision_built:
+		if request.collision_built or request.collision_dispatched:
 			continue
 		if not request.pending_parses.is_empty():
 			continue
 		if not request.pending_disk_loads.is_empty():
 			continue
-		request.collision_built = true
 		if not is_instance_valid(request.cell_node) or request.cell_record == null:
+			# Cell already torn down / never built. Mark built so we never retry.
+			request.collision_built = true
 			continue
+		# Win 2: skip cells in unload-container limbo. native_streaming_manager
+		# `_unload_cell` sets cell_node.visible=false but keeps the cell_node
+		# alive for state-reversal. Building physics here would be wasted
+		# work (the body would get freed seconds later by finalize_unloaded
+		# _cell). cancel_collision_build_for_request drained any in-flight
+		# build at limbo start; this guard catches the rare edge case where
+		# the limbo entry races with the next tick.
+		if not request.cell_node.visible:
+			continue
+
 		var use_static: bool = true
 		if request.load_profile != null:
 			use_static = request.load_profile.use_static_renderer
-		var body: StaticBody3D = _cell_static_collision.build_for_cell(
+
+		# Main-thread classify + payload build. Cheap.
+		var payload: Variant = _cell_static_collision.collect_classified_refs(
 			request.grid, request.cell_record, use_static,
 		)
-		if body != null:
-			request.cell_node.add_child(body)
-		return  # One per frame to bound cold-cache stalls.
+		if payload == null:
+			# Nothing to build for this cell (interior pocket or no static refs).
+			request.collision_built = true
+			continue
+
+		request.collision_payload = payload
+		# High priority — racing the cell's draw / interaction hooks. Worker
+		# does pure data work, no autoload/scene-tree access. Mirror Phase F's
+		# task-id tracking pattern.
+		CrashBreadcrumb.write("collision_worker_dispatch", "%d_%d" % [request.grid.x, request.grid.y])
+		request.collision_task_id = WorkerThreadPool.add_task(
+			_cell_static_collision.worker_collect_triangles.bind(payload),
+			true,
+			"cell_static_collision:collect_triangles",
+		)
+		request.collision_dispatched = true
+
+	# Phase 2: drain — for each cell whose worker finished, finalize on main.
+	# One per frame to bound `set_faces` BVH-build cost (~10-20ms cold).
+	#
+	# Win 3 (NEAR refactor 2026-04-25): collect READY candidates first, sort
+	# by camera distance, finalize closest first. Without this, dict iteration
+	# order is insertion order — on a teleport (3-9 cells dispatch in one
+	# frame) the chronologically-first cell would drain first regardless of
+	# its position relative to the player. Closest-first matters because the
+	# player is likely to interact with nearby geometry FIRST (ball drop, walk
+	# into rock, etc); distant cells can wait their 1-frame turn.
+	#
+	# 1-cell-per-frame floor preserved as the safe default. A microsecond
+	# budget loop can be added later if measurement shows multiple finalizes
+	# per frame are needed, but Wins 1+2 should have brought the per-cell
+	# main-thread work down enough that 1/frame is comfortable.
+	var ready: Array[int] = []
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request.collision_built:
+			continue
+		if not request.collision_dispatched:
+			continue
+		if request.collision_task_id < 0:
+			continue
+		if not WorkerThreadPool.is_task_completed(request.collision_task_id):
+			continue
+		ready.append(request_id)
+
+	if ready.is_empty():
+		return
+
+	# Sort by camera distance to cell center. Interior cells (no grid in the
+	# exterior sense) end up using Vector2i.ZERO which sorts them based on
+	# world origin distance — fine for the rare interior+exterior overlap.
+	if ready.size() > 1:
+		var cam: Vector3 = _camera_position
+		ready.sort_custom(func(a: int, b: int) -> bool:
+			var ga: Vector2i = _async_requests[a].grid
+			var gb: Vector2i = _async_requests[b].grid
+			var pa := DU.cell_to_world_center(ga, 0.0)
+			var pb := DU.cell_to_world_center(gb, 0.0)
+			return cam.distance_squared_to(pa) < cam.distance_squared_to(pb))
+
+	var winner_id: int = ready[0]
+	var winner: AsyncCellRequest = _async_requests[winner_id]
+
+	# Worker done — finalize on main.
+	winner.collision_built = true
+	var task_id: int = winner.collision_task_id
+	var payload: Variant = winner.collision_payload
+	winner.collision_task_id = -1
+	winner.collision_payload = null
+
+	# Defensive — wait_for_task_completion is idempotent once done; pairs
+	# with the is_task_completed gate above. Required by Godot's
+	# WorkerThreadPool contract to release task resources.
+	WorkerThreadPool.wait_for_task_completion(task_id)
+
+	if not is_instance_valid(winner.cell_node):
+		# Cell torn down between dispatch and drain — discard worker output.
+		return
+
+	# Win 2 — server-direct: finalize_body needs World3D for the physics
+	# space registration. Pulled from cell_node which is in the tree by
+	# this point (verified by is_instance_valid above + add-child sequence
+	# during cell construction).
+	var world: World3D = winner.cell_node.get_world_3d()
+	if world == null:
+		# Defensive — would only fire if cell_node was reparented out of a
+		# viewport between dispatch and drain. Skip the build; collision
+		# stays absent for this cell. Surfaces as ball-falls-through-rock
+		# during play, which is more visible than a silent free.
+		push_warning("CellStaticCollision: cell %s has no World3D — skipping body register" % str(winner.grid))
+		return
+
+	CrashBreadcrumb.write("collision_finalize_begin", "%d_%d" % [winner.grid.x, winner.grid.y])
+	var finalized: Variant = _cell_static_collision.finalize_body(payload, world)
+	CrashBreadcrumb.write("collision_finalize_end", "%d_%d" % [winner.grid.x, winner.grid.y])
+	if finalized != null:
+		winner.collision_body = finalized
+
+
+## Win 1 + Win 2 — wait on any in-flight collision worker for the request,
+## release the worker payload, AND free the server-direct body if one was
+## already finalized. Called from cancel paths (cancel_async_request,
+## finalize_unloaded_cell, fast_cleanup) BEFORE the request is erased so:
+## - the worker doesn't write into a dead payload after we drop our last ref
+## - the PhysicsServer3D body is removed from the broadphase before the
+##   underlying Shape3D resource is GC'd (Win 2 RID-lifetime hazard)
+##
+## Idempotent — no-op when no worker is dispatched and no body is finalized.
+##
+## The payload itself is RefCounted; once both `request.collision_payload`
+## and the worker's `.bind()` release, GDScript's refcount reaper collects it.
+func _drain_collision_worker_for_request(request: AsyncCellRequest) -> void:
+	if request == null:
+		return
+	# Drain in-flight worker first so it doesn't race with payload teardown.
+	if request.collision_task_id >= 0:
+		# wait_for_task_completion is idempotent once done; required by the
+		# WorkerThreadPool contract to release task resources.
+		WorkerThreadPool.wait_for_task_completion(request.collision_task_id)
+		request.collision_task_id = -1
+	request.collision_payload = null
+	# Win 2 — free the server-direct body if one was finalized. MUST run
+	# before the cell_node teardown elsewhere; PhysicsServer3D doesn't care
+	# about the cell_node, but freeing first means the body is gone from the
+	# broadphase before any stale references could become an issue.
+	if request.collision_body != null:
+		CellStaticCollisionScript.free_body(request.collision_body)
+		request.collision_body = null
+	# Mark built so the drain phase doesn't try to finalize on a cancelled cell.
+	request.collision_built = true
+
+
+## Win 2 — public hook: drain the collision build for a request that's about
+## to enter the unload-container limbo. Called from native_streaming_manager.
+## _unload_cell BEFORE the cell's request_id is moved into _unloading_request_ids.
+##
+## Why this is separate from `cancel_async_request`/`finalize_unloaded_cell`:
+## the unload-container pattern keeps the AsyncCellRequest alive across the
+## limbo window for state-reversal. We don't want to erase the request here,
+## just stop the collision build (no point finalizing a body for a cell the
+## player has walked past — Jolt would briefly insert it into the broadphase
+## then immediately remove it on the next finalize_unloaded_cell call). This
+## hook drains the worker + frees any already-finalized body without touching
+## anything else on the request.
+##
+## Resets collision_built + collision_dispatched so that if state-reversal
+## reclaims the cell, the dispatch phase fires again on the next tick. The
+## dispatch phase guards on `cell_node.visible` to avoid rebuilding while
+## the cell sits in limbo (hidden but cell_node still alive).
+##
+## Idempotent: no-op when the request isn't tracked or has no collision work.
+func cancel_collision_build_for_request(request_id: int) -> void:
+	if request_id not in _async_requests:
+		return
+	var request: AsyncCellRequest = _async_requests[request_id]
+	_drain_collision_worker_for_request(request)
+	# Re-arm for reclaim: clear the flags so the dispatch phase can rebuild
+	# if the cell comes back via state-reversal. The dispatch gate on
+	# cell_node.visible prevents wasted work while the cell is in limbo.
+	request.collision_built = false
+	request.collision_dispatched = false
 
 
 ## Internal: Queue an object for instantiation with limit checking

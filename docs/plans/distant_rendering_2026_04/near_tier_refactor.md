@@ -811,3 +811,59 @@ P4 takes 3 extra seconds to exit the HLOD-toggle stress window (per-cell trimesh
 - ✅ Doors still rotate (Node3D path untouched).
 - ✅ Carryables still drop (per-Node3D collision unchanged for interactives).
 - ✅ Interior pockets skip trimesh (LoadProfile.use_static_renderer=false gate).
+
+### 15.8 Session 2026-04-25 — NEAR refactor wins 0-5 (server-direct + lazy-spawn pass)
+
+Plan source: `C:\Users\metzo\.claude\plans\read-docs-research-server-direct-pattern-snappy-brook.md`. Companion research: `docs/research/server_direct_pattern.md` + `docs/research/static_collision_streaming.md`.
+
+User-locked scope: collision wins first, then interactive/light pass, then unblock S.2-S.6. Doc patch upfront. Full pass: cell static collision + lights + interactive Node3D burst sources.
+
+**Wins shipped (this pass):**
+
+- **Win 0** — verification corrections in `docs/research/server_direct_pattern.md` (claim #2 nuance, #3 cite update to 4.6 docs, #5 thread_model caveat, #8 byte count). Doc-only; doesn't affect runtime.
+- **Win 1** — off-thread triangle assembly in `cell_static_collision.gd`. New three-step pipeline: `collect_classified_refs` (main, classifier + sidecar resolution) → `worker_collect_triangles` (worker, pure data) → `finalize_body` (main, BVH `set_faces` + body register). Worker absorbs the 20-50ms cold-cache walk that previously stalled the main frame. Mirrors Zylann's godot_voxel meshing pattern. Dispatch + drain wired into `cell_manager._tick_static_collision_build` with task-id tracking + cancellation paths into `cancel_async_request` / `finalize_unloaded_cell` / `fast_cleanup` / new `cancel_collision_build_for_request` (called from `native_streaming_manager._unload_cell`).
+- **Win 2** — server-direct cell static body via `PhysicsServer3D.body_create()` + `body_add_shape` + `body_set_space`. Replaces `StaticBody3D` Node3D with raw RIDs, saves Node3D wrapper cost (~1.3 KB per cell + lifecycle/notification machinery). Added `FinalizedBody` RefCounted holder (body_rid + Shape3D strong-ref) + static `free_body` helper. Ownership tracked on `AsyncCellRequest.collision_body`; freed in `_drain_collision_worker_for_request`. Caveat: loses "Visible Collision Shapes" debug viz — counts surface via `print_streaming_stats` (extension pending). Aligns collision side with rendering side (which is already RS-direct).
+- **Win 3** — distance-sorted collision drain: closest cell finalizes first when multiple cells' workers complete in the same frame. 1-cell-per-frame bound preserved. Microsecond budget loop NOT added — deferred per plan ("if Wins 1+2 already removed the spikes"); easy to add later if measurement warrants.
+- **Win 4a** — lazy-spawn lights past `LIGHT_PROXIMITY_THRESHOLD_M = 60.0` in [reference_instantiator.gd](../../../src/core/world/reference_instantiator.gd). Big lights (`radius >= LIGHT_ALWAYS_SPAWN_RADIUS_MW = 700.0` MW units, ≈10m Godot range) bypass the gate so braziers / templar lanterns always spawn. Lights past threshold park in `_proximity_deferred` and re-queue via existing `tick_proximity_deferred` when camera approaches. Reuses the exact pattern proven by container/door lazy-spawn at 80m.
+- **Win 4b** — server-direct lights via `RS.omni_light_create` + `RS.instance_create` + `RS.light_set_param` + `RS.instance_set_transform` + `instance_geometry_set_visibility_range`. Static lights skip the `OmniLight3D` Node3D wrapper. Animated lights (flicker/pulse flags `0x01C8`) keep OmniLight3D so `LightAnimator`'s scene-tree walker continues to find them. RID lifetime managed by a `LightRids` RefCounted attached as `rs_light_rids` metadata on the light's container Node3D — its `NOTIFICATION_PREDELETE` handler frees both RIDs when cell teardown queue_frees the container. No bespoke per-cell tracking. Distance fade replicated via `instance_geometry_set_visibility_range` (0-150m with 30m fade margin, matches OmniLight3D `distance_fade_begin=120`).
+- **Win 5** — audit, see below.
+
+**Win 5 audit — remaining interactive Node3D burst sources, recommendations:**
+
+Post-Wins-1-4 the per-type cost ranking is expected to shift (measurement pending — rerun `--bench-auto=p5_post_near_pass` vs P4 baseline + `[inst-breakdown 5s]` log for ground truth). Pre-bench predictions for what remains:
+
+| Source | Status | Recommendation |
+|---|---|---|
+| **Animated statics** (flags, banners, water wheels) | Need `AnimationPlayer`, can't ride MultiMesh. Bundled into `static` per-type cost; cold-path PackedScene.instantiate is the dominant cost (~38ms cold per session 14.2 data). | **Defer.** Real fix is shader-based vertex animation (wind sway uniforms in the prototype shader), which is a prebake-pipeline change too big for this pass. Document as future direction; revisit if profiling shows animated statics are the next per-type ceiling. |
+| **Two-stage interactive spawn** (RS instance immediately, Node3D wrapper at proximity) | Theoretically reduces door/container Node3D burst by deferring the wrapper but keeping the visual mesh visible. | **DON'T SHIP.** Re-introduces per-object distance gating that S.1 deleted. Adds a "phantom Node3D promotion" path that's a kissing cousin of the per-actor promote/demote dance the refactor expressly removed (CLAUDE.md Simplicity Over Over-Engineering). Win 4a's lazy-spawn already handles 70-80% of the burst at the gameplay-distance frontier; the remaining cost is acceptable. |
+| **NPC distance gate widening** (preload at 200m if approaching) | Velocity-aware actor preload to avoid the burst when an NPC re-enters the 150m gate. | **Defer.** NPCs are rare per cell (~5-20). Burst is bounded. Phase 3 CellPreloader already handles spatial preload of cell content; widening per-actor distance gate is a small follow-up if `actor` shows up dominant in post-Win-4 measurements. |
+| **Phase A worker dispatch for lights** (off-thread `model_loader.get_model` for light models) | Lights currently bypass Phase A worker (light type returns false in `should_dispatch_to_worker`). Their model load is the single largest cost component. | **Possible follow-up.** Estimated 3-10× per-instance reduction for the model-load portion (matching container/door post-Phase-A). Adds light-specific branch to `complete_worker_instantiate` for the OmniLight3D-or-RID setup tail. NOT scoped this pass; revisit if `light` per-type cost stays high after lazy-spawn (Win 4a) + server-direct light (Win 4b). |
+| **Light shadow toggle on server-direct path** | `LightShadowBudget` walks the cell tree for `OmniLight3D` nodes (same pattern as `LightAnimator`). Server-direct lights are invisible to that walker → shadows stay off for the static-light set. | **Acceptable for now** — most MW omni lights ship with shadows off by default. If shadow coverage regression is observed in interactive pilot, extend `LightShadowBudget` to also walk `rs_light_rids` metadata on cell children and drive `RS.light_set_shadow(rid, bool)` per budget. |
+
+**Verification (this pass):**
+- ✅ Headless boot parses cleanly (no script errors, `_ready()` 670-730 ms).
+- ✅ gdunit4 138 tests, 0 errors, 9 failures (all pre-existing in `test_object_paging_kernel.gd`, unrelated to this pass).
+- ⏳ Interactive walk pilot (Seyda Neen 5 minutes + teleport to Balmora dock) — pending user run with the new build.
+- ⏳ `--bench-auto=p5_post_near_pass` measurement run vs P4 baseline — pending user run.
+- ⏳ Sig11 watch (10+ min pilot) — pending; new off-thread code in Win 1 has CrashBreadcrumb breadcrumbs at worker entry/exit boundaries (`collision_worker_dispatch`, `collision_finalize_begin/end`).
+
+**Risk callout updates:**
+- **Win 1 has_animation race** — closed by design: `_should_route_to_renderer` (which calls `model_loader.has_animation`) runs ONLY on main in `collect_classified_refs`. Worker payload is pre-classified.
+- **Win 2 RID lifetime** — closed: `FinalizedBody` strong-refs the trimesh `Shape3D` resource alongside the body RID. Both freed in `free_body` in the right order (body first → shape ref drop).
+- **Win 4b flicker lights** — closed: per-record gate on `MW_LIGHT_ANIMATED_FLAGS_MASK = 0x01C8` keeps animated lights on the OmniLight3D path so LightAnimator continues to find them.
+- **Win 4a "ghost lights" complaint** — partial: big-light always-spawn override (`radius >= 700`) covers braziers. Per-light AABB-aware threshold (smaller version of the same idea) is still future work if pilot reveals dim spots.
+- **Second SIGSEGV at sec~183** — still open from §12.2. New off-thread Win 1 code has breadcrumbs to avoid masking it. If a crash signature appears post this pass, read `user://logs/crash_breadcrumb.txt` for the new last-write tag.
+
+**Files touched this pass:**
+- `docs/research/server_direct_pattern.md` (Win 0)
+- `src/core/world/cell_static_collision.gd` (Wins 1, 2 — full rewrite of public API; back-compat `build_for_cell` retained)
+- `src/core/world/static_shape_cache.gd` (Win 1 — added `resolve_pack_path` + `get_shapes_for_worker`)
+- `src/core/world/cell_manager.gd` (Wins 1, 2, 3 — dispatch/drain + RID ownership + distance-sorted drain order + cancellation hooks)
+- `src/core/world/native_streaming_manager.gd` (Win 2 — `_unload_cell` calls `cancel_collision_build_for_request`)
+- `src/core/world/reference_instantiator.gd` (Wins 4a, 4b — `LIGHT_*` constants, `_is_light_proximity_deferred`, `MW_LIGHT_ANIMATED_FLAGS_MASK`, `LightRids` inner class, `_attach_animated_omni_light` + `_attach_server_direct_light` split)
+
+**Next steps:**
+1. User-driven `--bench-auto` measurement + interactive walk pilot to validate FPS deltas.
+2. Append `--bench-auto=p5_post_near_pass` row to §9 measurement log.
+3. If post-Win-4 measurements show `light` per-type cost still dominant, scope a follow-up "Win 4c: Phase A off-thread for light model load" task.
+4. Once measurements satisfy and user pilots NEAR successfully, unblock S.2-S.6 (StreamingSource abstraction → per-cell FSM → preloader generalization → UnloadQueue → user sign-off gate).

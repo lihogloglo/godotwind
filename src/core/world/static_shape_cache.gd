@@ -93,6 +93,52 @@ func get_shapes(model_path: String) -> Array:
 	return _publish_entry(key, entry)
 
 
+## MAIN-THREAD: resolve a model_path's prebaked sidecar (`.shapes.res`) path
+## via the configured ModelLoader. Returns "" when the loader is unset or the
+## sidecar doesn't exist.
+##
+## Centralizes the model_loader→resolve_shape_pack_path call so callers
+## (Win 1 collision dispatch, Phase F prereg) don't need to import
+## ModelLoader directly. Mirror of `ModelLoader.resolve_shape_pack_path`'s
+## main-thread contract — that method mutates `_file_exists_cache`.
+func resolve_pack_path(model_path: String) -> String:
+	if _model_loader == null:
+		return ""
+	if not _model_loader.has_method("resolve_shape_pack_path"):
+		return ""
+	return _model_loader.call("resolve_shape_pack_path", model_path)
+
+
+## WORKER-SAFE: query the cache for a prototype's shapes. Tries the in-memory
+## cache first; falls through to the prebaked sidecar via `ResourceLoader.load`
+## (thread-safe per Godot docs). Returns empty when neither hits — callers
+## should fall back to main-thread `get_shapes` for the legacy walker path.
+##
+## Path order:
+## 1. In-memory `_cache` — Mutex-guarded, O(1) dict lookup.
+## 2. Prebaked `StaticShapePack` sidecar — only if `pack_path` is non-empty
+##    AND the cache caller pre-warmed via `warm_from_path` (preferred), OR
+##    if the sidecar's existence has been resolved upstream.
+##
+## Does NOT call `_model_loader.resolve_shape_pack_path` (main-thread only)
+## or `_model_loader.get_model` (legacy walker, main-thread only). Callers
+## that hit empty here should either:
+## - pre-warm via `warm_from_path` BEFORE invoking this (Win 1 dispatch
+##   resolves pack_paths on main and the worker calls warm_from_path inline)
+## - fall back to `get_shapes` on main for prototypes the worker missed
+##
+## Thread safety: Mutex covers cache read + publish. The returned shapes
+## array is a shared reference — caller MUST NOT mutate it.
+func get_shapes_for_worker(model_path: String) -> Array:
+	var key := _normalize_key(model_path)
+
+	_cache_mutex.lock()
+	var hit: bool = key in _cache
+	var existing_shapes: Array = _cache[key].shapes if hit else []
+	_cache_mutex.unlock()
+	return existing_shapes
+
+
 ## Worker-safe warm of a prototype's shape pack. Called from Phase F's
 ## `_worker_preregister_prototype` after the caller resolved `pack_path` on
 ## the main thread via `ModelLoader.resolve_shape_pack_path`.

@@ -1122,6 +1122,16 @@ func _unload_cell(grid: Vector2i) -> void:
 		_async_requests.erase(grid)
 		_loading_cells.erase(grid)
 		_unloading_request_ids[grid] = request_id
+		# Win 2 — drain any in-flight collision worker + free the server-direct
+		# body NOW. The unload-container limbo can hold the request for many
+		# frames; without this, a worker that completes mid-limbo would insert
+		# a body into the broadphase that gets immediately freed by
+		# finalize_unloaded_cell. Also handles the rarer case where the body
+		# was already finalized before unload — better to free it at unload-
+		# start (matches old StaticBody3D-as-cell-node-child semantics, where
+		# physics died with the cell visibility change).
+		if _cell_manager != null:
+			_cell_manager.cancel_collision_build_for_request(request_id)
 		_debug("Parked async request %d for cell %s (state-reversal limbo)" % [request_id, grid])
 
 	if grid not in _loaded_cells:
