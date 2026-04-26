@@ -41,6 +41,7 @@ const StaticObjectRendererScript := preload("res://src/core/world/static_object_
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 const ObjectPagingScript := preload("res://src/core/world/object_paging.gd")
 const CellPreloaderScript := preload("res://src/core/world/cell_preloader.gd")
+const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 # MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
 # replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
 
@@ -217,6 +218,17 @@ var _cell_manager: CellManagerScript = null
 ## cells the camera is heading toward. Owned here; wired to `teleport_happened`
 ## (abort_all + reset) and `cell_loaded` / `cell_unloaded` signals.
 var _cell_preloader: CellPreloaderScript = null
+
+## Phase 2 stutter diag (2026-04-25) — RenderingServer pipeline compile counter
+## delta tracker. Three usage sites: (a) heartbeat for steady-state rate, (b)
+## per-cell-load delta on cell_loaded.emit, (c) per-preload-completion delta in
+## CellPreloader._poll_completions. The (b) vs (c) split tells us whether
+## ResourceLoader.load alone triggers MESH/SURFACE pre-compile or whether
+## explicit instantiation is required (§2.2/§2.3 of phase 2 plan).
+var _pipeline_compile_monitor: PipelineCompileMonitorScript = null
+## Per-cell-load delta tracker — independent baseline from heartbeat so the
+## delta on cell_loaded reflects only the cell-load window, not the 5s slice.
+var _pipeline_compile_per_cell: PipelineCompileMonitorScript = null
 
 ## Current camera position
 var _camera_position: Vector3 = Vector3.ZERO
@@ -452,6 +464,24 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	_cell_preloader.configure(_cell_manager._instantiator, _cell_manager._model_loader)
 	_cell_preloader.set_debug(debug_enabled)
 
+	# Phase 2 stutter diag — see field declarations above.
+	_pipeline_compile_monitor = PipelineCompileMonitorScript.new()
+	_pipeline_compile_per_cell = PipelineCompileMonitorScript.new()
+	# Hand the per-cell tracker to CellPreloader so its LOADING→READY transition
+	# can log its own delta on the same baseline. The heartbeat tracker stays here.
+	if _cell_preloader.has_method("set_pipeline_compile_monitor"):
+		_cell_preloader.set_pipeline_compile_monitor(PipelineCompileMonitorScript.new())
+
+	# Phase 2 stutter diag — force-create the StreamingProfiler so the
+	# slow-frame autopsy actually has data to dump. Previously _profiler was
+	# lazily created by `get_profiler()`, called only by the benchmark HUD or
+	# debug overlay; in normal interactive play the profiler stayed null and
+	# every `if prof:` bracket no-op'd. The autopsy needs the profiler from
+	# frame 0. Plan §11.4.
+	if _profiler == null:
+		_profiler = StreamingProfilerScript.new()
+		_profiler.enabled = SC.ENABLE_PROFILING
+
 	# Wire up background processor for async loading
 	if _background_processor and async_loading_enabled:
 		_cell_manager.set_background_processor(_background_processor)
@@ -601,7 +631,15 @@ func _process(delta: float) -> void:
 		# per §6: pairs should drop ~100× post-T.2 (merged cell trimesh).
 		var phys_active := int(p.get_monitor(p.PHYSICS_3D_ACTIVE_OBJECTS))
 		var phys_pairs := int(p.get_monitor(p.PHYSICS_3D_COLLISION_PAIRS))
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d phys_active=%d phys_pairs=%d" % [
+		# Phase 2 stutter diag — pipeline compile delta over the 5s heartbeat
+		# window. DRAW > 0 = first-visibility shader stutter source. MESH/SURFACE
+		# spread between heartbeats vs cell-load events tells us where in the
+		# load pipeline the engine pre-compiles. Plan §2.2.
+		var pcd_str: String = ""
+		if _pipeline_compile_monitor != null:
+			var pcd: PackedInt64Array = _pipeline_compile_monitor.delta_and_update()
+			pcd_str = " pipe=" + PipelineCompileMonitorScript.format_delta(pcd)
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d phys_active=%d phys_pairs=%d%s" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
@@ -620,6 +658,7 @@ func _process(delta: float) -> void:
 			reg_slots,
 			phys_active,
 			phys_pairs,
+			pcd_str,
 		])
 
 	# Start timing for frame budget telemetry
@@ -634,10 +673,14 @@ func _process(delta: float) -> void:
 	if prof:
 		prof.begin_frame()
 
-	# Update camera position and velocity
+	# Update camera position and velocity. Fix B (streaming_stutter_2026_04_25
+	# §11.4) — bracket cell_manager.set_camera_position; cheap in theory but
+	# walks the proximity-deferred list internally on some paths.
 	_camera_position = _camera.global_position
 	if _cell_manager:
+		if prof: prof.begin_section("cm_set_camera_position")
 		_cell_manager.set_camera_position(_camera_position)
+		if prof: prof.end_section("cm_set_camera_position")
 	var new_cell := DU.world_to_cell(_camera_position)
 
 	# Phase 7 finish (2026-04-17) — teleport detection. A single-frame camera
@@ -648,25 +691,36 @@ func _process(delta: float) -> void:
 	if _prev_camera_position != Vector3.ZERO \
 			and _camera_position.distance_to(_prev_camera_position) > TELEPORT_DETECT_THRESHOLD:
 		_teleport_detected = true
+		# Phase 2 stutter diag — bracket the teleport handler so the slow-frame
+		# autopsy attributes the 1+ second teleport hitch to its actual sources
+		# (signal-emit subscribers + CellPreloader.abort_all blocking wait).
+		# Plan §11.4. Sub-brackets isolate signal vs preloader-drain.
+		if prof: prof.begin_section("teleport:total")
 		# Phase 8 — emit BEFORE the startup_phase re-arm below so a
 		# LoadingStateMachine consumer can fade to black and pause the
 		# tree on the same frame the jump happens. NativeStreamingManager
 		# is PROCESS_MODE_ALWAYS so the post-teleport streaming burst
 		# will keep running while the tree is paused.
+		if prof: prof.begin_section("teleport:emit_signal")
 		teleport_happened.emit(
 			_prev_camera_position,
 			_camera_position,
 			_camera_position.distance_to(_prev_camera_position)
 		)
+		if prof: prof.end_section("teleport:emit_signal")
 
 		# Phase 3 (§8.8) — abort in-flight preloads for cells the camera just
 		# jumped away from; re-anchor at the new grid so the next update()
-		# tick re-warms around the destination. `abort_all` blocks on
-		# WorkerThreadPool.wait_for_task_completion (CLAUDE.md anti-pattern
-		# rule). Bounded: worst case <50 tasks × ResourceLoader.load ~20ms.
+		# tick re-warms around the destination. Post Fix C.1 (plan §12.6),
+		# `abort_all` is non-blocking: cooperative cancellation flag, no
+		# `wait_for_task_completion`. Was up to 1 sec block; now O(N entries)
+		# bookkeeping (~µs).
 		if _cell_preloader != null:
+			if prof: prof.begin_section("teleport:preloader_abort")
 			_cell_preloader.abort_all()
 			_cell_preloader.reset(DU.world_to_cell(_camera_position))
+			if prof: prof.end_section("teleport:preloader_abort")
+		if prof: prof.end_section("teleport:total")
 
 	# EMA-smoothed velocity on XZ plane (for predictive cell loading).
 	# Teleport frames skip the EMA so the huge jump doesn't throw predictive
@@ -695,11 +749,17 @@ func _process(delta: float) -> void:
 			if _impostor_renderer:
 				_impostor_renderer.set_load_budget_usec(15000.0)
 
-# Track startup frames for staggered loading
+# Track startup frames for staggered loading.
+	# Fix B — bracket the startup tick so the unattributed teleport autopsy
+	# (2326 ms / 1941 ms unattributed in baseline) stops being mysterious.
+	# After teleport, _startup_phase is re-armed and _check_startup_complete
+	# can call into cell_manager which is the suspected source of the gap.
 	if _startup_phase:
+		if prof: prof.begin_section("startup_tick")
 		_startup_frames += 1
 		_emit_startup_progress()
 		_check_startup_complete()
+		if prof: prof.end_section("startup_tick")
 
 	# Check if we moved to a new cell
 	var cell_update_usec: float = 0.0
@@ -730,31 +790,42 @@ func _process(delta: float) -> void:
 			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
 
 	# Runtime HLOD merger: process completed merges every frame, update on cell change
+	# Phase 2 stutter diag — bracket each unbracketed _process subsystem so the
+	# autopsy can attribute the BIG unattributed spikes (1.7s+) to whichever
+	# of these is actually responsible. Plan §11.4.
 	if _hlod_merger and not _startup_phase:
+		if prof: prof.begin_section("hlod_merger")
 		_hlod_merger.process_merge_queue()  # Staggered: max 2 cells/frame
 		_hlod_merger.process_completions()
 		if _cell_changed_this_frame or _hlod_needs_initial_update:
 			_hlod_merger.update_for_camera(_camera_cell, _camera_position)
 			_hlod_needs_initial_update = false
+		if prof: prof.end_section("hlod_merger")
 
 	# Update distant light manager (camera pos + time-of-day)
 	if _distant_light_manager:
+		if prof: prof.begin_section("distant_light_manager")
 		_distant_light_manager.update(_camera_position, _sun_elevation_rad)
+		if prof: prof.end_section("distant_light_manager")
 
 	# I.6 Phase 2 — orphan expiry tick. Off the frame-budget hot path
 	# because it runs at 1 Hz max, and the walk is bounded by the tiny
 	# size of `_persistent_nodes` (a handful of held items, if that).
 	_orphan_prune_accum += delta
 	if _orphan_prune_accum >= ORPHAN_PRUNE_INTERVAL_S:
+		if prof: prof.begin_section("orphan_prune")
 		_orphan_prune_accum = 0.0
 		_prune_expired_orphans()
+		if prof: prof.end_section("orphan_prune")
 
 	# Predictive loading — velocity-extrapolated two-phase CellPreloader (§8).
 	# Warms ResourceLoader + dispatches Phase F prereg for cells the camera is
 	# heading toward. Skipped during startup burst so the initial ring finishes
 	# with its own aggressive budget first.
 	if not _startup_phase and _cell_preloader != null:
+		if prof: prof.begin_section("cell_preloader_update")
 		_cell_preloader.update(_camera_cell, _camera_position, _camera_velocity_xz)
+		if prof: prof.end_section("cell_preloader_update")
 
 	# Phase 0: Budgeted unloading — free children of departing cells gradually
 	# Runs BEFORE loading so freed memory is available for new cells
@@ -794,7 +865,11 @@ func _process(delta: float) -> void:
 			else:
 				instantiation_budget_ms = SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
 			var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
+			# Phase 2 stutter diag — bracket the instantiate call into the profiler
+			# so the slow-frame autopsy can attribute spike time. Plan §11.4.
+			if prof: prof.begin_section("instantiate")
 			var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
+			if prof: prof.end_section("instantiate")
 			phase_times[2] = float(Time.get_ticks_usec() - phase_start)
 			if instantiated > 0 and debug_enabled:
 				_debug("Instantiated %d objects this frame" % instantiated)
@@ -821,23 +896,35 @@ func _process(delta: float) -> void:
 			# zero; the HUD still reads the slots but values will be 0.
 			var total_elapsed_usec := Time.get_ticks_usec() - frame_start_usec
 			if total_elapsed_usec < budget_usec:
-				# Phase 4: Queue new cell requests (non-blocking)
+				# Phase 4: Queue new cell requests (non-blocking).
+				# Fix B (streaming_stutter_2026_04_25 plan §11.4) — bracket so the
+				# autopsy attributes the suspected 800 ms spike. _request_cell_async
+				# calls cell_manager.request_exterior_cell_async which still calls
+				# preregister_cell_statics on the main thread (active-loader path
+				# Fix A left intact). If this section spikes, that's the smoking
+				# gun for the next fix.
 				phase_start = Time.get_ticks_usec()
+				if prof: prof.begin_section("pending_loads_async")
 				_process_pending_loads_async()
+				if prof: prof.end_section("pending_loads_async")
 				phase_times[6] = float(Time.get_ticks_usec() - phase_start)
 
 	else:
 		# Fallback: synchronous loading (blocks frame)
 		if _near_tier_visible:
+			if prof: prof.begin_section("pending_loads_sync")
 			_process_pending_loads_sync(delta)
+			if prof: prof.end_section("pending_loads_sync")
 
 	# Phase 3 world-scoped MultiMesh cull tick. tick_prototype_cull no-ops
 	# internally when the registry hasn't been instantiated yet (cold
 	# boot, empty world). Runs after all add/remove/transform work this
 	# frame so the packed buffer reflects the latest state.
 	if _static_renderer:
+		if prof: prof.begin_section("static_renderer_cull")
 		var vr_end: float = _static_renderer.visibility_range_end
 		_static_renderer.tick_prototype_cull(_camera_position, vr_end * vr_end)
+		if prof: prof.end_section("static_renderer_cull")
 
 	# Store per-phase timing for external consumers (benchmark, profiler)
 	phase_times[7] = cell_update_usec
@@ -858,6 +945,14 @@ func _process(delta: float) -> void:
 				phase_times[6] / 1000.0,
 				frame_budget_ms, _frame_overrun_count])
 			_last_overrun_log_frame = Engine.get_frames_drawn()
+
+	# Phase 2 stutter diag — close the per-frame profiler window and
+	# auto-dump a sorted per-section breakdown for any frame > 100 ms.
+	# Threshold deliberately wider than the overrun-warn (1.5x budget) so the
+	# autopsy fires on the user-visible spikes, not budget jitter. Plan §11.4.
+	if prof:
+		prof.end_frame()
+		prof.dump_overrun_breakdown(100.0, "stream_proc")
 
 	# Post-startup audit — auto-logs every 5s for 60s so FPS/queue/phase breakdown
 	# is captured during the slow loading period without requiring user interaction.
@@ -1084,6 +1179,7 @@ func _load_cell_sync(grid: Vector2i) -> void:
 		_stats["loaded_cells"] = _loaded_cells.size()
 		_stats["total_objects"] += object_count
 
+		_log_pipeline_compile_for_cell_load(grid, object_count, "sync")
 		cell_loaded.emit(grid, object_count)
 		if _cell_preloader != null:
 			_cell_preloader.notify_activated(grid)
@@ -1113,6 +1209,12 @@ func _unload_cell(grid: Vector2i) -> void:
 	# at `unload_cell_*`, breadcrumbs served their diagnostic purpose. The
 	# budgeted unloader still writes `bu::cell_qfree_*` breadcrumbs which
 	# cover the destructor path if a crash moves there.
+	# Phase 2 stutter diag — bracket each sub-step into the StreamingProfiler so
+	# the slow-frame autopsy (§11.4) can attribute spike time to specific
+	# sub-steps, not just the cell_update parent. The existing text-only
+	# breakdown log at the end of this function stays as a redundant signal.
+	var prof: StreamingProfilerScript = _profiler
+	if prof: prof.begin_section("unload_cell:total")
 	var t0 := Time.get_ticks_usec()
 	# Park any pending async request for this cell in the limbo registry.
 	# Do NOT call cell_manager.cancel_async_request — that filters the queue
@@ -1135,6 +1237,7 @@ func _unload_cell(grid: Vector2i) -> void:
 		_debug("Parked async request %d for cell %s (state-reversal limbo)" % [request_id, grid])
 
 	if grid not in _loaded_cells:
+		if prof: prof.end_section("unload_cell:total")
 		return
 
 	var cell_node: Node3D = _loaded_cells[grid]
@@ -1158,7 +1261,9 @@ func _unload_cell(grid: Vector2i) -> void:
 	# cell BEFORE putting it in the unloading set. Otherwise the
 	# budgeted unload pass would free the held body along with the
 	# rest of the cell. Per `docs/INTERACTION_SYSTEM.md` §10.
+	if prof: prof.begin_section("unload_cell:evac_persistents")
 	_evacuate_persistent_nodes_from_cell(cell_node, grid)
+	if prof: prof.end_section("unload_cell:evac_persistents")
 	var t_evac := Time.get_ticks_usec()
 
 	# No reparent. Cell_node stays in _world_container; hide via visible=false
@@ -1167,16 +1272,29 @@ func _unload_cell(grid: Vector2i) -> void:
 	# parent is irrelevant to that loop. process_mode stays INHERIT so
 	# in-flight physics bodies / scripts complete cleanly on their own
 	# frame — matching original behavior, which never touched process_mode.
+	# Phase 2 stutter diag — bracket separately to catch the suspected
+	# NOTIFICATION_VISIBILITY_CHANGED propagation cost on large subtrees.
+	if prof: prof.begin_section("unload_cell:visibility_propagate")
 	cell_node.visible = false
+	if prof: prof.end_section("unload_cell:visibility_propagate")
 	_unloading_cells[grid] = cell_node
 	var t_hide := Time.get_ticks_usec()
 
 	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
+	if prof: prof.begin_section("unload_cell:emit_unloaded")
 	cell_unloaded.emit(grid)
+	if prof: prof.end_section("unload_cell:emit_unloaded")
+	# Phase 2 stutter diag — explicit bracket: notify_unloaded → _drain_and_erase
+	# → _drain_entry → wait_for_task_completion. Suspected blocking call when
+	# a cell with many in-flight preload tasks unloads mid-transition.
+	if prof: prof.begin_section("unload_cell:preloader_drain")
 	if _cell_preloader != null:
 		_cell_preloader.notify_unloaded(grid)
+	if prof: prof.end_section("unload_cell:preloader_drain")
 	var t_emit1 := Time.get_ticks_usec()
+	if prof: prof.begin_section("unload_cell:emit_stats")
 	stats_updated.emit(_stats)
+	if prof: prof.end_section("unload_cell:emit_stats")
 	var t_emit2 := Time.get_ticks_usec()
 	var total_ms := float(t_emit2 - t0) / 1000.0
 	# Always log — threshold gating was masking the 8ms/call slice (sub-3ms per sub-step).
@@ -1188,6 +1306,7 @@ func _unload_cell(grid: Vector2i) -> void:
 		float(t_emit1 - t_hide) / 1000.0,
 		float(t_emit2 - t_emit1) / 1000.0,
 		cell_node.get_child_count()])
+	if prof: prof.end_section("unload_cell:total")
 
 
 ## Process gradual unloading of departing cells within time budget
@@ -1482,6 +1601,7 @@ func _process_async_completions() -> void:
 					var failed_count := _cell_manager.get_async_failed_count(request_id)
 					_debug("Cell %s completed with %d failed models" % [grid, failed_count])
 
+				_log_pipeline_compile_for_cell_load(grid, object_count, "async")
 				cell_loaded.emit(grid, object_count)
 				if _cell_preloader != null:
 					_cell_preloader.notify_activated(grid)
@@ -2053,6 +2173,34 @@ func _get_dynamic_budget(delta: float) -> float:
 func _debug(msg: String) -> void:
 	if debug_enabled:
 		Log.debug("streaming", msg)
+
+
+## Phase 2 stutter diag — log pipeline compile delta at cell-load completion.
+## Companion to the per-5s heartbeat: heartbeat shows TOTAL deltas over a slice,
+## this shows the delta attributable specifically to one cell's add_child window.
+##
+## Decision tree for the resulting log line (plan §2.2):
+##   Δ:m+sf>0, dr=0  → engine pre-compiled at instantiation; expected. If preload
+##                     delta was ALSO 0 then ResourceLoader.load alone isn't
+##                     sufficient — we need hidden-instance pre-warm in CellPreloader.
+##   Δ:dr>0          → first-visibility shader stutter. Missed pre-warm window.
+##                     Almost always means the asset entered the scene without
+##                     the engine having seen its mesh+material combo before.
+##   Δ:sp>0          → ubershader background optimization fired. Non-stuttering.
+func _log_pipeline_compile_for_cell_load(grid: Vector2i, object_count: int, mode: String) -> void:
+	if _pipeline_compile_per_cell == null:
+		return
+	var d: PackedInt64Array = _pipeline_compile_per_cell.delta_and_update()
+	if not PipelineCompileMonitorScript.has_activity(d):
+		return  # silent — nothing happened during this cell-load window
+	var level := "warn" if PipelineCompileMonitorScript.has_draw_compile(d) else "info"
+	var msg := "[pipe-cell %s %s] objs=%d %s" % [
+		mode, grid, object_count, PipelineCompileMonitorScript.format_delta(d),
+	]
+	if level == "warn":
+		Log.warn("streaming", msg)
+	else:
+		Log.info("streaming", msg)
 
 #endregion
 

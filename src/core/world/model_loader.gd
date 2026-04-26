@@ -64,31 +64,57 @@ var _has_animation_cache: Dictionary[String, bool] = {}
 ## Query whether the prototype at `model_path` contains an AnimationPlayer.
 ## Used by the statics routing gate to carve out animated statics (flags,
 ## banners, rotating objects) that can't ride the MultiMesh path.
-## Returns the cached value if known; otherwise instantiates once to inspect
-## then caches. Subsequent queries are O(1) dictionary hits.
+## Returns the cached value if known; otherwise inspects the PackedScene's
+## SceneState metadata (no instantiation) then caches.
+##
+## Fix C (streaming_stutter_2026_04_25 plan): the previous implementation was
+## the central main-thread spike source — `get_model` → ResourceLoader.load
+## (recursive sub-resource resolution) + `PackedScene.instantiate` (~30 ms
+## cold) + tree-walk + `queue_free`, all on the main thread, all to read a
+## boolean. It's how `preregister_cell_statics` blew 800 ms per cell.
+##
+## The canonical Godot 4 pattern is `PackedScene.get_state().get_node_type(i)`
+## — pure metadata lookup against the bundled data, no node creation. Cold
+## cost drops from ~30 ms/prototype to ~1 ms/prototype (just the load, which
+## is also cache-hit fast after the CellPreloader warm).
 func has_animation(model_path: String) -> bool:
 	var key := model_path.to_lower()
 	if key in _has_animation_cache:
 		return _has_animation_cache[key]
-	# Cache miss — instantiate to inspect. This costs one PackedScene.instantiate
-	# per unique prototype, amortized across all refs of the same model.
-	var instance := get_model(model_path, "")
-	if instance == null:
+
+	# Cache miss — inspect SceneState metadata. No instantiation.
+	var disk_path := resolve_disk_path(model_path)
+	if disk_path.is_empty():
 		_has_animation_cache[key] = false
 		return false
-	var has_anim := _subtree_has_animation_player(instance)
-	_has_animation_cache[key] = has_anim
-	instance.queue_free()  # inspection-only, discard
-	return has_anim
+	# CACHE_MODE_REUSE: hit the ResourceLoader cache the preloader already
+	# warmed. If cold, this loads the PackedScene once — much cheaper than
+	# instantiating it because we skip the recursive sub-resource finalize
+	# that `_drain_pending_instantiate_queue` does.
+	var packed_scene: PackedScene = ResourceLoader.load(
+		disk_path, "PackedScene", ResourceLoader.CACHE_MODE_REUSE
+	) as PackedScene
+	if packed_scene == null:
+		_has_animation_cache[key] = false
+		return false
 
+	var state: SceneState = packed_scene.get_state()
+	if state == null:
+		_has_animation_cache[key] = false
+		return false
 
-static func _subtree_has_animation_player(node: Node) -> bool:
-	if node is AnimationPlayer:
-		return true
-	for child in node.get_children():
-		if _subtree_has_animation_player(child):
-			return true
-	return false
+	var found := false
+	var node_count: int = state.get_node_count()
+	for i in node_count:
+		# get_node_type returns the registered class name as StringName.
+		# &"AnimationPlayer" matches both direct AnimationPlayer nodes and
+		# any subclass — ScriptState handles the inheritance.
+		if state.get_node_type(i) == &"AnimationPlayer":
+			found = true
+			break
+
+	_has_animation_cache[key] = found
+	return found
 
 ## The mod registry for asset resolution
 var _mod_registry: ModRegistry = null

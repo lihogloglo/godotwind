@@ -1521,7 +1521,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# of `_finalize_request` (which is gated by `pending_instantiations == 0`,
 	# a condition that never clears when interactive refs are proximity-
 	# deferred). One build per frame to bound cold-cache stalls.
+	# Fix B (streaming_stutter_2026_04_25 §11.4) — sub-bracket the four pre-loop
+	# steps so the autopsy can attribute the 100-540 ms `instantiate=` spike
+	# either to a substep here or to the main loop below.
+	var t_pre0 := Time.get_ticks_usec()
 	_tick_static_collision_build()
+	var t_pre_collision := Time.get_ticks_usec()
 
 	# Start budget clock BEFORE pre-loop work — disk loads, conversions, and
 	# pool prewarm all consume frame time that must count against the budget.
@@ -1533,16 +1538,19 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# entire frame allocation before the main instantiation loop runs.
 	# Half the caller budget: leaves the other half for _instantiation_queue items.
 	process_async_disk_loads(int(budget_ms * 500.0))  # budget_ms*0.5 in usec
+	var t_pre_disk := Time.get_ticks_usec()
 
 	# Then process any pending conversions to feed the cache
 	# Cap conversion time to half the budget so instantiation still gets time
 	var conversion_budget_ms := budget_ms * 0.5
 	process_pending_conversions(conversion_budget_ms)
+	var t_pre_conv := Time.get_ticks_usec()
 
 	# Process pool pre-warming in background (only if budget permits)
 	var pre_loop_elapsed := float(Time.get_ticks_usec() - start_time) / 1000.0
 	if pool_prewarm_enabled and pre_loop_elapsed < budget_ms * 0.7:
 		_process_pool_prewarm()
+	var t_pre_prewarm := Time.get_ticks_usec()
 
 	if _instantiation_queue.is_empty():
 		return 0
@@ -1779,6 +1787,26 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			else:
 				parent.add_child(child)
 	CrashBreadcrumb.write("cm::batch_done", "n=%d" % pending_children.size())
+
+	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
+	# threshold, dump the pre-loop split so we can tell whether
+	# _tick_static_collision_build / disk_loads / conversions / pool_prewarm
+	# is the spike, vs the main loop. 100 ms picks up the 100-540 ms class.
+	var t_end_inst := Time.get_ticks_usec()
+	var total_inst_us := t_end_inst - t_pre0
+	if total_inst_us > 100_000:
+		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f loop=%.1f addc=%.1f instantiated=%d queue=%d burst=%s" % [
+			total_inst_us / 1000.0,
+			float(t_pre_collision - t_pre0) / 1000.0,
+			float(t_pre_disk - start_time) / 1000.0,
+			float(t_pre_conv - t_pre_disk) / 1000.0,
+			float(t_pre_prewarm - t_pre_conv) / 1000.0,
+			float(add_child_start - t_pre_prewarm) / 1000.0,
+			float(t_end_inst - add_child_start) / 1000.0,
+			instantiated,
+			_instantiation_queue.size(),
+			"Y" if _burst_loading_active else "N",
+		])
 	return instantiated
 
 

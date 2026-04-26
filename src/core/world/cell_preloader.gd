@@ -27,6 +27,7 @@ extends RefCounted
 
 const SC := preload("res://src/core/world/streaming_config.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 
 
 ## One cached entry per unique cell grid. Transitions: loading → ready →
@@ -36,10 +37,19 @@ class PreloadEntry:
 	var cell: Vector2i
 	var state: String = "loading"  # "loading" | "ready" | "activated"
 	var last_touched_msec: int = 0
-	## WorkerThreadPool task IDs dispatched by this entry. `drain_entry()` must
-	## wait_for_task_completion on all of them before eviction — skipping is a
-	## memory leak per CLAUDE.md anti-pattern "DON'T skip wait_for_task_completion".
+	## WorkerThreadPool task IDs dispatched by this entry. The eviction path
+	## previously called wait_for_task_completion on each — that blocked the
+	## main thread for 100-750ms when many cells evicted simultaneously
+	## (autopsy 2026-04-25, plan §12). New pattern: cooperative cancellation.
+	## Workers check `cancelled` and self-bail; main thread never blocks.
+	## RefCounted lifetime guarantees no leak — bound `entry` keeps the
+	## RefCount > 0 while any worker is still executing.
 	var task_ids: Array[int] = []
+	## Cooperative-cancellation flag. Set true by main thread when the entry
+	## is evicted / aborted. Workers check this BEFORE doing the load and
+	## early-return if true. GDScript bool reads/writes are atomic on the
+	## platforms we target (x86_64 / arm64) — no mutex needed.
+	var cancelled: bool = false
 	## Debug / stat: model paths touched by this preload. Not used for logic.
 	var model_paths: Array[String] = []
 
@@ -53,6 +63,12 @@ var _model_loader_ref: WeakRef = null  # ModelLoader
 
 var _current_anchor_cell: Vector2i = Vector2i.ZERO
 var _debug_enabled: bool = false
+
+## Phase 2 stutter diag — pipeline compile delta monitor injected by
+## NativeStreamingManager. Logs MESH/SURFACE/DRAW deltas at LOADING→READY
+## transition so we can verify whether ResourceLoader.load triggers
+## engine-side pipeline pre-compile (plan §2.2). null = monitor disabled.
+var _pipeline_compile_monitor: PipelineCompileMonitorScript = null
 
 # Stats (read by streaming manager for heartbeat)
 var stats: Dictionary = {
@@ -72,6 +88,12 @@ func configure(instantiator: RefCounted, model_loader: RefCounted) -> void:
 
 func set_debug(enabled: bool) -> void:
 	_debug_enabled = enabled
+
+
+## Phase 2 stutter diag — wire a per-preload pipeline compile delta tracker.
+## Called from NativeStreamingManager.configure(). null = no logging.
+func set_pipeline_compile_monitor(monitor: PipelineCompileMonitorScript) -> void:
+	_pipeline_compile_monitor = monitor
 
 
 ## Main per-frame tick. Called from `native_streaming_manager._process` after
@@ -157,8 +179,11 @@ func get_stats_snapshot() -> Dictionary:
 ##
 ## Research §8.8 — mirrors OpenMW's `abortTerrainPreloadExcept`.
 ##
-## Waits for every dispatched task via `wait_for_task_completion` (required —
-## skipping leaks memory per CLAUDE.md anti-pattern).
+## Cooperative-cancellation: each entry's `cancelled` flag is set, workers
+## self-bail on next ResourceLoader.load entry. No `wait_for_task_completion`
+## (autopsy 2026-04-25 showed eviction blocked main thread up to 750 ms;
+## plan §12.6 / Fix C.1 replaces with coop-cancel). Memory safety guaranteed
+## by the bound `entry` arg keeping RefCount > 0 until each worker exits.
 func abort_all() -> void:
 	for cell: Vector2i in _cache:
 		_drain_entry(_cache[cell] as PreloadEntry)
@@ -251,18 +276,19 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 		stats["preloads_ready"] += 1
 		return
 
-	# Phase F integration (§8.6) — pre-register all STAT prototypes. Instantiator
-	# dispatches its own WorkerThreadPool tasks tracked in `_prereg_task_ids`;
-	# the preloader does NOT duplicate that tracking. Phase F's shutdown drain
-	# is orthogonal to the preloader's drain.
-	var instantiator: Object = _instantiator_ref.get_ref() if _instantiator_ref != null else null
-	if instantiator != null and instantiator.has_method("preregister_cell_statics"):
-		instantiator.call("preregister_cell_statics", cell_record)
+	# Fix A (streaming_stutter_2026_04_25 plan): the previous prereg call here
+	# was a 832 ms main-thread spike. preregister_cell_statics → has_animation
+	# → get_model is sync ResourceLoader.load + PackedScene.instantiate per
+	# unique prototype. The preloader's contract is ResourceLoader cache
+	# warming only; pre-registration belongs to the active loader, which calls
+	# preregister_cell_statics from cell_manager.request_exterior_cell_async.
+	# Speculative prereg duplicated that work on every cell the camera might
+	# enter. Deleted.
 
-	# Non-STAT refs (doors, containers, activators, lights) aren't covered by
-	# Phase F. Warm their ResourceLoader cache explicitly — one worker task per
-	# unique disk_path. Main-thread cost: one ESM lookup per ref (bounded,
-	# ~50–150/cell). Worker cost: ResourceLoader.load (thread-safe per §2.1).
+	# Warm ResourceLoader cache for every unique model_path in the cell — one
+	# worker task per unique disk_path. Main-thread cost: one ESM lookup per
+	# ref (bounded, ~50–150/cell). Worker cost: ResourceLoader.load (thread-
+	# safe per research §2.1).
 	var model_loader: Object = _model_loader_ref.get_ref() if _model_loader_ref != null else null
 	if model_loader == null or not model_loader.has_method("resolve_disk_path"):
 		return
@@ -288,8 +314,12 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 
 		# LOW priority — we're ahead of the instantiation queue. Don't starve
 		# Phase A/E/F tasks racing to feed the actual load.
+		# Bind `entry` so workers can check `entry.cancelled` and self-bail
+		# when main thread evicts. The bind also keeps entry RefCount > 0
+		# until every worker exits, guaranteeing cancelled-flag validity
+		# without any explicit wait. Plan §12.6 / Fix C.1.
 		var task_id: int = WorkerThreadPool.add_task(
-			_worker_warm_resource.bind(disk_path),
+			_worker_warm_resource.bind(disk_path, entry),
 			false,  # high_priority = false
 			"cell_preloader:warm",
 		)
@@ -301,8 +331,21 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 
 ## Worker body — off-thread PackedScene load. ResourceLoader.load is
 ## thread-safe per research §2.1; cached entries are shared across threads.
-# PHASE_G:WORKER_SAFE — zero autoload / signal / scene-tree access.
-static func _worker_warm_resource(disk_path: String) -> void:
+##
+## Cooperative cancellation (plan §12.6 / Fix C.1): main thread sets
+## `entry.cancelled = true` when evicting; we check before doing the IO and
+## bail. ResourceLoader.load itself can't be interrupted mid-IO, so once we
+## START loading we run to completion — but the result then sits in the
+## ResourceLoader cache (harmless: identical to a normal preload-hit on a
+## future re-visit) and we drop our reference. Net cost on cancellation: at
+## most ONE extra load for any in-flight worker, vs the previous up-to-750ms
+## main-thread block on n_evicted × n_tasks.
+# PHASE_G:WORKER_SAFE — zero autoload / signal / scene-tree access. The
+# `entry` arg is a RefCounted; we read entry.cancelled (atomic bool read)
+# but never write to entry from the worker.
+static func _worker_warm_resource(disk_path: String, entry: PreloadEntry) -> void:
+	if entry.cancelled:
+		return
 	ResourceLoader.load(disk_path, "PackedScene")
 
 
@@ -322,6 +365,18 @@ func _poll_completions() -> void:
 			stats["preloads_ready"] += 1
 			if _debug_enabled:
 				print("[CellPreloader] cell=", cell, " READY (tasks=", entry.task_ids.size(), ")")
+			# Phase 2 stutter diag — pipeline compile delta over the preload
+			# window. If MESH/SURFACE > 0 here → ResourceLoader.load triggered
+			# engine pre-compile (good, we're done). If 0 here BUT non-zero on
+			# the matching cell_loaded log line → pre-compile fires only at
+			# instantiate, and we need hidden-instance pre-warm. Plan §2.2.
+			if _pipeline_compile_monitor != null:
+				var d: PackedInt64Array = _pipeline_compile_monitor.delta_and_update()
+				if PipelineCompileMonitorScript.has_activity(d):
+					Log.info("streaming", "[pipe-preload %s] tasks=%d paths=%d %s" % [
+						cell, entry.task_ids.size(), entry.model_paths.size(),
+						PipelineCompileMonitorScript.format_delta(d),
+					])
 
 
 ## Evict stale entries. Never drops below MIN_CACHE_CELLS even if all are
@@ -345,8 +400,8 @@ func _evict_expired(now_msec: int) -> void:
 		_drain_and_erase(cell)
 
 
-## Remove + drain a single cell. Safe to call whether or not tasks are done —
-## `wait_for_task_completion` is idempotent on completed tasks.
+## Remove + drain a single cell. Marks workers as cancelled (cooperative)
+## and erases from cache immediately — no main-thread blocking.
 func _drain_and_erase(cell: Vector2i) -> void:
 	if cell not in _cache:
 		return
@@ -355,9 +410,23 @@ func _drain_and_erase(cell: Vector2i) -> void:
 	stats["evictions"] += 1
 
 
-## Shared drain helper — waits on all pending tasks.
+## Shared drain helper — cooperative cancellation only. Sets the entry's
+## cancelled flag so workers self-bail; clears the task_ids list so the
+## entry's RefCount drops to whatever the workers still hold; returns
+## immediately without blocking. The previous implementation called
+## `WorkerThreadPool.wait_for_task_completion` for every task, which
+## blocked the main thread for 100-750ms when many cells evicted at once
+## (autopsy 2026-04-25 — see plan §12.3 Class B).
+##
+## Why no leak: the worker's bound `entry` argument keeps RefCount > 0
+## until the worker function returns. Worker reads cancelled, returns,
+## drops its bind ref, RC reaches 0, entry frees normally.
+##
+## Why safe: `entry.cancelled` writes from main thread + reads from
+## worker thread on a single bool. GDScript bool reads/writes are
+## word-atomic on x86_64 / arm64. No torn read possible.
+##
+## Plan: docs/plans/distant_rendering_2026_04/cell_transition_stutter_phase2.md §12.6 / Fix C.1.
 func _drain_entry(entry: PreloadEntry) -> void:
-	for tid: int in entry.task_ids:
-		if not WorkerThreadPool.is_task_completed(tid):
-			WorkerThreadPool.wait_for_task_completion(tid)
+	entry.cancelled = true
 	entry.task_ids.clear()

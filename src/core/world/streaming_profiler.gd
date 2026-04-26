@@ -25,6 +25,10 @@ class SectionTiming extends RefCounted:
 	var call_count: int = 0
 	var max_duration_usec: int = 0
 	var min_duration_usec: int = 999999999
+	## Frame number at which last_duration_usec was last updated. Used by
+	## dump_overrun_breakdown to filter sections that fired in the current
+	## frame vs sections whose last value is stale from an earlier frame.
+	var last_fired_frame: int = -1
 
 	## Rolling average over last N frames
 	var history: Array[int] = []
@@ -101,6 +105,7 @@ func end_section(section_name: String) -> void:
 	section.last_duration_usec = duration
 	section.total_duration_usec += duration
 	section.call_count += 1
+	section.last_fired_frame = _frame_count
 
 	if duration > section.max_duration_usec:
 		section.max_duration_usec = duration
@@ -278,3 +283,56 @@ func get_raw_data() -> Dictionary:
 		"sections": get_all_sections(),
 		"metrics": _metrics.duplicate(),
 	}
+
+
+## Slow-frame autopsy. When the LAST frame exceeded `threshold_ms`, dump a
+## per-section breakdown of THAT frame (not aggregated) to the log.
+##
+## Designed to answer "where did the 1100 ms spike actually go?" without
+## requiring a hypothesis up front. Sections sorted by last-frame duration
+## descending; top 8 emitted with attributed/unattributed totals.
+##
+## Caller is expected to invoke this AFTER end_frame() at the bottom of
+## the per-frame loop. Cheap when the threshold is not hit (one float compare).
+##
+## `source` is appended to the log line so caller can identify the call site
+## (e.g. "stream_proc"). Empty string skips it.
+##
+## Plan: docs/plans/distant_rendering_2026_04/cell_transition_stutter_phase2.md §11.4.
+func dump_overrun_breakdown(threshold_ms: float, source: String = "") -> void:
+	if not enabled:
+		return
+	var frame_ms: float = _frame_duration_usec / 1000.0
+	if frame_ms < threshold_ms:
+		return
+
+	# Collect sections that FIRED THIS FRAME (last_fired_frame == current).
+	# Sections that didn't run this frame stay quiet — they aren't suspects.
+	# end_frame() incremented _frame_count first, so "this frame" is _frame_count - 1.
+	var current_frame: int = _frame_count - 1
+	var fired: Array = []
+	for section_name: String in _sections:
+		var s: SectionTiming = _sections[section_name]
+		if s.last_fired_frame == current_frame:
+			fired.append([section_name, s.last_duration_usec])
+
+	# Sort by duration desc.
+	fired.sort_custom(func(a: Array, b: Array) -> bool:
+		return (a[1] as int) > (b[1] as int))
+
+	var top: Array = fired.slice(0, 8)
+	var parts: PackedStringArray = PackedStringArray()
+	for entry: Array in top:
+		var name_str: String = entry[0]
+		var dur_usec: int = entry[1]
+		parts.append("%s=%.1f" % [name_str, dur_usec / 1000.0])
+	# Sum ALL fired sections (not just top 8) for accurate unattributed.
+	var total_attributed_usec: int = 0
+	for entry: Array in fired:
+		total_attributed_usec += int(entry[1])
+	var unattributed_ms: float = frame_ms - (total_attributed_usec / 1000.0)
+
+	var src_tag: String = (" " + source) if not source.is_empty() else ""
+	Log.warn("autopsy", "[autopsy %.1fms%s] top: %s | sections_fired=%d unattributed=%.1fms" % [
+		frame_ms, src_tag, ", ".join(parts), fired.size(), unattributed_ms,
+	])
