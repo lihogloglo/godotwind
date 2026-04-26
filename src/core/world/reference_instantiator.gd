@@ -76,6 +76,17 @@ var last_static_data: Dictionary = {}
 # on WorkerThreadPool". Plan: phase_f_prototype_prereg.md §5.
 var _prereg_task_ids: Array[int] = []
 
+## Fix D (streaming_stutter_2026_04_25 plan) — task IDs of the off-thread
+## *dispatcher* tasks (the worker variant of `preregister_cell_statics`).
+## Distinct from `_prereg_task_ids` which holds the per-prototype workers
+## the dispatcher itself spawns. `drain_prereg_tasks()` waits on both.
+var _prereg_dispatcher_task_ids: Array[int] = []
+
+## Fix D — guards `_prereg_task_ids` against concurrent worker append
+## (dispatcher worker on its own thread) and main-thread drain. Held only
+## around the array operations, never around worker-bound work.
+var _prereg_task_ids_mutex: Mutex = Mutex.new()
+
 # Configuration
 var create_lights: bool = true
 var load_lights: bool = true  # Skip ALL light ref instantiation (model + OmniLight3D). A/B benchmark gate.
@@ -638,25 +649,63 @@ func should_dispatch_static_precompute(
 ##
 ## Returns the number of tasks dispatched (for diagnostics).
 ##
-## Plan: docs/plans/distant_rendering_2026_04/phase_f_prototype_prereg.md §3
-# PHASE_F:MAIN_ONLY — reads ESMManager autoload + iterates cell refs.
+## Plan: docs/plans/streaming_stutter_2026_04_25.md (Fix D)
+##
+## Fix D — formerly PHASE_F:MAIN_ONLY. The previous main-thread implementation
+## was a 1644 ms post-teleport spike: walking 200 cell refs × ESMManager +
+## has_animation + has_type + resolve_disk_path on every active-loader cell
+## load, two cells per frame. After Fix C made has_animation cheap, the
+## remaining cost was still O(refs) main-thread iteration. Fix D dispatches
+## the entire body to a single worker per cell; main-thread cost is now ~µs
+## (one bind + add_task).
+##
+## Worker-safe contract — every method touched by the dispatcher worker:
+##   - ESMManager.get_any_record   — autoload, cache populated at boot, read-only
+##   - CarryableRegistry.is_carryable — static, _entries set at boot, read-only
+##   - model_loader.has_animation    — Fix D mutex-protected
+##   - model_loader.resolve_disk_path / resolve_shape_pack_path — Fix D mutex
+##   - static_renderer.has_type       — already mutex-protected (_mesh_types_mutex)
+##   - WorkerThreadPool.add_task      — supported from worker threads
+##   - _prune_completed_prereg_tasks  — Fix D mutex (_prereg_task_ids_mutex)
+##   - _prereg_task_ids append        — Fix D mutex
 func preregister_cell_statics(cell_record: Variant) -> int:
-	# Phase 0 ablation escape hatch — tracker §12.2 crash site lives inside
-	# _should_route_to_renderer → has_animation → get_model → ResourceLoader.load.
-	# Short-circuit the entire prereg when the debug flag is on so ablation runs
-	# can complete. Cold-register stalls return (what Phase F eliminated) but
-	# that delta is uniform across the three ablations.
+	# Phase 0 ablation escape hatch — tracker §12.2 crash site lived inside
+	# the old `has_animation → get_model → ResourceLoader.load` chain. Fix C
+	# rewrote has_animation as SceneState metadata and Fix D moved everything
+	# off-thread, so the original crash class is no longer reachable; flag
+	# kept for historical A/B isolation.
 	if StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG:
 		return 0
-	if static_renderer == null or model_loader == null:
-		return 0
-	if cell_record == null:
+	if static_renderer == null or model_loader == null or cell_record == null:
 		return 0
 
-	# Dedupe model paths within the cell — many refs share types.
-	# Value: { disk: String (scene .res), pack: String (.shapes.res, may be "") }.
-	# The pack path is resolved here on the main thread so the worker can stay
-	# autoload/FileAccess-free — matches the existing disk_path plumbing.
+	# Fix D — body runs off-thread. Caller doesn't await, so the dispatched
+	# count is no longer meaningful at return time; we return 0 and rely on
+	# stats / heartbeat to surface activity.
+	var dispatcher_id: int = WorkerThreadPool.add_task(
+		_worker_dispatch_preregister_cell.bind(cell_record),
+		false,  # low priority — the per-prototype tasks the dispatcher spawns
+				# stay HIGH so they still race the cell's instantiation queue
+		"ref_instantiator:phase_f_dispatcher",
+	)
+	_prereg_dispatcher_task_ids.append(dispatcher_id)
+	return 0
+
+
+# Fix D — off-thread body of preregister_cell_statics. WORKER_SAFE per the
+# contract documented on the public function above. Reads autoloads (now
+# read-only after batch populate at boot), calls mutex-protected helpers,
+# dispatches per-prototype workers via WorkerThreadPool.add_task.
+#
+# The classification step that used to sit before dedupe (carryable check,
+# _should_route_to_renderer) stays here; has_animation (called inside it)
+# is now thread-safe via the model_loader disk_cache_mutex (Fix D).
+func _worker_dispatch_preregister_cell(cell_record: Variant) -> void:
+	# Local re-check (defensive against teardown race): if any dependency
+	# is gone by the time the worker runs, bail cleanly.
+	if static_renderer == null or model_loader == null or cell_record == null:
+		return
+
 	var to_register: Dictionary = {}  # normalized_path -> { disk: String, pack: String }
 
 	for ref: CellReference in cell_record.references:
@@ -666,15 +715,13 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""
 
-		# Resolve model path from base record (STAT/CONT/DOOR/etc all have `model`).
 		if not "model" in base_record:
 			continue
 		var model_path: String = base_record.model
 		if model_path.is_empty():
 			continue
 
-		# Filter to STAT-routed refs only — interactives use _instantiate_model_object
-		# (Phase A), which doesn't need _mesh_types pre-warming.
+		# Filter to STAT-routed refs only — interactives use Phase A.
 		var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
 		if not _should_route_to_renderer(type_name, model_path, is_carryable, use_static_renderer):
 			continue
@@ -683,24 +730,18 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 		if normalized in to_register:
 			continue
 
-		# Already registered AND shape-cache warm? Skip entirely. If the
-		# renderer knows the type but the shape pack is still cold, we still
-		# want to dispatch so the worker can warm it (has_type doesn't speak
-		# to the collision cache).
+		# Already registered AND shape-cache warm? Skip. Otherwise we still
+		# want the per-prototype worker to fire (it covers shape-cache-only
+		# cold cases too).
 		var renderer_knows: bool = static_renderer.call("has_type", normalized)
 		var needs_shape_warm: bool = shape_cache != null
 		if renderer_knows and not needs_shape_warm:
 			continue
 
-		# Resolve disk path. If missing, sync path will handle it via BSA fallback
-		# (prebake-mode only; runtime_mode returns null and skips the ref).
 		var disk_path: String = model_loader.call("resolve_disk_path", model_path)
 		if disk_path.is_empty():
 			continue
 
-		# Resolve shape pack sidecar (may be empty for legacy caches pre-T.6).
-		# Worker will skip warming when path is empty; main-thread fallback via
-		# `StaticShapeCache.get_shapes` handles those prototypes the old way.
 		var shape_pack_path: String = ""
 		if shape_cache != null:
 			shape_pack_path = model_loader.call("resolve_shape_pack_path", model_path)
@@ -710,40 +751,32 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 			"pack": shape_pack_path,
 		}
 
-	# Prune completed task_ids before appending new ones. Cheap O(N) walk —
-	# N is the number of in-flight pre-reg tasks, typically bounded by the
-	# uniform prototype count × a small multiple. Prevents unbounded growth
-	# of _prereg_task_ids over a long session.
-	_prune_completed_prereg_tasks()
+	# Mutex-protected prune + append batch. Holds the lock only around the
+	# array work; doesn't span the WorkerThreadPool.add_task calls (those
+	# are themselves thread-safe and fast, but holding our local mutex
+	# during dispatch would needlessly serialize concurrent dispatchers).
+	_prereg_task_ids_mutex.lock()
+	# Prune in-place to bound array size over long sessions.
+	if not _prereg_task_ids.is_empty():
+		var still_pending: Array[int] = []
+		for tid: int in _prereg_task_ids:
+			if not WorkerThreadPool.is_task_completed(tid):
+				still_pending.append(tid)
+		_prereg_task_ids = still_pending
+	_prereg_task_ids_mutex.unlock()
 
-	var dispatched: int = 0
 	for normalized: String in to_register:
 		var entry: Dictionary = to_register[normalized]
 		var disk_path: String = entry.disk
 		var shape_pack_path: String = entry.pack
-		# HIGH priority — we're racing the cell's instantiation queue. The worker
-		# pool is shared with Phase A/E tasks; high-priority queueing ensures
-		# pre-reg lands before the static refs are drained.
 		var task_id: int = WorkerThreadPool.add_task(
 			_worker_preregister_prototype.bind(normalized, disk_path, shape_pack_path),
 			true,
 			"ref_instantiator:phase_f_prereg"
 		)
+		_prereg_task_ids_mutex.lock()
 		_prereg_task_ids.append(task_id)
-		dispatched += 1
-	return dispatched
-
-
-## Phase F — drop completed task_ids from _prereg_task_ids. Keep array size
-## bounded over long sessions. `is_task_completed` is non-blocking O(1).
-func _prune_completed_prereg_tasks() -> void:
-	if _prereg_task_ids.is_empty():
-		return
-	var still_pending: Array[int] = []
-	for task_id: int in _prereg_task_ids:
-		if not WorkerThreadPool.is_task_completed(task_id):
-			still_pending.append(task_id)
-	_prereg_task_ids = still_pending
+		_prereg_task_ids_mutex.unlock()
 
 
 ## Phase F — block until every in-flight prototype pre-reg worker completes.
@@ -761,10 +794,22 @@ func _prune_completed_prereg_tasks() -> void:
 ##
 ## Plan: phase_f_prototype_prereg.md §5
 func drain_prereg_tasks() -> void:
-	for task_id: int in _prereg_task_ids:
+	# Fix D — drain dispatcher tasks first; they may still be enqueueing
+	# per-prototype tasks into _prereg_task_ids when shutdown begins.
+	# Once dispatchers are done, _prereg_task_ids is stable for read.
+	for dispatcher_id: int in _prereg_dispatcher_task_ids:
+		if not WorkerThreadPool.is_task_completed(dispatcher_id):
+			WorkerThreadPool.wait_for_task_completion(dispatcher_id)
+	_prereg_dispatcher_task_ids.clear()
+
+	_prereg_task_ids_mutex.lock()
+	var snapshot: Array[int] = []
+	snapshot.append_array(_prereg_task_ids)
+	_prereg_task_ids.clear()
+	_prereg_task_ids_mutex.unlock()
+	for task_id: int in snapshot:
 		if not WorkerThreadPool.is_task_completed(task_id):
 			WorkerThreadPool.wait_for_task_completion(task_id)
-	_prereg_task_ids.clear()
 
 
 ## Phase F — Prototype pre-registration worker.

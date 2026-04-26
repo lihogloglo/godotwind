@@ -79,14 +79,25 @@ var _has_animation_cache: Dictionary[String, bool] = {}
 ## is also cache-hit fast after the CellPreloader warm).
 func has_animation(model_path: String) -> bool:
 	var key := model_path.to_lower()
-	if key in _has_animation_cache:
-		return _has_animation_cache[key]
 
-	# Cache miss — inspect SceneState metadata. No instantiation.
+	_disk_cache_mutex.lock()
+	if key in _has_animation_cache:
+		var hit: bool = _has_animation_cache[key]
+		_disk_cache_mutex.unlock()
+		return hit
+	_disk_cache_mutex.unlock()
+
+	# Cache miss — inspect SceneState metadata. No instantiation. The slow
+	# work (disk probe + ResourceLoader.load + SceneState walk) runs OUTSIDE
+	# the mutex so concurrent workers probing different prototypes don't
+	# serialize on this lock.
 	var disk_path := resolve_disk_path(model_path)
 	if disk_path.is_empty():
+		_disk_cache_mutex.lock()
 		_has_animation_cache[key] = false
+		_disk_cache_mutex.unlock()
 		return false
+
 	# CACHE_MODE_REUSE: hit the ResourceLoader cache the preloader already
 	# warmed. If cold, this loads the PackedScene once — much cheaper than
 	# instantiating it because we skip the recursive sub-resource finalize
@@ -94,26 +105,20 @@ func has_animation(model_path: String) -> bool:
 	var packed_scene: PackedScene = ResourceLoader.load(
 		disk_path, "PackedScene", ResourceLoader.CACHE_MODE_REUSE
 	) as PackedScene
-	if packed_scene == null:
-		_has_animation_cache[key] = false
-		return false
-
-	var state: SceneState = packed_scene.get_state()
-	if state == null:
-		_has_animation_cache[key] = false
-		return false
-
 	var found := false
-	var node_count: int = state.get_node_count()
-	for i in node_count:
-		# get_node_type returns the registered class name as StringName.
-		# &"AnimationPlayer" matches both direct AnimationPlayer nodes and
-		# any subclass — ScriptState handles the inheritance.
-		if state.get_node_type(i) == &"AnimationPlayer":
-			found = true
-			break
+	if packed_scene != null:
+		var state: SceneState = packed_scene.get_state()
+		if state != null:
+			var node_count: int = state.get_node_count()
+			for i in node_count:
+				# get_node_type returns the registered class name as StringName.
+				if state.get_node_type(i) == &"AnimationPlayer":
+					found = true
+					break
 
+	_disk_cache_mutex.lock()
 	_has_animation_cache[key] = found
+	_disk_cache_mutex.unlock()
 	return found
 
 ## The mod registry for asset resolution
@@ -136,6 +141,19 @@ var _disk_cache_dir: String = ""
 ## Maps disk_path -> bool (exists or not)
 ## This eliminates repeated FileAccess.file_exists() calls which are slow
 var _file_exists_cache: Dictionary = {}
+
+## Fix D (streaming_stutter_2026_04_25 plan): mutex covering both
+## `_file_exists_cache` AND `_has_animation_cache`. The off-thread prereg
+## dispatcher (`reference_instantiator.preregister_cell_statics` worker
+## variant) calls `resolve_disk_path` / `resolve_shape_pack_path` /
+## `has_animation` from worker threads — we mutex the dict R/W to avoid
+## torn writes against main-thread callers (carryable spawn paths,
+## proximity routing).
+##
+## Mutex is held only for dict access — not for the FileAccess.file_exists
+## probe or the SceneState parse, which are the slow parts. Workers
+## release before doing those.
+var _disk_cache_mutex: Mutex = Mutex.new()
 
 ## Pending async load requests: disk_path -> {cache_key: String, callbacks: Array[Callable]}
 ## Multiple requests for the same model share one load operation
@@ -320,15 +338,28 @@ func _evict_if_over_budget() -> void:
 		Log.debug("streaming", "LRU evicted %d prototypes (cache: %d/%d)" % [evicted, _model_cache.size(), MAX_CACHE_SIZE])
 
 
-## Cached file existence check - avoids repeated disk I/O
-## Results are cached for the session lifetime since prebaked files don't change
+## Cached file existence check - avoids repeated disk I/O.
+## Results are cached for the session lifetime since prebaked files don't change.
+## Fix D — thread-safe via _disk_cache_mutex. The mutex is dropped before the
+## FileAccess.file_exists probe (potentially blocking I/O) so concurrent workers
+## probing different paths don't serialize.
 func _cached_file_exists(path: String) -> bool:
+	_disk_cache_mutex.lock()
 	if path in _file_exists_cache:
+		var hit: bool = _file_exists_cache[path]
 		_stats["file_exists_cache_hits"] += 1
-		return _file_exists_cache[path]
+		_disk_cache_mutex.unlock()
+		return hit
+	_disk_cache_mutex.unlock()
 
+	# Slow path (file system) outside the lock.
 	var exists := FileAccess.file_exists(path)
+
+	_disk_cache_mutex.lock()
+	# Double-check: another worker may have populated while we probed.
+	# Either way, store our result. Multiple identical writes are harmless.
 	_file_exists_cache[path] = exists
+	_disk_cache_mutex.unlock()
 	return exists
 
 
