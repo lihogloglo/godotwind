@@ -563,17 +563,37 @@ func is_loading_async(model_path: String, item_id: String = "") -> bool:
 ##            instantiate queue for Phase A next frame.
 ## budget_usec: time budget for Phase A; 0 uses DRAIN_FALLBACK_BUDGET_USEC.
 func process_async_loads(budget_usec: int = 0) -> int:
+	# Fix E (streaming_stutter_2026_04_25 plan §11.4) — sub-bracket the three
+	# phases so the inst-spike log can attribute the disk= cost to the actual
+	# culprit (Phase A drain / Phase B poll / deferred drain).
+	var t0 := Time.get_ticks_usec()
+
 	# Phase A: instantiate within budget.
 	var effective_budget := budget_usec if budget_usec > 0 else DRAIN_FALLBACK_BUDGET_USEC
 	var completed := _drain_pending_instantiate_queue(effective_budget)
+
+	var t_phase_a := Time.get_ticks_usec()
 
 	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
 		return completed
 	if _pending_async_loads.is_empty():
 		_drain_deferred_queue()
+		var t_dd := Time.get_ticks_usec()
+		var ml_total: int = t_dd - t0
+		if ml_total > 50_000:
+			Log.warn("streaming", "[ml-spike %.1fms] phaseA=%.1f phaseB=0.0 dd=%.1f items_completed=%d pending_instq=%d pending_async=%d deferred=%d" % [
+				ml_total / 1000.0,
+				float(t_phase_a - t0) / 1000.0,
+				float(t_dd - t_phase_a) / 1000.0,
+				completed,
+				_pending_instantiate_queue.size(),
+				_pending_async_loads.size(),
+				_deferred_async_queue.size(),
+			])
 		return completed
 
 	var to_remove: Array[String] = []
+	var phase_b_get_count: int = 0
 
 	# Phase B: poll in-flight loads, defer instantiate for next frame.
 	for disk_path: String in _pending_async_loads:
@@ -587,6 +607,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 				# cached as null, and left for the next prebake pass to repair.
 				# See docs/audit/MODEL_LOADER_RACE.md.
 				var packed_scene := ResourceLoader.load_threaded_get(disk_path) as PackedScene
+				phase_b_get_count += 1
 				var cache_key: String = _pending_async_loads[disk_path].cache_key
 				var callbacks: Array = _pending_async_loads[disk_path].callbacks
 
@@ -636,8 +657,25 @@ func process_async_loads(budget_usec: int = 0) -> int:
 	for disk_path: String in to_remove:
 		_pending_async_loads.erase(disk_path)
 
+	var t_phase_b := Time.get_ticks_usec()
+
 	# Drain deferred queue into freed slots
 	_drain_deferred_queue()
+
+	var t_dd := Time.get_ticks_usec()
+	var ml_total: int = t_dd - t0
+	if ml_total > 50_000:
+		Log.warn("streaming", "[ml-spike %.1fms] phaseA=%.1f phaseB=%.1f dd=%.1f items_completed=%d phaseB_get=%d pending_instq=%d pending_async=%d deferred=%d" % [
+			ml_total / 1000.0,
+			float(t_phase_a - t0) / 1000.0,
+			float(t_phase_b - t_phase_a) / 1000.0,
+			float(t_dd - t_phase_b) / 1000.0,
+			completed,
+			phase_b_get_count,
+			_pending_instantiate_queue.size(),
+			_pending_async_loads.size(),
+			_deferred_async_queue.size(),
+		])
 
 	return completed
 
@@ -670,15 +708,15 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		var cache_key: String = entry.cache_key
 		var callbacks: Array = entry.callbacks
 
-		# Sync re-load via CACHE_MODE_REUSE to flush any pending c2 sub-resource
-		# initialization left over from the background thread (see field comment).
-		# ResourceLoader.load() on the main thread completes deferred sub-resource
-		# finalization before returning — the async packed_scene may still have
-		# partially-initialized sub-resources that cause SIGSEGV on instantiate().
-		var packed_scene := ResourceLoader.load(entry.disk_path, "PackedScene",
-				ResourceLoader.CACHE_MODE_REUSE) as PackedScene
-		if packed_scene == null:
-			packed_scene = entry.packed_scene  # fallback: use async result
+		# Fix E (streaming_stutter_2026_04_25 plan) — trust the threaded loader.
+		# The previous code did a sync ResourceLoader.load(CACHE_MODE_REUSE)
+		# here to "flush c2 sub-resource finalization", which produced 90-410 ms
+		# disk= spikes per frame. Godot 4.6's load_threaded_get returns a fully
+		# finalized resource when status is THREAD_LOAD_LOADED (verified against
+		# the engine's resource_loader.cpp ResourceLoaderTaskState::done path —
+		# the sub-resources are registered before the status flips to LOADED).
+		# If a SIGSEGV regression appears, revert this hunk.
+		var packed_scene: PackedScene = entry.packed_scene
 
 		# Validate before caching — if can_instantiate() fails, cache null
 		if packed_scene == null or not packed_scene.can_instantiate():
@@ -698,13 +736,35 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		_stats["models_from_disk_async"] += 1
 		_evict_if_over_budget()
 
-		# Each callback gets its own fresh instance (distinct Node3D, collision disabled)
+		# Fix E (streaming_stutter_2026_04_25 plan) — peel callbacks under
+		# the same budget. The previous code processed ALL callbacks of an
+		# entry in one go, ignoring the budget. A popular prototype with 50+
+		# refs ate 400 ms in a single "item" while the loop's outer budget
+		# check still saw items_completed=1. Now we instantiate one ref at
+		# a time and bail mid-entry when the budget runs out, preserving
+		# unprocessed callbacks for the next frame.
 		Log.debug("models", "instantiate %s" % entry.disk_path)
+		var processed_callbacks: int = 0
+		var entry_completed := true
 		for cb_info: Dictionary in callbacks:
+			if Time.get_ticks_usec() - start_us >= budget_usec:
+				entry_completed = false
+				break
 			var cb: Callable = cb_info.callback
 			if cb.is_valid():
 				var instance := _instantiate_from_scene(packed_scene)
 				cb.call(cb_info.model_path, cb_info.item_id, instance)
+			processed_callbacks += 1
+
+		if not entry_completed:
+			# Mid-entry budget exhaustion — re-park unprocessed callbacks
+			# back on the entry so next frame picks them up. We slice off
+			# the processed prefix; the entry stays in place at index
+			# (i - 1) — i was already incremented past it. Rewind so the
+			# loop slice at function exit doesn't drop it.
+			entry.callbacks = callbacks.slice(processed_callbacks)
+			i -= 1
+			break
 
 		completed += 1
 

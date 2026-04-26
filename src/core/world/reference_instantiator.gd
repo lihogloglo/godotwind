@@ -710,7 +710,11 @@ func _worker_dispatch_preregister_cell(cell_record: Variant) -> void:
 
 	for ref: CellReference in cell_record.references:
 		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		# Fix D follow-up — worker-thread-safe variant. Cache miss returns
+		# null (no on-demand creation, which is main-thread-only). Skipped
+		# refs get registered later when the main-thread instantiation path
+		# touches them.
+		var base_record: Variant = ESMManager.get_any_record_cached(str(ref.ref_id), record_type)
 		if base_record == null:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""

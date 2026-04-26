@@ -23,6 +23,17 @@ signal loading_failed(file_path: String, error: String)
 # Maps lowercase ID -> {record: ESMRecord, type: String}
 var _all_records: Dictionary = {}
 
+## Fix D follow-up (streaming_stutter_2026_04_25 plan) — guards `_all_records`
+## against concurrent worker reads + main-thread on-demand writes. The
+## reference_instantiator off-thread prereg dispatcher reads cell-ref records
+## concurrently with the active loader's main-thread `_start_async_request`
+## walk; without this mutex the on-demand creation path's `_all_records[key]
+## = ...` writes torn against a concurrent reader, producing a SIGSEGV cluster.
+##
+## Mutex held only around dict R/W; the slow C# bridge probe and record
+## construction happen outside the lock.
+var _all_records_mutex: Mutex = Mutex.new()
+
 # World/Environment
 var statics: Dictionary[String, StaticRecord] = {}
 var cells: Dictionary[String, CellRecord] = {}
@@ -1139,26 +1150,62 @@ func get_leveled_creature(id: String) -> LeveledCreatureRecord:
 ## Returns the record or null if not found
 ## Also returns the record type name via the optional out parameter
 ## On cache miss (for on-demand types), queries C# and creates record lazily
+##
+## MAIN-THREAD ONLY — the on-demand path mutates `_all_records` and the
+## type-specific dicts (statics / activators / doors / etc), which is unsafe
+## under concurrent reader access. Workers must use `get_any_record_cached`
+## (read-only — no on-demand creation, returns null on miss).
 func get_any_record(id: String, out_type: Array = []) -> ESMRecord:
 	var key := id.to_lower()
 
-	# O(1) lookup in unified dictionary (cache hit)
+	# O(1) lookup in unified dictionary (cache hit) — mutex-guarded against
+	# concurrent on-demand writes from the same fn called on another thread.
+	_all_records_mutex.lock()
 	var entry: Dictionary = _all_records.get(key, {})
+	_all_records_mutex.unlock()
 	if not entry.is_empty():
 		if out_type.size() > 0:
 			out_type[0] = entry.get("type", "unknown")
 		return entry.get("record") as ESMRecord
 
-	# Cache miss — try on-demand creation from C# (Phase 2)
+	# Cache miss — try on-demand creation from C# (Phase 2). The mutex is
+	# acquired internally by `_create_record_on_demand` only around the
+	# `_all_records[key] = ...` write.
 	if _native_loader != null:
 		var rec := _create_record_on_demand(key, id)
 		if rec != null:
+			_all_records_mutex.lock()
 			var cached_entry: Dictionary = _all_records.get(key, {})
+			_all_records_mutex.unlock()
 			if out_type.size() > 0:
 				out_type[0] = cached_entry.get("type", "unknown")
 			return rec
 
 	return null
+
+
+## Worker-thread-safe lookup. Pure read of the post-batch-populate cache
+## (no on-demand creation). Returns null on cache miss; caller must NOT
+## fall through to on-demand creation since that writes to `_all_records`
+## and the type-specific dicts.
+##
+## Used by Fix D's preregister_cell_statics dispatcher worker — workers
+## skip cache-miss refs (the main-thread instantiation path will trigger
+## on-demand creation later if the ref is actually instantiated).
+##
+## Plan: docs/plans/streaming_stutter_2026_04_25.md (Fix D follow-up).
+func get_any_record_cached(id: String, out_type: Array = []) -> ESMRecord:
+	var key := id.to_lower()
+	# Mutex-guarded read so concurrent on-demand writes from main thread
+	# can't tear the dict during this read.
+	_all_records_mutex.lock()
+	var entry: Dictionary = _all_records.get(key, {})
+	_all_records_mutex.unlock()
+	if entry.is_empty():
+		return null
+	if out_type.size() > 0:
+		out_type[0] = entry.get("type", "unknown")
+	return entry.get("record") as ESMRecord
 
 
 ## On-demand record creation from C# data (Phase 2)
@@ -1342,12 +1389,16 @@ func _create_record_on_demand(key: String, original_id: String) -> ESMRecord:
 			rec = clrec
 
 	if rec != null:
-		# Priority-aware insertion (same logic as _populate_simple_records)
+		# Priority-aware insertion (same logic as _populate_simple_records).
+		# Mutex-guarded write — concurrent worker reads of `_all_records`
+		# would race against this insert without it.
+		_all_records_mutex.lock()
 		var dominated: bool = _all_records.has(key)
 		var dominated_priority: int = _get_type_priority(_all_records[key].get("type", "")) if dominated else -1
 		var new_priority: int = _get_type_priority(type_name)
 		if not dominated or new_priority > dominated_priority:
 			_all_records[key] = {"record": rec, "type": type_name}
+		_all_records_mutex.unlock()
 
 	return rec
 
