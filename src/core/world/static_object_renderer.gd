@@ -390,14 +390,14 @@ func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
 ##
 ## Driver: native_streaming_manager._process. Passes current camera position
 ## and the active max-visible-distance squared (visibility_range_end²).
-func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float) -> int:
+func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float, batch_budget: int = 0) -> int:
 	if _prototype_registry == null:
 		return 0
 	# When invisible: only run if dirty (flushes hide_instance zero-scale transforms to GPU).
 	# Skip movement-driven re-culls entirely — no per-frame cost while MID is off.
 	if not _globally_visible and not _prototype_registry.is_cull_dirty():
 		return 0
-	return _prototype_registry.tick_cull_if_needed(cam_pos, max_dist_sq)
+	return _prototype_registry.tick_cull_if_needed(cam_pos, max_dist_sq, batch_budget)
 
 
 ## Lazily instantiate the PrototypeRegistry on first registry-routed add.

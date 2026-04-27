@@ -153,7 +153,7 @@ The summary table prints once it's done. `progressive_<timestamp>.csv` under `us
 **Path:** `user://benchmark_results/` (Windows: `%APPDATA%/Godot/app_userdata/Godotwind/benchmark_results/`)
 
 **Scripted flyby (`benchmark`):**
-- `benchmark_<timestamp>.csv` — 29 per-frame columns (see `CSV_HEADERS` in `streaming_benchmark.gd`)
+- `benchmark_<timestamp>.csv` — 30 per-frame columns (see `CSV_HEADERS` in `streaming_benchmark.gd`)
 - `events_<timestamp>.csv` — cell load/unload lifecycle log
 - `summary_<timestamp>.json` — aggregates + toggle state snapshot
 
@@ -172,9 +172,9 @@ The summary table prints once it's done. `progressive_<timestamp>.csv` under `us
 
 Full CSV columns (`CSV_HEADERS`):
 
-`frame, time_ms, fps, node_count, draw_calls, rendered_objects, primitives, queue_size, loaded_cells, async_requests, cam_x, cam_y, cam_z, memory_static, segment, mid_instances, mid_mesh_types, vram_mb, texture_mem_mb, promoted_objects, stream_total_ms, phase_unload_us, phase_async_us, phase_inst_us, phase_promo_us, phase_coll_us, phase_defer_us, phase_queue_us, phase_cellupd_us`
+`frame, time_ms, fps, node_count, draw_calls, rendered_objects, primitives, queue_size, loaded_cells, async_requests, cam_x, cam_y, cam_z, memory_static, segment, mid_instances, mid_mesh_types, vram_mb, texture_mem_mb, promoted_objects, stream_total_ms, phase_unload_us, phase_async_us, phase_inst_us, phase_promo_us, phase_coll_us, phase_defer_us, phase_queue_us, phase_cellupd_us, phase_static_cull_us`
 
-Aggregate results (in `_calculate_results()`): avg/min/max/p50/p95/p99 FPS + ms, avg/peak draw calls, peak VRAM, total frames, total time, per-segment breakdown.
+Aggregate results (in `_calculate_results()`): avg/min/max/p50/p95/p99/p99.9 FPS + ms, frames over 16.67 ms, avg/peak draw calls, peak VRAM, total frames, total time, per-segment breakdown.
 
 ---
 

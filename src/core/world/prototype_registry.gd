@@ -65,6 +65,14 @@ var initial_batch_capacity: int = 1024
 ## path when the frame had zero churn and the camera didn't move.
 var _cull_dirty: bool = true
 
+## Incremented on every batch/slot mutation. The budgeted cull pass uses this
+## to avoid marking itself clean if new churn arrives while a pass is in flight.
+var _cull_generation: int = 0
+var _cull_active_generation: int = -1
+var _cull_in_progress: bool = false
+var _cull_keys_snapshot: Array = []
+var _cull_cursor: int = 0
+
 ## Last camera position we ticked a cull from. Used with _cull_dist_threshold²
 ## to decide whether movement alone warrants a fresh tick.
 var _last_cull_cam_pos: Vector3 = Vector3.INF
@@ -85,6 +93,11 @@ var _native_checked: bool = false
 func _init(p_scenario: RID) -> void:
 	assert(p_scenario.is_valid(), "PrototypeRegistry: scenario must be valid")
 	_scenario = p_scenario
+
+
+func _mark_cull_dirty() -> void:
+	_cull_dirty = true
+	_cull_generation += 1
 
 
 #region Batch lookup
@@ -172,7 +185,7 @@ func add_instance(
 		slots[i] = InstanceSlot.new(batch, slot, local_xform)
 
 	_instance_slots[p_instance_id] = slots
-	_cull_dirty = true
+	_mark_cull_dirty()
 
 
 ## Phase E — variant of add_instance that takes pre-combined world transforms.
@@ -221,7 +234,7 @@ func add_instance_precombined(
 		slots[i] = InstanceSlot.new(batch, slot, local_xform)
 
 	_instance_slots[p_instance_id] = slots
-	_cull_dirty = true
+	_mark_cull_dirty()
 
 
 ## Release all slots owned by this instance. Idempotent — calling with an
@@ -235,7 +248,7 @@ func remove_instance(p_instance_id: int) -> bool:
 		if entry.batch != null:
 			entry.batch.release_slot(entry.slot)
 	_instance_slots.erase(p_instance_id)
-	_cull_dirty = true
+	_mark_cull_dirty()
 	return true
 
 
@@ -261,7 +274,7 @@ func set_instance_transform(p_instance_id: int, p_world_transform: Transform3D) 
 	for entry: InstanceSlot in slots:
 		if entry.batch != null:
 			entry.batch.set_slot_transform(entry.slot, p_world_transform * entry.local_transform)
-	_cull_dirty = true
+	_mark_cull_dirty()
 
 
 ## Hide all slots of an instance (zero-scale degenerate transform). Slot stays
@@ -275,7 +288,7 @@ func hide_instance(p_instance_id: int) -> void:
 	for entry: InstanceSlot in slots:
 		if entry.batch != null:
 			entry.batch.set_slot_transform(entry.slot, _HIDDEN_XFORM)
-	_cull_dirty = true
+	_mark_cull_dirty()
 
 
 ## Restore a hidden/promoted instance's slots to a live world transform.
@@ -294,15 +307,21 @@ const _HIDDEN_XFORM: Transform3D = Transform3D(
 #region Cull driver (step 4)
 
 ## Per-frame entry point from native_streaming_manager._process. Ticks a
-## full cull pass across every batch if the set is dirty OR the camera has
-## moved at least CULL_DISTANCE_HYSTERESIS since the previous tick.
+## cull pass across batches if the set is dirty OR the camera has moved at
+## least CULL_DISTANCE_HYSTERESIS since the previous tick.
 ##
-## Returns the total visible slot count this tick (0 if skipped).
-func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float) -> int:
+## batch_budget <= 0 keeps the legacy all-at-once behavior. A positive budget
+## spreads dirty uploads across frames, which is the production path during
+## NEAR streaming.
+##
+## Returns the visible slot count processed this tick, or -1 if skipped.
+func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float, batch_budget: int = 0) -> int:
 	var dx: float = cam_pos.x - _last_cull_cam_pos.x
 	var dz: float = cam_pos.z - _last_cull_cam_pos.z
 	var moved_sq: float = dx * dx + dz * dz
-	var needs_tick: bool = _cull_dirty or moved_sq >= CULL_DISTANCE_HYSTERESIS * CULL_DISTANCE_HYSTERESIS
+	var needs_tick: bool = _cull_in_progress \
+		or _cull_dirty \
+		or moved_sq >= CULL_DISTANCE_HYSTERESIS * CULL_DISTANCE_HYSTERESIS
 
 	if not needs_tick:
 		return -1
@@ -313,21 +332,53 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float) -> int:
 		var bridge := NativeBridge.new()
 		_native_culler = bridge.create_world_mid_culler()
 
+	if batch_budget <= 0 or batch_budget >= _batches.size():
+		_cull_in_progress = false
+		_cull_keys_snapshot.clear()
+		_cull_cursor = 0
+		_cull_active_generation = _cull_generation
+		var total_visible_all: int = 0
+		for key: int in _batches:
+			var batch_all: RefCounted = _batches[key]
+			if batch_all != null:
+				total_visible_all += batch_all.cull_and_upload(cam_pos, max_dist_sq, _native_culler)
+		if _cull_generation == _cull_active_generation:
+			_cull_dirty = false
+		_last_cull_cam_pos = cam_pos
+		return total_visible_all
+
+	if not _cull_in_progress:
+		_cull_keys_snapshot = _batches.keys()
+		_cull_cursor = 0
+		_cull_active_generation = _cull_generation
+		_cull_in_progress = true
+
 	var total_visible: int = 0
-	for key: int in _batches:
+	var processed: int = 0
+	while _cull_cursor < _cull_keys_snapshot.size() and processed < batch_budget:
+		var key: int = int(_cull_keys_snapshot[_cull_cursor])
+		_cull_cursor += 1
+		processed += 1
+		if not _batches.has(key):
+			continue
 		var batch: RefCounted = _batches[key]
 		if batch != null:
 			total_visible += batch.cull_and_upload(cam_pos, max_dist_sq, _native_culler)
 
-	_cull_dirty = false
-	_last_cull_cam_pos = cam_pos
+	if _cull_cursor >= _cull_keys_snapshot.size():
+		_cull_in_progress = false
+		_cull_keys_snapshot.clear()
+		_cull_cursor = 0
+		if _cull_generation == _cull_active_generation:
+			_cull_dirty = false
+			_last_cull_cam_pos = cam_pos
 	return total_visible
 
 
 ## Force the next tick_cull_if_needed to actually run, regardless of camera
 ## distance / dirty state. Exposed for console diagnostics.
 func force_cull_next_tick() -> void:
-	_cull_dirty = true
+	_mark_cull_dirty()
 
 func is_cull_dirty() -> bool:
 	return _cull_dirty

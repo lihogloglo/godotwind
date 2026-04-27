@@ -2383,6 +2383,16 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 ## the worker absorbs most of it (triangle assembly + transform), main pays
 ## only the ~10-20ms BVH build.
 func _tick_static_collision_build() -> void:
+	if SC.DEBUG_DISABLE_CELL_STATIC_COLLISION:
+		for request_id: int in _async_requests:
+			var request: AsyncCellRequest = _async_requests[request_id]
+			if request.collision_built:
+				continue
+			_drain_collision_worker_for_request(request)
+			request.collision_built = true
+			request.collision_dispatched = true
+		return
+
 	# Phase 1: dispatch — for each cell ready and not yet dispatched, classify
 	# on main and fire a worker task. Cheap (O(N_refs) main work, no BVH).
 	for request_id: int in _async_requests:

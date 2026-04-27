@@ -259,12 +259,12 @@ func _rebuild_labels(frame_ms: float) -> void:
 		var burst := bool(sm_stats.get("burst_loading", false))
 		var sm_total := float(sm_stats.get("frame_total_ms", 0.0))
 		var startup := bool(sm_stats.get("startup_phase", false))
-		_label_phases.text = "stream[%s%s]: inst=%.1f async=%.1f promo=%.1f unload=%.1f total=%.1f (ms)" % [
+		_label_phases.text = "stream[%s%s]: inst=%.1f async=%.1f static=%.1f unload=%.1f total=%.1f (ms)" % [
 			"STARTUP " if startup else "",
 			"BURST" if burst else "norm",
 			pt[2]/1000.0 if n > 2 else 0.0,
 			pt[1]/1000.0 if n > 1 else 0.0,
-			pt[3]/1000.0 if n > 3 else 0.0,
+			pt[8]/1000.0 if n > 8 else 0.0,
 			pt[0]/1000.0 if n > 0 else 0.0,
 			sm_total
 		]

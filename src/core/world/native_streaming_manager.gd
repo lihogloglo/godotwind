@@ -256,7 +256,8 @@ var _frame_overrun_count: int = 0
 var _last_overrun_log_frame: int = 0
 
 ## Per-frame phase timing (usec) — set every frame, readable by benchmark/profiler.
-## Indices: 0=unload, 1=async_complete, 2=instantiate, 3=promote, 4=collision, 5=deferred, 6=queue, 7=cell_update
+## Indices: 0=unload, 1=async_complete, 2=instantiate, 3=promote,
+## 4=collision, 5=deferred, 6=queue, 7=cell_update, 8=static_cull
 var _last_phase_times: PackedFloat64Array = PackedFloat64Array()
 var _last_frame_total_ms: float = 0.0
 
@@ -664,7 +665,7 @@ func _process(delta: float) -> void:
 	# Start timing for frame budget telemetry
 	var frame_start_usec := Time.get_ticks_usec()
 	var phase_times: PackedFloat64Array = PackedFloat64Array()  # usec per phase
-	phase_times.resize(8)  # 0:unload, 1:async_complete, 2:instantiate, 3:promote, 4:collision, 5:deferred, 6:queue, 7:cell_update
+	phase_times.resize(9)  # 0:unload, 1:async_complete, 2:instantiate, 3:promote, 4:collision, 5:deferred, 6:queue, 7:cell_update, 8:static_cull
 	var budget_usec := frame_budget_ms * 1000.0
 
 	# Per-phase profiler — lightweight begin/end section pairs.
@@ -921,10 +922,16 @@ func _process(delta: float) -> void:
 	# boot, empty world). Runs after all add/remove/transform work this
 	# frame so the packed buffer reflects the latest state.
 	if _static_renderer:
+		phase_start = Time.get_ticks_usec()
 		if prof: prof.begin_section("static_renderer_cull")
 		var vr_end: float = _static_renderer.visibility_range_end
-		_static_renderer.tick_prototype_cull(_camera_position, vr_end * vr_end)
+		_static_renderer.tick_prototype_cull(
+			_camera_position,
+			vr_end * vr_end,
+			SC.STATIC_CULL_BATCH_BUDGET_PER_FRAME
+		)
 		if prof: prof.end_section("static_renderer_cull")
+		phase_times[8] = float(Time.get_ticks_usec() - phase_start)
 
 	# Store per-phase timing for external consumers (benchmark, profiler)
 	phase_times[7] = cell_update_usec
@@ -937,12 +944,13 @@ func _process(delta: float) -> void:
 		_frame_overrun_count += 1
 		# Log with per-phase breakdown (at most once per 60 frames)
 		if Engine.get_frames_drawn() - _last_overrun_log_frame > 60:
-			Log.warn("streaming", "Frame overrun: %.1fms [cellupd:%.1f unload:%.1f async:%.1f inst:%.1f promo:%.1f coll:%.1f defer:%.1f queue:%.1f] (budget:%.1fms, overruns:%d)" % [
+			Log.warn("streaming", "Frame overrun: %.1fms [cellupd:%.1f unload:%.1f async:%.1f inst:%.1f promo:%.1f coll:%.1f defer:%.1f queue:%.1f static:%.1f] (budget:%.1fms, overruns:%d)" % [
 				total_ms,
 				cell_update_usec / 1000.0,
 				phase_times[0] / 1000.0, phase_times[1] / 1000.0, phase_times[2] / 1000.0,
 				phase_times[3] / 1000.0, phase_times[4] / 1000.0, phase_times[5] / 1000.0,
 				phase_times[6] / 1000.0,
+				phase_times[8] / 1000.0,
 				frame_budget_ms, _frame_overrun_count])
 			_last_overrun_log_frame = Engine.get_frames_drawn()
 
@@ -970,14 +978,15 @@ func _process(delta: float) -> void:
 				var burst := _cell_manager.is_burst_loading()
 				var pt := _last_phase_times
 				var n := pt.size()
-				Log.info("streaming", "[audit +%.0fs] fps=%d proc=%.1fms frame=%.1fms queue=%d burst=%s | unload=%.1f async=%.1f inst=%.1f promo=%.1f coll=%.1f defer=%.1f (ms)" % [
+				Log.info("streaming", "[audit +%.0fs] fps=%d proc=%.1fms frame=%.1fms queue=%d burst=%s | unload=%.1f async=%.1f inst=%.1f promo=%.1f coll=%.1f defer=%.1f static=%.1f (ms)" % [
 					elapsed_s, fps, proc_ms, total_ms, q, "Y" if burst else "N",
 					pt[0]/1000.0 if n > 0 else 0.0,
 					pt[1]/1000.0 if n > 1 else 0.0,
 					pt[2]/1000.0 if n > 2 else 0.0,
 					pt[3]/1000.0 if n > 3 else 0.0,
 					pt[4]/1000.0 if n > 4 else 0.0,
-					pt[5]/1000.0 if n > 5 else 0.0
+					pt[5]/1000.0 if n > 5 else 0.0,
+					pt[8]/1000.0 if n > 8 else 0.0
 				])
 
 
@@ -1714,7 +1723,7 @@ func get_stats() -> Dictionary:
 
 ## Get last frame's per-phase timing breakdown (usec).
 ## Indices: 0=unload, 1=async_complete, 2=instantiate, 3=promote, 4=collision,
-##          5=deferred, 6=queue, 7=cell_update
+##          5=deferred, 6=queue, 7=cell_update, 8=static_cull
 ## Returns empty array if not yet initialized.
 func get_phase_times() -> PackedFloat64Array:
 	return _last_phase_times

@@ -58,7 +58,7 @@ const SEGMENT_NAMES: Array[String] = [
 ]
 
 ## CSV column headers
-const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us"
+const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us"
 
 #endregion
 
@@ -460,7 +460,7 @@ func _update_segment_index() -> void:
 
 func _log_frame() -> void:
 	var entry := PackedFloat64Array()
-	entry.resize(29)
+	entry.resize(30)
 	entry[0] = float(Engine.get_frames_drawn())
 	entry[1] = _last_frame_time_ms
 	entry[2] = Engine.get_frames_per_second()
@@ -489,7 +489,7 @@ func _log_frame() -> void:
 	if _streaming_manager and _streaming_manager.has_method("get_phase_times"):
 		entry[20] = _streaming_manager.get_frame_streaming_ms()
 		var pt: PackedFloat64Array = _streaming_manager.get_phase_times()
-		for i in range(mini(pt.size(), 8)):
+		for i in range(mini(pt.size(), 9)):
 			entry[21 + i] = pt[i]
 	_frame_log.append(entry)
 
@@ -692,11 +692,16 @@ func _calculate_results() -> Dictionary:
 	var p50 := sorted_times[total_frames / 2]
 	var p95 := sorted_times[int(total_frames * 0.95)]
 	var p99 := sorted_times[int(total_frames * 0.99)]
+	var p999_index: int = mini(total_frames - 1, int(float(total_frames) * 0.999))
+	var p99_9 := sorted_times[p999_index]
 
 	var max_time := 0.0
 	var max_frame := 0
 	var max_segment := 0
+	var frames_over_16_67 := 0
 	for i in range(total_frames):
+		if frame_times[i] > 16.67:
+			frames_over_16_67 += 1
 		if frame_times[i] > max_time:
 			max_time = frame_times[i]
 			max_frame = i
@@ -764,9 +769,11 @@ func _calculate_results() -> Dictionary:
 		"p50_ms": p50,
 		"p95_ms": p95,
 		"p99_ms": p99,
+		"p99_9_ms": p99_9,
 		"max_time_ms": max_time,
 		"max_frame": max_frame,
 		"max_segment": SEGMENT_NAMES[max_segment] if max_segment < SEGMENT_NAMES.size() else "unknown",
+		"frames_over_16_67": frames_over_16_67,
 		"time_to_60fps_frames": time_to_60fps,
 		"time_to_60fps_s": float(time_to_60fps) * avg_time / 1000.0 if time_to_60fps > 0 else -1.0,
 		"peak_queue": int(peak_queue),
@@ -812,14 +819,14 @@ func _save_csv() -> void:
 
 	file.store_line(CSV_HEADERS)
 	for entry in _frame_log:
-		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d,%.2f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f" % [
+		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d,%.2f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f" % [
 			int(entry[0]), entry[1], entry[2], int(entry[3]), int(entry[4]),
 			int(entry[5]), int(entry[6]), int(entry[7]), int(entry[8]),
 			int(entry[9]), entry[10], entry[11], entry[12], entry[13],
 			int(entry[14]), int(entry[15]), int(entry[16]),
 			entry[17], entry[18], int(entry[19]),
 			entry[20], entry[21], entry[22], entry[23], entry[24],
-			entry[25], entry[26], entry[27], entry[28]
+			entry[25], entry[26], entry[27], entry[28], entry[29]
 		]
 		file.store_line(line)
 
@@ -870,7 +877,9 @@ func _print_summary(results: Dictionary) -> void:
 	lines.append("  P50: %.1fms" % results.p50_ms)
 	lines.append("  P95: %.1fms" % results.p95_ms)
 	lines.append("  P99: %.1fms" % results.p99_ms)
+	lines.append("  P99.9: %.1fms" % results.p99_9_ms)
 	lines.append("  Max: %.1fms (frame %d, segment: %s)" % [results.max_time_ms, results.max_frame, results.max_segment])
+	lines.append("  Frames >16.67ms: %d" % results.frames_over_16_67)
 	lines.append("")
 
 	if results.time_to_60fps_frames > 0:
@@ -942,31 +951,31 @@ func _print_summary(results: Dictionary) -> void:
 			lines.append("  Visibility drops (>5 objects): %d" % _visibility_change_count)
 
 	# Per-phase streaming timing breakdown (I/O stall profiling)
-	if _frame_log.size() > 0 and _frame_log[0].size() >= 29:
-		var phase_names: Array[String] = ["unload", "async", "instantiate", "promote", "collision", "deferred", "queue", "cell_update"]
+	if _frame_log.size() > 0 and _frame_log[0].size() >= 30:
+		var phase_names: Array[String] = ["unload", "async", "instantiate", "promote", "collision", "deferred", "queue", "cell_update", "static_cull"]
 		var phase_avgs: PackedFloat64Array = PackedFloat64Array()
 		var phase_maxes: PackedFloat64Array = PackedFloat64Array()
 		var stream_total_avg := 0.0
 		var stream_total_max := 0.0
-		phase_avgs.resize(8)
-		phase_maxes.resize(8)
+		phase_avgs.resize(9)
+		phase_maxes.resize(9)
 		var count := 0
 		for entry: PackedFloat64Array in _frame_log:
 			if entry[20] > 0.001:  # Only count frames where streaming actually ran
 				stream_total_avg += entry[20]
 				stream_total_max = maxf(stream_total_max, entry[20])
-				for i in range(8):
+				for i in range(9):
 					phase_avgs[i] += entry[21 + i]
 					phase_maxes[i] = maxf(phase_maxes[i], entry[21 + i])
 				count += 1
 		if count > 0:
 			stream_total_avg /= float(count)
-			for i in range(8):
+			for i in range(9):
 				phase_avgs[i] /= float(count)
 			lines.append("")
 			lines.append("Streaming Phase Timing (I/O stall analysis):")
 			lines.append("  Total streaming work: avg %.2fms, max %.2fms (%d active frames)" % [stream_total_avg, stream_total_max, count])
-			for i in range(8):
+			for i in range(9):
 				var avg_ms := phase_avgs[i] / 1000.0
 				var max_ms := phase_maxes[i] / 1000.0
 				var pct := (phase_avgs[i] / (stream_total_avg * 1000.0)) * 100.0 if stream_total_avg > 0.001 else 0.0
@@ -1015,7 +1024,9 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 		"p50_ms": results.get("p50_ms", 0.0),
 		"p95_ms": results.get("p95_ms", 0.0),
 		"p99_ms": results.get("p99_ms", 0.0),
+		"p99_9_ms": results.get("p99_9_ms", 0.0),
 		"max_ms": results.get("max_time_ms", 0.0),
+		"frames_over_16_67": results.get("frames_over_16_67", 0),
 		"avg_draw_calls": results.get("avg_draw_calls", 0),
 		"peak_draw_calls": results.get("peak_draw_calls", 0),
 		"peak_vram_mb": results.get("peak_vram_mb", 0.0),

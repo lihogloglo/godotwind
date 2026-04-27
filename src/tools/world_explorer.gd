@@ -169,6 +169,14 @@ var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 # Interior cell browser (constructed by CellBrowser)
 var _cell_browser: CellBrowser = null
 
+
+func _runtime_cmdline_args() -> PackedStringArray:
+	var args := PackedStringArray()
+	args.append_array(OS.get_cmdline_args())
+	args.append_array(OS.get_cmdline_user_args())
+	return args
+
+
 # Camera mode state
 enum CameraMode { FLY_CAMERA, PLAYER_CONTROLLER }
 var _camera_mode: CameraMode = CameraMode.FLY_CAMERA
@@ -273,7 +281,7 @@ func _ready() -> void:
 	# present, ALL light refs are skipped entirely (model + OmniLight3D). Used to
 	# validate the hypothesis that light instantiation drives FPS hitches before
 	# shipping the off-thread pattern. Remove once E.3 lands and is measured.
-	for arg in OS.get_cmdline_args():
+	for arg in _runtime_cmdline_args():
 		if arg == "--no-lights":
 			cell_manager.load_lights = false
 			Log.info("streaming", "[--no-lights] light refs disabled — A/B benchmark gate (Phase E.3 falsification)")
@@ -282,7 +290,7 @@ func _ready() -> void:
 	# Phase 0 ablation flags — isolate Jolt-broadphase + bespoke-fade cost from
 	# streaming pipeline. Consumers live in reference_instantiator.gd. Always
 	# default to false; command-line only. Remove once Phase 0 data is captured.
-	for arg in OS.get_cmdline_args():
+	for arg in _runtime_cmdline_args():
 		if arg == "--disable-jolt-attach":
 			StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH = true
 			Log.info("streaming", "[--disable-jolt-attach] per-object Jolt body attach disabled — Phase 0 ablation")
@@ -291,7 +299,10 @@ func _ready() -> void:
 			Log.info("streaming", "[--disable-fade-pool] bespoke fade-material pool disabled — Phase 0 ablation (engine FADE_SELF still active)")
 		elif arg == "--disable-phase-f-prereg":
 			StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG = true
-			Log.info("streaming", "[--disable-phase-f-prereg] Phase F prototype pre-reg disabled — works around tracker §12.2 crash site during ablation runs")
+			Log.info("streaming", "[--disable-phase-f-prereg] Phase F prototype pre-reg disabled - active-loader prereg bypass")
+		elif arg == "--disable-cell-static-collision":
+			StreamingConfig.DEBUG_DISABLE_CELL_STATIC_COLLISION = true
+			Log.info("streaming", "[--disable-cell-static-collision] per-cell static collision BVH publish disabled - NEAR streaming ablation")
 
 	# Initialize object pool for frequently used models
 	# Create a hidden container for pooled objects when they're not in use
@@ -505,7 +516,7 @@ func _init_async() -> void:
 	# --start-cell=X,Y overrides (Phase 0 ablation; booting at Balmora avoids
 	# the mid-session teleport that triggers tracker §12.2 crash).
 	var _start_cell := Vector2i(-2, -9)
-	for _arg in OS.get_cmdline_args():
+	for _arg in _runtime_cmdline_args():
 		if _arg.begins_with("--start-cell="):
 			var _parts := _arg.substr("--start-cell=".length()).split(",")
 			if _parts.size() == 2:
@@ -614,7 +625,7 @@ func _on_teleport_happened(_from_pos: Vector3, _to_pos: Vector3, distance: float
 	# Autobench opt-out — preserves the measurement contract in the
 	# perf-audit runs (we want to see the raw teleport-burst FPS trace,
 	# not 30 s of gated black screen).
-	for a in OS.get_cmdline_args():
+	for a in _runtime_cmdline_args():
 		if a == "--bench-auto" or a.begins_with("--bench-auto="):
 			return
 	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
@@ -631,12 +642,12 @@ func _on_teleport_happened(_from_pos: Vector3, _to_pos: Vector3, distance: float
 	)
 
 
-## Parse OS.get_cmdline_args() for --bench-auto [stamp] and instantiate the
+## Parse _runtime_cmdline_args() for --bench-auto [stamp] and instantiate the
 ## AutoBenchRunner when present. Accepts both `--bench-auto` (next arg is the
 ## timestamp) and `--bench-auto=<stamp>` forms. Only attaches when we have a
 ## streaming manager + camera + cell manager (all post-_setup_subsystem_toggles).
 func _maybe_start_auto_bench() -> void:
-	var args := OS.get_cmdline_args()
+	var args := _runtime_cmdline_args()
 	var stamp := ""
 	var flag_found := false
 	for i in range(args.size()):
@@ -662,11 +673,11 @@ func _maybe_start_auto_bench() -> void:
 	_log("[AUTOBENCH] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
 
-## Parse OS.get_cmdline_args() for --bench-ladder [stamp] and instantiate the
+## Parse _runtime_cmdline_args() for --bench-ladder [stamp] and instantiate the
 ## BenchLadderRunner when present. Mirrors _maybe_start_auto_bench but targets
 ## the progressive-additive subsystem-isolation ladder. No-op when absent.
 func _maybe_start_bench_ladder() -> void:
-	var args := OS.get_cmdline_args()
+	var args := _runtime_cmdline_args()
 	var stamp := ""
 	var flag_found := false
 	for i in range(args.size()):
@@ -1683,7 +1694,7 @@ func _setup_subsystem_toggles() -> void:
 	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
 	# now controls the universal statics renderer, flipping it off would
 	# hide all rocks/arches/clutter.
-	for a in OS.get_cmdline_args():
+	for a in _runtime_cmdline_args():
 		if a == "--near-only":
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)

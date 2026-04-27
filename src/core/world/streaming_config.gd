@@ -135,6 +135,11 @@ const TEXTURE_REBUILD_DELAY_MS := 300.0
 ## Prevents per-frame rebuilding during heavy loading
 const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
 
+## Maximum PrototypeRegistry batches to cull/upload per frame after static
+## renderer churn. Keeps cell-boundary static publish from forcing one giant
+## MultiMesh buffer-upload pass.
+const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 64
+
 # =============================================================================
 # MEMORY LIMITS
 # =============================================================================
@@ -356,6 +361,7 @@ const PRELOAD_PREDICTION_TIME_S: float = 1.0
 ## Default false — always compile clean, toggled only by boot flag.
 static var DEBUG_DISABLE_JOLT_ATTACH: bool = false
 static var DEBUG_DISABLE_FADE_POOL: bool = false
+static var DEBUG_DISABLE_CELL_STATIC_COLLISION: bool = false
 
 ## --disable-phase-f-prereg — bypass Phase F off-thread prototype pre-registration.
 ## Tracker §12.2 "second crash site" hits here during active streaming: the
