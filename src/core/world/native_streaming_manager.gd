@@ -947,12 +947,13 @@ func _process(delta: float) -> void:
 			_last_overrun_log_frame = Engine.get_frames_drawn()
 
 	# Phase 2 stutter diag — close the per-frame profiler window and
-	# auto-dump a sorted per-section breakdown for any frame > 100 ms.
-	# Threshold deliberately wider than the overrun-warn (1.5x budget) so the
-	# autopsy fires on the user-visible spikes, not budget jitter. Plan §11.4.
+	# auto-dump a sorted per-section breakdown for any frame > 16 ms.
+	# Dropped from 100 ms (2026-04-26) so the autopsy fires on the routine
+	# 12-25 ms overruns visible during walking traversal, not just catastrophic
+	# stalls. 16 ms = one 60 fps frame. Plan §11.4.
 	if prof:
 		prof.end_frame()
-		prof.dump_overrun_breakdown(100.0, "stream_proc")
+		prof.dump_overrun_breakdown(16.0, "stream_proc")
 
 	# Post-startup audit — auto-logs every 5s for 60s so FPS/queue/phase breakdown
 	# is captured during the slow loading period without requiring user interaction.

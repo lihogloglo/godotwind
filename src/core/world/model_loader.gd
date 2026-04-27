@@ -471,7 +471,12 @@ func get_cached_packed_scene(model_path: String, item_id: String = "") -> Packed
 ##   callback: Called when load completes with (model_path: String, item_id: String, model: Node3D)
 ## Returns:
 ##   true if load was started or model already cached, false if not in disk cache
-func request_model_async(model_path: String, item_id: String = "", callback: Callable = Callable()) -> bool:
+func request_model_async(
+	model_path: String,
+	item_id: String = "",
+	callback: Callable = Callable(),
+	instantiate_for_callback: bool = true
+) -> bool:
 	var normalized := model_path.to_lower().replace("/", "\\")
 	var cache_key := normalized
 	if not item_id.is_empty():
@@ -483,7 +488,9 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 		_stats["models_from_cache"] += 1
 		_last_access[cache_key] = Engine.get_frames_drawn()
 		if callback.is_valid():
-			var instance: Node3D = _instantiate_from_scene(cached as PackedScene) if cached != null else null
+			var instance: Node3D = null
+			if instantiate_for_callback and cached != null:
+				instance = _instantiate_from_scene(cached as PackedScene)
 			callback.call(model_path, item_id, instance)
 		return true
 
@@ -495,7 +502,8 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 			_pending_async_loads[disk_path].callbacks.append({
 				"callback": callback,
 				"model_path": model_path,
-				"item_id": item_id
+				"item_id": item_id,
+				"instantiate_for_callback": instantiate_for_callback,
 			})
 		return true
 
@@ -515,7 +523,8 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 			"cache_key": cache_key,
 			"callback": callback,
 			"model_path": model_path,
-			"item_id": item_id
+			"item_id": item_id,
+			"instantiate_for_callback": instantiate_for_callback,
 		})
 		return true  # Will be started later by _drain_deferred_queue
 
@@ -536,7 +545,8 @@ func request_model_async(model_path: String, item_id: String = "", callback: Cal
 		_pending_async_loads[disk_path].callbacks.append({
 			"callback": callback,
 			"model_path": model_path,
-			"item_id": item_id
+			"item_id": item_id,
+			"instantiate_for_callback": instantiate_for_callback,
 		})
 
 	return true
@@ -580,7 +590,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 		_drain_deferred_queue()
 		var t_dd := Time.get_ticks_usec()
 		var ml_total: int = t_dd - t0
-		if ml_total > 50_000:
+		if ml_total > 8_000:
 			Log.warn("streaming", "[ml-spike %.1fms] phaseA=%.1f phaseB=0.0 dd=%.1f items_completed=%d pending_instq=%d pending_async=%d deferred=%d" % [
 				ml_total / 1000.0,
 				float(t_phase_a - t0) / 1000.0,
@@ -752,7 +762,9 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 				break
 			var cb: Callable = cb_info.callback
 			if cb.is_valid():
-				var instance := _instantiate_from_scene(packed_scene)
+				var instance: Node3D = null
+				if bool(cb_info.get("instantiate_for_callback", true)):
+					instance = _instantiate_from_scene(packed_scene)
 				cb.call(cb_info.model_path, cb_info.item_id, instance)
 			processed_callbacks += 1
 
@@ -841,7 +853,9 @@ func _drain_deferred_queue() -> void:
 			var callback: Callable = entry.callback
 			if callback.is_valid():
 				var cached: Variant = _model_cache[cache_key]
-				var instance: Node3D = _instantiate_from_scene(cached as PackedScene) if cached != null else null
+				var instance: Node3D = null
+				if bool(entry.get("instantiate_for_callback", true)) and cached != null:
+					instance = _instantiate_from_scene(cached as PackedScene)
 				callback.call(entry.model_path, entry.item_id, instance)
 			continue
 
@@ -852,7 +866,8 @@ func _drain_deferred_queue() -> void:
 				_pending_async_loads[disk_path].callbacks.append({
 					"callback": callback,
 					"model_path": entry.model_path,
-					"item_id": entry.item_id
+					"item_id": entry.item_id,
+					"instantiate_for_callback": bool(entry.get("instantiate_for_callback", true)),
 				})
 			continue
 
@@ -872,7 +887,8 @@ func _drain_deferred_queue() -> void:
 			_pending_async_loads[disk_path].callbacks.append({
 				"callback": callback,
 				"model_path": entry.model_path,
-				"item_id": entry.item_id
+				"item_id": entry.item_id,
+				"instantiate_for_callback": bool(entry.get("instantiate_for_callback", true)),
 			})
 
 

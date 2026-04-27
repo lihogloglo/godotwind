@@ -1791,10 +1791,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
 	# threshold, dump the pre-loop split so we can tell whether
 	# _tick_static_collision_build / disk_loads / conversions / pool_prewarm
-	# is the spike, vs the main loop. 100 ms picks up the 100-540 ms class.
+	# is the spike, vs the main loop. Dropped from 100 ms to 16 ms (2026-04-26)
+	# to catch the routine 12-25 ms overruns visible during walking traversal,
+	# not just the catastrophic class. 16 ms = one 60 fps frame.
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
-	if total_inst_us > 100_000:
+	if total_inst_us > 16_000:
 		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f loop=%.1f addc=%.1f instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
 			float(t_pre_collision - t_pre0) / 1000.0,
@@ -2132,7 +2134,7 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 			# Start async load (or add callback to existing load)
 			# request_model_async handles deduplication internally
 			var callback := _make_disk_load_callback(request.request_id, model_path, item_id)
-			_model_loader.request_model_async(model_path, item_id, callback)
+			_model_loader.request_model_async(model_path, item_id, callback, false)
 			disk_cache_hits += 1
 			continue
 
