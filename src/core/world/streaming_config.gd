@@ -119,6 +119,12 @@ const INSTANTIATION_BUDGET_MAX_MS := 16.0    ## Cap: never exceed 16ms (even at 
 ## Fix: fixed 4ms post-startup gives ~12ms for rendering → 60+ FPS while queue drains.
 const POST_STARTUP_INSTANTIATION_BUDGET_MS := 4.0
 
+## Scene-tree child attach budget for interactive Node3Ds produced by the
+## instantiation queue. Keeps add_child() work explicit instead of dumping
+## large batches into idle-time call_deferred bursts.
+const CHILD_ATTACH_BUDGET_MS := 1.0
+const CHILD_ATTACH_MAX_PER_FRAME := 20
+
 ## NEAR TIER BURST LOADING - Moderate priority for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
 ## use these limits to populate objects faster without exceeding frame budget.

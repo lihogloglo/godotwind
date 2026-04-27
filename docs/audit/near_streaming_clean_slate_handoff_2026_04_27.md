@@ -53,6 +53,43 @@ For the collision ablation follow-up, run the same command with
 `frames_over_16_67`, `phase_inst_us`, `[inst-spike] coll=...`, and visible
 cell-boundary hitching.
 
+Measured result from the battery run:
+
+- Stamp: `near_streaming_arch_p1_battery`
+- Output:
+  - `user://benchmark_results/autobench_near_streaming_arch_p1_battery/`
+  - `user://benchmark_results/benchmark_2026-04-28_00-03-11.csv`
+  - `user://benchmark_results/summary_2026-04-28_00-03-11.json`
+- Scripted flyby summary:
+  - avg FPS: `174.6`
+  - avg frame: `5.73 ms`
+  - p95: `7.50 ms`
+  - p99: `10.83 ms`
+  - p99.9: `47.10 ms`
+  - max: `93.53 ms`
+  - frames over 16.67 ms: `86 / 14854`
+- Per-segment p99 from log:
+  - settle `8.7 ms`
+  - idle `7.8 ms`
+  - walk `9.7 ms`
+  - vista `7.7 ms`
+  - pan `8.7 ms`
+  - run `32.3 ms`
+- Streaming phase timing from log:
+  - total streaming work avg `0.33 ms`, max `264.50 ms`
+  - `static_cull` avg `0.07 ms`, max `13.03 ms`
+- AutoBench scenario summaries:
+  - `bench_tiers`: avg `416.2 FPS`, min `142 FPS`, max `519 FPS`
+  - `bench_teleport`: avg `134.5 FPS`, min `2 FPS`, max `162 FPS`
+  - `bench_hlod_off`: avg `176.9 FPS`, min `155 FPS`, max `185 FPS`
+
+Interpretation: performance is much better than the reported 250 -> 25 FPS
+cell-boundary collapse. The remaining issue is now tail latency, not average
+throughput. The worst run-segment frames still need a top-frames CSV autopsy.
+Static cull is improved but still visible in the max. Collision is still
+suspect because startup logs show `[inst-spike] coll=...` samples in the
+20-40 ms range, though the flyby p99 is now good.
+
 Purpose: give a fresh agent enough context to continue the NEAR streaming
 performance investigation without relying on stale plans or memory. The user
 wants a fully smooth, fast NEAR-only streaming and rendering path: no spikes at

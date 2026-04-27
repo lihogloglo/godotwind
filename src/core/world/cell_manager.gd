@@ -1031,6 +1031,11 @@ var _background_processor: Node = null
 ## Entries include position for distance-priority sorting
 var _instantiation_queue: Array[InstantiationEntry] = []
 
+## Detached Node3Ds waiting for a budgeted scene-tree attach. This replaces
+## bulk call_deferred("add_child") bursts with visible, frame-budgeted work.
+## Each entry: {request_id: int, parent: Node3D, child: Node3D}
+var _pending_child_attaches: Array[Dictionary] = []
+
 ## Camera position for distance-based prioritization
 var _camera_position: Vector3 = Vector3.ZERO
 
@@ -1314,6 +1319,7 @@ func fast_cleanup() -> void:
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 		_drain_collision_worker_for_request(request)
+	_discard_all_pending_child_attaches()
 
 
 ## Cancel an async request — HARD cancel, destroys everything.
@@ -1360,6 +1366,7 @@ func cancel_async_request(request_id: int) -> void:
 		# This is expected behavior when cells are unloaded mid-loading
 		# Using print instead of push_warning since it's informational, not a problem
 		Log.info("streaming", "CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
+	_discard_pending_child_attaches_for_request(request_id)
 
 	# Clean up cell node if started
 	if request.cell_node:
@@ -1401,6 +1408,7 @@ func finalize_unloaded_cell(request_id: int) -> void:
 	_instantiation_queue = _instantiation_queue.filter(
 		func(entry: InstantiationEntry) -> bool: return entry.request_id != request_id
 	)
+	_discard_pending_child_attaches_for_request(request_id)
 	# Note: DON'T queue_free(request.cell_node) — caller (_process_budgeted_unloading)
 	# owns the cell_node teardown and has already queue_free'd it.
 	_async_requests.erase(request_id)
@@ -1497,6 +1505,61 @@ func get_pending_disk_load_count() -> int:
 	return _model_loader.get_pending_async_count()
 
 
+## Queue a detached Node3D for a budgeted scene-tree attach.
+func _queue_child_attach(request_id: int, parent: Node3D, child: Node3D) -> void:
+	_pending_child_attaches.append({
+		"request_id": request_id,
+		"parent": parent,
+		"child": child,
+	})
+
+
+## Attach queued children within a small count/time budget. Invalid parents
+## mean the owning cell died before publish; free the detached child instead.
+func _drain_pending_child_attaches(max_count: int, budget_usec: float) -> int:
+	if _pending_child_attaches.is_empty() or max_count <= 0 or budget_usec <= 0.0:
+		return 0
+
+	var start_usec := Time.get_ticks_usec()
+	var processed := 0
+	var attached := 0
+	while not _pending_child_attaches.is_empty() and processed < max_count:
+		if float(Time.get_ticks_usec() - start_usec) >= budget_usec:
+			break
+		var entry: Dictionary = _pending_child_attaches.pop_back()
+		processed += 1
+		var parent: Node3D = entry.get("parent") as Node3D
+		var child: Node3D = entry.get("child") as Node3D
+		if is_instance_valid(parent) and is_instance_valid(child):
+			parent.add_child(child)
+			attached += 1
+		elif is_instance_valid(child):
+			child.queue_free()
+	return attached
+
+
+func _discard_pending_child_attaches_for_request(request_id: int) -> void:
+	if _pending_child_attaches.is_empty():
+		return
+	var kept: Array[Dictionary] = []
+	for entry: Dictionary in _pending_child_attaches:
+		if int(entry.get("request_id", -1)) != request_id:
+			kept.append(entry)
+			continue
+		var child: Node3D = entry.get("child") as Node3D
+		if is_instance_valid(child):
+			child.queue_free()
+	_pending_child_attaches = kept
+
+
+func _discard_all_pending_child_attaches() -> void:
+	for entry: Dictionary in _pending_child_attaches:
+		var child: Node3D = entry.get("child") as Node3D
+		if is_instance_valid(child):
+			child.queue_free()
+	_pending_child_attaches.clear()
+
+
 ## Process async instantiation within time budget (call from _process)
 ## Returns number of objects instantiated this frame
 ## Uses BOTH time budget AND object count cap for consistent frame times
@@ -1552,15 +1615,6 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_process_pool_prewarm()
 	var t_pre_prewarm := Time.get_ticks_usec()
 
-	if _instantiation_queue.is_empty():
-		return 0
-
-	# Sort queue by priority periodically (not every frame - too expensive)
-	var current_frame := Engine.get_frames_drawn()
-	if current_frame - _queue_sort_frame >= QUEUE_SORT_INTERVAL:
-		_queue_sort_frame = current_frame
-		_sort_queue_by_priority()
-
 	# BURST LOADING: Check if nearest objects are very close (critical loading)
 	# If so, use aggressive budget to populate cells faster
 	var effective_budget_ms := budget_ms
@@ -1580,6 +1634,24 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			_burst_loading_active = false
 
 	var budget_usec := effective_budget_ms * 1000.0
+	var attach_time_us := 0
+	var attach_start := Time.get_ticks_usec()
+	var attach_budget_pre := minf(
+		SC.CHILD_ATTACH_BUDGET_MS * 1000.0,
+		maxf(0.0, budget_usec - float(attach_start - start_time))
+	)
+	_drain_pending_child_attaches(SC.CHILD_ATTACH_MAX_PER_FRAME, attach_budget_pre)
+	attach_time_us += Time.get_ticks_usec() - attach_start
+
+	if _instantiation_queue.is_empty():
+		return 0
+
+	# Sort queue by priority periodically (not every frame - too expensive)
+	var current_frame := Engine.get_frames_drawn()
+	if current_frame - _queue_sort_frame >= QUEUE_SORT_INTERVAL:
+		_queue_sort_frame = current_frame
+		_sort_queue_by_priority()
+
 	var instantiated := 0
 	var exit_reason := ""
 
@@ -1594,9 +1666,6 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# and get re-queued at loop exit. Plan §3.1, §7.4.
 	if PHASE_A_OFFTHREAD_INSTANTIATE:
 		_phase_a_dispatch_pass()
-
-	# Batch children for deferred add_child (reduces scene tree churn)
-	var pending_children: Array[Dictionary] = []  # {parent: Node3D, child: Node3D}
 
 	# Phase A — entries whose worker task is still running get parked here
 	# and re-appended to the queue after the loop exits, so they get another
@@ -1747,10 +1816,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 			# Double-check parent is still valid before queuing (defensive)
 			if is_instance_valid(request.cell_node):
-				pending_children.append({
-					"parent": request.cell_node,
-					"child": obj,
-				})
+				_queue_child_attach(request_id, request.cell_node, obj)
 				instantiated += 1
 			else:
 				obj.queue_free()
@@ -1772,21 +1838,25 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		for i in range(phase_a_deferred.size() - 1, -1, -1):
 			_instantiation_queue.push_back(phase_a_deferred[i])
 
-	# Batch add all children at once (significantly reduces scene tree overhead)
-	# For large batches (>20), use call_deferred to spread work across frames
-	const DEFERRED_THRESHOLD := 20
+	# Attach children under an explicit budget. Large cell-boundary batches
+	# used to be dumped into call_deferred(), which hid the cost from this
+	# loop but still produced idle-time add_child bursts.
 	var add_child_start := Time.get_ticks_usec()
-	var use_deferred := pending_children.size() > DEFERRED_THRESHOLD
-	CrashBreadcrumb.write("cm::batch_start", "n=%d deferred=%s" % [pending_children.size(), str(use_deferred)])
-	for entry in pending_children:
-		var parent: Node3D = entry.parent
-		var child: Node3D = entry.child
-		if is_instance_valid(parent) and is_instance_valid(child):
-			if use_deferred:
-				parent.call_deferred("add_child", child)
-			else:
-				parent.add_child(child)
-	CrashBreadcrumb.write("cm::batch_done", "n=%d" % pending_children.size())
+	var attach_budget_post := minf(
+		SC.CHILD_ATTACH_BUDGET_MS * 1000.0,
+		maxf(0.0, budget_usec - float(add_child_start - start_time))
+	)
+	CrashBreadcrumb.write("cm::attach_start", "pending=%d budget_us=%d" % [
+		_pending_child_attaches.size(), int(attach_budget_post)
+	])
+	var attached_children := _drain_pending_child_attaches(
+		SC.CHILD_ATTACH_MAX_PER_FRAME,
+		attach_budget_post
+	)
+	attach_time_us += Time.get_ticks_usec() - add_child_start
+	CrashBreadcrumb.write("cm::attach_done", "attached=%d pending=%d" % [
+		attached_children, _pending_child_attaches.size()
+	])
 
 	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
 	# threshold, dump the pre-loop split so we can tell whether
@@ -1803,10 +1873,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			float(t_pre_disk - start_time) / 1000.0,
 			float(t_pre_conv - t_pre_disk) / 1000.0,
 			float(t_pre_prewarm - t_pre_conv) / 1000.0,
-			float(add_child_start - t_pre_prewarm) / 1000.0,
-			float(t_end_inst - add_child_start) / 1000.0,
+			maxf(0.0, float(t_end_inst - t_pre_prewarm - attach_time_us)) / 1000.0,
+			float(attach_time_us) / 1000.0,
 			instantiated,
-			_instantiation_queue.size(),
+			_instantiation_queue.size() + _pending_child_attaches.size(),
 			"Y" if _burst_loading_active else "N",
 		])
 	return instantiated
@@ -2652,13 +2722,14 @@ func get_async_pending_count() -> int:
 
 ## Get total objects waiting in instantiation queue
 func get_instantiation_queue_size() -> int:
-	return _instantiation_queue.size()
+	return _instantiation_queue.size() + _pending_child_attaches.size()
 
 
 ## Get comprehensive loading stats
 func get_loading_stats() -> Dictionary:
 	return {
-		"instantiation_queue_size": _instantiation_queue.size(),
+		"instantiation_queue_size": _instantiation_queue.size() + _pending_child_attaches.size(),
+		"pending_child_attaches": _pending_child_attaches.size(),
 		"burst_loading_active": _burst_loading_active,
 		"burst_budget_ms": _burst_budget_ms,
 		"burst_max_instantiations": _burst_max_instantiations,
