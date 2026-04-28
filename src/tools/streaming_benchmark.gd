@@ -58,7 +58,14 @@ const SEGMENT_NAMES: Array[String] = [
 ]
 
 ## CSV column headers
-const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us"
+##
+## Step 1 instrumentation (2026-04-28) — appended 6 ESM-type per-frame columns:
+##   `inst_door_us`, `inst_light_us`, `inst_light_modelload_us`,
+##   `inst_container_us`, `inst_activator_us`, `inst_static_us`.
+## Sum of inst_* should match `phase_inst_us` within rounding (excluding
+## skipped/deferred/unknown types). `inst_light_modelload_us` is a sub-slice
+## of `inst_light_us` — disk/parse cost of the light's model load.
+const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us"
 
 #endregion
 
@@ -460,7 +467,7 @@ func _update_segment_index() -> void:
 
 func _log_frame() -> void:
 	var entry := PackedFloat64Array()
-	entry.resize(30)
+	entry.resize(36)
 	entry[0] = float(Engine.get_frames_drawn())
 	entry[1] = _last_frame_time_ms
 	entry[2] = Engine.get_frames_per_second()
@@ -491,6 +498,19 @@ func _log_frame() -> void:
 		var pt: PackedFloat64Array = _streaming_manager.get_phase_times()
 		for i in range(mini(pt.size(), 9)):
 			entry[21 + i] = pt[i]
+
+	# Step 1 instrumentation — per-ESM-type instantiate timing (microseconds).
+	# Snapshot of cell_manager's per-frame buckets populated by the most recent
+	# process_async_instantiation. `inst_light_modelload_us` is a sub-slice of
+	# `inst_light_us`. Plan: docs/plans/near_streaming_2026_04_28_interactive_spawn.md
+	if _cell_manager and _cell_manager.has_method("get_frame_inst_route_times"):
+		var rt: Dictionary = _cell_manager.get_frame_inst_route_times()
+		entry[30] = float(rt.get("door", 0))
+		entry[31] = float(rt.get("light", 0))
+		entry[32] = float(rt.get("light_modelload", 0))
+		entry[33] = float(rt.get("container", 0))
+		entry[34] = float(rt.get("activator", 0))
+		entry[35] = float(rt.get("static", 0))
 	_frame_log.append(entry)
 
 	# Sample visibility for appear/disappear detection
@@ -819,14 +839,16 @@ func _save_csv() -> void:
 
 	file.store_line(CSV_HEADERS)
 	for entry in _frame_log:
-		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d,%.2f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f" % [
+		var line := "%d,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%.1f,%.1f,%d,%.2f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f" % [
 			int(entry[0]), entry[1], entry[2], int(entry[3]), int(entry[4]),
 			int(entry[5]), int(entry[6]), int(entry[7]), int(entry[8]),
 			int(entry[9]), entry[10], entry[11], entry[12], entry[13],
 			int(entry[14]), int(entry[15]), int(entry[16]),
 			entry[17], entry[18], int(entry[19]),
 			entry[20], entry[21], entry[22], entry[23], entry[24],
-			entry[25], entry[26], entry[27], entry[28], entry[29]
+			entry[25], entry[26], entry[27], entry[28], entry[29],
+			# Step 1 instrumentation — per-ESM-type inst time (µs)
+			entry[30], entry[31], entry[32], entry[33], entry[34], entry[35],
 		]
 		file.store_line(line)
 
@@ -980,6 +1002,30 @@ func _print_summary(results: Dictionary) -> void:
 				var max_ms := phase_maxes[i] / 1000.0
 				var pct := (phase_avgs[i] / (stream_total_avg * 1000.0)) * 100.0 if stream_total_avg > 0.001 else 0.0
 				lines.append("  %-14s avg %6.2fms  max %6.2fms  (%4.1f%%)" % [phase_names[i] + ":", avg_ms, max_ms, pct])
+
+		# Step 1 instrumentation — per-ESM-type roll-up. Sums every per-frame
+		# bucket across the run and reports total µs + active-frame max. Step 4
+		# gate compares avg (total / type instance count) against the doc's
+		# door ≤ 4000 µs / light ≤ 2500 µs limits — instance count is not in
+		# the CSV, so post-run analysis must read it from the inst-breakdown
+		# log lines or _diag_per_type_count via console. CSV here is a
+		# verification artefact, not the gate evidence by itself.
+		if _frame_log.size() > 0 and _frame_log[0].size() >= 36:
+			var route_names: Array[String] = ["door", "light", "light_modelload", "container", "activator", "static"]
+			var route_totals: PackedFloat64Array = PackedFloat64Array()
+			var route_maxes: PackedFloat64Array = PackedFloat64Array()
+			route_totals.resize(6)
+			route_maxes.resize(6)
+			for entry: PackedFloat64Array in _frame_log:
+				for i in range(6):
+					route_totals[i] += entry[30 + i]
+					route_maxes[i] = maxf(route_maxes[i], entry[30 + i])
+			lines.append("")
+			lines.append("Per-ESM-Type Instantiate Timing (step 1 instrumentation):")
+			for i in range(6):
+				var total_ms := route_totals[i] / 1000.0
+				var max_ms := route_maxes[i] / 1000.0
+				lines.append("  %-18s tot %7.1fms  max-frame %5.1fms" % [route_names[i] + ":", total_ms, max_ms])
 
 	lines.append("")
 

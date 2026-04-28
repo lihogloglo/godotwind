@@ -1052,6 +1052,21 @@ var _static_prepare_failed: Dictionary[String, bool] = {}
 ## Each entry: {request_id: int, parent: Node3D, child: Node3D}
 var _pending_child_attaches: Array[Dictionary] = []
 
+## Per-frame instantiation timing buckets, keyed by ESM record type. Reset at
+## the top of every `process_async_instantiation` call, accumulated as each
+## ref publishes, snapshotted by `streaming_benchmark` for CSV per-frame
+## columns. `light_modelload` is a sub-slice of `light` — the time spent
+## inside `model_loader.get_model()` for the light's model — so the caller
+## can split disk/parse cost from `OmniLight3D` construction cost.
+##
+## Plan: docs/plans/near_streaming_2026_04_28_interactive_spawn.md step 1.
+var _frame_inst_door_us: int = 0
+var _frame_inst_light_us: int = 0
+var _frame_inst_light_modelload_us: int = 0
+var _frame_inst_container_us: int = 0
+var _frame_inst_activator_us: int = 0
+var _frame_inst_static_us: int = 0
+
 ## Camera position for distance-based prioritization
 var _camera_position: Vector3 = Vector3.ZERO
 
@@ -1749,7 +1764,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# steps so the autopsy can attribute the 100-540 ms `instantiate=` spike
 	# either to a substep here or to the main loop below.
 	var t_pre0 := Time.get_ticks_usec()
-	_tick_static_collision_build()
+	_tick_static_collision_build(false)
 	var t_pre_collision := Time.get_ticks_usec()
 
 	# Start budget clock BEFORE pre-loop work — disk loads, conversions, and
@@ -1810,6 +1825,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	attach_time_us += Time.get_ticks_usec() - attach_start
 
 	if _instantiation_queue.is_empty():
+		_maybe_finalize_static_collision_when_idle(start_time, budget_usec)
 		return 0
 
 	# Sort queue by priority periodically (not every frame - too expensive)
@@ -1837,6 +1853,15 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var route_deferred_count := 0
 	var route_skip_count := 0
 	var worker_pending_count := 0
+
+	# Step 1 instrumentation — reset per-frame ESM-type buckets. Snapshotted
+	# by streaming_benchmark; do NOT accumulate across calls.
+	_frame_inst_door_us = 0
+	_frame_inst_light_us = 0
+	_frame_inst_light_modelload_us = 0
+	_frame_inst_container_us = 0
+	_frame_inst_activator_us = 0
+	_frame_inst_static_us = 0
 
 	# Periodic per-type breakdown dump (every 5s). Answers "inside inst:, which
 	# ref type dominates" with real data, not intuition.
@@ -2011,6 +2036,22 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		_diag_per_type_time_us[t_name] = _diag_per_type_time_us.get(t_name, 0) + inst_elapsed
 		_diag_per_type_count[t_name] = _diag_per_type_count.get(t_name, 0) + 1
 
+		# Step 1 instrumentation — per-frame ESM-type bucket. Light's model-load
+		# subslice splits disk/parse cost from `OmniLight3D` construction so a
+		# follow-up plan can tell whether light cost is disk/parse vs construction.
+		match t_name:
+			"door":
+				_frame_inst_door_us += inst_elapsed
+			"light":
+				_frame_inst_light_us += inst_elapsed
+				_frame_inst_light_modelload_us += int(_instantiator.last_model_load_us)
+			"container":
+				_frame_inst_container_us += inst_elapsed
+			"activator":
+				_frame_inst_activator_us += inst_elapsed
+			"static":
+				_frame_inst_static_us += inst_elapsed
+
 		# Lazy-spawn deferral — interactive ref too far, park it for later.
 		# The reference_instantiator returned null without decrementing our
 		# pending counter (see below). Push to the deferred list; it'll be
@@ -2076,6 +2117,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	CrashBreadcrumb.write("cm::attach_done", "attached=%d pending=%d" % [
 		attached_children, _pending_child_attaches.size()
 	])
+	_maybe_finalize_static_collision_when_idle(start_time, budget_usec)
 
 	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
 	# threshold, dump the pre-loop split so we can tell whether
@@ -2157,7 +2199,13 @@ func _phase_a_dispatch_pass() -> void:
 		return
 	if not ml.has_method("get_cached_packed_scene"):
 		return  # slice 3 API not present — defensive
-	for entry: InstantiationEntry in _instantiation_queue:
+	# The queue is sorted farthest-first and drained with pop_back(), so worker
+	# dispatch must scan from the back as well. Scanning forward spent the tiny
+	# dispatch budget on low-priority entries, then the drain immediately popped
+	# high-priority entries that had not been dispatched and sync-instantiated
+	# them on the main thread.
+	for i in range(_instantiation_queue.size() - 1, -1, -1):
+		var entry: InstantiationEntry = _instantiation_queue[i]
 		# Skip entries already dispatched on either worker path, or whose
 		# previous-frame worker result hasn't yet been consumed by the drain.
 		if dispatched >= SC.WORKER_DISPATCH_MAX_PER_FRAME:
@@ -2707,7 +2755,7 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 ## Cold-cache cell wall-clock used to be 20-50ms entirely on main; post-Win 1
 ## the worker absorbs most of it (triangle assembly + transform), main pays
 ## only the ~10-20ms BVH build.
-func _tick_static_collision_build() -> void:
+func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 	if SC.DEBUG_DISABLE_CELL_STATIC_COLLISION:
 		for request_id: int in _async_requests:
 			var request: AsyncCellRequest = _async_requests[request_id]
@@ -2766,6 +2814,9 @@ func _tick_static_collision_build() -> void:
 			"cell_static_collision:collect_triangles",
 		)
 		request.collision_dispatched = true
+
+	if not allow_finalize:
+		return
 
 	# Phase 2: drain — for each cell whose worker finished, finalize on main.
 	# One per frame to bound `set_faces` BVH-build cost (~10-20ms cold).
@@ -2847,6 +2898,18 @@ func _tick_static_collision_build() -> void:
 	CrashBreadcrumb.write("collision_finalize_end", "%d_%d" % [winner.grid.x, winner.grid.y])
 	if finalized != null:
 		winner.collision_body = finalized
+
+
+func _maybe_finalize_static_collision_when_idle(start_time_usec: int, budget_usec: float) -> void:
+	if SC.DEBUG_DISABLE_CELL_STATIC_COLLISION:
+		return
+	if not _instantiation_queue.is_empty():
+		return
+	if not _pending_child_attaches.is_empty():
+		return
+	if float(Time.get_ticks_usec() - start_time_usec) >= budget_usec:
+		return
+	_tick_static_collision_build(true)
 
 
 ## Win 1 + Win 2 — wait on any in-flight collision worker for the request,
@@ -2986,6 +3049,22 @@ func get_async_pending_count() -> int:
 ## Get total objects waiting in instantiation queue
 func get_instantiation_queue_size() -> int:
 	return _instantiation_queue.size() + _pending_child_attaches.size()
+
+
+## Step 1 instrumentation — per-frame instantiation timing buckets keyed by
+## ESM record type. Last call to `process_async_instantiation` populated these.
+## Read by `streaming_benchmark` for CSV per-frame columns.
+##
+## Plan: docs/plans/near_streaming_2026_04_28_interactive_spawn.md step 1.
+func get_frame_inst_route_times() -> Dictionary:
+	return {
+		"door": _frame_inst_door_us,
+		"light": _frame_inst_light_us,
+		"light_modelload": _frame_inst_light_modelload_us,
+		"container": _frame_inst_container_us,
+		"activator": _frame_inst_activator_us,
+		"static": _frame_inst_static_us,
+	}
 
 
 ## Get comprehensive loading stats

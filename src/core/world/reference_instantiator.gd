@@ -41,6 +41,13 @@ const DoorInteractableScript := preload("res://src/core/interaction/morrowind/do
 # time via DialogueSession.current().
 const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_interactable.gd")
 
+# Plan 2026-04-28 step 2 — shared interaction-area geometry per door
+# prototype. The 10.7 ms door instantiate cost is dominated by the AABB
+# subtree walk + BoxShape3D allocation, both deterministic per prototype.
+# Cached and reused on every subsequent door of the same prototype. Plan:
+# docs/plans/near_streaming_2026_04_28_interactive_spawn.md step 2.
+const InteractionShapeCacheScript := preload("res://src/core/world/interaction_shape_cache.gd")
+
 # S.1 follow-up — §12.2 crash-site diagnostic. Breadcrumbs bracket every
 # post-model-load hazard in _instantiate_model_object so a native SIGSEGV
 # post-instantiate_return narrows to a single named step. Remove once the
@@ -86,6 +93,17 @@ var _prereg_dispatcher_task_ids: Array[int] = []
 ## (dispatcher worker on its own thread) and main-thread drain. Held only
 ## around the array operations, never around worker-bound work.
 var _prereg_task_ids_mutex: Mutex = Mutex.new()
+
+## Plan 2026-04-28 step 2 — shared interaction-area geometry cache (one
+## entry per door / activator prototype). Lazily allocated on first
+## door / activator publish so test scenes that don't spawn interactives
+## pay nothing.
+##
+## Typed as RefCounted because `InteractionShapeCacheScript` is preloaded
+## without a class_name (mirrors prototype_batch / prototype_registry pattern;
+## avoids load-order resolution failures). Underlying type is
+## `InteractionShapeCacheScript`.
+var _interaction_shape_cache: RefCounted = null
 
 # Configuration
 var create_lights: bool = true
@@ -272,6 +290,7 @@ var last_type_name: String = ""
 ## Read by CellManager to split the broad `inst` phase into actionable buckets.
 var last_inst_route: String = ""
 var last_model_load_us: int = 0
+
 var last_static_register_us: int = 0
 var last_static_add_us: int = 0
 
@@ -1640,7 +1659,16 @@ func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_r
 	# interactable only from the wall-side (the bug: "flip somewhere").
 	# The baked StaticBody3D keeps layer 1 (Environment) only — it handles
 	# physics blocking. The Area3D below handles all interaction detection.
-	_generate_interaction_area(door_instance)
+	#
+	# Plan 2026-04-28 step 2 — route through the shared shape cache so the
+	# AABB walk + BoxShape3D allocation happen ONCE per door prototype.
+	# Falls back to the legacy uncached path when the model_path is missing
+	# (defensive — should never happen for ESM-driven door records).
+	var door_model_path: String = _get_model_path(base_record)
+	if door_model_path.is_empty():
+		_generate_interaction_area(door_instance)
+	else:
+		_generate_interaction_area_cached(door_instance, door_model_path)
 
 	Log.info("interaction", "[DOOR_ATTACH] %s (dest='%s' teleport=%s has_collision=%s)" % [
 		record_id, destination_name, has_destination,
@@ -1682,11 +1710,62 @@ static func _has_interactable_collision(node: Node) -> bool:
 	return false
 
 
+## Plan 2026-04-28 step 2 — cached variant of _generate_interaction_area.
+##
+## Routes the per-prototype AABB walk + BoxShape3D allocation through
+## `InteractionShapeCache`, so the same door model published 66 times pays
+## the walk + alloc once. Per-instance cost reduces to: Area3D.new +
+## CollisionShape3D.new + add_child + 2 transform writes.
+##
+## The cached `BoxShape3D` is shared across every Area3D produced from this
+## prototype — see `InteractionShapeCache` mutation contract. Callers MUST
+## NOT mutate `shape.size` per instance.
+##
+## `model_path` is the raw ESM model path (e.g. "doors\\hlaalu_loaddoor_01.nif").
+## Normalized via `InteractionShapeCache.make_key` so the cache lines up
+## with the rest of the codebase's prototype identity convention.
+##
+## Returns the new Area3D (already child of root).
+##
+## Plan: docs/plans/near_streaming_2026_04_28_interactive_spawn.md step 2.
+func _generate_interaction_area_cached(root: Node3D, model_path: String) -> Area3D:
+	if _interaction_shape_cache == null:
+		_interaction_shape_cache = InteractionShapeCacheScript.new()
+
+	var key := InteractionShapeCacheScript.make_key(model_path)
+	# Geom is `InteractionShapeCacheScript.CachedInteractionGeometry` — typed
+	# as RefCounted because the script has no class_name (load-order safety).
+	var geom: RefCounted = _interaction_shape_cache.get_or_compute(key, root)
+
+	var area := Area3D.new()
+	area.name = "InteractionArea"
+	area.collision_layer = 1 << 2  # Layer 3 only — Interactable
+	area.collision_mask = 0        # Detects nothing
+	area.monitoring = false
+	area.monitorable = false
+
+	var shape := CollisionShape3D.new()
+	shape.name = "InteractionShape"
+	# Reuse the shared BoxShape3D Resource — multiple Area3Ds reference the
+	# same shape RID. This is the canonical Godot Resource sharing pattern.
+	# Mutating shape.size here would propagate to every other instance.
+	shape.shape = geom.shape
+	shape.position = geom.aabb_center
+	area.add_child(shape)
+
+	root.add_child(area)
+	return area
+
+
 ## Generate a passive Area3D with a BoxShape3D derived from the combined
 ## mesh AABB of the subtree. Used as a raycast target for doors/items
 ## whose NIF models lack baked collision shapes. The Area3D sits on layer 3
 ## only (Interactable) with monitoring/monitorable OFF — it's a passive
 ## raycast target, not an overlap detector. Matches Jolt perf guidance.
+##
+## NOTE: this is the legacy uncached path — kept for callers without a
+## model_path key (test scenes, defensive fallback). Hot ESM-driven door
+## publishes go through `_generate_interaction_area_cached` above.
 # PHASE_A:MAIN_ONLY — called from _attach_door_interactable (main tail).
 # add_child on a detached root is likely safe off-thread, but keep main until
 # a future phase needs it on worker.

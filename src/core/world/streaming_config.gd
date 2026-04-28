@@ -122,7 +122,7 @@ const POST_STARTUP_INSTANTIATION_BUDGET_MS := 4.0
 ## Main-thread static prototype prepare budget. This lane registers renderer
 ## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs
 ## reach the activation drain, avoiding cold work inside add_instance().
-const STATIC_PREPARE_ENABLED := false
+const STATIC_PREPARE_ENABLED := true
 const STATIC_PREPARE_BUDGET_MS := 2.0
 const STATIC_PREPARE_MAX_PER_FRAME := 1
 const STATIC_PREPARE_CREATE_BATCHES := false

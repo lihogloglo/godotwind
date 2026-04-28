@@ -2,6 +2,102 @@
 
 Date: 2026-04-27
 
+## Session Update - 2026-04-28 Audit / Keep-Ditch Pass
+
+Audited the uncommitted changes after `d6cfc15`.
+
+Kept:
+
+- Per-frame benchmark columns for route-level instantiate cost:
+  `inst_door_us`, `inst_light_us`, `inst_light_modelload_us`,
+  `inst_container_us`, `inst_activator_us`, `inst_static_us`.
+- Door interaction shape caching via `InteractionShapeCache`. This removes the
+  repeated mesh-AABB walk and `BoxShape3D` allocation for duplicate door
+  prototypes while preserving the per-instance `Area3D` raycast target.
+- Worker dispatch order fix: `_phase_a_dispatch_pass()` now scans the
+  instantiation queue from the same high-priority end that the drain pops.
+  The old forward scan spent the tiny worker-dispatch budget on low-priority
+  refs, then high-priority interactives fell through to sync main-thread
+  instantiation.
+- Collision publish is no longer finalized at the start of the instantiate
+  slice. `_tick_static_collision_build(false)` only dispatches worker triangle
+  collection before visual publish; `set_faces()` finalization is attempted
+  later only when visual publish queues are idle and the slice has budget left.
+- Re-enabled the main-thread static prepare lane with batch creation still off:
+  `STATIC_PREPARE_ENABLED=true`, `STATIC_PREPARE_CREATE_BATCHES=false`. This is
+  not the old crash-prone off-thread Phase F path. It uses cached
+  `PackedScene` resources and `register_from_packed_scene()` under a small
+  budget so static publish no longer has to perform cold prototype registration
+  in the activation drain.
+
+Ditched:
+
+- The whole-cell `DataReady` gate experiment and its plan docs. It improved
+  some synthetic percentiles in one run, but it held cells behind all-model
+  readiness, ended the benchmark with cells still in `loading`, surfaced
+  `dr_miss=5`, and matched the observed visual regression where many objects
+  were missing or appeared too late. Do not revive that exact gate without a
+  real payload model that pins resources and preserves incremental visual
+  publish.
+
+Audit benchmark before ditching the gate:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_audit_current_2026_04_28 --start-cell=-3,-2 --near-only
+```
+
+Output:
+
+- `user://benchmark_results/autobench_near_streaming_audit_current_2026_04_28/`
+- `user://benchmark_results/benchmark_2026-04-28_13-40-10.csv`
+- `user://benchmark_results/summary_2026-04-28_13-40-10.json`
+
+Summary:
+
+- avg FPS: `254.9`
+- avg frame: `3.92 ms`
+- p95: `4.95 ms`
+- p99: `6.53 ms`
+- p99.9: `42.65 ms`
+- max: `91.41 ms`
+- frames over 16.67 ms: `137 / 21679`
+
+Interpretation: the route instrumentation was useful, but the gate was not
+production-worthy. Remaining visible spikes still include cold static/model
+publish (`ml`) and runtime cell collision finalization (`coll`), so the next
+productive work is still payload/prewarm/collision redesign, not whole-cell
+publish gating.
+
+Verification after ditching the gate and enabling main-thread static prepare:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_audit_cleaned_static_prepare_2026_04_28 --start-cell=-3,-2 --near-only
+```
+
+Output:
+
+- `user://benchmark_results/autobench_near_streaming_audit_cleaned_static_prepare_2026_04_28/`
+- `user://benchmark_results/benchmark_2026-04-28_13-52-05.csv`
+- `user://benchmark_results/summary_2026-04-28_13-52-05.json`
+
+Summary:
+
+- avg FPS: `202.1`
+- avg frame: `4.95 ms`
+- p95: `6.53 ms`
+- p99: `9.50 ms`
+- p99.9: `33.67 ms`
+- max: `67.16 ms`
+- frames over 16.67 ms: `68 / 17193`
+
+Compared to the gate run, this keeps the p99.9 improvement while restoring
+incremental object publish. Static publish attribution dropped sharply in the
+flyby (`static avg` in the 5s breakdown went from multi-ms cold samples to
+roughly `39-218 us` windows), but first-batch allocation can still appear
+during startup/settle (`sadd=110.5 ms`). Teleport still has a bad `fps_min=2`;
+next work should target teleport cell-update/unload bursts, residual interactive
+sync loads, and a real safe batch preallocation/payload path.
+
 ## Session Update - 2026-04-28 Route Diagnostics / Static Renderer Follow-up
 
 Added route-level diagnostics inside `process_async_instantiation` and
