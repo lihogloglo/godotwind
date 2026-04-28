@@ -22,6 +22,7 @@ extends RefCounted
 
 
 const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
+const SC := preload("res://src/core/world/streaming_config.gd")
 
 
 #region Types
@@ -58,7 +59,7 @@ var _batches: Dictionary[int, RefCounted] = {}
 var _instance_slots: Dictionary[int, Array] = {}
 
 ## Configurable initial capacity for newly-created batches.
-var initial_batch_capacity: int = 1024
+var initial_batch_capacity: int = SC.INITIAL_BATCH_CAPACITY
 
 ## Cull tick gate — set true by any mutation (add/remove/transform/hide/show)
 ## and consumed on the next tick_cull_if_needed call. Eliminates the no-op
@@ -130,6 +131,23 @@ func get_or_create_batch(p_mesh: Mesh, p_material: Material) -> RefCounted:
 	var created: RefCounted = PrototypeBatchScript.new(p_mesh, p_material, _scenario, initial_batch_capacity)
 	_batches[key] = created
 	return created
+
+
+## Create empty batches for the given registry input without acquiring slots.
+## Used by the static prepare lane to move first MultiMesh allocation out of
+## the per-ref publish path.
+func prepare_batches(p_sub_meshes: Array) -> int:
+	var prepared := 0
+	for sm: Dictionary in p_sub_meshes:
+		var mesh: Mesh = sm.get("mesh")
+		if mesh == null:
+			continue
+		var material: Material = sm.get("material")
+		var before := _batches.size()
+		get_or_create_batch(mesh, material)
+		if _batches.size() > before:
+			prepared += 1
+	return prepared
 
 
 ## Look up a batch without creating. Returns null if not present.

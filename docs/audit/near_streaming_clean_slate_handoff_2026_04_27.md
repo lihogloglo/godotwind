@@ -2,6 +2,185 @@
 
 Date: 2026-04-27
 
+## Session Update - 2026-04-28 Route Diagnostics / Static Renderer Follow-up
+
+Added route-level diagnostics inside `process_async_instantiation` and
+`ReferenceInstantiator` so `[inst-spike]` now splits the broad instantiate
+bucket into:
+
+- `static`, `node`, `wstatic`, `wnode`, `defer`, `skip`, `other`
+- `ml` = model-loader / prototype instantiate time
+- `sreg` = static renderer `register_from_prototype`
+- `sadd` = static renderer `add_instance` / registry publish
+- `wp` = worker tasks still pending
+
+Short route probes with cell static collision disabled showed:
+
+- Remaining early startup hitches are overwhelmingly static-renderer work, not
+  interactive Node3D creation.
+- The biggest first-batch spikes are in `sadd`, e.g. one static add taking
+  roughly `100-129 ms`. This points at first `PrototypeBatch` / `MultiMesh`
+  creation/allocation, not Jolt.
+- Repeated post-first-batch hitches are mostly `ml`, usually `9-40 ms`, which
+  is synchronous cold prototype load/instantiate for static registration.
+- `sreg` itself is tiny (`~0.1-0.3 ms`), so the subtree walk / type registration
+  is not the expensive part.
+
+Code change kept:
+
+- `PrototypeRegistry.initial_batch_capacity` now uses
+  `StreamingConfig.INITIAL_BATCH_CAPACITY` instead of a stale hard-coded `1024`
+  default. The config value is currently `256`.
+
+Code change tried and reverted:
+
+- A main-thread-safe replacement for Phase F was tested: request cold static
+  prototypes through `ModelLoader.request_model_async(..., false)`, requeue the
+  ref, then register later from memory cache, with a one-cold-register-per-slice
+  cap.
+- Full AutoBench with that experiment completed and wrote data, then crashed on
+  quit:
+  - `user://benchmark_results/autobench_near_streaming_after_static_warm_2026_04_28/`
+  - `user://benchmark_results/benchmark_2026-04-28_09-16-40.csv`
+  - `user://benchmark_results/summary_2026-04-28_09-16-40.json`
+- Flyby summary for the experiment:
+  - avg FPS: `202.3`
+  - avg frame: `4.94 ms`
+  - p95: `6.21 ms`
+  - p99: `13.47 ms`
+  - p99.9: `46.60 ms`
+  - max: `84.09 ms`
+  - frames over 16.67 ms: `153 / 17208`
+- This was worse than the Phase-F-disabled baseline (`p99.9 38.94 ms`, avg
+  `211.5 FPS`), so the async/requeue behavior was removed. Do not revive that
+  exact approach without a better queue design.
+
+Current interpretation:
+
+- The pre-data crash is Phase F off-thread prototype prereg. Keep it disabled by
+  default.
+- The remaining startup/runtime hitch is not simply Jolt. Jolt/cell collision is
+  a contributor, but static renderer cold prototype load and first MultiMesh
+  batch allocation remain significant.
+- Next productive fix is probably a real static-prototype prepare phase or
+  prebuilt static payloads, not ad-hoc requeueing from inside the instantiate
+  drain.
+
+## Session Update - 2026-04-28 Fresh Benchmark / Crash Triage
+
+Current git HEAD at test time: `7b23780` before the local stability patch.
+
+The plain fresh run:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_current_2026_04_28_fresh --start-cell=-3,-2 --near-only
+```
+
+crashed before writing benchmark data. Windows reported native access violation
+`0xc0000005`; Godot log showed AutoBench had started, and the crash breadcrumb
+ended at:
+
+```text
+instantiate_return :: C:/Users/metzo/Documents/Godotwind/cache/models/f_terrain_rock_bc_17_nif.res
+```
+
+A crash ablation with Phase F prototype pre-registration disabled completed the
+full AutoBench sequence and wrote data:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_crash_ablate_no_phase_f --start-cell=-3,-2 --near-only --disable-phase-f-prereg
+```
+
+Output:
+
+- `user://benchmark_results/autobench_near_streaming_crash_ablate_no_phase_f/`
+- `user://benchmark_results/benchmark_2026-04-28_08-26-16.csv`
+- `user://benchmark_results/summary_2026-04-28_08-26-17.json`
+
+Flyby summary:
+
+- avg FPS: `211.5`
+- avg frame: `4.73 ms`
+- p95: `6.00 ms`
+- p99: `10.95 ms`
+- p99.9: `38.94 ms`
+- max: `92.30 ms`
+- frames over 16.67 ms: `146 / 17997`
+
+AutoBench scenario summaries:
+
+- `bench_tiers`: avg `222.1 FPS`, min `195 FPS`, max `234 FPS`
+- `bench_teleport`: avg `206.9 FPS`, min `8 FPS`, max `240 FPS`
+- `bench_hlod_off`: avg `214.5 FPS`, min `194 FPS`, max `223 FPS`
+
+Important nuance: the ablated AutoBench run still crashed on quit after all
+JSON/CSV data was flushed. Treat that as a shutdown crash separate from the
+pre-benchmark crash.
+
+Code change made after this measurement:
+
+- `StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG` now defaults to `true`.
+- New opt-in flag: `--enable-phase-f-prereg`.
+
+Reason: the current Phase F path instantiates PackedScenes and registers
+prototypes off-thread. In this Godot 4.6 setup it is crash-prone enough to block
+normal benchmark collection. The stable default should be no Phase F prereg
+until a safer payload/prebake-based replacement exists.
+
+Verification after the patch:
+
+- Godot parser/startup smoke passed:
+  `D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe --headless --path . --quit`
+- `.NET` build passed:
+  `dotnet build Godotwind.sln --configfile NuGet.Config`
+  Existing nullable warnings remain.
+- `git diff --check` passed, with only line-ending warnings.
+
+## Session Update - 2026-04-28 Collision Ablation
+
+Run after Phase F was default-disabled:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_no_cell_collision_2026_04_28 --start-cell=-3,-2 --near-only --disable-cell-static-collision
+```
+
+Output:
+
+- `user://benchmark_results/autobench_near_streaming_no_cell_collision_2026_04_28/`
+- `user://benchmark_results/benchmark_2026-04-28_08-34-53.csv`
+- `user://benchmark_results/summary_2026-04-28_08-34-53.json`
+
+Flyby summary:
+
+- avg FPS: `219.9`
+- avg frame: `4.55 ms`
+- p95: `5.90 ms`
+- p99: `10.69 ms`
+- p99.9: `33.37 ms`
+- max: `80.24 ms`
+- frames over 16.67 ms: `140 / 18709`
+
+Compared to the preceding Phase-F-disabled baseline:
+
+- avg FPS improved `211.5 -> 219.9`
+- p99.9 improved `38.94 ms -> 33.37 ms`
+- max improved `92.30 ms -> 80.24 ms`
+- frames over 16.67 ms changed only slightly: `146 -> 140`
+
+Interpretation:
+
+- Collision/Jolt-side cell BVH publish is a real contributor, but not the sole
+  hitch source.
+- With cell static collision disabled, `[inst-spike] coll=...` disappears, but
+  significant `[inst-spike] loop=...` samples remain.
+- The current `phase_inst_us` / `instantiate` bucket includes static renderer
+  publish / cold prototype work / queue processing, not just visible Node3D
+  creation. Since Phase F prereg is disabled for stability, this bucket is now
+  the next dominant tail-latency target.
+- Next investigation should split `process_async_instantiation` timing further:
+  static renderer publish/register vs interactive Node3D creation vs queue scan /
+  deferred entries. Do not spend the next pass solely on Jolt.
+
 ## Session Update - 2026-04-27 Architecture Pass 1
 
 Implemented after this handoff was created:

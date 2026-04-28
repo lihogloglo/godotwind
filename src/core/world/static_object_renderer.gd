@@ -353,6 +353,128 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 ## Compatibility alias — post-B-wide there's no difference between the two
 ## registration paths. Kept so existing callers (cell_manager.gd, test scenes)
 ## continue to work without edits until they're cleaned up in Phase F.
+## Register a mesh type directly from PackedScene metadata without instantiating
+## a Node3D tree. This is the preferred streaming prepare path: SceneState gives
+## us MeshInstance3D meshes, transforms, visibility, and material overrides
+## without paying PackedScene.instantiate().
+func register_from_packed_scene(type_name: String, packed_scene: PackedScene) -> bool:
+	_mesh_types_mutex.lock()
+	var already := type_name in _mesh_types
+	_mesh_types_mutex.unlock()
+	if already:
+		return true
+	if packed_scene == null:
+		return false
+
+	var state: SceneState = packed_scene.get_state()
+	if state == null:
+		return false
+
+	var xforms: Dictionary[String, Transform3D] = {".": Transform3D.IDENTITY}
+	var sub_entries: Array[SubMeshEntry] = []
+	var union_aabb := AABB()
+	var any_has_lod := false
+
+	for i in range(state.get_node_count()):
+		var path := str(state.get_node_path(i, false))
+		var parent_path := str(state.get_node_path(i, true))
+		var local_xform := Transform3D.IDENTITY
+		var visible := true
+		var mesh: Mesh = null
+		var material_override: Material = null
+		var surface_overrides: Dictionary[int, Material] = {}
+
+		for p in range(state.get_node_property_count(i)):
+			var prop_name := str(state.get_node_property_name(i, p))
+			var prop_value: Variant = state.get_node_property_value(i, p)
+			match prop_name:
+				"transform":
+					if prop_value is Transform3D:
+						local_xform = prop_value
+				"visible":
+					visible = bool(prop_value)
+				"mesh":
+					mesh = prop_value as Mesh
+				"material_override":
+					material_override = prop_value as Material
+				_:
+					if prop_name.begins_with("surface_material_override/"):
+						var idx_text := prop_name.get_slice("/", 1)
+						if idx_text.is_valid_int():
+							var mat := prop_value as Material
+							if mat != null:
+								surface_overrides[int(idx_text)] = mat
+
+		var parent_xform: Transform3D = xforms.get(parent_path, Transform3D.IDENTITY)
+		var rel_xform: Transform3D = parent_xform * local_xform
+		xforms[path] = rel_xform
+
+		if state.get_node_type(i) != &"MeshInstance3D" or mesh == null or not visible:
+			continue
+
+		var entry := SubMeshEntry.new()
+		entry.mesh_resource = mesh
+		entry.local_transform = rel_xform
+		entry.has_lod_chain = mesh.has_meta("has_lod_chain") if mesh is ArrayMesh else false
+		if entry.has_lod_chain:
+			any_has_lod = true
+
+		if material_override != null:
+			entry.material_resource = material_override
+			entry.material_rid = material_override.get_rid()
+		else:
+			var surface_count := mesh.get_surface_count()
+			for si in range(surface_count):
+				var mat: Material = surface_overrides.get(si)
+				if mat == null:
+					mat = mesh.surface_get_material(si)
+				entry.surface_materials.append(mat)
+			if surface_count == 1 and not entry.surface_materials.is_empty() and entry.surface_materials[0]:
+				entry.material_resource = entry.surface_materials[0]
+				entry.material_rid = entry.surface_materials[0].get_rid()
+				entry.surface_materials.clear()
+
+		var transformed_aabb := entry.local_transform * mesh.get_aabb()
+		if sub_entries.is_empty():
+			union_aabb = transformed_aabb
+		else:
+			union_aabb = union_aabb.merge(transformed_aabb)
+		sub_entries.append(entry)
+
+	if sub_entries.is_empty():
+		return false
+
+	var first := sub_entries[0]
+	var mesh_type := MeshType.new()
+	mesh_type.name = type_name
+	if first.mesh_resource:
+		mesh_type.mesh_rid = first.mesh_resource.get_rid()
+		mesh_type.mesh_resource = first.mesh_resource
+		mesh_type.owns_mesh = false
+	else:
+		mesh_type.mesh_rid = RenderingServer.mesh_create()
+		mesh_type.owns_mesh = true
+	if first.material_resource:
+		mesh_type.material_rid = first.material_resource.get_rid()
+		mesh_type.material_resource = first.material_resource
+		mesh_type.owns_material = false
+	else:
+		mesh_type.material_rid = RID()
+		mesh_type.owns_material = false
+	mesh_type.aabb = union_aabb
+	mesh_type.has_lod_chain = any_has_lod
+	mesh_type.sub_meshes = sub_entries
+	if not first.surface_materials.is_empty():
+		mesh_type.surface_materials = first.surface_materials
+
+	_mesh_types_mutex.lock()
+	if type_name not in _mesh_types:
+		_mesh_types[type_name] = mesh_type
+		_stats["mesh_types"] += 1
+	_mesh_types_mutex.unlock()
+	return true
+
+
 func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
 	register_from_prototype(type_name, prototype)
 	return type_name in _mesh_types and _mesh_types[type_name].has_lod_chain
@@ -424,6 +546,26 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 			"local_transform": entry.local_transform,
 		}
 	return out
+
+
+## Pre-create empty PrototypeBatch/MultiMesh buckets for a registered type.
+## This is intentionally separate from add_instance(): it lets the streaming
+## prepare lane pay first-batch allocation before ref publish reaches the hot
+## activation drain. Returns the number of new batches created.
+func prepare_batches_for_type(type_name: String) -> int:
+	if not _scenario.is_valid():
+		return 0
+
+	_mesh_types_mutex.lock()
+	var mesh_type: MeshType = _mesh_types.get(type_name)
+	_mesh_types_mutex.unlock()
+	if mesh_type == null or mesh_type.sub_meshes.is_empty():
+		return 0
+
+	var registry := _ensure_registry()
+	if registry == null:
+		return 0
+	return registry.prepare_batches(_build_registry_sub_meshes(mesh_type))
 
 
 ## Phase E — worker-safe precompute for the STAT off-thread path.

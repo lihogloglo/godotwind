@@ -300,6 +300,9 @@ func _ready() -> void:
 		elif arg == "--disable-phase-f-prereg":
 			StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG = true
 			Log.info("streaming", "[--disable-phase-f-prereg] Phase F prototype pre-reg disabled - active-loader prereg bypass")
+		elif arg == "--enable-phase-f-prereg":
+			StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG = false
+			Log.info("streaming", "[--enable-phase-f-prereg] Phase F prototype pre-reg enabled - crash-risk research path")
 		elif arg == "--disable-cell-static-collision":
 			StreamingConfig.DEBUG_DISABLE_CELL_STATIC_COLLISION = true
 			Log.info("streaming", "[--disable-cell-static-collision] per-cell static collision BVH publish disabled - NEAR streaming ablation")

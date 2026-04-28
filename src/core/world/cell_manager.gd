@@ -979,6 +979,8 @@ class InstantiationEntry:
 	var model_path: String
 	var item_id: String
 	var position: Vector3
+	var static_prepare_key: String = ""
+	var static_prepare_failed: bool = false
 	## Per-entry load profile copied from the owning AsyncCellRequest at queue
 	## time. Read during _process_instantiation_queue so that concurrent loads
 	## with different profiles don't stomp on each other.
@@ -1024,12 +1026,26 @@ class InstantiationEntry:
 	var worker_static_task_id: int = -1
 
 
+class StaticPrepareEntry:
+	var request_id: int
+	var type_name: String
+	var model_path: String
+	var item_id: String
+	var key: String
+
+
 ## BackgroundProcessor reference (must be set via set_background_processor)
 var _background_processor: Node = null
 
 ## Instantiation queue for time-budgeted processing
 ## Entries include position for distance-priority sorting
 var _instantiation_queue: Array[InstantiationEntry] = []
+
+## Static renderer prototype/batch prepare queue. This is a main-thread-safe
+## replacement for the crash-prone Phase F worker prereg path.
+var _static_prepare_queue: Array[StaticPrepareEntry] = []
+var _static_prepare_enqueued: Dictionary[String, bool] = {}
+var _static_prepare_failed: Dictionary[String, bool] = {}
 
 ## Detached Node3Ds waiting for a budgeted scene-tree attach. This replaces
 ## bulk call_deferred("add_child") bursts with visible, frame-budgeted work.
@@ -1110,6 +1126,135 @@ func get_async_slots_available() -> int:
 	if not _background_processor:
 		return 0
 	return maxi(0, MAX_ASYNC_REQUESTS - _async_requests.size())
+
+
+func _should_prepare_static_ref(
+	base_record: Variant,
+	type_name: String,
+	model_path: String,
+	profile: LoadProfile,
+) -> bool:
+	if _instantiator == null or _static_renderer == null:
+		return false
+	if model_path.is_empty():
+		return false
+	var effective_use_static: bool = use_static_renderer
+	if profile != null:
+		effective_use_static = profile.use_static_renderer
+	return _instantiator.should_route_model_to_static_renderer(
+		type_name,
+		model_path,
+		base_record,
+		effective_use_static,
+	)
+
+
+func _enqueue_static_prepare(request_id: int, model_path: String, item_id: String = "") -> void:
+	if not SC.STATIC_PREPARE_ENABLED:
+		return
+	if _static_renderer == null or _model_loader == null:
+		return
+	if model_path.is_empty():
+		return
+	var normalized := model_path.to_lower().replace("/", "\\")
+	if _static_renderer.call("has_type", normalized):
+		return
+	if bool(_static_prepare_failed.get(normalized, false)):
+		return
+	if bool(_static_prepare_enqueued.get(normalized, false)):
+		return
+
+	var entry := StaticPrepareEntry.new()
+	entry.request_id = request_id
+	entry.type_name = normalized
+	entry.model_path = model_path
+	entry.item_id = item_id
+	entry.key = normalized
+	_static_prepare_queue.append(entry)
+	_static_prepare_enqueued[normalized] = true
+
+
+func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
+	if not SC.STATIC_PREPARE_ENABLED:
+		return 0
+	if _static_prepare_queue.is_empty() or _static_renderer == null or _model_loader == null:
+		return 0
+	if budget_usec <= 0 or max_per_frame <= 0:
+		return 0
+
+	var start_us := Time.get_ticks_usec()
+	var prepared := 0
+	var scanned := _static_prepare_queue.size()
+	while scanned > 0 and prepared < max_per_frame and not _static_prepare_queue.is_empty():
+		scanned -= 1
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
+
+		var entry: StaticPrepareEntry = _static_prepare_queue.pop_front()
+		_static_prepare_enqueued.erase(entry.key)
+
+		if entry.request_id not in _async_requests:
+			continue
+		if _static_renderer.call("has_type", entry.type_name):
+			continue
+
+		# Never sync-load in the prepare lane. Wait until the async disk path
+		# has promoted the PackedScene into memory, then instantiate/register.
+		if not _model_loader.has_model(entry.model_path, entry.item_id):
+			_enqueue_static_prepare(entry.request_id, entry.model_path, entry.item_id)
+			continue
+
+		var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(entry.model_path, entry.item_id)
+		if packed_scene == null:
+			_static_prepare_failed[entry.key] = true
+			continue
+
+		var prep_start := Time.get_ticks_usec()
+		var reg_start := prep_start
+		var registered := false
+		if _static_renderer.has_method("register_from_packed_scene"):
+			registered = bool(_static_renderer.call("register_from_packed_scene", entry.type_name, packed_scene))
+		var reg_us := Time.get_ticks_usec() - reg_start
+		if not registered:
+			_static_prepare_failed[entry.key] = true
+			continue
+
+		var batch_us := 0
+		var batch_count := 0
+		if SC.STATIC_PREPARE_CREATE_BATCHES and _static_renderer.has_method("prepare_batches_for_type"):
+			var batch_start := Time.get_ticks_usec()
+			batch_count = int(_static_renderer.call("prepare_batches_for_type", entry.type_name))
+			batch_us = Time.get_ticks_usec() - batch_start
+
+		var total_us := Time.get_ticks_usec() - prep_start
+		if total_us > 16_000:
+			Log.warn("streaming", "[static-prepare-spike %.1fms] state=%.1f batch=%.1f/%d type=%s queue=%d" % [
+				total_us / 1000.0,
+				reg_us / 1000.0,
+				batch_us / 1000.0,
+				batch_count,
+				entry.type_name.get_file(),
+				_static_prepare_queue.size(),
+			])
+		prepared += 1
+
+	return prepared
+
+
+func _static_entry_waiting_for_prepare(entry: InstantiationEntry) -> bool:
+	if not SC.STATIC_PREPARE_ENABLED:
+		return false
+	if entry.static_prepare_key.is_empty():
+		return false
+	if bool(_static_prepare_failed.get(entry.static_prepare_key, false)):
+		entry.static_prepare_failed = true
+		return false
+	if _static_renderer == null:
+		return false
+	if _static_renderer.call("has_type", entry.static_prepare_key):
+		return false
+	_enqueue_static_prepare(entry.request_id, entry.model_path, "")
+	return true
 
 
 ## Request async loading of an exterior cell
@@ -1320,6 +1465,9 @@ func fast_cleanup() -> void:
 		var request: AsyncCellRequest = _async_requests[request_id]
 		_drain_collision_worker_for_request(request)
 	_discard_all_pending_child_attaches()
+	_static_prepare_queue.clear()
+	_static_prepare_enqueued.clear()
+	_static_prepare_failed.clear()
 
 
 ## Cancel an async request — HARD cancel, destroys everything.
@@ -1367,6 +1515,7 @@ func cancel_async_request(request_id: int) -> void:
 		# Using print instead of push_warning since it's informational, not a problem
 		Log.info("streaming", "CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
 	_discard_pending_child_attaches_for_request(request_id)
+	_discard_static_prepare_for_request(request_id)
 
 	# Clean up cell node if started
 	if request.cell_node:
@@ -1409,6 +1558,7 @@ func finalize_unloaded_cell(request_id: int) -> void:
 		func(entry: InstantiationEntry) -> bool: return entry.request_id != request_id
 	)
 	_discard_pending_child_attaches_for_request(request_id)
+	_discard_static_prepare_for_request(request_id)
 	# Note: DON'T queue_free(request.cell_node) — caller (_process_budgeted_unloading)
 	# owns the cell_node teardown and has already queue_free'd it.
 	_async_requests.erase(request_id)
@@ -1560,6 +1710,17 @@ func _discard_all_pending_child_attaches() -> void:
 	_pending_child_attaches.clear()
 
 
+func _discard_static_prepare_for_request(request_id: int) -> void:
+	if _static_prepare_queue.is_empty():
+		return
+	_static_prepare_queue = _static_prepare_queue.filter(
+		func(entry: StaticPrepareEntry) -> bool: return entry.request_id != request_id
+	)
+	_static_prepare_enqueued.clear()
+	for entry: StaticPrepareEntry in _static_prepare_queue:
+		_static_prepare_enqueued[entry.key] = true
+
+
 ## Process async instantiation within time budget (call from _process)
 ## Returns number of objects instantiated this frame
 ## Uses BOTH time budget AND object count cap for consistent frame times
@@ -1614,6 +1775,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	if pool_prewarm_enabled and pre_loop_elapsed < budget_ms * 0.7:
 		_process_pool_prewarm()
 	var t_pre_prewarm := Time.get_ticks_usec()
+	var static_prepare_count := _process_static_prepare_queue(
+		int(SC.STATIC_PREPARE_BUDGET_MS * 1000.0),
+		SC.STATIC_PREPARE_MAX_PER_FRAME,
+	)
+	var t_pre_static_prepare := Time.get_ticks_usec()
 
 	# BURST LOADING: Check if nearest objects are very close (critical loading)
 	# If so, use aggressive budget to populate cells faster
@@ -1654,6 +1820,23 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 	var instantiated := 0
 	var exit_reason := ""
+	var route_static_us := 0
+	var route_node_us := 0
+	var route_worker_static_us := 0
+	var route_worker_node_us := 0
+	var route_deferred_us := 0
+	var route_skip_us := 0
+	var route_other_us := 0
+	var route_model_load_us := 0
+	var route_static_register_us := 0
+	var route_static_add_us := 0
+	var route_static_count := 0
+	var route_node_count := 0
+	var route_worker_static_count := 0
+	var route_worker_node_count := 0
+	var route_deferred_count := 0
+	var route_skip_count := 0
+	var worker_pending_count := 0
 
 	# Periodic per-type breakdown dump (every 5s). Answers "inside inst:, which
 	# ref type dominates" with real data, not intuition.
@@ -1697,10 +1880,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			if entry.worker_dispatched \
 					and not WorkerThreadPool.is_task_completed(entry.worker_task_id):
 				phase_a_deferred.append(entry)
+				worker_pending_count += 1
 				continue
 			if entry.worker_static_dispatched \
 					and not WorkerThreadPool.is_task_completed(entry.worker_static_task_id):
 				phase_a_deferred.append(entry)
+				worker_pending_count += 1
 				continue
 
 		# Check if request still exists
@@ -1718,6 +1903,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				request.completed = true
 				request.failed = true
 				request.error_message = "Cell node freed during instantiation"
+			continue
+
+		if _static_entry_waiting_for_prepare(entry):
+			phase_a_deferred.append(entry)
 			continue
 
 		# Decrement pending count
@@ -1762,6 +1951,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 				)
 				# Clear so we don't double-consume in any error path.
 				entry.worker_instance = null
+			else:
+				_instantiator._reset_last_inst_diagnostics("worker_node_empty")
 			# else: worker failed, obj stays null, ref drops silently.
 		elif PHASE_A_OFFTHREAD_INSTANTIATE and entry.worker_static_dispatched:
 			# Phase E — worker precomputed a PrecomputedInstance off-thread;
@@ -1777,11 +1968,39 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 					entry.worker_static_precomp,
 				)
 				entry.worker_static_precomp = null
+			else:
+				_instantiator._reset_last_inst_diagnostics("worker_static_empty")
 			# else: worker failed (e.g. type unregistered at precompute time,
 			# e.g. clear() ran mid-flight). Drop silently.
 		else:
 			obj = _instantiator.instantiate_reference(ref, inst_cell_grid)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
+		var route_name: String = _instantiator.last_inst_route
+		if route_name.is_empty():
+			route_name = "unknown"
+		route_model_load_us += int(_instantiator.last_model_load_us)
+		route_static_register_us += int(_instantiator.last_static_register_us)
+		route_static_add_us += int(_instantiator.last_static_add_us)
+		if route_name.begins_with("static_"):
+			route_static_us += inst_elapsed
+			route_static_count += 1
+		elif route_name == "worker_static_publish" or route_name == "worker_static_empty":
+			route_worker_static_us += inst_elapsed
+			route_worker_static_count += 1
+		elif route_name == "worker_node_tail" or route_name == "worker_node_empty":
+			route_worker_node_us += inst_elapsed
+			route_worker_node_count += 1
+		elif route_name == "deferred":
+			route_deferred_us += inst_elapsed
+			route_deferred_count += 1
+		elif route_name == "skip":
+			route_skip_us += inst_elapsed
+			route_skip_count += 1
+		elif route_name.begins_with("node_") or route_name == "placeholder":
+			route_node_us += inst_elapsed
+			route_node_count += 1
+		else:
+			route_other_us += inst_elapsed
 		_instantiator._clear_transient_profile()
 		_diag_instantiate_time_total_us += inst_elapsed
 		_diag_instantiate_count += 1
@@ -1867,14 +2086,33 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
 	if total_inst_us > 16_000:
-		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f loop=%.1f addc=%.1f instantiated=%d queue=%d burst=%s" % [
+		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d loop=%.1f addc=%.1f static=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
 			float(t_pre_collision - t_pre0) / 1000.0,
 			float(t_pre_disk - start_time) / 1000.0,
 			float(t_pre_conv - t_pre_disk) / 1000.0,
 			float(t_pre_prewarm - t_pre_conv) / 1000.0,
-			maxf(0.0, float(t_end_inst - t_pre_prewarm - attach_time_us)) / 1000.0,
+			float(t_pre_static_prepare - t_pre_prewarm) / 1000.0,
+			static_prepare_count,
+			maxf(0.0, float(t_end_inst - t_pre_static_prepare - attach_time_us)) / 1000.0,
 			float(attach_time_us) / 1000.0,
+			float(route_static_us) / 1000.0,
+			route_static_count,
+			float(route_node_us) / 1000.0,
+			route_node_count,
+			float(route_worker_static_us) / 1000.0,
+			route_worker_static_count,
+			float(route_worker_node_us) / 1000.0,
+			route_worker_node_count,
+			float(route_deferred_us) / 1000.0,
+			route_deferred_count,
+			float(route_skip_us) / 1000.0,
+			route_skip_count,
+			float(route_other_us) / 1000.0,
+			float(route_model_load_us) / 1000.0,
+			float(route_static_register_us) / 1000.0,
+			float(route_static_add_us) / 1000.0,
+			worker_pending_count,
 			instantiated,
 			_instantiation_queue.size() + _pending_child_attaches.size(),
 			"Y" if _burst_loading_active else "N",
@@ -1913,6 +2151,8 @@ func _phase_a_dispatch_pass() -> void:
 	if _instantiator.debug_lod:
 		return
 	var ml: RefCounted = _instantiator.model_loader
+	var start_us := Time.get_ticks_usec()
+	var dispatched := 0
 	if ml == null:
 		return
 	if not ml.has_method("get_cached_packed_scene"):
@@ -1920,6 +2160,10 @@ func _phase_a_dispatch_pass() -> void:
 	for entry: InstantiationEntry in _instantiation_queue:
 		# Skip entries already dispatched on either worker path, or whose
 		# previous-frame worker result hasn't yet been consumed by the drain.
+		if dispatched >= SC.WORKER_DISPATCH_MAX_PER_FRAME:
+			break
+		if Time.get_ticks_usec() - start_us >= SC.WORKER_DISPATCH_BUDGET_US:
+			break
 		if entry.worker_dispatched or entry.worker_static_dispatched:
 			continue
 		if entry.worker_instance != null or entry.worker_static_precomp != null:
@@ -1950,6 +2194,7 @@ func _phase_a_dispatch_pass() -> void:
 				false,
 				"cell_manager:phase_a_instantiate",
 			)
+			dispatched += 1
 			continue
 
 		# ---- Phase E path (off-thread STAT precompute, RS-routed clutter) ----
@@ -1975,6 +2220,7 @@ func _phase_a_dispatch_pass() -> void:
 				false,
 				"cell_manager:phase_e_static_precompute",
 			)
+			dispatched += 1
 
 
 ## Phase A — cancel worker instantiate tasks for a cancelled/unloaded request
@@ -2187,15 +2433,24 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 		var item_id: String = ""
 		if "record_id" in base_record:
 			item_id = base_record.record_id
+		var static_route := _should_prepare_static_ref(
+			base_record,
+			type_name,
+			model_path,
+			request.load_profile,
+		)
+		var load_item_id := "" if static_route else item_id
+		if static_route:
+			_enqueue_static_prepare(request.request_id, model_path, load_item_id)
 
 		# Check if already in memory cache
-		if _model_loader.has_model(model_path, item_id):
+		if _model_loader.has_model(model_path, load_item_id):
 			# Already have this model, queue reference for instantiation
 			_queue_instantiation(request.request_id, ref, model_path, item_id)
 			continue
 
 		# Check disk cache - if available, start ASYNC load (non-blocking!)
-		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, item_id):
+		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, load_item_id):
 			# Track this reference as waiting for the model
 			if model_path not in request.pending_disk_loads:
 				request.pending_disk_loads[model_path] = []
@@ -2203,8 +2458,8 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 
 			# Start async load (or add callback to existing load)
 			# request_model_async handles deduplication internally
-			var callback := _make_disk_load_callback(request.request_id, model_path, item_id)
-			_model_loader.request_model_async(model_path, item_id, callback, false)
+			var callback := _make_disk_load_callback(request.request_id, model_path, load_item_id)
+			_model_loader.request_model_async(model_path, load_item_id, callback, false)
 			disk_cache_hits += 1
 			continue
 
@@ -2685,6 +2940,14 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	if owning_request and owning_request.load_profile:
 		entry.load_profile = owning_request.load_profile
 		entry.interior_priority = owning_request.load_profile.interior_priority
+		if not model_path.is_empty():
+			var record_type: Array = [""]
+			var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+			if base_record != null:
+				var type_name: String = record_type[0] if record_type.size() > 0 else ""
+				if _should_prepare_static_ref(base_record, type_name, model_path, owning_request.load_profile):
+					entry.static_prepare_key = model_path.to_lower().replace("/", "\\")
+					_enqueue_static_prepare(request_id, model_path, "")
 
 	_instantiation_queue.append(entry)
 
@@ -2730,6 +2993,7 @@ func get_loading_stats() -> Dictionary:
 	return {
 		"instantiation_queue_size": _instantiation_queue.size() + _pending_child_attaches.size(),
 		"pending_child_attaches": _pending_child_attaches.size(),
+		"static_prepare_queue": _static_prepare_queue.size(),
 		"burst_loading_active": _burst_loading_active,
 		"burst_budget_ms": _burst_budget_ms,
 		"burst_max_instantiations": _burst_max_instantiations,

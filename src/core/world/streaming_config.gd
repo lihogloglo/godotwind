@@ -119,6 +119,20 @@ const INSTANTIATION_BUDGET_MAX_MS := 16.0    ## Cap: never exceed 16ms (even at 
 ## Fix: fixed 4ms post-startup gives ~12ms for rendering → 60+ FPS while queue drains.
 const POST_STARTUP_INSTANTIATION_BUDGET_MS := 4.0
 
+## Main-thread static prototype prepare budget. This lane registers renderer
+## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs
+## reach the activation drain, avoiding cold work inside add_instance().
+const STATIC_PREPARE_ENABLED := false
+const STATIC_PREPARE_BUDGET_MS := 2.0
+const STATIC_PREPARE_MAX_PER_FRAME := 1
+const STATIC_PREPARE_CREATE_BATCHES := false
+
+## Worker dispatch itself is main-thread work: ESM/cache checks plus
+## WorkerThreadPool.add_task calls. Keep it bounded now that static prepare can
+## make hundreds of queued refs eligible for Phase E in the same frame.
+const WORKER_DISPATCH_BUDGET_US := 1000
+const WORKER_DISPATCH_MAX_PER_FRAME := 64
+
 ## Scene-tree child attach budget for interactive Node3Ds produced by the
 ## instantiation queue. Keeps add_child() work explicit instead of dumping
 ## large batches into idle-time call_deferred bursts.
@@ -369,14 +383,14 @@ static var DEBUG_DISABLE_JOLT_ATTACH: bool = false
 static var DEBUG_DISABLE_FADE_POOL: bool = false
 static var DEBUG_DISABLE_CELL_STATIC_COLLISION: bool = false
 
-## --disable-phase-f-prereg — bypass Phase F off-thread prototype pre-registration.
-## Tracker §12.2 "second crash site" hits here during active streaming: the
-## `preregister_cell_statics → has_animation → get_model → ResourceLoader.load`
-## chain SIGSEGVs intermittently on `.res` files. For Phase 0 ablation we want
-## the measurement to COMPLETE, so disable prereg. Absolute FPS numbers drop
-## slightly (Phase F eliminates cold-register stalls) but since all three
-## ablations run identically without it, deltas are clean. NOT for production.
-static var DEBUG_DISABLE_PHASE_F_PREREG: bool = false
+## Phase F off-thread prototype pre-registration.
+##
+## Default-disabled after the 2026-04-28 fresh benchmark crashed before writing
+## data with Phase F enabled, while the same route completed with
+## --disable-phase-f-prereg. The worker path instantiates PackedScenes and
+## registers prototypes off-thread; that is too crash-prone on this Godot 4.6
+## setup. Keep the flag as an opt-in research switch via --enable-phase-f-prereg.
+static var DEBUG_DISABLE_PHASE_F_PREREG: bool = true
 
 # =============================================================================
 # STREAMING MODE - FULL_AAA ONLY (Simplified)

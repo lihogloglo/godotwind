@@ -268,12 +268,28 @@ var _inst_call_count: int = 0
 ## call. Read by `cell_manager.process_async_instantiation` for per-type
 ## timing breakdown. Scientific-approach instrumentation, not hypothesis.
 var last_type_name: String = ""
+## Route-level diagnostic for the most recent instantiate/publish call.
+## Read by CellManager to split the broad `inst` phase into actionable buckets.
+var last_inst_route: String = ""
+var last_model_load_us: int = 0
+var last_static_register_us: int = 0
+var last_static_add_us: int = 0
+
+
+func _reset_last_inst_diagnostics(route: String = "") -> void:
+	last_inst_route = route
+	last_model_load_us = 0
+	last_static_register_us = 0
+	last_static_add_us = 0
+
+
 # PHASE_A:MAIN_ONLY — orchestrator. ESMManager.get_any_record autoload read +
 # dispatch to type handlers. Stays main-thread; split lives in _instantiate_model_object.
 func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
 	_inst_call_count += 1
 	# Reset per-call state — caller (cell_manager) reads these after return.
 	last_proximity_deferred = false
+	_reset_last_inst_diagnostics("sync")
 
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
@@ -288,6 +304,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 	if not base_record:
 		# Not an error - some refs are for types we don't handle yet
 		last_type_name = "unknown"
+		last_inst_route = "skip"
 		return null
 
 	var type_name: String = record_type[0] if record_type.size() > 0 else ""
@@ -306,6 +323,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 			# tick_proximity_deferred when the camera approaches.
 			if _is_light_proximity_deferred(light_record, ref):
 				last_proximity_deferred = true
+				last_inst_route = "deferred"
 				return null
 			return _instantiate_light(ref, light_record)
 		"npc":
@@ -327,6 +345,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 		"leveled_item":
 			# Leveled items need to be resolved at runtime
 			# Could spawn random items here if needed
+			last_inst_route = "skip"
 			return null
 		_:
 			# Standard model-based object
@@ -415,6 +434,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 		var ref_world_pos := CS.vector_to_godot(ref.position)
 		if ref_world_pos.distance_squared_to(camera_position) > INTERACTIVE_PROXIMITY_THRESHOLD_M * INTERACTIVE_PROXIMITY_THRESHOLD_M:
 			last_proximity_deferred = true
+			last_inst_route = "deferred"
 			return null
 	last_proximity_deferred = false
 
@@ -424,6 +444,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	if not is_carryable and use_object_pool and object_pool:
 		var pooled: Node3D = object_pool.call("acquire", model_path)
 		if pooled:
+			last_inst_route = "node_pool"
 			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 			# Note: visibility_range is already configured on pooled objects
 			_apply_transform(pooled, ref, true)
@@ -431,9 +452,13 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 			return pooled
 
 	# Load — get_model() returns a fresh Node3D (collision disabled) from PackedScene cache.
+	last_inst_route = "node_sync"
+	var model_load_start := Time.get_ticks_usec()
 	var instance: Node3D = model_loader.call("get_model", model_path, record_id)
+	last_model_load_us = Time.get_ticks_usec() - model_load_start
 	if not instance:
 		# Create a placeholder for missing models
+		last_inst_route = "placeholder"
 		return _create_placeholder(ref)
 
 	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
@@ -668,6 +693,18 @@ func should_dispatch_static_precompute(
 ##   - WorkerThreadPool.add_task      — supported from worker threads
 ##   - _prune_completed_prereg_tasks  — Fix D mutex (_prereg_task_ids_mutex)
 ##   - _prereg_task_ids append        — Fix D mutex
+## Shared main-thread classifier for callers that need to know whether a model
+## will use the static renderer before an InstantiationEntry exists.
+func should_route_model_to_static_renderer(
+	type_name: String,
+	model_path: String,
+	base_record: Variant,
+	effective_use_static: bool,
+) -> bool:
+	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+	return _should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static)
+
+
 func preregister_cell_statics(cell_record: Variant) -> int:
 	# Phase 0 ablation escape hatch — tracker §12.2 crash site lived inside
 	# the old `has_animation → get_model → ResourceLoader.load` chain. Fix C
@@ -917,11 +954,14 @@ func _worker_static_precompute(entry: Variant, cell_grid: Vector2i) -> void:
 func complete_worker_static_precompute(entry: Variant, precomp: Variant) -> Node3D:
 	last_type_name = "static"
 	last_proximity_deferred = false
+	_reset_last_inst_diagnostics("worker_static_publish")
 	if precomp == null or static_renderer == null:
 		return null
 	# `add_instance_precomputed` returns the new instance_id; we don't need it
 	# here (remove_instance happens on cell unload via cell_grid index).
+	var add_start := Time.get_ticks_usec()
 	var id: int = static_renderer.call("add_instance_precomputed", precomp)
+	last_static_add_us = Time.get_ticks_usec() - add_start
 	if id >= 0:
 		stats["static_renderer_instances"] += 1
 		# Mirror of the sync path's `last_static_data` side-channel for the GPU
@@ -1018,6 +1058,7 @@ func complete_worker_instantiate(
 	# breakdown picks up worker-path entries under the right type key.
 	last_type_name = type_name
 	last_proximity_deferred = false
+	_reset_last_inst_diagnostics("worker_node_tail")
 	# Null path removed — the cell_manager drain only calls this when
 	# entry.worker_instance != null. @roaster review 2026-04-20 §4c.
 	var ref: CellReference = entry.ref
@@ -1075,14 +1116,21 @@ func complete_worker_instantiate(
 # add_instance). RS calls are thread-safe but registry mutation must stay main.
 func _instantiate_static_object(ref: CellReference, model_path: String, cell_grid: Vector2i) -> Node3D:
 	var normalized := model_path.to_lower().replace("/", "\\")
+	last_inst_route = "static_hot"
 
 	# Ensure model is loaded and registered with static renderer
 	if not static_renderer.call("has_type", normalized):
+		last_inst_route = "static_cold"
 		# Load prototype to get mesh
+		var load_start := Time.get_ticks_usec()
 		var prototype: Node3D = model_loader.call("get_model", model_path)
+		last_model_load_us = Time.get_ticks_usec() - load_start
 		if prototype:
+			var reg_start := Time.get_ticks_usec()
 			static_renderer.call("register_from_prototype", normalized, prototype)
+			last_static_register_us = Time.get_ticks_usec() - reg_start
 		else:
+			last_inst_route = "static_cold_fail"
 			return null
 
 	# Calculate transform using CoordinateSystem's ESM rotation conversion
@@ -1097,7 +1145,9 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 	var aabb: AABB = mesh_type_stats.get("aabb", AABB())
 
 	# Add instance to static renderer
+	var add_start := Time.get_ticks_usec()
 	var instance_id: int = static_renderer.call("add_instance", normalized, transform, cell_grid)
+	last_static_add_us = Time.get_ticks_usec() - add_start
 	if instance_id >= 0:
 		stats["static_renderer_instances"] += 1
 
