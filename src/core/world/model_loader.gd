@@ -33,6 +33,13 @@ const MAX_CACHE_SIZE := 500
 ## with hundreds of concurrent threaded load requests during heavy startup.
 const MAX_CONCURRENT_ASYNC_LOADS := 16
 
+## Per-frame hard caps for the main-thread side of async ResourceLoader drain.
+## These bound status polling, load_threaded_get() result handoff, and new
+## deferred load submissions separately from the caller's instantiate budget.
+const MAX_ASYNC_STATUS_POLLS_PER_FRAME := 8
+const MAX_ASYNC_COMPLETIONS_PER_FRAME := 2
+const MAX_DEFERRED_DRAIN_PER_FRAME := 4
+
 ## Fallback instantiation budget when no caller-supplied budget is available.
 ## 8ms matches INSTANTIATION_BUDGET_MS in StreamingConfig — used only if
 ## process_async_loads() is called without an explicit budget_usec argument.
@@ -598,11 +605,12 @@ func process_async_loads(budget_usec: int = 0) -> int:
 	var completed := _drain_pending_instantiate_queue(effective_budget)
 
 	var t_phase_a := Time.get_ticks_usec()
+	var phase_b_budget_left: int = maxi(0, effective_budget - int(t_phase_a - t0))
 
 	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
 		return completed
 	if _pending_async_loads.is_empty():
-		_drain_deferred_queue()
+		_drain_deferred_queue(phase_b_budget_left, MAX_DEFERRED_DRAIN_PER_FRAME)
 		var t_dd := Time.get_ticks_usec()
 		var ml_total: int = t_dd - t0
 		if ml_total > 8_000:
@@ -619,9 +627,18 @@ func process_async_loads(budget_usec: int = 0) -> int:
 
 	var to_remove: Array[String] = []
 	var phase_b_get_count: int = 0
+	var status_polls := 0
 
 	# Phase B: poll in-flight loads, defer instantiate for next frame.
 	for disk_path: String in _pending_async_loads:
+		if status_polls >= MAX_ASYNC_STATUS_POLLS_PER_FRAME:
+			break
+		if phase_b_get_count >= MAX_ASYNC_COMPLETIONS_PER_FRAME:
+			break
+		if Time.get_ticks_usec() - t0 >= effective_budget:
+			break
+		status_polls += 1
+
 		var status := ResourceLoader.load_threaded_get_status(disk_path)
 
 		match status:
@@ -685,7 +702,8 @@ func process_async_loads(budget_usec: int = 0) -> int:
 	var t_phase_b := Time.get_ticks_usec()
 
 	# Drain deferred queue into freed slots
-	_drain_deferred_queue()
+	var dd_budget_left: int = maxi(0, effective_budget - int(t_phase_b - t0))
+	_drain_deferred_queue(dd_budget_left, MAX_DEFERRED_DRAIN_PER_FRAME)
 
 	var t_dd := Time.get_ticks_usec()
 	var ml_total: int = t_dd - t0
@@ -857,9 +875,18 @@ func get_pending_async_count() -> int:
 
 ## Start deferred requests that were throttled by MAX_CONCURRENT_ASYNC_LOADS.
 ## Called each frame after completed loads are reaped, so freed slots get reused.
-func _drain_deferred_queue() -> void:
+func _drain_deferred_queue(budget_usec: int = DRAIN_FALLBACK_BUDGET_USEC, max_entries: int = MAX_DEFERRED_DRAIN_PER_FRAME) -> int:
+	if budget_usec <= 0 or max_entries <= 0:
+		return 0
+	var start_us := Time.get_ticks_usec()
+	var processed := 0
 	while not _deferred_async_queue.is_empty() and _pending_async_loads.size() < MAX_CONCURRENT_ASYNC_LOADS:
+		if processed >= max_entries:
+			break
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
 		var entry: Dictionary = _deferred_async_queue.pop_back()
+		processed += 1
 		var disk_path: String = entry.disk_path
 		var cache_key: String = entry.cache_key
 
@@ -905,6 +932,7 @@ func _drain_deferred_queue() -> void:
 				"item_id": entry.item_id,
 				"instantiate_for_callback": bool(entry.get("instantiate_for_callback", true)),
 			})
+	return processed
 
 
 ## Cache a freshly converted Node3D (prebaking path only).

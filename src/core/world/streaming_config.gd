@@ -119,6 +119,22 @@ const INSTANTIATION_BUDGET_MAX_MS := 16.0    ## Cap: never exceed 16ms (even at 
 ## Fix: fixed 4ms post-startup gives ~12ms for rendering → 60+ FPS while queue drains.
 const POST_STARTUP_INSTANTIATION_BUDGET_MS := 4.0
 
+## Main-thread drain budget for ModelLoader async completions inside the
+## interactive publish lane. The threaded load may finish off-thread, but
+## load_threaded_get(), PackedScene cache promotion, and callback dispatch still
+## happen on the main thread and must not consume the whole publish budget.
+const MODEL_LOADER_DRAIN_BUDGET_MS := 1.0
+const STARTUP_MODEL_LOADER_DRAIN_BUDGET_MS := 4.0
+
+## Async cell request classification budget. This is the main-thread pass that
+## walks CellReferences, resolves ESM records, builds CellPayload buckets, and
+## starts/dedupes model disk requests. It used to run all-at-once in
+## pending_loads_async when a cell boundary was crossed.
+const CELL_REQUEST_CLASSIFY_BUDGET_MS := 1.0
+const STARTUP_CELL_REQUEST_CLASSIFY_BUDGET_MS := 3.0
+const CELL_REQUEST_CLASSIFY_MAX_REFS := 48
+const STARTUP_CELL_REQUEST_CLASSIFY_MAX_REFS := 128
+
 ## Main-thread static prototype prepare budget. This lane registers renderer
 ## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs
 ## reach the activation drain, avoiding cold work inside add_instance().

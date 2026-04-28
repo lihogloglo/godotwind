@@ -25,6 +25,7 @@ const CellPayloadScript := preload("res://src/core/world/cell_payload.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const StaticShapeCacheScript := preload("res://src/core/world/static_shape_cache.gd")
 const CellStaticCollisionScript := preload("res://src/core/world/cell_static_collision.gd")
+const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 # S.1 follow-up §12.2 — second crash-site breadcrumbs for the post-instantiate
 # batch add_child loop.
 const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
@@ -931,6 +932,9 @@ class AsyncCellRequest:
 	var pending_disk_loads: Dictionary[String, Array] = {}  # cache_key -> Array[Dictionary] (refs waiting for this exact model key)
 	var parsed_results: Dictionary[String, NIFParseResult] = {}  # model_path -> NIFParseResult
 	var references_to_process: Array[CellReference] = []  # CellReference objects awaiting instantiation
+	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
+	var classify_index: int = 0
+	var classification_complete: bool = false
 	var pending_instantiations: int = 0  # Count of items queued for instantiation
 	var payload: CellPayloadScript = null
 	var state: int = CellPayloadScript.State.QUEUED_DATA
@@ -1161,12 +1165,16 @@ func _should_prepare_static_ref(
 	var effective_use_static: bool = use_static_renderer
 	if profile != null:
 		effective_use_static = profile.use_static_renderer
-	return _instantiator.should_route_model_to_static_renderer(
-		type_name,
-		model_path,
-		base_record,
-		effective_use_static,
-	)
+	if not effective_use_static:
+		return false
+	if CarryableRegistryScript.is_carryable(type_name, base_record):
+		return false
+	match type_name:
+		"door", "activator", "container", "light":
+			return false
+	if type_name == "static":
+		return true
+	return _instantiator._is_static_render_model(model_path)
 
 
 func _get_static_expected_count_for_request(request_id: int, model_path: String, item_id: String) -> int:
@@ -1309,6 +1317,155 @@ func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
 		prepared += 1
 
 	return prepared
+
+
+func _process_request_classification_queue(budget_usec: int, max_refs: int) -> int:
+	if budget_usec <= 0 or max_refs <= 0:
+		return 0
+	if _async_requests.is_empty():
+		return 0
+
+	var start_us := Time.get_ticks_usec()
+	var processed := 0
+	for request_id: int in _async_requests:
+		if processed >= max_refs:
+			break
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request == null or request.classification_complete:
+			continue
+		processed += _classify_request_refs(
+			request,
+			start_us,
+			budget_usec,
+			max_refs - processed,
+		)
+	return processed
+
+
+func _classify_request_refs(
+	request: AsyncCellRequest,
+	start_us: int,
+	budget_usec: int,
+	max_refs: int,
+) -> int:
+	if request == null or request.classification_complete or request.cell_record == null:
+		return 0
+
+	var processed := 0
+	var refs: Array = request.cell_record.references
+	while request.classify_index < refs.size() and processed < max_refs:
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
+
+		var ref: CellReference = refs[request.classify_index]
+		request.classify_index += 1
+		processed += 1
+
+		var record_type: Array = [""]
+		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		if not base_record:
+			continue
+
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
+
+		# Skip types that don't use models or are disabled.
+		if type_name == "leveled_item":
+			continue
+		if type_name == "npc" and not load_npcs:
+			continue
+		if type_name == "creature" and not load_creatures:
+			continue
+		if type_name == "leveled_creature" and not load_creatures:
+			continue
+
+		var model_path: String = _get_model_path(base_record)
+		if model_path.is_empty():
+			if request.payload != null:
+				if type_name == "light":
+					request.payload.add_light_ref("", "", ref)
+				else:
+					request.payload.add_interactive_ref(type_name, "", "", ref)
+			_queue_instantiation(request.request_id, ref, "", "", "")
+			continue
+
+		var item_id: String = ""
+		if "record_id" in base_record:
+			item_id = base_record.record_id
+		var static_route := _should_prepare_static_ref(
+			base_record,
+			type_name,
+			model_path,
+			request.load_profile,
+		)
+		var load_item_id := "" if static_route or type_name == "light" or type_name == "npc" or type_name == "creature" else item_id
+		if request.payload != null:
+			if static_route:
+				request.payload.add_static_ref(model_path, load_item_id, ref)
+			elif type_name == "light":
+				request.payload.add_light_ref(model_path, load_item_id, ref)
+			else:
+				request.payload.add_interactive_ref(type_name, model_path, load_item_id, ref)
+		if static_route:
+			_enqueue_static_prepare(request.request_id, model_path, load_item_id)
+
+		if _model_loader.has_model(model_path, load_item_id):
+			_pin_payload_cached_scene(request, model_path, load_item_id)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id)
+			continue
+
+		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, load_item_id):
+			var pending_key := _get_cache_key(model_path, load_item_id)
+			if pending_key not in request.pending_disk_loads:
+				request.pending_disk_loads[pending_key] = []
+			request.pending_disk_loads[pending_key].append({
+				"ref": ref,
+				"item_id": item_id,
+				"cache_item_id": load_item_id,
+			})
+
+			var callback := _make_disk_load_callback(request.request_id, model_path, load_item_id)
+			_model_loader.request_model_async(model_path, load_item_id, callback, false)
+			continue
+
+		if _model_loader.runtime_mode:
+			continue
+
+		if model_path not in request.models_to_load:
+			request.models_to_load[model_path] = {"item_ids": []}
+		var item_ids_array: Array = request.models_to_load[model_path].item_ids
+		if item_id and item_id not in item_ids_array:
+			item_ids_array.append(item_id)
+		request.references_to_process.append(ref)
+
+	if request.classify_index >= refs.size():
+		_finish_request_classification(request)
+
+	return processed
+
+
+func _finish_request_classification(request: AsyncCellRequest) -> void:
+	if request == null or request.classification_complete:
+		return
+
+	for model_path: String in request.models_to_load:
+		var model_info: Variant = request.models_to_load[model_path]
+		var item_ids: Array = model_info.get("item_ids", []) if model_info is Dictionary else []
+		var item_id: String = item_ids[0] if item_ids.size() > 0 else ""
+
+		var task_id := _submit_parse_task(str(model_path), item_id, request.request_id)
+		if task_id >= 0:
+			request.pending_parses[model_path] = task_id
+
+	request.classification_complete = true
+	request.started = true
+	request.state = CellPayloadScript.State.PAYLOAD_READY
+	if request.payload != null:
+		request.payload.state = request.state
+
+	if _is_request_complete(request):
+		_finalize_request(request)
 
 
 func _static_entry_waiting_for_prepare(entry: InstantiationEntry) -> bool:
@@ -1836,13 +1993,29 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 
 	# First process any pending async disk loads, budgeted so they can't eat the
 	# entire frame allocation before the main instantiation loop runs.
-	# Half the caller budget: leaves the other half for _instantiation_queue items.
-	process_async_disk_loads(int(budget_ms * 500.0))  # budget_ms*0.5 in usec
+	var budget_usec_total := int(budget_ms * 1000.0)
+	var classify_cap_ms := SC.CELL_REQUEST_CLASSIFY_BUDGET_MS
+	var classify_max_refs := SC.CELL_REQUEST_CLASSIFY_MAX_REFS
+	if budget_ms > SC.POST_STARTUP_INSTANTIATION_BUDGET_MS:
+		classify_cap_ms = SC.STARTUP_CELL_REQUEST_CLASSIFY_BUDGET_MS
+		classify_max_refs = SC.STARTUP_CELL_REQUEST_CLASSIFY_MAX_REFS
+	var classify_budget_us: int = mini(int(classify_cap_ms * 1000.0), budget_usec_total)
+	var classified_refs := _process_request_classification_queue(classify_budget_us, classify_max_refs)
+	var t_pre_classify := Time.get_ticks_usec()
+
+	var disk_elapsed_us := Time.get_ticks_usec() - start_time
+	var disk_remaining_us: int = maxi(0, budget_usec_total - int(disk_elapsed_us))
+	var disk_cap_ms := SC.MODEL_LOADER_DRAIN_BUDGET_MS
+	if budget_ms > SC.POST_STARTUP_INSTANTIATION_BUDGET_MS:
+		disk_cap_ms = SC.STARTUP_MODEL_LOADER_DRAIN_BUDGET_MS
+	var disk_budget_us: int = mini(int(disk_cap_ms * 1000.0), disk_remaining_us)
+	process_async_disk_loads(disk_budget_us)
 	var t_pre_disk := Time.get_ticks_usec()
 
 	# Then process any pending conversions to feed the cache
-	# Cap conversion time to half the budget so instantiation still gets time
-	var conversion_budget_ms := budget_ms * 0.5
+	# Runtime mode no-ops here, but keep the prebake path inside remaining time.
+	var conv_remaining_ms := maxf(0.0, budget_ms - (float(t_pre_disk - start_time) / 1000.0))
+	var conversion_budget_ms := minf(budget_ms * 0.25, conv_remaining_ms)
 	process_pending_conversions(conversion_budget_ms)
 	var t_pre_conv := Time.get_ticks_usec()
 
@@ -1851,8 +2024,13 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	if pool_prewarm_enabled and pre_loop_elapsed < budget_ms * 0.7:
 		_process_pool_prewarm()
 	var t_pre_prewarm := Time.get_ticks_usec()
-	var static_prepare_count := _process_static_prepare_queue(
+	var static_prepare_remaining_us: int = maxi(0, budget_usec_total - int(Time.get_ticks_usec() - start_time))
+	var static_prepare_budget_us: int = mini(
 		int(SC.STATIC_PREPARE_BUDGET_MS * 1000.0),
+		static_prepare_remaining_us,
+	)
+	var static_prepare_count := _process_static_prepare_queue(
+		static_prepare_budget_us,
 		SC.STATIC_PREPARE_MAX_PER_FRAME,
 	)
 	var t_pre_static_prepare := Time.get_ticks_usec()
@@ -2206,10 +2384,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
 	if total_inst_us > 16_000:
-		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
+		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f class=%.1f/%d disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
 			float(t_pre_collision - t_pre0) / 1000.0,
-			float(t_pre_disk - start_time) / 1000.0,
+			float(t_pre_classify - start_time) / 1000.0,
+			classified_refs,
+			float(t_pre_disk - t_pre_classify) / 1000.0,
 			float(t_pre_conv - t_pre_disk) / 1000.0,
 			float(t_pre_prewarm - t_pre_conv) / 1000.0,
 			float(t_pre_static_prepare - t_pre_prewarm) / 1000.0,
@@ -2679,128 +2859,6 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 	# Store request BEFORE processing so _queue_instantiation can find it
 	_async_requests[request.request_id] = request
 
-	# Collect all unique model paths that need loading
-	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
-	var disk_cache_hits := 0
-
-	for ref: CellReference in cell.references:
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-		if not base_record:
-			continue
-
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-
-		# Skip types that don't use models or are disabled
-		if type_name == "leveled_item":
-			continue
-		if type_name == "npc" and not load_npcs:
-			continue
-		if type_name == "creature" and not load_creatures:
-			continue
-		if type_name == "leveled_creature" and not load_creatures:
-			continue
-
-		var model_path: String = _get_model_path(base_record)
-		if model_path.is_empty():
-			if request.payload != null:
-				if type_name == "light":
-					request.payload.add_light_ref("", "", ref)
-				else:
-					request.payload.add_interactive_ref(type_name, "", "", ref)
-			# Light without model, or actor placeholder - queue for direct instantiation
-			# NOTE: These must be queued immediately, NOT added to references_to_process
-			# references_to_process is for refs waiting on async model parsing
-			# If we add model-less refs there, they'll never be processed when all models
-			# come from disk cache (no parsing = no _queue_references_for_model calls)
-			_queue_instantiation(request.request_id, ref, "", "", "")
-			continue
-
-		var item_id: String = ""
-		if "record_id" in base_record:
-			item_id = base_record.record_id
-		var static_route := _should_prepare_static_ref(
-			base_record,
-			type_name,
-			model_path,
-			request.load_profile,
-		)
-		# Some publish paths use the generic model key even when the ESM record
-		# has an id. Warm/load the exact key publish will hit; otherwise the
-		# visual drain pays a second cold load under a different cache key.
-		var load_item_id := "" if static_route or type_name == "light" or type_name == "npc" or type_name == "creature" else item_id
-		if request.payload != null:
-			if static_route:
-				request.payload.add_static_ref(model_path, load_item_id, ref)
-			elif type_name == "light":
-				request.payload.add_light_ref(model_path, load_item_id, ref)
-			else:
-				request.payload.add_interactive_ref(type_name, model_path, load_item_id, ref)
-		if static_route:
-			_enqueue_static_prepare(request.request_id, model_path, load_item_id)
-
-		# Check if already in memory cache
-		if _model_loader.has_model(model_path, load_item_id):
-			_pin_payload_cached_scene(request, model_path, load_item_id)
-			# Already have this model, queue reference for instantiation
-			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id)
-			continue
-
-		# Check disk cache - if available, start ASYNC load (non-blocking!)
-		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, load_item_id):
-			# Track this reference as waiting for the model
-			var pending_key := _get_cache_key(model_path, load_item_id)
-			if pending_key not in request.pending_disk_loads:
-				request.pending_disk_loads[pending_key] = []
-			request.pending_disk_loads[pending_key].append({
-				"ref": ref,
-				"item_id": item_id,
-				"cache_item_id": load_item_id,
-			})
-
-			# Start async load (or add callback to existing load)
-			# request_model_async handles deduplication internally
-			var callback := _make_disk_load_callback(request.request_id, model_path, load_item_id)
-			_model_loader.request_model_async(model_path, load_item_id, callback, false)
-			disk_cache_hits += 1
-			continue
-
-		# RUNTIME MODE: Skip models not in disk cache - they must be prebaked
-		# No NIF conversion at runtime - only prebaking does conversion
-		if _model_loader.runtime_mode:
-			# Model not prebaked - skip this reference silently
-			# (The prebaking UI will show which models are missing)
-			continue
-
-		# PREBAKING MODE ONLY: Need to load this model from BSA + convert NIF
-		if model_path not in models_to_load:
-			models_to_load[model_path] = {"item_ids": []}
-		var item_ids_array: Array = models_to_load[model_path].item_ids
-		if item_id and item_id not in item_ids_array:
-			item_ids_array.append(item_id)
-
-		# Queue reference for later (after model is parsed)
-		request.references_to_process.append(ref)
-
-	# Submit parse tasks for models that need loading
-	for model_path: String in models_to_load:
-		var model_info: Variant = models_to_load[model_path]
-		var item_ids: Array = model_info.get("item_ids", []) if model_info is Dictionary else []
-		var item_id: String = item_ids[0] if item_ids.size() > 0 else ""
-
-		var task_id := _submit_parse_task(str(model_path), item_id, request.request_id)
-		if task_id >= 0:
-			request.pending_parses[model_path] = task_id
-
-	request.started = true
-	request.state = CellPayloadScript.State.PAYLOAD_READY
-	if request.payload != null:
-		request.payload.state = request.state
-
-	# Mark as complete if nothing to do (all models cached and instantiated)
-	if _is_request_complete(request):
-		_finalize_request(request)
-
 	return request.request_id
 
 
@@ -2910,7 +2968,7 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 
 ## Internal: Check if an async request is complete
 func _is_request_complete(request: AsyncCellRequest) -> bool:
-	return request.pending_parses.is_empty() and request.pending_disk_loads.is_empty() and request.references_to_process.is_empty() and request.pending_instantiations <= 0
+	return request.classification_complete and request.pending_parses.is_empty() and request.pending_disk_loads.is_empty() and request.references_to_process.is_empty() and request.pending_instantiations <= 0
 
 
 ## Internal: Create a callback for async disk load completion
@@ -3034,6 +3092,8 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 		if request.collision_built or request.collision_dispatched:
+			continue
+		if not request.classification_complete:
 			continue
 		if not request.pending_parses.is_empty():
 			continue

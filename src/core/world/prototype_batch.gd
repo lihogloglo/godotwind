@@ -127,6 +127,11 @@ var _shadow_cutoff_hyst_sq: float = 0.0
 ## spawn with shadows on until the first cull pass evaluates distance.
 var _shadow_on: bool = true
 
+## Current RenderingServer instance visibility. Empty or fully-culled batches
+## hide the RS instance instead of writing MultiMesh.visible_instance_count=0;
+## the zero-visible setter has crashed during teleport/mass-unload on Godot 4.6.
+var _rs_visible: bool = true
+
 #endregion
 
 
@@ -370,8 +375,7 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 		return 0
 
 	if slot_count_live == 0:
-		if multimesh != null:
-			multimesh.visible_instance_count = 0
+		_set_rs_visible(false)
 		return 0
 
 	if native_culler != null:
@@ -417,13 +421,16 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 		_cull_buffer[i] = 0.0
 
 	if visible == 0:
-		multimesh.visible_instance_count = 0
+		_set_rs_visible(false)
 		_update_shadow_state(nearest_dist_sq)
 		return 0
 
 	_ensure_multimesh_capacity()
+	_set_rs_visible(false)
+	multimesh.visible_instance_count = 0
 	multimesh.set_buffer(_cull_buffer)
 	multimesh.visible_instance_count = visible
+	_set_rs_visible(true)
 	_update_shadow_state(nearest_dist_sq)
 	return visible
 
@@ -465,9 +472,16 @@ func _cull_native(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounte
 
 	if multimesh == null:
 		return 0
+	if visible <= 0:
+		_set_rs_visible(false)
+		_update_shadow_state(nearest_dist_sq)
+		return 0
 	_ensure_multimesh_capacity()
+	_set_rs_visible(false)
+	multimesh.visible_instance_count = 0
 	multimesh.set_buffer(buffer)
 	multimesh.visible_instance_count = visible
+	_set_rs_visible(true)
 	_update_shadow_state(nearest_dist_sq)
 	return visible
 
@@ -476,8 +490,18 @@ func _ensure_multimesh_capacity() -> void:
 	if multimesh == null:
 		return
 	if multimesh.instance_count != slot_capacity:
-		multimesh.visible_instance_count = 0
+		_set_rs_visible(false)
 		multimesh.instance_count = slot_capacity
+
+
+func _set_rs_visible(visible: bool) -> void:
+	if visible == _rs_visible:
+		return
+	if not rs_instance.is_valid():
+		_rs_visible = visible
+		return
+	RenderingServer.instance_set_visible(rs_instance, visible)
+	_rs_visible = visible
 
 ## Flip cast_shadow on the batch RS instance based on the nearest live
 ## slot's distance from the camera. Called from both cull paths (GDScript
@@ -548,5 +572,6 @@ func cleanup() -> void:
 	shadow_cutoff_dist_sq = 0.0
 	_shadow_cutoff_hyst_sq = 0.0
 	_shadow_on = true
+	_rs_visible = true
 
 #endregion
