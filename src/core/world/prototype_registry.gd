@@ -118,7 +118,7 @@ static func batch_key(p_mesh_rid: RID, p_material_rid: RID) -> int:
 
 ## Get the existing batch for a (mesh, material) pair, or create one on demand.
 ## Return type is RefCounted (underlying instance is PrototypeBatchScript).
-func get_or_create_batch(p_mesh: Mesh, p_material: Material) -> RefCounted:
+func get_or_create_batch(p_mesh: Mesh, p_material: Material, p_initial_capacity: int = -1) -> RefCounted:
 	assert(p_mesh != null, "PrototypeRegistry.get_or_create_batch: mesh must not be null")
 	var mesh_rid: RID = p_mesh.get_rid()
 	var material_rid: RID = p_material.get_rid() if p_material != null else RID()
@@ -128,7 +128,10 @@ func get_or_create_batch(p_mesh: Mesh, p_material: Material) -> RefCounted:
 	if existing != null:
 		return existing
 
-	var created: RefCounted = PrototypeBatchScript.new(p_mesh, p_material, _scenario, initial_batch_capacity)
+	var create_capacity: int = initial_batch_capacity
+	if p_initial_capacity > 0:
+		create_capacity = p_initial_capacity
+	var created: RefCounted = PrototypeBatchScript.new(p_mesh, p_material, _scenario, create_capacity)
 	_batches[key] = created
 	return created
 
@@ -136,18 +139,30 @@ func get_or_create_batch(p_mesh: Mesh, p_material: Material) -> RefCounted:
 ## Create empty batches for the given registry input without acquiring slots.
 ## Used by the static prepare lane to move first MultiMesh allocation out of
 ## the per-ref publish path.
-func prepare_batches(p_sub_meshes: Array) -> int:
-	var prepared := 0
+func reserve_batches(p_sub_meshes: Array, expected_count: int) -> int:
+	var reserved := 0
+	var count_to_reserve: int = maxi(0, expected_count)
 	for sm: Dictionary in p_sub_meshes:
 		var mesh: Mesh = sm.get("mesh")
 		if mesh == null:
 			continue
 		var material: Material = sm.get("material")
 		var before := _batches.size()
-		get_or_create_batch(mesh, material)
+		var cold_capacity: int = count_to_reserve if count_to_reserve > 0 else initial_batch_capacity
+		var batch: RefCounted = get_or_create_batch(mesh, material, cold_capacity)
+		var changed := _batches.size() > before
+		var needed_capacity: int = int(batch.slot_count_live) + count_to_reserve
+		if batch.has_method("reserve_capacity") and bool(batch.call("reserve_capacity", needed_capacity)):
+			changed = true
 		if _batches.size() > before:
-			prepared += 1
-	return prepared
+			changed = true
+		if changed:
+			reserved += 1
+	return reserved
+
+
+func prepare_batches(p_sub_meshes: Array) -> int:
+	return reserve_batches(p_sub_meshes, 0)
 
 
 ## Look up a batch without creating. Returns null if not present.

@@ -455,6 +455,21 @@ func get_cached_packed_scene(model_path: String, item_id: String = "") -> Packed
 	return cached as PackedScene
 
 
+## Restore a known-good PackedScene into the memory cache without touching disk.
+## CellPayload uses this to keep exact publish-key resources hot even if the
+## LRU trims the ModelLoader cache before visual publication reaches a ref.
+func put_cached_packed_scene(model_path: String, item_id: String, packed_scene: PackedScene) -> bool:
+	if packed_scene == null or not packed_scene.can_instantiate():
+		return false
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var cache_key := normalized
+	if not item_id.is_empty():
+		cache_key = normalized + ":" + item_id.to_lower()
+	_model_cache[cache_key] = packed_scene
+	_last_access[cache_key] = Engine.get_frames_drawn()
+	return true
+
+
 # =============================================================================
 # ASYNC DISK LOADING API
 # =============================================================================

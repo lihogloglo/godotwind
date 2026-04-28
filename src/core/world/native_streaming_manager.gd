@@ -533,6 +533,25 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	return OK
 
 
+## Explicit boot/loading-stage warmup for the cold static MultiMesh batch path.
+## This is intentionally not part of normal streaming: callers decide when the
+## loading screen can absorb the cost.
+func warmup_static_renderer_boot(initial_capacity: int = 1) -> Dictionary:
+	if _static_renderer == null:
+		return {
+			"ok": false,
+			"reason": "missing_static_renderer",
+			"total_us": 0,
+		}
+	if not _static_renderer.has_method("warmup_static_batch_pipeline"):
+		return {
+			"ok": false,
+			"reason": "missing_method",
+			"total_us": 0,
+		}
+	return _static_renderer.call("warmup_static_batch_pipeline", initial_capacity)
+
+
 ## Set the camera to track
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
@@ -1326,9 +1345,6 @@ func _process_budgeted_unloading() -> void:
 	var budget_usec := SC.UNLOAD_BUDGET_MS * 1000.0
 	var total_freed := 0
 
-	# Get object pool for returning pooled instances
-	var object_pool: RefCounted = _cell_manager.get_object_pool() if _cell_manager else null
-
 	# Process each unloading cell
 	var completed_grids: Array[Vector2i] = []
 
@@ -1356,9 +1372,13 @@ func _process_budgeted_unloading() -> void:
 			completed_grids.append(grid)
 			continue
 
-		# Remove up to UNLOAD_BATCH_SIZE children from this cell
+		# Queue up to UNLOAD_BATCH_SIZE children from this cell for deletion.
+		# Avoid remove_child() here: it synchronously runs tree-exit/physics
+		# notifications in the streaming tick and has crashed inside Terrain3D
+		# during cell transitions. queue_free() detaches at Godot's safe point.
 		var batch := 0
-		while batch < SC.UNLOAD_BATCH_SIZE and cell_node.get_child_count() > 0:
+		var child_index := cell_node.get_child_count() - 1
+		while batch < SC.UNLOAD_BATCH_SIZE and child_index >= 0:
 			# Check time budget
 			if Time.get_ticks_usec() - start_time >= budget_usec:
 				# Out of time — stop and continue next frame
@@ -1369,26 +1389,17 @@ func _process_budgeted_unloading() -> void:
 					_unloading_cells.erase(g)
 				return
 
-			# Remove last child (pop from end = O(1)).
 			# NOTE 2026-04-20: prior `CrashBreadcrumb.write("unload_child", ...)`
 			# fired per-child — with UNLOAD_BATCH_SIZE=30 it was the dominant
 			# cost inside `_process_budgeted_unloading` (each write is a
 			# FileAccess.open+store+close cycle). Removed; crashes never
 			# landed on `unload_child`, the cell-level `bu::cell_qfree_*`
 			# breadcrumbs still cover the destructor path.
-			var child := cell_node.get_child(cell_node.get_child_count() - 1)
-			cell_node.remove_child(child)
-
-			# Try to return to object pool instead of destroying
-			var returned_to_pool := false
-			if object_pool and child is Node3D and child.has_meta("pool_model_path"):
-				var pool_path: String = child.get_meta("pool_model_path")
-				if not pool_path.is_empty() and object_pool.has_method("release"):
-					object_pool.call("release", child)
-					returned_to_pool = true
-
-			if not returned_to_pool:
-				child.queue_free()
+			var child := cell_node.get_child(child_index)
+			child_index -= 1
+			if child == null or not is_instance_valid(child) or child.is_queued_for_deletion():
+				continue
+			child.queue_free()
 
 			batch += 1
 			total_freed += 1
@@ -2312,7 +2323,7 @@ const INNER_RING_RADIUS: int = 1
 ## the next 2–3 s of gameplay won't stall. 8 picked empirically — matches
 ## the 2 cells/frame HLOD merge rate × ~4 frames of tolerable post-unpause
 ## trickling.
-const INNER_RING_MAX_QUEUE: int = 8
+const FIRST_PLAYABLE_MAX_QUEUE: int = 8
 
 
 ## Return a snapshot of inner-ring load state. Read by LoadingStateMachine's
@@ -2350,6 +2361,7 @@ func get_inner_ring_status() -> Dictionary:
 		"ring_total": ring_total,
 		"ring_pending_async": ring_pending_async,
 		"instantiation_queue": inst_queue,
+		"first_playable_queue_cap": FIRST_PLAYABLE_MAX_QUEUE,
 		"camera_cell": center,
 	}
 
@@ -2363,7 +2375,28 @@ func is_inner_ring_ready() -> bool:
 	return (
 		int(s["ring_loaded"]) >= int(s["ring_total"])
 		and int(s["ring_pending_async"]) == 0
-		and int(s["instantiation_queue"]) < INNER_RING_MAX_QUEUE
+		and int(s["instantiation_queue"]) <= FIRST_PLAYABLE_MAX_QUEUE
 	)
+
+
+## Called by the loading gate when the first playable frame has been reached
+## or the gate times out. It ends the high-budget startup phase so leftover
+## queue work drains under the normal runtime budget after the overlay hides.
+func mark_first_playable(reason: String = "loading_gate") -> void:
+	if not _startup_phase:
+		return
+	_startup_phase = false
+	_post_startup_start_ms = Time.get_ticks_msec()
+	if _impostor_renderer:
+		_impostor_renderer.set_load_budget_usec(4000.0)
+	_impostor_update_pending = true
+	startup_complete.emit()
+	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
+	Log.info("streaming", "[first-playable] reason=%s frames=%d loaded_cells=%d queue=%d" % [
+		reason,
+		_startup_frames,
+		_loaded_cells.size(),
+		queue_size,
+	])
 
 #endregion

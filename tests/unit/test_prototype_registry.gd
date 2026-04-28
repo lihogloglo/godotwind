@@ -105,6 +105,21 @@ func test_batch_grows_beyond_initial_capacity() -> void:
 			assert_int(slots[i]).is_not_equal(slots[j])
 	b.cleanup()
 
+
+func test_batch_reserve_capacity_keeps_gpu_instance_count_until_upload() -> void:
+	var b := _build_batch(null, null, 2)
+	var before_instance_count: int = b.multimesh.instance_count
+
+	assert_bool(b.reserve_capacity(8)).is_true()
+	assert_int((b.get_stats() as Dictionary)["capacity"]).is_equal(8)
+	assert_int(b.multimesh.instance_count).is_equal(before_instance_count)
+
+	var slot: int = b.acquire_slot()
+	b.set_slot_transform(slot, Transform3D.IDENTITY)
+	b.cull_and_upload(Vector3.ZERO, 100.0)
+	assert_int(b.multimesh.instance_count).is_equal(8)
+	b.cleanup()
+
 #endregion
 
 

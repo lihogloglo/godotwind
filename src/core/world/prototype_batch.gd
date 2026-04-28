@@ -306,6 +306,13 @@ func set_slot_custom_data(slot: int, data: Color) -> void:
 
 #region Capacity growth
 
+func reserve_capacity(min_capacity: int) -> bool:
+	if min_capacity <= slot_capacity:
+		return false
+	_resize_capacity_internal(min_capacity)
+	return true
+
+
 func _grow() -> void:
 	var new_capacity: int = maxi(slot_capacity * GROW_FACTOR, slot_capacity + 1)
 	_resize_capacity_internal(new_capacity)
@@ -332,8 +339,6 @@ func _resize_capacity_internal(new_capacity: int) -> void:
 	for i in range(new_capacity - 1, old_capacity - 1, -1):
 		slot_freelist.append(i)
 
-	if multimesh != null:
-		multimesh.instance_count = new_capacity
 	slot_capacity = new_capacity
 
 #endregion
@@ -411,6 +416,11 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 	for i in range(out_off, _cull_buffer.size()):
 		_cull_buffer[i] = 0.0
 
+	if visible == 0:
+		multimesh.visible_instance_count = 0
+		_update_shadow_state(nearest_dist_sq)
+		return 0
+
 	_ensure_multimesh_capacity()
 	multimesh.set_buffer(_cull_buffer)
 	multimesh.visible_instance_count = visible
@@ -466,6 +476,7 @@ func _ensure_multimesh_capacity() -> void:
 	if multimesh == null:
 		return
 	if multimesh.instance_count != slot_capacity:
+		multimesh.visible_instance_count = 0
 		multimesh.instance_count = slot_capacity
 
 ## Flip cast_shadow on the batch RS instance based on the nearest live

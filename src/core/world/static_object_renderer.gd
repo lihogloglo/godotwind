@@ -25,6 +25,7 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const PrototypeRegistryScript := preload("res://src/core/world/prototype_registry.gd")
+const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Phase 3 world-scoped PrototypeRegistry. One MultiMesh per (mesh, material)
@@ -553,6 +554,40 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 ## prepare lane pay first-batch allocation before ref publish reaches the hot
 ## activation drain. Returns the number of new batches created.
 func prepare_batches_for_type(type_name: String) -> int:
+	return reserve_batches_for_type(type_name, 0)
+
+
+## Warm the cold MultiMesh/RenderingServer batch path during an explicit
+## loading stage. This uses the same PrototypeBatch constructor as real static
+## batches, then immediately frees the temporary RS resources so gameplay stats
+## and registry contents are unchanged.
+func warmup_static_batch_pipeline(initial_capacity: int = 1) -> Dictionary:
+	if not _scenario.is_valid():
+		return {
+			"ok": false,
+			"reason": "invalid_scenario",
+			"total_us": 0,
+		}
+
+	var start_us := Time.get_ticks_usec()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3.ONE
+	var batch: RefCounted = PrototypeBatchScript.new(mesh, null, _scenario, maxi(1, initial_capacity))
+	var create_us := Time.get_ticks_usec() - start_us
+	batch.call("cleanup")
+	var total_us := Time.get_ticks_usec() - start_us
+	return {
+		"ok": true,
+		"create_us": create_us,
+		"total_us": total_us,
+	}
+
+
+## Pre-create/grow PrototypeBatch/MultiMesh buckets for a registered type.
+## Capacity reservation is deliberately CPU/resource-side only: it may create
+## MultiMesh resources and resize slot storage, but it never uploads a render
+## buffer. The regular cull lane owns the later MultiMesh.set_buffer() call.
+func reserve_batches_for_type(type_name: String, expected_count: int) -> int:
 	if not _scenario.is_valid():
 		return 0
 
@@ -565,6 +600,8 @@ func prepare_batches_for_type(type_name: String) -> int:
 	var registry := _ensure_registry()
 	if registry == null:
 		return 0
+	if registry.has_method("reserve_batches"):
+		return int(registry.call("reserve_batches", _build_registry_sub_meshes(mesh_type), expected_count))
 	return registry.prepare_batches(_build_registry_sub_meshes(mesh_type))
 
 

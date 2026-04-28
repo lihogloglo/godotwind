@@ -80,6 +80,7 @@ const ProgressiveBenchmarkScript := preload("res://src/tools/progressive_benchma
 const PerfSweepScript := preload("res://src/tools/perf_sweep.gd")
 const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
 const BenchLadderRunnerScript := preload("res://src/tools/bench_ladder_runner.gd")
+const StreamingStressRunnerScript := preload("res://src/tools/streaming_stress_runner.gd")
 const LoadingStateMachineScript := preload("res://src/core/loading/loading_state_machine.gd")
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
@@ -486,11 +487,20 @@ func _init_async() -> void:
 
 	# Character asset preloading deferred until characters are first enabled
 	# CharacterFactoryV2Script.preload_character_assets() called in _on_show_characters_toggled()
+	var _start_cell := _get_start_cell_arg()
 
 	# Create and setup NativeStreamingManager (but don't start tracking yet)
 	await _update_loading(90, "Setting up streaming system...")
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
 	_ta = _log_timing(_ta, "streaming manager setup")
+
+	# Warm the cold static MultiMesh/RenderingServer batch path while the first
+	# loading UI is still visible. This absorbs the one-time driver/resource
+	# setup cost that otherwise appears later as a static prepare spike.
+	if StreamingConfig.BOOT_STATIC_PREWARM_ENABLED:
+		await _update_loading(92, "Warming static renderer...")
+		_warmup_static_renderer_boot(_start_cell)
+		_ta = _log_timing(_ta, "static renderer warmup")
 
 	# Models load automatically when streaming system starts
 	# Visibility is controlled by Godot's native visibility_range system
@@ -518,13 +528,6 @@ func _init_async() -> void:
 	# First teleport camera to Seyda Neen BEFORE starting to track.
 	# --start-cell=X,Y overrides (Phase 0 ablation; booting at Balmora avoids
 	# the mid-session teleport that triggers tracker §12.2 crash).
-	var _start_cell := Vector2i(-2, -9)
-	for _arg in _runtime_cmdline_args():
-		if _arg.begins_with("--start-cell="):
-			var _parts := _arg.substr("--start-cell=".length()).split(",")
-			if _parts.size() == 2:
-				_start_cell = Vector2i(int(_parts[0]), int(_parts[1]))
-				Log.info("streaming", "[--start-cell] booting at cell (%d, %d)" % [_start_cell.x, _start_cell.y])
 	_teleport_to_cell(_start_cell.x, _start_cell.y)
 
 	# NOW start tracking the camera - cells will generate around Seyda Neen
@@ -564,6 +567,44 @@ func _init_async() -> void:
 	# §Rung 0 of the 2026-04-18 salvage pass.
 	_maybe_start_bench_ladder()
 
+	# High-altitude sustained traversal stress test. This is separate from the
+	# canonical AutoBench because it answers transition stutter directly.
+	_maybe_start_stress_bench()
+
+
+func _get_start_cell_arg() -> Vector2i:
+	var start_cell := Vector2i(-2, -9)
+	for arg in _runtime_cmdline_args():
+		if arg.begins_with("--start-cell="):
+			var parts := arg.substr("--start-cell=".length()).split(",")
+			if parts.size() == 2:
+				start_cell = Vector2i(int(parts[0]), int(parts[1]))
+				Log.info("streaming", "[--start-cell] booting at cell (%d, %d)" % [start_cell.x, start_cell.y])
+	return start_cell
+
+
+func _warmup_static_renderer_boot(start_cell: Vector2i) -> void:
+	if not native_streaming_manager:
+		return
+	if not native_streaming_manager.has_method("warmup_static_renderer_boot"):
+		return
+	var result: Dictionary = native_streaming_manager.call("warmup_static_renderer_boot", 1)
+	if not bool(result.get("ok", false)):
+		Log.warn("streaming", "[static-warmup] skipped reason=%s" % str(result.get("reason", "unknown")))
+		return
+	Log.info("streaming", "[static-warmup] boot batch pipeline create=%.1fms total=%.1fms" % [
+		float(result.get("create_us", 0)) / 1000.0,
+		float(result.get("total_us", 0)) / 1000.0,
+	])
+	if cell_manager and cell_manager.has_method("warmup_static_batches_for_cell_ring"):
+		cell_manager.call(
+			"warmup_static_batches_for_cell_ring",
+			start_cell,
+			1,
+			StreamingConfig.BATCH_PREWARM_COUNT,
+			StreamingConfig.BOOT_STATIC_PREWARM_BUDGET_MS
+		)
+
 
 ## Phase 8 — Cold-boot handoff into LoadingStateMachine. Called once
 ## streaming is live + camera is tracking. Idempotent via _boot_gate_entered.
@@ -598,11 +639,12 @@ func _format_boot_progress() -> String:
 	if not native_streaming_manager or not native_streaming_manager.has_method("get_inner_ring_status"):
 		return ""
 	var s: Dictionary = native_streaming_manager.get_inner_ring_status()
-	return "cells %d/%d · async %d · queue %d" % [
+	return "cells %d/%d · async %d · queue %d/%d" % [
 		int(s.get("ring_loaded", 0)),
 		int(s.get("ring_total", 0)),
 		int(s.get("ring_pending_async", 0)),
 		int(s.get("instantiation_queue", 0)),
+		int(s.get("first_playable_queue_cap", 0)),
 	]
 
 
@@ -614,6 +656,20 @@ func _format_boot_progress() -> String:
 func _on_loading_finished(reason: String, duration_s: float, timed_out: bool) -> void:
 	var suffix := " (TIMEOUT)" if timed_out else ""
 	_log("[color=green]LoadingState '%s' complete in %.1fs%s[/color]" % [reason, duration_s, suffix])
+	if reason == "boot" and not timed_out and native_streaming_manager and native_streaming_manager.has_method("mark_first_playable"):
+		native_streaming_manager.call("mark_first_playable", "boot_ready")
+	if reason == "boot":
+		var status: Dictionary = {}
+		if native_streaming_manager and native_streaming_manager.has_method("get_inner_ring_status"):
+			status = native_streaming_manager.get_inner_ring_status()
+		var cm_stats: Dictionary = {}
+		if cell_manager and cell_manager.has_method("get_loading_stats"):
+			cm_stats = cell_manager.get_loading_stats()
+		Log.info("loading", "[LOADING_PHASES] phases=%s inner=%s cell_manager=%s" % [
+			JSON.stringify(_loading_phase_times),
+			JSON.stringify(status),
+			JSON.stringify(cm_stats),
+		])
 
 
 ## Phase 8 — teleport trigger. NativeStreamingManager emits
@@ -624,6 +680,10 @@ func _on_loading_finished(reason: String, duration_s: float, timed_out: bool) ->
 ## when `--bench-auto` was on the command line.
 func _on_teleport_happened(_from_pos: Vector3, _to_pos: Vector3, distance: float) -> void:
 	if not _loading_state_machine:
+		return
+	if native_streaming_manager and native_streaming_manager.has_method("is_in_startup_phase") \
+			and bool(native_streaming_manager.call("is_in_startup_phase")):
+		Log.info("loading", "[LOADING] ignoring startup teleport gate distance=%.1fm" % distance)
 		return
 	# Autobench opt-out — preserves the measurement contract in the
 	# perf-audit runs (we want to see the raw teleport-burst FPS trace,
@@ -706,6 +766,55 @@ func _maybe_start_bench_ladder() -> void:
 		native_streaming_manager, cell_manager, camera, self, _subsystem_toggles, stamp
 	)
 	_log("[LADDER] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
+
+
+func _maybe_start_stress_bench() -> void:
+	var args := _runtime_cmdline_args()
+	var stamp := ""
+	var flag_found := false
+	var altitude := 100.0
+	var speed := 100.0
+	var duration := 60.0
+	var direction := "dense-loop"
+	for i in range(args.size()):
+		var a: String = args[i]
+		if a == "--bench-stress":
+			flag_found = true
+			if i + 1 < args.size() and not args[i + 1].begins_with("--"):
+				stamp = args[i + 1]
+		elif a.begins_with("--bench-stress="):
+			flag_found = true
+			stamp = a.substr("--bench-stress=".length())
+		elif a.begins_with("--stress-altitude="):
+			altitude = float(a.substr("--stress-altitude=".length()))
+		elif a.begins_with("--stress-speed="):
+			speed = float(a.substr("--stress-speed=".length()))
+		elif a.begins_with("--stress-duration="):
+			duration = float(a.substr("--stress-duration=".length()))
+		elif a.begins_with("--stress-direction="):
+			direction = a.substr("--stress-direction=".length())
+		elif a.begins_with("--stress-route="):
+			direction = a.substr("--stress-route=".length())
+	if not flag_found:
+		return
+	if not native_streaming_manager or not cell_manager or not camera:
+		push_warning("[STRESS] --bench-stress flag set but required refs missing - skipping")
+		return
+	var runner := StreamingStressRunnerScript.new()
+	runner.name = "StreamingStressRunner"
+	get_tree().root.add_child(runner)
+	runner.configure(
+		native_streaming_manager,
+		cell_manager,
+		camera,
+		stamp,
+		_get_start_cell_arg(),
+		altitude,
+		speed,
+		duration,
+		direction
+	)
+	_log("[STRESS] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
 
 func _init_terrain3d() -> void:

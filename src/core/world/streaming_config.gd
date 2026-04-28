@@ -140,15 +140,15 @@ const CHILD_ATTACH_BUDGET_MS := 1.0
 ## Keep this low: one add_child() can be expensive when the detached subtree
 ## enters the scene tree, so the time budget can only stop after that call
 ## returns. A small count cap prevents 20 heavy nodes from stacking.
-const CHILD_ATTACH_MAX_PER_FRAME := 4
+const CHILD_ATTACH_MAX_PER_FRAME := 1
 
 ## NEAR TIER BURST LOADING - Moderate priority for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
 ## use these limits to populate objects faster without exceeding frame budget.
 ## Reduced from 50ms/300 objects to stay within frame budget and prevent stuttering.
-const NEAR_BURST_BUDGET_MS := 12.0            ## Stay within frame budget
-const NEAR_BURST_MAX_INSTANTIATIONS := 100    ## 2x normal, not 6x (was 300)
-const NEAR_BURST_DISTANCE := 100.0            ## Only for very close objects (was 250)
+const NEAR_BURST_BUDGET_MS := 4.0             ## Stability-first: do not override runtime budget
+const NEAR_BURST_MAX_INSTANTIATIONS := 16     ## Keep close-object publish bounded
+const NEAR_BURST_DISTANCE := 0.0              ## Disabled until visual stability is restored
 
 ## Delay before rebuilding impostor texture array (batching)
 ## Waits for multiple textures to finish loading before rebuilding
@@ -159,11 +159,11 @@ const TEXTURE_REBUILD_DELAY_MS := 300.0
 const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
 
 ## Maximum PrototypeRegistry batches to cull/upload per frame after static
-## renderer churn. Keeps cell-boundary static publish from forcing one giant
-## MultiMesh buffer-upload pass.
-## Eight batches still refreshes quickly but avoids the old "budget >= batch
-## count, upload everything" behavior becoming a startup/boundary cliff.
-const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 8
+## renderer churn. 0 means full pass. Keep full-pass correctness while the
+## world-scoped MultiMesh renderer is being stabilized; partial culls leave
+## stale packed buffers visible during camera movement and look like severe
+## flicker/holes/wrong pop-in.
+const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 0
 
 ## Native C# packing kernel for world-scoped static MultiMesh culling.
 ##
@@ -337,6 +337,15 @@ const MAX_BATCH_CAPACITY := 4096
 
 ## Pre-warm batch count for common mesh types
 const BATCH_PREWARM_COUNT := 20
+
+## Boot static prewarm is disabled while visual corruption/stutter regressions
+## are being isolated. The runtime static prepare lane remains budgeted.
+const BOOT_STATIC_PREWARM_ENABLED := false
+
+## Hard wall-clock cap for cold boot static prototype prewarm. This path is a
+## user-facing loading cost, so it must be priority-bound instead of "process N
+## types no matter how long the driver takes today".
+const BOOT_STATIC_PREWARM_BUDGET_MS := 6000.0
 
 # =============================================================================
 # DIAGNOSTIC FLAGS

@@ -21,6 +21,7 @@ const StaticObjectRendererScript := preload("res://src/core/world/static_object_
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
+const CellPayloadScript := preload("res://src/core/world/cell_payload.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const StaticShapeCacheScript := preload("res://src/core/world/static_shape_cache.gd")
 const CellStaticCollisionScript := preload("res://src/core/world/cell_static_collision.gd")
@@ -927,10 +928,12 @@ class AsyncCellRequest:
 	var request_id: int
 	var load_profile: LoadProfile = null  # Per-request settings (null -> use exterior defaults)
 	var pending_parses: Dictionary[String, int] = {}  # model_path -> task_id
-	var pending_disk_loads: Dictionary[String, Array] = {}  # model_path -> Array[CellReference] (refs waiting for this model)
+	var pending_disk_loads: Dictionary[String, Array] = {}  # cache_key -> Array[Dictionary] (refs waiting for this exact model key)
 	var parsed_results: Dictionary[String, NIFParseResult] = {}  # model_path -> NIFParseResult
 	var references_to_process: Array[CellReference] = []  # CellReference objects awaiting instantiation
 	var pending_instantiations: int = 0  # Count of items queued for instantiation
+	var payload: CellPayloadScript = null
+	var state: int = CellPayloadScript.State.QUEUED_DATA
 	var cell_node: Node3D = null  # The cell node being built
 	var started: bool = false
 	var completed: bool = false
@@ -978,6 +981,7 @@ class InstantiationEntry:
 	var ref: CellReference
 	var model_path: String
 	var item_id: String
+	var cache_item_id: String = ""
 	var position: Vector3
 	var static_prepare_key: String = ""
 	var static_prepare_failed: bool = false
@@ -1032,6 +1036,7 @@ class StaticPrepareEntry:
 	var model_path: String
 	var item_id: String
 	var key: String
+	var expected_count: int = 0
 
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
@@ -1164,6 +1169,29 @@ func _should_prepare_static_ref(
 	)
 
 
+func _get_static_expected_count_for_request(request_id: int, model_path: String, item_id: String) -> int:
+	if request_id not in _async_requests:
+		return 0
+	var request: AsyncCellRequest = _async_requests[request_id]
+	if request == null or request.payload == null:
+		return 0
+	var payload_key := CellPayloadScript.make_model_key(model_path, item_id)
+	return int(request.payload.static_expected_counts.get(payload_key, 0))
+
+
+func _sum_static_expected_count_for_type(type_name: String) -> int:
+	var total := 0
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request == null or request.payload == null:
+			continue
+		for key_variant: Variant in request.payload.static_expected_counts.keys():
+			var payload_key := str(key_variant)
+			if payload_key == type_name or payload_key.begins_with(type_name + ":"):
+				total += int(request.payload.static_expected_counts[payload_key])
+	return total
+
+
 func _enqueue_static_prepare(request_id: int, model_path: String, item_id: String = "") -> void:
 	if not SC.STATIC_PREPARE_ENABLED:
 		return
@@ -1172,11 +1200,14 @@ func _enqueue_static_prepare(request_id: int, model_path: String, item_id: Strin
 	if model_path.is_empty():
 		return
 	var normalized := model_path.to_lower().replace("/", "\\")
-	if _static_renderer.call("has_type", normalized):
+	var expected_count := _get_static_expected_count_for_request(request_id, model_path, item_id)
+	var type_registered := bool(_static_renderer.call("has_type", normalized))
+	if type_registered and expected_count <= 0:
 		return
 	if bool(_static_prepare_failed.get(normalized, false)):
 		return
-	if bool(_static_prepare_enqueued.get(normalized, false)):
+	var queue_key := ("%d:%s" % [request_id, normalized]) if type_registered else normalized
+	if bool(_static_prepare_enqueued.get(queue_key, false)):
 		return
 
 	var entry := StaticPrepareEntry.new()
@@ -1184,9 +1215,24 @@ func _enqueue_static_prepare(request_id: int, model_path: String, item_id: Strin
 	entry.type_name = normalized
 	entry.model_path = model_path
 	entry.item_id = item_id
-	entry.key = normalized
+	entry.key = queue_key
+	entry.expected_count = expected_count
 	_static_prepare_queue.append(entry)
-	_static_prepare_enqueued[normalized] = true
+	_static_prepare_enqueued[queue_key] = true
+
+
+func _pin_payload_cached_scene(request: AsyncCellRequest, model_path: String, item_id: String) -> void:
+	if request == null or request.payload == null or _model_loader == null:
+		return
+	var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path, item_id)
+	if packed_scene != null:
+		request.payload.pin_model_resource(model_path, item_id, packed_scene)
+
+
+func _restore_payload_cached_scene(request: AsyncCellRequest, model_path: String, item_id: String) -> void:
+	if request == null or request.payload == null or _model_loader == null:
+		return
+	request.payload.restore_model_resource(_model_loader, model_path, item_id)
 
 
 func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
@@ -1210,33 +1256,42 @@ func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
 
 		if entry.request_id not in _async_requests:
 			continue
-		if _static_renderer.call("has_type", entry.type_name):
-			continue
+		var request: AsyncCellRequest = _async_requests[entry.request_id]
+		var has_registered_type := bool(_static_renderer.call("has_type", entry.type_name))
 
 		# Never sync-load in the prepare lane. Wait until the async disk path
 		# has promoted the PackedScene into memory, then instantiate/register.
-		if not _model_loader.has_model(entry.model_path, entry.item_id):
+		if not has_registered_type and not _model_loader.has_model(entry.model_path, entry.item_id):
 			_enqueue_static_prepare(entry.request_id, entry.model_path, entry.item_id)
 			continue
 
-		var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(entry.model_path, entry.item_id)
-		if packed_scene == null:
-			_static_prepare_failed[entry.key] = true
-			continue
-
 		var prep_start := Time.get_ticks_usec()
-		var reg_start := prep_start
-		var registered := false
-		if _static_renderer.has_method("register_from_packed_scene"):
-			registered = bool(_static_renderer.call("register_from_packed_scene", entry.type_name, packed_scene))
-		var reg_us := Time.get_ticks_usec() - reg_start
-		if not registered:
-			_static_prepare_failed[entry.key] = true
-			continue
+		var reg_us := 0
+		if not has_registered_type:
+			var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(entry.model_path, entry.item_id)
+			if packed_scene == null:
+				_static_prepare_failed[entry.type_name] = true
+				continue
+			if request != null and request.payload != null:
+				request.payload.pin_model_resource(entry.model_path, entry.item_id, packed_scene)
+
+			var reg_start := Time.get_ticks_usec()
+			var registered := false
+			if _static_renderer.has_method("register_from_packed_scene"):
+				registered = bool(_static_renderer.call("register_from_packed_scene", entry.type_name, packed_scene))
+			reg_us = Time.get_ticks_usec() - reg_start
+			if not registered:
+				_static_prepare_failed[entry.type_name] = true
+				continue
 
 		var batch_us := 0
 		var batch_count := 0
-		if SC.STATIC_PREPARE_CREATE_BATCHES and _static_renderer.has_method("prepare_batches_for_type"):
+		var reserve_count: int = maxi(entry.expected_count, _sum_static_expected_count_for_type(entry.type_name))
+		if reserve_count > 0 and _static_renderer.has_method("reserve_batches_for_type"):
+			var batch_start := Time.get_ticks_usec()
+			batch_count = int(_static_renderer.call("reserve_batches_for_type", entry.type_name, reserve_count))
+			batch_us = Time.get_ticks_usec() - batch_start
+		elif SC.STATIC_PREPARE_CREATE_BATCHES and _static_renderer.has_method("prepare_batches_for_type"):
 			var batch_start := Time.get_ticks_usec()
 			batch_count = int(_static_renderer.call("prepare_batches_for_type", entry.type_name))
 			batch_us = Time.get_ticks_usec() - batch_start
@@ -1268,7 +1323,7 @@ func _static_entry_waiting_for_prepare(entry: InstantiationEntry) -> bool:
 		return false
 	if _static_renderer.call("has_type", entry.static_prepare_key):
 		return false
-	_enqueue_static_prepare(entry.request_id, entry.model_path, "")
+	_enqueue_static_prepare(entry.request_id, entry.model_path, entry.cache_item_id)
 	return true
 
 
@@ -1498,6 +1553,9 @@ func cancel_async_request(request_id: int) -> void:
 		return
 
 	var request: AsyncCellRequest = _async_requests[request_id]
+	request.state = CellPayloadScript.State.UNLOADING
+	if request.payload != null:
+		request.payload.state = request.state
 
 	# Cancel pending parse tasks
 	for task_id: int in request.pending_parses.values():
@@ -1555,6 +1613,9 @@ func finalize_unloaded_cell(request_id: int) -> void:
 	if request_id not in _async_requests:
 		return
 	var request: AsyncCellRequest = _async_requests[request_id]
+	request.state = CellPayloadScript.State.UNLOADING
+	if request.payload != null:
+		request.payload.state = request.state
 	# Cancel any still-in-flight parse tasks (cell's gone, results have no home).
 	for task_id: int in request.pending_parses.values():
 		_background_processor.call("cancel_task", task_id)
@@ -1901,6 +1962,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		var ref: CellReference = entry.ref
 		var model_path: String = entry.model_path
 		var item_id: String = entry.item_id
+		var cache_item_id: String = entry.cache_item_id
 
 		# Phase A / E — dispatched-but-running entries get parked. Their worker
 		# is still executing; trying to consume worker_instance / worker_static_precomp
@@ -1922,6 +1984,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			continue
 
 		var request: AsyncCellRequest = _async_requests[request_id]
+		if request.state < CellPayloadScript.State.VISUAL_PUBLISHING:
+			request.state = CellPayloadScript.State.VISUAL_PUBLISHING
+			if request.payload != null:
+				request.payload.state = request.state
 
 		# CRITICAL: Check if cell_node is still valid (cell may have been unloaded)
 		# This prevents crash when camera moves and cell is freed mid-instantiation
@@ -1937,6 +2003,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		if _static_entry_waiting_for_prepare(entry):
 			phase_a_deferred.append(entry)
 			continue
+		if not model_path.is_empty():
+			_restore_payload_cached_scene(request, model_path, cache_item_id)
 
 		# Decrement pending count
 		request.pending_instantiations -= 1
@@ -2244,7 +2312,7 @@ func _phase_a_dispatch_pass() -> void:
 		# Cache-peek first — cheapest gate, drops ~20% of entries (cache miss)
 		# before we spend the should_dispatch check. get_cached_packed_scene
 		# returns null on miss / null sentinel / non-PackedScene entry.
-		var packed_scene: PackedScene = ml.call("get_cached_packed_scene", entry.model_path, entry.item_id)
+		var packed_scene: PackedScene = ml.call("get_cached_packed_scene", entry.model_path, entry.cache_item_id)
 		if packed_scene != null and _instantiator.should_dispatch_to_worker(entry, base_record, type_name):
 			# Stash resolved records so the drain's main-thread tail can reuse
 			# them (avoids duplicate ESMManager lookup in complete_worker_instantiate).
@@ -2430,6 +2498,154 @@ func _process_pool_prewarm() -> void:
 		_prewarm_pending.erase(path)
 
 
+func warmup_static_batches_for_cell_ring(
+	center: Vector2i,
+	radius: int = 1,
+	max_types: int = SC.BATCH_PREWARM_COUNT,
+	wall_budget_ms: float = SC.BOOT_STATIC_PREWARM_BUDGET_MS
+) -> Dictionary:
+	if _static_renderer == null or _model_loader == null or _instantiator == null:
+		return {
+			"ok": false,
+			"reason": "missing_dependencies",
+			"total_us": 0,
+		}
+
+	var start_us := Time.get_ticks_usec()
+	var ordered_keys: Array[String] = []
+	var entries: Dictionary = {}
+	var profile := LoadProfile.exterior_default()
+	var budget_exhausted := false
+
+	for y in range(center.y - radius, center.y + radius + 1):
+		if wall_budget_ms > 0.0 and float(Time.get_ticks_usec() - start_us) / 1000.0 >= wall_budget_ms:
+			budget_exhausted = true
+			break
+		for x in range(center.x - radius, center.x + radius + 1):
+			if wall_budget_ms > 0.0 and float(Time.get_ticks_usec() - start_us) / 1000.0 >= wall_budget_ms:
+				budget_exhausted = true
+				break
+			var cell: CellRecord = ESMManager.get_exterior_cell(x, y)
+			if cell == null:
+				continue
+			for ref: CellReference in cell.references:
+				if wall_budget_ms > 0.0 and float(Time.get_ticks_usec() - start_us) / 1000.0 >= wall_budget_ms:
+					budget_exhausted = true
+					break
+				var record_type: Array = [""]
+				var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+				if base_record == null:
+					continue
+				var type_name: String = record_type[0] if record_type.size() > 0 else ""
+				var model_path: String = _get_model_path(base_record)
+				if model_path.is_empty():
+					continue
+				if not _should_prepare_static_ref(base_record, type_name, model_path, profile):
+					continue
+				var normalized := model_path.to_lower().replace("/", "\\")
+				if not entries.has(normalized):
+					entries[normalized] = {
+						"model_path": model_path,
+						"count": 0,
+					}
+					ordered_keys.append(normalized)
+				entries[normalized]["count"] = int(entries[normalized].get("count", 0)) + 1
+
+	ordered_keys.sort_custom(func(a: String, b: String) -> bool:
+		var ea: Dictionary = entries[a]
+		var eb: Dictionary = entries[b]
+		return _static_boot_prewarm_score(a, int(ea.get("count", 0))) \
+			> _static_boot_prewarm_score(b, int(eb.get("count", 0)))
+	)
+
+	var registered := 0
+	var reserved := 0
+	var failed := 0
+	var processed := 0
+	for key: String in ordered_keys:
+		if processed >= max_types:
+			break
+		if wall_budget_ms > 0.0 and float(Time.get_ticks_usec() - start_us) / 1000.0 >= wall_budget_ms:
+			budget_exhausted = true
+			break
+		processed += 1
+		var entry: Dictionary = entries[key]
+		var model_path: String = entry.get("model_path", "")
+		var expected_count := int(entry.get("count", 0))
+		var type_start := Time.get_ticks_usec()
+
+		var has_type := bool(_static_renderer.call("has_type", key))
+		if not has_type:
+			var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path, "")
+			if packed_scene == null:
+				var disk_path: String = _model_loader.call("resolve_disk_path", model_path)
+				if not disk_path.is_empty():
+					packed_scene = ResourceLoader.load(
+						disk_path,
+						"PackedScene",
+						ResourceLoader.CACHE_MODE_REUSE
+					) as PackedScene
+					if packed_scene != null and _model_loader.has_method("put_cached_packed_scene"):
+						_model_loader.call("put_cached_packed_scene", model_path, "", packed_scene)
+			if packed_scene == null:
+				failed += 1
+				continue
+			if _static_renderer.has_method("register_from_packed_scene"):
+				if bool(_static_renderer.call("register_from_packed_scene", key, packed_scene)):
+					registered += 1
+				else:
+					failed += 1
+					continue
+
+		if expected_count > 0 and _static_renderer.has_method("reserve_batches_for_type"):
+			reserved += int(_static_renderer.call("reserve_batches_for_type", key, expected_count))
+
+		var type_us := Time.get_ticks_usec() - type_start
+		if type_us > 16_000:
+			Log.warn("streaming", "[static-boot-prewarm-spike %.1fms] type=%s count=%d" % [
+				type_us / 1000.0,
+				key.get_file(),
+				expected_count,
+			])
+
+	var total_us := Time.get_ticks_usec() - start_us
+	Log.info("streaming", "[static-boot-prewarm] center=%s radius=%d processed=%d/%d registered=%d reserved=%d failed=%d budget=%.1fms exhausted=%s total=%.1fms" % [
+		center,
+		radius,
+		processed,
+		ordered_keys.size(),
+		registered,
+		reserved,
+		failed,
+		wall_budget_ms,
+		"Y" if budget_exhausted else "N",
+		total_us / 1000.0,
+	])
+	return {
+		"ok": true,
+		"processed": processed,
+		"candidates": ordered_keys.size(),
+		"registered": registered,
+		"reserved": reserved,
+		"failed": failed,
+		"budget_ms": wall_budget_ms,
+		"budget_exhausted": budget_exhausted,
+		"total_us": total_us,
+	}
+
+
+func _static_boot_prewarm_score(type_name: String, count: int) -> int:
+	var score := count * 100
+	var file_name := type_name.get_file()
+	if file_name.begins_with("terrain_rock") or file_name.begins_with("terrain_rocks"):
+		score += 1_000_000
+	elif file_name.begins_with("flora_"):
+		score += 900_000
+	elif file_name.begins_with("ex_"):
+		score += 500_000
+	return score
+
+
 ## Check if burst loading is currently active
 func is_burst_loading() -> bool:
 	return _burst_loading_active
@@ -2449,6 +2665,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 	request.load_profile = profile if profile else LoadProfile.exterior_default()
 	request.request_id = _next_async_id
 	_next_async_id += 1
+	request.payload = CellPayloadScript.new(grid)
+	request.state = CellPayloadScript.State.PREPARING_PAYLOAD
+	request.payload.state = request.state
 
 	# Create the cell node
 	request.cell_node = Node3D.new()
@@ -2484,12 +2703,17 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 
 		var model_path: String = _get_model_path(base_record)
 		if model_path.is_empty():
+			if request.payload != null:
+				if type_name == "light":
+					request.payload.add_light_ref("", "", ref)
+				else:
+					request.payload.add_interactive_ref(type_name, "", "", ref)
 			# Light without model, or actor placeholder - queue for direct instantiation
 			# NOTE: These must be queued immediately, NOT added to references_to_process
 			# references_to_process is for refs waiting on async model parsing
 			# If we add model-less refs there, they'll never be processed when all models
 			# come from disk cache (no parsing = no _queue_references_for_model calls)
-			_queue_instantiation(request.request_id, ref, "", "")
+			_queue_instantiation(request.request_id, ref, "", "", "")
 			continue
 
 		var item_id: String = ""
@@ -2501,26 +2725,38 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 			model_path,
 			request.load_profile,
 		)
-		# Lights instantiate their visual model with get_model(light_record.model)
-		# and no item_id, so warm/load them under the generic key. Loading them
-		# with record_id here creates an item-specific cache entry that the hot
-		# light path cannot hit, causing a second cold load during publish.
-		var load_item_id := "" if static_route or type_name == "light" else item_id
+		# Some publish paths use the generic model key even when the ESM record
+		# has an id. Warm/load the exact key publish will hit; otherwise the
+		# visual drain pays a second cold load under a different cache key.
+		var load_item_id := "" if static_route or type_name == "light" or type_name == "npc" or type_name == "creature" else item_id
+		if request.payload != null:
+			if static_route:
+				request.payload.add_static_ref(model_path, load_item_id, ref)
+			elif type_name == "light":
+				request.payload.add_light_ref(model_path, load_item_id, ref)
+			else:
+				request.payload.add_interactive_ref(type_name, model_path, load_item_id, ref)
 		if static_route:
 			_enqueue_static_prepare(request.request_id, model_path, load_item_id)
 
 		# Check if already in memory cache
 		if _model_loader.has_model(model_path, load_item_id):
+			_pin_payload_cached_scene(request, model_path, load_item_id)
 			# Already have this model, queue reference for instantiation
-			_queue_instantiation(request.request_id, ref, model_path, item_id)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id)
 			continue
 
 		# Check disk cache - if available, start ASYNC load (non-blocking!)
 		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, load_item_id):
 			# Track this reference as waiting for the model
-			if model_path not in request.pending_disk_loads:
-				request.pending_disk_loads[model_path] = []
-			request.pending_disk_loads[model_path].append({"ref": ref, "item_id": item_id})
+			var pending_key := _get_cache_key(model_path, load_item_id)
+			if pending_key not in request.pending_disk_loads:
+				request.pending_disk_loads[pending_key] = []
+			request.pending_disk_loads[pending_key].append({
+				"ref": ref,
+				"item_id": item_id,
+				"cache_item_id": load_item_id,
+			})
 
 			# Start async load (or add callback to existing load)
 			# request_model_async handles deduplication internally
@@ -2557,6 +2793,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 			request.pending_parses[model_path] = task_id
 
 	request.started = true
+	request.state = CellPayloadScript.State.PAYLOAD_READY
+	if request.payload != null:
+		request.payload.state = request.state
 
 	# Mark as complete if nothing to do (all models cached and instantiated)
 	if _is_request_complete(request):
@@ -2662,7 +2901,7 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 
 		if ref_model_path.to_lower().replace("/", "\\") == model_path.to_lower().replace("/", "\\"):
 			# This reference uses the model that was just parsed
-			_queue_instantiation(request.request_id, ref, model_path, item_id)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, item_id)
 		else:
 			remaining.append(ref)
 
@@ -2690,7 +2929,7 @@ func _on_disk_load_completed(request_id: int, model_path: String, item_id: Strin
 
 	# Check if cell_node is still valid (cell may have been unloaded)
 	if not is_instance_valid(request.cell_node):
-		request.pending_disk_loads.erase(model_path)
+		request.pending_disk_loads.erase(_get_cache_key(model_path, item_id))
 		if _is_request_complete(request):
 			request.completed = true
 			request.failed = true
@@ -2698,17 +2937,20 @@ func _on_disk_load_completed(request_id: int, model_path: String, item_id: Strin
 		return
 
 	# Get all references waiting for this model
-	if model_path not in request.pending_disk_loads:
+	var pending_key := _get_cache_key(model_path, item_id)
+	if pending_key not in request.pending_disk_loads:
 		return
 
-	var waiting_refs: Array = request.pending_disk_loads[model_path]
-	request.pending_disk_loads.erase(model_path)
+	var waiting_refs: Array = request.pending_disk_loads[pending_key]
+	request.pending_disk_loads.erase(pending_key)
+	_pin_payload_cached_scene(request, model_path, item_id)
 
 	# Queue all waiting references for instantiation
 	for ref_info: Dictionary in waiting_refs:
 		var ref: CellReference = ref_info.ref
 		var ref_item_id: String = ref_info.item_id
-		_queue_instantiation(request_id, ref, model_path, ref_item_id)
+		var cache_item_id: String = ref_info.get("cache_item_id", item_id)
+		_queue_instantiation(request_id, ref, model_path, ref_item_id, cache_item_id)
 
 	# Check if request is now complete
 	if _is_request_complete(request):
@@ -2746,6 +2988,9 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 	if request.completed:
 		return
 	request.completed = true
+	request.state = CellPayloadScript.State.VISUAL_READY
+	if request.payload != null:
+		request.payload.state = request.state
 
 
 ## Phase 4 / statics_no_node3d T.2 + Win 1 (NEAR refactor 2026-04-25) — per-frame
@@ -2884,6 +3129,9 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 
 	# Worker done — finalize on main.
 	winner.collision_built = true
+	winner.state = CellPayloadScript.State.PHYSICS_PUBLISHING
+	if winner.payload != null:
+		winner.payload.state = winner.state
 	var task_id: int = winner.collision_task_id
 	var payload: Variant = winner.collision_payload
 	winner.collision_task_id = -1
@@ -2916,6 +3164,9 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 	CrashBreadcrumb.write("collision_finalize_end", "%d_%d" % [winner.grid.x, winner.grid.y])
 	if finalized != null:
 		winner.collision_body = finalized
+	winner.state = CellPayloadScript.State.ACTIVE
+	if winner.payload != null:
+		winner.payload.state = winner.state
 
 
 func _maybe_finalize_static_collision_when_idle(start_time_usec: int, budget_usec: float) -> void:
@@ -2998,7 +3249,13 @@ func cancel_collision_build_for_request(request_id: int) -> void:
 ## Includes object position for distance-priority sorting
 ## S.1: queue-time classification (always_near / mid_worthy) removed — per-cell
 ## tier is the axis of variation, every queued ref becomes a Node3D.
-func _queue_instantiation(request_id: int, ref: CellReference, model_path: String, item_id: String) -> bool:
+func _queue_instantiation(
+	request_id: int,
+	ref: CellReference,
+	model_path: String,
+	item_id: String,
+	cache_item_id: String = "",
+) -> bool:
 	# Check queue limit to prevent memory buildup
 	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
 		push_warning("CellManager: Instantiation queue full (%d items), dropping object" % MAX_INSTANTIATION_QUEUE)
@@ -3012,6 +3269,7 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 	entry.ref = ref
 	entry.model_path = model_path
 	entry.item_id = item_id
+	entry.cache_item_id = cache_item_id
 	entry.position = position
 
 	# Copy the per-request LoadProfile onto the entry so the instantiation
@@ -3028,7 +3286,7 @@ func _queue_instantiation(request_id: int, ref: CellReference, model_path: Strin
 				var type_name: String = record_type[0] if record_type.size() > 0 else ""
 				if _should_prepare_static_ref(base_record, type_name, model_path, owning_request.load_profile):
 					entry.static_prepare_key = model_path.to_lower().replace("/", "\\")
-					_enqueue_static_prepare(request_id, model_path, "")
+					_enqueue_static_prepare(request_id, model_path, cache_item_id)
 
 	_instantiation_queue.append(entry)
 
@@ -3087,10 +3345,19 @@ func get_frame_inst_route_times() -> Dictionary:
 
 ## Get comprehensive loading stats
 func get_loading_stats() -> Dictionary:
+	var payloads := 0
+	var pinned_resources := 0
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request != null and request.payload != null:
+			payloads += 1
+			pinned_resources += int(request.payload.stats.get("pinned_resources", 0))
 	return {
 		"instantiation_queue_size": _instantiation_queue.size() + _pending_child_attaches.size(),
 		"pending_child_attaches": _pending_child_attaches.size(),
 		"static_prepare_queue": _static_prepare_queue.size(),
+		"cell_payloads": payloads,
+		"cell_payload_pinned_resources": pinned_resources,
 		"burst_loading_active": _burst_loading_active,
 		"burst_budget_ms": _burst_budget_ms,
 		"burst_max_instantiations": _burst_max_instantiations,
