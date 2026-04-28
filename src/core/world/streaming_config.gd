@@ -135,6 +135,14 @@ const STARTUP_CELL_REQUEST_CLASSIFY_BUDGET_MS := 3.0
 const CELL_REQUEST_CLASSIFY_MAX_REFS := 48
 const STARTUP_CELL_REQUEST_CLASSIFY_MAX_REFS := 128
 
+## Per-cell static collision lane budgets. Dispatch is cheap classification +
+## WorkerThreadPool submission; finalize is the atomic ConcavePolygonShape3D
+## BVH publish and only runs when the visual/attach queues are idle.
+const CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS := 0.5
+const CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME := 1
+const CELL_STATIC_COLLISION_FINALIZE_MIN_REMAINING_MS := 2.0
+const CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME := 8000
+
 ## Main-thread static prototype prepare budget. This lane registers renderer
 ## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs
 ## reach the activation drain, avoiding cold work inside add_instance().

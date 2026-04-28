@@ -2332,8 +2332,8 @@ const FIRST_PLAYABLE_MAX_QUEUE: int = 8
 ##
 ## Fields:
 ##   ring_loaded       — how many of the (2r+1)² cells in the inner ring
-##                       are fully loaded (present in _loaded_cells and
-##                       not still async-pending).
+##                       are playable: present in _loaded_cells and either
+##                       fully completed or past the cell data/resource gate.
 ##   ring_total        — (2 * INNER_RING_RADIUS + 1) ** 2 — constant, for
 ##                       convenience.
 ##   ring_pending_async — cells in the ring still waiting on the worker
@@ -2349,8 +2349,17 @@ func get_inner_ring_status() -> Dictionary:
 	for dx in range(-INNER_RING_RADIUS, INNER_RING_RADIUS + 1):
 		for dy in range(-INNER_RING_RADIUS, INNER_RING_RADIUS + 1):
 			var grid := Vector2i(center.x + dx, center.y + dy)
-			if grid in _loaded_cells and grid not in _async_requests:
-				ring_loaded += 1
+			if grid in _loaded_cells:
+				if grid not in _async_requests:
+					ring_loaded += 1
+				elif _cell_manager and _cell_manager.has_method("is_async_visual_playable"):
+					var request_id: int = int(_async_requests[grid])
+					if bool(_cell_manager.call("is_async_visual_playable", request_id)):
+						ring_loaded += 1
+					else:
+						ring_pending_async += 1
+				else:
+					ring_pending_async += 1
 			elif grid in _loading_cells or grid in _async_requests:
 				ring_pending_async += 1
 	var inst_queue: int = 0

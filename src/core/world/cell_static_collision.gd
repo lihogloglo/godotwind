@@ -106,6 +106,9 @@ class BuildPayload:
 	## Worker output — world-space triangle vertices, len % 3 == 0.
 	var vertices: PackedVector3Array = PackedVector3Array()
 	var build_time_us: int = 0
+	var finalize_vertex_offset: int = 0
+	var finalized_body: FinalizedBody = null
+	var stats_recorded: bool = false
 	## Diagnostic counters — same shape as the legacy `_dbg_*` fields.
 	var dbg_refs_seen: int = 0
 	var dbg_classified_static: int = 0
@@ -127,6 +130,8 @@ class FinalizedBody:
 	extends RefCounted
 	var body_rid: RID = RID()
 	var shape: Shape3D = null  # ConcavePolygonShape3D, kept alive while body references it
+	var body_rids: Array[RID] = []
+	var shapes: Array[Shape3D] = []
 	var cell_grid: Vector2i = Vector2i.ZERO  # diagnostic only
 
 
@@ -343,6 +348,8 @@ func finalize_body(payload: BuildPayload, world_3d: World3D) -> FinalizedBody:
 	finalized.body_rid = body_rid
 	finalized.shape = trimesh  # strong-ref keeps shape RID alive while body references it
 	finalized.cell_grid = payload.cell_grid
+	finalized.body_rids.append(body_rid)
+	finalized.shapes.append(trimesh)
 
 	stats["cells_built"] += 1
 	stats["total_triangles"] += payload.vertices.size() / 3
@@ -362,13 +369,85 @@ func finalize_body(payload: BuildPayload, world_3d: World3D) -> FinalizedBody:
 ##
 ## Idempotent: null and already-freed handles are no-ops.
 ##
+## MAIN-THREAD: publish a bounded slice of a cell collision payload.
+##
+## A single ConcavePolygonShape3D.set_faces() call is atomic and scales with
+## triangle count. Large cells can exceed 60k triangles, so the runtime lane
+## publishes several smaller server-direct bodies across frames.
+func finalize_body_slice(payload: BuildPayload, world_3d: World3D, max_triangles: int) -> FinalizedBody:
+	if payload == null:
+		return null
+	if world_3d == null:
+		push_error("CellStaticCollision.finalize_body_slice: world_3d is null - cannot register body with physics space")
+		return null
+
+	if payload.finalized_body == null:
+		payload.finalized_body = FinalizedBody.new()
+		payload.finalized_body.cell_grid = payload.cell_grid
+
+	if payload.dbg_shapes_empty > 0 and payload.finalize_vertex_offset == 0:
+		push_warning("CellStaticCollision: cell %s - %d/%d prototypes had no shapes (Phase F miss or missing .shapes.res sidecar). Triangles dropped." % [
+			str(payload.cell_grid), payload.dbg_shapes_empty, payload.dbg_shapes_fetched,
+		])
+
+	var total_vertices := payload.vertices.size()
+	if total_vertices <= 0 or payload.finalize_vertex_offset >= total_vertices:
+		return payload.finalized_body
+
+	var end_vertex: int = mini(total_vertices, payload.finalize_vertex_offset + maxi(1, max_triangles) * 3)
+	var chunk := PackedVector3Array()
+	var i := payload.finalize_vertex_offset
+	while i < end_vertex:
+		chunk.push_back(payload.vertices[i])
+		i += 1
+	payload.finalize_vertex_offset = end_vertex
+
+	var trimesh: ConcavePolygonShape3D = ConcavePolygonShape3D.new()
+	trimesh.set_faces(chunk)
+
+	var body_rid: RID = PhysicsServer3D.body_create()
+	PhysicsServer3D.body_set_mode(body_rid, PhysicsServer3D.BODY_MODE_STATIC)
+	PhysicsServer3D.body_set_collision_layer(body_rid, 1)
+	PhysicsServer3D.body_set_collision_mask(body_rid, 1)
+	PhysicsServer3D.body_add_shape(body_rid, trimesh.get_rid())
+	PhysicsServer3D.body_set_space(body_rid, world_3d.get_space())
+	PhysicsServer3D.body_set_state(body_rid, PhysicsServer3D.BODY_STATE_TRANSFORM, Transform3D.IDENTITY)
+
+	var finalized: FinalizedBody = payload.finalized_body
+	if not finalized.body_rid.is_valid():
+		finalized.body_rid = body_rid
+		finalized.shape = trimesh
+	finalized.body_rids.append(body_rid)
+	finalized.shapes.append(trimesh)
+
+	stats["total_triangles"] += chunk.size() / 3
+	if is_finalize_complete(payload) and not payload.stats_recorded:
+		payload.stats_recorded = true
+		stats["cells_built"] += 1
+		stats["total_build_time_us"] += payload.build_time_us
+		stats["total_worker_time_us"] += payload.build_time_us
+	return finalized
+
+
+func is_finalize_complete(payload: BuildPayload) -> bool:
+	if payload == null:
+		return true
+	return payload.finalize_vertex_offset >= payload.vertices.size()
+
+
 ## Main-thread only — PhysicsServer3D.free_rid is not thread-safe.
 static func free_body(finalized: FinalizedBody) -> void:
 	if finalized == null:
 		return
-	if finalized.body_rid.is_valid():
+	if not finalized.body_rids.is_empty():
+		for rid: RID in finalized.body_rids:
+			if rid.is_valid():
+				PhysicsServer3D.free_rid(rid)
+		finalized.body_rids.clear()
+	elif finalized.body_rid.is_valid():
 		PhysicsServer3D.free_rid(finalized.body_rid)
-		finalized.body_rid = RID()
+	finalized.body_rid = RID()
+	finalized.shapes.clear()
 	finalized.shape = null  # release strong ref → Godot frees shape RID
 
 

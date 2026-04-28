@@ -987,6 +987,10 @@ class InstantiationEntry:
 	var item_id: String
 	var cache_item_id: String = ""
 	var position: Vector3
+	var type_name: String = ""
+	## Nearby interactives/lights should publish before distant visual tail work
+	## so walk-up gameplay is responsive while the rest of the cell trickles in.
+	var player_local_priority: bool = false
 	var static_prepare_key: String = ""
 	var static_prepare_failed: bool = false
 	## Per-entry load profile copied from the owning AsyncCellRequest at queue
@@ -1387,7 +1391,7 @@ func _classify_request_refs(
 					request.payload.add_light_ref("", "", ref)
 				else:
 					request.payload.add_interactive_ref(type_name, "", "", ref)
-			_queue_instantiation(request.request_id, ref, "", "", "")
+			_queue_instantiation(request.request_id, ref, "", "", "", type_name)
 			continue
 
 		var item_id: String = ""
@@ -1412,7 +1416,7 @@ func _classify_request_refs(
 
 		if _model_loader.has_model(model_path, load_item_id):
 			_pin_payload_cached_scene(request, model_path, load_item_id)
-			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id, type_name)
 			continue
 
 		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, load_item_id):
@@ -1423,6 +1427,7 @@ func _classify_request_refs(
 				"ref": ref,
 				"item_id": item_id,
 				"cache_item_id": load_item_id,
+				"type_name": type_name,
 			})
 
 			var callback := _make_disk_load_callback(request.request_id, model_path, load_item_id)
@@ -1551,6 +1556,33 @@ func is_async_complete(request_id: int) -> bool:
 		return true  # Not found = already completed or invalid
 	var request: AsyncCellRequest = _async_requests.get(request_id)
 	return request.completed if request else true
+
+
+## Return true once the request has enough data for first-playable gating.
+##
+## Full completion can remain false for a long time because proximity-deferred
+## doors/containers/lights intentionally keep pending_instantiations alive until
+## the camera approaches. Loading screens should wait for cell data/resource
+## readiness, then let the interactive tail drain under runtime budgets.
+func is_async_visual_playable(request_id: int) -> bool:
+	if request_id not in _async_requests:
+		return true  # Completed/erased requests are no longer async blockers.
+	var request: AsyncCellRequest = _async_requests.get(request_id)
+	if request == null:
+		return true
+	if request.completed:
+		return true
+	if not is_instance_valid(request.cell_node):
+		return false
+	if not request.classification_complete:
+		return false
+	if not request.pending_parses.is_empty():
+		return false
+	if not request.pending_disk_loads.is_empty():
+		return false
+	if not request.references_to_process.is_empty():
+		return false
+	return true
 
 
 ## Check if an async request has failed (some models couldn't be parsed)
@@ -1982,18 +2014,27 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# steps so the autopsy can attribute the 100-540 ms `instantiate=` spike
 	# either to a substep here or to the main loop below.
 	var t_pre0 := Time.get_ticks_usec()
-	_tick_static_collision_build(false)
+	var start_time := t_pre0
+	var budget_usec_total := int(budget_ms * 1000.0)
+	var collision_dispatch_budget_us: int = mini(
+		int(SC.CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS * 1000.0),
+		budget_usec_total,
+	)
+	_tick_static_collision_build(
+		false,
+		collision_dispatch_budget_us,
+		SC.CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME,
+	)
 	var t_pre_collision := Time.get_ticks_usec()
 
-	# Start budget clock BEFORE pre-loop work — disk loads, conversions, and
-	# pool prewarm all consume frame time that must count against the budget.
+	# Start budget clock BEFORE pre-loop work — collision dispatch, disk loads,
+	# conversions, and pool prewarm all consume frame time that must count
+	# against the budget.
 	# Without this, these operations can blow the budget before the main
 	# instantiation loop even begins (root cause of 112ms frame overruns).
-	var start_time := Time.get_ticks_usec()
 
 	# First process any pending async disk loads, budgeted so they can't eat the
 	# entire frame allocation before the main instantiation loop runs.
-	var budget_usec_total := int(budget_ms * 1000.0)
 	var classify_cap_ms := SC.CELL_REQUEST_CLASSIFY_BUDGET_MS
 	var classify_max_refs := SC.CELL_REQUEST_CLASSIFY_MAX_REFS
 	if budget_ms > SC.POST_STARTUP_INSTANTIATION_BUDGET_MS:
@@ -2583,9 +2624,11 @@ func _phase_a_cancel_workers_for_request(request_id: int) -> void:
 ## Objects in front of camera get priority; objects behind are deprioritized 4x
 ## Queue is sorted FARTHEST-first so pop_back() returns highest priority (nearest/in-frustum)
 ##
-## PRIORITY LANE: Entries with `interior_priority == true` ALWAYS sort to the
-## tail of the queue, ahead of every non-priority entry regardless of distance.
-## Within the priority lane, existing distance/frustum ordering still applies.
+## PRIORITY LANES:
+## - `interior_priority` entries sort to the tail ahead of everything else.
+## - nearby player-local interactives/lights sort behind interior work but
+##   ahead of distant visual/static tail work.
+## Within each lane, existing distance/frustum ordering still applies.
 ## InteriorPocketManager flips this flag on all in-flight interior entries at
 ## the start of a transition so that the interior drains ahead of exterior
 ## streaming during the critical fade window.
@@ -2619,7 +2662,9 @@ func _sort_queue_by_priority() -> void:
 		# puts a BEFORE b.
 		if a.interior_priority != b.interior_priority:
 			return not a.interior_priority  # non-priority before priority
-		# SECONDARY KEY: existing distance/frustum priority. Farthest first,
+		if a.player_local_priority != b.player_local_priority:
+			return not a.player_local_priority
+		# LAST KEY: existing distance/frustum priority. Farthest first,
 		# so pop_back() returns nearest/highest-priority within the lane.
 		return priorities[a] > priorities[b]
 	)
@@ -2953,13 +2998,14 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 			continue
 
 		var ref_model_path: String = _get_model_path(base_record)
+		var type_name: String = record_type[0] if record_type.size() > 0 else ""
 		var item_id: String = ""
 		if "record_id" in base_record:
 			item_id = base_record.record_id
 
 		if ref_model_path.to_lower().replace("/", "\\") == model_path.to_lower().replace("/", "\\"):
 			# This reference uses the model that was just parsed
-			_queue_instantiation(request.request_id, ref, model_path, item_id, item_id)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, item_id, type_name)
 		else:
 			remaining.append(ref)
 
@@ -3008,7 +3054,8 @@ func _on_disk_load_completed(request_id: int, model_path: String, item_id: Strin
 		var ref: CellReference = ref_info.ref
 		var ref_item_id: String = ref_info.item_id
 		var cache_item_id: String = ref_info.get("cache_item_id", item_id)
-		_queue_instantiation(request_id, ref, model_path, ref_item_id, cache_item_id)
+		var type_name: String = str(ref_info.get("type_name", ""))
+		_queue_instantiation(request_id, ref, model_path, ref_item_id, cache_item_id, type_name)
 
 	# Check if request is now complete
 	if _is_request_complete(request):
@@ -3076,7 +3123,11 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 ## Cold-cache cell wall-clock used to be 20-50ms entirely on main; post-Win 1
 ## the worker absorbs most of it (triangle assembly + transform), main pays
 ## only the ~10-20ms BVH build.
-func _tick_static_collision_build(allow_finalize: bool = true) -> void:
+func _tick_static_collision_build(
+	allow_finalize: bool = true,
+	dispatch_budget_usec: int = -1,
+	max_dispatches: int = -1,
+) -> void:
 	if SC.DEBUG_DISABLE_CELL_STATIC_COLLISION:
 		for request_id: int in _async_requests:
 			var request: AsyncCellRequest = _async_requests[request_id]
@@ -3089,7 +3140,13 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 
 	# Phase 1: dispatch — for each cell ready and not yet dispatched, classify
 	# on main and fire a worker task. Cheap (O(N_refs) main work, no BVH).
+	var dispatch_start_us := Time.get_ticks_usec()
+	var dispatched_this_tick := 0
 	for request_id: int in _async_requests:
+		if max_dispatches >= 0 and dispatched_this_tick >= max_dispatches:
+			break
+		if dispatch_budget_usec >= 0 and Time.get_ticks_usec() - dispatch_start_us >= dispatch_budget_usec:
+			break
 		var request: AsyncCellRequest = _async_requests[request_id]
 		if request.collision_built or request.collision_dispatched:
 			continue
@@ -3137,6 +3194,7 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 			"cell_static_collision:collect_triangles",
 		)
 		request.collision_dispatched = true
+		dispatched_this_tick += 1
 
 	if not allow_finalize:
 		return
@@ -3163,9 +3221,9 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 			continue
 		if not request.collision_dispatched:
 			continue
-		if request.collision_task_id < 0:
+		if request.collision_task_id < 0 and request.collision_payload == null:
 			continue
-		if not WorkerThreadPool.is_task_completed(request.collision_task_id):
+		if request.collision_task_id >= 0 and not WorkerThreadPool.is_task_completed(request.collision_task_id):
 			continue
 		ready.append(request_id)
 
@@ -3187,23 +3245,24 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 	var winner_id: int = ready[0]
 	var winner: AsyncCellRequest = _async_requests[winner_id]
 
-	# Worker done — finalize on main.
-	winner.collision_built = true
+	# Worker done — finalize one bounded collision slice on main.
 	winner.state = CellPayloadScript.State.PHYSICS_PUBLISHING
 	if winner.payload != null:
 		winner.payload.state = winner.state
 	var task_id: int = winner.collision_task_id
 	var payload: Variant = winner.collision_payload
-	winner.collision_task_id = -1
-	winner.collision_payload = null
 
 	# Defensive — wait_for_task_completion is idempotent once done; pairs
 	# with the is_task_completed gate above. Required by Godot's
 	# WorkerThreadPool contract to release task resources.
-	WorkerThreadPool.wait_for_task_completion(task_id)
+	if task_id >= 0:
+		WorkerThreadPool.wait_for_task_completion(task_id)
+		winner.collision_task_id = -1
 
 	if not is_instance_valid(winner.cell_node):
 		# Cell torn down between dispatch and drain — discard worker output.
+		winner.collision_built = true
+		winner.collision_payload = null
 		return
 
 	# Win 2 — server-direct: finalize_body needs World3D for the physics
@@ -3217,16 +3276,46 @@ func _tick_static_collision_build(allow_finalize: bool = true) -> void:
 		# stays absent for this cell. Surfaces as ball-falls-through-rock
 		# during play, which is more visible than a silent free.
 		push_warning("CellStaticCollision: cell %s has no World3D — skipping body register" % str(winner.grid))
+		winner.collision_built = true
+		winner.collision_payload = null
 		return
 
 	CrashBreadcrumb.write("collision_finalize_begin", "%d_%d" % [winner.grid.x, winner.grid.y])
-	var finalized: Variant = _cell_static_collision.finalize_body(payload, world)
+	var finalize_start_us := Time.get_ticks_usec()
+	var finalized: Variant = _cell_static_collision.finalize_body_slice(
+		payload,
+		world,
+		SC.CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME,
+	)
+	var finalize_us := Time.get_ticks_usec() - finalize_start_us
 	CrashBreadcrumb.write("collision_finalize_end", "%d_%d" % [winner.grid.x, winner.grid.y])
 	if finalized != null:
 		winner.collision_body = finalized
-	winner.state = CellPayloadScript.State.ACTIVE
-	if winner.payload != null:
-		winner.payload.state = winner.state
+	var tri_count := 0
+	var total_tri_count := 0
+	var worker_us := 0
+	var complete := true
+	if payload != null:
+		total_tri_count = int(payload.vertices.size() / 3)
+		tri_count = mini(SC.CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME, total_tri_count)
+		worker_us = int(payload.build_time_us)
+		complete = bool(_cell_static_collision.is_finalize_complete(payload))
+	if finalize_us > 8_000:
+		Log.warn("streaming", "[collision-finalize %.1fms] cell=%s tris=%d/%d worker=%.1fms ready=%d done=%s" % [
+			finalize_us / 1000.0,
+			str(winner.grid),
+			tri_count,
+			total_tri_count,
+			float(worker_us) / 1000.0,
+			ready.size(),
+			"Y" if complete else "N",
+		])
+	if complete:
+		winner.collision_built = true
+		winner.collision_payload = null
+		winner.state = CellPayloadScript.State.ACTIVE
+		if winner.payload != null:
+			winner.payload.state = winner.state
 
 
 func _maybe_finalize_static_collision_when_idle(start_time_usec: int, budget_usec: float) -> void:
@@ -3236,9 +3325,17 @@ func _maybe_finalize_static_collision_when_idle(start_time_usec: int, budget_use
 		return
 	if not _pending_child_attaches.is_empty():
 		return
-	if float(Time.get_ticks_usec() - start_time_usec) >= budget_usec:
+	var elapsed_us := float(Time.get_ticks_usec() - start_time_usec)
+	if elapsed_us >= budget_usec:
 		return
-	_tick_static_collision_build(true)
+	var remaining_us := budget_usec - elapsed_us
+	if remaining_us < SC.CELL_STATIC_COLLISION_FINALIZE_MIN_REMAINING_MS * 1000.0:
+		return
+	_tick_static_collision_build(
+		true,
+		int(minf(SC.CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS * 1000.0, remaining_us)),
+		SC.CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME,
+	)
 
 
 ## Win 1 + Win 2 — wait on any in-flight collision worker for the request,
@@ -3315,6 +3412,7 @@ func _queue_instantiation(
 	model_path: String,
 	item_id: String,
 	cache_item_id: String = "",
+	type_name: String = "",
 ) -> bool:
 	# Check queue limit to prevent memory buildup
 	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
@@ -3331,6 +3429,8 @@ func _queue_instantiation(
 	entry.item_id = item_id
 	entry.cache_item_id = cache_item_id
 	entry.position = position
+	entry.type_name = type_name
+	entry.player_local_priority = _is_player_local_interactive_priority(type_name, position)
 
 	# Copy the per-request LoadProfile onto the entry so the instantiation
 	# queue processor can read it without a dictionary lookup, and so that
@@ -3343,8 +3443,8 @@ func _queue_instantiation(
 			var record_type: Array = [""]
 			var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 			if base_record != null:
-				var type_name: String = record_type[0] if record_type.size() > 0 else ""
-				if _should_prepare_static_ref(base_record, type_name, model_path, owning_request.load_profile):
+				var record_type_name: String = record_type[0] if record_type.size() > 0 else ""
+				if _should_prepare_static_ref(base_record, record_type_name, model_path, owning_request.load_profile):
 					entry.static_prepare_key = model_path.to_lower().replace("/", "\\")
 					_enqueue_static_prepare(request_id, model_path, cache_item_id)
 
@@ -3355,6 +3455,18 @@ func _queue_instantiation(
 		owning_request.pending_instantiations += 1
 
 	return true
+
+
+func _is_player_local_interactive_priority(type_name: String, position: Vector3) -> bool:
+	var threshold := ReferenceInstantiator.INTERACTIVE_PROXIMITY_THRESHOLD_M
+	match type_name:
+		"light":
+			threshold = ReferenceInstantiator.LIGHT_PROXIMITY_THRESHOLD_M
+		"door", "container", "activator":
+			pass
+		_:
+			return false
+	return position.distance_squared_to(_camera_position) <= threshold * threshold
 
 
 ## Internal: Get cache key for a model
