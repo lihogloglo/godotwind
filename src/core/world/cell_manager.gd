@@ -1838,6 +1838,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var exit_reason := ""
 	var route_static_us := 0
 	var route_node_us := 0
+	var route_light_us := 0
+	var route_actor_us := 0
 	var route_worker_static_us := 0
 	var route_worker_node_us := 0
 	var route_deferred_us := 0
@@ -1848,6 +1850,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var route_static_add_us := 0
 	var route_static_count := 0
 	var route_node_count := 0
+	var route_light_count := 0
+	var route_actor_count := 0
 	var route_worker_static_count := 0
 	var route_worker_node_count := 0
 	var route_deferred_count := 0
@@ -2009,6 +2013,12 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 		if route_name.begins_with("static_"):
 			route_static_us += inst_elapsed
 			route_static_count += 1
+		elif route_name == "light":
+			route_light_us += inst_elapsed
+			route_light_count += 1
+		elif route_name == "actor":
+			route_actor_us += inst_elapsed
+			route_actor_count += 1
 		elif route_name == "worker_static_publish" or route_name == "worker_static_empty":
 			route_worker_static_us += inst_elapsed
 			route_worker_static_count += 1
@@ -2128,7 +2138,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
 	if total_inst_us > 16_000:
-		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d loop=%.1f addc=%.1f static=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
+		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
 			float(t_pre_collision - t_pre0) / 1000.0,
 			float(t_pre_disk - start_time) / 1000.0,
@@ -2140,6 +2150,10 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			float(attach_time_us) / 1000.0,
 			float(route_static_us) / 1000.0,
 			route_static_count,
+			float(route_light_us) / 1000.0,
+			route_light_count,
+			float(route_actor_us) / 1000.0,
+			route_actor_count,
 			float(route_node_us) / 1000.0,
 			route_node_count,
 			float(route_worker_static_us) / 1000.0,
@@ -2487,7 +2501,11 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 			model_path,
 			request.load_profile,
 		)
-		var load_item_id := "" if static_route else item_id
+		# Lights instantiate their visual model with get_model(light_record.model)
+		# and no item_id, so warm/load them under the generic key. Loading them
+		# with record_id here creates an item-specific cache entry that the hot
+		# light path cannot hit, causing a second cold load during publish.
+		var load_item_id := "" if static_route or type_name == "light" else item_id
 		if static_route:
 			_enqueue_static_prepare(request.request_id, model_path, load_item_id)
 

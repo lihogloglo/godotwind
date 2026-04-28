@@ -1185,13 +1185,16 @@ func _instantiate_static_object(ref: CellReference, model_path: String, cell_gri
 
 ## Instantiate a light object (model + OmniLight3D)
 func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D:
+	last_inst_route = "light"
 	# Create container node
 	var light_node := Node3D.new()
 	light_node.name = str(ref.ref_id) + "_" + str(ref.ref_num)
 
 	# Load the model if it has one
 	if not light_record.model.is_empty():
+		var model_load_start := Time.get_ticks_usec()
 		var model_instance: Node3D = model_loader.call("get_model", light_record.model)
+		last_model_load_us = Time.get_ticks_usec() - model_load_start
 		if model_instance:
 			model_instance.name = "Model"
 			_hide_lod_nodes(model_instance)  # Hide materialless meshes only
@@ -1341,6 +1344,7 @@ func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) 
 ## Instantiate an NPC or Creature
 ## Uses CharacterFactory to create fully animated and functional characters
 func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
+	last_inst_route = "actor"
 	# Skip actors beyond NEAR tier — full CharacterBody3D is too expensive at distance.
 	# Per-request override via LoadProfile: interior pockets set this to 0.0
 	# because the camera is still at exterior position during pocket load.

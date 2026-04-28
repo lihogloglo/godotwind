@@ -10,7 +10,7 @@
 ##   - Per-slot transforms + custom_data live in PrototypeBatch's own
 ##     PackedFloat32Array fields (slot_transforms, slot_custom_data).
 ##   - The MultiMesh's internal buffer is only ever written via
-##     RenderingServer.multimesh_set_buffer during cull_and_upload — never via
+##     MultiMesh.set_buffer during cull_and_upload — never via
 ##     per-slot set_instance_transform. This keeps slot indexing coherent
 ##     with visible_instance_count (engine renders the first N slots in the
 ##     packed buffer; our packing decides which live slots go in first).
@@ -199,7 +199,7 @@ func _init(
 		rs.instance_geometry_set_material_override(rs_instance, material_rid)
 
 	## Nothing renders until cull_and_upload runs.
-	rs.multimesh_set_visible_instances(multimesh_rid, 0)
+	multimesh.visible_instance_count = 0
 
 	_resize_capacity_internal(p_initial_capacity)
 
@@ -361,12 +361,12 @@ func _resize_capacity_internal(new_capacity: int) -> void:
 ## NativeBridge benchmark note. When null, falls back to the GDScript loop
 ## below.
 func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounted = null) -> int:
-	if not multimesh_rid.is_valid():
+	if multimesh == null or not multimesh_rid.is_valid():
 		return 0
 
-	var rs := RenderingServer
 	if slot_count_live == 0:
-		rs.multimesh_set_visible_instances(multimesh_rid, 0)
+		if multimesh != null:
+			multimesh.visible_instance_count = 0
 		return 0
 
 	if native_culler != null:
@@ -411,8 +411,9 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 	for i in range(out_off, _cull_buffer.size()):
 		_cull_buffer[i] = 0.0
 
-	rs.multimesh_set_buffer(multimesh_rid, _cull_buffer)
-	rs.multimesh_set_visible_instances(multimesh_rid, visible)
+	_ensure_multimesh_capacity()
+	multimesh.set_buffer(_cull_buffer)
+	multimesh.visible_instance_count = visible
 	_update_shadow_state(nearest_dist_sq)
 	return visible
 
@@ -452,11 +453,20 @@ func _cull_native(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounte
 	## unmarshals that cleanly to INF.
 	var nearest_dist_sq: float = result.get("nearest_dist_sq", INF)
 
-	var rs := RenderingServer
-	rs.multimesh_set_buffer(multimesh_rid, buffer)
-	rs.multimesh_set_visible_instances(multimesh_rid, visible)
+	if multimesh == null:
+		return 0
+	_ensure_multimesh_capacity()
+	multimesh.set_buffer(buffer)
+	multimesh.visible_instance_count = visible
 	_update_shadow_state(nearest_dist_sq)
 	return visible
+
+
+func _ensure_multimesh_capacity() -> void:
+	if multimesh == null:
+		return
+	if multimesh.instance_count != slot_capacity:
+		multimesh.instance_count = slot_capacity
 
 ## Flip cast_shadow on the batch RS instance based on the nearest live
 ## slot's distance from the camera. Called from both cull paths (GDScript

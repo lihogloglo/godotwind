@@ -137,7 +137,10 @@ const WORKER_DISPATCH_MAX_PER_FRAME := 64
 ## instantiation queue. Keeps add_child() work explicit instead of dumping
 ## large batches into idle-time call_deferred bursts.
 const CHILD_ATTACH_BUDGET_MS := 1.0
-const CHILD_ATTACH_MAX_PER_FRAME := 20
+## Keep this low: one add_child() can be expensive when the detached subtree
+## enters the scene tree, so the time budget can only stop after that call
+## returns. A small count cap prevents 20 heavy nodes from stacking.
+const CHILD_ATTACH_MAX_PER_FRAME := 4
 
 ## NEAR TIER BURST LOADING - Moderate priority for critical cells
 ## When loading the player's current cell or immediately adjacent cells,
@@ -158,7 +161,18 @@ const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
 ## Maximum PrototypeRegistry batches to cull/upload per frame after static
 ## renderer churn. Keeps cell-boundary static publish from forcing one giant
 ## MultiMesh buffer-upload pass.
-const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 64
+## Eight batches still refreshes quickly but avoids the old "budget >= batch
+## count, upload everything" behavior becoming a startup/boundary cliff.
+const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 8
+
+## Native C# packing kernel for world-scoped static MultiMesh culling.
+##
+## Default-disabled after the 2026-04-28 smooth-baseline run crashed in
+## PrototypeBatch._cull_native() while uploading the C#-returned buffer via
+## RenderingServer.multimesh_set_buffer. The GDScript fallback still uses the
+## same RenderingServer/MultiMesh render path, but keeps the packed buffer owned
+## by GDScript until the native handoff is reworked and proven stable.
+const STATIC_CULL_NATIVE_ENABLED: bool = false
 
 # =============================================================================
 # MEMORY LIMITS

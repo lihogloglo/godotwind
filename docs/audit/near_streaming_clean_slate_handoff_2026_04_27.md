@@ -2,6 +2,570 @@
 
 Date: 2026-04-27
 
+## Smooth NEAR Streaming Tracker - Started 2026-04-28
+
+Purpose: turn the current diagnosis into an implementation tracker for a
+buttery NEAR-only tier in Godot 4.6. The design should make the best use of
+Godot's strengths: server-side rendering/physics for bulk static content,
+plain-data preparation off the hot path, and sparse scene-tree nodes only for
+objects that truly need gameplay behavior.
+
+This tracker replaces the failed whole-cell `DataReady` gate idea. The goal is
+not to hold back a cell until everything is perfect. The goal is to prepare the
+right payloads early, pin the needed resources, and publish visible work in
+small, predictable chunks.
+
+### Godot 4.6 Design Rules
+
+- Bulk NEAR statics should be rendered through `RenderingServer` /
+  `MultiMesh`, not thousands of `Node3D` / `MeshInstance3D` objects.
+- Scene-tree work must stay sparse and explicitly budgeted. Use `Node3D` for
+  doors, actors, activators, containers, scripted objects, animated objects,
+  and other genuinely interactive refs.
+- Worker threads may prepare plain data, sort refs, compute transforms, collect
+  shape triangles, and request resources. They should not be the normal path for
+  mass creation of rendering-node scene chunks.
+- Main-thread publish may call Godot server/resource APIs, but every expensive
+  publish class needs its own visible budget and benchmark column.
+- Cell-boundary detection should enqueue state transitions only. It should not
+  synchronously load, classify, instantiate, allocate batches, finalize
+  collision, rebuild queues, and unload old cells on the same frame.
+- Runtime should avoid asking the servers for data every frame. Server calls
+  should mostly be one-way creation/update/free operations.
+
+Relevant official Godot docs:
+
+- Thread-safe APIs:
+  `https://docs.godotengine.org/en/4.6/tutorials/performance/thread_safe_apis.html`
+- Optimization using MultiMeshes:
+  `https://docs.godotengine.org/en/4.6/tutorials/performance/using_multimesh.html`
+- RenderingServer:
+  `https://docs.godotengine.org/en/4.6/classes/class_renderingserver.html`
+- PhysicsServer3D:
+  `https://docs.godotengine.org/en/4.6/classes/class_physicsserver3d.html`
+
+### Success Gates
+
+Initial pass/fail gates for the standard NEAR-only AutoBench route:
+
+- [ ] No visible object starvation or late whole-cell pop-in.
+- [ ] No benchmark frames above `33.33 ms` during normal flyby.
+- [ ] Stretch: no benchmark frames above `16.67 ms` during normal flyby.
+- [ ] `p99.9 <= 16.67 ms` during normal flyby, or a clear remaining culprit
+  with a measured follow-up task.
+- [ ] Teleport scenario no longer reports single-digit `fps_min`.
+- [ ] Top-20 worst frames are classifiable from CSV/logs without manual guesswork.
+- [ ] Disabling cell static collision changes correctness/physics behavior, not
+  visual smoothness. In other words, collision is no longer a visual hitch source.
+- [ ] No crash before benchmark data flush; no recurring shutdown crash from
+  streaming resources.
+
+### Phase 0 - Baseline And Top-Frame Autopsy
+
+Status: completed on 2026-04-28. Baseline collection found and stabilized a
+static MultiMesh upload crash first, then completed the baseline and
+no-collision flyby runs.
+
+Commands:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_smooth_baseline_mmset_2026_04_28 --start-cell=-3,-2 --near-only
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_smooth_no_collision_mmset_2026_04_28 --start-cell=-3,-2 --near-only --disable-cell-static-collision
+```
+
+Tasks:
+
+- [x] Capture current summary JSON, CSV, and log for a clean baseline.
+- [x] Identify worst 20 normal-flyby frames.
+- [x] Classify each worst frame by `phase_*_us`, `[inst-spike]`, `[ml-spike]`,
+  `stream_proc`, heartbeat, and visible scenario segment.
+- [x] Compare with `--disable-cell-static-collision`.
+- [x] Record whether the dominant remaining spike class is `ml`, `sadd`,
+  `coll`, `cellupd`, `unload`, `static_cull`, interactive spawn, or something
+  else.
+
+Acceptance:
+
+- [x] We know which cost class owns the current tail before editing runtime
+  architecture again.
+
+Results:
+
+- Pre-fix baseline crashed during `bench_flyby` startup at
+  `PrototypeBatch._cull_native()` /
+  `RenderingServer.multimesh_set_buffer`.
+- Disabling the native C# culler moved the crash to the GDScript path at
+  `PrototypeBatch.cull_and_upload()` /
+  `RenderingServer.multimesh_set_buffer`.
+- Kept the world-scoped `MultiMesh` renderer, but changed upload ownership to
+  `MultiMesh.set_buffer()` plus `visible_instance_count`, and added a capacity
+  guard before upload.
+- Added `StreamingConfig.STATIC_CULL_NATIVE_ENABLED=false` so the C# packing
+  handoff stays off until it is reworked and proven stable.
+- Post-fix baseline completed and wrote data, then still hit the known shutdown
+  crash after AutoBench sequence completion.
+
+Baseline output:
+
+- AutoBench dir:
+  `user://benchmark_results/autobench_near_streaming_smooth_baseline_mmset_2026_04_28/`
+- CSV:
+  `user://benchmark_results/benchmark_2026-04-28_14-14-11.csv`
+- Summary:
+  `user://benchmark_results/summary_2026-04-28_14-14-12.json`
+- Copied log:
+  `user://benchmark_results/autobench_near_streaming_smooth_baseline_mmset_2026_04_28/godot_after_run.log`
+- avg FPS: `179.9`
+- avg frame: `5.56 ms`
+- p95: `7.41 ms`
+- p99: `13.54 ms`
+- p99.9: `38.85 ms`
+- max: `85.93 ms`
+- frames over 16.67 ms: `92 / 15304`
+- frames over 33.33 ms: `33 / 15304`
+
+No-collision output:
+
+- AutoBench dir:
+  `user://benchmark_results/autobench_near_streaming_smooth_no_collision_mmset_2026_04_28/`
+- CSV:
+  `user://benchmark_results/benchmark_2026-04-28_14-18-40.csv`
+- Summary:
+  `user://benchmark_results/summary_2026-04-28_14-18-40.json`
+- Copied log:
+  `user://benchmark_results/autobench_near_streaming_smooth_no_collision_mmset_2026_04_28/godot_after_run.log`
+- avg FPS: `183.0`
+- avg frame: `5.46 ms`
+- p95: `7.14 ms`
+- p99: `12.98 ms`
+- p99.9: `35.46 ms`
+- max: `76.50 ms`
+- frames over 16.67 ms: `62 / 15572`
+- frames over 33.33 ms: `17 / 15572`
+
+Interpretation:
+
+- Collision remains a contributor, but it is not the dominant remaining tail:
+  disabling cell static collision improved over-16 frames `92 -> 62` and
+  over-33 frames `33 -> 17`, but did not remove the long tail.
+- The dominant remaining visual-streaming classes are now:
+  instantiate-loop work, static cull/upload, queue work, interactive publish,
+  and cold model/prototype publish. Representative no-collision spike lines
+  still show `ml=17-20 ms`, `sadd=2.5-4.0 ms`, static publish counts of
+  `54-105`, and single-frame light/container costs above `10-26 ms`.
+- CSV top frames with no collision still show combinations such as
+  `phase_inst_us=20228`, `phase_static_cull_us=8264`,
+  `phase_queue_us=33600`, and `inst_light_us=26604`.
+- `phase_cellupd_us` was not a top-frame owner in these flyby runs, but
+  teleport/unload still needs separate attention because AutoBench still
+  exercises unload bursts and the existing handoff already recorded bad
+  teleport minima.
+- Next implementation target should be Phase 1 plus the start of Phase 2/3:
+  make the hot path even more legible, then build the static `CellPayload` /
+  static prepare path so `ml`, `sadd`, static publish, and static cull/upload
+  stop landing in the same boundary frame.
+
+### Phase 1 - Make The Hot Path Fully Legible
+
+Status: partially completed on 2026-04-28.
+
+Likely files:
+
+- `src/core/world/native_streaming_manager.gd`
+- `src/core/world/cell_manager.gd`
+- `src/core/world/reference_instantiator.gd`
+- `src/tools/streaming_benchmark.gd`
+- `src/tools/benchmark_hud.gd`
+
+Tasks:
+
+- [x] Ensure benchmark CSV separates at least the known route-level costs for
+  statics, doors, lights, light model loads, containers, and activators.
+- [ ] Further split:
+  data/model completion, static prepare, static publish, static cull/upload,
+  interactive create, interactive attach, collision publish, unload/free, and
+  cell-update management.
+- [x] Add or extend a top-frame classifier so the log can print the likely
+  owner of frames over `16.67 ms` and `33.33 ms`.
+- [ ] Keep route-level columns already added:
+  `inst_door_us`, `inst_light_us`, `inst_light_modelload_us`,
+  `inst_container_us`, `inst_activator_us`, `inst_static_us`.
+
+Acceptance:
+
+- [ ] No broad `phase_inst_us` mystery remains for the top 20 frames.
+
+Changes made:
+
+- `[inst-spike]` now reports explicit `light=...` and `actor=...` buckets.
+  Previously lights inherited the default `"sync"` route and were logged as
+  `other`, which hid the real owner of repeated 9-28 ms spikes.
+- `_instantiate_light()` now records `last_model_load_us`, so
+  `inst_light_modelload_us` and the `ml` field include light model load cost.
+  Before this, the CSV column was falsely zero for light spikes.
+- Light model async/data loading now uses the generic model cache key. The
+  active request path was warming light models as `model:item_id`, while
+  `_instantiate_light()` loads them as `get_model(light_record.model)` without
+  `item_id`, causing a second cold load in the publish path.
+- Tightened two budget caps:
+  - `CHILD_ATTACH_MAX_PER_FRAME: 20 -> 4`
+  - `STATIC_CULL_BATCH_BUDGET_PER_FRAME: 64 -> 8`
+- Kept the server-side `MultiMesh` renderer active. The tighter static cull
+  budget is a smoother dirty-upload schedule, not a retreat from Godot server
+  rendering.
+
+Phase 1 route probe:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_phase1_routes_no_collision_2026_04_28 --start-cell=-3,-2 --near-only --disable-cell-static-collision
+```
+
+Output:
+
+- AutoBench dir:
+  `user://benchmark_results/autobench_near_streaming_phase1_routes_no_collision_2026_04_28/`
+- CSV:
+  `user://benchmark_results/benchmark_2026-04-28_14-29-27.csv`
+- Summary:
+  `user://benchmark_results/summary_2026-04-28_14-29-27.json`
+- avg FPS: `192.2`
+- p95: `6.90 ms`
+- p99: `12.21 ms`
+- p99.9: `35.99 ms`
+- max: `89.04 ms`
+- frames over 16.67 ms: `64 / 16355`
+
+Interpretation: route attribution worked. Recent `[inst-spike]` lines showed
+`other=0.0`; the old mystery bucket collapsed into named `light`, `node`,
+`wstatic`, `wnode`, `sadd`, and `ml` buckets.
+
+Budgeted no-collision verification:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_phase1_budget_no_collision_2026_04_28 --start-cell=-3,-2 --near-only --disable-cell-static-collision
+```
+
+Output:
+
+- AutoBench dir:
+  `user://benchmark_results/autobench_near_streaming_phase1_budget_no_collision_2026_04_28/`
+- CSV:
+  `user://benchmark_results/benchmark_2026-04-28_14-36-32.csv`
+- Summary:
+  `user://benchmark_results/summary_2026-04-28_14-36-32.json`
+- avg FPS: `209.2`
+- avg frame: `4.78 ms`
+- p95: `6.14 ms`
+- p99: `8.06 ms`
+- p99.9: `29.64 ms`
+- max: `62.45 ms`
+- frames over 16.67 ms: `35 / 17801`
+- frames over 33.33 ms: `14 / 17801`
+- `phase_static_cull_us` max: `4114 us`
+
+Compared to the prior no-collision run
+`near_streaming_smooth_no_collision_mmset_2026_04_28`:
+
+- p99.9 improved `35.46 -> 29.64 ms`
+- frames over 16.67 ms improved `62 -> 35`
+- frames over 33.33 ms improved `17 -> 14`
+- `phase_static_cull_us` max improved `12262 -> 4114 us`
+
+Budgeted collision-enabled verification:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_phase1_budget_baseline_2026_04_28 --start-cell=-3,-2 --near-only
+```
+
+Output:
+
+- AutoBench dir:
+  `user://benchmark_results/autobench_near_streaming_phase1_budget_baseline_2026_04_28/`
+- CSV:
+  `user://benchmark_results/benchmark_2026-04-28_14-40-23.csv`
+- Summary:
+  `user://benchmark_results/summary_2026-04-28_14-40-23.json`
+- avg FPS: `194.6`
+- avg frame: `5.14 ms`
+- p95: `6.70 ms`
+- p99: `9.23 ms`
+- p99.9: `36.27 ms`
+- max: `70.15 ms`
+- frames over 16.67 ms: `66 / 16560`
+- frames over 33.33 ms: `24 / 16560`
+- `phase_static_cull_us` max: `3946 us`
+
+Compared to the prior collision-enabled baseline
+`near_streaming_smooth_baseline_mmset_2026_04_28`:
+
+- p99 improved `13.54 -> 9.23 ms`
+- frames over 33.33 ms improved `33 -> 24`
+- `phase_static_cull_us` max improved `11553 -> 3946 us`
+- p99.9 stayed high because the remaining tail is now mostly `phase_inst_us`
+  plus occasional collision finalization.
+
+Remaining dominant classes after Phase 1:
+
+- Cold light model publish: repeated `light=9-25 ms`, `ml=9-25 ms`.
+- Cold node publish: e.g. `node=17-20 ms`, `ml=16-19 ms`.
+- Static publish add cost: `sadd` mostly smaller after cull budgeting, but still
+  present when static publish and cold node/light work stack.
+- Child attach: smaller after the count cap, but still visible as `addc=5-9 ms`
+  when several interactive nodes enter the tree.
+- Collision: still appears in collision-enabled runs, e.g. `coll=11.6 ms` on a
+  40 ms instantiate spike.
+
+Next target:
+
+- Start Phase 2/3 with a minimal static/light payload or prepare lane that pins
+  the exact `PackedScene` resources before visual publish. The data path is now
+  legible enough to see that model cache readiness, not broad cell update, owns
+  much of the remaining NEAR tail.
+
+### Phase 2 - Minimal `CellPayload` V0 For Statics
+
+Status: pending.
+
+Goal: create a prepared, resource-pinning payload before visual activation,
+without reintroducing the whole-cell gate regression.
+
+Likely files:
+
+- `src/core/world/cell_manager.gd`
+- possible new file: `src/core/world/cell_payload.gd`
+- `src/core/world/reference_instantiator.gd`
+- `src/core/world/model_loader.gd`
+
+Payload V0 should contain:
+
+- [ ] `grid: Vector2i`
+- [ ] static refs grouped by model/prototype key
+- [ ] precomputed world transforms for statics
+- [ ] expected static batch counts by prototype/material where available
+- [ ] interactive refs split out but not necessarily spawned
+- [ ] light refs split out
+- [ ] shape pack paths or collision preparation handles
+- [ ] strong resource references needed to keep meshes/materials/scenes alive
+- [ ] small stats dictionary for benchmark/log validation
+
+Tasks:
+
+- [ ] Add cell states for payload preparation without blocking incremental
+  visual publish:
+  `QueuedData`, `PreparingPayload`, `PayloadReady`, `VisualPublishing`,
+  `VisualReady`, `PhysicsPublishing`, `Active`, `Unloading`.
+- [ ] Build payload data ahead of activation using existing loaded cell records.
+- [ ] Keep missing-resource refs incremental; do not hold the entire cell hidden
+  waiting for every optional model.
+- [ ] Validate static count and visible object count against the current path.
+
+Acceptance:
+
+- [ ] Static visual publish no longer performs cell-wide classification.
+- [ ] The payload pins resources needed by publish.
+- [ ] No regression to missing objects / late full-cell appearance.
+
+### Phase 3 - Static Prototype And Batch Preallocation
+
+Status: pending.
+
+Goal: remove `ml` and first `sadd` spikes from visible publish.
+
+Likely files:
+
+- `src/core/world/cell_manager.gd`
+- `src/core/world/static_object_renderer.gd`
+- `src/core/world/prototype_registry.gd`
+- `src/core/world/prototype_batch.gd`
+- `src/core/world/streaming_config.gd`
+
+Tasks:
+
+- [ ] Keep `DEBUG_DISABLE_PHASE_F_PREREG=true` by default.
+- [ ] Do main-thread static prototype registration from cached resources under
+  `STATIC_PREPARE_BUDGET_MS`.
+- [ ] Revisit `STATIC_PREPARE_CREATE_BATCHES`; enable only when batch creation
+  is proven stable and budgeted.
+- [ ] Add an explicit batch-reserve path using payload expected counts.
+- [ ] Avoid first `PrototypeBatch` / `MultiMesh` allocation inside static
+  instance publish.
+- [ ] Track `sreg`, `sadd`, and model-loader `ml` separately during prepare vs
+  publish.
+
+Acceptance:
+
+- [ ] Top-20 frames no longer contain cold static prototype loads during visual
+  publish.
+- [ ] Top-20 frames no longer contain first-batch `sadd` allocation spikes.
+- [ ] Static prepare may spend time over multiple frames, but visual publish
+  remains bounded.
+
+### Phase 4 - Budgeted Static Visual Publish
+
+Status: pending.
+
+Goal: make visible static publication a small server-side operation fed by the
+payload, not a discovery/load/register path.
+
+Likely files:
+
+- `src/core/world/cell_manager.gd`
+- `src/core/world/reference_instantiator.gd`
+- `src/core/world/static_object_renderer.gd`
+- `src/core/world/prototype_registry.gd`
+
+Tasks:
+
+- [ ] Add a static visual publish queue fed by `CellPayload`.
+- [ ] Publish static instances under a count/time budget independent of
+  interactive spawn and collision.
+- [ ] Treat `MultiMesh.set_buffer` / dirty upload as its own
+  budgeted continuation, not a hidden aftereffect.
+- [ ] Ensure unload does not immediately force a huge cull/upload rebuild.
+
+Acceptance:
+
+- [ ] Static publish work is bounded even when entering a dense cell.
+- [ ] `phase_static_cull_us` and static upload costs are no longer top-frame
+  surprises after cell churn.
+
+### Phase 5 - Collision Lane Decoupled From Visual Smoothness
+
+Status: pending.
+
+Goal: collision may lag visual activation briefly, but it must not hitch visual
+streaming.
+
+Likely files:
+
+- `src/core/world/cell_manager.gd`
+- `src/core/world/cell_static_collision.gd`
+- `src/core/world/static_shape_cache.gd`
+- `src/core/world/static_shape_pack.gd`
+- `src/tools/prebaking/model_prebaker.gd`
+
+Tasks:
+
+- [ ] Verify `.shapes.res` sidecars are present and used for benchmark-area
+  statics.
+- [ ] Measure `ConcavePolygonShape3D.set_faces()` per cell.
+- [ ] Keep worker triangle collection separate from main-thread finalization.
+- [ ] Finalize/publish collision only when visual/static queues are idle and
+  within a collision-specific budget.
+- [ ] Investigate prebaked cell-level collision resources so runtime does not
+  build large trimesh BVHs on boundary frames.
+- [ ] Keep `--disable-cell-static-collision` as an ablation and correctness
+  comparison flag.
+
+Acceptance:
+
+- [ ] `[inst-spike] coll=...` is absent from visual-boundary top frames.
+- [ ] Collision-enabled and collision-disabled flybys have similar visual
+  smoothness percentiles.
+
+### Phase 6 - Sparse Interactive Node Lane
+
+Status: pending.
+
+Goal: interactives use scene nodes, but only when needed and under explicit
+budgets.
+
+Likely files:
+
+- `src/core/world/reference_instantiator.gd`
+- `src/core/world/cell_manager.gd`
+- `src/core/world/interaction_shape_cache.gd`
+
+Tasks:
+
+- [ ] Split interactive create and `add_child` attach budgets.
+- [ ] Replace bursty `call_deferred("add_child", ...)` behavior with a bounded
+  attach queue.
+- [ ] Keep doors high priority, using `InteractionShapeCache`.
+- [ ] Spawn containers, activators, and other sparse interactives by priority /
+  proximity instead of raw cell membership where possible.
+- [ ] Keep lights server-direct where behavior allows; avoid light `Node3D`s for
+  static decorative lights.
+
+Acceptance:
+
+- [ ] Interactive spikes are small and attributable.
+- [ ] Door/interact behavior is preserved.
+- [ ] No deferred child-attach burst appears after the measured budget slice.
+
+### Phase 7 - Boundary And Unload Amortization
+
+Status: pending.
+
+Goal: crossing a cell boundary schedules work; it does not perform work.
+
+Likely files:
+
+- `src/core/world/native_streaming_manager.gd`
+- `src/core/world/cell_manager.gd`
+- `src/core/world/cell_preloader.gd`
+- `src/core/world/static_object_renderer.gd`
+
+Tasks:
+
+- [ ] Split `_update_loaded_cells()` into cheap desired-state calculation and
+  budgeted job queues.
+- [ ] Budget old-cell unload/free work separately from new-cell publish.
+- [ ] Avoid clearing/rebuilding large pending queues on the boundary frame.
+- [ ] Ensure distant-system scans remain disabled or no-op during NEAR-only
+  runs.
+- [ ] Fix teleport path by draining transitions over frames instead of forcing
+  all unload/load work immediately.
+
+Acceptance:
+
+- [ ] `phase_cellupd_us` and `phase_unload_us` are not top-frame owners during
+  flyby.
+- [ ] Teleport benchmark no longer reports single-digit `fps_min`.
+
+### Phase 8 - Verification Battery
+
+Status: pending.
+
+Always run after meaningful runtime changes:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --headless --path . --quit
+dotnet build Godotwind.sln --configfile NuGet.Config
+git diff --check
+```
+
+Benchmark battery:
+
+```powershell
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_smooth_verify_YYYY_MM_DD --start-cell=-3,-2 --near-only
+& 'D:\Gamedev\Godot\Godot_v4.6-stable_mono_win64.exe' --path . -- --bench-auto=near_streaming_smooth_verify_no_collision_YYYY_MM_DD --start-cell=-3,-2 --near-only --disable-cell-static-collision
+```
+
+Benchmark coverage note:
+
+- [ ] Add a high-altitude fast NEAR stress route: camera roughly `100 m` above
+  terrain, moving fast enough to cross cell boundaries frequently while keeping
+  lots of NEAR statics visible.
+- [ ] Add diagonal movement coverage. Diagonal traversal crosses cell corners
+  and can force different load/unload/preload overlap than axis-aligned movement.
+- [ ] Keep the existing scripted flyby for continuity, but do not treat it as
+  the only pass/fail route. A buttery NEAR tier should survive sustained
+  high-altitude and diagonal flight too.
+
+Record for each run:
+
+- [ ] Output directory
+- [ ] CSV path
+- [ ] summary JSON path
+- [ ] avg FPS
+- [ ] p95 / p99 / p99.9 / max frame time
+- [ ] frames over `16.67 ms`
+- [ ] frames over `33.33 ms`
+- [ ] top-frame classification
+- [ ] visible correctness notes
+- [ ] crash or shutdown notes
+
 ## Session Update - 2026-04-28 Audit / Keep-Ditch Pass
 
 Audited the uncommitted changes after `d6cfc15`.

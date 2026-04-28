@@ -344,11 +344,17 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float, batch_budget: int
 	if not needs_tick:
 		return -1
 
-	## Lazily spin up the C# culler on first real tick.
-	if not _native_checked:
+	## Lazily spin up the C# culler on first real tick. Keep this behind a
+	## config flag: the native-buffer handoff crashed in Godot 4.6 during the
+	## 2026-04-28 smooth-baseline flyby, while the GDScript path keeps the same
+	## RenderingServer/MultiMesh publish model with safer ownership.
+	if SC.STATIC_CULL_NATIVE_ENABLED and not _native_checked:
 		_native_checked = true
 		var bridge := NativeBridge.new()
 		_native_culler = bridge.create_world_mid_culler()
+	elif not SC.STATIC_CULL_NATIVE_ENABLED:
+		_native_checked = true
+		_native_culler = null
 
 	if batch_budget <= 0 or batch_budget >= _batches.size():
 		_cull_in_progress = false
