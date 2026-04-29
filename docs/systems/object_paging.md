@@ -22,7 +22,7 @@ tests/visual/test_hlod_benchmark.gd     — interactive flyby benchmark (CSV exp
 
 | size_level | Tier     | Band            | Chunk cells | World extent |
 |------------|----------|-----------------|-------------|--------------|
-| 0          | MID-near | [150, 300)m     | 1×1         | 117m         |
+| 0          | RETIRED  | (was [150, 300))| —           | now owned by `PrototypeRegistry` (`docs/systems/distance_rendering.md` MID tier) |
 | 1          | MID-far  | [300, 600)m     | 2×2         | 234m         |
 | 2          | HLOD     | [600, 1000)m    | 4×4         | 468m         |
 | —          | FAR      | [1000, 5000)m   | impostors   | —            |
@@ -83,7 +83,3 @@ Defined in `world_explorer.gd::_cmd_hlod_enable` / `_cmd_hlod_disable` / `_cmd_h
 
 First cell re-request for an unregistered mesh type bypasses the projected-size filter (AABB not yet in `StaticObjectRenderer`) and falls through to the slow-path prototype load. Front-loads during initial exterior streaming (~30-50 unique architectural types) and settles out. Not a regression — Phase 1 had no filter at all. Fix option: pre-register AABBs during ESM parse. Not scheduled.
 
-## History
-
-- `docs/archive/sessions/object_paging_2026_04_14_15.md` — Phases 1-3 session log (kernel extraction, projected-size filter, cost-benefit).
-- `docs/archive/sessions/object_paging_2026_04_16.md` — Phase 4-6 session log (adaptive quadtree, warmup, default-on flip).

@@ -363,8 +363,16 @@ func _finish() -> void:
 		JSON.stringify(summary), csv_path, json_path
 	])
 	get_tree().create_timer(1.0).timeout.connect(func() -> void:
-		get_tree().quit()
+		_quit_cleanly()
 	)
+
+
+func _quit_cleanly() -> void:
+	Log.info("shutdown", "BENCH_QUIT - stress runner complete, skipping manual RS teardown")
+	Engine.set_meta("_quitting", true)
+	if _streaming_manager != null:
+		_streaming_manager.set_process(false)
+	get_tree().quit()
 
 
 func _build_summary() -> Dictionary:

@@ -523,6 +523,15 @@ func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float, batch_budget: int
 	return _prototype_registry.tick_cull_if_needed(cam_pos, max_dist_sq, batch_budget)
 
 
+## Pause registry MultiMesh uploads for a few frames around unload membership
+## churn. This keeps set_buffer away from the same frame as hide/release work.
+func defer_prototype_uploads(frames: int) -> void:
+	if _prototype_registry == null:
+		return
+	if _prototype_registry.has_method("defer_uploads"):
+		_prototype_registry.call("defer_uploads", frames)
+
+
 ## Lazily instantiate the PrototypeRegistry on first registry-routed add.
 ## Returns null if the scenario isn't set yet.
 func _ensure_registry() -> RefCounted:

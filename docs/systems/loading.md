@@ -79,7 +79,7 @@ Everything else — `PlayerController`, `FlyCamera`, NPCs, Area3D monitors, phys
 
 ## Open question
 
-Phase 7 second pass is still open: even with the loading screen hiding the churn, the underlying streaming pipeline still takes ~170s cold-start to reach 55 FPS. This is a UX fix for the symptom; the `inst=20-30 ms/frame` cost of cold-start instantiation needs its own pass (probably widening post-startup `INSTANTIATION_BUDGET_MS`). Tracked in `docs/plans/distant_rendering_2026_04/plan.md`.
+Phase 7 second pass is still open: even with the loading screen hiding the churn, the underlying streaming pipeline still takes ~170s cold-start to reach 55 FPS. This is a UX fix for the symptom; the `inst=20-30 ms/frame` cost of cold-start instantiation needs its own pass (probably widening post-startup `INSTANTIATION_BUDGET_MS`). Tracked in `docs/plans/streaming_stutter_2026_04_25.md` and `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`.
 
 ## History
 

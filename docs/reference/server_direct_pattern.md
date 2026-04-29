@@ -2,7 +2,7 @@
 
 **Status:** Research pass, 2026-04-25. Captures the "use the servers directly and bypass the scene" pattern endorsed by Juan Linietsky (reduz) — the foundational Godot architecture call. Authored on branch `perf/distant-rendering-2026-04-17` after the user pushed back on a recommendation that was ignoring this pattern.
 
-**Scope:** general Godot 4.x pattern. Applies to rendering AND physics; this doc explains both. Specific application to mass static collision is a separate doc — see [`static_collision_streaming.md`](static_collision_streaming.md).
+**Scope:** general Godot 4.x pattern. Applies to rendering AND physics; this doc explains both. Specific application to mass static collision is a separate doc — see `docs/systems/model_loading.md` §"Static collision" + `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`.
 
 ---
 
@@ -110,7 +110,7 @@ For high counts the wrapper cost dominates. [Issue #45360](https://github.com/go
 | Cell-level merged static collision | **Node-based today** (`StaticBody3D` + `ConcavePolygonShape3D` per cell) | [`src/core/world/cell_static_collision.gd`](../../src/core/world/cell_static_collision.gd) |
 | Interactives (doors, containers, NPCs, carryables) | **Node-based** (correct — these need scripts/signals) | various |
 
-The collision side is the one place we're paying Node3D wrapper cost on a high-count axis without using the wrapper for gameplay. Switching it to server-direct is a free simplification — see [`static_collision_streaming.md`](static_collision_streaming.md).
+The collision side is the one place we're paying Node3D wrapper cost on a high-count axis without using the wrapper for gameplay. Switching it to server-direct is a free simplification — see `docs/systems/model_loading.md` §"Static collision" + `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`.
 
 ---
 
@@ -164,11 +164,11 @@ The Godotwind dev console (backtick) has `print_streaming_stats` and equivalents
 
 Going server-direct removes the **node wrapper** cost. It does NOT remove the cost imposed by the underlying server itself:
 
-- `PhysicsServer3D.body_create + body_set_space` still pays Jolt body insertion cost (~100µs/body in older measurements; un-benchmarked on 4.6 native — see [`static_collision_streaming.md`](static_collision_streaming.md))
+- `PhysicsServer3D.body_create + body_set_space` still pays Jolt body insertion cost (~100µs/body in older measurements; un-benchmarked on 4.6 native — see `docs/systems/model_loading.md` §"Static collision" + `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`)
 - `RenderingServer.instance_create` still pays scenario-tree insertion cost (cheap, ~10-50µs per Issue #45360 baseline)
 - Both servers eventually serialize through their respective threads — `RenderingServer` queue is wide and async; `PhysicsServer3D` for Jolt is the single physics thread
 
-Server-direct is **necessary but not always sufficient**. If you have 1800 inserts in one frame, server-direct still gives you 1800 × insert-cost on the main thread. The orthogonal fix is **frame-budgeted spreading** — see [`static_collision_streaming.md`](static_collision_streaming.md) §Budgeted spread for the canonical pattern.
+Server-direct is **necessary but not always sufficient**. If you have 1800 inserts in one frame, server-direct still gives you 1800 × insert-cost on the main thread. The orthogonal fix is **frame-budgeted spreading** — see `docs/systems/model_loading.md` §"Static collision" + `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md` §Budgeted spread for the canonical pattern.
 
 ---
 
@@ -194,5 +194,5 @@ Server-direct is **necessary but not always sufficient**. If you have 1800 inser
 
 ## Related Godotwind docs
 
-- [`static_collision_streaming.md`](static_collision_streaming.md) — applying server-direct + Zylann godot_voxel pattern to per-cell static collision
+- `docs/systems/model_loading.md` §"Static collision" + `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md` — applying server-direct + Zylann godot_voxel pattern to per-cell static collision
 - [`near_streaming_industry_patterns.md`](near_streaming_industry_patterns.md) — cross-engine survey for static-clutter streaming; informed the static-vs-interactive split that already routes ~80% of refs server-direct on the rendering side

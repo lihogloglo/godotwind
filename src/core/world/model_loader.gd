@@ -56,6 +56,15 @@ var _model_cache: Dictionary = {}
 ## LRU tracking: cache_key -> last access frame number
 var _last_access: Dictionary = {}
 
+## External lifetime pins: cache_key -> owner -> refcount.
+## Cell streaming payloads use this to keep resources out of the LRU while
+## their publish/collision queues can still reference them.
+var _cache_pins: Dictionary = {}
+
+## Async promotion should not evict while ResourceLoader callbacks and queued
+## PackedScene handoffs are active. It marks this flag and a quiet frame trims.
+var _eviction_requested: bool = false
+
 ## Cache for loaded LOD resources: model_path (lowercase) -> LODResource
 var _lod_cache: Dictionary = {}
 
@@ -227,7 +236,7 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 				_model_cache[cache_key] = packed_scene
 				_last_access[cache_key] = Engine.get_frames_drawn()
 				_stats["models_from_disk"] += 1
-				_evict_if_over_budget()
+				_queue_eviction_if_over_budget()
 				return _instantiate_from_scene(packed_scene)
 
 	# 3. RUNTIME MODE: Return null for uncached models (no NIF conversion at runtime)
@@ -303,6 +312,8 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 func clear_cache() -> void:
 	_model_cache.clear()
 	_last_access.clear()
+	_cache_pins.clear()
+	_eviction_requested = false
 	_file_exists_cache.clear()
 	_stats["models_loaded"] = 0
 	_stats["models_from_cache"] = 0
@@ -310,9 +321,94 @@ func clear_cache() -> void:
 	_stats["file_exists_cache_hits"] = 0
 
 
+func _make_cache_key(model_path: String, item_id: String = "") -> String:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	if not item_id.is_empty():
+		return normalized + ":" + item_id.to_lower()
+	return normalized
+
+
+func pin_cached_model(model_path: String, item_id: String = "", owner: String = "") -> void:
+	var cache_key := _make_cache_key(model_path, item_id)
+	if cache_key.is_empty():
+		return
+	var pin_owner := owner if not owner.is_empty() else "external"
+	if not _cache_pins.has(cache_key):
+		_cache_pins[cache_key] = {}
+	var owners: Dictionary = _cache_pins[cache_key]
+	owners[pin_owner] = int(owners.get(pin_owner, 0)) + 1
+
+
+func unpin_cached_model(model_path: String, item_id: String = "", owner: String = "") -> void:
+	unpin_cache_key(_make_cache_key(model_path, item_id), owner)
+
+
+func unpin_cache_key(cache_key: String, owner: String = "") -> void:
+	if cache_key.is_empty() or not _cache_pins.has(cache_key):
+		return
+	var pin_owner := owner if not owner.is_empty() else "external"
+	var owners: Dictionary = _cache_pins[cache_key]
+	if not owners.has(pin_owner):
+		return
+	var count := int(owners[pin_owner]) - 1
+	if count > 0:
+		owners[pin_owner] = count
+	else:
+		owners.erase(pin_owner)
+	if owners.is_empty():
+		_cache_pins.erase(cache_key)
+
+
+func unpin_cache_owner(owner: String) -> void:
+	if owner.is_empty():
+		return
+	var empty_keys: Array[String] = []
+	for key: String in _cache_pins:
+		var owners: Dictionary = _cache_pins[key]
+		if owners.has(owner):
+			owners.erase(owner)
+		if owners.is_empty():
+			empty_keys.append(key)
+	for key: String in empty_keys:
+		_cache_pins.erase(key)
+
+
+func _is_cache_key_pinned(cache_key: String) -> bool:
+	if cache_key in _cache_pins and not (_cache_pins[cache_key] as Dictionary).is_empty():
+		return true
+	for disk_path: String in _pending_async_loads:
+		if str(_pending_async_loads[disk_path].cache_key) == cache_key:
+			return true
+	for entry: Dictionary in _pending_instantiate_queue:
+		if str(entry.get("cache_key", "")) == cache_key:
+			return true
+	for entry: Dictionary in _deferred_async_queue:
+		if str(entry.get("cache_key", "")) == cache_key:
+			return true
+	return false
+
+
+func _queue_eviction_if_over_budget() -> void:
+	if _model_cache.size() > MAX_CACHE_SIZE:
+		_eviction_requested = true
+
+
+func _try_drain_requested_eviction() -> void:
+	if not _eviction_requested:
+		return
+	if not _pending_instantiate_queue.is_empty():
+		return
+	if not _pending_async_loads.is_empty():
+		return
+	if not _deferred_async_queue.is_empty():
+		return
+	_evict_if_over_budget()
+
+
 ## Evict least-recently-accessed cache entries if over budget
 ## Evicts down to 80% of MAX_CACHE_SIZE to avoid evicting every frame
 func _evict_if_over_budget() -> void:
+	_eviction_requested = false
 	if _model_cache.size() <= MAX_CACHE_SIZE:
 		return
 
@@ -330,19 +426,36 @@ func _evict_if_over_budget() -> void:
 
 	# Evict oldest until under target
 	var evicted := 0
+	var skipped_pinned := 0
 	for entry: Array in entries:
 		if _model_cache.size() <= target_size:
 			break
 		var key: String = entry[1]
+		if _is_cache_key_pinned(key):
+			skipped_pinned += 1
+			continue
 		_model_cache.erase(key)
 		_last_access.erase(key)
 		evicted += 1
 
+	if _model_cache.size() > MAX_CACHE_SIZE:
+		_eviction_requested = true
 	if evicted > 0:
 		if not _stats.has("lru_evictions"):
 			_stats["lru_evictions"] = 0
 		_stats["lru_evictions"] += evicted
-		Log.debug("streaming", "LRU evicted %d prototypes (cache: %d/%d)" % [evicted, _model_cache.size(), MAX_CACHE_SIZE])
+	if skipped_pinned > 0:
+		if not _stats.has("lru_eviction_pinned_skips"):
+			_stats["lru_eviction_pinned_skips"] = 0
+		_stats["lru_eviction_pinned_skips"] += skipped_pinned
+	if evicted > 0 or skipped_pinned > 0:
+		Log.debug("streaming", "LRU evict pass: evicted=%d pinned=%d cache=%d/%d pins=%d" % [
+			evicted,
+			skipped_pinned,
+			_model_cache.size(),
+			MAX_CACHE_SIZE,
+			_cache_pins.size(),
+		])
 
 
 ## Cached file existence check - avoids repeated disk I/O.
@@ -394,6 +507,9 @@ func get_stats() -> Dictionary:
 		"cached_models": _model_cache.size(),
 		"max_cache_size": MAX_CACHE_SIZE,
 		"lru_evictions": _stats.get("lru_evictions", 0),
+		"lru_eviction_pinned_skips": _stats.get("lru_eviction_pinned_skips", 0),
+		"cache_pinned_keys": _cache_pins.size(),
+		"cache_eviction_requested": _eviction_requested,
 		"file_exists_cache_hits": _stats["file_exists_cache_hits"],
 		"file_exists_cache_size": _file_exists_cache.size(),
 	}
@@ -474,6 +590,7 @@ func put_cached_packed_scene(model_path: String, item_id: String, packed_scene: 
 		cache_key = normalized + ":" + item_id.to_lower()
 	_model_cache[cache_key] = packed_scene
 	_last_access[cache_key] = Engine.get_frames_drawn()
+	_queue_eviction_if_over_budget()
 	return true
 
 
@@ -599,6 +716,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 	# phases so the inst-spike log can attribute the disk= cost to the actual
 	# culprit (Phase A drain / Phase B poll / deferred drain).
 	var t0 := Time.get_ticks_usec()
+	_try_drain_requested_eviction()
 
 	# Phase A: instantiate within budget.
 	var effective_budget := budget_usec if budget_usec > 0 else DRAIN_FALLBACK_BUDGET_USEC
@@ -608,6 +726,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 	var phase_b_budget_left: int = maxi(0, effective_budget - int(t_phase_a - t0))
 
 	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
+		_try_drain_requested_eviction()
 		return completed
 	if _pending_async_loads.is_empty():
 		_drain_deferred_queue(phase_b_budget_left, MAX_DEFERRED_DRAIN_PER_FRAME)
@@ -623,6 +742,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 				_pending_async_loads.size(),
 				_deferred_async_queue.size(),
 			])
+		_try_drain_requested_eviction()
 		return completed
 
 	var to_remove: Array[String] = []
@@ -720,6 +840,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 			_deferred_async_queue.size(),
 		])
 
+	_try_drain_requested_eviction()
 	return completed
 
 
@@ -759,7 +880,13 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		# the engine's resource_loader.cpp ResourceLoaderTaskState::done path —
 		# the sub-resources are registered before the status flips to LOADED).
 		# If a SIGSEGV regression appears, revert this hunk.
-		var packed_scene: PackedScene = entry.packed_scene
+		var packed_scene := ResourceLoader.load(
+			entry.disk_path,
+			"PackedScene",
+			ResourceLoader.CACHE_MODE_REUSE
+		) as PackedScene
+		if packed_scene == null:
+			packed_scene = entry.packed_scene as PackedScene
 
 		# Validate before caching — if can_instantiate() fails, cache null
 		if packed_scene == null or not packed_scene.can_instantiate():
@@ -777,7 +904,7 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		_model_cache[cache_key] = packed_scene
 		_last_access[cache_key] = Engine.get_frames_drawn()
 		_stats["models_from_disk_async"] += 1
-		_evict_if_over_budget()
+		_queue_eviction_if_over_budget()
 
 		# Fix E (streaming_stutter_2026_04_25 plan) — peel callbacks under
 		# the same budget. The previous code processed ALL callbacks of an

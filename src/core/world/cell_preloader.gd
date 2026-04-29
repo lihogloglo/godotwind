@@ -29,6 +29,12 @@ const SC := preload("res://src/core/world/streaming_config.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 
+## Disabled after transition crashes with ResourceLoader subresource path
+## collisions from `_worker_warm_resource`. Keep prediction bookkeeping alive,
+## but do not warm PackedScene resources off-thread until this is replaced by
+## the bounded main-thread/ModelLoader lane used by active streaming.
+const WORKER_RESOURCE_WARM_ENABLED := false
+
 
 ## One cached entry per unique cell grid. Transitions: loading → ready →
 ## activated. Evicted (dropped from _cache) on LRU expiry unless activated.
@@ -265,6 +271,10 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 	entry.last_touched_msec = now_msec
 	_cache[cell] = entry
 	stats["preloads_kicked"] += 1
+	if not WORKER_RESOURCE_WARM_ENABLED:
+		entry.state = "ready"
+		stats["preloads_ready"] += 1
+		return
 
 	# ESMManager is an autoload — main-thread safe. An empty / out-of-bounds
 	# grid returns null; mark as ready immediately (no work to do).

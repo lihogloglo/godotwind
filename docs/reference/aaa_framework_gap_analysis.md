@@ -1,11 +1,8 @@
-# Godotwind — AAA Open-World RPG Framework Plan
+# Godotwind — AAA Open-World RPG Framework Gap Analysis
 
-**Date:** 2026-04-07
-**Authors:** @future + @tools (Claude)
-**Reference targets:** RDR2, The Witcher 3, Cyberpunk 2077, Elden Ring, Skyrim SE
-**Purpose:** Single source of truth for (1) what Godotwind has vs an AAA open-world RPG baseline, and (2) per-gap adopt / build / hybrid recommendations grounded in the framework-first identity and the Terrain3D-keep / Sky3D-ditch precedent.
+**Date:** 2026-04-07. **Reference targets:** RDR2, The Witcher 3, Cyberpunk 2077, Elden Ring, Skyrim SE.
 
-This doc merges and replaces the earlier `AAA_GAP_ANALYSIS.md` and `TOOLING_PLAN.md`.
+> **Currency note (2026-04-29):** the streaming/rendering rows in this doc are partly superseded — HLOD shipped 2026-04-13, Wins 0-5 (off-thread cell-collision, server-direct cell static body, lazy-spawn lights, server-direct OmniLight3D) shipped 2026-04-25. For the current authoritative streaming+rendering AAA gap analysis, use `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`. The non-streaming sections (audio, weather, RPG systems, UI, dialogue) remain accurate as a feature inventory.
 
 ---
 
@@ -482,4 +479,4 @@ Driven by **dependencies** and **what unblocks the most other systems**, not pur
 
 ---
 
-*See also: `docs/STATUS.md`, `docs/archive/plans/masterplan.md`, `docs/systems/dialogue.md`.*
+*See also: `docs/STATUS.md`, `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`, `docs/systems/dialogue.md`.*

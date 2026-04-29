@@ -4,8 +4,10 @@ Systems overview derived from the actual codebase.
 
 ## Language Split
 
-**GDScript (95%)** — Godot API, gameplay, orchestration. C# has Variant marshalling overhead for Godot calls.
-**C# (5%)** — Binary parsing only (20-50x faster). Lives in `src/native/`.
+**C# is the default for new work** — significantly more performant per `.claude/CLAUDE.md` Language & Typing Policy. Use C# for binary parsing, math-heavy systems, data structures, anything per-frame on > 100 items, anything on a worker thread, any new subsystem where performance might matter. Existing C# lives in `src/native/`.
+
+**GDScript** — thin orchestration glue where work is dominated by Godot API calls (UI callbacks, simple gameplay triggers, editor `@tool` shims, one-file utilities). Marshalling cost eats the C# raw-compute win there.
+
 **Bridge:** C# can't call GDExtensions (like Terrain3D). Use `src/core/native_bridge.gd` as interop layer.
 
 ## Autoloads (Global Singletons)

@@ -1,6 +1,6 @@
 # Shaders — OpenMW / VAIO Port
 
-Current state of Godotwind's OpenMW-to-Godot shader port infrastructure. For the architecture + builtin-mapping reference, see [`docs/reference/openmw_shader_porting.md`](../reference/openmw_shader_porting.md). For the step-by-step guide to port a new `.omwfx` shader, see [`docs/reference/openmw_shader_porting_howto.md`](../reference/openmw_shader_porting_howto.md).
+Current state of Godotwind's OpenMW-to-Godot shader port infrastructure. For the architecture, builtin mapping, and step-by-step port guide, see [`docs/reference/openmw_shader_porting.md`](../reference/openmw_shader_porting.md).
 
 ---
 

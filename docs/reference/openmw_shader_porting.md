@@ -1,352 +1,265 @@
-# OpenMW Shader Porting — Architecture Reference
+# OpenMW Shader Porting
 
-> Reference material — OpenMW shader compatibility architecture + builtin-mapping reference. For current status of what's ported, see [`docs/systems/shaders_vaio_port.md`](../systems/shaders_vaio_port.md). For a step-by-step port guide, see [`docs/reference/openmw_shader_porting_howto.md`](openmw_shader_porting_howto.md).
+How to take an OpenMW `.omwfx` post-processing shader and port it to a Godot 4.6 CompositorEffect.
 
-How to port OpenMW community shaders (.omwfx) into Godotwind's Godot 4.6 framework.
-
-**Goal:** Enable Godotwind to use atmospheric rendering techniques from the OpenMW modding community (Rafael's Shader Pack, zesterer's shaders, etc.) with minimal manual porting effort.
+For current status of what's already ported, see [`docs/systems/shaders_vaio_port.md`](../systems/shaders_vaio_port.md).
 
 ---
 
 ## The Problem
 
-OpenMW community shaders like Rafael's VAIO and godrays are written in a custom `.omwfx` format that Godot cannot read. The format mixes:
-- A **DSL** (Domain Specific Language) for render pipeline declaration (`render_target`, `technique`, `passes`)
-- **Raw GLSL** fragments embedded inside pass declarations (vertex + fragment shaders)
-- **OpenMW-specific builtins** (`omw.eyePos`, `omw_GetDepth()`, `omw.weatherID`, etc.)
+OpenMW community shaders (Rafael's VAIO, godrays, DIVE, etc.) use a custom `.omwfx` format mixing:
+- **DSL** (not portable) — `render_target`, `technique`, `passes` declarations
+- **Raw GLSL** (portable) — fragment/vertex shader code inside `fragment {}` and `vertex {}` blocks
+- **OpenMW builtins** (need mapping) — `omw.eyePos`, `omw_GetDepth()`, etc.
 
-We cannot load .omwfx files directly. But the GLSL algorithms inside them are portable if we provide equivalent builtins.
-
----
-
-## Architecture: Three-Layer Approach
-
-### Layer 1: OpenMW Compatibility Constants & Helpers (GLSL)
-
-A set of GLSL constants, structs, and functions that provide the same data OpenMW shaders expect, sourced from Godot's rendering pipeline and our WeatherManager.
-
-Since Godot compute shaders (`#version 450`) don't support `#include`, these are embedded directly in each compute shader that needs them. A reference file `src/core/shaders/omw_reference.glsl` documents the full mapping for porters.
-
-**OpenMW Builtin → Godot Mapping:**
-
-| OpenMW Builtin | Type | Godot Equivalent | Delivery Method |
-|----------------|------|------------------|-----------------|
-| `omw.eyePos` | vec3 | Camera position | Push constant |
-| `omw.eyeVec` | vec3 | Camera forward | Derived from inv_view |
-| `omw.sunPos` | vec3 | Sun direction (normalized) | Push constant from DirectionalLight3D |
-| `omw.sunColor` | vec3 | Sun light color | Push constant from DirectionalLight3D |
-| `omw.sunVis` | float | Sun visibility (0-1) | Push constant (1.0 exterior, 0.0 interior) |
-| `omw.fogColor` | vec4 | Weather fog color | Push constant from WeatherResult |
-| `omw.fogNear` | float | Fog start distance | Push constant (fog_params.z) |
-| `omw.fogFar` | float | Fog end distance | Push constant (fog_params.w) |
-| `omw.far` | float | Camera far plane | From projection matrix |
-| `omw.viewMatrix` | mat4 | View matrix | Push constant (inv computed) |
-| `omw.projectionMatrix` | mat4 | Projection matrix | Push constant (inv computed) |
-| `omw.rcpResolution` | vec2 | 1.0 / viewport size | Derived from resolution push constant |
-| `omw.resolution` | vec2 | Viewport size | Push constant |
-| `omw.simulationTime` | float | Time in seconds | Push constant (Time.get_ticks_msec() / 1000.0) |
-| `omw.gameHour` | float | Game hour (0-24) | Push constant from WeatherManager |
-| `omw.weatherID` | int | Current weather type (0-9) | Push constant from WeatherManager |
-| `omw.nextWeatherID` | int | Next weather type | Push constant from WeatherManager |
-| `omw.weatherTransition` | float | Transition factor (0-1) | Push constant from WeatherManager |
-| `omw.isInterior` | bool | Interior cell flag | Push constant (future) |
-| `omw.isUnderwater` | bool | Camera underwater flag | Push constant (future) |
-| `omw.waterHeight` | float | Water surface Y | Push constant from OceanManager |
-| `omw.skyColor` | vec3 | Sky color | Push constant from WeatherResult |
-
-**OpenMW Functions → Godot Equivalents:**
-
-| OpenMW Function | Godot Equivalent |
-|----------------|------------------|
-| `omw_GetDepth(uv)` | `texture(depth_texture, uv).r` |
-| `omw_GetLinearDepth(uv)` | Reconstruct from depth + inv matrices |
-| `omw_GetWorldPosFromUV(uv)` | `get_world_position(uv, depth)` via inv_projection * inv_view |
-| `omw_GetLastShader(uv)` | `imageLoad(color_image, pixel_coords)` or previous RT texture |
-| `omw_Texture2D(sampler, uv)` | `texture(sampler, uv)` |
-| `omw_Texture3D(sampler, uvw)` | `texture(sampler, uvw)` |
-| `omw_GetPointLightCount()` | Not available in compute — pass as uniform array (future) |
-| `omw_GetPointLightWorldPos(i)` | Not available — pass as uniform array (future) |
-
-**Weather Modifier Tables (from VAIO):**
-
-These are pure data arrays that live as GLSL constants in the shader:
-
-```glsl
-// Fog density multiplier per weather type
-const float FOG_WEATHER_MODIFIERS[10] = float[10](
-    1.00, 1.12, 2.30, 1.15, 1.70, 1.45, 1.25, 0.80, 1.12, 2.50
-);
-
-// Height fog multiplier per weather type
-const float FOG_HEIGHT_MODIFIERS[10] = float[10](
-    1.0, 1.2, 3.5, 1.4, 2.0, 2.5, 1.8, 2.0, 1.5, 3.0
-);
-
-// Sun scatter reduction per weather type
-const float SCATTER_MODIFIERS[10] = float[10](
-    1.0, 0.7, 0.2, 0.3, 0.3, 0.15, 0.1, 0.05, 0.4, 0.1
-);
-
-// Time-of-day fog adjustment
-const float TIME_FOG_MODIFIERS[4] = float[4](
-    1.3, 1.0, 1.2, 1.1  // pre-sunrise, day, sunset, night
-);
-```
-
-Helper to blend between weather types during transitions:
-```glsl
-float get_weather_modifier(in float[10] modifiers) {
-    int current = clamp(int(weather_params.x), 0, 9);
-    int next = clamp(int(weather_params.y), 0, 9);
-    float transition = weather_params.z;
-    return mix(modifiers[current], modifiers[next], transition);
-}
-```
+You cannot load `.omwfx` files directly. Extract the GLSL algorithms, replace OpenMW builtins with Godot equivalents, wrap in a CompositorEffect.
 
 ---
 
-### Layer 2: CompositorEffect Pipeline (GDScript + Compute GLSL)
+## Architecture: Three Layers
 
-Each OpenMW render pass becomes a separate Godot `CompositorEffect` subclass.
+### Layer 1 — Builtin compatibility (GLSL constants + helpers)
 
-**How OpenMW multi-pass works:**
+OpenMW builtins are sourced from Godot's render pipeline + WeatherManager. Godot compute shaders (`#version 450`) don't support `#include`, so the mapping is embedded in each compute shader. `src/core/shaders/omw_reference.glsl` documents the full list.
+
+### Layer 2 — CompositorEffect pipeline (GDScript + Compute GLSL)
+
+Each OpenMW pass becomes one `CompositorEffect` subclass of `PostProcessEffect`. Ordering uses `render_priority` (lower = earlier). Inter-effect texture passing goes through `ShaderManager.set_shared_texture(name, rid)` / `get_shared_texture(name)`.
+
+### Layer 3 — Weather bridge (GDScript)
+
+`WeatherManager._process()` emits `weather_updated` → `ShaderManager._process()` calls `update_weather_cache()` on each effect (main thread) → `_render_callback` reads cached values (render thread). Weather data is never read from autoloads on the render thread.
+
+---
+
+## Step-by-Step Port Guide
+
+### 1. Identify the passes
+
+Open the `.omwfx` file. Find the `technique` block:
 ```
 technique {
-    passes = skyTransmittance, sky, fog, lights, combine
+    passes = stretch, blurRHalf, rays, combine;
 }
-render_target RT_SkyTransmittance { ... }
-render_target RT_Sky { ... }
-// Each pass reads previous RT, writes to its own RT
-// Final "combine" pass composites everything onto the frame
 ```
+Each pass name maps to a `fragment <name>` block containing GLSL.
 
-**How Godot replicates this:**
+### 2. Extract the GLSL
 
-Each pass = one `CompositorEffect` (subclass of our `PostProcessEffect`):
-1. `SkyTransmittanceEffect` — computes atmospheric scattering LUT → writes to internal texture
-2. `SkyEffect` — renders sky using LUT → writes to internal texture
-3. `VolumetricFogEffect` — ray marches fog (reads sky texture) → writes to color buffer
-4. `LightsEffect` — accumulates point light glow → writes to internal texture
-5. `CombineEffect` — composites all layers onto final frame
+Copy contents of each `fragment <name> { ... }` block. Discard:
+- `uniform_*` declarations → become push constants or registered effect parameters
+- `render_target` → become `RenderingDevice.texture_create()` calls
+- `sampler_2d` → become RDUniform sampler bindings
+- `technique` / `passes` → become `render_priority` + multi-dispatch ordering
 
-**Ordering:** CompositorEffects have `render_priority` (integer). Lower = earlier. Set them in sequence:
-```gdscript
-sky_transmittance_effect.render_priority = 5
-sky_effect.render_priority = 6
-fog_effect.render_priority = 10
-lights_effect.render_priority = 11
-combine_effect.render_priority = 15
-```
+### 3. Replace OpenMW builtins
 
-**Texture passing between effects:** Each effect creates an internal `RenderTexture` (via `RenderingDevice.texture_create()`). Subsequent effects receive RIDs of previous textures through shared state or a registry. The `ShaderManager` can mediate this:
+| OpenMW Builtin | Type | Godot Equivalent |
+|---|---|---|
+| `omw.eyePos` | vec3 | Push constant `camera_position.xyz` |
+| `omw.eyeVec` | vec3 | Derived from inv_view |
+| `omw.sunPos` | vec4 | Push constant `sun_direction.xyz` (toward sun) |
+| `omw.sunColor` | vec3 | Push constant — `light_color * light_energy` |
+| `omw.sunVis` | float | Push constant (0-1) |
+| `omw.fogColor` | vec4 | Push constant from WeatherResult |
+| `omw.fogNear` / `omw.fogFar` | float | Push constants |
+| `omw.far` | float | From projection matrix |
+| `omw.viewMatrix` | mat4 | `scene_data.get_cam_transform().affine_inverse()` |
+| `omw.projectionMatrix` | mat4 | `scene_data.get_cam_projection()` |
+| `omw.rcpResolution` / `omw.resolution` | vec2 | `1.0 / resolution` / `render_scene_buffers.get_internal_size()` |
+| `omw.simulationTime` | float | `Time.get_ticks_msec() / 1000.0` |
+| `omw.gameHour` | float | From WeatherManager (0-24) |
+| `omw.weatherID` / `nextWeatherID` / `weatherTransition` | int / float | From WeatherManager |
+| `omw.isInterior` / `isUnderwater` | bool | From cell system / OceanManager (future) |
+| `omw.waterHeight` | float | From OceanManager |
+| `omw.skyColor` | vec3 | From WeatherResult |
 
-```gdscript
-# In shader_manager.gd
-var _shared_textures: Dictionary = {}  # "sky_transmittance" → RID
+| OpenMW Function | Godot Equivalent |
+|---|---|
+| `omw_GetDepth(uv)` | `texture(depth_texture, uv).r` (reversed-Z: sky < 0.001) |
+| `omw_GetLinearDepth(uv)` | Reconstruct: `inv_projection * vec4(uv*2-1, depth, 1)` then linearize |
+| `omw_GetWorldPosFromUV(uv)` | `inv_view * inv_projection * vec4(uv*2-1, depth, 1)` |
+| `omw_GetLastShader(uv)` | `imageLoad(color_image, ivec2(uv * resolution))` |
+| `omw_Texture2D(sampler, uv)` | `texture(sampler, uv)` |
+| `omw_FragColor` | `imageStore(color_image, pixel, color)` |
+| `omw_Position` | N/A (compute uses `gl_GlobalInvocationID`) |
 
-func set_shared_texture(name: String, rid: RID) -> void:
-    _shared_textures[name] = rid
+### 4. Convert coordinates (Z-up → Y-up)
 
-func get_shared_texture(name: String) -> RID:
-    return _shared_textures.get(name, RID())
-```
-
-Each effect writes: `ShaderManager.set_shared_texture("fog_output", my_texture_rid)`
-Next effect reads: `var fog_tex: RID = ShaderManager.get_shared_texture("fog_output")`
-
----
-
-### Layer 3: Weather Bridge (GDScript)
-
-`WeatherManager` data flows into the compute shaders via cached push constants.
-
-**Data flow:**
-```
-WeatherManager._process()          [main thread, every frame]
-  → weather_updated signal
-  → WeatherResult (interpolated colors, fog depth, wind, etc.)
-
-ShaderManager._process()           [main thread, every frame]
-  → calls VolumetricFogEffect.update_weather_cache()
-  → caches weather_id, fog_color, game_hour, etc.
-
-VolumetricFogEffect._render_callback()  [render thread]
-  → reads cached values
-  → packs into push constants
-  → dispatches compute shader
-```
-
-**Thread safety:** Weather data is cached on the main thread via `update_weather_cache()` called from `ShaderManager._process()`. The render thread only reads the cached values. This avoids data races from accessing autoloads on the render thread.
-
-**Push constant budget:** Currently 240 bytes / 256 byte limit. If more fields needed (point lights, interior flags), move weather tables to a Uniform Buffer Object (UBO) instead of push constants.
-
----
-
-## Coordinate System Conversion
-
-**Critical:** OpenMW is Z-up, Godot is Y-up. Every .omwfx shader uses `.z` for height. When porting:
+Most common porting bug.
 
 | Operation | OpenMW (Z-up) | Godot (Y-up) |
-|-----------|---------------|--------------|
+|---|---|---|
 | Height of position | `pos.z` | `pos.y` |
 | Horizontal plane | `pos.xy` | `pos.xz` |
 | Height in noise UV | `ray_pos.zz` | `ray_pos.yy` |
 | Noise 3D height axis | `animated_pos.z *= -1.17` | `animated_pos.y *= -1.17` |
 | Valley check | `distance.z < 0` | `distance.y < 0` |
+| Sun height | `omw.sunPos.z` | `sun_direction.y` |
+| Camera height | `omw.eyePos.z` | `camera_position.y` |
 
----
+### 5. Handle reversed-Z depth
 
-## .omwfx Format Reference
+OpenMW: standard depth (0 = near, 1 = far/sky).
+Godot: reversed-Z (1 = near, 0 = far/sky).
 
-For porters who need to extract GLSL from .omwfx files:
-
+```glsl
+// OpenMW
+float is_sky = step(threshold, omw_GetDepth(uv));   // depth >= 1.0
+// Godot
+float is_sky = step(texture(depth_texture, uv).r, 0.001);
 ```
-// .omwfx structure (NOT GLSL — this is OpenMW's DSL)
 
-// 1. Uniform declarations
-uniform_float uFogDensity { default = 0.0007; min = 0.0; max = 0.01; }
+### 6. Convert fragment → compute
 
-// 2. Render target declarations
-render_target RT_Fog { width_ratio = 1.0; height_ratio = 1.0; }
+```glsl
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(rgba16f, set = 0, binding = 0) uniform image2D color_image;
 
-// 3. Technique declaration
-technique {
-    description = "Volumetric Fog";
-    passes = fog, combine;
-    version = "1.0";
-}
-
-// 4. Fragment shader (THIS is the portable GLSL)
-fragment fog {
-    omw_In vec2 omw_TexCoord;
-    void main() {
-        // ... actual fog algorithm ...
-        omw_FragColor = vec4(result, 1.0);
-    }
-}
-
-// 5. Vertex shader (usually trivial fullscreen quad)
-vertex fog {
-    omw_Out vec2 omw_TexCoord;
-    void main() {
-        omw_Position = vec4(omw_Vertex, 1.0);
-        omw_TexCoord = omw_Vertex.xy * 0.5 + 0.5;
-    }
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(resolution.x) || pixel.y >= int(resolution.y)) return;
+    vec2 uv = (vec2(pixel) + 0.5) / resolution;
+    vec4 color = imageLoad(color_image, pixel);
+    // ...same algorithm...
+    imageStore(color_image, pixel, result);
 }
 ```
 
-**What to extract:** The `fragment` block contents. Replace `omw_` prefixed variables with Godot equivalents per the mapping table above. The `vertex` block is usually a fullscreen quad — in Godot compute shaders, this is replaced by `gl_GlobalInvocationID`.
+### 7. Create the GDScript effect
 
-**What to discard:** The `uniform_*` declarations (become push constants or registered parameters in GDScript), `render_target` declarations (become `RenderingDevice.texture_create()` calls), `technique`/`passes` (become CompositorEffect ordering).
+Extend `PostProcessEffect` (see `src/core/shaders/effects/godrays_effect.gd` for a complete example):
+
+```gdscript
+class_name MyEffect extends PostProcessEffect
+
+const SHADER_PATH := "res://src/core/shaders/compute/my_shader.glsl"
+
+func _init() -> void:
+    super._init()
+    effect_name = "my_effect"
+    display_name = "My Effect"
+    category = "Atmosphere"
+    render_priority = 20
+    effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
+    access_resolved_color = true
+    access_resolved_depth = true
+    needs_depth = true
+
+func on_effect_added() -> void:
+    load_compute_shader(SHADER_PATH)
+
+func _render_callback(effect_type: int, render_data: RenderData) -> void:
+    pass  # build push constants, create uniform set, dispatch
+```
+
+Auto-discovered by `ShaderManager` from `src/core/shaders/effects/`.
+
+### 8. Multi-pass effects
+
+Use multiple `compute_list_begin/end` blocks with implicit barriers between them. Create internal textures with `TEXTURE_USAGE_STORAGE_BIT | TEXTURE_USAGE_SAMPLING_BIT` so they can be both written as images and read as samplers.
 
 ---
 
-## VAIO Shader Components (Rafael's Shader Pack)
+## Push constant budget
 
-Located at: `inspos/RafaelsShaderPack/Shaders/`
+Vulkan guarantees 128 bytes; most desktop GPUs support 256. Godotwind targets D3D12 (Windows) where root constants are flexible — keep under 256 bytes. The godrays effect hit a 128-byte limit in practice and was restructured 192→128 by precomputing weather data on CPU. Volumetric fog uses 240 bytes. If you need more, move lookup tables to a UBO bound on a separate descriptor set.
 
-| File | Lines | What It Does | Priority |
-|------|-------|-------------|----------|
-| `VAIO.omwfx` | ~1700 | Atmospheric scattering + volumetric fog + sky + lights | High (fog already ported) |
-| `godrays.omwfx` | ~400 | Screen-space radial god rays with blue noise dithering | High (next to port) |
-| `DIVE.omwfx` | ~600 | Underwater volumetric effects (caustics, light shafts) | Medium (after ocean integration) |
-| `wetworld.omwfx` | ~300 | Rain puddles, snow accumulation, surface wetness | Medium (after weather system) |
-| `HBAO.omwfx` | ~200 | Horizon-based ambient occlusion | Low (Godot has native SSAO) |
-| `tonemap.omwfx` | ~150 | Tone mapping / color correction | Low (Godot has native) |
-| `SMAA.omwfx` | ~200 | Anti-aliasing | Low (Godot has TAA/FXAA) |
-| `SMB.omwfx` | ~150 | Motion blur | Low |
+---
 
-### VAIO Internal Pass Chain
+## Weather type IDs
 
-```
-Pass 1: skyTransmittance
-  → Computes atmospheric extinction LUT
-  → 32 ray steps from origin to atmosphere top
-  → Per-weather aerosol density tables
+OpenMW and Godotwind share these indices:
 
-Pass 2: sky
-  → Renders sky dome using transmittance LUT
-  → Rayleigh (blue sky) + Mie (sun corona) + aerosol scattering
-  → Stars, moons, celestial objects
+| ID | Weather | Fog Density | Sun Occlusion |
+|---|---|---|---|
+| 0 | Clear | 1.0× | 0% |
+| 1 | Cloudy | 1.12× | 25% |
+| 2 | Foggy | 2.3× | 100% |
+| 3 | Overcast | 1.15× | 75% |
+| 4 | Rain | 1.7× | 100% |
+| 5 | Thunderstorm | 1.45× | 100% |
+| 6 | Ashstorm | 1.25× | 80% |
+| 7 | Blight | 0.8× | 80% |
+| 8 | Snow | 1.12× | 25% |
+| 9 | Blizzard | 2.5× | 85% |
 
-Pass 3: fog
-  → 32-step ray march through fog volume
-  → Dual-layer noise (3D high-freq + 2D low-freq)
-  → Height-based density with weather modifiers
-  → Stamp texturing for organic variation
-  → Distance-based attenuation
-  → Already ported to volumetric_fog.glsl
-
-Pass 4: lights
-  → Accumulates point light glow
-  → Per-light falloff and fog interaction
-  → Interior light multiplier
-
-Pass 5: combine
-  → Composites all passes onto final frame
-  → Fog color blending with Mie scattering
-  → Weather-based exposure adjustment
+VAIO weather modifier tables (fog density, height, scatter, time-of-day) live as `const float ARR[10]` in each shader. Blend between current/next weather:
+```glsl
+float get_weather_modifier(in float[10] m) {
+    int cur = clamp(int(weather_params.x), 0, 9);
+    int nxt = clamp(int(weather_params.y), 0, 9);
+    return mix(m[cur], m[nxt], weather_params.z);
+}
 ```
 
 ---
 
-## Noise Textures
+## Noise textures
 
-VAIO requires these noise textures (available in `inspos/RafaelsShaderPack/Textures/`):
+Available in `inspos/RafaelsShaderPack/Textures/`:
 
 | Texture | Type | Size | Usage |
-|---------|------|------|-------|
-| `noise3d.dds` | Texture3D | 64^3 | Primary fog volume noise |
-| `perlin2d.png` | Texture2D | 256^2 | Low-frequency variation + stamping |
-| `blue_noise.png` | Texture2D | 256^2 | Dithering for god rays (temporal stability) |
+|---|---|---|---|
+| `noise3d.dds` | Texture3D | 64³ | Primary fog volume noise |
+| `perlin2d.png` | Texture2D | 256² | Low-frequency variation |
+| `bluenoise.png` | Texture2D | 256² | Dithering (god rays) |
+| `vaionoise.png` / `vaionoise3dw.dds` | 2D / 3D | — | VAIO-specific |
 
-If textures are missing, `VolumetricFogEffect` generates procedural replacements using `FastNoiseLite` (lower quality but functional).
-
----
-
-## Testing Strategy
-
-1. **Fog test scene** (`tests/visual/test_fog.tscn`) — terrain + weather + all fog types
-2. **Weather test scene** (`tests/visual/test_weather.tscn`) — Sky3D + clouds + weather cycling
-3. **Per-effect visual tests** — each new CompositorEffect should have a minimal test scene
-4. **A/B comparison** — screenshot OpenMW with VAIO enabled, screenshot Godotwind with same weather type, compare
-
-**Key visual checks:**
-- Height fog pools in valleys (fly to sea level)
-- Fog density increases during Foggy/Blizzard weather
-- Ashstorm fog is brown-tinted, Blight is red-tinted
-- God rays visible on clear days (low sun angle, looking toward sun)
-- Thunder flash illuminates fog volume
-- Fog animates (noise movement visible over time)
-- No vertical banding (would indicate wrong coordinate plane in noise sampling)
-- No flashing when turning camera (temporal reprojection artifact)
+Effects fall back to procedural `FastNoiseLite` if textures are missing.
 
 ---
 
-## Known Limitations
+## VAIO Components Inventory (Rafael's Shader Pack)
 
-1. **No generic .omwfx parser** — each shader must be manually ported. The compatibility layer reduces effort but doesn't automate it.
-2. **Point lights not yet available** in compute shaders — requires building a light collection system.
-3. **Push constant budget** — 240/256 bytes used. Additional data requires UBO migration.
-4. **Single viewport only** — VR/stereo rendering loops through views but shares push constants.
-5. **No interior/exterior flag** — `omw.isInterior` not yet wired (needs cell transition system).
-6. **Godot's reversed-Z depth** — OpenMW uses standard depth. The depth comparison `depth < 0.0001` for sky detection accounts for this, but porters must be aware.
+Located at `inspos/RafaelsShaderPack/Shaders/`.
+
+| File | Lines | What | Priority |
+|---|---|---|---|
+| `VAIO.omwfx` | ~1700 | Atmospheric scattering + volumetric fog + sky + lights | High |
+| `godrays.omwfx` | ~400 | Screen-space radial god rays + blue noise | Shipped |
+| `DIVE.omwfx` | ~600 | Underwater volumetrics + caustics | Medium |
+| `wetworld.omwfx` | ~300 | Rain puddles, snow accumulation | Medium |
+| `HBAO.omwfx` | ~200 | Horizon AO | Low (Godot has SSAO) |
+| `tonemap.omwfx` | ~150 | Tone mapping | Low (Godot native) |
+| `SMAA.omwfx` | ~200 | AA | Low (Godot has TAA/FXAA) |
+| `SMB.omwfx` | ~150 | Motion blur | Low |
+
+VAIO internal pass chain: `skyTransmittance → sky → fog → lights → combine`. Passes 1, 2, 3 ported (`sky_transmittance_effect.gd`, `volumetric_fog_effect.gd`); 4 and 5 not ported (point lights, final combine).
+
+---
+
+## Currently ported
+
+| OpenMW Source | Godot Effect | Status |
+|---|---|---|
+| VAIO sky transmittance | `sky_transmittance_effect.gd` | Working — 256×64 Bruneton LUT, weather-aware |
+| VAIO fog pass | `volumetric_fog_effect.gd` | Working — weather-aware, 24-step ray march |
+| godrays.omwfx | `godrays_effect.gd` | Working — 4-pass sky mask + radial blur + rays + combine |
+| VAIO lights pass | — | Not ported (point light glow) |
+| DIVE.omwfx | — | Not ported (underwater) |
 
 ---
 
 ## Files Reference
 
 | File | Purpose |
-|------|---------|
-| `src/core/shaders/compute/volumetric_fog.glsl` | Main fog compute shader (VAIO-derived, weather-aware) |
-| `src/core/shaders/effects/volumetric_fog_effect.gd` | CompositorEffect wrapper (push constants, textures, weather cache) |
-| `src/core/shaders/shader_manager.gd` | Effect registry, enable/disable, transitions, weather cache pump |
-| `src/core/weather/weather_manager.gd` | Autoload — weather state machine, signals |
-| `src/core/weather/weather_types.gd` | WeatherParams, WeatherResult, fog field definitions |
-| `src/core/weather/weather_data.gd` | All 10 weather type definitions with fog parameters |
-| `src/core/weather/weather_interpolator.gd` | Stateless time-of-day + weather blending |
-| `src/core/weather/weather_renderer.gd` | Drives native Godot fog from WeatherResult |
-| `tests/visual/test_fog.tscn` | Fog test scene with terrain |
-| `tests/visual/test_weather.tscn` | Weather test scene (no terrain) |
-| `inspos/RafaelsShaderPack/Shaders/` | Original OpenMW shaders for reference |
-| `inspos/RafaelsShaderPack/Textures/` | Noise textures used by VAIO/godrays |
+|---|---|
+| `src/core/shaders/post_process_effect.gd` | Base class for all effects |
+| `src/core/shaders/shader_manager.gd` | Effect registry, enable/disable, shared textures, weather cache pump |
+| `src/core/shaders/effects/` | Auto-discovered effect scripts |
+| `src/core/shaders/compute/` | Compute shader GLSL files |
+| `src/core/weather/weather_manager.gd` | Weather state autoload |
+| `src/core/weather/weather_types.gd` | WeatherParams, WeatherResult |
+| `inspos/RafaelsShaderPack/` | Original OpenMW shaders + textures |
+
+---
+
+## Known limitations
+
+- No generic `.omwfx` parser — each shader must be manually ported.
+- Point lights not yet available in compute (would require building a light collection system).
+- Single viewport only — VR/stereo rendering loops through views but shares push constants.
+- `omw.isInterior` / `omw.isUnderwater` not yet wired (need cell transition / ocean integration).
+- Reversed-Z depth: porters must update sky-detect comparisons (`depth >= 1.0` → `depth < 0.001`).

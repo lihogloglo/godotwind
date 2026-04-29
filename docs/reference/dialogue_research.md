@@ -1,6 +1,6 @@
 # Dialogue & Text Systems — Industry Research
 
-Research conducted 2026-04-02. Compares Godotwind's approach against industry patterns, existing tools, and Godot 4.6 capabilities. See `TEXT_DIALOGUE_SYSTEM.md` for implementation details.
+Research conducted 2026-04-02. Compares Godotwind's approach against industry patterns, existing tools, and Godot 4.6 capabilities. See `docs/systems/dialogue.md` for implementation details.
 
 ---
 

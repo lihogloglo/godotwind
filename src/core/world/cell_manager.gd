@@ -114,7 +114,7 @@ const DEFAULT_POOL_MAX_SIZE: int = 50
 #
 # Plan: docs/plans/distant_rendering_2026_04/phase_a_offthread_instantiate.md
 # §3.1-§3.4, §4, §7.4-§7.7.
-const PHASE_A_OFFTHREAD_INSTANTIATE: bool = true
+const PHASE_A_OFFTHREAD_INSTANTIATE: bool = false
 
 
 ## Initialize instantiator with current configuration and dependencies
@@ -1236,9 +1236,24 @@ func _enqueue_static_prepare(request_id: int, model_path: String, item_id: Strin
 func _pin_payload_cached_scene(request: AsyncCellRequest, model_path: String, item_id: String) -> void:
 	if request == null or request.payload == null or _model_loader == null:
 		return
+	var key := CellPayloadScript.make_model_key(model_path, item_id)
+	var already_pinned := request.payload.resource_refs_by_key.has(key)
 	var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path, item_id)
 	if packed_scene != null:
 		request.payload.pin_model_resource(model_path, item_id, packed_scene)
+		if not already_pinned and _model_loader.has_method("pin_cached_model"):
+			_model_loader.call("pin_cached_model", model_path, item_id, _cache_pin_owner_for_request(request.request_id))
+
+
+func _cache_pin_owner_for_request(request_id: int) -> String:
+	return "cell_request:%d" % request_id
+
+
+func _unpin_payload_cached_scenes(request: AsyncCellRequest) -> void:
+	if request == null or _model_loader == null:
+		return
+	if _model_loader.has_method("unpin_cache_owner"):
+		_model_loader.call("unpin_cache_owner", _cache_pin_owner_for_request(request.request_id))
 
 
 func _restore_payload_cached_scene(request: AsyncCellRequest, model_path: String, item_id: String) -> void:
@@ -1621,6 +1636,7 @@ func get_async_result(request_id: int) -> Node3D:
 		return null
 
 	# Remove from tracking and return result
+	_unpin_payload_cached_scenes(request)
 	_async_requests.erase(request_id)
 	return request.cell_node
 
@@ -1723,6 +1739,7 @@ func fast_cleanup() -> void:
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 		_drain_collision_worker_for_request(request)
+		_unpin_payload_cached_scenes(request)
 	_discard_all_pending_child_attaches()
 	_static_prepare_queue.clear()
 	_static_prepare_enqueued.clear()
@@ -1783,6 +1800,7 @@ func cancel_async_request(request_id: int) -> void:
 	if request.cell_node:
 		request.cell_node.queue_free()
 
+	_unpin_payload_cached_scenes(request)
 	_async_requests.erase(request_id)
 
 
@@ -1816,6 +1834,7 @@ func finalize_unloaded_cell(request_id: int) -> void:
 	# Same rationale as cancel_async_request: the worker writes into a payload
 	# we're about to drop the last strong ref to.
 	_drain_collision_worker_for_request(request)
+	_unpin_payload_cached_scenes(request)
 	# Filter any remaining queue entries for this request. Unlike the unload-
 	# path filter (which was the bug), this runs AFTER the cell has truly died
 	# and the state-reversal window is closed — no reclaim can use these.
@@ -1998,7 +2017,12 @@ func _discard_static_prepare_for_request(request_id: int) -> void:
 ##   budget_ms: Time budget in milliseconds (may be overridden by burst loading)
 ##   camera_pos: Camera position for priority sorting (optional, uses cached if not provided)
 ##   camera_fwd: Camera forward direction for frustum priority (optional)
-func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3.INF, camera_fwd: Vector3 = Vector3.INF) -> int:
+func process_async_instantiation(
+	budget_ms: float,
+	camera_pos: Vector3 = Vector3.INF,
+	camera_fwd: Vector3 = Vector3.INF,
+	allow_collision_finalize: bool = true,
+) -> int:
 	# Update camera position/forward if provided
 	if camera_pos != Vector3.INF:
 		_camera_position = camera_pos
@@ -2016,15 +2040,16 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var t_pre0 := Time.get_ticks_usec()
 	var start_time := t_pre0
 	var budget_usec_total := int(budget_ms * 1000.0)
-	var collision_dispatch_budget_us: int = mini(
-		int(SC.CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS * 1000.0),
-		budget_usec_total,
-	)
-	_tick_static_collision_build(
-		false,
-		collision_dispatch_budget_us,
-		SC.CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME,
-	)
+	if allow_collision_finalize and not _has_collision_blocking_visual_work():
+		var collision_dispatch_budget_us: int = mini(
+			int(SC.CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS * 1000.0),
+			budget_usec_total,
+		)
+		_tick_static_collision_build(
+			false,
+			collision_dispatch_budget_us,
+			SC.CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME,
+		)
 	var t_pre_collision := Time.get_ticks_usec()
 
 	# Start budget clock BEFORE pre-loop work — collision dispatch, disk loads,
@@ -2105,6 +2130,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	attach_time_us += Time.get_ticks_usec() - attach_start
 
 	if _instantiation_queue.is_empty():
+		if not allow_collision_finalize:
+			return 0
 		_maybe_finalize_static_collision_when_idle(start_time, budget_usec)
 		return 0
 
@@ -2128,6 +2155,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var route_model_load_us := 0
 	var route_static_register_us := 0
 	var route_static_add_us := 0
+	var phase_a_dispatch_us := 0
+	var collision_finalize_us := 0
 	var route_static_count := 0
 	var route_node_count := 0
 	var route_light_count := 0
@@ -2157,7 +2186,9 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	# `complete_worker_instantiate`; in-flight tasks park on `phase_a_deferred`
 	# and get re-queued at loop exit. Plan §3.1, §7.4.
 	if PHASE_A_OFFTHREAD_INSTANTIATE:
+		var dispatch_start_us := Time.get_ticks_usec()
 		_phase_a_dispatch_pass()
+		phase_a_dispatch_us = Time.get_ticks_usec() - dispatch_start_us
 
 	# Phase A — entries whose worker task is still running get parked here
 	# and re-appended to the queue after the loop exits, so they get another
@@ -2414,7 +2445,11 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	CrashBreadcrumb.write("cm::attach_done", "attached=%d pending=%d" % [
 		attached_children, _pending_child_attaches.size()
 	])
-	_maybe_finalize_static_collision_when_idle(start_time, budget_usec)
+	if allow_collision_finalize:
+		collision_finalize_us = _maybe_finalize_static_collision_when_idle(start_time, budget_usec)
+	CrashBreadcrumb.write("cm::inst_tail_done", "queue=%d child=%d cfin=%d" % [
+		_instantiation_queue.size(), _pending_child_attaches.size(), collision_finalize_us
+	])
 
 	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
 	# threshold, dump the pre-loop split so we can tell whether
@@ -2425,7 +2460,7 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
 	if total_inst_us > 16_000:
-		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f class=%.1f/%d disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
+		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f class=%.1f/%d disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d dispatch=%.1f cfin=%.1f loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
 			float(t_pre_collision - t_pre0) / 1000.0,
 			float(t_pre_classify - start_time) / 1000.0,
@@ -2435,6 +2470,8 @@ func process_async_instantiation(budget_ms: float, camera_pos: Vector3 = Vector3
 			float(t_pre_prewarm - t_pre_conv) / 1000.0,
 			float(t_pre_static_prepare - t_pre_prewarm) / 1000.0,
 			static_prepare_count,
+			float(phase_a_dispatch_us) / 1000.0,
+			float(collision_finalize_us) / 1000.0,
 			maxf(0.0, float(t_end_inst - t_pre_static_prepare - attach_time_us)) / 1000.0,
 			float(attach_time_us) / 1000.0,
 			float(route_static_us) / 1000.0,
@@ -3127,7 +3164,7 @@ func _tick_static_collision_build(
 	allow_finalize: bool = true,
 	dispatch_budget_usec: int = -1,
 	max_dispatches: int = -1,
-) -> void:
+) -> int:
 	if SC.DEBUG_DISABLE_CELL_STATIC_COLLISION:
 		for request_id: int in _async_requests:
 			var request: AsyncCellRequest = _async_requests[request_id]
@@ -3136,7 +3173,7 @@ func _tick_static_collision_build(
 			_drain_collision_worker_for_request(request)
 			request.collision_built = true
 			request.collision_dispatched = true
-		return
+		return 0
 
 	# Phase 1: dispatch — for each cell ready and not yet dispatched, classify
 	# on main and fire a worker task. Cheap (O(N_refs) main work, no BVH).
@@ -3197,7 +3234,7 @@ func _tick_static_collision_build(
 		dispatched_this_tick += 1
 
 	if not allow_finalize:
-		return
+		return 0
 
 	# Phase 2: drain — for each cell whose worker finished, finalize on main.
 	# One per frame to bound `set_faces` BVH-build cost (~10-20ms cold).
@@ -3228,7 +3265,7 @@ func _tick_static_collision_build(
 		ready.append(request_id)
 
 	if ready.is_empty():
-		return
+		return 0
 
 	# Sort by camera distance to cell center. Interior cells (no grid in the
 	# exterior sense) end up using Vector2i.ZERO which sorts them based on
@@ -3263,12 +3300,17 @@ func _tick_static_collision_build(
 		# Cell torn down between dispatch and drain — discard worker output.
 		winner.collision_built = true
 		winner.collision_payload = null
-		return
+		return 0
 
 	# Win 2 — server-direct: finalize_body needs World3D for the physics
 	# space registration. Pulled from cell_node which is in the tree by
 	# this point (verified by is_instance_valid above + add-child sequence
 	# during cell construction).
+	if not winner.cell_node.visible:
+		# Unload limbo or visibility reversal in progress. Do not publish a
+		# server-direct body for a cell that is not currently playable.
+		return 0
+
 	var world: World3D = winner.cell_node.get_world_3d()
 	if world == null:
 		# Defensive — would only fire if cell_node was reparented out of a
@@ -3278,7 +3320,7 @@ func _tick_static_collision_build(
 		push_warning("CellStaticCollision: cell %s has no World3D — skipping body register" % str(winner.grid))
 		winner.collision_built = true
 		winner.collision_payload = null
-		return
+		return 0
 
 	CrashBreadcrumb.write("collision_finalize_begin", "%d_%d" % [winner.grid.x, winner.grid.y])
 	var finalize_start_us := Time.get_ticks_usec()
@@ -3316,26 +3358,47 @@ func _tick_static_collision_build(
 		winner.state = CellPayloadScript.State.ACTIVE
 		if winner.payload != null:
 			winner.payload.state = winner.state
+	return finalize_us
 
 
-func _maybe_finalize_static_collision_when_idle(start_time_usec: int, budget_usec: float) -> void:
+func _maybe_finalize_static_collision_when_idle(start_time_usec: int, budget_usec: float) -> int:
 	if SC.DEBUG_DISABLE_CELL_STATIC_COLLISION:
-		return
-	if not _instantiation_queue.is_empty():
-		return
-	if not _pending_child_attaches.is_empty():
-		return
+		return 0
+	if _has_collision_blocking_visual_work():
+		return 0
 	var elapsed_us := float(Time.get_ticks_usec() - start_time_usec)
 	if elapsed_us >= budget_usec:
-		return
+		return 0
 	var remaining_us := budget_usec - elapsed_us
 	if remaining_us < SC.CELL_STATIC_COLLISION_FINALIZE_MIN_REMAINING_MS * 1000.0:
-		return
-	_tick_static_collision_build(
+		return 0
+	return _tick_static_collision_build(
 		true,
 		int(minf(SC.CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS * 1000.0, remaining_us)),
 		SC.CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME,
 	)
+
+
+func _has_collision_blocking_visual_work() -> bool:
+	if not _instantiation_queue.is_empty():
+		return true
+	if not _pending_child_attaches.is_empty():
+		return true
+	if not _static_prepare_queue.is_empty():
+		return true
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request == null:
+			continue
+		if not request.classification_complete:
+			return true
+		if not request.pending_parses.is_empty():
+			return true
+		if not request.pending_disk_loads.is_empty():
+			return true
+		if not request.references_to_process.is_empty():
+			return true
+	return false
 
 
 ## Win 1 + Win 2 — wait on any in-flight collision worker for the request,

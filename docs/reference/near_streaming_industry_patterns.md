@@ -1,7 +1,7 @@
 # NEAR-Tier Streaming — Industry Pattern Survey + Godotwind Recommendation
 
-**Status:** Research pass, 2026-04-20. Updated 2026-04-22 — §7 (streaming granularity, grid vs spatial hierarchy), §8 (production CellPreloader design). Authored by @researcher on branch `perf/distant-rendering-2026-04-17`.
-**Scope:** NEAR tier only (0-150 m). MID / HLOD / FAR are parked per `docs/plans/distant_rendering_2026_04/near_tier_refactor.md` §1.
+**Status:** Research pass, 2026-04-20 (updated 2026-04-22 — §7 streaming granularity, §8 production CellPreloader design). **Recommendation status as of 2026-04-29:** partially shipped — Wins 0-5 (off-thread cell-collision, server-direct cell static body, lazy-spawn lights, server-direct OmniLight3D) landed 2026-04-25. `_apply_fade_in` deleted. `lod_crossfade_multimesh.gdshader` is still referenced from `static_object_renderer.gd` / `prototype_batch.gd` (recommendation half-shipped). `cell_preloader.gd` exists but is not wired into `native_streaming_manager.gd`. Phase A off-thread `PackedScene.instantiate()` was attempted and rolled back (`PHASE_A_OFFTHREAD_INSTANTIATE = false` in `streaming_config.gd`, crashes). For the current authoritative audit see `docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md`. Authored by @researcher on branch `perf/distant-rendering-2026-04-17`.
+**Scope:** NEAR tier only (0-150 m).
 **Trigger:** `ReferenceInstantiator.instantiate_reference` + `CellManager.add_child` on the main thread ceils at ~79 scene instantiates × ~11 ms = ~870 ms wall budgeted across frames, producing visible pop-in and 25 fps dips at cell crosses.
 
 ---
@@ -354,7 +354,7 @@ Files touched or referenced in this research (absolute paths):
 - `D:/Gamedev/Godotwind/godotwind/src/core/world/prototype_registry.gd` — world-scoped MultiMesh batching
 - `D:/Gamedev/Godotwind/godotwind/src/core/world/object_paging.gd` — HLOD runtime merger (not NEAR)
 - `D:/Gamedev/Godotwind/godotwind/src/core/world/distance_utils.gd` — NEAR_END / MID_END constants
-- `D:/Gamedev/Godotwind/godotwind/docs/plans/distant_rendering_2026_04/near_tier_refactor.md` — the active plan this research informs
+- `D:/Gamedev/Godotwind/godotwind/docs/plans/streaming_stutter_2026_04_25.md` + `D:/Gamedev/Godotwind/godotwind/docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md` — the active plan + audit this research informs
 - `D:/Gamedev/Godotwind/godotwind/inspos/openmw/apps/openmw/mwworld/cellpreloader.cpp` — canonical OpenMW preload pipeline
 - `D:/Gamedev/Godotwind/godotwind/inspos/openmw/apps/openmw/mwworld/scene.cpp` — `preloadCells`, `changeCellGrid`, `loadCell`
 - `D:/Gamedev/Godotwind/godotwind/inspos/openmw/apps/openmw/mwrender/objectpaging.cpp` — OpenMW chunk merge (HLOD, not NEAR)

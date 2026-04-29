@@ -9,7 +9,7 @@ What Godotwind actually ships for terrain rendering. For industry-standard techn
 - **Terrain3D v1.0.1 stable** — in-tree at `addons/terrain_3d/`, GDExtension, all platforms.
 - **Multi-region streaming works** — `generic_terrain_streamer.gd` handles priority queue + frustum culling at a 3-region (~4.6 km) view distance.
 - **RTT deformation framework ready** — `src/core/deformation/` ships the Texture2DArray pipeline, shader uniforms, and per-texture rest-height config, but the **stamp rendering pass is NOT wired**: no SubViewport stamper, no foot-contact detection, no decay loop.
-- **Custom build from source was reverted** — the v1.1-dev DLL experiment is archived. Reference material at `docs/reference/terrain3d_build_from_source.md`.
+- **Custom build from source was reverted** — the v1.1-dev DLL experiment is archived. Reference material at `docs/archive/reference/terrain3d_build_from_source.md`.
 - **Alignment saga resolved** — import-position + Z-up + physics-re-enable gotchas are documented in `.claude/CLAUDE.md` gotchas #8, #9, and #10.
 
 ---
@@ -89,15 +89,7 @@ Several factors cap terrain texture quality with vanilla Morrowind data:
 
 ### Texture Streaming
 
-**Not available in Godot.** There is no mipmap-level streaming — once a texture loads, all mip levels are in VRAM. No engine-level virtual texture system exists, and none is on Godot's public roadmap.
-
-**Current workarounds:**
-- Material deduplication (~10,000 -> ~1,000 unique materials)
-- BSAManager LRU cache (256MB cap)
-- Impostor system for distant objects
-- Terrain3D's clipmap handles geometry LOD, but not texture LOD
-
-This remains one of the **biggest scalability constraints** — no central `FUTURE_STEPS` doc anymore; tracked per-system.
+Godot 4.6 has no engine-level virtual texturing or mipmap-level streaming. Once a texture loads, all mip levels sit in VRAM. Workarounds: material deduplication (~10k → ~1k unique materials), BSAManager 256 MB LRU cache, impostors for distant objects. Terrain3D's clipmap handles geometry LOD, not texture LOD.
 
 ---
 

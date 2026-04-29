@@ -204,9 +204,10 @@ const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to 
 ## approach. OpenMW pattern: Node3D creation for 12-20 ms/ref interactives is
 ## skipped until gameplay can plausibly interact — eliminates 70-80% of the
 ## `inst:` overrun during cell-crossing bursts while preserving the invariant
-## "containers appear before you can touch them." Set to 80 m = below NEAR
-## render end (150 m) so interactives always arrive before they enter view.
-const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 80.0
+## "containers appear before you can touch them." Keep this comfortably above
+## actual interaction range but well below NEAR render end; at 80 m traversal
+## spends too many frames instantiating doors/containers the player cannot use.
+const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 35.0
 
 ## Win 4a (NEAR refactor 2026-04-25) — lazy-spawn distance for OmniLight3D refs.
 ##
@@ -217,7 +218,7 @@ const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 80.0
 ## visibly contribute past ~120 m anyway (existing distance_fade_begin = 120m
 ## in `_instantiate_light`).
 ##
-## Threshold tighter than INTERACTIVE_PROXIMITY_THRESHOLD_M (80m) because
+## Threshold wider than INTERACTIVE_PROXIMITY_THRESHOLD_M because
 ## lights cull at shadow distance, not interaction distance. Big lights
 ## (radius ≥ LIGHT_ALWAYS_SPAWN_RADIUS_MW) bypass the gate so braziers /
 ## templar lanterns / sconces always cast shadows even from far away.

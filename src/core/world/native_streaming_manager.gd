@@ -853,7 +853,13 @@ func _process(delta: float) -> void:
 	if prof:
 		prof.begin_section("unload")
 	if not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty():
+		CrashBreadcrumb.write("nsm::unload_tick_begin", "cells=%d hide=%d clean=%d" % [
+			_unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
+		])
 		_process_budgeted_unloading()
+		CrashBreadcrumb.write("nsm::unload_tick_done", "cells=%d hide=%d clean=%d" % [
+			_unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
+		])
 	if prof:
 		prof.end_section("unload")
 	phase_times[0] = float(Time.get_ticks_usec() - phase_start)
@@ -885,10 +891,21 @@ func _process(delta: float) -> void:
 			else:
 				instantiation_budget_ms = SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
 			var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
+			var allow_collision_finalize := _collision_finalize_defer_frames <= 0 \
+				and _unloading_cells.is_empty() \
+				and _pending_rs_hide_cells.is_empty() \
+				and _pending_rs_cleanup_cells.is_empty()
+			if _collision_finalize_defer_frames > 0:
+				_collision_finalize_defer_frames -= 1
 			# Phase 2 stutter diag — bracket the instantiate call into the profiler
 			# so the slow-frame autopsy can attribute spike time. Plan §11.4.
 			if prof: prof.begin_section("instantiate")
-			var instantiated := _cell_manager.process_async_instantiation(instantiation_budget_ms, _camera_position, camera_fwd)
+			var instantiated := _cell_manager.process_async_instantiation(
+				instantiation_budget_ms,
+				_camera_position,
+				camera_fwd,
+				allow_collision_finalize,
+			)
 			if prof: prof.end_section("instantiate")
 			phase_times[2] = float(Time.get_ticks_usec() - phase_start)
 			if instantiated > 0 and debug_enabled:
@@ -1104,7 +1121,7 @@ func _update_loaded_cells() -> void:
 
 	# Lazy-spawn re-queue (statics_no_node3d follow-up 2026-04-19): walk the
 	# proximity-deferred list, re-queue any interactive refs that are now
-	# within INTERACTIVE_PROXIMITY_THRESHOLD_M (80 m) of the camera. Throttled
+	# within INTERACTIVE_PROXIMITY_THRESHOLD_M of the camera. Throttled
 	# internally to ~4 checks/sec.
 	if _cell_manager:
 		_cell_manager.tick_proximity_deferred(_camera_position)
@@ -1245,6 +1262,10 @@ func _unload_cell(grid: Vector2i) -> void:
 	var prof: StreamingProfilerScript = _profiler
 	if prof: prof.begin_section("unload_cell:total")
 	var t0 := Time.get_ticks_usec()
+	_collision_finalize_defer_frames = maxi(
+		_collision_finalize_defer_frames,
+		SC.CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD
+	)
 	# Park any pending async request for this cell in the limbo registry.
 	# Do NOT call cell_manager.cancel_async_request — that filters the queue
 	# and frees the cell_node, which defeats state reversal on reclaim.
@@ -1285,6 +1306,8 @@ func _unload_cell(grid: Vector2i) -> void:
 		_pending_rs_hide_cells.append(grid)
 		_pending_rs_hide_set[grid] = true
 		_pending_rs_cleanup_cells.append(grid)
+		if _static_renderer.has_method("defer_prototype_uploads"):
+			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 
 	# I.6 — evacuate any persistent nodes (held items, etc.) from this
 	# cell BEFORE putting it in the unloading set. Otherwise the
@@ -1423,6 +1446,8 @@ func _process_budgeted_unloading() -> void:
 	# Phase A: Budgeted RS instance HIDING — hide ~200 instances per frame
 	# Replaces the old synchronous hide_cell_instances() that caused 10-32ms spikes
 	if _static_renderer and not _pending_rs_hide_cells.is_empty():
+		if _static_renderer.has_method("defer_prototype_uploads"):
+			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 		var hide_budget := 200  # Max RS calls per frame for hiding
 		var total_hidden := 0
 		var completed_hide: Array[int] = []  # indices to remove (collected, then batch-removed)
@@ -1446,6 +1471,8 @@ func _process_budgeted_unloading() -> void:
 	# Phase B: Deferred RS instance cleanup (free_rid) within remaining budget
 	# Only process cells that have been fully hidden
 	if _static_renderer and not _pending_rs_cleanup_cells.is_empty():
+		if _static_renderer.has_method("defer_prototype_uploads"):
+			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 		var rs_freed := 0
 		while not _pending_rs_cleanup_cells.is_empty():
 			if Time.get_ticks_usec() - start_time >= budget_usec:
@@ -1468,6 +1495,8 @@ var _pending_rs_hide_set: Dictionary[Vector2i, bool] = {}
 
 ## Cells with RS instances that need deferred free_rid() cleanup (after hiding)
 var _pending_rs_cleanup_cells: Array[Vector2i] = []
+
+var _collision_finalize_defer_frames: int = 0
 
 # S.1 refactor (near_tier_refactor.md 2026-04-19): MID↔NEAR promotion / demotion
 # loops deleted. Per-cell tier is the axis of variation; MID re-enable in S.7

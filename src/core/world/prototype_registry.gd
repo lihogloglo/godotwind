@@ -73,6 +73,8 @@ var _cull_active_generation: int = -1
 var _cull_in_progress: bool = false
 var _cull_keys_snapshot: Array = []
 var _cull_cursor: int = 0
+var _cull_deferred_upload_pending: bool = false
+var _upload_barrier_frames: int = 0
 
 ## Last camera position we ticked a cull from. Used with _cull_dist_threshold²
 ## to decide whether movement alone warrants a fresh tick.
@@ -99,6 +101,17 @@ func _init(p_scenario: RID) -> void:
 func _mark_cull_dirty() -> void:
 	_cull_dirty = true
 	_cull_generation += 1
+
+
+func defer_uploads(frames: int) -> void:
+	if frames <= 0:
+		return
+	_upload_barrier_frames = maxi(_upload_barrier_frames, frames)
+	_cull_dirty = true
+	_cull_in_progress = false
+	_cull_keys_snapshot.clear()
+	_cull_cursor = 0
+	_cull_deferred_upload_pending = false
 
 
 #region Batch lookup
@@ -359,6 +372,15 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float, batch_budget: int
 	if not needs_tick:
 		return -1
 
+	if _upload_barrier_frames > 0:
+		_upload_barrier_frames -= 1
+		_cull_dirty = true
+		_cull_in_progress = false
+		_cull_keys_snapshot.clear()
+		_cull_cursor = 0
+		_cull_deferred_upload_pending = false
+		return -1
+
 	## Lazily spin up the C# culler on first real tick. Keep this behind a
 	## config flag: the native-buffer handoff crashed in Godot 4.6 during the
 	## 2026-04-28 smooth-baseline flyby, while the GDScript path keeps the same
@@ -375,14 +397,18 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float, batch_budget: int
 		_cull_in_progress = false
 		_cull_keys_snapshot.clear()
 		_cull_cursor = 0
+		_cull_deferred_upload_pending = false
 		_cull_active_generation = _cull_generation
 		var total_visible_all: int = 0
+		var has_deferred_upload: bool = false
 		for key: int in _batches:
 			var batch_all: RefCounted = _batches[key]
 			if batch_all != null:
 				total_visible_all += batch_all.cull_and_upload(cam_pos, max_dist_sq, _native_culler)
+				if batch_all.has_method("has_deferred_upload") and bool(batch_all.call("has_deferred_upload")):
+					has_deferred_upload = true
 		if _cull_generation == _cull_active_generation:
-			_cull_dirty = false
+			_cull_dirty = has_deferred_upload
 		_last_cull_cam_pos = cam_pos
 		return total_visible_all
 
@@ -390,6 +416,7 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float, batch_budget: int
 		_cull_keys_snapshot = _batches.keys()
 		_cull_cursor = 0
 		_cull_active_generation = _cull_generation
+		_cull_deferred_upload_pending = false
 		_cull_in_progress = true
 
 	var total_visible: int = 0
@@ -403,14 +430,17 @@ func tick_cull_if_needed(cam_pos: Vector3, max_dist_sq: float, batch_budget: int
 		var batch: RefCounted = _batches[key]
 		if batch != null:
 			total_visible += batch.cull_and_upload(cam_pos, max_dist_sq, _native_culler)
+			if batch.has_method("has_deferred_upload") and bool(batch.call("has_deferred_upload")):
+				_cull_deferred_upload_pending = true
 
 	if _cull_cursor >= _cull_keys_snapshot.size():
 		_cull_in_progress = false
 		_cull_keys_snapshot.clear()
 		_cull_cursor = 0
 		if _cull_generation == _cull_active_generation:
-			_cull_dirty = false
+			_cull_dirty = _cull_deferred_upload_pending
 			_last_cull_cam_pos = cam_pos
+		_cull_deferred_upload_pending = false
 	return total_visible
 
 
@@ -421,6 +451,10 @@ func force_cull_next_tick() -> void:
 
 func is_cull_dirty() -> bool:
 	return _cull_dirty
+
+
+func has_upload_barrier() -> bool:
+	return _upload_barrier_frames > 0
 
 #endregion
 
@@ -585,5 +619,8 @@ func cleanup() -> void:
 		(_batches[key] as RefCounted).cleanup()
 	_batches.clear()
 	_instance_slots.clear()
+	_upload_barrier_frames = 0
+	_cull_dirty = true
+	_cull_generation += 1
 
 #endregion

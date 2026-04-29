@@ -6,13 +6,13 @@ Framework-first architecture — Morrowind is one data source, not the architect
 
 ---
 
-## Current state (2026-04-18)
+## Current state
 
 - Phase A (theme + typed Response envelope) + Phase B (interaction framework + in-world demo) shipped 2026-04-06.
-- Phase C.0 (MWDialogueContext split out of generic DialogueContext), C.1 (dead `process_dialogue_result` path deleted), and C.2 (DialogueSession singleton + interactable shrink + DialogueUI topic-click bug fix) shipped 2026-04-07.
-- Phase C.2.5 (PlayerController-owned input routing, deletes the C.2 stopgap cross-imports) — **unblocked, in progress.** The click bug that originally parked it was fixed via the separate I.0 interactivity refactor (BookViewer overlay leak + orphaned `_build_ui` indent in `dialogue_panel.gd`).
-- Main-scene integration (Phase C.3–C.7: spawn singletons under `scenes/Godotwind.tscn`, attach `InteractionRaycaster` to the player camera, `reference_spawned` decorator for NPC/book interactables, journal key binding) is **still pending.** Only `tests/visual/test_interaction.tscn` demonstrates the end-to-end vertical slice.
-- Forensic session log for the C.2 click-bug hunt + C.2.5 sequencing is archived at `docs/archive/sessions/dialogue_phase_c_bughunt_2026_04_07.md`.
+- Phase C.0 / C.1 / C.2 (MWDialogueContext split, dead `process_dialogue_result` deleted, DialogueSession singleton + DialogueUI topic-click fix) shipped 2026-04-07.
+- Phase C.2.5 (PlayerController-owned input routing) shipped 2026-04-09 via the I.0 interactivity refactor.
+- **Main-scene integration shipped 2026-04-09.** `DialogueUI`, `BookViewer`, `JournalPanel` are now spawned as persistent CanvasLayer singletons in `world_explorer.gd::_setup_ui_singletons` (preloaded at lines 67-69, instantiated 988-994). `InteractionRaycaster` is attached to the player camera under `world_explorer._setup_cameras` (see `docs/systems/interaction_system.md` §14).
+- Pending: BNAM result-script interpreter (dialogue can't yet mutate game state), derived disposition formula port, quest display-name extraction (panel still shows raw IDs), two-page book spread, persuasion/service UIs.
 
 ---
 
@@ -40,6 +40,11 @@ src/core/dialogue/morrowind/          MW translation layer (all MW-specific logi
 src/core/interaction/                 Generic interaction framework (Phase B, no MW references)
     interactable.gd                   Base class: get_prompt_text / can_interact / interact
     interaction_raycaster.gd          Camera-mounted raycaster, collision layer 3
+    carry_controller.gd               HL2 velocity-drive carry/throw (see interaction_system.md §6)
+    carryable_registry.gd             Generic carryable type registry
+    carryable_body_factory.gd         StaticBody3D → RigidBody3D swap on spawn
+    inventory_service.gd              Abstract base + StoreResult enum
+    morrowind/                        I.7 adapters: pickup, door, container, activator
 
 src/core/ui/                          Generic UI components
     text_formatter.gd                 Generic HTML markup → BBCode converter with callable hooks
@@ -101,19 +106,6 @@ tests/tools/
 - **JournalPanel**: parchment-style UI with Active/Completed tabs, quest list, journal entries
 - **Toast notifications**: "Your journal has been updated" / "Quest Complete" with fade-out
 - 629 MW quests with correctly ordered journal entries
-
----
-
-## Key Bugs Found & Fixed
-
-| Bug | Impact | Fix |
-|-----|--------|-----|
-| `speaker_sex`/`speaker_rank`/`player_rank` read as unsigned bytes | ALL dialogue filtering broken — gender filter rejected every NPC | `_byte_to_signed()` converts 0xFF → -1 in `dialogue_info_record.gd` |
-| QSTN/QSTF/QSTR subrecords skipped | Quest flags not stored, no journal tracking | Store as `bool` fields on `DialogueInfoRecord` |
-| Books/dialogues not loaded by C# native path | 0 books, 0 dialogues after ESM load | Added `REC_BOOK`, `REC_DIAL`, `REC_INFO` to GDScript supplement pass |
-| NPCs not populated before dialogue test | `ESMManager.npcs` empty (C# loader populates lazily) | Call `ensure_typed_dicts_populated()` before accessing NPC data |
-| New scripts without `.gd.uid` files | `class_name` types not discoverable from command line | Use `preload()` references instead of global class names |
-| `DETECTED` function defaulting to 0 | Player always "hidden" — sneaking greetings shown | Default `detected = true` in DialogueContext (normal conversation state) |
 
 ---
 

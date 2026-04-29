@@ -158,20 +158,20 @@ Several GDScript language improvements would significantly help the codebase:
 
 ---
 
-## How These Blockers Affect the Roadmap
+## Impact Summary
 
-| Blocker | Phases Affected | Impact |
-|---------|----------------|--------|
-| No RT acceleration (until 4.7) | Phase 6 | Low — RT occlusion is optional enhancement |
-| No engine GPU-driven renderer | Phase 2, 6 | Medium — we build our own (significant effort) |
-| No impostor system | Phase 4 | Low — already solved with custom system |
-| Indirect draw immaturity | Phase 2 | Low — MultiMesh fallback works |
-| Occlusion culling bug | Phase 2 | Medium — must implement GPU culling ourselves |
-| No GDScript structs | Phase 2, 3 | Medium — RefCounted overhead for data objects |
-| No GDScript traits | Phase 3, 5 | Low — abstract base classes work, just less elegant |
-| No texture streaming | Phase 2, 4 | **High** — VRAM fills up with many loaded cells, no engine-level fix possible |
-| No bindless textures | Phase 2, 4 | **High** — limits draw call reduction for 100k+ uniquely-textured objects |
-| No threaded instantiation | Phase 2 | Medium — streaming latency, must frame-budget all instantiation |
-| No mesh simplification | Phase 4 | Low — prebaking works, just adds offline step |
+| Blocker | Impact |
+|---|---|
+| No RT acceleration (until 4.7) | Low — RT occlusion is optional enhancement |
+| No engine GPU-driven renderer | Medium — we build our own (significant effort) |
+| No impostor system | Low — already solved with custom system |
+| Indirect draw immaturity | Low — MultiMesh fallback works |
+| Occlusion culling bug | Medium — must implement GPU culling ourselves |
+| No GDScript structs | Medium — RefCounted overhead for data objects |
+| No GDScript traits | Low — abstract base classes work, less elegant |
+| No texture streaming | **High** — VRAM fills up with many loaded cells, no engine-level fix |
+| No bindless textures | **High** — limits draw call reduction for 100k+ uniquely-textured objects |
+| No threaded instantiation | Medium — streaming latency, must frame-budget all instantiation |
+| No mesh simplification | Low — prebaking works, adds offline step |
 
 **Bottom line:** Nothing in Godot's pipeline is blocking our next steps. The biggest effort is building our own GPU-driven rendering system, which we'd need regardless given the project's scale (100k+ objects). Godot 4.7's RT features will be a nice upgrade when they arrive.

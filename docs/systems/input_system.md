@@ -80,7 +80,7 @@ K.0 deliberately does NOT add a gamepad binding to `interact`. Adding one requir
 
 ### 3.3 The `_ensure_input_actions` runtime safety net
 
-`PlayerController._ensure_input_actions` (`src/core/player/player_controller.gd:381`) is a runtime block that adds `move_forward / move_backward / move_left / move_right / sprint / walk / jump / crouch / toggle_camera / interact` if they are missing from `InputMap`.
+`PlayerController._ensure_input_actions` (`src/core/player/player_controller.gd:421`) is a runtime block that adds `move_forward / move_backward / move_left / move_right / sprint / walk / jump / crouch / toggle_camera / interact` if they are missing from `InputMap`.
 
 After K.0 these actions live in `project.godot [input]`, so the runtime block is a redundant safety net. It is **left in place** because:
 

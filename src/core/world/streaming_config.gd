@@ -141,7 +141,8 @@ const STARTUP_CELL_REQUEST_CLASSIFY_MAX_REFS := 128
 const CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS := 0.5
 const CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME := 1
 const CELL_STATIC_COLLISION_FINALIZE_MIN_REMAINING_MS := 2.0
-const CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME := 8000
+const CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME := 1000
+const CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD := 30
 
 ## Main-thread static prototype prepare budget. This lane registers renderer
 ## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs
@@ -188,6 +189,12 @@ const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
 ## stale packed buffers visible during camera movement and look like severe
 ## flicker/holes/wrong pop-in.
 const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 0
+
+## Godot 4.6 has proven sensitive to replacing a world-scoped MultiMesh buffer
+## in the same frame as unload-driven slot hide/release churn. While any
+## static renderer unload queue is active, pause PrototypeRegistry uploads; once
+## the unload queues go quiet, let this many frames pass before the next upload.
+const STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD: int = 4
 
 ## Native C# packing kernel for world-scoped static MultiMesh culling.
 ##

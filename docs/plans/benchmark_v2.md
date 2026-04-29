@@ -3,7 +3,7 @@
 **Status:** draft
 **Date:** 2026-04-14
 **Author:** @docs (reviewer)
-**Supersedes:** `docs/archive/plans/benchmark_v1_plan.md`
+**Supersedes:** the original v1 benchmark plan (deleted 2026-04-29 doc cleanup)
 
 ---
 

@@ -47,6 +47,11 @@ const PACKED_STRIDE: int = TRANSFORM_STRIDE + CUSTOM_DATA_STRIDE  # 16
 ## Default grow factor for capacity.
 const GROW_FACTOR: int = 2
 
+## After slot releases, wait a couple cull ticks before replacing the
+## MultiMesh buffer. Godot 4.6 has crashed in set_buffer immediately after
+## unload-driven membership churn; this separates release/free work from upload.
+const UPLOAD_DEFER_TICKS_AFTER_SLOT_RELEASE: int = 2
+
 ## Phase 3 fade shader — same spawn-time/fade-duration formula as Phase 2's
 ## lod_crossfade.gdshader, rewritten to read per-slot timing from
 ## INSTANCE_CUSTOM (see lod_crossfade_multimesh.gdshader comment header).
@@ -131,6 +136,10 @@ var _shadow_on: bool = true
 ## hide the RS instance instead of writing MultiMesh.visible_instance_count=0;
 ## the zero-visible setter has crashed during teleport/mass-unload on Godot 4.6.
 var _rs_visible: bool = true
+
+var _upload_defer_ticks: int = 0
+var _upload_deferred_last_tick: bool = false
+var _last_visible_count: int = 0
 
 #endregion
 
@@ -266,6 +275,7 @@ func release_slot(slot: int) -> void:
 	slot_live[slot] = 0
 	slot_count_live -= 1
 	slot_freelist.append(slot)
+	_upload_defer_ticks = maxi(_upload_defer_ticks, UPLOAD_DEFER_TICKS_AFTER_SLOT_RELEASE)
 
 
 ## Write a world transform into a slot's storage. NOT pushed to the GPU
@@ -371,12 +381,18 @@ func _resize_capacity_internal(new_capacity: int) -> void:
 ## NativeBridge benchmark note. When null, falls back to the GDScript loop
 ## below.
 func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounted = null) -> int:
+	_upload_deferred_last_tick = false
 	if multimesh == null or not multimesh_rid.is_valid():
 		return 0
 
 	if slot_count_live == 0:
 		_set_rs_visible(false)
+		_upload_defer_ticks = 0
+		_last_visible_count = 0
 		return 0
+
+	if _consume_deferred_upload_tick():
+		return _last_visible_count
 
 	if native_culler != null:
 		return _cull_native(cam_pos, max_dist_sq, native_culler)
@@ -423,15 +439,17 @@ func cull_and_upload(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCou
 	if visible == 0:
 		_set_rs_visible(false)
 		_update_shadow_state(nearest_dist_sq)
+		_last_visible_count = 0
 		return 0
 
 	_ensure_multimesh_capacity()
-	_set_rs_visible(false)
-	multimesh.visible_instance_count = 0
+	if not _rs_visible:
+		multimesh.visible_instance_count = 0
 	multimesh.set_buffer(_cull_buffer)
 	multimesh.visible_instance_count = visible
 	_set_rs_visible(true)
 	_update_shadow_state(nearest_dist_sq)
+	_last_visible_count = visible
 	return visible
 
 
@@ -475,15 +493,29 @@ func _cull_native(cam_pos: Vector3, max_dist_sq: float, native_culler: RefCounte
 	if visible <= 0:
 		_set_rs_visible(false)
 		_update_shadow_state(nearest_dist_sq)
+		_last_visible_count = 0
 		return 0
 	_ensure_multimesh_capacity()
-	_set_rs_visible(false)
-	multimesh.visible_instance_count = 0
+	if not _rs_visible:
+		multimesh.visible_instance_count = 0
 	multimesh.set_buffer(buffer)
 	multimesh.visible_instance_count = visible
 	_set_rs_visible(true)
 	_update_shadow_state(nearest_dist_sq)
+	_last_visible_count = visible
 	return visible
+
+
+func has_deferred_upload() -> bool:
+	return _upload_defer_ticks > 0 or _upload_deferred_last_tick
+
+
+func _consume_deferred_upload_tick() -> bool:
+	if _upload_defer_ticks <= 0:
+		return false
+	_upload_defer_ticks -= 1
+	_upload_deferred_last_tick = true
+	return true
 
 
 func _ensure_multimesh_capacity() -> void:
@@ -573,5 +605,8 @@ func cleanup() -> void:
 	_shadow_cutoff_hyst_sq = 0.0
 	_shadow_on = true
 	_rs_visible = true
+	_upload_defer_ticks = 0
+	_upload_deferred_last_tick = false
+	_last_visible_count = 0
 
 #endregion

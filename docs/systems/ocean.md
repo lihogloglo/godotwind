@@ -54,7 +54,7 @@ what is actually active in code.
      `mat.set_shader_parameter(&"sea_level", sea_level)`.
 - **Custom in-shader SSR trace** — ported verbatim from
   `inspos/GodotSSRWater-main/shaders/water.gdshader`. Helpers all prefixed
-  `ssr_` and live in `ocean_fft.gdshader`: `ssr_in_screen`, `ssr_view_to_uv`,
+  `ssr_` and live in `ocean_fft_common.gdshaderinc` (included by `ocean_fft.gdshader`): `ssr_in_screen`, `ssr_view_to_uv`,
   `ssr_uv_to_view`, `ssr_edge_alpha`, `ssr_trace`. Uniforms in
   `group_uniforms ssr`: `ssr_max_steps=24`, `ssr_resolution=1.5`,
   `ssr_max_travel=30.0`, `ssr_max_diff=4.0`, `ssr_mix_strength=0.7`,
