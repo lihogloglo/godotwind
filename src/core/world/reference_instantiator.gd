@@ -207,7 +207,7 @@ const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to 
 ## "containers appear before you can touch them." Keep this comfortably above
 ## actual interaction range but well below NEAR render end; at 80 m traversal
 ## spends too many frames instantiating doors/containers the player cannot use.
-const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 35.0
+const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 25.0
 
 ## Win 4a (NEAR refactor 2026-04-25) — lazy-spawn distance for OmniLight3D refs.
 ##

@@ -30,9 +30,9 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 
 ## Disabled after transition crashes with ResourceLoader subresource path
-## collisions from `_worker_warm_resource`. Keep prediction bookkeeping alive,
-## but do not warm PackedScene resources off-thread until this is replaced by
-## the bounded main-thread/ModelLoader lane used by active streaming.
+## collisions from `_worker_warm_resource`. Prediction now warms through the
+## ModelLoader async lane: load_threaded_request does background IO, while
+## load_threaded_get/cache promotion stays in ModelLoader's main-thread budget.
 const WORKER_RESOURCE_WARM_ENABLED := false
 
 
@@ -58,6 +58,9 @@ class PreloadEntry:
 	var cancelled: bool = false
 	## Debug / stat: model paths touched by this preload. Not used for logic.
 	var model_paths: Array[String] = []
+	## Model paths handed to ModelLoader.request_model_async without callback
+	## instantiation. Ready once ModelLoader has cached every listed path.
+	var pending_model_paths: Array[String] = []
 
 
 var _cache: Dictionary = {}  # Vector2i -> PreloadEntry
@@ -271,11 +274,6 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 	entry.last_touched_msec = now_msec
 	_cache[cell] = entry
 	stats["preloads_kicked"] += 1
-	if not WORKER_RESOURCE_WARM_ENABLED:
-		entry.state = "ready"
-		stats["preloads_ready"] += 1
-		return
-
 	# ESMManager is an autoload — main-thread safe. An empty / out-of-bounds
 	# grid returns null; mark as ready immediately (no work to do).
 	var cell_record: Variant = null
@@ -295,12 +293,12 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 	# Speculative prereg duplicated that work on every cell the camera might
 	# enter. Deleted.
 
-	# Warm ResourceLoader cache for every unique model_path in the cell — one
-	# worker task per unique disk_path. Main-thread cost: one ESM lookup per
-	# ref (bounded, ~50–150/cell). Worker cost: ResourceLoader.load (thread-
-	# safe per research §2.1).
+	# Warm ResourceLoader cache for every unique model_path in the cell through
+	# ModelLoader's bounded async lane. No Node3D instantiation is requested.
 	var model_loader: Object = _model_loader_ref.get_ref() if _model_loader_ref != null else null
-	if model_loader == null or not model_loader.has_method("resolve_disk_path"):
+	if model_loader == null or not model_loader.has_method("request_model_async"):
+		entry.state = "ready"
+		stats["preloads_ready"] += 1
 		return
 
 	var seen: Dictionary = {}  # normalized_path -> true
@@ -318,25 +316,15 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 		seen[key] = true
 		entry.model_paths.append(mp)
 
-		var disk_path: String = model_loader.call("resolve_disk_path", mp)
-		if disk_path.is_empty():
-			continue
-
-		# LOW priority — we're ahead of the instantiation queue. Don't starve
-		# Phase A/E/F tasks racing to feed the actual load.
-		# Bind `entry` so workers can check `entry.cancelled` and self-bail
-		# when main thread evicts. The bind also keeps entry RefCount > 0
-		# until every worker exits, guaranteeing cancelled-flag validity
-		# without any explicit wait. Plan §12.6 / Fix C.1.
-		var task_id: int = WorkerThreadPool.add_task(
-			_worker_warm_resource.bind(disk_path, entry),
-			false,  # high_priority = false
-			"cell_preloader:warm",
-		)
-		entry.task_ids.append(task_id)
+		var queued: bool = bool(model_loader.call("request_model_async", mp, "", Callable(), false))
+		if queued:
+			entry.pending_model_paths.append(mp)
 
 	if _debug_enabled:
-		print("[CellPreloader] preload kick cell=", cell, " tasks=", entry.task_ids.size(), " paths=", entry.model_paths.size())
+		print("[CellPreloader] preload kick cell=", cell, " pending=", entry.pending_model_paths.size(), " paths=", entry.model_paths.size())
+	if entry.pending_model_paths.is_empty():
+		entry.state = "ready"
+		stats["preloads_ready"] += 1
 
 
 ## Worker body — off-thread PackedScene load. ResourceLoader.load is
@@ -361,20 +349,28 @@ static func _worker_warm_resource(disk_path: String, entry: PreloadEntry) -> voi
 
 ## Promote LOADING → READY when all worker tasks are complete.
 func _poll_completions() -> void:
+	var model_loader: Object = _model_loader_ref.get_ref() if _model_loader_ref != null else null
 	for cell: Vector2i in _cache:
 		var entry: PreloadEntry = _cache[cell]
 		if entry.state != "loading":
 			continue
 		var all_done: bool = true
-		for tid: int in entry.task_ids:
-			if not WorkerThreadPool.is_task_completed(tid):
+		if model_loader != null and model_loader.has_method("has_model"):
+			for mp: String in entry.pending_model_paths:
+				if not bool(model_loader.call("has_model", mp, "")):
+					all_done = false
+					break
+		if WORKER_RESOURCE_WARM_ENABLED:
+			for tid: int in entry.task_ids:
+				if WorkerThreadPool.is_task_completed(tid):
+					continue
 				all_done = false
 				break
 		if all_done:
 			entry.state = "ready"
 			stats["preloads_ready"] += 1
 			if _debug_enabled:
-				print("[CellPreloader] cell=", cell, " READY (tasks=", entry.task_ids.size(), ")")
+				print("[CellPreloader] cell=", cell, " READY (pending=", entry.pending_model_paths.size(), " tasks=", entry.task_ids.size(), ")")
 			# Phase 2 stutter diag — pipeline compile delta over the preload
 			# window. If MESH/SURFACE > 0 here → ResourceLoader.load triggered
 			# engine pre-compile (good, we're done). If 0 here BUT non-zero on

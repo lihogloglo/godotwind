@@ -832,6 +832,7 @@ var _proximity_deferred: Array[InstantiationEntry] = []
 ## Enforce retry budget so we don't re-queue the entire deferred list every frame.
 var _proximity_last_tick_msec: int = 0
 const PROXIMITY_TICK_INTERVAL_MSEC: int = 250
+const PROXIMITY_REQUEUE_MAX_PER_TICK: int = 4
 
 ## Queue for pending NIF conversions (deferred to avoid main thread stall)
 ## Each entry: {parse_result: NIFParseResult, model_path: String, request_id: int, item_id: String}
@@ -1678,7 +1679,7 @@ func tick_proximity_deferred(camera_pos: Vector3) -> void:
 			dropped += 1
 			# `pending_instantiations` gets resolved at cell-fail finalize.
 			continue
-		if entry.position.distance_squared_to(camera_pos) <= threshold_sq:
+		if entry.position.distance_squared_to(camera_pos) <= threshold_sq and requeued < PROXIMITY_REQUEUE_MAX_PER_TICK:
 			_instantiation_queue.push_back(entry)
 			requeued += 1
 		else:

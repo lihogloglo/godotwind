@@ -184,11 +184,10 @@ const TEXTURE_REBUILD_DELAY_MS := 300.0
 const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
 
 ## Maximum PrototypeRegistry batches to cull/upload per frame after static
-## renderer churn. 0 means full pass. Keep full-pass correctness while the
-## world-scoped MultiMesh renderer is being stabilized; partial culls leave
-## stale packed buffers visible during camera movement and look like severe
-## flicker/holes/wrong pop-in.
-const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 0
+## renderer churn. 0 means full pass. During NEAR stabilization, keep this
+## bounded so one unload/add dirty sweep cannot spend 4-15 ms in
+## MultiMesh.set_buffer work on the same frame as cell transition work.
+const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 12
 
 ## Godot 4.6 has proven sensitive to replacing a world-scoped MultiMesh buffer
 ## in the same frame as unload-driven slot hide/release churn. While any
