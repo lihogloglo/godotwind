@@ -1065,6 +1065,9 @@ var _static_prepare_failed: Dictionary[String, bool] = {}
 ## bulk call_deferred("add_child") bursts with visible, frame-budgeted work.
 ## Each entry: {request_id: int, parent: Node3D, child: Node3D}
 var _pending_child_attaches: Array[Dictionary] = []
+const CHILD_ATTACH_DROP := 0
+const CHILD_ATTACH_READY := 1
+const CHILD_ATTACH_PAUSED := 2
 
 ## Per-frame instantiation timing buckets, keyed by ESM record type. Reset at
 ## the top of every `process_async_instantiation` call, accumulated as each
@@ -1285,6 +1288,12 @@ func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
 		if entry.request_id not in _async_requests:
 			continue
 		var request: AsyncCellRequest = _async_requests[entry.request_id]
+		if not is_instance_valid(request.cell_node):
+			continue
+		if _is_request_publish_paused(request):
+			_static_prepare_queue.append(entry)
+			_static_prepare_enqueued[entry.key] = true
+			continue
 		var has_registered_type := bool(_static_renderer.call("has_type", entry.type_name))
 
 		# Never sync-load in the prepare lane. Wait until the async disk path
@@ -1314,12 +1323,12 @@ func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
 
 		var batch_us := 0
 		var batch_count := 0
-		var reserve_count: int = maxi(entry.expected_count, _sum_static_expected_count_for_type(entry.type_name))
-		if reserve_count > 0 and _static_renderer.has_method("reserve_batches_for_type"):
-			var batch_start := Time.get_ticks_usec()
-			batch_count = int(_static_renderer.call("reserve_batches_for_type", entry.type_name, reserve_count))
-			batch_us = Time.get_ticks_usec() - batch_start
-		elif SC.STATIC_PREPARE_CREATE_BATCHES and _static_renderer.has_method("prepare_batches_for_type"):
+		# Keep this lane to main-thread type registration only. Pre-reserving
+		# MultiMesh/PrototypeBatch buckets during boot produced 300-400ms
+		# RenderingServer stalls and was the last suspicious operation before
+		# interactive load-time native crashes. Actual add_instance can still
+		# allocate batches incrementally on the normal publish path.
+		if SC.STATIC_PREPARE_CREATE_BATCHES and _static_renderer.has_method("prepare_batches_for_type"):
 			var batch_start := Time.get_ticks_usec()
 			batch_count = int(_static_renderer.call("prepare_batches_for_type", entry.type_name))
 			batch_us = Time.get_ticks_usec() - batch_start
@@ -1805,6 +1814,28 @@ func cancel_async_request(request_id: int) -> void:
 	_async_requests.erase(request_id)
 
 
+## Pause scene-tree publishing for a request whose cell has entered unload
+## limbo. Queue entries and detached children are preserved so state-reversal
+## reclaim can resume without rebuilding the cell from scratch.
+func pause_request_publish(request_id: int) -> void:
+	if request_id not in _async_requests:
+		return
+	var request: AsyncCellRequest = _async_requests[request_id]
+	request.state = CellPayloadScript.State.UNLOADING
+	if request.payload != null:
+		request.payload.state = request.state
+
+
+## Resume scene-tree publishing after unload-limbo state reversal.
+func resume_request_publish(request_id: int) -> void:
+	if request_id not in _async_requests:
+		return
+	var request: AsyncCellRequest = _async_requests[request_id]
+	request.state = CellPayloadScript.State.VISUAL_READY if request.completed else CellPayloadScript.State.VISUAL_PUBLISHING
+	if request.payload != null:
+		request.payload.state = request.state
+
+
 ## Finalize an unloaded cell — SOFT cleanup after state-reversal window closes.
 ##
 ## Call when a cell's unload-container entry has fully drained to empty and the
@@ -1949,6 +1980,33 @@ func _queue_child_attach(request_id: int, parent: Node3D, child: Node3D) -> void
 	})
 
 
+func _is_request_publish_paused(request: AsyncCellRequest) -> bool:
+	if request == null:
+		return true
+	if request.state == CellPayloadScript.State.UNLOADING:
+		return true
+	if not is_instance_valid(request.cell_node):
+		return false
+	if request.cell_node.is_queued_for_deletion():
+		return false
+	return not request.cell_node.visible
+
+
+func _get_child_attach_state(request_id: int, parent: Node3D) -> int:
+	if request_id not in _async_requests:
+		return CHILD_ATTACH_DROP
+	var request: AsyncCellRequest = _async_requests[request_id]
+	if not is_instance_valid(parent) or not is_instance_valid(request.cell_node):
+		return CHILD_ATTACH_DROP
+	if parent != request.cell_node:
+		return CHILD_ATTACH_DROP
+	if request.cell_node.is_queued_for_deletion():
+		return CHILD_ATTACH_DROP
+	if request.state == CellPayloadScript.State.UNLOADING or not request.cell_node.visible:
+		return CHILD_ATTACH_PAUSED
+	return CHILD_ATTACH_READY
+
+
 ## Attach queued children within a small count/time budget. Invalid parents
 ## mean the owning cell died before publish; free the detached child instead.
 func _drain_pending_child_attaches(max_count: int, budget_usec: float) -> int:
@@ -1958,18 +2016,35 @@ func _drain_pending_child_attaches(max_count: int, budget_usec: float) -> int:
 	var start_usec := Time.get_ticks_usec()
 	var processed := 0
 	var attached := 0
+	var blocked := 0
+	var dropped := 0
+	var blocked_entries: Array[Dictionary] = []
 	while not _pending_child_attaches.is_empty() and processed < max_count:
 		if float(Time.get_ticks_usec() - start_usec) >= budget_usec:
 			break
 		var entry: Dictionary = _pending_child_attaches.pop_back()
 		processed += 1
+		var request_id := int(entry.get("request_id", -1))
 		var parent: Node3D = entry.get("parent") as Node3D
 		var child: Node3D = entry.get("child") as Node3D
-		if is_instance_valid(parent) and is_instance_valid(child):
+		if not is_instance_valid(child):
+			continue
+		var attach_state := _get_child_attach_state(request_id, parent)
+		if attach_state == CHILD_ATTACH_READY:
 			parent.add_child(child)
 			attached += 1
-		elif is_instance_valid(child):
+		elif attach_state == CHILD_ATTACH_PAUSED:
+			blocked_entries.append(entry)
+			blocked += 1
+		else:
 			child.queue_free()
+			dropped += 1
+	for i in range(blocked_entries.size() - 1, -1, -1):
+		_pending_child_attaches.push_front(blocked_entries[i])
+	if blocked > 0 or dropped > 0:
+		CrashBreadcrumb.write("cm::attach_guard", "blocked=%d dropped=%d pending=%d" % [
+			blocked, dropped, _pending_child_attaches.size()
+		])
 	return attached
 
 
@@ -2249,6 +2324,10 @@ func process_async_instantiation(
 				request.completed = true
 				request.failed = true
 				request.error_message = "Cell node freed during instantiation"
+			continue
+		if _is_request_publish_paused(request):
+			phase_a_deferred.append(entry)
+			route_deferred_count += 1
 			continue
 
 		if _static_entry_waiting_for_prepare(entry):

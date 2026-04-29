@@ -61,6 +61,11 @@ var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
 ## INSTANCE_CUSTOM.y so it could be tuned per-instance in the future; today
 ## every slot uses this single value.
 const REGISTRY_FADE_DURATION_S: float = 0.3
+## Safety gate for the world-scoped PrototypeRegistry/MultiMesh path. Godot 4.6
+## native crashes are still occurring during first-load static publish in this
+## path. While NEAR stability is the priority, statics use the existing
+## per-submesh RenderingServer instance fallback instead.
+const USE_PROTOTYPE_REGISTRY: bool = false
 
 
 ## Next instance ID
@@ -514,6 +519,8 @@ func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
 ## Driver: native_streaming_manager._process. Passes current camera position
 ## and the active max-visible-distance squared (visibility_range_end²).
 func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float, batch_budget: int = 0) -> int:
+	if not USE_PROTOTYPE_REGISTRY:
+		return 0
 	if _prototype_registry == null:
 		return 0
 	# When invisible: only run if dirty (flushes hide_instance zero-scale transforms to GPU).
@@ -597,6 +604,8 @@ func warmup_static_batch_pipeline(initial_capacity: int = 1) -> Dictionary:
 ## MultiMesh resources and resize slot storage, but it never uploads a render
 ## buffer. The regular cull lane owns the later MultiMesh.set_buffer() call.
 func reserve_batches_for_type(type_name: String, expected_count: int) -> int:
+	if not USE_PROTOTYPE_REGISTRY:
+		return 0
 	if not _scenario.is_valid():
 		return 0
 
@@ -743,7 +752,7 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	# register_mesh_type direct path (no sub_meshes) falls through to the
 	# RS-instance branch below — that's kept for debug tools / tests that
 	# instantiate a Mesh resource directly without a Node3D prototype.
-	if not mesh_type.sub_meshes.is_empty():
+	if USE_PROTOTYPE_REGISTRY and not mesh_type.sub_meshes.is_empty():
 		var registry := _ensure_registry()
 		if registry != null:
 			var subs: Array = _build_registry_sub_meshes(mesh_type)
@@ -844,6 +853,8 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 ## Plan: phase_e_static_bulk_upload.md §3.2, §5.1
 # PHASE_E:MAIN_ONLY
 func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
+	if not USE_PROTOTYPE_REGISTRY:
+		return -1
 	if precomp == null:
 		return -1
 	var type_name := precomp.type_name

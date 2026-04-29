@@ -51,6 +51,11 @@ const GROW_FACTOR: int = 2
 ## MultiMesh buffer. Godot 4.6 has crashed in set_buffer immediately after
 ## unload-driven membership churn; this separates release/free work from upload.
 const UPLOAD_DEFER_TICKS_AFTER_SLOT_RELEASE: int = 2
+## Likewise, don't upload a buffer on the same frame as a fresh MultiMesh /
+## RenderingServer instance allocation. Boot-time crashes have landed right
+## after the first static add when the cull lane immediately uploaded the
+## newly-created batch.
+const UPLOAD_DEFER_TICKS_AFTER_BATCH_CREATE: int = 2
 
 ## Phase 3 fade shader — same spawn-time/fade-duration formula as Phase 2's
 ## lod_crossfade.gdshader, rewritten to read per-slot timing from
@@ -216,6 +221,7 @@ func _init(
 	multimesh.visible_instance_count = 0
 
 	_resize_capacity_internal(p_initial_capacity)
+	_upload_defer_ticks = UPLOAD_DEFER_TICKS_AFTER_BATCH_CREATE
 
 
 #region Fade material

@@ -2657,12 +2657,15 @@ func _input(event: InputEvent) -> void:
 					crash_reporter.dump_state_now()
 					_log("[color=cyan]State dumped to crash report log[/color]")
 
-	# Debug: left-click in fly-camera mode spawns a physics ball and throws
-	# it forward. Use for collision verification (walk-into-rock tests during
-	# statics_no_node3d T.2 before player controller collision is ready).
+	# Debug: hold right-click and press left-click in fly-camera mode to throw
+	# a physics ball. Keep plain left-click and Ctrl free for UI/movement.
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT and _camera_mode == CameraMode.FLY_CAMERA:
+		if mb.pressed \
+				and mb.button_index == MOUSE_BUTTON_LEFT \
+				and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) \
+				and _camera_mode == CameraMode.FLY_CAMERA \
+				and get_viewport().gui_get_hovered_control() == null:
 			_spawn_debug_ball()
 			get_viewport().set_input_as_handled()
 

@@ -1062,6 +1062,8 @@ func _update_loaded_cells() -> void:
 				# entries continue landing in the now-live cell.
 				if grid in _unloading_request_ids:
 					_async_requests[grid] = _unloading_request_ids[grid]
+					if _cell_manager != null and _cell_manager.has_method("resume_request_publish"):
+						_cell_manager.resume_request_publish(_unloading_request_ids[grid])
 					_unloading_request_ids.erase(grid)
 				_debug("Reclaimed unloading cell %s (%d children remaining, request restored)" % [grid, cell_node.get_child_count()])
 	for grid in reclaimed:
@@ -1283,6 +1285,8 @@ func _unload_cell(grid: Vector2i) -> void:
 		# start (matches old StaticBody3D-as-cell-node-child semantics, where
 		# physics died with the cell visibility change).
 		if _cell_manager != null:
+			if _cell_manager.has_method("pause_request_publish"):
+				_cell_manager.pause_request_publish(request_id)
 			_cell_manager.cancel_collision_build_for_request(request_id)
 		_debug("Parked async request %d for cell %s (state-reversal limbo)" % [request_id, grid])
 
