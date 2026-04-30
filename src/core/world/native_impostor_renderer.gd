@@ -244,7 +244,16 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
+		fast_cleanup()
 		return
+	fast_cleanup()
+
+
+## Shutdown hook used by NativeStreamingManager.fast_cleanup().
+## Stops thread owners before the scene tree starts freeing resources.
+func fast_cleanup() -> void:
+	set_process(false)
+	_streaming_enabled = false
 	_stop_job_system()
 	# Phase 6: drain any in-flight rebuild worker task so its closure and
 	# Image refs release before we go. Cheap — the task is CPU-only.

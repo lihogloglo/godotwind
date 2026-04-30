@@ -27,17 +27,48 @@ var model_keys: Dictionary = {}
 var resource_refs: Array[Resource] = []
 var resource_refs_by_key: Dictionary = {}
 var resource_handles_by_key: Dictionary = {}
+var static_prepare_entries_by_key: Dictionary = {}
+var static_prepare_enqueued: Dictionary[String, bool] = {}
+var static_buckets_by_key: Dictionary[String, RefCounted] = {}
+var pending_model_loads_by_key: Dictionary = {}
+var completed_model_loads: Array[Dictionary] = []
+var completed_model_load_keys: Dictionary[String, bool] = {}
+## Per-cell static collision publish state. CellManager still drives the
+## pipeline, but the worker payload, task id, and finalized PhysicsServer body
+## are owned by the same payload record as the visual publish queues.
+var collision_built: bool = false
+var collision_dispatched: bool = false
+var collision_payload: Variant = null
+var collision_task_id: int = -1
+var collision_body: Variant = null
+var publish_driver: Callable = Callable()
 var stats: Dictionary = {
 	"static_refs": 0,
 	"interactive_refs": 0,
 	"light_refs": 0,
 	"model_keys": 0,
 	"pinned_resources": 0,
+	"static_prepare_queue": 0,
+	"static_buckets": 0,
+	"pending_model_loads": 0,
+	"completed_model_loads": 0,
 }
 
 
 func _init(p_grid: Vector2i = Vector2i.ZERO) -> void:
 	grid = p_grid
+
+
+func configure_publish_driver(driver: Callable) -> void:
+	publish_driver = driver
+
+
+func publish_step(budget_usec: int) -> int:
+	if budget_usec <= 0 or state == State.UNLOADING:
+		return 0
+	if not publish_driver.is_valid():
+		return 0
+	return maxi(0, int(publish_driver.call(self, budget_usec)))
 
 
 static func make_model_key(model_path: String, item_id: String = "") -> String:
@@ -76,6 +107,147 @@ func add_static_ref(model_path: String, item_id: String, ref: CellReference) -> 
 	static_instance_transforms[key].append(_make_world_transform(ref))
 	static_expected_counts[key] = int(static_expected_counts[key]) + 1
 	stats["static_refs"] = int(stats.get("static_refs", 0)) + 1
+
+
+func enqueue_static_prepare(
+	request_id: int,
+	type_name: String,
+	model_path: String,
+	item_id: String,
+	key: String,
+	expected_count: int,
+) -> bool:
+	if key.is_empty() or bool(static_prepare_enqueued.get(key, false)):
+		return false
+	static_prepare_entries_by_key[key] = {
+		"request_id": request_id,
+		"type_name": type_name,
+		"model_path": model_path,
+		"item_id": item_id,
+		"key": key,
+		"expected_count": expected_count,
+	}
+	static_prepare_enqueued[key] = true
+	_update_static_prepare_stats()
+	return true
+
+
+func get_static_prepare_queue_size() -> int:
+	return static_prepare_entries_by_key.size()
+
+
+func pop_static_prepare_entry(key: String) -> Dictionary:
+	if key.is_empty() or not static_prepare_entries_by_key.has(key):
+		return {}
+	var entry: Dictionary = static_prepare_entries_by_key[key]
+	static_prepare_entries_by_key.erase(key)
+	static_prepare_enqueued.erase(key)
+	_update_static_prepare_stats()
+	return entry
+
+
+func requeue_static_prepare_entry(entry: Dictionary) -> void:
+	var key := str(entry.get("key", ""))
+	if key.is_empty() or bool(static_prepare_enqueued.get(key, false)):
+		return
+	static_prepare_entries_by_key[key] = entry
+	static_prepare_enqueued[key] = true
+	_update_static_prepare_stats()
+
+
+func discard_static_prepare_queue() -> void:
+	static_prepare_entries_by_key.clear()
+	static_prepare_enqueued.clear()
+	_update_static_prepare_stats()
+
+
+func has_static_bucket(key: String) -> bool:
+	return not key.is_empty() and static_buckets_by_key.has(key)
+
+
+func add_static_bucket(key: String, bucket: RefCounted) -> void:
+	if key.is_empty() or bucket == null:
+		return
+	# Phase 2A records the bucket while the async request is active. After the
+	# cell completes, live cleanup is owned by StaticObjectRenderer's cell index.
+	static_buckets_by_key[key] = bucket
+	stats["static_buckets"] = static_buckets_by_key.size()
+
+
+func release_static_buckets() -> void:
+	for bucket_value: Variant in static_buckets_by_key.values():
+		var bucket: RefCounted = bucket_value as RefCounted
+		if bucket != null and bucket.has_method("cleanup"):
+			bucket.call("cleanup")
+	static_buckets_by_key.clear()
+	stats["static_buckets"] = 0
+
+
+func enqueue_pending_model_load(key: String, ref_info: Dictionary) -> void:
+	if key.is_empty():
+		return
+	if not pending_model_loads_by_key.has(key):
+		pending_model_loads_by_key[key] = []
+	var refs: Array = pending_model_loads_by_key[key]
+	refs.append(ref_info)
+	_update_model_callback_stats()
+
+
+func discard_pending_model_load(key: String) -> void:
+	if key.is_empty():
+		return
+	pending_model_loads_by_key.erase(key)
+	completed_model_load_keys.erase(key)
+	var kept: Array[Dictionary] = []
+	for completion: Dictionary in completed_model_loads:
+		if str(completion.get("key", "")) != key:
+			kept.append(completion)
+	completed_model_loads = kept
+	_update_model_callback_stats()
+
+
+func mark_model_load_completed(key: String, request_id: int, model_path: String, item_id: String) -> void:
+	if key.is_empty() or bool(completed_model_load_keys.get(key, false)):
+		return
+	completed_model_loads.append({
+		"key": key,
+		"request_id": request_id,
+		"model_path": model_path,
+		"item_id": item_id,
+	})
+	completed_model_load_keys[key] = true
+	_update_model_callback_stats()
+
+
+func pop_model_load_completion() -> Dictionary:
+	while not completed_model_loads.is_empty():
+		var completion: Dictionary = completed_model_loads.pop_front()
+		var key := str(completion.get("key", ""))
+		completed_model_load_keys.erase(key)
+		if key.is_empty() or not pending_model_loads_by_key.has(key):
+			continue
+		var waiting_refs: Array = pending_model_loads_by_key[key]
+		pending_model_loads_by_key.erase(key)
+		completion["waiting_refs"] = waiting_refs
+		_update_model_callback_stats()
+		return completion
+	_update_model_callback_stats()
+	return {}
+
+
+func get_pending_model_load_count() -> int:
+	return pending_model_loads_by_key.size()
+
+
+func get_completed_model_load_count() -> int:
+	return completed_model_loads.size()
+
+
+func discard_model_load_callbacks() -> void:
+	pending_model_loads_by_key.clear()
+	completed_model_loads.clear()
+	completed_model_load_keys.clear()
+	_update_model_callback_stats()
 
 
 func add_light_ref(model_path: String, item_id: String, ref: CellReference) -> void:
@@ -156,6 +328,15 @@ func bind_resource_handles_to_node(node: Node) -> void:
 
 func _owner_key() -> String:
 	return "cell:%s,%s" % [grid.x, grid.y]
+
+
+func _update_static_prepare_stats() -> void:
+	stats["static_prepare_queue"] = get_static_prepare_queue_size()
+
+
+func _update_model_callback_stats() -> void:
+	stats["pending_model_loads"] = get_pending_model_load_count()
+	stats["completed_model_loads"] = get_completed_model_load_count()
 
 
 func _make_world_transform(ref: CellReference) -> Transform3D:

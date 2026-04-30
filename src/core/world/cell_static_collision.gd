@@ -41,7 +41,7 @@
 ## Ownership: owned by CellManager. The async path is driven by
 ## `_tick_static_collision_build` (cell_manager.gd) which dispatches the
 ## worker at cell-ready and finalizes one cell per frame. Body lifetime
-## tracked on `AsyncCellRequest.collision_body`; freed in
+## is tracked on `CellPayload.collision_body`; freed in
 ## `_drain_collision_worker_for_request` on cancel / unload / shutdown.
 ##
 ## Shape data comes from a shared `StaticShapeCache` (per-prototype LRU keyed

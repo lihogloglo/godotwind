@@ -350,7 +350,9 @@ func fast_cleanup() -> void:
 	# Free GPU resources (RS RIDs)
 	if _static_renderer:
 		_static_renderer.clear()
-	if _impostor_renderer and _impostor_renderer.has_method("clear"):
+	if _impostor_renderer and _impostor_renderer.has_method("fast_cleanup"):
+		_impostor_renderer.fast_cleanup()
+	elif _impostor_renderer and _impostor_renderer.has_method("clear"):
 		_impostor_renderer.clear()
 	if _distant_light_manager:
 		_distant_light_manager.cleanup()
@@ -531,25 +533,6 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		Log.info("streaming", "No camera provided - streaming will start when set_camera() is called")
 
 	return OK
-
-
-## Explicit boot/loading-stage warmup for the cold static MultiMesh batch path.
-## This is intentionally not part of normal streaming: callers decide when the
-## loading screen can absorb the cost.
-func warmup_static_renderer_boot(initial_capacity: int = 1) -> Dictionary:
-	if _static_renderer == null:
-		return {
-			"ok": false,
-			"reason": "missing_static_renderer",
-			"total_us": 0,
-		}
-	if not _static_renderer.has_method("warmup_static_batch_pipeline"):
-		return {
-			"ok": false,
-			"reason": "missing_method",
-			"total_us": 0,
-		}
-	return _static_renderer.call("warmup_static_batch_pipeline", initial_capacity)
 
 
 ## Set the camera to track
@@ -897,17 +880,23 @@ func _process(delta: float) -> void:
 				and _pending_rs_cleanup_cells.is_empty()
 			if _collision_finalize_defer_frames > 0:
 				_collision_finalize_defer_frames -= 1
+			var payload_publish_budget_us := int(SC.STATIC_PREPARE_BUDGET_MS * 1000.0)
+			var payload_publish_start_us := Time.get_ticks_usec()
+			var payload_published := _process_payload_publish_steps(payload_publish_budget_us)
+			var payload_publish_us := Time.get_ticks_usec() - payload_publish_start_us
 			# Phase 2 stutter diag — bracket the instantiate call into the profiler
 			# so the slow-frame autopsy can attribute spike time. Plan §11.4.
 			if prof: prof.begin_section("instantiate")
 			var instantiated := _cell_manager.process_async_instantiation(
-				instantiation_budget_ms,
+				maxf(0.1, instantiation_budget_ms - (float(payload_publish_us) / 1000.0)),
 				_camera_position,
 				camera_fwd,
 				allow_collision_finalize,
 			)
 			if prof: prof.end_section("instantiate")
 			phase_times[2] = float(Time.get_ticks_usec() - phase_start)
+			if payload_published > 0 and debug_enabled:
+				_debug("Published %d payload items this frame" % payload_published)
 			if instantiated > 0 and debug_enabled:
 				_debug("Instantiated %d objects this frame" % instantiated)
 
@@ -1610,6 +1599,26 @@ func _process_pending_loads_async() -> void:
 			_debug("Submitted %d async cell requests, %d remaining in queue (startup=%s, frame=%d)" % [
 				requests_submitted, _pending_load_queue.size(), _startup_phase, _startup_frames
 			])
+
+
+func _process_payload_publish_steps(budget_usec: int) -> int:
+	if _cell_manager == null or budget_usec <= 0 or _async_requests.is_empty():
+		return 0
+	var start_us := Time.get_ticks_usec()
+	var published := 0
+	for grid: Vector2i in _async_requests:
+		var elapsed := Time.get_ticks_usec() - start_us
+		if elapsed >= budget_usec:
+			break
+		var request_id: int = _async_requests[grid]
+		if not _cell_manager.has_method("get_async_payload"):
+			break
+		var payload: RefCounted = _cell_manager.call("get_async_payload", request_id) as RefCounted
+		if payload == null or not payload.has_method("publish_step"):
+			continue
+		var remaining_usec: int = budget_usec - elapsed
+		published += int(payload.call("publish_step", remaining_usec))
+	return published
 
 
 ## Process completed async requests
@@ -2376,12 +2385,23 @@ const FIRST_PLAYABLE_MAX_QUEUE: int = 8
 ##   camera_cell       — the cell the ring is centred on.
 func get_inner_ring_status() -> Dictionary:
 	var center: Vector2i = _camera_cell
-	var ring_total: int = (2 * INNER_RING_RADIUS + 1) * (2 * INNER_RING_RADIUS + 1)
+	# Count the scheduler-visible ring, not the theoretical grid. Coastal or
+	# sparse data sources may never queue every coordinate in the 3x3 block.
+	var ring_total: int = 0
 	var ring_loaded: int = 0
 	var ring_pending_async: int = 0
 	for dx in range(-INNER_RING_RADIUS, INNER_RING_RADIUS + 1):
 		for dy in range(-INNER_RING_RADIUS, INNER_RING_RADIUS + 1):
 			var grid := Vector2i(center.x + dx, center.y + dy)
+			var tracked := (
+				grid in _loaded_cells
+				or grid in _loading_cells
+				or grid in _async_requests
+				or grid in _pending_load_set
+			)
+			if not tracked:
+				continue
+			ring_total += 1
 			if grid in _loaded_cells:
 				if grid not in _async_requests:
 					ring_loaded += 1
@@ -2414,8 +2434,14 @@ func get_inner_ring_status() -> Dictionary:
 ## INNER_RING_MAX_QUEUE so the next few seconds of gameplay won't stall.
 func is_inner_ring_ready() -> bool:
 	var s := get_inner_ring_status()
+	if not _startup_phase:
+		return (
+			int(s["ring_pending_async"]) == 0
+			and int(s["instantiation_queue"]) <= FIRST_PLAYABLE_MAX_QUEUE
+		)
 	return (
-		int(s["ring_loaded"]) >= int(s["ring_total"])
+		int(s["ring_total"]) > 0
+		and int(s["ring_loaded"]) >= int(s["ring_total"])
 		and int(s["ring_pending_async"]) == 0
 		and int(s["instantiation_queue"]) <= FIRST_PLAYABLE_MAX_QUEUE
 	)

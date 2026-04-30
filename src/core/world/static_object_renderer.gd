@@ -26,6 +26,7 @@ extends Node3D
 const DU := preload("res://src/core/world/distance_utils.gd")
 const PrototypeRegistryScript := preload("res://src/core/world/prototype_registry.gd")
 const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
+const CellStaticBucketScript := preload("res://src/core/world/cell_static_bucket.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Phase 3 world-scoped PrototypeRegistry. One MultiMesh per (mesh, material)
@@ -55,6 +56,13 @@ var _instances: Dictionary[int, InstanceData] = {}
 ## Spatial index: cell_grid Vector2i -> Array[int] of instance IDs
 ## Enables O(cell_count) lookups instead of O(total_instances) for promotion/removal
 var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
+
+## Phase 2A near-streaming path: transitional renderer-owned per-cell/prototype
+## buckets. CellPayload records the publish result while the request is active,
+## but completed cells currently release buckets through this renderer facade.
+## Phase 2B must move or document any stronger cell/payload ownership model.
+var _cell_buckets: Dictionary[Vector2i, Array] = {} # Array[CellStaticBucket]
+var _cell_bucket_hide_progress: Dictionary[Vector2i, int] = {}
 
 ## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
 ## default — see lod_crossfade.gdshader. The shader reads this per-slot via
@@ -89,6 +97,8 @@ var _stats: Dictionary = {
 	"mesh_types": 0,
 	"total_instances": 0,
 	"visible_instances": 0,
+	"cell_buckets": 0,
+	"bucket_instances": 0,
 }
 
 
@@ -104,7 +114,6 @@ var _stats: Dictionary = {
 class SubMeshEntry:
 	var mesh_resource: Mesh        ## Strong ref — prevents GC; derive .get_rid() at use-time
 	var material_resource: Material  ## Strong ref (whole-mesh override, may be null)
-	var material_rid: RID
 	var surface_materials: Array[Material] = []  ## Per-surface mats (strong refs)
 	var local_transform: Transform3D  ## Child's transform relative to prototype root
 	var has_lod_chain: bool = false
@@ -113,8 +122,8 @@ class SubMeshEntry:
 ## Mesh type registration data
 class MeshType:
 	var name: String
-	var mesh_rid: RID          ## Primary mesh RID (first child, for backwards compat)
-	var material_rid: RID      ## Primary material RID (optional, whole-mesh override)
+	var mesh_rid: RID          ## Owned/generated or legacy cached RID; descriptor paths derive from mesh_resource
+	var material_rid: RID      ## Owned/generated or legacy cached RID; descriptor paths derive from material_resource
 	var mesh_resource: Mesh    ## Strong reference — prevents GC when prototype is LRU-evicted
 	var material_resource: Material  ## Strong reference — same reason
 	var owns_mesh: bool        ## Whether we created the mesh RID
@@ -129,6 +138,15 @@ class MeshType:
 	## All child meshes in the prototype. Single-mesh prototypes have one entry.
 	## Multi-mesh buildings (Vivec cantons, Hlaalu, etc.) have 3-8 entries.
 	var sub_meshes: Array[SubMeshEntry] = []
+
+
+## Validated static prototype data extracted before publishing to _mesh_types.
+## The descriptor owns Resource refs only. RIDs are derived later at the actual
+## RS instance publish point so static prepare cannot create server state.
+class StaticPrototypeDescriptor:
+	var sub_meshes: Array[SubMeshEntry] = []
+	var aabb: AABB
+	var has_lod_chain: bool = false
 
 
 ## Phase E — precomputed instance data produced off-thread.
@@ -265,10 +283,7 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 		push_warning("StaticObjectRenderer: No mesh found in prototype for '%s'" % type_name)
 		return
 
-	# Build sub-mesh entries for every child MeshInstance3D
-	var sub_entries: Array[SubMeshEntry] = []
-	var union_aabb := AABB()
-	var any_has_lod := false
+	var descriptor := StaticPrototypeDescriptor.new()
 
 	for mi: MeshInstance3D in all_mis:
 		if mi.mesh == null:
@@ -283,12 +298,11 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 			entry.local_transform = _get_relative_transform(mi, prototype)
 		entry.has_lod_chain = mi.mesh.has_meta("has_lod_chain") if mi.mesh is ArrayMesh else false
 		if entry.has_lod_chain:
-			any_has_lod = true
+			descriptor.has_lod_chain = true
 
 		# Material resolution: override > surface override > mesh surface
 		if mi.material_override:
 			entry.material_resource = mi.material_override
-			entry.material_rid = mi.material_override.get_rid()
 		else:
 			var surface_count: int = mi.mesh.get_surface_count()
 			for si in range(surface_count):
@@ -299,61 +313,24 @@ func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 			# Single-surface shortcut
 			if surface_count == 1 and not entry.surface_materials.is_empty() and entry.surface_materials[0]:
 				entry.material_resource = entry.surface_materials[0]
-				entry.material_rid = entry.surface_materials[0].get_rid()
 				entry.surface_materials.clear()
 
 		# Expand union AABB
 		var child_aabb := mi.mesh.get_aabb()
 		var transformed_aabb := entry.local_transform * child_aabb
-		if sub_entries.is_empty():
-			union_aabb = transformed_aabb
+		if descriptor.sub_meshes.is_empty():
+			descriptor.aabb = transformed_aabb
 		else:
-			union_aabb = union_aabb.merge(transformed_aabb)
+			descriptor.aabb = descriptor.aabb.merge(transformed_aabb)
 
-		sub_entries.append(entry)
+		descriptor.sub_meshes.append(entry)
 
-	if sub_entries.is_empty():
+	if descriptor.sub_meshes.is_empty():
 		# All mesh instances were filtered out (no mesh on any MI). Defensive
 		# — _find_all_mesh_instances already pre-filters, but be safe.
 		return
 
-	# Build the MeshType struct locally — fully populated, no shared state
-	# access. Mirrors register_mesh_type's field setup + register_from_prototype's
-	# sub_meshes/aabb/has_lod_chain/surface_materials overlay. Atomic publish
-	# at the end (single lock-protected insert) means workers never see a
-	# half-populated entry — they either see this entry fully or not at all.
-	var first := sub_entries[0]
-	var mesh_type := MeshType.new()
-	mesh_type.name = type_name
-	if first.mesh_resource:
-		mesh_type.mesh_rid = first.mesh_resource.get_rid()
-		mesh_type.mesh_resource = first.mesh_resource
-		mesh_type.owns_mesh = false
-	else:
-		mesh_type.mesh_rid = RenderingServer.mesh_create()
-		mesh_type.owns_mesh = true
-	if first.material_resource:
-		mesh_type.material_rid = first.material_resource.get_rid()
-		mesh_type.material_resource = first.material_resource
-		mesh_type.owns_material = false
-	else:
-		mesh_type.material_rid = RID()
-		mesh_type.owns_material = false
-	mesh_type.aabb = union_aabb
-	mesh_type.has_lod_chain = any_has_lod
-	mesh_type.sub_meshes = sub_entries
-	if not first.surface_materials.is_empty():
-		mesh_type.surface_materials = first.surface_materials
-
-	# Atomic publish — re-check under lock to handle the narrow race where
-	# another main-thread caller inserted the same type between our fast-path
-	# check and this point. (Same-frame same-type double-register is rare but
-	# not impossible — defensive.)
-	_mesh_types_mutex.lock()
-	if type_name not in _mesh_types:
-		_mesh_types[type_name] = mesh_type
-		_stats["mesh_types"] += 1
-	_mesh_types_mutex.unlock()
+	_publish_static_descriptor(type_name, descriptor)
 
 
 ## Compatibility alias — post-B-wide there's no difference between the two
@@ -377,9 +354,7 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 		return false
 
 	var xforms: Dictionary[String, Transform3D] = {".": Transform3D.IDENTITY}
-	var sub_entries: Array[SubMeshEntry] = []
-	var union_aabb := AABB()
-	var any_has_lod := false
+	var descriptor := StaticPrototypeDescriptor.new()
 
 	for i in range(state.get_node_count()):
 		var path := str(state.get_node_path(i, false))
@@ -423,11 +398,10 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 		entry.local_transform = rel_xform
 		entry.has_lod_chain = mesh.has_meta("has_lod_chain") if mesh is ArrayMesh else false
 		if entry.has_lod_chain:
-			any_has_lod = true
+			descriptor.has_lod_chain = true
 
 		if material_override != null:
 			entry.material_resource = material_override
-			entry.material_rid = material_override.get_rid()
 		else:
 			var surface_count := mesh.get_surface_count()
 			for si in range(surface_count):
@@ -437,39 +411,46 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 				entry.surface_materials.append(mat)
 			if surface_count == 1 and not entry.surface_materials.is_empty() and entry.surface_materials[0]:
 				entry.material_resource = entry.surface_materials[0]
-				entry.material_rid = entry.surface_materials[0].get_rid()
 				entry.surface_materials.clear()
 
 		var transformed_aabb := entry.local_transform * mesh.get_aabb()
-		if sub_entries.is_empty():
-			union_aabb = transformed_aabb
+		if descriptor.sub_meshes.is_empty():
+			descriptor.aabb = transformed_aabb
 		else:
-			union_aabb = union_aabb.merge(transformed_aabb)
-		sub_entries.append(entry)
+			descriptor.aabb = descriptor.aabb.merge(transformed_aabb)
+		descriptor.sub_meshes.append(entry)
 
-	if sub_entries.is_empty():
+	if descriptor.sub_meshes.is_empty():
 		return false
 
-	var first := sub_entries[0]
+	_publish_static_descriptor(type_name, descriptor)
+	return true
+
+
+func _publish_static_descriptor(type_name: String, descriptor: StaticPrototypeDescriptor) -> void:
+	if descriptor == null or descriptor.sub_meshes.is_empty():
+		return
+
+	var first := descriptor.sub_meshes[0]
 	var mesh_type := MeshType.new()
 	mesh_type.name = type_name
 	if first.mesh_resource:
-		mesh_type.mesh_rid = first.mesh_resource.get_rid()
+		mesh_type.mesh_rid = RID()
 		mesh_type.mesh_resource = first.mesh_resource
 		mesh_type.owns_mesh = false
 	else:
 		mesh_type.mesh_rid = RenderingServer.mesh_create()
 		mesh_type.owns_mesh = true
 	if first.material_resource:
-		mesh_type.material_rid = first.material_resource.get_rid()
+		mesh_type.material_rid = RID()
 		mesh_type.material_resource = first.material_resource
 		mesh_type.owns_material = false
 	else:
 		mesh_type.material_rid = RID()
 		mesh_type.owns_material = false
-	mesh_type.aabb = union_aabb
-	mesh_type.has_lod_chain = any_has_lod
-	mesh_type.sub_meshes = sub_entries
+	mesh_type.aabb = descriptor.aabb
+	mesh_type.has_lod_chain = descriptor.has_lod_chain
+	mesh_type.sub_meshes = descriptor.sub_meshes
 	if not first.surface_materials.is_empty():
 		mesh_type.surface_materials = first.surface_materials
 
@@ -478,7 +459,6 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 		_mesh_types[type_name] = mesh_type
 		_stats["mesh_types"] += 1
 	_mesh_types_mutex.unlock()
-	return true
 
 
 func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
@@ -563,64 +543,6 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 			"local_transform": entry.local_transform,
 		}
 	return out
-
-
-## Pre-create empty PrototypeBatch/MultiMesh buckets for a registered type.
-## This is intentionally separate from add_instance(): it lets the streaming
-## prepare lane pay first-batch allocation before ref publish reaches the hot
-## activation drain. Returns the number of new batches created.
-func prepare_batches_for_type(type_name: String) -> int:
-	return reserve_batches_for_type(type_name, 0)
-
-
-## Warm the cold MultiMesh/RenderingServer batch path during an explicit
-## loading stage. This uses the same PrototypeBatch constructor as real static
-## batches, then immediately frees the temporary RS resources so gameplay stats
-## and registry contents are unchanged.
-func warmup_static_batch_pipeline(initial_capacity: int = 1) -> Dictionary:
-	if not _scenario.is_valid():
-		return {
-			"ok": false,
-			"reason": "invalid_scenario",
-			"total_us": 0,
-		}
-
-	var start_us := Time.get_ticks_usec()
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3.ONE
-	var batch: RefCounted = PrototypeBatchScript.new(mesh, null, _scenario, maxi(1, initial_capacity))
-	var create_us := Time.get_ticks_usec() - start_us
-	batch.call("cleanup")
-	var total_us := Time.get_ticks_usec() - start_us
-	return {
-		"ok": true,
-		"create_us": create_us,
-		"total_us": total_us,
-	}
-
-
-## Pre-create/grow PrototypeBatch/MultiMesh buckets for a registered type.
-## Capacity reservation is deliberately CPU/resource-side only: it may create
-## MultiMesh resources and resize slot storage, but it never uploads a render
-## buffer. The regular cull lane owns the later MultiMesh.set_buffer() call.
-func reserve_batches_for_type(type_name: String, expected_count: int) -> int:
-	if not USE_PROTOTYPE_REGISTRY:
-		return 0
-	if not _scenario.is_valid():
-		return 0
-
-	_mesh_types_mutex.lock()
-	var mesh_type: MeshType = _mesh_types.get(type_name)
-	_mesh_types_mutex.unlock()
-	if mesh_type == null or mesh_type.sub_meshes.is_empty():
-		return 0
-
-	var registry := _ensure_registry()
-	if registry == null:
-		return 0
-	if registry.has_method("reserve_batches"):
-		return int(registry.call("reserve_batches", _build_registry_sub_meshes(mesh_type), expected_count))
-	return registry.prepare_batches(_build_registry_sub_meshes(mesh_type))
 
 
 ## Phase E — worker-safe precompute for the STAT off-thread path.
@@ -793,7 +715,9 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 		# If we have the mesh resource, re-derive; else trust the owned/cached RID.
 		var legacy_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
 			else mesh_type.mesh_rid
-		var rid := _create_rs_instance(legacy_mesh_rid, mesh_type.material_rid,
+		var legacy_material_rid: RID = mesh_type.material_resource.get_rid() if mesh_type.material_resource \
+			else mesh_type.material_rid
+		var rid := _create_rs_instance(legacy_mesh_rid, legacy_material_rid,
 			mesh_type.surface_materials, transform, mesh_type.aabb)
 		if rid.is_valid():
 			data.sub_rids.append(rid)
@@ -803,7 +727,8 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 			if entry.mesh_resource == null:
 				continue
 			var child_xform := transform * entry.local_transform
-			var rid := _create_rs_instance(entry.mesh_resource.get_rid(), entry.material_rid,
+			var material_rid: RID = entry.material_resource.get_rid() if entry.material_resource else RID()
+			var rid := _create_rs_instance(entry.mesh_resource.get_rid(), material_rid,
 				entry.surface_materials, child_xform, entry.mesh_resource.get_aabb())
 			if rid.is_valid():
 				data.sub_rids.append(rid)
@@ -851,6 +776,44 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 ## `clear(clear_mesh_types=true)` from somewhere else could drop the type.
 ##
 ## Plan: phase_e_static_bulk_upload.md §3.2, §5.1
+func create_cell_bucket(type_name: String, transforms: Array, cell_grid: Vector2i) -> RefCounted:
+	if type_name not in _mesh_types:
+		return null
+	if transforms.is_empty() or not _scenario.is_valid():
+		return null
+
+	var mesh_type: MeshType = _mesh_types[type_name]
+	if mesh_type.sub_meshes.is_empty():
+		return null
+
+	var bucket: RefCounted = CellStaticBucketScript.new()
+	var ok := bool(bucket.call(
+		"configure",
+		type_name,
+		cell_grid,
+		mesh_type.sub_meshes,
+		transforms,
+		_scenario,
+		visibility_range_end,
+		_globally_visible
+	))
+	if not ok:
+		if bucket.has_method("cleanup"):
+			bucket.call("cleanup")
+		return null
+
+	if cell_grid not in _cell_buckets:
+		_cell_buckets[cell_grid] = []
+	_cell_buckets[cell_grid].append(bucket)
+	_stats["cell_buckets"] = int(_stats.get("cell_buckets", 0)) + 1
+	_stats["bucket_instances"] = int(_stats.get("bucket_instances", 0)) + transforms.size()
+	_stats["total_instances"] = int(_stats.get("total_instances", 0)) + transforms.size()
+	if _globally_visible:
+		_stats["visible_instances"] = int(_stats.get("visible_instances", 0)) + transforms.size()
+	mesh_type.instance_count += transforms.size()
+	return bucket
+
+
 # PHASE_E:MAIN_ONLY
 func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
 	if not USE_PROTOTYPE_REGISTRY:
@@ -1030,13 +993,38 @@ func remove_instance(id: int) -> void:
 ## Remove all instances belonging to a cell. Uses spatial index for
 ## O(cell_size) instead of O(total_instances).
 func remove_cell_instances(cell_grid: Vector2i) -> int:
-	if cell_grid not in _cell_index:
-		return 0
+	var removed := 0
 
-	var to_remove: Array = _cell_index[cell_grid].duplicate()
-	for id: int in to_remove:
-		remove_instance(id)
-	return to_remove.size()
+	if cell_grid in _cell_index:
+		var to_remove: Array = _cell_index[cell_grid].duplicate()
+		for id: int in to_remove:
+			remove_instance(id)
+		removed += to_remove.size()
+
+	if cell_grid in _cell_buckets:
+		var buckets: Array = _cell_buckets[cell_grid]
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket == null:
+				continue
+			var count := int(bucket.get("instance_count"))
+			var was_visible := bool(bucket.get("visible"))
+			var bucket_type := str(bucket.get("type_name"))
+			if bucket.has_method("cleanup"):
+				count = int(bucket.call("cleanup"))
+			removed += count
+			_stats["cell_buckets"] = maxi(0, int(_stats.get("cell_buckets", 0)) - 1)
+			_stats["bucket_instances"] = maxi(0, int(_stats.get("bucket_instances", 0)) - count)
+			_stats["total_instances"] = maxi(0, int(_stats.get("total_instances", 0)) - count)
+			if was_visible:
+				_stats["visible_instances"] = maxi(0, int(_stats.get("visible_instances", 0)) - count)
+			if bucket_type in _mesh_types:
+				var mesh_type: MeshType = _mesh_types[bucket_type]
+				mesh_type.instance_count = maxi(0, mesh_type.instance_count - count)
+		_cell_buckets.erase(cell_grid)
+		_cell_bucket_hide_progress.erase(cell_grid)
+
+	return removed
 
 
 ## Hide all instances belonging to a cell (fast — no GPU resource cleanup)
@@ -1057,6 +1045,17 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 			data.visible = false
 			count += 1
 
+	if cell_grid in _cell_buckets:
+		for bucket_value: Variant in _cell_buckets[cell_grid]:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket == null or not bool(bucket.get("visible")):
+				continue
+			var bucket_count := int(bucket.get("instance_count"))
+			if bucket.has_method("set_visible"):
+				bucket.call("set_visible", false)
+			_stats["visible_instances"] = maxi(0, int(_stats.get("visible_instances", 0)) - bucket_count)
+			count += bucket_count
+
 	return count
 
 
@@ -1067,11 +1066,12 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 var _cell_hide_progress: Dictionary[Vector2i, int] = {}  # cell_grid -> index into _cell_index[grid]
 
 func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
-	if cell_grid not in _cell_index:
+	if cell_grid not in _cell_index and cell_grid not in _cell_buckets:
 		_cell_hide_progress.erase(cell_grid)
+		_cell_bucket_hide_progress.erase(cell_grid)
 		return [0, true]
 
-	var cell_ids: Array = _cell_index[cell_grid]
+	var cell_ids: Array = _cell_index.get(cell_grid, [])
 	var start_idx: int = _cell_hide_progress.get(cell_grid, 0)
 	var hidden := 0
 
@@ -1096,6 +1096,26 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		_cell_hide_progress.erase(cell_grid)
 	else:
 		_cell_hide_progress[cell_grid] = i
+
+	if is_complete and cell_grid in _cell_buckets:
+		var buckets: Array = _cell_buckets[cell_grid]
+		var bucket_start_idx: int = _cell_bucket_hide_progress.get(cell_grid, 0)
+		var bi := bucket_start_idx
+		while bi < buckets.size() and hidden < max_count:
+			var bucket: RefCounted = buckets[bi] as RefCounted
+			if bucket != null and bool(bucket.get("visible")):
+				var count := int(bucket.get("instance_count"))
+				if bucket.has_method("set_visible"):
+					bucket.call("set_visible", false)
+				_stats["visible_instances"] = maxi(0, int(_stats.get("visible_instances", 0)) - count)
+				hidden += count
+			bi += 1
+		is_complete = bi >= buckets.size()
+		if is_complete:
+			_cell_bucket_hide_progress.erase(cell_grid)
+		else:
+			_cell_bucket_hide_progress[cell_grid] = bi
+
 	return [hidden, is_complete]
 
 
@@ -1248,7 +1268,13 @@ func set_all_visible(visible: bool) -> void:
 				if rid.is_valid():
 					RenderingServer.instance_set_visible(rid, visible)
 		data.visible = visible
-	_stats["visible_instances"] = _instances.size() if visible else 0
+	for buckets: Array in _cell_buckets.values():
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket != null and bucket.has_method("set_visible"):
+				bucket.call("set_visible", visible)
+	var bucket_instances := int(_stats.get("bucket_instances", 0))
+	_stats["visible_instances"] = (_instances.size() + bucket_instances) if visible else 0
 
 
 func clear(clear_mesh_types: bool = true) -> void:
@@ -1266,6 +1292,14 @@ func clear(clear_mesh_types: bool = true) -> void:
 				rs.free_rid(rid)
 	_instances.clear()
 	_cell_index.clear()
+	for buckets: Array in _cell_buckets.values():
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket != null and bucket.has_method("cleanup"):
+				bucket.call("cleanup")
+	_cell_buckets.clear()
+	_cell_bucket_hide_progress.clear()
+	_cell_hide_progress.clear()
 
 	if clear_mesh_types:
 		# Lock for the iteration + clear — any in-flight worker read of
@@ -1287,6 +1321,8 @@ func clear(clear_mesh_types: bool = true) -> void:
 
 	_stats["total_instances"] = 0
 	_stats["visible_instances"] = 0
+	_stats["cell_buckets"] = 0
+	_stats["bucket_instances"] = 0
 
 #endregion
 

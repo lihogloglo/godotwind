@@ -150,7 +150,6 @@ const CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD := 30
 const STATIC_PREPARE_ENABLED := true
 const STATIC_PREPARE_BUDGET_MS := 2.0
 const STATIC_PREPARE_MAX_PER_FRAME := 1
-const STATIC_PREPARE_CREATE_BATCHES := false
 
 ## Worker dispatch itself is main-thread work: ESM/cache checks plus
 ## WorkerThreadPool.add_task calls. Keep it bounded now that static prepare can
@@ -364,18 +363,6 @@ const INITIAL_BATCH_CAPACITY := 256
 
 ## Maximum batch capacity before splitting into new batch
 const MAX_BATCH_CAPACITY := 4096
-
-## Pre-warm batch count for common mesh types
-const BATCH_PREWARM_COUNT := 20
-
-## Boot static prewarm is disabled while visual corruption/stutter regressions
-## are being isolated. The runtime static prepare lane remains budgeted.
-const BOOT_STATIC_PREWARM_ENABLED := false
-
-## Hard wall-clock cap for cold boot static prototype prewarm. This path is a
-## user-facing loading cost, so it must be priority-bound instead of "process N
-## types no matter how long the driver takes today".
-const BOOT_STATIC_PREWARM_BUDGET_MS := 6000.0
 
 # =============================================================================
 # DIAGNOSTIC FLAGS

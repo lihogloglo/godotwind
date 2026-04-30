@@ -219,22 +219,28 @@ func _notification(what: int) -> void:
 ## Immediate shutdown: free GPU resources, set quitting flag, skip slow tree teardown.
 ## Called from both Alt+F4 (NOTIFICATION_WM_CLOSE_REQUEST) and the escape menu Quit button.
 func _do_fast_quit() -> void:
+	_request_fast_quit("USER_QUIT — WM_CLOSE_REQUEST received, beginning fast quit")
+
+
+func _request_fast_quit(reason: String) -> void:
 	# Sentinel log marker — lets log readers distinguish a runtime crash
-	# from a user-initiated quit (any sig 11 / exit 139 after this line is
-	# a teardown crash, not a streaming bug). See MODEL_LOADER_RACE.md
-	# §"Not in scope" for the teardown-crash separate work item.
-	Log.info("shutdown", "USER_QUIT — WM_CLOSE_REQUEST received, beginning fast quit")
+	# from a user/diagnostic quit. Any native fault after this marker is a
+	# teardown/finalization failure, not a live streaming traversal failure.
+	Log.info("shutdown", reason)
 
 	# Global quitting flag — checked by _exit_tree handlers to bail immediately
 	Engine.set_meta("_quitting", true)
 
 	# Stop background worker threads from blocking on WTP handles
 	if native_streaming_manager:
+		Log.info("shutdown", "WORLD_EXPLORER_FAST_CLEANUP begin")
 		native_streaming_manager.fast_cleanup()
+		Log.info("shutdown", "WORLD_EXPLORER_FAST_CLEANUP done")
 
 	# Disable deformation persistence so shutdown() skips disk I/O
 	DeformationConfig.enable_persistence = false
 
+	Log.info("shutdown", "WORLD_EXPLORER_QUIT call")
 	get_tree().quit()
 
 
@@ -501,14 +507,6 @@ func _init_async() -> void:
 	_setup_world_streaming_manager(false)  # Pass false to delay tracking
 	_ta = _log_timing(_ta, "streaming manager setup")
 
-	# Warm the cold static MultiMesh/RenderingServer batch path while the first
-	# loading UI is still visible. This absorbs the one-time driver/resource
-	# setup cost that otherwise appears later as a static prepare spike.
-	if StreamingConfig.BOOT_STATIC_PREWARM_ENABLED:
-		await _update_loading(92, "Warming static renderer...")
-		_warmup_static_renderer_boot(_start_cell)
-		_ta = _log_timing(_ta, "static renderer warmup")
-
 	# Models load automatically when streaming system starts
 	# Visibility is controlled by Godot's native visibility_range system
 
@@ -592,29 +590,6 @@ func _get_start_cell_arg() -> Vector2i:
 				start_cell = Vector2i(int(parts[0]), int(parts[1]))
 				Log.info("streaming", "[--start-cell] booting at cell (%d, %d)" % [start_cell.x, start_cell.y])
 	return start_cell
-
-
-func _warmup_static_renderer_boot(start_cell: Vector2i) -> void:
-	if not native_streaming_manager:
-		return
-	if not native_streaming_manager.has_method("warmup_static_renderer_boot"):
-		return
-	var result: Dictionary = native_streaming_manager.call("warmup_static_renderer_boot", 1)
-	if not bool(result.get("ok", false)):
-		Log.warn("streaming", "[static-warmup] skipped reason=%s" % str(result.get("reason", "unknown")))
-		return
-	Log.info("streaming", "[static-warmup] boot batch pipeline create=%.1fms total=%.1fms" % [
-		float(result.get("create_us", 0)) / 1000.0,
-		float(result.get("total_us", 0)) / 1000.0,
-	])
-	if cell_manager and cell_manager.has_method("warmup_static_batches_for_cell_ring"):
-		cell_manager.call(
-			"warmup_static_batches_for_cell_ring",
-			start_cell,
-			1,
-			StreamingConfig.BATCH_PREWARM_COUNT,
-			StreamingConfig.BOOT_STATIC_PREWARM_BUDGET_MS
-		)
 
 
 ## Phase 8 — Cold-boot handoff into LoadingStateMachine. Called once
@@ -839,8 +814,7 @@ func _maybe_start_ready_quit() -> void:
 		return
 	Log.info("shutdown", "[--quit-after-ready] quitting in %.1fs" % delay)
 	get_tree().create_timer(delay).timeout.connect(func() -> void:
-		Log.info("shutdown", "READY_QUIT - diagnostic ready quit")
-		get_tree().quit()
+		_request_fast_quit("READY_QUIT - diagnostic ready quit")
 	)
 
 

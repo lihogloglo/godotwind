@@ -422,8 +422,10 @@ func _finish() -> void:
 
 
 func _quit_cleanly() -> void:
-	Log.info("shutdown", "BENCH_QUIT - autobench complete, skipping manual RS teardown")
+	Log.info("shutdown", "BENCH_QUIT - autobench complete, beginning fast cleanup")
 	Engine.set_meta("_quitting", true)
 	if _streaming_manager != null:
 		_streaming_manager.set_process(false)
+		if _streaming_manager.has_method("fast_cleanup"):
+			_streaming_manager.call("fast_cleanup")
 	get_tree().quit()
