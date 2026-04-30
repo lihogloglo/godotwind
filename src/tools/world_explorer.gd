@@ -154,6 +154,7 @@ var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
 var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B feature flags
 var _benchmark_hud: CanvasLayer = null  # BenchmarkHUD — live perf overlay, default hidden
 var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
+var _world_streaming_disabled: bool = false
 var _loading_state_machine: LoadingStateMachineScript = null  # Phase 8 — canonical loading gate (boot + teleport)
 var _boot_gate_entered: bool = false  # Latches the one-shot boot enter_loading call
 var _loading_phase_times: Dictionary = {}  # Per-phase loading times
@@ -286,6 +287,12 @@ func _ready() -> void:
 		if arg == "--no-lights":
 			cell_manager.load_lights = false
 			Log.info("streaming", "[--no-lights] light refs disabled — A/B benchmark gate (Phase E.3 falsification)")
+			break
+
+	for arg in _runtime_cmdline_args():
+		if arg == "--disable-world-streaming":
+			_world_streaming_disabled = true
+			Log.info("streaming", "[--disable-world-streaming] camera tracking/cell streaming disabled for shutdown control")
 			break
 
 	# Phase 0 ablation flags — isolate Jolt-broadphase + bespoke-fade cost from
@@ -531,7 +538,10 @@ func _init_async() -> void:
 	_teleport_to_cell(_start_cell.x, _start_cell.y)
 
 	# NOW start tracking the camera - cells will generate around Seyda Neen
-	world_streaming_manager.set_camera(camera)
+	if _world_streaming_disabled:
+		Log.info("streaming", "[--disable-world-streaming] skipping NativeStreamingManager.set_camera()")
+	else:
+		world_streaming_manager.set_camera(camera)
 
 	# Update debug overlay with references to managers
 	_update_debug_overlay_references()
@@ -570,6 +580,7 @@ func _init_async() -> void:
 	# High-altitude sustained traversal stress test. This is separate from the
 	# canonical AutoBench because it answers transition stutter directly.
 	_maybe_start_stress_bench()
+	_maybe_start_ready_quit()
 
 
 func _get_start_cell_arg() -> Vector2i:
@@ -815,6 +826,22 @@ func _maybe_start_stress_bench() -> void:
 		direction
 	)
 	_log("[STRESS] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
+
+
+func _maybe_start_ready_quit() -> void:
+	var delay := -1.0
+	for arg in _runtime_cmdline_args():
+		if arg == "--quit-after-ready":
+			delay = 1.0
+		elif arg.begins_with("--quit-after-ready="):
+			delay = maxf(0.1, float(arg.substr("--quit-after-ready=".length())))
+	if delay < 0.0:
+		return
+	Log.info("shutdown", "[--quit-after-ready] quitting in %.1fs" % delay)
+	get_tree().create_timer(delay).timeout.connect(func() -> void:
+		Log.info("shutdown", "READY_QUIT - diagnostic ready quit")
+		get_tree().quit()
+	)
 
 
 func _init_terrain3d() -> void:

@@ -2,6 +2,7 @@ class_name CellPayload
 extends RefCounted
 
 const CS := preload("res://src/core/coordinate_system.gd")
+const StreamedResourceHandleScript := preload("res://src/core/streaming/streamed_resource_handle.gd")
 
 enum State {
 	QUEUED_DATA,
@@ -25,6 +26,7 @@ var light_refs: Array = []
 var model_keys: Dictionary = {}
 var resource_refs: Array[Resource] = []
 var resource_refs_by_key: Dictionary = {}
+var resource_handles_by_key: Dictionary = {}
 var stats: Dictionary = {
 	"static_refs": 0,
 	"interactive_refs": 0,
@@ -94,18 +96,30 @@ func pin_model_resource(model_path: String, item_id: String, packed_scene: Packe
 	if packed_scene == null:
 		return
 	var key := make_model_key(model_path, item_id)
-	if resource_refs_by_key.has(key):
+	var handle := StreamedResourceHandleScript.new(key, packed_scene)
+	pin_model_handle(model_path, item_id, handle)
+
+
+func pin_model_handle(model_path: String, item_id: String, handle: RefCounted) -> void:
+	if handle == null or handle.packed_scene == null:
 		return
-	resource_refs_by_key[key] = packed_scene
-	resource_refs.append(packed_scene)
-	stats["pinned_resources"] = resource_refs.size()
+	var key := make_model_key(model_path, item_id)
+	var owner := _owner_key()
+	if resource_handles_by_key.has(key):
+		return
+	handle.add_owner(owner)
+	resource_handles_by_key[key] = handle
+	resource_refs_by_key[key] = handle.packed_scene
+	resource_refs.append(handle.packed_scene)
+	stats["pinned_resources"] = resource_handles_by_key.size()
 
 
 func restore_model_resource(model_loader: Object, model_path: String, item_id: String) -> bool:
 	if model_loader == null or model_path.is_empty():
 		return false
 	var key := make_model_key(model_path, item_id)
-	var packed_scene: PackedScene = resource_refs_by_key.get(key) as PackedScene
+	var handle: RefCounted = resource_handles_by_key.get(key) as RefCounted
+	var packed_scene: PackedScene = handle.packed_scene if handle != null else resource_refs_by_key.get(key) as PackedScene
 	if packed_scene == null:
 		return false
 	if model_loader.has_method("get_cached_packed_scene"):
@@ -115,6 +129,33 @@ func restore_model_resource(model_loader: Object, model_path: String, item_id: S
 	if model_loader.has_method("put_cached_packed_scene"):
 		return bool(model_loader.call("put_cached_packed_scene", model_path, item_id, packed_scene))
 	return false
+
+
+func release_resource_handles() -> void:
+	var owner := _owner_key()
+	for handle_value: Variant in resource_handles_by_key.values():
+		var handle: RefCounted = handle_value as RefCounted
+		if handle != null:
+			handle.remove_owner(owner)
+	resource_handles_by_key.clear()
+	resource_refs_by_key.clear()
+	resource_refs.clear()
+	stats["pinned_resources"] = 0
+
+
+func bind_resource_handles_to_node(node: Node) -> void:
+	if node == null or resource_handles_by_key.is_empty():
+		return
+	var handles: Array[RefCounted] = []
+	for handle_value: Variant in resource_handles_by_key.values():
+		var handle: RefCounted = handle_value as RefCounted
+		if handle != null and handle not in handles:
+			handles.append(handle)
+	node.set_meta("_streamed_resource_handles", handles)
+
+
+func _owner_key() -> String:
+	return "cell:%s,%s" % [grid.x, grid.y]
 
 
 func _make_world_transform(ref: CellReference) -> Transform3D:

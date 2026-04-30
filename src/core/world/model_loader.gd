@@ -23,6 +23,7 @@ extends RefCounted
 const LODResource := preload("res://src/core/world/lod_resource.gd")
 const StaticShapePackScript := preload("res://src/core/world/static_shape_pack.gd")
 const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
+const StreamedResourceHandleScript := preload("res://src/core/streaming/streamed_resource_handle.gd")
 
 ## Maximum number of prototypes kept in memory cache
 ## When exceeded, least-recently-accessed entries are evicted to 80% capacity
@@ -60,6 +61,11 @@ var _last_access: Dictionary = {}
 ## Cell streaming payloads use this to keep resources out of the LRU while
 ## their publish/collision queues can still reference them.
 var _cache_pins: Dictionary = {}
+
+## Canonical resource ownership for streamed prototypes. The cache dictionary is
+## only the lookup table; handles keep PackedScene sub-resources alive while
+## async publish/collision queues still reference them.
+var _resource_handles: Dictionary = {}
 
 ## Async promotion should not evict while ResourceLoader callbacks and queued
 ## PackedScene handoffs are active. It marks this flag and a quiet frame trims.
@@ -225,6 +231,8 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 			return null
 		_stats["models_from_cache"] += 1
 		_last_access[cache_key] = Engine.get_frames_drawn()
+		if cached is PackedScene:
+			_get_or_create_resource_handle(cache_key, cached as PackedScene)
 		return _instantiate_from_scene(cached as PackedScene)
 
 	# 2. Check disk cache if enabled (fast - direct resource load)
@@ -235,6 +243,7 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 			if packed_scene:
 				_model_cache[cache_key] = packed_scene
 				_last_access[cache_key] = Engine.get_frames_drawn()
+				_get_or_create_resource_handle(cache_key, packed_scene)
 				_stats["models_from_disk"] += 1
 				_queue_eviction_if_over_budget()
 				return _instantiate_from_scene(packed_scene)
@@ -298,6 +307,7 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 	if ps.pack(node) == OK:
 		_model_cache[cache_key] = ps
 		_last_access[cache_key] = Engine.get_frames_drawn()
+		_get_or_create_resource_handle(cache_key, ps)
 		_stats["models_loaded"] += 1
 		_evict_if_over_budget()
 		return _instantiate_from_scene(ps)
@@ -310,6 +320,11 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 
 ## Clear the model cache and reset statistics
 func clear_cache() -> void:
+	for handle_value: Variant in _resource_handles.values():
+		var handle: RefCounted = handle_value as RefCounted
+		if handle != null:
+			handle.release()
+	_resource_handles.clear()
 	_model_cache.clear()
 	_last_access.clear()
 	_cache_pins.clear()
@@ -328,6 +343,18 @@ func _make_cache_key(model_path: String, item_id: String = "") -> String:
 	return normalized
 
 
+func _get_or_create_resource_handle(cache_key: String, packed_scene: PackedScene) -> RefCounted:
+	if cache_key.is_empty() or packed_scene == null:
+		return null
+	var handle: RefCounted = _resource_handles.get(cache_key) as RefCounted
+	if handle == null:
+		handle = StreamedResourceHandleScript.new(cache_key, packed_scene)
+		_resource_handles[cache_key] = handle
+	elif handle.packed_scene != packed_scene:
+		handle.set_packed_scene(packed_scene)
+	return handle
+
+
 func pin_cached_model(model_path: String, item_id: String = "", owner: String = "") -> void:
 	var cache_key := _make_cache_key(model_path, item_id)
 	if cache_key.is_empty():
@@ -337,6 +364,10 @@ func pin_cached_model(model_path: String, item_id: String = "", owner: String = 
 		_cache_pins[cache_key] = {}
 	var owners: Dictionary = _cache_pins[cache_key]
 	owners[pin_owner] = int(owners.get(pin_owner, 0)) + 1
+	if cache_key in _model_cache and _model_cache[cache_key] is PackedScene:
+		var handle := _get_or_create_resource_handle(cache_key, _model_cache[cache_key] as PackedScene)
+		if handle != null:
+			handle.add_owner(pin_owner)
 
 
 func unpin_cached_model(model_path: String, item_id: String = "", owner: String = "") -> void:
@@ -344,19 +375,22 @@ func unpin_cached_model(model_path: String, item_id: String = "", owner: String 
 
 
 func unpin_cache_key(cache_key: String, owner: String = "") -> void:
-	if cache_key.is_empty() or not _cache_pins.has(cache_key):
+	if cache_key.is_empty():
 		return
 	var pin_owner := owner if not owner.is_empty() else "external"
-	var owners: Dictionary = _cache_pins[cache_key]
-	if not owners.has(pin_owner):
-		return
-	var count := int(owners[pin_owner]) - 1
-	if count > 0:
-		owners[pin_owner] = count
-	else:
-		owners.erase(pin_owner)
-	if owners.is_empty():
-		_cache_pins.erase(cache_key)
+	if _cache_pins.has(cache_key):
+		var owners: Dictionary = _cache_pins[cache_key]
+		if owners.has(pin_owner):
+			var count := int(owners[pin_owner]) - 1
+			if count > 0:
+				owners[pin_owner] = count
+			else:
+				owners.erase(pin_owner)
+			if owners.is_empty():
+				_cache_pins.erase(cache_key)
+	var handle: RefCounted = _resource_handles.get(cache_key) as RefCounted
+	if handle != null:
+		handle.remove_owner(pin_owner)
 
 
 func unpin_cache_owner(owner: String) -> void:
@@ -371,10 +405,17 @@ func unpin_cache_owner(owner: String) -> void:
 			empty_keys.append(key)
 	for key: String in empty_keys:
 		_cache_pins.erase(key)
+	for key: String in _resource_handles:
+		var handle: RefCounted = _resource_handles[key] as RefCounted
+		if handle != null:
+			handle.remove_owner(owner)
 
 
 func _is_cache_key_pinned(cache_key: String) -> bool:
 	if cache_key in _cache_pins and not (_cache_pins[cache_key] as Dictionary).is_empty():
+		return true
+	var handle: RefCounted = _resource_handles.get(cache_key) as RefCounted
+	if handle != null and handle.is_owned():
 		return true
 	for disk_path: String in _pending_async_loads:
 		if str(_pending_async_loads[disk_path].cache_key) == cache_key:
@@ -434,6 +475,11 @@ func _evict_if_over_budget() -> void:
 		if _is_cache_key_pinned(key):
 			skipped_pinned += 1
 			continue
+		var handle: RefCounted = _resource_handles.get(key) as RefCounted
+		if handle != null and handle.is_owned():
+			skipped_pinned += 1
+			continue
+		_resource_handles.erase(key)
 		_model_cache.erase(key)
 		_last_access.erase(key)
 		evicted += 1
@@ -575,7 +621,19 @@ func get_cached_packed_scene(model_path: String, item_id: String = "") -> Packed
 		return null
 	_last_access[cache_key] = Engine.get_frames_drawn()
 	_stats["models_from_cache"] += 1
+	_get_or_create_resource_handle(cache_key, cached as PackedScene)
 	return cached as PackedScene
+
+
+func get_cached_resource_handle(model_path: String, item_id: String = "") -> RefCounted:
+	var cache_key := _make_cache_key(model_path, item_id)
+	if cache_key.is_empty() or not cache_key in _model_cache:
+		return null
+	var cached: Variant = _model_cache[cache_key]
+	if cached == null or not cached is PackedScene:
+		return null
+	_last_access[cache_key] = Engine.get_frames_drawn()
+	return _get_or_create_resource_handle(cache_key, cached as PackedScene)
 
 
 ## Restore a known-good PackedScene into the memory cache without touching disk.
@@ -590,6 +648,7 @@ func put_cached_packed_scene(model_path: String, item_id: String, packed_scene: 
 		cache_key = normalized + ":" + item_id.to_lower()
 	_model_cache[cache_key] = packed_scene
 	_last_access[cache_key] = Engine.get_frames_drawn()
+	_get_or_create_resource_handle(cache_key, packed_scene)
 	_queue_eviction_if_over_budget()
 	return true
 
@@ -903,6 +962,7 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		# Cache the PackedScene — subsequent get_model() calls instantiate from this
 		_model_cache[cache_key] = packed_scene
 		_last_access[cache_key] = Engine.get_frames_drawn()
+		_get_or_create_resource_handle(cache_key, packed_scene)
 		_stats["models_from_disk_async"] += 1
 		_queue_eviction_if_over_budget()
 
@@ -1092,6 +1152,7 @@ func add_to_cache(model_path: String, model: Node3D, item_id: String = "") -> vo
 	var ps := PackedScene.new()
 	if ps.pack(model) == OK:
 		_model_cache[cache_key] = ps
+		_get_or_create_resource_handle(cache_key, ps)
 	else:
 		_model_cache[cache_key] = null
 

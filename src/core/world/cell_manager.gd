@@ -1242,6 +1242,13 @@ func _pin_payload_cached_scene(request: AsyncCellRequest, model_path: String, it
 		return
 	var key := CellPayloadScript.make_model_key(model_path, item_id)
 	var already_pinned := request.payload.resource_refs_by_key.has(key)
+	if _model_loader.has_method("get_cached_resource_handle"):
+		var handle: RefCounted = _model_loader.call("get_cached_resource_handle", model_path, item_id) as RefCounted
+		if handle != null:
+			request.payload.pin_model_handle(model_path, item_id, handle)
+			if not already_pinned and _model_loader.has_method("pin_cached_model"):
+				_model_loader.call("pin_cached_model", model_path, item_id, _cache_pin_owner_for_request(request.request_id))
+			return
 	var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path, item_id)
 	if packed_scene != null:
 		request.payload.pin_model_resource(model_path, item_id, packed_scene)
@@ -1258,6 +1265,8 @@ func _unpin_payload_cached_scenes(request: AsyncCellRequest) -> void:
 		return
 	if _model_loader.has_method("unpin_cache_owner"):
 		_model_loader.call("unpin_cache_owner", _cache_pin_owner_for_request(request.request_id))
+	if request.payload != null and request.payload.has_method("release_resource_handles"):
+		request.payload.release_resource_handles()
 
 
 func _restore_payload_cached_scene(request: AsyncCellRequest, model_path: String, item_id: String) -> void:
@@ -1310,7 +1319,14 @@ func _process_static_prepare_queue(budget_usec: int, max_per_frame: int) -> int:
 				_static_prepare_failed[entry.type_name] = true
 				continue
 			if request != null and request.payload != null:
-				request.payload.pin_model_resource(entry.model_path, entry.item_id, packed_scene)
+				if _model_loader.has_method("get_cached_resource_handle"):
+					var handle: RefCounted = _model_loader.call("get_cached_resource_handle", entry.model_path, entry.item_id) as RefCounted
+					if handle != null:
+						request.payload.pin_model_handle(entry.model_path, entry.item_id, handle)
+					else:
+						request.payload.pin_model_resource(entry.model_path, entry.item_id, packed_scene)
+				else:
+					request.payload.pin_model_resource(entry.model_path, entry.item_id, packed_scene)
 
 			var reg_start := Time.get_ticks_usec()
 			var registered := false
@@ -1644,6 +1660,11 @@ func get_async_result(request_id: int) -> Node3D:
 	var request: AsyncCellRequest = _async_requests[request_id]
 	if not request.completed:
 		return null
+
+	if is_instance_valid(request.cell_node) \
+			and request.payload != null \
+			and request.payload.has_method("bind_resource_handles_to_node"):
+		request.payload.bind_resource_handles_to_node(request.cell_node)
 
 	# Remove from tracking and return result
 	_unpin_payload_cached_scenes(request)

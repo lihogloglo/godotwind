@@ -368,8 +368,7 @@ func _finish() -> void:
 
 
 func _quit_cleanly() -> void:
-	Log.info("shutdown", "BENCH_QUIT - stress runner complete, skipping manual RS teardown")
-	Engine.set_meta("_quitting", true)
+	Log.info("shutdown", "BENCH_QUIT - stress runner complete, graceful tree quit")
 	if _streaming_manager != null:
 		_streaming_manager.set_process(false)
 	get_tree().quit()
