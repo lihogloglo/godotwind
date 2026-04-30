@@ -3,7 +3,7 @@
 Date: 2026-04-29  
 Owner: Codex  
 Branch: `perf/distant-rendering-2026-04-17`  
-Related handoff: `docs/audit/near_streaming_recovery_handoff_2026_04_29_codex.md`
+Related handoff: `docs/reference/how to streaming.md`
 
 ## Goal
 
