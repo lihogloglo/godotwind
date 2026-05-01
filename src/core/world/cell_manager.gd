@@ -26,10 +26,6 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const StaticShapeCacheScript := preload("res://src/core/world/static_shape_cache.gd")
 const CellStaticCollisionScript := preload("res://src/core/world/cell_static_collision.gd")
 const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
-# S.1 follow-up §12.2 — second crash-site breadcrumbs for the post-instantiate
-# batch add_child loop.
-const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
-
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
 
@@ -1361,6 +1357,7 @@ func _process_static_prepare_entry(entry: Dictionary) -> int:
 		return STATIC_PREPARE_ENTRY_SKIPPED
 
 	var has_registered_type := bool(_static_renderer.call("has_type", type_name))
+	var payload_key := CellPayloadScript.make_model_key(model_path, item_id)
 
 	# Never sync-load in the prepare lane. Wait until the async disk path has
 	# promoted the PackedScene into memory, then instantiate/register.
@@ -1385,7 +1382,17 @@ func _process_static_prepare_entry(entry: Dictionary) -> int:
 
 		var reg_start := Time.get_ticks_usec()
 		var registered := false
-		if _static_renderer.has_method("register_from_packed_scene"):
+		if _static_renderer.has_method("request_register_from_packed_scene"):
+			var register_status := str(_static_renderer.call("request_register_from_packed_scene", type_name, packed_scene))
+			match register_status:
+				"ready":
+					registered = true
+				"pending":
+					request.payload.pin_model_resource(model_path, item_id, packed_scene)
+					return STATIC_PREPARE_ENTRY_RETRY
+				_:
+					registered = false
+		elif _static_renderer.has_method("register_from_packed_scene"):
 			registered = bool(_static_renderer.call("register_from_packed_scene", type_name, packed_scene))
 		reg_us = Time.get_ticks_usec() - reg_start
 		if not registered:
@@ -1394,7 +1401,6 @@ func _process_static_prepare_entry(entry: Dictionary) -> int:
 
 	var batch_us := 0
 	var batch_count := 0
-	var payload_key := CellPayloadScript.make_model_key(model_path, item_id)
 	if not request.payload.has_static_bucket(payload_key):
 		_pin_payload_cached_scene(request, model_path, item_id)
 		var resource_handle: RefCounted = request.payload.get_model_handle(model_path, item_id) if request.payload.has_method("get_model_handle") else null
@@ -1409,12 +1415,14 @@ func _process_static_prepare_entry(entry: Dictionary) -> int:
 
 	var total_us := Time.get_ticks_usec() - prep_start
 	if total_us > 16_000:
-		Log.warn("streaming", "[static-prepare-spike %.1fms] state=%.1f batch=%.1f/%d type=%s queue=%d" % [
+		Log.warn("streaming", "[static-prepare-spike %.1fms] state=%.1f batch=%.1f/%d type=%s key=%s grid=%s queue=%d" % [
 			total_us / 1000.0,
 			reg_us / 1000.0,
 			batch_us / 1000.0,
 			batch_count,
 			type_name.get_file(),
+			payload_key,
+			str(request.grid),
 			_get_static_prepare_queue_size(),
 		])
 
@@ -2175,14 +2183,9 @@ func _drain_pending_child_attaches(max_count: int, budget_usec: float) -> int:
 				child.name,
 				child.get_child_count(),
 			]
-			CrashBreadcrumb.write("cm::attach_one_begin", attach_label)
 			var attach_one_start := Time.get_ticks_usec()
 			parent.add_child(child)
 			var attach_one_us := Time.get_ticks_usec() - attach_one_start
-			CrashBreadcrumb.write("cm::attach_one_done", "%s elapsed_us=%d" % [
-				attach_label,
-				attach_one_us,
-			])
 			if attach_one_us >= CHILD_ATTACH_SLOW_LOG_USEC:
 				Log.warn("streaming", "[child-attach-spike %.1fms] %s" % [
 					float(attach_one_us) / 1000.0,
@@ -2197,10 +2200,6 @@ func _drain_pending_child_attaches(max_count: int, budget_usec: float) -> int:
 			dropped += 1
 	for i in range(blocked_entries.size() - 1, -1, -1):
 		_pending_child_attaches.push_front(blocked_entries[i])
-	if blocked > 0 or dropped > 0:
-		CrashBreadcrumb.write("cm::attach_guard", "blocked=%d dropped=%d pending=%d" % [
-			blocked, dropped, _pending_child_attaches.size()
-		])
 	return attached
 
 
@@ -2659,22 +2658,13 @@ func process_async_instantiation(
 		SC.CHILD_ATTACH_BUDGET_MS * 1000.0,
 		maxf(0.0, budget_usec - float(add_child_start - start_time))
 	)
-	CrashBreadcrumb.write("cm::attach_start", "pending=%d budget_us=%d" % [
-		_pending_child_attaches.size(), int(attach_budget_post)
-	])
 	var attached_children := _drain_pending_child_attaches(
 		SC.CHILD_ATTACH_MAX_PER_FRAME,
 		attach_budget_post
 	)
 	attach_time_us += Time.get_ticks_usec() - add_child_start
-	CrashBreadcrumb.write("cm::attach_done", "attached=%d pending=%d" % [
-		attached_children, _pending_child_attaches.size()
-	])
 	if allow_collision_finalize:
 		collision_finalize_us = _maybe_finalize_static_collision_when_idle(start_time, budget_usec)
-	CrashBreadcrumb.write("cm::inst_tail_done", "queue=%d child=%d cfin=%d" % [
-		_instantiation_queue.size(), _pending_child_attaches.size(), collision_finalize_us
-	])
 
 	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
 	# threshold, dump the pre-loop split so we can tell whether
@@ -3309,7 +3299,6 @@ func _tick_static_collision_build(
 		# High priority — racing the cell's draw / interaction hooks. Worker
 		# does pure data work, no autoload/scene-tree access. Mirror Phase F's
 		# task-id tracking pattern.
-		CrashBreadcrumb.write("collision_worker_dispatch", "%d_%d" % [request.grid.x, request.grid.y])
 		request.payload.collision_task_id = WorkerThreadPool.add_task(
 			_cell_static_collision.worker_collect_triangles.bind(payload),
 			true,
@@ -3408,7 +3397,6 @@ func _tick_static_collision_build(
 		winner.payload.collision_payload = null
 		return 0
 
-	CrashBreadcrumb.write("collision_finalize_begin", "%d_%d" % [winner.grid.x, winner.grid.y])
 	var finalize_start_us := Time.get_ticks_usec()
 	var finalized: Variant = _cell_static_collision.finalize_body_slice(
 		payload,
@@ -3416,7 +3404,6 @@ func _tick_static_collision_build(
 		SC.CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME,
 	)
 	var finalize_us := Time.get_ticks_usec() - finalize_start_us
-	CrashBreadcrumb.write("collision_finalize_end", "%d_%d" % [winner.grid.x, winner.grid.y])
 	if finalized != null:
 		winner.payload.collision_body = finalized
 	var tri_count := 0

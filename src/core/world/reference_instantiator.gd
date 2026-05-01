@@ -48,12 +48,6 @@ const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_in
 # docs/plans/near_streaming_2026_04_28_interactive_spawn.md step 2.
 const InteractionShapeCacheScript := preload("res://src/core/world/interaction_shape_cache.gd")
 
-# S.1 follow-up — §12.2 crash-site diagnostic. Breadcrumbs bracket every
-# post-model-load hazard in _instantiate_model_object so a native SIGSEGV
-# post-instantiate_return narrows to a single named step. Remove once the
-# second crash site is closed.
-const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
-
 # Injected dependencies (set by CellManager)
 var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
@@ -549,14 +543,6 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	# Auto-play NIF keyframe animations (flags, banners, rotating objects) in NEAR tier only
 	_auto_play_nif_animation(instance, ref)
-	# S.1 follow-up §12.2 — only ri:: breadcrumb kept in hot path. If crash
-	# fires between model_loader's `instantiate_return` and this `ri::ret`,
-	# the culprit is in the reference_instantiator post-load block above
-	# (enable_coll / hide_lod / apply_xf / apply_meta / carryable / door /
-	# gen_static / auto_anim). If `ri::ret` is the last crumb, crash is in
-	# cell_manager post-return (VR apply, pending_children append, or the
-	# batch add_child loop — those have their own `cm::` crumbs).
-	CrashBreadcrumb.write("ri::ret", model_path)
 
 	# NOTE: Fade-in is NOT applied here because the node isn't in the scene tree yet.
 	# Fade-in must be applied AFTER add_child() - see CellManager._instantiate_cell()

@@ -22,7 +22,6 @@ extends RefCounted
 
 const LODResource := preload("res://src/core/world/lod_resource.gd")
 const StaticShapePackScript := preload("res://src/core/world/static_shape_pack.gd")
-const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
 const StreamedResourceHandleScript := preload("res://src/core/streaming/streamed_resource_handle.gd")
 
 ## Maximum number of prototypes kept in memory cache
@@ -938,14 +937,7 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 		# finalized resource when status is THREAD_LOAD_LOADED (verified against
 		# the engine's resource_loader.cpp ResourceLoaderTaskState::done path —
 		# the sub-resources are registered before the status flips to LOADED).
-		# If a SIGSEGV regression appears, revert this hunk.
-		var packed_scene := ResourceLoader.load(
-			entry.disk_path,
-			"PackedScene",
-			ResourceLoader.CACHE_MODE_REUSE
-		) as PackedScene
-		if packed_scene == null:
-			packed_scene = entry.packed_scene as PackedScene
+		var packed_scene := entry.packed_scene as PackedScene
 
 		# Validate before caching — if can_instantiate() fails, cache null
 		if packed_scene == null or not packed_scene.can_instantiate():
@@ -1021,24 +1013,14 @@ func _drain_pending_instantiate_queue(budget_usec: int) -> int:
 func _instantiate_from_scene(packed_scene: PackedScene) -> Node3D:
 	if packed_scene == null or not packed_scene.can_instantiate():
 		return null
-	# S.1 follow-up: breadcrumb the PackedScene path step-by-step.
-	# Native SIGSEGV persists after the 2026-04-16 canonical PackedScene refactor;
-	# breadcrumb is the only way to see which model / step crashes because release
-	# build has no debug symbols. Pulled once the race is fixed.
-	var res_path := packed_scene.resource_path
-	CrashBreadcrumb.write("instantiate_begin", res_path)
 	var instance := packed_scene.instantiate()
-	CrashBreadcrumb.write("instantiate_ok", res_path)
 	if instance == null:
 		return null
 	if not instance is Node3D:
 		instance.queue_free()
 		return null
-	CrashBreadcrumb.write("strip_occluders_begin", res_path)
 	_strip_occluders(instance)
-	CrashBreadcrumb.write("disable_collision_begin", res_path)
 	_disable_collision_shapes_in_tree(instance)
-	CrashBreadcrumb.write("instantiate_return", res_path)
 	return instance as Node3D
 
 

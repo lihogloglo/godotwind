@@ -6,6 +6,7 @@ class_name StreamingStressRunner
 extends Node
 
 const DU := preload("res://src/core/world/distance_utils.gd")
+const BT := preload("res://tests/benchmark/benchmark_thresholds.gd")
 
 const OUTPUT_DIR_BASE := "user://benchmark_results"
 const CSV_HEADERS := "frame,time_ms,fps,cam_x,cam_y,cam_z,cell_x,cell_y,cell_changed,queue_size,loaded_cells,async_requests,rendered_objects,draw_calls,primitives,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us"
@@ -14,7 +15,9 @@ const SETTLE_SEC := 8.0
 const TRANSITION_PRE_FRAMES := 30
 const TRANSITION_POST_FRAMES := 120
 const BOOMERANG_DISTANCE_M := 360.0
-const BLOCKING_FRAME_MS := 50.0
+const BLOCKING_FRAME_MS := BT.BLOCKING_FRAME_MS
+const STREAMING_PUBLISH_BLOCKING_MS := BT.STREAMING_PUBLISH_BLOCKING_MS
+const STATIC_PUBLISH_SPIKE_MS := BT.STATIC_PUBLISH_SPIKE_MS
 
 ## Step 2a: known-bad tokens scanned in the Godot user log at finish time.
 ## Hits flip the run status to "failed" and produce a non-zero process exit
@@ -33,6 +36,7 @@ const FAILURE_TOKENS: Array[String] = [
 	"stale bucket",
 	"Failed to load script",
 	"ERROR: CellStaticCollision.finalize_body",
+	"[static-prepare-spike",
 ]
 ## Cap how much of the log we scan. The log can grow large during long
 ## sessions; we only care about lines written during this stress run.
@@ -509,6 +513,18 @@ func _collect_gate_failure_reasons(summary: Dictionary, failure_scan: Dictionary
 	var frames_over_blocking := int(summary.get("frames_over_50", 0))
 	if frames_over_blocking > 0:
 		reasons.append("frames_over_50:%d" % frames_over_blocking)
+	if summary.has("max_ms"):
+		var max_frame_ms := float(summary.get("max_ms", 0.0))
+		if max_frame_ms >= BLOCKING_FRAME_MS:
+			reasons.append("max_frame_ms:%.1f" % max_frame_ms)
+	if summary.has("max_stream_total_ms"):
+		var max_stream_ms := float(summary.get("max_stream_total_ms", 0.0))
+		if max_stream_ms >= STREAMING_PUBLISH_BLOCKING_MS:
+			reasons.append("max_stream_total_ms:%.1f" % max_stream_ms)
+	if summary.has("max_inst_static_ms"):
+		var max_static_publish_ms := float(summary.get("max_inst_static_ms", 0.0))
+		if max_static_publish_ms >= STATIC_PUBLISH_SPIKE_MS:
+			reasons.append("max_static_publish_ms:%.1f" % max_static_publish_ms)
 	return reasons
 
 
@@ -604,6 +620,7 @@ func _build_summary() -> Dictionary:
 	var max_stream := 0.0
 	var max_inst_ms := 0.0
 	var max_static_cull_ms := 0.0
+	var max_inst_static_ms := 0.0
 	for row in _rows:
 		var ms := row[1]
 		frame_times.append(ms)
@@ -623,6 +640,7 @@ func _build_summary() -> Dictionary:
 		max_stream = maxf(max_stream, row[15])
 		max_inst_ms = maxf(max_inst_ms, row[18] / 1000.0)
 		max_static_cull_ms = maxf(max_static_cull_ms, row[24] / 1000.0)
+		max_inst_static_ms = maxf(max_inst_static_ms, row[30] / 1000.0)
 	frame_times.sort()
 
 	var transitions := _build_transition_summaries()
@@ -660,6 +678,9 @@ func _build_summary() -> Dictionary:
 		"frames_over_33_33": frames_over_33,
 		"frames_over_50": frames_over_50,
 		"blocking_frame_ms": BLOCKING_FRAME_MS,
+		"streaming_publish_budget_ms": BT.STREAMING_PUBLISH_BUDGET_MS,
+		"streaming_publish_blocking_ms": STREAMING_PUBLISH_BLOCKING_MS,
+		"static_publish_spike_ms": STATIC_PUBLISH_SPIKE_MS,
 		"cell_transitions": transitions.size(),
 		"worst_transition_post_max_ms": worst_transition_ms,
 		"worst_transition_drop_fps": worst_drop_fps,
@@ -671,6 +692,7 @@ func _build_summary() -> Dictionary:
 		"max_stream_total_ms": max_stream,
 		"max_phase_inst_ms": max_inst_ms,
 		"max_phase_static_cull_ms": max_static_cull_ms,
+		"max_inst_static_ms": max_inst_static_ms,
 		"transitions": transitions,
 		"lifecycle_event_counts": lifecycle_counts,
 	}

@@ -1,5 +1,9 @@
 # NEAR Streaming Recovery Handoff
 
+Archived: durable guidance and code recipes were consolidated into
+`docs/systems/streaming_rendering_bible.md` on 2026-05-01. Keep this file only
+as historical handoff material.
+
 Date: 2026-04-29  
 Author: Codex  
 Branch observed: `perf/distant-rendering-2026-04-17`  

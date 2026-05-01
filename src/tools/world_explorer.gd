@@ -1788,19 +1788,14 @@ func _setup_subsystem_toggles() -> void:
 				_env_controls.on_native_volumetric_fog_toggled(on),
 	}
 
-	# S.0 (near_tier_refactor.md 2026-04-19): MID / HLOD / IMPOSTORS
-	# parked at boot while open-world streaming refactor is in flight.
-	# Flip back to true individually once each tier re-lands under the
-	# per-cell state machine (phases S.7+).
+	# HLOD / IMPOSTORS park at boot while NEAR stabilizes. MID remains active
+	# as the 0-500m fallback band when HLOD is parked.
 	#
 	# `mid_objects: true` post-statics_no_node3d T.1 (2026-04-19): the
 	# static_object_renderer is now the universal statics render path
 	# (NEAR + flora + rocks + arches + clutter), not MID-only. Keeping
-	# this `false` at boot would hide ALL statics — the S.0 parking
-	# intent was to disable the MID DISTANCE BAND (visibility_range), not
-	# the renderer itself. MID-distance behavior is already inert (no
-	# `_apply_mid_visibility_range`, deleted in S.1). The UI toggle still
-	# exists for benchmark A/B isolation; it now toggles all statics.
+	# this `false` at boot would hide ALL statics. The UI toggle still exists
+	# for benchmark A/B isolation; it now toggles all statics.
 	var defaults: Dictionary = {
 		"terrain": true,
 		"ocean": false,
@@ -1819,8 +1814,8 @@ func _setup_subsystem_toggles() -> void:
 	_subsystem_toggles.setup(callbacks, defaults)
 
 	# Boot banner: make the parked state impossible to miss.
-	_log("[color=yellow][NEAR-only mode][/color] MID / HLOD / IMPOSTORS parked — open_world_streaming refactor in progress (docs/plans/distant_rendering_2026_04/near_tier_refactor.md)")
-	Log.info("streaming", "[NEAR-only mode] MID / HLOD / IMPOSTORS defaults=false; NEAR-tier refactor in progress")
+	_log("[color=yellow][Distant tiers parked][/color] HLOD / IMPOSTORS parked; MID fallback remains 0-500m")
+	Log.info("streaming", "[Distant tiers parked] HLOD / IMPOSTORS defaults=false; MID fallback 0-500m")
 
 	# CLI: --near-only is now the default behavior; flag retained as a
 	# no-op for any launch scripts / docs that still pass it explicitly.
@@ -2255,35 +2250,20 @@ func _cmd_prebake_animations(_args: Dictionary) -> String:
 func _cmd_hlod_enable(_args: Dictionary) -> String:
 	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
 		return "HLOD merger not initialized"
-	var DU := preload("res://src/core/world/distance_utils.gd")
 	native_streaming_manager._hlod_merger.enabled = true
-	# Narrow MID to 300m so HLOD covers 300-1000m
-	if native_streaming_manager._static_renderer:
-		native_streaming_manager._static_renderer.visibility_range_end = DU.HLOD_START
-	# Push impostor begin to HLOD_END — HLOD fills 300-1000m, impostors take over at 1000m.
-	# Restore visibility in case `hlod_disable` hid the impostor renderer (debug mode).
-	if native_streaming_manager._impostor_renderer:
-		native_streaming_manager._impostor_renderer.visible = true
-		native_streaming_manager._impostor_renderer.set_visibility_range_begin(DU.HLOD_END)
-	# Trigger immediate HLOD update for current camera position
-	native_streaming_manager._hlod_needs_initial_update = true
+	native_streaming_manager.set_hlod_visible(true)
 	return "HLOD merging ENABLED — MID 0-300m, HLOD 300-1000m, impostors 1000m+"
 
 
 func _cmd_hlod_disable(_args: Dictionary) -> String:
 	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
 		return "HLOD merger not initialized"
-	var DU := preload("res://src/core/world/distance_utils.gd")
 	native_streaming_manager._hlod_merger.enabled = false
-	native_streaming_manager._hlod_merger.cleanup()
-	# Phase 4 (2026-04-17): HLOD-off is the debug/baseline path per user rule
-	# "only NEAR renders past 150m, no middle ground". Cut MID at 150m and
-	# disable impostors entirely — nothing past NEAR.
-	if native_streaming_manager._static_renderer:
-		native_streaming_manager._static_renderer.visibility_range_end = DU.NEAR_END
-	if native_streaming_manager._impostor_renderer:
-		native_streaming_manager._impostor_renderer.visible = false
-	return "HLOD DISABLED — debug mode: NEAR only (0-150m), MID/HLOD/FAR off"
+	native_streaming_manager._hlod_merger.cleanup(false)
+	# HLOD-off parks only HLOD. MID falls back to 500m; FAR is controlled by
+	# the separate impostor toggle.
+	native_streaming_manager.set_hlod_visible(false)
+	return "HLOD DISABLED - MID fallback 0-500m, HLOD parked"
 
 
 func _cmd_proto_registry(args: Dictionary) -> String:

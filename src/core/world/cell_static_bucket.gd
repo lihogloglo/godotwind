@@ -3,6 +3,8 @@ extends RefCounted
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 
+const TRANSFORM_STRIDE := 12
+
 var type_name: String = ""
 var payload_key: String = ""
 var bucket_key: String = ""
@@ -143,9 +145,21 @@ func _create_draw_group(
 		return null
 	var material_resource: Material = sub_mesh.material_resource
 	var surface_materials: Array[Material] = sub_mesh.surface_materials
-	var mesh_resource := _make_multimesh_mesh(source_mesh, material_resource, surface_materials)
+	var mesh_resource := source_mesh
 	if mesh_resource == null:
 		return null
+
+	if transforms.size() == 1:
+		var single_transform: Transform3D = transforms[0]
+		return _create_single_mesh_draw_group(
+			mesh_resource,
+			material_resource,
+			surface_materials,
+			sub_mesh.local_transform,
+			single_transform,
+			scenario,
+			visibility_range_end
+		)
 
 	var multimesh := MultiMesh.new()
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
@@ -154,14 +168,9 @@ func _create_draw_group(
 
 	var local_transform: Transform3D = sub_mesh.local_transform
 	var mesh_aabb := mesh_resource.get_aabb()
-	var custom_aabb := AABB()
-	for i in range(transforms.size()):
-		var world_transform: Transform3D = transforms[i]
-		var slot_transform := world_transform * local_transform
-		multimesh.set_instance_transform(i, slot_transform)
-		var slot_aabb: AABB = slot_transform * mesh_aabb
-		custom_aabb = slot_aabb if i == 0 else custom_aabb.merge(slot_aabb)
-	multimesh.custom_aabb = custom_aabb
+	var packed := _pack_multimesh_transforms(transforms, local_transform, mesh_aabb)
+	multimesh.set_buffer(packed.buffer)
+	multimesh.custom_aabb = packed.custom_aabb
 
 	var rid := RenderingServer.instance_create()
 	RenderingServer.instance_set_base(rid, multimesh.get_rid())
@@ -195,25 +204,73 @@ func _create_draw_group(
 	return group
 
 
-func _make_multimesh_mesh(source_mesh: Mesh, material_resource: Material, surface_materials: Array[Material]) -> Mesh:
-	if material_resource != null or surface_materials.is_empty():
-		return source_mesh
+func _create_single_mesh_draw_group(
+	mesh_resource: Mesh,
+	material_resource: Material,
+	surface_materials: Array[Material],
+	local_transform: Transform3D,
+	world_transform: Transform3D,
+	scenario: RID,
+	visibility_range_end: float,
+) -> DrawGroup:
+	var rid := RenderingServer.instance_create()
+	RenderingServer.instance_set_base(rid, mesh_resource.get_rid())
+	RenderingServer.instance_set_scenario(rid, scenario)
+	RenderingServer.instance_set_transform(rid, world_transform * local_transform)
 
-	var surface_count := source_mesh.get_surface_count()
-	var material_count := mini(surface_materials.size(), surface_count)
-	var has_surface_material := false
-	for surface_index in range(material_count):
-		if surface_materials[surface_index] != null:
-			has_surface_material = true
-			break
-	if not has_surface_material:
-		return source_mesh
+	var material_rid: RID = material_resource.get_rid() if material_resource != null else RID()
+	if material_rid.is_valid():
+		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
 
-	var mesh_copy: Mesh = source_mesh.duplicate(false) as Mesh
-	if mesh_copy == null:
-		return source_mesh
-	for surface_index in range(material_count):
-		var material: Material = surface_materials[surface_index]
-		if material != null:
-			mesh_copy.surface_set_material(surface_index, material)
-	return mesh_copy
+	RenderingServer.instance_geometry_set_visibility_range(
+		rid,
+		0.0,
+		visibility_range_end,
+		0.0,
+		DU.FADE_MARGIN_LOD3_FAR,
+		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+	)
+	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
+	if not visible:
+		RenderingServer.instance_set_visible(rid, false)
+
+	var group := DrawGroup.new()
+	group.mesh_resource = mesh_resource
+	group.material_resource = material_resource
+	group.surface_materials = surface_materials.duplicate()
+	group.local_transform = local_transform
+	group.multimesh = null
+	group.instance_rid = rid
+	group.instance_count = 1
+	return group
+
+
+func _pack_multimesh_transforms(transforms: Array, local_transform: Transform3D, mesh_aabb: AABB) -> Dictionary:
+	var buffer := PackedFloat32Array()
+	buffer.resize(transforms.size() * TRANSFORM_STRIDE)
+	var custom_aabb := AABB()
+	for i in range(transforms.size()):
+		var world_transform: Transform3D = transforms[i]
+		var slot_transform := world_transform * local_transform
+		var off := i * TRANSFORM_STRIDE
+		var b := slot_transform.basis
+		var o := slot_transform.origin
+		buffer[off + 0] = b.x.x
+		buffer[off + 1] = b.y.x
+		buffer[off + 2] = b.z.x
+		buffer[off + 3] = o.x
+		buffer[off + 4] = b.x.y
+		buffer[off + 5] = b.y.y
+		buffer[off + 6] = b.z.y
+		buffer[off + 7] = o.y
+		buffer[off + 8] = b.x.z
+		buffer[off + 9] = b.y.z
+		buffer[off + 10] = b.z.z
+		buffer[off + 11] = o.z
+
+		var slot_aabb: AABB = slot_transform * mesh_aabb
+		custom_aabb = slot_aabb if i == 0 else custom_aabb.merge(slot_aabb)
+	return {
+		"buffer": buffer,
+		"custom_aabb": custom_aabb,
+	}

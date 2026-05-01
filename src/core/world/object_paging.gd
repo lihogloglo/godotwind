@@ -58,6 +58,10 @@ const MIN_REFS_TO_MERGE: int = 5
 ## Merge-queue stagger budget (main-thread work per frame).
 const MERGES_PER_FRAME: int = 2
 
+## Completion publish budget. Each entry can run generate_lods() and create an
+## RS instance on the main thread, so finalization must be frame-bounded too.
+const COMPLETIONS_PER_FRAME: int = 1
+
 ## visibility_range fade margins (same on both sides of a tier handoff).
 const TIER_FADE_MARGIN: float = 20.0
 
@@ -93,10 +97,10 @@ class PagingChunkData:
 #region State
 
 ## Master toggle.
-## Phase 4 (2026-04-17) — ON by default. HLOD is the production path:
+## Phase 4 (2026-04-17) — implemented as the production path, but currently
+## parked by the world_explorer subsystem default while NEAR stabilizes:
 ## HLOD-on = full pipeline (MID 150-300m → HLOD 300-1000m → FAR 1km+);
-## HLOD-off = debug/baseline (only NEAR renders past 150m, per user
-## "Keep it simple" rule in DISTANT_RENDERING_PLAN_2026_04_17.md).
+## HLOD-off parks only merged chunks; MID falls back to DU.MID_END.
 ## Toggle at runtime via console: `hlod_enable` / `hlod_disable`.
 var enabled: bool = true
 
@@ -328,19 +332,28 @@ func process_merge_queue() -> void:
 ## Call once per frame from streaming manager.
 ## Returns number of chunks completed.
 func process_completions() -> int:
-	if not enabled or _completed_queue.is_empty():
+	if not enabled:
+		_completed_mutex.lock()
+		_completed_queue.clear()
+		_completed_mutex.unlock()
 		return 0
 
 	_completed_mutex.lock()
-	var queue := _completed_queue.duplicate()
-	_completed_queue.clear()
-	_completed_mutex.unlock()
-
-	# When invisible, drain and discard — avoids main-thread generate_lods() stall
-	# from in-flight BG merges that completed while HLOD was toggled off.
-	# _pending_merges is already cleaned by _on_task_completed callback; safe to drop.
-	if not _globally_visible:
+	if _completed_queue.is_empty():
+		_completed_mutex.unlock()
 		return 0
+
+	if not _globally_visible:
+		_completed_queue.clear()
+		_completed_mutex.unlock()
+		return 0
+
+	var queue: Array = []
+	var budget := COMPLETIONS_PER_FRAME
+	while budget > 0 and not _completed_queue.is_empty():
+		queue.append(_completed_queue.pop_back())
+		budget -= 1
+	_completed_mutex.unlock()
 
 	var count := 0
 	for entry: Dictionary in queue:
@@ -397,13 +410,16 @@ func set_all_visible(visible: bool) -> void:
 		_warmup_queue.clear()
 
 
-func cleanup() -> void:
+func cleanup(disconnect_signals: bool = true) -> void:
 	# Cancel pending merges
 	if _bg_processor:
 		for key: Vector3i in _pending_merges:
 			_bg_processor.cancel_task(_pending_merges[key])
-		_bg_processor.task_completed.disconnect(_on_task_completed)
-		_bg_processor.task_failed.disconnect(_on_task_failed)
+		if disconnect_signals:
+			if _bg_processor.task_completed.is_connected(_on_task_completed):
+				_bg_processor.task_completed.disconnect(_on_task_completed)
+			if _bg_processor.task_failed.is_connected(_on_task_failed):
+				_bg_processor.task_failed.disconnect(_on_task_failed)
 	_pending_merges.clear()
 	_task_to_key.clear()
 	_merge_queue.clear()
@@ -420,7 +436,9 @@ func cleanup() -> void:
 	_mesh_sizes.clear()
 	_lru_order.clear()
 	_cache_used_bytes = 0
+	_completed_mutex.lock()
 	_completed_queue.clear()
+	_completed_mutex.unlock()
 
 	# Phase 2 SizeCache
 	_size_cache_mutex.lock()

@@ -1,5 +1,9 @@
 # Godot 4.6 NEAR Streaming Primary-Source Research
 
+Archived: durable conclusions were consolidated into
+`docs/systems/streaming_rendering_bible.md` on 2026-05-01. Keep this file only
+as forensic source material.
+
 Date: 2026-05-01
 Author: claude (architect / third-opinion reviewer role)
 Scope: input for the Phase 2B written design pass

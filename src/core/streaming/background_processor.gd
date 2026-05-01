@@ -170,6 +170,34 @@ func clear_pending() -> void:
 	_pending_tasks.clear()
 
 
+## Shutdown drain for owners that are about to drop task-bound state.
+## WorkerThreadPool tasks must be waited before their tracking handles are
+## discarded; pending tasks have no WTP handle yet and can be forgotten.
+func drain_all() -> void:
+	_running = false
+	_pending_tasks.clear()
+
+	var active_tasks: Array[TaskEntry] = []
+	for task_id: int in _active_tasks:
+		active_tasks.append(_active_tasks[task_id])
+	_active_tasks.clear()
+
+	for task: TaskEntry in active_tasks:
+		if task.group_task_id >= 0:
+			WorkerThreadPool.wait_for_task_completion(task.group_task_id)
+
+	for handle: int in _orphaned_wtp_handles:
+		WorkerThreadPool.wait_for_task_completion(handle)
+	_orphaned_wtp_handles.clear()
+
+	if _results_mutex:
+		_results_mutex.lock()
+		_completed_results.clear()
+		_results_mutex.unlock()
+	else:
+		_completed_results.clear()
+
+
 ## Internal: Start pending tasks up to concurrent limit
 func _start_pending_tasks() -> void:
 	while _active_tasks.size() < _concurrent_limit and not _pending_tasks.is_empty():

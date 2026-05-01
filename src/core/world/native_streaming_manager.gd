@@ -352,12 +352,9 @@ var _profiler: StreamingProfilerScript = null
 ## Fast cleanup for quit — frees only RS resources, skips slow node tree ops
 ## Called from world_explorer's _do_fast_quit() before get_tree().quit()
 func fast_cleanup() -> void:
-	# Stop background processor immediately — prevents WTP handle blocking in _exit_tree
+	# Stop and drain background work before dropping task-bound state.
 	if _background_processor:
-		_background_processor._running = false
-		_background_processor._active_tasks.clear()
-		_background_processor._pending_tasks.clear()
-		_background_processor._orphaned_wtp_handles.clear()
+		_background_processor.drain_all()
 
 	# Phase 3 — drain CellPreloader BEFORE the cell_manager drain. The preloader
 	# owns its own WorkerThreadPool warm tasks (ResourceLoader.load); they must
@@ -536,23 +533,22 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		_impostor_renderer.set_load_budget_usec(15000.0)
 
 	# Initialize runtime HLOD merger with viewport scenario + static renderer.
-	# Phase 4 (2026-04-17): ON by default. HLOD is the production pipeline —
+	# Phase 4 (2026-04-17): HLOD is the production pipeline when enabled —
 	# MID registry (150-300m) → HLOD merged chunks (300-1000m) → impostors
-	# (1000m+). HLOD-off is debug/baseline only (MID+HLOD disabled past 150m
-	# per the user "Keep it simple" rule). Toggle: `hlod_enable` / `hlod_disable`.
+	# (1000m+). HLOD-off parks merged chunks; MID falls back to DU.MID_END.
+	# Toggle: `hlod_enable` / `hlod_disable`.
 	if _hlod_merger:
 		var scenario := get_viewport().get_world_3d().scenario
 		_hlod_merger.initialize(scenario, _static_renderer, _background_processor)
-		if _hlod_merger.enabled and _static_renderer:
-			_static_renderer.visibility_range_end = DU.HLOD_START
+		if _hlod_merger.enabled:
+			set_hlod_visible(true)
 			# Impostors pick up where HLOD ends — 1km+. Keeps tier bands
 			# strictly non-overlapping (DISTANT_RENDERING_AUDIT §5.1 dedup).
-			if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
-				_impostor_renderer.set_visibility_range_begin(DU.HLOD_END)
 			Log.info("streaming", "Runtime HLOD merger active — MID 0-%dm, HLOD %d-%dm, impostors %dm+" % [
 				int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END), int(DU.HLOD_END)])
 		else:
-			Log.info("streaming", "Runtime HLOD merger initialized but DISABLED (enable via console: hlod_enable)")
+			set_hlod_visible(false)
+			Log.info("streaming", "Runtime HLOD merger initialized but DISABLED - MID fallback 0-%dm (enable via console: hlod_enable)" % int(DU.MID_END))
 
 	_initialized = true
 	Log.info("streaming", "Initialized with native visibility_range streaming")
@@ -2086,6 +2082,12 @@ func set_near_tier_visible(visible: bool) -> void:
 func set_hlod_visible(visible: bool) -> void:
 	if _hlod_merger:
 		_hlod_merger.set_all_visible(visible)
+	if _static_renderer:
+		_static_renderer.visibility_range_end = DU.HLOD_START if visible else DU.MID_END
+	if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
+		_impostor_renderer.set_visibility_range_begin(DU.HLOD_END if visible else DU.MID_END)
+	if visible:
+		_hlod_needs_initial_update = true
 
 ## Toggle distant-light billboard MultiMesh (DistantLightManager) — hides + stops streaming.
 func set_distant_lights_visible(visible: bool) -> void:
@@ -2536,7 +2538,7 @@ func is_in_startup_phase() -> bool:
 ## centred on the camera cell. INNER_RING_RADIUS=1 means the 3×3 block
 ## right under the player. Matches the post-v4 `load_radius_cells = 1`
 ## default (the loading gate and the streaming radius are now identical —
-## "playable at arm's reach" IS the whole visible range at NEAR-only tier).
+## "playable at arm's reach" is the initial cell-streaming readiness gate).
 const INNER_RING_RADIUS: int = 1
 
 ## Soft cap on the instantiation queue for the "ready" gate. The queue

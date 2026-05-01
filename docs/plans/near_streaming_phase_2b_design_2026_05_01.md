@@ -79,8 +79,9 @@ own Godot `RenderingServer` RIDs.
 
 Sources summarized in:
 
-- `docs/reference/how to streaming.md`
-- `docs/audit/godot_46_streaming_research_2026_05_01_claude.md`
+- `docs/systems/streaming_rendering_bible.md`
+- `docs/archive/reference/how to streaming.md`
+- `docs/archive/audit/godot_46_streaming_research_2026_05_01_claude.md`
 - Godot 4.6 `using_servers`, `using_multimesh`, `thread_safe_apis`,
   `WorkerThreadPool`, and `ResourceLoader` docs cited by the research note.
 

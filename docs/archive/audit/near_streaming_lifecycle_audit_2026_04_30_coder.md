@@ -1,5 +1,9 @@
 # NEAR Streaming Lifecycle Audit
 
+Archived: durable lifecycle rules were consolidated into
+`docs/systems/streaming_rendering_bible.md` on 2026-05-01. Keep this file only
+as P0.4 forensic source material.
+
 Date: 2026-04-30  
 Owner: coder  
 Scope: P0.4 first pass, focused on scene-tree child attach / unload lifecycle

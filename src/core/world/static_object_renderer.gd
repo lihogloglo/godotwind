@@ -65,12 +65,14 @@ var _cell_buckets: Dictionary[Vector2i, Array] = {} # Array[CellStaticBucket]
 var _cell_bucket_hide_progress: Dictionary[Vector2i, int] = {}
 var _cell_bucket_key_index: Dictionary[String, RefCounted] = {}
 var _cell_bucket_pending_cleanup: Dictionary[String, bool] = {}
+var _descriptor_build_tasks: Dictionary[String, DescriptorBuildTask] = {}
 
 ## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
 ## default — see lod_crossfade.gdshader. The shader reads this per-slot via
 ## INSTANCE_CUSTOM.y so it could be tuned per-instance in the future; today
 ## every slot uses this single value.
 const REGISTRY_FADE_DURATION_S: float = 0.3
+const DESCRIPTOR_BUILD_BUDGET_USEC: int = 1000
 ## Safety gate for the world-scoped PrototypeRegistry/MultiMesh path. Godot 4.6
 ## native crashes are still occurring during first-load static publish in this
 ## path. While NEAR stability is the priority, statics use the existing
@@ -151,6 +153,17 @@ class StaticPrototypeDescriptor:
 	var sub_meshes: Array[SubMeshEntry] = []
 	var aabb: AABB
 	var has_lod_chain: bool = false
+
+
+class DescriptorBuildTask:
+	var type_name: String = ""
+	var packed_scene: PackedScene = null
+	var state: SceneState = null
+	var node_index: int = 0
+	var xforms: Dictionary[String, Transform3D] = {".": Transform3D.IDENTITY}
+	var descriptor: StaticPrototypeDescriptor = null
+	var failed: bool = false
+	var done: bool = false
 
 
 ## Phase E — precomputed instance data produced off-thread.
@@ -353,9 +366,146 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 	if packed_scene == null:
 		return false
 
+	var descriptor := _build_descriptor_from_packed_scene(packed_scene)
+	if descriptor == null or descriptor.sub_meshes.is_empty():
+		return false
+
+	_publish_static_descriptor(type_name, descriptor)
+	return true
+
+
+func request_register_from_packed_scene(type_name: String, packed_scene: PackedScene) -> String:
+	_mesh_types_mutex.lock()
+	var already := type_name in _mesh_types
+	_mesh_types_mutex.unlock()
+	if already:
+		return "ready"
+	if type_name.is_empty() or packed_scene == null:
+		return "failed"
+
+	if type_name in _descriptor_build_tasks:
+		var existing: DescriptorBuildTask = _descriptor_build_tasks[type_name]
+		_process_descriptor_build_slice(existing)
+		if not existing.done:
+			return "pending"
+		_descriptor_build_tasks.erase(type_name)
+		if existing.failed or existing.descriptor == null or existing.descriptor.sub_meshes.is_empty():
+			return "failed"
+		_publish_static_descriptor(type_name, existing.descriptor)
+		return "ready"
+
+	var task := DescriptorBuildTask.new()
+	task.type_name = type_name
+	task.packed_scene = packed_scene
+	task.state = packed_scene.get_state()
+	task.descriptor = StaticPrototypeDescriptor.new()
+	if task.state == null:
+		task.failed = true
+		task.done = true
+		return "failed"
+	_process_descriptor_build_slice(task)
+	if task.done:
+		if task.failed or task.descriptor == null or task.descriptor.sub_meshes.is_empty():
+			return "failed"
+		_publish_static_descriptor(type_name, task.descriptor)
+		return "ready"
+	_descriptor_build_tasks[type_name] = task
+	return "pending"
+
+
+func _process_descriptor_build_slice(task: DescriptorBuildTask) -> void:
+	if task == null or task.done:
+		return
+	if task.state == null or task.descriptor == null:
+		task.failed = true
+		task.done = true
+		return
+
+	var start_usec := Time.get_ticks_usec()
+	var node_count := task.state.get_node_count()
+	while task.node_index < node_count:
+		_append_descriptor_node(task, task.node_index)
+		task.node_index += 1
+		if Time.get_ticks_usec() - start_usec >= DESCRIPTOR_BUILD_BUDGET_USEC:
+			return
+
+	task.failed = task.descriptor.sub_meshes.is_empty()
+	task.done = true
+
+
+func _append_descriptor_node(task: DescriptorBuildTask, node_index: int) -> void:
+	var state := task.state
+	var descriptor := task.descriptor
+	var path := str(state.get_node_path(node_index, false))
+	var parent_path := str(state.get_node_path(node_index, true))
+	var local_xform := Transform3D.IDENTITY
+	var visible := true
+	var mesh: Mesh = null
+	var material_override: Material = null
+	var surface_overrides: Dictionary[int, Material] = {}
+
+	for property_index in range(state.get_node_property_count(node_index)):
+		var prop_name := str(state.get_node_property_name(node_index, property_index))
+		var prop_value: Variant = state.get_node_property_value(node_index, property_index)
+		match prop_name:
+			"transform":
+				if prop_value is Transform3D:
+					local_xform = prop_value
+			"visible":
+				visible = bool(prop_value)
+			"mesh":
+				mesh = prop_value as Mesh
+			"material_override":
+				material_override = prop_value as Material
+			_:
+				if prop_name.begins_with("surface_material_override/"):
+					var idx_text := prop_name.get_slice("/", 1)
+					if idx_text.is_valid_int():
+						var mat := prop_value as Material
+						if mat != null:
+							surface_overrides[int(idx_text)] = mat
+
+	var parent_xform: Transform3D = task.xforms.get(parent_path, Transform3D.IDENTITY)
+	var rel_xform: Transform3D = parent_xform * local_xform
+	task.xforms[path] = rel_xform
+
+	if state.get_node_type(node_index) != &"MeshInstance3D" or mesh == null or not visible:
+		return
+
+	var entry := SubMeshEntry.new()
+	entry.mesh_resource = mesh
+	entry.local_transform = rel_xform
+	entry.has_lod_chain = mesh.has_meta("has_lod_chain") if mesh is ArrayMesh else false
+	if entry.has_lod_chain:
+		descriptor.has_lod_chain = true
+
+	if material_override != null:
+		entry.material_resource = material_override
+	elif not surface_overrides.is_empty():
+		var surface_count := mesh.get_surface_count()
+		if surface_count == 1 and surface_overrides.has(0):
+			entry.material_resource = surface_overrides[0]
+		else:
+			entry.surface_materials.resize(surface_count)
+			for surface_key: Variant in surface_overrides.keys():
+				var surface_index := int(surface_key)
+				if surface_index >= 0 and surface_index < surface_count:
+					entry.surface_materials[surface_index] = surface_overrides[surface_index]
+
+	var transformed_aabb := entry.local_transform * mesh.get_aabb()
+	if descriptor.sub_meshes.is_empty():
+		descriptor.aabb = transformed_aabb
+	else:
+		descriptor.aabb = descriptor.aabb.merge(transformed_aabb)
+	descriptor.sub_meshes.append(entry)
+
+
+func _build_descriptor_from_packed_scene(packed_scene: PackedScene) -> StaticPrototypeDescriptor:
+	if packed_scene == null:
+		return null
 	var state: SceneState = packed_scene.get_state()
 	if state == null:
-		return false
+		return null
 
 	var xforms: Dictionary[String, Transform3D] = {".": Transform3D.IDENTITY}
 	var descriptor := StaticPrototypeDescriptor.new()
@@ -406,16 +556,16 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 
 		if material_override != null:
 			entry.material_resource = material_override
-		else:
+		elif not surface_overrides.is_empty():
 			var surface_count := mesh.get_surface_count()
-			for si in range(surface_count):
-				var mat: Material = surface_overrides.get(si)
-				if mat == null:
-					mat = mesh.surface_get_material(si)
-				entry.surface_materials.append(mat)
-			if surface_count == 1 and not entry.surface_materials.is_empty() and entry.surface_materials[0]:
-				entry.material_resource = entry.surface_materials[0]
-				entry.surface_materials.clear()
+			if surface_count == 1 and surface_overrides.has(0):
+				entry.material_resource = surface_overrides[0]
+			else:
+				entry.surface_materials.resize(surface_count)
+				for surface_key: Variant in surface_overrides.keys():
+					var surface_index := int(surface_key)
+					if surface_index >= 0 and surface_index < surface_count:
+						entry.surface_materials[surface_index] = surface_overrides[surface_index]
 
 		var transformed_aabb := entry.local_transform * mesh.get_aabb()
 		if descriptor.sub_meshes.is_empty():
@@ -425,16 +575,15 @@ func register_from_packed_scene(type_name: String, packed_scene: PackedScene) ->
 		descriptor.sub_meshes.append(entry)
 
 	if descriptor.sub_meshes.is_empty():
-		return false
-
-	_publish_static_descriptor(type_name, descriptor)
-	return true
+		return null
+	return descriptor
 
 
 func _publish_static_descriptor(type_name: String, descriptor: StaticPrototypeDescriptor) -> void:
 	if descriptor == null or descriptor.sub_meshes.is_empty():
 		return
 
+	_materialize_surface_material_meshes(descriptor)
 	var first := descriptor.sub_meshes[0]
 	var mesh_type := MeshType.new()
 	mesh_type.name = type_name
@@ -463,6 +612,36 @@ func _publish_static_descriptor(type_name: String, descriptor: StaticPrototypeDe
 		_mesh_types[type_name] = mesh_type
 		_stats["mesh_types"] += 1
 	_mesh_types_mutex.unlock()
+
+
+func _materialize_surface_material_meshes(descriptor: StaticPrototypeDescriptor) -> void:
+	for sub_mesh_value: Variant in descriptor.sub_meshes:
+		var entry: SubMeshEntry = sub_mesh_value as SubMeshEntry
+		if entry == null or entry.mesh_resource == null:
+			continue
+		if entry.material_resource != null or entry.surface_materials.is_empty():
+			continue
+		var source_mesh := entry.mesh_resource
+		var surface_count := source_mesh.get_surface_count()
+		var material_count := mini(entry.surface_materials.size(), surface_count)
+		var has_surface_material := false
+		for surface_index in range(material_count):
+			if entry.surface_materials[surface_index] != null:
+				has_surface_material = true
+				break
+		if not has_surface_material:
+			entry.surface_materials.clear()
+			continue
+
+		var mesh_copy := source_mesh.duplicate(false) as Mesh
+		if mesh_copy == null:
+			continue
+		for surface_index in range(material_count):
+			var material: Material = entry.surface_materials[surface_index]
+			if material != null:
+				mesh_copy.surface_set_material(surface_index, material)
+		entry.mesh_resource = mesh_copy
+		entry.surface_materials.clear()
 
 
 func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
@@ -1058,12 +1237,12 @@ func _cleanup_detached_buckets(buckets: Array) -> int:
 		var was_visible := bool(bucket.get("visible"))
 		var bucket_type := str(bucket.get("type_name"))
 		var bucket_key := str(bucket.get("bucket_key"))
+		var draw_group_count := int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
 		if bucket.has_method("cleanup"):
 			count = int(bucket.call("cleanup"))
 		removed += count
 		_stats["cell_buckets"] = maxi(0, int(_stats.get("cell_buckets", 0)) - 1)
 		_stats["bucket_instances"] = maxi(0, int(_stats.get("bucket_instances", 0)) - count)
-		var draw_group_count := int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
 		_stats["bucket_draw_groups"] = maxi(0, int(_stats.get("bucket_draw_groups", 0)) - draw_group_count)
 		_stats["bucket_rs_instances"] = maxi(0, int(_stats.get("bucket_rs_instances", 0)) - draw_group_count)
 		_stats["total_instances"] = maxi(0, int(_stats.get("total_instances", 0)) - count)
@@ -1351,6 +1530,7 @@ func clear(clear_mesh_types: bool = true) -> void:
 	for buckets: Array in detached_bucket_lists:
 		_cleanup_detached_buckets(buckets)
 	_cell_bucket_pending_cleanup.clear()
+	_drain_descriptor_build_tasks()
 
 	if clear_mesh_types:
 		# Lock for the iteration + clear — any in-flight worker read of
@@ -1378,6 +1558,10 @@ func clear(clear_mesh_types: bool = true) -> void:
 	_stats["bucket_instances"] = 0
 	_stats["bucket_draw_groups"] = 0
 	_stats["bucket_rs_instances"] = 0
+
+
+func _drain_descriptor_build_tasks() -> void:
+	_descriptor_build_tasks.clear()
 
 #endregion
 

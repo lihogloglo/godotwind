@@ -1,5 +1,9 @@
 # NEAR Streaming P0 Fix Tracker
 
+Archived: P0.0-P0.4 are closed and durable rules were consolidated into
+`docs/systems/streaming_rendering_bible.md` on 2026-05-01. Keep this file only
+as historical tracker material.
+
 Date: 2026-04-29  
 Owner: Codex  
 Branch: `perf/distant-rendering-2026-04-17`  

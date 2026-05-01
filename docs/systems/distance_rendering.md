@@ -83,7 +83,7 @@ Constants in `distance_utils.gd`: `HLOD_START=300m`, `HLOD_END=1000m`.
 
 Replaces `is_mid_worthy` keyword filter with a projected-size test (`radius² × scale² < dist² × PAGING_MIN_SIZE²`, OpenMW canonical `PAGING_MIN_SIZE = 0.14`). Adds per-mesh-type cost-benefit merge decision, tier-hysteresis retention (20m), teleport warmup (prototype preload on camera jumps >500m), and a second-pass `minSizeMergeFactor` filter that trims tiny refs from merged types based on merge-benefit. Merge kernel lives in `src/native/NativeObjectPagingKernel.cs` (C# hot path).
 
-**Status 2026-04-16:** Confirmed working; enabled by default via `hlod_enable`. See `docs/systems/object_paging.md` for the current design and `docs/archive/sessions/object_paging_*` for historical bug-fix context.
+**Status 2026-05-01:** HLOD is implemented but parked by default while NEAR stabilizes. `hlod_enable` narrows MID to 300m and starts HLOD work; `hlod_disable` parks HLOD and restores MID to 500m. See `docs/systems/object_paging.md` for the current design and `docs/archive/sessions/object_paging_*` for historical bug-fix context.
 
 Console: `hlod_enable` / `hlod_disable`.
 
