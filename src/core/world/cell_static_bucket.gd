@@ -138,7 +138,12 @@ func _create_draw_group(
 	scenario: RID,
 	visibility_range_end: float,
 ) -> DrawGroup:
-	var mesh_resource: Mesh = sub_mesh.mesh_resource
+	var source_mesh: Mesh = sub_mesh.mesh_resource
+	if source_mesh == null:
+		return null
+	var material_resource: Material = sub_mesh.material_resource
+	var surface_materials: Array[Material] = sub_mesh.surface_materials
+	var mesh_resource := _make_multimesh_mesh(source_mesh, material_resource, surface_materials)
 	if mesh_resource == null:
 		return null
 
@@ -163,16 +168,9 @@ func _create_draw_group(
 	RenderingServer.instance_set_scenario(rid, scenario)
 	RenderingServer.instance_set_transform(rid, Transform3D.IDENTITY)
 
-	var material_resource: Material = sub_mesh.material_resource
 	var material_rid: RID = material_resource.get_rid() if material_resource != null else RID()
 	if material_rid.is_valid():
 		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
-	elif not sub_mesh.surface_materials.is_empty():
-		var surface_materials: Array[Material] = sub_mesh.surface_materials
-		for surface_index in range(surface_materials.size()):
-			var material: Material = surface_materials[surface_index]
-			if material != null:
-				RenderingServer.instance_set_surface_override_material(rid, surface_index, material.get_rid())
 
 	RenderingServer.instance_geometry_set_visibility_range(
 		rid,
@@ -189,9 +187,33 @@ func _create_draw_group(
 	var group := DrawGroup.new()
 	group.mesh_resource = mesh_resource
 	group.material_resource = material_resource
-	group.surface_materials = sub_mesh.surface_materials.duplicate()
+	group.surface_materials = surface_materials.duplicate()
 	group.local_transform = local_transform
 	group.multimesh = multimesh
 	group.instance_rid = rid
 	group.instance_count = transforms.size()
 	return group
+
+
+func _make_multimesh_mesh(source_mesh: Mesh, material_resource: Material, surface_materials: Array[Material]) -> Mesh:
+	if material_resource != null or surface_materials.is_empty():
+		return source_mesh
+
+	var surface_count := source_mesh.get_surface_count()
+	var material_count := mini(surface_materials.size(), surface_count)
+	var has_surface_material := false
+	for surface_index in range(material_count):
+		if surface_materials[surface_index] != null:
+			has_surface_material = true
+			break
+	if not has_surface_material:
+		return source_mesh
+
+	var mesh_copy: Mesh = source_mesh.duplicate(false) as Mesh
+	if mesh_copy == null:
+		return source_mesh
+	for surface_index in range(material_count):
+		var material: Material = surface_materials[surface_index]
+		if material != null:
+			mesh_copy.surface_set_material(surface_index, material)
+	return mesh_copy
