@@ -8,12 +8,22 @@ var payload_key: String = ""
 var bucket_key: String = ""
 var cell_grid: Vector2i = Vector2i.ZERO
 var instance_count: int = 0
-var rs_instances: Array[RID] = []
+var draw_groups: Array[DrawGroup] = []
 var visible: bool = true
 var frozen: bool = false
 var resource_handle: RefCounted = null
 var _bucket_owner_key: String = ""
 var _resource_refs: Array[Resource] = []
+
+
+class DrawGroup:
+	var mesh_resource: Mesh = null
+	var material_resource: Material = null
+	var surface_materials: Array[Material] = []
+	var local_transform: Transform3D = Transform3D.IDENTITY
+	var multimesh: MultiMesh = null
+	var instance_rid: RID = RID()
+	var instance_count: int = 0
 
 
 ## Phase 2B bucket primitive: owns RS instance RIDs plus the strong resource
@@ -45,25 +55,20 @@ func configure(
 		resource_handle.call("add_owner", _bucket_owner_key)
 	_pin_sub_mesh_resources(sub_meshes)
 
-	for world_transform_value: Variant in transforms:
-		var world_transform: Transform3D = world_transform_value
-		for sub_mesh_value: Variant in sub_meshes:
-			var sub_mesh: Variant = sub_mesh_value
-			if sub_mesh == null or sub_mesh.mesh_resource == null:
-				continue
-			var material_rid: RID = sub_mesh.material_resource.get_rid() if sub_mesh.material_resource else RID()
-			var rid := _create_rs_instance(
-				sub_mesh.mesh_resource.get_rid(),
-				material_rid,
-				sub_mesh.surface_materials,
-				world_transform * sub_mesh.local_transform,
-				scenario,
-				visibility_range_end
-			)
-			if rid.is_valid():
-				rs_instances.append(rid)
+	for sub_mesh_value: Variant in sub_meshes:
+		var sub_mesh: Variant = sub_mesh_value
+		if sub_mesh == null or sub_mesh.mesh_resource == null:
+			continue
+		var group := _create_draw_group(
+			sub_mesh,
+			transforms,
+			scenario,
+			visibility_range_end
+		)
+		if group != null:
+			draw_groups.append(group)
 
-	return not rs_instances.is_empty()
+	return not draw_groups.is_empty()
 
 
 func set_visible(p_visible: bool) -> void:
@@ -72,9 +77,9 @@ func set_visible(p_visible: bool) -> void:
 	if visible == p_visible:
 		return
 	visible = p_visible
-	for rid: RID in rs_instances:
-		if rid.is_valid():
-			RenderingServer.instance_set_visible(rid, visible)
+	for group: DrawGroup in draw_groups:
+		if group.instance_rid.is_valid():
+			RenderingServer.instance_set_visible(group.instance_rid, visible)
 
 
 func freeze() -> void:
@@ -84,10 +89,15 @@ func freeze() -> void:
 func cleanup() -> int:
 	freeze()
 	var released := instance_count
-	for rid: RID in rs_instances:
-		if rid.is_valid():
-			RenderingServer.free_rid(rid)
-	rs_instances.clear()
+	for group: DrawGroup in draw_groups:
+		if group.instance_rid.is_valid():
+			RenderingServer.free_rid(group.instance_rid)
+			group.instance_rid = RID()
+		group.multimesh = null
+		group.mesh_resource = null
+		group.material_resource = null
+		group.surface_materials.clear()
+	draw_groups.clear()
 	instance_count = 0
 	visible = false
 	_release_resource_owner()
@@ -118,25 +128,43 @@ func _release_resource_owner() -> void:
 	_bucket_owner_key = ""
 
 
-func _create_rs_instance(
-	mesh_rid: RID,
-	material_rid: RID,
-	surface_materials: Array[Material],
-	xform: Transform3D,
+func _create_draw_group(
+	sub_mesh: Variant,
+	transforms: Array,
 	scenario: RID,
 	visibility_range_end: float,
-) -> RID:
-	if not mesh_rid.is_valid():
-		return RID()
+) -> DrawGroup:
+	var mesh_resource: Mesh = sub_mesh.mesh_resource
+	if mesh_resource == null:
+		return null
+
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh_resource
+	multimesh.instance_count = transforms.size()
+
+	var local_transform: Transform3D = sub_mesh.local_transform
+	var mesh_aabb := mesh_resource.get_aabb()
+	var custom_aabb := AABB()
+	for i in range(transforms.size()):
+		var world_transform: Transform3D = transforms[i]
+		var slot_transform := world_transform * local_transform
+		multimesh.set_instance_transform(i, slot_transform)
+		var slot_aabb: AABB = slot_transform * mesh_aabb
+		custom_aabb = slot_aabb if i == 0 else custom_aabb.merge(slot_aabb)
+	multimesh.custom_aabb = custom_aabb
 
 	var rid := RenderingServer.instance_create()
-	RenderingServer.instance_set_base(rid, mesh_rid)
+	RenderingServer.instance_set_base(rid, multimesh.get_rid())
 	RenderingServer.instance_set_scenario(rid, scenario)
-	RenderingServer.instance_set_transform(rid, xform)
+	RenderingServer.instance_set_transform(rid, Transform3D.IDENTITY)
 
+	var material_resource: Material = sub_mesh.material_resource
+	var material_rid: RID = material_resource.get_rid() if material_resource != null else RID()
 	if material_rid.is_valid():
 		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
-	elif not surface_materials.is_empty():
+	elif not sub_mesh.surface_materials.is_empty():
+		var surface_materials: Array[Material] = sub_mesh.surface_materials
 		for surface_index in range(surface_materials.size()):
 			var material: Material = surface_materials[surface_index]
 			if material != null:
@@ -154,4 +182,12 @@ func _create_rs_instance(
 	if not visible:
 		RenderingServer.instance_set_visible(rid, false)
 
-	return rid
+	var group := DrawGroup.new()
+	group.mesh_resource = mesh_resource
+	group.material_resource = material_resource
+	group.surface_materials = sub_mesh.surface_materials.duplicate()
+	group.local_transform = local_transform
+	group.multimesh = multimesh
+	group.instance_rid = rid
+	group.instance_count = transforms.size()
+	return group
