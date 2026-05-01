@@ -57,10 +57,10 @@ var _instances: Dictionary[int, InstanceData] = {}
 ## Enables O(cell_count) lookups instead of O(total_instances) for promotion/removal
 var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
 
-## Phase 2A near-streaming path: transitional renderer-owned per-cell/prototype
-## buckets. CellPayload records the publish result while the request is active,
-## but completed cells currently release buckets through this renderer facade.
-## Phase 2B must move or document any stronger cell/payload ownership model.
+## Phase 2B near-streaming path: renderer-indexed per-cell/payload buckets.
+## CellStaticBucket owns its RS instances, local MultiMeshes, and the strong
+## Mesh/Material/handle refs behind those RIDs. `_mesh_types` is only the
+## prototype lookup source used at bucket creation time.
 var _cell_buckets: Dictionary[Vector2i, Array] = {} # Array[CellStaticBucket]
 var _cell_bucket_hide_progress: Dictionary[Vector2i, int] = {}
 var _cell_bucket_key_index: Dictionary[String, RefCounted] = {}
@@ -101,6 +101,8 @@ var _stats: Dictionary = {
 	"visible_instances": 0,
 	"cell_buckets": 0,
 	"bucket_instances": 0,
+	"bucket_draw_groups": 0,
+	"bucket_rs_instances": 0,
 }
 
 
@@ -778,6 +780,8 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 ## `clear(clear_mesh_types=true)` from somewhere else could drop the type.
 ##
 ## Plan: phase_e_static_bulk_upload.md §3.2, §5.1
+## Phase 2B bucket publication. `_mesh_types` supplies immutable prototype
+## descriptors; the returned CellStaticBucket owns the live resources/RIDs.
 func create_cell_bucket(type_name: String, payload_key: String, transforms: Array, cell_grid: Vector2i, resource_handle: RefCounted = null) -> RefCounted:
 	if payload_key.is_empty():
 		return null
@@ -817,6 +821,9 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 	_cell_bucket_key_index[bucket_key] = bucket
 	_stats["cell_buckets"] = int(_stats.get("cell_buckets", 0)) + 1
 	_stats["bucket_instances"] = int(_stats.get("bucket_instances", 0)) + transforms.size()
+	var draw_group_count := int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
+	_stats["bucket_draw_groups"] = int(_stats.get("bucket_draw_groups", 0)) + draw_group_count
+	_stats["bucket_rs_instances"] = int(_stats.get("bucket_rs_instances", 0)) + draw_group_count
 	_stats["total_instances"] = int(_stats.get("total_instances", 0)) + transforms.size()
 	if _globally_visible:
 		_stats["visible_instances"] = int(_stats.get("visible_instances", 0)) + transforms.size()
@@ -1056,6 +1063,9 @@ func _cleanup_detached_buckets(buckets: Array) -> int:
 		removed += count
 		_stats["cell_buckets"] = maxi(0, int(_stats.get("cell_buckets", 0)) - 1)
 		_stats["bucket_instances"] = maxi(0, int(_stats.get("bucket_instances", 0)) - count)
+		var draw_group_count := int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
+		_stats["bucket_draw_groups"] = maxi(0, int(_stats.get("bucket_draw_groups", 0)) - draw_group_count)
+		_stats["bucket_rs_instances"] = maxi(0, int(_stats.get("bucket_rs_instances", 0)) - draw_group_count)
 		_stats["total_instances"] = maxi(0, int(_stats.get("total_instances", 0)) - count)
 		if was_visible:
 			_stats["visible_instances"] = maxi(0, int(_stats.get("visible_instances", 0)) - count)
@@ -1344,7 +1354,9 @@ func clear(clear_mesh_types: bool = true) -> void:
 
 	if clear_mesh_types:
 		# Lock for the iteration + clear — any in-flight worker read of
-		# _mesh_types must complete or block here before we free the RIDs.
+		# _mesh_types must complete or block here before we clear prototype
+		# descriptors and legacy direct-instance owned RIDs. Cell buckets have
+		# already detached and freed their own RIDs/resource refs above.
 		# Clear is the teardown path (scene exit / test cleanup); worker
 		# cancellation SHOULD have already run upstream via
 		# _phase_a_cancel_workers_for_request, but this lock is the final
@@ -1364,6 +1376,8 @@ func clear(clear_mesh_types: bool = true) -> void:
 	_stats["visible_instances"] = 0
 	_stats["cell_buckets"] = 0
 	_stats["bucket_instances"] = 0
+	_stats["bucket_draw_groups"] = 0
+	_stats["bucket_rs_instances"] = 0
 
 #endregion
 

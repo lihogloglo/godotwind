@@ -71,6 +71,10 @@ func configure(
 	return not draw_groups.is_empty()
 
 
+func get_draw_group_count() -> int:
+	return draw_groups.size()
+
+
 func set_visible(p_visible: bool) -> void:
 	if frozen:
 		return
