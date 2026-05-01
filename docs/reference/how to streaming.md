@@ -1029,7 +1029,7 @@ analysis**, not Godot-doc-backed. Detailed case studies in
 | Async load | ResourceLoader + WorkerThreadPool | Async sublevel load | Async tile load | Addressables.LoadAsync | osgDB::DatabasePager |
 | Scene attach | Main thread + call_deferred | Main thread, budgeted spread | Main thread, budgeted | Main thread (LoadSceneAsync) | Main thread, frame-budgeted |
 | Far visuals | FAR impostors (5 km) | HLOD layers + lower grid | activeGrid promotion | LOD groups + impostors | Distant terrain LOD chunks |
-| Predictive prefetch | CellPreloader + velocity | StreamingSourceComponent | activeGrid expansion | Streaming priority | mPredictionTime + mPreloadCells |
+| Predictive prefetch | CellPreloader + velocity | StreamingSourceComponent | activeGrid expansion | Streaming priority | `Scene::preloadCells` velocity prediction via `mPredictionTime` |
 | Frame budget | StreamingConfig (ms) | s.LevelStreamingActorsUpdateTimeLimit | Async + GPU compute | Coroutine-based | mLoadingThreads |
 
 Two takeaways for an inheriting agent:
@@ -1038,9 +1038,26 @@ Two takeaways for an inheriting agent:
    per-cell GPU instance buffer is universal. Godotwind's `StaticObjectRenderer`
    direction is correct; the implementation must reach the per-cell-bucket
    shape.
-2. **Every engine has a velocity prefetch.** OpenMW has the simplest
-   implementation we can copy. Godotwind's `cell_preloader.gd` exists but is
-   not yet wired into the streaming manager.
+2. **Every engine has a velocity prefetch, including OpenMW.** OpenMW's
+   `Scene::preloadCells(float dt)` (in `apps/openmw/mwworld/scene.cpp`)
+   computes `predictedPos = playerPos + (playerPos - mLastPlayerPos) / dt *
+   mPredictionTime` and feeds the predicted position into
+   `preloadTeleportDoorDestinations`, `preloadExteriorGrid`, and terrain
+   preload positions. `mPredictionTime` is the time horizon for the
+   prediction (a velocity-extrapolation window), not an expiry timer. This
+   is the simplest documented velocity-based prefetch and Godotwind's
+   `cell_preloader.gd` direction is consistent with it. Verified
+   2026-05-01 via primary-source fetch of the OpenMW master `scene.cpp`.
+   OpenMW remains useful evidence for bounded preload thread count (1-3 per
+   the OpenMW settings docs; 4+ hits IO/sync bottlenecks), preloaded-cell
+   cache min/max bounds, expiry delays, strong refs to preloaded objects
+   while a cell is preloaded, and `clearAllTasks` abort/wait-before-free
+   cleanup. **The narrower correct distinction:** OpenMW does not appear to
+   have Godotwind's unload-limbo reclaim/state-reversal path, and its
+   resource lifetime model is OSG `osg::ref_ptr`-based rather than Godot
+   `RenderingServer` RID ownership. So Phase 2B and the existing P0.4
+   reclaim work must own those design justifications locally — those parts
+   are Godotwind-specific extensions, not OpenMW-derived.
 
 ## Anti-Pattern Checklist (claude, 2026-04-29)
 
