@@ -895,18 +895,17 @@ func drain_prereg_tasks() -> void:
 ## warm caches by the time the cell drains its instantiation queue.
 # PHASE_F:WORKER_SAFE — by design. Zero autoload / signal / scene-tree access.
 func _worker_preregister_prototype(type_name: String, disk_path: String, shape_pack_path: String) -> void:
-	# Shape cache warm first — independent of renderer registration, cheap
-	# resource deserialize (sub-ms), handles its own dedup via internal mutex.
-	# Done up front so a type that's already renderer-registered but shape-cold
-	# still gets its pack loaded (revisit-of-known-type case).
-	if shape_cache != null and not shape_pack_path.is_empty():
-		shape_cache.call("warm_from_path", type_name, shape_pack_path)
-
 	if static_renderer == null:
+		if shape_cache != null and not shape_pack_path.is_empty():
+			shape_cache.call("warm_from_path", type_name, shape_pack_path)
 		return
 	# Fast-path dedup: skip the ~20ms PackedScene.instantiate if another worker
-	# beat us to this type. Mutex-wrapped via has_type.
+	# beat us to this type. Mutex-wrapped via has_type. Still warm the shape
+	# sidecar after the render fast path so collision cache work cannot delay
+	# visual prototype registration.
 	if static_renderer.call("has_type", type_name):
+		if shape_cache != null and not shape_pack_path.is_empty():
+			shape_cache.call("warm_from_path", type_name, shape_pack_path)
 		return
 
 	# ResourceLoader.load is thread-safe — returns cached PackedScene if another
@@ -923,6 +922,9 @@ func _worker_preregister_prototype(type_name: String, disk_path: String, shape_p
 	# register_from_prototype has mutex-protected fast-path + atomic insert.
 	# Concurrent callers on the same type_name dedupe safely.
 	static_renderer.call("register_from_prototype", type_name, raw as Node3D)
+
+	if shape_cache != null and not shape_pack_path.is_empty():
+		shape_cache.call("warm_from_path", type_name, shape_pack_path)
 
 
 ## Phase E — worker that precomputes a PrecomputedInstance for a STAT ref.

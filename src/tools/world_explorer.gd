@@ -762,6 +762,7 @@ func _maybe_start_stress_bench() -> void:
 	var speed := 100.0
 	var duration := 60.0
 	var direction := "dense-loop"
+	var limbo_hold_frames := 0
 	for i in range(args.size()):
 		var a: String = args[i]
 		if a == "--bench-stress":
@@ -781,11 +782,20 @@ func _maybe_start_stress_bench() -> void:
 			direction = a.substr("--stress-direction=".length())
 		elif a.begins_with("--stress-route="):
 			direction = a.substr("--stress-route=".length())
+		elif a.begins_with("--stress-limbo-hold-frames="):
+			limbo_hold_frames = maxi(0, int(a.substr("--stress-limbo-hold-frames=".length())))
 	if not flag_found:
 		return
 	if not native_streaming_manager or not cell_manager or not camera:
 		push_warning("[STRESS] --bench-stress flag set but required refs missing - skipping")
 		return
+	if limbo_hold_frames > 0 and native_streaming_manager != null:
+		native_streaming_manager.debug_unload_limbo_hold_frames = limbo_hold_frames
+		if native_streaming_manager.has_method("set_lifecycle_capture_enabled"):
+			native_streaming_manager.set_lifecycle_capture_enabled(true)
+		if cell_manager != null and cell_manager.has_method("set_lifecycle_capture_enabled"):
+			cell_manager.set_lifecycle_capture_enabled(true)
+		Log.info("streaming", "[STRESS] unload limbo hold frames=%d" % limbo_hold_frames)
 	var runner := StreamingStressRunnerScript.new()
 	runner.name = "StreamingStressRunner"
 	get_tree().root.add_child(runner)

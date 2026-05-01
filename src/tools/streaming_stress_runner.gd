@@ -13,6 +13,7 @@ const CSV_HEADERS := "frame,time_ms,fps,cam_x,cam_y,cam_z,cell_x,cell_y,cell_cha
 const SETTLE_SEC := 8.0
 const TRANSITION_PRE_FRAMES := 30
 const TRANSITION_POST_FRAMES := 120
+const BOOMERANG_DISTANCE_M := 360.0
 
 const ROUTE_STRAIGHT_NAMES := {
 	"east": true,
@@ -28,6 +29,11 @@ const ROUTE_STRAIGHT_NAMES := {
 	"diag": true,
 	"diagonal": true,
 	"ne": true,
+}
+const ROUTE_BOOMERANG_NAMES := {
+	"boomerang": true,
+	"reclaim-boomerang": true,
+	"p04-reclaim": true,
 }
 const DENSE_LOOP_OFFSETS := [
 	Vector2i(0, 0),
@@ -171,6 +177,17 @@ func _direction_from_name(name: String) -> Vector3:
 
 func _configure_route(name: String) -> void:
 	var n := name.to_lower().strip_edges()
+	if ROUTE_BOOMERANG_NAMES.has(n):
+		_route_mode = "path"
+		_direction = Vector3(1, 0, 0)
+		var start := DU.cell_to_world_center(_start_cell, _altitude_m)
+		var turn := start + _direction * BOOMERANG_DISTANCE_M
+		_route_points = [start, turn, start]
+		_route_cells = [_start_cell, DU.world_to_cell(turn), _start_cell]
+		_route_cell_ref_counts[str(_start_cell)] = _get_cell_ref_count(_start_cell)
+		_route_cell_ref_counts[str(DU.world_to_cell(turn))] = _get_cell_ref_count(DU.world_to_cell(turn))
+		_recompute_route_bounds_and_length()
+		return
 	if ROUTE_STRAIGHT_NAMES.has(n):
 		_route_mode = "straight"
 		_direction = _direction_from_name(n)
@@ -221,6 +238,27 @@ func _sample_route(distance_m: float) -> Dictionary:
 			"position": _start_pos + _direction * distance_m,
 			"direction": _direction,
 		}
+	if _route_mode == "path":
+		var remaining := clampf(distance_m, 0.0, maxf(_route_total_length, 0.001))
+		for i in range(_route_points.size() - 1):
+			var a := _route_points[i]
+			var b := _route_points[i + 1]
+			var seg := b - a
+			var seg_len := seg.length()
+			if seg_len <= 0.001:
+				continue
+			if remaining <= seg_len:
+				var t := remaining / seg_len
+				return {
+					"position": a.lerp(b, t),
+					"direction": seg / seg_len,
+				}
+			remaining -= seg_len
+		var last_dir := (_route_points[-1] - _route_points[-2]).normalized()
+		return {
+			"position": _route_points[-1],
+			"direction": last_dir if last_dir.length_squared() > 0.0 else Vector3(1, 0, 0),
+		}
 	var wrapped := fposmod(distance_m, maxf(_route_total_length, 0.001))
 	for i in range(_route_points.size()):
 		var a := _route_points[i]
@@ -260,6 +298,8 @@ func _recompute_route_bounds_and_length() -> void:
 		_route_max = Vector3(maxf(_route_max.x, p.x), maxf(_route_max.y, p.y), maxf(_route_max.z, p.z))
 		if _route_mode == "loop" and _route_points.size() > 1:
 			_route_total_length += p.distance_to(_route_points[(i + 1) % _route_points.size()])
+		elif _route_mode == "path" and i + 1 < _route_points.size():
+			_route_total_length += p.distance_to(_route_points[i + 1])
 	if _route_mode == "straight":
 		_route_total_length = _speed_mps * _duration_s
 		var end_pos := _route_points[0] + _direction * _route_total_length
@@ -297,6 +337,7 @@ func _record_transition(from_cell: Vector2i, to_cell: Vector2i) -> void:
 
 
 func _log_frame(delta: float, cell_changed: bool) -> void:
+	_drain_lifecycle_events()
 	var row := PackedFloat64Array()
 	row.resize(31)
 	var cell := DU.world_to_cell(_camera.global_position)
@@ -333,6 +374,17 @@ func _log_frame(delta: float, cell_changed: bool) -> void:
 	_rows.append(row)
 
 
+func _drain_lifecycle_events() -> void:
+	if _streaming_manager and _streaming_manager.has_method("consume_lifecycle_events"):
+		var manager_events: Array = _streaming_manager.call("consume_lifecycle_events")
+		for event: Dictionary in manager_events:
+			_events.append(event)
+	if _cell_manager and _cell_manager.has_method("consume_lifecycle_events"):
+		var cell_events: Array = _cell_manager.call("consume_lifecycle_events")
+		for event: Dictionary in cell_events:
+			_events.append(event)
+
+
 func _get_queue_size() -> int:
 	if _cell_manager and _cell_manager.has_method("get_instantiation_queue_size"):
 		return int(_cell_manager.call("get_instantiation_queue_size"))
@@ -355,6 +407,7 @@ func _get_async_requests() -> int:
 
 func _finish() -> void:
 	set_process(false)
+	_drain_lifecycle_events()
 	var summary := _build_summary()
 	var csv_path := _write_csv()
 	var events_path := _write_events_csv()
@@ -418,6 +471,7 @@ func _build_summary() -> Dictionary:
 	frame_times.sort()
 
 	var transitions := _build_transition_summaries()
+	var lifecycle_counts := _build_event_counts()
 	var worst_transition_ms := 0.0
 	var worst_drop_fps := 0.0
 	for t in transitions:
@@ -460,7 +514,18 @@ func _build_summary() -> Dictionary:
 		"max_phase_inst_ms": max_inst_ms,
 		"max_phase_static_cull_ms": max_static_cull_ms,
 		"transitions": transitions,
+		"lifecycle_event_counts": lifecycle_counts,
 	}
+
+
+func _build_event_counts() -> Dictionary:
+	var counts: Dictionary = {}
+	for event: Dictionary in _events:
+		var name := str(event.get("event", ""))
+		if name.is_empty():
+			continue
+		counts[name] = int(counts.get(name, 0)) + 1
+	return counts
 
 
 func _build_transition_summaries() -> Array[Dictionary]:

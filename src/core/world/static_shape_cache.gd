@@ -45,6 +45,8 @@ class Entry:
 
 var _cache: Dictionary[String, Entry] = {}
 var _cache_mutex: Mutex = Mutex.new()
+var _pack_load_semaphores: Dictionary[String, Semaphore] = {}
+var _pack_load_waiters: Dictionary[String, int] = {}
 var _model_loader: RefCounted = null
 
 
@@ -77,9 +79,9 @@ func get_shapes(model_path: String) -> Array:
 	if _model_loader != null:
 		var pack_path: String = _model_loader.call("resolve_shape_pack_path", model_path)
 		if pack_path != "":
-			var pack := ResourceLoader.load(pack_path, "Resource") as StaticShapePackScript
-			if pack != null:
-				return _publish(key, pack.shapes as Array)
+			var packed_shapes := _load_pack_serialized(key, pack_path, false)
+			if not packed_shapes.is_empty():
+				return packed_shapes
 
 	# (3) Legacy path — instantiate, walk, cache. Also publishes an empty
 	# entry on failure so we don't retry every frame for missing prototypes.
@@ -146,33 +148,58 @@ func get_shapes_for_worker(model_path: String) -> Array:
 ## No-ops if the key is already cached or the pack fails to load (main-thread
 ## `get_shapes` will fall back to the walker for the affected prototype).
 ##
-## Thread safety: ResourceLoader.load is documented thread-safe. Mutex guards
-## the _cache publish.
+## Thread safety: ResourceLoader.load is documented thread-safe, but loading
+## the same `.shapes.res` from two workers at once can duplicate subresource
+## paths and make Godot emit cyclic-resource errors. This is a per-key
+## single-flight load: one worker loads, same-key waiters block on a semaphore,
+## and the cache mutex is held only for state transitions.
 func warm_from_path(model_path: String, pack_path: String) -> void:
 	if pack_path.is_empty():
 		return
 	var key := _normalize_key(model_path)
+	_load_pack_serialized(key, pack_path)
 
+
+func _load_pack_serialized(key: String, pack_path: String, wait_for_inflight: bool = true) -> Array:
 	_cache_mutex.lock()
-	var already_cached := key in _cache
+	if key in _cache:
+		var cached_shapes: Array = _cache[key].shapes
+		_cache_mutex.unlock()
+		return cached_shapes
+	if key in _pack_load_semaphores:
+		if not wait_for_inflight:
+			_cache_mutex.unlock()
+			return []
+		var waiter_sem: Semaphore = _pack_load_semaphores[key]
+		_pack_load_waiters[key] = int(_pack_load_waiters.get(key, 0)) + 1
+		_cache_mutex.unlock()
+		waiter_sem.wait()
+		_cache_mutex.lock()
+		var loaded_shapes: Array = _cache[key].shapes if key in _cache else []
+		_cache_mutex.unlock()
+		return loaded_shapes
+	var owner_sem := Semaphore.new()
+	_pack_load_semaphores[key] = owner_sem
+	_pack_load_waiters[key] = 0
 	_cache_mutex.unlock()
-	if already_cached:
-		return
 
 	var pack := ResourceLoader.load(pack_path, "Resource") as StaticShapePackScript
-	if pack == null:
-		return
-
-	_publish(key, pack.shapes as Array)
-
-
-## Shared publish for pack-loaded shapes. Copies the shapes array into a
-## fresh Entry (shallow — Shape3D refs are shared by design) and inserts
-## under the mutex with a re-check so concurrent publishers dedupe safely.
-func _publish(key: String, shapes: Array) -> Array:
 	var entry := Entry.new()
-	entry.shapes = shapes.duplicate()
-	return _publish_entry(key, entry)
+	if pack != null:
+		entry.shapes = (pack.shapes as Array).duplicate()
+
+	_cache_mutex.lock()
+	if pack != null and not key in _cache:
+		_cache[key] = entry
+	var shapes: Array = _cache[key].shapes if key in _cache else []
+	var waiter_count := int(_pack_load_waiters.get(key, 0))
+	_pack_load_semaphores.erase(key)
+	_pack_load_waiters.erase(key)
+	_cache_mutex.unlock()
+
+	for i in range(waiter_count):
+		owner_sem.post()
+	return shapes
 
 
 ## Insert `entry` under mutex, re-checking for a concurrent publisher.

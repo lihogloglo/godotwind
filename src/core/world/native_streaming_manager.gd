@@ -154,6 +154,15 @@ var _pending_load_set: Dictionary[Vector2i, bool] = {}
 
 ## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
 var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
+var _unloading_hold_frames: Dictionary[Vector2i, int] = {}
+const MAX_LIFECYCLE_EVENTS := 256
+var debug_lifecycle_capture_enabled: bool = false
+var _lifecycle_events: Array[Dictionary] = []
+var _lifecycle_event_write_index: int = 0
+
+## Verification-only hook for stress tests that need a deterministic
+## unload-limbo reclaim window. Default 0 keeps production behavior.
+var debug_unload_limbo_hold_frames: int = 0
 
 ## Request IDs of cells currently in unload-container limbo. Canonical
 ## state-reversal pattern (UE5 World Partition, OpenMW UnrefQueue): keep the
@@ -379,6 +388,9 @@ func _exit_tree() -> void:
 	# Manually freeing thousands of nodes in _exit_tree causes a long freeze
 	# and Godot produces misleading "leaked dependency" warnings from ordering issues
 	_unloading_cells.clear()
+	_unloading_hold_frames.clear()
+	_lifecycle_events.clear()
+	_lifecycle_event_write_index = 0
 	_loaded_cells.clear()
 
 
@@ -874,12 +886,9 @@ func _process(delta: float) -> void:
 			else:
 				instantiation_budget_ms = SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
 			var camera_fwd := -_camera.global_transform.basis.z if _camera else Vector3.FORWARD
-			var allow_collision_finalize := _collision_finalize_defer_frames <= 0 \
-				and _unloading_cells.is_empty() \
+			var allow_collision_finalize := _unloading_cells.is_empty() \
 				and _pending_rs_hide_cells.is_empty() \
 				and _pending_rs_cleanup_cells.is_empty()
-			if _collision_finalize_defer_frames > 0:
-				_collision_finalize_defer_frames -= 1
 			var payload_publish_budget_us := int(SC.STATIC_PREPARE_BUDGET_MS * 1000.0)
 			var payload_publish_start_us := Time.get_ticks_usec()
 			var payload_published := _process_payload_publish_steps(payload_publish_budget_us)
@@ -1041,7 +1050,7 @@ func _update_loaded_cells() -> void:
 			if not is_instance_valid(cell_ref):
 				continue
 			var cell_node: Node3D = cell_ref as Node3D
-			if cell_node.get_child_count() > 0:
+			if cell_node.get_child_count() > 0 or grid in _unloading_request_ids:
 				# Cell_node never left _world_container (see _unload_cell note);
 				# re-activate by flipping visible. No reparent.
 				cell_node.visible = _near_tier_visible
@@ -1054,9 +1063,14 @@ func _update_loaded_cells() -> void:
 					if _cell_manager != null and _cell_manager.has_method("resume_request_publish"):
 						_cell_manager.resume_request_publish(_unloading_request_ids[grid])
 					_unloading_request_ids.erase(grid)
+				_record_lifecycle_event("reclaim_cell", grid, "children=%d request_restored=%s" % [
+					cell_node.get_child_count(),
+					"Y" if grid in _async_requests else "N",
+				])
 				_debug("Reclaimed unloading cell %s (%d children remaining, request restored)" % [grid, cell_node.get_child_count()])
 	for grid in reclaimed:
 		_unloading_cells.erase(grid)
+		_unloading_hold_frames.erase(grid)
 	var t_reclaim := Time.get_ticks_usec()
 
 	# Unload cells that are too far (with hysteresis)
@@ -1253,10 +1267,6 @@ func _unload_cell(grid: Vector2i) -> void:
 	var prof: StreamingProfilerScript = _profiler
 	if prof: prof.begin_section("unload_cell:total")
 	var t0 := Time.get_ticks_usec()
-	_collision_finalize_defer_frames = maxi(
-		_collision_finalize_defer_frames,
-		SC.CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD
-	)
 	# Park any pending async request for this cell in the limbo registry.
 	# Do NOT call cell_manager.cancel_async_request — that filters the queue
 	# and frees the cell_node, which defeats state reversal on reclaim.
@@ -1277,6 +1287,7 @@ func _unload_cell(grid: Vector2i) -> void:
 			if _cell_manager.has_method("pause_request_publish"):
 				_cell_manager.pause_request_publish(request_id)
 			_cell_manager.cancel_collision_build_for_request(request_id)
+		_record_lifecycle_event("park_request", grid, "request=%d" % request_id)
 		_debug("Parked async request %d for cell %s (state-reversal limbo)" % [request_id, grid])
 
 	if grid not in _loaded_cells:
@@ -1323,6 +1334,8 @@ func _unload_cell(grid: Vector2i) -> void:
 	cell_node.visible = false
 	if prof: prof.end_section("unload_cell:visibility_propagate")
 	_unloading_cells[grid] = cell_node
+	if debug_unload_limbo_hold_frames > 0:
+		_unloading_hold_frames[grid] = debug_unload_limbo_hold_frames
 	var t_hide := Time.get_ticks_usec()
 
 	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
@@ -1378,10 +1391,15 @@ func _process_budgeted_unloading() -> void:
 
 		var children_count := cell_node.get_child_count()
 		if children_count == 0:
+			var hold_frames := int(_unloading_hold_frames.get(grid, 0))
+			if hold_frames > 0:
+				_unloading_hold_frames[grid] = hold_frames - 1
+				continue
 			# Cell is empty, free the container. State-reversal window closes
 			# here — cell is truly dying, finalize the parked async request.
 			CrashBreadcrumb.write("bu::cell_qfree_empty", str(grid))
 			if grid in _unloading_request_ids:
+				_record_lifecycle_event("finalize_unloaded", grid, "request=%d reason=empty" % _unloading_request_ids[grid])
 				_cell_manager.finalize_unloaded_cell(_unloading_request_ids[grid])
 				_unloading_request_ids.erase(grid)
 			cell_node.queue_free()
@@ -1403,6 +1421,7 @@ func _process_budgeted_unloading() -> void:
 				# Clean up completed cells before returning
 				for g in completed_grids:
 					_unloading_cells.erase(g)
+					_unloading_hold_frames.erase(g)
 				return
 
 			# NOTE 2026-04-20: prior `CrashBreadcrumb.write("unload_child", ...)`
@@ -1424,6 +1443,7 @@ func _process_budgeted_unloading() -> void:
 		if cell_node.get_child_count() == 0:
 			CrashBreadcrumb.write("bu::cell_qfree_drained", str(grid))
 			if grid in _unloading_request_ids:
+				_record_lifecycle_event("finalize_unloaded", grid, "request=%d reason=drained" % _unloading_request_ids[grid])
 				_cell_manager.finalize_unloaded_cell(_unloading_request_ids[grid])
 				_unloading_request_ids.erase(grid)
 			cell_node.queue_free()
@@ -1432,6 +1452,7 @@ func _process_budgeted_unloading() -> void:
 	# Remove completed cells from tracking
 	for g in completed_grids:
 		_unloading_cells.erase(g)
+		_unloading_hold_frames.erase(g)
 
 	if debug_enabled and total_freed > 0:
 		_debug("Budgeted unload: freed %d objects, %d cells remaining" % [total_freed, _unloading_cells.size()])
@@ -1489,7 +1510,6 @@ var _pending_rs_hide_set: Dictionary[Vector2i, bool] = {}
 ## Cells with RS instances that need deferred free_rid() cleanup (after hiding)
 var _pending_rs_cleanup_cells: Array[Vector2i] = []
 
-var _collision_finalize_defer_frames: int = 0
 
 # S.1 refactor (near_tier_refactor.md 2026-04-19): MID↔NEAR promotion / demotion
 # loops deleted. Per-cell tier is the axis of variation; MID re-enable in S.7
@@ -1785,6 +1805,42 @@ func get_phase_times() -> PackedFloat64Array:
 ## Get last frame's total streaming work in ms.
 func get_frame_streaming_ms() -> float:
 	return _last_frame_total_ms
+
+
+func consume_lifecycle_events() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if _lifecycle_events.size() < MAX_LIFECYCLE_EVENTS:
+		out.append_array(_lifecycle_events)
+	else:
+		var start := _lifecycle_event_write_index % MAX_LIFECYCLE_EVENTS
+		for i in range(MAX_LIFECYCLE_EVENTS):
+			out.append(_lifecycle_events[(start + i) % MAX_LIFECYCLE_EVENTS])
+	_lifecycle_events.clear()
+	_lifecycle_event_write_index = 0
+	return out
+
+
+func set_lifecycle_capture_enabled(enabled: bool) -> void:
+	debug_lifecycle_capture_enabled = enabled
+	_lifecycle_events.clear()
+	_lifecycle_event_write_index = 0
+
+
+func _record_lifecycle_event(event_name: String, grid: Vector2i, detail: String = "") -> void:
+	if not debug_lifecycle_capture_enabled:
+		return
+	var entry := {
+		"frame": Engine.get_frames_drawn(),
+		"elapsed_s": Time.get_ticks_msec() / 1000.0,
+		"event": event_name,
+		"detail": "%s %s" % [str(grid), detail],
+	}
+	if _lifecycle_events.size() < MAX_LIFECYCLE_EVENTS:
+		_lifecycle_events.append(entry)
+	else:
+		_lifecycle_events[_lifecycle_event_write_index % MAX_LIFECYCLE_EVENTS] = entry
+	_lifecycle_event_write_index += 1
+	Log.info("streaming", "[P0.4-LIFECYCLE] %s %s" % [event_name, entry["detail"]])
 
 
 ## Get or create the per-phase StreamingProfiler.

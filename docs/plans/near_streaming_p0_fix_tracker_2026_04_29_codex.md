@@ -181,7 +181,7 @@ Backed-out attempt, 2026-04-30:
 
 ### P0.4 Unload / RID Lifecycle Audit
 
-Status: pending
+Status: accepted via 2026-05-01 P0.4 lifecycle implementation
 
 Required if the eviction-disabled probe still crashes.
 
@@ -1122,7 +1122,7 @@ Triage table:
 | `DEBUG_DISABLE_PHASE_F_PREREG` | Kept as a crash-risk opt-in research gate. Default-disabled prereg is not production. | Delete when model callback ownership lane decides prereg fate, by 2026-05-02 |
 | `STATIC_CULL_NATIVE_ENABLED` | Kept with `PrototypeRegistry`. Registry is still present but gated off; Phase 2A adds a transitional RS bucket path, not the final per-cell MultiMesh replacement. | Delete with world-scoped `PrototypeRegistry` in Phase 2B, by 2026-05-04 |
 | `STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD` | Kept with world-scoped `PrototypeRegistry` upload path. | Delete with world-scoped `PrototypeRegistry` in Phase 2B, by 2026-05-04 |
-| `CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD` | Kept. Collision worker payload/task/body ownership now lives on `CellPayload`; defer policy remains a lifecycle guard pending the P0.4 unload/finalize audit. | Delete or justify during P0.4 lifecycle audit, by 2026-05-03 |
+| `CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD` | Deleted in P0.4. Payload-owned collision drains at unload start via `cancel_collision_build_for_request`; finalize remains gated by active unload / RS hide / RS cleanup ownership state instead of elapsed frames. | Done 2026-05-01 |
 
 Next lane:
 
@@ -1300,7 +1300,7 @@ Rejected Phase 2B budget experiments:
 
 ### 2026-04-30 Phase 1 Lane 2 Collision Publish Ownership Draft
 
-Status: implementation draft ready for review
+Status: implementation draft ready for final review
 
 Changes drafted:
 
@@ -1343,6 +1343,95 @@ Interpretation:
 This accepts the collision-publish ownership move as a narrow Phase 1 slice. It
 does not close the lifecycle audit: the unload/finalize defer flag and broader
 worker/body lifetime proof still belong in P0.4.
+
+### 2026-05-01 P0.4 Lifecycle Audit Implementation
+
+Status: accepted by reviewer 2026-05-01
+
+Changes drafted:
+
+- Deleted `CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD` and
+  `_collision_finalize_defer_frames`. Collision finalization is now controlled
+  by explicit lifecycle gates: no active unload cells, no pending RS hide cells,
+  and no pending RS cleanup cells.
+- Deleted unused `CellPayload.release_static_buckets()` so Phase 2A bucket
+  ownership remains unambiguous: renderer-owned through
+  `StaticObjectRenderer._cell_buckets`.
+- Updated stale collision docs from `AsyncCellRequest.collision_body` to
+  `CellPayload.collision_body`.
+- Added single-flight `StaticShapeCache` sidecar loading after east-route
+  verification exposed concurrent worker loads of the same `.shapes.res`.
+- Follow-up: Phase F render prototype registration now runs before collision
+  shape-cache warming, and main-thread `get_shapes()` does not wait behind an
+  in-flight worker sidecar load. This keeps collision-cache serialization from
+  forcing cold visual registration on the main thread.
+
+Verification:
+
+- `git diff --check` passed with CRLF normalization warnings only.
+- Ready smoke with collision disabled exited cleanly with code 0:
+  `--quit-after-ready=0.5 --disable-jolt-attach --disable-phase-f-prereg
+  --disable-cell-static-collision`.
+- Dense-loop stress `p04_lifecycle_dense_v3_2026_05_01_coder` completed 30s:
+  avg 112.939 FPS, p95 16.145 ms, p99 18.057 ms, max stream 32.451 ms,
+  max inst 18.161 ms, max queue 19, three frames over 33.33 ms, zero over
+  50 ms.
+- East-route stress before shape-order follow-up
+  `p04_lifecycle_east_v3_2026_05_01_coder` completed 30s: avg 127.364 FPS,
+  p95 16.017 ms, p99 19.692 ms, max stream 196.713 ms, max inst 196.613 ms,
+  max queue 8, three frames over 33.33 ms, two over 50 ms. Implementation
+  review rejected this as a regression.
+- East no-collision control
+  `p04_east_no_collision_control_2026_05_01_coder` completed 30s: avg
+  206.560 FPS, p99 16.025 ms, max stream 28.755 ms, max inst 21.563 ms,
+  max queue 8, one frame over 50 ms.
+- East-route stress after shape-order follow-up
+  `p04_east_shape_order_2026_05_01_coder` completed 30s: avg 132.320 FPS,
+  p95 15.261 ms, p99 17.203 ms, max stream 34.122 ms, max inst 18.478 ms,
+  max queue 8, two frames over 33.33 ms, one over 50 ms.
+- East-route repeat after shape-order follow-up
+  `p04_east_shape_order_repeat2_2026_05_01_coder` completed 30s: avg
+  127.396 FPS, p95 16.134 ms, p99 19.118 ms, max stream 38.983 ms,
+  max inst 19.891 ms, max queue 12, three frames over 33.33 ms, one over
+  50 ms.
+- Targeted reclaim proof
+  `p04_reclaim_boomerang_2026_05_01_coder` completed summary: route
+  `p04-reclaim`, 8s boomerang, 180 m/s,
+  `--stress-limbo-hold-frames=300`. Avg 105.918 FPS, p99 16.281 ms,
+  max frame 27.046 ms, max stream 23.114 ms, max inst 14.445 ms,
+  zero frames over 50 ms. Lifecycle event counts before summary:
+  `park_request=7`, `publish_paused=7`, `collision_rearmed=7`,
+  `reclaim_cell=5`, `publish_resumed=5`, `collision_dispatched=6`,
+  `collision_finalized=2`, `finalize_unloaded=2`.
+- Instrumentation cleanup: lifecycle capture is disabled by default and
+  bounded to 256 events when enabled. The stress harness enables it only for
+  explicit reclaim/limbo-hold verification.
+- Gated targeted reclaim proof
+  `p04_reclaim_boomerang_gated_2026_05_01_coder` completed summary with the
+  same route and limbo hold. Avg 97.143 FPS, p99 18.822 ms, max frame
+  41.603 ms, max stream 27.194 ms, max inst 24.094 ms, zero frames over
+  50 ms. Lifecycle event counts before summary: `park_request=7`,
+  `publish_paused=7`, `collision_rearmed=7`, `reclaim_cell=5`,
+  `publish_resumed=5`, `collision_dispatched=6`, `collision_finalized=1`,
+  `finalize_unloaded=2`.
+- Fresh dense/east logs had no `SCRIPT ERROR`, parse error, `ERROR:`,
+  `material_set_shader`, `child-attach-spike`, `collision-finalize`, or
+  `CellStaticCollision` errors before summary.
+- Both final stress runs still hit the parked post-`BENCH_QUIT` native access
+  violation after the summary wrote.
+
+Interpretation:
+
+P0.4 now includes a gated targeted reclaim proof. The stale collision
+frame-defer bridge is deleted, the shape-order follow-up removed the
+196/875 ms east-route instantiate regression, and the boomerang harness proves
+request park, publish pause, reclaim before finalize, publish resume,
+collision re-arm, collision re-dispatch, and post-reclaim collision
+finalization. Lifecycle capture is not always-on in production.
+
+The east-route 80-100 ms max-frame outlier remains a separate performance
+lane before any claim that NEAR streaming is flawless or before moving to
+distant rendering.
 
 ## Open Questions
 

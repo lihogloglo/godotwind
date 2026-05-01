@@ -22,7 +22,7 @@ Three-step pipeline in `cell_static_collision.gd`:
 2. `worker_collect_triangles(payload)` — WORKER thread (WorkerThreadPool). Walks shapes, transforms to world space, packs into `payload.vertices`. Reads from a worker-safe shape cache.
 3. `finalize_body(payload, world_3d)` — MAIN thread. `set_faces` (BVH build) + `PhysicsServer3D.body_create` + space registration. Returns a `FinalizedBody` (body RID + strong-ref to the trimesh Shape3D so its internal RID stays alive).
 
-Driven by `_tick_static_collision_build` in `cell_manager.gd`. One cell finalized per frame; body lifetime tracked on `AsyncCellRequest.collision_body`, freed via `free_body` on cancel / unload / shutdown. Shapes come from the shared `StaticShapeCache` (per-prototype LRU keyed on `model_path`); first-time extraction loads the prebaked `.shapes.res` sidecar (~sub-ms) or falls back to a PackedScene walker (~20-50ms).
+Driven by `_tick_static_collision_build` in `cell_manager.gd`. One cell finalized per frame; body lifetime tracked on `CellPayload.collision_body`, freed via `free_body` on cancel / unload / shutdown. Shapes come from the shared `StaticShapeCache` (per-prototype LRU keyed on `model_path`); first-time extraction loads the prebaked `.shapes.res` sidecar (~sub-ms) or falls back to a PackedScene walker (~20-50ms).
 
 **Why per-cell rather than per-prefab:** statics_no_node3d (T.1) moved static rendering to RenderingServer-direct (MultiMesh slots, no Node3D). That eliminated ~10k per-object `StaticBody3D` registrations in Jolt's broadphase but also removed collision. Per-cell merged trimesh restores it without re-introducing the broadphase storm.
 

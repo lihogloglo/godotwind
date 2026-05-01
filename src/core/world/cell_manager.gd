@@ -53,6 +53,10 @@ var _static_renderer: Node = null  # StaticObjectRenderer
 # per cell, parented to the cell_node so unload cascades cleanly.
 var _static_shape_cache: StaticShapeCacheScript = StaticShapeCacheScript.new()
 var _cell_static_collision: CellStaticCollisionScript = CellStaticCollisionScript.new()
+const MAX_LIFECYCLE_EVENTS := 256
+var debug_lifecycle_capture_enabled: bool = false
+var _lifecycle_events: Array[Dictionary] = []
+var _lifecycle_event_write_index: int = 0
 
 # MID-tier batch pool removed — StaticObjectRenderer now handles MID with per-instance LOD
 
@@ -1920,6 +1924,7 @@ func pause_request_publish(request_id: int) -> void:
 	request.state = CellPayloadScript.State.UNLOADING
 	if request.payload != null:
 		request.payload.state = request.state
+	_record_lifecycle_event("publish_paused", request.grid, "request=%d" % request_id)
 
 
 ## Resume scene-tree publishing after unload-limbo state reversal.
@@ -1930,6 +1935,10 @@ func resume_request_publish(request_id: int) -> void:
 	request.state = CellPayloadScript.State.VISUAL_READY if request.completed else CellPayloadScript.State.VISUAL_PUBLISHING
 	if request.payload != null:
 		request.payload.state = request.state
+	_record_lifecycle_event("publish_resumed", request.grid, "request=%d completed=%s" % [
+		request_id,
+		"Y" if request.completed else "N",
+	])
 
 
 ## Finalize an unloaded cell — SOFT cleanup after state-reversal window closes.
@@ -3305,6 +3314,7 @@ func _tick_static_collision_build(
 			"cell_static_collision:collect_triangles",
 		)
 		request.payload.collision_dispatched = true
+		_record_lifecycle_event("collision_dispatched", request.grid, "request=%d" % request_id)
 		dispatched_this_tick += 1
 
 	if not allow_finalize:
@@ -3432,6 +3442,10 @@ func _tick_static_collision_build(
 		winner.state = CellPayloadScript.State.ACTIVE
 		if winner.payload != null:
 			winner.payload.state = winner.state
+		_record_lifecycle_event("collision_finalized", winner.grid, "request=%d tris=%d" % [
+			winner_id,
+			total_tri_count,
+		])
 	return finalize_us
 
 
@@ -3539,6 +3553,7 @@ func cancel_collision_build_for_request(request_id: int) -> void:
 	# cell_node.visible prevents wasted work while the cell is in limbo.
 	request.payload.collision_built = false
 	request.payload.collision_dispatched = false
+	_record_lifecycle_event("collision_rearmed", request.grid, "request=%d" % request_id)
 
 
 ## Internal: Queue an object for instantiation with limit checking
@@ -3652,6 +3667,42 @@ func get_frame_inst_route_times() -> Dictionary:
 		"activator": _frame_inst_activator_us,
 		"static": _frame_inst_static_us,
 	}
+
+
+func consume_lifecycle_events() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if _lifecycle_events.size() < MAX_LIFECYCLE_EVENTS:
+		out.append_array(_lifecycle_events)
+	else:
+		var start := _lifecycle_event_write_index % MAX_LIFECYCLE_EVENTS
+		for i in range(MAX_LIFECYCLE_EVENTS):
+			out.append(_lifecycle_events[(start + i) % MAX_LIFECYCLE_EVENTS])
+	_lifecycle_events.clear()
+	_lifecycle_event_write_index = 0
+	return out
+
+
+func set_lifecycle_capture_enabled(enabled: bool) -> void:
+	debug_lifecycle_capture_enabled = enabled
+	_lifecycle_events.clear()
+	_lifecycle_event_write_index = 0
+
+
+func _record_lifecycle_event(event_name: String, grid: Vector2i, detail: String = "") -> void:
+	if not debug_lifecycle_capture_enabled:
+		return
+	var entry := {
+		"frame": Engine.get_frames_drawn(),
+		"elapsed_s": Time.get_ticks_msec() / 1000.0,
+		"event": event_name,
+		"detail": "%s %s" % [str(grid), detail],
+	}
+	if _lifecycle_events.size() < MAX_LIFECYCLE_EVENTS:
+		_lifecycle_events.append(entry)
+	else:
+		_lifecycle_events[_lifecycle_event_write_index % MAX_LIFECYCLE_EVENTS] = entry
+	_lifecycle_event_write_index += 1
+	Log.info("streaming", "[P0.4-LIFECYCLE] %s %s" % [event_name, entry["detail"]])
 
 
 ## Get comprehensive loading stats

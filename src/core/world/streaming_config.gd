@@ -142,7 +142,6 @@ const CELL_STATIC_COLLISION_DISPATCH_BUDGET_MS := 0.5
 const CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME := 1
 const CELL_STATIC_COLLISION_FINALIZE_MIN_REMAINING_MS := 2.0
 const CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME := 1000
-const CELL_STATIC_COLLISION_FINALIZE_DEFER_FRAMES_AFTER_UNLOAD := 30
 
 ## Main-thread static prototype prepare budget. This lane registers renderer
 ## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs

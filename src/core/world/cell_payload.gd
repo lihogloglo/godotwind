@@ -174,15 +174,6 @@ func add_static_bucket(key: String, bucket: RefCounted) -> void:
 	stats["static_buckets"] = static_buckets_by_key.size()
 
 
-func release_static_buckets() -> void:
-	for bucket_value: Variant in static_buckets_by_key.values():
-		var bucket: RefCounted = bucket_value as RefCounted
-		if bucket != null and bucket.has_method("cleanup"):
-			bucket.call("cleanup")
-	static_buckets_by_key.clear()
-	stats["static_buckets"] = 0
-
-
 func enqueue_pending_model_load(key: String, ref_info: Dictionary) -> void:
 	if key.is_empty():
 		return
