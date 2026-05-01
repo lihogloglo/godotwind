@@ -63,6 +63,8 @@ var _cell_index: Dictionary[Vector2i, Array] = {} # Array[int]
 ## Phase 2B must move or document any stronger cell/payload ownership model.
 var _cell_buckets: Dictionary[Vector2i, Array] = {} # Array[CellStaticBucket]
 var _cell_bucket_hide_progress: Dictionary[Vector2i, int] = {}
+var _cell_bucket_key_index: Dictionary[String, RefCounted] = {}
+var _cell_bucket_pending_cleanup: Dictionary[String, bool] = {}
 
 ## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
 ## default — see lod_crossfade.gdshader. The shader reads this per-slot via
@@ -776,7 +778,12 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 ## `clear(clear_mesh_types=true)` from somewhere else could drop the type.
 ##
 ## Plan: phase_e_static_bulk_upload.md §3.2, §5.1
-func create_cell_bucket(type_name: String, transforms: Array, cell_grid: Vector2i) -> RefCounted:
+func create_cell_bucket(type_name: String, payload_key: String, transforms: Array, cell_grid: Vector2i, resource_handle: RefCounted = null) -> RefCounted:
+	if payload_key.is_empty():
+		return null
+	var bucket_key := _make_cell_bucket_key(cell_grid, payload_key)
+	if _cell_bucket_key_index.has(bucket_key) or bool(_cell_bucket_pending_cleanup.get(bucket_key, false)):
+		return null
 	if type_name not in _mesh_types:
 		return null
 	if transforms.is_empty() or not _scenario.is_valid():
@@ -790,12 +797,14 @@ func create_cell_bucket(type_name: String, transforms: Array, cell_grid: Vector2
 	var ok := bool(bucket.call(
 		"configure",
 		type_name,
+		payload_key,
 		cell_grid,
 		mesh_type.sub_meshes,
 		transforms,
 		_scenario,
 		visibility_range_end,
-		_globally_visible
+		_globally_visible,
+		resource_handle
 	))
 	if not ok:
 		if bucket.has_method("cleanup"):
@@ -805,6 +814,7 @@ func create_cell_bucket(type_name: String, transforms: Array, cell_grid: Vector2
 	if cell_grid not in _cell_buckets:
 		_cell_buckets[cell_grid] = []
 	_cell_buckets[cell_grid].append(bucket)
+	_cell_bucket_key_index[bucket_key] = bucket
 	_stats["cell_buckets"] = int(_stats.get("cell_buckets", 0)) + 1
 	_stats["bucket_instances"] = int(_stats.get("bucket_instances", 0)) + transforms.size()
 	_stats["total_instances"] = int(_stats.get("total_instances", 0)) + transforms.size()
@@ -812,6 +822,10 @@ func create_cell_bucket(type_name: String, transforms: Array, cell_grid: Vector2
 		_stats["visible_instances"] = int(_stats.get("visible_instances", 0)) + transforms.size()
 	mesh_type.instance_count += transforms.size()
 	return bucket
+
+
+func _make_cell_bucket_key(cell_grid: Vector2i, payload_key: String) -> String:
+	return "%d,%d:%s" % [cell_grid.x, cell_grid.y, payload_key]
 
 
 # PHASE_E:MAIN_ONLY
@@ -1001,29 +1015,55 @@ func remove_cell_instances(cell_grid: Vector2i) -> int:
 			remove_instance(id)
 		removed += to_remove.size()
 
-	if cell_grid in _cell_buckets:
-		var buckets: Array = _cell_buckets[cell_grid]
-		for bucket_value: Variant in buckets:
-			var bucket: RefCounted = bucket_value as RefCounted
-			if bucket == null:
-				continue
-			var count := int(bucket.get("instance_count"))
-			var was_visible := bool(bucket.get("visible"))
-			var bucket_type := str(bucket.get("type_name"))
-			if bucket.has_method("cleanup"):
-				count = int(bucket.call("cleanup"))
-			removed += count
-			_stats["cell_buckets"] = maxi(0, int(_stats.get("cell_buckets", 0)) - 1)
-			_stats["bucket_instances"] = maxi(0, int(_stats.get("bucket_instances", 0)) - count)
-			_stats["total_instances"] = maxi(0, int(_stats.get("total_instances", 0)) - count)
-			if was_visible:
-				_stats["visible_instances"] = maxi(0, int(_stats.get("visible_instances", 0)) - count)
-			if bucket_type in _mesh_types:
-				var mesh_type: MeshType = _mesh_types[bucket_type]
-				mesh_type.instance_count = maxi(0, mesh_type.instance_count - count)
-		_cell_buckets.erase(cell_grid)
-		_cell_bucket_hide_progress.erase(cell_grid)
+	var detached_buckets := _detach_cell_buckets(cell_grid)
+	removed += _cleanup_detached_buckets(detached_buckets)
 
+	return removed
+
+
+func _detach_cell_buckets(cell_grid: Vector2i) -> Array:
+	if cell_grid not in _cell_buckets:
+		_cell_bucket_hide_progress.erase(cell_grid)
+		return []
+	var buckets: Array = _cell_buckets[cell_grid]
+	_cell_buckets.erase(cell_grid)
+	_cell_bucket_hide_progress.erase(cell_grid)
+	for bucket_value: Variant in buckets:
+		var bucket: RefCounted = bucket_value as RefCounted
+		if bucket == null:
+			continue
+		if bucket.has_method("freeze"):
+			bucket.call("freeze")
+		var bucket_key := str(bucket.get("bucket_key"))
+		if not bucket_key.is_empty():
+			_cell_bucket_key_index.erase(bucket_key)
+			_cell_bucket_pending_cleanup[bucket_key] = true
+	return buckets
+
+
+func _cleanup_detached_buckets(buckets: Array) -> int:
+	var removed := 0
+	for bucket_value: Variant in buckets:
+		var bucket: RefCounted = bucket_value as RefCounted
+		if bucket == null:
+			continue
+		var count := int(bucket.get("instance_count"))
+		var was_visible := bool(bucket.get("visible"))
+		var bucket_type := str(bucket.get("type_name"))
+		var bucket_key := str(bucket.get("bucket_key"))
+		if bucket.has_method("cleanup"):
+			count = int(bucket.call("cleanup"))
+		removed += count
+		_stats["cell_buckets"] = maxi(0, int(_stats.get("cell_buckets", 0)) - 1)
+		_stats["bucket_instances"] = maxi(0, int(_stats.get("bucket_instances", 0)) - count)
+		_stats["total_instances"] = maxi(0, int(_stats.get("total_instances", 0)) - count)
+		if was_visible:
+			_stats["visible_instances"] = maxi(0, int(_stats.get("visible_instances", 0)) - count)
+		if bucket_type in _mesh_types:
+			var mesh_type: MeshType = _mesh_types[bucket_type]
+			mesh_type.instance_count = maxi(0, mesh_type.instance_count - count)
+		if not bucket_key.is_empty():
+			_cell_bucket_pending_cleanup.erase(bucket_key)
 	return removed
 
 
@@ -1048,7 +1088,7 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 	if cell_grid in _cell_buckets:
 		for bucket_value: Variant in _cell_buckets[cell_grid]:
 			var bucket: RefCounted = bucket_value as RefCounted
-			if bucket == null or not bool(bucket.get("visible")):
+			if bucket == null or bool(bucket.get("frozen")) or not bool(bucket.get("visible")):
 				continue
 			var bucket_count := int(bucket.get("instance_count"))
 			if bucket.has_method("set_visible"):
@@ -1103,7 +1143,7 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		var bi := bucket_start_idx
 		while bi < buckets.size() and hidden < max_count:
 			var bucket: RefCounted = buckets[bi] as RefCounted
-			if bucket != null and bool(bucket.get("visible")):
+			if bucket != null and not bool(bucket.get("frozen")) and bool(bucket.get("visible")):
 				var count := int(bucket.get("instance_count"))
 				if bucket.has_method("set_visible"):
 					bucket.call("set_visible", false)
@@ -1271,7 +1311,7 @@ func set_all_visible(visible: bool) -> void:
 	for buckets: Array in _cell_buckets.values():
 		for bucket_value: Variant in buckets:
 			var bucket: RefCounted = bucket_value as RefCounted
-			if bucket != null and bucket.has_method("set_visible"):
+			if bucket != null and not bool(bucket.get("frozen")) and bucket.has_method("set_visible"):
 				bucket.call("set_visible", visible)
 	var bucket_instances := int(_stats.get("bucket_instances", 0))
 	_stats["visible_instances"] = (_instances.size() + bucket_instances) if visible else 0
@@ -1292,14 +1332,15 @@ func clear(clear_mesh_types: bool = true) -> void:
 				rs.free_rid(rid)
 	_instances.clear()
 	_cell_index.clear()
-	for buckets: Array in _cell_buckets.values():
-		for bucket_value: Variant in buckets:
-			var bucket: RefCounted = bucket_value as RefCounted
-			if bucket != null and bucket.has_method("cleanup"):
-				bucket.call("cleanup")
-	_cell_buckets.clear()
+	var detached_bucket_lists: Array = []
+	for cell_grid: Vector2i in _cell_buckets.keys():
+		detached_bucket_lists.append(_detach_cell_buckets(cell_grid))
 	_cell_bucket_hide_progress.clear()
 	_cell_hide_progress.clear()
+	_cell_bucket_key_index.clear()
+	for buckets: Array in detached_bucket_lists:
+		_cleanup_detached_buckets(buckets)
+	_cell_bucket_pending_cleanup.clear()
 
 	if clear_mesh_types:
 		# Lock for the iteration + clear — any in-flight worker read of

@@ -1396,10 +1396,12 @@ func _process_static_prepare_entry(entry: Dictionary) -> int:
 	var batch_count := 0
 	var payload_key := CellPayloadScript.make_model_key(model_path, item_id)
 	if not request.payload.has_static_bucket(payload_key):
+		_pin_payload_cached_scene(request, model_path, item_id)
+		var resource_handle: RefCounted = request.payload.get_model_handle(model_path, item_id) if request.payload.has_method("get_model_handle") else null
 		var transforms: Array = request.payload.static_instance_transforms.get(payload_key, [])
 		if not transforms.is_empty() and _static_renderer.has_method("create_cell_bucket"):
 			var batch_start := Time.get_ticks_usec()
-			var bucket: RefCounted = _static_renderer.call("create_cell_bucket", type_name, transforms, request.grid) as RefCounted
+			var bucket: RefCounted = _static_renderer.call("create_cell_bucket", type_name, payload_key, transforms, request.grid, resource_handle) as RefCounted
 			batch_us = Time.get_ticks_usec() - batch_start
 			if bucket != null:
 				request.payload.add_static_bucket(payload_key, bucket)

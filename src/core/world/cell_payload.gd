@@ -174,6 +174,11 @@ func add_static_bucket(key: String, bucket: RefCounted) -> void:
 	stats["static_buckets"] = static_buckets_by_key.size()
 
 
+func get_model_handle(model_path: String, item_id: String) -> RefCounted:
+	var key := make_model_key(model_path, item_id)
+	return resource_handles_by_key.get(key) as RefCounted
+
+
 func enqueue_pending_model_load(key: String, ref_info: Dictionary) -> void:
 	if key.is_empty():
 		return

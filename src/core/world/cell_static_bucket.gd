@@ -4,30 +4,46 @@ extends RefCounted
 const DU := preload("res://src/core/world/distance_utils.gd")
 
 var type_name: String = ""
+var payload_key: String = ""
+var bucket_key: String = ""
 var cell_grid: Vector2i = Vector2i.ZERO
 var instance_count: int = 0
 var rs_instances: Array[RID] = []
 var visible: bool = true
+var frozen: bool = false
+var resource_handle: RefCounted = null
+var _bucket_owner_key: String = ""
+var _resource_refs: Array[Resource] = []
 
 
-## Phase 2A bucket primitive: this owns RS instance RIDs only. Mesh/material
-## resources are still held by StaticObjectRenderer._mesh_types.
+## Phase 2B bucket primitive: owns RS instance RIDs plus the strong resource
+## refs/handle needed by those RIDs. `_mesh_types` is lookup, not lifetime.
 func configure(
 	p_type_name: String,
+	p_payload_key: String,
 	p_cell_grid: Vector2i,
 	sub_meshes: Array,
 	transforms: Array,
 	scenario: RID,
 	visibility_range_end: float,
 	globally_visible: bool,
+	p_resource_handle: RefCounted = null,
 ) -> bool:
-	if p_type_name.is_empty() or sub_meshes.is_empty() or transforms.is_empty() or not scenario.is_valid():
+	if p_type_name.is_empty() or p_payload_key.is_empty() or sub_meshes.is_empty() or transforms.is_empty() or not scenario.is_valid():
 		return false
 
 	type_name = p_type_name
+	payload_key = p_payload_key
 	cell_grid = p_cell_grid
+	bucket_key = "%d,%d:%s" % [cell_grid.x, cell_grid.y, payload_key]
+	_bucket_owner_key = "bucket:%s" % bucket_key
 	instance_count = transforms.size()
 	visible = globally_visible
+	frozen = false
+	resource_handle = p_resource_handle
+	if resource_handle != null and resource_handle.has_method("add_owner"):
+		resource_handle.call("add_owner", _bucket_owner_key)
+	_pin_sub_mesh_resources(sub_meshes)
 
 	for world_transform_value: Variant in transforms:
 		var world_transform: Transform3D = world_transform_value
@@ -51,6 +67,8 @@ func configure(
 
 
 func set_visible(p_visible: bool) -> void:
+	if frozen:
+		return
 	if visible == p_visible:
 		return
 	visible = p_visible
@@ -59,7 +77,12 @@ func set_visible(p_visible: bool) -> void:
 			RenderingServer.instance_set_visible(rid, visible)
 
 
+func freeze() -> void:
+	frozen = true
+
+
 func cleanup() -> int:
+	freeze()
 	var released := instance_count
 	for rid: RID in rs_instances:
 		if rid.is_valid():
@@ -67,7 +90,32 @@ func cleanup() -> int:
 	rs_instances.clear()
 	instance_count = 0
 	visible = false
+	_release_resource_owner()
+	_resource_refs.clear()
 	return released
+
+
+func _pin_sub_mesh_resources(sub_meshes: Array) -> void:
+	for sub_mesh_value: Variant in sub_meshes:
+		var sub_mesh: Variant = sub_mesh_value
+		if sub_mesh == null:
+			continue
+		_append_resource_ref(sub_mesh.mesh_resource)
+		_append_resource_ref(sub_mesh.material_resource)
+		for material_value: Variant in sub_mesh.surface_materials:
+			_append_resource_ref(material_value as Resource)
+
+
+func _append_resource_ref(resource: Resource) -> void:
+	if resource != null and resource not in _resource_refs:
+		_resource_refs.append(resource)
+
+
+func _release_resource_owner() -> void:
+	if resource_handle != null and resource_handle.has_method("remove_owner") and not _bucket_owner_key.is_empty():
+		resource_handle.call("remove_owner", _bucket_owner_key)
+	resource_handle = null
+	_bucket_owner_key = ""
 
 
 func _create_rs_instance(
