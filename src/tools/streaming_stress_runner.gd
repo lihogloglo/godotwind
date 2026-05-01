@@ -15,6 +15,28 @@ const TRANSITION_PRE_FRAMES := 30
 const TRANSITION_POST_FRAMES := 120
 const BOOMERANG_DISTANCE_M := 360.0
 
+## Step 2a: known-bad tokens scanned in the Godot user log at finish time.
+## Hits flip the run status to "failed" and produce a non-zero process exit
+## intent (Windows quit-time crashes can mask the OS exit code; the JSON
+## summary is the authoritative pass/fail signal for harnesses).
+## Per docs/systems/streaming_rendering_bible.md "Parked vs Blocking Failures".
+##
+## Tokens are anchored to the actual error pattern (`ERROR:` or `SCRIPT ERROR`
+## prefix) so headless stack-trace `at:` lines and the runner's own echoed
+## summary do not register as failures.
+const FAILURE_TOKENS: Array[String] = [
+	"SCRIPT ERROR",
+	"Parse Error",
+	"Compile Error",
+	"ERROR: material_set_shader",
+	"ERROR: stale bucket",
+	"Failed to load script",
+	"ERROR: CellStaticCollision.finalize_body",
+]
+## Cap how much of the log we scan. The log can grow large during long
+## sessions; we only care about lines written during this stress run.
+const LOG_SCAN_MAX_BYTES: int = 8 * 1024 * 1024  # 8 MiB
+
 const ROUTE_STRAIGHT_NAMES := {
 	"east": true,
 	"+x": true,
@@ -409,25 +431,99 @@ func _finish() -> void:
 	set_process(false)
 	_drain_lifecycle_events()
 	var summary := _build_summary()
+	# Step 2a: scan the user log for known-bad tokens. Hits flip the run
+	# status to "failed" and propagate to the process exit code, so
+	# automated harnesses can no longer mistake "wrote a CSV" for "passed".
+	var failure_scan := _scan_log_for_failure_tokens()
+	summary["status"] = "passed" if failure_scan["reasons"].is_empty() else "failed"
+	summary["failure_reasons"] = failure_scan["reasons"]
+	summary["log_scan_unverified"] = bool(failure_scan["unverified"])
 	var csv_path := _write_csv()
 	var events_path := _write_events_csv()
 	var json_path := _write_summary_json(summary, csv_path, events_path)
 	Log.info("tools", "[STRESS] complete summary=%s csv=%s json=%s" % [
 		JSON.stringify(summary), csv_path, json_path
 	])
+	if summary["status"] == "failed":
+		Log.error("tools", "[STRESS] FAILED — failure_reasons=%s" % JSON.stringify(summary["failure_reasons"]))
+	var exit_code: int = 0 if summary["status"] == "passed" else 1
 	get_tree().create_timer(1.0).timeout.connect(func() -> void:
-		_quit_cleanly()
+		_quit_cleanly(exit_code)
 	)
 
 
-func _quit_cleanly() -> void:
-	Log.info("shutdown", "BENCH_QUIT - stress runner complete, graceful tree quit")
+func _quit_cleanly(exit_code: int = 0) -> void:
+	Log.info("shutdown", "BENCH_QUIT - stress runner complete, graceful tree quit (exit=%d)" % exit_code)
 	Engine.set_meta("_quitting", true)
 	if _streaming_manager != null:
 		_streaming_manager.set_process(false)
 		if _streaming_manager.has_method("fast_cleanup"):
 			_streaming_manager.call("fast_cleanup")
-	get_tree().quit()
+	get_tree().quit(exit_code)
+
+
+## Step 2a: scan the Godot user log file for blocking-failure tokens written
+## during this run. The user log is the canonical sink for `push_error` /
+## `push_warning` / native engine errors that Log alone can't capture
+## (SCRIPT ERROR, Compile Error, material_set_shader, etc.).
+##
+## Returns:
+##   { "reasons": Array[String]  — token names that fired (deduped),
+##     "unverified": bool        — true when the log file could not be read
+##                                 (e.g. headless run with stdout redirected
+##                                 elsewhere) — caller can decide to treat
+##                                 unverified as a soft failure }
+func _scan_log_for_failure_tokens() -> Dictionary:
+	var result := {
+		"reasons": [] as Array[String],
+		"unverified": false,
+	}
+	var log_path := OS.get_user_data_dir() + "/logs/godot.log"
+	if not FileAccess.file_exists(log_path):
+		result["unverified"] = true
+		return result
+	var file := FileAccess.open(log_path, FileAccess.READ)
+	if file == null:
+		result["unverified"] = true
+		return result
+	var size := file.get_length()
+	# Tail the last LOG_SCAN_MAX_BYTES so we focus on this run, not session
+	# accumulation.
+	if size > LOG_SCAN_MAX_BYTES:
+		file.seek(size - LOG_SCAN_MAX_BYTES)
+	var content := file.get_as_text()
+	file.close()
+	# Anchor scan to this run only — the log file is multi-run, so without an
+	# anchor we'd flag tokens from prior sessions. Our stamp is unique per run
+	# and appears in the `[STRESS] configured stamp=...` line emitted at start.
+	if not _stamp.is_empty():
+		var anchor := "[STRESS] configured stamp=" + _stamp
+		var anchor_idx := content.find(anchor)
+		if anchor_idx >= 0:
+			content = content.substr(anchor_idx)
+		else:
+			# Stamp not found in tail — scan window may have rolled past this
+			# run's start. Treat as unverified rather than flagging old tokens.
+			result["unverified"] = true
+			return result
+	var hit_set := {}
+	# Line-by-line so we can skip the runner's own echoed summary / FAILED log,
+	# which would otherwise self-trigger (the summary line embeds failure_reasons
+	# verbatim, and the FAILED line repeats the matched tokens).
+	for line: String in content.split("\n"):
+		if "[STRESS] complete summary=" in line:
+			continue
+		if "[STRESS] FAILED" in line:
+			continue
+		for token: String in FAILURE_TOKENS:
+			if token in line:
+				hit_set[token] = true
+				break
+	var reasons: Array[String] = []
+	for token: String in hit_set.keys():
+		reasons.append(token)
+	result["reasons"] = reasons
+	return result
 
 
 func _build_summary() -> Dictionary:
