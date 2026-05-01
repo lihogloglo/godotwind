@@ -155,6 +155,13 @@ var _pending_load_set: Dictionary[Vector2i, bool] = {}
 ## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
 var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
 var _unloading_hold_frames: Dictionary[Vector2i, int] = {}
+## Per-bible 2026-05-01 §"Cleanup Order" + auditor2 finding (chat msg 40):
+## reclaim is valid only BEFORE destructive cleanup begins. This flag flips to
+## true the first frame `_process_budgeted_unloading` does any destructive work
+## on the grid (first child queue_free OR first RS instance hide). Once frozen,
+## reclaim is rejected and the cell drains to completion; a fresh load runs
+## after the cell exits `_unloading_cells`. Cleared when the cell finalizes.
+var _unloading_frozen: Dictionary[Vector2i, bool] = {}
 const MAX_LIFECYCLE_EVENTS := 256
 var debug_lifecycle_capture_enabled: bool = false
 var _lifecycle_events: Array[Dictionary] = []
@@ -163,6 +170,17 @@ var _lifecycle_event_write_index: int = 0
 ## Verification-only hook for stress tests that need a deterministic
 ## unload-limbo reclaim window. Default 0 keeps production behavior.
 var debug_unload_limbo_hold_frames: int = 0
+
+## Verification-only hook for stress tests that need to deterministically
+## widen the destructive-cleanup window so the boomerang route can actually
+## attempt reclaim before destruction begins. When > 0, the budgeted unloader
+## holds off on child queue_free + RS hide for that many frames per grid
+## after the grid enters `_unloading_cells`. Default 0 keeps production
+## behavior. Counter decrements once per `_process_budgeted_unloading` frame.
+var debug_unload_destructive_hold_frames: int = 0
+## Per-grid remaining destructive hold (frames). Initialized from
+## `debug_unload_destructive_hold_frames` at `_unload_cell` time.
+var _unloading_destructive_holds: Dictionary[Vector2i, int] = {}
 
 ## Request IDs of cells currently in unload-container limbo. Canonical
 ## state-reversal pattern (UE5 World Partition, OpenMW UnrefQueue): keep the
@@ -389,6 +407,12 @@ func _exit_tree() -> void:
 	# and Godot produces misleading "leaked dependency" warnings from ordering issues
 	_unloading_cells.clear()
 	_unloading_hold_frames.clear()
+	_unloading_frozen.clear()
+	_unloading_destructive_holds.clear()
+	_pending_rs_hide_cells.clear()
+	_pending_rs_hide_set.clear()
+	_pending_rs_cleanup_cells.clear()
+	_pending_rs_cleanup_set.clear()
 	_lifecycle_events.clear()
 	_lifecycle_event_write_index = 0
 	_loaded_cells.clear()
@@ -1024,6 +1048,24 @@ func _process(delta: float) -> void:
 				])
 
 
+## Returns true when any cell-lifecycle path still occupies the grid: live,
+## currently loading, in unload limbo, mid-hide, or with pending RS free work.
+## Load gates use this so a fresh load can't publish under a grid whose old
+## buckets are still scheduled for hide/free — auditor2 finding 2026-05-01.
+func _is_cell_occupied(grid: Vector2i) -> bool:
+	if grid in _loaded_cells:
+		return true
+	if grid in _loading_cells:
+		return true
+	if grid in _unloading_cells:
+		return true
+	if grid in _pending_rs_hide_set:
+		return true
+	if grid in _pending_rs_cleanup_set:
+		return true
+	return false
+
+
 ## Update which cells should be loaded based on camera position
 func _update_loaded_cells() -> void:
 	# Dual-purpose SubsystemToggles gate: freeze the cell set entirely when
@@ -1043,9 +1085,21 @@ func _update_loaded_cells() -> void:
 	# State-reversal window closes here: move the async request back out of
 	# `_unloading_request_ids` limbo into `_async_requests` so pending queue
 	# entries resume draining into the (now-active) cell_node.
+	#
+	# Reclaim is valid ONLY before destructive cleanup begins. Once the
+	# budgeted unloader has freed any child or hidden any RS instance for the
+	# grid, `_unloading_frozen[grid]` is true and reclaim is rejected — the
+	# cell drains to completion and gets a fresh load on the next pass.
+	# Without this gate, a reclaimed cell would lose its static RS instances
+	# (still queued in `_pending_rs_hide_cells` / `_pending_rs_cleanup_cells`)
+	# a few frames after "rescue", which the user perceives as parts of the
+	# rescued cell disappearing. (Auditor2 finding, chat msg 40, 2026-05-01.)
 	var reclaimed: Array[Vector2i] = []
 	for grid: Vector2i in _unloading_cells:
 		if grid in cells_to_load:
+			if _unloading_frozen.get(grid, false):
+				_record_lifecycle_event("reclaim_rejected", grid, "reason=frozen")
+				continue
 			var cell_ref: Variant = _unloading_cells[grid]
 			if not is_instance_valid(cell_ref):
 				continue
@@ -1063,6 +1117,22 @@ func _update_loaded_cells() -> void:
 					if _cell_manager != null and _cell_manager.has_method("resume_request_publish"):
 						_cell_manager.resume_request_publish(_unloading_request_ids[grid])
 					_unloading_request_ids.erase(grid)
+				# Drop the grid from the pending RS hide/cleanup queues so the
+				# budgeted unloader doesn't fire `hide_cell_instances_budgeted`
+				# / `remove_cell_instances` on a now-live cell. Frozen gate above
+				# guarantees no hide/cleanup work has run yet.
+				if grid in _pending_rs_hide_set:
+					var idx := _pending_rs_hide_cells.find(grid)
+					if idx >= 0:
+						_pending_rs_hide_cells[idx] = _pending_rs_hide_cells.back()
+						_pending_rs_hide_cells.pop_back()
+					_pending_rs_hide_set.erase(grid)
+				var cleanup_idx := _pending_rs_cleanup_cells.find(grid)
+				if cleanup_idx >= 0:
+					_pending_rs_cleanup_cells[cleanup_idx] = _pending_rs_cleanup_cells.back()
+					_pending_rs_cleanup_cells.pop_back()
+				_pending_rs_cleanup_set.erase(grid)
+				_unloading_destructive_holds.erase(grid)
 				_record_lifecycle_event("reclaim_cell", grid, "children=%d request_restored=%s" % [
 					cell_node.get_child_count(),
 					"Y" if grid in _async_requests else "N",
@@ -1071,6 +1141,7 @@ func _update_loaded_cells() -> void:
 	for grid in reclaimed:
 		_unloading_cells.erase(grid)
 		_unloading_hold_frames.erase(grid)
+		_unloading_frozen.erase(grid)
 	var t_reclaim := Time.get_ticks_usec()
 
 	# Unload cells that are too far (with hysteresis)
@@ -1098,7 +1169,7 @@ func _update_loaded_cells() -> void:
 	_pending_load_queue.clear()
 	_pending_load_set.clear()
 	for grid: Vector2i in cells_to_load:
-		if grid not in _loaded_cells and grid not in _loading_cells:
+		if not _is_cell_occupied(grid):
 			_pending_load_queue.append(grid)
 			_pending_load_set[grid] = true
 
@@ -1176,7 +1247,7 @@ func _get_cells_in_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 ## Request async loading of a cell (non-blocking)
 ## Returns true if request was submitted, false if already loading or at capacity
 func _request_cell_async(grid: Vector2i) -> bool:
-	if grid in _loaded_cells or grid in _loading_cells:
+	if _is_cell_occupied(grid):
 		return false
 
 	# Submit async request
@@ -1310,6 +1381,7 @@ func _unload_cell(grid: Vector2i) -> void:
 		_pending_rs_hide_cells.append(grid)
 		_pending_rs_hide_set[grid] = true
 		_pending_rs_cleanup_cells.append(grid)
+		_pending_rs_cleanup_set[grid] = true
 		if _static_renderer.has_method("defer_prototype_uploads"):
 			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 
@@ -1336,6 +1408,8 @@ func _unload_cell(grid: Vector2i) -> void:
 	_unloading_cells[grid] = cell_node
 	if debug_unload_limbo_hold_frames > 0:
 		_unloading_hold_frames[grid] = debug_unload_limbo_hold_frames
+	if debug_unload_destructive_hold_frames > 0:
+		_unloading_destructive_holds[grid] = debug_unload_destructive_hold_frames
 	var t_hide := Time.get_ticks_usec()
 
 	_debug("Queued cell %s for budgeted unloading (%d children)" % [grid, cell_node.get_child_count()])
@@ -1374,6 +1448,16 @@ func _process_budgeted_unloading() -> void:
 	var budget_usec := SC.UNLOAD_BUDGET_MS * 1000.0
 	var total_freed := 0
 
+	# Verification-only: tick the per-grid destructive hold once per frame.
+	# When the hold is > 0 for a grid, both the queue_free pass and the RS
+	# hide pass below skip that grid, keeping the cell in pure limbo so the
+	# reclaim window stays open. Default-empty in production.
+	if not _unloading_destructive_holds.is_empty():
+		for grid: Vector2i in _unloading_destructive_holds.keys():
+			var rem := int(_unloading_destructive_holds[grid])
+			if rem > 0:
+				_unloading_destructive_holds[grid] = rem - 1
+
 	# Process each unloading cell
 	var completed_grids: Array[Vector2i] = []
 
@@ -1388,6 +1472,11 @@ func _process_budgeted_unloading() -> void:
 			completed_grids.append(grid)
 			continue
 		var cell_node: Node3D = cell_ref as Node3D
+
+		# Verification hook: skip destruction for this grid while its hold
+		# counter is positive. Reclaim can still succeed during this window.
+		if _unloading_destructive_holds.get(grid, 0) > 0:
+			continue
 
 		var children_count := cell_node.get_child_count()
 		if children_count == 0:
@@ -1422,6 +1511,8 @@ func _process_budgeted_unloading() -> void:
 				for g in completed_grids:
 					_unloading_cells.erase(g)
 					_unloading_hold_frames.erase(g)
+					_unloading_frozen.erase(g)
+					_unloading_destructive_holds.erase(g)
 				return
 
 			# NOTE 2026-04-20: prior `CrashBreadcrumb.write("unload_child", ...)`
@@ -1434,6 +1525,13 @@ func _process_budgeted_unloading() -> void:
 			child_index -= 1
 			if child == null or not is_instance_valid(child) or child.is_queued_for_deletion():
 				continue
+			# Freeze the unload state-reversal window NOW — about to actually
+			# destroy a child. Flipping before this point (top of grid loop)
+			# would freeze cells that lost the time-budget race without any
+			# child being freed, shrinking the reclaim window. Idempotent.
+			if not _unloading_frozen.get(grid, false):
+				_unloading_frozen[grid] = true
+				_record_lifecycle_event("freeze_unload", grid, "reason=child_qfree children=%d" % cell_node.get_child_count())
 			child.queue_free()
 
 			batch += 1
@@ -1453,6 +1551,8 @@ func _process_budgeted_unloading() -> void:
 	for g in completed_grids:
 		_unloading_cells.erase(g)
 		_unloading_hold_frames.erase(g)
+		_unloading_frozen.erase(g)
+		_unloading_destructive_holds.erase(g)
 
 	if debug_enabled and total_freed > 0:
 		_debug("Budgeted unload: freed %d objects, %d cells remaining" % [total_freed, _unloading_cells.size()])
@@ -1469,8 +1569,21 @@ func _process_budgeted_unloading() -> void:
 			if total_hidden >= hide_budget or Time.get_ticks_usec() - start_time >= budget_usec:
 				break
 			var hide_grid: Vector2i = _pending_rs_hide_cells[hi]
+			# Verification hook: skip RS hide for this grid while its hold
+			# counter is positive. The grid stays in `_pending_rs_hide_cells`
+			# (and `_pending_rs_hide_set`), so `_is_cell_occupied` still gates
+			# fresh loads correctly during the wait.
+			if _unloading_destructive_holds.get(hide_grid, 0) > 0:
+				continue
 			var result: Array = _static_renderer.hide_cell_instances_budgeted(hide_grid, hide_budget - total_hidden)
-			total_hidden += result[0] as int
+			var hidden_this_call := result[0] as int
+			total_hidden += hidden_this_call
+			# Freeze only after actual hide work happened. A no-op call (cell
+			# had no instances registered, e.g. interior pocket profile) must
+			# not shrink the reclaim window. Idempotent.
+			if hidden_this_call > 0 and not _unloading_frozen.get(hide_grid, false):
+				_unloading_frozen[hide_grid] = true
+				_record_lifecycle_event("freeze_unload", hide_grid, "reason=rs_hide hidden=%d" % hidden_this_call)
 			if result[1] as bool:  # is_complete
 				completed_hide.append(hi)
 				_pending_rs_hide_set.erase(hide_grid)
@@ -1496,6 +1609,7 @@ func _process_budgeted_unloading() -> void:
 			if cleanup_grid in _pending_rs_hide_set:
 				break
 			_pending_rs_cleanup_cells.resize(_pending_rs_cleanup_cells.size() - 1)
+			_pending_rs_cleanup_set.erase(cleanup_grid)
 			rs_freed += _static_renderer.remove_cell_instances(cleanup_grid)
 		if rs_freed > 0 and debug_enabled:
 			_debug("Budgeted RS cleanup: freed %d instances, %d cells remaining" % [rs_freed, _pending_rs_cleanup_cells.size()])
@@ -1509,6 +1623,10 @@ var _pending_rs_hide_set: Dictionary[Vector2i, bool] = {}
 
 ## Cells with RS instances that need deferred free_rid() cleanup (after hiding)
 var _pending_rs_cleanup_cells: Array[Vector2i] = []
+## O(1) lookup mirroring _pending_rs_cleanup_cells. A grid in this set still has
+## pending RS instance free work; load gates must treat it as occupied so a fresh
+## load can't publish buckets under a grid whose old buckets are about to be freed.
+var _pending_rs_cleanup_set: Dictionary[Vector2i, bool] = {}
 
 
 # S.1 refactor (near_tier_refactor.md 2026-04-19): MID↔NEAR promotion / demotion
@@ -1606,8 +1724,10 @@ func _process_pending_loads_async() -> void:
 			_pending_load_queue.resize(_pending_load_queue.size() - 1)
 			_pending_load_set.erase(grid)
 
-			# Skip if already loaded or loading
-			if grid in _loaded_cells or grid in _loading_cells:
+			# Skip if already loaded, loading, mid-unload, or mid-cleanup.
+			# Same gate as _request_cell_async; checked here too so a frozen-
+			# rejected grid doesn't slip through when the queue submits.
+			if _is_cell_occupied(grid):
 				continue
 
 			# Submit async request
@@ -1734,7 +1854,10 @@ func _process_pending_loads_sync(_delta: float) -> void:
 		_pending_load_queue.resize(_pending_load_queue.size() - 1)
 		_pending_load_set.erase(grid)
 
-		if grid in _loaded_cells or grid in _loading_cells:
+		# Same occupancy gate as the async path: a grid mid-unload or with
+		# pending RS cleanup must not get a fresh load until the old cleanup
+		# clears (auditor2 finding 2026-05-01).
+		if _is_cell_occupied(grid):
 			continue
 
 		_load_cell_sync(grid)
