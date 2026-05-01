@@ -14,6 +14,7 @@ const SETTLE_SEC := 8.0
 const TRANSITION_PRE_FRAMES := 30
 const TRANSITION_POST_FRAMES := 120
 const BOOMERANG_DISTANCE_M := 360.0
+const BLOCKING_FRAME_MS := 50.0
 
 ## Step 2a: known-bad tokens scanned in the Godot user log at finish time.
 ## Hits flip the run status to "failed" and produce a non-zero process exit
@@ -29,7 +30,7 @@ const FAILURE_TOKENS: Array[String] = [
 	"Parse Error",
 	"Compile Error",
 	"ERROR: material_set_shader",
-	"ERROR: stale bucket",
+	"stale bucket",
 	"Failed to load script",
 	"ERROR: CellStaticCollision.finalize_body",
 ]
@@ -57,6 +58,11 @@ const ROUTE_BOOMERANG_NAMES := {
 	"reclaim-boomerang": true,
 	"p04-reclaim": true,
 }
+const ROUTE_DENSE_LOOP_NAMES := {
+	"dense": true,
+	"dense-loop": true,
+	"loop": true,
+}
 const DENSE_LOOP_OFFSETS := [
 	Vector2i(0, 0),
 	Vector2i(1, 0),
@@ -83,9 +89,12 @@ var _route_mode := "loop"
 var _route_points: Array[Vector3] = []
 var _route_cells: Array[Vector2i] = []
 var _route_cell_ref_counts: Dictionary = {}
+var _route_setup_failures: Array[String] = []
 var _route_total_length := 0.0
 var _route_min := Vector3.ZERO
 var _route_max := Vector3.ZERO
+var _expect_reclaim_cell_event := false
+var _expect_reclaim_rejected_event := false
 
 var _phase := "settle"
 var _elapsed := 0.0
@@ -107,7 +116,9 @@ func configure(
 	altitude_m: float,
 	speed_mps: float,
 	duration_s: float,
-	direction_name: String
+	direction_name: String,
+	limbo_hold_frames: int = 0,
+	destructive_hold_frames: int = 0
 ) -> void:
 	_streaming_manager = streaming_manager
 	_cell_manager = cell_manager
@@ -119,6 +130,9 @@ func configure(
 	_duration_s = duration_s
 	_route_name = direction_name if not direction_name.is_empty() else "dense-loop"
 	_started_msec = Time.get_ticks_msec()
+	var route_key := _route_name.to_lower().strip_edges()
+	_expect_reclaim_cell_event = ROUTE_BOOMERANG_NAMES.has(route_key) and limbo_hold_frames > 0
+	_expect_reclaim_rejected_event = ROUTE_BOOMERANG_NAMES.has(route_key) and destructive_hold_frames > 0
 
 	_configure_route(_route_name)
 	_start_pos = _route_points[0] if not _route_points.is_empty() else DU.cell_to_world_center(_start_cell, _altitude_m)
@@ -199,6 +213,8 @@ func _direction_from_name(name: String) -> Vector3:
 
 func _configure_route(name: String) -> void:
 	var n := name.to_lower().strip_edges()
+	_route_setup_failures.clear()
+	_route_cell_ref_counts.clear()
 	if ROUTE_BOOMERANG_NAMES.has(n):
 		_route_mode = "path"
 		_direction = Vector3(1, 0, 0)
@@ -229,6 +245,8 @@ func _configure_route(name: String) -> void:
 		)
 		_route_cell_ref_counts[str(_start_cell)] = _get_cell_ref_count(_start_cell)
 		return
+	if not ROUTE_DENSE_LOOP_NAMES.has(n):
+		_route_setup_failures.append("unknown_route:%s" % name)
 
 	_route_mode = "loop"
 	_route_points.clear()
@@ -243,7 +261,8 @@ func _configure_route(name: String) -> void:
 		_route_cell_ref_counts[str(cell)] = _get_cell_ref_count(cell)
 
 	if _route_points.size() < 4:
-		Log.warn("tools", "[STRESS] dense-loop had only %d valid points near %s; falling back to east straight route" % [
+		_route_setup_failures.append("dense_loop_insufficient_points:%d" % _route_points.size())
+		Log.warn("tools", "[STRESS] dense-loop had only %d valid points near %s; marking route invalid and falling back to east straight route" % [
 			_route_points.size(), str(_start_cell)
 		])
 		_route_mode = "straight"
@@ -435,8 +454,9 @@ func _finish() -> void:
 	# status to "failed" and propagate to the process exit code, so
 	# automated harnesses can no longer mistake "wrote a CSV" for "passed".
 	var failure_scan := _scan_log_for_failure_tokens()
-	summary["status"] = "passed" if failure_scan["reasons"].is_empty() else "failed"
-	summary["failure_reasons"] = failure_scan["reasons"]
+	var failure_reasons := _collect_gate_failure_reasons(summary, failure_scan)
+	summary["status"] = "passed" if failure_reasons.is_empty() else "failed"
+	summary["failure_reasons"] = failure_reasons
 	summary["log_scan_unverified"] = bool(failure_scan["unverified"])
 	var csv_path := _write_csv()
 	var events_path := _write_events_csv()
@@ -460,6 +480,36 @@ func _quit_cleanly(exit_code: int = 0) -> void:
 		if _streaming_manager.has_method("fast_cleanup"):
 			_streaming_manager.call("fast_cleanup")
 	get_tree().quit(exit_code)
+
+
+func _collect_gate_failure_reasons(summary: Dictionary, failure_scan: Dictionary) -> Array[String]:
+	var reasons: Array[String] = []
+	var scanned_reasons: Array = failure_scan.get("reasons", [])
+	for reason_value in scanned_reasons:
+		var reason := str(reason_value)
+		if not reasons.has(reason):
+			reasons.append(reason)
+	if bool(failure_scan["unverified"]) and not reasons.has("log_scan_unverified"):
+		reasons.append("log_scan_unverified")
+	for route_failure: String in _route_setup_failures:
+		var reason := "route_invalid:%s" % route_failure
+		if not reasons.has(reason):
+			reasons.append(reason)
+
+	var lifecycle_counts: Dictionary = summary.get("lifecycle_event_counts", {})
+	if _expect_reclaim_cell_event and int(lifecycle_counts.get("reclaim_cell", 0)) <= 0:
+		reasons.append("reclaim_cell_missing")
+	if _expect_reclaim_rejected_event:
+		if int(lifecycle_counts.get("freeze_unload", 0)) <= 0:
+			reasons.append("freeze_unload_missing")
+		if int(lifecycle_counts.get("reclaim_rejected", 0)) <= 0:
+			reasons.append("reclaim_rejected_missing")
+		if int(lifecycle_counts.get("finalize_unloaded", 0)) <= 0:
+			reasons.append("finalize_unloaded_missing")
+	var frames_over_blocking := int(summary.get("frames_over_50", 0))
+	if frames_over_blocking > 0:
+		reasons.append("frames_over_50:%d" % frames_over_blocking)
+	return reasons
 
 
 ## Step 2a: scan the Godot user log file for blocking-failure tokens written
@@ -529,7 +579,16 @@ func _scan_log_for_failure_tokens() -> Dictionary:
 func _build_summary() -> Dictionary:
 	var total := _rows.size()
 	if total == 0:
-		return {"frames": 0}
+		return {
+			"stamp": _stamp,
+			"route": _route_name,
+			"route_mode": _route_mode,
+			"route_valid": _route_setup_failures.is_empty(),
+			"route_setup_failures": _route_setup_failures.duplicate(),
+			"blocking_frame_ms": BLOCKING_FRAME_MS,
+			"frames": 0,
+			"lifecycle_event_counts": _build_event_counts(),
+		}
 
 	var frame_times: Array[float] = []
 	var total_ms := 0.0
@@ -554,7 +613,7 @@ func _build_summary() -> Dictionary:
 			frames_over_16 += 1
 		if ms > 33.33:
 			frames_over_33 += 1
-		if ms > 50.0:
+		if ms > BLOCKING_FRAME_MS:
 			frames_over_50 += 1
 		min_rendered = minf(min_rendered, row[12])
 		max_rendered = maxf(max_rendered, row[12])
@@ -578,6 +637,8 @@ func _build_summary() -> Dictionary:
 		"stamp": _stamp,
 		"route": _route_name,
 		"route_mode": _route_mode,
+		"route_valid": _route_setup_failures.is_empty(),
+		"route_setup_failures": _route_setup_failures.duplicate(),
 		"route_cells": _route_cells_as_strings(),
 		"route_cell_ref_counts": _route_cell_ref_counts,
 		"route_length_m": _route_total_length,
@@ -598,6 +659,7 @@ func _build_summary() -> Dictionary:
 		"frames_over_16_67": frames_over_16,
 		"frames_over_33_33": frames_over_33,
 		"frames_over_50": frames_over_50,
+		"blocking_frame_ms": BLOCKING_FRAME_MS,
 		"cell_transitions": transitions.size(),
 		"worst_transition_post_max_ms": worst_transition_ms,
 		"worst_transition_drop_fps": worst_drop_fps,
@@ -642,7 +704,7 @@ func _build_transition_summaries() -> Array[Dictionary]:
 		var post_min_fps := 1000.0 / maxf(post_max_ms, 0.001)
 		var stutter_frames_16 := _count_over_ms(idx, post_end, 16.67)
 		var stutter_frames := _count_over_ms(idx, post_end, 33.33)
-		var stutter_frames_50 := _count_over_ms(idx, post_end, 50.0)
+		var stutter_frames_50 := _count_over_ms(idx, post_end, BLOCKING_FRAME_MS)
 		var copy := t.duplicate()
 		copy["pre_avg_fps"] = pre_fps
 		copy["post_avg_fps"] = post_fps

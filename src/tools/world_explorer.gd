@@ -816,7 +816,9 @@ func _maybe_start_stress_bench() -> void:
 		altitude,
 		speed,
 		duration,
-		direction
+		direction,
+		limbo_hold_frames,
+		destructive_hold_frames
 	)
 	_log("[STRESS] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
