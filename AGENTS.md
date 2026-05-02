@@ -33,6 +33,7 @@ Best-in-class open-world rendering in Godot, using Morrowind as the data source.
 
 **Operational rules:**
 1. Before proposing a fix, identify the canonical pattern. Search the Godot docs, the major engine docs (Unreal, Unity, Source), academic / blog references (Fiedler's `gafferongames.com`, Game Programming Patterns, etc.). If a standard exists, name it in the proposal.
+1a. For Godot engine/API behavior (RenderingServer, ResourceLoader, MultiMesh, PhysicsServer, threading), verify the hypothesis against the current Godot 4.6 official docs and, when relevant, the official `godotengine/godot` issue/source history before changing code. Treat project comments and inherited assumptions as secondary evidence.
 2. If no standard exists, design from first principles AND document the design decision in `docs/audit/` so the next agent inherits the rationale, not just the code.
 3. Quick fixes are allowed ONLY as **explicitly time-boxed bridges to a planned proper fix**, never as the end state. Time-boxed fixes must include: (a) the symptom they paper over, (b) the canonical pattern they're standing in for, (c) the follow-up commit that removes them, (d) a dated TODO with the agent owner.
 4. "It works" is not the bar. "It's the way the industry has solved this problem and the way our future selves would build it from scratch" is the bar.

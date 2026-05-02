@@ -24,6 +24,7 @@ class_name StaticObjectRenderer
 extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
+const SC := preload("res://src/core/world/streaming_config.gd")
 const PrototypeRegistryScript := preload("res://src/core/world/prototype_registry.gd")
 const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
 const CellStaticBucketScript := preload("res://src/core/world/cell_static_bucket.gd")
@@ -1224,7 +1225,7 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 	)
 
 	# Default LOD bias — tunable per type later via streaming_config.
-	rs.instance_geometry_set_lod_bias(instance_rid, 1.0)
+	rs.instance_geometry_set_lod_bias(instance_rid, SC.DEFAULT_LOD_BIAS)
 
 	if not _globally_visible:
 		rs.instance_set_visible(instance_rid, false)

@@ -30,8 +30,8 @@
 ## - Albedo atlas: `<name>_<hash>_v6.png` (RGBA8 sRGB).
 ## - Normal/depth atlas: `<name>_<hash>_normal_v6.res` (ImageTexture RGBA8).
 ##     RGB = world-space normal encoded [0,1], A = linear depth [0,1].
-## - Debug normal PNG: `<name>_<hash>_normal_debug_v6.png` (always written
-##   for visual inspection — runtime loader ignores it).
+## - Optional debug normal PNG: `<name>_<hash>_normal_debug_v6.png`
+##   for visual inspection — runtime loader ignores it.
 ## - Metadata JSON: `<name>_<hash>_v6.json` with:
 ##     "projection": "hemi" | "sphere"  (per-asset)
 ##     "grid_size": 8
@@ -64,6 +64,7 @@ const LARGE_FRAME_SIZE: int = 128
 const BAKE_VERSION: int = 6
 const CAPTURE_SETTLE_FRAMES: int = 3
 const CAPTURE_SETTLE_FPS: float = 30.0
+const MIN_IMPOSTOR_HEIGHT_M: float = 4.0
 
 ## Patterns that opt an asset into full-sphere projection instead of hemi.
 ## Hemi (upper hemisphere only) is correct for ground-rooted assets — the
@@ -77,15 +78,11 @@ const SPHERE_OVERRIDE_PATTERNS: Array[String] = [
 	# "_airborne",
 ]
 
-## Always write a debug PNG copy of the normal atlas next to the `.res` file,
-## tagged `_normal_debug_v6.png`. Visual inspection only — runtime loader
-## ignores it. Cheap (small file, RGBA8 PNG of an existing image).
-const DUMP_DEBUG_NORMALS: bool = true
-
 ## Baker state
 var output_dir: String = ""
 var padding_factor: float = 1.2
 var background_color: Color = Color(0, 0, 0, 0)
+var dump_debug_normals: bool = false
 
 ## Rendering infrastructure — TWO separate viewports
 var _albedo_viewport: SubViewport = null
@@ -107,6 +104,7 @@ signal batch_complete(total: int, success_count: int, failed_count: int)
 
 ## Stats
 var _total_baked: int = 0
+var _total_skipped: int = 0
 var _total_failed: int = 0
 var _failed_models: Array[String] = []
 var _active_grid_size: int = GRID_SIZE
@@ -422,6 +420,22 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "error": error}
 
+	if aabb.size.y < MIN_IMPOSTOR_HEIGHT_M:
+		albedo_model.queue_free()
+		Log.info("prebaking", "Skipping impostor below %.1fm height: %s (height=%.2fm)" % [
+			MIN_IMPOSTOR_HEIGHT_M, model_path, aabb.size.y
+		])
+		model_baked.emit(model_path, true, "")
+		return {
+			"success": true,
+			"skipped": true,
+			"skip_reason": "height_below_minimum",
+			"height_m": aabb.size.y,
+			"min_height_m": MIN_IMPOSTOR_HEIGHT_M,
+			"bounds": aabb,
+			"error": ""
+		}
+
 	var center := aabb.get_center()
 	albedo_model.position = -center
 	await _wait_for_render_settle()
@@ -522,9 +536,9 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 		return {"success": false, "error": error}
 
 	# Debug PNG dump of the normal atlas, for visual inspection of encoded
-	# normals + depth. NOT loaded by the runtime path — purely an inspection
-	# aid. Always written; constant flag at top of file.
-	if DUMP_DEBUG_NORMALS and not normal_res_path.is_empty():
+	# normals + depth. NOT loaded by the runtime path — opt in for validation
+	# runs to avoid paying an extra PNG encode/write during production bakes.
+	if dump_debug_normals and not normal_res_path.is_empty():
 		var debug_save_err := normal_atlas_image.save_png(staged_normal_debug_png_path)
 		if debug_save_err != OK:
 			var error := "Failed to save normal debug PNG: error %d" % debug_save_err
@@ -543,12 +557,14 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "error": "Failed to save metadata: error %d" % save_err}
 
-	var promotion_err := _promote_staged_artifacts({
+	var staged_to_final := {
 		staged_albedo_path: albedo_path,
 		staged_normal_res_path: normal_res_path,
-		staged_normal_debug_png_path: normal_debug_png_path,
 		staged_metadata_path: metadata_path,
-	})
+	}
+	if dump_debug_normals:
+		staged_to_final[staged_normal_debug_png_path] = normal_debug_png_path
+	var promotion_err := _promote_staged_artifacts(staged_to_final)
 	if promotion_err != OK:
 		_cleanup_staging_dir(staging_dir)
 		model_baked.emit(model_path, false, "")
@@ -562,7 +578,7 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 		"success": true,
 		"output_path": albedo_path,
 		"normal_path": normal_res_path,
-		"normal_debug_path": normal_debug_png_path,
+		"normal_debug_path": normal_debug_png_path if dump_debug_normals else "",
 		"metadata_path": metadata_path,
 		"bounds": aabb,
 		"projection": projection,
@@ -573,9 +589,10 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 ## Batch bake — mirrors v2 API so existing prebake UI can swap in.
 func bake_models(model_paths: Array, candidates: ImpostorCandidatesScript = null) -> Dictionary:
 	if initialize() != OK:
-		return {"success": 0, "failed": 0, "total": 0}
+		return {"success": 0, "skipped": 0, "failed": 0, "total": 0}
 
 	_total_baked = 0
+	_total_skipped = 0
 	_total_failed = 0
 	_failed_models.clear()
 
@@ -584,7 +601,9 @@ func bake_models(model_paths: Array, candidates: ImpostorCandidatesScript = null
 		progress.emit(i + 1, model_paths.size(), model_path)
 
 		var result := await bake_model(model_path, candidates)
-		if result.success:
+		if bool(result.get("skipped", false)):
+			_total_skipped += 1
+		elif bool(result.get("success", false)):
 			_total_baked += 1
 		else:
 			_total_failed += 1
@@ -597,6 +616,7 @@ func bake_models(model_paths: Array, candidates: ImpostorCandidatesScript = null
 	return {
 		"total": model_paths.size(),
 		"success": _total_baked,
+		"skipped": _total_skipped,
 		"failed": _total_failed,
 		"failed_models": _failed_models.duplicate()
 	}
@@ -1012,6 +1032,7 @@ func _save_metadata(path: String, metadata: Dictionary) -> Error:
 func get_stats() -> Dictionary:
 	return {
 		"total_baked": _total_baked,
+		"total_skipped": _total_skipped,
 		"total_failed": _total_failed,
 		"failed_models": _failed_models.duplicate(),
 	}

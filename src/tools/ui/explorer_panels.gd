@@ -89,6 +89,7 @@ var cirrus_thickness_slider: HSlider = null
 ## Debug panel widgets
 var lod_mode_btn: Button = null
 var view_distance_slider: HSlider = null
+var view_distance_label: Label = null
 
 
 # ── Private ──
@@ -684,8 +685,9 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 
 	var dist_label := Label.new()
 	dist_label.name = "DistLabel"
-	dist_label.text = "%d cells" % view_distance
+	dist_label.text = StreamingConfig.format_load_radius_with_distance(view_distance)
 	dist_label.add_theme_font_size_override("font_size", 11)
+	view_distance_label = dist_label
 	vbox.add_child(dist_label)
 
 	# Quick teleport buttons

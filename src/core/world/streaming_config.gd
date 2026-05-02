@@ -34,6 +34,25 @@ static func clamp_load_radius_cells(value: int) -> int:
 	return clampi(value, MIN_LOAD_RADIUS_CELLS, MAX_LOAD_RADIUS_CELLS)
 
 
+## Convert the user-facing exterior cell radius slider into the active MID/FAR
+## render handoff. The default radius preserves the shipped 500m fallback; lower
+## values reduce distant static work for slower hardware.
+static func distant_render_end_for_load_radius_cells(value: int) -> float:
+	var clamped := clamp_load_radius_cells(value)
+	var normalized := float(clamped) / float(DEFAULT_LOAD_RADIUS_CELLS)
+	return maxf(DU.NEAR_END, DU.MID_END * normalized)
+
+
+static func load_distance_cap_for_load_radius_cells(value: int) -> float:
+	return distant_render_end_for_load_radius_cells(value) + DU.CELL_SIZE_METERS
+
+
+static func format_load_radius_with_distance(value: int) -> String:
+	var clamped := clamp_load_radius_cells(value)
+	var distance := distant_render_end_for_load_radius_cells(clamped)
+	return "%d cells (~%dm)" % [clamped, int(round(distance))]
+
+
 # =============================================================================
 # DISTANCE THRESHOLDS (referenced from DistanceUtils - single source of truth)
 # =============================================================================
@@ -152,6 +171,16 @@ const CELL_REQUEST_CLASSIFY_BUDGET_MS := 1.0
 const STARTUP_CELL_REQUEST_CLASSIFY_BUDGET_MS := 3.0
 const CELL_REQUEST_CLASSIFY_MAX_REFS := 48
 const STARTUP_CELL_REQUEST_CLASSIFY_MAX_REFS := 128
+
+## Budget for starting ResourceLoader threaded requests after classification has
+## queued them. `load_threaded_request()` is the Godot-standard background-load
+## entry point, but request startup is still main-thread work and must be
+## isolated from ref classification so one slow resource cannot consume the
+## whole classify slice.
+const MODEL_REQUEST_START_BUDGET_MS := 0.5
+const STARTUP_MODEL_REQUEST_START_BUDGET_MS := 1.0
+const MODEL_REQUEST_START_MAX_PER_FRAME := 1
+const STARTUP_MODEL_REQUEST_START_MAX_PER_FRAME := 2
 
 ## Per-cell static collision lane budgets. Dispatch is cheap classification +
 ## WorkerThreadPool submission; finalize is the atomic ConcavePolygonShape3D

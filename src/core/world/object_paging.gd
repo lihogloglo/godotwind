@@ -82,10 +82,9 @@ const DEFAULT_VISUAL_BEGIN_FLOOR: float = DU.HLOD_START
 ## on cold ResourceLoader I/O inside merge preparation.
 const TELEPORT_THRESHOLD: float = 500.0
 
-## Max prototype loads per `process_merge_queue` call while warmup is active.
-## Tuned so a typical teleport ring (~40-60 unique architectural mesh types)
-## drains in 3-4 frames. Each load is `.res` deserialize + register — low
-## single-digit ms each.
+## Max prototype warmup checks per `process_merge_queue` call while warmup is
+## active. Warmup starts ModelLoader async requests for cold entries and only
+## instantiates/registers prototypes after their PackedScene is already cached.
 const WARMUP_LOADS_PER_FRAME: int = 15
 const WARMUP_BUDGET_USEC: int = 1500
 
@@ -179,6 +178,10 @@ var _static_renderer: StaticObjectRendererScript = null
 ## Reference to background processor (for submitting merge tasks)
 var _bg_processor: BackgroundProcessor = null
 
+## Shared model loader. HLOD warmup uses this instead of doing its own
+## FileAccess/ResourceLoader probes on the streaming hot path.
+var _model_loader: ModelLoader = null
+
 ## Model cache directory (for loading prototypes not yet in StaticObjectRenderer)
 var _models_dir: String = ""
 
@@ -220,6 +223,11 @@ var _warmup_queue: Array[String] = []
 ## Dedup guard — mesh_type_names we've already enqueued in the current warmup
 ## burst. Cleared when the queue fully drains (or when cleanup() runs).
 var _warmup_dispatched: Dictionary = {}
+
+## Mesh types with a ModelLoader async request already started by HLOD warmup.
+## ModelLoader's public loading check only covers active threaded requests, not
+## throttled deferred entries, so ObjectPaging owns this higher-level dedup.
+var _warmup_pending_async: Dictionary = {}
 
 ## Mesh types whose cache resource could not be staged this session. Prevents
 ## missing/corrupt cache entries from requeueing the same HLOD chunk forever.
@@ -287,6 +295,10 @@ var _stats: Dictionary = {
 	"active_incomplete_coverage_chunks": 0,
 	"coverage_revision": 0,
 	"warmup_queue_size": 0,    # Phase 4d — prototype pre-load queue depth
+	"warmup_async_requests": 0,
+	"warmup_pending_async": 0,
+	"warmup_registered": 0,
+	"warmup_failed": 0,
 	"total_teleports": 0,      # Phase 4d — cumulative teleport events detected
 	"runtime_lod_generation_enabled": RUNTIME_GENERATE_LODS,
 	"runtime_force_merge_eligible_refs": RUNTIME_FORCE_MERGE_ELIGIBLE_REFS,
@@ -299,10 +311,11 @@ var _stats: Dictionary = {
 
 ## Initialize with viewport scenario, static renderer (for mesh data), and background processor.
 func initialize(scenario: RID, static_renderer: StaticObjectRendererScript,
-		bg_processor: BackgroundProcessor) -> void:
+		bg_processor: BackgroundProcessor, model_loader: ModelLoader = null) -> void:
 	_scenario = scenario
 	_static_renderer = static_renderer
 	_bg_processor = bg_processor
+	_model_loader = model_loader
 	_models_dir = SettingsManager.get_models_path()
 
 	if _bg_processor:
@@ -642,6 +655,7 @@ func set_all_visible(visible: bool) -> void:
 		_merge_queue.clear()
 		_warmup_queue.clear()
 		_warmup_dispatched.clear()
+		_warmup_pending_async.clear()
 		_warmup_failed.clear()
 		_invalidate_all_generations()
 		_negative_chunks.clear()
@@ -711,6 +725,7 @@ func cleanup(disconnect_signals: bool = true) -> void:
 	# Phase 4d warmup state
 	_warmup_queue.clear()
 	_warmup_dispatched.clear()
+	_warmup_pending_async.clear()
 	_warmup_failed.clear()
 	_last_camera_world_pos = Vector3.INF
 
@@ -782,33 +797,45 @@ func _queue_warmup_model(model_path: String) -> bool:
 
 
 ## Drain up to WARMUP_LOADS_PER_FRAME prototypes from the warmup queue.
-## Each load = ResourceLoader `.res` fetch + StaticObjectRenderer registration.
+## Cold entries start a ModelLoader async request and rotate to a later frame;
+## ready entries instantiate from the cached PackedScene and register with the renderer.
 ## When the queue fully drains, `_warmup_dispatched` clears so a future
 ## teleport gets a fresh dedup set.
 func _drain_warmup_queue() -> void:
 	if not _static_renderer:
 		_warmup_queue.clear()
 		_warmup_dispatched.clear()
+		_warmup_pending_async.clear()
 		return
 	var start_usec := Time.get_ticks_usec()
 	var budget := WARMUP_LOADS_PER_FRAME
-	while budget > 0 and not _warmup_queue.is_empty():
+	var initial_count := _warmup_queue.size()
+	var scanned := 0
+	while budget > 0 and not _warmup_queue.is_empty() and scanned < initial_count:
 		if Time.get_ticks_usec() - start_usec >= WARMUP_BUDGET_USEC:
 			break
+		scanned += 1
 		# pop_back is O(1); order doesn't matter — we pre-load everything.
 		var model_path: String = _warmup_queue.pop_back()
 		var mesh_type_name := model_path.to_lower().replace("/", "\\")
 		# Re-check registration — another path (e.g. a slow-path merge for an
 		# active chunk on a previous frame) may have already registered it.
 		if not _static_renderer.get_sub_meshes(mesh_type_name).is_empty():
+			_warmup_pending_async.erase(mesh_type_name)
 			budget -= 1
 			continue
 		var prototype := _load_prototype_from_cache(model_path)
 		if prototype:
 			_static_renderer.register_from_prototype(mesh_type_name, prototype)
 			prototype.free()
+			_warmup_pending_async.erase(mesh_type_name)
+			_stats["warmup_registered"] = int(_stats.get("warmup_registered", 0)) + 1
+		elif _request_prototype_warmup_async(model_path):
+			_warmup_queue.push_front(model_path)
 		else:
+			_warmup_pending_async.erase(mesh_type_name)
 			_warmup_failed[mesh_type_name] = true
+			_stats["warmup_failed"] = int(_stats.get("warmup_failed", 0)) + 1
 		budget -= 1
 	if _warmup_queue.is_empty():
 		_warmup_dispatched.clear()
@@ -1504,6 +1531,7 @@ func _refresh_stats() -> void:
 	_size_cache_mutex.unlock()
 
 	_stats["warmup_queue_size"] = _warmup_queue.size()
+	_stats["warmup_pending_async"] = _warmup_pending_async.size()
 	_stats["preparing_chunks"] = _prep_queue.size()
 	_stats["negative_chunks"] = _negative_chunks.size()
 	_stats["merge_queue_size"] = _merge_queue.size()
@@ -1566,14 +1594,22 @@ func _model_cache_scene_path(model_path: String) -> String:
 
 
 func _model_cache_scene_exists(model_path: String) -> bool:
+	if _model_loader:
+		return _model_loader.has_disk_cached(model_path)
 	var scene_path := _model_cache_scene_path(model_path)
 	return not scene_path.is_empty() and FileAccess.file_exists(scene_path)
 
 
-## Load a prototype from the model cache (.res files).
-## Used for models not yet registered in StaticObjectRenderer (far chunks).
-## Returns instantiated Node3D (caller must free), or null if not in cache.
+## Load a prototype from the already-warmed model cache.
+## Production HLOD goes through ModelLoader so disk existence and threaded
+## ResourceLoader ownership remain single-sourced. The direct path is retained
+## only for isolated tests that construct ObjectPaging without a ModelLoader.
 func _load_prototype_from_cache(model_path: String) -> Node3D:
+	if _model_loader:
+		if _model_loader.get_cached_packed_scene(model_path) == null:
+			return null
+		return _model_loader.get_cached(model_path)
+
 	var scene_path := _model_cache_scene_path(model_path)
 	if scene_path.is_empty() or not FileAccess.file_exists(scene_path):
 		return null
@@ -1583,5 +1619,22 @@ func _load_prototype_from_cache(model_path: String) -> Node3D:
 		return null
 
 	return packed_scene.instantiate() as Node3D
+
+
+func _request_prototype_warmup_async(model_path: String) -> bool:
+	if _model_loader == null:
+		return false
+	var mesh_type_name := model_path.to_lower().replace("/", "\\")
+	if mesh_type_name in _warmup_pending_async:
+		return true
+	if _model_loader.has_model(model_path) and _model_loader.get_cached_packed_scene(model_path) == null:
+		return false
+	var was_loading := _model_loader.is_loading_async(model_path)
+	var requested := _model_loader.request_model_async(model_path, "", Callable(), false)
+	if requested:
+		_warmup_pending_async[mesh_type_name] = true
+		if not was_loading:
+			_stats["warmup_async_requests"] = int(_stats.get("warmup_async_requests", 0)) + 1
+	return requested
 
 #endregion

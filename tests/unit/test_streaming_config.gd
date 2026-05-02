@@ -12,3 +12,15 @@ func test_clamp_load_radius_cells() -> void:
 	assert_int(StreamingConfig.clamp_load_radius_cells(StreamingConfig.MIN_LOAD_RADIUS_CELLS - 1)).is_equal(StreamingConfig.MIN_LOAD_RADIUS_CELLS)
 	assert_int(StreamingConfig.clamp_load_radius_cells(StreamingConfig.MAX_LOAD_RADIUS_CELLS + 1)).is_equal(StreamingConfig.MAX_LOAD_RADIUS_CELLS)
 	assert_int(StreamingConfig.clamp_load_radius_cells(StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)).is_equal(StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)
+
+
+func test_distant_render_end_tracks_load_radius_slider() -> void:
+	assert_float(StreamingConfig.distant_render_end_for_load_radius_cells(StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)).is_equal(StreamingConfig.MID_END)
+	assert_float(StreamingConfig.distant_render_end_for_load_radius_cells(StreamingConfig.MIN_LOAD_RADIUS_CELLS)).is_equal(StreamingConfig.NEAR_END)
+	assert_float(StreamingConfig.distant_render_end_for_load_radius_cells(StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS * 2)).is_equal(StreamingConfig.MID_END * 2.0)
+
+
+func test_load_distance_cap_covers_render_handoff() -> void:
+	var handoff := StreamingConfig.distant_render_end_for_load_radius_cells(StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)
+	var cap := StreamingConfig.load_distance_cap_for_load_radius_cells(StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)
+	assert_float(cap).is_greater(handoff)

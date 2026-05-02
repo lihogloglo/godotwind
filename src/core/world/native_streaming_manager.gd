@@ -87,10 +87,10 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 		load_radius_cells = SC.clamp_load_radius_cells(value)
 ## 4 cells gives a 9x9 loaded ring for the 0-500m MID static band.
 
-## Maximum distance at which to load cells (in meters)
-## Cells beyond this are never loaded, even if within radius
-## 800m is reasonable default; increase for powerful GPUs (up to ~2000m)
-@export var max_load_distance: float = 800.0
+## Maximum distance at which to load cells (in meters).
+## Derived from the user-facing radius slider so loaded cells cover the active
+## MID/FAR render handoff without a separate magic cap.
+@export var max_load_distance: float = SC.load_distance_cap_for_load_radius_cells(SC.DEFAULT_LOAD_RADIUS_CELLS)
 
 ## Whether to use native visibility_range (should always be true)
 @export var use_native_visibility: bool = true
@@ -140,6 +140,8 @@ var _impostor_renderer: Node3D = null
 
 ## Impostor candidates manager
 var _impostor_candidates: RefCounted = null
+
+var _distant_render_end_m: float = SC.distant_render_end_for_load_radius_cells(SC.DEFAULT_LOAD_RADIUS_CELLS)
 
 ## Loaded cells: grid -> Node3D container
 var _loaded_cells: Dictionary = {}
@@ -580,10 +582,28 @@ func set_load_radius_cells(radius: int, refresh: bool = true) -> int:
 	var clamped := SC.clamp_load_radius_cells(radius)
 	load_radius_cells = clamped
 	view_distance_cells = clamped
+	_apply_distant_render_distance_for_load_radius()
 	if refresh and _initialized:
 		refresh_cells()
 	_impostor_update_pending = true
 	return clamped
+
+
+func get_distant_render_end_m() -> float:
+	return _distant_render_end_m
+
+
+func _apply_distant_render_distance_for_load_radius() -> void:
+	_distant_render_end_m = SC.distant_render_end_for_load_radius_cells(load_radius_cells)
+	max_load_distance = SC.load_distance_cap_for_load_radius_cells(load_radius_cells)
+	if _static_renderer:
+		if _static_renderer.has_method("set_visibility_range_end"):
+			_static_renderer.call("set_visibility_range_end", _distant_render_end_m)
+		else:
+			_static_renderer.visibility_range_end = _distant_render_end_m
+	if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
+		_impostor_renderer.call("set_visibility_range_begin", _distant_render_end_m, DU.FADE_MARGIN_RENDER_FAR)
+	_sync_hlod_far_coverage(true)
 
 
 ## Set sun elevation for distant light time-of-day visibility.
@@ -1726,7 +1746,7 @@ func _apply_fallback_visibility_recursive(node: Node, count: int) -> int:
 	if node is GeometryInstance3D:
 		var geo := node as GeometryInstance3D
 		geo.visibility_range_begin = 0.0
-		geo.visibility_range_end = DU.MID_END
+		geo.visibility_range_end = _distant_render_end_m
 		geo.visibility_range_begin_margin = 0.0
 		geo.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
 		geo.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
@@ -2183,7 +2203,7 @@ func set_mid_tier_visible(visible: bool) -> void:
 func set_impostors_visible(visible: bool) -> void:
 	if _impostor_renderer:
 		if visible and _impostor_renderer.has_method("set_visibility_range_begin"):
-			_impostor_renderer.set_visibility_range_begin(DU.MID_END)
+			_impostor_renderer.set_visibility_range_begin(_distant_render_end_m)
 		_impostor_renderer.set_enabled(visible)
 
 ## Toggle NEAR-tier Node3D cells (loaded cell containers).
@@ -2219,16 +2239,16 @@ func set_hlod_visible(visible: bool) -> void:
 		_teardown_hlod_merger()
 		_sync_hlod_far_coverage(true)
 	if _static_renderer:
-		var mid_range_end := DU.MID_END
+		var mid_range_end := _distant_render_end_m
 		if _static_renderer.has_method("set_visibility_range_end"):
 			_static_renderer.call("set_visibility_range_end", mid_range_end)
 		else:
 			_static_renderer.visibility_range_end = mid_range_end
 	if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
-		# Keep FAR as the 500m fallback until HLOD has exact per-page coverage
+		# Keep FAR as the fallback until HLOD has exact per-page coverage
 		# ownership. Global FAR retirement creates holes for pending, sparse, or
 		# negative HLOD chunks.
-		_impostor_renderer.set_visibility_range_begin(DU.MID_END)
+		_impostor_renderer.set_visibility_range_begin(_distant_render_end_m)
 	if effective_visible:
 		_hlod_needs_initial_update = true
 		_sync_hlod_far_coverage(true)
@@ -2277,7 +2297,7 @@ func get_hlod_stats() -> Dictionary:
 			"visual_begin_floor": DU.HLOD_START,
 			"mid_hlod_overlap_chunks": 0,
 			"nonvisual_chunks_suppressed": 0,
-			"far_visibility_begin_m": DU.MID_END,
+			"far_visibility_begin_m": _distant_render_end_m,
 			"handoff_far_hlod_overlap_chunks": 0,
 			"handoff_hole_risk_chunks": 0,
 			"far_hlod_covered_pages": 0,
@@ -2298,11 +2318,11 @@ func get_hlod_stats() -> Dictionary:
 	stats["enabled"] = bool(_hlod_merger.get("enabled"))
 	stats["runtime_lod_generation_enabled"] = bool(stats.get("runtime_lod_generation_enabled", false))
 	stats["runtime_force_merge_eligible_refs"] = bool(stats.get("runtime_force_merge_eligible_refs", false))
-	var far_begin := DU.MID_END
+	var far_begin := _distant_render_end_m
 	var far_enabled := false
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
 		var far_stats: Dictionary = _impostor_renderer.call("get_stats")
-		far_begin = float(far_stats.get("far_visibility_begin_m", DU.MID_END))
+		far_begin = float(far_stats.get("far_visibility_begin_m", _distant_render_end_m))
 		far_enabled = bool(far_stats.get("far_enabled", false))
 	stats["far_visibility_begin_m"] = far_begin
 	stats["handoff_far_hlod_overlap_chunks"] = int(stats.get("active_visual_chunks", 0)) if far_enabled and far_begin < DU.HLOD_END else 0
@@ -2311,7 +2331,7 @@ func get_hlod_stats() -> Dictionary:
 		+ int(stats.get("merge_queue_size", 0))
 		+ int(stats.get("preparing_chunks", 0))
 		+ int(stats.get("negative_chunks", 0))
-	) if far_begin > DU.MID_END else 0
+	) if far_begin > _distant_render_end_m else 0
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
 		var impostor_stats: Dictionary = _impostor_renderer.call("get_stats")
 		stats["far_hlod_covered_pages"] = int(impostor_stats.get("far_hlod_covered_pages", 0))
@@ -2372,11 +2392,11 @@ func _ensure_hlod_merger() -> bool:
 		return false
 	_hlod_merger = merger
 	var scenario := get_viewport().get_world_3d().scenario
-	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor)
+	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor, _cell_manager._model_loader)
 	if _hlod_merger.has_method("set_visual_begin_floor"):
 		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
 	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID fallback 0-%dm, covered MID caps at %dm, HLOD visible %d-%dm, FAR fallback starts at %dm" % [
-		int(DU.MID_END), int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END), int(DU.MID_END)])
+		int(_distant_render_end_m), int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END), int(_distant_render_end_m)])
 	return true
 
 

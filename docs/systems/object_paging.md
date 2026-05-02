@@ -36,7 +36,7 @@ Console surface:
 
 | File | Role |
 | --- | --- |
-| `src/core/world/object_paging.gd` | HLOD orchestrator: desired chunks, worker queue, completion queue, active chunk lifetime |
+| `src/core/world/object_paging.gd` | HLOD orchestrator: desired chunks, ModelLoader-backed prototype warmup, worker queue, completion queue, active chunk lifetime |
 | `src/core/world/object_paging_kernel.gd` | GDScript wrapper around the native merge kernel and mesh assembly helpers |
 | `src/native/NativeObjectPagingKernel.cs` | Hot merge kernel: packed-array concatenation, material grouping, cost/benefit decisions |
 | `src/core/world/distance_utils.gd` | Paging constants, chunk keys, chunk centers, tier helpers |
@@ -103,6 +103,7 @@ with bounded main-thread publication cost.
 | Operation | Thread |
 | --- | --- |
 | `ObjectPositionIndex` reads | worker-safe after build |
+| Prototype availability checks and async `.res` requests | main thread, via `ModelLoader` indexed cache |
 | Candidate math and packed transform/array preparation | worker |
 | `NativeObjectPagingKernel` merge | worker |
 | `SizeCache` writes | worker with lock |

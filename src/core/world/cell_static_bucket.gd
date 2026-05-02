@@ -2,6 +2,7 @@ class_name CellStaticBucket
 extends RefCounted
 
 const DU := preload("res://src/core/world/distance_utils.gd")
+const SC := preload("res://src/core/world/streaming_config.gd")
 
 const TRANSFORM_STRIDE := 12
 const MULTIMESH_CLUSTER_SIZE_M: float = DU.CELL_SIZE_METERS * 0.5
@@ -251,7 +252,7 @@ func _create_multimesh_draw_group(
 	group.instance_count = transforms.size()
 	group.local_aabb = packed.custom_aabb
 	_apply_visibility_range(group)
-	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
+	RenderingServer.instance_geometry_set_lod_bias(rid, SC.DEFAULT_LOD_BIAS)
 	if not visible:
 		RenderingServer.instance_set_visible(rid, false)
 	return group
@@ -303,7 +304,7 @@ func _create_single_multimesh_draw_group(
 	group.instance_count = 1
 	group.local_aabb = slot_aabb
 	_apply_visibility_range(group)
-	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
+	RenderingServer.instance_geometry_set_lod_bias(rid, SC.DEFAULT_LOD_BIAS)
 	if not visible:
 		RenderingServer.instance_set_visible(rid, false)
 	return group

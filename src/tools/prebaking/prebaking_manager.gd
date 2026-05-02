@@ -711,7 +711,7 @@ func _bake_impostors() -> Dictionary:
 	if _impostor_baker.initialize() != OK:
 		var error := "Failed to initialize impostor baker. Impostor baking requires a real rendering backend; do not run it with Godot --headless."
 		error_occurred.emit("Impostors", error)
-		return {"success": 0, "failed": impostor_state.pending.size(), "error": error}
+		return {"success": 0, "skipped": 0, "failed": impostor_state.pending.size(), "error": error}
 
 	# Connect progress
 	_impostor_baker.progress.connect(func(current: int, total: int, name: String) -> void:
@@ -736,7 +736,7 @@ func _bake_impostors() -> Dictionary:
 	impostor_state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()
 
-	component_completed.emit("Impostors", result.success, result.failed, 0)
+	component_completed.emit("Impostors", result.success, result.failed, result.get("skipped", 0))
 
 	return result
 

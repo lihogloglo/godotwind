@@ -538,6 +538,31 @@ func invalidate_file_cache(path: String = "") -> void:
 		_file_exists_cache.erase(path)
 
 
+## Populate the file-existence cache from the prebaked model directory once at
+## boot. This keeps streaming classification from doing synchronous per-model
+## FileAccess probes on the main thread.
+func prewarm_disk_cache_index() -> int:
+	var cache_dir := _get_disk_cache_dir()
+	var dir := DirAccess.open(cache_dir)
+	if dir == null:
+		return 0
+
+	var indexed_paths: Array[String] = []
+	dir.list_dir_begin()
+	var file_name := dir.get_next()
+	while file_name != "":
+		if not dir.current_is_dir() and file_name.ends_with(".res"):
+			indexed_paths.append(cache_dir.path_join(file_name))
+		file_name = dir.get_next()
+	dir.list_dir_end()
+
+	_disk_cache_mutex.lock()
+	for path: String in indexed_paths:
+		_file_exists_cache[path] = true
+	_disk_cache_mutex.unlock()
+	return indexed_paths.size()
+
+
 ## Get statistics about model loading
 ## Returns:
 ##   Dictionary with keys: models_loaded, models_from_cache, models_from_disk, models_from_disk_async, etc.
@@ -674,6 +699,7 @@ func request_model_async(
 	callback: Callable = Callable(),
 	instantiate_for_callback: bool = true
 ) -> bool:
+	var request_start_t0 := Time.get_ticks_usec()
 	var normalized := model_path.to_lower().replace("/", "\\")
 	var cache_key := normalized
 	if not item_id.is_empty():
@@ -705,12 +731,24 @@ func request_model_async(
 		return true
 
 	# 3. Check disk cache exists
-	if not enable_disk_cache or not _cached_file_exists(disk_path):
+	var exists_us := 0
+	var exists_start := Time.get_ticks_usec()
+	var disk_exists := enable_disk_cache and _cached_file_exists(disk_path)
+	exists_us = Time.get_ticks_usec() - exists_start
+	if not disk_exists:
 		# Not in disk cache - in runtime mode this means model isn't prebaked
 		if runtime_mode:
 			_model_cache[cache_key] = null  # Cache miss
 			if callback.is_valid():
 				callback.call(model_path, item_id, null)
+		var missing_total_us := Time.get_ticks_usec() - request_start_t0
+		if missing_total_us > 8_000:
+			Log.warn("streaming", "[ml-request-start %.1fms] result=missing exists=%.1f model=%s item=%s" % [
+				float(missing_total_us) / 1000.0,
+				float(exists_us) / 1000.0,
+				model_path,
+				item_id,
+			])
 		return false
 
 	# 4. Throttle: defer if too many concurrent loads in flight
@@ -723,14 +761,36 @@ func request_model_async(
 			"item_id": item_id,
 			"instantiate_for_callback": instantiate_for_callback,
 		})
+		var defer_total_us := Time.get_ticks_usec() - request_start_t0
+		if defer_total_us > 8_000:
+			Log.warn("streaming", "[ml-request-start %.1fms] result=deferred exists=%.1f pending=%d deferred=%d model=%s item=%s" % [
+				float(defer_total_us) / 1000.0,
+				float(exists_us) / 1000.0,
+				_pending_async_loads.size(),
+				_deferred_async_queue.size(),
+				model_path,
+				item_id,
+			])
 		return true  # Will be started later by _drain_deferred_queue
 
 	# 5. Start async load
+	var threaded_request_start := Time.get_ticks_usec()
 	var err := ResourceLoader.load_threaded_request(disk_path, "PackedScene")
+	var threaded_request_us := Time.get_ticks_usec() - threaded_request_start
 	if err != OK:
 		push_warning("ModelLoader: Failed to start async load for %s: %s" % [disk_path, error_string(err)])
 		if callback.is_valid():
 			callback.call(model_path, item_id, null)
+		var failed_total_us := Time.get_ticks_usec() - request_start_t0
+		if failed_total_us > 8_000 or threaded_request_us > 8_000:
+			Log.warn("streaming", "[ml-request-start %.1fms] result=error err=%s exists=%.1f request=%.1f model=%s item=%s" % [
+				float(failed_total_us) / 1000.0,
+				error_string(err),
+				float(exists_us) / 1000.0,
+				float(threaded_request_us) / 1000.0,
+				model_path,
+				item_id,
+			])
 		return false
 
 	# Track pending load
@@ -745,6 +805,18 @@ func request_model_async(
 			"item_id": item_id,
 			"instantiate_for_callback": instantiate_for_callback,
 		})
+
+	var total_us := Time.get_ticks_usec() - request_start_t0
+	if total_us > 8_000 or threaded_request_us > 8_000:
+		Log.warn("streaming", "[ml-request-start %.1fms] result=started exists=%.1f request=%.1f pending=%d deferred=%d model=%s item=%s" % [
+			float(total_us) / 1000.0,
+			float(exists_us) / 1000.0,
+			float(threaded_request_us) / 1000.0,
+			_pending_async_loads.size(),
+			_deferred_async_queue.size(),
+			model_path,
+			item_id,
+		])
 
 	return true
 

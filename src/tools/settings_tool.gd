@@ -450,7 +450,7 @@ func _load_graphics_settings() -> void:
 
 	var view_distance := SettingsManager.get_streaming_radius_cells()
 	view_distance_slider.value = view_distance
-	view_distance_value.text = "%d cells" % view_distance
+	view_distance_value.text = StreamingConfig.format_load_radius_with_distance(view_distance)
 
 	vsync_check.button_pressed = SettingsManager.get_vsync_enabled()
 	ssao_check.button_pressed = SettingsManager.get_ssao_enabled()
@@ -535,7 +535,7 @@ func _on_view_distance_changed(value: float) -> void:
 	var radius := StreamingConfig.clamp_load_radius_cells(int(round(value)))
 	SettingsManager.set_streaming_radius_cells(radius)
 	view_distance_slider.set_value_no_signal(radius)
-	view_distance_value.text = "%d cells" % radius
+	view_distance_value.text = StreamingConfig.format_load_radius_with_distance(radius)
 
 
 func _on_vsync_toggled(enabled: bool) -> void:

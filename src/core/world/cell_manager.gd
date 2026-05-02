@@ -821,6 +821,14 @@ const PROXIMITY_REQUEUE_MAX_PER_TICK: int = 4
 var _pending_conversions: Array[Dictionary] = []
 var _pending_conversion_index: int = 0
 
+## Model disk-request starts staged by classification. Classification records
+## refs into the CellPayload, then this queue starts ResourceLoader threaded
+## requests under its own budget. This mirrors engine streaming managers: ref
+## classification and I/O request submission are separate frame-budgeted lanes.
+var _model_request_start_queue: Array[Dictionary] = []
+var _model_request_start_queued: Dictionary[String, bool] = {}
+var _model_request_start_active: Dictionary[String, bool] = {}
+
 ## Maximum conversion time per frame in milliseconds
 ## NOTE: A single complex model can take 500ms-6s to convert
 ## We can't interrupt mid-conversion, so this is really just a guide
@@ -1499,16 +1507,29 @@ func _classify_request_refs(
 
 	var processed := 0
 	var refs: Array = request.cell_record.references
+	var profile_start_us := Time.get_ticks_usec()
+	var profile_record_us := 0
+	var profile_route_us := 0
+	var profile_cache_us := 0
+	var profile_disk_us := 0
+	var profile_finish_us := 0
+	var worst_ref_us := 0
+	var worst_ref_id := ""
+	var worst_ref_type := ""
+	var worst_model_path := ""
 	while request.classify_index < refs.size() and processed < max_refs:
 		if Time.get_ticks_usec() - start_us >= budget_usec:
 			break
 
+		var iter_start_us := Time.get_ticks_usec()
 		var ref: CellReference = refs[request.classify_index]
 		request.classify_index += 1
 		processed += 1
 
+		var record_start_us := Time.get_ticks_usec()
 		var record_type: Array = [""]
 		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		profile_record_us += Time.get_ticks_usec() - record_start_us
 		if not base_record:
 			continue
 
@@ -1524,6 +1545,7 @@ func _classify_request_refs(
 		if type_name == "leveled_creature" and not load_creatures:
 			continue
 
+		var route_start_us := Time.get_ticks_usec()
 		var model_path: String = _get_model_path(base_record)
 		if model_path.is_empty():
 			if request.payload != null:
@@ -1532,6 +1554,7 @@ func _classify_request_refs(
 				else:
 					request.payload.add_interactive_ref(type_name, "", "", ref)
 			_queue_instantiation(request.request_id, ref, "", "", "", type_name)
+			profile_route_us += Time.get_ticks_usec() - route_start_us
 			continue
 
 		var item_id: String = ""
@@ -1544,6 +1567,7 @@ func _classify_request_refs(
 			request.load_profile,
 		)
 		var load_item_id := "" if static_route or type_name == "light" or type_name == "npc" or type_name == "creature" else item_id
+		profile_route_us += Time.get_ticks_usec() - route_start_us
 		if request.payload != null:
 			if static_route:
 				request.payload.add_static_ref(model_path, load_item_id, ref)
@@ -1554,13 +1578,23 @@ func _classify_request_refs(
 		if static_route:
 			_enqueue_static_prepare(request.request_id, model_path, load_item_id)
 
+		var cache_start_us := Time.get_ticks_usec()
 		if _model_loader.has_model(model_path, load_item_id):
 			_pin_payload_cached_scene(request, model_path, load_item_id)
+			profile_cache_us += Time.get_ticks_usec() - cache_start_us
+			var iter_elapsed_cached := Time.get_ticks_usec() - iter_start_us
+			if iter_elapsed_cached > worst_ref_us:
+				worst_ref_us = iter_elapsed_cached
+				worst_ref_id = str(ref.ref_id)
+				worst_ref_type = type_name
+				worst_model_path = model_path
 			if static_route:
 				continue
 			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id, type_name)
 			continue
+		profile_cache_us += Time.get_ticks_usec() - cache_start_us
 
+		var disk_start_us := Time.get_ticks_usec()
 		if _model_loader.enable_disk_cache and _model_loader.has_disk_cached(model_path, load_item_id):
 			var pending_key := _get_cache_key(model_path, load_item_id)
 			if request.payload != null:
@@ -1572,13 +1606,24 @@ func _classify_request_refs(
 					"static_only": static_route,
 				})
 
-			var callback := _make_disk_load_callback(request.request_id, model_path, load_item_id)
-			if not _model_loader.request_model_async(model_path, load_item_id, callback, false) \
-					and request.payload != null:
-				request.payload.discard_pending_model_load(pending_key)
+			_queue_model_request_start(request.request_id, model_path, load_item_id, pending_key)
+			profile_disk_us += Time.get_ticks_usec() - disk_start_us
+			var iter_elapsed_disk := Time.get_ticks_usec() - iter_start_us
+			if iter_elapsed_disk > worst_ref_us:
+				worst_ref_us = iter_elapsed_disk
+				worst_ref_id = str(ref.ref_id)
+				worst_ref_type = type_name
+				worst_model_path = model_path
 			continue
+		profile_disk_us += Time.get_ticks_usec() - disk_start_us
 
 		if _model_loader.runtime_mode:
+			var iter_elapsed_runtime := Time.get_ticks_usec() - iter_start_us
+			if iter_elapsed_runtime > worst_ref_us:
+				worst_ref_us = iter_elapsed_runtime
+				worst_ref_id = str(ref.ref_id)
+				worst_ref_type = type_name
+				worst_model_path = model_path
 			continue
 
 		if model_path not in request.models_to_load:
@@ -1588,9 +1633,36 @@ func _classify_request_refs(
 			item_ids_array.append(item_id)
 		if not static_route:
 			request.references_to_process.append(ref)
+		var iter_elapsed_parse := Time.get_ticks_usec() - iter_start_us
+		if iter_elapsed_parse > worst_ref_us:
+			worst_ref_us = iter_elapsed_parse
+			worst_ref_id = str(ref.ref_id)
+			worst_ref_type = type_name
+			worst_model_path = model_path
 
 	if request.classify_index >= refs.size():
+		var finish_start_us := Time.get_ticks_usec()
 		_finish_request_classification(request)
+		profile_finish_us += Time.get_ticks_usec() - finish_start_us
+
+	var profile_total_us := Time.get_ticks_usec() - profile_start_us
+	if profile_total_us > 16_000:
+		Log.warn("streaming", "[class-spike %.1fms] grid=%s processed=%d idx=%d/%d rec=%.1f route=%.1f cache=%.1f disk=%.1f finish=%.1f worst=%.1f ref=%s type=%s model=%s" % [
+			profile_total_us / 1000.0,
+			str(request.grid),
+			processed,
+			request.classify_index,
+			refs.size(),
+			profile_record_us / 1000.0,
+			profile_route_us / 1000.0,
+			profile_cache_us / 1000.0,
+			profile_disk_us / 1000.0,
+			profile_finish_us / 1000.0,
+			worst_ref_us / 1000.0,
+			worst_ref_id,
+			worst_ref_type,
+			worst_model_path,
+		])
 
 	return processed
 
@@ -1616,6 +1688,132 @@ func _finish_request_classification(request: AsyncCellRequest) -> void:
 
 	if _is_request_complete(request):
 		_finalize_request(request)
+
+
+func _model_request_start_key(request_id: int, pending_key: String) -> String:
+	return "%d:%s" % [request_id, pending_key]
+
+
+func _queue_model_request_start(request_id: int, model_path: String, item_id: String, pending_key: String) -> void:
+	if pending_key.is_empty():
+		return
+	var start_key := _model_request_start_key(request_id, pending_key)
+	if bool(_model_request_start_queued.get(start_key, false)):
+		return
+	if bool(_model_request_start_active.get(start_key, false)):
+		return
+	_model_request_start_queue.append({
+		"request_id": request_id,
+		"model_path": model_path,
+		"item_id": item_id,
+		"pending_key": pending_key,
+		"start_key": start_key,
+	})
+	_model_request_start_queued[start_key] = true
+
+
+func _process_model_request_start_queue(budget_usec: int, max_requests: int) -> int:
+	if budget_usec <= 0 or max_requests <= 0:
+		return 0
+	if _model_request_start_queue.is_empty():
+		return 0
+
+	var start_us := Time.get_ticks_usec()
+	var started := 0
+	while not _model_request_start_queue.is_empty() and started < max_requests:
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
+
+		var entry: Dictionary = _model_request_start_queue.pop_back()
+		var start_key := str(entry.get("start_key", ""))
+		_model_request_start_queued.erase(start_key)
+
+		var request_id := int(entry.get("request_id", -1))
+		var model_path := str(entry.get("model_path", ""))
+		var item_id := str(entry.get("item_id", ""))
+		var pending_key := str(entry.get("pending_key", ""))
+		if request_id not in _async_requests:
+			_model_request_start_active.erase(start_key)
+			continue
+
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request == null or request.payload == null:
+			_model_request_start_active.erase(start_key)
+			continue
+		if request.state == CellPayloadScript.State.UNLOADING or not is_instance_valid(request.cell_node):
+			request.payload.discard_pending_model_load(pending_key)
+			_model_request_start_active.erase(start_key)
+			if _is_request_complete(request):
+				request.completed = true
+				request.failed = true
+				request.error_message = "Cell node freed before disk request start"
+			continue
+
+		if _model_loader.has_model(model_path, item_id):
+			_on_disk_load_completed(request_id, model_path, item_id, null)
+			_model_request_start_active.erase(start_key)
+			if _is_request_complete(request):
+				_finalize_request(request)
+			continue
+		if not _model_loader.enable_disk_cache or not _model_loader.has_disk_cached(model_path, item_id):
+			request.payload.discard_pending_model_load(pending_key)
+			_model_request_start_active.erase(start_key)
+			if _is_request_complete(request):
+				_finalize_request(request)
+			continue
+
+		var request_start_us := Time.get_ticks_usec()
+		var callback := _make_disk_load_callback(request_id, model_path, item_id)
+		_model_request_start_active[start_key] = true
+		var requested := _model_loader.request_model_async(model_path, item_id, callback, false)
+		var elapsed_us := Time.get_ticks_usec() - request_start_us
+		started += 1
+
+		if not requested:
+			_model_request_start_active.erase(start_key)
+			request.payload.discard_pending_model_load(pending_key)
+			if _is_request_complete(request):
+				_finalize_request(request)
+		if elapsed_us > 8_000:
+			Log.warn("streaming", "[model-request-start-spike %.1fms] request=%d grid=%s key=%s queue=%d active=%d model=%s" % [
+				float(elapsed_us) / 1000.0,
+				request_id,
+				str(request.grid),
+				pending_key,
+				_model_request_start_queue.size(),
+				_model_request_start_active.size(),
+				model_path,
+			])
+
+	return started
+
+
+func _discard_model_request_starts_for_request(request_id: int) -> void:
+	var kept: Array[Dictionary] = []
+	for entry: Dictionary in _model_request_start_queue:
+		var entry_request_id := int(entry.get("request_id", -1))
+		var start_key := str(entry.get("start_key", ""))
+		if entry_request_id == request_id:
+			_model_request_start_queued.erase(start_key)
+			_model_request_start_active.erase(start_key)
+		else:
+			kept.append(entry)
+	_model_request_start_queue = kept
+
+	var prefix := "%d:" % request_id
+	var queued_to_remove: Array[String] = []
+	for key: String in _model_request_start_queued:
+		if key.begins_with(prefix):
+			queued_to_remove.append(key)
+	for key: String in queued_to_remove:
+		_model_request_start_queued.erase(key)
+
+	var active_to_remove: Array[String] = []
+	for key: String in _model_request_start_active:
+		if key.begins_with(prefix):
+			active_to_remove.append(key)
+	for key: String in active_to_remove:
+		_model_request_start_active.erase(key)
 
 
 func _static_entry_waiting_for_prepare(entry: InstantiationEntry) -> bool:
@@ -1761,6 +1959,7 @@ func get_async_result(request_id: int) -> Node3D:
 		request.payload.bind_resource_handles_to_node(request.cell_node)
 
 	# Remove from tracking and return result
+	_discard_model_request_starts_for_request(request_id)
 	_unpin_payload_cached_scenes(request)
 	_async_requests.erase(request_id)
 	return request.cell_node
@@ -1880,6 +2079,9 @@ func fast_cleanup() -> void:
 		_unpin_payload_cached_scenes(request)
 	_discard_all_pending_child_attaches()
 	_discard_all_static_prepare()
+	_model_request_start_queue.clear()
+	_model_request_start_queued.clear()
+	_model_request_start_active.clear()
 	_static_prepare_failed.clear()
 
 
@@ -1932,6 +2134,7 @@ func cancel_async_request(request_id: int) -> void:
 		Log.info("streaming", "CellManager: Cleaned up %d pending instantiations for unloaded cell (request %d)" % [removed, request_id])
 	_discard_pending_child_attaches_for_request(request_id)
 	_discard_static_prepare_for_request(request_id)
+	_discard_model_request_starts_for_request(request_id)
 	if _static_renderer != null and _static_renderer.has_method("remove_cell_instances"):
 		_static_renderer.call("remove_cell_instances", request.grid)
 
@@ -2009,6 +2212,7 @@ func finalize_unloaded_cell(request_id: int) -> void:
 	)
 	_discard_pending_child_attaches_for_request(request_id)
 	_discard_static_prepare_for_request(request_id)
+	_discard_model_request_starts_for_request(request_id)
 	# Note: DON'T queue_free(request.cell_node) — caller (_process_budgeted_unloading)
 	# owns the cell_node teardown and has already queue_free'd it.
 	_async_requests.erase(request_id)
@@ -2315,6 +2519,17 @@ func process_async_instantiation(
 	var classify_budget_us: int = mini(int(classify_cap_ms * 1000.0), budget_usec_total)
 	var classified_refs := _process_request_classification_queue(classify_budget_us, classify_max_refs)
 	var t_pre_classify := Time.get_ticks_usec()
+
+	var request_start_elapsed_us := Time.get_ticks_usec() - start_time
+	var request_start_remaining_us: int = maxi(0, budget_usec_total - int(request_start_elapsed_us))
+	var request_start_cap_ms := SC.MODEL_REQUEST_START_BUDGET_MS
+	var request_start_max := SC.MODEL_REQUEST_START_MAX_PER_FRAME
+	if budget_ms > SC.POST_STARTUP_INSTANTIATION_BUDGET_MS:
+		request_start_cap_ms = SC.STARTUP_MODEL_REQUEST_START_BUDGET_MS
+		request_start_max = SC.STARTUP_MODEL_REQUEST_START_MAX_PER_FRAME
+	var request_start_budget_us: int = mini(int(request_start_cap_ms * 1000.0), request_start_remaining_us)
+	var model_request_starts := _process_model_request_start_queue(request_start_budget_us, request_start_max)
+	var t_pre_request_start := Time.get_ticks_usec()
 
 	var disk_elapsed_us := Time.get_ticks_usec() - start_time
 	var disk_remaining_us: int = maxi(0, budget_usec_total - int(disk_elapsed_us))
@@ -2694,12 +2909,14 @@ func process_async_instantiation(
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
 	if total_inst_us > 16_000:
-		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f class=%.1f/%d disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d dispatch=%.1f cfin=%.1f loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
+		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f class=%.1f/%d mreq=%.1f/%d disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d dispatch=%.1f cfin=%.1f loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
 			float(t_pre_collision - t_pre0) / 1000.0,
 			float(t_pre_classify - start_time) / 1000.0,
 			classified_refs,
-			float(t_pre_disk - t_pre_classify) / 1000.0,
+			float(t_pre_request_start - t_pre_classify) / 1000.0,
+			model_request_starts,
+			float(t_pre_disk - t_pre_request_start) / 1000.0,
 			float(t_pre_conv - t_pre_disk) / 1000.0,
 			float(t_pre_prewarm - t_pre_conv) / 1000.0,
 			float(t_pre_static_prepare - t_pre_prewarm) / 1000.0,
@@ -3172,6 +3389,11 @@ func _make_disk_load_callback(request_id: int, model_path: String, _item_id: Str
 
 ## Internal: Handle async disk load completion
 func _on_disk_load_completed(request_id: int, model_path: String, item_id: String, _model: Node3D) -> void:
+	var pending_key := _get_cache_key(model_path, item_id)
+	var start_key := _model_request_start_key(request_id, pending_key)
+	_model_request_start_active.erase(start_key)
+	_model_request_start_queued.erase(start_key)
+
 	if request_id not in _async_requests:
 		return  # Request was cancelled
 
@@ -3181,14 +3403,13 @@ func _on_disk_load_completed(request_id: int, model_path: String, item_id: Strin
 
 	# Check if cell_node is still valid (cell may have been unloaded)
 	if not is_instance_valid(request.cell_node):
-		request.payload.discard_pending_model_load(_get_cache_key(model_path, item_id))
+		request.payload.discard_pending_model_load(pending_key)
 		if _is_request_complete(request):
 			request.completed = true
 			request.failed = true
 			request.error_message = "Cell node freed during disk load"
 		return
 
-	var pending_key := _get_cache_key(model_path, item_id)
 	_pin_payload_cached_scene(request, model_path, item_id)
 	request.payload.mark_model_load_completed(pending_key, request_id, model_path, item_id)
 
@@ -3733,6 +3954,8 @@ func get_loading_stats() -> Dictionary:
 		"resident_async_requests": _async_requests.size(),
 		"pending_conversions": pending_conversions,
 		"pending_disk_loads": get_pending_disk_load_count() + pending_model_loads,
+		"model_request_start_queue": _model_request_start_queue.size(),
+		"model_request_start_active": _model_request_start_active.size(),
 		"static_prepare_queue": _get_static_prepare_queue_size(),
 		"cell_payloads": payloads,
 		"cell_payload_pinned_resources": pinned_resources,

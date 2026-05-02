@@ -492,6 +492,8 @@ func _init_async() -> void:
 
 	# Pre-warm model cache with common models (improves first-cell loading)
 	await _update_loading(80, "Pre-loading common models...")
+	var indexed_models: int = cell_manager._model_loader.prewarm_disk_cache_index()
+	_log("Indexed %d prebaked model cache files" % indexed_models)
 	var preload_count := cell_manager.preload_common_models()
 	_log("Pre-loaded %d common models into cache" % preload_count)
 	_ta = _log_timing(_ta, "preload common models")
@@ -1820,8 +1822,8 @@ func _setup_subsystem_toggles() -> void:
 	_subsystem_toggles.setup(callbacks, defaults)
 
 	# Boot banner: make the active distant tier state explicit in logs.
-	_log("[color=green][Distant tiers active][/color] FAR impostors default ON; HLOD opt-in; MID fallback 0-500m, impostors 500m+")
-	Log.info("streaming", "[Distant tiers active] impostors default=true; HLOD default=false pending chunk-surface proof; MID fallback 0-500m, impostors 500m+")
+	_log("[color=green][Distant tiers active][/color] FAR impostors default ON; HLOD opt-in; MID/FAR handoff follows view-distance slider")
+	Log.info("streaming", "[Distant tiers active] impostors default=true; HLOD default=false pending chunk-surface proof; MID fallback follows view-distance slider, impostors start at the same handoff")
 
 	# CLI controls for focused tier isolation. `--near-only` parks both distant
 	# tiers; `--no-hlod` / `--no-impostors` isolate one tier without hiding MID.
@@ -1836,17 +1838,17 @@ func _setup_subsystem_toggles() -> void:
 		if a == "--near-only":
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
-			_log("[color=yellow]--near-only: hlod/impostors OFF; MID fallback restored to 0-500m[/color]")
+			_log("[color=yellow]--near-only: hlod/impostors OFF; MID handoff follows view-distance slider[/color]")
 		elif a == "--hlod":
 			_subsystem_toggles.set_flag("hlod", true)
-			_log("[color=yellow]--hlod: HLOD ON; MID fallback 0-500m, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback 500m+[/color]")
+			_log("[color=yellow]--hlod: HLOD ON; MID/FAR handoff follows view-distance slider, covered MID caps at 300m, HLOD visible 300-1000m[/color]")
 		elif a == "--hlod-only":
 			_subsystem_toggles.set_flag("hlod", true)
 			_subsystem_toggles.set_flag("impostors", false)
 			_log("[color=yellow]--hlod-only: HLOD ON, FAR impostors OFF[/color]")
 		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
 			_subsystem_toggles.set_flag("hlod", false)
-			_log("[color=yellow]--no-hlod: HLOD OFF; MID fallback restored to 0-500m[/color]")
+			_log("[color=yellow]--no-hlod: HLOD OFF; MID/FAR handoff follows view-distance slider[/color]")
 		elif a == "--no-impostors":
 			_subsystem_toggles.set_flag("impostors", false)
 			_log("[color=yellow]--no-impostors: FAR impostors OFF[/color]")
@@ -2138,7 +2140,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		console.register_command(
 			"hlod_enable",
 			_cmd_hlod_enable,
-			"Enable runtime HLOD merging (visible 300-1000m; FAR fallback stays 500m+)",
+			"Enable runtime HLOD merging (visible 300-1000m; FAR fallback follows view-distance slider)",
 			"streaming"
 		)
 
@@ -2296,7 +2298,8 @@ func _cmd_hlod_enable(_args: Dictionary) -> String:
 		_subsystem_toggles.set_flag("hlod", true)
 	else:
 		native_streaming_manager.set_hlod_visible(true)
-	return "HLOD merging ENABLED - MID fallback 0-500m, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback 500m+"
+	var handoff := _get_distant_render_end_m()
+	return "HLOD merging ENABLED - MID fallback 0-%dm, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback %dm+" % [int(handoff), int(handoff)]
 
 
 func _cmd_hlod_disable(_args: Dictionary) -> String:
@@ -2308,7 +2311,7 @@ func _cmd_hlod_disable(_args: Dictionary) -> String:
 		_subsystem_toggles.set_flag("hlod", false)
 	else:
 		native_streaming_manager.set_hlod_visible(false)
-	return "HLOD DISABLED - MID fallback 0-500m, HLOD parked"
+	return "HLOD DISABLED - MID fallback 0-%dm, HLOD parked" % int(_get_distant_render_end_m())
 
 
 func _cmd_proto_registry(args: Dictionary) -> String:
@@ -2919,8 +2922,19 @@ func _set_view_distance(value: Variant) -> void:
 			world_streaming_manager.view_distance_cells = _current_view_distance
 			if changed:
 				world_streaming_manager.refresh_cells()
-	_log("View distance: %d cells (~%dm)" % [_current_view_distance, int(_current_view_distance * StreamingConfig.DU.CELL_SIZE_METERS)])
+	if _panels:
+		if _panels.view_distance_slider:
+			_panels.view_distance_slider.set_value_no_signal(_current_view_distance)
+		if _panels.view_distance_label:
+			_panels.view_distance_label.text = StreamingConfig.format_load_radius_with_distance(_current_view_distance)
+	_log("View distance: %s" % StreamingConfig.format_load_radius_with_distance(_current_view_distance))
 	_update_stats()
+
+
+func _get_distant_render_end_m() -> float:
+	if world_streaming_manager and world_streaming_manager.has_method("get_distant_render_end_m"):
+		return float(world_streaming_manager.call("get_distant_render_end_m"))
+	return StreamingConfig.distant_render_end_for_load_radius_cells(_current_view_distance)
 
 
 # ==================== Interior Transitions ====================
