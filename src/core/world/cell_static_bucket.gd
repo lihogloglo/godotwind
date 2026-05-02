@@ -4,6 +4,7 @@ extends RefCounted
 const DU := preload("res://src/core/world/distance_utils.gd")
 
 const TRANSFORM_STRIDE := 12
+const MULTIMESH_CLUSTER_SIZE_M: float = DU.CELL_SIZE_METERS * 0.5
 
 var type_name: String = ""
 var payload_key: String = ""
@@ -13,6 +14,7 @@ var instance_count: int = 0
 var draw_groups: Array[DrawGroup] = []
 var visible: bool = true
 var frozen: bool = false
+var visibility_range_end: float = DU.MID_END
 var resource_handle: RefCounted = null
 var _bucket_owner_key: String = ""
 var _resource_refs: Array[Resource] = []
@@ -26,6 +28,7 @@ class DrawGroup:
 	var multimesh: MultiMesh = null
 	var instance_rid: RID = RID()
 	var instance_count: int = 0
+	var local_aabb: AABB = AABB()
 
 
 ## Phase 2B bucket primitive: owns RS instance RIDs plus the strong resource
@@ -37,7 +40,7 @@ func configure(
 	sub_meshes: Array,
 	transforms: Array,
 	scenario: RID,
-	visibility_range_end: float,
+	p_visibility_range_end: float,
 	globally_visible: bool,
 	p_resource_handle: RefCounted = null,
 ) -> bool:
@@ -52,6 +55,7 @@ func configure(
 	instance_count = transforms.size()
 	visible = globally_visible
 	frozen = false
+	visibility_range_end = p_visibility_range_end
 	resource_handle = p_resource_handle
 	if resource_handle != null and resource_handle.has_method("add_owner"):
 		resource_handle.call("add_owner", _bucket_owner_key)
@@ -61,20 +65,29 @@ func configure(
 		var sub_mesh: Variant = sub_mesh_value
 		if sub_mesh == null or sub_mesh.mesh_resource == null:
 			continue
-		var group := _create_draw_group(
+		var groups := _create_draw_groups(
 			sub_mesh,
 			transforms,
-			scenario,
-			visibility_range_end
+			scenario
 		)
-		if group != null:
-			draw_groups.append(group)
+		draw_groups.append_array(groups)
 
 	return not draw_groups.is_empty()
 
 
 func get_draw_group_count() -> int:
 	return draw_groups.size()
+
+
+func set_visibility_range_end(p_visibility_range_end: float) -> void:
+	if frozen:
+		return
+	if is_equal_approx(visibility_range_end, p_visibility_range_end):
+		return
+	visibility_range_end = p_visibility_range_end
+	for group: DrawGroup in draw_groups:
+		if group.instance_rid.is_valid():
+			_apply_visibility_range(group)
 
 
 func set_visible(p_visible: bool) -> void:
@@ -123,8 +136,14 @@ func _pin_sub_mesh_resources(sub_meshes: Array) -> void:
 
 
 func _append_resource_ref(resource: Resource) -> void:
-	if resource != null and resource not in _resource_refs:
+	if resource != null and is_instance_valid(resource) and resource not in _resource_refs:
 		_resource_refs.append(resource)
+
+
+static func _get_valid_material_rid(material: Material) -> RID:
+	if material == null or not is_instance_valid(material):
+		return RID()
+	return material.get_rid()
 
 
 func _release_resource_owner() -> void:
@@ -134,64 +153,93 @@ func _release_resource_owner() -> void:
 	_bucket_owner_key = ""
 
 
-func _create_draw_group(
+func _create_draw_groups(
 	sub_mesh: Variant,
 	transforms: Array,
 	scenario: RID,
-	visibility_range_end: float,
-) -> DrawGroup:
+) -> Array[DrawGroup]:
 	var source_mesh: Mesh = sub_mesh.mesh_resource
-	if source_mesh == null:
-		return null
+	if source_mesh == null or not is_instance_valid(source_mesh):
+		return []
 	var material_resource: Material = sub_mesh.material_resource
+	if material_resource != null and not is_instance_valid(material_resource):
+		material_resource = null
 	var surface_materials: Array[Material] = sub_mesh.surface_materials
 	var mesh_resource := source_mesh
 	if mesh_resource == null:
-		return null
+		return []
 
-	if transforms.size() == 1:
-		var single_transform: Transform3D = transforms[0]
-		return _create_single_mesh_draw_group(
+	var local_transform: Transform3D = sub_mesh.local_transform
+	var mesh_aabb := mesh_resource.get_aabb()
+	var bucket_origin := DU.cell_to_world_origin(cell_grid)
+	var clusters := _cluster_transforms(transforms, local_transform, bucket_origin)
+	var groups: Array[DrawGroup] = []
+	for cluster_value: Variant in clusters.values():
+		var cluster_transforms: Array = cluster_value
+		if cluster_transforms.size() == 1:
+			var single_transform: Transform3D = cluster_transforms[0]
+			var single_group := _create_single_multimesh_draw_group(
+				mesh_resource,
+				material_resource,
+				surface_materials,
+				local_transform,
+				single_transform,
+				mesh_aabb,
+				bucket_origin,
+				scenario
+			)
+			if single_group != null:
+				groups.append(single_group)
+			continue
+		var group := _create_multimesh_draw_group(
 			mesh_resource,
 			material_resource,
 			surface_materials,
-			sub_mesh.local_transform,
-			single_transform,
-			scenario,
-			visibility_range_end
+			local_transform,
+			cluster_transforms,
+			mesh_aabb,
+			bucket_origin,
+			scenario
 		)
+		if group == null:
+			continue
+		groups.append(group)
+	return groups
+
+
+func _create_multimesh_draw_group(
+	mesh_resource: Mesh,
+	material_resource: Material,
+	surface_materials: Array[Material],
+	local_transform: Transform3D,
+	transforms: Array,
+	mesh_aabb: AABB,
+	bucket_origin: Vector3,
+	scenario: RID,
+) -> DrawGroup:
+	if transforms.is_empty() or not scenario.is_valid():
+		return null
+	var mesh_rid := mesh_resource.get_rid()
+	if not mesh_rid.is_valid():
+		return null
 
 	var multimesh := MultiMesh.new()
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	multimesh.mesh = mesh_resource
 	multimesh.instance_count = transforms.size()
 
-	var local_transform: Transform3D = sub_mesh.local_transform
-	var mesh_aabb := mesh_resource.get_aabb()
-	var packed := _pack_multimesh_transforms(transforms, local_transform, mesh_aabb)
+	var packed := _pack_multimesh_transforms(transforms, local_transform, mesh_aabb, bucket_origin)
 	multimesh.set_buffer(packed.buffer)
 	multimesh.custom_aabb = packed.custom_aabb
 
 	var rid := RenderingServer.instance_create()
 	RenderingServer.instance_set_base(rid, multimesh.get_rid())
 	RenderingServer.instance_set_scenario(rid, scenario)
-	RenderingServer.instance_set_transform(rid, Transform3D.IDENTITY)
+	RenderingServer.instance_set_transform(rid, Transform3D(Basis.IDENTITY, bucket_origin))
 
-	var material_rid: RID = material_resource.get_rid() if material_resource != null else RID()
+	var material_rid := _get_valid_material_rid(material_resource)
 	if material_rid.is_valid():
 		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
-
-	RenderingServer.instance_geometry_set_visibility_range(
-		rid,
-		0.0,
-		visibility_range_end,
-		0.0,
-		DU.FADE_MARGIN_LOD3_FAR,
-		RenderingServer.VISIBILITY_RANGE_FADE_SELF
-	)
-	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
-	if not visible:
-		RenderingServer.instance_set_visible(rid, false)
 
 	var group := DrawGroup.new()
 	group.mesh_resource = mesh_resource
@@ -201,57 +249,114 @@ func _create_draw_group(
 	group.multimesh = multimesh
 	group.instance_rid = rid
 	group.instance_count = transforms.size()
+	group.local_aabb = packed.custom_aabb
+	_apply_visibility_range(group)
+	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
+	if not visible:
+		RenderingServer.instance_set_visible(rid, false)
 	return group
 
 
-func _create_single_mesh_draw_group(
+func _create_single_multimesh_draw_group(
 	mesh_resource: Mesh,
 	material_resource: Material,
 	surface_materials: Array[Material],
 	local_transform: Transform3D,
 	world_transform: Transform3D,
+	mesh_aabb: AABB,
+	bucket_origin: Vector3,
 	scenario: RID,
-	visibility_range_end: float,
 ) -> DrawGroup:
-	var rid := RenderingServer.instance_create()
-	RenderingServer.instance_set_base(rid, mesh_resource.get_rid())
-	RenderingServer.instance_set_scenario(rid, scenario)
-	RenderingServer.instance_set_transform(rid, world_transform * local_transform)
+	if not scenario.is_valid():
+		return null
+	var mesh_rid := mesh_resource.get_rid()
+	if not mesh_rid.is_valid():
+		return null
 
-	var material_rid: RID = material_resource.get_rid() if material_resource != null else RID()
+	var slot_transform := world_transform * local_transform
+	slot_transform.origin -= bucket_origin
+	var slot_aabb: AABB = slot_transform * mesh_aabb
+
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh_resource
+	multimesh.instance_count = 1
+	multimesh.set_instance_transform(0, slot_transform)
+	multimesh.custom_aabb = slot_aabb
+
+	var rid := RenderingServer.instance_create()
+	RenderingServer.instance_set_base(rid, multimesh.get_rid())
+	RenderingServer.instance_set_scenario(rid, scenario)
+	RenderingServer.instance_set_transform(rid, Transform3D(Basis.IDENTITY, bucket_origin))
+
+	var material_rid := _get_valid_material_rid(material_resource)
 	if material_rid.is_valid():
 		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
-
-	RenderingServer.instance_geometry_set_visibility_range(
-		rid,
-		0.0,
-		visibility_range_end,
-		0.0,
-		DU.FADE_MARGIN_LOD3_FAR,
-		RenderingServer.VISIBILITY_RANGE_FADE_SELF
-	)
-	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
-	if not visible:
-		RenderingServer.instance_set_visible(rid, false)
 
 	var group := DrawGroup.new()
 	group.mesh_resource = mesh_resource
 	group.material_resource = material_resource
 	group.surface_materials = surface_materials.duplicate()
 	group.local_transform = local_transform
-	group.multimesh = null
+	group.multimesh = multimesh
 	group.instance_rid = rid
 	group.instance_count = 1
+	group.local_aabb = slot_aabb
+	_apply_visibility_range(group)
+	RenderingServer.instance_geometry_set_lod_bias(rid, 1.0)
+	if not visible:
+		RenderingServer.instance_set_visible(rid, false)
 	return group
 
 
-func _pack_multimesh_transforms(transforms: Array, local_transform: Transform3D, mesh_aabb: AABB) -> Dictionary:
+func _apply_visibility_range(group: DrawGroup) -> void:
+	var radius := _aabb_horizontal_radius(group.local_aabb)
+	var begin := 0.0
+	var end := visibility_range_end + radius
+	RenderingServer.instance_geometry_set_visibility_range(
+		group.instance_rid,
+		begin,
+		end,
+		0.0,
+		DU.FADE_MARGIN_LOD3_FAR + radius,
+		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+	)
+
+
+static func _aabb_horizontal_radius(aabb: AABB) -> float:
+	if aabb.size == Vector3.ZERO:
+		return 0.0
+	return Vector2(aabb.size.x, aabb.size.z).length() * 0.5
+
+
+func _cluster_transforms(transforms: Array, local_transform: Transform3D, bucket_origin: Vector3) -> Dictionary:
+	var clusters: Dictionary = {}
+	for transform_value: Variant in transforms:
+		var world_transform: Transform3D = transform_value
+		var origin := (world_transform * local_transform).origin - bucket_origin
+		var key := Vector2i(
+			floori(origin.x / MULTIMESH_CLUSTER_SIZE_M),
+			floori(origin.z / MULTIMESH_CLUSTER_SIZE_M)
+		)
+		if key not in clusters:
+			clusters[key] = []
+		clusters[key].append(world_transform)
+	return clusters
+
+
+func _pack_multimesh_transforms(
+	transforms: Array,
+	local_transform: Transform3D,
+	mesh_aabb: AABB,
+	bucket_origin: Vector3
+) -> Dictionary:
 	var buffer := PackedFloat32Array()
 	buffer.resize(transforms.size() * TRANSFORM_STRIDE)
 	var custom_aabb := AABB()
 	for i in range(transforms.size()):
 		var world_transform: Transform3D = transforms[i]
 		var slot_transform := world_transform * local_transform
+		slot_transform.origin -= bucket_origin
 		var off := i * TRANSFORM_STRIDE
 		var b := slot_transform.basis
 		var o := slot_transform.origin

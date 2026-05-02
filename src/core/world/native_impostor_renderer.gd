@@ -27,10 +27,28 @@ const CS := preload("res://src/core/coordinate_system.gd")
 
 ## Maximum texture array layers. 256 layers × 256×256 RGBA8 = ~64 MB VRAM (albedo + normals).
 ## Previous: 512 layers × 512×512 = ~1 GB VRAM, triggered c0000005 in Vulkan on RTX 4060 Laptop.
+const TEXTURE_ARRAY_DIMENSION: int = 1024
 const MAX_TEXTURE_ARRAY_LAYERS: int = 256
 
 ## Texture array rebuild delay (batch multiple additions)
 const TEXTURE_ARRAY_REBUILD_DELAY: float = 0.1
+
+## Main-thread texture result handling budget. A single completed texture can
+## create hundreds of impostors, so poll one result at a time and stop before
+## texture finalization monopolizes a frame.
+const JOB_RESULT_POLL_MAX_PER_FRAME: int = 4
+const JOB_RESULT_POLL_BUDGET_USEC: int = 1500
+
+## Full-ring uploads are expensive while the startup ring is still ingesting.
+## Let the first visible batch appear quickly, then throttle progressive global
+## commits until the queue drains.
+const STARTUP_TEXTURE_REBUILD_INTERVAL: float = 0.25
+const READY_IMPOSTOR_CREATE_MAX_PER_FRAME: int = 256
+const READY_IMPOSTOR_CREATE_BUDGET_USEC: int = 1500
+const IMPOSTOR_PAGE_SIZE_CELLS: int = 4
+const IMPOSTOR_PAGE_REBUILD_MAX_PER_FRAME: int = 12
+const IMPOSTOR_PAGE_REBUILD_BUDGET_USEC: int = 1500
+const IMPOSTOR_PAGE_AABB_MARGIN: float = 64.0
 
 #endregion
 
@@ -51,9 +69,15 @@ signal stats_updated(stats: Dictionary)
 ## Impostor candidates (knows which models have impostors)
 var impostor_candidates: ImpostorCandidatesScript = null
 
-## Master MultiMesh for single draw call rendering
-var _master_multimesh: MultiMesh = null
-var _master_instance: MultiMeshInstance3D = null
+## Shared billboard mesh/material. Instances are split into spatial pages so
+## Godot can frustum/distance-cull bounded MultiMesh batches.
+var _quad_mesh: QuadMesh = null
+var _page_container: Node3D = null
+var _impostor_pages: Dictionary[Vector2i, ImpostorPage] = {}
+var _dirty_page_keys: Array[Vector2i] = []
+var _dirty_page_set: Dictionary[Vector2i, bool] = {}
+var _visibility_begin_distance: float = DU.MID_END
+var _visibility_fade_margin: float = DU.FADE_MARGIN_RENDER_FAR
 
 ## Billboard shader material with texture array
 var _billboard_material: ShaderMaterial = null
@@ -64,6 +88,7 @@ var _texture_index_map: Dictionary[String, int] = {}  # texture_hash -> array_in
 var _texture_array_dirty: bool = false
 var _all_array_images: Array[Image] = []
 var _texture_array_size: int = 0
+var _committed_texture_array_layers: int = 0
 var _last_texture_add_time: float = 0.0
 
 ## Normal texture array (parallel to albedo array, same layer indices)
@@ -72,6 +97,7 @@ var _normal_index_map: Dictionary[String, int] = {}  # texture_hash -> normal ar
 var _all_normal_images: Array[Image] = []
 var _normal_array_size: int = 0
 var _normal_array_dirty: bool = false
+var _committed_normal_array_layers: int = 0
 
 ## Phase 6 (2026-04-17) — async texture-array rebuild.
 ##
@@ -90,6 +116,7 @@ var _rebuild_pending_albedo: Array[Image] = []       ## worker output
 var _rebuild_pending_normals: Array[Image] = []      ## worker output
 var _old_texture_array: Texture2DArray = null        ## one-frame double-buffer
 var _old_normal_array: Texture2DArray = null
+var _texture_array_committed_this_frame: bool = false
 
 ## Reference count for textures: hash_key -> count of impostors using it
 var _texture_ref_counts: Dictionary[String, int] = {}
@@ -110,9 +137,8 @@ var _pending_job_ids: Dictionary[String, int] = {} # hash_key -> job_id
 
 ## Pending impostors waiting for texture
 var _pending_impostors: Dictionary[String, Array] = {}  # hash_key -> Array[PendingImpostor]
-
-## Default fallback texture for missing impostors (created on demand)
-var _fallback_texture: ImageTexture = null
+var _ready_texture_hashes: Array[String] = []
+var _ready_texture_hash_set: Dictionary[String, bool] = {}
 
 ## Active impostors: impostor_id -> ImpostorData
 var _impostors: Dictionary[int, ImpostorData] = {}
@@ -141,13 +167,11 @@ var _impostors_dirty: bool = false
 
 ## Rate-limiting for MultiMesh rebuilds to prevent frame stalls
 ## Rebuilding 70k+ instances every frame is catastrophic for performance
-var _last_multimesh_rebuild_time: float = 0.0
-var _last_impostor_add_time: float = 0.0  # When the last impostor was created (for debounce)
-const MULTIMESH_REBUILD_INTERVAL: float = 0.5  # Minimum seconds between rebuilds
-const MULTIMESH_REBUILD_DEBOUNCE: float = 0.2  # Wait this long after last impostor add before rebuilding
+var _last_texture_array_rebuild_time: float = 0.0
 
 ## Deferred impostor loading - process cells progressively to avoid freezing
 var _pending_impostor_cells: Array[Vector2i] = []  # Cells waiting to be processed
+var _pending_impostor_cell_set: Dictionary[Vector2i, bool] = {}
 var _pending_cell_index: int = 0  # Current front of the queue
 var _impostor_load_budget_usec: float = 4000.0  # Time budget in microseconds (4ms)
 
@@ -165,6 +189,31 @@ var _stats: Dictionary = {
 	"pending_loads": 0,
 	"skipped_no_texture": 0,  # Models that matched patterns but had no prebaked texture
 	"skipped_not_candidate": 0,  # Models that didn't match impostor candidate patterns
+	"far_cell_scan_us": 0,
+	"far_cells_processed_last_frame": 0,
+	"far_job_poll_us": 0,
+	"far_job_results_handled": 0,
+	"far_ready_create_us": 0,
+	"far_ready_created": 0,
+	"far_texture_upload_us": 0,
+	"far_normal_upload_us": 0,
+	"far_multimesh_pack_us": 0,
+	"far_multimesh_upload_us": 0,
+	"far_uploaded_instances": 0,
+	"far_page_count": 0,
+	"far_dirty_page_count": 0,
+	"far_pages_rebuilt": 0,
+	"far_visible_page_count": 0,
+	"far_rebuild_deferred_pending": 0,
+	"job_results_processed_last_frame": 0,
+	"job_result_poll_last_ms": 0.0,
+	"job_result_poll_max_ms": 0.0,
+	"texture_array_rebuild_count": 0,
+	"texture_array_upload_last_ms": 0.0,
+	"texture_array_upload_max_ms": 0.0,
+	"multimesh_rebuild_count": 0,
+	"multimesh_rebuild_last_ms": 0.0,
+	"multimesh_rebuild_max_ms": 0.0,
 }
 
 ## Debug logging
@@ -186,6 +235,7 @@ var _screen_size_histogram_logged: bool = false
 
 ## Previous center for differential impostor updates
 var _prev_impostor_center: Vector2i = Vector2i(999999, 999999)
+var _hlod_covered_ref_nums: Dictionary = {}
 
 #endregion
 
@@ -195,33 +245,45 @@ var _prev_impostor_center: Vector2i = Vector2i(999999, 999999)
 class PendingImpostor:
 	var model_path: String
 	var cell_grid: Vector2i  # Cell this belongs to
+	var ref_id: String = ""
+	var ref_num: int = 0
 	var position: Vector3
 	var rotation: Vector3
 	var scale: Vector3
 	var texture_size: Vector2
-	var aabb_center_y: float = 0.0
+	var aabb_center: Vector3 = Vector3.ZERO
 	var variant_flag: float = 0.0  # See ImpostorData.variant_flag
 
 
 class ImpostorData:
 	var id: int
 	var cell_grid: Vector2i # Cell this belongs to
+	var page_key: Vector2i
+	var ref_id: String = ""
+	var ref_num: int = 0
 	var model_path: String
 	var texture_hash: String
 	var texture_index: int
-	var normal_texture_index: int = -1  # -1 = no normals (legacy v3 bake)
+	var normal_texture_index: int = -1
 	var position: Vector3
 	var rotation: Vector3
 	var scale: Vector3
 	var texture_size: Vector2
-	var aabb_center_y: float = 0.0
+	var aabb_center: Vector3 = Vector3.ZERO
 	## Bake variant flag, packed into INSTANCE_CUSTOM.w for the shader.
-	## Lets the shader pick between Variant A (legacy 16-frame azimuthal) and
-	## Variant B (octahedral nearest-neighbor) at sample time.
-	##   0.0 = v4 azimuthal (legacy)
-	##   1.0 = v5 hemi octahedral
-	##   2.0 = v5 sphere octahedral
+	## Lets the shader pick the v6 octahedral projection at sample time.
+	##   1.0 = v6 hemi octahedral
+	##   2.0 = v6 sphere octahedral
 	var variant_flag: float = 0.0
+
+
+class ImpostorPage:
+	var key: Vector2i
+	var center: Vector3
+	var multimesh: MultiMesh
+	var instance: MultiMeshInstance3D
+	var impostor_ids: Array[int] = []
+	var visibility_begin_distance: float = 0.0
 
 #endregion
 
@@ -232,11 +294,23 @@ func set_enabled(enabled: bool) -> void:
 	visible = enabled
 
 
+func set_force_visible_for_test(enabled: bool) -> void:
+	if enabled:
+		_visibility_begin_distance = 0.0
+		_visibility_fade_margin = 0.0
+		_apply_visibility_ranges_to_pages()
+		if _billboard_material:
+			_billboard_material.set_shader_parameter("fade_distance", 0.0)
+			_billboard_material.set_shader_parameter("fade_margin", 0.0)
+	else:
+		set_visibility_range_begin(DU.MID_END, DU.FADE_MARGIN_RENDER_FAR)
+
+
 #region Initialization
 
 func _ready() -> void:
 	Log.info("impostors", "Initializing impostor renderer...")
-	_setup_master_multimesh()
+	_setup_paged_multimeshes()
 	_setup_billboard_material()
 	_start_job_system()
 	Log.info("impostors", "Initialization complete. Debug enabled: %s" % debug_enabled)
@@ -262,48 +336,37 @@ func fast_cleanup() -> void:
 		_rebuild_task_id = -1
 		_rebuild_pending_albedo = []
 		_rebuild_pending_normals = []
+	_detach_render_resources()
 	clear()
 
 
-func _setup_master_multimesh() -> void:
-	_master_multimesh = MultiMesh.new()
-	_master_multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	_master_multimesh.use_custom_data = true
+func _detach_render_resources() -> void:
+	_clear_pages(true)
+	if _page_container:
+		var parent := _page_container.get_parent()
+		if parent:
+			parent.remove_child(_page_container)
+		_page_container.free()
+		_page_container = null
+	if _quad_mesh and _quad_mesh.get_surface_count() > 0:
+		_quad_mesh.surface_set_material(0, null)
+	_quad_mesh = null
+	if _billboard_material:
+		_billboard_material.shader = null
+	_billboard_material = null
+	_texture_array = null
+	_normal_texture_array = null
+	_old_texture_array = null
+	_old_normal_array = null
 
-	# Create quad mesh for billboard
-	# NOTE: We set the material on the mesh surface directly, not just material_override
-	# This ensures the shader is definitely applied (material_override should work but didn't)
-	var quad := QuadMesh.new()
-	quad.size = Vector2(1.0, 1.0)
-	# Material will be set in _setup_billboard_material() after shader is created
-	_master_multimesh.mesh = quad
 
-	_master_instance = MultiMeshInstance3D.new()
-	_master_instance.multimesh = _master_multimesh
-	_master_instance.name = "ImpostorMasterBatch"
+func _setup_paged_multimeshes() -> void:
+	_quad_mesh = QuadMesh.new()
+	_quad_mesh.size = Vector2(1.0, 1.0)
 
-	# Configure native visibility_range for FAR tier
-	# CRITICAL FIX: Use Godot's native visibility_range to hide impostors at close range
-	# This is more reliable than shader-only discard because Godot culls BEFORE rendering
-	# Begin at FAR_START minus margin for smooth transition. Phase 5
-	# (2026-04-17) pushed FAR_START from 500m → 1000m, so the default is
-	# now 980m. native_streaming_manager's init re-applies HLOD_END at
-	# startup anyway, but keeping the default consistent avoids a 500m
-	# flash between _init and the post-initialize override.
-	_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR
-	_master_instance.visibility_range_end = DU.FAR_END  # 5000m
-	_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR  # 20m hysteresis
-	_master_instance.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
-	_master_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-
-	# Receive shadows YES, cast shadows NO (per audit fix #6 / reviewer addendum D).
-	# Casting shadows from a flat camera-facing quad would produce rectangular
-	# billboard shadows on the terrain at 500m+ — worse than the original "flat
-	# lighting" problem. The shader render_mode no longer has `shadows_disabled`,
-	# so receive is on; this property turns off cast.
-	_master_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-	add_child(_master_instance)
+	_page_container = Node3D.new()
+	_page_container.name = "ImpostorPages"
+	add_child(_page_container)
 
 
 func _setup_billboard_material() -> void:
@@ -316,39 +379,30 @@ func _setup_billboard_material() -> void:
 
 	_billboard_material = ShaderMaterial.new()
 	_billboard_material.shader = shader
-	_billboard_material.set_shader_parameter("atlas_columns", 4)
-	_billboard_material.set_shader_parameter("atlas_rows", 4)
 
 	# Create initial empty texture arrays (albedo + normal)
-	var default_img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
+	var default_img := Image.create(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, false, Image.FORMAT_RGBA8)
 	default_img.fill(Color(0, 0, 0, 0))
 	var default_array := Texture2DArray.new()
 	default_array.create_from_images([default_img])
 	_billboard_material.set_shader_parameter("texture_atlas", default_array)
 
 	# Normal atlas: default to up-facing normal (0.5, 1.0, 0.5), zero depth
-	var default_normal_img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
+	var default_normal_img := Image.create(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, false, Image.FORMAT_RGBA8)
 	default_normal_img.fill(Color(0.5, 1.0, 0.5, 0.0))
 	var default_normal_array := Texture2DArray.new()
 	default_normal_array.create_from_images([default_normal_img])
 	_billboard_material.set_shader_parameter("normal_atlas", default_normal_array)
 
-	# Phase 5 (2026-04-17): impostor fade-in centered on FAR_START (1km post-phase-5),
-	# matching the engine visibility_range_begin below. Was MID_END (500m) before
-	# the pipeline pushed impostors out to 1km.
-	_billboard_material.set_shader_parameter("fade_distance", DU.FAR_START)
+	# Keep shader fade and engine visibility in lockstep. NativeStreamingManager
+	# clamps this to MID_END for the current fallback policy.
+	_billboard_material.set_shader_parameter("fade_distance", DU.MID_END)
 	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN_LOD3_FAR)
 	_billboard_material.set_shader_parameter("debug_mode", false)
 
-	# Set material on both the mesh surface AND as override (belt and suspenders)
-	# This ensures the shader is applied even if material_override has issues
-	var quad_mesh: QuadMesh = _master_multimesh.mesh as QuadMesh
-	if quad_mesh:
-		quad_mesh.surface_set_material(0, _billboard_material)
-		Log.debug("impostors", "Set material on QuadMesh surface 0")
-
-	_master_instance.material_override = _billboard_material
-	Log.debug("impostors", "Set material_override on MultiMeshInstance3D")
+	if _quad_mesh:
+		_quad_mesh.surface_set_material(0, _billboard_material)
+		Log.debug("impostors", "Set material on shared impostor quad")
 
 
 ## Toggle debug mode for impostor shader (shows bright magenta at any distance)
@@ -356,51 +410,39 @@ func _setup_billboard_material() -> void:
 func set_shader_debug_mode(enabled: bool) -> void:
 	Log.debug("impostors", "set_shader_debug_mode called with: %s" % enabled)
 	Log.debug("impostors", "_billboard_material is: %s" % (_billboard_material != null))
-	Log.debug("impostors", "_master_instance is: %s" % (_master_instance != null))
+	Log.debug("impostors", "page count is: %d" % _impostor_pages.size())
 
-	# Note: Currently using simplified debug shader that always shows magenta
-	# The debug_mode uniform only exists in the full shader (commented out)
 	if _billboard_material and _billboard_material.shader:
-		# Check if shader has debug_mode uniform before setting
 		var shader_code: String = _billboard_material.shader.code
 		if "debug_mode" in shader_code:
 			_billboard_material.set_shader_parameter("debug_mode", enabled)
-			var actual_value = _billboard_material.get_shader_parameter("debug_mode")
-			Log.debug("impostors", "debug_mode uniform set to: %s (verified: %s)" % [enabled, actual_value])
-		else:
-			Log.debug("impostors", "Using simplified shader (no debug_mode uniform) - always magenta")
 	else:
 		Log.error("impostors", "_billboard_material or shader is null!")
 
-	# CRITICAL FIX: visibility_range culls the MultiMesh BEFORE shader runs
-	# So we must also disable visibility_range_begin for debug mode to work at close range
-	if _master_instance:
-		if enabled:
-			# Debug mode: show at any distance
-			_master_instance.visibility_range_begin = 0.0
-			_master_instance.visibility_range_begin_margin = 0.0
-			Log.debug("impostors", "visibility_range_begin set to 0 (debug mode)")
-		else:
-			# Normal mode: restore FAR tier visibility (FAR_START − margin).
-			# Phase 5: default is now 980m (was 480m) since FAR_START moved
-			# from 500m → 1000m.
-			_master_instance.visibility_range_begin = DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR
-			_master_instance.visibility_range_begin_margin = DU.FADE_MARGIN_LOD3_FAR
-			Log.debug("impostors", "visibility_range_begin restored to %.0fm" % [DU.FAR_START - DU.FADE_MARGIN_LOD3_FAR])
+	if enabled:
+		for page: ImpostorPage in _impostor_pages.values():
+			page.instance.visibility_range_begin = 0.0
+			page.instance.visibility_range_begin_margin = 0.0
+	else:
+		_apply_visibility_ranges_to_pages()
 
 	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (FAR tier)"))
 
 
 ## Adjust impostor visibility_range_begin to match the active tier layout.
-## When HLOD is active (300-1000m), impostors should start at HLOD_END.
-## When HLOD is off, impostors start at MID_END (default).
+## Default FAR fallback starts at MID_END. Individual pages can move to
+## HLOD_END only when active HLOD coverage proves every impostor in that page.
 func set_visibility_range_begin(begin_distance: float, fade_margin: float = DU.FADE_MARGIN_RENDER_FAR) -> void:
-	if not _master_instance:
-		return
-	_master_instance.visibility_range_begin = begin_distance - fade_margin
-	_master_instance.visibility_range_begin_margin = fade_margin
+	_visibility_begin_distance = begin_distance
+	_visibility_fade_margin = fade_margin
+	_apply_visibility_ranges_to_pages()
 	Log.info("impostors", "visibility_range_begin set to %.0fm (fade margin %.0fm)" % [
 		begin_distance - fade_margin, fade_margin])
+
+
+func set_hlod_covered_ref_nums(covered_ref_nums: Dictionary) -> void:
+	_hlod_covered_ref_nums = covered_ref_nums.duplicate()
+	_apply_visibility_ranges_to_pages()
 
 #endregion
 
@@ -408,21 +450,20 @@ func set_visibility_range_begin(begin_distance: float, fade_margin: float = DU.F
 #region Octahedral Billboard Shader (Lit with Normal Maps)
 
 func _get_octahedral_shader_code() -> String:
-	# Lit billboard impostor shader. Two variants, per-instance via
+	# Lit billboard impostor shader. v6-only projection, per-instance via
 	# INSTANCE_CUSTOM.w:
-	#   0.0 = Variant A — legacy v4 azimuthal 16-frame (4x4, Y-only)
-	#   1.0 = Variant B — v5 hemi octahedral tri-sample (8x8)
-	#   2.0 = Variant B — v5 sphere octahedral tri-sample (8x8)
+	#   1.0 = v6 hemi octahedral tri-sample (8x8)
+	#   2.0 = v6 sphere octahedral tri-sample (8x8)
 	#
 	# INSTANCE_CUSTOM: .x=albedo layer, .y=yaw rad, .z=normal layer, .w=variant
 	#
-	# Variant B addresses IMPOSTOR_REBUILD.md audit:
+	# v6 addresses IMPOSTOR_REBUILD.md audit:
 	# §2.1 true octahedral sampling, §2.3 tri-sample + renormalize,
 	# §2.4 yaw-rotated normals, §2.6 shadow receive.
 	# §2.5 parallax deferred. §2.7 NORMAL_MATRIX is read-only in 4.6 (moot
 	# since fragment overrides NORMAL from atlas).
 	#
-	# Variant B uses Brucks tri-sample blending (barycentric weights across
+	# v6 uses Brucks tri-sample blending (barycentric weights across
 	# the 3 nearest octahedral grid cells) for smooth angular transitions
 	# with no visible frame popping. Parallax deferred — add if validation
 	# shows missing depth cues.
@@ -431,12 +472,10 @@ func _get_octahedral_shader_code() -> String:
 	# visibility_range checks node position not per-instance position.
 	return """
 shader_type spatial;
-render_mode blend_mix, depth_prepass_alpha, cull_disabled;
+render_mode blend_mix, depth_prepass_alpha, cull_disabled, alpha_to_coverage;
 
 uniform sampler2DArray texture_atlas : source_color, filter_linear_mipmap;
 uniform sampler2DArray normal_atlas : filter_linear_mipmap;
-uniform int atlas_columns = 4;  // Variant A only — 4x4
-uniform int atlas_rows = 4;     // Variant A only — 4x4
 uniform float fade_distance = 500.0;
 uniform float fade_margin = 50.0;
 uniform bool debug_mode = false;
@@ -444,13 +483,14 @@ uniform bool debug_normals = false;
 uniform float impostor_roughness : hint_range(0.0, 1.0) = 0.85;
 uniform float impostor_specular : hint_range(0.0, 1.0) = 0.3;
 
-// Variant B grid size — must match impostor_baker_v3.GRID_SIZE
-const int V5_GRID_SIZE = 8;
+// v6 grid size — must match impostor_baker_v3.GRID_SIZE
+const int V6_GRID_SIZE = 8;
 
 varying flat float texture_layer;
 varying flat float normal_layer;
 varying flat float rotation_offset;
 varying flat float variant_flag;
+varying flat vec3 view_dir_world_flat;
 varying float dist_to_camera;
 
 // === Octahedral encoding (must match GDScript baker) ===
@@ -482,6 +522,13 @@ vec3 rotate_y(vec3 v, float angle) {
 	return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
 }
 
+vec2 atlas_frame_uv(vec2 local_uv, ivec2 cell, ivec2 grid) {
+	vec2 atlas_px = vec2(textureSize(texture_atlas, 0).xy);
+	vec2 frame_px = atlas_px / vec2(grid);
+	vec2 inset_uv = (local_uv * max(frame_px - vec2(2.0), vec2(1.0)) + vec2(1.0)) / atlas_px;
+	return vec2(cell) / vec2(grid) + inset_uv;
+}
+
 void vertex() {
 	texture_layer = INSTANCE_CUSTOM.x;
 	rotation_offset = INSTANCE_CUSTOM.y;
@@ -491,15 +538,15 @@ void vertex() {
 	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	vec3 impostor_center = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 	dist_to_camera = distance(camera_pos, impostor_center);
+	view_dir_world_flat = normalize(camera_pos - impostor_center);
 
-	// Y-axis billboard (face camera horizontally, keep vertical axis)
-	vec3 to_camera = camera_pos - impostor_center;
-	vec3 look_dir = normalize(vec3(to_camera.x, 0.0, to_camera.z));
-	if (length(vec2(to_camera.x, to_camera.z)) < 0.001) {
-		look_dir = vec3(0.0, 0.0, 1.0);
-	}
-	vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), look_dir));
-	vec3 up = vec3(0.0, 1.0, 0.0);
+	// Camera-plane billboard. V6 atlas selection accounts for the actual
+	// view direction; the card itself must face the camera for elevated views.
+	// Use the camera right vector directly so the atlas frame is not mirrored
+	// on the camera-facing card.
+	vec3 right = normalize(INV_VIEW_MATRIX[0].xyz);
+	vec3 up = normalize(INV_VIEW_MATRIX[1].xyz);
+	vec3 look_dir = normalize(INV_VIEW_MATRIX[2].xyz);
 
 	float scale_x = length(MODEL_MATRIX[0].xyz);
 	float scale_y = length(MODEL_MATRIX[1].xyz);
@@ -523,94 +570,73 @@ void fragment() {
 		discard;
 	}
 
-	vec3 camera_pos = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	vec3 impostor_center = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	vec3 view_dir_world = normalize(camera_pos - impostor_center);
+	vec3 view_dir_world = normalize(view_dir_world_flat);
 	bool has_normals = normal_layer >= 0.0;
-	bool is_v5 = variant_flag > 0.5;
 
-	// Tri-sample blending state (Variant B only, Variant A uses single sample)
 	vec4 tex;
 	vec4 normal_data;
 
-	if (is_v5) {
-		// === Variant B — v5 octahedral with Brucks tri-sample blending ===
-		// Reference: Ryan Brucks, "Octahedral Impostors Part 2: Triangle
-		// Blending" (shaderbits.com). Three nearest grid cells blended by
-		// barycentric weights = smooth angular transitions, no frame popping.
-		vec3 view_dir_local = rotate_y(view_dir_world, -rotation_offset);
+	// Reference: Ryan Brucks, "Octahedral Impostors Part 2: Triangle
+	// Blending" (shaderbits.com). Three nearest grid cells blended by
+	// barycentric weights = smooth angular transitions, no frame popping.
+	vec3 view_dir_local = rotate_y(view_dir_world, -rotation_offset);
 
-		vec2 oct_uv;
-		if (variant_flag > 1.5) {
-			oct_uv = oct_encode_sphere(view_dir_local);
-		} else {
-			oct_uv = oct_encode_hemi(view_dir_local);
-		}
-
-		// Continuous grid coordinate
-		vec2 grid_coord = (oct_uv * 0.5 + 0.5) * float(V5_GRID_SIZE);
-		vec2 base = floor(grid_coord);
-		vec2 f = grid_coord - base;
-
-		// The unit cell splits into two triangles along the diagonal.
-		// Determine which triangle contains the sample point.
-		ivec2 cell_a, cell_b, cell_c;
-		vec3 bary;
-
-		if (f.x + f.y > 1.0) {
-			// Lower-right triangle: vertices (1,0), (0,1), (1,1)
-			cell_a = ivec2(base) + ivec2(1, 0);
-			cell_b = ivec2(base) + ivec2(0, 1);
-			cell_c = ivec2(base) + ivec2(1, 1);
-			vec2 g = 1.0 - f;
-			bary = vec3(g.y, g.x, 1.0 - g.x - g.y);
-		} else {
-			// Upper-left triangle: vertices (0,0), (1,0), (0,1)
-			cell_a = ivec2(base);
-			cell_b = ivec2(base) + ivec2(1, 0);
-			cell_c = ivec2(base) + ivec2(0, 1);
-			bary = vec3(1.0 - f.x - f.y, f.x, f.y);
-		}
-
-		// Clamp to grid bounds
-		ivec2 grid_max = ivec2(V5_GRID_SIZE - 1);
-		cell_a = clamp(cell_a, ivec2(0), grid_max);
-		cell_b = clamp(cell_b, ivec2(0), grid_max);
-		cell_c = clamp(cell_c, ivec2(0), grid_max);
-
-		// Sample all three cells and blend by barycentric weights
-		float inv_grid = 1.0 / float(V5_GRID_SIZE);
-		vec2 uv_a = (vec2(cell_a) + UV) * inv_grid;
-		vec2 uv_b = (vec2(cell_b) + UV) * inv_grid;
-		vec2 uv_c = (vec2(cell_c) + UV) * inv_grid;
-
-		vec4 tex_a = texture(texture_atlas, vec3(uv_a, texture_layer));
-		vec4 tex_b = texture(texture_atlas, vec3(uv_b, texture_layer));
-		vec4 tex_c = texture(texture_atlas, vec3(uv_c, texture_layer));
-		tex = tex_a * bary.x + tex_b * bary.y + tex_c * bary.z;
-
-		if (has_normals) {
-			vec4 nd_a = texture(normal_atlas, vec3(uv_a, normal_layer));
-			vec4 nd_b = texture(normal_atlas, vec3(uv_b, normal_layer));
-			vec4 nd_c = texture(normal_atlas, vec3(uv_c, normal_layer));
-			normal_data = nd_a * bary.x + nd_b * bary.y + nd_c * bary.z;
-		}
+	vec2 oct_uv;
+	if (variant_flag > 1.5) {
+		oct_uv = oct_encode_sphere(view_dir_local);
 	} else {
-		// === Variant A — legacy v4 azimuthal 16-frame ===
-		float angle = atan(view_dir_world.x, view_dir_world.z) - rotation_offset;
-		float normalized_angle = (angle + PI) / (2.0 * PI);
-		int total_frames = atlas_columns * atlas_rows;
-		int frame = int(normalized_angle * float(total_frames)) % total_frames;
+		oct_uv = oct_encode_hemi(view_dir_local);
+	}
 
-		int col = frame % atlas_columns;
-		int row = frame / atlas_columns;
-		vec2 frame_size_uv = vec2(1.0 / float(atlas_columns), 1.0 / float(atlas_rows));
-		vec2 atlas_uv = vec2(float(col), float(row)) * frame_size_uv + UV * frame_size_uv;
+	// Continuous grid coordinate. Baker directions are generated at frame
+	// centers ((cell + 0.5) / N), so subtract 0.5 before the triangle
+	// lookup. Without this, exact baked views blend neighboring frames and
+	// thin silhouettes can disappear or double.
+	vec2 grid_coord = (oct_uv * 0.5 + 0.5) * float(V6_GRID_SIZE) - vec2(0.5);
+	vec2 base = floor(grid_coord);
+	vec2 f = grid_coord - base;
 
-		tex = texture(texture_atlas, vec3(atlas_uv, texture_layer));
-		if (has_normals) {
-			normal_data = texture(normal_atlas, vec3(atlas_uv, normal_layer));
-		}
+	// The unit cell splits into two triangles along the diagonal.
+	// Determine which triangle contains the sample point.
+	ivec2 cell_a, cell_b, cell_c;
+	vec3 bary;
+
+	if (f.x + f.y > 1.0) {
+		// Lower-right triangle: vertices (1,0), (0,1), (1,1)
+		cell_a = ivec2(base) + ivec2(1, 0);
+		cell_b = ivec2(base) + ivec2(0, 1);
+		cell_c = ivec2(base) + ivec2(1, 1);
+		vec2 g = 1.0 - f;
+		bary = vec3(g.y, g.x, 1.0 - g.x - g.y);
+	} else {
+		// Upper-left triangle: vertices (0,0), (1,0), (0,1)
+		cell_a = ivec2(base);
+		cell_b = ivec2(base) + ivec2(1, 0);
+		cell_c = ivec2(base) + ivec2(0, 1);
+		bary = vec3(1.0 - f.x - f.y, f.x, f.y);
+	}
+
+	// Clamp to grid bounds
+	ivec2 grid_max = ivec2(V6_GRID_SIZE - 1);
+	cell_a = clamp(cell_a, ivec2(0), grid_max);
+	cell_b = clamp(cell_b, ivec2(0), grid_max);
+	cell_c = clamp(cell_c, ivec2(0), grid_max);
+
+	// Sample all three cells and blend by barycentric weights
+	vec2 uv_a = atlas_frame_uv(UV, cell_a, ivec2(V6_GRID_SIZE, V6_GRID_SIZE));
+	vec2 uv_b = atlas_frame_uv(UV, cell_b, ivec2(V6_GRID_SIZE, V6_GRID_SIZE));
+	vec2 uv_c = atlas_frame_uv(UV, cell_c, ivec2(V6_GRID_SIZE, V6_GRID_SIZE));
+
+	vec4 tex_a = texture(texture_atlas, vec3(uv_a, texture_layer));
+	vec4 tex_b = texture(texture_atlas, vec3(uv_b, texture_layer));
+	vec4 tex_c = texture(texture_atlas, vec3(uv_c, texture_layer));
+	tex = tex_a * bary.x + tex_b * bary.y + tex_c * bary.z;
+
+	if (has_normals) {
+		vec4 nd_a = texture(normal_atlas, vec3(uv_a, normal_layer));
+		vec4 nd_b = texture(normal_atlas, vec3(uv_b, normal_layer));
+		vec4 nd_c = texture(normal_atlas, vec3(uv_c, normal_layer));
+		normal_data = nd_a * bary.x + nd_b * bary.y + nd_c * bary.z;
 	}
 
 	if (debug_mode) {
@@ -623,20 +649,16 @@ void fragment() {
 
 		ALBEDO = tex.rgb;
 		ALPHA = tex.a;
+		ALPHA_SCISSOR_THRESHOLD = 0.08;
+		ALPHA_ANTIALIASING_EDGE = 0.02;
+		ALPHA_TEXTURE_COORDINATE = UV * vec2(textureSize(texture_atlas, 0).xy);
 
 		if (has_normals) {
 			// Decode and renormalize (critical after tri-sample blending —
 			// linear interpolation of encoded normals shortens the vector)
 			vec3 baked_normal = normalize(normal_data.rgb * 2.0 - 1.0);
 
-			vec3 world_normal;
-			if (is_v5) {
-				// v5: rotate from bake-local to runtime world space
-				world_normal = rotate_y(baked_normal, rotation_offset);
-			} else {
-				// v4: already in bake-time world space, no rotation
-				world_normal = baked_normal;
-			}
+			vec3 world_normal = rotate_y(baked_normal, rotation_offset);
 
 			NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
 			ROUGHNESS = impostor_roughness;
@@ -707,13 +729,12 @@ func _load_texture_sync(hash_key: String, texture_path: String) -> void:
 		_on_texture_loaded(hash_key, image)
 	else:
 		push_warning("[NativeImpostorRenderer] Failed to load texture: %s (%s)" % [texture_path, error_string(err)])
-		# Use fallback
-		_on_texture_loaded(hash_key, _get_fallback_image())
+		_drop_pending_impostor_hash(hash_key)
 
 
 ## Submit async job to load a normal texture.
 ## `is_res` selects between async PNG decode (Image.load) and Godot
-## ResourceLoader (.res ImageTexture for v5 bakes). ResourceLoader IS
+## ResourceLoader (.res ImageTexture for v6 bakes). ResourceLoader IS
 ## thread-safe in Godot 4.6 for runtime resource files outside res://.
 func _submit_normal_load_job(hash_key: String, normal_path: String, is_res: bool = false) -> void:
 	if _job_system == null:
@@ -743,6 +764,7 @@ func _load_normal_sync(hash_key: String, normal_path: String, is_res: bool = fal
 	else:
 		if debug_enabled:
 			_debug("Failed to load normal texture: %s" % normal_path)
+		_drop_pending_impostor_hash(hash_key)
 
 
 ## Shared loader: PNG via Image.load, .res via ResourceLoader+get_image.
@@ -765,24 +787,29 @@ func _load_normal_image(normal_path: String, is_res: bool) -> Image:
 func _on_normal_loaded(hash_key: String, image: Image) -> void:
 	# Resize to standard size (256×256 matches albedo array resolution)
 	var img_copy := image.duplicate() as Image
-	if img_copy.get_size() != Vector2i(256, 256):
-		img_copy.resize(256, 256, Image.INTERPOLATE_LANCZOS)
+	if img_copy.get_size() != Vector2i(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION):
+		img_copy.resize(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, Image.INTERPOLATE_LANCZOS)
 
 	_impostor_normal_images[hash_key] = img_copy
 
 	# Add to normal texture array
 	var normal_index := _add_to_normal_array(hash_key, img_copy)
 
-	# Update existing impostors that use this hash — O(k) via reverse index
+	# Update existing impostors that use this hash via reverse index
 	if hash_key in _hash_to_impostor_ids:
+		var dirty_pages: Dictionary[Vector2i, bool] = {}
 		for id: int in _hash_to_impostor_ids[hash_key]:
 			var imp: ImpostorData = _impostors.get(id)
 			if imp:
 				imp.normal_texture_index = normal_index
-		_impostors_dirty = true
-
+				dirty_pages[imp.page_key] = true
+		for page_key: Vector2i in dirty_pages.keys():
+			_mark_page_dirty(page_key)
 	if debug_enabled:
 		_debug("Normal texture loaded for hash %s, index %d" % [hash_key, normal_index])
+
+	if hash_key in _impostor_textures:
+		_queue_ready_texture_hash(hash_key)
 
 
 ## Add image to normal texture array
@@ -798,16 +825,6 @@ func _add_to_normal_array(hash_key: String, image: Image) -> int:
 	_last_texture_add_time = Time.get_ticks_msec() / 1000.0
 	return index
 
-
-## Get or create fallback texture image (magenta/pink for visibility)
-func _get_fallback_image() -> Image:
-	if _fallback_texture == null:
-		var img := Image.create(256, 256, false, Image.FORMAT_RGBA8)
-		img.fill(Color(1.0, 0.0, 1.0, 1.0))  # Magenta
-		_fallback_texture = ImageTexture.create_from_image(img)
-		if debug_enabled:
-			_debug("Created fallback impostor texture (magenta)")
-	return _fallback_texture.get_image()
 
 #endregion
 
@@ -826,8 +843,11 @@ func _process(delta: float) -> void:
 	if not _streaming_enabled:
 		return
 
+	_texture_array_committed_this_frame = false
+
 	# Poll for completed texture loads
 	_poll_job_results()
+	_process_ready_impostor_creates()
 
 	# Phase 6 (2026-04-17): poll async texture-array rebuild. No-op when no
 	# task is in flight. When the worker completes, finalises the rebuild
@@ -853,29 +873,29 @@ func _process(delta: float) -> void:
 	# Rebuild texture arrays if needed (batched to avoid rebuilding every frame)
 	if _texture_array_dirty or _normal_array_dirty:
 		var time_since_add := current_time - _last_texture_add_time
-		if time_since_add >= TEXTURE_ARRAY_REBUILD_DELAY:
+		var time_since_rebuild := current_time - _last_texture_array_rebuild_time
+		var pending_cells_done := _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume
+		var should_rebuild := false
+		if pending_cells_done:
+			should_rebuild = time_since_add >= TEXTURE_ARRAY_REBUILD_DELAY and time_since_rebuild >= TEXTURE_ARRAY_REBUILD_DELAY
+		else:
+			should_rebuild = time_since_rebuild >= STARTUP_TEXTURE_REBUILD_INTERVAL
+		if should_rebuild:
 			_rebuild_texture_array()
-			# Schedule MultiMesh rebuild (rate-limited below)
-			_impostors_dirty = true
+			_last_texture_array_rebuild_time = current_time
 
-	# Rate-limited MultiMesh rebuild to prevent frame stalls
-	# With 70k+ impostors, rebuilding every frame destroys FPS
-	if _impostors_dirty:
-		var time_since_last_rebuild := current_time - _last_multimesh_rebuild_time
-		var time_since_last_add := current_time - _last_impostor_add_time
-
-		# Only rebuild if:
-		# 1. Enough time has passed since last rebuild (rate limit), AND
-		# 2. Either we've waited long enough after last add (debounce), OR no pending cells, AND
-		# 3. We have a meaningful number of impostors (skip tiny rebuilds during initial load)
-		var should_rebuild := time_since_last_rebuild >= MULTIMESH_REBUILD_INTERVAL
-		var done_adding := time_since_last_add >= MULTIMESH_REBUILD_DEBOUNCE or _pending_cell_index >= _pending_impostor_cells.size()
-		var has_enough := _impostors.size() >= 500 or _pending_cell_index >= _pending_impostor_cells.size()
-
-		if should_rebuild and done_adding and has_enough:
-			_rebuild_multimesh()
-			_last_multimesh_rebuild_time = current_time
-			_impostors_dirty = false
+	var texture_publish_ready := (
+		_committed_texture_array_layers > 0
+		and _committed_normal_array_layers > 0
+		and _billboard_material != null
+	)
+	if texture_publish_ready:
+		if _texture_array_committed_this_frame:
+			_stats["far_rebuild_deferred_pending"] = int(_stats.get("far_rebuild_deferred_pending", 0)) + 1
+		else:
+			_process_dirty_page_rebuilds()
+	elif _impostors_dirty:
+		_stats["far_rebuild_deferred_pending"] = int(_stats.get("far_rebuild_deferred_pending", 0)) + 1
 
 	# Periodic benchmark stats
 	_benchmark_timer += delta
@@ -884,7 +904,7 @@ func _process(delta: float) -> void:
 		var pending_count: int = maxi(0, _pending_impostor_cells.size() - _pending_cell_index)
 		Log.info("impostors", "Benchmark: %d impostors, %d tex layers, %d pending cells, mm_instances=%d" % [
 			_impostors.size(), _texture_array_size, pending_count,
-			_master_multimesh.instance_count if _master_multimesh else 0])
+			_get_uploaded_instance_count()])
 
 
 ## Process pending impostor cells progressively (time-budgeted with intra-cell resume)
@@ -908,6 +928,7 @@ func _process_pending_impostor_cells() -> void:
 			# Still not done — save resume state and bail
 			_resume_ref_index = resume_idx
 			var elapsed_usec := Time.get_ticks_usec() - start_usec
+			_record_cell_scan_stats(elapsed_usec, cells_processed)
 			Log.debug("impostors", "Resumed cell %s (ref %d), %.2f ms, %d remaining" % [
 				_resume_cell_grid, resume_idx, elapsed_usec / 1000.0,
 				_pending_impostor_cells.size() - _pending_cell_index])
@@ -920,6 +941,7 @@ func _process_pending_impostor_cells() -> void:
 
 		var grid: Vector2i = _pending_impostor_cells[_pending_cell_index]
 		_pending_cell_index += 1
+		_pending_impostor_cell_set.erase(grid)
 
 		var resume_idx := _load_impostors_from_cell_record_budgeted(grid, 0, deadline_usec)
 		if resume_idx < 0:
@@ -935,6 +957,7 @@ func _process_pending_impostor_cells() -> void:
 	# Periodic cleanup of the queue
 	if _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume:
 		_pending_impostor_cells.clear()
+		_pending_impostor_cell_set.clear()
 		_pending_cell_index = 0
 		# Queue finished — log screen-size histogram once
 		_log_screen_size_histogram()
@@ -942,8 +965,10 @@ func _process_pending_impostor_cells() -> void:
 		_pending_impostor_cells = _pending_impostor_cells.slice(_pending_cell_index)
 		_pending_cell_index = 0
 
+	var elapsed_usec := Time.get_ticks_usec() - start_usec
+	_record_cell_scan_stats(elapsed_usec, cells_processed)
+
 	if cells_processed > 0:
-		var elapsed_usec := Time.get_ticks_usec() - start_usec
 		Log.debug("impostors", "Processed %d cells in %.2f ms, %d remaining" % [
 			cells_processed, elapsed_usec / 1000.0,
 			_pending_impostor_cells.size() - _pending_cell_index])
@@ -952,30 +977,313 @@ func _process_pending_impostor_cells() -> void:
 func _poll_job_results() -> void:
 	if _job_system == null:
 		return
-	
-	var results: Array = _job_system.poll_results(10)
-	
-	for result in results:
+
+	var start_usec := Time.get_ticks_usec()
+	var processed := 0
+	while processed < JOB_RESULT_POLL_MAX_PER_FRAME:
+		if Time.get_ticks_usec() - start_usec >= JOB_RESULT_POLL_BUDGET_USEC:
+			break
+
+		var results: Array = _job_system.poll_results(1)
+		if results.is_empty():
+			break
+
+		var result = results[0]
 		if result.status != BackgroundJobSystemScript.JobStatus.COMPLETED:
+			processed += 1
 			continue
 
 		var data: Dictionary = result.result
-		if data == null or not data.get("success", false):
+		if data == null:
+			processed += 1
 			continue
 
 		var hash_key: String = data.get("hash_key", "")
 		var image: Image = data.get("image")
+		var is_normal := bool(data.get("is_normal", false))
+
+		if not hash_key.is_empty():
+			var job_key := hash_key + "_normal" if is_normal else hash_key
+			_pending_job_ids.erase(job_key)
+
+		if not data.get("success", false):
+			if not hash_key.is_empty():
+				_drop_pending_impostor_hash(hash_key)
+			processed += 1
+			continue
 
 		if hash_key.is_empty() or image == null:
+			processed += 1
 			continue
 
 		# Route to correct handler based on whether this is a normal texture
-		if data.get("is_normal", false):
-			_pending_job_ids.erase(hash_key + "_normal")
+		if is_normal:
 			_on_normal_loaded(hash_key, image)
 		else:
-			_pending_job_ids.erase(hash_key)
 			_on_texture_loaded(hash_key, image)
+
+		processed += 1
+
+	var elapsed_usec := Time.get_ticks_usec() - start_usec
+	var elapsed_ms := float(elapsed_usec) / 1000.0
+	_stats["far_job_poll_us"] = elapsed_usec
+	_stats["far_job_results_handled"] = processed
+	_stats["job_results_processed_last_frame"] = processed
+	_stats["job_result_poll_last_ms"] = elapsed_ms
+	_stats["job_result_poll_max_ms"] = maxf(float(_stats.get("job_result_poll_max_ms", 0.0)), elapsed_ms)
+
+
+func _queue_impostor_cells(cells: Array[Vector2i]) -> void:
+	for cell: Vector2i in cells:
+		if _pending_impostor_cell_set.has(cell):
+			continue
+		_pending_impostor_cells.append(cell)
+		_pending_impostor_cell_set[cell] = true
+
+
+func _queue_ready_texture_hash(hash_key: String) -> void:
+	if _ready_texture_hash_set.has(hash_key):
+		return
+	_ready_texture_hashes.append(hash_key)
+	_ready_texture_hash_set[hash_key] = true
+
+
+func _drop_pending_impostor_hash(hash_key: String) -> void:
+	_pending_impostors.erase(hash_key)
+	_ready_texture_hashes.erase(hash_key)
+	_ready_texture_hash_set.erase(hash_key)
+	_impostor_textures.erase(hash_key)
+	_impostor_normal_images.erase(hash_key)
+
+
+func _process_ready_impostor_creates() -> void:
+	if _ready_texture_hashes.is_empty():
+		_stats["far_ready_create_us"] = 0
+		_stats["far_ready_created"] = 0
+		return
+
+	var start_usec := Time.get_ticks_usec()
+	var created := 0
+	while not _ready_texture_hashes.is_empty() and created < READY_IMPOSTOR_CREATE_MAX_PER_FRAME:
+		if created > 0 and (created & 15) == 0 and Time.get_ticks_usec() - start_usec >= READY_IMPOSTOR_CREATE_BUDGET_USEC:
+			break
+
+		var hash_key := _ready_texture_hashes[0]
+		if hash_key not in _pending_impostors or (_pending_impostors[hash_key] as Array).is_empty():
+			_ready_texture_hashes.remove_at(0)
+			_ready_texture_hash_set.erase(hash_key)
+			_pending_impostors.erase(hash_key)
+			continue
+
+		var pending_list: Array = _pending_impostors[hash_key]
+		var pending: PendingImpostor = pending_list.pop_back()
+		var imp_id := _create_impostor(
+			pending.model_path,
+			pending.cell_grid,
+			pending.ref_id,
+			pending.ref_num,
+			hash_key,
+			pending.position,
+			pending.rotation,
+			pending.scale,
+			pending.texture_size,
+			pending.aabb_center
+		)
+		if imp_id >= 0 and imp_id in _impostors:
+			var normal_idx: int = _normal_index_map.get(hash_key, -1)
+			if normal_idx >= 0:
+				_impostors[imp_id].normal_texture_index = normal_idx
+			(_impostors[imp_id] as ImpostorData).variant_flag = pending.variant_flag
+		created += 1
+
+		if pending_list.is_empty():
+			_pending_impostors.erase(hash_key)
+			_ready_texture_hashes.remove_at(0)
+			_ready_texture_hash_set.erase(hash_key)
+
+	var elapsed_usec := Time.get_ticks_usec() - start_usec
+	_stats["far_ready_create_us"] = elapsed_usec
+	_stats["far_ready_created"] = created
+
+
+func _page_key_for_cell(cell_grid: Vector2i) -> Vector2i:
+	return Vector2i(
+		floori(float(cell_grid.x) / float(IMPOSTOR_PAGE_SIZE_CELLS)),
+		floori(float(cell_grid.y) / float(IMPOSTOR_PAGE_SIZE_CELLS))
+	)
+
+
+func _page_center_for_key(page_key: Vector2i) -> Vector3:
+	var origin_x := page_key.x * IMPOSTOR_PAGE_SIZE_CELLS
+	var origin_y := page_key.y * IMPOSTOR_PAGE_SIZE_CELLS
+	var center_x := (float(origin_x) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
+	var center_z := -(float(origin_y) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
+	return Vector3(center_x, 0.0, center_z)
+
+
+func _get_or_create_page(page_key: Vector2i) -> ImpostorPage:
+	if page_key in _impostor_pages:
+		return _impostor_pages[page_key]
+
+	if _page_container == null:
+		_page_container = Node3D.new()
+		_page_container.name = "ImpostorPages"
+		add_child(_page_container)
+
+	var page := ImpostorPage.new()
+	page.key = page_key
+	page.center = _page_center_for_key(page_key)
+	page.multimesh = MultiMesh.new()
+	page.multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	page.multimesh.use_custom_data = true
+	page.multimesh.mesh = _quad_mesh
+
+	page.instance = MultiMeshInstance3D.new()
+	page.instance.name = "ImpostorPage_%d_%d" % [page_key.x, page_key.y]
+	page.instance.position = page.center
+	page.instance.multimesh = page.multimesh
+	page.instance.material_override = _billboard_material
+	page.instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	page.visibility_begin_distance = _page_visibility_begin_distance(page)
+	_configure_page_visibility(page.instance, page.visibility_begin_distance)
+	_page_container.add_child(page.instance)
+
+	_impostor_pages[page_key] = page
+	_stats["far_page_count"] = _impostor_pages.size()
+	return page
+
+
+func _configure_page_visibility(instance: MultiMeshInstance3D, begin_distance: float = -1.0) -> void:
+	if begin_distance < 0.0:
+		begin_distance = _visibility_begin_distance
+	instance.visibility_range_begin = begin_distance - _visibility_fade_margin
+	instance.visibility_range_begin_margin = _visibility_fade_margin
+	instance.visibility_range_end = DU.FAR_END
+	instance.visibility_range_end_margin = DU.FADE_MARGIN_RENDER_FAR
+	instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+
+
+func _apply_visibility_ranges_to_pages() -> void:
+	for page: ImpostorPage in _impostor_pages.values():
+		page.visibility_begin_distance = _page_visibility_begin_distance(page)
+		_configure_page_visibility(page.instance, page.visibility_begin_distance)
+	if _billboard_material:
+		_billboard_material.set_shader_parameter("fade_distance", _visibility_begin_distance)
+		_billboard_material.set_shader_parameter("fade_margin", _visibility_fade_margin)
+
+
+func _page_visibility_begin_distance(page: ImpostorPage) -> float:
+	if page == null or page.impostor_ids.is_empty() or _hlod_covered_ref_nums.is_empty():
+		return _visibility_begin_distance
+	for id: int in page.impostor_ids:
+		var imp: ImpostorData = _impostors.get(id)
+		if imp == null or imp.ref_num <= 0 or not _hlod_covered_ref_nums.has(imp.ref_num):
+			return _visibility_begin_distance
+	return DU.HLOD_END
+
+
+func _mark_page_dirty(page_key: Vector2i) -> void:
+	if _dirty_page_set.has(page_key):
+		return
+	_dirty_page_keys.append(page_key)
+	_dirty_page_set[page_key] = true
+	_impostors_dirty = true
+
+
+func _mark_all_pages_dirty() -> void:
+	for page_key: Vector2i in _impostor_pages.keys():
+		_mark_page_dirty(page_key)
+
+
+func _free_page(page_key: Vector2i) -> void:
+	if page_key not in _impostor_pages:
+		return
+	var page: ImpostorPage = _impostor_pages[page_key]
+	if page.instance:
+		var parent := page.instance.get_parent()
+		page.instance.visible = false
+		page.instance.material_override = null
+		page.instance.multimesh = null
+		if parent:
+			parent.remove_child(page.instance)
+		page.instance.free()
+	if page.multimesh:
+		page.multimesh.instance_count = 0
+		page.multimesh.mesh = null
+	_impostor_pages.erase(page_key)
+	_dirty_page_keys.erase(page_key)
+	_dirty_page_set.erase(page_key)
+	_stats["far_page_count"] = _impostor_pages.size()
+
+
+func _clear_pages(free_nodes: bool = true) -> void:
+	var keys: Array = _impostor_pages.keys()
+	for page_key: Vector2i in keys:
+		if free_nodes:
+			_free_page(page_key)
+		else:
+			var page: ImpostorPage = _impostor_pages[page_key]
+			if page.multimesh:
+				page.multimesh.instance_count = 0
+			page.impostor_ids.clear()
+	if free_nodes:
+		_impostor_pages.clear()
+	_dirty_page_keys.clear()
+	_dirty_page_set.clear()
+	_stats["far_page_count"] = _impostor_pages.size()
+
+
+func _get_uploaded_instance_count() -> int:
+	var count := 0
+	for page: ImpostorPage in _impostor_pages.values():
+		if page.multimesh:
+			count += page.multimesh.instance_count
+	return count
+
+
+func _get_visible_page_count() -> int:
+	var count := 0
+	for page: ImpostorPage in _impostor_pages.values():
+		if page.instance and page.instance.visible:
+			count += 1
+	return count
+
+
+func _process_dirty_page_rebuilds() -> void:
+	if _dirty_page_keys.is_empty():
+		_stats["far_pages_rebuilt"] = 0
+		_stats["far_multimesh_pack_us"] = 0
+		_stats["far_multimesh_upload_us"] = 0
+		_impostors_dirty = false
+		return
+
+	var start_usec := Time.get_ticks_usec()
+	var rebuilt := 0
+	var processed := 0
+	var pack_usec := 0
+	var upload_usec := 0
+	var uploaded_instances := 0
+
+	while not _dirty_page_keys.is_empty() and processed < IMPOSTOR_PAGE_REBUILD_MAX_PER_FRAME:
+		if processed > 0 and Time.get_ticks_usec() - start_usec >= IMPOSTOR_PAGE_REBUILD_BUDGET_USEC:
+			break
+		var page_key: Vector2i = _dirty_page_keys.pop_back()
+		_dirty_page_set.erase(page_key)
+		processed += 1
+		var result: Dictionary = _rebuild_page(page_key)
+		rebuilt += int(result.get("rebuilt", 0))
+		pack_usec += int(result.get("pack_usec", 0))
+		upload_usec += int(result.get("upload_usec", 0))
+		uploaded_instances += int(result.get("instances", 0))
+
+	_stats["far_pages_rebuilt"] = rebuilt
+	_stats["far_multimesh_pack_us"] = pack_usec
+	_stats["far_multimesh_upload_us"] = upload_usec
+	_stats["far_uploaded_instances"] = uploaded_instances
+	_stats["multimesh_rebuild_count"] = int(_stats.get("multimesh_rebuild_count", 0)) + rebuilt
+	_stats["multimesh_rebuild_last_ms"] = float(Time.get_ticks_usec() - start_usec) / 1000.0
+	_stats["multimesh_rebuild_max_ms"] = maxf(float(_stats.get("multimesh_rebuild_max_ms", 0.0)), float(Time.get_ticks_usec() - start_usec) / 1000.0)
+	_impostors_dirty = not _dirty_page_keys.is_empty()
 
 #endregion
 
@@ -1018,77 +1326,94 @@ func add_impostor(
 	cell_grid: Vector2i,
 	world_position: Vector3,
 	world_rotation: Vector3 = Vector3.ZERO,
-	world_scale: Vector3 = Vector3.ONE
+	world_scale: Vector3 = Vector3.ONE,
+	ref_id: String = "",
+	ref_num: int = 0
 ) -> int:
 	# Check if this model should have an impostor
 	if impostor_candidates and not impostor_candidates.should_have_impostor(model_path):
 		_stats["skipped_not_candidate"] += 1
 		return -1
 
-	# Resolve which bake version to use. v5 (octahedral) takes priority over
-	# v4 (azimuthal) when both are present, so re-baking a single asset
-	# automatically opts it into Variant B at runtime.
-	var v5_albedo_path := ImpostorCandidatesScript.get_impostor_texture_path_v5(model_path)
-	var has_v5 := _cached_file_exists(v5_albedo_path)
-
-	var texture_path: String
-	var normal_path: String
-	var normal_is_res: bool
-	if has_v5:
-		texture_path = v5_albedo_path
-		normal_path = ImpostorCandidatesScript.get_impostor_normal_res_path_v5(model_path)
-		normal_is_res = true
-	else:
-		texture_path = ImpostorCandidatesScript.get_impostor_texture_path(model_path)
-		if not _cached_file_exists(texture_path):
-			_stats["skipped_no_texture"] += 1
-			return -1
-		normal_path = ImpostorCandidatesScript.get_impostor_normal_path(model_path)
-		normal_is_res = false
-
-	var has_normal_texture := _cached_file_exists(normal_path)
+	# Resolve which bake version to use. Runtime is intentionally strict:
+	# v6 octahedral bakes are the only accepted impostors. Older bakes are
+	# visually stale enough that drawing nothing is safer
+	# than drawing the wrong surrogate.
+	var v6_albedo_path := ImpostorCandidatesScript.get_impostor_texture_path_v6(model_path)
+	var normal_path := ImpostorCandidatesScript.get_impostor_normal_res_path_v6(model_path)
+	if not _cached_file_exists(v6_albedo_path) or not _cached_file_exists(normal_path):
+		_stats["skipped_no_texture"] += 1
+		return -1
 
 	var hash_key: String = ImpostorCandidatesScript.get_hash_key(model_path)
 
-	# Get impostor metadata for size + variant flag
+	# Get v6 metadata for size + variant flag. Missing metadata previously
+	# defaulted to a 10x10 billboard, which is exactly the kind of scale bug we
+	# should fail closed on.
 	var metadata := _get_or_load_metadata(model_path)
+	if metadata.is_empty():
+		_stats["skipped_no_texture"] += 1
+		return -1
+
 	var impostor_size := Vector2(10.0, 10.0)
-	var aabb_center_y: float = 0.0
-	var variant_flag: float = 0.0  # 0 = v4 azimuthal (default)
+	var aabb_center := Vector3.ZERO
+	var variant_flag: float = 1.0  # 1 = v6 hemi octahedral
 
-	if not metadata.is_empty():
-		var bounds: Dictionary = metadata.get("bounds", {})
-		if not bounds.is_empty():
-			impostor_size.x = bounds.get("width", 10.0)
-			impostor_size.y = bounds.get("height", 10.0)
-			var center_arr: Variant = bounds.get("center", [])
-			if center_arr is Array and (center_arr as Array).size() >= 2:
-				aabb_center_y = (center_arr as Array)[1] as float
+	var bounds: Dictionary = metadata.get("bounds", {})
+	if bounds.is_empty():
+		_stats["skipped_no_texture"] += 1
+		return -1
 
-		# v5 bake variant resolution
-		var bake_version: int = int(metadata.get("version", metadata.get("bake_version", 4)))
-		if bake_version >= 5:
-			var projection: String = str(metadata.get("projection", "hemi"))
-			variant_flag = 2.0 if projection == "sphere" else 1.0
+	var capture_size := float(bounds.get("capture_size", 0.0))
+	if capture_size > 0.0:
+		impostor_size = Vector2(capture_size, capture_size)
+	else:
+		impostor_size.x = bounds.get("width", 0.0)
+		impostor_size.y = bounds.get("height", 0.0)
+	if impostor_size.x <= 0.0 or impostor_size.y <= 0.0:
+		_stats["skipped_no_texture"] += 1
+		return -1
 
-	# If texture already loaded, create impostor immediately
-	if hash_key in _impostor_textures:
-		var existing_id := _create_impostor(model_path, cell_grid, hash_key, world_position, world_rotation, world_scale, impostor_size, aabb_center_y)
-		if existing_id >= 0 and existing_id in _impostors:
-			(_impostors[existing_id] as ImpostorData).variant_flag = variant_flag
-			_impostors_dirty = true
-		return existing_id
+	var center_arr: Variant = bounds.get("center", [])
+	if center_arr is Array and (center_arr as Array).size() >= 3:
+		var center_values := center_arr as Array
+		aabb_center = Vector3(
+			float(center_values[0]),
+			float(center_values[1]),
+			float(center_values[2])
+		)
 
-	# Create pending impostor data FIRST (before texture load which may be sync)
+	var bake_version: int = int(metadata.get("version", metadata.get("bake_version", 0)))
+	if bake_version < 6:
+		_stats["skipped_no_texture"] += 1
+		return -1
+
+	var projection: String = str(metadata.get("projection", "hemi"))
+	variant_flag = 2.0 if projection == "sphere" else 1.0
+
+	# Create pending impostor data FIRST (before texture load which may be
+	# sync). Publication is always frame-budgeted, even when the texture is
+	# already cached, so popular texture hashes cannot create thousands of
+	# impostors in one scan or job-poll frame.
 	var pending := PendingImpostor.new()
 	pending.model_path = model_path
 	pending.cell_grid = cell_grid
+	pending.ref_id = ref_id
+	pending.ref_num = ref_num
 	pending.position = world_position
 	pending.rotation = world_rotation
 	pending.scale = world_scale
 	pending.texture_size = impostor_size
-	pending.aabb_center_y = aabb_center_y
+	pending.aabb_center = aabb_center
 	pending.variant_flag = variant_flag
+
+	if hash_key in _impostor_textures:
+		if hash_key not in _pending_impostors:
+			_pending_impostors[hash_key] = []
+		(_pending_impostors[hash_key] as Array).append(pending)
+		if hash_key in _normal_index_map:
+			_queue_ready_texture_hash(hash_key)
+		return -1
 
 	# Queue for async load (or sync if texture missing)
 	var need_texture_load := false
@@ -1103,23 +1428,21 @@ func add_impostor(
 	if need_texture_load:
 		if debug_enabled:
 			var normalized := ImpostorCandidatesScript.normalize_model_path(model_path)
-			_debug("=== Impostor Texture Loading (v%s) ===" % ("5" if has_v5 else "4"))
+			_debug("=== Impostor Texture Loading (v6 strict) ===")
 			_debug("  Model path (input): %s" % model_path)
 			_debug("  Normalized path: %s" % normalized)
 			_debug("  Hash key: %s" % hash_key)
-			_debug("  Texture path: %s" % texture_path)
-			_debug("  Normal path: %s (exists: %s, .res: %s)" % [normal_path, has_normal_texture, normal_is_res])
+			_debug("  Texture path: %s" % v6_albedo_path)
+			_debug("  Normal path: %s" % normal_path)
 
 		# Try async loading first
 		if _job_system != null:
-			_submit_texture_load_job(hash_key, texture_path)
-			if has_normal_texture:
-				_submit_normal_load_job(hash_key, normal_path, normal_is_res)
+			_submit_texture_load_job(hash_key, v6_albedo_path)
+			_submit_normal_load_job(hash_key, normal_path, true)
 		else:
 			# Fallback to synchronous loading if job system failed
-			_load_texture_sync(hash_key, texture_path)
-			if has_normal_texture:
-				_load_normal_sync(hash_key, normal_path, normal_is_res)
+			_load_texture_sync(hash_key, v6_albedo_path)
+			_load_normal_sync(hash_key, normal_path, true)
 
 	return -1
 
@@ -1145,7 +1468,7 @@ func remove_impostor(impostor_id: int) -> void:
 				_hash_to_impostor_ids.erase(hash_key)
 		_impostors.erase(impostor_id)
 		_stats["total_impostors"] = _impostors.size()
-		_impostors_dirty = true  # Mark for MultiMesh rebuild
+		_mark_page_dirty(imp.page_key)
 
 
 ## Clear all impostors
@@ -1154,31 +1477,85 @@ func clear() -> void:
 	_cell_index.clear()
 	_texture_ref_counts.clear()
 	_hash_to_impostor_ids.clear()
+	_loaded_impostor_cells.clear()
 	_file_exists_cache.clear()
 	_impostor_normal_images.clear()
+	_texture_index_map.clear()
+	_normal_index_map.clear()
+	_all_array_images.clear()
+	_all_normal_images.clear()
+	_texture_array_size = 0
+	_normal_array_size = 0
+	_committed_texture_array_layers = 0
+	_committed_normal_array_layers = 0
+	_texture_array_dirty = false
+	_normal_array_dirty = false
 	_ref_id_to_model.clear()
+	_pending_impostor_cells.clear()
+	_pending_impostor_cell_set.clear()
+	_pending_cell_index = 0
+	_pending_impostors.clear()
+	_hlod_covered_ref_nums.clear()
+	_ready_texture_hashes.clear()
+	_ready_texture_hash_set.clear()
+	_pending_job_ids.clear()
 	_has_resume = false
 	_resume_cell_grid = Vector2i.ZERO
 	_resume_ref_index = 0
+	_last_center_cell = Vector2i.ZERO
+	_prev_impostor_center = Vector2i(999999, 999999)
 	_initial_pending_count = 0
 	_stats["total_impostors"] = 0
-	_impostors_dirty = true  # Mark for MultiMesh rebuild
-
-	if _master_multimesh:
-		_master_multimesh.instance_count = 0
+	_impostors_dirty = false
+	_clear_pages(true)
 
 
 ## Get statistics
 func get_stats() -> Dictionary:
 	var s := _stats.duplicate()
 	# Add dynamic stats
-	s["multimesh_instance_count"] = _master_multimesh.instance_count if _master_multimesh else 0
+	s["multimesh_instance_count"] = _get_uploaded_instance_count()
+	s["far_uploaded_instances"] = _get_uploaded_instance_count()
+	s["far_page_count"] = _impostor_pages.size()
+	s["far_dirty_page_count"] = _dirty_page_keys.size()
+	s["far_visible_page_count"] = _get_visible_page_count()
 	s["loaded_impostor_cells"] = _loaded_impostor_cells.size()
 	s["pending_texture_loads"] = _pending_job_ids.size()
 	s["pending_impostors"] = _pending_impostors.size()
+	s["pending_loads"] = get_pending_cell_count()
+	s["far_texture_rebuild_in_flight"] = _rebuild_task_id != -1
+	s["far_texture_array_dirty"] = _texture_array_dirty or _normal_array_dirty
+	s["far_multimesh_dirty"] = _impostors_dirty
+	s["far_enabled"] = _streaming_enabled and visible
+	s["far_visibility_begin_m"] = _visibility_begin_distance
+	var hlod_page_stats := _get_hlod_page_coverage_stats()
+	s["far_hlod_covered_pages"] = hlod_page_stats.get("covered_pages", 0)
+	s["far_hlod_uncovered_pages"] = hlod_page_stats.get("uncovered_pages", 0)
+	s["far_hlod_covered_impostors"] = hlod_page_stats.get("covered_impostors", 0)
+	s["far_hlod_page_overrides"] = hlod_page_stats.get("page_overrides", 0)
 	s["process_enabled"] = is_processing()
 	s["has_candidates"] = impostor_candidates != null
 	return s
+
+
+func _get_hlod_page_coverage_stats() -> Dictionary:
+	var covered_pages := 0
+	var uncovered_pages := 0
+	var covered_impostors := 0
+	var page_overrides := 0
+	for page: ImpostorPage in _impostor_pages.values():
+		if is_equal_approx(page.visibility_begin_distance, DU.HLOD_END):
+			covered_pages += 1
+			page_overrides += 1
+			covered_impostors += page.impostor_ids.size()
+		else:
+			uncovered_pages += 1
+	return {
+		"covered_pages": covered_pages,
+		"uncovered_pages": uncovered_pages,
+		"covered_impostors": covered_impostors,
+		"page_overrides": page_overrides,
+	}
 
 
 ## Detailed diagnostic output - call this to debug rendering issues
@@ -1186,30 +1563,16 @@ func dump_diagnostic() -> String:
 	var lines: Array[String] = []
 	lines.append("=== NativeImpostorRenderer Diagnostic ===")
 
-	# MultiMesh state
-	lines.append("\n[MultiMesh State]")
-	if _master_multimesh:
-		lines.append("  instance_count: %d" % _master_multimesh.instance_count)
-		lines.append("  visible_instance_count: %d" % _master_multimesh.visible_instance_count)
-		lines.append("  mesh: %s" % (_master_multimesh.mesh != null))
-		lines.append("  transform_format: %d" % _master_multimesh.transform_format)
-		lines.append("  use_custom_data: %s" % _master_multimesh.use_custom_data)
-	else:
-		lines.append("  ERROR: _master_multimesh is null!")
-
-	# MultiMeshInstance3D state
-	lines.append("\n[MultiMeshInstance3D State]")
-	if _master_instance:
-		lines.append("  in_tree: %s" % _master_instance.is_inside_tree())
-		lines.append("  visible: %s" % _master_instance.visible)
-		lines.append("  global_position: %s" % _master_instance.global_position)
-		lines.append("  visibility_range_begin: %.1f" % _master_instance.visibility_range_begin)
-		lines.append("  visibility_range_end: %.1f" % _master_instance.visibility_range_end)
-		lines.append("  material_override: %s" % (_master_instance.material_override != null))
-		lines.append("  cast_shadow: %d" % _master_instance.cast_shadow)
-		lines.append("  layers: %d" % _master_instance.layers)
-	else:
-		lines.append("  ERROR: _master_instance is null!")
+	# Paged MultiMesh state
+	lines.append("\n[Paged MultiMesh State]")
+	lines.append("  page_count: %d" % _impostor_pages.size())
+	lines.append("  dirty_pages: %d" % _dirty_page_keys.size())
+	lines.append("  uploaded_instances: %d" % _get_uploaded_instance_count())
+	if not _impostor_pages.is_empty():
+		var first_page: ImpostorPage = _impostor_pages.values()[0]
+		lines.append("  first_page_key: %s" % str(first_page.key))
+		lines.append("  first_page_instances: %d" % (first_page.multimesh.instance_count if first_page.multimesh else 0))
+		lines.append("  first_page_aabb: %s" % str(first_page.instance.custom_aabb if first_page.instance else AABB()))
 
 	# Material/Shader state
 	lines.append("\n[Material State]")
@@ -1217,30 +1580,20 @@ func dump_diagnostic() -> String:
 		lines.append("  shader: %s" % (_billboard_material.shader != null))
 		if _billboard_material.shader:
 			lines.append("  shader_code_length: %d chars" % _billboard_material.shader.code.length())
-			# Show first 100 chars of shader code to verify it's our shader
-			var code_preview: String = _billboard_material.shader.code.substr(0, 100).replace("\n", " ")
-			lines.append("  shader_preview: '%s...'" % code_preview)
 		lines.append("  debug_mode: %s" % _billboard_material.get_shader_parameter("debug_mode"))
 		lines.append("  fade_distance: %s" % _billboard_material.get_shader_parameter("fade_distance"))
 	else:
 		lines.append("  ERROR: _billboard_material is null!")
 
-	# Check mesh surface material
 	lines.append("\n[Mesh Surface Material]")
-	if _master_multimesh and _master_multimesh.mesh:
-		var mesh: Mesh = _master_multimesh.mesh
-		lines.append("  mesh_type: %s" % mesh.get_class())
-		lines.append("  surface_count: %d" % mesh.get_surface_count())
-		if mesh.get_surface_count() > 0:
-			var surface_mat: Material = mesh.surface_get_material(0)
+	if _quad_mesh:
+		lines.append("  mesh_type: %s" % _quad_mesh.get_class())
+		lines.append("  surface_count: %d" % _quad_mesh.get_surface_count())
+		if _quad_mesh.get_surface_count() > 0:
+			var surface_mat: Material = _quad_mesh.surface_get_material(0)
 			lines.append("  surface_0_material: %s" % (surface_mat != null))
-			if surface_mat:
-				lines.append("  surface_0_material_class: %s" % surface_mat.get_class())
-				if surface_mat is ShaderMaterial:
-					var sm: ShaderMaterial = surface_mat as ShaderMaterial
-					lines.append("  surface_0_has_shader: %s" % (sm.shader != null))
 	else:
-		lines.append("  ERROR: mesh is null!")
+		lines.append("  ERROR: shared quad mesh is null!")
 
 	# Texture array state
 	lines.append("\n[Texture Array State]")
@@ -1314,7 +1667,7 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 				for cy in range(-radius, radius + 1):
 					var lead_grid := Vector2i(lead_x, center_cell.y + cy)
 					if DU.cell_distance_squared(center_cell, lead_grid) <= radius_sq:
-						if lead_grid not in _loaded_impostor_cells and lead_grid not in _pending_impostor_cells:
+						if lead_grid not in _loaded_impostor_cells and not _pending_impostor_cell_set.has(lead_grid):
 							cells_to_load.append(lead_grid)
 							_loaded_impostor_cells[lead_grid] = true
 					var trail_grid := Vector2i(trail_x, _prev_impostor_center.y + cy)
@@ -1330,7 +1683,7 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 				for cx in range(-radius, radius + 1):
 					var lead_grid := Vector2i(center_cell.x + cx, lead_y)
 					if DU.cell_distance_squared(center_cell, lead_grid) <= radius_sq:
-						if lead_grid not in _loaded_impostor_cells and lead_grid not in _pending_impostor_cells:
+						if lead_grid not in _loaded_impostor_cells and not _pending_impostor_cell_set.has(lead_grid):
 							cells_to_load.append(lead_grid)
 							_loaded_impostor_cells[lead_grid] = true
 					var trail_grid := Vector2i(_prev_impostor_center.x + cx, trail_y)
@@ -1342,10 +1695,7 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 			_unload_impostors_in_cells(cells_to_unload)
 
 		if not cells_to_load.is_empty():
-			cells_to_load.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-				return DU.cell_distance_squared(center_cell, a) < DU.cell_distance_squared(center_cell, b)
-			)
-			_pending_impostor_cells.append_array(cells_to_load)
+			_queue_impostor_cells(cells_to_load)
 
 		Log.debug("impostors", "Differential: +%d -%d impostor cells (move:%s, scanned:%d)" % [
 			cells_to_load.size(), cells_to_unload.size(), move,
@@ -1374,15 +1724,12 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 
 		var cells_to_load: Array[Vector2i] = []
 		for grid: Vector2i in desired_cells:
-			if grid not in _loaded_impostor_cells and grid not in _pending_impostor_cells:
+			if grid not in _loaded_impostor_cells and not _pending_impostor_cell_set.has(grid):
 				cells_to_load.append(grid)
 				_loaded_impostor_cells[grid] = true
 
 		if not cells_to_load.is_empty():
-			cells_to_load.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-				return DU.cell_distance_squared(center_cell, a) < DU.cell_distance_squared(center_cell, b)
-			)
-			_pending_impostor_cells.append_array(cells_to_load)
+			_queue_impostor_cells(cells_to_load)
 			# Track initial count for progress reporting (only on first full recalc)
 			if _initial_pending_count == 0:
 				_initial_pending_count = _pending_impostor_cells.size()
@@ -1396,9 +1743,11 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 	for g: Vector2i in grids:
 		_loaded_impostor_cells.erase(g)
+		_pending_impostor_cell_set.erase(g)
 
 	# Use spatial index for O(cell_count) lookup instead of O(total_impostors)
 	var ids_to_remove: Array[int] = []
+	var dirty_pages: Dictionary[Vector2i, bool] = {}
 	for grid: Vector2i in grids:
 		if grid not in _cell_index:
 			continue
@@ -1406,6 +1755,7 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 			var imp: ImpostorData = _impostors.get(id)
 			if imp:
 				ids_to_remove.append(id)
+				dirty_pages[imp.page_key] = true
 				# Decrement texture reference count
 				var hash_key: String = imp.texture_hash
 				if hash_key in _texture_ref_counts:
@@ -1427,7 +1777,8 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 		_impostors.erase(id)
 
 	if not ids_to_remove.is_empty():
-		_impostors_dirty = true  # Mark for MultiMesh rebuild
+		for page_key: Vector2i in dirty_pages.keys():
+			_mark_page_dirty(page_key)
 
 	_stats["total_impostors"] = _impostors.size()
 	
@@ -1470,9 +1821,11 @@ func _load_impostors_from_cell_record_budgeted(grid: Vector2i, start_ref: int, d
 	# Process references starting from start_ref (supports resume)
 	var i := start_ref
 	while i < ref_count:
-		# Budget check every 16 refs to avoid Time.get_ticks_usec() overhead per-ref
-		if (i - start_ref) & 15 == 15 and Time.get_ticks_usec() >= deadline_usec:
-			return i  # Budget exceeded — return resume index
+		# The expensive units here are C# ESM lookups and first-time impostor
+		# metadata/file probes. Check the frame budget at ref granularity so a
+		# dense cell cannot run a 16-ref burst long after the deadline passed.
+		if Time.get_ticks_usec() >= deadline_usec:
+			return i
 
 		var ref = refs[i]
 		i += 1
@@ -1498,15 +1851,21 @@ func _load_impostors_from_cell_record_budgeted(grid: Vector2i, start_ref: int, d
 
 		model_count += 1
 
-		# Check if it needs an impostor
-		if impostor_candidates.should_have_impostor(model_path):
+		var should_create_impostor := impostor_candidates.should_have_impostor(model_path)
+		if Time.get_ticks_usec() >= deadline_usec:
+			return i - 1
+
+		if should_create_impostor:
 			impostor_count += 1
 			var pos := CS.vector_to_godot(ref.position)
 			var scale_vec := CS.scale_to_godot(ref.scale)
 			var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
 			var rot_euler := basis.get_euler()
 
-			add_impostor(model_path, grid, pos, rot_euler, scale_vec)
+			if Time.get_ticks_usec() >= deadline_usec:
+				return i - 1
+
+			add_impostor(model_path, grid, pos, rot_euler, scale_vec, ref_id_str, int(ref.ref_num))
 
 	if debug_enabled and (impostor_count > 0 or ref_count > 0):
 		_debug("Cell %s: %d refs (from %d), %d models, %d impostor candidates" % [grid, ref_count, start_ref, model_count, impostor_count])
@@ -1552,6 +1911,11 @@ func _log_screen_size_histogram() -> void:
 	for i in range(buckets.size()):
 		var pct: float = 100.0 * buckets[i] / maxf(1.0, float(_impostors.size()))
 		Log.info("impostors", "  %s: %d (%.1f%%)" % [bucket_names[i], buckets[i], pct])
+
+
+func _record_cell_scan_stats(elapsed_usec: int, cells_processed: int) -> void:
+	_stats["far_cell_scan_us"] = elapsed_usec
+	_stats["far_cells_processed_last_frame"] = cells_processed
 
 
 func _debug(msg: String) -> void:
@@ -1604,49 +1968,34 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 		_stats["texture_cache_size"] = _impostor_textures.size()
 		return
 
-	# Create all pending impostors waiting for this texture
-	# Check if normal texture was already loaded for this hash
-	var normal_idx: int = _normal_index_map.get(hash_key, -1)
-
 	var pending_list: Array = _pending_impostors[hash_key]
-	var created_count := pending_list.size()
-	for pending: PendingImpostor in pending_list:
-		var imp_id := _create_impostor(
-			pending.model_path,
-			pending.cell_grid,
-			hash_key,
-			pending.position,
-			pending.rotation,
-			pending.scale,
-			pending.texture_size,
-			pending.aabb_center_y
-		)
-		if imp_id >= 0 and imp_id in _impostors:
-			# Set normal index if available
-			if normal_idx >= 0:
-				_impostors[imp_id].normal_texture_index = normal_idx
-			# Propagate the bake variant flag from pending → live impostor
-			(_impostors[imp_id] as ImpostorData).variant_flag = pending.variant_flag
-	_pending_impostors.erase(hash_key)
+	var queued_count := pending_list.size()
+	if hash_key in _normal_index_map:
+		_queue_ready_texture_hash(hash_key)
 	if debug_enabled:
-		_debug("Texture loaded, created %d impostors for hash %s" % [created_count, hash_key])
+		_debug("Texture loaded, %d impostors waiting for complete v6 data for hash %s" % [queued_count, hash_key])
 
 
 func _create_impostor(
 	model_path: String,
 	cell_grid: Vector2i,
+	ref_id: String,
+	ref_num: int,
 	hash_key: String,
 	position: Vector3,
 	rotation: Vector3,
 	scale: Vector3,
 	texture_size: Vector2,
-	aabb_center_y: float
+	aabb_center: Vector3
 ) -> int:
 	var texture_index: int = _texture_index_map.get(hash_key, 0)
 
 	var impostor := ImpostorData.new()
 	impostor.id = _next_id
 	impostor.cell_grid = cell_grid
+	impostor.page_key = _page_key_for_cell(cell_grid)
+	impostor.ref_id = ref_id
+	impostor.ref_num = ref_num
 	impostor.model_path = model_path
 	impostor.texture_hash = hash_key
 	impostor.texture_index = texture_index
@@ -1654,13 +2003,15 @@ func _create_impostor(
 	impostor.rotation = rotation
 	impostor.scale = scale
 	impostor.texture_size = texture_size
-	impostor.aabb_center_y = aabb_center_y
+	impostor.aabb_center = aabb_center
 
 	_next_id += 1
 	_impostors[impostor.id] = impostor
 	_stats["total_impostors"] = _impostors.size()
-	_impostors_dirty = true  # Mark for MultiMesh rebuild (rate-limited in _process)
-	_last_impostor_add_time = Time.get_ticks_msec() / 1000.0  # For debounce
+
+	var page := _get_or_create_page(impostor.page_key)
+	page.impostor_ids.append(impostor.id)
+	_mark_page_dirty(impostor.page_key)
 
 	# Maintain spatial index for O(cell_size) unloading
 	if cell_grid not in _cell_index:
@@ -1701,8 +2052,8 @@ func _add_to_texture_array(hash_key: String, image: Image) -> int:
 
 	# Resize image to standard size (256×256 balances quality vs VRAM)
 	var img_copy := image.duplicate() as Image
-	if img_copy.get_size() != Vector2i(256, 256):
-		img_copy.resize(256, 256, Image.INTERPOLATE_LANCZOS)
+	if img_copy.get_size() != Vector2i(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION):
+		img_copy.resize(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, Image.INTERPOLATE_LANCZOS)
 
 	_all_array_images.append(img_copy)
 	_texture_array_dirty = true
@@ -1767,12 +2118,14 @@ func _compact_texture_array() -> void:
 	_all_array_images = new_images
 	_texture_index_map = new_index_map
 	_texture_array_size = new_images.size()
+	_committed_texture_array_layers = 0
 	_all_normal_images = new_normal_images
 	_normal_index_map = new_normal_index_map
 	_normal_array_size = new_normal_images.size()
+	_committed_normal_array_layers = 0
 	_texture_array_dirty = true
 	_normal_array_dirty = true
-	_impostors_dirty = true  # Need to rebuild MultiMesh with new indices
+	_mark_all_pages_dirty()
 
 	_stats["texture_array_layers"] = _texture_array_size
 	_stats["texture_cache_size"] = _impostor_textures.size()
@@ -1805,8 +2158,14 @@ func _rebuild_texture_array() -> void:
 	## Snapshot current inputs so the worker sees a stable view even if
 	## new impostors land mid-rebuild. Images are RefCounted; the snapshot
 	## is a cheap shallow copy.
-	var albedo_snapshot: Array[Image] = _all_array_images.duplicate()
-	var normal_snapshot: Array[Image] = _all_normal_images.duplicate()
+	var albedo_snapshot: Array[Image] = []
+	albedo_snapshot.assign(_all_array_images)
+	var pending_cells_done := _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume
+	if not _texture_array_dirty and _normal_array_dirty and not pending_cells_done:
+		return
+	var normal_snapshot: Array[Image] = []
+	if pending_cells_done:
+		normal_snapshot.assign(_all_normal_images)
 
 	_rebuild_task_id = WorkerThreadPool.add_task(
 		_rebuild_worker.bind(albedo_snapshot, normal_snapshot),
@@ -1884,7 +2243,12 @@ func _poll_rebuild_task() -> void:
 	## Converting + duplicating the images (the CPU half) already ran on
 	## the worker.
 	var new_array := Texture2DArray.new()
+	var albedo_upload_start := Time.get_ticks_usec()
 	var err := new_array.create_from_images(albedo_images)
+	var albedo_upload_usec := Time.get_ticks_usec() - albedo_upload_start
+	_stats["far_texture_upload_us"] = albedo_upload_usec
+	_stats["texture_array_upload_last_ms"] = float(albedo_upload_usec) / 1000.0
+	_stats["texture_array_upload_max_ms"] = maxf(float(_stats.get("texture_array_upload_max_ms", 0.0)), float(albedo_upload_usec) / 1000.0)
 	if err != OK:
 		push_error("[NativeImpostorRenderer] Failed to create texture array: %s" % error_string(err))
 		_texture_array_dirty = false
@@ -1894,92 +2258,118 @@ func _poll_rebuild_task() -> void:
 	_old_texture_array = _texture_array
 	_texture_array = new_array
 	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
-	_texture_array_dirty = false
+	_committed_texture_array_layers = albedo_images.size()
+	_texture_array_committed_this_frame = true
+	_texture_array_dirty = _all_array_images.size() > albedo_images.size()
+	_mark_all_pages_dirty()
 	Log.debug("impostors", "Rebuilt texture array with %d layers (async)" % albedo_images.size())
 
+	var normal_upload_usec := 0
 	if not normal_images.is_empty():
 		var new_normal := Texture2DArray.new()
+		var normal_upload_start := Time.get_ticks_usec()
 		err = new_normal.create_from_images(normal_images)
+		normal_upload_usec = Time.get_ticks_usec() - normal_upload_start
 		if err != OK:
 			push_error("[NativeImpostorRenderer] Failed to create normal texture array: %s" % error_string(err))
 		else:
 			_old_normal_array = _normal_texture_array
 			_normal_texture_array = new_normal
 			_billboard_material.set_shader_parameter("normal_atlas", _normal_texture_array)
+			_committed_normal_array_layers = normal_images.size()
 			Log.debug("impostors", "Rebuilt normal texture array with %d layers (async)" % normal_images.size())
-	_normal_array_dirty = false
+	_normal_array_dirty = _all_normal_images.size() > normal_images.size()
+	_stats["far_normal_upload_us"] = normal_upload_usec
+	_stats["texture_array_rebuild_count"] = int(_stats.get("texture_array_rebuild_count", 0)) + 1
 
 
-func _rebuild_multimesh() -> void:
-	var start_usec := Time.get_ticks_usec()
-	var impostor_count := _impostors.size()
+func _rebuild_page(page_key: Vector2i) -> Dictionary:
+	if page_key not in _impostor_pages:
+		return {"rebuilt": 0, "pack_usec": 0, "upload_usec": 0, "instances": 0}
 
-	if impostor_count == 0:
-		_master_multimesh.instance_count = 0
-		if debug_enabled:
-			_debug("_rebuild_multimesh: No impostors to render")
-		return
+	var page: ImpostorPage = _impostor_pages[page_key]
+	var all_live_ids: Array[int] = []
+	var live_ids: Array[int] = []
+	for id: int in page.impostor_ids:
+		if id in _impostors:
+			all_live_ids.append(id)
+			var live_imp: ImpostorData = _impostors[id]
+			var albedo_ready := live_imp.texture_index < _committed_texture_array_layers
+			var normal_ready := live_imp.normal_texture_index >= 0 and live_imp.normal_texture_index < _committed_normal_array_layers
+			if albedo_ready and normal_ready:
+				live_ids.append(id)
 
-	# Build a PackedFloat32Array and use set_buffer() for a single bulk upload
-	# instead of N * 2 individual set_instance_transform/set_instance_custom_data calls.
-	#
-	# Buffer layout per instance (TRANSFORM_3D + custom_data, no colors):
-	#   12 floats: Transform3D as 3 rows of [basis_col.x, basis_col.y, basis_col.z, origin_component]
-	#     Row 0: [basis.x.x, basis.x.y, basis.x.z, origin.x]  (column 0 + origin.x)
-	#     Row 1: [basis.y.x, basis.y.y, basis.y.z, origin.y]  (column 1 + origin.y)
-	#     Row 2: [basis.z.x, basis.z.y, basis.z.z, origin.z]  (column 2 + origin.z)
-	#   4 floats: custom_data [r, g, b, a]
-	# Total: 16 floats per instance
+	if all_live_ids.is_empty():
+		_free_page(page_key)
+		return {"rebuilt": 1, "pack_usec": 0, "upload_usec": 0, "instances": 0}
+	page.impostor_ids = all_live_ids
+
+	if live_ids.is_empty():
+		page.multimesh.instance_count = 0
+		page.multimesh.visible_instance_count = 0
+		return {"rebuilt": 0, "pack_usec": 0, "upload_usec": 0, "instances": 0}
+
 	var stride := 16
 	var buffer := PackedFloat32Array()
-	buffer.resize(impostor_count * stride)
+	buffer.resize(live_ids.size() * stride)
 
+	var pack_start_usec := Time.get_ticks_usec()
 	var offset := 0
-	for impostor_id: int in _impostors:
+	var aabb_min := Vector3.ZERO
+	var aabb_max := Vector3.ZERO
+	var has_aabb := false
+	for impostor_id: int in live_ids:
 		var impostor: ImpostorData = _impostors[impostor_id]
-
-		# Position billboard at model center (adjusted for AABB center)
-		var billboard_pos := impostor.position
-		billboard_pos.y += impostor.aabb_center_y * impostor.scale.y
-
-		# Scale based on texture size
+		var center_offset := Vector3(
+			impostor.aabb_center.x * impostor.scale.x,
+			impostor.aabb_center.y * impostor.scale.y,
+			impostor.aabb_center.z * impostor.scale.z
+		)
+		center_offset = Basis(Vector3.UP, impostor.rotation.y) * center_offset
+		var billboard_pos := impostor.position + center_offset
+		var local_pos := billboard_pos - page.center
 		var sx := impostor.texture_size.x * impostor.scale.x
 		var sy := impostor.texture_size.y * impostor.scale.y
 
-		# Transform: scaled identity basis (diagonal: sx, sy, 1.0) + origin
-		# Column 0 + origin.x
 		buffer[offset +  0] = sx
 		buffer[offset +  1] = 0.0
 		buffer[offset +  2] = 0.0
-		buffer[offset +  3] = billboard_pos.x
-		# Column 1 + origin.y
+		buffer[offset +  3] = local_pos.x
 		buffer[offset +  4] = 0.0
 		buffer[offset +  5] = sy
 		buffer[offset +  6] = 0.0
-		buffer[offset +  7] = billboard_pos.y
-		# Column 2 + origin.z
+		buffer[offset +  7] = local_pos.y
 		buffer[offset +  8] = 0.0
 		buffer[offset +  9] = 0.0
 		buffer[offset + 10] = 1.0
-		buffer[offset + 11] = billboard_pos.z
-		# Custom data: texture_index, rotation_y, normal_index, variant_flag
-		# .w (variant_flag) selects shader path:
-		#   0.0 = Variant A — legacy v4 azimuthal 16-frame
-		#   1.0 = Variant B — v5 hemi octahedral
-		#   2.0 = Variant B — v5 sphere octahedral
+		buffer[offset + 11] = local_pos.z
 		buffer[offset + 12] = float(impostor.texture_index)
 		buffer[offset + 13] = impostor.rotation.y
 		buffer[offset + 14] = float(impostor.normal_texture_index)
 		buffer[offset + 15] = impostor.variant_flag
-
 		offset += stride
 
-	_master_multimesh.instance_count = impostor_count
-	_master_multimesh.set_buffer(buffer)
+		var half_xz := maxf(1.0, sx * 0.5) + IMPOSTOR_PAGE_AABB_MARGIN
+		var half_y := maxf(1.0, sy * 0.5) + IMPOSTOR_PAGE_AABB_MARGIN
+		var imp_min := local_pos - Vector3(half_xz, half_y, half_xz)
+		var imp_max := local_pos + Vector3(half_xz, half_y, half_xz)
+		if not has_aabb:
+			aabb_min = imp_min
+			aabb_max = imp_max
+			has_aabb = true
+		else:
+			aabb_min = Vector3(minf(aabb_min.x, imp_min.x), minf(aabb_min.y, imp_min.y), minf(aabb_min.z, imp_min.z))
+			aabb_max = Vector3(maxf(aabb_max.x, imp_max.x), maxf(aabb_max.y, imp_max.y), maxf(aabb_max.z, imp_max.z))
 
-	var elapsed_usec := Time.get_ticks_usec() - start_usec
-	Log.debug("impostors", "MultiMesh rebuild: %d instances, %.2f ms (set_buffer)" % [
-		impostor_count, elapsed_usec / 1000.0])
+	var pack_usec := Time.get_ticks_usec() - pack_start_usec
+	var upload_start_usec := Time.get_ticks_usec()
+	page.multimesh.instance_count = live_ids.size()
+	page.multimesh.visible_instance_count = live_ids.size()
+	page.multimesh.set_buffer(buffer)
+	if has_aabb:
+		page.instance.custom_aabb = AABB(aabb_min, aabb_max - aabb_min)
+	var upload_usec := Time.get_ticks_usec() - upload_start_usec
+	return {"rebuilt": 1, "pack_usec": pack_usec, "upload_usec": upload_usec, "instances": live_ids.size()}
 
 
 func _get_or_load_metadata(model_path: String) -> Dictionary:
@@ -1988,15 +2378,13 @@ func _get_or_load_metadata(model_path: String) -> Dictionary:
 	if hash_key in _impostor_metadata:
 		return _impostor_metadata[hash_key]
 
-	# Prefer v5 metadata if present (octahedral bakes), otherwise fall back to
-	# v4 (legacy azimuthal bakes). Same hash key for both — only the filename
-	# suffix differs.
-	var v5_path := ImpostorCandidatesScript.get_impostor_metadata_path_v5(model_path)
-	var metadata_path := v5_path if FileAccess.file_exists(v5_path) else ImpostorCandidatesScript.get_impostor_metadata_path(model_path)
-	if not FileAccess.file_exists(metadata_path):
+	# v6-only. Do not fall back to legacy metadata; scale/projection
+	# mismatches should skip the impostor rather than render stale data.
+	var v6_path := ImpostorCandidatesScript.get_impostor_metadata_path_v6(model_path)
+	if not FileAccess.file_exists(v6_path):
 		return {}
 
-	var file := FileAccess.open(metadata_path, FileAccess.READ)
+	var file := FileAccess.open(v6_path, FileAccess.READ)
 	if not file:
 		return {}
 

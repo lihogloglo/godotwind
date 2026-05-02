@@ -19,6 +19,7 @@ class_name ExplorerPanels
 extends RefCounted
 
 const FoldablePanelScript := preload("res://src/tools/ui/foldable_panel.gd")
+const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 
 # ── Public widget references (read by world_explorer for dynamic updates) ──
 
@@ -87,6 +88,7 @@ var cirrus_thickness_slider: HSlider = null
 
 ## Debug panel widgets
 var lod_mode_btn: Button = null
+var view_distance_slider: HSlider = null
 
 
 # ── Private ──
@@ -651,8 +653,9 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 	_add_section(vbox, "View Distance")
 
 	var view_row := HBoxContainer.new()
-	var view_distance: int = _initial_state.get("view_distance", 5)
+	var view_distance: int = _initial_state.get("view_distance", StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)
 	var adjust_cb: Callable = _cb.get("adjust_view_distance", Callable())
+	var set_cb: Callable = _cb.get("set_view_distance", Callable())
 
 	var minus_btn := Button.new()
 	minus_btn.text = "-"
@@ -660,13 +663,16 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 	minus_btn.pressed.connect(func() -> void: adjust_cb.call(-1))
 	view_row.add_child(minus_btn)
 
-	var dist_label := Label.new()
-	dist_label.name = "DistLabel"
-	dist_label.text = "%d cells" % view_distance
-	dist_label.add_theme_font_size_override("font_size", 11)
-	dist_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	dist_label.custom_minimum_size.x = 70
-	view_row.add_child(dist_label)
+	view_distance_slider = HSlider.new()
+	view_distance_slider.name = "ViewDistanceSlider"
+	view_distance_slider.min_value = StreamingConfig.MIN_LOAD_RADIUS_CELLS
+	view_distance_slider.max_value = StreamingConfig.MAX_LOAD_RADIUS_CELLS
+	view_distance_slider.step = 1.0
+	view_distance_slider.value = StreamingConfig.clamp_load_radius_cells(view_distance)
+	view_distance_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	view_distance_slider.custom_minimum_size.x = 120
+	view_distance_slider.value_changed.connect(func(value: float) -> void: set_cb.call(value))
+	view_row.add_child(view_distance_slider)
 
 	var plus_btn := Button.new()
 	plus_btn.text = "+"
@@ -675,6 +681,12 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 	view_row.add_child(plus_btn)
 
 	vbox.add_child(view_row)
+
+	var dist_label := Label.new()
+	dist_label.name = "DistLabel"
+	dist_label.text = "%d cells" % view_distance
+	dist_label.add_theme_font_size_override("font_size", 11)
+	vbox.add_child(dist_label)
 
 	# Quick teleport buttons
 	_add_section(vbox, "Quick Teleport")

@@ -54,6 +54,18 @@ func test_static_publish_spike_field_fails_gate() -> void:
 	runner.free()
 
 
+func test_far_cell_scan_spike_field_fails_gate() -> void:
+	var runner := StreamingStressRunnerScript.new()
+	var summary := _base_summary()
+	summary["max_far_cell_scan_ms"] = BenchmarkThresholdsScript.SPIKE_FRAME_MS + 0.25
+	var reasons: Array[String] = runner._collect_gate_failure_reasons(
+		summary,
+		{"reasons": [], "unverified": false}
+	)
+	assert_bool(_has_reason_prefix(reasons, "max_far_cell_scan_ms:")).is_true()
+	runner.free()
+
+
 func test_absent_optional_spike_fields_do_not_fail_gate() -> void:
 	var runner := StreamingStressRunnerScript.new()
 	var reasons: Array[String] = runner._collect_gate_failure_reasons(
@@ -70,6 +82,20 @@ func test_thresholds_keep_legacy_symbols_with_bible_values() -> void:
 	assert_float(BenchmarkThresholdsScript.STREAMING_PUBLISH_BUDGET_MS).is_equal_approx(1.0, 0.001)
 	assert_float(BenchmarkThresholdsScript.RENDER_BUDGET_MS).is_equal_approx(3.5, 0.001)
 	assert_float(BenchmarkThresholdsScript.BLOCKING_FRAME_MS).is_equal_approx(50.0, 0.001)
+
+
+func test_landscape_spiral_offsets_cover_square_without_duplicates() -> void:
+	var runner := StreamingStressRunnerScript.new()
+	var offsets: Array[Vector2i] = runner._build_spiral_offsets(2)
+	var seen := {}
+	for offset: Vector2i in offsets:
+		seen[offset] = true
+	assert_bool(offsets[0] == Vector2i.ZERO).is_true()
+	assert_int(offsets.size()).is_equal(25)
+	assert_int(seen.size()).is_equal(25)
+	assert_bool(seen.has(Vector2i(2, 2))).is_true()
+	assert_bool(seen.has(Vector2i(-2, -2))).is_true()
+	runner.free()
 
 
 func _base_summary() -> Dictionary:

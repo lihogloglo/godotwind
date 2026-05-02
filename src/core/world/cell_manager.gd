@@ -1078,7 +1078,7 @@ func set_background_processor(processor: Node) -> void:
 ## Check if there's capacity for more async requests
 ## Use this before calling request_exterior_cell_async to avoid fallback to sync
 func has_async_capacity() -> bool:
-	return _background_processor != null and _async_requests.size() < MAX_ASYNC_REQUESTS
+	return _background_processor != null and _get_active_async_load_slot_count() < MAX_ASYNC_REQUESTS
 
 
 ## Set the interior_priority flag on all in-flight instantiation entries for
@@ -1108,7 +1108,38 @@ func force_queue_resort() -> void:
 func get_async_slots_available() -> int:
 	if not _background_processor:
 		return 0
-	return maxi(0, MAX_ASYNC_REQUESTS - _async_requests.size())
+	return maxi(0, MAX_ASYNC_REQUESTS - _get_active_async_load_slot_count())
+
+
+func _get_active_async_load_slot_count() -> int:
+	var count := 0
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request == null:
+			continue
+		if not _is_request_visual_playable(request):
+			count += 1
+	return count
+
+
+func _is_request_visual_playable(request: AsyncCellRequest) -> bool:
+	if request == null:
+		return true
+	if request.completed:
+		return true
+	if not is_instance_valid(request.cell_node):
+		return false
+	if not request.classification_complete:
+		return false
+	if not request.pending_parses.is_empty():
+		return false
+	if _get_pending_model_load_count_for_request(request) > 0:
+		return false
+	if request.payload != null and request.payload.get_static_prepare_queue_size() > 0:
+		return false
+	if not request.references_to_process.is_empty():
+		return false
+	return true
 
 
 func _should_prepare_static_ref(
@@ -1615,8 +1646,10 @@ func request_exterior_cell_async(x: int, y: int, profile: LoadProfile = null) ->
 			_stats["_warned_no_processor"] = true
 		return -1
 
-	# Check concurrent request limit - don't warn, caller should check has_async_capacity()
-	if _async_requests.size() >= MAX_ASYNC_REQUESTS:
+	# Check concurrent load-slot limit. Resident playable cells may keep an
+	# AsyncCellRequest alive for deferred interactives, but they must not block
+	# the loader from filling the rest of the selected streaming radius.
+	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
 		return -1
 
 	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
@@ -1646,8 +1679,10 @@ func request_cell_async(cell_name: String, profile: LoadProfile = null) -> int:
 			_stats["_warned_no_processor"] = true
 		return -1
 
-	# Check concurrent request limit - don't warn, caller should check has_async_capacity()
-	if _async_requests.size() >= MAX_ASYNC_REQUESTS:
+	# Check concurrent load-slot limit. Resident playable cells may keep an
+	# AsyncCellRequest alive for deferred interactives, but they must not block
+	# the loader from filling the rest of the selected streaming radius.
+	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
 		return -1
 
 	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
@@ -1682,23 +1717,7 @@ func is_async_visual_playable(request_id: int) -> bool:
 	if request_id not in _async_requests:
 		return true  # Completed/erased requests are no longer async blockers.
 	var request: AsyncCellRequest = _async_requests.get(request_id)
-	if request == null:
-		return true
-	if request.completed:
-		return true
-	if not is_instance_valid(request.cell_node):
-		return false
-	if not request.classification_complete:
-		return false
-	if not request.pending_parses.is_empty():
-		return false
-	if _get_pending_model_load_count_for_request(request) > 0:
-		return false
-	if request.payload != null and request.payload.get_static_prepare_queue_size() > 0:
-		return false
-	if not request.references_to_process.is_empty():
-		return false
-	return true
+	return _is_request_visual_playable(request)
 
 
 ## Check if an async request has failed (some models couldn't be parsed)
@@ -3698,14 +3717,22 @@ func _record_lifecycle_event(event_name: String, grid: Vector2i, detail: String 
 func get_loading_stats() -> Dictionary:
 	var payloads := 0
 	var pinned_resources := 0
+	var pending_model_loads := 0
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 		if request != null and request.payload != null:
 			payloads += 1
 			pinned_resources += int(request.payload.stats.get("pinned_resources", 0))
+		if request != null:
+			pending_model_loads += _get_pending_model_load_count_for_request(request)
+	var pending_conversions := maxi(0, _pending_conversions.size() - _pending_conversion_index)
 	return {
 		"instantiation_queue_size": _instantiation_queue.size() + _pending_child_attaches.size(),
 		"pending_child_attaches": _pending_child_attaches.size(),
+		"active_async_load_slots": _get_active_async_load_slot_count(),
+		"resident_async_requests": _async_requests.size(),
+		"pending_conversions": pending_conversions,
+		"pending_disk_loads": get_pending_disk_load_count() + pending_model_loads,
 		"static_prepare_queue": _get_static_prepare_queue_size(),
 		"cell_payloads": payloads,
 		"cell_payload_pinned_resources": pinned_resources,

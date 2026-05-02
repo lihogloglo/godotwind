@@ -515,11 +515,14 @@ func _cmd_mid_batch_stats(_args: Dictionary) -> String:
 		return "MID-tier static renderer not available"
 
 	var stats: Dictionary = _streaming_manager._static_renderer.get_stats()
-	var output := "MID-Tier Static Renderer Stats (per-instance RS visibility_range):\n"
+	var output := "MID-Tier Static Renderer Stats (cell-bucket RS visibility_range):\n"
 	output += "  Mesh types: %d\n" % stats.get("mesh_types", 0)
 	output += "  Total instances: %d\n" % stats.get("total_instances", 0)
 	output += "  Visible instances: %d\n" % stats.get("visible_instances", 0)
-	output += "  LOD RS instances: %d\n" % stats.get("lod_instances", 0)
+	output += "  Cell buckets: %d\n" % stats.get("cell_buckets", 0)
+	output += "  Bucket draw groups: %d\n" % stats.get("bucket_draw_groups", 0)
+	output += "  Bucket RS instances: %d\n" % stats.get("bucket_rs_instances", 0)
+	output += "  Bucket source refs: %d\n" % stats.get("bucket_instances", 0)
 	return output
 
 
@@ -596,7 +599,16 @@ func _cmd_streaming_diag(_args: Dictionary) -> String:
 	var s: Dictionary = _streaming_manager.get_stats()
 	var output := "=== STREAMING PIPELINE DIAGNOSTIC ===\n"
 	output += "Camera cell: %s\n" % str(s.get("camera_cell", "?"))
-	output += "Loaded cells: %d\n" % s.get("loaded_cells", 0)
+	output += "Load radius: %d cells (desired %d, theoretical %d)\n" % [
+		s.get("load_radius_cells", 0),
+		s.get("desired_cell_count", s.get("target_cell_count", 0)),
+		s.get("target_cell_count", 0),
+	]
+	output += "Cells ready/resident/loading: %d/%d/%d\n" % [
+		s.get("visual_ready_cells", s.get("loaded_cells", 0)),
+		s.get("resident_cell_containers", s.get("loaded_cells", 0)),
+		s.get("loading_cells", 0),
+	]
 	output += "Total objects: %d\n" % s.get("total_objects", 0)
 	output += "Frame budget: %.1fms\n" % s.get("frame_budget_ms", 0)
 	output += "Frame overruns: %d\n" % s.get("frame_overrun_count", 0)
@@ -605,7 +617,9 @@ func _cmd_streaming_diag(_args: Dictionary) -> String:
 	output += "  Pending conversions: %d\n" % s.get("pending_conversions", 0)
 	output += "  Pending disk loads: %d\n" % s.get("pending_disk_loads", 0)
 	output += "  Load queue: %d cells\n" % s.get("load_queue_size", 0)
-	output += "  Async requests: %d\n" % s.get("async_requests", 0)
+	output += "  Loading cells: %d\n" % s.get("loading_cells", 0)
+	output += "  Active load slots: %d\n" % s.get("active_async_load_slots", 0)
+	output += "  Resident async requests: %d\n" % s.get("resident_async_requests", s.get("async_requests", 0))
 	output += "\nTier Transitions:\n"
 	output += "  MID->NEAR promotions: %d\n" % s.get("mid_to_near_promotions", 0)
 	output += "  NEAR->MID demotions: %d\n" % s.get("near_to_mid_demotions", 0)
@@ -613,6 +627,10 @@ func _cmd_streaming_diag(_args: Dictionary) -> String:
 	output += "  RS instances: %d\n" % s.get("mid_instances", 0)
 	output += "  Visible: %d\n" % s.get("mid_visible", 0)
 	output += "  Mesh types: %d\n" % s.get("mid_mesh_types", 0)
+	output += "  Cell buckets: %d\n" % s.get("mid_cell_buckets", 0)
+	output += "  Bucket draw groups: %d\n" % s.get("mid_bucket_draw_groups", 0)
+	output += "  Bucket RS instances: %d\n" % s.get("mid_bucket_rs_instances", 0)
+	output += "  Bucket instances: %d\n" % s.get("mid_bucket_instances", 0)
 
 	# Add deferred NEAR info
 	if _streaming_manager._cell_manager:

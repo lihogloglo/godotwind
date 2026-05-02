@@ -1,6 +1,8 @@
 extends Control
 ## Settings Tool for configuring Morrowind data path, cache location, and texture packs
 
+const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
+
 @onready var current_path_label: Label = %CurrentPathLabel
 @onready var path_source_label: Label = %PathSourceLabel
 @onready var data_path_edit: LineEdit = %DataPathEdit
@@ -78,6 +80,9 @@ func _ready() -> void:
 	texture_pack_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
 
 	# Connect graphics settings signals
+	view_distance_slider.min_value = StreamingConfig.MIN_LOAD_RADIUS_CELLS
+	view_distance_slider.max_value = StreamingConfig.MAX_LOAD_RADIUS_CELLS
+	view_distance_slider.step = 1.0
 	quality_preset_option.item_selected.connect(_on_quality_preset_changed)
 	distant_rendering_check.toggled.connect(_on_distant_rendering_toggled)
 	anti_aliasing_option.item_selected.connect(_on_anti_aliasing_changed)
@@ -443,9 +448,9 @@ func _load_graphics_settings() -> void:
 	anti_aliasing_option.select(SettingsManager.get_anti_aliasing())
 	shadow_quality_option.select(SettingsManager.get_shadow_quality())
 
-	var view_dist := SettingsManager.get_view_distance_multiplier()
-	view_distance_slider.value = view_dist
-	view_distance_value.text = "%d%%" % int(view_dist * 100)
+	var view_distance := SettingsManager.get_streaming_radius_cells()
+	view_distance_slider.value = view_distance
+	view_distance_value.text = "%d cells" % view_distance
 
 	vsync_check.button_pressed = SettingsManager.get_vsync_enabled()
 	ssao_check.button_pressed = SettingsManager.get_ssao_enabled()
@@ -527,8 +532,10 @@ func _on_shadow_quality_changed(index: int) -> void:
 
 
 func _on_view_distance_changed(value: float) -> void:
-	SettingsManager.set_view_distance_multiplier(value)
-	view_distance_value.text = "%d%%" % int(value * 100)
+	var radius := StreamingConfig.clamp_load_radius_cells(int(round(value)))
+	SettingsManager.set_streaming_radius_cells(radius)
+	view_distance_slider.set_value_no_signal(radius)
+	view_distance_value.text = "%d cells" % radius
 
 
 func _on_vsync_toggled(enabled: bool) -> void:

@@ -29,9 +29,10 @@ const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
 const CellStaticBucketScript := preload("res://src/core/world/cell_static_bucket.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
-## Phase 3 world-scoped PrototypeRegistry. One MultiMesh per (mesh, material)
-## hash spans all loaded cells; add_instance routes every MID-tier static
-## through the registry. Legacy per-cell batch path was removed in step 7.
+## Parked legacy PrototypeRegistry path. It is world-scoped, which is the wrong
+## shape for a large open world because one MultiMesh is spatially indexed as
+## one object. Keep USE_PROTOTYPE_REGISTRY false unless this is rewritten into
+## spatially local buckets per the streaming/rendering bible.
 var _prototype_registry: RefCounted = null
 
 ## Registered mesh types: type_name -> MeshType
@@ -65,6 +66,8 @@ var _cell_buckets: Dictionary[Vector2i, Array] = {} # Array[CellStaticBucket]
 var _cell_bucket_hide_progress: Dictionary[Vector2i, int] = {}
 var _cell_bucket_key_index: Dictionary[String, RefCounted] = {}
 var _cell_bucket_pending_cleanup: Dictionary[String, bool] = {}
+var _hlod_covered_bucket_counts: Dictionary[String, int] = {}
+var _hlod_bucket_visibility_end: float = DU.HLOD_START
 var _descriptor_build_tasks: Dictionary[String, DescriptorBuildTask] = {}
 
 ## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
@@ -73,10 +76,10 @@ var _descriptor_build_tasks: Dictionary[String, DescriptorBuildTask] = {}
 ## every slot uses this single value.
 const REGISTRY_FADE_DURATION_S: float = 0.3
 const DESCRIPTOR_BUILD_BUDGET_USEC: int = 1000
-## Safety gate for the world-scoped PrototypeRegistry/MultiMesh path. Godot 4.6
-## native crashes are still occurring during first-load static publish in this
-## path. While NEAR stability is the priority, statics use the existing
-## per-submesh RenderingServer instance fallback instead.
+## Safety gate for the parked world-scoped PrototypeRegistry/MultiMesh path.
+## The active static path is the per-cell CellStaticBucket path above. Re-enable
+## only after replacing the registry with spatially local buckets and re-running
+## the bible's MID/HLOD/FAR verification gates.
 const USE_PROTOTYPE_REGISTRY: bool = false
 
 
@@ -105,6 +108,8 @@ var _stats: Dictionary = {
 	"bucket_instances": 0,
 	"bucket_draw_groups": 0,
 	"bucket_rs_instances": 0,
+	"hlod_bucket_overrides": 0,
+	"hlod_bucket_override_refs": 0,
 }
 
 
@@ -203,12 +208,10 @@ class InstanceData:
 	var visible: bool = true
 	var promoted: bool = false  ## True when a NEAR Node3D exists for this instance
 	var cell_grid: Vector2i    ## Which cell this belongs to
-	## Phase 3 registry routing. When >= 0, this instance's slots live inside
-	## the world-scoped PrototypeRegistry. sub_rids is empty; visibility /
-	## promotion / removal route through the registry instead of RS RIDs.
-	## The legacy unbatched path (step-7 removed) used sub_rids + instance_rid;
-	## those fields stay on the struct for debug-tool compat but are always
-	## the default values (empty / RID()) under the registry-only codepath.
+	## Parked PrototypeRegistry routing. When >= 0, this instance's slots live
+	## inside the legacy world-scoped registry. The active cell-bucket path does
+	## not allocate InstanceData for every static draw; these fields remain for
+	## legacy add_instance/debug-tool compatibility.
 	var registry_id: int = -1
 	## Metadata for MID→NEAR promotion (Phase 5b)
 	var model_path: String     ## Original model path for prototype lookup
@@ -985,7 +988,7 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 		mesh_type.sub_meshes,
 		transforms,
 		_scenario,
-		visibility_range_end,
+		_get_bucket_visibility_range_end(bucket_key, transforms.size()),
 		_globally_visible,
 		resource_handle
 	))
@@ -1010,14 +1013,72 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 	return bucket
 
 
+func set_visibility_range_end(p_visibility_range_end: float) -> void:
+	visibility_range_end = p_visibility_range_end
+	for buckets: Array in _cell_buckets.values():
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket != null and not bool(bucket.get("frozen")) and bucket.has_method("set_visibility_range_end"):
+				var bucket_key := str(bucket.get("bucket_key"))
+				var bucket_count := int(bucket.get("instance_count"))
+				bucket.call("set_visibility_range_end", _get_bucket_visibility_range_end(bucket_key, bucket_count))
+
+
+## Apply exact HLOD coverage to active MID buckets. Fully covered buckets cap at
+## the HLOD handoff; partial/uncovered buckets keep the normal MID fallback end.
+func set_hlod_covered_bucket_counts(bucket_counts: Dictionary, covered_range_end: float = DU.HLOD_START) -> void:
+	_hlod_covered_bucket_counts.clear()
+	for key_value: Variant in bucket_counts.keys():
+		var bucket_key := str(key_value)
+		var count := int(bucket_counts[key_value])
+		if count > 0:
+			_hlod_covered_bucket_counts[bucket_key] = count
+	_hlod_bucket_visibility_end = maxf(0.0, covered_range_end)
+	_apply_bucket_visibility_ranges()
+
+
+func _apply_bucket_visibility_ranges() -> void:
+	for buckets: Array in _cell_buckets.values():
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket == null or bool(bucket.get("frozen")) or not bucket.has_method("set_visibility_range_end"):
+				continue
+			var bucket_key := str(bucket.get("bucket_key"))
+			var bucket_count := int(bucket.get("instance_count"))
+			var target_end := _get_bucket_visibility_range_end(bucket_key, bucket_count)
+			bucket.call("set_visibility_range_end", target_end)
+	_refresh_hlod_bucket_override_stats()
+
+
+func _refresh_hlod_bucket_override_stats() -> void:
+	var override_count := 0
+	var override_refs := 0
+	for buckets: Array in _cell_buckets.values():
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket == null or bool(bucket.get("frozen")):
+				continue
+			var bucket_key := str(bucket.get("bucket_key"))
+			var bucket_count := int(bucket.get("instance_count"))
+			if _get_bucket_visibility_range_end(bucket_key, bucket_count) < visibility_range_end:
+				override_count += 1
+				override_refs += bucket_count
+	_stats["hlod_bucket_overrides"] = override_count
+	_stats["hlod_bucket_override_refs"] = override_refs
+
+
+func _get_bucket_visibility_range_end(bucket_key: String, bucket_count: int) -> float:
+	if bucket_count > 0 and int(_hlod_covered_bucket_counts.get(bucket_key, 0)) >= bucket_count:
+		return minf(visibility_range_end, _hlod_bucket_visibility_end)
+	return visibility_range_end
+
+
 func _make_cell_bucket_key(cell_grid: Vector2i, payload_key: String) -> String:
 	return "%d,%d:%s" % [cell_grid.x, cell_grid.y, payload_key]
 
 
 # PHASE_E:MAIN_ONLY
 func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
-	if not USE_PROTOTYPE_REGISTRY:
-		return -1
 	if precomp == null:
 		return -1
 	var type_name := precomp.type_name
@@ -1044,39 +1105,71 @@ func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
 	# Registry path — always used for prototypes registered via
 	# register_from_prototype. `sub_meshes` empty ⇒ mismatched registration
 	# state (rare) ⇒ bail; legacy path wouldn't use precomputed data anyway.
-	if mesh_type.sub_meshes.is_empty():
-		return -1
-
-	var registry := _ensure_registry()
-	if registry == null:
+	if USE_PROTOTYPE_REGISTRY and mesh_type.sub_meshes.is_empty():
 		return -1
 
 	# Build the registry input, feeding pre-combined world transforms (worker
 	# already computed `world * local`). `local_transform` is still stored so
 	# future set_instance_transform re-compositions work.
-	var subs: Array = []
-	subs.resize(mesh_type.sub_meshes.size())
-	for i in range(mesh_type.sub_meshes.size()):
-		var entry: SubMeshEntry = mesh_type.sub_meshes[i]
-		var world_xf: Transform3D = precomp.sub_mesh_combined_xforms[i] \
-			if i < precomp.sub_mesh_combined_xforms.size() else precomp.world_transform
-		subs[i] = {
-			"mesh": entry.mesh_resource,
-			"material": entry.material_resource,
-			"world_transform": world_xf,
-			"local_transform": entry.local_transform,
-		}
+	if USE_PROTOTYPE_REGISTRY:
+		var registry := _ensure_registry()
+		if registry == null:
+			return -1
+		var subs: Array = []
+		subs.resize(mesh_type.sub_meshes.size())
+		for i in range(mesh_type.sub_meshes.size()):
+			var entry: SubMeshEntry = mesh_type.sub_meshes[i]
+			var world_xf: Transform3D = precomp.sub_mesh_combined_xforms[i] \
+				if i < precomp.sub_mesh_combined_xforms.size() else precomp.world_transform
+			subs[i] = {
+				"mesh": entry.mesh_resource,
+				"material": entry.material_resource,
+				"world_transform": world_xf,
+				"local_transform": entry.local_transform,
+			}
 
-	registry.add_instance_precombined(
-		id, subs,
-		precomp.custom_data.r,  # spawn_time packed into custom_data.r
-		precomp.custom_data.g,  # fade_duration packed into custom_data.g
-	)
+		registry.add_instance_precombined(
+			id, subs,
+			precomp.custom_data.r,  # spawn_time packed into custom_data.r
+			precomp.custom_data.g,  # fade_duration packed into custom_data.g
+		)
 
-	if not _globally_visible:
-		registry.hide_instance(id)
-		data.visible = false
-	data.registry_id = id
+		if not _globally_visible:
+			registry.hide_instance(id)
+			data.visible = false
+		data.registry_id = id
+	else:
+		var sub_entries := mesh_type.sub_meshes
+		if sub_entries.is_empty():
+			var legacy_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
+				else mesh_type.mesh_rid
+			var legacy_material_rid: RID = mesh_type.material_resource.get_rid() if mesh_type.material_resource \
+				else mesh_type.material_rid
+			var rid := _create_rs_instance(legacy_mesh_rid, legacy_material_rid,
+				mesh_type.surface_materials, precomp.world_transform, mesh_type.aabb)
+			if rid.is_valid():
+				data.sub_rids.append(rid)
+			data.instance_rid = rid
+		else:
+			for i in range(sub_entries.size()):
+				var entry: SubMeshEntry = sub_entries[i]
+				if entry.mesh_resource == null:
+					continue
+				var child_xform: Transform3D = precomp.sub_mesh_combined_xforms[i] \
+					if i < precomp.sub_mesh_combined_xforms.size() \
+					else precomp.world_transform * entry.local_transform
+				var material_rid: RID = entry.material_resource.get_rid() if entry.material_resource else RID()
+				var rid := _create_rs_instance(entry.mesh_resource.get_rid(), material_rid,
+					entry.surface_materials, child_xform, entry.mesh_resource.get_aabb())
+				if rid.is_valid():
+					data.sub_rids.append(rid)
+			if not data.sub_rids.is_empty():
+				data.instance_rid = data.sub_rids[0]
+		if not _globally_visible:
+			for rid: RID in data.sub_rids:
+				if rid.is_valid():
+					RenderingServer.instance_set_visible(rid, false)
+			data.visible = false
 	_instances[id] = data
 	mesh_type.instance_count += 1
 	_stats["total_instances"] += 1
@@ -1092,14 +1185,12 @@ func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
 ## Create a single RS instance with visibility_range + LOD bias + material.
 ## Returns RID() on invalid mesh_rid — caller must guard against non-valid return.
 ##
-## `aabb` (optional) — caller-supplied local-space AABB for the mesh. When
-## provided, the instance's visibility_range_end is tightened per
-## DU.SCREEN_SIZE_CUTOFF_RATIO (screen-size cull replaces v1's flat shadow-off).
-## Pass the default `AABB()` (zero-size) to keep the class-wide
-## visibility_range_end (500m default, 300m with HLOD).
+## `aabb` is retained for legacy callers that still pass it for diagnostics.
+## MID ownership itself must not screen-size-cull visible geometry before the
+## tier handoff; embedded mesh LOD handles detail reduction.
 func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 		surface_materials: Array[Material], xform: Transform3D,
-		aabb: AABB = AABB()) -> RID:
+		_aabb: AABB = AABB()) -> RID:
 	# F3a (2026-04-15): defensive guard. An invalid mesh_rid reaching
 	# instance_set_base was the B1 crash vector (`Initializing already initialized
 	# RID` + `Parameter mem is null` cluster). Log once, skip cleanly.
@@ -1121,20 +1212,10 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 			if mat:
 				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
 
-	# Visibility range: scales with prototype AABB (screen-size cull) when the
-	# caller supplied an AABB, otherwise falls back to the class-wide
-	# visibility_range_end (500m default, 300m with HLOD). Screen-size cull
-	# replaces the flat shadow-off from v1 — the instance's fade kills BOTH
-	# visible and shadow draws when camera leaves its AABB by more than
-	# `cutoff`, so close-up shadows are preserved (camera inside AABB →
-	# distance=0 → no fade). See DU.SCREEN_SIZE_CUTOFF_RATIO for formula.
+	# MID is the safety fallback through its configured range. Do not apply
+	# per-object screen-size visible culling here; small statics disappearing at
+	# 40-160m makes the 0-500m MID contract false and leaves no replacement tier.
 	var effective_end: float = visibility_range_end
-	if aabb.size.y > 0.0:
-		var max_dim: float = maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
-		effective_end = minf(
-			visibility_range_end,
-			maxf(DU.SCREEN_SIZE_MIN_CUTOFF, max_dim * DU.SCREEN_SIZE_CUTOFF_RATIO)
-		)
 	rs.instance_geometry_set_visibility_range(
 		instance_rid,
 		0.0, effective_end,
@@ -1348,12 +1429,11 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 	return [hidden, is_complete]
 
 
-## NOTE: the legacy per-cell MultiMesh batch path (batch_cell_into_multimesh,
-## _create_cell_batch, _hide_batch_slot, _show_batch_slot, _free_cell_batches,
-## _cell_batches dict, CellBatch inner class) was removed in Phase 3 step 7.
-## The world-scoped PrototypeRegistry (one MultiMesh per (mesh, material)
-## hash across all loaded cells) supersedes it entirely. See
-## docs/audit/PHASE_3_MID_MULTIMESH_DESIGN.md for the full design.
+## NOTE: the old scene-node per-cell MultiMesh batch path
+## (batch_cell_into_multimesh, _cell_batches, CellBatch) was removed. It was not
+## replaced by the parked world-scoped PrototypeRegistry for production use.
+## The active NEAR/MID static path is CellStaticBucket: per cell/payload,
+## server-direct, resource-owning, and cleanup-detached before RID free.
 
 #endregion
 
@@ -1530,6 +1610,7 @@ func clear(clear_mesh_types: bool = true) -> void:
 	for buckets: Array in detached_bucket_lists:
 		_cleanup_detached_buckets(buckets)
 	_cell_bucket_pending_cleanup.clear()
+	_hlod_covered_bucket_counts.clear()
 	_drain_descriptor_build_tasks()
 
 	if clear_mesh_types:
@@ -1558,6 +1639,8 @@ func clear(clear_mesh_types: bool = true) -> void:
 	_stats["bucket_instances"] = 0
 	_stats["bucket_draw_groups"] = 0
 	_stats["bucket_rs_instances"] = 0
+	_stats["hlod_bucket_overrides"] = 0
+	_stats["hlod_bucket_override_refs"] = 0
 
 
 func _drain_descriptor_build_tasks() -> void:
@@ -1568,16 +1651,21 @@ func _drain_descriptor_build_tasks() -> void:
 
 #region Queries
 
-## Get statistics, including PrototypeRegistry batch breakdown.
+## Get statistics, including active CellStaticBucket counters and parked
+## PrototypeRegistry counters.
 ##
 ## Extra fields:
-##   `registry_batches` — number of active per-prototype MultiMeshes
-##   `registry_slots`   — total live slots across all registry batches
+##   `cell_buckets`        — active spatially local static buckets
+##   `bucket_draw_groups`  — draw groups inside active buckets
+##   `bucket_rs_instances` — RS instances owned by active buckets
+##   `registry_batches`    — legacy PrototypeRegistry MultiMeshes, normally 0
+##   `registry_slots`      — legacy registry live slots, normally 0
 ##
 ## Legacy mm_batches/mm_slots/mm_cells fields are retained and set to 0 for
 ## any callers that still probe them (heartbeat log, benchmark readers) —
 ## they'll be cleaned up in a follow-up pass.
 func get_stats() -> Dictionary:
+	_refresh_hlod_bucket_override_stats()
 	var result: Dictionary = _stats.duplicate()
 	result["mm_batches"] = 0
 	result["mm_slots"] = 0

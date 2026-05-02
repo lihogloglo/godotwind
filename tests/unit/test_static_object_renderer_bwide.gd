@@ -176,3 +176,144 @@ func test_remove_cell_instances() -> void:
 	var removed := renderer.remove_cell_instances(Vector2i(1, 1))
 	assert_that(removed).is_equal(2)
 	assert_that(int(renderer.get_stats()["total_instances"])).is_equal(1)
+
+
+func test_hlod_covered_bucket_caps_mid_range() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_hlod_bucket", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_hlod_bucket",
+		"meshes\\covered.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+
+	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\covered.nif": 1}, 300.0)
+	var stats := renderer.get_stats()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(300.0)
+	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(1)
+	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(1)
+
+	renderer.set_hlod_covered_bucket_counts({}, 300.0)
+	stats = renderer.get_stats()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(500.0)
+	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
+	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(0)
+
+
+func test_cell_bucket_uses_single_slot_multimesh_for_singleton_group() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_singleton_bucket", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_singleton_bucket",
+		"meshes\\singleton.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_int(int(bucket.call("get_draw_group_count"))).is_equal(1)
+
+	var groups: Array = bucket.get("draw_groups")
+	var group: Variant = groups[0]
+	assert_that(group.multimesh).is_not_null()
+	assert_that(group.instance_rid.is_valid()).is_true()
+	assert_int(int(group.instance_count)).is_equal(1)
+
+
+func test_partial_hlod_bucket_coverage_keeps_mid_fallback() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_hlod_partial", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_hlod_partial",
+		"meshes\\partial.nif",
+		[Transform3D.IDENTITY, Transform3D(Basis.IDENTITY, Vector3(2, 0, 0))],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+
+	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\partial.nif": 1}, 300.0)
+	var stats := renderer.get_stats()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(500.0)
+	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
+
+
+func test_cell_bucket_uses_local_multimesh_for_close_repeated_group() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_close_bucket", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_close_bucket",
+		"meshes\\close.nif",
+		[
+			Transform3D(Basis.IDENTITY, Vector3(0, 0, 0)),
+			Transform3D(Basis.IDENTITY, Vector3(2, 0, 0)),
+		],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_int(int(bucket.call("get_draw_group_count"))).is_equal(1)
+
+	var groups: Array = bucket.get("draw_groups")
+	var group: Variant = groups[0]
+	assert_that(group.multimesh).is_not_null()
+	assert_int(int(group.instance_count)).is_equal(2)
+
+
+func test_cell_bucket_splits_repeated_groups_into_spatial_clusters() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_clustered_bucket", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_clustered_bucket",
+		"meshes\\clustered.nif",
+		[
+			Transform3D(Basis.IDENTITY, Vector3(0, 0, 0)),
+			Transform3D(Basis.IDENTITY, Vector3(70, 0, 0)),
+		],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_int(int(bucket.call("get_draw_group_count"))).is_equal(2)
+
+	var stats := renderer.get_stats()
+	assert_int(int(stats["bucket_draw_groups"])).is_equal(2)
+	assert_int(int(stats["bucket_rs_instances"])).is_equal(2)
+
+	var groups: Array = bucket.get("draw_groups")
+	for group: Variant in groups:
+		assert_that(group.multimesh).is_not_null()
+		assert_int(int(group.instance_count)).is_equal(1)

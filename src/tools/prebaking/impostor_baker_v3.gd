@@ -1,8 +1,7 @@
-## ImpostorBakerV3 - Octahedral impostor baker (bake_version = 5)
+## ImpostorBakerV3 - Octahedral impostor baker (current output: bake_version = 6)
 ##
-## Rebuild of ImpostorBakerV2 per `docs/audit/IMPOSTOR_REBUILD.md`. Replaces
-## the misnamed v4 baker which was a 16-sample azimuthal billboard with no
-## elevation variation. Targets the actual 7 audit bugs, nothing more.
+## Current baker from `docs/audit/IMPOSTOR_REBUILD.md`. Produces octahedral
+## impostors with elevation-aware sampling and the v6 runtime metadata contract.
 ##
 ## Design choices:
 ## - **Octahedral direction sampling**, hemi by default (correct for the 99%
@@ -27,23 +26,23 @@
 ##   target is RGBA8; storing as RGBA16F would be a false precision claim).
 ##   BC5 / true HDR capture are follow-ups, not phase 1.
 ##
-## Output format (bake_version = 5):
-## - Albedo atlas: `<name>_<hash>_v5.png` (RGBA8 sRGB).
-## - Normal atlas: `<name>_<hash>_normal_v5.res` (ImageTexture RGBA8).
+## Output format (bake_version = 6):
+## - Albedo atlas: `<name>_<hash>_v6.png` (RGBA8 sRGB).
+## - Normal/depth atlas: `<name>_<hash>_normal_v6.res` (ImageTexture RGBA8).
 ##     RGB = world-space normal encoded [0,1], A = linear depth [0,1].
-## - Debug normal PNG: `<name>_<hash>_normal_debug_v5.png` (always written
+## - Debug normal PNG: `<name>_<hash>_normal_debug_v6.png` (always written
 ##   for visual inspection — runtime loader ignores it).
-## - Metadata JSON: `<name>_<hash>_v5.json` with:
+## - Metadata JSON: `<name>_<hash>_v6.json` with:
 ##     "projection": "hemi" | "sphere"  (per-asset)
 ##     "grid_size": 8
-##     "frame_size": 32
+##     "frame_size": per-asset tier
+##     "depth": explicit near/far/camera-distance convention for reprojection
 ##     "normal_format": "rgba8_res"
 ##     "directions": flat list of unit Vector3 per cell (row-major)
 ##
-## Runtime loader (native_impostor_renderer.gd) reads `bake_version` from
-## metadata to pick between Variant A (legacy azimuthal 16-frame) and Variant
-## B (octahedral nearest-neighbor). Variant B is phase 2 work — this file
-## only produces v5 bakes, does not touch the runtime loader.
+## Runtime loader (native_impostor_renderer.gd) accepts only v6 metadata and
+## the matching v6 albedo/normal artifacts. Older migration formats are not
+## maintained.
 class_name ImpostorBakerV3
 extends Node
 
@@ -59,7 +58,12 @@ const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candida
 ## Previous 64 px frames produced 512² atlases that the runtime downsampled
 ## to 256² anyway — wasted bake time and disk space.
 const GRID_SIZE: int = 8
-const FRAME_SIZE: int = 32
+const DEFAULT_FRAME_SIZE: int = 64
+const SMALL_FRAME_SIZE: int = 64
+const LARGE_FRAME_SIZE: int = 128
+const BAKE_VERSION: int = 6
+const CAPTURE_SETTLE_FRAMES: int = 3
+const CAPTURE_SETTLE_FPS: float = 30.0
 
 ## Patterns that opt an asset into full-sphere projection instead of hemi.
 ## Hemi (upper hemisphere only) is correct for ground-rooted assets — the
@@ -74,7 +78,7 @@ const SPHERE_OVERRIDE_PATTERNS: Array[String] = [
 ]
 
 ## Always write a debug PNG copy of the normal atlas next to the `.res` file,
-## tagged `_normal_debug_v5.png`. Visual inspection only — runtime loader
+## tagged `_normal_debug_v6.png`. Visual inspection only — runtime loader
 ## ignores it. Cheap (small file, RGBA8 PNG of an existing image).
 const DUMP_DEBUG_NORMALS: bool = true
 
@@ -105,6 +109,10 @@ signal batch_complete(total: int, success_count: int, failed_count: int)
 var _total_baked: int = 0
 var _total_failed: int = 0
 var _failed_models: Array[String] = []
+var _active_grid_size: int = GRID_SIZE
+var _active_frame_size: int = DEFAULT_FRAME_SIZE
+var _active_atlas_size: int = GRID_SIZE * DEFAULT_FRAME_SIZE
+var _active_tier_name: String = "small"
 
 
 #region Lifecycle & Setup
@@ -120,10 +128,12 @@ func _setup_rendering_viewports() -> void:
 
 	# === Albedo viewport (MSAA 4×, ambient white, transparent background) ===
 	_albedo_viewport = SubViewport.new()
-	_albedo_viewport.size = Vector2i(FRAME_SIZE, FRAME_SIZE)  # Resized per-asset
+	_albedo_viewport.size = Vector2i(DEFAULT_FRAME_SIZE, DEFAULT_FRAME_SIZE)  # Resized per-asset
 	_albedo_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	_albedo_viewport.transparent_bg = true
-	_albedo_viewport.msaa_3d = Viewport.MSAA_4X
+	_albedo_viewport.msaa_3d = Viewport.MSAA_DISABLED
+	_albedo_viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+	_albedo_viewport.use_taa = false
 	_albedo_viewport.use_hdr_2d = false
 	_albedo_viewport.own_world_3d = true
 	add_child(_albedo_viewport)
@@ -159,10 +169,12 @@ func _setup_rendering_viewports() -> void:
 	# get_image() read. MSAA disabled to prevent linear resolve averaging
 	# encoded normals across silhouette edges.
 	_normal_viewport = SubViewport.new()
-	_normal_viewport.size = Vector2i(FRAME_SIZE, FRAME_SIZE)
+	_normal_viewport.size = Vector2i(DEFAULT_FRAME_SIZE, DEFAULT_FRAME_SIZE)
 	_normal_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	_normal_viewport.transparent_bg = true
 	_normal_viewport.msaa_3d = Viewport.MSAA_DISABLED
+	_normal_viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+	_normal_viewport.use_taa = false
 	_normal_viewport.use_hdr_2d = false
 	_normal_viewport.own_world_3d = true
 	add_child(_normal_viewport)
@@ -183,7 +195,7 @@ func _setup_rendering_viewports() -> void:
 	_normal_capture_material = _create_normal_capture_material()
 
 	_is_initialized = true
-	Log.info("prebaking", "ImpostorBakerV3 initialized (bake_version=5, octahedral, 2-viewport)")
+	Log.info("prebaking", "ImpostorBakerV3 initialized (bake_version=%d, octahedral, 2-viewport)" % BAKE_VERSION)
 
 
 ## Normal-capture shader: writes world-space normal to RGB, view-space linear
@@ -193,7 +205,7 @@ func _create_normal_capture_material() -> ShaderMaterial:
 	var shader := Shader.new()
 	shader.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled;
+render_mode unshaded, cull_disabled, depth_draw_opaque;
 
 uniform float near_plane : hint_range(0.0, 1000.0) = 0.1;
 uniform float far_plane : hint_range(0.0, 10000.0) = 100.0;
@@ -205,6 +217,7 @@ void fragment() {
 	// Linear depth in view space: +z is into the screen, we want near=1 far=0
 	float linear_depth = -VERTEX.z;
 	ALPHA = 1.0 - clamp((linear_depth - near_plane) / (far_plane - near_plane), 0.0, 1.0);
+	ALPHA_SCISSOR_THRESHOLD = 0.0;
 }
 """
 	var mat := ShaderMaterial.new()
@@ -213,6 +226,9 @@ void fragment() {
 
 
 func initialize() -> Error:
+	if DisplayServer.get_name().to_lower().contains("headless"):
+		Log.error("prebaking", "ImpostorBakerV3 requires a real rendering backend; do not run impostor bakes with --headless")
+		return ERR_UNAVAILABLE
 	_setup_rendering_viewports()
 	if output_dir.is_empty():
 		output_dir = SettingsManager.get_impostors_path()
@@ -332,19 +348,40 @@ func _resolve_projection(model_path: String) -> String:
 			return "sphere"
 	return "hemi"
 
+
+func _resolve_bake_settings(model_path: String, candidates: ImpostorCandidatesScript = null) -> Dictionary:
+	var provider := candidates
+	if provider == null:
+		provider = ImpostorCandidatesScript.new()
+	var candidate_settings := provider.get_impostor_settings(model_path)
+	var requested_texture_size := int(candidate_settings.get("texture_size", 512))
+	var frame_size := SMALL_FRAME_SIZE
+	var tier_name := "small"
+	if requested_texture_size >= 512:
+		frame_size = LARGE_FRAME_SIZE
+		tier_name = "large"
+
+	return {
+		"tier": tier_name,
+		"grid_size": GRID_SIZE,
+		"frame_size": frame_size,
+		"atlas_size": GRID_SIZE * frame_size,
+		"source_texture_size": requested_texture_size,
+	}
+
 #endregion
 
 
 #region Bake Core
 
-## Bake a single model to a v5 octahedral impostor.
+## Bake a single model to a v6 octahedral impostor.
 ## Returns {success, output_path, normal_path, metadata_path, bounds, error}.
 ##
 ## `candidates` is unused in the simplified API (kept as a default param for
 ## backwards compatibility with the v2 batch caller). Per-asset settings live
 ## entirely in this file now — only the projection flag is per-asset.
-func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null) -> Dictionary:
-	Log.info("prebaking", "Baking impostor v5: %s" % model_path)
+func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null) -> Dictionary:
+	Log.info("prebaking", "Baking impostor v%d: %s" % [BAKE_VERSION, model_path])
 
 	if not is_inside_tree():
 		var error := "ImpostorBakerV3 not in scene tree"
@@ -352,13 +389,18 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "error": error}
 
-	# Single grid+frame config for all assets (constants). Only the projection
-	# (hemi/sphere) is per-asset.
+	var bake_settings := _resolve_bake_settings(model_path, candidates)
+	_active_grid_size = int(bake_settings["grid_size"])
+	_active_frame_size = int(bake_settings["frame_size"])
+	_active_atlas_size = int(bake_settings["atlas_size"])
+	_active_tier_name = str(bake_settings["tier"])
 	var projection := _resolve_projection(model_path)
 
-	# Resize both viewports to the standard frame size
-	_albedo_viewport.size = Vector2i(FRAME_SIZE, FRAME_SIZE)
-	_normal_viewport.size = Vector2i(FRAME_SIZE, FRAME_SIZE)
+	# Resize both viewports to the selected per-asset frame size.
+	_albedo_viewport.size = Vector2i(_active_frame_size, _active_frame_size)
+	_normal_viewport.size = Vector2i(_active_frame_size, _active_frame_size)
+	await _wait_for_viewport_size(_albedo_viewport, Vector2i(_active_frame_size, _active_frame_size))
+	await _wait_for_viewport_size(_normal_viewport, Vector2i(_active_frame_size, _active_frame_size))
 
 	# Load model into albedo pass
 	var albedo_model := _load_model(model_path)
@@ -369,7 +411,8 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 		return {"success": false, "error": error}
 
 	_albedo_model_container.add_child(albedo_model)
-	await get_tree().process_frame
+	_prepare_albedo_capture_materials(albedo_model)
+	await _wait_for_render_settle()
 
 	var aabb := _get_model_aabb(albedo_model)
 	if aabb.size.length() < 0.01:
@@ -381,7 +424,7 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 
 	var center := aabb.get_center()
 	albedo_model.position = -center
-	await get_tree().process_frame
+	await _wait_for_render_settle()
 
 	var size := aabb.size
 	var max_extent := maxf(maxf(size.x, size.y), size.z) * padding_factor
@@ -392,10 +435,12 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 	# Configure normal capture depth range
 	_normal_capture_material.set_shader_parameter("near_plane", _normal_camera.near)
 	_normal_capture_material.set_shader_parameter("far_plane", camera_distance * 2.0)
+	await _prime_viewport(_albedo_viewport)
+	await _prime_viewport(_normal_viewport)
 
 	# === Generate octahedral directions ===
-	var directions := generate_directions(GRID_SIZE, projection)
-	var total_frames := GRID_SIZE * GRID_SIZE
+	var directions := generate_directions(_active_grid_size, projection)
+	var total_frames := _active_grid_size * _active_grid_size
 
 	# === PASS 1: Albedo frames ===
 	var albedo_frames: Array[Image] = []
@@ -403,10 +448,10 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 		var frame := await _render_from_direction_async(
 			_albedo_camera, _albedo_viewport, directions[i], camera_distance
 		)
-		albedo_frames.append(frame if frame else _make_blank(FRAME_SIZE, background_color))
+		albedo_frames.append(frame if frame else _make_blank(_active_frame_size, background_color))
 
 	albedo_model.queue_free()
-	await get_tree().process_frame
+	await _wait_for_render_settle()
 
 	# === PASS 2: Normal frames (fresh model reload, override material) ===
 	var normal_frames: Array[Image] = []
@@ -420,39 +465,47 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 		for mesh_inst in mesh_instances:
 			mesh_inst.material_override = _normal_capture_material
 
-		await get_tree().process_frame
-		await get_tree().process_frame  # Extra frame for material propagation
+		await _wait_for_render_settle()
 
 		for i in range(total_frames):
 			var frame := await _render_from_direction_async(
 				_normal_camera, _normal_viewport, directions[i], camera_distance
 			)
-			normal_frames.append(frame if frame else _make_blank(FRAME_SIZE, Color(0.5, 0.5, 1.0, 0.0)))
+			normal_frames.append(frame if frame else _make_blank(_active_frame_size, Color(0.5, 0.5, 1.0, 0.0)))
 
 		normal_model.queue_free()
 	else:
 		for i in range(total_frames):
-			normal_frames.append(_make_blank(FRAME_SIZE, Color(0.5, 0.5, 1.0, 0.0)))
+			normal_frames.append(_make_blank(_active_frame_size, Color(0.5, 0.5, 1.0, 0.0)))
 
 	# === Pack atlases ===
-	var atlas_size := GRID_SIZE * FRAME_SIZE
+	var atlas_size := _active_atlas_size
 	var albedo_atlas := _pack_albedo_atlas(albedo_frames, atlas_size)
 	var normal_atlas_image := _pack_normal_atlas(normal_frames, albedo_frames, atlas_size)
 
 	# === Save ===
-	# v5 filename suffix on all outputs — prevents collision with legacy v4
-	# bakes in the same directory during the migration window. The runtime
-	# loader (phase 2) will check for `_v5.*` first and fall back to the
-	# legacy paths for v4 bakes.
-	var albedo_path := _get_output_path_with_suffix(model_path, "v5", "png")
-	var metadata_path := _get_output_path_with_suffix(model_path, "v5", "json")
-	var normal_res_path := _get_output_path_with_suffix(model_path, "normal_v5", "res")
-	var normal_debug_png_path := _get_output_path_with_suffix(model_path, "normal_debug_v5", "png")
+	# v6 filename suffix on all outputs. This is the only maintained impostor
+	# artifact contract used by the runtime.
+	var albedo_path := _get_output_path_with_suffix(model_path, "v6", "png")
+	var metadata_path := _get_output_path_with_suffix(model_path, "v6", "json")
+	var normal_res_path := _get_output_path_with_suffix(model_path, "normal_v6", "res")
+	var normal_debug_png_path := _get_output_path_with_suffix(model_path, "normal_debug_v6", "png")
+	var staging_dir := _make_staging_dir(model_path)
+	if staging_dir.is_empty():
+		var error := "Failed to create staging directory"
+		push_warning("ImpostorBakerV3: %s - %s" % [error, model_path])
+		model_baked.emit(model_path, false, "")
+		return {"success": false, "error": error}
+	var staged_albedo_path := staging_dir.path_join(albedo_path.get_file())
+	var staged_metadata_path := staging_dir.path_join(metadata_path.get_file())
+	var staged_normal_res_path := staging_dir.path_join(normal_res_path.get_file())
+	var staged_normal_debug_png_path := staging_dir.path_join(normal_debug_png_path.get_file())
 
-	var save_err := albedo_atlas.save_png(albedo_path)
+	var save_err := albedo_atlas.save_png(staged_albedo_path)
 	if save_err != OK:
 		var error := "Failed to save albedo atlas: error %d" % save_err
-		push_warning("ImpostorBakerV3: %s - %s" % [error, albedo_path])
+		push_warning("ImpostorBakerV3: %s - %s" % [error, staged_albedo_path])
+		_cleanup_staging_dir(staging_dir)
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "error": error}
 
@@ -460,26 +513,49 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 	# pipeline entirely. No .import file, no sRGB decode, bytes are preserved
 	# exactly. See addendum C in docs/audit/IMPOSTOR_REBUILD.md.
 	var normal_tex := ImageTexture.create_from_image(normal_atlas_image)
-	save_err = ResourceSaver.save(normal_tex, normal_res_path)
+	save_err = ResourceSaver.save(normal_tex, staged_normal_res_path)
 	if save_err != OK:
-		push_warning("ImpostorBakerV3: Failed to save normal .res: %s (err=%d)" % [normal_res_path, save_err])
-		normal_res_path = ""
+		var error := "Failed to save normal .res: error %d" % save_err
+		push_warning("ImpostorBakerV3: %s - %s" % [error, staged_normal_res_path])
+		_cleanup_staging_dir(staging_dir)
+		model_baked.emit(model_path, false, "")
+		return {"success": false, "error": error}
 
 	# Debug PNG dump of the normal atlas, for visual inspection of encoded
 	# normals + depth. NOT loaded by the runtime path — purely an inspection
 	# aid. Always written; constant flag at top of file.
 	if DUMP_DEBUG_NORMALS and not normal_res_path.is_empty():
-		var debug_save_err := normal_atlas_image.save_png(normal_debug_png_path)
+		var debug_save_err := normal_atlas_image.save_png(staged_normal_debug_png_path)
 		if debug_save_err != OK:
-			push_warning("ImpostorBakerV3: Failed to save normal debug PNG: %s" % normal_debug_png_path)
+			var error := "Failed to save normal debug PNG: error %d" % debug_save_err
+			push_warning("ImpostorBakerV3: %s - %s" % [error, staged_normal_debug_png_path])
+			_cleanup_staging_dir(staging_dir)
+			model_baked.emit(model_path, false, "")
+			return {"success": false, "error": error}
 
 	# Metadata
 	var metadata := _generate_metadata(
-		model_path, aabb, albedo_path, normal_res_path, projection, directions
+		model_path, aabb, albedo_path, normal_res_path, projection, directions, camera_distance, bake_settings
 	)
-	_save_metadata(metadata_path, metadata)
+	save_err = _save_metadata(staged_metadata_path, metadata)
+	if save_err != OK:
+		_cleanup_staging_dir(staging_dir)
+		model_baked.emit(model_path, false, "")
+		return {"success": false, "error": "Failed to save metadata: error %d" % save_err}
 
-	Log.info("prebaking", "Saved v5 impostor: %s (proj=%s)" % [albedo_path, projection])
+	var promotion_err := _promote_staged_artifacts({
+		staged_albedo_path: albedo_path,
+		staged_normal_res_path: normal_res_path,
+		staged_normal_debug_png_path: normal_debug_png_path,
+		staged_metadata_path: metadata_path,
+	})
+	if promotion_err != OK:
+		_cleanup_staging_dir(staging_dir)
+		model_baked.emit(model_path, false, "")
+		return {"success": false, "error": "Failed to promote staged artifacts: error %d" % promotion_err}
+	_cleanup_staging_dir(staging_dir)
+
+	Log.info("prebaking", "Saved v%d impostor: %s (tier=%s proj=%s)" % [BAKE_VERSION, albedo_path, _active_tier_name, projection])
 	model_baked.emit(model_path, true, albedo_path)
 
 	return {
@@ -495,7 +571,7 @@ func bake_model(model_path: String, _candidates: ImpostorCandidatesScript = null
 
 
 ## Batch bake — mirrors v2 API so existing prebake UI can swap in.
-func bake_models(model_paths: Array, _candidates: ImpostorCandidatesScript = null) -> Dictionary:
+func bake_models(model_paths: Array, candidates: ImpostorCandidatesScript = null) -> Dictionary:
 	if initialize() != OK:
 		return {"success": 0, "failed": 0, "total": 0}
 
@@ -507,7 +583,7 @@ func bake_models(model_paths: Array, _candidates: ImpostorCandidatesScript = nul
 		var model_path: String = model_paths[i]
 		progress.emit(i + 1, model_paths.size(), model_path)
 
-		var result := await bake_model(model_path)
+		var result := await bake_model(model_path, candidates)
 		if result.success:
 			_total_baked += 1
 		else:
@@ -540,18 +616,54 @@ func _render_from_direction_async(
 	if absf(direction.dot(Vector3.UP)) > 0.999:
 		up = Vector3.FORWARD
 	cam.look_at(Vector3.ZERO, up)
+	cam.force_update_transform()
 
-	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-	await get_tree().process_frame
-	await get_tree().process_frame
+	var expected_size := Vector2i(_active_frame_size, _active_frame_size)
+	for attempt in range(6):
+		await _render_viewport_frames(vp, CAPTURE_SETTLE_FRAMES)
 
-	var texture := vp.get_texture()
-	if not texture or not texture.get_rid().is_valid():
-		return null
-	var image := texture.get_image()
-	if not image:
-		return null
-	return image.duplicate()
+		var texture := vp.get_texture()
+		if not texture or not texture.get_rid().is_valid():
+			await get_tree().process_frame
+			continue
+		var image := texture.get_image()
+		if not image:
+			await get_tree().process_frame
+			continue
+		if image.get_size() == expected_size:
+			return image.duplicate()
+		Log.warn("prebaking", "Viewport readback size %s, expected %s (attempt %d)" % [
+			image.get_size(), expected_size, attempt + 1])
+		await get_tree().process_frame
+	vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	return null
+
+
+func _wait_for_render_settle() -> void:
+	await _render_viewport_frames(_albedo_viewport, 1)
+	await _render_viewport_frames(_normal_viewport, 1)
+
+
+func _wait_for_viewport_size(vp: SubViewport, expected_size: Vector2i) -> void:
+	for attempt in range(8):
+		await _render_viewport_frames(vp, 1)
+		var texture := vp.get_texture()
+		if texture and texture.get_rid().is_valid():
+			var image := texture.get_image()
+			if image and image.get_size() == expected_size:
+				return
+		await get_tree().process_frame
+	Log.warn("prebaking", "Viewport did not settle to %s before capture" % expected_size)
+
+
+func _prime_viewport(vp: SubViewport) -> void:
+	await _render_viewport_frames(vp, CAPTURE_SETTLE_FRAMES)
+
+
+func _render_viewport_frames(vp: SubViewport, frame_count: int) -> void:
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	await get_tree().create_timer(maxf(0.016, float(maxi(frame_count, 1)) / CAPTURE_SETTLE_FPS)).timeout
+	vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 
 
 static func _make_blank(size: int, fill: Color) -> Image:
@@ -570,16 +682,16 @@ func _pack_albedo_atlas(frames: Array[Image], atlas_size: int) -> Image:
 	var atlas := Image.create(atlas_size, atlas_size, false, Image.FORMAT_RGBA8)
 	atlas.fill(background_color)
 
-	var frame_rect := Rect2i(0, 0, FRAME_SIZE, FRAME_SIZE)
-	for row in range(GRID_SIZE):
-		for col in range(GRID_SIZE):
-			var frame_idx := row * GRID_SIZE + col
+	var frame_rect := Rect2i(0, 0, _active_frame_size, _active_frame_size)
+	for row in range(_active_grid_size):
+		for col in range(_active_grid_size):
+			var frame_idx := row * _active_grid_size + col
 			if frame_idx >= frames.size():
 				continue
 			var src: Image = frames[frame_idx]
 			if not src:
 				continue
-			atlas.blit_rect(src, frame_rect, Vector2i(col * FRAME_SIZE, row * FRAME_SIZE))
+			atlas.blit_rect(src, frame_rect, Vector2i(col * _active_frame_size, row * _active_frame_size))
 	return atlas
 
 
@@ -601,10 +713,10 @@ func _pack_normal_atlas(
 	var atlas := Image.create(atlas_size, atlas_size, false, Image.FORMAT_RGBA8)
 	atlas.fill(Color(0.5, 1.0, 0.5, 0.0))
 
-	var frame_rect := Rect2i(0, 0, FRAME_SIZE, FRAME_SIZE)
-	for row in range(GRID_SIZE):
-		for col in range(GRID_SIZE):
-			var frame_idx := row * GRID_SIZE + col
+	var frame_rect := Rect2i(0, 0, _active_frame_size, _active_frame_size)
+	for row in range(_active_grid_size):
+		for col in range(_active_grid_size):
+			var frame_idx := row * _active_grid_size + col
 			if frame_idx >= normal_frames.size():
 				continue
 			var src_normal: Image = normal_frames[frame_idx]
@@ -612,7 +724,7 @@ func _pack_normal_atlas(
 			if not src_normal:
 				continue
 
-			var dst_offset := Vector2i(col * FRAME_SIZE, row * FRAME_SIZE)
+			var dst_offset := Vector2i(col * _active_frame_size, row * _active_frame_size)
 			if src_albedo:
 				atlas.blit_rect_mask(src_normal, src_albedo, frame_rect, dst_offset)
 			else:
@@ -678,6 +790,33 @@ func _find_all_mesh_instances(node: Node) -> Array[MeshInstance3D]:
 		instances.append_array(_find_all_mesh_instances(child))
 	return instances
 
+
+func _prepare_albedo_capture_materials(node: Node3D) -> void:
+	for mesh_inst: MeshInstance3D in _find_all_mesh_instances(node):
+		if not mesh_inst.mesh:
+			continue
+		for surface_idx in range(mesh_inst.mesh.get_surface_count()):
+			var source_mat := mesh_inst.get_surface_override_material(surface_idx)
+			if source_mat == null:
+				source_mat = mesh_inst.material_override
+			if source_mat == null:
+				source_mat = mesh_inst.mesh.surface_get_material(surface_idx)
+			if source_mat is BaseMaterial3D:
+				var mat := _make_albedo_capture_material(source_mat)
+				mesh_inst.set_surface_override_material(surface_idx, mat)
+
+
+func _make_albedo_capture_material(source_mat: Material) -> Material:
+	if source_mat is BaseMaterial3D:
+		var mat := (source_mat as BaseMaterial3D).duplicate() as BaseMaterial3D
+		mat.resource_local_to_scene = true
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		mat.alpha_scissor_threshold = 0.1
+		mat.disable_receive_shadows = true
+		return mat
+	return source_mat
+
 #endregion
 
 
@@ -714,6 +853,91 @@ static func _base_name(normalized: String) -> String:
 #endregion
 
 
+#region Staging & Promotion
+
+func _make_staging_dir(model_path: String) -> String:
+	var normalized := _normalize(model_path)
+	var stage_root := output_dir.path_join(".staging")
+	var stage_dir := stage_root.path_join("%s_%d" % [_base_name(normalized), Time.get_ticks_usec()])
+	var err := DirAccess.make_dir_recursive_absolute(stage_dir)
+	if err != OK:
+		push_warning("ImpostorBakerV3: Failed to create staging dir %s (err=%d)" % [stage_dir, err])
+		return ""
+	return stage_dir
+
+
+func _promote_staged_artifacts(staged_to_final: Dictionary) -> Error:
+	for staged_path: String in staged_to_final.keys():
+		if not FileAccess.file_exists(staged_path):
+			push_warning("ImpostorBakerV3: Missing staged artifact before promotion: %s" % staged_path)
+			return ERR_FILE_NOT_FOUND
+		var file := FileAccess.open(staged_path, FileAccess.READ)
+		if not file:
+			return FileAccess.get_open_error()
+		if file.get_length() <= 0:
+			push_warning("ImpostorBakerV3: Empty staged artifact before promotion: %s" % staged_path)
+			file.close()
+			return ERR_FILE_CORRUPT
+		file.close()
+
+	var backup_suffix := ".bak_%d" % Time.get_ticks_usec()
+	var promoted: Array[Dictionary] = []
+	for staged_path: String in staged_to_final.keys():
+		var final_path: String = staged_to_final[staged_path]
+		DirAccess.make_dir_recursive_absolute(final_path.get_base_dir())
+		var backup_path := ""
+		if FileAccess.file_exists(final_path):
+			backup_path = final_path + backup_suffix
+			var backup_err := DirAccess.rename_absolute(final_path, backup_path)
+			if backup_err != OK:
+				_rollback_promoted_artifacts(promoted)
+				return backup_err
+		var promote_err := DirAccess.rename_absolute(staged_path, final_path)
+		if promote_err != OK:
+			if not backup_path.is_empty():
+				DirAccess.rename_absolute(backup_path, final_path)
+			_rollback_promoted_artifacts(promoted)
+			return promote_err
+		promoted.append({
+			"final": final_path,
+			"backup": backup_path,
+		})
+
+	for entry: Dictionary in promoted:
+		var backup_path: String = entry.get("backup", "")
+		if not backup_path.is_empty() and FileAccess.file_exists(backup_path):
+			DirAccess.remove_absolute(backup_path)
+	return OK
+
+
+func _rollback_promoted_artifacts(promoted: Array[Dictionary]) -> void:
+	for i in range(promoted.size() - 1, -1, -1):
+		var entry := promoted[i]
+		var final_path: String = entry.get("final", "")
+		var backup_path: String = entry.get("backup", "")
+		if not final_path.is_empty() and FileAccess.file_exists(final_path):
+			DirAccess.remove_absolute(final_path)
+		if not backup_path.is_empty() and FileAccess.file_exists(backup_path):
+			DirAccess.rename_absolute(backup_path, final_path)
+
+
+func _cleanup_staging_dir(staging_dir: String) -> void:
+	if staging_dir.is_empty():
+		return
+	var dir := DirAccess.open(staging_dir)
+	if dir:
+		dir.list_dir_begin()
+		var file_name := dir.get_next()
+		while not file_name.is_empty():
+			if not dir.current_is_dir():
+				DirAccess.remove_absolute(staging_dir.path_join(file_name))
+			file_name = dir.get_next()
+		dir.list_dir_end()
+	DirAccess.remove_absolute(staging_dir)
+
+#endregion
+
+
 #region Metadata
 
 func _generate_metadata(
@@ -722,7 +946,9 @@ func _generate_metadata(
 	albedo_path: String,
 	normal_path: String,
 	projection: String,
-	directions: Array[Vector3]
+	directions: Array[Vector3],
+	camera_distance: float,
+	bake_settings: Dictionary
 ) -> Dictionary:
 	var size := aabb.size
 	var dirs_array: Array = []
@@ -732,8 +958,8 @@ func _generate_metadata(
 		dirs_array[i] = [d.x, d.y, d.z]
 
 	return {
-		"version": 5,
-		"bake_version": 5,  # Mirror of "version" for forward-compat lookups
+		"version": BAKE_VERSION,
+		"bake_version": BAKE_VERSION,  # Mirror of "version" for forward-compat lookups
 		"projection": projection,
 		"model_path": model_path,
 		"texture_path": albedo_path,
@@ -741,10 +967,20 @@ func _generate_metadata(
 		"normal_format": "rgba8_res",
 		"has_normal_map": not normal_path.is_empty(),
 		"settings": {
-			"grid_size": GRID_SIZE,
-			"frame_size": FRAME_SIZE,
-			"atlas_size": GRID_SIZE * FRAME_SIZE,
-			"total_frames": GRID_SIZE * GRID_SIZE,
+			"tier": str(bake_settings.get("tier", _active_tier_name)),
+			"source_texture_size": int(bake_settings.get("source_texture_size", 0)),
+			"grid_size": _active_grid_size,
+			"frame_size": _active_frame_size,
+			"atlas_size": _active_atlas_size,
+			"total_frames": _active_grid_size * _active_grid_size,
+		},
+		"depth": {
+			"encoding": "normal_alpha_linear_view_depth_near1_far0",
+			"near": _normal_camera.near,
+			"far": camera_distance * 2.0,
+			"camera_distance": camera_distance,
+			"axis": "bake_camera_forward",
+			"reconstruct": "linear_depth = near + (1.0 - alpha) * (far - near)",
 		},
 		"bounds": {
 			"center": [aabb.get_center().x, aabb.get_center().y, aabb.get_center().z],
@@ -752,6 +988,7 @@ func _generate_metadata(
 			"width": size.x,
 			"height": size.y,
 			"depth": size.z,
+			"capture_size": maxf(maxf(size.x, size.y), size.z) * padding_factor,
 		},
 		"directions": dirs_array,
 		"baked_date": Time.get_datetime_string_from_system(),
@@ -780,12 +1017,11 @@ func get_stats() -> Dictionary:
 	}
 
 
-## Check if a v5 impostor already exists for a model (by albedo PNG presence +
-## metadata version check). Uses the _v5 filename suffix — does NOT match v4
-## bakes even if the hash collides.
+## Check if a current v6 impostor already exists for a model by albedo PNG
+## presence plus metadata version check.
 func impostor_exists(model_path: String) -> bool:
-	var albedo_path := _get_output_path_with_suffix(model_path, "v5", "png")
-	var meta_path := _get_output_path_with_suffix(model_path, "v5", "json")
+	var albedo_path := _get_output_path_with_suffix(model_path, "v6", "png")
+	var meta_path := _get_output_path_with_suffix(model_path, "v6", "json")
 	if not FileAccess.file_exists(albedo_path) or not FileAccess.file_exists(meta_path):
 		return false
 	var file := FileAccess.open(meta_path, FileAccess.READ)
@@ -795,6 +1031,6 @@ func impostor_exists(model_path: String) -> bool:
 	if json.parse(file.get_as_text()) != OK:
 		return false
 	var meta: Dictionary = json.data
-	return int(meta.get("version", 0)) >= 5
+	return int(meta.get("version", 0)) >= BAKE_VERSION
 
 #endregion

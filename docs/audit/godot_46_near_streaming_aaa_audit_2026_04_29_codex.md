@@ -11,6 +11,15 @@ Scope: NEAR-only rendering/streaming with distant rendering disabled. The target
 is a stable runtime that does not drop below 150 FPS on the test hardware, while
 still allowing player interaction and collision around the player.
 
+> **Currency note (2026-05-02):** this audit is historical NEAR-only guidance.
+> FAR impostor rendering is default-on again through `SubsystemToggles`
+> (`impostors=true`). HLOD remains implemented but opt-in (`hlod_enable`) after
+> the 2026-05-02 default-on stress run exposed a chunk-surface draw-call blow-up.
+> `--near-only` is now the explicit full distant-tier opt-out.
+> Use `docs/systems/streaming_rendering_bible.md`,
+> `docs/systems/distance_rendering.md`, and `docs/systems/object_paging.md` for
+> the current HLOD/FAR policy.
+
 ## Executive Verdict
 
 The current branch is not production-ready. The codebase is using several of the
@@ -523,7 +532,18 @@ Metrics to gate on:
 
 ## When Can Distant Rendering Resume?
 
-Not yet.
+Historical 2026-04-29 answer: not yet.
+
+Current 2026-05-02 answer: FAR impostors have resumed by default. HLOD remains
+implemented but opt-in pending chunk-surface draw-call reduction. The phased
+sequence below is retained as the historical rationale for why the tiers were
+parked during NEAR stabilization; it is no longer the active launch policy.
+Current default: MID 0-500m, FAR impostors 500m+. HLOD opt-in:
+`hlod_enable` keeps MID fallback as the 0-500m visual owner and renders HLOD
+only from 500-1000m until per-chunk coverage gating can remove overlap without
+creating holes or Z-fighting.
+Current opt-outs: `--near-only`, `--no-impostors`, `hlod_disable`, and the
+`SubsystemToggles` UI/console flags.
 
 Distant rendering should resume only after NEAR has a stable contract. Otherwise
 MID/HLOD/FAR will mask, amplify, or confuse the existing failures.
@@ -599,4 +619,3 @@ publish competes unpredictably with visual streaming.
   https://openmw.org/2020/openmw-spotlight-turning-the-pages/
 - OpenMW terrain/object paging settings:
   https://openmw-improved-docs.readthedocs.io/en/latest/reference/modding/settings/terrain.html
-

@@ -17,6 +17,24 @@ extends RefCounted
 const DU := preload("res://src/core/world/distance_utils.gd")
 
 # =============================================================================
+# STREAMING CELL RADIUS
+# =============================================================================
+
+## Default radius of exterior cells kept active around the camera.
+## 4 = 9x9 loaded grid, restoring MID coverage for the 0-500m fallback band.
+const DEFAULT_LOAD_RADIUS_CELLS := 4
+
+## User-facing slider limits. Kept here so runtime, UI, and settings validation
+## share the same contract.
+const MIN_LOAD_RADIUS_CELLS := 1
+const MAX_LOAD_RADIUS_CELLS := 10
+
+
+static func clamp_load_radius_cells(value: int) -> int:
+	return clampi(value, MIN_LOAD_RADIUS_CELLS, MAX_LOAD_RADIUS_CELLS)
+
+
+# =============================================================================
 # DISTANCE THRESHOLDS (referenced from DistanceUtils - single source of truth)
 # =============================================================================
 
@@ -329,9 +347,19 @@ const TELEPORT_THRESHOLD_SQ := TELEPORT_THRESHOLD * TELEPORT_THRESHOLD
 ## Prevents frame spikes when multiple cells exit the load radius at once
 const UNLOAD_BUDGET_MS := 4.0
 
+## Maximum cell unload transitions to start per frame.
+## `_unload_cell()` emits gameplay/tool notifications and preloader drains;
+## batching many starts in one camera-cell update causes deterministic spikes.
+const UNLOAD_STARTS_PER_FRAME := 1
+
 ## Maximum children to remove per unloading cell per frame
 ## Caps work even if individual queue_free() calls are fast
 const UNLOAD_BATCH_SIZE := 30
+
+## Maximum fully-hidden MID cells to free per frame.
+## `remove_cell_instances()` may release many bucket RIDs for one cell, so keep
+## cleanup cell-granular and bounded.
+const RS_CLEANUP_CELLS_PER_FRAME := 1
 
 # =============================================================================
 # OBJECT POOL PRE-WARMING

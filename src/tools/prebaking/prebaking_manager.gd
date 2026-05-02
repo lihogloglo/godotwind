@@ -21,7 +21,7 @@ class_name PrebakingManager
 extends Node
 
 const PrebakeState := preload("res://src/tools/prebaking/prebake_state.gd")
-const ImpostorBakerV2 := preload("res://src/tools/prebaking/impostor_baker_v2.gd")
+const ImpostorBakerV3 := preload("res://src/tools/prebaking/impostor_baker_v3.gd")
 const ModelPrebaker := preload("res://src/tools/prebaking/model_prebaker.gd")
 const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const ShoreMaskBaker := preload("res://src/tools/shore_mask_baker.gd")
@@ -64,7 +64,7 @@ var _state_manager: PrebakeState = null
 
 ## Bakers
 var _model_baker: ModelPrebaker = null
-var _impostor_baker: ImpostorBakerV2 = null
+var _impostor_baker: ImpostorBakerV3 = null
 var _navmesh_baker: NavMeshBaker = null
 var _shore_baker: ShoreMaskBaker = null
 
@@ -694,14 +694,14 @@ func _bake_impostors() -> Dictionary:
 
 	# Create baker if needed
 	if not _impostor_baker:
-		_impostor_baker = ImpostorBakerV2.new()
+		_impostor_baker = ImpostorBakerV3.new()
 		add_child(_impostor_baker)
 
 	# Get pending items
 	var impostor_state: PrebakeState.ComponentState = _state_manager.impostors
+	var candidates := ImpostorCandidates.new()
 	if impostor_state.pending.is_empty():
 		# Build initial pending list from ALL impostor candidates (landmarks, buildings, terrain, trees)
-		var candidates := ImpostorCandidates.new()
 		impostor_state.pending = candidates.get_all_impostor_models().duplicate()
 		impostor_state.start_time = Time.get_unix_time_from_system()
 
@@ -709,8 +709,9 @@ func _bake_impostors() -> Dictionary:
 		impostor_state.pending.size(), impostor_state.completed.size(), impostor_state.failed.size()])
 
 	if _impostor_baker.initialize() != OK:
-		error_occurred.emit("Impostors", "Failed to initialize impostor baker")
-		return {"success": 0, "failed": 0, "error": "Initialization failed"}
+		var error := "Failed to initialize impostor baker. Impostor baking requires a real rendering backend; do not run it with Godot --headless."
+		error_occurred.emit("Impostors", error)
+		return {"success": 0, "failed": impostor_state.pending.size(), "error": error}
 
 	# Connect progress
 	_impostor_baker.progress.connect(func(current: int, total: int, name: String) -> void:
@@ -730,7 +731,7 @@ func _bake_impostors() -> Dictionary:
 
 	# Bake pending items (must await since bake_models is now async)
 	var pending: Array = impostor_state.pending.duplicate()
-	var result: Dictionary = await _impostor_baker.bake_models(pending)
+	var result: Dictionary = await _impostor_baker.bake_models(pending, candidates)
 
 	impostor_state.end_time = Time.get_unix_time_from_system()
 	_state_manager.save_state()

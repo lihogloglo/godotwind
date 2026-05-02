@@ -37,6 +37,9 @@ Keep alive:
   implementation design until Phase 2B ships.
 - `docs/systems/distance_rendering.md`: shipped MID/HLOD/FAR system details,
   LOD console commands, ObjectPaging, and impostor specifics.
+- `docs/systems/impostor_streaming_rendering.md`: focused FAR impostor
+  streaming/rendering research, Godot 4.6 native capability map, and current
+  architecture audit.
 - `docs/systems/model_loading.md`: shipped model/cache/collision sidecar
   details, including carry held-body carve-out references.
 
@@ -53,7 +56,10 @@ Godotwind's target shape is sound for Godot 4.6:
 - cell payloads own streaming queues and resource handles;
 - heavy static collision uses one server-direct body per cell;
 - MID uses Godot's embedded mesh LOD cascade instead of hand-written LOD bands;
-- HLOD and FAR stay parked until NEAR is stable.
+- FAR impostors are default-on again as of 2026-05-02 after Phase 2B's
+  structural bucket path landed. HLOD remains implemented but opt-in because
+  the default-on stress run exposed a persistent chunk-surface draw-call
+  blow-up. `--near-only` remains the focused NEAR opt-out.
 
 The project has not been blocked by a fundamental Godot limitation. The
 historical failures came from lifetime ownership and scheduling complexity:
@@ -89,16 +95,17 @@ Accepted:
 
 Outstanding:
 
-- Phase 2B material/RID lifetime and bucket cleanup implementation.
-- Per-cell/per-area MultiMesh buckets to replace the transitional
-  RS-instance-per-transform bucket.
-- `_mesh_types` must stop being the hidden resource lifetime owner for live
-  cell buckets.
+- Phase 2B acceptance proof for material/RID lifetime and bucket cleanup.
+- Per-cell/per-area `CellStaticBucket` implementation is present structurally;
+  the remaining work is stress proof under collision, reclaim, and material/RID
+  iteration-order gates.
+- `_mesh_types` should remain a non-owning descriptor registry for live cell
+  buckets; verify no live bucket depends on it as hidden lifetime owner.
 - Residual east-route 50ms+ outlier attribution.
 - Frame budget split needs to move from 60-FPS-era 8ms shared budget toward
   the NEAR target of roughly 1ms streaming publish per frame at 150 FPS.
-- Distant rendering, HLOD, and FAR re-enable remain parked until NEAR Phase 2B
-  passes runtime gates.
+- FAR distant rendering is re-enabled by default; HLOD is opt-in pending chunk
+  surface/material reduction and clean runtime gates.
 
 ## Primary-Source Facts
 
@@ -313,9 +320,9 @@ An object belongs to exactly one visual tier at a time.
 | Tier | Range | Runtime Technique | Current Status |
 | --- | --- | --- | --- |
 | NEAR | 0-150m | Sparse `Node3D` only for interactives, static visuals server-direct, cell static collision server-direct | Active stabilization |
-| MID | 0-300m with HLOD, 0-500m fallback | One RS instance per object with embedded `ArrayMesh` LOD chain; Godot C++ chooses sub-LOD | Working, HLOD parked while NEAR stabilizes |
-| HLOD | 300-1000m | Runtime-merged static geometry per chunk, one RS instance per chunk | Implemented, not priority |
-| FAR | 1000-5000m | Octahedral impostors in MultiMesh | Working, parked during NEAR stabilization |
+| MID | 0-500m fallback | Spatially local `CellStaticBucket` draw groups: groups use local MultiMeshes; singleton groups use single-slot transform uploads; Godot C++ chooses embedded sub-LOD | Working; remains the safety fallback while HLOD is opt-in |
+| HLOD | Opt-in, currently visible 300-1000m | Runtime-merged static geometry per chunk, one RS instance per chunk | Implemented, opt-in; covered MID buckets cap at 300m while uncovered buckets keep the 500m fallback |
+| FAR | 500-5000m | Octahedral impostors in spatial MultiMesh pages | Working, default-on again; stays available from 500m while HLOD coverage is incomplete |
 
 Rules:
 

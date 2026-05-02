@@ -10,6 +10,17 @@
 
 ---
 
+## 2026-05-02 Production Update
+
+- v5 bakes now default to hemi-octahedral projection for ground-rooted assets. Full sphere remains a metadata-supported override for future assets that can be viewed from below or all around.
+- v5 runtime/bake resolution is now 512x512 per atlas (8x8 views at 64 px/view). The old 256x256 atlas was acceptable for small objects but under-sampled large Vivec/Hlaalu landmarks at the 1 km handoff.
+- v5 metadata stores `bounds.capture_size`, matching the orthographic square used during capture. Runtime uses this value for billboard scale instead of raw AABB width/height, avoiding padded-atlas origin/scale drift.
+- Runtime v5 cards now use camera-plane billboarding so elevated 1 km validation views do not see yaw-locked vertical cards.
+- The validation scene starts at a 1 km elevated camera, overlays original meshes, and includes an automatically moving point light plus directional sun controls.
+- `src/tools/prebaking/full_rebake_headless.tscn -- --impostors-only` is the unattended v5 rebake path. Use `--max-impostors=N` for a bounded smoke run.
+
+---
+
 ## 1. Problem Statement
 
 The current FAR-tier impostor system produces visibly wonky results, especially after normal maps were added. The user's instinct — "I'm not sure the way we do this is industry standard by any mean" — is correct. The code is named "octahedral" but the actual technique is a 16-sample azimuthal billboard with a hand-rolled normal pass bolted on top. Several implementation details break standard normal-map math.

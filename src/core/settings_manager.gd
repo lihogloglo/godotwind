@@ -8,6 +8,7 @@ extends Node
 ## 3. ProjectSettings (project.godot)
 
 const CONFIG_FILE_PATH := "user://settings.cfg"
+const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 
 var _config := ConfigFile.new()
 var _config_loaded := false
@@ -366,6 +367,26 @@ func get_view_distance_multiplier() -> float:
 func set_view_distance_multiplier(multiplier: float) -> void:
 	_load_config()
 	_config.set_value("graphics", "view_distance_multiplier", clampf(multiplier, 0.25, 2.0))
+	_save_config()
+
+## Gets the exterior streaming radius in cells.
+func get_streaming_radius_cells() -> int:
+	var env_radius := OS.get_environment("GODOTWIND_STREAMING_RADIUS_CELLS")
+	if not env_radius.is_empty():
+		return StreamingConfig.clamp_load_radius_cells(int(env_radius))
+
+	_load_config()
+	var default_radius: int = int(ProjectSettings.get_setting(
+		"graphics/streaming_radius_cells",
+		StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS
+	))
+	var radius: int = int(_config.get_value("graphics", "streaming_radius_cells", default_radius))
+	return StreamingConfig.clamp_load_radius_cells(radius)
+
+## Sets the exterior streaming radius in cells.
+func set_streaming_radius_cells(radius: int) -> void:
+	_load_config()
+	_config.set_value("graphics", "streaming_radius_cells", StreamingConfig.clamp_load_radius_cells(radius))
 	_save_config()
 
 ## Gets whether VSync is enabled

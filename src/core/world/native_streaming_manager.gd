@@ -39,11 +39,10 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
-const ObjectPagingScript := preload("res://src/core/world/object_paging.gd")
 const CellPreloaderScript := preload("res://src/core/world/cell_preloader.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
-# MidTierBatchPool removed — per-instance RS visibility_range in StaticObjectRenderer
-# replaces the broken MultiMesh approach (see docs/STREAMING_FIX_PLAN.md)
+# MidTierBatchPool removed — StaticObjectRenderer now owns MID statics via
+# server-direct instances and spatially local CellStaticBucket batches.
 
 #region Signals
 
@@ -83,7 +82,10 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 ## 1 = 3×3 grid = 9 cells (OpenMW `exterior cell load distance=1` default,
 ## matches NEAR-tier visible footprint of ~150 m at CELL=117 m).
 ## See docs/plans/distant_rendering_2026_04/near_tier_refactor.md §8.1 #1.
-@export var load_radius_cells: int = 1
+@export var load_radius_cells: int = SC.DEFAULT_LOAD_RADIUS_CELLS:
+	set(value):
+		load_radius_cells = SC.clamp_load_radius_cells(value)
+## 4 cells gives a 9x9 loaded ring for the 0-500m MID static band.
 
 ## Maximum distance at which to load cells (in meters)
 ## Cells beyond this are never loaded, even if within radius
@@ -109,10 +111,11 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 @export var impostor_radius_cells: int = 60
 
 ## View distance in cells (alias for load_radius_cells, backwards compatibility)
-@export var view_distance_cells: int = 1:
+@export var view_distance_cells: int = SC.DEFAULT_LOAD_RADIUS_CELLS:
 	set(value):
-		view_distance_cells = value
-		load_radius_cells = value
+		var clamped := SC.clamp_load_radius_cells(value)
+		view_distance_cells = clamped
+		load_radius_cells = clamped
 
 ## Enable/disable distant rendering (backwards compatibility)
 ## Controls impostor rendering
@@ -151,6 +154,11 @@ var _async_requests: Dictionary[Vector2i, int] = {}
 var _pending_load_queue: Array[Vector2i] = []
 ## O(1) membership check for pending queue (mirrors _pending_load_queue contents)
 var _pending_load_set: Dictionary[Vector2i, bool] = {}
+
+## Pending cells to begin unloading. Starting an unload fires notifications and
+## preloader drains, so starts are budgeted separately from child/RID cleanup.
+var _pending_unload_queue: Array[Vector2i] = []
+var _pending_unload_set: Dictionary[Vector2i, bool] = {}
 
 ## Cells being gradually unloaded: grid -> Node3D (hidden, children being removed over frames)
 var _unloading_cells: Dictionary[Vector2i, Node3D] = {}
@@ -301,6 +309,7 @@ const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit
 ## Threshold = 500m matches ObjectPaging.TELEPORT_THRESHOLD so both
 ## systems enter warmup in lockstep.
 const TELEPORT_DETECT_THRESHOLD: float = 500.0
+const HLOD_UPDATE_DISTANCE: float = 25.0
 var _teleport_detected: bool = false  ## Consumed by _process to re-arm startup mode
 
 ## Deferred impostor update — set when camera cell changes, processed next frame
@@ -310,8 +319,12 @@ var _impostor_update_pending: bool = false
 ## Distant light manager — billboard sprites for lights beyond NEAR tier (150m–5km)
 var _distant_light_manager: DistantLightManager = null
 
-## Runtime HLOD merger — cell-level merged meshes for 300-1000m range (OpenMW-style)
-var _hlod_merger: ObjectPagingScript = null
+## Runtime HLOD merger — cell-level merged meshes for 300-1000m range (OpenMW-style).
+## Loaded lazily so `--no-hlod` / impostor-only runs do not initialize ObjectPaging.
+var _object_paging_script: Script = null
+var _hlod_merger: RefCounted = null
+var _hlod_requested_visible: bool = false
+var _hlod_far_coverage_revision: int = -1
 
 ## Sun elevation in radians (set externally by world_explorer via set_sun_elevation)
 var _sun_elevation_rad: float = 0.5  # Default: daytime
@@ -322,6 +335,7 @@ var _camera_velocity_xz: Vector2 = Vector2.ZERO  # EMA-smoothed, XZ plane only
 
 ## HLOD needs initial population on first frame after startup
 var _hlod_needs_initial_update: bool = true
+var _hlod_last_update_position: Vector3 = Vector3.INF
 
 ## Queue drain tracker: time when loading screen hid (startup_complete), 0 = not yet fired
 var _post_startup_start_ms: int = 0
@@ -381,9 +395,7 @@ func fast_cleanup() -> void:
 	if _distant_light_manager:
 		_distant_light_manager.cleanup()
 		_distant_light_manager = null
-	if _hlod_merger:
-		_hlod_merger.cleanup()
-		_hlod_merger = null
+	_teardown_hlod_merger()
 
 
 func _exit_tree() -> void:
@@ -406,6 +418,8 @@ func _exit_tree() -> void:
 	_unloading_hold_frames.clear()
 	_unloading_frozen.clear()
 	_unloading_destructive_holds.clear()
+	_pending_unload_queue.clear()
+	_pending_unload_set.clear()
 	_pending_rs_hide_cells.clear()
 	_pending_rs_hide_set.clear()
 	_pending_rs_cleanup_cells.clear()
@@ -473,9 +487,6 @@ func _ready() -> void:
 	_distant_light_manager = DistantLightManagerScript.new()
 	_distant_light_manager.setup(_world_container)
 
-	# Create runtime HLOD merger for cell-level merged meshes (300-1000m)
-	_hlod_merger = ObjectPagingScript.new()
-
 
 ## Initialize the streaming manager
 ## cell_manager: CellManager instance for loading cell data
@@ -532,23 +543,9 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		# Normal budget (4ms) is restored when startup phase completes
 		_impostor_renderer.set_load_budget_usec(15000.0)
 
-	# Initialize runtime HLOD merger with viewport scenario + static renderer.
-	# Phase 4 (2026-04-17): HLOD is the production pipeline when enabled —
-	# MID registry (150-300m) → HLOD merged chunks (300-1000m) → impostors
-	# (1000m+). HLOD-off parks merged chunks; MID falls back to DU.MID_END.
-	# Toggle: `hlod_enable` / `hlod_disable`.
-	if _hlod_merger:
-		var scenario := get_viewport().get_world_3d().scenario
-		_hlod_merger.initialize(scenario, _static_renderer, _background_processor)
-		if _hlod_merger.enabled:
-			set_hlod_visible(true)
-			# Impostors pick up where HLOD ends — 1km+. Keeps tier bands
-			# strictly non-overlapping (DISTANT_RENDERING_AUDIT §5.1 dedup).
-			Log.info("streaming", "Runtime HLOD merger active — MID 0-%dm, HLOD %d-%dm, impostors %dm+" % [
-				int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END), int(DU.HLOD_END)])
-		else:
-			set_hlod_visible(false)
-			Log.info("streaming", "Runtime HLOD merger initialized but DISABLED - MID fallback 0-%dm (enable via console: hlod_enable)" % int(DU.MID_END))
+	# HLOD is opt-in. Keep the owner facade live, but do not create ObjectPaging
+	# until `hlod_enable` / `toggle hlod` asks for it.
+	set_hlod_visible(_hlod_requested_visible)
 
 	_initialized = true
 	Log.info("streaming", "Initialized with native visibility_range streaming")
@@ -576,6 +573,17 @@ func set_camera(camera: Camera3D) -> void:
 		_camera_cell = DU.world_to_cell(_camera_position)
 		_debug("Camera set, initial cell: %s" % _camera_cell)
 		_update_loaded_cells()
+
+
+## Set the active exterior streaming radius. Returns the clamped value.
+func set_load_radius_cells(radius: int, refresh: bool = true) -> int:
+	var clamped := SC.clamp_load_radius_cells(radius)
+	load_radius_cells = clamped
+	view_distance_cells = clamped
+	if refresh and _initialized:
+		refresh_cells()
+	_impostor_update_pending = true
+	return clamped
 
 
 ## Set sun elevation for distant light time-of-day visibility.
@@ -650,9 +658,8 @@ func _process(delta: float) -> void:
 				Viewport.RENDER_INFO_TYPE_SHADOW,
 				Viewport.RENDER_INFO_OBJECTS_IN_FRAME,
 			))
-		# Phase 3 registry batch stats from StaticObjectRenderer (0 if absent).
-		# Legacy mm_batches/mm_slots fields kept at 0 post-step-7; registry
-		# fields are the ground truth for MID-tier occupancy.
+		# MID bucket stats from StaticObjectRenderer. Legacy mm_batches/mm_slots
+		# fields remain 0 after the old MidTierBatchPool removal.
 		var reg_batches := 0
 		var reg_slots := 0
 		if _static_renderer and _static_renderer.has_method("get_stats"):
@@ -818,6 +825,7 @@ func _process(delta: float) -> void:
 		var imp_start := Time.get_ticks_usec()
 		if _impostor_renderer:
 			_impostor_renderer.update_impostor_area(_camera_cell, impostor_radius_cells)
+			_sync_hlod_far_coverage(true)
 		var imp_ms := float(Time.get_ticks_usec() - imp_start) / 1000.0
 		if prof:
 			prof.end_section("impostor_update")
@@ -828,13 +836,15 @@ func _process(delta: float) -> void:
 	# Phase 2 stutter diag — bracket each unbracketed _process subsystem so the
 	# autopsy can attribute the BIG unattributed spikes (1.7s+) to whichever
 	# of these is actually responsible. Plan §11.4.
-	if _hlod_merger and not _startup_phase:
+	if _hlod_requested_visible and _hlod_merger and not _startup_phase:
 		if prof: prof.begin_section("hlod_merger")
-		_hlod_merger.process_merge_queue()  # Staggered: max 2 cells/frame
-		_hlod_merger.process_completions()
-		if _cell_changed_this_frame or _hlod_needs_initial_update:
-			_hlod_merger.update_for_camera(_camera_cell, _camera_position)
+		_hlod_merger.call("process_merge_queue")  # Staggered: max 2 cells/frame
+		_hlod_merger.call("process_completions")
+		if _should_update_hlod():
+			_hlod_merger.call("update_for_camera", _camera_cell, _camera_position)
 			_hlod_needs_initial_update = false
+			_hlod_last_update_position = _camera_position
+		_sync_hlod_far_coverage(false)
 		if prof: prof.end_section("hlod_merger")
 
 	# Update distant light manager (camera pos + time-of-day)
@@ -867,13 +877,13 @@ func _process(delta: float) -> void:
 	var phase_start := Time.get_ticks_usec()
 	if prof:
 		prof.begin_section("unload")
-	if not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty():
-		CrashBreadcrumb.write("nsm::unload_tick_begin", "cells=%d hide=%d clean=%d" % [
-			_unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
+	if not _pending_unload_queue.is_empty() or not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty():
+		CrashBreadcrumb.write("nsm::unload_tick_begin", "queued=%d cells=%d hide=%d clean=%d" % [
+			_pending_unload_queue.size(), _unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
 		])
 		_process_budgeted_unloading()
-		CrashBreadcrumb.write("nsm::unload_tick_done", "cells=%d hide=%d clean=%d" % [
-			_unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
+		CrashBreadcrumb.write("nsm::unload_tick_done", "queued=%d cells=%d hide=%d clean=%d" % [
+			_pending_unload_queue.size(), _unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
 		])
 	if prof:
 		prof.end_section("unload")
@@ -1053,6 +1063,8 @@ func _is_cell_occupied(grid: Vector2i) -> bool:
 		return true
 	if grid in _loading_cells:
 		return true
+	if grid in _pending_unload_set:
+		return true
 	if grid in _unloading_cells:
 		return true
 	if grid in _pending_rs_hide_set:
@@ -1140,6 +1152,9 @@ func _update_loaded_cells() -> void:
 		_unloading_frozen.erase(grid)
 	var t_reclaim := Time.get_ticks_usec()
 
+	for grid: Vector2i in cells_to_load:
+		_cancel_pending_unload_cell(grid)
+
 	# Unload cells that are too far (with hysteresis)
 	# Load uses Chebyshev grid (square), so max Euclidean distance is the diagonal:
 	# sqrt(2) * radius * cell_size. Unload threshold must exceed this to prevent
@@ -1157,8 +1172,11 @@ func _update_loaded_cells() -> void:
 	if debug_enabled and not cells_to_unload.is_empty():
 		_debug("Unloading %d cells" % cells_to_unload.size())
 
+	cells_to_unload.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return DU.cell_distance_squared(_camera_cell, a) < DU.cell_distance_squared(_camera_cell, b)
+	)
 	for grid: Vector2i in cells_to_unload:
-		_unload_cell(grid)
+		_queue_unload_cell(grid)
 	var t_unload := Time.get_ticks_usec()
 
 	# Queue new cells for loading (sorted farthest-first so pop_back gets nearest)
@@ -1319,6 +1337,39 @@ func _load_cell_sync(grid: Vector2i) -> void:
 ## populated cell_node. Instead the request_id parks in `_unloading_request_ids`
 ## until the cell truly dies in `_process_budgeted_unloading`, where
 ## `finalize_unloaded_cell` does the soft cleanup.
+func _queue_unload_cell(grid: Vector2i) -> void:
+	if grid in _pending_unload_set or grid in _unloading_cells:
+		return
+	if grid not in _loaded_cells:
+		return
+	_pending_unload_queue.append(grid)
+	_pending_unload_set[grid] = true
+
+
+func _cancel_pending_unload_cell(grid: Vector2i) -> void:
+	if grid not in _pending_unload_set:
+		return
+	var idx := _pending_unload_queue.find(grid)
+	if idx >= 0:
+		_pending_unload_queue[idx] = _pending_unload_queue.back()
+		_pending_unload_queue.pop_back()
+	_pending_unload_set.erase(grid)
+
+
+func _process_pending_unload_starts(start_time_usec: int, budget_usec: float) -> int:
+	var started := 0
+	while not _pending_unload_queue.is_empty() and started < SC.UNLOAD_STARTS_PER_FRAME:
+		if started > 0 and float(Time.get_ticks_usec() - start_time_usec) >= budget_usec:
+			break
+		var grid: Vector2i = _pending_unload_queue.pop_back()
+		_pending_unload_set.erase(grid)
+		if grid not in _loaded_cells or grid in _unloading_cells:
+			continue
+		_unload_cell(grid)
+		started += 1
+	return started
+
+
 func _unload_cell(grid: Vector2i) -> void:
 	# NOTE 2026-04-20: prior `CrashBreadcrumb.write("unload_cell_begin/end", ...)`
 	# calls at entry/exit were each doing FileAccess open/write/close. Per-cell
@@ -1453,6 +1504,10 @@ func _process_budgeted_unloading() -> void:
 			var rem := int(_unloading_destructive_holds[grid])
 			if rem > 0:
 				_unloading_destructive_holds[grid] = rem - 1
+
+	var unload_starts := _process_pending_unload_starts(start_time, budget_usec)
+	if unload_starts > 0 and float(Time.get_ticks_usec() - start_time) >= budget_usec:
+		return
 
 	# Process each unloading cell
 	var completed_grids: Array[Vector2i] = []
@@ -1597,8 +1652,9 @@ func _process_budgeted_unloading() -> void:
 		if _static_renderer.has_method("defer_prototype_uploads"):
 			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 		var rs_freed := 0
+		var cleanup_cells := 0
 		while not _pending_rs_cleanup_cells.is_empty():
-			if Time.get_ticks_usec() - start_time >= budget_usec:
+			if cleanup_cells >= SC.RS_CLEANUP_CELLS_PER_FRAME or Time.get_ticks_usec() - start_time >= budget_usec:
 				break
 			var cleanup_grid: Vector2i = _pending_rs_cleanup_cells[-1]
 			# Don't free RIDs for cells still being hidden — O(1) set check
@@ -1607,6 +1663,7 @@ func _process_budgeted_unloading() -> void:
 			_pending_rs_cleanup_cells.resize(_pending_rs_cleanup_cells.size() - 1)
 			_pending_rs_cleanup_set.erase(cleanup_grid)
 			rs_freed += _static_renderer.remove_cell_instances(cleanup_grid)
+			cleanup_cells += 1
 		if rs_freed > 0 and debug_enabled:
 			_debug("Budgeted RS cleanup: freed %d instances, %d cells remaining" % [rs_freed, _pending_rs_cleanup_cells.size()])
 
@@ -1872,11 +1929,29 @@ func _process_pending_loads_sync(_delta: float) -> void:
 ## Get current streaming statistics
 func get_stats() -> Dictionary:
 	var s := _stats.duplicate()
+	var desired_cells := _get_cells_in_radius(_camera_cell, load_radius_cells)
+	var visual_ready_cells := 0
+	for grid: Vector2i in _loaded_cells:
+		if grid in _async_requests:
+			if _cell_manager and _cell_manager.has_method("is_async_visual_playable"):
+				var request_id: int = int(_async_requests[grid])
+				if bool(_cell_manager.call("is_async_visual_playable", request_id)):
+					visual_ready_cells += 1
+		else:
+			visual_ready_cells += 1
 
 	# Add load queue stats and telemetry
 	s["frame_overrun_count"] = _frame_overrun_count
+	s["load_radius_cells"] = load_radius_cells
+	s["target_cell_count"] = (2 * load_radius_cells + 1) * (2 * load_radius_cells + 1)
+	s["desired_cell_count"] = desired_cells.size()
+	s["resident_cell_containers"] = _loaded_cells.size()
+	s["visual_ready_cells"] = visual_ready_cells
 	s["load_queue_size"] = _pending_load_queue.size()
+	s["unload_queue_size"] = _pending_unload_queue.size()
+	s["unloading_cells"] = _unloading_cells.size()
 	s["async_requests"] = _async_requests.size()
+	s["loading_cells"] = _loading_cells.size()
 	s["async_loading_enabled"] = async_loading_enabled
 	s["camera_cell"] = _camera_cell
 	s["camera_position"] = _camera_position
@@ -1888,6 +1963,8 @@ func get_stats() -> Dictionary:
 	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
 		var cm_stats: Dictionary = _cell_manager.get_loading_stats()
 		s["instantiation_queue"] = cm_stats.get("instantiation_queue_size", 0)
+		s["active_async_load_slots"] = cm_stats.get("active_async_load_slots", 0)
+		s["resident_async_requests"] = cm_stats.get("resident_async_requests", 0)
 		s["pending_conversions"] = cm_stats.get("pending_conversions", 0)
 		s["pending_disk_loads"] = cm_stats.get("pending_disk_loads", 0)
 		s["burst_loading"] = cm_stats.get("burst_loading_active", false)
@@ -1902,13 +1979,62 @@ func get_stats() -> Dictionary:
 		s["mid_instances"] = sr_stats.get("total_instances", 0)
 		s["mid_visible"] = sr_stats.get("visible_instances", 0)
 		s["mid_mesh_types"] = sr_stats.get("mesh_types", 0)
+		s["mid_cell_buckets"] = sr_stats.get("cell_buckets", 0)
+		s["mid_bucket_draw_groups"] = sr_stats.get("bucket_draw_groups", 0)
+		s["mid_bucket_instances"] = sr_stats.get("bucket_instances", 0)
+		s["mid_bucket_rs_instances"] = sr_stats.get("bucket_rs_instances", 0)
+		s["hlod_mid_bucket_overrides"] = sr_stats.get("hlod_bucket_overrides", 0)
+		s["hlod_mid_bucket_override_refs"] = sr_stats.get("hlod_bucket_override_refs", 0)
 
-	# Merge HLOD stats
-	if _hlod_merger:
-		var hlod_stats: Dictionary = _hlod_merger.get_stats()
-		s["hlod_cells"] = hlod_stats.get("active_cells", 0)
-		s["hlod_pending"] = hlod_stats.get("pending_merges", 0)
-		s["hlod_cache_mb"] = hlod_stats.get("cache_bytes", 0) / (1024.0 * 1024.0)
+	var hlod_stats: Dictionary = get_hlod_stats()
+	s["hlod_active"] = hlod_stats.get("enabled", false)
+	s["hlod_initialized"] = _hlod_merger != null
+	s["hlod_cells"] = hlod_stats.get("active_cells", 0)
+	s["hlod_pending"] = hlod_stats.get("pending_merges", 0)
+	s["hlod_cache_mb"] = hlod_stats.get("cache_bytes", 0) / (1024.0 * 1024.0)
+	s["hlod_chunk_surfaces"] = hlod_stats.get("total_chunk_surfaces", 0)
+	s["hlod_chunk_materials"] = hlod_stats.get("total_chunk_materials", 0)
+	s["hlod_chunk_vertices"] = hlod_stats.get("total_chunk_vertices", 0)
+	s["hlod_chunk_indices"] = hlod_stats.get("total_chunk_indices", 0)
+	s["hlod_max_chunk_surfaces"] = hlod_stats.get("max_chunk_surfaces", 0)
+	s["hlod_max_chunk_materials"] = hlod_stats.get("max_chunk_materials", 0)
+	s["hlod_max_chunk_vertices"] = hlod_stats.get("max_chunk_vertices", 0)
+	s["hlod_max_chunk_indices"] = hlod_stats.get("max_chunk_indices", 0)
+	s["hlod_visual_begin_floor"] = hlod_stats.get("visual_begin_floor", DU.HLOD_START)
+	s["hlod_chunks_tier_0"] = hlod_stats.get("chunks_tier_0", 0)
+	s["hlod_chunks_tier_1"] = hlod_stats.get("chunks_tier_1", 0)
+	s["hlod_chunks_tier_2"] = hlod_stats.get("chunks_tier_2", 0)
+	s["hlod_active_visual_chunks"] = hlod_stats.get("active_visual_chunks", 0)
+	s["hlod_nonvisual_chunks_suppressed"] = hlod_stats.get("nonvisual_chunks_suppressed", 0)
+	s["hlod_mid_overlap_chunks"] = hlod_stats.get("mid_hlod_overlap_chunks", 0)
+	s["hlod_desired_chunks"] = hlod_stats.get("desired_chunks", 0)
+	s["hlod_merge_queue_size"] = hlod_stats.get("merge_queue_size", 0)
+	s["hlod_preparing_chunks"] = hlod_stats.get("preparing_chunks", 0)
+	s["hlod_negative_chunks"] = hlod_stats.get("negative_chunks", 0)
+	s["hlod_warmup_queue_size"] = hlod_stats.get("warmup_queue_size", 0)
+	s["hlod_stale_completions"] = hlod_stats.get("stale_completions_discarded", 0)
+	s["hlod_surface_cap_rejections"] = hlod_stats.get("surface_cap_rejections", 0)
+	s["hlod_refs_skipped"] = hlod_stats.get("total_refs_skipped", 0)
+	s["hlod_refs_type_rejected"] = hlod_stats.get("refs_type_rejected", 0)
+	s["hlod_refs_size_rejected"] = hlod_stats.get("refs_size_rejected", 0)
+	s["hlod_refs_surface_rejected"] = hlod_stats.get("refs_surface_rejected", 0)
+	s["hlod_refs_partial_bucket_rejected"] = hlod_stats.get("refs_partial_bucket_rejected", 0)
+	s["hlod_size_cache_hits"] = hlod_stats.get("size_cache_hits", 0)
+	s["hlod_size_cache_size"] = hlod_stats.get("size_cache_size", 0)
+	s["hlod_merge_queue_us"] = hlod_stats.get("merge_queue_last_usec", 0)
+	s["hlod_completion_us"] = hlod_stats.get("completion_last_usec", 0)
+	s["hlod_active_covered_refs"] = hlod_stats.get("active_covered_refs", 0)
+	s["hlod_active_covered_cells"] = hlod_stats.get("active_covered_cells", 0)
+	s["hlod_active_complete_coverage_chunks"] = hlod_stats.get("active_complete_coverage_chunks", 0)
+	s["hlod_active_incomplete_coverage_chunks"] = hlod_stats.get("active_incomplete_coverage_chunks", 0)
+	s["hlod_coverage_revision"] = hlod_stats.get("coverage_revision", 0)
+	s["hlod_handoff_far_overlap_chunks"] = hlod_stats.get("handoff_far_hlod_overlap_chunks", 0)
+	s["hlod_handoff_hole_risk_chunks"] = hlod_stats.get("handoff_hole_risk_chunks", 0)
+	s["hlod_far_covered_pages"] = hlod_stats.get("far_hlod_covered_pages", 0)
+	s["hlod_far_uncovered_pages"] = hlod_stats.get("far_hlod_uncovered_pages", 0)
+	s["hlod_far_page_overrides"] = hlod_stats.get("far_hlod_page_overrides", 0)
+	s["hlod_runtime_lod_generation_enabled"] = hlod_stats.get("runtime_lod_generation_enabled", false)
+	s["hlod_runtime_force_merge_eligible_refs"] = hlod_stats.get("runtime_force_merge_eligible_refs", false)
 
 	return s
 
@@ -2056,6 +2182,8 @@ func set_mid_tier_visible(visible: bool) -> void:
 ## Toggle FAR-tier impostors (NativeImpostorRenderer) — hides + stops streaming.
 func set_impostors_visible(visible: bool) -> void:
 	if _impostor_renderer:
+		if visible and _impostor_renderer.has_method("set_visibility_range_begin"):
+			_impostor_renderer.set_visibility_range_begin(DU.MID_END)
 		_impostor_renderer.set_enabled(visible)
 
 ## Toggle NEAR-tier Node3D cells (loaded cell containers).
@@ -2080,14 +2208,187 @@ func set_near_tier_visible(visible: bool) -> void:
 
 ## Toggle HLOD merged geometry (ObjectPaging)
 func set_hlod_visible(visible: bool) -> void:
-	if _hlod_merger:
-		_hlod_merger.set_all_visible(visible)
-	if _static_renderer:
-		_static_renderer.visibility_range_end = DU.HLOD_START if visible else DU.MID_END
-	if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
-		_impostor_renderer.set_visibility_range_begin(DU.HLOD_END if visible else DU.MID_END)
+	_hlod_requested_visible = visible
+	var effective_visible := false
 	if visible:
+		effective_visible = _ensure_hlod_merger()
+		if _hlod_merger:
+			_hlod_merger.set("enabled", effective_visible)
+			_hlod_merger.call("set_all_visible", effective_visible)
+	else:
+		_teardown_hlod_merger()
+		_sync_hlod_far_coverage(true)
+	if _static_renderer:
+		var mid_range_end := DU.MID_END
+		if _static_renderer.has_method("set_visibility_range_end"):
+			_static_renderer.call("set_visibility_range_end", mid_range_end)
+		else:
+			_static_renderer.visibility_range_end = mid_range_end
+	if _impostor_renderer and _impostor_renderer.has_method("set_visibility_range_begin"):
+		# Keep FAR as the 500m fallback until HLOD has exact per-page coverage
+		# ownership. Global FAR retirement creates holes for pending, sparse, or
+		# negative HLOD chunks.
+		_impostor_renderer.set_visibility_range_begin(DU.MID_END)
+	if effective_visible:
 		_hlod_needs_initial_update = true
+		_sync_hlod_far_coverage(true)
+
+
+func is_hlod_active() -> bool:
+	return _hlod_requested_visible and _hlod_merger != null
+
+
+func get_hlod_stats() -> Dictionary:
+	if not _hlod_merger:
+		return {
+			"enabled": false,
+			"active_cells": 0,
+			"pending_merges": 0,
+			"cache_entries": 0,
+			"cache_bytes": 0,
+			"total_merges_completed": 0,
+			"total_refs_skipped": 0,
+			"refs_size_rejected": 0,
+			"refs_surface_rejected": 0,
+			"refs_partial_bucket_rejected": 0,
+			"refs_type_rejected": 0,
+			"size_cache_hits": 0,
+			"size_cache_size": 0,
+			"chunks_tier_0": 0,
+			"chunks_tier_1": 0,
+			"chunks_tier_2": 0,
+			"total_chunk_surfaces": 0,
+			"total_chunk_materials": 0,
+			"total_chunk_vertices": 0,
+			"total_chunk_indices": 0,
+			"max_chunk_surfaces": 0,
+			"max_chunk_materials": 0,
+			"max_chunk_vertices": 0,
+			"max_chunk_indices": 0,
+			"stale_completions_discarded": 0,
+			"surface_cap_rejections": 0,
+			"merge_queue_last_usec": 0,
+			"completion_last_usec": 0,
+			"preparing_chunks": 0,
+			"negative_chunks": 0,
+			"desired_chunks": 0,
+			"merge_queue_size": 0,
+			"active_visual_chunks": 0,
+			"visual_begin_floor": DU.HLOD_START,
+			"mid_hlod_overlap_chunks": 0,
+			"nonvisual_chunks_suppressed": 0,
+			"far_visibility_begin_m": DU.MID_END,
+			"handoff_far_hlod_overlap_chunks": 0,
+			"handoff_hole_risk_chunks": 0,
+			"far_hlod_covered_pages": 0,
+			"far_hlod_uncovered_pages": 0,
+			"far_hlod_covered_impostors": 0,
+			"far_hlod_page_overrides": 0,
+			"active_covered_refs": 0,
+			"active_covered_cells": 0,
+			"active_complete_coverage_chunks": 0,
+			"active_incomplete_coverage_chunks": 0,
+			"coverage_revision": 0,
+			"warmup_queue_size": 0,
+			"total_teleports": 0,
+			"runtime_lod_generation_enabled": false,
+			"runtime_force_merge_eligible_refs": false,
+		}
+	var stats: Dictionary = _hlod_merger.call("get_stats")
+	stats["enabled"] = bool(_hlod_merger.get("enabled"))
+	stats["runtime_lod_generation_enabled"] = bool(stats.get("runtime_lod_generation_enabled", false))
+	stats["runtime_force_merge_eligible_refs"] = bool(stats.get("runtime_force_merge_eligible_refs", false))
+	var far_begin := DU.MID_END
+	var far_enabled := false
+	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
+		var far_stats: Dictionary = _impostor_renderer.call("get_stats")
+		far_begin = float(far_stats.get("far_visibility_begin_m", DU.MID_END))
+		far_enabled = bool(far_stats.get("far_enabled", false))
+	stats["far_visibility_begin_m"] = far_begin
+	stats["handoff_far_hlod_overlap_chunks"] = int(stats.get("active_visual_chunks", 0)) if far_enabled and far_begin < DU.HLOD_END else 0
+	stats["handoff_hole_risk_chunks"] = (
+		int(stats.get("pending_merges", 0))
+		+ int(stats.get("merge_queue_size", 0))
+		+ int(stats.get("preparing_chunks", 0))
+		+ int(stats.get("negative_chunks", 0))
+	) if far_begin > DU.MID_END else 0
+	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
+		var impostor_stats: Dictionary = _impostor_renderer.call("get_stats")
+		stats["far_hlod_covered_pages"] = int(impostor_stats.get("far_hlod_covered_pages", 0))
+		stats["far_hlod_uncovered_pages"] = int(impostor_stats.get("far_hlod_uncovered_pages", 0))
+		stats["far_hlod_covered_impostors"] = int(impostor_stats.get("far_hlod_covered_impostors", 0))
+		stats["far_hlod_page_overrides"] = int(impostor_stats.get("far_hlod_page_overrides", 0))
+	return stats
+
+
+func _sync_hlod_far_coverage(force: bool = false) -> void:
+	var can_sync_far := _impostor_renderer != null and _impostor_renderer.has_method("set_hlod_covered_ref_nums")
+	var can_sync_mid := _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
+	if not can_sync_far and not can_sync_mid:
+		return
+	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
+		if force or _hlod_far_coverage_revision != -1:
+			if can_sync_far:
+				_impostor_renderer.call("set_hlod_covered_ref_nums", {})
+			if can_sync_mid:
+				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
+			_hlod_far_coverage_revision = -1
+		return
+	var manifest: Dictionary = _hlod_merger.call("get_active_coverage_manifest")
+	var revision := int(manifest.get("coverage_revision", 0))
+	if not force and revision == _hlod_far_coverage_revision:
+		return
+	_hlod_far_coverage_revision = revision
+	if can_sync_far:
+		_impostor_renderer.call("set_hlod_covered_ref_nums", manifest.get("source_ref_nums", {}))
+	if can_sync_mid:
+		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("source_bucket_counts", {}), DU.HLOD_START)
+
+
+func _should_update_hlod() -> bool:
+	if _hlod_needs_initial_update or _cell_changed_this_frame:
+		return true
+	if _hlod_last_update_position == Vector3.INF:
+		return true
+	var camera_xz := Vector2(_camera_position.x, _camera_position.z)
+	var last_xz := Vector2(_hlod_last_update_position.x, _hlod_last_update_position.z)
+	return camera_xz.distance_to(last_xz) >= HLOD_UPDATE_DISTANCE
+
+
+func _ensure_hlod_merger() -> bool:
+	if _hlod_merger:
+		return true
+	if not _static_renderer or not _background_processor:
+		Log.warn("streaming", "HLOD requested before streaming initialization completed")
+		return false
+	if not _object_paging_script:
+		_object_paging_script = load("res://src/core/world/object_paging.gd") as Script
+	if not _object_paging_script:
+		Log.error("streaming", "Failed to load ObjectPaging script for HLOD")
+		return false
+	var merger: RefCounted = _object_paging_script.new() as RefCounted
+	if not merger:
+		Log.error("streaming", "Failed to create ObjectPaging instance for HLOD")
+		return false
+	_hlod_merger = merger
+	var scenario := get_viewport().get_world_3d().scenario
+	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor)
+	if _hlod_merger.has_method("set_visual_begin_floor"):
+		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
+	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID fallback 0-%dm, covered MID caps at %dm, HLOD visible %d-%dm, FAR fallback starts at %dm" % [
+		int(DU.MID_END), int(DU.HLOD_START), int(DU.HLOD_START), int(DU.HLOD_END), int(DU.MID_END)])
+	return true
+
+
+func _teardown_hlod_merger() -> void:
+	if _hlod_merger:
+		_hlod_merger.set("enabled", false)
+		_hlod_merger.call("set_all_visible", false)
+		_hlod_merger.call("cleanup", true)
+		_hlod_merger = null
+	_hlod_needs_initial_update = true
+	if _static_renderer and _static_renderer.has_method("set_hlod_covered_bucket_counts"):
+		_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
 
 ## Toggle distant-light billboard MultiMesh (DistantLightManager) — hides + stops streaming.
 func set_distant_lights_visible(visible: bool) -> void:
@@ -2453,7 +2754,7 @@ func _log_pipeline_compile_for_cell_load(grid: Vector2i, object_count: int, mode
 
 ## Emit startup progress signal for parent UI to handle
 func _emit_startup_progress() -> void:
-	var target_cells := (2 * load_radius_cells + 1) * (2 * load_radius_cells + 1)  # (2r+1)² grid
+	var target_cells := _get_cells_in_radius(_camera_cell, load_radius_cells).size()
 	var loaded := _loaded_cells.size()
 	var loading := _loading_cells.size()
 	var queue_size := _cell_manager.get_instantiation_queue_size() if _cell_manager else 0
@@ -2508,7 +2809,7 @@ func _check_startup_complete() -> void:
 	var nearby_cells_loaded := _loaded_cells.size() >= mini(load_radius_cells * 2 + 1, 7)
 	# Diagnostic: log startup progress every 60 frames
 	if _startup_frames % 60 == 0:
-		Log.info("streaming", "Startup check: cells=%d/%d queue=%d imp_processed=%d/%d imp_pending=%d" % [
+		Log.info("streaming", "Startup check: nearby_cells=%d/%d queue=%d imp_processed=%d/%d imp_pending=%d" % [
 			_loaded_cells.size(), mini(load_radius_cells * 2 + 1, 7),
 			queue_size, impostor_processed, inner_ring_count,
 			impostor_pending])

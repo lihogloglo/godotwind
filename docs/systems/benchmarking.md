@@ -56,7 +56,7 @@ Live performance overlay — replaces v1's cross-session isolation with the Unre
 UI rebuild throttled to 10Hz while visible; fully skipped while hidden so the HUD can't perturb the measurement it's reporting. Mouse events pass through (`MOUSE_FILTER_IGNORE` on the panel) so clicks/drags over the HUD rect still reach the fly-cam.
 
 ### `src/tools/progressive_benchmark.gd` (`ProgressiveBenchmark`, Node)
-Drives the `bench_progressive` command — 10 × 85s scripted flybys in one session, enabling subsystems additively (baseline first, then each of terrain → near_objects → mid_objects → impostors → shadows → postfx → sky → weather → characters). Wall-clock ~14.5 min. Order: hardcoded in `PROGRESSIVE_ORDER`; `hlod` deliberately omitted while HLOD is unused. Writes one aggregate `progressive_<timestamp>.csv` with `delta_ms` column showing each subsystem's marginal rendering cost.
+Drives the `bench_progressive` command — 11 × 85s scripted flybys in one session, enabling subsystems additively (baseline first, then each of terrain → near_objects → mid_objects → hlod → impostors → shadows → postfx → sky → weather → characters). Wall-clock ~15.5 min. Order: hardcoded in `PROGRESSIVE_ORDER`. Writes one aggregate `progressive_<timestamp>.csv` with `delta_ms` column showing each subsystem's marginal rendering cost.
 
 **Important:** progressive is additive-on-a-hot-session, NOT cross-session isolation. VRAM atlases and other allocations persist across passes, so the delta column measures RENDERING cost only. Allocation cost (launch-time) is not captured by this protocol.
 
@@ -76,7 +76,7 @@ Press `` ` `` (backtick) to open the console in-game.
 | `benchmark_streaming` | `bench_stream` | Same as `benchmark` |
 | `bench_start [label]` | | Begin a user-driven measurement block (drive the camera yourself) |
 | `bench_stop` | | Finalize the active `bench_start` block, write CSV + JSON with the label embedded in filenames |
-| `bench_progressive` | | Additive subsystem sweep, 10 × 85s flyby (~15 min) |
+| `bench_progressive` | | Additive subsystem sweep, 11 × 85s flyby (~15.5 min) |
 | `hud` | | Toggle the live benchmark HUD overlay |
 | `hud_reset` | | Clear the HUD's rolling 5s window (fresh measurement after a toggle change) |
 | `toggle <name>` | `t` | Flip one subsystem on/off |
@@ -201,7 +201,7 @@ The HUD (`hud` command) shows five lines, updated at 10Hz while visible:
 4. If you want it in the progressive sweep, append the flag name to `PROGRESSIVE_ORDER` in `src/tools/progressive_benchmark.gd`. Order matters — it's strictly additive, so put cheaper subsystems first.
 
 ### Toggle contract
-`Node3D.visible = bool` does **NOT** hide raw `RenderingServer.instance_create()` RIDs. If the subsystem uses raw RS instances (MID tier, HLOD), it needs its own `set_all_visible(bool)` that iterates the RID dict and calls `RS.instance_set_visible()`. See `static_object_renderer.gd` and `runtime_hlod_merger.gd` for the canonical pattern. Public API on `NativeStreamingManager` then delegates.
+`Node3D.visible = bool` does **NOT** hide raw `RenderingServer.instance_create()` RIDs. If the subsystem uses raw RS instances (MID tier, HLOD), it needs its own visibility API that iterates live draw groups/chunks and calls `RS.instance_set_visible()`. See `static_object_renderer.gd`, `cell_static_bucket.gd`, and `object_paging.gd` for the current patterns. Public API on `NativeStreamingManager` then delegates.
 
 ### Adding a new waypoint segment
 Edit `_build_waypoints()` in `streaming_benchmark.gd`. Append to `_segment_starts` with a name in the matching slot of `SEGMENT_NAMES`. Adjust `FLYBY_TOTAL_S` derivation if needed; the console command descriptions read from it dynamically so they auto-update.
@@ -226,7 +226,7 @@ Edit `_build_ui()` to create a new `Label`, then `_rebuild_labels()` to populate
 
 5. **`VILLAGE_ALTITUDE = 5.0` is a flat constant, not terrain-probed.** If Seyda Neen's ground at the spawn-cell center exceeds 5m, the flyby's idle segment spawns the camera underground and the "dense village render cost" measurement becomes a dirt-black frustum. Smoke-test: during a `benchmark` run, during the t=10-25s idle segment, visually confirm village geometry is visible. If not, `VILLAGE_ALTITUDE` needs a `Terrain3D.get_height()` probe (follow-up).
 
-6. **HUD + progressive concurrency.** The HUD + scripted flyby observe the same `Performance.*` monitors independently — running both is fine. But `bench_progressive` spawns 10 sequential `StreamingBenchmark` instances, each of which writes its own `_setup_ui()` overlay. If the HUD is visible during a progressive run, you'll see the HUD + the per-pass overlay stacked. Cosmetic only; measurement numbers are unaffected.
+6. **HUD + progressive concurrency.** The HUD + scripted flyby observe the same `Performance.*` monitors independently — running both is fine. But `bench_progressive` spawns 11 sequential `StreamingBenchmark` instances, each of which writes its own `_setup_ui()` overlay. If the HUD is visible during a progressive run, you'll see the HUD + the per-pass overlay stacked. Cosmetic only; measurement numbers are unaffected.
 
 7. **Progressive vs cold-launch cost.** `bench_progressive`'s `delta_ms` column captures RENDERING cost only — VRAM atlases, prebaked meshes, and other allocations made during earlier passes persist when a subsystem re-enables later. To measure allocation cost (launch-time), you need distinct process launches, which v2 deliberately doesn't automate. Use a manual A/B with `bench_start` in two separate sessions.
 

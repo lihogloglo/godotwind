@@ -6,10 +6,11 @@ class_name StreamingStressRunner
 extends Node
 
 const DU := preload("res://src/core/world/distance_utils.gd")
+const ObjectPaging := preload("res://src/core/world/object_paging.gd")
 const BT := preload("res://tests/benchmark/benchmark_thresholds.gd")
 
 const OUTPUT_DIR_BASE := "user://benchmark_results"
-const CSV_HEADERS := "frame,time_ms,fps,cam_x,cam_y,cam_z,cell_x,cell_y,cell_changed,queue_size,loaded_cells,async_requests,rendered_objects,draw_calls,primitives,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us"
+const CSV_HEADERS := "frame,time_ms,fps,cam_x,cam_y,cam_z,cell_x,cell_y,cell_changed,queue_size,loaded_cells,async_requests,rendered_objects,draw_calls,primitives,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us,total_impostors,far_pending_cells,far_texture_layers,far_texture_upload_us,far_normal_upload_us,far_multimesh_pack_us,far_multimesh_upload_us,far_cell_scan_us,far_page_count,far_dirty_page_count,far_pages_rebuilt,far_uploaded_instances,mid_instances,mid_visible,mid_buckets,mid_draw_groups,hlod_cells,hlod_pending,hlod_chunk_surfaces,hlod_chunk_materials,hlod_stale_completions,hlod_merge_queue_us,hlod_completion_us,hlod_desired_chunks,hlod_merge_queue_chunks,hlod_preparing_chunks,hlod_negative_chunks,hlod_active_visual_chunks,hlod_visual_begin_m,handoff_mid_hlod_overlap_chunks,hlod_nonvisual_suppressed,far_visibility_begin_m,handoff_far_hlod_overlap_chunks,handoff_hole_risk_chunks,far_hlod_covered_pages,far_hlod_uncovered_pages,far_hlod_covered_impostors,far_hlod_page_overrides,hlod_active_covered_refs,hlod_active_covered_cells,hlod_complete_coverage_chunks,hlod_incomplete_coverage_chunks,mid_mesh_types,hlod_enabled,hlod_initialized,hlod_cache_mb,hlod_chunks_tier_0,hlod_chunks_tier_1,hlod_chunks_tier_2"
 
 const SETTLE_SEC := 8.0
 const TRANSITION_PRE_FRAMES := 30
@@ -18,6 +19,7 @@ const BOOMERANG_DISTANCE_M := 360.0
 const BLOCKING_FRAME_MS := BT.BLOCKING_FRAME_MS
 const STREAMING_PUBLISH_BLOCKING_MS := BT.STREAMING_PUBLISH_BLOCKING_MS
 const STATIC_PUBLISH_SPIKE_MS := BT.STATIC_PUBLISH_SPIKE_MS
+const FAR_CELL_SCAN_SPIKE_MS := BT.SPIKE_FRAME_MS
 
 ## Step 2a: known-bad tokens scanned in the Godot user log at finish time.
 ## Hits flip the run status to "failed" and produce a non-zero process exit
@@ -67,6 +69,12 @@ const ROUTE_DENSE_LOOP_NAMES := {
 	"dense-loop": true,
 	"loop": true,
 }
+const ROUTE_LANDSCAPE_NAMES := {
+	"landscape": true,
+	"landscape-broad": true,
+	"broad-landscape": true,
+	"hlod-landscape": true,
+}
 const DENSE_LOOP_OFFSETS := [
 	Vector2i(0, 0),
 	Vector2i(1, 0),
@@ -78,6 +86,9 @@ const DENSE_LOOP_OFFSETS := [
 	Vector2i(0, -1),
 	Vector2i(1, -1),
 ]
+const LANDSCAPE_ROUTE_RADIUS_CELLS := 8
+const LANDSCAPE_ROUTE_MIN_POINTS := 12
+const LANDSCAPE_ROUTE_MAX_POINTS := 96
 
 var _streaming_manager: Node = null
 var _cell_manager: Variant = null
@@ -99,6 +110,7 @@ var _route_min := Vector3.ZERO
 var _route_max := Vector3.ZERO
 var _expect_reclaim_cell_event := false
 var _expect_reclaim_rejected_event := false
+var _route_forced_hlod := false
 
 var _phase := "settle"
 var _elapsed := 0.0
@@ -139,6 +151,10 @@ func configure(
 	_expect_reclaim_rejected_event = ROUTE_BOOMERANG_NAMES.has(route_key) and destructive_hold_frames > 0
 
 	_configure_route(_route_name)
+	if ROUTE_LANDSCAPE_NAMES.has(route_key) and _streaming_manager and _streaming_manager.has_method("set_hlod_visible"):
+		_streaming_manager.call("set_hlod_visible", true)
+		_route_forced_hlod = true
+		Log.info("tools", "[STRESS] landscape route enabling HLOD via public API")
 	_start_pos = _route_points[0] if not _route_points.is_empty() else DU.cell_to_world_center(_start_cell, _altitude_m)
 	_last_cell = DU.world_to_cell(_start_pos)
 	if _camera:
@@ -249,6 +265,9 @@ func _configure_route(name: String) -> void:
 		)
 		_route_cell_ref_counts[str(_start_cell)] = _get_cell_ref_count(_start_cell)
 		return
+	if ROUTE_LANDSCAPE_NAMES.has(n):
+		_configure_landscape_route()
+		return
 	if not ROUTE_DENSE_LOOP_NAMES.has(n):
 		_route_setup_failures.append("unknown_route:%s" % name)
 
@@ -275,6 +294,70 @@ func _configure_route(name: String) -> void:
 		_route_cells = [_start_cell]
 
 	_recompute_route_bounds_and_length()
+
+
+func _configure_landscape_route() -> void:
+	_route_mode = "path"
+	_route_points.clear()
+	_route_cells.clear()
+	_route_cell_ref_counts.clear()
+	for offset: Vector2i in _build_spiral_offsets(LANDSCAPE_ROUTE_RADIUS_CELLS):
+		var cell := _start_cell + offset
+		if not _cell_has_world_data(cell):
+			continue
+		_route_cells.append(cell)
+		_route_points.append(DU.cell_to_world_center(cell, _altitude_m))
+		_route_cell_ref_counts[str(cell)] = _get_cell_ref_count(cell)
+		if _route_points.size() >= LANDSCAPE_ROUTE_MAX_POINTS:
+			break
+
+	if _route_points.size() < LANDSCAPE_ROUTE_MIN_POINTS:
+		_route_setup_failures.append("landscape_insufficient_points:%d" % _route_points.size())
+		Log.warn("tools", "[STRESS] landscape route had only %d valid points near %s; falling back to dense-loop shape" % [
+			_route_points.size(), str(_start_cell)
+		])
+		_route_mode = "loop"
+		_route_points.clear()
+		_route_cells.clear()
+		_route_cell_ref_counts.clear()
+		for offset: Vector2i in DENSE_LOOP_OFFSETS:
+			var cell := _start_cell + offset
+			if not _cell_has_world_data(cell):
+				continue
+			_route_cells.append(cell)
+			_route_points.append(DU.cell_to_world_center(cell, _altitude_m))
+			_route_cell_ref_counts[str(cell)] = _get_cell_ref_count(cell)
+
+	_recompute_route_bounds_and_length()
+
+
+func _build_spiral_offsets(radius: int) -> Array[Vector2i]:
+	var offsets: Array[Vector2i] = [Vector2i.ZERO]
+	var x := 0
+	var y := 0
+	var step_len := 1
+	var directions: Array[Vector2i] = [
+		Vector2i(1, 0),
+		Vector2i(0, 1),
+		Vector2i(-1, 0),
+		Vector2i(0, -1),
+	]
+	while step_len <= radius * 2:
+		for dir_idx in range(directions.size()):
+			var dir := directions[dir_idx]
+			for _i in range(step_len):
+				x += dir.x
+				y += dir.y
+				if absi(x) <= radius and absi(y) <= radius:
+					offsets.append(Vector2i(x, y))
+			if dir_idx % 2 == 1:
+				step_len += 1
+	for yy in range(-radius, radius + 1):
+		for xx in range(-radius, radius + 1):
+			var offset := Vector2i(xx, yy)
+			if not offsets.has(offset):
+				offsets.append(offset)
+	return offsets
 
 
 func _sample_route(distance_m: float) -> Dictionary:
@@ -384,7 +467,7 @@ func _record_transition(from_cell: Vector2i, to_cell: Vector2i) -> void:
 func _log_frame(delta: float, cell_changed: bool) -> void:
 	_drain_lifecycle_events()
 	var row := PackedFloat64Array()
-	row.resize(31)
+	row.resize(80)
 	var cell := DU.world_to_cell(_camera.global_position)
 	row[0] = float(Engine.get_frames_drawn())
 	row[1] = delta * 1000.0
@@ -408,6 +491,61 @@ func _log_frame(delta: float, cell_changed: bool) -> void:
 			var pt: PackedFloat64Array = _streaming_manager.call("get_phase_times")
 			for i in range(mini(pt.size(), 9)):
 				row[16 + i] = pt[i]
+		if _streaming_manager.has_method("get_stats"):
+			var stats: Dictionary = _streaming_manager.call("get_stats")
+			row[31] = float(stats.get("total_impostors", 0))
+			row[32] = float(stats.get("pending_loads", 0))
+			row[33] = float(stats.get("texture_array_layers", 0))
+			row[34] = float(stats.get("far_texture_upload_us", 0))
+			row[35] = float(stats.get("far_normal_upload_us", 0))
+			row[36] = float(stats.get("far_multimesh_pack_us", 0))
+			row[37] = float(stats.get("far_multimesh_upload_us", 0))
+			row[38] = float(stats.get("far_cell_scan_us", 0))
+			row[39] = float(stats.get("far_page_count", 0))
+			row[40] = float(stats.get("far_dirty_page_count", 0))
+			row[41] = float(stats.get("far_pages_rebuilt", 0))
+			row[42] = float(stats.get("far_uploaded_instances", 0))
+			row[43] = float(stats.get("mid_instances", 0))
+			row[44] = float(stats.get("mid_visible", 0))
+			row[73] = float(stats.get("mid_mesh_types", 0))
+			row[75] = 1.0 if bool(stats.get("hlod_initialized", false)) else 0.0
+			row[76] = float(stats.get("hlod_cache_mb", 0.0))
+		if _streaming_manager.has_method("get_static_renderer_stats"):
+			var sr_stats: Dictionary = _streaming_manager.call("get_static_renderer_stats")
+			row[45] = float(sr_stats.get("cell_buckets", 0))
+			row[46] = float(sr_stats.get("bucket_draw_groups", 0))
+		if _streaming_manager.has_method("get_hlod_stats"):
+			var hlod_stats: Dictionary = _streaming_manager.call("get_hlod_stats")
+			row[47] = float(hlod_stats.get("active_cells", 0))
+			row[48] = float(hlod_stats.get("pending_merges", 0))
+			row[49] = float(hlod_stats.get("total_chunk_surfaces", 0))
+			row[50] = float(hlod_stats.get("total_chunk_materials", 0))
+			row[51] = float(hlod_stats.get("stale_completions_discarded", 0))
+			row[52] = float(hlod_stats.get("merge_queue_last_usec", 0))
+			row[53] = float(hlod_stats.get("completion_last_usec", 0))
+			row[54] = float(hlod_stats.get("desired_chunks", 0))
+			row[55] = float(hlod_stats.get("merge_queue_size", 0))
+			row[56] = float(hlod_stats.get("preparing_chunks", 0))
+			row[57] = float(hlod_stats.get("negative_chunks", 0))
+			row[58] = float(hlod_stats.get("active_visual_chunks", 0))
+			row[59] = float(hlod_stats.get("visual_begin_floor", 0.0))
+			row[60] = float(hlod_stats.get("mid_hlod_overlap_chunks", 0))
+			row[61] = float(hlod_stats.get("nonvisual_chunks_suppressed", 0))
+			row[62] = float(hlod_stats.get("far_visibility_begin_m", 0.0))
+			row[63] = float(hlod_stats.get("handoff_far_hlod_overlap_chunks", 0))
+			row[64] = float(hlod_stats.get("handoff_hole_risk_chunks", 0))
+			row[65] = float(hlod_stats.get("far_hlod_covered_pages", 0))
+			row[66] = float(hlod_stats.get("far_hlod_uncovered_pages", 0))
+			row[67] = float(hlod_stats.get("far_hlod_covered_impostors", 0))
+			row[68] = float(hlod_stats.get("far_hlod_page_overrides", 0))
+			row[69] = float(hlod_stats.get("active_covered_refs", 0))
+			row[70] = float(hlod_stats.get("active_covered_cells", 0))
+			row[71] = float(hlod_stats.get("active_complete_coverage_chunks", 0))
+			row[72] = float(hlod_stats.get("active_incomplete_coverage_chunks", 0))
+			row[74] = 1.0 if bool(hlod_stats.get("enabled", false)) else 0.0
+			row[77] = float(hlod_stats.get("chunks_tier_0", 0))
+			row[78] = float(hlod_stats.get("chunks_tier_1", 0))
+			row[79] = float(hlod_stats.get("chunks_tier_2", 0))
 	if _cell_manager and _cell_manager.has_method("get_frame_inst_route_times"):
 		var rt: Dictionary = _cell_manager.call("get_frame_inst_route_times")
 		row[25] = float(rt.get("door", 0))
@@ -483,6 +621,10 @@ func _quit_cleanly(exit_code: int = 0) -> void:
 		_streaming_manager.set_process(false)
 		if _streaming_manager.has_method("fast_cleanup"):
 			_streaming_manager.call("fast_cleanup")
+	call_deferred("_finish_quit", exit_code)
+
+
+func _finish_quit(exit_code: int) -> void:
 	get_tree().quit(exit_code)
 
 
@@ -525,6 +667,22 @@ func _collect_gate_failure_reasons(summary: Dictionary, failure_scan: Dictionary
 		var max_static_publish_ms := float(summary.get("max_inst_static_ms", 0.0))
 		if max_static_publish_ms >= STATIC_PUBLISH_SPIKE_MS:
 			reasons.append("max_static_publish_ms:%.1f" % max_static_publish_ms)
+	if summary.has("max_far_cell_scan_ms"):
+		var max_far_cell_scan_ms := float(summary.get("max_far_cell_scan_ms", 0.0))
+		if max_far_cell_scan_ms >= FAR_CELL_SCAN_SPIKE_MS:
+			reasons.append("max_far_cell_scan_ms:%.1f" % max_far_cell_scan_ms)
+	if summary.has("handoff_max_hole_risk_chunks"):
+		var hole_risk_chunks := int(summary.get("handoff_max_hole_risk_chunks", 0))
+		if hole_risk_chunks > 0:
+			reasons.append("handoff_hole_risk_chunks:%d" % hole_risk_chunks)
+	if summary.has("max_hlod_merge_queue_ms"):
+		var max_hlod_merge_ms := float(summary.get("max_hlod_merge_queue_ms", 0.0))
+		if max_hlod_merge_ms > float(ObjectPaging.MERGE_QUEUE_BUDGET_USEC) / 1000.0:
+			reasons.append("max_hlod_merge_queue_ms:%.1f" % max_hlod_merge_ms)
+	if summary.has("max_hlod_completion_ms"):
+		var max_hlod_completion_ms := float(summary.get("max_hlod_completion_ms", 0.0))
+		if max_hlod_completion_ms > float(ObjectPaging.COMPLETION_BUDGET_USEC) / 1000.0:
+			reasons.append("max_hlod_completion_ms:%.1f" % max_hlod_completion_ms)
 	return reasons
 
 
@@ -601,6 +759,7 @@ func _build_summary() -> Dictionary:
 			"route_mode": _route_mode,
 			"route_valid": _route_setup_failures.is_empty(),
 			"route_setup_failures": _route_setup_failures.duplicate(),
+			"route_forced_hlod": _route_forced_hlod,
 			"blocking_frame_ms": BLOCKING_FRAME_MS,
 			"frames": 0,
 			"lifecycle_event_counts": _build_event_counts(),
@@ -621,6 +780,57 @@ func _build_summary() -> Dictionary:
 	var max_inst_ms := 0.0
 	var max_static_cull_ms := 0.0
 	var max_inst_static_ms := 0.0
+	var max_total_impostors := 0.0
+	var max_far_pending_cells := 0.0
+	var max_far_texture_upload_ms := 0.0
+	var max_far_normal_upload_ms := 0.0
+	var max_far_multimesh_pack_ms := 0.0
+	var max_far_multimesh_upload_ms := 0.0
+	var max_far_cell_scan_ms := 0.0
+	var max_far_page_count := 0.0
+	var max_far_dirty_page_count := 0.0
+	var max_far_pages_rebuilt := 0.0
+	var max_far_uploaded_instances := 0.0
+	var min_mid_visible := INF
+	var max_mid_visible := 0.0
+	var min_mid_instances := INF
+	var max_mid_instances := 0.0
+	var max_mid_buckets := 0.0
+	var max_mid_draw_groups := 0.0
+	var min_hlod_cells := INF
+	var max_hlod_cells := 0.0
+	var max_hlod_pending := 0.0
+	var max_hlod_surfaces := 0.0
+	var max_hlod_materials := 0.0
+	var max_hlod_stale := 0.0
+	var max_hlod_merge_queue_ms := 0.0
+	var max_hlod_completion_ms := 0.0
+	var max_hlod_desired := 0.0
+	var max_hlod_merge_queue_chunks := 0.0
+	var max_hlod_preparing := 0.0
+	var max_hlod_negative := 0.0
+	var min_hlod_active_visual := INF
+	var max_hlod_active_visual := 0.0
+	var max_handoff_mid_hlod_overlap := 0.0
+	var max_hlod_nonvisual_suppressed := 0.0
+	var min_far_visibility_begin := INF
+	var max_far_visibility_begin := 0.0
+	var max_handoff_far_hlod_overlap := 0.0
+	var max_handoff_hole_risk := 0.0
+	var max_far_hlod_covered_pages := 0.0
+	var max_far_hlod_uncovered_pages := 0.0
+	var max_far_hlod_covered_impostors := 0.0
+	var max_far_hlod_page_overrides := 0.0
+	var max_hlod_active_covered_refs := 0.0
+	var max_hlod_active_covered_cells := 0.0
+	var max_hlod_complete_coverage_chunks := 0.0
+	var max_hlod_incomplete_coverage_chunks := 0.0
+	var max_mid_mesh_types := 0.0
+	var hlod_enabled_samples := 0
+	var max_hlod_cache_mb := 0.0
+	var max_hlod_tier_0 := 0.0
+	var max_hlod_tier_1 := 0.0
+	var max_hlod_tier_2 := 0.0
 	for row in _rows:
 		var ms := row[1]
 		frame_times.append(ms)
@@ -641,6 +851,58 @@ func _build_summary() -> Dictionary:
 		max_inst_ms = maxf(max_inst_ms, row[18] / 1000.0)
 		max_static_cull_ms = maxf(max_static_cull_ms, row[24] / 1000.0)
 		max_inst_static_ms = maxf(max_inst_static_ms, row[30] / 1000.0)
+		max_total_impostors = maxf(max_total_impostors, row[31])
+		max_far_pending_cells = maxf(max_far_pending_cells, row[32])
+		max_far_texture_upload_ms = maxf(max_far_texture_upload_ms, row[34] / 1000.0)
+		max_far_normal_upload_ms = maxf(max_far_normal_upload_ms, row[35] / 1000.0)
+		max_far_multimesh_pack_ms = maxf(max_far_multimesh_pack_ms, row[36] / 1000.0)
+		max_far_multimesh_upload_ms = maxf(max_far_multimesh_upload_ms, row[37] / 1000.0)
+		max_far_cell_scan_ms = maxf(max_far_cell_scan_ms, row[38] / 1000.0)
+		max_far_page_count = maxf(max_far_page_count, row[39])
+		max_far_dirty_page_count = maxf(max_far_dirty_page_count, row[40])
+		max_far_pages_rebuilt = maxf(max_far_pages_rebuilt, row[41])
+		max_far_uploaded_instances = maxf(max_far_uploaded_instances, row[42])
+		min_mid_instances = minf(min_mid_instances, row[43])
+		max_mid_instances = maxf(max_mid_instances, row[43])
+		min_mid_visible = minf(min_mid_visible, row[44])
+		max_mid_visible = maxf(max_mid_visible, row[44])
+		max_mid_buckets = maxf(max_mid_buckets, row[45])
+		max_mid_draw_groups = maxf(max_mid_draw_groups, row[46])
+		min_hlod_cells = minf(min_hlod_cells, row[47])
+		max_hlod_cells = maxf(max_hlod_cells, row[47])
+		max_hlod_pending = maxf(max_hlod_pending, row[48])
+		max_hlod_surfaces = maxf(max_hlod_surfaces, row[49])
+		max_hlod_materials = maxf(max_hlod_materials, row[50])
+		max_hlod_stale = maxf(max_hlod_stale, row[51])
+		max_hlod_merge_queue_ms = maxf(max_hlod_merge_queue_ms, row[52] / 1000.0)
+		max_hlod_completion_ms = maxf(max_hlod_completion_ms, row[53] / 1000.0)
+		max_hlod_desired = maxf(max_hlod_desired, row[54])
+		max_hlod_merge_queue_chunks = maxf(max_hlod_merge_queue_chunks, row[55])
+		max_hlod_preparing = maxf(max_hlod_preparing, row[56])
+		max_hlod_negative = maxf(max_hlod_negative, row[57])
+		min_hlod_active_visual = minf(min_hlod_active_visual, row[58])
+		max_hlod_active_visual = maxf(max_hlod_active_visual, row[58])
+		max_handoff_mid_hlod_overlap = maxf(max_handoff_mid_hlod_overlap, row[60])
+		max_hlod_nonvisual_suppressed = maxf(max_hlod_nonvisual_suppressed, row[61])
+		min_far_visibility_begin = minf(min_far_visibility_begin, row[62])
+		max_far_visibility_begin = maxf(max_far_visibility_begin, row[62])
+		max_handoff_far_hlod_overlap = maxf(max_handoff_far_hlod_overlap, row[63])
+		max_handoff_hole_risk = maxf(max_handoff_hole_risk, row[64])
+		max_far_hlod_covered_pages = maxf(max_far_hlod_covered_pages, row[65])
+		max_far_hlod_uncovered_pages = maxf(max_far_hlod_uncovered_pages, row[66])
+		max_far_hlod_covered_impostors = maxf(max_far_hlod_covered_impostors, row[67])
+		max_far_hlod_page_overrides = maxf(max_far_hlod_page_overrides, row[68])
+		max_hlod_active_covered_refs = maxf(max_hlod_active_covered_refs, row[69])
+		max_hlod_active_covered_cells = maxf(max_hlod_active_covered_cells, row[70])
+		max_hlod_complete_coverage_chunks = maxf(max_hlod_complete_coverage_chunks, row[71])
+		max_hlod_incomplete_coverage_chunks = maxf(max_hlod_incomplete_coverage_chunks, row[72])
+		max_mid_mesh_types = maxf(max_mid_mesh_types, row[73])
+		if row[74] > 0.0:
+			hlod_enabled_samples += 1
+		max_hlod_cache_mb = maxf(max_hlod_cache_mb, row[76])
+		max_hlod_tier_0 = maxf(max_hlod_tier_0, row[77])
+		max_hlod_tier_1 = maxf(max_hlod_tier_1, row[78])
+		max_hlod_tier_2 = maxf(max_hlod_tier_2, row[79])
 	frame_times.sort()
 
 	var transitions := _build_transition_summaries()
@@ -657,6 +919,7 @@ func _build_summary() -> Dictionary:
 		"route_mode": _route_mode,
 		"route_valid": _route_setup_failures.is_empty(),
 		"route_setup_failures": _route_setup_failures.duplicate(),
+		"route_forced_hlod": _route_forced_hlod,
 		"route_cells": _route_cells_as_strings(),
 		"route_cell_ref_counts": _route_cell_ref_counts,
 		"route_length_m": _route_total_length,
@@ -693,6 +956,57 @@ func _build_summary() -> Dictionary:
 		"max_phase_inst_ms": max_inst_ms,
 		"max_phase_static_cull_ms": max_static_cull_ms,
 		"max_inst_static_ms": max_inst_static_ms,
+		"max_total_impostors": int(max_total_impostors),
+		"max_far_pending_cells": int(max_far_pending_cells),
+		"max_far_texture_upload_ms": max_far_texture_upload_ms,
+		"max_far_normal_upload_ms": max_far_normal_upload_ms,
+		"max_far_multimesh_pack_ms": max_far_multimesh_pack_ms,
+		"max_far_multimesh_upload_ms": max_far_multimesh_upload_ms,
+		"max_far_cell_scan_ms": max_far_cell_scan_ms,
+		"max_far_page_count": int(max_far_page_count),
+		"max_far_dirty_page_count": int(max_far_dirty_page_count),
+		"max_far_pages_rebuilt": int(max_far_pages_rebuilt),
+		"max_far_uploaded_instances": int(max_far_uploaded_instances),
+		"min_mid_instances": int(min_mid_instances),
+		"max_mid_instances": int(max_mid_instances),
+		"min_mid_visible": int(min_mid_visible),
+		"max_mid_visible": int(max_mid_visible),
+		"max_mid_buckets": int(max_mid_buckets),
+		"max_mid_draw_groups": int(max_mid_draw_groups),
+		"min_hlod_cells": int(min_hlod_cells),
+		"max_hlod_cells": int(max_hlod_cells),
+		"max_hlod_pending": int(max_hlod_pending),
+		"max_hlod_chunk_surfaces": int(max_hlod_surfaces),
+		"max_hlod_chunk_materials": int(max_hlod_materials),
+		"max_hlod_stale_completions": int(max_hlod_stale),
+		"max_hlod_merge_queue_ms": max_hlod_merge_queue_ms,
+		"max_hlod_completion_ms": max_hlod_completion_ms,
+		"max_hlod_desired_chunks": int(max_hlod_desired),
+		"max_hlod_merge_queue_chunks": int(max_hlod_merge_queue_chunks),
+		"max_hlod_preparing_chunks": int(max_hlod_preparing),
+		"max_hlod_negative_chunks": int(max_hlod_negative),
+		"min_hlod_active_visual_chunks": int(min_hlod_active_visual),
+		"max_hlod_active_visual_chunks": int(max_hlod_active_visual),
+		"handoff_max_mid_hlod_overlap_chunks": int(max_handoff_mid_hlod_overlap),
+		"max_hlod_nonvisual_suppressed": int(max_hlod_nonvisual_suppressed),
+		"min_far_visibility_begin_m": min_far_visibility_begin,
+		"max_far_visibility_begin_m": max_far_visibility_begin,
+		"handoff_max_far_hlod_overlap_chunks": int(max_handoff_far_hlod_overlap),
+		"handoff_max_hole_risk_chunks": int(max_handoff_hole_risk),
+		"max_far_hlod_covered_pages": int(max_far_hlod_covered_pages),
+		"max_far_hlod_uncovered_pages": int(max_far_hlod_uncovered_pages),
+		"max_far_hlod_covered_impostors": int(max_far_hlod_covered_impostors),
+		"max_far_hlod_page_overrides": int(max_far_hlod_page_overrides),
+		"max_hlod_active_covered_refs": int(max_hlod_active_covered_refs),
+		"max_hlod_active_covered_cells": int(max_hlod_active_covered_cells),
+		"max_hlod_complete_coverage_chunks": int(max_hlod_complete_coverage_chunks),
+		"max_hlod_incomplete_coverage_chunks": int(max_hlod_incomplete_coverage_chunks),
+		"max_mid_mesh_types": int(max_mid_mesh_types),
+		"hlod_enabled_samples": hlod_enabled_samples,
+		"max_hlod_cache_mb": max_hlod_cache_mb,
+		"max_hlod_chunks_tier_0": int(max_hlod_tier_0),
+		"max_hlod_chunks_tier_1": int(max_hlod_tier_1),
+		"max_hlod_chunks_tier_2": int(max_hlod_tier_2),
 		"transitions": transitions,
 		"lifecycle_event_counts": lifecycle_counts,
 	}
@@ -721,6 +1035,15 @@ func _build_transition_summaries() -> Array[Dictionary]:
 		var post_max_queue := _max_value(idx, post_end, 9)
 		var post_min_loaded := _min_value(idx, post_end, 10)
 		var post_min_rendered := _min_value(idx, post_end, 12)
+		var post_min_mid_visible := _min_value(idx, post_end, 44)
+		var post_min_hlod_cells := _min_value(idx, post_end, 47)
+		var post_max_hlod_pending := _max_value(idx, post_end, 48)
+		var post_max_hlod_overlap := _max_value(idx, post_end, 60)
+		var post_min_hlod_active_visual := _min_value(idx, post_end, 58)
+		var post_max_far_hlod_overlap := _max_value(idx, post_end, 63)
+		var post_max_hole_risk := _max_value(idx, post_end, 64)
+		var post_max_far_hlod_page_overrides := _max_value(idx, post_end, 68)
+		var post_max_hlod_covered_refs := _max_value(idx, post_end, 69)
 		var pre_fps := 1000.0 / maxf(pre_avg_ms, 0.001)
 		var post_fps := 1000.0 / maxf(post_avg_ms, 0.001)
 		var post_min_fps := 1000.0 / maxf(post_max_ms, 0.001)
@@ -739,6 +1062,15 @@ func _build_transition_summaries() -> Array[Dictionary]:
 		copy["post_max_queue_size"] = int(post_max_queue)
 		copy["post_min_loaded_cells"] = int(post_min_loaded)
 		copy["post_min_rendered_objects"] = int(post_min_rendered)
+		copy["post_min_mid_visible"] = int(post_min_mid_visible)
+		copy["post_min_hlod_cells"] = int(post_min_hlod_cells)
+		copy["post_max_hlod_pending"] = int(post_max_hlod_pending)
+		copy["post_max_handoff_mid_hlod_overlap_chunks"] = int(post_max_hlod_overlap)
+		copy["post_min_hlod_active_visual_chunks"] = int(post_min_hlod_active_visual)
+		copy["post_max_handoff_far_hlod_overlap_chunks"] = int(post_max_far_hlod_overlap)
+		copy["post_max_handoff_hole_risk_chunks"] = int(post_max_hole_risk)
+		copy["post_max_far_hlod_page_overrides"] = int(post_max_far_hlod_page_overrides)
+		copy["post_max_hlod_active_covered_refs"] = int(post_max_hlod_covered_refs)
 		out.append(copy)
 	return out
 

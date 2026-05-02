@@ -46,6 +46,39 @@ static func _make_triangle_mesh() -> ArrayMesh:
 	return mesh
 
 
+## Build a deterministic triangle soup with enough vertices to exceed the
+## cost-benefit merge threshold for single-ref rejection tests.
+static func _make_triangle_soup_mesh(triangle_count: int) -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	var vert_count := triangle_count * 3
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+	verts.resize(vert_count)
+	normals.resize(vert_count)
+	indices.resize(vert_count)
+	for tri_idx in range(triangle_count):
+		var base := tri_idx * 3
+		var x := float(tri_idx % 10)
+		var y := float(tri_idx / 10)
+		verts[base] = Vector3(x, y, 0.0)
+		verts[base + 1] = Vector3(x + 1.0, y, 0.0)
+		verts[base + 2] = Vector3(x, y + 1.0, 0.0)
+		normals[base] = Vector3(0.0, 0.0, 1.0)
+		normals[base + 1] = Vector3(0.0, 0.0, 1.0)
+		normals[base + 2] = Vector3(0.0, 0.0, 1.0)
+		indices[base] = base
+		indices[base + 1] = base + 1
+		indices[base + 2] = base + 2
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
 ## Build a SubMeshInput wrapping a given mesh at identity local transform.
 static func _make_sub(mesh: ArrayMesh, mat_override: Material) -> Kernel.SubMeshInput:
 	var sm := Kernel.SubMeshInput.new()
@@ -71,6 +104,20 @@ static func _make_ref(mesh: ArrayMesh, mat: Material, world_pos: Vector3) -> Ker
 func test_empty_input_returns_null() -> void:
 	var mesh: ArrayMesh = Kernel.merge_refs([], Vector3.ZERO, 0, true)
 	assert_that(mesh).is_null()
+
+
+func test_object_paging_stats_include_observability_counters() -> void:
+	var paging := Merger.new()
+	var stats: Dictionary = paging.get_stats()
+
+	assert_bool(stats.has("runtime_lod_generation_enabled")).is_true()
+	assert_bool(stats.has("runtime_force_merge_eligible_refs")).is_true()
+	assert_bool(stats["runtime_lod_generation_enabled"]).is_false()
+	assert_bool(stats.has("refs_size_rejected")).is_true()
+	assert_bool(stats.has("refs_surface_rejected")).is_true()
+	assert_bool(stats.has("refs_partial_bucket_rejected")).is_true()
+	assert_bool(stats.has("surface_cap_rejections")).is_true()
+	assert_bool(stats.has("warmup_queue_size")).is_true()
 
 
 func test_single_ref_preserves_surface() -> void:
@@ -248,18 +295,18 @@ func test_size_worthy_scale_changes_outcome() -> void:
 	var mesh_radius_sq := 1.0  # 1m radius
 	var dist_sq := 10000.0  # 100m
 
-	# Scale=2.0 → radius² × scale² = 4. Threshold = dist² × minSize² = 10000 × 0.0196 = 196.
-	# 4 < 196 → still rejected at 100m.
+	# Godotwind's tuned minSize=0.02 gives threshold = 10000 × 0.0004 = 4.
+	# Scale=1 → 1 < 4 rejected. Scale=2 → 4 >= 4 kept (inclusive boundary).
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 1.0, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_false()
 	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
-		.is_false()
-
-	# Closer: dist=30m, dist_sq=900, threshold=900 × 0.0196 = 17.64.
-	# Scale=2 → 4. Still rejected (17.64 > 4).
-	# Scale=5 → 25. 25 >= 17.64 → kept.
-	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 5.0, 900.0, DU.PAGING_MIN_SIZE_SQ)) \
 		.is_true()
-	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, 900.0, DU.PAGING_MIN_SIZE_SQ)) \
+
+	# Farther: dist=150m, threshold=9. Scale=2 → 4 rejected; scale=3 → 9 kept.
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, 22500.0, DU.PAGING_MIN_SIZE_SQ)) \
 		.is_false()
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 3.0, 22500.0, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_true()
 
 
 ## Threshold boundary — exactly at the cutoff should pass (>= inclusive).
@@ -289,10 +336,11 @@ func test_size_worthy_zero_distance_kept() -> void:
 		.is_true()
 
 
-## PAGING_MIN_SIZE = 0.14 matches OpenMW canonical default (plan §8 / 17.1).
-func test_paging_min_size_matches_openmw_default() -> void:
-	assert_float(DU.PAGING_MIN_SIZE).is_equal_approx(0.14, 0.001)
-	assert_float(DU.PAGING_MIN_SIZE_SQ).is_equal_approx(0.0196, 0.0001)
+## PAGING_MIN_SIZE keeps OpenMW's projected-size pattern but uses Godotwind's
+## meter-scale tuned default so buildings and vegetation survive HLOD range.
+func test_paging_min_size_matches_godotwind_tuned_default() -> void:
+	assert_float(DU.PAGING_MIN_SIZE).is_equal_approx(0.02, 0.001)
+	assert_float(DU.PAGING_MIN_SIZE_SQ).is_equal_approx(0.0004, 0.00001)
 
 
 #endregion
@@ -366,10 +414,10 @@ func test_analyze_empty_input() -> void:
 	assert_that(result).is_empty()
 
 
-## Single mesh type with unique materials → merge_benefit = 0 (nothing to share).
-## OpenMW `mergeBenefit > mergeCost` fails → unmerged.
-func test_analyze_single_unique_type_not_merged() -> void:
-	var tri := _make_triangle_mesh()
+## Single high-cost mesh type can still fail cost-benefit.
+## With one material and one ref: benefit = 1 × 1 × 256 = 256; cost = 300.
+func test_analyze_single_high_cost_type_not_merged() -> void:
+	var tri := _make_triangle_soup_mesh(100)
 	var mat := StandardMaterial3D.new()
 	var refs: Array = [_make_ref(tri, mat, Vector3.ZERO)]
 	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
@@ -377,7 +425,7 @@ func test_analyze_single_unique_type_not_merged() -> void:
 	var mesh_id: int = tri.get_instance_id()
 	assert_that(result).contains_keys([mesh_id])
 	assert_bool(result[mesh_id]["merge"]) \
-		.override_failure_message("Single unique-material type must not merge (no shared materials = benefit 0).") \
+		.override_failure_message("Single high-cost type must not merge when mergeBenefit <= mergeCost.") \
 		.is_false()
 
 
@@ -409,8 +457,10 @@ func test_analyze_two_types_shared_material_both_merged() -> void:
 		.is_true()
 
 
-## Two mesh types with distinct materials (nothing shared) → both unmerged.
-func test_analyze_two_types_distinct_materials_not_merged() -> void:
+## Distinct materials no longer block merging. Current analyze uses OpenMW's
+## intra-NIF state-reuse shape: each low-cost triangle type independently
+## clears benefit > cost even when materials are not shared across mesh types.
+func test_analyze_two_types_distinct_materials_can_merge_when_low_cost() -> void:
 	var tri_a := _make_triangle_mesh()
 	var tri_b := _make_triangle_mesh()
 	var mat_a := StandardMaterial3D.new()
@@ -422,8 +472,8 @@ func test_analyze_two_types_distinct_materials_not_merged() -> void:
 	]
 	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
 
-	assert_bool(result[tri_a.get_instance_id()]["merge"]).is_false()
-	assert_bool(result[tri_b.get_instance_id()]["merge"]).is_false()
+	assert_bool(result[tri_a.get_instance_id()]["merge"]).is_true()
+	assert_bool(result[tri_b.get_instance_id()]["merge"]).is_true()
 
 
 ## size_level affects merge cost: higher level = higher cost = harder to merge.
@@ -549,6 +599,14 @@ func test_paging_band_boundaries_contiguous() -> void:
 
 
 ## Ring radius bounds per plan §4.5. Worst case size_level=2 = 3 chunks.
+func test_hlod_visual_floor_starts_at_hlod_boundary() -> void:
+	var merger := Merger.new()
+	assert_float(float(merger.get("_visual_begin_floor"))).is_equal_approx(DU.HLOD_START, 0.01)
+	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 0))).is_false()
+	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 1))).is_true()
+	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 2))).is_true()
+
+
 func test_paging_ring_radius_bounds() -> void:
 	# size_level=0: band_end=300, chunk_extent=117 → ceil(300/117) = 3 (actually 300/117=2.56)
 	# Let's check what we get and assert it's <= a reasonable bound.
@@ -609,10 +667,8 @@ func test_top_down_walk_band_membership() -> void:
 		).is_true()
 
 
-## At origin camera, each active tier should produce SOME chunks.
-## Phase 4 (2026-04-17): size_level=0 was retired — PrototypeRegistry (MID)
-## owns the 150-300m band. The walk only visits tiers 1 and 2 now. No tier-0
-## chunks must be emitted.
+## At origin camera, only visual HLOD tiers should produce chunks. Size level 0
+## is below the runtime visual floor and remains suppressed.
 func test_top_down_walk_all_tiers_populated_from_origin() -> void:
 	var merger := Merger.new()
 	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
@@ -621,7 +677,7 @@ func test_top_down_walk_all_tiers_populated_from_origin() -> void:
 	for key: Vector3i in desired:
 		tier_counts[key.z] = tier_counts[key.z] + 1
 
-	assert_int(tier_counts[0]).override_failure_message("size_level=0 chunks must NOT be produced — MID registry owns 150-300m post-Phase-4.").is_equal(0)
+	assert_int(tier_counts[0]).override_failure_message("size_level=0 chunks must stay suppressed below the HLOD visual floor.").is_equal(0)
 	assert_int(tier_counts[1]).override_failure_message("No size_level=1 chunks desired — band [300,600) should produce chunks at origin.").is_greater(0)
 	assert_int(tier_counts[2]).override_failure_message("No size_level=2 chunks desired — band [600,1000) should produce chunks at origin.").is_greater(0)
 
@@ -889,7 +945,7 @@ func test_min_size_merged_sq_weak_merge_tightens_to_base() -> void:
 ## Analyze now emits rich per-type dicts: merge:bool + min_size_merged_sq:float.
 ## Rejected types get min_size_merged_sq = 0 (filter is no-op).
 func test_analyze_rejected_type_has_zero_min_size_merged() -> void:
-	var tri := _make_triangle_mesh()
+	var tri := _make_triangle_soup_mesh(100)
 	var mat := StandardMaterial3D.new()
 	var refs: Array = [_make_ref(tri, mat, Vector3.ZERO)]
 	var result: Dictionary = Kernel._analyze_chunk(refs, 0)
@@ -938,8 +994,8 @@ func test_flatten_drops_sub_threshold_ref_via_second_pass() -> void:
 
 	# Configure refs so the second-pass filter rejects `small` and `small2`
 	# but keeps `big` and `big2`. rs2=1000, dist_sq=10000, threshold worst-case
-	# at MIN_SIZE² ≈ 0.0196 → dist_sq × threshold ≈ 196. Big's rs2=1000 > 196 kept.
-	# Small's rs2=0.01, threshold same → 0.01 < 196 rejected.
+	# at MIN_SIZE² ≈ 0.0004 → dist_sq × threshold ≈ 4. Big's rs2=1000 > 4 kept.
+	# Small's rs2=0.01, threshold same → 0.01 < 4 rejected.
 	big.rs2 = 1000.0
 	big.dist_sq = 10000.0
 	big2.rs2 = 1000.0
@@ -1006,15 +1062,15 @@ func test_flatten_second_pass_noop_when_ref_metrics_missing() -> void:
 func test_size_worthy_reevaluation_after_camera_approach() -> void:
 	# Cache-equivalent value: mesh_radius_sq × scale² = 1.0 × 1.0 = 1.0
 	var cached_rs2 := 1.0
-	var min_size_sq := DU.PAGING_MIN_SIZE_SQ  # 0.0196
+	var min_size_sq := DU.PAGING_MIN_SIZE_SQ  # 0.0004
 
-	# At 500m: threshold = 250000 × 0.0196 = 4900. 1.0 < 4900 → rejected.
+	# At 500m: threshold = 250000 × 0.0004 = 100. 1.0 < 100 → rejected.
 	var at_500 := 250000.0 * min_size_sq
 	assert_bool(cached_rs2 < at_500) \
 		.override_failure_message("SizeCache path assumes ref rejected at 500m.") \
 		.is_true()
 
-	# At 5m: threshold = 25 × 0.0196 = 0.49. 1.0 >= 0.49 → kept. Cache should
+	# At 5m: threshold = 25 × 0.0004 = 0.01. 1.0 >= 0.01 → kept. Cache should
 	# evict and fall through to full-path instantiation.
 	var at_5 := 25.0 * min_size_sq
 	assert_bool(cached_rs2 < at_5) \

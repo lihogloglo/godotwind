@@ -24,12 +24,9 @@ const HALF_CELL_SIZE: float = CELL_SIZE_METERS * 0.5
 const NEAR_END: float = 150.0
 
 ## MID tier: Per-object LOD meshes (NEAR_END to MID_END).
-## Phase 4 (2026-04-17) — with HLOD on (default), MID actually caps at
-## HLOD_START via `static_object_renderer.visibility_range_end`. With
-## HLOD off (debug/baseline mode), MID caps at NEAR_END (only NEAR
-## renders past 150m per the "Keep it simple" rule). MID_END itself is
-## now only used by legacy fallbacks + prebaked NIF visibility bands —
-## kept at 500 for back-compat with those.
+## Phase 4 (2026-04-17) — when HLOD is visible, MID caps at HLOD_START via
+## `static_object_renderer.visibility_range_end`. With HLOD off/default-parked,
+## MID falls back to MID_END so raw RS statics cover the 0-500m band.
 const MID_END: float = 500.0
 
 ## HLOD tier: Cell-level merged meshes (HLOD_START to HLOD_END)
@@ -37,11 +34,10 @@ const MID_END: float = 500.0
 const HLOD_START: float = 300.0
 const HLOD_END: float = 1000.0
 
-## FAR tier: Impostors/billboards (FAR_START to FAR_END).
-## Phase 5 (2026-04-17) — FAR_START pushed from MID_END (500m) to 1000m
-## so the MID+HLOD pipeline carries the 150-1000m range at full fidelity.
-## Impostors pick up at 1km, where per-object geometry is no longer worth
-## the draw-call cost.
+## FAR tier: Impostors/billboards (runtime begin to FAR_END).
+## FAR_START remains the nominal post-HLOD handoff distance. Runtime streaming
+## may clamp impostor visibility back to MID_END while HLOD coverage is pending
+## so sparse or negative HLOD chunks do not open 500-1000m holes.
 const FAR_END: float = 5000.0
 
 ## LEGACY: sub-LOD boundaries from the pre-B-wide 3-band MID scheme.
@@ -54,8 +50,8 @@ const LOD2_END: float = 375.0
 const LOD3_END: float = 500.0
 
 ## Tier start distances (for convenience).
-## Phase 5 (2026-04-17) — FAR_START broken from MID_END and pinned at 1000m
-## (= HLOD_END) so MID+HLOD cover the full 150-1000m range before impostors.
+## Nominal FAR handoff after exact HLOD replacement coverage exists. Current
+## runtime fallback may set impostor visibility to MID_END.
 const NEAR_START: float = 0.0
 const MID_START: float = NEAR_END
 const FAR_START: float = HLOD_END
@@ -64,7 +60,7 @@ const FAR_START: float = HLOD_END
 ## Tiered: smaller at close range (geometry mismatch visible), larger at distance
 const FADE_MARGIN: float = 10.0  ## Default / legacy (used by FAR tier impostor renderer)
 
-## Post-B-wide canonical fade margin: single render→impostor tier handoff at 500m.
+## Post-B-wide canonical fade margin for the render→impostor handoff.
 const FADE_MARGIN_RENDER_FAR: float = 20.0
 
 ## LEGACY per-boundary fade margins from the pre-B-wide 3-band MID scheme.

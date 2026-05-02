@@ -116,6 +116,9 @@ func test_batch_reserve_capacity_keeps_gpu_instance_count_until_upload() -> void
 
 	var slot: int = b.acquire_slot()
 	b.set_slot_transform(slot, Transform3D.IDENTITY)
+	for _i in range(PrototypeBatchScript.UPLOAD_DEFER_TICKS_AFTER_BATCH_CREATE):
+		b.cull_and_upload(Vector3.ZERO, 100.0)
+		assert_int(b.multimesh.instance_count).is_equal(before_instance_count)
 	b.cull_and_upload(Vector3.ZERO, 100.0)
 	assert_int(b.multimesh.instance_count).is_equal(8)
 	b.cleanup()

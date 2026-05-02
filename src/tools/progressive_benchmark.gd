@@ -11,20 +11,20 @@
 ## RENDERING cost. Allocation cost only shows up in the launch-time delta
 ## between runs, not in this sweep.
 ##
-## Wall-clock: ~14 min (10 × 85s flyby + 10 × 2s settle + finalization).
+## Wall-clock: ~15.5 min (11 × 85s flyby + 11 × 2s settle + finalization).
 class_name ProgressiveBenchmark
 extends Node
 
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 
-## Additive toggle order. `hlod` deliberately omitted — per user directive
-## 2026-04-14, HLOD is not used at present; it can be re-added here once it
-## ships. Ordering builds up the render cost from cheapest (terrain alone)
-## to heaviest (terrain + everything).
+## Additive toggle order. HLOD is included before impostors now that distant
+## rendering is default-on again. Ordering builds up the render cost from
+## cheapest (terrain alone) to heaviest (terrain + everything).
 const PROGRESSIVE_ORDER: Array[String] = [
 	"terrain",
 	"near_objects",
 	"mid_objects",
+	"hlod",
 	"impostors",
 	"shadows",
 	"postfx",

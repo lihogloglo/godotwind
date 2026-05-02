@@ -164,7 +164,7 @@ var _data_path: String = ""
 var _initialized: bool = false
 var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
-var _current_view_distance: int = 1  # 3×3 grid = 9 cells, matches NEAR-tier visible footprint. See near_tier_refactor.md §8.1 #1 (v4).
+var _current_view_distance: int = StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
 var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 
@@ -264,6 +264,8 @@ func _ready() -> void:
 	# tool. Console command lives in DebugViewCommands.
 	DebugViewCommands.enable_wireframe_generation()
 
+	_current_view_distance = SettingsManager.get_streaming_radius_cells()
+
 	var _t0 := Time.get_ticks_msec()
 	var _t_step := _t0
 
@@ -337,6 +339,7 @@ func _ready() -> void:
 
 	# Setup camera systems
 	_setup_cameras()
+	_apply_mesh_lod_threshold()
 	_t_step = _log_timing(_t_step, "cameras")
 
 	# Setup dialogue system (must be after cameras — needs PlayerController for modal gates)
@@ -1570,6 +1573,7 @@ func _setup_visibility_toggles() -> void:
 				_profiling_report.dump_report(),
 		"teleport_to_cell": _teleport_to_cell,
 		"adjust_view_distance": _adjust_view_distance,
+		"set_view_distance": _set_view_distance,
 	}
 	var initial_state := {
 		"show_characters": _show_characters,
@@ -1788,8 +1792,10 @@ func _setup_subsystem_toggles() -> void:
 				_env_controls.on_native_volumetric_fog_toggled(on),
 	}
 
-	# HLOD / IMPOSTORS park at boot while NEAR stabilizes. MID remains active
-	# as the 0-500m fallback band when HLOD is parked.
+	# Distant rendering is back on by default through FAR impostors. HLOD remains
+	# implemented and opt-in (`hlod_enable`, benchmark toggles) because the
+	# 2026-05-02 default-on stress run exposed a persistent draw-call blow-up in
+	# runtime chunk surfaces. `--near-only` remains the full distant-tier opt-out.
 	#
 	# `mid_objects: true` post-statics_no_node3d T.1 (2026-04-19): the
 	# static_object_renderer is now the universal statics render path
@@ -1802,7 +1808,7 @@ func _setup_subsystem_toggles() -> void:
 		"sky": true,
 		"weather": true,
 		"characters": _show_characters,
-		"impostors": false,
+		"impostors": true,
 		"mid_objects": true,
 		"near_objects": true,
 		"hlod": false,
@@ -1813,21 +1819,37 @@ func _setup_subsystem_toggles() -> void:
 
 	_subsystem_toggles.setup(callbacks, defaults)
 
-	# Boot banner: make the parked state impossible to miss.
-	_log("[color=yellow][Distant tiers parked][/color] HLOD / IMPOSTORS parked; MID fallback remains 0-500m")
-	Log.info("streaming", "[Distant tiers parked] HLOD / IMPOSTORS defaults=false; MID fallback 0-500m")
+	# Boot banner: make the active distant tier state explicit in logs.
+	_log("[color=green][Distant tiers active][/color] FAR impostors default ON; HLOD opt-in; MID fallback 0-500m, impostors 500m+")
+	Log.info("streaming", "[Distant tiers active] impostors default=true; HLOD default=false pending chunk-surface proof; MID fallback 0-500m, impostors 500m+")
 
-	# CLI: --near-only is now the default behavior; flag retained as a
-	# no-op for any launch scripts / docs that still pass it explicitly.
+	# CLI controls for focused tier isolation. `--near-only` parks both distant
+	# tiers; `--no-hlod` / `--no-impostors` isolate one tier without hiding MID.
+	# `--hlod` enables the lazy HLOD path at boot; `--hlod-only` also parks FAR.
 	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
 	# now controls the universal statics renderer, flipping it off would
 	# hide all rocks/arches/clutter.
-	for a in _runtime_cmdline_args():
+	var runtime_args := _runtime_cmdline_args()
+	for i in range(runtime_args.size()):
+		var a: String = runtime_args[i]
+		var next_arg: String = runtime_args[i + 1] if i + 1 < runtime_args.size() else ""
 		if a == "--near-only":
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
-			_log("[color=yellow]--near-only: hlod/impostors OFF (now default — flag is redundant)[/color]")
-			break
+			_log("[color=yellow]--near-only: hlod/impostors OFF; MID fallback restored to 0-500m[/color]")
+		elif a == "--hlod":
+			_subsystem_toggles.set_flag("hlod", true)
+			_log("[color=yellow]--hlod: HLOD ON; MID fallback 0-500m, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback 500m+[/color]")
+		elif a == "--hlod-only":
+			_subsystem_toggles.set_flag("hlod", true)
+			_subsystem_toggles.set_flag("impostors", false)
+			_log("[color=yellow]--hlod-only: HLOD ON, FAR impostors OFF[/color]")
+		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
+			_subsystem_toggles.set_flag("hlod", false)
+			_log("[color=yellow]--no-hlod: HLOD OFF; MID fallback restored to 0-500m[/color]")
+		elif a == "--no-impostors":
+			_subsystem_toggles.set_flag("impostors", false)
+			_log("[color=yellow]--no-impostors: FAR impostors OFF[/color]")
 
 	# Register console commands
 	if console:
@@ -1882,8 +1904,21 @@ func _setup_subsystem_toggles() -> void:
 				"STARTUP " if startup else "",
 				"BURST" if burst else "norm"
 			])
-			lines.append("queue=%d  cells=%d  async_req=%d" % [
-				q, int(stats.get("loaded_cells", 0)), int(stats.get("async_requests", 0))
+			lines.append("queue=%d  cells_ready/resident/desired=%d/%d/%d  async_req=%d" % [
+				q,
+				int(stats.get("visual_ready_cells", stats.get("loaded_cells", 0))),
+				int(stats.get("resident_cell_containers", stats.get("loaded_cells", 0))),
+				int(stats.get("desired_cell_count", stats.get("target_cell_count", 0))),
+				int(stats.get("async_requests", 0))
+			])
+			lines.append("radius=%d theoretical=%d load_queue=%d active_slots=%d resident_req=%d mid_buckets=%d mid_draws=%d" % [
+				int(stats.get("load_radius_cells", 0)),
+				int(stats.get("target_cell_count", 0)),
+				int(stats.get("load_queue_size", 0)),
+				int(stats.get("active_async_load_slots", 0)),
+				int(stats.get("resident_async_requests", stats.get("async_requests", 0))),
+				int(stats.get("mid_cell_buckets", 0)),
+				int(stats.get("mid_bucket_draw_groups", 0)),
 			])
 			lines.append("phases (ms):")
 			lines.append("  unload   = %.2f" % (pt[0]/1000.0 if n > 0 else 0.0))
@@ -1985,6 +2020,13 @@ func _setup_world_streaming_manager(start_tracking: bool = true) -> void:
 	_setup_native_streaming_manager(start_tracking)
 
 
+func _apply_mesh_lod_threshold() -> void:
+	var viewport := get_viewport()
+	if viewport:
+		viewport.mesh_lod_threshold = StreamingConfig.DEFAULT_MESH_LOD_THRESHOLD
+		Log.info("streaming", "Viewport mesh_lod_threshold=%.2f" % StreamingConfig.DEFAULT_MESH_LOD_THRESHOLD)
+
+
 ## Setup NEW native streaming manager (uses Godot visibility_range)
 ## ~1,000 lines of code vs ~10,000 in legacy system
 func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
@@ -1998,7 +2040,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	world_streaming_manager = nsm_node  # Assign to common reference
 	
 	# Configure
-	native_streaming_manager.load_radius_cells = _current_view_distance
+	native_streaming_manager.set_load_radius_cells(_current_view_distance, false)
 	native_streaming_manager.debug_enabled = false  # Disabled for performance (enable with toggle_debug command)
 	
 	add_child(native_streaming_manager)
@@ -2096,7 +2138,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		console.register_command(
 			"hlod_enable",
 			_cmd_hlod_enable,
-			"Enable runtime HLOD merging (300-1000m cell merge)",
+			"Enable runtime HLOD merging (visible 300-1000m; FAR fallback stays 500m+)",
 			"streaming"
 		)
 
@@ -2248,21 +2290,24 @@ func _cmd_prebake_animations(_args: Dictionary) -> String:
 
 
 func _cmd_hlod_enable(_args: Dictionary) -> String:
-	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
-		return "HLOD merger not initialized"
-	native_streaming_manager._hlod_merger.enabled = true
-	native_streaming_manager.set_hlod_visible(true)
-	return "HLOD merging ENABLED — MID 0-300m, HLOD 300-1000m, impostors 1000m+"
+	if not native_streaming_manager:
+		return "Native streaming manager not initialized"
+	if _subsystem_toggles and not _subsystem_toggles.get_flag("hlod"):
+		_subsystem_toggles.set_flag("hlod", true)
+	else:
+		native_streaming_manager.set_hlod_visible(true)
+	return "HLOD merging ENABLED - MID fallback 0-500m, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback 500m+"
 
 
 func _cmd_hlod_disable(_args: Dictionary) -> String:
-	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
-		return "HLOD merger not initialized"
-	native_streaming_manager._hlod_merger.enabled = false
-	native_streaming_manager._hlod_merger.cleanup(false)
+	if not native_streaming_manager:
+		return "Native streaming manager not initialized"
 	# HLOD-off parks only HLOD. MID falls back to 500m; FAR is controlled by
 	# the separate impostor toggle.
-	native_streaming_manager.set_hlod_visible(false)
+	if _subsystem_toggles and _subsystem_toggles.get_flag("hlod"):
+		_subsystem_toggles.set_flag("hlod", false)
+	else:
+		native_streaming_manager.set_hlod_visible(false)
 	return "HLOD DISABLED - MID fallback 0-500m, HLOD parked"
 
 
@@ -2324,14 +2369,79 @@ func _format_proto_registry_distribution(renderer: Node) -> String:
 
 
 func _cmd_hlod_stats(_args: Dictionary) -> String:
-	if not native_streaming_manager or not native_streaming_manager._hlod_merger:
-		return "HLOD merger not initialized"
-	var stats: Dictionary = native_streaming_manager._hlod_merger.get_stats()
-	return "HLOD: enabled=%s, active=%d, pending=%d, cache=%d entries (%.1f MB), total_merged=%d, skipped_refs=%d" % [
-		str(native_streaming_manager._hlod_merger.enabled),
-		stats.get("active_cells", 0), stats.get("pending_merges", 0),
-		stats.get("cache_entries", 0), stats.get("cache_bytes", 0) / (1024.0 * 1024.0),
-		stats.get("total_merges_completed", 0), stats.get("total_refs_skipped", 0)]
+	if not native_streaming_manager:
+		return "Native streaming manager not initialized"
+	var stats: Dictionary = native_streaming_manager.get_hlod_stats()
+	return (
+		"HLOD: enabled=%s, active=%d, visual=%d, pending=%d, cache=%d entries (%.1f MB), total_merged=%d\n" % [
+			str(stats.get("enabled", false)),
+			stats.get("active_cells", 0),
+			stats.get("active_visual_chunks", 0),
+			stats.get("pending_merges", 0),
+			stats.get("cache_entries", 0),
+			stats.get("cache_bytes", 0) / (1024.0 * 1024.0),
+			stats.get("total_merges_completed", 0),
+		] +
+		"  ranges: visual_floor=%.0fm, FAR_begin=%.0fm, MID_overlap_chunks=%d, FAR_overlap_chunks=%d, hole_risk_chunks=%d\n" % [
+			stats.get("visual_begin_floor", 0.0),
+			stats.get("far_visibility_begin_m", 0.0),
+			stats.get("mid_hlod_overlap_chunks", 0),
+			stats.get("handoff_far_hlod_overlap_chunks", 0),
+			stats.get("handoff_hole_risk_chunks", 0),
+		] +
+		"  tiers: t0=%d, t1=%d, t2=%d, nonvisual_suppressed=%d\n" % [
+			stats.get("chunks_tier_0", 0),
+			stats.get("chunks_tier_1", 0),
+			stats.get("chunks_tier_2", 0),
+			stats.get("nonvisual_chunks_suppressed", 0),
+		] +
+		"  queue: desired=%d, queued=%d, preparing=%d, pending=%d, negative=%d, warmup=%d\n" % [
+			stats.get("desired_chunks", 0),
+			stats.get("merge_queue_size", 0),
+			stats.get("preparing_chunks", 0),
+			stats.get("pending_merges", 0),
+			stats.get("negative_chunks", 0),
+			stats.get("warmup_queue_size", 0),
+		] +
+		"  chunks: surfaces=%d (max=%d), materials=%d (max=%d), verts=%d (max=%d), indices=%d (max=%d)\n" % [
+			stats.get("total_chunk_surfaces", 0),
+			stats.get("max_chunk_surfaces", 0),
+			stats.get("total_chunk_materials", 0),
+			stats.get("max_chunk_materials", 0),
+			stats.get("total_chunk_vertices", 0),
+			stats.get("max_chunk_vertices", 0),
+			stats.get("total_chunk_indices", 0),
+			stats.get("max_chunk_indices", 0),
+		] +
+		"  coverage: refs=%d, cells=%d, complete_chunks=%d, incomplete_chunks=%d, revision=%d, FAR_pages=%d/%d, FAR_overrides=%d\n" % [
+			stats.get("active_covered_refs", 0),
+			stats.get("active_covered_cells", 0),
+			stats.get("active_complete_coverage_chunks", 0),
+			stats.get("active_incomplete_coverage_chunks", 0),
+			stats.get("coverage_revision", 0),
+			stats.get("far_hlod_covered_pages", 0),
+			stats.get("far_hlod_uncovered_pages", 0),
+			stats.get("far_hlod_page_overrides", 0),
+		] +
+		"  rejects: skipped=%d, type=%d, size=%d, surface=%d, partial_bucket=%d, surface_cap=%d, stale=%d, size_cache_hits=%d, size_cache=%d\n" % [
+			stats.get("total_refs_skipped", 0),
+			stats.get("refs_type_rejected", 0),
+			stats.get("refs_size_rejected", 0),
+			stats.get("refs_surface_rejected", 0),
+			stats.get("refs_partial_bucket_rejected", 0),
+			stats.get("surface_cap_rejections", 0),
+			stats.get("stale_completions_discarded", 0),
+			stats.get("size_cache_hits", 0),
+			stats.get("size_cache_size", 0),
+		] +
+		"  timing: merge_queue=%dus, completion=%dus, teleports=%d, runtime_lods=%s, force_merge=%s" % [
+			stats.get("merge_queue_last_usec", 0),
+			stats.get("completion_last_usec", 0),
+			stats.get("total_teleports", 0),
+			str(stats.get("runtime_lod_generation_enabled", false)),
+			str(stats.get("runtime_force_merge_eligible_refs", false)),
+		]
+	)
 
 
 ## Callback for native streaming manager cell loaded
@@ -2790,13 +2900,26 @@ func _process(delta: float) -> void:
 
 
 ## Adjust view distance and update streaming manager
-## Max 10 cells (~1.2km) is reasonable for most GPUs; beyond that FPS may drop significantly
+## Max radius comes from StreamingConfig so settings, UI, and runtime clamp together.
 func _adjust_view_distance(delta: int) -> void:
-	_current_view_distance = clampi(_current_view_distance + delta, 1, 10)
+	_set_view_distance(_current_view_distance + delta)
+
+
+## Set view distance from UI/settings and update streaming manager.
+func _set_view_distance(value: Variant) -> void:
+	var requested := int(round(float(value)))
+	var clamped := StreamingConfig.clamp_load_radius_cells(requested)
+	var changed := clamped != _current_view_distance
+	_current_view_distance = clamped
+	SettingsManager.set_streaming_radius_cells(_current_view_distance)
 	if world_streaming_manager:
-		world_streaming_manager.view_distance_cells = _current_view_distance
-		world_streaming_manager.refresh_cells()
-	_log("View distance: %d cells (~%dm)" % [_current_view_distance, _current_view_distance * 117])
+		if world_streaming_manager.has_method("set_load_radius_cells"):
+			world_streaming_manager.call("set_load_radius_cells", _current_view_distance, changed)
+		else:
+			world_streaming_manager.view_distance_cells = _current_view_distance
+			if changed:
+				world_streaming_manager.refresh_cells()
+	_log("View distance: %d cells (~%dm)" % [_current_view_distance, int(_current_view_distance * StreamingConfig.DU.CELL_SIZE_METERS)])
 	_update_stats()
 
 

@@ -7,11 +7,11 @@
 ##   WASD / move_* actions — fly camera
 ##   Mouse — look
 ##   Scroll — speed
-##   F1 — toggle HLOD on/off (A/B comparison)
-##   F2 — start/stop benchmark logging (CSV output)
-##   F3 — dump stats to console
-##   F4 — teleport to tier boundary distances (cycles: 150m, 300m, 500m, 1000m)
-##   Escape — quit
+##   hlod_toggle - toggle HLOD on/off (A/B comparison)
+##   hlod_benchmark_toggle - start/stop benchmark logging (CSV output)
+##   hlod_dump_stats - dump stats to console
+##   hlod_teleport_tier - teleport to tier boundary distances
+##   ui_cancel - release mouse / quit
 ##
 ## Output: benchmark CSV + per-frame RS instance counts in user://benchmark_results/
 ##
@@ -24,6 +24,11 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
+
+const ACTION_HLOD_TOGGLE := &"hlod_toggle"
+const ACTION_HLOD_BENCHMARK_TOGGLE := &"hlod_benchmark_toggle"
+const ACTION_HLOD_DUMP_STATS := &"hlod_dump_stats"
+const ACTION_HLOD_TELEPORT_TIER := &"hlod_teleport_tier"
 
 ## Seyda Neen grid center (cell -2, -9 in ESM coords)
 const START_CELL := Vector2i(-2, -9)
@@ -66,6 +71,8 @@ const STATS_INTERVAL: float = 1.0
 
 
 func _ready() -> void:
+	InputActions.verify()
+	_verify_test_actions()
 	_setup_environment()
 	_setup_camera()
 	_setup_hud()
@@ -181,6 +188,13 @@ func _setup_streaming() -> void:
 	Log.info("hlod_bench", "Streaming initialized around cell %s" % START_CELL)
 
 
+func _verify_test_actions() -> void:
+	for action_name: StringName in InputActions.VISUAL_TEST:
+		if not InputMap.has_action(action_name):
+			Log.error("input", "Missing visual test action: %s" % action_name)
+			assert(false, "missing visual test action: %s" % action_name)
+
+
 func _on_startup_complete() -> void:
 	_startup_done = true
 	_startup_timer = Time.get_ticks_msec() / 1000.0
@@ -217,24 +231,23 @@ func _input(event: InputEvent) -> void:
 			_mouse_captured = true
 
 	if event is InputEventKey and event.pressed and not event.echo:
-		match event.keycode:
-			KEY_F1:
-				_toggle_hlod()
-			KEY_F2:
-				if _benchmarking:
-					_stop_benchmark()
-				else:
-					_start_benchmark()
-			KEY_F3:
-				_dump_stats()
-			KEY_F4:
-				_teleport_tier()
-			KEY_ESCAPE:
-				if _mouse_captured:
-					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-					_mouse_captured = false
-				else:
-					get_tree().quit()
+		if event.is_action_pressed(ACTION_HLOD_TOGGLE):
+			_toggle_hlod()
+		elif event.is_action_pressed(ACTION_HLOD_BENCHMARK_TOGGLE):
+			if _benchmarking:
+				_stop_benchmark()
+			else:
+				_start_benchmark()
+		elif event.is_action_pressed(ACTION_HLOD_DUMP_STATS):
+			_dump_stats()
+		elif event.is_action_pressed(ACTION_HLOD_TELEPORT_TIER):
+			_teleport_tier()
+		elif event.is_action_pressed("ui_cancel"):
+			if _mouse_captured:
+				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+				_mouse_captured = false
+			else:
+				get_tree().quit()
 
 
 func _process(delta: float) -> void:
@@ -270,37 +283,15 @@ func _toggle_hlod() -> void:
 	if not _streaming_manager:
 		return
 
-	var merger = _streaming_manager.get("_hlod_merger")
-	if not merger:
-		Log.warn("hlod_bench", "No HLOD merger available")
-		return
-
 	if _hlod_enabled:
-		merger.enabled = true
-		var sr = _streaming_manager.get("_static_renderer")
-		if sr:
-			sr.visibility_range_end = DU.HLOD_START
-			Log.info("hlod_bench", "  MID visibility_range_end → %.0f" % DU.HLOD_START)
-		var ir = _streaming_manager.get("_impostor_renderer")
-		if ir:
-			ir.set_visibility_range_begin(DU.HLOD_END)
-		_streaming_manager.set("_hlod_needs_initial_update", true)
+		_streaming_manager.set_hlod_visible(true)
 		# Log merger state for debugging
-		Log.info("hlod_bench", "HLOD ENABLED — merger.enabled=%s, scenario_valid=%s" % [
-			str(merger.enabled),
-			str(merger.get("_scenario") != RID() if merger.get("_scenario") != null else "null")])
-		var merger_stats = merger.get_stats() if merger.has_method("get_stats") else {}
+		Log.info("hlod_bench", "HLOD ENABLED")
+		var merger_stats: Dictionary = _streaming_manager.get_hlod_stats() if _streaming_manager.has_method("get_hlod_stats") else {}
 		Log.info("hlod_bench", "  HLOD stats: %s" % str(merger_stats))
-		Log.info("hlod_bench", "  MID 0-300m, HLOD 300-1000m, impostors 1000m+")
+		Log.info("hlod_bench", "  MID fallback 0-500m, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback 500m+")
 	else:
-		merger.enabled = false
-		merger.cleanup()
-		var sr = _streaming_manager.get("_static_renderer")
-		if sr:
-			sr.visibility_range_end = DU.MID_END
-		var ir = _streaming_manager.get("_impostor_renderer")
-		if ir:
-			ir.set_visibility_range_begin(DU.FAR_START)
+		_streaming_manager.set_hlod_visible(false)
 		Log.info("hlod_bench", "HLOD DISABLED — MID 0-500m, impostors 500m+")
 
 #endregion

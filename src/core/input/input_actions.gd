@@ -77,6 +77,25 @@ const DEBUG: Array[StringName] = [
 	&"debug_screenshot",
 ]
 
+## Visual-test actions — optional developer controls for standalone test scenes.
+const VISUAL_TEST: Array[StringName] = [
+	&"impostor_sun_left",
+	&"impostor_sun_right",
+	&"impostor_sun_up",
+	&"impostor_sun_down",
+	&"impostor_bake_v6",
+	&"impostor_debug_normals",
+	&"impostor_toggle_models",
+	&"impostor_toggle_billboard",
+	&"hlod_toggle",
+	&"hlod_benchmark_toggle",
+	&"hlod_dump_stats",
+	&"hlod_teleport_tier",
+	&"impostor_stress_toggle_bounds",
+	&"impostor_stress_force_visible",
+	&"impostor_stress_reload_area",
+]
+
 
 ## Required actions — verify() asserts every entry exists in InputMap.
 ## Excludes `walk` (intentionally unbound by default per K.0 SF2 ruling) and

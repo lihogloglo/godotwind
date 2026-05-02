@@ -329,19 +329,45 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 		sample["mid_instances"] = stats.get("mid_instances", 0)
 		sample["mid_visible"] = stats.get("mid_visible", 0)
 		sample["mid_mesh_types"] = stats.get("mid_mesh_types", 0)
+		sample["hlod_mid_bucket_overrides"] = stats.get("hlod_mid_bucket_overrides", 0)
+		sample["hlod_mid_bucket_override_refs"] = stats.get("hlod_mid_bucket_override_refs", 0)
 		sample["hlod_cells"] = stats.get("hlod_cells", 0)
 		sample["total_impostors"] = stats.get("total_impostors", 0)
+		sample["far_pending_cells"] = stats.get("pending_loads", 0)
+		sample["far_texture_layers"] = stats.get("texture_array_layers", 0)
+		sample["far_texture_upload_us"] = stats.get("far_texture_upload_us", 0)
+		sample["far_normal_upload_us"] = stats.get("far_normal_upload_us", 0)
+		sample["far_multimesh_pack_us"] = stats.get("far_multimesh_pack_us", 0)
+		sample["far_multimesh_upload_us"] = stats.get("far_multimesh_upload_us", 0)
+		sample["far_cell_scan_us"] = stats.get("far_cell_scan_us", 0)
+		sample["far_job_poll_us"] = stats.get("far_job_poll_us", 0)
+		sample["far_job_results_handled"] = stats.get("far_job_results_handled", 0)
+		sample["far_page_count"] = stats.get("far_page_count", 0)
+		sample["far_dirty_page_count"] = stats.get("far_dirty_page_count", 0)
+		sample["far_pages_rebuilt"] = stats.get("far_pages_rebuilt", 0)
+		sample["far_uploaded_instances"] = stats.get("far_uploaded_instances", 0)
 		if _streaming_manager.has_method("get_static_renderer_stats"):
 			var srs := _streaming_manager.get_static_renderer_stats()
 			sample["registry_batches"] = srs.get("registry_batches", 0)
 			sample["registry_slots"] = srs.get("registry_slots", 0)
 		# HLOD per-tier breakdown
-		if _streaming_manager._hlod_merger:
-			var hls: Dictionary = _streaming_manager._hlod_merger.get_stats()
+		if _streaming_manager.has_method("get_hlod_stats"):
+			var hls: Dictionary = _streaming_manager.get_hlod_stats()
 			sample["chunks_tier_0"] = hls.get("chunks_tier_0", 0)
 			sample["chunks_tier_1"] = hls.get("chunks_tier_1", 0)
 			sample["chunks_tier_2"] = hls.get("chunks_tier_2", 0)
 			sample["hlod_pending"] = hls.get("pending_merges", 0)
+			sample["hlod_chunk_surfaces"] = hls.get("total_chunk_surfaces", 0)
+			sample["hlod_chunk_materials"] = hls.get("total_chunk_materials", 0)
+			sample["hlod_chunk_vertices"] = hls.get("total_chunk_vertices", 0)
+			sample["hlod_chunk_indices"] = hls.get("total_chunk_indices", 0)
+			sample["hlod_max_chunk_surfaces"] = hls.get("max_chunk_surfaces", 0)
+			sample["hlod_max_chunk_materials"] = hls.get("max_chunk_materials", 0)
+			sample["hlod_max_chunk_vertices"] = hls.get("max_chunk_vertices", 0)
+			sample["hlod_max_chunk_indices"] = hls.get("max_chunk_indices", 0)
+			sample["hlod_stale_completions"] = hls.get("stale_completions_discarded", 0)
+			sample["hlod_merge_queue_us"] = hls.get("merge_queue_last_usec", 0)
+			sample["hlod_completion_us"] = hls.get("completion_last_usec", 0)
 	return sample
 
 
@@ -375,9 +401,32 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	var batches_max := 0
 	var slots_max := 0
 	var imp_max := 0
+	var far_texture_upload_max := 0
+	var far_normal_upload_max := 0
+	var far_multimesh_pack_max := 0
+	var far_multimesh_upload_max := 0
+	var far_cell_scan_max := 0
+	var far_job_poll_max := 0
+	var far_page_count_max := 0
+	var far_dirty_page_count_max := 0
+	var far_pages_rebuilt_max := 0
+	var far_uploaded_instances_max := 0
 	var hlod_cells_max := 0
 	var t1_max := 0
 	var t2_max := 0
+	var hlod_surfaces_max := 0
+	var hlod_materials_max := 0
+	var hlod_vertices_max := 0
+	var hlod_indices_max := 0
+	var hlod_max_chunk_surfaces := 0
+	var hlod_max_chunk_materials := 0
+	var hlod_max_chunk_vertices := 0
+	var hlod_max_chunk_indices := 0
+	var hlod_mid_bucket_overrides_max := 0
+	var hlod_mid_bucket_override_refs_max := 0
+	var hlod_stale_max := 0
+	var hlod_merge_queue_max := 0
+	var hlod_completion_max := 0
 	for s: Dictionary in samples:
 		var f := float(s.get("fps", 0.0))
 		fps_min = minf(fps_min, f)
@@ -388,9 +437,32 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		batches_max = maxi(batches_max, int(s.get("registry_batches", 0)))
 		slots_max = maxi(slots_max, int(s.get("registry_slots", 0)))
 		imp_max = maxi(imp_max, int(s.get("total_impostors", 0)))
+		far_texture_upload_max = maxi(far_texture_upload_max, int(s.get("far_texture_upload_us", 0)))
+		far_normal_upload_max = maxi(far_normal_upload_max, int(s.get("far_normal_upload_us", 0)))
+		far_multimesh_pack_max = maxi(far_multimesh_pack_max, int(s.get("far_multimesh_pack_us", 0)))
+		far_multimesh_upload_max = maxi(far_multimesh_upload_max, int(s.get("far_multimesh_upload_us", 0)))
+		far_cell_scan_max = maxi(far_cell_scan_max, int(s.get("far_cell_scan_us", 0)))
+		far_job_poll_max = maxi(far_job_poll_max, int(s.get("far_job_poll_us", 0)))
+		far_page_count_max = maxi(far_page_count_max, int(s.get("far_page_count", 0)))
+		far_dirty_page_count_max = maxi(far_dirty_page_count_max, int(s.get("far_dirty_page_count", 0)))
+		far_pages_rebuilt_max = maxi(far_pages_rebuilt_max, int(s.get("far_pages_rebuilt", 0)))
+		far_uploaded_instances_max = maxi(far_uploaded_instances_max, int(s.get("far_uploaded_instances", 0)))
 		hlod_cells_max = maxi(hlod_cells_max, int(s.get("hlod_cells", 0)))
 		t1_max = maxi(t1_max, int(s.get("chunks_tier_1", 0)))
 		t2_max = maxi(t2_max, int(s.get("chunks_tier_2", 0)))
+		hlod_surfaces_max = maxi(hlod_surfaces_max, int(s.get("hlod_chunk_surfaces", 0)))
+		hlod_materials_max = maxi(hlod_materials_max, int(s.get("hlod_chunk_materials", 0)))
+		hlod_vertices_max = maxi(hlod_vertices_max, int(s.get("hlod_chunk_vertices", 0)))
+		hlod_indices_max = maxi(hlod_indices_max, int(s.get("hlod_chunk_indices", 0)))
+		hlod_max_chunk_surfaces = maxi(hlod_max_chunk_surfaces, int(s.get("hlod_max_chunk_surfaces", 0)))
+		hlod_max_chunk_materials = maxi(hlod_max_chunk_materials, int(s.get("hlod_max_chunk_materials", 0)))
+		hlod_max_chunk_vertices = maxi(hlod_max_chunk_vertices, int(s.get("hlod_max_chunk_vertices", 0)))
+		hlod_max_chunk_indices = maxi(hlod_max_chunk_indices, int(s.get("hlod_max_chunk_indices", 0)))
+		hlod_mid_bucket_overrides_max = maxi(hlod_mid_bucket_overrides_max, int(s.get("hlod_mid_bucket_overrides", 0)))
+		hlod_mid_bucket_override_refs_max = maxi(hlod_mid_bucket_override_refs_max, int(s.get("hlod_mid_bucket_override_refs", 0)))
+		hlod_stale_max = maxi(hlod_stale_max, int(s.get("hlod_stale_completions", 0)))
+		hlod_merge_queue_max = maxi(hlod_merge_queue_max, int(s.get("hlod_merge_queue_us", 0)))
+		hlod_completion_max = maxi(hlod_completion_max, int(s.get("hlod_completion_us", 0)))
 	var n := float(samples.size())
 	return {
 		"samples": samples.size(),
@@ -402,9 +474,32 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"registry_batches_max": batches_max,
 		"registry_slots_max": slots_max,
 		"impostors_max": imp_max,
+		"far_texture_upload_max_us": far_texture_upload_max,
+		"far_normal_upload_max_us": far_normal_upload_max,
+		"far_multimesh_pack_max_us": far_multimesh_pack_max,
+		"far_multimesh_upload_max_us": far_multimesh_upload_max,
+		"far_cell_scan_max_us": far_cell_scan_max,
+		"far_job_poll_max_us": far_job_poll_max,
+		"far_page_count_max": far_page_count_max,
+		"far_dirty_page_count_max": far_dirty_page_count_max,
+		"far_pages_rebuilt_max": far_pages_rebuilt_max,
+		"far_uploaded_instances_max": far_uploaded_instances_max,
 		"hlod_cells_max": hlod_cells_max,
 		"chunks_tier_1_max": t1_max,
 		"chunks_tier_2_max": t2_max,
+		"hlod_chunk_surfaces_max": hlod_surfaces_max,
+		"hlod_chunk_materials_max": hlod_materials_max,
+		"hlod_chunk_vertices_max": hlod_vertices_max,
+		"hlod_chunk_indices_max": hlod_indices_max,
+		"hlod_max_chunk_surfaces": hlod_max_chunk_surfaces,
+		"hlod_max_chunk_materials": hlod_max_chunk_materials,
+		"hlod_max_chunk_vertices": hlod_max_chunk_vertices,
+		"hlod_max_chunk_indices": hlod_max_chunk_indices,
+		"hlod_mid_bucket_overrides_max": hlod_mid_bucket_overrides_max,
+		"hlod_mid_bucket_override_refs_max": hlod_mid_bucket_override_refs_max,
+		"hlod_stale_completions_max": hlod_stale_max,
+		"hlod_merge_queue_max_us": hlod_merge_queue_max,
+		"hlod_completion_max_us": hlod_completion_max,
 	}
 
 

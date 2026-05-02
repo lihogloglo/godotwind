@@ -12,7 +12,7 @@
 ## the Seyda Neen spawn for all rungs to keep the sample deterministic.
 ##
 ## Metrics sourced from Engine/Performance + `NativeStreamingManager.get_stats()` +
-## `get_static_renderer_stats()` + `_hlod_merger.get_stats()` — no new
+## `get_static_renderer_stats()` + `get_hlod_stats()` — no new
 ## instrumentation, just the same snapshot AutoBenchRunner uses.
 ##
 ## Usage:
@@ -254,15 +254,32 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 		sample["mid_visible"] = stats.get("mid_visible", 0)
 		sample["hlod_cells"] = stats.get("hlod_cells", 0)
 		sample["total_impostors"] = stats.get("total_impostors", 0)
+		sample["far_pending_cells"] = stats.get("pending_loads", 0)
+		sample["far_texture_layers"] = stats.get("texture_array_layers", 0)
+		sample["far_texture_upload_us"] = stats.get("far_texture_upload_us", 0)
+		sample["far_normal_upload_us"] = stats.get("far_normal_upload_us", 0)
+		sample["far_multimesh_pack_us"] = stats.get("far_multimesh_pack_us", 0)
+		sample["far_multimesh_upload_us"] = stats.get("far_multimesh_upload_us", 0)
+		sample["far_cell_scan_us"] = stats.get("far_cell_scan_us", 0)
+		sample["far_job_poll_us"] = stats.get("far_job_poll_us", 0)
+		sample["far_page_count"] = stats.get("far_page_count", 0)
+		sample["far_dirty_page_count"] = stats.get("far_dirty_page_count", 0)
+		sample["far_pages_rebuilt"] = stats.get("far_pages_rebuilt", 0)
+		sample["far_uploaded_instances"] = stats.get("far_uploaded_instances", 0)
 		if _streaming_manager.has_method("get_static_renderer_stats"):
 			var srs := _streaming_manager.get_static_renderer_stats()
 			sample["registry_batches"] = srs.get("registry_batches", 0)
 			sample["registry_slots"] = srs.get("registry_slots", 0)
-		if _streaming_manager._hlod_merger:
-			var hls: Dictionary = _streaming_manager._hlod_merger.get_stats()
+		if _streaming_manager.has_method("get_hlod_stats"):
+			var hls: Dictionary = _streaming_manager.get_hlod_stats()
 			sample["chunks_tier_0"] = hls.get("chunks_tier_0", 0)
 			sample["chunks_tier_1"] = hls.get("chunks_tier_1", 0)
 			sample["chunks_tier_2"] = hls.get("chunks_tier_2", 0)
+			sample["hlod_chunk_surfaces"] = hls.get("total_chunk_surfaces", 0)
+			sample["hlod_chunk_materials"] = hls.get("total_chunk_materials", 0)
+			sample["hlod_stale_completions"] = hls.get("stale_completions_discarded", 0)
+			sample["hlod_merge_queue_us"] = hls.get("merge_queue_last_usec", 0)
+			sample["hlod_completion_us"] = hls.get("completion_last_usec", 0)
 	return sample
 
 
@@ -280,7 +297,19 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	var reg_slots_max := 0
 	var reg_batches_max := 0
 	var hlod_cells_max := 0
+	var hlod_surfaces_max := 0
+	var hlod_materials_max := 0
+	var hlod_stale_max := 0
+	var hlod_merge_queue_max := 0
+	var hlod_completion_max := 0
 	var imp_max := 0
+	var far_texture_upload_max := 0
+	var far_multimesh_upload_max := 0
+	var far_cell_scan_max := 0
+	var far_page_count_max := 0
+	var far_dirty_page_count_max := 0
+	var far_pages_rebuilt_max := 0
+	var far_uploaded_instances_max := 0
 	for s: Dictionary in samples:
 		var f := float(s.get("fps", 0.0))
 		fps_min = minf(fps_min, f)
@@ -294,7 +323,19 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		reg_slots_max = maxi(reg_slots_max, int(s.get("registry_slots", 0)))
 		reg_batches_max = maxi(reg_batches_max, int(s.get("registry_batches", 0)))
 		hlod_cells_max = maxi(hlod_cells_max, int(s.get("hlod_cells", 0)))
+		hlod_surfaces_max = maxi(hlod_surfaces_max, int(s.get("hlod_chunk_surfaces", 0)))
+		hlod_materials_max = maxi(hlod_materials_max, int(s.get("hlod_chunk_materials", 0)))
+		hlod_stale_max = maxi(hlod_stale_max, int(s.get("hlod_stale_completions", 0)))
+		hlod_merge_queue_max = maxi(hlod_merge_queue_max, int(s.get("hlod_merge_queue_us", 0)))
+		hlod_completion_max = maxi(hlod_completion_max, int(s.get("hlod_completion_us", 0)))
 		imp_max = maxi(imp_max, int(s.get("total_impostors", 0)))
+		far_texture_upload_max = maxi(far_texture_upload_max, int(s.get("far_texture_upload_us", 0)))
+		far_multimesh_upload_max = maxi(far_multimesh_upload_max, int(s.get("far_multimesh_upload_us", 0)))
+		far_cell_scan_max = maxi(far_cell_scan_max, int(s.get("far_cell_scan_us", 0)))
+		far_page_count_max = maxi(far_page_count_max, int(s.get("far_page_count", 0)))
+		far_dirty_page_count_max = maxi(far_dirty_page_count_max, int(s.get("far_dirty_page_count", 0)))
+		far_pages_rebuilt_max = maxi(far_pages_rebuilt_max, int(s.get("far_pages_rebuilt", 0)))
+		far_uploaded_instances_max = maxi(far_uploaded_instances_max, int(s.get("far_uploaded_instances", 0)))
 	var n := float(samples.size())
 	return {
 		"samples": samples.size(),
@@ -309,7 +350,19 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"registry_slots_max": reg_slots_max,
 		"registry_batches_max": reg_batches_max,
 		"hlod_cells_max": hlod_cells_max,
+		"hlod_chunk_surfaces_max": hlod_surfaces_max,
+		"hlod_chunk_materials_max": hlod_materials_max,
+		"hlod_stale_completions_max": hlod_stale_max,
+		"hlod_merge_queue_max_us": hlod_merge_queue_max,
+		"hlod_completion_max_us": hlod_completion_max,
 		"impostors_max": imp_max,
+		"far_texture_upload_max_us": far_texture_upload_max,
+		"far_multimesh_upload_max_us": far_multimesh_upload_max,
+		"far_cell_scan_max_us": far_cell_scan_max,
+		"far_page_count_max": far_page_count_max,
+		"far_dirty_page_count_max": far_dirty_page_count_max,
+		"far_pages_rebuilt_max": far_pages_rebuilt_max,
+		"far_uploaded_instances_max": far_uploaded_instances_max,
 	}
 
 

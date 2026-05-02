@@ -141,6 +141,8 @@ func _update_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
 		var dist_label: Label = _find_label(_panels._nav_vbox, "DistLabel")
 		if dist_label:
 			dist_label.text = "%d cells" % view_distance
+		if _panels.view_distance_slider:
+			_panels.view_distance_slider.set_value_no_signal(view_distance)
 
 	# ── Debug tab labels ──
 	if _panels._debug_vbox:
@@ -153,10 +155,24 @@ func _update_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
 
 		var debug_label: Label = _find_label(_panels._debug_vbox, "DebugInfoLabel")
 		if debug_label:
-			var loaded_cells: int = stats.get("loaded_cells", 0)
+			var ready_cells: int = stats.get("visual_ready_cells", stats.get("loaded_cells", 0))
+			var resident_cells: int = stats.get("resident_cell_containers", stats.get("loaded_cells", 0))
+			var desired_cells: int = stats.get("desired_cell_count", stats.get("target_cell_count", 0))
 			var queue_size: int = stats.get("load_queue_size", 0)
-			var async_pending: int = stats.get("async_pending", 0)
-			debug_label.text = "Cells: %d | Queue: %d | Async: %d" % [loaded_cells, queue_size, async_pending]
+			var active_slots: int = stats.get("active_async_load_slots", 0)
+			var resident_requests: int = stats.get("resident_async_requests", stats.get("async_requests", 0))
+			var mid_buckets: int = stats.get("mid_cell_buckets", 0)
+			var mid_draws: int = stats.get("mid_bucket_draw_groups", 0)
+			debug_label.text = "Cells ready/res/goal: %d/%d/%d | Q: %d | Load slots: %d | Req: %d | MID buckets/draws: %d/%d" % [
+				ready_cells,
+				resident_cells,
+				desired_cells,
+				queue_size,
+				active_slots,
+				resident_requests,
+				mid_buckets,
+				mid_draws,
+			]
 
 		var odm_label: Label = _find_label(_panels._debug_vbox, "ODMLabel")
 		if odm_label:

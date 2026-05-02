@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS: Dictionary = {
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
 	"optimize_size": true,     # Compress texture
-	"min_distance": DU.FAR_START,  # Start showing at FAR tier (1km post-Phase-5)
+	"min_distance": DU.MID_END,  # Runtime FAR fallback starts at 500m until HLOD coverage gating lands.
 	"max_distance": DU.FAR_END,    # Stop showing at FAR end (5km)
 }
 
@@ -656,63 +656,28 @@ static func get_hash_key(model_path: String) -> String:
 	return normalized.md5_text().substr(0, 8)
 
 
-## Get the impostor texture path for a model
-## Returns expected path where impostor texture would be stored
-## Format: {base_name}_{md5_hash}.png
-## NOTE: The baker receives paths WITHOUT the "meshes\" prefix (e.g., "x\Ex_T_menhir_L_01.nif")
-## We must normalize the path the same way for hash consistency
-static func get_impostor_texture_path(model_path: String) -> String:
+## v6 octahedral impostors are the only maintained impostor artifact format.
+## Runtime fails closed on missing v6 bakes instead of silently rendering older
+## cache entries with stale scale, projection, or normal conventions.
+static func get_impostor_texture_path_v6(model_path: String) -> String:
 	var hash_key: String = get_hash_key(model_path)
-	var normalized: String = normalize_model_path(model_path)
-	var base_name: String = normalized.get_file().get_basename()
-	# Clean filename and lowercase (match baker output format which is lowercase on disk)
-	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
-	return _get_impostors_dir().path_join("%s_%s.png" % [base_name, hash_key])
+	var base_name: String = _impostor_base_name(model_path)
+	return _get_impostors_dir().path_join("%s_%s_v6.png" % [base_name, hash_key])
 
 
-## Get the impostor normal texture path for a model
-## Format: {base_name}_{md5_hash}_normal.png
-static func get_impostor_normal_path(model_path: String) -> String:
+static func get_impostor_normal_res_path_v6(model_path: String) -> String:
 	var hash_key: String = get_hash_key(model_path)
-	var normalized: String = normalize_model_path(model_path)
-	var base_name: String = normalized.get_file().get_basename()
-	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
-	return _get_impostors_dir().path_join("%s_%s_normal.png" % [base_name, hash_key])
+	var base_name: String = _impostor_base_name(model_path)
+	return _get_impostors_dir().path_join("%s_%s_normal_v6.res" % [base_name, hash_key])
 
 
-## Get the impostor metadata path for a model
-## Format: {base_name}_{md5_hash}.json
-static func get_impostor_metadata_path(model_path: String) -> String:
+static func get_impostor_metadata_path_v6(model_path: String) -> String:
 	var hash_key: String = get_hash_key(model_path)
-	var normalized: String = normalize_model_path(model_path)
-	var base_name: String = normalized.get_file().get_basename()
-	base_name = base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()
-	return _get_impostors_dir().path_join("%s_%s.json" % [base_name, hash_key])
+	var base_name: String = _impostor_base_name(model_path)
+	return _get_impostors_dir().path_join("%s_%s_v6.json" % [base_name, hash_key])
 
 
-## v5 path helpers — bake_version = 5 octahedral impostors live alongside v4
-## bakes in the same directory but with a `_v5` filename suffix to prevent
-## collision during the migration window. Runtime loader prefers v5 if both
-## are present. Produced by impostor_baker_v3.gd.
-static func get_impostor_texture_path_v5(model_path: String) -> String:
-	var hash_key: String = get_hash_key(model_path)
-	var base_name: String = _v5_base_name(model_path)
-	return _get_impostors_dir().path_join("%s_%s_v5.png" % [base_name, hash_key])
-
-
-static func get_impostor_normal_res_path_v5(model_path: String) -> String:
-	var hash_key: String = get_hash_key(model_path)
-	var base_name: String = _v5_base_name(model_path)
-	return _get_impostors_dir().path_join("%s_%s_normal_v5.res" % [base_name, hash_key])
-
-
-static func get_impostor_metadata_path_v5(model_path: String) -> String:
-	var hash_key: String = get_hash_key(model_path)
-	var base_name: String = _v5_base_name(model_path)
-	return _get_impostors_dir().path_join("%s_%s_v5.json" % [base_name, hash_key])
-
-
-static func _v5_base_name(model_path: String) -> String:
+static func _impostor_base_name(model_path: String) -> String:
 	var normalized: String = normalize_model_path(model_path)
 	var base_name: String = normalized.get_file().get_basename()
 	return base_name.replace("\\", "_").replace("/", "_").replace(" ", "_").to_lower()

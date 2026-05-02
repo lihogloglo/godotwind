@@ -59,9 +59,9 @@ Constants in `src/core/world/distance_utils.gd`.
 | Tier | Range | Technique |
 |------|-------|-----------|
 | NEAR | 0-150m | Full Node3D + physics in the scene tree. Root `visibility_range` band on each Node3D. |
-| MID | 0-300m (HLOD on) / 0-500m (HLOD off) | Single raw `RenderingServer` instance per object with embedded `ImporterMesh.generate_lods()` chain. Engine C++ `RendererSceneCull` picks the LOD level from screen-space coverage. No per-band visibility cascades. |
-| HLOD | 300-1000m | One RS instance per paged chunk — runtime-merged static geometry with its own LOD chain. OpenMW-style distance-adaptive walker (1×1 / 2×2 / 4×4 cells at [150,300) / [300,600) / [600,1000)m bands) in `src/core/world/object_paging.gd`. Enabled by default via `hlod_enable` console command. |
-| FAR | 1000-5km | Custom octahedral impostors via a single `MultiMeshInstance3D` draw call. |
+| MID | 0-500m fallback | Cell-local `CellStaticBucket` draw groups. Groups use local `MultiMesh` buckets under one ownership path; singleton groups use the single-slot transform API instead of a bulk buffer upload. Embedded mesh LOD stays engine-driven. |
+| HLOD | Opt-in, currently visible 300-1000m | One RS instance per ObjectPaging chunk: runtime-merged static geometry from the adaptive 1x1 / 2x2 / 4x4 chunk walker. Fully covered MID buckets cap at 300m; uncovered MID and FAR remain available from 500m until exact coverage ownership removes overlap safely. |
+| FAR | 500-5km | Custom octahedral impostors via spatial `MultiMeshInstance3D` pages. Default-on. |
 
 **MID→NEAR promotion at 250m, demotion at 280m** (20m hysteresis, `streaming_config.gd:78-81`) — physics bodies and scene-tree NEAR nodes are pre-created while the MID RS instance stays visible, then the RS instance is hidden and the Node3D becomes the active renderer when the camera enters the 150m band.
 

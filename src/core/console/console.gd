@@ -885,7 +885,7 @@ func _cmd_impostor_debug(_args: Dictionary) -> CommandRegistry.CommandResult:
 	var ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 	var test_model := "x\\ex_common_house_01.nif"
 	var test_hash := ImpostorCandidatesScript.get_hash_key(test_model)
-	var test_path := ImpostorCandidatesScript.get_impostor_texture_path(test_model)
+	var test_path := ImpostorCandidatesScript.get_impostor_texture_path_v6(test_model)
 	lines.append("  Test model: %s" % test_model)
 	lines.append("  Hash key: %s" % test_hash)
 	lines.append("  Expected path: %s" % test_path)
@@ -924,9 +924,9 @@ func _cmd_impostor_debug(_args: Dictionary) -> CommandRegistry.CommandResult:
 	if not issues_found:
 		lines.append("  [color=green]No obvious issues detected[/color]")
 		lines.append("  If impostors still don't appear:")
-		lines.append("    1. Move camera >500m from objects")
+		lines.append("    1. Move camera into the active FAR tier")
 		lines.append("    2. Run 'impostor_verbose' to enable debug logging")
-		lines.append("    3. Check that visibility_range_begin=450 on ImpostorMasterBatch")
+		lines.append("    3. Run 'impostor_dump' and check ImpostorPage visibility ranges")
 
 	return CommandRegistry.CommandResult.ok("\n".join(lines))
 

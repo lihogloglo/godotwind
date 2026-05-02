@@ -111,7 +111,7 @@ func _build_ui() -> void:
 	_model_section = _create_component_section("Models", "Pre-convert NIF models to Godot resources (NEAR tier) - Most impactful for load times!")
 	# NOTE: LODs are now embedded in models via NIFConverter during model prebaking
 	# HLOD removed — runtime-merged now, no prebake section
-	_impostor_section = _create_component_section("Impostors", "Octahedral impostor textures for distant landmarks (FAR tier)")
+	_impostor_section = _create_component_section("Impostors", "v6 octahedral albedo + normal/depth impostors for distant landmarks (FAR tier)")
 	_navmesh_section = _create_component_section("Navigation Meshes", "Pathfinding meshes for AI navigation")
 	_shore_section = _create_component_section("Shore Mask", "Ocean visibility mask based on terrain height")
 
