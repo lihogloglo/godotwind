@@ -66,6 +66,12 @@ class Selection:
 	## Model path if available
 	var model_path: String
 
+	## Copyable reference text for the console input / clipboard
+	var reference_text: String
+
+	## Source path used by the picker: scene_tree or static_payload
+	var source_kind: String
+
 	## World transform
 	var world_transform: Transform3D
 
@@ -73,6 +79,7 @@ class Selection:
 		instance_id = -1
 		cell_grid = Vector2i.ZERO
 		is_interior = false
+		source_kind = "scene_tree"
 
 	func get_display_name() -> String:
 		if form_id.is_empty():
@@ -85,15 +92,41 @@ class Selection:
 		return record_type
 
 	func get_position_string() -> String:
-		if not node:
-			return "N/A"
-		var pos := node.global_position
+		var pos := node.global_position if node else hit_position
 		return "(%.1f, %.1f, %.1f)" % [pos.x, pos.y, pos.z]
 
 	func get_cell_string() -> String:
 		if is_interior:
 			return cell_name
 		return "(%d, %d) %s" % [cell_grid.x, cell_grid.y, cell_name]
+
+	func get_reference_string() -> String:
+		if not reference_text.is_empty():
+			return reference_text
+		var parts := PackedStringArray()
+		if not form_id.is_empty():
+			parts.append("ref_id=%s" % form_id)
+		if instance_id >= 0:
+			parts.append("ref_num=%d" % instance_id)
+		if not model_path.is_empty():
+			parts.append("model=%s" % model_path)
+		if cell_grid != Vector2i.ZERO or not cell_name.is_empty():
+			parts.append("cell=%s" % get_cell_string())
+		return " ".join(parts) if not parts.is_empty() else get_display_name()
+
+
+class PickHit:
+	var mesh: MeshInstance3D = null
+	var object_root: Node3D = null
+	var hit_position: Vector3 = Vector3.ZERO
+	var distance: float = INF
+	var source_kind: String = "scene_tree"
+	var form_id: String = ""
+	var record_type: String = ""
+	var model_path: String = ""
+	var cell_grid: Vector2i = Vector2i.ZERO
+	var ref_num: int = -1
+	var world_transform: Transform3D = Transform3D.IDENTITY
 
 #endregion
 
@@ -104,8 +137,6 @@ class Selection:
 @export var max_distance: float = 500.0
 
 ## Angular threshold for pick cone (radians). ~5 degrees.
-const PICK_CONE_RAD := 0.087
-
 ## Hover update interval (seconds) — throttle to avoid per-frame mesh iteration
 const HOVER_INTERVAL := 0.1
 
@@ -132,6 +163,10 @@ var _camera: Camera3D = null
 ## Callable that returns an Array of Node3D cell containers to search
 ## Set via set_cell_provider()
 var _cell_provider: Callable = Callable()
+
+## Streaming systems used for server-direct static payload picking.
+var _world_provider: Object = null
+var _cell_manager: Object = null
 
 ## Reference to the console panel (to dynamically check its rect)
 var _console_panel: Control = null
@@ -184,7 +219,7 @@ func _process(delta: float) -> void:
 			return
 
 	# Cast ray from mouse through camera
-	var result := _pick_mesh_at(mouse_pos)
+	var result := _pick_at(mouse_pos)
 	_set_hover(result)
 
 
@@ -208,10 +243,9 @@ func _input(event: InputEvent) -> void:
 				if rect.has_point(mb.position):
 					return
 
-			var target := _pick_mesh_at(mb.position)
+			var target := _pick_at(mb.position)
 			if target:
-				var obj_root := _resolve_object_root(target)
-				var selection := _create_selection_from_node(obj_root, target.global_position)
+				var selection := _create_selection_from_hit(target)
 				_set_selection(selection)
 				get_viewport().set_input_as_handled()
 			elif picker_mode:
@@ -234,6 +268,16 @@ func set_camera(cam: Camera3D) -> void:
 ## Signature: func() -> Array (of Node3D)
 func set_cell_provider(provider: Callable) -> void:
 	_cell_provider = provider
+
+
+## Set the streaming world provider for server-direct static payload picking.
+func set_world_provider(provider: Object) -> void:
+	_world_provider = provider
+
+
+## Set the cell manager so static payload refs can be resolved while hovering.
+func set_cell_manager(manager: Object) -> void:
+	_cell_manager = manager
 
 
 ## Set the console panel Control to avoid picking inside it
@@ -301,49 +345,143 @@ func get_selection_info() -> String:
 
 #region AABB-based Mesh Picking
 
-## Pick the best MeshInstance3D at the given screen position using AABB proximity
-func _pick_mesh_at(screen_pos: Vector2) -> MeshInstance3D:
-	if not _camera or not _cell_provider.is_valid():
+## Pick the first visible mesh-like object under the cursor.
+func _pick_at(screen_pos: Vector2) -> PickHit:
+	if not _camera:
 		return null
 
 	var ray_origin := _camera.project_ray_origin(screen_pos)
 	var ray_dir := _camera.project_ray_normal(screen_pos)
 
-	# Dictionary holds mutable best result (GDScript primitives are pass-by-value)
-	var best: Dictionary = {"node": null, "score": INF}
+	var best := PickHit.new()
 
-	var cells: Array = _cell_provider.call()
-	for cell: Variant in cells:
-		if cell is Node3D:
-			_find_best_mesh(cell as Node3D, ray_origin, ray_dir, best)
+	if _cell_provider.is_valid():
+		var cells: Array = _cell_provider.call()
+		for cell: Variant in cells:
+			if cell is Node3D:
+				_find_first_scene_mesh(cell as Node3D, ray_origin, ray_dir, best)
 
-	return best.node as MeshInstance3D
+	_find_first_static_payload_ref(ray_origin, ray_dir, best)
+	return best if best.distance < INF else null
 
 
-## Recursively find the MeshInstance3D closest to the camera ray
-func _find_best_mesh(node: Node, origin: Vector3, dir: Vector3, best: Dictionary) -> void:
+## Recursively find the nearest MeshInstance3D AABB hit.
+func _find_first_scene_mesh(node: Node, origin: Vector3, dir: Vector3, best: PickHit) -> void:
 	if node is MeshInstance3D:
 		var mi := node as MeshInstance3D
-		if mi.visible and mi.mesh:
-			var center := mi.global_transform.origin
-			var local_center := mi.get_aabb().get_center()
-			if local_center != Vector3.ZERO:
-				center = mi.global_transform * local_center
-
-			var to_mesh := center - origin
-			var along := to_mesh.dot(dir)
-			if along > 0.5 and along < max_distance:
-				var closest_on_ray := origin + dir * along
-				var perp_dist := center.distance_to(closest_on_ray)
-				var angular := perp_dist / along if along > 0.0 else INF
-				# Bias toward closer objects (distance weight)
-				var score := angular * (1.0 + along / max_distance)
-				if angular < PICK_CONE_RAD and score < best.score:
-					best.node = mi
-					best.score = score
+		if mi.visible and mi.is_visible_in_tree() and mi.mesh:
+			var world_aabb: AABB = mi.global_transform * mi.get_aabb()
+			var hit_distance := _ray_aabb_distance(origin, dir, world_aabb)
+			if hit_distance >= 0.0 and hit_distance < best.distance and hit_distance <= max_distance:
+				best.mesh = mi
+				best.object_root = _resolve_object_root(mi)
+				best.hit_position = origin + dir * hit_distance
+				best.distance = hit_distance
+				best.source_kind = "scene_tree"
+				best.world_transform = mi.global_transform
 
 	for child in node.get_children():
-		_find_best_mesh(child, origin, dir, best)
+		_find_first_scene_mesh(child, origin, dir, best)
+
+
+func _find_first_static_payload_ref(origin: Vector3, dir: Vector3, best: PickHit) -> void:
+	if _world_provider == null or _cell_manager == null:
+		return
+	if not _world_provider.has_method("get_loaded_cell_coordinates"):
+		return
+	if not "_async_requests" in _world_provider or not "_static_renderer" in _world_provider:
+		return
+	var static_renderer: Variant = _world_provider.get("_static_renderer")
+	if static_renderer == null or not static_renderer.has_method("get_mesh_aabb"):
+		return
+
+	var coords: Array = _world_provider.call("get_loaded_cell_coordinates")
+	for grid_value: Variant in coords:
+		if not grid_value is Vector2i:
+			continue
+		var grid: Vector2i = grid_value
+		var request_id := int(_world_provider.get("_async_requests").get(grid, -1))
+		if request_id < 0 or not _cell_manager.has_method("get_async_payload"):
+			continue
+		var payload: RefCounted = _cell_manager.call("get_async_payload", request_id) as RefCounted
+		if payload == null:
+			continue
+		_find_first_static_ref_in_payload(payload, grid, static_renderer, origin, dir, best)
+
+
+func _find_first_static_ref_in_payload(
+	payload: RefCounted,
+	grid: Vector2i,
+	static_renderer: Object,
+	origin: Vector3,
+	dir: Vector3,
+	best: PickHit
+) -> void:
+	var model_keys: Dictionary = payload.get("model_keys")
+	var refs_by_model: Dictionary = payload.get("static_refs_by_model")
+	var transforms_by_model: Dictionary = payload.get("static_instance_transforms")
+	for key_value: Variant in refs_by_model.keys():
+		var key := str(key_value)
+		var info: Dictionary = model_keys.get(key, {})
+		var model_path := str(info.get("model_path", key))
+		var type_name := model_path.to_lower().replace("/", "\\")
+		var mesh_aabb: AABB = static_renderer.call("get_mesh_aabb", type_name)
+		if mesh_aabb.size == Vector3.ZERO:
+			continue
+		var refs: Array = refs_by_model.get(key, [])
+		var transforms: Array = transforms_by_model.get(key, [])
+		var count := mini(refs.size(), transforms.size())
+		for i in range(count):
+			if not transforms[i] is Transform3D:
+				continue
+			var xform: Transform3D = transforms[i]
+			var world_aabb: AABB = xform * mesh_aabb
+			var hit_distance := _ray_aabb_distance(origin, dir, world_aabb)
+			if hit_distance < 0.0 or hit_distance >= best.distance or hit_distance > max_distance:
+				continue
+			var ref: Variant = refs[i]
+			best.mesh = null
+			best.object_root = null
+			best.hit_position = origin + dir * hit_distance
+			best.distance = hit_distance
+			best.source_kind = "static_payload"
+			best.model_path = model_path
+			best.cell_grid = grid
+			best.world_transform = xform
+			best.record_type = "STAT"
+			best.form_id = str(ref.ref_id) if ref != null and "ref_id" in ref else key.get_file().get_basename()
+			best.ref_num = int(ref.ref_num) if ref != null and "ref_num" in ref else -1
+
+
+static func _ray_aabb_distance(origin: Vector3, dir: Vector3, aabb: AABB) -> float:
+	var min_v := aabb.position
+	var max_v := aabb.position + aabb.size
+	var t_min := 0.0
+	var t_max := INF
+	var eps := 0.000001
+
+	for axis in range(3):
+		var o := origin[axis]
+		var d := dir[axis]
+		var mn := min_v[axis]
+		var mx := max_v[axis]
+		if absf(d) < eps:
+			if o < mn or o > mx:
+				return -1.0
+			continue
+		var inv_d := 1.0 / d
+		var t1 := (mn - o) * inv_d
+		var t2 := (mx - o) * inv_d
+		if t1 > t2:
+			var tmp := t1
+			t1 = t2
+			t2 = tmp
+		t_min = maxf(t_min, t1)
+		t_max = minf(t_max, t2)
+		if t_min > t_max:
+			return -1.0
+
+	return t_min if t_min >= 0.0 else t_max
 
 #endregion
 
@@ -378,10 +516,10 @@ func _setup_tooltip() -> void:
 	_tooltip_layer.add_child(_tooltip_panel)
 
 
-func _set_hover(mesh: MeshInstance3D) -> void:
-	var obj_root: Node3D = _resolve_object_root(mesh) if mesh else null
+func _set_hover(hit: PickHit) -> void:
+	var obj_root: Node3D = hit.object_root if hit else null
 
-	if obj_root == _hover_node:
+	if obj_root == _hover_node and (obj_root != null or hit == null):
 		# Same object — just update tooltip position
 		if _tooltip_panel.visible:
 			_update_tooltip_position()
@@ -389,10 +527,9 @@ func _set_hover(mesh: MeshInstance3D) -> void:
 
 	_hover_node = obj_root
 
-	if obj_root:
-		var display_name := _get_object_display_name(obj_root)
-		var dist := _camera.global_position.distance_to(obj_root.global_position)
-		_tooltip_label.text = "%s  (%.0fm)" % [display_name, dist]
+	if hit:
+		var display_name := _get_hit_display_name(hit)
+		_tooltip_label.text = "%s  (%.0fm)" % [display_name, hit.distance]
 		_tooltip_panel.visible = true
 		_update_tooltip_position()
 	else:
@@ -426,6 +563,26 @@ func _get_object_display_name(node: Node3D) -> String:
 	if _suffix_regex:
 		clean_name = _suffix_regex.sub(clean_name, "")
 	return clean_name
+
+
+func _get_hit_display_name(hit: PickHit) -> String:
+	if hit.source_kind == "static_payload":
+		var label := hit.form_id
+		if not hit.model_path.is_empty():
+			label += "  " + hit.model_path.get_file()
+		return "[STAT] %s" % label
+	if hit.object_root:
+		return "[%s] %s" % [
+			_record_type_for_node(hit.object_root),
+			_get_object_display_name(hit.object_root),
+		]
+	return hit.mesh.name if hit.mesh else "Unknown"
+
+
+func _record_type_for_node(node: Node3D) -> String:
+	if node != null and node.has_meta("record_type"):
+		return str(node.get_meta("record_type"))
+	return "Node"
 
 #endregion
 
@@ -461,6 +618,28 @@ func _resolve_object_root(node: Node3D) -> Node3D:
 
 
 ## Create a Selection object from a picked node
+func _create_selection_from_hit(hit: PickHit) -> Selection:
+	if hit.source_kind == "static_payload":
+		var sel := Selection.new()
+		sel.node = null
+		sel.hit_position = hit.hit_position
+		sel.world_transform = hit.world_transform
+		sel.form_id = hit.form_id
+		sel.record_type = hit.record_type
+		sel.model_path = hit.model_path
+		sel.cell_grid = hit.cell_grid
+		sel.instance_id = hit.ref_num
+		sel.source_kind = hit.source_kind
+		sel.reference_text = _format_static_reference(sel)
+		return sel
+
+	var node := hit.object_root if hit.object_root else hit.mesh
+	var selection := _create_selection_from_node(node, hit.hit_position)
+	selection.source_kind = hit.source_kind
+	selection.reference_text = _format_node_reference(selection)
+	return selection
+
+
 func _create_selection_from_node(node: Node3D, hit_pos: Vector3) -> Selection:
 	var sel := Selection.new()
 	sel.node = node
@@ -523,7 +702,35 @@ func _create_selection_from_node(node: Node3D, hit_pos: Vector3) -> Selection:
 			clean_name = _suffix_regex.sub(clean_name, "")
 		sel.form_id = clean_name
 
+	sel.reference_text = _format_node_reference(sel)
 	return sel
+
+
+func _format_static_reference(sel: Selection) -> String:
+	var parts := PackedStringArray()
+	parts.append("ref_id=%s" % sel.form_id)
+	if sel.instance_id >= 0:
+		parts.append("ref_num=%d" % sel.instance_id)
+	if not sel.model_path.is_empty():
+		parts.append("model=%s" % sel.model_path)
+	parts.append("cell=%d,%d" % [sel.cell_grid.x, sel.cell_grid.y])
+	return " ".join(parts)
+
+
+func _format_node_reference(sel: Selection) -> String:
+	var parts := PackedStringArray()
+	if not sel.form_id.is_empty():
+		parts.append("ref_id=%s" % sel.form_id)
+	if sel.instance_id >= 0:
+		parts.append("ref_num=%d" % sel.instance_id)
+	if not sel.model_path.is_empty():
+		parts.append("model=%s" % sel.model_path)
+	if sel.cell_grid != Vector2i.ZERO or not sel.cell_name.is_empty():
+		if sel.is_interior and not sel.cell_name.is_empty():
+			parts.append("cell=\"%s\"" % sel.cell_name)
+		else:
+			parts.append("cell=%d,%d" % [sel.cell_grid.x, sel.cell_grid.y])
+	return " ".join(parts)
 
 #endregion
 

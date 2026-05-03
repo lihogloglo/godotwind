@@ -1214,10 +1214,20 @@ func _ensure_visual_proxy_type_registered(type_name: String, model_path: String,
 	if static_renderer.call("has_type", type_name):
 		return true
 
-	# Proximity-deferred visual proxies are opportunistic. Never sync-load or
-	# instantiate a prototype here: the full interactive object remains queued
-	# for proximity, and cold proxy registration must stay out of the frame loop.
-	return false
+	# Visual proxies may use only the already-promoted PackedScene. This keeps
+	# the MID-lag fix's no-sync-load rule while still letting deferred doors
+	# publish their cheap render proxy after the async model load completes.
+	if not model_loader.has_method("get_cached_packed_scene") or not static_renderer.has_method("register_from_packed_scene"):
+		return false
+	var packed_scene: PackedScene = model_loader.call("get_cached_packed_scene", model_path, cache_item_id)
+	if packed_scene == null and not cache_item_id.is_empty():
+		packed_scene = model_loader.call("get_cached_packed_scene", model_path, "")
+	if packed_scene == null:
+		return false
+	var reg_start := Time.get_ticks_usec()
+	var registered := bool(static_renderer.call("register_from_packed_scene", type_name, packed_scene))
+	last_static_register_us += Time.get_ticks_usec() - reg_start
+	return registered
 
 
 func _suppress_visual_proxy_for_ref(ref: CellReference, cell_grid: Vector2i, type_name: String) -> void:

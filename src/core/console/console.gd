@@ -145,8 +145,11 @@ func register_context(context_name: String, obj: Variant) -> void:
 	# When the streaming manager is registered, wire up the cell provider for picking
 	if context_name == "world" and obj is Object:
 		var world_obj: Object = obj
+		picker.set_world_provider(world_obj)
 		if world_obj.has_method("get_loaded_cell_nodes"):
 			picker.set_cell_provider(Callable(world_obj, "get_loaded_cell_nodes"))
+	elif context_name == "cell_manager" and obj is Object:
+		picker.set_cell_manager(obj)
 
 
 ## Get a context object
@@ -311,6 +314,10 @@ func _on_object_selected(selection: ObjectPicker.Selection) -> void:
 
 	# Store in context
 	_context["selected"] = selection
+	var reference_text := selection.get_reference_string()
+	if not reference_text.is_empty():
+		ui.set_input_text(reference_text)
+		DisplayServer.clipboard_set(reference_text)
 
 	# Print selection info
 	ui.print_line("")
@@ -323,6 +330,8 @@ func _on_object_selected(selection: ObjectPicker.Selection) -> void:
 		ui.print_line("  Cell: %s" % selection.get_cell_string())
 	if not selection.model_path.is_empty():
 		ui.print_line("  Model: %s" % selection.model_path)
+	if not reference_text.is_empty():
+		ui.print_line("  Copied: %s" % reference_text)
 
 	object_selected.emit(selection)
 

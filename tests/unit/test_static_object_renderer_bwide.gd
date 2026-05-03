@@ -9,6 +9,18 @@
 extends GdUnitTestSuite
 
 const SOR := preload("res://src/core/world/static_object_renderer.gd")
+const RI := preload("res://src/core/world/reference_instantiator.gd")
+
+
+class FakeModelLoader:
+	extends RefCounted
+	var packed_scenes: Dictionary[String, PackedScene] = {}
+
+	func get_cached_packed_scene(model_path: String, item_id: String = "") -> PackedScene:
+		var key := model_path.to_lower().replace("/", "\\")
+		if not item_id.is_empty():
+			key += ":" + item_id.to_lower()
+		return packed_scenes.get(key) as PackedScene
 
 
 ## Build a test mesh with an embedded LOD chain via ImporterMesh
@@ -63,6 +75,15 @@ func _build_prototype(mesh: ArrayMesh, mat: Material = null) -> Node3D:
 		mi.material_override = mat
 	root.add_child(mi)
 	return root
+
+
+func _build_packed_scene(mesh: ArrayMesh) -> PackedScene:
+	var root := _build_prototype(mesh)
+	var packed := PackedScene.new()
+	var err := packed.pack(root)
+	root.free()
+	assert_int(err).is_equal(OK)
+	return packed
 
 
 func test_register_mesh_type_detects_lod_chain() -> void:
@@ -346,3 +367,22 @@ func test_visual_proxy_source_key_lifecycle() -> void:
 	renderer.restore_proxy_if_clean(source_key)
 	data = renderer.get_instance_data(id)
 	assert_bool(data.visible).is_false()
+
+
+func test_visual_proxy_registers_from_cached_packed_scene_without_node_instantiation() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var model_path := "meshes\\d\\door_test.nif"
+	var normalized := model_path.to_lower().replace("/", "\\")
+	var loader := FakeModelLoader.new()
+	loader.packed_scenes[normalized] = _build_packed_scene(_build_simple_mesh())
+
+	var instantiator := RI.new()
+	instantiator.static_renderer = renderer
+	instantiator.model_loader = loader
+
+	assert_bool(renderer.has_type(normalized)).is_false()
+	assert_bool(instantiator._ensure_visual_proxy_type_registered(normalized, model_path, "")).is_true()
+	assert_bool(renderer.has_type(normalized)).is_true()
