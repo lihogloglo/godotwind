@@ -654,7 +654,7 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 	_add_section(vbox, "View Distance")
 
 	var view_row := HBoxContainer.new()
-	var view_distance: int = _initial_state.get("view_distance", StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS)
+	var view_distance: int = _initial_state.get("view_distance", StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS)
 	var adjust_cb: Callable = _cb.get("adjust_view_distance", Callable())
 	var set_cb: Callable = _cb.get("set_view_distance", Callable())
 
@@ -666,10 +666,10 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 
 	view_distance_slider = HSlider.new()
 	view_distance_slider.name = "ViewDistanceSlider"
-	view_distance_slider.min_value = StreamingConfig.MIN_LOAD_RADIUS_CELLS
-	view_distance_slider.max_value = StreamingConfig.MAX_LOAD_RADIUS_CELLS
-	view_distance_slider.step = 1.0
-	view_distance_slider.value = StreamingConfig.clamp_load_radius_cells(view_distance)
+	view_distance_slider.min_value = StreamingConfig.MIN_VIEW_DISTANCE_METERS
+	view_distance_slider.max_value = StreamingConfig.MAX_VIEW_DISTANCE_METERS
+	view_distance_slider.step = StreamingConfig.VIEW_DISTANCE_STEP_METERS
+	view_distance_slider.value = StreamingConfig.clamp_view_distance_meters(view_distance)
 	view_distance_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	view_distance_slider.custom_minimum_size.x = 120
 	view_distance_slider.value_changed.connect(func(value: float) -> void: set_cb.call(value))
@@ -685,7 +685,7 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 
 	var dist_label := Label.new()
 	dist_label.name = "DistLabel"
-	dist_label.text = StreamingConfig.format_load_radius_with_distance(view_distance)
+	dist_label.text = StreamingConfig.format_view_distance(view_distance)
 	dist_label.add_theme_font_size_override("font_size", 11)
 	view_distance_label = dist_label
 	vbox.add_child(dist_label)

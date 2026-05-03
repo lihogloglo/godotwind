@@ -369,25 +369,36 @@ func set_view_distance_multiplier(multiplier: float) -> void:
 	_config.set_value("graphics", "view_distance_multiplier", clampf(multiplier, 0.25, 2.0))
 	_save_config()
 
-## Gets the exterior streaming radius in cells.
-func get_streaming_radius_cells() -> int:
-	var env_radius := OS.get_environment("GODOTWIND_STREAMING_RADIUS_CELLS")
-	if not env_radius.is_empty():
-		return StreamingConfig.clamp_load_radius_cells(int(env_radius))
+## Gets the user-facing object view distance in meters.
+func get_view_distance_meters() -> int:
+	var env_distance := OS.get_environment("GODOTWIND_VIEW_DISTANCE_METERS")
+	if not env_distance.is_empty():
+		return StreamingConfig.clamp_view_distance_meters(int(env_distance))
 
 	_load_config()
-	var default_radius: int = int(ProjectSettings.get_setting(
-		"graphics/streaming_radius_cells",
-		StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS
+	var default_distance: int = int(ProjectSettings.get_setting(
+		"graphics/view_distance_meters",
+		StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS
 	))
-	var radius: int = int(_config.get_value("graphics", "streaming_radius_cells", default_radius))
-	return StreamingConfig.clamp_load_radius_cells(radius)
+	var distance: int = int(_config.get_value("graphics", "view_distance_meters", default_distance))
+	return StreamingConfig.clamp_view_distance_meters(distance)
 
-## Sets the exterior streaming radius in cells.
-func set_streaming_radius_cells(radius: int) -> void:
+## Sets the user-facing object view distance in meters.
+func set_view_distance_meters(distance_m: int) -> void:
 	_load_config()
-	_config.set_value("graphics", "streaming_radius_cells", StreamingConfig.clamp_load_radius_cells(radius))
+	_config.set_value("graphics", "view_distance_meters", StreamingConfig.clamp_view_distance_meters(distance_m))
 	_save_config()
+
+
+## Legacy compatibility for older tools/settings. Values in the old 1-10 cell
+## range are converted to the approximate historical render distance.
+func get_streaming_radius_cells() -> int:
+	var distance := get_view_distance_meters()
+	return StreamingConfig.scene_load_radius_cells_for_view_distance_meters(distance)
+
+
+func set_streaming_radius_cells(radius: int) -> void:
+	set_view_distance_meters(int(round(StreamingConfig.distant_render_end_for_load_radius_cells(radius))))
 
 ## Gets whether VSync is enabled
 func get_vsync_enabled() -> bool:

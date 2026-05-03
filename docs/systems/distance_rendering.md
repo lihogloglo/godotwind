@@ -9,16 +9,16 @@ system docs linked below.
 | Tier | Runtime range | Owner | Technique | Status |
 | --- | --- | --- | --- | --- |
 | NEAR | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior | Working |
-| MID | 0-500m default fallback | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
-| HLOD | Opt-in; currently visible 300-1000m | `object_paging.gd` | Runtime ObjectPaging chunk proxies: static refs are merged into chunk meshes and published as raw RS instances. | Implemented, opt-in |
-| FAR | 500-5000m default-on | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages | Working, default-on |
+| MID | Fixed 150-300m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
+| HLOD | Fixed 300-1000m, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies: static refs are merged into chunk meshes and published as raw RS instances. | Implemented, opt-in |
+| FAR | Fixed 1000-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages | Working |
 
-Default mode: MID owns 0-500m and FAR begins at 500m. HLOD is off.
+The user-facing distance slider is an object view-distance cap in meters. It
+does not expand MID. If the cap is below 300m, HLOD and FAR do not load. If the
+cap is below 1000m, FAR does not load.
 
-`hlod_enable`: HLOD work starts at the canonical 300m handoff. MID remains the
-0-500m safety fallback for uncovered buckets, but buckets fully covered by
-active HLOD cap their MID visibility at 300m. HLOD is visible 300-1000m, and
-FAR remains available from 500m so uncovered or late chunks do not open holes.
+`hlod_enable`: HLOD work starts at the canonical 300m handoff and is capped by
+the current view distance up to 1000m. MID remains fixed at 300m.
 
 `hlod_disable`: HLOD chunks are parked/cleaned up and the default MID/FAR
 fallback remains active.
@@ -31,16 +31,14 @@ runtime toggle policy. Do not treat it as the production tier contract.
 Distance constants live in `src/core/world/distance_utils.gd`:
 
 - `NEAR_END = 150`
-- `MID_END = 500`
+- `MID_END = 300`
 - `HLOD_START = 300`
 - `HLOD_END = 1000`
 - `FAR_START = 1000`
 - `FAR_END = 5000`
 
-`FAR_START` is the nominal post-HLOD design boundary. The current runtime safety
-policy deliberately shows FAR from 500m because HLOD does not yet own exact
-per-page coverage. Do not infer from the constant alone that runtime FAR starts
-at 1000m.
+`FAR_START` is the fixed post-HLOD design boundary. Runtime view distance can
+cap FAR visibility/loading, but cannot move FAR earlier than 1000m.
 
 MID to NEAR streaming promotion is separate from render-tier visibility:
 
@@ -82,8 +80,8 @@ Current HLOD rules:
 
 - HLOD is opt-in through `hlod_enable` and benchmark toggles.
 - Runtime visibility begins at 300m.
-- Fully covered MID buckets cap at 300m; partial/uncovered buckets keep their
-  500m fallback until coverage is exact.
+- MID stays capped at 300m; incomplete HLOD coverage is diagnosed rather than
+  widening MID.
 - HLOD must reduce surfaces/materials in chunk proxies before it can become
   default-on; one chunk instance is not enough if it still expands into many
   draw surfaces.
@@ -92,9 +90,7 @@ Deep dive: `docs/systems/object_paging.md`.
 
 ## FAR Contract
 
-FAR impostors are default-on from 500m in the current safety configuration.
-They provide the visible fallback beyond MID whether HLOD is disabled, late,
-sparse, or missing coverage.
+FAR impostors begin at 1000m when the view-distance cap is above 1000m.
 
 Deep dive: `docs/systems/impostor_streaming_rendering.md`.
 

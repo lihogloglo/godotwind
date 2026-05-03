@@ -91,6 +91,8 @@ const VISUAL_TEST: Array[StringName] = [
 	&"hlod_benchmark_toggle",
 	&"hlod_dump_stats",
 	&"hlod_teleport_tier",
+	&"hlod_debug_chunks_toggle",
+	&"hlod_fade_toggle",
 	&"impostor_stress_toggle_bounds",
 	&"impostor_stress_force_visible",
 	&"impostor_stress_reload_area",

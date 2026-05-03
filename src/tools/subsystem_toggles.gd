@@ -36,8 +36,7 @@ func setup(callbacks: Dictionary, defaults: Dictionary) -> void:
 		var default_val: bool = defaults.get(name, true)
 		_defaults[name] = default_val
 		_flags[name] = default_val
-		if not default_val:
-			_apply[name].call(default_val)
+		_apply[name].call(default_val)
 
 
 ## Get current state of a flag

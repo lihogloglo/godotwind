@@ -164,7 +164,8 @@ var _data_path: String = ""
 var _initialized: bool = false
 var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
-var _current_view_distance: int = StreamingConfig.DEFAULT_LOAD_RADIUS_CELLS
+var _current_view_distance: int = StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS
+var _hlod_flyby_mode: bool = false
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
 var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 
@@ -184,20 +185,20 @@ func _apply_cmdline_view_distance_override() -> void:
 	for i in range(runtime_args.size()):
 		var arg := runtime_args[i]
 		var value := ""
-		if arg == "--load-radius-cells" or arg == "--view-distance-cells":
+		if arg == "--view-distance-meters" or arg == "--view-distance":
 			if i + 1 < runtime_args.size():
 				value = runtime_args[i + 1]
-		elif arg.begins_with("--load-radius-cells="):
-			value = arg.substr("--load-radius-cells=".length())
-		elif arg.begins_with("--view-distance-cells="):
-			value = arg.substr("--view-distance-cells=".length())
+		elif arg.begins_with("--view-distance-meters="):
+			value = arg.substr("--view-distance-meters=".length())
+		elif arg.begins_with("--view-distance="):
+			value = arg.substr("--view-distance=".length())
 		if value.is_empty():
 			continue
 		if not value.is_valid_int():
-			Log.warn("streaming", "Ignoring invalid cell radius override: %s" % value)
+			Log.warn("streaming", "Ignoring invalid view distance override: %s" % value)
 			continue
-		_current_view_distance = StreamingConfig.clamp_load_radius_cells(int(value))
-		Log.info("streaming", "CLI cell radius override: %s" % StreamingConfig.format_load_radius_with_distance(_current_view_distance))
+		_current_view_distance = StreamingConfig.clamp_view_distance_meters(int(value))
+		Log.info("streaming", "CLI view distance override: %s" % StreamingConfig.format_view_distance(_current_view_distance))
 		return
 
 
@@ -286,7 +287,7 @@ func _ready() -> void:
 	# tool. Console command lives in DebugViewCommands.
 	DebugViewCommands.enable_wireframe_generation()
 
-	_current_view_distance = SettingsManager.get_streaming_radius_cells()
+	_current_view_distance = SettingsManager.get_view_distance_meters()
 	_apply_cmdline_view_distance_override()
 
 	var _t0 := Time.get_ticks_msec()
@@ -1854,10 +1855,9 @@ func _setup_subsystem_toggles() -> void:
 				_env_controls.on_native_volumetric_fog_toggled(on),
 	}
 
-	# Distant rendering is back on by default through FAR impostors. HLOD remains
-	# implemented and opt-in (`hlod_enable`, benchmark toggles) because the
-	# 2026-05-02 default-on stress run exposed a persistent draw-call blow-up in
-	# runtime chunk surfaces. `--near-only` remains the full distant-tier opt-out.
+	# Distant rendering is on by default through the fixed MID -> HLOD -> FAR
+	# architecture. `--near-only` remains the full distant-tier opt-out, and
+	# `--no-hlod` remains the HLOD ablation path.
 	#
 	# `mid_objects: true` post-statics_no_node3d T.1 (2026-04-19): the
 	# static_object_renderer is now the universal statics render path
@@ -1866,30 +1866,48 @@ func _setup_subsystem_toggles() -> void:
 	# for benchmark A/B isolation; it now toggles all statics.
 	var defaults: Dictionary = {
 		"terrain": true,
-		"ocean": false,
-		"sky": true,
-		"weather": true,
+		"ocean": _ocean_controls.show_ocean,
+		"sky": _env_controls.show_sky,
+		"weather": _weather_controls.weather_enabled,
 		"characters": _show_characters,
 		"impostors": true,
 		"mid_objects": true,
 		"near_objects": true,
 		"hlod": false,
 		"distant_lights": true,
-		"shadows": true,
-		"postfx": true,
+		"shadows": false,
+		"postfx": false,
 	}
 
 	_subsystem_toggles.setup(callbacks, defaults)
+	if native_streaming_manager != null:
+		native_streaming_manager.call("set_impostors_visible", bool(defaults.get("impostors", true)))
+		native_streaming_manager.call("set_hlod_visible", bool(defaults.get("hlod", false)))
+		native_streaming_manager.call("set_distant_lights_visible", bool(defaults.get("distant_lights", true)))
+		var tier_stats: Dictionary = native_streaming_manager.call("get_stats")
+		Log.info("streaming", "Distant tier defaults synced: HLOD=%s FAR=%s distant_lights=%s" % [
+			str(defaults.get("hlod", false)),
+			str(defaults.get("impostors", true)),
+			str(defaults.get("distant_lights", true)),
+		])
+		Log.info("streaming", "Distant tier state: view=%dm FAR enabled=%s FAR instances=%d HLOD initialized=%s HLOD active=%s HLOD cells=%d" % [
+			int(tier_stats.get("view_distance_meters", _current_view_distance)),
+			str(tier_stats.get("far_enabled", false)),
+			int(tier_stats.get("total_impostors", 0)),
+			str(tier_stats.get("hlod_initialized", false)),
+			str(tier_stats.get("hlod_active", false)),
+			int(tier_stats.get("hlod_cells", 0)),
+		])
 
 	# Boot banner: make the active distant tier state explicit in logs.
-	_log("[color=green][Distant tiers active][/color] FAR impostors default ON; HLOD opt-in; MID/FAR handoff follows view-distance slider")
-	Log.info("streaming", "[Distant tiers active] impostors default=true; HLOD default=false pending chunk-surface proof; MID fallback follows view-distance slider, impostors start at the same handoff")
+	_log("[color=green][Distant tiers active][/color] MID fixed 150-300m; HLOD opt-in 300-1000m; FAR fallback covers uncovered distant pages")
+	Log.info("streaming", "[Distant tiers active] MID fixed=150-300; HLOD opt-in=300-1000; FAR fallback starts at MID_END until HLOD coverage is exact; view distance caps tier loading")
 
 	# CLI controls for focused tier isolation. `--near-only` parks distant
 	# render tiers without hiding MID. `--near-mid-only` is the hard benchmark
 	# isolation mode: terrain + NEAR + MID only, with environment/post effects
-	# disabled too. `--hlod` enables the lazy HLOD path at boot; `--hlod-only`
-	# also parks FAR.
+	# disabled too. `--hlod` enables HLOD on top of the normal stack;
+	# `--hlod-only` isolates the runtime HLOD path.
 	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
 	# now controls the universal statics renderer, flipping it off would
 	# hide all rocks/arches/clutter.
@@ -1901,7 +1919,7 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
-			_log("[color=yellow]--near-only: HLOD/FAR/distant lights OFF; MID handoff follows view-distance slider[/color]")
+			_log("[color=yellow]--near-only: HLOD/FAR/distant lights OFF; MID fixed at 300m[/color]")
 		elif a == "--near-mid-only":
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
@@ -1915,14 +1933,25 @@ func _setup_subsystem_toggles() -> void:
 			_log("[color=yellow]--near-mid-only: terrain + NEAR + MID isolation[/color]")
 		elif a == "--hlod":
 			_subsystem_toggles.set_flag("hlod", true)
-			_log("[color=yellow]--hlod: HLOD ON; MID/FAR handoff follows view-distance slider, covered MID caps at 300m, HLOD visible 300-1000m[/color]")
+			_log("[color=yellow]--hlod: HLOD ON; FAR fallback remains until HLOD coverage is exact[/color]")
 		elif a == "--hlod-only":
+			_hlod_flyby_mode = true
+			_subsystem_toggles.set_flag("terrain", true)
+			_subsystem_toggles.set_flag("near_objects", true)
+			_subsystem_toggles.set_flag("mid_objects", true)
 			_subsystem_toggles.set_flag("hlod", true)
 			_subsystem_toggles.set_flag("impostors", false)
-			_log("[color=yellow]--hlod-only: HLOD ON, FAR impostors OFF[/color]")
+			_subsystem_toggles.set_flag("distant_lights", false)
+			_subsystem_toggles.set_flag("sky", false)
+			_subsystem_toggles.set_flag("weather", false)
+			_subsystem_toggles.set_flag("postfx", false)
+			_subsystem_toggles.set_flag("shadows", false)
+			_subsystem_toggles.set_flag("ocean", false)
+			_subsystem_toggles.set_flag("characters", false)
+			_log("[color=yellow]--hlod-only: HLOD flyby mode; terrain + NEAR/MID bootstrap ON, FAR/environment OFF[/color]")
 		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
 			_subsystem_toggles.set_flag("hlod", false)
-			_log("[color=yellow]--no-hlod: HLOD OFF; MID/FAR handoff follows view-distance slider[/color]")
+			_log("[color=yellow]--no-hlod: HLOD OFF; MID still fixed at 300m[/color]")
 		elif a == "--no-impostors":
 			_subsystem_toggles.set_flag("impostors", false)
 			_log("[color=yellow]--no-impostors: FAR impostors OFF[/color]")
@@ -2002,7 +2031,8 @@ func _setup_subsystem_toggles() -> void:
 				int(stats.get("desired_cell_count", stats.get("target_cell_count", 0))),
 				int(stats.get("async_requests", 0))
 			])
-			lines.append("radius=%d theoretical=%d load_queue=%d active_slots=%d resident_req=%d mid_buckets=%d mid_draws=%d" % [
+			lines.append("view=%dm scene_radius=%d theoretical=%d load_queue=%d active_slots=%d resident_req=%d mid_buckets=%d mid_draws=%d" % [
+				int(stats.get("view_distance_meters", _current_view_distance)),
 				int(stats.get("load_radius_cells", 0)),
 				int(stats.get("target_cell_count", 0)),
 				int(stats.get("load_queue_size", 0)),
@@ -2131,7 +2161,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	world_streaming_manager = nsm_node  # Assign to common reference
 	
 	# Configure
-	native_streaming_manager.set_load_radius_cells(_current_view_distance, false)
+	native_streaming_manager.set_view_distance_meters(_current_view_distance, false)
 	native_streaming_manager.debug_enabled = false  # Disabled for performance (enable with toggle_debug command)
 	
 	add_child(native_streaming_manager)
@@ -2387,20 +2417,25 @@ func _cmd_hlod_enable(_args: Dictionary) -> String:
 		_subsystem_toggles.set_flag("hlod", true)
 	else:
 		native_streaming_manager.set_hlod_visible(true)
-	var handoff := _get_distant_render_end_m()
-	return "HLOD merging ENABLED - MID fallback 0-%dm, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback %dm+" % [int(handoff), int(handoff)]
+	var cap := _get_distant_render_end_m()
+	return "HLOD requested - MID fixed 0-%dm, HLOD %s, FAR %s, view cap %dm" % [
+		int(StreamingConfig.DU.MID_END),
+		"300-%dm" % int(minf(cap, StreamingConfig.DU.HLOD_END)) if cap > StreamingConfig.DU.HLOD_START else "not loaded",
+		"fallback from %dm until coverage is exact" % int(StreamingConfig.DU.MID_END) if cap > StreamingConfig.DU.MID_END else "not loaded",
+		int(cap),
+	]
 
 
 func _cmd_hlod_disable(_args: Dictionary) -> String:
 	if not native_streaming_manager:
 		return "Native streaming manager not initialized"
-	# HLOD-off parks only HLOD. MID falls back to 500m; FAR is controlled by
-	# the separate impostor toggle.
+	# HLOD-off parks only HLOD. MID stays fixed at 300m; FAR is controlled by
+	# the separate impostor toggle and the view cap.
 	if _subsystem_toggles and _subsystem_toggles.get_flag("hlod"):
 		_subsystem_toggles.set_flag("hlod", false)
 	else:
 		native_streaming_manager.set_hlod_visible(false)
-	return "HLOD DISABLED - MID fallback 0-%dm, HLOD parked" % int(_get_distant_render_end_m())
+	return "HLOD DISABLED - MID fixed 0-%dm, HLOD parked" % int(StreamingConfig.DU.MID_END)
 
 
 func _cmd_proto_registry(args: Dictionary) -> String:
@@ -2752,6 +2787,15 @@ func _on_streaming_startup_progress(progress: float, loaded_cells: int, total_ce
 func _on_streaming_startup_complete() -> void:
 	_is_loading = false
 	_hide_loading()
+	if _hlod_flyby_mode:
+		_log_hlod_flyby_stats.call_deferred()
+
+
+func _log_hlod_flyby_stats() -> void:
+	await get_tree().create_timer(5.0).timeout
+	Log.info("streaming", "[HLOD flyby stats +5s]\n%s" % _cmd_hlod_stats({}))
+	await get_tree().create_timer(10.0).timeout
+	Log.info("streaming", "[HLOD flyby stats +15s]\n%s" % _cmd_hlod_stats({}))
 
 
 func _update_loading(progress: float, status: String) -> void:
@@ -2993,36 +3037,38 @@ func _process(delta: float) -> void:
 ## Adjust view distance and update streaming manager
 ## Max radius comes from StreamingConfig so settings, UI, and runtime clamp together.
 func _adjust_view_distance(delta: int) -> void:
-	_set_view_distance(_current_view_distance + delta)
+	_set_view_distance(_current_view_distance + delta * StreamingConfig.VIEW_DISTANCE_STEP_METERS)
 
 
 ## Set view distance from UI/settings and update streaming manager.
 func _set_view_distance(value: Variant) -> void:
 	var requested := int(round(float(value)))
-	var clamped := StreamingConfig.clamp_load_radius_cells(requested)
+	var clamped := StreamingConfig.clamp_view_distance_meters(requested)
 	var changed := clamped != _current_view_distance
 	_current_view_distance = clamped
-	SettingsManager.set_streaming_radius_cells(_current_view_distance)
+	SettingsManager.set_view_distance_meters(_current_view_distance)
 	if world_streaming_manager:
-		if world_streaming_manager.has_method("set_load_radius_cells"):
-			world_streaming_manager.call("set_load_radius_cells", _current_view_distance, changed)
+		if world_streaming_manager.has_method("set_view_distance_meters"):
+			world_streaming_manager.call("set_view_distance_meters", _current_view_distance, changed)
+		elif world_streaming_manager.has_method("set_load_radius_cells"):
+			world_streaming_manager.call("set_load_radius_cells", StreamingConfig.scene_load_radius_cells_for_view_distance_meters(_current_view_distance), changed)
 		else:
-			world_streaming_manager.view_distance_cells = _current_view_distance
+			world_streaming_manager.view_distance_cells = StreamingConfig.scene_load_radius_cells_for_view_distance_meters(_current_view_distance)
 			if changed:
 				world_streaming_manager.refresh_cells()
 	if _panels:
 		if _panels.view_distance_slider:
 			_panels.view_distance_slider.set_value_no_signal(_current_view_distance)
 		if _panels.view_distance_label:
-			_panels.view_distance_label.text = StreamingConfig.format_load_radius_with_distance(_current_view_distance)
-	_log("View distance: %s" % StreamingConfig.format_load_radius_with_distance(_current_view_distance))
+			_panels.view_distance_label.text = StreamingConfig.format_view_distance(_current_view_distance)
+	_log("View distance: %s" % StreamingConfig.format_view_distance(_current_view_distance))
 	_update_stats()
 
 
 func _get_distant_render_end_m() -> float:
 	if world_streaming_manager and world_streaming_manager.has_method("get_distant_render_end_m"):
 		return float(world_streaming_manager.call("get_distant_render_end_m"))
-	return StreamingConfig.distant_render_end_for_load_radius_cells(_current_view_distance)
+	return float(StreamingConfig.clamp_view_distance_meters(_current_view_distance))
 
 
 # ==================== Interior Transitions ====================

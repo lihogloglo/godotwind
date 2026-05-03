@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bb1scn2ycjcy1"]
+
+[ext_resource type="Script" path="res://tests/visual/test_hlod_only.gd" id="1"]
+
+[node name="TestHLODOnly" type="Node3D"]
+script = ExtResource("1")

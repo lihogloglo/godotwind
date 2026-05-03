@@ -17,15 +17,55 @@ extends RefCounted
 const DU := preload("res://src/core/world/distance_utils.gd")
 
 # =============================================================================
-# STREAMING CELL RADIUS
+# VIEW DISTANCE AND STREAMING RADIUS
 # =============================================================================
 
-## Default radius of exterior cells kept active around the camera.
-## 4 = 9x9 loaded grid, restoring MID coverage for the 0-500m fallback band.
-const DEFAULT_LOAD_RADIUS_CELLS := 4
+## User-facing object visibility distance in meters. This is not the MID cell
+## radius. The fixed tier ownership is:
+##   NEAR: 0-150m
+##   MID: 150-300m
+##   HLOD: 300-1000m
+##   FAR impostors: 1000m+
+const DEFAULT_VIEW_DISTANCE_METERS := int(DU.FAR_END)
 
-## User-facing slider limits. Kept here so runtime, UI, and settings validation
-## share the same contract.
+## Slider limits in meters. Values below a tier start suppress that tier's
+## loading entirely; e.g. <300m means no HLOD/impostor work.
+const MIN_VIEW_DISTANCE_METERS := int(DU.NEAR_END)
+const MAX_VIEW_DISTANCE_METERS := int(DU.FAR_END)
+const VIEW_DISTANCE_STEP_METERS := 50
+
+## Maximum exterior cell radius needed by the NEAR/MID scene representation.
+## HLOD and FAR read world data directly, so active scene cells never expand
+## beyond the fixed MID bridge band.
+const MAX_SCENE_LOAD_RADIUS_CELLS := 3
+
+
+static func clamp_view_distance_meters(value: int) -> int:
+	var stepped := int(round(float(value) / float(VIEW_DISTANCE_STEP_METERS))) * VIEW_DISTANCE_STEP_METERS
+	return clampi(stepped, MIN_VIEW_DISTANCE_METERS, MAX_VIEW_DISTANCE_METERS)
+
+
+static func scene_load_radius_cells_for_view_distance_meters(value: int) -> int:
+	var clamped := clamp_view_distance_meters(value)
+	var scene_distance := minf(float(clamped), DU.HLOD_START)
+	return clampi(DU.distance_to_cell_radius(scene_distance), 1, MAX_SCENE_LOAD_RADIUS_CELLS)
+
+
+static func scene_load_distance_cap_for_view_distance_meters(value: int) -> float:
+	return minf(float(clamp_view_distance_meters(value)), DU.HLOD_START) + DU.CELL_SIZE_METERS
+
+
+static func distant_stream_radius_cells_for_view_distance_meters(value: int, max_radius_cells: int) -> int:
+	var radius := DU.distance_to_cell_radius(float(clamp_view_distance_meters(value))) + 2
+	return clampi(radius, 1, max_radius_cells)
+
+
+static func format_view_distance(value: int) -> String:
+	return "%dm" % clamp_view_distance_meters(value)
+
+
+## Backwards-compatible helpers for older callers and saved settings.
+const DEFAULT_LOAD_RADIUS_CELLS := 4
 const MIN_LOAD_RADIUS_CELLS := 1
 const MAX_LOAD_RADIUS_CELLS := 10
 
@@ -34,9 +74,6 @@ static func clamp_load_radius_cells(value: int) -> int:
 	return clampi(value, MIN_LOAD_RADIUS_CELLS, MAX_LOAD_RADIUS_CELLS)
 
 
-## Convert the user-facing exterior cell radius slider into the active MID/FAR
-## render handoff. The default radius preserves the shipped 500m fallback; lower
-## values reduce distant static work for slower hardware.
 static func distant_render_end_for_load_radius_cells(value: int) -> float:
 	var clamped := clamp_load_radius_cells(value)
 	var normalized := float(clamped) / float(DEFAULT_LOAD_RADIUS_CELLS)
@@ -48,9 +85,10 @@ static func load_distance_cap_for_load_radius_cells(value: int) -> float:
 
 
 static func format_load_radius_with_distance(value: int) -> String:
-	var clamped := clamp_load_radius_cells(value)
-	var distance := distant_render_end_for_load_radius_cells(clamped)
-	return "%d cells (~%dm)" % [clamped, int(round(distance))]
+	return "%d cells legacy (%dm view)" % [
+		clamp_load_radius_cells(value),
+		int(round(distant_render_end_for_load_radius_cells(value))),
+	]
 
 
 # =============================================================================
@@ -61,9 +99,9 @@ static func format_load_radius_with_distance(value: int) -> String:
 ## NEAR tier: Full Node3D with physics and collision
 const NEAR_END := DU.NEAR_END  # 150.0
 
-## Distance where MID tier ends and FAR tier begins (meters)
+## Distance where MID tier ends and HLOD begins (meters)
 ## MID tier: one RS instance per object, engine-driven sub-LOD from embedded ArrayMesh surface_lod chain
-const MID_END := DU.MID_END  # 500.0
+const MID_END := DU.MID_END  # 300.0
 
 ## Distance where FAR tier ends and HORIZON begins (meters)
 ## FAR tier: Octahedral impostor billboards

@@ -226,7 +226,7 @@ func test_hlod_covered_bucket_caps_mid_range() -> void:
 
 	renderer.set_hlod_covered_bucket_counts({}, 300.0)
 	stats = renderer.get_stats()
-	assert_float(float(bucket.get("visibility_range_end"))).is_equal(500.0)
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(300.0)
 	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
 	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(0)
 
@@ -277,7 +277,7 @@ func test_partial_hlod_bucket_coverage_keeps_mid_fallback() -> void:
 
 	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\partial.nif": 1}, 300.0)
 	var stats := renderer.get_stats()
-	assert_float(float(bucket.get("visibility_range_end"))).is_equal(500.0)
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(300.0)
 	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
 
 

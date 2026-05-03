@@ -77,7 +77,8 @@ var _page_container: Node3D = null
 var _impostor_pages: Dictionary[String, ImpostorPage] = {}
 var _dirty_page_keys: Array[String] = []
 var _dirty_page_set: Dictionary[String, bool] = {}
-var _visibility_begin_distance: float = DU.MID_END
+var _visibility_begin_distance: float = DU.FAR_START
+var _visibility_end_distance: float = DU.FAR_END
 var _visibility_fade_margin: float = DU.FADE_MARGIN_RENDER_FAR
 
 ## Billboard shader material with texture array
@@ -335,7 +336,7 @@ func set_force_visible_for_test(enabled: bool) -> void:
 		_apply_visibility_ranges_to_pages()
 		_apply_material_visibility_params(0.0, 0.0)
 	else:
-		set_visibility_range_begin(DU.MID_END, DU.FADE_MARGIN_RENDER_FAR)
+		set_visibility_range(DU.FAR_START, DU.FAR_END, DU.FADE_MARGIN_RENDER_FAR)
 
 
 #region Initialization
@@ -593,6 +594,15 @@ func set_visibility_range_begin(begin_distance: float, fade_margin: float = DU.F
 	_apply_visibility_ranges_to_pages()
 	Log.info("impostors", "visibility_range_begin set to %.0fm (fade margin %.0fm)" % [
 		begin_distance - fade_margin, fade_margin])
+
+
+func set_visibility_range(begin_distance: float, end_distance: float, fade_margin: float = DU.FADE_MARGIN_RENDER_FAR) -> void:
+	_visibility_begin_distance = begin_distance
+	_visibility_end_distance = clampf(end_distance, begin_distance, DU.FAR_END)
+	_visibility_fade_margin = fade_margin
+	_apply_visibility_ranges_to_pages()
+	Log.info("impostors", "visibility_range fixed %.0f-%.0fm (fade margin %.0fm)" % [
+		begin_distance, _visibility_end_distance, fade_margin])
 
 
 func set_hlod_covered_ref_nums(covered_ref_nums: Dictionary) -> void:
@@ -1373,7 +1383,7 @@ func _configure_page_visibility(instance: MultiMeshInstance3D, begin_distance: f
 		begin_distance = _visibility_begin_distance
 	instance.visibility_range_begin = begin_distance - _visibility_fade_margin
 	instance.visibility_range_begin_margin = _visibility_fade_margin
-	instance.visibility_range_end = DU.FAR_END
+	instance.visibility_range_end = _visibility_end_distance
 	instance.visibility_range_end_margin = DU.FADE_MARGIN_RENDER_FAR
 	instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
@@ -1810,6 +1820,7 @@ func get_stats() -> Dictionary:
 	s["far_multimesh_dirty"] = _impostors_dirty
 	s["far_enabled"] = _streaming_enabled and visible
 	s["far_visibility_begin_m"] = _visibility_begin_distance
+	s["far_visibility_end_m"] = _visibility_end_distance
 	var hlod_page_stats := _get_hlod_page_coverage_stats()
 	s["far_hlod_covered_pages"] = hlod_page_stats.get("covered_pages", 0)
 	s["far_hlod_uncovered_pages"] = hlod_page_stats.get("uncovered_pages", 0)

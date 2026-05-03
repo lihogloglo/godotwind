@@ -168,6 +168,8 @@ var enabled: bool = true
 ## Mirrors the same pattern used by StaticObjectRenderer._globally_visible.
 var _globally_visible: bool = true
 var _visual_begin_floor: float = DEFAULT_VISUAL_BEGIN_FLOOR
+var _visual_end_cap: float = DU.HLOD_END
+var _visibility_fade_enabled: bool = false
 
 ## Scenario RID for creating RS instances
 var _scenario: RID = RID()
@@ -198,7 +200,7 @@ var _next_generation: int = 1
 ## Desired chunks proven not worth or not possible to merge in the current
 ## renderer/cache state. MID/FAR fallback owns their pixels; this prevents
 ## repeated ESM scans for sparse rings.
-var _negative_chunks: Dictionary = {}  # Vector3i -> true
+var _negative_chunks: Dictionary = {}  # Vector3i -> String reason
 
 ## Chunk merge input collection currently being prepared across frames.
 var _prep_queue: Array[MergePrepState] = []
@@ -209,6 +211,7 @@ var _preparing_chunks: Dictionary = {}  # Vector3i -> MergePrepState
 var _merge_queue: Array[Vector3i] = []
 var _camera_cell_cached: Vector2i = Vector2i.ZERO
 var _camera_world_pos_cached: Vector3 = Vector3.ZERO
+var _last_desired_chunks: Dictionary = {}
 
 ## Phase 4d — teleport warmup state.
 ## `_last_camera_world_pos` is the camera position from the previous
@@ -283,10 +286,20 @@ var _stats: Dictionary = {
 	"completion_last_usec": 0,
 	"preparing_chunks": 0,
 	"negative_chunks": 0,
+	"negative_empty_chunks": 0,
+	"negative_sparse_chunks": 0,
+	"negative_filtered_chunks": 0,
+	"negative_failed_chunks": 0,
+	"negative_surface_cap_chunks": 0,
 	"desired_chunks": 0,
+	"desired_chunks_tier_0": 0,
+	"desired_chunks_tier_1": 0,
+	"desired_chunks_tier_2": 0,
 	"merge_queue_size": 0,
 	"active_visual_chunks": 0,
 	"visual_begin_floor": DEFAULT_VISUAL_BEGIN_FLOOR,
+	"visual_end_cap": DU.HLOD_END,
+	"visibility_fade_enabled": false,
 	"mid_hlod_overlap_chunks": 0,
 	"nonvisual_chunks_suppressed": 0,
 	"active_covered_refs": 0,
@@ -358,6 +371,7 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# Plan §4.3 — top-down anti-overlap walk. Larger tiers claim their cells
 	# first; smaller tiers skip any chunk whose 1×1 sub-cells are covered.
 	var desired_chunks: Dictionary = _compute_desired_chunks(camera_cell, _camera_world_pos_cached)
+	_last_desired_chunks = desired_chunks.duplicate()
 	_stats["desired_chunks"] = desired_chunks.size()
 	Log.debug("streaming", "HLOD update_for_camera: %d desired chunks, %d active, %d pending, %d queued (cell=%s)" % [
 		desired_chunks.size(), _active_chunks.size(), _pending_merges.size(), _merge_queue.size(), camera_cell])
@@ -466,8 +480,9 @@ func process_merge_queue() -> void:
 	# Phase 4d — warmup drain has priority over merges.
 	if not _warmup_queue.is_empty():
 		_drain_warmup_queue()
-		_stats["merge_queue_last_usec"] = Time.get_ticks_usec() - start_usec
-		return
+		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
+			_stats["merge_queue_last_usec"] = Time.get_ticks_usec() - start_usec
+			return
 
 	if _merge_queue.is_empty():
 		if not _prep_queue.is_empty():
@@ -477,6 +492,11 @@ func process_merge_queue() -> void:
 					var done_state: MergePrepState = _prep_queue[0]
 					_prep_queue.remove_at(0)
 					_preparing_chunks.erase(done_state.key)
+					continue
+				if prep_status == "warmup" and _prep_queue.size() > 1:
+					var waiting_state: MergePrepState = _prep_queue[0]
+					_prep_queue.remove_at(0)
+					_prep_queue.append(waiting_state)
 					continue
 				break
 			_stats["merge_queue_last_usec"] = Time.get_ticks_usec() - start_usec
@@ -493,8 +513,13 @@ func process_merge_queue() -> void:
 				_prep_queue.remove_at(0)
 				_preparing_chunks.erase(done_state.key)
 				continue
+			if prep_status == "warmup" and _prep_queue.size() > 1:
+				var waiting_state: MergePrepState = _prep_queue[0]
+				_prep_queue.remove_at(0)
+				_prep_queue.append(waiting_state)
+				continue
 			break
-		if not _warmup_queue.is_empty() or (not _prep_queue.is_empty() and Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC):
+		if not _prep_queue.is_empty() and Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
 			break
 		if budget <= 0 or _merge_queue.is_empty():
 			break
@@ -507,8 +532,6 @@ func process_merge_queue() -> void:
 			continue
 		_start_chunk_merge_prepare(key, _camera_world_pos_cached)
 		budget -= 1
-		if not _warmup_queue.is_empty():
-			break
 	_stats["merge_queue_last_usec"] = Time.get_ticks_usec() - start_usec
 
 
@@ -562,7 +585,7 @@ func process_completions() -> int:
 			continue
 
 		if mesh == null or mesh.get_surface_count() > MAX_RUNTIME_CHUNK_SURFACES:
-			_negative_chunks[key] = true
+			_negative_chunks[key] = "surface_cap" if mesh != null else "merge_failed"
 			_stats["surface_cap_rejections"] = int(_stats.get("surface_cap_rejections", 0)) + 1
 			_pending_manifests.erase(key)
 			_chunk_generations.erase(key)
@@ -637,6 +660,59 @@ func get_active_coverage_manifest() -> Dictionary:
 	}
 
 
+func get_active_chunk_debug_data() -> Array[Dictionary]:
+	var by_key: Dictionary = {}
+	for key: Vector3i in _last_desired_chunks:
+		by_key[key] = _make_chunk_debug_entry(key, "desired")
+	for key: Vector3i in _negative_chunks:
+		var negative_entry := _make_chunk_debug_entry(key, "negative")
+		negative_entry["negative_reason"] = str(_negative_chunks.get(key, "unknown"))
+		by_key[key] = negative_entry
+	for key: Vector3i in _merge_queue:
+		by_key[key] = _make_chunk_debug_entry(key, "queued")
+	for key: Vector3i in _preparing_chunks:
+		by_key[key] = _make_chunk_debug_entry(key, "preparing")
+	for key: Vector3i in _pending_merges:
+		by_key[key] = _make_chunk_debug_entry(key, "pending")
+	var chunks: Array[Dictionary] = []
+	for key: Vector3i in _active_chunks:
+		var data: PagingChunkData = _active_chunks[key]
+		var entry := _make_chunk_debug_entry(key, "active")
+		entry.merge({
+			"surface_count": data.surface_count,
+			"material_count": data.material_count,
+			"vertex_count": data.vertex_count,
+			"coverage_complete": data.coverage_complete,
+		})
+		by_key[key] = entry
+	for key: Vector3i in by_key:
+		chunks.append(by_key[key])
+	return chunks
+
+
+func _make_chunk_debug_entry(key: Vector3i, status: String) -> Dictionary:
+	var size_cells := 1 << key.z
+	var size_m := float(size_cells) * DU.CELL_SIZE_METERS
+	var band_start := DU.paging_band_start(key.z)
+	var band_end := minf(DU.paging_band_end(key.z), _visual_end_cap)
+	var visual_begin := maxf(band_start, _visual_begin_floor)
+	return {
+		"key": key,
+		"status": status,
+		"size_level": key.z,
+		"size_cells": size_cells,
+		"size_m": size_m,
+		"origin": _chunk_origin_world(key),
+		"visual": status == "active" and _chunk_has_visual_range(key),
+		"visibility_begin": visual_begin,
+		"visibility_end": band_end,
+		"surface_count": 0,
+		"material_count": 0,
+		"vertex_count": 0,
+		"coverage_complete": false,
+	}
+
+
 ## Dual-purpose SubsystemToggles handler: hide output AND stop streaming work.
 ## Persists via `_globally_visible` so:
 ##  - chunks merged AFTER this call respect visibility (see `_create_rs_instance`)
@@ -653,6 +729,7 @@ func set_all_visible(visible: bool) -> void:
 			for key: Vector3i in _pending_merges:
 				_bg_processor.cancel_task(_pending_merges[key])
 		_merge_queue.clear()
+		_last_desired_chunks.clear()
 		_warmup_queue.clear()
 		_warmup_dispatched.clear()
 		_warmup_pending_async.clear()
@@ -679,6 +756,20 @@ func set_visual_begin_floor(distance_m: float) -> void:
 	_refresh_stats()
 
 
+func set_visual_end_cap(distance_m: float) -> void:
+	_visual_end_cap = clampf(distance_m, _visual_begin_floor, DU.HLOD_END)
+	for key: Vector3i in _active_chunks.keys():
+		_apply_chunk_visibility_range(key)
+	_refresh_stats()
+
+
+func set_visibility_fade_enabled(enabled_value: bool) -> void:
+	_visibility_fade_enabled = enabled_value
+	for key: Vector3i in _active_chunks.keys():
+		_apply_chunk_visibility_range(key)
+	_refresh_stats()
+
+
 func cleanup(disconnect_signals: bool = true) -> void:
 	# Cancel pending merges
 	if _bg_processor:
@@ -698,6 +789,7 @@ func cleanup(disconnect_signals: bool = true) -> void:
 	_prep_queue.clear()
 	_preparing_chunks.clear()
 	_merge_queue.clear()
+	_last_desired_chunks.clear()
 
 	# Free RS instances
 	for key: Vector3i in _active_chunks:
@@ -864,6 +956,10 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 	# distance sits outside the expanded window are NOT retained; the walk
 	# decides their fate (and the post-walk diff will unload them).
 	for active_key: Vector3i in _active_chunks:
+		if DU.paging_band_start(active_key.z) >= _visual_end_cap:
+			continue
+		if camera_xz.distance_to(DU.chunk_center_world(Vector2i(active_key.x, active_key.y), active_key.z)) >= _visual_end_cap:
+			continue
 		if not _is_within_retention(active_key, camera_xz):
 			continue
 		desired[active_key] = true
@@ -876,7 +972,8 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 		var size: int = 1 << size_level
 		var band_start: float = DU.paging_band_start(size_level)
 		var band_end: float = DU.paging_band_end(size_level)
-		if band_end <= _visual_begin_floor:
+		var capped_band_end := minf(band_end, _visual_end_cap)
+		if capped_band_end <= _visual_begin_floor:
 			continue
 		var ring_radius: int = DU.paging_ring_radius(size_level)
 
@@ -890,7 +987,7 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 				# Band classification by chunk-CENTER distance (plan §4.2)
 				var center_world := DU.chunk_center_world(center_cell, size_level)
 				var dist: float = camera_xz.distance_to(center_world)
-				if dist < band_start or dist >= band_end:
+				if dist < band_start or dist >= capped_band_end:
 					continue
 
 				# Anti-overlap: skip if any 1×1 sub-cell is already claimed
@@ -1005,7 +1102,7 @@ func _start_chunk_merge_prepare(key: Vector3i, camera_world_pos: Vector3) -> voi
 
 func _process_merge_prepare(state: MergePrepState, start_usec: int) -> String:
 	if not _static_renderer or not _bg_processor:
-		_negative_chunks[state.key] = true
+		_negative_chunks[state.key] = "uninitialized"
 		return "done"
 
 	var min_size_sq: float = DU.PAGING_MIN_SIZE_SQ
@@ -1221,7 +1318,7 @@ func _finish_merge_prepare(state: MergePrepState) -> void:
 
 	# Cost-benefit minimum — sparse chunks aren't worth merging
 	if state.inputs.size() < MIN_REFS_TO_MERGE:
-		_negative_chunks[key] = true
+		_negative_chunks[key] = _negative_reason_for_state(state)
 		if state.refs_skipped > 0 or state.refs_type_rejected > 0 or state.refs_size_rejected > 0 or state.refs_surface_rejected > 0 or state.refs_partial_bucket_rejected > 0:
 			Log.debug("streaming", "HLOD chunk %s: %d inputs (below MIN %d). skipped=%d type_rej=%d size_rej=%d surface_rej=%d partial_bucket_rej=%d" % [
 				key, state.inputs.size(), MIN_REFS_TO_MERGE, state.refs_skipped, state.refs_type_rejected, state.refs_size_rejected, state.refs_surface_rejected, state.refs_partial_bucket_rejected])
@@ -1248,6 +1345,22 @@ func _finish_merge_prepare(state: MergePrepState) -> void:
 	_pending_merges[key] = task_id
 	_task_to_key[task_id] = key
 	_task_to_generation[task_id] = generation
+
+
+func _negative_reason_for_state(state: MergePrepState) -> String:
+	if state.bucket_total_counts.is_empty():
+		return "empty"
+	if state.inputs.size() > 0:
+		return "sparse"
+	if state.refs_surface_rejected > 0:
+		return "surface_cap"
+	if state.refs_skipped > 0:
+		return "missing_prototype"
+	if state.refs_partial_bucket_rejected > 0:
+		return "partial_bucket"
+	if state.refs_size_rejected > 0 or state.refs_type_rejected > 0:
+		return "filtered"
+	return "empty"
 
 
 ## Worker thread entry point. Runs merge kernel, posts result to completion queue.
@@ -1336,23 +1449,25 @@ func _apply_chunk_visibility_range(key: Vector3i) -> void:
 
 func _set_chunk_visibility_range(rid: RID, key: Vector3i) -> void:
 	var band_start: float = DU.paging_band_start(key.z)
-	var band_end: float = DU.paging_band_end(key.z)
+	var band_end: float = minf(DU.paging_band_end(key.z), _visual_end_cap)
 	var visual_begin: float = maxf(band_start, _visual_begin_floor)
 	if visual_begin >= band_end:
 		RenderingServer.instance_set_visible(rid, false)
 		return
+	var fade_margin := TIER_FADE_MARGIN if _visibility_fade_enabled else 0.0
+	var fade_mode := RenderingServer.VISIBILITY_RANGE_FADE_SELF if _visibility_fade_enabled else RenderingServer.VISIBILITY_RANGE_FADE_DISABLED
 	RenderingServer.instance_geometry_set_visibility_range(
 		rid,
 		visual_begin, band_end,
-		TIER_FADE_MARGIN, TIER_FADE_MARGIN,
-		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+		fade_margin, fade_margin,
+		fade_mode
 	)
 	RenderingServer.instance_set_visible(rid, _globally_visible)
 
 
 func _chunk_has_visual_range(key: Vector3i) -> bool:
 	var band_start: float = DU.paging_band_start(key.z)
-	var band_end: float = DU.paging_band_end(key.z)
+	var band_end: float = minf(DU.paging_band_end(key.z), _visual_end_cap)
 	return maxf(band_start, _visual_begin_floor) < band_end
 
 
@@ -1453,6 +1568,18 @@ func _refresh_stats() -> void:
 	_stats["pending_merges"] = _pending_merges.size()
 	_stats["cache_entries"] = _mesh_cache.size()
 	_stats["cache_bytes"] = _cache_used_bytes
+	var dt0 := 0
+	var dt1 := 0
+	var dt2 := 0
+	for key: Vector3i in _last_desired_chunks:
+		match key.z:
+			0: dt0 += 1
+			1: dt1 += 1
+			2: dt2 += 1
+	_stats["desired_chunks"] = _last_desired_chunks.size()
+	_stats["desired_chunks_tier_0"] = dt0
+	_stats["desired_chunks_tier_1"] = dt1
+	_stats["desired_chunks_tier_2"] = dt2
 
 	var t0 := 0
 	var t1 := 0
@@ -1534,8 +1661,32 @@ func _refresh_stats() -> void:
 	_stats["warmup_pending_async"] = _warmup_pending_async.size()
 	_stats["preparing_chunks"] = _prep_queue.size()
 	_stats["negative_chunks"] = _negative_chunks.size()
+	var negative_empty := 0
+	var negative_sparse := 0
+	var negative_filtered := 0
+	var negative_failed := 0
+	var negative_surface := 0
+	for key: Vector3i in _negative_chunks:
+		match str(_negative_chunks.get(key, "unknown")):
+			"empty":
+				negative_empty += 1
+			"sparse":
+				negative_sparse += 1
+			"filtered", "partial_bucket":
+				negative_filtered += 1
+			"surface_cap":
+				negative_surface += 1
+			_:
+				negative_failed += 1
+	_stats["negative_empty_chunks"] = negative_empty
+	_stats["negative_sparse_chunks"] = negative_sparse
+	_stats["negative_filtered_chunks"] = negative_filtered
+	_stats["negative_failed_chunks"] = negative_failed
+	_stats["negative_surface_cap_chunks"] = negative_surface
 	_stats["merge_queue_size"] = _merge_queue.size()
 	_stats["visual_begin_floor"] = _visual_begin_floor
+	_stats["visual_end_cap"] = _visual_end_cap
+	_stats["visibility_fade_enabled"] = _visibility_fade_enabled
 
 #endregion
 

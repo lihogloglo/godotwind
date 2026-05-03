@@ -27,7 +27,7 @@ const NEAR_END: float = 150.0
 ## Phase 4 (2026-04-17) — when HLOD is visible, MID caps at HLOD_START via
 ## `static_object_renderer.visibility_range_end`. With HLOD off/default-parked,
 ## MID falls back to MID_END so raw RS statics cover the 0-500m band.
-const MID_END: float = 500.0
+const MID_END: float = 300.0
 
 ## HLOD tier: Cell-level merged meshes (HLOD_START to HLOD_END)
 ## Bridges individual MID instances and impostor billboards

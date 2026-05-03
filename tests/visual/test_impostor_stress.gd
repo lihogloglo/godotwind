@@ -406,7 +406,7 @@ func _apply_visibility_mode() -> void:
 	if _force_visible:
 		_renderer.set_force_visible_for_test(true)
 	else:
-		_renderer.set_visibility_range_begin(DU.MID_END, DU.FADE_MARGIN_RENDER_FAR)
+		_renderer.set_visibility_range(DU.FAR_START, DU.FAR_END, DU.FADE_MARGIN_RENDER_FAR)
 
 
 func _toggle_normal_debug() -> void:
@@ -464,7 +464,7 @@ func _update_hud() -> void:
 	var scan_ms := float(stats.get("far_cell_scan_us", 0)) / 1000.0
 	var cells_processed := int(stats.get("far_cells_processed_last_frame", 0))
 	var ready_created := int(stats.get("far_ready_created", 0))
-	var force_text := "ALL" if _force_visible else "FAR >= %.0fm" % DU.MID_END
+	var force_text := "ALL" if _force_visible else "FAR >= %.0fm" % DU.FAR_START
 	var force_note := "[color=orange]diagnostic only; near impostors can overlap/halo[/color]" if _force_visible else "tier-accurate"
 	var bounds_text := "ON" if _bounds_visible else "OFF"
 

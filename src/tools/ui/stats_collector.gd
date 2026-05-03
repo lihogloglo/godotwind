@@ -15,6 +15,8 @@
 class_name StatsCollector
 extends RefCounted
 
+const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
+
 # ── References (set via setters as they become available) ──
 
 var _panels: ExplorerPanels = null
@@ -140,7 +142,7 @@ func _update_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
 			camera_label.text = "Cell: (%d, %d) | Mode: %s [P]" % [camera_cell.x, camera_cell.y, camera_mode_str]
 		var dist_label: Label = _find_label(_panels._nav_vbox, "DistLabel")
 		if dist_label:
-			dist_label.text = "%d cells" % view_distance
+			dist_label.text = StreamingConfig.format_view_distance(view_distance)
 		if _panels.view_distance_slider:
 			_panels.view_distance_slider.set_value_no_signal(view_distance)
 
