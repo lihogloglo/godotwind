@@ -71,6 +71,14 @@ var _hlod_covered_bucket_counts: Dictionary[String, int] = {}
 var _hlod_bucket_visibility_end: float = DU.HLOD_START
 var _descriptor_build_tasks: Dictionary[String, DescriptorBuildTask] = {}
 
+## Render-only proxy handoff: source_key -> direct instance ID. This is for
+## stateful refs that need a cheap visual at distance and a full gameplay actor
+## near the player. Bucketed MultiMeshes are intentionally not used here because
+## they cannot punch out one source ref when that actor promotes or dirties.
+var _visual_proxy_by_source: Dictionary[String, int] = {}
+var _visual_proxy_dirty_reason: Dictionary[String, String] = {}
+var _visual_proxy_suppressed: Dictionary[String, bool] = {}
+
 ## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
 ## default — see lod_crossfade.gdshader. The shader reads this per-slot via
 ## INSTANCE_CUSTOM.y so it could be tuned per-instance in the future; today
@@ -111,6 +119,8 @@ var _stats: Dictionary = {
 	"bucket_rs_instances": 0,
 	"hlod_bucket_overrides": 0,
 	"hlod_bucket_override_refs": 0,
+	"visual_proxy_instances": 0,
+	"visual_proxy_dirty": 0,
 }
 
 
@@ -219,6 +229,8 @@ class InstanceData:
 	var item_id: String        ## Item variant ID
 	var ref_id: StringName     ## ESM reference ID (e.g., "barrel_01")
 	var ref_num: int           ## ESM unique reference number
+	var source_key: String = "" ## Stable placed-reference key for proxy handoff.
+	var visual_proxy: bool = false
 
 
 #endregion
@@ -623,10 +635,22 @@ func _materialize_surface_material_meshes(descriptor: StaticPrototypeDescriptor)
 		var entry: SubMeshEntry = sub_mesh_value as SubMeshEntry
 		if entry == null or entry.mesh_resource == null:
 			continue
-		if entry.material_resource != null or entry.surface_materials.is_empty():
-			continue
 		var source_mesh := entry.mesh_resource
 		var surface_count := source_mesh.get_surface_count()
+
+		if entry.material_resource != null:
+			var mesh_copy := source_mesh.duplicate(false) as Mesh
+			if mesh_copy == null:
+				continue
+			for surface_index in range(surface_count):
+				mesh_copy.surface_set_material(surface_index, entry.material_resource)
+			entry.mesh_resource = mesh_copy
+			entry.material_resource = null
+			entry.surface_materials.clear()
+			continue
+
+		if entry.surface_materials.is_empty():
+			continue
 		var material_count := mini(entry.surface_materials.size(), surface_count)
 		var has_surface_material := false
 		for surface_index in range(material_count):
@@ -826,7 +850,8 @@ func precompute_instance(
 ## Returns instance ID for later manipulation, or -1 on failure.
 # PHASE_E:MAIN_ONLY
 func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
-		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
+		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0,
+		source_key: String = "", visual_proxy: bool = false) -> int:
 	# NOTE: no early-return on `_globally_visible`. Post-statics_no_node3d T.1
 	# the renderer is the universal static-render path (NEAR + flora + rocks +
 	# arch + clutter). Dropping spawns when invisible = losing statics that a
@@ -855,6 +880,8 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	data.item_id = item_id
 	data.ref_id = ref_id
 	data.ref_num = ref_num
+	data.source_key = source_key
+	data.visual_proxy = visual_proxy
 
 	# Phase 3 registry path. Always taken for prototypes registered via
 	# register_from_prototype (which populates sub_meshes). The legacy
@@ -886,6 +913,9 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 			if cell_grid not in _cell_index:
 				_cell_index[cell_grid] = [] as Array[int]
 			_cell_index[cell_grid].append(id)
+			if visual_proxy and not source_key.is_empty():
+				_visual_proxy_by_source[source_key] = id
+				_stats["visual_proxy_instances"] = int(_stats.get("visual_proxy_instances", 0)) + 1
 			return id
 
 	# Legacy fallback: per-sub-mesh RS instance path for register_mesh_type
@@ -932,8 +962,66 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	if cell_grid not in _cell_index:
 		_cell_index[cell_grid] = [] as Array[int]
 	_cell_index[cell_grid].append(id)
+	if visual_proxy and not source_key.is_empty():
+		_visual_proxy_by_source[source_key] = id
+		_stats["visual_proxy_instances"] = int(_stats.get("visual_proxy_instances", 0)) + 1
 
 	return id
+
+
+## Add or return a direct render-only proxy for a stateful placed source ref.
+## Uses per-instance RS state, not CellStaticBucket, so gameplay promotion can
+## hide exactly one source ref without disturbing other refs sharing a model.
+func add_visual_proxy(source_key: String, type_name: String, transform: Transform3D, cell_grid: Vector2i = Vector2i.ZERO,
+		model_path: String = "", item_id: String = "", ref_id: StringName = &"", ref_num: int = 0) -> int:
+	if source_key.is_empty() or source_key in _visual_proxy_dirty_reason:
+		return -1
+	var existing_id := int(_visual_proxy_by_source.get(source_key, -1))
+	if existing_id in _instances:
+		if not bool(_visual_proxy_suppressed.get(source_key, false)):
+			set_instance_visible(existing_id, true)
+		return existing_id
+
+	var id := add_instance(type_name, transform, cell_grid, model_path, item_id, ref_id, ref_num, source_key, true)
+	if id < 0:
+		return -1
+	if bool(_visual_proxy_suppressed.get(source_key, false)):
+		set_instance_visible(id, false)
+	return id
+
+
+func suppress_proxy(source_key: String) -> void:
+	if source_key.is_empty():
+		return
+	_visual_proxy_suppressed[source_key] = true
+	var id := int(_visual_proxy_by_source.get(source_key, -1))
+	if id in _instances:
+		set_instance_visible(id, false)
+
+
+func restore_proxy_if_clean(source_key: String) -> void:
+	if source_key.is_empty():
+		return
+	_visual_proxy_suppressed.erase(source_key)
+	if source_key in _visual_proxy_dirty_reason:
+		return
+	var id := int(_visual_proxy_by_source.get(source_key, -1))
+	if id in _instances:
+		set_instance_visible(id, true)
+
+
+func mark_proxy_dirty(source_key: String, reason: String = "") -> void:
+	if source_key.is_empty():
+		return
+	var was_clean := source_key not in _visual_proxy_dirty_reason
+	_visual_proxy_dirty_reason[source_key] = reason
+	if was_clean:
+		_stats["visual_proxy_dirty"] = int(_stats.get("visual_proxy_dirty", 0)) + 1
+	suppress_proxy(source_key)
+
+
+func is_proxy_dirty(source_key: String) -> bool:
+	return source_key in _visual_proxy_dirty_reason
 
 
 ## Phase E — main-thread consumer of a worker-prepared PrecomputedInstance.
@@ -1213,24 +1301,33 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 			if mat:
 				rs.instance_set_surface_override_material(instance_rid, si, mat.get_rid())
 
-	# MID is the safety fallback through its configured range. Do not apply
-	# per-object screen-size visible culling here; small statics disappearing at
-	# 40-160m makes the 0-500m MID contract false and leaves no replacement tier.
-	var effective_end: float = visibility_range_end
+	# MID is the safety fallback through its configured range. Small static
+	# detail culling needs a coverage-aware replacement tier before it can ship.
 	rs.instance_geometry_set_visibility_range(
 		instance_rid,
-		0.0, effective_end,
-		0.0, DU.FADE_MARGIN_LOD3_FAR,           # 20m dither fade at far end
-		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+		0.0, visibility_range_end,
+		0.0, DU.FADE_MARGIN_LOD3_FAR,
+		SC.MID_VISIBILITY_FADE_MODE
 	)
 
 	# Default LOD bias — tunable per type later via streaming_config.
 	rs.instance_geometry_set_lod_bias(instance_rid, SC.DEFAULT_LOD_BIAS)
+	rs.instance_geometry_set_cast_shadows_setting(
+		instance_rid,
+		_shadow_setting_for_aabb(_aabb)
+	)
 
 	if not _globally_visible:
 		rs.instance_set_visible(instance_rid, false)
 
 	return instance_rid
+
+
+static func _shadow_setting_for_aabb(aabb: AABB) -> int:
+	var max_dim := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+	if max_dim < SC.MID_SHADOW_MIN_MESH_SIZE_M:
+		return RenderingServer.SHADOW_CASTING_SETTING_OFF
+	return RenderingServer.SHADOW_CASTING_SETTING_ON
 
 
 ## Remove an instance — frees per-instance RS RIDs for unbatched, or zero-scales
@@ -1240,6 +1337,10 @@ func remove_instance(id: int) -> void:
 		return
 
 	var data: InstanceData = _instances[id]
+	if data.visual_proxy and not data.source_key.is_empty():
+		_visual_proxy_by_source.erase(data.source_key)
+		_visual_proxy_suppressed.erase(data.source_key)
+		_stats["visual_proxy_instances"] = maxi(0, int(_stats.get("visual_proxy_instances", 0)) - 1)
 
 	if data.registry_id >= 0 and _prototype_registry != null:
 		# Registry owns the slots — release them back to the freelist. MultiMesh
@@ -1566,25 +1667,33 @@ func add_instances_batch(type_name: String, transforms: Array, cell_grid: Vector
 ## Operates directly on RS instances since they are not in the Node3D tree.
 func set_all_visible(visible: bool) -> void:
 	_globally_visible = visible
+	var visible_direct_instances := 0
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]
+		var instance_visible := visible
+		if data.visual_proxy and not data.source_key.is_empty():
+			instance_visible = visible \
+				and data.source_key not in _visual_proxy_dirty_reason \
+				and not bool(_visual_proxy_suppressed.get(data.source_key, false))
 		if data.registry_id >= 0 and _prototype_registry != null:
-			if visible:
+			if instance_visible:
 				_prototype_registry.show_instance(data.registry_id, data.transform)
 			else:
 				_prototype_registry.hide_instance(data.registry_id)
 		else:
 			for rid: RID in data.sub_rids:
 				if rid.is_valid():
-					RenderingServer.instance_set_visible(rid, visible)
-		data.visible = visible
+					RenderingServer.instance_set_visible(rid, instance_visible)
+		data.visible = instance_visible
+		if instance_visible:
+			visible_direct_instances += 1
 	for buckets: Array in _cell_buckets.values():
 		for bucket_value: Variant in buckets:
 			var bucket: RefCounted = bucket_value as RefCounted
 			if bucket != null and not bool(bucket.get("frozen")) and bucket.has_method("set_visible"):
 				bucket.call("set_visible", visible)
 	var bucket_instances := int(_stats.get("bucket_instances", 0))
-	_stats["visible_instances"] = (_instances.size() + bucket_instances) if visible else 0
+	_stats["visible_instances"] = visible_direct_instances + (bucket_instances if visible else 0)
 
 
 func clear(clear_mesh_types: bool = true) -> void:
@@ -1602,6 +1711,9 @@ func clear(clear_mesh_types: bool = true) -> void:
 				rs.free_rid(rid)
 	_instances.clear()
 	_cell_index.clear()
+	_visual_proxy_by_source.clear()
+	_visual_proxy_dirty_reason.clear()
+	_visual_proxy_suppressed.clear()
 	var detached_bucket_lists: Array = []
 	for cell_grid: Vector2i in _cell_buckets.keys():
 		detached_bucket_lists.append(_detach_cell_buckets(cell_grid))
@@ -1642,6 +1754,8 @@ func clear(clear_mesh_types: bool = true) -> void:
 	_stats["bucket_rs_instances"] = 0
 	_stats["hlod_bucket_overrides"] = 0
 	_stats["hlod_bucket_override_refs"] = 0
+	_stats["visual_proxy_instances"] = 0
+	_stats["visual_proxy_dirty"] = 0
 
 
 func _drain_descriptor_build_tasks() -> void:

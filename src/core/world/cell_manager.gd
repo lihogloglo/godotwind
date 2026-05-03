@@ -809,7 +809,8 @@ var _diag_per_type_last_log_msec: int = 0
 ## Each entry mirrors `InstantiationEntry` but lives off the main queue until
 ## the camera approaches the ref. Re-queued by `tick_proximity_deferred`.
 ## OpenMW lazy-spawn pattern: Node3D interactives at 12-20 ms/ref don't
-## instantiate until gameplay can plausibly interact (< 80 m from camera).
+## instantiate until gameplay can plausibly interact (< 25 m from camera for
+## generic interactives; lights use their wider light threshold).
 var _proximity_deferred: Array[InstantiationEntry] = []
 ## Enforce retry budget so we don't re-queue the entire deferred list every frame.
 var _proximity_last_tick_msec: int = 0
@@ -952,6 +953,7 @@ class InstantiationEntry:
 	var item_id: String
 	var cache_item_id: String = ""
 	var position: Vector3
+	var cell_grid: Vector2i = Vector2i.ZERO
 	var type_name: String = ""
 	## Nearby interactives/lights should publish before distant visual tail work
 	## so walk-up gameplay is responsive while the rest of the cell trickles in.
@@ -2001,7 +2003,6 @@ func tick_proximity_deferred(camera_pos: Vector3) -> void:
 	if _proximity_deferred.is_empty():
 		return
 
-	var threshold_sq: float = ReferenceInstantiator.INTERACTIVE_PROXIMITY_THRESHOLD_M * ReferenceInstantiator.INTERACTIVE_PROXIMITY_THRESHOLD_M
 	var kept: Array[InstantiationEntry] = []
 	var requeued: int = 0
 	var dropped: int = 0
@@ -2015,6 +2016,8 @@ func tick_proximity_deferred(camera_pos: Vector3) -> void:
 			dropped += 1
 			# `pending_instantiations` gets resolved at cell-fail finalize.
 			continue
+		var threshold := _proximity_threshold_for_entry(entry)
+		var threshold_sq: float = threshold * threshold
 		if entry.position.distance_squared_to(camera_pos) <= threshold_sq and requeued < PROXIMITY_REQUEUE_MAX_PER_TICK:
 			_instantiation_queue.push_back(entry)
 			requeued += 1
@@ -2023,9 +2026,27 @@ func tick_proximity_deferred(camera_pos: Vector3) -> void:
 	# Rebuild to kept entries — avoid O(N²) from in-place remove.
 	_proximity_deferred = kept
 	if requeued > 0 or dropped > 0:
-		Log.debug("streaming", "[proximity-tick] requeued=%d dropped=%d still_deferred=%d" % [
-			requeued, dropped, _proximity_deferred.size()
+		Log.debug("streaming", "[proximity-tick] requeued=%d dropped=%d still_deferred=%d by_type=%s" % [
+			requeued, dropped, _proximity_deferred.size(), str(get_proximity_deferred_counts())
 		])
+
+
+func _proximity_threshold_for_entry(entry: InstantiationEntry) -> float:
+	match entry.type_name:
+		"light":
+			return ReferenceInstantiator.LIGHT_PROXIMITY_THRESHOLD_M
+		"npc", "creature", "leveled_creature":
+			return ReferenceInstantiator.ACTOR_PROXIMITY_THRESHOLD_M
+		_:
+			return ReferenceInstantiator.INTERACTIVE_PROXIMITY_THRESHOLD_M
+
+
+func get_proximity_deferred_counts() -> Dictionary:
+	var counts: Dictionary = {}
+	for entry: InstantiationEntry in _proximity_deferred:
+		var type_name := entry.type_name if not entry.type_name.is_empty() else "unknown"
+		counts[type_name] = int(counts.get(type_name, 0)) + 1
+	return counts
 
 
 ## Periodic dump of per-type instantiate breakdown. Logs every 5s when any
@@ -2778,7 +2799,7 @@ func process_async_instantiation(
 			# else: worker failed (e.g. type unregistered at precompute time,
 			# e.g. clear() ran mid-flight). Drop silently.
 		else:
-			obj = _instantiator.instantiate_reference(ref, inst_cell_grid)
+			obj = _instantiator.instantiate_reference(ref, inst_cell_grid, cache_item_id)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
 		var route_name: String = _instantiator.last_inst_route
 		if route_name.is_empty():
@@ -2841,7 +2862,8 @@ func process_async_instantiation(
 		# Lazy-spawn deferral — interactive ref too far, park it for later.
 		# The reference_instantiator returned null without decrementing our
 		# pending counter (see below). Push to the deferred list; it'll be
-		# re-queued when the camera is within 80 m via tick_proximity_deferred.
+		# re-queued when the camera is within its proximity threshold via
+		# tick_proximity_deferred.
 		if obj == null and _instantiator.last_proximity_deferred:
 			_proximity_deferred.append(entry)
 			# Rewind the pending counter — this ref isn't instantiated OR failed,
@@ -3457,7 +3479,7 @@ func _finalize_request(request: AsyncCellRequest) -> void:
 ## Why a tick and not a `_finalize_request` hook: proximity-deferred interactive
 ## refs re-increment `pending_instantiations` at process time, which means
 ## `_is_request_complete` stays false forever for any cell where the player
-## hasn't walked within 80m of an interactive ref. The T.2 build only needs
+## hasn't walked within the proximity threshold of an interactive ref. The T.2 build only needs
 ## static models loaded, not every interactive spawned — so it fires on the
 ## earlier signal (`pending_parses.is_empty && payload model callbacks empty`).
 ##
@@ -3813,12 +3835,13 @@ func _queue_instantiation(
 	entry.cache_item_id = cache_item_id
 	entry.position = position
 	entry.type_name = type_name
+	var owning_request: AsyncCellRequest = _async_requests.get(request_id) if request_id in _async_requests else null
+	entry.cell_grid = owning_request.grid if owning_request != null and not owning_request.is_interior else Vector2i.ZERO
 	entry.player_local_priority = _is_player_local_interactive_priority(type_name, position)
 
 	# Copy the per-request LoadProfile onto the entry so the instantiation
 	# queue processor can read it without a dictionary lookup, and so that
 	# concurrent loads with different profiles don't collide on shared state.
-	var owning_request: AsyncCellRequest = _async_requests.get(request_id) if request_id in _async_requests else null
 	if owning_request and owning_request.load_profile:
 		entry.load_profile = owning_request.load_profile
 		entry.interior_priority = owning_request.load_profile.interior_priority
@@ -3957,6 +3980,8 @@ func get_loading_stats() -> Dictionary:
 		"model_request_start_queue": _model_request_start_queue.size(),
 		"model_request_start_active": _model_request_start_active.size(),
 		"static_prepare_queue": _get_static_prepare_queue_size(),
+		"proximity_deferred": _proximity_deferred.size(),
+		"proximity_deferred_by_type": get_proximity_deferred_counts(),
 		"cell_payloads": payloads,
 		"cell_payload_pinned_resources": pinned_resources,
 		"burst_loading_active": _burst_loading_active,

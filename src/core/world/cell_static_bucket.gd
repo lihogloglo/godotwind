@@ -253,6 +253,10 @@ func _create_multimesh_draw_group(
 	group.local_aabb = packed.custom_aabb
 	_apply_visibility_range(group)
 	RenderingServer.instance_geometry_set_lod_bias(rid, SC.DEFAULT_LOD_BIAS)
+	RenderingServer.instance_geometry_set_cast_shadows_setting(
+		rid,
+		_shadow_setting_for_mesh_aabb(mesh_aabb)
+	)
 	if not visible:
 		RenderingServer.instance_set_visible(rid, false)
 	return group
@@ -305,6 +309,10 @@ func _create_single_multimesh_draw_group(
 	group.local_aabb = slot_aabb
 	_apply_visibility_range(group)
 	RenderingServer.instance_geometry_set_lod_bias(rid, SC.DEFAULT_LOD_BIAS)
+	RenderingServer.instance_geometry_set_cast_shadows_setting(
+		rid,
+		_shadow_setting_for_mesh_aabb(mesh_aabb)
+	)
 	if not visible:
 		RenderingServer.instance_set_visible(rid, false)
 	return group
@@ -320,7 +328,7 @@ func _apply_visibility_range(group: DrawGroup) -> void:
 		end,
 		0.0,
 		DU.FADE_MARGIN_LOD3_FAR + radius,
-		RenderingServer.VISIBILITY_RANGE_FADE_SELF
+		SC.MID_VISIBILITY_FADE_MODE
 	)
 
 
@@ -328,6 +336,13 @@ static func _aabb_horizontal_radius(aabb: AABB) -> float:
 	if aabb.size == Vector3.ZERO:
 		return 0.0
 	return Vector2(aabb.size.x, aabb.size.z).length() * 0.5
+
+
+static func _shadow_setting_for_mesh_aabb(aabb: AABB) -> int:
+	var max_dim := maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
+	if max_dim < SC.MID_SHADOW_MIN_MESH_SIZE_M:
+		return RenderingServer.SHADOW_CASTING_SETTING_OFF
+	return RenderingServer.SHADOW_CASTING_SETTING_ON
 
 
 func _cluster_transforms(transforms: Array, local_transform: Transform3D, bucket_origin: Vector3) -> Dictionary:

@@ -82,6 +82,15 @@ const DEFAULT_MESH_LOD_THRESHOLD: float = 1.0
 ## accelerates LOD drops. Per-type overrides can be added in a registry later.
 const DEFAULT_LOD_BIAS: float = 1.0
 
+## MID bucket tier handoff fade mode. Disabled uses the configured visibility
+## margins as hysteresis instead of alpha fading, avoiding the transparent pass
+## cost Godot documents for fade Self/Dependencies.
+const MID_VISIBILITY_FADE_MODE := RenderingServer.VISIBILITY_RANGE_FADE_DISABLED
+
+## Static MID shadow detail cutoff. Small clutter remains visible but does not
+## redraw into every directional-light cascade. Large statics keep shadows.
+const MID_SHADOW_MIN_MESH_SIZE_M: float = 2.0
+
 # =============================================================================
 # CROSSFADE MARGINS
 # =============================================================================

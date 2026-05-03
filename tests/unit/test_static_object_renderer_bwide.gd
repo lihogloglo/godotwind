@@ -317,3 +317,32 @@ func test_cell_bucket_splits_repeated_groups_into_spatial_clusters() -> void:
 	for group: Variant in groups:
 		assert_that(group.multimesh).is_not_null()
 		assert_int(int(group.instance_count)).is_equal(1)
+
+
+func test_visual_proxy_source_key_lifecycle() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var simple := _build_simple_mesh()
+	renderer.register_mesh_type("test_proxy", simple)
+
+	var source_key := "container|ext|0,0|42|crate_01"
+	var id := renderer.add_visual_proxy(source_key, "test_proxy", Transform3D.IDENTITY, Vector2i(0, 0))
+	assert_that(id).is_greater_equal(0)
+	assert_int(int(renderer.get_stats()["visual_proxy_instances"])).is_equal(1)
+
+	renderer.suppress_proxy(source_key)
+	var data = renderer.get_instance_data(id)
+	assert_bool(data.visible).is_false()
+
+	renderer.restore_proxy_if_clean(source_key)
+	data = renderer.get_instance_data(id)
+	assert_bool(data.visible).is_true()
+
+	renderer.mark_proxy_dirty(source_key, "test")
+	data = renderer.get_instance_data(id)
+	assert_bool(data.visible).is_false()
+	renderer.restore_proxy_if_clean(source_key)
+	data = renderer.get_instance_data(id)
+	assert_bool(data.visible).is_false()

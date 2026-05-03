@@ -34,6 +34,8 @@ const PickupInteractableScript := preload("res://src/core/interaction/morrowind/
 # in turn gets it from world_explorer). Keeping the handler as a Callable
 # avoids importing world/streaming types into the instantiator.
 const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
+const ContainerInteractableScript := preload("res://src/core/interaction/morrowind/container_interactable.gd")
+const ActivatorInteractableScript := preload("res://src/core/interaction/morrowind/activator_interactable.gd")
 
 # C.5 — NPC dialogue adapter. NPCs get wrapped in an NPCInteractable so
 # the InteractionRaycaster can target them for conversation. The wrapper
@@ -118,7 +120,8 @@ var door_activated_handler: Callable = Callable()
 
 # NEAR-tier actor filtering — skip NPC/creature creation beyond this distance from camera
 # 150m matches the NEAR tier boundary in distance_utils.gd
-var max_actor_distance: float = 150.0
+const ACTOR_PROXIMITY_THRESHOLD_M: float = 150.0
+var max_actor_distance: float = ACTOR_PROXIMITY_THRESHOLD_M
 var camera_position: Vector3 = Vector3.ZERO  # Updated by streaming manager each frame
 
 # Transient per-call override: read by the static-renderer gate and
@@ -187,6 +190,7 @@ var stats: Dictionary = {
 	"npcs_loaded": 0,
 	"creatures_loaded": 0,
 	"static_renderer_instances": 0,
+	"visual_proxies_created": 0,
 	"significant_objects_registered": 0,  # Objects registered with per-object LOD
 }
 
@@ -199,9 +203,15 @@ const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to 
 ## skipped until gameplay can plausibly interact — eliminates 70-80% of the
 ## `inst:` overrun during cell-crossing bursts while preserving the invariant
 ## "containers appear before you can touch them." Keep this comfortably above
-## actual interaction range but well below NEAR render end; at 80 m traversal
-## spends too many frames instantiating doors/containers the player cannot use.
+## actual interaction range but well below NEAR render end; a wider radius spends
+## too many frames instantiating doors/containers the player cannot use.
 const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 25.0
+
+## Door visuals are source-key-backed proxies. The full DoorInteractable stays
+## near-only, but architectural door silhouettes should not wait for gameplay.
+const DOOR_VISUAL_PROXY_ENABLED: bool = true
+const CONTAINER_VISUAL_PROXY_ENABLED: bool = true
+const CONTAINER_VISUAL_PROXY_RANGE_M: float = DU.NEAR_END
 
 ## Win 4a (NEAR refactor 2026-04-25) — lazy-spawn distance for OmniLight3D refs.
 ##
@@ -299,7 +309,7 @@ func _reset_last_inst_diagnostics(route: String = "") -> void:
 
 # PHASE_A:MAIN_ONLY — orchestrator. ESMManager.get_any_record autoload read +
 # dispatch to type handlers. Stays main-thread; split lives in _instantiate_model_object.
-func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
 	_inst_call_count += 1
 	# Reset per-call state — caller (cell_manager) reads these after return.
 	last_proximity_deferred = false
@@ -323,12 +333,14 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 
 	var type_name: String = record_type[0] if record_type.size() > 0 else ""
 	last_type_name = type_name
+	if type_name == "light" and not load_lights:
+		return null
+	if type_name == "light" and CarryableRegistryScript.is_carryable(type_name, base_record):
+		return _instantiate_model_object(ref, base_record, cell_grid, type_name, cache_item_id)
 
 	# Handle different record types
 	match type_name:
 		"light":
-			if not load_lights:
-				return null
 			var light_record := base_record as LightRecord
 			# Win 4a — lazy-spawn gate. Skip Node3D + OmniLight3D + model
 			# construction when the camera is too far for the light to
@@ -363,7 +375,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 			return null
 		_:
 			# Standard model-based object
-			return _instantiate_model_object(ref, base_record, cell_grid, type_name)
+			return _instantiate_model_object(ref, base_record, cell_grid, type_name, cache_item_id)
 
 
 ## Check if a model is considered "significant" for per-object LOD
@@ -391,7 +403,7 @@ var _model_obj_count: int = 0
 # post-Phase-A this function becomes the orchestrator that dispatches worker
 # tasks (lines 328-351 moved off-thread) and runs the main-thread tail
 # (lines 353-410: carryable / door / interior-collision / anim).
-func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO, type_name: String = "") -> Node3D:
+func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO, type_name: String = "", cache_item_id: String = "") -> Node3D:
 	_model_obj_count += 1
 
 	# Get model path and record ID
@@ -447,6 +459,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	if effective_use_static and _is_proximity_gated(type_name, is_carryable):
 		var ref_world_pos := CS.vector_to_godot(ref.position)
 		if ref_world_pos.distance_squared_to(camera_position) > INTERACTIVE_PROXIMITY_THRESHOLD_M * INTERACTIVE_PROXIMITY_THRESHOLD_M:
+			_ensure_visual_proxy_for_ref(ref, model_path, cell_grid, type_name, cache_item_id)
 			last_proximity_deferred = true
 			last_inst_route = "deferred"
 			return null
@@ -494,6 +507,12 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 
 	# Add metadata for console object picker
 	_apply_metadata(instance, ref, base_record, model_path, type_name)
+	if _uses_visual_proxy(type_name):
+		var source_key := make_source_key(type_name, ref, cell_grid)
+		instance.set_meta("source_key", source_key)
+		instance.set_meta("cell_grid", cell_grid)
+		_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
+		_wire_visual_proxy_restore_on_exit(instance, source_key)
 
 	# I.1 — Carryable conversion. Swap the baked StaticBody3D for a
 	# RigidBody3D (frozen KINEMATIC, layers Environment+Interactable) and
@@ -502,6 +521,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# has no baked collision, conversion returns null and the instance
 	# stays static — log once and move on.
 	if is_carryable:
+		if type_name == "light" and base_record is LightRecord:
+			_attach_carryable_light_source(instance, base_record as LightRecord)
 		var mass_kg: float = CarryableRegistryScript.get_mass(type_name, base_record)
 		var display_name: String = ""
 		if "name" in base_record and not String(base_record.name).is_empty():
@@ -526,6 +547,10 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# via `InteriorPocketManager.get_door_info_by_ref_id()`.
 	if type_name == "door" and ref.is_teleport:
 		_attach_door_interactable(instance, ref, base_record, record_id)
+	elif type_name == "container":
+		_attach_container_interactable(instance, ref, cell_grid, base_record, record_id)
+	elif type_name == "activator":
+		_attach_activator_interactable(instance, base_record, record_id)
 
 	# Interior collision fallback — generate a StaticBody3D from the mesh
 	# AABB for non-carryable, non-door objects that lack baked collision.
@@ -1073,6 +1098,13 @@ func complete_worker_instantiate(
 	var record_id: String = ""
 	if base_record != null and "record_id" in base_record:
 		record_id = base_record.record_id
+	var cell_grid: Vector2i = entry.cell_grid
+	if _uses_visual_proxy(type_name):
+		var source_key := make_source_key(type_name, ref, cell_grid)
+		instance.set_meta("source_key", source_key)
+		instance.set_meta("cell_grid", cell_grid)
+		_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
+		_wire_visual_proxy_restore_on_exit(instance, source_key)
 
 	# NEAR-tier collision enable (mirror of _instantiate_model_object:339-342).
 	var ref_pos := CS.vector_to_godot(ref.position)
@@ -1099,9 +1131,13 @@ func complete_worker_instantiate(
 		if rb == null:
 			Log.info("interaction", "Carryable %s (%s) has no collision/mesh — staying static (non-interactable)" % [record_id, type_name])
 
-	# Door attachment (mirror of _instantiate_model_object:376-383).
+	# Gameplay adapter attachment (mirror of _instantiate_model_object).
 	if type_name == "door" and ref.is_teleport:
 		_attach_door_interactable(instance, ref, base_record, record_id)
+	elif type_name == "container":
+		_attach_container_interactable(instance, ref, cell_grid, base_record, record_id)
+	elif type_name == "activator":
+		_attach_activator_interactable(instance, base_record, record_id)
 
 	# Interior collision fallback (mirror of _instantiate_model_object:385-395).
 	if not is_carryable and not (type_name == "door" and ref.is_teleport):
@@ -1115,6 +1151,123 @@ func complete_worker_instantiate(
 	_auto_play_nif_animation(instance, ref)
 
 	return instance
+
+
+static func make_source_key(category: String, ref: CellReference, cell_grid: Vector2i) -> String:
+	var ref_id_lower := str(ref.ref_id).to_lower()
+	return "%s|ext|%d,%d|%d|%s" % [
+		category,
+		cell_grid.x,
+		cell_grid.y,
+		ref.ref_num,
+		ref_id_lower,
+	]
+
+
+func _make_ref_transform(ref: CellReference) -> Transform3D:
+	var pos := CS.vector_to_godot(ref.position)
+	var scale := CS.scale_to_godot(ref.scale)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scale)
+	return Transform3D(basis, pos)
+
+
+func _ensure_visual_proxy_for_ref(ref: CellReference, model_path: String, cell_grid: Vector2i, type_name: String, cache_item_id: String = "") -> bool:
+	if not _uses_visual_proxy(type_name):
+		return false
+	if type_name == "container":
+		var ref_world_pos := CS.vector_to_godot(ref.position)
+		if ref_world_pos.distance_squared_to(camera_position) > CONTAINER_VISUAL_PROXY_RANGE_M * CONTAINER_VISUAL_PROXY_RANGE_M:
+			return false
+	if static_renderer == null or model_loader == null:
+		return false
+	if not static_renderer.has_method("add_visual_proxy"):
+		return false
+	var source_key := make_source_key(type_name, ref, cell_grid)
+	if static_renderer.has_method("is_proxy_dirty") and bool(static_renderer.call("is_proxy_dirty", source_key)):
+		return false
+
+	var normalized := model_path.to_lower().replace("/", "\\")
+	if not _ensure_visual_proxy_type_registered(normalized, model_path, cache_item_id):
+		return false
+
+	var add_start := Time.get_ticks_usec()
+	var instance_id: int = static_renderer.call(
+		"add_visual_proxy",
+		source_key,
+		normalized,
+		_make_ref_transform(ref),
+		cell_grid,
+		model_path,
+		"",
+		ref.ref_id,
+		ref.ref_num
+	)
+	last_static_add_us += Time.get_ticks_usec() - add_start
+	if instance_id < 0:
+		return false
+	stats["visual_proxies_created"] = int(stats.get("visual_proxies_created", 0)) + 1
+	return true
+
+
+func _ensure_visual_proxy_type_registered(type_name: String, model_path: String, cache_item_id: String = "") -> bool:
+	if static_renderer.call("has_type", type_name):
+		return true
+
+	if model_loader.has_method("get_cached_packed_scene") and static_renderer.has_method("register_from_packed_scene"):
+		var packed_scene: PackedScene = model_loader.call("get_cached_packed_scene", model_path, cache_item_id)
+		if packed_scene == null and not cache_item_id.is_empty():
+			packed_scene = model_loader.call("get_cached_packed_scene", model_path, "")
+		if packed_scene != null:
+			var reg_start := Time.get_ticks_usec()
+			var registered := bool(static_renderer.call("register_from_packed_scene", type_name, packed_scene))
+			last_static_register_us += Time.get_ticks_usec() - reg_start
+			if registered:
+				return true
+
+	var load_start := Time.get_ticks_usec()
+	var prototype: Node3D = model_loader.call("get_model", model_path, cache_item_id)
+	last_model_load_us += Time.get_ticks_usec() - load_start
+	if prototype == null and not cache_item_id.is_empty():
+		load_start = Time.get_ticks_usec()
+		prototype = model_loader.call("get_model", model_path)
+		last_model_load_us += Time.get_ticks_usec() - load_start
+	if prototype == null:
+		return false
+	var reg_start := Time.get_ticks_usec()
+	static_renderer.call("register_from_prototype", type_name, prototype)
+	last_static_register_us += Time.get_ticks_usec() - reg_start
+	return bool(static_renderer.call("has_type", type_name))
+
+
+func _suppress_visual_proxy_for_ref(ref: CellReference, cell_grid: Vector2i, type_name: String) -> void:
+	if not _uses_visual_proxy(type_name) or static_renderer == null or not static_renderer.has_method("suppress_proxy"):
+		return
+	static_renderer.call("suppress_proxy", make_source_key(type_name, ref, cell_grid))
+
+
+static func _uses_visual_proxy(type_name: String) -> bool:
+	match type_name:
+		"door":
+			return DOOR_VISUAL_PROXY_ENABLED
+		"container":
+			return CONTAINER_VISUAL_PROXY_ENABLED
+		_:
+			return false
+
+
+func _wire_visual_proxy_restore_on_exit(instance: Node3D, source_key: String) -> void:
+	if instance == null or source_key.is_empty():
+		return
+	if static_renderer == null or not static_renderer.has_method("restore_proxy_if_clean"):
+		return
+	instance.tree_exiting.connect(_restore_visual_proxy_if_clean.bind(source_key), CONNECT_ONE_SHOT)
+
+
+func _restore_visual_proxy_if_clean(source_key: String) -> void:
+	if static_renderer == null or not static_renderer.has_method("restore_proxy_if_clean"):
+		return
+	static_renderer.call("restore_proxy_if_clean", source_key)
 
 
 ## Instantiate a flora/rock using StaticObjectRenderer (RenderingServer direct)
@@ -1257,6 +1410,14 @@ func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) 
 	light_node.add_child(omni)
 
 
+func _attach_carryable_light_source(instance: Node3D, light_record: LightRecord) -> void:
+	if instance == null or light_record == null:
+		return
+	if not create_lights or light_record.radius <= 0 or light_record.is_off_by_default():
+		return
+	_attach_animated_omni_light(instance, light_record)
+
+
 ## Win 4b — server-direct light: RS.omni_light_create + RS.instance_create
 ## paired with a LightRids RefCounted attached as metadata. The RefCounted's
 ## PREDELETE handler frees both RIDs when light_node is queue_freed via cell
@@ -1341,6 +1502,8 @@ func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: S
 	if effective_actor_dist > 0.0:
 		var ref_pos := CS.vector_to_godot(ref.position)
 		if ref_pos.distance_squared_to(camera_position) > effective_actor_dist * effective_actor_dist:
+			last_proximity_deferred = true
+			last_inst_route = "deferred"
 			return null
 
 	# Use CharacterFactory if available (new system)
@@ -1669,6 +1832,59 @@ func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_r
 
 	if door_activated_handler.is_valid():
 		adapter.door_activated.connect(door_activated_handler)
+
+
+func _attach_container_interactable(container_instance: Node3D, ref: CellReference, cell_grid: Vector2i, base_record: Variant, record_id: String) -> void:
+	container_instance.set_script(ContainerInteractableScript)
+	var adapter := container_instance as ContainerInteractable
+	if adapter == null:
+		Log.warn("interaction", "Container %s set_script failed — adapter cast null" % record_id)
+		return
+	adapter.record_id = record_id
+	adapter.display_name = _get_display_name(base_record, record_id)
+	adapter.container_record = base_record
+	adapter.locked = ref.is_locked
+	adapter.lock_level = ref.lock_level
+	var model_path := _get_model_path(base_record)
+	if model_path.is_empty():
+		_generate_interaction_area(container_instance)
+	else:
+		_generate_interaction_area_cached(container_instance, model_path)
+	if _uses_visual_proxy("container"):
+		var source_key := make_source_key("container", ref, cell_grid)
+		adapter.container_opened.connect(
+			_mark_visual_proxy_dirty_from_container.bind(source_key, "container_opened")
+		)
+
+
+func _mark_visual_proxy_dirty_from_container(_record_id: String, _container_record: Variant, _player: Node3D, source_key: String, reason: String) -> void:
+	if static_renderer == null or not static_renderer.has_method("mark_proxy_dirty"):
+		return
+	static_renderer.call("mark_proxy_dirty", source_key, reason)
+
+
+func _attach_activator_interactable(activator_instance: Node3D, base_record: Variant, record_id: String) -> void:
+	activator_instance.set_script(ActivatorInteractableScript)
+	var adapter := activator_instance as ActivatorInteractable
+	if adapter == null:
+		Log.warn("interaction", "Activator %s set_script failed — adapter cast null" % record_id)
+		return
+	adapter.record_id = record_id
+	adapter.display_name = _get_display_name(base_record, record_id)
+	adapter.activator_record = base_record
+	if base_record != null and "script_id" in base_record:
+		adapter.script_id = String(base_record.script_id)
+	var model_path := _get_model_path(base_record)
+	if model_path.is_empty():
+		_generate_interaction_area(activator_instance)
+	else:
+		_generate_interaction_area_cached(activator_instance, model_path)
+
+
+func _get_display_name(base_record: Variant, record_id: String) -> String:
+	if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
+		return String(base_record.name)
+	return record_id
 
 
 ## Walk a subtree and OR the Interactable bit (layer 3, bit index 2) onto
@@ -2141,6 +2357,7 @@ func reset_stats() -> void:
 		"npcs_loaded": 0,
 		"creatures_loaded": 0,
 		"static_renderer_instances": 0,
+		"visual_proxies_created": 0,
 		"significant_objects_registered": 0,
 	}
 

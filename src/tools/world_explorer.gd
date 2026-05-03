@@ -580,6 +580,8 @@ func _init_async() -> void:
 	# §Rung 0 of the 2026-04-18 salvage pass.
 	_maybe_start_bench_ladder()
 
+	_maybe_start_perf_sweep()
+
 	# High-altitude sustained traversal stress test. This is separate from the
 	# canonical AutoBench because it answers transition stutter directly.
 	_maybe_start_stress_bench()
@@ -757,6 +759,39 @@ func _maybe_start_bench_ladder() -> void:
 		native_streaming_manager, cell_manager, camera, self, _subsystem_toggles, stamp
 	)
 	_log("[LADDER] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
+
+
+func _maybe_start_perf_sweep() -> void:
+	var args := _runtime_cmdline_args()
+	var stamp := ""
+	var flag_found := false
+	for i in range(args.size()):
+		var a: String = args[i]
+		if a == "--perf-sweep":
+			flag_found = true
+			if i + 1 < args.size() and not args[i + 1].begins_with("--"):
+				stamp = args[i + 1]
+			break
+		if a.begins_with("--perf-sweep="):
+			flag_found = true
+			stamp = a.substr("--perf-sweep=".length())
+			break
+	if not flag_found:
+		return
+	if not native_streaming_manager or not _subsystem_toggles:
+		push_warning("[PERF_SWEEP] --perf-sweep flag set but required refs missing - skipping")
+		return
+	var runner := PerfSweepScript.new()
+	runner.name = "PerfSweepCli"
+	get_tree().root.add_child(runner)
+	runner.init(
+		_subsystem_toggles,
+		console,
+		native_streaming_manager,
+		stamp,
+		true,
+	)
+	_log("[PERF_SWEEP] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
 
 func _maybe_start_stress_bench() -> void:
@@ -2469,7 +2504,6 @@ func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 ## Callback for native streaming manager cell unloaded
 func _on_native_cell_unloaded(grid: Vector2i) -> void:
 	_log("Cell unloaded: (%d, %d) (native)" % [grid.x, grid.y])
-	_update_stats()
 
 	# Unregister doors from unloaded cell
 	if _pocket_manager:

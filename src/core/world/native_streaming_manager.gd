@@ -1987,6 +1987,8 @@ func get_stats() -> Dictionary:
 		s["resident_async_requests"] = cm_stats.get("resident_async_requests", 0)
 		s["pending_conversions"] = cm_stats.get("pending_conversions", 0)
 		s["pending_disk_loads"] = cm_stats.get("pending_disk_loads", 0)
+		s["proximity_deferred"] = cm_stats.get("proximity_deferred", 0)
+		s["proximity_deferred_by_type"] = cm_stats.get("proximity_deferred_by_type", {})
 		s["burst_loading"] = cm_stats.get("burst_loading_active", false)
 
 	# Merge impostor stats if available
@@ -2005,6 +2007,8 @@ func get_stats() -> Dictionary:
 		s["mid_bucket_rs_instances"] = sr_stats.get("bucket_rs_instances", 0)
 		s["hlod_mid_bucket_overrides"] = sr_stats.get("hlod_bucket_overrides", 0)
 		s["hlod_mid_bucket_override_refs"] = sr_stats.get("hlod_bucket_override_refs", 0)
+		s["visual_proxy_instances"] = sr_stats.get("visual_proxy_instances", 0)
+		s["visual_proxy_dirty"] = sr_stats.get("visual_proxy_dirty", 0)
 
 	var hlod_stats: Dictionary = get_hlod_stats()
 	s["hlod_active"] = hlod_stats.get("enabled", false)
