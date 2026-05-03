@@ -201,8 +201,16 @@ func clear() -> void:
 ## Dual-purpose so the tier measures as fully-off when disabled, not just hidden.
 func set_enabled(enabled: bool) -> void:
 	_streaming_enabled = enabled
-	if _multi_mesh_instance.is_valid():
-		RenderingServer.instance_set_visible(_multi_mesh_instance, enabled)
+	if enabled:
+		if not _is_setup and _parent_node:
+			_create_material()
+			_create_multi_mesh()
+			_is_setup = true
+		if _multi_mesh_instance.is_valid():
+			RenderingServer.instance_set_visible(_multi_mesh_instance, true)
+	else:
+		clear()
+		cleanup()
 
 
 ## Deprecated alias — kept briefly for any callers still using old name.

@@ -179,6 +179,9 @@ func _register_project_settings() -> void:
 
 
 func _deferred_init() -> void:
+	if not _system_enabled or _ocean_mesh == null:
+		return
+
 	sea_level = ProjectSettings.get_setting(SETTING_SEA_LEVEL, 0.0)
 	ocean_radius = ProjectSettings.get_setting(SETTING_RADIUS, 8000.0)
 	water_quality = ProjectSettings.get_setting(SETTING_QUALITY, -1)
@@ -753,9 +756,20 @@ func regenerate_shore_mask() -> void:
 
 
 func set_enabled(enabled: bool) -> void:
-	_enabled = enabled
-	if _ocean_mesh:
-		_ocean_mesh.visible = enabled
+	if enabled:
+		_system_enabled = true
+		_enabled = true
+		set_process(true)
+		if not _system_initialized:
+			force_initialize()
+			return
+		if _ocean_mesh:
+			_ocean_mesh.visible = true
+	else:
+		_enabled = false
+		_system_enabled = false
+		set_process(false)
+		release_runtime_resources()
 
 
 func get_time() -> float:
@@ -817,6 +831,22 @@ func force_initialize() -> void:
 
 	if _ocean_mesh:
 		_ocean_mesh.visible = true
+
+
+func release_runtime_resources() -> void:
+	if _underwater_effect_loaded:
+		ShaderManager.disable_effect("underwater")
+		ShaderManager.unload_effect("underwater")
+		_underwater_effect_loaded = false
+	_shutdown_fft_pipeline()
+	if _ocean_mesh:
+		_ocean_mesh.queue_free()
+		_ocean_mesh = null
+	if _shore_mask:
+		_shore_mask.queue_free()
+		_shore_mask = null
+	_cached_sun_light = null
+	_system_initialized = false
 
 
 func get_water_quality() -> OceanMesh.QualityMode:

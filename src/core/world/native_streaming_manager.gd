@@ -2209,6 +2209,8 @@ func set_impostors_visible(visible: bool) -> void:
 		if visible and _impostor_renderer.has_method("set_visibility_range_begin"):
 			_impostor_renderer.set_visibility_range_begin(_distant_render_end_m)
 		_impostor_renderer.set_enabled(visible)
+		if visible:
+			_impostor_update_pending = true
 
 ## Toggle NEAR-tier Node3D cells (loaded cell containers).
 ## Remembers state so cells loaded after the toggle respect it.
@@ -2418,6 +2420,8 @@ func _teardown_hlod_merger() -> void:
 func set_distant_lights_visible(visible: bool) -> void:
 	if _distant_light_manager:
 		_distant_light_manager.set_enabled(visible)
+		if visible:
+			_distant_light_manager.scan_cells_around(_camera_cell, impostor_radius_cells)
 
 
 # ----------------------------------------------------------------------------

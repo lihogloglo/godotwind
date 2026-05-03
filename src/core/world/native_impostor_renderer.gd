@@ -288,10 +288,16 @@ class ImpostorPage:
 #endregion
 
 
-## SubsystemToggles handler: hide MultiMesh AND stop per-frame streaming work.
+## SubsystemToggles handler: release FAR resources when the tier is off.
 func set_enabled(enabled: bool) -> void:
-	_streaming_enabled = enabled
-	visible = enabled
+	if enabled:
+		_ensure_runtime_resources()
+		_streaming_enabled = true
+		visible = true
+		set_process(true)
+		_prev_impostor_center = Vector2i(999999, 999999)
+	else:
+		release_runtime_resources()
 
 
 func set_force_visible_for_test(enabled: bool) -> void:
@@ -340,6 +346,26 @@ func fast_cleanup() -> void:
 	clear()
 
 
+## Runtime off switch used by SubsystemToggles. Unlike `fast_cleanup()`, this
+## keeps the renderer node reusable so toggling FAR back on can rebuild cleanly.
+func release_runtime_resources() -> void:
+	set_process(false)
+	_streaming_enabled = false
+	visible = false
+	_stop_job_system()
+	if _rebuild_task_id != -1:
+		WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
+		_rebuild_task_id = -1
+		_rebuild_pending_albedo = []
+		_rebuild_pending_normals = []
+	clear()
+	_texture_array = null
+	_normal_texture_array = null
+	_old_texture_array = null
+	_old_normal_array = null
+	_assign_default_texture_arrays(4)
+
+
 func _detach_render_resources() -> void:
 	_clear_pages(true)
 	if _page_container:
@@ -358,6 +384,18 @@ func _detach_render_resources() -> void:
 	_normal_texture_array = null
 	_old_texture_array = null
 	_old_normal_array = null
+
+
+func _ensure_runtime_resources() -> void:
+	if _page_container == null:
+		_setup_paged_multimeshes()
+	if _billboard_material == null or _quad_mesh == null:
+		_setup_billboard_material()
+	else:
+		_assign_default_texture_arrays()
+		if _quad_mesh:
+			_quad_mesh.surface_set_material(0, _billboard_material)
+	_start_job_system()
 
 
 func _setup_paged_multimeshes() -> void:
@@ -380,19 +418,7 @@ func _setup_billboard_material() -> void:
 	_billboard_material = ShaderMaterial.new()
 	_billboard_material.shader = shader
 
-	# Create initial empty texture arrays (albedo + normal)
-	var default_img := Image.create(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, false, Image.FORMAT_RGBA8)
-	default_img.fill(Color(0, 0, 0, 0))
-	var default_array := Texture2DArray.new()
-	default_array.create_from_images([default_img])
-	_billboard_material.set_shader_parameter("texture_atlas", default_array)
-
-	# Normal atlas: default to up-facing normal (0.5, 1.0, 0.5), zero depth
-	var default_normal_img := Image.create(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, false, Image.FORMAT_RGBA8)
-	default_normal_img.fill(Color(0.5, 1.0, 0.5, 0.0))
-	var default_normal_array := Texture2DArray.new()
-	default_normal_array.create_from_images([default_normal_img])
-	_billboard_material.set_shader_parameter("normal_atlas", default_normal_array)
+	_assign_default_texture_arrays()
 
 	# Keep shader fade and engine visibility in lockstep. NativeStreamingManager
 	# clamps this to MID_END for the current fallback policy.
@@ -403,6 +429,28 @@ func _setup_billboard_material() -> void:
 	if _quad_mesh:
 		_quad_mesh.surface_set_material(0, _billboard_material)
 		Log.debug("impostors", "Set material on shared impostor quad")
+
+
+func _assign_default_texture_arrays(dimension: int = TEXTURE_ARRAY_DIMENSION) -> void:
+	if _billboard_material == null:
+		return
+
+	var default_img := Image.create(dimension, dimension, false, Image.FORMAT_RGBA8)
+	default_img.fill(Color(0, 0, 0, 0))
+	var default_array := Texture2DArray.new()
+	default_array.create_from_images([default_img])
+	_texture_array = default_array
+	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
+
+	# Normal atlas: default to up-facing normal (0.5, 1.0, 0.5), zero depth
+	var default_normal_img := Image.create(dimension, dimension, false, Image.FORMAT_RGBA8)
+	default_normal_img.fill(Color(0.5, 1.0, 0.5, 0.0))
+	var default_normal_array := Texture2DArray.new()
+	default_normal_array.create_from_images([default_normal_img])
+	_normal_texture_array = default_normal_array
+	_billboard_material.set_shader_parameter("normal_atlas", _normal_texture_array)
+	_committed_texture_array_layers = 0
+	_committed_normal_array_layers = 0
 
 
 ## Toggle debug mode for impostor shader (shows bright magenta at any distance)
@@ -1508,6 +1556,41 @@ func clear() -> void:
 	_stats["total_impostors"] = 0
 	_impostors_dirty = false
 	_clear_pages(true)
+	_reset_runtime_stats()
+
+
+func _reset_runtime_stats() -> void:
+	for key: String in [
+		"texture_cache_size",
+		"texture_array_layers",
+		"pending_loads",
+		"far_cell_scan_us",
+		"far_cells_processed_last_frame",
+		"far_job_poll_us",
+		"far_job_results_handled",
+		"far_ready_create_us",
+		"far_ready_created",
+		"far_texture_upload_us",
+		"far_normal_upload_us",
+		"far_multimesh_pack_us",
+		"far_multimesh_upload_us",
+		"far_uploaded_instances",
+		"far_page_count",
+		"far_dirty_page_count",
+		"far_pages_rebuilt",
+		"far_visible_page_count",
+		"far_rebuild_deferred_pending",
+		"job_results_processed_last_frame",
+		"job_result_poll_last_ms",
+		"job_result_poll_max_ms",
+		"texture_array_rebuild_count",
+		"texture_array_upload_last_ms",
+		"texture_array_upload_max_ms",
+		"multimesh_rebuild_count",
+		"multimesh_rebuild_last_ms",
+		"multimesh_rebuild_max_ms",
+	]:
+		_stats[key] = 0
 
 
 ## Get statistics

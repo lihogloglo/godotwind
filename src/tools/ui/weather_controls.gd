@@ -18,6 +18,8 @@ var _panels: ExplorerPanels = null
 var _renderer: WeatherRenderer = null
 var _particles: WeatherParticles = null
 var _sunshine_driver: Node = null  # SunshineCloudsDriverGD instance
+var _particles_parent: Node = null
+var _particles_camera: Camera3D = null
 var _env_controls: EnvironmentControls = null
 
 ## Whether the weather system is wired and active
@@ -169,6 +171,8 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 
 ## Initialize weather particles (must be called from main thread)
 func setup_particles(parent: Node, camera: Camera3D) -> void:
+	_particles_parent = parent
+	_particles_camera = camera
 	_particles = WeatherParticles.new()
 	_particles.name = "WeatherParticles"
 	_particles.set_camera(camera)
@@ -254,6 +258,8 @@ var fog_density_multiplier: float = 1.0
 func on_weather_toggled(enabled: bool) -> void:
 	weather_enabled = enabled
 	WeatherManager.enabled = enabled
+	if enabled and _particles == null and _particles_parent and _particles_camera:
+		setup_particles(_particles_parent, _particles_camera)
 
 	# Notify environment_controls that weather owns fog/ambient values
 	if _env_controls:
@@ -283,7 +289,13 @@ func on_weather_toggled(enabled: bool) -> void:
 	_set_clouds_enabled(enabled or (_env_controls and _env_controls.show_sky))
 
 	if _particles:
-		_particles.visible = enabled
+		if enabled:
+			_particles.visible = true
+		else:
+			if WeatherManager.weather_updated.is_connected(_particles.update):
+				WeatherManager.weather_updated.disconnect(_particles.update)
+			_particles.queue_free()
+			_particles = null
 
 	# Reset ocean to calm defaults when weather is disabled
 	if not enabled and OceanManager.is_system_enabled():
