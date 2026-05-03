@@ -74,6 +74,7 @@ func _build_prototype(mesh: ArrayMesh, mat: Material = null) -> Node3D:
 	if mat:
 		mi.material_override = mat
 	root.add_child(mi)
+	mi.owner = root
 	return root
 
 
@@ -230,7 +231,7 @@ func test_hlod_covered_bucket_caps_mid_range() -> void:
 	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(0)
 
 
-func test_cell_bucket_uses_single_slot_multimesh_for_singleton_group() -> void:
+func test_cell_bucket_uses_direct_rs_for_singleton_group() -> void:
 	var renderer := SOR.new()
 	auto_free(renderer)
 	add_child(renderer)
@@ -251,7 +252,7 @@ func test_cell_bucket_uses_single_slot_multimesh_for_singleton_group() -> void:
 
 	var groups: Array = bucket.get("draw_groups")
 	var group: Variant = groups[0]
-	assert_that(group.multimesh).is_not_null()
+	assert_that(group.multimesh).is_null()
 	assert_that(group.instance_rid.is_valid()).is_true()
 	assert_int(int(group.instance_count)).is_equal(1)
 
@@ -336,7 +337,7 @@ func test_cell_bucket_splits_repeated_groups_into_spatial_clusters() -> void:
 
 	var groups: Array = bucket.get("draw_groups")
 	for group: Variant in groups:
-		assert_that(group.multimesh).is_not_null()
+		assert_that(group.multimesh).is_null()
 		assert_int(int(group.instance_count)).is_equal(1)
 
 

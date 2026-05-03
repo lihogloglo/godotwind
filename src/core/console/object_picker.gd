@@ -1,10 +1,10 @@
 ## Object Picker - Click-to-select objects in the 3D world
 ##
-## Uses AABB-based mesh proximity to camera ray (no physics/collision needed).
+## Uses first-hit AABB ray picking (no physics/collision needed).
 ## When the console is open, hovering shows a tooltip; clicking selects.
 ##
 ## Features:
-## - AABB-based object picking (works without collision shapes)
+## - First-hit AABB object picking (works without collision shapes)
 ## - Hover tooltip when console is visible
 ## - Click-to-select
 ## - Selection outline rendering
@@ -75,6 +75,9 @@ class Selection:
 	## World transform
 	var world_transform: Transform3D
 
+	## World-space bounds used for the debug selection box
+	var world_aabb: AABB
+
 	func _init() -> void:
 		instance_id = -1
 		cell_grid = Vector2i.ZERO
@@ -127,6 +130,7 @@ class PickHit:
 	var cell_grid: Vector2i = Vector2i.ZERO
 	var ref_num: int = -1
 	var world_transform: Transform3D = Transform3D.IDENTITY
+	var world_aabb: AABB = AABB()
 
 #endregion
 
@@ -136,8 +140,7 @@ class PickHit:
 ## Maximum pick distance
 @export var max_distance: float = 500.0
 
-## Angular threshold for pick cone (radians). ~5 degrees.
-## Hover update interval (seconds) — throttle to avoid per-frame mesh iteration
+## Hover update interval (seconds) - throttle to avoid per-frame mesh iteration
 const HOVER_INTERVAL := 0.1
 
 #endregion
@@ -177,6 +180,11 @@ var _outline_material: ShaderMaterial = null
 ## Currently outlined node (for cleanup)
 var _outlined_node: Node3D = null
 
+## World-space bounds helper for the active selection
+var _bounds_node: MeshInstance3D = null
+var _bounds_mesh: ImmediateMesh = null
+var _bounds_material: ShaderMaterial = null
+
 ## Hover tooltip label
 var _tooltip_layer: CanvasLayer = null
 var _tooltip_panel: PanelContainer = null
@@ -193,9 +201,14 @@ var _suffix_regex: RegEx = null
 
 func _ready() -> void:
 	_setup_outline_material()
-	_setup_tooltip()
+	_setup_bounds_material()
 	_suffix_regex = RegEx.new()
 	_suffix_regex.compile("_\\d+$")
+
+
+func _exit_tree() -> void:
+	_remove_bounds_box()
+	_release_tooltip()
 
 
 func _process(delta: float) -> void:
@@ -211,12 +224,9 @@ func _process(delta: float) -> void:
 
 	var mouse_pos := _camera.get_viewport().get_mouse_position()
 
-	# Don't pick if mouse is inside console panel
-	if _console_panel and _console_panel.visible:
-		var rect := Rect2(_console_panel.global_position, _console_panel.size)
-		if rect.has_point(mouse_pos):
-			_set_hover(null)
-			return
+	if _is_pointer_over_blocking_ui(mouse_pos):
+		_set_hover(null)
+		return
 
 	# Cast ray from mouse through camera
 	var result := _pick_at(mouse_pos)
@@ -237,11 +247,8 @@ func _input(event: InputEvent) -> void:
 	if (picker_mode or hover_enabled) and event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event as InputEventMouseButton
 		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
-			# Don't pick if mouse is inside console panel
-			if _console_panel and _console_panel.visible:
-				var rect := Rect2(_console_panel.global_position, _console_panel.size)
-				if rect.has_point(mb.position):
-					return
+			if _is_pointer_over_blocking_ui(mb.position):
+				return
 
 			var target := _pick_at(mb.position)
 			if target:
@@ -287,9 +294,38 @@ func set_console_panel(panel: Control) -> void:
 
 ## Enable/disable hover tracking
 func set_hover_enabled(enabled: bool) -> void:
+	if hover_enabled == enabled:
+		if enabled:
+			_setup_tooltip()
+		else:
+			_set_hover(null)
+			_release_tooltip()
+		return
 	hover_enabled = enabled
-	if not enabled:
+	if enabled:
+		_setup_tooltip()
+	else:
 		_set_hover(null)
+		_remove_bounds_box()
+		_release_tooltip()
+
+
+func _is_pointer_over_blocking_ui(screen_pos: Vector2) -> bool:
+	if _console_panel and _console_panel.visible:
+		var rect := Rect2(_console_panel.global_position, _console_panel.size)
+		if rect.has_point(screen_pos):
+			return true
+
+	var viewport := _camera.get_viewport() if _camera else get_viewport()
+	if viewport == null or not viewport.has_method("gui_get_hovered_control"):
+		return false
+	var hovered := viewport.call("gui_get_hovered_control") as Control
+	while hovered != null:
+		if hovered.visible and hovered.mouse_filter != Control.MOUSE_FILTER_IGNORE:
+			return true
+		var parent := hovered.get_parent()
+		hovered = parent as Control if parent is Control else null
+	return false
 
 
 ## Enter picker mode (legacy: next click will select)
@@ -297,6 +333,7 @@ func enter_picker_mode() -> void:
 	if picker_mode:
 		return
 	picker_mode = true
+	_setup_tooltip()
 	Input.set_default_cursor_shape(Input.CURSOR_CROSS)
 	picker_mode_entered.emit()
 
@@ -306,6 +343,9 @@ func exit_picker_mode() -> void:
 	if not picker_mode:
 		return
 	picker_mode = false
+	if not hover_enabled:
+		_set_hover(null)
+		_release_tooltip()
 	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
 	picker_mode_exited.emit()
 
@@ -313,6 +353,7 @@ func exit_picker_mode() -> void:
 ## Clear current selection
 func clear_selection() -> void:
 	_remove_outline()
+	_remove_bounds_box()
 	current_selection = null
 	selection_cleared.emit()
 
@@ -379,6 +420,7 @@ func _find_first_scene_mesh(node: Node, origin: Vector3, dir: Vector3, best: Pic
 				best.distance = hit_distance
 				best.source_kind = "scene_tree"
 				best.world_transform = mi.global_transform
+				best.world_aabb = world_aabb
 
 	for child in node.get_children():
 		_find_first_scene_mesh(child, origin, dir, best)
@@ -389,18 +431,19 @@ func _find_first_static_payload_ref(origin: Vector3, dir: Vector3, best: PickHit
 		return
 	if not _world_provider.has_method("get_loaded_cell_coordinates"):
 		return
-	if not "_async_requests" in _world_provider or not "_static_renderer" in _world_provider:
-		return
 	var static_renderer: Variant = _world_provider.get("_static_renderer")
 	if static_renderer == null or not static_renderer.has_method("get_mesh_aabb"):
+		return
+	var async_requests: Variant = _world_provider.get("_async_requests")
+	if not (async_requests is Dictionary):
 		return
 
 	var coords: Array = _world_provider.call("get_loaded_cell_coordinates")
 	for grid_value: Variant in coords:
-		if not grid_value is Vector2i:
+		if not (grid_value is Vector2i):
 			continue
 		var grid: Vector2i = grid_value
-		var request_id := int(_world_provider.get("_async_requests").get(grid, -1))
+		var request_id := int((async_requests as Dictionary).get(grid, -1))
 		if request_id < 0 or not _cell_manager.has_method("get_async_payload"):
 			continue
 		var payload: RefCounted = _cell_manager.call("get_async_payload", request_id) as RefCounted
@@ -432,7 +475,7 @@ func _find_first_static_ref_in_payload(
 		var transforms: Array = transforms_by_model.get(key, [])
 		var count := mini(refs.size(), transforms.size())
 		for i in range(count):
-			if not transforms[i] is Transform3D:
+			if not (transforms[i] is Transform3D):
 				continue
 			var xform: Transform3D = transforms[i]
 			var world_aabb: AABB = xform * mesh_aabb
@@ -448,6 +491,7 @@ func _find_first_static_ref_in_payload(
 			best.model_path = model_path
 			best.cell_grid = grid
 			best.world_transform = xform
+			best.world_aabb = world_aabb
 			best.record_type = "STAT"
 			best.form_id = str(ref.ref_id) if ref != null and "ref_id" in ref else key.get_file().get_basename()
 			best.ref_num = int(ref.ref_num) if ref != null and "ref_num" in ref else -1
@@ -489,6 +533,8 @@ static func _ray_aabb_distance(origin: Vector3, dir: Vector3, aabb: AABB) -> flo
 #region Hover & Tooltip
 
 func _setup_tooltip() -> void:
+	if is_instance_valid(_tooltip_layer):
+		return
 	_tooltip_layer = CanvasLayer.new()
 	_tooltip_layer.layer = 110  # Above console (100)
 	add_child(_tooltip_layer)
@@ -516,30 +562,43 @@ func _setup_tooltip() -> void:
 	_tooltip_layer.add_child(_tooltip_panel)
 
 
+func _release_tooltip() -> void:
+	_hover_node = null
+	if is_instance_valid(_tooltip_panel):
+		_tooltip_panel.visible = false
+	if is_instance_valid(_tooltip_layer):
+		_tooltip_layer.queue_free()
+	_tooltip_layer = null
+	_tooltip_panel = null
+	_tooltip_label = null
+
+
 func _set_hover(hit: PickHit) -> void:
 	var obj_root: Node3D = hit.object_root if hit else null
 
 	if obj_root == _hover_node and (obj_root != null or hit == null):
 		# Same object — just update tooltip position
-		if _tooltip_panel.visible:
+		if is_instance_valid(_tooltip_panel) and _tooltip_panel.visible:
 			_update_tooltip_position()
 		return
 
 	_hover_node = obj_root
 
 	if hit:
+		_setup_tooltip()
 		var display_name := _get_hit_display_name(hit)
 		_tooltip_label.text = "%s  (%.0fm)" % [display_name, hit.distance]
 		_tooltip_panel.visible = true
 		_update_tooltip_position()
 	else:
-		_tooltip_panel.visible = false
+		if is_instance_valid(_tooltip_panel):
+			_tooltip_panel.visible = false
 
 	hover_changed.emit(obj_root)
 
 
 func _update_tooltip_position() -> void:
-	if not _camera:
+	if not _camera or not is_instance_valid(_tooltip_panel):
 		return
 	var mouse_pos := _camera.get_viewport().get_mouse_position()
 	# Offset to bottom-right of cursor
@@ -630,12 +689,14 @@ func _create_selection_from_hit(hit: PickHit) -> Selection:
 		sel.cell_grid = hit.cell_grid
 		sel.instance_id = hit.ref_num
 		sel.source_kind = hit.source_kind
+		sel.world_aabb = hit.world_aabb
 		sel.reference_text = _format_static_reference(sel)
 		return sel
 
 	var node := hit.object_root if hit.object_root else hit.mesh
 	var selection := _create_selection_from_node(node, hit.hit_position)
 	selection.source_kind = hit.source_kind
+	selection.world_aabb = _get_world_aabb_for_node(node)
 	selection.reference_text = _format_node_reference(selection)
 	return selection
 
@@ -645,6 +706,7 @@ func _create_selection_from_node(node: Node3D, hit_pos: Vector3) -> Selection:
 	sel.node = node
 	sel.hit_position = hit_pos
 	sel.world_transform = node.global_transform
+	sel.world_aabb = _get_world_aabb_for_node(node)
 
 	# Resolve identity from metadata
 	if node.has_meta("form_id"):
@@ -740,9 +802,12 @@ func _format_node_reference(sel: Selection) -> String:
 ## Set the current selection and apply outline
 func _set_selection(selection: Selection) -> void:
 	_remove_outline()
+	_remove_bounds_box()
 	current_selection = selection
 	if selection and selection.node:
 		_apply_outline(selection.node)
+	if selection:
+		_apply_bounds_box(selection)
 	object_selected.emit(selection)
 
 
@@ -831,5 +896,101 @@ func _find_mesh_instances(node: Node3D) -> Array[MeshInstance3D]:
 		if child is Node3D:
 			result.append_array(_find_mesh_instances(child as Node3D))
 	return result
+
+#endregion
+
+
+#region Selection Bounds
+
+func _setup_bounds_material() -> void:
+	_bounds_material = ShaderMaterial.new()
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+render_mode unshaded, depth_draw_always, cull_disabled;
+
+uniform vec4 bounds_color : source_color = vec4(1.0, 0.75, 0.05, 1.0);
+
+void fragment() {
+	ALBEDO = bounds_color.rgb;
+	ALPHA = bounds_color.a;
+}
+"""
+	_bounds_material.shader = shader
+	_bounds_material.set_shader_parameter("bounds_color", Color(1.0, 0.75, 0.05, 1.0))
+
+
+func _apply_bounds_box(selection: Selection) -> void:
+	if selection == null:
+		return
+	var bounds := selection.world_aabb
+	if bounds.size == Vector3.ZERO:
+		return
+	_ensure_bounds_box()
+	if not is_instance_valid(_bounds_node) or _bounds_mesh == null:
+		return
+	_rebuild_bounds_mesh(bounds)
+	_bounds_node.visible = true
+
+
+func _ensure_bounds_box() -> void:
+	if is_instance_valid(_bounds_node):
+		return
+	_bounds_mesh = ImmediateMesh.new()
+	_bounds_node = MeshInstance3D.new()
+	_bounds_node.name = "ObjectPickerSelectionBounds"
+	_bounds_node.mesh = _bounds_mesh
+	_bounds_node.layers = 1
+	_bounds_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_bounds_node)
+
+
+func _remove_bounds_box() -> void:
+	if is_instance_valid(_bounds_node):
+		_bounds_node.queue_free()
+	_bounds_node = null
+	_bounds_mesh = null
+
+
+func _rebuild_bounds_mesh(bounds: AABB) -> void:
+	_bounds_mesh.clear_surfaces()
+	_bounds_node.global_transform = Transform3D(Basis.IDENTITY, bounds.get_center())
+
+	var half := bounds.size * 0.5
+	var corners: Array[Vector3] = [
+		Vector3(-half.x, -half.y, -half.z),
+		Vector3(half.x, -half.y, -half.z),
+		Vector3(half.x, -half.y, half.z),
+		Vector3(-half.x, -half.y, half.z),
+		Vector3(-half.x, half.y, -half.z),
+		Vector3(half.x, half.y, -half.z),
+		Vector3(half.x, half.y, half.z),
+		Vector3(-half.x, half.y, half.z),
+	]
+	var edges: Array[Vector2i] = [
+		Vector2i(0, 1), Vector2i(1, 2), Vector2i(2, 3), Vector2i(3, 0),
+		Vector2i(4, 5), Vector2i(5, 6), Vector2i(6, 7), Vector2i(7, 4),
+		Vector2i(0, 4), Vector2i(1, 5), Vector2i(2, 6), Vector2i(3, 7),
+	]
+
+	_bounds_mesh.surface_begin(Mesh.PRIMITIVE_LINES, _bounds_material)
+	for edge in edges:
+		_bounds_mesh.surface_add_vertex(corners[edge.x])
+		_bounds_mesh.surface_add_vertex(corners[edge.y])
+	_bounds_mesh.surface_end()
+
+
+func _get_world_aabb_for_node(node: Node3D) -> AABB:
+	if node == null:
+		return AABB()
+	var has_bounds := false
+	var bounds := AABB()
+	for mesh in _find_mesh_instances(node):
+		if mesh.mesh == null or not mesh.visible or not mesh.is_visible_in_tree():
+			continue
+		var mesh_bounds: AABB = mesh.global_transform * mesh.get_aabb()
+		bounds = mesh_bounds if not has_bounds else bounds.merge(mesh_bounds)
+		has_bounds = true
+	return bounds if has_bounds else AABB(node.global_position, Vector3.ZERO)
 
 #endregion

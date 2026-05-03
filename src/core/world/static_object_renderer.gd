@@ -29,6 +29,7 @@ const PrototypeRegistryScript := preload("res://src/core/world/prototype_registr
 const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
 const CellStaticBucketScript := preload("res://src/core/world/cell_static_bucket.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const EXTERIOR_RENDER_LAYER_MASK := 1
 
 ## Parked legacy PrototypeRegistry path. It is world-scoped, which is the wrong
 ## shape for a large open world because one MultiMesh is spatially indexed as
@@ -1358,6 +1359,7 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 	var instance_rid := rs.instance_create()
 	rs.instance_set_base(instance_rid, mesh_rid)
 	rs.instance_set_scenario(instance_rid, _scenario)
+	rs.instance_set_layer_mask(instance_rid, EXTERIOR_RENDER_LAYER_MASK)
 	rs.instance_set_transform(instance_rid, xform)
 
 	# Apply material: prefer whole-mesh override, fall back to per-surface

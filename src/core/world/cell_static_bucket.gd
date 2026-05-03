@@ -9,6 +9,7 @@ const MULTIMESH_CLUSTER_SIZE_M: float = DU.CELL_SIZE_METERS * 0.5
 const CONFIGURE_READY := "ready"
 const CONFIGURE_PENDING := "pending"
 const CONFIGURE_FAILED := "failed"
+const EXTERIOR_RENDER_LAYER_MASK := 1
 
 var type_name: String = ""
 var payload_key: String = ""
@@ -299,7 +300,6 @@ func _create_draw_group_for_cluster(
 			local_transform,
 			single_transform,
 			mesh_aabb,
-			bucket_origin,
 			scenario
 		)
 	return _create_multimesh_draw_group(
@@ -342,11 +342,17 @@ func _create_multimesh_draw_group(
 	var rid := RenderingServer.instance_create()
 	RenderingServer.instance_set_base(rid, multimesh.get_rid())
 	RenderingServer.instance_set_scenario(rid, scenario)
+	RenderingServer.instance_set_layer_mask(rid, EXTERIOR_RENDER_LAYER_MASK)
 	RenderingServer.instance_set_transform(rid, Transform3D(Basis.IDENTITY, bucket_origin))
 
 	var material_rid := _get_valid_material_rid(material_resource)
 	if material_rid.is_valid():
 		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
+	else:
+		for surface_index in range(surface_materials.size()):
+			var surface_material_rid := _get_valid_material_rid(surface_materials[surface_index])
+			if surface_material_rid.is_valid():
+				RenderingServer.instance_set_surface_override_material(rid, surface_index, surface_material_rid)
 
 	var group := DrawGroup.new()
 	group.mesh_resource = mesh_resource
@@ -375,7 +381,6 @@ func _create_single_rs_draw_group(
 	local_transform: Transform3D,
 	world_transform: Transform3D,
 	mesh_aabb: AABB,
-	_bucket_origin: Vector3,
 	scenario: RID,
 ) -> DrawGroup:
 	if not scenario.is_valid():
@@ -390,6 +395,7 @@ func _create_single_rs_draw_group(
 	var rid := RenderingServer.instance_create()
 	RenderingServer.instance_set_base(rid, mesh_rid)
 	RenderingServer.instance_set_scenario(rid, scenario)
+	RenderingServer.instance_set_layer_mask(rid, EXTERIOR_RENDER_LAYER_MASK)
 	RenderingServer.instance_set_transform(rid, slot_transform)
 
 	var material_rid := _get_valid_material_rid(material_resource)
