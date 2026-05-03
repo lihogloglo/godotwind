@@ -65,6 +65,7 @@ const BAKE_VERSION: int = 6
 const CAPTURE_SETTLE_FRAMES: int = 3
 const CAPTURE_SETTLE_FPS: float = 30.0
 const MIN_IMPOSTOR_HEIGHT_M: float = 4.0
+const HERO_ATLAS_CAPTURE_SIZE_M: float = 48.0
 
 ## Patterns that opt an asset into full-sphere projection instead of hemi.
 ## Hemi (upper hemisphere only) is correct for ground-rooted assets — the
@@ -347,7 +348,7 @@ func _resolve_projection(model_path: String) -> String:
 	return "hemi"
 
 
-func _resolve_bake_settings(model_path: String, candidates: ImpostorCandidatesScript = null) -> Dictionary:
+func _resolve_bake_settings(model_path: String, candidates: ImpostorCandidatesScript = null, aabb: AABB = AABB()) -> Dictionary:
 	var provider := candidates
 	if provider == null:
 		provider = ImpostorCandidatesScript.new()
@@ -355,9 +356,12 @@ func _resolve_bake_settings(model_path: String, candidates: ImpostorCandidatesSc
 	var requested_texture_size := int(candidate_settings.get("texture_size", 512))
 	var frame_size := SMALL_FRAME_SIZE
 	var tier_name := "small"
-	if requested_texture_size >= 512:
+	var capture_size := 0.0
+	if aabb.size.length_squared() > 0.0:
+		capture_size = maxf(maxf(aabb.size.x, aabb.size.y), aabb.size.z) * padding_factor
+	if capture_size >= HERO_ATLAS_CAPTURE_SIZE_M:
 		frame_size = LARGE_FRAME_SIZE
-		tier_name = "large"
+		tier_name = "hero"
 
 	return {
 		"tier": tier_name,
@@ -387,18 +391,7 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 		model_baked.emit(model_path, false, "")
 		return {"success": false, "error": error}
 
-	var bake_settings := _resolve_bake_settings(model_path, candidates)
-	_active_grid_size = int(bake_settings["grid_size"])
-	_active_frame_size = int(bake_settings["frame_size"])
-	_active_atlas_size = int(bake_settings["atlas_size"])
-	_active_tier_name = str(bake_settings["tier"])
 	var projection := _resolve_projection(model_path)
-
-	# Resize both viewports to the selected per-asset frame size.
-	_albedo_viewport.size = Vector2i(_active_frame_size, _active_frame_size)
-	_normal_viewport.size = Vector2i(_active_frame_size, _active_frame_size)
-	await _wait_for_viewport_size(_albedo_viewport, Vector2i(_active_frame_size, _active_frame_size))
-	await _wait_for_viewport_size(_normal_viewport, Vector2i(_active_frame_size, _active_frame_size))
 
 	# Load model into albedo pass
 	var albedo_model := _load_model(model_path)
@@ -435,6 +428,17 @@ func bake_model(model_path: String, candidates: ImpostorCandidatesScript = null)
 			"bounds": aabb,
 			"error": ""
 		}
+
+	var bake_settings := _resolve_bake_settings(model_path, candidates, aabb)
+	_active_grid_size = int(bake_settings["grid_size"])
+	_active_frame_size = int(bake_settings["frame_size"])
+	_active_atlas_size = int(bake_settings["atlas_size"])
+	_active_tier_name = str(bake_settings["tier"])
+
+	_albedo_viewport.size = Vector2i(_active_frame_size, _active_frame_size)
+	_normal_viewport.size = Vector2i(_active_frame_size, _active_frame_size)
+	await _wait_for_viewport_size(_albedo_viewport, Vector2i(_active_frame_size, _active_frame_size))
+	await _wait_for_viewport_size(_normal_viewport, Vector2i(_active_frame_size, _active_frame_size))
 
 	var center := aabb.get_center()
 	albedo_model.position = -center

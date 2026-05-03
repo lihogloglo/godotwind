@@ -26,6 +26,8 @@ const BASE_FLY_SPEED: float = 180.0
 const SPRINT_MULTIPLIER: float = 4.0
 const HUD_INTERVAL: float = 0.15
 const BOUNDS_INTERVAL: float = 0.5
+const AUTO_SPEED: float = 120.0
+const ATLAS_SIZES: Array[int] = [512, 1024]
 
 const ACTION_DEBUG_NORMALS := &"impostor_debug_normals"
 const ACTION_TOGGLE_BOUNDS := &"impostor_stress_toggle_bounds"
@@ -52,6 +54,24 @@ var _force_visible: bool = false
 var _loading_stage: String = "Booting"
 var _area_updates: int = 0
 var _esm_loaded: bool = false
+var _auto_duration: float = 0.0
+var _auto_elapsed: float = 0.0
+var _auto_started: bool = false
+var _summary_stamp: String = "impostor_stress"
+var _frame_count: int = 0
+var _max_frame_ms: float = 0.0
+var _max_texture_upload_ms: float = 0.0
+var _max_normal_upload_ms: float = 0.0
+var _max_pack_ms: float = 0.0
+var _max_upload_ms: float = 0.0
+var _max_total_impostors: int = 0
+var _max_uploaded_instances: int = 0
+var _max_texture_layers: int = 0
+var _max_texture_upload_ms_by_size: Dictionary[int, float] = {}
+var _max_normal_upload_ms_by_size: Dictionary[int, float] = {}
+var _max_texture_layers_by_size: Dictionary[int, int] = {}
+var _max_texture_slabs_by_size: Dictionary[int, int] = {}
+var _warmup_remaining: int = 5
 
 
 func _ready() -> void:
@@ -60,6 +80,8 @@ func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	_force_visible = "--force-visible" in args or "--all-visible" in args
 	_bounds_visible = not "--hide-bounds" in args
+	_auto_duration = _get_float_arg(args, "--auto-duration=", 0.0)
+	_summary_stamp = _get_string_arg(args, "--stamp=", _summary_stamp)
 	_setup_environment()
 	_setup_camera()
 	_setup_hud()
@@ -162,6 +184,9 @@ func _load_and_start() -> void:
 	await get_tree().process_frame
 	_request_current_area(true)
 	_loading_stage = "Streaming impostors"
+	_auto_started = _auto_duration > 0.0
+	_frame_count = 0
+	_warmup_remaining = 5
 
 
 func _setup_renderer() -> void:
@@ -212,7 +237,12 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
-	_process_camera(delta)
+	if _auto_started:
+		_frame_count += 1
+		_record_benchmark_sample()
+		_process_auto_camera(delta)
+	else:
+		_process_camera(delta)
 	_process_area_update()
 
 	_hud_timer += delta
@@ -225,6 +255,101 @@ func _process(delta: float) -> void:
 		if _bounds_timer >= BOUNDS_INTERVAL:
 			_bounds_timer = 0.0
 			_rebuild_bounds_mesh()
+
+	if _auto_started:
+		_auto_elapsed += delta
+		if _auto_elapsed >= _auto_duration:
+			_write_auto_summary()
+			get_tree().quit()
+
+
+func _get_float_arg(args: PackedStringArray, prefix: String, fallback: float) -> float:
+	for arg: String in args:
+		if arg.begins_with(prefix):
+			return maxf(0.0, float(arg.trim_prefix(prefix)))
+	return fallback
+
+
+func _get_string_arg(args: PackedStringArray, prefix: String, fallback: String) -> String:
+	for arg: String in args:
+		if arg.begins_with(prefix):
+			var value := arg.trim_prefix(prefix).strip_edges()
+			if not value.is_empty():
+				return value
+	return fallback
+
+
+func _process_auto_camera(delta: float) -> void:
+	if not _camera:
+		return
+	var angle := _auto_elapsed * 0.18
+	var center := DU.cell_to_world_center(START_CELL, 180.0)
+	var radius := 900.0
+	_camera.position = center + Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
+	_camera.look_at(center + Vector3(0.0, -40.0, 0.0), Vector3.UP)
+
+
+func _record_benchmark_sample() -> void:
+	if _warmup_remaining > 0:
+		_warmup_remaining -= 1
+		return
+	var stats := _get_renderer_stats()
+	var frame_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	_max_frame_ms = maxf(_max_frame_ms, frame_ms)
+	_max_texture_upload_ms = maxf(_max_texture_upload_ms, float(stats.get("far_texture_upload_us", 0)) / 1000.0)
+	_max_normal_upload_ms = maxf(_max_normal_upload_ms, float(stats.get("far_normal_upload_us", 0)) / 1000.0)
+	for atlas_size: int in ATLAS_SIZES:
+		_max_texture_upload_ms_by_size[atlas_size] = maxf(
+			_max_texture_upload_ms_by_size.get(atlas_size, 0.0),
+			float(stats.get("far_texture_upload_us_%d" % atlas_size, 0)) / 1000.0
+		)
+		_max_normal_upload_ms_by_size[atlas_size] = maxf(
+			_max_normal_upload_ms_by_size.get(atlas_size, 0.0),
+			float(stats.get("far_normal_upload_us_%d" % atlas_size, 0)) / 1000.0
+		)
+		_max_texture_layers_by_size[atlas_size] = maxi(
+			_max_texture_layers_by_size.get(atlas_size, 0),
+			int(stats.get("far_texture_layers_%d" % atlas_size, 0))
+		)
+		_max_texture_slabs_by_size[atlas_size] = maxi(
+			_max_texture_slabs_by_size.get(atlas_size, 0),
+			int(stats.get("far_texture_slabs_%d" % atlas_size, 0))
+		)
+	_max_pack_ms = maxf(_max_pack_ms, float(stats.get("far_multimesh_pack_us", 0)) / 1000.0)
+	_max_upload_ms = maxf(_max_upload_ms, float(stats.get("far_multimesh_upload_us", 0)) / 1000.0)
+	_max_total_impostors = maxi(_max_total_impostors, int(stats.get("total_impostors", 0)))
+	_max_uploaded_instances = maxi(_max_uploaded_instances, int(stats.get("far_uploaded_instances", 0)))
+	_max_texture_layers = maxi(_max_texture_layers, int(stats.get("texture_array_layers", 0)))
+
+
+func _write_auto_summary() -> void:
+	var dir := "user://benchmark_results"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir))
+	var summary := {
+		"stamp": _summary_stamp,
+		"duration_s": _auto_duration,
+		"frames": _frame_count,
+		"avg_fps": float(_frame_count) / maxf(_auto_elapsed, 0.001),
+		"max_frame_ms": _max_frame_ms,
+		"max_texture_upload_ms": _max_texture_upload_ms,
+		"max_normal_upload_ms": _max_normal_upload_ms,
+		"max_multimesh_pack_ms": _max_pack_ms,
+		"max_multimesh_upload_ms": _max_upload_ms,
+		"max_total_impostors": _max_total_impostors,
+		"max_uploaded_instances": _max_uploaded_instances,
+		"max_texture_layers": _max_texture_layers,
+	}
+	for atlas_size: int in ATLAS_SIZES:
+		summary["max_texture_upload_ms_%d" % atlas_size] = _max_texture_upload_ms_by_size.get(atlas_size, 0.0)
+		summary["max_normal_upload_ms_%d" % atlas_size] = _max_normal_upload_ms_by_size.get(atlas_size, 0.0)
+		summary["max_texture_layers_%d" % atlas_size] = _max_texture_layers_by_size.get(atlas_size, 0)
+		summary["max_texture_slabs_%d" % atlas_size] = _max_texture_slabs_by_size.get(atlas_size, 0)
+	var path := "%s/impostor_stress_%s.json" % [dir, _summary_stamp]
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(summary, "\t"))
+		f.close()
+	Log.info("impostors", "[AUTO] summary=%s json=%s" % [JSON.stringify(summary), path])
 
 
 func _process_camera(delta: float) -> void:
@@ -292,7 +417,10 @@ func _toggle_normal_debug() -> void:
 		return
 	var current_value: Variant = material.get_shader_parameter("debug_normals")
 	var current: bool = current_value == true
-	material.set_shader_parameter("debug_normals", not current)
+	if _renderer.has_method("set_normal_debug_for_test"):
+		_renderer.set_normal_debug_for_test(not current)
+	else:
+		material.set_shader_parameter("debug_normals", not current)
 
 
 func _get_renderer_stats() -> Dictionary:
@@ -323,8 +451,14 @@ func _update_hud() -> void:
 	var dirty_pages := int(stats.get("far_dirty_page_count", 0))
 	var pages_rebuilt := int(stats.get("far_pages_rebuilt", 0))
 	var texture_layers := int(stats.get("texture_array_layers", 0))
+	var texture_layers_512 := int(stats.get("far_texture_layers_512", 0))
+	var texture_layers_1024 := int(stats.get("far_texture_layers_1024", 0))
 	var texture_upload_ms := float(stats.get("far_texture_upload_us", 0)) / 1000.0
 	var normal_upload_ms := float(stats.get("far_normal_upload_us", 0)) / 1000.0
+	var texture_upload_512_ms := float(stats.get("far_texture_upload_us_512", 0)) / 1000.0
+	var texture_upload_1024_ms := float(stats.get("far_texture_upload_us_1024", 0)) / 1000.0
+	var normal_upload_512_ms := float(stats.get("far_normal_upload_us_512", 0)) / 1000.0
+	var normal_upload_1024_ms := float(stats.get("far_normal_upload_us_1024", 0)) / 1000.0
 	var pack_ms := float(stats.get("far_multimesh_pack_us", 0)) / 1000.0
 	var upload_ms := float(stats.get("far_multimesh_upload_us", 0)) / 1000.0
 	var scan_ms := float(stats.get("far_cell_scan_us", 0)) / 1000.0
@@ -344,8 +478,10 @@ Visibility: %s (%s)  |  Page bounds: %s
 [b]Impostor Renderer[/b]
   Loaded cells: %d  |  Pending cells: %d  |  Cell scan: %.2fms (%d cells this frame)
   Total impostors: %d  |  Uploaded slots: %d  |  Ready created/frame: %d
-  Texture layers: %d/256  |  Pending textures: %d  |  Pending impostor hashes: %d
-  Texture upload: %.2fms  |  Normal upload: %.2fms
+  Texture layers: %d total  |  512: %d/256  |  1024: %d/256
+  Pending textures: %d  |  Pending impostor hashes: %d
+  Upload last: %.2fms texture / %.2fms normal
+  Upload buckets: 512 %.2f/%.2fms  |  1024 %.2f/%.2fms
 
 [b]Paged MultiMesh[/b]
   Pages: %d  |  Visible page nodes: %d  |  Dirty pages: %d  |  Rebuilt/frame: %d
@@ -364,8 +500,10 @@ Visibility: %s (%s)  |  Page bounds: %s
 		fps, frame_ms, draws, objects, primitives / 1000,
 		loaded_cells, pending_cells, scan_ms, cells_processed,
 		total_impostors, uploaded, ready_created,
-		texture_layers, pending_textures, pending_impostors,
+		texture_layers, texture_layers_512, texture_layers_1024,
+		pending_textures, pending_impostors,
 		texture_upload_ms, normal_upload_ms,
+		texture_upload_512_ms, normal_upload_512_ms, texture_upload_1024_ms, normal_upload_1024_ms,
 		page_count, visible_pages, dirty_pages, pages_rebuilt,
 		pack_ms, upload_ms,
 		_fly_speed,

@@ -25,10 +25,11 @@ const CS := preload("res://src/core/coordinate_system.gd")
 
 #region Configuration
 
-## Maximum texture array layers. 256 layers × 256×256 RGBA8 = ~64 MB VRAM (albedo + normals).
-## Previous: 512 layers × 512×512 = ~1 GB VRAM, triggered c0000005 in Vulkan on RTX 4060 Laptop.
-const TEXTURE_ARRAY_DIMENSION: int = 1024
+const DEFAULT_ATLAS_SIZE: int = 512
+const SUPPORTED_ATLAS_SIZES: Array[int] = [512, 1024]
 const MAX_TEXTURE_ARRAY_LAYERS: int = 256
+const TEXTURE_ARRAY_SLAB_LAYERS: int = 4
+const HERO_ATLAS_CAPTURE_SIZE_M: float = 48.0
 
 ## Texture array rebuild delay (batch multiple additions)
 const TEXTURE_ARRAY_REBUILD_DELAY: float = 0.1
@@ -43,11 +44,11 @@ const JOB_RESULT_POLL_BUDGET_USEC: int = 1500
 ## Let the first visible batch appear quickly, then throttle progressive global
 ## commits until the queue drains.
 const STARTUP_TEXTURE_REBUILD_INTERVAL: float = 0.25
-const READY_IMPOSTOR_CREATE_MAX_PER_FRAME: int = 256
-const READY_IMPOSTOR_CREATE_BUDGET_USEC: int = 1500
+const READY_IMPOSTOR_CREATE_MAX_PER_FRAME: int = 64
+const READY_IMPOSTOR_CREATE_BUDGET_USEC: int = 1000
 const IMPOSTOR_PAGE_SIZE_CELLS: int = 4
-const IMPOSTOR_PAGE_REBUILD_MAX_PER_FRAME: int = 12
-const IMPOSTOR_PAGE_REBUILD_BUDGET_USEC: int = 1500
+const IMPOSTOR_PAGE_REBUILD_MAX_PER_FRAME: int = 6
+const IMPOSTOR_PAGE_REBUILD_BUDGET_USEC: int = 1000
 const IMPOSTOR_PAGE_AABB_MARGIN: float = 64.0
 
 #endregion
@@ -73,31 +74,22 @@ var impostor_candidates: ImpostorCandidatesScript = null
 ## Godot can frustum/distance-cull bounded MultiMesh batches.
 var _quad_mesh: QuadMesh = null
 var _page_container: Node3D = null
-var _impostor_pages: Dictionary[Vector2i, ImpostorPage] = {}
-var _dirty_page_keys: Array[Vector2i] = []
-var _dirty_page_set: Dictionary[Vector2i, bool] = {}
+var _impostor_pages: Dictionary[String, ImpostorPage] = {}
+var _dirty_page_keys: Array[String] = []
+var _dirty_page_set: Dictionary[String, bool] = {}
 var _visibility_begin_distance: float = DU.MID_END
 var _visibility_fade_margin: float = DU.FADE_MARGIN_RENDER_FAR
 
 ## Billboard shader material with texture array
+var _billboard_shader: Shader = null
 var _billboard_material: ShaderMaterial = null
+var _billboard_materials: Dictionary[String, ShaderMaterial] = {}
 
-## Texture array for batched rendering (albedo)
-var _texture_array: Texture2DArray = null
-var _texture_index_map: Dictionary[String, int] = {}  # texture_hash -> array_index
-var _texture_array_dirty: bool = false
-var _all_array_images: Array[Image] = []
-var _texture_array_size: int = 0
-var _committed_texture_array_layers: int = 0
+## Texture arrays for batched rendering, split by v6 atlas size.
+var _texture_buckets: Dictionary[String, TextureBucket] = {}
+var _hash_to_atlas_size: Dictionary[String, int] = {}
+var _hash_to_bucket_key: Dictionary[String, String] = {}
 var _last_texture_add_time: float = 0.0
-
-## Normal texture array (parallel to albedo array, same layer indices)
-var _normal_texture_array: Texture2DArray = null
-var _normal_index_map: Dictionary[String, int] = {}  # texture_hash -> normal array_index
-var _all_normal_images: Array[Image] = []
-var _normal_array_size: int = 0
-var _normal_array_dirty: bool = false
-var _committed_normal_array_layers: int = 0
 
 ## Phase 6 (2026-04-17) — async texture-array rebuild.
 ##
@@ -112,11 +104,11 @@ var _committed_normal_array_layers: int = 0
 ## for one frame after the swap to avoid a GPU-side use-after-free on
 ## drivers that batch texture binds across command buffers.
 var _rebuild_task_id: int = -1                       ## -1 = idle
+var _rebuild_bucket_key: String = ""
 var _rebuild_pending_albedo: Array[Image] = []       ## worker output
 var _rebuild_pending_normals: Array[Image] = []      ## worker output
-var _old_texture_array: Texture2DArray = null        ## one-frame double-buffer
-var _old_normal_array: Texture2DArray = null
 var _texture_array_committed_this_frame: bool = false
+var _next_rebuild_bucket_index: int = 0
 
 ## Reference count for textures: hash_key -> count of impostors using it
 var _texture_ref_counts: Dictionary[String, int] = {}
@@ -125,8 +117,9 @@ var _texture_ref_counts: Dictionary[String, int] = {}
 ## Enables O(k) lookup instead of O(total_impostors) when a normal texture loads
 var _hash_to_impostor_ids: Dictionary[String, Array] = {}  # Array[int]
 
-## Loaded impostor textures: hash_key -> Texture2D
-var _impostor_textures: Dictionary[String, Texture2D] = {}
+## Loaded impostor albedo marker. The renderable GPU copy lives only in the
+## Texture2DArray; do not create per-texture ImageTexture resources here.
+var _impostor_textures: Dictionary[String, bool] = {}
 
 ## Loaded normal textures: hash_key -> Image (stored as Image, added to array)
 var _impostor_normal_images: Dictionary[String, Image] = {}
@@ -197,6 +190,10 @@ var _stats: Dictionary = {
 	"far_ready_created": 0,
 	"far_texture_upload_us": 0,
 	"far_normal_upload_us": 0,
+	"far_texture_upload_us_512": 0,
+	"far_normal_upload_us_512": 0,
+	"far_texture_upload_us_1024": 0,
+	"far_normal_upload_us_1024": 0,
 	"far_multimesh_pack_us": 0,
 	"far_multimesh_upload_us": 0,
 	"far_uploaded_instances": 0,
@@ -245,6 +242,7 @@ var _hlod_covered_ref_nums: Dictionary = {}
 class PendingImpostor:
 	var model_path: String
 	var cell_grid: Vector2i  # Cell this belongs to
+	var atlas_size: int = 512
 	var ref_id: String = ""
 	var ref_num: int = 0
 	var position: Vector3
@@ -258,7 +256,10 @@ class PendingImpostor:
 class ImpostorData:
 	var id: int
 	var cell_grid: Vector2i # Cell this belongs to
-	var page_key: Vector2i
+	var page_key: String
+	var bucket_key: String
+	var atlas_size: int = 512
+	var slab_index: int = 0
 	var ref_id: String = ""
 	var ref_num: int = 0
 	var model_path: String
@@ -278,12 +279,35 @@ class ImpostorData:
 
 
 class ImpostorPage:
-	var key: Vector2i
+	var key: String
+	var spatial_key: Vector2i
+	var bucket_key: String
+	var atlas_size: int = 512
+	var slab_index: int = 0
 	var center: Vector3
 	var multimesh: MultiMesh
 	var instance: MultiMeshInstance3D
 	var impostor_ids: Array[int] = []
 	var visibility_begin_distance: float = 0.0
+
+
+class TextureBucket:
+	var key: String
+	var atlas_size: int = 512
+	var slab_index: int = 0
+	var material: ShaderMaterial = null
+	var texture_array: Texture2DArray = null
+	var normal_texture_array: Texture2DArray = null
+	var old_texture_array: Texture2DArray = null
+	var old_normal_texture_array: Texture2DArray = null
+	var texture_index_map: Dictionary[String, int] = {}
+	var normal_index_map: Dictionary[String, int] = {}
+	var all_array_images: Array[Image] = []
+	var all_normal_images: Array[Image] = []
+	var texture_array_dirty: bool = false
+	var normal_array_dirty: bool = false
+	var committed_texture_array_layers: int = 0
+	var committed_normal_array_layers: int = 0
 
 #endregion
 
@@ -309,9 +333,7 @@ func set_force_visible_for_test(enabled: bool) -> void:
 		_visibility_begin_distance = 0.0
 		_visibility_fade_margin = 0.0
 		_apply_visibility_ranges_to_pages()
-		if _billboard_material:
-			_billboard_material.set_shader_parameter("fade_distance", 0.0)
-			_billboard_material.set_shader_parameter("fade_margin", 0.0)
+		_apply_material_visibility_params(0.0, 0.0)
 	else:
 		set_visibility_range_begin(DU.MID_END, DU.FADE_MARGIN_RENDER_FAR)
 
@@ -360,14 +382,14 @@ func release_runtime_resources() -> void:
 	if _rebuild_task_id != -1:
 		WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
 		_rebuild_task_id = -1
+		_rebuild_bucket_key = ""
 		_rebuild_pending_albedo = []
 		_rebuild_pending_normals = []
 	clear()
-	_texture_array = null
-	_normal_texture_array = null
-	_old_texture_array = null
-	_old_normal_array = null
-	_assign_default_texture_arrays(4)
+	_texture_buckets.clear()
+	_billboard_materials.clear()
+	_billboard_material = null
+	_get_or_create_bucket(DEFAULT_ATLAS_SIZE, 0)
 
 
 func _detach_render_resources() -> void:
@@ -384,19 +406,17 @@ func _detach_render_resources() -> void:
 	if _billboard_material:
 		_billboard_material.shader = null
 	_billboard_material = null
-	_texture_array = null
-	_normal_texture_array = null
-	_old_texture_array = null
-	_old_normal_array = null
+	_billboard_materials.clear()
+	_texture_buckets.clear()
 
 
 func _ensure_runtime_resources() -> void:
 	if _page_container == null:
 		_setup_paged_multimeshes()
-	if _billboard_material == null or _quad_mesh == null:
+	if _billboard_shader == null or _quad_mesh == null:
 		_setup_billboard_material()
 	else:
-		_assign_default_texture_arrays()
+		_get_or_create_bucket(DEFAULT_ATLAS_SIZE, 0)
 		if _quad_mesh:
 			_quad_mesh.surface_set_material(0, _billboard_material)
 	_start_job_system()
@@ -411,50 +431,127 @@ func _setup_paged_multimeshes() -> void:
 	add_child(_page_container)
 
 
+func _normalize_atlas_size(atlas_size: int) -> int:
+	if atlas_size >= 1024:
+		return 1024
+	return DEFAULT_ATLAS_SIZE
+
+
+func _is_supported_atlas_size(atlas_size: int) -> bool:
+	return atlas_size in SUPPORTED_ATLAS_SIZES
+
+
+func _resolve_runtime_atlas_size(metadata: Dictionary) -> int:
+	var bounds: Dictionary = metadata.get("bounds", {})
+	var capture_size := float(bounds.get("capture_size", 0.0))
+	if capture_size <= 0.0:
+		capture_size = maxf(
+			maxf(float(bounds.get("width", 0.0)), float(bounds.get("height", 0.0))),
+			float(bounds.get("depth", 0.0))
+		)
+	if capture_size >= HERO_ATLAS_CAPTURE_SIZE_M:
+		return 1024
+	return DEFAULT_ATLAS_SIZE
+
+
 func _setup_billboard_material() -> void:
 	var shader := Shader.new()
 	shader.code = _get_octahedral_shader_code()
+	_billboard_shader = shader
 
 	# Check if shader compiled successfully
 	# Note: Godot doesn't expose direct "is_valid" for shaders, but errors print to console
 	Log.debug("impostors", "Shader code length: %d chars" % shader.code.length())
 
-	_billboard_material = ShaderMaterial.new()
-	_billboard_material.shader = shader
-
-	_assign_default_texture_arrays()
-
-	# Keep shader fade and engine visibility in lockstep. NativeStreamingManager
-	# clamps this to MID_END for the current fallback policy.
-	_billboard_material.set_shader_parameter("fade_distance", DU.MID_END)
-	_billboard_material.set_shader_parameter("fade_margin", DU.FADE_MARGIN_LOD3_FAR)
-	_billboard_material.set_shader_parameter("debug_mode", false)
+	_get_or_create_bucket(DEFAULT_ATLAS_SIZE, 0)
 
 	if _quad_mesh:
 		_quad_mesh.surface_set_material(0, _billboard_material)
 		Log.debug("impostors", "Set material on shared impostor quad")
 
 
-func _assign_default_texture_arrays(dimension: int = TEXTURE_ARRAY_DIMENSION) -> void:
-	if _billboard_material == null:
+func _bucket_key(atlas_size: int, slab_index: int) -> String:
+	atlas_size = _normalize_atlas_size(atlas_size)
+	return "%d:%d" % [atlas_size, maxi(0, slab_index)]
+
+
+func _get_bucket_for_hash(hash_key: String) -> TextureBucket:
+	var bucket_key: String = _hash_to_bucket_key.get(hash_key, "")
+	if bucket_key.is_empty() or bucket_key not in _texture_buckets:
+		return null
+	return _texture_buckets[bucket_key]
+
+
+func _get_or_create_bucket(atlas_size: int, slab_index: int = 0) -> TextureBucket:
+	atlas_size = _normalize_atlas_size(atlas_size)
+	slab_index = maxi(0, slab_index)
+	var key := _bucket_key(atlas_size, slab_index)
+	if key in _texture_buckets:
+		return _texture_buckets[key]
+
+	var bucket := TextureBucket.new()
+	bucket.key = key
+	bucket.atlas_size = atlas_size
+	bucket.slab_index = slab_index
+	bucket.material = ShaderMaterial.new()
+	bucket.material.shader = _billboard_shader
+	bucket.material.set_shader_parameter("fade_distance", _visibility_begin_distance)
+	bucket.material.set_shader_parameter("fade_margin", _visibility_fade_margin)
+	bucket.material.set_shader_parameter("debug_mode", false)
+	_assign_default_texture_arrays(bucket)
+
+	_texture_buckets[key] = bucket
+	_billboard_materials[key] = bucket.material
+	if key == _bucket_key(DEFAULT_ATLAS_SIZE, 0) or _billboard_material == null:
+		_billboard_material = bucket.material
+	return bucket
+
+
+func _get_write_bucket(atlas_size: int) -> TextureBucket:
+	atlas_size = _normalize_atlas_size(atlas_size)
+	var slab_index := 0
+	while slab_index * TEXTURE_ARRAY_SLAB_LAYERS < MAX_TEXTURE_ARRAY_LAYERS:
+		var key := _bucket_key(atlas_size, slab_index)
+		if key in _texture_buckets:
+			var bucket: TextureBucket = _texture_buckets[key]
+			if maxi(bucket.all_array_images.size(), bucket.all_normal_images.size()) < TEXTURE_ARRAY_SLAB_LAYERS:
+				return bucket
+		else:
+			return _get_or_create_bucket(atlas_size, slab_index)
+		slab_index += 1
+	return null
+
+
+func _get_or_assign_bucket_for_hash(hash_key: String, atlas_size: int) -> TextureBucket:
+	var bucket := _get_bucket_for_hash(hash_key)
+	if bucket != null:
+		return bucket
+	bucket = _get_write_bucket(atlas_size)
+	if bucket != null:
+		_hash_to_bucket_key[hash_key] = bucket.key
+	return bucket
+
+
+func _assign_default_texture_arrays(bucket: TextureBucket) -> void:
+	if bucket == null or bucket.material == null:
 		return
 
-	var default_img := Image.create(dimension, dimension, false, Image.FORMAT_RGBA8)
+	var default_img := Image.create(bucket.atlas_size, bucket.atlas_size, false, Image.FORMAT_RGBA8)
 	default_img.fill(Color(0, 0, 0, 0))
 	var default_array := Texture2DArray.new()
 	default_array.create_from_images([default_img])
-	_texture_array = default_array
-	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
+	bucket.texture_array = default_array
+	bucket.material.set_shader_parameter("texture_atlas", bucket.texture_array)
 
 	# Normal atlas: default to up-facing normal (0.5, 1.0, 0.5), zero depth
-	var default_normal_img := Image.create(dimension, dimension, false, Image.FORMAT_RGBA8)
+	var default_normal_img := Image.create(bucket.atlas_size, bucket.atlas_size, false, Image.FORMAT_RGBA8)
 	default_normal_img.fill(Color(0.5, 1.0, 0.5, 0.0))
 	var default_normal_array := Texture2DArray.new()
 	default_normal_array.create_from_images([default_normal_img])
-	_normal_texture_array = default_normal_array
-	_billboard_material.set_shader_parameter("normal_atlas", _normal_texture_array)
-	_committed_texture_array_layers = 0
-	_committed_normal_array_layers = 0
+	bucket.normal_texture_array = default_normal_array
+	bucket.material.set_shader_parameter("normal_atlas", bucket.normal_texture_array)
+	bucket.committed_texture_array_layers = 0
+	bucket.committed_normal_array_layers = 0
 
 
 ## Toggle debug mode for impostor shader (shows bright magenta at any distance)
@@ -467,7 +564,8 @@ func set_shader_debug_mode(enabled: bool) -> void:
 	if _billboard_material and _billboard_material.shader:
 		var shader_code: String = _billboard_material.shader.code
 		if "debug_mode" in shader_code:
-			_billboard_material.set_shader_parameter("debug_mode", enabled)
+			for material: ShaderMaterial in _billboard_materials.values():
+				material.set_shader_parameter("debug_mode", enabled)
 	else:
 		Log.error("impostors", "_billboard_material or shader is null!")
 
@@ -479,6 +577,11 @@ func set_shader_debug_mode(enabled: bool) -> void:
 		_apply_visibility_ranges_to_pages()
 
 	Log.info("impostors", "Shader debug mode: %s" % ("ON - magenta squares at ANY distance" if enabled else "OFF - normal rendering (FAR tier)"))
+
+
+func set_normal_debug_for_test(enabled: bool) -> void:
+	for material: ShaderMaterial in _billboard_materials.values():
+		material.set_shader_parameter("debug_normals", enabled)
 
 
 ## Adjust impostor visibility_range_begin to match the active tier layout.
@@ -837,25 +940,30 @@ func _load_normal_image(normal_path: String, is_res: bool) -> Image:
 
 ## Called when a normal texture finishes loading
 func _on_normal_loaded(hash_key: String, image: Image) -> void:
+	var atlas_size: int = _hash_to_atlas_size.get(hash_key, DEFAULT_ATLAS_SIZE)
+	var bucket := _get_or_assign_bucket_for_hash(hash_key, atlas_size)
+	if bucket == null:
+		_drop_pending_impostor_hash(hash_key)
+		return
 	# Resize to standard size (256×256 matches albedo array resolution)
 	var img_copy := image.duplicate() as Image
-	if img_copy.get_size() != Vector2i(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION):
-		img_copy.resize(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, Image.INTERPOLATE_LANCZOS)
+	if img_copy.get_size() != Vector2i(bucket.atlas_size, bucket.atlas_size):
+		img_copy.resize(bucket.atlas_size, bucket.atlas_size, Image.INTERPOLATE_LANCZOS)
 
 	_impostor_normal_images[hash_key] = img_copy
 
 	# Add to normal texture array
-	var normal_index := _add_to_normal_array(hash_key, img_copy)
+	var normal_index := _add_to_normal_array(hash_key, img_copy, bucket)
 
 	# Update existing impostors that use this hash via reverse index
 	if hash_key in _hash_to_impostor_ids:
-		var dirty_pages: Dictionary[Vector2i, bool] = {}
+		var dirty_pages: Dictionary[String, bool] = {}
 		for id: int in _hash_to_impostor_ids[hash_key]:
 			var imp: ImpostorData = _impostors.get(id)
 			if imp:
 				imp.normal_texture_index = normal_index
 				dirty_pages[imp.page_key] = true
-		for page_key: Vector2i in dirty_pages.keys():
+		for page_key: String in dirty_pages.keys():
 			_mark_page_dirty(page_key)
 	if debug_enabled:
 		_debug("Normal texture loaded for hash %s, index %d" % [hash_key, normal_index])
@@ -865,15 +973,16 @@ func _on_normal_loaded(hash_key: String, image: Image) -> void:
 
 
 ## Add image to normal texture array
-func _add_to_normal_array(hash_key: String, image: Image) -> int:
-	if hash_key in _normal_index_map:
-		return _normal_index_map[hash_key]
+func _add_to_normal_array(hash_key: String, image: Image, bucket: TextureBucket) -> int:
+	if bucket == null:
+		return -1
+	if hash_key in bucket.normal_index_map:
+		return bucket.normal_index_map[hash_key]
 
-	var index := _normal_array_size
-	_normal_index_map[hash_key] = index
-	_normal_array_size += 1
-	_all_normal_images.append(image)
-	_normal_array_dirty = true
+	var index := bucket.all_normal_images.size()
+	bucket.normal_index_map[hash_key] = index
+	bucket.all_normal_images.append(image)
+	bucket.normal_array_dirty = true
 	_last_texture_add_time = Time.get_ticks_msec() / 1000.0
 	return index
 
@@ -914,16 +1023,17 @@ func _process(delta: float) -> void:
 	if current_time - _last_compaction_time >= COMPACTION_INTERVAL:
 		_last_compaction_time = current_time
 		# Check if we're above the compaction threshold
-		if _texture_array_size > MAX_TEXTURE_ARRAY_LAYERS * COMPACTION_THRESHOLD:
-			var before := _texture_array_size
+		var total_before := _get_total_texture_layers()
+		if total_before > MAX_TEXTURE_ARRAY_LAYERS * COMPACTION_THRESHOLD:
 			_compact_texture_array()
-			if _texture_array_size < before:
+			var total_after := _get_total_texture_layers()
+			if total_after < total_before:
 				if debug_enabled:
 					_debug("Periodic compaction freed %d texture slots (%d -> %d)" % [
-						before - _texture_array_size, before, _texture_array_size])
+						total_before - total_after, total_before, total_after])
 
 	# Rebuild texture arrays if needed (batched to avoid rebuilding every frame)
-	if _texture_array_dirty or _normal_array_dirty:
+	if _any_bucket_dirty():
 		var time_since_add := current_time - _last_texture_add_time
 		var time_since_rebuild := current_time - _last_texture_array_rebuild_time
 		var pending_cells_done := _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume
@@ -936,11 +1046,7 @@ func _process(delta: float) -> void:
 			_rebuild_texture_array()
 			_last_texture_array_rebuild_time = current_time
 
-	var texture_publish_ready := (
-		_committed_texture_array_layers > 0
-		and _committed_normal_array_layers > 0
-		and _billboard_material != null
-	)
+	var texture_publish_ready := _any_bucket_ready()
 	if texture_publish_ready:
 		if _texture_array_committed_this_frame:
 			_stats["far_rebuild_deferred_pending"] = int(_stats.get("far_rebuild_deferred_pending", 0)) + 1
@@ -955,7 +1061,7 @@ func _process(delta: float) -> void:
 		_benchmark_timer = 0.0
 		var pending_count: int = maxi(0, _pending_impostor_cells.size() - _pending_cell_index)
 		Log.info("impostors", "Benchmark: %d impostors, %d tex layers, %d pending cells, mm_instances=%d" % [
-			_impostors.size(), _texture_array_size, pending_count,
+			_impostors.size(), _get_total_texture_layers(), pending_count,
 			_get_uploaded_instance_count()])
 
 
@@ -1101,11 +1207,51 @@ func _queue_ready_texture_hash(hash_key: String) -> void:
 
 
 func _drop_pending_impostor_hash(hash_key: String) -> void:
+	var bucket_key: String = _hash_to_bucket_key.get(hash_key, "")
 	_pending_impostors.erase(hash_key)
 	_ready_texture_hashes.erase(hash_key)
 	_ready_texture_hash_set.erase(hash_key)
 	_impostor_textures.erase(hash_key)
 	_impostor_normal_images.erase(hash_key)
+	_hash_to_atlas_size.erase(hash_key)
+	_hash_to_bucket_key.erase(hash_key)
+	if not bucket_key.is_empty():
+		_compact_texture_array(bucket_key)
+
+
+func _get_total_texture_layers() -> int:
+	var total := 0
+	for bucket: TextureBucket in _texture_buckets.values():
+		total += bucket.all_array_images.size()
+	return total
+
+
+func _any_bucket_dirty() -> bool:
+	for bucket: TextureBucket in _texture_buckets.values():
+		if bucket.texture_array_dirty or bucket.normal_array_dirty:
+			return true
+	return false
+
+
+func _any_bucket_ready() -> bool:
+	for bucket: TextureBucket in _texture_buckets.values():
+		if bucket.committed_texture_array_layers > 0:
+			return true
+	return false
+
+
+func _get_dirty_rebuild_bucket() -> TextureBucket:
+	var dirty_buckets: Array[TextureBucket] = []
+	var pending_cells_done := _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume
+	for bucket: TextureBucket in _texture_buckets.values():
+		if bucket.texture_array_dirty or (pending_cells_done and bucket.normal_array_dirty):
+			dirty_buckets.append(bucket)
+	if dirty_buckets.is_empty():
+		return null
+	_next_rebuild_bucket_index = _next_rebuild_bucket_index % dirty_buckets.size()
+	var selected := dirty_buckets[_next_rebuild_bucket_index]
+	_next_rebuild_bucket_index = (_next_rebuild_bucket_index + 1) % dirty_buckets.size()
+	return selected
 
 
 func _process_ready_impostor_creates() -> void:
@@ -1129,12 +1275,17 @@ func _process_ready_impostor_creates() -> void:
 
 		var pending_list: Array = _pending_impostors[hash_key]
 		var pending: PendingImpostor = pending_list.pop_back()
+		var bucket := _get_bucket_for_hash(hash_key)
+		if bucket == null:
+			_drop_pending_impostor_hash(hash_key)
+			continue
 		var imp_id := _create_impostor(
 			pending.model_path,
 			pending.cell_grid,
 			pending.ref_id,
 			pending.ref_num,
 			hash_key,
+			bucket,
 			pending.position,
 			pending.rotation,
 			pending.scale,
@@ -1142,7 +1293,7 @@ func _process_ready_impostor_creates() -> void:
 			pending.aabb_center
 		)
 		if imp_id >= 0 and imp_id in _impostors:
-			var normal_idx: int = _normal_index_map.get(hash_key, -1)
+			var normal_idx: int = bucket.normal_index_map.get(hash_key, -1)
 			if normal_idx >= 0:
 				_impostors[imp_id].normal_texture_index = normal_idx
 			(_impostors[imp_id] as ImpostorData).variant_flag = pending.variant_flag
@@ -1158,24 +1309,31 @@ func _process_ready_impostor_creates() -> void:
 	_stats["far_ready_created"] = created
 
 
-func _page_key_for_cell(cell_grid: Vector2i) -> Vector2i:
+func _spatial_page_key_for_cell(cell_grid: Vector2i) -> Vector2i:
 	return Vector2i(
 		floori(float(cell_grid.x) / float(IMPOSTOR_PAGE_SIZE_CELLS)),
 		floori(float(cell_grid.y) / float(IMPOSTOR_PAGE_SIZE_CELLS))
 	)
 
 
-func _page_center_for_key(page_key: Vector2i) -> Vector3:
-	var origin_x := page_key.x * IMPOSTOR_PAGE_SIZE_CELLS
-	var origin_y := page_key.y * IMPOSTOR_PAGE_SIZE_CELLS
+func _page_key_for_cell(cell_grid: Vector2i, bucket: TextureBucket) -> String:
+	var spatial_key := _spatial_page_key_for_cell(cell_grid)
+	return "%d,%d,%s" % [spatial_key.x, spatial_key.y, bucket.key]
+
+
+func _page_center_for_key(spatial_key: Vector2i) -> Vector3:
+	var origin_x := spatial_key.x * IMPOSTOR_PAGE_SIZE_CELLS
+	var origin_y := spatial_key.y * IMPOSTOR_PAGE_SIZE_CELLS
 	var center_x := (float(origin_x) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
 	var center_z := -(float(origin_y) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
 	return Vector3(center_x, 0.0, center_z)
 
 
-func _get_or_create_page(page_key: Vector2i) -> ImpostorPage:
+func _get_or_create_page(page_key: String, spatial_key: Vector2i, bucket: TextureBucket) -> ImpostorPage:
 	if page_key in _impostor_pages:
 		return _impostor_pages[page_key]
+	if bucket == null:
+		return null
 
 	if _page_container == null:
 		_page_container = Node3D.new()
@@ -1184,17 +1342,22 @@ func _get_or_create_page(page_key: Vector2i) -> ImpostorPage:
 
 	var page := ImpostorPage.new()
 	page.key = page_key
-	page.center = _page_center_for_key(page_key)
+	page.spatial_key = spatial_key
+	page.bucket_key = bucket.key
+	page.atlas_size = bucket.atlas_size
+	page.slab_index = bucket.slab_index
+	page.center = _page_center_for_key(spatial_key)
 	page.multimesh = MultiMesh.new()
 	page.multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	page.multimesh.use_custom_data = true
 	page.multimesh.mesh = _quad_mesh
 
 	page.instance = MultiMeshInstance3D.new()
-	page.instance.name = "ImpostorPage_%d_%d" % [page_key.x, page_key.y]
+	page.instance.name = "ImpostorPage_%d_%d_%d_%d" % [spatial_key.x, spatial_key.y, page.atlas_size, page.slab_index]
 	page.instance.position = page.center
 	page.instance.multimesh = page.multimesh
-	page.instance.material_override = _billboard_material
+	page.instance.material_override = bucket.material
+	page.instance.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	page.instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	page.visibility_begin_distance = _page_visibility_begin_distance(page)
 	_configure_page_visibility(page.instance, page.visibility_begin_distance)
@@ -1219,9 +1382,13 @@ func _apply_visibility_ranges_to_pages() -> void:
 	for page: ImpostorPage in _impostor_pages.values():
 		page.visibility_begin_distance = _page_visibility_begin_distance(page)
 		_configure_page_visibility(page.instance, page.visibility_begin_distance)
-	if _billboard_material:
-		_billboard_material.set_shader_parameter("fade_distance", _visibility_begin_distance)
-		_billboard_material.set_shader_parameter("fade_margin", _visibility_fade_margin)
+	_apply_material_visibility_params(_visibility_begin_distance, _visibility_fade_margin)
+
+
+func _apply_material_visibility_params(begin_distance: float, fade_margin: float) -> void:
+	for material: ShaderMaterial in _billboard_materials.values():
+		material.set_shader_parameter("fade_distance", begin_distance)
+		material.set_shader_parameter("fade_margin", fade_margin)
 
 
 func _page_visibility_begin_distance(page: ImpostorPage) -> float:
@@ -1234,7 +1401,7 @@ func _page_visibility_begin_distance(page: ImpostorPage) -> float:
 	return DU.HLOD_END
 
 
-func _mark_page_dirty(page_key: Vector2i) -> void:
+func _mark_page_dirty(page_key: String) -> void:
 	if _dirty_page_set.has(page_key):
 		return
 	_dirty_page_keys.append(page_key)
@@ -1243,11 +1410,11 @@ func _mark_page_dirty(page_key: Vector2i) -> void:
 
 
 func _mark_all_pages_dirty() -> void:
-	for page_key: Vector2i in _impostor_pages.keys():
+	for page_key: String in _impostor_pages.keys():
 		_mark_page_dirty(page_key)
 
 
-func _free_page(page_key: Vector2i) -> void:
+func _free_page(page_key: String) -> void:
 	if page_key not in _impostor_pages:
 		return
 	var page: ImpostorPage = _impostor_pages[page_key]
@@ -1270,7 +1437,7 @@ func _free_page(page_key: Vector2i) -> void:
 
 func _clear_pages(free_nodes: bool = true) -> void:
 	var keys: Array = _impostor_pages.keys()
-	for page_key: Vector2i in keys:
+	for page_key: String in keys:
 		if free_nodes:
 			_free_page(page_key)
 		else:
@@ -1319,7 +1486,7 @@ func _process_dirty_page_rebuilds() -> void:
 	while not _dirty_page_keys.is_empty() and processed < IMPOSTOR_PAGE_REBUILD_MAX_PER_FRAME:
 		if processed > 0 and Time.get_ticks_usec() - start_usec >= IMPOSTOR_PAGE_REBUILD_BUDGET_USEC:
 			break
-		var page_key: Vector2i = _dirty_page_keys.pop_back()
+		var page_key: String = _dirty_page_keys.pop_back()
 		_dirty_page_set.erase(page_key)
 		processed += 1
 		var result: Dictionary = _rebuild_page(page_key)
@@ -1442,6 +1609,11 @@ func add_impostor(
 
 	var projection: String = str(metadata.get("projection", "hemi"))
 	variant_flag = 2.0 if projection == "sphere" else 1.0
+	var atlas_size := _resolve_runtime_atlas_size(metadata)
+	if not _is_supported_atlas_size(atlas_size):
+		_stats["skipped_no_texture"] += 1
+		return -1
+	_hash_to_atlas_size[hash_key] = atlas_size
 
 	# Create pending impostor data FIRST (before texture load which may be
 	# sync). Publication is always frame-budgeted, even when the texture is
@@ -1450,6 +1622,7 @@ func add_impostor(
 	var pending := PendingImpostor.new()
 	pending.model_path = model_path
 	pending.cell_grid = cell_grid
+	pending.atlas_size = atlas_size
 	pending.ref_id = ref_id
 	pending.ref_num = ref_num
 	pending.position = world_position
@@ -1463,7 +1636,8 @@ func add_impostor(
 		if hash_key not in _pending_impostors:
 			_pending_impostors[hash_key] = []
 		(_pending_impostors[hash_key] as Array).append(pending)
-		if hash_key in _normal_index_map:
+		var cached_bucket := _get_or_assign_bucket_for_hash(hash_key, atlas_size)
+		if cached_bucket != null and hash_key in cached_bucket.normal_index_map:
 			_queue_ready_texture_hash(hash_key)
 		return -1
 
@@ -1531,17 +1705,14 @@ func clear() -> void:
 	_hash_to_impostor_ids.clear()
 	_loaded_impostor_cells.clear()
 	_file_exists_cache.clear()
+	_impostor_textures.clear()
 	_impostor_normal_images.clear()
-	_texture_index_map.clear()
-	_normal_index_map.clear()
-	_all_array_images.clear()
-	_all_normal_images.clear()
-	_texture_array_size = 0
-	_normal_array_size = 0
-	_committed_texture_array_layers = 0
-	_committed_normal_array_layers = 0
-	_texture_array_dirty = false
-	_normal_array_dirty = false
+	_hash_to_atlas_size.clear()
+	_hash_to_bucket_key.clear()
+	_texture_buckets.clear()
+	_billboard_materials.clear()
+	if _billboard_shader != null:
+		_get_or_create_bucket(DEFAULT_ATLAS_SIZE, 0)
 	_ref_id_to_model.clear()
 	_pending_impostor_cells.clear()
 	_pending_impostor_cell_set.clear()
@@ -1576,6 +1747,10 @@ func _reset_runtime_stats() -> void:
 		"far_ready_created",
 		"far_texture_upload_us",
 		"far_normal_upload_us",
+		"far_texture_upload_us_512",
+		"far_normal_upload_us_512",
+		"far_texture_upload_us_1024",
+		"far_normal_upload_us_1024",
 		"far_multimesh_pack_us",
 		"far_multimesh_upload_us",
 		"far_uploaded_instances",
@@ -1611,7 +1786,27 @@ func get_stats() -> Dictionary:
 	s["pending_impostors"] = _pending_impostors.size()
 	s["pending_loads"] = get_pending_cell_count()
 	s["far_texture_rebuild_in_flight"] = _rebuild_task_id != -1
-	s["far_texture_array_dirty"] = _texture_array_dirty or _normal_array_dirty
+	s["texture_array_layers"] = _get_total_texture_layers()
+	s["far_texture_array_dirty"] = _any_bucket_dirty()
+	for atlas_size: int in SUPPORTED_ATLAS_SIZES:
+		var texture_layers := 0
+		var committed_texture_layers := 0
+		var normal_layers := 0
+		var committed_normal_layers := 0
+		var slab_count := 0
+		for bucket: TextureBucket in _texture_buckets.values():
+			if bucket.atlas_size != atlas_size:
+				continue
+			slab_count += 1
+			texture_layers += bucket.all_array_images.size()
+			committed_texture_layers += bucket.committed_texture_array_layers
+			normal_layers += bucket.all_normal_images.size()
+			committed_normal_layers += bucket.committed_normal_array_layers
+		s["far_texture_layers_%d" % atlas_size] = texture_layers
+		s["far_committed_texture_layers_%d" % atlas_size] = committed_texture_layers
+		s["far_normal_layers_%d" % atlas_size] = normal_layers
+		s["far_committed_normal_layers_%d" % atlas_size] = committed_normal_layers
+		s["far_texture_slabs_%d" % atlas_size] = slab_count
 	s["far_multimesh_dirty"] = _impostors_dirty
 	s["far_enabled"] = _streaming_enabled and visible
 	s["far_visibility_begin_m"] = _visibility_begin_distance
@@ -1684,10 +1879,17 @@ func dump_diagnostic() -> String:
 
 	# Texture array state
 	lines.append("\n[Texture Array State]")
-	lines.append("  _texture_array: %s" % (_texture_array != null))
-	lines.append("  _texture_array_size: %d" % _texture_array_size)
-	lines.append("  _all_array_images count: %d" % _all_array_images.size())
-	lines.append("  _texture_index_map count: %d" % _texture_index_map.size())
+	lines.append("  texture_buckets: %d" % _texture_buckets.size())
+	lines.append("  texture_array_layers: %d" % _get_total_texture_layers())
+	for bucket_key: String in _texture_buckets.keys():
+		var bucket: TextureBucket = _texture_buckets[bucket_key]
+		lines.append("  bucket %s: textures=%d normals=%d committed=%d/%d" % [
+			bucket_key,
+			bucket.all_array_images.size(),
+			bucket.all_normal_images.size(),
+			bucket.committed_texture_array_layers,
+			bucket.committed_normal_array_layers
+		])
 
 	# Impostor data
 	lines.append("\n[Impostor Data]")
@@ -1834,7 +2036,7 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 
 	# Use spatial index for O(cell_count) lookup instead of O(total_impostors)
 	var ids_to_remove: Array[int] = []
-	var dirty_pages: Dictionary[Vector2i, bool] = {}
+	var dirty_pages: Dictionary[String, bool] = {}
 	for grid: Vector2i in grids:
 		if grid not in _cell_index:
 			continue
@@ -1864,7 +2066,7 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 		_impostors.erase(id)
 
 	if not ids_to_remove.is_empty():
-		for page_key: Vector2i in dirty_pages.keys():
+		for page_key: String in dirty_pages.keys():
 			_mark_page_dirty(page_key)
 
 	_stats["total_impostors"] = _impostors.size()
@@ -2033,31 +2235,28 @@ func _on_texture_loaded(hash_key: String, image: Image) -> void:
 		return
 
 	# Create texture and cache
-	var texture := ImageTexture.create_from_image(image)
-	if not texture:
-		push_error("[NativeImpostorRenderer] Failed to create ImageTexture for hash %s" % hash_key)
-		_pending_impostors.erase(hash_key)
+	_impostor_textures[hash_key] = true
+	_stats["texture_cache_size"] = _impostor_textures.size()
+	var atlas_size: int = _hash_to_atlas_size.get(hash_key, DEFAULT_ATLAS_SIZE)
+	var bucket := _get_or_assign_bucket_for_hash(hash_key, atlas_size)
+	if bucket == null:
+		_drop_pending_impostor_hash(hash_key)
 		return
 
-	_impostor_textures[hash_key] = texture
-	_stats["texture_cache_size"] = _impostor_textures.size()
-
 	# Add to texture array - check for failure
-	var texture_index := _add_to_texture_array(hash_key, image)
+	var texture_index := _add_to_texture_array(hash_key, image, bucket)
 	if texture_index < 0:
 		# Texture array full and compaction didn't help - skip these impostors
 		if debug_enabled:
 			_debug("Texture array full, skipping %d impostors for hash %s" % [
 				(_pending_impostors[hash_key] as Array).size(), hash_key])
-		_pending_impostors.erase(hash_key)
-		# Also remove from texture cache since we won't use it
-		_impostor_textures.erase(hash_key)
+		_drop_pending_impostor_hash(hash_key)
 		_stats["texture_cache_size"] = _impostor_textures.size()
 		return
 
 	var pending_list: Array = _pending_impostors[hash_key]
 	var queued_count := pending_list.size()
-	if hash_key in _normal_index_map:
+	if hash_key in bucket.normal_index_map:
 		_queue_ready_texture_hash(hash_key)
 	if debug_enabled:
 		_debug("Texture loaded, %d impostors waiting for complete v6 data for hash %s" % [queued_count, hash_key])
@@ -2069,18 +2268,24 @@ func _create_impostor(
 	ref_id: String,
 	ref_num: int,
 	hash_key: String,
+	bucket: TextureBucket,
 	position: Vector3,
 	rotation: Vector3,
 	scale: Vector3,
 	texture_size: Vector2,
 	aabb_center: Vector3
 ) -> int:
-	var texture_index: int = _texture_index_map.get(hash_key, 0)
+	if bucket == null:
+		return -1
+	var texture_index: int = bucket.texture_index_map.get(hash_key, 0)
 
 	var impostor := ImpostorData.new()
 	impostor.id = _next_id
 	impostor.cell_grid = cell_grid
-	impostor.page_key = _page_key_for_cell(cell_grid)
+	impostor.bucket_key = bucket.key
+	impostor.atlas_size = bucket.atlas_size
+	impostor.slab_index = bucket.slab_index
+	impostor.page_key = _page_key_for_cell(cell_grid, bucket)
 	impostor.ref_id = ref_id
 	impostor.ref_num = ref_num
 	impostor.model_path = model_path
@@ -2096,8 +2301,14 @@ func _create_impostor(
 	_impostors[impostor.id] = impostor
 	_stats["total_impostors"] = _impostors.size()
 
-	var page := _get_or_create_page(impostor.page_key)
+	var page := _get_or_create_page(impostor.page_key, _spatial_page_key_for_cell(cell_grid), bucket)
+	if page == null:
+		_impostors.erase(impostor.id)
+		_stats["total_impostors"] = _impostors.size()
+		return -1
 	page.impostor_ids.append(impostor.id)
+	page.visibility_begin_distance = _page_visibility_begin_distance(page)
+	_configure_page_visibility(page.instance, page.visibility_begin_distance)
 	_mark_page_dirty(impostor.page_key)
 
 	# Maintain spatial index for O(cell_size) unloading
@@ -2118,49 +2329,66 @@ func _create_impostor(
 	return impostor.id
 
 
-func _add_to_texture_array(hash_key: String, image: Image) -> int:
-	if hash_key in _texture_index_map:
-		return _texture_index_map[hash_key]
+func _add_to_texture_array(hash_key: String, image: Image, bucket: TextureBucket) -> int:
+	if bucket == null:
+		return -1
+	if hash_key in bucket.texture_index_map:
+		return bucket.texture_index_map[hash_key]
 
 	# If at capacity, try to compact by removing unused textures
-	if _texture_array_size >= MAX_TEXTURE_ARRAY_LAYERS:
-		_compact_texture_array()
+	if bucket.all_array_images.size() >= TEXTURE_ARRAY_SLAB_LAYERS:
+		_compact_texture_array(bucket.key)
 		# Check again after compaction
-		if _texture_array_size >= MAX_TEXTURE_ARRAY_LAYERS:
+		if bucket.all_array_images.size() >= TEXTURE_ARRAY_SLAB_LAYERS:
 			# Log warning only once per overflow event (not every impostor)
 			if not _stats.get("_logged_array_full", false):
-				push_warning("[NativeImpostorRenderer] Texture array limit reached (%d layers). New impostors will be skipped until cells unload." % MAX_TEXTURE_ARRAY_LAYERS)
+				push_warning("[NativeImpostorRenderer] Texture array slab limit reached (%d layers for %s). New impostors will be skipped until cells unload." % [TEXTURE_ARRAY_SLAB_LAYERS, bucket.key])
 				_stats["_logged_array_full"] = true
 			return -1  # Return -1 to indicate failure (not 0 which is a valid index)
 
-	var index := _texture_array_size
-	_texture_index_map[hash_key] = index
-	_texture_array_size += 1
+	var index := bucket.all_array_images.size()
+	bucket.texture_index_map[hash_key] = index
 
 	# Resize image to standard size (256×256 balances quality vs VRAM)
 	var img_copy := image.duplicate() as Image
-	if img_copy.get_size() != Vector2i(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION):
-		img_copy.resize(TEXTURE_ARRAY_DIMENSION, TEXTURE_ARRAY_DIMENSION, Image.INTERPOLATE_LANCZOS)
+	if img_copy.get_size() != Vector2i(bucket.atlas_size, bucket.atlas_size):
+		img_copy.resize(bucket.atlas_size, bucket.atlas_size, Image.INTERPOLATE_LANCZOS)
 
-	_all_array_images.append(img_copy)
-	_texture_array_dirty = true
+	bucket.all_array_images.append(img_copy)
+	bucket.texture_array_dirty = true
 	_last_texture_add_time = Time.get_ticks_msec() / 1000.0
 
-	_stats["texture_array_layers"] = _texture_array_size
+	_stats["texture_array_layers"] = _get_total_texture_layers()
 
 	return index
 
 
 ## Compact the texture array by removing unreferenced textures
 ## This rebuilds the array with only textures that have active impostors using them
-func _compact_texture_array() -> void:
+func _compact_texture_array(bucket_key: String = "") -> void:
+	if bucket_key.is_empty():
+		for key: String in _texture_buckets.keys():
+			_compact_texture_array(key)
+		return
+	if bucket_key not in _texture_buckets:
+		return
+	var bucket: TextureBucket = _texture_buckets[bucket_key]
 	# Find which textures are still in use (have reference count > 0)
 	var used_hashes: Array[String] = []
-	for hash_key: String in _texture_index_map:
-		if hash_key in _texture_ref_counts and _texture_ref_counts[hash_key] > 0:
+	for hash_key: String in bucket.texture_index_map:
+		if (
+			(hash_key in _texture_ref_counts and _texture_ref_counts[hash_key] > 0)
+			or hash_key in _pending_impostors
+			or hash_key in _ready_texture_hash_set
+			or hash_key in _pending_job_ids
+			or (hash_key + "_normal") in _pending_job_ids
+		):
 			used_hashes.append(hash_key)
 
-	var removed_count := _texture_index_map.size() - used_hashes.size()
+	var removed_count := bucket.texture_index_map.size() - used_hashes.size()
+	for hash_key: String in bucket.normal_index_map:
+		if hash_key not in used_hashes:
+			removed_count += 1
 	if removed_count == 0:
 		return  # Nothing to compact
 
@@ -2173,8 +2401,8 @@ func _compact_texture_array() -> void:
 
 	for i in used_hashes.size():
 		var hash_key: String = used_hashes[i]
-		var old_index: int = _texture_index_map[hash_key]
-		new_images.append(_all_array_images[old_index])
+		var old_index: int = bucket.texture_index_map[hash_key]
+		new_images.append(bucket.all_array_images[old_index])
 		new_index_map[hash_key] = i
 
 	# Also compact normal arrays in parallel
@@ -2183,38 +2411,37 @@ func _compact_texture_array() -> void:
 
 	for i in used_hashes.size():
 		var hash_key: String = used_hashes[i]
-		if hash_key in _normal_index_map:
-			var old_normal_idx: int = _normal_index_map[hash_key]
-			new_normal_images.append(_all_normal_images[old_normal_idx])
+		if hash_key in bucket.normal_index_map:
+			var old_normal_idx: int = bucket.normal_index_map[hash_key]
+			new_normal_images.append(bucket.all_normal_images[old_normal_idx])
 			new_normal_index_map[hash_key] = new_normal_images.size() - 1
 
 	# Update impostor texture indices to match new array positions
 	for id: int in _impostors:
 		var imp: ImpostorData = _impostors[id]
-		if imp.texture_hash in new_index_map:
+		if imp.bucket_key == bucket.key and imp.texture_hash in new_index_map:
 			imp.texture_index = new_index_map[imp.texture_hash]
 			imp.normal_texture_index = new_normal_index_map.get(imp.texture_hash, -1)
 
 	# Clear old cached textures that are no longer in the array
 	for hash_key: String in _impostor_textures.keys():
-		if hash_key not in new_index_map:
+		if _hash_to_bucket_key.get(hash_key, "") == bucket.key and hash_key not in new_index_map:
 			_impostor_textures.erase(hash_key)
 			_impostor_normal_images.erase(hash_key)
+			_hash_to_bucket_key.erase(hash_key)
 
 	# Replace arrays
-	_all_array_images = new_images
-	_texture_index_map = new_index_map
-	_texture_array_size = new_images.size()
-	_committed_texture_array_layers = 0
-	_all_normal_images = new_normal_images
-	_normal_index_map = new_normal_index_map
-	_normal_array_size = new_normal_images.size()
-	_committed_normal_array_layers = 0
-	_texture_array_dirty = true
-	_normal_array_dirty = true
+	bucket.all_array_images = new_images
+	bucket.texture_index_map = new_index_map
+	bucket.all_normal_images = new_normal_images
+	bucket.normal_index_map = new_normal_index_map
+	bucket.committed_texture_array_layers = 0
+	bucket.committed_normal_array_layers = 0
+	bucket.texture_array_dirty = true
+	bucket.normal_array_dirty = true
 	_mark_all_pages_dirty()
 
-	_stats["texture_array_layers"] = _texture_array_size
+	_stats["texture_array_layers"] = _get_total_texture_layers()
 	_stats["texture_cache_size"] = _impostor_textures.size()
 
 	# Reset "array full" warning flag since we freed space
@@ -2233,26 +2460,30 @@ func _compact_texture_array() -> void:
 ## completion will pick up the latest dirty images once it lands. This
 ## matches the debounce contract at the _process call site.
 func _rebuild_texture_array() -> void:
-	if _all_array_images.is_empty():
-		_texture_array_dirty = false
-		_normal_array_dirty = false
+	var bucket := _get_dirty_rebuild_bucket()
+	if bucket == null:
 		return
 
 	if _rebuild_task_id != -1:
 		## Still running — the next debounce tick will retry.
 		return
 
+	var pending_cells_done := _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume
+	var upload_albedo := bucket.texture_array_dirty and not bucket.all_array_images.is_empty()
+	var upload_normals := pending_cells_done and bucket.normal_array_dirty and not bucket.all_normal_images.is_empty()
+	if not upload_albedo and not upload_normals:
+		return
+
 	## Snapshot current inputs so the worker sees a stable view even if
 	## new impostors land mid-rebuild. Images are RefCounted; the snapshot
 	## is a cheap shallow copy.
 	var albedo_snapshot: Array[Image] = []
-	albedo_snapshot.assign(_all_array_images)
-	var pending_cells_done := _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume
-	if not _texture_array_dirty and _normal_array_dirty and not pending_cells_done:
-		return
+	if upload_albedo:
+		albedo_snapshot.assign(bucket.all_array_images)
 	var normal_snapshot: Array[Image] = []
-	if pending_cells_done:
-		normal_snapshot.assign(_all_normal_images)
+	if upload_normals:
+		normal_snapshot.assign(bucket.all_normal_images)
+	_rebuild_bucket_key = bucket.key
 
 	_rebuild_task_id = WorkerThreadPool.add_task(
 		_rebuild_worker.bind(albedo_snapshot, normal_snapshot),
@@ -2302,10 +2533,9 @@ func _poll_rebuild_task() -> void:
 	## One-frame-delayed free of the previous texture array. Keeps the
 	## old GPU texture alive for at least one command buffer submit after
 	## the shader rebind, avoiding a use-after-free on batched drivers.
-	if _old_texture_array != null:
-		_old_texture_array = null
-	if _old_normal_array != null:
-		_old_normal_array = null
+	for bucket: TextureBucket in _texture_buckets.values():
+		bucket.old_texture_array = null
+		bucket.old_normal_texture_array = null
 
 	if _rebuild_task_id == -1:
 		return
@@ -2314,76 +2544,90 @@ func _poll_rebuild_task() -> void:
 
 	WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
 	_rebuild_task_id = -1
+	var bucket: TextureBucket = _texture_buckets.get(_rebuild_bucket_key)
+	_rebuild_bucket_key = ""
+	if bucket == null:
+		_rebuild_pending_albedo = []
+		_rebuild_pending_normals = []
+		return
 
 	var albedo_images: Array[Image] = _rebuild_pending_albedo
 	var normal_images: Array[Image] = _rebuild_pending_normals
 	_rebuild_pending_albedo = []
 	_rebuild_pending_normals = []
 
-	if albedo_images.is_empty():
-		_texture_array_dirty = false
-		_normal_array_dirty = false
+	if albedo_images.is_empty() and normal_images.is_empty():
 		return
 
 	## Main-thread RenderingServer allocation. This is the unavoidable
 	## residual main-thread cost per rebuild — the texture upload itself.
 	## Converting + duplicating the images (the CPU half) already ran on
 	## the worker.
-	var new_array := Texture2DArray.new()
-	var albedo_upload_start := Time.get_ticks_usec()
-	var err := new_array.create_from_images(albedo_images)
-	var albedo_upload_usec := Time.get_ticks_usec() - albedo_upload_start
+	var albedo_upload_usec := 0
 	_stats["far_texture_upload_us"] = albedo_upload_usec
-	_stats["texture_array_upload_last_ms"] = float(albedo_upload_usec) / 1000.0
-	_stats["texture_array_upload_max_ms"] = maxf(float(_stats.get("texture_array_upload_max_ms", 0.0)), float(albedo_upload_usec) / 1000.0)
-	if err != OK:
-		push_error("[NativeImpostorRenderer] Failed to create texture array: %s" % error_string(err))
-		_texture_array_dirty = false
-		return
+	_stats["far_texture_upload_us_%d" % bucket.atlas_size] = albedo_upload_usec
+	if not albedo_images.is_empty():
+		var new_array := Texture2DArray.new()
+		var albedo_upload_start := Time.get_ticks_usec()
+		var err := new_array.create_from_images(albedo_images)
+		albedo_upload_usec = Time.get_ticks_usec() - albedo_upload_start
+		_stats["far_texture_upload_us"] = albedo_upload_usec
+		_stats["far_texture_upload_us_%d" % bucket.atlas_size] = albedo_upload_usec
+		_stats["texture_array_upload_last_ms"] = float(albedo_upload_usec) / 1000.0
+		_stats["texture_array_upload_max_ms"] = maxf(float(_stats.get("texture_array_upload_max_ms", 0.0)), float(albedo_upload_usec) / 1000.0)
+		if err != OK:
+			push_error("[NativeImpostorRenderer] Failed to create texture array: %s" % error_string(err))
+			bucket.texture_array_dirty = false
+			return
 
-	## Swap. Old array kept alive one frame via _old_texture_array.
-	_old_texture_array = _texture_array
-	_texture_array = new_array
-	_billboard_material.set_shader_parameter("texture_atlas", _texture_array)
-	_committed_texture_array_layers = albedo_images.size()
-	_texture_array_committed_this_frame = true
-	_texture_array_dirty = _all_array_images.size() > albedo_images.size()
-	_mark_all_pages_dirty()
-	Log.debug("impostors", "Rebuilt texture array with %d layers (async)" % albedo_images.size())
+		## Swap. Old array kept alive one frame via _old_texture_array.
+		bucket.old_texture_array = bucket.texture_array
+		bucket.texture_array = new_array
+		bucket.material.set_shader_parameter("texture_atlas", bucket.texture_array)
+		bucket.committed_texture_array_layers = albedo_images.size()
+		_texture_array_committed_this_frame = true
+		bucket.texture_array_dirty = bucket.all_array_images.size() > albedo_images.size()
+		_mark_all_pages_dirty()
+		Log.debug("impostors", "Rebuilt texture array with %d layers (async)" % albedo_images.size())
 
 	var normal_upload_usec := 0
+	_stats["far_normal_upload_us"] = normal_upload_usec
+	_stats["far_normal_upload_us_%d" % bucket.atlas_size] = normal_upload_usec
 	if not normal_images.is_empty():
 		var new_normal := Texture2DArray.new()
 		var normal_upload_start := Time.get_ticks_usec()
-		err = new_normal.create_from_images(normal_images)
+		var err := new_normal.create_from_images(normal_images)
 		normal_upload_usec = Time.get_ticks_usec() - normal_upload_start
+		_stats["far_normal_upload_us"] = normal_upload_usec
+		_stats["far_normal_upload_us_%d" % bucket.atlas_size] = normal_upload_usec
 		if err != OK:
 			push_error("[NativeImpostorRenderer] Failed to create normal texture array: %s" % error_string(err))
 		else:
-			_old_normal_array = _normal_texture_array
-			_normal_texture_array = new_normal
-			_billboard_material.set_shader_parameter("normal_atlas", _normal_texture_array)
-			_committed_normal_array_layers = normal_images.size()
+			bucket.old_normal_texture_array = bucket.normal_texture_array
+			bucket.normal_texture_array = new_normal
+			bucket.material.set_shader_parameter("normal_atlas", bucket.normal_texture_array)
+			bucket.committed_normal_array_layers = normal_images.size()
 			Log.debug("impostors", "Rebuilt normal texture array with %d layers (async)" % normal_images.size())
-	_normal_array_dirty = _all_normal_images.size() > normal_images.size()
-	_stats["far_normal_upload_us"] = normal_upload_usec
+		bucket.normal_array_dirty = bucket.all_normal_images.size() > normal_images.size()
 	_stats["texture_array_rebuild_count"] = int(_stats.get("texture_array_rebuild_count", 0)) + 1
 
 
-func _rebuild_page(page_key: Vector2i) -> Dictionary:
+func _rebuild_page(page_key: String) -> Dictionary:
 	if page_key not in _impostor_pages:
 		return {"rebuilt": 0, "pack_usec": 0, "upload_usec": 0, "instances": 0}
 
 	var page: ImpostorPage = _impostor_pages[page_key]
+	if page.bucket_key not in _texture_buckets:
+		return {"rebuilt": 0, "pack_usec": 0, "upload_usec": 0, "instances": 0}
+	var bucket: TextureBucket = _texture_buckets[page.bucket_key]
 	var all_live_ids: Array[int] = []
 	var live_ids: Array[int] = []
 	for id: int in page.impostor_ids:
 		if id in _impostors:
 			all_live_ids.append(id)
 			var live_imp: ImpostorData = _impostors[id]
-			var albedo_ready := live_imp.texture_index < _committed_texture_array_layers
-			var normal_ready := live_imp.normal_texture_index >= 0 and live_imp.normal_texture_index < _committed_normal_array_layers
-			if albedo_ready and normal_ready:
+			var albedo_ready := live_imp.texture_index < bucket.committed_texture_array_layers
+			if albedo_ready:
 				live_ids.append(id)
 
 	if all_live_ids.is_empty():
@@ -2432,7 +2676,10 @@ func _rebuild_page(page_key: Vector2i) -> Dictionary:
 		buffer[offset + 11] = local_pos.z
 		buffer[offset + 12] = float(impostor.texture_index)
 		buffer[offset + 13] = impostor.rotation.y
-		buffer[offset + 14] = float(impostor.normal_texture_index)
+		var normal_index := impostor.normal_texture_index
+		if normal_index < 0 or normal_index >= bucket.committed_normal_array_layers:
+			normal_index = 0
+		buffer[offset + 14] = float(normal_index)
 		buffer[offset + 15] = impostor.variant_flag
 		offset += stride
 
