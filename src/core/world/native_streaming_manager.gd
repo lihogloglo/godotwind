@@ -106,9 +106,10 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 ## When disabled, falls back to synchronous loading
 @export var async_loading_enabled: bool = true
 
-## Radius for impostors (cells) - radius around camera where impostors are generated
-## 60 cells * 117m ~= 7km default; increase to 100 for whole-island (may impact FPS)
-@export var impostor_radius_cells: int = 60
+## Radius for FAR impostors and distant-light sprites. Covers the 5km FAR_END
+## with a small cell-boundary safety margin; larger rings stream cells that can
+## never render and directly inflate impostor texture work.
+@export var impostor_radius_cells: int = 45
 
 ## View distance in cells (alias for load_radius_cells, backwards compatibility)
 @export var view_distance_cells: int = SC.DEFAULT_LOAD_RADIUS_CELLS:
@@ -2013,6 +2014,10 @@ func get_stats() -> Dictionary:
 	# Merge impostor stats if available
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
 		s.merge(_impostor_renderer.call("get_stats"))
+
+	# Merge distant-light billboard stats if available.
+	if _distant_light_manager and _distant_light_manager.has_method("get_stats"):
+		s.merge(_distant_light_manager.call("get_stats"))
 
 	# Merge MID-tier static renderer stats
 	if _static_renderer:

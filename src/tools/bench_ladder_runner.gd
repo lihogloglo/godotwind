@@ -266,6 +266,10 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 		sample["far_dirty_page_count"] = stats.get("far_dirty_page_count", 0)
 		sample["far_pages_rebuilt"] = stats.get("far_pages_rebuilt", 0)
 		sample["far_uploaded_instances"] = stats.get("far_uploaded_instances", 0)
+		sample["distant_light_count"] = stats.get("distant_light_count", 0)
+		sample["distant_light_page_count"] = stats.get("distant_light_page_count", 0)
+		sample["distant_light_scan_us"] = stats.get("distant_light_scan_us", 0)
+		sample["distant_light_rebuild_us"] = stats.get("distant_light_rebuild_us", 0)
 		if _streaming_manager.has_method("get_static_renderer_stats"):
 			var srs := _streaming_manager.get_static_renderer_stats()
 			sample["registry_batches"] = srs.get("registry_batches", 0)
@@ -310,6 +314,10 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	var far_dirty_page_count_max := 0
 	var far_pages_rebuilt_max := 0
 	var far_uploaded_instances_max := 0
+	var distant_light_count_max := 0
+	var distant_light_page_count_max := 0
+	var distant_light_scan_max := 0
+	var distant_light_rebuild_max := 0
 	for s: Dictionary in samples:
 		var f := float(s.get("fps", 0.0))
 		fps_min = minf(fps_min, f)
@@ -336,6 +344,10 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		far_dirty_page_count_max = maxi(far_dirty_page_count_max, int(s.get("far_dirty_page_count", 0)))
 		far_pages_rebuilt_max = maxi(far_pages_rebuilt_max, int(s.get("far_pages_rebuilt", 0)))
 		far_uploaded_instances_max = maxi(far_uploaded_instances_max, int(s.get("far_uploaded_instances", 0)))
+		distant_light_count_max = maxi(distant_light_count_max, int(s.get("distant_light_count", 0)))
+		distant_light_page_count_max = maxi(distant_light_page_count_max, int(s.get("distant_light_page_count", 0)))
+		distant_light_scan_max = maxi(distant_light_scan_max, int(s.get("distant_light_scan_us", 0)))
+		distant_light_rebuild_max = maxi(distant_light_rebuild_max, int(s.get("distant_light_rebuild_us", 0)))
 	var n := float(samples.size())
 	return {
 		"samples": samples.size(),
@@ -363,6 +375,10 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"far_dirty_page_count_max": far_dirty_page_count_max,
 		"far_pages_rebuilt_max": far_pages_rebuilt_max,
 		"far_uploaded_instances_max": far_uploaded_instances_max,
+		"distant_light_count_max": distant_light_count_max,
+		"distant_light_page_count_max": distant_light_page_count_max,
+		"distant_light_scan_max_us": distant_light_scan_max,
+		"distant_light_rebuild_max_us": distant_light_rebuild_max,
 	}
 
 
