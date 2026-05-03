@@ -1214,30 +1214,10 @@ func _ensure_visual_proxy_type_registered(type_name: String, model_path: String,
 	if static_renderer.call("has_type", type_name):
 		return true
 
-	if model_loader.has_method("get_cached_packed_scene") and static_renderer.has_method("register_from_packed_scene"):
-		var packed_scene: PackedScene = model_loader.call("get_cached_packed_scene", model_path, cache_item_id)
-		if packed_scene == null and not cache_item_id.is_empty():
-			packed_scene = model_loader.call("get_cached_packed_scene", model_path, "")
-		if packed_scene != null:
-			var reg_start := Time.get_ticks_usec()
-			var registered := bool(static_renderer.call("register_from_packed_scene", type_name, packed_scene))
-			last_static_register_us += Time.get_ticks_usec() - reg_start
-			if registered:
-				return true
-
-	var load_start := Time.get_ticks_usec()
-	var prototype: Node3D = model_loader.call("get_model", model_path, cache_item_id)
-	last_model_load_us += Time.get_ticks_usec() - load_start
-	if prototype == null and not cache_item_id.is_empty():
-		load_start = Time.get_ticks_usec()
-		prototype = model_loader.call("get_model", model_path)
-		last_model_load_us += Time.get_ticks_usec() - load_start
-	if prototype == null:
-		return false
-	var reg_start := Time.get_ticks_usec()
-	static_renderer.call("register_from_prototype", type_name, prototype)
-	last_static_register_us += Time.get_ticks_usec() - reg_start
-	return bool(static_renderer.call("has_type", type_name))
+	# Proximity-deferred visual proxies are opportunistic. Never sync-load or
+	# instantiate a prototype here: the full interactive object remains queued
+	# for proximity, and cold proxy registration must stay out of the frame loop.
+	return false
 
 
 func _suppress_visual_proxy_for_ref(ref: CellReference, cell_grid: Vector2i, type_name: String) -> void:

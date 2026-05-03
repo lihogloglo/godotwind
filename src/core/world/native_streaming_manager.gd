@@ -276,6 +276,11 @@ var _camera_cell: Vector2i = Vector2i.ZERO
 ## Tracked camera node
 var _camera: Camera3D = null
 
+## True only after the caller explicitly starts camera tracking.
+## `initialize(null)` must not auto-discover the viewport camera while boot
+## isolation flags are still being applied.
+var _tracking_enabled: bool = false
+
 ## Statistics
 var _stats: Dictionary = {
 	"loaded_cells": 0,
@@ -505,6 +510,7 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	_cell_manager._static_renderer = _static_renderer
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
+	_tracking_enabled = _camera != null
 
 	# Phase 3 (2026-04-22) — CellPreloader. Depends on the instantiator (for
 	# preregister_cell_statics) + model_loader (for resolve_disk_path). Both
@@ -550,6 +556,7 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	set_hlod_visible(_hlod_requested_visible)
 
 	_initialized = true
+	set_process(_tracking_enabled)
 	Log.info("streaming", "Initialized with native visibility_range streaming")
 
 	# Only start tracking if camera was explicitly provided
@@ -569,6 +576,8 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 ## Set the camera to track
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
+	_tracking_enabled = _camera != null
+	set_process(_tracking_enabled)
 	# Trigger initial update if system is initialized and camera is set
 	if _initialized and _camera:
 		_camera_position = _camera.global_position
@@ -606,6 +615,12 @@ func _apply_distant_render_distance_for_load_radius() -> void:
 	_sync_hlod_far_coverage(true)
 
 
+func _impostor_streaming_enabled() -> bool:
+	return _impostor_renderer != null \
+		and _impostor_renderer.has_method("is_enabled") \
+		and bool(_impostor_renderer.call("is_enabled"))
+
+
 ## Set sun elevation for distant light time-of-day visibility.
 ## Called by world_explorer from sky_manager.celestial.sun_altitude.
 func set_sun_elevation(elevation_rad: float) -> void:
@@ -625,6 +640,9 @@ func _process(delta: float) -> void:
 	if not _initialized:
 		if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
 			Log.debug("streaming", "_process skipped: not initialized")
+		return
+
+	if not _tracking_enabled:
 		return
 
 	if not _camera:
@@ -840,16 +858,17 @@ func _process(delta: float) -> void:
 		# Deferred impostor update — runs on the frame AFTER cell change
 		# Prevents impostor scan (170ms+ initial) from stacking with cell load/unload
 		_impostor_update_pending = false
-		if prof:
+		var impostors_on := _impostor_streaming_enabled()
+		if impostors_on and prof:
 			prof.begin_section("impostor_update")
 		var imp_start := Time.get_ticks_usec()
-		if _impostor_renderer:
+		if impostors_on:
 			_impostor_renderer.update_impostor_area(_camera_cell, impostor_radius_cells)
 			_sync_hlod_far_coverage(true)
 		var imp_ms := float(Time.get_ticks_usec() - imp_start) / 1000.0
-		if prof:
+		if impostors_on and prof:
 			prof.end_section("impostor_update")
-		if imp_ms > 2.0:
+		if impostors_on and imp_ms > 2.0:
 			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
 
 	# Runtime HLOD merger: process completed merges every frame, update on cell change
@@ -1220,7 +1239,7 @@ func _update_loaded_cells() -> void:
 	# During startup phase, defer further — impostor scan (11K+ cells) overwhelms
 	# the resource pipeline when combined with cell model loading. The startup_complete
 	# signal handler below triggers the impostor scan once initial cells are done.
-	if not _startup_phase:
+	if not _startup_phase and _impostor_streaming_enabled():
 		_impostor_update_pending = true
 
 	# Scan for distant lights in a wider radius than loaded cells

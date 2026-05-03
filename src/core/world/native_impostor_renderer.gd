@@ -300,6 +300,10 @@ func set_enabled(enabled: bool) -> void:
 		release_runtime_resources()
 
 
+func is_enabled() -> bool:
+	return _streaming_enabled
+
+
 func set_force_visible_for_test(enabled: bool) -> void:
 	if enabled:
 		_visibility_begin_distance = 0.0

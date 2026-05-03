@@ -179,6 +179,28 @@ func _runtime_cmdline_args() -> PackedStringArray:
 	return args
 
 
+func _apply_cmdline_view_distance_override() -> void:
+	var runtime_args := _runtime_cmdline_args()
+	for i in range(runtime_args.size()):
+		var arg := runtime_args[i]
+		var value := ""
+		if arg == "--load-radius-cells" or arg == "--view-distance-cells":
+			if i + 1 < runtime_args.size():
+				value = runtime_args[i + 1]
+		elif arg.begins_with("--load-radius-cells="):
+			value = arg.substr("--load-radius-cells=".length())
+		elif arg.begins_with("--view-distance-cells="):
+			value = arg.substr("--view-distance-cells=".length())
+		if value.is_empty():
+			continue
+		if not value.is_valid_int():
+			Log.warn("streaming", "Ignoring invalid cell radius override: %s" % value)
+			continue
+		_current_view_distance = StreamingConfig.clamp_load_radius_cells(int(value))
+		Log.info("streaming", "CLI cell radius override: %s" % StreamingConfig.format_load_radius_with_distance(_current_view_distance))
+		return
+
+
 # Camera mode state
 enum CameraMode { FLY_CAMERA, PLAYER_CONTROLLER }
 var _camera_mode: CameraMode = CameraMode.FLY_CAMERA
@@ -265,6 +287,7 @@ func _ready() -> void:
 	DebugViewCommands.enable_wireframe_generation()
 
 	_current_view_distance = SettingsManager.get_streaming_radius_cells()
+	_apply_cmdline_view_distance_override()
 
 	var _t0 := Time.get_ticks_msec()
 	var _t_step := _t0
@@ -540,7 +563,12 @@ func _init_async() -> void:
 	# the mid-session teleport that triggers tracker §12.2 crash).
 	_teleport_to_cell(_start_cell.x, _start_cell.y)
 
-	# NOW start tracking the camera - cells will generate around Seyda Neen
+	# Setup subsystem toggles (needs all managers initialized)
+	_setup_subsystem_toggles()
+
+	# NOW start tracking the camera - cells will generate around Seyda Neen.
+	# Apply subsystem CLI isolation before this call so `--near-only` /
+	# `--near-mid-only` cannot pay one startup scan for disabled distant paths.
 	if _world_streaming_disabled:
 		Log.info("streaming", "[--disable-world-streaming] skipping NativeStreamingManager.set_camera()")
 	else:
@@ -551,9 +579,6 @@ func _init_async() -> void:
 
 	# Connect diagnostic systems now that WSM is ready
 	_connect_diagnostic_systems()
-
-	# Setup subsystem toggles (needs all managers initialized)
-	_setup_subsystem_toggles()
 
 	# Phase 8 — boot gate + teleport hook re-enabled 2026-04-17 after
 	# pass-3 diagnostic launch (Phase 8 disabled) reproduced the same
@@ -1860,9 +1885,11 @@ func _setup_subsystem_toggles() -> void:
 	_log("[color=green][Distant tiers active][/color] FAR impostors default ON; HLOD opt-in; MID/FAR handoff follows view-distance slider")
 	Log.info("streaming", "[Distant tiers active] impostors default=true; HLOD default=false pending chunk-surface proof; MID fallback follows view-distance slider, impostors start at the same handoff")
 
-	# CLI controls for focused tier isolation. `--near-only` parks both distant
-	# tiers; `--no-hlod` / `--no-impostors` isolate one tier without hiding MID.
-	# `--hlod` enables the lazy HLOD path at boot; `--hlod-only` also parks FAR.
+	# CLI controls for focused tier isolation. `--near-only` parks distant
+	# render tiers without hiding MID. `--near-mid-only` is the hard benchmark
+	# isolation mode: terrain + NEAR + MID only, with environment/post effects
+	# disabled too. `--hlod` enables the lazy HLOD path at boot; `--hlod-only`
+	# also parks FAR.
 	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
 	# now controls the universal statics renderer, flipping it off would
 	# hide all rocks/arches/clutter.
@@ -1873,7 +1900,19 @@ func _setup_subsystem_toggles() -> void:
 		if a == "--near-only":
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("impostors", false)
-			_log("[color=yellow]--near-only: hlod/impostors OFF; MID handoff follows view-distance slider[/color]")
+			_subsystem_toggles.set_flag("distant_lights", false)
+			_log("[color=yellow]--near-only: HLOD/FAR/distant lights OFF; MID handoff follows view-distance slider[/color]")
+		elif a == "--near-mid-only":
+			_subsystem_toggles.set_flag("hlod", false)
+			_subsystem_toggles.set_flag("impostors", false)
+			_subsystem_toggles.set_flag("distant_lights", false)
+			_subsystem_toggles.set_flag("sky", false)
+			_subsystem_toggles.set_flag("weather", false)
+			_subsystem_toggles.set_flag("postfx", false)
+			_subsystem_toggles.set_flag("shadows", false)
+			_subsystem_toggles.set_flag("ocean", false)
+			_subsystem_toggles.set_flag("characters", false)
+			_log("[color=yellow]--near-mid-only: terrain + NEAR + MID isolation[/color]")
 		elif a == "--hlod":
 			_subsystem_toggles.set_flag("hlod", true)
 			_log("[color=yellow]--hlod: HLOD ON; MID/FAR handoff follows view-distance slider, covered MID caps at 300m, HLOD visible 300-1000m[/color]")
@@ -1887,6 +1926,21 @@ func _setup_subsystem_toggles() -> void:
 		elif a == "--no-impostors":
 			_subsystem_toggles.set_flag("impostors", false)
 			_log("[color=yellow]--no-impostors: FAR impostors OFF[/color]")
+		elif a == "--no-distant-lights":
+			_subsystem_toggles.set_flag("distant_lights", false)
+			_log("[color=yellow]--no-distant-lights: distant light billboards OFF[/color]")
+		elif a == "--no-sky":
+			_subsystem_toggles.set_flag("sky", false)
+			_log("[color=yellow]--no-sky: sky renderer OFF[/color]")
+		elif a == "--no-weather":
+			_subsystem_toggles.set_flag("weather", false)
+			_log("[color=yellow]--no-weather: weather renderer OFF[/color]")
+		elif a == "--no-postfx":
+			_subsystem_toggles.set_flag("postfx", false)
+			_log("[color=yellow]--no-postfx: TAA/SSAO/SSIL/glow/godrays/fog OFF[/color]")
+		elif a == "--no-shadows":
+			_subsystem_toggles.set_flag("shadows", false)
+			_log("[color=yellow]--no-shadows: directional shadows OFF[/color]")
 
 	# Register console commands
 	if console:
