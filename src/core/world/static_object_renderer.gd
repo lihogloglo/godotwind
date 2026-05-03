@@ -67,6 +67,7 @@ var _cell_buckets: Dictionary[Vector2i, Array] = {} # Array[CellStaticBucket]
 var _cell_bucket_hide_progress: Dictionary[Vector2i, int] = {}
 var _cell_bucket_key_index: Dictionary[String, RefCounted] = {}
 var _cell_bucket_pending_cleanup: Dictionary[String, bool] = {}
+var _cell_bucket_build_tasks: Dictionary[String, RefCounted] = {}
 var _hlod_covered_bucket_counts: Dictionary[String, int] = {}
 var _hlod_bucket_visibility_end: float = DU.HLOD_START
 var _descriptor_build_tasks: Dictionary[String, DescriptorBuildTask] = {}
@@ -1057,7 +1058,7 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 	if payload_key.is_empty():
 		return null
 	var bucket_key := _make_cell_bucket_key(cell_grid, payload_key)
-	if _cell_bucket_key_index.has(bucket_key) or bool(_cell_bucket_pending_cleanup.get(bucket_key, false)):
+	if _cell_bucket_key_index.has(bucket_key) or _cell_bucket_build_tasks.has(bucket_key) or bool(_cell_bucket_pending_cleanup.get(bucket_key, false)):
 		return null
 	if type_name not in _mesh_types:
 		return null
@@ -1086,20 +1087,87 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 			bucket.call("cleanup")
 		return null
 
+	_finalize_cell_bucket(bucket, type_name, payload_key, cell_grid)
+	return bucket
+
+
+func create_cell_bucket_budgeted(
+	type_name: String,
+	payload_key: String,
+	transforms: Array,
+	cell_grid: Vector2i,
+	resource_handle: RefCounted,
+	deadline_usec: int,
+) -> Dictionary:
+	if payload_key.is_empty():
+		return {"status": "failed", "bucket": null}
+	var bucket_key := _make_cell_bucket_key(cell_grid, payload_key)
+	if _cell_bucket_key_index.has(bucket_key):
+		return {"status": "ready", "bucket": _cell_bucket_key_index[bucket_key]}
+	if bool(_cell_bucket_pending_cleanup.get(bucket_key, false)):
+		return {"status": "failed", "bucket": null}
+	if type_name not in _mesh_types:
+		return {"status": "failed", "bucket": null}
+	if transforms.is_empty() or not _scenario.is_valid():
+		return {"status": "failed", "bucket": null}
+
+	var mesh_type: MeshType = _mesh_types[type_name]
+	if mesh_type.sub_meshes.is_empty():
+		return {"status": "failed", "bucket": null}
+
+	var bucket: RefCounted = _cell_bucket_build_tasks.get(bucket_key) as RefCounted
+	if bucket == null:
+		bucket = CellStaticBucketScript.new()
+		var started := bool(bucket.call(
+			"begin_configure",
+			type_name,
+			payload_key,
+			cell_grid,
+			mesh_type.sub_meshes,
+			transforms,
+			_scenario,
+			_get_bucket_visibility_range_end(bucket_key, transforms.size()),
+			_globally_visible,
+			resource_handle
+		))
+		if not started:
+			if bucket.has_method("cleanup"):
+				bucket.call("cleanup")
+			return {"status": "failed", "bucket": null}
+		_cell_bucket_build_tasks[bucket_key] = bucket
+
+	var status := str(bucket.call("configure_step", deadline_usec))
+	if status == "pending":
+		return {"status": "pending", "bucket": bucket}
+
+	_cell_bucket_build_tasks.erase(bucket_key)
+	if status != "ready":
+		if bucket.has_method("cleanup"):
+			bucket.call("cleanup")
+		return {"status": "failed", "bucket": null}
+
+	_finalize_cell_bucket(bucket, type_name, payload_key, cell_grid)
+	return {"status": "ready", "bucket": bucket}
+
+
+func _finalize_cell_bucket(bucket: RefCounted, type_name: String, _payload_key: String, cell_grid: Vector2i) -> void:
 	if cell_grid not in _cell_buckets:
 		_cell_buckets[cell_grid] = []
 	_cell_buckets[cell_grid].append(bucket)
+	var bucket_key := str(bucket.get("bucket_key"))
 	_cell_bucket_key_index[bucket_key] = bucket
 	_stats["cell_buckets"] = int(_stats.get("cell_buckets", 0)) + 1
-	_stats["bucket_instances"] = int(_stats.get("bucket_instances", 0)) + transforms.size()
+	var bucket_count := int(bucket.get("instance_count"))
+	_stats["bucket_instances"] = int(_stats.get("bucket_instances", 0)) + bucket_count
 	var draw_group_count := int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
 	_stats["bucket_draw_groups"] = int(_stats.get("bucket_draw_groups", 0)) + draw_group_count
 	_stats["bucket_rs_instances"] = int(_stats.get("bucket_rs_instances", 0)) + draw_group_count
-	_stats["total_instances"] = int(_stats.get("total_instances", 0)) + transforms.size()
+	_stats["total_instances"] = int(_stats.get("total_instances", 0)) + bucket_count
 	if _globally_visible:
-		_stats["visible_instances"] = int(_stats.get("visible_instances", 0)) + transforms.size()
-	mesh_type.instance_count += transforms.size()
-	return bucket
+		_stats["visible_instances"] = int(_stats.get("visible_instances", 0)) + bucket_count
+	if type_name in _mesh_types:
+		var mesh_type: MeshType = _mesh_types[type_name]
+		mesh_type.instance_count += bucket_count
 
 
 func set_visibility_range_end(p_visibility_range_end: float) -> void:
@@ -1391,6 +1459,7 @@ func remove_cell_instances(cell_grid: Vector2i) -> int:
 
 
 func _detach_cell_buckets(cell_grid: Vector2i) -> Array:
+	_cancel_bucket_builds_for_cell(cell_grid)
 	if cell_grid not in _cell_buckets:
 		_cell_bucket_hide_progress.erase(cell_grid)
 		return []
@@ -1408,6 +1477,23 @@ func _detach_cell_buckets(cell_grid: Vector2i) -> Array:
 			_cell_bucket_key_index.erase(bucket_key)
 			_cell_bucket_pending_cleanup[bucket_key] = true
 	return buckets
+
+
+func cancel_cell_bucket_build(bucket_key: String) -> void:
+	if not _cell_bucket_build_tasks.has(bucket_key):
+		return
+	var bucket: RefCounted = _cell_bucket_build_tasks[bucket_key]
+	_cell_bucket_build_tasks.erase(bucket_key)
+	if bucket != null and bucket.has_method("cleanup"):
+		bucket.call("cleanup")
+
+
+func _cancel_bucket_builds_for_cell(cell_grid: Vector2i) -> void:
+	var prefix := "%d,%d:" % [cell_grid.x, cell_grid.y]
+	for key_value: Variant in _cell_bucket_build_tasks.keys():
+		var bucket_key := str(key_value)
+		if bucket_key.begins_with(prefix):
+			cancel_cell_bucket_build(bucket_key)
 
 
 func _cleanup_detached_buckets(buckets: Array) -> int:
@@ -1703,6 +1789,10 @@ func clear(clear_mesh_types: bool = true) -> void:
 	if _prototype_registry != null:
 		_prototype_registry.cleanup()
 		_prototype_registry = null
+
+	for bucket_key: String in _cell_bucket_build_tasks.keys():
+		cancel_cell_bucket_build(bucket_key)
+	_cell_bucket_build_tasks.clear()
 
 	for id: int in _instances:
 		var data: InstanceData = _instances[id]

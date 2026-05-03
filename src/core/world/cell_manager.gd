@@ -1157,6 +1157,8 @@ func _should_prepare_static_ref(
 	type_name: String,
 	model_path: String,
 	profile: LoadProfile,
+	item_id: String = "",
+	ref: CellReference = null,
 ) -> bool:
 	if _instantiator == null or _static_renderer == null:
 		return false
@@ -1172,9 +1174,86 @@ func _should_prepare_static_ref(
 	match type_name:
 		"door", "activator", "container", "light":
 			return false
-	if type_name == "static":
+	if type_name != "static" and not _instantiator._is_static_render_model(model_path):
+		return false
+	var cached_max_dim := _get_cached_model_max_dimension(model_path, item_id)
+	if cached_max_dim > 0.0:
+		return _is_model_dimension_mid_worthy(cached_max_dim, ref)
+	if StreamingPolicyScript.is_mid_worthy(type_name, model_path):
 		return true
-	return _instantiator._is_static_render_model(model_path)
+	return false
+
+
+func _is_model_dimension_mid_worthy(max_dim: float, ref: CellReference = null) -> bool:
+	var scale_max := 1.0
+	if ref != null:
+		var scale := CS.scale_to_godot(ref.scale)
+		scale_max = maxf(absf(scale.x), maxf(absf(scale.y), absf(scale.z)))
+	var scaled_max_dim := max_dim * maxf(scale_max, 0.001)
+	if scaled_max_dim >= SC.AABB_MID_WORTHY_THRESHOLD:
+		return true
+	var radius := scaled_max_dim * 0.5
+	return radius * radius >= DU.NEAR_END * DU.NEAR_END * DU.PAGING_MIN_SIZE_SQ
+
+
+func _get_cached_model_max_dimension(model_path: String, item_id: String = "") -> float:
+	var normalized := model_path.to_lower().replace("/", "\\")
+	if normalized.is_empty():
+		return 0.0
+	if normalized in _aabb_cache:
+		return float(_aabb_cache[normalized])
+	if _static_renderer != null and bool(_static_renderer.call("has_type", normalized)):
+		var renderer_aabb: AABB = _static_renderer.call("get_mesh_aabb", normalized)
+		var renderer_max := _aabb_max_dimension(renderer_aabb)
+		if renderer_max > 0.0:
+			_aabb_cache[normalized] = renderer_max
+			return renderer_max
+	if _model_loader == null or not _model_loader.has_model(model_path, item_id):
+		return 0.0
+	var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path, item_id)
+	if packed_scene == null:
+		return 0.0
+	var scene_aabb := _estimate_packed_scene_aabb(packed_scene)
+	var scene_max := _aabb_max_dimension(scene_aabb)
+	if scene_max > 0.0:
+		_aabb_cache[normalized] = scene_max
+	return scene_max
+
+
+func _estimate_packed_scene_aabb(packed_scene: PackedScene) -> AABB:
+	var state := packed_scene.get_state()
+	if state == null:
+		return AABB()
+	var transforms: Dictionary[String, Transform3D] = {".": Transform3D.IDENTITY}
+	var merged := AABB()
+	var has_aabb := false
+	for node_index in range(state.get_node_count()):
+		var path := str(state.get_node_path(node_index, false))
+		var parent_path := str(state.get_node_path(node_index, true))
+		var parent_transform: Transform3D = transforms.get(parent_path, Transform3D.IDENTITY)
+		var local_transform := Transform3D.IDENTITY
+		var mesh: Mesh = null
+		for property_index in range(state.get_node_property_count(node_index)):
+			var property_name := String(state.get_node_property_name(node_index, property_index))
+			var property_value: Variant = state.get_node_property_value(node_index, property_index)
+			if property_name == "transform" and property_value is Transform3D:
+				local_transform = property_value
+			elif property_name == "mesh" and property_value is Mesh:
+				mesh = property_value
+		var world_transform := parent_transform * local_transform
+		transforms[path] = world_transform
+		if state.get_node_type(node_index) != &"MeshInstance3D" or mesh == null or not is_instance_valid(mesh):
+			continue
+		var mesh_aabb := world_transform * mesh.get_aabb()
+		merged = mesh_aabb if not has_aabb else merged.merge(mesh_aabb)
+		has_aabb = true
+	return merged if has_aabb else AABB()
+
+
+static func _aabb_max_dimension(aabb: AABB) -> float:
+	if aabb.size == Vector3.ZERO:
+		return 0.0
+	return maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
 
 
 func _get_static_expected_count_for_request(request_id: int, model_path: String, item_id: String) -> int:
@@ -1283,6 +1362,7 @@ func _discard_all_static_prepare() -> void:
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
 		if request != null and request.payload != null:
+			_cancel_payload_static_bucket_builds(request)
 			request.payload.discard_static_prepare_queue()
 
 
@@ -1320,7 +1400,7 @@ func _publish_payload_step(payload: CellPayloadScript, budget_usec: int) -> int:
 		if entry.is_empty():
 			continue
 
-		var result := _process_static_prepare_entry(entry)
+		var result := _process_static_prepare_entry(entry, start_us + budget_usec)
 		match result:
 			STATIC_PREPARE_ENTRY_PREPARED:
 				prepared += 1
@@ -1376,7 +1456,7 @@ func _publish_payload_model_callbacks(payload: CellPayloadScript, budget_usec: i
 	return completed
 
 
-func _process_static_prepare_entry(entry: Dictionary) -> int:
+func _process_static_prepare_entry(entry: Dictionary, deadline_usec: int = 0) -> int:
 	var request_id := int(entry.get("request_id", -1))
 	if request_id not in _async_requests:
 		return STATIC_PREPARE_ENTRY_SKIPPED
@@ -1446,7 +1526,26 @@ func _process_static_prepare_entry(entry: Dictionary) -> int:
 		_pin_payload_cached_scene(request, model_path, item_id)
 		var resource_handle: RefCounted = request.payload.get_model_handle(model_path, item_id) if request.payload.has_method("get_model_handle") else null
 		var transforms: Array = request.payload.static_instance_transforms.get(payload_key, [])
-		if not transforms.is_empty() and _static_renderer.has_method("create_cell_bucket"):
+		if not transforms.is_empty() and _static_renderer.has_method("create_cell_bucket_budgeted"):
+			var batch_start := Time.get_ticks_usec()
+			var build_result: Dictionary = _static_renderer.call(
+				"create_cell_bucket_budgeted",
+				type_name,
+				payload_key,
+				transforms,
+				request.grid,
+				resource_handle,
+				deadline_usec
+			)
+			batch_us = Time.get_ticks_usec() - batch_start
+			var build_status := str(build_result.get("status", "failed"))
+			if build_status == "pending":
+				return STATIC_PREPARE_ENTRY_RETRY
+			var bucket: RefCounted = build_result.get("bucket", null) as RefCounted
+			if build_status == "ready" and bucket != null:
+				request.payload.add_static_bucket(payload_key, bucket)
+				batch_count = transforms.size()
+		elif not transforms.is_empty() and _static_renderer.has_method("create_cell_bucket"):
 			var batch_start := Time.get_ticks_usec()
 			var bucket: RefCounted = _static_renderer.call("create_cell_bucket", type_name, payload_key, transforms, request.grid, resource_handle) as RefCounted
 			batch_us = Time.get_ticks_usec() - batch_start
@@ -1567,6 +1666,8 @@ func _classify_request_refs(
 			type_name,
 			model_path,
 			request.load_profile,
+			item_id,
+			ref,
 		)
 		var load_item_id := "" if static_route or type_name == "light" or type_name == "npc" or type_name == "creature" else item_id
 		profile_route_us += Time.get_ticks_usec() - route_start_us
@@ -2474,7 +2575,24 @@ func _discard_static_prepare_for_request(request_id: int) -> void:
 		return
 	var request: AsyncCellRequest = _async_requests[request_id]
 	if request != null and request.payload != null:
+		_cancel_payload_static_bucket_builds(request)
 		request.payload.discard_static_prepare_queue()
+
+
+func _cancel_payload_static_bucket_builds(request: AsyncCellRequest) -> void:
+	if request == null or request.payload == null or _static_renderer == null:
+		return
+	if not _static_renderer.has_method("cancel_cell_bucket_build"):
+		return
+	for entry_value: Variant in request.payload.static_prepare_entries_by_key.values():
+		var entry: Dictionary = entry_value
+		var model_path := str(entry.get("model_path", ""))
+		if model_path.is_empty():
+			continue
+		var item_id := str(entry.get("item_id", ""))
+		var payload_key := CellPayloadScript.make_model_key(model_path, item_id)
+		var bucket_key := "%d,%d:%s" % [request.grid.x, request.grid.y, payload_key]
+		_static_renderer.call("cancel_cell_bucket_build", bucket_key)
 
 
 ## Process async instantiation within time budget (call from _process)
@@ -3850,7 +3968,7 @@ func _queue_instantiation(
 			var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
 			if base_record != null:
 				var record_type_name: String = record_type[0] if record_type.size() > 0 else ""
-				if _should_prepare_static_ref(base_record, record_type_name, model_path, owning_request.load_profile):
+				if _should_prepare_static_ref(base_record, record_type_name, model_path, owning_request.load_profile, cache_item_id, ref):
 					entry.static_prepare_key = model_path.to_lower().replace("/", "\\")
 					_enqueue_static_prepare(request_id, model_path, cache_item_id)
 
