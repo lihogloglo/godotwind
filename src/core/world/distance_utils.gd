@@ -23,10 +23,7 @@ const HALF_CELL_SIZE: float = CELL_SIZE_METERS * 0.5
 ## NEAR tier: Full 3D meshes with physics/collision (0 to NEAR_END)
 const NEAR_END: float = 150.0
 
-## MID tier: Per-object LOD meshes (NEAR_END to MID_END).
-## Phase 4 (2026-04-17) — when HLOD is visible, MID caps at HLOD_START via
-## `static_object_renderer.visibility_range_end`. With HLOD off/default-parked,
-## MID falls back to MID_END so raw RS statics cover the 0-500m band.
+## MID tier: static bucket visuals (NEAR_END to MID_END).
 const MID_END: float = 300.0
 
 ## HLOD tier: Cell-level merged meshes (HLOD_START to HLOD_END)
@@ -34,10 +31,7 @@ const MID_END: float = 300.0
 const HLOD_START: float = 300.0
 const HLOD_END: float = 1000.0
 
-## FAR tier: Impostors/billboards (runtime begin to FAR_END).
-## FAR_START remains the nominal post-HLOD handoff distance. Runtime streaming
-## may clamp impostor visibility back to MID_END while HLOD coverage is pending
-## so sparse or negative HLOD chunks do not open 500-1000m holes.
+## FAR tier: Impostors/billboards (FAR_START to FAR_END).
 const FAR_END: float = 5000.0
 
 ## LEGACY: sub-LOD boundaries from the pre-B-wide 3-band MID scheme.
@@ -50,8 +44,6 @@ const LOD2_END: float = 375.0
 const LOD3_END: float = 500.0
 
 ## Tier start distances (for convenience).
-## Nominal FAR handoff after exact HLOD replacement coverage exists. Current
-## runtime fallback may set impostor visibility to MID_END.
 const NEAR_START: float = 0.0
 const MID_START: float = NEAR_END
 const FAR_START: float = HLOD_END
@@ -124,7 +116,7 @@ const PAGING_HYSTERESIS: float = 20.0
 ##   0.3m pebble  → 60m cutoff
 ##   0.8m barrel  → 160m cutoff
 ##   1.5m crate   → 300m cutoff
-##   3m tree      → 600m → clamped to MID_END (500m)
+##   3m tree      → 600m → clamped to MID_END (300m)
 ## Inside the instance's spatial AABB, Godot reports distance=0 so the fade
 ## stays off — close-up shadows preserved. Outside the AABB by more than
 ## `cutoff`, VISIBILITY_RANGE_FADE_SELF dithers out → both visible and shadow

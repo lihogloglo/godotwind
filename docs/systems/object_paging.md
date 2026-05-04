@@ -8,27 +8,27 @@ publish one raw `RenderingServer` chunk instance on the main thread.
 
 ## Status
 
-HLOD is implemented but opt-in. FAR impostors are default-on from 500m; HLOD is
-not default-on after the 2026-05-02 stress run exposed persistent chunk
-surface/material draw-call cost.
+HLOD is default-on in `Godotwind.tscn`. FAR impostors are default-on from
+1000m. `--no-hlod` / `hlod_disable` remain ablation tools for isolating HLOD
+cost and coverage issues.
 
 Runtime modes:
 
 | Mode | MID | HLOD | FAR |
 | --- | --- | --- | --- |
-| Default | 0-500m `CellStaticBucket` fallback | Off | 500-5000m |
-| `hlod_enable` | 0-500m fallback; covered buckets cap at 300m | Visible 300-1000m | 500-5000m fallback |
-| `hlod_disable` | 0-500m safety fallback | Off / cleaned up | 500-5000m |
+| Default | 0-300m `CellStaticBucket` bridge | Visible 300-1000m | 1000-5000m |
+| `hlod_enable` | 0-300m bridge | Visible 300-1000m | 1000-5000m |
+| `hlod_disable` | 0-300m bridge | Off / cleaned up | 1000-5000m |
 
 The nominal constants define `HLOD_START = 300`, `HLOD_END = 1000`, and
-`FAR_START = 1000`. Runtime HLOD now uses the 300m visual floor, while FAR
-stays at 500m until exact chunk/page coverage ownership exists.
+`FAR_START = 1000`. Runtime HLOD uses the 300m visual floor, and FAR uses the
+fixed 1000m handoff.
 
 Console surface:
 
 | Command | Effect |
 | --- | --- |
-| `hlod_enable` | Enables ObjectPaging work and HLOD visibility with MID/FAR safety fallback |
+| `hlod_enable` | Enables ObjectPaging work and HLOD visibility |
 | `hlod_disable` | Disables ObjectPaging and cleans up active chunks |
 | `hlod_stats` | Prints live chunk, coverage, queue, rejection, cache, merge timing, and runtime-LOD counters |
 
@@ -136,23 +136,23 @@ and a worker finishes after the camera leaves range.
 
 ## MID/HLOD/FAR Handoff
 
-Current safety handoff:
+Current handoff:
 
-- MID `CellStaticBucket` owns visible static geometry through 500m.
+- MID `CellStaticBucket` owns visible static geometry through 300m.
 - HLOD, when enabled, is visible from 300m to 1000m.
-- FAR impostors remain visible from 500m to 5000m.
+- FAR impostors are visible from 1000m to 5000m.
 
-This overlap is intentional. It avoids holes while HLOD lacks exact coverage
-ownership. The desired future state is non-overlapping ownership, but only
-after HLOD can prove which chunks/pages are complete enough to replace MID/FAR.
-Covered MID buckets cap at 300m, but uncovered buckets retain the 500m fallback.
+This is intentionally non-overlapping. HLOD coverage gaps should be diagnosed
+as HLOD coverage gaps rather than hidden by widening MID or starting FAR early.
+Covered MID bucket counters remain in stats so the main-scene integration can
+prove which buckets HLOD is replacing.
 
 Any change to these ranges must retune live bucket/chunk/page visibility, not
 only future instances.
 
 ## Acceptance Gaps
 
-HLOD cannot become default-on until these are proven:
+HLOD remains performance-sensitive. These gates still matter:
 
 - bounded active chunk surface/material counts;
 - bounded visible/shadow draw calls with HLOD enabled;

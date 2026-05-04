@@ -586,8 +586,8 @@ func set_normal_debug_for_test(enabled: bool) -> void:
 
 
 ## Adjust impostor visibility_range_begin to match the active tier layout.
-## Default FAR fallback starts at MID_END. Individual pages can move to
-## HLOD_END only when active HLOD coverage proves every impostor in that page.
+## FAR starts at FAR_START. Page-level HLOD coverage is retained as diagnostic
+## metadata, but the production tier handoff is the fixed 1000m boundary.
 func set_visibility_range_begin(begin_distance: float, fade_margin: float = DU.FADE_MARGIN_RENDER_FAR) -> void:
 	_visibility_begin_distance = begin_distance
 	_visibility_fade_margin = fade_margin

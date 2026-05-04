@@ -1218,7 +1218,7 @@ func _refresh_hlod_bucket_override_stats() -> void:
 				continue
 			var bucket_key := str(bucket.get("bucket_key"))
 			var bucket_count := int(bucket.get("instance_count"))
-			if _get_bucket_visibility_range_end(bucket_key, bucket_count) < visibility_range_end:
+			if bucket_count > 0 and int(_hlod_covered_bucket_counts.get(bucket_key, 0)) >= bucket_count:
 				override_count += 1
 				override_refs += bucket_count
 	_stats["hlod_bucket_overrides"] = override_count

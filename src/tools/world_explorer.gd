@@ -1873,7 +1873,7 @@ func _setup_subsystem_toggles() -> void:
 		"impostors": true,
 		"mid_objects": true,
 		"near_objects": true,
-		"hlod": false,
+		"hlod": true,
 		"distant_lights": true,
 		"shadows": false,
 		"postfx": false,
@@ -1900,14 +1900,15 @@ func _setup_subsystem_toggles() -> void:
 		])
 
 	# Boot banner: make the active distant tier state explicit in logs.
-	_log("[color=green][Distant tiers active][/color] MID fixed 150-300m; HLOD opt-in 300-1000m; FAR fallback covers uncovered distant pages")
-	Log.info("streaming", "[Distant tiers active] MID fixed=150-300; HLOD opt-in=300-1000; FAR fallback starts at MID_END until HLOD coverage is exact; view distance caps tier loading")
+	_log("[color=green][Distant tiers active][/color] MID fixed 150-300m; HLOD 300-1000m; FAR impostors 1000m+")
+	Log.info("streaming", "[Distant tiers active] MID fixed=150-300; HLOD=300-1000; FAR starts at 1000; view distance caps tier loading")
 
 	# CLI controls for focused tier isolation. `--near-only` parks distant
 	# render tiers without hiding MID. `--near-mid-only` is the hard benchmark
 	# isolation mode: terrain + NEAR + MID only, with environment/post effects
-	# disabled too. `--hlod` enables HLOD on top of the normal stack;
-	# `--hlod-only` isolates the runtime HLOD path.
+	# disabled too. `--hlod` explicitly enables HLOD on top of the normal
+	# stack; `--hlod-only` isolates visible HLOD + terrain while leaving the
+	# streaming/prototype bootstrap alive.
 	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
 	# now controls the universal statics renderer, flipping it off would
 	# hide all rocks/arches/clutter.
@@ -1933,12 +1934,12 @@ func _setup_subsystem_toggles() -> void:
 			_log("[color=yellow]--near-mid-only: terrain + NEAR + MID isolation[/color]")
 		elif a == "--hlod":
 			_subsystem_toggles.set_flag("hlod", true)
-			_log("[color=yellow]--hlod: HLOD ON; FAR fallback remains until HLOD coverage is exact[/color]")
+			_log("[color=yellow]--hlod: HLOD ON; FAR starts at 1000m[/color]")
 		elif a == "--hlod-only":
 			_hlod_flyby_mode = true
 			_subsystem_toggles.set_flag("terrain", true)
-			_subsystem_toggles.set_flag("near_objects", true)
-			_subsystem_toggles.set_flag("mid_objects", true)
+			_subsystem_toggles.set_flag("near_objects", false)
+			_subsystem_toggles.set_flag("mid_objects", false)
 			_subsystem_toggles.set_flag("hlod", true)
 			_subsystem_toggles.set_flag("impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
@@ -1948,7 +1949,7 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("shadows", false)
 			_subsystem_toggles.set_flag("ocean", false)
 			_subsystem_toggles.set_flag("characters", false)
-			_log("[color=yellow]--hlod-only: HLOD flyby mode; terrain + NEAR/MID bootstrap ON, FAR/environment OFF[/color]")
+			_log("[color=yellow]--hlod-only: visible HLOD + terrain isolation; FAR/environment OFF[/color]")
 		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
 			_subsystem_toggles.set_flag("hlod", false)
 			_log("[color=yellow]--no-hlod: HLOD OFF; MID still fixed at 300m[/color]")
@@ -2259,7 +2260,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		console.register_command(
 			"hlod_enable",
 			_cmd_hlod_enable,
-			"Enable runtime HLOD merging (visible 300-1000m; FAR fallback follows view-distance slider)",
+			"Enable runtime HLOD merging (visible 300-1000m; FAR starts at 1000m)",
 			"streaming"
 		)
 
@@ -2418,10 +2419,10 @@ func _cmd_hlod_enable(_args: Dictionary) -> String:
 	else:
 		native_streaming_manager.set_hlod_visible(true)
 	var cap := _get_distant_render_end_m()
-	return "HLOD requested - MID fixed 0-%dm, HLOD %s, FAR %s, view cap %dm" % [
+	return "HLOD requested - MID bridge 150-%dm, HLOD %s, FAR %s, view cap %dm" % [
 		int(StreamingConfig.DU.MID_END),
 		"300-%dm" % int(minf(cap, StreamingConfig.DU.HLOD_END)) if cap > StreamingConfig.DU.HLOD_START else "not loaded",
-		"fallback from %dm until coverage is exact" % int(StreamingConfig.DU.MID_END) if cap > StreamingConfig.DU.MID_END else "not loaded",
+		"%d-%dm" % [int(StreamingConfig.DU.FAR_START), int(cap)] if cap > StreamingConfig.DU.FAR_START else "not loaded",
 		int(cap),
 	]
 
@@ -2435,7 +2436,7 @@ func _cmd_hlod_disable(_args: Dictionary) -> String:
 		_subsystem_toggles.set_flag("hlod", false)
 	else:
 		native_streaming_manager.set_hlod_visible(false)
-	return "HLOD DISABLED - MID fixed 0-%dm, HLOD parked" % int(StreamingConfig.DU.MID_END)
+	return "HLOD DISABLED - MID bridge 150-%dm, HLOD parked" % int(StreamingConfig.DU.MID_END)
 
 
 func _cmd_proto_registry(args: Dictionary) -> String:

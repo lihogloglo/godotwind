@@ -557,8 +557,8 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		# Normal budget (4ms) is restored when startup phase completes
 		_impostor_renderer.set_load_budget_usec(15000.0)
 
-	# HLOD is opt-in. Keep the owner facade live, but do not create ObjectPaging
-	# until `hlod_enable` / `toggle hlod` asks for it.
+	# HLOD follows the owning toggle. ObjectPaging is still created lazily, so
+	# `--near-only` / `--no-hlod` runs do not pay the setup cost.
 	set_hlod_visible(_hlod_requested_visible)
 
 	_initialized = true
@@ -2302,9 +2302,7 @@ func set_impostors_visible(visible: bool) -> void:
 
 func _apply_impostor_request() -> void:
 	if _impostor_renderer:
-		# FAR is the safety fallback while HLOD coverage is incomplete. Covered
-		# pages move out to HLOD_END via set_hlod_covered_ref_nums().
-		var far_begin := DU.MID_END
+		var far_begin := DU.FAR_START
 		var effective_visible := _impostors_requested_visible and _distant_render_end_m > far_begin
 		if effective_visible and _impostor_renderer.has_method("set_visibility_range_begin"):
 			if _impostor_renderer.has_method("set_visibility_range"):
@@ -2408,7 +2406,7 @@ func get_hlod_stats() -> Dictionary:
 			"visual_begin_floor": DU.HLOD_START,
 			"mid_hlod_overlap_chunks": 0,
 			"nonvisual_chunks_suppressed": 0,
-			"far_visibility_begin_m": DU.MID_END,
+			"far_visibility_begin_m": DU.FAR_START,
 			"handoff_far_hlod_overlap_chunks": 0,
 			"handoff_hole_risk_chunks": 0,
 			"far_hlod_covered_pages": 0,
@@ -2429,11 +2427,11 @@ func get_hlod_stats() -> Dictionary:
 	stats["enabled"] = bool(_hlod_merger.get("enabled"))
 	stats["runtime_lod_generation_enabled"] = bool(stats.get("runtime_lod_generation_enabled", false))
 	stats["runtime_force_merge_eligible_refs"] = bool(stats.get("runtime_force_merge_eligible_refs", false))
-	var far_begin := DU.MID_END
+	var far_begin := DU.FAR_START
 	var far_enabled := false
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
 		var far_stats: Dictionary = _impostor_renderer.call("get_stats")
-		far_begin = float(far_stats.get("far_visibility_begin_m", DU.MID_END))
+		far_begin = float(far_stats.get("far_visibility_begin_m", DU.FAR_START))
 		far_enabled = bool(far_stats.get("far_enabled", false))
 	stats["far_visibility_begin_m"] = far_begin
 	stats["handoff_far_hlod_overlap_chunks"] = int(stats.get("active_visual_chunks", 0)) if far_enabled and far_begin < DU.HLOD_END else 0
@@ -2459,8 +2457,6 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 		return
 	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
 		if force or _hlod_far_coverage_revision != -1:
-			if can_sync_far:
-				_impostor_renderer.call("set_hlod_covered_ref_nums", {})
 			if can_sync_mid:
 				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
 			_hlod_far_coverage_revision = -1
@@ -2470,8 +2466,6 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 	if not force and revision == _hlod_far_coverage_revision:
 		return
 	_hlod_far_coverage_revision = revision
-	if can_sync_far:
-		_impostor_renderer.call("set_hlod_covered_ref_nums", manifest.get("source_ref_nums", {}))
 	if can_sync_mid:
 		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("source_bucket_counts", {}), DU.HLOD_START)
 
@@ -2506,8 +2500,8 @@ func _ensure_hlod_merger() -> bool:
 	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor, _cell_manager._model_loader)
 	if _hlod_merger.has_method("set_visual_begin_floor"):
 		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
-	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID fixed 0-%dm, HLOD visible %d-%dm, FAR fallback starts at %dm, view cap=%dm" % [
-		int(DU.MID_END), int(DU.HLOD_START), int(minf(_distant_render_end_m, DU.HLOD_END)), int(DU.MID_END), int(_distant_render_end_m)])
+	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID bridge 150-%dm, HLOD visible %d-%dm, FAR starts at %dm, view cap=%dm" % [
+		int(DU.MID_END), int(DU.HLOD_START), int(minf(_distant_render_end_m, DU.HLOD_END)), int(DU.FAR_START), int(_distant_render_end_m)])
 	return true
 
 

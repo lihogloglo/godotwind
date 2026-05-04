@@ -56,10 +56,9 @@ Godotwind's target shape is sound for Godot 4.6:
 - cell payloads own streaming queues and resource handles;
 - heavy static collision uses one server-direct body per cell;
 - MID uses Godot's embedded mesh LOD cascade instead of hand-written LOD bands;
-- FAR impostors are default-on again as of 2026-05-02 after Phase 2B's
-  structural bucket path landed. HLOD remains implemented but opt-in because
-  the default-on stress run exposed a persistent chunk-surface draw-call
-  blow-up. `--near-only` remains the focused NEAR opt-out.
+- HLOD and FAR impostors are default-on again after Phase 2B's structural
+  bucket path landed. `--near-only` remains the focused NEAR opt-out;
+  `--no-hlod` remains the HLOD ablation path.
 
 The project has not been blocked by a fundamental Godot limitation. The
 historical failures came from lifetime ownership and scheduling complexity:
@@ -104,8 +103,8 @@ Outstanding:
 - Residual east-route 50ms+ outlier attribution.
 - Frame budget split needs to move from 60-FPS-era 8ms shared budget toward
   the NEAR target of roughly 1ms streaming publish per frame at 150 FPS.
-- FAR distant rendering is re-enabled by default; HLOD is opt-in pending chunk
-  surface/material reduction and clean runtime gates.
+- HLOD and FAR distant rendering are re-enabled by default, pending continued
+  chunk surface/material reduction and clean runtime gates.
 
 ## Primary-Source Facts
 
@@ -320,9 +319,9 @@ An object belongs to exactly one visual tier at a time.
 | Tier | Range | Runtime Technique | Current Status |
 | --- | --- | --- | --- |
 | NEAR | 0-150m | Sparse `Node3D` only for interactives, static visuals server-direct, cell static collision server-direct | Active stabilization |
-| MID | 0-500m fallback | Spatially local `CellStaticBucket` draw groups: groups use local MultiMeshes; singleton groups use single-slot transform uploads; Godot C++ chooses embedded sub-LOD | Working; remains the safety fallback while HLOD is opt-in |
-| HLOD | Opt-in, currently visible 300-1000m | Runtime-merged static geometry per chunk, one RS instance per chunk | Implemented, opt-in; covered MID buckets cap at 300m while uncovered buckets keep the 500m fallback |
-| FAR | 500-5000m | Octahedral impostors in spatial MultiMesh pages | Working, default-on again; stays available from 500m while HLOD coverage is incomplete |
+| MID | 150-300m bridge | Spatially local `CellStaticBucket` draw groups: groups use local MultiMeshes; singleton groups use single-slot transform uploads; Godot C++ chooses embedded sub-LOD | Working |
+| HLOD | 300-1000m | Runtime-merged static geometry per chunk, one RS instance per chunk | Working, default-on; coverage gaps are diagnosed rather than hidden by widening MID/FAR |
+| FAR | 1000-5000m | Octahedral impostors in spatial MultiMesh pages | Working, default-on |
 
 Rules:
 

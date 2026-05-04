@@ -10,7 +10,7 @@ system docs linked below.
 | --- | --- | --- | --- | --- |
 | NEAR | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior | Working |
 | MID | Fixed 150-300m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
-| HLOD | Fixed 300-1000m, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies: static refs are merged into chunk meshes and published as raw RS instances. | Implemented, opt-in |
+| HLOD | Fixed 300-1000m, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies: static refs are merged into chunk meshes and published as raw RS instances. | Working, default-on |
 | FAR | Fixed 1000-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages | Working |
 
 The user-facing distance slider is an object view-distance cap in meters. It
@@ -20,8 +20,8 @@ cap is below 1000m, FAR does not load.
 `hlod_enable`: HLOD work starts at the canonical 300m handoff and is capped by
 the current view distance up to 1000m. MID remains fixed at 300m.
 
-`hlod_disable`: HLOD chunks are parked/cleaned up and the default MID/FAR
-fallback remains active.
+`hlod_disable`: HLOD chunks are parked/cleaned up for ablation. Production
+ownership still expects HLOD to cover 300-1000m.
 
 `--near-only`: focused test override that parks distant tiers according to the
 runtime toggle policy. Do not treat it as the production tier contract.
@@ -78,13 +78,13 @@ cell-merge helper path.
 
 Current HLOD rules:
 
-- HLOD is opt-in through `hlod_enable` and benchmark toggles.
+- HLOD is default-on in `Godotwind.tscn`; `hlod_enable`/`hlod_disable` remain
+  runtime ablation controls.
 - Runtime visibility begins at 300m.
 - MID stays capped at 300m; incomplete HLOD coverage is diagnosed rather than
   widening MID.
-- HLOD must reduce surfaces/materials in chunk proxies before it can become
-  default-on; one chunk instance is not enough if it still expands into many
-  draw surfaces.
+- HLOD still must reduce surfaces/materials in chunk proxies; one chunk
+  instance is not enough if it still expands into many draw surfaces.
 
 Deep dive: `docs/systems/object_paging.md`.
 
