@@ -41,6 +41,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
+const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 
 ## LRU cache budget in bytes (default 256 MB)
 const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
@@ -115,6 +116,7 @@ class PagingChunkData:
 	var estimated_bytes: int = 0
 	var covered_cells: Array[Vector2i] = []
 	var source_ref_nums: Dictionary = {}
+	var source_object_ids: Dictionary = {}
 	var source_bucket_counts: Dictionary = {}
 	var coverage_complete: bool = false
 	var refs_accepted: int = 0
@@ -133,6 +135,7 @@ class MergePrepState:
 	var inputs: Array = []
 	var covered_cells: Array[Vector2i] = []
 	var source_ref_nums: Dictionary = {}
+	var source_object_ids: Dictionary = {}
 	var source_bucket_counts: Dictionary = {}
 	var bucket_total_counts: Dictionary = {}
 	var surface_estimate: int = 0
@@ -182,6 +185,7 @@ var _bg_processor: BackgroundProcessor = null
 ## Shared model loader. HLOD warmup uses this instead of doing its own
 ## FileAccess/ResourceLoader probes on the streaming hot path.
 var _model_loader: ModelLoader = null
+var _world_object_source: RefCounted = null
 
 ## Model cache directory (for loading prototypes not yet in StaticObjectRenderer)
 var _models_dir: String = ""
@@ -336,6 +340,10 @@ func initialize(scenario: RID, static_renderer: StaticObjectRendererScript,
 		_bg_processor.task_failed.connect(_on_task_failed)
 
 
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
+
+
 ## Update active paging chunks based on camera position. Runs the top-down
 ## anti-overlap walk across tiers (plan §4.3). Returns number of chunks changed.
 ##
@@ -464,9 +472,12 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 ## reason for the hard split: prototype loading + merge submission on the
 ## same frame was the pre-Phase-4d pathology — warmup is exactly the "don't
 ## do both at once" budget partitioner.
-func process_merge_queue() -> void:
+func process_merge_queue(deadline_usec: int = 0) -> void:
 	var start_usec := Time.get_ticks_usec()
 	if not enabled:
+		_stats["merge_queue_last_usec"] = 0
+		return
+	if _deadline_exhausted(deadline_usec):
 		_stats["merge_queue_last_usec"] = 0
 		return
 	# Dual-purpose SubsystemToggles gate: stop draining merge queue when
@@ -479,15 +490,15 @@ func process_merge_queue() -> void:
 
 	# Phase 4d — warmup drain has priority over merges.
 	if not _warmup_queue.is_empty():
-		_drain_warmup_queue()
-		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
+		_drain_warmup_queue(deadline_usec)
+		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC or _deadline_exhausted(deadline_usec):
 			_stats["merge_queue_last_usec"] = Time.get_ticks_usec() - start_usec
 			return
 
 	if _merge_queue.is_empty():
 		if not _prep_queue.is_empty():
 			while not _prep_queue.is_empty():
-				var prep_status := _process_merge_prepare(_prep_queue[0], start_usec)
+				var prep_status := _process_merge_prepare(_prep_queue[0], start_usec, deadline_usec)
 				if prep_status == "done":
 					var done_state: MergePrepState = _prep_queue[0]
 					_prep_queue.remove_at(0)
@@ -505,9 +516,9 @@ func process_merge_queue() -> void:
 		return
 
 	var budget := MERGES_PER_FRAME
-	while Time.get_ticks_usec() - start_usec < MERGE_QUEUE_SOFT_LIMIT_USEC:
+	while Time.get_ticks_usec() - start_usec < MERGE_QUEUE_SOFT_LIMIT_USEC and not _deadline_exhausted(deadline_usec):
 		while not _prep_queue.is_empty():
-			var prep_status := _process_merge_prepare(_prep_queue[0], start_usec)
+			var prep_status := _process_merge_prepare(_prep_queue[0], start_usec, deadline_usec)
 			if prep_status == "done":
 				var done_state: MergePrepState = _prep_queue[0]
 				_prep_queue.remove_at(0)
@@ -519,11 +530,11 @@ func process_merge_queue() -> void:
 				_prep_queue.append(waiting_state)
 				continue
 			break
-		if not _prep_queue.is_empty() and Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
+		if not _prep_queue.is_empty() and (Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC or _deadline_exhausted(deadline_usec)):
 			break
 		if budget <= 0 or _merge_queue.is_empty():
 			break
-		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
+		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC or _deadline_exhausted(deadline_usec):
 			break
 		var key: Vector3i = _merge_queue[0]
 		_merge_queue.remove_at(0)
@@ -538,7 +549,7 @@ func process_merge_queue() -> void:
 ## Process completed merge results on main thread. Creates RS instances.
 ## Call once per frame from streaming manager.
 ## Returns number of chunks completed.
-func process_completions() -> int:
+func process_completions(deadline_usec: int = 0) -> int:
 	var start_usec := Time.get_ticks_usec()
 	if not enabled:
 		_completed_mutex.lock()
@@ -564,7 +575,7 @@ func process_completions() -> int:
 	var queue: Array = []
 	var budget := COMPLETIONS_PER_FRAME
 	while budget > 0 and not _completed_queue.is_empty():
-		if Time.get_ticks_usec() - start_usec >= COMPLETION_BUDGET_USEC:
+		if Time.get_ticks_usec() - start_usec >= COMPLETION_BUDGET_USEC or _deadline_exhausted(deadline_usec):
 			break
 		queue.append(_completed_queue.pop_back())
 		budget -= 1
@@ -636,7 +647,7 @@ func get_stats() -> Dictionary:
 
 
 func get_active_coverage_manifest() -> Dictionary:
-	var source_ref_nums: Dictionary = {}
+	var source_object_ids: Dictionary = {}
 	var source_bucket_counts: Dictionary = {}
 	var covered_cells: Dictionary = {}
 	var complete_chunks := 0
@@ -649,19 +660,20 @@ func get_active_coverage_manifest() -> Dictionary:
 			complete_chunks += 1
 		else:
 			incomplete_chunks += 1
-		for ref_num: Variant in data.source_ref_nums.keys():
-			source_ref_nums[int(ref_num)] = true
+		for object_id: Variant in data.source_object_ids.keys():
+			source_object_ids[object_id] = true
 		for bucket_key: Variant in data.source_bucket_counts.keys():
 			var key_string := str(bucket_key)
 			source_bucket_counts[key_string] = int(source_bucket_counts.get(key_string, 0)) + int(data.source_bucket_counts[bucket_key])
 		for cell: Vector2i in data.covered_cells:
 			covered_cells[cell] = true
 	return {
-		"source_ref_nums": source_ref_nums,
 		"source_bucket_counts": source_bucket_counts,
 		"complete_bucket_counts": source_bucket_counts.duplicate(),
 		"covered_cells": covered_cells,
-		"active_covered_refs": source_ref_nums.size(),
+		"source_object_ids": source_object_ids,
+		"source_ref_nums": source_object_ids,
+		"active_covered_refs": source_object_ids.size(),
 		"active_covered_cells": covered_cells.size(),
 		"active_complete_coverage_chunks": complete_chunks,
 		"active_incomplete_coverage_chunks": incomplete_chunks,
@@ -889,27 +901,16 @@ static func _is_teleport(prev_pos: Vector3, curr_pos: Vector3) -> bool:
 func _prime_warmup_queue(desired_chunks: Dictionary) -> void:
 	if not RUNTIME_PROTOTYPE_WARMUP:
 		return
-	if not _static_renderer:
+	if not _static_renderer or _world_object_source == null:
 		return
 	for key: Vector3i in desired_chunks:
 		var size: int = 1 << key.z
 		for cy in range(size):
 			for cx in range(size):
 				var cell_grid := Vector2i(key.x + cx, key.y + cy)
-				var cell_record: Variant = ESMManager.get_exterior_cell(cell_grid.x, cell_grid.y)
-				if not cell_record:
-					continue
-				for ref in cell_record.references:
-					if ref.is_deleted:
-						continue
-					var record_type: Array = [""]
-					var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-					if not base_record:
-						continue
-					var type_name: String = record_type[0] if record_type.size() > 0 else ""
-					if not _type_eligible(type_name, key.z):
-						continue
-					var model_path: String = _get_model_path(base_record)
+				var records: Array = _world_object_source.get_objects_in_cell(cell_grid, WorldObjectRecordScript.CAP_HLOD)
+				for record: RefCounted in records:
+					var model_path: String = record.model_path
 					if model_path.is_empty():
 						continue
 					_queue_warmup_model(model_path)
@@ -940,7 +941,7 @@ func _queue_warmup_model(model_path: String) -> bool:
 ## ready entries instantiate from the cached PackedScene and register with the renderer.
 ## When the queue fully drains, `_warmup_dispatched` clears so a future
 ## teleport gets a fresh dedup set.
-func _drain_warmup_queue() -> void:
+func _drain_warmup_queue(deadline_usec: int = 0) -> void:
 	if not _static_renderer:
 		_warmup_queue.clear()
 		_warmup_dispatched.clear()
@@ -951,7 +952,7 @@ func _drain_warmup_queue() -> void:
 	var initial_count := _warmup_queue.size()
 	var scanned := 0
 	while budget > 0 and not _warmup_queue.is_empty() and scanned < initial_count:
-		if Time.get_ticks_usec() - start_usec >= WARMUP_BUDGET_USEC:
+		if Time.get_ticks_usec() - start_usec >= WARMUP_BUDGET_USEC or _deadline_exhausted(deadline_usec):
 			break
 		scanned += 1
 		# pop_back is O(1); order doesn't matter — we pre-load everything.
@@ -1138,6 +1139,16 @@ static func _type_eligible(type_name: String, size_level: int) -> bool:
 			return false
 
 
+static func _category_eligible(category: int, size_level: int) -> bool:
+	match category:
+		WorldObjectRecordScript.Category.STATIC, WorldObjectRecordScript.Category.DOOR, WorldObjectRecordScript.Category.ACTIVATOR:
+			return true
+		WorldObjectRecordScript.Category.CONTAINER:
+			return size_level == 0
+		_:
+			return false
+
+
 ## Phase 2 — projected-size test (OpenMW ObjectPaging §2.2).
 ##
 ## Contract (matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:793-799`):
@@ -1170,22 +1181,21 @@ func _start_chunk_merge_prepare(key: Vector3i, camera_world_pos: Vector3) -> voi
 	_prep_queue.append(state)
 
 
-func _process_merge_prepare(state: MergePrepState, start_usec: int) -> String:
-	if not _static_renderer or not _bg_processor:
+func _process_merge_prepare(state: MergePrepState, start_usec: int, deadline_usec: int = 0) -> String:
+	if not _static_renderer or not _bg_processor or _world_object_source == null:
 		_negative_chunks[state.key] = "uninitialized"
 		return "done"
 
 	var min_size_sq: float = DU.PAGING_MIN_SIZE_SQ
 	while state.cy < state.size:
-		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
+		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC or _deadline_exhausted(deadline_usec):
 			return "pending"
 
 		if not state.refs_loaded:
 			var cell_grid := Vector2i(state.center_cell.x + state.cx, state.center_cell.y + state.cy)
 			if not state.covered_cells.has(cell_grid):
 				state.covered_cells.append(cell_grid)
-			var cell_record: Variant = ESMManager.get_exterior_cell(cell_grid.x, cell_grid.y)
-			state.refs = cell_record.references if cell_record else []
+			state.refs = _world_object_source.get_objects_in_cell(cell_grid, WorldObjectRecordScript.CAP_HLOD)
 			state.ref_index = 0
 			state.refs_loaded = true
 
@@ -1193,41 +1203,27 @@ func _process_merge_prepare(state: MergePrepState, start_usec: int) -> String:
 			_advance_prepare_cell(state)
 			continue
 
-		var ref: Variant = state.refs[state.ref_index]
-		if ref.is_deleted:
-			state.ref_index += 1
-			continue
-
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-		if not base_record:
-			state.ref_index += 1
-			continue
-
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-		if not _type_eligible(type_name, state.size_level):
+		var record: RefCounted = state.refs[state.ref_index]
+		if not _category_eligible(record.category, state.size_level):
 			state.refs_type_rejected += 1
 			state.ref_index += 1
 			continue
 
-		var model_path: String = _get_model_path(base_record)
+		var model_path: String = record.model_path
 		if model_path.is_empty():
 			state.ref_index += 1
 			continue
 
-		var pos: Vector3 = CS.vector_to_godot(ref.position)
-		var scale: Vector3 = CS.scale_to_godot(ref.scale)
-		var basis: Basis = CS.esm_rotation_to_godot_basis(ref.rotation)
-		basis = basis.scaled(scale)
-		var ref_transform := Transform3D(basis, pos)
+		var pos: Vector3 = record.transform.origin
+		var ref_transform: Transform3D = record.transform
 
 		var mesh_type_name := model_path.to_lower().replace("/", "\\")
 		var payload_key := _make_static_payload_key(model_path)
 		var cell_grid := Vector2i(state.center_cell.x + state.cx, state.center_cell.y + state.cy)
 		var bucket_key := _make_bucket_key(cell_grid, payload_key)
 		state.bucket_total_counts[bucket_key] = int(state.bucket_total_counts.get(bucket_key, 0)) + 1
-		var cache_key: int = ref.ref_num
-		var scale_f: float = ref.scale
+		var cache_key: StringName = record.object_id
+		var scale_f: float = record.scale_scalar
 		var dist_sq: float = pos.distance_squared_to(state.camera_world_pos)
 		var size_threshold: float = dist_sq * min_size_sq
 
@@ -1273,7 +1269,7 @@ func _process_merge_prepare(state: MergePrepState, start_usec: int) -> String:
 		var ref_input := Kernel.RefInput.new()
 		ref_input.ref_transform = ref_transform
 		ref_input.bucket_key = bucket_key
-		ref_input.source_ref_num = int(ref.ref_num)
+		ref_input.source_object_id = record.object_id
 		ref_input.sub_meshes = []
 		ref_input.rs2 = rs2
 		ref_input.dist_sq = dist_sq
@@ -1291,14 +1287,18 @@ func _process_merge_prepare(state: MergePrepState, start_usec: int) -> String:
 		if not ref_input.sub_meshes.is_empty():
 			ref_input.surface_count = ref_surface_count
 			state.inputs.append(ref_input)
-			state.source_ref_nums[int(ref.ref_num)] = true
+			state.source_object_ids[record.object_id] = true
 			state.source_bucket_counts[bucket_key] = int(state.source_bucket_counts.get(bucket_key, 0)) + 1
 		state.ref_index += 1
-		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC:
+		if Time.get_ticks_usec() - start_usec >= MERGE_QUEUE_SOFT_LIMIT_USEC or _deadline_exhausted(deadline_usec):
 			return "pending"
 
 	_finish_merge_prepare(state)
 	return "done"
+
+
+func _deadline_exhausted(deadline_usec: int) -> bool:
+	return deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec
 
 
 func _advance_prepare_cell(state: MergePrepState) -> void:
@@ -1324,7 +1324,8 @@ func _build_manifest_for_state(state: MergePrepState) -> Dictionary:
 		"key": state.key,
 		"size_level": state.size_level,
 		"covered_cells": state.covered_cells.duplicate(),
-		"source_ref_nums": state.source_ref_nums.duplicate(),
+		"source_object_ids": state.source_object_ids.duplicate(),
+		"source_ref_nums": state.source_object_ids.duplicate(),
 		"source_bucket_counts": state.source_bucket_counts.duplicate(),
 		"complete_bucket_counts": state.source_bucket_counts.duplicate(),
 		"coverage_complete": (
@@ -1504,7 +1505,8 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int, m
 	var manifest: Dictionary = _mesh_manifests.get(key, {})
 	if not manifest.is_empty():
 		data.covered_cells = (manifest.get("covered_cells", []) as Array).duplicate()
-		data.source_ref_nums = (manifest.get("source_ref_nums", {}) as Dictionary).duplicate()
+		data.source_object_ids = (manifest.get("source_object_ids", manifest.get("source_ref_nums", {})) as Dictionary).duplicate()
+		data.source_ref_nums = data.source_object_ids.duplicate()
 		data.source_bucket_counts = (manifest.get("source_bucket_counts", {}) as Dictionary).duplicate()
 		data.coverage_complete = bool(manifest.get("coverage_complete", false))
 		data.refs_accepted = int(manifest.get("refs_accepted", 0))
@@ -1686,8 +1688,8 @@ func _refresh_stats() -> void:
 				complete_coverage_chunks += 1
 			else:
 				incomplete_coverage_chunks += 1
-			for ref_num: Variant in chunk_data.source_ref_nums.keys():
-				active_source_refs[int(ref_num)] = true
+			for object_id: Variant in chunk_data.source_object_ids.keys():
+				active_source_refs[object_id] = true
 			for cell: Vector2i in chunk_data.covered_cells:
 				active_covered_cells[cell] = true
 		else:

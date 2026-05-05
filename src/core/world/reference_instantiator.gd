@@ -63,6 +63,7 @@ var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/
 # to the legacy walker without error. See docs/plans/distant_rendering_2026_04/
 # statics_no_node3d.md §7.
 var shape_cache: RefCounted = null  # StaticShapeCache
+var _world_object_source: RefCounted = null
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null
@@ -78,6 +79,27 @@ var last_static_data: Dictionary = {}
 # Also prevents CLAUDE.md anti-pattern "DON'T skip wait_for_task_completion()
 # on WorkerThreadPool". Plan: phase_f_prototype_prereg.md §5.
 var _prereg_task_ids: Array[int] = []
+
+
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
+
+
+func _get_base_record(ref_id: String, record_type_out: Array, cached: bool = false) -> Variant:
+	if _world_object_source == null:
+		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSource for ref '%s'" % ref_id)
+		return null
+	if cached:
+		return _world_object_source.get_legacy_base_record_cached(ref_id, record_type_out)
+	return _world_object_source.get_legacy_base_record(ref_id, record_type_out)
+
+
+func _get_creature_record(creature_id: String) -> Variant:
+	return _world_object_source.get_legacy_creature(creature_id) if _world_object_source != null else null
+
+
+func _get_leveled_creature_record(creature_id: String) -> Variant:
+	return _world_object_source.get_legacy_leveled_creature(creature_id) if _world_object_source != null else null
 
 ## Fix D (streaming_stutter_2026_04_25 plan) — task IDs of the off-thread
 ## *dispatcher* tasks (the worker variant of `preregister_cell_statics`).
@@ -317,7 +339,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
-	var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+	var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
 
 	if debug_lod and _inst_call_count <= 20:
 		Log.debug("streaming", "[LOD-INST] #%d ref=%s, type=%s, found=%s, cell=%s" % [
@@ -332,6 +354,35 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 		return null
 
 	var type_name: String = record_type[0] if record_type.size() > 0 else ""
+	return _instantiate_resolved_reference(ref, base_record, type_name, cell_grid, cache_item_id)
+
+
+func instantiate_world_object(object_id: StringName, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
+	_inst_call_count += 1
+	last_proximity_deferred = false
+	_reset_last_inst_diagnostics("world_object")
+	if _world_object_source == null:
+		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSource for object '%s'" % str(object_id))
+		last_inst_route = "skip"
+		return null
+	var payload: Dictionary = _world_object_source.resolve_gameplay_payload(object_id)
+	var ref: CellReference = payload.get("ref", null)
+	var base_record: Variant = payload.get("base_record", null)
+	var type_name: String = str(payload.get("type_name", ""))
+	if ref == null or base_record == null or type_name.is_empty():
+		last_type_name = "unknown"
+		last_inst_route = "skip"
+		return null
+	return _instantiate_resolved_reference(ref, base_record, type_name, cell_grid, cache_item_id)
+
+
+func _instantiate_resolved_reference(
+	ref: CellReference,
+	base_record: Variant,
+	type_name: String,
+	cell_grid: Vector2i = Vector2i.ZERO,
+	cache_item_id: String = "",
+) -> Node3D:
 	last_type_name = type_name
 	if type_name == "light" and not load_lights:
 		return null
@@ -782,7 +833,7 @@ func _worker_dispatch_preregister_cell(cell_record: Variant) -> void:
 		# null (no on-demand creation, which is main-thread-only). Skipped
 		# refs get registered later when the main-thread instantiation path
 		# touches them.
-		var base_record: Variant = ESMManager.get_any_record_cached(str(ref.ref_id), record_type)
+		var base_record: Variant = _get_base_record(str(ref.ref_id), record_type, true)
 		if base_record == null:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""
@@ -1729,12 +1780,12 @@ func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int
 	var creature_id: String = chosen.creature_id
 
 	# Look up the actual creature record
-	var creature: CreatureRecord = ESMManager.get_creature(creature_id)
+	var creature: CreatureRecord = _get_creature_record(creature_id)
 	if creature:
 		return creature
 
 	# Might be a nested leveled list - try to resolve recursively
-	var nested_leveled: LeveledCreatureRecord = ESMManager.get_leveled_creature(creature_id)
+	var nested_leveled: LeveledCreatureRecord = _get_leveled_creature_record(creature_id)
 	if nested_leveled:
 		return _resolve_leveled_creature(nested_leveled, player_level)
 

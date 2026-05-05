@@ -25,6 +25,7 @@ var _apply: Dictionary = {}
 
 ## Default states (for reset)
 var _defaults: Dictionary = {}
+var _aliases: Dictionary = {}
 
 
 ## Initialize with subsystem callbacks.
@@ -39,13 +40,25 @@ func setup(callbacks: Dictionary, defaults: Dictionary) -> void:
 		_apply[name].call(default_val)
 
 
+func register_alias(alias_name: String, canonical_name: String) -> void:
+	if canonical_name not in _flags:
+		Log.warn("toggles", "Cannot alias %s to unknown subsystem %s" % [alias_name, canonical_name])
+		return
+	_aliases[alias_name] = canonical_name
+
+
+func _canonical_name(name: String) -> String:
+	return str(_aliases.get(name, name))
+
+
 ## Get current state of a flag
 func get_flag(name: String) -> bool:
-	return _flags.get(name, false)
+	return _flags.get(_canonical_name(name), false)
 
 
 ## Set a flag and apply it
 func set_flag(name: String, enabled: bool) -> void:
+	name = _canonical_name(name)
 	if name not in _flags:
 		Log.warn("toggles", "Unknown subsystem: %s" % name)
 		return
@@ -59,6 +72,7 @@ func set_flag(name: String, enabled: bool) -> void:
 
 ## Toggle a flag (flip current state)
 func toggle_flag(name: String) -> void:
+	name = _canonical_name(name)
 	if name not in _flags:
 		Log.warn("toggles", "Unknown subsystem: %s" % name)
 		return
@@ -79,6 +93,7 @@ func disable_all() -> void:
 
 ## Enable ONLY the named flag, disable everything else
 func isolate(name: String) -> void:
+	name = _canonical_name(name)
 	if name not in _flags:
 		Log.warn("toggles", "Unknown subsystem: %s" % name)
 		return
@@ -147,6 +162,7 @@ func _cmd_toggle(args: Dictionary) -> String:
 			if parts.size() < 2:
 				return "Usage: toggle only <name>"
 			var name: String = parts[1]
+			name = _canonical_name(name)
 			if name not in _flags:
 				return "Unknown: '%s'. Use 'toggle list'." % name
 			isolate(name)
@@ -154,6 +170,7 @@ func _cmd_toggle(args: Dictionary) -> String:
 		_:
 			# Treat as toggle name
 			var name: String = subcmd
+			name = _canonical_name(name)
 			if name not in _flags:
 				return "Unknown: '%s'. Use 'toggle list'." % name
 			toggle_flag(name)

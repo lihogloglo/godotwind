@@ -53,10 +53,10 @@ const SAMPLE_DURATION_S: float = 15.0
 ## rendering-stack additions on top.
 static var LADDER_ADD_ORDER: Array[String] = [
 	"terrain",
-	"near_objects",
-	"mid_objects",
+	"near_gameplay",
+	"static_visuals",
 	"hlod",
-	"impostors",
+	"far_impostors",
 	"distant_lights",
 	"sky",
 	"ocean",

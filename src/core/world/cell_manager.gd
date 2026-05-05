@@ -26,6 +26,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const StaticShapeCacheScript := preload("res://src/core/world/static_shape_cache.gd")
 const CellStaticCollisionScript := preload("res://src/core/world/cell_static_collision.gd")
 const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
+const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 # Model loader for NIF loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
 
@@ -49,6 +50,7 @@ var _static_renderer: Node = null  # StaticObjectRenderer
 # per cell, parented to the cell_node so unload cascades cleanly.
 var _static_shape_cache: StaticShapeCacheScript = StaticShapeCacheScript.new()
 var _cell_static_collision: CellStaticCollisionScript = CellStaticCollisionScript.new()
+var _world_object_source: RefCounted = null
 const MAX_LIFECYCLE_EVENTS := 256
 var debug_lifecycle_capture_enabled: bool = false
 var _lifecycle_events: Array[Dictionary] = []
@@ -115,6 +117,63 @@ func _init() -> void:
 	_instantiator.shape_cache = _static_shape_cache
 
 
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
+	if _instantiator and _instantiator.has_method("set_world_object_source"):
+		_instantiator.call("set_world_object_source", source)
+
+
+func _get_cell_record(cell_name: String) -> Variant:
+	if _world_object_source == null:
+		Log.error("streaming", "CellManager has no WorldObjectSource for cell '%s'" % cell_name)
+		return null
+	return _world_object_source.get_legacy_cell(cell_name)
+
+
+func _get_exterior_cell_record(x: int, y: int) -> Variant:
+	if _world_object_source == null:
+		Log.error("streaming", "CellManager has no WorldObjectSource for exterior cell %d,%d" % [x, y])
+		return null
+	return _world_object_source.get_legacy_exterior_cell(Vector2i(x, y))
+
+
+func _get_base_record(ref_id: String, record_type_out: Array) -> Variant:
+	if _world_object_source == null:
+		Log.error("streaming", "CellManager has no WorldObjectSource for ref '%s'" % ref_id)
+		return null
+	return _world_object_source.get_legacy_base_record(ref_id, record_type_out)
+
+
+func _get_world_object_payload(record: RefCounted) -> Dictionary:
+	if record == null or _world_object_source == null:
+		return {}
+	var payload: Dictionary = _world_object_source.resolve_gameplay_payload(record.object_id)
+	if payload.is_empty():
+		return {}
+	payload["object_id"] = record.object_id
+	if not payload.has("model_path") or str(payload.get("model_path", "")).is_empty():
+		payload["model_path"] = record.model_path
+	return payload
+
+
+func _make_pending_payload(
+	ref: CellReference,
+	base_record: Variant,
+	type_name: String,
+	item_id: String,
+	cache_item_id: String,
+	object_id: StringName = &"",
+) -> Dictionary:
+	return {
+		"ref": ref,
+		"base_record": base_record,
+		"type_name": type_name,
+		"item_id": item_id,
+		"cache_item_id": cache_item_id,
+		"object_id": object_id,
+	}
+
+
 ## Initialize object pool for frequently used models
 ## parent_node: Node3D to store pooled objects when not in use (required for proper pooling)
 func init_object_pool(parent_node: Node3D = null) -> void:
@@ -177,7 +236,7 @@ func _sync_instantiator_config() -> void:
 
 ## Load an interior cell by name and return a Node3D containing all objects
 func load_cell(cell_name: String) -> Node3D:
-	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
+	var cell_record: CellRecord = _get_cell_record(cell_name)
 	if not cell_record:
 		push_error("CellManager: Cell not found: '%s'" % cell_name)
 		return null
@@ -187,7 +246,7 @@ func load_cell(cell_name: String) -> Node3D:
 
 ## Load an exterior cell by grid coordinates and return a Node3D containing all objects
 func load_exterior_cell(x: int, y: int) -> Node3D:
-	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
 	if not cell_record:
 		push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
 		return null
@@ -199,7 +258,7 @@ func load_exterior_cell(x: int, y: int) -> Node3D:
 ## Returns an empty Node3D container - terrain is handled separately via Terrain3D
 ## Objects are streamed by ObjectStreamer via position index
 func load_exterior_cell_metadata_only(x: int, y: int) -> Node3D:
-	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
 	if not cell_record:
 		push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
 		return null
@@ -220,7 +279,7 @@ func load_exterior_cell_metadata_only(x: int, y: int) -> Node3D:
 ## Load only NPCs/creatures into an existing cell node
 ## Used when toggling NPCs on after cells were loaded without them
 func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
-	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
 	if not cell_record:
 		push_warning("CellManager: Cannot load characters - cell not found: %d, %d" % [x, y])
 		return 0
@@ -238,7 +297,7 @@ func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
 	for ref: CellReference in cell_record.references:
 		# Get base record and type
 		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
 		if not base_record:
 			continue
 
@@ -326,7 +385,7 @@ func _group_references_for_instancing(references: Array, cell_grid: Vector2i) ->
 	for ref: CellReference in references:
 		# Get base record and type
 		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
 
 		if not base_record:
 			continue
@@ -710,7 +769,7 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 
 ## Get cell references for a given grid position
 func get_cell_references(x: int, y: int) -> Array:
-	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
 	if not cell_record:
 		return []
 	return cell_record.references
@@ -728,7 +787,7 @@ func instantiate_deferred_object(
 ) -> Node3D:
 	# Get record_id for collision shape lookup
 	var record_type: Array = [""]
-	var base_record: Variant = ESMManager.get_any_record(ref_id, record_type)
+	var base_record: Variant = _get_base_record(ref_id, record_type)
 
 	var record_id: String = ""
 	if base_record and "record_id" in base_record:
@@ -922,7 +981,8 @@ class AsyncCellRequest:
 	var load_profile: LoadProfile = null  # Per-request settings (null -> use exterior defaults)
 	var pending_parses: Dictionary[String, int] = {}  # model_path -> task_id
 	var parsed_results: Dictionary[String, NIFParseResult] = {}  # model_path -> NIFParseResult
-	var references_to_process: Array[CellReference] = []  # CellReference objects awaiting instantiation
+	var world_objects_to_classify: Array = []  # WorldObjectRecord objects for exterior generic-source classification
+	var references_to_process: Array = []  # Pending payload dictionaries awaiting model availability
 	var models_to_load: Dictionary = {}  # model_path -> {item_ids: Array}
 	var classify_index: int = 0
 	var classification_complete: bool = false
@@ -949,6 +1009,7 @@ var _async_requests: Dictionary[int, AsyncCellRequest] = {}
 class InstantiationEntry:
 	var request_id: int
 	var ref: CellReference
+	var world_object_id: StringName = &""
 	var model_path: String
 	var item_id: String
 	var cache_item_id: String = ""
@@ -1449,7 +1510,8 @@ func _publish_payload_model_callbacks(payload: CellPayloadScript, budget_usec: i
 			var ref_item_id: String = ref_info.item_id
 			var cache_item_id: String = ref_info.get("cache_item_id", item_id)
 			var type_name: String = str(ref_info.get("type_name", ""))
-			_queue_instantiation(request_id, ref, model_path, ref_item_id, cache_item_id, type_name)
+			var object_id: StringName = ref_info.get("object_id", &"")
+			_queue_instantiation(request_id, ref, model_path, ref_item_id, cache_item_id, type_name, object_id)
 		if _is_request_complete(request):
 			_finalize_request(request)
 		completed += 1
@@ -1607,7 +1669,8 @@ func _classify_request_refs(
 		return 0
 
 	var processed := 0
-	var refs: Array = request.cell_record.references
+	var refs: Array = request.world_objects_to_classify if not request.world_objects_to_classify.is_empty() else request.cell_record.references
+	var using_world_objects: bool = not request.world_objects_to_classify.is_empty()
 	var profile_start_us := Time.get_ticks_usec()
 	var profile_record_us := 0
 	var profile_route_us := 0
@@ -1623,18 +1686,36 @@ func _classify_request_refs(
 			break
 
 		var iter_start_us := Time.get_ticks_usec()
-		var ref: CellReference = refs[request.classify_index]
+		var ref: CellReference = null
+		var base_record: Variant = null
+		var type_name: String = ""
+		var object_id: StringName = &""
+		var model_path: String = ""
+		if using_world_objects:
+			var object_record: RefCounted = refs[request.classify_index]
+			var payload: Dictionary = _get_world_object_payload(object_record)
+			if payload.is_empty():
+				request.classify_index += 1
+				processed += 1
+				continue
+			ref = payload.get("ref", null)
+			base_record = payload.get("base_record", null)
+			type_name = str(payload.get("type_name", ""))
+			object_id = payload.get("object_id", &"")
+			model_path = str(payload.get("model_path", ""))
+		else:
+			ref = refs[request.classify_index]
 		request.classify_index += 1
 		processed += 1
 
 		var record_start_us := Time.get_ticks_usec()
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+		var record_type: Array = [type_name]
+		if not using_world_objects:
+			base_record = _get_base_record(str(ref.ref_id), record_type)
+			type_name = record_type[0] if record_type.size() > 0 else ""
 		profile_record_us += Time.get_ticks_usec() - record_start_us
 		if not base_record:
 			continue
-
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
 
 		# Skip types that don't use models or are disabled.
 		if type_name == "leveled_item":
@@ -1647,14 +1728,15 @@ func _classify_request_refs(
 			continue
 
 		var route_start_us := Time.get_ticks_usec()
-		var model_path: String = _get_model_path(base_record)
+		if model_path.is_empty():
+			model_path = _get_model_path(base_record)
 		if model_path.is_empty():
 			if request.payload != null:
 				if type_name == "light":
 					request.payload.add_light_ref("", "", ref)
 				else:
 					request.payload.add_interactive_ref(type_name, "", "", ref)
-			_queue_instantiation(request.request_id, ref, "", "", "", type_name)
+			_queue_instantiation(request.request_id, ref, "", "", "", type_name, object_id)
 			profile_route_us += Time.get_ticks_usec() - route_start_us
 			continue
 
@@ -1693,7 +1775,7 @@ func _classify_request_refs(
 				worst_model_path = model_path
 			if static_route:
 				continue
-			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id, type_name)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, load_item_id, type_name, object_id)
 			continue
 		profile_cache_us += Time.get_ticks_usec() - cache_start_us
 
@@ -1707,6 +1789,7 @@ func _classify_request_refs(
 					"cache_item_id": load_item_id,
 					"type_name": type_name,
 					"static_only": static_route,
+					"object_id": object_id,
 				})
 
 			_queue_model_request_start(request.request_id, model_path, load_item_id, pending_key)
@@ -1735,7 +1818,7 @@ func _classify_request_refs(
 		if item_id and item_id not in item_ids_array:
 			item_ids_array.append(item_id)
 		if not static_route:
-			request.references_to_process.append(ref)
+			request.references_to_process.append(_make_pending_payload(ref, base_record, type_name, item_id, item_id, object_id))
 		var iter_elapsed_parse := Time.get_ticks_usec() - iter_start_us
 		if iter_elapsed_parse > worst_ref_us:
 			worst_ref_us = iter_elapsed_parse
@@ -1953,7 +2036,7 @@ func request_exterior_cell_async(x: int, y: int, profile: LoadProfile = null) ->
 	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
 		return -1
 
-	var cell_record: CellRecord = ESMManager.get_exterior_cell(x, y)
+	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
 	if not cell_record:
 		return -1
 
@@ -1986,7 +2069,7 @@ func request_cell_async(cell_name: String, profile: LoadProfile = null) -> int:
 	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
 		return -1
 
-	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
+	var cell_record: CellRecord = _get_cell_record(cell_name)
 	if not cell_record:
 		return -1
 
@@ -2917,7 +3000,10 @@ func process_async_instantiation(
 			# else: worker failed (e.g. type unregistered at precompute time,
 			# e.g. clear() ran mid-flight). Drop silently.
 		else:
-			obj = _instantiator.instantiate_reference(ref, inst_cell_grid, cache_item_id)
+			if entry.world_object_id != &"" and _instantiator.has_method("instantiate_world_object"):
+				obj = _instantiator.call("instantiate_world_object", entry.world_object_id, inst_cell_grid, cache_item_id) as Node3D
+			else:
+				obj = _instantiator.instantiate_reference(ref, inst_cell_grid, cache_item_id)
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
 		var route_name: String = _instantiator.last_inst_route
 		if route_name.is_empty():
@@ -3147,7 +3233,7 @@ func _phase_a_dispatch_pass() -> void:
 		# Phase E gates need them. ESMManager is an autoload and worker-unsafe
 		# per plan §5.1. Cheap (dict lookup).
 		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(entry.ref.ref_id), record_type)
+		var base_record: Variant = _get_base_record(str(entry.ref.ref_id), record_type)
 		if base_record == null:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""
@@ -3385,6 +3471,9 @@ func _start_async_request(cell: CellRecord, grid: Vector2i, is_interior: bool, p
 	request.payload.configure_publish_driver(Callable(self, "_publish_payload_step"))
 	request.state = CellPayloadScript.State.PREPARING_PAYLOAD
 	request.payload.state = request.state
+	if not is_interior and _world_object_source != null:
+		var capability_mask: int = WorldObjectRecordScript.CAP_GAMEPLAY | WorldObjectRecordScript.CAP_STATIC_VISUAL
+		request.world_objects_to_classify = _world_object_source.get_objects_in_cell(grid, capability_mask)
 
 	# Create the cell node
 	request.cell_node = Node3D.new()
@@ -3483,23 +3572,30 @@ func _on_parse_completed(task_id: int, result: Variant) -> void:
 func _queue_references_for_model(request: AsyncCellRequest, model_path: String) -> void:
 	var remaining: Array = []
 
-	for ref: CellReference in request.references_to_process:
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-		if not base_record:
+	for pending: Variant in request.references_to_process:
+		var payload: Dictionary = pending if pending is Dictionary else {}
+		var ref: CellReference = payload.get("ref", pending)
+		var base_record: Variant = payload.get("base_record", null)
+		var type_name: String = str(payload.get("type_name", ""))
+		var item_id: String = str(payload.get("item_id", ""))
+		var cache_item_id: String = str(payload.get("cache_item_id", item_id))
+		var object_id: StringName = payload.get("object_id", &"")
+		if ref == null:
 			continue
+		if base_record == null:
+			var record_type: Array = [""]
+			base_record = _get_base_record(str(ref.ref_id), record_type)
+			type_name = record_type[0] if record_type.size() > 0 else ""
+			if "record_id" in base_record:
+				item_id = base_record.record_id
+				cache_item_id = item_id
 
 		var ref_model_path: String = _get_model_path(base_record)
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-		var item_id: String = ""
-		if "record_id" in base_record:
-			item_id = base_record.record_id
-
 		if ref_model_path.to_lower().replace("/", "\\") == model_path.to_lower().replace("/", "\\"):
 			# This reference uses the model that was just parsed
-			_queue_instantiation(request.request_id, ref, model_path, item_id, item_id, type_name)
+			_queue_instantiation(request.request_id, ref, model_path, item_id, cache_item_id, type_name, object_id)
 		else:
-			remaining.append(ref)
+			remaining.append(pending)
 
 	request.references_to_process = remaining
 
@@ -3931,6 +4027,7 @@ func _queue_instantiation(
 	item_id: String,
 	cache_item_id: String = "",
 	type_name: String = "",
+	object_id: StringName = &"",
 ) -> bool:
 	# Check queue limit to prevent memory buildup
 	if _instantiation_queue.size() >= MAX_INSTANTIATION_QUEUE:
@@ -3943,6 +4040,7 @@ func _queue_instantiation(
 	var entry := InstantiationEntry.new()
 	entry.request_id = request_id
 	entry.ref = ref
+	entry.world_object_id = object_id
 	entry.model_path = model_path
 	entry.item_id = item_id
 	entry.cache_item_id = cache_item_id
@@ -3958,9 +4056,9 @@ func _queue_instantiation(
 	if owning_request and owning_request.load_profile:
 		entry.load_profile = owning_request.load_profile
 		entry.interior_priority = owning_request.load_profile.interior_priority
-		if not model_path.is_empty():
+		if not model_path.is_empty() and object_id == &"":
 			var record_type: Array = [""]
-			var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
+			var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
 			if base_record != null:
 				var record_type_name: String = record_type[0] if record_type.size() > 0 else ""
 				if _should_prepare_static_ref(base_record, record_type_name, model_path, owning_request.load_profile, cache_item_id, ref):

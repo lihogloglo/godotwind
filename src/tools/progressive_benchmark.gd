@@ -17,15 +17,15 @@ extends Node
 
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 
-## Additive toggle order. HLOD is included before impostors now that distant
+## Additive toggle order. HLOD is included before FAR impostors now that distant
 ## rendering is default-on again. Ordering builds up the render cost from
 ## cheapest (terrain alone) to heaviest (terrain + everything).
 const PROGRESSIVE_ORDER: Array[String] = [
 	"terrain",
-	"near_objects",
-	"mid_objects",
+	"near_gameplay",
+	"static_visuals",
 	"hlod",
-	"impostors",
+	"far_impostors",
 	"shadows",
 	"postfx",
 	"sky",

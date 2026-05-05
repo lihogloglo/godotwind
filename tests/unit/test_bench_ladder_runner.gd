@@ -119,7 +119,7 @@ func test_ladder_add_order_covers_all_toggle_names() -> void:
 	# reading for every subsystem above it.
 	var expected_flags: Array[String] = [
 		"terrain", "ocean", "sky", "weather", "characters",
-		"impostors", "mid_objects", "near_objects", "hlod",
+		"far_impostors", "static_visuals", "near_gameplay", "hlod",
 		"distant_lights", "shadows", "postfx",
 	]
 	var ladder: Array[String] = BenchLadderRunnerScript.LADDER_ADD_ORDER

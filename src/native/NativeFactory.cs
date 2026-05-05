@@ -323,6 +323,20 @@ public partial class NativeFactory : RefCounted
     }
 
     // =========================================================================
+    // Generic World Object Index
+    // =========================================================================
+
+    /// <summary>
+    /// Create a generic world-object spatial index. Game adapters feed stable
+    /// object IDs and capability flags; render tiers query it without knowing
+    /// about ESM, CellReference, or any other source format.
+    /// </summary>
+    public NativeWorldObjectIndex CreateWorldObjectIndex()
+    {
+        return new NativeWorldObjectIndex();
+    }
+
+    // =========================================================================
     // Utility
     // =========================================================================
 

@@ -13,14 +13,14 @@ const OUTPUT_DIR_BASE := "user://benchmark_results"
 ## Runtime filters skip flags that were already OFF at sweep start, so launch
 ## isolation flags such as --no-hlod / --no-impostors remain in force.
 const SWEEP_ORDER: Array[String] = [
-	"near_objects",
-	"mid_objects",
+	"near_gameplay",
+	"static_visuals",
 	"distant_lights",
 	"shadows",
 	"postfx",
 	"sky",
 	"weather",
-	"impostors",
+	"far_impostors",
 	"hlod",
 	"ocean",
 	"characters",

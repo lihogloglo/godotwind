@@ -31,6 +31,7 @@ const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
@@ -132,6 +133,7 @@ var native_streaming_manager: Node3D = null  # NativeStreamingManager reference 
 var terrain_manager: TerrainManager = null  # TerrainManager (for prebaking)
 var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
+var world_object_source: RefCounted = null
 var profiler: PerformanceProfiler = null  # PerformanceProfiler
 var _ocean_controls: OceanControls = null  # OceanControls (ocean/water system)
 var _env_controls: EnvironmentControls = null  # EnvironmentControls (shader effects + sky)
@@ -307,6 +309,8 @@ func _ready() -> void:
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
 	cell_manager = CellManagerScript.new()
+	world_object_source = MorrowindWorldObjectSourceScript.new()
+	cell_manager.set_world_object_source(world_object_source)
 	# NPCs/creatures controlled by _show_characters toggle (default OFF for testing)
 	cell_manager.load_npcs = _show_characters
 	cell_manager.load_creatures = _show_characters
@@ -1831,11 +1835,11 @@ func _setup_subsystem_toggles() -> void:
 			if _weather_controls: _weather_controls.on_weather_toggled(on),
 		"characters": func(on: bool) -> void:
 			_on_show_characters_toggled(on),
-		"impostors": func(on: bool) -> void:
+		"far_impostors": func(on: bool) -> void:
 			if native_streaming_manager: native_streaming_manager.set_impostors_visible(on),
-		"mid_objects": func(on: bool) -> void:
+		"static_visuals": func(on: bool) -> void:
 			if native_streaming_manager: native_streaming_manager.set_mid_tier_visible(on),
-		"near_objects": func(on: bool) -> void:
+		"near_gameplay": func(on: bool) -> void:
 			if native_streaming_manager: native_streaming_manager.set_near_tier_visible(on),
 		"hlod": func(on: bool) -> void:
 			if native_streaming_manager: native_streaming_manager.set_hlod_visible(on),
@@ -1868,9 +1872,9 @@ func _setup_subsystem_toggles() -> void:
 		"sky": _env_controls.show_sky,
 		"weather": _weather_controls.weather_enabled,
 		"characters": _show_characters,
-		"impostors": true,
-		"mid_objects": true,
-		"near_objects": true,
+		"far_impostors": true,
+		"static_visuals": true,
+		"near_gameplay": true,
 		"hlod": true,
 		"distant_lights": true,
 		"shadows": false,
@@ -1878,14 +1882,17 @@ func _setup_subsystem_toggles() -> void:
 	}
 
 	_subsystem_toggles.setup(callbacks, defaults)
+	_subsystem_toggles.register_alias("impostors", "far_impostors")
+	_subsystem_toggles.register_alias("mid_objects", "static_visuals")
+	_subsystem_toggles.register_alias("near_objects", "near_gameplay")
 	if native_streaming_manager != null:
-		native_streaming_manager.call("set_impostors_visible", bool(defaults.get("impostors", true)))
+		native_streaming_manager.call("set_impostors_visible", bool(defaults.get("far_impostors", true)))
 		native_streaming_manager.call("set_hlod_visible", bool(defaults.get("hlod", false)))
 		native_streaming_manager.call("set_distant_lights_visible", bool(defaults.get("distant_lights", true)))
 		var tier_stats: Dictionary = native_streaming_manager.call("get_stats")
 		Log.info("streaming", "Distant tier defaults synced: HLOD=%s FAR=%s distant_lights=%s" % [
 			str(defaults.get("hlod", false)),
-			str(defaults.get("impostors", true)),
+			str(defaults.get("far_impostors", true)),
 			str(defaults.get("distant_lights", true)),
 		])
 		Log.info("streaming", "Distant tier state: view=%dm FAR enabled=%s FAR instances=%d HLOD initialized=%s HLOD active=%s HLOD cells=%d" % [
@@ -1916,12 +1923,12 @@ func _setup_subsystem_toggles() -> void:
 		var next_arg: String = runtime_args[i + 1] if i + 1 < runtime_args.size() else ""
 		if a == "--near-only":
 			_subsystem_toggles.set_flag("hlod", false)
-			_subsystem_toggles.set_flag("impostors", false)
+			_subsystem_toggles.set_flag("far_impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
 			_log("[color=yellow]--near-only: HLOD/FAR/distant lights OFF; MID fixed at 300m[/color]")
 		elif a == "--near-mid-only":
 			_subsystem_toggles.set_flag("hlod", false)
-			_subsystem_toggles.set_flag("impostors", false)
+			_subsystem_toggles.set_flag("far_impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
 			_subsystem_toggles.set_flag("sky", false)
 			_subsystem_toggles.set_flag("weather", false)
@@ -1936,10 +1943,10 @@ func _setup_subsystem_toggles() -> void:
 		elif a == "--hlod-only":
 			_hlod_flyby_mode = true
 			_subsystem_toggles.set_flag("terrain", true)
-			_subsystem_toggles.set_flag("near_objects", false)
-			_subsystem_toggles.set_flag("mid_objects", false)
+			_subsystem_toggles.set_flag("near_gameplay", false)
+			_subsystem_toggles.set_flag("static_visuals", false)
 			_subsystem_toggles.set_flag("hlod", true)
-			_subsystem_toggles.set_flag("impostors", false)
+			_subsystem_toggles.set_flag("far_impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
 			_subsystem_toggles.set_flag("sky", false)
 			_subsystem_toggles.set_flag("weather", false)
@@ -1952,7 +1959,7 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("hlod", false)
 			_log("[color=yellow]--no-hlod: HLOD OFF; MID still fixed at 300m[/color]")
 		elif a == "--no-impostors":
-			_subsystem_toggles.set_flag("impostors", false)
+			_subsystem_toggles.set_flag("far_impostors", false)
 			_log("[color=yellow]--no-impostors: FAR impostors OFF[/color]")
 		elif a == "--no-distant-lights":
 			_subsystem_toggles.set_flag("distant_lights", false)
@@ -2171,6 +2178,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	native_streaming_manager.set_view_distance_meters(_current_view_distance, false)
 	native_streaming_manager.debug_enabled = false  # Disabled for performance (enable with toggle_debug command)
+	native_streaming_manager.set_world_object_source(world_object_source)
 	
 	add_child(native_streaming_manager)
 	

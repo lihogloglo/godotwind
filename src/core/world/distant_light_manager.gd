@@ -11,6 +11,7 @@ extends RefCounted
 
 const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 
 #region Configuration
 
@@ -21,6 +22,11 @@ const BASE_SPRITE_SIZE: float = 3.0
 const MIN_SCREEN_FACTOR: float = 0.005
 const MAX_INSTANCES: int = 4096
 const MW_LIGHT_SCALE: float = 1.0 / 70.0
+const LIGHT_FLAG_FLICKER: int = 0x0008
+const LIGHT_FLAG_FIRE: int = 0x0010
+const LIGHT_FLAG_FLICKER_SLOW: int = 0x0040
+const LIGHT_FLAG_PULSE: int = 0x0080
+const LIGHT_FLAG_PULSE_SLOW: int = 0x0100
 const DUSK_THRESHOLD: float = 0.15
 const NIGHT_THRESHOLD: float = -0.05
 
@@ -67,6 +73,7 @@ var _material: ShaderMaterial = null
 var _quad_mesh: QuadMesh = null
 var _is_setup: bool = false
 var _streaming_enabled: bool = true
+var _world_object_source: RefCounted = null
 
 var _lights: Dictionary[int, LightData] = {}
 var _next_id: int = 0
@@ -139,13 +146,19 @@ func scan_cells_around(center_cell: Vector2i, radius_cells: int) -> void:
 
 
 ## Process pending scans, rebuild dirty pages, and update the shader uniforms.
-func update(camera_pos: Vector3, sun_elevation_rad: float) -> void:
+func update(camera_pos: Vector3, sun_elevation_rad: float, deadline_usec: int = 0) -> void:
 	if not _is_setup or not _streaming_enabled:
 		return
 
-	_process_full_ring_enum()
-	_process_pending_scans()
-	_process_dirty_page_rebuilds()
+	if _deadline_exhausted(deadline_usec):
+		return
+	_process_full_ring_enum(deadline_usec)
+	if _deadline_exhausted(deadline_usec):
+		return
+	_process_pending_scans(deadline_usec)
+	if _deadline_exhausted(deadline_usec):
+		return
+	_process_dirty_page_rebuilds(deadline_usec)
 
 	if sun_elevation_rad <= NIGHT_THRESHOLD:
 		_night_factor = 1.0
@@ -184,6 +197,10 @@ func set_visible(visible: bool) -> void:
 	set_enabled(visible)
 
 
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
+
+
 func cleanup() -> void:
 	for page_key: Vector2i in _pages.keys():
 		_free_page(page_key)
@@ -217,7 +234,7 @@ func _update_ring_full(center_cell: Vector2i, radius_cells: int) -> void:
 	_full_ring_dy = -radius_cells
 
 
-func _process_full_ring_enum() -> void:
+func _process_full_ring_enum(deadline_usec: int = 0) -> void:
 	if not _full_ring_active:
 		_stats["distant_light_full_enum_us"] = 0
 		_stats["distant_light_full_enum_cells"] = 0
@@ -230,7 +247,10 @@ func _process_full_ring_enum() -> void:
 	var radius_sq := radius_meters * radius_meters
 
 	while _full_ring_dy <= _full_ring_radius and visited < FULL_RING_ENUM_CELLS_MAX_PER_FRAME:
-		if visited > 0 and Time.get_ticks_usec() - start_usec >= FULL_RING_ENUM_BUDGET_USEC:
+		var now_usec := Time.get_ticks_usec()
+		if _deadline_exhausted(deadline_usec, now_usec):
+			break
+		if visited > 0 and now_usec - start_usec >= FULL_RING_ENUM_BUDGET_USEC:
 			break
 		var grid := Vector2i(_full_ring_center.x + _full_ring_dx, _full_ring_center.y + _full_ring_dy)
 		if DU.cell_distance_squared(_full_ring_center, grid) <= radius_sq:
@@ -324,7 +344,7 @@ func _queue_cells(cells: Array[Vector2i]) -> void:
 
 #region Scanning and lifetime
 
-func _process_pending_scans() -> void:
+func _process_pending_scans(deadline_usec: int = 0) -> void:
 	if _pending_cells.is_empty() or _lights.size() >= MAX_INSTANCES:
 		_stats["distant_light_scan_us"] = 0
 		_stats["distant_light_cells_scanned"] = 0
@@ -333,13 +353,16 @@ func _process_pending_scans() -> void:
 	var start_usec := Time.get_ticks_usec()
 	var scanned := 0
 	while not _pending_cells.is_empty() and scanned < SCAN_CELLS_MAX_PER_FRAME:
-		if scanned > 0 and Time.get_ticks_usec() - start_usec >= SCAN_BUDGET_USEC:
+		var now_usec := Time.get_ticks_usec()
+		if _deadline_exhausted(deadline_usec, now_usec):
+			break
+		if scanned > 0 and now_usec - start_usec >= SCAN_BUDGET_USEC:
 			break
 		var grid: Vector2i = _pending_cells.pop_back()
 		_pending_cell_set.erase(grid)
 		if grid not in _loaded_cells:
 			continue
-		_scan_cell(grid)
+		_scan_cell(grid, deadline_usec)
 		scanned += 1
 		if _lights.size() >= MAX_INSTANCES:
 			break
@@ -349,29 +372,27 @@ func _process_pending_scans() -> void:
 	_refresh_stats()
 
 
-func _scan_cell(grid: Vector2i) -> void:
-	var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
-	if cell == null:
+func _scan_cell(grid: Vector2i, deadline_usec: int = 0) -> void:
+	if _world_object_source == null:
 		return
 
-	for ref: CellReference in cell.references:
+	var records: Array = _world_object_source.get_objects_in_cell(grid, WorldObjectRecordScript.CAP_DISTANT_LIGHT)
+	for record: RefCounted in records:
+		if _deadline_exhausted(deadline_usec):
+			return
 		if _lights.size() >= MAX_INSTANCES:
 			return
 
-		var ref_id_lower := str(ref.ref_id).to_lower()
-		var light_rec: LightRecord = ESMManager.lights.get(ref_id_lower)
-		if light_rec == null:
-			continue
-		if light_rec.is_off_by_default() or light_rec.radius <= 0 or light_rec.is_negative():
+		if record.light_radius <= 0.0:
 			continue
 
 		var data := LightData.new()
 		data.id = _next_id
 		data.cell_grid = grid
-		data.position = CS.vector_to_godot(ref.position)
-		data.color = light_rec.color
-		data.radius = float(light_rec.radius) * MW_LIGHT_SCALE
-		data.flags = light_rec.flags
+		data.position = record.transform.origin
+		data.color = record.light_color
+		data.radius = record.light_radius
+		data.flags = record.light_flags
 		data.page_key = _page_key_for_position(data.position)
 		_next_id += 1
 
@@ -490,7 +511,7 @@ func _mark_page_dirty(page_key: Vector2i) -> void:
 	_stats["distant_light_dirty_pages"] = _dirty_pages.size()
 
 
-func _process_dirty_page_rebuilds() -> void:
+func _process_dirty_page_rebuilds(deadline_usec: int = 0) -> void:
 	if _dirty_pages.is_empty():
 		_stats["distant_light_pages_rebuilt"] = 0
 		_stats["distant_light_rebuild_us"] = 0
@@ -499,10 +520,17 @@ func _process_dirty_page_rebuilds() -> void:
 	var start_usec := Time.get_ticks_usec()
 	var rebuilt := 0
 	while not _dirty_pages.is_empty() and rebuilt < PAGE_REBUILD_MAX_PER_FRAME:
-		if rebuilt > 0 and Time.get_ticks_usec() - start_usec >= PAGE_REBUILD_BUDGET_USEC:
+		var now_usec := Time.get_ticks_usec()
+		if _deadline_exhausted(deadline_usec, now_usec):
+			break
+		if rebuilt > 0 and now_usec - start_usec >= PAGE_REBUILD_BUDGET_USEC:
 			break
 		var page_key: Vector2i = _dirty_pages.pop_back()
 		_dirty_page_set.erase(page_key)
+		var page: LightPage = _pages.get(page_key)
+		if deadline_usec > 0 and page != null and page.light_ids.size() > 128:
+			_mark_page_dirty(page_key)
+			break
 		_rebuild_page(page_key)
 		rebuilt += 1
 
@@ -511,6 +539,14 @@ func _process_dirty_page_rebuilds() -> void:
 	_stats["distant_light_rebuild_us"] = elapsed
 	_stats["distant_light_rebuild_max_us"] = maxi(int(_stats.get("distant_light_rebuild_max_us", 0)), elapsed)
 	_refresh_stats()
+
+
+func _deadline_exhausted(deadline_usec: int, now_usec: int = 0) -> bool:
+	if deadline_usec <= 0:
+		return false
+	if now_usec <= 0:
+		now_usec = Time.get_ticks_usec()
+	return now_usec >= deadline_usec
 
 
 func _rebuild_page(page_key: Vector2i) -> void:
@@ -540,8 +576,8 @@ func _rebuild_page(page_key: Vector2i) -> void:
 		var data: LightData = _lights[live_ids[i]]
 		var size_scale := clampf(data.radius / 3.0, 0.5, 4.0)
 		var local_pos := data.position - page.center
-		var is_fire := 1.0 if (data.flags & LightRecord.FLAG_FIRE) != 0 else 0.0
-		var has_flicker := 1.0 if (data.flags & (LightRecord.FLAG_FLICKER | LightRecord.FLAG_FLICKER_SLOW | LightRecord.FLAG_PULSE | LightRecord.FLAG_PULSE_SLOW)) != 0 else 0.0
+		var is_fire := 1.0 if (data.flags & LIGHT_FLAG_FIRE) != 0 else 0.0
+		var has_flicker := 1.0 if (data.flags & (LIGHT_FLAG_FLICKER | LIGHT_FLAG_FLICKER_SLOW | LIGHT_FLAG_PULSE | LIGHT_FLAG_PULSE_SLOW)) != 0 else 0.0
 		var phase_offset := fmod(float(data.id) * 0.618033988749, 1.0)
 
 		var offset := i * stride

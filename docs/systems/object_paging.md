@@ -2,9 +2,10 @@
 
 Current HLOD deep dive. ObjectPaging is the only active HLOD path.
 
-It adapts OpenMW-style object paging to Godot: collect distant static refs by
-distance-adaptive chunks, merge eligible geometry off-thread as pure data, then
-publish one raw `RenderingServer` chunk instance on the main thread.
+It adapts OpenMW-style object paging to Godot: collect distant static-capable
+world object records by distance-adaptive chunks, merge eligible geometry
+off-thread as pure data, then publish one raw `RenderingServer` chunk instance
+on the main thread.
 
 ## Status
 
@@ -39,6 +40,8 @@ Console surface:
 | `src/core/world/object_paging.gd` | HLOD orchestrator: desired chunks, ModelLoader-backed prototype warmup, worker queue, completion queue, active chunk lifetime |
 | `src/core/world/object_paging_kernel.gd` | GDScript wrapper around the native merge kernel and mesh assembly helpers |
 | `src/native/NativeObjectPagingKernel.cs` | Hot merge kernel: packed-array concatenation, material grouping, cost/benefit decisions |
+| `src/core/world/world_object_source.gd` | Generic manifest/source interface used by HLOD, FAR impostors, distant lights, and streaming orchestration |
+| `src/core/world/morrowind/morrowind_world_object_source.gd` | Morrowind adapter that converts ESM cell refs into generic object records |
 | `src/core/world/distance_utils.gd` | Paging constants, chunk keys, chunk centers, tier helpers |
 | `src/core/world/object_position_index.gd` | Immutable spatial index queried by chunk |
 | `tests/unit/test_object_paging_kernel.gd` | Kernel and paging math coverage |
@@ -72,9 +75,10 @@ do not duplicate coverage.
 
 The filter order is:
 
-1. Type eligibility.
-   Static durable refs are eligible in larger chunks. More interactive or
-   gameplay-shaped records are restricted to the safety tier or rejected.
+1. Capability and category eligibility.
+   The source must mark an object `CAP_HLOD`. Static durable categories are
+   eligible in larger chunks. More interactive or gameplay-shaped records are
+   restricted to the safety tier or rejected.
 
 2. Projected-size filter.
    Uses the OpenMW form:
@@ -150,9 +154,10 @@ Current handoff:
 
 This is intentionally non-overlapping. HLOD coverage gaps should be diagnosed
 as HLOD coverage gaps rather than hidden by widening MID or starting FAR early.
-The active coverage manifest intentionally separates rendered HLOD refs from
-complete MID bucket counts. Partial buckets still render in HLOD, but only
-complete buckets are safe to use for MID suppression.
+The active coverage manifest intentionally separates rendered HLOD object ids
+from complete static-bucket counts. Partial buckets still render in HLOD, but
+only complete buckets are safe to use for static-visual suppression. FAR
+suppression uses rendered object ids/pages, not bucket completeness.
 
 Any change to these ranges must retune live bucket/chunk/page visibility, not
 only future instances.

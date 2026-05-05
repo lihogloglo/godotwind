@@ -51,7 +51,8 @@ class RefInput:
 	var ref_transform: Transform3D
 	var sub_meshes: Array  ## Array[SubMeshInput]
 	var bucket_key: String = ""  ## Source CellStaticBucket key for whole-bucket HLOD ownership.
-	var source_ref_num: int = -1  ## ESM ref_num for FAR coverage ownership.
+	var source_ref_num: int = -1  ## Legacy source ref number, kept for old tests/tools.
+	var source_object_id: StringName = &""  ## Generic object id for FAR coverage ownership.
 	var rs2: float = 0.0         ## mesh_radius² × scale² (Phase 2 size metric)
 	var dist_sq: float = 0.0     ## pos.distance_squared_to(camera) at merge-request time
 	var surface_count: int = 0   ## Estimated source surfaces for priority/cap selection.

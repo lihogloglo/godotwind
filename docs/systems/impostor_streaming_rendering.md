@@ -1,7 +1,7 @@
 # Impostor Streaming And Rendering
 
 Date: 2026-05-02
-Owner: impostors
+Owner: far_impostors
 Scope: FAR-tier impostor loading, streaming, rendering, and its handoff with MID/HLOD
 
 This document is the focused FAR-tier companion to
@@ -182,7 +182,8 @@ Current files:
 Current flow:
 
 1. `NativeStreamingManager` creates `NativeImpostorRenderer` as
-   `ImpostorManager` and passes it an `ImpostorCandidates` helper.
+   `ImpostorManager`, passes it an `ImpostorCandidates` helper, and injects the
+   active `WorldObjectSource`.
 2. On camera cell changes, `NativeStreamingManager` defers the FAR area update
    to a later frame, then calls `update_impostor_area(_camera_cell,
    impostor_radius_cells)`.
@@ -191,9 +192,10 @@ Current flow:
    large moves use a full ring recalculation.
 4. `_process_pending_impostor_cells()` consumes queued cells under a time
    budget with intra-cell resume.
-5. `_load_impostors_from_cell_record_budgeted()` scans ESM refs, maps ref IDs
-   to model paths, filters through `ImpostorCandidates`, reads bake metadata,
-   and creates pending or live impostors.
+5. `_load_impostors_from_cell_record_budgeted()` asks the source for
+   impostor-capable `WorldObjectRecord`s, filters through `ImpostorCandidates`,
+   reads bake metadata, and creates pending or live impostors keyed by stable
+   object id.
 6. Texture and normal assets are loaded through `WorkerThreadPool` tasks, then
    copied into albedo/normal `Texture2DArray` inputs on the main thread.
 7. `_rebuild_texture_array()` moves CPU image conversion to a worker task, but
@@ -202,6 +204,10 @@ Current flow:
    `PackedFloat32Array`, sets page `instance_count`, and calls `set_buffer()`.
 9. Spatial `ImpostorPage_*` `MultiMeshInstance3D` nodes render FAR impostors
    with custom data: albedo layer, yaw, normal layer, and bake variant.
+
+The FAR renderer does not query `ESMManager` directly. Morrowind-specific cell
+lookup, ref numbers, model conventions, and coordinate conversion live in the
+world-object adapter.
 
 ### Current Strengths
 

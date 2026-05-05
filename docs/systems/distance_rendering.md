@@ -8,10 +8,15 @@ system docs linked below.
 
 | Tier | Runtime range | Owner | Technique | Status |
 | --- | --- | --- | --- | --- |
-| NEAR | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior | Working |
-| MID | Fixed 150-300m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
-| HLOD | Fixed 300-1000m, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies: static refs are merged into chunk meshes and published as raw RS instances. | Working, default-on |
-| FAR | Fixed 1000-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages | Working |
+| NEAR gameplay | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior. Toggle disables visibility, processing, and collision/area activation. | Working |
+| Static visuals | Fixed 150-300m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
+| HLOD | Fixed 300-1000m, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies from generic world object records: static-capable objects are merged into chunk meshes and published as raw RS instances. | Working, default-on |
+| FAR impostors | Fixed 1000-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages from generic impostor-capable records | Working |
+
+All tier modules are fed through `WorldObjectSource` manifests. The Morrowind
+implementation lives in `src/core/world/morrowind/morrowind_world_object_source.gd`;
+core render tiers consume stable object ids, transforms, model paths,
+categories, and capability flags rather than querying `ESMManager` directly.
 
 The user-facing distance slider is an object view-distance cap in meters. It
 does not expand MID. If the cap is below 300m, HLOD and FAR do not load. If the
@@ -93,6 +98,21 @@ Deep dive: `docs/systems/object_paging.md`.
 FAR impostors begin at 1000m when the view-distance cap is above 1000m.
 
 Deep dive: `docs/systems/impostor_streaming_rendering.md`.
+
+## Toggle Contract
+
+Canonical runtime toggle names:
+
+- `near_gameplay`
+- `static_visuals`
+- `hlod`
+- `far_impostors`
+- `distant_lights`
+
+Temporary compatibility aliases remain for benchmark scripts and console muscle
+memory: `near_objects -> near_gameplay`, `mid_objects -> static_visuals`, and
+`impostors -> far_impostors`. New docs, HUDs, benchmark ladders, and CLI
+messages should use the canonical names.
 
 ## Anti-Patterns
 

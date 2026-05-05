@@ -18,6 +18,12 @@ If a C# file changed, run `dotnet build Godotwind.sln` before launching Godot.
 If neither visual launch nor automated benchmark can be run, say exactly why in
 the final response.
 
+## Plain-English Work Summary Rule
+
+Always explain in plain English what you changed and what you verified. Do not
+only list file names, commands, or implementation details; include the practical
+effect the user should expect to see.
+
 Not a faithful port — "Morrowind if it was made in 2025 with modern Godot."
 Best-in-class open-world rendering in Godot, using Morrowind as the data source.
 

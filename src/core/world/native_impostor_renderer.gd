@@ -16,6 +16,7 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 # We assume global CS class is available or we use duplicated logic?
 # Best to rely on the fact that CellManager usually handles this.
 # Note: Since we are reading raw ESM data here, we might need CoordinateSystem.
@@ -129,6 +130,7 @@ var _impostor_normal_images: Dictionary[String, Image] = {}
 var _texture_jobs_active: bool = false
 var _pending_job_ids: Dictionary[String, int] = {} # hash_key -> job_id
 var _queued_texture_jobs: Array[Dictionary] = []
+var _queued_texture_job_keys: Dictionary[String, bool] = {}
 var _pending_job_results: Dictionary[String, Dictionary] = {}
 var _pending_job_results_mutex: Mutex = Mutex.new()
 
@@ -177,6 +179,23 @@ var _impostor_load_budget_usec: float = 4000.0  # Time budget in microseconds (4
 var _has_resume: bool = false
 var _resume_cell_grid: Vector2i = Vector2i.ZERO
 var _resume_ref_index: int = 0
+
+## Resumable full-area recalc. Initial/teleport FAR rings can cover thousands
+## of cells, so the scan itself is publication work and must yield to the
+## shared conductor instead of building the whole queue in one frame.
+var _area_update_active: bool = false
+var _area_update_center: Vector2i = Vector2i.ZERO
+var _area_update_radius: int = 0
+var _area_update_radius_sq: float = 0.0
+var _area_update_dx: int = 0
+var _area_update_dy: int = 0
+var _area_update_phase: int = 0
+var _area_update_desired_cells: Dictionary = {}
+var _area_update_loaded_keys: Array[Vector2i] = []
+var _area_update_loaded_index: int = 0
+var _area_update_desired_keys: Array = []
+var _area_update_desired_index: int = 0
+var _area_update_new_cells: int = 0
 
 ## Statistics
 var _stats: Dictionary = {
@@ -236,7 +255,9 @@ var _screen_size_histogram_logged: bool = false
 
 ## Previous center for differential impostor updates
 var _prev_impostor_center: Vector2i = Vector2i(999999, 999999)
-var _hlod_covered_ref_nums: Dictionary = {}
+var _prev_impostor_radius: int = -1
+var _hlod_covered_object_ids: Dictionary = {}
+var _world_object_source: RefCounted = null
 var _fast_cleanup_done: bool = false
 
 #endregion
@@ -250,6 +271,7 @@ class PendingImpostor:
 	var atlas_size: int = 512
 	var ref_id: String = ""
 	var ref_num: int = 0
+	var source_object_id: StringName = &""
 	var position: Vector3
 	var rotation: Vector3
 	var scale: Vector3
@@ -267,6 +289,7 @@ class ImpostorData:
 	var slab_index: int = 0
 	var ref_id: String = ""
 	var ref_num: int = 0
+	var source_object_id: StringName = &""
 	var model_path: String
 	var texture_hash: String
 	var texture_index: int
@@ -323,8 +346,9 @@ func set_enabled(enabled: bool) -> void:
 		_ensure_runtime_resources()
 		_streaming_enabled = true
 		visible = true
-		set_process(true)
+		set_process(false)
 		_prev_impostor_center = Vector2i(999999, 999999)
+		_prev_impostor_radius = -1
 	else:
 		release_runtime_resources()
 
@@ -629,8 +653,16 @@ func set_visibility_range(begin_distance: float, end_distance: float, fade_margi
 
 
 func set_hlod_covered_ref_nums(covered_ref_nums: Dictionary) -> void:
-	_hlod_covered_ref_nums = covered_ref_nums.duplicate()
+	set_hlod_covered_object_ids(covered_ref_nums)
+
+
+func set_hlod_covered_object_ids(covered_object_ids: Dictionary) -> void:
+	_hlod_covered_object_ids = covered_object_ids.duplicate()
 	_apply_visibility_ranges_to_pages()
+
+
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
 
 #endregion
 
@@ -886,6 +918,7 @@ func _stop_texture_jobs() -> void:
 	_pending_job_results.clear()
 	_pending_job_results_mutex.unlock()
 	_queued_texture_jobs.clear()
+	_queued_texture_job_keys.clear()
 	_pending_job_ids.clear()
 	_texture_jobs_active = false
 
@@ -898,12 +931,14 @@ func _dispatch_texture_jobs() -> void:
 		var job: Dictionary = _queued_texture_jobs.back()
 		_queued_texture_jobs.pop_back()
 		var job_key := String(job.get("job_key", ""))
+		_queued_texture_job_keys.erase(job_key)
 		if job_key.is_empty() or job_key in _pending_job_ids:
 			continue
 		var hash_key := String(job.get("hash_key", ""))
 		var texture_path := String(job.get("path", ""))
 		var is_normal := bool(job.get("is_normal", false))
 		var is_res := bool(job.get("is_res", false))
+		var atlas_size := int(job.get("atlas_size", DEFAULT_ATLAS_SIZE))
 		var task_id := WorkerThreadPool.add_task(func() -> void:
 			var image: Image = null
 			if is_normal:
@@ -913,6 +948,8 @@ func _dispatch_texture_jobs() -> void:
 				var err := image.load(texture_path)
 				if err != OK:
 					image = null
+			if image != null and image.get_size() != Vector2i(atlas_size, atlas_size):
+				image.resize(atlas_size, atlas_size, Image.INTERPOLATE_LANCZOS)
 			var result := {
 				"hash_key": hash_key,
 				"image": image,
@@ -930,10 +967,7 @@ func _dispatch_texture_jobs() -> void:
 
 
 func _is_texture_job_queued(job_key: String) -> bool:
-	for job: Dictionary in _queued_texture_jobs:
-		if String(job.get("job_key", "")) == job_key:
-			return true
-	return false
+	return _queued_texture_job_keys.has(job_key)
 
 
 func _submit_texture_load_job(hash_key: String, texture_path: String) -> void:
@@ -949,7 +983,9 @@ func _submit_texture_load_job(hash_key: String, texture_path: String) -> void:
 		"path": texture_path,
 		"is_normal": false,
 		"is_res": false,
+		"atlas_size": _hash_to_atlas_size.get(hash_key, DEFAULT_ATLAS_SIZE),
 	})
+	_queued_texture_job_keys[job_key] = true
 	_dispatch_texture_jobs()
 
 
@@ -984,7 +1020,9 @@ func _submit_normal_load_job(hash_key: String, normal_path: String, is_res: bool
 		"path": normal_path,
 		"is_normal": true,
 		"is_res": is_res,
+		"atlas_size": _hash_to_atlas_size.get(hash_key, DEFAULT_ATLAS_SIZE),
 	})
+	_queued_texture_job_keys[normal_job_key] = true
 	_dispatch_texture_jobs()
 
 
@@ -1023,8 +1061,9 @@ func _on_normal_loaded(hash_key: String, image: Image) -> void:
 		_drop_pending_impostor_hash(hash_key)
 		return
 	# Resize to standard size (256×256 matches albedo array resolution)
-	var img_copy := image.duplicate() as Image
+	var img_copy := image
 	if img_copy.get_size() != Vector2i(bucket.atlas_size, bucket.atlas_size):
+		img_copy = image.duplicate() as Image
 		img_copy.resize(bucket.atlas_size, bucket.atlas_size, Image.INTERPOLATE_LANCZOS)
 
 	_impostor_normal_images[hash_key] = img_copy
@@ -1075,25 +1114,43 @@ const COMPACTION_INTERVAL: float = 5.0  # Run compaction check every 5 seconds
 const COMPACTION_THRESHOLD: float = 0.75  # Compact when 75% full
 
 func _process(delta: float) -> void:
+	process_publication_slice(delta)
+
+
+func process_publication_slice(delta: float, deadline_usec: int = 0) -> void:
 	# Dual-purpose SubsystemToggles gate: when `impostors` is toggled off,
 	# stop the whole per-frame streaming pipeline. Existing MultiMesh already
 	# hidden by `.visible = false`. This early-return kills ingress work.
 	if not _streaming_enabled:
 		return
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
 
 	_texture_array_committed_this_frame = false
 
 	# Poll for completed texture loads
-	_poll_job_results()
-	_process_ready_impostor_creates()
+	_poll_job_results(deadline_usec)
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
+	_process_ready_impostor_creates(deadline_usec)
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
 
 	# Phase 6 (2026-04-17): poll async texture-array rebuild. No-op when no
 	# task is in flight. When the worker completes, finalises the rebuild
 	# on this frame (main-thread create_from_images + shader param swap).
-	_poll_rebuild_task()
+	_poll_rebuild_task(deadline_usec)
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
+
+	_process_pending_area_update(deadline_usec)
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
 
 	# Process deferred impostor cell loading (progressive to avoid freezing)
-	_process_pending_impostor_cells()
+	_process_pending_impostor_cells(deadline_usec)
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
 
 	# Periodic compaction to prevent texture array from filling up
 	var current_time := Time.get_ticks_msec() / 1000.0
@@ -1120,7 +1177,8 @@ func _process(delta: float) -> void:
 		else:
 			should_rebuild = time_since_rebuild >= STARTUP_TEXTURE_REBUILD_INTERVAL
 		if should_rebuild:
-			_rebuild_texture_array()
+			if deadline_usec <= 0 or Time.get_ticks_usec() < deadline_usec:
+				_rebuild_texture_array()
 			_last_texture_array_rebuild_time = current_time
 
 	var texture_publish_ready := _any_bucket_ready()
@@ -1128,7 +1186,7 @@ func _process(delta: float) -> void:
 		if _texture_array_committed_this_frame:
 			_stats["far_rebuild_deferred_pending"] = int(_stats.get("far_rebuild_deferred_pending", 0)) + 1
 		else:
-			_process_dirty_page_rebuilds()
+			_process_dirty_page_rebuilds(deadline_usec)
 	elif _impostors_dirty:
 		_stats["far_rebuild_deferred_pending"] = int(_stats.get("far_rebuild_deferred_pending", 0)) + 1
 
@@ -1143,12 +1201,17 @@ func _process(delta: float) -> void:
 
 
 ## Process pending impostor cells progressively (time-budgeted with intra-cell resume)
-func _process_pending_impostor_cells() -> void:
+func _process_pending_impostor_cells(deadline_usec: int = 0) -> void:
 	if _pending_cell_index >= _pending_impostor_cells.size() and not _has_resume:
 		return
 
 	var start_usec := Time.get_ticks_usec()
-	var deadline_usec := start_usec + int(_impostor_load_budget_usec)
+	if deadline_usec <= 0:
+		deadline_usec = start_usec + int(_impostor_load_budget_usec)
+	else:
+		deadline_usec = mini(deadline_usec, start_usec + int(_impostor_load_budget_usec))
+	if Time.get_ticks_usec() >= deadline_usec:
+		return
 	var cells_processed := 0
 
 	if _has_resume and not _loaded_impostor_cells.has(_resume_cell_grid):
@@ -1216,14 +1279,17 @@ func _process_pending_impostor_cells() -> void:
 			_pending_impostor_cells.size() - _pending_cell_index])
 
 
-func _poll_job_results() -> void:
+func _poll_job_results(deadline_usec: int = 0) -> void:
 	if not _texture_jobs_active:
 		return
 
 	var start_usec := Time.get_ticks_usec()
 	var processed := 0
 	while processed < JOB_RESULT_POLL_MAX_PER_FRAME:
-		if Time.get_ticks_usec() - start_usec >= JOB_RESULT_POLL_BUDGET_USEC:
+		var now_usec := Time.get_ticks_usec()
+		if deadline_usec > 0 and now_usec >= deadline_usec:
+			break
+		if now_usec - start_usec >= JOB_RESULT_POLL_BUDGET_USEC:
 			break
 
 		var completed_key := ""
@@ -1274,7 +1340,8 @@ func _poll_job_results() -> void:
 
 		processed += 1
 
-	_dispatch_texture_jobs()
+	if deadline_usec <= 0 or Time.get_ticks_usec() < deadline_usec:
+		_dispatch_texture_jobs()
 
 	var elapsed_usec := Time.get_ticks_usec() - start_usec
 	var elapsed_ms := float(elapsed_usec) / 1000.0
@@ -1348,7 +1415,7 @@ func _get_dirty_rebuild_bucket() -> TextureBucket:
 	return selected
 
 
-func _process_ready_impostor_creates() -> void:
+func _process_ready_impostor_creates(deadline_usec: int = 0) -> void:
 	if _ready_texture_hashes.is_empty():
 		_stats["far_ready_create_us"] = 0
 		_stats["far_ready_created"] = 0
@@ -1357,7 +1424,10 @@ func _process_ready_impostor_creates() -> void:
 	var start_usec := Time.get_ticks_usec()
 	var created := 0
 	while not _ready_texture_hashes.is_empty() and created < READY_IMPOSTOR_CREATE_MAX_PER_FRAME:
-		if created > 0 and (created & 15) == 0 and Time.get_ticks_usec() - start_usec >= READY_IMPOSTOR_CREATE_BUDGET_USEC:
+		var now_usec := Time.get_ticks_usec()
+		if deadline_usec > 0 and now_usec >= deadline_usec:
+			break
+		if created > 0 and (created & 15) == 0 and now_usec - start_usec >= READY_IMPOSTOR_CREATE_BUDGET_USEC:
 			break
 
 		var hash_key := _ready_texture_hashes[0]
@@ -1378,6 +1448,7 @@ func _process_ready_impostor_creates() -> void:
 			pending.cell_grid,
 			pending.ref_id,
 			pending.ref_num,
+			pending.source_object_id,
 			hash_key,
 			bucket,
 			pending.position,
@@ -1486,11 +1557,12 @@ func _apply_material_visibility_params(begin_distance: float, fade_margin: float
 
 
 func _page_visibility_begin_distance(page: ImpostorPage) -> float:
-	if page == null or page.impostor_ids.is_empty() or _hlod_covered_ref_nums.is_empty():
+	if page == null or page.impostor_ids.is_empty() or _hlod_covered_object_ids.is_empty():
 		return _visibility_begin_distance
 	for id: int in page.impostor_ids:
 		var imp: ImpostorData = _impostors.get(id)
-		if imp == null or imp.ref_num <= 0 or not _hlod_covered_ref_nums.has(imp.ref_num):
+		var object_id := imp.source_object_id if imp != null else &""
+		if imp == null or object_id == &"" or not _hlod_covered_object_ids.has(object_id):
 			return _visibility_begin_distance
 	return DU.HLOD_END
 
@@ -1562,7 +1634,7 @@ func _get_visible_page_count() -> int:
 	return count
 
 
-func _process_dirty_page_rebuilds() -> void:
+func _process_dirty_page_rebuilds(deadline_usec: int = 0) -> void:
 	if _dirty_page_keys.is_empty():
 		_stats["far_pages_rebuilt"] = 0
 		_stats["far_multimesh_pack_us"] = 0
@@ -1578,7 +1650,10 @@ func _process_dirty_page_rebuilds() -> void:
 	var uploaded_instances := 0
 
 	while not _dirty_page_keys.is_empty() and processed < IMPOSTOR_PAGE_REBUILD_MAX_PER_FRAME:
-		if processed > 0 and Time.get_ticks_usec() - start_usec >= IMPOSTOR_PAGE_REBUILD_BUDGET_USEC:
+		var now_usec := Time.get_ticks_usec()
+		if deadline_usec > 0 and now_usec >= deadline_usec:
+			break
+		if processed > 0 and now_usec - start_usec >= IMPOSTOR_PAGE_REBUILD_BUDGET_USEC:
 			break
 		var page_key: String = _dirty_page_keys.pop_back()
 		_dirty_page_set.erase(page_key)
@@ -1641,7 +1716,8 @@ func add_impostor(
 	world_rotation: Vector3 = Vector3.ZERO,
 	world_scale: Vector3 = Vector3.ONE,
 	ref_id: String = "",
-	ref_num: int = 0
+	ref_num: int = 0,
+	source_object_id: StringName = &""
 ) -> int:
 	# Check if this model should have an impostor
 	if impostor_candidates and not impostor_candidates.should_have_impostor(model_path):
@@ -1663,6 +1739,9 @@ func add_impostor(
 	# Get v6 metadata for size + variant flag. Missing metadata previously
 	# defaulted to a 10x10 billboard, which is exactly the kind of scale bug we
 	# should fail closed on.
+	if hash_key not in _impostor_metadata:
+		_stats["skipped_metadata_uncached"] = int(_stats.get("skipped_metadata_uncached", 0)) + 1
+		return -1
 	var metadata := _get_or_load_metadata(model_path)
 	if metadata.is_empty():
 		_stats["skipped_no_texture"] += 1
@@ -1719,6 +1798,7 @@ func add_impostor(
 	pending.atlas_size = atlas_size
 	pending.ref_id = ref_id
 	pending.ref_num = ref_num
+	pending.source_object_id = source_object_id
 	pending.position = world_position
 	pending.rotation = world_rotation
 	pending.scale = world_scale
@@ -1815,7 +1895,7 @@ func clear(reseed_default_bucket: bool = true) -> void:
 	_pending_impostor_cell_set.clear()
 	_pending_cell_index = 0
 	_pending_impostors.clear()
-	_hlod_covered_ref_nums.clear()
+	_hlod_covered_object_ids.clear()
 	_ready_texture_hashes.clear()
 	_ready_texture_hash_set.clear()
 	_pending_job_ids.clear()
@@ -1827,6 +1907,7 @@ func clear(reseed_default_bucket: bool = true) -> void:
 	_resume_ref_index = 0
 	_last_center_cell = Vector2i.ZERO
 	_prev_impostor_center = Vector2i(999999, 999999)
+	_prev_impostor_radius = -1
 	_initial_pending_count = 0
 	_stats["total_impostors"] = 0
 	_impostors_dirty = false
@@ -2024,7 +2105,7 @@ func dump_diagnostic() -> String:
 ## Uses differential update when moving 1-2 cells (only processes the ring delta),
 ## falls back to full recalc on teleport or first call.
 ## Called by streaming manager
-func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
+func update_impostor_area(center_cell: Vector2i, radius: int, deadline_usec: int = 0) -> bool:
 	_last_center_cell = center_cell
 	# SubsystemToggles gate: when `impostors` is toggled off, refuse to queue
 	# any impostor cells. `_process` already bails early on `_streaming_enabled`,
@@ -2032,10 +2113,10 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 	# grows unbounded as the camera moves. Matches the pattern in
 	# static_object_renderer.add_instance / object_paging.update_for_camera.
 	if not _streaming_enabled:
-		return
+		return true
 	if not impostor_candidates:
 		push_warning("[NativeImpostorRenderer] update_impostor_area called but impostor_candidates is null!")
-		return
+		return true
 
 	var radius_meters := float(radius) * DU.CELL_SIZE_METERS
 	var radius_sq := radius_meters * radius_meters
@@ -2043,8 +2124,10 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 	# Differential update: if we moved only 1-2 cells, compute only the delta ring
 	var delta := Vector2i(absi(center_cell.x - _prev_impostor_center.x), absi(center_cell.y - _prev_impostor_center.y))
 	var use_differential := _prev_impostor_center != Vector2i(999999, 999999) and delta.x <= 2 and delta.y <= 2
+	if not _area_update_active and center_cell == _prev_impostor_center and radius == _prev_impostor_radius:
+		return true
 
-	if use_differential and center_cell != _prev_impostor_center:
+	if not _area_update_active and use_differential and center_cell != _prev_impostor_center:
 		# Border-strip approach: only scan strips on the leading/trailing edges
 		# For a move of (dx, dy), new cells appear on the leading edge and old cells
 		# disappear from the trailing edge. Each strip is at most 2R+1 cells long.
@@ -2098,41 +2181,115 @@ func update_impostor_area(center_cell: Vector2i, radius: int) -> void:
 			(absi(move.x) + absi(move.y)) * (2 * radius + 1) * 2])
 
 	else:
-		# Full recalculation (first call, teleport, or large move)
-		var desired_cells: Dictionary = {}
-		for dy in range(-radius, radius + 1):
-			for dx in range(-radius, radius + 1):
-				var grid := Vector2i(center_cell.x + dx, center_cell.y + dy)
-				if DU.cell_distance_squared(center_cell, grid) <= radius_sq:
-					desired_cells[grid] = true
-
-		if debug_enabled:
-			_debug("Full impostor recalc: center=%s, radius=%d, desired=%d" % [
-				center_cell, radius, desired_cells.size()])
-
-		var cells_to_unload: Array[Vector2i] = []
-		for grid: Vector2i in _loaded_impostor_cells:
-			if grid not in desired_cells:
-				cells_to_unload.append(grid)
-
-		if not cells_to_unload.is_empty():
-			_unload_impostors_in_cells(cells_to_unload)
-
-		var cells_to_load: Array[Vector2i] = []
-		for grid: Vector2i in desired_cells:
-			if grid not in _loaded_impostor_cells and not _pending_impostor_cell_set.has(grid):
-				cells_to_load.append(grid)
-				_loaded_impostor_cells[grid] = true
-
-		if not cells_to_load.is_empty():
-			_queue_impostor_cells(cells_to_load)
-			# Track initial count for progress reporting (only on first full recalc)
-			if _initial_pending_count == 0:
-				_initial_pending_count = _pending_impostor_cells.size()
-			Log.info("impostors", "Queued %d impostor cells for deferred loading (total pending: %d)" % [
-				cells_to_load.size(), _pending_impostor_cells.size()])
+		if not _area_update_active or center_cell != _area_update_center or radius != _area_update_radius:
+			_begin_full_area_update(center_cell, radius, radius_sq)
+		return _process_pending_area_update(deadline_usec)
 
 	_prev_impostor_center = center_cell
+	_prev_impostor_radius = radius
+	return true
+
+
+func _deadline_reached(deadline_usec: int) -> bool:
+	return deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec
+
+
+func _begin_full_area_update(center_cell: Vector2i, radius: int, radius_sq: float) -> void:
+	_area_update_active = true
+	_area_update_center = center_cell
+	_area_update_radius = radius
+	_area_update_radius_sq = radius_sq
+	_area_update_dx = -radius
+	_area_update_dy = -radius
+	_area_update_phase = 0
+	_area_update_desired_cells.clear()
+	_area_update_loaded_keys.clear()
+	_area_update_loaded_index = 0
+	_area_update_desired_keys.clear()
+	_area_update_desired_index = 0
+	_area_update_new_cells = 0
+	if debug_enabled:
+		_debug("Full impostor recalc started: center=%s, radius=%d" % [center_cell, radius])
+
+
+func _process_pending_area_update(deadline_usec: int = 0) -> bool:
+	if not _area_update_active:
+		return true
+
+	while true:
+		if _deadline_reached(deadline_usec):
+			return false
+
+		if _area_update_phase == 0:
+			while _area_update_dy <= _area_update_radius:
+				while _area_update_dx <= _area_update_radius:
+					if _deadline_reached(deadline_usec):
+						return false
+					var grid := Vector2i(_area_update_center.x + _area_update_dx, _area_update_center.y + _area_update_dy)
+					if DU.cell_distance_squared(_area_update_center, grid) <= _area_update_radius_sq:
+						_area_update_desired_cells[grid] = true
+					_area_update_dx += 1
+				_area_update_dx = -_area_update_radius
+				_area_update_dy += 1
+			_area_update_loaded_keys = [] as Array[Vector2i]
+			for grid: Vector2i in _loaded_impostor_cells:
+				_area_update_loaded_keys.append(grid)
+			_area_update_phase = 1
+
+		elif _area_update_phase == 1:
+			var unload_batch: Array[Vector2i] = []
+			while _area_update_loaded_index < _area_update_loaded_keys.size():
+				if _deadline_reached(deadline_usec):
+					if not unload_batch.is_empty():
+						_unload_impostors_in_cells(unload_batch)
+					return false
+				var loaded_grid: Vector2i = _area_update_loaded_keys[_area_update_loaded_index]
+				_area_update_loaded_index += 1
+				if loaded_grid not in _area_update_desired_cells:
+					unload_batch.append(loaded_grid)
+				if unload_batch.size() >= 64:
+					_unload_impostors_in_cells(unload_batch)
+					unload_batch.clear()
+			if not unload_batch.is_empty():
+				_unload_impostors_in_cells(unload_batch)
+			_area_update_dx = -_area_update_radius
+			_area_update_dy = -_area_update_radius
+			_area_update_phase = 2
+
+		elif _area_update_phase == 2:
+			while _area_update_dy <= _area_update_radius:
+				while _area_update_dx <= _area_update_radius:
+					if _deadline_reached(deadline_usec):
+						return false
+					var desired_grid := Vector2i(_area_update_center.x + _area_update_dx, _area_update_center.y + _area_update_dy)
+					_area_update_dx += 1
+					if DU.cell_distance_squared(_area_update_center, desired_grid) > _area_update_radius_sq:
+						continue
+					if desired_grid in _loaded_impostor_cells or _pending_impostor_cell_set.has(desired_grid):
+						continue
+					_pending_impostor_cells.append(desired_grid)
+					_pending_impostor_cell_set[desired_grid] = true
+					_loaded_impostor_cells[desired_grid] = true
+					_area_update_new_cells += 1
+				_area_update_dx = -_area_update_radius
+				_area_update_dy += 1
+			if _initial_pending_count == 0:
+				_initial_pending_count = _pending_impostor_cells.size()
+			if _area_update_new_cells > 0:
+				Log.info("impostors", "Queued %d impostor cells for deferred loading (total pending: %d)" % [
+					_area_update_new_cells, _pending_impostor_cells.size()])
+			_prev_impostor_center = _area_update_center
+			_prev_impostor_radius = _area_update_radius
+			_area_update_active = false
+			_area_update_desired_cells.clear()
+			_area_update_loaded_keys.clear()
+			_area_update_desired_keys.clear()
+			return true
+
+		else:
+			_area_update_active = false
+			return true
+	return false
 
 
 ## Unload impostors belonging to specific cells
@@ -2226,75 +2383,50 @@ func _discard_pending_impostor_cells(grids: Array[Vector2i]) -> void:
 ## Returns -1 if the cell was fully processed, or the reference index to resume from
 ## if the budget was exceeded mid-cell.
 func _load_impostors_from_cell_record_budgeted(grid: Vector2i, start_ref: int, deadline_usec: int) -> int:
-	if not ESMManager:
-		Log.error("impostors", "ESMManager not available!")
+	if _world_object_source == null:
+		Log.error("impostors", "WorldObjectSource not available!")
 		return -1
 
-	var cell_record = ESMManager.get_exterior_cell(grid.x, grid.y)
-	if not cell_record:
+	var refs: Array = _world_object_source.get_objects_in_cell(grid, WorldObjectRecordScript.CAP_IMPOSTOR)
+	if refs.is_empty():
 		if abs(grid.x) < 30 and abs(grid.y) < 30:
-			_debug("No cell record for grid %s" % grid)
+			_debug("No impostor-capable objects for grid %s" % grid)
 		return -1
 
-	var refs: Array = cell_record.references
 	var ref_count := refs.size()
 	var impostor_count := 0
 	var model_count := 0
-
-	# Process references starting from start_ref (supports resume)
 	var i := start_ref
 	while i < ref_count:
-		# The expensive units here are C# ESM lookups and first-time impostor
-		# metadata/file probes. Check the frame budget at ref granularity so a
-		# dense cell cannot run a 16-ref burst long after the deadline passed.
 		if Time.get_ticks_usec() >= deadline_usec:
 			return i
 
-		var ref = refs[i]
+		var record: RefCounted = refs[i]
 		i += 1
-
-		# Fast path: use cached ref_id -> model_path mapping
-		var ref_id_str: String = str(ref.ref_id)
-		var model_path: String
-		if ref_id_str in _ref_id_to_model:
-			model_path = _ref_id_to_model[ref_id_str]
-			if model_path.is_empty():
-				continue  # Cached as "no model"
-		else:
-			# Cache miss — do the expensive ESM lookup once
-			var record = ESMManager.get_any_record(ref_id_str)
-			if not record or not ("model" in record) or not record.model:
-				_ref_id_to_model[ref_id_str] = ""  # Cache negative result
-				continue
-			model_path = record.model
-			if model_path.is_empty():
-				_ref_id_to_model[ref_id_str] = ""
-				continue
-			_ref_id_to_model[ref_id_str] = model_path
+		var ref_id_str: String = str(record.source_ref_id)
+		var model_path: String = record.model_path
+		if model_path.is_empty():
+			continue
 
 		model_count += 1
-
 		var should_create_impostor := impostor_candidates.should_have_impostor(model_path)
 		if Time.get_ticks_usec() >= deadline_usec:
 			return i - 1
 
 		if should_create_impostor:
 			impostor_count += 1
-			var pos := CS.vector_to_godot(ref.position)
-			var scale_vec := CS.scale_to_godot(ref.scale)
-			var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-			var rot_euler := basis.get_euler()
-
+			var transform: Transform3D = record.transform
+			var pos: Vector3 = transform.origin
+			var scale_vec: Vector3 = transform.basis.get_scale()
+			var rot_euler: Vector3 = transform.basis.orthonormalized().get_euler()
 			if Time.get_ticks_usec() >= deadline_usec:
 				return i - 1
-
-			add_impostor(model_path, grid, pos, rot_euler, scale_vec, ref_id_str, int(ref.ref_num))
+			add_impostor(model_path, grid, pos, rot_euler, scale_vec, ref_id_str, 0, record.object_id)
 
 	if debug_enabled and (impostor_count > 0 or ref_count > 0):
 		_debug("Cell %s: %d refs (from %d), %d models, %d impostor candidates" % [grid, ref_count, start_ref, model_count, impostor_count])
 
 	return -1  # Cell fully processed
-
 
 ## Log screen-size histogram of all loaded impostors (one-time diagnostic)
 func _log_screen_size_histogram() -> void:
@@ -2401,6 +2533,7 @@ func _create_impostor(
 	cell_grid: Vector2i,
 	ref_id: String,
 	ref_num: int,
+	source_object_id: StringName,
 	hash_key: String,
 	bucket: TextureBucket,
 	position: Vector3,
@@ -2424,6 +2557,7 @@ func _create_impostor(
 	impostor.page_key = _page_key_for_cell(cell_grid, bucket)
 	impostor.ref_id = ref_id
 	impostor.ref_num = ref_num
+	impostor.source_object_id = source_object_id
 	impostor.model_path = model_path
 	impostor.texture_hash = hash_key
 	impostor.texture_index = texture_index
@@ -2486,8 +2620,9 @@ func _add_to_texture_array(hash_key: String, image: Image, bucket: TextureBucket
 	bucket.texture_index_map[hash_key] = index
 
 	# Resize image to standard size (256×256 balances quality vs VRAM)
-	var img_copy := image.duplicate() as Image
+	var img_copy := image
 	if img_copy.get_size() != Vector2i(bucket.atlas_size, bucket.atlas_size):
+		img_copy = image.duplicate() as Image
 		img_copy.resize(bucket.atlas_size, bucket.atlas_size, Image.INTERPOLATE_LANCZOS)
 
 	bucket.all_array_images.append(img_copy)
@@ -2665,7 +2800,7 @@ func _rebuild_worker(albedo: Array[Image], normals: Array[Image]) -> void:
 ##      (double-buffer — frees any GPU-side command-buffer reference).
 ##   3. Swap the shader param.
 ##   4. Release last frame's _old_texture_array.
-func _poll_rebuild_task() -> void:
+func _poll_rebuild_task(deadline_usec: int = 0) -> void:
 	## One-frame-delayed free of the previous texture array. Keeps the
 	## old GPU texture alive for at least one command buffer submit after
 	## the shader rebind, avoiding a use-after-free on batched drivers.
@@ -2676,6 +2811,11 @@ func _poll_rebuild_task() -> void:
 	if _rebuild_task_id == -1:
 		return
 	if not WorkerThreadPool.is_task_completed(_rebuild_task_id):
+		return
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
+	if deadline_usec > 0:
+		_stats["far_texture_commit_deferred"] = int(_stats.get("far_texture_commit_deferred", 0)) + 1
 		return
 
 	WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)

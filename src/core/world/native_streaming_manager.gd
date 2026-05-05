@@ -41,7 +41,18 @@ const StaticObjectRendererScript := preload("res://src/core/world/static_object_
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 const CellPreloaderScript := preload("res://src/core/world/cell_preloader.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
+const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
+const StreamingPublicationBudgetScript := preload("res://src/core/world/streaming_publication_budget.gd")
 const HLOD_MODEL_WARMUP_BUDGET_USEC: int = 2000
+const PUBLICATION_LANE_NEAR_GAMEPLAY := "near_gameplay"
+const PUBLICATION_LANE_STATIC_VISUALS := "static_visuals"
+const PUBLICATION_LANE_HLOD := "hlod"
+const PUBLICATION_LANE_FAR_IMPOSTORS := "far_impostors"
+const PUBLICATION_LANE_DISTANT_LIGHTS := "distant_lights"
+const PUBLICATION_LANE_UNLOAD := "unload"
+const HLOD_PUBLICATION_BUDGET_USEC: int = 2500
+const FAR_IMPOSTOR_PUBLICATION_BUDGET_USEC: int = 4000
+const DISTANT_LIGHT_PUBLICATION_BUDGET_USEC: int = 2400
 # MidTierBatchPool removed — StaticObjectRenderer now owns MID statics via
 # server-direct instances and spatially local CellStaticBucket batches.
 
@@ -128,7 +139,7 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 	set(value):
 		distant_rendering_enabled = value
 		if _impostor_renderer:
-			_impostor_renderer.set_process(value)
+			_impostor_renderer.set_enabled(value)
 
 #endregion
 
@@ -148,6 +159,7 @@ var _impostor_candidates: RefCounted = null
 
 var _distant_render_end_m: float = float(SC.DEFAULT_VIEW_DISTANCE_METERS)
 var _impostors_requested_visible: bool = true
+var _world_object_source: RefCounted = null
 
 ## Loaded cells: grid -> Node3D container
 var _loaded_cells: Dictionary = {}
@@ -311,10 +323,12 @@ var _last_frame_total_ms: float = 0.0
 var _last_impostor_update_usec: float = 0.0
 var _last_hlod_merger_usec: float = 0.0
 var _last_distant_light_usec: float = 0.0
+var _publication_budget: RefCounted = StreamingPublicationBudgetScript.new()
 
 ## Startup phase state - controls staggered loading during initial population
 var _startup_phase: bool = true
 var _startup_frames: int = 0
+var _first_playable_reached: bool = false
 const STARTUP_PHASE_FRAMES: int = 20  # ~0.33 seconds at 60 FPS — matches exit condition
 
 ## Phase 7 finish (2026-04-17) — teleport detection.
@@ -495,6 +509,7 @@ func _ready() -> void:
 	_impostor_renderer = NativeImpostorRendererScript.new()
 	_impostor_renderer.name = "ImpostorManager"  # Use old name for backwards compatibility
 	add_child(_impostor_renderer)
+	_impostor_renderer.set_process(false)
 
 	# Create impostor candidates helper
 	_impostor_candidates = ImpostorCandidatesScript.new()
@@ -509,6 +524,11 @@ func _ready() -> void:
 	_distant_light_manager = DistantLightManagerScript.new()
 	_distant_light_manager.setup(_world_container)
 
+	if _world_object_source == null:
+		set_world_object_source(MorrowindWorldObjectSourceScript.new())
+	else:
+		set_world_object_source(_world_object_source)
+
 
 ## Initialize the streaming manager
 ## cell_manager: CellManager instance for loading cell data
@@ -522,6 +542,10 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		return ERR_INVALID_PARAMETER
 
 	_cell_manager = cell_manager
+	if _world_object_source == null:
+		set_world_object_source(MorrowindWorldObjectSourceScript.new())
+	if _cell_manager.has_method("set_world_object_source"):
+		_cell_manager.call("set_world_object_source", _world_object_source)
 	_cell_manager._static_renderer = _static_renderer
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
@@ -601,6 +625,18 @@ func set_camera(camera: Camera3D) -> void:
 		_update_loaded_cells()
 
 
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
+	if _cell_manager and _cell_manager.has_method("set_world_object_source"):
+		_cell_manager.call("set_world_object_source", source)
+	if _impostor_renderer and _impostor_renderer.has_method("set_world_object_source"):
+		_impostor_renderer.call("set_world_object_source", source)
+	if _distant_light_manager and _distant_light_manager.has_method("set_world_object_source"):
+		_distant_light_manager.call("set_world_object_source", source)
+	if _hlod_merger and _hlod_merger.has_method("set_world_object_source"):
+		_hlod_merger.call("set_world_object_source", source)
+
+
 ## Set the active exterior streaming radius. Returns the clamped value.
 func set_load_radius_cells(radius: int, refresh: bool = true) -> int:
 	return set_view_distance_meters(int(round(SC.distant_render_end_for_load_radius_cells(radius))), refresh)
@@ -668,12 +704,8 @@ func _reconcile_distant_tier_loading() -> void:
 		_hlod_last_update_position = _camera_position
 		_sync_hlod_far_coverage(true)
 	if _impostor_streaming_enabled():
-		if _startup_phase:
+		if _first_playable_reached:
 			_impostor_update_pending = true
-		else:
-			_impostor_renderer.update_impostor_area(_camera_cell, _distant_stream_radius_cells())
-			_sync_hlod_far_coverage(true)
-			_impostor_update_pending = false
 	else:
 		_impostor_update_pending = false
 	if _distant_light_manager:
@@ -693,6 +725,46 @@ func set_cell_manager(cell_manager: CellManagerScript) -> void:
 #endregion
 
 
+func _begin_publication_budget_frame() -> void:
+	if _publication_budget == null:
+		return
+	var budget_ms := frame_budget_ms
+	if _startup_phase or _near_burst_drain:
+		budget_ms = maxf(budget_ms, 25.0)
+	_publication_budget.begin_frame(int(budget_ms * 1000.0))
+
+
+func _claim_publication_slice(lane: String, requested_usec: int) -> Dictionary:
+	if requested_usec <= 0:
+		return {}
+	if _publication_budget == null:
+		return {
+			"lane": lane,
+			"granted_usec": requested_usec,
+			"deadline_usec": Time.get_ticks_usec() + requested_usec,
+		}
+	if not _publication_budget.has_method("make_slice"):
+		var fallback_grant := int(_publication_budget.call("claim", lane, requested_usec))
+		if fallback_grant <= 0:
+			return {}
+		return {
+			"lane": lane,
+			"granted_usec": fallback_grant,
+			"deadline_usec": Time.get_ticks_usec() + fallback_grant,
+		}
+	return _publication_budget.call("make_slice", lane, requested_usec) as Dictionary
+
+
+func _finish_publication_slice(lane: String, slice: Dictionary, elapsed_usec: int) -> void:
+	if _publication_budget == null or slice.is_empty():
+		return
+	_publication_budget.call("record_actual", lane, maxi(0, elapsed_usec))
+	var granted := int(slice.get("granted_usec", 0))
+	var unused := maxi(0, granted - elapsed_usec)
+	if unused > 0 and _publication_budget.has_method("refund"):
+		_publication_budget.call("refund", lane, unused)
+
+
 #region Main Update Loop
 
 func _process(delta: float) -> void:
@@ -700,6 +772,8 @@ func _process(delta: float) -> void:
 		if debug_enabled and Engine.get_frames_drawn() % 60 == 0:
 			Log.debug("streaming", "_process skipped: not initialized")
 		return
+
+	_begin_publication_budget_frame()
 
 	if not _tracking_enabled:
 		return
@@ -884,6 +958,7 @@ func _process(delta: float) -> void:
 		if not _startup_phase:
 			Log.info("streaming", "Teleport detected — re-entering startup burst mode")
 			_startup_phase = true
+			_first_playable_reached = false
 			_startup_frames = 0
 			_post_startup_start_ms = 0
 			_queue_drain_logged = false
@@ -916,23 +991,44 @@ func _process(delta: float) -> void:
 		cell_update_usec = float(Time.get_ticks_usec() - cu_start)
 		if prof:
 			prof.end_section("cell_update")
-	elif _impostor_update_pending:
+	elif _impostor_update_pending and not _startup_phase and _first_playable_reached:
 		# Deferred impostor update — runs on the frame AFTER cell change
 		# Prevents impostor scan (170ms+ initial) from stacking with cell load/unload
-		_impostor_update_pending = false
 		var impostors_on := _impostor_streaming_enabled()
 		if impostors_on and prof:
 			prof.begin_section("impostor_update")
+		var imp_slice := _claim_publication_slice(PUBLICATION_LANE_FAR_IMPOSTORS, FAR_IMPOSTOR_PUBLICATION_BUDGET_USEC)
 		var imp_start := Time.get_ticks_usec()
-		if impostors_on:
-			_impostor_renderer.update_impostor_area(_camera_cell, _distant_stream_radius_cells())
-			_sync_hlod_far_coverage(true)
+		if impostors_on and not imp_slice.is_empty():
+			var area_done := bool(_impostor_renderer.update_impostor_area(
+				_camera_cell,
+				_distant_stream_radius_cells(),
+				int(imp_slice.get("deadline_usec", 0))
+			))
+			if area_done:
+				_sync_hlod_far_coverage(true)
+				_impostor_update_pending = false
+		elif not impostors_on:
+			_impostor_update_pending = false
 		impostor_update_usec = float(Time.get_ticks_usec() - imp_start)
+		_finish_publication_slice(PUBLICATION_LANE_FAR_IMPOSTORS, imp_slice, int(impostor_update_usec))
 		var imp_ms := impostor_update_usec / 1000.0
 		if impostors_on and prof:
 			prof.end_section("impostor_update")
 		if impostors_on and imp_ms > 2.0:
 			Log.info("streaming", "Deferred impostor update: %.1fms" % imp_ms)
+
+	if _impostor_renderer and _impostor_streaming_enabled():
+		var far_slice := _claim_publication_slice(PUBLICATION_LANE_FAR_IMPOSTORS, FAR_IMPOSTOR_PUBLICATION_BUDGET_USEC)
+		if not far_slice.is_empty():
+			if prof: prof.begin_section("far_impostor_publish")
+			var far_start := Time.get_ticks_usec()
+			if _impostor_renderer.has_method("process_publication_slice"):
+				_impostor_renderer.call("process_publication_slice", delta, int(far_slice.get("deadline_usec", 0)))
+			var far_elapsed := Time.get_ticks_usec() - far_start
+			impostor_update_usec += float(far_elapsed)
+			_finish_publication_slice(PUBLICATION_LANE_FAR_IMPOSTORS, far_slice, int(far_elapsed))
+			if prof: prof.end_section("far_impostor_publish")
 
 	# Runtime HLOD merger: process completed merges every frame, update on cell change
 	# Phase 2 stutter diag — bracket each unbracketed _process subsystem so the
@@ -940,25 +1036,34 @@ func _process(delta: float) -> void:
 	# of these is actually responsible. Plan §11.4.
 	if _hlod_requested_visible and _hlod_merger:
 		if prof: prof.begin_section("hlod_merger")
+		var hlod_slice := _claim_publication_slice(PUBLICATION_LANE_HLOD, HLOD_PUBLICATION_BUDGET_USEC)
 		var hlod_start := Time.get_ticks_usec()
-		if _cell_manager and _cell_manager.has_method("process_async_disk_loads"):
-			_cell_manager.call("process_async_disk_loads", HLOD_MODEL_WARMUP_BUDGET_USEC)
-		_hlod_merger.call("process_merge_queue")  # Staggered: max 2 cells/frame
-		_hlod_merger.call("process_completions")
-		if _should_update_hlod():
-			_hlod_merger.call("update_for_camera", _camera_cell, _camera_position)
-			_hlod_needs_initial_update = false
-			_hlod_last_update_position = _camera_position
-		_sync_hlod_far_coverage(false)
+		if not hlod_slice.is_empty():
+			var hlod_deadline := int(hlod_slice.get("deadline_usec", 0))
+			if _cell_manager and _cell_manager.has_method("process_async_disk_loads"):
+				_cell_manager.call("process_async_disk_loads", mini(HLOD_MODEL_WARMUP_BUDGET_USEC, maxi(0, hlod_deadline - Time.get_ticks_usec())))
+			if Time.get_ticks_usec() < hlod_deadline:
+				_hlod_merger.call("process_merge_queue", hlod_deadline)  # Staggered: max 2 cells/frame
+			if Time.get_ticks_usec() < hlod_deadline:
+				_hlod_merger.call("process_completions", hlod_deadline)
+			if Time.get_ticks_usec() < hlod_deadline and _should_update_hlod():
+				_hlod_merger.call("update_for_camera", _camera_cell, _camera_position)
+				_hlod_needs_initial_update = false
+				_hlod_last_update_position = _camera_position
+			_sync_hlod_far_coverage(false)
 		hlod_merger_usec = float(Time.get_ticks_usec() - hlod_start)
+		_finish_publication_slice(PUBLICATION_LANE_HLOD, hlod_slice, int(hlod_merger_usec))
 		if prof: prof.end_section("hlod_merger")
 
 	# Update distant light manager (camera pos + time-of-day)
 	if _distant_light_manager:
 		if prof: prof.begin_section("distant_light_manager")
+		var light_slice := _claim_publication_slice(PUBLICATION_LANE_DISTANT_LIGHTS, DISTANT_LIGHT_PUBLICATION_BUDGET_USEC)
 		var distant_light_start := Time.get_ticks_usec()
-		_distant_light_manager.update(_camera_position, _sun_elevation_rad)
+		if not light_slice.is_empty():
+			_distant_light_manager.update(_camera_position, _sun_elevation_rad, int(light_slice.get("deadline_usec", 0)))
 		distant_light_usec = float(Time.get_ticks_usec() - distant_light_start)
+		_finish_publication_slice(PUBLICATION_LANE_DISTANT_LIGHTS, light_slice, int(distant_light_usec))
 		if prof: prof.end_section("distant_light_manager")
 
 	# I.6 Phase 2 — orphan expiry tick. Off the frame-budget hot path
@@ -989,7 +1094,11 @@ func _process(delta: float) -> void:
 		CrashBreadcrumb.write("nsm::unload_tick_begin", "queued=%d cells=%d hide=%d clean=%d" % [
 			_pending_unload_queue.size(), _unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
 		])
-		_process_budgeted_unloading()
+		var unload_slice := _claim_publication_slice(PUBLICATION_LANE_UNLOAD, int(SC.UNLOAD_BUDGET_MS * 1000.0))
+		var unload_start := Time.get_ticks_usec()
+		if not unload_slice.is_empty():
+			_process_budgeted_unloading(int(unload_slice.get("deadline_usec", 0)))
+		_finish_publication_slice(PUBLICATION_LANE_UNLOAD, unload_slice, Time.get_ticks_usec() - unload_start)
 		CrashBreadcrumb.write("nsm::unload_tick_done", "queued=%d cells=%d hide=%d clean=%d" % [
 			_pending_unload_queue.size(), _unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
 		])
@@ -1008,7 +1117,11 @@ func _process(delta: float) -> void:
 		phase_start = Time.get_ticks_usec()
 		if prof:
 			prof.begin_section("async_complete")
-		_process_async_completions()
+		var completion_slice := _claim_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, int(SC.CELL_QUEUE_BUDGET_MS * 1000.0))
+		var completion_start := Time.get_ticks_usec()
+		if not completion_slice.is_empty():
+			_process_async_completions()
+		_finish_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, completion_slice, Time.get_ticks_usec() - completion_start)
 		if prof:
 			prof.end_section("async_complete")
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
@@ -1028,18 +1141,28 @@ func _process(delta: float) -> void:
 				and _pending_rs_hide_cells.is_empty() \
 				and _pending_rs_cleanup_cells.is_empty()
 			var payload_publish_budget_us := int(SC.STATIC_PREPARE_BUDGET_MS * 1000.0)
+			var payload_slice := _claim_publication_slice(PUBLICATION_LANE_STATIC_VISUALS, payload_publish_budget_us)
 			var payload_publish_start_us := Time.get_ticks_usec()
-			var payload_published := _process_payload_publish_steps(payload_publish_budget_us)
+			var payload_published := 0
+			if not payload_slice.is_empty():
+				payload_published = _process_payload_publish_steps(int(payload_slice.get("granted_usec", 0)))
 			var payload_publish_us := Time.get_ticks_usec() - payload_publish_start_us
+			_finish_publication_slice(PUBLICATION_LANE_STATIC_VISUALS, payload_slice, payload_publish_us)
 			# Phase 2 stutter diag — bracket the instantiate call into the profiler
 			# so the slow-frame autopsy can attribute spike time. Plan §11.4.
 			if prof: prof.begin_section("instantiate")
-			var instantiated := _cell_manager.process_async_instantiation(
-				maxf(0.1, instantiation_budget_ms - (float(payload_publish_us) / 1000.0)),
-				_camera_position,
-				camera_fwd,
-				allow_collision_finalize,
-			)
+			var near_requested_usec := int(maxf(0.1, instantiation_budget_ms - (float(payload_publish_us) / 1000.0)) * 1000.0)
+			var near_slice := _claim_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, near_requested_usec)
+			var near_start := Time.get_ticks_usec()
+			var instantiated := 0
+			if not near_slice.is_empty():
+				instantiated = _cell_manager.process_async_instantiation(
+					float(int(near_slice.get("granted_usec", 0))) / 1000.0,
+					_camera_position,
+					camera_fwd,
+					allow_collision_finalize,
+				)
+			_finish_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, near_slice, Time.get_ticks_usec() - near_start)
 			if prof: prof.end_section("instantiate")
 			phase_times[2] = float(Time.get_ticks_usec() - phase_start)
 			if payload_published > 0 and debug_enabled:
@@ -1251,6 +1374,7 @@ func _update_loaded_cells() -> void:
 				# Cell_node never left _world_container (see _unload_cell note);
 				# re-activate by flipping visible. No reparent.
 				cell_node.visible = _near_tier_visible
+				_set_near_gameplay_active(cell_node, _near_tier_visible)
 				_loaded_cells[grid] = cell_node
 				reclaimed.append(grid)
 				# Restore the async request from limbo so in-flight queue
@@ -1336,7 +1460,8 @@ func _update_loaded_cells() -> void:
 	# the resource pipeline when combined with cell model loading. The startup_complete
 	# signal handler below triggers the impostor scan once initial cells are done.
 	if not _startup_phase and _impostor_streaming_enabled():
-		_impostor_update_pending = true
+		if _first_playable_reached:
+			_impostor_update_pending = true
 
 	# Scan for distant lights in a wider radius than loaded cells
 	# Uses impostor_radius since distant lights should be visible as far as impostors
@@ -1419,6 +1544,7 @@ func _request_cell_async(grid: Vector2i) -> bool:
 	var cell_node := _cell_manager.get_async_cell_node(request_id)
 	if cell_node:
 		cell_node.visible = _near_tier_visible
+		_set_near_gameplay_active(cell_node, _near_tier_visible)
 		_world_container.add_child(cell_node)
 		_loaded_cells[grid] = cell_node
 
@@ -1440,6 +1566,7 @@ func _load_cell_sync(grid: Vector2i) -> void:
 	if cell_node:
 		_configure_cell_visibility(cell_node)
 		cell_node.visible = _near_tier_visible
+		_set_near_gameplay_active(cell_node, _near_tier_visible)
 		_world_container.add_child(cell_node)
 		_loaded_cells[grid] = cell_node
 
@@ -1625,9 +1752,13 @@ func _unload_cell(grid: Vector2i) -> void:
 
 ## Process gradual unloading of departing cells within time budget
 ## Removes children in batches to avoid frame spikes from mass queue_free()
-func _process_budgeted_unloading() -> void:
+func _process_budgeted_unloading(deadline_usec: int = 0) -> void:
 	var start_time := Time.get_ticks_usec()
 	var budget_usec := SC.UNLOAD_BUDGET_MS * 1000.0
+	if deadline_usec > 0:
+		budget_usec = minf(budget_usec, maxf(0.0, float(deadline_usec - start_time)))
+	if budget_usec <= 0.0:
+		return
 	var total_freed := 0
 
 	# Verification-only: tick the per-grid destructive hold once per frame.
@@ -1971,6 +2102,7 @@ func _process_async_completions() -> void:
 			if cell_node:
 				_configure_cell_visibility(cell_node)
 				cell_node.visible = _near_tier_visible
+				_set_near_gameplay_active(cell_node, _near_tier_visible)
 
 				if cell_node.get_parent() != _world_container:
 					_world_container.add_child(cell_node)
@@ -2105,6 +2237,8 @@ func get_stats() -> Dictionary:
 	s["streaming_hlod_merger_ms"] = _last_hlod_merger_usec / 1000.0
 	s["streaming_distant_light_ms"] = _last_distant_light_usec / 1000.0
 	s["streaming_unattributed_ms"] = maxf(0.0, _last_frame_total_ms - attributed_ms)
+	if _publication_budget:
+		s.merge(_publication_budget.get_stats())
 
 	# Add CellManager async stats if available
 	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
@@ -2368,11 +2502,23 @@ func set_near_tier_visible(visible: bool) -> void:
 		var cell_node: Node3D = _loaded_cells[grid]
 		if cell_node:
 			cell_node.visible = visible
+			_set_near_gameplay_active(cell_node, visible)
 	# On thaw: arm burst drain + force catch-up cell scan.
 	if visible and not was_visible:
 		_near_burst_drain = true
 		Log.info("streaming", "NEAR thaw — burst drain armed")
 		_update_loaded_cells()
+
+func _set_near_gameplay_active(root: Node, active: bool) -> void:
+	root.process_mode = Node.PROCESS_MODE_INHERIT if active else Node.PROCESS_MODE_DISABLED
+	if root is CollisionShape3D or root is CollisionPolygon3D:
+		root.set_deferred("disabled", not active)
+	if root is Area3D:
+		(root as Area3D).set_deferred("monitoring", active)
+		(root as Area3D).set_deferred("monitorable", active)
+	for child: Node in root.get_children():
+		_set_near_gameplay_active(child, active)
+
 
 ## Toggle HLOD merged geometry (ObjectPaging)
 func set_hlod_visible(visible: bool) -> void:
@@ -2499,14 +2645,20 @@ func get_hlod_chunk_debug_data() -> Array[Dictionary]:
 
 
 func _sync_hlod_far_coverage(force: bool = false) -> void:
-	var can_sync_far := _impostor_renderer != null and _impostor_renderer.has_method("set_hlod_covered_ref_nums")
+	var can_sync_far := _impostor_renderer != null and (
+		_impostor_renderer.has_method("set_hlod_covered_object_ids")
+		or _impostor_renderer.has_method("set_hlod_covered_ref_nums")
+	)
 	var can_sync_mid := _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
 	if not can_sync_far and not can_sync_mid:
 		return
 	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
 		if force or _hlod_far_coverage_revision != -1:
 			if can_sync_far:
-				_impostor_renderer.call("set_hlod_covered_ref_nums", {})
+				if _impostor_renderer.has_method("set_hlod_covered_object_ids"):
+					_impostor_renderer.call("set_hlod_covered_object_ids", {})
+				else:
+					_impostor_renderer.call("set_hlod_covered_ref_nums", {})
 			if can_sync_mid:
 				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
 			_hlod_far_coverage_revision = -1
@@ -2517,7 +2669,11 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 		return
 	_hlod_far_coverage_revision = revision
 	if can_sync_far:
-		_impostor_renderer.call("set_hlod_covered_ref_nums", manifest.get("source_ref_nums", {}))
+		var covered_objects: Dictionary = manifest.get("source_object_ids", manifest.get("source_ref_nums", {}))
+		if _impostor_renderer.has_method("set_hlod_covered_object_ids"):
+			_impostor_renderer.call("set_hlod_covered_object_ids", covered_objects)
+		else:
+			_impostor_renderer.call("set_hlod_covered_ref_nums", covered_objects)
 	if can_sync_mid:
 		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("complete_bucket_counts", manifest.get("source_bucket_counts", {})), DU.HLOD_START)
 
@@ -2550,6 +2706,8 @@ func _ensure_hlod_merger() -> bool:
 	_hlod_merger = merger
 	var scenario := get_viewport().get_world_3d().scenario
 	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor, _cell_manager._model_loader)
+	if _hlod_merger.has_method("set_world_object_source"):
+		_hlod_merger.call("set_world_object_source", _world_object_source)
 	if _hlod_merger.has_method("set_visual_begin_floor"):
 		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
 	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID bridge 150-%dm, HLOD visible %d-%dm, FAR starts at %dm, view cap=%dm" % [
@@ -3112,10 +3270,11 @@ func is_inner_ring_ready() -> bool:
 ## or the gate times out. It ends the high-budget startup phase so leftover
 ## queue work drains under the normal runtime budget after the overlay hides.
 func mark_first_playable(reason: String = "loading_gate") -> void:
-	if not _startup_phase:
-		return
-	_startup_phase = false
-	_post_startup_start_ms = Time.get_ticks_msec()
+	_first_playable_reached = true
+	if _startup_phase:
+		_startup_phase = false
+	if _post_startup_start_ms <= 0:
+		_post_startup_start_ms = Time.get_ticks_msec()
 	if _impostor_renderer:
 		_impostor_renderer.set_load_budget_usec(4000.0)
 	_impostor_update_pending = true
