@@ -347,6 +347,7 @@ func _update_hud() -> void:
 	var max_surfaces := int(stats.get("max_chunk_surfaces", 0))
 	var stale := int(stats.get("stale_completions_discarded", 0))
 	var surface_rejects := int(stats.get("surface_cap_rejections", 0))
+	var over_budget_published := int(stats.get("surface_cap_over_budget_published", 0))
 	var merge_us := int(stats.get("merge_queue_last_usec", 0))
 	var completion_us := int(stats.get("completion_last_usec", 0))
 	var complete := int(stats.get("active_complete_coverage_chunks", 0))
@@ -369,7 +370,7 @@ func _update_hud() -> void:
 
 [b]Proxy Cost[/b]
   Surfaces %d  |  Materials %d  |  Verts %dk  |  Max surfaces/chunk %d
-  Merge %.2fms  |  Publish %.2fms  |  Stale %d  |  Surface rejects %d
+  Merge %.2fms  |  Publish %.2fms  |  Stale %d  |  Surface rejects %d  |  Over-budget kept %d
 
 [b]Coverage[/b]
   Complete chunks %d  |  Incomplete chunks %d  |  Covered refs %d  |  Covered cells %d
@@ -388,7 +389,7 @@ func _update_hud() -> void:
 		int(stats.get("chunks_tier_1", 0)), int(stats.get("chunks_tier_2", 0)), warmup, async_pending,
 		negative_sparse, negative_empty, negative_filtered, negative_failed, negative_surface,
 		surfaces, materials, vertices / 1000, max_surfaces,
-		float(merge_us) / 1000.0, float(completion_us) / 1000.0, stale, surface_rejects,
+		float(merge_us) / 1000.0, float(completion_us) / 1000.0, stale, surface_rejects, over_budget_published,
 		complete, incomplete, int(stats.get("active_covered_refs", 0)), int(stats.get("active_covered_cells", 0)),
 		camera_cell, _cam_speed,
 	]
@@ -519,6 +520,7 @@ func _record_frame() -> void:
 		"hlod_merge_us": int(stats.get("merge_queue_last_usec", 0)),
 		"hlod_completion_us": int(stats.get("completion_last_usec", 0)),
 		"hlod_surface_rejects": int(stats.get("surface_cap_rejections", 0)),
+		"hlod_surface_over_budget_published": int(stats.get("surface_cap_over_budget_published", 0)),
 		"hlod_covered_refs": int(stats.get("active_covered_refs", 0)),
 		"fade_enabled": _fade_enabled,
 		"cam_x": _camera.position.x,

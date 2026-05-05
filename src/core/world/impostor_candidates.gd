@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS: Dictionary = {
 	"frames": 16,              # Viewing angles (8-32 for octahedral)
 	"use_alpha": true,         # Enable alpha cutout
 	"optimize_size": true,     # Compress texture
-	"min_distance": DU.MID_END,  # Runtime FAR fallback starts at 500m until HLOD coverage gating lands.
+	"min_distance": DU.FAR_START,
 	"max_distance": DU.FAR_END,    # Stop showing at FAR end (5km)
 }
 

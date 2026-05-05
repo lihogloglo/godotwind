@@ -37,8 +37,8 @@ const START_CELL := Vector2i(-2, -9)
 const START_POS := Vector3(-2 * 117.0 + 58.5, 40.0, 9 * 117.0 + 58.5)
 
 ## Tier boundary teleport positions (relative to start, looking at the cell center from each distance)
-const TIER_DISTANCES: Array[float] = [150.0, 300.0, 500.0, 1000.0]
-const TIER_LABELS: Array[String] = ["NEAR/MID boundary (150m)", "MID/HLOD boundary (300m)", "MID/FAR boundary (500m)", "HLOD/FAR boundary (1000m)"]
+const TIER_DISTANCES: Array[float] = [150.0, 300.0, 600.0, 1000.0]
+const TIER_LABELS: Array[String] = ["NEAR/MID boundary (150m)", "MID/HLOD boundary (300m)", "HLOD tier-1/2 boundary (600m)", "HLOD/FAR boundary (1000m)"]
 
 var _streaming_manager: Node3D
 var _cell_manager: CellManager
@@ -289,10 +289,10 @@ func _toggle_hlod() -> void:
 		Log.info("hlod_bench", "HLOD ENABLED")
 		var merger_stats: Dictionary = _streaming_manager.get_hlod_stats() if _streaming_manager.has_method("get_hlod_stats") else {}
 		Log.info("hlod_bench", "  HLOD stats: %s" % str(merger_stats))
-		Log.info("hlod_bench", "  MID fallback 0-500m, covered MID caps at 300m, HLOD visible 300-1000m, FAR fallback 500m+")
+		Log.info("hlod_bench", "  MID fixed 0-300m, HLOD visible 300-1000m, FAR impostors 1000m+")
 	else:
 		_streaming_manager.set_hlod_visible(false)
-		Log.info("hlod_bench", "HLOD DISABLED — MID 0-500m, impostors 500m+")
+		Log.info("hlod_bench", "HLOD DISABLED - MID fixed 0-300m, FAR impostors 1000m+")
 
 #endregion
 

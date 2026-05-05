@@ -349,10 +349,10 @@ func _create_multimesh_draw_group(
 	if material_rid.is_valid():
 		RenderingServer.instance_geometry_set_material_override(rid, material_rid)
 	else:
-		for surface_index in range(surface_materials.size()):
-			var surface_material_rid := _get_valid_material_rid(surface_materials[surface_index])
-			if surface_material_rid.is_valid():
-				RenderingServer.instance_set_surface_override_material(rid, surface_index, surface_material_rid)
+		# RenderingServer per-surface overrides are not valid on MultiMesh bases.
+		# StaticObjectRenderer materializes surface overrides into the Mesh
+		# resource before bucket creation; keep this as a final crash guard.
+		pass
 
 	var group := DrawGroup.new()
 	group.mesh_resource = mesh_resource

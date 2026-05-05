@@ -308,6 +308,9 @@ var _last_overrun_log_frame: int = 0
 ## 4=collision, 5=deferred, 6=queue, 7=cell_update, 8=static_cull
 var _last_phase_times: PackedFloat64Array = PackedFloat64Array()
 var _last_frame_total_ms: float = 0.0
+var _last_impostor_update_usec: float = 0.0
+var _last_hlod_merger_usec: float = 0.0
+var _last_distant_light_usec: float = 0.0
 
 ## Startup phase state - controls staggered loading during initial population
 var _startup_phase: bool = true
@@ -398,17 +401,23 @@ func fast_cleanup() -> void:
 	if _cell_manager:
 		_cell_manager.fast_cleanup()
 
-	# Free GPU resources (RS RIDs)
+	# Free GPU resources in dependency order. HLOD owns merged RS instances and
+	# mesh refs sourced from static prototypes, so release it before prototypes.
+	_teardown_hlod_merger()
+	Log.info("shutdown", "NativeStreamingManager fast_cleanup: HLOD merger cleared")
 	if _static_renderer:
 		_static_renderer.clear()
+		Log.info("shutdown", "NativeStreamingManager fast_cleanup: static renderer cleared")
 	if _impostor_renderer and _impostor_renderer.has_method("fast_cleanup"):
 		_impostor_renderer.fast_cleanup()
+		Log.info("shutdown", "NativeStreamingManager fast_cleanup: impostor renderer stopped")
 	elif _impostor_renderer and _impostor_renderer.has_method("clear"):
 		_impostor_renderer.clear()
+		Log.info("shutdown", "NativeStreamingManager fast_cleanup: impostor renderer cleared")
 	if _distant_light_manager:
 		_distant_light_manager.cleanup()
 		_distant_light_manager = null
-	_teardown_hlod_merger()
+		Log.info("shutdown", "NativeStreamingManager fast_cleanup: distant lights cleared")
 
 
 func _exit_tree() -> void:
@@ -598,6 +607,9 @@ func set_load_radius_cells(radius: int, refresh: bool = true) -> int:
 
 
 func set_view_distance_meters(distance_m: int, refresh: bool = true) -> int:
+	if _initialized:
+		Log.info("streaming", "Ignoring runtime view-distance change to %dm; edit graphics/view_distance_meters and relaunch" % distance_m)
+		return view_distance_meters
 	var clamped := SC.clamp_view_distance_meters(distance_m)
 	var changed := clamped != view_distance_meters
 	view_distance_meters = clamped
@@ -650,7 +662,7 @@ func _reconcile_distant_tier_loading() -> void:
 		return
 	_camera_position = _camera.global_position
 	_camera_cell = DU.world_to_cell(_camera_position)
-	if _hlod_requested_visible and _hlod_merger and not _startup_phase:
+	if _hlod_requested_visible and _hlod_merger:
 		_hlod_merger.call("update_for_camera", _camera_cell, _camera_position)
 		_hlod_needs_initial_update = false
 		_hlod_last_update_position = _camera_position
@@ -793,6 +805,9 @@ func _process(delta: float) -> void:
 	var phase_times: PackedFloat64Array = PackedFloat64Array()  # usec per phase
 	phase_times.resize(9)  # 0:unload, 1:async_complete, 2:instantiate, 3:promote, 4:collision, 5:deferred, 6:queue, 7:cell_update, 8:static_cull
 	var budget_usec := frame_budget_ms * 1000.0
+	var impostor_update_usec: float = 0.0
+	var hlod_merger_usec: float = 0.0
+	var distant_light_usec: float = 0.0
 
 	# Per-phase profiler — lightweight begin/end section pairs.
 	# Gated by SC.ENABLE_PROFILING; zero overhead when disabled.
@@ -912,7 +927,8 @@ func _process(delta: float) -> void:
 		if impostors_on:
 			_impostor_renderer.update_impostor_area(_camera_cell, _distant_stream_radius_cells())
 			_sync_hlod_far_coverage(true)
-		var imp_ms := float(Time.get_ticks_usec() - imp_start) / 1000.0
+		impostor_update_usec = float(Time.get_ticks_usec() - imp_start)
+		var imp_ms := impostor_update_usec / 1000.0
 		if impostors_on and prof:
 			prof.end_section("impostor_update")
 		if impostors_on and imp_ms > 2.0:
@@ -922,8 +938,9 @@ func _process(delta: float) -> void:
 	# Phase 2 stutter diag — bracket each unbracketed _process subsystem so the
 	# autopsy can attribute the BIG unattributed spikes (1.7s+) to whichever
 	# of these is actually responsible. Plan §11.4.
-	if _hlod_requested_visible and _hlod_merger and not _startup_phase:
+	if _hlod_requested_visible and _hlod_merger:
 		if prof: prof.begin_section("hlod_merger")
+		var hlod_start := Time.get_ticks_usec()
 		if _cell_manager and _cell_manager.has_method("process_async_disk_loads"):
 			_cell_manager.call("process_async_disk_loads", HLOD_MODEL_WARMUP_BUDGET_USEC)
 		_hlod_merger.call("process_merge_queue")  # Staggered: max 2 cells/frame
@@ -933,12 +950,15 @@ func _process(delta: float) -> void:
 			_hlod_needs_initial_update = false
 			_hlod_last_update_position = _camera_position
 		_sync_hlod_far_coverage(false)
+		hlod_merger_usec = float(Time.get_ticks_usec() - hlod_start)
 		if prof: prof.end_section("hlod_merger")
 
 	# Update distant light manager (camera pos + time-of-day)
 	if _distant_light_manager:
 		if prof: prof.begin_section("distant_light_manager")
+		var distant_light_start := Time.get_ticks_usec()
 		_distant_light_manager.update(_camera_position, _sun_elevation_rad)
+		distant_light_usec = float(Time.get_ticks_usec() - distant_light_start)
 		if prof: prof.end_section("distant_light_manager")
 
 	# I.6 Phase 2 — orphan expiry tick. Off the frame-budget hot path
@@ -1088,6 +1108,9 @@ func _process(delta: float) -> void:
 	# Store per-phase timing for external consumers (benchmark, profiler)
 	phase_times[7] = cell_update_usec
 	_last_phase_times = phase_times
+	_last_impostor_update_usec = impostor_update_usec
+	_last_hlod_merger_usec = hlod_merger_usec
+	_last_distant_light_usec = distant_light_usec
 
 	# Frame budget telemetry — detect when combined streaming work exceeds budget
 	var total_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
@@ -1096,13 +1119,16 @@ func _process(delta: float) -> void:
 		_frame_overrun_count += 1
 		# Log with per-phase breakdown (at most once per 60 frames)
 		if Engine.get_frames_drawn() - _last_overrun_log_frame > 60:
-			Log.warn("streaming", "Frame overrun: %.1fms [cellupd:%.1f unload:%.1f async:%.1f inst:%.1f promo:%.1f coll:%.1f defer:%.1f queue:%.1f static:%.1f] (budget:%.1fms, overruns:%d)" % [
+			Log.warn("streaming", "Frame overrun: %.1fms [cellupd:%.1f unload:%.1f async:%.1f inst:%.1f promo:%.1f coll:%.1f defer:%.1f queue:%.1f static:%.1f imp:%.1f hlod:%.1f light:%.1f] (budget:%.1fms, overruns:%d)" % [
 				total_ms,
 				cell_update_usec / 1000.0,
 				phase_times[0] / 1000.0, phase_times[1] / 1000.0, phase_times[2] / 1000.0,
 				phase_times[3] / 1000.0, phase_times[4] / 1000.0, phase_times[5] / 1000.0,
 				phase_times[6] / 1000.0,
 				phase_times[8] / 1000.0,
+				impostor_update_usec / 1000.0,
+				hlod_merger_usec / 1000.0,
+				distant_light_usec / 1000.0,
 				frame_budget_ms, _frame_overrun_count])
 			_last_overrun_log_frame = Engine.get_frames_drawn()
 
@@ -1130,7 +1156,7 @@ func _process(delta: float) -> void:
 				var burst := _cell_manager.is_burst_loading()
 				var pt := _last_phase_times
 				var n := pt.size()
-				Log.info("streaming", "[audit +%.0fs] fps=%d proc=%.1fms frame=%.1fms queue=%d burst=%s | unload=%.1f async=%.1f inst=%.1f promo=%.1f coll=%.1f defer=%.1f static=%.1f (ms)" % [
+				Log.info("streaming", "[audit +%.0fs] fps=%d proc=%.1fms frame=%.1fms queue=%d burst=%s | unload=%.1f async=%.1f inst=%.1f promo=%.1f coll=%.1f defer=%.1f static=%.1f imp=%.1f hlod=%.1f light=%.1f (ms)" % [
 					elapsed_s, fps, proc_ms, total_ms, q, "Y" if burst else "N",
 					pt[0]/1000.0 if n > 0 else 0.0,
 					pt[1]/1000.0 if n > 1 else 0.0,
@@ -1138,7 +1164,10 @@ func _process(delta: float) -> void:
 					pt[3]/1000.0 if n > 3 else 0.0,
 					pt[4]/1000.0 if n > 4 else 0.0,
 					pt[5]/1000.0 if n > 5 else 0.0,
-					pt[8]/1000.0 if n > 8 else 0.0
+					pt[8]/1000.0 if n > 8 else 0.0,
+					_last_impostor_update_usec / 1000.0,
+					_last_hlod_merger_usec / 1000.0,
+					_last_distant_light_usec / 1000.0
 				])
 				if _hlod_requested_visible and _hlod_merger:
 					var hs: Dictionary = get_hlod_stats()
@@ -1804,7 +1833,7 @@ var _pending_rs_cleanup_set: Dictionary[Vector2i, bool] = {}
 
 ## Configure visibility_range on mesh nodes for cells loaded from non-prebaked
 ## sources (editor scenes, test scenes). Post-B-wide refactor: prebaked NIFs
-## carry `visibility_prebaked` meta AND the embedded LOD chain + 0-500m range
+## carry `visibility_prebaked` meta AND the embedded LOD chain + tier range
 ## is set at bake time, so this path is a no-op safety net for edge cases.
 func _configure_cell_visibility(cell_node: Node3D) -> void:
 	if not use_native_visibility:
@@ -2065,6 +2094,17 @@ func get_stats() -> Dictionary:
 	s["frame_budget_ms"] = frame_budget_ms
 	s["frame_total_ms"] = _last_frame_total_ms
 	s["startup_phase"] = _startup_phase
+	var phase_sum_usec: float = 0.0
+	for phase_usec: float in _last_phase_times:
+		phase_sum_usec += phase_usec
+	var distant_tier_usec := _last_impostor_update_usec + _last_hlod_merger_usec + _last_distant_light_usec
+	var attributed_ms := (phase_sum_usec + distant_tier_usec) / 1000.0
+	s["streaming_phase_sum_ms"] = phase_sum_usec / 1000.0
+	s["streaming_distant_tiers_ms"] = distant_tier_usec / 1000.0
+	s["streaming_impostor_update_ms"] = _last_impostor_update_usec / 1000.0
+	s["streaming_hlod_merger_ms"] = _last_hlod_merger_usec / 1000.0
+	s["streaming_distant_light_ms"] = _last_distant_light_usec / 1000.0
+	s["streaming_unattributed_ms"] = maxf(0.0, _last_frame_total_ms - attributed_ms)
 
 	# Add CellManager async stats if available
 	if _cell_manager and _cell_manager.has_method("get_loading_stats"):
@@ -2129,6 +2169,7 @@ func get_stats() -> Dictionary:
 	s["hlod_warmup_queue_size"] = hlod_stats.get("warmup_queue_size", 0)
 	s["hlod_stale_completions"] = hlod_stats.get("stale_completions_discarded", 0)
 	s["hlod_surface_cap_rejections"] = hlod_stats.get("surface_cap_rejections", 0)
+	s["hlod_surface_cap_over_budget_published"] = hlod_stats.get("surface_cap_over_budget_published", 0)
 	s["hlod_refs_skipped"] = hlod_stats.get("total_refs_skipped", 0)
 	s["hlod_refs_type_rejected"] = hlod_stats.get("refs_type_rejected", 0)
 	s["hlod_refs_size_rejected"] = hlod_stats.get("refs_size_rejected", 0)
@@ -2396,6 +2437,7 @@ func get_hlod_stats() -> Dictionary:
 			"max_chunk_indices": 0,
 			"stale_completions_discarded": 0,
 			"surface_cap_rejections": 0,
+			"surface_cap_over_budget_published": 0,
 			"merge_queue_last_usec": 0,
 			"completion_last_usec": 0,
 			"preparing_chunks": 0,
@@ -2450,6 +2492,12 @@ func get_hlod_stats() -> Dictionary:
 	return stats
 
 
+func get_hlod_chunk_debug_data() -> Array[Dictionary]:
+	if not _hlod_merger or not _hlod_merger.has_method("get_active_chunk_debug_data"):
+		return []
+	return _hlod_merger.call("get_active_chunk_debug_data") as Array[Dictionary]
+
+
 func _sync_hlod_far_coverage(force: bool = false) -> void:
 	var can_sync_far := _impostor_renderer != null and _impostor_renderer.has_method("set_hlod_covered_ref_nums")
 	var can_sync_mid := _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
@@ -2457,6 +2505,8 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 		return
 	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
 		if force or _hlod_far_coverage_revision != -1:
+			if can_sync_far:
+				_impostor_renderer.call("set_hlod_covered_ref_nums", {})
 			if can_sync_mid:
 				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
 			_hlod_far_coverage_revision = -1
@@ -2466,8 +2516,10 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 	if not force and revision == _hlod_far_coverage_revision:
 		return
 	_hlod_far_coverage_revision = revision
+	if can_sync_far:
+		_impostor_renderer.call("set_hlod_covered_ref_nums", manifest.get("source_ref_nums", {}))
 	if can_sync_mid:
-		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("source_bucket_counts", {}), DU.HLOD_START)
+		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("complete_bucket_counts", manifest.get("source_bucket_counts", {})), DU.HLOD_START)
 
 
 func _should_update_hlod() -> bool:

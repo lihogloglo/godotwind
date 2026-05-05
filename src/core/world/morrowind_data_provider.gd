@@ -522,6 +522,7 @@ func get_tier_unit_counts() -> Dictionary:
 	return {
 		TierUtils.Tier.NEAR: 50,      # ~585m radius (full 3D geometry)
 		TierUtils.Tier.MID: 100,      # ~1170m radius (pre-merged meshes)
+		TierUtils.Tier.HLOD: 150,     # ~1755m radius (chunk proxies)
 		TierUtils.Tier.FAR: 200,      # ~2340m radius (impostors)
 		TierUtils.Tier.HIDDEN: 0,     # Skybox only (no per-cell processing)
 	}

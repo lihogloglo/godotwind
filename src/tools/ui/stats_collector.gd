@@ -143,8 +143,6 @@ func _update_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
 		var dist_label: Label = _find_label(_panels._nav_vbox, "DistLabel")
 		if dist_label:
 			dist_label.text = StreamingConfig.format_view_distance(view_distance)
-		if _panels.view_distance_slider:
-			_panels.view_distance_slider.set_value_no_signal(view_distance)
 
 	# ── Debug tab labels ──
 	if _panels._debug_vbox:

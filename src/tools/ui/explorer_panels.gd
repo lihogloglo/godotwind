@@ -88,7 +88,6 @@ var cirrus_thickness_slider: HSlider = null
 
 ## Debug panel widgets
 var lod_mode_btn: Button = null
-var view_distance_slider: HSlider = null
 var view_distance_label: Label = null
 
 
@@ -650,45 +649,21 @@ func _build_navigation_tab(vbox: VBoxContainer) -> void:
 	camera_label.text = "Cell: (0, 0) | Mode: Fly"
 	vbox.add_child(camera_label)
 
-	# View distance control
+	# View distance is startup/config-only. Live range edits cause expensive
+	# MID/HLOD/FAR reconfiguration and make tier debugging ambiguous.
 	_add_section(vbox, "View Distance")
 
 	var view_row := HBoxContainer.new()
 	var view_distance: int = _initial_state.get("view_distance", StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS)
-	var adjust_cb: Callable = _cb.get("adjust_view_distance", Callable())
-	var set_cb: Callable = _cb.get("set_view_distance", Callable())
-
-	var minus_btn := Button.new()
-	minus_btn.text = "-"
-	minus_btn.custom_minimum_size.x = 30
-	minus_btn.pressed.connect(func() -> void: adjust_cb.call(-1))
-	view_row.add_child(minus_btn)
-
-	view_distance_slider = HSlider.new()
-	view_distance_slider.name = "ViewDistanceSlider"
-	view_distance_slider.min_value = StreamingConfig.MIN_VIEW_DISTANCE_METERS
-	view_distance_slider.max_value = StreamingConfig.MAX_VIEW_DISTANCE_METERS
-	view_distance_slider.step = StreamingConfig.VIEW_DISTANCE_STEP_METERS
-	view_distance_slider.value = StreamingConfig.clamp_view_distance_meters(view_distance)
-	view_distance_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	view_distance_slider.custom_minimum_size.x = 120
-	view_distance_slider.value_changed.connect(func(value: float) -> void: set_cb.call(value))
-	view_row.add_child(view_distance_slider)
-
-	var plus_btn := Button.new()
-	plus_btn.text = "+"
-	plus_btn.custom_minimum_size.x = 30
-	plus_btn.pressed.connect(func() -> void: adjust_cb.call(1))
-	view_row.add_child(plus_btn)
-
-	vbox.add_child(view_row)
 
 	var dist_label := Label.new()
 	dist_label.name = "DistLabel"
 	dist_label.text = StreamingConfig.format_view_distance(view_distance)
 	dist_label.add_theme_font_size_override("font_size", 11)
+	dist_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	view_distance_label = dist_label
-	vbox.add_child(dist_label)
+	view_row.add_child(dist_label)
+	vbox.add_child(view_row)
 
 	# Quick teleport buttons
 	_add_section(vbox, "Quick Teleport")
@@ -752,17 +727,17 @@ func _build_debug_tab(vbox: VBoxContainer) -> void:
 	var lod_panel := FoldablePanelScript.new("LOD Overlays", true)
 
 	var chunk_toggle := CheckBox.new()
-	chunk_toggle.text = "Show Chunks (FAR tier)"
+	chunk_toggle.text = "Show HLOD Chunks"
 	chunk_toggle.button_pressed = _initial_state.get("show_chunk_debug", false)
 	chunk_toggle.toggled.connect(_cb.get("show_chunks_toggled", Callable()))
-	chunk_toggle.tooltip_text = "Visualize quadtree chunk boundaries (8x8 cells each)"
+	chunk_toggle.tooltip_text = "Visualize HLOD chunk state: active, queued, pending, or rejected"
 	lod_panel.add_content(chunk_toggle)
 
 	var tier_toggle := CheckBox.new()
 	tier_toggle.text = "Show Distance Tiers"
 	tier_toggle.button_pressed = _initial_state.get("show_tier_debug", false)
 	tier_toggle.toggled.connect(_cb.get("show_tiers_toggled", Callable()))
-	tier_toggle.tooltip_text = "Visualize NEAR/MID/FAR tier zones with colors"
+	tier_toggle.tooltip_text = "Visualize NEAR/MID/HLOD/FAR tier zones with colors"
 	lod_panel.add_content(tier_toggle)
 
 	var cell_toggle := CheckBox.new()

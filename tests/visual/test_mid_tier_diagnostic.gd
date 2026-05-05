@@ -372,8 +372,8 @@ func _build_visual_grid() -> void:
 
 func _build_distance_strip(parent: Node3D) -> void:
 	var strip_origin := Vector3(80, 0, 0)  # Offset to the right of grid
-	var distances: Array[float] = [150.0, 250.0, 375.0, 500.0]
-	var band_names: Array[String] = ["NEAR/MID boundary", "LOD1/LOD2", "LOD2/LOD3", "MID/FAR boundary"]
+	var distances: Array[float] = [150.0, 250.0, 300.0, 1000.0]
+	var band_names: Array[String] = ["NEAR/MID boundary", "MID interior check", "MID/HLOD boundary", "HLOD/FAR boundary"]
 
 	# Place distance markers
 	for d_idx: int in distances.size():

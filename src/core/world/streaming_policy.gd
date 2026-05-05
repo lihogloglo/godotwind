@@ -1,7 +1,7 @@
 ## StreamingPolicy — Single source of truth for MID-tier filtering and LOD generation
 ##
 ## Consolidates two filters:
-## - `is_mid_worthy()` — runtime: decides if object renders at 150-500m. Post-S.1
+## - `is_mid_worthy()` — runtime: decides if object belongs in MID/HLOD source data. Post-S.1
 ##   (near_tier_refactor.md 2026-04-19), runtime callers are gone; kept for the
 ##   prebake path + future S.7 MID re-enable where the per-cell tier FSM reads it.
 ## - `should_generate_lods()` (used by nif_converter.gd) — prebake: decides if
@@ -14,7 +14,7 @@ class_name StreamingPolicy
 extends RefCounted
 
 
-## Check if a model is visually significant enough for MID-tier rendering (150-500m).
+## Check if a model is visually significant enough for MID/HLOD renderer ownership.
 ## Objects that fail this check are deferred to NEAR range only.
 ##
 ## Parameters:

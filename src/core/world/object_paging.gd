@@ -45,12 +45,11 @@ const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
 ## LRU cache budget in bytes (default 256 MB)
 const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
 
-## Minimum refs to justify merging a chunk (OpenMW cost-benefit insight).
-## Sparse chunks with fewer refs aren't worth the merge overhead — refs stay
-## as individual RS instances through StaticObjectRenderer.
-## Lowered from 15 to 5: Morrowind near-coast cells can be sparse; 5 is still
-## enough for the cost-benefit analysis to find shared materials.
-const MIN_REFS_TO_MERGE: int = 5
+## Minimum refs to justify merging a chunk.
+## Sparse chunks are still valid visual proxies because MID no longer covers
+## beyond 300m. Keep this permissive; proxy-material/atlas work can later reduce
+## draw cost without creating HLOD coverage holes.
+const MIN_REFS_TO_MERGE: int = 1
 
 ## Merge-queue stagger budget (main-thread work per frame).
 const MERGES_PER_FRAME: int = 2
@@ -63,15 +62,15 @@ const MERGE_QUEUE_SOFT_LIMIT_USEC: int = 2200
 const COMPLETIONS_PER_FRAME: int = 1
 const COMPLETION_BUDGET_USEC: int = 2500
 const RUNTIME_GENERATE_LODS: bool = false
-const MAX_RUNTIME_CHUNK_SURFACES: int = 16
+const MAX_RUNTIME_CHUNK_SURFACES: int = 128
 
 ## visibility_range fade margins (same on both sides of a tier handoff).
 const TIER_FADE_MARGIN: float = 20.0
 
 ## Runtime visibility owner floor. HLOD should render at the canonical
-## MID->HLOD handoff (300m). MID remains the fallback only for buckets that are
-## not covered by active HLOD chunks; NativeStreamingManager applies those
-## bucket-specific MID caps from this merger's coverage manifest.
+## MID->HLOD handoff (300m). MID is independently capped at the same handoff;
+## the coverage manifest is only allowed to shorten buckets that HLOD fully
+## covers, never to decide whether accepted HLOD refs render.
 const DEFAULT_VISUAL_BEGIN_FLOOR: float = DU.HLOD_START
 
 ## Phase 4d — teleport warmup (plan §11 Phase 3 / session log §7).
@@ -157,9 +156,9 @@ class MergePrepState:
 ## Master toggle.
 ## Phase 4 (2026-04-17) — implemented as an opt-in runtime path while chunk
 ## coverage and publish costs are verified:
-## HLOD-on = MID fallback 0-500m, covered MID buckets cap at 300m, HLOD visible
-## 300-1000m, and FAR remains the 500m fallback until page coverage is exact.
-## HLOD-off parks only merged chunks; MID remains at DU.MID_END.
+## HLOD-on = MID capped at DU.MID_END, HLOD visible 300-1000m, FAR visible
+## from DU.FAR_START onward. HLOD-off parks only merged chunks; it does not
+## widen MID or pull FAR inward.
 ## Toggle at runtime via console: `hlod_enable` / `hlod_disable`.
 var enabled: bool = true
 
@@ -198,8 +197,8 @@ var _chunk_generations: Dictionary = {}  # Vector3i -> int
 var _next_generation: int = 1
 
 ## Desired chunks proven not worth or not possible to merge in the current
-## renderer/cache state. MID/FAR fallback owns their pixels; this prevents
-## repeated ESM scans for sparse rings.
+## renderer/cache state. These are HLOD coverage holes to diagnose; MID and FAR
+## do not move their tier boundaries to cover them.
 var _negative_chunks: Dictionary = {}  # Vector3i -> String reason
 
 ## Chunk merge input collection currently being prepared across frames.
@@ -282,6 +281,7 @@ var _stats: Dictionary = {
 	"max_chunk_indices": 0,
 	"stale_completions_discarded": 0,
 	"surface_cap_rejections": 0,
+	"surface_cap_over_budget_published": 0,
 	"merge_queue_last_usec": 0,
 	"completion_last_usec": 0,
 	"preparing_chunks": 0,
@@ -576,6 +576,7 @@ func process_completions() -> int:
 		var generation: int = entry.get("generation", 0)
 		var mesh: ArrayMesh = entry["mesh"]
 		var bytes: int = entry["bytes"]
+		var mesh_stats: Dictionary = entry.get("mesh_stats", {})
 
 		# Chunk may have left range, been cancelled, or been superseded while
 		# the worker was in progress. Reject before LOD generation or RS publish.
@@ -584,12 +585,19 @@ func process_completions() -> int:
 			_pending_manifests.erase(key)
 			continue
 
-		if mesh == null or mesh.get_surface_count() > MAX_RUNTIME_CHUNK_SURFACES:
-			_negative_chunks[key] = "surface_cap" if mesh != null else "merge_failed"
+		if mesh == null:
+			_negative_chunks[key] = "merge_failed"
 			_stats["surface_cap_rejections"] = int(_stats.get("surface_cap_rejections", 0)) + 1
 			_pending_manifests.erase(key)
 			_chunk_generations.erase(key)
 			continue
+		if mesh.get_surface_count() > MAX_RUNTIME_CHUNK_SURFACES:
+			_stats["surface_cap_over_budget_published"] = int(_stats.get("surface_cap_over_budget_published", 0)) + 1
+			Log.warn("hlod", "Publishing over-budget HLOD chunk %s with %d surfaces (cap=%d); preserving coverage over disappearance" % [
+				str(key),
+				mesh.get_surface_count(),
+				MAX_RUNTIME_CHUNK_SURFACES,
+			])
 
 		# Optional runtime LOD finalization is disabled in the hot path. If it
 		# returns, it must stay on the main thread because ImporterMesh +
@@ -610,7 +618,7 @@ func process_completions() -> int:
 		_lru_order.append(key)
 		_cache_used_bytes += bytes
 
-		if _create_rs_instance(key, mesh, bytes):
+		if _create_rs_instance(key, mesh, bytes, mesh_stats):
 			count += 1
 
 		_chunk_generations.erase(key)
@@ -651,6 +659,7 @@ func get_active_coverage_manifest() -> Dictionary:
 	return {
 		"source_ref_nums": source_ref_nums,
 		"source_bucket_counts": source_bucket_counts,
+		"complete_bucket_counts": source_bucket_counts.duplicate(),
 		"covered_cells": covered_cells,
 		"active_covered_refs": source_ref_nums.size(),
 		"active_covered_cells": covered_cells.size(),
@@ -671,9 +680,16 @@ func get_active_chunk_debug_data() -> Array[Dictionary]:
 	for key: Vector3i in _merge_queue:
 		by_key[key] = _make_chunk_debug_entry(key, "queued")
 	for key: Vector3i in _preparing_chunks:
-		by_key[key] = _make_chunk_debug_entry(key, "preparing")
+		var prep_entry := _make_chunk_debug_entry(key, "preparing")
+		var state: MergePrepState = _preparing_chunks[key]
+		prep_entry.merge(_make_debug_counts_from_state(state))
+		by_key[key] = prep_entry
 	for key: Vector3i in _pending_merges:
-		by_key[key] = _make_chunk_debug_entry(key, "pending")
+		var pending_entry := _make_chunk_debug_entry(key, "pending")
+		var manifest: Dictionary = _pending_manifests.get(key, {})
+		if not manifest.is_empty():
+			pending_entry.merge(_make_debug_counts_from_manifest(manifest))
+		by_key[key] = pending_entry
 	var chunks: Array[Dictionary] = []
 	for key: Vector3i in _active_chunks:
 		var data: PagingChunkData = _active_chunks[key]
@@ -683,6 +699,11 @@ func get_active_chunk_debug_data() -> Array[Dictionary]:
 			"material_count": data.material_count,
 			"vertex_count": data.vertex_count,
 			"coverage_complete": data.coverage_complete,
+			"refs_accepted": data.refs_accepted,
+			"refs_skipped": data.refs_skipped,
+			"refs_size_rejected": data.refs_size_rejected,
+			"refs_surface_rejected": data.refs_surface_rejected,
+			"refs_type_rejected": data.refs_type_rejected,
 		})
 		by_key[key] = entry
 	for key: Vector3i in by_key:
@@ -710,6 +731,32 @@ func _make_chunk_debug_entry(key: Vector3i, status: String) -> Dictionary:
 		"material_count": 0,
 		"vertex_count": 0,
 		"coverage_complete": false,
+		"refs_accepted": 0,
+		"refs_skipped": 0,
+		"refs_size_rejected": 0,
+		"refs_surface_rejected": 0,
+		"refs_type_rejected": 0,
+	}
+
+
+static func _make_debug_counts_from_manifest(manifest: Dictionary) -> Dictionary:
+	return {
+		"refs_accepted": int(manifest.get("refs_accepted", 0)),
+		"refs_skipped": int(manifest.get("refs_skipped", 0)),
+		"refs_size_rejected": int(manifest.get("refs_size_rejected", 0)),
+		"refs_surface_rejected": int(manifest.get("refs_surface_rejected", 0)),
+		"refs_type_rejected": int(manifest.get("refs_type_rejected", 0)),
+		"coverage_complete": bool(manifest.get("coverage_complete", false)),
+	}
+
+
+static func _make_debug_counts_from_state(state: MergePrepState) -> Dictionary:
+	return {
+		"refs_accepted": state.inputs.size(),
+		"refs_skipped": state.refs_skipped,
+		"refs_size_rejected": state.refs_size_rejected,
+		"refs_surface_rejected": state.refs_surface_rejected,
+		"refs_type_rejected": state.refs_type_rejected,
 	}
 
 
@@ -916,12 +963,13 @@ func _drain_warmup_queue() -> void:
 			_warmup_pending_async.erase(mesh_type_name)
 			budget -= 1
 			continue
-		var prototype := _load_prototype_from_cache(model_path)
-		if prototype:
-			_static_renderer.register_from_prototype(mesh_type_name, prototype)
-			prototype.free()
+		var register_status := _register_cached_packed_scene(mesh_type_name, model_path)
+		if register_status == "ready":
 			_warmup_pending_async.erase(mesh_type_name)
 			_stats["warmup_registered"] = int(_stats.get("warmup_registered", 0)) + 1
+			_clear_temporary_negative_chunks()
+		elif register_status == "pending":
+			_warmup_queue.push_front(model_path)
 		elif _request_prototype_warmup_async(model_path):
 			_warmup_queue.push_front(model_path)
 		else:
@@ -931,6 +979,28 @@ func _drain_warmup_queue() -> void:
 		budget -= 1
 	if _warmup_queue.is_empty():
 		_warmup_dispatched.clear()
+
+
+func _clear_temporary_negative_chunks() -> void:
+	if _negative_chunks.is_empty():
+		return
+	var cleared := 0
+	for key: Vector3i in _negative_chunks.keys():
+		var reason := str(_negative_chunks.get(key, ""))
+		if reason == "missing_prototype" or reason == "uninitialized":
+			_negative_chunks.erase(key)
+			cleared += 1
+	if cleared > 0:
+		Log.debug("hlod", "Cleared %d temporary HLOD negative chunks after prototype warmup" % cleared)
+
+
+func _register_cached_packed_scene(mesh_type_name: String, model_path: String) -> String:
+	if _model_loader == null or not _static_renderer.has_method("request_register_from_packed_scene"):
+		return "failed"
+	var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path)
+	if packed_scene == null:
+		return "failed"
+	return str(_static_renderer.call("request_register_from_packed_scene", mesh_type_name, packed_scene))
 
 #endregion
 
@@ -1219,11 +1289,7 @@ func _process_merge_prepare(state: MergePrepState, start_usec: int) -> String:
 			sm.surface_materials = sub.surface_materials.duplicate()
 			ref_input.sub_meshes.append(sm)
 		if not ref_input.sub_meshes.is_empty():
-			if state.surface_estimate + ref_surface_count > MAX_RUNTIME_CHUNK_SURFACES:
-				state.refs_surface_rejected += 1
-				state.ref_index += 1
-				continue
-			state.surface_estimate += ref_surface_count
+			ref_input.surface_count = ref_surface_count
 			state.inputs.append(ref_input)
 			state.source_ref_nums[int(ref.ref_num)] = true
 			state.source_bucket_counts[bucket_key] = int(state.source_bucket_counts.get(bucket_key, 0)) + 1
@@ -1260,6 +1326,7 @@ func _build_manifest_for_state(state: MergePrepState) -> Dictionary:
 		"covered_cells": state.covered_cells.duplicate(),
 		"source_ref_nums": state.source_ref_nums.duplicate(),
 		"source_bucket_counts": state.source_bucket_counts.duplicate(),
+		"complete_bucket_counts": state.source_bucket_counts.duplicate(),
 		"coverage_complete": (
 			state.refs_skipped == 0
 			and state.refs_size_rejected == 0
@@ -1276,44 +1343,52 @@ func _build_manifest_for_state(state: MergePrepState) -> Dictionary:
 	}
 
 
-func _filter_partial_bucket_inputs(state: MergePrepState) -> void:
+## Keep every accepted HLOD render input, but publish only whole MID buckets as
+## suppressible. `refs_partial_bucket_rejected` now means "accepted for HLOD
+## render, not accepted for MID bucket suppression."
+func _update_complete_bucket_counts(state: MergePrepState) -> void:
 	if state.inputs.is_empty() or state.bucket_total_counts.is_empty():
+		state.source_bucket_counts.clear()
 		return
 
-	var filtered_inputs: Array = []
-	var filtered_ref_nums: Dictionary = {}
-	var filtered_bucket_counts: Dictionary = {}
+	var complete_bucket_counts: Dictionary = {}
+	for bucket_key_value: Variant in state.source_bucket_counts.keys():
+		var bucket_key := str(bucket_key_value)
+		if bucket_key.is_empty():
+			continue
+		var accepted_count: int = int(state.source_bucket_counts.get(bucket_key_value, 0))
+		var total_count: int = int(state.bucket_total_counts.get(bucket_key, 0))
+		if total_count > 0 and accepted_count >= total_count:
+			complete_bucket_counts[bucket_key] = accepted_count
+		else:
+			state.refs_partial_bucket_rejected += accepted_count
+			continue
+
+	state.source_bucket_counts = complete_bucket_counts
+
+
+func _apply_surface_budget(state: MergePrepState) -> void:
+	if state.inputs.is_empty() or MAX_RUNTIME_CHUNK_SURFACES <= 0:
+		return
+	var surface_total := 0
 	for input_value: Variant in state.inputs:
 		var input: Kernel.RefInput = input_value as Kernel.RefInput
 		if input == null:
 			continue
-		var bucket_key: String = input.bucket_key
-		if bucket_key.is_empty():
-			state.refs_partial_bucket_rejected += 1
-			continue
-		var accepted_count: int = int(state.source_bucket_counts.get(bucket_key, 0))
-		var total_count: int = int(state.bucket_total_counts.get(bucket_key, 0))
-		if total_count <= 0 or accepted_count < total_count:
-			state.refs_partial_bucket_rejected += 1
-			continue
-		filtered_inputs.append(input)
-		filtered_bucket_counts[bucket_key] = int(filtered_bucket_counts.get(bucket_key, 0)) + 1
-		if input.source_ref_num >= 0:
-			filtered_ref_nums[input.source_ref_num] = true
-
-	state.inputs = filtered_inputs
-	state.source_bucket_counts = filtered_bucket_counts
-	state.source_ref_nums = filtered_ref_nums
+		var surface_count := maxi(1, input.surface_count)
+		surface_total += surface_count
+	state.surface_estimate = surface_total
 
 
 func _finish_merge_prepare(state: MergePrepState) -> void:
 	var key := state.key
 	_stats["total_refs_skipped"] += state.refs_skipped
-	_stats["refs_size_rejected"] += state.refs_size_rejected
-	_stats["refs_surface_rejected"] += state.refs_surface_rejected
 	_stats["refs_type_rejected"] += state.refs_type_rejected
 	_stats["size_cache_hits"] += state.size_cache_hits
-	_filter_partial_bucket_inputs(state)
+	_apply_surface_budget(state)
+	_stats["refs_size_rejected"] += state.refs_size_rejected
+	_stats["refs_surface_rejected"] += state.refs_surface_rejected
+	_update_complete_bucket_counts(state)
 	_stats["refs_partial_bucket_rejected"] += state.refs_partial_bucket_rejected
 
 	# Cost-benefit minimum — sparse chunks aren't worth merging
@@ -1371,10 +1446,14 @@ func _merge_chunk_worker(key: Vector3i, generation: int, inputs: Array, chunk_or
 	if not mesh:
 		return {"key": key, "generation": generation, "mesh": null, "bytes": 0}
 
-	var bytes := Kernel.estimate_mesh_bytes(mesh)
+	var mesh_stats := Kernel.collect_mesh_stats(mesh)
+	var bytes := int(mesh_stats.get("bytes", 0))
+	if bytes <= 0:
+		bytes = Kernel.estimate_mesh_bytes(mesh)
+		mesh_stats["bytes"] = bytes
 
 	_completed_mutex.lock()
-	_completed_queue.append({"key": key, "generation": generation, "mesh": mesh, "bytes": bytes})
+	_completed_queue.append({"key": key, "generation": generation, "mesh": mesh, "bytes": bytes, "mesh_stats": mesh_stats})
 	_completed_mutex.unlock()
 
 	return {"key": key, "generation": generation, "bytes": bytes}
@@ -1393,7 +1472,7 @@ static func _chunk_origin_world(key: Vector3i) -> Vector3:
 
 ## Create RenderingServer instance for a merged chunk mesh.
 ## Visibility range is tier-specific: [band_start, band_end] with 20m fade.
-func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int) -> bool:
+func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int, mesh_stats: Dictionary = {}) -> bool:
 	if not _scenario.is_valid() or not mesh:
 		return false
 
@@ -1406,7 +1485,7 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int) -
 	rs.instance_set_transform(rid, Transform3D(Basis.IDENTITY, _chunk_origin_world(key)))
 
 	# Tier-specific visibility_range (plan §4/§9), clamped by the runtime
-	# visual-owner floor so HLOD never z-fights MID fallback.
+	# visual-owner floor so HLOD begins exactly at the MID handoff.
 	_set_chunk_visibility_range(rid, key)
 	rs.instance_geometry_set_lod_bias(rid, 1.0)
 
@@ -1417,11 +1496,10 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int) -
 	data.key = key
 	data.instance_rid = rid
 	data.mesh = mesh
-	data.surface_count = mesh.get_surface_count()
-	data.material_count = _count_distinct_surface_materials(mesh)
-	var geometry_counts := _count_mesh_geometry(mesh)
-	data.vertex_count = int(geometry_counts.get("vertices", 0))
-	data.index_count = int(geometry_counts.get("indices", 0))
+	data.surface_count = int(mesh_stats.get("surface_count", mesh.get_surface_count()))
+	data.material_count = int(mesh_stats.get("material_count", data.surface_count))
+	data.vertex_count = int(mesh_stats.get("vertex_count", estimated_bytes / 72))
+	data.index_count = int(mesh_stats.get("index_count", 0))
 	data.estimated_bytes = estimated_bytes
 	var manifest: Dictionary = _mesh_manifests.get(key, {})
 	if not manifest.is_empty():
@@ -1499,13 +1577,18 @@ func _cache_evict_to_fit(needed_bytes: int) -> void:
 		var oldest: Vector3i = _lru_order[0]
 		_lru_order.remove_at(0)
 
-		# If chunk is still active, free its RS instance too
 		if oldest in _active_chunks:
-			var data: PagingChunkData = _active_chunks[oldest]
-			if data.instance_rid.is_valid():
-				RenderingServer.free_rid(data.instance_rid)
-			_active_chunks.erase(oldest)
-			_coverage_revision += 1
+			# Active chunks are visible HLOD ownership, not disposable cache.
+			# Touch them to the back and keep looking for inactive cache entries.
+			_lru_order.append(oldest)
+			var has_inactive := false
+			for candidate: Vector3i in _lru_order:
+				if candidate not in _active_chunks:
+					has_inactive = true
+					break
+			if not has_inactive:
+				break
+			continue
 
 		var evicted_bytes: int = _mesh_sizes.get(oldest, 0)
 		_cache_used_bytes -= evicted_bytes

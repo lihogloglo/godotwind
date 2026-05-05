@@ -1635,8 +1635,6 @@ func _setup_visibility_toggles() -> void:
 			if _profiling_report:
 				_profiling_report.dump_report(),
 		"teleport_to_cell": _teleport_to_cell,
-		"adjust_view_distance": _adjust_view_distance,
-		"set_view_distance": _set_view_distance,
 	}
 	var initial_state := {
 		"show_characters": _show_characters,
@@ -2051,6 +2049,15 @@ func _setup_subsystem_toggles() -> void:
 			lines.append("  defer    = %.2f" % (pt[5]/1000.0 if n > 5 else 0.0))
 			lines.append("  queue_io = %.2f" % (pt[6]/1000.0 if n > 6 else 0.0))
 			lines.append("  cell_upd = %.2f" % (pt[7]/1000.0 if n > 7 else 0.0))
+			lines.append("distant lanes (ms):")
+			lines.append("  impostor = %.2f" % float(stats.get("streaming_impostor_update_ms", 0.0)))
+			lines.append("  hlod     = %.2f" % float(stats.get("streaming_hlod_merger_ms", 0.0)))
+			lines.append("  lights   = %.2f" % float(stats.get("streaming_distant_light_ms", 0.0)))
+			lines.append("  distant_total = %.2f  attributed = %.2f  unattrib = %.2f" % [
+				float(stats.get("streaming_distant_tiers_ms", 0.0)),
+				float(stats.get("streaming_phase_sum_ms", 0.0)) + float(stats.get("streaming_distant_tiers_ms", 0.0)),
+				float(stats.get("streaming_unattributed_ms", 0.0)),
+			])
 			lines.append("Δ GPU = frame_ms - proc_ms (if proc_ms large → GDScript bound)")
 			for line: String in lines:
 				console.print_line(line)
@@ -2217,6 +2224,20 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"debug"
 		)
 
+		console.register_command(
+			"tier_view",
+			_cmd_toggle_tier_view,
+			"Toggle visual NEAR/MID/HLOD/FAR distance tier rings",
+			"debug"
+		)
+
+		console.register_command(
+			"hlod_chunk_view",
+			_cmd_toggle_hlod_chunk_view,
+			"Toggle visual HLOD chunk boxes and state labels",
+			"debug"
+		)
+
 		# Register MID-tier debugger commands (autopilot + census + markers)
 		if not _MidTierDebuggerScript:
 			_MidTierDebuggerScript = load("res://src/tools/mid_tier_debugger.gd")
@@ -2338,6 +2359,22 @@ func _cmd_toggle_batch_debug(_args: Dictionary) -> String:
 		_batch_debug_hud.toggle()
 		return "Batch debug HUD: %s" % ("ON" if _batch_debug_hud.is_active() else "OFF")
 	return "Batch debug HUD not initialized"
+
+
+func _cmd_toggle_tier_view(_args: Dictionary) -> String:
+	if not _debug_overlay:
+		return "Debug overlay not initialized"
+	_on_show_tiers_toggled(not _show_tier_debug)
+	var state := "ON" if _show_tier_debug else "OFF"
+	return "Tier view: %s (NEAR 0-150m, MID 150-300m, HLOD 300-1000m, FAR 1000m+)" % state
+
+
+func _cmd_toggle_hlod_chunk_view(_args: Dictionary) -> String:
+	if not _debug_overlay:
+		return "Debug overlay not initialized"
+	_on_show_chunks_toggled(not _show_chunk_debug)
+	var state := "ON" if _show_chunk_debug else "OFF"
+	return "HLOD chunk view: %s (cyan=active, yellow=queued, blue=pending, red=rejected)" % state
 
 
 func _cmd_dump_doors(_args: Dictionary) -> String:
@@ -2551,13 +2588,14 @@ func _cmd_hlod_stats(_args: Dictionary) -> String:
 			stats.get("far_hlod_uncovered_pages", 0),
 			stats.get("far_hlod_page_overrides", 0),
 		] +
-		"  rejects: skipped=%d, type=%d, size=%d, surface=%d, partial_bucket=%d, surface_cap=%d, stale=%d, size_cache_hits=%d, size_cache=%d\n" % [
+		"  rejects: skipped=%d, type=%d, size=%d, surface=%d, partial_bucket=%d, surface_cap=%d, over_budget_published=%d, stale=%d, size_cache_hits=%d, size_cache=%d\n" % [
 			stats.get("total_refs_skipped", 0),
 			stats.get("refs_type_rejected", 0),
 			stats.get("refs_size_rejected", 0),
 			stats.get("refs_surface_rejected", 0),
 			stats.get("refs_partial_bucket_rejected", 0),
 			stats.get("surface_cap_rejections", 0),
+			stats.get("surface_cap_over_budget_published", 0),
 			stats.get("stale_completions_discarded", 0),
 			stats.get("size_cache_hits", 0),
 			stats.get("size_cache_size", 0),
@@ -2882,10 +2920,6 @@ func _input(event: InputEvent) -> void:
 				# Handled by DebugSystem; fallback to profiling report
 				if not debug_system and _profiling_report:
 					_profiling_report.dump_report()
-			KEY_EQUAL, KEY_KP_ADD:  # + key
-				_adjust_view_distance(1)
-			KEY_MINUS, KEY_KP_SUBTRACT:  # - key
-				_adjust_view_distance(-1)
 			KEY_N:  # Toggle NPCs/characters
 				if _panels and _panels.show_characters_toggle:
 					_panels.show_characters_toggle.button_pressed = not _panels.show_characters_toggle.button_pressed
@@ -3033,37 +3067,6 @@ func _process(delta: float) -> void:
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:
 		_update_stats()
-
-
-## Adjust view distance and update streaming manager
-## Max radius comes from StreamingConfig so settings, UI, and runtime clamp together.
-func _adjust_view_distance(delta: int) -> void:
-	_set_view_distance(_current_view_distance + delta * StreamingConfig.VIEW_DISTANCE_STEP_METERS)
-
-
-## Set view distance from UI/settings and update streaming manager.
-func _set_view_distance(value: Variant) -> void:
-	var requested := int(round(float(value)))
-	var clamped := StreamingConfig.clamp_view_distance_meters(requested)
-	var changed := clamped != _current_view_distance
-	_current_view_distance = clamped
-	SettingsManager.set_view_distance_meters(_current_view_distance)
-	if world_streaming_manager:
-		if world_streaming_manager.has_method("set_view_distance_meters"):
-			world_streaming_manager.call("set_view_distance_meters", _current_view_distance, changed)
-		elif world_streaming_manager.has_method("set_load_radius_cells"):
-			world_streaming_manager.call("set_load_radius_cells", StreamingConfig.scene_load_radius_cells_for_view_distance_meters(_current_view_distance), changed)
-		else:
-			world_streaming_manager.view_distance_cells = StreamingConfig.scene_load_radius_cells_for_view_distance_meters(_current_view_distance)
-			if changed:
-				world_streaming_manager.refresh_cells()
-	if _panels:
-		if _panels.view_distance_slider:
-			_panels.view_distance_slider.set_value_no_signal(_current_view_distance)
-		if _panels.view_distance_label:
-			_panels.view_distance_label.text = StreamingConfig.format_view_distance(_current_view_distance)
-	_log("View distance: %s" % StreamingConfig.format_view_distance(_current_view_distance))
-	_update_stats()
 
 
 func _get_distant_render_end_m() -> float:

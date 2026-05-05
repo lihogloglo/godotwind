@@ -86,17 +86,23 @@ The filter order is:
    `PAGING_MIN_SIZE` is tuned in Godot meters. Do not copy OpenMW's value
    blindly.
 
-3. Cost/benefit merge decision.
+3. Runtime surface count.
+   Runtime HLOD preserves accepted refs even when a chunk exceeds the current
+   surface warning cap. Over-budget chunks are published and counted so visual
+   coverage wins over disappearance; later proxy material/atlas work should
+   reduce their draw cost.
+
+4. Cost/benefit merge decision.
    Merge a mesh type only when the expected draw-state benefit justifies the
    vertex/index cost. The native kernel groups by mesh/material identity and
    rejects poor merge candidates.
 
-4. Second-pass min-size relaxation.
+5. Second-pass min-size relaxation.
    High-benefit types can keep smaller refs in the merged proxy; marginal
    types are filtered more aggressively.
 
-The goal is not "merge everything." The goal is fewer useful render surfaces
-with bounded main-thread publication cost.
+The goal is coverage first inside 300-1000m, then fewer useful render surfaces
+through proxy-material and atlas work.
 
 ## Threading Contract
 
@@ -144,8 +150,9 @@ Current handoff:
 
 This is intentionally non-overlapping. HLOD coverage gaps should be diagnosed
 as HLOD coverage gaps rather than hidden by widening MID or starting FAR early.
-Covered MID bucket counters remain in stats so the main-scene integration can
-prove which buckets HLOD is replacing.
+The active coverage manifest intentionally separates rendered HLOD refs from
+complete MID bucket counts. Partial buckets still render in HLOD, but only
+complete buckets are safe to use for MID suppression.
 
 Any change to these ranges must retune live bucket/chunk/page visibility, not
 only future instances.
@@ -178,9 +185,13 @@ ObjectPaging directly. The console `hlod_stats` command prints the same groups:
   teleport warmup queue depth;
 - total and max chunk surfaces/materials/vertices/indices;
 - active coverage manifest counters and FAR page override counters;
-- rejection counters for type, projected-size, surface, partial-bucket, surface
-  cap, stale completion, and size-cache behavior;
+- rejection/incomplete-coverage counters for type, projected-size, surface,
+  partial-bucket, surface cap, over-budget published chunks, stale completion,
+  and size-cache behavior;
 - last-frame merge queue and completion publish timings;
+- aggregate streaming lane timings in `streaming_phases`: core phases,
+  deferred impostor scan, HLOD merger, distant light billboards, and remaining
+  unattributed frame time;
 - runtime flags, including `runtime_lods=false`.
 
 ## Related Docs

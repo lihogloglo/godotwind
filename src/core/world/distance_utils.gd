@@ -71,12 +71,12 @@ const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 ## OpenMW uses 0.14 in Morrowind (MW) units. Godotwind works in meters
 ## (1 MW unit = 1/70 m), so 0.14 in MW-unit space is effectively the same
 ## angular-size formula but with meter-scale distances. In practice, 0.14
-## requires mesh_radius ≥ 28m at 200m distance — which rejects all Morrowind
-## buildings and vegetation. Lowered to 0.02 so objects with radius ≥ ~4m
-## (typical Morrowind tree/building) pass at 200m. Tune upward to reduce
-## paging draw calls if performance requires it.
+## requires mesh_radius >= 28m at 200m distance, which rejects all Morrowind
+## buildings and vegetation. Tuned to 0.003 so normal exterior statics survive
+## the full HLOD band; draw-call reduction belongs in proxy material/atlas
+## work, not in dropping visible coverage.
 ## Source: inspos/openmw/components/settings/categories/terrain.hpp:34
-const PAGING_MIN_SIZE: float = 0.02
+const PAGING_MIN_SIZE: float = 0.003
 const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
 
 ## Cost-benefit merge decision multiplier (OpenMW `mObjectPagingMergeFactor`).

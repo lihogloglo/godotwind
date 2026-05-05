@@ -100,6 +100,6 @@ Deep dive: `docs/systems/impostor_streaming_rendering.md`.
   the active pipeline; current HLOD is runtime ObjectPaging.
 - Do not describe MID as one raw RS instance per object. Current MID ownership
   is `CellStaticBucket` draw groups with local MultiMesh or singleton RS draws.
-- Do not move FAR to 1000m in docs or tests until HLOD owns exact coverage.
+- Do not move FAR earlier than 1000m in docs, tests, or runtime code.
 - Do not reintroduce manual per-LOD visibility ranges for MID. Use embedded LOD
   chains plus Godot's mesh LOD selector.

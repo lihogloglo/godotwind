@@ -124,10 +124,10 @@ func get_config() -> Dictionary:
 ## Returns: Dictionary mapping Tier enum to max unit count
 ##
 ## Example for Morrowind (small 117m cells):
-##   { Tier.NEAR: 50, Tier.MID: 100, Tier.FAR: 200, Tier.HORIZON: 0 }
+##   { Tier.NEAR: 50, Tier.MID: 100, Tier.HLOD: 150, Tier.FAR: 200, Tier.HORIZON: 0 }
 ##
 ## Example for La Palma (large 1536m regions):
-##   { Tier.NEAR: 5, Tier.MID: 10, Tier.FAR: 20, Tier.HORIZON: 0 }
+##   { Tier.NEAR: 5, Tier.MID: 10, Tier.HLOD: 15, Tier.FAR: 20, Tier.HORIZON: 0 }
 ##
 ## Returns empty dict to use DistanceTierManager defaults
 func get_tier_unit_counts() -> Dictionary:
@@ -140,8 +140,8 @@ func get_max_view_distance() -> float:
 	return 0.0  # Use default
 
 
-## Check if this world supports distant rendering (MID/FAR/HORIZON tiers)
-## When false, only NEAR tier (0-500m) is used
+## Check if this world supports distant rendering (MID/HLOD/FAR/HORIZON tiers)
+## When false, only NEAR tier is used
 ## Returns: true if distant rendering should be enabled
 func supports_distant_rendering() -> bool:
 	return false  # Disabled by default

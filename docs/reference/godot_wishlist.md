@@ -1,177 +1,361 @@
 # Godot Wishlist
 
-> Reference material. Godot 4.6 engine features Godotwind is blocked on, working around, or waiting for. Not a roadmap, not a status doc — just the list of engine-level gaps and our workarounds. Verify against current Godot release notes before acting on any entry (several were last updated 2026-03).
+> Reference material. Godot 4.6 engine features Godotwind is blocked on,
+> working around, or waiting for. This is not a roadmap and not a status doc.
+> Verify against current Godot release notes, docs, and issue history before
+> treating any entry as current.
 
 ---
 
-## Godot Features We're Waiting For
+## Reddit-Style Summary
 
-### Ray Tracing Acceleration Structures (Godot 4.7)
+Godot is not "bad at 3D" in the lazy meme sense. You can absolutely build a
+good-looking 3D game in it, and Godot 4.x has moved fast. The pain starts when
+you try to build the kind of world that other engines have spent decades
+specializing around: continuous open spaces, thousands of unique assets, huge
+material variety, heavy transparency, long view distances, dynamic loading, and
+no loading screen every time the player crosses an invisible line.
 
-**What:** `GL_EXT_ray_query` support for GPU occlusion culling via RT acceleration structures.
+The main thing we learned building Godotwind is that Godot gives you a renderer
+and a scene system, but not yet the production open-world middleware layer that
+Unreal/Unity users often take for granted. There is threaded resource loading,
+but not a streaming system. There are MultiMeshes and RenderingServer APIs, but
+not an engine-level GPU-driven renderer. There are compositor callbacks, but not
+yet a full render-graph/custom-pass story. There are mipmaps, but not texture
+streaming or virtual textures. There are ways to build scene chunks off-thread,
+but the active SceneTree, rendering nodes, resources, and GPU uploads still make
+runtime spawning a careful frame-budgeting problem.
 
-**Why we need it:** Ray queries are the most accurate occlusion culling method — they determine if objects are hidden behind terrain/buildings with no CPU readback and no conservative errors.
-
-**Status:** [PR #99119](https://github.com/godotengine/godot/pull/99119) merged into Godot master (Jan 2026), targeting **Godot 4.7**. Vulkan only — no Metal or D3D12 RT support yet.
-
-**Our workaround:** The system degrades gracefully without RT. Frustum + distance culling work without ray queries. RT occlusion is a bonus, not a requirement.
-
----
-
-### Engine-Level GPU-Driven Renderer (No Timeline)
-
-**What:** Reduz's [GPU-driven renderer vision](https://gist.github.com/reduz/c5769d0e705d8ab7ac187d63be0099b5) — deferred G-buffer, bindless textures, RT shadows, all opaque rendering via indirect draw.
-
-**Why we want it:** Would replace our application-level GPU-driven work and MID-tier batching system. Engine-level integration would be dramatically more efficient.
-
-**Status:** Multi-year effort, **not actively being developed**, not mentioned in [Godot's rendering priorities (Sep 2024)](https://godotengine.org/article/rendering-priorities-september-2024/). Don't wait for it.
-
-**Our workaround:** Application-level GPU-driven system using compute shader culling + SSBO storage + MultiMesh readback. When/if Godot ships engine-level GPU rendering, our system can be retired.
-
----
-
-### Built-in Impostor System (Not Planned)
-
-**What:** Automatic billboard/octahedral impostor generation for distant objects.
-
-**Why we need it:** Open-world games need impostors for objects beyond LOD range. Godot has `visibility_range` but no impostor generation.
-
-**Status:** Not on any Godot roadmap.
-
-**Our workaround:** Custom octahedral impostor system with `NativeImpostorRenderer` — prebaked impostor atlases, MultiMesh rendering, 70k+ instances in a single draw call. Works well but required significant development effort.
+So the takeaway is not "do not use Godot." The takeaway is: for ambitious
+open-world 3D, expect to become an engine team much earlier than you would in
+Unreal. You will write the asset pipeline, visibility system, impostors,
+material deduplication, shader warmup, LOD policy, streaming scheduler, and VRAM
+strategy yourself. That is exciting if you want control. It is brutal if you
+expected the engine to already have the AAA scaffolding.
 
 ---
 
-### Automatic Texture Atlasing (Not Planned)
+## Top Blockers For Ambitious Open-World 3D
 
-**What:** Engine-level texture array/atlas packing for draw call reduction.
+### 1. Texture Streaming / Virtual Textures
 
-**Why we want it:** Morrowind has ~10,000 unique materials. We deduplicate to ~1,000, but further batching requires texture arrays.
+**What:** Engine-level mip residency: load tiny mips first, stream higher mips
+as objects approach the camera, evict unused detail under a VRAM budget.
 
-**Status:** Not on any Godot roadmap.
+**Why it matters:** Open worlds are not limited only by draw calls or triangle
+count. They are limited by how many unique textures can be resident without
+blowing up VRAM. Morrowind's data set has thousands of unique textures. Modern
+open worlds are much worse.
 
-**Our workaround:** Manual `Texture2DArray` packing (512 layers, 512x512 per texture) in our material library. A bindless material system would build on top of this.
+**Godot 4.6 status:** Godot has mipmaps and texture compression, but no runtime
+texture streaming or virtual texture system. Proposal
+[godot-proposals#3177](https://github.com/godotengine/godot-proposals/issues/3177)
+is open. Godot's own AA/AAA article identifies streaming as the most important
+missing feature for large scenes/open worlds:
+<https://godotengine.org/article/whats-missing-in-godot-for-aaa/>.
 
----
+**Our workaround:**
+- Material deduplication reduces duplicate materials.
+- Manual `Texture2DArray` packing supports some batching paths.
+- FAR impostors collapse distant objects into atlas textures.
+- Object streaming and eviction reduce scene residency.
 
-### `draw_list_draw_indirect()` Maturity (Available but Unproven)
+**Remaining gap:** Once a normal texture is loaded, Godot does not expose
+engine-level per-mip residency control. We can reduce what we load, but not make
+Godot's texture system behave like Unreal Virtual Textures or Unity Mipmap
+Streaming.
 
-**What:** GPU indirect drawing — the GPU decides what to draw without CPU readback.
-
-**Why we want it:** Zero-latency GPU-driven rendering. Our preferred path for GPU culling output.
-
-**Status:** API exists since Godot 4.4.dev4, but:
-- Zero community usage examples
-- [Known Mac Metal bug](https://github.com/godotengine/godot/issues/103488)
-- Undocumented beyond API reference
-- Compatibility renderer doesn't support it
-
-**Our workaround:** MultiMesh readback fallback (GPU cull → async readback → MultiMesh update, 1-frame latency). Plan to switch to indirect draw when the ecosystem matures.
-
----
-
-### Outdoor Occlusion Culling Fix (Bug)
-
-**What:** Godot's built-in occlusion culling has an [angle bug (#106184)](https://github.com/godotengine/godot/issues/106184) that makes it unreliable for exterior scenes.
-
-**Why we need it:** Dense areas (Balmora, Vivec) have many objects behind buildings that should be culled.
-
-**Our workaround:** GPU compute shader frustum + distance culling, with RT ray query occlusion planned once Godot 4.7 ships RT support.
+**Impact:** **Critical.** This is one of the hardest open-world scalability
+limits to solve cleanly outside the engine.
 
 ---
 
-### GDScript Language Features (Proposed)
+### 2. Asset / Scene Streaming Is Primitive
 
-Several GDScript language improvements would significantly help the codebase:
+**What:** A full streaming system with priority queues, spatial awareness,
+loading budgets, memory budgets, dependency warmup, cancellation, eviction, and
+hitch-free activation.
 
-| Feature | Why We Want It | Status |
-|---------|---------------|--------|
-| **Structs / value types** | ESM records, NIF data, cell references — thousands of small data objects that currently require `RefCounted` or `Resource` with GC overhead | [GIP-1](https://github.com/godotengine/godot-proposals/issues/7329) proposed, no implementation timeline |
-| **Traits / interfaces** | Framework-First architecture needs proper interfaces (InventoryInterface, DialogueInterface, etc.) — currently using duck-typing or abstract base classes | [Proposal #6416](https://github.com/godotengine/godot-proposals/issues/6416) discussed, no implementation timeline |
-| **Typed dictionaries** | `Dictionary[StringName, Record]` exists in 4.4+ but typed Dictionary literals and better inference would help | Partially available |
+**Why it matters:** `ResourceLoader.load_threaded_request()` is useful, but it
+loads resources. It is not a complete streaming architecture. Open-world games
+need to continuously decide what to load, what to keep warm, what to evict, and
+what can be activated this frame without blowing the frame budget.
 
----
+**Godot 4.6 status:** Godot supports threaded resource loading:
+<https://docs.godotengine.org/en/4.6/classes/class_resourceloader.html>. The
+docs recommend polling status across frames rather than blocking on
+`load_threaded_get()`. There is no built-in spatial streaming manager, asset
+priority system, memory budget, or world-partition equivalent.
 
-### Asset Streaming (Engine-Level)
+**Our workaround:** Custom streaming in `src/core/world/`: frame-budgeted
+activation, frustum priority, LRU-style eviction, tier transitions, and
+prebaked asset loading.
 
-**What:** Native background asset loading with priority queues and memory budgets.
-
-**Why we want it:** We built our own streaming pipeline (~2,000 lines) with frame budgeting, frustum priority, LRU eviction, and tier transitions. Engine-level support would be more robust.
-
-**Status:** Godot has `ResourceLoader.load_threaded_request()` which we use, but no higher-level streaming system (priority, budgeting, spatial awareness). Not on any roadmap.
-
-**Our workaround:** Custom streaming pipeline in `src/core/world/` — works well after 10 sessions of optimization.
-
----
-
-### Texture Streaming / Virtual Textures (Not Available)
-
-**What:** Engine-level mipmap streaming that loads only the mip levels needed for the current view, keeping VRAM usage bounded regardless of total texture count.
-
-**Why we need it:** Morrowind has thousands of unique textures. When streaming many cells, all their textures load at full resolution into VRAM. With no texture streaming, VRAM fills up fast — especially on GPUs with 4-8 GB. This is one of our biggest scalability constraints.
-
-**Status:** Godot has no texture streaming or virtual texture system. Not on any public roadmap. Unreal has "Virtual Textures" and Unity has "Mipmap Streaming" — both solve this problem at engine level.
-
-**Our workarounds:**
-- Material deduplication (~10,000 → ~1,000 unique materials) reduces duplicate texture loads
-- LRU cache eviction in BSAManager (256MB cap) limits disk-side memory
-- Impostor system replaces distant objects with atlas textures (much smaller VRAM footprint)
-- But there's no mip-level control — once a texture is loaded, all mips are in VRAM
-
-**What would help:** Even basic mipmap streaming (load mip 0-1 first, stream higher mips on demand) would dramatically reduce VRAM pressure. This is a hard engine-level feature — not something we can easily build at application level.
+**Impact:** **High.** Solvable at project/framework level, but it is a major
+engineering cost and easy to get wrong.
 
 ---
 
-### Bindless Textures (Not Available)
+### 3. No Engine-Level GPU-Driven Renderer / Bindless Materials
 
-**What:** GPU descriptor indexing (`GL_EXT_nonuniform_qualifier`) — the GPU picks textures from a heap via integer ID, allowing thousands of differently-textured objects in a single draw call.
+**What:** A modern renderer path where GPU-side culling, indirect draw,
+bindless/material indexing, and draw compaction are core engine features rather
+than project-specific hacks.
 
-**Why we need it:** This is the single biggest draw call reduction opportunity for MID/FAR tiers. We have ~1,000 unique materials across 100k+ objects. Without bindless, every unique material = separate draw call (or complex Texture2DArray workarounds). With bindless, all objects can share one shader and one draw call regardless of texture count.
+**Why it matters:** Open worlds want to draw huge numbers of objects with tiny
+CPU overhead. Godot has useful primitives (`RenderingServer`, `RenderingDevice`,
+`MultiMesh`, compute shaders), but not the integrated renderer architecture
+that lets all opaque rendering be GPU-driven with thousands of materials.
 
-**Status:** Not exposed in Godot. Part of Reduz's GPU-driven vision, no implementation timeline. Vulkan and D3D12 both support it at hardware level — it's a Godot integration gap.
+**Godot 4.6 status:** No engine-level GPU-driven renderer or exposed bindless
+texture/material system. Reduz's design notes describe a possible future
+GPU-driven renderer, including bindless-style shader compatibility:
+<https://gist.github.com/reduz/c5769d0e705d8ab7ac187d63be0099b5>. Godot's
+rendering priorities article says performance is now the top rendering priority
+because higher-fidelity games are making the renderer a limiting factor:
+<https://godotengine.org/article/rendering-priorities-september-2024/>.
 
-**Our workaround:** Manual `Texture2DArray` packing (512 layers per array, 512x512 per texture). Objects index into the array via custom instance data. Works but requires texture format normalization, atlas management, and limits flexibility. True bindless would be dramatically simpler.
+**Our workaround:**
+- MID-tier batching with raw `RenderingServer` instances.
+- HLOD chunks.
+- FAR impostors in MultiMesh.
+- Manual `Texture2DArray` material packing.
+- Compute-culling experiments with MultiMesh/indirect-draw fallbacks.
 
----
-
-### Background Thread Scene Instantiation (Engine Limitation)
-
-**What:** Ability to call `PackedScene.instantiate()` from worker threads.
-
-**Why we need it:** Cell streaming creates dozens of Node3D instances per frame. `instantiate()` is main-thread only — we must defer all instantiation through frame budgeting (2ms/frame cap). True threaded instantiation would let us stream cells faster without frame hitches.
-
-**Status:** Godot architecture limitation. `duplicate()` works from threads but `instantiate()` does not. No public proposals to change this.
-
-**Our workaround:** Frame-budgeted main-thread instantiation with frustum-priority queuing. Works well but adds latency — distant cells may take several frames to fully populate.
-
----
-
-### Native Mesh Simplification / LOD Generation (Not Available)
-
-**What:** Automatic mesh decimation for LOD generation (like UE's Nanite or even basic simplification).
-
-**Why we want it:** We prebake 3 LOD levels per object for the MID tier. Engine-level simplification would eliminate the prebake step and allow dynamic LOD quality adjustment.
-
-**Status:** Godot has `visibility_range` for LOD switching but no mesh simplification pipeline. `SurfaceTool` and `MeshDataTool` exist but have no decimation. `mesh_simplifier.gd` exists in our codebase but is disabled — Godot's `ImporterMesh.generate_lods()` is import-time only, not available at runtime.
-
-**Our workaround:** Prebaked LODs via the asset pipeline. Custom impostor system for FAR tier. Works but requires offline processing.
+**Impact:** **High.** The work is possible, but the framework must own systems
+that a mature open-world renderer would normally provide.
 
 ---
 
-## Impact Summary
+### 4. Renderer Customization / Compositor Is Not Yet A Full Render Graph
 
-| Blocker | Impact |
-|---|---|
-| No RT acceleration (until 4.7) | Low — RT occlusion is optional enhancement |
-| No engine GPU-driven renderer | Medium — we build our own (significant effort) |
-| No impostor system | Low — already solved with custom system |
-| Indirect draw immaturity | Low — MultiMesh fallback works |
-| Occlusion culling bug | Medium — must implement GPU culling ourselves |
-| No GDScript structs | Medium — RefCounted overhead for data objects |
-| No GDScript traits | Low — abstract base classes work, less elegant |
-| No texture streaming | **High** — VRAM fills up with many loaded cells, no engine-level fix |
-| No bindless textures | **High** — limits draw call reduction for 100k+ uniquely-textured objects |
-| No threaded instantiation | Medium — streaming latency, must frame-budget all instantiation |
-| No mesh simplification | Low — prebaking works, adds offline step |
+**What:** Fine-grained custom render passes, custom buffers, material pass
+assignment, stencil control, depth/color copies at chosen stages, portals,
+planar reflections, terrain-to-geometry blending, custom post processes, and
+renderer callbacks between major passes.
 
-**Bottom line:** Nothing in Godot's pipeline is blocking our next steps. The biggest effort is building our own GPU-driven rendering system, which we'd need regardless given the project's scale (100k+ objects). Godot 4.7's RT features will be a nice upgrade when they arrive.
+**Why it matters:** Advanced rendering effects often need to happen in the
+middle of the pipeline, not just as "draw the world, then run a post-process."
+
+**Godot 4.6 status:** `CompositorEffect` exists and is important, but it is
+experimental and exposes a limited callback model:
+<https://docs.godotengine.org/en/4.6/classes/class_compositoreffect.html>.
+The broader compositor proposal remains open:
+<https://github.com/godotengine/godot-proposals/issues/7916>. That proposal
+exists because Godot's renderer is still relatively monolithic for advanced
+custom rendering.
+
+**Our workaround:** Use built-in pipeline stages where possible; use shader
+workarounds, extra viewports, or project-specific render paths only when the
+engine path is insufficient.
+
+**Impact:** **High for advanced visuals, medium for core open-world streaming.**
+This affects water, transparency, shore blending, portals, decals, outlines,
+debug visualization, and other effects that want real pass control.
+
+---
+
+### 5. Runtime Spawning, SceneTree, And GPU Uploads Are Hitch-Prone
+
+**What:** Hitch-free creation, warmup, and activation of complex object trees.
+
+**Why it matters:** Open worlds constantly bring objects in and out of
+existence. Even if file I/O is threaded, activation can still hitch if it
+touches the active SceneTree, creates rendering nodes, compiles pipelines, or
+uploads GPU resources at the wrong time.
+
+**Godot 4.6 status:** This is more nuanced than "PackedScene.instantiate() is
+main-thread only." The official thread-safe API docs say building or
+instantiating scene chunks outside the active tree is possible from a thread,
+but interacting with the active SceneTree is not thread-safe. They also warn
+that rendering-node instancing is not thread-safe by default, multiple loading
+threads can race shared resources, and direct GPU interaction from threads can
+stall:
+<https://docs.godotengine.org/en/4.6/tutorials/performance/thread_safe_apis.html>.
+
+**Our workaround:** Frame-budgeted main-thread activation, off-thread data
+preparation where safe, direct server APIs for high-volume objects, and careful
+resource ownership.
+
+**Impact:** **High.** Manageable, but expert-only in practice.
+
+---
+
+### 6. Pipeline / Shader Compilation Stutter
+
+**What:** Avoiding runtime stalls when a material, shader variant, or pipeline
+is first needed by the GPU.
+
+**Why it matters:** Streaming is not finished when a resource is loaded from
+disk. It is finished when the object can appear without a frame spike.
+
+**Godot 4.6 status:** Godot documents pipeline compilation as expensive. In the
+Compatibility renderer, the docs still recommend the legacy warmup approach:
+displaying materials, shaders, and particles in view for at least one frame
+during loading:
+<https://docs.godotengine.org/en/4.6/tutorials/performance/pipeline_compilations.html>.
+
+**Our workaround:** Prefer prebaked assets, reduce material permutations, warm
+assets before they enter the player view, and treat shader warmup as part of
+streaming rather than an afterthought.
+
+**Impact:** **Medium to high.** It does not block features, but it can destroy
+frame pacing if ignored.
+
+---
+
+### 7. Transparency And Screen-Space Effects Have Hard Limits
+
+**What:** Correct interaction between transparency, SSR/refraction, depth,
+normal/roughness buffers, MSAA, SSS, and custom effects.
+
+**Why it matters:** Water, glass, particles, foliage, fog cards, magic effects,
+and wet surfaces all lean on the transparency/screen-space boundary.
+
+**Godot 4.6 status:** The docs explicitly state that transparent materials
+cannot cast shadows or appear in `hint_screen_texture` / `hint_depth_texture`,
+which prevents them from appearing in screen-space reflections or refraction in
+the same way opaque objects do:
+<https://docs.godotengine.org/en/4.6/tutorials/shaders/shader_reference/spatial_shader.html>.
+SSR documentation also says transparent materials are not reflected because
+they do not write to the depth buffer:
+<https://docs.godotengine.org/en/stable/tutorials/3d/environment_and_post_processing.html>.
+Godot's rendering priorities call out screen-space effects as an area needing
+significant improvement.
+
+**Our workaround:** Prefer opaque/alpha-hash when possible, use reflection
+probes or custom water paths, avoid relying on transparent objects participating
+in every screen-space effect, and design effects around known renderer limits.
+
+**Impact:** **Medium to high.** Especially important for water, foliage, and
+high-end VFX.
+
+---
+
+### 8. Dynamic Mesh / CPU-Updated Vertex Workflows Are Sharp-Edged
+
+**What:** Efficiently updating mesh vertex/attribute data at runtime.
+
+**Why it matters:** Terrain edits, deformation, decals, trails, procedural
+geometry, generated impostors, and custom debug geometry all need predictable
+dynamic mesh APIs.
+
+**Godot 4.6 status:** The common complaint that Godot has "no way to update
+verts in-place" is too strong. `ArrayMesh` exposes
+`surface_update_vertex_region()`, `surface_update_attribute_region()`, and
+`surface_update_skin_region()`. The real problem is that these methods are
+low-level, underdocumented, byte-offset based, and easy to misuse:
+<https://docs.godotengine.org/en/4.6/classes/class_arraymesh.html>.
+
+**Our workaround:** Prefer prebake for static assets. For dynamic systems, use
+server-level APIs or tightly controlled `ArrayMesh` update paths with explicit
+binary layout knowledge.
+
+**Impact:** **Medium.** Not impossible, but far less ergonomic than mature
+dynamic mesh workflows in bigger engines.
+
+---
+
+### 9. Built-In Occlusion Culling Is Not An Open-World Silver Bullet
+
+**What:** Reliable outdoor occlusion for dense cities, terrain, buildings, and
+large object counts.
+
+**Why it matters:** Dense areas like Balmora/Vivec need many hidden objects to
+disappear before they cost CPU/GPU time.
+
+**Godot 4.6 status:** Godot has occlusion culling, but it is not a complete
+open-world visibility solution. The previously cited angle regression
+[godot#106184](https://github.com/godotengine/godot/issues/106184) is closed
+with milestone 4.5, so do not cite it as a current active blocker. Treat the
+remaining issue as broader: outdoor occlusion is workload-dependent, requires
+authoring/occluder setup, and does not replace project-specific streaming,
+distance culling, HLOD, or GPU culling.
+
+**Our workaround:** Frustum + distance culling, tiered LOD/HLOD/impostor
+systems, and project-specific compute culling experiments.
+
+**Impact:** **Medium.** Important, but not as fundamental as texture streaming
+or renderer architecture.
+
+---
+
+## Important Future / In-Progress Engine Work
+
+### Vulkan Ray Tracing Plumbing
+
+**What:** Low-level Vulkan ray tracing support in `RenderingDevice`.
+
+**Status:** PR
+[godot#99119](https://github.com/godotengine/godot/pull/99119) was merged into
+`master` on January 27, 2026. This is useful foundation work, not a shipped
+Godot 4.6 open-world occlusion solution.
+
+**Caveat:** Vulkan-focused. Do not assume D3D12, Metal, or production renderer
+integration is complete.
+
+**Impact for Godotwind:** Low short-term, potentially high long-term for GPU
+occlusion and advanced rendering experiments.
+
+---
+
+### Compositor API Expansion
+
+**What:** More complete custom pass/buffer/render-order control.
+
+**Status:** `CompositorEffect` exists in 4.6, but the broader compositor design
+proposal remains open.
+
+**Impact for Godotwind:** High for water, shore blending, custom visibility
+debugging, decals, outlines, and advanced effects.
+
+---
+
+## Lower-Priority Missing Features
+
+### Built-In Impostor System
+
+**What:** Automatic billboard/octahedral impostor generation for distant
+objects.
+
+**Status:** Not a public roadmap item.
+
+**Our workaround:** Custom octahedral impostor system with prebaked atlases and
+MultiMesh rendering.
+
+**Impact:** Low for us now because we built it, but high effort for any new
+open-world Godot project.
+
+---
+
+### Native Runtime Mesh Simplification / LOD Generation
+
+**What:** Engine-level mesh decimation and runtime LOD generation.
+
+**Status:** Godot has import-time LOD generation and `visibility_range`, but no
+general runtime mesh simplification pipeline comparable to mature content
+pipelines in larger engines.
+
+**Our workaround:** Prebaked LODs and impostors.
+
+**Impact:** Low to medium. Offline preprocessing works, but it increases asset
+pipeline complexity.
+
+---
+
+### GDScript Value Types / Traits / Interfaces
+
+**What:** Better language support for data-heavy framework code.
+
+**Why it matters:** Framework code wants compact value-like records and explicit
+interfaces. GDScript currently pushes many data models toward `RefCounted`,
+`Resource`, dictionaries, abstract base classes, or duck typing.
+
+**Status:** Proposals exist/discussions continue, but no dependency should be
+taken on them for Godotwind.
+
+**Our workaround:** C# for new hot paths and data-heavy systems; GDScript for
+thin orchestration glue.
+
+**Impact:** Medium for ergonomics, low for capability.
+

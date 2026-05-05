@@ -10,8 +10,8 @@
 ## + `lod_bias` — no sibling LOD nodes, no manual distance cascade, no
 ## per-LOD RS instances.
 ##
-## The instance carries a single hard-cull `visibility_range` at 500m for the
-## render→impostor tier handoff; sub-LOD selection is fully engine-driven.
+## The instance carries a single hard-cull `visibility_range` at MID_END for the
+## MID->HLOD tier handoff; sub-LOD selection is fully engine-driven.
 ##
 ## Usage:
 ##   var renderer := StaticObjectRenderer.new()
@@ -101,8 +101,7 @@ var _next_id: int = 0
 var _scenario: RID = RID()
 
 ## Maximum visibility range for individual MID instances.
-## Default: MID_END (500m). When HLOD cells are available, set to HLOD_START (300m)
-## so the HLOD cell mesh takes over at distance.
+## Default: MID_END (300m). HLOD owns the next fixed tier, 300-1000m.
 var visibility_range_end: float = DU.MID_END
 
 ## Global visibility override for benchmark A/B testing. When false, all RS
@@ -635,25 +634,12 @@ func _publish_static_descriptor(type_name: String, descriptor: StaticPrototypeDe
 func _materialize_surface_material_meshes(descriptor: StaticPrototypeDescriptor) -> void:
 	for sub_mesh_value: Variant in descriptor.sub_meshes:
 		var entry: SubMeshEntry = sub_mesh_value as SubMeshEntry
-		if entry == null or entry.mesh_resource == null:
+		if entry == null or entry.mesh_resource == null or entry.surface_materials.is_empty():
 			continue
 		var source_mesh := entry.mesh_resource
-		var surface_count := source_mesh.get_surface_count()
-
-		if entry.material_resource != null:
-			var mesh_copy := source_mesh.duplicate(false) as Mesh
-			if mesh_copy == null:
-				continue
-			for surface_index in range(surface_count):
-				mesh_copy.surface_set_material(surface_index, entry.material_resource)
-			entry.mesh_resource = mesh_copy
-			entry.material_resource = null
-			entry.surface_materials.clear()
+		if not source_mesh is ArrayMesh:
 			continue
-
-		if entry.surface_materials.is_empty():
-			continue
-		var material_count := mini(entry.surface_materials.size(), surface_count)
+		var material_count := mini(entry.surface_materials.size(), source_mesh.get_surface_count())
 		var has_surface_material := false
 		for surface_index in range(material_count):
 			if entry.surface_materials[surface_index] != null:
@@ -662,16 +648,41 @@ func _materialize_surface_material_meshes(descriptor: StaticPrototypeDescriptor)
 		if not has_surface_material:
 			entry.surface_materials.clear()
 			continue
-
-		var mesh_copy := source_mesh.duplicate(false) as Mesh
+		var mesh_copy := _copy_array_mesh_with_surface_materials(source_mesh as ArrayMesh, entry.surface_materials, entry.has_lod_chain)
 		if mesh_copy == null:
 			continue
-		for surface_index in range(material_count):
-			var material: Material = entry.surface_materials[surface_index]
-			if material != null:
-				mesh_copy.surface_set_material(surface_index, material)
 		entry.mesh_resource = mesh_copy
 		entry.surface_materials.clear()
+
+
+func _copy_array_mesh_with_surface_materials(source_mesh: ArrayMesh, surface_materials: Array[Material], generate_lod_chain: bool) -> ArrayMesh:
+	var importer := ImporterMesh.new()
+	for surface_index in range(source_mesh.get_surface_count()):
+		var arrays := source_mesh.surface_get_arrays(surface_index)
+		if arrays.is_empty():
+			continue
+		var material: Material = null
+		if surface_index < surface_materials.size() and surface_materials[surface_index] != null:
+			material = surface_materials[surface_index]
+		else:
+			material = source_mesh.surface_get_material(surface_index)
+		importer.add_surface(
+			source_mesh.surface_get_primitive_type(surface_index),
+			arrays,
+			source_mesh.surface_get_blend_shape_arrays(surface_index),
+			{},
+			material
+		)
+	if generate_lod_chain:
+		importer.generate_lods(60.0, 25.0, [])
+	var mesh_copy: ArrayMesh = importer.get_mesh()
+	if mesh_copy != null and mesh_copy.get_surface_count() > 0:
+		for meta_key: StringName in source_mesh.get_meta_list():
+			mesh_copy.set_meta(meta_key, source_mesh.get_meta(meta_key))
+		if generate_lod_chain:
+			mesh_copy.set_meta("has_lod_chain", true)
+		return mesh_copy
+	return null
 
 
 func register_lod_from_prototype(type_name: String, prototype: Node3D) -> bool:
@@ -845,7 +856,7 @@ func precompute_instance(
 ## Add an instance of a registered mesh type.
 ##
 ## Post-B-wide: single RS instance per object with a single hard-cull
-## visibility_range at 500m (render→impostor tier handoff). Sub-LOD selection
+## visibility_range at MID_END (MID->HLOD tier handoff). Sub-LOD selection
 ## is driven by the embedded `surface_lod_indices` chain + Godot's C++ screen-
 ## space LOD selector, not by manual distance bands.
 ##
@@ -1183,7 +1194,7 @@ func set_visibility_range_end(p_visibility_range_end: float) -> void:
 
 
 ## Apply exact HLOD coverage to active MID buckets. Fully covered buckets cap at
-## the HLOD handoff; partial/uncovered buckets keep the normal MID fallback end.
+## the HLOD handoff; partial/uncovered buckets keep the normal MID end.
 func set_hlod_covered_bucket_counts(bucket_counts: Dictionary, covered_range_end: float = DU.HLOD_START) -> void:
 	_hlod_covered_bucket_counts.clear()
 	for key_value: Variant in bucket_counts.keys():

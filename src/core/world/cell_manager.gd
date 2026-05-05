@@ -492,7 +492,7 @@ func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3
 		mmi.material_override = mesh_instance.material_override
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-		# Render-tier visibility_range — single band 0-500m → impostor handoff.
+		# Render-tier visibility_range - single MID band ending at DU.MID_END.
 		mmi.visibility_range_begin = 0.0
 		mmi.visibility_range_end = DU.MID_END
 		mmi.visibility_range_begin_margin = 0.0
@@ -2990,13 +2990,8 @@ func process_async_instantiation(
 			continue
 
 		if obj:
-			# Override prebaked 0-500m VR (legacy MID-tier artifact) → 0-NEAR_END
-			# so NEAR Node3Ds cull at 150m instead of bleeding to 500m. Without
-			# this, every Node3D in cells 150m-350m draws at full cost (no MID
-			# RS offload during NEAR-only mode). Restored 2026-04-19 after S.1
-			# launch revealed the 35 fps mid-load regression. Stays even after
-			# S.7 brings MID back — NEAR Node3Ds always cull at NEAR_END; MID
-			# RS instances cover 150m+ via PrototypeRegistry.
+			# Override legacy prebaked VR to 0-NEAR_END so NEAR Node3Ds cull at
+			# 150m. MID/HLOD/FAR render ownership is handled by renderer tiers.
 			_apply_near_visibility_range(obj)
 			obj.set_meta("visibility_prebaked", true)
 
@@ -4137,10 +4132,9 @@ func get_stats() -> Dictionary:
 
 
 ## Override VR on every GeometryInstance3D descendant to the NEAR range (~155m).
-## Prebaked prototypes carry 0-500m (legacy MID-tier range artifact). NEAR Node3Ds
+## Prebaked prototypes can carry legacy MID-tier ranges. NEAR Node3Ds
 ## must cull at NEAR_END so the visible disc follows the camera instead of bleeding
-## to impostor range — this matters during the NEAR-only window AND post-S.7 when
-## MID RS instances take over 150m+ via PrototypeRegistry.
+## into renderer-owned tiers.
 func _apply_near_visibility_range(node: Node3D) -> void:
 	for geo: Node in node.find_children("*", "GeometryInstance3D", true, false):
 		var g := geo as GeometryInstance3D

@@ -316,11 +316,11 @@ const IMPOSTOR_TEXTURE_WARNING_THRESHOLD := 230
 const MAX_NEAR_CELLS := 13
 
 ## Maximum number of MID tier cells loaded simultaneously
-## MID tier: 150-500m ring
+## MID tier: fixed bridge through 300m
 const MAX_MID_CELLS := 80
 
 ## Maximum number of FAR tier cells loaded simultaneously
-## FAR tier: 500-5000m ring
+## FAR tier: 1000-5000m ring
 const MAX_FAR_CELLS := 250
 
 # =============================================================================

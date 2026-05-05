@@ -72,7 +72,7 @@ func test_distance_to_cell_radius() -> void:
 
 func test_is_cell_in_range() -> void:
 	var center := Vector2i(0, 0)
-	# Cell at origin is in range 0-500m
+	# Cell at origin is in any positive range from itself.
 	assert_bool(DU.is_cell_in_range(center, center, 0.0, 500.0)).is_true()
 	# Cell 10 cells away is NOT in range 0-100m (10*117 = 1170m > 100m)
 	assert_bool(DU.is_cell_in_range(Vector2i(10, 0), center, 0.0, 100.0)).is_false()

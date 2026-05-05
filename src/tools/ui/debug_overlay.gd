@@ -16,6 +16,7 @@ class_name DebugOverlay
 extends Node3D
 
 const CS := preload("res://src/core/coordinate_system.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 ## Visibility flags
 var show_chunks: bool = false:
@@ -96,14 +97,22 @@ var _tier_materials: Dictionary[int, StandardMaterial3D] = {}
 ## Tier colors (semi-transparent)
 const TIER_COLORS: Dictionary[int, Color] = {
 	0: Color(0.2, 1.0, 0.2, 0.15),   # NEAR - green (0-150m)
-	1: Color(1.0, 1.0, 0.2, 0.15),   # MID - yellow (150-500m)
-	2: Color(1.0, 0.5, 0.2, 0.15),   # FAR - orange (500-5000m)
-	3: Color(0.5, 0.2, 1.0, 0.15),   # HORIZON - purple (5000m+)
+	1: Color(1.0, 0.9, 0.2, 0.15),   # MID - yellow (150-300m)
+	2: Color(0.0, 0.75, 1.0, 0.14),  # HLOD - cyan (300-1000m)
+	3: Color(0.65, 0.3, 1.0, 0.12),  # FAR impostors - purple (1000m+)
 }
 
 ## Chunk color
 const CHUNK_COLOR := Color(0.0, 0.8, 1.0, 0.3)  # Cyan
 const CHUNK_BORDER_COLOR := Color(0.0, 0.8, 1.0, 0.8)
+const HLOD_CHUNK_COLORS: Dictionary[String, Color] = {
+	"active": Color(0.0, 0.95, 1.0, 0.22),
+	"pending": Color(0.35, 0.55, 1.0, 0.18),
+	"preparing": Color(1.0, 0.55, 0.15, 0.18),
+	"queued": Color(1.0, 0.9, 0.1, 0.14),
+	"desired": Color(0.75, 0.75, 0.75, 0.10),
+	"negative": Color(1.0, 0.15, 0.1, 0.18),
+}
 
 ## Cell grid color
 const CELL_COLOR := Color(0.5, 0.5, 0.5, 0.1)
@@ -287,7 +296,7 @@ func _rebuild_chunk_overlay() -> void:
 	# If we have a chunk manager, use it. Otherwise show a grid around the camera
 	var far_chunks: Array[Vector2i] = []
 	if _chunk_manager and _chunk_manager.has_method("get_visible_chunks"):
-		far_chunks = _chunk_manager.get_visible_chunks(camera_cell, 2)  # Tier.FAR = 2
+		far_chunks = _chunk_manager.get_visible_chunks(camera_cell, 2)
 	else:
 		# No chunk manager - show chunks around camera position
 		var camera_chunk := Vector2i(floori(float(camera_cell.x) / FAR_CHUNK_SIZE), floori(float(camera_cell.y) / FAR_CHUNK_SIZE))
@@ -296,6 +305,15 @@ func _rebuild_chunk_overlay() -> void:
 				far_chunks.append(Vector2i(camera_chunk.x + dx, camera_chunk.y + dy))
 
 	Log.debug("debug", "Showing %d chunks around cell %s" % [far_chunks.size(), camera_cell])
+
+	if _world_streaming_manager and _world_streaming_manager.has_method("get_hlod_chunk_debug_data"):
+		var hlod_chunks: Array = _world_streaming_manager.call("get_hlod_chunk_debug_data") as Array
+		if not hlod_chunks.is_empty():
+			Log.debug("debug", "Showing %d HLOD chunks around cell %s" % [hlod_chunks.size(), camera_cell])
+			for entry_value: Variant in hlod_chunks:
+				if entry_value is Dictionary:
+					_create_hlod_chunk_visual(entry_value as Dictionary)
+			return
 
 	# Create visual for each chunk
 	for chunk: Vector2i in far_chunks:
@@ -331,18 +349,18 @@ func _create_chunk_visual(chunk_grid: Vector2i, chunk_size: int, color: Color) -
 	_chunk_container.add_child(mesh_instance)
 
 	# Add wireframe border
-	_add_chunk_border(origin_x, origin_z, size)
+	_add_chunk_border(origin_x, origin_z, size, CHUNK_BORDER_COLOR)
 
 
 ## Add wireframe border to chunk
-func _add_chunk_border(origin_x: float, origin_z: float, size: float) -> void:
+func _add_chunk_border(origin_x: float, origin_z: float, size: float, color: Color = CHUNK_BORDER_COLOR) -> void:
 	var im := ImmediateMesh.new()
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.mesh = im
 
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = CHUNK_BORDER_COLOR
+	mat.albedo_color = color
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mesh_instance.material_override = mat
 
@@ -367,6 +385,60 @@ func _add_chunk_border(origin_x: float, origin_z: float, size: float) -> void:
 	_chunk_container.add_child(mesh_instance)
 
 
+func _create_hlod_chunk_visual(entry: Dictionary) -> void:
+	var origin: Vector3 = entry.get("origin", Vector3.ZERO)
+	var size := float(entry.get("size_m", CELL_SIZE_METERS))
+	if size <= 0.0:
+		return
+	var status := str(entry.get("status", "desired"))
+	var color: Color = HLOD_CHUNK_COLORS.get(status, CHUNK_COLOR)
+	if bool(entry.get("visual", false)):
+		color.a = maxf(color.a, 0.26)
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(size, 45.0, size)
+
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.mesh = mesh
+	mesh_instance.position = Vector3(origin.x, 22.5, origin.z)
+
+	var mat := StandardMaterial3D.new()
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = color
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh_instance.material_override = mat
+	_chunk_container.add_child(mesh_instance)
+
+	var border_color := Color(color.r, color.g, color.b, 0.85)
+	_add_chunk_border(origin.x - size * 0.5, origin.z - size * 0.5, size, border_color)
+
+	var label := Label3D.new()
+	var range_begin := float(entry.get("visibility_begin", 0.0))
+	var range_end := float(entry.get("visibility_end", 0.0))
+	var refs_accepted := int(entry.get("refs_accepted", 0))
+	var refs_size_rejected := int(entry.get("refs_size_rejected", 0))
+	var refs_type_rejected := int(entry.get("refs_type_rejected", 0))
+	var refs_skipped := int(entry.get("refs_skipped", 0))
+	var refs_surface_rejected := int(entry.get("refs_surface_rejected", 0))
+	label.text = "HLOD L%d %s\n%.0f-%.0fm refs=%d\nrej s/t/k/sf=%d/%d/%d/%d" % [
+		int(entry.get("size_level", 0)),
+		status,
+		range_begin,
+		range_end,
+		refs_accepted,
+		refs_size_rejected,
+		refs_type_rejected,
+		refs_skipped,
+		refs_surface_rejected,
+	]
+	label.font_size = 28
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = true
+	label.modulate = border_color
+	label.position = Vector3(origin.x, 55.0, origin.z)
+	_chunk_container.add_child(label)
+
+
 ## Rebuild tier zone visualization
 ## Rings are drawn centered at origin - the container is moved to camera position in _process()
 ## This allows smooth camera following without expensive geometry rebuilds
@@ -387,41 +459,20 @@ func _rebuild_tier_overlay() -> void:
 	# Rings are centered at origin (0, 0, 0) - container will be moved to camera position
 	var ring_center := Vector3.ZERO
 
-	# Get tier distances - use defaults if no manager
-	var tier_distances: Dictionary = {}
-	var tier_end_distances: Dictionary = {}
+	var view_cap := DU.FAR_END
+	if _world_streaming_manager and _world_streaming_manager.has_method("get_distant_render_end_m"):
+		view_cap = float(_world_streaming_manager.call("get_distant_render_end_m"))
 
-	if _tier_manager:
-		if _tier_manager.has_method("get_debug_info"):
-			var debug: Dictionary = _tier_manager.get_debug_info()
-			tier_distances = debug.get("tier_distances", {})
-			tier_end_distances = debug.get("tier_end_distances", {})
-		else:
-			tier_distances = _tier_manager.get("tier_distances")
-			tier_end_distances = _tier_manager.get("tier_end_distances")
-	else:
-		# Use default values
-		tier_distances = {0: 0.0, 2: 150.0, 3: 5000.0}
-		tier_end_distances = {0: 150.0, 2: 5000.0, 3: 10000.0}
+	Log.debug("debug", "Tier distances: NEAR %.0f, MID %.0f, HLOD %.0f, FAR %.0f (view cap %.0f)" % [
+		DU.NEAR_END, DU.MID_END, DU.HLOD_END, DU.FAR_END, view_cap])
 
-	Log.debug("debug", "Tier distances: %s (rings centered at origin, container follows camera)" % [tier_end_distances])
-
-	# Create rings for each tier (centered at origin)
-	# NEAR tier: 0 to 150m (green)
-	_create_tier_ring(ring_center, 0.0, tier_end_distances.get(0, 150.0), 0)
-
-	# MID tier: 150m to 500m (yellow) - this tier handles per-object LODs
-	var mid_start: float = tier_end_distances.get(0, 150.0)
-	var mid_end: float = tier_end_distances.get(1, 500.0)
-	if mid_end <= mid_start:
-		# Fallback if tier 1 not in dictionary
-		mid_end = tier_distances.get(2, 500.0)
-	_create_tier_ring(ring_center, mid_start, mid_end, 1)
-
-	# FAR tier: 500m to 5000m (orange) - cap at 2000m for visibility
-	var far_start: float = mid_end
-	var far_end: float = tier_end_distances.get(2, 5000.0)
-	_create_tier_ring(ring_center, far_start, minf(far_end, 2000.0), 2)
+	_create_tier_ring(ring_center, DU.NEAR_START, minf(DU.NEAR_END, view_cap), 0, "NEAR")
+	if view_cap > DU.MID_START:
+		_create_tier_ring(ring_center, DU.MID_START, minf(DU.MID_END, view_cap), 1, "MID")
+	if view_cap > DU.HLOD_START:
+		_create_tier_ring(ring_center, DU.HLOD_START, minf(DU.HLOD_END, view_cap), 2, "HLOD")
+	if view_cap > DU.FAR_START:
+		_create_tier_ring(ring_center, DU.FAR_START, minf(minf(DU.FAR_END, view_cap), 2000.0), 3, "FAR")
 
 	# Mark as built and set initial position
 	_tier_rings_built = true
@@ -430,7 +481,7 @@ func _rebuild_tier_overlay() -> void:
 
 
 ## Create a ring mesh for a tier zone
-func _create_tier_ring(center: Vector3, inner_radius: float, outer_radius: float, tier: int) -> void:
+func _create_tier_ring(center: Vector3, inner_radius: float, outer_radius: float, tier: int, tier_name: String = "") -> void:
 	if outer_radius <= inner_radius:
 		return
 
@@ -477,13 +528,13 @@ func _create_tier_ring(center: Vector3, inner_radius: float, outer_radius: float
 	_tier_container.add_child(mesh_instance)
 
 	# Add distance text labels
-	_add_tier_label(center, outer_radius, tier)
+	_add_tier_label(center, outer_radius, tier, tier_name)
 
 
 ## Add a label for tier distance
-func _add_tier_label(center: Vector3, radius: float, tier: int) -> void:
-	var tier_names := {0: "NEAR", 1: "MID", 2: "FAR", 3: "HORIZON"}
-	var label_text := "%s\n%.0fm" % [tier_names.get(tier, "TIER"), radius]
+func _add_tier_label(center: Vector3, radius: float, tier: int, tier_name: String = "") -> void:
+	var tier_names := {0: "NEAR", 1: "MID", 2: "HLOD", 3: "FAR"}
+	var label_text := "%s\n%.0fm" % [tier_name if not tier_name.is_empty() else tier_names.get(tier, "TIER"), radius]
 
 	# Create 3D label at edge of tier
 	var label := Label3D.new()
@@ -830,8 +881,8 @@ func _create_lod_legend() -> void:
 			0: "LOD0 (NEAR 0-150m)",
 			1: "LOD1 (MID 150-250m)",
 			2: "LOD2 (MID 250-375m)",
-			3: "LOD3 (MID 375-500m)",
-			4: "Impostor (FAR 500m+)",
+			3: "LOD3 (screen-space MID)",
+			4: "Impostor (FAR 1000m+)",
 		}
 
 		for lod_level: int in lod_names:

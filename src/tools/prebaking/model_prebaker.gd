@@ -457,7 +457,7 @@ func _save_model_to_cache(node: Node3D, cache_key: String) -> int:
 	# Set owner on all children so PackedScene.pack() includes them
 	_set_owner_recursive(node, node)
 
-	# nif_converter already configured visibility_range (0-500m → impostor handoff).
+	# nif_converter already configured visibility_range for the renderer tiers.
 	# The old LODConfigurator.configure_for_prebake walk is obsolete — it would
 	# clobber our single-band range with the old per-sub-LOD cascade math.
 	node.set_meta("visibility_prebaked", true)

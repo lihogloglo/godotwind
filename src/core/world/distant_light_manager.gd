@@ -530,6 +530,9 @@ func _rebuild_page(page_key: Vector2i) -> void:
 	page.multimesh.instance_count = live_ids.size()
 	page.multimesh.visible_instance_count = live_ids.size()
 
+	var stride := 20 # 12 transform floats + 4 color floats + 4 custom-data floats.
+	var buffer := PackedFloat32Array()
+	buffer.resize(live_ids.size() * stride)
 	var aabb_min := Vector3.ZERO
 	var aabb_max := Vector3.ZERO
 	var has_aabb := false
@@ -537,17 +540,31 @@ func _rebuild_page(page_key: Vector2i) -> void:
 		var data: LightData = _lights[live_ids[i]]
 		var size_scale := clampf(data.radius / 3.0, 0.5, 4.0)
 		var local_pos := data.position - page.center
-		var xform := Transform3D(
-			Basis.IDENTITY.scaled(Vector3(size_scale, size_scale, size_scale)),
-			local_pos
-		)
-		page.multimesh.set_instance_transform(i, xform)
-		page.multimesh.set_instance_color(i, data.color)
-
 		var is_fire := 1.0 if (data.flags & LightRecord.FLAG_FIRE) != 0 else 0.0
 		var has_flicker := 1.0 if (data.flags & (LightRecord.FLAG_FLICKER | LightRecord.FLAG_FLICKER_SLOW | LightRecord.FLAG_PULSE | LightRecord.FLAG_PULSE_SLOW)) != 0 else 0.0
 		var phase_offset := fmod(float(data.id) * 0.618033988749, 1.0)
-		page.multimesh.set_instance_custom_data(i, Color(is_fire, has_flicker, phase_offset, 0.0))
+
+		var offset := i * stride
+		buffer[offset + 0] = size_scale
+		buffer[offset + 1] = 0.0
+		buffer[offset + 2] = 0.0
+		buffer[offset + 3] = local_pos.x
+		buffer[offset + 4] = 0.0
+		buffer[offset + 5] = size_scale
+		buffer[offset + 6] = 0.0
+		buffer[offset + 7] = local_pos.y
+		buffer[offset + 8] = 0.0
+		buffer[offset + 9] = 0.0
+		buffer[offset + 10] = size_scale
+		buffer[offset + 11] = local_pos.z
+		buffer[offset + 12] = data.color.r
+		buffer[offset + 13] = data.color.g
+		buffer[offset + 14] = data.color.b
+		buffer[offset + 15] = data.color.a
+		buffer[offset + 16] = is_fire
+		buffer[offset + 17] = has_flicker
+		buffer[offset + 18] = phase_offset
+		buffer[offset + 19] = 0.0
 
 		var half := maxf(BASE_SPRITE_SIZE, data.radius) * 2.0 + PAGE_AABB_MARGIN
 		var imp_min := local_pos - Vector3(half, half, half)
@@ -560,6 +577,7 @@ func _rebuild_page(page_key: Vector2i) -> void:
 			aabb_min = Vector3(minf(aabb_min.x, imp_min.x), minf(aabb_min.y, imp_min.y), minf(aabb_min.z, imp_min.z))
 			aabb_max = Vector3(maxf(aabb_max.x, imp_max.x), maxf(aabb_max.y, imp_max.y), maxf(aabb_max.z, imp_max.z))
 
+	page.multimesh.set_buffer(buffer)
 	if has_aabb:
 		var aabb := AABB(aabb_min, aabb_max - aabb_min)
 		page.multimesh.custom_aabb = aabb

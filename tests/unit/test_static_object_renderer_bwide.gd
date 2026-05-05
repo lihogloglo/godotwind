@@ -67,6 +67,22 @@ func _build_simple_mesh() -> ArrayMesh:
 	return st.commit()
 
 
+func _build_two_surface_mesh() -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	for offset in [0.0, 2.0]:
+		var verts := PackedVector3Array([
+			Vector3(offset, 0, 0),
+			Vector3(offset + 1.0, 0, 0),
+			Vector3(offset, 0, 1),
+		])
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_INDEX] = PackedInt32Array([0, 1, 2])
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
 func _build_prototype(mesh: ArrayMesh, mat: Material = null) -> Node3D:
 	var root := Node3D.new()
 	var mi := MeshInstance3D.new()
@@ -78,8 +94,8 @@ func _build_prototype(mesh: ArrayMesh, mat: Material = null) -> Node3D:
 	return root
 
 
-func _build_packed_scene(mesh: ArrayMesh) -> PackedScene:
-	var root := _build_prototype(mesh)
+func _build_packed_scene(mesh: ArrayMesh, mat: Material = null) -> PackedScene:
+	var root := _build_prototype(mesh, mat)
 	var packed := PackedScene.new()
 	var err := packed.pack(root)
 	root.free()
@@ -108,6 +124,56 @@ func test_register_simple_mesh_no_lod() -> void:
 	renderer.register_mesh_type("test_simple", simple)
 	assert_that(renderer.has_type("test_simple")).is_true()
 	assert_that(renderer.has_lod("test_simple")).is_false()
+
+
+func test_packed_scene_registration_keeps_instance_material_override_on_submesh() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var mat := StandardMaterial3D.new()
+	var packed := _build_packed_scene(mesh, mat)
+	var status := renderer.request_register_from_packed_scene("test_packed_override", packed)
+	assert_str(status).is_equal("ready")
+
+	var sub_meshes := renderer.get_sub_meshes("test_packed_override")
+	assert_int(sub_meshes.size()).is_equal(1)
+	var sub: SOR.SubMeshEntry = sub_meshes[0]
+	assert_int(sub.mesh_resource.get_instance_id()).is_equal(mesh.get_instance_id())
+	assert_int(sub.material_resource.get_instance_id()).is_equal(mat.get_instance_id())
+	assert_int(sub.surface_materials.size()).is_equal(0)
+
+
+func test_packed_scene_surface_overrides_materialize_into_owned_mesh_copy() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_two_surface_mesh()
+	var mat0 := StandardMaterial3D.new()
+	var mat1 := StandardMaterial3D.new()
+	var root := Node3D.new()
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.set_surface_override_material(0, mat0)
+	mi.set_surface_override_material(1, mat1)
+	root.add_child(mi)
+	mi.owner = root
+	var packed := PackedScene.new()
+	assert_int(packed.pack(root)).is_equal(OK)
+	root.free()
+
+	var status := renderer.request_register_from_packed_scene("test_surface_override", packed)
+	assert_str(status).is_equal("ready")
+
+	var sub_meshes := renderer.get_sub_meshes("test_surface_override")
+	assert_int(sub_meshes.size()).is_equal(1)
+	var sub: SOR.SubMeshEntry = sub_meshes[0]
+	assert_int(sub.mesh_resource.get_instance_id()).is_not_equal(mesh.get_instance_id())
+	assert_int(sub.surface_materials.size()).is_equal(0)
+	assert_int(sub.mesh_resource.surface_get_material(0).get_instance_id()).is_equal(mat0.get_instance_id())
+	assert_int(sub.mesh_resource.surface_get_material(1).get_instance_id()).is_equal(mat1.get_instance_id())
 
 
 func test_single_instance_per_object() -> void:

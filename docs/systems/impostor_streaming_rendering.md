@@ -194,8 +194,8 @@ Current flow:
 5. `_load_impostors_from_cell_record_budgeted()` scans ESM refs, maps ref IDs
    to model paths, filters through `ImpostorCandidates`, reads bake metadata,
    and creates pending or live impostors.
-6. Texture and normal assets are loaded through `BackgroundJobSystem`, then
-   copied into albedo/normal `Texture2DArray` inputs.
+6. Texture and normal assets are loaded through `WorkerThreadPool` tasks, then
+   copied into albedo/normal `Texture2DArray` inputs on the main thread.
 7. `_rebuild_texture_array()` moves CPU image conversion to a worker task, but
    `Texture2DArray.create_from_images()` still happens on the main thread.
 8. `_rebuild_page()` repacks dirty page-local impostors into a
@@ -271,21 +271,21 @@ Accepted direction:
   fewer larger commits.
 - Treat a texture-array rebuild as a GPU upload, not as cheap bookkeeping.
 
-#### Bespoke BackgroundJobSystem
+#### WorkerThreadPool Ownership
 
-`native_impostor_renderer.gd` uses `src/core/threading/background_job_system.gd`,
-which starts raw `Thread` workers. The project rule and Godot-native path prefer
-`WorkerThreadPool` and `ResourceLoader` where practical.
+`native_impostor_renderer.gd` uses `WorkerThreadPool` for FAR texture/normal
+loading and CPU image copy tasks. Each owned task is polled with
+`is_task_completed()` and released with `wait_for_task_completion()` before its
+result is consumed or discarded.
 
-Accepted direction: new FAR work should not extend `BackgroundJobSystem`.
-Migrate image/resource loading and CPU image copy tasks to either:
+Accepted direction: new FAR background work should keep using native Godot
+threading APIs:
 
 - `ResourceLoader.load_threaded_request()` for Godot resources; or
 - `WorkerThreadPool.add_task()` for CPU-only decode/copy work that cannot use
   ResourceLoader cleanly.
 
-Keep the old job system only as a time-boxed compatibility bridge until the FAR
-worker lanes are migrated and benchmarked.
+Do not reintroduce `BackgroundJobSystem` into the FAR path.
 
 #### Candidate Policy Is Too Pattern-Centric
 
@@ -356,10 +356,11 @@ Teleport/startup:
 
 HLOD handoff:
 
-- HLOD off: MID 0-500 m, FAR begins at `DU.MID_END`.
-- HLOD on: MID remains the 0-500 m fallback, fully covered MID buckets cap at 300 m, HLOD is visible 300-1000 m, and FAR remains available from 500 m until exact coverage gating replaces the fallback safely.
-- The same FAR batch system should support both by changing batch
-  `visibility_range_begin`, not by rebuilding all impostor data.
+- MID owns 0-300 m through static buckets.
+- HLOD owns 300-1000 m through ObjectPaging chunk proxies.
+- FAR impostors begin at `DU.FAR_START`/1000 m and never earlier.
+- HLOD coverage gaps are HLOD bugs to diagnose, not reasons to widen MID or
+  pull FAR inward.
 
 ### Threading And Publication
 
@@ -432,9 +433,9 @@ Telemetry to add:
    The renderer can keep queues, but main-thread upload work must be granted by
    `NativeStreamingManager` or a shared streaming scheduler.
 
-5. Migrate background work to native APIs.
+5. Keep background work on native APIs.
    Use `WorkerThreadPool` for CPU-only tasks and ResourceLoader's threaded API
-   for resources. Retire `BackgroundJobSystem` from the FAR path after parity.
+   for resources. Do not reintroduce `BackgroundJobSystem` into the FAR path.
 
 6. Make candidate selection data-driven.
    Keep Morrowind model-name patterns in the adapter, but feed core FAR with
@@ -453,7 +454,7 @@ Telemetry to add:
 - Do not rebuild a full 5 km MultiMesh ring for a one-cell movement.
 - Do not call GPU-touching texture or RenderingServer operations from worker
   threads without a focused harness proving the exact Godot 4.6 path.
-- Do not extend `BackgroundJobSystem` for new FAR work; use Godot's native
+- Do not reintroduce `BackgroundJobSystem` for FAR work; use Godot's native
   `WorkerThreadPool` or `ResourceLoader` path.
 - Do not move Morrowind model-name pattern logic into generic world systems.
 

@@ -54,6 +54,7 @@ class RefInput:
 	var source_ref_num: int = -1  ## ESM ref_num for FAR coverage ownership.
 	var rs2: float = 0.0         ## mesh_radius² × scale² (Phase 2 size metric)
 	var dist_sq: float = 0.0     ## pos.distance_squared_to(camera) at merge-request time
+	var surface_count: int = 0   ## Estimated source surfaces for priority/cap selection.
 
 
 ## One child sub-mesh of a RefInput.
@@ -158,6 +159,17 @@ static func estimate_mesh_bytes(mesh: ArrayMesh) -> int:
 	if native == null:
 		return 0
 	return int(native.call("EstimateMeshBytes", mesh))
+
+
+## Collect scalar mesh diagnostics without making the HLOD publication frame
+## read back all ArrayMesh surfaces.
+static func collect_mesh_stats(mesh: ArrayMesh) -> Dictionary:
+	if mesh == null:
+		return {}
+	var native: RefCounted = _get_native()
+	if native == null:
+		return {}
+	return native.call("EstimateMeshStats", mesh) as Dictionary
 
 
 ## Generate LOD chain on a merged ArrayMesh via ImporterMesh.

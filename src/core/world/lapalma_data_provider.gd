@@ -275,6 +275,7 @@ func get_tier_unit_counts() -> Dictionary:
 	return {
 		TierUtils.Tier.NEAR: 5,       # ~7.7km radius (5 large regions)
 		TierUtils.Tier.MID: 10,       # ~15.4km radius (simplified)
+		TierUtils.Tier.HLOD: 15,      # ~23.0km radius (chunk proxies)
 		TierUtils.Tier.FAR: 20,       # ~30.8km radius (impostors)
 		TierUtils.Tier.HIDDEN: 0,     # Ocean skybox (no per-region processing)
 	}

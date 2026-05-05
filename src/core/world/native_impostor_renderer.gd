@@ -16,7 +16,6 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
-const BackgroundJobSystemScript := preload("res://src/core/threading/background_job_system.gd")
 # We assume global CS class is available or we use duplicated logic?
 # Best to rely on the fact that CellManager usually handles this.
 # Note: Since we are reading raw ESM data here, we might need CoordinateSystem.
@@ -39,6 +38,7 @@ const TEXTURE_ARRAY_REBUILD_DELAY: float = 0.1
 ## texture finalization monopolizes a frame.
 const JOB_RESULT_POLL_MAX_PER_FRAME: int = 4
 const JOB_RESULT_POLL_BUDGET_USEC: int = 1500
+const TEXTURE_LOAD_MAX_ACTIVE_TASKS: int = 2
 
 ## Full-ring uploads are expensive while the startup ring is still ingesting.
 ## Let the first visible batch appear quickly, then throttle progressive global
@@ -125,9 +125,12 @@ var _impostor_textures: Dictionary[String, bool] = {}
 ## Loaded normal textures: hash_key -> Image (stored as Image, added to array)
 var _impostor_normal_images: Dictionary[String, Image] = {}
 
-## Background job system for async texture loading
-var _job_system: RefCounted = null
+## WorkerThreadPool-backed async texture loading
+var _texture_jobs_active: bool = false
 var _pending_job_ids: Dictionary[String, int] = {} # hash_key -> job_id
+var _queued_texture_jobs: Array[Dictionary] = []
+var _pending_job_results: Dictionary[String, Dictionary] = {}
+var _pending_job_results_mutex: Mutex = Mutex.new()
 
 ## Pending impostors waiting for texture
 var _pending_impostors: Dictionary[String, Array] = {}  # hash_key -> Array[PendingImpostor]
@@ -234,6 +237,7 @@ var _screen_size_histogram_logged: bool = false
 ## Previous center for differential impostor updates
 var _prev_impostor_center: Vector2i = Vector2i(999999, 999999)
 var _hlod_covered_ref_nums: Dictionary = {}
+var _fast_cleanup_done: bool = false
 
 #endregion
 
@@ -345,11 +349,13 @@ func _ready() -> void:
 	Log.info("impostors", "Initializing impostor renderer...")
 	_setup_paged_multimeshes()
 	_setup_billboard_material()
-	_start_job_system()
+	_start_texture_jobs()
 	Log.info("impostors", "Initialization complete. Debug enabled: %s" % debug_enabled)
 
 
 func _exit_tree() -> void:
+	if _fast_cleanup_done:
+		return
 	if Engine.has_meta("_quitting"):
 		fast_cleanup()
 		return
@@ -359,18 +365,35 @@ func _exit_tree() -> void:
 ## Shutdown hook used by NativeStreamingManager.fast_cleanup().
 ## Stops thread owners before the scene tree starts freeing resources.
 func fast_cleanup() -> void:
+	if _fast_cleanup_done:
+		return
+	_fast_cleanup_done = true
 	set_process(false)
 	_streaming_enabled = false
-	_stop_job_system()
+	_stop_texture_jobs()
 	# Phase 6: drain any in-flight rebuild worker task so its closure and
 	# Image refs release before we go. Cheap — the task is CPU-only.
 	if _rebuild_task_id != -1:
 		WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
 		_rebuild_task_id = -1
+		_rebuild_bucket_key = ""
 		_rebuild_pending_albedo = []
 		_rebuild_pending_normals = []
-	_detach_render_resources()
-	clear()
+	Log.info("shutdown", "NativeImpostorRenderer fast_cleanup: workers stopped")
+	_pending_impostor_cells.clear()
+	_pending_impostor_cell_set.clear()
+	_pending_cell_index = 0
+	_pending_impostors.clear()
+	_ready_texture_hashes.clear()
+	_ready_texture_hash_set.clear()
+	_pending_job_ids.clear()
+	_has_resume = false
+	_impostors_dirty = false
+	Log.info("shutdown", "NativeImpostorRenderer fast_cleanup: queues cleared")
+	# Terminal quit path: stop producers and leave existing visual resources to
+	# the scene-tree/engine teardown. Manually freeing MultiMeshInstance3D,
+	# ShaderMaterial, and Texture2DArray resources during an automated quit can
+	# race the render frame that is still draining.
 
 
 ## Runtime off switch used by SubsystemToggles. Unlike `fast_cleanup()`, this
@@ -379,7 +402,7 @@ func release_runtime_resources() -> void:
 	set_process(false)
 	_streaming_enabled = false
 	visible = false
-	_stop_job_system()
+	_stop_texture_jobs()
 	if _rebuild_task_id != -1:
 		WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
 		_rebuild_task_id = -1
@@ -420,7 +443,7 @@ func _ensure_runtime_resources() -> void:
 		_get_or_create_bucket(DEFAULT_ATLAS_SIZE, 0)
 		if _quad_mesh:
 			_quad_mesh.surface_set_material(0, _billboard_material)
-	_start_job_system()
+	_start_texture_jobs()
 
 
 func _setup_paged_multimeshes() -> void:
@@ -844,44 +867,90 @@ void fragment() {
 
 #region Job System for Async Texture Loading
 
-func _start_job_system() -> void:
-	if _job_system != null:
+func _start_texture_jobs() -> void:
+	if _texture_jobs_active:
 		return
 
-	_job_system = BackgroundJobSystemScript.new()
-	var err: Error = _job_system.start(2)  # 2 worker threads
-	if err != OK:
-		push_error("[NativeImpostorRenderer] Failed to start job system: %s" % error_string(err))
-		push_error("[NativeImpostorRenderer] Falling back to synchronous texture loading")
-		_job_system = null
+	_texture_jobs_active = true
+	Log.info("impostors", "NativeImpostorRenderer texture IO using WorkerThreadPool")
 
 
-func _stop_job_system() -> void:
-	if _job_system == null:
+func _stop_texture_jobs() -> void:
+	if not _texture_jobs_active and _pending_job_ids.is_empty():
 		return
-	
-	_job_system.stop()
-	_job_system = null
+
+	for task_id: int in _pending_job_ids.values():
+		if task_id >= 0:
+			WorkerThreadPool.wait_for_task_completion(task_id)
+	_pending_job_results_mutex.lock()
+	_pending_job_results.clear()
+	_pending_job_results_mutex.unlock()
+	_queued_texture_jobs.clear()
 	_pending_job_ids.clear()
+	_texture_jobs_active = false
+
+
+func _dispatch_texture_jobs() -> void:
+	if not _texture_jobs_active:
+		return
+
+	while _pending_job_ids.size() < TEXTURE_LOAD_MAX_ACTIVE_TASKS and not _queued_texture_jobs.is_empty():
+		var job: Dictionary = _queued_texture_jobs.back()
+		_queued_texture_jobs.pop_back()
+		var job_key := String(job.get("job_key", ""))
+		if job_key.is_empty() or job_key in _pending_job_ids:
+			continue
+		var hash_key := String(job.get("hash_key", ""))
+		var texture_path := String(job.get("path", ""))
+		var is_normal := bool(job.get("is_normal", false))
+		var is_res := bool(job.get("is_res", false))
+		var task_id := WorkerThreadPool.add_task(func() -> void:
+			var image: Image = null
+			if is_normal:
+				image = _load_normal_image(texture_path, is_res)
+			else:
+				image = Image.new()
+				var err := image.load(texture_path)
+				if err != OK:
+					image = null
+			var result := {
+				"hash_key": hash_key,
+				"image": image,
+				"success": image != null,
+				"is_normal": is_normal,
+			}
+			_pending_job_results_mutex.lock()
+			_pending_job_results[job_key] = result
+			_pending_job_results_mutex.unlock()
+		)
+		if task_id >= 0:
+			_pending_job_ids[job_key] = task_id
+			if debug_enabled:
+				_debug("Submitted async texture load task %d for key %s" % [task_id, job_key])
+
+
+func _is_texture_job_queued(job_key: String) -> bool:
+	for job: Dictionary in _queued_texture_jobs:
+		if String(job.get("job_key", "")) == job_key:
+			return true
+	return false
 
 
 func _submit_texture_load_job(hash_key: String, texture_path: String) -> void:
-	if _job_system == null:
+	if not _texture_jobs_active:
 		return
 
-	var load_callable := func() -> Dictionary:
-		var image := Image.new()
-		var err := image.load(texture_path)
-		if err == OK:
-			return {"hash_key": hash_key, "image": image, "success": true}
-		else:
-			return {"hash_key": hash_key, "image": null, "success": false}
-
-	var job_id: int = _job_system.submit(load_callable, "texture", 0)
-	if job_id >= 0:
-		_pending_job_ids[hash_key] = job_id
-		if debug_enabled:
-			_debug("Submitted async texture load job %d for hash %s" % [job_id, hash_key])
+	var job_key := hash_key
+	if job_key in _pending_job_ids or _is_texture_job_queued(job_key):
+		return
+	_queued_texture_jobs.append({
+		"job_key": job_key,
+		"hash_key": hash_key,
+		"path": texture_path,
+		"is_normal": false,
+		"is_res": false,
+	})
+	_dispatch_texture_jobs()
 
 
 ## Synchronous texture loading fallback
@@ -902,23 +971,21 @@ func _load_texture_sync(hash_key: String, texture_path: String) -> void:
 ## ResourceLoader (.res ImageTexture for v6 bakes). ResourceLoader IS
 ## thread-safe in Godot 4.6 for runtime resource files outside res://.
 func _submit_normal_load_job(hash_key: String, normal_path: String, is_res: bool = false) -> void:
-	if _job_system == null:
+	if not _texture_jobs_active:
 		return
 
 	var normal_job_key := hash_key + "_normal"
-	if normal_job_key in _pending_job_ids:
+	if normal_job_key in _pending_job_ids or _is_texture_job_queued(normal_job_key):
 		return  # Already loading
 
-	var load_callable := func() -> Dictionary:
-		var image := _load_normal_image(normal_path, is_res)
-		if image:
-			return {"hash_key": hash_key, "image": image, "success": true, "is_normal": true}
-		else:
-			return {"hash_key": hash_key, "image": null, "success": false, "is_normal": true}
-
-	var job_id: int = _job_system.submit(load_callable, "texture", 0)
-	if job_id >= 0:
-		_pending_job_ids[normal_job_key] = job_id
+	_queued_texture_jobs.append({
+		"job_key": normal_job_key,
+		"hash_key": hash_key,
+		"path": normal_path,
+		"is_normal": true,
+		"is_res": is_res,
+	})
+	_dispatch_texture_jobs()
 
 
 ## Synchronous normal texture loading fallback.
@@ -1084,6 +1151,11 @@ func _process_pending_impostor_cells() -> void:
 	var deadline_usec := start_usec + int(_impostor_load_budget_usec)
 	var cells_processed := 0
 
+	if _has_resume and not _loaded_impostor_cells.has(_resume_cell_grid):
+		_has_resume = false
+		_resume_ref_index = 0
+		_resume_cell_grid = Vector2i.ZERO
+
 	# Resume a partially-processed cell from last frame
 	if _has_resume:
 		var resume_idx := _load_impostors_from_cell_record_budgeted(_resume_cell_grid, _resume_ref_index, deadline_usec)
@@ -1110,6 +1182,8 @@ func _process_pending_impostor_cells() -> void:
 		var grid: Vector2i = _pending_impostor_cells[_pending_cell_index]
 		_pending_cell_index += 1
 		_pending_impostor_cell_set.erase(grid)
+		if not _loaded_impostor_cells.has(grid):
+			continue
 
 		var resume_idx := _load_impostors_from_cell_record_budgeted(grid, 0, deadline_usec)
 		if resume_idx < 0:
@@ -1143,7 +1217,7 @@ func _process_pending_impostor_cells() -> void:
 
 
 func _poll_job_results() -> void:
-	if _job_system == null:
+	if not _texture_jobs_active:
 		return
 
 	var start_usec := Time.get_ticks_usec()
@@ -1152,17 +1226,25 @@ func _poll_job_results() -> void:
 		if Time.get_ticks_usec() - start_usec >= JOB_RESULT_POLL_BUDGET_USEC:
 			break
 
-		var results: Array = _job_system.poll_results(1)
-		if results.is_empty():
+		var completed_key := ""
+		var completed_task_id := -1
+		for job_key: String in _pending_job_ids.keys():
+			var task_id := int(_pending_job_ids[job_key])
+			if WorkerThreadPool.is_task_completed(task_id):
+				completed_key = job_key
+				completed_task_id = task_id
+				break
+		if completed_key.is_empty():
 			break
 
-		var result = results[0]
-		if result.status != BackgroundJobSystemScript.JobStatus.COMPLETED:
-			processed += 1
-			continue
+		WorkerThreadPool.wait_for_task_completion(completed_task_id)
+		_pending_job_ids.erase(completed_key)
 
-		var data: Dictionary = result.result
-		if data == null:
+		_pending_job_results_mutex.lock()
+		var data: Dictionary = _pending_job_results.get(completed_key, {})
+		_pending_job_results.erase(completed_key)
+		_pending_job_results_mutex.unlock()
+		if data.is_empty():
 			processed += 1
 			continue
 
@@ -1191,6 +1273,8 @@ func _poll_job_results() -> void:
 			_on_texture_loaded(hash_key, image)
 
 		processed += 1
+
+	_dispatch_texture_jobs()
 
 	var elapsed_usec := Time.get_ticks_usec() - start_usec
 	var elapsed_ms := float(elapsed_usec) / 1000.0
@@ -1672,7 +1756,7 @@ func add_impostor(
 			_debug("  Normal path: %s" % normal_path)
 
 		# Try async loading first
-		if _job_system != null:
+		if _texture_jobs_active:
 			_submit_texture_load_job(hash_key, v6_albedo_path)
 			_submit_normal_load_job(hash_key, normal_path, true)
 		else:
@@ -1707,8 +1791,11 @@ func remove_impostor(impostor_id: int) -> void:
 		_mark_page_dirty(imp.page_key)
 
 
-## Clear all impostors
-func clear() -> void:
+## Clear all impostors. Runtime toggles reseed the default bucket so the node can
+## be reused; shutdown must not allocate fresh render resources after teardown.
+func clear(reseed_default_bucket: bool = true) -> void:
+	var restart_texture_jobs := _texture_jobs_active and not _fast_cleanup_done
+	_stop_texture_jobs()
 	_impostors.clear()
 	_cell_index.clear()
 	_texture_ref_counts.clear()
@@ -1721,7 +1808,7 @@ func clear() -> void:
 	_hash_to_bucket_key.clear()
 	_texture_buckets.clear()
 	_billboard_materials.clear()
-	if _billboard_shader != null:
+	if reseed_default_bucket and _billboard_shader != null:
 		_get_or_create_bucket(DEFAULT_ATLAS_SIZE, 0)
 	_ref_id_to_model.clear()
 	_pending_impostor_cells.clear()
@@ -1732,6 +1819,9 @@ func clear() -> void:
 	_ready_texture_hashes.clear()
 	_ready_texture_hash_set.clear()
 	_pending_job_ids.clear()
+	_pending_job_results_mutex.lock()
+	_pending_job_results.clear()
+	_pending_job_results_mutex.unlock()
 	_has_resume = false
 	_resume_cell_grid = Vector2i.ZERO
 	_resume_ref_index = 0
@@ -1742,6 +1832,8 @@ func clear() -> void:
 	_impostors_dirty = false
 	_clear_pages(true)
 	_reset_runtime_stats()
+	if restart_texture_jobs:
+		_start_texture_jobs()
 
 
 func _reset_runtime_stats() -> void:
@@ -1792,7 +1884,9 @@ func get_stats() -> Dictionary:
 	s["far_dirty_page_count"] = _dirty_page_keys.size()
 	s["far_visible_page_count"] = _get_visible_page_count()
 	s["loaded_impostor_cells"] = _loaded_impostor_cells.size()
-	s["pending_texture_loads"] = _pending_job_ids.size()
+	s["pending_texture_loads"] = _pending_job_ids.size() + _queued_texture_jobs.size()
+	s["active_texture_load_tasks"] = _pending_job_ids.size()
+	s["queued_texture_load_tasks"] = _queued_texture_jobs.size()
 	s["pending_impostors"] = _pending_impostors.size()
 	s["pending_loads"] = get_pending_cell_count()
 	s["far_texture_rebuild_in_flight"] = _rebuild_task_id != -1
@@ -1837,7 +1931,9 @@ func _get_hlod_page_coverage_stats() -> Dictionary:
 	var covered_impostors := 0
 	var page_overrides := 0
 	for page: ImpostorPage in _impostor_pages.values():
-		if is_equal_approx(page.visibility_begin_distance, DU.HLOD_END):
+		var is_hlod_override := _visibility_begin_distance < DU.HLOD_END \
+			and is_equal_approx(page.visibility_begin_distance, DU.HLOD_END)
+		if is_hlod_override:
 			covered_pages += 1
 			page_overrides += 1
 			covered_impostors += page.impostor_ids.size()
@@ -2044,6 +2140,7 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 	for g: Vector2i in grids:
 		_loaded_impostor_cells.erase(g)
 		_pending_impostor_cell_set.erase(g)
+	_discard_pending_impostor_cells(grids)
 
 	# Use spatial index for O(cell_count) lookup instead of O(total_impostors)
 	var ids_to_remove: Array[int] = []
@@ -2096,6 +2193,32 @@ func _unload_impostors_in_cells(grids: Array[Vector2i]) -> void:
 			i -= 1
 			
 	_debug("Unloaded %d cells, removed %d impostors" % [grids.size(), ids_to_remove.size()])
+
+
+func _discard_pending_impostor_cells(grids: Array[Vector2i]) -> void:
+	if grids.is_empty() or (_pending_impostor_cells.is_empty() and not _has_resume):
+		return
+	var drop_set: Dictionary[Vector2i, bool] = {}
+	for grid: Vector2i in grids:
+		drop_set[grid] = true
+	if _has_resume and drop_set.has(_resume_cell_grid):
+		_has_resume = false
+		_resume_ref_index = 0
+		_resume_cell_grid = Vector2i.ZERO
+	if _pending_impostor_cells.is_empty():
+		return
+	var old_index := _pending_cell_index
+	var compacted: Array[Vector2i] = []
+	var compacted_index := 0
+	for i in range(_pending_impostor_cells.size()):
+		var grid: Vector2i = _pending_impostor_cells[i]
+		if drop_set.has(grid):
+			continue
+		if i < old_index:
+			compacted_index += 1
+		compacted.append(grid)
+	_pending_impostor_cells = compacted
+	_pending_cell_index = mini(compacted_index, _pending_impostor_cells.size())
 
 
 ## Internal helper to load impostors from ESM record
@@ -2287,6 +2410,8 @@ func _create_impostor(
 	aabb_center: Vector3
 ) -> int:
 	if bucket == null:
+		return -1
+	if not _loaded_impostor_cells.has(cell_grid):
 		return -1
 	var texture_index: int = bucket.texture_index_map.get(hash_key, 0)
 
@@ -2618,6 +2743,7 @@ func _poll_rebuild_task() -> void:
 			bucket.normal_texture_array = new_normal
 			bucket.material.set_shader_parameter("normal_atlas", bucket.normal_texture_array)
 			bucket.committed_normal_array_layers = normal_images.size()
+			_mark_all_pages_dirty()
 			Log.debug("impostors", "Rebuilt normal texture array with %d layers (async)" % normal_images.size())
 		bucket.normal_array_dirty = bucket.all_normal_images.size() > normal_images.size()
 	_stats["texture_array_rebuild_count"] = int(_stats.get("texture_array_rebuild_count", 0)) + 1
@@ -2637,8 +2763,7 @@ func _rebuild_page(page_key: String) -> Dictionary:
 		if id in _impostors:
 			all_live_ids.append(id)
 			var live_imp: ImpostorData = _impostors[id]
-			var albedo_ready := live_imp.texture_index < bucket.committed_texture_array_layers
-			if albedo_ready:
+			if _is_impostor_ready_for_page(live_imp, bucket):
 				live_ids.append(id)
 
 	if all_live_ids.is_empty():
@@ -2689,7 +2814,7 @@ func _rebuild_page(page_key: String) -> Dictionary:
 		buffer[offset + 13] = impostor.rotation.y
 		var normal_index := impostor.normal_texture_index
 		if normal_index < 0 or normal_index >= bucket.committed_normal_array_layers:
-			normal_index = 0
+			normal_index = -1
 		buffer[offset + 14] = float(normal_index)
 		buffer[offset + 15] = impostor.variant_flag
 		offset += stride
@@ -2715,6 +2840,14 @@ func _rebuild_page(page_key: String) -> Dictionary:
 		page.instance.custom_aabb = AABB(aabb_min, aabb_max - aabb_min)
 	var upload_usec := Time.get_ticks_usec() - upload_start_usec
 	return {"rebuilt": 1, "pack_usec": pack_usec, "upload_usec": upload_usec, "instances": live_ids.size()}
+
+
+static func _is_impostor_ready_for_page(impostor: ImpostorData, bucket: TextureBucket) -> bool:
+	if impostor == null or bucket == null:
+		return false
+	if impostor.texture_index < 0 or impostor.texture_index >= bucket.committed_texture_array_layers:
+		return false
+	return true
 
 
 func _get_or_load_metadata(model_path: String) -> Dictionary:

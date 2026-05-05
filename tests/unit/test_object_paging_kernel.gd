@@ -117,6 +117,7 @@ func test_object_paging_stats_include_observability_counters() -> void:
 	assert_bool(stats.has("refs_surface_rejected")).is_true()
 	assert_bool(stats.has("refs_partial_bucket_rejected")).is_true()
 	assert_bool(stats.has("surface_cap_rejections")).is_true()
+	assert_bool(stats.has("surface_cap_over_budget_published")).is_true()
 	assert_bool(stats.has("warmup_queue_size")).is_true()
 
 
@@ -292,20 +293,22 @@ func test_size_worthy_small_distant_mesh_rejected() -> void:
 ## Scale multiplier matters — a mesh with scale=2 covers 4× area in the test.
 ## Same mesh at scale=0.5 projects 4× smaller → rejection threshold shifts.
 func test_size_worthy_scale_changes_outcome() -> void:
-	var mesh_radius_sq := 1.0  # 1m radius
+	var mesh_radius_sq := 0.04  # 0.2m radius
 	var dist_sq := 10000.0  # 100m
 
-	# Godotwind's tuned minSize=0.02 gives threshold = 10000 × 0.0004 = 4.
-	# Scale=1 → 1 < 4 rejected. Scale=2 → 4 >= 4 kept (inclusive boundary).
+	# Godotwind's tuned minSize=0.003 gives threshold = 10000 * 0.000009 = 0.09.
+	# Scale=1 -> 0.04 < 0.09 rejected. Scale=2 -> 0.16 >= 0.09 kept.
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 0.5, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
+		.is_false()
 	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 1.0, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
 		.is_false()
 	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, dist_sq, DU.PAGING_MIN_SIZE_SQ)) \
 		.is_true()
 
-	# Farther: dist=150m, threshold=9. Scale=2 → 4 rejected; scale=3 → 9 kept.
-	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 2.0, 22500.0, DU.PAGING_MIN_SIZE_SQ)) \
+	# Farther: dist=500m, threshold=2.25. Scale=7 -> 1.96 rejected; scale=8 -> 2.56 kept.
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 7.0, 250000.0, DU.PAGING_MIN_SIZE_SQ)) \
 		.is_false()
-	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 3.0, 22500.0, DU.PAGING_MIN_SIZE_SQ)) \
+	assert_bool(Merger._is_size_worthy(mesh_radius_sq, 8.0, 250000.0, DU.PAGING_MIN_SIZE_SQ)) \
 		.is_true()
 
 
@@ -339,8 +342,102 @@ func test_size_worthy_zero_distance_kept() -> void:
 ## PAGING_MIN_SIZE keeps OpenMW's projected-size pattern but uses Godotwind's
 ## meter-scale tuned default so buildings and vegetation survive HLOD range.
 func test_paging_min_size_matches_godotwind_tuned_default() -> void:
-	assert_float(DU.PAGING_MIN_SIZE).is_equal_approx(0.02, 0.001)
-	assert_float(DU.PAGING_MIN_SIZE_SQ).is_equal_approx(0.0004, 0.00001)
+	assert_float(DU.PAGING_MIN_SIZE).is_equal_approx(0.003, 0.001)
+	assert_float(DU.PAGING_MIN_SIZE_SQ).is_equal_approx(0.000009, 0.000001)
+
+
+func test_surface_budget_preserves_coverage() -> void:
+	var merger := Merger.new()
+	var state := Merger.MergePrepState.new()
+	var big := Kernel.RefInput.new()
+	big.rs2 = 100.0
+	big.dist_sq = 10000.0
+	big.surface_count = 100
+	big.source_ref_num = 1
+	big.bucket_key = "0,0:big"
+	var small_a := Kernel.RefInput.new()
+	small_a.rs2 = 1.0
+	small_a.dist_sq = 10000.0
+	small_a.surface_count = 40
+	small_a.source_ref_num = 2
+	small_a.bucket_key = "0,0:small_a"
+	var small_b := Kernel.RefInput.new()
+	small_b.rs2 = 1.0
+	small_b.dist_sq = 10000.0
+	small_b.surface_count = 40
+	small_b.source_ref_num = 3
+	small_b.bucket_key = "0,0:small_b"
+	state.inputs = [small_a, small_b, big]
+
+	merger._apply_surface_budget(state)
+
+	assert_int(state.inputs.size()).is_equal(3)
+	assert_int(state.refs_surface_rejected).is_equal(0)
+	assert_int(state.surface_estimate).is_equal(180)
+
+
+func test_partial_bucket_inputs_still_render_but_do_not_suppress_mid() -> void:
+	var merger := Merger.new()
+	var state := Merger.MergePrepState.new()
+	var partial := Kernel.RefInput.new()
+	partial.source_ref_num = 10
+	partial.bucket_key = "0,0:partial"
+	var complete := Kernel.RefInput.new()
+	complete.source_ref_num = 20
+	complete.bucket_key = "0,0:complete"
+	state.inputs = [partial, complete]
+	state.source_ref_nums = {10: true, 20: true}
+	state.source_bucket_counts = {
+		"0,0:partial": 1,
+		"0,0:complete": 1,
+	}
+	state.bucket_total_counts = {
+		"0,0:partial": 2,
+		"0,0:complete": 1,
+	}
+
+	merger._update_complete_bucket_counts(state)
+
+	assert_int(state.inputs.size()).is_equal(2)
+	assert_bool(state.source_ref_nums.has(10)).is_true()
+	assert_bool(state.source_ref_nums.has(20)).is_true()
+	assert_bool(state.source_bucket_counts.has("0,0:partial")).is_false()
+	assert_int(int(state.source_bucket_counts.get("0,0:complete", 0))).is_equal(1)
+	assert_int(state.refs_partial_bucket_rejected).is_equal(1)
+
+
+func test_active_hlod_chunks_are_pinned_during_cache_eviction() -> void:
+	var merger := Merger.new()
+	var active_key := Vector3i(0, 0, 1)
+	var inactive_key := Vector3i(2, 0, 1)
+	var active_data := Merger.PagingChunkData.new()
+	active_data.key = active_key
+	merger._active_chunks[active_key] = active_data
+	merger._mesh_cache[active_key] = ArrayMesh.new()
+	merger._mesh_sizes[active_key] = 16
+	merger._mesh_cache[inactive_key] = ArrayMesh.new()
+	merger._mesh_sizes[inactive_key] = 16
+	merger._lru_order = [active_key, inactive_key]
+	merger._cache_used_bytes = Merger.CACHE_BUDGET_BYTES
+
+	merger._cache_evict_to_fit(1)
+
+	assert_bool(merger._active_chunks.has(active_key)).is_true()
+	assert_bool(merger._mesh_cache.has(active_key)).is_true()
+	assert_bool(merger._mesh_cache.has(inactive_key)).is_false()
+
+
+func test_prototype_warmup_clears_temporary_negative_chunks() -> void:
+	var merger := Merger.new()
+	var missing_key := Vector3i(0, 0, 1)
+	var surface_key := Vector3i(2, 0, 1)
+	merger._negative_chunks[missing_key] = "missing_prototype"
+	merger._negative_chunks[surface_key] = "surface_cap"
+
+	merger._clear_temporary_negative_chunks()
+
+	assert_bool(merger._negative_chunks.has(missing_key)).is_false()
+	assert_bool(merger._negative_chunks.has(surface_key)).is_true()
 
 
 #endregion
@@ -994,8 +1091,8 @@ func test_flatten_drops_sub_threshold_ref_via_second_pass() -> void:
 
 	# Configure refs so the second-pass filter rejects `small` and `small2`
 	# but keeps `big` and `big2`. rs2=1000, dist_sq=10000, threshold worst-case
-	# at MIN_SIZE² ≈ 0.0004 → dist_sq × threshold ≈ 4. Big's rs2=1000 > 4 kept.
-	# Small's rs2=0.01, threshold same → 0.01 < 4 rejected.
+	# at MIN_SIZE^2 ~= 0.000009 -> dist_sq * threshold ~= 0.09.
+	# Big's rs2=1000 is kept. Small's rs2=0.01 is rejected.
 	big.rs2 = 1000.0
 	big.dist_sq = 10000.0
 	big2.rs2 = 1000.0
@@ -1062,15 +1159,15 @@ func test_flatten_second_pass_noop_when_ref_metrics_missing() -> void:
 func test_size_worthy_reevaluation_after_camera_approach() -> void:
 	# Cache-equivalent value: mesh_radius_sq × scale² = 1.0 × 1.0 = 1.0
 	var cached_rs2 := 1.0
-	var min_size_sq := DU.PAGING_MIN_SIZE_SQ  # 0.0004
+	var min_size_sq := DU.PAGING_MIN_SIZE_SQ
 
-	# At 500m: threshold = 250000 × 0.0004 = 100. 1.0 < 100 → rejected.
-	var at_500 := 250000.0 * min_size_sq
-	assert_bool(cached_rs2 < at_500) \
-		.override_failure_message("SizeCache path assumes ref rejected at 500m.") \
+	# At 1000m: threshold = 1000000 * 0.000009 = 9. 1.0 < 9 -> rejected.
+	var at_1000 := 1000000.0 * min_size_sq
+	assert_bool(cached_rs2 < at_1000) \
+		.override_failure_message("SizeCache path assumes ref rejected at 1000m.") \
 		.is_true()
 
-	# At 5m: threshold = 25 × 0.0004 = 0.01. 1.0 >= 0.01 → kept. Cache should
+	# At 5m: threshold = 25 * 0.000009 = 0.000225. 1.0 >= threshold -> kept. Cache should
 	# evict and fall through to full-path instantiation.
 	var at_5 := 25.0 * min_size_sq
 	assert_bool(cached_rs2 < at_5) \

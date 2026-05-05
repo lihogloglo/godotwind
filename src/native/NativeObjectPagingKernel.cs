@@ -354,6 +354,54 @@ public partial class NativeObjectPagingKernel : RefCounted
         return total;
     }
 
+    /// <summary>
+    /// Collect cheap scalar diagnostics while the merged resource is still owned
+    /// by the worker pipeline. The main thread should only publish the mesh RID.
+    /// </summary>
+    public Godot.Collections.Dictionary EstimateMeshStats(ArrayMesh mesh)
+    {
+        int surfaceCount = mesh.GetSurfaceCount();
+        int vertexCount = 0;
+        int indexCount = 0;
+        var materialIds = new HashSet<ulong>();
+
+        for (int si = 0; si < surfaceCount; si++)
+        {
+            var material = mesh.SurfaceGetMaterial(si);
+            materialIds.Add(material != null ? (ulong)material.GetInstanceId() : 0UL);
+
+            var arrays = mesh.SurfaceGetArrays(si);
+            if (arrays.Count <= ArrayVertex) continue;
+
+            int verts = 0;
+            var v = arrays[ArrayVertex];
+            if (v.VariantType == Variant.Type.PackedVector3Array)
+            {
+                verts = v.AsVector3Array().Length;
+                vertexCount += verts;
+            }
+
+            if (arrays.Count > ArrayIndex && arrays[ArrayIndex].VariantType == Variant.Type.PackedInt32Array)
+            {
+                var indices = arrays[ArrayIndex].AsInt32Array();
+                indexCount += indices.Length > 0 ? indices.Length : verts;
+            }
+            else
+            {
+                indexCount += verts;
+            }
+        }
+
+        return new Godot.Collections.Dictionary
+        {
+            ["bytes"] = vertexCount * 72,
+            ["surface_count"] = surfaceCount,
+            ["material_count"] = materialIds.Count,
+            ["vertex_count"] = vertexCount,
+            ["index_count"] = indexCount,
+        };
+    }
+
     #region Private helpers
 
     private static void CopyArrayIfPresent(Godot.Collections.Array src, Godot.Collections.Array dst, int index, Variant.Type expected)
