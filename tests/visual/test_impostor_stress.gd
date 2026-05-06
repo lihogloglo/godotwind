@@ -17,6 +17,7 @@ extends Node3D
 const DU := preload("res://src/core/world/distance_utils.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
 
 const START_CELL := Vector2i(-2, -9)
 const IMPOSTOR_RADIUS_CELLS: int = 60
@@ -195,6 +196,7 @@ func _setup_renderer() -> void:
 	_renderer.name = "NativeImpostorRendererStress"
 	_renderer.debug_enabled = false
 	_renderer.set_impostor_candidates(_candidates)
+	_renderer.set_world_object_source(MorrowindWorldObjectSourceScript.new())
 	_renderer.set_load_budget_usec(LOAD_BUDGET_USEC)
 	add_child(_renderer)
 	_apply_visibility_mode()

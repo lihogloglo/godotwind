@@ -1891,6 +1891,7 @@ func _setup_subsystem_toggles() -> void:
 	var boot_near_only := false
 	var boot_near_mid_only := false
 	var boot_hlod_only := false
+	var boot_far_only := false
 	var boot_no_hlod := false
 	var boot_no_impostors := false
 	var boot_no_distant_lights := false
@@ -1900,6 +1901,7 @@ func _setup_subsystem_toggles() -> void:
 		boot_near_only = boot_near_only or arg == "--near-only"
 		boot_near_mid_only = boot_near_mid_only or arg == "--near-mid-only"
 		boot_hlod_only = boot_hlod_only or arg == "--hlod-only"
+		boot_far_only = boot_far_only or arg == "--far-only"
 		boot_no_hlod = boot_no_hlod or arg == "--no-hlod" or arg == "-no-hlod" or ((arg == "-no" or arg == "--no") and boot_next_arg == "hlod")
 		boot_no_impostors = boot_no_impostors or arg == "--no-impostors"
 		boot_no_distant_lights = boot_no_distant_lights or arg == "--no-distant-lights"
@@ -1907,15 +1909,15 @@ func _setup_subsystem_toggles() -> void:
 
 	var defaults: Dictionary = {
 		"terrain": true,
-		"ocean": _ocean_controls.show_ocean,
-		"sky": _env_controls.show_sky,
-		"weather": _weather_controls.weather_enabled,
+		"ocean": _ocean_controls.show_ocean and not boot_far_only,
+		"sky": _env_controls.show_sky and not boot_far_only,
+		"weather": _weather_controls.weather_enabled and not boot_far_only,
 		"characters": _show_characters,
 		"far_impostors": distant_default and not boot_no_impostors and not boot_hlod_only,
-		"static_visuals": distant_default and not boot_hlod_only,
-		"near_gameplay": true,
-		"hlod": distant_default and not boot_no_hlod,
-		"distant_lights": distant_default and not boot_no_distant_lights and not boot_hlod_only,
+		"static_visuals": distant_default and not boot_hlod_only and not boot_far_only,
+		"near_gameplay": not boot_far_only,
+		"hlod": distant_default and not boot_no_hlod and not boot_far_only,
+		"distant_lights": distant_default and not boot_no_distant_lights and not boot_hlod_only and not boot_far_only,
 		"shadows": false,
 		"postfx": false,
 	}
@@ -1993,6 +1995,20 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("ocean", false)
 			_subsystem_toggles.set_flag("characters", false)
 			_log("[color=yellow]--hlod-only: visible HLOD + terrain isolation; FAR/environment OFF[/color]")
+		elif a == "--far-only":
+			_subsystem_toggles.set_flag("terrain", true)
+			_subsystem_toggles.set_flag("near_gameplay", false)
+			_subsystem_toggles.set_flag("static_visuals", false)
+			_subsystem_toggles.set_flag("hlod", false)
+			_subsystem_toggles.set_flag("far_impostors", true)
+			_subsystem_toggles.set_flag("distant_lights", false)
+			_subsystem_toggles.set_flag("sky", false)
+			_subsystem_toggles.set_flag("weather", false)
+			_subsystem_toggles.set_flag("postfx", false)
+			_subsystem_toggles.set_flag("shadows", false)
+			_subsystem_toggles.set_flag("ocean", false)
+			_subsystem_toggles.set_flag("characters", false)
+			_log("[color=yellow]--far-only: terrain + FAR impostors only; NEAR/MID/HLOD/environment OFF[/color]")
 		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
 			_subsystem_toggles.set_flag("hlod", false)
 			_log("[color=yellow]--no-hlod: HLOD OFF; MID still fixed at 300m[/color]")

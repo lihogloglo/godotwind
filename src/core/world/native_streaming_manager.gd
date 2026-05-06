@@ -3316,7 +3316,8 @@ func _check_startup_complete() -> void:
 	var impostor_inner_ring_done: bool = impostor_processed >= inner_ring_count or impostor_pending == 0
 	# Wait for nearby cells loaded + instantiation queue manageable + inner ring impostors
 	# Don't be too strict — player shouldn't wait 30s for every impostor
-	var nearby_cells_loaded := _loaded_cells.size() >= mini(load_radius_cells * 2 + 1, 7)
+	var scene_tiers_disabled := not _near_tier_visible and not _mid_tier_visible
+	var nearby_cells_loaded := scene_tiers_disabled or _loaded_cells.size() >= mini(load_radius_cells * 2 + 1, 7)
 	# Diagnostic: log startup progress every 60 frames
 	if _startup_frames % 60 == 0:
 		Log.info("streaming", "Startup check: nearby_cells=%d/%d queue=%d imp_processed=%d/%d imp_pending=%d" % [

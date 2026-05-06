@@ -1739,9 +1739,6 @@ func add_impostor(
 	# Get v6 metadata for size + variant flag. Missing metadata previously
 	# defaulted to a 10x10 billboard, which is exactly the kind of scale bug we
 	# should fail closed on.
-	if hash_key not in _impostor_metadata:
-		_stats["skipped_metadata_uncached"] = int(_stats.get("skipped_metadata_uncached", 0)) + 1
-		return -1
 	var metadata := _get_or_load_metadata(model_path)
 	if metadata.is_empty():
 		_stats["skipped_no_texture"] += 1
@@ -2813,9 +2810,6 @@ func _poll_rebuild_task(deadline_usec: int = 0) -> void:
 	if not WorkerThreadPool.is_task_completed(_rebuild_task_id):
 		return
 	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
-		return
-	if deadline_usec > 0:
-		_stats["far_texture_commit_deferred"] = int(_stats.get("far_texture_commit_deferred", 0)) + 1
 		return
 
 	WorkerThreadPool.wait_for_task_completion(_rebuild_task_id)
