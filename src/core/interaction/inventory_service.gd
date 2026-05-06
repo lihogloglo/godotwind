@@ -44,6 +44,10 @@ static func set_current(service: InventoryService) -> void:
 	_current = service
 
 
+static func clear_current() -> void:
+	_current = null
+
+
 ## Get the active service, or null if none has been registered. Call
 ## sites should be defensive: a missing service is a setup bug, not a
 ## runtime expectation.

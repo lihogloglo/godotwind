@@ -58,6 +58,7 @@ var _MidTierDebuggerScript: GDScript
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const ModRegistryScript := preload("res://src/core/modding/mod_registry.gd")
 const MWCarryableRegistryScript := preload("res://src/core/interaction/morrowind/mw_carryable_registry.gd")
+const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 const InventoryServiceScript := preload("res://src/core/interaction/inventory_service.gd")
 const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/mw_inventory_service.gd")
 # Interaction framework main-scene integration (2026-04-09).
@@ -157,6 +158,7 @@ var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B 
 var _benchmark_hud: CanvasLayer = null  # BenchmarkHUD — live perf overlay, default hidden
 var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
 var _world_streaming_disabled: bool = false
+var _shutdown_refs_released: bool = false
 var _loading_state_machine: LoadingStateMachineScript = null  # Phase 8 — canonical loading gate (boot + teleport)
 var _boot_gate_entered: bool = false  # Latches the one-shot boot enter_loading call
 var _loading_phase_times: Dictionary = {}  # Per-phase loading times
@@ -259,14 +261,35 @@ func _request_fast_quit(reason: String) -> void:
 	# Stop background worker threads from blocking on WTP handles
 	if native_streaming_manager:
 		Log.info("shutdown", "WORLD_EXPLORER_FAST_CLEANUP begin")
+		native_streaming_manager.set_process(false)
 		native_streaming_manager.fast_cleanup()
 		Log.info("shutdown", "WORLD_EXPLORER_FAST_CLEANUP done")
 
 	# Disable deformation persistence so shutdown() skips disk I/O
 	DeformationConfig.enable_persistence = false
+	_release_shutdown_refs()
 
 	Log.info("shutdown", "WORLD_EXPLORER_QUIT call")
+	call_deferred("_finish_quit")
+
+
+func _finish_quit() -> void:
 	get_tree().quit()
+
+
+func _release_shutdown_refs() -> void:
+	if _shutdown_refs_released:
+		return
+	_shutdown_refs_released = true
+	CarryableRegistryScript.clear()
+	MWCarryableRegistryScript.release_callable_owner()
+	InventoryServiceScript.clear_current()
+	Log.info("shutdown", "WORLD_EXPLORER_STATIC_REGISTRIES_CLEARED")
+
+
+func _exit_tree() -> void:
+	if Engine.has_meta("_quitting"):
+		_release_shutdown_refs()
 
 
 func _ready() -> void:
