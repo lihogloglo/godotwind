@@ -102,6 +102,7 @@ var _scenario: RID = RID()
 
 ## Maximum visibility range for individual MID instances.
 ## Default: MID_END (300m). HLOD owns the next fixed tier, 300-1000m.
+var visibility_range_begin: float = 0.0
 var visibility_range_end: float = DU.MID_END
 
 ## Global visibility override for benchmark A/B testing. When false, all RS
@@ -1092,7 +1093,8 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 		_scenario,
 		_get_bucket_visibility_range_end(bucket_key, transforms.size()),
 		_globally_visible,
-		resource_handle
+		resource_handle,
+		visibility_range_begin
 	))
 	if not ok:
 		if bucket.has_method("cleanup"):
@@ -1140,7 +1142,8 @@ func create_cell_bucket_budgeted(
 			_scenario,
 			_get_bucket_visibility_range_end(bucket_key, transforms.size()),
 			_globally_visible,
-			resource_handle
+			resource_handle,
+			visibility_range_begin
 		))
 		if not started:
 			if bucket.has_method("cleanup"):
@@ -1182,15 +1185,36 @@ func _finalize_cell_bucket(bucket: RefCounted, type_name: String, _payload_key: 
 		mesh_type.instance_count += bucket_count
 
 
-func set_visibility_range_end(p_visibility_range_end: float) -> void:
+func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_end: float) -> void:
+	visibility_range_begin = maxf(0.0, p_visibility_range_begin)
 	visibility_range_end = p_visibility_range_end
 	for buckets: Array in _cell_buckets.values():
 		for bucket_value: Variant in buckets:
 			var bucket: RefCounted = bucket_value as RefCounted
-			if bucket != null and not bool(bucket.get("frozen")) and bucket.has_method("set_visibility_range_end"):
+			if bucket != null and not bool(bucket.get("frozen")):
 				var bucket_key := str(bucket.get("bucket_key"))
 				var bucket_count := int(bucket.get("instance_count"))
-				bucket.call("set_visibility_range_end", _get_bucket_visibility_range_end(bucket_key, bucket_count))
+				var bucket_end := _get_bucket_visibility_range_end(bucket_key, bucket_count)
+				if bucket.has_method("set_visibility_range"):
+					bucket.call("set_visibility_range", visibility_range_begin, bucket_end)
+				elif bucket.has_method("set_visibility_range_end"):
+					bucket.call("set_visibility_range_end", bucket_end)
+	for id: int in _instances:
+		var data: InstanceData = _instances[id]
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_geometry_set_visibility_range(
+					rid,
+					visibility_range_begin,
+					visibility_range_end,
+					0.0,
+					DU.FADE_MARGIN_LOD3_FAR,
+					SC.MID_VISIBILITY_FADE_MODE
+				)
+
+
+func set_visibility_range_end(p_visibility_range_end: float) -> void:
+	set_visibility_range(visibility_range_begin, p_visibility_range_end)
 
 
 ## Apply exact HLOD coverage to active MID buckets. Fully covered buckets cap at
@@ -1210,12 +1234,15 @@ func _apply_bucket_visibility_ranges() -> void:
 	for buckets: Array in _cell_buckets.values():
 		for bucket_value: Variant in buckets:
 			var bucket: RefCounted = bucket_value as RefCounted
-			if bucket == null or bool(bucket.get("frozen")) or not bucket.has_method("set_visibility_range_end"):
+			if bucket == null or bool(bucket.get("frozen")):
 				continue
 			var bucket_key := str(bucket.get("bucket_key"))
 			var bucket_count := int(bucket.get("instance_count"))
 			var target_end := _get_bucket_visibility_range_end(bucket_key, bucket_count)
-			bucket.call("set_visibility_range_end", target_end)
+			if bucket.has_method("set_visibility_range"):
+				bucket.call("set_visibility_range", visibility_range_begin, target_end)
+			elif bucket.has_method("set_visibility_range_end"):
+				bucket.call("set_visibility_range_end", target_end)
 	_refresh_hlod_bucket_override_stats()
 
 
@@ -1386,7 +1413,7 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 	# detail culling needs a coverage-aware replacement tier before it can ship.
 	rs.instance_geometry_set_visibility_range(
 		instance_rid,
-		0.0, visibility_range_end,
+		visibility_range_begin, visibility_range_end,
 		0.0, DU.FADE_MARGIN_LOD3_FAR,
 		SC.MID_VISIBILITY_FADE_MODE
 	)

@@ -1884,22 +1884,38 @@ func _setup_subsystem_toggles() -> void:
 	# architecture. `--near-only` remains the full distant-tier opt-out, and
 	# `--no-hlod` remains the HLOD ablation path.
 	#
-	# `mid_objects: true` post-statics_no_node3d T.1 (2026-04-19): the
-	# static_object_renderer is now the universal statics render path
-	# (NEAR + flora + rocks + arches + clutter), not MID-only. Keeping
-	# this `false` at boot would hide ALL statics. The UI toggle still exists
-	# for benchmark A/B isolation; it now toggles all statics.
+	# `static_visuals` controls the MID extension of the shared static renderer.
+	# With NEAR gameplay on, disabling it caps static buckets to NEAR range
+	# instead of hiding all rocks/arches/clutter.
+	var runtime_args := _runtime_cmdline_args()
+	var boot_near_only := false
+	var boot_near_mid_only := false
+	var boot_hlod_only := false
+	var boot_no_hlod := false
+	var boot_no_impostors := false
+	var boot_no_distant_lights := false
+	for boot_i in range(runtime_args.size()):
+		var arg: String = runtime_args[boot_i]
+		var boot_next_arg: String = runtime_args[boot_i + 1] if boot_i + 1 < runtime_args.size() else ""
+		boot_near_only = boot_near_only or arg == "--near-only"
+		boot_near_mid_only = boot_near_mid_only or arg == "--near-mid-only"
+		boot_hlod_only = boot_hlod_only or arg == "--hlod-only"
+		boot_no_hlod = boot_no_hlod or arg == "--no-hlod" or arg == "-no-hlod" or ((arg == "-no" or arg == "--no") and boot_next_arg == "hlod")
+		boot_no_impostors = boot_no_impostors or arg == "--no-impostors"
+		boot_no_distant_lights = boot_no_distant_lights or arg == "--no-distant-lights"
+	var distant_default := SettingsManager.get_distant_rendering_enabled() and not boot_near_only and not boot_near_mid_only
+
 	var defaults: Dictionary = {
 		"terrain": true,
 		"ocean": _ocean_controls.show_ocean,
 		"sky": _env_controls.show_sky,
 		"weather": _weather_controls.weather_enabled,
 		"characters": _show_characters,
-		"far_impostors": true,
-		"static_visuals": true,
+		"far_impostors": distant_default and not boot_no_impostors and not boot_hlod_only,
+		"static_visuals": distant_default and not boot_hlod_only,
 		"near_gameplay": true,
-		"hlod": true,
-		"distant_lights": true,
+		"hlod": distant_default and not boot_no_hlod,
+		"distant_lights": distant_default and not boot_no_distant_lights and not boot_hlod_only,
 		"shadows": false,
 		"postfx": false,
 	}
@@ -1931,24 +1947,23 @@ func _setup_subsystem_toggles() -> void:
 	_log("[color=green][Distant tiers active][/color] MID fixed 150-300m; HLOD 300-1000m; FAR impostors 1000m+")
 	Log.info("streaming", "[Distant tiers active] MID fixed=150-300; HLOD=300-1000; FAR starts at 1000; view distance caps tier loading")
 
-	# CLI controls for focused tier isolation. `--near-only` parks distant
-	# render tiers without hiding MID. `--near-mid-only` is the hard benchmark
+	# CLI controls for focused tier isolation. `--near-only` parks MID and
+	# distant render tiers. `--near-mid-only` is the hard benchmark
 	# isolation mode: terrain + NEAR + MID only, with environment/post effects
 	# disabled too. `--hlod` explicitly enables HLOD on top of the normal
 	# stack; `--hlod-only` isolates visible HLOD + terrain while leaving the
 	# streaming/prototype bootstrap alive.
-	# Post statics_no_node3d T.1: do NOT flip `mid_objects` — that toggle
-	# now controls the universal statics renderer, flipping it off would
-	# hide all rocks/arches/clutter.
-	var runtime_args := _runtime_cmdline_args()
+	# The shared static renderer remains alive for NEAR; this toggle adjusts
+	# its visibility range rather than deleting the owner.
 	for i in range(runtime_args.size()):
 		var a: String = runtime_args[i]
 		var next_arg: String = runtime_args[i + 1] if i + 1 < runtime_args.size() else ""
 		if a == "--near-only":
+			_subsystem_toggles.set_flag("static_visuals", false)
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("far_impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
-			_log("[color=yellow]--near-only: HLOD/FAR/distant lights OFF; MID fixed at 300m[/color]")
+			_log("[color=yellow]--near-only: NEAR gameplay/statics only; MID/HLOD/FAR/distant lights OFF[/color]")
 		elif a == "--near-mid-only":
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("far_impostors", false)

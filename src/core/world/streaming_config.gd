@@ -39,6 +39,12 @@ const VIEW_DISTANCE_STEP_METERS := 50
 ## beyond the fixed MID bridge band.
 const MAX_SCENE_LOAD_RADIUS_CELLS := 3
 
+## Playable NEAR-only cell footprint. This matches the OpenMW-style exterior
+## load distance of 1 cell: current cell plus immediate neighbors. MID disabled
+## must not keep loading the 300m bridge ring.
+const NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS := 1
+const NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP := DU.NEAR_END + DU.HALF_CELL_SIZE
+
 
 static func clamp_view_distance_meters(value: int) -> int:
 	var stepped := int(round(float(value) / float(VIEW_DISTANCE_STEP_METERS))) * VIEW_DISTANCE_STEP_METERS

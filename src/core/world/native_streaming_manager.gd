@@ -159,6 +159,7 @@ var _impostor_candidates: RefCounted = null
 
 var _distant_render_end_m: float = float(SC.DEFAULT_VIEW_DISTANCE_METERS)
 var _impostors_requested_visible: bool = true
+var _mid_tier_visible: bool = true
 var _world_object_source: RefCounted = null
 
 ## Loaded cells: grid -> Node3D container
@@ -672,12 +673,7 @@ func _apply_distant_render_distance_for_load_radius() -> void:
 func _apply_view_distance_cap() -> void:
 	_distant_render_end_m = float(SC.clamp_view_distance_meters(view_distance_meters))
 	max_load_distance = SC.scene_load_distance_cap_for_view_distance_meters(view_distance_meters)
-	if _static_renderer:
-		var mid_end := minf(_distant_render_end_m, DU.MID_END)
-		if _static_renderer.has_method("set_visibility_range_end"):
-			_static_renderer.call("set_visibility_range_end", mid_end)
-		else:
-			_static_renderer.visibility_range_end = mid_end
+	_apply_static_renderer_tier_visibility()
 	_apply_hlod_request()
 	_apply_impostor_request()
 	_sync_hlod_far_coverage(true)
@@ -691,6 +687,14 @@ func _impostor_streaming_enabled() -> bool:
 
 func _distant_stream_radius_cells() -> int:
 	return SC.distant_stream_radius_cells_for_view_distance_meters(view_distance_meters, impostor_radius_cells)
+
+
+func _effective_scene_load_radius_cells() -> int:
+	return load_radius_cells if _mid_tier_visible else SC.NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS
+
+
+func _effective_scene_load_distance_cap() -> float:
+	return max_load_distance if _mid_tier_visible else SC.NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP
 
 
 func _reconcile_distant_tier_loading() -> void:
@@ -1126,7 +1130,7 @@ func _process(delta: float) -> void:
 			prof.end_section("async_complete")
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
-		if _near_tier_visible:
+		if _near_tier_visible or _mid_tier_visible:
 			# Phase 2: instantiation
 			# During startup / burst drain: 25ms budget.
 			# Post-startup normal: 4ms — prevents 48%-of-frame death spiral.
@@ -1150,20 +1154,21 @@ func _process(delta: float) -> void:
 			_finish_publication_slice(PUBLICATION_LANE_STATIC_VISUALS, payload_slice, payload_publish_us)
 			# Phase 2 stutter diag — bracket the instantiate call into the profiler
 			# so the slow-frame autopsy can attribute spike time. Plan §11.4.
-			if prof: prof.begin_section("instantiate")
 			var near_requested_usec := int(maxf(0.1, instantiation_budget_ms - (float(payload_publish_us) / 1000.0)) * 1000.0)
-			var near_slice := _claim_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, near_requested_usec)
-			var near_start := Time.get_ticks_usec()
 			var instantiated := 0
-			if not near_slice.is_empty():
-				instantiated = _cell_manager.process_async_instantiation(
-					float(int(near_slice.get("granted_usec", 0))) / 1000.0,
-					_camera_position,
-					camera_fwd,
-					allow_collision_finalize,
-				)
-			_finish_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, near_slice, Time.get_ticks_usec() - near_start)
-			if prof: prof.end_section("instantiate")
+			if _near_tier_visible:
+				if prof: prof.begin_section("instantiate")
+				var near_slice := _claim_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, near_requested_usec)
+				var near_start := Time.get_ticks_usec()
+				if not near_slice.is_empty():
+					instantiated = _cell_manager.process_async_instantiation(
+						float(int(near_slice.get("granted_usec", 0))) / 1000.0,
+						_camera_position,
+						camera_fwd,
+						allow_collision_finalize,
+					)
+				_finish_publication_slice(PUBLICATION_LANE_NEAR_GAMEPLAY, near_slice, Time.get_ticks_usec() - near_start)
+				if prof: prof.end_section("instantiate")
 			phase_times[2] = float(Time.get_ticks_usec() - phase_start)
 			if payload_published > 0 and debug_enabled:
 				_debug("Published %d payload items this frame" % payload_published)
@@ -1171,7 +1176,7 @@ func _process(delta: float) -> void:
 				_debug("Instantiated %d objects this frame" % instantiated)
 
 			# Burst drain: clear when queue is empty
-			if _near_burst_drain and _cell_manager:
+			if _near_tier_visible and _near_burst_drain and _cell_manager:
 				if _cell_manager.get_instantiation_queue_size() == 0 and _async_requests.is_empty():
 					_near_burst_drain = false
 					Log.info("streaming", "NEAR burst drain complete")
@@ -1334,12 +1339,10 @@ func _is_cell_occupied(grid: Vector2i) -> bool:
 
 ## Update which cells should be loaded based on camera position
 func _update_loaded_cells() -> void:
-	# Dual-purpose SubsystemToggles gate: freeze the cell set entirely when
-	# `near_objects` is off. Both loads AND unloads pause. Prevents the
-	# asymmetric-drain bug where `_loaded_cells` shrinks during the off period
-	# (unloads run) but can't be refilled (loads gated). On toggle back to ON,
-	# `set_near_tier_visible` forces a single catch-up call.
-	if not _near_tier_visible:
+	# Freeze scene-cell streaming only when both scene-backed tiers are off.
+	# MID static buckets share the scene-cell source, so they must keep this
+	# scheduler alive even when NEAR gameplay nodes are disabled.
+	if not _near_tier_visible and not _mid_tier_visible:
 		return
 	var ulc_start := Time.get_ticks_usec()
 
@@ -1495,10 +1498,12 @@ func _update_loaded_cells() -> void:
 ## Get all cells within a radius of the center cell
 func _get_cells_in_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
-	var max_dist_sq := max_load_distance * max_load_distance
+	var effective_radius := mini(radius, _effective_scene_load_radius_cells())
+	var effective_max_load_distance := _effective_scene_load_distance_cap()
+	var max_dist_sq := effective_max_load_distance * effective_max_load_distance
 	
-	for dy in range(-radius, radius + 1):
-		for dx in range(-radius, radius + 1):
+	for dy in range(-effective_radius, effective_radius + 1):
+		for dx in range(-effective_radius, effective_radius + 1):
 			var grid := Vector2i(center.x + dx, center.y + dy)
 			
 			# Check distance
@@ -2020,7 +2025,7 @@ func _process_pending_loads_async() -> void:
 	# submitting new cell-load async requests. This kills both NEAR ingress
 	# AND the MID flora adds that piggyback on ReferenceInstantiator during
 	# the cell load. HLOD + impostors are independent (they read ESM direct).
-	if not _near_tier_visible:
+	if not _near_tier_visible and not _mid_tier_visible:
 		return
 	if _pending_load_queue.is_empty():
 		return
@@ -2153,7 +2158,7 @@ func _process_pending_loads_sync(_delta: float) -> void:
 		push_warning("[NativeStreamingManager] Using synchronous cell loading - this can cause stuttering. Set async_loading_enabled = true for better performance.")
 
 	# Dual-purpose SubsystemToggles gate — mirror of async path.
-	if not _near_tier_visible:
+	if not _near_tier_visible and not _mid_tier_visible:
 		return
 
 	if _pending_load_queue.is_empty():
@@ -2211,7 +2216,8 @@ func get_stats() -> Dictionary:
 	s["frame_overrun_count"] = _frame_overrun_count
 	s["view_distance_meters"] = view_distance_meters
 	s["load_radius_cells"] = load_radius_cells
-	s["target_cell_count"] = (2 * load_radius_cells + 1) * (2 * load_radius_cells + 1)
+	s["effective_load_radius_cells"] = _effective_scene_load_radius_cells()
+	s["target_cell_count"] = (2 * _effective_scene_load_radius_cells() + 1) * (2 * _effective_scene_load_radius_cells() + 1)
 	s["desired_cell_count"] = desired_cells.size()
 	s["resident_cell_containers"] = _loaded_cells.size()
 	s["visual_ready_cells"] = visual_ready_cells
@@ -2466,8 +2472,25 @@ func is_cell_loaded(grid: Vector2i) -> bool:
 
 ## Toggle MID-tier RS instances (StaticObjectRenderer)
 func set_mid_tier_visible(visible: bool) -> void:
-	if _static_renderer:
-		_static_renderer.set_all_visible(visible)
+	_mid_tier_visible = visible
+	_apply_static_renderer_tier_visibility()
+	if _initialized and _camera:
+		_update_loaded_cells()
+
+
+func _apply_static_renderer_tier_visibility() -> void:
+	if not _static_renderer:
+		return
+	var any_static_visuals := _near_tier_visible or _mid_tier_visible
+	var begin := 0.0
+	var end := minf(_distant_render_end_m, DU.MID_END if _mid_tier_visible else DU.NEAR_END)
+	if not _near_tier_visible and _mid_tier_visible:
+		begin = DU.NEAR_END
+	if _static_renderer.has_method("set_visibility_range"):
+		_static_renderer.call("set_visibility_range", begin, end)
+	elif _static_renderer.has_method("set_visibility_range_end"):
+		_static_renderer.call("set_visibility_range_end", end)
+	_static_renderer.set_all_visible(any_static_visuals)
 
 ## Toggle FAR-tier impostors (NativeImpostorRenderer) — hides + stops streaming.
 func set_impostors_visible(visible: bool) -> void:
@@ -2508,6 +2531,7 @@ func set_near_tier_visible(visible: bool) -> void:
 		_near_burst_drain = true
 		Log.info("streaming", "NEAR thaw — burst drain armed")
 		_update_loaded_cells()
+	_apply_static_renderer_tier_visibility()
 
 func _set_near_gameplay_active(root: Node, active: bool) -> void:
 	root.process_mode = Node.PROCESS_MODE_INHERIT if active else Node.PROCESS_MODE_DISABLED
@@ -2539,11 +2563,7 @@ func _apply_hlod_request() -> void:
 		_teardown_hlod_merger()
 		_sync_hlod_far_coverage(true)
 	if _static_renderer:
-		var mid_range_end := minf(_distant_render_end_m, DU.MID_END)
-		if _static_renderer.has_method("set_visibility_range_end"):
-			_static_renderer.call("set_visibility_range_end", mid_range_end)
-		else:
-			_static_renderer.visibility_range_end = mid_range_end
+		_apply_static_renderer_tier_visibility()
 	_apply_impostor_request()
 	if effective_visible:
 		_hlod_needs_initial_update = true

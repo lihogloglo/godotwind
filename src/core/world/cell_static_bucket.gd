@@ -6,6 +6,7 @@ const SC := preload("res://src/core/world/streaming_config.gd")
 
 const TRANSFORM_STRIDE := 12
 const MULTIMESH_CLUSTER_SIZE_M: float = DU.CELL_SIZE_METERS * 0.5
+const MAX_TRANSFORMS_PER_DRAW_GROUP := 128
 const CONFIGURE_READY := "ready"
 const CONFIGURE_PENDING := "pending"
 const CONFIGURE_FAILED := "failed"
@@ -19,6 +20,7 @@ var instance_count: int = 0
 var draw_groups: Array[DrawGroup] = []
 var visible: bool = true
 var frozen: bool = false
+var visibility_range_begin: float = 0.0
 var visibility_range_end: float = DU.MID_END
 var resource_handle: RefCounted = null
 var _bucket_owner_key: String = ""
@@ -57,6 +59,7 @@ func configure(
 	p_visibility_range_end: float,
 	globally_visible: bool,
 	p_resource_handle: RefCounted = null,
+	p_visibility_range_begin: float = 0.0,
 ) -> bool:
 	if not begin_configure(
 		p_type_name,
@@ -67,7 +70,8 @@ func configure(
 		scenario,
 		p_visibility_range_end,
 		globally_visible,
-		p_resource_handle
+		p_resource_handle,
+		p_visibility_range_begin
 	):
 		return false
 	while true:
@@ -87,6 +91,7 @@ func begin_configure(
 	p_visibility_range_end: float,
 	globally_visible: bool,
 	p_resource_handle: RefCounted = null,
+	p_visibility_range_begin: float = 0.0,
 ) -> bool:
 	if p_type_name.is_empty() or p_payload_key.is_empty() or sub_meshes.is_empty() or transforms.is_empty() or not scenario.is_valid():
 		return false
@@ -99,6 +104,7 @@ func begin_configure(
 	instance_count = transforms.size()
 	visible = globally_visible
 	frozen = false
+	visibility_range_begin = maxf(0.0, p_visibility_range_begin)
 	visibility_range_end = p_visibility_range_end
 	resource_handle = p_resource_handle
 	if resource_handle != null and resource_handle.has_method("add_owner"):
@@ -135,10 +141,12 @@ func configure_step(deadline_usec: int) -> String:
 				_pending_current_sub_mesh.local_transform,
 				_pending_bucket_origin
 			)
-			_pending_clusters = clusters.values()
+			_pending_clusters = _split_cluster_batches(clusters.values())
 			_pending_cluster_index = 0
 
 		while _pending_cluster_index < _pending_clusters.size():
+			if Time.get_ticks_usec() >= deadline_usec:
+				return CONFIGURE_PENDING
 			var cluster_transforms: Array = _pending_clusters[_pending_cluster_index]
 			var group := _create_draw_group_for_cluster(
 				_pending_current_sub_mesh,
@@ -181,15 +189,20 @@ func get_draw_group_count() -> int:
 	return draw_groups.size()
 
 
-func set_visibility_range_end(p_visibility_range_end: float) -> void:
+func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_end: float) -> void:
 	if frozen:
 		return
-	if is_equal_approx(visibility_range_end, p_visibility_range_end):
+	if is_equal_approx(visibility_range_begin, p_visibility_range_begin) and is_equal_approx(visibility_range_end, p_visibility_range_end):
 		return
+	visibility_range_begin = p_visibility_range_begin
 	visibility_range_end = p_visibility_range_end
 	for group: DrawGroup in draw_groups:
 		if group.instance_rid.is_valid():
 			_apply_visibility_range(group)
+
+
+func set_visibility_range_end(p_visibility_range_end: float) -> void:
+	set_visibility_range(visibility_range_begin, p_visibility_range_end)
 
 
 func set_visible(p_visible: bool) -> void:
@@ -264,7 +277,7 @@ func _create_draw_groups(
 	var bucket_origin := DU.cell_to_world_origin(cell_grid)
 	var clusters := _cluster_transforms(transforms, sub_mesh.local_transform, bucket_origin)
 	var groups: Array[DrawGroup] = []
-	for cluster_value: Variant in clusters.values():
+	for cluster_value: Variant in _split_cluster_batches(clusters.values()):
 		var cluster_transforms: Array = cluster_value
 		var group := _create_draw_group_for_cluster(sub_mesh, cluster_transforms, bucket_origin, scenario)
 		if group != null:
@@ -429,7 +442,7 @@ func _create_single_rs_draw_group(
 
 func _apply_visibility_range(group: DrawGroup) -> void:
 	var radius := _aabb_horizontal_radius(group.local_aabb)
-	var begin := 0.0
+	var begin := maxf(0.0, visibility_range_begin - radius)
 	var end := visibility_range_end + radius
 	RenderingServer.instance_geometry_set_visibility_range(
 		group.instance_rid,
@@ -467,6 +480,22 @@ func _cluster_transforms(transforms: Array, local_transform: Transform3D, bucket
 			clusters[key] = []
 		clusters[key].append(world_transform)
 	return clusters
+
+
+func _split_cluster_batches(cluster_values: Array) -> Array:
+	var batches: Array = []
+	for cluster_value: Variant in cluster_values:
+		var cluster_transforms: Array = cluster_value
+		var count := cluster_transforms.size()
+		if count <= MAX_TRANSFORMS_PER_DRAW_GROUP:
+			batches.append(cluster_transforms)
+			continue
+		var start := 0
+		while start < count:
+			var end := mini(start + MAX_TRANSFORMS_PER_DRAW_GROUP, count)
+			batches.append(cluster_transforms.slice(start, end))
+			start = end
+	return batches
 
 
 func _pack_multimesh_transforms(
