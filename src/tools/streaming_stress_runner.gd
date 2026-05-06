@@ -19,6 +19,10 @@ const SETTLE_SEC := 8.0
 const TRANSITION_PRE_FRAMES := 30
 const TRANSITION_POST_FRAMES := 120
 const BOOMERANG_DISTANCE_M := 360.0
+const AXIS_SWEEP_SCAN_CELLS := 96
+const AXIS_SWEEP_EMPTY_RUN_CELLS := 3
+const AXIS_SWEEP_EDGE_BUFFER_CELLS := 1
+const AXIS_SWEEP_MIN_DATA_CELLS := 4
 const BLOCKING_FRAME_MS := BT.BLOCKING_FRAME_MS
 const STREAMING_PUBLISH_BLOCKING_MS := BT.STREAMING_PUBLISH_BLOCKING_MS
 const STATIC_PUBLISH_SPIKE_MS := BT.STATIC_PUBLISH_SPIKE_MS
@@ -66,6 +70,14 @@ const ROUTE_BOOMERANG_NAMES := {
 	"boomerang": true,
 	"reclaim-boomerang": true,
 	"p04-reclaim": true,
+}
+const ROUTE_AXIS_SWEEP_NAMES := {
+	"east-west": true,
+	"ew": true,
+	"x-sweep": true,
+	"sweep-x": true,
+	"west-east": true,
+	"we": true,
 }
 const ROUTE_DENSE_LOOP_NAMES := {
 	"dense": true,
@@ -249,6 +261,9 @@ func _configure_route(name: String) -> void:
 		_route_cell_ref_counts[str(DU.world_to_cell(turn))] = _get_cell_ref_count(DU.world_to_cell(turn))
 		_recompute_route_bounds_and_length()
 		return
+	if ROUTE_AXIS_SWEEP_NAMES.has(n):
+		_configure_axis_sweep_route(n == "west-east" or n == "we")
+		return
 	if ROUTE_STRAIGHT_NAMES.has(n):
 		_route_mode = "straight"
 		_direction = _direction_from_name(n)
@@ -296,7 +311,68 @@ func _configure_route(name: String) -> void:
 		_route_points = [DU.cell_to_world_center(_start_cell, _altitude_m)]
 		_route_cells = [_start_cell]
 
+		_recompute_route_bounds_and_length()
+
+
+func _configure_axis_sweep_route(west_first: bool) -> void:
+	_route_mode = "path"
+	_route_points.clear()
+	_route_cells.clear()
+	_route_cell_ref_counts.clear()
+
+	var west_cell := Vector2i(_find_axis_sweep_extent(-1) - AXIS_SWEEP_EDGE_BUFFER_CELLS, _start_cell.y)
+	var east_cell := Vector2i(_find_axis_sweep_extent(1) + AXIS_SWEEP_EDGE_BUFFER_CELLS, _start_cell.y)
+	var data_cells := maxi(0, east_cell.x - west_cell.x + 1 - (AXIS_SWEEP_EDGE_BUFFER_CELLS * 2))
+	if data_cells < AXIS_SWEEP_MIN_DATA_CELLS:
+		_route_setup_failures.append("axis_sweep_insufficient_data_cells:%d" % data_cells)
+		Log.warn("tools", "[STRESS] axis sweep found only %d data cells near row y=%d; falling back to duration-sized sweep" % [
+			data_cells,
+			_start_cell.y,
+		])
+		var center := DU.cell_to_world_center(_start_cell, _altitude_m)
+		var half_leg_m := maxf(DU.CELL_SIZE_METERS * 4.0, _speed_mps * _duration_s * 0.5)
+		var fallback_west := center + Vector3(-half_leg_m, 0.0, 0.0)
+		var fallback_east := center + Vector3(half_leg_m, 0.0, 0.0)
+		_append_axis_sweep_points(fallback_west, fallback_east, west_first)
+		_direction = (_route_points[1] - _route_points[0]).normalized()
+		_populate_route_cells_along_points()
+		_recompute_route_bounds_and_length()
+		return
+
+	var west := DU.cell_to_world_center(west_cell, _altitude_m)
+	var east := DU.cell_to_world_center(east_cell, _altitude_m)
+	_append_axis_sweep_points(west, east, west_first)
+	_direction = (_route_points[1] - _route_points[0]).normalized()
+	_populate_route_cells_along_points()
 	_recompute_route_bounds_and_length()
+
+
+func _append_axis_sweep_points(west: Vector3, east: Vector3, west_first: bool) -> void:
+	if west_first:
+		_route_points.append(west)
+		_route_points.append(east)
+		_route_points.append(west)
+	else:
+		_route_points.append(east)
+		_route_points.append(west)
+		_route_points.append(east)
+
+
+func _find_axis_sweep_extent(direction_x: int) -> int:
+	var step := -1 if direction_x < 0 else 1
+	var last_data_x := _start_cell.x
+	var empty_run := 0
+	for i in range(AXIS_SWEEP_SCAN_CELLS + 1):
+		var x := _start_cell.x + (i * step)
+		var cell := Vector2i(x, _start_cell.y)
+		if _cell_has_world_data(cell):
+			last_data_x = x
+			empty_run = 0
+			continue
+		empty_run += 1
+		if empty_run >= AXIS_SWEEP_EMPTY_RUN_CELLS:
+			break
+	return last_data_x
 
 
 func _configure_landscape_route() -> void:
@@ -332,6 +408,25 @@ func _configure_landscape_route() -> void:
 			_route_cell_ref_counts[str(cell)] = _get_cell_ref_count(cell)
 
 	_recompute_route_bounds_and_length()
+
+
+func _populate_route_cells_along_points() -> void:
+	_route_cells.clear()
+	_route_cell_ref_counts.clear()
+	if _route_points.is_empty():
+		return
+	for i in range(_route_points.size() - 1):
+		var a := _route_points[i]
+		var b := _route_points[i + 1]
+		var distance := a.distance_to(b)
+		var steps := maxi(1, ceili(distance / (DU.CELL_SIZE_METERS * 0.5)))
+		for step in range(steps + 1):
+			var t := float(step) / float(steps)
+			var cell := DU.world_to_cell(a.lerp(b, t))
+			if _route_cells.has(cell):
+				continue
+			_route_cells.append(cell)
+			_route_cell_ref_counts[str(cell)] = _get_cell_ref_count(cell)
 
 
 func _build_spiral_offsets(radius: int) -> Array[Vector2i]:

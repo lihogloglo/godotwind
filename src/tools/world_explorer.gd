@@ -2245,6 +2245,15 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		)
 
 		console.register_command(
+			"static_trace_selected",
+			_cmd_static_trace_selected,
+			"Trace the selected static payload through CellPayload and CellStaticBucket",
+			"debug",
+			PackedStringArray(["sts"]),
+			[CommandRegistry.ParameterInfo.new("action", TYPE_STRING, "''|force_on|force_off", false, "")]
+		)
+
+		console.register_command(
 			"toggle_debug",
 			_cmd_toggle_debug,
 			"Toggle debug logging for streaming system",
@@ -2388,6 +2397,16 @@ func _cmd_debug_streaming(_args: Dictionary) -> String:
 		native_streaming_manager.print_debug_info()
 		return "Debug info printed above"
 	return "Native streaming manager not available"
+
+
+func _cmd_static_trace_selected(args: Dictionary) -> String:
+	if not console:
+		return "Console not initialized"
+	if not native_streaming_manager or not native_streaming_manager.has_method("static_trace_selection"):
+		return "Native streaming manager does not support static tracing"
+	var selection: Variant = console.get_selection()
+	var action := str(args.get("action", ""))
+	return native_streaming_manager.call("static_trace_selection", selection, action)
 
 
 ## Console command: toggle_debug

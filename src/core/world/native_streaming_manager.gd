@@ -2400,6 +2400,159 @@ func get_static_renderer_stats() -> Dictionary:
 	return {}
 
 
+func static_trace_selection(selection: Variant, debug_action: String = "") -> String:
+	if selection == null:
+		return "No selected object. Use the console picker first."
+	if str(selection.get("source_kind")) != "static_payload":
+		return "Selected object is '%s', not static_payload. This trace targets server-direct static visuals." % str(selection.get("source_kind"))
+	if _static_renderer == null:
+		return "Static renderer is not initialized."
+	if _cell_manager == null:
+		return "Cell manager is not initialized."
+
+	var grid: Vector2i = selection.get("cell_grid")
+	var model_path := str(selection.get("model_path"))
+	var ref_num := int(selection.get("instance_id"))
+	var ref_id := str(selection.get("form_id"))
+	var request_id := int(_async_requests.get(grid, -1))
+	var payload: RefCounted = null
+	if request_id >= 0 and _cell_manager.has_method("get_async_payload"):
+		payload = _cell_manager.call("get_async_payload", request_id) as RefCounted
+
+	var payload_key := ""
+	var expected_count := 0
+	var transform_count := 0
+	var selected_index := -1
+	if payload != null:
+		payload_key = _resolve_static_payload_key(payload, model_path, ref_num)
+		if not payload_key.is_empty():
+			expected_count = int(payload.static_expected_counts.get(payload_key, 0))
+			var transforms: Array = payload.static_instance_transforms.get(payload_key, [])
+			transform_count = transforms.size()
+			selected_index = _find_static_ref_index(payload, payload_key, ref_num)
+	if payload_key.is_empty():
+		payload_key = model_path.to_lower().replace("/", "\\")
+
+	var bucket_key := "%d,%d:%s" % [grid.x, grid.y, payload_key]
+	var action := debug_action.to_lower()
+	var force_changed := false
+	var force_enabled := false
+	match action:
+		"force", "force_on", "on", "debug_on":
+			force_changed = true
+			force_enabled = true
+		"force_off", "off", "debug_off":
+			force_changed = true
+			force_enabled = false
+	if force_changed and _static_renderer.has_method("set_cell_bucket_debug_force_visible"):
+		_static_renderer.call("set_cell_bucket_debug_force_visible", bucket_key, force_enabled)
+
+	var bucket_info: Dictionary = {}
+	if _static_renderer.has_method("get_cell_bucket_debug_info"):
+		bucket_info = _static_renderer.call("get_cell_bucket_debug_info", bucket_key)
+
+	var lines: Array[String] = []
+	lines.append("========== STATIC TRACE SELECTED ==========")
+	lines.append("selection: source=%s grid=%s ref=%s#%d model=%s" % [
+		str(selection.get("source_kind")),
+		str(grid),
+		ref_id,
+		ref_num,
+		model_path,
+	])
+	lines.append("payload: request_id=%d exists=%s key=%s expected=%d transforms=%d selected_index=%d" % [
+		request_id,
+		"Y" if payload != null else "N",
+		payload_key,
+		expected_count,
+		transform_count,
+		selected_index,
+	])
+	lines.append("bucket: key=%s exists=%s pending_build=%s pending_cleanup=%s hlod_capped=%s covered=%d target_end=%s" % [
+		bucket_key,
+		"Y" if bool(bucket_info.get("exists", false)) else "N",
+		"Y" if bool(bucket_info.get("build_pending", false)) else "N",
+		"Y" if bool(bucket_info.get("pending_cleanup", false)) else "N",
+		"Y" if bool(bucket_info.get("hlod_capped", false)) else "N",
+		int(bucket_info.get("hlod_covered_count", 0)),
+		str(bucket_info.get("target_visibility_range_end", "?")),
+	])
+	if force_changed:
+		lines.append("debug_force_visible: %s" % ("ON" if force_enabled else "OFF"))
+	var bucket: Dictionary = bucket_info.get("bucket", {})
+	if bucket.is_empty():
+		lines.append("bucket_detail: unavailable")
+	else:
+		lines.append("bucket_detail: visible=%s frozen=%s debug_force=%s instances=%d draw_groups=%d range=%.1f-%.1f handle=%s refs=%d" % [
+			"Y" if bool(bucket.get("visible", false)) else "N",
+			"Y" if bool(bucket.get("frozen", false)) else "N",
+			"Y" if bool(bucket.get("debug_force_visible", false)) else "N",
+			int(bucket.get("instance_count", 0)),
+			int(bucket.get("draw_group_count", 0)),
+			float(bucket.get("visibility_range_begin", 0.0)),
+			float(bucket.get("visibility_range_end", 0.0)),
+			"Y" if bool(bucket.get("resource_handle_pinned", false)) else "N",
+			int(bucket.get("resource_ref_count", 0)),
+		])
+		var groups: Array = bucket.get("draw_groups", [])
+		for group_value: Variant in groups:
+			var group: Dictionary = group_value
+			lines.append("  group[%d]: kind=%s rid=%s mesh_rid=%s mm_rid=%s count=%d mm_count=%d mm_visible=%d fmt=%d layer=%d mat_override=%s surf_mats=%d" % [
+				int(group.get("index", -1)),
+				str(group.get("kind", "")),
+				"Y" if bool(group.get("rid_valid", false)) else "N",
+				"Y" if bool(group.get("mesh_rid_valid", false)) else "N",
+				"Y" if bool(group.get("multimesh_rid_valid", false)) else "N",
+				int(group.get("instance_count", 0)),
+				int(group.get("multimesh_instance_count", 0)),
+				int(group.get("multimesh_visible_instance_count", -1)),
+				int(group.get("multimesh_transform_format", -1)),
+				int(group.get("layer_mask", 0)),
+				"Y" if bool(group.get("has_material_override", false)) else "N",
+				int(group.get("surface_material_count", 0)),
+			])
+			lines.append("    mesh_aabb=%s custom_aabb=%s local_group_aabb=%s range=%.1f-%.1f margin_end=%.1f" % [
+				str(group.get("mesh_aabb", AABB())),
+				str(group.get("custom_aabb", AABB())),
+				str(group.get("local_group_aabb", AABB())),
+				float(group.get("visibility_range_begin", 0.0)),
+				float(group.get("visibility_range_end", 0.0)),
+				float(group.get("visibility_margin_end", 0.0)),
+			])
+	lines.append("===========================================")
+	return "\n".join(lines)
+
+
+func _resolve_static_payload_key(payload: RefCounted, model_path: String, ref_num: int) -> String:
+	if payload == null:
+		return ""
+	var exact_key := model_path.to_lower().replace("/", "\\")
+	var refs_by_model: Dictionary = payload.get("static_refs_by_model")
+	if refs_by_model.has(exact_key):
+		return exact_key
+	var model_keys: Dictionary = payload.get("model_keys")
+	for key_value: Variant in refs_by_model.keys():
+		var key := str(key_value)
+		var info: Dictionary = model_keys.get(key, {})
+		if str(info.get("model_path", "")).to_lower().replace("/", "\\") != exact_key:
+			continue
+		if ref_num < 0 or _find_static_ref_index(payload, key, ref_num) >= 0:
+			return key
+	return ""
+
+
+func _find_static_ref_index(payload: RefCounted, payload_key: String, ref_num: int) -> int:
+	if payload == null or payload_key.is_empty() or ref_num < 0:
+		return -1
+	var refs_by_model: Dictionary = payload.get("static_refs_by_model")
+	var refs: Array = refs_by_model.get(payload_key, [])
+	for i in range(refs.size()):
+		var ref: Variant = refs[i]
+		if ref != null and "ref_num" in ref and int(ref.ref_num) == ref_num:
+			return i
+	return -1
+
+
 ## Print detailed debug information to console (for troubleshooting)
 func print_debug_info() -> void:
 	var lines: Array[String] = []

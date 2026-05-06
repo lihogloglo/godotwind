@@ -1114,20 +1114,21 @@ func create_cell_bucket_budgeted(
 	deadline_usec: int,
 ) -> Dictionary:
 	if payload_key.is_empty():
-		return {"status": "failed", "bucket": null}
+		return {"status": "failed", "bucket": null, "reason": "empty_payload_key", "retryable": false}
 	var bucket_key := _make_cell_bucket_key(cell_grid, payload_key)
 	if _cell_bucket_key_index.has(bucket_key):
-		return {"status": "ready", "bucket": _cell_bucket_key_index[bucket_key]}
+		return {"status": "ready", "bucket": _cell_bucket_key_index[bucket_key], "reason": "existing_bucket", "retryable": false}
 	if bool(_cell_bucket_pending_cleanup.get(bucket_key, false)):
-		return {"status": "failed", "bucket": null}
+		return {"status": "failed", "bucket": null, "reason": "pending_cleanup", "retryable": true}
 	if type_name not in _mesh_types:
-		return {"status": "failed", "bucket": null}
+		return {"status": "failed", "bucket": null, "reason": "type_not_registered", "retryable": true}
 	if transforms.is_empty() or not _scenario.is_valid():
-		return {"status": "failed", "bucket": null}
+		var reason := "empty_transforms" if transforms.is_empty() else "invalid_scenario"
+		return {"status": "failed", "bucket": null, "reason": reason, "retryable": not transforms.is_empty()}
 
 	var mesh_type: MeshType = _mesh_types[type_name]
 	if mesh_type.sub_meshes.is_empty():
-		return {"status": "failed", "bucket": null}
+		return {"status": "failed", "bucket": null, "reason": "type_has_no_submeshes", "retryable": false}
 
 	var bucket: RefCounted = _cell_bucket_build_tasks.get(bucket_key) as RefCounted
 	if bucket == null:
@@ -1148,21 +1149,21 @@ func create_cell_bucket_budgeted(
 		if not started:
 			if bucket.has_method("cleanup"):
 				bucket.call("cleanup")
-			return {"status": "failed", "bucket": null}
+			return {"status": "failed", "bucket": null, "reason": "begin_configure_failed", "retryable": false}
 		_cell_bucket_build_tasks[bucket_key] = bucket
 
 	var status := str(bucket.call("configure_step", deadline_usec))
 	if status == "pending":
-		return {"status": "pending", "bucket": bucket}
+		return {"status": "pending", "bucket": bucket, "reason": "budget_exhausted", "retryable": true}
 
 	_cell_bucket_build_tasks.erase(bucket_key)
 	if status != "ready":
 		if bucket.has_method("cleanup"):
 			bucket.call("cleanup")
-		return {"status": "failed", "bucket": null}
+		return {"status": "failed", "bucket": null, "reason": "configure_%s" % status, "retryable": false}
 
 	_finalize_cell_bucket(bucket, type_name, payload_key, cell_grid)
-	return {"status": "ready", "bucket": bucket}
+	return {"status": "ready", "bucket": bucket, "reason": "created", "retryable": false}
 
 
 func _finalize_cell_bucket(bucket: RefCounted, type_name: String, _payload_key: String, cell_grid: Vector2i) -> void:
@@ -1271,6 +1272,37 @@ func _get_bucket_visibility_range_end(bucket_key: String, bucket_count: int) -> 
 
 func _make_cell_bucket_key(cell_grid: Vector2i, payload_key: String) -> String:
 	return "%d,%d:%s" % [cell_grid.x, cell_grid.y, payload_key]
+
+
+func get_cell_bucket_debug_info(bucket_key: String) -> Dictionary:
+	var result: Dictionary = {
+		"bucket_key": bucket_key,
+		"exists": false,
+		"pending_cleanup": bool(_cell_bucket_pending_cleanup.get(bucket_key, false)),
+		"build_pending": _cell_bucket_build_tasks.has(bucket_key),
+		"hlod_covered_count": int(_hlod_covered_bucket_counts.get(bucket_key, 0)),
+		"hlod_capped": false,
+		"hlod_bucket_visibility_end": _hlod_bucket_visibility_end,
+	}
+	var bucket: RefCounted = _cell_bucket_key_index.get(bucket_key) as RefCounted
+	if bucket == null:
+		return result
+	result["exists"] = true
+	var bucket_count := int(bucket.get("instance_count"))
+	var covered_count := int(_hlod_covered_bucket_counts.get(bucket_key, 0))
+	result["hlod_capped"] = bucket_count > 0 and covered_count >= bucket_count
+	result["target_visibility_range_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count)
+	if bucket.has_method("get_debug_info"):
+		result["bucket"] = bucket.call("get_debug_info")
+	return result
+
+
+func set_cell_bucket_debug_force_visible(bucket_key: String, enabled: bool) -> bool:
+	var bucket: RefCounted = _cell_bucket_key_index.get(bucket_key) as RefCounted
+	if bucket == null or not bucket.has_method("set_debug_force_visible"):
+		return false
+	bucket.call("set_debug_force_visible", enabled)
+	return true
 
 
 # PHASE_E:MAIN_ONLY

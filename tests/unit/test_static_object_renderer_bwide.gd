@@ -375,6 +375,110 @@ func test_cell_bucket_uses_local_multimesh_for_close_repeated_group() -> void:
 	assert_int(int(group.instance_count)).is_equal(2)
 
 
+func test_cell_bucket_multimesh_pack_buffer_matches_godot_transform3d_stride() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_pack_stride", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_pack_stride",
+		"meshes\\pack_stride.nif",
+		[
+			Transform3D(Basis.IDENTITY, Vector3(10, 0, 20)),
+			Transform3D(Basis.IDENTITY, Vector3(13, 0, 20)),
+		],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+
+	var packed: Dictionary = bucket.call(
+		"_pack_multimesh_transforms",
+		[
+			Transform3D(Basis.IDENTITY, Vector3(10, 0, 20)),
+			Transform3D(Basis.IDENTITY, Vector3(13, 0, 20)),
+		],
+		Transform3D(Basis.IDENTITY, Vector3(1, 0, 0)),
+		mesh.get_aabb(),
+		Vector3(5, 0, 10)
+	)
+	var buffer: PackedFloat32Array = packed["buffer"]
+	assert_int(buffer.size()).is_equal(24)
+	assert_float(buffer[0]).is_equal(1.0)
+	assert_float(buffer[5]).is_equal(1.0)
+	assert_float(buffer[10]).is_equal(1.0)
+	assert_float(buffer[3]).is_equal(6.0)
+	assert_float(buffer[7]).is_equal(0.0)
+	assert_float(buffer[11]).is_equal(10.0)
+	assert_float(buffer[15]).is_equal(9.0)
+	assert_float(buffer[19]).is_equal(0.0)
+	assert_float(buffer[23]).is_equal(10.0)
+
+	var custom_aabb: AABB = packed["custom_aabb"]
+	assert_float(custom_aabb.position.x).is_equal(6.0)
+	assert_float(custom_aabb.position.z).is_equal(10.0)
+	assert_float(custom_aabb.end.x).is_equal(10.0)
+	assert_float(custom_aabb.end.z).is_equal(11.0)
+
+
+func test_existing_cell_bucket_budgeted_lookup_returns_ready_without_duplication() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_budgeted_existing", proto)
+	var transforms := [Transform3D.IDENTITY, Transform3D(Basis.IDENTITY, Vector3(2, 0, 0))]
+	var first := renderer.create_cell_bucket_budgeted(
+		"test_budgeted_existing",
+		"meshes\\budgeted_existing.nif",
+		transforms,
+		Vector2i(0, 0),
+		null,
+		9_223_372_036_854_775_000
+	)
+	assert_str(str(first.get("status", ""))).is_equal("ready")
+	var stats_before := renderer.get_stats()
+
+	var second := renderer.create_cell_bucket_budgeted(
+		"test_budgeted_existing",
+		"meshes\\budgeted_existing.nif",
+		transforms,
+		Vector2i(0, 0),
+		null,
+		9_223_372_036_854_775_000
+	)
+	assert_str(str(second.get("status", ""))).is_equal("ready")
+	assert_str(str(second.get("reason", ""))).is_equal("existing_bucket")
+	assert_int(int(renderer.get_stats()["bucket_instances"])).is_equal(int(stats_before["bucket_instances"]))
+	assert_int(int(renderer.get_stats()["cell_buckets"])).is_equal(int(stats_before["cell_buckets"]))
+
+
+func test_budgeted_bucket_failure_reports_retryable_transient_reason() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var result := renderer.create_cell_bucket_budgeted(
+		"missing_type",
+		"meshes\\missing_type.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0),
+		null,
+		9_223_372_036_854_775_000
+	)
+	assert_str(str(result.get("status", ""))).is_equal("failed")
+	assert_str(str(result.get("reason", ""))).is_equal("type_not_registered")
+	assert_bool(bool(result.get("retryable", false))).is_true()
+
+
 func test_cell_bucket_splits_repeated_groups_into_spatial_clusters() -> void:
 	var renderer := SOR.new()
 	auto_free(renderer)

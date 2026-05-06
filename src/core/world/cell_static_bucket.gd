@@ -25,6 +25,8 @@ var visibility_range_end: float = DU.MID_END
 var resource_handle: RefCounted = null
 var _bucket_owner_key: String = ""
 var _resource_refs: Array[Resource] = []
+var _debug_force_visible: bool = false
+var _debug_material: StandardMaterial3D = null
 var _configure_active: bool = false
 var _pending_sub_meshes: Array = []
 var _pending_transforms: Array = []
@@ -213,7 +215,41 @@ func set_visible(p_visible: bool) -> void:
 	visible = p_visible
 	for group: DrawGroup in draw_groups:
 		if group.instance_rid.is_valid():
-			RenderingServer.instance_set_visible(group.instance_rid, visible)
+			RenderingServer.instance_set_visible(group.instance_rid, true if _debug_force_visible else visible)
+
+
+func set_debug_force_visible(enabled: bool) -> void:
+	if frozen:
+		return
+	if _debug_force_visible == enabled:
+		return
+	_debug_force_visible = enabled
+	for group: DrawGroup in draw_groups:
+		_apply_debug_force_visible(group, enabled)
+
+
+func get_debug_info() -> Dictionary:
+	var groups: Array[Dictionary] = []
+	for i in range(draw_groups.size()):
+		var group: DrawGroup = draw_groups[i]
+		groups.append(_get_draw_group_debug_info(group, i))
+	return {
+		"type_name": type_name,
+		"payload_key": payload_key,
+		"bucket_key": bucket_key,
+		"cell_grid": cell_grid,
+		"visible": visible,
+		"frozen": frozen,
+		"debug_force_visible": _debug_force_visible,
+		"instance_count": instance_count,
+		"draw_group_count": draw_groups.size(),
+		"visibility_range_begin": visibility_range_begin,
+		"visibility_range_end": visibility_range_end,
+		"resource_handle_pinned": resource_handle != null,
+		"resource_ref_count": _resource_refs.size(),
+		"configure_active": _configure_active,
+		"draw_groups": groups,
+	}
 
 
 func freeze() -> void:
@@ -238,6 +274,83 @@ func cleanup() -> int:
 	_release_resource_owner()
 	_resource_refs.clear()
 	return released
+
+
+func _apply_debug_force_visible(group: DrawGroup, enabled: bool) -> void:
+	if not group.instance_rid.is_valid():
+		return
+	RenderingServer.instance_set_ignore_culling(group.instance_rid, enabled)
+	RenderingServer.instance_set_visible(group.instance_rid, true if enabled else visible)
+	if enabled:
+		RenderingServer.instance_geometry_set_material_override(group.instance_rid, _get_debug_material().get_rid())
+		return
+	_restore_group_materials(group)
+
+
+func _get_debug_material() -> StandardMaterial3D:
+	if _debug_material == null:
+		_debug_material = StandardMaterial3D.new()
+		_debug_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_debug_material.albedo_color = Color(1.0, 0.1, 0.85, 1.0)
+		_debug_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _debug_material
+
+
+func _restore_group_materials(group: DrawGroup) -> void:
+	if not group.instance_rid.is_valid():
+		return
+	var material_rid := _get_valid_material_rid(group.material_resource)
+	RenderingServer.instance_geometry_set_material_override(group.instance_rid, material_rid)
+	if material_rid.is_valid() or group.multimesh != null:
+		return
+	for surface_index in range(group.surface_materials.size()):
+		var surface_material_rid := _get_valid_material_rid(group.surface_materials[surface_index])
+		if surface_material_rid.is_valid():
+			RenderingServer.instance_set_surface_override_material(group.instance_rid, surface_index, surface_material_rid)
+
+
+func _get_draw_group_debug_info(group: DrawGroup, index: int) -> Dictionary:
+	var mesh_aabb := AABB()
+	var mesh_rid_valid := false
+	var surface_count := 0
+	if group.mesh_resource != null and is_instance_valid(group.mesh_resource):
+		mesh_aabb = group.mesh_resource.get_aabb()
+		mesh_rid_valid = group.mesh_resource.get_rid().is_valid()
+		surface_count = group.mesh_resource.get_surface_count()
+	var custom_aabb := group.local_aabb
+	var multimesh_rid_valid := false
+	var multimesh_instance_count := 0
+	var multimesh_visible_count := -1
+	var multimesh_transform_format := -1
+	if group.multimesh != null and is_instance_valid(group.multimesh):
+		custom_aabb = group.multimesh.custom_aabb
+		multimesh_rid_valid = group.multimesh.get_rid().is_valid()
+		multimesh_instance_count = group.multimesh.instance_count
+		multimesh_visible_count = group.multimesh.visible_instance_count
+		multimesh_transform_format = group.multimesh.transform_format
+	return {
+		"index": index,
+		"kind": "multimesh" if group.multimesh != null else "single_rs",
+		"rid_valid": group.instance_rid.is_valid(),
+		"mesh_rid_valid": mesh_rid_valid,
+		"multimesh_rid_valid": multimesh_rid_valid,
+		"instance_count": group.instance_count,
+		"multimesh_instance_count": multimesh_instance_count,
+		"multimesh_visible_instance_count": multimesh_visible_count,
+		"multimesh_transform_format": multimesh_transform_format,
+		"layer_mask": EXTERIOR_RENDER_LAYER_MASK,
+		"visibility_range_begin": visibility_range_begin,
+		"visibility_range_end": visibility_range_end,
+		"visibility_margin_end": DU.FADE_MARGIN_LOD3_FAR + _aabb_horizontal_radius(group.local_aabb),
+		"mesh_aabb": mesh_aabb,
+		"custom_aabb": custom_aabb,
+		"local_group_aabb": group.local_aabb,
+		"local_transform": group.local_transform,
+		"has_material_override": group.material_resource != null and is_instance_valid(group.material_resource),
+		"surface_material_count": group.surface_materials.size(),
+		"mesh_surface_count": surface_count,
+		"debug_force_visible": _debug_force_visible,
+	}
 
 
 func _pin_sub_mesh_resources(sub_meshes: Array) -> void:

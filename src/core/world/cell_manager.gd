@@ -1541,6 +1541,15 @@ func _process_static_prepare_entry(entry: Dictionary, deadline_usec: int = 0) ->
 
 	var has_registered_type := bool(_static_renderer.call("has_type", type_name))
 	var payload_key := CellPayloadScript.make_model_key(model_path, item_id)
+	var expected_count := int(request.payload.static_expected_counts.get(payload_key, 0))
+	var transforms: Array = request.payload.static_instance_transforms.get(payload_key, [])
+
+	# Static refs are discovered incrementally during classification. Publishing
+	# a bucket before that pass completes can freeze a partial transform list,
+	# leaving a pickable payload AABB with no matching visual slot for refs
+	# discovered later in the same cell.
+	if not request.classification_complete:
+		return STATIC_PREPARE_ENTRY_RETRY
 
 	# Never sync-load in the prepare lane. Wait until the async disk path has
 	# promoted the PackedScene into memory, then instantiate/register.
@@ -1584,10 +1593,20 @@ func _process_static_prepare_entry(entry: Dictionary, deadline_usec: int = 0) ->
 
 	var batch_us := 0
 	var batch_count := 0
-	if not request.payload.has_static_bucket(payload_key):
+	if request.payload.has_static_bucket(payload_key):
+		var existing_bucket: RefCounted = request.payload.static_buckets_by_key.get(payload_key) as RefCounted
+		var existing_count := int(existing_bucket.get("instance_count")) if existing_bucket != null else 0
+		if expected_count > 0 and existing_count != expected_count:
+			Log.error("streaming", "[static-prepare-invariant] existing bucket count mismatch after classification grid=%s key=%s expected=%d bucket=%d" % [
+				str(request.grid),
+				payload_key,
+				expected_count,
+				existing_count,
+			])
+			return STATIC_PREPARE_ENTRY_SKIPPED
+	else:
 		_pin_payload_cached_scene(request, model_path, item_id)
 		var resource_handle: RefCounted = request.payload.get_model_handle(model_path, item_id) if request.payload.has_method("get_model_handle") else null
-		var transforms: Array = request.payload.static_instance_transforms.get(payload_key, [])
 		if not transforms.is_empty() and _static_renderer.has_method("create_cell_bucket_budgeted"):
 			var batch_start := Time.get_ticks_usec()
 			var build_result: Dictionary = _static_renderer.call(
@@ -1605,15 +1624,71 @@ func _process_static_prepare_entry(entry: Dictionary, deadline_usec: int = 0) ->
 				return STATIC_PREPARE_ENTRY_RETRY
 			var bucket: RefCounted = build_result.get("bucket", null) as RefCounted
 			if build_status == "ready" and bucket != null:
+				var bucket_instances := int(bucket.get("instance_count"))
+				if expected_count > 0 and bucket_instances != expected_count:
+					Log.warn("streaming", "[static-prepare-invariant] new bucket count mismatch grid=%s key=%s expected=%d bucket=%d reason=%s" % [
+						str(request.grid),
+						payload_key,
+						expected_count,
+						bucket_instances,
+						str(build_result.get("reason", "")),
+					])
+					return STATIC_PREPARE_ENTRY_RETRY
 				request.payload.add_static_bucket(payload_key, bucket)
 				batch_count = transforms.size()
+			elif not transforms.is_empty():
+				var reason := str(build_result.get("reason", "unknown"))
+				var retryable := bool(build_result.get("retryable", false))
+				var msg := "[static-prepare-failed] grid=%s key=%s type=%s transforms=%d expected=%d status=%s reason=%s retryable=%s" % [
+					str(request.grid),
+					payload_key,
+					type_name.get_file(),
+					transforms.size(),
+					expected_count,
+					build_status,
+					reason,
+					"Y" if retryable else "N",
+				]
+				if retryable:
+					Log.warn("streaming", msg)
+					return STATIC_PREPARE_ENTRY_RETRY
+				Log.error("streaming", msg)
+				_static_prepare_failed[type_name] = true
+				return STATIC_PREPARE_ENTRY_SKIPPED
 		elif not transforms.is_empty() and _static_renderer.has_method("create_cell_bucket"):
 			var batch_start := Time.get_ticks_usec()
 			var bucket: RefCounted = _static_renderer.call("create_cell_bucket", type_name, payload_key, transforms, request.grid, resource_handle) as RefCounted
 			batch_us = Time.get_ticks_usec() - batch_start
 			if bucket != null:
+				var bucket_instances := int(bucket.get("instance_count"))
+				if expected_count > 0 and bucket_instances != expected_count:
+					Log.warn("streaming", "[static-prepare-invariant] sync bucket count mismatch grid=%s key=%s expected=%d bucket=%d" % [
+						str(request.grid),
+						payload_key,
+						expected_count,
+						bucket_instances,
+					])
+					if bucket.has_method("cleanup"):
+						bucket.call("cleanup")
+					return STATIC_PREPARE_ENTRY_RETRY
 				request.payload.add_static_bucket(payload_key, bucket)
 				batch_count = transforms.size()
+			else:
+				Log.warn("streaming", "[static-prepare-failed] grid=%s key=%s type=%s transforms=%d expected=%d status=sync_failed retryable=Y" % [
+					str(request.grid),
+					payload_key,
+					type_name.get_file(),
+					transforms.size(),
+					expected_count,
+				])
+				return STATIC_PREPARE_ENTRY_RETRY
+		elif expected_count > 0:
+			Log.warn("streaming", "[static-prepare-invariant] expected static refs but no transforms grid=%s key=%s expected=%d" % [
+				str(request.grid),
+				payload_key,
+				expected_count,
+			])
+			return STATIC_PREPARE_ENTRY_RETRY
 
 	var total_us := Time.get_ticks_usec() - prep_start
 	if total_us > 16_000:
