@@ -18,6 +18,7 @@ extends GdUnitTestSuite
 const Kernel := preload("res://src/core/world/object_paging_kernel.gd")
 const Merger := preload("res://src/core/world/object_paging.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+const MorrowindWorldObjectSource := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
 
 
 #region Fixtures
@@ -118,6 +119,7 @@ func test_object_paging_stats_include_observability_counters() -> void:
 	assert_bool(stats.has("refs_partial_bucket_rejected")).is_true()
 	assert_bool(stats.has("surface_cap_rejections")).is_true()
 	assert_bool(stats.has("surface_cap_over_budget_published")).is_true()
+	assert_bool(stats.has("cached_publish_queue_size")).is_true()
 	assert_bool(stats.has("visible_hlod_draw_calls")).is_true()
 	assert_bool(stats.has("null_material_surface_count")).is_true()
 	assert_bool(stats.has("default_proxy_surface_count")).is_true()
@@ -269,7 +271,7 @@ func test_surface_overflow_uses_proxy_material_not_null_material() -> void:
 
 	var merged: ArrayMesh = Kernel.merge_refs(refs, Vector3.ZERO, 0, true)
 	assert_that(merged).is_not_null()
-	assert_that(merged.get_surface_count()).is_equal(250)
+	assert_that(merged.get_surface_count()).is_equal(Merger.MAX_RUNTIME_CHUNK_SURFACES)
 
 	for si in range(merged.get_surface_count()):
 		assert_that(merged.surface_get_material(si)).is_not_null()
@@ -278,6 +280,21 @@ func test_surface_overflow_uses_proxy_material_not_null_material() -> void:
 	assert_int(int(stats.get("null_material_surface_count", -1))).is_equal(0)
 	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(1)
 	assert_int(int(stats.get("overflow_proxy_surfaces", 0))).is_greater(0)
+
+
+func test_surface_overflow_folds_one_over_runtime_cap() -> void:
+	var refs: Array = []
+	for i in range(Merger.MAX_RUNTIME_CHUNK_SURFACES + 1):
+		refs.append(_make_ref(_make_triangle_mesh(), StandardMaterial3D.new(), Vector3(float(i), 0.0, 0.0)))
+
+	var merged: ArrayMesh = Kernel.merge_refs(refs, Vector3.ZERO, 0, true)
+	assert_that(merged).is_not_null()
+	assert_that(merged.get_surface_count()).is_equal(Merger.MAX_RUNTIME_CHUNK_SURFACES)
+
+	var stats := Kernel.collect_mesh_stats(merged)
+	assert_int(int(stats.get("null_material_surface_count", -1))).is_equal(0)
+	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(1)
+	assert_int(int(stats.get("overflow_proxy_surfaces", 0))).is_equal(2)
 
 
 func test_estimate_mesh_bytes_scales_with_vertex_count() -> void:
@@ -562,6 +579,17 @@ func test_type_eligible_unknown_defaults_to_reject() -> void:
 	assert_bool(Merger._type_eligible("", 0)).is_false()
 	assert_bool(Merger._type_eligible("spell", 0)).is_false()
 	assert_bool(Merger._type_eligible("dialogue_info", 0)).is_false()
+
+
+func test_morrowind_hlod_filter_keeps_large_architecture() -> void:
+	assert_bool(MorrowindWorldObjectSource._is_hlod_geometry_candidate("static", null, "x\\ex_hlaalu_b_01.nif")).is_true()
+	assert_bool(MorrowindWorldObjectSource._is_hlod_geometry_candidate("static", null, "x\\terrain_rock_big_01.nif")).is_true()
+
+
+func test_morrowind_hlod_filter_routes_specialized_clutter_out() -> void:
+	assert_bool(MorrowindWorldObjectSource._is_hlod_geometry_candidate("static", null, "f\\flora_tree_bc_01.nif")).is_false()
+	assert_bool(MorrowindWorldObjectSource._is_hlod_geometry_candidate("static", null, "f\\furn_de_barrel_01.nif")).is_false()
+	assert_bool(MorrowindWorldObjectSource._is_hlod_geometry_candidate("static", null, "x\\terrain_rock_sm_01.nif")).is_false()
 
 #endregion
 

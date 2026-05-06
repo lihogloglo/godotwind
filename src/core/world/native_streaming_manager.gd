@@ -703,7 +703,7 @@ func _reconcile_distant_tier_loading() -> void:
 	_camera_position = _camera.global_position
 	_camera_cell = DU.world_to_cell(_camera_position)
 	if _hlod_requested_visible and _hlod_merger:
-		_hlod_merger.call("update_for_camera", _camera_cell, _camera_position)
+		_hlod_merger.call("update_for_camera", _camera_cell, _camera_position, _camera_velocity_xz)
 		_hlod_needs_initial_update = false
 		_hlod_last_update_position = _camera_position
 		_sync_hlod_far_coverage(true)
@@ -1046,14 +1046,14 @@ func _process(delta: float) -> void:
 			var hlod_deadline := int(hlod_slice.get("deadline_usec", 0))
 			if _cell_manager and _cell_manager.has_method("process_async_disk_loads"):
 				_cell_manager.call("process_async_disk_loads", mini(HLOD_MODEL_WARMUP_BUDGET_USEC, maxi(0, hlod_deadline - Time.get_ticks_usec())))
+			if Time.get_ticks_usec() < hlod_deadline and _should_update_hlod():
+				_hlod_merger.call("update_for_camera", _camera_cell, _camera_position, _camera_velocity_xz)
+				_hlod_needs_initial_update = false
+				_hlod_last_update_position = _camera_position
 			if Time.get_ticks_usec() < hlod_deadline:
 				_hlod_merger.call("process_merge_queue", hlod_deadline)  # Staggered: max 2 cells/frame
 			if Time.get_ticks_usec() < hlod_deadline:
 				_hlod_merger.call("process_completions", hlod_deadline)
-			if Time.get_ticks_usec() < hlod_deadline and _should_update_hlod():
-				_hlod_merger.call("update_for_camera", _camera_cell, _camera_position)
-				_hlod_needs_initial_update = false
-				_hlod_last_update_position = _camera_position
 			_sync_hlod_far_coverage(false)
 		hlod_merger_usec = float(Time.get_ticks_usec() - hlod_start)
 		_finish_publication_slice(PUBLICATION_LANE_HLOD, hlod_slice, int(hlod_merger_usec))
@@ -2286,6 +2286,7 @@ func get_stats() -> Dictionary:
 	s["hlod_initialized"] = _hlod_merger != null
 	s["hlod_cells"] = hlod_stats.get("active_cells", 0)
 	s["hlod_pending"] = hlod_stats.get("pending_merges", 0)
+	s["hlod_cached_publish_queue"] = hlod_stats.get("cached_publish_queue_size", 0)
 	s["hlod_cache_mb"] = hlod_stats.get("cache_bytes", 0) / (1024.0 * 1024.0)
 	s["hlod_chunk_surfaces"] = hlod_stats.get("total_chunk_surfaces", 0)
 	s["hlod_chunk_materials"] = hlod_stats.get("total_chunk_materials", 0)
@@ -2738,6 +2739,7 @@ func get_hlod_stats() -> Dictionary:
 			"enabled": false,
 			"active_cells": 0,
 			"pending_merges": 0,
+			"cached_publish_queue_size": 0,
 			"cache_entries": 0,
 			"cache_bytes": 0,
 			"total_merges_completed": 0,
@@ -2769,6 +2771,7 @@ func get_hlod_stats() -> Dictionary:
 			"stale_completions_discarded": 0,
 			"surface_cap_rejections": 0,
 			"surface_cap_over_budget_published": 0,
+			"runtime_surface_budget_proxy_chunks": 0,
 			"merge_queue_last_usec": 0,
 			"completion_last_usec": 0,
 			"preparing_chunks": 0,
@@ -2811,6 +2814,7 @@ func get_hlod_stats() -> Dictionary:
 	stats["handoff_far_hlod_overlap_chunks"] = int(stats.get("active_visual_chunks", 0)) if far_enabled and far_begin < DU.HLOD_END else 0
 	stats["handoff_hole_risk_chunks"] = (
 		int(stats.get("pending_merges", 0))
+		+ int(stats.get("cached_publish_queue_size", 0))
 		+ int(stats.get("merge_queue_size", 0))
 		+ int(stats.get("preparing_chunks", 0))
 		+ int(stats.get("negative_chunks", 0))
@@ -2831,12 +2835,13 @@ func get_hlod_chunk_debug_data() -> Array[Dictionary]:
 
 
 func _sync_hlod_far_coverage(force: bool = false) -> void:
-	var can_sync_far := _impostor_renderer != null and (
+	var can_sync_far := _impostors_requested_visible and _impostor_renderer != null and (
 		_impostor_renderer.has_method("set_hlod_covered_object_ids")
 		or _impostor_renderer.has_method("set_hlod_covered_ref_nums")
 	)
-	var can_sync_mid := _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
+	var can_sync_mid := _mid_tier_visible and _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
 	if not can_sync_far and not can_sync_mid:
+		_hlod_far_coverage_revision = -1
 		return
 	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
 		if force or _hlod_far_coverage_revision != -1:
@@ -2849,6 +2854,12 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
 			_hlod_far_coverage_revision = -1
 		return
+
+	if not force and _hlod_merger.has_method("get_coverage_revision"):
+		var current_revision := int(_hlod_merger.call("get_coverage_revision"))
+		if current_revision == _hlod_far_coverage_revision:
+			return
+
 	var manifest: Dictionary = _hlod_merger.call("get_active_coverage_manifest")
 	var revision := int(manifest.get("coverage_revision", 0))
 	if not force and revision == _hlod_far_coverage_revision:

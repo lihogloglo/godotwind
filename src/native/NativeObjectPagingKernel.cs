@@ -31,7 +31,8 @@ namespace Godotwind.Native;
 [GlobalClass]
 public partial class NativeObjectPagingKernel : RefCounted
 {
-    private const int MaxSurfaces = 250;
+    private const int RuntimeMaxSurfaces = 128;
+    private const int MaxOverflowMaterialBuckets = 8;
     private const string DefaultProxyMaterialName = "GodotwindHLODDefaultProxy";
 
     // Cached ARRAY_* indices to avoid repeated enum->int casts.
@@ -95,11 +96,16 @@ public partial class NativeObjectPagingKernel : RefCounted
 
             var srcArrays = trip[0].AsGodotArray();
             var fullXform = trip[1].AsTransform3D();
-            var material = trip[2].As<Material>();
-            if (material == null)
+            Material material;
+            var sourceMaterial = trip[2].As<Material>();
+            if (sourceMaterial == null)
             {
                 sourceNullMaterialSurfaces++;
                 material = GetDefaultProxyMaterial(ref defaultProxyMaterial);
+            }
+            else
+            {
+                material = sourceMaterial;
             }
 
             if (srcArrays.Count <= ArrayVertex) continue;
@@ -174,7 +180,7 @@ public partial class NativeObjectPagingKernel : RefCounted
             }
             workArrays[ArrayIndex] = indices;
 
-            ulong matId = material != null ? (ulong)material.GetInstanceId() : 0UL;
+            ulong matId = (ulong)material.GetInstanceId();
             if (!matGroups.TryGetValue(matId, out var group))
             {
                 group = new MatGroup { Material = material, ArraysList = new Godot.Collections.Array() };
@@ -211,18 +217,17 @@ public partial class NativeObjectPagingKernel : RefCounted
         if (flatSurfaces.Count == 0)
             return null;
 
-        // Handle surface-count overflow (Godot hard cap 256, leave headroom).
-        // Overflow is assigned a valid simplified proxy material. A null
-        // material renders as Godot's default white material, which makes HLOD
-        // failures visible as broken output instead of graceful degradation.
-        if (flatSurfaces.Count > MaxSurfaces)
+        // Fold runtime overflow before publication. Godot's engine cap is
+        // higher, but runtime HLOD's budget is draw calls, not just validity.
+        if (flatSurfaces.Count > RuntimeMaxSurfaces)
         {
             flatSurfaces.Sort((a, b) => b.VertCount.CompareTo(a.VertCount));
             var overflow = new Godot.Collections.Array();
-            for (int i = MaxSurfaces - 1; i < flatSurfaces.Count; i++)
+            int keptSurfaceCount = RuntimeMaxSurfaces - 1;
+            for (int i = keptSurfaceCount; i < flatSurfaces.Count; i++)
                 overflow.Add(flatSurfaces[i].Arrays);
-            overflowProxySurfaces = flatSurfaces.Count - (MaxSurfaces - 1);
-            flatSurfaces.RemoveRange(MaxSurfaces - 1, flatSurfaces.Count - (MaxSurfaces - 1));
+            overflowProxySurfaces = flatSurfaces.Count - keptSurfaceCount;
+            flatSurfaces.RemoveRange(keptSurfaceCount, flatSurfaces.Count - keptSurfaceCount);
             var combined = ConcatenateSurfaceArrays(overflow);
             if (combined.Count > 0)
                 flatSurfaces.Add(new FlatSurface

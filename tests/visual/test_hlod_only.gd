@@ -22,6 +22,7 @@ const START_CELL := Vector2i(-2, -9)
 const START_POS := Vector3(-2.0 * 117.0 + 58.5, 52.0, 9.0 * 117.0 + 58.5)
 const HLOD_UPDATE_DISTANCE := 25.0
 const MODEL_LOADER_BUDGET_USEC := 2000
+const HLOD_PUBLICATION_BUDGET_USEC := 2500
 const STATS_INTERVAL := 0.25
 const CSV_DIR := "user://benchmark_results"
 
@@ -44,6 +45,7 @@ var _chunk_debug_material: StandardMaterial3D
 var _mouse_captured := true
 var _mouse_sensitivity := 0.002
 var _cam_speed := 90.0
+var _camera_velocity_xz := Vector2.ZERO
 var _chunk_debug_visible := false
 var _fade_enabled := false
 
@@ -243,12 +245,15 @@ func _process(delta: float) -> void:
 		_model_loader.process_async_loads(MODEL_LOADER_BUDGET_USEC)
 
 	if _startup_done and _hlod_merger:
-		_hlod_merger.process_merge_queue()
-		_hlod_merger.process_completions()
+		var hlod_deadline := Time.get_ticks_usec() + HLOD_PUBLICATION_BUDGET_USEC
 		if _hlod_needs_update():
 			var camera_cell := DU.world_to_cell(_camera.global_position)
-			_hlod_merger.update_for_camera(camera_cell, _camera.global_position)
+			_hlod_merger.update_for_camera(camera_cell, _camera.global_position, _camera_velocity_xz)
 			_last_hlod_update_position = _camera.global_position
+		if Time.get_ticks_usec() < hlod_deadline:
+			_hlod_merger.process_merge_queue(hlod_deadline)
+		if Time.get_ticks_usec() < hlod_deadline:
+			_hlod_merger.process_completions(hlod_deadline)
 
 	_stats_timer += delta
 	if _stats_timer >= STATS_INTERVAL:
@@ -272,7 +277,11 @@ func _process_camera_movement(delta: float) -> void:
 	if Input.is_action_pressed("crouch"):
 		velocity.y -= 1.0
 	if velocity.length() > 0.0:
-		_camera.position += velocity.normalized() * _cam_speed * delta
+		var movement := velocity.normalized() * _cam_speed
+		_camera_velocity_xz = Vector2(movement.x, movement.z)
+		_camera.position += movement * delta
+	else:
+		_camera_velocity_xz = Vector2.ZERO
 
 
 func _hlod_needs_update() -> bool:
@@ -332,6 +341,7 @@ func _update_hud() -> void:
 	var desired := int(stats.get("desired_chunks", 0))
 	var predictive := int(stats.get("predictive_desired_chunks", 0))
 	var pending := int(stats.get("pending_merges", 0))
+	var cached_publish := int(stats.get("cached_publish_queue_size", 0))
 	var queued := int(stats.get("merge_queue_size", 0))
 	var preparing := int(stats.get("preparing_chunks", 0))
 	var negative := int(stats.get("negative_chunks", 0))
@@ -347,6 +357,7 @@ func _update_hud() -> void:
 	var null_material_surfaces := int(stats.get("null_material_surface_count", 0))
 	var default_proxy_surfaces := int(stats.get("default_proxy_surface_count", 0))
 	var overflow_proxy_surfaces := int(stats.get("overflow_proxy_surfaces", 0))
+	var runtime_proxy_chunks := int(stats.get("runtime_surface_budget_proxy_chunks", 0))
 	var vertices := int(stats.get("total_chunk_vertices", 0))
 	var max_surfaces := int(stats.get("max_chunk_surfaces", 0))
 	var stale := int(stats.get("stale_completions_discarded", 0))
@@ -368,13 +379,13 @@ func _update_hud() -> void:
   FPS %.0f  |  Frame %.1fms  |  Draws %d  |  Objects %d  |  Prims %dk  |  VRAM %.0f MB
 
 [b]Chunks[/b]
-  Desired %d  |  Prefetch %d  |  Visual %d  |  Pending %d  |  Queue %d  |  Preparing %d  |  Negative %d
+  Desired %d  |  Prefetch %d  |  Visual %d  |  Pending %d  |  Cached publish %d  |  Queue %d  |  Preparing %d  |  Negative %d
   Desired T1/T2 %d/%d  |  Visual T1/T2 %d/%d  |  Warmup %d  |  Async %d
   Negative: sparse %d  |  empty %d  |  filtered %d  |  failed %d  |  surface %d
 
 [b]Proxy Cost[/b]
   Surfaces %d  |  Materials %d  |  Verts %dk  |  Max surfaces/chunk %d
-  Null mats %d  |  Proxy fallback %d  |  Overflow folded %d
+  Null mats %d  |  Proxy fallback %d  |  Overflow folded %d  |  Budget proxy chunks %d
   Merge %.2fms  |  Publish %.2fms  |  Stale %d  |  Surface rejects %d  |  Over-budget kept %d
 
 [b]Coverage[/b]
@@ -389,12 +400,12 @@ func _update_hud() -> void:
   olive empty/sparse negative, red failed/surface negative""" % [
 		startup_text, bench_text, chunks_text, fade_text,
 		fps, frame_ms, draws, objects, prims / 1000, vram_mb,
-		desired, predictive, active, pending, queued, preparing, negative,
+		desired, predictive, active, pending, cached_publish, queued, preparing, negative,
 		int(stats.get("desired_chunks_tier_1", 0)), int(stats.get("desired_chunks_tier_2", 0)),
 		int(stats.get("chunks_tier_1", 0)), int(stats.get("chunks_tier_2", 0)), warmup, async_pending,
 		negative_sparse, negative_empty, negative_filtered, negative_failed, negative_surface,
 		surfaces, materials, vertices / 1000, max_surfaces,
-		null_material_surfaces, default_proxy_surfaces, overflow_proxy_surfaces,
+		null_material_surfaces, default_proxy_surfaces, overflow_proxy_surfaces, runtime_proxy_chunks,
 		float(merge_us) / 1000.0, float(completion_us) / 1000.0, stale, surface_rejects, over_budget_published,
 		complete, incomplete, int(stats.get("active_covered_refs", 0)), int(stats.get("active_covered_cells", 0)),
 		camera_cell, _cam_speed,
@@ -510,6 +521,7 @@ func _record_frame() -> void:
 		"hlod_desired": int(stats.get("desired_chunks", 0)),
 		"hlod_predictive": int(stats.get("predictive_desired_chunks", 0)),
 		"hlod_pending": int(stats.get("pending_merges", 0)),
+		"hlod_cached_publish": int(stats.get("cached_publish_queue_size", 0)),
 		"hlod_queue": int(stats.get("merge_queue_size", 0)),
 		"hlod_preparing": int(stats.get("preparing_chunks", 0)),
 		"hlod_negative": int(stats.get("negative_chunks", 0)),
@@ -525,6 +537,7 @@ func _record_frame() -> void:
 		"hlod_null_material_surfaces": int(stats.get("null_material_surface_count", 0)),
 		"hlod_default_proxy_surfaces": int(stats.get("default_proxy_surface_count", 0)),
 		"hlod_overflow_proxy_surfaces": int(stats.get("overflow_proxy_surfaces", 0)),
+		"hlod_runtime_proxy_chunks": int(stats.get("runtime_surface_budget_proxy_chunks", 0)),
 		"hlod_vertices": int(stats.get("total_chunk_vertices", 0)),
 		"hlod_max_surfaces": int(stats.get("max_chunk_surfaces", 0)),
 		"hlod_merge_us": int(stats.get("merge_queue_last_usec", 0)),
@@ -551,17 +564,17 @@ func _save_benchmark() -> void:
 		Log.error("hlod_only", "Failed to write %s" % filename)
 		return
 
-	file.store_line("frame,time_ms,fps,frame_ms,draw_calls,objects,primitives,hlod_desired,hlod_visual,hlod_pending,hlod_queue,hlod_preparing,hlod_negative,hlod_negative_sparse,hlod_negative_empty,hlod_negative_filtered,hlod_negative_failed,hlod_negative_surface,hlod_tier1,hlod_tier2,hlod_surfaces,hlod_materials,hlod_vertices,hlod_max_surfaces,hlod_merge_us,hlod_completion_us,hlod_surface_rejects,hlod_covered_refs,fade_enabled,cam_x,cam_y,cam_z")
+	file.store_line("frame,time_ms,fps,frame_ms,draw_calls,objects,primitives,hlod_desired,hlod_visual,hlod_pending,hlod_cached_publish,hlod_queue,hlod_preparing,hlod_negative,hlod_negative_sparse,hlod_negative_empty,hlod_negative_filtered,hlod_negative_failed,hlod_negative_surface,hlod_tier1,hlod_tier2,hlod_surfaces,hlod_materials,hlod_vertices,hlod_max_surfaces,hlod_merge_us,hlod_completion_us,hlod_surface_rejects,hlod_runtime_proxy_chunks,hlod_covered_refs,fade_enabled,cam_x,cam_y,cam_z")
 	for f: Dictionary in _bench_frames:
-		file.store_line("%d,%d,%.1f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%.1f,%.1f,%.1f" % [
+		file.store_line("%d,%d,%.1f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%.1f,%.1f,%.1f" % [
 			f["frame"], f["time_ms"], f["fps"], f["frame_ms"],
 			f["draw_calls"], f["objects"], f["primitives"],
-			f["hlod_desired"], f["hlod_visual"], f["hlod_pending"], f["hlod_queue"],
+			f["hlod_desired"], f["hlod_visual"], f["hlod_pending"], f["hlod_cached_publish"], f["hlod_queue"],
 			f["hlod_preparing"], f["hlod_negative"],
 			f["hlod_negative_sparse"], f["hlod_negative_empty"], f["hlod_negative_filtered"], f["hlod_negative_failed"], f["hlod_negative_surface"],
 			f["hlod_tier1"], f["hlod_tier2"],
 			f["hlod_surfaces"], f["hlod_materials"], f["hlod_vertices"], f["hlod_max_surfaces"],
-			f["hlod_merge_us"], f["hlod_completion_us"], f["hlod_surface_rejects"], f["hlod_covered_refs"],
+			f["hlod_merge_us"], f["hlod_completion_us"], f["hlod_surface_rejects"], f["hlod_runtime_proxy_chunks"], f["hlod_covered_refs"],
 			str(f["fade_enabled"]),
 			f["cam_x"], f["cam_y"], f["cam_z"],
 		])

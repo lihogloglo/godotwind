@@ -106,6 +106,7 @@ const PREDICTIVE_STREAMING_ENABLED: bool = true
 const PREDICTIVE_LOOKAHEAD_SECONDS: float = 2.0
 const PREDICTIVE_MIN_SPEED_MPS: float = 8.0
 const PREDICTIVE_MAX_LOOKAHEAD_M: float = 350.0
+const PREDICTIVE_SAMPLE_COUNT: int = 3
 
 
 #region Internal Data Classes
@@ -267,15 +268,19 @@ var _completed_mutex: Mutex = Mutex.new()
 var _mesh_cache: Dictionary = {}  # Vector3i -> ArrayMesh
 var _mesh_sizes: Dictionary = {}  # Vector3i -> int (bytes)
 var _mesh_manifests: Dictionary = {}  # Vector3i -> Dictionary
+var _mesh_stats_cache: Dictionary = {}  # Vector3i -> Dictionary
 var _lru_order: Array[Vector3i] = []  # Oldest first
 var _cache_used_bytes: int = 0
 var _pending_manifests: Dictionary = {}  # Vector3i -> Dictionary
+var _cached_publish_queue: Array[Vector3i] = []
+var _cached_publish_keys: Dictionary = {}  # Vector3i -> true
 var _coverage_revision: int = 0
 
 ## Stats
 var _stats: Dictionary = {
 	"active_cells": 0,         # kept name for caller compat; counts all active chunks across tiers
 	"pending_merges": 0,
+	"cached_publish_queue_size": 0,
 	"cache_entries": 0,
 	"cache_bytes": 0,
 	"total_merges_completed": 0,
@@ -318,6 +323,7 @@ var _stats: Dictionary = {
 	"negative_surface_cap_chunks": 0,
 	"desired_chunks": 0,
 	"predictive_desired_chunks": 0,
+	"runtime_surface_budget_proxy_chunks": 0,
 	"desired_chunks_tier_0": 0,
 	"desired_chunks_tier_1": 0,
 	"desired_chunks_tier_2": 0,
@@ -367,13 +373,12 @@ func set_world_object_source(source: RefCounted) -> void:
 
 
 ## Update active paging chunks based on camera position. Runs the top-down
-## anti-overlap walk across tiers (plan §4.3). Returns number of chunks changed.
 ##
 ## `camera_world_pos` is the actual camera world position — used by both the
 ## chunk-center band classification (§4.2) and the per-ref projected-size test
 ## (§2.2, Phase 2). Legacy callers may pass `Vector3.INF` to approximate from
 ## `camera_cell`, but new callers should provide the real position.
-func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector3.INF) -> int:
+func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector3.INF, camera_velocity_xz: Vector2 = Vector2.INF) -> int:
 	if not enabled:
 		return 0
 	# Dual-purpose SubsystemToggles gate: when HLOD is toggled off, stop
@@ -394,7 +399,7 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# main thread inside merge preparation. Prime the warmup queue so
 	# process_merge_queue pre-loads them over the next few frames instead.
 	var is_teleport: bool = _is_teleport(_last_camera_world_pos, _camera_world_pos_cached)
-	_update_camera_velocity(is_teleport)
+	_update_camera_velocity(is_teleport, camera_velocity_xz)
 	if is_teleport:
 		_stats["total_teleports"] += 1
 	_last_camera_world_pos = _camera_world_pos_cached
@@ -422,19 +427,18 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 
 	# Queue new chunks (stagger via process_merge_queue)
 	for key: Vector3i in combined_chunks:
-		if key in _active_chunks or key in _pending_merges or key in _chunk_generations or key in _negative_chunks or key in _preparing_chunks:
+		if key in _active_chunks or key in _pending_merges or key in _chunk_generations or key in _negative_chunks or key in _preparing_chunks or key in _cached_publish_keys:
 			continue
 		# Check LRU cache (fast path — previously merged)
 		if key in _mesh_cache:
-			if key in desired_chunks and _create_rs_instance(key, _mesh_cache[key], _mesh_sizes.get(key, 0)):
-				_lru_touch(key)
-				changed += 1
+			if key in desired_chunks:
+				_queue_cached_publish(key)
 		elif key not in _merge_queue:
 			_merge_queue.append(key)
 
 	# Sort merge queue by chunk-center distance (closest first)
 	if not _merge_queue.is_empty():
-		_merge_queue.sort_custom(_sort_by_chunk_distance)
+		_merge_queue.sort_custom(_sort_by_chunk_priority)
 
 	# Unload chunks that left desired set
 	var to_unload: Array[Vector3i] = []
@@ -487,6 +491,14 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 
 	# Remove queued chunks that left desired set
 	_merge_queue = _merge_queue.filter(func(k: Vector3i) -> bool: return k in combined_chunks)
+	_cached_publish_queue = _cached_publish_queue.filter(func(k: Vector3i) -> bool:
+		if k in desired_chunks and k in _mesh_cache and k not in _active_chunks:
+			return true
+		_cached_publish_keys.erase(k)
+		return false
+	)
+	if not _cached_publish_queue.is_empty():
+		_cached_publish_queue.sort_custom(_sort_by_chunk_priority)
 
 	_refresh_stats()
 	return changed
@@ -576,6 +588,26 @@ func process_merge_queue(deadline_usec: int = 0) -> void:
 	_stats["merge_queue_last_usec"] = Time.get_ticks_usec() - start_usec
 
 
+func _queue_cached_publish(key: Vector3i) -> void:
+	if key in _cached_publish_keys:
+		return
+	if key not in _mesh_cache:
+		return
+	_cached_publish_keys[key] = true
+	_cached_publish_queue.append(key)
+
+
+func _reject_surface_cap_chunk(key: Vector3i, surface_count: int, source: String) -> void:
+	_negative_chunks[key] = "surface_cap"
+	_stats["surface_cap_rejections"] = int(_stats.get("surface_cap_rejections", 0)) + 1
+	Log.warn("hlod", "Rejecting over-budget runtime HLOD chunk %s from %s with %d surfaces (cap=%d); needs cached proxy asset" % [
+		str(key),
+		source,
+		surface_count,
+		MAX_RUNTIME_CHUNK_SURFACES,
+	])
+
+
 ## Process completed merge results on main thread. Creates RS instances.
 ## Call once per frame from streaming manager.
 ## Returns number of chunks completed.
@@ -586,11 +618,13 @@ func process_completions(deadline_usec: int = 0) -> int:
 		_stats["stale_completions_discarded"] += _completed_queue.size()
 		_completed_queue.clear()
 		_completed_mutex.unlock()
+		_cached_publish_queue.clear()
+		_cached_publish_keys.clear()
 		_stats["completion_last_usec"] = 0
 		return 0
 
 	_completed_mutex.lock()
-	if _completed_queue.is_empty():
+	if _completed_queue.is_empty() and _cached_publish_queue.is_empty():
 		_completed_mutex.unlock()
 		_stats["completion_last_usec"] = 0
 		return 0
@@ -599,11 +633,40 @@ func process_completions(deadline_usec: int = 0) -> int:
 		_stats["stale_completions_discarded"] += _completed_queue.size()
 		_completed_queue.clear()
 		_completed_mutex.unlock()
+		_cached_publish_queue.clear()
+		_cached_publish_keys.clear()
 		_stats["completion_last_usec"] = 0
 		return 0
 
+	_completed_mutex.unlock()
 	var queue: Array = []
 	var budget := COMPLETIONS_PER_FRAME
+	var count := 0
+	while budget > 0 and not _cached_publish_queue.is_empty():
+		if Time.get_ticks_usec() - start_usec >= COMPLETION_BUDGET_USEC or _deadline_exhausted(deadline_usec):
+			break
+		var cached_key: Vector3i = _cached_publish_queue[0]
+		_cached_publish_queue.remove_at(0)
+		_cached_publish_keys.erase(cached_key)
+		if cached_key not in _last_desired_chunks or cached_key in _active_chunks or cached_key not in _mesh_cache:
+			continue
+		var cached_stats: Dictionary = _mesh_stats_cache.get(cached_key, {})
+		var cached_mesh: ArrayMesh = _mesh_cache[cached_key]
+		var cached_surface_count := int(cached_stats.get("surface_count", cached_mesh.get_surface_count()))
+		if cached_surface_count > MAX_RUNTIME_CHUNK_SURFACES:
+			_reject_surface_cap_chunk(cached_key, cached_surface_count, "cached_publish")
+			_evict_cached_mesh(cached_key)
+			continue
+		if _create_rs_instance(
+				cached_key,
+				cached_mesh,
+				_mesh_sizes.get(cached_key, 0),
+				cached_stats
+			):
+			_lru_touch(cached_key)
+			count += 1
+			budget -= 1
+	_completed_mutex.lock()
 	while budget > 0 and not _completed_queue.is_empty():
 		if Time.get_ticks_usec() - start_usec >= COMPLETION_BUDGET_USEC or _deadline_exhausted(deadline_usec):
 			break
@@ -611,7 +674,6 @@ func process_completions(deadline_usec: int = 0) -> int:
 		budget -= 1
 	_completed_mutex.unlock()
 
-	var count := 0
 	for entry: Dictionary in queue:
 		var key: Vector3i = entry["key"]
 		var generation: int = entry.get("generation", 0)
@@ -633,12 +695,10 @@ func process_completions(deadline_usec: int = 0) -> int:
 			_chunk_generations.erase(key)
 			continue
 		if mesh.get_surface_count() > MAX_RUNTIME_CHUNK_SURFACES:
-			_stats["surface_cap_over_budget_published"] = int(_stats.get("surface_cap_over_budget_published", 0)) + 1
-			Log.warn("hlod", "Publishing over-budget HLOD chunk %s with %d surfaces (cap=%d); preserving coverage over disappearance" % [
-				str(key),
-				mesh.get_surface_count(),
-				MAX_RUNTIME_CHUNK_SURFACES,
-			])
+			_reject_surface_cap_chunk(key, mesh.get_surface_count(), "merge_completion")
+			_pending_manifests.erase(key)
+			_chunk_generations.erase(key)
+			continue
 
 		# Optional runtime LOD finalization is disabled in the hot path. If it
 		# returns, it must stay on the main thread because ImporterMesh +
@@ -655,6 +715,7 @@ func process_completions(deadline_usec: int = 0) -> int:
 		_mesh_cache[key] = mesh
 		_mesh_sizes[key] = bytes
 		_mesh_manifests[key] = _pending_manifests.get(key, {})
+		_mesh_stats_cache[key] = mesh_stats.duplicate()
 		_pending_manifests.erase(key)
 		_lru_order.append(key)
 		_cache_used_bytes += bytes
@@ -674,6 +735,10 @@ func process_completions(deadline_usec: int = 0) -> int:
 func get_stats() -> Dictionary:
 	_refresh_stats()
 	return _stats.duplicate()
+
+
+func get_coverage_revision() -> int:
+	return _coverage_revision
 
 
 func get_active_coverage_manifest() -> Dictionary:
@@ -833,6 +898,8 @@ func set_all_visible(visible: bool) -> void:
 		_negative_chunks.clear()
 		_prep_queue.clear()
 		_preparing_chunks.clear()
+		_cached_publish_queue.clear()
+		_cached_publish_keys.clear()
 		_pending_merges.clear()
 		_pending_manifests.clear()
 		_task_to_key.clear()
@@ -898,7 +965,10 @@ func cleanup(disconnect_signals: bool = true) -> void:
 	_mesh_cache.clear()
 	_mesh_sizes.clear()
 	_mesh_manifests.clear()
+	_mesh_stats_cache.clear()
 	_lru_order.clear()
+	_cached_publish_queue.clear()
+	_cached_publish_keys.clear()
 	_cache_used_bytes = 0
 	_completed_mutex.lock()
 	_completed_queue.clear()
@@ -934,9 +1004,12 @@ static func _is_teleport(prev_pos: Vector3, curr_pos: Vector3) -> bool:
 	return prev_pos.distance_to(curr_pos) > TELEPORT_THRESHOLD
 
 
-func _update_camera_velocity(is_teleport: bool) -> void:
+func _update_camera_velocity(is_teleport: bool, supplied_velocity_xz: Vector2 = Vector2.INF) -> void:
 	if is_teleport or _last_camera_world_pos == Vector3.INF or _last_update_ticks_msec <= 0:
 		_camera_velocity_xz = Vector2.ZERO
+		return
+	if supplied_velocity_xz != Vector2.INF:
+		_camera_velocity_xz = supplied_velocity_xz
 		return
 	var dt := float(Time.get_ticks_msec() - _last_update_ticks_msec) / 1000.0
 	if dt <= 0.0001:
@@ -955,13 +1028,15 @@ func _compute_predictive_prefetch_chunks(current_desired: Dictionary) -> Diction
 	if lookahead <= 0.0:
 		return {}
 	var dir := _camera_velocity_xz / speed
-	var future_pos := _camera_world_pos_cached + Vector3(dir.x * lookahead, 0.0, dir.y * lookahead)
-	var future_cell := DU.world_to_cell(future_pos)
-	var future_desired := _compute_desired_chunks(future_cell, future_pos)
 	var prefetch: Dictionary = {}
-	for key: Vector3i in future_desired:
-		if key not in current_desired:
-			prefetch[key] = true
+	for sample in range(1, PREDICTIVE_SAMPLE_COUNT + 1):
+		var t := float(sample) / float(PREDICTIVE_SAMPLE_COUNT)
+		var future_pos := _camera_world_pos_cached + Vector3(dir.x * lookahead * t, 0.0, dir.y * lookahead * t)
+		var future_cell := DU.world_to_cell(future_pos)
+		var future_desired := _compute_desired_chunks(future_cell, future_pos)
+		for key: Vector3i in future_desired:
+			if key not in current_desired:
+				prefetch[key] = true
 	return prefetch
 
 
@@ -1106,41 +1181,92 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 		desired[active_key] = true
 		_mark_sub_cells(Vector2i(active_key.x, active_key.y), 1 << active_key.z, covered_cells)
 
-	# Largest tier first. Smaller tiers can't overlap a larger accepted chunk.
-	# Size levels below the visual owner floor are skipped so the pager does
-	# not spend worker budget on non-rendering chunks.
-	for size_level in [2, 1, 0]:
-		var size: int = 1 << size_level
-		var band_start: float = DU.paging_band_start(size_level)
-		var band_end: float = DU.paging_band_end(size_level)
-		var capped_band_end := minf(band_end, _visual_end_cap)
-		if capped_band_end <= _visual_begin_floor:
-			continue
-		var ring_radius: int = DU.paging_ring_radius(size_level)
-
-		# Align camera to this tier's chunk grid
-		var cam_aligned := DU.chunk_key_for_cell(camera_cell, size_level)
-
-		for dy in range(-ring_radius, ring_radius + 1):
-			for dx in range(-ring_radius, ring_radius + 1):
-				var center_cell := Vector2i(cam_aligned.x + dx * size, cam_aligned.y + dy * size)
-
-				# Band classification by chunk-CENTER distance (plan §4.2)
-				var center_world := DU.chunk_center_world(center_cell, size_level)
-				var dist: float = camera_xz.distance_to(center_world)
-				if dist < band_start or dist >= capped_band_end:
-					continue
-
-				# Anti-overlap: skip if any 1×1 sub-cell is already claimed
-				if _any_sub_cell_covered(center_cell, size, covered_cells):
-					continue
-
-				# Accept chunk + mark its 1×1 sub-cells
-				var key := Vector3i(center_cell.x, center_cell.y, size_level)
-				desired[key] = true
-				_mark_sub_cells(center_cell, size, covered_cells)
+	var root_level := 2
+	var root_size: int = 1 << root_level
+	var root_radius: int = DU.paging_ring_radius(root_level)
+	var root_aligned := DU.chunk_key_for_cell(camera_cell, root_level)
+	for dy in range(-root_radius, root_radius + 1):
+		for dx in range(-root_radius, root_radius + 1):
+			var root_cell := Vector2i(root_aligned.x + dx * root_size, root_aligned.y + dy * root_size)
+			_collect_desired_quadtree(root_cell, root_level, camera_xz, covered_cells, desired)
 
 	return desired
+
+
+
+
+
+
+func _collect_desired_quadtree(center_cell: Vector2i, size_level: int, camera_xz: Vector2, covered_cells: Dictionary, desired: Dictionary) -> void:
+	if size_level < 0:
+		return
+	var size: int = 1 << size_level
+	if _any_sub_cell_covered(center_cell, size, covered_cells):
+		return
+
+	var band_start: float = DU.paging_band_start(size_level)
+	var band_end: float = minf(DU.paging_band_end(size_level), _visual_end_cap)
+	if band_end <= _visual_begin_floor:
+		return
+
+	var bounds := _chunk_distance_bounds(center_cell, size_level, camera_xz)
+	var min_dist: float = bounds.x
+	var max_dist: float = bounds.y
+	if min_dist >= band_end or max_dist < band_start:
+		return
+
+	var center_world := DU.chunk_center_world(center_cell, size_level)
+	var center_dist: float = camera_xz.distance_to(center_world)
+	if center_dist >= band_start and center_dist < band_end:
+		var key := Vector3i(center_cell.x, center_cell.y, size_level)
+		desired[key] = true
+		_mark_sub_cells(center_cell, size, covered_cells)
+		return
+
+	if size_level > 0:
+		var child_level := size_level - 1
+		var child_size: int = 1 << child_level
+		for sy in range(2):
+			for sx in range(2):
+				_collect_desired_quadtree(
+					Vector2i(center_cell.x + sx * child_size, center_cell.y + sy * child_size),
+					child_level,
+					camera_xz,
+					covered_cells,
+					desired
+				)
+
+
+static func _chunk_distance_bounds(center_cell: Vector2i, size_level: int, camera_xz: Vector2) -> Vector2:
+	var size: int = 1 << size_level
+	var min_world := DU.cell_to_world_origin(center_cell)
+	var max_world := DU.cell_to_world_origin(Vector2i(center_cell.x + size, center_cell.y + size))
+	var min_x: float = minf(min_world.x, max_world.x)
+	var max_x: float = maxf(min_world.x, max_world.x)
+	var min_z: float = minf(min_world.z, max_world.z)
+	var max_z: float = maxf(min_world.z, max_world.z)
+
+	var dx := 0.0
+	if camera_xz.x < min_x:
+		dx = min_x - camera_xz.x
+	elif camera_xz.x > max_x:
+		dx = camera_xz.x - max_x
+	var dz := 0.0
+	if camera_xz.y < min_z:
+		dz = min_z - camera_xz.y
+	elif camera_xz.y > max_z:
+		dz = camera_xz.y - max_z
+	var min_dist := sqrt(dx * dx + dz * dz)
+
+	var max_dist_sq := 0.0
+	for corner: Vector2 in [
+		Vector2(min_x, min_z),
+		Vector2(min_x, max_z),
+		Vector2(max_x, min_z),
+		Vector2(max_x, max_z),
+	]:
+		max_dist_sq = maxf(max_dist_sq, camera_xz.distance_squared_to(corner))
+	return Vector2(min_dist, sqrt(max_dist_sq))
 
 
 static func _any_sub_cell_covered(center_cell: Vector2i, size: int, covered: Dictionary) -> bool:
@@ -1184,6 +1310,14 @@ func _sort_by_chunk_distance(a: Vector3i, b: Vector3i) -> bool:
 	var da := camera_xz.distance_squared_to(DU.chunk_center_world(Vector2i(a.x, a.y), a.z))
 	var db := camera_xz.distance_squared_to(DU.chunk_center_world(Vector2i(b.x, b.y), b.z))
 	return da < db
+
+
+func _sort_by_chunk_priority(a: Vector3i, b: Vector3i) -> bool:
+	var a_desired := a in _last_desired_chunks
+	var b_desired := b in _last_desired_chunks
+	if a_desired != b_desired:
+		return a_desired
+	return _sort_by_chunk_distance(a, b)
 
 #endregion
 
@@ -1666,11 +1800,20 @@ func _cache_evict_to_fit(needed_bytes: int) -> void:
 				break
 			continue
 
-		var evicted_bytes: int = _mesh_sizes.get(oldest, 0)
-		_cache_used_bytes -= evicted_bytes
-		_mesh_cache.erase(oldest)
-		_mesh_sizes.erase(oldest)
-		_mesh_manifests.erase(oldest)
+		_evict_cached_mesh(oldest)
+
+
+func _evict_cached_mesh(key: Vector3i) -> void:
+	if key not in _mesh_cache:
+		_cached_publish_keys.erase(key)
+		return
+	var evicted_bytes: int = _mesh_sizes.get(key, 0)
+	_cache_used_bytes = maxi(0, _cache_used_bytes - evicted_bytes)
+	_mesh_cache.erase(key)
+	_mesh_sizes.erase(key)
+	_mesh_manifests.erase(key)
+	_mesh_stats_cache.erase(key)
+	_cached_publish_keys.erase(key)
 
 #endregion
 
@@ -1725,6 +1868,7 @@ func _on_task_failed(task_id: int, error: String) -> void:
 func _refresh_stats() -> void:
 	_stats["active_cells"] = _active_chunks.size()
 	_stats["pending_merges"] = _pending_merges.size()
+	_stats["cached_publish_queue_size"] = _cached_publish_queue.size()
 	_stats["cache_entries"] = _mesh_cache.size()
 	_stats["cache_bytes"] = _cache_used_bytes
 	var dt0 := 0
@@ -1792,6 +1936,7 @@ func _refresh_stats() -> void:
 	var total_default_proxy_surfaces := 0
 	var total_source_null_material_surfaces := 0
 	var total_overflow_proxy_surfaces := 0
+	var runtime_surface_budget_chunks := 0
 	var total_vertices := 0
 	var total_indices := 0
 	var max_surfaces := 0
@@ -1808,6 +1953,8 @@ func _refresh_stats() -> void:
 		total_default_proxy_surfaces += data.default_proxy_surface_count
 		total_source_null_material_surfaces += data.source_null_material_surfaces
 		total_overflow_proxy_surfaces += data.overflow_proxy_surfaces
+		if data.overflow_proxy_surfaces > 0:
+			runtime_surface_budget_chunks += 1
 		total_vertices += data.vertex_count
 		total_indices += data.index_count
 		max_surfaces = maxi(max_surfaces, data.surface_count)
@@ -1823,6 +1970,7 @@ func _refresh_stats() -> void:
 	_stats["default_proxy_surface_count"] = total_default_proxy_surfaces
 	_stats["source_null_material_surfaces"] = total_source_null_material_surfaces
 	_stats["overflow_proxy_surfaces"] = total_overflow_proxy_surfaces
+	_stats["runtime_surface_budget_proxy_chunks"] = runtime_surface_budget_chunks
 	_stats["chunk_surface_histogram"] = surface_histogram
 	_stats["chunk_material_histogram"] = material_histogram
 	_stats["total_chunk_vertices"] = total_vertices

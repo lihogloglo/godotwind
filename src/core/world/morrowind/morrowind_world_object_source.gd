@@ -145,11 +145,13 @@ func _capabilities_for(type_name: String, base_record: Variant, model_path: Stri
 	match type_name:
 		"static":
 			if not model_path.is_empty():
-				flags |= RecordScript.CAP_STATIC_VISUAL | RecordScript.CAP_COLLISION | RecordScript.CAP_HLOD
+				flags |= RecordScript.CAP_STATIC_VISUAL | RecordScript.CAP_COLLISION
+				if _is_hlod_geometry_candidate(type_name, base_record, model_path):
+					flags |= RecordScript.CAP_HLOD
 		"door", "container", "activator":
 			if not model_path.is_empty():
 				flags |= RecordScript.CAP_GAMEPLAY | RecordScript.CAP_STATIC_VISUAL
-				if type_name == "door" or type_name == "activator":
+				if _is_hlod_geometry_candidate(type_name, base_record, model_path):
 					flags |= RecordScript.CAP_HLOD
 		"light":
 			flags |= RecordScript.CAP_GAMEPLAY
@@ -163,6 +165,58 @@ func _capabilities_for(type_name: String, base_record: Variant, model_path: Stri
 	if not model_path.is_empty():
 		flags |= RecordScript.CAP_IMPOSTOR
 	return flags
+
+
+static func _is_hlod_geometry_candidate(type_name: String, base_record: Variant, model_path: String) -> bool:
+	var lower := model_path.to_lower().replace("/", "\\")
+	if lower.is_empty():
+		return false
+	match type_name:
+		"door":
+			return true
+		"activator":
+			if _has_static_state_script(base_record):
+				return false
+			return _is_large_static_hlod_model(lower)
+		"static":
+			return _is_large_static_hlod_model(lower)
+		_:
+			return false
+
+
+static func _has_static_state_script(base_record: Variant) -> bool:
+	if base_record == null:
+		return false
+	if "script" in base_record and base_record.script is String:
+		return not str(base_record.script).is_empty()
+	return false
+
+
+static func _is_large_static_hlod_model(lower_model_path: String) -> bool:
+	if _is_specialized_distant_representation(lower_model_path):
+		return false
+	if "terrain_" in lower_model_path:
+		return "_small" not in lower_model_path and "rock_sm" not in lower_model_path
+	if "ex_" in lower_model_path or "dwrv_" in lower_model_path or "dae_" in lower_model_path:
+		return true
+	if "bridge" in lower_model_path or "dock" in lower_model_path or "platform" in lower_model_path:
+		return true
+	if "ship" in lower_model_path or "boat" in lower_model_path:
+		return true
+	if "stronghold" in lower_model_path or "velothi" in lower_model_path:
+		return true
+	return false
+
+
+static func _is_specialized_distant_representation(lower_model_path: String) -> bool:
+	return "flora_" in lower_model_path \
+		or "grass" in lower_model_path \
+		or "furn_" in lower_model_path \
+		or "contain_" in lower_model_path \
+		or "barrel" in lower_model_path \
+		or "crate" in lower_model_path \
+		or "light_" in lower_model_path \
+		or "marker" in lower_model_path
 
 
 func _is_distant_light_candidate(light_record: Variant) -> bool:

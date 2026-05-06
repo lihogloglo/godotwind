@@ -75,6 +75,63 @@ Expected effect:
 - This does not solve first-time runtime merge/upload cost. Cached/prebuilt
   proxy assets remain the needed stutter fix.
 
+### 2026-05-07 Phase 5 Follow-up: Coverage Sync Budget Guard
+
+Implemented:
+
+- HLOD coverage sync now checks a cheap coverage revision before rebuilding the
+  full active coverage manifest.
+- HLOD-only mode no longer pushes HLOD coverage into disabled MID/FAR consumers.
+
+Verification:
+
+- `dotnet build Godotwind.sln` passed.
+- `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/run_tests.tscn`
+  passed.
+- `scenes/Godotwind.tscn --hlod-only` was launched and logs were inspected.
+
+Result:
+
+- The prior catastrophic HLOD-manager stalls in the user log, including a
+  1040 ms frame and a 716 ms follow-up, did not recur in the follow-up run.
+- Smaller HLOD-owned overruns remain, including a 34.8 ms publish frame.
+- FPS remains poor in dense views because visible HLOD still reaches thousands
+  of surfaces/materials; this is still the Phase 2/3 proxy-material and cached
+  proxy-asset problem, not solved by predictive prefetch.
+
+### 2026-05-07 Phase 5 Follow-up: Cached Publish Budgeting
+
+Implemented:
+
+- Cached HLOD chunks no longer create RenderingServer instances directly inside
+  `ObjectPaging.update_for_camera`.
+- Cache hits now enter a `cached_publish_queue` and publish through
+  `process_completions`, sharing the same per-frame HLOD publication budget as
+  fresh worker completions.
+- The production `NativeStreamingManager` and HLOD-only test scene now update
+  the desired HLOD ring before draining merge/publish work for the frame.
+- HLOD-only HUD/CSV and `hlod_stats` expose the cached publish queue depth.
+
+Verification:
+
+- `dotnet build Godotwind.sln` passed.
+- Targeted `tests/unit/test_object_paging_kernel.gd` passed.
+- Full `res://tests/run_tests.tscn` passed.
+- `scenes/Godotwind.tscn --hlod-only` was launched interactively.
+
+Result:
+
+- User visual check reports there are still movement spikes and FPS remains
+  very poor.
+- This confirms cached publish bursts were not the root performance problem.
+- The remaining spike source is consistent with the core audit: individual
+  runtime HLOD chunks are still too heavy to upload/render. A frame budget can
+  decide when to publish a chunk, but it cannot make one oversized mesh upload
+  cheap once publication starts.
+- Next fix should stop publishing oversized runtime proxies as if they were
+  acceptable HLOD. The runtime fallback must either reject/defer them until a
+  cached/prebuilt proxy exists, or split/drop content by representation class.
+
 ## Goal
 
 Make HLOD the cheap distant-content tier it is supposed to be: stable, low-stutter,
