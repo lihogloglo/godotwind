@@ -1,464 +1,232 @@
 # Fixing HLOD
 
-Date: 2026-05-06  
-Status: Phase 1 shipped 2026-05-07; Phase 5 cache-only predictive prefetch in progress
+Date: 2026-05-06
+Status: Runtime HLOD isolated; FPS and movement spikes still unacceptable.
 
-## Progress Log
+## Current Read
 
-### 2026-05-07 Phase 1: Stop Broken Output
+HLOD is structurally isolated, but not yet cheap.
 
-Implemented:
+Recent checks showed:
 
-- `src/native/NativeObjectPagingKernel.cs` no longer publishes overflow HLOD
-  surfaces with `Material = null`.
-- Source materialless surfaces and overflow-folded surfaces now receive a valid
-  neutral HLOD proxy material instead of Godot's default white material.
-- `hlod_stats` now reports visible HLOD draw-call estimate, null-material
-  surface count, proxy fallback surface count, overflow-folded surface count,
-  and chunk surface/material histograms.
-- `tests/visual/test_hlod_only.gd` HUD and benchmark CSV expose the new
-  material/proxy counters.
-- Unit coverage was added for null source materials and >250-surface overflow.
+- White/default-looking HLOD output was fixed by giving null/overflow surfaces a
+  real fallback material.
+- HLOD-only still performs badly: dense views remain low FPS, and movement
+  spikes are still visible.
+- Cached-publish budgeting and predictive cache-only prefetch did not remove
+  the spikes.
+- Re-enabling the OpenMW-style cost-benefit filter made distant content less
+  visually complete without buying enough FPS. That change was reverted.
 
-Verification:
+Current production posture:
 
-- `dotnet build Godotwind.sln` passed.
-- `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/run_tests.tscn`
-  passed.
-- `scenes/Godotwind.tscn --hlod-only` was launched interactively.
-- User visual check confirmed the white/default HLOD objects are solved.
+- `RUNTIME_FORCE_MERGE_ELIGIBLE_REFS = true` is intentionally back on.
+- Big buildings and landmarks must not disappear just because a merge-cost
+  heuristic rejects them.
+- Filtering remains desirable, but only after we have representation rules that
+  preserve important coverage.
+- We cannot rely on fully prebaking every possible HLOD chunk. Prior attempts
+  were too large on disk.
 
-Remaining after Phase 1:
-
-- FPS is still poor: roughly 60 FPS max, around 35 FPS while moving, with
-  stutters.
-- The next bottleneck is still the expected one from this audit: HLOD chunks
-  are too material/surface heavy, so Phase 2 must collapse exact source material
-  identity into bounded distant proxy buckets.
-
-### 2026-05-07 Phase 2 Runtime Proxy Attempt: Reverted
-
-Attempted:
-
-- Added a runtime proxy-material bucketing path in the native HLOD merge kernel
-  to collapse exact source material identity into coarse color/material classes.
-
-Result:
-
-- User visual check caught a bad regression: HLOD objects became fully white /
-  visually wrong.
-- The runtime bucketing path was removed. Phase 1's valid fallback material for
-  null/overflow surfaces remains.
-
-Decision:
-
-- Do not collapse live HLOD materials by replacing them with coarse generated
-  materials in the worker merge path.
-- The proxy-material stage needs to happen in a cache/prebuild path with proper
-  source texture/material metadata, not as an in-place runtime shortcut.
-
-### 2026-05-07 Phase 5 Partial: Cache-Only Predictive Prefetch
-
-Implemented:
-
-- `ObjectPaging` now estimates camera velocity and computes a future HLOD ring
-  in the movement direction.
-- Predicted chunks are allowed to warm/merge into the mesh cache, but they are
-  not published as visible RenderingServer instances until they enter the
-  current desired HLOD ring.
-- `hlod_stats` and the HLOD-only HUD now report predictive prefetch chunk count.
-
-Expected effect:
-
-- Normal movement should encounter fewer completely cold HLOD chunks at the
-  tier boundary.
-- This does not solve first-time runtime merge/upload cost. Cached/prebuilt
-  proxy assets remain the needed stutter fix.
-
-### 2026-05-07 Phase 5 Follow-up: Coverage Sync Budget Guard
-
-Implemented:
-
-- HLOD coverage sync now checks a cheap coverage revision before rebuilding the
-  full active coverage manifest.
-- HLOD-only mode no longer pushes HLOD coverage into disabled MID/FAR consumers.
-
-Verification:
-
-- `dotnet build Godotwind.sln` passed.
-- `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/run_tests.tscn`
-  passed.
-- `scenes/Godotwind.tscn --hlod-only` was launched and logs were inspected.
-
-Result:
-
-- The prior catastrophic HLOD-manager stalls in the user log, including a
-  1040 ms frame and a 716 ms follow-up, did not recur in the follow-up run.
-- Smaller HLOD-owned overruns remain, including a 34.8 ms publish frame.
-- FPS remains poor in dense views because visible HLOD still reaches thousands
-  of surfaces/materials; this is still the Phase 2/3 proxy-material and cached
-  proxy-asset problem, not solved by predictive prefetch.
-
-### 2026-05-07 Phase 5 Follow-up: Cached Publish Budgeting
-
-Implemented:
-
-- Cached HLOD chunks no longer create RenderingServer instances directly inside
-  `ObjectPaging.update_for_camera`.
-- Cache hits now enter a `cached_publish_queue` and publish through
-  `process_completions`, sharing the same per-frame HLOD publication budget as
-  fresh worker completions.
-- The production `NativeStreamingManager` and HLOD-only test scene now update
-  the desired HLOD ring before draining merge/publish work for the frame.
-- HLOD-only HUD/CSV and `hlod_stats` expose the cached publish queue depth.
-
-Verification:
-
-- `dotnet build Godotwind.sln` passed.
-- Targeted `tests/unit/test_object_paging_kernel.gd` passed.
-- Full `res://tests/run_tests.tscn` passed.
-- `scenes/Godotwind.tscn --hlod-only` was launched interactively.
-
-Result:
-
-- User visual check reports there are still movement spikes and FPS remains
-  very poor.
-- This confirms cached publish bursts were not the root performance problem.
-- The remaining spike source is consistent with the core audit: individual
-  runtime HLOD chunks are still too heavy to upload/render. A frame budget can
-  decide when to publish a chunk, but it cannot make one oversized mesh upload
-  cheap once publication starts.
-- Next fix should stop publishing oversized runtime proxies as if they were
-  acceptable HLOD. The runtime fallback must either reject/defer them until a
-  cached/prebuilt proxy exists, or split/drop content by representation class.
-
-## Goal
-
-Make HLOD the cheap distant-content tier it is supposed to be: stable, low-stutter,
-low-draw-call, visually coherent from 300-1000m, and architecturally compatible
-with the generic open-world framework.
-
-This is not a threshold-tuning task. The target is the industry-standard HLOD
-shape: grouped distant content becomes simplified proxy assets with simplified
-proxy materials, streamed predictively and published under a hard frame budget.
+The practical conclusion: dropping more objects is not the next fix. The next
+fix is making the objects that remain cheap to publish and cheap to draw.
 
 ## Canonical Pattern
 
-The common pattern across engines is:
+Good HLOD is not "one giant merged mesh." It is a distant representation system:
 
-1. Cluster distant static content by world-space cells/chunks.
-2. Generate proxy meshes for those clusters.
-3. Simplify geometry and material state together.
-4. Stream and compile those proxies before they are needed.
-5. Switch tiers by distance/screen size using engine visibility/LOD features.
+1. Cluster distant static content.
+2. Reduce material and surface count.
+3. Keep important silhouettes and landmarks.
+4. Route unsuitable content to another distant representation.
+5. Publish small, bounded render resources before they are visible.
 
-References:
+OpenMW does this better than our current path because it filters candidates,
+uses size tests, chooses when merging is worth it, can substitute LOD mesh names,
+runs an OSG optimizer over static transforms/geometry, and schedules GPU compile
+work incrementally.
 
-- Godot 4.6 3D optimization docs list visibility ranges as the manual HLOD path:
-  https://docs.godotengine.org/en/4.6/tutorials/optimization/optimizing_3d_performance.html
-- Godot visibility ranges are the engine-level handoff mechanism for manual LOD/HLOD:
-  https://docs.godotengine.org/en/4.0/tutorials/3d/visibility_ranges.html
-- Unreal's HLOD overview defines HLOD as combining static mesh actors into a
-  single proxy mesh and material with atlased textures:
-  https://dev.epicgames.com/documentation/en-us/unreal-engine/hierarchical-level-of-detail-overview-in-unreal-engine
-- Unreal's HLOD simplification API exposes mesh proxy and material proxy settings
-  as first-class concepts:
-  https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Engine/HLOD/FHierarchicalSimplification
-- OpenMW reference implementation:
-  `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp`
+Godot does not expose an exact equivalent of OSG's
+`IncrementalCompileOperation`, so our translation must be:
 
-## Current Evidence
+- smaller runtime publish units;
+- fewer materials/surfaces per unit;
+- predictive warmup;
+- strict publication budgets;
+- no oversized `ArrayMesh` upload treated as acceptable runtime work.
 
-From the HLOD-only interactive run:
+## Evidence To Collect Next
 
-- HLOD-only correctly isolated terrain + HLOD. NEAR/MID/FAR/distant lights were
-  off and loaded NEAR cells stayed at 0.
-- FPS settled around 50-60 in dense views, with worse dips on transitions.
-- Draw calls rose to roughly 2,000-2,600 in HLOD-only views.
-- HLOD chunks reached thousands of output surfaces/materials.
-- Several chunks published over the nominal surface warning cap.
-- The screenshot shows white/default-looking surfaces in HLOD chunks.
+Before changing policy again, capture one HLOD-only bad run and record:
 
-The practical read: the tier is structurally isolated, but it is not yet cheap.
-It is reducing node/object management, but it is not reducing render state enough.
+- visible HLOD draw calls;
+- visible HLOD chunk count;
+- total and max surfaces per chunk;
+- total and max materials per chunk;
+- total and max vertices/indices per chunk;
+- largest chunk publish time;
+- largest merge completion/publish frame;
+- number of chunks over the runtime surface target;
+- negative/missing chunks by reason;
+- whether bad FPS correlates more with draw calls or primitive count.
 
-## Issue 1: HLOD Is Still Material/Surface Heavy
+Acceptance should fail if HLOD-only reaches thousands of draw calls, even if the
+chunk count looks low.
 
-**What is happening**
+## Next Options
 
-`ObjectPaging` creates one raw RenderingServer instance per chunk, but the chunk
-mesh still contains many surfaces. The C# merge kernel groups by exact material
-identity. Morrowind content has highly fragmented material identity, so a merged
-chunk can still contain hundreds of surfaces. Godot then still pays many draw
-calls.
+### 1. Bound Publish Units
 
-Relevant code:
+Problem:
 
-- `src/core/world/object_paging.gd`
-- `src/core/world/object_paging_kernel.gd`
-- `src/native/NativeObjectPagingKernel.cs`
+A frame budget can delay publication, but it cannot make one oversized mesh
+upload cheap once publication starts.
 
-**Why OpenMW can be faster**
+Plan:
 
-OpenMW does not treat "merged vertices" as the whole win. Its object paging
-pipeline analyzes render state reuse, merges geometry through the scene
-optimizer, and schedules GL object compilation incrementally. The merge is a
-render-state optimization, not just a vertex concatenation step.
+- Add hard publish limits for runtime HLOD chunks: surfaces, vertices, indices,
+  estimated bytes, and material count.
+- If a chunk exceeds limits, split it instead of publishing it whole.
+- Split by cell, representation class, or material group.
+- Keep previous/nearer representation alive until replacement parts are ready.
 
-**Good move**
+Expected effect:
 
-Build a real HLOD proxy-material stage:
+- Movement spikes should become smaller and more frequent rather than rare huge
+  frame hits.
+- This does not solve steady low FPS by itself, but it attacks stutter directly.
 
-- Generate chunk proxy meshes with a small, bounded material count.
-- Replace exact material identity with proxy material classes or texture atlases.
-- Keep high-signal landmark materials when needed, but collapse distant clutter
-  into coarse material groups.
-- Measure success by draw calls/material surfaces per visible HLOD chunk, not by
-  "one RS instance per chunk."
+### 2. Material Canonicalization
 
-Target: a chunk should normally be single-digit surfaces, not hundreds.
+Problem:
 
-## Issue 2: White Objects Are Probably Material Overflow
+The native merge groups surfaces by exact Godot `Material` instance identity.
+Morrowind content creates many distinct material instances that are visually and
+render-state equivalent at HLOD distance.
 
-**What is happening**
+Plan:
 
-`NativeObjectPagingKernel.cs` has an overflow path for chunks with too many
-material groups. It keeps the largest surfaces, combines the overflow, and assigns
-the combined overflow surface `Material = null`. Godot renders that as a default
-white-ish material.
+- Derive a material signature from render-relevant properties:
+  albedo texture path, normal texture path, alpha/cutout mode, shader family,
+  blend mode, cull mode, and distant-relevant flags.
+- Reuse one canonical material per signature.
+- Preserve source visuals; do not replace materials with generated color buckets
+  yet.
+- Measure material/surface collapse before adding atlases.
 
-Relevant code:
+Expected effect:
 
-- `src/native/NativeObjectPagingKernel.cs`
+- Low-risk draw-call reduction if many duplicate-looking materials currently
+  differ only by resource identity.
 
-**Good move**
+### 3. Targeted Atlases Or Texture Arrays
 
-Delete the null-material overflow behavior as part of the proxy-material stage.
-When material count exceeds budget, the fallback should be:
+Problem:
 
-- assign a valid simplified proxy material;
-- split the chunk into multiple proxy parts if that is cheaper/clearer;
-- or route specific content classes to impostors/groundcover instead of geometry.
+Per-source-material surfaces keep HLOD draw calls high. Full per-chunk atlases
+would likely recreate the disk-space problem.
 
-Never publish a visible HLOD surface with no material. That is not a graceful
-degradation; it is broken output.
+Plan:
 
-## Issue 3: Runtime Merging Causes Transition Stutter
+- Do not atlas every chunk.
+- Start with high-repeat model/material families: common architecture sets,
+  rocks, walls, and repeated settlement pieces.
+- Prefer reusable source-family atlases or texture arrays over unique chunk
+  atlases.
+- Keep a small material budget per HLOD chunk.
+- Add a debug view that shows atlas/proxy material assignment before using it
+  broadly.
 
-**What is happening**
+Expected effect:
 
-Chunk input prep is budgeted, and vertex transforms happen in C#, but the runtime
-path still has live work at cell transitions: model warmup, surface array reads,
-worker submission, completed mesh publication, RS instance creation, and GPU
-resource upload/compile pressure.
+- Steady FPS should improve by reducing texture/material state changes without
+  exploding disk usage.
 
-OpenMW has an incremental compile/resource-cache system around this. We have a
-good start with warmup and worker tasks, but we are still generating expensive
-proxy resources too close to visibility time.
+### 4. Representation Split
 
-**Good move**
+Problem:
 
-Move HLOD proxy generation out of the live traversal path:
+HLOD geometry is currently asked to represent too many kinds of distant content.
 
-- Primary path: cached/prebuilt HLOD chunk assets on disk.
-- Runtime path: stream, upload, and show already-built proxy resources.
-- Background path: build missing proxies asynchronously and save them, but do not
-  let a missing proxy hitch the frame that needs to render.
-- Publish GPU resources under a hard frame budget, with visible old chunks kept
-  alive until replacements are ready.
+Plan:
 
-Runtime merging can remain as a development fallback, but not as the shipping
-performance path.
-
-## Issue 4: HLOD Is Not Predictively Paged Like NEAR
-
-**What is happening**
-
-NEAR has velocity-aware preloading. HLOD mostly uses current camera position,
-chunk-center distance, distance-sorted queueing, and teleport warmup. That helps,
-but it is not the same as preloading the chunks the player is heading toward.
-
-**Good move**
-
-After proxy assets are cheap enough, add a predictive HLOD stream source:
-
-- Use camera/player velocity on the XZ plane.
-- Preload the next HLOD ring in the movement direction.
-- Keep the current distance ring resident until the next ring is ready.
-- Treat teleport as a separate loading-state path, not a normal movement case.
-
-Prediction should hide latency. It should not be used to excuse expensive proxy
-generation.
-
-## Issue 5: Coverage-First Currently Forces Too Much Geometry
-
-**What is happening**
-
-`RUNTIME_FORCE_MERGE_ELIGIBLE_REFS = true` favors visual coverage. That was a
-reasonable corrective move after HLOD holes, but it means the kernel bypasses
-some cost-benefit filtering and accepts many refs into surface-heavy chunks.
-
-The result is visually dense but expensive.
-
-**Good move**
-
-Separate three decisions:
-
-1. Should this object appear in distant content at all?
-2. Which representation should it use: HLOD geometry, impostor, groundcover,
-   distant light, or nothing?
-3. Can this HLOD proxy claim complete coverage for suppressing MID/FAR overlap?
-
-Use screen-size and content-class rules:
-
-- Buildings, rocks, large statics: HLOD geometry/proxy.
-- Trees and repeated organic clutter: impostors, billboards, or specialized
-  vegetation/groundcover renderer.
-- Tiny clutter below screen threshold: drop from HLOD.
+- Buildings, large rocks, bridges, and landmarks: HLOD geometry.
+- Trees, shrubs, repeated organic clutter: impostors, billboards, or a dedicated
+  vegetation renderer.
+- Tiny clutter: drop by projected size once this is proven not to remove
+  important silhouettes.
 - Lights: distant-light system, not HLOD geometry.
+- Doors/activators: geometry only when they are visually large or landmark-like.
 
-That keeps coverage intentional without making every accepted object part of an
-expensive geometry proxy.
+Expected effect:
 
-## Issue 6: HLOD Geometry Is Not Simplified Enough
+- Filtering becomes coverage-safe because rejected content has an intended
+  alternate representation or an explicit screen-size reason to disappear.
 
-**What is happening**
+### 5. Alternate LOD Mesh Names
 
-Runtime HLOD LOD generation is disabled, which is good for avoiding main-thread
-ImporterMesh cost, but it also means the currently published HLOD mesh can carry
-too many vertices/indices for a distant proxy.
+Problem:
 
-The logs showed millions of visible primitives in HLOD-only views.
+OpenMW can substitute alternate LOD mesh names when available. We currently tend
+to merge near-ish source geometry.
 
-**Good move**
+Plan:
 
-Generate simplified HLOD meshes offline or in a cache build step:
+- Add Morrowind-adapter lookup for alternate LOD mesh names.
+- Keep this outside the generic HLOD framework.
+- Prefer LOD source meshes for HLOD inputs when they exist.
+- Fall back to current source meshes when no alternate exists.
 
-- Use decimation targets per distance band.
-- Preserve silhouettes for large landmarks.
-- Aggressively simplify interiors/backfaces/details not visible at 300-1000m.
-- Store proxy meshes with their intended material proxies.
-- Do not call runtime LOD generation in the hot path.
+Expected effect:
 
-The shipping HLOD chunk should be a purpose-built distant mesh, not a merged copy
-of near geometry.
+- Lower vertex/index counts for compatible content without changing generic
+  framework code.
 
-## Issue 7: Cache Policy Must Pin Active Chunks
+## Recommended Order
 
-**What is happening**
+1. Add one HLOD-only diagnostic capture that reports the worst chunks by publish
+   time, surfaces, materials, vertices, and indices.
+2. Enforce bounded publish units by splitting oversized runtime chunks.
+3. Implement material canonicalization by render signature.
+4. Prototype targeted atlas or texture-array reduction on one high-repeat content
+   family.
+5. Add representation-class routing so future filtering cannot delete large
+   buildings or landmarks.
+6. Revisit cost-benefit filtering only after representation routing exists.
 
-Previous audit notes flagged that cache pressure can delete active HLOD resources
-if active chunks are treated the same as inactive cached entries.
+This order avoids the failed pattern of trading visual coverage for little or no
+performance win.
 
-**Good move**
+## Do Not Do
 
-Make residency explicit:
+- Do not globally prebake every HLOD chunk; disk usage is already known to be too
+  high.
+- Do not re-enable cost-benefit filtering as a blind production default while it
+  removes large buildings.
+- Do not publish null-material HLOD surfaces.
+- Do not use a frame budget as an excuse to publish a single oversized mesh.
+- Do not solve HLOD holes by widening MID or pulling FAR inward; that hides the
+  bug and makes the tier contract unclear.
+- Do not put Morrowind-specific mesh-name or content rules into generic core
+  HLOD code.
 
-- Active visible chunks are pinned.
-- Recently visible chunks are warm-resident for a short grace window.
-- Only inactive cached proxies are evictable.
-- If memory is over budget, degrade future proxy quality or refuse new inactive
-  cache entries before evicting visible chunks.
+## Done Criteria
 
-This matches the standard streaming-resource rule: never evict what the renderer
-is actively drawing.
+HLOD is not fixed until:
 
-## Issue 8: Metrics Need To Track Proxy Quality, Not Just Chunk Count
+- HLOD-only interactive traversal holds acceptable FPS in dense views.
+- Normal movement does not produce recurring visible publish spikes.
+- Visible HLOD draw calls/materials/surfaces are bounded.
+- Oversized chunks are split, deferred, or routed elsewhere.
+- Large buildings and landmarks remain visible in the 300-1000m band.
+- Missing content is intentional and explainable by representation policy.
+- The generic HLOD framework remains data-source agnostic.
 
-**What is happening**
+## Plain English
 
-The current stats are useful, but the primary health signal should be whether the
-visible HLOD set is cheap enough to render.
-
-**Good move**
-
-Make these first-class acceptance counters:
-
-- visible HLOD chunks;
-- surfaces/materials per chunk;
-- total visible HLOD draw calls;
-- total visible HLOD triangles/primitives;
-- proxy memory per chunk;
-- chunk build/load/upload time;
-- white/default-material surface count;
-- missing/negative chunks by reason;
-- content-class breakdown: building, rock, tree, clutter, door, activator.
-
-Acceptance should fail if HLOD-only has thousands of draw calls, even if it has
-"only" a few chunk instances.
-
-## Recommended Implementation Direction
-
-### Phase 1: Stop Broken Output
-
-- Remove/null-material overflow as an allowed visible result.
-- Add telemetry for default-material HLOD surfaces.
-- Add per-chunk material/surface histograms to `hlod_stats`.
-- Keep HLOD-only launch mode as the visual verification scene.
-
-Expected effect: white objects become diagnosed and bounded instead of silently
-published.
-
-### Phase 2: Build Proxy Material Policy
-
-- Define distant proxy material classes or an atlas/texture-array path.
-- Bucket source materials into those proxy classes.
-- Preserve only the material features that matter at HLOD distance: albedo,
-  alpha cutout where necessary, rough normal/color class if needed.
-- Avoid per-source-material surfaces in HLOD chunks.
-
-Expected effect: draw calls collapse because surfaces collapse.
-
-### Phase 3: Cached HLOD Proxy Assets
-
-- Add a cache builder for HLOD chunks.
-- Output chunk proxy mesh + proxy material metadata.
-- Store cache keys by data source, cell/chunk key, content version, and proxy
-  settings version.
-- Runtime loads proxies instead of generating them during traversal.
-
-Expected effect: cell-transition stutters drop because expensive merge/simplify
-work no longer lands on the live frame.
-
-### Phase 4: Representation Split
-
-- Route large statics to HLOD geometry.
-- Route repeated trees/organic clutter to impostors or vegetation renderer.
-- Route tiny clutter out by projected screen size.
-- Route lights to distant-light pages.
-
-Expected effect: HLOD stops trying to be the renderer for every distant thing.
-
-### Phase 5: Predictive Streaming
-
-- Feed HLOD streaming from current camera/player velocity, like NEAR preloading.
-- Preload ahead of the current ring.
-- Keep old visible chunks until new chunks are resident.
-
-Expected effect: movement through cell boundaries stops exposing HLOD build/load
-latency.
-
-## Definition Of Done
-
-HLOD should not be called fixed until:
-
-- HLOD-only can be launched interactively with terrain and no NEAR/MID/FAR.
-- Dense views hold the target FPS with no recurring transition hitch.
-- Visible HLOD draw calls are bounded and substantially below MID/FAR full-stack
-  cost.
-- No visible white/default-material proxy surfaces.
-- Chunk publication never exceeds the frame budget in normal movement.
-- HLOD gaps are measured and intentional, not hidden by widening MID or FAR.
-- The system remains data-source agnostic: Morrowind-specific selection rules
-  live in the adapter/source layer, while the HLOD framework consumes generic
-  object records and proxy metadata.
-
-## Plain-English Summary
-
-The issue is not that HLOD is missing a tiny tweak. The current system is doing
-runtime chunk aggregation, but industry-standard HLOD is proxy generation:
-fewer meshes, fewer triangles, and especially fewer materials. Our HLOD is still
-rendering too many material islands, and sometimes it falls off the edge into
-white default material overflow. The clean fix is to build real distant proxies:
-simplified chunk meshes with simplified/atlased materials, cached ahead of time,
-then streamed predictively.
+Filtering alone made the world cheaper-looking, not faster enough. That means
+the problem is deeper than object count. The next fixes should make HLOD chunks
+smaller to publish and cheaper to draw: fewer surfaces, fewer materials, smaller
+upload units, and smarter routing for trees/clutter/lights. Once important
+coverage has another safe path, filtering can come back as a scalpel instead of
+an axe.
