@@ -53,17 +53,17 @@ const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
 const MIN_REFS_TO_MERGE: int = 1
 
 ## Merge-queue stagger budget (main-thread work per frame).
-const MERGES_PER_FRAME: int = 2
-const MERGE_QUEUE_BUDGET_USEC: int = 2500
-const MERGE_QUEUE_SOFT_LIMIT_USEC: int = 2200
+const MERGES_PER_FRAME: int = 1
+const MERGE_QUEUE_BUDGET_USEC: int = 1500
+const MERGE_QUEUE_SOFT_LIMIT_USEC: int = 1200
 
 ## Completion publish budget. Runtime HLOD publication must stay bounded; LOD
 ## generation for proxy chunks belongs in an offline/precomputed path, not in
 ## traversal-time publish.
 const COMPLETIONS_PER_FRAME: int = 1
-const COMPLETION_BUDGET_USEC: int = 2500
+const COMPLETION_BUDGET_USEC: int = 1500
 const RUNTIME_GENERATE_LODS: bool = false
-const MAX_RUNTIME_CHUNK_SURFACES: int = 128
+const MAX_RUNTIME_CHUNK_SURFACES: int = 64
 
 ## visibility_range fade margins (same on both sides of a tier handoff).
 const TIER_FADE_MARGIN: float = 20.0
@@ -103,9 +103,9 @@ const RUNTIME_FORCE_MERGE_ELIGIBLE_REFS: bool = true
 ## Predictive paging queues the next HLOD ring in the movement direction so
 ## normal traversal does not discover cold chunks exactly at the tier boundary.
 const PREDICTIVE_STREAMING_ENABLED: bool = true
-const PREDICTIVE_LOOKAHEAD_SECONDS: float = 2.0
+const PREDICTIVE_LOOKAHEAD_SECONDS: float = 4.0
 const PREDICTIVE_MIN_SPEED_MPS: float = 8.0
-const PREDICTIVE_MAX_LOOKAHEAD_M: float = 350.0
+const PREDICTIVE_MAX_LOOKAHEAD_M: float = 700.0
 const PREDICTIVE_SAMPLE_COUNT: int = 3
 
 
@@ -422,6 +422,8 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# Phase 4d — on teleport, enqueue unregistered prototypes for the new ring.
 	if is_teleport:
 		_prime_warmup_queue(desired_chunks)
+	elif not prefetch_chunks.is_empty():
+		_prime_warmup_queue(prefetch_chunks)
 
 	var changed := 0
 

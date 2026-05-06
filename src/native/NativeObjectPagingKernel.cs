@@ -31,7 +31,7 @@ namespace Godotwind.Native;
 [GlobalClass]
 public partial class NativeObjectPagingKernel : RefCounted
 {
-    private const int RuntimeMaxSurfaces = 128;
+    private const int RuntimeMaxSurfaces = 64;
     private const int MaxOverflowMaterialBuckets = 8;
     private const string DefaultProxyMaterialName = "GodotwindHLODDefaultProxy";
 
@@ -222,20 +222,40 @@ public partial class NativeObjectPagingKernel : RefCounted
         if (flatSurfaces.Count > RuntimeMaxSurfaces)
         {
             flatSurfaces.Sort((a, b) => b.VertCount.CompareTo(a.VertCount));
-            var overflow = new Godot.Collections.Array();
-            int keptSurfaceCount = RuntimeMaxSurfaces - 1;
+            int overage = flatSurfaces.Count - RuntimeMaxSurfaces;
+            int bucketCount = Mathf.Clamp((overage + 7) / 8, 1, MaxOverflowMaterialBuckets);
+            int keptSurfaceCount = RuntimeMaxSurfaces - bucketCount;
+            var overflowBuckets = new List<OverflowBucket>(bucketCount);
+            for (int i = 0; i < bucketCount; i++)
+            {
+                var source = flatSurfaces[keptSurfaceCount + i];
+                overflowBuckets.Add(new OverflowBucket
+                {
+                    Material = source.Material,
+                    ArraysList = new Godot.Collections.Array(),
+                    VertCount = 0
+                });
+            }
             for (int i = keptSurfaceCount; i < flatSurfaces.Count; i++)
-                overflow.Add(flatSurfaces[i].Arrays);
+            {
+                var bucket = overflowBuckets[(i - keptSurfaceCount) % bucketCount];
+                bucket.ArraysList.Add(flatSurfaces[i].Arrays);
+                bucket.VertCount += flatSurfaces[i].VertCount;
+            }
             overflowProxySurfaces = flatSurfaces.Count - keptSurfaceCount;
             flatSurfaces.RemoveRange(keptSurfaceCount, flatSurfaces.Count - keptSurfaceCount);
-            var combined = ConcatenateSurfaceArrays(overflow);
-            if (combined.Count > 0)
+            foreach (var bucket in overflowBuckets)
+            {
+                var combined = ConcatenateSurfaceArrays(bucket.ArraysList);
+                if (combined.Count == 0)
+                    continue;
                 flatSurfaces.Add(new FlatSurface
                 {
                     Arrays = combined,
-                    Material = GetDefaultProxyMaterial(ref defaultProxyMaterial),
-                    VertCount = 0
+                    Material = bucket.Material ?? GetDefaultProxyMaterial(ref defaultProxyMaterial),
+                    VertCount = bucket.VertCount
                 });
+            }
         }
 
         var mergedMesh = new ArrayMesh();
@@ -553,6 +573,13 @@ public partial class NativeObjectPagingKernel : RefCounted
     {
         public Godot.Collections.Array Arrays = null!;
         public Material Material = null!;
+        public int VertCount;
+    }
+
+    private sealed class OverflowBucket
+    {
+        public Material Material = null!;
+        public Godot.Collections.Array ArraysList = null!;
         public int VertCount;
     }
 

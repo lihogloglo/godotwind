@@ -22,7 +22,7 @@ const START_CELL := Vector2i(-2, -9)
 const START_POS := Vector3(-2.0 * 117.0 + 58.5, 52.0, 9.0 * 117.0 + 58.5)
 const HLOD_UPDATE_DISTANCE := 25.0
 const MODEL_LOADER_BUDGET_USEC := 2000
-const HLOD_PUBLICATION_BUDGET_USEC := 2500
+const HLOD_PUBLICATION_BUDGET_USEC := 1500
 const STATS_INTERVAL := 0.25
 const CSV_DIR := "user://benchmark_results"
 

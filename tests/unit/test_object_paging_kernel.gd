@@ -278,7 +278,7 @@ func test_surface_overflow_uses_proxy_material_not_null_material() -> void:
 
 	var stats := Kernel.collect_mesh_stats(merged)
 	assert_int(int(stats.get("null_material_surface_count", -1))).is_equal(0)
-	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(1)
+	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(0)
 	assert_int(int(stats.get("overflow_proxy_surfaces", 0))).is_greater(0)
 
 
@@ -293,7 +293,7 @@ func test_surface_overflow_folds_one_over_runtime_cap() -> void:
 
 	var stats := Kernel.collect_mesh_stats(merged)
 	assert_int(int(stats.get("null_material_surface_count", -1))).is_equal(0)
-	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(1)
+	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(0)
 	assert_int(int(stats.get("overflow_proxy_surfaces", 0))).is_equal(2)
 
 

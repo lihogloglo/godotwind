@@ -50,7 +50,7 @@ const PUBLICATION_LANE_HLOD := "hlod"
 const PUBLICATION_LANE_FAR_IMPOSTORS := "far_impostors"
 const PUBLICATION_LANE_DISTANT_LIGHTS := "distant_lights"
 const PUBLICATION_LANE_UNLOAD := "unload"
-const HLOD_PUBLICATION_BUDGET_USEC: int = 2500
+const HLOD_PUBLICATION_BUDGET_USEC: int = 1500
 const FAR_IMPOSTOR_PUBLICATION_BUDGET_USEC: int = 4000
 const DISTANT_LIGHT_PUBLICATION_BUDGET_USEC: int = 2400
 # MidTierBatchPool removed — StaticObjectRenderer now owns MID statics via
