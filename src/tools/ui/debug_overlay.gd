@@ -97,9 +97,9 @@ var _tier_materials: Dictionary[int, StandardMaterial3D] = {}
 ## Tier colors (semi-transparent)
 const TIER_COLORS: Dictionary[int, Color] = {
 	0: Color(0.2, 1.0, 0.2, 0.15),   # NEAR - green (0-150m)
-	1: Color(1.0, 0.9, 0.2, 0.15),   # MID - yellow (150-300m)
-	2: Color(0.0, 0.75, 1.0, 0.14),  # HLOD - cyan (300-1000m)
-	3: Color(0.65, 0.3, 1.0, 0.12),  # FAR impostors - purple (1000m+)
+	1: Color(1.0, 0.9, 0.2, 0.15),   # MID - yellow (150-400m)
+	2: Color(0.0, 0.75, 1.0, 0.14),  # HLOD - cyan (optional)
+	3: Color(0.65, 0.3, 1.0, 0.12),  # FAR impostors - purple (400m+)
 }
 
 ## Chunk color
@@ -882,7 +882,7 @@ func _create_lod_legend() -> void:
 			1: "LOD1 (MID 150-250m)",
 			2: "LOD2 (MID 250-375m)",
 			3: "LOD3 (screen-space MID)",
-			4: "Impostor (FAR 1000m+)",
+			4: "Impostor (FAR 400m+)",
 		}
 
 		for lod_level: int in lod_names:

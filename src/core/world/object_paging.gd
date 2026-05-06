@@ -171,7 +171,7 @@ class MergePrepState:
 ## Master toggle.
 ## Phase 4 (2026-04-17) — implemented as an opt-in runtime path while chunk
 ## coverage and publish costs are verified:
-## HLOD-on = MID capped at DU.MID_END, HLOD visible 300-1000m, FAR visible
+## HLOD-on = MID capped at DU.MID_END, HLOD visible 400-1000m, FAR visible
 ## from DU.FAR_START onward. HLOD-off parks only merged chunks; it does not
 ## widen MID or pull FAR inward.
 ## Toggle at runtime via console: `hlod_enable` / `hlod_disable`.

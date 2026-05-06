@@ -17,9 +17,9 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 ## ObjectStreamer uses HIDDEN for object-level visibility. Both map to value 3+.
 enum Tier {
 	NEAR = 0,    # 0-150m: Full Node3D with physics
-	MID = 1,     # 150-300m: cell-local static buckets
-	HLOD = 2,    # 300-1000m: merged chunk proxies
-	FAR = 3,     # 1000m-5km: impostors
+	MID = 1,     # 150-400m: cell-local static buckets
+	HLOD = 2,    # optional merged chunk proxies
+	FAR = 3,     # 400m-5km: impostors
 	HIDDEN = 4   # Beyond FAR or not loaded
 }
 
@@ -44,8 +44,6 @@ static func get_tier_for_distance(distance: float) -> int:
 		return Tier.NEAR
 	elif distance < DU.MID_END:
 		return Tier.MID
-	elif distance < DU.HLOD_END:
-		return Tier.HLOD
 	elif distance < DU.FAR_END:
 		return Tier.FAR
 	else:

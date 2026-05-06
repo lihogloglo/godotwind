@@ -350,7 +350,7 @@ var _impostor_update_pending: bool = false
 ## Distant light manager — billboard sprites for lights beyond NEAR tier (150m–5km)
 var _distant_light_manager: DistantLightManager = null
 
-## Runtime HLOD merger — cell-level merged meshes for 300-1000m range (OpenMW-style).
+## Runtime HLOD merger — optional cell-level merged meshes for the 400-1000m band.
 ## Loaded lazily so `--no-hlod` / impostor-only runs do not initialize ObjectPaging.
 var _object_paging_script: Script = null
 var _hlod_merger: RefCounted = null

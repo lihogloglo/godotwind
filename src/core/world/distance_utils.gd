@@ -24,11 +24,11 @@ const HALF_CELL_SIZE: float = CELL_SIZE_METERS * 0.5
 const NEAR_END: float = 150.0
 
 ## MID tier: static bucket visuals (NEAR_END to MID_END).
-const MID_END: float = 300.0
+const MID_END: float = 400.0
 
-## HLOD tier: Cell-level merged meshes (HLOD_START to HLOD_END)
-## Bridges individual MID instances and impostor billboards
-const HLOD_START: float = 300.0
+## Optional HLOD tier: runtime-merged chunk proxies.
+## Normal gameplay currently parks HLOD and hands MID directly to FAR.
+const HLOD_START: float = MID_END
 const HLOD_END: float = 1000.0
 
 ## FAR tier: Impostors/billboards (FAR_START to FAR_END).
@@ -46,7 +46,7 @@ const LOD3_END: float = 500.0
 ## Tier start distances (for convenience).
 const NEAR_START: float = 0.0
 const MID_START: float = NEAR_END
-const FAR_START: float = HLOD_END
+const FAR_START: float = MID_END
 
 ## Crossfade zone size (meters) - both tiers visible during transition
 ## Tiered: smaller at close range (geometry mismatch visible), larger at distance
@@ -91,11 +91,11 @@ const PAGING_MERGE_FACTOR: float = 256.0
 ## Phase 4 — adaptive chunk tier band ends (strict half-open intervals).
 ## Plan §4.2. Band classification uses chunk-CENTER distance from camera.
 ##   size_level 0 (1×1 chunks) = [150, 300)
-##   size_level 1 (2×2 chunks) = [300, 600)
+##   size_level 1 (2×2 chunks) = [400, 600)
 ##   size_level 2 (4×4 chunks) = [600, 1000)
 ## FAR tier (impostors) picks up at PAGING_TIER_2_END.
 const PAGING_TIER_0_START: float = 150.0
-const PAGING_TIER_0_END: float = 300.0
+const PAGING_TIER_0_END: float = HLOD_START
 const PAGING_TIER_1_END: float = 600.0
 const PAGING_TIER_2_END: float = 1000.0
 
@@ -116,7 +116,7 @@ const PAGING_HYSTERESIS: float = 20.0
 ##   0.3m pebble  → 60m cutoff
 ##   0.8m barrel  → 160m cutoff
 ##   1.5m crate   → 300m cutoff
-##   3m tree      → 600m → clamped to MID_END (300m)
+##   3m tree      → 600m → clamped to MID_END (400m)
 ## Inside the instance's spatial AABB, Godot reports distance=0 so the fade
 ## stays off — close-up shadows preserved. Outside the AABB by more than
 ## `cutoff`, VISIBILITY_RANGE_FADE_SELF dithers out → both visible and shadow

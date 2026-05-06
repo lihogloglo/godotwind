@@ -11,7 +11,7 @@
 ## per-LOD RS instances.
 ##
 ## The instance carries a single hard-cull `visibility_range` at MID_END for the
-## MID->HLOD tier handoff; sub-LOD selection is fully engine-driven.
+## default MID->FAR tier handoff; sub-LOD selection is fully engine-driven.
 ##
 ## Usage:
 ##   var renderer := StaticObjectRenderer.new()
@@ -101,7 +101,7 @@ var _next_id: int = 0
 var _scenario: RID = RID()
 
 ## Maximum visibility range for individual MID instances.
-## Default: MID_END (300m). HLOD owns the next fixed tier, 300-1000m.
+## Default: MID_END (400m). FAR owns the default next tier; HLOD is optional.
 var visibility_range_begin: float = 0.0
 var visibility_range_end: float = DU.MID_END
 
@@ -857,7 +857,7 @@ func precompute_instance(
 ## Add an instance of a registered mesh type.
 ##
 ## Post-B-wide: single RS instance per object with a single hard-cull
-## visibility_range at MID_END (MID->HLOD tier handoff). Sub-LOD selection
+## visibility_range at MID_END (default MID->FAR tier handoff). Sub-LOD selection
 ## is driven by the embedded `surface_lod_indices` chain + Godot's C++ screen-
 ## space LOD selector, not by manual distance bands.
 ##

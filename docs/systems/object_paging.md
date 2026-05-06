@@ -9,21 +9,21 @@ on the main thread.
 
 ## Status
 
-HLOD is default-on in `Godotwind.tscn`. FAR impostors are default-on from
-1000m. `--no-hlod` / `hlod_disable` remain ablation tools for isolating HLOD
-cost and coverage issues.
+HLOD is default-off in `Godotwind.tscn` for the 400m MID/FAR experiment. FAR
+impostors are default-on from 400m. `--hlod` / `hlod_enable` remain comparison
+tools for isolating HLOD cost and coverage issues.
 
 Runtime modes:
 
 | Mode | MID | HLOD | FAR |
 | --- | --- | --- | --- |
-| Default | 0-300m `CellStaticBucket` bridge | Visible 300-1000m | 1000-5000m |
-| `hlod_enable` | 0-300m bridge | Visible 300-1000m | 1000-5000m |
-| `hlod_disable` | 0-300m bridge | Off / cleaned up | 1000-5000m |
+| Default | 0-400m `CellStaticBucket` bridge | Off / cleaned up | 400-5000m |
+| `hlod_enable` | 0-400m bridge | Visible 400-1000m | 400-5000m |
+| `hlod_disable` | 0-400m bridge | Off / cleaned up | 400-5000m |
 
-The nominal constants define `HLOD_START = 300`, `HLOD_END = 1000`, and
-`FAR_START = 1000`. Runtime HLOD uses the 300m visual floor, and FAR uses the
-fixed 1000m handoff.
+The nominal constants define `HLOD_START = 400`, `HLOD_END = 1000`, and
+`FAR_START = 400`. Runtime HLOD uses the 400m visual floor when explicitly
+enabled, and FAR uses the fixed 400m handoff.
 
 Console surface:
 
@@ -105,7 +105,7 @@ The filter order is:
    High-benefit types can keep smaller refs in the merged proxy; marginal
    types are filtered more aggressively.
 
-The goal is coverage first inside 300-1000m, then fewer useful render surfaces
+The goal is coverage first inside the optional 400-1000m HLOD band, then fewer useful render surfaces
 through proxy-material and atlas work.
 
 ## Threading Contract
@@ -148,12 +148,13 @@ and a worker finishes after the camera leaves range.
 
 Current handoff:
 
-- MID `CellStaticBucket` owns visible static geometry through 300m.
-- HLOD, when enabled, is visible from 300m to 1000m.
-- FAR impostors are visible from 1000m to 5000m.
+- MID `CellStaticBucket` owns visible static geometry through 400m.
+- FAR impostors are visible from 400m to 5000m.
+- HLOD, when enabled, is visible from 400m to 1000m as an overlap comparison.
 
-This is intentionally non-overlapping. HLOD coverage gaps should be diagnosed
-as HLOD coverage gaps rather than hidden by widening MID or starting FAR early.
+The default MID/FAR path is intentionally simple and non-overlapping. Optional
+HLOD runs may overlap FAR so their cost and visual coverage can be compared
+without creating a 400-1000m hole.
 The active coverage manifest intentionally separates rendered HLOD object ids
 from complete static-bucket counts. Partial buckets still render in HLOD, but
 only complete buckets are safe to use for static-visual suppression. FAR

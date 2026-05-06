@@ -23,21 +23,21 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 ## User-facing object visibility distance in meters. This is not the MID cell
 ## radius. The fixed tier ownership is:
 ##   NEAR: 0-150m
-##   MID: 150-300m
-##   HLOD: 300-1000m
-##   FAR impostors: 1000m+
+##   MID: 150-400m
+##   FAR impostors: 400m+
+##   HLOD: optional runtime chunk proxies, off by default
 const DEFAULT_VIEW_DISTANCE_METERS := int(DU.FAR_END)
 
 ## Slider limits in meters. Values below a tier start suppress that tier's
-## loading entirely; e.g. <300m means no HLOD/impostor work.
+## loading entirely; e.g. <=400m means no FAR impostor work.
 const MIN_VIEW_DISTANCE_METERS := int(DU.NEAR_END)
 const MAX_VIEW_DISTANCE_METERS := int(DU.FAR_END)
 const VIEW_DISTANCE_STEP_METERS := 50
 
 ## Maximum exterior cell radius needed by the NEAR/MID scene representation.
-## HLOD and FAR read world data directly, so active scene cells never expand
-## beyond the fixed MID bridge band.
-const MAX_SCENE_LOAD_RADIUS_CELLS := 3
+## FAR reads world data directly, so active scene cells only expand far enough
+## to feed the fixed MID bridge band.
+const MAX_SCENE_LOAD_RADIUS_CELLS := 4
 
 ## Playable NEAR-only cell footprint. This matches the OpenMW-style exterior
 ## load distance of 1 cell: current cell plus immediate neighbors. MID disabled
@@ -105,9 +105,9 @@ static func format_load_radius_with_distance(value: int) -> String:
 ## NEAR tier: Full Node3D with physics and collision
 const NEAR_END := DU.NEAR_END  # 150.0
 
-## Distance where MID tier ends and HLOD begins (meters)
+## Distance where MID tier ends and FAR begins by default (meters)
 ## MID tier: one RS instance per object, engine-driven sub-LOD from embedded ArrayMesh surface_lod chain
-const MID_END := DU.MID_END  # 300.0
+const MID_END := DU.MID_END  # 400.0
 
 ## Distance where FAR tier ends and HORIZON begins (meters)
 ## FAR tier: Octahedral impostor billboards

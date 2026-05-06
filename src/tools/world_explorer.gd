@@ -1880,9 +1880,9 @@ func _setup_subsystem_toggles() -> void:
 				_env_controls.on_native_volumetric_fog_toggled(on),
 	}
 
-	# Distant rendering is on by default through the fixed MID -> HLOD -> FAR
+	# Distant rendering is on by default through the fixed MID -> FAR
 	# architecture. `--near-only` remains the full distant-tier opt-out, and
-	# `--no-hlod` remains the HLOD ablation path.
+	# `--hlod` remains the runtime-HLOD experiment path.
 	#
 	# `static_visuals` controls the MID extension of the shared static renderer.
 	# With NEAR gameplay on, disabling it caps static buckets to NEAR range
@@ -1916,7 +1916,7 @@ func _setup_subsystem_toggles() -> void:
 		"far_impostors": distant_default and not boot_no_impostors and not boot_hlod_only,
 		"static_visuals": distant_default and not boot_hlod_only and not boot_far_only,
 		"near_gameplay": not boot_far_only,
-		"hlod": distant_default and not boot_no_hlod and not boot_far_only,
+		"hlod": boot_hlod_only or (not boot_no_hlod and not boot_far_only and runtime_args.has("--hlod")),
 		"distant_lights": distant_default and not boot_no_distant_lights and not boot_hlod_only and not boot_far_only,
 		"shadows": false,
 		"postfx": false,
@@ -1946,8 +1946,14 @@ func _setup_subsystem_toggles() -> void:
 		])
 
 	# Boot banner: make the active distant tier state explicit in logs.
-	_log("[color=green][Distant tiers active][/color] MID fixed 150-300m; HLOD 300-1000m; FAR impostors 1000m+")
-	Log.info("streaming", "[Distant tiers active] MID fixed=150-300; HLOD=300-1000; FAR starts at 1000; view distance caps tier loading")
+	_log("[color=green][Distant tiers active][/color] MID fixed 150-%dm; FAR impostors %dm+; HLOD off by default" % [
+		int(StreamingConfig.DU.MID_END),
+		int(StreamingConfig.DU.FAR_START),
+	])
+	Log.info("streaming", "[Distant tiers active] MID fixed=150-%d; FAR starts at %d; HLOD off by default; view distance caps tier loading" % [
+		int(StreamingConfig.DU.MID_END),
+		int(StreamingConfig.DU.FAR_START),
+	])
 
 	# CLI controls for focused tier isolation. `--near-only` parks MID and
 	# distant render tiers. `--near-mid-only` is the hard benchmark
@@ -1979,7 +1985,7 @@ func _setup_subsystem_toggles() -> void:
 			_log("[color=yellow]--near-mid-only: terrain + NEAR + MID isolation[/color]")
 		elif a == "--hlod":
 			_subsystem_toggles.set_flag("hlod", true)
-			_log("[color=yellow]--hlod: HLOD ON; FAR starts at 1000m[/color]")
+			_log("[color=yellow]--hlod: HLOD ON; FAR still starts at %dm[/color]" % int(StreamingConfig.DU.FAR_START))
 		elif a == "--hlod-only":
 			_hlod_flyby_mode = true
 			_subsystem_toggles.set_flag("terrain", true)
@@ -2011,7 +2017,7 @@ func _setup_subsystem_toggles() -> void:
 			_log("[color=yellow]--far-only: terrain + FAR impostors only; NEAR/MID/HLOD/environment OFF[/color]")
 		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
 			_subsystem_toggles.set_flag("hlod", false)
-			_log("[color=yellow]--no-hlod: HLOD OFF; MID still fixed at 300m[/color]")
+			_log("[color=yellow]--no-hlod: HLOD OFF; MID fixed at %dm[/color]" % int(StreamingConfig.DU.MID_END))
 		elif a == "--no-impostors":
 			_subsystem_toggles.set_flag("far_impostors", false)
 			_log("[color=yellow]--no-impostors: FAR impostors OFF[/color]")
@@ -2352,7 +2358,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		console.register_command(
 			"hlod_enable",
 			_cmd_hlod_enable,
-			"Enable runtime HLOD merging (visible 300-1000m; FAR starts at 1000m)",
+			"Enable runtime HLOD merging (optional overlap with FAR)",
 			"streaming"
 		)
 
@@ -2447,7 +2453,11 @@ func _cmd_toggle_tier_view(_args: Dictionary) -> String:
 		return "Debug overlay not initialized"
 	_on_show_tiers_toggled(not _show_tier_debug)
 	var state := "ON" if _show_tier_debug else "OFF"
-	return "Tier view: %s (NEAR 0-150m, MID 150-300m, HLOD 300-1000m, FAR 1000m+)" % state
+	return "Tier view: %s (NEAR 0-150m, MID 150-%dm, FAR %dm+, HLOD optional)" % [
+		state,
+		int(StreamingConfig.DU.MID_END),
+		int(StreamingConfig.DU.FAR_START),
+	]
 
 
 func _cmd_toggle_hlod_chunk_view(_args: Dictionary) -> String:
@@ -2539,7 +2549,7 @@ func _cmd_hlod_enable(_args: Dictionary) -> String:
 	var cap := _get_distant_render_end_m()
 	return "HLOD requested - MID bridge 150-%dm, HLOD %s, FAR %s, view cap %dm" % [
 		int(StreamingConfig.DU.MID_END),
-		"300-%dm" % int(minf(cap, StreamingConfig.DU.HLOD_END)) if cap > StreamingConfig.DU.HLOD_START else "not loaded",
+		"%d-%dm" % [int(StreamingConfig.DU.HLOD_START), int(minf(cap, StreamingConfig.DU.HLOD_END))] if cap > StreamingConfig.DU.HLOD_START else "not loaded",
 		"%d-%dm" % [int(StreamingConfig.DU.FAR_START), int(cap)] if cap > StreamingConfig.DU.FAR_START else "not loaded",
 		int(cap),
 	]

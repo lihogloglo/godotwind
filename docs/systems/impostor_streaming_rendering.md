@@ -363,8 +363,9 @@ Teleport/startup:
 HLOD handoff:
 
 - MID owns 0-300 m through static buckets.
-- HLOD owns 300-1000 m through ObjectPaging chunk proxies.
-- FAR impostors begin at `DU.FAR_START`/1000 m and never earlier.
+- MID owns 0-400 m through static buckets.
+- FAR impostors begin at `DU.FAR_START`/400 m.
+- Optional HLOD can be enabled as a 400-1000 m overlap comparison tier.
 - HLOD coverage gaps are HLOD bugs to diagnose, not reasons to widen MID or
   pull FAR inward.
 

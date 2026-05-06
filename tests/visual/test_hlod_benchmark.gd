@@ -289,10 +289,10 @@ func _toggle_hlod() -> void:
 		Log.info("hlod_bench", "HLOD ENABLED")
 		var merger_stats: Dictionary = _streaming_manager.get_hlod_stats() if _streaming_manager.has_method("get_hlod_stats") else {}
 		Log.info("hlod_bench", "  HLOD stats: %s" % str(merger_stats))
-		Log.info("hlod_bench", "  MID fixed 0-300m, HLOD visible 300-1000m, FAR impostors 1000m+")
+		Log.info("hlod_bench", "  MID fixed 0-400m, HLOD visible 400-1000m, FAR impostors 400m+")
 	else:
 		_streaming_manager.set_hlod_visible(false)
-		Log.info("hlod_bench", "HLOD DISABLED - MID fixed 0-300m, FAR impostors 1000m+")
+		Log.info("hlod_bench", "HLOD DISABLED - MID fixed 0-400m, FAR impostors 400m+")
 
 #endregion
 

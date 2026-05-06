@@ -9,24 +9,24 @@ system docs linked below.
 | Tier | Runtime range | Owner | Technique | Status |
 | --- | --- | --- | --- | --- |
 | NEAR gameplay | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior. Toggle disables visibility, processing, and collision/area activation. | Working |
-| Static visuals | Fixed 150-300m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
-| HLOD | Fixed 300-1000m, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies from generic world object records: static-capable objects are merged into chunk meshes and published as raw RS instances. | Working, default-on |
-| FAR impostors | Fixed 1000-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages from generic impostor-capable records | Working |
+| Static visuals | Fixed 150-400m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
+| FAR impostors | Fixed 400-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages from generic impostor-capable records | Working |
+| HLOD | Optional 400-1000m overlap experiment, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies from generic world object records: static-capable objects are merged into chunk meshes and published as raw RS instances. | Working but default-off due FPS/stutter cost |
 
 All tier modules are fed through `WorldObjectSource` manifests. The Morrowind
 implementation lives in `src/core/world/morrowind/morrowind_world_object_source.gd`;
 core render tiers consume stable object ids, transforms, model paths,
 categories, and capability flags rather than querying `ESMManager` directly.
 
-The user-facing distance slider is an object view-distance cap in meters. It
-does not expand MID. If the cap is below 300m, HLOD and FAR do not load. If the
-cap is below 1000m, FAR does not load.
+The user-facing distance slider is an object view-distance cap in meters. If
+the cap is at or below 400m, FAR does not load.
 
-`hlod_enable`: HLOD work starts at the canonical 300m handoff and is capped by
-the current view distance up to 1000m. MID remains fixed at 300m.
+`hlod_enable`: HLOD work starts at the 400m handoff and is capped by the
+current view distance up to 1000m. MID remains fixed at 400m, and FAR still
+starts at 400m during this experiment.
 
-`hlod_disable`: HLOD chunks are parked/cleaned up for ablation. Production
-ownership still expects HLOD to cover 300-1000m.
+`hlod_disable`: HLOD chunks are parked/cleaned up. This is the default
+production posture for the 400m MID/FAR experiment.
 
 `--near-only`: focused test override that parks distant tiers according to the
 runtime toggle policy. Do not treat it as the production tier contract.
@@ -36,14 +36,15 @@ runtime toggle policy. Do not treat it as the production tier contract.
 Distance constants live in `src/core/world/distance_utils.gd`:
 
 - `NEAR_END = 150`
-- `MID_END = 300`
-- `HLOD_START = 300`
+- `MID_END = 400`
+- `HLOD_START = 400`
 - `HLOD_END = 1000`
-- `FAR_START = 1000`
+- `FAR_START = 400`
 - `FAR_END = 5000`
 
-`FAR_START` is the fixed post-HLOD design boundary. Runtime view distance can
-cap FAR visibility/loading, but cannot move FAR earlier than 1000m.
+`FAR_START` is the fixed post-MID design boundary for the current experiment.
+Runtime view distance can cap FAR visibility/loading, but does not move the
+handoff.
 
 MID to NEAR streaming promotion is separate from render-tier visibility:
 
@@ -83,11 +84,10 @@ cell-merge helper path.
 
 Current HLOD rules:
 
-- HLOD is default-on in `Godotwind.tscn`; `hlod_enable`/`hlod_disable` remain
-  runtime ablation controls.
-- Runtime visibility begins at 300m.
-- MID stays capped at 300m; incomplete HLOD coverage is diagnosed rather than
-  widening MID.
+- HLOD is default-off in `Godotwind.tscn`; `hlod_enable`/`hlod_disable` remain
+  runtime comparison controls.
+- Runtime visibility begins at 400m.
+- MID stays capped at 400m.
 - HLOD still must reduce surfaces/materials in chunk proxies; one chunk
   instance is not enough if it still expands into many draw surfaces.
 
@@ -95,7 +95,7 @@ Deep dive: `docs/systems/object_paging.md`.
 
 ## FAR Contract
 
-FAR impostors begin at 1000m when the view-distance cap is above 1000m.
+FAR impostors begin at 400m when the view-distance cap is above 400m.
 
 Deep dive: `docs/systems/impostor_streaming_rendering.md`.
 
@@ -120,6 +120,5 @@ messages should use the canonical names.
   the active pipeline; current HLOD is runtime ObjectPaging.
 - Do not describe MID as one raw RS instance per object. Current MID ownership
   is `CellStaticBucket` draw groups with local MultiMesh or singleton RS draws.
-- Do not move FAR earlier than 1000m in docs, tests, or runtime code.
 - Do not reintroduce manual per-LOD visibility ranges for MID. Use embedded LOD
   chains plus Godot's mesh LOD selector.

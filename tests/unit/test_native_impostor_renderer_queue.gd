@@ -54,7 +54,7 @@ func test_hlod_page_stats_do_not_count_default_far_begin_as_override() -> void:
 	assert_int(stats.get("page_overrides", -1)).is_equal(0)
 
 
-func test_hlod_page_stats_ignore_hlod_begin_when_far_is_fixed() -> void:
+func test_hlod_page_stats_count_hlod_deferred_page_when_far_starts_early() -> void:
 	var renderer := NativeImpostorRendererScript.new()
 	auto_free(renderer)
 
@@ -66,10 +66,10 @@ func test_hlod_page_stats_ignore_hlod_begin_when_far_is_fixed() -> void:
 	renderer._visibility_begin_distance = DU.FAR_START
 
 	var stats: Dictionary = renderer._get_hlod_page_coverage_stats()
-	assert_int(stats.get("covered_pages", -1)).is_equal(0)
-	assert_int(stats.get("uncovered_pages", -1)).is_equal(1)
-	assert_int(stats.get("covered_impostors", -1)).is_equal(0)
-	assert_int(stats.get("page_overrides", -1)).is_equal(0)
+	assert_int(stats.get("covered_pages", -1)).is_equal(1)
+	assert_int(stats.get("uncovered_pages", -1)).is_equal(0)
+	assert_int(stats.get("covered_impostors", -1)).is_equal(2)
+	assert_int(stats.get("page_overrides", -1)).is_equal(1)
 
 
 func test_impostor_page_readiness_allows_albedo_only() -> void:

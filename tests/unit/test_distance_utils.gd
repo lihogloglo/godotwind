@@ -53,11 +53,10 @@ func test_tier_constants_are_ordered() -> void:
 	assert_float(DU.NEAR_START).is_less(DU.NEAR_END)
 	assert_float(DU.NEAR_END).is_equal(DU.MID_START)
 	assert_float(DU.MID_START).is_less(DU.MID_END)
-	# Phase 5 (2026-04-17): FAR_START broken from MID_END and pinned at
-	# HLOD_END (1km). The MID+HLOD pipeline carries 150-1000m; impostors
-	# only pick up at FAR_START.
-	assert_float(DU.HLOD_START).is_equal(300.0)
-	assert_float(DU.HLOD_END).is_equal(DU.FAR_START)
+	assert_float(DU.MID_END).is_equal(400.0)
+	assert_float(DU.HLOD_START).is_equal(DU.MID_END)
+	assert_float(DU.FAR_START).is_equal(DU.MID_END)
+	assert_float(DU.HLOD_END).is_greater(DU.HLOD_START)
 	assert_float(DU.FAR_START).is_less(DU.FAR_END)
 
 
