@@ -100,6 +100,13 @@ const RUNTIME_PROTOTYPE_WARMUP: bool = true
 ## reduction remains the production optimization path after correctness.
 const RUNTIME_FORCE_MERGE_ELIGIBLE_REFS: bool = true
 
+## Predictive paging queues the next HLOD ring in the movement direction so
+## normal traversal does not discover cold chunks exactly at the tier boundary.
+const PREDICTIVE_STREAMING_ENABLED: bool = true
+const PREDICTIVE_LOOKAHEAD_SECONDS: float = 2.0
+const PREDICTIVE_MIN_SPEED_MPS: float = 8.0
+const PREDICTIVE_MAX_LOOKAHEAD_M: float = 350.0
+
 
 #region Internal Data Classes
 
@@ -111,6 +118,10 @@ class PagingChunkData:
 	var mesh: ArrayMesh  ## Strong ref — prevents GC
 	var surface_count: int = 0
 	var material_count: int = 0
+	var null_material_surface_count: int = 0
+	var default_proxy_surface_count: int = 0
+	var source_null_material_surfaces: int = 0
+	var overflow_proxy_surfaces: int = 0
 	var vertex_count: int = 0
 	var index_count: int = 0
 	var estimated_bytes: int = 0
@@ -215,12 +226,15 @@ var _merge_queue: Array[Vector3i] = []
 var _camera_cell_cached: Vector2i = Vector2i.ZERO
 var _camera_world_pos_cached: Vector3 = Vector3.ZERO
 var _last_desired_chunks: Dictionary = {}
+var _last_prefetch_chunks: Dictionary = {}
 
 ## Phase 4d — teleport warmup state.
 ## `_last_camera_world_pos` is the camera position from the previous
 ## `update_for_camera` call, used to detect a jump > TELEPORT_THRESHOLD.
 ## `Vector3.INF` sentinel = no prior call (first-ever frame, never triggers).
 var _last_camera_world_pos: Vector3 = Vector3.INF
+var _last_update_ticks_msec: int = 0
+var _camera_velocity_xz: Vector2 = Vector2.ZERO
 
 ## Pending prototype-load paths to pre-register. Drained by `process_merge_queue`
 ## before any merges are submitted. Main-thread only.
@@ -277,6 +291,13 @@ var _stats: Dictionary = {
 	"chunks_tier_2": 0,
 	"total_chunk_surfaces": 0,
 	"total_chunk_materials": 0,
+	"visible_hlod_draw_calls": 0,
+	"null_material_surface_count": 0,
+	"default_proxy_surface_count": 0,
+	"source_null_material_surfaces": 0,
+	"overflow_proxy_surfaces": 0,
+	"chunk_surface_histogram": {},
+	"chunk_material_histogram": {},
 	"total_chunk_vertices": 0,
 	"total_chunk_indices": 0,
 	"max_chunk_surfaces": 0,
@@ -296,6 +317,7 @@ var _stats: Dictionary = {
 	"negative_failed_chunks": 0,
 	"negative_surface_cap_chunks": 0,
 	"desired_chunks": 0,
+	"predictive_desired_chunks": 0,
 	"desired_chunks_tier_0": 0,
 	"desired_chunks_tier_1": 0,
 	"desired_chunks_tier_2": 0,
@@ -372,17 +394,25 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# main thread inside merge preparation. Prime the warmup queue so
 	# process_merge_queue pre-loads them over the next few frames instead.
 	var is_teleport: bool = _is_teleport(_last_camera_world_pos, _camera_world_pos_cached)
+	_update_camera_velocity(is_teleport)
 	if is_teleport:
 		_stats["total_teleports"] += 1
 	_last_camera_world_pos = _camera_world_pos_cached
+	_last_update_ticks_msec = Time.get_ticks_msec()
 
 	# Plan §4.3 — top-down anti-overlap walk. Larger tiers claim their cells
 	# first; smaller tiers skip any chunk whose 1×1 sub-cells are covered.
 	var desired_chunks: Dictionary = _compute_desired_chunks(camera_cell, _camera_world_pos_cached)
+	var prefetch_chunks: Dictionary = _compute_predictive_prefetch_chunks(desired_chunks)
+	var combined_chunks: Dictionary = desired_chunks.duplicate()
+	for key: Vector3i in prefetch_chunks:
+		combined_chunks[key] = true
 	_last_desired_chunks = desired_chunks.duplicate()
+	_last_prefetch_chunks = prefetch_chunks.duplicate()
 	_stats["desired_chunks"] = desired_chunks.size()
+	_stats["predictive_desired_chunks"] = prefetch_chunks.size()
 	Log.debug("streaming", "HLOD update_for_camera: %d desired chunks, %d active, %d pending, %d queued (cell=%s)" % [
-		desired_chunks.size(), _active_chunks.size(), _pending_merges.size(), _merge_queue.size(), camera_cell])
+		combined_chunks.size(), _active_chunks.size(), _pending_merges.size(), _merge_queue.size(), camera_cell])
 
 	# Phase 4d — on teleport, enqueue unregistered prototypes for the new ring.
 	if is_teleport:
@@ -391,12 +421,12 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	var changed := 0
 
 	# Queue new chunks (stagger via process_merge_queue)
-	for key: Vector3i in desired_chunks:
+	for key: Vector3i in combined_chunks:
 		if key in _active_chunks or key in _pending_merges or key in _chunk_generations or key in _negative_chunks or key in _preparing_chunks:
 			continue
 		# Check LRU cache (fast path — previously merged)
 		if key in _mesh_cache:
-			if _create_rs_instance(key, _mesh_cache[key], _mesh_sizes.get(key, 0)):
+			if key in desired_chunks and _create_rs_instance(key, _mesh_cache[key], _mesh_sizes.get(key, 0)):
 				_lru_touch(key)
 				changed += 1
 		elif key not in _merge_queue:
@@ -418,7 +448,7 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# Cancel pending merges that left desired set
 	var to_cancel: Array[Vector3i] = []
 	for key: Vector3i in _pending_merges:
-		if key not in desired_chunks:
+		if key not in combined_chunks:
 			to_cancel.append(key)
 	for key: Vector3i in to_cancel:
 		if _bg_processor:
@@ -432,7 +462,7 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 
 	# Drop in-progress preparations that left the desired set.
 	_prep_queue = _prep_queue.filter(func(state: MergePrepState) -> bool:
-		if state.key in desired_chunks:
+		if state.key in combined_chunks:
 			return true
 		_preparing_chunks.erase(state.key)
 		return false
@@ -441,7 +471,7 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# Invalidate completed-but-not-yet-published requests that left desired set.
 	var generations_to_drop: Array[Vector3i] = []
 	for key: Vector3i in _chunk_generations:
-		if key not in desired_chunks and key not in _active_chunks:
+		if key not in combined_chunks and key not in _active_chunks:
 			generations_to_drop.append(key)
 	for key: Vector3i in generations_to_drop:
 		_chunk_generations.erase(key)
@@ -450,13 +480,13 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# later camera pass can re-evaluate against a changed renderer/cache state.
 	var negatives_to_drop: Array[Vector3i] = []
 	for key: Vector3i in _negative_chunks:
-		if key not in desired_chunks:
+		if key not in combined_chunks:
 			negatives_to_drop.append(key)
 	for key: Vector3i in negatives_to_drop:
 		_negative_chunks.erase(key)
 
 	# Remove queued chunks that left desired set
-	_merge_queue = _merge_queue.filter(func(k: Vector3i) -> bool: return k in desired_chunks)
+	_merge_queue = _merge_queue.filter(func(k: Vector3i) -> bool: return k in combined_chunks)
 
 	_refresh_stats()
 	return changed
@@ -629,7 +659,7 @@ func process_completions(deadline_usec: int = 0) -> int:
 		_lru_order.append(key)
 		_cache_used_bytes += bytes
 
-		if _create_rs_instance(key, mesh, bytes, mesh_stats):
+		if key in _last_desired_chunks and _create_rs_instance(key, mesh, bytes, mesh_stats):
 			count += 1
 
 		_chunk_generations.erase(key)
@@ -709,6 +739,9 @@ func get_active_chunk_debug_data() -> Array[Dictionary]:
 		entry.merge({
 			"surface_count": data.surface_count,
 			"material_count": data.material_count,
+			"null_material_surface_count": data.null_material_surface_count,
+			"default_proxy_surface_count": data.default_proxy_surface_count,
+			"overflow_proxy_surfaces": data.overflow_proxy_surfaces,
 			"vertex_count": data.vertex_count,
 			"coverage_complete": data.coverage_complete,
 			"refs_accepted": data.refs_accepted,
@@ -741,6 +774,9 @@ func _make_chunk_debug_entry(key: Vector3i, status: String) -> Dictionary:
 		"visibility_end": band_end,
 		"surface_count": 0,
 		"material_count": 0,
+		"null_material_surface_count": 0,
+		"default_proxy_surface_count": 0,
+		"overflow_proxy_surfaces": 0,
 		"vertex_count": 0,
 		"coverage_complete": false,
 		"refs_accepted": 0,
@@ -879,6 +915,9 @@ func cleanup(disconnect_signals: bool = true) -> void:
 	_warmup_pending_async.clear()
 	_warmup_failed.clear()
 	_last_camera_world_pos = Vector3.INF
+	_last_update_ticks_msec = 0
+	_camera_velocity_xz = Vector2.ZERO
+	_last_prefetch_chunks.clear()
 
 #endregion
 
@@ -893,6 +932,37 @@ static func _is_teleport(prev_pos: Vector3, curr_pos: Vector3) -> bool:
 	if prev_pos == Vector3.INF:
 		return false
 	return prev_pos.distance_to(curr_pos) > TELEPORT_THRESHOLD
+
+
+func _update_camera_velocity(is_teleport: bool) -> void:
+	if is_teleport or _last_camera_world_pos == Vector3.INF or _last_update_ticks_msec <= 0:
+		_camera_velocity_xz = Vector2.ZERO
+		return
+	var dt := float(Time.get_ticks_msec() - _last_update_ticks_msec) / 1000.0
+	if dt <= 0.0001:
+		return
+	var delta := _camera_world_pos_cached - _last_camera_world_pos
+	_camera_velocity_xz = Vector2(delta.x, delta.z) / dt
+
+
+func _compute_predictive_prefetch_chunks(current_desired: Dictionary) -> Dictionary:
+	if not PREDICTIVE_STREAMING_ENABLED:
+		return {}
+	var speed := _camera_velocity_xz.length()
+	if speed < PREDICTIVE_MIN_SPEED_MPS:
+		return {}
+	var lookahead := minf(speed * PREDICTIVE_LOOKAHEAD_SECONDS, PREDICTIVE_MAX_LOOKAHEAD_M)
+	if lookahead <= 0.0:
+		return {}
+	var dir := _camera_velocity_xz / speed
+	var future_pos := _camera_world_pos_cached + Vector3(dir.x * lookahead, 0.0, dir.y * lookahead)
+	var future_cell := DU.world_to_cell(future_pos)
+	var future_desired := _compute_desired_chunks(future_cell, future_pos)
+	var prefetch: Dictionary = {}
+	for key: Vector3i in future_desired:
+		if key not in current_desired:
+			prefetch[key] = true
+	return prefetch
 
 
 ## Populate the warmup queue with unregistered prototype paths for every
@@ -1499,6 +1569,10 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int, m
 	data.mesh = mesh
 	data.surface_count = int(mesh_stats.get("surface_count", mesh.get_surface_count()))
 	data.material_count = int(mesh_stats.get("material_count", data.surface_count))
+	data.null_material_surface_count = int(mesh_stats.get("null_material_surface_count", _count_null_material_surfaces(mesh)))
+	data.default_proxy_surface_count = int(mesh_stats.get("default_proxy_surface_count", 0))
+	data.source_null_material_surfaces = int(mesh_stats.get("source_null_material_surfaces", 0))
+	data.overflow_proxy_surfaces = int(mesh_stats.get("overflow_proxy_surfaces", 0))
 	data.vertex_count = int(mesh_stats.get("vertex_count", estimated_bytes / 72))
 	data.index_count = int(mesh_stats.get("index_count", 0))
 	data.estimated_bytes = estimated_bytes
@@ -1662,6 +1736,7 @@ func _refresh_stats() -> void:
 			1: dt1 += 1
 			2: dt2 += 1
 	_stats["desired_chunks"] = _last_desired_chunks.size()
+	_stats["predictive_desired_chunks"] = _last_prefetch_chunks.size()
 	_stats["desired_chunks_tier_0"] = dt0
 	_stats["desired_chunks_tier_1"] = dt1
 	_stats["desired_chunks_tier_2"] = dt2
@@ -1713,24 +1788,43 @@ func _refresh_stats() -> void:
 
 	var total_surfaces := 0
 	var total_materials := 0
+	var total_null_material_surfaces := 0
+	var total_default_proxy_surfaces := 0
+	var total_source_null_material_surfaces := 0
+	var total_overflow_proxy_surfaces := 0
 	var total_vertices := 0
 	var total_indices := 0
 	var max_surfaces := 0
 	var max_materials := 0
 	var max_vertices := 0
 	var max_indices := 0
+	var surface_histogram: Dictionary = {}
+	var material_histogram: Dictionary = {}
 	for key: Vector3i in _active_chunks:
 		var data: PagingChunkData = _active_chunks[key]
 		total_surfaces += data.surface_count
 		total_materials += data.material_count
+		total_null_material_surfaces += data.null_material_surface_count
+		total_default_proxy_surfaces += data.default_proxy_surface_count
+		total_source_null_material_surfaces += data.source_null_material_surfaces
+		total_overflow_proxy_surfaces += data.overflow_proxy_surfaces
 		total_vertices += data.vertex_count
 		total_indices += data.index_count
 		max_surfaces = maxi(max_surfaces, data.surface_count)
 		max_materials = maxi(max_materials, data.material_count)
 		max_vertices = maxi(max_vertices, data.vertex_count)
 		max_indices = maxi(max_indices, data.index_count)
+		_increment_histogram(surface_histogram, data.surface_count)
+		_increment_histogram(material_histogram, data.material_count)
 	_stats["total_chunk_surfaces"] = total_surfaces
 	_stats["total_chunk_materials"] = total_materials
+	_stats["visible_hlod_draw_calls"] = total_surfaces
+	_stats["null_material_surface_count"] = total_null_material_surfaces
+	_stats["default_proxy_surface_count"] = total_default_proxy_surfaces
+	_stats["source_null_material_surfaces"] = total_source_null_material_surfaces
+	_stats["overflow_proxy_surfaces"] = total_overflow_proxy_surfaces
+	_stats["chunk_surface_histogram"] = surface_histogram
+	_stats["chunk_material_histogram"] = material_histogram
 	_stats["total_chunk_vertices"] = total_vertices
 	_stats["total_chunk_indices"] = total_indices
 	_stats["max_chunk_surfaces"] = max_surfaces
@@ -1800,6 +1894,41 @@ static func _count_distinct_surface_materials(mesh: ArrayMesh) -> int:
 		else:
 			materials["<null>"] = true
 	return materials.size()
+
+
+static func _count_null_material_surfaces(mesh: ArrayMesh) -> int:
+	if not mesh:
+		return 0
+	var count := 0
+	for surface_idx in range(mesh.get_surface_count()):
+		if mesh.surface_get_material(surface_idx) == null:
+			count += 1
+	return count
+
+
+static func _increment_histogram(histogram: Dictionary, value: int) -> void:
+	var bucket := _histogram_bucket(value)
+	histogram[bucket] = int(histogram.get(bucket, 0)) + 1
+
+
+static func _histogram_bucket(value: int) -> String:
+	if value <= 1:
+		return "1"
+	if value <= 4:
+		return "2-4"
+	if value <= 8:
+		return "5-8"
+	if value <= 16:
+		return "9-16"
+	if value <= 32:
+		return "17-32"
+	if value <= 64:
+		return "33-64"
+	if value <= 128:
+		return "65-128"
+	if value <= 256:
+		return "129-256"
+	return "257+"
 
 
 static func _count_mesh_geometry(mesh: ArrayMesh) -> Dictionary:

@@ -32,6 +32,7 @@ namespace Godotwind.Native;
 public partial class NativeObjectPagingKernel : RefCounted
 {
     private const int MaxSurfaces = 250;
+    private const string DefaultProxyMaterialName = "GodotwindHLODDefaultProxy";
 
     // Cached ARRAY_* indices to avoid repeated enum->int casts.
     private const int ArrayVertex = (int)Mesh.ArrayType.Vertex;
@@ -83,6 +84,9 @@ public partial class NativeObjectPagingKernel : RefCounted
     {
         // material instance ID -> {material, list of surface-array dicts ready to concat}
         var matGroups = new Dictionary<ulong, MatGroup>();
+        Material? defaultProxyMaterial = null;
+        int sourceNullMaterialSurfaces = 0;
+        int overflowProxySurfaces = 0;
 
         foreach (Variant triplet in triplets)
         {
@@ -92,6 +96,11 @@ public partial class NativeObjectPagingKernel : RefCounted
             var srcArrays = trip[0].AsGodotArray();
             var fullXform = trip[1].AsTransform3D();
             var material = trip[2].As<Material>();
+            if (material == null)
+            {
+                sourceNullMaterialSurfaces++;
+                material = GetDefaultProxyMaterial(ref defaultProxyMaterial);
+            }
 
             if (srcArrays.Count <= ArrayVertex) continue;
             var srcVertsVariant = srcArrays[ArrayVertex];
@@ -203,21 +212,25 @@ public partial class NativeObjectPagingKernel : RefCounted
             return null;
 
         // Handle surface-count overflow (Godot hard cap 256, leave headroom).
-        // TODO(paging-phase-N): overflow surfaces get Material = null, losing
-        // their original material (pre-existing behaviour from the GDScript
-        // kernel — kept verbatim in Phase 1 extraction, not a new regression).
-        // A proper fix is a fallback "combine by closest albedo + texture hash"
-        // once we see a real chunk hit >250 materials in bench_progressive.
+        // Overflow is assigned a valid simplified proxy material. A null
+        // material renders as Godot's default white material, which makes HLOD
+        // failures visible as broken output instead of graceful degradation.
         if (flatSurfaces.Count > MaxSurfaces)
         {
             flatSurfaces.Sort((a, b) => b.VertCount.CompareTo(a.VertCount));
             var overflow = new Godot.Collections.Array();
             for (int i = MaxSurfaces - 1; i < flatSurfaces.Count; i++)
                 overflow.Add(flatSurfaces[i].Arrays);
+            overflowProxySurfaces = flatSurfaces.Count - (MaxSurfaces - 1);
             flatSurfaces.RemoveRange(MaxSurfaces - 1, flatSurfaces.Count - (MaxSurfaces - 1));
             var combined = ConcatenateSurfaceArrays(overflow);
             if (combined.Count > 0)
-                flatSurfaces.Add(new FlatSurface { Arrays = combined, Material = null, VertCount = 0 });
+                flatSurfaces.Add(new FlatSurface
+                {
+                    Arrays = combined,
+                    Material = GetDefaultProxyMaterial(ref defaultProxyMaterial),
+                    VertCount = 0
+                });
         }
 
         var mergedMesh = new ArrayMesh();
@@ -231,6 +244,9 @@ public partial class NativeObjectPagingKernel : RefCounted
         if (mergedMesh.GetSurfaceCount() == 0)
             return null;
 
+        mergedMesh.SetMeta("hlod_source_null_material_surfaces", sourceNullMaterialSurfaces);
+        mergedMesh.SetMeta("hlod_overflow_proxy_surfaces", overflowProxySurfaces);
+        mergedMesh.SetMeta("hlod_default_proxy_surface_count", CountDefaultProxySurfaces(mergedMesh));
         return mergedMesh;
     }
 
@@ -363,12 +379,24 @@ public partial class NativeObjectPagingKernel : RefCounted
         int surfaceCount = mesh.GetSurfaceCount();
         int vertexCount = 0;
         int indexCount = 0;
+        int nullMaterialSurfaces = 0;
+        int defaultProxySurfaces = 0;
         var materialIds = new HashSet<ulong>();
 
         for (int si = 0; si < surfaceCount; si++)
         {
             var material = mesh.SurfaceGetMaterial(si);
-            materialIds.Add(material != null ? (ulong)material.GetInstanceId() : 0UL);
+            if (material == null)
+            {
+                nullMaterialSurfaces++;
+                materialIds.Add(0UL);
+            }
+            else
+            {
+                materialIds.Add((ulong)material.GetInstanceId());
+                if (IsDefaultProxyMaterial(material))
+                    defaultProxySurfaces++;
+            }
 
             var arrays = mesh.SurfaceGetArrays(si);
             if (arrays.Count <= ArrayVertex) continue;
@@ -399,10 +427,52 @@ public partial class NativeObjectPagingKernel : RefCounted
             ["material_count"] = materialIds.Count,
             ["vertex_count"] = vertexCount,
             ["index_count"] = indexCount,
+            ["null_material_surface_count"] = nullMaterialSurfaces,
+            ["default_proxy_surface_count"] = defaultProxySurfaces,
+            ["source_null_material_surfaces"] = mesh.HasMeta("hlod_source_null_material_surfaces")
+                ? mesh.GetMeta("hlod_source_null_material_surfaces").AsInt32()
+                : 0,
+            ["overflow_proxy_surfaces"] = mesh.HasMeta("hlod_overflow_proxy_surfaces")
+                ? mesh.GetMeta("hlod_overflow_proxy_surfaces").AsInt32()
+                : 0,
         };
     }
 
     #region Private helpers
+
+    private static Material GetDefaultProxyMaterial(ref Material? cached)
+    {
+        if (cached != null)
+            return cached;
+
+        var material = new StandardMaterial3D
+        {
+            ResourceName = DefaultProxyMaterialName,
+            AlbedoColor = new Color(0.42f, 0.39f, 0.33f, 1.0f),
+            Roughness = 1.0f,
+            Metallic = 0.0f
+        };
+        cached = material;
+        return material;
+    }
+
+    private static bool IsDefaultProxyMaterial(Material material)
+    {
+        return material.ResourceName == DefaultProxyMaterialName;
+    }
+
+    private static int CountDefaultProxySurfaces(ArrayMesh mesh)
+    {
+        int count = 0;
+        int surfaceCount = mesh.GetSurfaceCount();
+        for (int si = 0; si < surfaceCount; si++)
+        {
+            var material = mesh.SurfaceGetMaterial(si);
+            if (material != null && IsDefaultProxyMaterial(material))
+                count++;
+        }
+        return count;
+    }
 
     private static void CopyArrayIfPresent(Godot.Collections.Array src, Godot.Collections.Array dst, int index, Variant.Type expected)
     {

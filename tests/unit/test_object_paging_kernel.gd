@@ -118,6 +118,11 @@ func test_object_paging_stats_include_observability_counters() -> void:
 	assert_bool(stats.has("refs_partial_bucket_rejected")).is_true()
 	assert_bool(stats.has("surface_cap_rejections")).is_true()
 	assert_bool(stats.has("surface_cap_over_budget_published")).is_true()
+	assert_bool(stats.has("visible_hlod_draw_calls")).is_true()
+	assert_bool(stats.has("null_material_surface_count")).is_true()
+	assert_bool(stats.has("default_proxy_surface_count")).is_true()
+	assert_bool(stats.has("overflow_proxy_surfaces")).is_true()
+	assert_bool(stats.has("chunk_surface_histogram")).is_true()
 	assert_bool(stats.has("warmup_queue_size")).is_true()
 
 
@@ -240,6 +245,39 @@ func test_materials_preserved_on_merged_surfaces() -> void:
 	assert_bool(seen_a and seen_b).override_failure_message(
 		"Expected both mat_a and mat_b on merged surfaces."
 	).is_true()
+
+
+func test_null_source_material_uses_proxy_material_not_engine_default() -> void:
+	var tri := _make_triangle_mesh()
+	var ref := _make_ref(tri, null, Vector3.ZERO)
+
+	var merged: ArrayMesh = Kernel.merge_refs([ref], Vector3.ZERO, 0, true)
+	assert_that(merged).is_not_null()
+	assert_that(merged.get_surface_count()).is_equal(1)
+	assert_that(merged.surface_get_material(0)).is_not_null()
+
+	var stats := Kernel.collect_mesh_stats(merged)
+	assert_int(int(stats.get("null_material_surface_count", -1))).is_equal(0)
+	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(1)
+	assert_int(int(stats.get("source_null_material_surfaces", 0))).is_equal(1)
+
+
+func test_surface_overflow_uses_proxy_material_not_null_material() -> void:
+	var refs: Array = []
+	for i in range(260):
+		refs.append(_make_ref(_make_triangle_mesh(), StandardMaterial3D.new(), Vector3(float(i), 0.0, 0.0)))
+
+	var merged: ArrayMesh = Kernel.merge_refs(refs, Vector3.ZERO, 0, true)
+	assert_that(merged).is_not_null()
+	assert_that(merged.get_surface_count()).is_equal(250)
+
+	for si in range(merged.get_surface_count()):
+		assert_that(merged.surface_get_material(si)).is_not_null()
+
+	var stats := Kernel.collect_mesh_stats(merged)
+	assert_int(int(stats.get("null_material_surface_count", -1))).is_equal(0)
+	assert_int(int(stats.get("default_proxy_surface_count", 0))).is_equal(1)
+	assert_int(int(stats.get("overflow_proxy_surfaces", 0))).is_greater(0)
 
 
 func test_estimate_mesh_bytes_scales_with_vertex_count() -> void:
@@ -425,6 +463,31 @@ func test_active_hlod_chunks_are_pinned_during_cache_eviction() -> void:
 	assert_bool(merger._active_chunks.has(active_key)).is_true()
 	assert_bool(merger._mesh_cache.has(active_key)).is_true()
 	assert_bool(merger._mesh_cache.has(inactive_key)).is_false()
+
+
+func test_prefetch_completion_warms_cache_without_publishing_visual_chunk() -> void:
+	var merger := Merger.new()
+	var prefetch_key := Vector3i(4, 0, 1)
+	var generation := 1
+	var mesh := _make_triangle_mesh()
+
+	merger._chunk_generations[prefetch_key] = generation
+	merger._last_desired_chunks = {}
+	merger._completed_queue.append({
+		"key": prefetch_key,
+		"generation": generation,
+		"mesh": mesh,
+		"bytes": 256,
+		"mesh_stats": Kernel.collect_mesh_stats(mesh),
+	})
+
+	var published := merger.process_completions()
+
+	assert_int(published).is_equal(0)
+	assert_bool(merger._mesh_cache.has(prefetch_key)).is_true()
+	assert_bool(merger._active_chunks.has(prefetch_key)).is_false()
+	assert_int(int(merger.get_stats().get("cache_entries", 0))).is_equal(1)
+	assert_int(int(merger.get_stats().get("active_visual_chunks", 0))).is_equal(0)
 
 
 func test_prototype_warmup_clears_temporary_negative_chunks() -> void:
@@ -777,6 +840,19 @@ func test_top_down_walk_all_tiers_populated_from_origin() -> void:
 	assert_int(tier_counts[0]).override_failure_message("size_level=0 chunks must stay suppressed below the HLOD visual floor.").is_equal(0)
 	assert_int(tier_counts[1]).override_failure_message("No size_level=1 chunks desired — band [300,600) should produce chunks at origin.").is_greater(0)
 	assert_int(tier_counts[2]).override_failure_message("No size_level=2 chunks desired — band [600,1000) should produce chunks at origin.").is_greater(0)
+
+
+func test_predictive_prefetch_adds_ahead_chunks_without_changing_current_desired() -> void:
+	var merger := Merger.new()
+	merger._camera_world_pos_cached = Vector3.ZERO
+	merger._camera_velocity_xz = Vector2(100.0, 0.0)
+	var current: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), Vector3.ZERO)
+
+	var prefetch: Dictionary = merger._compute_predictive_prefetch_chunks(current)
+
+	assert_int(prefetch.size()).is_greater(0)
+	for key: Vector3i in prefetch:
+		assert_bool(current.has(key)).is_false()
 
 
 ## Verify anti-overlap in a specific geometric setup: a 2×2 chunk

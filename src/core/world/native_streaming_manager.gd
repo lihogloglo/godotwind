@@ -2289,6 +2289,10 @@ func get_stats() -> Dictionary:
 	s["hlod_cache_mb"] = hlod_stats.get("cache_bytes", 0) / (1024.0 * 1024.0)
 	s["hlod_chunk_surfaces"] = hlod_stats.get("total_chunk_surfaces", 0)
 	s["hlod_chunk_materials"] = hlod_stats.get("total_chunk_materials", 0)
+	s["hlod_visible_draw_calls"] = hlod_stats.get("visible_hlod_draw_calls", 0)
+	s["hlod_null_material_surfaces"] = hlod_stats.get("null_material_surface_count", 0)
+	s["hlod_default_proxy_surfaces"] = hlod_stats.get("default_proxy_surface_count", 0)
+	s["hlod_overflow_proxy_surfaces"] = hlod_stats.get("overflow_proxy_surfaces", 0)
 	s["hlod_chunk_vertices"] = hlod_stats.get("total_chunk_vertices", 0)
 	s["hlod_chunk_indices"] = hlod_stats.get("total_chunk_indices", 0)
 	s["hlod_max_chunk_surfaces"] = hlod_stats.get("max_chunk_surfaces", 0)
@@ -2303,6 +2307,7 @@ func get_stats() -> Dictionary:
 	s["hlod_nonvisual_chunks_suppressed"] = hlod_stats.get("nonvisual_chunks_suppressed", 0)
 	s["hlod_mid_overlap_chunks"] = hlod_stats.get("mid_hlod_overlap_chunks", 0)
 	s["hlod_desired_chunks"] = hlod_stats.get("desired_chunks", 0)
+	s["hlod_predictive_desired_chunks"] = hlod_stats.get("predictive_desired_chunks", 0)
 	s["hlod_merge_queue_size"] = hlod_stats.get("merge_queue_size", 0)
 	s["hlod_preparing_chunks"] = hlod_stats.get("preparing_chunks", 0)
 	s["hlod_negative_chunks"] = hlod_stats.get("negative_chunks", 0)
@@ -2748,6 +2753,13 @@ func get_hlod_stats() -> Dictionary:
 			"chunks_tier_2": 0,
 			"total_chunk_surfaces": 0,
 			"total_chunk_materials": 0,
+			"visible_hlod_draw_calls": 0,
+			"null_material_surface_count": 0,
+			"default_proxy_surface_count": 0,
+			"source_null_material_surfaces": 0,
+			"overflow_proxy_surfaces": 0,
+			"chunk_surface_histogram": {},
+			"chunk_material_histogram": {},
 			"total_chunk_vertices": 0,
 			"total_chunk_indices": 0,
 			"max_chunk_surfaces": 0,
@@ -2762,6 +2774,7 @@ func get_hlod_stats() -> Dictionary:
 			"preparing_chunks": 0,
 			"negative_chunks": 0,
 			"desired_chunks": 0,
+			"predictive_desired_chunks": 0,
 			"merge_queue_size": 0,
 			"active_visual_chunks": 0,
 			"visual_begin_floor": DU.HLOD_START,
