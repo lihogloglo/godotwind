@@ -436,7 +436,7 @@ func set_debug_mode(mode: int) -> void:
 	var mat: ShaderMaterial = _ocean_mesh.get_material()
 	if not mat:
 		return
-	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 9))
+	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 12))
 
 
 ## Push the directional light's world-space forward direction to the ocean

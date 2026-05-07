@@ -22,6 +22,8 @@ const BUOY_DEBUG_GRID: int = 40
 const BUOY_DEBUG_SPACING: float = 1.0
 const SHORE_SCAN_GRID: int = 6
 const SHORE_SCAN_NEIGHBOR: float = 32.0
+const REFRACTION_STRENGTH_DEFAULT: float = 0.6
+const SSR_MIX_STRENGTH_DEFAULT: float = 0.7
 const DEBUG_MODE_NAMES: Array[String] = [
 	"Normal",
 	"Shore depth",
@@ -33,6 +35,9 @@ const DEBUG_MODE_NAMES: Array[String] = [
 	"Refraction offset",
 	"Normal.y",
 	"SSS scatter",
+	"Raw screen",
+	"Refracted screen",
+	"Refraction depth edge",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
@@ -57,6 +62,8 @@ var _mesh_button: Button = null
 var _sun_button: Button = null
 var _wet_debug_button: Button = null
 var _quality_button: Button = null
+var _refraction_button: Button = null
+var _ssr_button: Button = null
 
 var _sea_level: float = SEA_LEVEL_DEFAULT
 var _playground_origin: Vector3 = Vector3.ZERO
@@ -74,6 +81,8 @@ var _textures_loaded: int = 0
 
 var _buoy_grid_visible: bool = true
 var _debug_mode: int = 0
+var _refraction_enabled: bool = true
+var _ssr_enabled: bool = true
 var _current_weather: int = 0
 var _sun_low: bool = false
 var _help_visible: bool = true
@@ -268,6 +277,7 @@ func _setup_ocean() -> void:
 	OceanManager.set_terrain(_terrain)
 	_sea_level = OceanManager.get_sea_level()
 	_ocean = OceanManager.get_ocean_mesh()
+	_apply_ocean_feature_params()
 
 
 func _setup_reflection_canaries() -> void:
@@ -368,7 +378,7 @@ func _build_ui() -> void:
 
 	var control_panel := PanelContainer.new()
 	control_panel.position = Vector2(12.0, 12.0)
-	control_panel.size = Vector2(440.0, 310.0)
+	control_panel.size = Vector2(440.0, 360.0)
 	layer.add_child(control_panel)
 	var control_box := VBoxContainer.new()
 	control_panel.add_child(control_box)
@@ -392,6 +402,8 @@ func _build_ui() -> void:
 	_wet_debug_button = _add_button(_button_grid, "", Callable(self, "_toggle_wet_debug"))
 	_add_button(_button_grid, "Center Shore", Callable(self, "_teleport_to_shore_probe"))
 	_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_quality"))
+	_refraction_button = _add_button(_button_grid, "", Callable(self, "_toggle_refraction"))
+	_ssr_button = _add_button(_button_grid, "", Callable(self, "_toggle_ssr"))
 	_add_button(_button_grid, "Help", func() -> void:
 		_help_visible = not _help_visible
 	)
@@ -407,7 +419,7 @@ func _build_ui() -> void:
 	layer.add_child(_hud_label)
 
 	_wet_panel = PanelContainer.new()
-	_wet_panel.position = Vector2(12.0, 340.0)
+	_wet_panel.position = Vector2(12.0, 390.0)
 	_wet_panel.size = Vector2(420.0, 160.0)
 	layer.add_child(_wet_panel)
 	var vbox := VBoxContainer.new()
@@ -482,6 +494,10 @@ func _refresh_control_labels() -> void:
 	if _quality_button:
 		var quality := OceanManager.get_water_quality_name() if OceanManager and OceanManager.is_initialized() else "Unknown"
 		_quality_button.text = "Quality: %s" % quality
+	if _refraction_button:
+		_refraction_button.text = "Refract: %s" % ("On" if _refraction_enabled else "Off")
+	if _ssr_button:
+		_ssr_button.text = "SSR: %s" % ("On" if _ssr_enabled else "Off")
 
 
 func _process(delta: float) -> void:
@@ -618,6 +634,10 @@ func _update_hud() -> void:
 		"on" if _wet_debug else "off",
 		"low" if _sun_low else "high",
 	])
+	lines.append("refraction=%s  ssr=%s" % [
+		"on" if _refraction_enabled else "off",
+		"on" if _ssr_enabled else "off",
+	])
 	if _help_visible:
 		lines.append("")
 		lines.append("Use the control panel buttons for ocean/debug actions.")
@@ -648,6 +668,7 @@ func _apply_weather_preset(idx: int) -> void:
 	var wind_rad := deg_to_rad(45.0)
 	result.storm_direction = Vector3(sin(wind_rad), 0.0, cos(wind_rad))
 	OceanManager.apply_weather(result)
+	_apply_ocean_feature_params()
 	_refresh_control_labels()
 	Log.info("water", "[Ocean Lab] weather preset %s wind=%.2f" % [preset["name"], preset["wind"]])
 
@@ -663,10 +684,13 @@ func _toggle_mesh_mode() -> void:
 		return
 	var current: int = OceanManager.get_mesh_mode()
 	var next := 1 if current == 0 else 0
+	if next == 1 and OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
+		OceanManager.set_water_quality(2)
 	OceanManager.rebuild_mesh_with_mode(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
 	_apply_weather_preset(_current_weather)
+	_apply_ocean_feature_params()
 	_refresh_control_labels()
 
 
@@ -723,11 +747,43 @@ func _cycle_quality() -> void:
 		next = 0
 	else:
 		next = 2
+	if next != 2 and OceanManager.get_mesh_mode() == 1:
+		OceanManager.rebuild_mesh_with_mode(0)
 	OceanManager.set_water_quality(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
 	_apply_weather_preset(_current_weather)
+	_apply_ocean_feature_params()
 	_refresh_control_labels()
+
+
+func _toggle_refraction() -> void:
+	_refraction_enabled = not _refraction_enabled
+	_apply_ocean_feature_params()
+	_refresh_control_labels()
+
+
+func _toggle_ssr() -> void:
+	_ssr_enabled = not _ssr_enabled
+	_apply_ocean_feature_params()
+	_refresh_control_labels()
+
+
+func _apply_ocean_feature_params() -> void:
+	var mat := _get_ocean_material()
+	if mat == null:
+		return
+	mat.set_shader_parameter("refraction_strength", REFRACTION_STRENGTH_DEFAULT if _refraction_enabled else 0.0)
+	mat.set_shader_parameter("ssr_mix_strength", SSR_MIX_STRENGTH_DEFAULT if _ssr_enabled else 0.0)
+
+
+func _get_ocean_material() -> ShaderMaterial:
+	if OceanManager == null or not OceanManager.is_initialized():
+		return null
+	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
+	if ocean_mesh == null:
+		return null
+	return ocean_mesh.get_material()
 
 
 func _spawn_buoyant_sphere_from_camera() -> void:

@@ -84,10 +84,10 @@ uniform float refraction_strength : hint_range(0.0, 1.0) = 0.6;
 // Combined with refraction_strength, this caps the view-space step length. At
 // 1.5 and 0.6 the max projected ray is ~0.9m → clearly visible pixel offsets.
 uniform float max_refr_thickness : hint_range(0.1, 5.0) = 1.5;
-// Depth-contrast rejection: if the refracted sample's view-space depth differs
-// from the unrefracted sample's depth by more than this many meters, the
-// refracted ray has crossed a silhouette edge (e.g. the edge of a submerged
-// rock or the monolith). Fall back to unrefracted to kill ghost/halo artifacts.
+// Legacy depth-contrast rejection threshold retained for runtime tuning. The
+// FFT path no longer hard-rejects underwater silhouette crossings: bending
+// submerged silhouettes is the visible point of refraction. Sky/off-screen and
+// above-water samples are still rejected by the guard chain below.
 uniform float refraction_silhouette_threshold : hint_range(0.1, 10.0) = 1.5;
 // World-space Y of the undisplaced water surface. Used by Guard (3b) to reject
 // refracted samples that are view-space-behind the water surface but
@@ -129,7 +129,10 @@ uniform float wave_scale : hint_range(0.0, 3.0) = 1.0;
 //   7 = Refraction UV offset magnitude (black=none, red=large)
 //   8 = Normal.y (up-facing = white, sideways = black)
 //   9 = SSS scatter factor (sub-surface emission)
-uniform int debug_mode : hint_range(0, 9) = 0;
+//   10 = Raw screen color at SCREEN_UV
+//   11 = Refracted screen color at refr_uv
+//   12 = Refraction depth delta (red = crossed depth discontinuity)
+uniform int debug_mode : hint_range(0, 12) = 0;
 
 // Subsurface scattering — Sea of Thieves "scattering approximation" model.
 // Blends between the base water color and a sub-surface scatter color based on
@@ -384,12 +387,6 @@ void fragment() {
 	fresnel = mix(pow(1.0 - cos_theta, fresnel_power) / (1.0 + 22.7 * pow(roughness, 1.5)), 1.0, REFLECTANCE);
 
 	// ========================================================================
-	// WATER COLOR — real view-space depth + per-channel Beer-Lambert absorption
-	// ========================================================================
-	// Beer-Lambert transmittance per channel (exponential falloff with thickness).
-	vec3 transmittance = exp(-water_thickness * absorption_rate * absorption_density);
-
-	// ========================================================================
 	// STEP 2 — Refraction UV offset
 	// Refract the view direction through the surface normal using air→water IOR
 	// (1/1.333 = 0.7509). Step along the refracted ray by a distance proportional
@@ -404,19 +401,19 @@ void fragment() {
 	//       reconstruction on garbage depth.
 	//   (4) Refracted sample is BEHIND the water surface in view space
 	//       (cand_view_z less than surf_view.z).
-	//   (5) SILHOUETTE CROSSING — refracted sample's depth differs from the
-	//       unrefracted sample's depth by more than refraction_silhouette_threshold.
-	//   (6) WORLD-Y REJECT — refracted sample must be BELOW sea_level in WORLD
+	//   (5) WORLD-Y REJECT — refracted sample must be BELOW sea_level in WORLD
 	//       space. Prevents pulling above-water pixels into underwater regions.
 	// ========================================================================
 	vec2 refr_uv = SCREEN_UV;
+	bool refr_valid = false;
+	float refr_depth_delta = 0.0;
+	float refr_view_z = bg_view_z;
 	if (!is_sky_or_far && refraction_strength > 0.0) {
 		vec3 refr_dir = refract(-VIEW, NORMAL, 0.7509); // air→water, IOR 1.333
 		if (dot(refr_dir, refr_dir) > 1e-6) {
 			float edge_t = clamp(length((SCREEN_UV - 0.5) * 2.0), 0.0, 1.0);
 			float edge_fade = 1.0 - smoothstep(0.7, 1.0, edge_t);
-			float travel = min(water_thickness, max_refr_thickness)
-				* refraction_strength * edge_fade;
+			float travel = max_refr_thickness * refraction_strength * edge_fade;
 			vec3 refr_target_view = surf_view + refr_dir * travel;
 			vec4 refr_clip = PROJECTION_MATRIX * vec4(refr_target_view, 1.0);
 			if (refr_clip.w > 1e-4) {
@@ -429,19 +426,20 @@ void fragment() {
 					if (cand_ndc_z > 1e-4) {
 						// Canonical reversed-Z view-space Z.
 						float cand_view_z = -PROJECTION_MATRIX[3][2] / max(cand_ndc_z, 1e-5);
+						refr_depth_delta = abs(cand_view_z - bg_view_z);
 						// Guard (4): refracted sample must be behind the surface.
 						bool passes_above = cand_view_z < surf_view.z - 0.01;
-						// Guard (5): depth-contrast silhouette rejection.
-						bool passes_silhouette = abs(cand_view_z - bg_view_z) < refraction_silhouette_threshold;
-						// Guard (6): refracted sample's WORLD Y must be below sea_level.
+						// Guard (5): refracted sample's WORLD Y must be below sea_level.
 						vec4 cand_clip = vec4(candidate_uv * 2.0 - 1.0, cand_ndc_z, 1.0);
 						vec4 cand_view4 = INV_PROJECTION_MATRIX * cand_clip;
 						vec3 cand_view_xyz = cand_view4.xyz / max(abs(cand_view4.w), 1e-4);
 						vec4 cand_world4 = INV_VIEW_MATRIX * vec4(cand_view_xyz, 1.0);
 						float cand_world_y = cand_world4.y / cand_world4.w;
 						bool passes_underwater = cand_world_y < sea_level;
-						if (passes_above && passes_silhouette && passes_underwater) {
+						if (passes_above && passes_underwater) {
 							refr_uv = candidate_uv;
+							refr_valid = true;
+							refr_view_z = cand_view_z;
 						}
 					}
 				}
@@ -449,16 +447,24 @@ void fragment() {
 		}
 	}
 
-	// Sample the scene behind the water at the refracted UV (or raw UV if any
-	// guard fell through). At sky-depth, skip the sample entirely and use deep
-	// water color — sampling and tinting sky would bleed sky through refraction.
-	vec3 screen_behind = is_sky_or_far
+	// Beer-Lambert absorption must use the same depth sample as the refracted
+	// color. If color bends but thickness stays at raw SCREEN_UV depth, opaque
+	// objects stamp a straight attenuation silhouette under the wobbled image.
+	float optical_water_thickness = refr_valid
+		? min(max(0.0, surf_view.z - refr_view_z), max_visible_depth)
+		: water_thickness;
+	vec3 transmittance = exp(-optical_water_thickness * absorption_rate * absorption_density);
+
+	// Sample the scene behind the water only when the refracted UV passes the
+	// guard chain. Invalid samples fade to water color instead of preserving an
+	// undistorted underwater object silhouette with a displaced edge contour.
+	vec3 screen_behind = (is_sky_or_far || (refraction_strength > 0.0 && !refr_valid))
 		? color_deep
 		: texture(SCREEN_TEXTURE, refr_uv).rgb;
 	vec3 refracted_col = screen_behind * transmittance + color_deep * (1.0 - transmittance);
 
 	// Base water color for the "no refraction contribution" term (grazing angles).
-	vec3 base_water = mix(color_shallow, color_deep, clamp(water_thickness * 0.1, 0.0, 1.0));
+	vec3 base_water = mix(color_shallow, color_deep, clamp(optical_water_thickness * 0.1, 0.0, 1.0));
 
 	// ========================================================================
 	// SSS — Sea of Thieves scattering approximation (fragment path, ALBEDO)
@@ -554,6 +560,13 @@ void fragment() {
 			// before the sub_surface tint reaches final color.
 			debug_col = vec3(0.05, 0.1, 0.15);
 			EMISSION = color_sub_surface * scatter * 4.0;
+		} else if (debug_mode == 10) {
+			debug_col = texture(SCREEN_TEXTURE, SCREEN_UV).rgb;
+		} else if (debug_mode == 11) {
+			debug_col = refr_valid ? texture(SCREEN_TEXTURE, refr_uv).rgb : color_deep;
+		} else if (debug_mode == 12) {
+			float t = clamp(refr_depth_delta / max(refraction_silhouette_threshold * 2.0, 0.001), 0.0, 1.0);
+			debug_col = vec3(t, float(refr_valid) * (1.0 - t), 0.0);
 		}
 		ALBEDO = debug_col;
 		ROUGHNESS = 1.0;

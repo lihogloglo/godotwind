@@ -1,7 +1,7 @@
 # Ocean Quality Tracker
 
 Date: 2026-05-07
-Status: Draft tracker, implementation pending
+Status: Ocean Lab active, Phase 0 stabilization in progress
 Owner: current ocean session
 
 Goal: make the Godotwind ocean look excellent while staying performant enough
@@ -92,7 +92,7 @@ smoke.
 
 ## Phase 0 - Ocean Lab Testbed
 
-Status: first pass implemented 2026-05-07
+Status: first pass implemented 2026-05-07; stabilization pass in progress
 
 Created `tests/visual/test_ocean_lab.tscn` and
 `tests/visual/test_ocean_lab.gd`. The first pass forks the wet terrain setup and
@@ -107,6 +107,17 @@ pickup objects were also moved west/south of the shoreline playground and raised
 above the waterline so they are not buried in terrain at startup. Next pass
 should add explicit feature cost toggles after the OceanManager/shader APIs
 exist.
+
+2026-05-07 stabilization notes:
+
+- Mesh-mode rebuild lifecycle was hardened after the lab's `Mesh: <mode>`
+  button was reported to crash when toggling back to clipmap. The old
+  `OceanMesh` is now detached from the scene tree before being queued for
+  deletion, and a crash-smoke scene exercises `Clipmap -> Projected -> Clipmap`.
+- Water-thickness debug mode exposed a hard cutoff where genuinely deep
+  underwater terrain was being classified as sky/far. The shader now treats
+  only near-zero reversed-Z depth samples as sky/far; deep valid scene geometry
+  remains deep water and is only clamped for absorption/debug scaling.
 
 ### Source Scenes To Merge
 
@@ -192,6 +203,14 @@ Implemented as a left-side button panel plus wetness sliders:
 - Reflection/refraction canaries are visible.
 - Wet terrain and draggable wet objects are present.
 - No automated screenshot harness is added.
+
+### Phase 0 Verification
+
+- `tests/visual/test_ocean_lab.tscn` launched with the documented Godot 4.6
+  binary and reached Ocean Lab ready.
+- `tests/visual/test_ocean_lab_mesh_toggle_smoke.tscn` completed the mesh-mode
+  round trip without crashing.
+- User visually confirmed the water-thickness hard cutoff was fixed in the lab.
 
 ---
 
