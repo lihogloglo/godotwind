@@ -219,11 +219,45 @@ exist.
   observed the first cyan line was not perfectly aligned with the moving ocean;
   next pass should use the debug modes to identify the remaining mismatch
   before adding polish.
+- WL Proto sampler-contract fix: the compositor now samples the FFT
+  displacement array with repeat wrapping, matching the tiled ocean vertex
+  shader and CPU wave sampler, while depth reconstruction uses nearest depth
+  sampling to avoid interpolated geometry edges. This should remove a major
+  world-UV alignment error before further visual tuning.
+- WL Proto debug band tightened: the cyan waterline marker is now a narrow
+  band with only a small antialias edge instead of a broad feather, making
+  above/below alignment errors easier to judge interactively.
+- Verification gotcha: after editing `waterline_probe.glsl`, delete its
+  generated `.godot/imported/waterline_probe.glsl-*.res/.md5` artifacts and run
+  Godot with `--import` before visual checks. A stale imported `RDShaderFile`
+  can make the lab appear to ignore shader edits.
+- Timing probe: surface shore-wave / foam animation and WL Proto now share an
+  OceanManager-owned `ocean_time` instead of mixing spatial-shader `TIME` with
+  compositor-side wall-clock sampling. If the cyan band still appears offset
+  after cache-cleared verification, remaining drift is more likely classifier
+  geometry/depth reconstruction than clock phase.
+- WL Final first pass: cyan is now debug-only. `WL Debug: Final` uses the
+  aligned classifier for subtle submerged-object tint/absorption plus a small
+  non-cyan transition band, while `WL Debug: Flat/FFT/FFT+Shore` keep the
+  narrow cyan measuring band for diagnosis.
 - Future requirement: support a half-immersed camera view. When the camera is
   near/intersecting the dynamic wave surface, the compositor should split the
   frame by the moving wave intersection: underwater absorption/fog/caustics on
   the submerged portion of the screen, normal above-water atmosphere on the
   exposed portion, and a waterline that moves up/down with the FFT waves.
+- Shore-wave quality requirement: the near-land analytical/Gerstner shore
+  waves are an accepted architecture choice for adding surf close to land while
+  FFT handles the broader ocean, but the current animation direction is wrong.
+  The shore waves appear to travel out toward the ocean instead of in toward
+  the real shore. They should also shrink as they approach the shoreline and
+  climb only a few dozen centimeters up the beach for a gentle lap/run-up,
+  rather than flattening abruptly at the shore.
+- Shore-wave direction/envelope fix: `shore_data.gb` is documented by both the
+  runtime and C# shore-mask bakers as pointing away from shore. The analytical
+  shore-wave phase now travels toward decreasing shore distance, and the
+  amplitude envelope keeps a small near-shore run-up lobe instead of dropping
+  to zero at the shoreline. The visible ocean, underwater volume, and WL Proto
+  classifier were updated together so diagnostics stay aligned.
 - Surface refraction is still not solved. Keep `Surf Refract` default-off in
   Ocean Lab; do not treat the existing surface-shader refraction path as
   production-ready.
@@ -439,11 +473,19 @@ Tasks:
   visual blockiness without wasting memory.
 - If gradient quantization is the limit, evaluate a higher precision format or
   derived smooth gradient.
+- Verify analytical shore-wave direction so waves travel toward the shore, not
+  out toward the ocean. First shader pass implemented; visual confirmation
+  pending.
+- Verify shore-wave amplitude envelope so waves reduce height near the real
+  shoreline and produce a small run-up/lapping motion instead of a hard flatten.
+  First shader pass implemented; visual confirmation pending.
 
 Acceptance:
 
 - Waves dampen near shore without terrain penetration.
 - Shore waves run toward shore smoothly.
+- Shore waves visibly lap/run up the beach by a few dozen centimeters, then
+  recede, without large rollers intersecting the terrain.
 - No hard square blocks are visible in the wetness/ocean lab coastline.
 - CPU `get_shore_factor()` and shader shore result agree at debug sample points.
 
@@ -521,9 +563,10 @@ Tasks:
 - Align the WL Proto classifier with the rendered ocean mesh before visual
   polish. Current pass moved closer to the mesh contract by using surface
   distance for cascade fade and approximately inverting horizontal
-  displacement, but the user still observed imperfect alignment. Use
-  `WL Debug` modes to isolate whether remaining drift comes from FFT sampling,
-  shore-wave terms, projected/clipmap differences, or depth/object geometry.
+  displacement, then fixed the compositor sampler contract so FFT displacement
+  repeats like the visible ocean mesh instead of clamping at tile edges. Use
+  `WL Debug` modes to isolate any remaining drift from shore-wave terms,
+  projected/clipmap differences, or depth/object geometry.
 - Add the half-immersed camera compositor mode after object waterline ownership
   is proven. The desired behavior is a moving wave-driven split screen:
   underwater treatment below the dynamic surface contour and normal atmospheric

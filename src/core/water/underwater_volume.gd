@@ -123,6 +123,7 @@ func sync_wave_surface_from_ocean_material(ocean_material: ShaderMaterial) -> vo
 	_material.set_shader_parameter("use_dynamic_water_surface", true)
 	_material.set_shader_parameter("map_scales", ocean_material.get_shader_parameter("map_scales"))
 	_material.set_shader_parameter("wave_scale", ocean_material.get_shader_parameter("wave_scale"))
+	_material.set_shader_parameter("ocean_time", ocean_material.get_shader_parameter("ocean_time"))
 	_material.set_shader_parameter("shore_mask", ocean_material.get_shader_parameter("shore_mask"))
 	_material.set_shader_parameter("shore_mask_bounds", ocean_material.get_shader_parameter("shore_mask_bounds"))
 	_material.set_shader_parameter("shore_fade_distance", ocean_material.get_shader_parameter("shore_fade_distance"))

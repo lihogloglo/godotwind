@@ -17,6 +17,9 @@ const SETTING_QUALITY := "ocean/quality"
 #            1 = PROJECTED (screen-space N×N grid, vertex-shader unproject).
 # FFT quality only; flat/gerstner always use CLIPMAP.
 const SETTING_MESH_MODE := "ocean/mesh_mode"
+const SHORE_WAVE_SPATIAL_FREQUENCY := 0.1
+const SHORE_WAVE_REFERENCE_DEPTH := 20.0
+const GRAVITY := 9.81
 
 ## Get prebaked shore mask path from SettingsManager
 func _get_shore_mask_path() -> String:
@@ -238,6 +241,7 @@ func _process(delta: float) -> void:
 		return
 
 	_time = Time.get_ticks_msec() / 1000.0
+	_push_ocean_time_uniform()
 
 	# Auto-find camera
 	if not _camera and _auto_find_camera:
@@ -465,6 +469,15 @@ func _update_sun_uniform() -> void:
 		# DirectionalLight3D forward = -basis.z (points FROM sun TO world).
 		var sun_dir: Vector3 = -_cached_sun_light.global_basis.z
 		mat.set_shader_parameter("sun_dir_world", sun_dir.normalized())
+
+
+func _push_ocean_time_uniform() -> void:
+	if not _ocean_mesh:
+		return
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if not mat:
+		return
+	mat.set_shader_parameter("ocean_time", _time)
 
 
 func _shutdown_fft_pipeline() -> void:
@@ -1164,7 +1177,7 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 
 	# Shore waves — calm: gentle lapping, storm: strong rollers
 	mat.set_shader_parameter("shore_wave_amplitude", lerpf(0.15, 0.8, wind_t))
-	mat.set_shader_parameter("shore_wave_speed", lerpf(0.8, 2.5, wind_t))
+	_push_shore_wave_timing_uniforms(mat)
 	mat.set_shader_parameter("shore_wave_steepness", lerpf(0.3, 0.7, wind_t))
 
 	# FFT-specific uniforms
@@ -1184,6 +1197,17 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 func _push_surface_optical_uniforms(mat: ShaderMaterial) -> void:
 	mat.set_shader_parameter("absorption_rate", _SURFACE_ABSORPTION_RATE)
 	mat.set_shader_parameter("absorption_density", _SURFACE_ABSORPTION_DENSITY)
+
+
+func _push_shore_wave_timing_uniforms(mat: ShaderMaterial) -> void:
+	mat.set_shader_parameter("shore_wave_frequency", SHORE_WAVE_SPATIAL_FREQUENCY)
+	mat.set_shader_parameter("shore_wave_speed", _shore_wave_temporal_frequency(SHORE_WAVE_SPATIAL_FREQUENCY))
+
+
+static func _shore_wave_temporal_frequency(spatial_frequency: float) -> float:
+	var k: float = maxf(spatial_frequency, 0.001) * TAU
+	var omega: float = sqrt(GRAVITY * k * tanh(k * SHORE_WAVE_REFERENCE_DEPTH))
+	return omega / TAU
 
 
 ## Reset ocean to calm defaults (call when weather system is disabled)
@@ -1209,7 +1233,7 @@ func reset_weather() -> void:
 	mat.set_shader_parameter("normal_strength", 0.6)
 	mat.set_shader_parameter("wave_scale", wave_scale)
 	mat.set_shader_parameter("shore_wave_amplitude", 0.15)
-	mat.set_shader_parameter("shore_wave_speed", 0.8)
+	_push_shore_wave_timing_uniforms(mat)
 	mat.set_shader_parameter("shore_wave_steepness", 0.3)
 
 	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()

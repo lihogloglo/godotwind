@@ -41,6 +41,17 @@ struct SurfaceSample {
 	vec2 horizontal_offset;
 };
 
+float shore_breaker_envelope(float raw_dist, float shore_fade_distance) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	return shore_ramp * offshore_fade;
+}
+
+float shore_runup_envelope(float raw_dist, float shore_fade_distance) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+}
 
 vec3 get_world_position(vec2 uv, float depth) {
 	vec4 clip_pos = vec4(uv * 2.0 - 1.0, depth, 1.0);
@@ -81,13 +92,21 @@ SurfaceSample sample_surface(vec2 sample_xz, vec3 cam_pos, bool include_fft, boo
 	float raw_dist = shore_data.a * shore_fade_distance;
 	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
 	float shore_dir_len = length(shore_dir);
-	if (include_shore_waves && shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.5) {
+	if (include_shore_waves && shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.05) {
 		shore_dir /= shore_dir_len;
-		float amp_env = smoothstep(0.0, shore_fade_distance * 0.1, raw_dist)
-			* (1.0 - smoothstep(shore_fade_distance * 0.5, shore_fade_distance * 0.9, raw_dist));
-		float phase = raw_dist * shore_wave_frequency * 6.2832 - TIME * shore_wave_speed * 6.2832;
-		water_y += shore_wave_amplitude * amp_env * sin(phase);
-		horizontal_offset -= shore_dir * (shore_wave_amplitude * amp_env * shore_wave_steepness * cos(phase));
+		float phase = raw_dist * shore_wave_frequency * 6.2832 + TIME * shore_wave_speed * 6.2832;
+		float sin_phase = sin(phase);
+		float breaker_env = shore_breaker_envelope(raw_dist, shore_fade_distance);
+		float runup_env = shore_runup_envelope(raw_dist, shore_fade_distance);
+		float crest = smoothstep(0.0, 1.0, sin_phase);
+		water_y += shore_wave_amplitude * (
+			breaker_env * sin_phase
+			+ runup_env * crest * 0.35
+		);
+		horizontal_offset -= shore_dir * (shore_wave_amplitude * shore_wave_steepness * (
+			breaker_env * cos(phase)
+			+ runup_env * crest * 0.55
+		));
 	}
 
 	SurfaceSample result;
@@ -139,8 +158,12 @@ void main() {
 	float water_depth = water_level - world_pos.y;
 
 	float below_mask = smoothstep(0.02, 0.35, water_depth);
-	float waterline_band = 1.0 - smoothstep(0.0, 0.65, abs(water_depth));
-	float mask = max(below_mask * 0.55, waterline_band);
+	// Debug waterline marker: keep this narrow so alignment errors are readable.
+	float waterline_band = 1.0 - smoothstep(0.08, 0.14, abs(water_depth));
+	float final_transition_band = 1.0 - smoothstep(0.0, 0.22, abs(water_depth));
+	float mask = debug_mode == 0
+		? max(below_mask * 0.55, final_transition_band * 0.18)
+		: max(below_mask * 0.55, waterline_band);
 	if (mask <= 0.001) {
 		return;
 	}
@@ -152,7 +175,10 @@ void main() {
 	vec3 transmittance = exp(-sigma * min(travel, 45.0));
 	vec3 absorbed = mix(tint, scene_color.rgb, transmittance);
 
-	vec3 proof_color = mix(absorbed, vec3(0.0, 0.85, 1.0), waterline_band * 0.65);
+	vec3 line_tint = mix(scene_color.rgb, tint * 1.8, 0.35);
+	vec3 proof_color = debug_mode == 0
+		? mix(absorbed, line_tint, final_transition_band * 0.22)
+		: mix(absorbed, vec3(0.0, 0.85, 1.0), waterline_band * 0.65);
 	if (debug_mode == 4) {
 		float flat_delta = clamp((water_level - sea_level) * 0.5 + 0.5, 0.0, 1.0);
 		proof_color = mix(vec3(0.05, 0.15, 1.0), vec3(1.0, 0.15, 0.05), flat_delta);

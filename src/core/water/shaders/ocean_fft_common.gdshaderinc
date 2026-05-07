@@ -60,7 +60,9 @@ uniform float shore_wave_amplitude : hint_range(0.0, 2.0) = 0.5;
 // Waves per meter of shore distance — 0.1 = 10m wavelength, 0.05 = 20m.
 // Must be low enough that wavelength exceeds clipmap vertex spacing (~2-4m inner rings).
 uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
-uniform float shore_wave_speed : hint_range(0.1, 5.0) = 1.2;
+// Temporal frequency in cycles/sec. OceanManager derives this from the same
+// gravity-wave dispersion relation used by the FFT compute shader.
+uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
 
 // Refraction — real depth-driven Beer-Lambert from DEPTH_TEXTURE + SCREEN_TEXTURE.
@@ -121,6 +123,10 @@ group_uniforms visual;
 uniform float roughness : hint_range(0.0, 1.0) = 0.02;
 uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
 uniform float wave_scale : hint_range(0.0, 3.0) = 1.0;
+// Shared clock driven by OceanManager. Keep ocean surface animation and
+// compositor classifiers on one time source instead of mixing shader TIME with
+// GDScript wall-clock samples.
+uniform float ocean_time = 0.0;
 
 // Debug visualization — cycles through views of the fragment-shader
 // intermediate state. 0 = normal render. Set via `OceanManager.set_debug_mode(int)`.
@@ -184,6 +190,18 @@ varying float v_vertex_dist;
 varying float v_choppiness;
 
 // Shore mask sampled in vertex() of each .gdshader — not here in fragment.
+
+float shore_breaker_envelope(float raw_dist) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	return shore_ramp * offshore_fade;
+}
+
+float shore_runup_envelope(float raw_dist) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+}
 
 // ============================================================================
 // BICUBIC FILTERING (for normal maps — reduces aliasing at distance)
@@ -362,8 +380,8 @@ void fragment() {
 	float jacobian_foam = smoothstep(0.0, 1.0, gradient.z * 0.75) * foam_dist_fade * foam_intensity;
 
 	// Flow-mapped dual-layer foam texture for animated detail
-	vec2 foam_uv_a = v_world_pos.xz * 0.15 + TIME * vec2(foam_flow_speed, foam_flow_speed * 0.7);
-	vec2 foam_uv_b = v_world_pos.xz * 0.12 + TIME * vec2(-foam_flow_speed * 0.6, foam_flow_speed);
+	vec2 foam_uv_a = v_world_pos.xz * 0.15 + ocean_time * vec2(foam_flow_speed, foam_flow_speed * 0.7);
+	vec2 foam_uv_b = v_world_pos.xz * 0.12 + ocean_time * vec2(-foam_flow_speed * 0.6, foam_flow_speed);
 	float foam_tex_a = texture(foam_texture, foam_uv_a).r;
 	float foam_tex_b = texture(foam_texture, foam_uv_b).r;
 	float foam_detail = foam_tex_a * foam_tex_b;  // multiply for sharper, more natural pattern

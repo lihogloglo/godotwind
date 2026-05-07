@@ -18,6 +18,22 @@ If a C# file changed, run `dotnet build Godotwind.sln` before launching Godot.
 If neither visual launch nor automated benchmark can be run, say exactly why in
 the final response.
 
+## Shader Import / Cache Verification Rule
+
+When a `.glsl` compute shader or `.gdshader` / `.gdshaderinc` visual shader
+changes, do not trust a normal launch to pick up the edit. Before visual
+verification, clear the relevant generated shader/import cache and force
+reimport/recompile:
+
+- For imported compute shaders (`RDShaderFile`, usually `.glsl`), delete the
+  matching `.godot/imported/<shader-name>-*.res` and `.md5` files, then run:
+  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+- For visual `.gdshader` / `.gdshaderinc` changes, clear the relevant
+  `.godot/shader_cache/` entries if the edit appears stale, then relaunch the
+  test scene.
+- In the final response, say whether shader cache/import artifacts were cleared
+  before the visual check.
+
 ## Plain-English Work Summary Rule
 
 Always explain in plain English what you changed and what you verified. Do not

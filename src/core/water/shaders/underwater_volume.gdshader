@@ -75,9 +75,10 @@ uniform float wave_scale = 1.0;
 uniform sampler2D shore_mask : filter_linear_mipmap;
 uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
 uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
+uniform float ocean_time = 0.0;
 uniform float shore_wave_amplitude : hint_range(0.0, 2.0) = 0.5;
 uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
-uniform float shore_wave_speed : hint_range(0.1, 5.0) = 1.2;
+uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
 
 // ── Absorption (Step 1) ────────────────────────────────────────────────────
@@ -132,6 +133,18 @@ float luminance(vec3 color) {
 	return dot(color, vec3(0.299, 0.587, 0.114));
 }
 
+float shore_breaker_envelope(float raw_dist) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	return shore_ramp * offshore_fade;
+}
+
+float shore_runup_envelope(float raw_dist) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+}
+
 // Build a rotation matrix whose +Z axis points along `direction`.
 // Used to project world positions into a caustic UV plane perpendicular to
 // the sun direction (caustics look right when they come from "above" relative
@@ -169,11 +182,16 @@ float get_dynamic_water_level(vec2 world_xz, float dist_to_camera) {
 	float raw_dist = shore_data.a * shore_fade_distance;
 	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
 	float shore_dir_len = length(shore_dir);
-	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.5) {
-		float amp_env = smoothstep(0.0, shore_fade_distance * 0.1, raw_dist)
-					  * (1.0 - smoothstep(shore_fade_distance * 0.5, shore_fade_distance * 0.9, raw_dist));
-		float phase = raw_dist * shore_wave_frequency * 6.2832 - TIME * shore_wave_speed * 6.2832;
-		water_y += shore_wave_amplitude * amp_env * sin(phase);
+	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.05) {
+		float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
+		float sin_phase = sin(phase);
+		float breaker_env = shore_breaker_envelope(raw_dist);
+		float runup_env = shore_runup_envelope(raw_dist);
+		float crest = smoothstep(0.0, 1.0, sin_phase);
+		water_y += shore_wave_amplitude * (
+			breaker_env * sin_phase
+			+ runup_env * crest * 0.35
+		);
 	}
 
 	return water_y;

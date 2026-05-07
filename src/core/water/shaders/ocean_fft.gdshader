@@ -67,15 +67,23 @@ void vertex() {
 	float raw_dist = shore_data.a * shore_fade_distance;
 	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
 	float shore_dir_len = length(shore_dir);
-	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.5) {
+	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.05) {
 		shore_dir /= shore_dir_len;
-		// Amplitude envelope: ramp up near shore, broad peak, fade toward deep water.
-		// With fade_distance=50: ramp 0-5m, peak 5-25m, fade 25-45m.
-		float amp_env = smoothstep(0.0, shore_fade_distance * 0.1, raw_dist)
-					  * (1.0 - smoothstep(shore_fade_distance * 0.5, shore_fade_distance * 0.9, raw_dist));
-		float phase = raw_dist * shore_wave_frequency * 6.2832 - TIME * shore_wave_speed * 6.2832;
-		float shore_y = shore_wave_amplitude * amp_env * sin(phase);
-		float shore_xz = shore_wave_amplitude * amp_env * shore_wave_steepness * cos(phase);
+		// shore_dir points away from shore. Phase sign makes crests travel
+		// toward decreasing distance, i.e. toward the real shoreline.
+		float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
+		float sin_phase = sin(phase);
+		float breaker_env = shore_breaker_envelope(raw_dist);
+		float runup_env = shore_runup_envelope(raw_dist);
+		float crest = smoothstep(0.0, 1.0, sin_phase);
+		float shore_y = shore_wave_amplitude * (
+			breaker_env * sin_phase
+			+ runup_env * crest * 0.35
+		);
+		float shore_xz = shore_wave_amplitude * shore_wave_steepness * (
+			breaker_env * cos(phase)
+			+ runup_env * crest * 0.55
+		);
 		VERTEX.y += shore_y;
 		VERTEX.xz -= shore_dir * shore_xz;
 	}

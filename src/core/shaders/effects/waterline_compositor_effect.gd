@@ -11,7 +11,8 @@ const SHADER_PATH := "res://src/core/shaders/compute/waterline_probe.glsl"
 const MAX_CASCADES := 8
 
 var _depth_sampler: RID
-var _linear_sampler: RID
+var _linear_clamp_sampler: RID
+var _linear_repeat_sampler: RID
 var _state_buffer: RID
 var _displacement_rid: RID
 var _shore_mask_rid: RID
@@ -23,13 +24,14 @@ var _shore_mask_bounds: Vector4 = Vector4(-8000.0, -8000.0, 16000.0, 16000.0)
 var _shore_fade_distance: float = 50.0
 var _shore_wave_amplitude: float = 0.0
 var _shore_wave_frequency: float = 0.1
-var _shore_wave_speed: float = 1.2
+var _shore_wave_speed: float = 0.4
 var _shore_wave_steepness: float = 0.5
 var _water_tint: Vector3 = Vector3(0.02, 0.04, 0.06)
 var _absorption_sigma: Vector3 = Vector3(0.12, 0.03, 0.018)
 var _caustics_strength: float = 1.0
 var _probe_strength: float = 0.7
 var _debug_mode: int = 0
+var _ocean_time: float = 0.0
 var _render_logged: bool = false
 
 
@@ -58,13 +60,29 @@ func on_effect_added() -> void:
 func _create_samplers() -> void:
 	if rd == null:
 		return
-	var linear_state := RDSamplerState.new()
-	linear_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	linear_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	linear_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
-	linear_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
-	_depth_sampler = rd.sampler_create(linear_state)
-	_linear_sampler = rd.sampler_create(linear_state)
+	var depth_state := RDSamplerState.new()
+	depth_state.mag_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	depth_state.min_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	depth_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	depth_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	depth_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_depth_sampler = rd.sampler_create(depth_state)
+
+	var clamp_state := RDSamplerState.new()
+	clamp_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	clamp_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	clamp_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	clamp_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	clamp_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_linear_clamp_sampler = rd.sampler_create(clamp_state)
+
+	var repeat_state := RDSamplerState.new()
+	repeat_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	repeat_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	repeat_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
+	repeat_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
+	repeat_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_linear_repeat_sampler = rd.sampler_create(repeat_state)
 
 
 func _create_fallback_shore_mask() -> void:
@@ -88,6 +106,8 @@ func sync_from_ocean(ocean_manager: Node, ocean_material: ShaderMaterial) -> voi
 		_absorption_sigma = ocean_manager.get_absorption_sigma()
 	if ocean_manager.has_method("get_underwater_caustics_strength"):
 		_caustics_strength = ocean_manager.get_underwater_caustics_strength()
+	if ocean_manager.has_method("get_time"):
+		_ocean_time = ocean_manager.get_time()
 
 	var scales: Variant = ocean_material.get_shader_parameter("map_scales")
 	_map_scales.clear()
@@ -180,7 +200,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var pc := PackedFloat32Array()
 	pc.append(float(size.x))
 	pc.append(float(size.y))
-	pc.append(Time.get_ticks_msec() / 1000.0)
+	pc.append(_ocean_time)
 	pc.append(blend_factor)
 	pc.append(_sea_level)
 	pc.append(_wave_scale)
@@ -210,14 +230,14 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var u_displacement := RDUniform.new()
 	u_displacement.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u_displacement.binding = 2
-	u_displacement.add_id(_linear_sampler)
+	u_displacement.add_id(_linear_repeat_sampler)
 	u_displacement.add_id(_displacement_rid)
 	uniforms.append(u_displacement)
 
 	var u_shore := RDUniform.new()
 	u_shore.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u_shore.binding = 3
-	u_shore.add_id(_linear_sampler)
+	u_shore.add_id(_linear_clamp_sampler)
 	u_shore.add_id(_shore_mask_rid)
 	uniforms.append(u_shore)
 
@@ -298,9 +318,12 @@ func on_effect_removed() -> void:
 		if _depth_sampler.is_valid():
 			rd.free_rid(_depth_sampler)
 			_depth_sampler = RID()
-		if _linear_sampler.is_valid():
-			rd.free_rid(_linear_sampler)
-			_linear_sampler = RID()
+		if _linear_clamp_sampler.is_valid():
+			rd.free_rid(_linear_clamp_sampler)
+			_linear_clamp_sampler = RID()
+		if _linear_repeat_sampler.is_valid():
+			rd.free_rid(_linear_repeat_sampler)
+			_linear_repeat_sampler = RID()
 		if _state_buffer.is_valid():
 			rd.free_rid(_state_buffer)
 			_state_buffer = RID()
