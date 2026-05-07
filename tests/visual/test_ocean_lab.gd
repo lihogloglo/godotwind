@@ -90,6 +90,7 @@ var _ocean_surface_button: Button = null
 var _uw_debug_button: Button = null
 var _waterline_button: Button = null
 var _waterline_debug_button: Button = null
+var _wireframe_button: Button = null
 
 var _sea_level: float = SEA_LEVEL_DEFAULT
 var _playground_origin: Vector3 = Vector3.ZERO
@@ -116,6 +117,7 @@ var _ocean_surface_visible: bool = true
 var _uw_debug_mode: int = 0
 var _waterline_compositor_enabled: bool = true
 var _waterline_debug_mode: int = 0
+var _wireframe_enabled: bool = false
 var _current_weather: int = 0
 var _sun_low: bool = false
 var _help_visible: bool = true
@@ -126,6 +128,7 @@ var _avg_frame_ms: float = 0.0
 
 func _ready() -> void:
 	InputActionsScript.verify()
+	RenderingServer.set_debug_generate_wireframes(true)
 	_build_environment()
 	_build_camera()
 	_setup_terrain()
@@ -490,6 +493,7 @@ func _build_ui() -> void:
 	_uw_debug_button = _add_button(_button_grid, "", Callable(self, "_cycle_uw_debug_mode"))
 	_waterline_button = _add_button(_button_grid, "", Callable(self, "_toggle_waterline_compositor"))
 	_waterline_debug_button = _add_button(_button_grid, "", Callable(self, "_cycle_waterline_debug_mode"))
+	_wireframe_button = _add_button(_button_grid, "", Callable(self, "_toggle_wireframe_debug"))
 	_add_button(_button_grid, "Help", func() -> void:
 		_help_visible = not _help_visible
 	)
@@ -600,6 +604,8 @@ func _refresh_control_labels() -> void:
 		_waterline_button.text = "WL Proto: %s" % ("On" if _waterline_compositor_enabled else "Off")
 	if _waterline_debug_button:
 		_waterline_debug_button.text = "WL Debug: %s" % WL_DEBUG_MODE_NAMES[_waterline_debug_mode]
+	if _wireframe_button:
+		_wireframe_button.text = "Wireframe: %s" % ("On" if _wireframe_enabled else "Off")
 
 
 func _process(delta: float) -> void:
@@ -787,8 +793,9 @@ func _update_hud() -> void:
 		"allcam" if _underwater_active_above else "belowcam",
 		"on" if _uw_wobble_enabled else "off",
 	])
-	lines.append("ocean_mesh=%s  uw_debug=%s  waterline_proto=%s/%s" % [
+	lines.append("ocean_mesh=%s  wireframe=%s  uw_debug=%s  waterline_proto=%s/%s" % [
 		"on" if _ocean_surface_visible else "off",
+		"on" if _wireframe_enabled else "off",
 		UW_DEBUG_MODE_NAMES[_uw_debug_mode],
 		"on" if _waterline_compositor_enabled else "off",
 		WL_DEBUG_MODE_NAMES[_waterline_debug_mode],
@@ -972,6 +979,12 @@ func _cycle_waterline_debug_mode() -> void:
 	_waterline_debug_mode = (_waterline_debug_mode + 1) % WL_DEBUG_MODE_NAMES.size()
 	if _waterline_effect and _waterline_effect.has_method("set_debug_mode"):
 		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	_refresh_control_labels()
+
+
+func _toggle_wireframe_debug() -> void:
+	_wireframe_enabled = not _wireframe_enabled
+	get_viewport().debug_draw = Viewport.DEBUG_DRAW_WIREFRAME if _wireframe_enabled else Viewport.DEBUG_DRAW_DISABLED
 	_refresh_control_labels()
 
 

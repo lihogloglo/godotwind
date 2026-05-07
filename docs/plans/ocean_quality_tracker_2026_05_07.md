@@ -258,6 +258,21 @@ exist.
   amplitude envelope keeps a small near-shore run-up lobe instead of dropping
   to zero at the shoreline. The visible ocean, underwater volume, and WL Proto
   classifier were updated together so diagnostics stay aligned.
+- Shore-wave timing/run-up follow-up: the analytical shore/Gerstner layer now
+  uses a shared `ocean_time` clock and a gravity-wave dispersion-derived
+  temporal frequency instead of a separate weather-scaled speed. User visually
+  confirmed the shore/Gerstner wave speed now matches the FFT cadence better.
+  A second pass removed the first-meter dead strip by deriving a fallback shore
+  direction from neighboring shore-mask alpha samples when shore seed pixels
+  encode no direction, allowing the run-up lobe to operate at `raw_dist == 0`.
+  User visually confirmed the shore now rises/falls, but the motion feels too
+  robotic / ON-OFF. Next pass should replace the binary crest-gated run-up with
+  a smoother swash curve that advances, slows, and recedes continuously.
+- Shoreline smoothness follow-up: user reports the ocean/shoreline edge still
+  appears super blocky near the camera. Do not assume the cause yet. Diagnose
+  whether the blocks come from ocean clipmap tessellation, Terrain3D shoreline
+  geometry/depth silhouette, shore-mask resolution/filtering, or the
+  screen-depth water/terrain intersection before choosing a fix.
 - Surface refraction is still not solved. Keep `Surf Refract` default-off in
   Ocean Lab; do not treat the existing surface-shader refraction path as
   production-ready.
@@ -457,9 +472,21 @@ Acceptance:
 
 ## Phase 3 - Shore Quality
 
-Status: pending
+Status: in progress
 
 The shore system exists, but it needs to stop looking blocky.
+
+Current 2026-05-07 visual state:
+
+- Shore/Gerstner wave speed is now visually close to the FFT wave cadence after
+  switching to shared `ocean_time` plus dispersion-derived timing.
+- The waterline now moves up/down at the shore after the shader derives a
+  fallback SDF direction from neighboring shore-mask alpha samples on zero
+  distance seed pixels.
+- The run-up is visibly present but feels robotic / ON-OFF. It needs smoother
+  swash shaping, not just more amplitude or speed.
+- The shoreline/ocean edge still looks blocky near the camera. Cause is
+  unproven and must be isolated before fixing.
 
 Tasks:
 
@@ -474,11 +501,18 @@ Tasks:
 - If gradient quantization is the limit, evaluate a higher precision format or
   derived smooth gradient.
 - Verify analytical shore-wave direction so waves travel toward the shore, not
-  out toward the ocean. First shader pass implemented; visual confirmation
-  pending.
+  out toward the ocean. First shader pass implemented; user confirmed speed
+  now feels matched to FFT cadence.
 - Verify shore-wave amplitude envelope so waves reduce height near the real
   shoreline and produce a small run-up/lapping motion instead of a hard flatten.
-  First shader pass implemented; visual confirmation pending.
+  First shader pass implemented; user confirmed run-up exists, but it is too
+  binary and needs a smoother swash curve.
+- Diagnose first before changing mesh density: compare clipmap versus projected
+  grid, shore debug modes, waterline debug modes, and terrain/depth silhouette
+  to determine whether the blocky edge comes from ocean mesh tessellation,
+  Terrain3D geometry, shore-mask resolution/filtering, or depth intersection.
+- Smooth the shore run-up curve so it advances, slows, and recedes instead of
+  crest-gating like an ON/OFF switch.
 
 Acceptance:
 

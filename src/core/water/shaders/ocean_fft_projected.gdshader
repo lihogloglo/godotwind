@@ -159,22 +159,22 @@ void vertex() {
 
 	// Shore waves — analytical Gerstner oriented perpendicular to coastline
 	float raw_dist = shore_data.a * shore_fade_distance;
-	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
+	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
-	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.05) {
+	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0) {
 		shore_dir /= shore_dir_len;
 		float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
 		float sin_phase = sin(phase);
 		float breaker_env = shore_breaker_envelope(raw_dist);
 		float runup_env = shore_runup_envelope(raw_dist);
-		float crest = smoothstep(0.0, 1.0, sin_phase);
+		float swash = shore_swash_curve(phase);
 		float shore_y = shore_wave_amplitude * (
 			breaker_env * sin_phase
-			+ runup_env * crest * 0.35
+			+ runup_env * swash * 0.75
 		);
 		float shore_xz = shore_wave_amplitude * shore_wave_steepness * (
 			breaker_env * cos(phase)
-			+ runup_env * crest * 0.55
+			+ runup_env * swash * 0.90
 		);
 		world_pos.y += shore_y;
 		world_pos.xz -= shore_dir * shore_xz;

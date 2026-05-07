@@ -1176,9 +1176,9 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	mat.set_shader_parameter("foam_intensity", lerpf(0.05, 1.0, wind_t))
 
 	# Shore waves — calm: gentle lapping, storm: strong rollers
-	mat.set_shader_parameter("shore_wave_amplitude", lerpf(0.15, 0.8, wind_t))
+	mat.set_shader_parameter("shore_wave_amplitude", lerpf(0.18, 2.2, wind_t))
 	_push_shore_wave_timing_uniforms(mat)
-	mat.set_shader_parameter("shore_wave_steepness", lerpf(0.3, 0.7, wind_t))
+	mat.set_shader_parameter("shore_wave_steepness", lerpf(0.35, 0.95, wind_t))
 
 	# FFT-specific uniforms
 	if quality == OceanMesh.QualityMode.HIGH:
@@ -1232,9 +1232,9 @@ func reset_weather() -> void:
 	mat.set_shader_parameter("sky_tint_strength", 0.8)
 	mat.set_shader_parameter("normal_strength", 0.6)
 	mat.set_shader_parameter("wave_scale", wave_scale)
-	mat.set_shader_parameter("shore_wave_amplitude", 0.15)
+	mat.set_shader_parameter("shore_wave_amplitude", 0.18)
 	_push_shore_wave_timing_uniforms(mat)
-	mat.set_shader_parameter("shore_wave_steepness", 0.3)
+	mat.set_shader_parameter("shore_wave_steepness", 0.35)
 
 	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
 	if quality == OceanMesh.QualityMode.HIGH:

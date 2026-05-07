@@ -76,7 +76,7 @@ uniform sampler2D shore_mask : filter_linear_mipmap;
 uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
 uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
 uniform float ocean_time = 0.0;
-uniform float shore_wave_amplitude : hint_range(0.0, 2.0) = 0.5;
+uniform float shore_wave_amplitude : hint_range(0.0, 3.0) = 0.5;
 uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
 uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
@@ -145,6 +145,34 @@ float shore_runup_envelope(float raw_dist) {
 	return 1.0 - smoothstep(0.00, 0.16, dist_t);
 }
 
+float shore_swash_curve(float phase) {
+	float cycle = fract(phase / 6.2831853);
+	float uprush = smoothstep(0.00, 0.30, cycle);
+	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	return uprush * backwash;
+}
+
+vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
+	vec2 dir = encoded_dir * 2.0 - 1.0;
+	if (length(dir) > 0.01) {
+		return normalize(dir);
+	}
+
+	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
+	for (int radius = 1; radius <= 8; radius *= 2) {
+		vec2 step_uv = texel * float(radius);
+		float x_pos = texture(shore_mask, clamp(shore_uv + vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
+		float x_neg = texture(shore_mask, clamp(shore_uv - vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
+		float z_pos = texture(shore_mask, clamp(shore_uv + vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
+		float z_neg = texture(shore_mask, clamp(shore_uv - vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
+		vec2 gradient_dir = vec2(x_pos - x_neg, z_pos - z_neg);
+		if (length(gradient_dir) > 1e-5) {
+			return normalize(gradient_dir);
+		}
+	}
+	return vec2(0.0);
+}
+
 // Build a rotation matrix whose +Z axis points along `direction`.
 // Used to project world positions into a caustic UV plane perpendicular to
 // the sun direction (caustics look right when they come from "above" relative
@@ -180,17 +208,17 @@ float get_dynamic_water_level(vec2 world_xz, float dist_to_camera) {
 	float water_y = sea_level + displacement.y * wave_scale * shore;
 
 	float raw_dist = shore_data.a * shore_fade_distance;
-	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
+	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
-	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.05) {
+	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0) {
 		float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
 		float sin_phase = sin(phase);
 		float breaker_env = shore_breaker_envelope(raw_dist);
 		float runup_env = shore_runup_envelope(raw_dist);
-		float crest = smoothstep(0.0, 1.0, sin_phase);
+		float swash = shore_swash_curve(phase);
 		water_y += shore_wave_amplitude * (
 			breaker_env * sin_phase
-			+ runup_env * crest * 0.35
+			+ runup_env * swash * 0.75
 		);
 	}
 

@@ -56,7 +56,7 @@ uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
 // Used to denormalize the raw distance stored in shore_mask.a.
 uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
 // Shore wave parameters (Outerra-style trochoidal waves oriented by SDF gradient)
-uniform float shore_wave_amplitude : hint_range(0.0, 2.0) = 0.5;
+uniform float shore_wave_amplitude : hint_range(0.0, 3.0) = 0.5;
 // Waves per meter of shore distance — 0.1 = 10m wavelength, 0.05 = 20m.
 // Must be low enough that wavelength exceeds clipmap vertex spacing (~2-4m inner rings).
 uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
@@ -201,6 +201,34 @@ float shore_breaker_envelope(float raw_dist) {
 float shore_runup_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
 	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+}
+
+float shore_swash_curve(float phase) {
+	float cycle = fract(phase / 6.2831853);
+	float uprush = smoothstep(0.00, 0.30, cycle);
+	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	return uprush * backwash;
+}
+
+vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
+	vec2 dir = encoded_dir * 2.0 - 1.0;
+	if (length(dir) > 0.01) {
+		return normalize(dir);
+	}
+
+	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
+	for (int radius = 1; radius <= 8; radius *= 2) {
+		vec2 step_uv = texel * float(radius);
+		float x_pos = texture(shore_mask, clamp(shore_uv + vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
+		float x_neg = texture(shore_mask, clamp(shore_uv - vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
+		float z_pos = texture(shore_mask, clamp(shore_uv + vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
+		float z_neg = texture(shore_mask, clamp(shore_uv - vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
+		vec2 gradient_dir = vec2(x_pos - x_neg, z_pos - z_neg);
+		if (length(gradient_dir) > 1e-5) {
+			return normalize(gradient_dir);
+		}
+	}
+	return vec2(0.0);
 }
 
 // ============================================================================
