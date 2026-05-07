@@ -839,14 +839,23 @@ func release_runtime_resources() -> void:
 		ShaderManager.unload_effect("underwater")
 		_underwater_effect_loaded = false
 	_shutdown_fft_pipeline()
-	if _ocean_mesh:
-		_ocean_mesh.queue_free()
-		_ocean_mesh = null
+	_dispose_ocean_mesh()
 	if _shore_mask:
 		_shore_mask.queue_free()
 		_shore_mask = null
 	_cached_sun_light = null
 	_system_initialized = false
+
+
+func _dispose_ocean_mesh() -> void:
+	var old_mesh := _ocean_mesh
+	_ocean_mesh = null
+	if old_mesh == null:
+		return
+	old_mesh.visible = false
+	if old_mesh.get_parent() == self:
+		remove_child(old_mesh)
+	old_mesh.queue_free()
 
 
 func get_water_quality() -> OceanMesh.QualityMode:
@@ -875,14 +884,13 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 
 	water_mesh_mode = new_mode
 
-	if _ocean_mesh:
-		_ocean_mesh.queue_free()
-		_ocean_mesh = null
+	_dispose_ocean_mesh()
 
 	_ocean_mesh = OceanMesh.new()
 	_ocean_mesh.name = "OceanMesh"
 	add_child(_ocean_mesh)
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
+	water_mesh_mode = _ocean_mesh.get_mesh_mode()
 
 	# Re-push shader parameters, shore mask, and FFT cascade state to the
 	# fresh material.
@@ -893,7 +901,7 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 	reset_weather()
 
 	Log.info("water", "OceanManager: rebuilt ocean mesh in mode %s" % (
-		"PROJECTED" if new_mode == 1 else "CLIPMAP"))
+		"PROJECTED" if water_mesh_mode == 1 else "CLIPMAP"))
 
 
 func get_mesh_mode() -> int:

@@ -30,6 +30,7 @@ const NativeStreamingManagerScript := preload("res://src/core/world/native_strea
 const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const MorrowindTerrainTextureBridgeScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_bridge.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
@@ -154,6 +155,7 @@ var _debug_view_commands: DebugViewCommands = null  # wireframe + collision viz 
 var _pocket_manager: Node = null  # InteriorPocketManager
 var _door_prompt_label: Label = null  # "Press E to enter" prompt
 var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
+var _mw_terrain_texture_bridge: RefCounted = null  # MW LTEX sidecar terrain texturing
 var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B feature flags
 var _benchmark_hud: CanvasLayer = null  # BenchmarkHUD — live perf overlay, default hidden
 var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
@@ -537,6 +539,7 @@ func _init_async() -> void:
 		# Push wet map uniforms (sea_level from OceanManager or project settings)
 		var sea_lvl: float = ProjectSettings.get_setting("ocean/sea_level", 0.0)
 		_horizon_map_manager.push_wet_map(sea_lvl)
+		_init_mw_terrain_textures()
 	_ta = _log_timing(_ta, "horizon maps")
 
 	# Ocean system is now lazy-loaded - created on first toggle
@@ -973,14 +976,24 @@ func _init_terrain3d() -> void:
 	Log.info("tools", "Terrain3D collision: mode=%s layer=%s shape_size=%d radius=%d camera=%s" % [
 		str(dbg_mode), str(dbg_layer), 16, 64, camera.name if camera else "null"])
 
-	# Load terrain textures
-	var textures_loaded: int = texture_loader.load_terrain_textures(terrain_3d.assets)
-	_log("Loaded %d terrain textures" % textures_loaded)
-
-	# Configure terrain manager to use proper texture slot mapping
-	terrain_manager.set_texture_slot_mapper(texture_loader)
+	if texture_loader.call("load_default_terrain_texture", terrain_3d.assets):
+		_log("Terrain textures: Terrain3D default slot installed; MW LTEX sidecar array enabled")
+	else:
+		_log("[color=yellow]Warning: Failed to install Terrain3D default terrain texture[/color]")
 
 	_log("Terrain3D configured: region_size=%d, vertex_spacing=%.3f" % [CS.TERRAIN_REGION_SIZE, terrain_3d.get_vertex_spacing()])
+
+
+func _init_mw_terrain_textures() -> void:
+	if not terrain_3d or not terrain_3d.material:
+		return
+	_mw_terrain_texture_bridge = MorrowindTerrainTextureBridgeScript.new()
+	var err: Error = _mw_terrain_texture_bridge.call("initialize", terrain_3d)
+	if err != OK:
+		Log.warn("textures", "MW terrain texture bridge failed to initialize: %s" % error_string(err))
+		return
+	_mw_terrain_texture_bridge.call("rebuild_all_active_regions")
+	_log("MW terrain textures: %d array layers" % int(_mw_terrain_texture_bridge.call("get_texture_array_layer_count")))
 
 
 func _load_preprocessed_terrain() -> void:

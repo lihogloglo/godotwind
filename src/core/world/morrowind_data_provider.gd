@@ -5,16 +5,12 @@
 ##
 ## Uses combined regions (4x4 MW cells per Terrain3D region) for large world support.
 ##
-## Terrain Texture Blending:
-## --------------------------
-## This provider implements OpenMW-style cross-cell texture blending to eliminate
-## the "chessboard" appearance at cell boundaries. Key features:
-##
-## 1. Region-level control map generation with neighbor sampling
-## 2. Bilinear interpolation of texture indices across cell boundaries
-## 3. Future-proof support for next-gen PBR textures (normal, roughness, AO maps)
-##
-## Reference: OpenMW components/esmterrain/storage.cpp getBlendmaps()
+## Terrain texturing:
+## ------------------
+## Morrowind terrain textures are owned by MorrowindTerrainTextureBridge.
+## Terrain3D's built-in control map is kept valid for flags/defaults, but it is
+## not used as the production MW texture-selection path because it only exposes
+## 32 texture slots.
 class_name MorrowindDataProvider
 extends "res://src/core/world/world_data_provider.gd"
 
@@ -31,6 +27,9 @@ var _texture_loader: RefCounted = null
 
 ## Terrain3D assets (for texture slot mapping)
 var _terrain_assets: Terrain3DAssets = null
+
+## Optional MW Terrain3D sidecar texture bridge
+var _terrain_texture_bridge: RefCounted = null
 
 ## Cells per Terrain3D region (4x4 = 16 cells per region)
 const CELLS_PER_REGION: int = 4
@@ -81,11 +80,22 @@ func initialize() -> Error:
 ## Set Terrain3D assets for texture slot mapping
 func set_terrain_assets(assets: Terrain3DAssets) -> void:
 	_terrain_assets = assets
-	if _texture_loader and assets:
-		var loaded: int = _texture_loader.call("load_terrain_textures", assets)
-		Log.info("streaming", "MorrowindDataProvider: Loaded %d terrain textures" % loaded)
-		if _terrain_manager:
-			_terrain_manager.call("set_texture_slot_mapper", _texture_loader)
+	if assets:
+		Log.info("streaming", "MorrowindDataProvider: Terrain3D assets configured; MW terrain textures use sidecar Texture2DArray")
+
+
+func set_terrain_texture_bridge(bridge: RefCounted) -> void:
+	_terrain_texture_bridge = bridge
+
+
+func on_terrain_region_imported(region_coord: Vector2i, t3d_loc: Vector2i) -> void:
+	if _terrain_texture_bridge and _terrain_texture_bridge.has_method("on_terrain_region_imported"):
+		_terrain_texture_bridge.call("on_terrain_region_imported", region_coord, t3d_loc)
+
+
+func on_terrain_region_unloading(region_coord: Vector2i, t3d_loc: Vector2i) -> void:
+	if _terrain_texture_bridge and _terrain_texture_bridge.has_method("on_terrain_region_unloading"):
+		_terrain_texture_bridge.call("on_terrain_region_unloading", region_coord, t3d_loc)
 
 
 ## Map types for unified generation
@@ -97,8 +107,7 @@ func get_heightmap_for_region(region_coord: Vector2i) -> Image:
 
 
 func get_controlmap_for_region(region_coord: Vector2i) -> Image:
-	# Use new cross-cell blending approach for smooth texture transitions
-	return _generate_region_controlmap_with_blending(region_coord)
+	return _get_combined_map(region_coord, MapType.CONTROL)
 
 
 func get_colormap_for_region(region_coord: Vector2i) -> Image:

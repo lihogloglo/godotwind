@@ -481,6 +481,7 @@ func _load_region_sync(region_coord: Vector2i) -> void:
 	var t3d_count := _terrain_3d.data.get_region_count()
 	var t3d_loc := _terrain_3d.data.get_region_location(world_pos)
 	_debug("Terrain3D: %d regions, this one at T3D loc %s" % [t3d_count, t3d_loc])
+	_notify_provider_region_imported(region_coord, t3d_loc)
 
 	# Track this region
 	_loaded_regions[region_coord] = true
@@ -619,6 +620,8 @@ func _import_generated_data(data: Dictionary) -> void:
 	])
 
 	_terrain_3d.data.import_images(images, world_pos, 0.0, 1.0)
+	var t3d_loc := _terrain_3d.data.get_region_location(world_pos)
+	_notify_provider_region_imported(region_coord, t3d_loc)
 
 	# Track this region
 	_loaded_regions[region_coord] = true
@@ -669,6 +672,7 @@ func _unload_region(region_coord: Vector2i) -> void:
 	var removed := false
 	for t3d_region in _terrain_3d.data.get_regions_active():
 		if t3d_region.get_location() == t3d_loc:
+			_notify_provider_region_unloading(region_coord, t3d_loc)
 			_terrain_3d.data.remove_region(t3d_region, false)
 			removed = true
 			_stats_regions_unloaded += 1
@@ -682,6 +686,16 @@ func _unload_region(region_coord: Vector2i) -> void:
 	# Clean up our tracking regardless
 	_loaded_regions.erase(region_coord)
 	_region_world_positions.erase(region_coord)
+
+
+func _notify_provider_region_imported(region_coord: Vector2i, t3d_loc: Vector2i) -> void:
+	if _provider and _provider.has_method("on_terrain_region_imported"):
+		_provider.call("on_terrain_region_imported", region_coord, t3d_loc)
+
+
+func _notify_provider_region_unloading(region_coord: Vector2i, t3d_loc: Vector2i) -> void:
+	if _provider and _provider.has_method("on_terrain_region_unloading"):
+		_provider.call("on_terrain_region_unloading", region_coord, t3d_loc)
 
 
 ## Unload regions that are too far from the camera

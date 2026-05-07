@@ -73,8 +73,9 @@ uniform sampler2D DEPTH_TEXTURE  : hint_depth_texture, filter_nearest;
 // R absorbed fastest, G/B slower — matches real ocean spectrum.
 uniform vec3 absorption_rate = vec3(0.4, 0.1, 0.06);
 uniform float absorption_density : hint_range(0.01, 2.0) = 0.3;
-// Clamp water thickness to this many meters when background is far-plane/sky.
-// Prevents division by zero and caps extreme absorption for looking-at-horizon cases.
+// Clamp water thickness to this many meters for Beer-Lambert absorption and
+// debug scaling. Depths beyond this remain real scene geometry; only a near-zero
+// reversed-Z depth sample means far-plane/sky.
 uniform float max_visible_depth : hint_range(1.0, 50.0) = 20.0;
 // Strength of the refraction UV offset. 0.6 is the shader-specialist-tuned
 // default — visibly refractive without crossing silhouettes. 0 to disable.
@@ -323,7 +324,7 @@ void fragment() {
 	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
 	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
 	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
-	bool is_sky_or_far = raw_thickness >= max_visible_depth;
+	bool is_sky_or_far = bg_ndc_z <= 1e-5;
 	float water_thickness = min(raw_thickness, max_visible_depth);
 
 	// Read gradient and foam from normal maps (all cascades)

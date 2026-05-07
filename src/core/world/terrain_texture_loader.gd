@@ -118,6 +118,19 @@ func load_terrain_textures(terrain_assets: Terrain3DAssets) -> int:
 	return loaded
 
 
+## Install only the default terrain texture in Terrain3D assets.
+##
+## MW production texturing uses MorrowindTerrainTextureBridge, but Terrain3D
+## still expects a valid asset array for its material internals. This prevents
+## the checkered fallback without mapping MW LTEX data into the 32-slot model.
+func load_default_terrain_texture(terrain_assets: Terrain3DAssets) -> bool:
+	if not terrain_assets:
+		push_error("TerrainTextureLoader: No Terrain3DAssets provided")
+		return false
+	_add_default_texture(terrain_assets)
+	return true
+
+
 ## Collect all texture indices actually used by LAND records, sorted by usage frequency
 ## This ensures the most commonly used textures get slots when we hit the 32-slot limit
 func _collect_used_texture_indices() -> Array[int]:

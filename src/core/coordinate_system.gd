@@ -344,6 +344,10 @@ static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true
 	# Create material if needed
 	if create_material and not terrain.material:
 		terrain.set_material(Terrain3DMaterial.new())
+
+	# Disable Terrain3D's checker/debug surface for runtime terrain.
+	terrain.set("show_checkered", false)
+	if terrain.material:
 		terrain.material.show_checkered = false
 
 	# Configure world background for areas beyond generated regions
@@ -352,7 +356,6 @@ static func configure_terrain3d(terrain: Terrain3D, create_material: bool = true
 	# NONE mode — no infinite terrain plane beyond loaded regions.
 	# The ocean mesh (8km radius clipmap) covers deep water areas.
 	# FLAT (=1) was causing z-fighting: infinite plane at Y=0 intersected ocean surface.
-	if terrain.material:
 		terrain.material.world_background = 0  # NONE
 
 	# Create assets if needed

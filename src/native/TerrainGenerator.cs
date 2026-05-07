@@ -2,6 +2,8 @@ using Godot;
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using GodotArray = Godot.Collections.Array;
+using GodotDictionary = Godot.Collections.Dictionary;
 
 namespace Godotwind.Native;
 
@@ -23,6 +25,7 @@ public partial class TerrainGenerator : RefCounted
     public const int MW_TEXTURE_SIZE = 16;   // Texture tiles per cell side
     public const int CELLS_PER_REGION = 4;   // 4x4 cells per Terrain3D region
     public const int CELL_CROP_SIZE = 64;    // Cropped cell size for Terrain3D
+    public const int MW_REGION_INDEX_MAP_SIZE = CELLS_PER_REGION * MW_TEXTURE_SIZE + 1; // 65x65 texture IDs
 
     // Height scale for MW -> Godot conversion
     // MW units to meters: 1 / 70 (same as CoordinateSystem.UNITS_PER_METER)
@@ -318,6 +321,84 @@ public partial class TerrainGenerator : RefCounted
 
         img.SetData(regionSize, regionSize, false, Image.Format.Rf, buffer);
         return img;
+    }
+
+    /// <summary>
+    /// Generate a Morrowind terrain texture index map for one Terrain3D region.
+    ///
+    /// Input cellTextures is a 5x5 neighborhood of LAND VTEX grids, ordered
+    /// south-to-north rows from the region's south-west cell. Each populated
+    /// entry is a 16x16 PackedInt32Array of MW texture indices.
+    ///
+    /// Output is a 65x65 FORMAT_R8 image. Pixels 0..63 cover the 4x4 region;
+    /// pixel 64 is the north/east border sampled from neighboring cells.
+    /// The image Y axis is flipped so texture-array sampling matches the
+    /// Terrain3D region texture orientation.
+    /// </summary>
+    public static Image GenerateMorrowindRegionIndexMap(GodotArray cellTextures, GodotDictionary mwToLayer)
+    {
+        var img = Image.CreateEmpty(MW_REGION_INDEX_MAP_SIZE, MW_REGION_INDEX_MAP_SIZE, false, Image.Format.R8);
+        var buffer = new byte[MW_REGION_INDEX_MAP_SIZE * MW_REGION_INDEX_MAP_SIZE];
+
+        if (cellTextures == null)
+        {
+            img.SetData(MW_REGION_INDEX_MAP_SIZE, MW_REGION_INDEX_MAP_SIZE, false, Image.Format.R8, buffer);
+            return img;
+        }
+
+        for (int imgY = 0; imgY < MW_REGION_INDEX_MAP_SIZE; imgY++)
+        {
+            int globalY = MW_REGION_INDEX_MAP_SIZE - 1 - imgY;
+            int cellOffsetY = Math.Min(globalY / MW_TEXTURE_SIZE, CELLS_PER_REGION);
+            int texY = globalY % MW_TEXTURE_SIZE;
+
+            for (int x = 0; x < MW_REGION_INDEX_MAP_SIZE; x++)
+            {
+                int cellOffsetX = Math.Min(x / MW_TEXTURE_SIZE, CELLS_PER_REGION);
+                int texX = x % MW_TEXTURE_SIZE;
+                int mwIndex = GetMwTextureIndex(cellTextures, cellOffsetX, cellOffsetY, texX, texY);
+                int layer = GetLayerForMwIndex(mwToLayer, mwIndex);
+                buffer[imgY * MW_REGION_INDEX_MAP_SIZE + x] = (byte)Math.Clamp(layer, 0, 255);
+            }
+        }
+
+        img.SetData(MW_REGION_INDEX_MAP_SIZE, MW_REGION_INDEX_MAP_SIZE, false, Image.Format.R8, buffer);
+        return img;
+    }
+
+    private static int GetMwTextureIndex(GodotArray cellTextures, int cellOffsetX, int cellOffsetY, int texX, int texY)
+    {
+        int cellIndex = cellOffsetY * (CELLS_PER_REGION + 1) + cellOffsetX;
+        if (cellIndex < 0 || cellIndex >= cellTextures.Count)
+            return 0;
+
+        Variant cellVariant = cellTextures[cellIndex];
+        if (cellVariant.VariantType != Variant.Type.PackedInt32Array)
+            return 0;
+
+        int[] indices = cellVariant.AsInt32Array();
+        if (indices.Length != MW_TEXTURE_SIZE * MW_TEXTURE_SIZE)
+            return 0;
+
+        return indices[texY * MW_TEXTURE_SIZE + texX];
+    }
+
+    private static int GetLayerForMwIndex(GodotDictionary mwToLayer, int mwIndex)
+    {
+        if (mwIndex == 0 || mwToLayer == null)
+            return 0;
+
+        Variant key = Variant.From(mwIndex);
+        if (!mwToLayer.ContainsKey(key))
+            return 0;
+
+        Variant value = mwToLayer[key];
+        return value.VariantType switch
+        {
+            Variant.Type.Int => value.AsInt32(),
+            Variant.Type.Float => (int)MathF.Round(value.AsSingle()),
+            _ => 0
+        };
     }
 
     /// <summary>

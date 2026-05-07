@@ -58,6 +58,12 @@ uniform float wet_roughness_target : hint_range(0.0, 0.3) = 0.05;
 uniform bool wet_debug = false;
 // === CUSTOM: enable_texturing toggle for test scenes without MW textures ===
 uniform bool enable_texturing = true;
+// === CUSTOM: Morrowind LTEX sidecar texturing ===
+uniform bool mw_texturing_enabled = false;
+uniform highp sampler2DArray mw_land_albedo_array : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform highp sampler2DArray mw_land_index_maps : filter_nearest, repeat_disable;
+uniform float mw_texture_tile_scale = 0.136752;
+uniform float mw_texture_blend_softness : hint_range(0.0, 1.0) = 1.0;
 
 // Types & varyings (from internal shader)
 struct material {
@@ -214,6 +220,22 @@ void accumulate_material(const vec3 base_ddx, const vec3 base_ddy, const float w
 	}
 }
 
+int mw_decode_layer(const ivec3 coord) {
+	return int(round(texelFetch(mw_land_index_maps, coord, 0).r * 255.0));
+}
+
+void accumulate_mw_material(const float weight, const int id, const vec2 uv, const vec4 dd, inout material mat) {
+	if (weight <= 0.0) {
+		return;
+	}
+	vec4 alb = textureGrad(mw_land_albedo_array, vec3(uv, float(id)), dd.xy, dd.zw);
+	float id_weight = weight;
+	mat.albedo_height = fma(alb, vec4(id_weight), mat.albedo_height);
+	mat.normal_rough = fma(vec4(0., 1., 0., 0.7), vec4(id_weight), mat.normal_rough);
+	mat.normal_map_depth += id_weight;
+	mat.total_weight += id_weight;
+}
+
 ////////////////////////
 // Vertex (from internal shader)
 ////////////////////////
@@ -358,64 +380,92 @@ void fragment() {
 		BINORMAL = mat3(VIEW_MATRIX) * w_binormal;
 	}
 
-	// Control map decode
-	uvec4 control = uvec4(floatBitsToUint(texelFetch(_control_maps, index[3], 0).r));
-	if (bilerp) {
-		control = uvec4(
-			floatBitsToUint(texelFetch(_control_maps, index[0], 0).r),
-			floatBitsToUint(texelFetch(_control_maps, index[1], 0).r),
-			floatBitsToUint(texelFetch(_control_maps, index[2], 0).r),
-			control[3]);
-	}
-
-	// Texture ID decode
-	ivec4 t_id[2] = {ivec4(control >> uvec4(27u) & uvec4(0x1Fu)),
-		ivec4(control >> uvec4(22u) & uvec4(0x1Fu))};
-	ivec2 texture_ids[4] = ivec2[4](
-		ivec2(t_id[0].x, t_id[1].x),
-		ivec2(t_id[0].y, t_id[1].y),
-		ivec2(t_id[0].z, t_id[1].z),
-		ivec2(t_id[0].w, t_id[1].w));
-
-	// Texture weight interpolation
-	vec4 weights_id_1 = vec4(control >> uvec4(14u) & uvec4(0xFFu)) * 0.003921568627450;
-	vec4 weights_id_0 = 1.0 - weights_id_1;
-	vec2 t_weights[4] = vec2[4](
-		vec2(weights_id_0[0], weights_id_1[0]),
-		vec2(weights_id_0[1], weights_id_1[1]),
-		vec2(weights_id_0[2], weights_id_1[2]),
-		vec2(weights_id_0[3], weights_id_1[3]));
-
-	if (bilerp) {
-		t_weights = {vec2(0), vec2(0), vec2(0), vec2(0)};
-		weights_id_0 *= weights;
-		weights_id_1 *= weights;
-		for (int i = 0; i < 4; i++) {
-			vec2 w_0 = vec2(weights_id_0[i]);
-			vec2 w_1 = vec2(weights_id_1[i]);
-			ivec2 id_0 = texture_ids[i].xx;
-			ivec2 id_1 = texture_ids[i].yy;
-			t_weights[0] += fma(w_0, vec2(equal(texture_ids[0], id_0)), w_1 * vec2(equal(texture_ids[0], id_1)));
-			t_weights[1] += fma(w_0, vec2(equal(texture_ids[1], id_0)), w_1 * vec2(equal(texture_ids[1], id_1)));
-			t_weights[2] += fma(w_0, vec2(equal(texture_ids[2], id_0)), w_1 * vec2(equal(texture_ids[2], id_1)));
-			t_weights[3] += fma(w_0, vec2(equal(texture_ids[3], id_0)), w_1 * vec2(equal(texture_ids[3], id_1)));
-		}
-	}
-
 	// Material accumulation
 	material mat = material(vec4(0.0), vec4(0.0), 0., 0., 0.);
 
 	if (enable_texturing) {
-		accumulate_material(base_ddx, base_ddy, weights[3], index[3], control[3], t_weights[3],
-			texture_ids[3], index_normal[3], h[3], mat);
+		if (mw_texturing_enabled && region_uv.z > -1.0) {
+			vec2 mw_grid = clamp(region_uv.xy * 64.0, vec2(0.0), vec2(64.0));
+			ivec2 mw_base = ivec2(floor(clamp(mw_grid, vec2(0.0), vec2(63.999))));
+			vec2 mw_frac = fract(mw_grid);
+			mw_frac = mix(mw_frac, smoothstep(vec2(0.0), vec2(1.0), mw_frac), mw_texture_blend_softness);
 
-		if (bilerp) {
-			accumulate_material(base_ddx, base_ddy, weights[2], index[2], control[2], t_weights[2],
-				texture_ids[2], index_normal[2], h[2], mat);
-			accumulate_material(base_ddx, base_ddy, weights[1], index[1], control[1], t_weights[1],
-				texture_ids[1], index_normal[1], h[1], mat);
-			accumulate_material(base_ddx, base_ddy, weights[0], index[0], control[0], t_weights[0],
-				texture_ids[0], index_normal[0], h[0], mat);
+			vec4 mw_weights = vec4(
+				(1.0 - mw_frac.x) * (1.0 - mw_frac.y),
+				mw_frac.x * (1.0 - mw_frac.y),
+				(1.0 - mw_frac.x) * mw_frac.y,
+				mw_frac.x * mw_frac.y
+			);
+
+			int mw_layer = int(region_uv.z);
+			ivec2 mw_next = min(mw_base + ivec2(1), ivec2(64));
+			int mw_id_00 = mw_decode_layer(ivec3(mw_base.x, mw_base.y, mw_layer));
+			int mw_id_10 = mw_decode_layer(ivec3(mw_next.x, mw_base.y, mw_layer));
+			int mw_id_01 = mw_decode_layer(ivec3(mw_base.x, mw_next.y, mw_layer));
+			int mw_id_11 = mw_decode_layer(ivec3(mw_next.x, mw_next.y, mw_layer));
+
+			vec2 mw_uv = v_vertex.xz * mw_texture_tile_scale;
+			vec4 mw_dd = vec4(base_ddx.xz * mw_texture_tile_scale, base_ddy.xz * mw_texture_tile_scale);
+			accumulate_mw_material(mw_weights.x, mw_id_00, mw_uv, mw_dd, mat);
+			accumulate_mw_material(mw_weights.y, mw_id_10, mw_uv, mw_dd, mat);
+			accumulate_mw_material(mw_weights.z, mw_id_01, mw_uv, mw_dd, mat);
+			accumulate_mw_material(mw_weights.w, mw_id_11, mw_uv, mw_dd, mat);
+		} else {
+			// Control map decode
+			uvec4 control = uvec4(floatBitsToUint(texelFetch(_control_maps, index[3], 0).r));
+			if (bilerp) {
+				control = uvec4(
+					floatBitsToUint(texelFetch(_control_maps, index[0], 0).r),
+					floatBitsToUint(texelFetch(_control_maps, index[1], 0).r),
+					floatBitsToUint(texelFetch(_control_maps, index[2], 0).r),
+					control[3]);
+			}
+
+			// Texture ID decode
+			ivec4 t_id[2] = {ivec4(control >> uvec4(27u) & uvec4(0x1Fu)),
+				ivec4(control >> uvec4(22u) & uvec4(0x1Fu))};
+			ivec2 texture_ids[4] = ivec2[4](
+				ivec2(t_id[0].x, t_id[1].x),
+				ivec2(t_id[0].y, t_id[1].y),
+				ivec2(t_id[0].z, t_id[1].z),
+				ivec2(t_id[0].w, t_id[1].w));
+
+			// Texture weight interpolation
+			vec4 weights_id_1 = vec4(control >> uvec4(14u) & uvec4(0xFFu)) * 0.003921568627450;
+			vec4 weights_id_0 = 1.0 - weights_id_1;
+			vec2 t_weights[4] = vec2[4](
+				vec2(weights_id_0[0], weights_id_1[0]),
+				vec2(weights_id_0[1], weights_id_1[1]),
+				vec2(weights_id_0[2], weights_id_1[2]),
+				vec2(weights_id_0[3], weights_id_1[3]));
+
+			if (bilerp) {
+				t_weights = {vec2(0), vec2(0), vec2(0), vec2(0)};
+				weights_id_0 *= weights;
+				weights_id_1 *= weights;
+				for (int i = 0; i < 4; i++) {
+					vec2 w_0 = vec2(weights_id_0[i]);
+					vec2 w_1 = vec2(weights_id_1[i]);
+					ivec2 id_0 = texture_ids[i].xx;
+					ivec2 id_1 = texture_ids[i].yy;
+					t_weights[0] += fma(w_0, vec2(equal(texture_ids[0], id_0)), w_1 * vec2(equal(texture_ids[0], id_1)));
+					t_weights[1] += fma(w_0, vec2(equal(texture_ids[1], id_0)), w_1 * vec2(equal(texture_ids[1], id_1)));
+					t_weights[2] += fma(w_0, vec2(equal(texture_ids[2], id_0)), w_1 * vec2(equal(texture_ids[2], id_1)));
+					t_weights[3] += fma(w_0, vec2(equal(texture_ids[3], id_0)), w_1 * vec2(equal(texture_ids[3], id_1)));
+				}
+			}
+
+			accumulate_material(base_ddx, base_ddy, weights[3], index[3], control[3], t_weights[3],
+				texture_ids[3], index_normal[3], h[3], mat);
+
+			if (bilerp) {
+				accumulate_material(base_ddx, base_ddy, weights[2], index[2], control[2], t_weights[2],
+					texture_ids[2], index_normal[2], h[2], mat);
+				accumulate_material(base_ddx, base_ddy, weights[1], index[1], control[1], t_weights[1],
+					texture_ids[1], index_normal[1], h[1], mat);
+				accumulate_material(base_ddx, base_ddy, weights[0], index[0], control[0], t_weights[0],
+					texture_ids[0], index_normal[0], h[0], mat);
+			}
 		}
 	}
 
