@@ -23,6 +23,9 @@ color bleeding into the submerged region.
 |------|---------|
 | `src/core/water/shaders/underwater_volume.gdshader` | Spatial shader on a BoxMesh volume. `render_mode blend_mix, cull_front, depth_test_disabled, unshaded`. Reconstructs world pos from DEPTH_TEXTURE, slabs to `[sea_level - volume_depth, sea_level]` in Y, applies wobble + absorption + caustics. |
 | `src/core/water/underwater_volume.gd` | Node3D wrapper. 500×40×500 BoxMesh, follows camera position (NOT rotation), hides above water, updates `sea_level` each frame. Documented `blend_mix` deviation vs paddy-exe source. |
+| `src/core/water/ocean_manager.gd` | Owns the legacy ShaderManager compositor switch. Ocean Lab calls `set_underwater_compositor_enabled(false)` so the old compositor does not race the volume diagnostic. |
+| Ocean Lab `UW Debug` | Interactive-only diagnostic control for the volume shader. `Slab Mask` paints water-classified pixels cyan, `Depth/Y` colors reconstructed underwater depth, and `Big Wobble` exaggerates the volume contribution. |
+| Ocean Lab wave sync | `UnderwaterVolume.sync_wave_surface_from_ocean_material()` copies FFT cascade scales, wave scale, shore mask, and shore-wave uniforms from the active ocean material so the volume's waterline follows the displaced FFT surface instead of a flat `sea_level` plane. |
 | `assets/water/caustics_noise.png` | paddy-exe's `caustics-generator.png`, MIT. |
 | `assets/water/caustics_luma_gradient.tres` | paddy-exe's luma ramp. |
 | `assets/water/water_normal.png` | openmw `water_nm.png`, MIT. **Must be imported with `compress/normal_map=1` (Normal Map mode)** — otherwise sRGB decode biases `wobble_offset` to a constant non-zero state. |
@@ -65,23 +68,38 @@ color bleeding into the submerged region.
    the same. If `sea_level` is wrong (e.g. default 0 when the scene uses a
    different water plane), the slab test rejects the wrong pixels and
    effects appear in the wrong place.
-3. **Ocean surface seen from below (the "ceiling") is unaffected by this
+   In Ocean Lab, the flat `sea_level` plane is only the fallback. The volume
+   shader receives the active ocean material's FFT/shore uniforms and computes
+   the displaced water height per pixel, matching moving wave crests/troughs.
+3. **Above-water diagnostic mode is not a production solution.**
+   `UnderwaterVolume.set_active_above_water(true)` exists for Ocean Lab
+   render-order diagnosis. With the opaque ocean mesh visible, the depth
+   texture may reconstruct the ocean surface rather than submerged objects
+   behind it. If this is confirmed, above-water waterline/submerged-object
+   distortion needs a compositor/pre-ocean/subpass design instead of only a
+   late transparent volume. See
+   `docs/audit/ocean_option_c_render_order_2026_05_07_codex.md`.
+   Use Ocean Lab's `UW Debug` modes before drawing conclusions from subtle
+   final shading: `Slab Mask` paints water-classified pixels cyan, and
+   `Big Wobble` makes the volume contribution obvious if it is running.
+4. **Ocean surface seen from below (the "ceiling") is unaffected by this
    shader.** The slab test rejects pixels where `scene_world_pos.y ≥
    sea_level`, which includes the ocean-surface mesh's fragments. By design —
    owned by `@water` as a separate "underwater POV" fix to
    `ocean_fft.gdshader` (Snell's-window bright-spot). When that lands, this
    shader needs zero changes.
-4. **Wave-driven caustic scaling.** The caustic noise texture is panned at a
+5. **Wave-driven caustic scaling.** The caustic noise texture is panned at a
    fixed `caustics_scale` and `caustics_speed`. Physically, caustic cell size
    is driven by the dominant wave wavelength (big swell = big cells).
    Proposed interface: `OceanManager.get_dominant_wavelength()` +
    `get_surface_variance()` to drive `caustics_scale` and `caustics_speed`
    as per-frame uniforms. Not implemented.
-5. **Shared absorption constants.** This shader has its own `water_tint` and
-   `absorption_sigma`; the ocean-surface shader has its own. Eventually both
-   should read from `OceanManager.get_absorption_tint/sigma/depth_falloff()`
-   so the visual transition across the waterline stays continuous as weather
-   / time-of-day / fog change. Proposed, not implemented.
+6. **Shared absorption constants.** Ocean Lab now calls
+   `UnderwaterVolume.sync_optical_constants_from_ocean_manager()`, which copies
+   `OceanManager.get_absorption_tint()`, `get_absorption_sigma()`, and
+   `get_underwater_caustics_strength()` into the volume. The compositor
+   prototype should use the same typed getters so crossing the waterline does
+   not jump between unrelated surface/underwater water colors.
 
 ---
 

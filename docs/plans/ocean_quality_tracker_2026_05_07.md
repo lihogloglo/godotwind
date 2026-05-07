@@ -17,8 +17,10 @@ Godotwind should have a modern open-world ocean:
 - FFT displacement with clipmap or projected-grid surface coverage.
 - Jacobian foam and storm-scaled whitecaps.
 - Sea spray on wave tops, Sea of Thieves style.
-- Opaque water with depth-buffer refraction, Beer-Lambert absorption, custom SSR,
-  and visible wave-tip translucency.
+- Opaque FFT water surface for waves, foam, reflection, absorption, and
+  visible wave-tip translucency.
+- A dedicated underwater / waterline compositor path for submerged-object
+  distortion, underwater fog, caustics, and the camera-underwater view.
 - Shore waves that run up beaches without blocky mask artifacts.
 - Wet terrain and objects where water has been.
 - Buoyancy that matches the visual wave surface and does not tank frame time.
@@ -40,7 +42,13 @@ smoke.
 - Shared surface shading lives in
   `src/core/water/shaders/ocean_fft_common.gdshaderinc`.
 - Jacobian foam, shore intersection foam, Beer-Lambert absorption, guarded
-  refraction, custom in-shader SSR, and wave-tip SSS approximation are present.
+  surface refraction, custom in-shader SSR, and wave-tip SSS approximation are
+  present.
+- A separate underwater volume track exists (`docs/systems/underwater.md`,
+  `src/core/water/underwater_volume.gd`,
+  `src/core/water/shaders/underwater_volume.gdshader`) with wobble, caustics,
+  and absorption, but it is not yet the owner of ocean waterline/submerged
+  object distortion and still has known ghosting issues.
 - Shore-mask vertex dampening and analytical shore waves already exist in both
   FFT vertex paths.
 - Terrain wetness exists through `HorizonMapManager` plus
@@ -65,6 +73,14 @@ smoke.
 - Shore waves are present, but blockiness likely comes from mask resolution,
   mask format, bounds, sampling, or amplitude envelope tuning.
 - Wave-tip translucency exists as SSS, but the visible result is weak or broken.
+- Ocean surface refraction is carrying too much responsibility. Attempts to fix
+  half-submerged object ghosts purely inside `ocean_fft_common.gdshaderinc`
+  trade one artifact for another: foreground halos versus straight underwater
+  mesh overlap. This is now treated as an architecture problem, not a guard
+  tuning problem.
+- The projected-grid mesh path has broken or unstable refraction/SSR, implying
+  its surface-position/depth contract with the shared fragment shader needs a
+  separate audit before it can become default.
 - Old test scenes use a mix of raw key polling and InputMap actions. New test
   scenes must use the unified input system.
 
@@ -78,9 +94,16 @@ smoke.
   style, not separate hand-placed shore meshes.
 - Foam: FFT/Jacobian whitecaps plus shore intersection foam. Dynamic spray is a
   separate particle or impostor layer driven by crest masks and wind.
-- Refraction/absorption: opaque depth-buffer water with Beer-Lambert absorption.
-  Godot transparent water is not acceptable here because transparent materials
-  do not participate properly in screen/depth effects.
+- Refraction/absorption: keep the FFT ocean surface opaque for large-water
+  stability, depth authority, foam, and reflection. Do not use Godot's native
+  transparent refraction as the main ocean path: Godot 4.6 documents it as
+  screen-space, transparent-pipeline, sorting-limited, and incompatible with
+  several screen/depth/reflection expectations.
+- Waterline / underwater distortion: use a dedicated underwater or compositor
+  pass (Option C), not more ad hoc silhouette guards in the surface shader.
+  The ocean surface should render the water surface; the underwater path should
+  own submerged-object wobble, caustics, water fog, and below-surface camera
+  behavior.
 - Reflections: custom SSR remains necessary for this material because Godot
   screen/depth texture use and native SSR have ordering/visibility limits.
 - Wetness: Sebastien Lagarde PBR wet surfaces, with terrain/material/compositor
@@ -118,6 +141,94 @@ exist.
   underwater terrain was being classified as sky/far. The shader now treats
   only near-zero reversed-Z depth samples as sky/far; deep valid scene geometry
   remains deep water and is only clamped for absorption/debug scaling.
+- Refraction foreground ghosts and straight-underwater-mesh overlap exposed a
+  deeper pipeline problem: surface refraction and underwater/waterline
+  distortion are fighting inside one screen-space shader. Decision for the next
+  refactor: switch to Option C. Keep the FFT ocean surface opaque and simplify
+  its refraction role; move submerged-object wobble, waterline transition,
+  underwater fog, and caustics into the underwater/compositor path. The old
+  underwater volume shader already has caustics/wobble/absorption and must be
+  folded into this tracker as the starting point, even though it is not yet
+  production-quality.
+- Render-order audit captured in
+  `docs/audit/ocean_option_c_render_order_2026_05_07_codex.md`: a late
+  transparent `UnderwaterVolume` can diagnose and serve underwater-camera
+  effects, but above-water half-submerged-object distortion needs a compositor
+  or pre-ocean capture path if the visible ocean mesh hides the submerged
+  object depth.
+- Ocean Lab now disables OceanManager's legacy ShaderManager underwater
+  compositor through `set_underwater_compositor_enabled(false)` instead of
+  letting OceanManager re-enable it every frame and then force-disabling it
+  from the lab.
+- Ocean Lab `UnderwaterVolume` diagnostics were added:
+  `UW Mode: BelowCam/AllCam`, `Ocean Mesh: On/Off`, and
+  `UW Debug: Final/Slab Mask/Depth/Y/Big Wobble`. These are interactive-only
+  controls for proving what the underwater path sees; no automated screenshot
+  harness was added.
+- User visually diagnosed the first `UnderwaterVolume` bug: the volume was
+  classifying pixels against flat `sea_level` while the visible FFT ocean mesh
+  displaced up/down. This produced a flat underwater slab boundary through a
+  moving wave surface. Fixed in Ocean Lab by syncing FFT `map_scales`,
+  `wave_scale`, shore mask, and shore-wave uniforms from the ocean material and
+  computing a dynamic water level per pixel in
+  `src/core/water/shaders/underwater_volume.gdshader`.
+- User visually confirmed the dynamic underwater slab fix: `UW Debug:
+  Slab Mask` now follows the visible wave crests/troughs instead of a flat
+  plane.
+- Follow-up diagnostics now sync OceanManager optical constants into
+  `UnderwaterVolume`: surface deep tint, Beer-Lambert extinction sigma, and
+  weather-scaled underwater caustic strength. The wobble neighbor guard also
+  compares against the displaced water height instead of flat `sea_level`, and
+  the slab top is biased just below the dynamic surface so a visible opaque
+  ocean mesh does not get mistaken for submerged scene geometry.
+- User re-ran the intended `UW Mode: AllCam` / `UW Debug: Big Wobble` check
+  after dynamic-waterline sync. With `Ocean Mesh: On` versus `Off`, the volume
+  effect looks broadly similar; the visible difference is an outline at the
+  object waterline when the ocean mesh is on. This means the late
+  `UnderwaterVolume` can tint/wobble visible submerged pixels, but the opaque
+  ocean surface still owns the exact object/water intersection. Treat the
+  volume wobble as diagnostic scaffolding / underwater-camera effect, not the
+  final above-water waterline refraction solution.
+- User identified the remaining small "refraction" as `UnderwaterVolume`
+  wobble: tiny edge shimmer on objects, visually not good enough. This is not
+  the old surface refraction path; `Surf Refract` remains off by default. Next
+  pass should expose an explicit `UW Wobble` toggle so absorption/caustics can
+  be evaluated without this diagnostic distortion.
+- First Option C compositor ownership probe added:
+  `src/core/shaders/effects/waterline_compositor_effect.gd` plus
+  `src/core/shaders/compute/waterline_probe.glsl`. It runs at
+  `PRE_TRANSPARENT`, classifies opaque scene pixels against the displaced FFT
+  water height, and uses OceanManager optical getters for tint/absorption. This
+  is a strong visual marker to prove ordering, not final waterline polish.
+- Ocean Lab now has `UW Wobble: On/Off` and `WL Proto: On/Off`. `UW Wobble`
+  defaults off so tint/absorption/caustics can be evaluated without the small
+  edge shimmer; `WL Proto` defaults on to make the compositor ownership proof
+  obvious.
+- 2026-05-07 follow-up: the new compute shader needed an editor import pass
+  before game launch could load it as an `RDShaderFile`. After import, console
+  launch reached Ocean Lab ready and logged:
+  `[WATERLINE_PROTO] render callback fired enabled=true pipeline=true
+  displacement=true shore=true`. User visually confirmed the cyan WL Proto
+  waterline and magenta corner marker are visible, proving compositor execution
+  and resource binding.
+- WL Proto alignment pass added `WL Debug: Final/Flat/FFT/FFT+Shore/Delta`.
+  The classifier now uses water-surface sample distance for FFT cascade fade
+  instead of object-pixel distance, includes shore-wave height as a selectable
+  term, and does a small inverse step for horizontal FFT/shore displacement so
+  the screen-space classifier better matches the actual displaced mesh. User
+  observed the first cyan line was not perfectly aligned with the moving ocean;
+  next pass should use the debug modes to identify the remaining mismatch
+  before adding polish.
+- Future requirement: support a half-immersed camera view. When the camera is
+  near/intersecting the dynamic wave surface, the compositor should split the
+  frame by the moving wave intersection: underwater absorption/fog/caustics on
+  the submerged portion of the screen, normal above-water atmosphere on the
+  exposed portion, and a waterline that moves up/down with the FFT waves.
+- Surface refraction is still not solved. Keep `Surf Refract` default-off in
+  Ocean Lab; do not treat the existing surface-shader refraction path as
+  production-ready.
+- Wave-tip translucency / SSS is still not visibly working as far as the user
+  knows. Phase 5 remains pending.
 
 ### Source Scenes To Merge
 
@@ -185,14 +296,49 @@ Implemented as a left-side button panel plus wetness sliders:
 - `Debug: <mode> <name>` cycles shader debug mode and displays the current
   meaning.
 - `Weather: <preset>` cycles calm/breeze/moderate/storm/blizzard.
-- `Buoy Grid` toggles the CPU-evaluated wave-surface grid.
+- `Buoy Grid` toggles the CPU-evaluated wave-surface grid. It defaults off so
+  the lab opens on the actual ocean view instead of the diagnostic overlay.
 - `Spawn Buoy` launches a buoyant sphere from the camera.
 - `Mesh: <mode>` toggles clipmap/projected FFT mesh mode.
 - `Sun: <angle>` toggles high/low sun for crest-translucency checks.
 - `Wet Debug: <state>` toggles wetness debug coloring.
 - `Center Shore` returns the camera to the scanned shoreline playground.
 - `Quality: <quality>` cycles flat/Gerstner/FFT.
+- `Surf Refract: <state>` toggles the legacy surface-shader screen refraction.
+  It defaults off in the lab for the Option C refactor so submerged-object
+  distortion can move to the underwater/waterline path instead of fighting the
+  surface shader.
+- `Underwater: <state>` toggles the existing `UnderwaterVolume` caustics /
+  wobble / absorption pass. This is the seed for the new underwater/waterline
+  owner, not yet final quality.
+- `UW Mode: <BelowCam|AllCam>` controls whether `UnderwaterVolume` only runs
+  when the camera is below water or is forced on above water for render-order
+  diagnosis.
+- `Ocean Mesh: <state>` hides only the ocean mesh, without shutting down
+  OceanManager. This lets the lab prove whether the underwater pass can see
+  submerged objects when the opaque ocean surface is not writing color/depth.
+- `UW Debug: <mode>` cycles the underwater volume through final shading, cyan
+  underwater slab mask, reconstructed depth/Y coloring, and exaggerated
+  wobble/tint. This makes the volume's own depth classification visible during
+  interactive diagnosis.
+- `UW Wobble: <state>` enables/disables the diagnostic `UnderwaterVolume`
+  screen-offset wobble independently from its tint/absorption/caustics.
+- `WL Proto: <state>` enables/disables the first `CompositorEffect` waterline
+  ownership probe. It intentionally uses a strong cyan/tint marker for pixels
+  classified below the displaced FFT water surface.
+- `WL Debug: <Final|Flat|FFT|FFT+Shore|Delta>` selects the waterline
+  compositor classifier/debug view. Use this to compare flat sea level,
+  FFT-only height, FFT plus analytical shore waves, and a delta visualization
+  before tuning the final mask.
+- The underwater volume now syncs FFT `map_scales`, `wave_scale`, shore mask,
+  and shore-wave parameters from the ocean material, then classifies pixels
+  against the displaced water height instead of a flat `sea_level` plane. This
+  fixes the diagnostic mismatch where the visible wave crests moved above the
+  underwater slab boundary.
 - Wetness sliders drive terrain wetness and the object wet shader.
+- Lab buttons/sliders are mouse-only controls (`FOCUS_NONE`) so Space remains a
+  fly-camera `jump` input and does not activate whichever UI button was last
+  clicked.
 
 ### Acceptance
 
@@ -211,6 +357,13 @@ Implemented as a left-side button panel plus wetness sliders:
 - `tests/visual/test_ocean_lab_mesh_toggle_smoke.tscn` completed the mesh-mode
   round trip without crashing.
 - User visually confirmed the water-thickness hard cutoff was fixed in the lab.
+- User visually confirmed the underwater volume's slab-mask waterline now
+  follows FFT wave displacement after the dynamic water-level sync.
+- 2026-05-07 follow-up: `test_ocean_lab_mesh_toggle_smoke.tscn` still exits
+  cleanly after optical-constant sync and underwater-volume diagnostic changes.
+  `test_ocean_lab.tscn` was launched interactively for the requested
+  `UW Mode: AllCam` / `UW Debug: Final` and `Big Wobble` /
+  `Ocean Mesh: On-Off` comparison.
 
 ---
 
@@ -296,26 +449,113 @@ Acceptance:
 
 ---
 
-## Phase 4 - Water Color, Refraction, Absorption, SSR
+## Phase 4 - Surface / Underwater Split
 
-Status: pending
+Status: in progress
 
-This phase tunes the already implemented surface optics.
+Refactor the current surface-only optical path into the Option C architecture:
+opaque FFT ocean surface plus dedicated underwater/waterline compositor. This
+phase must happen before further refraction tuning. The existing underwater
+volume shader is the seed, not the final design.
+
+2026-05-07 handoff:
+
+- Ocean Lab now exposes the old `UnderwaterVolume` path directly and disables
+  the legacy ShaderManager compositor in the lab.
+- The underwater volume's first correctness bug is fixed in the lab: its
+  waterline classification now uses the displaced FFT water height, not a flat
+  `sea_level` plane.
+- User observation before the dynamic-waterline fix: final shading showed no
+  meaningful difference between `Ocean Mesh: On` and `Ocean Mesh: Off` except
+  for the ocean-surface waterline/foam line. Re-run this comparison after the
+  dynamic-waterline fix before deciding whether a late transparent volume is
+  sufficient or whether a compositor/pre-ocean path is required.
+- User observation after the dynamic-waterline fix: `UW Debug: Big Wobble` in
+  `AllCam` still shows broadly similar submerged tint/wobble with ocean mesh on
+  or off, but the ocean mesh adds the visible waterline outline. Conclusion:
+  late `UnderwaterVolume` is useful for underwater fog/caustics/tint and for
+  diagnostics, but it is not the production owner of above-water
+  half-submerged-object waterline/refraction.
+- Surface refraction still does not work. `Surf Refract` remains a diagnostic
+  toggle for the legacy surface-shader path, not an accepted solution.
 
 Tasks:
 
-- Validate depth reconstruction in the ocean lab across shallow shelf, deep
-  floor, submerged rock, and half-submerged monolith.
-- Tune Beer-Lambert coefficients for Morrowind-scale water.
-- Re-check refraction guard chain after tuning strength.
-- Add feature toggles to isolate refraction and SSR in the lab.
-- Reduce custom SSR step count or distance by quality tier if it is expensive.
-- Keep ReflectionProbe and sky fallback working when SSR misses.
+- Remove the failed conditional silhouette-guard experiments from the surface
+  shader; return surface refraction to a conservative role that does not try to
+  solve submerged-object compositing by itself.
+- Decide the exact owner of each effect:
+  - FFT surface shader: waves, foam, Fresnel, surface color, surface
+    absorption tint, custom SSR/probe/sky reflection, wave-tip SSS.
+  - Underwater/waterline path: submerged-object wobble, underwater fog,
+    caustics, waterline transition, underwater camera view.
+- Wire or revive `UnderwaterVolume` in the ocean lab so the lab can toggle it
+  alongside surface refraction/SSR.
+- Add a separate `UW Wobble` toggle so the lab can test underwater tint,
+  absorption, and caustics without the current edge-only wobble artifact.
+- Use Ocean Lab's `UW Mode: AllCam` plus `Ocean Mesh: Off` diagnostic to map
+  exactly what `UnderwaterVolume` sees before and after the opaque ocean writes
+  depth. If the volume only works with the ocean hidden, the final above-water
+  waterline solution needs a compositor/pre-ocean/subpass design rather than a
+  late transparent volume alone. See
+  `docs/audit/ocean_option_c_render_order_2026_05_07_codex.md`.
+- Audit `src/core/water/shaders/underwater_volume.gdshader` for current Godot
+  4.6 depth reconstruction, sea-level wiring, and its known waterline ghosting.
+- Share color/absorption constants between the surface shader and underwater
+  shader through OceanManager-facing uniforms or typed getters, so the
+  waterline does not change tint abruptly. First pass implemented for
+  `UnderwaterVolume`; carry this same API into the compositor prototype.
+- Add explicit ocean lab toggles for surface refraction, SSR, and underwater
+  volume/compositor.
+- Re-run `UW Mode: AllCam` with `UW Debug: Final` and `Big Wobble`, comparing
+  `Ocean Mesh: On` and `Ocean Mesh: Off`, now that the underwater slab follows
+  the FFT surface. Done visually; result above points toward a compositor
+  waterline pass.
+- Prototype the smallest `CompositorEffect` waterline pass. Use the same
+  dynamic FFT water-height classification and OceanManager optical getters.
+  First goal is only to prove ordering/ownership: tint or strongly mark pixels
+  classified below the displaced water surface before/around transparent ocean
+  composition. First proof is done: console launch logs the render callback
+  with valid pipeline/displacement/shore resources, and the user can see the
+  cyan WL Proto line plus magenta corner marker.
+- Align the WL Proto classifier with the rendered ocean mesh before visual
+  polish. Current pass moved closer to the mesh contract by using surface
+  distance for cascade fade and approximately inverting horizontal
+  displacement, but the user still observed imperfect alignment. Use
+  `WL Debug` modes to isolate whether remaining drift comes from FFT sampling,
+  shore-wave terms, projected/clipmap differences, or depth/object geometry.
+- Add the half-immersed camera compositor mode after object waterline ownership
+  is proven. The desired behavior is a moving wave-driven split screen:
+  underwater treatment below the dynamic surface contour and normal atmospheric
+  rendering above it.
+- Validate projected-grid mesh separately: refraction and SSR must receive
+  coherent `v_world_pos`, `SCREEN_UV`, and depth relations before projected
+  grid can become default.
+- Reduce custom SSR step count or distance by quality tier if it is expensive,
+  but only after the surface/underwater split is stable.
+
+Screen-space policy:
+
+- Use screen-space/compositor passes where they are the canonical fit:
+  waterline/submerged-object distortion, underwater camera fog/caustics/tint,
+  and broad wetness overlays.
+- Keep the ocean itself as a real opaque 3D surface for displacement, normals,
+  foam, Fresnel, SSR/probe/sky reflection, and future wave-tip SSS.
+- Reflection target: layered reflection, not one magic path. Use custom SSR for
+  nearby reflected geometry, reflection probes/sky fallback when SSR misses,
+  and consider planar reflection only for deliberate hero views if measurement
+  justifies the cost.
 
 Acceptance:
 
-- Submerged geometry is visible and refracted without silhouette halos.
-- Half-submerged objects have tolerable waterline behavior.
+- Submerged geometry is visible with underwater wobble, without a straight
+  unrefracted duplicate from the surface shader.
+- Above-water foreground objects no longer cast faint refraction ghosts onto
+  water behind them.
+- Half-submerged objects have a stable waterline transition owned by the
+  underwater/waterline path, not by more surface-shader guard tweaks.
+- Underwater caustics/fog/wobble from the old underwater shader are visible in
+  the ocean lab when enabled.
 - SSR reflects nearby opaque/emissive targets without dominating the water.
 - Distant water remains stable and does not shimmer excessively.
 
@@ -326,7 +566,9 @@ Acceptance:
 Status: pending
 
 The shader already has a Sea of Thieves-inspired SSS approximation, but the
-user reports tip translucency does not work.
+user reports tip translucency does not work. As of the 2026-05-07 handoff,
+this is still believed broken / unverified; do not assume the existing SSS
+uniforms are producing a visible wave-tip translucency effect.
 
 Tasks:
 

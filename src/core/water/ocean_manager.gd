@@ -69,6 +69,7 @@ var _time: float = 0.0
 var _auto_find_camera: bool = true
 
 # Underwater compositor effect (managed via ShaderManager)
+var underwater_compositor_enabled: bool = true
 var _underwater_effect_loaded: bool = false
 
 # FFT pipeline
@@ -204,7 +205,8 @@ func _deferred_init() -> void:
 	reset_weather()
 
 	# Initialize underwater post-process effect
-	_init_underwater_effect()
+	if underwater_compositor_enabled:
+		_init_underwater_effect()
 
 	_system_initialized = true
 	ocean_initialized.emit()
@@ -262,7 +264,7 @@ func _process(delta: float) -> void:
 	_update_sun_uniform()
 
 	# Update underwater compositor effect state (submersion, sun, camera)
-	if _underwater_effect_loaded:
+	if underwater_compositor_enabled and _underwater_effect_loaded:
 		_update_underwater_state()
 
 	# GPU readback for buoyancy — read every cascade's displacement map
@@ -701,6 +703,22 @@ func get_underwater_effect() -> PostProcessEffect:
 	return null
 
 
+func set_underwater_compositor_enabled(enabled: bool) -> void:
+	if underwater_compositor_enabled == enabled:
+		return
+
+	underwater_compositor_enabled = enabled
+	if not enabled:
+		if _underwater_effect_loaded:
+			ShaderManager.disable_effect("underwater")
+			ShaderManager.unload_effect("underwater")
+			_underwater_effect_loaded = false
+		return
+
+	if _system_initialized:
+		_init_underwater_effect()
+
+
 ## Check if the camera is currently submerged
 func is_camera_submerged() -> bool:
 	if _camera:
@@ -733,6 +751,40 @@ func set_sea_level(level: float) -> void:
 
 func get_sea_level() -> float:
 	return sea_level
+
+
+func get_absorption_tint() -> Vector3:
+	return _current_absorption_tint
+
+
+func get_absorption_sigma() -> Vector3:
+	return _current_absorption_sigma
+
+
+func get_absorption_depth_falloff() -> float:
+	if _ocean_mesh == null:
+		return 20.0
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if mat == null:
+		return 20.0
+	var max_depth: Variant = mat.get_shader_parameter("max_visible_depth")
+	if max_depth == null:
+		return 20.0
+	return float(max_depth)
+
+
+func get_underwater_caustics_strength() -> float:
+	return _current_underwater_caustics_strength
+
+
+func get_displacement_texture_rd() -> RID:
+	if _wave_generator == null or not _wave_generator.descriptors.has(&"displacement_map"):
+		return RID()
+	return _wave_generator.descriptors[&"displacement_map"].rid
+
+
+func get_fft_cascade_count() -> int:
+	return _cascade_parameters.size()
 
 
 func set_terrain(terrain: Terrain3D) -> void:
@@ -1067,6 +1119,12 @@ const _SHALLOW_CALM := Color(0.09, 0.12, 0.13)
 const _SHALLOW_STORM := Color(0.06, 0.08, 0.09)
 const _DEEP_CALM := Color(0.02, 0.04, 0.06)
 const _DEEP_STORM := Color(0.01, 0.02, 0.03)
+const _SURFACE_ABSORPTION_RATE := Vector3(0.4, 0.1, 0.06)
+const _SURFACE_ABSORPTION_DENSITY := 0.3
+
+var _current_absorption_tint := Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b)
+var _current_absorption_sigma := _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
+var _current_underwater_caustics_strength: float = 1.0
 
 func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
 	if not _ocean_mesh:
@@ -1081,8 +1139,12 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	var storm_t: float = clampf(result.cloud_coverage, 0.0, 1.0)
 	var shallow_col: Color = _SHALLOW_CALM.lerp(_SHALLOW_STORM, storm_t)
 	var deep_col: Color = _DEEP_CALM.lerp(_DEEP_STORM, storm_t)
+	_current_absorption_tint = Vector3(deep_col.r, deep_col.g, deep_col.b)
+	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
+	_current_underwater_caustics_strength = lerpf(1.0, 0.35, storm_t)
 	mat.set_shader_parameter("color_shallow", Vector3(shallow_col.r, shallow_col.g, shallow_col.b))
-	mat.set_shader_parameter("color_deep", Vector3(deep_col.r, deep_col.g, deep_col.b))
+	mat.set_shader_parameter("color_deep", _current_absorption_tint)
+	_push_surface_optical_uniforms(mat)
 
 	# Shore foam — minimal in calm, wide in storms
 	mat.set_shader_parameter("foam_edge_width", lerpf(0.1, 1.5, wind_t))
@@ -1119,6 +1181,11 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 		mat.set_shader_parameter("sss_strength", lerpf(0.6, 1.0, wind_t))
 
 
+func _push_surface_optical_uniforms(mat: ShaderMaterial) -> void:
+	mat.set_shader_parameter("absorption_rate", _SURFACE_ABSORPTION_RATE)
+	mat.set_shader_parameter("absorption_density", _SURFACE_ABSORPTION_DENSITY)
+
+
 ## Reset ocean to calm defaults (call when weather system is disabled)
 func reset_weather() -> void:
 	_weather_last_wind = -1.0
@@ -1130,8 +1197,12 @@ func reset_weather() -> void:
 	if not mat:
 		return
 
+	_current_absorption_tint = Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b)
+	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
+	_current_underwater_caustics_strength = 1.0
 	mat.set_shader_parameter("color_shallow", Vector3(_SHALLOW_CALM.r, _SHALLOW_CALM.g, _SHALLOW_CALM.b))
-	mat.set_shader_parameter("color_deep", Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b))
+	mat.set_shader_parameter("color_deep", _current_absorption_tint)
+	_push_surface_optical_uniforms(mat)
 	mat.set_shader_parameter("foam_edge_width", 0.1)
 	mat.set_shader_parameter("foam_intensity", 0.05)
 	mat.set_shader_parameter("sky_tint_strength", 0.8)

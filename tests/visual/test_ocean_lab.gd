@@ -12,6 +12,8 @@ const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const BuoyancyBodyScript := preload("res://src/core/water/buoyancy_body.gd")
 const BuoyancyProbeScript := preload("res://src/core/water/buoyancy_probe.gd")
+const UnderwaterVolumeScript := preload("res://src/core/water/underwater_volume.gd")
+const WaterlineCompositorScript := preload("res://src/core/shaders/effects/waterline_compositor_effect.gd")
 const WeatherTypesScript := preload("res://src/core/weather/weather_types.gd")
 const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manager.gd")
 const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
@@ -39,6 +41,19 @@ const DEBUG_MODE_NAMES: Array[String] = [
 	"Refracted screen",
 	"Refraction depth edge",
 ]
+const UW_DEBUG_MODE_NAMES: Array[String] = [
+	"Final",
+	"Slab Mask",
+	"Depth/Y",
+	"Big Wobble",
+]
+const WL_DEBUG_MODE_NAMES: Array[String] = [
+	"Final",
+	"Flat",
+	"FFT",
+	"FFT+Shore",
+	"Delta",
+]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
 	{"name": "Breeze", "wind": 0.3, "cloud": 0.25},
@@ -48,10 +63,14 @@ const WEATHER_PRESETS: Array[Dictionary] = [
 ]
 
 var _camera: Camera3D = null
+var _world_env: WorldEnvironment = null
 var _terrain: Terrain3D = null
 var _horizon_mgr: HorizonMapManager = null
 var _sun: DirectionalLight3D = null
 var _ocean: OceanMesh = null
+var _underwater_volume: UnderwaterVolume = null
+var _waterline_compositor: Compositor = null
+var _waterline_effect: PostProcessEffect = null
 var _debug_mmi: MultiMeshInstance3D = null
 var _hud_label: RichTextLabel = null
 var _wet_panel: PanelContainer = null
@@ -64,6 +83,13 @@ var _wet_debug_button: Button = null
 var _quality_button: Button = null
 var _refraction_button: Button = null
 var _ssr_button: Button = null
+var _underwater_button: Button = null
+var _underwater_mode_button: Button = null
+var _uw_wobble_button: Button = null
+var _ocean_surface_button: Button = null
+var _uw_debug_button: Button = null
+var _waterline_button: Button = null
+var _waterline_debug_button: Button = null
 
 var _sea_level: float = SEA_LEVEL_DEFAULT
 var _playground_origin: Vector3 = Vector3.ZERO
@@ -79,10 +105,17 @@ var _held_object: Dictionary = {}
 var _regions_loaded: int = 0
 var _textures_loaded: int = 0
 
-var _buoy_grid_visible: bool = true
+var _buoy_grid_visible: bool = false
 var _debug_mode: int = 0
-var _refraction_enabled: bool = true
+var _refraction_enabled: bool = false
 var _ssr_enabled: bool = true
+var _underwater_volume_enabled: bool = true
+var _underwater_active_above: bool = false
+var _uw_wobble_enabled: bool = false
+var _ocean_surface_visible: bool = true
+var _uw_debug_mode: int = 0
+var _waterline_compositor_enabled: bool = true
+var _waterline_debug_mode: int = 0
 var _current_weather: int = 0
 var _sun_low: bool = false
 var _help_visible: bool = true
@@ -100,6 +133,8 @@ func _ready() -> void:
 	_playground_origin = _find_shore_playground_center()
 	_place_camera_at_playground()
 	_setup_ocean()
+	_setup_underwater_volume()
+	_setup_waterline_compositor()
 	_setup_reflection_canaries()
 	_setup_wetness()
 	_spawn_wet_test_objects()
@@ -115,8 +150,17 @@ func _ready() -> void:
 	])
 
 
+func _exit_tree() -> void:
+	if _waterline_effect != null:
+		_waterline_effect.on_effect_removed()
+	_waterline_effect = null
+	if _world_env != null:
+		_world_env.compositor = null
+	_waterline_compositor = null
+
+
 func _build_environment() -> void:
-	var world_env := WorldEnvironment.new()
+	_world_env = WorldEnvironment.new()
 	var env := Environment.new()
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
@@ -140,8 +184,8 @@ func _build_environment() -> void:
 	env.glow_intensity = 0.45
 	env.glow_bloom = 0.2
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	world_env.environment = env
-	add_child(world_env)
+	_world_env.environment = env
+	add_child(_world_env)
 
 	_sun = DirectionalLight3D.new()
 	_sun.name = "Sun"
@@ -269,15 +313,50 @@ func _setup_ocean() -> void:
 		Log.error("water", "[Ocean Lab] OceanManager autoload missing")
 		return
 
+	if OceanManager.has_method("set_underwater_compositor_enabled"):
+		OceanManager.set_underwater_compositor_enabled(false)
 	ProjectSettings.set_setting("ocean/quality", 2)
 	if not OceanManager.is_initialized():
 		OceanManager.force_initialize()
+	if OceanManager.has_method("set_underwater_compositor_enabled"):
+		OceanManager.set_underwater_compositor_enabled(false)
 	OceanManager.set_enabled(true)
 	OceanManager.set_camera(_camera)
 	OceanManager.set_terrain(_terrain)
 	_sea_level = OceanManager.get_sea_level()
 	_ocean = OceanManager.get_ocean_mesh()
 	_apply_ocean_feature_params()
+
+
+func _setup_underwater_volume() -> void:
+	_underwater_volume = UnderwaterVolumeScript.new()
+	_underwater_volume.name = "OceanLabUnderwaterVolume"
+	_underwater_volume.set_camera(_camera)
+	_underwater_volume.set_sun(_sun)
+	_underwater_volume.set_sea_level(_sea_level)
+	_underwater_volume.set_active_above_water(_underwater_active_above)
+	_underwater_volume.set_debug_mode(_uw_debug_mode)
+	_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
+	_underwater_volume.sync_wave_surface_from_ocean_material(_get_ocean_material())
+	_underwater_volume.sync_optical_constants_from_ocean_manager(OceanManager)
+	_underwater_volume.enabled = _underwater_volume_enabled
+	add_child(_underwater_volume)
+
+
+func _setup_waterline_compositor() -> void:
+	if _world_env == null:
+		return
+	_waterline_effect = WaterlineCompositorScript.new()
+	_waterline_effect.effect_enabled = _waterline_compositor_enabled
+	_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+	if _waterline_effect.has_method("set_debug_mode"):
+		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	_waterline_effect.on_effect_added()
+	_waterline_effect.sync_from_ocean(OceanManager, _get_ocean_material())
+
+	_waterline_compositor = Compositor.new()
+	_waterline_compositor.compositor_effects = [_waterline_effect]
+	_world_env.compositor = _waterline_compositor
 
 
 func _setup_reflection_canaries() -> void:
@@ -378,7 +457,7 @@ func _build_ui() -> void:
 
 	var control_panel := PanelContainer.new()
 	control_panel.position = Vector2(12.0, 12.0)
-	control_panel.size = Vector2(440.0, 360.0)
+	control_panel.size = Vector2(440.0, 450.0)
 	layer.add_child(control_panel)
 	var control_box := VBoxContainer.new()
 	control_panel.add_child(control_box)
@@ -404,6 +483,13 @@ func _build_ui() -> void:
 	_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_quality"))
 	_refraction_button = _add_button(_button_grid, "", Callable(self, "_toggle_refraction"))
 	_ssr_button = _add_button(_button_grid, "", Callable(self, "_toggle_ssr"))
+	_underwater_button = _add_button(_button_grid, "", Callable(self, "_toggle_underwater_volume"))
+	_underwater_mode_button = _add_button(_button_grid, "", Callable(self, "_toggle_underwater_active_above"))
+	_uw_wobble_button = _add_button(_button_grid, "", Callable(self, "_toggle_uw_wobble"))
+	_ocean_surface_button = _add_button(_button_grid, "", Callable(self, "_toggle_ocean_surface_visible"))
+	_uw_debug_button = _add_button(_button_grid, "", Callable(self, "_cycle_uw_debug_mode"))
+	_waterline_button = _add_button(_button_grid, "", Callable(self, "_toggle_waterline_compositor"))
+	_waterline_debug_button = _add_button(_button_grid, "", Callable(self, "_cycle_waterline_debug_mode"))
 	_add_button(_button_grid, "Help", func() -> void:
 		_help_visible = not _help_visible
 	)
@@ -419,7 +505,7 @@ func _build_ui() -> void:
 	layer.add_child(_hud_label)
 
 	_wet_panel = PanelContainer.new()
-	_wet_panel.position = Vector2(12.0, 390.0)
+	_wet_panel.position = Vector2(12.0, 480.0)
 	_wet_panel.size = Vector2(420.0, 160.0)
 	layer.add_child(_wet_panel)
 	var vbox := VBoxContainer.new()
@@ -451,6 +537,7 @@ func _add_slider(parent: Control, label_text: String, min_val: float, max_val: f
 	label.custom_minimum_size.x = 80.0
 	hbox.add_child(label)
 	var slider := HSlider.new()
+	slider.focus_mode = Control.FOCUS_NONE
 	slider.min_value = min_val
 	slider.max_value = max_val
 	slider.step = 0.05
@@ -470,6 +557,7 @@ func _add_slider(parent: Control, label_text: String, min_val: float, max_val: f
 func _add_button(parent: Control, label_text: String, callback: Callable) -> Button:
 	var button := Button.new()
 	button.text = label_text
+	button.focus_mode = Control.FOCUS_NONE
 	button.custom_minimum_size = Vector2(190.0, 30.0)
 	button.pressed.connect(callback)
 	parent.add_child(button)
@@ -495,9 +583,23 @@ func _refresh_control_labels() -> void:
 		var quality := OceanManager.get_water_quality_name() if OceanManager and OceanManager.is_initialized() else "Unknown"
 		_quality_button.text = "Quality: %s" % quality
 	if _refraction_button:
-		_refraction_button.text = "Refract: %s" % ("On" if _refraction_enabled else "Off")
+		_refraction_button.text = "Surf Refract: %s" % ("On" if _refraction_enabled else "Off")
 	if _ssr_button:
 		_ssr_button.text = "SSR: %s" % ("On" if _ssr_enabled else "Off")
+	if _underwater_button:
+		_underwater_button.text = "Underwater: %s" % ("On" if _underwater_volume_enabled else "Off")
+	if _underwater_mode_button:
+		_underwater_mode_button.text = "UW Mode: %s" % ("AllCam" if _underwater_active_above else "BelowCam")
+	if _uw_wobble_button:
+		_uw_wobble_button.text = "UW Wobble: %s" % ("On" if _uw_wobble_enabled else "Off")
+	if _ocean_surface_button:
+		_ocean_surface_button.text = "Ocean Mesh: %s" % ("On" if _ocean_surface_visible else "Off")
+	if _uw_debug_button:
+		_uw_debug_button.text = "UW Debug: %s" % UW_DEBUG_MODE_NAMES[_uw_debug_mode]
+	if _waterline_button:
+		_waterline_button.text = "WL Proto: %s" % ("On" if _waterline_compositor_enabled else "Off")
+	if _waterline_debug_button:
+		_waterline_debug_button.text = "WL Debug: %s" % WL_DEBUG_MODE_NAMES[_waterline_debug_mode]
 
 
 func _process(delta: float) -> void:
@@ -505,6 +607,8 @@ func _process(delta: float) -> void:
 	_update_buoyancy_debug_grid()
 	_update_object_wetness(delta)
 	_update_held_object()
+	_update_underwater_volume()
+	_update_waterline_compositor()
 	_update_hud()
 
 
@@ -561,6 +665,48 @@ func _update_held_object() -> void:
 		return
 	var node: MeshInstance3D = _held_object["node"]
 	node.global_position = _camera.global_position + -_camera.global_basis.z * 5.0
+
+
+func _update_underwater_volume() -> void:
+	_disable_legacy_underwater_compositor()
+	_apply_ocean_surface_visibility()
+	if _underwater_volume == null:
+		return
+	_underwater_volume.set_sea_level(_sea_level)
+	_underwater_volume.set_active_above_water(_underwater_active_above)
+	_underwater_volume.set_debug_mode(_uw_debug_mode)
+	_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
+	_underwater_volume.sync_wave_surface_from_ocean_material(_get_ocean_material())
+	_underwater_volume.sync_optical_constants_from_ocean_manager(OceanManager)
+
+
+func _update_waterline_compositor() -> void:
+	if _waterline_effect == null:
+		return
+	_waterline_effect.effect_enabled = _waterline_compositor_enabled
+	_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+	if _waterline_effect.has_method("set_debug_mode"):
+		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	if _waterline_compositor_enabled:
+		_waterline_effect.sync_from_ocean(OceanManager, _get_ocean_material())
+
+
+func _apply_ocean_surface_visibility() -> void:
+	if OceanManager == null or not OceanManager.is_initialized():
+		return
+	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
+	if ocean_mesh:
+		ocean_mesh.visible = _ocean_surface_visible
+
+
+func _disable_legacy_underwater_compositor() -> void:
+	if not OceanManager or not OceanManager.has_method("get_underwater_effect"):
+		return
+	var effect = OceanManager.get_underwater_effect()
+	if effect != null and bool(effect.get("effect_enabled")):
+		effect.set("effect_enabled", false)
+	if ShaderManager and ShaderManager.has_method("is_effect_enabled") and ShaderManager.is_effect_enabled("underwater"):
+		ShaderManager.disable_effect("underwater")
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -634,9 +780,18 @@ func _update_hud() -> void:
 		"on" if _wet_debug else "off",
 		"low" if _sun_low else "high",
 	])
-	lines.append("refraction=%s  ssr=%s" % [
+	lines.append("surface_refraction=%s  ssr=%s  underwater=%s/%s  uw_wobble=%s" % [
 		"on" if _refraction_enabled else "off",
 		"on" if _ssr_enabled else "off",
+		"on" if _underwater_volume_enabled else "off",
+		"allcam" if _underwater_active_above else "belowcam",
+		"on" if _uw_wobble_enabled else "off",
+	])
+	lines.append("ocean_mesh=%s  uw_debug=%s  waterline_proto=%s/%s" % [
+		"on" if _ocean_surface_visible else "off",
+		UW_DEBUG_MODE_NAMES[_uw_debug_mode],
+		"on" if _waterline_compositor_enabled else "off",
+		WL_DEBUG_MODE_NAMES[_waterline_debug_mode],
 	])
 	if _help_visible:
 		lines.append("")
@@ -689,6 +844,7 @@ func _toggle_mesh_mode() -> void:
 	OceanManager.rebuild_mesh_with_mode(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
+	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_apply_ocean_feature_params()
 	_refresh_control_labels()
@@ -752,6 +908,7 @@ func _cycle_quality() -> void:
 	OceanManager.set_water_quality(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
+	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_apply_ocean_feature_params()
 	_refresh_control_labels()
@@ -769,11 +926,61 @@ func _toggle_ssr() -> void:
 	_refresh_control_labels()
 
 
+func _toggle_underwater_volume() -> void:
+	_underwater_volume_enabled = not _underwater_volume_enabled
+	if _underwater_volume:
+		_underwater_volume.enabled = _underwater_volume_enabled
+	_refresh_control_labels()
+
+
+func _toggle_underwater_active_above() -> void:
+	_underwater_active_above = not _underwater_active_above
+	if _underwater_volume:
+		_underwater_volume.set_active_above_water(_underwater_active_above)
+	_refresh_control_labels()
+
+
+func _toggle_uw_wobble() -> void:
+	_uw_wobble_enabled = not _uw_wobble_enabled
+	if _underwater_volume:
+		_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
+	_refresh_control_labels()
+
+
+func _toggle_ocean_surface_visible() -> void:
+	_ocean_surface_visible = not _ocean_surface_visible
+	_apply_ocean_surface_visibility()
+	_refresh_control_labels()
+
+
+func _cycle_uw_debug_mode() -> void:
+	_uw_debug_mode = (_uw_debug_mode + 1) % UW_DEBUG_MODE_NAMES.size()
+	if _underwater_volume:
+		_underwater_volume.set_debug_mode(_uw_debug_mode)
+	_refresh_control_labels()
+
+
+func _toggle_waterline_compositor() -> void:
+	_waterline_compositor_enabled = not _waterline_compositor_enabled
+	if _waterline_effect:
+		_waterline_effect.effect_enabled = _waterline_compositor_enabled
+		_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+	_refresh_control_labels()
+
+
+func _cycle_waterline_debug_mode() -> void:
+	_waterline_debug_mode = (_waterline_debug_mode + 1) % WL_DEBUG_MODE_NAMES.size()
+	if _waterline_effect and _waterline_effect.has_method("set_debug_mode"):
+		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	_refresh_control_labels()
+
+
 func _apply_ocean_feature_params() -> void:
 	var mat := _get_ocean_material()
 	if mat == null:
 		return
 	mat.set_shader_parameter("refraction_strength", REFRACTION_STRENGTH_DEFAULT if _refraction_enabled else 0.0)
+	mat.set_shader_parameter("surface_refraction_enabled", _refraction_enabled)
 	mat.set_shader_parameter("ssr_mix_strength", SSR_MIX_STRENGTH_DEFAULT if _ssr_enabled else 0.0)
 
 

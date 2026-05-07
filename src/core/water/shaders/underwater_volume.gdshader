@@ -1,5 +1,7 @@
 shader_type spatial;
 
+#define MAX_CASCADES 8
+
 // ============================================================================
 // Underwater Volume — Step 2 (caustics + absorption + wobble)
 // ============================================================================
@@ -65,6 +67,18 @@ uniform vec3 sun_direction_world = vec3(0.3, 0.8, 0.2);
 // `volume_depth` is how far below `sea_level` caustics are drawn.
 uniform float sea_level = 0.0;
 uniform float volume_depth = 40.0;
+uniform bool use_dynamic_water_surface = false;
+global uniform uint num_cascades;
+global uniform sampler2DArray displacements;
+uniform vec4 map_scales[MAX_CASCADES];
+uniform float wave_scale = 1.0;
+uniform sampler2D shore_mask : filter_linear_mipmap;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
+uniform float shore_wave_amplitude : hint_range(0.0, 2.0) = 0.5;
+uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
+uniform float shore_wave_speed : hint_range(0.1, 5.0) = 1.2;
+uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
 
 // ── Absorption (Step 1) ────────────────────────────────────────────────────
 // Beer-Lambert: surviving fraction of scene color = exp(-sigma * travel_distance)
@@ -72,7 +86,7 @@ uniform float volume_depth = 40.0;
 // `water_tint` is the color light converges TO at infinite depth.
 // `sigma_scale` scales absorption rate in world units (larger = darker faster).
 uniform vec3 water_tint : source_color = vec3(0.015, 0.115, 0.145);
-uniform float absorption_sigma : hint_range(0.0, 0.5) = 0.08;
+uniform vec3 absorption_sigma = vec3(0.12, 0.03, 0.018);
 // Minimum travel distance before absorption kicks in — avoids aggressive
 // darkening on geometry right next to the camera.
 uniform float absorption_min_travel : hint_range(0.0, 5.0) = 0.0;
@@ -90,6 +104,8 @@ uniform sampler2D water_normal_map : hint_normal, filter_linear, repeat_enable;
 uniform float wobble_strength : hint_range(0.0, 0.1) = 0.025;
 uniform float wobble_tiling : hint_range(0.5, 20.0) = 6.0;  // world units per tile
 uniform vec2 wobble_speed = vec2(0.15, 0.08);
+uniform bool wobble_enabled = true;
+uniform int debug_mode = 0; // 0 final, 1 slab mask, 2 depth/Y, 3 exaggerated wobble
 
 // ── Screen reconstruction ──────────────────────────────────────────────────
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture;
@@ -130,6 +146,39 @@ mat3 make_rotation_dir(vec3 direction, vec3 up) {
 	);
 }
 
+float get_dynamic_water_level(vec2 world_xz, float dist_to_camera) {
+	if (!use_dynamic_water_surface) {
+		return sea_level;
+	}
+
+	vec3 displacement = vec3(0.0);
+	for (uint i = 0U; i < num_cascades; ++i) {
+		vec4 scales = map_scales[i];
+		float tile_size = 1.0 / max(scales.x, 1e-6);
+		float cascade_fade = clamp(exp(-(dist_to_camera - 50.0) / (tile_size * 20.0)), 0.0, 1.0);
+		vec3 cascade_disp = texture(displacements, vec3(world_xz * scales.xy, float(i))).xyz * scales.z * cascade_fade;
+		displacement += cascade_disp;
+	}
+
+	vec2 shore_uv = (world_xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
+	vec4 shore_data = in_mask ? texture(shore_mask, shore_uv) : vec4(1.0, 0.5, 0.5, 1.0);
+	float shore = shore_data.r;
+	float water_y = sea_level + displacement.y * wave_scale * shore;
+
+	float raw_dist = shore_data.a * shore_fade_distance;
+	vec2 shore_dir = shore_data.gb * 2.0 - 1.0;
+	float shore_dir_len = length(shore_dir);
+	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0 && raw_dist > 0.5) {
+		float amp_env = smoothstep(0.0, shore_fade_distance * 0.1, raw_dist)
+					  * (1.0 - smoothstep(shore_fade_distance * 0.5, shore_fade_distance * 0.9, raw_dist));
+		float phase = raw_dist * shore_wave_frequency * 6.2832 - TIME * shore_wave_speed * 6.2832;
+		water_y += shore_wave_amplitude * amp_env * sin(phase);
+	}
+
+	return water_y;
+}
+
 
 void vertex() {
 	// No vertex displacement — the BoxMesh is already in the right place.
@@ -168,10 +217,14 @@ void fragment() {
 	vec2 nm_uv = scene_world_pos.xz / wobble_tiling + TIME * wobble_speed;
 	vec3 nm_sample = texture(water_normal_map, nm_uv).xyz;
 	vec2 wobble_offset = (nm_sample.xy * 2.0 - 1.0) * wobble_strength;
+	if (!wobble_enabled) {
+		wobble_offset = vec2(0.0);
+	}
 
 	// Guard against sampling outside the viewport — refracted off-screen
 	// pixels would return garbage. Clamp to [0,1].
 	vec2 wobbled_uv = clamp(SCREEN_UV + wobble_offset, vec2(0.0), vec2(1.0));
+	vec3 cam_pos = INV_VIEW_MATRIX[3].xyz;
 
 	// ── Above-water guard ──
 	// The wobble offset might point at a neighbor pixel that belongs to
@@ -208,7 +261,9 @@ void fragment() {
 		}
 		vec4 neighbor_world4 = INV_VIEW_MATRIX * INV_PROJECTION_MATRIX * vec4(neighbor_ndc, 1.0);
 		vec3 neighbor_world = neighbor_world4.xyz / neighbor_world4.w;
-		if (neighbor_world.y > sea_level) {
+		float neighbor_dist = length(neighbor_world - cam_pos);
+		float neighbor_water_level = get_dynamic_water_level(neighbor_world.xz, neighbor_dist);
+		if (neighbor_world.y > neighbor_water_level) {
 			// Above-water neighbor — fall back.
 			wobbled_uv = SCREEN_UV;
 		}
@@ -219,17 +274,36 @@ void fragment() {
 	// a visual-only refraction, not a physical ray bend. DIVE.omwfx takes the
 	// same stance.
 	scene_color = texture(SCREEN_TEXTURE, wobbled_uv).rgb;
+	float camera_scene_dist = length(scene_world_pos - cam_pos);
+	float water_level = get_dynamic_water_level(scene_world_pos.xz, camera_scene_dist);
 
 	// Test whether the scene pixel is inside the caustic volume.
 	// Volume is an axis-aligned slab: [sea_level - volume_depth, sea_level] in Y.
 	// (The BoxMesh also constrains X/Z to the follower box, but Y is the
 	// physically meaningful bound — we want caustics on the seafloor, not above
 	// water, and not drawn on the sky when depth==1.)
-	float y_top = sea_level;
-	float y_bot = sea_level - volume_depth;
+	float y_top = water_level - 0.03;
+	float y_bot = water_level - volume_depth;
 	inside_volume = step(y_bot, scene_world_pos.y) * step(scene_world_pos.y, y_top);
 
-	if (inside_volume < 0.5) {
+	if (debug_mode == 1) {
+		if (inside_volume < 0.5) {
+			ALBEDO = vec3(0.0);
+			ALPHA = 0.0;
+		} else {
+			ALBEDO = vec3(0.0, 0.85, 1.0);
+			ALPHA = 0.85;
+		}
+	} else if (debug_mode == 2) {
+		if (inside_volume < 0.5) {
+			ALBEDO = vec3(0.0);
+			ALPHA = 0.0;
+		} else {
+			float depth_band = clamp((water_level - scene_world_pos.y) / max(volume_depth, 0.001), 0.0, 1.0);
+			ALBEDO = vec3(depth_band, 1.0 - depth_band, 0.25);
+			ALPHA = 0.85;
+		}
+	} else if (inside_volume < 0.5) {
 		// Pixel is above water or below the volume — draw fully transparent.
 		// The slab test also rejects the ocean surface seen from below (@water's
 		// flat dark ceiling) because those pixels reconstruct to world_pos.y
@@ -241,9 +315,12 @@ void fragment() {
 		// Travel distance = camera to scene pixel, in world units.
 		// Uses actual view-space distance, not just vertical depth, so looking
 		// sideways at a distant rock darkens correctly too.
-		vec3 cam_pos = INV_VIEW_MATRIX[3].xyz;
 		float travel = max(length(scene_world_pos - cam_pos) - absorption_min_travel, 0.0);
-		vec3 transmittance = exp(-vec3(absorption_sigma) * travel);
+		vec3 transmittance = exp(-absorption_sigma * travel);
+		if (debug_mode == 3 && wobble_enabled) {
+			vec2 debug_uv = clamp(SCREEN_UV + wobble_offset * 4.0, vec2(0.0), vec2(1.0));
+			scene_color = mix(texture(SCREEN_TEXTURE, debug_uv).rgb, vec3(0.0, 0.9, 1.0), 0.35);
+		}
 		vec3 absorbed = mix(water_tint, scene_color, transmittance);
 
 		// ── Step 0: Caustics (unchanged, just applied AFTER absorption) ─────

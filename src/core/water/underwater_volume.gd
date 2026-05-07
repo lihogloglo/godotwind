@@ -47,7 +47,10 @@ var _material: ShaderMaterial
 var _camera: Camera3D = null
 var _sun: DirectionalLight3D = null
 var _sea_level: float = 0.0
+var _debug_mode: int = 0
 var enabled: bool = true
+var active_above_water: bool = false
+var wobble_enabled: bool = true
 
 
 func _ready() -> void:
@@ -56,6 +59,7 @@ func _ready() -> void:
 
 	_material = ShaderMaterial.new()
 	_material.shader = load(SHADER_PATH)
+	_material.render_priority = 80
 	_material.set_shader_parameter("caustics_noise", load(CAUSTICS_NOISE_PATH))
 	_material.set_shader_parameter("luma_gradient", load(LUMA_GRADIENT_PATH))
 	_material.set_shader_parameter("water_normal_map", load(WATER_NORMAL_PATH))
@@ -91,6 +95,57 @@ func set_sea_level(y: float) -> void:
 	_sea_level = y
 
 
+## Diagnostic/refactor mode. When true, the volume stays visible even while the
+## camera is above sea level, so the ocean lab can prove render-order behavior.
+func set_active_above_water(value: bool) -> void:
+	active_above_water = value
+
+
+func set_debug_mode(mode: int) -> void:
+	_debug_mode = clampi(mode, 0, 3)
+	if _material != null:
+		_material.set_shader_parameter("debug_mode", _debug_mode)
+
+
+func set_wobble_enabled(value: bool) -> void:
+	wobble_enabled = value
+	if _material != null:
+		_material.set_shader_parameter("wobble_enabled", wobble_enabled)
+
+
+func sync_wave_surface_from_ocean_material(ocean_material: ShaderMaterial) -> void:
+	if _material == null:
+		return
+	if ocean_material == null:
+		_material.set_shader_parameter("use_dynamic_water_surface", false)
+		return
+
+	_material.set_shader_parameter("use_dynamic_water_surface", true)
+	_material.set_shader_parameter("map_scales", ocean_material.get_shader_parameter("map_scales"))
+	_material.set_shader_parameter("wave_scale", ocean_material.get_shader_parameter("wave_scale"))
+	_material.set_shader_parameter("shore_mask", ocean_material.get_shader_parameter("shore_mask"))
+	_material.set_shader_parameter("shore_mask_bounds", ocean_material.get_shader_parameter("shore_mask_bounds"))
+	_material.set_shader_parameter("shore_fade_distance", ocean_material.get_shader_parameter("shore_fade_distance"))
+	_material.set_shader_parameter("shore_wave_amplitude", ocean_material.get_shader_parameter("shore_wave_amplitude"))
+	_material.set_shader_parameter("shore_wave_frequency", ocean_material.get_shader_parameter("shore_wave_frequency"))
+	_material.set_shader_parameter("shore_wave_speed", ocean_material.get_shader_parameter("shore_wave_speed"))
+	_material.set_shader_parameter("shore_wave_steepness", ocean_material.get_shader_parameter("shore_wave_steepness"))
+
+
+func sync_optical_constants_from_ocean_manager(ocean_manager: Node) -> void:
+	if _material == null or ocean_manager == null:
+		return
+	if ocean_manager.has_method("get_absorption_tint"):
+		var tint: Vector3 = ocean_manager.get_absorption_tint()
+		_material.set_shader_parameter("water_tint", tint)
+	if ocean_manager.has_method("get_absorption_sigma"):
+		var sigma: Vector3 = ocean_manager.get_absorption_sigma()
+		_material.set_shader_parameter("absorption_sigma", sigma)
+	if ocean_manager.has_method("get_underwater_caustics_strength"):
+		var caustics: float = ocean_manager.get_underwater_caustics_strength()
+		_material.set_shader_parameter("caustics_strength", caustics)
+
+
 func _process(_delta: float) -> void:
 	if _camera == null or not is_instance_valid(_camera) or not enabled:
 		visible = false
@@ -98,8 +153,8 @@ func _process(_delta: float) -> void:
 
 	var cam_y: float = _camera.global_position.y
 	var submerged: bool = cam_y < _sea_level
-	visible = submerged
-	if not submerged:
+	visible = submerged or active_above_water
+	if not visible:
 		return
 
 	# Follow camera position, never rotation. The volume stays axis-aligned
@@ -109,6 +164,8 @@ func _process(_delta: float) -> void:
 
 	# Per-frame uniforms. Cheap enough to push unconditionally.
 	_material.set_shader_parameter("sea_level", _sea_level)
+	_material.set_shader_parameter("debug_mode", _debug_mode)
+	_material.set_shader_parameter("wobble_enabled", wobble_enabled)
 	if _sun != null and is_instance_valid(_sun):
 		# Godot DirectionalLight3D shines along -basis.z, so +basis.z is the
 		# direction pointing AT the sun in the sky.

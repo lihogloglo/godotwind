@@ -52,6 +52,12 @@ what is actually active in code.
      overlaid on straight mesh" double-vision artifact. `sea_level` is pushed
      by `OceanManager._update_shader_parameters()` via
      `mat.set_shader_parameter(&"sea_level", sea_level)`.
+- **Option C refraction split started** — `surface_refraction_enabled` now gates
+  screen-color sampling in the FFT surface shader. When disabled, the surface
+  renders opaque water color/absorption/reflection instead of sampling the raw,
+  straight underwater mesh silhouette. Submerged-object wobble, waterline
+  transition, underwater fog, and caustics are moving to the underwater volume /
+  compositor path.
 - **Custom in-shader SSR trace** — ported verbatim from
   `inspos/GodotSSRWater-main/shaders/water.gdshader`. Helpers all prefixed
   `ssr_` and live in `ocean_fft_common.gdshaderinc` (included by `ocean_fft.gdshader`): `ssr_in_screen`, `ssr_view_to_uv`,
@@ -141,3 +147,8 @@ ordering — the custom in-shader SSR trace replaces it.
 compositor effect read the same values — keeps the waterline transition
 continuous as weather / time-of-day / fog change. Pre-agreed with the
 `underwater` track.
+
+2026-05-07 update: Ocean Lab's `UnderwaterVolume` now consumes these getters
+for tint, extinction sigma, and caustic strength. The eventual compositor
+prototype should use the same typed API rather than introducing another
+water-color stack.
