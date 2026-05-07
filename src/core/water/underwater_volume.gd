@@ -113,6 +113,11 @@ func set_wobble_enabled(value: bool) -> void:
 		_material.set_shader_parameter("wobble_enabled", wobble_enabled)
 
 
+func set_render_layers(layer_mask: int) -> void:
+	if _mesh_instance != null:
+		_mesh_instance.layers = layer_mask
+
+
 func sync_wave_surface_from_ocean_material(ocean_material: ShaderMaterial) -> void:
 	if _material == null:
 		return

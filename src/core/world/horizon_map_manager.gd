@@ -23,6 +23,8 @@ func _set_param(param_name: StringName, value: Variant) -> void:
 	if not _material_rid.is_valid() and _terrain and _terrain.material:
 		_material_rid = _terrain.material.get_material_rid()
 	if _material_rid.is_valid():
+		if value is Texture2D:
+			value = (value as Texture2D).get_rid()
 		RenderingServer.material_set_param(_material_rid, param_name, value)
 
 
@@ -58,6 +60,34 @@ func push_wet_map(sea_level: float, wet_margin: float = 1.5, wet_darken: float =
 	_set_param("wet_margin", wet_margin)
 	_set_param("wet_albedo_darken", wet_darken)
 	_set_param("wet_roughness_target", wet_rough)
+
+
+## Push the active ocean shore-wave signal into the terrain wetness shader.
+## This keeps the wet beach band aligned with the same analytical swash layer
+## that displaces the visible ocean near shore.
+func push_shore_wave_wetness(ocean_material: ShaderMaterial, ocean_time: float, enabled: bool = true) -> void:
+	if ocean_material == null or not enabled:
+		_set_param("shore_wave_wetness_enabled", false)
+		return
+
+	_set_param("shore_wave_wetness_enabled", true)
+	_set_param("ocean_time", ocean_time)
+
+	var shore_mask: Variant = ocean_material.get_shader_parameter("shore_mask")
+	if shore_mask is Texture2D:
+		_set_param("shore_mask", shore_mask)
+
+	for param_name: StringName in [
+		&"shore_mask_bounds",
+		&"shore_fade_distance",
+		&"shore_wave_amplitude",
+		&"shore_wave_frequency",
+		&"shore_wave_speed",
+		&"shore_wave_steepness",
+	]:
+		var value: Variant = ocean_material.get_shader_parameter(param_name)
+		if value != null:
+			_set_param(param_name, value)
 
 
 ## Kept for API compatibility — horizon maps are parked.

@@ -8,11 +8,20 @@ class_name WaterlineCompositorEffect
 extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/waterline_probe.glsl"
+const COPY_SHADER_PATH := "res://src/core/shaders/compute/color_image_copy.glsl"
 const MAX_CASCADES := 8
 
 var _depth_sampler: RID
 var _linear_clamp_sampler: RID
 var _linear_repeat_sampler: RID
+var _source_color_sampler: RID
+var _source_color_rid: RID
+var _source_color_size: Vector2i = Vector2i.ZERO
+var _external_source_color_rid: RID
+var _external_source_depth_rid: RID
+var _external_source_size: Vector2i = Vector2i.ZERO
+var _copy_shader_rid: RID
+var _copy_pipeline_rid: RID
 var _state_buffer: RID
 var _displacement_rid: RID
 var _shore_mask_rid: RID
@@ -33,6 +42,8 @@ var _probe_strength: float = 0.7
 var _debug_mode: int = 0
 var _ocean_time: float = 0.0
 var _render_logged: bool = false
+var _copy_warning_logged: bool = false
+var _last_source_log_key: String = ""
 
 
 func _init() -> void:
@@ -52,9 +63,30 @@ func on_effect_added() -> void:
 	if not load_compute_shader(SHADER_PATH):
 		Log.error("water", "WaterlineCompositorEffect: failed to load shader")
 		return
+	if not _load_copy_shader():
+		Log.error("water", "WaterlineCompositorEffect: failed to load color copy shader")
+		return
 	_create_samplers()
 	_create_fallback_shore_mask()
 	Log.info("water", "WaterlineCompositorEffect initialized")
+
+
+func _load_copy_shader() -> bool:
+	if rd == null:
+		rd = RenderingServer.get_rendering_device()
+		if rd == null:
+			return false
+	var shader_file := load(COPY_SHADER_PATH) as RDShaderFile
+	if shader_file == null:
+		return false
+	var shader_spirv := shader_file.get_spirv()
+	if shader_spirv == null:
+		return false
+	_copy_shader_rid = rd.shader_create_from_spirv(shader_spirv)
+	if not _copy_shader_rid.is_valid():
+		return false
+	_copy_pipeline_rid = rd.compute_pipeline_create(_copy_shader_rid)
+	return _copy_pipeline_rid.is_valid()
 
 
 func _create_samplers() -> void:
@@ -83,6 +115,14 @@ func _create_samplers() -> void:
 	repeat_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
 	repeat_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
 	_linear_repeat_sampler = rd.sampler_create(repeat_state)
+
+	var source_state := RDSamplerState.new()
+	source_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	source_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	source_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	source_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	source_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_source_color_sampler = rd.sampler_create(source_state)
 
 
 func _create_fallback_shore_mask() -> void:
@@ -149,7 +189,19 @@ func set_probe_strength(value: float) -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 4)
+	_debug_mode = clampi(value, 0, 6)
+
+
+func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i) -> void:
+	_external_source_color_rid = color_rid
+	_external_source_depth_rid = depth_rid
+	_external_source_size = size
+
+
+func clear_external_source_buffers() -> void:
+	_external_source_color_rid = RID()
+	_external_source_depth_rid = RID()
+	_external_source_size = Vector2i.ZERO
 
 
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
@@ -190,6 +242,33 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var depth_texture := buffers.get_depth_layer(view)
 	if not color_image.is_valid() or not depth_texture.is_valid():
 		return
+	var has_external_source := (
+		_external_source_color_rid.is_valid()
+		and _external_source_depth_rid.is_valid()
+		and _external_source_size != Vector2i.ZERO
+	)
+	var source_color_rid := _external_source_color_rid
+	var source_depth_rid := _external_source_depth_rid
+	var source_color_valid := has_external_source
+	var source_depth_valid := has_external_source
+	if not has_external_source:
+		source_color_valid = _copy_source_color(color_image, size)
+		source_color_rid = _source_color_rid
+		source_depth_rid = depth_texture
+	var source_log_key := "%s/%s/%s/%s" % [
+		has_external_source,
+		source_color_valid,
+		source_depth_valid,
+		_external_source_size if has_external_source else size,
+	]
+	if source_log_key != _last_source_log_key:
+		_last_source_log_key = source_log_key
+		print("[WATERLINE_PROTO] source buffers external=%s color_valid=%s depth_valid=%s size=%s" % [
+			has_external_source,
+			source_color_valid,
+			source_depth_valid,
+			_external_source_size if has_external_source else size,
+		])
 
 	var matrix_data := _build_state_buffer_data(scene_data)
 	var matrix_bytes := matrix_data.to_byte_array()
@@ -207,8 +286,8 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(float(mini(_map_scales.size(), MAX_CASCADES)))
 	pc.append(_probe_strength)
 	pc.append(float(_debug_mode))
-	pc.append(0.0)
-	pc.append(0.0)
+	pc.append(1.0 if source_color_valid else 0.0)
+	pc.append(1.0 if source_depth_valid else 0.0)
 	pc.append(0.0)
 	var pc_bytes := pc.to_byte_array()
 
@@ -247,6 +326,20 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_state.add_id(_state_buffer)
 	uniforms.append(u_state)
 
+	var u_source := RDUniform.new()
+	u_source.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_source.binding = 5
+	u_source.add_id(_source_color_sampler)
+	u_source.add_id(source_color_rid if source_color_rid.is_valid() else color_image)
+	uniforms.append(u_source)
+
+	var u_source_depth := RDUniform.new()
+	u_source_depth.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_source_depth.binding = 6
+	u_source_depth.add_id(_depth_sampler)
+	u_source_depth.add_id(source_depth_rid if source_depth_rid.is_valid() else depth_texture)
+	uniforms.append(u_source_depth)
+
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
 		return
@@ -260,6 +353,72 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
 	rd.compute_list_end()
 	rd.free_rid(uniform_set)
+
+
+func _copy_source_color(color_image: RID, size: Vector2i) -> bool:
+	if rd == null or not color_image.is_valid() or not _copy_shader_rid.is_valid() or not _copy_pipeline_rid.is_valid():
+		return false
+	var src_format: RDTextureFormat = rd.texture_get_format(color_image)
+	if not _source_color_rid.is_valid() or _source_color_size != size:
+		if _source_color_rid.is_valid():
+			rd.free_rid(_source_color_rid)
+			_source_color_rid = RID()
+		var fmt := RDTextureFormat.new()
+		fmt.format = src_format.format
+		fmt.width = size.x
+		fmt.height = size.y
+		fmt.depth = 1
+		fmt.array_layers = 1
+		fmt.mipmaps = 1
+		fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+		fmt.samples = RenderingDevice.TEXTURE_SAMPLES_1
+		fmt.usage_bits = (
+			RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+			| RenderingDevice.TEXTURE_USAGE_STORAGE_BIT
+		)
+		_source_color_rid = rd.texture_create(fmt, RDTextureView.new())
+		_source_color_size = size if _source_color_rid.is_valid() else Vector2i.ZERO
+	if not _source_color_rid.is_valid():
+		return false
+
+	var uniforms: Array[RDUniform] = []
+	var u_source := RDUniform.new()
+	u_source.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_source.binding = 0
+	u_source.add_id(color_image)
+	uniforms.append(u_source)
+
+	var u_target := RDUniform.new()
+	u_target.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_target.binding = 1
+	u_target.add_id(_source_color_rid)
+	uniforms.append(u_target)
+
+	var uniform_set := rd.uniform_set_create(uniforms, _copy_shader_rid, 0)
+	if not uniform_set.is_valid():
+		if not _copy_warning_logged:
+			_copy_warning_logged = true
+			Log.warn("water", "WaterlineCompositorEffect: source color copy uniform set failed; WL Proto stays tint-only")
+		return false
+
+	var pc := PackedFloat32Array()
+	pc.append(float(size.x))
+	pc.append(float(size.y))
+	pc.append(0.0)
+	pc.append(0.0)
+	var pc_bytes := pc.to_byte_array()
+
+	var groups_x := (size.x + 7) / 8
+	var groups_y := (size.y + 7) / 8
+	var cl := rd.compute_list_begin()
+	rd.compute_list_bind_compute_pipeline(cl, _copy_pipeline_rid)
+	rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
+	rd.compute_list_set_push_constant(cl, pc_bytes, pc_bytes.size())
+	rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
+	rd.compute_list_add_barrier(cl)
+	rd.compute_list_end()
+	rd.free_rid(uniform_set)
+	return true
 
 
 func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Array:
@@ -309,6 +468,22 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_absorption_sigma.y)
 	data.append(_absorption_sigma.z)
 	data.append(_caustics_strength)
+
+	var projection: Projection = scene_data.get_cam_projection()
+	for col in 4:
+		for row in 4:
+			data.append(projection[col][row])
+
+	var view: Transform3D = inv_view.affine_inverse()
+	for col in 3:
+		data.append(view.basis[col].x)
+		data.append(view.basis[col].y)
+		data.append(view.basis[col].z)
+		data.append(0.0)
+	data.append(view.origin.x)
+	data.append(view.origin.y)
+	data.append(view.origin.z)
+	data.append(1.0)
 	return data
 
 
@@ -324,6 +499,18 @@ func on_effect_removed() -> void:
 		if _linear_repeat_sampler.is_valid():
 			rd.free_rid(_linear_repeat_sampler)
 			_linear_repeat_sampler = RID()
+		if _source_color_sampler.is_valid():
+			rd.free_rid(_source_color_sampler)
+			_source_color_sampler = RID()
+		if _source_color_rid.is_valid():
+			rd.free_rid(_source_color_rid)
+			_source_color_rid = RID()
+		if _copy_pipeline_rid.is_valid():
+			rd.free_rid(_copy_pipeline_rid)
+			_copy_pipeline_rid = RID()
+		if _copy_shader_rid.is_valid():
+			rd.free_rid(_copy_shader_rid)
+			_copy_shader_rid = RID()
 		if _state_buffer.is_valid():
 			rd.free_rid(_state_buffer)
 			_state_buffer = RID()

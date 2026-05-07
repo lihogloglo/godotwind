@@ -258,6 +258,29 @@ exist.
   amplitude envelope keeps a small near-shore run-up lobe instead of dropping
   to zero at the shoreline. The visible ocean, underwater volume, and WL Proto
   classifier were updated together so diagnostics stay aligned.
+- Option C source-buffer pass started: Ocean Lab now creates a secondary
+  pre-water `SubViewport` camera that shares the main world but excludes a
+  dedicated water render layer. A new `PrewaterCaptureEffect` copies that
+  viewport's clean color and depth into RD textures, and
+  `WaterlineCompositorEffect` samples those buffers instead of the main buffer
+  when available. Practical effect: WL Proto can classify and bend/tint the
+  object behind the opaque ocean surface, while rejecting offset samples whose
+  reconstructed pre-water world position is above the displaced FFT waterline.
+  The underwater-camera debug no-entry case is also handled: when the camera is
+  already below the dynamic water surface, the compositor no longer searches
+  for an impossible forward entry crossing.
+- Verification: `waterline_probe.glsl` and `prewater_capture.glsl` import
+  artifacts were deleted from `.godot/imported/`, then Godot was run with
+  `--import` to force shader recompile. Ocean Lab was launched interactively
+  afterwards for visual inspection.
+- Follow-up after user visual check: the pre-water capture viewport was fixed
+  to track the main viewport size instead of a hardcoded 1280x720 target. The
+  mismatch could make `WL Debug: Refract` appear as sliding colored wedges
+  around half-submerged objects while moving. The refraction sample was also
+  simplified to a source-buffer screen offset driven by the dynamic FFT water
+  normal, followed by the same reconstructed-world-position waterline reject.
+  This keeps the proper source-buffer architecture while removing the brittle
+  above-water entry-ray dependency from the visible bending path.
 - Shore-wave timing/run-up follow-up: the analytical shore/Gerstner layer now
   uses a shared `ocean_time` clock and a gravity-wave dispersion-derived
   temporal frequency instead of a separate weather-scaled speed. User visually
@@ -268,6 +291,24 @@ exist.
   User visually confirmed the shore now rises/falls, but the motion feels too
   robotic / ON-OFF. Next pass should replace the binary crest-gated run-up with
   a smoother swash curve that advances, slows, and recedes continuously.
+- Shore-wave swash pass: the binary crest gate was replaced by a continuous
+  swash curve with fast uprush and slower backwash. Weather scaling was raised
+  so Storm/Blizzard can push the shore layer well above the previous sub-meter
+  cap (`shore_wave_amplitude` now ramps to 2.2m and steepness to 0.95). The
+  visible clipmap path, projected-grid path, `UnderwaterVolume`, and WL Proto
+  classifier were updated together so diagnostics use the same water height.
+- Shore-wave seesaw diagnosis: user screenshot showed a hinge artifact where
+  some shore vertices did not move while adjacent water vertices rose/fell.
+  Root cause: the shore mask encodes land/seed pixels as zero distance with no
+  direction, so those vertices became pinned. Temporary shader bridge: neutral
+  shore pixels now search outward up to 8 texels in the shore-mask alpha field
+  to recover an offshore gradient and join the swash motion. Proper production
+  fix remains a rebaked signed shoreline SDF/depth cache that stores land-side
+  run-up distance and direction explicitly.
+- Ocean Lab wireframe debug was added as `Wireframe: On/Off`, using the
+  viewport wireframe debug draw. It works for both clipmap and projected-grid
+  mesh modes and is intended to diagnose topology/blockiness, with the caveat
+  that viewport debug draw is not a final shaded ocean view.
 - Shoreline smoothness follow-up: user reports the ocean/shoreline edge still
   appears super blocky near the camera. Do not assume the cause yet. Diagnose
   whether the blocks come from ocean clipmap tessellation, Terrain3D shoreline
@@ -483,8 +524,13 @@ Current 2026-05-07 visual state:
 - The waterline now moves up/down at the shore after the shader derives a
   fallback SDF direction from neighboring shore-mask alpha samples on zero
   distance seed pixels.
-- The run-up is visibly present but feels robotic / ON-OFF. It needs smoother
-  swash shaping, not just more amplitude or speed.
+- The run-up no longer uses the binary crest gate. Current shader uses a
+  continuous swash curve and stronger weather energy, so high-wind presets have
+  enough vertical headroom for visible storm run-up.
+- A temporary shore-gradient fallback reduces the "seesaw" hinge where some
+  shore vertices were pinned. This is acceptable for now, but the production
+  data model should become a signed shoreline SDF/depth cache with explicit
+  land-side run-up support.
 - The shoreline/ocean edge still looks blocky near the camera. Cause is
   unproven and must be isolated before fixing.
 
@@ -505,14 +551,15 @@ Tasks:
   now feels matched to FFT cadence.
 - Verify shore-wave amplitude envelope so waves reduce height near the real
   shoreline and produce a small run-up/lapping motion instead of a hard flatten.
-  First shader pass implemented; user confirmed run-up exists, but it is too
-  binary and needs a smoother swash curve.
+  First shader pass implemented; follow-up replaced the binary gate with a
+  smoother swash curve and increased weather-scaled amplitude.
 - Diagnose first before changing mesh density: compare clipmap versus projected
   grid, shore debug modes, waterline debug modes, and terrain/depth silhouette
   to determine whether the blocky edge comes from ocean mesh tessellation,
   Terrain3D geometry, shore-mask resolution/filtering, or depth intersection.
-- Smooth the shore run-up curve so it advances, slows, and recedes instead of
-  crest-gating like an ON/OFF switch.
+- Replace the temporary multi-texel shore-gradient fallback with a proper
+  signed shoreline SDF/depth-cache bake so beach-side run-up is represented in
+  data rather than inferred in the shader.
 
 Acceptance:
 
@@ -520,6 +567,8 @@ Acceptance:
 - Shore waves run toward shore smoothly.
 - Shore waves visibly lap/run up the beach by a few dozen centimeters, then
   recede, without large rollers intersecting the terrain.
+- In strong weather, the shore swash moves as a coherent sheet along/up the
+  beach, not as a seesaw hinged on pinned shore vertices.
 - No hard square blocks are visible in the wetness/ocean lab coastline.
 - CPU `get_shore_factor()` and shader shore result agree at debug sample points.
 
@@ -554,6 +603,9 @@ volume shader is the seed, not the final design.
   half-submerged-object waterline/refraction.
 - Surface refraction still does not work. `Surf Refract` remains a diagnostic
   toggle for the legacy surface-shader path, not an accepted solution.
+- New direction: use a real pre-water source. Ocean Lab now proves this with a
+  water-excluding capture viewport plus `PrewaterCaptureEffect`; promote this
+  into runtime only after the lab result is visually accepted and costed.
 
 Tasks:
 
@@ -601,6 +653,9 @@ Tasks:
   repeats like the visible ocean mesh instead of clamping at tile edges. Use
   `WL Debug` modes to isolate any remaining drift from shore-wave terms,
   projected/clipmap differences, or depth/object geometry.
+- Feed WL Proto from the pre-water capture buffers, not from the main
+  post-ocean color/depth. First pass is implemented in Ocean Lab; next check is
+  visual quality and frame cost at the chosen capture resolution.
 - Add the half-immersed camera compositor mode after object waterline ownership
   is proven. The desired behavior is a moving wave-driven split screen:
   underwater treatment below the dynamic surface contour and normal atmospheric

@@ -13,6 +13,7 @@ const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const BuoyancyBodyScript := preload("res://src/core/water/buoyancy_body.gd")
 const BuoyancyProbeScript := preload("res://src/core/water/buoyancy_probe.gd")
 const UnderwaterVolumeScript := preload("res://src/core/water/underwater_volume.gd")
+const PrewaterCaptureScript := preload("res://src/core/shaders/effects/prewater_capture_effect.gd")
 const WaterlineCompositorScript := preload("res://src/core/shaders/effects/waterline_compositor_effect.gd")
 const WeatherTypesScript := preload("res://src/core/weather/weather_types.gd")
 const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manager.gd")
@@ -20,6 +21,8 @@ const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 const SEA_LEVEL_DEFAULT: float = 0.0
+const ALL_RENDER_LAYERS: int = 0xFFFFF
+const WATER_RENDER_LAYER_MASK: int = 1 << 19
 const BUOY_DEBUG_GRID: int = 40
 const BUOY_DEBUG_SPACING: float = 1.0
 const SHORE_SCAN_GRID: int = 6
@@ -53,6 +56,8 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"FFT",
 	"FFT+Shore",
 	"Delta",
+	"Refract",
+	"Refract Delta",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
@@ -69,6 +74,10 @@ var _horizon_mgr: HorizonMapManager = null
 var _sun: DirectionalLight3D = null
 var _ocean: OceanMesh = null
 var _underwater_volume: UnderwaterVolume = null
+var _prewater_viewport: SubViewport = null
+var _prewater_camera: Camera3D = null
+var _prewater_compositor: Compositor = null
+var _prewater_capture_effect: PostProcessEffect = null
 var _waterline_compositor: Compositor = null
 var _waterline_effect: PostProcessEffect = null
 var _debug_mmi: MultiMeshInstance3D = null
@@ -108,7 +117,7 @@ var _textures_loaded: int = 0
 
 var _buoy_grid_visible: bool = false
 var _debug_mode: int = 0
-var _refraction_enabled: bool = false
+var _refraction_enabled: bool = true
 var _ssr_enabled: bool = true
 var _underwater_volume_enabled: bool = true
 var _underwater_active_above: bool = false
@@ -137,6 +146,7 @@ func _ready() -> void:
 	_place_camera_at_playground()
 	_setup_ocean()
 	_setup_underwater_volume()
+	_setup_prewater_capture()
 	_setup_waterline_compositor()
 	_setup_reflection_canaries()
 	_setup_wetness()
@@ -154,6 +164,10 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if _prewater_capture_effect != null:
+		_prewater_capture_effect.on_effect_removed()
+	_prewater_capture_effect = null
+	_prewater_compositor = null
 	if _waterline_effect != null:
 		_waterline_effect.on_effect_removed()
 	_waterline_effect = null
@@ -328,6 +342,8 @@ func _setup_ocean() -> void:
 	OceanManager.set_terrain(_terrain)
 	_sea_level = OceanManager.get_sea_level()
 	_ocean = OceanManager.get_ocean_mesh()
+	if _ocean != null:
+		_ocean.layers = WATER_RENDER_LAYER_MASK
 	_apply_ocean_feature_params()
 
 
@@ -344,6 +360,42 @@ func _setup_underwater_volume() -> void:
 	_underwater_volume.sync_optical_constants_from_ocean_manager(OceanManager)
 	_underwater_volume.enabled = _underwater_volume_enabled
 	add_child(_underwater_volume)
+	_underwater_volume.set_render_layers(WATER_RENDER_LAYER_MASK)
+
+
+func _setup_prewater_capture() -> void:
+	_prewater_viewport = SubViewport.new()
+	_prewater_viewport.name = "OceanLabPrewaterViewport"
+	_prewater_viewport.size = _get_main_viewport_size()
+	_prewater_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_prewater_viewport.transparent_bg = false
+	_prewater_viewport.msaa_3d = Viewport.MSAA_DISABLED
+	_prewater_viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+	_prewater_viewport.use_taa = false
+	_prewater_viewport.own_world_3d = false
+	_prewater_viewport.handle_input_locally = false
+	add_child(_prewater_viewport)
+
+	_prewater_capture_effect = PrewaterCaptureScript.new()
+	_prewater_capture_effect.effect_enabled = true
+	_prewater_capture_effect.blend_factor = 1.0
+	_prewater_capture_effect.on_effect_added()
+
+	_prewater_compositor = Compositor.new()
+	_prewater_compositor.compositor_effects = [_prewater_capture_effect]
+
+	_prewater_camera = Camera3D.new()
+	_prewater_camera.name = "OceanLabPrewaterCamera"
+	_prewater_camera.current = true
+	_prewater_camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_prewater_camera.cull_mask = ALL_RENDER_LAYERS & ~WATER_RENDER_LAYER_MASK
+	_prewater_camera.compositor = _prewater_compositor
+	_prewater_camera.environment = _world_env.environment
+	_prewater_camera.far = _camera.far if _camera else 20000.0
+	_prewater_camera.near = _camera.near if _camera else 0.05
+	_prewater_camera.fov = _camera.fov if _camera else 75.0
+	_prewater_viewport.add_child(_prewater_camera)
+	_sync_prewater_camera()
 
 
 func _setup_waterline_compositor() -> void:
@@ -354,6 +406,7 @@ func _setup_waterline_compositor() -> void:
 	_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
 	if _waterline_effect.has_method("set_debug_mode"):
 		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	_push_prewater_capture_to_waterline()
 	_waterline_effect.on_effect_added()
 	_waterline_effect.sync_from_ocean(OceanManager, _get_ocean_material())
 
@@ -397,6 +450,17 @@ func _setup_wetness() -> void:
 func _push_wet_uniforms() -> void:
 	if _horizon_mgr:
 		_horizon_mgr.push_wet_map(_sea_level, _wet_margin, _wet_albedo_darken, _wet_roughness_target)
+		_sync_terrain_shore_wetness()
+
+
+func _sync_terrain_shore_wetness() -> void:
+	if _horizon_mgr == null:
+		return
+	var mat := _get_ocean_material()
+	var time := 0.0
+	if OceanManager and OceanManager.has_method("get_time"):
+		time = OceanManager.get_time()
+	_horizon_mgr.push_shore_wave_wetness(mat, time, mat != null)
 
 
 func _spawn_wet_test_objects() -> void:
@@ -614,7 +678,9 @@ func _process(delta: float) -> void:
 	_update_object_wetness(delta)
 	_update_held_object()
 	_update_underwater_volume()
+	_update_prewater_capture()
 	_update_waterline_compositor()
+	_sync_terrain_shore_wetness()
 	_update_hud()
 
 
@@ -694,7 +760,58 @@ func _update_waterline_compositor() -> void:
 	if _waterline_effect.has_method("set_debug_mode"):
 		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
 	if _waterline_compositor_enabled:
+		_push_prewater_capture_to_waterline()
 		_waterline_effect.sync_from_ocean(OceanManager, _get_ocean_material())
+
+
+func _update_prewater_capture() -> void:
+	_sync_prewater_camera()
+	if _prewater_capture_effect != null:
+		_prewater_capture_effect.effect_enabled = _waterline_compositor_enabled
+		_prewater_capture_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+
+
+func _sync_prewater_camera() -> void:
+	if _prewater_camera == null or _camera == null:
+		return
+	if _prewater_viewport != null:
+		var main_size := _get_main_viewport_size()
+		if main_size.x > 0 and main_size.y > 0 and _prewater_viewport.size != main_size:
+			_prewater_viewport.size = main_size
+	_prewater_camera.global_transform = _camera.global_transform
+	_prewater_camera.projection = _camera.projection
+	_prewater_camera.fov = _camera.fov
+	_prewater_camera.size = _camera.size
+	_prewater_camera.near = _camera.near
+	_prewater_camera.far = _camera.far
+	_prewater_camera.cull_mask = ALL_RENDER_LAYERS & ~WATER_RENDER_LAYER_MASK
+
+
+func _get_main_viewport_size() -> Vector2i:
+	var rect := get_viewport().get_visible_rect()
+	var size := Vector2i(int(rect.size.x), int(rect.size.y))
+	if size.x <= 0 or size.y <= 0:
+		return Vector2i(1280, 720)
+	return size
+
+
+func _push_prewater_capture_to_waterline() -> void:
+	if _waterline_effect == null:
+		return
+	if _prewater_capture_effect == null or not _prewater_capture_effect.has_method("has_capture"):
+		if _waterline_effect.has_method("clear_external_source_buffers"):
+			_waterline_effect.call("clear_external_source_buffers")
+		return
+	if not bool(_prewater_capture_effect.call("has_capture")):
+		if _waterline_effect.has_method("clear_external_source_buffers"):
+			_waterline_effect.call("clear_external_source_buffers")
+		return
+	_waterline_effect.call(
+		"set_external_source_buffers",
+		_prewater_capture_effect.call("get_source_color_rid"),
+		_prewater_capture_effect.call("get_source_depth_rid"),
+		_prewater_capture_effect.call("get_source_size")
+	)
 
 
 func _apply_ocean_surface_visibility() -> void:
@@ -702,6 +819,7 @@ func _apply_ocean_surface_visibility() -> void:
 		return
 	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
 	if ocean_mesh:
+		ocean_mesh.layers = WATER_RENDER_LAYER_MASK
 		ocean_mesh.visible = _ocean_surface_visible
 
 
@@ -805,6 +923,10 @@ func _update_hud() -> void:
 		lines.append("Use the control panel buttons for ocean/debug actions.")
 		lines.append("RMB + movement actions flies the camera.")
 		lines.append("LClick picks/drops wet test objects.")
+		if _waterline_debug_mode == 5:
+			lines.append("WL Refract: green=offset accepted, yellow=raw fallback, orange=above-water reject.")
+		elif _waterline_debug_mode == 6:
+			lines.append("WL Refract Delta: red=UV offset amount, green=visible source-color change.")
 		lines.append("Playground: %s" % _shore_search_status)
 	_hud_label.text = "\n".join(lines)
 

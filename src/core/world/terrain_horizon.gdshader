@@ -56,6 +56,16 @@ uniform float wet_margin : hint_range(0.0, 5.0) = 1.5;
 uniform float wet_albedo_darken : hint_range(0.0, 1.0) = 0.6;
 uniform float wet_roughness_target : hint_range(0.0, 0.3) = 0.05;
 uniform bool wet_debug = false;
+uniform bool shore_wave_wetness_enabled = false;
+uniform highp sampler2D shore_mask : filter_linear_mipmap, repeat_disable;
+uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
+uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
+uniform float shore_wave_amplitude : hint_range(0.0, 3.0) = 0.0;
+uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
+uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
+uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
+uniform float shore_wet_runup_width : hint_range(0.5, 20.0) = 8.0;
+uniform float ocean_time = 0.0;
 // === CUSTOM: enable_texturing toggle for test scenes without MW textures ===
 uniform bool enable_texturing = true;
 // === CUSTOM: Morrowind LTEX sidecar texturing ===
@@ -110,6 +120,105 @@ float random(in vec2 xy) {
 
 vec2 rotate_vec2(const vec2 v, const vec2 cs) {
 	return vec2(fma(cs.x, v.x, cs.y * v.y), fma(cs.x, v.y, -cs.y * v.x));
+}
+
+float shore_breaker_envelope(float raw_dist) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	return shore_ramp * offshore_fade;
+}
+
+float shore_runup_envelope(float raw_dist) {
+	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
+	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+}
+
+float shore_swash_curve(float phase) {
+	float cycle = fract(phase / 6.2831853);
+	float uprush = smoothstep(0.00, 0.30, cycle);
+	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	return uprush * backwash;
+}
+
+vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
+	vec2 dir = encoded_dir * 2.0 - 1.0;
+	if (length(dir) > 0.01) {
+		return normalize(dir);
+	}
+
+	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
+	for (int radius = 1; radius <= 8; radius *= 2) {
+		vec2 step_uv = texel * float(radius);
+		float x_pos = texture(shore_mask, clamp(shore_uv + vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
+		float x_neg = texture(shore_mask, clamp(shore_uv - vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
+		float z_pos = texture(shore_mask, clamp(shore_uv + vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
+		float z_neg = texture(shore_mask, clamp(shore_uv - vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
+		vec2 gradient_dir = vec2(x_pos - x_neg, z_pos - z_neg);
+		if (length(gradient_dir) > 1e-5) {
+			return normalize(gradient_dir);
+		}
+	}
+	return vec2(0.0);
+}
+
+float shore_land_distance(vec2 shore_uv, vec2 offshore_dir) {
+	if (length(offshore_dir) <= 0.01) {
+		return shore_wet_runup_width + 1.0;
+	}
+
+	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
+	float texel_world = max(shore_mask_bounds.z, shore_mask_bounds.w) / float(max(textureSize(shore_mask, 0).x, 1));
+	for (int radius = 1; radius <= 8; radius++) {
+		vec2 sample_uv = clamp(shore_uv + offshore_dir * texel * float(radius), vec2(0.0), vec2(1.0));
+		vec4 sample_data = texture(shore_mask, sample_uv);
+		if (sample_data.a > 0.001 || sample_data.r > 0.001) {
+			return float(radius) * texel_world;
+		}
+	}
+	return shore_wet_runup_width + texel_world;
+}
+
+float shore_wave_wetness(vec3 world_pos) {
+	if (!shore_wave_wetness_enabled || shore_wave_amplitude <= 0.0) {
+		return 0.0;
+	}
+
+	vec2 shore_uv = (world_pos.xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
+	if (!in_mask) {
+		return 0.0;
+	}
+
+	vec4 shore_data = texture(shore_mask, shore_uv);
+	float raw_dist = shore_data.a * shore_fade_distance;
+	vec2 shore_dir = shore_direction_from_mask(shore_uv, shore_data.gb);
+	float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
+	float breaker_env = shore_breaker_envelope(raw_dist);
+	float runup_env = shore_runup_envelope(raw_dist);
+	float swash = shore_swash_curve(phase);
+	float cycle = fract(phase / 6.2831853);
+	float dry_tail = 1.0 - smoothstep(0.35, 1.00, cycle);
+	float dynamic_water_y = sea_level_wet + shore_wave_amplitude * (
+		breaker_env * sin(phase)
+		+ runup_env * swash * 0.75
+	);
+
+	float wet_margin_safe = max(wet_margin, 0.001);
+	float contact_wet = 1.0 - smoothstep(dynamic_water_y, dynamic_water_y + wet_margin_safe, world_pos.y);
+
+	float land_dist = shore_land_distance(shore_uv, shore_dir);
+	float current_runup_width = wet_margin_safe + shore_wet_runup_width * max(swash, max(0.0, sin(phase)) * breaker_env);
+	float high_runup_width = wet_margin_safe + shore_wet_runup_width;
+	float footprint_wet = 1.0 - smoothstep(current_runup_width, current_runup_width + wet_margin_safe, land_dist);
+	float footprint_tail = (1.0 - smoothstep(high_runup_width, high_runup_width + wet_margin_safe, land_dist))
+		* dry_tail;
+
+	float high_water_y = sea_level_wet + shore_wave_amplitude * runup_env * 0.75;
+	float trailing_wet = (1.0 - smoothstep(high_water_y, high_water_y + wet_margin_safe, world_pos.y))
+		* dry_tail * runup_env;
+
+	return max(max(contact_wet, trailing_wet), max(footprint_wet, footprint_tail) * runup_env);
 }
 
 void accumulate_material(const vec3 base_ddx, const vec3 base_ddy, const float weight, const ivec3 index,
@@ -510,7 +619,9 @@ void fragment() {
 	// === CUSTOM: Wet map — Lagarde PBR wet surfaces ===
 	// Terrain below sea_level + wet_margin darkens and gets glossy.
 	{
-		float wetness = smoothstep(sea_level_wet + wet_margin, sea_level_wet, v_vertex.y);
+		float wet_margin_safe = max(wet_margin, 0.001);
+		float static_wetness = 1.0 - smoothstep(sea_level_wet, sea_level_wet + wet_margin_safe, v_vertex.y);
+		float wetness = max(static_wetness, shore_wave_wetness(v_vertex));
 		if (wet_debug) {
 			ALBEDO = mix(ALBEDO, vec3(0.0, 0.2, 0.8), wetness * 0.8);
 		} else {

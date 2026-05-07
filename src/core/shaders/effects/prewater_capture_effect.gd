@@ -1,0 +1,203 @@
+## PrewaterCaptureEffect
+##
+## Copies a secondary viewport's color and depth buffers into sampleable RD
+## textures. The viewport camera is expected to render the same world as the
+## main camera while excluding water-layer geometry, giving waterline effects a
+## clean "scene before water" source.
+@tool
+class_name PrewaterCaptureEffect
+extends PostProcessEffect
+
+const SHADER_PATH := "res://src/core/shaders/compute/prewater_capture.glsl"
+
+var _depth_sampler: RID
+var _source_color_rid: RID
+var _source_depth_rid: RID
+var _source_size: Vector2i = Vector2i.ZERO
+
+
+func _init() -> void:
+	super._init()
+	effect_name = "prewater_capture"
+	display_name = "Pre-water Capture"
+	description = "Copies a water-excluded viewport color/depth pair for waterline refraction."
+	category = "Water"
+	render_priority = 0
+	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
+	access_resolved_color = true
+	access_resolved_depth = true
+	needs_depth = true
+
+
+func on_effect_added() -> void:
+	if not load_compute_shader(SHADER_PATH):
+		Log.error("water", "PrewaterCaptureEffect: failed to load shader")
+		return
+	_create_samplers()
+	Log.info("water", "PrewaterCaptureEffect initialized")
+
+
+func _create_samplers() -> void:
+	if rd == null:
+		return
+	var depth_state := RDSamplerState.new()
+	depth_state.mag_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	depth_state.min_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	depth_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	depth_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	depth_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	_depth_sampler = rd.sampler_create(depth_state)
+
+
+func get_source_color_rid() -> RID:
+	return _source_color_rid
+
+
+func get_source_depth_rid() -> RID:
+	return _source_depth_rid
+
+
+func get_source_size() -> Vector2i:
+	return _source_size
+
+
+func has_capture() -> bool:
+	return _source_color_rid.is_valid() and _source_depth_rid.is_valid() and _source_size != Vector2i.ZERO
+
+
+func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
+	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_POST_TRANSPARENT:
+		return
+	if not effect_enabled or blend_factor <= 0.0 or not pipeline_rid.is_valid():
+		return
+	if rd == null:
+		rd = RenderingServer.get_rendering_device()
+		if rd == null:
+			return
+
+	var buffers := render_data.get_render_scene_buffers()
+	if buffers == null:
+		return
+	var size: Vector2i = buffers.get_internal_size()
+	if size.x == 0 or size.y == 0:
+		return
+
+	var view_count: int = buffers.get_view_count()
+	for view in view_count:
+		_render_view(view, size, buffers)
+
+
+func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD) -> void:
+	var color_image := buffers.get_color_layer(view)
+	var depth_texture := buffers.get_depth_layer(view)
+	if not color_image.is_valid() or not depth_texture.is_valid():
+		return
+	if not _ensure_target_textures(color_image, size):
+		return
+
+	var uniforms: Array[RDUniform] = []
+
+	var u_color_src := RDUniform.new()
+	u_color_src.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_color_src.binding = 0
+	u_color_src.add_id(color_image)
+	uniforms.append(u_color_src)
+
+	var u_depth_src := RDUniform.new()
+	u_depth_src.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_depth_src.binding = 1
+	u_depth_src.add_id(_depth_sampler)
+	u_depth_src.add_id(depth_texture)
+	uniforms.append(u_depth_src)
+
+	var u_color_dst := RDUniform.new()
+	u_color_dst.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_color_dst.binding = 2
+	u_color_dst.add_id(_source_color_rid)
+	uniforms.append(u_color_dst)
+
+	var u_depth_dst := RDUniform.new()
+	u_depth_dst.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	u_depth_dst.binding = 3
+	u_depth_dst.add_id(_source_depth_rid)
+	uniforms.append(u_depth_dst)
+
+	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
+	if not uniform_set.is_valid():
+		return
+
+	var pc := PackedFloat32Array()
+	pc.append(float(size.x))
+	pc.append(float(size.y))
+	pc.append(0.0)
+	pc.append(0.0)
+	var pc_bytes := pc.to_byte_array()
+
+	var groups_x := (size.x + 7) / 8
+	var groups_y := (size.y + 7) / 8
+	var cl := rd.compute_list_begin()
+	rd.compute_list_bind_compute_pipeline(cl, pipeline_rid)
+	rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
+	rd.compute_list_set_push_constant(cl, pc_bytes, pc_bytes.size())
+	rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
+	rd.compute_list_add_barrier(cl)
+	rd.compute_list_end()
+	rd.free_rid(uniform_set)
+
+
+func _ensure_target_textures(color_image: RID, size: Vector2i) -> bool:
+	if _source_color_rid.is_valid() and _source_depth_rid.is_valid() and _source_size == size:
+		return true
+
+	if _source_color_rid.is_valid():
+		rd.free_rid(_source_color_rid)
+		_source_color_rid = RID()
+	if _source_depth_rid.is_valid():
+		rd.free_rid(_source_depth_rid)
+		_source_depth_rid = RID()
+	_source_size = Vector2i.ZERO
+
+	var src_format: RDTextureFormat = rd.texture_get_format(color_image)
+	var color_fmt := RDTextureFormat.new()
+	color_fmt.format = src_format.format
+	color_fmt.width = size.x
+	color_fmt.height = size.y
+	color_fmt.depth = 1
+	color_fmt.array_layers = 1
+	color_fmt.mipmaps = 1
+	color_fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	color_fmt.samples = RenderingDevice.TEXTURE_SAMPLES_1
+	color_fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT
+	_source_color_rid = rd.texture_create(color_fmt, RDTextureView.new())
+
+	var depth_fmt := RDTextureFormat.new()
+	depth_fmt.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
+	depth_fmt.width = size.x
+	depth_fmt.height = size.y
+	depth_fmt.depth = 1
+	depth_fmt.array_layers = 1
+	depth_fmt.mipmaps = 1
+	depth_fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	depth_fmt.samples = RenderingDevice.TEXTURE_SAMPLES_1
+	depth_fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT
+	_source_depth_rid = rd.texture_create(depth_fmt, RDTextureView.new())
+
+	if not _source_color_rid.is_valid() or not _source_depth_rid.is_valid():
+		return false
+	_source_size = size
+	return true
+
+
+func on_effect_removed() -> void:
+	super.on_effect_removed()
+	if rd:
+		if _depth_sampler.is_valid():
+			rd.free_rid(_depth_sampler)
+			_depth_sampler = RID()
+		if _source_color_rid.is_valid():
+			rd.free_rid(_source_color_rid)
+			_source_color_rid = RID()
+		if _source_depth_rid.is_valid():
+			rd.free_rid(_source_depth_rid)
+			_source_depth_rid = RID()
+	_source_size = Vector2i.ZERO

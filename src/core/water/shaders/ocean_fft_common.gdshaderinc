@@ -82,19 +82,17 @@ uniform float max_visible_depth : hint_range(1.0, 50.0) = 20.0;
 // Strength of the refraction UV offset. 0.6 is the shader-specialist-tuned
 // default — visibly refractive without crossing silhouettes. 0 to disable.
 uniform float refraction_strength : hint_range(0.0, 1.0) = 0.6;
-// Option C refactor switch. The FFT surface should not own submerged-object
-// distortion; that moves to the underwater/waterline path. When disabled, the
-// surface renders opaque water/absorption/reflection without sampling the raw
-// scene color behind it.
-uniform bool surface_refraction_enabled = false;
+// Surface-side refraction switch. This is the visible "look down through water"
+// path: sample the opaque scene copy behind the water at a shifted UV.
+uniform bool surface_refraction_enabled = true;
 // Clamp refraction ray travel distance (meters along the refracted ray direction).
 // Combined with refraction_strength, this caps the view-space step length. At
-// 1.5 and 0.6 the max projected ray is ~0.9m → clearly visible pixel offsets.
+// 1.5 and 0.6 the max projected ray is ~0.9m -> clearly visible pixel offsets.
 uniform float max_refr_thickness : hint_range(0.1, 5.0) = 1.5;
-// Depth-contrast rejection threshold for screen-space refraction. Neighbor
-// samples that jump too far in depth are silhouette/foreground crossings; using
-// them pulls above-water objects into the water as ghosts. Valid submerged
-// interiors still refract because adjacent depths remain coherent.
+// Legacy depth-contrast rejection threshold retained for debug visualization.
+// We do not hard-reject underwater silhouette crossings: bending submerged
+// silhouettes is the visible point of refraction. Sky/off-screen and above-water
+// samples are still rejected by the guard chain below.
 uniform float refraction_silhouette_threshold : hint_range(0.1, 10.0) = 1.5;
 // World-space Y of the undisplaced water surface. Used by Guard (3b) to reject
 // refracted samples that are view-space-behind the water surface but
@@ -438,31 +436,22 @@ void fragment() {
 	fresnel = mix(pow(1.0 - cos_theta, fresnel_power) / (1.0 + 22.7 * pow(roughness, 1.5)), 1.0, REFLECTANCE);
 
 	// ========================================================================
-	// STEP 2 — Refraction UV offset
-	// Refract the view direction through the surface normal using air→water IOR
-	// (1/1.333 = 0.7509). Step along the refracted ray by a distance proportional
-	// to water thickness, project that point back to screen UV, and sample there.
-	// This bends submerged geometry at the waterline.
+	// STEP 2 — Surface refraction UV offset
+	// Refract the view direction through the surface normal using air->water IOR
+	// (1/1.333 = 0.7509). Step from the water surface, project that point back
+	// to screen UV, and sample there. This is the e13ee7d path that made the
+	// submerged half of waterline objects bend cleanly.
 	//
-	// Guards (in order):
-	//   (1) Total internal reflection — refract() returns zero; fall back.
-	//   (2) Refracted UV is off-screen [0,1] — fall back.
-	//   (3) SKY REJECT — refracted UV samples the sky/far plane (NDC depth near
-	//       zero in reversed-Z). Belt-and-suspenders early-out before doing
-	//       reconstruction on garbage depth.
-	//   (4) Refracted sample is BEHIND the water surface in view space
-	//       (cand_view_z less than surf_view.z).
-	//   (5) DEPTH EDGE REJECT — refracted sample must stay on the same
-	//       approximate scene surface as the unshifted water pixel.
-	//   (6) WORLD-Y REJECT — refracted sample must be BELOW sea_level in WORLD
-	//       space. Prevents pulling above-water pixels into underwater regions.
+	// Deliberately do not hard-reject depth discontinuities here. Crossing an
+	// underwater silhouette is the effect; only off-screen, sky/far, not-behind-
+	// water, and above-water candidate samples fall back.
 	// ========================================================================
 	vec2 refr_uv = SCREEN_UV;
 	bool refr_valid = false;
 	float refr_depth_delta = 0.0;
 	float refr_view_z = bg_view_z;
 	if (surface_refraction_enabled && !is_sky_or_far && refraction_strength > 0.0) {
-		vec3 refr_dir = refract(-VIEW, NORMAL, 0.7509); // air→water, IOR 1.333
+		vec3 refr_dir = refract(-VIEW, NORMAL, 0.7509);
 		if (dot(refr_dir, refr_dir) > 1e-6) {
 			float edge_t = clamp(length((SCREEN_UV - 0.5) * 2.0), 0.0, 1.0);
 			float edge_fade = 1.0 - smoothstep(0.7, 1.0, edge_t);
@@ -471,30 +460,20 @@ void fragment() {
 			vec4 refr_clip = PROJECTION_MATRIX * vec4(refr_target_view, 1.0);
 			if (refr_clip.w > 1e-4) {
 				vec2 candidate_uv = (refr_clip.xy / refr_clip.w) * 0.5 + 0.5;
-				// Guard (2): on-screen?
 				if (all(greaterThan(candidate_uv, vec2(0.0)))
 					&& all(lessThan(candidate_uv, vec2(1.0)))) {
 					float cand_ndc_z = texture(DEPTH_TEXTURE, candidate_uv).r;
-					// Guard (3): sky reject (reversed-Z → far plane near zero).
 					if (cand_ndc_z > 1e-4) {
-						// Canonical reversed-Z view-space Z.
 						float cand_view_z = -PROJECTION_MATRIX[3][2] / max(cand_ndc_z, 1e-5);
 						refr_depth_delta = abs(cand_view_z - bg_view_z);
-						// Guard (4): refracted sample must be behind the surface.
-						bool passes_above = cand_view_z < surf_view.z - 0.01;
-						// Guard (5): reject depth discontinuities. This is the
-						// standard screen-space refraction silhouette guard: do
-						// not let an offset UV cross from underwater geometry to
-						// a foreground object or a different object edge.
-						bool passes_depth_edge = refr_depth_delta < refraction_silhouette_threshold;
-						// Guard (6): refracted sample's WORLD Y must be below sea_level.
+						bool passes_behind_water = cand_view_z < surf_view.z - 0.01;
 						vec4 cand_clip = vec4(candidate_uv * 2.0 - 1.0, cand_ndc_z, 1.0);
 						vec4 cand_view4 = INV_PROJECTION_MATRIX * cand_clip;
 						vec3 cand_view_xyz = cand_view4.xyz / max(abs(cand_view4.w), 1e-4);
 						vec4 cand_world4 = INV_VIEW_MATRIX * vec4(cand_view_xyz, 1.0);
 						float cand_world_y = cand_world4.y / cand_world4.w;
 						bool passes_underwater = cand_world_y < sea_level;
-						if (passes_above && passes_depth_edge && passes_underwater) {
+						if (passes_behind_water && passes_underwater) {
 							refr_uv = candidate_uv;
 							refr_valid = true;
 							refr_view_z = cand_view_z;
@@ -513,12 +492,10 @@ void fragment() {
 		: water_thickness;
 	vec3 transmittance = exp(-optical_water_thickness * absorption_rate * absorption_density);
 
-	// Sample the scene behind the water only when surface refraction is enabled
-	// and the shifted UV passes the guard chain. Option C moves submerged-object
-	// wobble/waterline distortion out of this shader, so disabled/invalid
-	// surface refraction fades to water color instead of preserving the raw,
-	// straight underwater mesh silhouette.
-	vec3 screen_behind = (!surface_refraction_enabled || is_sky_or_far || !refr_valid)
+	// e13ee7d behavior: when refraction is enabled but the shifted sample fails
+	// the guard chain, fade to water color instead of preserving a straight,
+	// un-refracted silhouette inside the displaced contour.
+	vec3 screen_behind = (is_sky_or_far || (surface_refraction_enabled && refraction_strength > 0.0 && !refr_valid))
 		? color_deep
 		: texture(SCREEN_TEXTURE, refr_uv).rgb;
 	vec3 refracted_col = screen_behind * transmittance + color_deep * (1.0 - transmittance);

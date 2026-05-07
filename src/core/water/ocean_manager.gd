@@ -1133,7 +1133,7 @@ const _SHALLOW_STORM := Color(0.06, 0.08, 0.09)
 const _DEEP_CALM := Color(0.02, 0.04, 0.06)
 const _DEEP_STORM := Color(0.01, 0.02, 0.03)
 const _SURFACE_ABSORPTION_RATE := Vector3(0.4, 0.1, 0.06)
-const _SURFACE_ABSORPTION_DENSITY := 0.3
+const _SURFACE_ABSORPTION_DENSITY := 0.2
 
 var _current_absorption_tint := Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b)
 var _current_absorption_sigma := _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
