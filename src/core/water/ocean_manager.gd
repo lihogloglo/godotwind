@@ -617,6 +617,24 @@ func _sum_cascade_displacement(world_pos: Vector3) -> Vector3:
 	return total
 
 
+func _cascade_ready_mask(count: int) -> int:
+	var mask := 0
+	var safe_count: int = mini(count, 30)
+	for i in safe_count:
+		mask |= 1 << i
+	return mask
+
+
+func _readback_cascade_ready_mask() -> int:
+	var mask := 0
+	var count: int = mini(_displacement_cpu_per_cascade.size(), _cascade_parameters.size())
+	count = mini(count, 30)
+	for i in count:
+		if _displacement_cpu_per_cascade[i].size() > 0:
+			mask |= 1 << i
+	return mask
+
+
 func _sample_active_shore_data(world_pos: Vector3) -> Color:
 	if _active_shore_mask_image == null:
 		return Color(1.0, 0.5, 0.5, 1.0)
@@ -785,11 +803,62 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 func get_wave_normal(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.UP
+	var gradient := get_wave_gradient(world_pos)
+	return Vector3(-gradient.x, 1.0, -gradient.y).normalized()
+
+
+## Get dHeight/dWorldXZ for consumers that need slope without rebuilding it.
+func get_wave_gradient(world_pos: Vector3) -> Vector2:
+	if not _system_enabled or not _enabled:
+		return Vector2.ZERO
 	var eps := 1.0
-	var h0 := get_wave_height(world_pos)
-	var hx := get_wave_height(world_pos + Vector3(eps, 0.0, 0.0))
-	var hz := get_wave_height(world_pos + Vector3(0.0, 0.0, eps))
-	return Vector3(h0 - hx, eps, h0 - hz).normalized()
+	var hx0 := get_wave_height(world_pos - Vector3(eps, 0.0, 0.0))
+	var hx1 := get_wave_height(world_pos + Vector3(eps, 0.0, 0.0))
+	var hz0 := get_wave_height(world_pos - Vector3(0.0, 0.0, eps))
+	var hz1 := get_wave_height(world_pos + Vector3(0.0, 0.0, eps))
+	return Vector2(hx1 - hx0, hz1 - hz0) / (2.0 * eps)
+
+
+## Surface velocity is intentionally not approximated from a single height sample.
+## Future GPU/CPU wave data should publish true dDisplacement/dt here.
+func get_wave_velocity(_world_pos: Vector3) -> Vector3:
+	return Vector3.ZERO
+
+
+func get_water_coverage(world_pos: Vector3) -> float:
+	if not _system_enabled or not _enabled:
+		return 0.0
+	if _active_shore_mask_image != null or _shore_mask:
+		return clampf(_get_shore_factor(world_pos), 0.0, 1.0)
+	if _terrain and _terrain.data:
+		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
+		return 1.0 if terrain_height < sea_level else 0.0
+	return 1.0
+
+
+func get_signed_shore_distance(world_pos: Vector3) -> float:
+	if _active_shore_mask_image != null:
+		var shore_data := _sample_active_shore_data(world_pos)
+		var distance := shore_data.a * _active_shore_fade_distance
+		return distance if shore_data.r > 0.01 else -distance
+	if _shore_mask:
+		return _get_shore_factor(world_pos) * shore_fade_distance
+	if _terrain and _terrain.data:
+		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
+		return shore_fade_distance if terrain_height < sea_level else -shore_fade_distance
+	return shore_fade_distance
+
+
+func get_shore_side(world_pos: Vector3) -> int:
+	if get_water_coverage(world_pos) > 0.01:
+		return WaterSurfaceState.SHORE_SIDE_WATER
+	return WaterSurfaceState.SHORE_SIDE_LAND
+
+
+func get_water_body_id_at(world_pos: Vector3) -> StringName:
+	if get_water_coverage(world_pos) > 0.01:
+		return WaterSurfaceState.WATER_BODY_OCEAN
+	return WaterSurfaceState.WATER_BODY_NONE
 
 
 ## Sample one cascade's displacement texture at a world position.
@@ -996,6 +1065,12 @@ func get_displacement_texture_rd() -> RID:
 	return _wave_generator.descriptors[&"displacement_map"].rid
 
 
+func get_normal_texture_rd() -> RID:
+	if _wave_generator == null or not _wave_generator.descriptors.has(&"normal_map"):
+		return RID()
+	return _wave_generator.descriptors[&"normal_map"].rid
+
+
 func is_gpu_wave_readback_enabled() -> bool:
 	return use_gpu_wave_readback
 
@@ -1029,12 +1104,29 @@ func get_water_query_readback_bytes_per_frame() -> int:
 
 func get_water_surface_state() -> WaterSurfaceState:
 	var state := WaterSurfaceState.new()
+	var frame_id := Engine.get_process_frames()
+	var displacement_rd := get_displacement_texture_rd()
+	var normal_rd := get_normal_texture_rd()
 	state.sea_level = sea_level
 	state.wave_scale = wave_scale
 	state.ocean_time = _time
 	state.map_scales = _current_map_scales
 	state.cascade_count = _cascade_parameters.size()
-	state.displacement_texture_rd = get_displacement_texture_rd()
+	state.displacement_texture_rd = displacement_rd
+	state.normal_texture_rd = normal_rd
+	state.water_body_id = WaterSurfaceState.WATER_BODY_OCEAN if _system_enabled and _enabled else WaterSurfaceState.WATER_BODY_NONE
+	state.water_body_index = 1 if _system_enabled and _enabled else 0
+	state.coverage_available = _system_enabled and _enabled
+	if _active_shore_mask_image != null:
+		state.coverage_source = &"shore_mask"
+	elif _shore_mask != null:
+		state.coverage_source = &"runtime_shore_mask"
+	elif _terrain != null and _terrain.data != null:
+		state.coverage_source = &"terrain_height"
+	elif _system_enabled and _enabled:
+		state.coverage_source = &"global_ocean"
+	else:
+		state.coverage_source = &"none"
 	state.shore_mask_texture = _active_shore_mask_texture
 	state.shore_mask_bounds = Vector4(
 		_active_shore_mask_bounds.position.x,
@@ -1051,6 +1143,14 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.absorption_sigma = _current_absorption_sigma
 	state.absorption_depth_falloff = get_absorption_depth_falloff()
 	state.underwater_caustics_strength = _current_underwater_caustics_strength
+	state.snapshot_frame_id = frame_id
+	state.surface_data_frame_id = frame_id
+	state.readback_frame_id = _readback_frame
+	state.fft_ready = _system_enabled and _enabled and displacement_rd.is_valid() and _cascade_parameters.size() > 0
+	state.normal_data_ready = _system_enabled and _enabled and normal_rd.is_valid() and _cascade_parameters.size() > 0
+	state.readback_ready = use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0
+	state.gpu_cascade_ready_mask = _cascade_ready_mask(_cascade_parameters.size()) if state.fft_ready else 0
+	state.cpu_cascade_ready_mask = _readback_cascade_ready_mask()
 	state.cpu_query_available = _system_enabled and _enabled
 	state.cpu_query_source = get_water_query_source()
 	state.cpu_readback_bytes_per_frame = get_water_query_readback_bytes_per_frame()
@@ -1058,6 +1158,11 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.height_query = Callable(self, "get_wave_height")
 	state.displacement_query = Callable(self, "get_wave_displacement")
 	state.normal_query = Callable(self, "get_wave_normal")
+	state.gradient_query = Callable(self, "get_wave_gradient")
+	state.coverage_query = Callable(self, "get_water_coverage")
+	state.signed_shore_distance_query = Callable(self, "get_signed_shore_distance")
+	state.shore_side_query = Callable(self, "get_shore_side")
+	state.water_body_id_query = Callable(self, "get_water_body_id_at")
 	if _active_shore_mask_texture != null:
 		var texture_rid := _active_shore_mask_texture.get_rid()
 		if texture_rid.is_valid():

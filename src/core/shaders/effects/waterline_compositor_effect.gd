@@ -36,6 +36,8 @@ var _caustics_strength: float = 1.0
 var _probe_strength: float = 0.85
 var _debug_mode: int = 0
 var _ocean_time: float = 0.0
+var _camera_water_level: float = 0.0
+var _near_water_activation_distance: float = 120.0
 var _render_logged: bool = false
 var _missing_source_warning_logged: bool = false
 var _last_source_log_key: String = ""
@@ -192,7 +194,15 @@ func set_probe_strength(value: float) -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 7)
+	_debug_mode = clampi(value, 0, 8)
+
+
+func set_camera_water_level(value: float) -> void:
+	_camera_water_level = value
+
+
+func set_near_water_activation_distance(value: float) -> void:
+	_near_water_activation_distance = maxf(value, 0.0)
 
 
 func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i) -> void:
@@ -233,6 +243,11 @@ func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> v
 		return
 	var size: Vector2i = buffers.get_internal_size()
 	if size.x == 0 or size.y == 0:
+		return
+	var camera_pos := scene_data.get_cam_transform().origin
+	var camera_delta := camera_pos.y - _camera_water_level
+	var camera_near_or_under_water := camera_delta <= 0.0 or absf(camera_delta) <= _near_water_activation_distance
+	if not camera_near_or_under_water and _debug_mode == 0:
 		return
 
 	var view_count: int = buffers.get_view_count()

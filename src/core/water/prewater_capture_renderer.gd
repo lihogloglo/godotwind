@@ -167,7 +167,8 @@ func _ensure_nodes() -> void:
 func _update_active_state() -> void:
 	var near_water := true
 	if _source_camera != null and is_instance_valid(_source_camera):
-		near_water = absf(_source_camera.global_position.y - _camera_water_level) <= near_water_capture_distance_m
+		var camera_delta := _source_camera.global_position.y - _camera_water_level
+		near_water = camera_delta <= 0.0 or absf(camera_delta) <= near_water_capture_distance_m
 	_capture_active = _capture_enabled and _blend_factor > 0.0 and near_water
 	_apply_active_state()
 

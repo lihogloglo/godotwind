@@ -52,10 +52,13 @@ what is actually active in code.
   `src/core/water/water_surface_state.gd` is the shared water-surface snapshot
   produced by `OceanManager.get_water_surface_state()`. It carries the GPU
   shader inputs plus typed CPU query callables for height, displacement, and
-  normal sampling, along with the current query source (`gpu_readback`,
-  `cpu_spectrum`, `shore_analytical`, `flat`, or `disabled`) and readback
-  budget metadata. New water-adjacent systems should consume this state before
-  reaching directly into OceanManager internals.
+  normal/gradient sampling, coverage/body classification, shoreline side and
+  distance metadata, along with the current query source (`gpu_readback`,
+  `cpu_spectrum`, `shore_analytical`, `flat`, or `disabled`) and freshness /
+  cascade-readiness metadata. Surface velocity is part of the contract but is
+  deliberately unavailable until the wave pipeline publishes true
+  dDisplacement/dt data. New water-adjacent systems should consume this state
+  before reaching directly into OceanManager internals.
 - **Native/probe/sky reflections** — the FFT surface remains opaque and avoids
   sampling scene color directly. Reflections come through Godot's normal opaque
   reflection path (`SPECULAR`, ReflectionProbe, and sky), while waterline
@@ -96,7 +99,8 @@ refraction.
 - **Pre-water capture as a reusable component.** Scenes should use
   `PrewaterCaptureRenderer` instead of building ad-hoc SubViewport/camera
   chains. It disables the capture viewport when the compositor is off or the
-  camera is outside the near-water band, and it preserves the explicit
+  camera is outside the near-water band, while staying active for underwater
+  cameras that need the receiver buffer. It preserves the explicit
   render-order/latency contract for later production underwater passes.
 - **Godot transparent screen-texture constraint.** Godot copies 3D screen
   textures after opaque rendering and before transparent rendering. Transparent

@@ -53,6 +53,7 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Refract",
 	"Refract Offset",
 	"Source",
+	"Camera Split",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
@@ -91,6 +92,7 @@ var _ocean_surface_button: Button = null
 var _uw_debug_button: Button = null
 var _waterline_button: Button = null
 var _waterline_debug_button: Button = null
+var _waterline_res_button: Button = null
 var _wireframe_button: Button = null
 
 var _sea_level: float = SEA_LEVEL_DEFAULT
@@ -119,6 +121,8 @@ var _ocean_surface_visible: bool = true
 var _uw_debug_mode: int = 0
 var _waterline_compositor_enabled: bool = false
 var _waterline_debug_mode: int = 0
+var _waterline_resolution_scales: Array[float] = [1.0, 0.75, 0.5, 0.25]
+var _waterline_resolution_index: int = 2
 var _wireframe_enabled: bool = false
 var _current_weather: int = 0
 var _sun_low: bool = false
@@ -365,6 +369,7 @@ func _setup_prewater_capture() -> void:
 	_prewater_capture.configure(_camera, _world_env.environment, WATER_REFRACTION_RECEIVER_LAYER_MASK)
 	_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
 	_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
+	_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
 	_prewater_capture.set_camera_water_level(_get_camera_water_level())
 	add_child(_prewater_capture)
 	_prewater_capture.update_capture(_get_main_viewport_size())
@@ -374,10 +379,12 @@ func _setup_waterline_compositor() -> void:
 	if _world_env == null:
 		return
 	_waterline_effect = WaterlineCompositorScript.new()
-	_waterline_effect.effect_enabled = _waterline_compositor_enabled
-	_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+	_waterline_effect.effect_enabled = false
+	_waterline_effect.blend_factor = 0.0
 	if _waterline_effect.has_method("set_debug_mode"):
 		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	if _waterline_effect.has_method("set_camera_water_level"):
+		_waterline_effect.call("set_camera_water_level", _get_camera_water_level())
 	_push_prewater_capture_to_waterline()
 	_waterline_effect.on_effect_added()
 	if _waterline_effect.has_method("sync_from_water_state"):
@@ -537,6 +544,7 @@ func _build_ui() -> void:
 	_uw_debug_button = _add_button(_button_grid, "", Callable(self, "_cycle_uw_debug_mode"))
 	_waterline_button = _add_button(_button_grid, "", Callable(self, "_toggle_waterline_compositor"))
 	_waterline_debug_button = _add_button(_button_grid, "", Callable(self, "_cycle_waterline_debug_mode"))
+	_waterline_res_button = _add_button(_button_grid, "", Callable(self, "_cycle_waterline_resolution"))
 	_wireframe_button = _add_button(_button_grid, "", Callable(self, "_toggle_wireframe_debug"))
 	_add_button(_button_grid, "Help", func() -> void:
 		_help_visible = not _help_visible
@@ -650,6 +658,8 @@ func _refresh_control_labels() -> void:
 		_waterline_button.text = "Waterline: %s" % ("On" if _waterline_compositor_enabled else "Off")
 	if _waterline_debug_button:
 		_waterline_debug_button.text = "WL Debug: %s" % WL_DEBUG_MODE_NAMES[_waterline_debug_mode]
+	if _waterline_res_button:
+		_waterline_res_button.text = "WL Res: %d%%" % int(roundf(_get_waterline_resolution_scale() * 100.0))
 	if _wireframe_button:
 		_wireframe_button.text = "Wireframe: %s" % ("On" if _wireframe_enabled else "Off")
 
@@ -784,14 +794,19 @@ func _update_underwater_volume() -> void:
 func _update_waterline_compositor() -> void:
 	if _waterline_effect == null:
 		return
-	_waterline_effect.effect_enabled = _waterline_compositor_enabled
-	_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+	var capture_active := _prewater_capture != null and _prewater_capture.is_capture_active() and _prewater_capture.has_capture()
+	_waterline_effect.effect_enabled = _waterline_compositor_enabled and capture_active
+	_waterline_effect.blend_factor = 1.0 if _waterline_effect.effect_enabled else 0.0
 	if _waterline_effect.has_method("set_debug_mode"):
 		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
-	if _waterline_compositor_enabled:
+	if _waterline_effect.has_method("set_camera_water_level"):
+		_waterline_effect.call("set_camera_water_level", _get_camera_water_level())
+	if _waterline_effect.effect_enabled:
 		_push_prewater_capture_to_waterline()
 		if _waterline_effect.has_method("sync_from_water_state"):
 			_waterline_effect.call("sync_from_water_state", _get_water_state())
+	elif _waterline_effect.has_method("clear_external_source_buffers"):
+		_waterline_effect.call("clear_external_source_buffers")
 
 
 func _update_prewater_capture() -> void:
@@ -799,6 +814,7 @@ func _update_prewater_capture() -> void:
 		return
 	_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
 	_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
+	_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
 	_prewater_capture.set_camera_water_level(_get_camera_water_level())
 	_prewater_capture.update_capture(_get_main_viewport_size())
 
@@ -819,6 +835,10 @@ func _push_prewater_capture_to_waterline() -> void:
 			_waterline_effect.call("clear_external_source_buffers")
 		return
 	_prewater_capture.push_to_waterline_effect(_waterline_effect)
+
+
+func _get_waterline_resolution_scale() -> float:
+	return _waterline_resolution_scales[clampi(_waterline_resolution_index, 0, _waterline_resolution_scales.size() - 1)]
 
 
 func _apply_ocean_surface_visibility() -> void:
@@ -886,6 +906,7 @@ func _update_hud() -> void:
 	var cascade_count := state.cascade_count if state != null else 0
 	var fft_size := state.displacement_texture_size if state != null else 0
 	var readback_label := String(state.cpu_query_source) if state != null else "none"
+	var coverage_label := String(state.coverage_source) if state != null else "none"
 	var preset: Dictionary = WEATHER_PRESETS[_current_weather]
 
 	var lines: Array[String] = []
@@ -897,6 +918,11 @@ func _update_hud() -> void:
 		cascade_count,
 		readback_label,
 		readback_bytes / 1024,
+	])
+	lines.append("coverage=%s  gpu_mask=%d  cpu_mask=%d" % [
+		coverage_label,
+		state.gpu_cascade_ready_mask if state != null else 0,
+		state.cpu_cascade_ready_mask if state != null else 0,
 	])
 	lines.append("weather=%s wind=%.2f  debug=%d %s" % [
 		preset["name"],
@@ -930,6 +956,12 @@ func _update_hud() -> void:
 		"on" if _waterline_compositor_enabled else "off",
 		WL_DEBUG_MODE_NAMES[_waterline_debug_mode],
 	])
+	if _prewater_capture != null:
+		lines.append("prewater=%s %.0f%% %s" % [
+			"active" if _prewater_capture.is_capture_active() else "idle",
+			_prewater_capture.get_resolution_scale() * 100.0,
+			_prewater_capture.get_source_size(),
+		])
 	if _help_visible:
 		lines.append("")
 		lines.append("Use the control panel buttons for ocean/debug actions.")
@@ -940,9 +972,11 @@ func _update_hud() -> void:
 		elif _waterline_debug_mode == 6:
 			lines.append("WL Refract Offset: red=UV offset amount, green=visible source-color change.")
 		elif _waterline_debug_mode == 4:
-			lines.append("WL Receiver Mask: red=eligible receiver, green=underwater, blue=visible water gate.")
+			lines.append("WL Receiver Mask: red=eligible receiver, green=water coverage, blue=visible water gate.")
 		elif _waterline_debug_mode == 7:
 			lines.append("WL Source: green=source depth valid, red=missing source color.")
+		elif _waterline_debug_mode == 8:
+			lines.append("WL Camera Split: red=receiver underwater, green=ray crosses water, blue=coverage-gated water.")
 		lines.append("Playground: %s" % _shore_search_status)
 	_hud_label.text = "\n".join(lines)
 
@@ -1110,9 +1144,9 @@ func _cycle_uw_debug_mode() -> void:
 
 func _toggle_waterline_compositor() -> void:
 	_waterline_compositor_enabled = not _waterline_compositor_enabled
-	if _waterline_effect:
-		_waterline_effect.effect_enabled = _waterline_compositor_enabled
-		_waterline_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
+	if _prewater_capture:
+		_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
+		_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
 	_refresh_control_labels()
 
 
@@ -1120,6 +1154,13 @@ func _cycle_waterline_debug_mode() -> void:
 	_waterline_debug_mode = (_waterline_debug_mode + 1) % WL_DEBUG_MODE_NAMES.size()
 	if _waterline_effect and _waterline_effect.has_method("set_debug_mode"):
 		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+	_refresh_control_labels()
+
+
+func _cycle_waterline_resolution() -> void:
+	_waterline_resolution_index = (_waterline_resolution_index + 1) % _waterline_resolution_scales.size()
+	if _prewater_capture:
+		_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
 	_refresh_control_labels()
 
 
