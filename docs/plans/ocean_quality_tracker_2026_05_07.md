@@ -261,13 +261,14 @@ exist.
   to zero at the shoreline. The visible ocean, underwater volume, and WL Proto
   classifier were updated together so diagnostics stay aligned.
 - Option C source-buffer pass started: Ocean Lab now creates a secondary
-  pre-water `SubViewport` camera that shares the main world but excludes a
-  dedicated water render layer. A new `PrewaterCaptureEffect` copies that
+  receiver `SubViewport` camera. The first attempt excluded only the dedicated
+  water render layer; the current architecture captures only opt-in receiver
+  objects on render layer `1 << 18`. `PrewaterCaptureEffect` copies that
   viewport's clean color and depth into RD textures, and
   `WaterlineCompositorEffect` samples those buffers instead of the main buffer
   when available. Practical effect: WL Proto can classify and bend/tint the
   object behind the opaque ocean surface, while rejecting offset samples whose
-  reconstructed pre-water world position is above the displaced FFT waterline.
+  reconstructed receiver world position is above the displaced FFT waterline.
   The underwater-camera debug no-entry case is also handled: when the camera is
   already below the dynamic water surface, the compositor no longer searches
   for an impossible forward entry crossing.
@@ -275,13 +276,13 @@ exist.
   artifacts were deleted from `.godot/imported/`, then Godot was run with
   `--import` to force shader recompile. Ocean Lab was launched interactively
   afterwards for visual inspection.
-- Follow-up after user visual check: the pre-water capture viewport was fixed
+- Follow-up after user visual check: the receiver capture viewport was fixed
   to track the main viewport size instead of a hardcoded 1280x720 target. The
   mismatch could make `WL Debug: Refract` appear as sliding colored wedges
   around half-submerged objects while moving. The refraction sample was also
   simplified to a source-buffer screen offset driven by the dynamic FFT water
   normal, followed by the same reconstructed-world-position waterline reject.
-  This keeps the proper source-buffer architecture while removing the brittle
+  This keeps the proper receiver-buffer architecture while removing the brittle
   above-water entry-ray dependency from the visible bending path.
 - Shore-wave timing/run-up follow-up: the analytical shore/Gerstner layer now
   uses a shared `ocean_time` clock and a gravity-wave dispersion-derived
@@ -415,9 +416,9 @@ Implemented as a left-side button panel plus wetness sliders:
   interactive diagnosis.
 - `UW Wobble: <state>` enables/disables the diagnostic `UnderwaterVolume`
   screen-offset wobble independently from its tint/absorption/caustics.
-- `Waterline: <state>` enables/disables the pre-water `CompositorEffect`
+- `Waterline: <state>` enables/disables the receiver-only `CompositorEffect`
   waterline path.
-- `WL Debug: <Final|Flat|FFT|FFT+Shore|Delta|Refract|Refract Delta|Source>`
+- `WL Debug: <Final|Flat|FFT|FFT+Shore|Receiver Mask|Refract|Refract Offset|Source>`
   selects the waterline compositor classifier/debug view.
 - The underwater volume now syncs FFT `map_scales`, `wave_scale`, shore mask,
   and shore-wave parameters from the ocean material, then classifies pixels
@@ -602,30 +603,29 @@ volume shader is the seed, not the final design.
   half-submerged-object waterline/refraction.
 - Surface refraction is retired from the FFT surface shader. Do not re-add
   surface-owned `SCREEN_TEXTURE` bending to solve half-submerged objects.
-- New direction: use a real pre-water source. Ocean Lab now proves this with a
-  water-excluding capture viewport plus `PrewaterCaptureEffect`; promote this
-  into runtime only after the lab result is visually accepted and costed.
+- New direction: keep the FFT ocean opaque and use an explicit refraction
+  receiver source. Ocean Lab now proves this with a receiver-layer capture
+  viewport plus `PrewaterCaptureEffect`; promote this into runtime only after
+  the lab result is visually accepted and costed.
 - 2026-05-08 ownership fix: Ocean Lab now prevents `UnderwaterVolume` final
   shading from drawing above water. Its above-water scope is diagnostic-only,
-  so it cannot overwrite the pre-water waterline compositor result. The legacy
+  so it cannot overwrite the receiver waterline compositor result. The legacy
   ShaderManager underwater compositor is disabled by default and enable
   requests are ignored.
 - 2026-05-08 object wetness fix: lab wet test objects now receive the active
   `WaterSurfaceState` every frame and their material shader samples FFT
   displacement plus shore swash per fragment, with `wet_line_y` retained only
   as drying high-water memory.
-- 2026-05-08 waterline foreground fix: `Waterline: Off` only disables the
-  compositor; terrain/object wetness lines are separate systems. The waterline
-  compute pass now gates `Final` output against the main-view water-surface
-  depth and samples the pre-water source without linear silhouette bleed, so
-  dry foreground objects should not get contours just because water is behind
-  them. Debug modes remain loose for classifier inspection.
-- 2026-05-08 stage fix: user confirmed `WL Debug: Refract` above water was
-  green/accepted, but `Final` showed no refraction with `Ocean Mesh: On`.
-  Conclusion: the ocean surface was drawing after the previous
-  `PRE_TRANSPARENT` waterline pass and overwriting it. `WaterlineCompositorEffect`
-  now runs at `POST_TRANSPARENT`, after the visible water surface, while still
-  sampling the separate pre-water capture buffers.
+- 2026-05-08 receiver-only cleanup: the broad water-excluding capture was the
+  source of the ghosting/terrain projection. Ocean Lab now reserves render
+  layer `1 << 18` for refraction receivers, keeps water on `1 << 19`, and
+  captures only opt-in objects for `WaterlineCompositorEffect`. Terrain and the
+  broad seabed helpers are not receiver inputs.
+- 2026-05-08 waterline stage correction: with receiver-only buffers, the
+  compositor returns to `PRE_TRANSPARENT`, after opaque ocean and before spray
+  or diagnostic volumes. `Final` output requires valid receiver depth plus a
+  visible-water gate in the main view, so it must not repaint empty ocean,
+  terrain, or dry foreground object parts.
 
 Tasks:
 
@@ -671,9 +671,10 @@ Tasks:
   repeats like the visible ocean mesh instead of clamping at tile edges. Use
   `WL Debug` modes to isolate any remaining drift from shore-wave terms,
   projected/clipmap differences, or depth/object geometry.
-- Feed WL Proto from the pre-water capture buffers, not from the main
-  post-ocean color/depth. First pass is implemented in Ocean Lab; next check is
-  visual quality and frame cost at the chosen capture resolution.
+- Feed WL Proto from the receiver capture buffers, not from the main
+  post-ocean color/depth or a broad terrain capture. Current pass is
+  implemented in Ocean Lab; next check is visual quality and frame cost at the
+  chosen capture resolution.
 - Add the half-immersed camera compositor mode after object waterline ownership
   is proven. The desired behavior is a moving wave-driven split screen:
   underwater treatment below the dynamic surface contour and normal atmospheric

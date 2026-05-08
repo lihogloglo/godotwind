@@ -35,10 +35,13 @@ what is actually active in code.
   transmittance `exp(-thickness * absorption_rate * absorption_density)` drives
   water color only. The FFT surface no longer declares `hint_screen_texture`;
   submerged-object bending is not owned by this material.
-- **Option C refraction split** — above-water half-submerged-object distortion
-  is owned by the pre-water `WaterlineCompositorEffect`. The surface shader
-  stays opaque and uses scene depth only for thickness, shore foam, and tint.
-  `UnderwaterVolume` is underwater-camera/diagnostic support only.
+- **Receiver-only waterline refraction split** — above-water
+  half-submerged-object distortion is owned by an opt-in
+  `WaterlineCompositorEffect` receiver pass. The FFT surface stays opaque and
+  uses scene depth only for thickness, shore foam, and tint. Terrain, sky,
+  water, spray, UI, and broad seafloor helpers are not receiver inputs unless a
+  future system explicitly opts them in. `UnderwaterVolume` is
+  underwater-camera/diagnostic support only.
 - **Custom in-shader SSR trace** — ported verbatim from
   `inspos/GodotSSRWater-main/shaders/water.gdshader`. Helpers all prefixed
   `ssr_` and live in `ocean_fft_common.gdshaderinc` (included by `ocean_fft.gdshader`): `ssr_in_screen`, `ssr_view_to_uv`,
@@ -76,10 +79,16 @@ ordering — the custom in-shader SSR trace replaces it.
 - **Reflections via custom SSR trace + ReflectionProbe + sky cube.** Native
   SSR is brittle on the ocean material once depth/screen textures are involved,
   so nearby reflections use the custom raymarched trace.
-- **Refraction via Option C compositor.** Do not reintroduce surface-owned
+- **Refraction via receiver compositor.** Do not reintroduce surface-owned
   `SCREEN_TEXTURE` bending in `ocean_fft_common.gdshaderinc`. Submerged-object
-  distortion belongs to the pre-water compositor path, where it can sample
-  object color/depth before the opaque ocean hides it.
+  distortion belongs to the receiver compositor path, where opt-in object
+  color/depth can be captured separately without repainting terrain or the
+  whole ocean surface.
+- **Godot transparent screen-texture constraint.** Godot copies 3D screen
+  textures after opaque rendering and before transparent rendering. Transparent
+  screen-reading water is therefore not the production architecture for
+  Godotwind; the opaque ocean owns the surface, and the receiver compositor
+  owns the narrow submerged-object overlay.
 - **Canonical Godot reversed-Z formula** for depth→view-space-Z reconstruction:
   `-PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5)`. NOT full
   `INV_PROJECTION_MATRIX * clip` — that pattern blows up near the near plane
@@ -109,12 +118,12 @@ ordering — the custom in-shader SSR trace replaces it.
 ## Known Limitations (shipped)
 
 1. **Waterline compositor still prototype-quality.** Above-water
-   half-submerged-object bending now comes from the pre-water compositor path,
-   not the FFT surface shader, but alignment/polish and production integration
-   are still in progress. `Final` mode is gated by the main-view water-surface
-   depth to avoid dry foreground-object contours; classifier/debug modes may
-   still mark pixels more broadly on purpose. The compositor runs after
-   transparent water draws, so it is not hidden by the visible ocean surface.
+   half-submerged-object bending now comes from the receiver-only compositor
+   path, not the FFT surface shader. `Final` mode requires valid receiver
+   depth and visible water in the main view, so empty ocean pixels and terrain
+   stay as the opaque surface rendered them. The compositor runs at
+   `PRE_TRANSPARENT`: after opaque rendering and before transparent spray or
+   diagnostic volumes.
 2. **Underwater POV of ocean surface is flat dark `color_deep`.** When the
    camera is below the water looking up, the ocean-surface fragment's
    Beer-Lambert path sees sky at `DEPTH_TEXTURE`, the sky-guard fires, and the
@@ -123,8 +132,8 @@ ordering — the custom in-shader SSR trace replaces it.
    leaves these pixels alone so the fix drops in independently.
 3. **UnderwaterVolume is not the above-water refraction owner.** It is kept for
    underwater-camera tint/caustics and debug visualizations. Ocean Lab prevents
-   its final mode from drawing above water so it cannot hide the compositor
-   waterline result.
+   its final mode from drawing above water and uses dynamic camera water height
+   for activation, so it cannot hide or compete with the receiver compositor.
 4. **Sea spray cost is candidate-count driven.** The foam-driven spawn path is
    more expensive than the earlier choppiness-only prototype because each
    candidate samples normal/foam data as well as displacement, and active

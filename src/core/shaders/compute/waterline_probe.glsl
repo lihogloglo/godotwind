@@ -310,7 +310,7 @@ bool fetch_underwater_source(
 
 	sample_world = get_world_position(sample_uv, sample_depth);
 	float sample_water_level = get_dynamic_water_level(sample_world.xz, cam_pos, true, true);
-	if (sample_world.y >= sample_water_level + 0.05) {
+	if (sample_world.y >= sample_water_level - 0.02) {
 		reject_status = 7.0;
 		return false;
 	}
@@ -363,9 +363,9 @@ RefractSample refracted_source_color(
 	vec3 normal_view = normalize((state.view * vec4(world_normal, 0.0)).xyz);
 	float view_grazing = 1.0 - abs(dot(view_dir, world_normal));
 	float camera_underwater = cam_pos.y < camera_water_level - 0.02 ? 1.0 : 0.0;
-	float offset_scale = mix(0.006, 0.010, camera_underwater)
-		+ mix(0.016, 0.018, camera_underwater) * view_grazing;
-	offset_scale *= clamp(path_length / 3.0, 0.25, 1.35) * below_mask;
+	float offset_scale = mix(0.0012, 0.0018, camera_underwater)
+		+ mix(0.0035, 0.0045, camera_underwater) * view_grazing;
+	offset_scale *= clamp(path_length / 3.0, 0.25, 1.20) * below_mask;
 	vec2 offset = normal_view.xy * offset_scale;
 
 	float reject_status = 0.0;
@@ -409,6 +409,10 @@ void main() {
 
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(screen_w, screen_h);
 
+	if (!source_valid || !source_depth_valid) {
+		return;
+	}
+
 	float raw_depth = get_source_depth(uv);
 	float main_depth = get_main_depth(uv);
 	if (raw_depth <= 0.0001 || main_depth <= 0.0001) {
@@ -429,49 +433,40 @@ void main() {
 	float main_water_depth = main_water_level - main_world_pos.y;
 	float camera_water_level = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
 	bool camera_underwater = cam_pos.y < camera_water_level - 0.02;
+	if (debug_mode == 0 && camera_underwater) {
+		return;
+	}
 
 	float below_mask = smoothstep(0.02, 0.35, water_depth);
-	// Debug waterline marker: keep this narrow so alignment errors are readable.
-	float waterline_band = 1.0 - smoothstep(0.08, 0.14, abs(water_depth));
-	float final_transition_band = 1.0 - smoothstep(0.0, 0.22, abs(water_depth));
-	float mask = debug_mode == 0
-		? max(below_mask * 0.80, final_transition_band * 0.22)
-		: max(below_mask * 0.55, waterline_band);
-	float final_surface_gate = 1.0;
-	if (debug_mode == 0 && !camera_underwater) {
-		final_surface_gate = 1.0 - smoothstep(0.15, 0.75, abs(main_water_depth));
-		mask *= final_surface_gate;
-	}
-	if (mask <= 0.001) {
+	float waterline_band = 1.0 - smoothstep(0.00, 0.24, abs(water_depth));
+	float receiver_mask = max(below_mask, waterline_band * 0.35);
+	// Only write onto visible water pixels. Receiver objects keep their normal
+	// scene layer, so their dry above-water pixels already render in the main
+	// scene and must not get a post-process halo.
+	float visible_water_depth_gate = smoothstep(-0.05, 0.03, main_water_depth);
+	float visible_water_band_gate = 1.0 - smoothstep(0.45, 1.25, abs(main_water_depth));
+	float visible_water_gate = camera_underwater ? 0.0 : visible_water_depth_gate * visible_water_band_gate;
+	float mask = receiver_mask * visible_water_gate;
+	if (debug_mode == 0 && mask <= 0.001) {
 		return;
 	}
 
 	vec4 scene_color = imageLoad(color_image, pixel);
-	vec3 prewater_color = source_valid ? sample_source_color_nearest(uv) : scene_color.rgb;
-	RefractSample refr_sample = refracted_source_color(uv, prewater_color, cam_pos, world_pos, below_mask);
-	float refracted_mask = max(mask, refr_sample.below_mask * final_surface_gate);
-	vec3 source_color = refr_sample.color;
+	vec3 receiver_color = sample_source_color_nearest(uv);
+	RefractSample refr_sample = refracted_source_color(uv, receiver_color, cam_pos, world_pos, below_mask);
 	vec3 tint = state.shore_params1.yzw;
+	vec3 source_color = refr_sample.color;
 	vec3 sigma = state.optical_params.xyz;
 	float travel = max(refr_sample.path_length, max(water_depth, 0.0));
 	vec3 transmittance = exp(-sigma * min(travel, 45.0));
-	if (debug_mode == 0 && refr_sample.valid > 0.5) {
-		float shallow_clear = 1.0 - smoothstep(1.0, 8.0, travel);
-		transmittance = max(transmittance, mix(vec3(0.42, 0.50, 0.58), vec3(0.72, 0.78, 0.84), shallow_clear));
-	}
 	vec3 absorbed = mix(tint, source_color, transmittance);
-	if (debug_mode == 0 && refr_sample.valid > 0.5) {
-		float clarity = 1.0 - smoothstep(2.0, 12.0, travel);
-		absorbed = mix(absorbed, source_color, 0.28 + clarity * 0.22);
-	}
 
 	vec3 line_tint = mix(scene_color.rgb, tint * 1.8, 0.35);
 	vec3 proof_color = debug_mode == 0
-		? mix(absorbed, line_tint, final_transition_band * 0.12)
-		: mix(absorbed, vec3(0.0, 0.85, 1.0), waterline_band * 0.65);
+		? mix(absorbed, line_tint, waterline_band * 0.08)
+		: mix(absorbed, vec3(0.0, 0.85, 1.0), waterline_band * 0.55);
 	if (debug_mode == 4) {
-		float flat_delta = clamp((water_level - sea_level) * 0.5 + 0.5, 0.0, 1.0);
-		proof_color = mix(vec3(0.05, 0.15, 1.0), vec3(1.0, 0.15, 0.05), flat_delta);
+		proof_color = vec3(receiver_mask, below_mask, visible_water_gate);
 	} else if (debug_mode == 5) {
 		if (refr_sample.status < 1.5) {
 			proof_color = vec3(1.0, 0.0, 0.85);
@@ -495,7 +490,7 @@ void main() {
 			proof_color = vec3(0.4, 0.4, 0.4);
 		}
 	} else if (debug_mode == 6) {
-		vec3 raw_source = source_valid ? texture(source_color_tex, uv).rgb : scene_color.rgb;
+		vec3 raw_source = texture(source_color_tex, uv).rgb;
 		float source_delta = length(refr_sample.color - raw_source);
 		float offset_meter = clamp(refr_sample.offset * 80.0, 0.0, 1.0);
 		float color_meter = clamp(source_delta * 8.0, 0.0, 1.0);
@@ -508,7 +503,9 @@ void main() {
 		);
 	}
 	float debug_strength = (debug_mode == 5 || debug_mode == 6 || debug_mode == 7) ? 1.0 : probe_strength;
-	float final_refraction_boost = debug_mode == 0 && refr_sample.valid > 0.5 ? 1.45 : 1.0;
-	float strength = clamp(debug_strength * final_refraction_boost * blend_factor * refracted_mask, 0.0, 1.0);
+	float final_refraction_boost = debug_mode == 0 && refr_sample.valid > 0.5 ? 1.10 : 1.0;
+	float strength = debug_mode == 0
+		? clamp(debug_strength * final_refraction_boost * blend_factor * mask * 0.30, 0.0, 0.30)
+		: clamp(debug_strength * blend_factor * max(receiver_mask, waterline_band), 0.0, 1.0);
 	imageStore(color_image, pixel, vec4(mix(scene_color.rgb, proof_color, strength), scene_color.a));
 }

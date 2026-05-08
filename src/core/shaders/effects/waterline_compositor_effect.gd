@@ -1,8 +1,8 @@
-## WaterlineCompositorEffect - Option C waterline compositor core.
+## WaterlineCompositorEffect - receiver-only waterline compositor core.
 ##
-## Classifies pre-water scene depth against the displaced FFT water surface
-## after transparent water has drawn, then bends/tints visible water pixels from
-## the pre-water source.
+## Classifies opt-in receiver depth against the displaced FFT water surface
+## after opaque water has drawn, then subtly bends/tints only those receiver
+## pixels through visible water. Empty water and terrain are left untouched.
 @tool
 class_name WaterlineCompositorEffect
 extends PostProcessEffect
@@ -45,10 +45,10 @@ func _init() -> void:
 	super._init()
 	effect_name = "waterline_probe"
 	display_name = "Waterline Compositor"
-	description = "POST_TRANSPARENT waterline compositor core for Option C."
+	description = "PRE_TRANSPARENT receiver-only waterline compositor."
 	category = "Water"
 	render_priority = 8
-	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
+	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
 	access_resolved_color = true
 	access_resolved_depth = true
 	needs_depth = true
@@ -208,7 +208,7 @@ func clear_external_source_buffers() -> void:
 
 
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
-	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_POST_TRANSPARENT:
+	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT:
 		return
 	if not _render_logged:
 		_render_logged = true
@@ -253,7 +253,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	if not has_external_source:
 		if not _missing_source_warning_logged:
 			_missing_source_warning_logged = true
-			Log.warn("water", "WaterlineCompositorEffect: missing pre-water source buffers; compositor pass skipped")
+			Log.warn("water", "WaterlineCompositorEffect: missing receiver source buffers; compositor pass skipped")
 		return
 	var source_color_rid := _external_source_color_rid
 	var source_depth_rid := _external_source_depth_rid

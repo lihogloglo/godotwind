@@ -1,9 +1,11 @@
 ## PrewaterCaptureEffect
 ##
+## Historical name retained for script compatibility. Runtime use is now a
+## receiver-only capture for waterline refraction.
+##
 ## Copies a secondary viewport's color and depth buffers into sampleable RD
-## textures. The viewport camera is expected to render the same world as the
-## main camera while excluding water-layer geometry, giving waterline effects a
-## clean "scene before water" source.
+## textures. Ocean Lab uses that viewport as an explicit refraction receiver
+## capture: only objects on the receiver layer are rendered into this source.
 @tool
 class_name PrewaterCaptureEffect
 extends PostProcessEffect
@@ -19,8 +21,8 @@ var _source_size: Vector2i = Vector2i.ZERO
 func _init() -> void:
 	super._init()
 	effect_name = "prewater_capture"
-	display_name = "Pre-water Capture"
-	description = "Copies a water-excluded viewport color/depth pair for waterline refraction."
+	display_name = "Refraction Receiver Capture"
+	description = "Copies a receiver-only viewport color/depth pair for waterline refraction."
 	category = "Water"
 	render_priority = 0
 	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT

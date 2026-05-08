@@ -47,6 +47,7 @@ var _material: ShaderMaterial
 var _camera: Camera3D = null
 var _sun: DirectionalLight3D = null
 var _sea_level: float = 0.0
+var _camera_water_level: float = 0.0
 var _debug_mode: int = 0
 var enabled: bool = true
 var active_above_water: bool = false
@@ -93,11 +94,19 @@ func set_sun(sun: DirectionalLight3D) -> void:
 ## so tides/weather/etc. stay in sync.
 func set_sea_level(y: float) -> void:
 	_sea_level = y
+	_camera_water_level = y
 
 
-## Diagnostic/refactor mode. When true, non-final debug modes can stay visible
-## above sea level so Ocean Lab can prove render-order behavior. Final
-## above-water waterline/refraction is owned by WaterlineCompositorEffect.
+## Dynamic water height at the camera. Production scenes should update this
+## from WaterSurfaceState/OceanManager so waves, tide, and shore swash decide
+## when the camera is actually underwater.
+func set_camera_water_level(y: float) -> void:
+	_camera_water_level = y
+
+
+## Diagnostic/refactor mode. When true, the volume can stay visible even while
+## the camera is above the waterline for non-final debug modes. Production
+## scenes should keep this disabled.
 func set_active_above_water(value: bool) -> void:
 	active_above_water = value
 
@@ -147,6 +156,7 @@ func sync_wave_surface_from_water_state(state: WaterSurfaceState) -> void:
 		return
 
 	_sea_level = state.sea_level
+	_camera_water_level = state.sea_level
 	_material.set_shader_parameter("use_dynamic_water_surface", true)
 	_material.set_shader_parameter("map_scales", state.map_scales)
 	_material.set_shader_parameter("wave_scale", state.wave_scale)
@@ -184,7 +194,7 @@ func _process(_delta: float) -> void:
 		return
 
 	var cam_y: float = _camera.global_position.y
-	var submerged: bool = cam_y < _sea_level
+	var submerged: bool = cam_y < _camera_water_level
 	var above_water_diagnostic: bool = active_above_water and _debug_mode != 0
 	visible = submerged or above_water_diagnostic
 	if not visible:

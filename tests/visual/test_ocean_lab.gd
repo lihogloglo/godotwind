@@ -21,7 +21,7 @@ const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 const SEA_LEVEL_DEFAULT: float = 0.0
-const ALL_RENDER_LAYERS: int = 0xFFFFF
+const WATER_REFRACTION_RECEIVER_LAYER_MASK: int = 1 << 18
 const WATER_RENDER_LAYER_MASK: int = 1 << 19
 const BUOY_DEBUG_GRID: int = 40
 const BUOY_DEBUG_SPACING: float = 1.0
@@ -49,9 +49,9 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Flat",
 	"FFT",
 	"FFT+Shore",
-	"Delta",
+	"Receiver Mask",
 	"Refract",
-	"Refract Delta",
+	"Refract Offset",
 	"Source",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
@@ -119,7 +119,7 @@ var _underwater_active_above: bool = false
 var _uw_wobble_enabled: bool = false
 var _ocean_surface_visible: bool = true
 var _uw_debug_mode: int = 0
-var _waterline_compositor_enabled: bool = true
+var _waterline_compositor_enabled: bool = false
 var _waterline_debug_mode: int = 0
 var _wireframe_enabled: bool = false
 var _current_weather: int = 0
@@ -357,6 +357,8 @@ func _setup_underwater_volume() -> void:
 	_underwater_volume.set_debug_mode(_uw_debug_mode)
 	_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
 	_underwater_volume.sync_wave_surface_from_water_state(_get_water_state())
+	if _underwater_volume.has_method("set_camera_water_level"):
+		_underwater_volume.call("set_camera_water_level", _get_camera_water_level())
 	_underwater_volume.enabled = _underwater_volume_enabled
 	add_child(_underwater_volume)
 	_underwater_volume.set_render_layers(WATER_RENDER_LAYER_MASK)
@@ -364,7 +366,7 @@ func _setup_underwater_volume() -> void:
 
 func _setup_prewater_capture() -> void:
 	_prewater_viewport = SubViewport.new()
-	_prewater_viewport.name = "OceanLabPrewaterViewport"
+	_prewater_viewport.name = "OceanLabRefractionReceiverViewport"
 	_prewater_viewport.size = _get_main_viewport_size()
 	_prewater_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_prewater_viewport.transparent_bg = false
@@ -376,18 +378,18 @@ func _setup_prewater_capture() -> void:
 	add_child(_prewater_viewport)
 
 	_prewater_capture_effect = PrewaterCaptureScript.new()
-	_prewater_capture_effect.effect_enabled = true
-	_prewater_capture_effect.blend_factor = 1.0
+	_prewater_capture_effect.effect_enabled = _waterline_compositor_enabled
+	_prewater_capture_effect.blend_factor = 1.0 if _waterline_compositor_enabled else 0.0
 	_prewater_capture_effect.on_effect_added()
 
 	_prewater_compositor = Compositor.new()
 	_prewater_compositor.compositor_effects = [_prewater_capture_effect]
 
 	_prewater_camera = Camera3D.new()
-	_prewater_camera.name = "OceanLabPrewaterCamera"
+	_prewater_camera.name = "OceanLabRefractionReceiverCamera"
 	_prewater_camera.current = true
 	_prewater_camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
-	_prewater_camera.cull_mask = ALL_RENDER_LAYERS & ~WATER_RENDER_LAYER_MASK
+	_prewater_camera.cull_mask = WATER_REFRACTION_RECEIVER_LAYER_MASK
 	_prewater_camera.compositor = _prewater_compositor
 	_prewater_camera.environment = _world_env.environment
 	_prewater_camera.far = _camera.far if _camera else 20000.0
@@ -424,9 +426,9 @@ func _setup_reflection_canaries() -> void:
 
 	_add_box("DeepSeabed", Vector3(160.0, 2.0, 160.0), _lab_pos(Vector3(0.0, -16.0, 0.0)), seabed_mat)
 	_add_box("ShallowShelf", Vector3(35.0, 6.0, 35.0), _lab_pos(Vector3(22.0, -4.0, 18.0)), seabed_mat)
-	_add_box("SubmergedRock", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-8.0, -3.0, 8.0)), _standard_mat(Color(0.50, 0.45, 0.35), 0.65))
-	_add_box("HalfSubmergedMonolith", Vector3(3.0, 10.0, 3.0), _lab_pos(Vector3(8.0, 0.0, 9.0)), _standard_mat(Color(0.85, 0.85, 0.90), 0.7))
-	_add_box("MetalReflectionTarget", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-14.0, 5.0, -12.0)), _metal_mat())
+	_add_box("SubmergedRock", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-8.0, -3.0, 8.0)), _standard_mat(Color(0.50, 0.45, 0.35), 0.65), true)
+	_add_box("HalfSubmergedMonolith", Vector3(3.0, 10.0, 3.0), _lab_pos(Vector3(8.0, 0.0, 9.0)), _standard_mat(Color(0.85, 0.85, 0.90), 0.7), true)
+	_add_box("MetalReflectionTarget", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-14.0, 5.0, -12.0)), _metal_mat(), true)
 	_add_emissive_marker(_lab_pos(Vector3(12.0, 4.0, -12.0)), Color(1.0, 0.45, 0.12))
 	_add_emissive_marker(_lab_pos(Vector3(0.0, 2.5, -20.0)), Color(0.15, 0.65, 1.0))
 
@@ -486,6 +488,7 @@ func _spawn_wet_test_objects() -> void:
 		mat.set_shader_parameter("wet_albedo_darken", _wet_albedo_darken)
 		mat.set_shader_parameter("wet_roughness_target", _wet_roughness_target)
 		mi.material_override = mat
+		_mark_refraction_receiver(mi)
 		add_child(mi)
 		mi.global_position = _lab_pos(spec["offset"])
 		_test_objects.append({
@@ -800,6 +803,8 @@ func _update_underwater_volume() -> void:
 	_underwater_volume.set_debug_mode(_uw_debug_mode)
 	_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
 	_underwater_volume.sync_wave_surface_from_water_state(_get_water_state())
+	if _underwater_volume.has_method("set_camera_water_level"):
+		_underwater_volume.call("set_camera_water_level", _get_camera_water_level())
 
 
 func _update_waterline_compositor() -> void:
@@ -835,7 +840,7 @@ func _sync_prewater_camera() -> void:
 	_prewater_camera.size = _camera.size
 	_prewater_camera.near = _camera.near
 	_prewater_camera.far = _camera.far
-	_prewater_camera.cull_mask = ALL_RENDER_LAYERS & ~WATER_RENDER_LAYER_MASK
+	_prewater_camera.cull_mask = WATER_REFRACTION_RECEIVER_LAYER_MASK
 
 
 func _get_main_viewport_size() -> Vector2i:
@@ -988,7 +993,9 @@ func _update_hud() -> void:
 		if _waterline_debug_mode == 5:
 			lines.append("WL Refract: green=offset accepted, yellow=raw fallback, orange=above-water reject.")
 		elif _waterline_debug_mode == 6:
-			lines.append("WL Refract Delta: red=UV offset amount, green=visible source-color change.")
+			lines.append("WL Refract Offset: red=UV offset amount, green=visible source-color change.")
+		elif _waterline_debug_mode == 4:
+			lines.append("WL Receiver Mask: red=eligible receiver, green=underwater, blue=visible water gate.")
 		elif _waterline_debug_mode == 7:
 			lines.append("WL Source: green=source depth valid, red=missing source color.")
 		lines.append("Playground: %s" % _shore_search_status)
@@ -1193,6 +1200,12 @@ func _get_water_state() -> WaterSurfaceState:
 	return null
 
 
+func _get_camera_water_level() -> float:
+	if _camera != null and OceanManager != null and OceanManager.has_method("get_wave_height"):
+		return float(OceanManager.get_wave_height(_camera.global_position))
+	return _sea_level
+
+
 func _spawn_buoyant_sphere_from_camera() -> void:
 	if _camera == null:
 		return
@@ -1220,6 +1233,7 @@ func _spawn_buoyant_sphere_from_camera() -> void:
 	sphere_mesh.height = SPHERE_RADIUS * 2.0
 	mesh_inst.mesh = sphere_mesh
 	mesh_inst.material_override = _standard_mat(Color(0.9, 0.35, 0.2), 0.35)
+	_mark_refraction_receiver(mesh_inst)
 	body.add_child(mesh_inst)
 
 	var probe: BuoyancyProbe3D = BuoyancyProbeScript.new()
@@ -1249,16 +1263,22 @@ func _make_checker_texture(size_px: int, cell_px: int, a: Color, b: Color) -> Im
 	return ImageTexture.create_from_image(img)
 
 
-func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
+func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material, refraction_receiver: bool = false) -> MeshInstance3D:
 	var inst := MeshInstance3D.new()
 	inst.name = node_name
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	inst.mesh = mesh
 	inst.material_override = mat
+	if refraction_receiver:
+		_mark_refraction_receiver(inst)
 	add_child(inst)
 	inst.global_position = pos
 	return inst
+
+
+func _mark_refraction_receiver(inst: VisualInstance3D) -> void:
+	inst.layers = inst.layers | WATER_REFRACTION_RECEIVER_LAYER_MASK
 
 
 func _add_emissive_marker(pos: Vector3, color: Color) -> void:
