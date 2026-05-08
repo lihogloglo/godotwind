@@ -437,6 +437,7 @@ static func load_prebaked(image_path: String) -> Dictionary:
 
 	return {
 		"texture": texture,
+		"image": image,
 		"bounds": bounds,
 		"fade_distance": fade_dist
 	}

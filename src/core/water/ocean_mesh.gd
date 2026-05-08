@@ -134,7 +134,6 @@ void fragment() {
 	ALBEDO = water_color.rgb;
 	ROUGHNESS = roughness;
 	METALLIC = 0.0;
-	ALPHA = 1.0;
 }
 """
 	return shader

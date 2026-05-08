@@ -316,6 +316,10 @@ func get_shore_mask_texture() -> ImageTexture:
 	return _shore_mask
 
 
+func get_shore_mask_image() -> Image:
+	return _shore_image
+
+
 ## Get the world bounds of the shore mask
 func get_world_bounds() -> Rect2:
 	return _world_bounds

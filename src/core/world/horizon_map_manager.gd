@@ -65,6 +65,23 @@ func push_wet_map(sea_level: float, wet_margin: float = 1.5, wet_darken: float =
 ## Push the active ocean shore-wave signal into the terrain wetness shader.
 ## This keeps the wet beach band aligned with the same analytical swash layer
 ## that displaces the visible ocean near shore.
+func push_shore_wave_wetness_from_state(state: WaterSurfaceState, enabled: bool = true) -> void:
+	if state == null or not enabled:
+		_set_param("shore_wave_wetness_enabled", false)
+		return
+
+	_set_param("shore_wave_wetness_enabled", true)
+	_set_param("ocean_time", state.ocean_time)
+	if state.shore_mask_texture != null:
+		_set_param("shore_mask", state.shore_mask_texture)
+	_set_param("shore_mask_bounds", state.shore_mask_bounds)
+	_set_param("shore_fade_distance", state.shore_fade_distance)
+	_set_param("shore_wave_amplitude", state.shore_wave_amplitude)
+	_set_param("shore_wave_frequency", state.shore_wave_frequency)
+	_set_param("shore_wave_speed", state.shore_wave_speed)
+	_set_param("shore_wave_steepness", state.shore_wave_steepness)
+
+
 func push_shore_wave_wetness(ocean_material: ShaderMaterial, ocean_time: float, enabled: bool = true) -> void:
 	if ocean_material == null or not enabled:
 		_set_param("shore_wave_wetness_enabled", false)

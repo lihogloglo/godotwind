@@ -63,7 +63,7 @@ uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
 uniform float shore_wave_amplitude : hint_range(0.0, 3.0) = 0.0;
 uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
 uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
-uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.5;
+uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
 uniform float shore_wet_runup_width : hint_range(0.5, 20.0) = 8.0;
 uniform float ocean_time = 0.0;
 // === CUSTOM: enable_texturing toggle for test scenes without MW textures ===
@@ -141,6 +141,12 @@ float shore_swash_curve(float phase) {
 	return uprush * backwash;
 }
 
+float shore_crest_shape(float sin_phase) {
+	return sin_phase >= 0.0
+		? pow(max(sin_phase, 0.0), 1.45)
+		: -0.65 * pow(max(-sin_phase, 0.0), 1.15);
+}
+
 vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
 	vec2 dir = encoded_dir * 2.0 - 1.0;
 	if (length(dir) > 0.01) {
@@ -164,7 +170,7 @@ vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
 
 float shore_land_distance(vec2 shore_uv, vec2 offshore_dir) {
 	if (length(offshore_dir) <= 0.01) {
-		return shore_wet_runup_width + 1.0;
+		return 1.0e6;
 	}
 
 	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
@@ -177,6 +183,16 @@ float shore_land_distance(vec2 shore_uv, vec2 offshore_dir) {
 		}
 	}
 	return shore_wet_runup_width + texel_world;
+}
+
+float shore_water_coverage(vec3 world_pos) {
+	vec2 shore_uv = (world_pos.xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
+	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
+	if (!in_mask) {
+		return 0.0;
+	}
+	vec4 shore_data = texture(shore_mask, shore_uv);
+	return smoothstep(0.001, 0.05, max(shore_data.r, shore_data.a));
 }
 
 float shore_wave_wetness(vec3 world_pos) {
@@ -193,32 +209,46 @@ float shore_wave_wetness(vec3 world_pos) {
 	vec4 shore_data = texture(shore_mask, shore_uv);
 	float raw_dist = shore_data.a * shore_fade_distance;
 	vec2 shore_dir = shore_direction_from_mask(shore_uv, shore_data.gb);
+	bool shore_eligible = max(shore_data.r, shore_data.a) > 0.001 || length(shore_dir) > 0.01;
+	if (!shore_eligible) {
+		return 0.0;
+	}
 	float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
 	float breaker_env = shore_breaker_envelope(raw_dist);
 	float runup_env = shore_runup_envelope(raw_dist);
 	float swash = shore_swash_curve(phase);
 	float cycle = fract(phase / 6.2831853);
-	float dry_tail = 1.0 - smoothstep(0.35, 1.00, cycle);
+	float recede_gate = smoothstep(0.30, 0.42, cycle);
+	float dry_tail = (1.0 - smoothstep(0.35, 1.00, cycle)) * recede_gate;
+	float crest_phase = shore_crest_shape(sin(phase));
 	float dynamic_water_y = sea_level_wet + shore_wave_amplitude * (
-		breaker_env * sin(phase)
+		breaker_env * crest_phase
 		+ runup_env * swash * 0.75
 	);
 
 	float wet_margin_safe = max(wet_margin, 0.001);
-	float contact_wet = 1.0 - smoothstep(dynamic_water_y, dynamic_water_y + wet_margin_safe, world_pos.y);
-
 	float land_dist = shore_land_distance(shore_uv, shore_dir);
 	float current_runup_width = wet_margin_safe + shore_wet_runup_width * max(swash, max(0.0, sin(phase)) * breaker_env);
 	float high_runup_width = wet_margin_safe + shore_wet_runup_width;
-	float footprint_wet = 1.0 - smoothstep(current_runup_width, current_runup_width + wet_margin_safe, land_dist);
+	float waterline_contact = 1.0 - smoothstep(
+		dynamic_water_y - wet_margin_safe * 0.25,
+		dynamic_water_y + wet_margin_safe * 1.50,
+		world_pos.y
+	);
+	float footprint_wet = (1.0 - smoothstep(current_runup_width, current_runup_width + wet_margin_safe * 1.5, land_dist))
+		* waterline_contact
+		* max(runup_env, breaker_env)
+		* recede_gate;
 	float footprint_tail = (1.0 - smoothstep(high_runup_width, high_runup_width + wet_margin_safe, land_dist))
-		* dry_tail;
+		* dry_tail
+		* waterline_contact
+		* runup_env * 0.75;
 
 	float high_water_y = sea_level_wet + shore_wave_amplitude * runup_env * 0.75;
-	float trailing_wet = (1.0 - smoothstep(high_water_y, high_water_y + wet_margin_safe, world_pos.y))
-		* dry_tail * runup_env;
+	float trailing_wet = (1.0 - smoothstep(high_water_y, high_water_y + wet_margin_safe * 2.0, world_pos.y))
+		* dry_tail * runup_env * 0.75;
 
-	return max(max(contact_wet, trailing_wet), max(footprint_wet, footprint_tail) * runup_env);
+	return max(trailing_wet, max(footprint_wet, footprint_tail) * runup_env);
 }
 
 void accumulate_material(const vec3 base_ddx, const vec3 base_ddy, const float weight, const ivec3 index,
@@ -620,7 +650,11 @@ void fragment() {
 	// Terrain below sea_level + wet_margin darkens and gets glossy.
 	{
 		float wet_margin_safe = max(wet_margin, 0.001);
-		float static_wetness = 1.0 - smoothstep(sea_level_wet, sea_level_wet + wet_margin_safe, v_vertex.y);
+		float static_wetness = (1.0 - smoothstep(sea_level_wet, sea_level_wet + wet_margin_safe, v_vertex.y))
+			* shore_water_coverage(v_vertex);
+		if (shore_wave_wetness_enabled) {
+			static_wetness = 0.0;
+		}
 		float wetness = max(static_wetness, shore_wave_wetness(v_vertex));
 		if (wet_debug) {
 			ALBEDO = mix(ALBEDO, vec3(0.0, 0.2, 0.8), wetness * 0.8);

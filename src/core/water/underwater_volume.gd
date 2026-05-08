@@ -138,6 +138,31 @@ func sync_wave_surface_from_ocean_material(ocean_material: ShaderMaterial) -> vo
 	_material.set_shader_parameter("shore_wave_steepness", ocean_material.get_shader_parameter("shore_wave_steepness"))
 
 
+func sync_wave_surface_from_water_state(state: WaterSurfaceState) -> void:
+	if _material == null:
+		return
+	if state == null:
+		_material.set_shader_parameter("use_dynamic_water_surface", false)
+		return
+
+	_sea_level = state.sea_level
+	_material.set_shader_parameter("use_dynamic_water_surface", true)
+	_material.set_shader_parameter("map_scales", state.map_scales)
+	_material.set_shader_parameter("wave_scale", state.wave_scale)
+	_material.set_shader_parameter("ocean_time", state.ocean_time)
+	if state.shore_mask_texture != null:
+		_material.set_shader_parameter("shore_mask", state.shore_mask_texture)
+	_material.set_shader_parameter("shore_mask_bounds", state.shore_mask_bounds)
+	_material.set_shader_parameter("shore_fade_distance", state.shore_fade_distance)
+	_material.set_shader_parameter("shore_wave_amplitude", state.shore_wave_amplitude)
+	_material.set_shader_parameter("shore_wave_frequency", state.shore_wave_frequency)
+	_material.set_shader_parameter("shore_wave_speed", state.shore_wave_speed)
+	_material.set_shader_parameter("shore_wave_steepness", state.shore_wave_steepness)
+	_material.set_shader_parameter("water_tint", state.absorption_tint)
+	_material.set_shader_parameter("absorption_sigma", state.absorption_sigma)
+	_material.set_shader_parameter("caustics_strength", state.underwater_caustics_strength)
+
+
 func sync_optical_constants_from_ocean_manager(ocean_manager: Node) -> void:
 	if _material == null or ocean_manager == null:
 		return

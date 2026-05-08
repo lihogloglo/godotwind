@@ -13,11 +13,15 @@
 class_name BuoyancyBody3D
 extends RigidBody3D
 
-## Buoyancy force multiplier (higher = floats more aggressively).
-@export var buoyancy_force: float = 10.0
+## Buoyancy force multiplier around the body's own weight.
+## 1.0 = neutral support at full probe submersion, >1.0 floats higher.
+@export var buoyancy_force: float = 1.25
 
 ## Depth exponent for non-linear force curve. 1.0 = linear, 1.5 = gentler near surface.
-@export var buoyancy_power: float = 1.5
+@export var buoyancy_power: float = 1.2
+
+## Depth in meters at which a probe contributes its full buoyancy share.
+@export var probe_submersion_depth: float = 1.0
 
 ## Water density in kg/m3 (1000 = freshwater, 1025 = seawater).
 @export var fluid_density: float = 1025.0
@@ -51,7 +55,7 @@ func _find_probes() -> void:
 		Log.warn("water", "BuoyancyBody3D '%s': No BuoyancyProbe3D children found" % name)
 
 
-func _physics_process(delta: float) -> void:
+func _physics_process(_delta: float) -> void:
 	# I.5 / INTERACTION_SYSTEM.md §6.4 — frozen-body early-out guard.
 	# Verified mandatory by `tests/diagnostic/frozen_rb_tick_check.tscn`:
 	# Godot 4.6 ticks `_physics_process` on frozen RigidBody3Ds every
@@ -85,11 +89,16 @@ func _physics_process(delta: float) -> void:
 			_is_submerged = true
 			_submerged_count += 1
 
-			# Non-linear buoyancy: gentler near surface, stronger when deep
-			var force_mag: float = pow(absf(depth), buoyancy_power) * buoyancy_force * probe.buoyancy_multiplier
+			# Weight-relative Archimedes approximation. The previous depth * density
+			# scalar produced huge forces for small props once apply_force() was no
+			# longer incorrectly delta-scaled.
+			var probe_weight: float = gravity_mag * mass / float(_probes.size())
+			var submersion: float = clampf(depth / maxf(probe_submersion_depth, 0.001), 0.0, 1.0)
+			var density_scale: float = fluid_density / 1025.0
+			var force_mag: float = probe_weight * buoyancy_force * density_scale * pow(submersion, buoyancy_power) * probe.buoyancy_multiplier
 
 			# Buoyancy force opposes gravity
-			var buoyancy: Vector3 = -gravity.normalized() * force_mag * fluid_density * delta
+			var buoyancy: Vector3 = -gravity.normalized() * force_mag
 
 			# Apply at probe position (generates torque around center of mass)
 			var force_offset: Vector3 = probe_pos - global_position
@@ -97,7 +106,7 @@ func _physics_process(delta: float) -> void:
 
 			# Per-probe gravity if distributed mode
 			if distributed_gravity:
-				var probe_gravity: Vector3 = gravity * (mass / float(_probes.size())) * delta
+				var probe_gravity: Vector3 = gravity * (mass / float(_probes.size()))
 				apply_force(probe_gravity, force_offset)
 
 	# Hydrodynamic drag when submerged

@@ -75,6 +75,12 @@ float shore_swash_curve(float phase) {
 	return uprush * backwash;
 }
 
+float shore_crest_shape(float sin_phase) {
+	return sin_phase >= 0.0
+		? pow(max(sin_phase, 0.0), 1.45)
+		: -0.65 * pow(max(-sin_phase, 0.0), 1.15);
+}
+
 vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
 	vec2 dir = encoded_dir * 2.0 - 1.0;
 	if (length(dir) > 0.01) {
@@ -157,11 +163,12 @@ SurfaceSample sample_surface(vec2 sample_xz, vec3 cam_pos, bool include_fft, boo
 		shore_dir /= shore_dir_len;
 		float phase = raw_dist * shore_wave_frequency * 6.2832 + TIME * shore_wave_speed * 6.2832;
 		float sin_phase = sin(phase);
+		float crest_phase = shore_crest_shape(sin_phase);
 		float breaker_env = shore_breaker_envelope(raw_dist, shore_fade_distance);
 		float runup_env = shore_runup_envelope(raw_dist, shore_fade_distance);
 		float swash = shore_swash_curve(phase);
 		water_y += shore_wave_amplitude * (
-			breaker_env * sin_phase
+			breaker_env * crest_phase
 			+ runup_env * swash * 0.75
 		);
 		horizontal_offset -= shore_dir * (shore_wave_amplitude * shore_wave_steepness * (
@@ -356,10 +363,6 @@ void main() {
 	}
 
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(screen_w, screen_h);
-	if (pixel.x < 72 && pixel.y < 24) {
-		vec4 marker = imageLoad(color_image, pixel);
-		imageStore(color_image, pixel, vec4(mix(marker.rgb, vec3(1.0, 0.0, 0.85), 0.85 * blend_factor), marker.a));
-	}
 
 	float raw_depth = get_scene_depth(uv);
 	if (raw_depth <= 0.0001) {
@@ -388,7 +391,8 @@ void main() {
 	}
 
 	vec4 scene_color = imageLoad(color_image, pixel);
-	RefractSample refr_sample = refracted_source_color(uv, scene_color.rgb, cam_pos, world_pos, below_mask);
+	vec3 prewater_color = source_valid ? texture(source_color_tex, uv).rgb : scene_color.rgb;
+	RefractSample refr_sample = refracted_source_color(uv, prewater_color, cam_pos, world_pos, below_mask);
 	float refracted_mask = max(mask, refr_sample.below_mask);
 	vec3 source_color = refr_sample.color;
 	vec3 tint = state.shore_params1.yzw;
@@ -440,9 +444,15 @@ void main() {
 		float offset_meter = clamp(refr_sample.offset * 80.0, 0.0, 1.0);
 		float color_meter = clamp(source_delta * 8.0, 0.0, 1.0);
 		proof_color = vec3(offset_meter, color_meter, refr_sample.valid > 0.5 ? 0.08 : 0.65);
+	} else if (debug_mode == 7) {
+		proof_color = vec3(
+			source_valid ? 0.0 : 1.0,
+			source_depth_valid ? 1.0 : 0.0,
+			source_valid && source_depth_valid ? 0.15 : 0.0
+		);
 	}
-	float debug_strength = (debug_mode == 5 || debug_mode == 6) ? 1.0 : probe_strength;
-	float final_refraction_boost = debug_mode == 0 && refr_sample.valid > 0.5 ? 1.35 : 1.0;
+	float debug_strength = (debug_mode == 5 || debug_mode == 6 || debug_mode == 7) ? 1.0 : probe_strength;
+	float final_refraction_boost = debug_mode == 0 && refr_sample.valid > 0.5 ? 1.45 : 1.0;
 	float strength = clamp(debug_strength * final_refraction_boost * blend_factor * refracted_mask, 0.0, 1.0);
 	imageStore(color_image, pixel, vec4(mix(scene_color.rgb, proof_color, strength), scene_color.a));
 }

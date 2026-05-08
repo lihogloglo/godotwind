@@ -54,6 +54,10 @@ func _get_shore_mask_path() -> String:
 # Wave parameters (exposed for UI control)
 @export_group("Wave Settings")
 @export var wave_scale: float = 1.0
+## Synchronous GPU wave readback matches the visual FFT exactly but stalls the
+## render device. Keep disabled for gameplay; CPU queries use the spectrum
+## evaluator plus the same analytical shore wave as the mesh.
+@export var use_gpu_wave_readback: bool = false
 
 @export_group("Sea Spray")
 @export var sea_spray_enabled: bool = true
@@ -79,6 +83,15 @@ var _camera: Camera3D = null
 var _enabled: bool = true
 var _time: float = 0.0
 var _auto_find_camera: bool = true
+var _current_map_scales: PackedVector4Array = PackedVector4Array()
+var _active_shore_mask_texture: Texture2D = null
+var _active_shore_mask_image: Image = null
+var _active_shore_mask_bounds: Rect2 = Rect2(-8000.0, -8000.0, 16000.0, 16000.0)
+var _active_shore_fade_distance: float = 50.0
+var _current_shore_wave_amplitude: float = 0.18
+var _current_shore_wave_frequency: float = SHORE_WAVE_SPATIAL_FREQUENCY
+var _current_shore_wave_speed: float = 0.4
+var _current_shore_wave_steepness: float = 0.58
 
 # Underwater compositor effect (managed via ShaderManager)
 var underwater_compositor_enabled: bool = true
@@ -228,6 +241,20 @@ func _deferred_init() -> void:
 		sea_level, ocean_radius, get_water_quality_name()])
 
 
+func _set_active_shore_mask(texture: Texture2D, bounds: Rect2, fade_distance: float, image: Image = null) -> void:
+	_active_shore_mask_texture = texture
+	_active_shore_mask_image = image
+	_active_shore_mask_bounds = bounds
+	_active_shore_fade_distance = fade_distance
+
+	if texture == null:
+		return
+	if _ocean_mesh:
+		_ocean_mesh.set_shore_mask(texture, bounds, fade_distance)
+	if _ocean_spray:
+		_ocean_spray.set_shore_mask(texture, bounds)
+
+
 func _load_shore_mask() -> void:
 	var shore_mask_loaded := false
 
@@ -238,9 +265,9 @@ func _load_shore_mask() -> void:
 		if not prebaked.is_empty():
 			var tex: Texture2D = prebaked.texture
 			var bounds: Rect2 = prebaked.bounds
-			_ocean_mesh.set_shore_mask(tex, bounds, shore_fade_distance)
-			if _ocean_spray:
-				_ocean_spray.set_shore_mask(tex, bounds)
+			var fade_distance: float = float(prebaked.get("fade_distance", shore_fade_distance))
+			var image := prebaked.get("image", null) as Image
+			_set_active_shore_mask(tex, bounds, fade_distance, image)
 			shore_mask_loaded = true
 			Log.info("water", "OceanManager: Using prebaked shore mask from %s" % shore_mask_path)
 
@@ -297,7 +324,7 @@ func _process(delta: float) -> void:
 	# contributes roughly as much amplitude as the swell. The shader
 	# vertex sums ALL cascades; the CPU path must do the same or buoyant
 	# bodies drift out of sync with the visible mesh.
-	if _wave_generator and _displacement_size > 0:
+	if use_gpu_wave_readback and _wave_generator and _displacement_size > 0:
 		var frame := Engine.get_process_frames()
 		if frame != _readback_frame:
 			_readback_frame = frame
@@ -350,9 +377,7 @@ func _update_shader_parameters() -> void:
 	_ocean_mesh.set_wave_scale(wave_scale)
 	if _ocean_spray:
 		_ocean_spray.set_wave_scale(wave_scale)
-	# Push sea_level to the ocean surface shader. Used by Guard (6) in
-	# ocean_fft.gdshader's refraction path to reject refracted samples whose
-	# world Y is above the waterline (tall rocks / pillar tops poking out).
+	# Push sea_level to the ocean surface shader and shared water-state readers.
 	var mat: ShaderMaterial = _ocean_mesh.get_material()
 	if mat:
 		mat.set_shader_parameter(&"sea_level", sea_level)
@@ -442,6 +467,7 @@ func _update_cascade_scales() -> void:
 		var params := _cascade_parameters[i]
 		var uv_scale := Vector2.ONE / params.tile_length
 		map_scales[i] = Vector4(uv_scale.x, uv_scale.y, params.displacement_scale, params.normal_scale)
+	_current_map_scales = map_scales
 	_ocean_mesh.get_material().set_shader_parameter(&"map_scales", map_scales)
 	if _ocean_spray:
 		_ocean_spray.set_map_scales(map_scales)
@@ -456,17 +482,16 @@ func _update_cascade_scales() -> void:
 ##   3 = Water thickness (blue thin → red thick, magenta = sky-or-far)
 ##   4 = Transmittance (gray; bright = light passes through unfiltered)
 ##   5 = Fresnel (gray)
-##   6 = SSR hit alpha (green = hit)
-##   7 = Refraction UV offset magnitude (red = large offset)
-##   8 = World normal.y (white = flat, dark = steep slope)
-##   9 = SSS scatter factor (peak_mask × view_fade × sun_back, sub-surface tint)
+##   6 = Foam factor
+##   7 = World normal.y (white = flat, dark = steep slope)
+##   8 = SSS scatter factor (peak_mask × side_mask × sun_back, sub-surface tint)
 func set_debug_mode(mode: int) -> void:
 	if not _ocean_mesh:
 		return
 	var mat: ShaderMaterial = _ocean_mesh.get_material()
 	if not mat:
 		return
-	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 12))
+	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 8))
 
 
 ## Push the directional light's world-space forward direction to the ocean
@@ -586,29 +611,112 @@ func _sum_cascade_displacement(world_pos: Vector3) -> Vector3:
 	return total
 
 
+func _sample_active_shore_data(world_pos: Vector3) -> Color:
+	if _active_shore_mask_image == null:
+		return Color(1.0, 0.5, 0.5, 1.0)
+	var size := _active_shore_mask_image.get_size()
+	if size.x <= 0 or size.y <= 0 or _active_shore_mask_bounds.size == Vector2.ZERO:
+		return Color(1.0, 0.5, 0.5, 1.0)
+	var u := (world_pos.x - _active_shore_mask_bounds.position.x) / _active_shore_mask_bounds.size.x
+	var v := (world_pos.z - _active_shore_mask_bounds.position.y) / _active_shore_mask_bounds.size.y
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return Color(1.0, 0.5, 0.5, 1.0)
+	var px := clampi(int(u * float(size.x)), 0, size.x - 1)
+	var py := clampi(int(v * float(size.y)), 0, size.y - 1)
+	return _active_shore_mask_image.get_pixel(px, py)
+
+
+func _shore_direction_from_active_mask(world_pos: Vector3, shore_data: Color) -> Vector2:
+	var dir := Vector2(shore_data.g * 2.0 - 1.0, shore_data.b * 2.0 - 1.0)
+	if dir.length() > 0.01:
+		return dir.normalized()
+	if _active_shore_mask_image == null or _active_shore_mask_bounds.size == Vector2.ZERO:
+		return Vector2.ZERO
+
+	var size := _active_shore_mask_image.get_size()
+	var u := (world_pos.x - _active_shore_mask_bounds.position.x) / _active_shore_mask_bounds.size.x
+	var v := (world_pos.z - _active_shore_mask_bounds.position.y) / _active_shore_mask_bounds.size.y
+	var px := clampi(int(u * float(size.x)), 0, size.x - 1)
+	var py := clampi(int(v * float(size.y)), 0, size.y - 1)
+	for radius in [1, 2, 4, 8]:
+		var x_pos: float = _active_shore_mask_image.get_pixel(clampi(px + radius, 0, size.x - 1), py).a
+		var x_neg: float = _active_shore_mask_image.get_pixel(clampi(px - radius, 0, size.x - 1), py).a
+		var z_pos: float = _active_shore_mask_image.get_pixel(px, clampi(py + radius, 0, size.y - 1)).a
+		var z_neg: float = _active_shore_mask_image.get_pixel(px, clampi(py - radius, 0, size.y - 1)).a
+		var gradient_dir := Vector2(x_pos - x_neg, z_pos - z_neg)
+		if gradient_dir.length() > 1e-5:
+			return gradient_dir.normalized()
+	return Vector2.ZERO
+
+
+static func _shore_breaker_envelope_cpu(raw_dist: float, fade_distance: float) -> float:
+	var dist_t := clampf(raw_dist / maxf(fade_distance, 0.001), 0.0, 1.0)
+	var shore_ramp := smoothstep(0.03, 0.22, dist_t)
+	var offshore_fade := 1.0 - smoothstep(0.45, 0.90, dist_t)
+	return shore_ramp * offshore_fade
+
+
+static func _shore_runup_envelope_cpu(raw_dist: float, fade_distance: float) -> float:
+	var dist_t := clampf(raw_dist / maxf(fade_distance, 0.001), 0.0, 1.0)
+	return 1.0 - smoothstep(0.00, 0.16, dist_t)
+
+
+static func _shore_swash_curve_cpu(phase: float) -> float:
+	var cycle := fposmod(phase / TAU, 1.0)
+	var uprush := smoothstep(0.00, 0.30, cycle)
+	var backwash := 1.0 - smoothstep(0.30, 1.00, cycle)
+	return uprush * backwash
+
+
+static func _shore_crest_shape_cpu(sin_phase: float) -> float:
+	if sin_phase >= 0.0:
+		return pow(maxf(sin_phase, 0.0), 1.45)
+	return -0.65 * pow(maxf(-sin_phase, 0.0), 1.15)
+
+
+func _get_shore_wave_height(world_pos: Vector3) -> float:
+	if _current_shore_wave_amplitude <= 0.0:
+		return 0.0
+	var shore_data := _sample_active_shore_data(world_pos)
+	var shore_dir := _shore_direction_from_active_mask(world_pos, shore_data)
+	if shore_dir.length() <= 0.01:
+		return 0.0
+	var raw_dist := shore_data.a * _active_shore_fade_distance
+	var phase := raw_dist * _current_shore_wave_frequency * TAU + _time * _current_shore_wave_speed * TAU
+	var breaker_env := _shore_breaker_envelope_cpu(raw_dist, _active_shore_fade_distance)
+	var runup_env := _shore_runup_envelope_cpu(raw_dist, _active_shore_fade_distance)
+	var swash := _shore_swash_curve_cpu(phase)
+	var crest_phase := _shore_crest_shape_cpu(sin(phase))
+	return _current_shore_wave_amplitude * (
+		breaker_env * crest_phase
+		+ runup_env * swash * 0.75
+	)
+
+
 ## Get the wave height at a world position (for buoyancy)
 func get_wave_height(world_pos: Vector3) -> float:
 	if not _system_enabled or not _enabled:
 		return sea_level
 
 	var shore_factor := _get_shore_factor(world_pos)
-	if shore_factor <= 0.01:
+	var shore_wave_height := _get_shore_wave_height(world_pos)
+	if shore_factor <= 0.01 and shore_wave_height <= 0.02:
 		return sea_level - 1000.0
 
 	# GPU readback — exact match with visual waves (sum every cascade
 	# with its own tile_length + displacement_scale, same as the shader).
-	if _displacement_cpu_per_cascade.size() > 0:
+	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
 		var disp := _sum_cascade_displacement(world_pos)
-		return sea_level + disp.y * shore_factor * wave_scale
+		return sea_level + disp.y * shore_factor * wave_scale + shore_wave_height
 
 	# Fallback: CPU spectrum evaluator (approximate)
 	if _physics_evaluator and _physics_evaluator._component_count > 0:
-		return sea_level + _physics_evaluator.get_height(world_pos, _time, shore_factor * wave_scale)
+		return sea_level + _physics_evaluator.get_height(world_pos, _time, shore_factor * wave_scale) + shore_wave_height
 
 	# Fallback: Gerstner for STANDARD mode
 	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
 	var disp := GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
-	return sea_level + disp.y
+	return sea_level + disp.y + shore_wave_height
 
 
 ## Get wave displacement vector at world position
@@ -616,16 +724,17 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.ZERO
 	var shore_factor := _get_shore_factor(world_pos)
+	var shore_wave_height := _get_shore_wave_height(world_pos)
 
-	if _displacement_cpu_per_cascade.size() > 0:
+	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
 		var disp := _sum_cascade_displacement(world_pos)
-		return disp * shore_factor * wave_scale
+		return disp * shore_factor * wave_scale + Vector3(0.0, shore_wave_height, 0.0)
 
 	if _physics_evaluator and _physics_evaluator._component_count > 0:
-		return _physics_evaluator.get_displacement(world_pos, _time, shore_factor * wave_scale)
+		return _physics_evaluator.get_displacement(world_pos, _time, shore_factor * wave_scale) + Vector3(0.0, shore_wave_height, 0.0)
 
 	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
-	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
+	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos) + Vector3(0.0, shore_wave_height, 0.0)
 
 
 ## Get wave normal at world position
@@ -635,7 +744,7 @@ func get_wave_normal(world_pos: Vector3) -> Vector3:
 	var shore_factor := _get_shore_factor(world_pos)
 
 	# GPU readback normal via finite differences across all cascades
-	if _displacement_cpu_per_cascade.size() > 0:
+	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
 		var eps := 1.0
 		var h0 := _sum_cascade_displacement(world_pos).y
 		var hx := _sum_cascade_displacement(world_pos + Vector3(eps, 0, 0)).y
@@ -701,6 +810,8 @@ func _read_displacement_texel_from_buf(buf: PackedByteArray, x: int, z: int) -> 
 
 
 func _get_shore_factor(world_pos: Vector3) -> float:
+	if _active_shore_mask_image != null:
+		return _sample_active_shore_data(world_pos).r
 	if _shore_mask:
 		return _shore_mask.get_shore_factor(world_pos)
 	return 1.0
@@ -712,8 +823,8 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 		return false
 	if world_pos.y > sea_level + 10.0:
 		return false
-	if _shore_mask:
-		return _shore_mask.get_shore_factor(world_pos) > 0.01
+	if _active_shore_mask_image != null or _shore_mask:
+		return _get_shore_factor(world_pos) > 0.01 or _get_shore_wave_height(world_pos) > 0.02
 	if _terrain and _terrain.data:
 		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
 		return terrain_height < sea_level
@@ -812,17 +923,12 @@ func set_sea_level(level: float) -> void:
 		return
 	if _terrain and _shore_mask:
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
-		if _ocean_mesh:
-			_ocean_mesh.set_shore_mask(
-				_shore_mask.get_shore_mask_texture(),
-				_shore_mask.get_world_bounds(),
-				shore_fade_distance
-			)
-			if _ocean_spray:
-				_ocean_spray.set_shore_mask(
-					_shore_mask.get_shore_mask_texture(),
-					_shore_mask.get_world_bounds()
-				)
+		_set_active_shore_mask(
+			_shore_mask.get_shore_mask_texture(),
+			_shore_mask.get_world_bounds(),
+			shore_fade_distance,
+			_shore_mask.get_shore_mask_image()
+		)
 
 
 func get_sea_level() -> float:
@@ -859,6 +965,48 @@ func get_displacement_texture_rd() -> RID:
 	return _wave_generator.descriptors[&"displacement_map"].rid
 
 
+func is_gpu_wave_readback_enabled() -> bool:
+	return use_gpu_wave_readback
+
+
+func set_gpu_wave_readback_enabled(enabled: bool) -> void:
+	use_gpu_wave_readback = enabled
+	if not enabled:
+		_displacement_cpu = PackedByteArray()
+		_displacement_cpu_per_cascade.clear()
+
+
+func get_water_surface_state() -> WaterSurfaceState:
+	var state := WaterSurfaceState.new()
+	state.sea_level = sea_level
+	state.wave_scale = wave_scale
+	state.ocean_time = _time
+	state.map_scales = _current_map_scales
+	state.cascade_count = _cascade_parameters.size()
+	state.displacement_texture_rd = get_displacement_texture_rd()
+	state.shore_mask_texture = _active_shore_mask_texture
+	state.shore_mask_bounds = Vector4(
+		_active_shore_mask_bounds.position.x,
+		_active_shore_mask_bounds.position.y,
+		_active_shore_mask_bounds.size.x,
+		_active_shore_mask_bounds.size.y
+	)
+	state.shore_fade_distance = _active_shore_fade_distance
+	state.shore_wave_amplitude = _current_shore_wave_amplitude
+	state.shore_wave_frequency = _current_shore_wave_frequency
+	state.shore_wave_speed = _current_shore_wave_speed
+	state.shore_wave_steepness = _current_shore_wave_steepness
+	state.absorption_tint = _current_absorption_tint
+	state.absorption_sigma = _current_absorption_sigma
+	state.absorption_depth_falloff = get_absorption_depth_falloff()
+	state.underwater_caustics_strength = _current_underwater_caustics_strength
+	if _active_shore_mask_texture != null:
+		var texture_rid := _active_shore_mask_texture.get_rid()
+		if texture_rid.is_valid():
+			state.shore_mask_rd = RenderingServer.texture_get_rd_texture(texture_rid)
+	return state
+
+
 func get_fft_cascade_count() -> int:
 	return _cascade_parameters.size()
 
@@ -875,17 +1023,12 @@ func regenerate_shore_mask() -> void:
 		return
 	if _shore_mask and _terrain:
 		_shore_mask.generate_from_terrain(_terrain, shore_mask_resolution, shore_fade_distance, sea_level)
-		if _ocean_mesh:
-			_ocean_mesh.set_shore_mask(
-				_shore_mask.get_shore_mask_texture(),
-				_shore_mask.get_world_bounds(),
-				shore_fade_distance
-			)
-			if _ocean_spray:
-				_ocean_spray.set_shore_mask(
-					_shore_mask.get_shore_mask_texture(),
-					_shore_mask.get_world_bounds()
-				)
+		_set_active_shore_mask(
+			_shore_mask.get_shore_mask_texture(),
+			_shore_mask.get_world_bounds(),
+			shore_fade_distance,
+			_shore_mask.get_shore_mask_image()
+		)
 
 
 func set_enabled(enabled: bool) -> void:
@@ -1282,7 +1425,7 @@ func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> vo
 
 
 ## Water colors — dark and desaturated like OpenMW. Visual character comes from
-## reflections (SSR/sky), not albedo. Bright/turquoise water = wrong.
+## reflections (probe/sky), not albedo. Bright/turquoise water = wrong.
 const _SHALLOW_CALM := Color(0.09, 0.12, 0.13)
 const _SHALLOW_STORM := Color(0.06, 0.08, 0.09)
 const _DEEP_CALM := Color(0.02, 0.04, 0.06)
@@ -1331,9 +1474,11 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	mat.set_shader_parameter("foam_intensity", lerpf(0.05, 1.0, wind_t))
 
 	# Shore waves — calm: gentle lapping, storm: strong rollers
-	mat.set_shader_parameter("shore_wave_amplitude", lerpf(0.18, 2.2, wind_t))
+	_current_shore_wave_amplitude = lerpf(0.18, 2.2, wind_t)
+	mat.set_shader_parameter("shore_wave_amplitude", _current_shore_wave_amplitude)
 	_push_shore_wave_timing_uniforms(mat)
-	mat.set_shader_parameter("shore_wave_steepness", lerpf(0.35, 0.95, wind_t))
+	_current_shore_wave_steepness = lerpf(0.58, 0.98, wind_t)
+	mat.set_shader_parameter("shore_wave_steepness", _current_shore_wave_steepness)
 
 	# FFT-specific uniforms
 	if quality == OceanMesh.QualityMode.HIGH:
@@ -1346,7 +1491,8 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 		# mask does the "only fire on real crests" selection. Previous 0.9→1.5
 		# combined with the old low-threshold mask was producing flat patches
 		# of green across the whole horizon.
-		mat.set_shader_parameter("sss_strength", lerpf(0.6, 1.0, wind_t))
+		mat.set_shader_parameter("sss_strength", lerpf(0.8, 1.25, wind_t))
+		mat.set_shader_parameter("sss_emission_strength", lerpf(0.45, 0.85, wind_t))
 
 
 func _push_surface_optical_uniforms(mat: ShaderMaterial) -> void:
@@ -1355,8 +1501,10 @@ func _push_surface_optical_uniforms(mat: ShaderMaterial) -> void:
 
 
 func _push_shore_wave_timing_uniforms(mat: ShaderMaterial) -> void:
-	mat.set_shader_parameter("shore_wave_frequency", SHORE_WAVE_SPATIAL_FREQUENCY)
-	mat.set_shader_parameter("shore_wave_speed", _shore_wave_temporal_frequency(SHORE_WAVE_SPATIAL_FREQUENCY))
+	_current_shore_wave_frequency = SHORE_WAVE_SPATIAL_FREQUENCY
+	_current_shore_wave_speed = _shore_wave_temporal_frequency(SHORE_WAVE_SPATIAL_FREQUENCY)
+	mat.set_shader_parameter("shore_wave_frequency", _current_shore_wave_frequency)
+	mat.set_shader_parameter("shore_wave_speed", _current_shore_wave_speed)
 
 
 static func _shore_wave_temporal_frequency(spatial_frequency: float) -> float:
@@ -1387,14 +1535,17 @@ func reset_weather() -> void:
 	mat.set_shader_parameter("sky_tint_strength", 0.8)
 	mat.set_shader_parameter("normal_strength", 0.6)
 	mat.set_shader_parameter("wave_scale", wave_scale)
-	mat.set_shader_parameter("shore_wave_amplitude", 0.18)
+	_current_shore_wave_amplitude = 0.18
+	mat.set_shader_parameter("shore_wave_amplitude", _current_shore_wave_amplitude)
 	_push_shore_wave_timing_uniforms(mat)
-	mat.set_shader_parameter("shore_wave_steepness", 0.35)
+	_current_shore_wave_steepness = 0.58
+	mat.set_shader_parameter("shore_wave_steepness", _current_shore_wave_steepness)
 
 	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
 	if quality == OceanMesh.QualityMode.HIGH:
 		mat.set_shader_parameter("roughness", 0.01)
-		mat.set_shader_parameter("sss_strength", 0.6)
+		mat.set_shader_parameter("sss_strength", 0.8)
+		mat.set_shader_parameter("sss_emission_strength", 0.45)
 
 	# Reset FFT cascades to calm/lake defaults
 	for cascade: WaveCascadeParameters in _cascade_parameters:

@@ -1,27 +1,21 @@
-## WaterlineCompositorEffect - tiny Option C ownership/order prototype.
+## WaterlineCompositorEffect - Option C waterline compositor core.
 ##
-## This is intentionally blunt: it classifies the current opaque scene depth
-## against the displaced FFT water surface and marks/tints matching pixels at
-## PRE_TRANSPARENT. The first goal is render-order proof, not final refraction.
+## Classifies pre-water scene depth against the displaced FFT water surface at
+## PRE_TRANSPARENT, then bends/tints submerged pixels from the pre-water source.
 @tool
 class_name WaterlineCompositorEffect
 extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/waterline_probe.glsl"
-const COPY_SHADER_PATH := "res://src/core/shaders/compute/color_image_copy.glsl"
 const MAX_CASCADES := 8
 
 var _depth_sampler: RID
 var _linear_clamp_sampler: RID
 var _linear_repeat_sampler: RID
 var _source_color_sampler: RID
-var _source_color_rid: RID
-var _source_color_size: Vector2i = Vector2i.ZERO
 var _external_source_color_rid: RID
 var _external_source_depth_rid: RID
 var _external_source_size: Vector2i = Vector2i.ZERO
-var _copy_shader_rid: RID
-var _copy_pipeline_rid: RID
 var _state_buffer: RID
 var _displacement_rid: RID
 var _shore_mask_rid: RID
@@ -38,19 +32,19 @@ var _shore_wave_steepness: float = 0.5
 var _water_tint: Vector3 = Vector3(0.02, 0.04, 0.06)
 var _absorption_sigma: Vector3 = Vector3(0.12, 0.03, 0.018)
 var _caustics_strength: float = 1.0
-var _probe_strength: float = 0.7
+var _probe_strength: float = 0.85
 var _debug_mode: int = 0
 var _ocean_time: float = 0.0
 var _render_logged: bool = false
-var _copy_warning_logged: bool = false
+var _missing_source_warning_logged: bool = false
 var _last_source_log_key: String = ""
 
 
 func _init() -> void:
 	super._init()
 	effect_name = "waterline_probe"
-	display_name = "Waterline Probe"
-	description = "PRE_TRANSPARENT waterline compositor prototype for Option C."
+	display_name = "Waterline Compositor"
+	description = "PRE_TRANSPARENT waterline compositor core for Option C."
 	category = "Water"
 	render_priority = 8
 	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
@@ -63,30 +57,9 @@ func on_effect_added() -> void:
 	if not load_compute_shader(SHADER_PATH):
 		Log.error("water", "WaterlineCompositorEffect: failed to load shader")
 		return
-	if not _load_copy_shader():
-		Log.error("water", "WaterlineCompositorEffect: failed to load color copy shader")
-		return
 	_create_samplers()
 	_create_fallback_shore_mask()
 	Log.info("water", "WaterlineCompositorEffect initialized")
-
-
-func _load_copy_shader() -> bool:
-	if rd == null:
-		rd = RenderingServer.get_rendering_device()
-		if rd == null:
-			return false
-	var shader_file := load(COPY_SHADER_PATH) as RDShaderFile
-	if shader_file == null:
-		return false
-	var shader_spirv := shader_file.get_spirv()
-	if shader_spirv == null:
-		return false
-	_copy_shader_rid = rd.shader_create_from_spirv(shader_spirv)
-	if not _copy_shader_rid.is_valid():
-		return false
-	_copy_pipeline_rid = rd.compute_pipeline_create(_copy_shader_rid)
-	return _copy_pipeline_rid.is_valid()
 
 
 func _create_samplers() -> void:
@@ -132,8 +105,37 @@ func _create_fallback_shore_mask() -> void:
 	_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
 
 
+func sync_from_water_state(state: WaterSurfaceState) -> void:
+	if state == null:
+		return
+
+	_sea_level = state.sea_level
+	_displacement_rid = state.displacement_texture_rd
+	_water_tint = state.absorption_tint
+	_absorption_sigma = state.absorption_sigma
+	_caustics_strength = state.underwater_caustics_strength
+	_ocean_time = state.ocean_time
+	_map_scales = state.map_scales
+	_wave_scale = state.wave_scale
+	_shore_mask_bounds = state.shore_mask_bounds
+	_shore_fade_distance = state.shore_fade_distance
+	_shore_wave_amplitude = state.shore_wave_amplitude
+	_shore_wave_frequency = state.shore_wave_frequency
+	_shore_wave_speed = state.shore_wave_speed
+	_shore_wave_steepness = state.shore_wave_steepness
+	if state.shore_mask_rd.is_valid():
+		_shore_mask_rid = state.shore_mask_rd
+	elif _fallback_shore_texture != null:
+		_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
+
+
 func sync_from_ocean(ocean_manager: Node, ocean_material: ShaderMaterial) -> void:
-	if ocean_manager == null or ocean_material == null:
+	if ocean_manager == null:
+		return
+	if ocean_manager.has_method("get_water_surface_state"):
+		sync_from_water_state(ocean_manager.get_water_surface_state())
+		return
+	if ocean_material == null:
 		return
 
 	if ocean_manager.has_method("get_sea_level"):
@@ -189,7 +191,7 @@ func set_probe_strength(value: float) -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 6)
+	_debug_mode = clampi(value, 0, 7)
 
 
 func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i) -> void:
@@ -209,7 +211,7 @@ func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> v
 		return
 	if not _render_logged:
 		_render_logged = true
-		print("[WATERLINE_PROTO] render callback fired enabled=%s pipeline=%s displacement=%s shore=%s" % [
+		Log.info("water", "WaterlineCompositorEffect: render callback fired enabled=%s pipeline=%s displacement=%s shore=%s" % [
 			effect_enabled,
 			pipeline_rid.is_valid(),
 			_displacement_rid.is_valid(),
@@ -247,27 +249,28 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 		and _external_source_depth_rid.is_valid()
 		and _external_source_size != Vector2i.ZERO
 	)
+	if not has_external_source:
+		if not _missing_source_warning_logged:
+			_missing_source_warning_logged = true
+			Log.warn("water", "WaterlineCompositorEffect: missing pre-water source buffers; compositor pass skipped")
+		return
 	var source_color_rid := _external_source_color_rid
 	var source_depth_rid := _external_source_depth_rid
 	var source_color_valid := has_external_source
 	var source_depth_valid := has_external_source
-	if not has_external_source:
-		source_color_valid = _copy_source_color(color_image, size)
-		source_color_rid = _source_color_rid
-		source_depth_rid = depth_texture
 	var source_log_key := "%s/%s/%s/%s" % [
 		has_external_source,
 		source_color_valid,
 		source_depth_valid,
-		_external_source_size if has_external_source else size,
+		_external_source_size,
 	]
 	if source_log_key != _last_source_log_key:
 		_last_source_log_key = source_log_key
-		print("[WATERLINE_PROTO] source buffers external=%s color_valid=%s depth_valid=%s size=%s" % [
+		Log.info("water", "WaterlineCompositorEffect: source buffers external=%s color_valid=%s depth_valid=%s size=%s" % [
 			has_external_source,
 			source_color_valid,
 			source_depth_valid,
-			_external_source_size if has_external_source else size,
+			_external_source_size,
 		])
 
 	var matrix_data := _build_state_buffer_data(scene_data)
@@ -355,72 +358,6 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	rd.free_rid(uniform_set)
 
 
-func _copy_source_color(color_image: RID, size: Vector2i) -> bool:
-	if rd == null or not color_image.is_valid() or not _copy_shader_rid.is_valid() or not _copy_pipeline_rid.is_valid():
-		return false
-	var src_format: RDTextureFormat = rd.texture_get_format(color_image)
-	if not _source_color_rid.is_valid() or _source_color_size != size:
-		if _source_color_rid.is_valid():
-			rd.free_rid(_source_color_rid)
-			_source_color_rid = RID()
-		var fmt := RDTextureFormat.new()
-		fmt.format = src_format.format
-		fmt.width = size.x
-		fmt.height = size.y
-		fmt.depth = 1
-		fmt.array_layers = 1
-		fmt.mipmaps = 1
-		fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
-		fmt.samples = RenderingDevice.TEXTURE_SAMPLES_1
-		fmt.usage_bits = (
-			RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
-			| RenderingDevice.TEXTURE_USAGE_STORAGE_BIT
-		)
-		_source_color_rid = rd.texture_create(fmt, RDTextureView.new())
-		_source_color_size = size if _source_color_rid.is_valid() else Vector2i.ZERO
-	if not _source_color_rid.is_valid():
-		return false
-
-	var uniforms: Array[RDUniform] = []
-	var u_source := RDUniform.new()
-	u_source.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-	u_source.binding = 0
-	u_source.add_id(color_image)
-	uniforms.append(u_source)
-
-	var u_target := RDUniform.new()
-	u_target.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-	u_target.binding = 1
-	u_target.add_id(_source_color_rid)
-	uniforms.append(u_target)
-
-	var uniform_set := rd.uniform_set_create(uniforms, _copy_shader_rid, 0)
-	if not uniform_set.is_valid():
-		if not _copy_warning_logged:
-			_copy_warning_logged = true
-			Log.warn("water", "WaterlineCompositorEffect: source color copy uniform set failed; WL Proto stays tint-only")
-		return false
-
-	var pc := PackedFloat32Array()
-	pc.append(float(size.x))
-	pc.append(float(size.y))
-	pc.append(0.0)
-	pc.append(0.0)
-	var pc_bytes := pc.to_byte_array()
-
-	var groups_x := (size.x + 7) / 8
-	var groups_y := (size.y + 7) / 8
-	var cl := rd.compute_list_begin()
-	rd.compute_list_bind_compute_pipeline(cl, _copy_pipeline_rid)
-	rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
-	rd.compute_list_set_push_constant(cl, pc_bytes, pc_bytes.size())
-	rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
-	rd.compute_list_add_barrier(cl)
-	rd.compute_list_end()
-	rd.free_rid(uniform_set)
-	return true
-
-
 func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Array:
 	var data := PackedFloat32Array()
 	var inv_proj: Projection = scene_data.get_cam_projection().inverse()
@@ -502,15 +439,6 @@ func on_effect_removed() -> void:
 		if _source_color_sampler.is_valid():
 			rd.free_rid(_source_color_sampler)
 			_source_color_sampler = RID()
-		if _source_color_rid.is_valid():
-			rd.free_rid(_source_color_rid)
-			_source_color_rid = RID()
-		if _copy_pipeline_rid.is_valid():
-			rd.free_rid(_copy_pipeline_rid)
-			_copy_pipeline_rid = RID()
-		if _copy_shader_rid.is_valid():
-			rd.free_rid(_copy_shader_rid)
-			_copy_shader_rid = RID()
 		if _state_buffer.is_valid():
 			rd.free_rid(_state_buffer)
 			_state_buffer = RID()
