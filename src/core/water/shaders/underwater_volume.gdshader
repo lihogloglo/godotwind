@@ -133,23 +133,50 @@ float luminance(vec3 color) {
 	return dot(color, vec3(0.299, 0.587, 0.114));
 }
 
+const float SHORE_TAU = 6.2831853;
+
 float shore_breaker_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
-	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	float shore_ramp = smoothstep(0.05, 0.20, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.42, 0.82, dist_t);
 	return shore_ramp * offshore_fade;
 }
 
 float shore_runup_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+	return 1.0 - smoothstep(0.00, 0.12, dist_t);
 }
 
 float shore_swash_curve(float phase) {
-	float cycle = fract(phase / 6.2831853);
-	float uprush = smoothstep(0.00, 0.30, cycle);
-	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	float cycle = fract(phase / SHORE_TAU);
+	float uprush = smoothstep(0.02, 0.24, cycle);
+	float backwash = 1.0 - smoothstep(0.24, 0.72, cycle);
 	return uprush * backwash;
+}
+
+float shore_skewed_sine(float phase, float steepness) {
+	float s = sin(phase);
+	float c = cos(phase);
+	float skew = clamp(0.22 + 0.22 * steepness, 0.0, 0.44);
+	return clamp(s + (2.0 * s * c) * skew, -1.0, 1.0);
+}
+
+float shore_crest_shape(float phase, float steepness) {
+	float skew_s = shore_skewed_sine(phase, steepness);
+	float crest = max(skew_s, 0.0);
+	float trough = max(-skew_s, 0.0);
+	float crest2 = crest * crest;
+	float shaped_crest = crest2 * (1.65 - 0.65 * crest);
+	float broad_trough = trough * (2.0 - trough);
+	return shaped_crest - broad_trough * mix(0.40, 0.22, steepness);
+}
+
+float shore_along_modulation(vec2 world_xz, vec2 shore_dir) {
+	vec2 tangent = vec2(-shore_dir.y, shore_dir.x);
+	float along = dot(world_xz, tangent);
+	float n = sin(along * 0.035 + ocean_time * 0.19) * 0.50
+		+ sin(along * 0.079 - ocean_time * 0.13) * 0.25;
+	return clamp(0.78 + n * 0.28, 0.55, 1.0);
 }
 
 vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
@@ -211,14 +238,16 @@ float get_dynamic_water_level(vec2 world_xz, float dist_to_camera) {
 	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
 	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0) {
-		float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
-		float sin_phase = sin(phase);
+		shore_dir /= shore_dir_len;
+		float phase = raw_dist * shore_wave_frequency * SHORE_TAU + ocean_time * shore_wave_speed * SHORE_TAU;
+		float modulation = shore_along_modulation(world_xz, shore_dir);
 		float breaker_env = shore_breaker_envelope(raw_dist);
 		float runup_env = shore_runup_envelope(raw_dist);
 		float swash = shore_swash_curve(phase);
+		float mod_runup = runup_env * swash * mix(0.65, 1.0, modulation);
 		water_y += shore_wave_amplitude * (
-			breaker_env * sin_phase
-			+ runup_env * swash * 0.75
+			breaker_env * modulation * shore_crest_shape(phase, shore_wave_steepness)
+			+ mod_runup * 0.32
 		);
 	}
 

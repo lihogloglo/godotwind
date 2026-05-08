@@ -1,7 +1,8 @@
 ## WaterlineCompositorEffect - Option C waterline compositor core.
 ##
-## Classifies pre-water scene depth against the displaced FFT water surface at
-## PRE_TRANSPARENT, then bends/tints submerged pixels from the pre-water source.
+## Classifies pre-water scene depth against the displaced FFT water surface
+## after transparent water has drawn, then bends/tints visible water pixels from
+## the pre-water source.
 @tool
 class_name WaterlineCompositorEffect
 extends PostProcessEffect
@@ -44,10 +45,10 @@ func _init() -> void:
 	super._init()
 	effect_name = "waterline_probe"
 	display_name = "Waterline Compositor"
-	description = "PRE_TRANSPARENT waterline compositor core for Option C."
+	description = "POST_TRANSPARENT waterline compositor core for Option C."
 	category = "Water"
 	render_priority = 8
-	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
+	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
 	access_resolved_color = true
 	access_resolved_depth = true
 	needs_depth = true
@@ -207,7 +208,7 @@ func clear_external_source_buffers() -> void:
 
 
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
-	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT:
+	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_POST_TRANSPARENT:
 		return
 	if not _render_logged:
 		_render_logged = true

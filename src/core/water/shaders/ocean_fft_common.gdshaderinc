@@ -147,32 +147,73 @@ varying float v_vertex_dist;
 // cascades, with shore mask applied. This is SoT's canonical "wave peak mask".
 // Large values = sharp crest with short light path through water = more scatter.
 varying float v_choppiness;
+// Shore-wave surface signals are computed in vertex() from the already-sampled
+// shore mask and carried into fragment() so lapping waves affect lighting
+// without adding per-fragment shore-mask reads.
+varying vec2 v_shore_slope;
+varying float v_shore_choppiness;
 
 // Shore mask sampled in vertex() of each .gdshader — not here in fragment.
 
+const float SHORE_TAU = 6.2831853;
+
 float shore_breaker_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
-	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	float shore_ramp = smoothstep(0.05, 0.20, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.42, 0.82, dist_t);
 	return shore_ramp * offshore_fade;
 }
 
 float shore_runup_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+	return 1.0 - smoothstep(0.00, 0.12, dist_t);
 }
 
 float shore_swash_curve(float phase) {
-	float cycle = fract(phase / 6.2831853);
-	float uprush = smoothstep(0.00, 0.30, cycle);
-	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	float cycle = fract(phase / SHORE_TAU);
+	float uprush = smoothstep(0.02, 0.24, cycle);
+	float backwash = 1.0 - smoothstep(0.24, 0.72, cycle);
 	return uprush * backwash;
 }
 
-float shore_crest_shape(float sin_phase) {
-	return sin_phase >= 0.0
-		? pow(max(sin_phase, 0.0), 1.45)
-		: -0.65 * pow(max(-sin_phase, 0.0), 1.15);
+float shore_skewed_sine(float phase, float steepness) {
+	float s = sin(phase);
+	float c = cos(phase);
+	float skew = clamp(0.22 + 0.22 * steepness, 0.0, 0.44);
+	return clamp(s + (2.0 * s * c) * skew, -1.0, 1.0);
+}
+
+float shore_crest_shape(float phase, float steepness) {
+	float skew_s = shore_skewed_sine(phase, steepness);
+	float crest = max(skew_s, 0.0);
+	float trough = max(-skew_s, 0.0);
+	float crest2 = crest * crest;
+	float shaped_crest = crest2 * (1.65 - 0.65 * crest);
+	float broad_trough = trough * (2.0 - trough);
+	return shaped_crest - broad_trough * mix(0.40, 0.22, steepness);
+}
+
+float shore_profile_slope(float phase, float steepness) {
+	float c = cos(phase);
+	float skew_s = shore_skewed_sine(phase, steepness);
+	float crest = max(skew_s, 0.0);
+	float trough = max(-skew_s, 0.0);
+	float crest_slope = 3.30 * crest - 1.95 * crest * crest;
+	float trough_slope = mix(0.80, 0.44, steepness) * (1.0 - trough);
+	return c * mix(trough_slope, crest_slope, step(0.0, skew_s));
+}
+
+float shore_forward_push(float phase, float steepness) {
+	float crest = max(shore_skewed_sine(phase, steepness), 0.0);
+	return cos(phase) * (0.45 + 0.35 * crest);
+}
+
+float shore_along_modulation(vec2 world_xz, vec2 shore_dir) {
+	vec2 tangent = vec2(-shore_dir.y, shore_dir.x);
+	float along = dot(world_xz, tangent);
+	float n = sin(along * 0.035 + ocean_time * 0.19) * 0.50
+		+ sin(along * 0.079 - ocean_time * 0.13) * 0.25;
+	return clamp(0.78 + n * 0.28, 0.55, 1.0);
 }
 
 vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
@@ -279,6 +320,7 @@ void fragment() {
 	// At shore (water_thickness → 0), gradient → 0, giving calm flat normals.
 	// At depth > 1m, full gradient. Prevents visual noise at the thin-water zone.
 	gradient *= smoothstep(0.0, 1.0, water_thickness);
+	gradient.xy += v_shore_slope;
 
 	// ========================================================================
 	// SHORE BLEND — depth-driven. Thin water blends toward shallow color,
@@ -346,7 +388,7 @@ void fragment() {
 	// ALBEDO downstream — no LIGHT_COLOR multiply, so the scatter color survives
 	// sunset lighting without being crushed to the sun's warm tint.
 	// ========================================================================
-	float chop_mask = smoothstep(scatter_choppiness_min, scatter_choppiness_max, v_choppiness);
+	float chop_mask = smoothstep(scatter_choppiness_min, scatter_choppiness_max, v_choppiness + v_shore_choppiness);
 	vec3 world_view_dir = normalize((INV_VIEW_MATRIX * vec4(VIEW, 0.0)).xyz);
 	float side_mask = smoothstep(0.06, 0.38, 1.0 - world_normal.y);
 	float peak_mask = chop_mask * mix(0.55, 1.0, side_mask);

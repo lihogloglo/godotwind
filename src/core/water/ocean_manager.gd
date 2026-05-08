@@ -93,8 +93,10 @@ var _current_shore_wave_frequency: float = SHORE_WAVE_SPATIAL_FREQUENCY
 var _current_shore_wave_speed: float = 0.4
 var _current_shore_wave_steepness: float = 0.58
 
-# Underwater compositor effect (managed via ShaderManager)
-var underwater_compositor_enabled: bool = true
+# Legacy underwater compositor effect (managed via ShaderManager).
+# Disabled by default: underwater/waterline ownership moved to the volume and
+# pre-water compositor paths. Keep the API as a cleanup shim for older scenes.
+var underwater_compositor_enabled: bool = false
 var _underwater_effect_loaded: bool = false
 
 # FFT pipeline
@@ -229,10 +231,6 @@ func _deferred_init() -> void:
 
 	# Apply calm defaults to shader uniforms (weather system will override when active)
 	reset_weather()
-
-	# Initialize underwater post-process effect
-	if underwater_compositor_enabled:
-		_init_underwater_effect()
 
 	_system_initialized = true
 	ocean_initialized.emit()
@@ -651,46 +649,82 @@ func _shore_direction_from_active_mask(world_pos: Vector3, shore_data: Color) ->
 
 static func _shore_breaker_envelope_cpu(raw_dist: float, fade_distance: float) -> float:
 	var dist_t := clampf(raw_dist / maxf(fade_distance, 0.001), 0.0, 1.0)
-	var shore_ramp := smoothstep(0.03, 0.22, dist_t)
-	var offshore_fade := 1.0 - smoothstep(0.45, 0.90, dist_t)
+	var shore_ramp := smoothstep(0.05, 0.20, dist_t)
+	var offshore_fade := 1.0 - smoothstep(0.42, 0.82, dist_t)
 	return shore_ramp * offshore_fade
 
 
 static func _shore_runup_envelope_cpu(raw_dist: float, fade_distance: float) -> float:
 	var dist_t := clampf(raw_dist / maxf(fade_distance, 0.001), 0.0, 1.0)
-	return 1.0 - smoothstep(0.00, 0.16, dist_t)
+	return 1.0 - smoothstep(0.00, 0.12, dist_t)
 
 
 static func _shore_swash_curve_cpu(phase: float) -> float:
 	var cycle := fposmod(phase / TAU, 1.0)
-	var uprush := smoothstep(0.00, 0.30, cycle)
-	var backwash := 1.0 - smoothstep(0.30, 1.00, cycle)
+	var uprush := smoothstep(0.02, 0.24, cycle)
+	var backwash := 1.0 - smoothstep(0.24, 0.72, cycle)
 	return uprush * backwash
 
 
-static func _shore_crest_shape_cpu(sin_phase: float) -> float:
-	if sin_phase >= 0.0:
-		return pow(maxf(sin_phase, 0.0), 1.45)
-	return -0.65 * pow(maxf(-sin_phase, 0.0), 1.15)
+static func _shore_skewed_sine_cpu(phase: float, steepness: float) -> float:
+	var s := sin(phase)
+	var c := cos(phase)
+	var skew := clampf(0.22 + 0.22 * steepness, 0.0, 0.44)
+	return clampf(s + (2.0 * s * c) * skew, -1.0, 1.0)
 
 
-func _get_shore_wave_height(world_pos: Vector3) -> float:
+static func _shore_crest_shape_cpu(phase: float, steepness: float) -> float:
+	var skew_s := _shore_skewed_sine_cpu(phase, steepness)
+	var crest := maxf(skew_s, 0.0)
+	var trough := maxf(-skew_s, 0.0)
+	var crest2 := crest * crest
+	var shaped_crest := crest2 * (1.65 - 0.65 * crest)
+	var broad_trough := trough * (2.0 - trough)
+	return shaped_crest - broad_trough * lerpf(0.40, 0.22, steepness)
+
+
+static func _shore_forward_push_cpu(phase: float, steepness: float) -> float:
+	var crest := maxf(_shore_skewed_sine_cpu(phase, steepness), 0.0)
+	return cos(phase) * (0.45 + 0.35 * crest)
+
+
+static func _shore_along_modulation_cpu(world_pos: Vector3, shore_dir: Vector2, time: float) -> float:
+	var tangent := Vector2(-shore_dir.y, shore_dir.x)
+	var along := Vector2(world_pos.x, world_pos.z).dot(tangent)
+	var n := sin(along * 0.035 + time * 0.19) * 0.50 \
+		+ sin(along * 0.079 - time * 0.13) * 0.25
+	return clampf(0.78 + n * 0.28, 0.55, 1.0)
+
+
+func _get_shore_wave_displacement(world_pos: Vector3) -> Vector3:
 	if _current_shore_wave_amplitude <= 0.0:
-		return 0.0
+		return Vector3.ZERO
 	var shore_data := _sample_active_shore_data(world_pos)
 	var shore_dir := _shore_direction_from_active_mask(world_pos, shore_data)
 	if shore_dir.length() <= 0.01:
-		return 0.0
+		return Vector3.ZERO
+	shore_dir = shore_dir.normalized()
 	var raw_dist := shore_data.a * _active_shore_fade_distance
 	var phase := raw_dist * _current_shore_wave_frequency * TAU + _time * _current_shore_wave_speed * TAU
+	var modulation := _shore_along_modulation_cpu(world_pos, shore_dir, _time)
 	var breaker_env := _shore_breaker_envelope_cpu(raw_dist, _active_shore_fade_distance)
 	var runup_env := _shore_runup_envelope_cpu(raw_dist, _active_shore_fade_distance)
 	var swash := _shore_swash_curve_cpu(phase)
-	var crest_phase := _shore_crest_shape_cpu(sin(phase))
-	return _current_shore_wave_amplitude * (
-		breaker_env * crest_phase
-		+ runup_env * swash * 0.75
+	var mod_runup := runup_env * swash * lerpf(0.65, 1.0, modulation)
+	var crest_phase := _shore_crest_shape_cpu(phase, _current_shore_wave_steepness)
+	var shore_y := _current_shore_wave_amplitude * (
+		breaker_env * modulation * crest_phase
+		+ mod_runup * 0.32
 	)
+	var shore_xz := _current_shore_wave_amplitude * _current_shore_wave_steepness * (
+		breaker_env * modulation * _shore_forward_push_cpu(phase, _current_shore_wave_steepness)
+		+ mod_runup * 1.10
+	)
+	return Vector3(-shore_dir.x * shore_xz, shore_y, -shore_dir.y * shore_xz)
+
+
+func _get_shore_wave_height(world_pos: Vector3) -> float:
+	return _get_shore_wave_displacement(world_pos).y
 
 
 ## Get the wave height at a world position (for buoyancy)
@@ -724,40 +758,28 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.ZERO
 	var shore_factor := _get_shore_factor(world_pos)
-	var shore_wave_height := _get_shore_wave_height(world_pos)
+	var shore_wave_disp := _get_shore_wave_displacement(world_pos)
 
 	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
 		var disp := _sum_cascade_displacement(world_pos)
-		return disp * shore_factor * wave_scale + Vector3(0.0, shore_wave_height, 0.0)
+		return disp * shore_factor * wave_scale + shore_wave_disp
 
 	if _physics_evaluator and _physics_evaluator._component_count > 0:
-		return _physics_evaluator.get_displacement(world_pos, _time, shore_factor * wave_scale) + Vector3(0.0, shore_wave_height, 0.0)
+		return _physics_evaluator.get_displacement(world_pos, _time, shore_factor * wave_scale) + shore_wave_disp
 
 	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
-	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos) + Vector3(0.0, shore_wave_height, 0.0)
+	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos) + shore_wave_disp
 
 
 ## Get wave normal at world position
 func get_wave_normal(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.UP
-	var shore_factor := _get_shore_factor(world_pos)
-
-	# GPU readback normal via finite differences across all cascades
-	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
-		var eps := 1.0
-		var h0 := _sum_cascade_displacement(world_pos).y
-		var hx := _sum_cascade_displacement(world_pos + Vector3(eps, 0, 0)).y
-		var hz := _sum_cascade_displacement(world_pos + Vector3(0, 0, eps)).y
-		var nx := (h0 - hx) * shore_factor * wave_scale
-		var nz := (h0 - hz) * shore_factor * wave_scale
-		return Vector3(nx, 1.0, nz).normalized()
-
-	if _physics_evaluator and _physics_evaluator._component_count > 0:
-		return _physics_evaluator.get_normal(world_pos, _time, shore_factor * wave_scale)
-
-	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
-	return GerstnerMath.get_normal(world_pos, _time, shore_factor * wave_scale, cam_pos)
+	var eps := 1.0
+	var h0 := get_wave_height(world_pos)
+	var hx := get_wave_height(world_pos + Vector3(eps, 0.0, 0.0))
+	var hz := get_wave_height(world_pos + Vector3(0.0, 0.0, eps))
+	return Vector3(h0 - hx, eps, h0 - hz).normalized()
 
 
 ## Sample one cascade's displacement texture at a world position.
@@ -884,19 +906,18 @@ func get_underwater_effect() -> PostProcessEffect:
 
 
 func set_underwater_compositor_enabled(enabled: bool) -> void:
-	if underwater_compositor_enabled == enabled:
+	if enabled:
+		Log.warn("water", "OceanManager: legacy underwater compositor is retired; request ignored")
+		enabled = false
+
+	if underwater_compositor_enabled == enabled and not _underwater_effect_loaded:
 		return
 
 	underwater_compositor_enabled = enabled
-	if not enabled:
-		if _underwater_effect_loaded:
-			ShaderManager.disable_effect("underwater")
-			ShaderManager.unload_effect("underwater")
-			_underwater_effect_loaded = false
-		return
-
-	if _system_initialized:
-		_init_underwater_effect()
+	if _underwater_effect_loaded:
+		ShaderManager.disable_effect("underwater")
+		ShaderManager.unload_effect("underwater")
+		_underwater_effect_loaded = false
 
 
 ## Check if the camera is currently submerged
@@ -1285,6 +1306,11 @@ func set_water_quality(quality: int) -> void:
 		_shutdown_fft_pipeline()
 	if _ocean_spray:
 		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
+	_update_shader_parameters()
+	_load_shore_mask()
+	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH and _wave_generator:
+		_update_cascade_scales()
+	reset_weather()
 
 	Log.info("water", "OceanManager: Quality changed to: %s" % get_water_quality_name())
 

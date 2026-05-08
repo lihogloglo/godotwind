@@ -1,6 +1,6 @@
 shader_type spatial;
 // Clipmap mesh path — vertex reads world-space XZ from VERTEX directly because
-// `ocean_mesh.gd` snaps the mesh to a 64m grid centered on the camera. Kept
+// `ocean_mesh.gd` snaps the mesh to the active inner-ring grid around the camera. Kept
 // `cull_disabled` (the clipmap mesh winding renders as the back face from
 // above, so standard culling would hide the entire ocean). `depth_draw_always`
 // forces depth to be written authoritatively from the main pass (fixes the
@@ -11,7 +11,7 @@ render_mode world_vertex_coords, cull_disabled, shadows_disabled, depth_draw_alw
 /**
  * Ocean FFT Shader — Godotwind (clipmap path)
  *
- * Entry point for the 11-ring clipmap mesh built by `ocean_mesh.gd`. All
+ * Entry point for the clipmap mesh built by `ocean_mesh.gd`. All
  * shared state (uniforms, varyings, SSR + refraction + SSS fragment, custom
  * light()) lives in `ocean_fft_common.gdshaderinc`. This file is only
  * responsible for the per-vertex path from the clipmap mesh to the displaced
@@ -30,7 +30,7 @@ render_mode world_vertex_coords, cull_disabled, shadows_disabled, depth_draw_alw
 // by `ocean_mesh.gd::update_position`).
 // ============================================================================
 void vertex() {
-	// Mesh position snapped to 64m grid by ocean_mesh.gd (scrolling clipmap)
+	// Mesh position snapped to the active inner-ring grid by ocean_mesh.gd.
 	UV = VERTEX.xz;
 	// 3D distance for altitude-aware cascade fading
 	float dist = length(VERTEX - CAMERA_POSITION_WORLD);
@@ -67,29 +67,40 @@ void vertex() {
 	float raw_dist = shore_data.a * shore_fade_distance;
 	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
+	float shore_wave_y = 0.0;
+	v_shore_slope = vec2(0.0);
+	v_shore_choppiness = 0.0;
 	if (shore_dir_len > 0.01 && shore_wave_amplitude > 0.0) {
 		shore_dir /= shore_dir_len;
 		// shore_dir points away from shore. Phase sign makes crests travel
 		// toward decreasing distance, i.e. toward the real shoreline.
-		float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
-		float sin_phase = sin(phase);
-		float crest_phase = shore_crest_shape(sin_phase);
+		float phase = raw_dist * shore_wave_frequency * SHORE_TAU + ocean_time * shore_wave_speed * SHORE_TAU;
+		float modulation = shore_along_modulation(VERTEX.xz, shore_dir);
+		float crest_phase = shore_crest_shape(phase, shore_wave_steepness);
 		float breaker_env = shore_breaker_envelope(raw_dist);
 		float runup_env = shore_runup_envelope(raw_dist);
 		float swash = shore_swash_curve(phase);
+		float mod_runup = runup_env * swash * mix(0.65, 1.0, modulation);
 		float shore_y = shore_wave_amplitude * (
-			breaker_env * crest_phase
-			+ runup_env * swash * 0.75
+			breaker_env * modulation * crest_phase
+			+ mod_runup * 0.32
 		);
+		shore_wave_y = shore_y;
 		float shore_xz = shore_wave_amplitude * shore_wave_steepness * (
-			breaker_env * cos(phase)
-			+ runup_env * swash * 0.90
+			breaker_env * modulation * shore_forward_push(phase, shore_wave_steepness)
+			+ mod_runup * 1.10
 		);
 		VERTEX.y += shore_y;
 		VERTEX.xz -= shore_dir * shore_xz;
+		float slope = shore_wave_amplitude * shore_wave_frequency * SHORE_TAU * (
+			breaker_env * modulation * shore_profile_slope(phase, shore_wave_steepness)
+			+ mod_runup * 0.10 * cos(phase)
+		);
+		v_shore_slope = shore_dir * clamp(slope, -1.6, 1.6);
+		v_shore_choppiness = abs(shore_xz) * 0.65;
 	}
 
-	wave_height = displacement.y * shore;
+	wave_height = displacement.y * shore + shore_wave_y;
 	v_world_pos = VERTEX;
 	v_choppiness = chop_accum * wave_scale * shore;
 }

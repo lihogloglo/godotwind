@@ -56,29 +56,55 @@ struct RefractSample {
 	float below_mask;
 };
 
+const float SHORE_TAU = 6.2831853;
+
 float shore_breaker_envelope(float raw_dist, float shore_fade_distance) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
-	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	float shore_ramp = smoothstep(0.05, 0.20, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.42, 0.82, dist_t);
 	return shore_ramp * offshore_fade;
 }
 
 float shore_runup_envelope(float raw_dist, float shore_fade_distance) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+	return 1.0 - smoothstep(0.00, 0.12, dist_t);
 }
 
 float shore_swash_curve(float phase) {
-	float cycle = fract(phase / 6.2831853);
-	float uprush = smoothstep(0.00, 0.30, cycle);
-	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	float cycle = fract(phase / SHORE_TAU);
+	float uprush = smoothstep(0.02, 0.24, cycle);
+	float backwash = 1.0 - smoothstep(0.24, 0.72, cycle);
 	return uprush * backwash;
 }
 
-float shore_crest_shape(float sin_phase) {
-	return sin_phase >= 0.0
-		? pow(max(sin_phase, 0.0), 1.45)
-		: -0.65 * pow(max(-sin_phase, 0.0), 1.15);
+float shore_skewed_sine(float phase, float steepness) {
+	float s = sin(phase);
+	float c = cos(phase);
+	float skew = clamp(0.22 + 0.22 * steepness, 0.0, 0.44);
+	return clamp(s + (2.0 * s * c) * skew, -1.0, 1.0);
+}
+
+float shore_crest_shape(float phase, float steepness) {
+	float skew_s = shore_skewed_sine(phase, steepness);
+	float crest = max(skew_s, 0.0);
+	float trough = max(-skew_s, 0.0);
+	float crest2 = crest * crest;
+	float shaped_crest = crest2 * (1.65 - 0.65 * crest);
+	float broad_trough = trough * (2.0 - trough);
+	return shaped_crest - broad_trough * mix(0.40, 0.22, steepness);
+}
+
+float shore_forward_push(float phase, float steepness) {
+	float crest = max(shore_skewed_sine(phase, steepness), 0.0);
+	return cos(phase) * (0.45 + 0.35 * crest);
+}
+
+float shore_along_modulation(vec2 world_xz, vec2 shore_dir, float time) {
+	vec2 tangent = vec2(-shore_dir.y, shore_dir.x);
+	float along = dot(world_xz, tangent);
+	float n = sin(along * 0.035 + time * 0.19) * 0.50
+		+ sin(along * 0.079 - time * 0.13) * 0.25;
+	return clamp(0.78 + n * 0.28, 0.55, 1.0);
 }
 
 vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
@@ -110,8 +136,26 @@ vec3 get_world_position(vec2 uv, float depth) {
 	return world_pos.xyz;
 }
 
+float get_main_depth(vec2 uv) {
+	return texture(depth_tex, uv).r;
+}
+
+
+float get_source_depth(vec2 uv) {
+	return source_depth_valid ? texture(source_depth_tex, uv).r : get_main_depth(uv);
+}
+
+
 float get_scene_depth(vec2 uv) {
-	return source_depth_valid ? texture(source_depth_tex, uv).r : texture(depth_tex, uv).r;
+	return get_source_depth(uv);
+}
+
+
+vec3 sample_source_color_nearest(vec2 uv) {
+	ivec2 tex_size = textureSize(source_color_tex, 0);
+	ivec2 texel = ivec2(clamp(uv, vec2(0.0), vec2(0.999999)) * vec2(tex_size));
+	texel = clamp(texel, ivec2(0), tex_size - ivec2(1));
+	return texelFetch(source_color_tex, texel, 0).rgb;
 }
 
 
@@ -161,19 +205,20 @@ SurfaceSample sample_surface(vec2 sample_xz, vec3 cam_pos, bool include_fft, boo
 	float shore_dir_len = length(shore_dir);
 	if (include_shore_waves && shore_dir_len > 0.01 && shore_wave_amplitude > 0.0) {
 		shore_dir /= shore_dir_len;
-		float phase = raw_dist * shore_wave_frequency * 6.2832 + TIME * shore_wave_speed * 6.2832;
-		float sin_phase = sin(phase);
-		float crest_phase = shore_crest_shape(sin_phase);
+		float phase = raw_dist * shore_wave_frequency * SHORE_TAU + TIME * shore_wave_speed * SHORE_TAU;
+		float modulation = shore_along_modulation(sample_xz, shore_dir, TIME);
+		float crest_phase = shore_crest_shape(phase, shore_wave_steepness);
 		float breaker_env = shore_breaker_envelope(raw_dist, shore_fade_distance);
 		float runup_env = shore_runup_envelope(raw_dist, shore_fade_distance);
 		float swash = shore_swash_curve(phase);
+		float mod_runup = runup_env * swash * mix(0.65, 1.0, modulation);
 		water_y += shore_wave_amplitude * (
-			breaker_env * crest_phase
-			+ runup_env * swash * 0.75
+			breaker_env * modulation * crest_phase
+			+ mod_runup * 0.32
 		);
 		horizontal_offset -= shore_dir * (shore_wave_amplitude * shore_wave_steepness * (
-			breaker_env * cos(phase)
-			+ runup_env * swash * 0.90
+			breaker_env * modulation * shore_forward_push(phase, shore_wave_steepness)
+			+ mod_runup * 1.10
 		));
 	}
 
@@ -270,7 +315,7 @@ bool fetch_underwater_source(
 		return false;
 	}
 
-	sample_color = texture(source_color_tex, sample_uv).rgb;
+	sample_color = sample_source_color_nearest(sample_uv);
 	return true;
 }
 
@@ -364,12 +409,14 @@ void main() {
 
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(screen_w, screen_h);
 
-	float raw_depth = get_scene_depth(uv);
-	if (raw_depth <= 0.0001) {
+	float raw_depth = get_source_depth(uv);
+	float main_depth = get_main_depth(uv);
+	if (raw_depth <= 0.0001 || main_depth <= 0.0001) {
 		return;
 	}
 
 	vec3 world_pos = get_world_position(uv, raw_depth);
+	vec3 main_world_pos = get_world_position(uv, main_depth);
 	vec3 cam_pos = state.inv_view[3].xyz;
 	float water_level = get_dynamic_water_level(world_pos.xz, cam_pos, true, true);
 	if (debug_mode == 1) {
@@ -378,6 +425,10 @@ void main() {
 		water_level = get_dynamic_water_level(world_pos.xz, cam_pos, true, false);
 	}
 	float water_depth = water_level - world_pos.y;
+	float main_water_level = get_dynamic_water_level(main_world_pos.xz, cam_pos, true, true);
+	float main_water_depth = main_water_level - main_world_pos.y;
+	float camera_water_level = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
+	bool camera_underwater = cam_pos.y < camera_water_level - 0.02;
 
 	float below_mask = smoothstep(0.02, 0.35, water_depth);
 	// Debug waterline marker: keep this narrow so alignment errors are readable.
@@ -386,14 +437,19 @@ void main() {
 	float mask = debug_mode == 0
 		? max(below_mask * 0.80, final_transition_band * 0.22)
 		: max(below_mask * 0.55, waterline_band);
+	float final_surface_gate = 1.0;
+	if (debug_mode == 0 && !camera_underwater) {
+		final_surface_gate = 1.0 - smoothstep(0.15, 0.75, abs(main_water_depth));
+		mask *= final_surface_gate;
+	}
 	if (mask <= 0.001) {
 		return;
 	}
 
 	vec4 scene_color = imageLoad(color_image, pixel);
-	vec3 prewater_color = source_valid ? texture(source_color_tex, uv).rgb : scene_color.rgb;
+	vec3 prewater_color = source_valid ? sample_source_color_nearest(uv) : scene_color.rgb;
 	RefractSample refr_sample = refracted_source_color(uv, prewater_color, cam_pos, world_pos, below_mask);
-	float refracted_mask = max(mask, refr_sample.below_mask);
+	float refracted_mask = max(mask, refr_sample.below_mask * final_surface_gate);
 	vec3 source_color = refr_sample.color;
 	vec3 tint = state.shore_params1.yzw;
 	vec3 sigma = state.optical_params.xyz;

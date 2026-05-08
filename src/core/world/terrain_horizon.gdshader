@@ -122,29 +122,50 @@ vec2 rotate_vec2(const vec2 v, const vec2 cs) {
 	return vec2(fma(cs.x, v.x, cs.y * v.y), fma(cs.x, v.y, -cs.y * v.x));
 }
 
+const float SHORE_TAU = 6.2831853;
+
 float shore_breaker_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	float shore_ramp = smoothstep(0.03, 0.22, dist_t);
-	float offshore_fade = 1.0 - smoothstep(0.45, 0.90, dist_t);
+	float shore_ramp = smoothstep(0.05, 0.20, dist_t);
+	float offshore_fade = 1.0 - smoothstep(0.42, 0.82, dist_t);
 	return shore_ramp * offshore_fade;
 }
 
 float shore_runup_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	return 1.0 - smoothstep(0.00, 0.16, dist_t);
+	return 1.0 - smoothstep(0.00, 0.12, dist_t);
 }
 
 float shore_swash_curve(float phase) {
-	float cycle = fract(phase / 6.2831853);
-	float uprush = smoothstep(0.00, 0.30, cycle);
-	float backwash = 1.0 - smoothstep(0.30, 1.00, cycle);
+	float cycle = fract(phase / SHORE_TAU);
+	float uprush = smoothstep(0.02, 0.24, cycle);
+	float backwash = 1.0 - smoothstep(0.24, 0.72, cycle);
 	return uprush * backwash;
 }
 
-float shore_crest_shape(float sin_phase) {
-	return sin_phase >= 0.0
-		? pow(max(sin_phase, 0.0), 1.45)
-		: -0.65 * pow(max(-sin_phase, 0.0), 1.15);
+float shore_skewed_sine(float phase, float steepness) {
+	float s = sin(phase);
+	float c = cos(phase);
+	float skew = clamp(0.22 + 0.22 * steepness, 0.0, 0.44);
+	return clamp(s + (2.0 * s * c) * skew, -1.0, 1.0);
+}
+
+float shore_crest_shape(float phase, float steepness) {
+	float skew_s = shore_skewed_sine(phase, steepness);
+	float crest = max(skew_s, 0.0);
+	float trough = max(-skew_s, 0.0);
+	float crest2 = crest * crest;
+	float shaped_crest = crest2 * (1.65 - 0.65 * crest);
+	float broad_trough = trough * (2.0 - trough);
+	return shaped_crest - broad_trough * mix(0.40, 0.22, steepness);
+}
+
+float shore_along_modulation(vec2 world_xz, vec2 shore_dir) {
+	vec2 tangent = vec2(-shore_dir.y, shore_dir.x);
+	float along = dot(world_xz, tangent);
+	float n = sin(along * 0.035 + ocean_time * 0.19) * 0.50
+		+ sin(along * 0.079 - ocean_time * 0.13) * 0.25;
+	return clamp(0.78 + n * 0.28, 0.55, 1.0);
 }
 
 vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
@@ -213,22 +234,25 @@ float shore_wave_wetness(vec3 world_pos) {
 	if (!shore_eligible) {
 		return 0.0;
 	}
-	float phase = raw_dist * shore_wave_frequency * 6.2832 + ocean_time * shore_wave_speed * 6.2832;
+	shore_dir = normalize(shore_dir);
+	float phase = raw_dist * shore_wave_frequency * SHORE_TAU + ocean_time * shore_wave_speed * SHORE_TAU;
+	float modulation = shore_along_modulation(world_pos.xz, shore_dir);
 	float breaker_env = shore_breaker_envelope(raw_dist);
 	float runup_env = shore_runup_envelope(raw_dist);
 	float swash = shore_swash_curve(phase);
-	float cycle = fract(phase / 6.2831853);
+	float mod_runup = runup_env * swash * mix(0.65, 1.0, modulation);
+	float cycle = fract(phase / SHORE_TAU);
 	float recede_gate = smoothstep(0.30, 0.42, cycle);
 	float dry_tail = (1.0 - smoothstep(0.35, 1.00, cycle)) * recede_gate;
-	float crest_phase = shore_crest_shape(sin(phase));
+	float crest_phase = shore_crest_shape(phase, shore_wave_steepness);
 	float dynamic_water_y = sea_level_wet + shore_wave_amplitude * (
-		breaker_env * crest_phase
-		+ runup_env * swash * 0.75
+		breaker_env * modulation * crest_phase
+		+ mod_runup * 0.32
 	);
 
 	float wet_margin_safe = max(wet_margin, 0.001);
 	float land_dist = shore_land_distance(shore_uv, shore_dir);
-	float current_runup_width = wet_margin_safe + shore_wet_runup_width * max(swash, max(0.0, sin(phase)) * breaker_env);
+	float current_runup_width = wet_margin_safe + shore_wet_runup_width * max(swash, max(0.0, shore_skewed_sine(phase, shore_wave_steepness)) * breaker_env * modulation);
 	float high_runup_width = wet_margin_safe + shore_wet_runup_width;
 	float waterline_contact = 1.0 - smoothstep(
 		dynamic_water_y - wet_margin_safe * 0.25,
@@ -244,7 +268,7 @@ float shore_wave_wetness(vec3 world_pos) {
 		* waterline_contact
 		* runup_env * 0.75;
 
-	float high_water_y = sea_level_wet + shore_wave_amplitude * runup_env * 0.75;
+	float high_water_y = sea_level_wet + shore_wave_amplitude * runup_env * 0.32;
 	float trailing_wet = (1.0 - smoothstep(high_water_y, high_water_y + wet_margin_safe * 2.0, world_pos.y))
 		* dry_tail * runup_env * 0.75;
 

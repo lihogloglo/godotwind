@@ -99,7 +99,7 @@ var _wireframe_button: Button = null
 var _sea_level: float = SEA_LEVEL_DEFAULT
 var _playground_origin: Vector3 = Vector3.ZERO
 var _shore_search_status: String = "not searched"
-var _wet_margin: float = 1.5
+var _wet_margin: float = 0.05
 var _wet_albedo_darken: float = 0.6
 var _wet_roughness_target: float = 0.05
 var _wet_debug: bool = false
@@ -482,7 +482,7 @@ func _spawn_wet_test_objects() -> void:
 		mat.set_shader_parameter("albedo_color", spec["color"])
 		mat.set_shader_parameter("roughness", 0.7)
 		mat.set_shader_parameter("wet_line_y", -1000.0)
-		mat.set_shader_parameter("wet_margin", 0.3)
+		mat.set_shader_parameter("wet_margin", _wet_margin)
 		mat.set_shader_parameter("wet_albedo_darken", _wet_albedo_darken)
 		mat.set_shader_parameter("wet_roughness_target", _wet_roughness_target)
 		mi.material_override = mat
@@ -589,6 +589,7 @@ func _build_ui() -> void:
 	_add_slider(vbox, "margin", 0.0, 5.0, _wet_margin, func(val: float) -> void:
 		_wet_margin = val
 		_push_wet_uniforms()
+		_push_object_wet_params()
 	)
 	_add_slider(vbox, "darken", 0.0, 1.0, _wet_albedo_darken, func(val: float) -> void:
 		_wet_albedo_darken = val
@@ -661,9 +662,9 @@ func _refresh_control_labels() -> void:
 		var quality_name := OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown"
 		_spray_quality_button.text = "Spray Q: %s" % quality_name
 	if _underwater_button:
-		_underwater_button.text = "Underwater: %s" % ("On" if _underwater_volume_enabled else "Off")
+		_underwater_button.text = "UW Volume: %s" % ("On" if _underwater_volume_enabled else "Off")
 	if _underwater_mode_button:
-		_underwater_mode_button.text = "UW Mode: %s" % ("AllCam" if _underwater_active_above else "BelowCam")
+		_underwater_mode_button.text = "UW Scope: %s" % ("Debug" if _underwater_active_above else "BelowCam")
 	if _uw_wobble_button:
 		_uw_wobble_button.text = "UW Wobble: %s" % ("On" if _uw_wobble_enabled else "Off")
 	if _ocean_surface_button:
@@ -681,6 +682,7 @@ func _refresh_control_labels() -> void:
 func _process(delta: float) -> void:
 	_update_average_frame_time(delta)
 	_update_buoyancy_debug_grid()
+	_push_object_water_state()
 	_update_object_wetness(delta)
 	_update_held_object()
 	_update_underwater_volume()
@@ -737,6 +739,33 @@ func _update_object_wetness(delta: float) -> void:
 		var mat_rid: RID = obj["mat_rid"]
 		if mat_rid.is_valid():
 			RenderingServer.material_set_param(mat_rid, "wet_line_y", obj_y + wet_local)
+
+
+func _push_object_water_state() -> void:
+	var state := _get_water_state()
+	var dynamic_enabled := state != null
+	for obj: Dictionary in _test_objects:
+		var mat_rid: RID = obj["mat_rid"]
+		if not mat_rid.is_valid():
+			continue
+		RenderingServer.material_set_param(mat_rid, "dynamic_water_enabled", dynamic_enabled)
+		if not dynamic_enabled:
+			continue
+		if _camera != null:
+			RenderingServer.material_set_param(mat_rid, "camera_world_position", _camera.global_position)
+		RenderingServer.material_set_param(mat_rid, "sea_level", state.sea_level)
+		RenderingServer.material_set_param(mat_rid, "wave_scale", state.wave_scale)
+		RenderingServer.material_set_param(mat_rid, "ocean_time", state.ocean_time)
+		RenderingServer.material_set_param(mat_rid, "map_scales", state.map_scales)
+		RenderingServer.material_set_param(mat_rid, "shore_mask_bounds", state.shore_mask_bounds)
+		RenderingServer.material_set_param(mat_rid, "shore_fade_distance", state.shore_fade_distance)
+		RenderingServer.material_set_param(mat_rid, "shore_wave_amplitude", state.shore_wave_amplitude)
+		RenderingServer.material_set_param(mat_rid, "shore_wave_frequency", state.shore_wave_frequency)
+		RenderingServer.material_set_param(mat_rid, "shore_wave_speed", state.shore_wave_speed)
+		RenderingServer.material_set_param(mat_rid, "shore_wave_steepness", state.shore_wave_steepness)
+		RenderingServer.material_set_param(mat_rid, "dynamic_water_has_shore_mask", state.shore_mask_texture != null)
+		if state.shore_mask_texture != null:
+			RenderingServer.material_set_param(mat_rid, "shore_mask", state.shore_mask_texture.get_rid())
 
 
 func _sample_object_contact_water_y(center: Vector3, radius: float) -> float:
@@ -932,7 +961,7 @@ func _update_hud() -> void:
 	])
 	lines.append("underwater=%s/%s  uw_wobble=%s" % [
 		"on" if _underwater_volume_enabled else "off",
-		"allcam" if _underwater_active_above else "belowcam",
+		"debug" if _underwater_active_above else "belowcam",
 		"on" if _uw_wobble_enabled else "off",
 	])
 	var spray_energy := OceanManager.get_sea_spray_energy() if OceanManager and OceanManager.has_method("get_sea_spray_energy") else 0.0
@@ -1044,6 +1073,7 @@ func _push_object_wet_params() -> void:
 	for obj: Dictionary in _test_objects:
 		var mat_rid: RID = obj["mat_rid"]
 		if mat_rid.is_valid():
+			RenderingServer.material_set_param(mat_rid, "wet_margin", _wet_margin)
 			RenderingServer.material_set_param(mat_rid, "wet_albedo_darken", _wet_albedo_darken)
 			RenderingServer.material_set_param(mat_rid, "wet_roughness_target", _wet_roughness_target)
 

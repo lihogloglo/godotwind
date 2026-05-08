@@ -95,8 +95,9 @@ func set_sea_level(y: float) -> void:
 	_sea_level = y
 
 
-## Diagnostic/refactor mode. When true, the volume stays visible even while the
-## camera is above sea level, so the ocean lab can prove render-order behavior.
+## Diagnostic/refactor mode. When true, non-final debug modes can stay visible
+## above sea level so Ocean Lab can prove render-order behavior. Final
+## above-water waterline/refraction is owned by WaterlineCompositorEffect.
 func set_active_above_water(value: bool) -> void:
 	active_above_water = value
 
@@ -184,7 +185,8 @@ func _process(_delta: float) -> void:
 
 	var cam_y: float = _camera.global_position.y
 	var submerged: bool = cam_y < _sea_level
-	visible = submerged or active_above_water
+	var above_water_diagnostic: bool = active_above_water and _debug_mode != 0
+	visible = submerged or above_water_diagnostic
 	if not visible:
 		return
 

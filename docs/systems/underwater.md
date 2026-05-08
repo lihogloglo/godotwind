@@ -22,8 +22,8 @@ color bleeding into the submerged region.
 | File | Purpose |
 |------|---------|
 | `src/core/water/shaders/underwater_volume.gdshader` | Spatial shader on a BoxMesh volume. `render_mode blend_mix, cull_front, depth_test_disabled, unshaded`. Reconstructs world pos from DEPTH_TEXTURE, slabs to `[sea_level - volume_depth, sea_level]` in Y, applies wobble + absorption + caustics. |
-| `src/core/water/underwater_volume.gd` | Node3D wrapper. 500×40×500 BoxMesh, follows camera position (NOT rotation), hides above water, updates `sea_level` each frame. Documented `blend_mix` deviation vs paddy-exe source. |
-| `src/core/water/ocean_manager.gd` | Owns the legacy ShaderManager compositor switch. Ocean Lab calls `set_underwater_compositor_enabled(false)` so the old compositor does not race the volume diagnostic. |
+| `src/core/water/underwater_volume.gd` | Node3D wrapper. 500×40×500 BoxMesh, follows camera position (NOT rotation), hides above water in final mode, updates `sea_level` each frame. Above-water visibility is diagnostic-only and requires a non-final debug mode. |
+| `src/core/water/ocean_manager.gd` | Legacy ShaderManager underwater compositor switch is retired and disabled by default. `set_underwater_compositor_enabled(true)` is ignored so the old compute path cannot race the volume/compositor split. |
 | Ocean Lab `UW Debug` | Interactive-only diagnostic control for the volume shader. `Slab Mask` paints water-classified pixels cyan, `Depth/Y` colors reconstructed underwater depth, and `Big Wobble` exaggerates the volume contribution. |
 | Ocean Lab wave sync | `UnderwaterVolume.sync_wave_surface_from_ocean_material()` copies FFT cascade scales, wave scale, shore mask, and shore-wave uniforms from the active ocean material so the volume's waterline follows the displaced FFT surface instead of a flat `sea_level` plane. |
 | `assets/water/caustics_noise.png` | paddy-exe's `caustics-generator.png`, MIT. |
@@ -36,7 +36,7 @@ color bleeding into the submerged region.
 | File | Status |
 |------|--------|
 | `src/core/shaders/compute/underwater.glsl` | Dead. Compute-shader CompositorEffect with push-constant matrices, procedural FBM wobble, voronoi caustic math. |
-| `src/core/shaders/effects/underwater_compositor_effect.gd` | Dead. Companion GDScript — still loaded by `OceanManager._load_underwater_effect()` via `ShaderManager.load_effect()`, then force-disabled at scene startup by `test_underwater.gd`. Full removal requires unwiring `OceanManager.get_underwater_effect()` + `ShaderManager` hooks. |
+| `src/core/shaders/effects/underwater_compositor_effect.gd` | Dead. Companion GDScript. OceanManager no longer loads it by default; deletion is still pending after any standalone references are removed. |
 | `src/core/water/shaders/underwater.gdshader` | Dead. Earlier quad-based approach. |
 | `src/core/water/underwater_effect.gd` | Dead. Companion script. |
 
@@ -73,11 +73,10 @@ color bleeding into the submerged region.
    the displaced water height per pixel, matching moving wave crests/troughs.
 3. **Above-water diagnostic mode is not a production solution.**
    `UnderwaterVolume.set_active_above_water(true)` exists for Ocean Lab
-   render-order diagnosis. With the opaque ocean mesh visible, the depth
-   texture may reconstruct the ocean surface rather than submerged objects
-   behind it. If this is confirmed, above-water waterline/submerged-object
-   distortion needs a compositor/pre-ocean/subpass design instead of only a
-   late transparent volume. See
+   render-order diagnosis, but it only makes non-final debug modes visible
+   above water. Final above-water waterline/submerged-object distortion belongs
+   to the pre-water compositor path; the transparent volume must not overwrite
+   that result. See
    `docs/audit/ocean_option_c_render_order_2026_05_07_codex.md`.
    Use Ocean Lab's `UW Debug` modes before drawing conclusions from subtle
    final shading: `Slab Mask` paints water-classified pixels cyan, and

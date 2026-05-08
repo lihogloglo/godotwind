@@ -9,15 +9,20 @@
 class_name OceanMesh
 extends MeshInstance3D
 
-# Clipmap configuration
-const NUM_LOD_RINGS: int = 11
-const BASE_QUAD_SIZE: float = 2.0  # Innermost ring quad size in meters
-const RING_VERTEX_COUNT: int = 64   # Vertices per side for each ring
+# Clipmap configuration. HIGH/FFT gets denser near-camera geometry so the
+# shore-wave breaker profile has enough vertices; FLAT/STANDARD keep the
+# lighter legacy mesh for low-end hardware.
+const LEGACY_NUM_LOD_RINGS: int = 11
+const LEGACY_BASE_QUAD_SIZE: float = 2.0
+const LEGACY_RING_VERTEX_COUNT: int = 64
+const HIGH_NUM_LOD_RINGS: int = 12
+const HIGH_BASE_QUAD_SIZE: float = 1.0
+const HIGH_RING_VERTEX_COUNT: int = 80
 
 # Projected grid configuration — single flat N×N mesh in local [0,1]²; the
 # vertex shader unprojects each vertex from NDC → world via INV_VIEW_PROJECTION
-# and ray-intersects the water plane. 192 = ~36k vertices which matches the
-# clipmap path's fine-ring density while giving uniform screen-space coverage.
+# and ray-intersects the water plane. 192 = ~36k vertices, kept as a stable
+# comparison path while FFT clipmap density is tuned independently.
 const PROJECTED_GRID_DIM: int = 192
 
 enum QualityMode { FLAT, STANDARD, HIGH }
@@ -209,6 +214,22 @@ func _load_foam_texture() -> Texture2D:
 # CLIPMAP MESH CREATION
 # ============================================================================
 
+func _clipmap_ring_count() -> int:
+	return HIGH_NUM_LOD_RINGS if _quality == QualityMode.HIGH else LEGACY_NUM_LOD_RINGS
+
+
+func _clipmap_base_quad_size() -> float:
+	return HIGH_BASE_QUAD_SIZE if _quality == QualityMode.HIGH else LEGACY_BASE_QUAD_SIZE
+
+
+func _clipmap_ring_vertex_count() -> int:
+	return HIGH_RING_VERTEX_COUNT if _quality == QualityMode.HIGH else LEGACY_RING_VERTEX_COUNT
+
+
+func _clipmap_snap_size() -> float:
+	return _clipmap_base_quad_size() * float(_clipmap_ring_vertex_count()) * 0.5
+
+
 func _create_clipmap_mesh(radius: float) -> void:
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -219,9 +240,12 @@ func _create_clipmap_mesh(radius: float) -> void:
 
 	var vertex_offset := 0
 	var prev_outer_radius := 0.0
+	var ring_count := _clipmap_ring_count()
+	var base_quad_size := _clipmap_base_quad_size()
+	var ring_vertex_count := _clipmap_ring_vertex_count()
 
-	for ring in range(NUM_LOD_RINGS):
-		var quad_size := BASE_QUAD_SIZE * pow(2.0, float(ring))
+	for ring in range(ring_count):
+		var quad_size := base_quad_size * pow(2.0, float(ring))
 		# 2026-04-09 — clipmap seam fix. Successive rings have 2x quad_size
 		# so the inner ring's outer edge has twice as many vertices as the
 		# outer ring's inner edge, creating T-junctions. When the FFT
@@ -237,7 +261,7 @@ func _create_clipmap_mesh(radius: float) -> void:
 		var inner_radius := prev_outer_radius
 		if ring > 0:
 			inner_radius = maxf(0.0, prev_outer_radius - quad_size)
-		var outer_radius := quad_size * RING_VERTEX_COUNT * 0.5
+		var outer_radius := quad_size * ring_vertex_count * 0.5
 		outer_radius = minf(outer_radius, radius)
 
 		if outer_radius <= inner_radius:
@@ -276,7 +300,7 @@ func _create_clipmap_mesh(radius: float) -> void:
 	extra_cull_margin = radius
 
 	Log.info("water", "OceanMesh: Created mesh with %d vertices, %d triangles, %d rings" % [
-		vertices.size(), indices.size() / 3, NUM_LOD_RINGS])
+		vertices.size(), indices.size() / 3, ring_count])
 
 
 # ============================================================================
@@ -449,14 +473,14 @@ func update_position(center: Vector3) -> void:
 	# under its enormous custom AABB).
 	if _mesh_mode == MeshMode.PROJECTED:
 		return
-	# CLIPMAP mode: snap mesh position to large grid to prevent vertex swimming.
-	# 64m snap = inner ring half-size. Vertices stable between rare jumps.
+	# CLIPMAP mode: snap mesh position to the inner ring half-size to prevent
+	# vertex swimming. Vertices stay stable between rare jumps.
 	# Must move mesh (not shader offset) so Godot's AABB frustum culling stays correct.
-	const SNAP_SIZE: float = 64.0
+	var snap_size := _clipmap_snap_size()
 	global_position = Vector3(
-		snappedf(center.x, SNAP_SIZE),
+		snappedf(center.x, snap_size),
 		center.y,
-		snappedf(center.z, SNAP_SIZE)
+		snappedf(center.z, snap_size)
 	)
 
 
@@ -514,6 +538,12 @@ func set_quality(quality: QualityMode, radius: float) -> bool:
 
 	_create_shader()
 	_create_material()
+	if _mesh_mode == MeshMode.PROJECTED and _quality != QualityMode.HIGH:
+		_mesh_mode = MeshMode.CLIPMAP
+	if _mesh_mode == MeshMode.PROJECTED:
+		_create_projected_mesh(radius)
+	else:
+		_create_clipmap_mesh(radius)
 	_restore_cached_state()
 
 	var needs_fft := (_quality == QualityMode.HIGH)
