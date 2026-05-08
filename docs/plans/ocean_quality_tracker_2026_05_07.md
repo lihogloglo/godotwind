@@ -720,7 +720,7 @@ Acceptance:
 
 ## Phase 6 - Sea Spray
 
-Status: pending
+Status: first pass implemented 2026-05-08, visual tuning in progress
 
 Add Sea of Thieves-style spray after the crest mask and performance controls are
 trusted.
@@ -746,6 +746,49 @@ Acceptance:
 - Calm water has little to no spray.
 - Spray is not locked to screen space in an obvious way.
 - Feature can be disabled with measurable perf recovery.
+
+2026-05-08 first pass:
+
+- Added `OceanSpray`, a GPU-particle sea-spray layer owned by OceanManager.
+  The particle shader samples the same FFT displacement cascade as the surface
+  shader, then activates only high-energy candidate particles in a
+  camera-centered world-space window.
+- Weather drives spray energy: calm stays off, breeze starts sparse misting,
+  and storm/blizzard presets increase opacity, size, and wind drift.
+- Ocean Lab exposes `Spray: On/Off`, `Spray Q: Off/Low/Medium/High`, and HUD
+  `spray_energy` so visual quality and cost can be compared interactively.
+- Artist-authored texture hook: `res://src/core/water/textures/sea_spray.png`
+  is used if present; otherwise a procedural soft spray texture is generated.
+- Shader cache entries matching `ocean_spray*` were cleared before import.
+  Godot `--import` succeeded, the Ocean Lab mesh-toggle smoke exited cleanly,
+  and `tests/visual/test_ocean_lab.tscn` was launched interactively for user
+  visual checking.
+
+2026-05-08 tuning update:
+
+- Replaced the crude choppiness-first spawn mask with the GodotOceanWaves-style
+  foam/normal signal: foam is the primary activation source, normal slope
+  filters broad flat foam, and a lower-weight choppiness/height fallback keeps
+  sharp crests alive when foam is sparse.
+- Imported `src/core/water/textures/sea_spray.png` from GodotOceanWaves
+  (MIT; attribution in `src/core/water/textures/ATTRIBUTION.txt`) and updated
+  the billboard shader to preserve the texture's irregular shape with a
+  lifetime dissolve.
+- Added per-particle size variation: mostly small wisps, some medium sheets,
+  and rare larger bursts. Width and height vary independently so the spray no
+  longer reads as repeated identical stamps.
+- Added performance A/B hooks: `OceanManager.get_sea_spray_status()`,
+  `toggle_sea_spray()`, Ocean Lab HUD fields for emitting/candidates/energy,
+  and the main-scene console command `ocean_spray [on|off|status]` with
+  `spray` alias.
+- Cost note: foam-driven spawn is more expensive than the earlier
+  choppiness-only prototype because candidate particles now sample normal/foam
+  data in addition to displacement and active particles follow the surface.
+  It does not add new FFT generation work; the first performance knob is
+  spray quality/candidate count.
+- Verification: cleared `.godot/shader_cache/`, ran Godot `--import`, ran
+  `tests/visual/test_ocean_spray_smoke.tscn` successfully, and relaunched
+  `tests/visual/test_ocean_lab.tscn` interactively for visual checking.
 
 ---
 

@@ -1,0 +1,8 @@
+Sea spray texture
+
+Source: GodotOceanWaves by Ethan Truong / 2Retr0
+URL: https://github.com/2Retr0/GodotOceanWaves
+License: MIT
+
+File:
+  sea_spray.png

@@ -7,6 +7,7 @@ class_name OceanManagerClass
 extends Node
 
 const CS := preload("res://src/core/coordinate_system.gd")
+const OceanSprayScript := preload("res://src/core/water/ocean_spray.gd")
 
 # Project settings paths
 const SETTING_ENABLED := "ocean/enabled"
@@ -54,6 +55,11 @@ func _get_shore_mask_path() -> String:
 @export_group("Wave Settings")
 @export var wave_scale: float = 1.0
 
+@export_group("Sea Spray")
+@export var sea_spray_enabled: bool = true
+## 0 = Off, 1 = Low, 2 = Medium, 3 = High.
+@export_range(0, 3) var sea_spray_quality: int = 2
+
 # System state
 var _system_initialized: bool = false
 var _system_enabled: bool = false
@@ -61,9 +67,12 @@ var _system_enabled: bool = false
 # Weather integration — last applied values (avoid redundant FFT spectrum regen)
 var _weather_last_wind: float = -1.0
 var _weather_last_storm_dir: Vector3 = Vector3.ZERO
+var _weather_last_wind_t: float = 0.0
+var _weather_last_wind_dir_xz: Vector2 = Vector2(1.0, 1.0).normalized()
 
 # Internal state
 var _ocean_mesh: OceanMesh = null
+var _ocean_spray: OceanSpray = null
 var _shore_mask: ShoreMaskGenerator = null
 var _terrain: Terrain3D = null
 var _camera: Camera3D = null
@@ -196,6 +205,7 @@ func _deferred_init() -> void:
 
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
 	_update_shader_parameters()
+	_setup_spray_layer()
 	# Shore mask — vertex dampening only (CREST OceanDepthCache pattern).
 	# Fragment-side shore visuals remain depth-driven (water_thickness).
 	_load_shore_mask()
@@ -229,6 +239,8 @@ func _load_shore_mask() -> void:
 			var tex: Texture2D = prebaked.texture
 			var bounds: Rect2 = prebaked.bounds
 			_ocean_mesh.set_shore_mask(tex, bounds, shore_fade_distance)
+			if _ocean_spray:
+				_ocean_spray.set_shore_mask(tex, bounds)
 			shore_mask_loaded = true
 			Log.info("water", "OceanManager: Using prebaked shore mask from %s" % shore_mask_path)
 
@@ -252,6 +264,8 @@ func _process(delta: float) -> void:
 		var cam_pos := _camera.global_position
 		var new_pos := Vector3(cam_pos.x, sea_level, cam_pos.z)
 		_ocean_mesh.update_position(new_pos)
+		if _ocean_spray:
+			_ocean_spray.set_camera(_camera)
 
 	# Drive FFT pipeline updates (rate-limited)
 	if _wave_generator and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
@@ -261,6 +275,12 @@ func _process(delta: float) -> void:
 			var update_dt := delta if fft_updates_per_second == 0 else target_dt + (_fft_time - _fft_next_update)
 			_fft_next_update = _fft_time + target_dt
 			_wave_generator.update(update_dt, _cascade_parameters)
+
+	if _ocean_spray:
+		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
+		_ocean_spray.set_sea_level(sea_level)
+		_ocean_spray.set_wave_scale(wave_scale)
+		_ocean_spray.set_ocean_time(_time)
 
 	# Push sun direction to the ocean surface shader for SSS backlight.
 	# Scan the scene tree at most once every 60 frames so we notice late-spawned
@@ -328,6 +348,8 @@ func _update_shader_parameters() -> void:
 	if not _ocean_mesh:
 		return
 	_ocean_mesh.set_wave_scale(wave_scale)
+	if _ocean_spray:
+		_ocean_spray.set_wave_scale(wave_scale)
 	# Push sea_level to the ocean surface shader. Used by Guard (6) in
 	# ocean_fft.gdshader's refraction path to reject refracted samples whose
 	# world Y is above the waterline (tall rocks / pillar tops poking out).
@@ -421,6 +443,8 @@ func _update_cascade_scales() -> void:
 		var uv_scale := Vector2.ONE / params.tile_length
 		map_scales[i] = Vector4(uv_scale.x, uv_scale.y, params.displacement_scale, params.normal_scale)
 	_ocean_mesh.get_material().set_shader_parameter(&"map_scales", map_scales)
+	if _ocean_spray:
+		_ocean_spray.set_map_scales(map_scales)
 
 
 ## Debug visualization (2026-04-09). Cycles the ocean_fft.gdshader's
@@ -478,10 +502,42 @@ func _push_ocean_time_uniform() -> void:
 	if not mat:
 		return
 	mat.set_shader_parameter("ocean_time", _time)
+	if _ocean_spray:
+		_ocean_spray.set_ocean_time(_time)
+
+
+func _setup_spray_layer() -> void:
+	if _ocean_spray != null:
+		return
+	_ocean_spray = OceanSprayScript.new()
+	_ocean_spray.name = "OceanSpray"
+	add_child(_ocean_spray)
+	if _camera:
+		_ocean_spray.set_camera(_camera)
+	_ocean_spray.enabled = sea_spray_enabled
+	_ocean_spray.quality_tier = clampi(sea_spray_quality, 0, 3) as OceanSpray.QualityTier
+	_ocean_spray.set_sea_level(sea_level)
+	_ocean_spray.set_wave_scale(wave_scale)
+	_ocean_spray.set_weather(_weather_last_wind_t, _weather_last_wind_dir_xz)
+	_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
+	if not _cascade_parameters.is_empty():
+		_update_cascade_scales()
+
+
+func _dispose_spray_layer() -> void:
+	var spray := _ocean_spray
+	_ocean_spray = null
+	if spray == null:
+		return
+	if spray.get_parent() == self:
+		remove_child(spray)
+	spray.queue_free()
 
 
 func _shutdown_fft_pipeline() -> void:
 	if _wave_generator:
+		if _ocean_spray:
+			_ocean_spray.set_fft_available(false)
 		_displacement_maps.texture_rd_rid = RID()
 		_normal_maps.texture_rd_rid = RID()
 		_wave_generator.queue_free()
@@ -746,6 +802,8 @@ func is_camera_submerged() -> bool:
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
 	_auto_find_camera = false
+	if _ocean_spray:
+		_ocean_spray.set_camera(camera)
 
 
 func set_sea_level(level: float) -> void:
@@ -760,6 +818,11 @@ func set_sea_level(level: float) -> void:
 				_shore_mask.get_world_bounds(),
 				shore_fade_distance
 			)
+			if _ocean_spray:
+				_ocean_spray.set_shore_mask(
+					_shore_mask.get_shore_mask_texture(),
+					_shore_mask.get_world_bounds()
+				)
 
 
 func get_sea_level() -> float:
@@ -818,6 +881,11 @@ func regenerate_shore_mask() -> void:
 				_shore_mask.get_world_bounds(),
 				shore_fade_distance
 			)
+			if _ocean_spray:
+				_ocean_spray.set_shore_mask(
+					_shore_mask.get_shore_mask_texture(),
+					_shore_mask.get_world_bounds()
+				)
 
 
 func set_enabled(enabled: bool) -> void:
@@ -843,6 +911,77 @@ func get_time() -> float:
 
 func get_ocean_mesh() -> OceanMesh:
 	return _ocean_mesh
+
+
+func get_ocean_spray() -> OceanSpray:
+	return _ocean_spray
+
+
+func set_sea_spray_enabled(enabled: bool) -> void:
+	sea_spray_enabled = enabled
+	if _ocean_spray:
+		_ocean_spray.enabled = enabled
+
+
+func toggle_sea_spray() -> bool:
+	set_sea_spray_enabled(not sea_spray_enabled)
+	return sea_spray_enabled
+
+
+func is_sea_spray_enabled() -> bool:
+	return sea_spray_enabled
+
+
+func set_sea_spray_quality(quality: int) -> void:
+	sea_spray_quality = clampi(quality, 0, 3)
+	if _ocean_spray:
+		_ocean_spray.quality_tier = sea_spray_quality as OceanSpray.QualityTier
+
+
+func get_sea_spray_quality() -> int:
+	return sea_spray_quality
+
+
+func get_sea_spray_quality_name() -> String:
+	match sea_spray_quality:
+		0:
+			return "Off"
+		1:
+			return "Low"
+		2:
+			return "Medium"
+		3:
+			return "High"
+	return "Unknown"
+
+
+func get_sea_spray_energy() -> float:
+	if _ocean_spray:
+		return _ocean_spray.get_weather_energy()
+	return 0.0
+
+
+func get_sea_spray_status() -> Dictionary:
+	var status := {
+		"enabled": sea_spray_enabled,
+		"quality": sea_spray_quality,
+		"quality_name": get_sea_spray_quality_name(),
+		"initialized": _ocean_spray != null,
+		"emitting": false,
+		"particle_candidates": 0,
+		"weather_energy": 0.0,
+		"wind_strength": _weather_last_wind_t,
+		"has_fft": _wave_generator != null and _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH,
+	}
+	if _ocean_spray:
+		status.merge(_ocean_spray.get_runtime_status(), true)
+		status["quality_name"] = get_sea_spray_quality_name()
+	return status
+
+
+func set_sea_spray_render_layers(mask: int) -> void:
+	if _ocean_spray:
+		_ocean_spray.set_render_layers(mask)
 
 
 func get_shore_mask_generator() -> ShoreMaskGenerator:
@@ -903,6 +1042,7 @@ func release_runtime_resources() -> void:
 		ShaderManager.disable_effect("underwater")
 		ShaderManager.unload_effect("underwater")
 		_underwater_effect_loaded = false
+	_dispose_spray_layer()
 	_shutdown_fft_pipeline()
 	_dispose_ocean_mesh()
 	if _shore_mask:
@@ -963,6 +1103,9 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 	_load_shore_mask()
 	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH and _wave_generator:
 		_update_cascade_scales()
+	_setup_spray_layer()
+	if _ocean_spray:
+		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
 	reset_weather()
 
 	Log.info("water", "OceanManager: rebuilt ocean mesh in mode %s" % (
@@ -994,8 +1137,11 @@ func set_water_quality(quality: int) -> void:
 	# Start/stop FFT pipeline as needed
 	if needs_fft and not _wave_generator:
 		_init_fft_pipeline()
+		_setup_spray_layer()
 	elif not needs_fft and _wave_generator:
 		_shutdown_fft_pipeline()
+	if _ocean_spray:
+		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
 
 	Log.info("water", "OceanManager: Quality changed to: %s" % get_water_quality_name())
 
@@ -1057,6 +1203,8 @@ func set_wind_strength(value: float) -> void:
 	_update_cascade_scales()
 	if _physics_evaluator:
 		_physics_evaluator.init_from_cascades(_cascade_parameters, fft_map_size)
+	_weather_last_wind_t = v
+	_update_spray_weather(_weather_last_wind_t, _weather_last_wind_dir_xz)
 
 
 func apply_weather(result: WeatherTypes.WeatherResult) -> void:
@@ -1065,6 +1213,12 @@ func apply_weather(result: WeatherTypes.WeatherResult) -> void:
 
 	# Normalize MW wind range (0.0-0.9) to 0-1
 	var wind_t: float = clampf(result.wind_speed / 0.9, 0.0, 1.0)
+	var wind_dir_xz := Vector2(result.storm_direction.x, result.storm_direction.z)
+	if wind_dir_xz.length_squared() < 0.0001:
+		wind_dir_xz = Vector2(1.0, 1.0)
+	wind_dir_xz = wind_dir_xz.normalized()
+	_weather_last_wind_t = wind_t
+	_weather_last_wind_dir_xz = wind_dir_xz
 
 	# FFT mode — update cascade parameters (only when wind actually changes)
 	if _cascade_parameters.size() > 0:
@@ -1077,6 +1231,7 @@ func apply_weather(result: WeatherTypes.WeatherResult) -> void:
 
 	# All modes — update shader material uniforms (cheap, safe every frame)
 	_apply_weather_shader(result, wind_t)
+	_update_spray_weather(wind_t, wind_dir_xz)
 
 
 func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
@@ -1258,7 +1413,19 @@ func reset_weather() -> void:
 	if _physics_evaluator and _cascade_parameters.size() > 0:
 		_physics_evaluator.init_from_cascades(_cascade_parameters, fft_map_size)
 
+	_weather_last_wind_t = 0.0
+	_weather_last_wind_dir_xz = Vector2(1.0, 1.0).normalized()
+	_update_spray_weather(_weather_last_wind_t, _weather_last_wind_dir_xz)
+
 	Log.info("water", "Ocean weather reset to calm defaults")
+
+
+func _update_spray_weather(wind_t: float, wind_dir_xz: Vector2) -> void:
+	if _ocean_spray == null:
+		return
+	_ocean_spray.enabled = sea_spray_enabled
+	_ocean_spray.quality_tier = clampi(sea_spray_quality, 0, 3) as OceanSpray.QualityTier
+	_ocean_spray.set_weather(wind_t, wind_dir_xz)
 
 
 func _exit_tree() -> void:
@@ -1268,6 +1435,7 @@ func _exit_tree() -> void:
 		ShaderManager.disable_effect("underwater")
 		ShaderManager.unload_effect("underwater")
 		_underwater_effect_loaded = false
+	_dispose_spray_layer()
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()
 

@@ -92,6 +92,8 @@ var _wet_debug_button: Button = null
 var _quality_button: Button = null
 var _refraction_button: Button = null
 var _ssr_button: Button = null
+var _spray_button: Button = null
+var _spray_quality_button: Button = null
 var _underwater_button: Button = null
 var _underwater_mode_button: Button = null
 var _uw_wobble_button: Button = null
@@ -119,6 +121,8 @@ var _buoy_grid_visible: bool = false
 var _debug_mode: int = 0
 var _refraction_enabled: bool = true
 var _ssr_enabled: bool = true
+var _spray_enabled: bool = true
+var _spray_quality: int = 2
 var _underwater_volume_enabled: bool = true
 var _underwater_active_above: bool = false
 var _uw_wobble_enabled: bool = false
@@ -344,6 +348,12 @@ func _setup_ocean() -> void:
 	_ocean = OceanManager.get_ocean_mesh()
 	if _ocean != null:
 		_ocean.layers = WATER_RENDER_LAYER_MASK
+	if OceanManager.has_method("set_sea_spray_render_layers"):
+		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("is_sea_spray_enabled"):
+		_spray_enabled = OceanManager.is_sea_spray_enabled()
+	if OceanManager.has_method("get_sea_spray_quality"):
+		_spray_quality = OceanManager.get_sea_spray_quality()
 	_apply_ocean_feature_params()
 
 
@@ -550,6 +560,8 @@ func _build_ui() -> void:
 	_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_quality"))
 	_refraction_button = _add_button(_button_grid, "", Callable(self, "_toggle_refraction"))
 	_ssr_button = _add_button(_button_grid, "", Callable(self, "_toggle_ssr"))
+	_spray_button = _add_button(_button_grid, "", Callable(self, "_toggle_spray"))
+	_spray_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_spray_quality"))
 	_underwater_button = _add_button(_button_grid, "", Callable(self, "_toggle_underwater_volume"))
 	_underwater_mode_button = _add_button(_button_grid, "", Callable(self, "_toggle_underwater_active_above"))
 	_uw_wobble_button = _add_button(_button_grid, "", Callable(self, "_toggle_uw_wobble"))
@@ -654,6 +666,11 @@ func _refresh_control_labels() -> void:
 		_refraction_button.text = "Surf Refract: %s" % ("On" if _refraction_enabled else "Off")
 	if _ssr_button:
 		_ssr_button.text = "SSR: %s" % ("On" if _ssr_enabled else "Off")
+	if _spray_button:
+		_spray_button.text = "Spray: %s" % ("On" if _spray_enabled else "Off")
+	if _spray_quality_button:
+		var quality_name := OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown"
+		_spray_quality_button.text = "Spray Q: %s" % quality_name
 	if _underwater_button:
 		_underwater_button.text = "Underwater: %s" % ("On" if _underwater_volume_enabled else "Off")
 	if _underwater_mode_button:
@@ -911,6 +928,15 @@ func _update_hud() -> void:
 		"allcam" if _underwater_active_above else "belowcam",
 		"on" if _uw_wobble_enabled else "off",
 	])
+	var spray_energy := OceanManager.get_sea_spray_energy() if OceanManager and OceanManager.has_method("get_sea_spray_energy") else 0.0
+	var spray_status: Dictionary = OceanManager.get_sea_spray_status() if OceanManager and OceanManager.has_method("get_sea_spray_status") else {}
+	lines.append("spray=%s/%s  emitting=%s  candidates=%d  energy=%.2f" % [
+		"on" if _spray_enabled else "off",
+		OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown",
+		"yes" if bool(spray_status.get("emitting", false)) else "no",
+		int(spray_status.get("particle_candidates", 0)),
+		spray_energy,
+	])
 	lines.append("ocean_mesh=%s  wireframe=%s  uw_debug=%s  waterline_proto=%s/%s" % [
 		"on" if _ocean_surface_visible else "off",
 		"on" if _wireframe_enabled else "off",
@@ -973,6 +999,8 @@ func _toggle_mesh_mode() -> void:
 	OceanManager.rebuild_mesh_with_mode(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
+	if OceanManager.has_method("set_sea_spray_render_layers"):
+		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_apply_ocean_feature_params()
@@ -1037,6 +1065,8 @@ func _cycle_quality() -> void:
 	OceanManager.set_water_quality(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
+	if OceanManager.has_method("set_sea_spray_render_layers"):
+		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_apply_ocean_feature_params()
@@ -1052,6 +1082,20 @@ func _toggle_refraction() -> void:
 func _toggle_ssr() -> void:
 	_ssr_enabled = not _ssr_enabled
 	_apply_ocean_feature_params()
+	_refresh_control_labels()
+
+
+func _toggle_spray() -> void:
+	_spray_enabled = not _spray_enabled
+	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
+		OceanManager.set_sea_spray_enabled(_spray_enabled)
+	_refresh_control_labels()
+
+
+func _cycle_spray_quality() -> void:
+	_spray_quality = (_spray_quality + 1) % 4
+	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
+		OceanManager.set_sea_spray_quality(_spray_quality)
 	_refresh_control_labels()
 
 

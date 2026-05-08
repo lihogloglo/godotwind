@@ -68,6 +68,19 @@ what is actually active in code.
   500m via `smoothstep(50, 500, dist)`. Fresnel-weighted mix, additive on top
   of `SPECULAR = 0.5` (ReflectionProbe + sky cube contributions still reach
   the surface via the native path).
+- **Sea spray layer** — `src/core/water/ocean_spray.gd` owns a camera-centered
+  `GPUParticles3D` system with shader-driven spawn/cull. The particle shader
+  samples the existing FFT displacement and normal/foam texture arrays: foam is
+  the primary spawn signal, normal slope filters out broad flat foam, and a
+  lower-weight choppiness/height fallback keeps extreme crests from going dead.
+  Candidate particles are distributed in a world-space square around the
+  camera, rejected on the GPU, wind-biased, distance-faded, and disabled when
+  FFT or weather energy is unavailable. The draw shader uses
+  `src/core/water/textures/sea_spray.png` from GodotOceanWaves when present,
+  with a procedural fallback, and dissolves particles over their lifetime so
+  they atomize instead of popping. Particle size now varies per candidate:
+  mostly small wisps, some medium sheets, and rare larger bursts, with
+  independent width/height aspect variation.
 
 Native Godot 4.6 SSR is disabled on this material because declaring
 `hint_depth_texture` + `hint_screen_texture` as uniforms kills SSR pipeline
@@ -104,6 +117,12 @@ ordering — the custom in-shader SSR trace replaces it.
   shore detection at wave crests.
 - **`OceanPhysicsEvaluator` kept as fallback.** Hash mismatch means it doesn't
   perfectly match the GPU, but still useful if readback fails or is disabled.
+- **Spray is a separate toggleable layer.** It does not add new FFT generation
+  work, but it does add particle-shader texture sampling and draw cost. Use
+  Ocean Lab's `Spray` / `Spray Q` buttons or the main console command
+  `ocean_spray [on|off|status]` (`spray` alias) for visual and performance
+  A/B testing. Status reports enabled/emitting state, quality, candidate count,
+  weather energy, and FFT availability.
 
 ---
 
@@ -127,6 +146,12 @@ ordering — the custom in-shader SSR trace replaces it.
    `max_visible_depth=20m`) were picked after higher strengths reintroduced
    silhouette artifacts even with the six-guard chain, and lower strengths
    were "invisible". Current is visible but subtle.
+4. **Sea spray cost is candidate-count driven.** The foam-driven spawn path is
+   more expensive than the earlier choppiness-only prototype because each
+   candidate samples normal/foam data as well as displacement, and active
+   particles follow the surface for their lifetime. The normal/foam maps are
+   already produced for the ocean, so the added cost is particle shader work,
+   not extra FFT compute. First tuning knob is `Spray Q` / candidate count.
 
 ---
 

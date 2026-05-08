@@ -1210,6 +1210,16 @@ func _setup_console() -> void:
 		PackedStringArray(["coe -2 -9"])
 	)
 
+	console.register_command(
+		"ocean_spray",
+		_cmd_ocean_spray,
+		"Toggle sea spray for visual/performance A/B. Pass on/off/status or omit to flip.",
+		"water",
+		PackedStringArray(["spray"]),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on/off/status (omit to flip)", false)] as Array[CommandRegistry.ParameterInfo],
+		PackedStringArray(["ocean_spray", "ocean_spray off", "ocean_spray status"])
+	)
+
 	# Register weather console commands
 	if _weather_controls:
 		_weather_controls.register_console_commands(console)
@@ -2452,6 +2462,31 @@ func _cmd_toggle_debug(_args: Dictionary) -> String:
 			native_streaming_manager._impostor_renderer.debug_enabled = native_streaming_manager.debug_enabled
 		return "Debug mode: %s" % ("ON" if native_streaming_manager.debug_enabled else "OFF")
 	return "Native streaming manager not available"
+
+
+func _cmd_ocean_spray(args: Dictionary) -> String:
+	if OceanManager == null:
+		return "OceanManager not available"
+
+	var raw := String(args.get("state", "")).to_lower().strip_edges()
+	if raw in ["on", "true", "1", "yes"]:
+		OceanManager.set_sea_spray_enabled(true)
+	elif raw in ["off", "false", "0", "no"]:
+		OceanManager.set_sea_spray_enabled(false)
+	elif raw not in ["", "status"]:
+		return "Usage: ocean_spray [on|off|status]"
+	elif raw == "":
+		OceanManager.toggle_sea_spray()
+
+	var status: Dictionary = OceanManager.get_sea_spray_status()
+	return "ocean_spray=%s quality=%s emitting=%s candidates=%d energy=%.2f fft=%s" % [
+		"ON" if bool(status.get("enabled", false)) else "off",
+		String(status.get("quality_name", "Unknown")),
+		"yes" if bool(status.get("emitting", false)) else "no",
+		int(status.get("particle_candidates", 0)),
+		float(status.get("weather_energy", 0.0)),
+		"yes" if bool(status.get("has_fft", false)) else "no",
+	]
 
 
 func _cmd_toggle_batch_debug(_args: Dictionary) -> String:
