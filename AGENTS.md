@@ -111,6 +111,21 @@ When in doubt: read the Godot docs, find the canonical pattern, follow it. If th
 
 ---
 
+## Engineering Principle — Build the Final Feature, Not a Placeholder Step
+
+**Do not silently downgrade a requested feature into "let's first do X" just to have a Step 1 shipped.** Locked by user 2026-05-09 after the underwater-effect pass produced partial approximations for Snell's window, fog, rays, wobble, and particles that now need to be redone.
+
+When the user asks for a feature, the target is the finalized, production-ready version of that feature, not a scaffold, prototype, diagnostic approximation, placeholder, or "good enough first pass" unless the user explicitly asks for that.
+
+**Operational rules:**
+1. If the full production-quality implementation is too large for one session, say so up front and propose a complete implementation plan with honest scope boundaries. Do not quietly build a lesser version.
+2. Do not use phrases like "first pass", "step 1", "scaffold", "prototype", "approximation", or "temporary" as a shield for shipping behavior the user will reasonably expect to keep.
+3. If technical risk requires a probe, keep it as an explicit throwaway investigation and do not present it as the completed feature.
+4. If a feature requires a canonical architecture change, do that architecture change or stop and explain the cost. Do not bolt a partial effect onto the old architecture to show progress.
+5. Before finalizing, ask: "Will the next agent need to redo this to make the requested feature real?" If yes, the work is not done.
+
+---
+
 ## Reviewer Engagement Scope
 
 **Reviewers (`@reviewer`, `@roaster`, `@critic`, etc.) engage at two points per change, NOT continuously.** Locked by user 2026-04-08.

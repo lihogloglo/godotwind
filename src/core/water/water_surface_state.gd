@@ -22,6 +22,14 @@ var absorption_sigma: Vector3 = Vector3(0.08, 0.02, 0.012)
 var absorption_depth_falloff: float = 20.0
 var underwater_caustics_strength: float = 1.0
 
+var cpu_query_available: bool = false
+var cpu_query_source: StringName = &"none"
+var cpu_readback_bytes_per_frame: int = 0
+var displacement_texture_size: int = 0
+var height_query: Callable = Callable()
+var displacement_query: Callable = Callable()
+var normal_query: Callable = Callable()
+
 
 func has_fft() -> bool:
 	return displacement_texture_rd.is_valid() and cascade_count > 0
@@ -29,3 +37,37 @@ func has_fft() -> bool:
 
 func has_shore_mask() -> bool:
 	return shore_mask_rd.is_valid()
+
+
+func can_sample_height() -> bool:
+	return cpu_query_available and height_query.is_valid()
+
+
+func can_sample_displacement() -> bool:
+	return cpu_query_available and displacement_query.is_valid()
+
+
+func can_sample_normal() -> bool:
+	return cpu_query_available and normal_query.is_valid()
+
+
+func sample_height(world_pos: Vector3, fallback: float = 0.0) -> float:
+	if can_sample_height():
+		return float(height_query.call(world_pos))
+	return fallback
+
+
+func sample_displacement(world_pos: Vector3, fallback: Vector3 = Vector3.ZERO) -> Vector3:
+	if can_sample_displacement():
+		var result: Variant = displacement_query.call(world_pos)
+		if result is Vector3:
+			return result
+	return fallback
+
+
+func sample_normal(world_pos: Vector3, fallback: Vector3 = Vector3.UP) -> Vector3:
+	if can_sample_normal():
+		var result: Variant = normal_query.call(world_pos)
+		if result is Vector3:
+			return result
+	return fallback

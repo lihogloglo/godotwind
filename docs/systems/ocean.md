@@ -42,6 +42,20 @@ what is actually active in code.
   water, spray, UI, and broad seafloor helpers are not receiver inputs unless a
   future system explicitly opts them in. `UnderwaterVolume` is
   underwater-camera/diagnostic support only.
+- **Pre-water receiver capture component** —
+  `src/core/water/prewater_capture_renderer.gd` owns the receiver-only
+  SubViewport, matching camera, capture compositor, resolution scale, and
+  near-water activation used by waterline/underwater compositor work. Consumers
+  sample the most recent completed capture texture; the contract allows up to
+  one rendered frame of latency and intentionally avoids forced GPU syncs.
+- **Water-surface state contract** —
+  `src/core/water/water_surface_state.gd` is the shared water-surface snapshot
+  produced by `OceanManager.get_water_surface_state()`. It carries the GPU
+  shader inputs plus typed CPU query callables for height, displacement, and
+  normal sampling, along with the current query source (`gpu_readback`,
+  `cpu_spectrum`, `shore_analytical`, `flat`, or `disabled`) and readback
+  budget metadata. New water-adjacent systems should consume this state before
+  reaching directly into OceanManager internals.
 - **Native/probe/sky reflections** — the FFT surface remains opaque and avoids
   sampling scene color directly. Reflections come through Godot's normal opaque
   reflection path (`SPECULAR`, ReflectionProbe, and sky), while waterline
@@ -79,6 +93,11 @@ refraction.
   distortion belongs to the receiver compositor path, where opt-in object
   color/depth can be captured separately without repainting terrain or the
   whole ocean surface.
+- **Pre-water capture as a reusable component.** Scenes should use
+  `PrewaterCaptureRenderer` instead of building ad-hoc SubViewport/camera
+  chains. It disables the capture viewport when the compositor is off or the
+  camera is outside the near-water band, and it preserves the explicit
+  render-order/latency contract for later production underwater passes.
 - **Godot transparent screen-texture constraint.** Godot copies 3D screen
   textures after opaque rendering and before transparent rendering. Transparent
   screen-reading water is therefore not the production architecture for

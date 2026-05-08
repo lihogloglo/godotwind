@@ -1007,6 +1007,26 @@ func set_gpu_wave_readback_enabled(enabled: bool) -> void:
 		_displacement_cpu_per_cascade.clear()
 
 
+func get_water_query_source() -> StringName:
+	if not _system_enabled or not _enabled:
+		return &"disabled"
+	var is_flat := _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.FLAT
+	if is_flat:
+		return &"flat"
+	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
+		return &"gpu_readback"
+	if _physics_evaluator and _physics_evaluator._component_count > 0:
+		return &"cpu_spectrum"
+	return &"shore_analytical"
+
+
+func get_water_query_readback_bytes_per_frame() -> int:
+	var total := 0
+	for buf: PackedByteArray in _displacement_cpu_per_cascade:
+		total += buf.size()
+	return total
+
+
 func get_water_surface_state() -> WaterSurfaceState:
 	var state := WaterSurfaceState.new()
 	state.sea_level = sea_level
@@ -1031,6 +1051,13 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.absorption_sigma = _current_absorption_sigma
 	state.absorption_depth_falloff = get_absorption_depth_falloff()
 	state.underwater_caustics_strength = _current_underwater_caustics_strength
+	state.cpu_query_available = _system_enabled and _enabled
+	state.cpu_query_source = get_water_query_source()
+	state.cpu_readback_bytes_per_frame = get_water_query_readback_bytes_per_frame()
+	state.displacement_texture_size = _displacement_size
+	state.height_query = Callable(self, "get_wave_height")
+	state.displacement_query = Callable(self, "get_wave_displacement")
+	state.normal_query = Callable(self, "get_wave_normal")
 	if _active_shore_mask_texture != null:
 		var texture_rid := _active_shore_mask_texture.get_rid()
 		if texture_rid.is_valid():

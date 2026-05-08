@@ -25,6 +25,7 @@ uniform float wet_line_y = -1000.0; // world-space Y of the water line on this o
 uniform float wet_margin : hint_range(0.0, 2.0) = 0.3; // capillary rise above wet_line
 uniform float wet_albedo_darken : hint_range(0.0, 1.0) = 0.6;
 uniform float wet_roughness_target : hint_range(0.0, 0.3) = 0.05;
+uniform float retained_wetness_strength : hint_range(0.0, 1.0) = 0.35;
 uniform bool wet_debug = false;
 uniform bool dynamic_water_enabled = false;
 uniform bool dynamic_water_has_shore_mask = false;
@@ -69,13 +70,19 @@ void fragment() {
 	METALLIC = metallic;
 	SPECULAR = specular;
 
-	// Per-pixel wetness: current water contact plus retained high-water memory.
-	float memory_wetness = smoothstep(wet_line_y + wet_margin, wet_line_y, v_world_pos.y);
+	// Per-pixel wetness: current water contact is authoritative. The scalar
+	// high-water line is only drying memory, so it must not flatten the live
+	// wave/object contact contour while the object is still touching water.
+	float wet_margin_safe = max(wet_margin, 0.001);
+	float memory_wetness = 1.0 - smoothstep(wet_line_y, wet_line_y + wet_margin_safe, v_world_pos.y);
 	float contact_water_y = dynamic_water_level(v_world_pos.xz);
 	float contact_wetness = dynamic_water_enabled
-		? smoothstep(contact_water_y + wet_margin, contact_water_y, v_world_pos.y)
+		? 1.0 - smoothstep(contact_water_y, contact_water_y + wet_margin_safe, v_world_pos.y)
 		: 0.0;
-	float wetness = max(memory_wetness, contact_wetness);
+	float retained_wetness = dynamic_water_enabled
+		? memory_wetness * (1.0 - contact_wetness) * retained_wetness_strength
+		: memory_wetness;
+	float wetness = max(contact_wetness, retained_wetness);
 
 	if (wet_debug) {
 		ALBEDO = mix(ALBEDO, vec3(0.0, 0.2, 0.8), wetness * 0.8);
