@@ -22,7 +22,7 @@ Effort scale: **S** = days, **M** = 1-3 weeks, **L** = 1-3 months, **XL** = 3+ m
 - **Streaming pipeline** — best-in-class for Godot (8 ms shared budget, frustum priority, tier transitions, LRU eviction)
 - **Impostor system** — ~63k instances at 5 km in a single draw call
 - **NIF/ESM/BSA pipeline** — 47 record types, 132 animations, 629 quests, 574 books parsed
-- **Ocean shader** — analytical Gerstner + custom SSR + Beer-Lambert + caustics
+- **Ocean shader** — FFT/flat surface path + Beer-Lambert + caustics
 - **Volumetric clouds** — SunshineClouds2 (already integrated)
 - **Per-object LOD chains** — prebaked via meshoptimizer in the asset pipeline
 - **Dialogue engine** — OpenMW 4-step filter + 74 functions + 24k INFO records, topic cross-refs
@@ -112,7 +112,7 @@ Detailed feature-by-feature gap tables. Decisions are summarized in Part 2.
 
 | Feature | AAA | Godotwind | Status |
 |---|---|---|---|
-| Ocean waves (Gerstner/FFT) | FFT standard | Analytical 3-octave Gerstner, 12 waves | **SHIPPED** (FFT later) |
+| Ocean waves (FFT/flat) | FFT standard | FFT with flat fallback | **SHIPPED** |
 | Refraction + caustics | Yes | Beer-Lambert + refraction UV + custom SSR + caustics | **SHIPPED** |
 | Underwater POV | Yes | Shader exists, flat dark POV bug | **PARTIAL** |
 | Buoyancy / boat physics | Yes | GPU-readback buoyancy in framework, not wired | **FRAMEWORK** |

@@ -84,7 +84,7 @@ All three were removed together because they shared the `v_shore_factor` varying
    float shore_depth = texture(shore_mask, shore_uv).r;
    float shore_amp = shore_wave_amplitude * smoothstep(0.0, shore_wave_max_depth, shore_depth)
                    * (1.0 - smoothstep(shore_wave_max_depth, shore_wave_max_depth * 2.0, shore_depth));
-   // Gerstner with skew parameter for asymmetric breaking shape
+   // Trochoidal swash with skew parameter for asymmetric breaking shape
    // Phase driven by distance-to-shore (waves "arrive" at shore)
    ```
 3. Tune: amplitude curve, skew (steep leading face), phase speed, octave count.

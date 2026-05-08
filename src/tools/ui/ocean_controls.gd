@@ -158,8 +158,8 @@ func _sync_water_quality_dropdown() -> void:
 		OceanMesh.QualityMode.FLAT:
 			target_id = 0
 		OceanMesh.QualityMode.HIGH:
-			target_id = 2
-		_: # STANDARD
+			target_id = 1
+		_:
 			target_id = 1
 
 	for i in _panels.water_quality_btn.get_item_count():

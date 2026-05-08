@@ -327,7 +327,7 @@ func _setup_ocean() -> void:
 
 	if OceanManager.has_method("set_underwater_compositor_enabled"):
 		OceanManager.set_underwater_compositor_enabled(false)
-	ProjectSettings.set_setting("ocean/quality", 2)
+	ProjectSettings.set_setting("ocean/quality", 1)
 	if not OceanManager.is_initialized():
 		OceanManager.force_initialize()
 	if OceanManager.has_method("set_underwater_compositor_enabled"):
@@ -1039,7 +1039,7 @@ func _toggle_mesh_mode() -> void:
 	var current: int = OceanManager.get_mesh_mode()
 	var next := 1 if current == 0 else 0
 	if next == 1 and OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
-		OceanManager.set_water_quality(2)
+		OceanManager.set_water_quality(1)
 	OceanManager.rebuild_mesh_with_mode(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
@@ -1097,14 +1097,12 @@ func _cycle_quality() -> void:
 	if not OceanManager or not OceanManager.is_initialized():
 		return
 	var current: OceanMesh.QualityMode = OceanManager.get_water_quality()
-	var next := 2
+	var next := 1
 	if current == OceanMesh.QualityMode.HIGH:
-		next = 1
-	elif current == OceanMesh.QualityMode.STANDARD:
 		next = 0
 	else:
-		next = 2
-	if next != 2 and OceanManager.get_mesh_mode() == 1:
+		next = 1
+	if next == 0 and OceanManager.get_mesh_mode() == 1:
 		OceanManager.rebuild_mesh_with_mode(0)
 	OceanManager.set_water_quality(next)
 	OceanManager.set_camera(_camera)

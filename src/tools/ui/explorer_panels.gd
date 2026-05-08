@@ -430,11 +430,10 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	water_quality_btn = OptionButton.new()
 	water_quality_btn.add_item("Auto", -1)
 	water_quality_btn.add_item("Flat", 0)
-	water_quality_btn.add_item("Standard", 1)
-	water_quality_btn.add_item("High (FFT)", 2)
+	water_quality_btn.add_item("High (FFT)", 1)
 	water_quality_btn.selected = 0
 	water_quality_btn.item_selected.connect(_cb.get("water_quality_changed", Callable()))
-	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane (fallback)\n- Standard: Analytical Gerstner waves\n- High: FFT compute ocean (JONSWAP spectrum)"
+	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane (fallback)\n- High: FFT compute ocean (JONSWAP spectrum)"
 	water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	quality_row.add_child(water_quality_btn)
 	vbox.add_child(quality_row)

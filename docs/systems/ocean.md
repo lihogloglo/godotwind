@@ -18,7 +18,7 @@ what is actually active in code.
   out via `texture_get_data()`. `src/core/water/ocean_manager.gd` bilinearly
   samples the RGBA16F CPU copy and derives normals by finite differences.
   Constant 512KB readback per frame regardless of query count. Fallback chain:
-  GPU readback → `OceanPhysicsEvaluator` → `GerstnerMath`.
+  GPU readback → `OceanPhysicsEvaluator` → flat sea level plus analytical shore swash.
 - **BuoyancyBody3D** — `src/core/water/buoyancy_body.gd`, extends `RigidBody3D`.
   Multi-probe sampling (forces at probe positions yield natural torque),
   non-linear depth response (`pow(depth, buoyancy_power)`), hydrodynamic linear
@@ -42,16 +42,10 @@ what is actually active in code.
   water, spray, UI, and broad seafloor helpers are not receiver inputs unless a
   future system explicitly opts them in. `UnderwaterVolume` is
   underwater-camera/diagnostic support only.
-- **Custom in-shader SSR trace** — ported verbatim from
-  `inspos/GodotSSRWater-main/shaders/water.gdshader`. Helpers all prefixed
-  `ssr_` and live in `ocean_fft_common.gdshaderinc` (included by `ocean_fft.gdshader`): `ssr_in_screen`, `ssr_view_to_uv`,
-  `ssr_uv_to_view`, `ssr_edge_alpha`, `ssr_trace`. Uniforms in
-  `group_uniforms ssr`: `ssr_max_steps=24`, `ssr_resolution=1.5`,
-  `ssr_max_travel=30.0`, `ssr_max_diff=4.0`, `ssr_mix_strength=0.7`,
-  `ssr_screen_border_fadeout=0.3`. Distance LOD quarters the step count past
-  500m via `smoothstep(50, 500, dist)`. Fresnel-weighted mix, additive on top
-  of `SPECULAR = 0.5` (ReflectionProbe + sky cube contributions still reach
-  the surface via the native path).
+- **Native/probe/sky reflections** — the FFT surface remains opaque and avoids
+  sampling scene color directly. Reflections come through Godot's normal opaque
+  reflection path (`SPECULAR`, ReflectionProbe, and sky), while waterline
+  refraction is owned by the receiver compositor.
 - **Sea spray layer** — `src/core/water/ocean_spray.gd` owns a camera-centered
   `GPUParticles3D` system with shader-driven spawn/cull. The particle shader
   samples the existing FFT displacement and normal/foam texture arrays: foam is
@@ -66,9 +60,10 @@ what is actually active in code.
   mostly small wisps, some medium sheets, and rare larger bursts, with
   independent width/height aspect variation.
 
-Native Godot 4.6 SSR is disabled on this material because declaring
-`hint_depth_texture` + `hint_screen_texture` as uniforms kills SSR pipeline
-ordering — the custom in-shader SSR trace replaces it.
+Native Godot 4.6 SSR is not relied on for the ocean material. Declaring both
+depth and screen textures on the surface caused fragile ordering, so the
+surface owns opaque water color and the waterline compositor owns receiver
+refraction.
 
 ---
 

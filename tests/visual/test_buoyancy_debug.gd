@@ -70,7 +70,7 @@ func _ready() -> void:
 
 	# Force the ocean pipeline online in HIGH (FFT) mode so the CPU
 	# readback path activates. The autoload would otherwise sit in
-	# STANDARD (Gerstner) which has no displacement textures to read.
+	# auto/flat mode, which has no displacement textures to read.
 	#
 	# IMPORTANT: disable the prebaked shore mask BEFORE force_initialize.
 	# The prebaked mask on disk is baked against the Morrowind world
@@ -81,7 +81,7 @@ func _ready() -> void:
 	# Also write the quality into ProjectSettings BEFORE init because
 	# `_deferred_init` overwrites `water_quality` from the setting.
 	if OceanManager:
-		ProjectSettings.set_setting("ocean/quality", 2)  # HIGH = FFT
+		ProjectSettings.set_setting("ocean/quality", 1)  # HIGH = FFT
 		OceanManager.use_prebaked_shore_mask = false
 		if not OceanManager.is_initialized():
 			OceanManager.force_initialize()

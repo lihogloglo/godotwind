@@ -859,7 +859,7 @@ func _find_nearest_poi() -> Vector3:
 # =============================================================================
 
 ## Check ocean/water height at player position each frame.
-## Uses GerstnerMath for ocean surface, or static water volumes (Area3D).
+## Uses OceanManager's shared water surface, or static water volumes (Area3D).
 func _update_water_state() -> void:
 	var pos := global_position
 
@@ -867,9 +867,9 @@ func _update_water_state() -> void:
 	if _in_water_volume:
 		_water_surface_y = _water_volume_surface_y
 	elif OceanManager.is_system_enabled():
-		# Ocean wave height via GerstnerMath (only when ocean is active)
-		var time: float = float(Time.get_ticks_msec()) / 1000.0
-		_water_surface_y = GerstnerMath.get_height(pos, time)
+		# Same water-height contract used by buoyant objects; character response
+		# remains controller-specific instead of RigidBody buoyancy.
+		_water_surface_y = OceanManager.get_wave_height(pos)
 	else:
 		_water_surface_y = -INF
 

@@ -1,6 +1,6 @@
 ## OceanManager - Main coordinator for the ocean water system
 ## Manages ocean mesh, shore dampening, FFT compute pipeline, and buoyancy queries.
-## Buoyancy uses OceanPhysicsEvaluator (FFT-synced) in HIGH mode, GerstnerMath fallback in STANDARD.
+## Buoyancy uses OceanPhysicsEvaluator (FFT-synced) in HIGH mode; FLAT returns sea level.
 ## Autoload singleton: accessible via OceanManager global
 ## OPTIONAL SYSTEM - Can be completely disabled via project settings
 class_name OceanManagerClass
@@ -16,7 +16,7 @@ const SETTING_RADIUS := "ocean/radius"
 const SETTING_QUALITY := "ocean/quality"
 # Mesh mode: 0 = CLIPMAP (11-ring concentric mesh, follows camera),
 #            1 = PROJECTED (screen-space N×N grid, vertex-shader unproject).
-# FFT quality only; flat/gerstner always use CLIPMAP.
+# FFT quality only; flat always uses CLIPMAP.
 const SETTING_MESH_MODE := "ocean/mesh_mode"
 const SHORE_WAVE_SPATIAL_FREQUENCY := 0.1
 const SHORE_WAVE_REFERENCE_DEPTH := 20.0
@@ -37,8 +37,8 @@ func _get_shore_mask_path() -> String:
 
 # Quality settings
 @export_group("Quality Settings")
-## Water quality: -1 = auto, 0 = flat, 1 = standard (Gerstner), 2 = high (FFT)
-@export_range(-1, 2) var water_quality: int = -1
+## Water quality: -1 = auto, 0 = flat, any positive legacy value = high (FFT)
+@export_range(-1, 1) var water_quality: int = -1
 ## Mesh mode: 0 = CLIPMAP (default), 1 = PROJECTED grid (FFT only).
 ## Projected is Sea of Thieves / Wicked Engine canonical — single flat grid
 ## + vertex-shader unproject, zero T-junctions, uniform screen density.
@@ -134,6 +134,14 @@ var _last_sun_scan_frame: int = -1
 signal ocean_initialized()
 
 
+static func _normalize_water_quality_id(quality: int) -> int:
+	if quality == 0:
+		return 0
+	if quality > 0:
+		return 1
+	return -1
+
+
 func _ready() -> void:
 	_register_project_settings()
 
@@ -192,7 +200,7 @@ func _register_project_settings() -> void:
 			"name": SETTING_QUALITY,
 			"type": TYPE_INT,
 			"hint": PROPERTY_HINT_RANGE,
-			"hint_string": "-1,2,1"
+			"hint_string": "-1,1,1"
 		})
 
 	if not ProjectSettings.has_setting(SETTING_MESH_MODE):
@@ -212,7 +220,7 @@ func _deferred_init() -> void:
 
 	sea_level = ProjectSettings.get_setting(SETTING_SEA_LEVEL, 0.0)
 	ocean_radius = ProjectSettings.get_setting(SETTING_RADIUS, 8000.0)
-	water_quality = ProjectSettings.get_setting(SETTING_QUALITY, -1)
+	water_quality = _normalize_water_quality_id(ProjectSettings.get_setting(SETTING_QUALITY, -1))
 	water_mesh_mode = ProjectSettings.get_setting(SETTING_MESH_MODE, 0)
 
 	HardwareDetection.detect()
@@ -574,7 +582,7 @@ func _shutdown_fft_pipeline() -> void:
 
 
 # ============================================================================
-# WAVE QUERIES — GPU readback (exact match) > OceanPhysicsEvaluator > GerstnerMath
+# WAVE QUERIES - GPU readback (exact match) > OceanPhysicsEvaluator > flat sea level
 # ============================================================================
 
 ## Sum every loaded cascade's contribution at `world_pos`, applying
@@ -733,9 +741,12 @@ func get_wave_height(world_pos: Vector3) -> float:
 		return sea_level
 
 	var shore_factor := _get_shore_factor(world_pos)
-	var shore_wave_height := _get_shore_wave_height(world_pos)
+	var is_flat := _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.FLAT
+	var shore_wave_height := 0.0 if is_flat else _get_shore_wave_height(world_pos)
 	if shore_factor <= 0.01 and shore_wave_height <= 0.02:
 		return sea_level - 1000.0
+	if is_flat:
+		return sea_level
 
 	# GPU readback — exact match with visual waves (sum every cascade
 	# with its own tile_length + displacement_scale, same as the shader).
@@ -747,10 +758,7 @@ func get_wave_height(world_pos: Vector3) -> float:
 	if _physics_evaluator and _physics_evaluator._component_count > 0:
 		return sea_level + _physics_evaluator.get_height(world_pos, _time, shore_factor * wave_scale) + shore_wave_height
 
-	# Fallback: Gerstner for STANDARD mode
-	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
-	var disp := GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos)
-	return sea_level + disp.y + shore_wave_height
+	return sea_level + shore_wave_height
 
 
 ## Get wave displacement vector at world position
@@ -758,6 +766,9 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.ZERO
 	var shore_factor := _get_shore_factor(world_pos)
+	var is_flat := _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.FLAT
+	if is_flat or shore_factor <= 0.01:
+		return Vector3.ZERO
 	var shore_wave_disp := _get_shore_wave_displacement(world_pos)
 
 	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
@@ -767,8 +778,7 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 	if _physics_evaluator and _physics_evaluator._component_count > 0:
 		return _physics_evaluator.get_displacement(world_pos, _time, shore_factor * wave_scale) + shore_wave_disp
 
-	var cam_pos := _camera.global_position if _camera else Vector3.ZERO
-	return GerstnerMath.get_displacement(world_pos, _time, shore_factor * wave_scale, cam_pos) + shore_wave_disp
+	return shore_wave_disp
 
 
 ## Get wave normal at world position
@@ -1230,7 +1240,7 @@ func _dispose_ocean_mesh() -> void:
 func get_water_quality() -> OceanMesh.QualityMode:
 	if _ocean_mesh:
 		return _ocean_mesh.get_quality()
-	return OceanMesh.QualityMode.STANDARD
+	return OceanMesh.QualityMode.HIGH
 
 
 ## Rebuild the ocean mesh in a different mesh mode (CLIPMAP ↔ PROJECTED) at
@@ -1283,26 +1293,26 @@ func get_mesh_mode() -> int:
 
 
 func set_water_quality(quality: int) -> void:
-	water_quality = quality
+	water_quality = _normalize_water_quality_id(quality)
 	if not _system_enabled or not _ocean_mesh:
 		return
 
-	var old_quality := _ocean_mesh.get_quality()
 	var target_quality: OceanMesh.QualityMode
-	if quality == 0:
+	if water_quality == 0:
 		target_quality = OceanMesh.QualityMode.FLAT
-	elif quality == 1:
-		target_quality = OceanMesh.QualityMode.STANDARD
+	elif water_quality < 0:
+		HardwareDetection.detect()
+		target_quality = OceanMesh.QualityMode.HIGH if HardwareDetection.get_recommended_quality() == HardwareDetection.WaterQuality.HIGH else OceanMesh.QualityMode.FLAT
 	else:
 		target_quality = OceanMesh.QualityMode.HIGH
 
-	var needs_fft := _ocean_mesh.set_quality(target_quality, ocean_radius)
+	_ocean_mesh.set_quality(target_quality, ocean_radius)
 
 	# Start/stop FFT pipeline as needed
-	if needs_fft and not _wave_generator:
+	if target_quality == OceanMesh.QualityMode.HIGH and not _wave_generator:
 		_init_fft_pipeline()
 		_setup_spray_layer()
-	elif not needs_fft and _wave_generator:
+	elif target_quality != OceanMesh.QualityMode.HIGH and _wave_generator:
 		_shutdown_fft_pipeline()
 	if _ocean_spray:
 		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
@@ -1320,8 +1330,6 @@ func get_water_quality_name() -> String:
 		match _ocean_mesh.get_quality():
 			OceanMesh.QualityMode.HIGH:
 				return "High (FFT)"
-			OceanMesh.QualityMode.STANDARD:
-				return "Standard (Gerstner)"
 			_:
 				return "Flat"
 	return "Unknown"
@@ -1470,8 +1478,6 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	if not mat:
 		return
 
-	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
-
 	# Water color darkens and desaturates in storms (driven by cloud coverage)
 	var storm_t: float = clampf(result.cloud_coverage, 0.0, 1.0)
 	var shallow_col: Color = _SHALLOW_CALM.lerp(_SHALLOW_STORM, storm_t)
@@ -1489,10 +1495,6 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	# Normal strength — gentle in calm, choppy in storms
 	mat.set_shader_parameter("normal_strength", lerpf(0.6, 1.6, wind_t))
 
-	# Wave scale for STANDARD mode (Gerstner has no runtime wind — we scale amplitude)
-	if quality == OceanMesh.QualityMode.STANDARD:
-		mat.set_shader_parameter("wave_scale", lerpf(0.4, 2.2, wind_t) * wave_scale)
-
 	# Calm water reflects more sky, storms reflect less (sky obscured by clouds)
 	mat.set_shader_parameter("sky_tint_strength", lerpf(0.8, 0.3, wind_t))
 
@@ -1507,7 +1509,7 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	mat.set_shader_parameter("shore_wave_steepness", _current_shore_wave_steepness)
 
 	# FFT-specific uniforms
-	if quality == OceanMesh.QualityMode.HIGH:
+	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
 		# Calm water is glassy smooth, storms are rough
 		mat.set_shader_parameter("roughness", lerpf(0.01, 0.15, wind_t))
 		# 2026-04-10 (r2) — SSS is a choppiness-driven ALBEDO blend. Stormy
@@ -1567,8 +1569,7 @@ func reset_weather() -> void:
 	_current_shore_wave_steepness = 0.58
 	mat.set_shader_parameter("shore_wave_steepness", _current_shore_wave_steepness)
 
-	var quality: OceanMesh.QualityMode = _ocean_mesh.get_quality()
-	if quality == OceanMesh.QualityMode.HIGH:
+	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
 		mat.set_shader_parameter("roughness", 0.01)
 		mat.set_shader_parameter("sss_strength", 0.8)
 		mat.set_shader_parameter("sss_emission_strength", 0.45)

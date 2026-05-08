@@ -185,7 +185,7 @@ func get_height(world_pos: Vector3, time: float, shore_factor: float = 1.0) -> f
 	return h * shore_factor
 
 
-## Get full 3D displacement (Gerstner-style horizontal + vertical).
+## Get full 3D displacement (horizontal + vertical).
 func get_displacement(world_pos: Vector3, time: float, shore_factor: float = 1.0) -> Vector3:
 	if _component_count == 0:
 		return Vector3.ZERO

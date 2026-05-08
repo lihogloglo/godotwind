@@ -66,6 +66,7 @@ uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
 uniform float shore_wet_runup_width : hint_range(0.5, 20.0) = 8.0;
 uniform float ocean_time = 0.0;
+#include "res://src/core/water/shaders/ocean_shore_common.gdshaderinc"
 // === CUSTOM: enable_texturing toggle for test scenes without MW textures ===
 uniform bool enable_texturing = true;
 // === CUSTOM: Morrowind LTEX sidecar texturing ===
@@ -120,73 +121,6 @@ float random(in vec2 xy) {
 
 vec2 rotate_vec2(const vec2 v, const vec2 cs) {
 	return vec2(fma(cs.x, v.x, cs.y * v.y), fma(cs.x, v.y, -cs.y * v.x));
-}
-
-const float SHORE_TAU = 6.2831853;
-
-float shore_breaker_envelope(float raw_dist) {
-	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	float shore_ramp = smoothstep(0.05, 0.20, dist_t);
-	float offshore_fade = 1.0 - smoothstep(0.42, 0.82, dist_t);
-	return shore_ramp * offshore_fade;
-}
-
-float shore_runup_envelope(float raw_dist) {
-	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
-	return 1.0 - smoothstep(0.00, 0.12, dist_t);
-}
-
-float shore_swash_curve(float phase) {
-	float cycle = fract(phase / SHORE_TAU);
-	float uprush = smoothstep(0.02, 0.24, cycle);
-	float backwash = 1.0 - smoothstep(0.24, 0.72, cycle);
-	return uprush * backwash;
-}
-
-float shore_skewed_sine(float phase, float steepness) {
-	float s = sin(phase);
-	float c = cos(phase);
-	float skew = clamp(0.22 + 0.22 * steepness, 0.0, 0.44);
-	return clamp(s + (2.0 * s * c) * skew, -1.0, 1.0);
-}
-
-float shore_crest_shape(float phase, float steepness) {
-	float skew_s = shore_skewed_sine(phase, steepness);
-	float crest = max(skew_s, 0.0);
-	float trough = max(-skew_s, 0.0);
-	float crest2 = crest * crest;
-	float shaped_crest = crest2 * (1.65 - 0.65 * crest);
-	float broad_trough = trough * (2.0 - trough);
-	return shaped_crest - broad_trough * mix(0.40, 0.22, steepness);
-}
-
-float shore_along_modulation(vec2 world_xz, vec2 shore_dir) {
-	vec2 tangent = vec2(-shore_dir.y, shore_dir.x);
-	float along = dot(world_xz, tangent);
-	float n = sin(along * 0.035 + ocean_time * 0.19) * 0.50
-		+ sin(along * 0.079 - ocean_time * 0.13) * 0.25;
-	return clamp(0.78 + n * 0.28, 0.55, 1.0);
-}
-
-vec2 shore_direction_from_mask(vec2 shore_uv, vec2 encoded_dir) {
-	vec2 dir = encoded_dir * 2.0 - 1.0;
-	if (length(dir) > 0.01) {
-		return normalize(dir);
-	}
-
-	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
-	for (int radius = 1; radius <= 8; radius *= 2) {
-		vec2 step_uv = texel * float(radius);
-		float x_pos = texture(shore_mask, clamp(shore_uv + vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
-		float x_neg = texture(shore_mask, clamp(shore_uv - vec2(step_uv.x, 0.0), vec2(0.0), vec2(1.0))).a;
-		float z_pos = texture(shore_mask, clamp(shore_uv + vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
-		float z_neg = texture(shore_mask, clamp(shore_uv - vec2(0.0, step_uv.y), vec2(0.0), vec2(1.0))).a;
-		vec2 gradient_dir = vec2(x_pos - x_neg, z_pos - z_neg);
-		if (length(gradient_dir) > 1e-5) {
-			return normalize(gradient_dir);
-		}
-	}
-	return vec2(0.0);
 }
 
 float shore_land_distance(vec2 shore_uv, vec2 offshore_dir) {

@@ -62,7 +62,7 @@ Priority-based: each Move implements `check_relevance(input) → StringName`.
 ## Water Detection
 
 Two sources:
-1. **Ocean** — `GerstnerMath.get_height(position, time)` sampled every frame
+1. **Ocean** — `OceanManager.get_wave_height(position)` sampled every frame, matching the same water-height contract used by buoyant objects
 2. **Static water volumes** — Area3D colliders trigger `enter_water_volume()` / `exit_water_volume()`
 
 Flags injected into InputPackage: `is_in_water`, `water_surface_y`.

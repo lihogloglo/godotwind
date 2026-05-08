@@ -2,16 +2,15 @@
 ## Creates a multi-LOD mesh that follows the camera
 ## Inner rings are high detail, outer rings are lower detail
 ##
-## Three quality modes:
+## Two quality modes:
 ## - FLAT: Simple flat plane with basic lighting (software renderer fallback)
-## - STANDARD: Analytical multi-octave Gerstner waves via ocean_standard.gdshader
 ## - HIGH: FFT compute ocean via ocean_fft.gdshader (JONSWAP spectrum, multi-cascade)
 class_name OceanMesh
 extends MeshInstance3D
 
 # Clipmap configuration. HIGH/FFT gets denser near-camera geometry so the
-# shore-wave breaker profile has enough vertices; FLAT/STANDARD keep the
-# lighter legacy mesh for low-end hardware.
+# shore-wave breaker profile has enough vertices; FLAT keeps the lighter legacy
+# mesh for low-end hardware.
 const LEGACY_NUM_LOD_RINGS: int = 11
 const LEGACY_BASE_QUAD_SIZE: float = 2.0
 const LEGACY_RING_VERTEX_COUNT: int = 64
@@ -25,17 +24,17 @@ const HIGH_RING_VERTEX_COUNT: int = 80
 # comparison path while FFT clipmap density is tuned independently.
 const PROJECTED_GRID_DIM: int = 192
 
-enum QualityMode { FLAT, STANDARD, HIGH }
+enum QualityMode { FLAT, HIGH }
 # MeshMode is independent of QualityMode. CLIPMAP is the 11-ring concentric
 # mesh built by `_create_clipmap_mesh()`. PROJECTED is the Sea of Thieves /
 # Wicked Engine flat grid + vertex-shader unproject path. PROJECTED is only
-# meaningful in HIGH quality (FFT) — FLAT and STANDARD ignore it.
+# meaningful in HIGH quality (FFT); FLAT ignores it.
 enum MeshMode { CLIPMAP, PROJECTED }
 
 # Shader state
 var _material: ShaderMaterial = null
 var _shader: Shader = null
-var _quality: QualityMode = QualityMode.STANDARD
+var _quality: QualityMode = QualityMode.HIGH
 var _mesh_mode: MeshMode = MeshMode.CLIPMAP
 
 # Cached state for quality switching
@@ -51,8 +50,7 @@ func initialize(radius: float, quality_override: int = -1, mesh_mode: int = -1) 
 	if mesh_mode >= 0:
 		_mesh_mode = mesh_mode as MeshMode
 	# Projected grid is FFT-only. Downgrade silently if the user asked for
-	# PROJECTED at a lower quality — there's no point unprojecting for a
-	# Gerstner shader that reads flat vertex positions.
+	# PROJECTED at flat quality.
 	if _mesh_mode == MeshMode.PROJECTED and _quality != QualityMode.HIGH:
 		Log.warn("water", "OceanMesh: PROJECTED mesh mode requested but quality is not HIGH (FFT); falling back to CLIPMAP")
 		_mesh_mode = MeshMode.CLIPMAP
@@ -72,20 +70,15 @@ func _select_quality(quality_override: int) -> void:
 	if quality_override == 0:
 		_quality = QualityMode.FLAT
 		Log.info("water", "OceanMesh: Quality override: FLAT")
-	elif quality_override == 1:
-		_quality = QualityMode.STANDARD
-		Log.info("water", "OceanMesh: Quality override: STANDARD (Gerstner)")
-	elif quality_override >= 2:
+	elif quality_override > 0:
 		_quality = QualityMode.HIGH
 		Log.info("water", "OceanMesh: Quality override: HIGH (FFT)")
 	else:
 		# Auto-detect based on hardware
 		HardwareDetection.detect()
 		var recommended := HardwareDetection.get_recommended_quality()
-		if recommended == HardwareDetection.WaterQuality.ULTRA_LOW:
+		if recommended != HardwareDetection.WaterQuality.HIGH:
 			_quality = QualityMode.FLAT
-		elif HardwareDetection.is_integrated_gpu():
-			_quality = QualityMode.STANDARD
 		else:
 			_quality = QualityMode.HIGH
 		Log.info("water", "OceanMesh: Auto-detected quality: %s (GPU: %s)" % [
@@ -104,21 +97,11 @@ func _create_shader() -> void:
 				shader_path = "res://src/core/water/shaders/ocean_fft_projected.gdshader"
 			_shader = load(shader_path) as Shader
 			if not _shader:
-				Log.warn("water", "OceanMesh: FFT shader not found at %s, falling back to Gerstner" % shader_path)
-				_quality = QualityMode.STANDARD
-				_create_shader()
-				return
-			Log.info("water", "OceanMesh: Using %s" % shader_path.get_file())
-
-		QualityMode.STANDARD:
-			var shader_path := "res://src/core/water/shaders/ocean_standard.gdshader"
-			_shader = load(shader_path) as Shader
-			if not _shader:
-				Log.warn("water", "OceanMesh: Standard shader not found, falling back to flat")
+				Log.warn("water", "OceanMesh: FFT shader not found at %s, falling back to flat" % shader_path)
 				_quality = QualityMode.FLAT
 				_create_shader()
 				return
-			Log.info("water", "OceanMesh: Using ocean_standard.gdshader (Gerstner)")
+			Log.info("water", "OceanMesh: Using %s" % shader_path.get_file())
 
 		QualityMode.FLAT:
 			_shader = _create_inline_flat_shader()
@@ -154,8 +137,6 @@ func _create_material() -> void:
 
 	if _quality == QualityMode.HIGH:
 		_setup_fft_defaults()
-	elif _quality == QualityMode.STANDARD:
-		_setup_standard_defaults()
 	# FLAT shader has sensible defaults in its code
 
 	material_override = _material
@@ -166,24 +147,11 @@ func _setup_fft_defaults() -> void:
 	if not _material:
 		return
 
-	# Foam texture (same as standard)
 	var foam_tex := _load_foam_texture()
 	_material.set_shader_parameter("foam_texture", foam_tex)
 	_cached_foam_texture = foam_tex
 
 	Log.debug("water", "OceanMesh: FFT shader defaults configured")
-
-
-func _setup_standard_defaults() -> void:
-	if not _material:
-		return
-
-	# Load foam texture (procedural fallback if not found)
-	var foam_tex := _load_foam_texture()
-	_material.set_shader_parameter("foam_texture", foam_tex)
-	_cached_foam_texture = foam_tex
-
-	Log.debug("water", "OceanMesh: Standard shader defaults configured")
 
 
 func _load_foam_texture() -> Texture2D:
@@ -517,7 +485,6 @@ func set_shore_mask(mask: Texture2D, world_bounds: Rect2, fade_distance: float =
 
 func set_debug_shore_mask(enabled: bool) -> void:
 	_debug_shore_mask = enabled
-	# Not supported in the new standard shader, but keep API for future use
 	Log.debug("water", "OceanMesh: Debug shore mask: %s" % enabled)
 
 
@@ -563,7 +530,7 @@ func _restore_cached_state() -> void:
 	if _cached_wave_scale != 1.0:
 		set_wave_scale(_cached_wave_scale)
 
-	if _quality in [QualityMode.STANDARD, QualityMode.HIGH] and _cached_foam_texture:
+	if _quality == QualityMode.HIGH and _cached_foam_texture:
 		_material.set_shader_parameter("foam_texture", _cached_foam_texture)
 
 
@@ -575,7 +542,5 @@ static func _quality_name_for(q: QualityMode) -> String:
 	match q:
 		QualityMode.HIGH:
 			return "High (FFT)"
-		QualityMode.STANDARD:
-			return "Standard (Gerstner)"
 		_:
 			return "Flat"

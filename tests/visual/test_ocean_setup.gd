@@ -2,7 +2,7 @@ extends Node3D
 
 ## Visual test for ocean rendering.
 ## Run this scene and verify:
-## - Gerstner wave motion visible
+## - FFT wave motion visible
 ## - Shore mask dampening (if terrain present)
 ## - Reflections via native SSR + sky
 ## - Depth-based water coloring

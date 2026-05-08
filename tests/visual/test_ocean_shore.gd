@@ -135,6 +135,8 @@ func _ready() -> void:
 	# This gives us the compute pipeline (displacement/normal textures) that
 	# the FFT shader requires as global uniforms.
 	# ================================================================
+	if OceanManager:
+		ProjectSettings.set_setting("ocean/quality", 1)
 	if OceanManager and not OceanManager.is_initialized():
 		OceanManager.force_initialize()
 	if OceanManager and OceanManager.is_initialized():
@@ -148,10 +150,10 @@ func _ready() -> void:
 		var white_tex := ImageTexture.create_from_image(white_img)
 		_ocean.set_shore_mask(white_tex, Rect2(-50000, -50000, 100000, 100000))
 	else:
-		# Fallback: standalone mesh in STANDARD (Gerstner) mode — no FFT needed
+		# Fallback: standalone flat mesh when the FFT autoload is unavailable.
 		_ocean = OceanMesh.new()
 		add_child(_ocean)
-		_ocean.initialize(5000.0, 1)  # STANDARD mode (no global uniform dependency)
+		_ocean.initialize(5000.0, 0)
 
 	# ================================================================
 	# UI LABEL
@@ -228,7 +230,7 @@ func _process(delta: float) -> void:
 
 	_label.text = "Ocean Shore Test\n"
 	_label.text += "shore_blend_distance: %.1fm (press 1/2/3)\n" % blend_dist
-	_label.text += "Quality: %s\n" % ("FFT" if _ocean.get_quality() == OceanMesh.QualityMode.HIGH else "Gerstner")
+	_label.text += "Quality: %s\n" % ("FFT" if _ocean.get_quality() == OceanMesh.QualityMode.HIGH else "Flat")
 	_label.text += "Cubes: %d (should bob with waves)\n" % _buoyancy_cubes.size()
 	_label.text += "Debug grid: %s (G to toggle)\n" % ("ON — red spheres = CPU wave surface" if _debug_grid_visible else "OFF")
 	_label.text += "F = distant view | WASD + mouse = fly | Q/E = up/down"

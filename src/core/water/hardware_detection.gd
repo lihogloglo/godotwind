@@ -5,8 +5,8 @@ extends RefCounted
 
 enum WaterQuality {
 	ULTRA_LOW,  # Flat plane with basic material (no shader)
-	LOW,        # Simple vertex waves, basic fragment
-	MEDIUM,     # Gerstner waves, no screen sampling
+	LOW,        # Flat fallback for old/low-end GPUs
+	MEDIUM,     # Flat fallback for integrated GPUs
 	HIGH,       # Full shader with all effects
 }
 
@@ -117,7 +117,7 @@ static func _calculate_recommended_quality() -> WaterQuality:
 		if gpu_lower.contains(pattern):
 			return WaterQuality.LOW
 
-	# Integrated GPU = medium (skip expensive screen effects)
+	# Integrated GPU = flat fallback. There is no middle analytical ocean path.
 	if _is_integrated_gpu:
 		return WaterQuality.MEDIUM
 
@@ -125,7 +125,7 @@ static func _calculate_recommended_quality() -> WaterQuality:
 	if _has_compute:
 		return WaterQuality.HIGH
 
-	# Default to medium for safety
+	# Default to flat for safety
 	return WaterQuality.MEDIUM
 
 
@@ -177,9 +177,9 @@ static func quality_name(quality: WaterQuality) -> String:
 		WaterQuality.ULTRA_LOW:
 			return "Ultra Low (Flat)"
 		WaterQuality.LOW:
-			return "Low (Basic Waves)"
+			return "Low (Flat)"
 		WaterQuality.MEDIUM:
-			return "Medium (Gerstner)"
+			return "Medium (Flat)"
 		WaterQuality.HIGH:
 			return "High (Full Effects)"
 	return "Unknown"
@@ -191,9 +191,9 @@ static func quality_description(quality: WaterQuality) -> String:
 		WaterQuality.ULTRA_LOW:
 			return "Flat water plane with basic color. Best for software renderers."
 		WaterQuality.LOW:
-			return "Simple animated waves with basic lighting. For old/low-end GPUs."
+			return "Flat water plane with basic color. For old/low-end GPUs."
 		WaterQuality.MEDIUM:
-			return "Gerstner waves with foam. No depth/screen effects. For integrated GPUs."
+			return "Flat water plane with basic color. For integrated GPUs."
 		WaterQuality.HIGH:
 			return "Full ocean simulation with all effects. Requires dedicated GPU."
 	return ""

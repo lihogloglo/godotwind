@@ -31,7 +31,7 @@ Systems overview derived from the actual codebase.
 | `bsa/` | BSA archive extraction |
 | `character/` | NPC assembly (Morrowind body parts, humanoid GLB), controller |
 | `animation/` | Animation loading, state machine, IK (TwoBoneIK3D), retargeting |
-| `water/` | Ocean mesh, Gerstner waves, buoyancy, shore mask |
+| `water/` | Ocean mesh, FFT waves, flat fallback, buoyancy, shore mask |
 | `console/` | Developer console, command registry, object picking |
 | `deformation/` | RTT-based terrain deformation |
 | `texture/` | DDS/TGA loading, material dedup (hash includes 7 texture slots, apply mode, ZBuffer, specular color) |

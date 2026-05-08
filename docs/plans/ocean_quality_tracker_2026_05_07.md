@@ -247,7 +247,7 @@ exist.
   frame by the moving wave intersection: underwater absorption/fog/caustics on
   the submerged portion of the screen, normal above-water atmosphere on the
   exposed portion, and a waterline that moves up/down with the FFT waves.
-- Shore-wave quality requirement: the near-land analytical/Gerstner shore
+- Shore-wave quality requirement: the near-land analytical shore-swash
   waves are an accepted architecture choice for adding surf close to land while
   FFT handles the broader ocean, but the current animation direction is wrong.
   The shore waves appear to travel out toward the ocean instead of in toward
@@ -284,10 +284,10 @@ exist.
   normal, followed by the same reconstructed-world-position waterline reject.
   This keeps the proper receiver-buffer architecture while removing the brittle
   above-water entry-ray dependency from the visible bending path.
-- Shore-wave timing/run-up follow-up: the analytical shore/Gerstner layer now
+- Shore-wave timing/run-up follow-up: the analytical shore-swash layer now
   uses a shared `ocean_time` clock and a gravity-wave dispersion-derived
   temporal frequency instead of a separate weather-scaled speed. User visually
-  confirmed the shore/Gerstner wave speed now matches the FFT cadence better.
+  confirmed the shore-swash speed now matches the FFT cadence better.
   A second pass removed the first-meter dead strip by deriving a fallback shore
   direction from neighboring shore-mask alpha samples when shore seed pixels
   encode no direction, allowing the run-up lobe to operate at `raw_dist == 0`.
@@ -358,7 +358,7 @@ Use InputMap actions for movement and camera mode. Do not add new raw
   project action.
 - Cycle ocean shader debug modes.
 - Toggle clipmap/projected mesh mode.
-- Toggle FFT/Gerstner/flat quality only through `OceanManager` public API.
+- Toggle FFT/flat quality only through `OceanManager` public API.
 - Toggle buoyancy surface grid.
 - Spawn buoyant object.
 - Cycle weather presets.
@@ -396,7 +396,7 @@ Implemented as a left-side button panel plus wetness sliders:
 - `Sun: <angle>` toggles high/low sun for crest-translucency checks.
 - `Wet Debug: <state>` toggles wetness debug coloring.
 - `Center Shore` returns the camera to the scanned shoreline playground.
-- `Quality: <quality>` cycles flat/Gerstner/FFT.
+- `Quality: <quality>` cycles flat/FFT.
 - Surface refraction is retired from the FFT surface shader. The surface stays
   opaque; above-water submerged-object bending is owned by the waterline
   compositor.
@@ -471,7 +471,7 @@ Tasks:
 - Add a readback mode:
   - `sync`: current `texture_get_data()` path.
   - `async`: `texture_get_data_async()` callback path.
-  - `disabled`: use `OceanPhysicsEvaluator` or Gerstner fallback.
+  - `disabled`: use `OceanPhysicsEvaluator` or flat sea-level fallback.
 - Add a lightweight benchmark route for the ocean lab that can run without
   screenshots and logs average FPS/frame time for each toggle set.
 
@@ -519,7 +519,7 @@ The shore system exists, but it needs to stop looking blocky.
 
 Current 2026-05-07 visual state:
 
-- Shore/Gerstner wave speed is now visually close to the FFT wave cadence after
+- Shore-swash wave speed is now visually close to the FFT wave cadence after
   switching to shared `ocean_time` plus dispersion-derived timing.
 - The waterline now moves up/down at the shore after the shader derives a
   fallback SDF direction from neighboring shore-mask alpha samples on zero
