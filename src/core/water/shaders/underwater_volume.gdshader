@@ -3,12 +3,8 @@ shader_type spatial;
 #define MAX_CASCADES 8
 
 // ============================================================================
-// Underwater Volume — Step 2 (caustics + absorption + wobble)
+// Underwater Volume — diagnostic slab + absorption + wobble
 // ============================================================================
-//
-// Ported from paddy-exe/Godot-RealTimeCaustics (MIT license):
-//   https://github.com/paddy-exe/Godot-RealTimeCaustics
-//   Caustics.gdshader at branch 4.3+
 //
 // Architecture: a BoxMesh with front-face culling + depth-test disabled, so
 // the shader runs when the camera is INSIDE the volume. A box follower node
@@ -23,48 +19,19 @@ shader_type spatial;
 // important thing we got wrong in the previous CompositorEffect attempt.
 //
 // ----------------------------------------------------------------------------
-// DEVIATION FROM PADDY-EXE REFERENCE
+// PRODUCTION OWNERSHIP
 // ----------------------------------------------------------------------------
-// paddy-exe uses:
-//     render_mode blend_add, cull_front, depth_test_disabled, ambient_light_disabled
-// because its shader is purely additive caustics.
-//
-// We use:
-//     render_mode blend_mix, cull_front, depth_test_disabled, unshaded
-// because Step 1 will add Beer-Lambert absorption via mix(scene, tint, ...),
-// which cannot coexist with blend_add. The shader will sample SCREEN_TEXTURE
-// itself, do the mix internally, then add caustics on top in a single pass.
-// For Step 0, we still only output caustics — the SCREEN_TEXTURE sample and
-// absorption code lands in Step 1. This render_mode choice is an anticipatory
-// adaptation, not a creative addition, made in advance so Step 0 and Step 1
-// touch the same render state without requiring a re-verification of Step 0.
-//
-// `unshaded` replaces paddy's `ambient_light_disabled` + `light()` function
-// approach: we don't need multi-light support, the underwater caustics should
-// be driven by the directional sun only. Computing everything in fragment()
-// instead of light() is simpler and matches our single-sun use case.
+// Production underwater caustics are owned by WaterlineCompositorEffect /
+// waterline_probe.glsl. This volume is retained only for interactive
+// diagnostic checks of underwater volume classification, absorption, and
+// wobble behavior.
 // ============================================================================
 
 render_mode blend_mix, cull_front, depth_test_disabled, unshaded;
 
-// ── Caustics ────────────────────────────────────────────────────────────────
-uniform sampler2D caustics_noise : filter_linear, repeat_enable;
-uniform float caustics_scale = 4.0;
-uniform float caustics_speed = 0.1;
-uniform float caustics_strength : hint_range(0.0, 4.0) = 1.0;
-uniform float caustics_power : hint_range(0.25, 8.0) = 2.0;
-uniform float caustics_chroma_split : hint_range(0.0, 0.02) = 0.002;
-uniform float caustics_luminance_mask_strength : hint_range(-2.0, 2.0) = 0.2;
-uniform sampler2D luma_gradient : hint_default_white;
-
-// ── Sun direction (driven by GDScript from the active DirectionalLight3D) ──
-// paddy-exe pulls LIGHT from light() and transforms to world space per-light.
-// We project from a single sun direction set from CPU-side.
-uniform vec3 sun_direction_world = vec3(0.3, 0.8, 0.2);
-
 // ── Volume bounds (sea level + depth) ──────────────────────────────────────
 // Set from GDScript each frame. `sea_level` is the Y of the water surface.
-// `volume_depth` is how far below `sea_level` caustics are drawn.
+// `volume_depth` is how far below `sea_level` the diagnostic volume draws.
 uniform float sea_level = 0.0;
 uniform float volume_depth = 40.0;
 uniform bool use_dynamic_water_surface = false;
@@ -115,46 +82,19 @@ uniform sampler2D DEPTH_TEXTURE : hint_depth_texture;
 uniform sampler2D SCREEN_TEXTURE : hint_screen_texture;
 
 
-// ── Helpers (from paddy-exe, verbatim) ─────────────────────────────────────
-
-vec2 panner(vec2 uv, float speed, float tiling) {
-	return (vec2(1.0, 0.0) * TIME * speed) + (uv * tiling);
-}
-
-vec3 aberration_sample(sampler2D tex, vec2 uv, float split) {
-	vec2 uv1 = uv + vec2(split, split);
-	vec2 uv2 = uv + vec2(split, -split);
-	vec2 uv3 = uv + vec2(-split, -split);
-	float r = texture(tex, uv1).r;
-	float g = texture(tex, uv2).r;
-	float b = texture(tex, uv3).r;
-	return vec3(r, g, b);
-}
-
-float luminance(vec3 color) {
-	return dot(color, vec3(0.299, 0.587, 0.114));
-}
-
-// Build a rotation matrix whose +Z axis points along `direction`.
-// Used to project world positions into a caustic UV plane perpendicular to
-// the sun direction (caustics look right when they come from "above" relative
-// to the sun, not from world up).
-mat3 make_rotation_dir(vec3 direction, vec3 up) {
-	vec3 xaxis = normalize(cross(up, direction));
-	vec3 yaxis = normalize(cross(direction, xaxis));
-	return mat3(
-		vec3(xaxis.x, yaxis.x, direction.x),
-		vec3(xaxis.y, yaxis.y, direction.y),
-		vec3(xaxis.z, yaxis.z, direction.z)
-	);
-}
-
 float get_dynamic_water_level(vec2 world_xz, float dist_to_camera) {
 	if (!use_dynamic_water_surface) {
 		return sea_level;
 	}
 
-	return water_surface_dynamic_level(world_xz, dist_to_camera, true, true, true);
+	WaterSurfaceContractSample surface = water_surface_query(
+		vec3(world_xz.x, sea_level, world_xz.y),
+		dist_to_camera,
+		true,
+		true,
+		true
+	);
+	return surface.y;
 }
 
 
@@ -248,19 +188,18 @@ void fragment() {
 	}
 
 	// Re-sample the scene color at the (possibly unwobbled) UV. Absorption
-	// and caustics continue to use the UN-wobbled world position — wobble is
-	// a visual-only refraction, not a physical ray bend. DIVE.omwfx takes the
-	// same stance.
+	// continues to use the UN-wobbled world position; wobble is a visual-only
+	// refraction, not a physical ray bend.
 	scene_color = texture(SCREEN_TEXTURE, wobbled_uv).rgb;
 	float camera_scene_dist = length(scene_world_pos - cam_pos);
 	float water_level = get_dynamic_water_level(scene_world_pos.xz, camera_scene_dist);
 
-	// Test whether the scene pixel is inside the caustic volume.
+	// Test whether the scene pixel is inside the diagnostic underwater volume.
 	// Volume is an axis-aligned slab: [sea_level - volume_depth, sea_level] in Y.
 	// (The BoxMesh also constrains X/Z to the follower box, but Y is the
-	// physically meaningful bound — we want caustics on the seafloor, not above
+	// physically meaningful bound — we want underwater diagnostics below the
 	// water, and not drawn on the sky when depth==1.)
-	float y_top = water_level - 0.03;
+	float y_top = water_level + 0.02;
 	float y_bot = water_level - volume_depth;
 	inside_volume = step(y_bot, scene_world_pos.y) * step(scene_world_pos.y, y_top);
 
@@ -282,10 +221,8 @@ void fragment() {
 			ALPHA = 0.85;
 		}
 	} else if (inside_volume < 0.5) {
-		// Pixel is above water or below the volume — draw fully transparent.
-		// The slab test also rejects the ocean surface seen from below (@water's
-		// flat dark ceiling) because those pixels reconstruct to world_pos.y
-		// ≈ sea_level which sits AT the slab top, not inside it.
+		// Pixel is above water or below the volume: draw fully transparent.
+		// Exact receiver classification belongs to the waterline compositor.
 		ALBEDO = vec3(0.0);
 		ALPHA = 0.0;
 	} else {
@@ -301,34 +238,7 @@ void fragment() {
 		}
 		vec3 absorbed = mix(water_tint, scene_color, transmittance);
 
-		// ── Step 0: Caustics (unchanged, just applied AFTER absorption) ─────
-		mat3 lrm = make_rotation_dir(sun_direction_world, vec3(0.0, 1.0, 0.0));
-		vec2 caustic_uv = (lrm * scene_world_pos).xy;
-
-		vec2 uv1 = panner(caustic_uv, 0.75 * caustics_speed, 1.0 / caustics_scale);
-		vec2 uv2 = panner(caustic_uv, caustics_speed, -1.0 / caustics_scale);
-
-		vec3 caus1 = aberration_sample(caustics_noise, uv1, caustics_chroma_split);
-		vec3 caus2 = aberration_sample(caustics_noise, uv2, caustics_chroma_split);
-		caus1 = pow(caus1, vec3(caustics_power));
-		caus2 = pow(caus2, vec3(caustics_power));
-		vec3 c = min(caus1, caus2) * caustics_strength;
-
-		// Luminance masking — caustics fade on dark surfaces so they don't
-		// blow out shadowed geometry. Use ABSORBED scene luma so the mask
-		// responds to what the viewer actually sees, not the raw (pre-tinted)
-		// input.
-		float scene_luma = luminance(absorbed);
-		scene_luma = texture(luma_gradient, vec2(scene_luma)).r;
-		float luma_mask = mix(1.0, scene_luma, caustics_luminance_mask_strength);
-
-		// Caustics also attenuate with travel distance — the light focused
-		// onto the seafloor has to travel back through the same water column
-		// to reach the camera, so it's absorbed on the way back. Reusing
-		// `transmittance` here is correct: same optical path, same attenuation.
-		vec3 caustics_output = c * luma_mask * transmittance;
-
-		ALBEDO = absorbed + caustics_output;
+		ALBEDO = absorbed;
 		ALPHA = 1.0;
 	}
 }

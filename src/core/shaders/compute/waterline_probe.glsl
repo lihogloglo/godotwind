@@ -10,6 +10,7 @@ layout(set = 0, binding = 3) uniform sampler2D shore_mask_tex;
 layout(set = 0, binding = 5) uniform sampler2D source_color_tex;
 layout(set = 0, binding = 6) uniform sampler2D source_depth_tex;
 layout(set = 0, binding = 7) uniform sampler2D scene_color_tex;
+layout(set = 0, binding = 8) uniform sampler2D caustics_noise_tex;
 
 #define MAX_CASCADES 8
 
@@ -64,10 +65,25 @@ const int FEATURE_RAYS = 4;
 const int FEATURE_WOBBLE = 8;
 const int FEATURE_PARTICLES = 16;
 const int FEATURE_MENISCUS_REFRACTION = 32;
+const int FEATURE_CAUSTICS = 64;
+const float CAUSTICS_SPEED = 0.10;
+const float CAUSTICS_POWER = 2.0;
+const float CAUSTICS_CHROMA_SPLIT = 0.002;
+const float CAUSTICS_LUMA_MASK_STRENGTH = 0.22;
+const float CAUSTICS_LUMA_LOW = 0.00560224;
+const float CAUSTICS_LUMA_HIGH = 0.10559;
 
 struct SurfaceSample {
 	float y;
 	vec2 horizontal_offset;
+};
+
+struct WaterSurfaceContractSample {
+	float y;
+	vec2 horizontal_offset;
+	float coverage;
+	float body_gate;
+	float depth;
 };
 
 struct RefractSample {
@@ -77,6 +93,14 @@ struct RefractSample {
 	float status;
 	float path_length;
 	float below_mask;
+};
+
+struct CameraSplitSample {
+	float underwater_mask;
+	float meniscus;
+	float lens_body_gate;
+	float ray_surface_gate;
+	float lens_depth;
 };
 
 const float SHORE_TAU = 6.2831853;
@@ -100,6 +124,57 @@ float snells_window(vec3 normal, vec3 view, float ior) {
 	float cos_theta = clamp(dot(normal, view), 0.0, 1.0);
 	float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
 	return step(sin_theta * ior, 1.0);
+}
+
+float luminance(vec3 color) {
+	return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+vec2 caustics_panner(vec2 uv, float speed, float tiling) {
+	return vec2(TIME * speed, 0.0) + uv * tiling;
+}
+
+vec3 caustics_aberration_sample(sampler2D tex, vec2 uv, float split) {
+	vec2 uv1 = uv + vec2(split, split);
+	vec2 uv2 = uv + vec2(split, -split);
+	vec2 uv3 = uv + vec2(-split, -split);
+	float r = texture(tex, uv1).r;
+	float g = texture(tex, uv2).r;
+	float b = texture(tex, uv3).r;
+	return vec3(r, g, b);
+}
+
+mat3 make_light_projection_basis(vec3 direction) {
+	vec3 zaxis = normalize(direction);
+	vec3 up = abs(zaxis.y) > 0.98 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+	vec3 xaxis = normalize(cross(up, zaxis));
+	vec3 yaxis = normalize(cross(zaxis, xaxis));
+	return mat3(
+		vec3(xaxis.x, yaxis.x, zaxis.x),
+		vec3(xaxis.y, yaxis.y, zaxis.y),
+		vec3(xaxis.z, yaxis.z, zaxis.z)
+	);
+}
+
+float dominant_caustics_scale() {
+	float weighted_inverse_tile = 0.0;
+	float total_weight = 0.0;
+	int count = clamp(cascade_count, 0, MAX_CASCADES);
+	for (int i = 0; i < MAX_CASCADES; i++) {
+		if (i >= count) {
+			break;
+		}
+		vec4 scales = state.map_scales[i];
+		float tile_size = 1.0 / max(max(scales.x, scales.y), 1e-6);
+		float weight = max(scales.z * scales.w, 0.0);
+		weighted_inverse_tile += weight / max(tile_size, 1.0);
+		total_weight += weight;
+	}
+	if (total_weight <= 0.001 || weighted_inverse_tile <= 1e-6) {
+		return 4.0;
+	}
+	float harmonic_tile = total_weight / weighted_inverse_tile;
+	return clamp(harmonic_tile * 0.055, 3.0, 7.0);
 }
 
 float hash21(vec2 p) {
@@ -309,12 +384,20 @@ vec4 sample_shore_data(vec2 world_xz) {
 float get_dynamic_water_level(vec2 final_xz, vec3 cam_pos, bool include_fft, bool include_shore_waves);
 
 
-float water_coverage_at(vec2 world_xz, vec3 cam_pos) {
+float water_surface_body_coverage(vec2 world_xz, vec3 cam_pos) {
 	vec4 shore_data = sample_shore_data(world_xz);
 	float coverage = shore_data.r;
 	float dynamic_level = get_dynamic_water_level(world_xz, cam_pos, true, true);
 	float runup_hint = smoothstep(0.015, 0.12, max(dynamic_level - sea_level, 0.0));
 	return clamp(max(coverage, runup_hint * 0.45), 0.0, 1.0);
+}
+
+float water_surface_body_gate(float coverage) {
+	return smoothstep(0.015, 0.12, coverage);
+}
+
+float water_coverage_at(vec2 world_xz, vec3 cam_pos) {
+	return water_surface_body_coverage(world_xz, cam_pos);
 }
 
 
@@ -384,6 +467,20 @@ float get_dynamic_water_level(vec2 final_xz, vec3 cam_pos, bool include_fft, boo
 		sample_xz = final_xz - s.horizontal_offset;
 	}
 	return sample_surface(sample_xz, cam_pos, include_fft, include_shore_waves).y;
+}
+
+// RDShaderFile compute imports do not share Godot spatial `.gdshaderinc`
+// resources, so this mirrors the visual shader's WaterSurfaceContractSample
+// vocabulary exactly: level, horizontal offset, coverage, body gate, depth.
+WaterSurfaceContractSample water_surface_query(vec3 world_pos, vec3 cam_pos, bool include_fft, bool include_shore_waves) {
+	WaterSurfaceContractSample result;
+	SurfaceSample surface = sample_surface(world_pos.xz, cam_pos, include_fft, include_shore_waves);
+	result.y = get_dynamic_water_level(world_pos.xz, cam_pos, include_fft, include_shore_waves);
+	result.horizontal_offset = surface.horizontal_offset;
+	result.coverage = water_surface_body_coverage(world_pos.xz, cam_pos);
+	result.body_gate = water_surface_body_gate(result.coverage);
+	result.depth = result.y - world_pos.y;
+	return result;
 }
 
 
@@ -575,6 +672,45 @@ float compute_underwater_particles(vec2 uv, vec3 cam_pos, vec3 view_dir, float p
 }
 
 
+vec3 compute_receiver_caustics(vec3 world_pos, vec3 cam_pos, vec3 receiver_color, float water_depth, float water_gate) {
+	float strength = state.optical_params.w;
+	if (strength <= 0.001 || water_depth <= 0.02 || water_gate <= 0.001) {
+		return vec3(0.0);
+	}
+
+	vec3 sun_dir = normalize(state.sun_params.xyz);
+	float sun_vis = clamp(state.sun_params.w, 0.0, 1.0);
+	float sun_gate = smoothstep(0.04, 0.30, sun_dir.y) * sun_vis;
+	if (sun_gate <= 0.001) {
+		return vec3(0.0);
+	}
+
+	float sun_height = max(sun_dir.y, 0.05);
+	vec2 surface_xz = world_pos.xz + sun_dir.xz * (water_depth / sun_height);
+	vec3 surface_normal = water_normal_at(surface_xz, cam_pos);
+	float slope_focus = clamp(length(surface_normal.xz) * 2.6, 0.0, 1.0);
+	mat3 light_basis = make_light_projection_basis(sun_dir);
+	vec2 caustic_uv = (light_basis * vec3(surface_xz.x, world_pos.y, surface_xz.y)).xy;
+	float caustic_scale = dominant_caustics_scale();
+	vec2 uv1 = caustics_panner(caustic_uv, 0.75 * CAUSTICS_SPEED, 1.0 / caustic_scale);
+	vec2 uv2 = caustics_panner(caustic_uv, CAUSTICS_SPEED, -1.0 / caustic_scale);
+	vec3 caus1 = pow(caustics_aberration_sample(caustics_noise_tex, uv1, CAUSTICS_CHROMA_SPLIT), vec3(CAUSTICS_POWER));
+	vec3 caus2 = pow(caustics_aberration_sample(caustics_noise_tex, uv2, CAUSTICS_CHROMA_SPLIT), vec3(CAUSTICS_POWER));
+	vec3 caustic = min(caus1, caus2);
+
+	float scene_luma = clamp(luminance(receiver_color), 0.0, 1.0);
+	float luma_ramp = smoothstep(CAUSTICS_LUMA_LOW, CAUSTICS_LUMA_HIGH, scene_luma);
+	float luma_mask = mix(1.0, luma_ramp, CAUSTICS_LUMA_MASK_STRENGTH);
+	float depth_atten = exp(-water_depth * 0.060) * (1.0 - smoothstep(42.0, 90.0, water_depth));
+	float camera_dist = length(world_pos - cam_pos);
+	float distance_gate = 1.0 - smoothstep(90.0, 180.0, camera_dist);
+	float shallow_gate = smoothstep(0.08, 0.45, water_depth);
+	float view_atten = exp(-dot(state.optical_params.xyz, vec3(0.333333)) * min(camera_dist, 70.0) * 0.35);
+	return caustic * vec3(0.48, 0.86, 1.0) * luma_mask * mix(0.45, 1.20, slope_focus)
+		* depth_atten * distance_gate * shallow_gate * view_atten * water_gate * sun_gate * strength * 0.58;
+}
+
+
 float estimate_water_path_length(vec3 cam_pos, vec3 world_pos) {
 	float camera_water_level = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
 	if (cam_pos.y < camera_water_level - 0.02) {
@@ -612,6 +748,47 @@ float ray_water_crossing_mask(vec3 cam_pos, vec3 world_pos, float camera_water_l
 	}
 	float t = find_water_entry_t(cam_pos, world_pos);
 	return (t > 0.001 && t < 0.999) ? 1.0 : 0.0;
+}
+
+
+CameraSplitSample compute_camera_split(
+	vec3 cam_pos,
+	vec3 view_dir,
+	float camera_water_level,
+	bool water_ray_hit,
+	float water_ray_gate
+) {
+	const float LENS_SAMPLE_DISTANCE_M = 0.42;
+	const float SPLIT_MIN_FEATHER_M = 0.035;
+	const float SPLIT_GRAZING_FEATHER_M = 0.085;
+	const float MENISCUS_HALF_WIDTH_M = 0.105;
+
+	CameraSplitSample result;
+	result.underwater_mask = 0.0;
+	result.meniscus = 0.0;
+	result.lens_body_gate = 0.0;
+	result.ray_surface_gate = water_ray_hit ? water_ray_gate : 0.0;
+	result.lens_depth = 0.0;
+
+	float camera_depth = camera_water_level - cam_pos.y;
+	WaterSurfaceContractSample camera_surface = water_surface_query(cam_pos, cam_pos, true, true);
+	float camera_body_gate = camera_surface.body_gate;
+	vec3 lens_pos = cam_pos + view_dir * LENS_SAMPLE_DISTANCE_M;
+	WaterSurfaceContractSample lens_surface = water_surface_query(lens_pos, cam_pos, true, true);
+	result.lens_depth = lens_surface.depth;
+	result.lens_body_gate = max(lens_surface.body_gate, result.ray_surface_gate);
+
+	float grazing = 1.0 - abs(view_dir.y);
+	float split_feather = mix(SPLIT_MIN_FEATHER_M, SPLIT_GRAZING_FEATHER_M, grazing);
+	float lens_underwater = smoothstep(-split_feather, split_feather, lens_surface.depth);
+	float near_surface = 1.0 - smoothstep(0.28, 1.35, abs(camera_depth));
+	float fully_submerged = smoothstep(0.42, 0.95, camera_depth) * camera_body_gate;
+	float partial_split = lens_underwater * result.lens_body_gate * near_surface;
+	result.underwater_mask = clamp(max(partial_split, fully_submerged), 0.0, 1.0);
+
+	float lens_band = 1.0 - smoothstep(MENISCUS_HALF_WIDTH_M * 0.30, MENISCUS_HALF_WIDTH_M, abs(lens_surface.depth));
+	result.meniscus = lens_band * result.lens_body_gate * near_surface;
+	return result;
 }
 
 
@@ -816,9 +993,10 @@ void main() {
 
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(screen_w, screen_h);
 	bool pipeline_debug = debug_mode == 9;
+	bool phase2_debug = debug_mode >= 10 && debug_mode <= 14;
 	vec4 scene_color = imageLoad(color_image, pixel);
 	vec3 cam_pos = state.inv_view[3].xyz;
-	float camera_water_level = camera_water_level_cached;
+	float camera_water_level = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
 	bool camera_underwater = cam_pos.y < camera_water_level - 0.02;
 	vec3 view_dir = get_world_ray_dir(uv);
 	bool absorption_enabled = feature_enabled(FEATURE_ABSORPTION_FOG);
@@ -827,24 +1005,33 @@ void main() {
 	bool wobble_enabled = feature_enabled(FEATURE_WOBBLE);
 	bool particles_enabled = feature_enabled(FEATURE_PARTICLES);
 	bool meniscus_refraction_enabled = feature_enabled(FEATURE_MENISCUS_REFRACTION);
-	bool underwater_any_enabled = absorption_enabled || snell_enabled || rays_enabled || wobble_enabled || particles_enabled;
+	bool caustics_enabled = feature_enabled(FEATURE_CAUSTICS);
+	bool underwater_any_enabled = absorption_enabled || snell_enabled || rays_enabled || wobble_enabled || particles_enabled || caustics_enabled;
 	if (debug_mode == 0 && camera_underwater && !underwater_any_enabled && !meniscus_refraction_enabled) {
 		return;
 	}
 	vec3 analytic_water_pos = cam_pos + view_dir * 5000.0;
 	float analytic_water_gate = 0.0;
-	bool refraction_mode = debug_mode == 0 || debug_mode == 5 || debug_mode == 6;
+	bool refraction_mode = debug_mode == 0 || debug_mode == 5 || debug_mode == 6 || phase2_debug;
 	bool needs_water_ray = camera_underwater || pipeline_debug || debug_mode != 0 || (meniscus_refraction_enabled && refraction_mode);
 	bool water_ray_hit = false;
 	if (needs_water_ray) {
 		water_ray_hit = trace_water_surface(uv, cam_pos, analytic_water_pos, analytic_water_gate);
 	}
+	CameraSplitSample camera_split = compute_camera_split(
+		cam_pos,
+		view_dir,
+		camera_water_level,
+		water_ray_hit,
+		analytic_water_gate
+	);
+	bool half_camera_active = camera_split.underwater_mask > 0.001 || camera_split.meniscus > 0.001;
 
 	float raw_depth = source_depth_valid ? get_source_depth(uv) : 0.0;
 	float main_depth = get_main_depth(uv);
 	bool main_depth_present = main_depth > 0.0001;
 	bool receiver_depth_present = source_depth_valid && raw_depth > 0.0001;
-	if ((!main_depth_present && !receiver_depth_present && !water_ray_hit && !camera_underwater) || (!receiver_depth_present && !refraction_mode && !camera_underwater)) {
+	if ((!main_depth_present && !receiver_depth_present && !water_ray_hit && !camera_underwater && !half_camera_active) || (!receiver_depth_present && !refraction_mode && !camera_underwater && !half_camera_active)) {
 		if (pipeline_debug) {
 			vec3 debug_color = pipeline_debug_color(
 				uv,
@@ -865,20 +1052,23 @@ void main() {
 	vec3 fallback_world_pos = water_ray_hit ? analytic_water_pos : cam_pos + view_dir * 200.0;
 	vec3 main_world_pos = main_depth_present ? get_world_position(uv, main_depth) : fallback_world_pos;
 	vec3 world_pos = receiver_depth_present ? get_world_position(uv, raw_depth) : main_world_pos;
-	float water_level = get_dynamic_water_level(world_pos.xz, cam_pos, true, true);
+	WaterSurfaceContractSample receiver_surface = water_surface_query(world_pos, cam_pos, true, true);
+	WaterSurfaceContractSample main_surface = water_surface_query(main_world_pos, cam_pos, true, true);
+	WaterSurfaceContractSample camera_surface = water_surface_query(cam_pos, cam_pos, true, true);
+	float water_level = receiver_surface.y;
 	if (debug_mode == 1) {
 		water_level = sea_level;
 	} else if (debug_mode == 2) {
 		water_level = get_dynamic_water_level(world_pos.xz, cam_pos, true, false);
 	}
 	float water_depth = water_level - world_pos.y;
-	float main_water_level = get_dynamic_water_level(main_world_pos.xz, cam_pos, true, true);
+	float main_water_level = main_surface.y;
 	float main_water_depth = main_water_level - main_world_pos.y;
-	float receiver_coverage = receiver_depth_present ? water_coverage_at(world_pos.xz, cam_pos) : 0.0;
-	float main_coverage = water_coverage_at(main_world_pos.xz, cam_pos);
-	float camera_coverage = water_coverage_at(cam_pos.xz, cam_pos);
+	float receiver_coverage = receiver_depth_present ? receiver_surface.coverage : 0.0;
+	float main_coverage = main_surface.coverage;
+	float camera_coverage = camera_surface.coverage;
 	float water_body_gate = max(
-		smoothstep(0.015, 0.12, max(max(receiver_coverage, main_coverage), camera_underwater ? camera_coverage : 0.0)),
+		max(water_surface_body_gate(max(max(receiver_coverage, main_coverage), camera_underwater ? camera_coverage : 0.0)), camera_split.lens_body_gate),
 		analytic_water_gate
 	);
 
@@ -888,20 +1078,21 @@ void main() {
 		crossing_mask = 1.0;
 	}
 	float underwater_ray_mask = camera_underwater
-		? max(below_mask, crossing_mask)
-		: below_mask;
+		? max(max(below_mask, crossing_mask), camera_split.underwater_mask)
+		: max(below_mask, camera_split.underwater_mask);
 	float waterline_band = 1.0 - smoothstep(0.00, 0.24, abs(water_depth));
+	float camera_waterline_band = max(waterline_band, camera_split.meniscus);
 	float receiver_mask = receiver_depth_present
-		? max(underwater_ray_mask, waterline_band * 0.35)
-		: max(camera_underwater ? underwater_ray_mask : 0.0, waterline_band * 0.20);
+		? max(underwater_ray_mask, camera_waterline_band * 0.35)
+		: max(underwater_ray_mask, camera_waterline_band * 0.20);
 	// Main-view ocean depth is a useful hint, but the water body ray keeps the
 	// compositor stable when the finite clipmap mesh/depth footprint drops out.
 	float visible_water_depth_gate = main_depth_present ? smoothstep(-0.08, 0.04, main_water_depth) : 0.0;
 	float visible_water_band_gate = main_depth_present ? 1.0 - smoothstep(0.55, 1.45, abs(main_water_depth)) : 0.0;
 	float analytic_visible_water_gate = water_ray_hit ? analytic_water_gate : 0.0;
 	float visible_water_gate = camera_underwater
-		? max(max(underwater_ray_mask, crossing_mask * 0.65), analytic_visible_water_gate * 0.75)
-		: max(visible_water_depth_gate * visible_water_band_gate, analytic_visible_water_gate);
+		? max(max(underwater_ray_mask, crossing_mask * 0.65), max(analytic_visible_water_gate * 0.75, camera_split.underwater_mask))
+		: max(max(visible_water_depth_gate * visible_water_band_gate, analytic_visible_water_gate), camera_split.underwater_mask);
 	float receiver_visibility_gate = max(visible_water_gate, underwater_ray_mask);
 	float mask = receiver_mask * receiver_visibility_gate * water_body_gate;
 
@@ -923,7 +1114,7 @@ void main() {
 		? refr_sample.below_mask * visible_water_gate * water_body_gate
 		: 0.0;
 	mask = max(mask, refracted_silhouette_mask);
-	if (debug_mode == 0 && mask <= 0.001 && !camera_underwater) {
+	if (debug_mode == 0 && mask <= 0.001 && !camera_underwater && !half_camera_active) {
 		return;
 	}
 
@@ -938,17 +1129,21 @@ void main() {
 	vec3 water_color = absorption_enabled
 		? mix(absorbed, backscatter, path_fog * mix(0.22, 0.38, camera_underwater ? 1.0 : 0.0))
 		: source_color;
+	float caustic_gate = (receiver_depth_present ? below_mask : 0.0) * water_body_gate;
+	water_color += caustics_enabled
+		? compute_receiver_caustics(world_pos, cam_pos, water_color, max(water_depth, 0.0), caustic_gate)
+		: vec3(0.0);
 
-	float meniscus_core = 1.0 - smoothstep(0.00, 0.085, abs(water_depth));
-	float meniscus_halo = waterline_band * (1.0 - smoothstep(0.10, 0.32, abs(water_depth)));
+	float meniscus_core = max(1.0 - smoothstep(0.00, 0.085, abs(water_depth)), camera_split.meniscus);
+	float meniscus_halo = camera_waterline_band * (1.0 - smoothstep(0.10, 0.32, abs(water_depth)));
 	vec3 meniscus_tint = mix(tint * 1.35, vec3(0.62, 0.92, 1.0), 0.55);
 	vec3 line_tint = mix(scene_color.rgb, meniscus_tint, 0.38);
 	float meniscus = meniscus_refraction_enabled
-		? max(meniscus_core * 0.16, meniscus_halo * mix(0.05, 0.14, max(crossing_mask, camera_underwater ? 0.5 : 0.0)))
+		? max(meniscus_core * 0.16, meniscus_halo * mix(0.05, 0.14, max(max(crossing_mask, camera_split.meniscus), camera_underwater ? 0.5 : 0.0)))
 		: 0.0;
 	vec3 proof_color = debug_mode == 0
 		? mix(water_color, line_tint, meniscus)
-		: mix(water_color, vec3(0.0, 0.85, 1.0), waterline_band * 0.55);
+		: mix(water_color, vec3(0.0, 0.85, 1.0), camera_waterline_band * 0.55);
 	if (debug_mode == 4) {
 		proof_color = vec3(receiver_mask, water_body_gate, receiver_visibility_gate);
 	} else if (debug_mode == 5) {
@@ -986,7 +1181,7 @@ void main() {
 			scene_color_valid ? 0.25 : 0.0
 		);
 	} else if (debug_mode == 8) {
-		proof_color = vec3(below_mask, crossing_mask, receiver_visibility_gate * water_body_gate);
+		proof_color = vec3(camera_split.underwater_mask, camera_split.meniscus, camera_split.lens_body_gate);
 	} else if (pipeline_debug) {
 		proof_color = pipeline_debug_color(
 			uv,
@@ -999,12 +1194,28 @@ void main() {
 			visible_water_gate,
 			mask
 		);
+	} else if (debug_mode == 10) {
+		float camera_depth_t = clamp((camera_water_level - cam_pos.y) / 8.0, -1.0, 1.0);
+		proof_color = camera_depth_t >= 0.0
+			? vec3(0.0, camera_depth_t, 1.0 - camera_depth_t * 0.35)
+			: vec3(-camera_depth_t, 0.10, 0.0);
+	} else if (debug_mode == 11) {
+		float receiver_depth_t = clamp(water_depth / 8.0, -1.0, 1.0);
+		proof_color = receiver_depth_t >= 0.0
+			? vec3(0.0, receiver_depth_t, 1.0 - receiver_depth_t * 0.35)
+			: vec3(-receiver_depth_t, 0.05, 0.0);
+	} else if (debug_mode == 12) {
+		proof_color = vec3(water_ray_hit ? 1.0 : 0.0, crossing_mask, analytic_water_gate);
+	} else if (debug_mode == 13) {
+		proof_color = vec3(receiver_coverage, main_coverage, camera_coverage);
+	} else if (debug_mode == 14) {
+		proof_color = vec3(mask, water_body_gate, visible_water_gate);
 	}
 
 	float camera_depth = camera_water_level - cam_pos.y;
-	float underwater_view_mask = smoothstep(0.04, 0.55, camera_depth);
+	float underwater_view_mask = camera_split.underwater_mask;
 	vec3 underwater_color = scene_color.rgb;
-	if (camera_underwater && underwater_any_enabled) {
+	if (underwater_view_mask > 0.001 && underwater_any_enabled) {
 		bool needs_surface_normal = snell_enabled || wobble_enabled;
 		float surface_dist = water_ray_hit ? length(analytic_water_pos - cam_pos) : 8.0;
 		SnellSample snell = compute_snell_sample(cam_pos, view_dir, analytic_water_pos, water_ray_hit);
@@ -1054,8 +1265,15 @@ void main() {
 			water_ray_hit ? 1.0 : 0.0
 		) : 0.0;
 		underwater_color += rays * vec3(0.46, 0.82, 1.0) * (0.45 + 0.55 * state.sun_params.w);
-		float particles = particles_enabled ? compute_underwater_particles(uv, cam_pos, view_dir, max(scene_dist, surface_dist + 12.0), camera_depth) : 0.0;
+		float particles = particles_enabled ? compute_underwater_particles(uv, cam_pos, view_dir, max(scene_dist, surface_dist + 12.0), max(camera_depth, 0.0)) : 0.0;
 		underwater_color += particles * mix(vec3(0.58, 0.82, 0.78), vec3(0.95, 1.0, 0.92), underwater_fog) * 0.58;
+		float underwater_caustic_depth = main_depth_present
+			? max(get_dynamic_water_level(main_world_pos.xz, cam_pos, true, true) - main_world_pos.y, 0.0)
+			: 0.0;
+		float underwater_caustic_gate = (main_depth_present ? water_body_gate : 0.0) * underwater_view_mask;
+		underwater_color += caustics_enabled
+			? compute_receiver_caustics(main_world_pos, cam_pos, underwater_color, underwater_caustic_depth, underwater_caustic_gate) * 0.70
+			: vec3(0.0);
 		vec2 snell_uv = clamp(uv - normal_view.xy * 0.006, vec2(0.001), vec2(0.999));
 		vec3 snell_scene = source_valid ? texture(source_color_tex, snell_uv).rgb : sample_scene_color(snell_uv, scene_color.rgb);
 		vec3 tir_tint = absorption_enabled ? underwater_color : tint;
@@ -1064,16 +1282,17 @@ void main() {
 		underwater_color += vec3(dither * 2.0 - 1.0) / 255.0;
 	}
 
-	float debug_strength = (debug_mode == 5 || debug_mode == 6 || debug_mode == 7 || debug_mode == 8 || pipeline_debug) ? 1.0 : probe_strength;
+	float debug_strength = (debug_mode >= 5 || pipeline_debug) ? 1.0 : probe_strength;
 	float final_refraction_boost = debug_mode == 0 && refr_sample.valid > 0.5 ? 1.16 : 1.0;
-	float final_opacity = mix(0.34, 0.50, camera_underwater ? 1.0 : 0.0);
+	float final_opacity = mix(0.34, 0.50, max(camera_underwater ? 1.0 : 0.0, underwater_view_mask));
+	float debug_mask = phase2_debug ? 1.0 : max(receiver_mask, camera_waterline_band);
 	float strength = pipeline_debug
 		? 1.0
 		: debug_mode == 0
 		? clamp(debug_strength * final_refraction_boost * blend_factor * mask * final_opacity, 0.0, final_opacity)
-		: clamp(debug_strength * blend_factor * max(receiver_mask, waterline_band), 0.0, 1.0);
+		: clamp(debug_strength * blend_factor * debug_mask, 0.0, 1.0);
 	vec3 output_color = mix(scene_color.rgb, proof_color, strength);
-	if (debug_mode == 0 && camera_underwater && underwater_any_enabled) {
+	if (debug_mode == 0 && underwater_view_mask > 0.001 && underwater_any_enabled) {
 		output_color = mix(output_color, underwater_color, clamp(blend_factor * underwater_view_mask, 0.0, 0.96));
 	}
 	imageStore(color_image, pixel, vec4(output_color, scene_color.a));

@@ -4,8 +4,8 @@
 ##   - Basis[i] returns COLUMNS (same as basis.x/y/z), NOT rows
 ##   - Projection[col] returns COLUMNS (column-major storage)
 ##
-## The session hypothesis "underwater_compositor_effect.gd packs inv_view transposed
-## because Basis[i] returns rows" was WRONG. Both indexing forms match.
+## The session hypothesis "a compositor effect packs inv_view transposed because
+## Basis[i] returns rows" was WRONG. Both indexing forms match.
 ##
 ## If Godot ever changes this API, our shader matrix packing will silently break;
 ## this test catches that.

@@ -64,7 +64,10 @@ what is actually active in code.
   cascade-readiness metadata. Surface velocity is part of the contract but is
   deliberately unavailable until the wave pipeline publishes true
   dDisplacement/dt data. New water-adjacent systems should consume this state
-  before reaching directly into OceanManager internals.
+  before reaching directly into OceanManager internals. Shader consumers use
+  the shared final-surface lookup, including horizontal displacement inversion,
+  so wetness, waterline, caustics, Snell, rays, particles, and diagnostic
+  underwater volume checks classify against the same moving surface.
 - **Native/probe/sky reflections** — the FFT surface remains opaque and avoids
   sampling scene color directly. Reflections come through Godot's normal opaque
   reflection path (`SPECULAR`, ReflectionProbe, and sky), while waterline
@@ -150,14 +153,14 @@ refraction.
    visible ocean surface.
 2. **Underwater POV is compositor-owned, but not final art.** The compositor
    now brightens the underwater ceiling with Snell-window transmission and
-   applies underwater absorption, surface-anchored rays, wobble, and
-   particulate. The FFT surface shader can still produce a flat dark surface
+   applies underwater absorption, receiver-depth caustics, surface-anchored
+   rays, wobble, and particulate. The FFT surface shader can still produce a flat dark surface
    color by itself; the compositor is the production owner of the underwater
    camera view.
-3. **UnderwaterVolume is not the above-water refraction owner.** It is kept for
-   underwater-camera tint/caustics and debug visualizations. Ocean Lab prevents
-   its final mode from drawing above water and uses dynamic camera water height
-   for activation, so it cannot hide or compete with the receiver compositor.
+3. **UnderwaterVolume is not the caustics or refraction owner.** It is kept for
+   diagnostic underwater slab/depth/wobble checks only. Ocean Lab prevents its
+   final mode from drawing above water and uses dynamic camera water height for
+   activation, so it cannot hide or compete with the receiver compositor.
 4. **Sea spray cost is candidate-count driven.** The foam-driven spawn path is
    more expensive than the earlier choppiness-only prototype because each
    candidate samples normal/foam data as well as displacement, and active
@@ -185,7 +188,6 @@ compositor effect read the same values — keeps the waterline transition
 continuous as weather / time-of-day / fog change. Pre-agreed with the
 `underwater` track.
 
-2026-05-07 update: Ocean Lab's `UnderwaterVolume` now consumes these getters
-for tint, extinction sigma, and caustic strength. The eventual compositor
-prototype should use the same typed API rather than introducing another
-water-color stack.
+2026-05-09 update: Ocean Lab's `UnderwaterVolume` consumes these getters for
+tint and extinction sigma only. Caustic strength is compositor-owned through
+`WaterSurfaceState` / `WaterlineCompositorEffect`.

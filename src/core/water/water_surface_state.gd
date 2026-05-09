@@ -6,6 +6,8 @@ const WATER_BODY_OCEAN := &"ocean"
 const SHORE_SIDE_LAND := -1
 const SHORE_SIDE_UNKNOWN := 0
 const SHORE_SIDE_WATER := 1
+const COVERAGE_GATE_START := 0.015
+const COVERAGE_GATE_END := 0.12
 
 var sea_level: float = 0.0
 var wave_scale: float = 1.0
@@ -164,6 +166,33 @@ func sample_coverage(world_pos: Vector3, fallback: float = 0.0) -> float:
 	if can_sample_coverage():
 		return float(coverage_query.call(world_pos))
 	return fallback
+
+
+func coverage_to_body_gate(coverage: float) -> float:
+	return smoothstep(COVERAGE_GATE_START, COVERAGE_GATE_END, clampf(coverage, 0.0, 1.0))
+
+
+func sample_body_gate(world_pos: Vector3, fallback: float = 0.0) -> float:
+	return coverage_to_body_gate(sample_coverage(world_pos, fallback))
+
+
+func sample_water_depth(world_pos: Vector3, fallback: float = 0.0) -> float:
+	return sample_height(world_pos, sea_level) - world_pos.y if can_sample_height() else fallback
+
+
+func sample_surface_query(world_pos: Vector3) -> Dictionary:
+	var coverage := sample_coverage(world_pos)
+	var water_y := sample_height(world_pos, sea_level)
+	return {
+		"height": water_y,
+		"displacement": sample_displacement(world_pos),
+		"normal": sample_normal(world_pos),
+		"coverage": coverage,
+		"body_gate": coverage_to_body_gate(coverage),
+		"depth": water_y - world_pos.y,
+		"water_body_id": sample_water_body_id(world_pos),
+		"coverage_source": coverage_source,
+	}
 
 
 func sample_signed_shore_distance(world_pos: Vector3, fallback: float = 0.0) -> float:

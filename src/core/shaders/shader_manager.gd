@@ -89,9 +89,8 @@ func attach_to(node: Node) -> void:
 		push_warning("[ShaderManager] Can only attach to WorldEnvironment or Camera3D")
 
 
-## Set the active sun on all effects that support it (fog, godrays, etc.)
-## Most effects accept set_sun(DirectionalLight3D). UnderwaterCompositorEffect
-## uses set_sun_direction(Vector3, float) to avoid the signature collision.
+## Set the active sun on all effects that support it (fog, godrays, waterline, etc.).
+## Effects may expose either set_sun_direction(Vector3, float) or set_sun().
 func set_sun(sun: DirectionalLight3D) -> void:
 	for effect_name in _effects:
 		var effect: PostProcessEffect = _effects[effect_name]

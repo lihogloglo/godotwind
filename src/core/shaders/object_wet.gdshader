@@ -53,7 +53,14 @@ float dynamic_water_level(vec2 world_xz) {
 	}
 
 	float dist_to_camera = length(vec3(world_xz.x, sea_level, world_xz.y) - camera_world_position);
-	return water_surface_dynamic_level(world_xz, dist_to_camera, true, dynamic_water_has_shore_mask, true);
+	WaterSurfaceContractSample surface = water_surface_query(
+		vec3(world_xz.x, sea_level, world_xz.y),
+		dist_to_camera,
+		true,
+		dynamic_water_has_shore_mask,
+		true
+	);
+	return surface.y;
 }
 
 void vertex() {

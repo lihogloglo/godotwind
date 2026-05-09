@@ -111,7 +111,7 @@ Three rendering paths, one driver, one shared formula.
 
 **New file:** `src/core/shaders/effects/wet_compositor_effect.gd` (extends `PostProcessEffect`).
 **New file:** `src/core/shaders/compute/wet_compositor.glsl` (compute shader).
-**Pattern reference:** `src/core/shaders/effects/underwater_compositor_effect.gd` — same plumbing (depth + normal_roughness access, world-pos reconstruction, POST_TRANSPARENT stage, render_priority), different math.
+**Pattern reference:** `src/core/shaders/effects/waterline_compositor_effect.gd` — same RD compositor plumbing (resolved color/depth access, world-pos reconstruction, POST_TRANSPARENT stage, render_priority), different math.
 
 ### Access flags
 
@@ -155,7 +155,7 @@ vec4 normal_roughness_compatibility(vec4 p_normal_roughness) {
 
 ### Core compute pass (per pixel)
 
-1. Sample depth, reconstruct world position via `inv_proj * inv_view` (pattern from `underwater_compositor_effect`).
+1. Sample depth, reconstruct world position via `inv_proj * inv_view` (pattern from `waterline_compositor_effect`).
 2. Sample normal_roughness, apply `normal_roughness_compatibility()`, decode normal to view→world.
 3. Compute `wet_level` per §4 (submersion + rain).
 4. Sample color; apply Lagarde (§2); write back.
@@ -423,7 +423,7 @@ func _update_memory_holders(delta: float) -> void
 
 **Stage:** `EFFECT_CALLBACK_TYPE_POST_TRANSPARENT`, PRE-tonemap.
 - `POST_OPAQUE` misses transparent flora — rejected.
-- `POST_TRANSPARENT` matches `underwater_compositor_effect.gd` slot — approved.
+- `POST_TRANSPARENT` matches `waterline_compositor_effect.gd` slot — approved.
 - Pre-tonemap because Lagarde math is linear-space.
 
 **Render priority:** 9.
@@ -433,7 +433,7 @@ func _update_memory_holders(delta: float) -> void
 **Perf estimate (submersion-only, Phase 1):** 0.15–0.25 ms at 1440p on RTX 3060-class.
 - 1 compute pass, 16×16 workgroup, 14,400 workgroups at 1440p.
 - ~2 texture fetches + `normal_roughness_compatibility()` + ~20 ALU per pixel.
-- Compared to `underwater_compositor_effect` measured ~0.4 ms (with caustics + wobble + ray-march) — wet is strictly lighter.
+- Compared to the waterline/underwater compositor measured ~0.4 ms (with caustics + wobble + ray-march) — wet is strictly lighter.
 
 **Perf estimate (Phase 2, rain + sky-march):** 0.4–0.6 ms at 1440p.
 - Adds 16–32 step screen-space ray-march along `+y`. Dominates the new cost.
@@ -569,7 +569,7 @@ Closed items from the 2026-04-14 21:14 review:
 - Godot-docs #9591 — `normal_roughness_compatibility()` requirement — https://github.com/godotengine/godot-docs/issues/9591
 - Godot forum — accessing normal/roughness buffer through compositor — https://forum.godotengine.org/t/accessing-the-normal-and-roughness-buffer-through-the-compositor/130455
 - Godot `Material` / `stencil_mode` — https://docs.godotengine.org/en/stable/classes/class_material.html
-- Project reference: `src/core/shaders/effects/underwater_compositor_effect.gd` (pattern twin).
+- Project reference: `src/core/shaders/effects/waterline_compositor_effect.gd` (pattern twin).
 - Project reference: `src/core/shaders/object_wet.gdshader` (existing per-material base).
 - Project reference: `src/core/water/horizon_map_manager.gd` (existing terrain path).
 

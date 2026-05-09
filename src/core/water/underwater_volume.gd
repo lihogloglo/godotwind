@@ -1,10 +1,7 @@
 ## UnderwaterVolume — follows the camera, drives underwater_volume.gdshader.
 ##
-## Step 0 (caustics only). A BoxMesh rendered with a custom spatial shader
-## that draws caustics on world geometry inside the volume's Y slab.
-##
-## Ported from paddy-exe/Godot-RealTimeCaustics (MIT):
-##   https://github.com/paddy-exe/Godot-RealTimeCaustics
+## Diagnostic support volume for underwater slab/depth/wobble checks. Production
+## underwater caustics now live only in WaterlineCompositorEffect.
 ##
 ## ## Positioning model
 ##
@@ -23,9 +20,9 @@
 ## camera, but the shader itself slabs its effects to the range
 ## [sea_level - volume_depth, sea_level] regardless of where the box floats —
 ## so effects will not appear above the water even if the camera is at y=+50.
-## The box just has to contain any pixel where caustics should be visible,
-## and 500 × 40 × 500 is comfortably larger than Morrowind's underwater
-## visibility range.
+## The box just has to contain pixels where the diagnostic underwater treatment
+## should be visible, and 500 × 40 × 500 is comfortably larger than Morrowind's
+## underwater visibility range.
 ##
 ## ## Activation
 ##
@@ -36,16 +33,15 @@ class_name UnderwaterVolume
 extends Node3D
 
 const SHADER_PATH := "res://src/core/water/shaders/underwater_volume.gdshader"
-const CAUSTICS_NOISE_PATH := "res://assets/water/caustics_noise.png"
-const LUMA_GRADIENT_PATH := "res://assets/water/caustics_luma_gradient.tres"
 const WATER_NORMAL_PATH := "res://assets/water/water_normal.png"
 
 const VOLUME_SIZE := Vector3(500.0, 40.0, 500.0)
 
 var _mesh_instance: MeshInstance3D
 var _material: ShaderMaterial
+var _fallback_shore_texture: Texture2D = null
 var _camera: Camera3D = null
-var _sun: DirectionalLight3D = null
+var _water_state: WaterSurfaceState = null
 var _sea_level: float = 0.0
 var _camera_water_level: float = 0.0
 var _debug_mode: int = 0
@@ -61,10 +57,10 @@ func _ready() -> void:
 	_material = ShaderMaterial.new()
 	_material.shader = load(SHADER_PATH)
 	_material.render_priority = 80
-	_material.set_shader_parameter("caustics_noise", load(CAUSTICS_NOISE_PATH))
-	_material.set_shader_parameter("luma_gradient", load(LUMA_GRADIENT_PATH))
 	_material.set_shader_parameter("water_normal_map", load(WATER_NORMAL_PATH))
 	_material.set_shader_parameter("volume_depth", VOLUME_SIZE.y)
+	_fallback_shore_texture = _create_fallback_shore_mask()
+	_material.set_shader_parameter("shore_mask", _fallback_shore_texture)
 
 	_mesh_instance = MeshInstance3D.new()
 	_mesh_instance.name = "UnderwaterBox"
@@ -78,15 +74,20 @@ func _ready() -> void:
 	visible = false  # hidden until _process() confirms camera is underwater
 
 
+func _create_fallback_shore_mask() -> Texture2D:
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(1.0, 0.5, 0.5, 1.0))
+	return ImageTexture.create_from_image(img)
+
+
 ## Assign the scene camera. Must be called before the volume becomes useful.
 func set_camera(camera: Camera3D) -> void:
 	_camera = camera
 
 
-## Assign the sun/directional light. Used to project caustics from the sun
-## direction in world space (paddy-exe's make_rotation_dir technique).
-func set_sun(sun: DirectionalLight3D) -> void:
-	_sun = sun
+## Compatibility no-op: production caustics and sun projection are compositor-owned.
+func set_sun(_sun: DirectionalLight3D) -> void:
+	pass
 
 
 ## Override the sea level Y value. Defaults to 0 if not called.
@@ -131,38 +132,31 @@ func set_render_layers(layer_mask: int) -> void:
 func sync_wave_surface_from_ocean_material(ocean_material: ShaderMaterial) -> void:
 	if _material == null:
 		return
-	if ocean_material == null:
-		_material.set_shader_parameter("use_dynamic_water_surface", false)
-		return
-
-	_material.set_shader_parameter("use_dynamic_water_surface", true)
-	_material.set_shader_parameter("map_scales", ocean_material.get_shader_parameter("map_scales"))
-	_material.set_shader_parameter("wave_scale", ocean_material.get_shader_parameter("wave_scale"))
-	_material.set_shader_parameter("ocean_time", ocean_material.get_shader_parameter("ocean_time"))
-	_material.set_shader_parameter("shore_mask", ocean_material.get_shader_parameter("shore_mask"))
-	_material.set_shader_parameter("shore_mask_bounds", ocean_material.get_shader_parameter("shore_mask_bounds"))
-	_material.set_shader_parameter("shore_fade_distance", ocean_material.get_shader_parameter("shore_fade_distance"))
-	_material.set_shader_parameter("shore_wave_amplitude", ocean_material.get_shader_parameter("shore_wave_amplitude"))
-	_material.set_shader_parameter("shore_wave_frequency", ocean_material.get_shader_parameter("shore_wave_frequency"))
-	_material.set_shader_parameter("shore_wave_speed", ocean_material.get_shader_parameter("shore_wave_speed"))
-	_material.set_shader_parameter("shore_wave_steepness", ocean_material.get_shader_parameter("shore_wave_steepness"))
+	if ocean_material != null:
+		Log.warn("water", "UnderwaterVolume: refused material fallback; WaterSurfaceState is the required water contract")
+	_water_state = null
+	_material.set_shader_parameter("use_dynamic_water_surface", false)
 
 
 func sync_wave_surface_from_water_state(state: WaterSurfaceState) -> void:
 	if _material == null:
 		return
 	if state == null:
+		_water_state = null
 		_material.set_shader_parameter("use_dynamic_water_surface", false)
 		return
 
+	_water_state = state
 	_sea_level = state.sea_level
-	_camera_water_level = state.sea_level
+	_camera_water_level = state.sample_height(_camera.global_position, state.sea_level) if _camera != null else state.sea_level
 	_material.set_shader_parameter("use_dynamic_water_surface", true)
 	_material.set_shader_parameter("map_scales", state.map_scales)
 	_material.set_shader_parameter("wave_scale", state.wave_scale)
 	_material.set_shader_parameter("ocean_time", state.ocean_time)
 	if state.shore_mask_texture != null:
 		_material.set_shader_parameter("shore_mask", state.shore_mask_texture)
+	elif _fallback_shore_texture != null:
+		_material.set_shader_parameter("shore_mask", _fallback_shore_texture)
 	_material.set_shader_parameter("shore_mask_bounds", state.shore_mask_bounds)
 	_material.set_shader_parameter("shore_fade_distance", state.shore_fade_distance)
 	_material.set_shader_parameter("shore_wave_amplitude", state.shore_wave_amplitude)
@@ -171,7 +165,6 @@ func sync_wave_surface_from_water_state(state: WaterSurfaceState) -> void:
 	_material.set_shader_parameter("shore_wave_steepness", state.shore_wave_steepness)
 	_material.set_shader_parameter("water_tint", state.absorption_tint)
 	_material.set_shader_parameter("absorption_sigma", state.absorption_sigma)
-	_material.set_shader_parameter("caustics_strength", state.underwater_caustics_strength)
 
 
 func sync_optical_constants_from_ocean_manager(ocean_manager: Node) -> void:
@@ -183,9 +176,6 @@ func sync_optical_constants_from_ocean_manager(ocean_manager: Node) -> void:
 	if ocean_manager.has_method("get_absorption_sigma"):
 		var sigma: Vector3 = ocean_manager.get_absorption_sigma()
 		_material.set_shader_parameter("absorption_sigma", sigma)
-	if ocean_manager.has_method("get_underwater_caustics_strength"):
-		var caustics: float = ocean_manager.get_underwater_caustics_strength()
-		_material.set_shader_parameter("caustics_strength", caustics)
 
 
 func _process(_delta: float) -> void:
@@ -193,6 +183,9 @@ func _process(_delta: float) -> void:
 		visible = false
 		return
 
+	if _water_state != null:
+		_sea_level = _water_state.sea_level
+		_camera_water_level = _water_state.sample_height(_camera.global_position, _sea_level)
 	var cam_y: float = _camera.global_position.y
 	var submerged: bool = cam_y < _camera_water_level
 	var above_water_diagnostic: bool = active_above_water and _debug_mode != 0
@@ -209,8 +202,3 @@ func _process(_delta: float) -> void:
 	_material.set_shader_parameter("sea_level", _sea_level)
 	_material.set_shader_parameter("debug_mode", _debug_mode)
 	_material.set_shader_parameter("wobble_enabled", wobble_enabled)
-	if _sun != null and is_instance_valid(_sun):
-		# Godot DirectionalLight3D shines along -basis.z, so +basis.z is the
-		# direction pointing AT the sun in the sky.
-		var toward_sun: Vector3 = _sun.global_basis.z
-		_material.set_shader_parameter("sun_direction_world", toward_sun)

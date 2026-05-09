@@ -93,12 +93,6 @@ var _current_shore_wave_frequency: float = SHORE_WAVE_SPATIAL_FREQUENCY
 var _current_shore_wave_speed: float = 0.4
 var _current_shore_wave_steepness: float = 0.58
 
-# Legacy underwater compositor effect (managed via ShaderManager).
-# Disabled by default: underwater/waterline ownership moved to the volume and
-# pre-water compositor paths. Keep the API as a cleanup shim for older scenes.
-var underwater_compositor_enabled: bool = false
-var _underwater_effect_loaded: bool = false
-
 # FFT pipeline
 var _wave_generator: WaveGenerator = null
 var _cascade_parameters: Array[WaveCascadeParameters] = []
@@ -319,10 +313,6 @@ func _process(delta: float) -> void:
 	# Scan the scene tree at most once every 60 frames so we notice late-spawned
 	# DirectionalLight3D nodes without walking the tree per frame.
 	_update_sun_uniform()
-
-	# Update underwater compositor effect state (submersion, sun, camera)
-	if underwater_compositor_enabled and _underwater_effect_loaded:
-		_update_underwater_state()
 
 	# GPU readback for buoyancy — read every cascade's displacement map
 	# once per frame. Sampling only cascade 0 (swell) under-reports the
@@ -932,73 +922,6 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 	return true
 
 
-# ============================================================================
-# UNDERWATER EFFECT
-# ============================================================================
-
-func _init_underwater_effect() -> void:
-	if _underwater_effect_loaded:
-		return
-	var effect_path := "res://src/core/shaders/effects/underwater_compositor_effect.gd"
-	if ShaderManager.load_effect(effect_path):
-		_underwater_effect_loaded = true
-		Log.info("water", "OceanManager: Underwater compositor effect loaded")
-	else:
-		Log.error("water", "OceanManager: Failed to load underwater compositor effect")
-
-
-func _update_underwater_state() -> void:
-	if not _underwater_effect_loaded or not _camera:
-		return
-
-	var cam_y: float = _camera.global_position.y
-	var submerged: bool = cam_y < sea_level + 2.0  # Include boundary zone
-
-	# Enable/disable the effect based on submersion
-	var effect: PostProcessEffect = ShaderManager.get_effect("underwater")
-	if effect == null:
-		return
-
-	var is_active: bool = ShaderManager.is_effect_enabled("underwater")
-	if submerged and not is_active:
-		ShaderManager.enable_effect("underwater")
-		Log.info("water", "Underwater effect: ON")
-	elif not submerged and is_active:
-		ShaderManager.disable_effect("underwater")
-		Log.info("water", "Underwater effect: OFF")
-
-	# Update camera and sun state on the effect
-	if submerged and effect.has_method("set_sea_level"):
-		effect.set_sea_level(sea_level)
-		effect.set_camera_state(_camera.global_position, _camera.global_basis)
-		# Find sun for light direction
-		var light: DirectionalLight3D = _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
-		if light:
-			effect.set_sun_direction(-light.global_basis.z, 1.0)
-
-
-## Get the underwater compositor effect
-func get_underwater_effect() -> PostProcessEffect:
-	if _underwater_effect_loaded:
-		return ShaderManager.get_effect("underwater")
-	return null
-
-
-func set_underwater_compositor_enabled(enabled: bool) -> void:
-	if enabled:
-		Log.warn("water", "OceanManager: legacy underwater compositor is retired; request ignored")
-		enabled = false
-
-	if underwater_compositor_enabled == enabled and not _underwater_effect_loaded:
-		return
-
-	underwater_compositor_enabled = enabled
-	if _underwater_effect_loaded:
-		ShaderManager.disable_effect("underwater")
-		ShaderManager.unload_effect("underwater")
-		_underwater_effect_loaded = false
-
-
 ## Check if the camera is currently submerged
 func is_camera_submerged() -> bool:
 	if _camera:
@@ -1344,10 +1267,6 @@ func force_initialize() -> void:
 
 
 func release_runtime_resources() -> void:
-	if _underwater_effect_loaded:
-		ShaderManager.disable_effect("underwater")
-		ShaderManager.unload_effect("underwater")
-		_underwater_effect_loaded = false
 	_dispose_spray_layer()
 	_shutdown_fft_pipeline()
 	_dispose_ocean_mesh()
@@ -1741,10 +1660,6 @@ func _update_spray_weather(wind_t: float, wind_dir_xz: Vector2) -> void:
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
-	if _underwater_effect_loaded:
-		ShaderManager.disable_effect("underwater")
-		ShaderManager.unload_effect("underwater")
-		_underwater_effect_loaded = false
 	_dispose_spray_layer()
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()

@@ -9,6 +9,7 @@ extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/waterline_probe.glsl"
 const SCENE_COPY_SHADER_PATH := "res://src/core/shaders/compute/screen_color_copy.glsl"
+const CAUSTICS_NOISE_PATH := "res://assets/water/caustics_noise.png"
 const MAX_CASCADES := 8
 const FEATURE_ABSORPTION_FOG := 1
 const FEATURE_SNELL := 2
@@ -16,6 +17,7 @@ const FEATURE_RAYS := 4
 const FEATURE_WOBBLE := 8
 const FEATURE_PARTICLES := 16
 const FEATURE_MENISCUS_REFRACTION := 32
+const FEATURE_CAUSTICS := 64
 
 var _depth_sampler: RID
 var _linear_clamp_sampler: RID
@@ -31,7 +33,9 @@ var _external_source_size: Vector2i = Vector2i.ZERO
 var _state_buffer: RID
 var _displacement_rid: RID
 var _shore_mask_rid: RID
+var _caustics_noise_rid: RID
 var _fallback_shore_texture: Texture2D
+var _caustics_noise_texture: Texture2D
 var _map_scales: PackedVector4Array = PackedVector4Array()
 var _sea_level: float = 0.0
 var _wave_scale: float = 1.0
@@ -59,6 +63,7 @@ var _underwater_feature_flags: int = (
 	| FEATURE_WOBBLE
 	| FEATURE_PARTICLES
 	| FEATURE_MENISCUS_REFRACTION
+	| FEATURE_CAUSTICS
 )
 var _ray_shell_count: int = 6
 var _ray_shell_spacing_m: float = 16.0
@@ -102,6 +107,7 @@ func on_effect_added() -> void:
 		return
 	_create_samplers()
 	_create_fallback_shore_mask()
+	_load_caustics_textures()
 	Log.info("water", "WaterlineCompositorEffect initialized")
 
 
@@ -166,6 +172,20 @@ func _create_fallback_shore_mask() -> void:
 	_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
 
 
+func _load_caustics_textures() -> void:
+	_caustics_noise_texture = load(CAUSTICS_NOISE_PATH) as Texture2D
+	if _caustics_noise_texture == null:
+		Log.warn("water", "WaterlineCompositorEffect: missing caustics noise texture, caustics disabled")
+		_caustics_noise_texture = _make_solid_texture(Color.BLACK)
+	_caustics_noise_rid = RenderingServer.texture_get_rd_texture(_caustics_noise_texture.get_rid())
+
+
+func _make_solid_texture(color: Color) -> Texture2D:
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, color)
+	return ImageTexture.create_from_image(img)
+
+
 func sync_from_water_state(state: WaterSurfaceState) -> void:
 	if state == null:
 		return
@@ -196,55 +216,8 @@ func sync_from_ocean(ocean_manager: Node, ocean_material: ShaderMaterial) -> voi
 	if ocean_manager.has_method("get_water_surface_state"):
 		sync_from_water_state(ocean_manager.get_water_surface_state())
 		return
-	if ocean_material == null:
-		return
-
-	if ocean_manager.has_method("get_sea_level"):
-		_sea_level = ocean_manager.get_sea_level()
-	if ocean_manager.has_method("get_displacement_texture_rd"):
-		_displacement_rid = ocean_manager.get_displacement_texture_rd()
-	if ocean_manager.has_method("get_absorption_tint"):
-		_water_tint = ocean_manager.get_absorption_tint()
-	if ocean_manager.has_method("get_absorption_sigma"):
-		_absorption_sigma = ocean_manager.get_absorption_sigma()
-	if ocean_manager.has_method("get_underwater_caustics_strength"):
-		_caustics_strength = ocean_manager.get_underwater_caustics_strength()
-	if ocean_manager.has_method("get_time"):
-		_ocean_time = ocean_manager.get_time()
-
-	var scales: Variant = ocean_material.get_shader_parameter("map_scales")
-	_map_scales.clear()
-	if scales is PackedVector4Array:
-		for scale: Vector4 in scales:
-			_map_scales.append(scale)
-
-	var wave: Variant = ocean_material.get_shader_parameter("wave_scale")
-	if wave != null:
-		_wave_scale = float(wave)
-
-	var shore_mask: Variant = ocean_material.get_shader_parameter("shore_mask")
-	if shore_mask is Texture2D:
-		_shore_mask_rid = RenderingServer.texture_get_rd_texture((shore_mask as Texture2D).get_rid())
-
-	var bounds: Variant = ocean_material.get_shader_parameter("shore_mask_bounds")
-	if bounds is Vector4:
-		_shore_mask_bounds = bounds
-
-	var fade: Variant = ocean_material.get_shader_parameter("shore_fade_distance")
-	if fade != null:
-		_shore_fade_distance = float(fade)
-	var shore_amp: Variant = ocean_material.get_shader_parameter("shore_wave_amplitude")
-	if shore_amp != null:
-		_shore_wave_amplitude = float(shore_amp)
-	var shore_freq: Variant = ocean_material.get_shader_parameter("shore_wave_frequency")
-	if shore_freq != null:
-		_shore_wave_frequency = float(shore_freq)
-	var shore_speed: Variant = ocean_material.get_shader_parameter("shore_wave_speed")
-	if shore_speed != null:
-		_shore_wave_speed = float(shore_speed)
-	var shore_steep: Variant = ocean_material.get_shader_parameter("shore_wave_steepness")
-	if shore_steep != null:
-		_shore_wave_steepness = float(shore_steep)
+	if ocean_material != null:
+		Log.warn("water", "WaterlineCompositorEffect: refused material fallback; WaterSurfaceState is the required water contract")
 
 
 func set_probe_strength(value: float) -> void:
@@ -252,7 +225,7 @@ func set_probe_strength(value: float) -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 9)
+	_debug_mode = clampi(value, 0, 14)
 
 
 func set_camera_water_level(value: float) -> void:
@@ -326,6 +299,8 @@ func _feature_bit(feature_name: StringName) -> int:
 			return FEATURE_PARTICLES
 		&"meniscus_refraction":
 			return FEATURE_MENISCUS_REFRACTION
+		&"caustics":
+			return FEATURE_CAUSTICS
 		_:
 			return 0
 
@@ -514,6 +489,13 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_scene_color.add_id(_source_color_sampler)
 	u_scene_color.add_id(_scene_color_copy_rid if scene_copy_valid else color_image)
 	uniforms.append(u_scene_color)
+
+	var u_caustics_noise := RDUniform.new()
+	u_caustics_noise.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_caustics_noise.binding = 8
+	u_caustics_noise.add_id(_linear_repeat_sampler)
+	u_caustics_noise.add_id(_caustics_noise_rid)
+	uniforms.append(u_caustics_noise)
 
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():

@@ -56,6 +56,11 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Source",
 	"Camera Split",
 	"Pipeline",
+	"Camera Depth",
+	"Receiver Depth",
+	"Ray Entry/Exit",
+	"Body Coverage",
+	"Final Mask",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
@@ -101,6 +106,7 @@ var _uw_rays_check: CheckBox = null
 var _uw_wobble_check: CheckBox = null
 var _uw_particles_check: CheckBox = null
 var _uw_meniscus_check: CheckBox = null
+var _uw_caustics_check: CheckBox = null
 var _uw_waterline_check: CheckBox = null
 var _uw_perf_label: RichTextLabel = null
 var _uw_profile_button: Button = null
@@ -139,6 +145,7 @@ var _uw_rays_enabled: bool = true
 var _uw_wobble_effect_enabled: bool = true
 var _uw_particles_enabled: bool = true
 var _uw_meniscus_enabled: bool = true
+var _uw_caustics_enabled: bool = true
 var _uw_ray_shell_count: int = 6
 var _uw_ray_shell_spacing_m: float = 16.0
 var _uw_ray_intensity: float = 1.8
@@ -353,13 +360,9 @@ func _setup_ocean() -> void:
 		Log.error("water", "[Ocean Lab] OceanManager autoload missing")
 		return
 
-	if OceanManager.has_method("set_underwater_compositor_enabled"):
-		OceanManager.set_underwater_compositor_enabled(false)
 	ProjectSettings.set_setting("ocean/quality", 1)
 	if not OceanManager.is_initialized():
 		OceanManager.force_initialize()
-	if OceanManager.has_method("set_underwater_compositor_enabled"):
-		OceanManager.set_underwater_compositor_enabled(false)
 	OceanManager.set_enabled(true)
 	OceanManager.set_camera(_camera)
 	OceanManager.set_terrain(_terrain)
@@ -650,6 +653,10 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 		_uw_particles_enabled = value
 		_push_underwater_effect_controls()
 	)
+	_uw_caustics_check = _add_check(toggles, "Caustics", _uw_caustics_enabled, func(value: bool) -> void:
+		_uw_caustics_enabled = value
+		_push_underwater_effect_controls()
+	)
 	_uw_meniscus_check = _add_check(toggles, "Meniscus / refraction", _uw_meniscus_enabled, func(value: bool) -> void:
 		_uw_meniscus_enabled = value
 		_push_underwater_effect_controls()
@@ -817,6 +824,8 @@ func _refresh_control_labels() -> void:
 		_uw_wobble_check.button_pressed = _uw_wobble_effect_enabled
 	if _uw_particles_check:
 		_uw_particles_check.button_pressed = _uw_particles_enabled
+	if _uw_caustics_check:
+		_uw_caustics_check.button_pressed = _uw_caustics_enabled
 	if _uw_meniscus_check:
 		_uw_meniscus_check.button_pressed = _uw_meniscus_enabled
 	if _uw_waterline_check:
@@ -941,7 +950,6 @@ func _update_held_object() -> void:
 
 
 func _update_underwater_volume() -> void:
-	_disable_legacy_underwater_compositor()
 	_apply_ocean_surface_visibility()
 	if _underwater_volume == null:
 		return
@@ -1034,6 +1042,7 @@ func _push_underwater_effect_controls() -> void:
 		_waterline_effect.call("set_underwater_feature_enabled", &"wobble", _uw_wobble_effect_enabled)
 		_waterline_effect.call("set_underwater_feature_enabled", &"particles", _uw_particles_enabled)
 		_waterline_effect.call("set_underwater_feature_enabled", &"meniscus_refraction", _uw_meniscus_enabled)
+		_waterline_effect.call("set_underwater_feature_enabled", &"caustics", _uw_caustics_enabled)
 	if _waterline_effect.has_method("set_underwater_ray_params"):
 		_waterline_effect.call(
 			"set_underwater_ray_params",
@@ -1059,6 +1068,7 @@ func _set_underwater_profile_features(profile_name: String) -> void:
 	_uw_wobble_effect_enabled = profile_name == "Wobble" or profile_name == "All On"
 	_uw_particles_enabled = profile_name == "Particles" or profile_name == "All On"
 	_uw_meniscus_enabled = profile_name == "Meniscus/Refract" or profile_name == "All On"
+	_uw_caustics_enabled = profile_name == "Caustics" or profile_name == "All On"
 	_push_underwater_effect_controls()
 	_refresh_control_labels()
 
@@ -1071,6 +1081,7 @@ func _underwater_profile_names() -> Array[String]:
 		"Rays",
 		"Wobble",
 		"Particles",
+		"Caustics",
 		"Meniscus/Refract",
 		"All On",
 	]
@@ -1138,12 +1149,13 @@ func _update_underwater_perf_label() -> void:
 	lines.append("waterline/underwater probe: %.3f ms" % probe_ms)
 	lines.append("combined: %.3f ms" % total_ms)
 	lines.append("")
-	lines.append("flags: fog=%s snell=%s rays=%s wobble=%s particles=%s refract=%s" % [
+	lines.append("flags: fog=%s snell=%s rays=%s wobble=%s particles=%s caustics=%s refract=%s" % [
 		"on" if _uw_absorption_enabled else "off",
 		"on" if _uw_snell_enabled else "off",
 		"on" if _uw_rays_enabled else "off",
 		"on" if _uw_wobble_effect_enabled else "off",
 		"on" if _uw_particles_enabled else "off",
+		"on" if _uw_caustics_enabled else "off",
 		"on" if _uw_meniscus_enabled else "off",
 	])
 	lines.append("rays: %d shells / %.1fm / %.2fx" % [_uw_ray_shell_count, _uw_ray_shell_spacing_m, _uw_ray_intensity])
@@ -1167,16 +1179,6 @@ func _apply_ocean_surface_visibility() -> void:
 	if ocean_mesh:
 		ocean_mesh.layers = WATER_RENDER_LAYER_MASK
 		ocean_mesh.visible = _ocean_surface_visible
-
-
-func _disable_legacy_underwater_compositor() -> void:
-	if not OceanManager or not OceanManager.has_method("get_underwater_effect"):
-		return
-	var effect = OceanManager.get_underwater_effect()
-	if effect != null and bool(effect.get("effect_enabled")):
-		effect.set("effect_enabled", false)
-	if ShaderManager and ShaderManager.has_method("is_effect_enabled") and ShaderManager.is_effect_enabled("underwater"):
-		ShaderManager.disable_effect("underwater")
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1303,9 +1305,19 @@ func _update_hud() -> void:
 		elif _waterline_debug_mode == 7:
 			lines.append("WL Source: green=source depth valid, red=missing source color.")
 		elif _waterline_debug_mode == 8:
-			lines.append("WL Camera Split: red=receiver underwater, green=ray crosses water, blue=active coverage gate.")
+			lines.append("WL Camera Split: red=underwater camera mask, green=meniscus band, blue=water body gate.")
 		elif _waterline_debug_mode == 9:
 			lines.append("WL Pipeline: left=buffers, mid=depth, next=masks, right=final write gate.")
+		elif _waterline_debug_mode == 10:
+			lines.append("WL Camera Depth: blue/green=submerged camera depth, red=above water.")
+		elif _waterline_debug_mode == 11:
+			lines.append("WL Receiver Depth: blue/green=submerged receiver depth, red=above water.")
+		elif _waterline_debug_mode == 12:
+			lines.append("WL Ray Entry/Exit: red=surface hit, green=ray crossing, blue=body gate.")
+		elif _waterline_debug_mode == 13:
+			lines.append("WL Body Coverage: red=receiver, green=main depth, blue=camera.")
+		elif _waterline_debug_mode == 14:
+			lines.append("WL Final Mask: red=final mask, green=body gate, blue=visibility gate.")
 		lines.append("Playground: %s" % _shore_search_status)
 	_hud_label.text = "\n".join(lines)
 

@@ -1,22 +1,17 @@
-## Visual test for underwater compositor effect.
+## Visual test for the diagnostic underwater volume.
 ##
 ## Standalone scene — no ESM loading, no asset streaming.
-## Tests: UnderwaterCompositorEffect caustics, absorption, light rays, boundary, wobble.
-## Ocean is initialized via OceanManager autoload. Effect managed via ShaderManager.
+## Tests: UnderwaterVolume absorption, debug masks, and wobble.
+## Ocean is initialized via OceanManager autoload.
 ##
 ## Controls:
 ##   RMB      = Hold to look, ZQSD to move, Space/Ctrl up/down
 ##   Shift    = Fast move
-##   U        = Toggle underwater effect
-##   1        = Toggle caustics
-##   2        = Toggle light rays
+##   U        = Toggle underwater volume
 ##   3        = Toggle wobble
-##   4        = Toggle backscatter
-##   5        = Toggle boundary effect
-##   6        = Cycle debug modes (depth, normals, caustic raw, etc.)
+##   6        = Cycle volume debug modes
 ##   R        = Reset camera to underwater
 ##   G        = Reset camera to surface (boundary view)
-##   +/-      = Adjust absorption rate
 ##   O        = Toggle ocean visibility
 extends Node3D
 
@@ -28,12 +23,8 @@ var _ocean_enabled: bool = true
 var _mouse_captured: bool = false
 var _fly_speed: float = 15.0
 
-# Effect toggle states (independent of compositor — we set params to 0)
-var _caustics_on: bool = true
-var _rays_on: bool = true
+# Diagnostic volume toggles.
 var _wobble_on: bool = true
-var _scatter_on: bool = true
-var _boundary_on: bool = true
 var _debug_mode: int = 0
 
 
@@ -49,7 +40,7 @@ func _ready() -> void:
 	_camera.position = Vector3(0, -8, 20)
 	_camera.rotation_degrees = Vector3(-5, 0, 0)
 
-	Log.info("water", "Underwater test ready. RMB=fly, U=toggle effect, 1-5=toggle features, 6=debug, R=dive, G=surface")
+	Log.info("water", "Underwater test ready. RMB=fly, U=toggle volume, 3=wobble, 6=debug, R=dive, G=surface")
 
 
 func _setup_environment() -> void:
@@ -85,8 +76,8 @@ func _setup_environment() -> void:
 	_world_env.environment = env
 	add_child(_world_env)
 
-	# Attach ShaderManager's compositor to our WorldEnvironment
-	# Without this, CompositorEffects (underwater, godrays, etc.) won't render
+	# Attach ShaderManager's compositor to our WorldEnvironment for optional
+	# shared post effects; the diagnostic underwater volume does not use it.
 	ShaderManager.attach_to(_world_env)
 
 	_light = DirectionalLight3D.new()
@@ -200,32 +191,20 @@ var _volume: UnderwaterVolume = null
 
 
 func _setup_underwater_volume() -> void:
-	# Step 0: volume-based caustics shader replacing the old compute effect.
 	_volume = UnderwaterVolume.new()
 	_volume.name = "UnderwaterVolume"
 	_volume.set_camera(_camera)
 	_volume.set_sun(_light)
 	_volume.set_sea_level(OceanManager.get_sea_level())
 	add_child(_volume)
-	Log.info("water", "UnderwaterVolume added (Step 0: caustics only)")
+	Log.info("water", "UnderwaterVolume added (diagnostic absorption/wobble only)")
 
 
 func _process(delta: float) -> void:
 	_handle_fly_camera(delta)
-	_update_effect_params()
 	_update_debug_overlay()
 	if _volume != null:
 		_volume.set_sea_level(OceanManager.get_sea_level())
-
-
-func _update_effect_params() -> void:
-	# Step 0: old CompositorEffect underwater path is disabled in favor of the
-	# volume-based spatial shader (see _setup_underwater_volume). Force-disable
-	# it so the old broken effect doesn't overlap the new one. Full deletion of
-	# underwater_compositor_effect.gd + underwater.glsl is Step 5.
-	var effect: PostProcessEffect = OceanManager.get_underwater_effect()
-	if effect != null and effect.effect_enabled:
-		effect.effect_enabled = false
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -236,26 +215,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _volume != null:
 					_volume.enabled = not _volume.enabled
 					Log.info("water", "Underwater volume: %s" % ("ON" if _volume.enabled else "OFF"))
-			KEY_1:
-				_caustics_on = not _caustics_on
-				Log.info("water", "Caustics: %s" % ("ON" if _caustics_on else "OFF"))
-			KEY_2:
-				_rays_on = not _rays_on
-				Log.info("water", "Light rays: %s" % ("ON" if _rays_on else "OFF"))
 			KEY_3:
 				_wobble_on = not _wobble_on
+				if _volume != null:
+					_volume.set_wobble_enabled(_wobble_on)
 				Log.info("water", "Wobble: %s" % ("ON" if _wobble_on else "OFF"))
-			KEY_4:
-				_scatter_on = not _scatter_on
-				Log.info("water", "Backscatter: %s" % ("ON" if _scatter_on else "OFF"))
-			KEY_5:
-				_boundary_on = not _boundary_on
-				Log.info("water", "Boundary: %s" % ("ON" if _boundary_on else "OFF"))
 			KEY_6:
-				_debug_mode = (_debug_mode + 1) % 11
-				var names := ["OFF", "water_depth", "world_pos.y", "underwater_mask",
-					"caustic_raw", "world_normal", "linear_depth",
-					"cam_pos_sentinel", "worldpos_bands_10m", "raw_depth", "inv_proj_diag"]
+				_debug_mode = (_debug_mode + 1) % 4
+				var names := ["Final", "Slab Mask", "Depth/Y", "Big Wobble"]
+				if _volume != null:
+					_volume.set_debug_mode(_debug_mode)
 				Log.info("water", "Debug mode: %s" % names[_debug_mode])
 			KEY_R:
 				_camera.position = Vector3(0, -8, 20)
@@ -269,10 +238,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				_ocean_enabled = not _ocean_enabled
 				OceanManager.set_enabled(_ocean_enabled)
 				Log.info("water", "Ocean: %s" % ("ON" if _ocean_enabled else "OFF"))
-			KEY_EQUAL:
-				_adjust_absorption(0.0005)
-			KEY_MINUS:
-				_adjust_absorption(-0.0005)
 
 	if event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event as InputEventMouseButton
@@ -285,13 +250,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		_camera.rotation_degrees.y -= mm.relative.x * 0.2
 		_camera.rotation_degrees.x -= mm.relative.y * 0.2
 		_camera.rotation_degrees.x = clampf(_camera.rotation_degrees.x, -89, 89)
-
-
-func _adjust_absorption(delta_val: float) -> void:
-	var rate = ShaderManager.get_effect_param("underwater", "absorption_rate")
-	if rate == null:
-		rate = 0.0015
-	ShaderManager.set_effect_param("underwater", "absorption_rate", clampf(float(rate) + delta_val, 0.0005, 0.01))
 
 
 func _handle_fly_camera(delta: float) -> void:
@@ -335,7 +293,7 @@ func _update_debug_overlay() -> void:
 		return
 
 	var lines: PackedStringArray = PackedStringArray()
-	lines.append("[b]UNDERWATER TEST (CompositorEffect)[/b]")
+	lines.append("[b]UNDERWATER TEST (Diagnostic Volume)[/b]")
 	lines.append("")
 
 	var sea: float = OceanManager.get_sea_level()
@@ -351,33 +309,19 @@ func _update_debug_overlay() -> void:
 		lines.append("[color=green]ABOVE WATER[/color]")
 	lines.append("")
 
-	var effect: PostProcessEffect = OceanManager.get_underwater_effect()
-	if effect:
-		var active: bool = ShaderManager.is_effect_enabled("underwater")
-		lines.append("[b]Effect:[/b] %s" % ("[color=cyan]ACTIVE[/color]" if active else "[color=red]INACTIVE[/color]"))
-		lines.append("  [1] Caustics: %s" % _on_off(_caustics_on))
-		lines.append("  [2] Rays:     %s" % _on_off(_rays_on))
-		lines.append("  [3] Wobble:   %s" % _on_off(_wobble_on))
-		lines.append("  [4] Scatter:  %s" % _on_off(_scatter_on))
-		lines.append("  [5] Boundary: %s" % _on_off(_boundary_on))
-		var rate = ShaderManager.get_effect_param("underwater", "absorption_rate")
-		if rate != null:
-			lines.append("  Absorption: %.4f [+/-]" % float(rate))
-	else:
-		lines.append("[color=red]No underwater effect loaded[/color]")
+	lines.append("[b]Volume:[/b] %s" % ("[color=cyan]ACTIVE[/color]" if _volume != null and _volume.enabled else "[color=red]INACTIVE[/color]"))
+	lines.append("  [3] Wobble:   %s" % _on_off(_wobble_on))
 	lines.append("")
 
 	if _debug_mode > 0:
-		var names := ["", "water_depth", "world_pos.y", "underwater_mask", "caustic_raw",
-			"world_normal", "linear_depth", "cam_pos_sentinel", "worldpos_bands_10m",
-			"raw_depth", "inv_proj_diag"]
+		var names := ["", "Slab Mask", "Depth/Y", "Big Wobble"]
 		lines.append("[color=orange][b]DEBUG: %s[/b][/color]" % names[_debug_mode])
 	lines.append("")
 
 	lines.append("[b]Controls:[/b]")
 	lines.append("  RMB = Look | ZQSD = Move")
 	lines.append("  Space/Ctrl = Up/Down | Shift = Fast")
-	lines.append("  U = Toggle effect | O = Toggle ocean")
+	lines.append("  U = Toggle volume | O = Toggle ocean")
 	lines.append("  R = Dive | G = Surface | 6 = Debug mode")
 
 	_debug_label.text = "\n".join(lines)
