@@ -1017,7 +1017,9 @@ func _sync_waterline_sun() -> void:
 	if _waterline_effect == null or _sun == null or not is_instance_valid(_sun):
 		return
 	if _waterline_effect.has_method("set_sun_direction"):
-		_waterline_effect.call("set_sun_direction", -_sun.global_basis.z)
+		# DirectionalLight3D shines along -basis.z; +basis.z points back toward
+		# the sun in the sky. The underwater ray shader expects toward-sun.
+		_waterline_effect.call("set_sun_direction", _sun.global_basis.z)
 	if _waterline_effect.has_method("set_sun_visibility"):
 		_waterline_effect.call("set_sun_visibility", clampf(_sun.light_energy / 1.4, 0.0, 1.0))
 

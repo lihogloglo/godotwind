@@ -83,21 +83,23 @@ const float SHORE_TAU = 6.2831853;
 const float AIR_IOR = 1.000293;
 const float WATER_IOR = 1.3330;
 const float WATER_TO_AIR_ETA = WATER_IOR / AIR_IOR;
-const float WATER_TO_AIR_CRITICAL_SIN = AIR_IOR / WATER_IOR;
-const float WATER_TO_AIR_CRITICAL_COS = sqrt(1.0 - WATER_TO_AIR_CRITICAL_SIN * WATER_TO_AIR_CRITICAL_SIN);
 
 struct SnellSample {
 	float window;
-	float rim;
 	float cos_theta;
 	float valid;
-	vec3 air_dir;
 	vec3 surface_normal;
 	vec3 surface_pos;
 };
 
 bool feature_enabled(int bit) {
 	return (feature_flags & bit) != 0;
+}
+
+float snells_window(vec3 normal, vec3 view, float ior) {
+	float cos_theta = clamp(dot(normal, view), 0.0, 1.0);
+	float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+	return step(sin_theta * ior, 1.0);
 }
 
 float hash21(vec2 p) {
@@ -443,10 +445,8 @@ bool trace_water_surface(vec2 uv, vec3 cam_pos, out vec3 water_world, out float 
 SnellSample compute_snell_sample(vec3 cam_pos, vec3 view_dir, vec3 water_surface_pos, bool water_surface_hit) {
 	SnellSample result;
 	result.window = 0.0;
-	result.rim = 0.0;
 	result.cos_theta = 0.0;
 	result.valid = 0.0;
-	result.air_dir = vec3(0.0, 1.0, 0.0);
 	result.surface_normal = vec3(0.0, 1.0, 0.0);
 	result.surface_pos = water_surface_pos;
 
@@ -460,42 +460,20 @@ SnellSample compute_snell_sample(vec3 cam_pos, vec3 view_dir, vec3 water_surface
 	}
 
 	vec3 surface_normal = water_normal_at(water_surface_pos.xz, cam_pos);
-	float cos_theta = clamp(dot(surface_ray, surface_normal), 0.0, 1.0);
-	if (cos_theta <= 0.0) {
+	float wave_cos_theta = clamp(dot(surface_ray, surface_normal), 0.0, 1.0);
+	if (wave_cos_theta <= 0.0) {
 		return result;
 	}
 
 	// Snell window for water->air transmission. The hard physics boundary is
 	// theta_c = asin(n_air / n_water), which gives a ~97 degree full cone.
-	float window = smoothstep(
-		WATER_TO_AIR_CRITICAL_COS - 0.010,
-		WATER_TO_AIR_CRITICAL_COS + 0.028,
-		cos_theta
-	);
-	float rim = (1.0 - smoothstep(0.0, 0.040, abs(cos_theta - WATER_TO_AIR_CRITICAL_COS)))
-		* smoothstep(0.18, 0.60, cos_theta);
-	vec3 air_dir = refract(surface_ray, -surface_normal, WATER_TO_AIR_ETA);
-	float refracted = step(1e-5, dot(air_dir, air_dir));
+	float window = snells_window(surface_normal, surface_ray, WATER_TO_AIR_ETA);
 
-	result.window = window * refracted;
-	result.rim = rim;
-	result.cos_theta = cos_theta;
+	result.window = window;
+	result.cos_theta = wave_cos_theta;
 	result.valid = 1.0;
-	result.air_dir = refracted > 0.5 ? normalize(air_dir) : reflect(surface_ray, surface_normal);
 	result.surface_normal = surface_normal;
 	return result;
-}
-
-
-vec3 snell_sky_color(vec3 air_dir, vec3 sun_dir, float sun_visibility, vec3 water_tint) {
-	float horizon = clamp(air_dir.y * 0.5 + 0.5, 0.0, 1.0);
-	vec3 low_sky = mix(water_tint * 1.20, vec3(0.43, 0.67, 0.82), sun_visibility);
-	vec3 high_sky = mix(vec3(0.24, 0.45, 0.64), vec3(0.72, 0.91, 1.0), sun_visibility);
-	float sun_core = pow(max(dot(air_dir, sun_dir), 0.0), 180.0) * sun_visibility;
-	float sun_haze = pow(max(dot(air_dir, sun_dir), 0.0), 14.0) * sun_visibility;
-	return mix(low_sky, high_sky, smoothstep(0.20, 0.95, horizon))
-		+ vec3(1.0, 0.88, 0.62) * sun_core * 1.15
-		+ vec3(0.55, 0.72, 0.82) * sun_haze * 0.16;
 }
 
 
@@ -510,7 +488,7 @@ float compute_underwater_rays(
 	vec3 sun_dir = normalize(state.sun_params.xyz);
 	float sun_vis = clamp(state.sun_params.w, 0.0, 1.0);
 	float sun_height = max(sun_dir.y, 0.03);
-	float sun_fade = smoothstep(0.02, 0.32, sun_dir.y) * sun_vis;
+	float sun_fade = smoothstep(0.00, 0.26, sun_dir.y) * sun_vis;
 	float view_to_sun = max(dot(view_dir, sun_dir), 0.0);
 	vec2 sun_xz = normalize(sun_dir.xz + vec2(0.001, -0.001));
 	vec2 sun_perp = vec2(-sun_xz.y, sun_xz.x);
@@ -543,16 +521,16 @@ float compute_underwater_rays(
 		float column_a = fbm2(vec2(across * 0.055, along * 0.010) + vec2(TIME * 0.010, -TIME * 0.004));
 		float column_b = fbm2(surface_xz * 0.018 + vec2(-TIME * 0.006, TIME * 0.008) + float(i) * 9.17);
 		float column = column_a * 0.72 + column_b * 0.28;
-		float shaft = pow(smoothstep(0.58, 0.86, column), 2.15);
+		float shaft = pow(smoothstep(0.42, 0.72, column), 1.55);
 		float shimmer = 0.86 + 0.14 * sin(TIME * 0.75 + along * 0.030 + across * 0.017);
-		float depth_atten = exp(-sample_depth * 0.030) * (1.0 - smoothstep(62.0, 145.0, sample_depth));
+		float depth_atten = exp(-sample_depth * 0.020) * (1.0 - smoothstep(72.0, 160.0, sample_depth));
 		float dist_gate = smoothstep(1.0, 7.0, sample_dist)
 			* (1.0 - smoothstep(max_dist * 0.76, max_dist, sample_dist));
 		float phase = 0.24 + pow(view_to_sun, 1.75) * 0.88 + smoothstep(0.0, 0.72, sun_dir.y) * 0.22;
 		ray_sum += shaft * shimmer * depth_atten * dist_gate * phase / (1.0 + float(i) * 0.30);
 	}
 
-	return clamp(ray_sum * ray_intensity * sun_fade * camera_depth_gate * 0.22, 0.0, 0.38);
+	return clamp(ray_sum * ray_intensity * sun_fade * camera_depth_gate * 0.42, 0.0, 0.55);
 }
 
 
@@ -1033,7 +1011,6 @@ void main() {
 		vec3 surface_normal = (needs_surface_normal && snell.valid > 0.5) ? snell.surface_normal : vec3(0.0, 1.0, 0.0);
 		vec3 normal_view = normalize((state.view * vec4(surface_normal, 0.0)).xyz);
 		float snell_window = snell_enabled ? snell.window : 0.0;
-		float snell_rim = snell_enabled ? snell.rim : 0.0;
 		float total_internal_reflection = snell_enabled && snell.valid > 0.5 ? 1.0 - snell_window : 0.0;
 		float up_dot = snell.valid > 0.5 ? snell.cos_theta : max(view_dir.y, 0.0);
 		float scene_dist = main_depth_present ? length(main_world_pos - cam_pos) : min(surface_dist + 55.0, 95.0);
@@ -1079,11 +1056,10 @@ void main() {
 		underwater_color += rays * vec3(0.46, 0.82, 1.0) * (0.45 + 0.55 * state.sun_params.w);
 		float particles = particles_enabled ? compute_underwater_particles(uv, cam_pos, view_dir, max(scene_dist, surface_dist + 12.0), camera_depth) : 0.0;
 		underwater_color += particles * mix(vec3(0.58, 0.82, 0.78), vec3(0.95, 1.0, 0.92), underwater_fog) * 0.58;
-		vec3 snell_color = snell_sky_color(snell.air_dir, normalize(state.sun_params.xyz), state.sun_params.w, tint);
-		vec3 surface_sample = sample_scene_color(clamp(wobbled_uv - normal_view.xy * 0.004, vec2(0.001), vec2(0.999)), scene_color.rgb);
-		snell_color = mix(snell_color, max(snell_color, surface_sample * 1.10), 0.25);
-		underwater_color = snell_enabled ? mix(underwater_color, snell_color, snell_window * 0.78) : underwater_color;
-		underwater_color += vec3(0.38, 0.78, 0.96) * snell_rim * 0.18;
+		vec2 snell_uv = clamp(uv - normal_view.xy * 0.006, vec2(0.001), vec2(0.999));
+		vec3 snell_scene = source_valid ? texture(source_color_tex, snell_uv).rgb : sample_scene_color(snell_uv, scene_color.rgb);
+		vec3 tir_tint = absorption_enabled ? underwater_color : tint;
+		underwater_color = snell_enabled ? mix(tir_tint, snell_scene, snell_window) : underwater_color;
 		float dither = interleaved_gradient_noise(vec2(pixel));
 		underwater_color += vec3(dither * 2.0 - 1.0) / 255.0;
 	}
