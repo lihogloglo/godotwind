@@ -173,6 +173,30 @@ bool uv_in_screen(vec2 uv) {
 }
 
 
+vec3 pipeline_debug_color(
+	vec2 uv,
+	float source_bound,
+	float source_depth_bound,
+	float receiver_depth_present,
+	float main_depth_present,
+	float receiver_mask,
+	float water_body_gate,
+	float visible_water_gate,
+	float final_mask
+) {
+	if (uv.x < 0.25) {
+		return vec3(source_bound, source_depth_bound, receiver_depth_present);
+	}
+	if (uv.x < 0.50) {
+		return vec3(receiver_depth_present, main_depth_present, source_bound * source_depth_bound * 0.20);
+	}
+	if (uv.x < 0.75) {
+		return vec3(receiver_mask, water_body_gate, visible_water_gate);
+	}
+	return vec3(final_mask, final_mask > 0.001 ? 1.0 : 0.0, 1.0);
+}
+
+
 vec4 sample_shore_data(vec2 world_xz) {
 	vec2 shore_uv = (world_xz - state.shore_mask_bounds.xy) / state.shore_mask_bounds.zw;
 	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
@@ -455,14 +479,45 @@ void main() {
 	}
 
 	vec2 uv = (vec2(pixel) + 0.5) / vec2(screen_w, screen_h);
+	bool pipeline_debug = debug_mode == 9;
 
 	if (!source_valid || !source_depth_valid) {
+		if (pipeline_debug) {
+			vec4 scene_color = imageLoad(color_image, pixel);
+			vec3 debug_color = pipeline_debug_color(
+				uv,
+				source_valid ? 1.0 : 0.0,
+				source_depth_valid ? 1.0 : 0.0,
+				0.0,
+				0.0,
+				0.0,
+				0.0,
+				0.0,
+				0.0
+			);
+			imageStore(color_image, pixel, vec4(debug_color, scene_color.a));
+		}
 		return;
 	}
 
 	float raw_depth = get_source_depth(uv);
 	float main_depth = get_main_depth(uv);
 	if (raw_depth <= 0.0001 || main_depth <= 0.0001) {
+		if (pipeline_debug) {
+			vec4 scene_color = imageLoad(color_image, pixel);
+			vec3 debug_color = pipeline_debug_color(
+				uv,
+				1.0,
+				1.0,
+				raw_depth > 0.0001 ? 1.0 : 0.0,
+				main_depth > 0.0001 ? 1.0 : 0.0,
+				0.0,
+				0.0,
+				0.0,
+				0.0
+			);
+			imageStore(color_image, pixel, vec4(debug_color, scene_color.a));
+		}
 		return;
 	}
 
@@ -500,7 +555,8 @@ void main() {
 	float visible_water_gate = camera_underwater
 		? max(underwater_ray_mask, crossing_mask * 0.65)
 		: visible_water_depth_gate * visible_water_band_gate;
-	float mask = receiver_mask * visible_water_gate * water_body_gate;
+	float receiver_visibility_gate = max(visible_water_gate, underwater_ray_mask);
+	float mask = receiver_mask * receiver_visibility_gate * water_body_gate;
 	if (debug_mode == 0 && mask <= 0.001) {
 		return;
 	}
@@ -524,7 +580,7 @@ void main() {
 		? mix(water_color, line_tint, meniscus)
 		: mix(water_color, vec3(0.0, 0.85, 1.0), waterline_band * 0.55);
 	if (debug_mode == 4) {
-		proof_color = vec3(receiver_mask, water_body_gate, visible_water_gate);
+		proof_color = vec3(receiver_mask, water_body_gate, receiver_visibility_gate);
 	} else if (debug_mode == 5) {
 		if (refr_sample.status < 1.5) {
 			proof_color = vec3(1.0, 0.0, 0.85);
@@ -560,12 +616,26 @@ void main() {
 			source_valid && source_depth_valid ? 0.15 : 0.0
 		);
 	} else if (debug_mode == 8) {
-		proof_color = vec3(below_mask, crossing_mask, visible_water_gate * water_body_gate);
+		proof_color = vec3(below_mask, crossing_mask, receiver_visibility_gate * water_body_gate);
+	} else if (pipeline_debug) {
+		proof_color = pipeline_debug_color(
+			uv,
+			1.0,
+			1.0,
+			1.0,
+			1.0,
+			receiver_mask,
+			water_body_gate,
+			visible_water_gate,
+			mask
+		);
 	}
-	float debug_strength = (debug_mode == 5 || debug_mode == 6 || debug_mode == 7 || debug_mode == 8) ? 1.0 : probe_strength;
+	float debug_strength = (debug_mode == 5 || debug_mode == 6 || debug_mode == 7 || debug_mode == 8 || pipeline_debug) ? 1.0 : probe_strength;
 	float final_refraction_boost = debug_mode == 0 && refr_sample.valid > 0.5 ? 1.10 : 1.0;
 	float final_opacity = mix(0.30, 0.46, camera_underwater ? 1.0 : 0.0);
-	float strength = debug_mode == 0
+	float strength = pipeline_debug
+		? 1.0
+		: debug_mode == 0
 		? clamp(debug_strength * final_refraction_boost * blend_factor * mask * final_opacity, 0.0, final_opacity)
 		: clamp(debug_strength * blend_factor * max(receiver_mask, waterline_band), 0.0, 1.0);
 	imageStore(color_image, pixel, vec4(mix(scene_color.rgb, proof_color, strength), scene_color.a));

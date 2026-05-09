@@ -54,6 +54,7 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Refract Offset",
 	"Source",
 	"Camera Split",
+	"Pipeline",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
@@ -119,10 +120,10 @@ var _underwater_active_above: bool = false
 var _uw_wobble_enabled: bool = false
 var _ocean_surface_visible: bool = true
 var _uw_debug_mode: int = 0
-var _waterline_compositor_enabled: bool = false
+var _waterline_compositor_enabled: bool = true
 var _waterline_debug_mode: int = 0
 var _waterline_resolution_scales: Array[float] = [1.0, 0.75, 0.5, 0.25]
-var _waterline_resolution_index: int = 2
+var _waterline_resolution_index: int = 0
 var _wireframe_enabled: bool = false
 var _current_weather: int = 0
 var _sun_low: bool = false
@@ -972,11 +973,13 @@ func _update_hud() -> void:
 		elif _waterline_debug_mode == 6:
 			lines.append("WL Refract Offset: red=UV offset amount, green=visible source-color change.")
 		elif _waterline_debug_mode == 4:
-			lines.append("WL Receiver Mask: red=eligible receiver, green=water coverage, blue=visible water gate.")
+			lines.append("WL Receiver Mask: red=eligible receiver, green=water coverage, blue=active visibility gate.")
 		elif _waterline_debug_mode == 7:
 			lines.append("WL Source: green=source depth valid, red=missing source color.")
 		elif _waterline_debug_mode == 8:
-			lines.append("WL Camera Split: red=receiver underwater, green=ray crosses water, blue=coverage-gated water.")
+			lines.append("WL Camera Split: red=receiver underwater, green=ray crosses water, blue=active coverage gate.")
+		elif _waterline_debug_mode == 9:
+			lines.append("WL Pipeline: left=buffers, mid=depth, next=masks, right=final write gate.")
 		lines.append("Playground: %s" % _shore_search_status)
 	_hud_label.text = "\n".join(lines)
 

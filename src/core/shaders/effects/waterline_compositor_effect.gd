@@ -1,8 +1,8 @@
 ## WaterlineCompositorEffect - receiver-only waterline compositor core.
 ##
 ## Classifies opt-in receiver depth against the displaced FFT water surface
-## after opaque water has drawn, then subtly bends/tints only those receiver
-## pixels through visible water. Empty water and terrain are left untouched.
+## after the visible ocean has drawn, then bends/tints only those receiver
+## pixels through water. Empty water and terrain are left untouched.
 @tool
 class_name WaterlineCompositorEffect
 extends PostProcessEffect
@@ -47,10 +47,10 @@ func _init() -> void:
 	super._init()
 	effect_name = "waterline_probe"
 	display_name = "Waterline Compositor"
-	description = "PRE_TRANSPARENT receiver-only waterline compositor."
+	description = "POST_TRANSPARENT receiver-only waterline compositor."
 	category = "Water"
 	render_priority = 8
-	effect_callback_type = EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
+	effect_callback_type = EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
 	access_resolved_color = true
 	access_resolved_depth = true
 	needs_depth = true
@@ -194,7 +194,7 @@ func set_probe_strength(value: float) -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 8)
+	_debug_mode = clampi(value, 0, 9)
 
 
 func set_camera_water_level(value: float) -> void:
@@ -218,7 +218,7 @@ func clear_external_source_buffers() -> void:
 
 
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
-	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT:
+	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_POST_TRANSPARENT:
 		return
 	if not _render_logged:
 		_render_logged = true

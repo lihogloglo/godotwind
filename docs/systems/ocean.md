@@ -138,10 +138,9 @@ refraction.
 1. **Waterline compositor still prototype-quality.** Above-water
    half-submerged-object bending now comes from the receiver-only compositor
    path, not the FFT surface shader. `Final` mode requires valid receiver
-   depth and visible water in the main view, so empty ocean pixels and terrain
-   stay as the opaque surface rendered them. The compositor runs at
-   `PRE_TRANSPARENT`: after opaque rendering and before transparent spray or
-   diagnostic volumes.
+   depth and active water coverage, so empty ocean pixels and terrain stay as
+   the opaque surface rendered them. The compositor runs at `POST_TRANSPARENT`
+   so its receiver result is not buried by the visible ocean surface.
 2. **Underwater POV of ocean surface is flat dark `color_deep`.** When the
    camera is below the water looking up, the ocean-surface fragment's
    Beer-Lambert path sees sky at `DEPTH_TEXTURE`, the sky-guard fires, and the
