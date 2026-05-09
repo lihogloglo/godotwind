@@ -621,11 +621,34 @@ volume shader is the seed, not the final design.
   layer `1 << 18` for refraction receivers, keeps water on `1 << 19`, and
   captures only opt-in objects for `WaterlineCompositorEffect`. Terrain and the
   broad seabed helpers are not receiver inputs.
-- 2026-05-08 waterline stage correction: with receiver-only buffers, the
-  compositor returns to `PRE_TRANSPARENT`, after opaque ocean and before spray
-  or diagnostic volumes. `Final` output requires valid receiver depth plus a
-  visible-water gate in the main view, so it must not repaint empty ocean,
-  terrain, or dry foreground object parts.
+- 2026-05-09 waterline stage correction: with receiver-only buffers, the
+  compositor now runs at `POST_TRANSPARENT`. `PRE_TRANSPARENT` let the visible
+  ocean surface overdraw the receiver result; user A/B screenshots with
+  `Ocean Mesh: On/Off` proved that only the waterline band survived when the
+  ocean drew afterward. `POST_TRANSPARENT` keeps the opaque FFT ocean as the
+  base surface while allowing the receiver waterline result to draw over it.
+- 2026-05-09 refraction pass: `waterline_probe.glsl` can now pull receiver
+  color/depth from neighboring UVs, so Final/Refract modes can bend the
+  submerged receiver silhouette instead of only tinting same-pixel coverage.
+  Strength is intentionally slightly art-directed above minimal physical
+  subtlety, with above-water/sky reject guards retained.
+- 2026-05-09 cutoff audit: user observed that waterline/underwater effects can
+  stop abruptly while moving away, then reappear, and that the main scene can
+  show a square area around the camera where effects work. There are two
+  likely contributors in current code:
+  - `PrewaterCaptureRenderer.near_water_capture_distance_m = 120.0` disables
+    the receiver capture when the camera is more than 120 m above the sampled
+    water surface.
+  - `WaterlineCompositorEffect._near_water_activation_distance = 120.0`
+    skips Final mode outside the same vertical band.
+  - Clipmap ocean geometry is square-ring based and snapped around the camera;
+    any compositor gate based on main-view ocean depth/visible-water pixels can
+    inherit that square footprint and close abruptly outside the rendered
+    ocean/depth coverage.
+  Next fix should not be another refraction-strength tweak. Replace the hard
+  activation and visible-depth gates with a stable water coverage contract from
+  `WaterSurfaceState` / water body coverage, with smooth fade margins and clear
+  HUD meters for capture active, camera-water delta, and coverage source.
 
 Tasks:
 
@@ -675,6 +698,15 @@ Tasks:
   post-ocean color/depth or a broad terrain capture. Current pass is
   implemented in Ocean Lab; next check is visual quality and frame cost at the
   chosen capture resolution.
+- Audit and replace hard waterline activation boundaries. The current 120 m
+  vertical near-water cutoff is useful for cost control but unacceptable as a
+  visible hard switch. The production path needs a budgeted policy such as
+  frustum/body-aware capture, distance/altitude fade, or quality-tiered
+  resolution scaling rather than disabling the source buffers abruptly.
+- Decouple waterline eligibility from the finite square ocean mesh depth. Main
+  ocean depth is useful as a visibility hint, but water body coverage must not
+  disappear just because the clipmap footprint, snap, or projected grid edge
+  leaves no same-pixel water depth.
 - Add the half-immersed camera compositor mode after object waterline ownership
   is proven. The desired behavior is a moving wave-driven split screen:
   underwater treatment below the dynamic surface contour and normal atmospheric

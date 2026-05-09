@@ -23,7 +23,58 @@ scene turning into a flat dark overlay or a debug-colored screen-space hack.
 
 ## Current Status
 
-The waterline compositor path is still not working visually in Final mode.
+Update later on 2026-05-09: the waterline compositor path is now visually
+working in Ocean Lab at the ownership / ordering level, but it is still not
+production complete.
+
+What changed after this handoff was written:
+
+- `WaterlineCompositorEffect` now runs at `POST_TRANSPARENT`, so the visible
+  opaque ocean surface no longer overdraws the receiver waterline result.
+- Ocean Lab starts with `Waterline: On` and `WL Res: 100%`.
+- `WL Debug: Pipeline` was added to prove source buffers, depth, gates, and
+  final image writes.
+- `WL Debug: Receiver Mask` now shows the active gate used by Final mode.
+- Final / Refract modes can pull a submerged receiver from a neighboring UV,
+  so waterline refraction can bend the receiver silhouette instead of only
+  tinting same-pixel object coverage.
+- Refraction strength was intentionally nudged above purely subtle physical
+  scale for readable game-art feedback.
+
+The user visually confirmed:
+
+- receiver masks draw over the real ocean surface with `Ocean Mesh: On`;
+- Final/Refract mode now works, but still needs polish;
+- moving away can make the effects stop abruptly and later reappear;
+- in the main Godotwind scene a square-ish area around the camera appears to
+  bound where waterline/underwater effects work.
+
+Audit note for the abrupt cutoff / square footprint:
+
+- `PrewaterCaptureRenderer.near_water_capture_distance_m` is hard-coded to
+  `120.0`; the receiver capture disables when the camera is more than this
+  vertical distance above the sampled water level.
+- `WaterlineCompositorEffect._near_water_activation_distance` is also
+  hard-coded to `120.0`; Final mode skips work when the camera is above that
+  band.
+- The current Final mask still depends on main-view ocean depth / visible-water
+  coverage for some cases. Where the ocean mesh/depth is absent, clipped, or
+  falls outside a square clipmap footprint, the compositor gate closes hard.
+- The ocean mesh in clipmap mode is square-ring geometry snapped around the
+  camera (`OceanMesh.update_position()` snaps in 40 m steps for current HIGH
+  settings). That square geometry can become visible in any effect that uses
+  the rendered ocean depth as its coverage source.
+
+Treat this as the next architecture problem, not as a refraction-strength
+tuning bug. The proper fix is to replace hard activation/coverage gates with a
+stable water-coverage contract: receiver capture/compositor activation should
+fade or be driven by the camera frustum/water body, and waterline eligibility
+should come from `WaterSurfaceState` / water body coverage rather than the
+finite square ocean mesh depth alone.
+
+Previous status from the start of this handoff follows.
+
+The waterline compositor path was still not working visually in Final mode.
 
 The debug classifier showed signs of being conceptually close:
 

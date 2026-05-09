@@ -5,7 +5,7 @@
 // `ocean_fft_projected.gdshader` (Sea of Thieves / Wicked Engine screen-space
 // projected grid path). Contains every piece of the ocean surface shader that
 // does NOT depend on how vertices reach the water plane — uniforms, varyings,
-// bicubic + shore helpers, the full fragment() and light() functions.
+// SSR + bicubic + shore helpers, the full fragment() and light() functions.
 //
 // The including .gdshader file is responsible for:
 //   - `shader_type spatial;`
@@ -13,7 +13,7 @@
 //   - `void vertex() { ... }` (clipmap reads world VERTEX.xz; projected unprojects NDC)
 //
 // Keeping the split at the vertex() boundary means only ~40 lines differ
-// between the two meshes, and everything downstream — opaque optics,
+// between the two meshes, and everything downstream — SSR, opaque optics,
 // shore mask, SSS, debug modes, lighting — stays in lockstep automatically.
 //
 // DO NOT add `shader_type` or `render_mode` to this file; the include is
@@ -65,10 +65,11 @@ uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
 uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
 
-// Opaque depth-driven Beer-Lambert tint. The production ocean surface must not
-// declare the scene-color screen sampler; scene-color bending/tinting belongs to the
-// waterline compositor so the surface remains in the robust opaque family.
+// Opaque depth-driven Beer-Lambert tint. The waterline compositor owns
+// scene-color bending for submerged receivers; this surface still samples the
+// opaque scene copy for per-surface SSR.
 group_uniforms optics;
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
 uniform sampler2D DEPTH_TEXTURE  : hint_depth_texture, filter_nearest;
 // Beer-Lambert extinction coefficients per channel (m^-1, applied after density scale).
 // R absorbed fastest, G/B slower — matches real ocean spectrum.
@@ -81,6 +82,17 @@ uniform float max_visible_depth : hint_range(1.0, 50.0) = 20.0;
 // World-space Y of the undisplaced water surface. Set by OceanManager when the
 // material is initialized; default 0 works for sea-level-at-origin scenes.
 uniform float sea_level = 0.0;
+
+// Custom in-shader SSR. Godot native SSR is enabled in the lab environment, but
+// water's depth/screen-reading shader path is not a reliable native SSR
+// receiver. This raymarch restores object reflections on the ocean itself.
+group_uniforms ssr;
+uniform int ssr_max_steps : hint_range(4, 64) = 24;
+uniform float ssr_resolution : hint_range(0.1, 5.0) = 1.5;
+uniform float ssr_max_travel : hint_range(1.0, 100.0) = 30.0;
+uniform float ssr_max_diff : hint_range(0.1, 10.0) = 4.0;
+uniform float ssr_mix_strength : hint_range(0.0, 1.0) = 0.7;
+uniform float ssr_screen_border_fadeout : hint_range(0.0, 1.0) = 0.3;
 
 // Visual tuning
 group_uniforms visual;
@@ -100,10 +112,11 @@ uniform float ocean_time = 0.0;
 //   3 = Water thickness / max_visible_depth (blue=thin, red=thick)
 //   4 = Transmittance (beer-lambert absorption, gray)
 //   5 = Fresnel (gray)
-//   6 = Foam factor
-//   7 = Normal.y (up-facing = white, sideways = black)
-//   8 = SSS scatter factor (sub-surface emission)
-uniform int debug_mode : hint_range(0, 8) = 0;
+//   6 = SSR hit (green = hit, reflected color = sampled scene)
+//   7 = Foam factor
+//   8 = Normal.y (up-facing = white, sideways = black)
+//   9 = SSS scatter factor (sub-surface emission)
+uniform int debug_mode : hint_range(0, 9) = 0;
 
 // Subsurface scattering — Sea of Thieves "scattering approximation" model.
 // Blends between the base water color and a sub-surface scatter color based on
@@ -141,7 +154,7 @@ uniform vec3 sun_dir_world = vec3(0.0, -1.0, 0.0);
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
-varying vec3 v_world_pos;      // displaced world position (for normals, SSS, depth)
+varying vec3 v_world_pos;      // displaced world position (for normals, SSS, depth, SSR)
 varying float v_vertex_dist;
 // FFT choppiness magnitude — horizontal displacement length summed across all
 // cascades, with shore mask applied. This is SoT's canonical "wave peak mask".
@@ -189,6 +202,74 @@ vec4 texture_bicubic(in sampler2DArray sampler_tex, in vec3 uvw) {
 }
 
 // ============================================================================
+// CUSTOM SSR RAYMARCH
+// ============================================================================
+bool ssr_in_screen(vec2 pos) {
+	return pos.x > 0.0 && pos.x < 1.0 && pos.y > 0.0 && pos.y < 1.0;
+}
+
+vec2 ssr_view_to_uv(vec3 view_pos, mat4 proj) {
+	vec4 clip = proj * vec4(view_pos, 1.0);
+	vec2 ndc = clip.xy / clip.w;
+	return ndc * 0.5 + 0.5;
+}
+
+vec3 ssr_uv_to_view(vec2 uv, float depth, mat4 inv_proj) {
+	vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+	vec4 view = inv_proj * ndc;
+	return view.xyz / view.w;
+}
+
+float ssr_edge_alpha(vec2 pos) {
+	vec2 shifted = 4.0 * pos * (1.0 - pos);
+	float mask = shifted.x * shifted.y;
+	float offset = mix(0.0, 0.5, (clamp(ssr_screen_border_fadeout, 0.75, 1.0) - 0.75) / 0.25);
+	float alpha = clamp(smoothstep(0.0, 2.0 * ssr_screen_border_fadeout, mask) - offset, 0.0, 1.0);
+	return ssr_screen_border_fadeout < 1e-5 ? 1.0 : alpha;
+}
+
+vec4 ssr_trace(
+	vec3 surf_view_pos,
+	vec3 view_normal,
+	vec3 view_vec,
+	mat4 proj,
+	mat4 inv_proj,
+	int steps
+) {
+	if (ssr_max_travel < 1e-5 || steps <= 0) {
+		return vec4(0.0);
+	}
+
+	vec3 incident = -view_vec;
+	vec3 reflect_dir = normalize(reflect(incident, view_normal));
+	vec3 current = surf_view_pos;
+	vec2 screen_pos = vec2(0.5);
+	vec3 result = vec3(-1.0);
+	float travel = 0.0;
+
+	for (int i = 0; i < steps; i++) {
+		if (result.x >= 0.0) { break; }
+		if (travel >= ssr_max_travel) { break; }
+		current += reflect_dir * ssr_resolution;
+		travel += ssr_resolution;
+		screen_pos = ssr_view_to_uv(current, proj);
+		if (!ssr_in_screen(screen_pos)) { continue; }
+
+		float probe_depth = texture(DEPTH_TEXTURE, screen_pos).r;
+		vec3 probe_view = ssr_uv_to_view(screen_pos, probe_depth, inv_proj);
+		float depth_diff = probe_view.z - current.z;
+		if (depth_diff >= 0.0 && depth_diff < ssr_max_diff) {
+			result = texture(SCREEN_TEXTURE, screen_pos).rgb;
+		}
+	}
+
+	if (result.x < 0.0) {
+		return vec4(0.0);
+	}
+	return vec4(result, ssr_edge_alpha(screen_pos));
+}
+
+// ============================================================================
 // SPECULAR HELPERS — Smith masking-shadowing + GGX distribution
 // Ported from GodotOceanWaves (2Retr0). Declared BEFORE light() so the
 // shader parser sees the definitions in order.
@@ -207,7 +288,7 @@ float ggx_distribution(in float cos_theta, in float alpha) {
 
 // ============================================================================
 // FRAGMENT — Opaque ocean: depth thickness + Beer-Lambert absorption +
-// depth-driven shore foam + Fresnel + SSS.
+// depth-driven shore foam + Fresnel + custom in-shader SSR + SSS.
 // ============================================================================
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
@@ -324,6 +405,21 @@ void fragment() {
 	vec3 water_col = base_water;
 	water_col = mix(water_col, color_sky_tint, fresnel * sky_tint_strength);
 
+	int ssr_steps = int(mix(
+		float(ssr_max_steps),
+		float(max(ssr_max_steps / 4, 4)),
+		smoothstep(50.0, 500.0, v_vertex_dist)
+	));
+	vec4 ssr_result = ssr_trace(
+		surf_view,
+		NORMAL,
+		VIEW,
+		PROJECTION_MATRIX,
+		INV_PROJECTION_MATRIX,
+		ssr_steps
+	);
+	water_col = mix(water_col, ssr_result.rgb, ssr_result.a * ssr_mix_strength * fresnel);
+
 	// ========================================================================
 	// COMPOSE — fully opaque
 	// ========================================================================
@@ -356,10 +452,12 @@ void fragment() {
 		} else if (debug_mode == 5) {
 			debug_col = vec3(fresnel);
 		} else if (debug_mode == 6) {
-			debug_col = vec3(foam_factor);
+			debug_col = vec3(0.0, ssr_result.a, 0.0) + ssr_result.rgb * ssr_result.a * 0.5;
 		} else if (debug_mode == 7) {
-			debug_col = vec3(clamp(world_normal.y, 0.0, 1.0));
+			debug_col = vec3(foam_factor);
 		} else if (debug_mode == 8) {
+			debug_col = vec3(clamp(world_normal.y, 0.0, 1.0));
+		} else if (debug_mode == 9) {
 			// SSS scatter factor — visualizes the peak_mask × side_mask ×
 			// sun_back chain from the fragment-path SSS. Emission = where
 			// the scatter is firing + how strong. Light-independent rendering
@@ -387,7 +485,7 @@ void fragment() {
 		NORMAL = normalize((VIEW_MATRIX * vec4(perturbed, 0.0)).xyz);
 	}
 	// Roughness: base from uniform, foam adds roughness. Low roughness keeps
-	// native/probe/sky reflections sharp on calm water.
+	// SSR/probe/sky reflections sharp on calm water.
 	ROUGHNESS = (1.0 - fresnel) * foam_factor * 0.6 + roughness;
 	METALLIC = 0.0;
 	SPECULAR = 0.5;  // F0 for environment reflections — separate from light() specular
@@ -404,7 +502,8 @@ void fragment() {
 // an ALBEDO operation, not a DIFFUSE_LIGHT addition.
 //
 // Direct-light specular via SPECULAR_LIGHT (sun glints, point lights).
-// Environment reflections (native/probes/sky) handled by SPECULAR in fragment().
+// Environment reflections (native/probes/sky) handled by SPECULAR in fragment();
+// object SSR is supplied by the explicit surface raymarch above.
 // ============================================================================
 void light() {
 	vec3 halfway = normalize(LIGHT + VIEW);

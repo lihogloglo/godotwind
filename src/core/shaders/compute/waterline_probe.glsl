@@ -434,21 +434,25 @@ RefractSample refracted_source_color(
 	vec3 normal_view = normalize((state.view * vec4(world_normal, 0.0)).xyz);
 	float view_grazing = 1.0 - abs(dot(view_dir, world_normal));
 	float camera_underwater = cam_pos.y < camera_water_level - 0.02 ? 1.0 : 0.0;
-	float offset_scale = mix(0.0012, 0.0018, camera_underwater)
-		+ mix(0.0035, 0.0045, camera_underwater) * view_grazing;
+	float offset_scale = mix(0.0022, 0.0030, camera_underwater)
+		+ mix(0.0065, 0.0080, camera_underwater) * view_grazing;
 	offset_scale *= clamp(path_length / 3.0, 0.25, 1.20) * below_mask;
 	vec2 offset = normal_view.xy * offset_scale;
 
 	float reject_status = 0.0;
 	vec3 sample_color = scene_color;
 	vec3 sample_world = world_pos;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 6; i++) {
 		float scale = 1.0;
 		if (i == 1) {
 			scale = 0.66;
 		} else if (i == 2) {
 			scale = 0.33;
 		} else if (i == 3) {
+			scale = -0.66;
+		} else if (i == 4) {
+			scale = -0.33;
+		} else if (i == 5) {
 			scale = 0.0;
 		}
 
@@ -463,6 +467,76 @@ RefractSample refracted_source_color(
 		result.offset = length(refr_uv - uv);
 		result.status = scale > 0.0 ? 9.0 : 8.0;
 		result.path_length = max(estimate_water_path_length(cam_pos, sample_world), path_length);
+		float sample_water_depth = max(get_dynamic_water_level(sample_world.xz, cam_pos, true, true) - sample_world.y, 0.0);
+		result.below_mask = smoothstep(0.02, 0.35, sample_water_depth);
+		return result;
+	}
+
+	return result;
+}
+
+
+RefractSample refracted_receiver_from_water_pixel(
+	vec2 uv,
+	vec3 scene_color,
+	vec3 cam_pos,
+	vec3 water_world_pos,
+	float water_gate
+) {
+	RefractSample result;
+	result.color = scene_color;
+	result.valid = 0.0;
+	result.offset = 0.0;
+	result.status = 0.0;
+	result.path_length = 0.0;
+	result.below_mask = 0.0;
+	if (!source_valid) {
+		result.status = 1.0;
+		return result;
+	}
+	if (water_gate <= 0.001) {
+		result.status = 3.0;
+		return result;
+	}
+
+	vec3 view_dir = normalize(water_world_pos - cam_pos);
+	vec3 world_normal = water_normal_at(water_world_pos.xz, cam_pos);
+	vec3 normal_view = normalize((state.view * vec4(world_normal, 0.0)).xyz);
+	float view_grazing = 1.0 - abs(dot(view_dir, world_normal));
+	float view_dist = length(water_world_pos - cam_pos);
+	float offset_scale = (0.0075 + 0.0200 * view_grazing)
+		* clamp(view_dist / 35.0, 0.45, 1.45)
+		* water_gate;
+	vec2 offset = normal_view.xy * offset_scale;
+
+	float reject_status = 0.0;
+	vec3 sample_color = scene_color;
+	vec3 sample_world = water_world_pos;
+	for (int i = 0; i < 6; i++) {
+		float scale = 1.0;
+		if (i == 1) {
+			scale = 0.66;
+		} else if (i == 2) {
+			scale = 0.33;
+		} else if (i == 3) {
+			scale = -0.66;
+		} else if (i == 4) {
+			scale = -0.33;
+		} else if (i == 5) {
+			scale = 0.0;
+		}
+
+		vec2 refr_uv = uv + offset * scale;
+		if (!fetch_underwater_source(refr_uv, cam_pos, sample_color, sample_world, reject_status)) {
+			result.status = reject_status;
+			continue;
+		}
+
+		result.color = sample_color;
+		result.valid = scale != 0.0 ? 1.0 : 0.5;
+		result.offset = length(refr_uv - uv);
+		result.status = scale != 0.0 ? 9.0 : 8.0;
+		result.path_length = max(estimate_water_path_length(cam_pos, sample_world), 0.25);
 		float sample_water_depth = max(get_dynamic_water_level(sample_world.xz, cam_pos, true, true) - sample_world.y, 0.0);
 		result.below_mask = smoothstep(0.02, 0.35, sample_water_depth);
 		return result;
@@ -502,14 +576,16 @@ void main() {
 
 	float raw_depth = get_source_depth(uv);
 	float main_depth = get_main_depth(uv);
-	if (raw_depth <= 0.0001 || main_depth <= 0.0001) {
+	bool receiver_depth_present = raw_depth > 0.0001;
+	bool refraction_mode = debug_mode == 0 || debug_mode == 5 || debug_mode == 6;
+	if (main_depth <= 0.0001 || (!receiver_depth_present && !refraction_mode)) {
 		if (pipeline_debug) {
 			vec4 scene_color = imageLoad(color_image, pixel);
 			vec3 debug_color = pipeline_debug_color(
 				uv,
 				1.0,
 				1.0,
-				raw_depth > 0.0001 ? 1.0 : 0.0,
+				receiver_depth_present ? 1.0 : 0.0,
 				main_depth > 0.0001 ? 1.0 : 0.0,
 				0.0,
 				0.0,
@@ -521,8 +597,8 @@ void main() {
 		return;
 	}
 
-	vec3 world_pos = get_world_position(uv, raw_depth);
 	vec3 main_world_pos = get_world_position(uv, main_depth);
+	vec3 world_pos = receiver_depth_present ? get_world_position(uv, raw_depth) : main_world_pos;
 	vec3 cam_pos = state.inv_view[3].xyz;
 	float water_level = get_dynamic_water_level(world_pos.xz, cam_pos, true, true);
 	if (debug_mode == 1) {
@@ -557,17 +633,27 @@ void main() {
 		: visible_water_depth_gate * visible_water_band_gate;
 	float receiver_visibility_gate = max(visible_water_gate, underwater_ray_mask);
 	float mask = receiver_mask * receiver_visibility_gate * water_body_gate;
+
+	vec4 scene_color = imageLoad(color_image, pixel);
+	vec3 receiver_color = receiver_depth_present ? sample_source_color_nearest(uv) : scene_color.rgb;
+	RefractSample refr_sample;
+	if (receiver_depth_present) {
+		refr_sample = refracted_source_color(uv, receiver_color, cam_pos, world_pos, underwater_ray_mask);
+	} else {
+		refr_sample = refracted_receiver_from_water_pixel(uv, scene_color.rgb, cam_pos, main_world_pos, visible_water_gate * water_body_gate);
+	}
+	float refracted_silhouette_mask = (!receiver_depth_present && refr_sample.valid > 0.0)
+		? refr_sample.below_mask * visible_water_gate * water_body_gate
+		: 0.0;
+	mask = max(mask, refracted_silhouette_mask);
 	if (debug_mode == 0 && mask <= 0.001) {
 		return;
 	}
 
-	vec4 scene_color = imageLoad(color_image, pixel);
-	vec3 receiver_color = sample_source_color_nearest(uv);
-	RefractSample refr_sample = refracted_source_color(uv, receiver_color, cam_pos, world_pos, underwater_ray_mask);
 	vec3 tint = state.shore_params1.yzw;
 	vec3 source_color = refr_sample.color;
 	vec3 sigma = state.optical_params.xyz;
-	float travel = max(refr_sample.path_length, max(water_depth, 0.0));
+	float travel = max(refr_sample.path_length, receiver_depth_present ? max(water_depth, 0.0) : refr_sample.below_mask * 2.0);
 	vec3 transmittance = exp(-sigma * min(travel, 45.0));
 	vec3 absorbed = mix(tint, source_color, transmittance);
 	float path_fog = 1.0 - exp(-min(travel, 60.0) * 0.045);
