@@ -18,9 +18,12 @@ const PrewaterCaptureScript := preload("res://src/core/shaders/effects/prewater_
 const MIN_RESOLUTION_SCALE := 0.25
 const MAX_RESOLUTION_SCALE := 1.0
 const DEFAULT_FALLBACK_SIZE := Vector2i(1280, 720)
+const DEFAULT_CAPTURE_FADE_START_M := 280.0
+const DEFAULT_CAPTURE_FADE_END_M := 420.0
 
 var receiver_layer_mask: int = 1
-var near_water_capture_distance_m: float = 120.0
+var near_water_capture_distance_m: float = DEFAULT_CAPTURE_FADE_END_M
+var near_water_capture_fade_start_m: float = DEFAULT_CAPTURE_FADE_START_M
 
 var _source_camera: Camera3D = null
 var _source_environment: Environment = null
@@ -33,6 +36,7 @@ var _capture_enabled: bool = false
 var _blend_factor: float = 0.0
 var _camera_water_level: float = 0.0
 var _capture_active: bool = false
+var _activation_fade: float = 0.0
 
 
 func _ready() -> void:
@@ -77,6 +81,10 @@ func get_resolution_scale() -> float:
 
 func set_camera_water_level(value: float) -> void:
 	_camera_water_level = value
+
+
+func get_activation_fade() -> float:
+	return _activation_fade
 
 
 func update_capture(main_size: Vector2i) -> void:
@@ -165,20 +173,32 @@ func _ensure_nodes() -> void:
 
 
 func _update_active_state() -> void:
-	var near_water := true
+	var near_water_fade := 1.0
 	if _source_camera != null and is_instance_valid(_source_camera):
 		var camera_delta := _source_camera.global_position.y - _camera_water_level
-		near_water = camera_delta <= 0.0 or absf(camera_delta) <= near_water_capture_distance_m
-	_capture_active = _capture_enabled and _blend_factor > 0.0 and near_water
+		near_water_fade = _compute_near_water_fade(camera_delta)
+	_activation_fade = near_water_fade
+	_capture_active = _capture_enabled and _blend_factor > 0.0 and near_water_fade > 0.001
 	_apply_active_state()
 
 
 func _apply_active_state() -> void:
 	if _capture_effect != null:
 		_capture_effect.effect_enabled = _capture_active
-		_capture_effect.blend_factor = _blend_factor if _capture_active else 0.0
+		_capture_effect.blend_factor = _blend_factor * _activation_fade if _capture_active else 0.0
 	if _viewport != null:
 		_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _capture_active else SubViewport.UPDATE_DISABLED
+
+
+func _compute_near_water_fade(camera_delta: float) -> float:
+	if camera_delta <= 0.0:
+		return 1.0
+	var distance := absf(camera_delta)
+	var fade_end := maxf(near_water_capture_distance_m, 0.0)
+	var fade_start := clampf(near_water_capture_fade_start_m, 0.0, fade_end)
+	if fade_end <= fade_start + 0.001:
+		return 1.0 if distance <= fade_end else 0.0
+	return 1.0 - smoothstep(fade_start, fade_end, distance)
 
 
 func _sync_viewport_size(main_size: Vector2i) -> void:

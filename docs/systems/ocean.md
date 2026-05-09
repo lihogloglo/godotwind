@@ -40,14 +40,20 @@ what is actually active in code.
   `WaterlineCompositorEffect` receiver pass. The FFT surface stays opaque and
   uses scene depth only for thickness, shore foam, and tint. Terrain, sky,
   water, spray, UI, and broad seafloor helpers are not receiver inputs unless a
-  future system explicitly opts them in. `UnderwaterVolume` is
-  underwater-camera/diagnostic support only.
+  future system explicitly opts them in. The same compositor now owns the first
+  underwater-camera screen treatment: Snell-window transmission using the
+  water-to-air critical angle, path fog/absorption, world-surface-anchored
+  faint rays, normal-driven screen wobble, and sparse suspended particulate.
+  `UnderwaterVolume` is underwater-camera / diagnostic
+  support only.
 - **Pre-water receiver capture component** —
   `src/core/water/prewater_capture_renderer.gd` owns the receiver-only
   SubViewport, matching camera, capture compositor, resolution scale, and
-  near-water activation used by waterline/underwater compositor work. Consumers
-  sample the most recent completed capture texture; the contract allows up to
-  one rendered frame of latency and intentionally avoids forced GPU syncs.
+  near-water activation used by waterline/underwater compositor work. Activation
+  now fades from 280-420m vertical camera-water delta instead of cutting at
+  120m. Consumers sample the most recent completed capture texture; the
+  contract allows up to one rendered frame of latency and intentionally avoids
+  forced GPU syncs.
 - **Water-surface state contract** —
   `src/core/water/water_surface_state.gd` is the shared water-surface snapshot
   produced by `OceanManager.get_water_surface_state()`. It carries the GPU
@@ -135,18 +141,19 @@ refraction.
 
 ## Known Limitations (shipped)
 
-1. **Waterline compositor still prototype-quality.** Above-water
+1. **Waterline compositor still needs visual tuning.** Above-water
    half-submerged-object bending now comes from the receiver-only compositor
-   path, not the FFT surface shader. `Final` mode requires valid receiver
-   depth and active water coverage, so empty ocean pixels and terrain stay as
-   the opaque surface rendered them. The compositor runs at `POST_TRANSPARENT`
-   so its receiver result is not buried by the visible ocean surface.
-2. **Underwater POV of ocean surface is flat dark `color_deep`.** When the
-   camera is below the water looking up, the ocean-surface fragment's
-   Beer-Lambert path sees sky at `DEPTH_TEXTURE`, the sky-guard fires, and the
-   fallback is `color_deep`. Should be a Snell's-window bright-spot. Backlog;
-   coordinated with the `underwater` track — their volume shader's slab test
-   leaves these pixels alone so the fix drops in independently.
+   path, not the FFT surface shader. `Final` mode uses receiver depth when
+   present and an analytic water-body ray as a fallback so the effect no longer
+   depends only on the finite square ocean mesh depth footprint. The compositor
+   runs at `POST_TRANSPARENT` so its receiver result is not buried by the
+   visible ocean surface.
+2. **Underwater POV is compositor-owned, but not final art.** The compositor
+   now brightens the underwater ceiling with Snell-window transmission and
+   applies underwater absorption, surface-anchored rays, wobble, and
+   particulate. The FFT surface shader can still produce a flat dark surface
+   color by itself; the compositor is the production owner of the underwater
+   camera view.
 3. **UnderwaterVolume is not the above-water refraction owner.** It is kept for
    underwater-camera tint/caustics and debug visualizations. Ocean Lab prevents
    its final mode from drawing above water and uses dynamic camera water height

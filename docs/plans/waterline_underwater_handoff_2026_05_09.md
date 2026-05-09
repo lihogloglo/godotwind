@@ -23,6 +23,26 @@ scene turning into a flat dark overlay or a debug-colored screen-space hack.
 
 ## Current Status
 
+Update after compositor polish pass on 2026-05-09:
+
+- The 120m hard near-water gates were replaced with smooth 280-420m fade
+  ranges in both `PrewaterCaptureRenderer` and `WaterlineCompositorEffect`.
+  Ocean Lab HUD now shows the prewater fade value.
+- `WaterlineCompositorEffect` now copies the post-transparent scene color into
+  `screen_color_copy.glsl` before running the main waterline shader. This gives
+  compositor-owned underwater wobble a stable source texture instead of reading
+  from the image being written.
+- Final mode no longer depends only on main-view ocean mesh depth for water
+  eligibility. It also traces the camera ray against the dynamic water surface
+  and uses `WaterSurfaceState`-derived water coverage as an analytic fallback,
+  reducing the square clipmap/depth-footprint cutoff.
+- Final waterline optics were retuned: slightly stronger receiver refraction,
+  calmer absorption tint, path fog/backscatter, and a narrower meniscus line.
+- Broad underwater camera effects moved into the compositor path: Snell-window
+  ceiling brightening, path fog/absorption, four-shell light rays, FFT-normal
+  wobble, and sparse suspended particulate. `UnderwaterVolume` remains
+  diagnostic/support.
+
 Update later on 2026-05-09: the waterline compositor path is now visually
 working in Ocean Lab at the ownership / ordering level, but it is still not
 production complete.
@@ -185,6 +205,28 @@ closely instead of hanging onto stale waterline values too strongly.
 This shader work needs more debugging. The user reported: "It doesn't work."
 
 ## Verification Done
+
+For the compositor polish pass:
+
+- Deleted `.godot/imported/waterline_probe.glsl-*` and
+  `.godot/imported/screen_color_copy.glsl-*`.
+- Ran:
+
+```powershell
+D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import
+```
+
+- Confirmed both shader import artifacts regenerated.
+- Ran Ocean Lab crash smoke successfully:
+
+```powershell
+D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --headless --path D:/Gamedev/Godotwind/godotwind --quit-after 5 res://tests/visual/test_ocean_lab.tscn
+```
+
+- Launched Ocean Lab interactively after changes.
+
+No C# files changed in this slice, so `dotnet build Godotwind.sln` was not
+required.
 
 For shader changes:
 

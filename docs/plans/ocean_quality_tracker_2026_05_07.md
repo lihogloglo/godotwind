@@ -649,6 +649,15 @@ volume shader is the seed, not the final design.
   activation and visible-depth gates with a stable water coverage contract from
   `WaterSurfaceState` / water body coverage, with smooth fade margins and clear
   HUD meters for capture active, camera-water delta, and coverage source.
+- 2026-05-09 compositor polish follow-up: the 120m hard activation gates were
+  replaced with 280-420m fade ranges, Ocean Lab HUD now shows prewater fade,
+  and `WaterlineCompositorEffect` uses an analytic dynamic-water ray plus
+  water coverage fallback so Final mode is less dependent on the finite square
+  ocean mesh depth footprint. The compositor also now copies the current scene
+  color to a safe sample texture before applying underwater camera optics:
+  Snell-window brightening, path fog/absorption, four-shell rays, FFT-normal
+  wobble, and sparse suspended particulate. `UnderwaterVolume` remains
+  diagnostic/support.
 
 Tasks:
 

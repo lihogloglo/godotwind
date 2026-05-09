@@ -26,6 +26,7 @@ color bleeding into the submerged region.
 | `src/core/water/ocean_manager.gd` | Legacy ShaderManager underwater compositor switch is retired and disabled by default. `set_underwater_compositor_enabled(true)` is ignored so the old compute path cannot race the volume/compositor split. |
 | Ocean Lab `UW Debug` | Interactive-only diagnostic control for the volume shader. `Slab Mask` paints water-classified pixels cyan, `Depth/Y` colors reconstructed underwater depth, and `Big Wobble` exaggerates the volume contribution. |
 | Ocean Lab wave sync | `UnderwaterVolume.sync_wave_surface_from_ocean_material()` copies FFT cascade scales, wave scale, shore mask, and shore-wave uniforms from the active ocean material so the volume's waterline follows the displaced FFT surface instead of a flat `sea_level` plane. |
+| `WaterlineCompositorEffect` underwater view | Production-owner direction for broad underwater camera optics. It now copies the post-transparent scene color into a safe sample texture, then applies compositor-owned Snell-window transmission using the water-to-air critical angle, absorption/path fog, world-surface-anchored faint rays, FFT-normal wobble, and sparse suspended particulate when the camera is submerged. |
 | `assets/water/caustics_noise.png` | paddy-exe's `caustics-generator.png`, MIT. |
 | `assets/water/caustics_luma_gradient.tres` | paddy-exe's luma ramp. |
 | `assets/water/water_normal.png` | openmw `water_nm.png`, MIT. **Must be imported with `compress/normal_map=1` (Normal Map mode)** — otherwise sRGB decode biases `wobble_offset` to a constant non-zero state. |
@@ -83,10 +84,9 @@ color bleeding into the submerged region.
    `Big Wobble` makes the volume contribution obvious if it is running.
 4. **Ocean surface seen from below (the "ceiling") is unaffected by this
    shader.** The slab test rejects pixels where `scene_world_pos.y ≥
-   sea_level`, which includes the ocean-surface mesh's fragments. By design —
-   owned by `@water` as a separate "underwater POV" fix to
-   `ocean_fft.gdshader` (Snell's-window bright-spot). When that lands, this
-   shader needs zero changes.
+   sea_level`, which includes the ocean-surface mesh fragments. By design:
+   broad underwater POV is now owned by `WaterlineCompositorEffect`, not by
+   this diagnostic volume.
 5. **Wave-driven caustic scaling.** The caustic noise texture is panned at a
    fixed `caustics_scale` and `caustics_speed`. Physically, caustic cell size
    is driven by the dominant wave wavelength (big swell = big cells).
@@ -111,8 +111,8 @@ Reference: `inspos/RafaelsShaderPack/Shaders/DIVE.omwfx` (OpenMW omwfx format).
 | Voronoi caustics | `ComputeCaustics()` + `GetCausticEdge()` | **Not ported.** Current caustics use paddy-exe's sampled noise texture with panned UVs, not DIVE's procedural voronoi. Different technique, similar visual result. |
 | Beer-Lambert absorption | Lines 424-435 | **Ported.** `exp(-sigma * length(scene_pos - cam_pos))` applied via `mix(water_tint, scene_color, transmittance)`. Per-channel `sigma`; DIVE had `SIGMA = 0.001196 * (1 - WATER_COLOR_0)` giving nicer wavelength-dependent absorption but we hardcoded a uniform scalar. |
 | Screen wobble | Lines 397-400 | **Ported with guards.** DIVE uses a 3D water normal sampled at `(screen_uv, 0.2*time)`. We use a 2D normal at `world_pos.xz / tiling + time * speed`. World-space sampling avoids the camera-locked banding the FBM implementation had. |
-| Shell-based light rays | Lines 477-500 | **Not ported.** Deferred. |
-| Backscattering | Lines 509-520 | **Not ported.** Deferred. |
+| Shell-based light rays | Lines 477-500 | **Compositor-owned.** `waterline_probe.glsl` samples faint shafts along the view ray, projects each underwater sample back to the dynamic water surface along the sun vector, and evaluates the column pattern at that world-space surface footprint. This is not a literal DIVE port, but follows the same shell idea without camera-locked rays. |
+| Backscattering | Lines 509-520 | **Partially ported.** Path fog and water-color convergence now live in the compositor; normal-facing surface backscatter remains deferred. |
 | Water boundary highlight | Custom (not DIVE) | **Not ported.** Deferred. |
 | Anti-banding dithering | Lines 524-527 | **Not ported.** Deferred. |
 
