@@ -16,8 +16,11 @@ assets/characters/
 # Godot-specific ignores
 *.translation
 
-# Imported textures and samples
+# Generated/sample import metadata is noisy in this repo, but non-default
+# importer settings that affect runtime types must be versioned explicitly.
 *.import
+!addons/SunshineClouds2/NoiseTextures/bluenoise_Dither.png.import
+!addons/SunshineClouds2/NoiseTextures/curl_noise_varied.tga.import
 
 # Mono-specific ignores
 .mono/
