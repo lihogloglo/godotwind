@@ -227,7 +227,7 @@ func set_probe_strength(value: float) -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 14)
+	_debug_mode = clampi(value, 0, 15)
 
 
 ## Sets the stable water-body datum used only for whole-pass activation.

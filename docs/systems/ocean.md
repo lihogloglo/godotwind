@@ -5,6 +5,52 @@ what is actually active in code.
 
 ---
 
+## Render Pipeline (load-bearing)
+
+This is the order future agents must preserve. Commit
+`ad67dcecab2764ab3ef38ec1bf0ac46512aa0142` fixed receiver refraction by
+letting the receiver compositor run after the visible ocean, instead of trying
+to bend screen color from inside the FFT surface.
+
+1. **FFT ocean surface draws visible water only.**
+   `src/core/water/shaders/ocean_fft*.gdshader*` stays fully opaque. It may use
+   scene depth for thickness/foam/tint, FFT displacement/normal/foam textures,
+   the shore mask, ReflectionProbes, sky, and normal opaque lighting. It must
+   not declare `hint_screen_texture`, sample `SCREEN_TEXTURE`, write `ALPHA`, or
+   own receiver refraction / custom SSR raymarching.
+2. **Pre-water capture records only opt-in receivers.**
+   `PrewaterCaptureRenderer` owns the SubViewport/camera/copy path for objects
+   that need waterline bending. Ocean Lab's intended mask is
+   `WATER_REFRACTION_RECEIVER_LAYER_MASK`, not the main camera mask. The current
+   near-water default band is 80-140m vertical camera-to-water distance, reduced
+   resolution by default, and consumers accept up to one rendered frame of
+   latency.
+3. **The normal scene renders.**
+   Terrain, sky, ocean surface, spray, and ordinary objects render through the
+   main viewport. They are not receiver-capture inputs unless a future system
+   explicitly opts them in.
+4. **`WaterlineCompositorEffect` runs at `POST_TRANSPARENT`.**
+   This is the `ad67dce` win. The compositor must run after visible water so
+   receiver refraction is not buried by the ocean surface. Its receiver
+   refraction output domain is visible water pixels: each water pixel samples
+   the receiver color/depth capture at a perturbed UV and draws only when that
+   sampled receiver point is underwater. Current-UV receiver depth is diagnostic
+   data, not the final output mask. The same compositor combines main scene
+   depth/color and `WaterSurfaceState` for underwater-camera optics.
+5. **Underwater scene color is a separate source from receiver color.**
+   Snell-window / wobble sampling uses post-scene color when needed. The
+   receiver capture is only for opt-in receiver objects and must not be treated
+   as sky, terrain, or broad above-water scene color.
+6. **Wetness is optional/debug quality.**
+   `WetCompositorEffect` and wet-line work are not part of the default ocean
+   cost. Enable them deliberately for debugging or tuning; do not silently add a
+   full-screen wet pass to the normal ocean path.
+
+Do not regress these invariants: no surface `hint_screen_texture`, no surface
+`SCREEN_TEXTURE` refraction, no custom SSR in the FFT material by default, no
+main-camera prewater capture, no broad wetness pass by default, and no move of
+the waterline compositor back before transparent rendering.
+
 ## Shipped
 
 - **Opaque rendering** — `src/core/water/shaders/ocean_fft.gdshader`. Fully
@@ -37,10 +83,13 @@ what is actually active in code.
   submerged-object bending is not owned by this material.
 - **Receiver-only waterline refraction split** — above-water
   half-submerged-object distortion is owned by an opt-in
-  `WaterlineCompositorEffect` receiver pass. The FFT surface stays opaque and
-  uses scene depth only for thickness, shore foam, and tint. Terrain, sky,
-  water, spray, UI, and broad seafloor helpers are not receiver inputs unless a
-  future system explicitly opts them in. The same compositor now owns the first
+  `WaterlineCompositorEffect` receiver pass. The pass shades visible water
+  pixels and fetches opt-in receiver color/depth from offset UVs, so submerged
+  silhouettes can move outside the receiver mesh's original screen footprint.
+  The FFT surface stays opaque and uses scene depth only for thickness, shore
+  foam, and tint. Terrain, sky, water, spray, UI, and broad seafloor helpers are
+  not receiver inputs unless a future system explicitly opts them in. The same
+  compositor now owns the first
   underwater-camera screen treatment: Snell-window transmission using the
   water-to-air critical angle, path fog/absorption, world-surface-anchored
   faint rays, normal-driven screen wobble, and sparse suspended particulate.
@@ -50,7 +99,7 @@ what is actually active in code.
   `src/core/water/prewater_capture_renderer.gd` owns the receiver-only
   SubViewport, matching camera, capture compositor, resolution scale, and
   near-water activation used by waterline/underwater compositor work. Activation
-  now fades from 280-420m vertical camera-to-sea-level delta instead of using
+  now fades from 80-140m vertical camera-to-sea-level delta instead of using
   animated wave height as a binary pass switch. Consumers sample the most
   recent completed capture texture; the
   contract allows up to one rendered frame of latency and intentionally avoids
@@ -108,14 +157,17 @@ refraction.
 
 - **Fully opaque ocean.** No ALPHA anywhere. Shore transition via color blend +
   discard. Follows GodotOceanWaves.
-- **Reflections via custom SSR trace + ReflectionProbe + sky cube.** Native
-  SSR is brittle on the ocean material once depth/screen textures are involved,
-  so nearby reflections use the custom raymarched trace.
+- **Reflections via opaque Godot paths, not surface SSR.** The ocean material
+  stays in the opaque path and relies on `SPECULAR`, ReflectionProbes, sky, and
+  the engine's normal opaque lighting inputs. The old custom in-surface SSR
+  trace was removed because it reintroduced `hint_screen_texture`, made the
+  surface screen-color-owned again, and added a per-fragment raymarch to the
+  hottest water path.
 - **Refraction via receiver compositor.** Do not reintroduce surface-owned
   `SCREEN_TEXTURE` bending in `ocean_fft_common.gdshaderinc`. Submerged-object
-  distortion belongs to the receiver compositor path, where opt-in object
-  color/depth can be captured separately without repainting terrain or the
-  whole ocean surface.
+  distortion belongs to the receiver compositor path, where visible water pixels
+  sample opt-in object color/depth from the receiver capture without repainting
+  terrain or the whole ocean surface.
 - **Pre-water capture as a reusable component.** Scenes should use
   `PrewaterCaptureRenderer` instead of building ad-hoc SubViewport/camera
   chains. It disables the capture viewport when the compositor is off or the
@@ -157,17 +209,19 @@ refraction.
 
 1. **Waterline compositor still needs visual tuning.** Above-water
    half-submerged-object bending now comes from the receiver-only compositor
-   path, not the FFT surface shader. `Final` mode uses receiver depth when
-   present and an analytic water-body ray as a fallback so the effect no longer
-   depends only on the finite square ocean mesh depth footprint. The compositor
-   runs at `POST_TRANSPARENT` so its receiver result is not buried by the
-   visible ocean surface.
+   path, not the FFT surface shader. `Final` mode no longer uses the receiver's
+   current screen-space depth as the output mask; it writes only from visible
+   water pixels with a valid offset sample into the underwater receiver capture.
+   The compositor runs at `POST_TRANSPARENT` so its receiver result is not
+   buried by the visible ocean surface.
 2. **Underwater POV is compositor-owned, but not final art.** The compositor
    now brightens the underwater ceiling with Snell-window transmission and
    applies underwater absorption, receiver-depth caustics, surface-anchored
-   rays, wobble, and particulate. The FFT surface shader can still produce a flat dark surface
-   color by itself; the compositor is the production owner of the underwater
-   camera view.
+   rays, edge-aware FFT-normal wobble, and particulate. Wobble samples are
+   guarded against waterline, sky, and depth-edge pulls so high-contrast scene
+   edges do not get blindly doubled. The FFT surface shader can still produce a
+   flat dark surface color by itself; the compositor is the production owner of
+   the underwater camera view.
 3. **UnderwaterVolume is not the caustics or refraction owner.** It is kept for
    diagnostic underwater slab/depth/wobble checks only. Ocean Lab prevents its
    final mode from drawing above water and uses dynamic camera water height for

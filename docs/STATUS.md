@@ -31,7 +31,7 @@ What works, what doesn't.
 
 | System | Notes |
 |--------|-------|
-| Ocean/Water | OceanManager, FFT waves, GPU-readback buoyancy, real depth-driven Beer-Lambert absorption + refraction UV offset + custom in-shader SSR raymarch for object reflections (2026-04-06). Native Godot 4.6 SSR is disabled on this material (declaring hint_depth_texture/hint_screen_texture kills the native SSR pass in Forward+); custom SSR trace ported from GodotSSRWater replaces it. Known residuals: waterline discontinuity on half-submerged objects, underwater POV renders as flat dark. Not wired into main scene. See `docs/systems/ocean.md`. |
+| Ocean/Water | OceanManager, FFT waves, GPU-readback buoyancy, opaque FFT ocean surface, depth-driven Beer-Lambert tint, receiver-only prewater capture, and `WaterlineCompositorEffect` water-surface-domain receiver refraction/underwater optics. The surface shader no longer samples screen color or owns custom SSR; the `POST_TRANSPARENT` compositor samples receiver color/depth from visible water pixels instead of using the receiver's original screen-space silhouette as the output mask, and underwater wobble now rejects sky/waterline/depth-edge pulls before falling back. Known residuals: waterline/wetness/Snell/rays need visual tuning and perf instrumentation before main-scene integration. Not wired into main scene. See `docs/systems/ocean.md`. |
 | Character Controller (physics, swimming) | `PlayerController` with Move-as-Node state machine shipped (see `docs/systems/character_controller.md`) but not yet wired into main streaming scene — only test scene `tests/visual/test_character_controller.tscn`. |
 
 ## Project-wide settings flipped 2026-04-08

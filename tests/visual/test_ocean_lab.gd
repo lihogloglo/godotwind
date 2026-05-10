@@ -62,6 +62,7 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Ray Entry/Exit",
 	"Body Coverage",
 	"Final Mask",
+	"Wobble Guard",
 ]
 const WET_DEBUG_MODE_NAMES: Array[String] = [
 	"Off",
@@ -1380,6 +1381,8 @@ func _update_hud() -> void:
 			lines.append("WL Body Coverage: red=receiver, green=main depth, blue=camera.")
 		elif _waterline_debug_mode == 14:
 			lines.append("WL Final Mask: red=final mask, green=body gate, blue=visibility gate.")
+		elif _waterline_debug_mode == 15:
+			lines.append("WL Wobble Guard: red=rejected shifted sample, green=accepted, blue=guard strength.")
 		if _wet_debug_mode == 1:
 			lines.append("Wet Final: blue=final live wetness written by the compositor.")
 		elif _wet_debug_mode == 2:

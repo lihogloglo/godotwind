@@ -23,7 +23,7 @@ volume for slab/depth/wobble checks and no longer draws caustics.
 | `src/core/water/ocean_manager.gd` | Publishes `WaterSurfaceState` and optical constants. It no longer exposes or loads the retired ShaderManager underwater compositor. |
 | Ocean Lab `UW Debug` | Interactive-only diagnostic control for the volume shader. `Slab Mask` paints water-classified pixels cyan, `Depth/Y` colors reconstructed underwater depth, and `Big Wobble` exaggerates the volume contribution. |
 | Ocean Lab wave sync | `UnderwaterVolume.sync_wave_surface_from_ocean_material()` copies FFT cascade scales, wave scale, shore mask, and shore-wave uniforms from the active ocean material so the volume's waterline follows the displaced FFT surface instead of a flat `sea_level` plane. |
-| `WaterlineCompositorEffect` underwater view | Production owner for broad underwater camera optics and receiver-waterline shading. It copies the post-transparent scene color into a safe sample texture, classifies receivers against the shared dynamic water surface, then applies Snell-window transmission, absorption/path fog, receiver caustics, world-surface-anchored faint rays, FFT-normal wobble, and sparse suspended particulate. |
+| `WaterlineCompositorEffect` underwater view | Production owner for broad underwater camera optics and receiver-waterline shading. Receiver refraction is water-surface-domain: visible water pixels sample the pre-water receiver color/depth capture at offset UVs, and the sampled receiver point must be underwater before the compositor draws. Snell-window / wobble sampling uses post-transparent scene color when needed; the receiver buffer is never the sky/terrain source. Meniscus refraction is optional and receiver refraction must keep working when it is disabled. |
 | `assets/water/caustics_noise.png` | paddy-exe's `caustics-generator.png`, MIT. Used by the compositor caustics path. |
 | `assets/water/caustics_luma_gradient.tres` | Archived paddy-exe luma ramp reference. The compositor uses the same ramp values analytically because GradientTexture2D does not bind cleanly as an RD compute texture. |
 | `assets/water/water_normal.png` | openmw `water_nm.png`, MIT. **Must be imported with `compress/normal_map=1` (Normal Map mode)** — otherwise sRGB decode biases `wobble_offset` to a constant non-zero state. |
@@ -54,14 +54,14 @@ volume for slab/depth/wobble checks and no longer draws caustics.
 
 ---
 
-## Known remaining issues (user-accepted "move on")
+## Known remaining issues / tuning
 
-1. **Wobble waterline ghosting.** Even with the above-water guard, at some
-   camera angles the wobble's screen-UV offset pulls content across the
-   waterline visibly. The hard-switch fall-back (`wobbled_uv = SCREEN_UV`
-   when the neighbor is above water) kills most of the artifact but not all.
-   The contingency of widening the guard by 0.1m below sea level was not
-   applied.
+1. **Wobble edge guard needs human visual tuning.** The production compositor
+   now uses projection-scaled wobble offsets, a near-camera/surface normal
+   footprint, and an edge-aware scene-color sampler that rejects offscreen, sky,
+   above-water, and large depth-jump samples before falling back to the current
+   pixel. Ocean Lab's `WL Debug: Wobble Guard` shows rejected shifted samples
+   in red, accepted samples in green, and final guard strength in blue.
 2. **`sea_level` wiring.** The test scene pulls from
    `OceanManager.get_sea_level()` in `_process()`. Production scenes must do
    the same. If `sea_level` is wrong (e.g. default 0 when the scene uses a
