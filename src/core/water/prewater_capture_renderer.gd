@@ -18,8 +18,8 @@ const PrewaterCaptureScript := preload("res://src/core/shaders/effects/prewater_
 const MIN_RESOLUTION_SCALE := 0.25
 const MAX_RESOLUTION_SCALE := 1.0
 const DEFAULT_FALLBACK_SIZE := Vector2i(1280, 720)
-const DEFAULT_CAPTURE_FADE_START_M := 280.0
-const DEFAULT_CAPTURE_FADE_END_M := 420.0
+const DEFAULT_CAPTURE_FADE_START_M := 80.0
+const DEFAULT_CAPTURE_FADE_END_M := 140.0
 
 var receiver_layer_mask: int = 1
 var near_water_capture_distance_m: float = DEFAULT_CAPTURE_FADE_END_M
@@ -31,7 +31,7 @@ var _viewport: SubViewport = null
 var _capture_camera: Camera3D = null
 var _compositor: Compositor = null
 var _capture_effect: PrewaterCaptureEffect = null
-var _resolution_scale: float = 1.0
+var _resolution_scale: float = 0.5
 var _capture_enabled: bool = false
 var _blend_factor: float = 0.0
 var _camera_water_level: float = 0.0
@@ -79,8 +79,15 @@ func get_resolution_scale() -> float:
 	return _resolution_scale
 
 
-func set_camera_water_level(value: float) -> void:
+## Sets the stable water-body datum used only for capture activation.
+## Pass mean sea level, not animated wave height; the compositor shader handles
+## per-pixel wave classification after the pass is already active.
+func set_activation_water_level(value: float) -> void:
 	_camera_water_level = value
+
+
+func set_camera_water_level(value: float) -> void:
+	set_activation_water_level(value)
 
 
 func get_activation_fade() -> float:

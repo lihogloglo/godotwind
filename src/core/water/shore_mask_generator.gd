@@ -3,6 +3,9 @@
 ## Creates a texture where each pixel stores the shore factor:
 ## - 0.0 = at shore or on land (full wave dampening)
 ## - 1.0 = far from shore (full waves, beyond fade_distance)
+## Alpha stores water membership plus water-side distance:
+## - 0.0 = land
+## - 0.5..1.0 = water, where (alpha - 0.5) * 2 is raw distance / fade_distance
 ##
 ## Uses Jump Flooding Algorithm (JFA) for efficient Euclidean distance computation.
 ## This is used for wave dampening near coastlines (OpenMW-style).
@@ -99,9 +102,9 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 		_jfa_pass(step, binary_mask)
 		step /= 2
 
-	# Step 3: Compute shore factor, gradient direction, and raw distance
+	# Step 3: Compute shore factor, gradient direction, and water-side distance
 	# RGBA8: R = shore factor (smoothstepped), G = gradient dir X, B = gradient dir Y,
-	# A = raw distance (linear, normalized to fade_distance)
+	# A = water membership + raw distance (land=0, water=0.5 + 0.5 * raw_norm)
 	_shore_image = Image.create(_mask_resolution, _mask_resolution, false, Image.FORMAT_RGBA8)
 	var texel_size := _world_bounds.size.x / float(_mask_resolution)
 
@@ -142,15 +145,17 @@ func generate_from_terrain(terrain: Terrain3D, resolution: int, fade_distance: f
 				# Encode gradient direction from [-1,1] to [0,1]
 				var enc_gx := grad_x * 0.5 + 0.5
 				var enc_gy := grad_y * 0.5 + 0.5
-				_shore_image.set_pixel(x, y, Color(shore_factor, enc_gx, enc_gy, raw_norm))
+				var encoded_water_distance := 0.5 + raw_norm * 0.5
+				_shore_image.set_pixel(x, y, Color(shore_factor, enc_gx, enc_gy, encoded_water_distance))
 
-	# Apply user override if available (multiplies shore factor only, preserves gradient)
+	# Apply user override if available (multiplies wave dampening only, preserves
+	# gradient and water membership so optical/body masks remain stable).
 	if _user_mask:
 		for y in range(_mask_resolution):
 			for x in range(_mask_resolution):
 				var px := _shore_image.get_pixel(x, y)
 				var user_value := _user_mask.get_pixel(x, y).r
-				_shore_image.set_pixel(x, y, Color(px.r * user_value, px.g, px.b, px.a * user_value))
+				_shore_image.set_pixel(x, y, Color(px.r * user_value, px.g, px.b, px.a))
 
 	# Create texture from image
 	_shore_mask = ImageTexture.create_from_image(_shore_image)
@@ -309,6 +314,17 @@ func get_shore_factor(world_pos: Vector3) -> float:
 
 	var pixel := _world_to_pixel(world_pos)
 	return _shore_image.get_pixel(pixel.x, pixel.y).r
+
+
+func get_water_coverage(world_pos: Vector3) -> float:
+	if not _shore_image:
+		if _terrain and _terrain.data:
+			var height := CS.get_terrain_height(world_pos, _terrain)
+			return 1.0 if height < _sea_level else 0.0
+		return 1.0
+
+	var pixel := _world_to_pixel(world_pos)
+	return 1.0 if _shore_image.get_pixel(pixel.x, pixel.y).a >= 0.25 else 0.0
 
 
 ## Get the shore mask texture for shader use

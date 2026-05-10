@@ -13,7 +13,7 @@ into a production-quality rendering path. Update this file as work lands; use
 | Phase 2 - Shared Water Surface And Mask Contract | [x] Complete | 2026-05-09 | Import + timed Godot smokes | Shared surface/mask contract now feeds visual shaders, waterline compositor, wetness, and diagnostic volume; interactive stability pass still belongs to Phase 7/8 visual verification. |
 | Phase 3 - Half-Immersed Camera Split | [x] Complete | 2026-05-09 | Import + timed Godot smokes + interactive main-scene launch | Per-pixel camera split now gates underwater combine; human visual judgement remains with the launched scene. |
 | Phase 4 - Snell's Window Rebuild | [ ] Pending | - | - | Must use correct above-water/sky source. |
-| Phase 5 - Wobble Rebuild | [ ] Pending | - | - | Replace camera-locked screen-space FBM if still present. |
+| Phase 5 - Wobble Rebuild | [ ] Pending | - | - | Screen-space FBM has been removed; final scale/art tuning still pending. |
 | Phase 6 - Rays And Caustics Rebuild | [ ] Pending | - | - | Separate ray and caustic gates. |
 | Phase 7 - Main Scene Integration | [ ] Pending | - | - | Ocean Lab and `scenes/Godotwind.tscn` must share the path. |
 | Phase 8 - Performance And Quality Gate | [ ] Pending | - | - | Final docs update only after visual verification. |
@@ -173,6 +173,10 @@ Implementation notes:
 - Phase 2 should not change the optical models yet. It only makes surface
   height, water-body coverage, water depth, and diagnostic masks share one
   classification vocabulary.
+- 2026-05-09 follow-up: shore mask v4 separates water-body membership from
+  shore/wave dampening. `shore_mask.r` remains the dampening ramp; alpha now
+  encodes land-vs-water plus water-side raw distance, and compositor/CPU
+  coverage gates use alpha-derived body coverage.
 
 Tasks:
 
@@ -182,6 +186,8 @@ Tasks:
   shared snippet or another verified Godot 4.6-compatible sharing path.
 - [x] Add or derive a stable water coverage/body mask that does not depend on
   the finite square ocean mesh depth footprint.
+- [x] Split shore dampening from body coverage so shoreline wave fade cannot
+  create receiver/ray mask bands.
 - [x] Add debug views for camera water depth, receiver water depth, ray water
   entry/exit, water body coverage, and final waterline mask.
 
@@ -245,6 +251,12 @@ Verification:
 
 Goal: make Snell's window physically grounded and shallow-water stable.
 
+2026-05-09 follow-up: the compositor no longer uses a binary
+`water_ray_hit ? surface_dist : scene_dist` underwater path-length branch. Water
+path now blends toward the short surface path by the smooth Snell/Fresnel
+transmission weight, which removes the hard underwater ceiling seam while the
+full Phase 4 sky/source rebuild remains open.
+
 Tasks:
 
 - [ ] Research water-to-air refraction, critical angle, Fresnel, and total
@@ -267,6 +279,12 @@ Verification:
 ## Phase 5 - Wobble Rebuild
 
 Goal: visible, world-anchored underwater distortion.
+
+2026-05-09 follow-up: the production compositor no longer uses screen-space
+FBM as the wobble driver. It samples the FFT normal texture through
+`WaterSurfaceState.normal_texture_rd` and falls back to dynamic height
+finite-difference normals. Remaining Phase 5 work is strength calibration and
+waterline/sky sampling guards.
 
 Tasks:
 

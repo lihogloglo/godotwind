@@ -71,7 +71,7 @@ float water_surface_dynamic_level(vec2 final_xz, float dist_to_camera, bool use_
 float water_surface_body_coverage(vec2 world_xz, bool use_fft, bool use_shore_mask, bool include_shore_waves) {
 	vec2 shore_uv = water_surface_shore_uv(world_xz);
 	vec4 shore_data = water_surface_shore_sample(shore_uv, use_shore_mask);
-	float coverage = shore_data.r;
+	float coverage = water_surface_shore_body_coverage(shore_data);
 	if (include_shore_waves) {
 		float dynamic_level = water_surface_dynamic_level(world_xz, 0.0, use_fft, use_shore_mask, true);
 		float runup_hint = smoothstep(0.015, 0.12, max(dynamic_level - sea_level, 0.0));

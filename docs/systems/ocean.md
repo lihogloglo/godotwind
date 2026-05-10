@@ -50,8 +50,9 @@ what is actually active in code.
   `src/core/water/prewater_capture_renderer.gd` owns the receiver-only
   SubViewport, matching camera, capture compositor, resolution scale, and
   near-water activation used by waterline/underwater compositor work. Activation
-  now fades from 280-420m vertical camera-water delta instead of cutting at
-  120m. Consumers sample the most recent completed capture texture; the
+  now fades from 280-420m vertical camera-to-sea-level delta instead of using
+  animated wave height as a binary pass switch. Consumers sample the most
+  recent completed capture texture; the
   contract allows up to one rendered frame of latency and intentionally avoids
   forced GPU syncs.
 - **Water-surface state contract** —
@@ -68,6 +69,16 @@ what is actually active in code.
   the shared final-surface lookup, including horizontal displacement inversion,
   so wetness, waterline, caustics, Snell, rays, particles, and diagnostic
   underwater volume checks classify against the same moving surface.
+- **Stable coarse water volume, dynamic optical surface** -- waterline capture
+  activation and coarse camera-ray water entry use the mean sea-level/body mask.
+  The animated FFT/shore surface is applied after that for height, normals, and
+  refraction detail. This prevents low-angle distant waves from toggling the
+  whole refraction pass on and off.
+- **Shore mask v4 channel contract** -- `shore_mask.r` is only shore/wave
+  dampening. `shore_mask.a` stores body membership plus water-side raw distance:
+  land is `0.0`, water is `0.5..1.0`, and consumers decode distance with
+  `alpha * 2.0 - 1.0`. Waterline, wetness, underwater rays, and CPU coverage
+  gates must use alpha-derived body coverage, not the red dampening ramp.
 - **Native/probe/sky reflections** — the FFT surface remains opaque and avoids
   sampling scene color directly. Reflections come through Godot's normal opaque
   reflection path (`SPECULAR`, ReflectionProbe, and sky), while waterline

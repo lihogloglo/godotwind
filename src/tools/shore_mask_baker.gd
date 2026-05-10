@@ -7,7 +7,8 @@
 ## - R = shore factor (smoothstepped, 0 = at shore/land, 1 = deep ocean)
 ## - G = gradient direction X (encoded 0.5 + 0.5 * dir.x)
 ## - B = gradient direction Y (encoded 0.5 + 0.5 * dir.y)
-## - A = raw normalized distance (linear, 0-1 over fade_distance)
+## - A = water membership + raw normalized water-side distance
+##   (land = 0, water = 0.5 + 0.5 * raw_norm)
 ##
 ## This is used for wave dampening near coastlines (OpenMW-style approach).
 ##
@@ -385,8 +386,8 @@ func _save_metadata(image_path: String) -> void:
 	config.set_value("shore_mask", "bounds_width", world_bounds.size.x)
 	config.set_value("shore_mask", "bounds_height", world_bounds.size.y)
 	config.set_value("shore_mask", "algorithm", "jfa_native")
-	config.set_value("shore_mask", "format", "rgba8")
-	config.set_value("shore_mask", "version", 3)
+	config.set_value("shore_mask", "format", "rgba8_alpha_water_distance")
+	config.set_value("shore_mask", "version", 4)
 
 	var cfg_path := image_path.replace(".png", ".cfg")
 	config.save(cfg_path)
@@ -419,10 +420,15 @@ static func load_prebaked(image_path: String) -> Dictionary:
 	var cfg_path := image_path.replace(".png", ".cfg")
 	var bounds := Rect2(-8000, -8000, 16000, 16000)  # Default
 	var fade_dist := 50.0
+	var version := 0
 
 	if FileAccess.file_exists(cfg_path):
 		var config := ConfigFile.new()
 		if config.load(cfg_path) == OK:
+			version = int(config.get_value("shore_mask", "version", 0))
+			if version < 4:
+				Log.warn("tools", "ShoreMaskBaker: Ignoring stale shore mask v%d; v4 alpha water coverage is required" % version)
+				return {}
 			var bounds_x: float = config.get_value("shore_mask", "bounds_x", -8000.0)
 			var bounds_y: float = config.get_value("shore_mask", "bounds_y", -8000.0)
 			var bounds_w: float = config.get_value("shore_mask", "bounds_width", 16000.0)
@@ -431,6 +437,9 @@ static func load_prebaked(image_path: String) -> Dictionary:
 			fade_dist = config.get_value("shore_mask", "fade_distance", 50.0)
 			var algorithm: String = config.get_value("shore_mask", "algorithm", "iterative")
 			Log.debug("tools", "ShoreMaskBaker: Loaded %s-based shore mask (fade=%.0fm)" % [algorithm, fade_dist])
+	else:
+		Log.warn("tools", "ShoreMaskBaker: Ignoring shore mask without metadata; v4 alpha water coverage is required")
+		return {}
 
 	Log.info("tools", "ShoreMaskBaker: Loaded prebaked shore mask from %s" % image_path)
 	Log.debug("tools", "  Bounds: %s" % bounds)

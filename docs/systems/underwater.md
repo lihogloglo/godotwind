@@ -48,8 +48,9 @@ volume for slab/depth/wobble checks and no longer draws caustics.
    GDScript.
 2. **Do not use procedural FBM for wobble.** FBM sampled at screen-space UV
    frequencies produces visible horizontal banding locked to the camera.
-   A sampled normal texture at world-space XZ is the only technique that
-   looks right under motion. Do not regress to FBM.
+   The production compositor samples the FFT normal texture from
+   `WaterSurfaceState` at world-space water-surface XZ, with a finite-difference
+   height normal fallback. Do not regress to screen-space FBM.
 
 ---
 
@@ -101,7 +102,7 @@ Reference: `inspos/RafaelsShaderPack/Shaders/DIVE.omwfx` (OpenMW omwfx format).
 |--------|------------|----------------|
 | Voronoi caustics | `ComputeCaustics()` + `GetCausticEdge()` | **Compositor-owned.** Current caustics use paddy-exe's sampled noise texture with panned light-projected UVs in `waterline_probe.glsl`, not DIVE's procedural voronoi. The old volume caustic path is removed. |
 | Beer-Lambert absorption | Lines 424-435 | **Ported.** `exp(-sigma * length(scene_pos - cam_pos))` applied via `mix(water_tint, scene_color, transmittance)`. Per-channel `sigma`; DIVE had `SIGMA = 0.001196 * (1 - WATER_COLOR_0)` giving nicer wavelength-dependent absorption but we hardcoded a uniform scalar. |
-| Screen wobble | Lines 397-400 | **Ported with guards.** DIVE uses a 3D water normal sampled at `(screen_uv, 0.2*time)`. We use a 2D normal at `world_pos.xz / tiling + time * speed`. World-space sampling avoids the camera-locked banding the FBM implementation had. |
+| Screen wobble | Lines 397-400 | **Ported via the Godotwind water contract.** DIVE uses a 3D water normal sampled at `(screen_uv, 0.2*time)`. The compositor now samples the active FFT normal texture at world-space water-surface XZ, using the same `WaterSurfaceState`/`map_scales` contract as the visible ocean. |
 | Shell-based light rays | Lines 477-500 | **Compositor-owned.** `waterline_probe.glsl` samples faint shafts along the view ray, projects each underwater sample back to the dynamic water surface along the sun vector, and evaluates the column pattern at that world-space surface footprint. This is not a literal DIVE port, but follows the same shell idea without camera-locked rays. |
 | Backscattering | Lines 509-520 | **Partially ported.** Path fog and water-color convergence now live in the compositor; normal-facing surface backscatter remains deferred. |
 | Water boundary highlight | Custom (not DIVE) | **Not ported.** Deferred. |

@@ -640,6 +640,14 @@ func _sample_active_shore_data(world_pos: Vector3) -> Color:
 	return _active_shore_mask_image.get_pixel(px, py)
 
 
+func _shore_water_distance_norm(shore_data: Color) -> float:
+	return clampf(shore_data.a * 2.0 - 1.0, 0.0, 1.0)
+
+
+func _shore_body_coverage(shore_data: Color) -> float:
+	return 1.0 if shore_data.a >= 0.25 else 0.0
+
+
 func _shore_direction_from_active_mask(world_pos: Vector3, shore_data: Color) -> Vector2:
 	var dir := Vector2(shore_data.g * 2.0 - 1.0, shore_data.b * 2.0 - 1.0)
 	if dir.length() > 0.01:
@@ -720,7 +728,7 @@ func _get_shore_wave_displacement(world_pos: Vector3) -> Vector3:
 	if shore_dir.length() <= 0.01:
 		return Vector3.ZERO
 	shore_dir = shore_dir.normalized()
-	var raw_dist := shore_data.a * _active_shore_fade_distance
+	var raw_dist := _shore_water_distance_norm(shore_data) * _active_shore_fade_distance
 	var phase := raw_dist * _current_shore_wave_frequency * TAU + _time * _current_shore_wave_speed * TAU
 	var modulation := _shore_along_modulation_cpu(world_pos, shore_dir, _time)
 	var breaker_env := _shore_breaker_envelope_cpu(raw_dist, _active_shore_fade_distance)
@@ -818,8 +826,10 @@ func get_wave_velocity(_world_pos: Vector3) -> Vector3:
 func get_water_coverage(world_pos: Vector3) -> float:
 	if not _system_enabled or not _enabled:
 		return 0.0
-	if _active_shore_mask_image != null or _shore_mask:
-		return clampf(_get_shore_factor(world_pos), 0.0, 1.0)
+	if _active_shore_mask_image != null:
+		return _shore_body_coverage(_sample_active_shore_data(world_pos))
+	if _shore_mask:
+		return _shore_mask.get_water_coverage(world_pos)
 	if _terrain and _terrain.data:
 		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
 		return 1.0 if terrain_height < sea_level else 0.0
@@ -829,8 +839,8 @@ func get_water_coverage(world_pos: Vector3) -> float:
 func get_signed_shore_distance(world_pos: Vector3) -> float:
 	if _active_shore_mask_image != null:
 		var shore_data := _sample_active_shore_data(world_pos)
-		var distance := shore_data.a * _active_shore_fade_distance
-		return distance if shore_data.r > 0.01 else -distance
+		var distance := _shore_water_distance_norm(shore_data) * _active_shore_fade_distance
+		return distance if _shore_body_coverage(shore_data) > 0.0 else -_active_shore_fade_distance
 	if _shore_mask:
 		return _get_shore_factor(world_pos) * shore_fade_distance
 	if _terrain and _terrain.data:
@@ -915,7 +925,7 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 	if world_pos.y > sea_level + 10.0:
 		return false
 	if _active_shore_mask_image != null or _shore_mask:
-		return _get_shore_factor(world_pos) > 0.01 or _get_shore_wave_height(world_pos) > 0.02
+		return get_water_coverage(world_pos) > 0.0 or _get_shore_wave_height(world_pos) > 0.02
 	if _terrain and _terrain.data:
 		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
 		return terrain_height < sea_level

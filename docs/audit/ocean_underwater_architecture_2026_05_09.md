@@ -84,6 +84,30 @@ canonical adaptation is:
    or above-water source.
 6. All distances and tuning constants are Godotwind meters, Y-up.
 
+## Follow-up Audit - Timing And Underwater Stability
+
+User screenshots on 2026-05-09 exposed three architecture faults in the active
+compositor path:
+
+- The Ocean Lab `uw_gpu` readout paired timestamp markers by reused string
+  names. Godot `RenderingDevice` timestamps are absolute microseconds since
+  engine start, so a begin marker from one capture and an end marker from
+  another can report seconds of fake GPU time while the scene is still running
+  at interactive FPS. The profiler now pairs begin/end markers in capture-list
+  order and rejects implausible cross-frame deltas instead of reporting them as
+  pass cost.
+- Underwater absorption used a binary `water_ray_hit ? surface_dist :
+  scene_dist` path-length branch. At shallow underwater camera angles, that
+  creates a visible screen-space cut where the ray stops intersecting the water
+  ceiling. The compositor now blends to the short surface path by the smooth
+  Snell/Fresnel transmission weight, so the optical transition is angular and
+  continuous rather than a hard horizon-classification seam.
+- The underwater wobble path still contained screen-UV FBM. That violated this
+  audit's own water-surface-contract rule and produced camera-locked bands. It
+  now samples the FFT normal texture published by `WaterSurfaceState` at
+  world-space water-surface positions, with the existing finite-difference
+  surface normal as fallback.
+
 ## Source Anchors
 
 - Godot 4.6 CompositorEffect:

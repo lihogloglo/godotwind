@@ -1,8 +1,8 @@
-## Manages the terrain shader override for wet map support.
+## Manages the terrain shader override for wet fallback support.
 ##
-## Applies a custom shader override to Terrain3D that adds wet surface
-## darkening near sea level (Lagarde PBR). The override shader is extracted
-## from Terrain3D's actual internal C++ shader to guarantee baseline parity.
+## Applies a custom shader override to Terrain3D. Production water-contact
+## wetness is screen-space; this terrain shader keeps only a tight fallback
+## hook and Terrain3D material plumbing.
 ##
 ## Horizon maps are PARKED — the baking infrastructure remains but is not
 ## loaded or applied. Will be re-enabled when all regions have baked data
@@ -39,7 +39,7 @@ func _apply_shader_override() -> bool:
 	_terrain.material.set("shader_override", shader)
 	_terrain.material.set("shader_override_enabled", true)
 	_material_rid = _terrain.material.get_material_rid()
-	Log.info("streaming", "HorizonMapManager: Applied terrain shader override (wet map)")
+	Log.info("streaming", "HorizonMapManager: Applied terrain shader override")
 	return true
 
 
@@ -53,58 +53,43 @@ func initialize(terrain: Terrain3D, _sun: DirectionalLight3D) -> void:
 		Log.warn("streaming", "HorizonMapManager: Could not apply shader override")
 
 
-## Push wet map uniforms to the terrain shader override.
-## Call after initialize() and whenever sea_level changes.
-func push_wet_map(sea_level: float, wet_margin: float = 1.5, wet_darken: float = 0.6, wet_rough: float = 0.05) -> void:
+## Push terrain wet fallback uniforms. Disabled by default because live wetness
+## is owned by WetCompositorEffect.
+func push_wet_map(
+	sea_level: float,
+	wet_margin: float = 0.3,
+	wet_darken: float = 0.6,
+	wet_rough: float = 0.05,
+	fallback_enabled: bool = false
+) -> void:
 	_set_param("sea_level_wet", sea_level)
 	_set_param("wet_margin", wet_margin)
 	_set_param("wet_albedo_darken", wet_darken)
 	_set_param("wet_roughness_target", wet_rough)
+	_set_param("terrain_wet_fallback_enabled", fallback_enabled)
 
 
-## Push the active ocean shore-wave signal into the terrain wetness shader.
-## This keeps the wet beach band aligned with the same analytical swash layer
-## that displaces the visible ocean near shore.
-func push_shore_wave_wetness_from_state(state: WaterSurfaceState, enabled: bool = true) -> void:
-	if state == null or not enabled:
-		_set_param("shore_wave_wetness_enabled", false)
+## Legacy no-op: terrain shore/runup wetness is not authoritative.
+func push_shore_wave_wetness_from_state(state: WaterSurfaceState, _enabled: bool = true) -> void:
+	if state == null:
 		return
-
-	_set_param("shore_wave_wetness_enabled", true)
-	_set_param("ocean_time", state.ocean_time)
 	if state.shore_mask_texture != null:
 		_set_param("shore_mask", state.shore_mask_texture)
 	_set_param("shore_mask_bounds", state.shore_mask_bounds)
-	_set_param("shore_fade_distance", state.shore_fade_distance)
-	_set_param("shore_wave_amplitude", state.shore_wave_amplitude)
-	_set_param("shore_wave_frequency", state.shore_wave_frequency)
-	_set_param("shore_wave_speed", state.shore_wave_speed)
-	_set_param("shore_wave_steepness", state.shore_wave_steepness)
 
 
-func push_shore_wave_wetness(ocean_material: ShaderMaterial, ocean_time: float, enabled: bool = true) -> void:
-	if ocean_material == null or not enabled:
-		_set_param("shore_wave_wetness_enabled", false)
+## Legacy no-op: terrain shore/runup wetness is not authoritative.
+func push_shore_wave_wetness(ocean_material: ShaderMaterial, _ocean_time: float, _enabled: bool = true) -> void:
+	if ocean_material == null:
 		return
-
-	_set_param("shore_wave_wetness_enabled", true)
-	_set_param("ocean_time", ocean_time)
 
 	var shore_mask: Variant = ocean_material.get_shader_parameter("shore_mask")
 	if shore_mask is Texture2D:
 		_set_param("shore_mask", shore_mask)
 
-	for param_name: StringName in [
-		&"shore_mask_bounds",
-		&"shore_fade_distance",
-		&"shore_wave_amplitude",
-		&"shore_wave_frequency",
-		&"shore_wave_speed",
-		&"shore_wave_steepness",
-	]:
-		var value: Variant = ocean_material.get_shader_parameter(param_name)
-		if value != null:
-			_set_param(param_name, value)
+	var bounds: Variant = ocean_material.get_shader_parameter("shore_mask_bounds")
+	if bounds != null:
+		_set_param("shore_mask_bounds", bounds)
 
 
 ## Kept for API compatibility — horizon maps are parked.

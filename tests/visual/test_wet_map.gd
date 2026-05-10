@@ -28,7 +28,7 @@ const SPEED_MAX := 500.0
 
 # Wet map defaults
 var _sea_level := 0.0
-var _wet_margin := 1.5
+var _wet_margin := 0.3
 var _wet_albedo_darken := 0.6
 var _wet_roughness_target := 0.05
 
@@ -43,7 +43,7 @@ var _textures_loaded := 0
 # Draggable test objects for wetness testing
 var _test_objects: Array[Dictionary] = []  # [{node, wet_line_local, mat_rid, mesh_bottom}]
 var _held_object: Dictionary = {}
-var _wet_dry_rate := 0.3  # wet_line_local decay (m/s) when above water
+var _wet_dry_rate := 0.1  # wet_line_local decay (m/s) when above water
 const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
 
 const CS := preload("res://src/core/coordinate_system.gd")
@@ -162,7 +162,7 @@ func _setup_terrain() -> void:
 
 func _push_wet_uniforms() -> void:
 	if _horizon_mgr:
-		_horizon_mgr.push_wet_map(_sea_level, _wet_margin, _wet_albedo_darken, _wet_roughness_target)
+		_horizon_mgr.push_wet_map(_sea_level, _wet_margin, _wet_albedo_darken, _wet_roughness_target, true)
 
 
 func _spawn_test_objects() -> void:
@@ -185,6 +185,7 @@ func _spawn_test_objects() -> void:
 		mat.set_shader_parameter("wet_margin", 0.3)
 		mat.set_shader_parameter("wet_albedo_darken", _wet_albedo_darken)
 		mat.set_shader_parameter("wet_roughness_target", _wet_roughness_target)
+		mat.set_shader_parameter("live_contact_from_compositor", true)
 		mi.material_override = mat
 		mi.position = cam_pos + s["offset"]
 		add_child(mi)

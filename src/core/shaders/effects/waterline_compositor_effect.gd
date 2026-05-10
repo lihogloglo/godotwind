@@ -18,6 +18,7 @@ const FEATURE_WOBBLE := 8
 const FEATURE_PARTICLES := 16
 const FEATURE_MENISCUS_REFRACTION := 32
 const FEATURE_CAUSTICS := 64
+const MAX_REASONABLE_TIMESTAMP_MS := 100.0
 
 var _depth_sampler: RID
 var _linear_clamp_sampler: RID
@@ -32,6 +33,7 @@ var _external_source_depth_rid: RID
 var _external_source_size: Vector2i = Vector2i.ZERO
 var _state_buffer: RID
 var _displacement_rid: RID
+var _normal_rid: RID
 var _shore_mask_rid: RID
 var _caustics_noise_rid: RID
 var _fallback_shore_texture: Texture2D
@@ -52,8 +54,8 @@ var _probe_strength: float = 0.85
 var _debug_mode: int = 0
 var _ocean_time: float = 0.0
 var _camera_water_level: float = 0.0
-var _near_water_activation_distance: float = 420.0
-var _near_water_fade_start_distance: float = 280.0
+var _near_water_activation_distance: float = 140.0
+var _near_water_fade_start_distance: float = 80.0
 var _sun_direction: Vector3 = Vector3(0.25, 0.85, 0.45).normalized()
 var _sun_visibility: float = 1.0
 var _underwater_feature_flags: int = (
@@ -62,7 +64,6 @@ var _underwater_feature_flags: int = (
 	| FEATURE_RAYS
 	| FEATURE_WOBBLE
 	| FEATURE_PARTICLES
-	| FEATURE_MENISCUS_REFRACTION
 	| FEATURE_CAUSTICS
 )
 var _ray_shell_count: int = 6
@@ -192,6 +193,7 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 
 	_sea_level = state.sea_level
 	_displacement_rid = state.displacement_texture_rd
+	_normal_rid = state.normal_texture_rd
 	_water_tint = state.absorption_tint
 	_absorption_sigma = state.absorption_sigma
 	_caustics_strength = state.underwater_caustics_strength
@@ -228,8 +230,14 @@ func set_debug_mode(value: int) -> void:
 	_debug_mode = clampi(value, 0, 14)
 
 
-func set_camera_water_level(value: float) -> void:
+## Sets the stable water-body datum used only for whole-pass activation.
+## The compute shader samples the animated wave surface for per-pixel optics.
+func set_activation_water_level(value: float) -> void:
 	_camera_water_level = value
+
+
+func set_camera_water_level(value: float) -> void:
+	set_activation_water_level(value)
 
 
 func set_near_water_activation_distance(value: float) -> void:
@@ -372,7 +380,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var depth_texture := buffers.get_depth_layer(view)
 	if not color_image.is_valid() or not depth_texture.is_valid():
 		return
-	var scene_copy_valid := _copy_scene_color(color_image, size)
+	var scene_copy_valid := _needs_scene_color_copy(scene_data) and _copy_scene_color(color_image, size)
 	var has_external_source := (
 		_external_source_color_rid.is_valid()
 		and _external_source_depth_rid.is_valid()
@@ -422,7 +430,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(1.0 if scene_copy_valid else 0.0)
 	pc.append(float(_underwater_feature_flags))
 	pc.append(_camera_water_level)
-	pc.append(0.0)
+	pc.append(1.0 if _normal_rid.is_valid() else 0.0)
 	pc.append(0.0)
 	pc.append(float(_ray_shell_count))
 	pc.append(_ray_shell_spacing_m)
@@ -483,11 +491,14 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_source_depth.add_id(source_depth_rid if source_depth_rid.is_valid() else depth_texture)
 	uniforms.append(u_source_depth)
 
+	var scene_sample_rid := _scene_color_copy_rid if scene_copy_valid else source_color_rid
+	if not scene_sample_rid.is_valid():
+		scene_sample_rid = color_image
 	var u_scene_color := RDUniform.new()
 	u_scene_color.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u_scene_color.binding = 7
 	u_scene_color.add_id(_source_color_sampler)
-	u_scene_color.add_id(_scene_color_copy_rid if scene_copy_valid else color_image)
+	u_scene_color.add_id(scene_sample_rid)
 	uniforms.append(u_scene_color)
 
 	var u_caustics_noise := RDUniform.new()
@@ -496,6 +507,13 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_caustics_noise.add_id(_linear_repeat_sampler)
 	u_caustics_noise.add_id(_caustics_noise_rid)
 	uniforms.append(u_caustics_noise)
+
+	var u_normal := RDUniform.new()
+	u_normal.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_normal.binding = 9
+	u_normal.add_id(_linear_repeat_sampler)
+	u_normal.add_id(_normal_rid if _normal_rid.is_valid() else _displacement_rid)
+	uniforms.append(u_normal)
 
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
@@ -557,6 +575,16 @@ func _copy_scene_color(color_image: RID, size: Vector2i) -> bool:
 	rd.capture_timestamp("godotwind_waterline_scene_copy_end")
 	rd.free_rid(uniform_set)
 	return true
+
+
+func _needs_scene_color_copy(scene_data: RenderSceneDataRD) -> bool:
+	if _debug_mode != 0:
+		return true
+	var scene_sampling_flags := FEATURE_SNELL | FEATURE_WOBBLE
+	if (_underwater_feature_flags & scene_sampling_flags) == 0:
+		return false
+	var camera_y := scene_data.get_cam_transform().origin.y
+	return camera_y <= _camera_water_level + 1.0
 
 
 func _ensure_scene_copy_texture(color_image: RID, size: Vector2i) -> bool:
@@ -664,30 +692,23 @@ func _refresh_timestamp_snapshot() -> void:
 		return
 	_last_perf_frame = frame
 
-	var count := rd.get_captured_timestamps_count()
-	var scene_copy_begin := -1
-	var scene_copy_end := -1
-	var probe_begin := -1
-	var probe_end := -1
-	for i in count:
-		var name := rd.get_captured_timestamp_name(i)
-		match name:
-			"godotwind_waterline_scene_copy_begin":
-				scene_copy_begin = rd.get_captured_timestamp_gpu_time(i)
-			"godotwind_waterline_scene_copy_end":
-				scene_copy_end = rd.get_captured_timestamp_gpu_time(i)
-			"godotwind_waterline_probe_begin":
-				probe_begin = rd.get_captured_timestamp_gpu_time(i)
-			"godotwind_waterline_probe_end":
-				probe_end = rd.get_captured_timestamp_gpu_time(i)
-
-	var scene_copy_ms := _timestamp_delta_ms(scene_copy_begin, scene_copy_end)
-	var probe_ms := _timestamp_delta_ms(probe_begin, probe_end)
+	var scene_copy_ms := _timestamp_pair_delta_ms(
+		"godotwind_waterline_scene_copy_begin",
+		"godotwind_waterline_scene_copy_end"
+	)
+	var probe_ms := _timestamp_pair_delta_ms(
+		"godotwind_waterline_probe_begin",
+		"godotwind_waterline_probe_end"
+	)
+	var timing_valid := scene_copy_ms >= 0.0 and probe_ms >= 0.0
+	scene_copy_ms = maxf(scene_copy_ms, 0.0)
+	probe_ms = maxf(probe_ms, 0.0)
 	_last_perf_snapshot = {
 		"scene_copy_ms": scene_copy_ms,
 		"probe_ms": probe_ms,
 		"total_ms": scene_copy_ms + probe_ms,
 		"frame": frame,
+		"timing_valid": timing_valid,
 		"feature_flags": _underwater_feature_flags,
 		"ray_shell_count": _ray_shell_count,
 		"ray_shell_spacing_m": _ray_shell_spacing_m,
@@ -697,9 +718,31 @@ func _refresh_timestamp_snapshot() -> void:
 	}
 
 
+func _timestamp_pair_delta_ms(begin_name: String, end_name: String) -> float:
+	if rd == null:
+		return -1.0
+	var pending_gpu := -1
+	var last_valid_ms := -1.0
+	var count := rd.get_captured_timestamps_count()
+	for i in count:
+		var name := rd.get_captured_timestamp_name(i)
+		if name == begin_name:
+			pending_gpu = rd.get_captured_timestamp_gpu_time(i)
+		elif name == end_name and pending_gpu >= 0:
+			var gpu_ms := _timestamp_delta_ms(pending_gpu, rd.get_captured_timestamp_gpu_time(i))
+			if _timestamp_delta_is_plausible(gpu_ms):
+				last_valid_ms = gpu_ms
+			pending_gpu = -1
+	return last_valid_ms
+
+
+func _timestamp_delta_is_plausible(gpu_ms: float) -> bool:
+	return gpu_ms >= 0.0 and gpu_ms <= MAX_REASONABLE_TIMESTAMP_MS
+
+
 func _timestamp_delta_ms(begin_us: int, end_us: int) -> float:
 	if begin_us < 0 or end_us < 0 or end_us < begin_us:
-		return 0.0
+		return -1.0
 	return float(end_us - begin_us) / 1000.0
 
 

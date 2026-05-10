@@ -11,6 +11,7 @@ layout(set = 0, binding = 5) uniform sampler2D source_color_tex;
 layout(set = 0, binding = 6) uniform sampler2D source_depth_tex;
 layout(set = 0, binding = 7) uniform sampler2D scene_color_tex;
 layout(set = 0, binding = 8) uniform sampler2D caustics_noise_tex;
+layout(set = 0, binding = 9) uniform sampler2DArray normal_tex;
 
 #define MAX_CASCADES 8
 
@@ -31,7 +32,7 @@ layout(push_constant, std430) uniform Params {
 	vec4 screen; // x=width, y=height, z=time, w=blend
 	vec4 water; // x=sea_level, y=wave_scale, z=cascade_count, w=probe_strength
 	vec4 debug; // x=debug_mode, y=source_color_valid, z=source_depth_valid, w=reserved
-	vec4 features; // x=feature_flags, y=camera_water_level, zw=reserved
+	vec4 features; // x=feature_flags, y=camera_water_level, z=normal_valid, w=reserved
 	vec4 ray_params; // x=shell_count, y=shell_spacing_m, z=intensity, w=shell_start_m
 	vec4 particle_params; // x=noise_scale, y=density, z=near_gate_m, w=far_gate_m
 } pc;
@@ -50,6 +51,7 @@ layout(push_constant, std430) uniform Params {
 #define scene_color_valid (pc.debug.w > 0.5)
 #define feature_flags int(pc.features.x)
 #define camera_water_level_cached pc.features.y
+#define normal_valid (pc.features.z > 0.5)
 #define ray_shell_count pc.ray_params.x
 #define ray_shell_spacing pc.ray_params.y
 #define ray_intensity pc.ray_params.z
@@ -107,6 +109,10 @@ const float SHORE_TAU = 6.2831853;
 const float AIR_IOR = 1.000293;
 const float WATER_IOR = 1.3330;
 const float WATER_TO_AIR_ETA = WATER_IOR / AIR_IOR;
+const float WATER_RAY_MAX_DISTANCE = 5000.0;
+const float SNELL_EDGE_SIN_WIDTH = 0.018;
+const float SNELL_WAVE_NORMAL_SHALLOW_WEIGHT = 0.16;
+const float SNELL_WAVE_NORMAL_DEEP_WEIGHT = 0.36;
 
 struct SnellSample {
 	float window;
@@ -120,10 +126,39 @@ bool feature_enabled(int bit) {
 	return (feature_flags & bit) != 0;
 }
 
+float fresnel_dielectric(vec3 incoming, vec3 normal, float eta) {
+	float c = abs(dot(incoming, normal));
+	float g = eta * eta - 1.0 + c * c;
+	if (g <= 0.0) {
+		return 1.0;
+	}
+
+	g = sqrt(g);
+	float a = (g - c) / (g + c);
+	float b = (c * (g + c) - 1.0) / (c * (g - c) + 1.0);
+	return clamp(0.5 * a * a * (1.0 + b * b), 0.0, 1.0);
+}
+
 float snells_window(vec3 normal, vec3 view, float ior) {
 	float cos_theta = clamp(dot(normal, view), 0.0, 1.0);
 	float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
-	return step(sin_theta * ior, 1.0);
+	float critical_sin = 1.0 / max(ior, 1e-5);
+	float cone_transmission = 1.0 - smoothstep(
+		critical_sin - SNELL_EDGE_SIN_WIDTH,
+		critical_sin + SNELL_EDGE_SIN_WIDTH,
+		sin_theta
+	);
+	float reflectance = fresnel_dielectric(view, normal, 1.0 / max(ior, 1e-5));
+	return cone_transmission * (1.0 - reflectance);
+}
+
+vec3 snell_mask_normal(vec3 dynamic_surface_normal, float camera_depth) {
+	float wave_weight = mix(
+		SNELL_WAVE_NORMAL_SHALLOW_WEIGHT,
+		SNELL_WAVE_NORMAL_DEEP_WEIGHT,
+		smoothstep(2.0, 10.0, max(camera_depth, 0.0))
+	);
+	return normalize(mix(vec3(0.0, 1.0, 0.0), dynamic_surface_normal, wave_weight));
 }
 
 float luminance(vec3 color) {
@@ -380,13 +415,48 @@ vec4 sample_shore_data(vec2 world_xz) {
 	return in_mask ? texture(shore_mask_tex, shore_uv) : vec4(1.0, 0.5, 0.5, 1.0);
 }
 
+float shore_water_distance_norm(vec4 shore_data) {
+	return clamp(shore_data.a * 2.0 - 1.0, 0.0, 1.0);
+}
+
+float shore_body_coverage(vec4 shore_data) {
+	return step(0.25, shore_data.a);
+}
+
 
 float get_dynamic_water_level(vec2 final_xz, vec3 cam_pos, bool include_fft, bool include_shore_waves);
 
 
+vec3 sample_atmosphere_color(vec2 uv, vec3 fallback, vec3 cam_pos) {
+	if (!scene_color_valid) {
+		return fallback;
+	}
+
+	vec3 color = sample_scene_color(uv, fallback);
+	float depth = get_main_depth(uv);
+	if (depth > 0.0001) {
+		vec3 sample_world = get_world_position(uv, depth);
+		float sample_water_level = get_dynamic_water_level(sample_world.xz, cam_pos, true, true);
+		if (sample_world.y < sample_water_level - 0.02) {
+			return fallback;
+		}
+	} else if (source_depth_valid) {
+		depth = get_source_depth(uv);
+		if (depth > 0.0001) {
+			vec3 sample_world = get_world_position(uv, depth);
+			float sample_water_level = get_dynamic_water_level(sample_world.xz, cam_pos, true, true);
+			if (sample_world.y < sample_water_level - 0.02) {
+				return fallback;
+			}
+		}
+	}
+	return color;
+}
+
+
 float water_surface_body_coverage(vec2 world_xz, vec3 cam_pos) {
 	vec4 shore_data = sample_shore_data(world_xz);
-	float coverage = shore_data.r;
+	float coverage = shore_body_coverage(shore_data);
 	float dynamic_level = get_dynamic_water_level(world_xz, cam_pos, true, true);
 	float runup_hint = smoothstep(0.015, 0.12, max(dynamic_level - sea_level, 0.0));
 	return clamp(max(coverage, runup_hint * 0.45), 0.0, 1.0);
@@ -394,6 +464,10 @@ float water_surface_body_coverage(vec2 world_xz, vec3 cam_pos) {
 
 float water_surface_body_gate(float coverage) {
 	return smoothstep(0.015, 0.12, coverage);
+}
+
+float stable_water_body_coverage(vec2 world_xz) {
+	return shore_body_coverage(sample_shore_data(world_xz));
 }
 
 float water_coverage_at(vec2 world_xz, vec3 cam_pos) {
@@ -428,7 +502,7 @@ SurfaceSample sample_surface(vec2 sample_xz, vec3 cam_pos, bool include_fft, boo
 	float shore_wave_frequency = state.shore_params0.z;
 	float shore_wave_speed = state.shore_params0.w;
 	float shore_wave_steepness = state.shore_params1.x;
-	float raw_dist = shore_data.a * shore_fade_distance;
+	float raw_dist = shore_water_distance_norm(shore_data) * shore_fade_distance;
 	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
 	if (include_shore_waves && shore_dir_len > 0.01 && shore_wave_amplitude > 0.0) {
@@ -512,34 +586,81 @@ vec3 water_normal_at(vec2 xz, vec3 cam_pos) {
 }
 
 
+vec3 water_optical_normal_at(vec2 xz, vec3 cam_pos) {
+	if (!normal_valid || cascade_count <= 0) {
+		return water_normal_at(xz, cam_pos);
+	}
+
+	vec2 gradient = vec2(0.0);
+	float total_weight = 0.0;
+	float dist_to_camera = length(vec3(xz.x, sea_level, xz.y) - cam_pos);
+	int count = clamp(cascade_count, 0, MAX_CASCADES);
+	for (int i = 0; i < MAX_CASCADES; i++) {
+		if (i >= count) {
+			break;
+		}
+		vec4 scales = state.map_scales[i];
+		float tile_size = 1.0 / max(scales.x, 1e-6);
+		float cascade_fade = clamp(exp(-(dist_to_camera - 50.0) / (tile_size * 20.0)), 0.0, 1.0);
+		vec4 normal_sample = texture(normal_tex, vec3(xz * scales.xy, float(i)));
+		gradient += normal_sample.xy * scales.w * cascade_fade;
+		total_weight += cascade_fade;
+	}
+
+	if (total_weight <= 0.001) {
+		return water_normal_at(xz, cam_pos);
+	}
+	return normalize(vec3(-gradient.x, 1.0, -gradient.y));
+}
+
+
 bool trace_water_surface(vec2 uv, vec3 cam_pos, out vec3 water_world, out float water_gate) {
 	vec3 ray_dir = get_world_ray_dir(uv);
 	if (abs(ray_dir.y) < 1e-4) {
-		water_world = cam_pos + ray_dir * 5000.0;
+		water_world = cam_pos + ray_dir * WATER_RAY_MAX_DISTANCE;
 		water_gate = 0.0;
 		return false;
 	}
 
-	float water_y = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
-	float t = (water_y - cam_pos.y) / ray_dir.y;
+	float plane_t = (sea_level - cam_pos.y) / ray_dir.y;
+	if (plane_t <= 0.0 || plane_t > WATER_RAY_MAX_DISTANCE) {
+		water_world = cam_pos + ray_dir * clamp(plane_t, 0.0, WATER_RAY_MAX_DISTANCE);
+		water_gate = 0.0;
+		return false;
+	}
+
+	vec3 plane_world = cam_pos + ray_dir * plane_t;
+	float stable_gate = water_surface_body_gate(stable_water_body_coverage(plane_world.xz));
+	if (stable_gate <= 0.001) {
+		water_world = plane_world;
+		water_gate = 0.0;
+		return false;
+	}
+
+	float t = plane_t;
 	for (int i = 0; i < 4; i++) {
-		if (t <= 0.0 || t > 5000.0) {
-			water_world = cam_pos + ray_dir * max(t, 0.0);
-			water_gate = 0.0;
-			return false;
+		if (t <= 0.0 || t > WATER_RAY_MAX_DISTANCE) {
+			water_world = plane_world;
+			water_gate = stable_gate;
+			return true;
 		}
 		vec3 p = cam_pos + ray_dir * t;
-		water_y = get_dynamic_water_level(p.xz, cam_pos, true, true);
+		float water_y = get_dynamic_water_level(p.xz, cam_pos, true, true);
 		t = (water_y - cam_pos.y) / ray_dir.y;
+	}
+	if (t <= 0.0 || t > WATER_RAY_MAX_DISTANCE) {
+		water_world = plane_world;
+		water_gate = stable_gate;
+		return true;
 	}
 
 	water_world = cam_pos + ray_dir * t;
-	float coverage = water_coverage_at(water_world.xz, cam_pos);
+	float coverage = max(water_coverage_at(water_world.xz, cam_pos), stable_water_body_coverage(plane_world.xz));
 	water_gate = smoothstep(0.015, 0.12, coverage);
 	return water_gate > 0.001;
 }
 
-SnellSample compute_snell_sample(vec3 cam_pos, vec3 view_dir, vec3 water_surface_pos, bool water_surface_hit) {
+SnellSample compute_snell_sample(vec3 cam_pos, vec3 view_dir, vec3 water_surface_pos, bool water_surface_hit, float camera_depth) {
 	SnellSample result;
 	result.window = 0.0;
 	result.cos_theta = 0.0;
@@ -556,15 +677,16 @@ SnellSample compute_snell_sample(vec3 cam_pos, vec3 view_dir, vec3 water_surface
 		return result;
 	}
 
-	vec3 surface_normal = water_normal_at(water_surface_pos.xz, cam_pos);
-	float wave_cos_theta = clamp(dot(surface_ray, surface_normal), 0.0, 1.0);
+	vec3 surface_normal = water_optical_normal_at(water_surface_pos.xz, cam_pos);
+	vec3 mask_normal = snell_mask_normal(surface_normal, camera_depth);
+	float wave_cos_theta = clamp(dot(surface_ray, mask_normal), 0.0, 1.0);
 	if (wave_cos_theta <= 0.0) {
 		return result;
 	}
 
-	// Snell window for water->air transmission. The hard physics boundary is
+	// Snell window for water->air transmission. The critical boundary is
 	// theta_c = asin(n_air / n_water), which gives a ~97 degree full cone.
-	float window = snells_window(surface_normal, surface_ray, WATER_TO_AIR_ETA);
+	float window = snells_window(mask_normal, surface_ray, WATER_TO_AIR_ETA);
 
 	result.window = window;
 	result.cos_theta = wave_cos_theta;
@@ -762,6 +884,8 @@ CameraSplitSample compute_camera_split(
 	const float SPLIT_MIN_FEATHER_M = 0.035;
 	const float SPLIT_GRAZING_FEATHER_M = 0.085;
 	const float MENISCUS_HALF_WIDTH_M = 0.105;
+	const float FULLY_SUBMERGED_START_M = 0.06;
+	const float FULLY_SUBMERGED_END_M = 0.22;
 
 	CameraSplitSample result;
 	result.underwater_mask = 0.0;
@@ -781,9 +905,9 @@ CameraSplitSample compute_camera_split(
 	float grazing = 1.0 - abs(view_dir.y);
 	float split_feather = mix(SPLIT_MIN_FEATHER_M, SPLIT_GRAZING_FEATHER_M, grazing);
 	float lens_underwater = smoothstep(-split_feather, split_feather, lens_surface.depth);
-	float near_surface = 1.0 - smoothstep(0.28, 1.35, abs(camera_depth));
-	float fully_submerged = smoothstep(0.42, 0.95, camera_depth) * camera_body_gate;
-	float partial_split = lens_underwater * result.lens_body_gate * near_surface;
+	float near_surface = 1.0 - smoothstep(0.18, 0.70, abs(camera_depth));
+	float fully_submerged = smoothstep(FULLY_SUBMERGED_START_M, FULLY_SUBMERGED_END_M, camera_depth) * camera_body_gate;
+	float partial_split = lens_underwater * result.lens_body_gate * near_surface * (1.0 - fully_submerged);
 	result.underwater_mask = clamp(max(partial_split, fully_submerged), 0.0, 1.0);
 
 	float lens_band = 1.0 - smoothstep(MENISCUS_HALF_WIDTH_M * 0.30, MENISCUS_HALF_WIDTH_M, abs(lens_surface.depth));
@@ -869,7 +993,7 @@ RefractSample refracted_source_color(
 			surface_xz = entry_world.xz;
 		}
 	}
-	vec3 world_normal = water_normal_at(surface_xz, cam_pos);
+	vec3 world_normal = water_optical_normal_at(surface_xz, cam_pos);
 	vec3 normal_view = normalize((state.view * vec4(world_normal, 0.0)).xyz);
 	float view_grazing = 1.0 - abs(dot(view_dir, world_normal));
 	float camera_underwater = cam_pos.y < camera_water_level - 0.02 ? 1.0 : 0.0;
@@ -939,7 +1063,7 @@ RefractSample refracted_receiver_from_water_pixel(
 	}
 
 	vec3 view_dir = normalize(water_world_pos - cam_pos);
-	vec3 world_normal = water_normal_at(water_world_pos.xz, cam_pos);
+	vec3 world_normal = water_optical_normal_at(water_world_pos.xz, cam_pos);
 	vec3 normal_view = normalize((state.view * vec4(world_normal, 0.0)).xyz);
 	float view_grazing = 1.0 - abs(dot(view_dir, world_normal));
 	float view_dist = length(water_world_pos - cam_pos);
@@ -1098,15 +1222,15 @@ void main() {
 
 	vec3 receiver_color = receiver_depth_present ? sample_source_color_nearest(uv) : scene_color.rgb;
 	RefractSample refr_sample;
-	if (!meniscus_refraction_enabled && debug_mode == 0) {
+	if (receiver_depth_present) {
+		refr_sample = refracted_source_color(uv, receiver_color, cam_pos, world_pos, underwater_ray_mask);
+	} else if (!meniscus_refraction_enabled && debug_mode == 0) {
 		refr_sample.color = receiver_color;
 		refr_sample.valid = 0.0;
 		refr_sample.offset = 0.0;
 		refr_sample.status = 0.0;
 		refr_sample.path_length = max(water_depth, 0.0);
 		refr_sample.below_mask = underwater_ray_mask;
-	} else if (receiver_depth_present) {
-		refr_sample = refracted_source_color(uv, receiver_color, cam_pos, world_pos, underwater_ray_mask);
 	} else {
 		refr_sample = refracted_receiver_from_water_pixel(uv, scene_color.rgb, cam_pos, main_world_pos, visible_water_gate * water_body_gate);
 	}
@@ -1218,43 +1342,42 @@ void main() {
 	if (underwater_view_mask > 0.001 && underwater_any_enabled) {
 		bool needs_surface_normal = snell_enabled || wobble_enabled;
 		float surface_dist = water_ray_hit ? length(analytic_water_pos - cam_pos) : 8.0;
-		SnellSample snell = compute_snell_sample(cam_pos, view_dir, analytic_water_pos, water_ray_hit);
+		SnellSample snell = compute_snell_sample(cam_pos, view_dir, analytic_water_pos, water_ray_hit, camera_depth);
 		vec3 surface_normal = (needs_surface_normal && snell.valid > 0.5) ? snell.surface_normal : vec3(0.0, 1.0, 0.0);
-		vec3 normal_view = normalize((state.view * vec4(surface_normal, 0.0)).xyz);
 		float snell_window = snell_enabled ? snell.window : 0.0;
-		float total_internal_reflection = snell_enabled && snell.valid > 0.5 ? 1.0 - snell_window : 0.0;
+		float snell_reflection = snell_enabled && snell.valid > 0.5 ? 1.0 - snell_window : 0.0;
 		float up_dot = snell.valid > 0.5 ? snell.cos_theta : max(view_dir.y, 0.0);
 		float scene_dist = main_depth_present ? length(main_world_pos - cam_pos) : min(surface_dist + 55.0, 95.0);
-		vec2 wobble_low = vec2(
-			fbm2(uv * vec2(3.1, 4.7) + TIME * vec2(0.055, -0.024)),
-			fbm2(uv * vec2(4.2, 2.9) - TIME * vec2(0.032, 0.041))
-		) * 2.0 - 1.0;
-		vec2 wobble_mid = vec2(
-			fbm2(uv * vec2(9.5, 7.0) + TIME * vec2(-0.078, 0.039)),
-			fbm2(uv * vec2(7.7, 10.2) + TIME * vec2(0.046, 0.071))
-		) * 2.0 - 1.0;
+		vec2 wobble_xz = (snell.valid > 0.5)
+			? snell.surface_pos.xz
+			: (water_ray_hit ? analytic_water_pos.xz : main_world_pos.xz);
+		vec2 view_xz = length(view_dir.xz) > 0.001 ? normalize(view_dir.xz) : vec2(1.0, 0.0);
+		float wobble_step = clamp(scene_dist * 0.18, 1.0, 18.0);
+		vec3 wobble_normal_a = water_optical_normal_at(wobble_xz, cam_pos);
+		vec3 wobble_normal_b = water_optical_normal_at(wobble_xz + view_xz * wobble_step, cam_pos);
+		vec3 optical_normal = normalize(mix(surface_normal, normalize(mix(wobble_normal_a, wobble_normal_b, 0.35)), 0.78));
+		vec3 normal_view = normalize((state.view * vec4(optical_normal, 0.0)).xyz);
 		float wobble_strength = (
-			0.0055
-			+ 0.0075 * smoothstep(0.0, 0.90, up_dot)
-			+ 0.000075 * min(scene_dist, 85.0)
+			0.0045
+			+ 0.0065 * smoothstep(0.0, 0.90, up_dot)
+			+ 0.000055 * min(scene_dist, 85.0)
 		) * underwater_view_mask;
-		vec2 wobble_offset = (wobble_low * 0.72 + wobble_mid * 0.28 + normal_view.xy * 0.18) * wobble_strength;
+		vec2 wobble_offset = normal_view.xy * wobble_strength;
 		vec2 wobbled_uv = wobble_enabled ? clamp(uv + wobble_offset, vec2(0.001), vec2(0.999)) : uv;
 		vec3 wobbled_scene = sample_scene_color(wobbled_uv, scene_color.rgb);
-		float water_travel = mix(scene_dist, max(surface_dist * 0.42, 0.75), snell_window);
+		float air_transmission = snell.valid > 0.5 ? snell_window : 0.0;
+		float surface_path = water_ray_hit ? max(surface_dist, 0.75) : scene_dist;
+		float water_travel = mix(scene_dist, surface_path, air_transmission);
 		vec3 underwater_sigma = max(sigma * 1.65, vec3(0.075, 0.025, 0.018));
 		vec3 underwater_transmittance = exp(-underwater_sigma * min(water_travel, 90.0));
 		vec3 underwater_absorbed = mix(tint * 1.08, wobbled_scene, underwater_transmittance);
 		float underwater_fog = 1.0 - exp(-min(water_travel, 130.0) * 0.085);
 		underwater_color = absorption_enabled
-			? mix(underwater_absorbed, tint * mix(1.70, 2.55, snell_window), clamp(underwater_fog * 0.86, 0.0, 0.96))
+			? mix(underwater_absorbed, tint * mix(1.70, 2.20, smoothstep(6.0, 48.0, water_travel)), clamp(underwater_fog * 0.86, 0.0, 0.96))
 			: wobbled_scene;
-		if (total_internal_reflection > 0.001) {
-			vec3 reflected_dir = reflect(view_dir, surface_normal);
-			vec2 reflect_uv = clamp(uv + normal_view.xy * 0.010 + reflected_dir.xz * 0.0025, vec2(0.001), vec2(0.999));
-			vec3 reflected_water = sample_scene_color(reflect_uv, scene_color.rgb);
-			vec3 ceiling_tint = mix(tint * 1.45, reflected_water, 0.32);
-			underwater_color = mix(underwater_color, ceiling_tint, total_internal_reflection * 0.22);
+		if (snell_reflection > 0.001) {
+			vec3 ceiling_tint = mix(tint * 1.45, scene_color.rgb, 0.18);
+			underwater_color = mix(underwater_color, ceiling_tint, snell_reflection * 0.32);
 		}
 		float rays = rays_enabled ? compute_underwater_rays(
 			cam_pos,
@@ -1274,10 +1397,15 @@ void main() {
 		underwater_color += caustics_enabled
 			? compute_receiver_caustics(main_world_pos, cam_pos, underwater_color, underwater_caustic_depth, underwater_caustic_gate) * 0.70
 			: vec3(0.0);
-		vec2 snell_uv = clamp(uv - normal_view.xy * 0.006, vec2(0.001), vec2(0.999));
-		vec3 snell_scene = source_valid ? texture(source_color_tex, snell_uv).rgb : sample_scene_color(snell_uv, scene_color.rgb);
-		vec3 tir_tint = absorption_enabled ? underwater_color : tint;
-		underwater_color = snell_enabled ? mix(tir_tint, snell_scene, snell_window) : underwater_color;
+		if (snell_enabled && snell.valid > 0.5 && snell_window > 0.001) {
+			float window_absorption = absorption_enabled
+				? exp(-max(camera_depth, 0.0) * 0.050)
+				: 1.0;
+			float window_strength = snell_window * mix(0.62, 0.92, window_absorption);
+			vec3 atmosphere = sample_atmosphere_color(uv, tint * 1.24, cam_pos);
+			vec3 atmospheric_window = mix(tint * 1.24, atmosphere, window_absorption);
+			underwater_color = mix(underwater_color, atmospheric_window, clamp(window_strength, 0.0, 0.92));
+		}
 		float dither = interleaved_gradient_noise(vec2(pixel));
 		underwater_color += vec3(dither * 2.0 - 1.0) / 255.0;
 	}

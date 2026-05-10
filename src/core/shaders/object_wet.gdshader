@@ -1,6 +1,6 @@
 // Per-pixel object wetness shader — Lagarde PBR wet surfaces.
-// Darkens and glossifies only the portion of the mesh below wet_line_y.
-// wet_line_y tracks the "high water mark" and decays over time (drying from top).
+// Live water contact is screen-space; wet_line_y tracks retained high-water
+// memory for objects that should stay wet after leaving water.
 //
 // Usage: assign as ShaderMaterial on any MeshInstance3D.
 // Push wet_line_y from GDScript via RenderingServer.material_set_param().
@@ -19,14 +19,15 @@ uniform float metallic : hint_range(0.0, 1.0) = 0.0;
 uniform float specular : hint_range(0.0, 1.0) = 0.5;
 uniform sampler2D albedo_texture : source_color, hint_default_white;
 
-// Wet map parameters. `wet_line_y` is retained high-water memory; the optional
-// dynamic water path adds the current FFT/shore waterline per fragment.
+// Wet map parameters. The dynamic water path is only a fallback when the
+// screen-space compositor is not providing live contact wetness.
 uniform float wet_line_y = -1000.0; // world-space Y of the water line on this object
 uniform float wet_margin : hint_range(0.0, 2.0) = 0.3; // capillary rise above wet_line
 uniform float wet_albedo_darken : hint_range(0.0, 1.0) = 0.6;
 uniform float wet_roughness_target : hint_range(0.0, 0.3) = 0.05;
 uniform float retained_wetness_strength : hint_range(0.0, 1.0) = 0.35;
 uniform bool wet_debug = false;
+uniform bool live_contact_from_compositor = true;
 uniform bool dynamic_water_enabled = false;
 uniform bool dynamic_water_has_shore_mask = false;
 uniform vec3 camera_world_position = vec3(0.0);
@@ -77,16 +78,17 @@ void fragment() {
 	METALLIC = metallic;
 	SPECULAR = specular;
 
-	// Per-pixel wetness: current water contact is authoritative. The scalar
-	// high-water line is only drying memory, so it must not flatten the live
-	// wave/object contact contour while the object is still touching water.
+	// Retained wetness memory. Live contact is supplied by WetCompositorEffect;
+	// the dynamic shader path remains only for explicit fallback materials.
 	float wet_margin_safe = max(wet_margin, 0.001);
 	float memory_wetness = 1.0 - smoothstep(wet_line_y, wet_line_y + wet_margin_safe, v_world_pos.y);
 	float contact_water_y = dynamic_water_level(v_world_pos.xz);
-	float contact_wetness = dynamic_water_enabled
+	float contact_wetness = (dynamic_water_enabled && !live_contact_from_compositor)
 		? 1.0 - smoothstep(contact_water_y, contact_water_y + wet_margin_safe, v_world_pos.y)
 		: 0.0;
-	float retained_wetness = dynamic_water_enabled
+	float retained_wetness = live_contact_from_compositor
+		? memory_wetness * retained_wetness_strength
+		: dynamic_water_enabled
 		? memory_wetness * (1.0 - contact_wetness) * retained_wetness_strength
 		: memory_wetness;
 	float wetness = max(contact_wetness, retained_wetness);
