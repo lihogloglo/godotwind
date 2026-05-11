@@ -21,10 +21,13 @@ to bend screen color from inside the FFT surface.
 2. **Pre-water capture records only opt-in receivers.**
    `PrewaterCaptureRenderer` owns the SubViewport/camera/copy path for objects
    that need waterline bending. Ocean Lab's intended mask is
-   `WATER_REFRACTION_RECEIVER_LAYER_MASK`, not the main camera mask. The current
-   near-water default band is 80-140m vertical camera-to-water distance, reduced
-   resolution by default, and consumers accept up to one rendered frame of
-   latency.
+   `WATER_REFRACTION_RECEIVER_LAYER_MASK`, not the main camera mask. When the
+   receiver compositor is active, receiver visuals live only on that layer and
+   the main camera excludes it. This prevents receiver meshes from writing the
+   main viewport depth that the opaque FFT surface uses for thickness. The
+   current near-water default band is 80-140m vertical camera-to-water distance,
+   reduced resolution by default, and consumers accept up to one rendered frame
+   of latency.
 3. **The normal scene renders.**
    Terrain, sky, ocean surface, spray, and ordinary objects render through the
    main viewport. They are not receiver-capture inputs unless a future system
@@ -34,9 +37,11 @@ to bend screen color from inside the FFT surface.
    receiver refraction is not buried by the ocean surface. Its receiver
    refraction output domain is visible water pixels: each water pixel samples
    the receiver color/depth capture at a perturbed UV and draws only when that
-   sampled receiver point is underwater. Current-UV receiver depth is diagnostic
-   data, not the final output mask. The same compositor combines main scene
-   depth/color and `WaterSurfaceState` for underwater-camera optics.
+   sampled receiver point is underwater. Current-UV receiver depth also draws
+   the receiver's above-water portion directly from the receiver capture, so the
+   object is represented once: direct above the waterline, refracted below it.
+   The same compositor combines main scene depth/color and `WaterSurfaceState`
+   for underwater-camera optics.
 5. **Underwater scene color is a separate source from receiver color.**
    Snell-window / wobble sampling uses post-scene color when needed. The
    receiver capture is only for opt-in receiver objects and must not be treated
@@ -86,6 +91,8 @@ the waterline compositor back before transparent rendering.
   `WaterlineCompositorEffect` receiver pass. The pass shades visible water
   pixels and fetches opt-in receiver color/depth from offset UVs, so submerged
   silhouettes can move outside the receiver mesh's original screen footprint.
+  Ocean Lab now keeps active receivers off the main camera cull mask and lets
+  the compositor draw their direct above-water portion from the receiver capture.
   The FFT surface stays opaque and uses scene depth only for thickness, shore
   foam, and tint. Terrain, sky, water, spray, UI, and broad seafloor helpers are
   not receiver inputs unless a future system explicitly opts them in. The same
@@ -209,11 +216,13 @@ refraction.
 
 1. **Waterline compositor still needs visual tuning.** Above-water
    half-submerged-object bending now comes from the receiver-only compositor
-   path, not the FFT surface shader. `Final` mode no longer uses the receiver's
-   current screen-space depth as the output mask; it writes only from visible
-   water pixels with a valid offset sample into the underwater receiver capture.
-   The compositor runs at `POST_TRANSPARENT` so its receiver result is not
-   buried by the visible ocean surface.
+   path, not the FFT surface shader. Active receivers no longer imprint the
+   main ocean depth/thickness footprint in Ocean Lab; the main camera excludes
+   the receiver layer while the compositor writes one coherent receiver result.
+   `Final` mode writes direct receiver pixels above the dynamic waterline and
+   visible-water pixels with a valid offset sample below it. The compositor runs
+   at `POST_TRANSPARENT` so its receiver result is not buried by the visible
+   ocean surface.
 2. **Underwater POV is compositor-owned, but not final art.** The compositor
    now brightens the underwater ceiling with Snell-window transmission and
    applies underwater absorption, receiver-depth caustics, surface-anchored

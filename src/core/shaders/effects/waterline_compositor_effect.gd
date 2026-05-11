@@ -39,6 +39,7 @@ var _caustics_noise_rid: RID
 var _fallback_shore_texture: Texture2D
 var _caustics_noise_texture: Texture2D
 var _map_scales: PackedVector4Array = PackedVector4Array()
+var _state_buffer_size: int = 0
 var _sea_level: float = 0.0
 var _wave_scale: float = 1.0
 var _shore_mask_bounds: Vector4 = Vector4(-8000.0, -8000.0, 16000.0, 16000.0)
@@ -392,6 +393,8 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var source_depth_rid := _external_source_depth_rid if external_source_depth_valid else RID()
 	var source_color_valid := has_external_source
 	var source_depth_valid := has_external_source
+	if not has_external_source and _debug_mode == 0 and scene_data.get_cam_transform().origin.y > _camera_water_level + 0.02:
+		return
 	var source_log_key := "%s/%s/%s/%s" % [
 		has_external_source,
 		source_color_valid,
@@ -409,9 +412,8 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 
 	var matrix_data := _build_state_buffer_data(scene_data)
 	var matrix_bytes := matrix_data.to_byte_array()
-	if _state_buffer.is_valid():
-		rd.free_rid(_state_buffer)
-	_state_buffer = rd.storage_buffer_create(matrix_bytes.size(), matrix_bytes)
+	if not _ensure_state_buffer(matrix_bytes):
+		return
 
 	var pc := PackedFloat32Array()
 	pc.append(float(size.x))
@@ -528,6 +530,20 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	rd.compute_list_end()
 	rd.capture_timestamp("godotwind_waterline_probe_end")
 	rd.free_rid(uniform_set)
+
+
+func _ensure_state_buffer(matrix_bytes: PackedByteArray) -> bool:
+	var required_size := matrix_bytes.size()
+	if required_size <= 0:
+		return false
+	if not _state_buffer.is_valid() or _state_buffer_size != required_size:
+		if _state_buffer.is_valid():
+			rd.free_rid(_state_buffer)
+		_state_buffer = rd.storage_buffer_create(required_size, matrix_bytes)
+		_state_buffer_size = required_size if _state_buffer.is_valid() else 0
+		return _state_buffer.is_valid()
+	rd.buffer_update(_state_buffer, 0, required_size, matrix_bytes)
+	return true
 
 
 func _copy_scene_color(color_image: RID, size: Vector2i) -> bool:
@@ -771,4 +787,5 @@ func on_effect_removed() -> void:
 		if _state_buffer.is_valid():
 			rd.free_rid(_state_buffer)
 			_state_buffer = RID()
+	_state_buffer_size = 0
 	_scene_copy_size = Vector2i.ZERO

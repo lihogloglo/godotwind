@@ -271,6 +271,7 @@ func _build_camera() -> void:
 	_camera.set_script(FlyCameraScript)
 	_camera.far = 20000.0
 	_camera.current = true
+	_apply_receiver_layer_contract()
 	add_child(_camera)
 	_camera.global_position = Vector3(0.0, 35.0, 80.0)
 	_camera.look_at(Vector3(0.0, 0.0, 0.0), Vector3.UP)
@@ -986,6 +987,7 @@ func _update_underwater_volume() -> void:
 func _update_waterline_compositor() -> void:
 	if _waterline_effect == null:
 		return
+	_apply_receiver_layer_contract()
 	var activation_fade := _get_waterline_activation_fade()
 	var debug_active := _waterline_debug_mode != 0
 	_waterline_effect.effect_enabled = _waterline_compositor_enabled and (activation_fade > 0.001 or debug_active)
@@ -1056,6 +1058,15 @@ func _push_prewater_capture_to_waterline() -> void:
 			_waterline_effect.call("clear_external_source_buffers")
 		return
 	_prewater_capture.push_to_waterline_effect(_waterline_effect)
+
+
+func _apply_receiver_layer_contract() -> void:
+	if _camera == null:
+		return
+	if _waterline_compositor_enabled:
+		_camera.cull_mask = _camera.cull_mask & ~WATER_REFRACTION_RECEIVER_LAYER_MASK
+	else:
+		_camera.cull_mask = _camera.cull_mask | WATER_REFRACTION_RECEIVER_LAYER_MASK
 
 
 func _get_waterline_resolution_scale() -> float:
@@ -1689,7 +1700,7 @@ func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material, ref
 
 
 func _mark_refraction_receiver(inst: VisualInstance3D) -> void:
-	inst.layers = inst.layers | WATER_REFRACTION_RECEIVER_LAYER_MASK
+	inst.layers = WATER_REFRACTION_RECEIVER_LAYER_MASK
 
 
 func _add_emissive_marker(pos: Vector3, color: Color) -> void:

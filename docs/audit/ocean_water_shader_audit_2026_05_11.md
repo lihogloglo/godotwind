@@ -148,6 +148,8 @@ The problem is production integration and cost:
 - `WaterlineCompositorEffect._render_view()` frees and recreates a storage buffer every view every frame at `src/core/shaders/effects/waterline_compositor_effect.gd:415-416`.
 - It also creates and frees uniform sets every dispatch at `:518` and `:532`, and may do a full-scene color copy at `:535`.
 - `WetCompositorEffect` has the same per-frame buffer/uniform-set pattern at `src/core/shaders/effects/wet_compositor_effect.gd:250` and `:313`.
+- Interactive refraction debugging on 2026-05-11 showed the source capture, receiver mask, and final mask are correct, but final rendering still has a double-outline artifact. The likely cause is architectural: opt-in receiver objects still contribute to the main opaque ocean depth/thickness footprint before the compositor draws the refracted receiver copy. Shader-side replacement/erase attempts reduced symptoms but did not produce one unified contour.
+- User-observed empty Ocean Lab cost on 2026-05-11: compositor off about 4 ms, compositor on about 16 ms / roughly 60 FPS. That is too expensive for an always-on production path.
 
 This is acceptable as lab instrumentation, but not as a final always-on AAA underwater stack. It needs persistent buffers, cached or reusable uniform sets where Godot allows it, strict feature tiers, and low-resolution/upscaled modes.
 
@@ -281,6 +283,40 @@ Verification:
 
 No C# files changed, so `dotnet build Godotwind.sln` was not required.
 
+### Follow-up receiver-refraction debug - 2026-05-11
+
+Interactive Ocean Lab debugging found:
+
+- `WL Debug: Source` showed valid source color/depth over the water and correct submerged receiver transitions.
+- `WL Debug: Receiver Mask` and `Final Mask` produced the expected submerged receiver shapes.
+- `WL Debug: Refract`, `Refract Offset`, and `Final` still showed two outlines / silhouettes, especially at lower `WL Res`.
+- A near-replacement compositor blend and an attempted original-footprint erase did not fully remove the duplicate outline.
+- Cycling waterline resolution no longer produced the earlier `Texture (binding: 5) is not a valid texture` error after adding receiver-source RID validity checks and delayed prewater texture retirement.
+
+Conclusion: do not keep tuning the current shader as the final fix. The next pass should solve receiver refraction architecture so receiver objects do not also imprint the opaque ocean depth/thickness pass that the compositor later tries to bend.
+
+### Follow-up receiver-layer contract fix - 2026-05-11
+
+Files changed:
+
+- `tests/visual/test_ocean_lab.gd`
+- `src/core/shaders/compute/waterline_probe.glsl`
+- `src/core/shaders/effects/waterline_compositor_effect.gd`
+- `docs/systems/ocean.md`
+
+Practical effect:
+
+- Ocean Lab receiver meshes are now receiver-layer owned while the waterline compositor is active. The main camera excludes `WATER_REFRACTION_RECEIVER_LAYER_MASK`, so receiver meshes no longer write the main viewport depth that the opaque FFT ocean uses for surface thickness.
+- The compositor now draws one receiver result from the receiver capture: direct current-UV receiver pixels above the dynamic waterline, and refracted offset receiver samples below the waterline.
+- The shader-side original-footprint erase experiment was removed rather than tuned further.
+- The waterline effect now reuses its state storage buffer with `RenderingDevice.buffer_update()` instead of freeing and recreating that buffer every view every frame, and it skips the above-water final pass when no receiver source exists.
+
+Canonical Godot basis:
+
+- `Camera3D.cull_mask` selects which `VisualInstance3D.layers` the camera renders.
+- A `SubViewport` can render the same shared `World3D` through a different camera/cull mask.
+- `CompositorEffect.EFFECT_CALLBACK_TYPE_POST_TRANSPARENT` runs after transparent rendering and before built-in post-processing/output, which is the correct slot for the final receiver overlay after opaque water has drawn.
+
 ## Architecture Recommendation
 
 ### Keep
@@ -372,6 +408,10 @@ The current game path is surface ocean only. The lab path has the interesting un
 
 This should be a real system, not copied lab setup code.
 
+### P0 - Receiver refraction still has a render-architecture conflict
+
+Ocean Lab now proves that receiver capture and masks can be correct while the final image remains wrong. The submerged receiver is represented twice: once as the current main-scene/depth footprint affecting the opaque ocean surface, and once as the compositor's offset receiver sample. The proper fix is to change the render path or layer/depth contract, not keep adding shader-side eraser logic.
+
 ### P0 - Inland water architecture is wrong
 
 Do not extend `WaterVolume` into lakes/rivers. It is not Godot 4.6 correct, not shared-state based, and not tied into the ocean/underwater/physics stack.
@@ -398,6 +438,7 @@ The waterline and wetness compositors should not allocate/free buffers and unifo
 - Optional half/quarter-res underwater pass with upscale.
 - Disable receiver capture unless refraction receivers exist and camera is near/under water.
 - Ocean Lab perf thresholds for scene copy, waterline probe, spray, and wetness.
+- Treat the 2026-05-11 Ocean Lab measurement, compositor off about 4 ms versus on about 16 ms, as a blocking performance target failure until the architecture is simplified or split into cheaper feature tiers.
 
 ### P1 - Fix shader correctness issues
 
@@ -465,7 +506,7 @@ This should record GPU timestamps from the waterline effect plus whole-frame met
 | Inland lakes/puddles | `WaterVolume` prototype | Replace |
 | Rivers/flowmaps | `WaterVolume` has visual scroll only | Missing production architecture |
 | Above-water reflections | Opaque surface can use Godot lighting/reflection path; SSR/probe lab exists | Good baseline, no planar/hero reflection strategy yet |
-| Refraction | Surface does not do true scene-color refraction; compositor has receiver refraction | Correct direction, production integration missing |
+| Refraction | Surface does not do true scene-color refraction; compositor has receiver refraction, but Ocean Lab still shows duplicate receiver outlines | Architecture conflict remains; fix render/depth layering before more shader tuning |
 | Absorption | Surface depth tint and compositor absorption | Partial |
 | Waterline split | Waterline compositor in lab | Not production-integrated |
 | Underwater particles/rays/wobble/caustics/Snell | Present in lab compositor | Needs visual validation, perf hardening, production integration |

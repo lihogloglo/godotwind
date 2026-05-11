@@ -118,7 +118,7 @@ const float SNELL_WAVE_NORMAL_DEEP_WEIGHT = 0.36;
 const float WOBBLE_MAX_UV_OFFSET = 0.012;
 const float WOBBLE_MIN_CAMERA_DEPTH_M = 0.16;
 const float WOBBLE_FULL_CAMERA_DEPTH_M = 0.70;
-const float RECEIVER_REFRACTION_REPLACE_OPACITY = 0.92;
+const float RECEIVER_REFRACTION_REPLACE_OPACITY = 0.98;
 
 struct SnellSample {
 	float window;
@@ -1247,7 +1247,7 @@ void main() {
 	float main_depth = get_main_depth(uv);
 	bool main_depth_present = main_depth > 0.0001;
 	bool receiver_depth_present = source_depth_valid && raw_depth > 0.0001;
-	if (!main_depth_present && !water_ray_hit && !camera_underwater && !half_camera_active) {
+	if (!main_depth_present && !receiver_depth_present && !water_ray_hit && !camera_underwater && !half_camera_active) {
 		if (pipeline_debug) {
 			vec3 debug_color = pipeline_debug_color(
 				uv,
@@ -1283,6 +1283,12 @@ void main() {
 	float receiver_coverage = receiver_depth_present ? receiver_surface.coverage : 0.0;
 	float main_coverage = main_surface.coverage;
 	float camera_coverage = camera_surface.coverage;
+	float receiver_view_distance = receiver_depth_present ? length(world_pos - cam_pos) : 0.0;
+	float main_view_distance = main_depth_present ? length(main_world_pos - cam_pos) : 1.0e20;
+	float receiver_unoccluded = (!main_depth_present || receiver_view_distance <= main_view_distance + 0.05) ? 1.0 : 0.0;
+	float direct_receiver_mask = receiver_depth_present
+		? (1.0 - smoothstep(-0.02, 0.18, water_depth)) * receiver_unoccluded
+		: 0.0;
 	float water_body_gate = max(
 		max(water_surface_body_gate(max(main_coverage, camera_underwater ? camera_coverage : 0.0)), camera_split.lens_body_gate),
 		analytic_water_gate
@@ -1313,14 +1319,14 @@ void main() {
 		? visible_water_depth_gate * visible_water_band_gate
 		: 0.0;
 	float receiver_refraction_gate = visible_water_pixel_gate * water_body_gate;
-	if (debug_mode == 0 && !camera_underwater && !half_camera_active && receiver_refraction_gate <= 0.001) {
+	if (debug_mode == 0 && !camera_underwater && !half_camera_active && receiver_refraction_gate <= 0.001 && direct_receiver_mask <= 0.001) {
 		return;
 	}
 
 	RefractSample refr_sample = refracted_receiver_from_water_pixel(uv, scene_color.rgb, cam_pos, main_world_pos, receiver_refraction_gate);
 	float refracted_receiver_mask = refr_sample.valid * refr_sample.below_mask * receiver_refraction_gate;
 	float mask = refracted_receiver_mask;
-	if (debug_mode == 0 && mask <= 0.001 && !camera_underwater && !half_camera_active) {
+	if (debug_mode == 0 && max(mask, direct_receiver_mask) <= 0.001 && !camera_underwater && !half_camera_active) {
 		return;
 	}
 
@@ -1385,11 +1391,9 @@ void main() {
 			proof_color = vec3(0.4, 0.4, 0.4);
 		}
 	} else if (debug_mode == 6) {
-		vec3 raw_source = source_valid ? texture(source_color_tex, uv).rgb : scene_color.rgb;
-		float source_delta = length(refr_sample.color - raw_source);
 		float offset_meter = clamp(refr_sample.offset * 80.0, 0.0, 1.0);
-		float color_meter = clamp(source_delta * 8.0, 0.0, 1.0);
-		proof_color = vec3(offset_meter, color_meter, refr_sample.valid > 0.5 ? 0.08 : 0.65);
+		float accepted_meter = clamp(mask, 0.0, 1.0);
+		proof_color = vec3(offset_meter, accepted_meter, refr_sample.valid > 0.5 ? 0.08 : 0.65);
 	} else if (debug_mode == 7) {
 		proof_color = vec3(
 			source_valid ? 0.0 : 1.0,
@@ -1425,7 +1429,7 @@ void main() {
 	} else if (debug_mode == 13) {
 		proof_color = vec3(receiver_coverage, main_coverage, camera_coverage);
 	} else if (debug_mode == 14) {
-		proof_color = vec3(mask, water_body_gate, visible_water_gate);
+		proof_color = vec3(max(mask, direct_receiver_mask), water_body_gate, visible_water_gate);
 	}
 
 	float camera_depth = camera_water_level - cam_pos.y;
@@ -1524,7 +1528,7 @@ void main() {
 	float debug_mask = phase2_debug
 		? 1.0
 		: receiver_refraction_debug
-		? max(mask, receiver_refraction_gate)
+		? mask
 		: max(max(receiver_mask, receiver_refraction_gate), camera_waterline_band);
 	if (debug_mode == 15) {
 		debug_mask = max(underwater_view_mask, camera_waterline_band);
@@ -1537,7 +1541,11 @@ void main() {
 		: debug_mode == 0
 		? receiver_replace_strength
 		: clamp(debug_strength * blend_factor * debug_mask, 0.0, 1.0);
-	vec3 output_color = mix(scene_color.rgb, proof_color, strength);
+	vec3 output_color = scene_color.rgb;
+	if (debug_mode == 0 && direct_receiver_mask > 0.001 && source_valid) {
+		output_color = mix(output_color, sample_source_color_linear(uv), clamp(blend_factor * direct_receiver_mask, 0.0, 1.0));
+	}
+	output_color = mix(output_color, proof_color, strength);
 	if (debug_mode == 0 && underwater_view_mask > 0.001 && underwater_any_enabled) {
 		output_color = mix(output_color, underwater_color, clamp(blend_factor * underwater_view_mask, 0.0, 0.96));
 	}
