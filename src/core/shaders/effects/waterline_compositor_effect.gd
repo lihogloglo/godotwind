@@ -13,7 +13,6 @@ const CAUSTICS_NOISE_PATH := "res://assets/water/caustics_noise.png"
 const MAX_CASCADES := 8
 const FEATURE_ABSORPTION_FOG := 1
 const FEATURE_SNELL := 2
-const FEATURE_RAYS := 4
 const FEATURE_WOBBLE := 8
 const FEATURE_PARTICLES := 16
 const FEATURE_MENISCUS_REFRACTION := 32
@@ -22,8 +21,8 @@ const QUALITY_LOW := 0
 const QUALITY_MEDIUM := 1
 const QUALITY_HIGH := 2
 const QUALITY_LOW_FEATURE_FLAGS := FEATURE_ABSORPTION_FOG | FEATURE_MENISCUS_REFRACTION
-const QUALITY_MEDIUM_FEATURE_FLAGS := QUALITY_LOW_FEATURE_FLAGS | FEATURE_SNELL | FEATURE_RAYS | FEATURE_WOBBLE
-const QUALITY_HIGH_FEATURE_FLAGS := QUALITY_MEDIUM_FEATURE_FLAGS | FEATURE_PARTICLES | FEATURE_CAUSTICS
+const QUALITY_MEDIUM_FEATURE_FLAGS := QUALITY_LOW_FEATURE_FLAGS | FEATURE_SNELL | FEATURE_WOBBLE
+const QUALITY_HIGH_FEATURE_FLAGS := QUALITY_MEDIUM_FEATURE_FLAGS | FEATURE_CAUSTICS
 const RECEIVER_SOURCE_CAPTURE_DIRECT := 0
 const RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER := 1
 const MAX_REASONABLE_TIMESTAMP_MS := 100.0
@@ -71,10 +70,6 @@ var _quality_tier: int = QUALITY_MEDIUM
 var _receiver_source_mode: int = RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER
 var _user_underwater_feature_flags: int = QUALITY_HIGH_FEATURE_FLAGS
 var _underwater_feature_flags: int = QUALITY_MEDIUM_FEATURE_FLAGS
-var _ray_shell_count: int = 4
-var _ray_shell_spacing_m: float = 14.0
-var _ray_intensity: float = 1.65
-var _ray_shell_start_m: float = 0.45
 var _particle_noise_scale: float = 0.70
 var _particle_density: float = 0.15
 var _particle_near_gate_m: float = 1.5
@@ -297,13 +292,6 @@ func set_receiver_source_mode(mode: int) -> void:
 	_receiver_source_mode = clampi(mode, RECEIVER_SOURCE_CAPTURE_DIRECT, RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER)
 
 
-func set_underwater_ray_params(shell_count: int, shell_spacing_m: float, intensity: float, shell_start_m: float) -> void:
-	_ray_shell_count = clampi(shell_count, 1, 8)
-	_ray_shell_spacing_m = clampf(shell_spacing_m, 1.0, 80.0)
-	_ray_intensity = clampf(intensity, 0.0, 4.0)
-	_ray_shell_start_m = clampf(shell_start_m, 0.10, 80.0)
-
-
 func set_underwater_particle_params(noise_scale: float, density: float, near_gate_m: float, far_gate_m: float) -> void:
 	_particle_noise_scale = clampf(noise_scale, 0.005, 1.5)
 	_particle_density = clampf(density, 0.0, 8.0)
@@ -322,8 +310,6 @@ func _feature_bit(feature_name: StringName) -> int:
 			return FEATURE_ABSORPTION_FOG
 		&"snell":
 			return FEATURE_SNELL
-		&"rays":
-			return FEATURE_RAYS
 		&"wobble":
 			return FEATURE_WOBBLE
 		&"particles":
@@ -469,10 +455,6 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(_camera_water_level)
 	pc.append(1.0 if _normal_rid.is_valid() else 0.0)
 	pc.append(float(_receiver_source_mode))
-	pc.append(float(_ray_shell_count))
-	pc.append(_ray_shell_spacing_m)
-	pc.append(_ray_intensity)
-	pc.append(_ray_shell_start_m)
 	pc.append(_particle_noise_scale)
 	pc.append(_particle_density)
 	pc.append(_particle_near_gate_m)
@@ -766,9 +748,6 @@ func _refresh_timestamp_snapshot() -> void:
 		"feature_flags": _underwater_feature_flags,
 		"scene_copy_active": _last_scene_copy_active,
 		"source_size": _external_source_size,
-		"ray_shell_count": _ray_shell_count,
-		"ray_shell_spacing_m": _ray_shell_spacing_m,
-		"ray_intensity": _ray_intensity,
 		"particle_noise_scale": _particle_noise_scale,
 		"particle_density": _particle_density,
 	}

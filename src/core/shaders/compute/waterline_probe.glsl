@@ -33,7 +33,6 @@ layout(push_constant, std430) uniform Params {
 	vec4 water; // x=sea_level, y=wave_scale, z=cascade_count, w=probe_strength
 	vec4 debug; // x=debug_mode, y=source_color_valid, z=source_depth_valid, w=reserved
 	vec4 features; // x=feature_flags, y=camera_water_level, z=normal_valid, w=receiver_source_mode
-	vec4 ray_params; // x=shell_count, y=shell_spacing_m, z=intensity, w=shell_start_m
 	vec4 particle_params; // x=noise_scale, y=density, z=near_gate_m, w=far_gate_m
 } pc;
 
@@ -53,10 +52,6 @@ layout(push_constant, std430) uniform Params {
 #define camera_water_level_cached pc.features.y
 #define normal_valid (pc.features.z > 0.5)
 #define receiver_source_mode int(pc.features.w)
-#define ray_shell_count pc.ray_params.x
-#define ray_shell_spacing pc.ray_params.y
-#define ray_intensity pc.ray_params.z
-#define ray_shell_start pc.ray_params.w
 #define particle_noise_scale pc.particle_params.x
 #define particle_density pc.particle_params.y
 #define particle_near_gate pc.particle_params.z
@@ -64,7 +59,6 @@ layout(push_constant, std430) uniform Params {
 
 const int FEATURE_ABSORPTION_FOG = 1;
 const int FEATURE_SNELL = 2;
-const int FEATURE_RAYS = 4;
 const int FEATURE_WOBBLE = 8;
 const int FEATURE_PARTICLES = 16;
 const int FEATURE_MENISCUS_REFRACTION = 32;
@@ -77,11 +71,10 @@ const float CAUSTICS_CHROMA_SPLIT = 0.002;
 const float CAUSTICS_LUMA_MASK_STRENGTH = 0.22;
 const float CAUSTICS_LUMA_LOW = 0.00560224;
 const float CAUSTICS_LUMA_HIGH = 0.10559;
-const int UNDERWATER_PARTICLE_STEPS = 4;
-const float UNDERWATER_PARTICLE_NEAR_RADIUS = 0.070;
-const float UNDERWATER_PARTICLE_FINE_RADIUS = 0.046;
-const float UNDERWATER_PARTICLE_NEAR_THRESHOLD = 0.82;
-const float UNDERWATER_PARTICLE_FINE_THRESHOLD = 0.92;
+const int UNDERWATER_PARTICLE_STEPS = 3;
+const float UNDERWATER_PARTICLE_COARSE_THRESHOLD = 0.59;
+const float UNDERWATER_PARTICLE_FINE_THRESHOLD = 0.70;
+const float UNDERWATER_PARTICLE_FINE_WEIGHT = 0.12;
 const vec3 UNDERWATER_PARTICLE_DRIFT = vec3(0.52, 0.15, -0.39);
 
 struct SurfaceSample {
@@ -936,124 +929,32 @@ SnellSample compute_snell_sample(vec3 cam_pos, vec3 view_dir, vec3 water_surface
 }
 
 
-float compute_underwater_rays(
-	vec3 cam_pos,
-	vec3 view_dir,
-	float pixel_dist,
-	float camera_water_level,
-	vec3 water_surface_pos,
-	float water_surface_hit
-) {
-	vec3 sun_dir = normalize(state.sun_params.xyz);
-	float sun_vis = clamp(state.sun_params.w, 0.0, 1.0);
-	float sun_height = max(sun_dir.y, 0.05);
-	float sun_fade = smoothstep(0.00, 0.26, sun_dir.y) * sun_vis;
-	if (sun_fade <= 0.001) {
-		return 0.0;
-	}
-
-	float view_to_sun = max(dot(view_dir, sun_dir), 0.0);
-	vec2 sun_xz = normalize(sun_dir.xz + vec2(0.001, -0.001));
-	vec2 sun_perp = vec2(-sun_xz.y, sun_xz.x);
-	float dynamic_camera_level = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
-	float camera_depth = max(max(camera_water_level, dynamic_camera_level) - cam_pos.y, 0.0);
-	float camera_depth_gate = smoothstep(0.18, 1.35, camera_depth) * (1.0 - smoothstep(140.0, 260.0, camera_depth));
-	if (camera_depth_gate <= 0.001) {
-		return 0.0;
-	}
-
-	float water_exit_dist = min(max(pixel_dist, 0.75), 120.0);
-	if (water_surface_hit > 0.5) {
-		water_exit_dist = min(water_exit_dist, max(length(water_surface_pos - cam_pos) - 0.12, 0.30));
-	}
-	if (water_exit_dist <= 0.30) {
-		return 0.0;
-	}
-
-	float ray_sum = 0.0;
-	int shell_count = clamp(int(round(ray_shell_count)), 1, 6);
-	float start_dist = min(max(ray_shell_start, 0.12), water_exit_dist * 0.45);
-	float max_dist = min(water_exit_dist, start_dist + max(ray_shell_spacing, 1.0) * float(shell_count));
-	float travel_gate = smoothstep(0.55, 5.5, max_dist);
-
-	for (int i = 0; i < 8; i++) {
-		if (i >= shell_count) {
-			break;
-		}
-		float jitter = hash21(vec2(gl_GlobalInvocationID.xy) + vec2(float(i) * 19.17, TIME * 0.03));
-		float slice = (float(i) + 0.35 + jitter * 0.30) / float(shell_count);
-		float sample_dist = mix(start_dist, max_dist, slice);
-		vec3 sample_pos = cam_pos + view_dir * sample_dist;
-		float water_y = get_dynamic_water_level(sample_pos.xz, cam_pos, true, true);
-		float sample_depth = max(water_y - sample_pos.y, 0.0);
-		if (sample_depth <= 0.03) {
-			continue;
-		}
-
-		vec2 surface_xz = sample_pos.xz + sun_dir.xz * (sample_depth / sun_height);
-		float surface_body_gate = water_surface_body_gate(max(
-			stable_water_body_coverage(surface_xz),
-			water_coverage_at(surface_xz, cam_pos)
-		));
-		if (surface_body_gate <= 0.001) {
-			continue;
-		}
-		float along = dot(surface_xz, sun_xz);
-		float across = dot(surface_xz, sun_perp);
-		float lane_width = mix(7.0, 18.0, hash21(vec2(floor(along * 0.025), 7.13)));
-		float lane = across / lane_width;
-		float lane_id = floor(lane);
-		float lane_center = (lane_id + 0.5 + (hash21(vec2(lane_id, floor(along * 0.018))) - 0.5) * 0.40) * lane_width;
-		float lane_dist = abs(across - lane_center) / lane_width;
-		float broken_column = fbm2(vec2(lane_id * 0.37, along * 0.026) + vec2(TIME * 0.018, -TIME * 0.010));
-		float column = (1.0 - smoothstep(0.035, 0.23, lane_dist)) * smoothstep(0.44, 0.76, broken_column);
-		float wave_focus = fbm2(surface_xz * 0.090 + vec2(TIME * 0.035, -TIME * 0.021));
-		float shaft = pow(column * mix(0.64, 1.25, wave_focus), 1.18);
-		float shimmer = 0.82 + 0.18 * sin(TIME * 0.82 + along * 0.030 + across * 0.017);
-		float shallow_gate = smoothstep(0.35, 2.8, sample_depth);
-		float depth_atten = shallow_gate * exp(-sample_depth * 0.017) * (1.0 - smoothstep(86.0, 180.0, sample_depth));
-		float dist_gate = smoothstep(1.0, 7.0, sample_dist)
-			* (1.0 - smoothstep(max_dist * 0.76, max_dist, sample_dist));
-		float phase = 0.30 + pow(view_to_sun, 1.55) * 0.95 + smoothstep(0.0, 0.72, sun_dir.y) * 0.20;
-		ray_sum += shaft * shimmer * depth_atten * dist_gate * surface_body_gate * phase / (1.0 + float(i) * 0.22);
-	}
-
-	return clamp(ray_sum * ray_intensity * sun_fade * camera_depth_gate * travel_gate * 0.58, 0.0, 0.62);
-}
-
-
-float underwater_speck_layer(vec3 sample_pos, float cell_scale, float radius, float threshold) {
-	vec3 q = sample_pos * cell_scale;
-	vec3 cell = floor(q);
-	vec3 local = fract(q);
-	vec3 center = vec3(
-		hash31(cell + vec3(17.0, 3.0, 11.0)),
-		hash31(cell + vec3(5.0, 23.0, 7.0)),
-		hash31(cell + vec3(31.0, 13.0, 19.0))
-	);
-	float speck_active = step(threshold, hash31(cell));
-	float dist = length(local - center);
-	return speck_active * (1.0 - smoothstep(radius, radius * 1.85, dist));
+float underwater_mote_layer(vec3 sample_pos, float cell_scale, float threshold) {
+	vec3 p = sample_pos * cell_scale;
+	float xz = fbm2(p.xz + vec2(p.y * 0.071, -p.y * 0.043));
+	float xy = fbm2(p.xy * 0.83 + vec2(p.z * 0.049, p.z * 0.061));
+	float yz = fbm2(p.yz * 0.67 + vec2(-p.x * 0.037, p.x * 0.052));
+	float field = xz * 0.52 + xy * 0.30 + yz * 0.18;
+	return pow(smoothstep(threshold, 0.92, field), 1.35);
 }
 
 
 float compute_underwater_particles(vec2 uv, vec3 cam_pos, vec3 view_dir, float pixel_dist, float camera_depth) {
 	float scale = clamp(particle_noise_scale, 0.005, 1.5);
-	float coarse_scale = mix(0.32, 1.15, clamp(scale / 1.5, 0.0, 1.0));
-	float fine_scale = coarse_scale * 2.35;
+	float coarse_scale = mix(0.18, 0.62, clamp(scale / 1.5, 0.0, 1.0));
+	float fine_scale = coarse_scale * 2.20;
 	vec3 drift = UNDERWATER_PARTICLE_DRIFT * TIME;
 	float sample_limit = min(pixel_dist, particle_far_gate);
 	float flecks = 0.0;
 	for (int i = 0; i < UNDERWATER_PARTICLE_STEPS; i++) {
-		float jitter = interleaved_gradient_noise(uv * vec2(screen_w, screen_h) + float(i) * 41.0);
-		float t = (float(i) + 0.24 + 0.56 * jitter) / float(UNDERWATER_PARTICLE_STEPS);
+		float t = (float(i) + 0.5) / float(UNDERWATER_PARTICLE_STEPS);
 		float sample_dist = mix(0.45, sample_limit, t);
 		vec3 p = cam_pos + view_dir * sample_dist + drift + vec3(0.31, -0.17, 0.23) * float(i);
-		float near_speck = underwater_speck_layer(p, coarse_scale, UNDERWATER_PARTICLE_NEAR_RADIUS, UNDERWATER_PARTICLE_NEAR_THRESHOLD);
-		float fine_speck = underwater_speck_layer(p + vec3(9.7, -3.1, 4.3), fine_scale, UNDERWATER_PARTICLE_FINE_RADIUS, UNDERWATER_PARTICLE_FINE_THRESHOLD);
-		flecks += near_speck * 0.92 + fine_speck * 0.42;
+		float coarse_mote = underwater_mote_layer(p, coarse_scale, UNDERWATER_PARTICLE_COARSE_THRESHOLD);
+		float fine_mote = underwater_mote_layer(p + vec3(9.7, -3.1, 4.3), fine_scale, UNDERWATER_PARTICLE_FINE_THRESHOLD);
+		flecks += coarse_mote + fine_mote * UNDERWATER_PARTICLE_FINE_WEIGHT;
 	}
-	flecks *= 0.18;
+	flecks *= 0.24;
 	float depth_gate = smoothstep(0.20, 3.5, camera_depth);
 	float near_gate = max(particle_near_gate, 0.25);
 	float far_gate = max(particle_far_gate, near_gate + 1.0);
@@ -1450,12 +1351,11 @@ void main() {
 	vec3 view_dir = get_world_ray_dir(uv);
 	bool absorption_enabled = feature_enabled(FEATURE_ABSORPTION_FOG);
 	bool snell_enabled = feature_enabled(FEATURE_SNELL);
-	bool rays_enabled = feature_enabled(FEATURE_RAYS);
 	bool wobble_enabled = feature_enabled(FEATURE_WOBBLE);
-	bool particles_enabled = feature_enabled(FEATURE_PARTICLES);
+	bool particles_enabled = false;
 	bool meniscus_refraction_enabled = feature_enabled(FEATURE_MENISCUS_REFRACTION);
 	bool caustics_enabled = feature_enabled(FEATURE_CAUSTICS);
-	bool underwater_any_enabled = absorption_enabled || snell_enabled || rays_enabled || wobble_enabled || particles_enabled || caustics_enabled;
+	bool underwater_any_enabled = absorption_enabled || snell_enabled || wobble_enabled || particles_enabled || caustics_enabled;
 	if (debug_mode == 0 && camera_underwater && !underwater_any_enabled && !meniscus_refraction_enabled) {
 		return;
 	}
@@ -1533,21 +1433,21 @@ void main() {
 	if (!receiver_depth_present && !main_depth_present && water_ray_hit) {
 		crossing_mask = 1.0;
 	}
-	float underwater_ray_mask = camera_underwater
+	float submerged_view_mask = camera_underwater
 		? max(max(below_mask, crossing_mask), camera_split.underwater_mask)
 		: max(below_mask, camera_split.underwater_mask);
 	float waterline_band = 1.0 - smoothstep(0.00, 0.24, abs(water_depth));
 	float camera_waterline_band = max(waterline_band, camera_split.meniscus);
 	float receiver_mask = receiver_depth_present
-		? max(underwater_ray_mask, camera_waterline_band * 0.35)
-		: max(underwater_ray_mask, camera_waterline_band * 0.20);
+		? max(submerged_view_mask, camera_waterline_band * 0.35)
+		: max(submerged_view_mask, camera_waterline_band * 0.20);
 	// Main-view ocean depth is a useful hint, but the water body ray keeps the
 	// compositor stable when the finite clipmap mesh/depth footprint drops out.
 	float visible_water_depth_gate = main_depth_present ? smoothstep(-0.08, 0.04, main_water_depth) : 0.0;
 	float visible_water_band_gate = main_depth_present ? 1.0 - smoothstep(0.55, 1.45, abs(main_water_depth)) : 0.0;
 	float analytic_visible_water_gate = water_ray_hit ? analytic_water_gate : 0.0;
 	float visible_water_gate = camera_underwater
-		? max(max(underwater_ray_mask, crossing_mask * 0.65), max(analytic_visible_water_gate * 0.75, camera_split.underwater_mask))
+		? max(max(submerged_view_mask, crossing_mask * 0.65), max(analytic_visible_water_gate * 0.75, camera_split.underwater_mask))
 		: max(max(visible_water_depth_gate * visible_water_band_gate, analytic_visible_water_gate), camera_split.underwater_mask);
 	float visible_water_pixel_gate = main_depth_present
 		? visible_water_depth_gate * visible_water_band_gate
@@ -1721,15 +1621,6 @@ void main() {
 			vec3 ceiling_tint = mix(tint * 1.45, scene_color.rgb, 0.18);
 			underwater_color = mix(underwater_color, ceiling_tint, snell_reflection * 0.32);
 		}
-		float rays = rays_enabled ? compute_underwater_rays(
-			cam_pos,
-			view_dir,
-			max(scene_dist, surface_dist + 10.0),
-			camera_water_level,
-			analytic_water_pos,
-			water_ray_hit ? 1.0 : 0.0
-		) : 0.0;
-		underwater_color += rays * vec3(0.46, 0.82, 1.0) * (0.45 + 0.55 * state.sun_params.w);
 		float particles = particles_enabled ? compute_underwater_particles(uv, cam_pos, view_dir, max(scene_dist, surface_dist + 12.0), max(camera_depth, 0.0)) : 0.0;
 		underwater_color += particles * mix(vec3(0.58, 0.82, 0.78), vec3(0.95, 1.0, 0.92), underwater_fog) * 0.58;
 		float underwater_caustic_depth = main_depth_present

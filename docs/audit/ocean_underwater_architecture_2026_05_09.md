@@ -107,6 +107,24 @@ compositor path:
   world-space water-surface positions, with the existing finite-difference
   surface normal as fallback.
 
+## Follow-up Audit - Underwater Rays Rebuild
+
+On 2026-05-11, the underwater ray path was rebuilt rather than tuned. The old
+shader sampled several shells along each screen ray, re-ran dynamic water
+classification per shell, and synthesized hard lane columns from procedural
+noise. That was both expensive and visually unstable in shallow water.
+
+The replacement follows the normal game-rendering split used by HDRP/Unreal
+style water systems: underwater treatment belongs to the water
+post/compositor, while rays are an approximation of participating-media
+inscattering and caustics remain a separate receiver projection. In Godotwind
+terms, `compute_underwater_rays()` now performs a cheap screen-space estimate:
+camera water depth, water-column length, sun phase, water-body gate, and a
+sparse light-space shaft field aligned to the sun direction. Rays deliberately
+do not sample the caustics texture; using that pattern made the volume read as
+a textured box instead of shafts of light. Shallow water fades out by
+depth/length gates instead of producing glitchy close-range bands.
+
 ## Source Anchors
 
 - Godot 4.6 CompositorEffect:

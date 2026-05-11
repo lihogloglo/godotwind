@@ -14,7 +14,7 @@ into a production-quality rendering path. Update this file as work lands; use
 | Phase 3 - Half-Immersed Camera Split | [x] Complete | 2026-05-09 | Import + timed Godot smokes + interactive main-scene launch | Per-pixel camera split now gates underwater combine; human visual judgement remains with the launched scene. |
 | Phase 4 - Snell's Window Rebuild | [ ] Pending | - | - | Must use correct above-water/sky source. |
 | Phase 5 - Wobble Rebuild | [ ] Pending | - | - | Screen-space FBM has been removed; final scale/art tuning still pending. |
-| Phase 6 - Rays And Caustics Rebuild | [ ] Pending | - | - | Separate ray and caustic gates. |
+| Phase 6 - Rays And Caustics Rebuild | [ ] In Progress | 2026-05-11 | Shader import + interactive visual pending | Rays rebuilt from the ground up; caustics still pending. |
 | Phase 7 - Main Scene Integration | [ ] Pending | - | - | Ocean Lab and `scenes/Godotwind.tscn` must share the path. |
 | Phase 8 - Performance And Quality Gate | [ ] Pending | - | - | Final docs update only after visual verification. |
 
@@ -311,11 +311,12 @@ Goal: stable shallow and deep underwater lighting.
 
 Tasks:
 
-- [ ] Research volumetric underwater light shafts and real-time caustic receiver
+- [x] Research volumetric underwater light shafts and real-time caustic receiver
   projection.
-- [ ] Implement rays as a low-resolution or full-resolution compositor effect
-  only if the Godot research supports the performance/quality trade-off.
-- [ ] Anchor rays to sun direction, dynamic surface entry points, and water-body
+- [x] Implement rays as a cheap full-resolution compositor estimate. The
+  2026-05-11 rebuild deletes the old per-pixel shell loop and uses two cheap
+  participating-media samples through a sparse light-space shaft field.
+- [x] Anchor rays to sun direction, projected surface entry, and water-body
   coverage.
 - [ ] Separate ray visibility from caustic visibility. Thin shallow water should
   not use the same gates as deep open water.
@@ -328,7 +329,9 @@ Tasks:
 
 Verification:
 
-- [ ] Shallow water rays should fade out or become subtle instead of glitching.
+- [x] Shallow water rays should fade out or become subtle instead of glitching.
+  The new gate requires camera depth and water-column length before rays can
+  appear.
 - [ ] Deep water rays should remain readable and stable during camera motion.
 - [ ] Caustics should not draw on dry/above-water receivers.
 - [x] Ocean Lab caustics toggle controls the compositor path only.

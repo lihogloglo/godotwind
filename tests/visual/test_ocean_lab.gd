@@ -107,7 +107,6 @@ var _waterline_quality_button: Button = null
 var _wireframe_button: Button = null
 var _uw_absorption_check: CheckBox = null
 var _uw_snell_check: CheckBox = null
-var _uw_rays_check: CheckBox = null
 var _uw_wobble_check: CheckBox = null
 var _uw_particles_check: CheckBox = null
 var _uw_meniscus_check: CheckBox = null
@@ -144,17 +143,16 @@ var _waterline_resolution_index: int = 2
 var _waterline_quality_tier: int = 1
 var _uw_absorption_enabled: bool = true
 var _uw_snell_enabled: bool = true
-var _uw_rays_enabled: bool = false
 var _uw_wobble_effect_enabled: bool = true
 var _uw_particles_enabled: bool = false
 var _uw_meniscus_enabled: bool = true
 var _uw_caustics_enabled: bool = false
-var _uw_ray_shell_count: int = 6
-var _uw_ray_shell_spacing_m: float = 16.0
-var _uw_ray_intensity: float = 1.8
-var _uw_ray_shell_start_m: float = 2.0
 var _uw_particle_noise_scale: float = 0.70
-var _uw_particle_density: float = 0.15
+var _uw_particle_density: float = 1.0
+var _uw_particles_quality: int = 2
+var _uw_particle_count: int = 4096
+var _uw_particle_size_scale: float = 4.0
+var _uw_particle_speed_scale: float = 1.5
 var _uw_particle_near_gate_m: float = 1.5
 var _uw_particle_far_gate_m: float = 95.0
 var _uw_profile_running: bool = false
@@ -378,10 +376,26 @@ func _setup_ocean() -> void:
 		_ocean.layers = WATER_RENDER_LAYER_MASK
 	if OceanManager.has_method("set_sea_spray_render_layers"):
 		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("set_underwater_particles_render_layers"):
+		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("set_underwater_particles_enabled"):
+		OceanManager.set_underwater_particles_enabled(_uw_particles_enabled)
+	if OceanManager.has_method("set_underwater_particles_quality"):
+		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
+	if OceanManager.has_method("set_underwater_particles_count"):
+		OceanManager.set_underwater_particles_count(_uw_particle_count)
+	if OceanManager.has_method("set_underwater_particles_size_scale"):
+		OceanManager.set_underwater_particles_size_scale(_uw_particle_size_scale)
+	if OceanManager.has_method("set_underwater_particles_speed_scale"):
+		OceanManager.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
+	if OceanManager.has_method("set_underwater_particles_opacity"):
+		OceanManager.set_underwater_particles_opacity(_uw_particle_density)
 	if OceanManager.has_method("is_sea_spray_enabled"):
 		_spray_enabled = OceanManager.is_sea_spray_enabled()
 	if OceanManager.has_method("get_sea_spray_quality"):
 		_spray_quality = OceanManager.get_sea_spray_quality()
+	if OceanManager.has_method("get_underwater_particles_quality"):
+		_uw_particles_quality = OceanManager.get_underwater_particles_quality()
 
 
 func _setup_prewater_capture() -> void:
@@ -634,19 +648,12 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 		_uw_snell_enabled = value
 		_push_underwater_effect_controls()
 	)
-	_uw_rays_check = _add_check(toggles, "Rays", _uw_rays_enabled, func(value: bool) -> void:
-		_uw_rays_enabled = value
-		_promote_waterline_quality_for_high_effect(value)
-		_push_underwater_effect_controls()
-		_refresh_control_labels()
-	)
 	_uw_wobble_check = _add_check(toggles, "Wobble", _uw_wobble_effect_enabled, func(value: bool) -> void:
 		_uw_wobble_effect_enabled = value
 		_push_underwater_effect_controls()
 	)
 	_uw_particles_check = _add_check(toggles, "Particles", _uw_particles_enabled, func(value: bool) -> void:
 		_uw_particles_enabled = value
-		_promote_waterline_quality_for_high_effect(value)
 		_push_underwater_effect_controls()
 		_refresh_control_labels()
 	)
@@ -677,20 +684,16 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 	_waterline_res_button.custom_minimum_size.x = 150.0
 	_waterline_quality_button.custom_minimum_size.x = 150.0
 
-	_add_slider(effects_tab, "ray count", 1.0, 8.0, float(_uw_ray_shell_count), func(val: float) -> void:
-		_uw_ray_shell_count = int(roundf(val))
+	_add_slider(effects_tab, "particle count", 0.0, 4096.0, float(_uw_particle_count), func(val: float) -> void:
+		_uw_particle_count = int(roundf(val / 128.0)) * 128
 		_push_underwater_effect_controls()
 	)
-	_add_slider(effects_tab, "ray dist", 4.0, 45.0, _uw_ray_shell_spacing_m, func(val: float) -> void:
-		_uw_ray_shell_spacing_m = val
+	_add_slider(effects_tab, "particle size", 0.25, 4.0, _uw_particle_size_scale, func(val: float) -> void:
+		_uw_particle_size_scale = val
 		_push_underwater_effect_controls()
 	)
-	_add_slider(effects_tab, "ray power", 0.0, 3.0, _uw_ray_intensity, func(val: float) -> void:
-		_uw_ray_intensity = val
-		_push_underwater_effect_controls()
-	)
-	_add_slider(effects_tab, "particle scale", 0.03, 0.70, _uw_particle_noise_scale, func(val: float) -> void:
-		_uw_particle_noise_scale = val
+	_add_slider(effects_tab, "particle speed", 0.0, 4.0, _uw_particle_speed_scale, func(val: float) -> void:
+		_uw_particle_speed_scale = val
 		_push_underwater_effect_controls()
 	)
 	_add_slider(effects_tab, "particle opacity", 0.0, 1.0, _uw_particle_density, func(val: float) -> void:
@@ -811,8 +814,6 @@ func _refresh_control_labels() -> void:
 		_uw_absorption_check.button_pressed = _uw_absorption_enabled
 	if _uw_snell_check:
 		_uw_snell_check.button_pressed = _uw_snell_enabled
-	if _uw_rays_check:
-		_uw_rays_check.button_pressed = _uw_rays_enabled
 	if _uw_wobble_check:
 		_uw_wobble_check.button_pressed = _uw_wobble_effect_enabled
 	if _uw_particles_check:
@@ -1043,7 +1044,7 @@ func _sync_waterline_sun() -> void:
 		return
 	if _waterline_effect.has_method("set_sun_direction"):
 		# DirectionalLight3D shines along -basis.z; +basis.z points back toward
-		# the sun in the sky. The underwater ray shader expects toward-sun.
+		# the sun in the sky. The underwater compositor expects toward-sun.
 		_waterline_effect.call("set_sun_direction", _sun.global_basis.z)
 	if _waterline_effect.has_method("set_sun_visibility"):
 		_waterline_effect.call("set_sun_visibility", clampf(_sun.light_energy / 1.4, 0.0, 1.0))
@@ -1059,19 +1060,22 @@ func _push_underwater_effect_controls() -> void:
 	if _waterline_effect.has_method("set_underwater_feature_enabled"):
 		_waterline_effect.call("set_underwater_feature_enabled", &"absorption_fog", _uw_absorption_enabled)
 		_waterline_effect.call("set_underwater_feature_enabled", &"snell", _uw_snell_enabled)
-		_waterline_effect.call("set_underwater_feature_enabled", &"rays", _uw_rays_enabled)
 		_waterline_effect.call("set_underwater_feature_enabled", &"wobble", _uw_wobble_effect_enabled)
-		_waterline_effect.call("set_underwater_feature_enabled", &"particles", _uw_particles_enabled)
+		_waterline_effect.call("set_underwater_feature_enabled", &"particles", false)
 		_waterline_effect.call("set_underwater_feature_enabled", &"meniscus_refraction", _uw_meniscus_enabled)
 		_waterline_effect.call("set_underwater_feature_enabled", &"caustics", _uw_caustics_enabled)
-	if _waterline_effect.has_method("set_underwater_ray_params"):
-		_waterline_effect.call(
-			"set_underwater_ray_params",
-			_uw_ray_shell_count,
-			_uw_ray_shell_spacing_m,
-			_uw_ray_intensity,
-			_uw_ray_shell_start_m
-		)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_enabled"):
+		OceanManager.set_underwater_particles_enabled(_uw_particles_enabled)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
+		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_count"):
+		OceanManager.set_underwater_particles_count(_uw_particle_count)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_size_scale"):
+		OceanManager.set_underwater_particles_size_scale(_uw_particle_size_scale)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_speed_scale"):
+		OceanManager.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_opacity"):
+		OceanManager.set_underwater_particles_opacity(_uw_particle_density)
 	if _waterline_effect.has_method("set_underwater_particle_params"):
 		_waterline_effect.call(
 			"set_underwater_particle_params",
@@ -1085,12 +1089,11 @@ func _push_underwater_effect_controls() -> void:
 func _set_underwater_profile_features(profile_name: String) -> void:
 	_uw_absorption_enabled = profile_name == "Absorption" or profile_name == "All On"
 	_uw_snell_enabled = profile_name == "Snell" or profile_name == "All On"
-	_uw_rays_enabled = profile_name == "Rays" or profile_name == "All On"
 	_uw_wobble_effect_enabled = profile_name == "Wobble" or profile_name == "All On"
 	_uw_particles_enabled = profile_name == "Particles" or profile_name == "All On"
 	_uw_meniscus_enabled = profile_name == "Meniscus/Refract" or profile_name == "All On"
 	_uw_caustics_enabled = profile_name == "Caustics" or profile_name == "All On"
-	if profile_name in ["Rays", "Particles", "Caustics", "All On"]:
+	if profile_name in ["Particles", "Caustics", "All On"]:
 		_waterline_quality_tier = 2
 	_push_underwater_effect_controls()
 	_refresh_control_labels()
@@ -1101,7 +1104,6 @@ func _underwater_profile_names() -> Array[String]:
 		"All Off",
 		"Absorption",
 		"Snell",
-		"Rays",
 		"Wobble",
 		"Particles",
 		"Caustics",
@@ -1159,6 +1161,14 @@ func _get_underwater_perf_snapshot() -> Dictionary:
 	return {}
 
 
+func _get_underwater_particles_status() -> Dictionary:
+	if OceanManager and OceanManager.has_method("get_underwater_particles_status"):
+		var status: Variant = OceanManager.get_underwater_particles_status()
+		if status is Dictionary:
+			return status
+	return {}
+
+
 func _get_prewater_perf_snapshot() -> Dictionary:
 	if _prewater_capture != null and _prewater_capture.has_method("get_perf_snapshot"):
 		var snapshot: Variant = _prewater_capture.call("get_perf_snapshot")
@@ -1179,6 +1189,7 @@ func _update_underwater_perf_label() -> void:
 	if _uw_perf_label == null:
 		return
 	var perf := _get_underwater_perf_snapshot()
+	var particle_status := _get_underwater_particles_status()
 	var prewater_perf := _get_prewater_perf_snapshot()
 	var wet_perf := _get_wet_perf_snapshot()
 	var copy_ms := float(perf.get("scene_copy_ms", 0.0))
@@ -1202,17 +1213,22 @@ func _update_underwater_perf_label() -> void:
 		lines.append("timestamp sample invalid")
 	lines.append("quality: %s  scene copy: %s" % [quality_name, "active" if scene_copy_active else "skipped"])
 	lines.append("")
-	lines.append("flags: fog=%s snell=%s rays=%s wobble=%s particles=%s caustics=%s refract=%s" % [
+	lines.append("flags: fog=%s snell=%s wobble=%s particles=%s caustics=%s refract=%s" % [
 		"on" if _uw_absorption_enabled else "off",
 		"on" if _uw_snell_enabled else "off",
-		"on" if _uw_rays_enabled else "off",
 		"on" if _uw_wobble_effect_enabled else "off",
 		"on" if _uw_particles_enabled else "off",
 		"on" if _uw_caustics_enabled else "off",
 		"on" if _uw_meniscus_enabled else "off",
 	])
-	lines.append("rays: %d shells / %.1fm / %.2fx" % [_uw_ray_shell_count, _uw_ray_shell_spacing_m, _uw_ray_intensity])
-	lines.append("particles: scale %.2f opacity %.2f" % [_uw_particle_noise_scale, _uw_particle_density])
+	lines.append("particles: %d motes size %.2fx speed %.2fx opacity %.2f emitting=%s depth=%.2fm" % [
+		int(particle_status.get("particle_count", 0)),
+		float(particle_status.get("size_scale", _uw_particle_size_scale)),
+		float(particle_status.get("speed_scale", _uw_particle_speed_scale)),
+		_uw_particle_density,
+		"on" if bool(particle_status.get("emitting", false)) else "off",
+		float(particle_status.get("camera_water_depth", 0.0)),
+	])
 	if _uw_profile_running:
 		var names := _underwater_profile_names()
 		lines.append("")
@@ -1321,6 +1337,15 @@ func _update_hud() -> void:
 		"yes" if bool(spray_status.get("emitting", false)) else "no",
 		int(spray_status.get("particle_candidates", 0)),
 		spray_energy,
+	])
+	var particle_status := _get_underwater_particles_status()
+	lines.append("uw_particles=%s  emitting=%s  motes=%d  size=%.2fx speed=%.2fx opacity=%.2f" % [
+		"on" if _uw_particles_enabled else "off",
+		"yes" if bool(particle_status.get("emitting", false)) else "no",
+		int(particle_status.get("particle_count", 0)),
+		float(particle_status.get("size_scale", _uw_particle_size_scale)),
+		float(particle_status.get("speed_scale", _uw_particle_speed_scale)),
+		_uw_particle_density,
 	])
 	lines.append("ocean_mesh=%s  wireframe=%s  waterline=%s/%s" % [
 		"on" if _ocean_surface_visible else "off",
@@ -1439,6 +1464,8 @@ func _toggle_mesh_mode() -> void:
 	_ocean = OceanManager.get_ocean_mesh()
 	if OceanManager.has_method("set_sea_spray_render_layers"):
 		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("set_underwater_particles_render_layers"):
+		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_refresh_control_labels()
@@ -1513,6 +1540,8 @@ func _cycle_quality() -> void:
 	_ocean = OceanManager.get_ocean_mesh()
 	if OceanManager.has_method("set_sea_spray_render_layers"):
 		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("set_underwater_particles_render_layers"):
+		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_refresh_control_labels()
@@ -1564,6 +1593,28 @@ func _cycle_waterline_quality() -> void:
 	_waterline_quality_tier = (_waterline_quality_tier + 1) % WL_QUALITY_NAMES.size()
 	_push_underwater_effect_controls()
 	_refresh_control_labels()
+
+
+func _cycle_underwater_particles_quality() -> void:
+	_uw_particles_quality = (_uw_particles_quality + 1) % 4
+	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
+		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
+	_refresh_control_labels()
+
+
+func _get_underwater_particles_quality_name() -> String:
+	if OceanManager and OceanManager.has_method("get_underwater_particles_quality_name"):
+		return OceanManager.get_underwater_particles_quality_name()
+	match _uw_particles_quality:
+		0:
+			return "Off"
+		1:
+			return "Low"
+		2:
+			return "Medium"
+		3:
+			return "High"
+	return "Unknown"
 
 
 func _toggle_wireframe_debug() -> void:

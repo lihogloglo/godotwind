@@ -8,6 +8,7 @@ extends Node
 
 const CS := preload("res://src/core/coordinate_system.gd")
 const OceanSprayScript := preload("res://src/core/water/ocean_spray.gd")
+const UnderwaterParticulatesScript := preload("res://src/core/water/underwater_particulates.gd")
 
 # Project settings paths
 const SETTING_ENABLED := "ocean/enabled"
@@ -64,6 +65,15 @@ func _get_shore_mask_path() -> String:
 ## 0 = Off, 1 = Low, 2 = Medium, 3 = High.
 @export_range(0, 3) var sea_spray_quality: int = 2
 
+@export_group("Underwater Particles")
+@export var underwater_particles_enabled: bool = false
+## 0 = Off, 1 = Low, 2 = Medium, 3 = High.
+@export_range(0, 3) var underwater_particles_quality: int = 2
+@export_range(0.0, 2.0) var underwater_particles_opacity: float = 1.0
+@export_range(0, 8192) var underwater_particles_count: int = 4096
+@export_range(0.25, 4.0) var underwater_particles_size_scale: float = 4.0
+@export_range(0.0, 4.0) var underwater_particles_speed_scale: float = 1.5
+
 # System state
 var _system_initialized: bool = false
 var _system_enabled: bool = false
@@ -77,6 +87,7 @@ var _weather_last_wind_dir_xz: Vector2 = Vector2(1.0, 1.0).normalized()
 # Internal state
 var _ocean_mesh: OceanMesh = null
 var _ocean_spray: OceanSpray = null
+var _underwater_particulates: UnderwaterParticulates = null
 var _shore_mask: ShoreMaskGenerator = null
 var _terrain: Terrain3D = null
 var _camera: Camera3D = null
@@ -223,6 +234,7 @@ func _deferred_init() -> void:
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
 	_update_shader_parameters()
 	_setup_spray_layer()
+	_setup_underwater_particulates_layer()
 	# Shore mask — vertex dampening only (CREST OceanDepthCache pattern).
 	# Fragment-side shore visuals remain depth-driven (water_thickness).
 	_load_shore_mask()
@@ -293,6 +305,8 @@ func _process(delta: float) -> void:
 		_ocean_mesh.update_position(new_pos)
 		if _ocean_spray:
 			_ocean_spray.set_camera(_camera)
+		if _underwater_particulates:
+			_underwater_particulates.set_camera(_camera)
 
 	# Drive FFT pipeline updates (rate-limited)
 	if _wave_generator and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
@@ -308,6 +322,8 @@ func _process(delta: float) -> void:
 		_ocean_spray.set_sea_level(sea_level)
 		_ocean_spray.set_wave_scale(wave_scale)
 		_ocean_spray.set_ocean_time(_time)
+	if _underwater_particulates:
+		_underwater_particulates.set_sea_level(sea_level)
 
 	# Push sun direction to the ocean surface shader for SSS backlight.
 	# Scan the scene tree at most once every 60 frames so we notice late-spawned
@@ -525,6 +541,34 @@ func _push_ocean_time_uniform() -> void:
 	mat.set_shader_parameter("ocean_time", _time)
 	if _ocean_spray:
 		_ocean_spray.set_ocean_time(_time)
+
+
+func _setup_underwater_particulates_layer() -> void:
+	if _underwater_particulates != null:
+		return
+	_underwater_particulates = UnderwaterParticulatesScript.new()
+	_underwater_particulates.name = "UnderwaterParticulates"
+	add_child(_underwater_particulates)
+	if _camera:
+		_underwater_particulates.set_camera(_camera)
+	_underwater_particulates.enabled = underwater_particles_enabled
+	_underwater_particulates.quality_tier = clampi(underwater_particles_quality, 0, 3) as UnderwaterParticulates.QualityTier
+	_underwater_particulates.particle_count = underwater_particles_count
+	_underwater_particulates.size_scale = underwater_particles_size_scale
+	_underwater_particulates.speed_scale = underwater_particles_speed_scale
+	_underwater_particulates.opacity = underwater_particles_opacity
+	_underwater_particulates.set_sea_level(sea_level)
+	_underwater_particulates.set_current(_weather_last_wind_t, _weather_last_wind_dir_xz)
+
+
+func _dispose_underwater_particulates_layer() -> void:
+	var particles := _underwater_particulates
+	_underwater_particulates = null
+	if particles == null:
+		return
+	if particles.get_parent() == self:
+		remove_child(particles)
+	particles.queue_free()
 
 
 func _setup_spray_layer() -> void:
@@ -948,10 +992,14 @@ func set_camera(camera: Camera3D) -> void:
 	_auto_find_camera = false
 	if _ocean_spray:
 		_ocean_spray.set_camera(camera)
+	if _underwater_particulates:
+		_underwater_particulates.set_camera(camera)
 
 
 func set_sea_level(level: float) -> void:
 	sea_level = level
+	if _underwater_particulates:
+		_underwater_particulates.set_sea_level(sea_level)
 	if not _system_enabled:
 		return
 	if _terrain and _shore_mask:
@@ -1223,6 +1271,89 @@ func set_sea_spray_render_layers(mask: int) -> void:
 		_ocean_spray.set_render_layers(mask)
 
 
+func set_underwater_particles_enabled(enabled: bool) -> void:
+	underwater_particles_enabled = enabled
+	if _underwater_particulates:
+		_underwater_particulates.enabled = enabled
+
+
+func is_underwater_particles_enabled() -> bool:
+	return underwater_particles_enabled
+
+
+func set_underwater_particles_quality(quality: int) -> void:
+	underwater_particles_quality = clampi(quality, 0, 3)
+	if _underwater_particulates:
+		_underwater_particulates.quality_tier = underwater_particles_quality as UnderwaterParticulates.QualityTier
+		underwater_particles_count = _underwater_particulates.particle_count
+
+
+func get_underwater_particles_quality() -> int:
+	return underwater_particles_quality
+
+
+func get_underwater_particles_quality_name() -> String:
+	match underwater_particles_quality:
+		0:
+			return "Off"
+		1:
+			return "Low"
+		2:
+			return "Medium"
+		3:
+			return "High"
+	return "Unknown"
+
+
+func set_underwater_particles_opacity(value: float) -> void:
+	underwater_particles_opacity = clampf(value, 0.0, 2.0)
+	if _underwater_particulates:
+		_underwater_particulates.opacity = underwater_particles_opacity
+
+
+func set_underwater_particles_count(value: int) -> void:
+	underwater_particles_count = clampi(value, 0, 8192)
+	if _underwater_particulates:
+		_underwater_particulates.particle_count = underwater_particles_count
+
+
+func set_underwater_particles_size_scale(value: float) -> void:
+	underwater_particles_size_scale = clampf(value, 0.25, 4.0)
+	if _underwater_particulates:
+		_underwater_particulates.size_scale = underwater_particles_size_scale
+
+
+func set_underwater_particles_speed_scale(value: float) -> void:
+	underwater_particles_speed_scale = clampf(value, 0.0, 4.0)
+	if _underwater_particulates:
+		_underwater_particulates.speed_scale = underwater_particles_speed_scale
+
+
+func get_underwater_particles_status() -> Dictionary:
+	var status := {
+		"enabled": underwater_particles_enabled,
+		"quality": underwater_particles_quality,
+		"quality_name": get_underwater_particles_quality_name(),
+		"initialized": _underwater_particulates != null,
+		"visible": false,
+		"emitting": false,
+		"particle_count": underwater_particles_count,
+		"opacity": underwater_particles_opacity,
+		"size_scale": underwater_particles_size_scale,
+		"speed_scale": underwater_particles_speed_scale,
+		"camera_water_depth": 0.0,
+	}
+	if _underwater_particulates:
+		status.merge(_underwater_particulates.get_runtime_status(), true)
+		status["quality_name"] = get_underwater_particles_quality_name()
+	return status
+
+
+func set_underwater_particles_render_layers(mask: int) -> void:
+	if _underwater_particulates:
+		_underwater_particulates.set_render_layers(mask)
+
+
 func get_shore_mask_generator() -> ShoreMaskGenerator:
 	return _shore_mask
 
@@ -1278,6 +1409,7 @@ func force_initialize() -> void:
 
 func release_runtime_resources() -> void:
 	_dispose_spray_layer()
+	_dispose_underwater_particulates_layer()
 	_shutdown_fft_pipeline()
 	_dispose_ocean_mesh()
 	if _shore_mask:
@@ -1339,6 +1471,7 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH and _wave_generator:
 		_update_cascade_scales()
 	_setup_spray_layer()
+	_setup_underwater_particulates_layer()
 	if _ocean_spray:
 		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
 	reset_weather()
@@ -1373,6 +1506,7 @@ func set_water_quality(quality: int) -> void:
 	if target_quality == OceanMesh.QualityMode.HIGH and not _wave_generator:
 		_init_fft_pipeline()
 		_setup_spray_layer()
+		_setup_underwater_particulates_layer()
 	elif target_quality != OceanMesh.QualityMode.HIGH and _wave_generator:
 		_shutdown_fft_pipeline()
 	if _ocean_spray:
@@ -1660,17 +1794,19 @@ func reset_weather() -> void:
 
 
 func _update_spray_weather(wind_t: float, wind_dir_xz: Vector2) -> void:
-	if _ocean_spray == null:
-		return
-	_ocean_spray.enabled = sea_spray_enabled
-	_ocean_spray.quality_tier = clampi(sea_spray_quality, 0, 3) as OceanSpray.QualityTier
-	_ocean_spray.set_weather(wind_t, wind_dir_xz)
+	if _ocean_spray:
+		_ocean_spray.enabled = sea_spray_enabled
+		_ocean_spray.quality_tier = clampi(sea_spray_quality, 0, 3) as OceanSpray.QualityTier
+		_ocean_spray.set_weather(wind_t, wind_dir_xz)
+	if _underwater_particulates:
+		_underwater_particulates.set_current(wind_t, wind_dir_xz)
 
 
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
 	_dispose_spray_layer()
+	_dispose_underwater_particulates_layer()
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()
 

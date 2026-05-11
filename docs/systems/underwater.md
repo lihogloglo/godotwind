@@ -9,9 +9,8 @@ final path.
 
 **Active effects:** `WaterlineCompositorEffect` owns the underwater path, but
 effects are quality-gated. Low quality is absorption/path fog plus
-meniscus/refraction, medium adds Snell-window transmission, FFT-normal
-wobble, and the cheap underwater ray shafts, and high adds sparse particulate
-and caustics. As of
+meniscus/refraction, medium adds Snell-window transmission and FFT-normal
+wobble, and high adds sparse particulate and caustics. As of
 2026-05-11, user Ocean Lab testing still reports no visible underwater
 particles or caustics, so those high-tier effects are not accepted art yet.
 
@@ -101,7 +100,7 @@ Reference: `inspos/RafaelsShaderPack/Shaders/DIVE.omwfx` (OpenMW omwfx format).
 | Voronoi caustics | `ComputeCaustics()` + `GetCausticEdge()` | Compositor-owned. Current caustics use paddy-exe's sampled noise texture with panned light-projected UVs in `waterline_probe.glsl`, not DIVE's procedural voronoi. |
 | Beer-Lambert absorption | Lines 424-435 | Ported into the compositor path with per-channel optical constants from `WaterSurfaceState`. |
 | Screen wobble | Lines 397-400 | Ported via the Godotwind water contract. The compositor samples active FFT normals at world-space water-surface XZ. |
-| Shell-based light rays | Lines 477-500 | Compositor-owned. `waterline_probe.glsl` samples the underwater segment of the view ray, projects each sample back to the dynamic water surface along the sun vector, and evaluates sparse waterline-anchored shafts in Godotwind meters/Y-up. |
+| Underwater light rays | Lines 477-500 | Removed from the production shader on 2026-05-11. The compositor no longer exposes underwater ray feature flags, parameters, profile entries, or Ocean Lab controls. |
 | Backscattering | Lines 509-520 | Partially ported. Path fog and water-color convergence live in the compositor; normal-facing surface backscatter remains deferred. |
 | Water boundary highlight | Custom (not DIVE) | Not ported. Deferred. |
 | Anti-banding dithering | Lines 524-527 | Not ported. Deferred. |
@@ -118,8 +117,8 @@ Use Ocean Lab for current underwater checks:
 
 Relevant controls live under the `Underwater` tab: feature toggles, waterline
 debug modes, waterline resolution, `WL Q`, and the GPU timing/profile panel.
-Use `WL Q: Medium` or higher when checking rays. Use `WL Q: High` when checking
-particles or caustics; medium intentionally masks those heavier effects for cost.
+Use `WL Q: High` when checking particles or caustics; medium intentionally
+masks those heavier effects for cost.
 
 Do not use automated screenshot or auto-capture harnesses for final visual
 verification. Launch interactively and inspect while piloting the camera.
