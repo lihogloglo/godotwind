@@ -10,6 +10,7 @@ extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/wet_compositor.glsl"
 const MAX_CASCADES := 8
+const MAX_REASONABLE_TIMESTAMP_MS := 100.0
 
 var _depth_sampler: RID
 var _linear_sampler: RID
@@ -20,6 +21,7 @@ var _fallback_normal_texture: Texture2D
 var _fallback_normal_rid: RID
 var _dummy_displacement_rid: RID
 var _state_buffer: RID
+var _state_buffer_size: int = 0
 
 var _sea_level: float = 0.0
 var _wave_scale: float = 1.0
@@ -38,6 +40,12 @@ var _retained_wetness_strength: float = 0.35
 var _submerged_optics_depth: float = 0.10
 var _debug_mode: int = 0
 var _has_water_state: bool = false
+var _last_perf_frame: int = -1
+var _last_perf_snapshot: Dictionary = {
+	"wet_compositor_ms": 0.0,
+	"frame": -1,
+	"timing_valid": false,
+}
 var _render_logged: bool = false
 
 
@@ -78,6 +86,7 @@ func on_effect_removed() -> void:
 			if rid.is_valid():
 				rd.free_rid(rid)
 		_state_buffer = RID()
+		_state_buffer_size = 0
 		_depth_sampler = RID()
 		_linear_sampler = RID()
 		_dummy_displacement_rid = RID()
@@ -181,6 +190,11 @@ func set_debug_mode(mode: int) -> void:
 	_debug_mode = clampi(mode, 0, 5)
 
 
+func get_wet_perf_snapshot() -> Dictionary:
+	_refresh_timestamp_snapshot()
+	return _last_perf_snapshot.duplicate()
+
+
 func sync_from_water_state(state: WaterSurfaceState) -> void:
 	if state == null:
 		_has_water_state = false
@@ -206,6 +220,7 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
 	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT:
 		return
+	_refresh_timestamp_snapshot()
 	if not _render_logged:
 		_render_logged = true
 		Log.info("water", "WetCompositorEffect: render callback fired enabled=%s pipeline=%s water=%s" % [
@@ -246,9 +261,8 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 
 	var matrix_data := _build_state_buffer_data(scene_data)
 	var matrix_bytes := matrix_data.to_byte_array()
-	if _state_buffer.is_valid():
-		rd.free_rid(_state_buffer)
-	_state_buffer = rd.storage_buffer_create(matrix_bytes.size(), matrix_bytes)
+	if not _ensure_state_buffer(matrix_bytes):
+		return
 
 	var pc := PackedFloat32Array()
 	pc.append(float(size.x))
@@ -327,6 +341,20 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	rd.free_rid(uniform_set)
 
 
+func _ensure_state_buffer(matrix_bytes: PackedByteArray) -> bool:
+	var required_size: int = matrix_bytes.size()
+	if required_size <= 0:
+		return false
+	if not _state_buffer.is_valid() or _state_buffer_size != required_size:
+		if _state_buffer.is_valid():
+			rd.free_rid(_state_buffer)
+		_state_buffer = rd.storage_buffer_create(required_size, matrix_bytes)
+		_state_buffer_size = required_size if _state_buffer.is_valid() else 0
+		return _state_buffer.is_valid()
+	rd.buffer_update(_state_buffer, 0, required_size, matrix_bytes)
+	return true
+
+
 func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Array:
 	var data := PackedFloat32Array()
 	var inv_proj: Projection = scene_data.get_cam_projection().inverse()
@@ -371,3 +399,52 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(0.0)
 	data.append(0.0)
 	return data
+
+
+func _refresh_timestamp_snapshot() -> void:
+	if rd == null:
+		return
+	var frame: int = rd.get_captured_timestamps_frame()
+	if frame == _last_perf_frame:
+		return
+	_last_perf_frame = frame
+
+	var wet_ms: float = _timestamp_pair_delta_ms(
+		"godotwind_wet_compositor_begin",
+		"godotwind_wet_compositor_end"
+	)
+	var timing_valid: bool = wet_ms >= 0.0
+	wet_ms = maxf(wet_ms, 0.0)
+	_last_perf_snapshot = {
+		"wet_compositor_ms": wet_ms,
+		"frame": frame,
+		"timing_valid": timing_valid,
+	}
+
+
+func _timestamp_pair_delta_ms(begin_name: String, end_name: String) -> float:
+	if rd == null:
+		return -1.0
+	var pending_gpu: int = -1
+	var last_valid_ms: float = -1.0
+	var count: int = rd.get_captured_timestamps_count()
+	for i: int in count:
+		var name: String = rd.get_captured_timestamp_name(i)
+		if name == begin_name:
+			pending_gpu = rd.get_captured_timestamp_gpu_time(i)
+		elif name == end_name and pending_gpu >= 0:
+			var gpu_ms: float = _timestamp_delta_ms(pending_gpu, rd.get_captured_timestamp_gpu_time(i))
+			if _timestamp_delta_is_plausible(gpu_ms):
+				last_valid_ms = gpu_ms
+			pending_gpu = -1
+	return last_valid_ms
+
+
+func _timestamp_delta_is_plausible(gpu_ms: float) -> bool:
+	return gpu_ms >= 0.0 and gpu_ms <= MAX_REASONABLE_TIMESTAMP_MS
+
+
+func _timestamp_delta_ms(begin_us: int, end_us: int) -> float:
+	if begin_us < 0 or end_us < 0 or end_us < begin_us:
+		return -1.0
+	return float(end_us - begin_us) / 1000.0

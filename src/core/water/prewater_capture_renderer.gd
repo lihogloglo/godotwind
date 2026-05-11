@@ -127,6 +127,19 @@ func get_source_size() -> Vector2i:
 	return _capture_effect.get_source_size()
 
 
+func get_perf_snapshot() -> Dictionary:
+	if _capture_effect == null or not _capture_effect.has_method("get_capture_perf_snapshot"):
+		return {}
+	var snapshot: Variant = _capture_effect.call("get_capture_perf_snapshot")
+	if snapshot is Dictionary:
+		var result := (snapshot as Dictionary).duplicate()
+		result["capture_active"] = _capture_active
+		result["resolution_scale"] = _resolution_scale
+		result["activation_fade"] = _activation_fade
+		return result
+	return {}
+
+
 func push_to_waterline_effect(effect: Object) -> bool:
 	if effect == null:
 		return false

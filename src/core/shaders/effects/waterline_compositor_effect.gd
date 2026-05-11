@@ -18,6 +18,14 @@ const FEATURE_WOBBLE := 8
 const FEATURE_PARTICLES := 16
 const FEATURE_MENISCUS_REFRACTION := 32
 const FEATURE_CAUSTICS := 64
+const QUALITY_LOW := 0
+const QUALITY_MEDIUM := 1
+const QUALITY_HIGH := 2
+const QUALITY_LOW_FEATURE_FLAGS := FEATURE_ABSORPTION_FOG | FEATURE_MENISCUS_REFRACTION
+const QUALITY_MEDIUM_FEATURE_FLAGS := QUALITY_LOW_FEATURE_FLAGS | FEATURE_SNELL | FEATURE_RAYS | FEATURE_WOBBLE
+const QUALITY_HIGH_FEATURE_FLAGS := QUALITY_MEDIUM_FEATURE_FLAGS | FEATURE_PARTICLES | FEATURE_CAUSTICS
+const RECEIVER_SOURCE_CAPTURE_DIRECT := 0
+const RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER := 1
 const MAX_REASONABLE_TIMESTAMP_MS := 100.0
 
 var _depth_sampler: RID
@@ -59,23 +67,20 @@ var _near_water_activation_distance: float = 140.0
 var _near_water_fade_start_distance: float = 80.0
 var _sun_direction: Vector3 = Vector3(0.25, 0.85, 0.45).normalized()
 var _sun_visibility: float = 1.0
-var _underwater_feature_flags: int = (
-	FEATURE_ABSORPTION_FOG
-	| FEATURE_SNELL
-	| FEATURE_RAYS
-	| FEATURE_WOBBLE
-	| FEATURE_PARTICLES
-	| FEATURE_CAUSTICS
-)
-var _ray_shell_count: int = 6
-var _ray_shell_spacing_m: float = 16.0
-var _ray_intensity: float = 1.8
-var _ray_shell_start_m: float = 2.0
+var _quality_tier: int = QUALITY_MEDIUM
+var _receiver_source_mode: int = RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER
+var _user_underwater_feature_flags: int = QUALITY_HIGH_FEATURE_FLAGS
+var _underwater_feature_flags: int = QUALITY_MEDIUM_FEATURE_FLAGS
+var _ray_shell_count: int = 4
+var _ray_shell_spacing_m: float = 14.0
+var _ray_intensity: float = 1.65
+var _ray_shell_start_m: float = 0.45
 var _particle_noise_scale: float = 0.70
 var _particle_density: float = 0.15
 var _particle_near_gate_m: float = 1.5
 var _particle_far_gate_m: float = 95.0
 var _last_perf_frame: int = -1
+var _last_scene_copy_active: bool = false
 var _last_perf_snapshot: Dictionary = {
 	"scene_copy_ms": 0.0,
 	"probe_ms": 0.0,
@@ -265,9 +270,10 @@ func set_underwater_feature_enabled(feature_name: StringName, enabled: bool) -> 
 	if bit == 0:
 		return
 	if enabled:
-		_underwater_feature_flags |= bit
+		_user_underwater_feature_flags |= bit
 	else:
-		_underwater_feature_flags &= ~bit
+		_user_underwater_feature_flags &= ~bit
+	_refresh_effective_feature_flags()
 
 
 func is_underwater_feature_enabled(feature_name: StringName) -> bool:
@@ -275,11 +281,27 @@ func is_underwater_feature_enabled(feature_name: StringName) -> bool:
 	return bit != 0 and (_underwater_feature_flags & bit) != 0
 
 
+func set_quality_tier(tier: int) -> void:
+	var next_tier := clampi(tier, QUALITY_LOW, QUALITY_HIGH)
+	if _quality_tier == next_tier:
+		return
+	_quality_tier = next_tier
+	_refresh_effective_feature_flags()
+
+
+func get_quality_tier() -> int:
+	return _quality_tier
+
+
+func set_receiver_source_mode(mode: int) -> void:
+	_receiver_source_mode = clampi(mode, RECEIVER_SOURCE_CAPTURE_DIRECT, RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER)
+
+
 func set_underwater_ray_params(shell_count: int, shell_spacing_m: float, intensity: float, shell_start_m: float) -> void:
 	_ray_shell_count = clampi(shell_count, 1, 8)
 	_ray_shell_spacing_m = clampf(shell_spacing_m, 1.0, 80.0)
 	_ray_intensity = clampf(intensity, 0.0, 4.0)
-	_ray_shell_start_m = clampf(shell_start_m, 1.0, 80.0)
+	_ray_shell_start_m = clampf(shell_start_m, 0.10, 80.0)
 
 
 func set_underwater_particle_params(noise_scale: float, density: float, near_gate_m: float, far_gate_m: float) -> void:
@@ -312,6 +334,20 @@ func _feature_bit(feature_name: StringName) -> int:
 			return FEATURE_CAUSTICS
 		_:
 			return 0
+
+
+func _refresh_effective_feature_flags() -> void:
+	_underwater_feature_flags = _user_underwater_feature_flags & _quality_feature_mask(_quality_tier)
+
+
+func _quality_feature_mask(tier: int) -> int:
+	match tier:
+		QUALITY_LOW:
+			return QUALITY_LOW_FEATURE_FLAGS
+		QUALITY_HIGH:
+			return QUALITY_HIGH_FEATURE_FLAGS
+		_:
+			return QUALITY_MEDIUM_FEATURE_FLAGS
 
 
 func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i) -> void:
@@ -382,9 +418,12 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	if not color_image.is_valid() or not depth_texture.is_valid():
 		return
 	var scene_copy_valid := _needs_scene_color_copy(scene_data) and _copy_scene_color(color_image, size)
+	_last_scene_copy_active = scene_copy_valid
 	var external_source_color_valid := _external_source_color_rid.is_valid() and rd.texture_is_valid(_external_source_color_rid)
 	var external_source_depth_valid := _external_source_depth_rid.is_valid() and rd.texture_is_valid(_external_source_depth_rid)
 	var has_external_source := external_source_color_valid and external_source_depth_valid and _external_source_size != Vector2i.ZERO
+	if not has_external_source and _debug_mode == 0 and scene_data.get_cam_transform().origin.y > _camera_water_level + 0.02:
+		return
 	if not has_external_source:
 		if not _missing_source_warning_logged:
 			_missing_source_warning_logged = true
@@ -393,8 +432,6 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var source_depth_rid := _external_source_depth_rid if external_source_depth_valid else RID()
 	var source_color_valid := has_external_source
 	var source_depth_valid := has_external_source
-	if not has_external_source and _debug_mode == 0 and scene_data.get_cam_transform().origin.y > _camera_water_level + 0.02:
-		return
 	var source_log_key := "%s/%s/%s/%s" % [
 		has_external_source,
 		source_color_valid,
@@ -431,7 +468,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(float(_underwater_feature_flags))
 	pc.append(_camera_water_level)
 	pc.append(1.0 if _normal_rid.is_valid() else 0.0)
-	pc.append(0.0)
+	pc.append(float(_receiver_source_mode))
 	pc.append(float(_ray_shell_count))
 	pc.append(_ray_shell_spacing_m)
 	pc.append(_ray_intensity)
@@ -723,7 +760,12 @@ func _refresh_timestamp_snapshot() -> void:
 		"total_ms": scene_copy_ms + probe_ms,
 		"frame": frame,
 		"timing_valid": timing_valid,
+		"quality_tier": _quality_tier,
+		"receiver_source_mode": _receiver_source_mode,
+		"user_feature_flags": _user_underwater_feature_flags,
 		"feature_flags": _underwater_feature_flags,
+		"scene_copy_active": _last_scene_copy_active,
+		"source_size": _external_source_size,
 		"ray_shell_count": _ray_shell_count,
 		"ray_shell_spacing_m": _ray_shell_spacing_m,
 		"ray_intensity": _ray_intensity,

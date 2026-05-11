@@ -1600,6 +1600,29 @@ func _get_active_camera() -> Camera3D:
 	return fly_camera
 
 
+func _get_active_world_environment() -> WorldEnvironment:
+	if _env_controls and _env_controls.show_sky and _env_controls.sky_manager:
+		var sky_world_env: WorldEnvironment = _env_controls.sky_manager.get_world_environment()
+		if sky_world_env and sky_world_env.is_inside_tree():
+			return sky_world_env
+	for child in get_children():
+		if child is WorldEnvironment:
+			return child as WorldEnvironment
+	return null
+
+
+func _get_active_sun() -> DirectionalLight3D:
+	if _env_controls and _env_controls.show_sky and _env_controls.sky_manager:
+		var sky_sun: DirectionalLight3D = _env_controls.sky_manager.get_sun_light()
+		if sky_sun and sky_sun.is_inside_tree():
+			return sky_sun
+	if _env_controls:
+		var fallback_light: DirectionalLight3D = _env_controls.get_fallback_light()
+		if fallback_light and fallback_light.is_inside_tree():
+			return fallback_light
+	return _find_sun_light()
+
+
 ## Setup visibility toggle checkboxes and foldable panel system
 func _setup_visibility_toggles() -> void:
 	# Create environment controls (extracted in Session 5)
@@ -1621,7 +1644,10 @@ func _setup_visibility_toggles() -> void:
 		"log": _log,
 		"add_child": add_child,
 		"get_active_camera": _get_active_camera,
+		"get_active_world_environment": _get_active_world_environment,
+		"get_active_sun": _get_active_sun,
 		"get_terrain": func() -> Terrain3D: return terrain_3d,
+		"get_viewport": get_viewport,
 		"update_stats": _update_stats,
 	}
 	_ocean_controls = OceanControlsScript.new(ocean_callbacks)
@@ -3194,6 +3220,10 @@ func _process(delta: float) -> void:
 	# Update weather rendering
 	if _weather_controls:
 		_weather_controls.process(delta)
+
+	# Update ocean waterline compositor/capture path
+	if _ocean_controls:
+		_ocean_controls.process(delta)
 
 	# Update horizon map sun direction
 	if _horizon_map_manager:

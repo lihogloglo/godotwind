@@ -13,9 +13,8 @@ Use one production underwater path:
 - `WaterlineCompositorEffect` owns waterline composition, submerged receiver
   refraction, underwater camera optics, Snell's window, fog/absorption,
   backscatter, rays, wobble, caustics, and particles.
-- `UnderwaterVolume` is diagnostic/support only. It no longer draws caustics;
-  it is not the production owner for the underwater view or half-immersed
-  camera split.
+- The old `UnderwaterVolume` diagnostic/support path was deleted on
+  2026-05-11. It is not a production owner for underwater rendering.
 
 Legacy files from the old compute/quad attempts must remain deleted. They were
 useful experiments, but keeping them in-tree makes it too easy for a later
@@ -31,13 +30,13 @@ session to patch the wrong architecture.
 | `src/core/water/prewater_capture_renderer.gd` | Production support | Owns receiver-only SubViewport capture and exposes texture RIDs to the compositor. |
 | `src/core/shaders/effects/prewater_capture_effect.gd` + `prewater_capture.glsl` | Production support | Copies receiver color/depth from the capture viewport into sampleable RD textures. |
 | `src/core/shaders/effects/waterline_compositor_effect.gd` + `waterline_probe.glsl` | Production, needs rebuild phases | Correct owner for the waterline and underwater camera path, but Snell/rays/wobble need the later overhaul phases. |
-| `src/core/water/underwater_volume.gd` + `underwater_volume.gdshader` | Diagnostic/support | Useful for visualizing underwater slab/depth/wobble behavior. It must not own caustics or production camera optics. |
 | `tests/visual/test_ocean_lab.gd` | Production lab | Interactive lab for the compositor, prewater capture, debug views, and perf snapshots. |
-| `tests/visual/test_underwater.gd` | Diagnostic/reference | Legacy visual scene now limited to `UnderwaterVolume` diagnosis; not a production path. |
 | `src/core/shaders/compute/underwater.glsl` | Deleted | Retired compute compositor shader. |
 | `src/core/shaders/effects/underwater_compositor_effect.gd` | Deleted | Retired ShaderManager-loaded compositor wrapper. |
 | `src/core/water/shaders/underwater.gdshader` | Deleted | Retired full-screen quad shader. |
 | `src/core/water/underwater_effect.gd` | Deleted | Retired quad script. |
+| `src/core/water/underwater_volume.gd` + `underwater_volume.gdshader` | Deleted | Retired diagnostic spatial-volume path, deleted 2026-05-11. |
+| `tests/visual/test_underwater.gd` | Deleted | Retired standalone diagnostic scene for the removed volume, deleted 2026-05-11. |
 
 ## Research Notes
 

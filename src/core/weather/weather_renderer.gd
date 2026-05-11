@@ -283,8 +283,9 @@ func _apply_sunshine_clouds(driver: Node, result: WeatherTypes.WeatherResult) ->
 static func get_cloud_preset_for_coverage(cloud_coverage: float) -> Dictionary:
 	return {
 		"coverage": cloud_coverage,
-		# Density: clear=0.10, fully overcast/storm=0.35. Plugin safe range ~0.02-1.0.
-		"density": lerpf(0.10, 0.35, cloud_coverage),
+		# Density now uses the plugin's full authored range; the previous 0.35
+		# ceiling made overcast and storm clouds read thin and wispy.
+		"density": lerpf(0.14, 1.0, cloud_coverage),
 		# Sharpness: clear=0.8 (crisp edges), overcast=0.5 (soft diffuse)
 		"sharpness": lerpf(0.8, 0.5, cloud_coverage),
 	}

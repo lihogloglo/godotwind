@@ -12,7 +12,6 @@ const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const BuoyancyBodyScript := preload("res://src/core/water/buoyancy_body.gd")
 const BuoyancyProbeScript := preload("res://src/core/water/buoyancy_probe.gd")
-const UnderwaterVolumeScript := preload("res://src/core/water/underwater_volume.gd")
 const PrewaterCaptureRendererScript := preload("res://src/core/water/prewater_capture_renderer.gd")
 const WetCompositorScript := preload("res://src/core/shaders/effects/wet_compositor_effect.gd")
 const WaterlineCompositorScript := preload("res://src/core/shaders/effects/waterline_compositor_effect.gd")
@@ -39,12 +38,6 @@ const DEBUG_MODE_NAMES: Array[String] = [
 	"Normal.y",
 	"SSS scatter",
 ]
-const UW_DEBUG_MODE_NAMES: Array[String] = [
-	"Final",
-	"Slab Mask",
-	"Depth/Y",
-	"Big Wobble",
-]
 const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Final",
 	"Flat",
@@ -62,6 +55,11 @@ const WL_DEBUG_MODE_NAMES: Array[String] = [
 	"Body Coverage",
 	"Final Mask",
 	"Wobble Guard",
+]
+const WL_QUALITY_NAMES: Array[String] = [
+	"Low",
+	"Medium",
+	"High",
 ]
 const WET_DEBUG_MODE_NAMES: Array[String] = [
 	"Off",
@@ -85,7 +83,6 @@ var _terrain: Terrain3D = null
 var _horizon_mgr: HorizonMapManager = null
 var _sun: DirectionalLight3D = null
 var _ocean: OceanMesh = null
-var _underwater_volume: UnderwaterVolume = null
 var _prewater_capture: PrewaterCaptureRenderer = null
 var _waterline_compositor: Compositor = null
 var _wet_effect: PostProcessEffect = null
@@ -102,14 +99,11 @@ var _wet_debug_button: Button = null
 var _quality_button: Button = null
 var _spray_button: Button = null
 var _spray_quality_button: Button = null
-var _underwater_button: Button = null
-var _underwater_mode_button: Button = null
-var _uw_wobble_button: Button = null
 var _ocean_surface_button: Button = null
-var _uw_debug_button: Button = null
 var _waterline_button: Button = null
 var _waterline_debug_button: Button = null
 var _waterline_res_button: Button = null
+var _waterline_quality_button: Button = null
 var _wireframe_button: Button = null
 var _uw_absorption_check: CheckBox = null
 var _uw_snell_check: CheckBox = null
@@ -142,22 +136,19 @@ var _buoy_grid_visible: bool = false
 var _debug_mode: int = 0
 var _spray_enabled: bool = true
 var _spray_quality: int = 2
-var _underwater_volume_enabled: bool = true
-var _underwater_active_above: bool = false
-var _uw_wobble_enabled: bool = false
 var _ocean_surface_visible: bool = true
-var _uw_debug_mode: int = 0
 var _waterline_compositor_enabled: bool = true
 var _waterline_debug_mode: int = 0
 var _waterline_resolution_scales: Array[float] = [1.0, 0.75, 0.5, 0.25]
 var _waterline_resolution_index: int = 2
+var _waterline_quality_tier: int = 1
 var _uw_absorption_enabled: bool = true
 var _uw_snell_enabled: bool = true
-var _uw_rays_enabled: bool = true
+var _uw_rays_enabled: bool = false
 var _uw_wobble_effect_enabled: bool = true
-var _uw_particles_enabled: bool = true
-var _uw_meniscus_enabled: bool = false
-var _uw_caustics_enabled: bool = true
+var _uw_particles_enabled: bool = false
+var _uw_meniscus_enabled: bool = true
+var _uw_caustics_enabled: bool = false
 var _uw_ray_shell_count: int = 6
 var _uw_ray_shell_spacing_m: float = 16.0
 var _uw_ray_intensity: float = 1.8
@@ -190,7 +181,6 @@ func _ready() -> void:
 	_playground_origin = _find_shore_playground_center()
 	_place_camera_at_playground()
 	_setup_ocean()
-	_setup_underwater_volume()
 	_setup_prewater_capture()
 	_setup_waterline_compositor()
 	_setup_reflection_canaries()
@@ -261,7 +251,7 @@ func _build_environment() -> void:
 	probe.box_projection = false
 	probe.size = Vector3(1000.0, 200.0, 1000.0)
 	probe.position = Vector3(0.0, 50.0, 0.0)
-	probe.update_mode = ReflectionProbe.UPDATE_ONCE
+	probe.update_mode = ReflectionProbe.UPDATE_ALWAYS
 	add_child(probe)
 
 
@@ -392,23 +382,6 @@ func _setup_ocean() -> void:
 		_spray_enabled = OceanManager.is_sea_spray_enabled()
 	if OceanManager.has_method("get_sea_spray_quality"):
 		_spray_quality = OceanManager.get_sea_spray_quality()
-
-
-func _setup_underwater_volume() -> void:
-	_underwater_volume = UnderwaterVolumeScript.new()
-	_underwater_volume.name = "OceanLabUnderwaterVolume"
-	_underwater_volume.set_camera(_camera)
-	_underwater_volume.set_sun(_sun)
-	_underwater_volume.set_sea_level(_sea_level)
-	_underwater_volume.set_active_above_water(_underwater_active_above)
-	_underwater_volume.set_debug_mode(_uw_debug_mode)
-	_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
-	_underwater_volume.sync_wave_surface_from_water_state(_get_water_state())
-	if _underwater_volume.has_method("set_camera_water_level"):
-		_underwater_volume.call("set_camera_water_level", _get_camera_water_level())
-	_underwater_volume.enabled = _underwater_volume_enabled
-	add_child(_underwater_volume)
-	_underwater_volume.set_render_layers(WATER_RENDER_LAYER_MASK)
 
 
 func _setup_prewater_capture() -> void:
@@ -663,7 +636,9 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 	)
 	_uw_rays_check = _add_check(toggles, "Rays", _uw_rays_enabled, func(value: bool) -> void:
 		_uw_rays_enabled = value
+		_promote_waterline_quality_for_high_effect(value)
 		_push_underwater_effect_controls()
+		_refresh_control_labels()
 	)
 	_uw_wobble_check = _add_check(toggles, "Wobble", _uw_wobble_effect_enabled, func(value: bool) -> void:
 		_uw_wobble_effect_enabled = value
@@ -671,11 +646,15 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 	)
 	_uw_particles_check = _add_check(toggles, "Particles", _uw_particles_enabled, func(value: bool) -> void:
 		_uw_particles_enabled = value
+		_promote_waterline_quality_for_high_effect(value)
 		_push_underwater_effect_controls()
+		_refresh_control_labels()
 	)
 	_uw_caustics_check = _add_check(toggles, "Caustics", _uw_caustics_enabled, func(value: bool) -> void:
 		_uw_caustics_enabled = value
+		_promote_waterline_quality_for_high_effect(value)
 		_push_underwater_effect_controls()
+		_refresh_control_labels()
 	)
 	_uw_meniscus_check = _add_check(toggles, "Meniscus / refraction", _uw_meniscus_enabled, func(value: bool) -> void:
 		_uw_meniscus_enabled = value
@@ -689,21 +668,14 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 		_refresh_control_labels()
 	)
 
-	var utility_row := HBoxContainer.new()
-	effects_tab.add_child(utility_row)
-	_underwater_button = _add_button(utility_row, "", Callable(self, "_toggle_underwater_volume"))
-	_underwater_mode_button = _add_button(utility_row, "", Callable(self, "_toggle_underwater_active_above"))
-	_uw_debug_button = _add_button(utility_row, "", Callable(self, "_cycle_uw_debug_mode"))
-	_uw_wobble_button = _add_button(utility_row, "", Callable(self, "_toggle_uw_wobble"))
-	for button: Button in [_underwater_button, _underwater_mode_button, _uw_debug_button, _uw_wobble_button]:
-		button.custom_minimum_size.x = 115.0
-
 	var wl_row := HBoxContainer.new()
 	effects_tab.add_child(wl_row)
 	_waterline_debug_button = _add_button(wl_row, "", Callable(self, "_cycle_waterline_debug_mode"))
 	_waterline_res_button = _add_button(wl_row, "", Callable(self, "_cycle_waterline_resolution"))
-	_waterline_debug_button.custom_minimum_size.x = 230.0
-	_waterline_res_button.custom_minimum_size.x = 230.0
+	_waterline_quality_button = _add_button(wl_row, "", Callable(self, "_cycle_waterline_quality"))
+	_waterline_debug_button.custom_minimum_size.x = 150.0
+	_waterline_res_button.custom_minimum_size.x = 150.0
+	_waterline_quality_button.custom_minimum_size.x = 150.0
 
 	_add_slider(effects_tab, "ray count", 1.0, 8.0, float(_uw_ray_shell_count), func(val: float) -> void:
 		_uw_ray_shell_count = int(roundf(val))
@@ -721,7 +693,7 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 		_uw_particle_noise_scale = val
 		_push_underwater_effect_controls()
 	)
-	_add_slider(effects_tab, "particle density", 0.0, 1.0, _uw_particle_density, func(val: float) -> void:
+	_add_slider(effects_tab, "particle opacity", 0.0, 1.0, _uw_particle_density, func(val: float) -> void:
 		_uw_particle_density = val
 		_push_underwater_effect_controls()
 	)
@@ -756,6 +728,11 @@ func _add_check(parent: Control, label_text: String, initial: bool, callback: Ca
 	check.toggled.connect(callback)
 	parent.add_child(check)
 	return check
+
+
+func _promote_waterline_quality_for_high_effect(enabled: bool) -> void:
+	if enabled and _waterline_quality_tier < 2:
+		_waterline_quality_tier = 2
 
 
 func _add_slider(parent: Control, label_text: String, min_val: float, max_val: float, initial: float, callback: Callable) -> void:
@@ -818,22 +795,16 @@ func _refresh_control_labels() -> void:
 	if _spray_quality_button:
 		var quality_name := OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown"
 		_spray_quality_button.text = "Spray Q: %s" % quality_name
-	if _underwater_button:
-		_underwater_button.text = "UW Volume: %s" % ("On" if _underwater_volume_enabled else "Off")
-	if _underwater_mode_button:
-		_underwater_mode_button.text = "UW Scope: %s" % ("Debug" if _underwater_active_above else "BelowCam")
-	if _uw_wobble_button:
-		_uw_wobble_button.text = "UW Wobble: %s" % ("On" if _uw_wobble_enabled else "Off")
 	if _ocean_surface_button:
 		_ocean_surface_button.text = "Ocean Mesh: %s" % ("On" if _ocean_surface_visible else "Off")
-	if _uw_debug_button:
-		_uw_debug_button.text = "UW Debug: %s" % UW_DEBUG_MODE_NAMES[_uw_debug_mode]
 	if _waterline_button:
 		_waterline_button.text = "Waterline: %s" % ("On" if _waterline_compositor_enabled else "Off")
 	if _waterline_debug_button:
 		_waterline_debug_button.text = "WL Debug: %s" % WL_DEBUG_MODE_NAMES[_waterline_debug_mode]
 	if _waterline_res_button:
 		_waterline_res_button.text = "WL Res: %d%%" % int(roundf(_get_waterline_resolution_scale() * 100.0))
+	if _waterline_quality_button:
+		_waterline_quality_button.text = "WL Q: %s" % WL_QUALITY_NAMES[clampi(_waterline_quality_tier, 0, WL_QUALITY_NAMES.size() - 1)]
 	if _wireframe_button:
 		_wireframe_button.text = "Wireframe: %s" % ("On" if _wireframe_enabled else "Off")
 	if _uw_absorption_check:
@@ -862,7 +833,7 @@ func _process(delta: float) -> void:
 	_push_object_water_state()
 	_update_object_wetness(delta)
 	_update_held_object()
-	_update_underwater_volume()
+	_apply_ocean_surface_visibility()
 	_update_prewater_capture()
 	_update_wet_compositor()
 	_update_waterline_compositor()
@@ -971,19 +942,6 @@ func _update_held_object() -> void:
 	node.global_position = _camera.global_position + -_camera.global_basis.z * 5.0
 
 
-func _update_underwater_volume() -> void:
-	_apply_ocean_surface_visibility()
-	if _underwater_volume == null:
-		return
-	_underwater_volume.set_sea_level(_sea_level)
-	_underwater_volume.set_active_above_water(_underwater_active_above)
-	_underwater_volume.set_debug_mode(_uw_debug_mode)
-	_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
-	_underwater_volume.sync_wave_surface_from_water_state(_get_water_state())
-	if _underwater_volume.has_method("set_camera_water_level"):
-		_underwater_volume.call("set_camera_water_level", _get_camera_water_level())
-
-
 func _update_waterline_compositor() -> void:
 	if _waterline_effect == null:
 		return
@@ -1063,10 +1021,7 @@ func _push_prewater_capture_to_waterline() -> void:
 func _apply_receiver_layer_contract() -> void:
 	if _camera == null:
 		return
-	if _waterline_compositor_enabled:
-		_camera.cull_mask = _camera.cull_mask & ~WATER_REFRACTION_RECEIVER_LAYER_MASK
-	else:
-		_camera.cull_mask = _camera.cull_mask | WATER_REFRACTION_RECEIVER_LAYER_MASK
+	_camera.cull_mask = _camera.cull_mask | WATER_REFRACTION_RECEIVER_LAYER_MASK
 
 
 func _get_waterline_resolution_scale() -> float:
@@ -1097,6 +1052,10 @@ func _sync_waterline_sun() -> void:
 func _push_underwater_effect_controls() -> void:
 	if _waterline_effect == null:
 		return
+	if _waterline_effect.has_method("set_quality_tier"):
+		_waterline_effect.call("set_quality_tier", _waterline_quality_tier)
+	if _waterline_effect.has_method("set_receiver_source_mode"):
+		_waterline_effect.call("set_receiver_source_mode", 1)
 	if _waterline_effect.has_method("set_underwater_feature_enabled"):
 		_waterline_effect.call("set_underwater_feature_enabled", &"absorption_fog", _uw_absorption_enabled)
 		_waterline_effect.call("set_underwater_feature_enabled", &"snell", _uw_snell_enabled)
@@ -1131,6 +1090,8 @@ func _set_underwater_profile_features(profile_name: String) -> void:
 	_uw_particles_enabled = profile_name == "Particles" or profile_name == "All On"
 	_uw_meniscus_enabled = profile_name == "Meniscus/Refract" or profile_name == "All On"
 	_uw_caustics_enabled = profile_name == "Caustics" or profile_name == "All On"
+	if profile_name in ["Rays", "Particles", "Caustics", "All On"]:
+		_waterline_quality_tier = 2
 	_push_underwater_effect_controls()
 	_refresh_control_labels()
 
@@ -1198,22 +1159,48 @@ func _get_underwater_perf_snapshot() -> Dictionary:
 	return {}
 
 
+func _get_prewater_perf_snapshot() -> Dictionary:
+	if _prewater_capture != null and _prewater_capture.has_method("get_perf_snapshot"):
+		var snapshot: Variant = _prewater_capture.call("get_perf_snapshot")
+		if snapshot is Dictionary:
+			return snapshot
+	return {}
+
+
+func _get_wet_perf_snapshot() -> Dictionary:
+	if _wet_effect != null and _wet_effect.has_method("get_wet_perf_snapshot"):
+		var snapshot: Variant = _wet_effect.call("get_wet_perf_snapshot")
+		if snapshot is Dictionary:
+			return snapshot
+	return {}
+
+
 func _update_underwater_perf_label() -> void:
 	if _uw_perf_label == null:
 		return
 	var perf := _get_underwater_perf_snapshot()
+	var prewater_perf := _get_prewater_perf_snapshot()
+	var wet_perf := _get_wet_perf_snapshot()
 	var copy_ms := float(perf.get("scene_copy_ms", 0.0))
 	var probe_ms := float(perf.get("probe_ms", 0.0))
 	var total_ms := float(perf.get("total_ms", 0.0))
+	var prewater_copy_ms := float(prewater_perf.get("prewater_copy_ms", 0.0))
+	var wet_ms := float(wet_perf.get("wet_compositor_ms", 0.0))
 	var timing_valid := bool(perf.get("timing_valid", true))
+	var stack_total_ms := total_ms + prewater_copy_ms + wet_ms
+	var quality_name := WL_QUALITY_NAMES[clampi(int(perf.get("quality_tier", _waterline_quality_tier)), 0, WL_QUALITY_NAMES.size() - 1)]
+	var scene_copy_active := bool(perf.get("scene_copy_active", false))
 	var lines: Array[String] = []
 	lines.append("[b]GPU timings[/b]")
 	if timing_valid:
+		lines.append("prewater copy: %.3f ms" % prewater_copy_ms)
 		lines.append("scene copy: %.3f ms" % copy_ms)
 		lines.append("waterline/underwater probe: %.3f ms" % probe_ms)
-		lines.append("combined: %.3f ms" % total_ms)
+		lines.append("wetness: %.3f ms" % wet_ms)
+		lines.append("stack subtotal: %.3f ms" % stack_total_ms)
 	else:
 		lines.append("timestamp sample invalid")
+	lines.append("quality: %s  scene copy: %s" % [quality_name, "active" if scene_copy_active else "skipped"])
 	lines.append("")
 	lines.append("flags: fog=%s snell=%s rays=%s wobble=%s particles=%s caustics=%s refract=%s" % [
 		"on" if _uw_absorption_enabled else "off",
@@ -1225,7 +1212,7 @@ func _update_underwater_perf_label() -> void:
 		"on" if _uw_meniscus_enabled else "off",
 	])
 	lines.append("rays: %d shells / %.1fm / %.2fx" % [_uw_ray_shell_count, _uw_ray_shell_spacing_m, _uw_ray_intensity])
-	lines.append("particles: scale %.2f density %.2f" % [_uw_particle_noise_scale, _uw_particle_density])
+	lines.append("particles: scale %.2f opacity %.2f" % [_uw_particle_noise_scale, _uw_particle_density])
 	if _uw_profile_running:
 		var names := _underwater_profile_names()
 		lines.append("")
@@ -1326,11 +1313,6 @@ func _update_hud() -> void:
 		"on" if _wet_effect != null and _wet_effect.effect_enabled else "off",
 		_wet_margin,
 	])
-	lines.append("underwater=%s/%s  uw_wobble=%s" % [
-		"on" if _underwater_volume_enabled else "off",
-		"debug" if _underwater_active_above else "belowcam",
-		"on" if _uw_wobble_enabled else "off",
-	])
 	var spray_energy := OceanManager.get_sea_spray_energy() if OceanManager and OceanManager.has_method("get_sea_spray_energy") else 0.0
 	var spray_status: Dictionary = OceanManager.get_sea_spray_status() if OceanManager and OceanManager.has_method("get_sea_spray_status") else {}
 	lines.append("spray=%s/%s  emitting=%s  candidates=%d  energy=%.2f" % [
@@ -1340,27 +1322,34 @@ func _update_hud() -> void:
 		int(spray_status.get("particle_candidates", 0)),
 		spray_energy,
 	])
-	lines.append("ocean_mesh=%s  wireframe=%s  uw_debug=%s  waterline=%s/%s" % [
+	lines.append("ocean_mesh=%s  wireframe=%s  waterline=%s/%s" % [
 		"on" if _ocean_surface_visible else "off",
 		"on" if _wireframe_enabled else "off",
-		UW_DEBUG_MODE_NAMES[_uw_debug_mode],
 		"on" if _waterline_compositor_enabled else "off",
 		WL_DEBUG_MODE_NAMES[_waterline_debug_mode],
 	])
 	if _prewater_capture != null:
+		var prewater_perf := _get_prewater_perf_snapshot()
 		lines.append("prewater=%s %.0f%% fade=%.2f %s" % [
 			"active" if _prewater_capture.is_capture_active() else "idle",
 			_prewater_capture.get_resolution_scale() * 100.0,
 			_get_waterline_activation_fade(),
 			_prewater_capture.get_source_size(),
 		])
+		if not prewater_perf.is_empty() and bool(prewater_perf.get("timing_valid", true)):
+			lines.append("prewater_copy=%.3f ms" % float(prewater_perf.get("prewater_copy_ms", 0.0)))
 	var uw_perf := _get_underwater_perf_snapshot()
 	if not uw_perf.is_empty():
+		var quality_name := WL_QUALITY_NAMES[clampi(int(uw_perf.get("quality_tier", _waterline_quality_tier)), 0, WL_QUALITY_NAMES.size() - 1)]
+		var wet_perf := _get_wet_perf_snapshot()
+		var wet_ms := float(wet_perf.get("wet_compositor_ms", 0.0))
 		if bool(uw_perf.get("timing_valid", true)):
-			lines.append("uw_gpu=%.3f ms (copy %.3f / probe %.3f)" % [
+			lines.append("uw_gpu=%s %.3f ms (copy %.3f / probe %.3f / wet %.3f)" % [
+				quality_name,
 				float(uw_perf.get("total_ms", 0.0)),
 				float(uw_perf.get("scene_copy_ms", 0.0)),
 				float(uw_perf.get("probe_ms", 0.0)),
+				wet_ms,
 			])
 		else:
 			lines.append("uw_gpu=-- (timestamp sample invalid)")
@@ -1543,37 +1532,9 @@ func _cycle_spray_quality() -> void:
 	_refresh_control_labels()
 
 
-func _toggle_underwater_volume() -> void:
-	_underwater_volume_enabled = not _underwater_volume_enabled
-	if _underwater_volume:
-		_underwater_volume.enabled = _underwater_volume_enabled
-	_refresh_control_labels()
-
-
-func _toggle_underwater_active_above() -> void:
-	_underwater_active_above = not _underwater_active_above
-	if _underwater_volume:
-		_underwater_volume.set_active_above_water(_underwater_active_above)
-	_refresh_control_labels()
-
-
-func _toggle_uw_wobble() -> void:
-	_uw_wobble_enabled = not _uw_wobble_enabled
-	if _underwater_volume:
-		_underwater_volume.set_wobble_enabled(_uw_wobble_enabled)
-	_refresh_control_labels()
-
-
 func _toggle_ocean_surface_visible() -> void:
 	_ocean_surface_visible = not _ocean_surface_visible
 	_apply_ocean_surface_visibility()
-	_refresh_control_labels()
-
-
-func _cycle_uw_debug_mode() -> void:
-	_uw_debug_mode = (_uw_debug_mode + 1) % UW_DEBUG_MODE_NAMES.size()
-	if _underwater_volume:
-		_underwater_volume.set_debug_mode(_uw_debug_mode)
 	_refresh_control_labels()
 
 
@@ -1596,6 +1557,12 @@ func _cycle_waterline_resolution() -> void:
 	_waterline_resolution_index = (_waterline_resolution_index + 1) % _waterline_resolution_scales.size()
 	if _prewater_capture:
 		_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
+	_refresh_control_labels()
+
+
+func _cycle_waterline_quality() -> void:
+	_waterline_quality_tier = (_waterline_quality_tier + 1) % WL_QUALITY_NAMES.size()
+	_push_underwater_effect_controls()
 	_refresh_control_labels()
 
 

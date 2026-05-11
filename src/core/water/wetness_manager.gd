@@ -229,10 +229,10 @@ func _update_memory_holders(delta: float, state: WaterSurfaceState) -> void:
 			erase_ids.append(instance_id)
 			continue
 
-		var root_y := holder.root.global_position.y
-		var bottom_world := root_y + holder.bottom_local_y
-		var water_y := _sample_contact_water_y(state, holder.root.global_position, holder.sample_radius)
-		if bottom_world < water_y:
+		var root_y: float = holder.root.global_position.y
+		var bottom_world: float = root_y + holder.bottom_local_y
+		var water_y: float = _sample_contact_water_y(state, holder.root, bottom_world, holder.sample_radius)
+		if water_y > -INF:
 			holder.wet_line_local = maxf(holder.wet_line_local, water_y - root_y)
 		else:
 			holder.wet_line_local -= wet_dry_rate * delta
@@ -253,19 +253,37 @@ func _update_memory_holders(delta: float, state: WaterSurfaceState) -> void:
 		_memory_holders.erase(instance_id)
 
 
-func _sample_contact_water_y(state: WaterSurfaceState, center: Vector3, radius: float) -> float:
-	if state == null:
-		return ProjectSettings.get_setting("ocean/sea_level", 0.0)
-	var fallback := state.sea_level
-	if not state.can_sample_height():
-		return fallback
-	var max_y := -INF
-	for offset: Vector3 in [
+func _sample_contact_water_y(state: WaterSurfaceState, root: Node3D, bottom_world_y: float, radius: float) -> float:
+	if state == null or root == null or not state.can_sample_height():
+		return -INF
+
+	var max_y: float = -INF
+	var center: Vector3 = root.global_position
+	center.y = bottom_world_y
+	var x_axis: Vector3 = _horizontal_axis(root.global_transform.basis.x)
+	var z_axis: Vector3 = _horizontal_axis(root.global_transform.basis.z)
+	var sample_radius: float = maxf(radius, 0.0)
+	var offsets: Array[Vector3] = [
 		Vector3.ZERO,
-		Vector3(radius, 0.0, 0.0),
-		Vector3(-radius, 0.0, 0.0),
-		Vector3(0.0, 0.0, radius),
-		Vector3(0.0, 0.0, -radius),
-	]:
-		max_y = maxf(max_y, state.sample_height(center + offset, fallback))
+		x_axis * sample_radius,
+		-x_axis * sample_radius,
+		z_axis * sample_radius,
+		-z_axis * sample_radius,
+		(x_axis + z_axis).normalized() * sample_radius,
+		(x_axis - z_axis).normalized() * sample_radius,
+		(-x_axis + z_axis).normalized() * sample_radius,
+		(-x_axis - z_axis).normalized() * sample_radius,
+	]
+	for offset: Vector3 in offsets:
+		var sample_pos: Vector3 = center + offset
+		var depth: float = state.sample_water_depth(sample_pos, -INF)
+		if depth > 0.0:
+			max_y = maxf(max_y, state.sample_height(sample_pos, state.sea_level))
 	return max_y
+
+
+func _horizontal_axis(axis: Vector3) -> Vector3:
+	var horizontal: Vector3 = Vector3(axis.x, 0.0, axis.z)
+	if horizontal.length_squared() <= 0.0001:
+		return Vector3.RIGHT
+	return horizontal.normalized()

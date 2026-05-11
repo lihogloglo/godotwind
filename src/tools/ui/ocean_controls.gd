@@ -11,6 +11,10 @@
 class_name OceanControls
 extends RefCounted
 
+const WaterlineStackScript := preload("res://src/core/water/waterline_stack.gd")
+const WATER_REFRACTION_RECEIVER_LAYER_MASK: int = 1 << 18
+const WATER_RENDER_LAYER_MASK: int = 1 << 19
+
 # ── Public state (readable by world_explorer) ──
 
 var show_ocean: bool = false
@@ -20,6 +24,7 @@ var show_ocean: bool = false
 
 var _ocean_configured: bool = false
 var _panels: ExplorerPanels = null
+var _waterline_stack: Node = null
 
 ## Callback dictionary — keys are action names, values are Callables on world_explorer
 var _cb: Dictionary = {}
@@ -39,14 +44,20 @@ func set_panels(panels: ExplorerPanels) -> void:
 
 ## Update the ocean camera (convenience for camera switching).
 func set_camera(cam: Camera3D) -> void:
+	if cam != null:
+		cam.cull_mask = cam.cull_mask | WATER_RENDER_LAYER_MASK
 	if OceanManager and OceanManager.has_method("set_camera"):
 		OceanManager.set_camera(cam)
+	if _waterline_stack:
+		_waterline_stack.set_camera(cam)
 
 
 ## Enable or disable the ocean (convenience for mode switching).
 func set_enabled(enabled: bool) -> void:
 	if OceanManager and OceanManager.has_method("set_enabled"):
 		OceanManager.set_enabled(enabled)
+	if _waterline_stack:
+		_waterline_stack.set_enabled(enabled)
 
 
 ## Toggle ocean visibility.
@@ -63,6 +74,8 @@ func on_show_ocean_toggled(enabled: bool) -> void:
 			OceanManager.force_initialize()
 		if not _ocean_configured:
 			_configure_global_ocean()
+		_ensure_waterline_stack()
+		_configure_waterline_stack()
 		set_enabled(true)
 		_sync_ocean_sliders()
 	else:
@@ -78,8 +91,26 @@ func on_water_quality_changed(index: int) -> void:
 		return
 	var quality: int = _panels.water_quality_btn.get_item_id(index)
 	OceanManager.set_water_quality(quality)
+	_sync_ocean_render_layers()
+	if _waterline_stack:
+		_waterline_stack.quality_tier = _get_waterline_quality_tier()
 	_log("Water quality: %s" % OceanManager.get_water_quality_name())
 	_update_stats()
+
+
+## Per-frame waterline compositor/capture sync. Called by WorldExplorer.
+func process(delta: float) -> void:
+	if not show_ocean or _waterline_stack == null:
+		return
+	_configure_waterline_stack()
+	var viewport_size := Vector2i.ZERO
+	var viewport_cb: Callable = _cb.get("get_viewport", Callable())
+	if viewport_cb.is_valid():
+		var viewport: Viewport = viewport_cb.call()
+		if viewport:
+			var rect := viewport.get_visible_rect()
+			viewport_size = Vector2i(int(rect.size.x), int(rect.size.y))
+	_waterline_stack.process_stack(delta, viewport_size)
 
 
 ## Handle wave scale change.
@@ -124,6 +155,7 @@ func _configure_global_ocean() -> void:
 	if get_camera_cb.is_valid():
 		var active_camera: Camera3D = get_camera_cb.call()
 		if active_camera:
+			active_camera.cull_mask = active_camera.cull_mask | WATER_RENDER_LAYER_MASK
 			OceanManager.set_camera(active_camera)
 
 	# Set terrain for shore mask generation (if not already found by force_initialize)
@@ -134,9 +166,74 @@ func _configure_global_ocean() -> void:
 			OceanManager.set_terrain(terrain)
 
 	_ocean_configured = true
+	_sync_ocean_render_layers()
 	_sync_water_quality_dropdown()
 	_log("Ocean configured (quality: %s, sea level: %.1f)" % [
 		OceanManager.get_water_quality_name(), OceanManager.sea_level])
+
+
+func _ensure_waterline_stack() -> void:
+	if _waterline_stack and is_instance_valid(_waterline_stack):
+		return
+	_waterline_stack = WaterlineStackScript.new()
+	_waterline_stack.name = "WaterlineStack"
+	var add_child_cb: Callable = _cb.get("add_child", Callable())
+	if add_child_cb.is_valid():
+		add_child_cb.call(_waterline_stack)
+
+
+func _configure_waterline_stack() -> void:
+	if _waterline_stack == null:
+		return
+	var active_camera: Camera3D = null
+	var get_camera_cb: Callable = _cb.get("get_active_camera", Callable())
+	if get_camera_cb.is_valid():
+		active_camera = get_camera_cb.call()
+
+	var world_env: WorldEnvironment = null
+	var get_world_env_cb: Callable = _cb.get("get_active_world_environment", Callable())
+	if get_world_env_cb.is_valid():
+		world_env = get_world_env_cb.call()
+
+	var sun: DirectionalLight3D = null
+	var get_sun_cb: Callable = _cb.get("get_active_sun", Callable())
+	if get_sun_cb.is_valid():
+		sun = get_sun_cb.call()
+	_sync_ocean_render_layers()
+
+	_waterline_stack.configure(
+		active_camera,
+		world_env,
+		OceanManager,
+		_get_receiver_capture_mask(active_camera),
+		_get_waterline_quality_tier(),
+		sun
+	)
+
+
+func _sync_ocean_render_layers() -> void:
+	if not OceanManager:
+		return
+	if OceanManager._ocean_mesh:
+		OceanManager._ocean_mesh.layers = WATER_RENDER_LAYER_MASK
+	if OceanManager.has_method("set_sea_spray_render_layers"):
+		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+
+
+func _get_receiver_capture_mask(active_camera: Camera3D) -> int:
+	if active_camera == null:
+		return WATER_REFRACTION_RECEIVER_LAYER_MASK
+	active_camera.cull_mask = active_camera.cull_mask | WATER_RENDER_LAYER_MASK
+	return active_camera.cull_mask & ~WATER_RENDER_LAYER_MASK
+
+
+func _get_waterline_quality_tier() -> int:
+	if not OceanManager or not OceanManager.has_method("get_water_quality"):
+		return WaterlineStackScript.QUALITY_MEDIUM
+	var quality: int = OceanManager.get_water_quality()
+	if quality == OceanMesh.QualityMode.FLAT:
+		return WaterlineStackScript.QUALITY_LOW
+	return WaterlineStackScript.QUALITY_MEDIUM
 
 
 ## Sync ocean slider values with current ocean manager settings.

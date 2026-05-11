@@ -10,7 +10,7 @@ into a production-quality rendering path. Update this file as work lands; use
 |-------|--------|------|--------------|-------|
 | Phase 0 - Research And Ground Truth | [x] Complete | 2026-05-09 | Static audit only | See `docs/audit/ocean_underwater_architecture_2026_05_09.md`. |
 | Phase 1 - Cleanup Ownership | [x] Complete | 2026-05-09 | Static refs + import + timed Godot smokes | Legacy compute/quad paths deleted; `OceanManager` no longer loads the old underwater compositor. |
-| Phase 2 - Shared Water Surface And Mask Contract | [x] Complete | 2026-05-09 | Import + timed Godot smokes | Shared surface/mask contract now feeds visual shaders, waterline compositor, wetness, and diagnostic volume; interactive stability pass still belongs to Phase 7/8 visual verification. |
+| Phase 2 - Shared Water Surface And Mask Contract | [x] Complete | 2026-05-09 | Import + timed Godot smokes | Shared surface/mask contract now feeds visual shaders, waterline compositor, and wetness. The old diagnostic volume was deleted on 2026-05-11. |
 | Phase 3 - Half-Immersed Camera Split | [x] Complete | 2026-05-09 | Import + timed Godot smokes + interactive main-scene launch | Per-pixel camera split now gates underwater combine; human visual judgement remains with the launched scene. |
 | Phase 4 - Snell's Window Rebuild | [ ] Pending | - | - | Must use correct above-water/sky source. |
 | Phase 5 - Wobble Rebuild | [ ] Pending | - | - | Screen-space FBM has been removed; final scale/art tuning still pending. |
@@ -71,8 +71,9 @@ to follow stale text.
   - underwater wobble;
   - receiver caustics;
   - suspended particles.
-- `UnderwaterVolume` is diagnostic/support only unless fresh research proves a
-  volume-rendered path is the proper Godot production owner.
+- `UnderwaterVolume` was deleted on 2026-05-11. Do not reintroduce a
+  diagnostic spatial-volume renderer as a fallback for production underwater
+  work.
 - Dead legacy underwater compositor / quad paths must stay deleted or clearly
   quarantined so nobody patches the wrong system.
 
@@ -181,7 +182,7 @@ Implementation notes:
 Tasks:
 
 - [x] Promote a single water-surface lookup used by surface shader, waterline
-  compositor, wetness, caustics, rays, and diagnostic volume.
+  compositor, wetness, caustics, and rays.
 - [x] Replace hand-copied `.gdshaderinc` / `.glsl` surface math with a generated
   shared snippet or another verified Godot 4.6-compatible sharing path.
 - [x] Add or derive a stable water coverage/body mask that does not depend on
@@ -322,6 +323,8 @@ Tasks:
   rather than fixed texture scale.
 - [x] Remove the old `UnderwaterVolume` caustic branch so compositor caustics
   are the only production caustics path.
+- [x] Delete the remaining diagnostic `UnderwaterVolume` wrapper, shader, test
+  scene, and Ocean Lab controls on 2026-05-11.
 
 Verification:
 

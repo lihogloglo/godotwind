@@ -12,12 +12,19 @@ extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/prewater_capture.glsl"
 const RETIRED_TEXTURE_FRAME_DELAY := 3
+const MAX_REASONABLE_TIMESTAMP_MS := 100.0
 
 var _depth_sampler: RID
 var _source_color_rid: RID
 var _source_depth_rid: RID
 var _source_size: Vector2i = Vector2i.ZERO
 var _retired_textures: Array[Dictionary] = []
+var _last_perf_frame: int = -1
+var _last_perf_snapshot: Dictionary = {
+	"prewater_copy_ms": 0.0,
+	"frame": -1,
+	"timing_valid": false,
+}
 
 
 func _init() -> void:
@@ -69,9 +76,15 @@ func has_capture() -> bool:
 	return _source_color_rid.is_valid() and _source_depth_rid.is_valid() and _source_size != Vector2i.ZERO
 
 
+func get_capture_perf_snapshot() -> Dictionary:
+	_refresh_timestamp_snapshot()
+	return _last_perf_snapshot.duplicate()
+
+
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
 	if p_effect_callback_type != EFFECT_CALLBACK_TYPE_POST_TRANSPARENT:
 		return
+	_refresh_timestamp_snapshot()
 	if not effect_enabled or blend_factor <= 0.0 or not pipeline_rid.is_valid():
 		return
 	if rd == null:
@@ -140,6 +153,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD) -> v
 
 	var groups_x := (size.x + 7) / 8
 	var groups_y := (size.y + 7) / 8
+	rd.capture_timestamp("godotwind_prewater_copy_begin")
 	var cl := rd.compute_list_begin()
 	rd.compute_list_bind_compute_pipeline(cl, pipeline_rid)
 	rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
@@ -147,6 +161,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD) -> v
 	rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
 	rd.compute_list_add_barrier(cl)
 	rd.compute_list_end()
+	rd.capture_timestamp("godotwind_prewater_copy_end")
 	rd.free_rid(uniform_set)
 
 
@@ -214,6 +229,56 @@ func _release_retired_textures(force: bool = false) -> void:
 			if rid.is_valid():
 				rd.free_rid(rid)
 			_retired_textures.remove_at(i)
+
+
+func _refresh_timestamp_snapshot() -> void:
+	if rd == null:
+		return
+	var frame := rd.get_captured_timestamps_frame()
+	if frame == _last_perf_frame:
+		return
+	_last_perf_frame = frame
+
+	var copy_ms := _timestamp_pair_delta_ms(
+		"godotwind_prewater_copy_begin",
+		"godotwind_prewater_copy_end"
+	)
+	var timing_valid := copy_ms >= 0.0
+	copy_ms = maxf(copy_ms, 0.0)
+	_last_perf_snapshot = {
+		"prewater_copy_ms": copy_ms,
+		"frame": frame,
+		"timing_valid": timing_valid,
+		"source_size": _source_size,
+	}
+
+
+func _timestamp_pair_delta_ms(begin_name: String, end_name: String) -> float:
+	if rd == null:
+		return -1.0
+	var pending_gpu := -1
+	var last_valid_ms := -1.0
+	var count := rd.get_captured_timestamps_count()
+	for i in count:
+		var name := rd.get_captured_timestamp_name(i)
+		if name == begin_name:
+			pending_gpu = rd.get_captured_timestamp_gpu_time(i)
+		elif name == end_name and pending_gpu >= 0:
+			var gpu_ms := _timestamp_delta_ms(pending_gpu, rd.get_captured_timestamp_gpu_time(i))
+			if _timestamp_delta_is_plausible(gpu_ms):
+				last_valid_ms = gpu_ms
+			pending_gpu = -1
+	return last_valid_ms
+
+
+func _timestamp_delta_is_plausible(gpu_ms: float) -> bool:
+	return gpu_ms >= 0.0 and gpu_ms <= MAX_REASONABLE_TIMESTAMP_MS
+
+
+func _timestamp_delta_ms(begin_us: int, end_us: int) -> float:
+	if begin_us < 0 or end_us < 0 or end_us < begin_us:
+		return -1.0
+	return float(end_us - begin_us) / 1000.0
 
 
 func on_effect_removed() -> void:

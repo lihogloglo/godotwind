@@ -295,7 +295,7 @@ Interactive Ocean Lab debugging found:
 
 Conclusion: do not keep tuning the current shader as the final fix. The next pass should solve receiver refraction architecture so receiver objects do not also imprint the opaque ocean depth/thickness pass that the compositor later tries to bend.
 
-### Follow-up receiver-layer contract fix - 2026-05-11
+### Follow-up receiver-layer contract fix - 2026-05-11 (superseded)
 
 Files changed:
 
@@ -304,12 +304,19 @@ Files changed:
 - `src/core/shaders/effects/waterline_compositor_effect.gd`
 - `docs/systems/ocean.md`
 
-Practical effect:
+Original intended effect:
 
-- Ocean Lab receiver meshes are now receiver-layer owned while the waterline compositor is active. The main camera excludes `WATER_REFRACTION_RECEIVER_LAYER_MASK`, so receiver meshes no longer write the main viewport depth that the opaque FFT ocean uses for surface thickness.
-- The compositor now draws one receiver result from the receiver capture: direct current-UV receiver pixels above the dynamic waterline, and refracted offset receiver samples below the waterline.
+- Ocean Lab receiver meshes were moved to receiver-layer ownership while the waterline compositor was active, and the main camera excluded `WATER_REFRACTION_RECEIVER_LAYER_MASK`.
+- The compositor drew one receiver result from the receiver capture: direct current-UV receiver pixels above the dynamic waterline, and refracted offset receiver samples below the waterline.
 - The shader-side original-footprint erase experiment was removed rather than tuned further.
 - The waterline effect now reuses its state storage buffer with `RenderingDevice.buffer_update()` instead of freeing and recreating that buffer every view every frame, and it skips the above-water final pass when no receiver source exists.
+
+Superseding correction from later 2026-05-11 Ocean Lab testing:
+
+- That receiver-layer-only contract made `WL Res` affect the above-water part of receiver meshes, because final above-water pixels came from the reduced receiver capture.
+- The current recovery contract keeps receivers visible in the main camera for above-water pixels and uses the receiver capture only for underwater/refraction samples.
+- The double-outline artifact is still not accepted. User testing at `WL Res 25%` showed a duplicated/blocky underwater silhouette; the shader now disables quarter-res edge dilation, but this requires interactive validation.
+- User testing also reported no visible underwater caustics or particles. High-tier effects must be treated as unverified/broken until checked in Ocean Lab with `WL Q: High`.
 
 Canonical Godot basis:
 
@@ -509,7 +516,7 @@ This should record GPU timestamps from the waterline effect plus whole-frame met
 | Refraction | Surface does not do true scene-color refraction; compositor has receiver refraction, but Ocean Lab still shows duplicate receiver outlines | Architecture conflict remains; fix render/depth layering before more shader tuning |
 | Absorption | Surface depth tint and compositor absorption | Partial |
 | Waterline split | Waterline compositor in lab | Not production-integrated |
-| Underwater particles/rays/wobble/caustics/Snell | Present in lab compositor | Needs visual validation, perf hardening, production integration |
+| Underwater particles/rays/wobble/caustics/Snell | Snell/wobble/fog are medium-tier compositor paths; rays/particles/caustics are high-tier and not visually accepted after 2026-05-11 Ocean Lab testing | Needs repair/validation, perf hardening, production integration |
 | Foam | FFT foam plus shore foam | Present, needs visual tuning |
 | SSS on wave tips | Present as approximate crest tint/emission | Present, small shader bug may affect lighting |
 | Spray particles | GPU spray smoke passes | Good base |
