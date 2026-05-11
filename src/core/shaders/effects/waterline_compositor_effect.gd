@@ -381,17 +381,15 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	if not color_image.is_valid() or not depth_texture.is_valid():
 		return
 	var scene_copy_valid := _needs_scene_color_copy(scene_data) and _copy_scene_color(color_image, size)
-	var has_external_source := (
-		_external_source_color_rid.is_valid()
-		and _external_source_depth_rid.is_valid()
-		and _external_source_size != Vector2i.ZERO
-	)
+	var external_source_color_valid := _external_source_color_rid.is_valid() and rd.texture_is_valid(_external_source_color_rid)
+	var external_source_depth_valid := _external_source_depth_rid.is_valid() and rd.texture_is_valid(_external_source_depth_rid)
+	var has_external_source := external_source_color_valid and external_source_depth_valid and _external_source_size != Vector2i.ZERO
 	if not has_external_source:
 		if not _missing_source_warning_logged:
 			_missing_source_warning_logged = true
 			Log.warn("water", "WaterlineCompositorEffect: missing receiver source buffers; receiver refraction disabled")
-	var source_color_rid := _external_source_color_rid
-	var source_depth_rid := _external_source_depth_rid
+	var source_color_rid := _external_source_color_rid if external_source_color_valid else RID()
+	var source_depth_rid := _external_source_depth_rid if external_source_depth_valid else RID()
 	var source_color_valid := has_external_source
 	var source_depth_valid := has_external_source
 	var source_log_key := "%s/%s/%s/%s" % [

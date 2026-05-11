@@ -11,11 +11,13 @@ class_name PrewaterCaptureEffect
 extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/prewater_capture.glsl"
+const RETIRED_TEXTURE_FRAME_DELAY := 3
 
 var _depth_sampler: RID
 var _source_color_rid: RID
 var _source_depth_rid: RID
 var _source_size: Vector2i = Vector2i.ZERO
+var _retired_textures: Array[Dictionary] = []
 
 
 func _init() -> void:
@@ -76,6 +78,7 @@ func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> v
 		rd = RenderingServer.get_rendering_device()
 		if rd == null:
 			return
+	_release_retired_textures()
 
 	var buffers := render_data.get_render_scene_buffers()
 	if buffers == null:
@@ -152,10 +155,10 @@ func _ensure_target_textures(color_image: RID, size: Vector2i) -> bool:
 		return true
 
 	if _source_color_rid.is_valid():
-		rd.free_rid(_source_color_rid)
+		_retire_texture(_source_color_rid)
 		_source_color_rid = RID()
 	if _source_depth_rid.is_valid():
-		rd.free_rid(_source_depth_rid)
+		_retire_texture(_source_depth_rid)
 		_source_depth_rid = RID()
 	_source_size = Vector2i.ZERO
 
@@ -190,6 +193,29 @@ func _ensure_target_textures(color_image: RID, size: Vector2i) -> bool:
 	return true
 
 
+func _retire_texture(rid: RID) -> void:
+	if not rid.is_valid():
+		return
+	_retired_textures.append({
+		"rid": rid,
+		"release_frame": Engine.get_process_frames() + RETIRED_TEXTURE_FRAME_DELAY,
+	})
+
+
+func _release_retired_textures(force: bool = false) -> void:
+	if rd == null:
+		return
+	var frame := Engine.get_process_frames()
+	for i in range(_retired_textures.size() - 1, -1, -1):
+		var entry := _retired_textures[i]
+		var rid: RID = entry["rid"]
+		var release_frame := int(entry["release_frame"])
+		if force or frame >= release_frame:
+			if rid.is_valid():
+				rd.free_rid(rid)
+			_retired_textures.remove_at(i)
+
+
 func on_effect_removed() -> void:
 	super.on_effect_removed()
 	if rd:
@@ -202,4 +228,5 @@ func on_effect_removed() -> void:
 		if _source_depth_rid.is_valid():
 			rd.free_rid(_source_depth_rid)
 			_source_depth_rid = RID()
+		_release_retired_textures(true)
 	_source_size = Vector2i.ZERO

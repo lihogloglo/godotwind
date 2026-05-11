@@ -102,11 +102,11 @@ Current surface features include:
 - Weather-driven roughness, foam, normal strength, and color.
 - Debug modes 0-8.
 
-Concrete shader issues found:
+Concrete shader issues found during the audit:
 
-- `smith_masking_shadowing(cos_theta, alpha)` is called with swapped argument order in `src/core/water/shaders/ocean_fft_common.gdshaderinc:416` and `:417`. That can distort direct-light specular.
-- The surface shader reconstructs background depth with a reversed-Z shortcut in `src/core/water/shaders/ocean_fft_common.gdshaderinc:226`. Godot's documented pattern is inverse projection reconstruction. The compositor already follows the inverse-matrix style more closely; the surface shader should match.
-- Ocean Lab's surface debug labels are stale. `tests/visual/test_ocean_lab.gd:31` labels mode 6 as `SSR hit`, but shader mode 6 is foam. There is no surface SSR-hit debug mode there.
+- `smith_masking_shadowing(cos_theta, alpha)` was called with swapped argument order in `src/core/water/shaders/ocean_fft_common.gdshaderinc:416` and `:417`. Fixed 2026-05-11 by passing `dot_nl/dot_nv` as `cos_theta` and `spec_alpha` as `alpha`.
+- The surface shader reconstructed background depth with a reversed-Z shortcut in `src/core/water/shaders/ocean_fft_common.gdshaderinc:226`. Fixed 2026-05-11 by using Godot's documented `INV_PROJECTION_MATRIX` depth-to-view reconstruction path with a sky/far-depth guard.
+- Ocean Lab's surface debug labels were stale. `tests/visual/test_ocean_lab.gd:31` labeled mode 6 as `SSR hit`, but shader mode 6 is foam. Fixed 2026-05-11 by removing the stale label so modes 0-8 match the shader.
 
 ### Shore handling
 
@@ -260,6 +260,27 @@ No shader files changed in this audit, so shader import/cache clearing was not a
 
 No C# files changed in this audit, so `dotnet build Godotwind.sln` was not required.
 
+### Follow-up shader correctness slice - 2026-05-11
+
+Files changed:
+
+- `src/core/water/shaders/ocean_fft_common.gdshaderinc`
+- `tests/visual/test_ocean_lab.gd`
+
+Practical effect:
+
+- Direct sun/specular highlights now use the Smith masking-shadowing helper with the intended argument order.
+- Water thickness now comes from Godot's inverse-projection depth reconstruction pattern instead of the previous shortcut, keeping the surface path closer to the compositor and current Godot 4.6 documentation.
+- Ocean Lab surface debug labels now match the actual shader debug modes; mode 6 is foam, mode 7 is `Normal.y`, and mode 8 is SSS scatter.
+
+Verification:
+
+- Cleared `.godot/shader_cache/SceneForwardClusteredShaderRD` before checking the changed `.gdshaderinc`.
+- Ran `res://tests/visual/test_ocean_lab_mesh_toggle_smoke.tscn`; result was exit code 0. This exercised both clipmap and projected ocean shader paths after shader cache clearing.
+- Launched `res://tests/visual/test_ocean_lab.tscn` interactively for visual inspection. Visual follow-up found that projected grid and clipmap still have noticeably different water aspect/texture character from the same camera pose. That predates this correctness slice and remains a projected-grid evaluation item, not a resolved issue.
+
+No C# files changed, so `dotnet build Godotwind.sln` was not required.
+
 ## Architecture Recommendation
 
 ### Keep
@@ -382,9 +403,9 @@ The waterline and wetness compositors should not allocate/free buffers and unifo
 
 Small but important:
 
-- Swap the `smith_masking_shadowing()` call arguments.
-- Replace surface depth reconstruction shortcut with Godot's inverse-projection pattern.
-- Fix Ocean Lab surface debug labels.
+- Done 2026-05-11: swap the `smith_masking_shadowing()` call arguments.
+- Done 2026-05-11: replace the surface depth reconstruction shortcut with Godot's inverse-projection pattern, guarded for sky/far depth.
+- Done 2026-05-11: fix Ocean Lab surface debug labels.
 - Make `OceanMesh.set_debug_shore_mask()` actually drive a shader debug mode or remove that UI path.
 
 ### P1 - Shore-mask fallback

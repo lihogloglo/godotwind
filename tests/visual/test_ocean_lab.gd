@@ -35,7 +35,6 @@ const DEBUG_MODE_NAMES: Array[String] = [
 	"Water thickness",
 	"Transmittance",
 	"Fresnel",
-	"SSR hit",
 	"Foam",
 	"Normal.y",
 	"SSS scatter",

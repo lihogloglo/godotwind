@@ -118,6 +118,7 @@ const float SNELL_WAVE_NORMAL_DEEP_WEIGHT = 0.36;
 const float WOBBLE_MAX_UV_OFFSET = 0.012;
 const float WOBBLE_MIN_CAMERA_DEPTH_M = 0.16;
 const float WOBBLE_FULL_CAMERA_DEPTH_M = 0.70;
+const float RECEIVER_REFRACTION_REPLACE_OPACITY = 0.92;
 
 struct SnellSample {
 	float window;
@@ -1518,19 +1519,23 @@ void main() {
 		proof_color = vec3(wobble_rejected, wobble_accepted, clamp(wobble_sample.guard, 0.0, 1.0));
 	}
 
+	bool receiver_refraction_debug = debug_mode == 5 || debug_mode == 6;
 	float debug_strength = (debug_mode >= 5 || pipeline_debug) ? 1.0 : probe_strength;
-	float final_opacity = mix(0.28, 0.46, max(camera_underwater ? 1.0 : 0.0, underwater_view_mask));
-	if (debug_mode == 0 && refr_sample.valid > 0.5) {
-		final_opacity = mix(final_opacity, 0.58, clamp(refr_sample.below_mask * receiver_refraction_gate, 0.0, 1.0));
-	}
-	float debug_mask = phase2_debug ? 1.0 : max(max(receiver_mask, receiver_refraction_gate), camera_waterline_band);
+	float debug_mask = phase2_debug
+		? 1.0
+		: receiver_refraction_debug
+		? max(mask, receiver_refraction_gate)
+		: max(max(receiver_mask, receiver_refraction_gate), camera_waterline_band);
 	if (debug_mode == 15) {
 		debug_mask = max(underwater_view_mask, camera_waterline_band);
 	}
+	float receiver_replace_strength = camera_underwater
+		? 0.0
+		: clamp(blend_factor * mask * RECEIVER_REFRACTION_REPLACE_OPACITY, 0.0, RECEIVER_REFRACTION_REPLACE_OPACITY);
 	float strength = pipeline_debug
 		? 1.0
 		: debug_mode == 0
-		? clamp(debug_strength * blend_factor * mask * final_opacity, 0.0, final_opacity)
+		? receiver_replace_strength
 		: clamp(debug_strength * blend_factor * debug_mask, 0.0, 1.0);
 	vec3 output_color = mix(scene_color.rgb, proof_color, strength);
 	if (debug_mode == 0 && underwater_view_mask > 0.001 && underwater_any_enabled) {
