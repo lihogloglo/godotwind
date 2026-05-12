@@ -33,15 +33,11 @@ func _update(input: InputPackage, delta: float) -> void:
 
 func _apply_movement(input: InputPackage, delta: float) -> void:
 	var config := get_movement_config()
-	var input_dir_3d := (input.camera_basis * Vector3(
-		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
-	var facing: Node3D = character_root if character_root else player
-	var face_direction := -facing.basis.z
-	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
 
-	var move_dir: Vector3
-	if absf(angle) > config.get_backward_angle_radians():
-		move_dir = -face_direction * config.run_speed * config.backward_speed_multiplier
+	var move_dir := _resolve_tracked_motion(
+		input, delta, config.run_speed, config.run_turn_speed,
+		config.ground_tracking_angular_speed)
+	if _is_backward_movement_input(input):
 		if _current_dir_anim != &"RunBack":
 			_current_dir_anim = &"RunBack"
 			if animator:
@@ -51,13 +47,6 @@ func _apply_movement(input: InputPackage, delta: float) -> void:
 			_current_dir_anim = &"Run"
 			if animator:
 				animator.transition_to(&"Run", true)
-		if absf(angle) >= config.ground_tracking_angular_speed * delta:
-			move_dir = face_direction.rotated(
-				Vector3.UP, signf(angle) * config.ground_tracking_angular_speed * delta) * config.run_turn_speed
-			facing.rotate_y(signf(angle) * config.ground_tracking_angular_speed * delta)
-		else:
-			move_dir = face_direction.rotated(Vector3.UP, angle) * config.run_speed
-			facing.rotate_y(angle)
 
 	player.velocity.x = move_dir.x
 	player.velocity.z = move_dir.z

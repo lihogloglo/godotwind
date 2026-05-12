@@ -3,12 +3,13 @@
 ## Controls:
 ##   WASD = move, Shift = sprint, Space = jump, C/Ctrl = crouch
 ##   Mouse = look, Tab = toggle 1st/3rd person, ESC = release mouse
-##   1-5 = spawn preset NPCs
-##   F1 = toggle debug HUD
-##   F2 = dump KF vs actual bone comparison to console
+##   character_controller_preset_1..5 = spawn preset NPCs
+##   character_controller_toggle_debug_hud = toggle debug HUD
+##   character_controller_dump_kf_bones = dump KF vs actual bone comparison
 @warning_ignore("untyped_declaration", "unsafe_method_access")
 extends Node3D
 
+const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
@@ -24,6 +25,16 @@ const PRESET_NPCS := [
 	"sugar-lips habasi",  # 5 - Female Khajiit (beast)
 ]
 
+const PRESET_ACTIONS := [
+	&"character_controller_preset_1",
+	&"character_controller_preset_2",
+	&"character_controller_preset_3",
+	&"character_controller_preset_4",
+	&"character_controller_preset_5",
+]
+const DEBUG_HUD_ACTION: StringName = &"character_controller_toggle_debug_hud"
+const KF_BONE_DUMP_ACTION: StringName = &"character_controller_dump_kf_bones"
+
 var _player_controller: CharacterBody3D
 var _factory: RefCounted
 var _debug_hud: RichTextLabel
@@ -32,6 +43,7 @@ var _is_loading: bool = false
 
 
 func _ready() -> void:
+	InputActionsScript.verify()
 	_create_environment()
 	_create_terrain()
 	_create_water_pool()
@@ -64,22 +76,30 @@ func _ready() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	# Number keys spawn preset NPCs
 	if event is InputEventKey and event.pressed and not event.echo:
-		var key_idx: int = event.keycode - KEY_1
-		if key_idx >= 0 and key_idx < PRESET_NPCS.size():
-			_spawn_npc(PRESET_NPCS[key_idx])
-		elif event.keycode == KEY_F1:
+		for key_idx in PRESET_ACTIONS.size():
+			if event.is_action_pressed(PRESET_ACTIONS[key_idx]):
+				_spawn_npc(PRESET_NPCS[key_idx])
+				return
+		if event.is_action_pressed(DEBUG_HUD_ACTION):
 			_debug_visible = not _debug_visible
 			if _debug_hud:
 				_debug_hud.visible = _debug_visible
-		elif event.keycode == KEY_F2:
+		elif event.is_action_pressed(KF_BONE_DUMP_ACTION):
 			_dump_kf_comparison()
 
 
 func _physics_process(_delta: float) -> void:
 	if _debug_visible and _debug_hud and _player_controller:
 		_update_debug_hud()
+
+
+func get_visual_test_action_names() -> Array[StringName]:
+	var action_names: Array[StringName] = []
+	action_names.append_array(PRESET_ACTIONS)
+	action_names.append(DEBUG_HUD_ACTION)
+	action_names.append(KF_BONE_DUMP_ACTION)
+	return action_names
 
 
 # =============================================================================

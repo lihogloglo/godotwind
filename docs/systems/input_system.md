@@ -43,7 +43,19 @@ Godotwind defines all input via Godot's native `InputMap`, with action definitio
 - **† crouch on JOY_B**: B is press-not-hold on Xbox; works as a tap toggle but not ideal for held crouch. Acceptable default, user rebinds in K.1.
 - **‡ sprint on LS click**: clicking the stick you're tilting forward is uncomfortable. Conventional Xbox sprint is LB shoulder (idx 9). Rebind in K.1.
 
-### 2.1 Joystick axis sign convention
+### 2.1 Visual-test actions
+
+Visual scenes use the same project `InputMap` contract as runtime scenes. The
+main controller visual scene owns these scene-specific actions:
+
+- `character_controller_preset_1..5`: spawn the five preset NPC fixtures.
+- `character_controller_toggle_debug_hud`: show/hide the debug HUD.
+- `character_controller_dump_kf_bones`: dump KF-vs-skeleton diagnostics.
+
+These are developer-only validation controls listed under
+`InputActions.VISUAL_TEST`; they are not gameplay input.
+
+### 2.2 Joystick axis sign convention
 
 `InputEventJoypadMotion.axis_value` follows Godot's screen-Y-down convention applied to sticks:
 
@@ -52,7 +64,7 @@ Godotwind defines all input via Godot's native `InputMap`, with action definitio
 
 `move_forward` binds to `axis = JOY_AXIS_LEFT_Y, axis_value = -1.0`. If you bind `axis_value = +1.0` you will get a backward-walking sprint key.
 
-### 2.2 Gamepad button index reference
+### 2.3 Gamepad button index reference
 
 | Index | Xbox name      | Common use                |
 |-------|----------------|---------------------------|

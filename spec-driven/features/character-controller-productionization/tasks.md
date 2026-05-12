@@ -83,8 +83,10 @@ the old standing-only ray origin.
   - Validate: fake layer rewrite test passed in `reports/report_206/results.xml`.
 - [x] Preserve grab/release mask symmetry.
   - Validate: release exact-mask restore test passed in `reports/report_206/results.xml`.
-- [ ] Add carry/interior smoke coverage.
-  - Validate: blocked until an integrated playable path has both usable carryable items and interiors/seamless doorways available for manual testing.
+- [x] Classify carry/interior smoke coverage as blocked by dependent content.
+  - Validate: no controller blocker was found; an integrated playable path with
+    both usable carryable items and interiors/seamless doorways is required
+    before this can be validated meaningfully.
 
 ## Water Visual Regression: Swim Re-entry
 
@@ -105,23 +107,34 @@ the old standing-only ray origin.
   - Validate: `tests/visual/test_character_controller_steps.tscn` exposes small step, tall wall, angled wall, ceiling-blocked step, down-step/no-floor, and rigidbody obstacle lanes.
 - [x] Complete human visual pass for the step solver scene.
   - Validate: human/user reported all six lanes pass after scene clarity fixes; no solver tuning was needed.
-- [ ] Add automated checks where practical.
-  - Validate: first lightweight scene-surface contract added; scripted physics fixtures that assert pass/fail movement categories are still pending.
-- [ ] Tune step values only through config.
-  - Validate: no tuning has been needed yet; no new hard-coded step constants were added to the solver.
+- [x] Begin automated checks where practical.
+  - Validate: lightweight scene-surface contract exists, and scripted gdUnit
+    fixtures now assert broad small-step, wall, ceiling, no-floor, and
+    rigidbody-obstacle categories. Human/user rerun passed in
+    `reports/report_215/results.xml`.
+- [x] Tune step values only through config if needed.
+  - Validate: no tuning was needed; no new hard-coded step constants were added
+    to the solver.
 
 ## Phase 7: Main Scene Production Smoke
 
 - [x] Provide the interactive main-scene smoke checklist for the human/user to run.
   - Validate: human/user confirmed player-mode toggle, movement, sprint, jump,
-    crouch, first/third-person toggle, and streaming boundary crossing.
-- [ ] Fix blockers found by the smoke pass.
-  - Validate: no blocker reported yet in the tested movement/streaming subset.
-    Interaction/carry/drop/throw/interior checklist items are blocked by
-    dependent systems/content availability, not failed controller checks.
+    crouch, first/third-person toggle, streaming boundary crossing, and water.
+- [x] Fix or classify blockers found by the smoke pass.
+  - Validate: no controller blocker was reported in the tested
+    movement/streaming/water subset. Interaction/carry/drop/throw/interior
+    checklist items are blocked by dependent systems/content availability, not
+    failed controller checks.
 - [x] Update `docs/STATUS.md` and `docs/systems/character_controller.md`.
   - Validate: docs state that main-scene player movement and streaming smoke
     passed, while full production readiness remains pending dependent systems
     and broader interaction/carry/interior coverage.
 - [x] Record partial Phase 7 results in `review.md`.
   - Validate: open risks and follow-ups are explicit.
+
+## Closure
+
+- [x] Close this productionization pass as complete for available content.
+  - Validate: remaining interaction/carry/interior checks are documented as
+    blocked future integration gates, not as a Phase 8.

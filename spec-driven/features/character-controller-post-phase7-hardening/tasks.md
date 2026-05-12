@@ -76,98 +76,123 @@ Each task should be independently reviewable.
     `PlayerController.teleport_to()`, `FlyCamera.teleport_to()`, and direct
     transition-style body/camera transform writes.
 
+- [x] Rebuild the broken teleport interpolation-reset visual scene from
+  scratch after the generated/fallback version failed human visual checks.
+  - Validate: scene-owned board/camera/probes are present in the `.tscn`, and
+    the script only toggles existing InputMap-driven teleport paths.
+
 - [x] Add scene-surface contracts for the new visual scenes.
   - Validate: the character-controller baseline suite checks the new scene
     case names and teleport visual-test InputMap actions.
 
-- [ ] Human/user runs the carry prompt-suppression scene interactively.
+- [x] Human/user runs the carry prompt-suppression scene interactively.
   - Validate: prompts hide while carrying, tapping while carrying does not
     activate the visible target, and prompts return after release.
 
-- [ ] Human/user runs the teleport interpolation-reset scene interactively.
+- [x] Human/user runs the teleport interpolation-reset scene interactively.
   - Validate: each probe snaps between pads without a visible interpolation
     streak or smear.
 
 ## Phase 3: Movement Config Truthfulness
 
-- [ ] Classify every exported `CharacterMovementConfig` field as active,
+- [x] Classify every exported `CharacterMovementConfig` field as active,
   reserved, or deprecated.
   - Validate: docs and comments list the status of every field flagged by the
     audit.
 
-- [ ] Implement `turn_to_movement_direction` or mark it reserved.
+- [x] Implement `turn_to_movement_direction` or mark it reserved.
   - Validate: if active, a test proves disabling it prevents auto-turning toward
     movement direction.
 
-- [ ] Decide `smooth_movement` and `smooth_player_turning_delay`.
+- [x] Decide `smooth_movement` and `smooth_player_turning_delay`.
   - Validate: if active, tests prove smoothing behavior; if reserved, presets
     and docs no longer imply active behavior.
 
-- [ ] Implement or reserve `swim_upward_correction_enabled` and
+- [x] Implement or reserve `swim_upward_correction_enabled` and
   `swim_upward_coef`.
   - Validate: if active, a swim test proves the configured correction changes
     vertical movement; if reserved, Morrowind preset no longer suggests active
     correction.
 
-- [ ] Implement `step_down_height` and `min_step_height` or mark them reserved.
+- [x] Implement `step_down_height` and `min_step_height` or mark them reserved.
   - Validate: if active, step-solver tests prove the values affect down-step
     search and minimum step acceptance.
 
-- [ ] Update movement config docs and preset notes.
+- [x] Update movement config docs and preset notes.
   - Validate: a future modder can tell which fields affect behavior.
 
 ## Phase 4: Visual Test Input Actions and State/Docs Cleanup
 
-- [ ] Add visual-test actions for character-controller preset selection,
+- [x] Add visual-test actions for character-controller preset selection,
   debug-HUD toggle, and KF/bone dump.
   - Validate: `InputActions.verify()` or a focused test protects the new
     action names.
 
-- [ ] Replace raw keycode handling in
+- [x] Replace raw keycode handling in
   `tests/visual/test_character_controller.gd` for those scene-specific
   controls.
   - Validate: static check finds no `KEY_1..KEY_5`, `KEY_F1`, or `KEY_F2`
     branch in that file.
 
-- [ ] Clarify or split jumping/airborne movement state semantics.
+- [x] Clarify or split jumping/airborne movement state semantics.
   - Validate: comments/docs/tests no longer imply `is_jumping` means upward
     velocity if the code also sets it while falling.
 
-- [ ] Update stale doc paths and ownership comments.
+- [x] Update stale doc paths and ownership comments.
   - Validate: no comments in the audited files point to
     `docs/INTERACTION_SYSTEM.md`, `docs/INPUT_SYSTEM.md`, or `.claude/CLAUDE.md`
     as current handoff docs.
 
-- [ ] Reconcile `docs/STATUS.md` with current interaction/carry integration.
+- [x] Reconcile `docs/STATUS.md` with current interaction/carry integration.
   - Validate: `STATUS.md` no longer says carry is kinematic direct-transform
     logic or that main-scene wiring is absent.
 
 ## Phase 5: Integrated Verification and Review
 
-- [ ] Human/user runs the targeted character-controller/interaction gdUnit
+- [x] Human/user runs the targeted character-controller/interaction gdUnit
   scene.
   - Validate: newest relevant `reports/report_<number>/results.xml` has zero
     failures/errors for the targeted suite.
 
-- [ ] Human/user opens `tests/visual/test_character_controller.tscn`.
+- [x] Human/user opens `tests/visual/test_character_controller.tscn`.
   - Validate: movement, visual-test actions, prompt suppression, and any
     changed config behavior work.
 
-- [ ] Human/user opens `scenes/Godotwind.tscn`.
+- [x] Human/user opens `scenes/Godotwind.tscn`.
   - Validate: fly/player switching, streaming movement, available interaction,
     carry, and teleport/interior paths behave according to `validation.md`.
+  - Status: available visual subset passed; copied logs show no
+    controller/input/interaction warnings or errors; interaction/carry/interior
+    items are blocked future integration gates until those main-scene paths
+    exist.
 
-- [ ] Record validation results in `review.md`.
+- [x] Record validation results in `review.md`.
   - Validate: review names completed checks, blocked checks, and any residual
     risk.
 
+## Phase 6: Next Implementation Slice
+
+- [x] Begin Phase 6 from the completed hardening baseline.
+  - Validate: Phases 1-5 were not reopened; the first follow-up slice adds
+    practical automated step-solver category fixtures on top of the verified
+    baseline.
+
+- [x] Classify deferred main-scene interaction/carry/interior smoke as blocked
+  until the required scene elements or content paths are implemented.
+  - Deferred checks:
+    - available interact/carry paths behave;
+    - prompts hide while carrying and return after release;
+    - teleport/interior paths do not visibly streak.
+  - Validate: not a hardening failure and not a Phase 8; these checks move to
+    a future interaction/carry/interior integration feature.
+
 ## Cleanup
 
-- [ ] Remove temporary debug code that is not part of planned validation.
-- [ ] Keep comments limited to non-obvious active-context, interpolation, or
+- [x] Remove temporary debug code that is not part of planned validation.
+- [x] Keep comments limited to non-obvious active-context, interpolation, or
   reserved-config rationale.
-- [ ] Confirm no new autoload was added.
-- [ ] Confirm no Morrowind-specific assumptions leaked into generic framework
+- [x] Confirm no new autoload was added.
+- [x] Confirm no Morrowind-specific assumptions leaked into generic framework
   code.
-- [ ] Confirm no shader files changed. If they unexpectedly changed, follow the
+- [x] Confirm no shader files changed. If they unexpectedly changed, follow the
   shader cache/import verification rule before visual validation.

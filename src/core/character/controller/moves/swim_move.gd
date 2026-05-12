@@ -46,12 +46,13 @@ func update(input: InputPackage, delta: float) -> void:
 
 	if input.input_direction != Vector2.ZERO:
 		var facing: Node3D = character_root if character_root else player
-		var face_dir := (input.camera_basis * Vector3(
-			input.input_direction.x, 0.0, input.input_direction.y)).normalized()
-		var face_direction := -facing.basis.z
-		var angle := face_direction.signed_angle_to(face_dir, Vector3.UP)
-		facing.rotate_y(clampf(angle,
-			-config.swim_tracking_angular_speed * delta, config.swim_tracking_angular_speed * delta))
+		if facing and config.turn_to_movement_direction:
+			var face_dir := (input.camera_basis * Vector3(
+				input.input_direction.x, 0.0, input.input_direction.y)).normalized()
+			var face_direction := -facing.basis.z
+			var angle := face_direction.signed_angle_to(face_dir, Vector3.UP)
+			facing.rotate_y(clampf(angle,
+				-config.swim_tracking_angular_speed * delta, config.swim_tracking_angular_speed * delta))
 
 
 func _apply_swim_jump(input: InputPackage, config: CharacterMovementConfig, delta: float) -> void:

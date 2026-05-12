@@ -14,6 +14,63 @@
   debug/preset controls.
 - Docs and comments describe the current architecture.
 
+## Recorded Results
+
+- Phase 4 targeted gdUnit: human/user ran
+  `res://tests/run_character_controller_phase0.tscn` on 2026-05-12 and
+  produced `reports/report_213/results.xml`.
+  `test_character_controller_phase0_baseline` passed: 50 tests, 0 failures,
+  0 errors, 0 skipped.
+- Phase 4 visual controller scene: human/user ran
+  `tests/visual/test_character_controller.tscn` on 2026-05-12 and confirmed it
+  works after the InputMap action migration.
+- Phase 2 teleport interpolation visual scene: human/user ran
+  `tests/visual/test_teleport_interpolation_reset.tscn` on 2026-05-12 and
+  confirmed it works.
+- Phase 5 static cleanup: Codex rechecked `reports/report_213/results.xml`
+  and the hardening-scope diff. The targeted suite remains green at 50 tests,
+  0 failures, 0 errors, 0 skipped. No shader files changed, no new autoload was
+  added, and shader cache/import clearing is not required for this package.
+- Phase 5 main-scene visual smoke: human/user launched
+  `scenes/Godotwind.tscn` and reported fly/player switching, movement, sprint,
+  jump, crouch, camera toggle, and streaming boundary crossing all work.
+- Phase 5 main-scene deferred checks: available interact/carry paths, prompt
+  hide/return while carrying, and teleport/interior streak checks are deferred
+  until those main-scene elements or content paths are implemented.
+- Phase 5 console/log review: human/user copied `crash_breadcrumb.txt`,
+  `crash_report.txt`, `debug_report.txt`, and `godot.log` from the Godot user
+  data logs to `C:\Users\pc\Desktop\godot logs\`. Codex read them on
+  2026-05-12. `crash_report.txt` says "No errors recorded";
+  `debug_report.txt` says "Errors captured: 0" and "No errors"; `godot.log`
+  has no `SCRIPT ERROR`, no `SCRIPT WARNING`, and zero `[WARN]` / `[ERROR]`
+  entries for `controller`, `input`, or `interaction`.
+- Phase 6 start: Codex began the next implementation slice by adding a
+  scripted step-solver gdUnit fixture on top of the completed hardening
+  baseline. Human/user Godot validation is pending; expected focused
+  character-controller suite count is now 51 tests if no other tests are added
+  before the run.
+- Phase 6 first run: human/user ran the focused suite and produced
+  `reports/report_214/results.xml`: 51 tests, 1 failure, 0 errors. The one
+  failure was the new step-solver scripted fixture overasserting that a tall
+  wall should have zero forward contact travel. The solver did not climb the
+  tall wall; Codex tightened the fixture to assert the no-climb contract.
+- Phase 6 rerun: human/user reran the focused suite and produced
+  `reports/report_215/results.xml`: 51 tests, 0 failures, 0 errors, 0 skipped.
+  The report includes `test_phase6_step_solver_scripted_fixture_categories`.
+- Phase 7 main-scene smoke follow-up: human/user confirmed fly/player switch,
+  movement, sprint, jump, crouch, camera toggle, streaming boundaries, and
+  water all work. Interaction/carry/interior checks remain blocked by missing
+  dependent main-scene content paths, not failed.
+- Phase 7 updated log review: `crash_report.txt` says "No errors recorded";
+  `debug_report.txt` says "Errors captured: 0" and "No errors"; `godot.log`
+  has zero `SCRIPT ERROR` / `SCRIPT WARNING` entries and zero
+  controller/input/interaction/player/animation/water/swim warnings or errors.
+  Unrelated streaming/autopsy, missing static collision shape sidecar, and
+  shutdown resource-leak warnings remain outside this controller scope.
+- Closure: the hardening package is complete for available content. There is no
+  Phase 8; interaction/carry/interior checks remain blocked future integration
+  gates.
+
 ## Shared Godot Limitation
 
 Current Codex limitation: Codex cannot reliably launch the Godot engine from
@@ -113,7 +170,10 @@ Command or procedure:
 Expected result:
 
 - New visual-test action names exist in `project.godot` and
-  `InputActions.VISUAL_TEST`.
+  `InputActions.VISUAL_TEST`:
+  `character_controller_preset_1..5`,
+  `character_controller_toggle_debug_hud`, and
+  `character_controller_dump_kf_bones`.
 - `tests/visual/test_character_controller.gd` no longer branches on raw
   `KEY_1..KEY_5`, `KEY_F1`, or `KEY_F2` for its scene-specific controls.
 - Jump/airborne semantics are named or documented accurately.
@@ -207,6 +267,12 @@ Purpose:
   physics-interpolation streaks.
 - Exercise `PlayerController.teleport_to()`, `FlyCamera.teleport_to()`, and
   direct transition-style body/camera transform writes.
+- The rebuilt scene uses an editor-authored board, fixed overview camera, and
+  preauthored visible probes so the board remains visible even if the movement
+  script does not behave as expected.
+- The scene temporarily sets `Engine.physics_ticks_per_second` to 10 while it
+  runs, then restores the previous value on exit. This follows Godot's
+  interpolation debugging advice and makes any missing reset easier to see.
 
 Controls:
 
@@ -219,6 +285,8 @@ Controls:
 
 Checklist:
 
+- [ ] Confirm the board is visible immediately: three lanes, colored start and
+      destination pads, and HUD text.
 - [ ] Trigger the player probe several times and watch for an instant jump
       between its pads.
 - [ ] Trigger the fly-camera probe several times and watch for an instant jump
@@ -248,26 +316,23 @@ D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/go
 Checklist:
 
 - [ ] Start in fly camera mode.
-- [ ] Tap/hold `interact` in fly mode against available interactable content.
 - [ ] Switch to player mode.
 - [ ] Move, sprint, jump, crouch, and toggle camera.
-- [ ] Tap/hold `interact` in player mode against available interactable
-      content.
-- [ ] Carry an item if content exists.
-- [ ] Confirm prompts hide while carrying and return after release.
-- [ ] Teleport to a cell or switch modes in a way that calls
-      `PlayerController.teleport_to()`.
-- [ ] Use an interior/seamless transition if content exists.
 - [ ] Cross streaming cell boundaries.
 - [ ] Check console/log for controller, input, interaction, or interpolation
       errors.
 
 Expected result:
 
-- The active mode alone handles interaction.
-- Teleports do not visibly streak.
-- Carry release/drop restores collision behavior.
+- Fly/player mode switching, movement, camera toggle, and streaming remain
+  stable.
 - No new controller/interaction errors appear.
+
+Deferred until the required main-scene elements are implemented:
+
+- Available interact/carry paths behave.
+- Prompts hide while carrying and return after release.
+- Teleport/interior paths do not visibly streak.
 
 ## Performance Check
 
@@ -284,7 +349,7 @@ Budget or target:
 How to measure:
 
 - Static review for new loops/queries.
-- Human/user watches frame-time/log warnings during the main scene smoke.
+- Human/user watches frame-time during the main scene smoke.
 
 ## Modding Check
 

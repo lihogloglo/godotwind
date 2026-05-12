@@ -25,6 +25,7 @@ const PlayerControllerScript := preload("res://src/core/player/player_controller
 const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
 const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
 const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
+const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const AnimationManagerScript := preload("res://src/core/animation/animation_manager.gd")
 const MoveScript := preload("res://src/core/character/controller/move.gd")
 const IdleMoveScript := preload("res://src/core/character/controller/moves/idle_move.gd")
@@ -38,6 +39,7 @@ const SwimMoveScript := preload("res://src/core/character/controller/moves/swim_
 const StepSolverScene := preload("res://tests/visual/test_character_controller_steps.tscn")
 const CarryPromptSuppressionScene := preload("res://tests/visual/test_carry_prompt_suppression.tscn")
 const TeleportInterpolationResetScene := preload("res://tests/visual/test_teleport_interpolation_reset.tscn")
+const CharacterControllerVisualScene := preload("res://tests/visual/test_character_controller.tscn")
 
 const TEST_ACTIONS: Array[StringName] = [
 	&"move_forward",
@@ -304,7 +306,32 @@ func test_held_swim_jump_repeats_as_impulse_after_cooldown() -> void:
 func test_movement_config_presets_load() -> void:
 	assert_bool(DefaultMovementConfigResource is CharacterMovementConfig).is_true()
 	assert_bool(MorrowindMovementConfigResource is CharacterMovementConfig).is_true()
-	assert_bool(MorrowindMovementConfigResource.swim_upward_correction_enabled).is_true()
+	assert_bool(MorrowindMovementConfigResource.swim_upward_correction_enabled).is_false()
+
+
+func test_movement_config_status_table_covers_exported_fields() -> void:
+	var config := CharacterMovementConfigScript.new() as CharacterMovementConfig
+	var statuses := CharacterMovementConfig.get_exported_field_statuses()
+	var missing: Array[StringName] = []
+
+	for property: Dictionary in config.get_property_list():
+		var usage := int(property.get("usage", 0))
+		if (usage & PROPERTY_USAGE_SCRIPT_VARIABLE) == 0:
+			continue
+		if (usage & PROPERTY_USAGE_EDITOR) == 0:
+			continue
+		var field_name := StringName(str(property.get("name", "")))
+		if not statuses.has(field_name):
+			missing.append(field_name)
+
+	assert_int(missing.size()).is_equal(0)
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"turn_to_movement_direction"))).is_equal("active")
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"step_down_height"))).is_equal("active")
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"min_step_height"))).is_equal("active")
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"smooth_movement"))).is_equal("reserved")
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"smooth_player_turning_delay"))).is_equal("reserved")
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"swim_upward_correction_enabled"))).is_equal("reserved")
+	assert_str(str(CharacterMovementConfig.get_exported_field_status(&"swim_upward_coef"))).is_equal("reserved")
 
 func test_movement_config_controls_run_speed() -> void:
 	var mc := _make_locomotion_container()
@@ -320,6 +347,24 @@ func test_movement_config_controls_run_speed() -> void:
 	run._update(pkg, 1.0 / 60.0)
 
 	assert_float(absf(mc.player.velocity.z)).is_equal_approx(11.0, 0.001)
+
+
+func test_turn_to_movement_direction_false_prevents_auto_turning() -> void:
+	var mc := _make_locomotion_container()
+	var config := CharacterMovementConfigScript.new() as CharacterMovementConfig
+	config.turn_to_movement_direction = false
+	config.run_speed = 6.0
+	config.backward_angle_degrees = 170.0
+	mc.set_movement_config(config)
+
+	var run := mc.get_move(&"run")
+	var pkg := _make_input_package([&"idle", &"run"])
+	pkg.input_direction = Vector2(1.0, 0.0)
+	run._update(pkg, 1.0 / 60.0)
+
+	assert_float(mc.character_root.rotation.y).is_equal_approx(0.0, 0.001)
+	assert_float(mc.player.velocity.x).is_equal_approx(6.0, 0.001)
+	assert_float(mc.player.velocity.z).is_equal_approx(0.0, 0.001)
 
 
 func test_movement_config_controls_jump_velocity() -> void:
@@ -341,6 +386,18 @@ func test_movement_config_controls_step_height() -> void:
 	mc.set_movement_config(config)
 
 	assert_float(mc.max_step_height).is_equal_approx(0.72, 0.001)
+
+
+func test_movement_config_controls_step_down_and_min_step_height() -> void:
+	var mc := _make_locomotion_container()
+	var config := CharacterMovementConfigScript.new() as CharacterMovementConfig
+	config.step_down_height = 0.25
+	config.min_step_height = 0.15
+	mc.set_movement_config(config)
+
+	assert_float(mc._get_step_down_probe_distance(0.5)).is_equal_approx(0.75, 0.001)
+	assert_bool(mc._is_step_height_accepted(1.0, 1.14)).is_false()
+	assert_bool(mc._is_step_height_accepted(1.0, 1.16)).is_true()
 
 
 func test_movement_config_controls_backward_run_multiplier() -> void:
@@ -845,6 +902,24 @@ func test_phase6_step_visual_scene_exposes_required_cases() -> void:
 	assert_bool(InputMap.has_action(&"step_solver_respawn")).is_true()
 
 
+func test_phase6_step_solver_scripted_fixture_categories() -> void:
+	var small_step := await _run_step_solver_fixture(&"small_step")
+	assert_bool(bool(small_step[&"did_climb"])).is_true()
+	assert_bool(bool(small_step[&"moved_forward"])).is_true()
+
+	var tall_wall := await _run_step_solver_fixture(&"tall_wall")
+	assert_bool(bool(tall_wall[&"did_climb"])).is_false()
+
+	var ceiling_blocked := await _run_step_solver_fixture(&"ceiling_blocked_step")
+	assert_bool(bool(ceiling_blocked[&"did_climb"])).is_false()
+
+	var no_floor := await _run_step_solver_fixture(&"down_step_no_floor")
+	assert_bool(bool(no_floor[&"did_climb"])).is_false()
+
+	var rigidbody_obstacle := await _run_step_solver_fixture(&"rigidbody_obstacle")
+	assert_bool(bool(rigidbody_obstacle[&"did_climb"])).is_false()
+
+
 # --- Post-Phase 7 Phase 2 visual validation surfaces ------------------------
 
 func test_phase2_carry_prompt_visual_scene_exposes_required_cases() -> void:
@@ -885,7 +960,169 @@ func test_phase2_teleport_visual_scene_exposes_required_cases_and_actions() -> v
 		assert_bool(InputMap.has_action(StringName(str(action_name)))).is_true()
 
 
+# --- Post-Phase 7 Phase 4 visual input and state contracts -------------------
+
+func test_phase4_character_controller_visual_actions_are_registered() -> void:
+	var expected_actions := [
+		&"character_controller_preset_1",
+		&"character_controller_preset_2",
+		&"character_controller_preset_3",
+		&"character_controller_preset_4",
+		&"character_controller_preset_5",
+		&"character_controller_toggle_debug_hud",
+		&"character_controller_dump_kf_bones",
+	]
+
+	var scene := CharacterControllerVisualScene.instantiate()
+	auto_free(scene)
+	assert_bool(scene.has_method("get_visual_test_action_names")).is_true()
+	var scene_actions := Array(scene.get_visual_test_action_names())
+
+	for action_name in expected_actions:
+		assert_bool(InputMap.has_action(action_name)).is_true()
+		assert_bool(InputActionsScript.VISUAL_TEST.has(action_name)).is_true()
+		assert_bool(scene_actions.has(action_name)).is_true()
+
+
+func test_phase4_character_controller_visual_scene_uses_input_actions_for_debug_controls() -> void:
+	var source := FileAccess.get_file_as_string("res://tests/visual/test_character_controller.gd")
+
+	assert_bool(source.contains("KEY_1")).is_false()
+	assert_bool(source.contains("KEY_2")).is_false()
+	assert_bool(source.contains("KEY_3")).is_false()
+	assert_bool(source.contains("KEY_4")).is_false()
+	assert_bool(source.contains("KEY_5")).is_false()
+	assert_bool(source.contains("KEY_F1")).is_false()
+	assert_bool(source.contains("KEY_F2")).is_false()
+	assert_bool(source.contains("event.keycode")).is_false()
+
+
+func test_phase4_movement_state_splits_jump_move_from_airborne_state() -> void:
+	var mc := _make_locomotion_container()
+	var pkg := _make_input_package([])
+
+	mc.switch_to(&"midair")
+	mc._publish_movement_state(pkg)
+	var midair_state := mc.get_movement_state()
+	assert_bool(midair_state.is_airborne).is_true()
+	assert_bool(midair_state.is_jump_move).is_false()
+	assert_bool(midair_state.is_jumping).is_true()
+
+	mc.switch_to(&"jump")
+	mc._publish_movement_state(pkg)
+	var jump_state := mc.get_movement_state()
+	assert_bool(jump_state.is_airborne).is_true()
+	assert_bool(jump_state.is_jump_move).is_true()
+	assert_bool(jump_state.is_jumping).is_true()
+
+
 # --- Helpers ----------------------------------------------------------------
+
+func _run_step_solver_fixture(step_case: StringName) -> Dictionary:
+	var root := Node3D.new()
+	root.name = "StepSolverFixture_%s" % step_case
+	add_child(root)
+	auto_free(root)
+
+	_add_step_fixture_floor(root, "ApproachFloor", Vector3(0.0, -0.05, 1.6), Vector3(3.0, 0.1, 4.0))
+	match step_case:
+		&"small_step":
+			_add_step_fixture_floor(root, "LandingFloor", Vector3(0.0, 0.25, -1.2), Vector3(3.0, 0.1, 3.0))
+			_add_step_fixture_static_box(root, "SmallStepBlock", Vector3(0.0, 0.15, 0.45), Vector3(2.0, 0.3, 0.4))
+		&"tall_wall":
+			_add_step_fixture_floor(root, "LandingFloor", Vector3(0.0, 0.0, -1.2), Vector3(3.0, 0.1, 3.0))
+			_add_step_fixture_static_box(root, "TallWallBlock", Vector3(0.0, 0.7, 0.45), Vector3(2.0, 1.4, 0.4))
+		&"ceiling_blocked_step":
+			_add_step_fixture_floor(root, "LandingFloor", Vector3(0.0, 0.25, -1.2), Vector3(3.0, 0.1, 3.0))
+			_add_step_fixture_static_box(root, "CeilingStepBlock", Vector3(0.0, 0.15, 0.45), Vector3(2.0, 0.3, 0.4))
+			_add_step_fixture_static_box(root, "LowCeiling", Vector3(0.0, 1.95, 0.35), Vector3(2.4, 0.2, 1.6))
+		&"down_step_no_floor":
+			pass
+		&"rigidbody_obstacle":
+			_add_step_fixture_floor(root, "LandingFloor", Vector3(0.0, 0.0, -1.2), Vector3(3.0, 0.1, 3.0))
+			_add_step_fixture_rigidbody_box(root, "PushableCrate", Vector3(0.0, 0.35, 0.45), Vector3(0.7, 0.7, 0.7))
+
+	var player := CharacterBody3D.new()
+	player.name = "FixturePlayer"
+	player.collision_layer = GameplayPhysicsLayersScript.PLAYER
+	player.collision_mask = GameplayPhysicsLayersScript.ENVIRONMENT | GameplayPhysicsLayersScript.CARRYABLE_LAYER
+	player.floor_snap_length = 0.15
+	player.global_position = Vector3(0.0, 0.0, 1.15)
+	var player_shape := CollisionShape3D.new()
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = 0.3
+	capsule.height = 1.8
+	player_shape.shape = capsule
+	player_shape.position.y = 0.9
+	player.add_child(player_shape)
+	root.add_child(player)
+
+	var mc := MoveContainerScript.new() as MoveContainer
+	mc.player = player
+	var config := CharacterMovementConfigScript.new() as CharacterMovementConfig
+	config.step_up_height = 0.45
+	config.step_down_height = 0.45
+	config.min_step_height = 0.0
+	mc.set_movement_config(config)
+	root.add_child(mc)
+
+	await get_tree().physics_frame
+	player.velocity = Vector3.DOWN
+	player.move_and_slide()
+	await get_tree().physics_frame
+
+	var initial_position := player.global_position
+	player.velocity = Vector3(0.0, 0.0, -5.0)
+	mc._move_with_step_up(0.12)
+	await get_tree().physics_frame
+
+	var final_position := player.global_position
+	return {
+		&"did_climb": final_position.y > initial_position.y + 0.08,
+		&"moved_forward": final_position.z < initial_position.z - 0.08,
+		&"initial_position": initial_position,
+		&"final_position": final_position,
+	}
+
+
+func _add_step_fixture_floor(root: Node3D, body_name: String, pos: Vector3, size: Vector3) -> StaticBody3D:
+	return _add_step_fixture_static_box(root, body_name, pos, size)
+
+
+func _add_step_fixture_static_box(root: Node3D, body_name: String, pos: Vector3, size: Vector3) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = body_name
+	body.position = pos
+	body.collision_layer = GameplayPhysicsLayersScript.ENVIRONMENT
+	body.collision_mask = GameplayPhysicsLayersScript.PLAYER
+
+	var shape := BoxShape3D.new()
+	shape.size = size
+	var collision := CollisionShape3D.new()
+	collision.shape = shape
+	body.add_child(collision)
+
+	root.add_child(body)
+	return body
+
+
+func _add_step_fixture_rigidbody_box(root: Node3D, body_name: String, pos: Vector3, size: Vector3) -> RigidBody3D:
+	var body := RigidBody3D.new()
+	body.name = body_name
+	body.position = pos
+	body.mass = 1.0
+	body.collision_layer = GameplayPhysicsLayersScript.CARRYABLE_LAYER
+	body.collision_mask = GameplayPhysicsLayersScript.ENVIRONMENT | GameplayPhysicsLayersScript.PLAYER
+
+	var shape := BoxShape3D.new()
+	shape.size = size
+	var collision := CollisionShape3D.new()
+	collision.shape = shape
+	body.add_child(collision)
+
+	root.add_child(body)
+	return body
+
 
 func _make_locomotion_container() -> MoveContainer:
 	var mc := MoveContainerScript.new() as MoveContainer

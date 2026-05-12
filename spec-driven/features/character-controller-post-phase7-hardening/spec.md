@@ -213,10 +213,6 @@ Shared systems must not hard-code:
 
 ## Open Questions
 
-- Should `smooth_movement` and `smooth_player_turning_delay` be implemented now
-  as turn smoothing, or marked reserved until a clearer animation/motion spec?
-- Should `swim_upward_correction_enabled` be retained, implemented, or folded
-  into the current swim-jump/surface-clamp behavior?
 - Should `InteractionRaycaster` own prompt suppression through a generic
   callable, or should prompt UI callbacks suppress based on active carry state?
 - Should the public movement state split `is_jumping` into `is_airborne` and
@@ -229,3 +225,6 @@ Shared systems must not hard-code:
 | 2026-05-10 | Use explicit active input contexts over Source-style noclip rewrite. | Fits current fly/player architecture with the smallest canonical repair. |
 | 2026-05-10 | Keep this feature scoped to hardening/docs/tests, not a full interaction rewrite. | The Phase 7 ownership model is sound; audit findings are contract drift and small correctness gaps. |
 | 2026-05-10 | Runtime/editor validation remains human-run. | Codex cannot reliably launch Godot in this workspace per project rule. |
+| 2026-05-12 | Mark `smooth_movement` and `smooth_player_turning_delay` reserved. | Movement smoothing needs a future feel/animation/camera spec; inventing semantics here would make mod-facing behavior misleading. |
+| 2026-05-12 | Mark `swim_upward_correction_enabled` and `swim_upward_coef` reserved. | Current swimming already uses camera-relative pitch, buoyancy, surface clamp, and swim-stroke impulse fields; the old upward-correction names no longer describe the active model. |
+| 2026-05-12 | Implement `turn_to_movement_direction`, `step_down_height`, and `min_step_height`. | These map cleanly onto existing turn tracking and step-solver decisions without a broader movement rewrite. |

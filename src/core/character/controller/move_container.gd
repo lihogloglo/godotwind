@@ -180,7 +180,9 @@ func _publish_movement_state(input: InputPackage) -> void:
 	movement_state.is_sprinting = active_name == &"sprint"
 	movement_state.is_walking = active_name == &"walk"
 	movement_state.is_crouching = active_name == &"crouch"
-	movement_state.is_jumping = active_name == &"jump" or active_name == &"midair"
+	movement_state.is_jump_move = active_name == &"jump"
+	movement_state.is_airborne = active_name == &"jump" or active_name == &"midair"
+	movement_state.is_jumping = movement_state.is_airborne
 	movement_state.is_swimming = active_name == &"swim" or active_name == &"swim_idle"
 	movement_state.elapsed_time = current_move.get_progress() if current_move else 0.0
 
@@ -370,7 +372,7 @@ func _move_with_step_up(delta: float) -> void:
 	player.global_position += forward_travel
 
 	# 3. Down-trace: snap onto the step surface below.
-	var down_motion: Vector3 = Vector3.DOWN * (up_distance + max_step_height)
+	var down_motion: Vector3 = Vector3.DOWN * _get_step_down_probe_distance(up_distance)
 	var down_collision: KinematicCollision3D = KinematicCollision3D.new()
 	var down_hit: bool = player.test_move(
 		player.global_transform, down_motion, down_collision)
@@ -391,6 +393,13 @@ func _move_with_step_up(delta: float) -> void:
 		player.move_and_slide()
 		return
 
+	var landing_y: float = player.global_position.y + down_collision.get_travel().y
+	if not _is_step_height_accepted(original_position.y, landing_y):
+		player.global_position = original_position
+		player.velocity = original_velocity
+		player.move_and_slide()
+		return
+
 	# ----- Phase D: commit the step ---------------------------------------
 	# Apply the downward travel, restore horizontal velocity, null vy so
 	# gravity doesn't immediately fight the new floor contact. A single
@@ -401,6 +410,16 @@ func _move_with_step_up(delta: float) -> void:
 	player.velocity = original_velocity
 	player.velocity.y = 0.0
 	player.move_and_slide()
+
+
+func _get_step_down_probe_distance(up_distance: float) -> float:
+	var config := movement_config if movement_config else _DefaultMovementConfig
+	return up_distance + config.step_down_height
+
+
+func _is_step_height_accepted(original_y: float, landing_y: float) -> bool:
+	var config := movement_config if movement_config else _DefaultMovementConfig
+	return landing_y - original_y >= config.min_step_height
 
 
 ## Push the player out of penetrating geometry. Runs every frame at the top

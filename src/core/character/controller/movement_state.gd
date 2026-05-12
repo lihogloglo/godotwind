@@ -17,6 +17,10 @@ var velocity: Vector3 = Vector3.ZERO
 var is_sprinting: bool = false
 var is_walking: bool = false
 var is_crouching: bool = false
+var is_airborne: bool = false
+var is_jump_move: bool = false
+## Compatibility alias for "jump-family airborne state" (`jump` or `midair`).
+## Use `is_jump_move` for the actual launch move and `is_airborne` for falling.
 var is_jumping: bool = false
 var is_swimming: bool = false
 var elapsed_time: float = 0.0
@@ -36,6 +40,8 @@ func copy_from(other: MovementState) -> void:
 	is_sprinting = other.is_sprinting
 	is_walking = other.is_walking
 	is_crouching = other.is_crouching
+	is_airborne = other.is_airborne
+	is_jump_move = other.is_jump_move
 	is_jumping = other.is_jumping
 	is_swimming = other.is_swimming
 	elapsed_time = other.elapsed_time

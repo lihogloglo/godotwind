@@ -1,20 +1,26 @@
 # Review: Character Controller Productionization
 
 Date: 2026-05-10
-Status: Phase 6 visual step-solver rig passed; Phase 5 manual carry/interior validation remains blocked by content/integration availability
+Status: Complete for available content; no Phase 8. Interaction/carry/interior
+main-scene validation is blocked by dependent integration/content paths.
 
 ## Plan Review Notes
 
 - The plan follows the audit's core diagnosis: fix ownership and data flow, not isolated symptoms only.
 - The first runtime phase is intentionally small and should be safe to review independently.
 - Morrowind behavior is planned as a preset/adapter, preserving the framework boundary.
-- The final production claim is deferred until an interactive main-scene smoke pass is completed with the user.
+- The final available-content production claim was completed through human-run
+  main-scene smoke and log review. Interaction/carry/interior remain blocked
+  future integration gates.
 
 ## Implementation Review
 
-Phase 5 gameplay physics layer draft passed human-run gdUnit. Manual
-carry/interior validation is blocked until an integrated playable path has both
-usable carryable items and interiors/seamless doorways available.
+The character-controller productionization pass is closed as complete for
+available content. Human-run gdUnit, focused visual scenes, step-solver
+validation, main-scene movement/streaming/water smoke, and controller-scope log
+review passed. Manual interaction/carry/interior validation is intentionally
+classified as blocked until an integrated playable path has both usable
+carryable items and interiors/seamless doorways available.
 
 ## Codex Runtime Limitation
 
@@ -42,7 +48,8 @@ Phase 1:
 - Editor-run gdUnit report `reports/report_199/results.xml` passed: 8 tests, 0 failures, 0 errors.
 - The passing test names confirm the new Phase 1 contracts ran: one push pass, moving crouch resolves to crouch, walk remains intentionally unbound, and swim pitch uses water context during input gathering.
 - Command-line Godot verification is still blocked locally by the same Godot 4.6.2 Mono signal-11 crash seen in Phase 0.
-- Visual/main-scene checks remain pending human/user verification.
+- Visual/main-scene checks were completed in later phases; see the Phase 7
+  result below.
 
 Phase 2:
 
@@ -239,7 +246,8 @@ Phase 7 main-scene production smoke, partial:
   - toggling from fly camera to player mode;
   - movement, sprint, jump, and crouch;
   - first/third-person camera toggle;
-  - crossing streaming cell boundaries.
+  - crossing streaming cell boundaries;
+  - entering/exiting water and swimming.
 - Interaction, carry, drop, throw, and carry-through-interior checklist items
   could not currently be tested because dependent systems/content paths are not
   complete enough to exercise them in the main scene. These are recorded as
@@ -256,17 +264,26 @@ Phase 7 main-scene production smoke, partial:
   missing-shape sidecar warnings, and shutdown-time RID/resource leak reports.
   These should be tracked under streaming/rendering/resource-cleanup work, not
   as Phase 7 controller smoke failures.
+- Follow-up Phase 7 log review after the water-inclusive smoke passed for the
+  controller scope. `crash_report.txt` says "No errors recorded";
+  `debug_report.txt` says "Errors captured: 0" and "No errors"; `godot.log`
+  has zero `SCRIPT ERROR` / `SCRIPT WARNING` entries and zero warnings or
+  errors matching controller, input, interaction, player, animation, water, or
+  swim. Positive path lines include `Interaction framework wired`, `IKController.setup`,
+  `MoveContainer: Accepted 9 moves`, `Player character attached: fargoth`, and
+  `Switched to PLAYER mode`.
 
 ## Open Risks
 
 - The Morrowind preset may need a later actor-stat adapter; Phase 2 should not overbuild that before stats/fatigue/encumbrance are ready.
 - Main-scene verification depends on the user's local content and visual checks.
-- Phase 7 main-scene movement/camera/streaming smoke passed for the tested
-  subset. Interaction/carry/drop/throw/interior validation remains blocked by
-  dependent systems/content availability.
-- Phase 7 log/error review for the supplied smoke output found no controller
-  errors. Unrelated streaming/collision/shutdown warnings remain outside this
-  feature's acceptance scope.
+- Phase 7 main-scene movement/camera/streaming/water smoke passed for the
+  tested subset. Interaction/carry/drop/throw/interior validation remains
+  blocked by dependent systems/content availability.
+- Phase 7 log/error review for the supplied smoke output found no controller,
+  input, interaction, player, animation, water, or swim warnings/errors.
+  Unrelated streaming/collision/shutdown warnings remain outside this feature's
+  acceptance scope.
 - Focused visual verification for Phase 3 still needs a human/user editor-run
   pass because Codex cannot reliably launch Godot here.
 - Phase 4 jump-grace automated and in-game validation are complete.
@@ -274,8 +291,7 @@ Phase 7 main-scene production smoke, partial:
   validation is blocked by content/integration availability.
 - Water re-entry/swim-jump automated and visual validation are complete.
 - Phase 6 visual step-solver validation is complete. Scripted physics fixtures
-  for step categories remain optional follow-up work if the next session wants
-  more automated coverage.
+  for step categories passed in `reports/report_215/results.xml`.
 
 ## Next Session Handoff
 
@@ -305,6 +321,9 @@ Current status:
 - Phase 5 core implementation complete.
 - Water visual regression follow-up complete.
 - Phase 6 visual step-solver contract complete.
+- Phase 7 main-scene production smoke complete for available content.
+- Productionization pass closed as complete for available content. There is no
+  Phase 8 in this package.
 
 Latest verified reports/results:
 
@@ -316,7 +335,7 @@ Latest verified reports/results:
   reported the character-controller gdUnit tests all pass. Expected result:
   39 tests, 0 failures, 0 errors. Report path was not provided in chat.
 
-Phase 5 remaining:
+Blocked future validation gates:
 
 - Manual carry/interior smoke is blocked, not failed.
 - Reason: there is still no confirmed integrated playable path with both usable
@@ -324,6 +343,8 @@ Phase 5 remaining:
 - When content/integration exists, test: carry an item through an
   interior/seamless doorway, confirm it does not push the player, release/drop
   it, and confirm normal collision behavior restores.
+- Also validate interaction/carry/drop/throw, prompt suppression in main-scene
+  content, and real teleport/interior interpolation reset paths.
 
 Water follow-up status:
 
@@ -346,36 +367,22 @@ Phase 6 completed:
   respawn.
 - No solver code was tuned or rewritten. `_move_with_step_up()` remains on the
   current canonical up/forward/down probe architecture.
+- Phase 6 automated follow-up has started:
+  `test_phase6_step_solver_scripted_fixture_categories` adds tiny scripted
+  physics fixtures for broad category checks: small step climbs, tall wall
+  does not climb, ceiling-blocked step does not climb, no-floor case gains no
+  height, and rigidbody obstacle does not get treated as a static step.
+  Human/user reran the focused gdUnit scene and produced
+  `reports/report_215/results.xml`: 51 tests, 0 failures, 0 errors, 0 skipped.
 
 Recommended next-session instruction:
 
-Begin from Phase 6 follow-up or Phase 7, but do not tune the step solver unless
-new evidence appears. The measuring rig passed visually after scene fixes.
+Do not create Phase 8 in this package. If the blocked interaction/carry/interior
+items become actionable, start a new spec package for that integration slice and
+use this review as the controller baseline. Keep step-solver tuning through
+`CharacterMovementConfig` only and avoid rewriting `_move_with_step_up()` unless
+new tests show the canonical up/forward/down probe architecture is wrong.
 
-If continuing Phase 6, make it automated-fixture work:
-
-- Add scripted physics fixtures only where practical.
-- Assert categories, not pixel-perfect positions: small step gains height,
-  tall wall does not climb, ceiling-blocked step does not pop through, edge lip
-  does not create an artificial safe stair landing, rigidbody obstacle is
-  pushed rather than stepped onto.
-- Keep tuning through `CharacterMovementConfig` only.
-- Avoid rewriting `_move_with_step_up()` unless tests show the canonical
-  up/forward/down probe architecture is wrong.
-
-If moving to Phase 7, start with the main-scene production smoke checklist in
-`validation.md`:
-
-- launch `scenes/Godotwind.tscn`;
-- toggle from fly camera to player mode;
-- test movement, sprint, jump, crouch, first/third person;
-- cross streaming boundaries;
-- interact with a door/container/activator;
-- carry/drop/throw an item;
-- enter/exit water;
-- enter/exit an interior or seamless doorway while carrying, if content exists;
-- check console/log for controller errors.
-
-Codex cannot reliably launch Godot here; human/user must run gdUnit and visual
-checks. No C# or shader changes were made in the Phase 6 scene/respawn work, so
-no `dotnet build` or shader cache clearing is needed.
+Codex cannot reliably launch Godot here; human/user must run future gdUnit and
+visual checks. No C# or shader changes were made in this pass, so no
+`dotnet build` or shader cache clearing is needed.

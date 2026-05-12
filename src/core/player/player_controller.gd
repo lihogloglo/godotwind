@@ -165,8 +165,15 @@ var is_walking: bool = false
 ## Whether player is crouching
 var is_crouching: bool = false
 
-## Whether player is jumping (upward velocity while airborne)
+## Whether player is in the jump-family airborne state (`jump` or `midair`).
+## Kept as a compatibility alias; prefer `is_jump_move` or `is_airborne`.
 var is_jumping: bool = false
+
+## Whether player is in the actual launch move, before normal midair/fall state.
+var is_jump_move: bool = false
+
+## Whether player is in either launch or falling midair movement.
+var is_airborne: bool = false
 
 ## Whether player is swimming
 var is_swimming: bool = false
@@ -526,6 +533,8 @@ func _apply_movement_state(state: MovementState) -> void:
 	is_walking = state.is_walking
 	is_crouching = state.is_crouching
 	is_jumping = state.is_jumping
+	is_jump_move = state.is_jump_move
+	is_airborne = state.is_airborne
 	is_swimming = state.is_swimming
 	current_posture = state.posture
 	_apply_camera_posture(state.posture)
@@ -551,6 +560,8 @@ func _reset_public_movement_state() -> void:
 	is_sprinting = false
 	is_walking = false
 	is_jumping = false
+	is_jump_move = false
+	is_airborne = false
 
 
 ## Set camera mode (first or third person)

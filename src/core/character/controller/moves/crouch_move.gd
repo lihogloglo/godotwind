@@ -32,15 +32,8 @@ func update(input: InputPackage, delta: float) -> void:
 
 	# Movement while crouched - switch animation based on input direction
 	if input.input_direction != Vector2.ZERO:
-		var config := get_movement_config()
 		# Check if moving backward relative to facing
-		var input_dir_3d := (input.camera_basis * Vector3(
-			input.input_direction.x, 0.0, input.input_direction.y)).normalized()
-		var facing: Node3D = character_root if character_root else player
-		var face_direction := -facing.basis.z
-		var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
-
-		var target_anim: StringName = &"CrouchBack" if absf(angle) > config.get_backward_angle_radians() else &"CrouchWalk"
+		var target_anim: StringName = &"CrouchBack" if _is_backward_movement_input(input) else &"CrouchWalk"
 		if _current_crouch_anim != target_anim:
 			_current_crouch_anim = target_anim
 			if animator:
@@ -68,22 +61,9 @@ func on_exit_state() -> void:
 
 func _apply_crouch_movement(input: InputPackage, delta: float) -> void:
 	var config := get_movement_config()
-	var input_dir_3d := (input.camera_basis * Vector3(
-		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
-	var facing: Node3D = character_root if character_root else player
-	var face_direction := -facing.basis.z
-	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
-
-	var move_dir: Vector3
-	if absf(angle) > config.get_backward_angle_radians():
-		move_dir = -face_direction * config.crouch_speed * config.backward_speed_multiplier
-	elif absf(angle) >= config.ground_tracking_angular_speed * delta:
-		move_dir = face_direction.rotated(
-			Vector3.UP, signf(angle) * config.ground_tracking_angular_speed * delta) * config.crouch_speed
-		facing.rotate_y(signf(angle) * config.ground_tracking_angular_speed * delta)
-	else:
-		move_dir = face_direction.rotated(Vector3.UP, angle) * config.crouch_speed
-		facing.rotate_y(angle)
+	var move_dir := _resolve_tracked_motion(
+		input, delta, config.crouch_speed, config.crouch_speed,
+		config.ground_tracking_angular_speed)
 
 	player.velocity.x = move_dir.x
 	player.velocity.z = move_dir.z

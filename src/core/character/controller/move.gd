@@ -195,13 +195,56 @@ func should_enter_midair(input: InputPackage) -> bool:
 ## Called by locomotion moves that track input direction.
 ## Rotates character_root (not player, since camera is parented to player).
 func process_input_vector(input: InputPackage, delta: float) -> void:
-	var input_dir_3d := (input.camera_basis * Vector3(
+	_resolve_tracked_motion(input, delta, 0.0, 0.0, tracking_angular_speed, false)
+
+
+func _get_input_world_direction(input: InputPackage) -> Vector3:
+	if not input or input.input_direction == Vector2.ZERO:
+		return Vector3.ZERO
+	return (input.camera_basis * Vector3(
 		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
-	var facing: Node3D = character_root if character_root else player
+
+
+func _get_facing_node() -> Node3D:
+	return character_root if character_root else player
+
+
+func _is_backward_movement_input(input: InputPackage) -> bool:
+	var input_dir_3d := _get_input_world_direction(input)
+	var facing := _get_facing_node()
+	if input_dir_3d == Vector3.ZERO or not facing:
+		return false
+	var face_direction := -facing.basis.z
+	var config := get_movement_config()
+	return absf(face_direction.signed_angle_to(input_dir_3d, Vector3.UP)) > config.get_backward_angle_radians()
+
+
+func _resolve_tracked_motion(input: InputPackage, delta: float, base_speed: float,
+		turn_speed: float, angular_speed: float, allow_backward: bool = true) -> Vector3:
+	var input_dir_3d := _get_input_world_direction(input)
+	if input_dir_3d == Vector3.ZERO:
+		return Vector3.ZERO
+	var facing := _get_facing_node()
+	if not facing:
+		return input_dir_3d * base_speed
+
+	var config := get_movement_config()
 	var face_direction := -facing.basis.z
 	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
-	facing.rotate_y(clampf(angle,
-		-tracking_angular_speed * delta, tracking_angular_speed * delta))
+	if allow_backward and absf(angle) > config.get_backward_angle_radians():
+		return -face_direction * base_speed * config.backward_speed_multiplier
+
+	if not config.turn_to_movement_direction:
+		return input_dir_3d * base_speed
+
+	var turn_step := angular_speed * delta
+	if turn_step > 0.0 and absf(angle) >= turn_step:
+		var applied_turn := signf(angle) * turn_step
+		facing.rotate_y(applied_turn)
+		return face_direction.rotated(Vector3.UP, applied_turn) * turn_speed
+
+	facing.rotate_y(angle)
+	return input_dir_3d * base_speed
 
 
 # =============================================================================

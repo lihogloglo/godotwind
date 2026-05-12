@@ -5,6 +5,9 @@
 class_name CharacterMovementConfig
 extends Resource
 
+const FIELD_STATUS_ACTIVE: StringName = &"active"
+const FIELD_STATUS_RESERVED: StringName = &"reserved"
+
 @export_group("Ground Speeds")
 @export_range(0.0, 10.0, 0.1) var walk_speed: float = 2.5
 @export_range(0.0, 20.0, 0.1) var run_speed: float = 5.0
@@ -19,7 +22,10 @@ extends Resource
 @export_range(0.0, 20.0, 0.1) var ground_tracking_angular_speed: float = 10.0
 @export_range(0.0, 20.0, 0.1) var swim_tracking_angular_speed: float = 8.0
 @export var turn_to_movement_direction: bool = true
-@export var smooth_movement: bool = true
+## Reserved: kept for resource compatibility until a separate movement-feel
+## spec defines acceleration/turn smoothing semantics and tests.
+@export var smooth_movement: bool = false
+## Reserved with `smooth_movement`; not read by runtime movement yet.
 @export_range(0.0, 1.0, 0.01) var smooth_player_turning_delay: float = 0.0
 
 @export_group("Backward Movement")
@@ -53,7 +59,10 @@ extends Resource
 @export_range(0.0, 2.0, 0.05) var swim_min_feet_submersion: float = 0.35
 @export_range(0.0, 10.0, 0.1) var swim_jump_velocity: float = 2.4
 @export_range(0.05, 2.0, 0.01) var swim_jump_repeat_time: float = 0.45
+## Reserved: legacy upward-correction knobs were superseded by camera-relative
+## swim pitch, buoyancy, surface clamp, and swim-stroke impulse behavior.
 @export var swim_upward_correction_enabled: bool = false
+## Reserved with `swim_upward_correction_enabled`; not read by runtime movement yet.
 @export_range(0.0, 10.0, 0.1) var swim_upward_coef: float = 1.0
 
 @export_group("Step And Floor")
@@ -69,6 +78,64 @@ extends Resource
 @export var can_crouch: bool = true
 @export var can_jump: bool = true
 @export var can_swim: bool = true
+
+
+static func get_exported_field_statuses() -> Dictionary[StringName, StringName]:
+	return {
+		&"walk_speed": FIELD_STATUS_ACTIVE,
+		&"run_speed": FIELD_STATUS_ACTIVE,
+		&"sprint_speed": FIELD_STATUS_ACTIVE,
+		&"crouch_speed": FIELD_STATUS_ACTIVE,
+		&"walk_turn_speed": FIELD_STATUS_ACTIVE,
+		&"run_turn_speed": FIELD_STATUS_ACTIVE,
+		&"sprint_turn_speed": FIELD_STATUS_ACTIVE,
+		&"walk_tracking_angular_speed": FIELD_STATUS_ACTIVE,
+		&"ground_tracking_angular_speed": FIELD_STATUS_ACTIVE,
+		&"swim_tracking_angular_speed": FIELD_STATUS_ACTIVE,
+		&"turn_to_movement_direction": FIELD_STATUS_ACTIVE,
+		&"smooth_movement": FIELD_STATUS_RESERVED,
+		&"smooth_player_turning_delay": FIELD_STATUS_RESERVED,
+		&"backward_angle_degrees": FIELD_STATUS_ACTIVE,
+		&"backward_speed_multiplier": FIELD_STATUS_ACTIVE,
+		&"jump_velocity": FIELD_STATUS_ACTIVE,
+		&"jump_min_time": FIELD_STATUS_ACTIVE,
+		&"ground_to_midair_lockout": FIELD_STATUS_ACTIVE,
+		&"coyote_time": FIELD_STATUS_ACTIVE,
+		&"jump_buffer_time": FIELD_STATUS_ACTIVE,
+		&"air_control": FIELD_STATUS_ACTIVE,
+		&"air_speed": FIELD_STATUS_ACTIVE,
+		&"standing_height": FIELD_STATUS_ACTIVE,
+		&"crouch_height": FIELD_STATUS_ACTIVE,
+		&"player_radius": FIELD_STATUS_ACTIVE,
+		&"standing_eye_height": FIELD_STATUS_ACTIVE,
+		&"crouch_eye_height": FIELD_STATUS_ACTIVE,
+		&"stand_up_clearance_margin": FIELD_STATUS_ACTIVE,
+		&"swim_speed": FIELD_STATUS_ACTIVE,
+		&"swim_acceleration": FIELD_STATUS_ACTIVE,
+		&"swim_buoyancy_strength": FIELD_STATUS_ACTIVE,
+		&"swim_drag": FIELD_STATUS_ACTIVE,
+		&"swim_idle_drag": FIELD_STATUS_ACTIVE,
+		&"swim_submersion_depth": FIELD_STATUS_ACTIVE,
+		&"swim_min_feet_submersion": FIELD_STATUS_ACTIVE,
+		&"swim_jump_velocity": FIELD_STATUS_ACTIVE,
+		&"swim_jump_repeat_time": FIELD_STATUS_ACTIVE,
+		&"swim_upward_correction_enabled": FIELD_STATUS_RESERVED,
+		&"swim_upward_coef": FIELD_STATUS_RESERVED,
+		&"max_floor_angle_degrees": FIELD_STATUS_ACTIVE,
+		&"floor_snap_length": FIELD_STATUS_ACTIVE,
+		&"step_up_height": FIELD_STATUS_ACTIVE,
+		&"step_down_height": FIELD_STATUS_ACTIVE,
+		&"min_step_height": FIELD_STATUS_ACTIVE,
+		&"can_walk": FIELD_STATUS_ACTIVE,
+		&"can_sprint": FIELD_STATUS_ACTIVE,
+		&"can_crouch": FIELD_STATUS_ACTIVE,
+		&"can_jump": FIELD_STATUS_ACTIVE,
+		&"can_swim": FIELD_STATUS_ACTIVE,
+	}
+
+
+static func get_exported_field_status(field_name: StringName) -> StringName:
+	return get_exported_field_statuses().get(field_name, &"unknown")
 
 
 func get_backward_angle_radians() -> float:

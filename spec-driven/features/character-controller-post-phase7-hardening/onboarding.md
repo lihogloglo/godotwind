@@ -6,7 +6,7 @@ Use this as the first message or handoff brief for the next Codex session.
 
 You are working in:
 
-`C:\Users\pc\Desktop\godotwind-master`
+`C:\Users\pc\Documents\GitHub\godotwind`
 
 This is Godotwind, a Godot 4.6 open-world RPG framework using Morrowind as one
 data source. Keep framework systems generic. Morrowind-specific formats,
@@ -106,19 +106,24 @@ Files:
 
 ## Where To Begin
 
-Phase 1 and Phase 2 are implemented. Before continuing to Phase 3, create a
-proper Phase 2 visual validation surface in:
+This hardening/productionization pass is closed as complete for available
+content. There is no Phase 8 in this package. Human/user validation is complete
+for the targeted character-controller gdUnit scene, the main
+character-controller visual scene, the carry prompt-suppression visual scene,
+the teleport interpolation-reset visual scene, the Phase 6 step-solver
+fixture/visual surface, and the available-content main-scene smoke pass
+including water and controller-scope log review.
 
-`spec-driven/features/character-controller-post-phase7-hardening/tasks.md`
+Do not recreate the Phase 2 scenes, do not revisit Phase 3 movement config
+truthfulness, do not redo Phase 4 visual input actions, do not redo Phase 5/7
+integrated verification, and do not invent Phase 8 unless new evidence appears.
 
-Do not start by patching every remaining audit finding at once. The next task
-group is a validation-scene follow-up for Phase 2:
+The main-scene checks below are blocked future integration gates until the
+relevant scene elements or content paths are implemented:
 
-1. Create a focused carry visual test scene with carryable items, prompt
-   suppression, drop/release behavior, and tap-while-carrying gating.
-2. Create a focused teleport visual test scene with an obvious before/after
-   teleport path that exercises `PlayerController.teleport_to()`,
-   `FlyCamera.teleport_to()`, and direct transition-style transform writes.
+- available interact/carry paths behave;
+- prompts hide while carrying and return after release;
+- teleport/interior paths do not visibly streak.
 
 Important current gap: `res://tests/visual/test_interior_transition.tscn` is
 not a useful Phase 2 teleport visual test right now. The human/user opened it
@@ -195,12 +200,102 @@ Phase 2 validation:
 - The report includes the new player teleport reset, fly-camera teleport reset,
   and missing-wrapper/valid-body carry release contracts.
 - Prompt suppression tests were added to
-  `tests/unit/test_player_controller_interaction.gd`, but they still need a
-  human/user run of that focused suite or the full runner.
-- Interactive visual validation is still pending. Existing scenes are not
-  enough: the current interior transition test did not expose usable doors for
-  the human/user, and the carry scenes predate the exact Phase 2 prompt
-  suppression contract. Build the two focused scenes described above.
+  `tests/unit/test_player_controller_interaction.gd`. A focused run of that
+  separate suite is still useful if future interaction changes touch prompt
+  gating, but the visual prompt-suppression path passed.
+- Focused Phase 2 visual scenes now exist for carry prompt suppression and
+  teleport interpolation reset.
+- Carry prompt suppression interactive visual validation is complete.
+- Teleport interpolation interactive visual validation is complete: on
+  2026-05-12 the human/user ran
+  `tests/visual/test_teleport_interpolation_reset.tscn` and confirmed it works.
+
+Phase 3 completed:
+
+- Classified every exported `CharacterMovementConfig` field as `active` or
+  `reserved` through
+  `src/core/character/controller/character_movement_config.gd::get_exported_field_statuses()`.
+- Implemented `turn_to_movement_direction` for ground and swim moves. When it
+  is false, movement remains camera-relative but the model/player no longer
+  auto-rotates toward the input direction.
+- Implemented `step_down_height` as the step solver's down-probe distance after
+  a candidate step-up.
+- Implemented `min_step_height` as a rejection threshold for tiny upward snaps
+  that should remain normal slide/floor-snap behavior.
+- Marked `smooth_movement` and `smooth_player_turning_delay` reserved. They
+  need a future movement-feel spec covering acceleration, turn delay,
+  animation blending, and camera response before they become active.
+- Marked `swim_upward_correction_enabled` and `swim_upward_coef` reserved.
+  Current swimming is governed by camera-relative pitch, buoyancy, surface
+  clamp, and repeated swim-stroke impulse fields instead.
+- Removed reserved-field overrides from the Morrowind movement preset so it no
+  longer implies those knobs are live behavior.
+- Updated:
+  - `src/core/character/controller/character_movement_config.gd`
+  - `src/core/character/controller/move.gd`
+  - `src/core/character/controller/move_container.gd`
+  - `src/core/character/controller/moves/{run,walk,sprint,crouch,swim}_move.gd`
+  - `src/core/character/controller/movement_presets/morrowind_movement_config.tres`
+  - `tests/unit/test_character_controller_phase0_baseline.gd`
+  - `docs/systems/character_controller.md`
+  - `spec-driven/features/character-controller-post-phase7-hardening/{spec,plan,tasks,review}.md`
+
+Phase 3 validation:
+
+- Human/user ran the character-controller gdUnit scene and produced
+  `reports/report_212/results.xml`.
+- `test_character_controller_phase0_baseline` passed: 47 tests, 0 failures,
+  0 errors.
+- The report includes the Phase 3 contracts:
+  - `test_movement_config_status_table_covers_exported_fields`
+  - `test_turn_to_movement_direction_false_prevents_auto_turning`
+  - `test_movement_config_controls_step_down_and_min_step_height`
+- Human/user had already run around the main game before Phase 3 started and
+  reported that things were working. Treat that as useful runtime smoke
+  context, not as the specific teleport visual-scene validation.
+
+Phase 4 completed:
+
+- Added `character_controller_preset_1..5`,
+  `character_controller_toggle_debug_hud`, and
+  `character_controller_dump_kf_bones` to `project.godot` and
+  `InputActions.VISUAL_TEST`.
+- Routed `tests/visual/test_character_controller.gd` through those InputMap
+  actions instead of raw `KEY_1..KEY_5`, `KEY_F1`, `KEY_F2`, or
+  `event.keycode` handling.
+- Split jump-state semantics:
+  - `MovementState.is_jump_move` = actual launch move.
+  - `MovementState.is_airborne` = jump launch or midair/falling.
+  - `is_jumping` remains a documented compatibility alias for jump-family
+    airborne state, not upward velocity.
+- Updated stale ownership comments and reconciled `docs/STATUS.md` with the
+  current interaction/carry main-scene wiring and velocity-drive carry path.
+- Updated:
+  - `project.godot`
+  - `src/core/input/input_actions.gd`
+  - `tests/visual/test_character_controller.gd`
+  - `src/core/character/controller/movement_state.gd`
+  - `src/core/character/controller/move_container.gd`
+  - `src/core/player/player_controller.gd`
+  - `src/tools/world_explorer.gd`
+  - `tests/unit/test_character_controller_phase0_baseline.gd`
+  - `docs/STATUS.md`
+  - `docs/systems/input_system.md`
+  - `docs/systems/character_controller.md`
+  - `spec-driven/features/character-controller-post-phase7-hardening/{tasks,validation,review}.md`
+
+Phase 4 validation:
+
+- Human/user ran `res://tests/run_character_controller_phase0.tscn` and
+  produced `reports/report_213/results.xml`.
+- `test_character_controller_phase0_baseline` passed: 50 tests, 0 failures,
+  0 errors, 0 skipped.
+- The report includes the Phase 4 contracts:
+  - `test_phase4_character_controller_visual_actions_are_registered`
+  - `test_phase4_character_controller_visual_scene_uses_input_actions_for_debug_controls`
+  - `test_phase4_movement_state_splits_jump_move_from_airborne_state`
+- Human/user ran `tests/visual/test_character_controller.tscn` and confirmed it
+  works.
 
 The contract to preserve:
 
@@ -213,19 +308,14 @@ The contract to preserve:
 
 Recommended next implementation slice:
 
-1. Add `tests/visual/test_carry_prompt_suppression.tscn` and matching `.gd`
-   script. It should spawn simple carryable items and at least one non-carry
-   interactable, then make it obvious that prompts hide while carrying and
-   return after release.
-2. Add `tests/visual/test_teleport_interpolation_reset.tscn` and matching `.gd`
-   script. It should provide manual InputMap-driven teleport controls for a
-   player body, fly camera, and transition-style camera/body transform write.
-3. Update `validation.md`, `tasks.md`, and `review.md` with those scene paths
-   and the human visual checklist.
-4. Human/user runs `test_player_controller_interaction` or the full runner to
-   validate the prompt-suppression unit tests.
-5. Human/user runs the two new visual scenes and reports results.
-6. Only then continue to Phase 3 movement config truthfulness.
+1. Begin Phase 6 from the completed hardening baseline.
+2. Preserve the Phase 5 result: main-scene fly/player switching, movement,
+   sprint, jump, crouch, camera toggle, streaming boundary crossing, and
+   controller/input/interaction log review passed for available content.
+3. Treat main-scene interact/carry/prompt and teleport/interior smoke checks as
+   future validation gates for the feature that implements those missing paths.
+4. If new evidence contradicts a completed phase, update the relevant spec or
+   plan first instead of patching around stale assumptions.
 
 ## Current Visual Scene Status
 
@@ -239,18 +329,21 @@ Carry prompt suppression visual scene:
 
 Teleport interpolation visual scene:
 
-- `tests/visual/test_teleport_interpolation_reset.tscn` exists, but it is NOT
-  a trustworthy validation surface.
-- Human/user first saw the pads, and key presses made objects appear on pads,
-  but the probes did not clearly toggle positions as intended.
-- Follow-up fixture edits made the scene blank for the human/user, even after a
-  full Godot restart.
-- Do not keep patching this scene as-is. Recreate the teleport visual test from
-  scratch with a simpler, editor-authored or minimally scripted scene, then
-  have the human/user verify it interactively before using it as Phase 2 visual
-  evidence.
-- Until recreated and verified, Phase 2 teleport visual validation remains
-  pending even though the gdUnit scene-surface contracts passed.
+- `tests/visual/test_teleport_interpolation_reset.tscn` has been rebuilt from
+  scratch as a simpler editor-authored board with a fixed overview camera,
+  colored pads, visible probes, and a small script that only handles the
+  existing InputMap actions.
+- The scene temporarily sets physics ticks per second to 10 while it runs and
+  restores the previous value on exit, making missing interpolation resets more
+  visible during manual inspection.
+- Human/user ran the rebuilt scene on 2026-05-12 and confirmed it works.
+  Phase 2 teleport visual validation is complete.
+
+Main character-controller visual scene:
+
+- `tests/visual/test_character_controller.tscn` uses InputMap actions for
+  preset switching, debug HUD toggle, and KF/bone diagnostics.
+- Human/user ran it on 2026-05-12 after Phase 4 and confirmed it works.
 
 ## Verification Rule
 

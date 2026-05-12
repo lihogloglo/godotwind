@@ -250,6 +250,11 @@ D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/go
   provided in chat.
 - Confirm the report includes:
   `test_phase6_step_visual_scene_exposes_required_cases`.
+- Scripted fixture follow-up report includes:
+  `test_phase6_step_solver_scripted_fixture_categories`.
+- Human/user reran the focused suite after the fixture was tightened and
+  produced `reports/report_215/results.xml`: 51 tests, 0 failures, 0 errors,
+  0 skipped.
 
 Visual:
 
@@ -306,6 +311,23 @@ Checklist:
 Expected:
 
 - Player mode feels stable and no subsystem owns movement through animation.
+
+Recorded result:
+
+- Human/user confirmed fly/player switch, movement, sprint, jump, crouch,
+  camera toggle, streaming boundaries, and water all work in
+  `scenes/Godotwind.tscn`.
+- Interaction/carry/interior checks remain blocked by missing dependent
+  main-scene content paths, not failed.
+- Updated log review passed for the controller scope. `crash_report.txt` says
+  "No errors recorded"; `debug_report.txt` says "Errors captured: 0" and "No
+  errors"; `godot.log` has zero `SCRIPT ERROR` / `SCRIPT WARNING` entries and
+  zero controller/input/interaction/player/animation/water/swim warnings or
+  errors. The log does contain unrelated streaming/autopsy, missing static
+  collision shape sidecar, and shutdown resource-leak warnings.
+- Closure: this pass is complete for available content. There is no Phase 8 in
+  this package; blocked interaction/carry/interior checks should move to a
+  future integration spec when those paths are ready.
 
 Codex role:
 

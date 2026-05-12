@@ -1567,7 +1567,7 @@ func _attach_player_character() -> bool:
 	# Load KF animations (uses cached remap to convert Bip01 → profile names)
 	factory._load_character_animations(character_root, skeleton, is_female, is_beast)
 
-	# Wire animation system (MoveContainer, AnimationManager, IK)
+	# Wire animation system (AnimationManager, IK). Movement stays owned by CharacterMotor.
 	factory.setup_character(player_controller, is_female, is_beast,
 		npc_record.race_id, npc_record.record_id)
 

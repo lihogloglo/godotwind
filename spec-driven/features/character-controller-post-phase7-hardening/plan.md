@@ -104,13 +104,13 @@ Each exported field should have one status:
 - `removed/deprecated`: removed from active presets or replaced by a clearer
   field.
 
-Initial field decisions to make during implementation:
+Phase 3 field decisions:
 
-- Likely active:
+- Active:
   - `turn_to_movement_direction`;
   - `step_down_height`;
-  - `min_step_height`, if solver semantics are straightforward.
-- Decide before implementing:
+  - `min_step_height`.
+- Reserved:
   - `smooth_movement`;
   - `smooth_player_turning_delay`;
   - `swim_upward_correction_enabled`;
@@ -343,6 +343,43 @@ Validation:
   movement-config behavior changes look correct.
 - Main scene: fly/player switching, movement, streaming boundary crossing, and
   available interaction/carry paths remain stable.
+
+Status:
+
+- Complete for currently available main-scene content.
+- Deferred until implemented in the main scene:
+  - available interact/carry paths behave;
+  - prompts hide while carrying and return after release;
+  - teleport/interior paths do not visibly streak.
+
+### Phase 6: Next Implementation Slice
+
+Goal: move forward from the completed hardening baseline without reopening
+Phases 1-5.
+
+Scope:
+
+- Start the next planned implementation package from the Phase 5 verified
+  baseline.
+- Do not redo active input contexts, teleport reset helpers, movement config
+  truthfulness, visual-test actions, or Phase 5 smoke unless new evidence
+  appears.
+- Treat the deferred main-scene interaction/carry/interior smoke checks as
+  future validation gates for the feature that implements those missing
+  main-scene elements.
+
+Validation:
+
+- Use the latest hardening validation as baseline:
+  - `reports/report_213/results.xml`: 50 tests, 0 failures, 0 errors,
+    0 skipped.
+  - `tests/visual/test_character_controller.tscn`: human/user confirmed
+    working.
+  - `tests/visual/test_teleport_interpolation_reset.tscn`: human/user
+    confirmed working.
+  - `scenes/Godotwind.tscn`: fly/player switching, movement, sprint, jump,
+    crouch, camera toggle, streaming boundary crossing, and controller/input/
+    interaction log review passed for available content.
 
 ## Files to Change
 

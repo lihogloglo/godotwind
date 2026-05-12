@@ -11,15 +11,13 @@ Working in `tests/visual/test_character_controller.tscn`: ground locomotion
 `InteractionRaycaster`, and `CarryController`. Human/user Phase 7 smoke testing
 confirmed the core player path works for fly-camera to player-mode toggle,
 movement, sprint, jump, crouch, first/third-person camera toggle, and streaming
-cell boundary crossing. Full production validation across interaction,
-carry/drop/throw, interiors, and water remains pending because those dependent
-systems/content paths are not yet complete enough to exercise in the main scene.
-Godot log/error review of the human-provided output found no controller,
-player-mode, movement, animation, or interaction-wiring errors during the tested
-path. The supplied log did include unrelated streaming/profiler warnings,
-static-collision missing-shape sidecar warnings, and shutdown-time RID/resource
-leak reports, which belong to streaming/rendering/resource-cleanup follow-up
-rather than this controller smoke result.
+cell boundary crossing. A follow-up Phase 7 smoke also confirmed the main-scene
+water path works. Updated Godot log/error review found no script errors and no
+controller, input, interaction, player, animation, water, or swim
+warnings/errors during the tested path. Productionization is complete for
+available content. Interaction, carry/drop/throw, and interiors are blocked
+future integration gates because those dependent systems/content paths are not
+yet complete enough to exercise in the main scene.
 
 Codex runtime limitation: Codex cannot reliably launch the Godot engine from
 this desktop workspace. The human/user must run Godot editor/runtime checks and
@@ -60,6 +58,19 @@ then restored exactly on release. Human-run gdUnit validation passed in
 blocked until an integrated playable path has both usable carryable items and
 interiors/seamless doorways available.
 
+Post-Phase 7 hardening through Phase 6 is implemented and human-validated for
+the focused controller path. `reports/report_215/results.xml` passed the
+character-controller baseline suite with 51 tests, 0 failures, 0 errors, and
+0 skipped, including the scripted Phase 6 step-solver fixture. Human/user also
+confirmed `tests/visual/test_character_controller.tscn` and
+`tests/visual/test_teleport_interpolation_reset.tscn` work. Available-content
+main-scene smoke passed for fly/player switching, movement, sprint, jump,
+crouch, camera toggle, streaming boundary crossing, water, and controller-scope
+log review. Main-scene interact/carry/prompt and teleport/interior checks are
+blocked future integration gates until those paths are implemented in the
+scene. There is no Phase 8 in the character-controller productionization
+package.
+
 ---
 
 Move-as-Node state machine pattern (adapted from Gab-ani's Universal
@@ -88,6 +99,17 @@ Each Move is a Node that owns its movement physics and transition logic.
 and camera basis. `MoveContainer` publishes a `MovementState` snapshot after
 processing. Animation reads that snapshot and chooses animation transitions; it
 no longer creates or owns the movement state machine.
+
+## Movement State Semantics
+
+`MovementState` is the public read model for animation, camera, interaction,
+debug UI, and future gameplay code. Its jump-family fields are intentionally
+split:
+
+- `is_jump_move`: true only during the actual jump launch move.
+- `is_airborne`: true during either jump launch or normal midair/falling.
+- `is_jumping`: legacy compatibility alias for jump-family airborne state;
+  do not treat it as "upward velocity."
 
 ## Key Parameters
 
@@ -137,6 +159,57 @@ Override order for current Phase 3 runtime:
 The old `PlayerController` speed exports are compatibility mirrors populated
 from `movement_config` in `_ready()`. They are no longer the movement source of
 truth.
+
+### Movement Config Field Status
+
+Every exported `CharacterMovementConfig` field is classified in
+`CharacterMovementConfig.get_exported_field_statuses()` as either `active` or
+`reserved`. Active fields are read by runtime movement, controller setup, or
+tests. Reserved fields stay exported for resource compatibility but are not
+runtime behavior yet; presets should not set them as if they are live tuning.
+
+Active fields:
+
+```text
+walk_speed, run_speed, sprint_speed, crouch_speed,
+walk_turn_speed, run_turn_speed, sprint_turn_speed,
+walk_tracking_angular_speed, ground_tracking_angular_speed,
+swim_tracking_angular_speed, turn_to_movement_direction,
+backward_angle_degrees, backward_speed_multiplier,
+jump_velocity, jump_min_time, ground_to_midair_lockout, coyote_time,
+jump_buffer_time, air_control, air_speed,
+standing_height, crouch_height, player_radius, standing_eye_height,
+crouch_eye_height, stand_up_clearance_margin,
+swim_speed, swim_acceleration, swim_buoyancy_strength, swim_drag,
+swim_idle_drag, swim_submersion_depth, swim_min_feet_submersion,
+swim_jump_velocity, swim_jump_repeat_time,
+max_floor_angle_degrees, floor_snap_length, step_up_height,
+step_down_height, min_step_height,
+can_walk, can_sprint, can_crouch, can_jump, can_swim
+```
+
+Reserved fields:
+
+```text
+smooth_movement, smooth_player_turning_delay,
+swim_upward_correction_enabled, swim_upward_coef
+```
+
+`turn_to_movement_direction = false` keeps input camera-relative but prevents
+the model/player facing from auto-rotating toward that movement direction.
+`step_down_height` now controls the down probe distance after a candidate
+step-up, and `min_step_height` rejects tiny upward snaps that should remain
+normal slide/floor-snap behavior. Godot's own `floor_max_angle` and
+`floor_snap_length` remain the native slope/floor-stick controls; the step
+solver only handles obstacle step-up candidates around that `move_and_slide()`
+path.
+
+The reserved smoothing fields need a future movement-feel spec before they
+become active because acceleration smoothing, turn delay, animation blending,
+and camera response should be tuned together. The reserved swim-upward
+correction fields are legacy compatibility hooks; current swimming uses
+camera-relative pitch, buoyancy, surface clamping, and repeated swim-stroke
+impulses instead.
 
 ## Movement Physics
 
@@ -211,7 +284,10 @@ First/third-person toggle (Tab):
 
 `tests/visual/test_character_controller.tscn` is a flat terrain scene with a
 ramp, climbing wall, water pool, NPC presets, pushable physics objects, and
-debug HUD.
+debug HUD. Scene-specific controls use InputMap actions:
+`character_controller_preset_1..5`,
+`character_controller_toggle_debug_hud`, and
+`character_controller_dump_kf_bones`.
 
 `tests/visual/test_character_controller_steps.tscn` is the focused Phase 6
 step-solver measuring rig. It avoids Morrowind data and animations, uses a
