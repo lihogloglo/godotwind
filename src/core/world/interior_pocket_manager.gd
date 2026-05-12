@@ -29,6 +29,7 @@ const DoorUtils := preload("res://src/core/world/door_utils.gd")
 const DOOR_CLIP_SHADER := preload("res://src/core/world/shaders/door_clip.gdshader")
 const LightAnimatorScript := preload("res://src/core/world/light_animator.gd")
 const LightShadowBudgetScript := preload("res://src/core/world/light_shadow_budget.gd")
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 
 #region Constants
 
@@ -74,7 +75,8 @@ const ALL_RENDER_LAYERS: int = 0xFFFFF       # All 20 layers
 
 ## Physics layer assignments (per slot)
 ## Exterior uses layers 1-4, interior slots use 5-6 and 7-8
-const EXTERIOR_PHYSICS_LAYERS: int = 0xF     # Layers 1-4 (bits 0-3)
+## Layers 1-4 (bits 0-3).
+const EXTERIOR_PHYSICS_LAYERS: int = GameplayPhysicsLayersScript.EXTERIOR_TRANSITION_MASK
 const INTERIOR_PHYSICS_BASE: int = 4          # First interior physics layer bit index
 
 ## Fade duration for transitions
@@ -1361,10 +1363,12 @@ func _do_transition(target_slot: PocketSlot, dest_pos: Vector3,
 	if camera_is_on_body:
 		_player_body.global_position = dest_pos
 		_player_body.global_basis = dest_basis
+		_player_body.reset_physics_interpolation()
 		Log.info("streaming", "[TRANSITION] Teleported BODY to %s" % dest_pos)
 	elif _camera and is_instance_valid(_camera):
 		_camera.global_position = dest_pos  # DODT position already includes player height
 		_camera.global_basis = dest_basis
+		_camera.reset_physics_interpolation()
 		Log.info("streaming", "[TRANSITION] Teleported CAMERA to %s" % dest_pos)
 	else:
 		Log.error("streaming", "[TRANSITION] No valid camera or body for teleport!")
