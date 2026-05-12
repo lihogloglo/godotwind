@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://b4dvlxgmkxgcu"]
+
+[ext_resource type="Script" path="res://tests/visual/test_carry_prompt_suppression.gd" id="1_script"]
+
+[node name="TestCarryPromptSuppression" type="Node3D"]
+script = ExtResource("1_script")

@@ -34,7 +34,7 @@
 ##   - `freeze = false` — body is dynamic, Jolt integrates it
 ##   - `gravity_scale = 0` — don't fight gravity while held
 ##   - `linear_damp / angular_damp` bumped up — prevents oscillation
-##   - `collision_mask &= ~LAYER_PLAYER` — no collision with player capsule
+##   - `collision_mask` excludes the player's current layer bits
 ##
 ## Each physics tick (while held):
 ##   - Compute world-space target pose from camera rig
@@ -61,6 +61,7 @@ const InteractionRaycasterScript := preload("res://src/core/interaction/interact
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 const CarryableBodyFactoryScript := preload("res://src/core/interaction/carryable_body_factory.gd")
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 const PickupInteractableScript := preload("res://src/core/interaction/morrowind/pickup_interactable.gd")
 const MWCarryableRegistryScript := preload("res://src/core/interaction/morrowind/mw_carryable_registry.gd")
 const InventoryServiceScript := preload("res://src/core/interaction/inventory_service.gd")
@@ -112,11 +113,6 @@ const MAX_HOLD_DISTANCE: float = 1.8
 ## + constant damping combo is standard for physics-gun tuning.
 const HELD_LINEAR_DAMP: float = 4.0
 const HELD_ANGULAR_DAMP: float = 6.0
-
-## Collision layer bit for the player capsule. Same source as
-## `CarryableBodyFactory.LAYER_PLAYER`; duplicated here so this
-## file has zero imports from the carry stack.
-const LAYER_PLAYER: int = 1 << 1
 
 ## Walking params for the test scene movement loop.
 const WALK_SPEED: float = 4.0
@@ -444,7 +440,7 @@ func _do_grab(rb: RigidBody3D) -> void:
 	rb.gravity_scale = 0.0
 	rb.linear_damp = HELD_LINEAR_DAMP
 	rb.angular_damp = HELD_ANGULAR_DAMP
-	rb.collision_mask = rb.collision_mask & ~LAYER_PLAYER
+	rb.collision_mask = GameplayPhysicsLayersScript.get_held_body_mask(_saved_mask, _player)
 	# Zero out whatever velocity the body had pre-grab so the chase
 	# starts from a clean state. The velocity drive will ramp it up
 	# as needed over the next few ticks.
