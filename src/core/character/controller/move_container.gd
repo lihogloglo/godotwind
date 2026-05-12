@@ -1,10 +1,12 @@
 ## MoveContainer — Holds Move nodes and manages state transitions
 ##
-## Child of CharacterAnimationSystem. Move nodes are added as children
-## either manually or by a factory. On setup, accept_moves() wires each
-## Move with references to the player, animator, skeleton, etc.
+## Child of CharacterMotor. Move nodes are added as children either manually
+## or by a factory. On setup, accept_moves() wires each Move with references
+## to the player, model root, skeleton, resources, and movement config.
 class_name MoveContainer
 extends Node
+
+const _DefaultMovementConfig := preload("res://src/core/character/controller/movement_presets/default_movement_config.tres")
 
 ## Emitted on every state transition
 signal state_changed(old_move: StringName, new_move: StringName)
@@ -12,8 +14,9 @@ signal state_changed(old_move: StringName, new_move: StringName)
 # --- Registered moves ---
 var moves: Dictionary[StringName, Move] = {}
 var current_move: Move = null
+var movement_state: MovementState = MovementState.new()
 
-# --- References (set by CharacterAnimationSystem during setup) ---
+# --- References (set by CharacterMotor during setup) ---
 var player: CharacterBody3D = null
 var character_root: Node3D = null  # Model root for rotation (may differ from player)
 var animator: Node = null  # AnimationManager
@@ -21,6 +24,7 @@ var skeleton: Skeleton3D = null
 var resources: Node = null  # HumanoidResources (Phase 4)
 var combat: Node = null  # HumanoidCombat (Phase 5)
 var legs: Node = null  # Legs (Phase 4)
+@export var movement_config: CharacterMovementConfig = _DefaultMovementConfig
 
 # --- Step-up ---
 ## Maximum obstacle height the character can step over without jumping
@@ -30,6 +34,15 @@ var rigid_body_push_force: float = 8.0
 
 # --- State ---
 var _is_setup: bool = false
+var _time_since_grounded: float = INF
+var _jump_buffer_timer: float = 0.0
+
+
+func set_movement_config(config: CharacterMovementConfig) -> void:
+	movement_config = config if config else _DefaultMovementConfig
+	max_step_height = movement_config.step_up_height
+	for move: Move in moves.values():
+		move.movement_config = movement_config
 
 
 # =============================================================================
@@ -55,6 +68,7 @@ func accept_moves() -> void:
 			move.combat = combat
 			move.container = self
 			move.legs = legs
+			move.movement_config = movement_config
 			move.assign_combos()
 
 	if moves.is_empty():
@@ -62,17 +76,19 @@ func accept_moves() -> void:
 		return
 
 	# Start in idle (or first available move)
+	max_step_height = movement_config.step_up_height
 	var start_move: StringName = &"idle" if moves.has(&"idle") else moves.keys()[0]
 	current_move = moves[start_move]
 	current_move._on_enter_state()
 	_is_setup = true
+	_publish_movement_state(null)
 
 	Log.info("controller", "MoveContainer: Accepted %d moves, starting in '%s'" % [
 		moves.size(), start_move])
 
 
 # =============================================================================
-# PER-FRAME UPDATE — Called from CharacterAnimationSystem or PlayerController
+# PER-FRAME UPDATE — Called from CharacterMotor
 # =============================================================================
 
 ## Process one physics frame: check relevance, maybe switch, then update.
@@ -81,18 +97,24 @@ func process(input: InputPackage, delta: float) -> void:
 	if not _is_setup or current_move == null:
 		return
 
+	if player:
+		_prepare_jump_grace_actions(input, delta, player.is_on_floor())
+
 	# Let the current move decide if we should transition
 	var relevance: StringName = current_move.check_relevance(input)
 	if relevance != &"okay":
 		switch_to(relevance)
+		if relevance == &"jump":
+			_consume_jump_grace()
 
 	# Update the (possibly new) current move — sets velocity only
 	current_move._update(input, delta)
 
 	# Single move_and_slide() call per frame — with step-up for small obstacles
 	if player:
-		_move_with_step_up()
-		_push_rigid_bodies()
+		_move_with_step_up(delta)
+		_push_rigid_bodies(delta)
+	_publish_movement_state(input)
 
 
 # =============================================================================
@@ -138,6 +160,110 @@ func is_ready() -> bool:
 	return _is_setup
 
 
+func get_movement_state() -> MovementState:
+	return movement_state
+
+
+func _publish_movement_state(input: InputPackage) -> void:
+	if not movement_state:
+		movement_state = MovementState.new()
+	var active_name: StringName = current_move.move_name if current_move else &""
+	movement_state.active_move_name = active_name
+	movement_state.animation_state = _resolve_animation_state(input)
+	movement_state.posture = _resolve_posture(active_name)
+	movement_state.is_grounded = player.is_on_floor() if player else false
+	movement_state.is_in_water = input.is_in_water if input else false
+	movement_state.input_direction = input.input_direction if input else Vector2.ZERO
+	movement_state.input_strength = movement_state.input_direction.length()
+	movement_state.desired_world_direction = _resolve_desired_world_direction(input)
+	movement_state.velocity = player.velocity if player else Vector3.ZERO
+	movement_state.is_sprinting = active_name == &"sprint"
+	movement_state.is_walking = active_name == &"walk"
+	movement_state.is_crouching = active_name == &"crouch"
+	movement_state.is_jumping = active_name == &"jump" or active_name == &"midair"
+	movement_state.is_swimming = active_name == &"swim" or active_name == &"swim_idle"
+	movement_state.elapsed_time = current_move.get_progress() if current_move else 0.0
+
+
+func _prepare_jump_grace_actions(input: InputPackage, delta: float, grounded: bool) -> void:
+	if not input:
+		return
+	var safe_delta: float = maxf(delta, 0.0)
+	if grounded:
+		_time_since_grounded = 0.0
+	else:
+		_time_since_grounded += safe_delta
+
+	var config := movement_config if movement_config else _DefaultMovementConfig
+	var jump_pressed_this_frame := input.actions.has(&"jump")
+	if jump_pressed_this_frame:
+		_jump_buffer_timer = config.jump_buffer_time
+	else:
+		_jump_buffer_timer = maxf(_jump_buffer_timer - safe_delta, 0.0)
+
+	var has_ground_grace := grounded or _time_since_grounded <= config.coyote_time
+	var has_jump_intent := jump_pressed_this_frame or _jump_buffer_timer > 0.0
+	var jump_available := config.can_jump and has_move(&"jump") and has_jump_intent and has_ground_grace
+	if jump_available:
+		if not input.actions.has(&"jump"):
+			input.actions.append(&"jump")
+	else:
+		input.actions.erase(&"jump")
+
+
+func _consume_jump_grace() -> void:
+	_jump_buffer_timer = 0.0
+	_time_since_grounded = INF
+
+
+func _resolve_animation_state(input: InputPackage) -> StringName:
+	if not current_move:
+		return &""
+	var active_name := current_move.move_name
+	match active_name:
+		&"walk":
+			return &"WalkBack" if _is_backward_input(input) else &"Walk"
+		&"run":
+			return &"RunBack" if _is_backward_input(input) else &"Run"
+		&"crouch":
+			if input and input.input_direction != Vector2.ZERO:
+				return &"CrouchBack" if _is_backward_input(input) else &"CrouchWalk"
+			return &"Crouch"
+		&"swim_idle":
+			return &"SwimIdle"
+		&"swim":
+			return &"SwimForward"
+	return current_move.animation_state
+
+
+func _resolve_posture(active_name: StringName) -> StringName:
+	match active_name:
+		&"crouch":
+			return &"crouching"
+		&"swim", &"swim_idle":
+			return &"swimming"
+	return &"standing"
+
+
+func _resolve_desired_world_direction(input: InputPackage) -> Vector3:
+	if not input or input.input_direction == Vector2.ZERO:
+		return Vector3.ZERO
+	return (input.camera_basis * Vector3(
+		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
+
+
+func _is_backward_input(input: InputPackage) -> bool:
+	if not input or input.input_direction == Vector2.ZERO:
+		return false
+	var desired := _resolve_desired_world_direction(input)
+	var facing: Node3D = character_root if character_root else player
+	if not facing:
+		return false
+	var face_direction := -facing.basis.z
+	var config := movement_config if movement_config else _DefaultMovementConfig
+	return absf(face_direction.signed_angle_to(desired, Vector3.UP)) > config.get_backward_angle_radians()
+
+
 # =============================================================================
 # MOVEMENT — Canonical pre-move step probe + unstuck recovery
 # =============================================================================
@@ -167,14 +293,13 @@ const _STEP_MIN_FORWARD: float = 0.01
 const _STEP_WALL_NORMAL_Y: float = 0.7
 
 
-func _move_with_step_up() -> void:
+func _move_with_step_up(delta: float) -> void:
 	# ----- Phase A: unstuck recovery --------------------------------------
 	# Push the body out of any penetrating geometry before it tries to move.
 	# Fixes spawn-into-terrain, thin-mesh tunneling, and edge penetration
 	# around bridges / interior seams.
 	_unstuck_if_penetrating()
 
-	var delta: float = get_physics_process_delta_time()
 	var horizontal_vel: Vector3 = Vector3(player.velocity.x, 0.0, player.velocity.z)
 	var has_horizontal: bool = horizontal_vel.length_squared() > 0.0001
 
@@ -182,7 +307,6 @@ func _move_with_step_up() -> void:
 	# Airborne / idle / ascending frames go straight through move_and_slide.
 	if not player.is_on_floor() or not has_horizontal or player.velocity.y > 0.1:
 		player.move_and_slide()
-		_push_rigid_bodies()
 		return
 
 	# ----- Phase B: pre-move obstruction probe ----------------------------
@@ -193,13 +317,11 @@ func _move_with_step_up() -> void:
 	if not blocked:
 		# Clear path — let the slide handle gravity, floor snap, and slope slide.
 		player.move_and_slide()
-		_push_rigid_bodies()
 		return
 
 	# Ignore pushable rigid bodies (barrels, crates) — handled by the push loop.
 	if probe.get_collider() is RigidBody3D:
 		player.move_and_slide()
-		_push_rigid_bodies()
 		return
 
 	# Walkable-slope obstructions fall through to slide — slope handling
@@ -207,7 +329,6 @@ func _move_with_step_up() -> void:
 	var hit_normal: Vector3 = probe.get_normal()
 	if hit_normal.y >= _STEP_WALL_NORMAL_Y:
 		player.move_and_slide()
-		_push_rigid_bodies()
 		return
 
 	# ----- Phase C: up / forward / down probe -----------------------------
@@ -221,7 +342,6 @@ func _move_with_step_up() -> void:
 		if up_distance <= 0.0:
 			# No vertical clearance — can't step, slide instead.
 			player.move_and_slide()
-			_push_rigid_bodies()
 			return
 
 	# 2. Save state, warp to raised height, probe forward.
@@ -246,7 +366,6 @@ func _move_with_step_up() -> void:
 			player.global_position = original_position
 			player.velocity = original_velocity
 			player.move_and_slide()
-			_push_rigid_bodies()
 			return
 	player.global_position += forward_travel
 
@@ -260,7 +379,6 @@ func _move_with_step_up() -> void:
 		player.global_position = original_position
 		player.velocity = original_velocity
 		player.move_and_slide()
-		_push_rigid_bodies()
 		return
 
 	# Reject landing on slopes steeper than the character can walk — matches
@@ -271,7 +389,6 @@ func _move_with_step_up() -> void:
 		player.global_position = original_position
 		player.velocity = original_velocity
 		player.move_and_slide()
-		_push_rigid_bodies()
 		return
 
 	# ----- Phase D: commit the step ---------------------------------------
@@ -284,7 +401,6 @@ func _move_with_step_up() -> void:
 	player.velocity = original_velocity
 	player.velocity.y = 0.0
 	player.move_and_slide()
-	_push_rigid_bodies()
 
 
 ## Push the player out of penetrating geometry. Runs every frame at the top
@@ -310,7 +426,7 @@ func _unstuck_if_penetrating() -> void:
 
 
 ## Push any RigidBody3D objects the player collided with during move_and_slide().
-func _push_rigid_bodies() -> void:
+func _push_rigid_bodies(delta: float) -> void:
 	if rigid_body_push_force <= 0.0:
 		return
 	for i: int in player.get_slide_collision_count():
@@ -326,4 +442,4 @@ func _push_rigid_bodies() -> void:
 				push_dir = push_dir.normalized()
 				var contact: Vector3 = col.get_position()
 				var offset: Vector3 = contact - rb.global_position
-				rb.apply_impulse(push_dir * rigid_body_push_force * get_physics_process_delta_time(), offset)
+				rb.apply_impulse(push_dir * rigid_body_push_force * delta, offset)

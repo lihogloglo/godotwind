@@ -9,9 +9,13 @@ extends Node
 var camera_pivot: Node3D = null
 
 
-## Gather all input state for this physics frame
-func gather_input() -> InputPackage:
+## Gather all input state for this physics frame.
+## Environment context is passed before vertical intent is computed so swimming
+## can use camera pitch in the same frame the player enters water.
+func gather_input(is_in_water: bool = false, water_surface_y: float = -INF) -> InputPackage:
 	var pkg := InputPackage.new()
+	pkg.is_in_water = is_in_water
+	pkg.water_surface_y = water_surface_y
 
 	# Movement direction (analog-stick or WASD)
 	pkg.input_direction = Input.get_vector(
@@ -21,8 +25,10 @@ func gather_input() -> InputPackage:
 	if camera_pivot:
 		pkg.camera_basis = Basis(Vector3.UP, camera_pivot.rotation.y)
 
-	# Vertical intent for swimming/flying
-	if Input.is_action_pressed(&"jump"):
+	# Vertical intent for swimming/flying. In water, jump is a discrete swim
+	# stroke handled by swim moves, not a continuous ascend axis.
+	pkg.swim_jump_held = pkg.is_in_water and Input.is_action_pressed(&"jump")
+	if not pkg.is_in_water and Input.is_action_pressed(&"jump"):
 		pkg.vertical_input += 1.0
 	if Input.is_action_pressed(&"crouch"):
 		pkg.vertical_input -= 1.0
@@ -45,7 +51,7 @@ func gather_input() -> InputPackage:
 			pkg.actions.append(&"sprint")
 
 	# Jump (only on ground — midair/swim jumps handled by their respective moves)
-	if Input.is_action_just_pressed(&"jump"):
+	if not pkg.is_in_water and Input.is_action_just_pressed(&"jump"):
 		pkg.actions.append(&"jump")
 
 	# Crouch
