@@ -2,7 +2,7 @@
 
 **Owner:** @keys
 **Status:** K.0 + K.0.5 shipped 2026-04-07
-**Coordination:** Reads `interact` action only — owned by `PlayerController` per `docs/systems/interaction_system.md` §3.1.
+**Coordination:** `interact` is owned by the active input context per `docs/systems/interaction_system.md` §3.1: `PlayerGameplayContext` routes through `PlayerController`, and `FlyCameraContext` routes through `world_explorer.gd`.
 
 ---
 
@@ -35,7 +35,7 @@ Godotwind defines all input via Godot's native `InputMap`, with action definitio
 | `look_up`         | camera      | *(mouse, see §4)*   | RS Y −1.0           | `PlayerController`, `FlyCamera`      |
 | `look_down`       | camera      | *(mouse, see §4)*   | RS Y +1.0           | `PlayerController`, `FlyCamera`      |
 | `toggle_camera`   | camera      | TAB                 | Back/Select (idx 4) | `PlayerController`                   |
-| `interact`        | interaction | E                   | *(see §3.1)*        | **`PlayerController` ONLY**          |
+| `interact`        | interaction | E                   | *(see §3.1)*        | **active context only**              |
 | `debug_console`   | debug       | ² / ` , F1          | —                   | `world_explorer`, console UI         |
 | `debug_screenshot`| debug       | F2                  | —                   | tools                                |
 
@@ -70,9 +70,14 @@ Godotwind defines all input via Godot's native `InputMap`, with action definitio
 
 ### 3.1 The `interact` action
 
-`interact` is **owned exclusively by `PlayerController`** per `docs/systems/interaction_system.md` §3.1. Input code does NOT redefine, rebind, or add a second listener on this action. The pre-existing definition (`physical_keycode = 69` = E) in `project.godot [input]` is left untouched. `InputActions.verify()` asserts it exists but does not bind it.
+`interact` is **owned by exactly one active input context** per `docs/systems/interaction_system.md` §3.1. Input code does NOT redefine, rebind, or add an ungated listener on this action. The pre-existing definition (`physical_keycode = 69` = E) in `project.godot [input]` is left untouched. `InputActions.verify()` asserts it exists but does not bind it.
 
-K.0 deliberately does NOT add a gamepad binding to `interact`. Adding one requires editing the action definition, which is owned by `PlayerController`. If/when @interactivity wants `interact` on the X button, that change goes through #interactivity coordination first.
+- `PlayerGameplayContext`: active in player-controller mode. `PlayerController` reads raw `interact`, feeds `InteractionIntent`, and emits/routes `interact_tap`, `interact_hold_begin`, and `interact_release`.
+- `FlyCameraContext`: active in fly-camera/debug mode. `world_explorer.gd` reads raw `interact`, feeds the same `InteractionIntent` helper, and routes the same semantic tap/hold/release outcomes through the fly raycaster/carry controller.
+
+The active camera mode gates those contexts so one physical press cannot be processed by both paths.
+
+K.0 deliberately does NOT add a gamepad binding to `interact`. Adding one requires editing the action definition, which is coordinated by the interaction/input-context contract. If/when @interactivity wants `interact` on the X button, that change goes through #interactivity coordination first.
 
 ### 3.2 Mouse mode
 
@@ -156,7 +161,7 @@ Sub-deliverables: `src/core/ui/input_remap_panel.gd` + `.tscn` (Pelagiad-themed)
 Controller prompt icons (no addon name committed until verified survey); per-device profiles (different bindings kbd vs gamepad); gamepad hot-swap detection (`Input.joy_connection_changed`); haptic / rumble API wrapper around `Input.start_joy_vibration` / `stop_joy_vibration`.
 
 ### K.3 — context layers (NOT STARTED)
-Stack-based input contexts (gameplay / dialogue / inventory / book / menu). Read state from `PlayerController.is_modal_ui_open()` — **one-way read only**, @keys never registers gates with `PlayerController`. Suppress movement actions in dialogue; suppress camera actions in inventory; never suppress `interact`.
+Stack-based input contexts (gameplay / dialogue / inventory / book / menu). Read state from `PlayerController.is_modal_ui_open()` — **one-way read only**, @keys never registers gates with `PlayerController`. Suppress movement actions in dialogue; suppress camera actions in inventory; do not add a third raw `interact` reader.
 
 ### P6 — gdunit headless test (low priority)
 Add `tests/unit/test_input_actions.gd` asserting `InputActions.REQUIRED_ACTIONS.size() == 15`, each action is `InputMap.has_action(name)`, deadzone values match doc constant. ~30-40 LOC. Blocks regression detection if `project.godot` is hand-edited and an action gets dropped.
@@ -167,7 +172,7 @@ Add `tests/unit/test_input_actions.gd` asserting `InputActions.REQUIRED_ACTIONS.
 
 - **Mouse motion is not bindable to `InputMap` actions.** §4. Settled.
 - **`_ensure_input_actions` stays in PlayerController.** §3.3. Settled.
-- **`interact` action is owned by `PlayerController`.** §3.1 + INTERACTION_SYSTEM.md §3.1. Settled.
+- **`interact` action is owned by exactly one active context.** §3.1 + `docs/systems/interaction_system.md` §3.1. Settled.
 - **`physical_keycode` everywhere.** §5. Settled. Never use `keycode` (logical) for new bindings.
 - **`walk` is unbound by default.** Settled. Do not bind it without a strong default rationale.
 - **K.0 / K.0.5 ship zero addons.** All work uses native Godot 4.6 `InputMap` API only.

@@ -41,6 +41,7 @@ const PickupInteractableScript := preload("res://src/core/interaction/morrowind/
 const MWCarryableRegistryScript := preload("res://src/core/interaction/morrowind/mw_carryable_registry.gd")
 const InventoryServiceScript := preload("res://src/core/interaction/inventory_service.gd")
 const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/mw_inventory_service.gd")
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 
 
 # Fake record for spawn props (same shape as I.1/I.2).
@@ -176,6 +177,7 @@ func _test_grab_release_mask_flip() -> void:
 	var cam := Camera3D.new()
 	harness.add_child(cam)
 	var fake_player := CharacterBody3D.new()
+	fake_player.collision_layer = GameplayPhysicsLayersScript.PLAYER
 	add_child(fake_player)
 
 	var carry := CarryControllerScript.new()
@@ -191,12 +193,15 @@ func _test_grab_release_mask_flip() -> void:
 
 	var pickup: Interactable = rb.get_parent() as Interactable
 	var original_mask: int = rb.collision_mask
-	var expected_held_mask: int = original_mask & ~CarryableBodyFactoryScript.LAYER_PLAYER
+	var expected_held_mask: int = GameplayPhysicsLayersScript.get_held_body_mask(
+		original_mask,
+		fake_player
+	)
 
 	# MF3 — verify the spawn mask actually has the player bit set,
 	# otherwise the flip is a no-op and the assertion below means nothing.
-	assert((original_mask & CarryableBodyFactoryScript.LAYER_PLAYER) != 0,
-		"spawn mask should have LAYER_PLAYER set (got %d)" % original_mask)
+	assert((original_mask & GameplayPhysicsLayersScript.PLAYER) != 0,
+		"spawn mask should have the player layer set (got %d)" % original_mask)
 
 	# Snapshot the wrapper's original parent — the no-reparent
 	# architecture (id=4041) leaves the wrapper under the prop root

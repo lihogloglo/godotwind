@@ -1,0 +1,17 @@
+[gd_resource type="Resource" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/core/character/controller/character_movement_config.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+turn_to_movement_direction = true
+smooth_movement = true
+backward_angle_degrees = 120.0
+backward_speed_multiplier = 0.7
+coyote_time = 0.06
+jump_buffer_time = 0.08
+max_floor_angle_degrees = 50.0
+step_up_height = 0.45
+step_down_height = 0.45
+swim_upward_correction_enabled = true
+swim_upward_coef = 1.0

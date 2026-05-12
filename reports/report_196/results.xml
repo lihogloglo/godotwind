@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-09" name="report_196" tests="8" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_character_controller_phase0_baseline" package="tests/unit" timestamp="2026-05-10T00:57:14" hostname="localhost" tests="8" failures="0" errors="0" skipped="0" flaky="0" time="0.013">
+		<testcase name="test_baseline_process_runs_two_push_passes_until_phase_1" classname="test_character_controller_phase0_baseline" time="0.003">
+		</testcase>
+		<testcase name="test_baseline_moving_crouch_resolves_to_run_until_phase_2" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_sprint_priority_beats_default_run" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_jump_priority_beats_sprint_and_run" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_forward_input_defaults_to_run_action" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_sprint_is_added_only_on_top_of_movement" classname="test_character_controller_phase0_baseline" time="0.000">
+		</testcase>
+		<testcase name="test_baseline_walk_action_is_unbound_until_phase_3_contract_decision" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_baseline_swim_pitch_is_not_applied_before_water_injection_until_phase_4" classname="test_character_controller_phase0_baseline" time="0.000">
+		</testcase>
+	</testsuite>
+</testsuites>

@@ -43,6 +43,7 @@ const StatsCollectorScript := preload("res://src/tools/ui/stats_collector.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
+const MorrowindMovementConfig := preload("res://src/core/character/controller/movement_presets/morrowind_movement_config.tres")
 const ConsoleScript := preload("res://src/core/console/console.gd")
 const ExplorerPanelsScript := preload("res://src/tools/ui/explorer_panels.gd")
 const CellBrowserScript := preload("res://src/tools/ui/cell_browser.gd")
@@ -64,6 +65,7 @@ const InventoryServiceScript := preload("res://src/core/interaction/inventory_se
 const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/mw_inventory_service.gd")
 # Interaction framework main-scene integration (2026-04-09).
 const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
+const InteractionIntentScript := preload("res://src/core/interaction/interaction_intent.gd")
 const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
 const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
 # Dialogue system integration (C.3-C.7)
@@ -217,16 +219,12 @@ var player_controller: PlayerController = null  # PlayerController instance
 # Interaction framework main-scene integration (2026-04-09)
 var _interaction_raycaster: InteractionRaycaster = null
 var _fly_raycaster: InteractionRaycaster = null  # Separate raycaster for fly camera mode
-var _carry_controller: Node = null  # CarryController (no class_name export to avoid preload cycle)
-var _fly_carry_controller: Node = null  # CarryController bound to fly_camera (same class, separate instance)
+var _carry_controller: CarryController = null
+var _fly_carry_controller: CarryController = null  # CarryController bound to fly_camera (same class, separate instance)
 
-# Fly-camera interact press/release discriminator — mirrors the PlayerController
-# pattern so tap vs hold routing works identically in flycam mode. The
-# `interact` action is already bound to E in project.godot; we consume press +
-# release events when the fly camera is active.
-const FLY_INTERACT_HOLD_THRESHOLD_S: float = 0.20
-var _fly_interact_press_time_msec: int = -1
-var _fly_interact_hold_emitted: bool = false
+# FlyCameraContext owns raw `interact` while fly mode is active. It uses the
+# same helper as PlayerGameplayContext so tap/hold/release behavior cannot drift.
+var _fly_interaction_intent: InteractionIntent = InteractionIntentScript.new() as InteractionIntent
 
 # Dialogue system (C.3-C.7)
 var _dialogue_ui: DialogueUI = null
@@ -1031,6 +1029,7 @@ func _setup_cameras() -> void:
 	# Create player controller (hidden by default)
 	var player_node := CharacterBody3D.new()
 	player_node.set_script(PlayerControllerScript)
+	player_node.set("movement_config", MorrowindMovementConfig)
 	player_node.name = "PlayerController"
 	add_child(player_node)
 	player_controller = player_node as PlayerController
@@ -1066,7 +1065,7 @@ func _setup_cameras() -> void:
 		player_controller.set_interaction_raycaster(_interaction_raycaster)
 		_interaction_raycaster.prompt_changed.connect(_on_interact_prompt_changed)
 
-		_carry_controller = CarryControllerScript.new()
+		_carry_controller = CarryControllerScript.new() as CarryController
 		_carry_controller.name = "CarryController"
 		player_controller.add_child(_carry_controller)
 		_carry_controller.setup(player_camera, player_controller)
@@ -1087,15 +1086,15 @@ func _setup_cameras() -> void:
 		fly_camera.add_child(_fly_raycaster)
 		_fly_raycaster.prompt_changed.connect(_on_interact_prompt_changed)
 
-		# Dedicated CarryController for flycam mode. CarryController only uses
-		# the `player` arg for nothing currently (see carry_controller.gd:126
-		# — `player` is assigned in setup but never read in the hold loop),
-		# so passing null is safe. Streaming manager wired later in
-		# _initialize_interior_pocket_manager alongside the player-mode one.
-		_fly_carry_controller = CarryControllerScript.new()
+		# Dedicated CarryController for flycam mode. There is no player body in
+		# this context, so the carry mask helper falls back to the standard Player
+		# layer. Streaming manager is wired later beside the player-mode one.
+		_fly_carry_controller = CarryControllerScript.new() as CarryController
 		_fly_carry_controller.name = "FlyCarryController"
 		fly_camera.add_child(_fly_carry_controller)
 		_fly_carry_controller.setup(fly_camera, null)
+		_fly_carry_controller.grabbed.connect(_on_fly_carry_grabbed)
+		_fly_carry_controller.released.connect(_on_fly_carry_released)
 
 	# Start in fly camera mode
 	_camera_mode = CameraMode.FLY_CAMERA
@@ -1385,8 +1384,6 @@ func _switch_to_player_controller() -> void:
 	if not player_controller or not fly_camera:
 		return
 
-	_camera_mode = CameraMode.PLAYER_CONTROLLER
-
 	# Get current fly camera position for teleport
 	var current_pos := fly_camera.global_position
 
@@ -1394,13 +1391,21 @@ func _switch_to_player_controller() -> void:
 	var ground_y := _get_ground_height(current_pos)
 	var player_pos := Vector3(current_pos.x, ground_y, current_pos.z)
 
+	# Attach player character body if not already attached. Do this before
+	# disabling the fly camera so failed data/assembly leaves the user in a
+	# working camera mode instead of a player controller with no movement stack.
+	if not player_controller.character_root:
+		if not _attach_player_character():
+			_log("[color=red]Could not switch to PLAYER mode: player character attachment failed[/color]")
+			Log.warn("controller", "Player mode switch aborted: character attachment failed")
+			return
+
+	_camera_mode = CameraMode.PLAYER_CONTROLLER
+	_fly_interaction_intent.cancel()
+
 	# Disable fly camera
 	fly_camera.disable()
 	fly_camera.current = false
-
-	# Attach player character body if not already attached
-	if not player_controller.character_root:
-		_attach_player_character()
 
 	# Enable and position player controller
 	player_controller.teleport_to(player_pos)
@@ -1408,7 +1413,7 @@ func _switch_to_player_controller() -> void:
 	# player's eye (camera_pivot) in the camera's forward direction, so
 	# it works at full reach regardless of where the SpringArm3D puts the
 	# camera. See world_explorer._setup_cameras where ray_origin_node is
-	# wired, and docs/INTERACTION_SYSTEM.md for the third-person pattern.
+		# wired, and docs/systems/interaction_system.md for the third-person pattern.
 	# TAB still toggles first/third-person freely.
 	player_controller.set_camera_mode(PlayerControllerScript.CameraMode.THIRD_PERSON)
 	player_controller.allow_camera_mode_switch = true
@@ -1455,6 +1460,7 @@ func _switch_to_fly_camera() -> void:
 		return
 
 	_camera_mode = CameraMode.FLY_CAMERA
+	player_controller.cancel_interaction_intent()
 
 	# Get player position
 	var player_camera_pos: Vector3 = player_controller.get_camera_position()
@@ -1463,7 +1469,7 @@ func _switch_to_fly_camera() -> void:
 	player_controller.disable()
 
 	# Enable fly camera at player's camera position
-	fly_camera.position = player_camera_pos
+	fly_camera.teleport_to(player_camera_pos)
 	fly_camera.enable()
 	fly_camera.current = true
 
@@ -1501,8 +1507,10 @@ func _switch_to_fly_camera() -> void:
 	_log("Hold Right-click to look, WASD to move")
 
 
-## Attach a Morrowind NPC body to the player controller
-func _attach_player_character() -> void:
+## Attach a Morrowind NPC body to the player controller.
+## Returns false when data or assembly is missing so camera-mode switching can
+## fail closed and keep the fly camera active.
+func _attach_player_character() -> bool:
 	# Ensure character assets are preloaded (KF animations, skeletons, body parts)
 	if not _character_assets_preloaded:
 		_character_assets_preloaded = true
@@ -1514,12 +1522,12 @@ func _attach_player_character() -> void:
 	var npc_record: NPCRecord = ESMManager.get_npc(_player_npc_id)
 	if not npc_record:
 		_log("Player NPC not found: %s" % _player_npc_id)
-		return
+		return false
 
 	var race: RaceRecord = ESMManager.get_race(npc_record.race_id)
 	if not race:
 		_log("Race not found: %s" % npc_record.race_id)
-		return
+		return false
 
 	var is_female: bool = npc_record.is_female()
 	var is_beast: bool = race.is_beast() if race else false
@@ -1529,7 +1537,7 @@ func _attach_player_character() -> void:
 	var character_root: Node3D = MorrowindNPCAssembler.assemble(npc_record, race)
 	if not character_root:
 		_log("Failed to assemble player NPC: %s" % _player_npc_id)
-		return
+		return false
 
 	# Find skeleton and rename bones (Bip01 -> profile names)
 	var SkeletonUtils := preload("res://src/core/animation/skeleton_utils.gd")
@@ -1537,7 +1545,7 @@ func _attach_player_character() -> void:
 	if not skeleton:
 		_log("No skeleton found for player NPC: %s" % _player_npc_id)
 		character_root.queue_free()
-		return
+		return false
 
 	var factory := CharacterFactoryV2Script.new()
 	factory.enable_ik = true
@@ -1567,6 +1575,7 @@ func _attach_player_character() -> void:
 	player_controller._setup_input_gatherer()
 
 	_log("Player character attached: %s" % _player_npc_id)
+	return true
 
 
 ## Recursively find a Skeleton3D in a node hierarchy
@@ -2804,8 +2813,10 @@ func _teleport_to_cell(cell_x: int, cell_y: int) -> void:
 		player_controller.teleport_to(Vector3(world_x, height + 2.0, world_z))
 	elif fly_camera:
 		# Teleport fly camera above the cell
-		fly_camera.position = Vector3(world_x, height + 100.0, world_z + 50.0)
-		fly_camera.look_at(Vector3(world_x, height, world_z))
+		fly_camera.teleport_to(
+			Vector3(world_x, height + 100.0, world_z + 50.0),
+			Vector3(world_x, height, world_z)
+		)
 
 	_log("Teleported to cell (%d, %d)" % [cell_x, cell_y])
 
@@ -3019,10 +3030,8 @@ func _input(event: InputEvent) -> void:
 	if console and console.is_visible():
 		return
 
-	# Fly-camera interact press/release — bound to the `interact` action
-	# (default E). Mirrors the PlayerController tap/hold discriminator so
-	# the same raycaster target drives tap→interact and hold→carry.grab.
-	# Only active in FLY_CAMERA mode; PlayerController handles its own.
+	# FlyCameraContext interact press/release — only active in FLY_CAMERA
+	# mode. Player mode is handled by PlayerController.
 	if _camera_mode == CameraMode.FLY_CAMERA:
 		if event.is_action_pressed(&"interact"):
 			_fly_on_interact_pressed()
@@ -3374,49 +3383,58 @@ func _on_interact_prompt_changed(interactable: Interactable, distance: float) ->
 	_door_prompt_label.visible = true
 
 
-## Record the press time; reset hold flag. Poll in _process decides when
-## the press crosses the hold threshold and fires the grab path.
-func _fly_on_interact_pressed() -> void:
+func _on_fly_carry_grabbed(_body: RigidBody3D) -> void:
+	if _fly_raycaster:
+		_fly_raycaster.set_prompt_suppressed(true)
+
+
+func _on_fly_carry_released(_body: RigidBody3D) -> void:
+	if _fly_raycaster:
+		_fly_raycaster.set_prompt_suppressed(false)
+
+
+## Record a fly-context press. Poll in _process decides when the press crosses
+## the hold threshold and fires the grab path.
+func _fly_on_interact_pressed(now_msec: int = -1) -> void:
 	if _dialogue_session and _dialogue_session.is_any_panel_open():
+		_fly_interaction_intent.cancel()
 		return
-	_fly_interact_press_time_msec = Time.get_ticks_msec()
-	_fly_interact_hold_emitted = false
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	_fly_interaction_intent.press(now_msec)
 
 
 ## Discriminate tap vs post-hold release. Same rules as
 ## PlayerController._on_interact_released. Tap → interact(); release after
 ## hold → carry_controller.release().
-func _fly_on_interact_released() -> void:
-	if _fly_interact_press_time_msec < 0:
+func _fly_on_interact_released(now_msec: int = -1) -> void:
+	if not _fly_interaction_intent.is_pressed():
 		return
-	var held_msec := Time.get_ticks_msec() - _fly_interact_press_time_msec
-	_fly_interact_press_time_msec = -1
 	if _dialogue_session and _dialogue_session.is_any_panel_open():
-		_fly_interact_hold_emitted = false
+		_fly_interaction_intent.cancel()
 		return
-	if _fly_interact_hold_emitted:
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	var outcome: int = _fly_interaction_intent.release(now_msec)
+	if outcome == InteractionIntent.Outcome.HOLD_RELEASE:
 		_fly_carry_release()
-	elif held_msec < int(FLY_INTERACT_HOLD_THRESHOLD_S * 1000):
-		_fly_camera_interact()
-	else:
-		# Past threshold but poll didn't fire (low fps race). Fallthrough
-		# as a tap so the event isn't silently dropped.
+	elif outcome == InteractionIntent.Outcome.TAP:
 		_fly_camera_interact()
 
 
 ## Polled from _process. Fires hold-begin once when the press crosses the
 ## threshold; that routes to the carry controller to grab whatever the
 ## fly raycaster is currently targeting.
-func _poll_fly_interact_hold() -> void:
+func _poll_fly_interact_hold(now_msec: int = -1) -> void:
 	if _camera_mode != CameraMode.FLY_CAMERA:
 		return
-	if _fly_interact_press_time_msec < 0 or _fly_interact_hold_emitted:
+	if not _fly_interaction_intent.is_pressed():
 		return
 	if _dialogue_session and _dialogue_session.is_any_panel_open():
 		return
-	var held_msec := Time.get_ticks_msec() - _fly_interact_press_time_msec
-	if held_msec >= int(FLY_INTERACT_HOLD_THRESHOLD_S * 1000):
-		_fly_interact_hold_emitted = true
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	if _fly_interaction_intent.poll(now_msec) == InteractionIntent.Outcome.HOLD_BEGIN:
 		_fly_carry_grab()
 
 
@@ -3648,8 +3666,7 @@ func _position_camera_for_interior_cell(cell: CellRecord) -> void:
 	if _camera_mode == CameraMode.PLAYER_CONTROLLER and player_controller:
 		player_controller.teleport_to(center + Vector3(0, 2, 0))
 	elif fly_camera:
-		fly_camera.position = center + Vector3(0, 300, 500)
-		fly_camera.look_at(center)
+		fly_camera.teleport_to(center + Vector3(0, 300, 500), center)
 
 	_log("Camera positioned at: %s" % (player_controller.global_position if _camera_mode == CameraMode.PLAYER_CONTROLLER else fly_camera.position))
 

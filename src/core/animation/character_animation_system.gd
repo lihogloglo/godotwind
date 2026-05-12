@@ -16,7 +16,7 @@ const _AnimationManager := preload("res://src/core/animation/animation_manager.g
 const _IKController := preload("res://src/core/animation/ik_controller.gd")
 const _ProceduralModifierController := preload("res://src/core/animation/procedural_modifier_controller.gd")
 const _AnimationLODController := preload("res://src/core/animation/animation_lod_controller.gd")
-const _MoveContainer := preload("res://src/core/character/controller/move_container.gd")
+const _DefaultMovementConfig := preload("res://src/core/character/controller/movement_presets/default_movement_config.tres")
 
 # Signals
 signal animation_state_changed(old_state: StringName, new_state: StringName)
@@ -32,7 +32,6 @@ var animation_manager: Node = null  # AnimationManager
 var ik_controller: Node = null  # IKController
 var procedural_modifiers: Node = null  # ProceduralModifierController
 var lod_controller: Node = null  # AnimationLODController
-var move_container: Node = null  # MoveContainer
 
 # References
 var skeleton: Skeleton3D = null
@@ -48,10 +47,13 @@ var character_root: Node3D = null
 @export var enable_ik: bool = true
 @export var enable_procedural: bool = true
 @export var enable_lod: bool = true
-@export var enable_moves: bool = true
+
+@export_group("Movement")
+@export var movement_config: CharacterMovementConfig = _DefaultMovementConfig
 
 # State
 var _is_setup: bool = false
+var _last_movement_animation_state: StringName = &""
 
 
 func _ready() -> void:
@@ -106,6 +108,11 @@ func reset() -> void:
 	skeleton = null
 	character_body = null
 	character_root = null
+	_last_movement_animation_state = &""
+
+
+func set_movement_config(config: CharacterMovementConfig) -> void:
+	movement_config = config if config else _DefaultMovementConfig
 
 
 ## Process - called every frame
@@ -190,6 +197,30 @@ func update_from_movement(velocity: Vector3, is_grounded: bool = true,
 			p_is_sprinting, p_is_walking)
 
 
+## Observe CharacterMotor's per-frame movement snapshot.
+func update_from_movement_state(state: MovementState) -> void:
+	if not state:
+		return
+	var anim: Node = animation_manager
+	if not anim:
+		return
+
+	var horizontal_velocity := Vector3(state.velocity.x, 0.0, state.velocity.z)
+	if anim.has_method("set_blend_parameter"):
+		anim.set_blend_parameter(&"movement_speed", horizontal_velocity.length())
+		anim.set_blend_parameter(&"is_grounded", state.is_grounded)
+		anim.set_blend_parameter(&"movement_direction", state.input_direction)
+		anim.set_blend_parameter(&"is_sprinting", state.is_sprinting)
+		anim.set_blend_parameter(&"is_walking", state.is_walking)
+
+	if not state.animation_state.is_empty() and state.animation_state != _last_movement_animation_state:
+		if anim.has_method("transition_to"):
+			var result: Variant = anim.transition_to(state.animation_state, true)
+			if result is bool and not result:
+				return
+		_last_movement_animation_state = state.animation_state
+
+
 # =============================================================================
 # WIRING API
 # =============================================================================
@@ -215,6 +246,10 @@ func get_animation_tree() -> AnimationTree:
 	if anim:
 		return anim.get_animation_tree()
 	return null
+
+
+func get_animation_manager() -> Node:
+	return animation_manager
 
 
 # =============================================================================
@@ -359,13 +394,6 @@ func _create_controllers() -> void:
 		lod_controller.name = "LODController"
 		add_child(lod_controller)
 
-	# Move Container (state machine for character actions)
-	if enable_moves:
-		move_container = _MoveContainer.new()
-		move_container.name = "MoveContainer"
-		add_child(move_container)
-		_add_default_moves()
-
 
 ## Setup each controller with references
 func _setup_controllers() -> void:
@@ -395,17 +423,6 @@ func _setup_controllers() -> void:
 	if lod:
 		lod.setup(self, character_body)
 
-	# Setup Move Container
-	var mc: _MoveContainer = move_container as _MoveContainer
-	if mc:
-		mc.player = character_body
-		mc.character_root = character_root
-		mc.animator = animation_manager
-		mc.skeleton = skeleton
-		mc.accept_moves()
-		mc.state_changed.connect(_on_move_state_changed)
-
-
 ## Cleanup controllers on reset
 func _cleanup_controllers() -> void:
 	# Clean up AnimationTree FIRST — it lives on the Skeleton3D, not the
@@ -434,62 +451,6 @@ func _cleanup_controllers() -> void:
 	if lod_controller:
 		lod_controller.queue_free()
 		lod_controller = null
-
-	if move_container:
-		move_container.queue_free()
-		move_container = null
-
-
-## Add default locomotion moves to the MoveContainer.
-## Subclasses can override this to add different or additional moves.
-func _add_default_moves() -> void:
-	if not move_container:
-		return
-	var IdleMoveClass := preload("res://src/core/character/controller/moves/idle_move.gd")
-	var WalkMoveClass := preload("res://src/core/character/controller/moves/walk_move.gd")
-	var RunMoveClass := preload("res://src/core/character/controller/moves/run_move.gd")
-	var SprintMoveClass := preload("res://src/core/character/controller/moves/sprint_move.gd")
-	var JumpMoveClass := preload("res://src/core/character/controller/moves/jump_move.gd")
-	var MidairMoveClass := preload("res://src/core/character/controller/moves/midair_move.gd")
-	var CrouchMoveClass := preload("res://src/core/character/controller/moves/crouch_move.gd")
-	var SwimIdleMoveClass := preload("res://src/core/character/controller/moves/swim_idle_move.gd")
-	var SwimMoveClass := preload("res://src/core/character/controller/moves/swim_move.gd")
-
-	var idle := IdleMoveClass.new()
-	idle.name = "IdleMove"
-	move_container.add_child(idle)
-
-	var walk := WalkMoveClass.new()
-	walk.name = "WalkMove"
-	move_container.add_child(walk)
-
-	var run := RunMoveClass.new()
-	run.name = "RunMove"
-	move_container.add_child(run)
-
-	var sprint := SprintMoveClass.new()
-	sprint.name = "SprintMove"
-	move_container.add_child(sprint)
-
-	var jump := JumpMoveClass.new()
-	jump.name = "JumpMove"
-	move_container.add_child(jump)
-
-	var midair := MidairMoveClass.new()
-	midair.name = "MidairMove"
-	move_container.add_child(midair)
-
-	var crouch := CrouchMoveClass.new()
-	crouch.name = "CrouchMove"
-	move_container.add_child(crouch)
-
-	var swim_idle := SwimIdleMoveClass.new()
-	swim_idle.name = "SwimIdleMove"
-	move_container.add_child(swim_idle)
-
-	var swim := SwimMoveClass.new()
-	swim.name = "SwimMove"
-	move_container.add_child(swim)
 
 
 ## Find skeleton in node hierarchy
@@ -534,27 +495,6 @@ func _on_hit_triggered(position: Vector3) -> void:
 
 func _on_footstep_triggered(foot: String, position: Vector3) -> void:
 	footstep_triggered.emit(foot, position)
-
-
-func _on_move_state_changed(old_move: StringName, new_move: StringName) -> void:
-	if debug_mode:
-		Log.debug("animation", "CharacterAnimationSystem: Move %s -> %s" % [old_move, new_move])
-
-
-# =============================================================================
-# MOVE CONTAINER API
-# =============================================================================
-
-## Process moves for this frame (call from PlayerController with gathered input)
-func process_moves(input: Resource, delta: float) -> void:
-	var mc: _MoveContainer = move_container as _MoveContainer
-	if mc:
-		mc.process(input, delta)
-
-
-## Get the MoveContainer node (for direct access from PlayerController)
-func get_move_container() -> Node:
-	return move_container
 
 
 # =============================================================================

@@ -1,27 +1,21 @@
-## CrouchMove — Crouched locomotion with reduced speed and shorter collision
+## CrouchMove - Crouched locomotion with reduced speed and shorter collision
 class_name CrouchMove
 extends Move
 
-@export var crouch_speed: float = 2.0
-@export var crouch_height: float = 1.0
-## Normal player height (restored on exit)
-@export var standing_height: float = 1.8
-
-var _original_height: float = 1.8
 var _current_crouch_anim: StringName = &""
 
 
 func _init() -> void:
 	move_name = &"crouch"
 	animation_state = &"Crouch"
-	priority = 1  # Same as walk — crouch replaces walk when crouching
+	priority = 4  # Phase 1 contract: crouch posture wins over run/sprint.
 
 
 func default_lifecycle(input: InputPackage) -> StringName:
-	if input.is_in_water and container and container.has_move(&"swim_idle"):
+	var config := get_movement_config()
+	if input.is_in_water and config.can_swim and container and container.has_move(&"swim_idle"):
 		return &"swim_idle"
-	# Landing lockout: don't transition to midair for 0.1s after entering (prevents Jolt bounce)
-	if works_longer_than(0.1) and not player.is_on_floor() and container and container.has_move(&"midair"):
+	if should_enter_midair(input):
 		return &"midair"
 	# Stay crouching while crouch is held, otherwise uncrouch
 	if not input.actions.has(&"crouch"):
@@ -36,8 +30,9 @@ func update(input: InputPackage, delta: float) -> void:
 	if not player.is_on_floor():
 		player.velocity.y -= gravity * delta
 
-	# Movement while crouched — switch animation based on input direction
+	# Movement while crouched - switch animation based on input direction
 	if input.input_direction != Vector2.ZERO:
+		var config := get_movement_config()
 		# Check if moving backward relative to facing
 		var input_dir_3d := (input.camera_basis * Vector3(
 			input.input_direction.x, 0.0, input.input_direction.y)).normalized()
@@ -45,7 +40,7 @@ func update(input: InputPackage, delta: float) -> void:
 		var face_direction := -facing.basis.z
 		var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
 
-		var target_anim: StringName = &"CrouchBack" if absf(angle) > 2.1 else &"CrouchWalk"
+		var target_anim: StringName = &"CrouchBack" if absf(angle) > config.get_backward_angle_radians() else &"CrouchWalk"
 		if _current_crouch_anim != target_anim:
 			_current_crouch_anim = target_anim
 			if animator:
@@ -63,15 +58,16 @@ func update(input: InputPackage, delta: float) -> void:
 func on_enter_state() -> void:
 	_current_crouch_anim = &"Crouch"
 	# Shrink collision shape
-	_set_collision_height(crouch_height)
+	_set_collision_height(get_movement_config().crouch_height)
 
 
 func on_exit_state() -> void:
 	# Restore collision shape
-	_set_collision_height(_original_height)
+	_set_collision_height(get_movement_config().standing_height)
 
 
 func _apply_crouch_movement(input: InputPackage, delta: float) -> void:
+	var config := get_movement_config()
 	var input_dir_3d := (input.camera_basis * Vector3(
 		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 	var facing: Node3D = character_root if character_root else player
@@ -79,14 +75,14 @@ func _apply_crouch_movement(input: InputPackage, delta: float) -> void:
 	var angle := face_direction.signed_angle_to(input_dir_3d, Vector3.UP)
 
 	var move_dir: Vector3
-	if absf(angle) > 2.1:  # Backward — don't rotate
-		move_dir = -face_direction * crouch_speed * 0.7
-	elif absf(angle) >= tracking_angular_speed * delta:
+	if absf(angle) > config.get_backward_angle_radians():
+		move_dir = -face_direction * config.crouch_speed * config.backward_speed_multiplier
+	elif absf(angle) >= config.ground_tracking_angular_speed * delta:
 		move_dir = face_direction.rotated(
-			Vector3.UP, signf(angle) * tracking_angular_speed * delta) * crouch_speed
-		facing.rotate_y(signf(angle) * tracking_angular_speed * delta)
+			Vector3.UP, signf(angle) * config.ground_tracking_angular_speed * delta) * config.crouch_speed
+		facing.rotate_y(signf(angle) * config.ground_tracking_angular_speed * delta)
 	else:
-		move_dir = face_direction.rotated(Vector3.UP, angle) * crouch_speed
+		move_dir = face_direction.rotated(Vector3.UP, angle) * config.crouch_speed
 		facing.rotate_y(angle)
 
 	player.velocity.x = move_dir.x
@@ -98,22 +94,30 @@ func _set_collision_height(height: float) -> void:
 	for child in player.get_children():
 		if child is CollisionShape3D and child.shape is CapsuleShape3D:
 			var capsule: CapsuleShape3D = child.shape as CapsuleShape3D
-			if height == crouch_height:
-				_original_height = capsule.height
 			capsule.height = height
 			child.position.y = height / 2.0
 			break
 
 
 func _can_stand_up() -> bool:
-	# Raycast upward from player to check if there's room to stand
 	var space_state := player.get_world_3d().direct_space_state
 	if not space_state:
 		return true
-	var query := PhysicsRayQueryParameters3D.create(
-		player.global_position + Vector3(0, crouch_height, 0),
-		player.global_position + Vector3(0, standing_height + 0.1, 0),
-		player.collision_mask,
-		[player.get_rid()])
-	var result := space_state.intersect_ray(query)
+	var config := get_movement_config()
+	var margin: float = clampf(config.stand_up_clearance_margin, 0.0, config.player_radius * 0.5)
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = config.player_radius
+	capsule.height = maxf(config.standing_height - margin * 2.0, config.player_radius * 2.0)
+
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = capsule
+	query.transform = Transform3D(player.global_transform.basis,
+		player.global_position + Vector3.UP * (config.standing_height * 0.5))
+	query.collision_mask = player.collision_mask
+	var excluded: Array[RID] = []
+	excluded.append(player.get_rid())
+	query.exclude = excluded
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
+	var result := space_state.intersect_shape(query, 1)
 	return result.is_empty()

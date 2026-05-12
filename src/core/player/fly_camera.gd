@@ -114,7 +114,7 @@ func _process(delta: float) -> void:
 
 	# Read movement via InputMap actions (physical_keycode, layout-independent).
 	# AZERTY/QWERTY/Dvorak users press the same physical key positions.
-	# See src/core/input/input_actions.gd and docs/INPUT_SYSTEM.md.
+	# See src/core/input/input_actions.gd and docs/systems/input_system.md.
 	var input_dir := Vector3.ZERO
 
 	# Horizontal plane — get_vector returns (x: left/right, y: forward/back)
@@ -145,6 +145,7 @@ func teleport_to(pos: Vector3, look_target: Vector3 = Vector3.ZERO) -> void:
 	position = pos
 	if look_target != Vector3.ZERO:
 		look_at(look_target)
+	reset_physics_interpolation()
 
 
 ## Release mouse capture when disabling

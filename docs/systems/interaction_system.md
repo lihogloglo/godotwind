@@ -36,11 +36,16 @@ The framework lives in `src/core/interaction/`; Morrowind-specific verb mappings
 | `interact_hold_begin` | Press, held longer than `HOLD_THRESHOLD` | Start carry on the targeted Interactable (if carryable) |
 | `interact_release` | Release after `interact_hold_begin` already fired | End carry: drop or throw |
 
-`PlayerController` is the **only** node that reads the raw `interact` action. It debounces and emits the three semantic events as signals. Every consumer listens to the signals — never `Input.is_action_pressed("interact")` directly.
+The raw `interact` action is owned by exactly one active input context:
+
+- `PlayerGameplayContext`: active in player-controller mode. `PlayerController` reads raw `interact`, feeds the shared `InteractionIntent` helper, and emits/routes the three semantic events as signals.
+- `FlyCameraContext`: active in fly-camera/debug mode. `world_explorer.gd` reads raw `interact`, feeds the same `InteractionIntent` helper, and routes equivalent semantic outcomes through the fly raycaster/carry controller.
+
+Every consumer listens to those semantic outcomes or asks the active raycaster for state. No system should add an ungated second `Input.is_action_pressed("interact")` reader.
 
 ### 3.1 Modal gate registry
 
-Signal-based registry. `PlayerController` is the single input owner; modal UIs register themselves as gates.
+Signal-based registry. `PlayerController` is the player-mode input owner; modal UIs register themselves as gates.
 
 ```gdscript
 # src/core/player/player_controller.gd
@@ -49,6 +54,8 @@ signal interact_hold_begin()
 signal interact_release()
 
 const HOLD_THRESHOLD: float = 0.20  # seconds
+
+# src/core/interaction/interaction_intent.gd owns the shared splitter.
 
 func register_modal_gate(gate: Node) -> void   # gate.has_method("is_open")
 func unregister_modal_gate(gate: Node) -> void
@@ -64,13 +71,15 @@ While ANY registered gate's `is_open()` returns true, `PlayerController` suppres
 
 **Why `is_open()` and not `.visible`:** `DialogueUI` extends `CanvasLayer` with internal `_root_control.visible` state, not a top-level `visible` property. Duck-typing would skip CanvasLayer-rooted UIs.
 
-**Hold detection lives in `_physics_process`** (not the input event) because input events fire only on press/release. Single emission per press (`_hold_emitted` flag), no double-fire. Modal-gate check inside `_physics_process` too — if a panel opens mid-press, the hold doesn't fire.
+**Hold detection lives in polling** (player mode uses `_physics_process`; fly mode uses the main-scene process loop) because input events fire only on press/release. `InteractionIntent` ensures a single hold-begin outcome per press. Modal-gate checks remain in the active context too — if a panel opens mid-press, the hold doesn't fire.
 
 The `_ensure_input_actions` runtime safety net at `player_controller.gd:421` is REDUNDANT after K.0 (input system) ships but deliberately left in place — see `docs/systems/input_system.md` §3.3.
 
 ## 4. Targeting
 
-`InteractionRaycaster` (`src/core/interaction/interaction_raycaster.gd`) sits on the player camera and casts forward each physics frame against collision layer 3. It maintains `_current_target: Interactable` and emits `prompt_changed` whenever it changes. It does NOT call `interact()` itself — `PlayerController` listens to input events and asks the raycaster for `get_current_target()`.
+`InteractionRaycaster` (`src/core/interaction/interaction_raycaster.gd`) sits on the active camera and casts forward each physics frame against collision layer 3. It maintains `_current_target: Interactable` and emits `prompt_changed` whenever it changes. It does NOT call `interact()` itself — the active input context asks the active raycaster for `get_current_target()`.
+
+Carry mode suppresses prompt output through `InteractionRaycaster.set_prompt_suppressed(true)` while leaving target acquisition intact. `PlayerController` wires this from player carry signals; the main-scene fly context wires the same behavior from the fly carry controller.
 
 ```
 PlayerController
@@ -113,6 +122,9 @@ Books are both readable (tap) AND grabbable (hold) — same Interactable handles
 - A `PickupInteractable` child carries the ESM `record_id`
 
 Carryables are by definition Node3D-bound; the static-renderer fast path is excluded.
+The named layer bits live in `src/core/physics/gameplay_physics_layers.gd`;
+the helper is preloaded by systems that need the contract and is not an
+autoload.
 
 ### 6.2 Hold mechanism — HL2 physics-gun velocity drive (canonical)
 
@@ -161,9 +173,14 @@ func _physics_process(delta: float) -> void:
 | State | Mask | Reason |
 |---|---|---|
 | Spawned / dropped / thrown | `Environment \| Player` | Rolling apple bumps player's foot |
-| Held (carried) | `Environment` (Player removed) | Held object must not push player around |
+| Held (carried) | saved mask minus the player's current collision-layer bits | Held object must not push player around, including during interior layer rewrites |
 
-Single source of truth in `CarryController.grab()` (clear `PLAYER_BIT`) and `release()` (restore from snapshot before unfreeze). Don't change masks anywhere else.
+Single source of truth in `CarryController`: grab saves the exact pre-hold
+mask, hold state excludes `player.collision_layer` via
+`GameplayPhysicsLayers`, and release restores the saved mask bit-for-bit before
+unfreeze. This is deliberate because `InteriorPocketManager` can temporarily
+move the player from the normal player bit onto exterior plus interior-slot
+physics layers. Don't change carry masks anywhere else.
 
 ---
 
@@ -190,7 +207,7 @@ Single source of truth in `CarryController.grab()` (clear `PLAYER_BIT`) and `rel
 2. **Modal UI gates carry.** When ANY modal UI is open, `PlayerController` stops emitting interact events entirely. Critical for books (readable + carryable): without the gate, holding E to read would lift the book out of the reader's hands.
 3. **Combat owns its own button.** `attack` / `block` are independent of `interact`. The only interaction is "while weapon drawn and carryable targeted, hold-to-grab still works" — lets the player throw a chair mid-fight.
 4. **No double raycast.** Only `InteractionRaycaster` casts on layer 3. Other systems read `raycaster.get_current_target()`.
-5. **One input owner.** Only `PlayerController` reads raw `interact`.
+5. **One active input owner.** Only `PlayerGameplayContext` or `FlyCameraContext` reads raw `interact` at a time.
 6. **Cell streaming respects carried objects.** See §10.
 7. **Interactable layer is layer 3 ONLY.** Don't add interactables to other layers; don't add non-interactables to layer 3.
 8. **No `Area3D.monitoring = true` on items.** Detection is pull-based.
@@ -284,7 +301,7 @@ Player mode defaults to third-person (`set_camera_mode(THIRD_PERSON)`, `allow_ca
 
 **DoorInteractable spawn:** for every `type_name == "door"` reference whose `ref.is_teleport` is true (DODT subrecord present), the door instance's root `Node3D` is promoted to a `DoorInteractable` via `set_script`. `_add_interactable_layer_recursive` ORs the Interactable bit (`1 << 2`) onto every `CollisionObject3D` in the door subtree.
 
-**KEY_E fallback in fly mode:** `world_explorer._unhandled_input` gated on `_camera_mode == FLY_CAMERA`. In fly mode, KEY_E runs proximity-based `_activate_nearest_door()`. In player mode, the unified `interact` action drives the raycast path. The gate prevents double-activation.
+**FlyCameraContext:** `world_explorer._unhandled_input` is gated on `_camera_mode == FLY_CAMERA`. In fly mode, the unified `interact` action uses the fly raycaster and the shared `InteractionIntent` splitter to route tap to the current Interactable and hold/release to the fly carry controller. In player mode, `PlayerController` owns the same action. The camera-mode gate prevents double-activation.
 
 ---
 

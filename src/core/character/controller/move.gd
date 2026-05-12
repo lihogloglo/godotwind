@@ -6,6 +6,8 @@
 class_name Move
 extends Node
 
+const _DefaultMovementConfig := preload("res://src/core/character/controller/movement_presets/default_movement_config.tres")
+
 # --- References (wired by MoveContainer.accept_moves()) ---
 var player: CharacterBody3D = null
 var character_root: Node3D = null  # Model root for rotation (separate from player when camera is child)
@@ -15,6 +17,7 @@ var resources: Node = null  # HumanoidResources (Phase 4)
 var combat: Node = null  # HumanoidCombat (Phase 5)
 var container: Node = null  # MoveContainer
 var legs: Node = null  # Legs (Phase 4)
+var movement_config: CharacterMovementConfig = null
 
 # --- Configuration ---
 @export var move_name: StringName = &""
@@ -27,7 +30,7 @@ var legs: Node = null  # Legs (Phase 4)
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 
 # --- State tracking ---
-var enter_state_time: float = 0.0
+var elapsed_time: float = 0.0
 var initial_position: Vector3 = Vector3.ZERO
 
 # --- Forced / queued move system ---
@@ -73,6 +76,7 @@ func default_lifecycle(input: InputPackage) -> StringName:
 ## Called every physics frame while this is the active move.
 ## Internal wrapper that handles input vector processing before subclass update.
 func _update(input: InputPackage, delta: float) -> void:
+	advance_time(delta)
 	update(input, delta)
 
 
@@ -150,9 +154,37 @@ func _get_move(name: StringName) -> Move:
 
 ## Check if a move can be paid for (stamina). Always true until Phase 4.
 func _can_afford(_move: Move) -> bool:
+	var config := get_movement_config()
+	match _move.move_name:
+		&"walk":
+			if not config.can_walk:
+				return false
+		&"sprint":
+			if not config.can_sprint:
+				return false
+		&"crouch":
+			if not config.can_crouch:
+				return false
+		&"jump":
+			if not config.can_jump:
+				return false
+		&"swim", &"swim_idle":
+			if not config.can_swim:
+				return false
 	if resources and resources.has_method("can_be_paid"):
 		return resources.can_be_paid(_move)
 	return true
+
+
+func should_enter_midair(input: InputPackage) -> bool:
+	var config := get_movement_config()
+	if not works_longer_than(config.ground_to_midair_lockout):
+		return false
+	if player.is_on_floor():
+		return false
+	if input and input.actions.has(&"jump"):
+		return false
+	return container and container.has_move(&"midair")
 
 
 # =============================================================================
@@ -177,10 +209,13 @@ func process_input_vector(input: InputPackage, delta: float) -> void:
 # =============================================================================
 
 func mark_enter_state() -> void:
-	enter_state_time = Time.get_unix_time_from_system()
+	elapsed_time = 0.0
 
 func get_progress() -> float:
-	return Time.get_unix_time_from_system() - enter_state_time
+	return elapsed_time
+
+func advance_time(delta: float) -> void:
+	elapsed_time += maxf(delta, 0.0)
 
 func works_longer_than(time: float) -> bool:
 	return get_progress() >= time
@@ -234,3 +269,14 @@ func assign_combos() -> void:
 			combos.append(child)
 			if "move" in child:
 				child.move = self
+
+
+func get_movement_config() -> CharacterMovementConfig:
+	if movement_config:
+		return movement_config
+	if container:
+		var container_config: CharacterMovementConfig = container.get("movement_config") as CharacterMovementConfig
+		if container_config:
+			movement_config = container_config
+			return movement_config
+	return _DefaultMovementConfig

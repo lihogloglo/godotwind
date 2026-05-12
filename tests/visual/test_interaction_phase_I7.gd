@@ -256,43 +256,43 @@ func _spawn_props() -> void:
 	# Door — emits door_activated on tap
 	var door := _make_prop("door", Vector3(-3, 0.9, 0), Color(0.4, 0.25, 0.15),
 		Vector3(0.2, 1.8, 1.0))
-	var door_adapter := DoorInteractableScript.new()
+	door.set_script(DoorInteractableScript)
+	var door_adapter := door as DoorInteractable
 	door_adapter.record_id = "door_test_01"
 	door_adapter.display_name = "Iron Door"
 	door_adapter.has_destination = true
 	door_adapter.destination_name = "Test Destination"
-	door.add_child(door_adapter)
 	door_adapter.door_activated.connect(_on_door_activated)
 
 	# Container (unlocked) — emits container_opened on tap
 	var box := _make_prop("box", Vector3(-1, 0.4, 0), Color(0.5, 0.4, 0.25),
 		Vector3(0.8, 0.8, 0.8))
-	var box_adapter := ContainerInteractableScript.new()
+	box.set_script(ContainerInteractableScript)
+	var box_adapter := box as ContainerInteractable
 	box_adapter.record_id = "crate_test_01"
 	box_adapter.display_name = "Wooden Crate"
-	box.add_child(box_adapter)
 	box_adapter.container_opened.connect(_on_container_opened)
 
 	# Container (locked) — refuses on tap
 	var locked := _make_prop("locked_box", Vector3(1, 0.4, 0), Color(0.4, 0.3, 0.15),
 		Vector3(0.8, 0.8, 0.8))
-	var locked_adapter := ContainerInteractableScript.new()
+	locked.set_script(ContainerInteractableScript)
+	var locked_adapter := locked as ContainerInteractable
 	locked_adapter.record_id = "crate_locked_01"
 	locked_adapter.display_name = "Locked Strongbox"
 	locked_adapter.locked = true
 	locked_adapter.lock_level = 50
-	locked.add_child(locked_adapter)
 	locked_adapter.container_refused.connect(_on_container_refused)
 	locked_adapter.container_opened.connect(_on_container_opened)
 
 	# Activator — emits activator_triggered
 	var lever := _make_prop("lever", Vector3(3, 0.6, 0), Color(0.5, 0.5, 0.55),
 		Vector3(0.2, 1.2, 0.2))
-	var lever_adapter := ActivatorInteractableScript.new()
+	lever.set_script(ActivatorInteractableScript)
+	var lever_adapter := lever as ActivatorInteractable
 	lever_adapter.record_id = "lever_test_01"
 	lever_adapter.display_name = "Stone Lever"
 	lever_adapter.script_id = "test_lever_script"
-	lever.add_child(lever_adapter)
 	lever_adapter.activator_triggered.connect(_on_activator_triggered)
 
 

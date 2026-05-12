@@ -1,36 +1,65 @@
 # Godotwind — Godot 4.6 Morrowind Framework
 
+## Spec-Driven Development Rule
+
+For non-trivial Godotwind development, read `spec-driven/README.md` before editing code.
+
+Use the spec-driven workflow for new systems, rendering/shader work, terrain/world features, importers, editor tooling, performance-sensitive changes, and large refactors.
+
+The standing principles live in `spec-driven/00-constitution.md`.
+The repeatable workflow lives in `spec-driven/01-workflow.md`.
+
+For Morrowind-adjacent features, use OpenMW as a research and compatibility reference for formulas, settings, data interpretation, and edge cases, but keep Morrowind behavior as one implementation on top of generalized Godotwind systems.
+
+Modding is a first-class requirement: content and behavior intended for creators should be data-driven, override-friendly, and documented.
+
 ## Codex Session Verification Rule
 
-For Godotwind work, do not stop at static inspection. Before calling a gameplay,
-streaming, rendering, or performance change done, either:
+For Godotwind work, do not stop at static inspection. Runtime/editor
+verification is still required before a gameplay, streaming, rendering, or
+performance change is considered truly verified.
 
-1. Launch `scenes/Godotwind.tscn` interactively so the user can visually check it, or
-2. Run an automated benchmark/crash smoke that exercises the changed path.
+Current Codex limitation: Codex cannot reliably launch the Godot engine from
+this desktop workspace. The documented `D:` binary may be absent from Codex's
+environment, and the local Godot 4.6.2 Mono console runner has repeatedly
+crashed with signal 11 before gdUnit tests can run. Therefore Godot editor
+launches, interactive scene checks, imports/reimports, and gdUnit runs must be
+performed by the human/user unless the user explicitly says the environment has
+changed and asks Codex to try again.
 
-Use the documented local binary when available:
+Codex must still support verification by giving the human/user the exact scene,
+command, and checklist to run. Before calling a gameplay, streaming, rendering,
+or performance change done, either:
+
+1. Ask the user to launch `scenes/Godotwind.tscn` interactively and report the
+   visual result, or
+2. Ask the user to run an automated benchmark/crash smoke that exercises the
+   changed path and report the output.
+
+Human/user command when the documented local binary is available:
 
 ```powershell
 D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
 ```
 
-If a C# file changed, run `dotnet build Godotwind.sln` before launching Godot.
-If neither visual launch nor automated benchmark can be run, say exactly why in
-the final response.
+If a C# file changed, tell the human/user to run `dotnet build Godotwind.sln`
+before launching Godot. If neither visual launch nor automated benchmark has
+been run by the human/user, say exactly why in the final response and mark the
+runtime verification as pending.
 
 ## Shader Import / Cache Verification Rule
 
 When a `.glsl` compute shader or `.gdshader` / `.gdshaderinc` visual shader
-changes, do not trust a normal launch to pick up the edit. Before visual
-verification, clear the relevant generated shader/import cache and force
-reimport/recompile:
+changes, do not trust a normal launch to pick up the edit. Before human visual
+verification, clear the relevant generated shader/import cache and have the
+human/user force reimport/recompile:
 
 - For imported compute shaders (`RDShaderFile`, usually `.glsl`), delete the
   matching `.godot/imported/<shader-name>-*.res` and `.md5` files, then run:
   `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
 - For visual `.gdshader` / `.gdshaderinc` changes, clear the relevant
-  `.godot/shader_cache/` entries if the edit appears stale, then relaunch the
-  test scene.
+  `.godot/shader_cache/` entries if the edit appears stale, then have the
+  human/user relaunch the test scene.
 - In the final response, say whether shader cache/import artifacts were cleared
   before the visual check.
 
@@ -242,19 +271,26 @@ Ground truth lives in `docs/STATUS.md`. Don't duplicate here. When in doubt abou
 
 ## Verification — How to Check Your Work
 
-- Open `scenes/Godotwind.tscn` and run — should stream Morrowind cells at 60+ FPS
+- Human/user opens `scenes/Godotwind.tscn` and runs it — should stream Morrowind cells at 60+ FPS
 - Press `` ` `` for console, check for errors
 - Streaming changes: watch frame time (budget: 2ms/frame for cell loading)
 - Shader changes: fly to tier boundaries (150m, 500m) and check for artifacts
-- **C# changes MUST rebuild** before running: `dotnet build Godotwind.sln` from project root, or Build > Build Solution in Godot editor. Godot will NOT auto-rebuild C# on scene launch.
+- **C# changes MUST rebuild** before running: human/user runs `dotnet build Godotwind.sln` from project root, or Build > Build Solution in Godot editor. Godot will NOT auto-rebuild C# on scene launch.
 - Profile before optimizing: use Godot's built-in profiler or ObjectDB snapshots (4.6)
 
 ## Testing (gdUnit4)
 
 - **Framework:** gdUnit4 v6.1.2 (`addons/gdunit4/`)
-- **Run all tests:** `"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/run_tests.tscn`
+- **Run all tests:** human/user runs `"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/run_tests.tscn`
 - **Exit code:** 0 = all pass, non-zero = failures
 - Opens a window briefly (headless doesn't resolve `class_name` types)
+- **Detailed reports:** gdUnit writes each run to `reports/report_<number>/`.
+  Check the newest directory after a human/user test run:
+  - `reports/report_<number>/results.xml` — machine-readable pass/fail summary
+    and exact test counts.
+  - `reports/report_<number>/index.html` — human-readable report.
+  - `reports/report_<number>/test_suites/*.html` — per-suite details, for
+    example `reports/report_201/test_suites/tests.unit.test_character_controller_phase0_baseline.html`.
 - **Test directories:**
   - `tests/unit/` — Fast, isolated, no scene tree needed
   - `tests/integration/` — Needs autoloads/scene tree
@@ -284,7 +320,7 @@ Ground truth lives in `docs/STATUS.md`. Don't duplicate here. When in doubt abou
 - **DON'T** instantiate from worker threads — `duplicate()` is OK, `instantiate()` is main-thread only
 - **DON'T** bake Morrowind-specific logic into framework code — MW formats (SCVR, NIF, ESM) belong in `morrowind/` adapter subdirectories, not in generic systems
 - **DON'T** roll your own input loop in a test scene — read from `InputMap` actions (`Input.is_action_*`, `Input.get_vector("move_left","move_right","move_forward","move_backward")`). No `Input.is_key_pressed(KEY_*)`, no raw WASD branches. See Testing section + `docs/systems/input_system.md` §6.
-- **DON'T** use automated screenshot/auto-capture harnesses for visual verification — **EVER**. No `--auto-capture`, no scripted camera paths that auto-quit, no headless PNG dumps to "prove" a visual change works. Scripted captures lock to one camera pose and miss artifacts the user would catch in 5 seconds of free-fly (wobble patterns, debug modes left on, guard inversions, screen-space artifacts). Launch the test scene **interactively** and let the user pilot the camera. Auto-capture is a trap: it fakes confidence in broken visuals. Internal math sanity dumps (debug shader modes for world-pos reconstruction, etc.) are fine, but the human-verification pass is always interactive.
+- **DON'T** use automated screenshot/auto-capture harnesses for visual verification — **EVER**. No `--auto-capture`, no scripted camera paths that auto-quit, no headless PNG dumps to "prove" a visual change works. Have the human/user launch the test scene **interactively** and pilot the camera. Auto-capture is a trap: it fakes confidence in broken visuals. Internal math sanity dumps (debug shader modes for world-pos reconstruction, etc.) are fine, but the human-verification pass is always interactive.
 
 ---
 

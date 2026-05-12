@@ -3,13 +3,18 @@
 ## CharacterBody3D-based player controller with:
 ## - SpringArm3D orbit camera with collision avoidance
 ## - First/third-person camera toggle with smooth transition
-## - Move-as-Node state machine for movement + combat (via MoveContainer)
+## - Move-as-Node state machine for movement + combat (via CharacterMotor)
 ## - Character model + animation system integration
 ## - Freeze/unfreeze for dialogue, cutscenes
 ## - IK wiring (foot, look-at, hand) via CharacterAnimationSystem
 class_name PlayerController
 extends CharacterBody3D
 
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
+const InteractionIntentScript := preload("res://src/core/interaction/interaction_intent.gd")
+
+const _DefaultMovementConfig := preload("res://src/core/character/controller/movement_presets/default_movement_config.tres")
+const _CharacterMotor := preload("res://src/core/character/character_motor.gd")
 
 #region Signals
 
@@ -26,10 +31,10 @@ signal exited_water
 signal camera_mode_changed(mode: int)
 
 # --- Interaction (I.0) -------------------------------------------------------
-# `PlayerController` is the SOLE owner of the `interact` InputMap action.
-# All other systems (raycaster, dialogue UI, future CarryController) subscribe
-# to these signals — they MUST NOT read `Input.is_action_pressed("interact")`
-# directly. See docs/INTERACTION_SYSTEM.md §3.1 for the contract.
+# In PlayerGameplayContext, `PlayerController` owns the raw `interact` action.
+# FlyCameraContext owns the same action while fly mode is active. Both contexts
+# feed the shared InteractionIntent helper so tap/hold/release semantics stay
+# identical. See docs/systems/interaction_system.md §3.1 for the contract.
 
 ## Quick press + release inside HOLD_THRESHOLD. Default verb on the
 ## current Interactable target (Talk / Read / Take / Open / Activate).
@@ -57,6 +62,7 @@ enum CameraMode {
 #region Export Variables
 
 @export_group("Movement")
+@export var movement_config: CharacterMovementConfig = _DefaultMovementConfig
 ## Normal run speed in meters per second
 @export_range(0.1, 20.0, 0.1) var run_speed: float = 5.0
 ## Walking speed (when walk key held)
@@ -127,8 +133,11 @@ var character_root: Node3D
 ## Animation system (set via attach_character)
 var animation_system: Node
 
+## Movement motor owned by the player/character stack
+var movement_motor: CharacterMotor = null
+
 ## Input gatherer (creates InputPackage each frame for MoveContainer)
-var _input_gatherer: Node = null  # PlayerInputGatherer
+var _input_gatherer: Node = null  # PlayerInputGatherer, owned by CharacterMotor
 
 #endregion
 
@@ -153,8 +162,17 @@ var is_sprinting: bool = false
 ## Whether player is walking (slow)
 var is_walking: bool = false
 
+## Whether player is crouching
+var is_crouching: bool = false
+
 ## Whether player is jumping (upward velocity while airborne)
 var is_jumping: bool = false
+
+## Whether player is swimming
+var is_swimming: bool = false
+
+## Current posture from MovementState
+var current_posture: StringName = &"standing"
 
 ## Freeze all movement (for dialogue, cutscenes)
 var frozen: bool = false
@@ -194,18 +212,13 @@ var _water_volume_surface_y: float = -INF
 # --- Interaction (I.0) -------------------------------------------------------
 
 ## Threshold (seconds) above which a press becomes "hold" instead of "tap".
-const HOLD_THRESHOLD: float = 0.20
+const HOLD_THRESHOLD: float = InteractionIntentScript.DEFAULT_HOLD_THRESHOLD
 
 ## Modal UI gate registry. Each entry must implement `is_open() -> bool`.
 ## While ANY registered gate is open, interact_* signals are suppressed.
 var _modal_gates: Array[Node] = []
 
-## Time of the current interact press in milliseconds, or -1 if not pressed.
-var _interact_press_time_msec: int = -1
-
-## True after `interact_hold_begin` has fired for the current press, so
-## the polling loop in `_physics_process` does not double-fire.
-var _interact_hold_emitted: bool = false
+var _interaction_intent: InteractionIntent = InteractionIntentScript.new(HOLD_THRESHOLD) as InteractionIntent
 
 ## Optional reference to the InteractionRaycaster owned by this player.
 ## Set via `set_interaction_raycaster()` after the raycaster is parented.
@@ -219,8 +232,8 @@ var _interaction_raycaster: Node = null
 ## `setup(camera, player)` has been called. When set, `PlayerController`
 ## automatically routes `interact_hold_begin` → `try_grab(target)` and
 ## `interact_release` → `release()`. Held-body state lives entirely in
-## CarryController per `INTERACTION_SYSTEM.md` §6.2 MF1.
-var _carry_controller: Node = null
+## CarryController per `docs/systems/interaction_system.md`.
+var _carry_controller: CarryController = null
 
 ## Tracks the previous frame's modal gate state so we can edge-detect
 ## open→closed and re-capture the mouse automatically. Without this the
@@ -236,6 +249,7 @@ var _was_modal_open: bool = false
 # =============================================================================
 
 func _ready() -> void:
+	_sync_legacy_exports_from_movement_config()
 	_ensure_input_actions()
 	_setup_collision()
 	_setup_camera()
@@ -254,7 +268,7 @@ func _physics_process(delta: float) -> void:
 
 	# Interact hold polling — input events fire on press/release only,
 	# so "held past threshold" detection requires per-frame polling.
-	# See docs/INTERACTION_SYSTEM.md §3.1.
+	# See docs/systems/interaction_system.md §3.1.
 	_poll_interact_hold()
 
 	# Modal gate edge detection — re-capture the mouse on the open→closed
@@ -275,15 +289,13 @@ func _physics_process(delta: float) -> void:
 	# Water detection (ocean height check each frame)
 	_update_water_state()
 
-	# Gather input and let MoveContainer handle movement + animation
-	if _input_gatherer and animation_system:
-		var input: Resource = _input_gatherer.gather_input()
-		# Inject water state into input package
-		if input is InputPackage:
-			input.is_in_water = in_water
-			input.water_surface_y = _water_surface_y
-		if animation_system.has_method("process_moves"):
-			animation_system.process_moves(input, delta)
+	# CharacterMotor owns input gathering and movement. Animation observes the
+	# resulting MovementState, so movement keeps working without animation.
+	if movement_motor:
+		var state: MovementState = movement_motor.process(delta, in_water, _water_surface_y)
+		_apply_movement_state(state)
+		if animation_system and animation_system.has_method("update_from_movement_state"):
+			animation_system.update_from_movement_state(state)
 
 	# Landing detection
 	if is_on_floor() and not _was_on_floor:
@@ -306,15 +318,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Modal UI gate — if any registered modal UI is open, do NOT consume
 	# the interact event. Let it propagate to the panel's own
 	# `_unhandled_input` so panels can handle E-to-close themselves.
-	# See docs/INTERACTION_SYSTEM.md §3.1 + reviewer M1 (id=3945).
+	# See docs/systems/interaction_system.md §3.1 + reviewer M1 (id=3945).
 	# The internal checks in `_on_interact_pressed` / `_on_interact_released`
 	# are kept as belt-and-braces for the rare race where a modal opens
 	# between this entry point and the inner dispatch.
 	if is_modal_ui_open():
 		return
 
-	# Interact action — single source of truth for the entire project.
-	# See docs/INTERACTION_SYSTEM.md §3.1. No other site reads "interact".
+	# Interact action — owned by PlayerGameplayContext while this controller
+	# is active. FlyCameraContext owns the same action in fly mode.
+	# See docs/systems/interaction_system.md §3.1.
 	if InputMap.has_action("interact"):
 		if event.is_action_pressed("interact"):
 			_on_interact_pressed()
@@ -361,25 +374,26 @@ func _setup_collision() -> void:
 	collision_shape = CollisionShape3D.new()
 	collision_shape.name = "CollisionShape"
 	var capsule := CapsuleShape3D.new()
-	capsule.radius = player_radius
-	capsule.height = player_height
+	var config := get_movement_config()
+	capsule.radius = config.player_radius
+	capsule.height = config.standing_height
 	collision_shape.shape = capsule
-	collision_shape.position.y = player_height / 2.0
+	collision_shape.position.y = config.standing_height / 2.0
 	add_child(collision_shape)
 	# Morrowind terrain can be steep — allow ~50° slopes before sliding
-	floor_max_angle = deg_to_rad(50.0)
+	floor_max_angle = config.get_max_floor_angle_radians()
 	# Snap to ground — handles stair steps naturally via Godot's built-in floor snap.
 	# Custom step-up in MoveContainer handles larger obstacles (0.3-0.5m).
-	floor_snap_length = 0.3
+	floor_snap_length = config.floor_snap_length
 	# Allow pushing RigidBody3D objects (barrels, crates, etc.)
-	collision_layer = 2  # Player layer
-	collision_mask = 1 | 2  # Detect Environment + dynamic objects
+	collision_layer = GameplayPhysicsLayersScript.PLAYER
+	collision_mask = GameplayPhysicsLayersScript.ENVIRONMENT | GameplayPhysicsLayersScript.PLAYER
 
 
 func _setup_camera() -> void:
 	camera_pivot = Node3D.new()
 	camera_pivot.name = "CameraPivot"
-	camera_pivot.position.y = 1.7  # Eye/head height
+	camera_pivot.position.y = get_movement_config().standing_eye_height
 	# Vibration spike (§17.2.1 / @roaster verdict): with project-wide
 	# `physics/common/physics_interpolation = true`, the camera_pivot
 	# must be carved out so mouse rotation in `_unhandled_input` stays
@@ -408,35 +422,42 @@ func _setup_camera() -> void:
 
 ## Create and wire up the PlayerInputGatherer
 func _setup_input_gatherer() -> void:
-	if _input_gatherer:
-		_input_gatherer.queue_free()
-	var GathererClass := preload("res://src/core/character/controller/player_input_gatherer.gd")
-	_input_gatherer = GathererClass.new()
-	_input_gatherer.name = "InputGatherer"
-	_input_gatherer.camera_pivot = camera_pivot
-	add_child(_input_gatherer)
+	_setup_movement_motor()
+	_input_gatherer = movement_motor.input_gatherer if movement_motor else null
+
+
+func _setup_movement_motor() -> void:
+	if not movement_motor:
+		movement_motor = _CharacterMotor.new() as CharacterMotor
+		movement_motor.name = "CharacterMotor"
+		add_child(movement_motor)
+	movement_motor.setup(self, character_root, get_movement_config(), camera_pivot,
+		_find_skeleton(character_root) if character_root else null)
+	_input_gatherer = movement_motor.input_gatherer
 
 
 ## Register required input actions if they don't exist
 func _ensure_input_actions() -> void:
 	var actions: Dictionary = {
-		"move_forward": KEY_W,
-		"move_backward": KEY_S,
-		"move_left": KEY_A,
-		"move_right": KEY_D,
-		"sprint": KEY_SHIFT,
-		"walk": KEY_CTRL,
-		"jump": KEY_SPACE,
-		"crouch": KEY_C,
-		"toggle_camera": KEY_TAB,
-		"interact": KEY_E,
+		"move_forward": [KEY_W],
+		"move_backward": [KEY_S],
+		"move_left": [KEY_A],
+		"move_right": [KEY_D],
+		"sprint": [KEY_SHIFT],
+		"walk": [],
+		"jump": [KEY_SPACE],
+		"crouch": [KEY_C, KEY_CTRL],
+		"toggle_camera": [KEY_TAB],
+		"interact": [KEY_E],
 	}
 	for action_name: String in actions:
 		if not InputMap.has_action(action_name):
 			InputMap.add_action(action_name)
-			var key_event := InputEventKey.new()
-			key_event.physical_keycode = actions[action_name]
-			InputMap.action_add_event(action_name, key_event)
+			var keys: Array = actions[action_name]
+			for physical_keycode: int in keys:
+				var key_event := InputEventKey.new()
+				key_event.physical_keycode = physical_keycode
+				InputMap.action_add_event(action_name, key_event)
 
 
 # =============================================================================
@@ -456,16 +477,80 @@ func attach_character(character: Node3D, anim_sys: Node = null) -> void:
 		add_child(character_root)
 
 	animation_system = anim_sys
+	if animation_system and animation_system.has_method("set_movement_config"):
+		animation_system.set_movement_config(get_movement_config())
 
 	# Wire IK controller to use this CharacterBody3D for raycasts
 	if anim_sys and anim_sys.has_method("set_character_body"):
 		anim_sys.set_character_body(self)
 
-	# Create input gatherer (reads hardware input into InputPackage)
+	# Create movement motor (owns input gathering, MoveContainer, MovementState)
 	_setup_input_gatherer()
 
 	# Default to third person when character is attached
 	set_camera_mode(CameraMode.THIRD_PERSON)
+
+
+func get_movement_config() -> CharacterMovementConfig:
+	return movement_config if movement_config else _DefaultMovementConfig
+
+
+func get_movement_motor() -> CharacterMotor:
+	return movement_motor
+
+
+func get_movement_state() -> MovementState:
+	if movement_motor:
+		return movement_motor.get_movement_state()
+	return null
+
+
+func _sync_legacy_exports_from_movement_config() -> void:
+	var config := get_movement_config()
+	walk_speed = config.walk_speed
+	run_speed = config.run_speed
+	sprint_speed = config.sprint_speed
+	jump_velocity = config.jump_velocity
+	can_walk = config.can_walk
+	player_height = config.standing_height
+	player_radius = config.player_radius
+
+
+func _apply_movement_state(state: MovementState) -> void:
+	if not state:
+		return
+	input_direction = state.input_direction
+	input_strength = state.input_strength
+	direction = state.desired_world_direction
+	is_sprinting = state.is_sprinting
+	is_walking = state.is_walking
+	is_crouching = state.is_crouching
+	is_jumping = state.is_jumping
+	is_swimming = state.is_swimming
+	current_posture = state.posture
+	_apply_camera_posture(state.posture)
+
+
+func _apply_camera_posture(posture: StringName) -> void:
+	if not camera_pivot:
+		return
+	camera_pivot.position.y = _get_eye_height_for_posture(posture)
+
+
+func _get_eye_height_for_posture(posture: StringName) -> float:
+	var config := get_movement_config()
+	if posture == &"crouching":
+		return config.crouch_eye_height
+	return config.standing_eye_height
+
+
+func _reset_public_movement_state() -> void:
+	input_direction = Vector2.ZERO
+	input_strength = 0.0
+	direction = Vector3.ZERO
+	is_sprinting = false
+	is_walking = false
+	is_jumping = false
 
 
 ## Set camera mode (first or third person)
@@ -494,19 +579,19 @@ func enable() -> void:
 ## Disable the player controller and release mouse
 func disable() -> void:
 	enabled = false
+	cancel_interaction_intent()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if camera:
 		camera.current = false
 	velocity = Vector3.ZERO
+	_reset_public_movement_state()
 
 
 ## Freeze character (pause movement, e.g. for dialogue)
 func freeze() -> void:
 	frozen = true
 	velocity = Vector3.ZERO
-	input_direction = Vector2.ZERO
-	is_sprinting = false
-	is_walking = false
+	_reset_public_movement_state()
 
 
 ## Unfreeze character
@@ -517,6 +602,7 @@ func unfreeze() -> void:
 ## Teleport player to a position
 func teleport_to(pos: Vector3) -> void:
 	global_position = pos
+	reset_physics_interpolation()
 	velocity = Vector3.ZERO
 
 
@@ -538,7 +624,7 @@ func set_root_motion(p_enabled: bool) -> void:
 
 
 # =============================================================================
-# INTERACTION (I.0 — see docs/INTERACTION_SYSTEM.md §3.1)
+# INTERACTION (I.0 — see docs/systems/interaction_system.md §3.1)
 # =============================================================================
 
 ## Register a modal UI as an input gate. While ANY registered gate's
@@ -588,6 +674,7 @@ func get_modal_gate_count() -> int:
 ## interact_* signals themselves and read the target via their own means.
 func set_interaction_raycaster(raycaster: Node) -> void:
 	_interaction_raycaster = raycaster
+	_update_prompt_suppression_for_carry()
 
 
 ## Returns the attached InteractionRaycaster, or null.
@@ -599,13 +686,47 @@ func get_interaction_raycaster() -> Node:
 ## `interact_hold_begin` → `try_grab(raycaster.get_current_target())` and
 ## `interact_release` → `release()`. The controller must be parented and
 ## `setup(camera, player)` already called.
-func set_carry_controller(cc: Node) -> void:
+func set_carry_controller(cc: CarryController) -> void:
+	if _carry_controller != null and is_instance_valid(_carry_controller):
+		if _carry_controller.grabbed.is_connected(_on_carry_grabbed):
+			_carry_controller.grabbed.disconnect(_on_carry_grabbed)
+		if _carry_controller.released.is_connected(_on_carry_released):
+			_carry_controller.released.disconnect(_on_carry_released)
 	_carry_controller = cc
+	if _carry_controller != null:
+		if not _carry_controller.grabbed.is_connected(_on_carry_grabbed):
+			_carry_controller.grabbed.connect(_on_carry_grabbed)
+		if not _carry_controller.released.is_connected(_on_carry_released):
+			_carry_controller.released.connect(_on_carry_released)
+	_update_prompt_suppression_for_carry()
 
 
 ## Returns the attached CarryController, or null.
-func get_carry_controller() -> Node:
+func get_carry_controller() -> CarryController:
 	return _carry_controller
+
+
+func _on_carry_grabbed(_body: RigidBody3D) -> void:
+	_set_interaction_prompt_suppressed(true)
+
+
+func _on_carry_released(_body: RigidBody3D) -> void:
+	_set_interaction_prompt_suppressed(false)
+
+
+func _update_prompt_suppression_for_carry() -> void:
+	_set_interaction_prompt_suppressed(_carry_controller != null and _carry_controller.is_carrying())
+
+
+func _set_interaction_prompt_suppressed(suppressed: bool) -> void:
+	if _interaction_raycaster == null:
+		return
+	if _interaction_raycaster.has_method("set_prompt_suppressed"):
+		_interaction_raycaster.set_prompt_suppressed(suppressed)
+
+
+func cancel_interaction_intent() -> void:
+	_interaction_intent.cancel()
 
 
 func _on_gate_tree_exiting(gate: Node) -> void:
@@ -613,37 +734,31 @@ func _on_gate_tree_exiting(gate: Node) -> void:
 
 
 ## Called from `_unhandled_input` on `interact` press.
-func _on_interact_pressed() -> void:
+func _on_interact_pressed(now_msec: int = -1) -> void:
 	if is_modal_ui_open():
+		_interaction_intent.cancel()
 		return
-	_interact_press_time_msec = Time.get_ticks_msec()
-	_interact_hold_emitted = false
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	_interaction_intent.press(now_msec)
 
 
 ## Called from `_unhandled_input` on `interact` release.
-func _on_interact_released() -> void:
-	if _interact_press_time_msec < 0:
-		# We never recorded a press (modal UI was open at press time, or
-		# the action was rebound mid-press). Ignore the release.
+func _on_interact_released(now_msec: int = -1) -> void:
+	if not _interaction_intent.is_pressed():
 		return
-	var held_msec := Time.get_ticks_msec() - _interact_press_time_msec
-	_interact_press_time_msec = -1
 	# A modal UI may have opened mid-press; in that case suppress emission.
 	if is_modal_ui_open():
-		_interact_hold_emitted = false
+		_interaction_intent.cancel()
 		return
-	if _interact_hold_emitted:
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	var outcome: int = _interaction_intent.release(now_msec)
+	if outcome == InteractionIntent.Outcome.HOLD_RELEASE:
 		interact_release.emit()
 		_route_carry_release()
-	elif held_msec < int(HOLD_THRESHOLD * 1000):
+	elif outcome == InteractionIntent.Outcome.TAP:
 		_emit_interact_tap()
-	else:
-		# Held past threshold but `_interact_hold_emitted` is false — physics
-		# tick didn't fire (extreme rare race, e.g. low fps). Treat as a tap
-		# on the fallthrough rather than silently dropping the event.
-		_emit_interact_tap()
-	# `_interact_hold_emitted` is reset on the NEXT press in
-	# `_on_interact_pressed`, no need to reset here.
 
 
 ## Polled from `_physics_process`. Edge-detects modal gate state so the
@@ -667,14 +782,14 @@ func _poll_modal_mouse_mode() -> void:
 
 ## Polled from `_physics_process`. Emits `interact_hold_begin` once when
 ## the active press crosses the threshold.
-func _poll_interact_hold() -> void:
-	if _interact_press_time_msec < 0 or _interact_hold_emitted:
+func _poll_interact_hold(now_msec: int = -1) -> void:
+	if not _interaction_intent.is_pressed():
 		return
 	if is_modal_ui_open():
 		return
-	var held_msec := Time.get_ticks_msec() - _interact_press_time_msec
-	if held_msec >= int(HOLD_THRESHOLD * 1000):
-		_interact_hold_emitted = true
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	if _interaction_intent.poll(now_msec) == InteractionIntent.Outcome.HOLD_BEGIN:
 		interact_hold_begin.emit()
 		_route_carry_grab()
 
@@ -688,9 +803,8 @@ func _emit_interact_tap() -> void:
 	# the tap is consumed by the carry stack — don't ALSO forward to the
 	# raycaster target (which would tap-pickup whatever the player is
 	# looking at while still holding the previous item). The hold-vs-tap
-	# discriminator handles this implicitly via _interact_hold_emitted,
-	# but defensive: if a tap somehow leaks through while carrying,
-	# refuse it here.
+	# splitter handles this implicitly, but defensive: if a tap somehow leaks
+	# through while carrying, refuse it here.
 	if _carry_controller != null and _carry_controller.has_method("is_carrying"):
 		if _carry_controller.is_carrying():
 			return
@@ -735,19 +849,16 @@ func _route_carry_release() -> void:
 
 
 # =============================================================================
-# MOVEMENT (legacy — kept for fallback when MoveContainer is not active)
+# MOVEMENT (legacy — kept for fallback when CharacterMotor is not active)
 # =============================================================================
 # Movement is now handled by individual Move nodes (IdleMove, RunMove, etc.)
-# via the MoveContainer in CharacterAnimationSystem. These methods are kept
-# for backwards compatibility when enable_moves=false.
+# via the MoveContainer owned by CharacterMotor.
 
 
 func _handle_frozen_movement() -> void:
 	velocity.x = 0.0
 	velocity.z = 0.0
-	input_direction = Vector2.ZERO
-	is_sprinting = false
-	is_walking = false
+	_reset_public_movement_state()
 
 
 # =============================================================================
@@ -915,6 +1026,16 @@ func _find_node_of_type(node: Node, type_name: String) -> Node:
 		return node
 	for child in node.get_children():
 		var result := _find_node_of_type(child, type_name)
+		if result:
+			return result
+	return null
+
+
+func _find_skeleton(node: Node) -> Skeleton3D:
+	if node is Skeleton3D:
+		return node as Skeleton3D
+	for child in node.get_children():
+		var result := _find_skeleton(child)
 		if result:
 			return result
 	return null

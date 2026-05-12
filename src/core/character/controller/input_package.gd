@@ -17,8 +17,12 @@ var input_direction: Vector2 = Vector2.ZERO
 ## Camera orientation basis (for converting input_direction to world-space 3D)
 var camera_basis: Basis = Basis.IDENTITY
 
-## Vertical input for swimming/flying: +1 ascend (jump key), -1 descend (crouch key)
+## Vertical input for swimming/flying: camera pitch / crouch-driven continuous axis.
 var vertical_input: float = 0.0
+
+## Held jump intent while swimming. Swim moves consume this as repeated
+## upward strokes instead of a continuous ascend axis.
+var swim_jump_held: bool = false
 
 ## Whether the player is currently in water (set by PlayerController)
 var is_in_water: bool = false

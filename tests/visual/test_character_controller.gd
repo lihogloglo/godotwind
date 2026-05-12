@@ -1,8 +1,8 @@
 ## Character Controller Test — Playable test scene for the Move-as-Node system
 ##
 ## Controls:
-##   WASD = move, Shift = sprint, Ctrl = walk, Space = jump, C = crouch
-##   Mouse = look, V = toggle 1st/3rd person, ESC = release mouse
+##   WASD = move, Shift = sprint, Space = jump, C/Ctrl = crouch
+##   Mouse = look, Tab = toggle 1st/3rd person, ESC = release mouse
 ##   1-5 = spawn preset NPCs
 ##   F1 = toggle debug HUD
 ##   F2 = dump KF vs actual bone comparison to console
@@ -12,6 +12,8 @@ extends Node3D
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 const CharacterFactoryV2Script := preload("res://src/core/animation/character_factory_v2.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
+const MorrowindMovementConfig := preload("res://src/core/character/controller/movement_presets/morrowind_movement_config.tres")
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 
 # Preset Morrowind NPCs
 const PRESET_NPCS := [
@@ -140,8 +142,7 @@ func _spawn_npc(npc_id: String) -> void:
 	# Create PlayerController FIRST and add to scene tree
 	_player_controller = PlayerControllerScript.new()
 	_player_controller.name = "Player_%s" % npc_id
-	_player_controller.player_height = 1.8
-	_player_controller.player_radius = 0.35
+	_player_controller.movement_config = MorrowindMovementConfig
 	add_child(_player_controller)
 	_player_controller.global_position = Vector3(-5, 2, 5)
 
@@ -154,7 +155,8 @@ func _spawn_npc(npc_id: String) -> void:
 	# --- DIAGNOSTIC: verify tracks match skeleton bones ---
 	_diagnose_animation_binding(character_root, skeleton)
 
-	# Wire animation system on OUR PlayerController (creates MoveContainer, AnimationManager, IK)
+	# Wire animation system on OUR PlayerController (AnimationManager, IK).
+	# PlayerController owns movement through CharacterMotor.
 	_factory.setup_character(_player_controller, is_female, is_beast,
 		npc_record.race_id, npc_record.record_id)
 
@@ -458,14 +460,19 @@ func _create_water_pool() -> void:
 	var water_area := Area3D.new()
 	water_area.name = "WaterVolume"
 	water_area.collision_layer = 0
-	water_area.collision_mask = 2  # Detect player on layer 2
+	water_area.collision_mask = GameplayPhysicsLayersScript.PLAYER
 	var area_col := CollisionShape3D.new()
 	var area_shape := BoxShape3D.new()
-	var vol_height: float = surface_y - floor_y  # from floor to surface
+	var detector_margin_above_surface := 4.0
+	var vol_height: float = surface_y - floor_y + detector_margin_above_surface
 	area_shape.size = Vector3(pool_half * 2, vol_height, pool_half * 2)
 	area_col.shape = area_shape
 	water_area.add_child(area_col)
-	water_area.position = Vector3(pool_x, (surface_y + floor_y) / 2.0, pool_z)
+	water_area.position = Vector3(
+		pool_x,
+		(floor_y + surface_y + detector_margin_above_surface) / 2.0,
+		pool_z
+	)
 	add_child(water_area)
 
 	# Connect Area3D signals to player controller
@@ -634,7 +641,7 @@ func _add_pushable_sphere(pos: Vector3, radius: float, mass_kg: float, color: Co
 	body.name = "PushableSphere"
 	body.mass = mass_kg
 	body.position = pos
-	body.collision_layer = 2  # Dynamic object layer
+	body.collision_layer = 1  # Environment/dynamic prop layer
 	body.collision_mask = 1 | 2  # Collide with environment + player
 
 	var col := CollisionShape3D.new()
@@ -702,10 +709,12 @@ func _update_debug_hud() -> void:
 	var anim_count := 0
 	var state_map_info := ""
 
-	if anim_sys and anim_sys.has_method("get_move_container"):
-		var mc = anim_sys.get_move_container()
-		if mc and mc.has_method("get_current_move_name"):
-			move_name = str(mc.get_current_move_name())
+	if _player_controller.has_method("get_movement_motor"):
+		var motor = _player_controller.get_movement_motor()
+		if motor and motor.has_method("get_move_container"):
+			var mc = motor.get_move_container()
+			if mc and mc.has_method("get_current_move_name"):
+				move_name = str(mc.get_current_move_name())
 	if anim_sys and anim_sys.has_method("get_animation_manager"):
 		var am = anim_sys.get_animation_manager()
 		if am and am.has_method("get_current_state"):
@@ -742,12 +751,16 @@ func _update_debug_hud() -> void:
 	text += "[b]Position:[/b] %.1f, %.1f, %.1f\n" % [pos.x, pos.y, pos.z]
 	text += "[b]On Floor:[/b] %s\n" % str(_player_controller.is_on_floor())
 	text += "[b]In Water:[/b] %s\n" % str(_player_controller.in_water)
+	text += "[b]Posture:[/b] %s | Swimming: %s\n" % [
+		str(_player_controller.current_posture),
+		str(_player_controller.is_swimming),
+	]
 	text += "[b]Camera:[/b] %s\n" % ("1st Person" if _player_controller.camera_mode == 0 else "3rd Person")
 	if not state_map_info.is_empty():
 		text += "[b]State Map:[/b] %s\n" % state_map_info
 	text += "─────────────────────\n"
 	text += "[color=gray]WASD=move Shift=sprint C=crouch\n"
-	text += "Space=jump V=camera 1-5=NPC F1=HUD\n"
+	text += "Space=jump Tab=camera 1-5=NPC F1=HUD\n"
 	text += "F2=dump KF comparison[/color]"
 
 	_debug_hud.text = text

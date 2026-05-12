@@ -306,6 +306,8 @@ func _setup_animation_system(movement_controller: CharacterBody3D,
 	anim_system.enable_lod = enable_lod
 	anim_system.debug_mode = debug_animations
 	anim_system.auto_setup = false  # We'll call setup manually
+	if movement_controller.has_method("get_movement_config"):
+		anim_system.set_movement_config(movement_controller.get_movement_config())
 
 	character_root.add_child(anim_system)
 

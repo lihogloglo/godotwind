@@ -271,24 +271,24 @@ func _resolve_fallback_state(state: StringName) -> StringName:
 
 
 ## Transition to a new state
-func transition_to(state: StringName, force: bool = false) -> void:
+func transition_to(state: StringName, force: bool = false) -> bool:
 	if not _is_setup or not _state_machine:
-		return
+		return false
 
 	if state == _current_state and not force:
-		return
+		return true
 
 	# Check priority system - can this transition happen?
 	if _priority_system and not force:
 		var prio: _Priority = _priority_system as _Priority
 		if not prio.request_animation(state, force):
 			# Blocked by higher priority animation
-			return
+			return false
 
 	# Fallback if the target state has no animation
 	state = _resolve_fallback_state(state)
 	if state == &"":
-		return
+		return false
 
 	_previous_state = _current_state
 	_current_state = state
@@ -304,6 +304,7 @@ func transition_to(state: StringName, force: bool = false) -> void:
 
 	if debug_state_changes:
 		Log.debug("animation", "AnimationManager: %s -> %s" % [_previous_state, _current_state])
+	return true
 
 
 ## Get current state name
@@ -845,6 +846,14 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 			if anim.to_lower() == term_lower:
 				return StringName(anim)
 
+	# Pass 1b: normalized exact match. MW text keys often contain spaces while
+	# framework states use compact names, e.g. "Swim Walk Forward" -> SwimForward.
+	for term in search_terms:
+		var normalized_term := _normalize_animation_lookup_name(term)
+		for anim in animations:
+			if _normalize_animation_lookup_name(anim) == normalized_term:
+				return StringName(anim)
+
 	# Pass 2: word-boundary match (term must be delimited by _ or start/end)
 	# Prevents "run" from matching "sprinting_forward_roll"
 	for term in search_terms:
@@ -869,6 +878,10 @@ func _find_animation_for_state_name(state_name: StringName) -> StringName:
 				return StringName(anim)
 
 	return &""
+
+
+func _normalize_animation_lookup_name(value: Variant) -> String:
+	return str(value).to_lower().replace(" ", "").replace("_", "").replace("-", "")
 
 
 ## Build animation state map from available animations

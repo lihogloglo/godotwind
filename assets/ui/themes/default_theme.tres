@@ -1,28 +1,8 @@
-; Godotwind default UI theme.
-;
-; Source of truth for all dialogue/book/journal/toast styling. Built in
-; Phase A of the Text/Dialogue overhaul (see docs/TEXT_DIALOGUE_SYSTEM.md).
-;
-; See assets/ui/themes/BEFORE_STYLE_CATALOG.md for the original hand-rolled
-; StyleBox values captured before this extraction — they are the acceptance
-; criteria for the visual regression test.
-;
-; Primary font: Pelagiad (OFL 1.1, MW-themed serif). Located at
-; assets/ui/fonts/pelagiad/Pelagiad.ttf.
-;
-; Style summary (all values verified against source 2026-04-06):
-;   Parchment        bg #E8DEC7 / border #735940 w3 / radius 4 / padding 20
-;   ParchmentTight   bg #E8DEC7 / border #735940 w2 / radius 4 / padding 15
-;   Toast            bg #1F1914@0.9 / border #998059 w1 / radius 6 / padding 12
-;   TopicsList       bg #1F1F26 / border #4D4D66 w2 / radius 4 / padding 10
-;   ParchmentSep     bg #735940@0.5, margin_top/bottom 1
-;
-; Applied to panels via `theme = preload("res://assets/ui/themes/default_theme.tres")`
-; and (for ParchmentTight/Toast/TopicsList) `theme_type_variation = "..."`.
+[gd_resource type="Theme" format=3 uid="uid://be8rcwpetixhr"]
 
-[gd_resource type="Theme" load_steps=11 format=3]
+[ext_resource type="FontFile" uid="uid://ck07kwkhl8ppn" path="res://assets/ui/fonts/pelagiad/Pelagiad.ttf" id="1_font"]
 
-[ext_resource type="FontFile" path="res://assets/ui/fonts/pelagiad/Pelagiad.ttf" id="1_font"]
+[sub_resource type="StyleBoxEmpty" id="SB_Empty3"]
 
 [sub_resource type="StyleBoxFlat" id="SB_Parchment"]
 content_margin_left = 20.0
@@ -40,6 +20,11 @@ corner_radius_top_right = 4
 corner_radius_bottom_right = 4
 corner_radius_bottom_left = 4
 
+[sub_resource type="StyleBoxFlat" id="SB_ParchmentSep"]
+content_margin_top = 1.0
+content_margin_bottom = 1.0
+bg_color = Color(0.45, 0.35, 0.25, 0.5)
+
 [sub_resource type="StyleBoxFlat" id="SB_ParchmentTight"]
 content_margin_left = 15.0
 content_margin_top = 15.0
@@ -55,6 +40,10 @@ corner_radius_top_left = 4
 corner_radius_top_right = 4
 corner_radius_bottom_right = 4
 corner_radius_bottom_left = 4
+
+[sub_resource type="StyleBoxEmpty" id="SB_Empty2"]
+
+[sub_resource type="StyleBoxEmpty" id="SB_Empty"]
 
 [sub_resource type="StyleBoxFlat" id="SB_Toast"]
 content_margin_left = 12.0
@@ -88,40 +77,29 @@ corner_radius_top_right = 4
 corner_radius_bottom_right = 4
 corner_radius_bottom_left = 4
 
-[sub_resource type="StyleBoxFlat" id="SB_ParchmentSep"]
-content_margin_top = 1.0
-content_margin_bottom = 1.0
-bg_color = Color(0.45, 0.35, 0.25, 0.5)
-
-[sub_resource type="StyleBoxEmpty" id="SB_Empty"]
-
-[sub_resource type="StyleBoxEmpty" id="SB_Empty2"]
-
-[sub_resource type="StyleBoxEmpty" id="SB_Empty3"]
-
 [resource]
 default_font = ExtResource("1_font")
 default_font_size = 18
-PanelContainer/styles/panel = SubResource("SB_Parchment")
-ParchmentTight/base_type = "PanelContainer"
-ParchmentTight/styles/panel = SubResource("SB_ParchmentTight")
-Toast/base_type = "PanelContainer"
-Toast/styles/panel = SubResource("SB_Toast")
-TopicsList/base_type = "PanelContainer"
-TopicsList/styles/panel = SubResource("SB_TopicsList")
-ParchmentSeparator/base_type = "HSeparator"
-ParchmentSeparator/styles/separator = SubResource("SB_ParchmentSep")
-Label/colors/font_color = Color(0.15, 0.1, 0.05, 1)
-TitleLabel/base_type = "Label"
-TitleLabel/colors/font_color = Color(0.25, 0.15, 0.1, 1)
-TitleLabel/font_sizes/font_size = 26
-DispositionLabel/base_type = "Label"
-DispositionLabel/colors/font_color = Color(0.6, 0.7, 0.6, 1)
-ToastLabel/base_type = "Label"
-ToastLabel/colors/font_color = Color(0.9, 0.85, 0.7, 1)
-RichTextLabel/colors/default_color = Color(0.15, 0.1, 0.05, 1)
-RichTextLabel/styles/normal = SubResource("SB_Empty")
-RichTextLabel/styles/focus = SubResource("SB_Empty2")
-CloseButton/base_type = "Button"
+CloseButton/base_type = &"Button"
 CloseButton/font_sizes/font_size = 22
 CloseButton/styles/normal = SubResource("SB_Empty3")
+DispositionLabel/base_type = &"Label"
+DispositionLabel/colors/font_color = Color(0.6, 0.7, 0.6, 1)
+Label/colors/font_color = Color(0.15, 0.1, 0.05, 1)
+PanelContainer/styles/panel = SubResource("SB_Parchment")
+ParchmentSeparator/base_type = &"HSeparator"
+ParchmentSeparator/styles/separator = SubResource("SB_ParchmentSep")
+ParchmentTight/base_type = &"PanelContainer"
+ParchmentTight/styles/panel = SubResource("SB_ParchmentTight")
+RichTextLabel/colors/default_color = Color(0.15, 0.1, 0.05, 1)
+RichTextLabel/styles/focus = SubResource("SB_Empty2")
+RichTextLabel/styles/normal = SubResource("SB_Empty")
+TitleLabel/base_type = &"Label"
+TitleLabel/colors/font_color = Color(0.25, 0.15, 0.1, 1)
+TitleLabel/font_sizes/font_size = 26
+Toast/base_type = &"PanelContainer"
+Toast/styles/panel = SubResource("SB_Toast")
+ToastLabel/base_type = &"Label"
+ToastLabel/colors/font_color = Color(0.9, 0.85, 0.7, 1)
+TopicsList/base_type = &"PanelContainer"
+TopicsList/styles/panel = SubResource("SB_TopicsList")

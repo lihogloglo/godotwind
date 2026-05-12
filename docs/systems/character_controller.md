@@ -1,33 +1,97 @@
 # Character Controller
 
-## Status (2026-04-18)
+## Status (2026-05-10)
 
-Working in `tests/visual/test_character_controller.tscn`: ground locomotion (idle/walk/run/sprint/crouch), jump/midair with air control, and swimming (buoyancy + 3D camera-relative motion). **NOT yet wired into the main scene** — integration with `scenes/Godotwind.tscn` is pending. Planned next: stagger/interrupt (Phase 4), basic climbing (Phase 5), flying toggle (Phase 6).
+Working in `tests/visual/test_character_controller.tscn`: ground locomotion
+(idle/walk/run/sprint/crouch), jump/midair with air control, and swimming
+(buoyancy + 3D camera-relative motion).
+
+`scenes/Godotwind.tscn` has partial player-mode wiring through
+`src/tools/world_explorer.gd`, including `PlayerController`,
+`InteractionRaycaster`, and `CarryController`. Human/user Phase 7 smoke testing
+confirmed the core player path works for fly-camera to player-mode toggle,
+movement, sprint, jump, crouch, first/third-person camera toggle, and streaming
+cell boundary crossing. Full production validation across interaction,
+carry/drop/throw, interiors, and water remains pending because those dependent
+systems/content paths are not yet complete enough to exercise in the main scene.
+Godot log/error review of the human-provided output found no controller,
+player-mode, movement, animation, or interaction-wiring errors during the tested
+path. The supplied log did include unrelated streaming/profiler warnings,
+static-collision missing-shape sidecar warnings, and shutdown-time RID/resource
+leak reports, which belong to streaming/rendering/resource-cleanup follow-up
+rather than this controller smoke result.
+
+Codex runtime limitation: Codex cannot reliably launch the Godot engine from
+this desktop workspace. The human/user must run Godot editor/runtime checks and
+gdUnit; Codex should provide exact commands and checklists and record the
+reported results.
+
+Phase 1 of `spec-driven/features/character-controller-productionization/` fixed
+the small current-architecture defects from the audit:
+
+- rigidbody push now runs once per movement frame;
+- water context reaches input gathering before swim pitch is computed;
+- moving crouch wins over run/sprint;
+- `walk` remains intentionally unbound by default;
+- visual-test help text matches the actual Tab camera toggle;
+- player-mode switch aborts safely when character attachment fails.
+
+Phase 2 added `CharacterMovementConfig` as the single source for movement
+tuning. Phase 3 moved movement ownership into `CharacterMotor`: the player /
+character stack now owns input gathering, `MoveContainer`, and `MovementState`,
+while animation observes the published state.
+
+Phase 4 has implemented deterministic timing, posture coherence, and explicit
+jump grace. Move elapsed time now accumulates from the physics delta supplied by
+`CharacterMotor` / `MoveContainer`, and the movement helpers use that same
+delta source. Crouch posture now drives the public movement snapshot and camera
+eye height from `MovementState.posture`; the main-scene interaction ray origin
+follows because it is attached to `PlayerController.camera_pivot`. Coyote time
+and jump buffering are now named config fields instead of accidental side
+effects of the ground-to-midair lockout.
+
+Phase 5 has started centralizing gameplay physics layer contracts. Layer role
+bits now live in `src/core/physics/gameplay_physics_layers.gd` as a small
+preloaded helper, not an autoload. `CarryController` no longer assumes the
+player is always only on physics layer 2: while an item is held, its saved
+collision mask is rewritten to exclude the player's current `collision_layer`,
+then restored exactly on release. Human-run gdUnit validation passed in
+`reports/report_206/results.xml`; carry-through-interior manual validation is
+blocked until an integrated playable path has both usable carryable items and
+interiors/seamless doorways available.
 
 ---
 
-Move-as-Node state machine pattern (adapted from Gab-ani's Universal Controller).
+Move-as-Node state machine pattern (adapted from Gab-ani's Universal
+Controller).
 
 ## Architecture
 
-```
-PlayerController (CharacterBody3D, 920 lines)
- └─ MoveContainer (state machine orchestrator)
-     ├─ IdleMove (priority 0)
-     ├─ WalkMove (priority 1)
-     ├─ RunMove (priority 2, default ground locomotion)
-     ├─ SprintMove (priority 3)
-     ├─ CrouchMove (priority 4)
-     ├─ JumpMove (priority 5, → MidairMove after 0.1s)
-     ├─ MidairMove (priority 5, gravity + air control)
-     ├─ SwimIdleMove (priority 6, buoyancy)
-     └─ SwimMove (priority 7, 3D camera-relative)
+```text
+PlayerController (CharacterBody3D)
+  -> CharacterMotor
+      -> PlayerInputGatherer
+      -> MoveContainer (state machine orchestrator)
+          -> IdleMove (priority 0)
+          -> WalkMove (priority 1)
+          -> RunMove (priority 2, default ground locomotion)
+          -> SprintMove (priority 3)
+          -> CrouchMove (priority 4)
+          -> JumpMove (priority 5, to MidairMove after 0.1s)
+          -> MidairMove (priority 5, gravity + air control)
+          -> SwimIdleMove (priority 6, buoyancy)
+          -> SwimMove (priority 7, 3D camera-relative)
 ```
 
-Each Move is a Node that owns its movement physics, animation transitions, and transition logic.
-`InputPackage` carries per-frame input data (direction, actions, water state, camera basis).
+Each Move is a Node that owns its movement physics and transition logic.
+`InputPackage` carries per-frame input data: direction, actions, water state,
+and camera basis. `MoveContainer` publishes a `MovementState` snapshot after
+processing. Animation reads that snapshot and chooses animation transitions; it
+no longer creates or owns the movement state machine.
 
 ## Key Parameters
+
+The source of truth is `CharacterMovementConfig`.
 
 | Parameter | Value |
 |-----------|-------|
@@ -35,59 +99,242 @@ Each Move is a Node that owns its movement physics, animation transitions, and t
 | Walk speed | 2.5 m/s |
 | Sprint speed | 8.0 m/s |
 | Swim speed | 3.5 m/s |
+| Swim minimum feet submersion | 0.35m |
+| Swim jump velocity | 2.4 m/s |
+| Swim jump repeat time | 0.45s |
 | Jump velocity | 4.5 |
+| Coyote time | 0.10s default, 0.06s Morrowind preset |
+| Jump buffer time | 0.12s default, 0.08s Morrowind preset |
+| Ground-to-midair lockout | 0.10s bounce/contact guard |
 | Gravity | 9.8 (ProjectSettings) |
 | Player height | 1.8m (CapsuleShape3D) |
 | Player radius | 0.35m |
-| Floor max angle | 50° (steep MW terrain) |
+| Standing eye height | 1.7m |
+| Crouch eye height | 1.58m |
+| Floor max angle | 50 degrees (steep MW terrain) |
 | Floor snap length | 0.3m |
 | Camera distance | 3.5m (SpringArm3D, third-person) |
 
+Default preset:
+
+```text
+src/core/character/controller/movement_presets/default_movement_config.tres
+```
+
+Morrowind-informed preset:
+
+```text
+src/core/character/controller/movement_presets/morrowind_movement_config.tres
+```
+
+Override order for current Phase 3 runtime:
+
+1. `PlayerController.movement_config`
+2. `CharacterMotor.movement_config`
+3. `MoveContainer.movement_config`
+4. framework default preset
+
+The old `PlayerController` speed exports are compatibility mirrors populated
+from `movement_config` in `_ready()`. They are no longer the movement source of
+truth.
+
 ## Movement Physics
 
-- **CharacterBody3D** with Jolt Physics backend
-- `move_and_slide()` centralized in MoveContainer (not per-Move)
-- Y velocity preserved across Move transitions (jump while running works)
-- Backward movement at 70% speed when input >120° from facing direction
-- Playback speed scales with velocity ratio to reduce foot sliding
+- `CharacterBody3D` with Jolt Physics backend.
+- `move_and_slide()` centralized in `MoveContainer`, not per Move.
+- `PlayerController.teleport_to()` moves the body, resets Godot physics interpolation, and clears velocity so player-mode teleports do not render a one-frame streak.
+- RigidBody push is a single pass after movement.
+- Move elapsed time and movement helper timing come from the supplied physics
+  delta, not wall-clock time.
+- `MoveContainer` owns jump-grace timers from physics delta: coyote time tracks
+  how recently the body was grounded, and jump buffering stores slightly early
+  jump input until a valid grounded/coyote frame consumes it.
+- Crouch collision height is still owned by `CrouchMove`, while camera/raycast
+  eye height is driven from `MovementState.posture`.
+- Swim movement keeps the player's feet below the water surface by at least
+  `swim_min_feet_submersion`, preventing forward/up swim input from lifting the
+  capsule out of water and flickering back to upright locomotion.
+- In water, the jump key is a repeated swim stroke, not a continuous upward
+  axis. Holding jump applies `swim_jump_velocity` at
+  `swim_jump_repeat_time` intervals, then buoyancy pulls the player back toward
+  swim depth.
+- Stand-up clearance uses a standing capsule shape overlap, not a single center
+  ray, so edge-of-capsule ceiling blockers are represented.
+- Y velocity is preserved across Move transitions.
+- Backward movement threshold and multiplier come from
+  `CharacterMovementConfig`.
+- Playback speed scales with velocity ratio to reduce foot sliding.
 
 ## Move Transitions
 
-Priority-based: each Move implements `check_relevance(input) → StringName`.
-- Returns move name to transition to, or `&"okay"` to stay
-- `best_input_that_can_be_paid(input)` picks highest-priority affordable move
-- Combat overrides via `try_force_move()` (stagger, hit reactions)
-- 0.1s lockout after landing prevents Jolt bounce-induced re-jumps
+Priority-based: each Move implements `check_relevance(input) -> StringName`.
+
+- Returns move name to transition to, or `&"okay"` to stay.
+- `best_input_that_can_be_paid(input)` picks the highest-priority affordable
+  move.
+- Combat overrides use `try_force_move()`.
+- `ground_to_midair_lockout` remains a bounce/contact guard. It no longer acts
+  as accidental coyote time; eligible coyote/buffered jump input can still win
+  before ground moves transition to `MidairMove`.
 
 ## Water Detection
 
 Two sources:
-1. **Ocean** — `OceanManager.get_wave_height(position)` sampled every frame, matching the same water-height contract used by buoyant objects
-2. **Static water volumes** — Area3D colliders trigger `enter_water_volume()` / `exit_water_volume()`
 
-Flags injected into InputPackage: `is_in_water`, `water_surface_y`.
-SwimMove uses buoyancy (strength 4.0, drag 2.0, submersion depth 1.2m).
+1. Ocean: `OceanManager.get_wave_height(position)` sampled every frame, matching
+   the same water-height contract used by buoyant objects.
+2. Static water volumes: `Area3D` colliders trigger `enter_water_volume()` /
+   `exit_water_volume()`.
+
+`PlayerController` passes `is_in_water` and `water_surface_y` into
+`PlayerInputGatherer.gather_input(is_in_water, water_surface_y)` before vertical
+swim intent is computed. `SwimMove` uses buoyancy (strength 4.0, drag 2.0,
+submersion depth 1.2m).
 
 ## Camera
 
 First/third-person toggle (Tab):
-- **Third-person:** SpringArm3D at 3.5m, character visible, LookAt IK targets POIs
-- **First-person:** SpringArm at 0.0m, character hidden, mouselook only
+
+- Third-person: `SpringArm3D` at 3.5m, character visible, LookAt IK targets POIs.
+- First-person: SpringArm at 0.0m, character hidden, mouselook only.
 
 ## Animation Wiring
 
-- PlayerController holds `animation_system` reference
-- Each Move calls `animator.transition_to(state_name)` on enter
-- MoveContainer calls `animation_system.process_moves(input, delta)` per frame
-- Speed scale set via `animator.set_speed_scale(velocity_ratio)`
+- `PlayerController` holds an `animation_system` reference.
+- `CharacterMotor` publishes `MovementState` after movement processing.
+- `PlayerController` calls `animation_system.update_from_movement_state(state)`
+  when animation exists.
+- `CharacterAnimationSystem` no longer creates a `MoveContainer` and movement
+  still works when no animation system is attached.
 
 ## Test Scene
 
-`tests/visual/test_character_controller.tscn` — flat terrain with ramp, climbing wall, water pool, 6 NPC presets (keys 1-5), debug HUD (F1).
+`tests/visual/test_character_controller.tscn` is a flat terrain scene with a
+ramp, climbing wall, water pool, NPC presets, pushable physics objects, and
+debug HUD.
+
+`tests/visual/test_character_controller_steps.tscn` is the focused Phase 6
+step-solver measuring rig. It avoids Morrowind data and animations, uses a
+capsule-only `PlayerController`, and labels six obstacle lanes: small step,
+tall wall, angled wall, ceiling-blocked step, edge lip/no landing, and
+rigidbody obstacle. The edge-lip lane should not create an artificial stair
+snap across empty space, but normal falling off the edge is allowed. Falling
+below the panels respawns the player at the start, and the
+`step_solver_respawn` InputMap action (`R` by default) can be pressed for a
+manual reset.
+
+Controls:
+
+- WASD: move
+- Shift: sprint
+- Space: jump
+- C/Ctrl: crouch
+- Tab: first/third-person camera
+- 1-5: spawn preset NPCs
+- F1: debug HUD
+- F2: dump KF comparison
+
+`walk` exists in `project.godot` but is intentionally unbound by default per
+`docs/systems/input_system.md`.
+
+## Phase 0-3 Verification Harness
+
+`tests/unit/test_character_controller_phase0_baseline.gd` is the lightweight
+unit-test harness for the controller cleanup plan. It intentionally avoids
+Morrowind data, meshes, scenes, and animation libraries so failures point at
+movement-input logic rather than asset setup.
+
+The harness started as a baseline around audit findings. Phase 1 updated the
+fixed defects into new contracts:
+
+- one rigidbody push pass;
+- moving crouch resolves to crouch;
+- water-aware swim pitch is computed during input gathering;
+- `walk` is intentionally present but unbound by default.
+- config values drive run speed, jump velocity, backward speed multiplier,
+  sprint capability, and step height.
+- Phase 3 ownership: `CharacterMotor` can process movement without animation,
+  `PlayerController` attaches a motor when animation is null, and animation can
+  observe `MovementState`.
+- Phase 4 jump grace: coyote time accepts a jump shortly after ground loss,
+  expired coyote time rejects late jump, and jump buffering fires on a landing
+  frame.
+- Water visual regression coverage: midair re-entry into water selects swim
+  state again, Morrowind-style spaced swim animation names resolve, and failed
+  animation transitions are retried instead of being cached as handled.
+- Swim jump coverage: in-water jump input is treated as repeated swim-stroke
+  impulse intent rather than continuous vertical input.
+- Post-Phase 7 hardening: player/fly teleport helpers reset interpolation, and
+  public carry release restores a valid body even if the pickup wrapper is
+  missing.
+
+For editor-side validation, human/user runs:
+
+```text
+tests/run_character_controller_phase0.tscn
+```
+
+After the run, check the newest gdUnit report:
+
+```text
+reports/report_<number>/results.xml
+reports/report_<number>/index.html
+reports/report_<number>/test_suites/tests.unit.test_character_controller_phase0_baseline.html
+```
+
+Latest known Phase 3 report: `reports/report_201/results.xml` passed with 20
+tests, 0 failures, and 0 errors.
+
+Latest known Phase 4 posture-slice report: `reports/report_204/results.xml`.
+The character-controller suite passed with 24 tests, 0 failures, and 0 errors,
+including camera posture, interaction ray-origin posture, crouch posture
+publication, and the physics-delta elapsed-time contract. The prior full unit
+report still had unrelated rendering/object-paging failures outside the
+character controller.
+
+Latest known Phase 4 jump-grace report: `reports/report_205/results.xml`.
+The character-controller suite passed with 29 tests, 0 failures, and 0 errors,
+including coyote-time defaults, coyote acceptance, expired-coyote rejection,
+jump buffering on landing, and immediate grounded jump when buffering is set to
+zero. Human/user also tested the jump-grace behavior in game and reported it
+works.
+
+Human/user visually tuned crouch first-person eye height to `1.58m` and
+reported that value feels correct. Human/user also completed the posture visual
+checks: interaction prompt/raycast origin lowers with crouch, standing restores
+it, and low ceilings near the capsule edge block standing.
+Phase 4 jump-grace automated and in-game validation are complete.
+
+Latest known Phase 5 layer-contract report: `reports/report_206/results.xml`.
+The character-controller suite passed with 32 tests, 0 failures, and 0 errors,
+including no-autoload layer helper usage, held-mask exclusion for fake player
+layer rewrites, and exact release mask restoration.
+
+Latest known water regression report: `reports/report_207/results.xml`.
+The character-controller suite passed with 38 tests, 0 failures, and 0 errors,
+including swim re-entry state recovery, swim surface clamping, in-water
+jump-as-impulse input, held swim-jump repeat behavior, spaced swim animation
+name resolution, and retry after failed animation transitions. Human/user also
+completed the visual re-test and confirmed held jump while swimming now bobs
+upward, falls back down, and repeats instead of pinning the character near the
+top.
+
+Phase 6 adds a visual-scene surface contract:
+`test_phase6_step_visual_scene_exposes_required_cases`. Human/user reported the
+character-controller tests pass after the Phase 6 scene-surface contract and
+respawn action; expected result is 39 tests, 0 failures, and 0 errors. Human/user
+also completed the six-lane step visual pass after scene clarity fixes. No step
+solver tuning or architecture changes were needed.
 
 ## Key Files
 
-- `src/core/player/player_controller.gd` — Main controller
-- `src/core/character/controller/move.gd` — Move base class
-- `src/core/character/controller/input_package.gd` — Input data
-- `src/core/character/controller/moves/*.gd` — 9 concrete moves
+- `src/core/player/player_controller.gd`: main player controller
+- `src/core/character/character_motor.gd`: movement owner
+- `src/core/character/controller/movement_state.gd`: public movement snapshot
+- `src/core/character/controller/move.gd`: Move base class
+- `src/core/character/controller/input_package.gd`: input data
+- `src/core/character/controller/character_movement_config.gd`: movement tuning resource
+- `src/core/physics/gameplay_physics_layers.gd`: shared gameplay physics layer roles
+- `src/core/character/controller/player_input_gatherer.gd`: InputMap reader
+- `src/core/character/controller/move_container.gd`: move orchestration
+- `src/core/character/controller/moves/*.gd`: concrete moves

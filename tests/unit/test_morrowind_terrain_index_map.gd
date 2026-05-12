@@ -1,6 +1,7 @@
 extends GdUnitTestSuite
 
 const BridgeScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_bridge.gd")
+const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
 const INDEX_MAP_SIZE := 65
 const MW_TEXTURE_SIZE := 16
 const CELLS_PER_REGION := 4
@@ -8,8 +9,9 @@ const NEIGHBORHOOD_SIZE := CELLS_PER_REGION + 1
 
 
 func test_region_index_map_samples_north_and_east_borders() -> void:
-	var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
-	assert_object(generator).is_not_null()
+	var generator := _make_terrain_generator_or_fail()
+	if generator == null:
+		return
 
 	var cells := _make_cells()
 	cells[0] = _filled_cell(11)
@@ -34,8 +36,9 @@ func test_region_index_map_samples_north_and_east_borders() -> void:
 
 
 func test_region_index_map_missing_neighbor_uses_default_layer() -> void:
-	var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
-	assert_object(generator).is_not_null()
+	var generator := _make_terrain_generator_or_fail()
+	if generator == null:
+		return
 
 	var cells := _make_cells()
 	cells[0] = _filled_cell(12)
@@ -46,8 +49,9 @@ func test_region_index_map_missing_neighbor_uses_default_layer() -> void:
 
 
 func test_region_index_map_preserves_layers_above_terrain3d_slot_limit() -> void:
-	var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
-	assert_object(generator).is_not_null()
+	var generator := _make_terrain_generator_or_fail()
+	if generator == null:
+		return
 
 	var cells := _make_cells()
 	cells[0] = _filled_cell(80)
@@ -58,6 +62,18 @@ func test_region_index_map_preserves_layers_above_terrain3d_slot_limit() -> void
 
 func test_terrain3d_location_y_converts_to_mw_region_y() -> void:
 	assert_vector(BridgeScript.terrain3d_location_to_mw_region(Vector2i(-1, 3))).is_equal(Vector2i(-1, -3))
+
+
+func _make_terrain_generator_or_fail() -> RefCounted:
+	var bridge := NativeBridgeScript.new()
+	var factory: RefCounted = bridge.get("_factory")
+	if factory == null:
+		fail("NativeFactory is unavailable. Run dotnet build Godotwind.sln before the full gdUnit suite so the C# assembly loads.")
+		return null
+	var generator: RefCounted = factory.call("CreateTerrainGenerator")
+	if generator == null:
+		fail("TerrainGenerator native class is unavailable. Run dotnet build Godotwind.sln before the full gdUnit suite so the C# assembly loads.")
+	return generator
 
 
 func _make_cells() -> Array:

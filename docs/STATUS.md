@@ -32,7 +32,7 @@ What works, what doesn't.
 | System | Notes |
 |--------|-------|
 | Ocean/Water | OceanManager, FFT waves, GPU-readback buoyancy, real depth-driven Beer-Lambert absorption + refraction UV offset + custom in-shader SSR raymarch for object reflections (2026-04-06). Native Godot 4.6 SSR is disabled on this material (declaring hint_depth_texture/hint_screen_texture kills the native SSR pass in Forward+); custom SSR trace ported from GodotSSRWater replaces it. Known residuals: waterline discontinuity on half-submerged objects, underwater POV renders as flat dark. Not wired into main scene. See `docs/systems/ocean.md`. |
-| Character Controller (physics, swimming) | `PlayerController` with Move-as-Node state machine shipped (see `docs/systems/character_controller.md`) but not yet wired into main streaming scene — only test scene `tests/visual/test_character_controller.tscn`. |
+| Character Controller (physics, swimming) | `PlayerController` with Move-as-Node state machine shipped (see `docs/systems/character_controller.md`). Main scene `scenes/Godotwind.tscn` has partial player-mode wiring through `world_explorer.gd`. Human/user Phase 7 smoke confirmed fly-camera to player-mode toggle, movement, sprint, jump, crouch, first/third-person camera toggle, and streaming cell boundary crossing. Human-provided log output showed no controller, player-mode, movement, animation, or interaction-wiring errors on the tested path. Interaction, carry/drop/throw, water, and carry-through-interior checks remain pending or blocked by dependent systems/content availability. |
 
 ## Project-wide settings flipped 2026-04-08
 

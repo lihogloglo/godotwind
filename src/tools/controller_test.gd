@@ -117,9 +117,10 @@ func _create_player() -> void:
 		print("  [%d] %s ← %s" % [i, skeleton.get_bone_name(i), parent_name])
 
 	# Print move container state
-	if anim_system.move_container:
-		var mc = anim_system.move_container
-		if mc.has_method("get_current_move_name"):
+	if player_controller.has_method("get_movement_motor"):
+		var motor = player_controller.get_movement_motor()
+		var mc = motor.get_move_container() if motor else null
+		if mc and mc.has_method("get_current_move_name"):
 			print("=== MoveContainer: %d moves, current='%s' ===" % [
 				mc.moves.size(), mc.get_current_move_name()])
 

@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3 uid="uid://clb74pwrqrgok"]
+[gd_scene format=3 uid="uid://clb74pwrqrgok"]
 
 [ext_resource type="Script" uid="uid://bseqvng0pt5o2" path="res://src/tools/world_explorer.gd" id="1_demo"]
 
@@ -65,29 +65,29 @@ lod0_range = 128.0
 [sub_resource type="Terrain3DAssets" id="Terrain3DAssets_8gw3e"]
 mesh_list = Array[Terrain3DMeshAsset]([SubResource("Terrain3DMeshAsset_mrdvh")])
 
-[node name="StreamingDemo" type="Node3D"]
+[node name="StreamingDemo" type="Node3D" unique_id=1972672954]
 script = ExtResource("1_demo")
 
-[node name="FlyCamera" type="Camera3D" parent="."]
+[node name="FlyCamera" type="Camera3D" parent="." unique_id=2026823360]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 200, 300)
 far = 20000.0
 
-[node name="Terrain3D" type="Terrain3D" parent="."]
+[node name="Terrain3D" type="Terrain3D" parent="." unique_id=934909931]
 material = SubResource("Terrain3DMaterial_w14db")
 assets = SubResource("Terrain3DAssets_8gw3e")
 show_checkered = true
 top_level = true
 metadata/_edit_lock_ = true
 
-[node name="UI" type="CanvasLayer" parent="."]
+[node name="UI" type="CanvasLayer" parent="." unique_id=1065793377]
 
-[node name="LoadingOverlay" type="ColorRect" parent="UI"]
+[node name="LoadingOverlay" type="ColorRect" parent="UI" unique_id=913061579]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-color = Color(0.05, 0.05, 0.08, 1.0)
+color = Color(0.05, 0.05, 0.08, 1)
 
-[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay"]
+[node name="VBox" type="VBoxContainer" parent="UI/LoadingOverlay" unique_id=2124568112]
 layout_mode = 0
 anchor_left = 0.5
 anchor_top = 0.5
@@ -100,29 +100,29 @@ offset_bottom = 50.0
 grow_horizontal = 2
 grow_vertical = 2
 
-[node name="TitleLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+[node name="TitleLabel" type="Label" parent="UI/LoadingOverlay/VBox" unique_id=119077132]
 layout_mode = 2
-theme_override_font_sizes/font_size = 36
 theme_override_colors/font_color = Color(0.85, 0.75, 0.55, 1)
+theme_override_font_sizes/font_size = 36
 text = "GODOTWIND"
 horizontal_alignment = 1
 
-[node name="LoadingLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+[node name="LoadingLabel" type="Label" parent="UI/LoadingOverlay/VBox" unique_id=1306946667]
 layout_mode = 2
 text = "Loading..."
 horizontal_alignment = 1
 
-[node name="ProgressBar" type="ProgressBar" parent="UI/LoadingOverlay/VBox"]
+[node name="ProgressBar" type="ProgressBar" parent="UI/LoadingOverlay/VBox" unique_id=742908373]
 custom_minimum_size = Vector2(400, 25)
 layout_mode = 2
 
-[node name="StatusLabel" type="Label" parent="UI/LoadingOverlay/VBox"]
+[node name="StatusLabel" type="Label" parent="UI/LoadingOverlay/VBox" unique_id=855000128]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
 text = "Initializing..."
 horizontal_alignment = 1
 
-[node name="StatsPanel" type="Panel" parent="UI"]
+[node name="StatsPanel" type="Panel" parent="UI" unique_id=1957020623]
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
@@ -130,7 +130,7 @@ offset_left = -340.0
 offset_bottom = 700.0
 grow_horizontal = 0
 
-[node name="VBox" type="VBoxContainer" parent="UI/StatsPanel"]
+[node name="VBox" type="VBoxContainer" parent="UI/StatsPanel" unique_id=1532673785]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -139,64 +139,64 @@ offset_top = 10.0
 offset_right = -10.0
 offset_bottom = -10.0
 
-[node name="Title" type="Label" parent="UI/StatsPanel/VBox"]
+[node name="Title" type="Label" parent="UI/StatsPanel/VBox" unique_id=1692770910]
 layout_mode = 2
 theme_override_font_sizes/font_size = 14
 text = "World Explorer [F3]"
 
-[node name="HSeparator" type="HSeparator" parent="UI/StatsPanel/VBox"]
+[node name="HSeparator" type="HSeparator" parent="UI/StatsPanel/VBox" unique_id=1633906657]
 layout_mode = 2
 
-[node name="StatsText" type="RichTextLabel" parent="UI/StatsPanel/VBox"]
+[node name="StatsText" type="RichTextLabel" parent="UI/StatsPanel/VBox" unique_id=2048681294]
 custom_minimum_size = Vector2(0, 200)
 layout_mode = 2
 bbcode_enabled = true
 text = "Initializing..."
 
-[node name="HSeparator2" type="HSeparator" parent="UI/StatsPanel/VBox"]
+[node name="HSeparator2" type="HSeparator" parent="UI/StatsPanel/VBox" unique_id=1955983484]
 visible = false
 layout_mode = 2
 
-[node name="QuickLabel" type="Label" parent="UI/StatsPanel/VBox"]
+[node name="QuickLabel" type="Label" parent="UI/StatsPanel/VBox" unique_id=299907556]
 visible = false
 layout_mode = 2
 text = "Quick Teleport:"
 
-[node name="QuickButtons" type="GridContainer" parent="UI/StatsPanel/VBox"]
+[node name="QuickButtons" type="GridContainer" parent="UI/StatsPanel/VBox" unique_id=797862904]
 visible = false
 layout_mode = 2
 columns = 2
 
-[node name="SeydaNeenBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+[node name="SeydaNeenBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons" unique_id=1548188038]
 layout_mode = 2
 text = "Seyda Neen"
 
-[node name="BalmoraBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+[node name="BalmoraBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons" unique_id=1137091093]
 layout_mode = 2
 text = "Balmora"
 
-[node name="VivecBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+[node name="VivecBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons" unique_id=1348444385]
 layout_mode = 2
 text = "Vivec"
 
-[node name="OriginBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons"]
+[node name="OriginBtn" type="Button" parent="UI/StatsPanel/VBox/QuickButtons" unique_id=399181423]
 layout_mode = 2
 text = "Origin (0,0)"
 
-[node name="HSeparator3" type="HSeparator" parent="UI/StatsPanel/VBox"]
+[node name="HSeparator3" type="HSeparator" parent="UI/StatsPanel/VBox" unique_id=1810516140]
 visible = false
 layout_mode = 2
 
-[node name="TerrainLabel" type="Label" parent="UI/StatsPanel/VBox"]
+[node name="TerrainLabel" type="Label" parent="UI/StatsPanel/VBox" unique_id=1274117425]
 visible = false
 layout_mode = 2
 text = "Terrain:"
 
-[node name="HSeparator4" type="HSeparator" parent="UI/StatsPanel/VBox"]
+[node name="HSeparator4" type="HSeparator" parent="UI/StatsPanel/VBox" unique_id=1808066971]
 visible = false
 layout_mode = 2
 
-[node name="LogPanel" type="Panel" parent="UI"]
+[node name="LogPanel" type="Panel" parent="UI" unique_id=751969251]
 anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
@@ -206,7 +206,7 @@ offset_right = 500.0
 offset_bottom = -10.0
 grow_vertical = 0
 
-[node name="VBox" type="VBoxContainer" parent="UI/LogPanel"]
+[node name="VBox" type="VBoxContainer" parent="UI/LogPanel" unique_id=1697831910]
 layout_mode = 0
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -215,11 +215,11 @@ offset_top = 5.0
 offset_right = -10.0
 offset_bottom = -5.0
 
-[node name="LogLabel" type="Label" parent="UI/LogPanel/VBox"]
+[node name="LogLabel" type="Label" parent="UI/LogPanel/VBox" unique_id=535093070]
 layout_mode = 2
 text = "Log:"
 
-[node name="LogText" type="RichTextLabel" parent="UI/LogPanel/VBox"]
+[node name="LogText" type="RichTextLabel" parent="UI/LogPanel/VBox" unique_id=550769713]
 layout_mode = 2
 size_flags_vertical = 3
 bbcode_enabled = true

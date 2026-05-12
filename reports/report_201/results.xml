@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-10" name="report_201" tests="20" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_character_controller_phase0_baseline" package="tests/unit" timestamp="2026-05-10T11:39:06" hostname="localhost" tests="20" failures="0" errors="0" skipped="0" flaky="0" time="0.073">
+		<testcase name="test_process_runs_one_push_pass_after_movement" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_moving_crouch_resolves_to_crouch" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_sprint_priority_beats_default_run" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_jump_priority_beats_sprint_and_run" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_forward_input_defaults_to_run_action" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_sprint_is_added_only_on_top_of_movement" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_walk_action_is_intentionally_unbound" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_swim_pitch_uses_water_context_during_input_gather" classname="test_character_controller_phase0_baseline" time="0.000">
+		</testcase>
+		<testcase name="test_movement_config_presets_load" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_movement_config_controls_run_speed" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_movement_config_controls_jump_velocity" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_movement_config_controls_step_height" classname="test_character_controller_phase0_baseline" time="0.004">
+		</testcase>
+		<testcase name="test_movement_config_controls_backward_run_multiplier" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_movement_config_can_disable_sprint" classname="test_character_controller_phase0_baseline" time="0.001">
+		</testcase>
+		<testcase name="test_character_motor_processes_movement_without_animation_system" classname="test_character_controller_phase0_baseline" time="0.002">
+		</testcase>
+		<testcase name="test_player_controller_attaches_character_motor_without_animation_system" classname="test_character_controller_phase0_baseline" time="0.016">
+		</testcase>
+		<testcase name="test_animation_system_observes_movement_state" classname="test_character_controller_phase0_baseline" time="0.011">
+		</testcase>
+		<testcase name="test_animation_system_forces_idle_after_sprint_state" classname="test_character_controller_phase0_baseline" time="0.004">
+		</testcase>
+		<testcase name="test_player_controller_ensure_input_actions_keeps_walk_unbound" classname="test_character_controller_phase0_baseline" time="0.004">
+		</testcase>
+		<testcase name="test_player_controller_ensure_input_actions_binds_ctrl_to_crouch" classname="test_character_controller_phase0_baseline" time="0.004">
+		</testcase>
+	</testsuite>
+</testsuites>

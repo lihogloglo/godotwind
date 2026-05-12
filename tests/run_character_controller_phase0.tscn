@@ -1,0 +1,18 @@
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="GDScript" id="GDScript_runner"]
+script/source = "## Narrow gdUnit runner for the character-controller phase 0 baseline.
+## Open this scene and use the editor's Run Current Scene button/F6.
+extends Node
+
+const TEST_PATH := \"res://tests/unit/test_character_controller_phase0_baseline.gd\"
+
+func _ready() -> void:
+	print(\"[TEST RUNNER] Starting tests: %s\" % TEST_PATH)
+	var runner := GdUnitTestCIRunner.new()
+	runner._debug_cmd_args = [\"GdUnitCmdTool.gd\", \"--add\", TEST_PATH, \"--continue\"]
+	add_child(runner)
+"
+
+[node name="CharacterControllerPhase0Runner" type="Node"]
+script = SubResource("GDScript_runner")
