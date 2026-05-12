@@ -52,6 +52,7 @@ extends RefCounted
 ## within `src/core/` is allowed.
 const BuoyancyBody3DScript := preload("res://src/core/water/buoyancy_body.gd")
 const BuoyancyProbe3DScript := preload("res://src/core/water/buoyancy_probe.gd")
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 
 
 ## Hard solver-sanity clamp. NOT the gameplay grab cap (that's in
@@ -59,14 +60,13 @@ const BuoyancyProbe3DScript := preload("res://src/core/water/buoyancy_probe.gd")
 const MASS_MIN_KG: float = 0.1
 const MASS_MAX_KG: float = 200.0
 
-## Layer bits. Mirrors `project.godot [layer_names.3d_physics]`:
-##   layer_1 = Environment, layer_2 = Player, layer_3 = Interactable
-const LAYER_ENVIRONMENT: int = 1 << 0
-const LAYER_PLAYER: int = 1 << 1
-const LAYER_INTERACTABLE: int = 1 << 2
+## Layer bits. Mirrors `project.godot [layer_names.3d_physics]`.
+const LAYER_ENVIRONMENT: int = GameplayPhysicsLayersScript.ENVIRONMENT
+const LAYER_PLAYER: int = GameplayPhysicsLayersScript.PLAYER
+const LAYER_INTERACTABLE: int = GameplayPhysicsLayersScript.INTERACTABLE
 
-const SPAWN_LAYER: int = LAYER_ENVIRONMENT | LAYER_INTERACTABLE
-const SPAWN_MASK: int = LAYER_ENVIRONMENT | LAYER_PLAYER
+const SPAWN_LAYER: int = GameplayPhysicsLayersScript.CARRYABLE_LAYER
+const SPAWN_MASK: int = GameplayPhysicsLayersScript.CARRYABLE_MASK
 
 
 ## Convert the first StaticBody3D found inside `instance` into a

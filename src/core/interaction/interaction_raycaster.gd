@@ -5,10 +5,11 @@
 ## the crosshair (or null). **Pure state — does NOT read input.**
 ##
 ## Phase I.0 (2026-04-07) removed the raycaster's `_unhandled_input` block.
-## Input handling for the `interact` action lives entirely in
-## `PlayerController`, which calls `get_current_target()` and routes the
-## press to the target's `interact()` method. See
-## `docs/INTERACTION_SYSTEM.md` §3.1 + §4 for the contract.
+## Input handling for the `interact` action lives in the active input context:
+## PlayerGameplayContext routes through `PlayerController`, and FlyCameraContext
+## routes through the main-scene fly adapter. Both call `get_current_target()`
+## and route the semantic tap/hold outcome. See
+## `docs/systems/interaction_system.md` §3.1 + §4 for the contract.
 ##
 ## ## Framework/adapter boundary
 ##
@@ -80,6 +81,7 @@ signal prompt_changed(interactable: Interactable, distance: float)
 
 var _current_target: Interactable = null
 var _current_distance: float = 0.0
+var _prompts_suppressed: bool = false
 # Tracks whether we've subscribed to the current target's `tree_exiting`
 # signal. We can't query a Node's connection list cheaply at every read,
 # so we mirror the connection state ourselves.
@@ -100,8 +102,8 @@ func _ready() -> void:
 		Log.warn("interaction", "InteractionRaycaster has no camera reference — disabling")
 		set_physics_process(false)
 		return
-	# Raycaster does NOT read input. PlayerController owns the `interact`
-	# action and calls get_current_target() when it fires.
+	# Raycaster does NOT read input. The active input context calls
+	# get_current_target() after InteractionIntent emits a semantic outcome.
 	set_process_unhandled_input(false)
 
 
@@ -137,6 +139,20 @@ func get_current_distance() -> float:
 		_current_target = null
 		_current_distance = 0.0
 	return _current_distance
+
+
+## Hide prompt output while another system owns interaction focus, without
+## changing target acquisition. Carry mode uses this so tap prompts do not show
+## for actions that the active context will ignore.
+func set_prompt_suppressed(suppressed: bool) -> void:
+	if _prompts_suppressed == suppressed:
+		return
+	_prompts_suppressed = suppressed
+	_emit_prompt_for_current_target()
+
+
+func is_prompt_suppressed() -> bool:
+	return _prompts_suppressed
 
 
 ## Stale = freed, queued-for-deletion, or no longer in the scene tree.
@@ -199,6 +215,16 @@ func _on_target_tree_exiting() -> void:
 	prompt_changed.emit(null, 0.0)
 
 
+func _emit_prompt_for_current_target() -> void:
+	if _is_target_stale():
+		_current_target = null
+		_current_distance = 0.0
+	if _prompts_suppressed:
+		prompt_changed.emit(null, 0.0)
+	else:
+		prompt_changed.emit(_current_target, _current_distance)
+
+
 ## Cast forward and update _current_target + _current_distance.
 func _update_target() -> void:
 	# Pre-flight: drop a stale cached target before we compare against it.
@@ -250,7 +276,7 @@ func _update_target() -> void:
 		_current_target = new_target
 		_current_distance = new_distance
 		_connect_target_exiting(_current_target)
-		prompt_changed.emit(_current_target, _current_distance)
+		_emit_prompt_for_current_target()
 		if debug_log:
 			var label: String = "(none)" if _current_target == null else _current_target.get_prompt_text()
 			Log.debug("interaction", "Target → %s @ %.2fm" % [label, new_distance])

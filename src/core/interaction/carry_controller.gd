@@ -8,8 +8,8 @@
 ##
 ## ## Architecture (post-2026-04-08 rewrite)
 ##
-## See `.claude/CLAUDE.md` "Engineering Principle — Simplicity Over
-## Over-Engineering" for the full saga. The short version: previous
+## See `AGENTS.md` "Engineering Principle - Simplicity Over Over-Engineering"
+## for the full saga. The short version: previous
 ## sessions tried four flavors of kinematic direct-transform-write
 ## (frozen body + `body.global_transform = X` from `_process`), all of
 ## which fought Godot's physics interpolation system and produced render-
@@ -29,7 +29,8 @@
 ##     and gravity-off + center-grab side by side and picked the
 ##     simpler one — see chat history 2026-04-08 ~22:25)
 ##   - `linear_damp` / `angular_damp` bumped — prevents oscillation
-##   - `collision_mask &= ~LAYER_PLAYER` — held body doesn't push player
+##   - `collision_mask` excludes the player's current layer bits — held body
+##     doesn't push the player during normal play or interior layer rewrites
 ##   - `linear_velocity` / `angular_velocity` zeroed — clean chase start
 ##
 ## **Each `_physics_process` tick (while held)**:
@@ -69,7 +70,7 @@
 class_name CarryController
 extends Node3D
 
-const CarryableBodyFactoryScript := preload("res://src/core/interaction/carryable_body_factory.gd")
+const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 
 
 # --- Signals
@@ -148,6 +149,7 @@ var _saved_collision_mask: int = 0
 var _saved_gravity_scale: float = 1.0
 var _saved_linear_damp: float = 0.0
 var _saved_angular_damp: float = 0.0
+var _held_excluded_player_layers: int = 0
 
 
 ## Public configuration. Called by PlayerController during setup.
@@ -282,6 +284,7 @@ func _do_grab(target: Interactable, rb: RigidBody3D) -> void:
 		_saved_gravity_scale = 1.0
 		_saved_linear_damp = 0.0
 		_saved_angular_damp = 0.0
+		_held_excluded_player_layers = 0
 		return
 	if camera == null:
 		return
@@ -292,10 +295,10 @@ func _do_grab(target: Interactable, rb: RigidBody3D) -> void:
 	rb.linear_damp = HELD_LINEAR_DAMP
 	rb.angular_damp = HELD_ANGULAR_DAMP
 
-	# Mask flip — clear the player layer bit so the held body doesn't
-	# push the player capsule around. Bit-precise. Restored exactly on
+	# Mask flip -- clear the player body's current layer bits so the held body
+	# doesn't push the player capsule around. Bit-precise. Restored exactly on
 	# release per §6.5.
-	rb.collision_mask = rb.collision_mask & ~CarryableBodyFactoryScript.LAYER_PLAYER
+	_apply_held_player_collision_exclusion(rb)
 
 	# Zero starting velocity so the chase doesn't inherit whatever the
 	# body was doing pre-grab (falling, sliding off a table, etc.).
@@ -320,7 +323,6 @@ func _do_grab(target: Interactable, rb: RigidBody3D) -> void:
 func release() -> void:
 	if not is_carrying():
 		return
-	var pickup := _held_pickup
 	var rb := _held_body
 	var saved_mask := _saved_collision_mask
 	var saved_gs := _saved_gravity_scale
@@ -338,9 +340,8 @@ func release() -> void:
 	_saved_gravity_scale = 1.0
 	_saved_linear_damp = 0.0
 	_saved_angular_damp = 0.0
+	_held_excluded_player_layers = 0
 
-	if pickup == null or not is_instance_valid(pickup):
-		return
 	if rb == null or not is_instance_valid(rb):
 		return
 
@@ -375,6 +376,31 @@ func _do_release(
 		_streaming_manager.unregister_persistent_node(rb)
 
 
+func _apply_held_player_collision_exclusion(rb: RigidBody3D) -> void:
+	if rb == null or not is_instance_valid(rb):
+		return
+	if not is_carrying() and _saved_collision_mask == 0:
+		return
+	var player_layers := GameplayPhysicsLayersScript.get_body_collision_layers(
+		player,
+		GameplayPhysicsLayersScript.PLAYER
+	)
+	_held_excluded_player_layers = player_layers
+	rb.collision_mask = GameplayPhysicsLayersScript.exclude_layers(_saved_collision_mask, player_layers)
+
+
+func _refresh_held_player_collision_exclusion() -> void:
+	if not is_carrying():
+		return
+	var player_layers := GameplayPhysicsLayersScript.get_body_collision_layers(
+		player,
+		GameplayPhysicsLayersScript.PLAYER
+	)
+	if player_layers == _held_excluded_player_layers:
+		return
+	_apply_held_player_collision_exclusion.call_deferred(_held_body)
+
+
 # --- Per-tick chase loop (the entire hold logic in one function)
 
 ## Velocity-drive chase. Runs in `_physics_process` because that is the
@@ -396,6 +422,7 @@ func _physics_process(_delta: float) -> void:
 		_held_pickup = null
 		_held_origin_parent = null
 		return
+	_refresh_held_player_collision_exclusion()
 
 	var target_xf: Transform3D = _hold_target_marker.global_transform
 	var target_pos: Vector3 = target_xf.origin
@@ -465,4 +492,5 @@ func _exit_tree() -> void:
 		_held_body.angular_velocity = Vector3.ZERO
 		_held_body = null
 		_held_pickup = null
+		_held_excluded_player_layers = 0
 	_hold_target_marker = null

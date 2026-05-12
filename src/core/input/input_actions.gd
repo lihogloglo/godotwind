@@ -10,13 +10,13 @@
 ##   2. Provide a verify() function that asserts every required action exists
 ##   3. Document the AZERTY / controller / mouse-not-bindable design decisions
 ##
-## See `docs/INPUT_SYSTEM.md` for the full design rationale, action table,
+## See `docs/systems/input_system.md` for the full design rationale, action table,
 ## addon survey, and decision history.
 ##
-## COORDINATION CONTRACT (per docs/INTERACTION_SYSTEM.md §3.1):
-##   - The `interact` action is OWNED by `PlayerController`. Do NOT add a
-##     second listener on it. Do NOT redefine it. Do NOT touch mouse mode
-##     from input code — that is also `PlayerController`'s job.
+## COORDINATION CONTRACT (per docs/systems/interaction_system.md §3.1):
+##   - The active input context owns `interact`: PlayerGameplayContext routes it
+##     through PlayerController, FlyCameraContext routes it through world_explorer.
+##     Do NOT redefine it or add an ungated listener.
 ##
 ## REDUNDANCY NOTE:
 ##   `PlayerController._ensure_input_actions` (player_controller.gd:381) is a
@@ -58,8 +58,8 @@ const CAMERA: Array[StringName] = [
 	&"toggle_camera",
 ]
 
-## Interaction actions — `interact` is OWNED by PlayerController. Do not add
-## a second listener. See coordination contract above.
+## Interaction actions — `interact` is owned by exactly one active context.
+## See coordination contract above.
 const INTERACTION: Array[StringName] = [
 	&"interact",
 ]
@@ -96,6 +96,11 @@ const VISUAL_TEST: Array[StringName] = [
 	&"impostor_stress_toggle_bounds",
 	&"impostor_stress_force_visible",
 	&"impostor_stress_reload_area",
+	&"step_solver_respawn",
+	&"teleport_test_player",
+	&"teleport_test_fly_camera",
+	&"teleport_test_transition_write",
+	&"teleport_test_reset",
 ]
 
 
@@ -132,8 +137,8 @@ const REQUIRED_ACTIONS: Array[StringName] = [
 const STICK_DEADZONE: float = 0.2
 
 ## Hold threshold for `interact` long-press detection. Mirrored from
-## PlayerController.HOLD_THRESHOLD for cross-reference only — the live value
-## lives in player_controller.gd. If you change one, change BOTH.
+## InteractionIntent.DEFAULT_HOLD_THRESHOLD for cross-reference only — the live
+## value lives in `src/core/interaction/interaction_intent.gd`.
 const INTERACT_HOLD_THRESHOLD: float = 0.20
 
 
