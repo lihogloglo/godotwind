@@ -1,9 +1,10 @@
 ## Unit tests for PlayerController's I.0 interaction contract.
 ##
-## Covers the contract from `docs/INTERACTION_SYSTEM.md` §3.1:
+## Covers the contract from `docs/systems/interaction_system.md` §3.1:
 ##   - modal gate registry (register / unregister / idempotent / null guard)
 ##   - tree_exiting self-heal removes freed gates
 ##   - is_modal_ui_open() reflects gate state
+##   - InteractionIntent tap / hold-begin / hold-release semantics
 ##   - interact_tap / interact_hold_begin / interact_release semantics
 ##   - modal gate suppresses interact_* signal emission
 ##   - _emit_interact_tap routes to raycaster's get_current_target
@@ -13,12 +14,14 @@
 ##   internal handlers (`_on_interact_pressed`, `_on_interact_released`,
 ##   `_poll_interact_hold`) directly. The viewport-input integration is
 ##   covered by the visual scene `tests/visual/test_interaction_phase_I0.tscn`.
-## - HOLD_THRESHOLD is real-time (0.2s). Instead of `await` we manufacture
-##   stale `_interact_press_time_msec` values so polling crosses the
-##   threshold synchronously.
+## - PlayerController handlers accept an optional test timestamp so polling
+##   crosses the threshold synchronously without waiting.
 ## - All gate stubs live as inner classes in this file — self-contained.
 extends GdUnitTestSuite
 
+const InteractionIntentScript := preload("res://src/core/interaction/interaction_intent.gd")
+const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
+const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 
 
@@ -52,6 +55,11 @@ class FakeInteractable extends Node:
 		interact_count += 1
 
 
+class FakePromptTarget extends Interactable:
+	func get_prompt_text() -> String:
+		return "Use target"
+
+
 # --- Helpers ----------------------------------------------------------------
 
 func _make_player() -> PlayerController:
@@ -60,6 +68,51 @@ func _make_player() -> PlayerController:
 	auto_free(p)
 	p.enabled = true
 	return p
+
+
+# --- InteractionIntent helper -----------------------------------------------
+
+func test_interaction_intent_tap_on_quick_release() -> void:
+	var intent := InteractionIntentScript.new(0.20) as InteractionIntent
+	intent.press(1000)
+	assert_int(intent.release(1100)).is_equal(InteractionIntent.Outcome.TAP)
+	assert_bool(intent.is_pressed()).is_false()
+
+
+func test_interaction_intent_hold_begin_at_threshold() -> void:
+	var intent := InteractionIntentScript.new(0.20) as InteractionIntent
+	intent.press(1000)
+	assert_int(intent.poll(1199)).is_equal(InteractionIntent.Outcome.NONE)
+	assert_int(intent.poll(1200)).is_equal(InteractionIntent.Outcome.HOLD_BEGIN)
+	assert_bool(intent.has_hold_emitted()).is_true()
+
+
+func test_interaction_intent_release_after_hold() -> void:
+	var intent := InteractionIntentScript.new(0.20) as InteractionIntent
+	intent.press(1000)
+	assert_int(intent.poll(1250)).is_equal(InteractionIntent.Outcome.HOLD_BEGIN)
+	assert_int(intent.release(1300)).is_equal(InteractionIntent.Outcome.HOLD_RELEASE)
+	assert_bool(intent.has_hold_emitted()).is_false()
+
+
+func test_interaction_intent_missing_press_is_none() -> void:
+	var intent := InteractionIntentScript.new(0.20) as InteractionIntent
+	assert_int(intent.release(1000)).is_equal(InteractionIntent.Outcome.NONE)
+	assert_int(intent.poll(1000)).is_equal(InteractionIntent.Outcome.NONE)
+
+
+func test_interaction_intent_cancel_clears_press() -> void:
+	var intent := InteractionIntentScript.new(0.20) as InteractionIntent
+	intent.press(1000)
+	intent.cancel()
+	assert_bool(intent.is_pressed()).is_false()
+	assert_int(intent.release(1300)).is_equal(InteractionIntent.Outcome.NONE)
+
+
+func test_interaction_intent_long_release_without_poll_falls_back_to_tap() -> void:
+	var intent := InteractionIntentScript.new(0.20) as InteractionIntent
+	intent.press(1000)
+	assert_int(intent.release(1400)).is_equal(InteractionIntent.Outcome.TAP)
 
 
 # --- Modal gate registry ----------------------------------------------------
@@ -133,21 +186,17 @@ func test_tap_emits_on_quick_press_release() -> void:
 func test_hold_begin_emits_after_threshold() -> void:
 	var p := _make_player()
 	@warning_ignore("inferred_declaration") var monitor := monitor_signals(p)
-	p._on_interact_pressed()
-	# Manufacture a stale press timestamp 250ms in the past so the next
-	# poll crosses HOLD_THRESHOLD (200ms) synchronously.
-	p._interact_press_time_msec = Time.get_ticks_msec() - 250
-	p._poll_interact_hold()
+	p._on_interact_pressed(1000)
+	p._poll_interact_hold(1250)
 	await assert_signal(monitor).is_emitted("interact_hold_begin")
 
 
 func test_release_emits_after_hold() -> void:
 	var p := _make_player()
 	@warning_ignore("inferred_declaration") var monitor := monitor_signals(p)
-	p._on_interact_pressed()
-	p._interact_press_time_msec = Time.get_ticks_msec() - 250
-	p._poll_interact_hold()
-	p._on_interact_released()
+	p._on_interact_pressed(1000)
+	p._poll_interact_hold(1250)
+	p._on_interact_released(1300)
 	await assert_signal(monitor).is_emitted("interact_release")
 
 
@@ -156,9 +205,9 @@ func test_modal_gate_suppresses_press() -> void:
 	var g: AlwaysOpenGate = auto_free(AlwaysOpenGate.new())
 	add_child(g)
 	p.register_modal_gate(g)
-	p._on_interact_pressed()
-	# Press should be ignored — _interact_press_time_msec stays at -1.
-	assert_int(p._interact_press_time_msec).is_equal(-1)
+	p._on_interact_pressed(1000)
+	# Press should be ignored — no active interaction intent is recorded.
+	assert_bool(p._interaction_intent.is_pressed()).is_false()
 
 
 # --- Tap routing to raycaster -----------------------------------------------
@@ -180,3 +229,44 @@ func test_emit_interact_tap_no_raycaster_is_safe() -> void:
 	# No raycaster set — should not crash.
 	p._emit_interact_tap()
 	assert_object(p.get_interaction_raycaster()).is_null()
+
+
+# --- Carry prompt suppression ------------------------------------------------
+
+func test_raycaster_prompt_suppression_hides_and_restores_current_target() -> void:
+	var ray := InteractionRaycasterScript.new() as InteractionRaycaster
+	add_child(ray)
+	auto_free(ray)
+	var target: FakePromptTarget = auto_free(FakePromptTarget.new())
+	add_child(target)
+	ray._current_target = target
+	ray._current_distance = 2.5
+
+	ray.set_prompt_suppressed(true)
+	assert_bool(ray.is_prompt_suppressed()).is_true()
+	ray.set_prompt_suppressed(false)
+
+	assert_bool(ray.is_prompt_suppressed()).is_false()
+	assert_bool(ray.get_current_target() == target).is_true()
+
+
+func test_player_carry_signals_toggle_raycaster_prompt_suppression() -> void:
+	var p := _make_player()
+	var ray := InteractionRaycasterScript.new() as InteractionRaycaster
+	add_child(ray)
+	auto_free(ray)
+	var carry := CarryControllerScript.new() as CarryController
+	add_child(carry)
+	auto_free(carry)
+	var rb := RigidBody3D.new()
+	add_child(rb)
+	auto_free(rb)
+
+	p.set_interaction_raycaster(ray)
+	p.set_carry_controller(carry)
+
+	carry.grabbed.emit(rb)
+	assert_bool(ray.is_prompt_suppressed()).is_true()
+
+	carry.released.emit(rb)
+	assert_bool(ray.is_prompt_suppressed()).is_false()

@@ -28,8 +28,8 @@ func test_fake_source_filters_by_capability() -> void:
 	source.add(static_record)
 	source.add(light_record)
 
-	var hlod_records: Array[WorldObjectRecord] = source.get_objects_in_cell(Vector2i.ZERO, WorldObjectRecord.CAP_HLOD)
-	var light_records: Array[WorldObjectRecord] = source.get_objects_in_cell(Vector2i.ZERO, WorldObjectRecord.CAP_DISTANT_LIGHT)
+	var hlod_records: Array = source.get_objects_in_cell(Vector2i.ZERO, WorldObjectRecord.CAP_HLOD)
+	var light_records: Array = source.get_objects_in_cell(Vector2i.ZERO, WorldObjectRecord.CAP_DISTANT_LIGHT)
 
 	assert_int(hlod_records.size()).is_equal(1)
 	assert_that(hlod_records[0].object_id).is_equal(&"cell0:static")
@@ -40,8 +40,12 @@ func test_fake_source_filters_by_capability() -> void:
 func test_native_world_object_index_queries_cell_and_radius() -> void:
 	var bridge := NativeBridgeScript.new()
 	var factory: RefCounted = bridge.get("_factory")
-	assert_object(factory).is_not_null()
-	assert_bool(factory.has_method("CreateWorldObjectIndex")).is_true()
+	if factory == null:
+		fail("NativeFactory is unavailable. Run dotnet build Godotwind.sln before the full gdUnit suite so the C# assembly loads.")
+		return
+	if not factory.has_method("CreateWorldObjectIndex"):
+		fail("NativeFactory is missing CreateWorldObjectIndex.")
+		return
 
 	var index: RefCounted = factory.call("CreateWorldObjectIndex")
 	index.call("AddObject", &"near_static", Vector3.ZERO, Vector2i.ZERO, WorldObjectRecord.CAP_HLOD)
