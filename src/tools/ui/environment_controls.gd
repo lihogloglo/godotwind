@@ -125,6 +125,7 @@ func setup_fallback_environment() -> void:
 	_fallback_light.rotation_degrees = Vector3(-45, -30, 0)
 
 	_add_child(_fallback_light)
+	ensure_shader_manager_attached()
 
 
 ## Sync sky state with toggle on initialization.

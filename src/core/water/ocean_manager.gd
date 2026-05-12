@@ -8,6 +8,7 @@ extends Node
 
 const CS := preload("res://src/core/coordinate_system.gd")
 const OceanSprayScript := preload("res://src/core/water/ocean_spray.gd")
+const UnderwaterParticulatesScript := preload("res://src/core/water/underwater_particulates.gd")
 
 # Project settings paths
 const SETTING_ENABLED := "ocean/enabled"
@@ -64,6 +65,15 @@ func _get_shore_mask_path() -> String:
 ## 0 = Off, 1 = Low, 2 = Medium, 3 = High.
 @export_range(0, 3) var sea_spray_quality: int = 2
 
+@export_group("Underwater Particles")
+@export var underwater_particles_enabled: bool = false
+## 0 = Off, 1 = Low, 2 = Medium, 3 = High.
+@export_range(0, 3) var underwater_particles_quality: int = 2
+@export_range(0.0, 2.0) var underwater_particles_opacity: float = 1.0
+@export_range(0, 8192) var underwater_particles_count: int = 4096
+@export_range(0.25, 4.0) var underwater_particles_size_scale: float = 4.0
+@export_range(0.0, 4.0) var underwater_particles_speed_scale: float = 1.5
+
 # System state
 var _system_initialized: bool = false
 var _system_enabled: bool = false
@@ -77,6 +87,7 @@ var _weather_last_wind_dir_xz: Vector2 = Vector2(1.0, 1.0).normalized()
 # Internal state
 var _ocean_mesh: OceanMesh = null
 var _ocean_spray: OceanSpray = null
+var _underwater_particulates: UnderwaterParticulates = null
 var _shore_mask: ShoreMaskGenerator = null
 var _terrain: Terrain3D = null
 var _camera: Camera3D = null
@@ -92,12 +103,6 @@ var _current_shore_wave_amplitude: float = 0.18
 var _current_shore_wave_frequency: float = SHORE_WAVE_SPATIAL_FREQUENCY
 var _current_shore_wave_speed: float = 0.4
 var _current_shore_wave_steepness: float = 0.58
-
-# Legacy underwater compositor effect (managed via ShaderManager).
-# Disabled by default: underwater/waterline ownership moved to the volume and
-# pre-water compositor paths. Keep the API as a cleanup shim for older scenes.
-var underwater_compositor_enabled: bool = false
-var _underwater_effect_loaded: bool = false
 
 # FFT pipeline
 var _wave_generator: WaveGenerator = null
@@ -229,6 +234,7 @@ func _deferred_init() -> void:
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
 	_update_shader_parameters()
 	_setup_spray_layer()
+	_setup_underwater_particulates_layer()
 	# Shore mask — vertex dampening only (CREST OceanDepthCache pattern).
 	# Fragment-side shore visuals remain depth-driven (water_thickness).
 	_load_shore_mask()
@@ -299,6 +305,8 @@ func _process(delta: float) -> void:
 		_ocean_mesh.update_position(new_pos)
 		if _ocean_spray:
 			_ocean_spray.set_camera(_camera)
+		if _underwater_particulates:
+			_underwater_particulates.set_camera(_camera)
 
 	# Drive FFT pipeline updates (rate-limited)
 	if _wave_generator and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
@@ -314,15 +322,13 @@ func _process(delta: float) -> void:
 		_ocean_spray.set_sea_level(sea_level)
 		_ocean_spray.set_wave_scale(wave_scale)
 		_ocean_spray.set_ocean_time(_time)
+	if _underwater_particulates:
+		_underwater_particulates.set_sea_level(sea_level)
 
 	# Push sun direction to the ocean surface shader for SSS backlight.
 	# Scan the scene tree at most once every 60 frames so we notice late-spawned
 	# DirectionalLight3D nodes without walking the tree per frame.
 	_update_sun_uniform()
-
-	# Update underwater compositor effect state (submersion, sun, camera)
-	if underwater_compositor_enabled and _underwater_effect_loaded:
-		_update_underwater_state()
 
 	# GPU readback for buoyancy — read every cascade's displacement map
 	# once per frame. Sampling only cascade 0 (swell) under-reports the
@@ -537,6 +543,34 @@ func _push_ocean_time_uniform() -> void:
 		_ocean_spray.set_ocean_time(_time)
 
 
+func _setup_underwater_particulates_layer() -> void:
+	if _underwater_particulates != null:
+		return
+	_underwater_particulates = UnderwaterParticulatesScript.new()
+	_underwater_particulates.name = "UnderwaterParticulates"
+	add_child(_underwater_particulates)
+	if _camera:
+		_underwater_particulates.set_camera(_camera)
+	_underwater_particulates.enabled = underwater_particles_enabled
+	_underwater_particulates.quality_tier = clampi(underwater_particles_quality, 0, 3) as UnderwaterParticulates.QualityTier
+	_underwater_particulates.particle_count = underwater_particles_count
+	_underwater_particulates.size_scale = underwater_particles_size_scale
+	_underwater_particulates.speed_scale = underwater_particles_speed_scale
+	_underwater_particulates.opacity = underwater_particles_opacity
+	_underwater_particulates.set_sea_level(sea_level)
+	_underwater_particulates.set_current(_weather_last_wind_t, _weather_last_wind_dir_xz)
+
+
+func _dispose_underwater_particulates_layer() -> void:
+	var particles := _underwater_particulates
+	_underwater_particulates = null
+	if particles == null:
+		return
+	if particles.get_parent() == self:
+		remove_child(particles)
+	particles.queue_free()
+
+
 func _setup_spray_layer() -> void:
 	if _ocean_spray != null:
 		return
@@ -617,6 +651,24 @@ func _sum_cascade_displacement(world_pos: Vector3) -> Vector3:
 	return total
 
 
+func _cascade_ready_mask(count: int) -> int:
+	var mask := 0
+	var safe_count: int = mini(count, 30)
+	for i in safe_count:
+		mask |= 1 << i
+	return mask
+
+
+func _readback_cascade_ready_mask() -> int:
+	var mask := 0
+	var count: int = mini(_displacement_cpu_per_cascade.size(), _cascade_parameters.size())
+	count = mini(count, 30)
+	for i in count:
+		if _displacement_cpu_per_cascade[i].size() > 0:
+			mask |= 1 << i
+	return mask
+
+
 func _sample_active_shore_data(world_pos: Vector3) -> Color:
 	if _active_shore_mask_image == null:
 		return Color(1.0, 0.5, 0.5, 1.0)
@@ -630,6 +682,14 @@ func _sample_active_shore_data(world_pos: Vector3) -> Color:
 	var px := clampi(int(u * float(size.x)), 0, size.x - 1)
 	var py := clampi(int(v * float(size.y)), 0, size.y - 1)
 	return _active_shore_mask_image.get_pixel(px, py)
+
+
+func _shore_water_distance_norm(shore_data: Color) -> float:
+	return clampf(shore_data.a * 2.0 - 1.0, 0.0, 1.0)
+
+
+func _shore_body_coverage(shore_data: Color) -> float:
+	return 1.0 if shore_data.a >= 0.25 else 0.0
 
 
 func _shore_direction_from_active_mask(world_pos: Vector3, shore_data: Color) -> Vector2:
@@ -712,7 +772,7 @@ func _get_shore_wave_displacement(world_pos: Vector3) -> Vector3:
 	if shore_dir.length() <= 0.01:
 		return Vector3.ZERO
 	shore_dir = shore_dir.normalized()
-	var raw_dist := shore_data.a * _active_shore_fade_distance
+	var raw_dist := _shore_water_distance_norm(shore_data) * _active_shore_fade_distance
 	var phase := raw_dist * _current_shore_wave_frequency * TAU + _time * _current_shore_wave_speed * TAU
 	var modulation := _shore_along_modulation_cpu(world_pos, shore_dir, _time)
 	var breaker_env := _shore_breaker_envelope_cpu(raw_dist, _active_shore_fade_distance)
@@ -785,11 +845,64 @@ func get_wave_displacement(world_pos: Vector3) -> Vector3:
 func get_wave_normal(world_pos: Vector3) -> Vector3:
 	if not _system_enabled or not _enabled:
 		return Vector3.UP
+	var gradient := get_wave_gradient(world_pos)
+	return Vector3(-gradient.x, 1.0, -gradient.y).normalized()
+
+
+## Get dHeight/dWorldXZ for consumers that need slope without rebuilding it.
+func get_wave_gradient(world_pos: Vector3) -> Vector2:
+	if not _system_enabled or not _enabled:
+		return Vector2.ZERO
 	var eps := 1.0
-	var h0 := get_wave_height(world_pos)
-	var hx := get_wave_height(world_pos + Vector3(eps, 0.0, 0.0))
-	var hz := get_wave_height(world_pos + Vector3(0.0, 0.0, eps))
-	return Vector3(h0 - hx, eps, h0 - hz).normalized()
+	var hx0 := get_wave_height(world_pos - Vector3(eps, 0.0, 0.0))
+	var hx1 := get_wave_height(world_pos + Vector3(eps, 0.0, 0.0))
+	var hz0 := get_wave_height(world_pos - Vector3(0.0, 0.0, eps))
+	var hz1 := get_wave_height(world_pos + Vector3(0.0, 0.0, eps))
+	return Vector2(hx1 - hx0, hz1 - hz0) / (2.0 * eps)
+
+
+## Surface velocity is intentionally not approximated from a single height sample.
+## Future GPU/CPU wave data should publish true dDisplacement/dt here.
+func get_wave_velocity(_world_pos: Vector3) -> Vector3:
+	return Vector3.ZERO
+
+
+func get_water_coverage(world_pos: Vector3) -> float:
+	if not _system_enabled or not _enabled:
+		return 0.0
+	if _active_shore_mask_image != null:
+		return _shore_body_coverage(_sample_active_shore_data(world_pos))
+	if _shore_mask:
+		return _shore_mask.get_water_coverage(world_pos)
+	if _terrain and _terrain.data:
+		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
+		return 1.0 if terrain_height < sea_level else 0.0
+	return 1.0
+
+
+func get_signed_shore_distance(world_pos: Vector3) -> float:
+	if _active_shore_mask_image != null:
+		var shore_data := _sample_active_shore_data(world_pos)
+		var distance := _shore_water_distance_norm(shore_data) * _active_shore_fade_distance
+		return distance if _shore_body_coverage(shore_data) > 0.0 else -_active_shore_fade_distance
+	if _shore_mask:
+		return _get_shore_factor(world_pos) * shore_fade_distance
+	if _terrain and _terrain.data:
+		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
+		return shore_fade_distance if terrain_height < sea_level else -shore_fade_distance
+	return shore_fade_distance
+
+
+func get_shore_side(world_pos: Vector3) -> int:
+	if get_water_coverage(world_pos) > 0.01:
+		return WaterSurfaceState.SHORE_SIDE_WATER
+	return WaterSurfaceState.SHORE_SIDE_LAND
+
+
+func get_water_body_id_at(world_pos: Vector3) -> StringName:
+	if get_water_coverage(world_pos) > 0.01:
+		return WaterSurfaceState.WATER_BODY_OCEAN
+	return WaterSurfaceState.WATER_BODY_NONE
 
 
 ## Sample one cascade's displacement texture at a world position.
@@ -856,78 +969,11 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 	if world_pos.y > sea_level + 10.0:
 		return false
 	if _active_shore_mask_image != null or _shore_mask:
-		return _get_shore_factor(world_pos) > 0.01 or _get_shore_wave_height(world_pos) > 0.02
+		return get_water_coverage(world_pos) > 0.0 or _get_shore_wave_height(world_pos) > 0.02
 	if _terrain and _terrain.data:
 		var terrain_height: float = CS.get_terrain_height(world_pos, _terrain)
 		return terrain_height < sea_level
 	return true
-
-
-# ============================================================================
-# UNDERWATER EFFECT
-# ============================================================================
-
-func _init_underwater_effect() -> void:
-	if _underwater_effect_loaded:
-		return
-	var effect_path := "res://src/core/shaders/effects/underwater_compositor_effect.gd"
-	if ShaderManager.load_effect(effect_path):
-		_underwater_effect_loaded = true
-		Log.info("water", "OceanManager: Underwater compositor effect loaded")
-	else:
-		Log.error("water", "OceanManager: Failed to load underwater compositor effect")
-
-
-func _update_underwater_state() -> void:
-	if not _underwater_effect_loaded or not _camera:
-		return
-
-	var cam_y: float = _camera.global_position.y
-	var submerged: bool = cam_y < sea_level + 2.0  # Include boundary zone
-
-	# Enable/disable the effect based on submersion
-	var effect: PostProcessEffect = ShaderManager.get_effect("underwater")
-	if effect == null:
-		return
-
-	var is_active: bool = ShaderManager.is_effect_enabled("underwater")
-	if submerged and not is_active:
-		ShaderManager.enable_effect("underwater")
-		Log.info("water", "Underwater effect: ON")
-	elif not submerged and is_active:
-		ShaderManager.disable_effect("underwater")
-		Log.info("water", "Underwater effect: OFF")
-
-	# Update camera and sun state on the effect
-	if submerged and effect.has_method("set_sea_level"):
-		effect.set_sea_level(sea_level)
-		effect.set_camera_state(_camera.global_position, _camera.global_basis)
-		# Find sun for light direction
-		var light: DirectionalLight3D = _find_node_by_class(get_tree().root, "DirectionalLight3D") as DirectionalLight3D
-		if light:
-			effect.set_sun_direction(-light.global_basis.z, 1.0)
-
-
-## Get the underwater compositor effect
-func get_underwater_effect() -> PostProcessEffect:
-	if _underwater_effect_loaded:
-		return ShaderManager.get_effect("underwater")
-	return null
-
-
-func set_underwater_compositor_enabled(enabled: bool) -> void:
-	if enabled:
-		Log.warn("water", "OceanManager: legacy underwater compositor is retired; request ignored")
-		enabled = false
-
-	if underwater_compositor_enabled == enabled and not _underwater_effect_loaded:
-		return
-
-	underwater_compositor_enabled = enabled
-	if _underwater_effect_loaded:
-		ShaderManager.disable_effect("underwater")
-		ShaderManager.unload_effect("underwater")
-		_underwater_effect_loaded = false
 
 
 ## Check if the camera is currently submerged
@@ -946,10 +992,14 @@ func set_camera(camera: Camera3D) -> void:
 	_auto_find_camera = false
 	if _ocean_spray:
 		_ocean_spray.set_camera(camera)
+	if _underwater_particulates:
+		_underwater_particulates.set_camera(camera)
 
 
 func set_sea_level(level: float) -> void:
 	sea_level = level
+	if _underwater_particulates:
+		_underwater_particulates.set_sea_level(sea_level)
 	if not _system_enabled:
 		return
 	if _terrain and _shore_mask:
@@ -996,6 +1046,12 @@ func get_displacement_texture_rd() -> RID:
 	return _wave_generator.descriptors[&"displacement_map"].rid
 
 
+func get_normal_texture_rd() -> RID:
+	if _wave_generator == null or not _wave_generator.descriptors.has(&"normal_map"):
+		return RID()
+	return _wave_generator.descriptors[&"normal_map"].rid
+
+
 func is_gpu_wave_readback_enabled() -> bool:
 	return use_gpu_wave_readback
 
@@ -1007,14 +1063,51 @@ func set_gpu_wave_readback_enabled(enabled: bool) -> void:
 		_displacement_cpu_per_cascade.clear()
 
 
+func get_water_query_source() -> StringName:
+	if not _system_enabled or not _enabled:
+		return &"disabled"
+	var is_flat := _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.FLAT
+	if is_flat:
+		return &"flat"
+	if use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0:
+		return &"gpu_readback"
+	if _physics_evaluator and _physics_evaluator._component_count > 0:
+		return &"cpu_spectrum"
+	return &"shore_analytical"
+
+
+func get_water_query_readback_bytes_per_frame() -> int:
+	var total := 0
+	for buf: PackedByteArray in _displacement_cpu_per_cascade:
+		total += buf.size()
+	return total
+
+
 func get_water_surface_state() -> WaterSurfaceState:
 	var state := WaterSurfaceState.new()
+	var frame_id := Engine.get_process_frames()
+	var displacement_rd := get_displacement_texture_rd()
+	var normal_rd := get_normal_texture_rd()
 	state.sea_level = sea_level
 	state.wave_scale = wave_scale
 	state.ocean_time = _time
 	state.map_scales = _current_map_scales
 	state.cascade_count = _cascade_parameters.size()
-	state.displacement_texture_rd = get_displacement_texture_rd()
+	state.displacement_texture_rd = displacement_rd
+	state.normal_texture_rd = normal_rd
+	state.water_body_id = WaterSurfaceState.WATER_BODY_OCEAN if _system_enabled and _enabled else WaterSurfaceState.WATER_BODY_NONE
+	state.water_body_index = 1 if _system_enabled and _enabled else 0
+	state.coverage_available = _system_enabled and _enabled
+	if _active_shore_mask_image != null:
+		state.coverage_source = &"shore_mask"
+	elif _shore_mask != null:
+		state.coverage_source = &"runtime_shore_mask"
+	elif _terrain != null and _terrain.data != null:
+		state.coverage_source = &"terrain_height"
+	elif _system_enabled and _enabled:
+		state.coverage_source = &"global_ocean"
+	else:
+		state.coverage_source = &"none"
 	state.shore_mask_texture = _active_shore_mask_texture
 	state.shore_mask_bounds = Vector4(
 		_active_shore_mask_bounds.position.x,
@@ -1031,6 +1124,26 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.absorption_sigma = _current_absorption_sigma
 	state.absorption_depth_falloff = get_absorption_depth_falloff()
 	state.underwater_caustics_strength = _current_underwater_caustics_strength
+	state.snapshot_frame_id = frame_id
+	state.surface_data_frame_id = frame_id
+	state.readback_frame_id = _readback_frame
+	state.fft_ready = _system_enabled and _enabled and displacement_rd.is_valid() and _cascade_parameters.size() > 0
+	state.normal_data_ready = _system_enabled and _enabled and normal_rd.is_valid() and _cascade_parameters.size() > 0
+	state.readback_ready = use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0
+	state.gpu_cascade_ready_mask = _cascade_ready_mask(_cascade_parameters.size()) if state.fft_ready else 0
+	state.cpu_cascade_ready_mask = _readback_cascade_ready_mask()
+	state.cpu_query_available = _system_enabled and _enabled
+	state.cpu_query_source = get_water_query_source()
+	state.cpu_readback_bytes_per_frame = get_water_query_readback_bytes_per_frame()
+	state.displacement_texture_size = _displacement_size
+	state.height_query = Callable(self, "get_wave_height")
+	state.displacement_query = Callable(self, "get_wave_displacement")
+	state.normal_query = Callable(self, "get_wave_normal")
+	state.gradient_query = Callable(self, "get_wave_gradient")
+	state.coverage_query = Callable(self, "get_water_coverage")
+	state.signed_shore_distance_query = Callable(self, "get_signed_shore_distance")
+	state.shore_side_query = Callable(self, "get_shore_side")
+	state.water_body_id_query = Callable(self, "get_water_body_id_at")
 	if _active_shore_mask_texture != null:
 		var texture_rid := _active_shore_mask_texture.get_rid()
 		if texture_rid.is_valid():
@@ -1158,6 +1271,89 @@ func set_sea_spray_render_layers(mask: int) -> void:
 		_ocean_spray.set_render_layers(mask)
 
 
+func set_underwater_particles_enabled(enabled: bool) -> void:
+	underwater_particles_enabled = enabled
+	if _underwater_particulates:
+		_underwater_particulates.enabled = enabled
+
+
+func is_underwater_particles_enabled() -> bool:
+	return underwater_particles_enabled
+
+
+func set_underwater_particles_quality(quality: int) -> void:
+	underwater_particles_quality = clampi(quality, 0, 3)
+	if _underwater_particulates:
+		_underwater_particulates.quality_tier = underwater_particles_quality as UnderwaterParticulates.QualityTier
+		underwater_particles_count = _underwater_particulates.particle_count
+
+
+func get_underwater_particles_quality() -> int:
+	return underwater_particles_quality
+
+
+func get_underwater_particles_quality_name() -> String:
+	match underwater_particles_quality:
+		0:
+			return "Off"
+		1:
+			return "Low"
+		2:
+			return "Medium"
+		3:
+			return "High"
+	return "Unknown"
+
+
+func set_underwater_particles_opacity(value: float) -> void:
+	underwater_particles_opacity = clampf(value, 0.0, 2.0)
+	if _underwater_particulates:
+		_underwater_particulates.opacity = underwater_particles_opacity
+
+
+func set_underwater_particles_count(value: int) -> void:
+	underwater_particles_count = clampi(value, 0, 8192)
+	if _underwater_particulates:
+		_underwater_particulates.particle_count = underwater_particles_count
+
+
+func set_underwater_particles_size_scale(value: float) -> void:
+	underwater_particles_size_scale = clampf(value, 0.25, 4.0)
+	if _underwater_particulates:
+		_underwater_particulates.size_scale = underwater_particles_size_scale
+
+
+func set_underwater_particles_speed_scale(value: float) -> void:
+	underwater_particles_speed_scale = clampf(value, 0.0, 4.0)
+	if _underwater_particulates:
+		_underwater_particulates.speed_scale = underwater_particles_speed_scale
+
+
+func get_underwater_particles_status() -> Dictionary:
+	var status := {
+		"enabled": underwater_particles_enabled,
+		"quality": underwater_particles_quality,
+		"quality_name": get_underwater_particles_quality_name(),
+		"initialized": _underwater_particulates != null,
+		"visible": false,
+		"emitting": false,
+		"particle_count": underwater_particles_count,
+		"opacity": underwater_particles_opacity,
+		"size_scale": underwater_particles_size_scale,
+		"speed_scale": underwater_particles_speed_scale,
+		"camera_water_depth": 0.0,
+	}
+	if _underwater_particulates:
+		status.merge(_underwater_particulates.get_runtime_status(), true)
+		status["quality_name"] = get_underwater_particles_quality_name()
+	return status
+
+
+func set_underwater_particles_render_layers(mask: int) -> void:
+	if _underwater_particulates:
+		_underwater_particulates.set_render_layers(mask)
+
+
 func get_shore_mask_generator() -> ShoreMaskGenerator:
 	return _shore_mask
 
@@ -1212,11 +1408,8 @@ func force_initialize() -> void:
 
 
 func release_runtime_resources() -> void:
-	if _underwater_effect_loaded:
-		ShaderManager.disable_effect("underwater")
-		ShaderManager.unload_effect("underwater")
-		_underwater_effect_loaded = false
 	_dispose_spray_layer()
+	_dispose_underwater_particulates_layer()
 	_shutdown_fft_pipeline()
 	_dispose_ocean_mesh()
 	if _shore_mask:
@@ -1278,6 +1471,7 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH and _wave_generator:
 		_update_cascade_scales()
 	_setup_spray_layer()
+	_setup_underwater_particulates_layer()
 	if _ocean_spray:
 		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
 	reset_weather()
@@ -1312,6 +1506,7 @@ func set_water_quality(quality: int) -> void:
 	if target_quality == OceanMesh.QualityMode.HIGH and not _wave_generator:
 		_init_fft_pipeline()
 		_setup_spray_layer()
+		_setup_underwater_particulates_layer()
 	elif target_quality != OceanMesh.QualityMode.HIGH and _wave_generator:
 		_shutdown_fft_pipeline()
 	if _ocean_spray:
@@ -1599,21 +1794,19 @@ func reset_weather() -> void:
 
 
 func _update_spray_weather(wind_t: float, wind_dir_xz: Vector2) -> void:
-	if _ocean_spray == null:
-		return
-	_ocean_spray.enabled = sea_spray_enabled
-	_ocean_spray.quality_tier = clampi(sea_spray_quality, 0, 3) as OceanSpray.QualityTier
-	_ocean_spray.set_weather(wind_t, wind_dir_xz)
+	if _ocean_spray:
+		_ocean_spray.enabled = sea_spray_enabled
+		_ocean_spray.quality_tier = clampi(sea_spray_quality, 0, 3) as OceanSpray.QualityTier
+		_ocean_spray.set_weather(wind_t, wind_dir_xz)
+	if _underwater_particulates:
+		_underwater_particulates.set_current(wind_t, wind_dir_xz)
 
 
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
-	if _underwater_effect_loaded:
-		ShaderManager.disable_effect("underwater")
-		ShaderManager.unload_effect("underwater")
-		_underwater_effect_loaded = false
 	_dispose_spray_layer()
+	_dispose_underwater_particulates_layer()
 	# Clean up FFT RIDs to avoid exit-time leaks
 	_shutdown_fft_pipeline()
 

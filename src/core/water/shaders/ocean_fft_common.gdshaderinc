@@ -65,9 +65,9 @@ uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
 uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
 
-// Opaque depth-driven Beer-Lambert tint. The production ocean surface must not
-// declare the scene-color screen sampler; scene-color bending/tinting belongs to the
-// waterline compositor so the surface remains in the robust opaque family.
+// Opaque depth-driven Beer-Lambert tint. The waterline compositor owns
+// scene-color bending for submerged receivers; this surface deliberately avoids
+// hint_screen_texture so it stays in the robust opaque family.
 group_uniforms optics;
 uniform sampler2D DEPTH_TEXTURE  : hint_depth_texture, filter_nearest;
 // Beer-Lambert extinction coefficients per channel (m^-1, applied after density scale).
@@ -215,17 +215,21 @@ void fragment() {
 
 	// ========================================================================
 	// DEPTH RECONSTRUCTION — moved to top of fragment so water_thickness is
-	// available for gradient dampening, shore blend, and foam. Canonical
+	// available for gradient dampening, shore blend, and foam.
 	// Godot 4.6 reversed-Z depth→view-space-Z. Forward+ / D3D12 / Vulkan use
-	// infinite reversed-Z: 1.0 at near, 0.0 at far. PROJECTION_MATRIX[3][2]
-	// encodes the negated near distance.
+	// Current code reconstructs the sampled background with INV_PROJECTION_MATRIX.
 	// ========================================================================
 	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
 	vec3 surf_view = surf_view4.xyz / surf_view4.w;
 	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
-	float bg_view_z = -PROJECTION_MATRIX[3][2] / max(bg_ndc_z, 1e-5);
-	float raw_thickness = max(0.0, surf_view.z - bg_view_z);
 	bool is_sky_or_far = bg_ndc_z <= 1e-5;
+	float raw_thickness = max_visible_depth;
+	if (!is_sky_or_far) {
+		vec3 bg_ndc = vec3(SCREEN_UV * 2.0 - 1.0, bg_ndc_z);
+		vec4 bg_view4 = INV_PROJECTION_MATRIX * vec4(bg_ndc, 1.0);
+		vec3 bg_view = bg_view4.xyz / bg_view4.w;
+		raw_thickness = max(0.0, surf_view.z - bg_view.z);
+	}
 	float water_thickness = min(raw_thickness, max_visible_depth);
 
 	// Read gradient and foam from normal maps (all cascades)
@@ -387,7 +391,7 @@ void fragment() {
 		NORMAL = normalize((VIEW_MATRIX * vec4(perturbed, 0.0)).xyz);
 	}
 	// Roughness: base from uniform, foam adds roughness. Low roughness keeps
-	// native/probe/sky reflections sharp on calm water.
+	// probe/sky reflections sharp on calm water.
 	ROUGHNESS = (1.0 - fresnel) * foam_factor * 0.6 + roughness;
 	METALLIC = 0.0;
 	SPECULAR = 0.5;  // F0 for environment reflections — separate from light() specular
@@ -413,8 +417,8 @@ void light() {
 
 	// --- SPECULAR (direct light) --- Smith-GGX with Fresnel
 	float spec_alpha = max(roughness, 0.05);  // Use base roughness uniform, floor to avoid artifacts
-	float light_mask = smith_masking_shadowing(spec_alpha, dot_nv);
-	float view_mask = smith_masking_shadowing(spec_alpha, dot_nl);
+	float light_mask = smith_masking_shadowing(dot_nl, spec_alpha);
+	float view_mask = smith_masking_shadowing(dot_nv, spec_alpha);
 	float microfacet_distribution = ggx_distribution(dot(NORMAL, halfway), spec_alpha);
 	float geometric_attenuation = 1.0 / (1.0 + light_mask + view_mask);
 	SPECULAR_LIGHT += fresnel * microfacet_distribution * geometric_attenuation / (4.0 * dot_nv + 0.1) * ATTENUATION;

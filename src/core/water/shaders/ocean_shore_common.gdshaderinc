@@ -27,6 +27,14 @@ vec4 water_surface_shore_sample(vec2 shore_uv, bool use_shore_mask) {
 		: vec4(1.0, 0.5, 0.5, 1.0);
 }
 
+float water_surface_shore_water_distance_norm(vec4 shore_data) {
+	return clamp(shore_data.a * 2.0 - 1.0, 0.0, 1.0);
+}
+
+float water_surface_shore_body_coverage(vec4 shore_data) {
+	return step(0.25, shore_data.a);
+}
+
 float shore_breaker_envelope(float raw_dist) {
 	float dist_t = clamp(raw_dist / max(shore_fade_distance, 0.001), 0.0, 1.0);
 	float shore_ramp = smoothstep(0.05, 0.20, dist_t);
@@ -112,7 +120,7 @@ float water_surface_shore_phase(float raw_dist) {
 }
 
 vec4 water_surface_shore_offset(vec2 world_xz, vec2 shore_uv, bool in_mask, vec4 shore_data) {
-	float raw_dist = shore_data.a * shore_fade_distance;
+	float raw_dist = water_surface_shore_water_distance_norm(shore_data) * shore_fade_distance;
 	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
 	if (shore_dir_len <= 0.01 || shore_wave_amplitude <= 0.0) {
@@ -138,7 +146,7 @@ vec4 water_surface_shore_offset(vec2 world_xz, vec2 shore_uv, bool in_mask, vec4
 }
 
 vec2 water_surface_shore_slope(vec2 world_xz, vec2 shore_uv, bool in_mask, vec4 shore_data) {
-	float raw_dist = shore_data.a * shore_fade_distance;
+	float raw_dist = water_surface_shore_water_distance_norm(shore_data) * shore_fade_distance;
 	vec2 shore_dir = in_mask ? shore_direction_from_mask(shore_uv, shore_data.gb) : vec2(0.0);
 	float shore_dir_len = length(shore_dir);
 	if (shore_dir_len <= 0.01 || shore_wave_amplitude <= 0.0) {
@@ -158,4 +166,3 @@ vec2 water_surface_shore_slope(vec2 world_xz, vec2 shore_uv, bool in_mask, vec4 
 	);
 	return shore_dir * clamp(slope, -1.6, 1.6);
 }
-

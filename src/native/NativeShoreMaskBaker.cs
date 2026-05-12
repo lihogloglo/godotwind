@@ -13,7 +13,8 @@ namespace Godotwind.Native;
 ///   R = shore factor (smoothstepped, 0 = at shore/land, 1 = deep ocean)
 ///   G = gradient direction X (encoded as 0.5 + 0.5 * dir.x)
 ///   B = gradient direction Y (encoded as 0.5 + 0.5 * dir.y)
-///   A = raw normalized distance (linear, 0-1 over fade_distance)
+///   A = water membership + raw normalized water-side distance
+///       (land = 0, water = 0.5 + 0.5 * raw_norm)
 ///
 /// Performance: ~40-100x faster than GDScript (Parallel.For on classification
 /// + gradient computation, sequential JFA passes with parallel row processing).
@@ -165,7 +166,9 @@ public partial class NativeShoreMaskBaker : RefCounted
 
             if (!isWater[idx])
             {
-                // Land: R=0, G=0.5 (neutral dir), B=0.5, A=0
+                // Land: R=0, G=0.5 (neutral dir), B=0.5, A=0.
+                // Water starts at A=0.5, so consumers can distinguish land
+                // from a water shoreline pixel whose dampening factor is also 0.
                 output[outIdx] = 0;
                 output[outIdx + 1] = 128;
                 output[outIdx + 2] = 128;
@@ -214,11 +217,14 @@ public partial class NativeShoreMaskBaker : RefCounted
                 }
             }
 
-            // Encode: R=shore_factor, G=grad_x (0.5+0.5*dir), B=grad_y, A=raw_norm
+            float encodedWaterDistance = 0.5f + 0.5f * rawNorm;
+
+            // Encode: R=shore_factor, G=grad_x (0.5+0.5*dir), B=grad_y,
+            // A=water membership + water-side raw_norm.
             output[outIdx] = (byte)(Math.Clamp(shoreFactor, 0.0f, 1.0f) * 255.0f + 0.5f);
             output[outIdx + 1] = (byte)(Math.Clamp(gradX * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
             output[outIdx + 2] = (byte)(Math.Clamp(gradY * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
-            output[outIdx + 3] = (byte)(Math.Clamp(rawNorm, 0.0f, 1.0f) * 255.0f + 0.5f);
+            output[outIdx + 3] = (byte)(Math.Clamp(encodedWaterDistance, 0.0f, 1.0f) * 255.0f + 0.5f);
         }
     }
 

@@ -106,25 +106,33 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 			clouds_res.set("pre_pass_compute_shader", load(shader_dir + "SunshineCloudsPreCompute.glsl"))
 		if ResourceLoader.exists(shader_dir + "SunshineCloudsPostCompute.glsl"):
 			clouds_res.set("post_pass_compute_shader", load(shader_dir + "SunshineCloudsPostCompute.glsl"))
-		# Lower cloud altitude for Morrowind scale (default 1500m is too high)
-		clouds_res.set("cloud_floor", 800.0)
-		clouds_res.set("cloud_ceiling", 12000.0)
-		# Temporal accumulation: 0.55 balances shimmer suppression vs camera lag.
-		# Default 0.7 causes heavy camera lag; 0.4 was too low (shimmer).
-		clouds_res.set("accumulation_decay", 0.55)
-		# Enable environment fog color sampling so clouds match the atmosphere
-		clouds_res.set("use_environment_fog", 0.5)
-		# Set ambient tint to neutral — we drive cloud_ambient_color directly from sky state
-		# Default tint (0.133, 0.2, 0.243) is too dark and multiplies with our computed ambient
-		clouds_res.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
-		# Neutralize AO color — plugin default is RED (1,0,0,1) which tints all clouds
-		# pink/red wherever the ambient occlusion term is non-zero. Alpha=0 disables
-		# AO coloring entirely; white+alpha would darken uniformly without color shift.
-		clouds_res.set("ambient_occlusion_color", Color(1.0, 1.0, 1.0, 0.0))
-		# Moderate post-pass blur to mask dither noise at half-resolution.
-		# Defaults (2.0, 1.0) shimmer too much; (4.0, 2.0) costs too much GPU.
-		# 2.5/1.0 is a balance — slightly smoother than default, minimal GPU cost.
-		clouds_res.set("blur_power", 2.5)
+		# Author-example SunshineClouds2 baseline. Weather presets can still
+		# reshape coverage, density, and sharpness after initialization.
+		clouds_res.set("clouds_coverage", 0.726)
+		clouds_res.set("clouds_density", 1.0)
+		clouds_res.set("clouds_sharpness", 0.5)
+		clouds_res.set("clouds_detail_power", 0.0)
+		clouds_res.set("lighting_density", 0.55)
+		clouds_res.set("lighting_sharpness", 0.34)
+		clouds_res.set("cloud_floor", 1500.0)
+		clouds_res.set("cloud_ceiling", 15000.0)
+		clouds_res.set("accumulation_decay", 0.8)
+		# Atmosphere color is driven directly below; fog sampling washed out the
+		# author tint and made the clouds look flatter.
+		clouds_res.set("use_environment_fog", 0.0)
+		clouds_res.set("cloud_ambient_tint", Color(0.1276, 0.18766, 0.22, 1.0))
+		clouds_res.set("ambient_occlusion_color", Color(0.693375, 0.223129, 0.0, 0.466667))
+		clouds_res.set("extra_large_noise_scale", 298497.0)
+		clouds_res.set("large_noise_scale", 85138.6)
+		clouds_res.set("medium_noise_scale", 20043.3)
+		clouds_res.set("small_noise_scale", 6901.78)
+		clouds_res.set("curl_noise_strength", 6184.1)
+		clouds_res.set("min_step_distance", 100.0)
+		clouds_res.set("max_step_distance", 600.0)
+		clouds_res.set("lighting_travel_distance", 8000.0)
+		clouds_res.set("extra_large_used_as_mask", true)
+		clouds_res.set("mask_width_km", 512.0)
+		clouds_res.set("blur_power", 1.0)
 		clouds_res.set("blur_quality", 1.0)
 		# Add driver to tree FIRST — clouds_res_added() needs is_inside_tree()=true
 		# to register the CompositorEffect on the WorldEnvironment's Compositor
@@ -142,7 +150,7 @@ func setup_sunshine_clouds(parent: Node, light: DirectionalLight3D) -> void:
 		if light:
 			var lights: Array[DirectionalLight3D] = [light]
 			_sunshine_driver.tracked_directional_lights = lights
-			var shadow_steps: Array[int] = [4]
+			var shadow_steps: Array[int] = [32]
 			_sunshine_driver.tracked_directional_light_shadow_steps = shadow_steps
 
 		# Set clouds_resource AFTER add_child — the setter calls clouds_res_added()
@@ -523,8 +531,7 @@ func _sync_cloud_ambient() -> void:
 	var ambient: Color = night_color.lerp(day_color, day_factor)
 	ambient = ambient.lerp(sunset_tint, sunset_factor)
 	res.set("cloud_ambient_color", ambient)
-	# Tint stays neutral — color info goes through cloud_ambient_color only
-	res.set("cloud_ambient_tint", Color(1.0, 1.0, 1.0, 1.0))
+	res.set("cloud_ambient_tint", Color(0.1276, 0.18766, 0.22, 1.0))
 
 	# Atmosphere color: controls distant cloud fog tint
 	var atmo_day := Color(0.9, 0.92, 1.0)

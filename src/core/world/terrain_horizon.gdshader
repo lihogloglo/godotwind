@@ -1,7 +1,7 @@
 // Terrain3D shader override — extracted from Terrain3D v1.0.1 internal C++ shader
 // via RenderingServer.shader_get_code() on 2026-04-13.
 //
-// ONLY ADDITION: wet map block at end of fragment() (~15 lines).
+// ONLY ADDITION: optional tight wet fallback block at end of fragment().
 // Horizon maps are PARKED — all horizon uniforms/code removed.
 // This guarantees baseline parity with the internal shader.
 
@@ -52,21 +52,13 @@ uniform float noise2_scale : hint_range(0.001, 1.) = 0.076;
 
 // === CUSTOM: Wet map (only addition to internal shader) ===
 uniform float sea_level_wet = 0.0;
-uniform float wet_margin : hint_range(0.0, 5.0) = 1.5;
+uniform float wet_margin : hint_range(0.0, 5.0) = 0.3;
 uniform float wet_albedo_darken : hint_range(0.0, 1.0) = 0.6;
 uniform float wet_roughness_target : hint_range(0.0, 0.3) = 0.05;
 uniform bool wet_debug = false;
-uniform bool shore_wave_wetness_enabled = false;
+uniform bool terrain_wet_fallback_enabled = false;
 uniform highp sampler2D shore_mask : filter_linear_mipmap, repeat_disable;
 uniform vec4 shore_mask_bounds = vec4(-8000.0, -8000.0, 16000.0, 16000.0);
-uniform float shore_fade_distance : hint_range(10.0, 200.0) = 50.0;
-uniform float shore_wave_amplitude : hint_range(0.0, 3.0) = 0.0;
-uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
-uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
-uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
-uniform float shore_wet_runup_width : hint_range(0.5, 20.0) = 8.0;
-uniform float ocean_time = 0.0;
-#include "res://src/core/water/shaders/ocean_shore_common.gdshaderinc"
 // === CUSTOM: enable_texturing toggle for test scenes without MW textures ===
 uniform bool enable_texturing = true;
 // === CUSTOM: Morrowind LTEX sidecar texturing ===
@@ -123,23 +115,6 @@ vec2 rotate_vec2(const vec2 v, const vec2 cs) {
 	return vec2(fma(cs.x, v.x, cs.y * v.y), fma(cs.x, v.y, -cs.y * v.x));
 }
 
-float shore_land_distance(vec2 shore_uv, vec2 offshore_dir) {
-	if (length(offshore_dir) <= 0.01) {
-		return 1.0e6;
-	}
-
-	vec2 texel = 1.0 / vec2(textureSize(shore_mask, 0));
-	float texel_world = max(shore_mask_bounds.z, shore_mask_bounds.w) / float(max(textureSize(shore_mask, 0).x, 1));
-	for (int radius = 1; radius <= 8; radius++) {
-		vec2 sample_uv = clamp(shore_uv + offshore_dir * texel * float(radius), vec2(0.0), vec2(1.0));
-		vec4 sample_data = texture(shore_mask, sample_uv);
-		if (sample_data.a > 0.001 || sample_data.r > 0.001) {
-			return float(radius) * texel_world;
-		}
-	}
-	return shore_wet_runup_width + texel_world;
-}
-
 float shore_water_coverage(vec3 world_pos) {
 	vec2 shore_uv = (world_pos.xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
 	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
@@ -148,65 +123,6 @@ float shore_water_coverage(vec3 world_pos) {
 	}
 	vec4 shore_data = texture(shore_mask, shore_uv);
 	return smoothstep(0.001, 0.05, max(shore_data.r, shore_data.a));
-}
-
-float shore_wave_wetness(vec3 world_pos) {
-	if (!shore_wave_wetness_enabled || shore_wave_amplitude <= 0.0) {
-		return 0.0;
-	}
-
-	vec2 shore_uv = (world_pos.xz - shore_mask_bounds.xy) / shore_mask_bounds.zw;
-	bool in_mask = shore_uv.x >= 0.0 && shore_uv.x <= 1.0 && shore_uv.y >= 0.0 && shore_uv.y <= 1.0;
-	if (!in_mask) {
-		return 0.0;
-	}
-
-	vec4 shore_data = texture(shore_mask, shore_uv);
-	float raw_dist = shore_data.a * shore_fade_distance;
-	vec2 shore_dir = shore_direction_from_mask(shore_uv, shore_data.gb);
-	bool shore_eligible = max(shore_data.r, shore_data.a) > 0.001 || length(shore_dir) > 0.01;
-	if (!shore_eligible) {
-		return 0.0;
-	}
-	shore_dir = normalize(shore_dir);
-	float phase = raw_dist * shore_wave_frequency * SHORE_TAU + ocean_time * shore_wave_speed * SHORE_TAU;
-	float modulation = shore_along_modulation(world_pos.xz, shore_dir);
-	float breaker_env = shore_breaker_envelope(raw_dist);
-	float runup_env = shore_runup_envelope(raw_dist);
-	float swash = shore_swash_curve(phase);
-	float mod_runup = runup_env * swash * mix(0.65, 1.0, modulation);
-	float cycle = fract(phase / SHORE_TAU);
-	float recede_gate = smoothstep(0.30, 0.42, cycle);
-	float dry_tail = (1.0 - smoothstep(0.35, 1.00, cycle)) * recede_gate;
-	float crest_phase = shore_crest_shape(phase, shore_wave_steepness);
-	float dynamic_water_y = sea_level_wet + shore_wave_amplitude * (
-		breaker_env * modulation * crest_phase
-		+ mod_runup * 0.32
-	);
-
-	float wet_margin_safe = max(wet_margin, 0.001);
-	float land_dist = shore_land_distance(shore_uv, shore_dir);
-	float current_runup_width = wet_margin_safe + shore_wet_runup_width * max(swash, max(0.0, shore_skewed_sine(phase, shore_wave_steepness)) * breaker_env * modulation);
-	float high_runup_width = wet_margin_safe + shore_wet_runup_width;
-	float waterline_contact = 1.0 - smoothstep(
-		dynamic_water_y - wet_margin_safe * 0.25,
-		dynamic_water_y + wet_margin_safe * 1.50,
-		world_pos.y
-	);
-	float footprint_wet = (1.0 - smoothstep(current_runup_width, current_runup_width + wet_margin_safe * 1.5, land_dist))
-		* waterline_contact
-		* max(runup_env, breaker_env)
-		* recede_gate;
-	float footprint_tail = (1.0 - smoothstep(high_runup_width, high_runup_width + wet_margin_safe, land_dist))
-		* dry_tail
-		* waterline_contact
-		* runup_env * 0.75;
-
-	float high_water_y = sea_level_wet + shore_wave_amplitude * runup_env * 0.32;
-	float trailing_wet = (1.0 - smoothstep(high_water_y, high_water_y + wet_margin_safe * 2.0, world_pos.y))
-		* dry_tail * runup_env * 0.75;
-
-	return max(trailing_wet, max(footprint_wet, footprint_tail) * runup_env);
 }
 
 void accumulate_material(const vec3 base_ddx, const vec3 base_ddy, const float weight, const ivec3 index,
@@ -605,15 +521,13 @@ void fragment() {
 	AO_LIGHT_AFFECT = (1.0 - mat.albedo_height.a) * clamp(mat.normal_rough.y, 0., 1.);
 
 	// === CUSTOM: Wet map — Lagarde PBR wet surfaces ===
-	// Terrain below sea_level + wet_margin darkens and gets glossy.
+	// The shared screen-space compositor owns production water-contact wetness.
+	// This shader path is only a tight fallback when explicitly enabled.
 	{
 		float wet_margin_safe = max(wet_margin, 0.001);
 		float static_wetness = (1.0 - smoothstep(sea_level_wet, sea_level_wet + wet_margin_safe, v_vertex.y))
 			* shore_water_coverage(v_vertex);
-		if (shore_wave_wetness_enabled) {
-			static_wetness = 0.0;
-		}
-		float wetness = max(static_wetness, shore_wave_wetness(v_vertex));
+		float wetness = terrain_wet_fallback_enabled ? static_wetness : 0.0;
 		if (wet_debug) {
 			ALBEDO = mix(ALBEDO, vec3(0.0, 0.2, 0.8), wetness * 0.8);
 		} else {

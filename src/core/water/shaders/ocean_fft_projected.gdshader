@@ -24,7 +24,7 @@ render_mode cull_disabled, shadows_disabled, depth_draw_always;
  *
  * Entry point for the flat N×N grid mesh built by
  * `ocean_mesh.gd::_create_projected_mesh`. All shared state (uniforms,
- * varyings, SSR + refraction + SSS fragment, custom light()) lives in
+ * varyings, SSR + opaque optics + SSS fragment, custom light()) lives in
  * `ocean_fft_common.gdshaderinc`. This file only owns the screen-space
  * unproject + ray-plane intersect vertex path.
  *

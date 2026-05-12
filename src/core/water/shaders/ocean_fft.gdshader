@@ -12,7 +12,7 @@ render_mode world_vertex_coords, cull_disabled, shadows_disabled, depth_draw_alw
  * Ocean FFT Shader — Godotwind (clipmap path)
  *
  * Entry point for the clipmap mesh built by `ocean_mesh.gd`. All
- * shared state (uniforms, varyings, SSR + refraction + SSS fragment, custom
+ * shared state (uniforms, varyings, SSR + opaque optics + SSS fragment, custom
  * light()) lives in `ocean_fft_common.gdshaderinc`. This file is only
  * responsible for the per-vertex path from the clipmap mesh to the displaced
  * world position.
