@@ -323,7 +323,7 @@ func _process(delta: float) -> void:
 		_ocean_spray.set_wave_scale(wave_scale)
 		_ocean_spray.set_ocean_time(_time)
 	if _underwater_particulates:
-		_underwater_particulates.set_sea_level(sea_level)
+		_underwater_particulates.sync_from_water_state(get_water_surface_state())
 
 	# Push sun direction to the ocean surface shader for SSS backlight.
 	# Scan the scene tree at most once every 60 frames so we notice late-spawned
@@ -494,16 +494,28 @@ func _update_cascade_scales() -> void:
 ##   3 = Water thickness (blue thin → red thick, magenta = sky-or-far)
 ##   4 = Transmittance (gray; bright = light passes through unfiltered)
 ##   5 = Fresnel (gray)
-##   6 = Foam factor
-##   7 = World normal.y (white = flat, dark = steep slope)
-##   8 = SSS scatter factor (peak_mask × side_mask × sun_back, sub-surface tint)
+##   6 = Refraction validity and UV offset
+##   7 = Refraction depth/guard rejection
+##   8 = SSR hit mask and sampled reflection color
+##   9 = Foam factor
+##   10 = World normal.y (white = flat, dark = steep slope)
+##   11 = SSS scatter factor (peak_mask × side_mask × sun_back, sub-surface tint)
+##   12 = Refraction color delta / edge guard
+##   13 = Straight source color
+##   14 = Refracted candidate source color
+##   15 = Refraction classifier / mask
+##   16 = Godot PR #93449 depth weight
+##   17 = Depth edge/disocclusion strength
+##   18 = Godot PR #93449 source preview
+##   19 = Final refraction sample weight
+##   20 = Source Blend before absorption/Fresnel/SSR
 func set_debug_mode(mode: int) -> void:
 	if not _ocean_mesh:
 		return
 	var mat: ShaderMaterial = _ocean_mesh.get_material()
 	if not mat:
 		return
-	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 8))
+	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 20))
 
 
 ## Push the directional light's world-space forward direction to the ocean
@@ -1024,6 +1036,41 @@ func get_absorption_sigma() -> Vector3:
 	return _current_absorption_sigma
 
 
+func get_absorption_density() -> float:
+	return _surface_absorption_density
+
+
+func is_surface_ssr_enabled() -> bool:
+	return _surface_ssr_enabled
+
+
+func set_surface_ssr_enabled(enabled: bool) -> void:
+	_surface_ssr_enabled = enabled
+	_push_surface_ssr_to_material()
+
+
+func set_absorption_density(value: float) -> void:
+	_surface_absorption_density = clampf(value, 0.01, 2.0)
+	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _surface_absorption_density
+	_push_current_absorption_to_material()
+
+
+func get_absorption_tint_color() -> Color:
+	return Color(_current_absorption_tint.x, _current_absorption_tint.y, _current_absorption_tint.z, 1.0)
+
+
+func set_absorption_tint_color(value: Color) -> void:
+	_absorption_tint_override_enabled = true
+	_absorption_tint_override = value
+	_current_absorption_tint = Vector3(value.r, value.g, value.b)
+	_push_current_absorption_to_material()
+
+
+func clear_absorption_tint_override() -> void:
+	_absorption_tint_override_enabled = false
+	reset_weather()
+
+
 func get_absorption_depth_falloff() -> float:
 	if _ocean_mesh == null:
 		return 20.0
@@ -1136,6 +1183,14 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.cpu_query_source = get_water_query_source()
 	state.cpu_readback_bytes_per_frame = get_water_query_readback_bytes_per_frame()
 	state.displacement_texture_size = _displacement_size
+	if _ocean_mesh != null:
+		state.render_mesh_mode = int(_ocean_mesh.get_mesh_mode())
+		state.render_mesh_origin = _ocean_mesh.get_clipmap_origin()
+		state.render_clipmap_base_quad_size = _ocean_mesh.get_clipmap_base_quad_size()
+		state.render_clipmap_ring_vertex_count = _ocean_mesh.get_clipmap_ring_vertex_count()
+		state.render_clipmap_ring_count = _ocean_mesh.get_clipmap_ring_count()
+		state.render_projected_grid_dim = _ocean_mesh.get_projected_grid_dim()
+		state.render_projected_grid_overscan = _ocean_mesh.get_projected_grid_overscan()
 	state.height_query = Callable(self, "get_wave_height")
 	state.displacement_query = Callable(self, "get_wave_displacement")
 	state.normal_query = Callable(self, "get_wave_normal")
@@ -1660,11 +1715,15 @@ const _SHALLOW_STORM := Color(0.06, 0.08, 0.09)
 const _DEEP_CALM := Color(0.02, 0.04, 0.06)
 const _DEEP_STORM := Color(0.01, 0.02, 0.03)
 const _SURFACE_ABSORPTION_RATE := Vector3(0.4, 0.1, 0.06)
-const _SURFACE_ABSORPTION_DENSITY := 0.2
+const _SURFACE_ABSORPTION_DENSITY_DEFAULT := 0.2
 
 var _current_absorption_tint := Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b)
-var _current_absorption_sigma := _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
+var _current_absorption_sigma := _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY_DEFAULT
 var _current_underwater_caustics_strength: float = 1.0
+var _surface_ssr_enabled: bool = true
+var _surface_absorption_density: float = _SURFACE_ABSORPTION_DENSITY_DEFAULT
+var _absorption_tint_override_enabled: bool = false
+var _absorption_tint_override: Color = _DEEP_CALM
 
 func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
 	if not _ocean_mesh:
@@ -1676,9 +1735,9 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	# Water color darkens and desaturates in storms (driven by cloud coverage)
 	var storm_t: float = clampf(result.cloud_coverage, 0.0, 1.0)
 	var shallow_col: Color = _SHALLOW_CALM.lerp(_SHALLOW_STORM, storm_t)
-	var deep_col: Color = _DEEP_CALM.lerp(_DEEP_STORM, storm_t)
+	var deep_col: Color = _resolve_absorption_tint(_DEEP_CALM.lerp(_DEEP_STORM, storm_t))
 	_current_absorption_tint = Vector3(deep_col.r, deep_col.g, deep_col.b)
-	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
+	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _surface_absorption_density
 	_current_underwater_caustics_strength = lerpf(1.0, 0.35, storm_t)
 	mat.set_shader_parameter("color_shallow", Vector3(shallow_col.r, shallow_col.g, shallow_col.b))
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)
@@ -1720,7 +1779,31 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 
 func _push_surface_optical_uniforms(mat: ShaderMaterial) -> void:
 	mat.set_shader_parameter("absorption_rate", _SURFACE_ABSORPTION_RATE)
-	mat.set_shader_parameter("absorption_density", _SURFACE_ABSORPTION_DENSITY)
+	mat.set_shader_parameter("absorption_density", _surface_absorption_density)
+	mat.set_shader_parameter("ssr_enabled", _surface_ssr_enabled)
+
+
+func _push_current_absorption_to_material() -> void:
+	if _ocean_mesh == null:
+		return
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if mat == null:
+		return
+	mat.set_shader_parameter("color_deep", _current_absorption_tint)
+	_push_surface_optical_uniforms(mat)
+
+
+func _push_surface_ssr_to_material() -> void:
+	if _ocean_mesh == null:
+		return
+	var mat: ShaderMaterial = _ocean_mesh.get_material()
+	if mat == null:
+		return
+	mat.set_shader_parameter("ssr_enabled", _surface_ssr_enabled)
+
+
+func _resolve_absorption_tint(weather_deep: Color) -> Color:
+	return _absorption_tint_override if _absorption_tint_override_enabled else weather_deep
 
 
 func _push_shore_wave_timing_uniforms(mat: ShaderMaterial) -> void:
@@ -1747,8 +1830,9 @@ func reset_weather() -> void:
 	if not mat:
 		return
 
-	_current_absorption_tint = Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b)
-	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY
+	var deep_col := _resolve_absorption_tint(_DEEP_CALM)
+	_current_absorption_tint = Vector3(deep_col.r, deep_col.g, deep_col.b)
+	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _surface_absorption_density
 	_current_underwater_caustics_strength = 1.0
 	mat.set_shader_parameter("color_shallow", Vector3(_SHALLOW_CALM.r, _SHALLOW_CALM.g, _SHALLOW_CALM.b))
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)

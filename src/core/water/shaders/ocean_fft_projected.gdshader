@@ -15,8 +15,9 @@ shader_type spatial;
 // winding is consistent), but fragments straddling the horizon can get weird
 // facing directions under extreme camera pitch, and the cost of disabling
 // culling on a 192² grid is negligible.
-// `depth_draw_always` — same rationale as the clipmap path: authoritative
-// depth from the main pass, no prepass ambiguity.
+// Screen-reading water runs in Godot's transparent family, but the ocean is one
+// continuous surface: writing depth from the main pass prevents far projected
+// triangles from drawing over nearer displaced waves.
 render_mode cull_disabled, shadows_disabled, depth_draw_always;
 
 /**

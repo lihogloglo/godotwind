@@ -1,7 +1,7 @@
 extends Node3D
 
 ## Ocean lab: combined interactive testbed for FFT ocean visuals, shore behavior,
-## wetness, waterline/reflection canaries, and buoyancy CPU-vs-GPU sync.
+## wetness, screen-space ocean optics canaries, and buoyancy CPU-vs-GPU sync.
 ##
 ## Run:
 ##   Godot_v4.6-stable_mono_win64.exe --path ... res://tests/visual/test_ocean_lab.tscn
@@ -12,16 +12,14 @@ const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const BuoyancyBodyScript := preload("res://src/core/water/buoyancy_body.gd")
 const BuoyancyProbeScript := preload("res://src/core/water/buoyancy_probe.gd")
-const PrewaterCaptureRendererScript := preload("res://src/core/water/prewater_capture_renderer.gd")
 const WetCompositorScript := preload("res://src/core/shaders/effects/wet_compositor_effect.gd")
-const WaterlineCompositorScript := preload("res://src/core/shaders/effects/waterline_compositor_effect.gd")
+const UnderwaterCompositorScript := preload("res://src/core/shaders/effects/underwater_compositor_effect.gd")
 const WeatherTypesScript := preload("res://src/core/weather/weather_types.gd")
 const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manager.gd")
 const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 const SEA_LEVEL_DEFAULT: float = 0.0
-const WATER_REFRACTION_RECEIVER_LAYER_MASK: int = 1 << 18
 const WATER_RENDER_LAYER_MASK: int = 1 << 19
 const BUOY_DEBUG_GRID: int = 40
 const BUOY_DEBUG_SPACING: float = 1.0
@@ -34,29 +32,31 @@ const DEBUG_MODE_NAMES: Array[String] = [
 	"Water thickness",
 	"Transmittance",
 	"Fresnel",
+	"Refraction",
+	"Refract depth",
+	"SSR hit",
 	"Foam",
 	"Normal.y",
 	"SSS scatter",
+	"Refract delta",
+	"Source straight",
+	"Source refracted",
+	"Refract mask",
+	"Godot depth weight",
+	"Depth edge fade",
+	"Godot source preview",
+	"Refract weight",
+	"Source Blend",
 ]
-const WL_DEBUG_MODE_NAMES: Array[String] = [
+const UW_DEBUG_MODE_NAMES: Array[String] = [
 	"Final",
-	"Flat",
-	"FFT",
-	"FFT+Shore",
-	"Receiver Mask",
-	"Refract",
-	"Refract Offset",
-	"Source",
-	"Camera Split",
-	"Pipeline",
-	"Camera Depth",
-	"Receiver Depth",
-	"Ray Entry/Exit",
-	"Body Coverage",
-	"Final Mask",
+	"Path Length",
+	"Transmittance",
+	"Underwater Mask",
+	"Wobble Delta",
 	"Wobble Guard",
 ]
-const WL_QUALITY_NAMES: Array[String] = [
+const UW_QUALITY_NAMES: Array[String] = [
 	"Low",
 	"Medium",
 	"High",
@@ -70,6 +70,7 @@ const WET_DEBUG_MODE_NAMES: Array[String] = [
 	"World",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
+	{"name": "Flat", "wind": 0.0, "cloud": 0.05, "flat_water": true},
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
 	{"name": "Breeze", "wind": 0.3, "cloud": 0.25},
 	{"name": "Moderate", "wind": 0.5, "cloud": 0.45},
@@ -83,10 +84,9 @@ var _terrain: Terrain3D = null
 var _horizon_mgr: HorizonMapManager = null
 var _sun: DirectionalLight3D = null
 var _ocean: OceanMesh = null
-var _prewater_capture: PrewaterCaptureRenderer = null
-var _waterline_compositor: Compositor = null
+var _water_compositor: Compositor = null
 var _wet_effect: PostProcessEffect = null
-var _waterline_effect: PostProcessEffect = null
+var _underwater_effect: PostProcessEffect = null
 var _debug_mmi: MultiMeshInstance3D = null
 var _hud_label: RichTextLabel = null
 var _button_grid: GridContainer = null
@@ -100,18 +100,20 @@ var _quality_button: Button = null
 var _spray_button: Button = null
 var _spray_quality_button: Button = null
 var _ocean_surface_button: Button = null
-var _waterline_button: Button = null
-var _waterline_debug_button: Button = null
-var _waterline_res_button: Button = null
-var _waterline_quality_button: Button = null
+var _surface_ssr_button: Button = null
+var _surface_refraction_button: Button = null
+var _surface_edge_guard_button: Button = null
+var _environment_ssr_button: Button = null
+var _underwater_button: Button = null
+var _underwater_debug_button: Button = null
+var _underwater_quality_button: Button = null
 var _wireframe_button: Button = null
 var _uw_absorption_check: CheckBox = null
 var _uw_snell_check: CheckBox = null
 var _uw_wobble_check: CheckBox = null
 var _uw_particles_check: CheckBox = null
-var _uw_meniscus_check: CheckBox = null
 var _uw_caustics_check: CheckBox = null
-var _uw_waterline_check: CheckBox = null
+var _uw_effect_check: CheckBox = null
 var _uw_perf_label: RichTextLabel = null
 var _uw_profile_button: Button = null
 
@@ -125,6 +127,10 @@ var _retained_wetness_strength: float = 0.35
 var _wet_compositor_enabled: bool = false
 var _wet_debug_mode: int = 0
 var _wet_dry_rate: float = 0.1
+var _absorption_density: float = 0.2
+var _absorption_tint: Color = Color(0.02, 0.04, 0.06)
+var _absorption_tint_picker: ColorPickerButton = null
+var _syncing_ocean_optics_ui: bool = false
 
 var _test_objects: Array[Dictionary] = []
 var _held_object: Dictionary = {}
@@ -136,16 +142,17 @@ var _debug_mode: int = 0
 var _spray_enabled: bool = true
 var _spray_quality: int = 2
 var _ocean_surface_visible: bool = true
-var _waterline_compositor_enabled: bool = true
-var _waterline_debug_mode: int = 0
-var _waterline_resolution_scales: Array[float] = [1.0, 0.75, 0.5, 0.25]
-var _waterline_resolution_index: int = 2
-var _waterline_quality_tier: int = 1
+var _surface_ssr_enabled: bool = true
+var _surface_refraction_enabled: bool = true
+var _surface_edge_guard_enabled: bool = false
+var _environment_ssr_enabled: bool = true
+var _underwater_effect_enabled: bool = true
+var _underwater_debug_mode: int = 0
+var _underwater_quality_tier: int = 1
 var _uw_absorption_enabled: bool = true
-var _uw_snell_enabled: bool = true
+var _uw_snell_enabled: bool = false
 var _uw_wobble_effect_enabled: bool = true
 var _uw_particles_enabled: bool = false
-var _uw_meniscus_enabled: bool = true
 var _uw_caustics_enabled: bool = false
 var _uw_particle_noise_scale: float = 0.70
 var _uw_particle_density: float = 1.0
@@ -162,6 +169,7 @@ var _uw_profile_accum_ms: float = 0.0
 var _uw_profile_results: Array[String] = []
 var _wireframe_enabled: bool = false
 var _current_weather: int = 0
+var _default_wave_scale: float = 1.0
 var _sun_low: bool = false
 var _help_visible: bool = true
 var _frame_time_accum: float = 0.0
@@ -179,8 +187,8 @@ func _ready() -> void:
 	_playground_origin = _find_shore_playground_center()
 	_place_camera_at_playground()
 	_setup_ocean()
-	_setup_prewater_capture()
-	_setup_waterline_compositor()
+	_default_wave_scale = OceanManager.wave_scale if OceanManager else 1.0
+	_setup_water_compositor()
 	_setup_reflection_canaries()
 	_setup_wetness()
 	_spawn_wet_test_objects()
@@ -194,19 +202,19 @@ func _ready() -> void:
 		_textures_loaded,
 		OceanManager.get_water_quality_name() if OceanManager else "none",
 	])
+	_log_refraction_baseline_state("ready")
 
 
 func _exit_tree() -> void:
-	_prewater_capture = null
 	if _wet_effect != null:
 		_wet_effect.on_effect_removed()
 	_wet_effect = null
-	if _waterline_effect != null:
-		_waterline_effect.on_effect_removed()
-	_waterline_effect = null
+	if _underwater_effect != null:
+		_underwater_effect.on_effect_removed()
+	_underwater_effect = null
 	if _world_env != null:
 		_world_env.compositor = null
-	_waterline_compositor = null
+	_water_compositor = null
 
 
 func _build_environment() -> void:
@@ -225,7 +233,7 @@ func _build_environment() -> void:
 	env.ambient_light_sky_contribution = 0.65
 	env.ambient_light_energy = 1.0
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
-	env.ssr_enabled = true
+	env.ssr_enabled = _environment_ssr_enabled
 	env.ssr_max_steps = 96
 	env.ssr_fade_in = 0.15
 	env.ssr_fade_out = 2.0
@@ -259,7 +267,7 @@ func _build_camera() -> void:
 	_camera.set_script(FlyCameraScript)
 	_camera.far = 20000.0
 	_camera.current = true
-	_apply_receiver_layer_contract()
+	_camera.cull_mask = _camera.cull_mask | WATER_RENDER_LAYER_MASK
 	add_child(_camera)
 	_camera.global_position = Vector3(0.0, 35.0, 80.0)
 	_camera.look_at(Vector3(0.0, 0.0, 0.0), Vector3.UP)
@@ -396,23 +404,69 @@ func _setup_ocean() -> void:
 		_spray_quality = OceanManager.get_sea_spray_quality()
 	if OceanManager.has_method("get_underwater_particles_quality"):
 		_uw_particles_quality = OceanManager.get_underwater_particles_quality()
+	_sync_ocean_optics_from_manager()
+	_push_surface_refraction_control()
 
 
-func _setup_prewater_capture() -> void:
-	_prewater_capture = PrewaterCaptureRendererScript.new()
-	_prewater_capture.name = "OceanLabPrewaterCapture"
-	_prewater_capture.near_water_capture_fade_start_m = 80.0
-	_prewater_capture.near_water_capture_distance_m = 140.0
-	_prewater_capture.configure(_camera, _world_env.environment, WATER_REFRACTION_RECEIVER_LAYER_MASK)
-	_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
-	_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
-	_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
-	_prewater_capture.set_activation_water_level(_get_waterline_activation_level())
-	add_child(_prewater_capture)
-	_prewater_capture.update_capture(_get_main_viewport_size())
+func _sync_ocean_optics_from_manager() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("get_absorption_density"):
+		_absorption_density = float(OceanManager.get_absorption_density())
+	if OceanManager.has_method("get_absorption_tint_color"):
+		_absorption_tint = OceanManager.get_absorption_tint_color()
+	elif OceanManager.has_method("get_absorption_tint"):
+		var tint: Vector3 = OceanManager.get_absorption_tint()
+		_absorption_tint = Color(tint.x, tint.y, tint.z, 1.0)
+	if OceanManager.has_method("is_surface_ssr_enabled"):
+		_surface_ssr_enabled = OceanManager.is_surface_ssr_enabled()
+	if _absorption_tint_picker != null:
+		_syncing_ocean_optics_ui = true
+		_absorption_tint_picker.color = _absorption_tint
+		_syncing_ocean_optics_ui = false
 
 
-func _setup_waterline_compositor() -> void:
+func _push_absorption_density_control() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("set_absorption_density"):
+		OceanManager.set_absorption_density(_absorption_density)
+	_refresh_control_labels()
+
+
+func _push_absorption_tint_control() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("set_absorption_tint_color"):
+		OceanManager.set_absorption_tint_color(_absorption_tint)
+	_refresh_control_labels()
+
+
+func _push_surface_ssr_control() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("set_surface_ssr_enabled"):
+		OceanManager.set_surface_ssr_enabled(_surface_ssr_enabled)
+	_refresh_control_labels()
+
+
+func _push_surface_refraction_control() -> void:
+	var mat := _get_ocean_material()
+	if mat != null:
+		mat.set_shader_parameter("refraction_strength", 0.45 if _surface_refraction_enabled else 0.0)
+		mat.set_shader_parameter("refraction_edge_guard_strength", 1.0 if _surface_edge_guard_enabled else 0.0)
+	_refresh_control_labels()
+
+
+func _reset_absorption_tint_control() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("clear_absorption_tint_override"):
+		OceanManager.clear_absorption_tint_override()
+	_apply_weather_preset(_current_weather)
+
+
+func _setup_water_compositor() -> void:
 	if _world_env == null:
 		return
 	_wet_effect = WetCompositorScript.new()
@@ -432,27 +486,19 @@ func _setup_waterline_compositor() -> void:
 	if _wet_effect.has_method("sync_from_water_state"):
 		_wet_effect.call("sync_from_water_state", _get_water_state())
 
-	_waterline_effect = WaterlineCompositorScript.new()
-	_waterline_effect.effect_enabled = false
-	_waterline_effect.blend_factor = 0.0
-	if _waterline_effect.has_method("set_debug_mode"):
-		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
-	if _waterline_effect.has_method("set_activation_water_level"):
-		_waterline_effect.call("set_activation_water_level", _get_waterline_activation_level())
-	if _waterline_effect.has_method("set_near_water_fade_start_distance"):
-		_waterline_effect.call("set_near_water_fade_start_distance", 80.0)
-	if _waterline_effect.has_method("set_near_water_activation_distance"):
-		_waterline_effect.call("set_near_water_activation_distance", 140.0)
+	_underwater_effect = UnderwaterCompositorScript.new()
+	_underwater_effect.effect_enabled = false
+	_underwater_effect.blend_factor = 0.0
+	if _underwater_effect.has_method("set_debug_mode"):
+		_underwater_effect.call("set_debug_mode", _underwater_debug_mode)
 	_push_underwater_effect_controls()
-	_sync_waterline_sun()
-	_push_prewater_capture_to_waterline()
-	_waterline_effect.on_effect_added()
-	if _waterline_effect.has_method("sync_from_water_state"):
-		_waterline_effect.call("sync_from_water_state", _get_water_state())
+	_underwater_effect.on_effect_added()
+	if _underwater_effect.has_method("sync_from_water_state"):
+		_underwater_effect.call("sync_from_water_state", _get_water_state())
 
-	_waterline_compositor = Compositor.new()
-	_waterline_compositor.compositor_effects = [_wet_effect, _waterline_effect]
-	_world_env.compositor = _waterline_compositor
+	_water_compositor = Compositor.new()
+	_water_compositor.compositor_effects = [_wet_effect, _underwater_effect]
+	_world_env.compositor = _water_compositor
 
 
 func _setup_reflection_canaries() -> void:
@@ -464,9 +510,12 @@ func _setup_reflection_canaries() -> void:
 
 	_add_box("DeepSeabed", Vector3(160.0, 2.0, 160.0), _lab_pos(Vector3(0.0, -16.0, 0.0)), seabed_mat)
 	_add_box("ShallowShelf", Vector3(35.0, 6.0, 35.0), _lab_pos(Vector3(22.0, -4.0, 18.0)), seabed_mat)
-	_add_box("SubmergedRock", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-8.0, -3.0, 8.0)), _standard_mat(Color(0.50, 0.45, 0.35), 0.65), true)
-	_add_box("HalfSubmergedMonolith", Vector3(3.0, 10.0, 3.0), _lab_pos(Vector3(8.0, 0.0, 9.0)), _standard_mat(Color(0.85, 0.85, 0.90), 0.7), true)
-	_add_box("MetalReflectionTarget", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-14.0, 5.0, -12.0)), _metal_mat(), true)
+	_add_box("SubmergedRock", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-8.0, -3.0, 8.0)), _standard_mat(Color(0.50, 0.45, 0.35), 0.65))
+	_add_box("HalfSubmergedMonolith", Vector3(3.0, 10.0, 3.0), _lab_pos(Vector3(8.0, 0.0, 9.0)), _standard_mat(Color(0.85, 0.85, 0.90), 0.7))
+	_add_box("MetalReflectionTarget", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-14.0, 5.0, -12.0)), _metal_mat())
+	_add_box("OpticsDepth1m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(-6.0, -1.5, -10.0)), _standard_mat(Color(1.0, 0.82, 0.18), 0.45))
+	_add_box("OpticsDepth10m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(0.0, -10.5, -10.0)), _standard_mat(Color(1.0, 0.22, 0.18), 0.45))
+	_add_box("OpticsDepth50m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(6.0, -50.5, -10.0)), _standard_mat(Color(0.20, 0.55, 1.0), 0.45))
 	_add_emissive_marker(_lab_pos(Vector3(12.0, 4.0, -12.0)), Color(1.0, 0.45, 0.12))
 	_add_emissive_marker(_lab_pos(Vector3(0.0, 2.5, -20.0)), Color(0.15, 0.65, 1.0))
 
@@ -513,7 +562,6 @@ func _spawn_wet_test_objects() -> void:
 		mat.set_shader_parameter("retained_wetness_strength", _retained_wetness_strength)
 		mat.set_shader_parameter("live_contact_from_compositor", true)
 		mi.material_override = mat
-		_mark_refraction_receiver(mi)
 		add_child(mi)
 		mi.global_position = _lab_pos(spec["offset"])
 		_test_objects.append({
@@ -574,10 +622,25 @@ func _build_ui() -> void:
 	_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_quality"))
 	_mesh_button = _add_button(_button_grid, "", Callable(self, "_toggle_mesh_mode"))
 	_ocean_surface_button = _add_button(_button_grid, "", Callable(self, "_toggle_ocean_surface_visible"))
+	_surface_ssr_button = _add_button(_button_grid, "", Callable(self, "_toggle_surface_ssr"))
+	_surface_refraction_button = _add_button(_button_grid, "", Callable(self, "_toggle_surface_refraction"))
+	_surface_edge_guard_button = _add_button(_button_grid, "", Callable(self, "_toggle_surface_edge_guard"))
+	_environment_ssr_button = _add_button(_button_grid, "", Callable(self, "_toggle_environment_ssr"))
 	_spray_button = _add_button(_button_grid, "", Callable(self, "_toggle_spray"))
 	_spray_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_spray_quality"))
 	_sun_button = _add_button(_button_grid, "", Callable(self, "_toggle_sun_angle"))
 	_add_button(_button_grid, "Center Shore", Callable(self, "_teleport_to_shore_probe"))
+	_add_button(_button_grid, "Reset Tint", Callable(self, "_reset_absorption_tint_control"))
+	var absorption_density_changed := func(val: float) -> void:
+		_absorption_density = val
+		_push_absorption_density_control()
+	_add_slider(ocean_tab, "muddiness", 0.01, 2.0, _absorption_density, absorption_density_changed, 0.01)
+	var absorption_tint_changed := func(color: Color) -> void:
+		if _syncing_ocean_optics_ui:
+			return
+		_absorption_tint = color
+		_push_absorption_tint_control()
+	_absorption_tint_picker = _add_color_picker(ocean_tab, "water tint", _absorption_tint, absorption_tint_changed)
 
 	var buoyancy_tab := VBoxContainer.new()
 	buoyancy_tab.name = "Buoy"
@@ -645,44 +708,37 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 		_push_underwater_effect_controls()
 	)
 	_uw_snell_check = _add_check(toggles, "Snell window", _uw_snell_enabled, func(value: bool) -> void:
-		_uw_snell_enabled = value
+		_uw_snell_enabled = false
 		_push_underwater_effect_controls()
 	)
+	_uw_snell_check.disabled = true
 	_uw_wobble_check = _add_check(toggles, "Wobble", _uw_wobble_effect_enabled, func(value: bool) -> void:
 		_uw_wobble_effect_enabled = value
 		_push_underwater_effect_controls()
 	)
 	_uw_particles_check = _add_check(toggles, "Particles", _uw_particles_enabled, func(value: bool) -> void:
-		_uw_particles_enabled = value
+		_uw_particles_enabled = false
 		_push_underwater_effect_controls()
 		_refresh_control_labels()
 	)
+	_uw_particles_check.disabled = true
 	_uw_caustics_check = _add_check(toggles, "Caustics", _uw_caustics_enabled, func(value: bool) -> void:
-		_uw_caustics_enabled = value
-		_promote_waterline_quality_for_high_effect(value)
+		_uw_caustics_enabled = false
 		_push_underwater_effect_controls()
 		_refresh_control_labels()
 	)
-	_uw_meniscus_check = _add_check(toggles, "Meniscus / refraction", _uw_meniscus_enabled, func(value: bool) -> void:
-		_uw_meniscus_enabled = value
-		_push_underwater_effect_controls()
-	)
-	_uw_waterline_check = _add_check(toggles, "Compositor", _waterline_compositor_enabled, func(value: bool) -> void:
-		_waterline_compositor_enabled = value
-		if _prewater_capture:
-			_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
-			_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
+	_uw_caustics_check.disabled = true
+	_uw_effect_check = _add_check(toggles, "Underwater medium", _underwater_effect_enabled, func(value: bool) -> void:
+		_underwater_effect_enabled = value
 		_refresh_control_labels()
 	)
 
 	var wl_row := HBoxContainer.new()
 	effects_tab.add_child(wl_row)
-	_waterline_debug_button = _add_button(wl_row, "", Callable(self, "_cycle_waterline_debug_mode"))
-	_waterline_res_button = _add_button(wl_row, "", Callable(self, "_cycle_waterline_resolution"))
-	_waterline_quality_button = _add_button(wl_row, "", Callable(self, "_cycle_waterline_quality"))
-	_waterline_debug_button.custom_minimum_size.x = 150.0
-	_waterline_res_button.custom_minimum_size.x = 150.0
-	_waterline_quality_button.custom_minimum_size.x = 150.0
+	_underwater_debug_button = _add_button(wl_row, "", Callable(self, "_cycle_underwater_debug_mode"))
+	_underwater_quality_button = _add_button(wl_row, "", Callable(self, "_cycle_underwater_quality"))
+	_underwater_debug_button.custom_minimum_size.x = 180.0
+	_underwater_quality_button.custom_minimum_size.x = 150.0
 
 	_add_slider(effects_tab, "particle count", 0.0, 4096.0, float(_uw_particle_count), func(val: float) -> void:
 		_uw_particle_count = int(roundf(val / 128.0)) * 128
@@ -733,12 +789,15 @@ func _add_check(parent: Control, label_text: String, initial: bool, callback: Ca
 	return check
 
 
-func _promote_waterline_quality_for_high_effect(enabled: bool) -> void:
-	if enabled and _waterline_quality_tier < 2:
-		_waterline_quality_tier = 2
-
-
-func _add_slider(parent: Control, label_text: String, min_val: float, max_val: float, initial: float, callback: Callable) -> void:
+func _add_slider(
+	parent: Control,
+	label_text: String,
+	min_val: float,
+	max_val: float,
+	initial: float,
+	callback: Callable,
+	step: float = 0.05
+) -> void:
 	var hbox := HBoxContainer.new()
 	parent.add_child(hbox)
 	var label := Label.new()
@@ -749,7 +808,7 @@ func _add_slider(parent: Control, label_text: String, min_val: float, max_val: f
 	slider.focus_mode = Control.FOCUS_NONE
 	slider.min_value = min_val
 	slider.max_value = max_val
-	slider.step = 0.05
+	slider.step = step
 	slider.value = initial
 	slider.custom_minimum_size.x = 220.0
 	hbox.add_child(slider)
@@ -761,6 +820,24 @@ func _add_slider(parent: Control, label_text: String, min_val: float, max_val: f
 		value.text = "%.2f" % val
 		callback.call(val)
 	)
+
+
+func _add_color_picker(parent: Control, label_text: String, initial: Color, callback: Callable) -> ColorPickerButton:
+	var hbox := HBoxContainer.new()
+	parent.add_child(hbox)
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size.x = 80.0
+	hbox.add_child(label)
+	var picker := ColorPickerButton.new()
+	picker.focus_mode = Control.FOCUS_NONE
+	picker.color = initial
+	picker.custom_minimum_size = Vector2(220.0, 28.0)
+	picker.color_changed.connect(func(color: Color) -> void:
+		callback.call(color)
+	)
+	hbox.add_child(picker)
+	return picker
 
 
 func _add_button(parent: Control, label_text: String, callback: Callable) -> Button:
@@ -800,14 +877,20 @@ func _refresh_control_labels() -> void:
 		_spray_quality_button.text = "Spray Q: %s" % quality_name
 	if _ocean_surface_button:
 		_ocean_surface_button.text = "Ocean Mesh: %s" % ("On" if _ocean_surface_visible else "Off")
-	if _waterline_button:
-		_waterline_button.text = "Waterline: %s" % ("On" if _waterline_compositor_enabled else "Off")
-	if _waterline_debug_button:
-		_waterline_debug_button.text = "WL Debug: %s" % WL_DEBUG_MODE_NAMES[_waterline_debug_mode]
-	if _waterline_res_button:
-		_waterline_res_button.text = "WL Res: %d%%" % int(roundf(_get_waterline_resolution_scale() * 100.0))
-	if _waterline_quality_button:
-		_waterline_quality_button.text = "WL Q: %s" % WL_QUALITY_NAMES[clampi(_waterline_quality_tier, 0, WL_QUALITY_NAMES.size() - 1)]
+	if _surface_ssr_button:
+		_surface_ssr_button.text = "Surface SSR: %s" % ("On" if _surface_ssr_enabled else "Off")
+	if _surface_refraction_button:
+		_surface_refraction_button.text = "Refraction: %s" % ("On" if _surface_refraction_enabled else "Off")
+	if _surface_edge_guard_button:
+		_surface_edge_guard_button.text = "Refract Guard: %s" % ("On" if _surface_edge_guard_enabled else "Off")
+	if _environment_ssr_button:
+		_environment_ssr_button.text = "Env SSR: %s" % ("On" if _environment_ssr_enabled else "Off")
+	if _underwater_button:
+		_underwater_button.text = "Underwater: %s" % ("On" if _underwater_effect_enabled else "Off")
+	if _underwater_debug_button:
+		_underwater_debug_button.text = "UW Debug: %s" % UW_DEBUG_MODE_NAMES[_underwater_debug_mode]
+	if _underwater_quality_button:
+		_underwater_quality_button.text = "UW Q: %s" % UW_QUALITY_NAMES[clampi(_underwater_quality_tier, 0, UW_QUALITY_NAMES.size() - 1)]
 	if _wireframe_button:
 		_wireframe_button.text = "Wireframe: %s" % ("On" if _wireframe_enabled else "Off")
 	if _uw_absorption_check:
@@ -820,10 +903,8 @@ func _refresh_control_labels() -> void:
 		_uw_particles_check.button_pressed = _uw_particles_enabled
 	if _uw_caustics_check:
 		_uw_caustics_check.button_pressed = _uw_caustics_enabled
-	if _uw_meniscus_check:
-		_uw_meniscus_check.button_pressed = _uw_meniscus_enabled
-	if _uw_waterline_check:
-		_uw_waterline_check.button_pressed = _waterline_compositor_enabled
+	if _uw_effect_check:
+		_uw_effect_check.button_pressed = _underwater_effect_enabled
 	if _uw_profile_button:
 		_uw_profile_button.text = "Profile: %s" % ("Stop" if _uw_profile_running else "Run")
 
@@ -835,9 +916,8 @@ func _process(delta: float) -> void:
 	_update_object_wetness(delta)
 	_update_held_object()
 	_apply_ocean_surface_visibility()
-	_update_prewater_capture()
 	_update_wet_compositor()
-	_update_waterline_compositor()
+	_update_underwater_compositor()
 	_update_underwater_profile()
 	_update_underwater_perf_label()
 	_update_hud()
@@ -943,36 +1023,17 @@ func _update_held_object() -> void:
 	node.global_position = _camera.global_position + -_camera.global_basis.z * 5.0
 
 
-func _update_waterline_compositor() -> void:
-	if _waterline_effect == null:
+func _update_underwater_compositor() -> void:
+	if _underwater_effect == null:
 		return
-	_apply_receiver_layer_contract()
-	var activation_fade := _get_waterline_activation_fade()
-	var debug_active := _waterline_debug_mode != 0
-	_waterline_effect.effect_enabled = _waterline_compositor_enabled and (activation_fade > 0.001 or debug_active)
-	_waterline_effect.blend_factor = (1.0 if debug_active else activation_fade) if _waterline_effect.effect_enabled else 0.0
-	if _waterline_effect.has_method("set_debug_mode"):
-		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
-	if _waterline_effect.has_method("set_activation_water_level"):
-		_waterline_effect.call("set_activation_water_level", _get_waterline_activation_level())
+	var debug_active := _underwater_debug_mode != 0
+	_underwater_effect.effect_enabled = _underwater_effect_enabled or debug_active
+	_underwater_effect.blend_factor = 1.0 if _underwater_effect.effect_enabled else 0.0
+	if _underwater_effect.has_method("set_debug_mode"):
+		_underwater_effect.call("set_debug_mode", _underwater_debug_mode)
 	_push_underwater_effect_controls()
-	_sync_waterline_sun()
-	if _waterline_effect.effect_enabled:
-		_push_prewater_capture_to_waterline()
-		if _waterline_effect.has_method("sync_from_water_state"):
-			_waterline_effect.call("sync_from_water_state", _get_water_state())
-	elif _waterline_effect.has_method("clear_external_source_buffers"):
-		_waterline_effect.call("clear_external_source_buffers")
-
-
-func _update_prewater_capture() -> void:
-	if _prewater_capture == null:
-		return
-	_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
-	_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
-	_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
-	_prewater_capture.set_activation_water_level(_get_waterline_activation_level())
-	_prewater_capture.update_capture(_get_main_viewport_size())
+	if _underwater_effect.effect_enabled and _underwater_effect.has_method("sync_from_water_state"):
+		_underwater_effect.call("sync_from_water_state", _get_water_state())
 
 
 func _update_wet_compositor() -> void:
@@ -1009,63 +1070,20 @@ func _get_main_viewport_size() -> Vector2i:
 	return size
 
 
-func _push_prewater_capture_to_waterline() -> void:
-	if _waterline_effect == null:
-		return
-	if _prewater_capture == null:
-		if _waterline_effect.has_method("clear_external_source_buffers"):
-			_waterline_effect.call("clear_external_source_buffers")
-		return
-	_prewater_capture.push_to_waterline_effect(_waterline_effect)
-
-
-func _apply_receiver_layer_contract() -> void:
-	if _camera == null:
-		return
-	_camera.cull_mask = _camera.cull_mask | WATER_REFRACTION_RECEIVER_LAYER_MASK
-
-
-func _get_waterline_resolution_scale() -> float:
-	return _waterline_resolution_scales[clampi(_waterline_resolution_index, 0, _waterline_resolution_scales.size() - 1)]
-
-
-func _get_waterline_activation_fade() -> float:
-	if _prewater_capture != null and _prewater_capture.has_method("get_activation_fade"):
-		return float(_prewater_capture.call("get_activation_fade"))
-	return 1.0
-
-
-func _get_waterline_activation_level() -> float:
-	return _sea_level
-
-
-func _sync_waterline_sun() -> void:
-	if _waterline_effect == null or _sun == null or not is_instance_valid(_sun):
-		return
-	if _waterline_effect.has_method("set_sun_direction"):
-		# DirectionalLight3D shines along -basis.z; +basis.z points back toward
-		# the sun in the sky. The underwater compositor expects toward-sun.
-		_waterline_effect.call("set_sun_direction", _sun.global_basis.z)
-	if _waterline_effect.has_method("set_sun_visibility"):
-		_waterline_effect.call("set_sun_visibility", clampf(_sun.light_energy / 1.4, 0.0, 1.0))
-
 
 func _push_underwater_effect_controls() -> void:
-	if _waterline_effect == null:
+	if _underwater_effect == null:
 		return
-	if _waterline_effect.has_method("set_quality_tier"):
-		_waterline_effect.call("set_quality_tier", _waterline_quality_tier)
-	if _waterline_effect.has_method("set_receiver_source_mode"):
-		_waterline_effect.call("set_receiver_source_mode", 1)
-	if _waterline_effect.has_method("set_underwater_feature_enabled"):
-		_waterline_effect.call("set_underwater_feature_enabled", &"absorption_fog", _uw_absorption_enabled)
-		_waterline_effect.call("set_underwater_feature_enabled", &"snell", _uw_snell_enabled)
-		_waterline_effect.call("set_underwater_feature_enabled", &"wobble", _uw_wobble_effect_enabled)
-		_waterline_effect.call("set_underwater_feature_enabled", &"particles", false)
-		_waterline_effect.call("set_underwater_feature_enabled", &"meniscus_refraction", _uw_meniscus_enabled)
-		_waterline_effect.call("set_underwater_feature_enabled", &"caustics", _uw_caustics_enabled)
+	if _underwater_effect.has_method("set_quality_tier"):
+		_underwater_effect.call("set_quality_tier", _underwater_quality_tier)
+	if _underwater_effect.has_method("set_underwater_feature_enabled"):
+		_underwater_effect.call("set_underwater_feature_enabled", &"absorption_fog", _uw_absorption_enabled)
+		_underwater_effect.call("set_underwater_feature_enabled", &"snell", false)
+		_underwater_effect.call("set_underwater_feature_enabled", &"wobble", _uw_wobble_effect_enabled)
+		_underwater_effect.call("set_underwater_feature_enabled", &"particles", false)
+		_underwater_effect.call("set_underwater_feature_enabled", &"caustics", false)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_enabled"):
-		OceanManager.set_underwater_particles_enabled(_uw_particles_enabled)
+		OceanManager.set_underwater_particles_enabled(false)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
 		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_count"):
@@ -1076,8 +1094,8 @@ func _push_underwater_effect_controls() -> void:
 		OceanManager.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_opacity"):
 		OceanManager.set_underwater_particles_opacity(_uw_particle_density)
-	if _waterline_effect.has_method("set_underwater_particle_params"):
-		_waterline_effect.call(
+	if _underwater_effect.has_method("set_underwater_particle_params"):
+		_underwater_effect.call(
 			"set_underwater_particle_params",
 			_uw_particle_noise_scale,
 			_uw_particle_density,
@@ -1087,14 +1105,11 @@ func _push_underwater_effect_controls() -> void:
 
 
 func _set_underwater_profile_features(profile_name: String) -> void:
-	_uw_absorption_enabled = profile_name == "Absorption" or profile_name == "All On"
-	_uw_snell_enabled = profile_name == "Snell" or profile_name == "All On"
-	_uw_wobble_effect_enabled = profile_name == "Wobble" or profile_name == "All On"
-	_uw_particles_enabled = profile_name == "Particles" or profile_name == "All On"
-	_uw_meniscus_enabled = profile_name == "Meniscus/Refract" or profile_name == "All On"
-	_uw_caustics_enabled = profile_name == "Caustics" or profile_name == "All On"
-	if profile_name in ["Particles", "Caustics", "All On"]:
-		_waterline_quality_tier = 2
+	_uw_absorption_enabled = profile_name == "Absorption" or profile_name == "Absorption+Wobble"
+	_uw_wobble_effect_enabled = profile_name == "Wobble" or profile_name == "Absorption+Wobble"
+	_uw_snell_enabled = false
+	_uw_particles_enabled = false
+	_uw_caustics_enabled = false
 	_push_underwater_effect_controls()
 	_refresh_control_labels()
 
@@ -1103,12 +1118,8 @@ func _underwater_profile_names() -> Array[String]:
 	return [
 		"All Off",
 		"Absorption",
-		"Snell",
 		"Wobble",
-		"Particles",
-		"Caustics",
-		"Meniscus/Refract",
-		"All On",
+		"Absorption+Wobble",
 	]
 
 
@@ -1124,12 +1135,12 @@ func _toggle_underwater_profile() -> void:
 
 
 func _update_underwater_profile() -> void:
-	if not _uw_profile_running or _waterline_effect == null:
+	if not _uw_profile_running or _underwater_effect == null:
 		return
 	var names := _underwater_profile_names()
 	if _uw_profile_step >= names.size():
 		_uw_profile_running = false
-		_set_underwater_profile_features("All On")
+		_set_underwater_profile_features("Absorption+Wobble")
 		_refresh_control_labels()
 		return
 
@@ -1149,13 +1160,13 @@ func _update_underwater_profile() -> void:
 		_set_underwater_profile_features(names[_uw_profile_step])
 	else:
 		_uw_profile_running = false
-		_set_underwater_profile_features("All On")
+		_set_underwater_profile_features("Absorption+Wobble")
 	_refresh_control_labels()
 
 
 func _get_underwater_perf_snapshot() -> Dictionary:
-	if _waterline_effect != null and _waterline_effect.has_method("get_underwater_perf_snapshot"):
-		var snapshot: Variant = _waterline_effect.call("get_underwater_perf_snapshot")
+	if _underwater_effect != null and _underwater_effect.has_method("get_underwater_perf_snapshot"):
+		var snapshot: Variant = _underwater_effect.call("get_underwater_perf_snapshot")
 		if snapshot is Dictionary:
 			return snapshot
 	return {}
@@ -1166,14 +1177,6 @@ func _get_underwater_particles_status() -> Dictionary:
 		var status: Variant = OceanManager.get_underwater_particles_status()
 		if status is Dictionary:
 			return status
-	return {}
-
-
-func _get_prewater_perf_snapshot() -> Dictionary:
-	if _prewater_capture != null and _prewater_capture.has_method("get_perf_snapshot"):
-		var snapshot: Variant = _prewater_capture.call("get_perf_snapshot")
-		if snapshot is Dictionary:
-			return snapshot
 	return {}
 
 
@@ -1190,36 +1193,31 @@ func _update_underwater_perf_label() -> void:
 		return
 	var perf := _get_underwater_perf_snapshot()
 	var particle_status := _get_underwater_particles_status()
-	var prewater_perf := _get_prewater_perf_snapshot()
 	var wet_perf := _get_wet_perf_snapshot()
 	var copy_ms := float(perf.get("scene_copy_ms", 0.0))
 	var probe_ms := float(perf.get("probe_ms", 0.0))
 	var total_ms := float(perf.get("total_ms", 0.0))
-	var prewater_copy_ms := float(prewater_perf.get("prewater_copy_ms", 0.0))
 	var wet_ms := float(wet_perf.get("wet_compositor_ms", 0.0))
 	var timing_valid := bool(perf.get("timing_valid", true))
-	var stack_total_ms := total_ms + prewater_copy_ms + wet_ms
-	var quality_name := WL_QUALITY_NAMES[clampi(int(perf.get("quality_tier", _waterline_quality_tier)), 0, WL_QUALITY_NAMES.size() - 1)]
+	var stack_total_ms := total_ms + wet_ms
+	var quality_name := UW_QUALITY_NAMES[clampi(int(perf.get("quality_tier", _underwater_quality_tier)), 0, UW_QUALITY_NAMES.size() - 1)]
 	var scene_copy_active := bool(perf.get("scene_copy_active", false))
 	var lines: Array[String] = []
 	lines.append("[b]GPU timings[/b]")
 	if timing_valid:
-		lines.append("prewater copy: %.3f ms" % prewater_copy_ms)
-		lines.append("scene copy: %.3f ms" % copy_ms)
-		lines.append("waterline/underwater probe: %.3f ms" % probe_ms)
+		lines.append("underwater copy: %.3f ms" % copy_ms)
+		lines.append("underwater medium: %.3f ms" % probe_ms)
 		lines.append("wetness: %.3f ms" % wet_ms)
 		lines.append("stack subtotal: %.3f ms" % stack_total_ms)
 	else:
 		lines.append("timestamp sample invalid")
 	lines.append("quality: %s  scene copy: %s" % [quality_name, "active" if scene_copy_active else "skipped"])
 	lines.append("")
-	lines.append("flags: fog=%s snell=%s wobble=%s particles=%s caustics=%s refract=%s" % [
+	lines.append("flags: fog=%s wobble=%s particles=%s caustics=%s" % [
 		"on" if _uw_absorption_enabled else "off",
-		"on" if _uw_snell_enabled else "off",
 		"on" if _uw_wobble_effect_enabled else "off",
 		"on" if _uw_particles_enabled else "off",
 		"on" if _uw_caustics_enabled else "off",
-		"on" if _uw_meniscus_enabled else "off",
 	])
 	lines.append("particles: %d motes size %.2fx speed %.2fx opacity %.2f emitting=%s depth=%.2fm" % [
 		int(particle_status.get("particle_count", 0)),
@@ -1347,25 +1345,29 @@ func _update_hud() -> void:
 		float(particle_status.get("speed_scale", _uw_particle_speed_scale)),
 		_uw_particle_density,
 	])
-	lines.append("ocean_mesh=%s  wireframe=%s  waterline=%s/%s" % [
+	lines.append("ocean_mesh=%s  wireframe=%s  underwater=%s/%s" % [
 		"on" if _ocean_surface_visible else "off",
 		"on" if _wireframe_enabled else "off",
-		"on" if _waterline_compositor_enabled else "off",
-		WL_DEBUG_MODE_NAMES[_waterline_debug_mode],
+		"on" if _underwater_effect_enabled else "off",
+		UW_DEBUG_MODE_NAMES[_underwater_debug_mode],
 	])
-	if _prewater_capture != null:
-		var prewater_perf := _get_prewater_perf_snapshot()
-		lines.append("prewater=%s %.0f%% fade=%.2f %s" % [
-			"active" if _prewater_capture.is_capture_active() else "idle",
-			_prewater_capture.get_resolution_scale() * 100.0,
-			_get_waterline_activation_fade(),
-			_prewater_capture.get_source_size(),
-		])
-		if not prewater_perf.is_empty() and bool(prewater_perf.get("timing_valid", true)):
-			lines.append("prewater_copy=%.3f ms" % float(prewater_perf.get("prewater_copy_ms", 0.0)))
+	lines.append("surface_ssr=%s  refraction=%s guard=%s  env_ssr=%s" % [
+		"on" if _surface_ssr_enabled else "off",
+		"on" if _surface_refraction_enabled else "off",
+		"on" if _surface_edge_guard_enabled else "off",
+		"on" if _environment_ssr_enabled else "off",
+	])
+	var sigma := OceanManager.get_absorption_sigma() if OceanManager and OceanManager.has_method("get_absorption_sigma") else Vector3.ZERO
+	lines.append("optics density=%.2f  tint=#%s  sigma=(%.3f %.3f %.3f)" % [
+		_absorption_density,
+		_absorption_tint.to_html(false),
+		sigma.x,
+		sigma.y,
+		sigma.z,
+	])
 	var uw_perf := _get_underwater_perf_snapshot()
 	if not uw_perf.is_empty():
-		var quality_name := WL_QUALITY_NAMES[clampi(int(uw_perf.get("quality_tier", _waterline_quality_tier)), 0, WL_QUALITY_NAMES.size() - 1)]
+		var quality_name := UW_QUALITY_NAMES[clampi(int(uw_perf.get("quality_tier", _underwater_quality_tier)), 0, UW_QUALITY_NAMES.size() - 1)]
 		var wet_perf := _get_wet_perf_snapshot()
 		var wet_ms := float(wet_perf.get("wet_compositor_ms", 0.0))
 		if bool(uw_perf.get("timing_valid", true)):
@@ -1383,34 +1385,44 @@ func _update_hud() -> void:
 		lines.append("Use the control panel buttons for ocean/debug actions.")
 		lines.append("RMB + movement actions flies the camera.")
 		lines.append("LClick picks/drops wet test objects.")
-		if _waterline_debug_mode == 5:
-			lines.append("WL Refract: green=offset accepted, yellow=raw fallback, orange=above-water reject.")
-		elif _waterline_debug_mode == 6:
-			lines.append("WL Refract Offset: red=UV offset amount, green=visible source-color change.")
-		elif _waterline_debug_mode == 4:
-			lines.append("WL Receiver Mask: red=eligible receiver, green=water coverage, blue=active visibility gate.")
-		elif _waterline_debug_mode == 7:
-			lines.append("WL Source: green=source depth valid, red=missing source color.")
-		elif _waterline_debug_mode == 8:
-			lines.append("WL Camera Split: red=underwater camera mask, green=meniscus band, blue=water body gate.")
-		elif _waterline_debug_mode == 9:
-			lines.append("WL Pipeline: left=buffers, mid=depth, next=masks, right=final write gate.")
-		elif _waterline_debug_mode == 10:
-			lines.append("WL Camera Depth: blue/green=submerged camera depth, red=above water.")
-		elif _waterline_debug_mode == 11:
-			lines.append("WL Receiver Depth: blue/green=submerged receiver depth, red=above water.")
-		elif _waterline_debug_mode == 12:
-			lines.append("WL Ray Entry/Exit: red=surface hit, green=ray crossing, blue=body gate.")
-		elif _waterline_debug_mode == 13:
-			lines.append("WL Body Coverage: red=receiver, green=main depth, blue=camera.")
-		elif _waterline_debug_mode == 14:
-			lines.append("WL Final Mask: red=final mask, green=body gate, blue=visibility gate.")
-		elif _waterline_debug_mode == 15:
-			lines.append("WL Wobble Guard: red=rejected shifted sample, green=accepted, blue=guard strength.")
+		if _debug_mode == 6:
+			lines.append("Surface Refraction: green=accepted, red=rejected, blue=UV offset.")
+		elif _debug_mode == 7:
+			lines.append("Refract Depth: red=depth delta, green=stable edge, blue=below-water hit.")
+		elif _debug_mode == 8:
+			lines.append("SSR Hit: green/reflected color marks successful surface reflection rays.")
+		elif _debug_mode == 12:
+			lines.append("Refract Delta: orange=shifted scene color differs, blue=optional hard-reject preview.")
+		elif _debug_mode == 13:
+			lines.append("Source Straight: raw opaque scene color sampled at SCREEN_UV.")
+		elif _debug_mode == 14:
+			lines.append("Source Refracted: raw opaque scene color sampled at the refracted candidate UV.")
+		elif _debug_mode == 15:
+			lines.append("Refract Mask: red=rejected candidate, green=used refracted sample, blue=UV offset.")
+		elif _debug_mode == 16:
+			lines.append("Godot Depth Weight: red=straight/source-safe, green=PR #93449 refract weight, blue=depth delta.")
+		elif _debug_mode == 17:
+			lines.append("Depth Edge Fade: red=SCREEN_UV edge, green=candidate edge, blue=would fade to straight sample.")
+		elif _debug_mode == 18:
+			lines.append("Godot Source Preview: raw source color with PR #93449's depth-weighted UV mix.")
+		elif _debug_mode == 19:
+			lines.append("Refract Weight: black=straight source, white=refracted source; gray means unwanted blend.")
+		elif _debug_mode == 20:
+			lines.append("Source Blend: raw straight/refracted source mix before absorption/Fresnel/SSR.")
+		if _underwater_debug_mode == 1:
+			lines.append("UW Path Length: blue=short water path, red=long water path.")
+		elif _underwater_debug_mode == 2:
+			lines.append("UW Transmittance: bright=clear, dark=absorbed.")
+		elif _underwater_debug_mode == 3:
+			lines.append("UW Mask: green=underwater hit, blue=sky/far depth.")
+		elif _underwater_debug_mode == 4:
+			lines.append("UW Wobble Delta: orange marks shifted scene-color differences.")
+		elif _underwater_debug_mode == 5:
+			lines.append("UW Wobble Guard: green=shifted sample, red=fallback.")
 		if _wet_debug_mode == 1:
 			lines.append("Wet Final: blue=final live wetness written by the compositor.")
 		elif _wet_debug_mode == 2:
-			lines.append("Wet Depth: red=above water, green=contact band, blue=skipped submerged receiver.")
+			lines.append("Wet Depth: red=above water, green=contact band, blue=skipped submerged surface.")
 		elif _wet_debug_mode == 3:
 			lines.append("Wet Body: red=shore-mask land gate, green=water gate, blue=raw coverage.")
 		elif _wet_debug_mode == 4:
@@ -1427,6 +1439,7 @@ func _cycle_debug_mode() -> void:
 		OceanManager.set_debug_mode(_debug_mode)
 	_refresh_control_labels()
 	Log.info("water", "[Ocean Lab] debug_mode %d = %s" % [_debug_mode, DEBUG_MODE_NAMES[_debug_mode]])
+	_log_refraction_baseline_state("debug_mode")
 
 
 func _apply_weather_preset(idx: int) -> void:
@@ -1442,8 +1455,26 @@ func _apply_weather_preset(idx: int) -> void:
 	var wind_rad := deg_to_rad(45.0)
 	result.storm_direction = Vector3(sin(wind_rad), 0.0, cos(wind_rad))
 	OceanManager.apply_weather(result)
+	_apply_flat_water_override(bool(preset.get("flat_water", false)))
+	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 	Log.info("water", "[Ocean Lab] weather preset %s wind=%.2f" % [preset["name"], preset["wind"]])
+
+
+func _apply_flat_water_override(enabled: bool) -> void:
+	if not OceanManager or not OceanManager.is_initialized():
+		return
+	var target_wave_scale := 0.0 if enabled else _default_wave_scale
+	OceanManager.wave_scale = target_wave_scale
+	if OceanManager.has_method("set_wind_strength"):
+		OceanManager.set_wind_strength(0.0 if enabled else clampf(float(WEATHER_PRESETS[_current_weather]["wind"]) / 0.9, 0.0, 1.0))
+	if OceanManager._ocean_mesh:
+		OceanManager._ocean_mesh.set_wave_scale(target_wave_scale)
+		var mat: ShaderMaterial = OceanManager._ocean_mesh.get_material()
+		if mat:
+			mat.set_shader_parameter("shore_wave_amplitude", 0.0 if enabled else OceanManager._current_shore_wave_amplitude)
+			mat.set_shader_parameter("normal_strength", 0.0 if enabled else lerpf(0.6, 1.6, clampf(float(WEATHER_PRESETS[_current_weather]["wind"]) / 0.9, 0.0, 1.0)))
+	OceanManager._current_shore_wave_amplitude = 0.0 if enabled else OceanManager._current_shore_wave_amplitude
 
 
 func _toggle_buoy_grid() -> void:
@@ -1468,6 +1499,7 @@ func _toggle_mesh_mode() -> void:
 		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
+	_push_surface_refraction_control()
 	_refresh_control_labels()
 
 
@@ -1498,11 +1530,13 @@ func _toggle_wet_debug() -> void:
 		if mat_rid.is_valid():
 			RenderingServer.material_set_param(mat_rid, "wet_debug", object_debug)
 	_refresh_control_labels()
+	_log_refraction_baseline_state("wet_debug")
 
 
 func _toggle_wet_compositor() -> void:
 	_wet_compositor_enabled = not _wet_compositor_enabled
 	_refresh_control_labels()
+	_log_refraction_baseline_state("wetness")
 
 
 func _push_object_wet_params() -> void:
@@ -1544,6 +1578,7 @@ func _cycle_quality() -> void:
 		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
+	_push_surface_refraction_control()
 	_refresh_control_labels()
 
 
@@ -1567,30 +1602,48 @@ func _toggle_ocean_surface_visible() -> void:
 	_refresh_control_labels()
 
 
-func _toggle_waterline_compositor() -> void:
-	_waterline_compositor_enabled = not _waterline_compositor_enabled
-	if _prewater_capture:
-		_prewater_capture.set_capture_enabled(_waterline_compositor_enabled)
-		_prewater_capture.set_blend_factor(1.0 if _waterline_compositor_enabled else 0.0)
+func _toggle_surface_ssr() -> void:
+	_surface_ssr_enabled = not _surface_ssr_enabled
+	_push_surface_ssr_control()
+	_log_refraction_baseline_state("surface_ssr")
+
+
+func _toggle_surface_refraction() -> void:
+	_surface_refraction_enabled = not _surface_refraction_enabled
+	_push_surface_refraction_control()
+	_log_refraction_baseline_state("surface_refraction")
+
+
+func _toggle_surface_edge_guard() -> void:
+	_surface_edge_guard_enabled = not _surface_edge_guard_enabled
+	_push_surface_refraction_control()
+	_log_refraction_baseline_state("surface_edge_guard")
+
+
+func _toggle_environment_ssr() -> void:
+	_environment_ssr_enabled = not _environment_ssr_enabled
+	if _world_env != null and _world_env.environment != null:
+		_world_env.environment.ssr_enabled = _environment_ssr_enabled
 	_refresh_control_labels()
+	_log_refraction_baseline_state("environment_ssr")
 
 
-func _cycle_waterline_debug_mode() -> void:
-	_waterline_debug_mode = (_waterline_debug_mode + 1) % WL_DEBUG_MODE_NAMES.size()
-	if _waterline_effect and _waterline_effect.has_method("set_debug_mode"):
-		_waterline_effect.call("set_debug_mode", _waterline_debug_mode)
+func _toggle_underwater_compositor() -> void:
+	_underwater_effect_enabled = not _underwater_effect_enabled
 	_refresh_control_labels()
+	_log_refraction_baseline_state("underwater")
 
 
-func _cycle_waterline_resolution() -> void:
-	_waterline_resolution_index = (_waterline_resolution_index + 1) % _waterline_resolution_scales.size()
-	if _prewater_capture:
-		_prewater_capture.set_resolution_scale(_get_waterline_resolution_scale())
+func _cycle_underwater_debug_mode() -> void:
+	_underwater_debug_mode = (_underwater_debug_mode + 1) % UW_DEBUG_MODE_NAMES.size()
+	if _underwater_effect and _underwater_effect.has_method("set_debug_mode"):
+		_underwater_effect.call("set_debug_mode", _underwater_debug_mode)
 	_refresh_control_labels()
+	_log_refraction_baseline_state("underwater_debug")
 
 
-func _cycle_waterline_quality() -> void:
-	_waterline_quality_tier = (_waterline_quality_tier + 1) % WL_QUALITY_NAMES.size()
+func _cycle_underwater_quality() -> void:
+	_underwater_quality_tier = (_underwater_quality_tier + 1) % UW_QUALITY_NAMES.size()
 	_push_underwater_effect_controls()
 	_refresh_control_labels()
 
@@ -1630,6 +1683,49 @@ func _get_ocean_material() -> ShaderMaterial:
 	if ocean_mesh == null:
 		return null
 	return ocean_mesh.get_material()
+
+
+func _get_surface_refraction_strength() -> float:
+	var mat := _get_ocean_material()
+	if mat == null:
+		return 0.0
+	var value: Variant = mat.get_shader_parameter("refraction_strength")
+	if value == null:
+		return 0.0
+	return float(value)
+
+
+func _log_refraction_baseline_state(reason: String) -> void:
+	var camera_pos := Vector3.ZERO
+	var camera_rot := Vector3.ZERO
+	if _camera != null:
+		camera_pos = _camera.global_position
+		camera_rot = _camera.global_rotation_degrees
+	var weather_name := "Unknown"
+	if _current_weather >= 0 and _current_weather < WEATHER_PRESETS.size():
+		weather_name = str(WEATHER_PRESETS[_current_weather].get("name", "Unknown"))
+	var mesh_mode := "Unknown"
+	if OceanManager and OceanManager.is_initialized() and OceanManager.has_method("get_mesh_mode"):
+		mesh_mode = "Projected" if OceanManager.get_mesh_mode() == 1 else "Clipmap"
+	var lines: Array[String] = [
+		"[Ocean Lab] Refraction baseline (%s)" % reason,
+		"| refraction_strength | %.3f |" % _get_surface_refraction_strength(),
+		"| surface_refraction | %s |" % ("on" if _surface_refraction_enabled else "off"),
+		"| surface_edge_guard | %s |" % ("on" if _surface_edge_guard_enabled else "off"),
+		"| surface_ssr | %s |" % ("on" if _surface_ssr_enabled else "off"),
+		"| env_ssr | %s |" % ("on" if _environment_ssr_enabled else "off"),
+		"| underwater_effect | %s |" % ("on" if _underwater_effect_enabled else "off"),
+		"| wetness | %s |" % ("on" if _wet_compositor_enabled else "off"),
+		"| debug_mode | %d %s |" % [_debug_mode, DEBUG_MODE_NAMES[_debug_mode]],
+		"| underwater_debug | %d %s |" % [_underwater_debug_mode, UW_DEBUG_MODE_NAMES[_underwater_debug_mode]],
+		"| camera_pos | %s |" % str(camera_pos),
+		"| camera_rot_deg | %s |" % str(camera_rot),
+		"| mesh | %s |" % mesh_mode,
+		"| weather | %s |" % weather_name,
+		"| test_objects | %d |" % _test_objects.size(),
+		"| playground | %s |" % _shore_search_status,
+	]
+	Log.info("water", "\n".join(lines))
 
 
 func _get_water_state() -> WaterSurfaceState:
@@ -1673,7 +1769,6 @@ func _spawn_buoyant_sphere_from_camera() -> void:
 	sphere_mesh.height = SPHERE_RADIUS * 2.0
 	mesh_inst.mesh = sphere_mesh
 	mesh_inst.material_override = _standard_mat(Color(0.9, 0.35, 0.2), 0.35)
-	_mark_refraction_receiver(mesh_inst)
 	body.add_child(mesh_inst)
 
 	var probe: BuoyancyProbe3D = BuoyancyProbeScript.new()
@@ -1703,22 +1798,16 @@ func _make_checker_texture(size_px: int, cell_px: int, a: Color, b: Color) -> Im
 	return ImageTexture.create_from_image(img)
 
 
-func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material, refraction_receiver: bool = false) -> MeshInstance3D:
+func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
 	var inst := MeshInstance3D.new()
 	inst.name = node_name
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	inst.mesh = mesh
 	inst.material_override = mat
-	if refraction_receiver:
-		_mark_refraction_receiver(inst)
 	add_child(inst)
 	inst.global_position = pos
 	return inst
-
-
-func _mark_refraction_receiver(inst: VisualInstance3D) -> void:
-	inst.layers = WATER_REFRACTION_RECEIVER_LAYER_MASK
 
 
 func _add_emissive_marker(pos: Vector3, color: Color) -> void:

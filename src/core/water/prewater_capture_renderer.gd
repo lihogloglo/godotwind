@@ -79,9 +79,8 @@ func get_resolution_scale() -> float:
 	return _resolution_scale
 
 
-## Sets the stable water-body datum used only for capture activation.
-## Pass mean sea level, not animated wave height; the compositor shader handles
-## per-pixel wave classification after the pass is already active.
+## Sets the water-body datum used only for capture activation. The compositor
+## shader still owns per-pixel wave classification after the pass is active.
 func set_activation_water_level(value: float) -> void:
 	_camera_water_level = value
 

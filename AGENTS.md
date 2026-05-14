@@ -3,15 +3,13 @@
 ## Codex Session Verification Rule
 
 For Godotwind work, do not stop at static inspection. Before calling a gameplay,
-streaming, rendering, or performance change done, either:
+streaming, rendering, or performance change done, run a visual launch or
+automated benchmark/crash smoke that exercises the changed path.
 
-1. Launch `scenes/Godotwind.tscn` interactively so the user can visually check it, or
-2. Run an automated benchmark/crash smoke that exercises the changed path.
-
-Use the documented local binary when available:
+Use the documented local binary when a visual launch is appropriate:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind <scene-or-test-path>
 ```
 
 If a C# file changed, run `dotnet build Godotwind.sln` before launching Godot.

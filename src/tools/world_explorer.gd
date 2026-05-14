@@ -3221,7 +3221,7 @@ func _process(delta: float) -> void:
 	if _weather_controls:
 		_weather_controls.process(delta)
 
-	# Update ocean waterline compositor/capture path
+	# Update ocean controls
 	if _ocean_controls:
 		_ocean_controls.process(delta)
 

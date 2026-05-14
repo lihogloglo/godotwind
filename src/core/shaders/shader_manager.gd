@@ -66,6 +66,11 @@ var _effect_paths: Array[String] = [
 	"res://src/core/shaders/effects/"
 ]
 
+const DEPRECATED_RUNTIME_EFFECT_FILES := {
+	"prewater_capture_effect.gd": true,
+	"waterline_compositor_effect.gd": true,
+}
+
 
 func _ready() -> void:
 	_compositor = Compositor.new()
@@ -89,7 +94,7 @@ func attach_to(node: Node) -> void:
 		push_warning("[ShaderManager] Can only attach to WorldEnvironment or Camera3D")
 
 
-## Set the active sun on all effects that support it (fog, godrays, waterline, etc.).
+## Set the active sun on all effects that support it (fog, godrays, etc.).
 ## Effects may expose either set_sun_direction(Vector3, float) or set_sun().
 func set_sun(sun: DirectionalLight3D) -> void:
 	for effect_name in _effects:
@@ -461,6 +466,9 @@ func _load_built_in_effects() -> void:
 		var file_name := dir.get_next()
 		while file_name != "":
 			if not dir.current_is_dir() and file_name.ends_with(".gd"):
+				if DEPRECATED_RUNTIME_EFFECT_FILES.has(file_name):
+					file_name = dir.get_next()
+					continue
 				load_effect(path + file_name)
 			file_name = dir.get_next()
 		dir.list_dir_end()

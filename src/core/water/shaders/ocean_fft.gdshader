@@ -2,10 +2,10 @@ shader_type spatial;
 // Clipmap mesh path — vertex reads world-space XZ from VERTEX directly because
 // `ocean_mesh.gd` snaps the mesh to the active inner-ring grid around the camera. Kept
 // `cull_disabled` (the clipmap mesh winding renders as the back face from
-// above, so standard culling would hide the entire ocean). `depth_draw_always`
-// forces depth to be written authoritatively from the main pass (fixes the
-// "far sea drawn over near sea" artifact observed at ring boundaries when
-// two-sided geometry went through the prepass).
+// above, so standard culling would hide the entire ocean). Screen-reading water
+// runs in Godot's transparent family, but the ocean is one continuous surface:
+// writing depth from the main pass prevents far clipmap triangles/rings from
+// drawing over nearer displaced waves.
 render_mode world_vertex_coords, cull_disabled, shadows_disabled, depth_draw_always;
 
 /**

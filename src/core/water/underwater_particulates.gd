@@ -56,6 +56,8 @@ var _particles: GPUParticles3D = null
 var _process_material: ShaderMaterial = null
 var _draw_material: ShaderMaterial = null
 var _sea_level: float = 0.0
+var _water_state: WaterSurfaceState = null
+var _surface_level: float = 0.0
 var _camera_water_depth: float = 0.0
 var _spawn_center: Vector3 = Vector3.ZERO
 var _current_direction_xz: Vector2 = Vector2(0.35, 0.14).normalized()
@@ -73,11 +75,13 @@ func _process(_delta: float) -> void:
 		var camera_pos := _camera.global_position
 		global_position = camera_pos
 		_spawn_center = _compute_spawn_center(camera_pos)
-		_camera_water_depth = maxf(_sea_level - camera_pos.y, 0.0)
+		_surface_level = _sample_surface_level(camera_pos)
+		_camera_water_depth = maxf(_surface_level - camera_pos.y, 0.0)
 	if _process_material == null:
 		return
 	_process_material.set_shader_parameter(&"camera_position", global_position)
 	_process_material.set_shader_parameter(&"spawn_center", _spawn_center)
+	_process_material.set_shader_parameter(&"sea_level", _surface_level)
 	_process_material.set_shader_parameter(&"camera_water_depth", _camera_water_depth)
 	_apply_runtime_state()
 
@@ -91,8 +95,15 @@ func set_camera(camera: Camera3D) -> void:
 
 func set_sea_level(value: float) -> void:
 	_sea_level = value
+	_surface_level = value
 	if _process_material:
 		_process_material.set_shader_parameter(&"sea_level", _sea_level)
+
+
+func sync_from_water_state(state: WaterSurfaceState) -> void:
+	_water_state = state
+	if state != null:
+		_sea_level = state.sea_level
 
 
 func set_current(wind_t: float, current_dir_xz: Vector2) -> void:
@@ -220,3 +231,9 @@ func _compute_spawn_center(camera_pos: Vector3) -> Vector3:
 		roundf(camera_pos.y / cell) * cell,
 		roundf(camera_pos.z / cell) * cell
 	)
+
+
+func _sample_surface_level(world_pos: Vector3) -> float:
+	if _water_state != null and _water_state.can_sample_height():
+		return _water_state.sample_height(world_pos, _sea_level)
+	return _sea_level

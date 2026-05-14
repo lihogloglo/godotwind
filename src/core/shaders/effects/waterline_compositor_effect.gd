@@ -15,12 +15,11 @@ const FEATURE_ABSORPTION_FOG := 1
 const FEATURE_SNELL := 2
 const FEATURE_WOBBLE := 8
 const FEATURE_PARTICLES := 16
-const FEATURE_MENISCUS_REFRACTION := 32
 const FEATURE_CAUSTICS := 64
 const QUALITY_LOW := 0
 const QUALITY_MEDIUM := 1
 const QUALITY_HIGH := 2
-const QUALITY_LOW_FEATURE_FLAGS := FEATURE_ABSORPTION_FOG | FEATURE_MENISCUS_REFRACTION
+const QUALITY_LOW_FEATURE_FLAGS := FEATURE_ABSORPTION_FOG
 const QUALITY_MEDIUM_FEATURE_FLAGS := QUALITY_LOW_FEATURE_FLAGS | FEATURE_SNELL | FEATURE_WOBBLE
 const QUALITY_HIGH_FEATURE_FLAGS := QUALITY_MEDIUM_FEATURE_FLAGS | FEATURE_CAUSTICS
 const RECEIVER_SOURCE_CAPTURE_DIRECT := 0
@@ -58,6 +57,13 @@ var _shore_wave_steepness: float = 0.5
 var _water_tint: Vector3 = Vector3(0.02, 0.04, 0.06)
 var _absorption_sigma: Vector3 = Vector3(0.12, 0.03, 0.018)
 var _caustics_strength: float = 1.0
+var _render_mesh_mode: int = 0
+var _render_mesh_origin: Vector2 = Vector2.ZERO
+var _render_clipmap_base_quad_size: float = 1.0
+var _render_clipmap_ring_vertex_count: int = 0
+var _render_clipmap_ring_count: int = 0
+var _render_projected_grid_dim: int = 0
+var _render_projected_grid_overscan: float = 1.0
 var _probe_strength: float = 0.85
 var _debug_mode: int = 0
 var _ocean_time: float = 0.0
@@ -74,6 +80,10 @@ var _particle_noise_scale: float = 0.70
 var _particle_density: float = 0.15
 var _particle_near_gate_m: float = 1.5
 var _particle_far_gate_m: float = 95.0
+var _receiver_optical_max_path_m: float = 120.0
+var _receiver_surface_visual_depth_m: float = 60.0
+var _receiver_debug_depth_scale_m: float = 60.0
+var _receiver_inscatter_strength: float = 0.32
 var _last_perf_frame: int = -1
 var _last_scene_copy_active: bool = false
 var _last_perf_snapshot: Dictionary = {
@@ -198,6 +208,13 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	_water_tint = state.absorption_tint
 	_absorption_sigma = state.absorption_sigma
 	_caustics_strength = state.underwater_caustics_strength
+	_render_mesh_mode = state.render_mesh_mode
+	_render_mesh_origin = state.render_mesh_origin
+	_render_clipmap_base_quad_size = state.render_clipmap_base_quad_size
+	_render_clipmap_ring_vertex_count = state.render_clipmap_ring_vertex_count
+	_render_clipmap_ring_count = state.render_clipmap_ring_count
+	_render_projected_grid_dim = state.render_projected_grid_dim
+	_render_projected_grid_overscan = state.render_projected_grid_overscan
 	_ocean_time = state.ocean_time
 	_map_scales = state.map_scales
 	_wave_scale = state.wave_scale
@@ -231,8 +248,8 @@ func set_debug_mode(value: int) -> void:
 	_debug_mode = clampi(value, 0, 15)
 
 
-## Sets the stable water-body datum used only for whole-pass activation.
-## The compute shader samples the animated wave surface for per-pixel optics.
+## Sets the water-body datum used only for whole-pass activation. The compute
+## shader samples the animated wave surface for per-pixel optics.
 func set_activation_water_level(value: float) -> void:
 	_camera_water_level = value
 
@@ -288,8 +305,10 @@ func get_quality_tier() -> int:
 	return _quality_tier
 
 
-func set_receiver_source_mode(mode: int) -> void:
-	_receiver_source_mode = clampi(mode, RECEIVER_SOURCE_CAPTURE_DIRECT, RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER)
+func set_receiver_source_mode(_mode: int) -> void:
+	# Receiver refraction is now a single water-surface replacement path.
+	# Keep the setter for existing callers, but do not re-enable direct overlays.
+	_receiver_source_mode = RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER
 
 
 func set_underwater_particle_params(noise_scale: float, density: float, near_gate_m: float, far_gate_m: float) -> void:
@@ -314,8 +333,6 @@ func _feature_bit(feature_name: StringName) -> int:
 			return FEATURE_WOBBLE
 		&"particles":
 			return FEATURE_PARTICLES
-		&"meniscus_refraction":
-			return FEATURE_MENISCUS_REFRACTION
 		&"caustics":
 			return FEATURE_CAUSTICS
 		_:
@@ -698,6 +715,18 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_sun_direction.y)
 	data.append(_sun_direction.z)
 	data.append(_sun_visibility)
+	data.append(float(_render_mesh_mode))
+	data.append(_render_mesh_origin.x)
+	data.append(_render_mesh_origin.y)
+	data.append(_render_clipmap_base_quad_size)
+	data.append(float(_render_clipmap_ring_vertex_count))
+	data.append(float(_render_clipmap_ring_count))
+	data.append(float(_render_projected_grid_dim))
+	data.append(_render_projected_grid_overscan)
+	data.append(_receiver_optical_max_path_m)
+	data.append(_receiver_surface_visual_depth_m)
+	data.append(_receiver_debug_depth_scale_m)
+	data.append(_receiver_inscatter_strength)
 
 	var projection: Projection = scene_data.get_cam_projection()
 	for col in 4:
@@ -750,6 +779,8 @@ func _refresh_timestamp_snapshot() -> void:
 		"source_size": _external_source_size,
 		"particle_noise_scale": _particle_noise_scale,
 		"particle_density": _particle_density,
+		"receiver_optical_max_path_m": _receiver_optical_max_path_m,
+		"receiver_debug_depth_scale_m": _receiver_debug_depth_scale_m,
 	}
 
 

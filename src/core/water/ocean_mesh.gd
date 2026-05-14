@@ -23,6 +23,7 @@ const HIGH_RING_VERTEX_COUNT: int = 80
 # and ray-intersects the water plane. 192 = ~36k vertices, kept as a stable
 # comparison path while FFT clipmap density is tuned independently.
 const PROJECTED_GRID_DIM: int = 192
+const PROJECTED_GRID_OVERSCAN: float = 1.15
 
 enum QualityMode { FLAT, HIGH }
 # MeshMode is independent of QualityMode. CLIPMAP is the 11-ring concentric
@@ -454,6 +455,30 @@ func update_position(center: Vector3) -> void:
 
 func get_mesh_mode() -> MeshMode:
 	return _mesh_mode
+
+
+func get_clipmap_origin() -> Vector2:
+	return Vector2(global_position.x, global_position.z)
+
+
+func get_clipmap_base_quad_size() -> float:
+	return _clipmap_base_quad_size()
+
+
+func get_clipmap_ring_vertex_count() -> int:
+	return _clipmap_ring_vertex_count()
+
+
+func get_clipmap_ring_count() -> int:
+	return _clipmap_ring_count()
+
+
+func get_projected_grid_dim() -> int:
+	return PROJECTED_GRID_DIM
+
+
+func get_projected_grid_overscan() -> float:
+	return PROJECTED_GRID_OVERSCAN
 
 
 func _mesh_mode_name() -> String:

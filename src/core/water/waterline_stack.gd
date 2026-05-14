@@ -132,7 +132,7 @@ func process_stack(_delta: float, main_viewport_size: Vector2i = Vector2i.ZERO) 
 		and state.water_body_id != WaterSurfaceState.WATER_BODY_NONE
 		and state.coverage_available
 	)
-	var sea_level: float = state.sea_level if state != null else ProjectSettings.get_setting("ocean/sea_level", 0.0)
+	var activation_water_level := _get_activation_water_level(state)
 
 	_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask)
 	_prewater_capture.near_water_capture_fade_start_m = DEFAULT_NEAR_WATER_FADE_START_M
@@ -140,14 +140,14 @@ func process_stack(_delta: float, main_viewport_size: Vector2i = Vector2i.ZERO) 
 	_prewater_capture.set_capture_enabled(active_water)
 	_prewater_capture.set_blend_factor(1.0 if active_water else 0.0)
 	_prewater_capture.set_resolution_scale(_get_resolution_scale())
-	_prewater_capture.set_activation_water_level(sea_level)
+	_prewater_capture.set_activation_water_level(activation_water_level)
 	_prewater_capture.update_capture(_get_safe_viewport_size(main_viewport_size))
 
 	var activation_fade := _prewater_capture.get_activation_fade()
 	var effect_active := active_water and activation_fade > 0.001
 	_set_effect_active(effect_active, activation_fade if effect_active else 0.0)
 	if _waterline_effect.has_method("set_activation_water_level"):
-		_waterline_effect.call("set_activation_water_level", sea_level)
+		_waterline_effect.call("set_activation_water_level", activation_water_level)
 	if _waterline_effect.has_method("set_near_water_fade_start_distance"):
 		_waterline_effect.call("set_near_water_fade_start_distance", DEFAULT_NEAR_WATER_FADE_START_M)
 	if _waterline_effect.has_method("set_near_water_activation_distance"):
@@ -255,6 +255,13 @@ func _get_water_state() -> WaterSurfaceState:
 	if result is WaterSurfaceState:
 		return result
 	return null
+
+
+func _get_activation_water_level(state: WaterSurfaceState) -> float:
+	var fallback: float = state.sea_level if state != null else ProjectSettings.get_setting("ocean/sea_level", 0.0)
+	if state != null and _camera != null and is_instance_valid(_camera) and state.can_sample_height():
+		return state.sample_height(_camera.global_position, fallback)
+	return fallback
 
 
 func _get_environment() -> Environment:
