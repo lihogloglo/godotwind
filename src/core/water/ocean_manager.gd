@@ -1040,6 +1040,45 @@ func get_absorption_density() -> float:
 	return _surface_absorption_density
 
 
+func get_water_visibility_distance() -> float:
+	return _optical_profile.visibility_distance_m
+
+
+func set_water_visibility_distance(value: float) -> void:
+	_optical_profile.visibility_distance_m = clampf(
+		value,
+		WaterOpticalProfile.MIN_VISIBILITY_M,
+		WaterOpticalProfile.MAX_VISIBILITY_M
+	)
+	_sync_optical_cache_from_profile()
+	_push_current_absorption_to_material()
+
+
+func get_water_scattering_strength() -> float:
+	return _optical_profile.scattering_strength
+
+
+func set_water_scattering_strength(value: float) -> void:
+	_optical_profile.scattering_strength = clampf(value, 0.0, 1.0)
+	_sync_optical_cache_from_profile()
+	_push_current_absorption_to_material()
+
+
+func get_water_scattering_color() -> Color:
+	return _optical_profile.scattering_color
+
+
+func set_water_scattering_color(value: Color) -> void:
+	_optical_color_override_enabled = true
+	_optical_profile.scattering_color = value
+	_sync_optical_cache_from_profile()
+	_push_current_absorption_to_material()
+
+
+func get_water_optical_profile() -> WaterOpticalProfile:
+	return _optical_profile.duplicate_profile()
+
+
 func is_surface_ssr_enabled() -> bool:
 	return _surface_ssr_enabled
 
@@ -1051,7 +1090,8 @@ func set_surface_ssr_enabled(enabled: bool) -> void:
 
 func set_absorption_density(value: float) -> void:
 	_surface_absorption_density = clampf(value, 0.01, 2.0)
-	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _surface_absorption_density
+	_optical_profile.visibility_distance_m = _visibility_from_legacy_density(_surface_absorption_density)
+	_sync_optical_cache_from_profile()
 	_push_current_absorption_to_material()
 
 
@@ -1061,13 +1101,16 @@ func get_absorption_tint_color() -> Color:
 
 func set_absorption_tint_color(value: Color) -> void:
 	_absorption_tint_override_enabled = true
+	_optical_color_override_enabled = true
 	_absorption_tint_override = value
-	_current_absorption_tint = Vector3(value.r, value.g, value.b)
+	_optical_profile.set_medium_color(value)
+	_sync_optical_cache_from_profile()
 	_push_current_absorption_to_material()
 
 
 func clear_absorption_tint_override() -> void:
 	_absorption_tint_override_enabled = false
+	_optical_color_override_enabled = false
 	reset_weather()
 
 
@@ -1167,6 +1210,7 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.shore_wave_frequency = _current_shore_wave_frequency
 	state.shore_wave_speed = _current_shore_wave_speed
 	state.shore_wave_steepness = _current_shore_wave_steepness
+	state.optical_profile = _optical_profile.duplicate_profile()
 	state.absorption_tint = _current_absorption_tint
 	state.absorption_sigma = _current_absorption_sigma
 	state.absorption_depth_falloff = get_absorption_depth_falloff()
@@ -1716,7 +1760,9 @@ const _DEEP_CALM := Color(0.02, 0.04, 0.06)
 const _DEEP_STORM := Color(0.01, 0.02, 0.03)
 const _SURFACE_ABSORPTION_RATE := Vector3(0.4, 0.1, 0.06)
 const _SURFACE_ABSORPTION_DENSITY_DEFAULT := 0.2
+const _SURFACE_EXTINCTION_BIAS := Vector3(1.0, 0.25, 0.15)
 
+var _optical_profile: WaterOpticalProfile = WaterOpticalProfile.new()
 var _current_absorption_tint := Vector3(_DEEP_CALM.r, _DEEP_CALM.g, _DEEP_CALM.b)
 var _current_absorption_sigma := _SURFACE_ABSORPTION_RATE * _SURFACE_ABSORPTION_DENSITY_DEFAULT
 var _current_underwater_caustics_strength: float = 1.0
@@ -1724,6 +1770,7 @@ var _surface_ssr_enabled: bool = true
 var _surface_absorption_density: float = _SURFACE_ABSORPTION_DENSITY_DEFAULT
 var _absorption_tint_override_enabled: bool = false
 var _absorption_tint_override: Color = _DEEP_CALM
+var _optical_color_override_enabled: bool = false
 
 func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) -> void:
 	if not _ocean_mesh:
@@ -1736,8 +1783,9 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	var storm_t: float = clampf(result.cloud_coverage, 0.0, 1.0)
 	var shallow_col: Color = _SHALLOW_CALM.lerp(_SHALLOW_STORM, storm_t)
 	var deep_col: Color = _resolve_absorption_tint(_DEEP_CALM.lerp(_DEEP_STORM, storm_t))
-	_current_absorption_tint = Vector3(deep_col.r, deep_col.g, deep_col.b)
-	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _surface_absorption_density
+	if not _optical_color_override_enabled:
+		_optical_profile.set_medium_color(deep_col)
+	_sync_optical_cache_from_profile()
 	_current_underwater_caustics_strength = lerpf(1.0, 0.35, storm_t)
 	mat.set_shader_parameter("color_shallow", Vector3(shallow_col.r, shallow_col.g, shallow_col.b))
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)
@@ -1780,6 +1828,9 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 func _push_surface_optical_uniforms(mat: ShaderMaterial) -> void:
 	mat.set_shader_parameter("absorption_rate", _SURFACE_ABSORPTION_RATE)
 	mat.set_shader_parameter("absorption_density", _surface_absorption_density)
+	mat.set_shader_parameter("extinction_sigma", _current_absorption_sigma)
+	mat.set_shader_parameter("medium_color", _current_absorption_tint)
+	mat.set_shader_parameter("visibility_distance_m", _optical_profile.visibility_distance_m)
 	mat.set_shader_parameter("ssr_enabled", _surface_ssr_enabled)
 
 
@@ -1804,6 +1855,32 @@ func _push_surface_ssr_to_material() -> void:
 
 func _resolve_absorption_tint(weather_deep: Color) -> Color:
 	return _absorption_tint_override if _absorption_tint_override_enabled else weather_deep
+
+
+func _sync_optical_cache_from_profile() -> void:
+	var turbidity := clampf(_optical_profile.scattering_strength, 0.0, 1.0)
+	_optical_profile.extinction_color_bias = _SURFACE_EXTINCTION_BIAS.lerp(Vector3(1.0, 1.0, 1.0), turbidity)
+	_current_absorption_tint = _optical_profile.get_medium_color()
+	_current_absorption_sigma = _optical_profile.get_extinction_sigma()
+	_surface_absorption_density = _legacy_density_from_visibility(_optical_profile.visibility_distance_m)
+
+
+static func _visibility_from_legacy_density(density: float) -> float:
+	var safe_density := maxf(density, 0.001)
+	return clampf(
+		-log(WaterOpticalProfile.TARGET_TRANSMITTANCE) / (_SURFACE_ABSORPTION_RATE.x * safe_density),
+		WaterOpticalProfile.MIN_VISIBILITY_M,
+		WaterOpticalProfile.MAX_VISIBILITY_M
+	)
+
+
+static func _legacy_density_from_visibility(visibility_distance_m: float) -> float:
+	var safe_visibility := maxf(visibility_distance_m, WaterOpticalProfile.MIN_VISIBILITY_M)
+	return clampf(
+		-log(WaterOpticalProfile.TARGET_TRANSMITTANCE) / (_SURFACE_ABSORPTION_RATE.x * safe_visibility),
+		0.01,
+		2.0
+	)
 
 
 func _push_shore_wave_timing_uniforms(mat: ShaderMaterial) -> void:
@@ -1831,8 +1908,9 @@ func reset_weather() -> void:
 		return
 
 	var deep_col := _resolve_absorption_tint(_DEEP_CALM)
-	_current_absorption_tint = Vector3(deep_col.r, deep_col.g, deep_col.b)
-	_current_absorption_sigma = _SURFACE_ABSORPTION_RATE * _surface_absorption_density
+	if not _optical_color_override_enabled:
+		_optical_profile.set_medium_color(deep_col)
+	_sync_optical_cache_from_profile()
 	_current_underwater_caustics_strength = 1.0
 	mat.set_shader_parameter("color_shallow", Vector3(_SHALLOW_CALM.r, _SHALLOW_CALM.g, _SHALLOW_CALM.b))
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)

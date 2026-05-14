@@ -75,6 +75,9 @@ uniform sampler2D DEPTH_TEXTURE  : hint_depth_texture, filter_nearest;
 // R absorbed fastest, G/B slower — matches real ocean spectrum.
 uniform vec3 absorption_rate = vec3(0.4, 0.1, 0.06);
 uniform float absorption_density : hint_range(0.01, 2.0) = 0.3;
+uniform vec3 extinction_sigma = vec3(0.08, 0.02, 0.012);
+uniform vec3 medium_color : source_color = vec3(0.02, 0.04, 0.06);
+uniform float visibility_distance_m : hint_range(0.5, 500.0) = 57.5;
 // Clamp water thickness to this many meters for Beer-Lambert absorption and
 // debug scaling. Depths beyond this remain real scene geometry; only a near-zero
 // reversed-Z depth sample means far-plane/sky.
@@ -376,14 +379,19 @@ void fragment() {
 	bool is_sky_or_far = bg_ndc_z <= 1e-5;
 	float raw_thickness = max_visible_depth;
 	float bg_view_z = surf_view.z - max_visible_depth;
+	bool bg_below_water = true;
 	if (!is_sky_or_far) {
 		vec3 bg_ndc = vec3(SCREEN_UV * 2.0 - 1.0, bg_ndc_z);
 		vec4 bg_view4 = INV_PROJECTION_MATRIX * vec4(bg_ndc, 1.0);
 		vec3 bg_view = bg_view4.xyz / bg_view4.w;
 		bg_view_z = bg_view.z;
 		raw_thickness = max(0.0, surf_view.z - bg_view_z);
+		vec4 bg_world4 = INV_VIEW_MATRIX * vec4(bg_view, 1.0);
+		float bg_world_y = bg_world4.y / bg_world4.w;
+		bg_below_water = bg_world_y <= sea_level + 0.03;
 	}
-	float water_thickness = min(raw_thickness, max_visible_depth);
+	bool water_medium_hit = is_sky_or_far || bg_below_water;
+	float water_thickness = water_medium_hit ? min(raw_thickness, max_visible_depth) : 0.0;
 
 	// Read gradient and foam from normal maps (all cascades)
 	vec3 gradient = vec3(0);
@@ -553,7 +561,7 @@ void fragment() {
 		: 0.0;
 	float refr_debug_reject = refr_valid ? (1.0 - refr_color_guard) : 0.0;
 	float effective_water_thickness = mix(water_thickness, optical_water_thickness, refr_sample_weight);
-	vec3 transmittance = exp(-effective_water_thickness * absorption_rate * absorption_density);
+	vec3 transmittance = exp(-effective_water_thickness * extinction_sigma);
 	float depth_t = is_sky_or_far ? 1.0 : clamp(effective_water_thickness / max_visible_depth, 0.0, 1.0);
 	vec3 base_water = mix(color_shallow, color_deep, depth_t);
 
@@ -584,7 +592,7 @@ void fragment() {
 	// Fresnel blend: steep angles show the refracted/tinted scene, grazing
 	// angles lean back toward the lit surface color and sky tint.
 	vec3 source_col = mix(straight_source_col, refr_source_col, refr_sample_weight);
-	vec3 refracted_col = source_col * transmittance + color_deep * (vec3(1.0) - transmittance);
+	vec3 refracted_col = source_col * transmittance + medium_color * (vec3(1.0) - transmittance);
 	vec3 water_col = mix(refracted_col, base_water, clamp(fresnel, 0.0, 1.0));
 	water_col = mix(water_col, color_sky_tint, fresnel * sky_tint_strength);
 
@@ -704,7 +712,6 @@ void fragment() {
 		ALBEDO = final_col;
 		EMISSION = color_sub_surface * scatter * sss_emission_strength * (1.0 - foam_factor * 0.5);
 	}
-	ALPHA = 1.0;
 	// Foam perturbs normal for rough micro-detail (foam isn't mirror-smooth)
 	if (foam_factor > 0.01) {
 		vec3 foam_normal_perturb = vec3(

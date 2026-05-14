@@ -21,12 +21,12 @@ layout(std430, set = 0, binding = 4) readonly buffer WaterlineState {
 	vec4 map_scales[MAX_CASCADES];
 	vec4 shore_mask_bounds;
 	vec4 shore_params0; // x=fade, y=amp, z=freq, w=speed
-	vec4 shore_params1; // x=steep, yzw=water_tint
+	vec4 shore_params1; // x=steep, yzw=medium asymptote
 	vec4 optical_params; // xyz=sigma, w=caustics strength
 	vec4 sun_params; // xyz=toward sun, w=visibility
 	vec4 render_surface0; // x=mesh_mode, y=clipmap_origin_x, z=clipmap_origin_z, w=clipmap_base_quad
 	vec4 render_surface1; // x=clipmap_ring_vertices, y=clipmap_ring_count, z=projected_grid_dim, w=projected_overscan
-	vec4 receiver_optics; // x=max path, y=surface visual depth, z=debug depth scale, w=inscatter
+	vec4 receiver_optics; // x=max path, y=surface visual depth, z=debug depth scale, w=reserved
 	mat4 projection;
 	mat4 view;
 } state;
@@ -214,10 +214,6 @@ float receiver_surface_visual_depth() {
 
 float receiver_debug_depth_scale() {
 	return max(state.receiver_optics.z, 1.0);
-}
-
-float receiver_inscatter_strength() {
-	return max(state.receiver_optics.w, 0.0);
 }
 
 float luminance(vec3 color) {
@@ -1100,14 +1096,14 @@ OpticalSegment compute_optical_segment(vec3 ray_start, vec3 ray_end, vec3 surfac
 }
 
 
-MediumSample apply_water_medium(vec3 source_color, vec3 tint, vec3 sigma, float path_length_m, float inscatter_strength) {
+MediumSample apply_water_medium(vec3 source_color, vec3 tint, vec3 sigma, float path_length_m) {
 	MediumSample result;
 	float optical_path = min(max(path_length_m, 0.0), receiver_optical_max_path());
 	vec3 extinction = max(sigma, vec3(0.0));
 	result.transmittance = exp(-extinction * optical_path);
 	result.fog = clamp(1.0 - luminance(result.transmittance), 0.0, 1.0);
 	result.color = source_color * result.transmittance
-		+ tint * (vec3(1.0) - result.transmittance) * max(inscatter_strength, 0.0);
+		+ tint * (vec3(1.0) - result.transmittance);
 	return result;
 }
 
@@ -1565,7 +1561,7 @@ void main() {
 	}
 	float receiver_path_length = receiver_segment.valid > 0.001 ? receiver_segment.path_length_m : 0.0;
 	float receiver_vertical_depth = receiver_segment.valid > 0.001 ? receiver_segment.vertical_depth_m : water_depth;
-	MediumSample receiver_medium = apply_water_medium(source_color, tint, sigma, receiver_path_length, receiver_inscatter_strength());
+	MediumSample receiver_medium = apply_water_medium(source_color, tint, sigma, receiver_path_length);
 	vec3 water_color = source_color;
 	if (absorption_enabled) {
 		water_color = receiver_medium.color;
@@ -1700,7 +1696,7 @@ void main() {
 				water_travel = length(underwater_target - cam_pos);
 			}
 		}
-		MediumSample underwater_medium = apply_water_medium(wobbled_scene, tint, sigma, water_travel, receiver_inscatter_strength());
+		MediumSample underwater_medium = apply_water_medium(wobbled_scene, tint, sigma, water_travel);
 		float underwater_fog = underwater_medium.fog;
 		underwater_color = absorption_enabled
 			? underwater_medium.color

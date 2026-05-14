@@ -77,6 +77,12 @@ const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Storm", "wind": 0.7, "cloud": 0.75},
 	{"name": "Blizzard", "wind": 0.9, "cloud": 0.95},
 ]
+const OPTICAL_PRESETS: Array[Dictionary] = [
+	{"name": "Clear Sea", "visibility": 80.0, "scatter": 0.2, "color": Color(0.015, 0.055, 0.080)},
+	{"name": "Dark Coast", "visibility": 35.0, "scatter": 0.55, "color": Color(0.020, 0.040, 0.060)},
+	{"name": "Morrowind", "visibility": 16.0, "scatter": 0.80, "color": Color(0.050, 0.075, 0.055)},
+	{"name": "Muddy", "visibility": 3.0, "scatter": 1.0, "color": Color(0.180, 0.135, 0.070)},
+]
 
 var _camera: Camera3D = null
 var _world_env: WorldEnvironment = null
@@ -92,6 +98,7 @@ var _hud_label: RichTextLabel = null
 var _button_grid: GridContainer = null
 var _debug_button: Button = null
 var _weather_button: Button = null
+var _optical_preset_button: Button = null
 var _mesh_button: Button = null
 var _sun_button: Button = null
 var _wet_live_button: Button = null
@@ -128,6 +135,8 @@ var _wet_compositor_enabled: bool = false
 var _wet_debug_mode: int = 0
 var _wet_dry_rate: float = 0.1
 var _absorption_density: float = 0.2
+var _visibility_distance_m: float = 57.5
+var _scattering_strength: float = 1.0
 var _absorption_tint: Color = Color(0.02, 0.04, 0.06)
 var _absorption_tint_picker: ColorPickerButton = null
 var _syncing_ocean_optics_ui: bool = false
@@ -169,6 +178,7 @@ var _uw_profile_accum_ms: float = 0.0
 var _uw_profile_results: Array[String] = []
 var _wireframe_enabled: bool = false
 var _current_weather: int = 0
+var _current_optical_preset: int = 0
 var _default_wave_scale: float = 1.0
 var _sun_low: bool = false
 var _help_visible: bool = true
@@ -413,7 +423,13 @@ func _sync_ocean_optics_from_manager() -> void:
 		return
 	if OceanManager.has_method("get_absorption_density"):
 		_absorption_density = float(OceanManager.get_absorption_density())
-	if OceanManager.has_method("get_absorption_tint_color"):
+	if OceanManager.has_method("get_water_visibility_distance"):
+		_visibility_distance_m = float(OceanManager.get_water_visibility_distance())
+	if OceanManager.has_method("get_water_scattering_strength"):
+		_scattering_strength = float(OceanManager.get_water_scattering_strength())
+	if OceanManager.has_method("get_water_scattering_color"):
+		_absorption_tint = OceanManager.get_water_scattering_color()
+	elif OceanManager.has_method("get_absorption_tint_color"):
 		_absorption_tint = OceanManager.get_absorption_tint_color()
 	elif OceanManager.has_method("get_absorption_tint"):
 		var tint: Vector3 = OceanManager.get_absorption_tint()
@@ -431,14 +447,36 @@ func _push_absorption_density_control() -> void:
 		return
 	if OceanManager.has_method("set_absorption_density"):
 		OceanManager.set_absorption_density(_absorption_density)
+	_sync_ocean_optics_from_manager()
+	_refresh_control_labels()
+
+
+func _push_visibility_distance_control() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("set_water_visibility_distance"):
+		OceanManager.set_water_visibility_distance(_visibility_distance_m)
+	_sync_ocean_optics_from_manager()
+	_refresh_control_labels()
+
+
+func _push_scattering_strength_control() -> void:
+	if not OceanManager:
+		return
+	if OceanManager.has_method("set_water_scattering_strength"):
+		OceanManager.set_water_scattering_strength(_scattering_strength)
+	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 
 
 func _push_absorption_tint_control() -> void:
 	if not OceanManager:
 		return
-	if OceanManager.has_method("set_absorption_tint_color"):
+	if OceanManager.has_method("set_water_scattering_color"):
+		OceanManager.set_water_scattering_color(_absorption_tint)
+	elif OceanManager.has_method("set_absorption_tint_color"):
 		OceanManager.set_absorption_tint_color(_absorption_tint)
+	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 
 
@@ -463,6 +501,7 @@ func _reset_absorption_tint_control() -> void:
 		return
 	if OceanManager.has_method("clear_absorption_tint_override"):
 		OceanManager.clear_absorption_tint_override()
+	_current_optical_preset = 0
 	_apply_weather_preset(_current_weather)
 
 
@@ -619,6 +658,9 @@ func _build_ui() -> void:
 	_weather_button = _add_button(_button_grid, "", func() -> void:
 		_apply_weather_preset((_current_weather + 1) % WEATHER_PRESETS.size())
 	)
+	_optical_preset_button = _add_button(_button_grid, "", func() -> void:
+		_apply_optical_preset((_current_optical_preset + 1) % OPTICAL_PRESETS.size())
+	)
 	_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_quality"))
 	_mesh_button = _add_button(_button_grid, "", Callable(self, "_toggle_mesh_mode"))
 	_ocean_surface_button = _add_button(_button_grid, "", Callable(self, "_toggle_ocean_surface_visible"))
@@ -630,17 +672,21 @@ func _build_ui() -> void:
 	_spray_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_spray_quality"))
 	_sun_button = _add_button(_button_grid, "", Callable(self, "_toggle_sun_angle"))
 	_add_button(_button_grid, "Center Shore", Callable(self, "_teleport_to_shore_probe"))
-	_add_button(_button_grid, "Reset Tint", Callable(self, "_reset_absorption_tint_control"))
-	var absorption_density_changed := func(val: float) -> void:
-		_absorption_density = val
-		_push_absorption_density_control()
-	_add_slider(ocean_tab, "muddiness", 0.01, 2.0, _absorption_density, absorption_density_changed, 0.01)
+	_add_button(_button_grid, "Clear Water", Callable(self, "_reset_absorption_tint_control"))
+	var visibility_changed := func(val: float) -> void:
+		_visibility_distance_m = val
+		_push_visibility_distance_control()
+	_add_slider(ocean_tab, "visibility m", 1.0, 120.0, _visibility_distance_m, visibility_changed, 0.5)
+	var scatter_changed := func(val: float) -> void:
+		_scattering_strength = val
+		_push_scattering_strength_control()
+	_add_slider(ocean_tab, "turbidity", 0.0, 1.0, _scattering_strength, scatter_changed, 0.01)
 	var absorption_tint_changed := func(color: Color) -> void:
 		if _syncing_ocean_optics_ui:
 			return
 		_absorption_tint = color
 		_push_absorption_tint_control()
-	_absorption_tint_picker = _add_color_picker(ocean_tab, "water tint", _absorption_tint, absorption_tint_changed)
+	_absorption_tint_picker = _add_color_picker(ocean_tab, "scatter color", _absorption_tint, absorption_tint_changed)
 
 	var buoyancy_tab := VBoxContainer.new()
 	buoyancy_tab.name = "Buoy"
@@ -856,6 +902,9 @@ func _refresh_control_labels() -> void:
 	if _weather_button:
 		var preset: Dictionary = WEATHER_PRESETS[_current_weather]
 		_weather_button.text = "Weather: %s" % preset["name"]
+	if _optical_preset_button:
+		var preset: Dictionary = OPTICAL_PRESETS[_current_optical_preset]
+		_optical_preset_button.text = "Optics: %s" % preset["name"]
 	if _mesh_button:
 		var mode_text := "Clipmap"
 		if OceanManager and OceanManager.is_initialized() and OceanManager.has_method("get_mesh_mode"):
@@ -1358,8 +1407,9 @@ func _update_hud() -> void:
 		"on" if _environment_ssr_enabled else "off",
 	])
 	var sigma := OceanManager.get_absorption_sigma() if OceanManager and OceanManager.has_method("get_absorption_sigma") else Vector3.ZERO
-	lines.append("optics density=%.2f  tint=#%s  sigma=(%.3f %.3f %.3f)" % [
-		_absorption_density,
+	lines.append("optics vis=%.1fm  turb=%.2f  tint=#%s  sigma=(%.3f %.3f %.3f)" % [
+		_visibility_distance_m,
+		_scattering_strength,
 		_absorption_tint.to_html(false),
 		sigma.x,
 		sigma.y,
@@ -1456,9 +1506,35 @@ func _apply_weather_preset(idx: int) -> void:
 	result.storm_direction = Vector3(sin(wind_rad), 0.0, cos(wind_rad))
 	OceanManager.apply_weather(result)
 	_apply_flat_water_override(bool(preset.get("flat_water", false)))
+	_apply_optical_preset(_current_optical_preset)
 	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 	Log.info("water", "[Ocean Lab] weather preset %s wind=%.2f" % [preset["name"], preset["wind"]])
+
+
+func _apply_optical_preset(idx: int) -> void:
+	if idx < 0 or idx >= OPTICAL_PRESETS.size():
+		return
+	_current_optical_preset = idx
+	if not OceanManager or not OceanManager.is_initialized():
+		return
+	var preset: Dictionary = OPTICAL_PRESETS[idx]
+	_visibility_distance_m = float(preset["visibility"])
+	_scattering_strength = float(preset["scatter"])
+	_absorption_tint = preset["color"]
+	if OceanManager.has_method("set_water_visibility_distance"):
+		OceanManager.set_water_visibility_distance(_visibility_distance_m)
+	if OceanManager.has_method("set_water_scattering_strength"):
+		OceanManager.set_water_scattering_strength(_scattering_strength)
+	if OceanManager.has_method("set_water_scattering_color"):
+		OceanManager.set_water_scattering_color(_absorption_tint)
+	_sync_ocean_optics_from_manager()
+	_refresh_control_labels()
+	Log.info("water", "[Ocean Lab] optics preset %s visibility=%.1fm turbidity=%.2f" % [
+		preset["name"],
+		_visibility_distance_m,
+		_scattering_strength,
+	])
 
 
 func _apply_flat_water_override(enabled: bool) -> void:

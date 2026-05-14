@@ -31,6 +31,7 @@ var shore_wave_frequency: float = 0.1
 var shore_wave_speed: float = 0.4
 var shore_wave_steepness: float = 0.58
 
+var optical_profile: WaterOpticalProfile = WaterOpticalProfile.new()
 var absorption_tint: Vector3 = Vector3(0.02, 0.04, 0.06)
 var absorption_sigma: Vector3 = Vector3(0.08, 0.02, 0.012)
 var absorption_depth_falloff: float = 20.0

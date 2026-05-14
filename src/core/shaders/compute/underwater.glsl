@@ -10,12 +10,12 @@ layout(set = 0, binding = 2) uniform sampler2D source_color_tex;
 layout(std430, set = 0, binding = 3) readonly buffer UnderwaterState {
 	mat4 inv_projection;
 	mat4 inv_view;
-	vec4 water_tint; // rgb=tint
+	vec4 water_tint; // rgb=medium asymptote
 } state;
 
 layout(push_constant, std430) uniform Params {
 	vec4 screen; // x=width, y=height, z=time, w=blend
-	vec4 water; // x=sea_level, y=max_path_m, z=inscatter, w=wobble_strength
+	vec4 water; // x=sea_level, y=max_path_m, z=reserved, w=wobble_strength
 	vec4 sigma_debug; // xyz=absorption sigma, w=debug mode
 	vec4 flags; // x=absorption, y=wobble, z=source_valid, w=reserved
 } pc;
@@ -26,7 +26,6 @@ layout(push_constant, std430) uniform Params {
 #define blend_factor pc.screen.w
 #define sea_level pc.water.x
 #define max_path_m pc.water.y
-#define inscatter_strength pc.water.z
 #define wobble_strength pc.water.w
 #define debug_mode int(pc.sigma_debug.w + 0.5)
 #define absorption_enabled (pc.flags.x > 0.5)
@@ -153,7 +152,7 @@ void main() {
 	vec3 sigma = absorption_enabled ? pc.sigma_debug.xyz : vec3(0.0);
 	vec3 transmittance = exp(-sigma * path_len);
 	vec3 tint = max(state.water_tint.rgb, vec3(0.0));
-	vec3 medium = source * transmittance + tint * (vec3(1.0) - transmittance) * inscatter_strength;
+	vec3 medium = source * transmittance + tint * (vec3(1.0) - transmittance);
 	vec3 final_color = mix(original.rgb, medium, clamp(blend_factor, 0.0, 1.0));
 
 	if (debug_mode > 0) {

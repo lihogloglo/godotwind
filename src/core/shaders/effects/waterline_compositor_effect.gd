@@ -54,7 +54,7 @@ var _shore_wave_amplitude: float = 0.0
 var _shore_wave_frequency: float = 0.1
 var _shore_wave_speed: float = 0.4
 var _shore_wave_steepness: float = 0.5
-var _water_tint: Vector3 = Vector3(0.02, 0.04, 0.06)
+var _medium_color: Vector3 = Vector3(0.02, 0.04, 0.06)
 var _absorption_sigma: Vector3 = Vector3(0.12, 0.03, 0.018)
 var _caustics_strength: float = 1.0
 var _render_mesh_mode: int = 0
@@ -83,7 +83,6 @@ var _particle_far_gate_m: float = 95.0
 var _receiver_optical_max_path_m: float = 120.0
 var _receiver_surface_visual_depth_m: float = 60.0
 var _receiver_debug_depth_scale_m: float = 60.0
-var _receiver_inscatter_strength: float = 0.32
 var _last_perf_frame: int = -1
 var _last_scene_copy_active: bool = false
 var _last_perf_snapshot: Dictionary = {
@@ -205,8 +204,8 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	_sea_level = state.sea_level
 	_displacement_rid = state.displacement_texture_rd
 	_normal_rid = state.normal_texture_rd
-	_water_tint = state.absorption_tint
-	_absorption_sigma = state.absorption_sigma
+	_medium_color = state.optical_profile.get_medium_color()
+	_absorption_sigma = state.optical_profile.get_extinction_sigma()
 	_caustics_strength = state.underwater_caustics_strength
 	_render_mesh_mode = state.render_mesh_mode
 	_render_mesh_origin = state.render_mesh_origin
@@ -704,9 +703,9 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_shore_wave_frequency)
 	data.append(_shore_wave_speed)
 	data.append(_shore_wave_steepness)
-	data.append(_water_tint.x)
-	data.append(_water_tint.y)
-	data.append(_water_tint.z)
+	data.append(_medium_color.x)
+	data.append(_medium_color.y)
+	data.append(_medium_color.z)
 	data.append(_absorption_sigma.x)
 	data.append(_absorption_sigma.y)
 	data.append(_absorption_sigma.z)
@@ -726,7 +725,7 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_receiver_optical_max_path_m)
 	data.append(_receiver_surface_visual_depth_m)
 	data.append(_receiver_debug_depth_scale_m)
-	data.append(_receiver_inscatter_strength)
+	data.append(0.0)
 
 	var projection: Projection = scene_data.get_cam_projection()
 	for col in 4:

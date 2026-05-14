@@ -24,10 +24,9 @@ var _state_buffer: RID
 var _state_buffer_size: int = 0
 
 var _sea_level: float = 0.0
-var _water_tint: Vector3 = Vector3(0.02, 0.04, 0.06)
+var _medium_color: Vector3 = Vector3(0.02, 0.04, 0.06)
 var _absorption_sigma: Vector3 = Vector3(0.08, 0.02, 0.012)
 var _max_path_m: float = 120.0
-var _inscatter_strength: float = 0.32
 var _wobble_strength: float = 0.0025
 var _debug_mode: int = 0
 var _quality_tier: int = QUALITY_MEDIUM
@@ -99,8 +98,8 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	if state == null:
 		return
 	_sea_level = state.sea_level
-	_water_tint = state.absorption_tint
-	_absorption_sigma = state.absorption_sigma
+	_medium_color = state.optical_profile.get_medium_color()
+	_absorption_sigma = state.optical_profile.get_extinction_sigma()
 
 
 func sync_from_ocean(ocean_manager: Node, _ocean_material: ShaderMaterial) -> void:
@@ -246,7 +245,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(blend_factor)
 	pc.append(_sea_level)
 	pc.append(_max_path_m)
-	pc.append(_inscatter_strength)
+	pc.append(0.0)
 	pc.append(_wobble_strength)
 	pc.append(_absorption_sigma.x)
 	pc.append(_absorption_sigma.y)
@@ -409,9 +408,9 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(inv_view.origin.y)
 	data.append(inv_view.origin.z)
 	data.append(1.0)
-	data.append(_water_tint.x)
-	data.append(_water_tint.y)
-	data.append(_water_tint.z)
+	data.append(_medium_color.x)
+	data.append(_medium_color.y)
+	data.append(_medium_color.z)
 	data.append(0.0)
 	return data
 
