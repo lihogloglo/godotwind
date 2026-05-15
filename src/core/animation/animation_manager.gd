@@ -257,12 +257,48 @@ func _resolve_fallback_state(state: StringName) -> StringName:
 		&"Run": [&"Walk", &"Sprint"],
 		&"Sprint": [&"Run", &"Walk"],
 		&"WalkBack": [&"Walk", &"Idle"],
+		&"WalkLeft": [&"Walk", &"Idle"],
+		&"WalkRight": [&"Walk", &"Idle"],
+		&"WalkForwardLeft": [&"WalkLeft", &"Walk", &"Idle"],
+		&"WalkForwardRight": [&"WalkRight", &"Walk", &"Idle"],
+		&"WalkBackLeft": [&"WalkLeft", &"WalkBack", &"Walk", &"Idle"],
+		&"WalkBackRight": [&"WalkRight", &"WalkBack", &"Walk", &"Idle"],
 		&"RunBack": [&"Run", &"WalkBack", &"Walk"],
+		&"RunLeft": [&"Run", &"WalkLeft", &"Walk"],
+		&"RunRight": [&"Run", &"WalkRight", &"Walk"],
+		&"RunForwardLeft": [&"RunLeft", &"Run", &"WalkForwardLeft", &"WalkLeft", &"Walk"],
+		&"RunForwardRight": [&"RunRight", &"Run", &"WalkForwardRight", &"WalkRight", &"Walk"],
+		&"RunBackLeft": [&"RunLeft", &"RunBack", &"WalkBackLeft", &"WalkLeft", &"WalkBack", &"Walk"],
+		&"RunBackRight": [&"RunRight", &"RunBack", &"WalkBackRight", &"WalkRight", &"WalkBack", &"Walk"],
 		&"Jump": [&"Fall"],
 		&"Fall": [&"Jump"],
 		&"Crouch": [&"Idle"],
 		&"CrouchWalk": [&"Walk", &"Idle"],
 		&"CrouchBack": [&"CrouchWalk", &"Crouch", &"Idle"],
+		&"SneakForward": [&"CrouchWalk", &"Walk", &"Idle"],
+		&"SneakBack": [&"CrouchBack", &"CrouchWalk", &"Crouch", &"Idle"],
+		&"SneakLeft": [&"CrouchWalk", &"WalkLeft", &"Walk", &"Idle"],
+		&"SneakRight": [&"CrouchWalk", &"WalkRight", &"Walk", &"Idle"],
+		&"SneakForwardLeft": [&"SneakLeft", &"SneakForward", &"CrouchWalk", &"WalkLeft", &"Walk"],
+		&"SneakForwardRight": [&"SneakRight", &"SneakForward", &"CrouchWalk", &"WalkRight", &"Walk"],
+		&"SneakBackLeft": [&"SneakLeft", &"SneakBack", &"CrouchBack", &"CrouchWalk", &"WalkLeft", &"Walk"],
+		&"SneakBackRight": [&"SneakRight", &"SneakBack", &"CrouchBack", &"CrouchWalk", &"WalkRight", &"Walk"],
+		&"SwimWalkForward": [&"SwimForward", &"SwimIdle"],
+		&"SwimWalkBack": [&"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimWalkLeft": [&"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimWalkRight": [&"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimWalkForwardLeft": [&"SwimWalkLeft", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimWalkForwardRight": [&"SwimWalkRight", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimWalkBackLeft": [&"SwimWalkLeft", &"SwimWalkBack", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimWalkBackRight": [&"SwimWalkRight", &"SwimWalkBack", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimRunForward": [&"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimRunBack": [&"SwimWalkBack", &"SwimRunForward", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimRunLeft": [&"SwimWalkLeft", &"SwimRunForward", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimRunRight": [&"SwimWalkRight", &"SwimRunForward", &"SwimWalkForward", &"SwimForward", &"SwimIdle"],
+		&"SwimRunForwardLeft": [&"SwimRunLeft", &"SwimWalkForwardLeft", &"SwimWalkLeft", &"SwimRunForward", &"SwimForward"],
+		&"SwimRunForwardRight": [&"SwimRunRight", &"SwimWalkForwardRight", &"SwimWalkRight", &"SwimRunForward", &"SwimForward"],
+		&"SwimRunBackLeft": [&"SwimRunLeft", &"SwimRunBack", &"SwimWalkBackLeft", &"SwimWalkLeft", &"SwimForward"],
+		&"SwimRunBackRight": [&"SwimRunRight", &"SwimRunBack", &"SwimWalkBackRight", &"SwimWalkRight", &"SwimForward"],
 	}
 	for fb: StringName in FALLBACKS.get(state, []):
 		if fb in _state_animation_map:
@@ -493,10 +529,19 @@ func _create_locomotion_state_machine() -> AnimationNodeStateMachine:
 
 	# Add states (includes swimming/crouch/backward for MW compatibility)
 	var states := [&"Idle", &"Walk", &"Run", &"Sprint",
-		&"WalkBack", &"RunBack",
+		&"WalkBack", &"WalkLeft", &"WalkRight",
+		&"WalkForwardLeft", &"WalkForwardRight", &"WalkBackLeft", &"WalkBackRight",
+		&"RunBack", &"RunLeft", &"RunRight",
+		&"RunForwardLeft", &"RunForwardRight", &"RunBackLeft", &"RunBackRight",
 		&"Jump", &"Fall", &"Land",
 		&"SwimIdle", &"SwimForward",
-		&"Crouch", &"CrouchWalk", &"CrouchBack"]
+		&"SwimWalkForward", &"SwimWalkBack", &"SwimWalkLeft", &"SwimWalkRight",
+		&"SwimWalkForwardLeft", &"SwimWalkForwardRight", &"SwimWalkBackLeft", &"SwimWalkBackRight",
+		&"SwimRunForward", &"SwimRunBack", &"SwimRunLeft", &"SwimRunRight",
+		&"SwimRunForwardLeft", &"SwimRunForwardRight", &"SwimRunBackLeft", &"SwimRunBackRight",
+		&"Crouch", &"CrouchWalk", &"CrouchBack",
+		&"SneakForward", &"SneakBack", &"SneakLeft", &"SneakRight",
+		&"SneakForwardLeft", &"SneakForwardRight", &"SneakBackLeft", &"SneakBackRight"]
 
 	for state_name: StringName in states:
 		var anim_name := _find_animation_for_state_name(state_name)
@@ -581,10 +626,27 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 		var from: StringName = trans[0]
 		var to: StringName = trans[1]
 
-		if sm.has_node(from) and sm.has_node(to):
-			var transition := AnimationNodeStateMachineTransition.new()
-			transition.xfade_time = default_blend_time
-			sm.add_transition(from, to, transition)
+		_add_locomotion_transition(sm, from, to, default_blend_time)
+
+	var ground_directional_states := [
+		&"Idle", &"Walk", &"WalkBack", &"WalkLeft", &"WalkRight",
+		&"WalkForwardLeft", &"WalkForwardRight", &"WalkBackLeft", &"WalkBackRight",
+		&"Run", &"Sprint", &"RunBack", &"RunLeft", &"RunRight",
+		&"RunForwardLeft", &"RunForwardRight", &"RunBackLeft", &"RunBackRight",
+		&"Crouch", &"CrouchWalk", &"CrouchBack",
+		&"SneakForward", &"SneakBack", &"SneakLeft", &"SneakRight",
+		&"SneakForwardLeft", &"SneakForwardRight", &"SneakBackLeft", &"SneakBackRight",
+	]
+	_add_pairwise_locomotion_transitions(sm, ground_directional_states, default_blend_time)
+
+	var swim_directional_states := [
+		&"SwimIdle", &"SwimForward",
+		&"SwimWalkForward", &"SwimWalkBack", &"SwimWalkLeft", &"SwimWalkRight",
+		&"SwimWalkForwardLeft", &"SwimWalkForwardRight", &"SwimWalkBackLeft", &"SwimWalkBackRight",
+		&"SwimRunForward", &"SwimRunBack", &"SwimRunLeft", &"SwimRunRight",
+		&"SwimRunForwardLeft", &"SwimRunForwardRight", &"SwimRunBackLeft", &"SwimRunBackRight",
+	]
+	_add_pairwise_locomotion_transitions(sm, swim_directional_states, default_blend_time)
 
 	# Direct ground→Fall and Fall→ground transitions with fast crossfade.
 	# Without these, travel("Fall") from Run routes through Walk→Idle→Jump→Fall
@@ -613,6 +675,27 @@ func _add_locomotion_transitions(sm: AnimationNodeStateMachine) -> void:
 			var transition := AnimationNodeStateMachineTransition.new()
 			transition.xfade_time = fast_blend_time  # 0.1s — fast cut, no cascading
 			sm.add_transition(from, to, transition)
+
+
+func _add_pairwise_locomotion_transitions(sm: AnimationNodeStateMachine,
+		states: Array, blend_time: float) -> void:
+	for from_variant: Variant in states:
+		var from: StringName = from_variant
+		for to_variant: Variant in states:
+			var to: StringName = to_variant
+			if from != to:
+				_add_locomotion_transition(sm, from, to, blend_time)
+
+
+func _add_locomotion_transition(sm: AnimationNodeStateMachine,
+		from: StringName, to: StringName, blend_time: float) -> void:
+	if not sm.has_node(from) or not sm.has_node(to):
+		return
+	if sm.has_method("has_transition") and sm.has_transition(from, to):
+		return
+	var transition := AnimationNodeStateMachineTransition.new()
+	transition.xfade_time = blend_time
+	sm.add_transition(from, to, transition)
 
 
 ## Check if enough directional animations exist for BlendSpace2D
@@ -891,10 +974,19 @@ func _build_animation_map() -> void:
 
 	var states := [
 		&"Idle", &"Walk", &"Run", &"Sprint",
-		&"WalkBack", &"RunBack",
+		&"WalkBack", &"WalkLeft", &"WalkRight",
+		&"WalkForwardLeft", &"WalkForwardRight", &"WalkBackLeft", &"WalkBackRight",
+		&"RunBack", &"RunLeft", &"RunRight",
+		&"RunForwardLeft", &"RunForwardRight", &"RunBackLeft", &"RunBackRight",
 		&"Jump", &"Fall", &"Land",
 		&"SwimIdle", &"SwimForward",
+		&"SwimWalkForward", &"SwimWalkBack", &"SwimWalkLeft", &"SwimWalkRight",
+		&"SwimWalkForwardLeft", &"SwimWalkForwardRight", &"SwimWalkBackLeft", &"SwimWalkBackRight",
+		&"SwimRunForward", &"SwimRunBack", &"SwimRunLeft", &"SwimRunRight",
+		&"SwimRunForwardLeft", &"SwimRunForwardRight", &"SwimRunBackLeft", &"SwimRunBackRight",
 		&"Crouch", &"CrouchWalk", &"CrouchBack",
+		&"SneakForward", &"SneakBack", &"SneakLeft", &"SneakRight",
+		&"SneakForwardLeft", &"SneakForwardRight", &"SneakBackLeft", &"SneakBackRight",
 		&"CombatIdle", &"Attack", &"Block", &"Hit", &"Death", &"SpellCast"
 	]
 

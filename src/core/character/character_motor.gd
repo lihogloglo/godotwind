@@ -53,6 +53,13 @@ func set_camera_pivot(camera_pivot: Node3D) -> void:
 	input_gatherer.camera_pivot = camera_pivot
 
 
+func set_movement_reference_providers(
+		basis_provider: Callable, pitch_provider: Callable = Callable()) -> void:
+	if not input_gatherer:
+		_ensure_input_gatherer(null)
+	input_gatherer.set_movement_reference_providers(basis_provider, pitch_provider)
+
+
 func get_movement_state() -> MovementState:
 	return movement_state
 

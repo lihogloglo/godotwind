@@ -23,7 +23,7 @@ func update(input: InputPackage, delta: float) -> void:
 	player.velocity.y -= gravity * delta
 
 	if input.input_direction != Vector2.ZERO:
-		var input_dir_3d := (input.camera_basis * Vector3(
+		var input_dir_3d := (input.movement_basis * Vector3(
 			input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 		var target_h := input_dir_3d * config.air_speed
 		player.velocity.x = lerpf(player.velocity.x, target_h.x, config.air_control * delta * 10.0)

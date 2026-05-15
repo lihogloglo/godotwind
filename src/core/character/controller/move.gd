@@ -191,7 +191,7 @@ func should_enter_midair(input: InputPackage) -> bool:
 # MOVEMENT HELPERS
 # =============================================================================
 
-## Camera-relative direction calculation + character rotation.
+## Movement-reference direction calculation + character rotation.
 ## Called by locomotion moves that track input direction.
 ## Rotates character_root (not player, since camera is parented to player).
 func process_input_vector(input: InputPackage, delta: float) -> void:
@@ -201,7 +201,7 @@ func process_input_vector(input: InputPackage, delta: float) -> void:
 func _get_input_world_direction(input: InputPackage) -> Vector3:
 	if not input or input.input_direction == Vector2.ZERO:
 		return Vector3.ZERO
-	return (input.camera_basis * Vector3(
+	return (input.movement_basis * Vector3(
 		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 
 

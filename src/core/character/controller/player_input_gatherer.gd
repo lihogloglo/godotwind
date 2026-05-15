@@ -1,17 +1,27 @@
-## PlayerInputGatherer — Reads hardware input into an InputPackage each frame
+## PlayerInputGatherer - Reads hardware input into an InputPackage each frame
 ##
-## Mirrors Gab-ani's InputGatherer pattern. Requires a camera_pivot reference
-## for camera_basis (set by PlayerController on setup).
+## Mirrors Gab-ani's InputGatherer pattern. PlayerController supplies the
+## movement reference so visual camera orbit and movement controls can diverge.
 class_name PlayerInputGatherer
 extends Node
 
-## Camera pivot node — set by PlayerController so we can compute camera-relative direction
+## Legacy fallback for old setup paths. PlayerController should prefer the
+## movement reference providers below.
 var camera_pivot: Node3D = null
+
+var movement_basis_provider: Callable = Callable()
+var movement_pitch_provider: Callable = Callable()
+
+
+func set_movement_reference_providers(
+		basis_provider: Callable, pitch_provider: Callable = Callable()) -> void:
+	movement_basis_provider = basis_provider
+	movement_pitch_provider = pitch_provider
 
 
 ## Gather all input state for this physics frame.
 ## Environment context is passed before vertical intent is computed so swimming
-## can use camera pitch in the same frame the player enters water.
+## can use movement pitch in the same frame the player enters water.
 func gather_input(is_in_water: bool = false, water_surface_y: float = -INF) -> InputPackage:
 	var pkg := InputPackage.new()
 	pkg.is_in_water = is_in_water
@@ -21,9 +31,9 @@ func gather_input(is_in_water: bool = false, water_surface_y: float = -INF) -> I
 	pkg.input_direction = Input.get_vector(
 		&"move_left", &"move_right", &"move_forward", &"move_backward")
 
-	# Camera basis for world-space direction
-	if camera_pivot:
-		pkg.camera_basis = Basis(Vector3.UP, camera_pivot.rotation.y)
+	pkg.movement_basis = _get_movement_basis()
+	pkg.movement_pitch = _get_movement_pitch()
+	pkg.camera_basis = pkg.movement_basis
 
 	# Vertical intent for swimming/flying. In water, jump is a discrete swim
 	# stroke handled by swim moves, not a continuous ascend axis.
@@ -32,9 +42,9 @@ func gather_input(is_in_water: bool = false, water_surface_y: float = -INF) -> I
 		pkg.vertical_input += 1.0
 	if Input.is_action_pressed(&"crouch"):
 		pkg.vertical_input -= 1.0
-	# Camera pitch contributes to vertical when swimming/flying
-	if camera_pivot and pkg.is_in_water:
-		pkg.vertical_input += clampf(-camera_pivot.rotation.x * pkg.input_direction.length(), -1.0, 1.0)
+	# Movement pitch contributes to vertical when swimming/flying.
+	if pkg.is_in_water:
+		pkg.vertical_input += clampf(-pkg.movement_pitch * pkg.input_direction.length(), -1.0, 1.0)
 	pkg.vertical_input = clampf(pkg.vertical_input, -1.0, 1.0)
 
 	# --- Actions ---
@@ -50,7 +60,7 @@ func gather_input(is_in_water: bool = false, water_surface_y: float = -INF) -> I
 		if Input.is_action_pressed(&"sprint"):
 			pkg.actions.append(&"sprint")
 
-	# Jump (only on ground — midair/swim jumps handled by their respective moves)
+	# Jump (only on ground - midair/swim jumps handled by their respective moves)
 	if not pkg.is_in_water and Input.is_action_just_pressed(&"jump"):
 		pkg.actions.append(&"jump")
 
@@ -65,3 +75,21 @@ func gather_input(is_in_water: bool = false, water_surface_y: float = -INF) -> I
 	#	pkg.actions.append(&"roll")
 
 	return pkg
+
+
+func _get_movement_basis() -> Basis:
+	if movement_basis_provider.is_valid():
+		var provided: Variant = movement_basis_provider.call()
+		if provided is Basis:
+			return provided
+	if camera_pivot:
+		return Basis(Vector3.UP, camera_pivot.rotation.y)
+	return Basis.IDENTITY
+
+
+func _get_movement_pitch() -> float:
+	if movement_pitch_provider.is_valid():
+		return float(movement_pitch_provider.call())
+	if camera_pivot:
+		return camera_pivot.rotation.x
+	return 0.0

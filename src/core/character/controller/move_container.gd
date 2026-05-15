@@ -224,18 +224,44 @@ func _resolve_animation_state(input: InputPackage) -> StringName:
 	var active_name := current_move.move_name
 	match active_name:
 		&"walk":
-			return &"WalkBack" if _is_backward_input(input) else &"Walk"
+			return _resolve_directional_animation_state(input, &"Walk", &"Walk")
 		&"run":
-			return &"RunBack" if _is_backward_input(input) else &"Run"
+			return _resolve_directional_animation_state(input, &"Run", &"Run")
+		&"sprint":
+			return _resolve_directional_animation_state(input, &"Run", &"Run")
 		&"crouch":
 			if input and input.input_direction != Vector2.ZERO:
-				return &"CrouchBack" if _is_backward_input(input) else &"CrouchWalk"
+				return _resolve_directional_animation_state(input, &"Sneak", &"CrouchWalk")
 			return &"Crouch"
 		&"swim_idle":
 			return &"SwimIdle"
 		&"swim":
-			return &"SwimForward"
+			var swim_prefix := &"SwimRun" if input and input.actions.has(&"sprint") else &"SwimWalk"
+			return _resolve_directional_animation_state(input, swim_prefix, &"SwimForward")
 	return current_move.animation_state
+
+
+func _resolve_directional_animation_state(input: InputPackage,
+		prefix: StringName, forward_state: StringName) -> StringName:
+	if not input or input.input_direction == Vector2.ZERO:
+		return forward_state
+	var direction := input.input_direction.normalized()
+	var x_abs := absf(direction.x)
+	var y_abs := absf(direction.y)
+	var axis_epsilon := 0.001
+	var side := ""
+	var longitudinal := ""
+	if x_abs > axis_epsilon:
+		side = "Left" if direction.x < 0.0 else "Right"
+	if y_abs > axis_epsilon:
+		longitudinal = "Forward" if direction.y < 0.0 else "Back"
+	if not side.is_empty() and not longitudinal.is_empty():
+		return StringName("%s%s%s" % [prefix, longitudinal, side])
+	if not side.is_empty():
+		return StringName("%s%s" % [prefix, side])
+	if longitudinal == "Back":
+		return StringName("%sBack" % prefix)
+	return forward_state
 
 
 func _resolve_posture(active_name: StringName) -> StringName:
@@ -250,7 +276,7 @@ func _resolve_posture(active_name: StringName) -> StringName:
 func _resolve_desired_world_direction(input: InputPackage) -> Vector3:
 	if not input or input.input_direction == Vector2.ZERO:
 		return Vector3.ZERO
-	return (input.camera_basis * Vector3(
+	return (input.movement_basis * Vector3(
 		input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 
 

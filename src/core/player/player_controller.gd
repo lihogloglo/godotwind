@@ -54,6 +54,7 @@ signal interact_release()
 enum CameraMode {
 	FIRST_PERSON,
 	THIRD_PERSON,
+	THIRD_PERSON_VANITY,
 }
 
 #endregion
@@ -85,7 +86,7 @@ enum CameraMode {
 @export_range(0.0, 89.0, 1.0) var tilt_limit_degrees: float = 75.0
 ## Speed at which the character mesh rotates to face movement direction
 @export_range(0.1, 50.0, 0.1) var rotation_speed: float = 10.0
-## Camera mode: FIRST_PERSON or THIRD_PERSON
+## Camera mode: FIRST_PERSON, THIRD_PERSON, or temporary THIRD_PERSON_VANITY
 @export var camera_mode: CameraMode = CameraMode.THIRD_PERSON:
 	set(value):
 		camera_mode = value
@@ -115,7 +116,7 @@ enum CameraMode {
 
 #region Node References
 
-## Camera pivot node (rotates with mouse)
+## Camera pivot node (owns look pitch and follows facing yaw in primary modes)
 var camera_pivot: Node3D
 
 ## SpringArm3D for collision avoidance
@@ -139,6 +140,11 @@ var movement_motor: CharacterMotor = null
 ## Input gatherer (creates InputPackage each frame for MoveContainer)
 var _input_gatherer: Node = null  # PlayerInputGatherer, owned by CharacterMotor
 
+## Local player movement config. The shared movement resource can keep
+## movement-direction tracking for NPC/action-controller users, while the
+## player controller owns facing from mouse/controller look.
+var _player_movement_config: CharacterMovementConfig = null
+
 #endregion
 
 
@@ -153,7 +159,7 @@ var input_direction: Vector2 = Vector2.ZERO
 ## Input magnitude (0-1, for analog stick support)
 var input_strength: float = 0.0
 
-## Camera-relative movement direction in world space
+## Movement-reference direction in world space
 var direction: Vector3 = Vector3.ZERO
 
 ## Whether player is sprinting
@@ -227,6 +233,10 @@ var _modal_gates: Array[Node] = []
 
 var _interaction_intent: InteractionIntent = InteractionIntentScript.new(HOLD_THRESHOLD) as InteractionIntent
 
+## Tap/hold splitter for `toggle_camera`: tap toggles first/follow, hold enters
+## temporary vanity and returns to the previous primary mode on release.
+var _camera_mode_intent: InteractionIntent = InteractionIntentScript.new(HOLD_THRESHOLD) as InteractionIntent
+
 ## Optional reference to the InteractionRaycaster owned by this player.
 ## Set via `set_interaction_raycaster()` after the raycaster is parented.
 ## When set, `PlayerController` automatically routes interact_tap to the
@@ -248,6 +258,16 @@ var _carry_controller: CarryController = null
 ## to left-click to re-capture for camera-look.
 var _was_modal_open: bool = false
 
+## Primary mode to restore when temporary vanity/orbit is released.
+var _primary_camera_mode: CameraMode = CameraMode.THIRD_PERSON
+
+## Pitch used by movement systems such as swim. Vanity pitch must not write here.
+var _movement_look_pitch: float = 0.0
+
+## Visual-only orbit angles used while holding vanity.
+var _vanity_orbit_yaw: float = 0.0
+var _vanity_orbit_pitch: float = 0.0
+
 #endregion
 
 
@@ -256,12 +276,15 @@ var _was_modal_open: bool = false
 # =============================================================================
 
 func _ready() -> void:
+	_prepare_player_movement_config()
 	_sync_legacy_exports_from_movement_config()
 	_ensure_input_actions()
 	_setup_collision()
 	_setup_camera()
 
 	_tilt_limit_rad = deg_to_rad(tilt_limit_degrees)
+	if camera_mode != CameraMode.THIRD_PERSON_VANITY:
+		_primary_camera_mode = camera_mode
 	_target_camera_distance = 0.0 if camera_mode == CameraMode.FIRST_PERSON else camera_distance
 	spring_arm.spring_length = _target_camera_distance
 
@@ -277,6 +300,7 @@ func _physics_process(delta: float) -> void:
 	# so "held past threshold" detection requires per-frame polling.
 	# See docs/systems/interaction_system.md §3.1.
 	_poll_interact_hold()
+	_poll_camera_mode_hold()
 
 	# Modal gate edge detection — re-capture the mouse on the open→closed
 	# falling edge so the player goes straight back to camera-look without
@@ -303,6 +327,8 @@ func _physics_process(delta: float) -> void:
 		_apply_movement_state(state)
 		if animation_system and animation_system.has_method("update_from_movement_state"):
 			animation_system.update_from_movement_state(state)
+		if camera_mode != CameraMode.THIRD_PERSON_VANITY:
+			_sync_follow_camera_yaw()
 
 	# Landing detection
 	if is_on_floor() and not _was_on_floor:
@@ -310,7 +336,7 @@ func _physics_process(delta: float) -> void:
 	_was_on_floor = is_on_floor()
 
 	# Update look-at IK target
-	if camera_mode == CameraMode.THIRD_PERSON:
+	if camera_mode != CameraMode.FIRST_PERSON:
 		_update_look_target()
 
 
@@ -355,22 +381,30 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Mouse look
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		camera_pivot.rotation.x -= event.relative.y * mouse_sensitivity
-		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x, -_tilt_limit_rad, _tilt_limit_rad)
-		camera_pivot.rotation.y -= event.relative.x * mouse_sensitivity
+		_apply_look_delta(
+			-event.relative.x * mouse_sensitivity,
+			-event.relative.y * mouse_sensitivity)
 
 
 func _input(event: InputEvent) -> void:
 	if not enabled:
 		return
 
-	# Camera mode toggle
-	if allow_camera_mode_switch and event.is_action_pressed("toggle_camera"):
-		if character_root:
-			if camera_mode == CameraMode.FIRST_PERSON:
-				set_camera_mode(CameraMode.THIRD_PERSON)
-			else:
-				set_camera_mode(CameraMode.FIRST_PERSON)
+	if allow_camera_mode_switch and character_root and InputMap.has_action("camera_vanity"):
+		if event.is_action_pressed("camera_vanity"):
+			begin_camera_vanity()
+			return
+		if event.is_action_released("camera_vanity"):
+			end_camera_vanity()
+			return
+
+	if InputMap.has_action("toggle_camera"):
+		if event.is_action_pressed("toggle_camera"):
+			_on_camera_mode_pressed()
+			return
+		if event.is_action_released("toggle_camera"):
+			_on_camera_mode_released()
+			return
 
 
 # =============================================================================
@@ -418,6 +452,7 @@ func _setup_camera() -> void:
 	spring_arm.spring_length = camera_distance
 	spring_arm.collision_mask = 1  # World collision layer
 	spring_arm.margin = 0.2
+	spring_arm.add_excluded_object(get_rid())
 	camera_pivot.add_child(spring_arm)
 
 	camera = Camera3D.new()
@@ -440,6 +475,9 @@ func _setup_movement_motor() -> void:
 		add_child(movement_motor)
 	movement_motor.setup(self, character_root, get_movement_config(), camera_pivot,
 		_find_skeleton(character_root) if character_root else null)
+	movement_motor.set_movement_reference_providers(
+		Callable(self, "_get_movement_basis"),
+		Callable(self, "_get_movement_pitch"))
 	_input_gatherer = movement_motor.input_gatherer
 
 
@@ -455,6 +493,7 @@ func _ensure_input_actions() -> void:
 		"jump": [KEY_SPACE],
 		"crouch": [KEY_C, KEY_CTRL],
 		"toggle_camera": [KEY_TAB],
+		"camera_vanity": [],
 		"interact": [KEY_E],
 	}
 	for action_name: String in actions:
@@ -499,7 +538,15 @@ func attach_character(character: Node3D, anim_sys: Node = null) -> void:
 
 
 func get_movement_config() -> CharacterMovementConfig:
-	return movement_config if movement_config else _DefaultMovementConfig
+	if not _player_movement_config:
+		_prepare_player_movement_config()
+	return _player_movement_config
+
+
+func _prepare_player_movement_config() -> void:
+	var source_config: CharacterMovementConfig = movement_config if movement_config else _DefaultMovementConfig
+	_player_movement_config = source_config.duplicate(true) as CharacterMovementConfig
+	_player_movement_config.turn_to_movement_direction = false
 
 
 func get_movement_motor() -> CharacterMotor:
@@ -564,8 +611,10 @@ func _reset_public_movement_state() -> void:
 	is_airborne = false
 
 
-## Set camera mode (first or third person)
+## Set camera mode.
 func set_camera_mode(mode: CameraMode) -> void:
+	if mode != CameraMode.THIRD_PERSON_VANITY:
+		_primary_camera_mode = mode
 	camera_mode = mode
 	_update_camera_mode()
 	camera_mode_changed.emit(mode)
@@ -573,10 +622,32 @@ func set_camera_mode(mode: CameraMode) -> void:
 
 ## Toggle between first and third person
 func toggle_camera_mode() -> void:
-	if camera_mode == CameraMode.FIRST_PERSON:
+	var current_primary := _primary_camera_mode
+	if camera_mode != CameraMode.THIRD_PERSON_VANITY:
+		current_primary = camera_mode
+	if current_primary == CameraMode.FIRST_PERSON:
 		set_camera_mode(CameraMode.THIRD_PERSON)
 	else:
 		set_camera_mode(CameraMode.FIRST_PERSON)
+
+
+## Temporarily enter third-person vanity/orbit without changing the primary mode.
+func begin_camera_vanity() -> void:
+	if camera_mode == CameraMode.THIRD_PERSON_VANITY:
+		return
+	if camera_mode != CameraMode.THIRD_PERSON_VANITY:
+		_primary_camera_mode = camera_mode
+	if camera_pivot:
+		_vanity_orbit_yaw = camera_pivot.rotation.y
+		_vanity_orbit_pitch = camera_pivot.rotation.x
+	set_camera_mode(CameraMode.THIRD_PERSON_VANITY)
+
+
+## Return from temporary vanity/orbit to the last primary first/third-person mode.
+func end_camera_vanity() -> void:
+	if camera_mode != CameraMode.THIRD_PERSON_VANITY:
+		return
+	set_camera_mode(_primary_camera_mode)
 
 
 ## Enable the player controller and capture mouse
@@ -738,6 +809,7 @@ func _set_interaction_prompt_suppressed(suppressed: bool) -> void:
 
 func cancel_interaction_intent() -> void:
 	_interaction_intent.cancel()
+	_camera_mode_intent.cancel()
 
 
 func _on_gate_tree_exiting(gate: Node) -> void:
@@ -803,6 +875,39 @@ func _poll_interact_hold(now_msec: int = -1) -> void:
 	if _interaction_intent.poll(now_msec) == InteractionIntent.Outcome.HOLD_BEGIN:
 		interact_hold_begin.emit()
 		_route_carry_grab()
+
+
+func _on_camera_mode_pressed(now_msec: int = -1) -> void:
+	if not allow_camera_mode_switch or character_root == null:
+		_camera_mode_intent.cancel()
+		return
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	_camera_mode_intent.press(now_msec)
+
+
+func _on_camera_mode_released(now_msec: int = -1) -> void:
+	if not _camera_mode_intent.is_pressed():
+		return
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	var outcome: int = _camera_mode_intent.release(now_msec)
+	if outcome == InteractionIntent.Outcome.HOLD_RELEASE:
+		end_camera_vanity()
+	elif outcome == InteractionIntent.Outcome.TAP:
+		toggle_camera_mode()
+
+
+func _poll_camera_mode_hold(now_msec: int = -1) -> void:
+	if not _camera_mode_intent.is_pressed():
+		return
+	if not allow_camera_mode_switch or character_root == null:
+		_camera_mode_intent.cancel()
+		return
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	if _camera_mode_intent.poll(now_msec) == InteractionIntent.Outcome.HOLD_BEGIN:
+		begin_camera_vanity()
 
 
 ## Default routing for `interact_tap`: forward to the raycaster's current
@@ -872,15 +977,40 @@ func _handle_frozen_movement() -> void:
 	_reset_public_movement_state()
 
 
+func _get_movement_basis() -> Basis:
+	return Basis(Vector3.UP, _get_movement_yaw())
+
+
+func _get_movement_pitch() -> float:
+	return _movement_look_pitch
+
+
+func _get_movement_yaw() -> float:
+	var facing := _get_facing_node()
+	if facing:
+		return facing.rotation.y
+	return rotation.y
+
+
+func _get_facing_node() -> Node3D:
+	return character_root if character_root else self
+
+
 # =============================================================================
 # CAMERA
 # =============================================================================
 
 func _update_camera_mode() -> void:
-	if camera_mode == CameraMode.FIRST_PERSON:
-		_target_camera_distance = 0.0
-	else:
-		_target_camera_distance = camera_distance
+	match camera_mode:
+		CameraMode.FIRST_PERSON:
+			_target_camera_distance = 0.0
+			_apply_primary_camera_transform()
+		CameraMode.THIRD_PERSON:
+			_target_camera_distance = camera_distance
+			_apply_primary_camera_transform()
+		CameraMode.THIRD_PERSON_VANITY:
+			_target_camera_distance = camera_distance
+			_apply_vanity_camera_transform()
 
 
 func _handle_camera_transition(delta: float) -> void:
@@ -894,7 +1024,7 @@ func _handle_camera_transition(delta: float) -> void:
 		var progress := spring_arm.spring_length / camera_distance
 		_set_character_visible(progress > 0.3)
 	elif character_root:
-		_set_character_visible(camera_mode == CameraMode.THIRD_PERSON)
+		_set_character_visible(camera_mode != CameraMode.FIRST_PERSON)
 
 
 func _handle_controller_camera(delta: float) -> void:
@@ -906,9 +1036,45 @@ func _handle_controller_camera(delta: float) -> void:
 		return
 	var look_dir := Input.get_vector("look_left", "look_right", "look_up", "look_down")
 	if look_dir != Vector2.ZERO:
-		camera_pivot.rotation.y -= look_dir.x * controller_sensitivity * delta
-		camera_pivot.rotation.x += look_dir.y * controller_sensitivity * delta
-		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x, -_tilt_limit_rad, _tilt_limit_rad)
+		_apply_look_delta(
+			-look_dir.x * controller_sensitivity * delta,
+			look_dir.y * controller_sensitivity * delta)
+
+
+func _apply_look_delta(yaw_delta: float, pitch_delta: float) -> void:
+	if camera_mode == CameraMode.THIRD_PERSON_VANITY:
+		_vanity_orbit_yaw += yaw_delta
+		_vanity_orbit_pitch = clampf(
+			_vanity_orbit_pitch + pitch_delta, -_tilt_limit_rad, _tilt_limit_rad)
+		_apply_vanity_camera_transform()
+		return
+
+	var facing := _get_facing_node()
+	if facing:
+		facing.rotation.y += yaw_delta
+	_movement_look_pitch = clampf(
+		_movement_look_pitch + pitch_delta, -_tilt_limit_rad, _tilt_limit_rad)
+	_apply_primary_camera_transform()
+
+
+func _apply_primary_camera_transform() -> void:
+	if not camera_pivot:
+		return
+	camera_pivot.rotation.x = _movement_look_pitch
+	_sync_follow_camera_yaw()
+
+
+func _apply_vanity_camera_transform() -> void:
+	if not camera_pivot:
+		return
+	camera_pivot.rotation.x = _vanity_orbit_pitch
+	camera_pivot.rotation.y = _vanity_orbit_yaw
+
+
+func _sync_follow_camera_yaw() -> void:
+	if not camera_pivot:
+		return
+	camera_pivot.rotation.y = _get_movement_yaw()
 
 
 func _set_character_visible(p_visible: bool) -> void:
@@ -939,7 +1105,10 @@ func _update_look_target() -> void:
 		return
 
 	# Default: look forward from character (not camera — camera looks down in 3rd person)
+	var facing := _get_facing_node()
 	var char_forward := -global_transform.basis.z.normalized()
+	if facing:
+		char_forward = -facing.global_transform.basis.z.normalized()
 	var head_height := global_position + Vector3.UP * 1.6
 	var look_pos := head_height + char_forward * 10.0
 	if animation_system.has_method("set_look_position"):
@@ -953,7 +1122,10 @@ func _find_nearest_poi() -> Vector3:
 		return Vector3.INF
 
 	var head_pos := global_position + Vector3.UP * 1.6
+	var facing := _get_facing_node()
 	var char_forward := -global_transform.basis.z.normalized()
+	if facing:
+		char_forward = -facing.global_transform.basis.z.normalized()
 	var best_dist := 15.0  # Max look distance
 	var best_pos := Vector3.INF
 

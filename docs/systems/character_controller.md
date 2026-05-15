@@ -1,10 +1,12 @@
 # Character Controller
 
-## Status (2026-05-10)
+## Status (2026-05-15)
 
 Working in `tests/visual/test_character_controller.tscn`: ground locomotion
-(idle/walk/run/sprint/crouch), jump/midair with air control, and swimming
-(buoyancy + 3D camera-relative motion).
+(idle/walk/run/sprint/crouch), jump/midair with air control, and surface-level
+swimming (buoyancy + 3D movement-reference motion). Intentional diving /
+below-surface swimming is not implemented yet; track that missing feature under
+`spec-driven/features/subsurface-swimming/`.
 
 `scenes/Godotwind.tscn` has partial player-mode wiring through
 `src/tools/world_explorer.gd`, including `PlayerController`,
@@ -91,14 +93,15 @@ PlayerController (CharacterBody3D)
           -> JumpMove (priority 5, to MidairMove after 0.1s)
           -> MidairMove (priority 5, gravity + air control)
           -> SwimIdleMove (priority 6, buoyancy)
-          -> SwimMove (priority 7, 3D camera-relative)
+          -> SwimMove (priority 7, 3D movement-reference)
 ```
 
 Each Move is a Node that owns its movement physics and transition logic.
 `InputPackage` carries per-frame input data: direction, actions, water state,
-and camera basis. `MoveContainer` publishes a `MovementState` snapshot after
-processing. Animation reads that snapshot and chooses animation transitions; it
-no longer creates or owns the movement state machine.
+movement basis, and movement pitch. `MoveContainer` publishes a
+`MovementState` snapshot after processing. Animation reads that snapshot and
+chooses animation transitions; it no longer creates or owns the movement state
+machine.
 
 ## Movement State Semantics
 
@@ -195,8 +198,18 @@ smooth_movement, smooth_player_turning_delay,
 swim_upward_correction_enabled, swim_upward_coef
 ```
 
-`turn_to_movement_direction = false` keeps input camera-relative but prevents
-the model/player facing from auto-rotating toward that movement direction.
+`turn_to_movement_direction = false` keeps input relative to the supplied
+movement reference but prevents the model/player facing from auto-rotating
+toward that movement direction. `PlayerController` uses a private runtime copy
+of its movement config with this disabled, because player facing is owned by
+mouse/controller look in first-person and fixed third-person follow. This makes
+A/D strafe or side-step instead of spinning the actor toward the lateral input.
+Animation selection still reads the same actor-relative `InputPackage` vector:
+lateral input publishes `WalkLeft`/`RunLeft` or `WalkRight`/`RunRight`, crouch
+publishes `Sneak*` states, swimming publishes `SwimWalk*`/`SwimRun*` states,
+and diagonal input publishes explicit diagonal intent such as `RunForwardLeft`.
+If a modded animation library does not provide diagonal clips, the animation
+manager falls back to the nearest available cardinal state.
 `step_down_height` now controls the down probe distance after a candidate
 step-up, and `min_step_height` rejects tiny upward snaps that should remain
 normal slide/floor-snap behavior. Godot's own `floor_max_angle` and
@@ -208,7 +221,7 @@ The reserved smoothing fields need a future movement-feel spec before they
 become active because acceleration smoothing, turn delay, animation blending,
 and camera response should be tuned together. The reserved swim-upward
 correction fields are legacy compatibility hooks; current swimming uses
-camera-relative pitch, buoyancy, surface clamping, and repeated swim-stroke
+explicit movement pitch, buoyancy, surface clamping, and repeated swim-stroke
 impulses instead.
 
 ## Movement Physics
@@ -227,6 +240,9 @@ impulses instead.
 - Swim movement keeps the player's feet below the water surface by at least
   `swim_min_feet_submersion`, preventing forward/up swim input from lifting the
   capsule out of water and flickering back to upright locomotion.
+- Current swim movement is therefore surface-biased. The player cannot
+  intentionally dive and continue swimming below the water surface yet. That is
+  a separate planned feature, not part of the player-camera mode split.
 - In water, the jump key is a repeated swim stroke, not a continuous upward
   axis. Holding jump applies `swim_jump_velocity` at
   `swim_jump_repeat_time` intervals, then buoyancy pulls the player back toward
@@ -269,7 +285,29 @@ submersion depth 1.2m).
 First/third-person toggle (Tab):
 
 - Third-person: `SpringArm3D` at 3.5m, character visible, LookAt IK targets POIs.
-- First-person: SpringArm at 0.0m, character hidden, mouselook only.
+- First-person: SpringArm at 0.0m, character hidden.
+- Vanity/orbit: hold Tab to temporarily switch into third-person vanity/orbit.
+  A short Tab press still toggles first/fixed-third person. Gamepad can enter
+  vanity directly with RS click.
+
+Player camera modes are being split under
+`spec-driven/features/player-camera-modes/`. `PlayerInputGatherer` receives
+explicit movement basis/pitch providers from `PlayerController` through
+`CharacterMotor`. Movement consumers read `InputPackage.movement_basis`;
+`camera_basis` remains only as a synced compatibility alias during the
+transition. Normal `THIRD_PERSON` now routes mouse/controller yaw into the
+actor-facing node (`character_root` when attached, otherwise the player body)
+and keeps `camera_pivot` yaw aligned behind that facing. Phase 3 adds
+`THIRD_PERSON_VANITY`: it stores separate visual orbit yaw/pitch, returns to
+the last primary camera mode on release, and keeps swim/movement pitch on the
+primary look pitch so vanity tilt cannot create vertical swim intent. Keyboard
+entry uses the OpenMW-style held Tab behavior, including holding Tab from first
+person to enter third-person vanity temporarily. Human-run gdUnit verification
+passed in `reports/report_220/results.xml` with 71 tests, 0 failures, 0 errors,
+and 0 skipped. Human/user visual gameplay testing on 2026-05-15 reported that
+the fixed-follow camera and held-Tab vanity behavior work well in game. The
+next player-camera mode step is Phase 4: first-person cleanup and swim-pitch
+visual acceptance.
 
 ## Animation Wiring
 
@@ -279,6 +317,10 @@ First/third-person toggle (Tab):
   when animation exists.
 - `CharacterAnimationSystem` no longer creates a `MoveContainer` and movement
   still works when no animation system is attached.
+- Directional locomotion states are selected from actor-relative input, not
+  from auto-turning the actor. Side-step clips are `WalkLeft`/`WalkRight` and
+  `RunLeft`/`RunRight`; diagonal states preserve intent for modded clips and
+  fall back to cardinal Morrowind groups when only vanilla-style clips exist.
 
 ## Test Scene
 
@@ -305,7 +347,7 @@ Controls:
 - Shift: sprint
 - Space: jump
 - C/Ctrl: crouch
-- Tab: first/third-person camera
+- Tab: tap first/third-person camera, hold vanity
 - 1-5: spawn preset NPCs
 - F1: debug HUD
 - F2: dump KF comparison
@@ -358,8 +400,10 @@ reports/report_<number>/index.html
 reports/report_<number>/test_suites/tests.unit.test_character_controller_phase0_baseline.html
 ```
 
-Latest known Phase 3 report: `reports/report_201/results.xml` passed with 20
-tests, 0 failures, and 0 errors.
+Latest known player camera mode report: `reports/report_220/results.xml`
+passed with 71 tests, 0 failures, 0 errors, and 0 skipped. This includes the
+Phase 2 fixed-follow/directional-animation contracts and the Phase 3 held
+Tab/vanity contracts.
 
 Latest known Phase 4 posture-slice report: `reports/report_204/results.xml`.
 The character-controller suite passed with 24 tests, 0 failures, and 0 errors,

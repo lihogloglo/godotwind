@@ -23,12 +23,14 @@ const MovementStateScript := preload("res://src/core/character/controller/moveme
 const CharacterMotorScript := preload("res://src/core/character/character_motor.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
 const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
+const InteractionIntentScript := preload("res://src/core/interaction/interaction_intent.gd")
 const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
 const GameplayPhysicsLayersScript := preload("res://src/core/physics/gameplay_physics_layers.gd")
 const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const AnimationManagerScript := preload("res://src/core/animation/animation_manager.gd")
 const MoveScript := preload("res://src/core/character/controller/move.gd")
 const IdleMoveScript := preload("res://src/core/character/controller/moves/idle_move.gd")
+const WalkMoveScript := preload("res://src/core/character/controller/moves/walk_move.gd")
 const RunMoveScript := preload("res://src/core/character/controller/moves/run_move.gd")
 const SprintMoveScript := preload("res://src/core/character/controller/moves/sprint_move.gd")
 const JumpMoveScript := preload("res://src/core/character/controller/moves/jump_move.gd")
@@ -50,6 +52,7 @@ const TEST_ACTIONS: Array[StringName] = [
 	&"crouch",
 	&"sprint",
 	&"walk",
+	&"camera_vanity",
 ]
 
 
@@ -201,6 +204,39 @@ func test_walk_action_is_intentionally_unbound() -> void:
 	assert_int(InputMap.action_get_events(&"walk").size()).is_equal(0)
 
 
+func test_input_gatherer_uses_explicit_movement_basis_provider() -> void:
+	var gatherer := _make_gatherer()
+	var pivot := Node3D.new()
+	add_child(pivot)
+	auto_free(pivot)
+	gatherer.camera_pivot = pivot
+	gatherer.set_movement_reference_providers(
+		Callable(self, "_test_actor_forward_basis"),
+		Callable(self, "_test_flat_movement_pitch"))
+
+	pivot.rotation.y = PI
+	Input.action_press(&"move_forward")
+
+	var pkg := gatherer.gather_input()
+	var world_forward := (pkg.movement_basis * Vector3(0.0, 0.0, -1.0)).normalized()
+	var legacy_world_forward := (pkg.camera_basis * Vector3(0.0, 0.0, -1.0)).normalized()
+
+	assert_vector(world_forward).is_equal(Vector3(0.0, 0.0, -1.0))
+	assert_vector(legacy_world_forward).is_equal(Vector3(0.0, 0.0, -1.0))
+
+
+func test_move_container_resolves_direction_from_movement_basis_not_camera_alias() -> void:
+	var mc := _make_locomotion_container()
+	var pkg := _make_input_package([&"idle", &"run"])
+	pkg.input_direction = Vector2(0.0, -1.0)
+	pkg.movement_basis = Basis.IDENTITY
+	pkg.camera_basis = Basis(Vector3.UP, PI)
+
+	var desired := mc._resolve_desired_world_direction(pkg)
+
+	assert_vector(desired).is_equal(Vector3(0.0, 0.0, -1.0))
+
+
 func test_swim_pitch_uses_water_context_during_input_gather() -> void:
 	var gatherer := _make_gatherer()
 	var pivot := Node3D.new()
@@ -214,6 +250,258 @@ func test_swim_pitch_uses_water_context_during_input_gather() -> void:
 	var pkg := gatherer.gather_input(true, 0.0)
 
 	assert_float(pkg.vertical_input).is_greater(0.0)
+
+
+func test_swim_pitch_can_use_explicit_movement_pitch_provider() -> void:
+	var gatherer := _make_gatherer()
+	var pivot := Node3D.new()
+	add_child(pivot)
+	auto_free(pivot)
+	gatherer.camera_pivot = pivot
+	gatherer.set_movement_reference_providers(
+		Callable(self, "_test_actor_forward_basis"),
+		Callable(self, "_test_upward_swim_pitch"))
+
+	pivot.rotation.x = 0.0
+	Input.action_press(&"move_forward")
+
+	var pkg := gatherer.gather_input(true, 0.0)
+
+	assert_float(pkg.movement_pitch).is_equal_approx(-0.5, 0.001)
+	assert_float(pkg.vertical_input).is_greater(0.0)
+
+
+func test_third_person_movement_basis_uses_character_facing_not_camera_pivot() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.THIRD_PERSON)
+
+	character_root.rotation.y = 0.0
+	player.camera_pivot.rotation.y = PI
+
+	var world_forward := (player._get_movement_basis() * Vector3(0.0, 0.0, -1.0)).normalized()
+
+	assert_vector(world_forward).is_equal(Vector3(0.0, 0.0, -1.0))
+
+
+func test_third_person_look_yaw_turns_facing_and_syncs_camera_follow() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.THIRD_PERSON)
+
+	character_root.rotation.y = 0.0
+	player.camera_pivot.rotation.y = PI
+	player._apply_look_delta(0.4, -0.2)
+
+	assert_float(character_root.rotation.y).is_equal_approx(0.4, 0.001)
+	assert_float(player.camera_pivot.rotation.y).is_equal_approx(character_root.rotation.y, 0.001)
+	assert_float(player.camera_pivot.rotation.x).is_equal_approx(-0.2, 0.001)
+
+
+func test_player_controller_left_right_input_strafes_without_turning_facing() -> void:
+	var source_config := CharacterMovementConfigScript.new() as CharacterMovementConfig
+	source_config.turn_to_movement_direction = true
+	source_config.run_speed = 5.0
+	source_config.ground_tracking_angular_speed = 20.0
+
+	var player := PlayerControllerScript.new() as PlayerController
+	player.movement_config = source_config
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+
+	var run := player.get_movement_motor().get_move_container().get_move(&"run")
+	var pkg := _make_input_package([&"idle", &"run"])
+	pkg.input_direction = Vector2(-1.0, 0.0)
+	pkg.movement_basis = player._get_movement_basis()
+
+	character_root.rotation.y = 0.0
+	run._update(pkg, 1.0 / 60.0)
+
+	assert_bool(source_config.turn_to_movement_direction).is_true()
+	assert_bool(player.get_movement_config().turn_to_movement_direction).is_false()
+	assert_float(character_root.rotation.y).is_equal_approx(0.0, 0.001)
+	assert_float(player.velocity.x).is_equal_approx(-5.0, 0.001)
+	assert_float(player.velocity.z).is_equal_approx(0.0, 0.001)
+
+
+func test_camera_vanity_orbits_without_changing_movement_basis() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.THIRD_PERSON)
+
+	character_root.rotation.y = 0.0
+	player.camera_pivot.rotation.y = 0.0
+	player.begin_camera_vanity()
+	player._apply_look_delta(PI, 0.25)
+
+	var world_forward := (player._get_movement_basis() * Vector3(0.0, 0.0, -1.0)).normalized()
+
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.THIRD_PERSON_VANITY)
+	assert_float(character_root.rotation.y).is_equal_approx(0.0, 0.001)
+	assert_float(player.camera_pivot.rotation.y).is_equal_approx(PI, 0.001)
+	assert_vector(world_forward).is_equal(Vector3(0.0, 0.0, -1.0))
+
+
+func test_camera_vanity_release_returns_to_primary_mode() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.FIRST_PERSON)
+
+	player.begin_camera_vanity()
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.THIRD_PERSON_VANITY)
+
+	player.end_camera_vanity()
+
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.FIRST_PERSON)
+
+
+func test_camera_vanity_pitch_does_not_change_swim_movement_pitch() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.THIRD_PERSON)
+	player._apply_look_delta(0.0, -0.25)
+
+	player.begin_camera_vanity()
+	player._apply_look_delta(0.0, 0.75)
+
+	assert_float(player._get_movement_pitch()).is_equal_approx(-0.25, 0.001)
+	assert_float(player.camera_pivot.rotation.x).is_equal_approx(0.5, 0.001)
+
+
+func test_camera_vanity_action_is_required_input_action() -> void:
+	assert_bool(InputActionsScript.CAMERA.has(&"camera_vanity")).is_true()
+	assert_bool(InputActionsScript.REQUIRED_ACTIONS.has(&"camera_vanity")).is_true()
+	assert_bool(InputMap.has_action(&"camera_vanity")).is_true()
+	for event in InputMap.action_get_events(&"camera_vanity"):
+		assert_bool(event is InputEventKey).is_false()
+
+
+func test_camera_tab_tap_toggles_first_and_third_person() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.THIRD_PERSON)
+
+	player._on_camera_mode_pressed(1000)
+	player._on_camera_mode_released(1050)
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.FIRST_PERSON)
+
+	player._on_camera_mode_pressed(1100)
+	player._on_camera_mode_released(1150)
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.THIRD_PERSON)
+
+
+func test_camera_tab_hold_enters_vanity_then_returns_to_third_person() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.THIRD_PERSON)
+
+	player._on_camera_mode_pressed(1000)
+	player._poll_camera_mode_hold(1000 + int(InteractionIntentScript.DEFAULT_HOLD_THRESHOLD * 1000.0))
+
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.THIRD_PERSON_VANITY)
+
+	player._on_camera_mode_released(1300)
+
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.THIRD_PERSON)
+
+
+func test_camera_tab_hold_from_first_person_enters_vanity_then_returns_to_first_person() -> void:
+	var player := PlayerControllerScript.new() as PlayerController
+	add_child(player)
+	auto_free(player)
+
+	var character_root := Node3D.new()
+	player.attach_character(character_root, null)
+	player.set_camera_mode(PlayerController.CameraMode.FIRST_PERSON)
+
+	player._on_camera_mode_pressed(1000)
+	player._poll_camera_mode_hold(1000 + int(InteractionIntentScript.DEFAULT_HOLD_THRESHOLD * 1000.0))
+
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.THIRD_PERSON_VANITY)
+
+	player._on_camera_mode_released(1300)
+
+	assert_int(player.camera_mode).is_equal(PlayerController.CameraMode.FIRST_PERSON)
+
+
+func test_directional_ground_animation_state_uses_lateral_input() -> void:
+	var mc := _make_locomotion_container()
+	mc.switch_to(&"run")
+	var pkg := _make_input_package([&"idle", &"run"])
+
+	pkg.input_direction = Vector2(-1.0, 0.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("RunLeft")
+
+	pkg.input_direction = Vector2(1.0, 0.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("RunRight")
+
+
+func test_directional_ground_animation_state_preserves_diagonal_intent() -> void:
+	var mc := _make_locomotion_container()
+	mc.switch_to(&"run")
+	var pkg := _make_input_package([&"idle", &"run"])
+
+	pkg.input_direction = Vector2(-1.0, -1.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("RunForwardLeft")
+
+	pkg.input_direction = Vector2(1.0, 1.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("RunBackRight")
+
+
+func test_directional_crouch_animation_state_uses_sneak_cardinals() -> void:
+	var mc := _make_locomotion_container()
+	mc.switch_to(&"crouch")
+	var pkg := _make_input_package([&"idle", &"run", &"crouch"])
+
+	pkg.input_direction = Vector2(-1.0, 0.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("SneakLeft")
+
+	pkg.input_direction = Vector2(1.0, 1.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("SneakBackRight")
+
+
+func test_directional_swim_animation_state_uses_cardinal_groups() -> void:
+	var mc := _make_locomotion_container()
+	mc.switch_to(&"swim")
+	var pkg := _make_input_package([&"idle", &"run"])
+
+	pkg.input_direction = Vector2(-1.0, 0.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("SwimWalkLeft")
+
+	pkg.actions.append(&"sprint")
+	pkg.input_direction = Vector2(1.0, -1.0)
+	assert_str(str(mc._resolve_animation_state(pkg))).is_equal("SwimRunForwardRight")
 
 
 func test_swim_jump_is_impulse_intent_not_vertical_axis() -> void:
@@ -693,6 +981,46 @@ func test_animation_manager_resolves_spaced_swim_animation_names() -> void:
 	assert_str(str(anim_manager._find_animation_for_state_name(&"SwimForward"))).is_equal("Swim Walk Forward")
 
 
+func test_animation_manager_resolves_directional_morrowind_names() -> void:
+	var anim_manager := AnimationManagerScript.new() as AnimationManager
+	add_child(anim_manager)
+	auto_free(anim_manager)
+
+	var anim_player := AnimationPlayer.new()
+	add_child(anim_player)
+	auto_free(anim_player)
+	var lib := AnimationLibrary.new()
+	lib.add_animation(&"Run Left", Animation.new())
+	lib.add_animation(&"RunForwardRight1h", Animation.new())
+	lib.add_animation(&"Sneak Right", Animation.new())
+	lib.add_animation(&"Swim Walk Left", Animation.new())
+	anim_player.add_animation_library("", lib)
+	anim_manager.animation_player = anim_player
+
+	assert_str(str(anim_manager._find_animation_for_state_name(&"RunLeft"))).is_equal("Run Left")
+	assert_str(str(anim_manager._find_animation_for_state_name(&"RunForwardRight"))).is_equal("RunForwardRight1h")
+	assert_str(str(anim_manager._find_animation_for_state_name(&"SneakRight"))).is_equal("Sneak Right")
+	assert_str(str(anim_manager._find_animation_for_state_name(&"SwimWalkLeft"))).is_equal("Swim Walk Left")
+
+
+func test_animation_manager_directional_diagonal_falls_back_to_cardinal() -> void:
+	var anim_manager := AnimationManagerScript.new() as AnimationManager
+	add_child(anim_manager)
+	auto_free(anim_manager)
+
+	anim_manager._state_animation_map = {
+		&"Run": &"RunForward",
+		&"RunLeft": &"RunLeft",
+		&"RunBack": &"RunBack",
+		&"SwimForward": &"SwimWalkForward",
+		&"SwimWalkRight": &"SwimWalkRight",
+	}
+
+	assert_str(str(anim_manager._resolve_fallback_state(&"RunForwardLeft"))).is_equal("RunLeft")
+	assert_str(str(anim_manager._resolve_fallback_state(&"RunBackRight"))).is_equal("RunBack")
+	assert_str(str(anim_manager._resolve_fallback_state(&"SwimWalkForwardRight"))).is_equal("SwimWalkRight")
+
+
 func test_animation_system_retries_movement_state_after_failed_transition() -> void:
 	var anim_system := CharacterAnimationSystem.new()
 	add_child(anim_system)
@@ -997,6 +1325,12 @@ func test_phase4_character_controller_visual_scene_uses_input_actions_for_debug_
 	assert_bool(source.contains("event.keycode")).is_false()
 
 
+func test_phase4_character_controller_visual_scene_keeps_player_animation_lod_disabled() -> void:
+	var source := FileAccess.get_file_as_string("res://tests/visual/test_character_controller.gd")
+
+	assert_bool(source.contains("_factory.enable_lod = false")).is_true()
+
+
 func test_phase4_movement_state_splits_jump_move_from_airborne_state() -> void:
 	var mc := _make_locomotion_container()
 	var pkg := _make_input_package([])
@@ -1140,6 +1474,7 @@ func _make_locomotion_container() -> MoveContainer:
 	mc.character_root = character_root
 
 	var idle := IdleMoveScript.new()
+	var walk := WalkMoveScript.new()
 	var run := RunMoveScript.new()
 	var sprint := SprintMoveScript.new()
 	var jump := JumpMoveScript.new()
@@ -1148,6 +1483,7 @@ func _make_locomotion_container() -> MoveContainer:
 	var swim_idle := SwimIdleMoveScript.new()
 	var swim := SwimMoveScript.new()
 	mc.add_child(idle)
+	mc.add_child(walk)
 	mc.add_child(run)
 	mc.add_child(sprint)
 	mc.add_child(jump)
@@ -1170,6 +1506,18 @@ func _make_gatherer() -> PlayerInputGatherer:
 	add_child(gatherer)
 	auto_free(gatherer)
 	return gatherer
+
+
+func _test_actor_forward_basis() -> Basis:
+	return Basis.IDENTITY
+
+
+func _test_flat_movement_pitch() -> float:
+	return 0.0
+
+
+func _test_upward_swim_pitch() -> float:
+	return -0.5
 
 
 func _release_test_actions() -> void:

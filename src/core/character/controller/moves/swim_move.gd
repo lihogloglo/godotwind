@@ -1,4 +1,4 @@
-## SwimMove - Directional swimming with 3D camera-relative movement
+## SwimMove - Directional swimming with 3D movement-reference movement
 class_name SwimMove
 extends Move
 
@@ -32,7 +32,7 @@ func update(input: InputPackage, delta: float) -> void:
 	var config := get_movement_config()
 	var target_velocity := Vector3.ZERO
 	if input.input_direction != Vector2.ZERO:
-		var input_dir_3d := (input.camera_basis * Vector3(
+		var input_dir_3d := (input.movement_basis * Vector3(
 			input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 		target_velocity = input_dir_3d * config.swim_speed
 
@@ -47,7 +47,7 @@ func update(input: InputPackage, delta: float) -> void:
 	if input.input_direction != Vector2.ZERO:
 		var facing: Node3D = character_root if character_root else player
 		if facing and config.turn_to_movement_direction:
-			var face_dir := (input.camera_basis * Vector3(
+			var face_dir := (input.movement_basis * Vector3(
 				input.input_direction.x, 0.0, input.input_direction.y)).normalized()
 			var face_direction := -facing.basis.z
 			var angle := face_direction.signed_angle_to(face_dir, Vector3.UP)

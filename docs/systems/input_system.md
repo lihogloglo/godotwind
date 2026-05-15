@@ -34,7 +34,8 @@ Godotwind defines all input via Godot's native `InputMap`, with action definitio
 | `look_right`      | camera      | *(mouse, see §4)*   | RS X +1.0           | `PlayerController`, `FlyCamera`      |
 | `look_up`         | camera      | *(mouse, see §4)*   | RS Y −1.0           | `PlayerController`, `FlyCamera`      |
 | `look_down`       | camera      | *(mouse, see §4)*   | RS Y +1.0           | `PlayerController`, `FlyCamera`      |
-| `toggle_camera`   | camera      | TAB                 | Back/Select (idx 4) | `PlayerController`                   |
+| `toggle_camera`   | camera      | TAB tap/hold        | Back/Select (idx 4) | `PlayerController`                   |
+| `camera_vanity`   | camera      | *(unbound)*         | RS click (idx 8)    | `PlayerController`                   |
 | `interact`        | interaction | E                   | *(see §3.1)*        | **active context only**              |
 | `debug_console`   | debug       | ² / ` , F1          | —                   | `world_explorer`, console UI         |
 | `debug_screenshot`| debug       | F2                  | —                   | tools                                |
@@ -74,7 +75,7 @@ These are developer-only validation controls listed under
 | 3     | Y              | (reserved)                |
 | 4     | Back / View    | toggle_camera / menu      |
 | 7     | LS click       | sprint                    |
-| 8     | RS click       | (reserved)                |
+| 8     | RS click       | camera_vanity             |
 
 ---
 
@@ -97,7 +98,7 @@ K.0 deliberately does NOT add a gamepad binding to `interact`. Adding one requir
 
 ### 3.3 The `_ensure_input_actions` runtime safety net
 
-`PlayerController._ensure_input_actions` (`src/core/player/player_controller.gd:421`) is a runtime block that adds `move_forward / move_backward / move_left / move_right / sprint / walk / jump / crouch / toggle_camera / interact` if they are missing from `InputMap`.
+`PlayerController._ensure_input_actions` (`src/core/player/player_controller.gd:421`) is a runtime block that adds `move_forward / move_backward / move_left / move_right / sprint / walk / jump / crouch / toggle_camera / camera_vanity / interact` if they are missing from `InputMap`.
 
 After K.0 these actions live in `project.godot [input]`, so the runtime block is a redundant safety net. It is **left in place** because:
 
@@ -106,6 +107,12 @@ After K.0 these actions live in `project.godot [input]`, so the runtime block is
 3. It defends against the case where a future test scene boots without `project.godot` somehow.
 
 Cleanup is queued for a phase AFTER K.0.5 ships, owner TBD. If you are considering deleting it: don't, until you have audited every entry point and added a regression test first.
+
+Keyboard vanity follows the OpenMW-style Tab contract in `PlayerController`:
+short-press `toggle_camera` toggles first/fixed-third person, while holding the
+same action enters temporary third-person vanity until release. The separate
+`camera_vanity` action is intentionally unbound on keyboard and remains
+available for direct gamepad RS-click vanity.
 
 ---
 
@@ -157,7 +164,7 @@ K.0 uses `deadzone = 0.2` on every axis binding, hardcoded into each `InputEvent
 ## 8. Roadmap
 
 ### K.0 — foundation (shipped 2026-04-07)
-Action set in `project.godot [input]` (15 required actions); `src/core/input/input_actions.gd` static namespace + `verify()`; `fly_camera.gd` swapped from hardcoded `KEY_*` reads to action reads; `tests/visual/test_input_phase_K0.tscn` acceptance scene; this document. AZERTY keyboard pass green; gamepad pass deferred (no controller available at run time).
+Action set in `project.godot [input]` (16 required actions after the player-camera Phase 3 `camera_vanity` addition); `src/core/input/input_actions.gd` static namespace + `verify()`; `fly_camera.gd` swapped from hardcoded `KEY_*` reads to action reads; `tests/visual/test_input_phase_K0.tscn` acceptance scene; this document. AZERTY keyboard pass green; gamepad pass deferred (no controller available at run time).
 
 ### K.0.5 — test scene sweep (shipped 2026-04-07)
 Migrated `lapalma_explorer.gd`, `lapalma_static_explorer.gd`, `ik_animation_showcase.gd`, `ik_visual_test.gd`, `animation_wiring_test.gd` from hardcoded `KEY_*` reads to action reads. Hotkey match blocks switched from `keycode` to `physical_keycode`. Post-sweep grep over `src/`: zero `Input.is_key_pressed` matches. 18 debug-only hotkeys (F3 / K / O / 1-4 / M / N / etc.) remain hardcoded as `physical_keycode`, flagged inline as K.1 rebind candidates.
@@ -176,7 +183,7 @@ Controller prompt icons (no addon name committed until verified survey); per-dev
 Stack-based input contexts (gameplay / dialogue / inventory / book / menu). Read state from `PlayerController.is_modal_ui_open()` — **one-way read only**, @keys never registers gates with `PlayerController`. Suppress movement actions in dialogue; suppress camera actions in inventory; do not add a third raw `interact` reader.
 
 ### P6 — gdunit headless test (low priority)
-Add `tests/unit/test_input_actions.gd` asserting `InputActions.REQUIRED_ACTIONS.size() == 15`, each action is `InputMap.has_action(name)`, deadzone values match doc constant. ~30-40 LOC. Blocks regression detection if `project.godot` is hand-edited and an action gets dropped.
+Add `tests/unit/test_input_actions.gd` asserting `InputActions.REQUIRED_ACTIONS.size() == 16`, each action is `InputMap.has_action(name)`, deadzone values match doc constant. ~30-40 LOC. Blocks regression detection if `project.godot` is hand-edited and an action gets dropped.
 
 ---
 

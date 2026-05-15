@@ -11,12 +11,13 @@
 ##   5. Press SPACE → jump fires
 ##   6. Press C and CTRL → crouch fires (both bindings)
 ##   7. Press SHIFT → sprint fires
-##   8. Press TAB → toggle_camera fires
-##   9. Press E → interact fires
-##  10. Press the ²/` key (KEY_QUOTELEFT physical position) → debug_console fires
-##  11. Press F1 → debug_console fires (fallback)
-##  12. Press F2 → debug_screenshot fires
-##  13. Plug in a controller → look_* axes light up when right stick moves
+##   8. Press TAB → toggle_camera fires; hold TAB → vanity in PlayerController
+##   9. Press RS click on controller → camera_vanity fires
+##  10. Press E → interact fires
+##  11. Press the ²/` key (KEY_QUOTELEFT physical position) → debug_console fires
+##  12. Press F1 → debug_console fires (fallback)
+##  13. Press F2 → debug_screenshot fires
+##  14. Plug in a controller → look_* axes light up when right stick moves
 ##
 ## Auto self-test: calls InputActions.verify() in _ready and asserts all
 ## REQUIRED_ACTIONS exist. Logs result via Log autoload.
@@ -82,7 +83,8 @@ func _process(_delta: float) -> void:
 	lines.append("look_up           : %s" % _state(&"look_up"))
 	lines.append("look_down         : %s" % _state(&"look_down"))
 	lines.append("look_vec (x,y)    : %s" % str(Input.get_vector(&"look_left", &"look_right", &"look_up", &"look_down").snappedf(0.01)))
-	lines.append("toggle_camera     : %s   (TAB)" % _state(&"toggle_camera"))
+	lines.append("toggle_camera     : %s   (TAB tap/hold)" % _state(&"toggle_camera"))
+	lines.append("camera_vanity     : %s   (RS click)" % _state(&"camera_vanity"))
 	lines.append("")
 	lines.append("--- INTERACTION (owned by PlayerController) ---")
 	lines.append("interact          : %s   (E — read-only display)" % _state(&"interact"))

@@ -2,7 +2,7 @@
 ##
 ## Controls:
 ##   WASD = move, Shift = sprint, Space = jump, C/Ctrl = crouch
-##   Mouse = look, Tab = toggle 1st/3rd person, ESC = release mouse
+##   Mouse = look, Tab tap = toggle 1st/3rd person, Tab hold = vanity, ESC = release mouse
 ##   character_controller_preset_1..5 = spawn preset NPCs
 ##   character_controller_toggle_debug_hud = toggle debug HUD
 ##   character_controller_dump_kf_bones = dump KF vs actual bone comparison
@@ -57,6 +57,7 @@ func _ready() -> void:
 	# Factory for creating MW NPCs
 	_factory = CharacterFactoryV2Script.new()
 	_factory.enable_ik = true
+	_factory.enable_lod = false  # Local player visual test mirrors main scene: never cull player animation.
 	_factory.enable_wander = false
 	_factory.debug_characters = true
 	_factory.debug_animations = true
@@ -321,12 +322,13 @@ func _create_terrain() -> void:
 		add_child(body)
 
 	# Slope ramp
+	var ramp_position := Vector3(10, -1.15, 0)
 	var ramp := MeshInstance3D.new()
 	ramp.name = "Ramp"
 	var box_mesh := BoxMesh.new()
 	box_mesh.size = Vector3(4, 0.2, 8)
 	ramp.mesh = box_mesh
-	ramp.position = Vector3(10, 1.5, 0)
+	ramp.position = ramp_position
 	ramp.rotation.x = deg_to_rad(-20)
 	ramp.material_override = mat.duplicate()
 	ramp.material_override.albedo_color = Color(0.5, 0.4, 0.3)
@@ -339,9 +341,11 @@ func _create_terrain() -> void:
 	ramp_shape.size = Vector3(4, 0.2, 8)
 	ramp_col.shape = ramp_shape
 	ramp_body.add_child(ramp_col)
-	ramp_body.position = Vector3(10, 1.5, 0)
+	ramp_body.position = ramp_position
 	ramp_body.rotation.x = deg_to_rad(-20)
 	add_child(ramp_body)
+
+	_create_slope_test_course(mat)
 
 	# Tall wall for climbing test (Phase 5)
 	var wall := MeshInstance3D.new()
@@ -399,6 +403,208 @@ func _create_terrain() -> void:
 		bx_body.add_child(bx_col)
 		bx_body.position = b[1]
 		add_child(bx_body)
+
+
+func _create_slope_test_course(base_mat: StandardMaterial3D) -> void:
+	var runup_mat := base_mat.duplicate() as StandardMaterial3D
+	runup_mat.albedo_color = Color(0.34, 0.52, 0.24)
+	_add_box_terrain(
+		"SlopeCourse_Runup",
+		Vector3(0, -0.05, 65),
+		Vector3(100, 0.1, 30),
+		runup_mat
+	)
+
+	var slope_specs := [
+		# [name, lane_x, angle_degrees, color]
+		["SlopeCourse_12Deg", -36.0, 12.0, Color(0.45, 0.55, 0.28)],
+		["SlopeCourse_28Deg", -18.0, 28.0, Color(0.52, 0.48, 0.25)],
+		["SlopeCourse_45Deg", 0.0, 45.0, Color(0.58, 0.42, 0.24)],
+		["SlopeCourse_58Deg", 18.0, 58.0, Color(0.62, 0.32, 0.22)],
+	]
+	for spec in slope_specs:
+		var platform_name := String(spec[0])
+		var center_x := float(spec[1])
+		var angle_degrees := float(spec[2])
+		var color: Color = spec[3]
+		_add_slope_platform(
+			platform_name,
+			center_x,
+			80.0,
+			14.0,
+			9.0,
+			0.3,
+			angle_degrees,
+			color
+		)
+
+	_add_rolling_hill_course()
+
+
+func _add_box_terrain(box_name: String, position: Vector3, size: Vector3, mat: Material) -> void:
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.name = box_name
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	mesh_instance.mesh = mesh
+	mesh_instance.position = position
+	mesh_instance.material_override = mat
+	add_child(mesh_instance)
+
+	var body := StaticBody3D.new()
+	body.name = box_name + "Body"
+	var col := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = size
+	col.shape = shape
+	body.add_child(col)
+	body.position = position
+	add_child(body)
+
+
+func _add_slope_platform(
+	platform_name: String,
+	center_x: float,
+	low_edge_z: float,
+	length: float,
+	width: float,
+	thickness: float,
+	angle_degrees: float,
+	color: Color
+) -> void:
+	var angle := deg_to_rad(angle_degrees)
+	var half_length := length * 0.5
+	var half_thickness := thickness * 0.5
+	var platform_position := Vector3(
+		center_x,
+		half_length * sin(angle) - half_thickness * cos(angle),
+		low_edge_z + half_length * cos(angle) + half_thickness * sin(angle)
+	)
+	var platform_size := Vector3(width, thickness, length)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.name = platform_name
+	var mesh := BoxMesh.new()
+	mesh.size = platform_size
+	mesh_instance.mesh = mesh
+	mesh_instance.position = platform_position
+	mesh_instance.rotation.x = -angle
+	mesh_instance.material_override = mat
+	add_child(mesh_instance)
+
+	var body := StaticBody3D.new()
+	body.name = platform_name + "Body"
+	var col := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = platform_size
+	col.shape = shape
+	body.add_child(col)
+	body.position = platform_position
+	body.rotation.x = -angle
+	add_child(body)
+
+
+func _add_rolling_hill_course() -> void:
+	var hill_mat := StandardMaterial3D.new()
+	hill_mat.albedo_color = Color(0.30, 0.43, 0.24)
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(hill_mat)
+
+	var faces := PackedVector3Array()
+	var x_min := 28.0
+	var x_max := 50.0
+	var z_min := 80.0
+	var z_max := 128.0
+	var x_steps := 12
+	var z_steps := 24
+
+	for z_i in range(z_steps):
+		for x_i in range(x_steps):
+			var x0 := lerpf(x_min, x_max, float(x_i) / float(x_steps))
+			var x1 := lerpf(x_min, x_max, float(x_i + 1) / float(x_steps))
+			var z0 := lerpf(z_min, z_max, float(z_i) / float(z_steps))
+			var z1 := lerpf(z_min, z_max, float(z_i + 1) / float(z_steps))
+			var v00 := Vector3(x0, _slope_course_height(x0, z0), z0)
+			var v01 := Vector3(x0, _slope_course_height(x0, z1), z1)
+			var v10 := Vector3(x1, _slope_course_height(x1, z0), z0)
+			var v11 := Vector3(x1, _slope_course_height(x1, z1), z1)
+
+			st.add_vertex(v00)
+			st.add_vertex(v01)
+			st.add_vertex(v10)
+			faces.append(v00)
+			faces.append(v01)
+			faces.append(v10)
+
+			st.add_vertex(v10)
+			st.add_vertex(v01)
+			st.add_vertex(v11)
+			faces.append(v10)
+			faces.append(v01)
+			faces.append(v11)
+
+	st.generate_normals()
+	var hill_mesh := st.commit()
+	var hill := MeshInstance3D.new()
+	hill.name = "SlopeCourse_RollingHills"
+	hill.mesh = hill_mesh
+	add_child(hill)
+
+	var body := StaticBody3D.new()
+	body.name = "SlopeCourse_RollingHillsBody"
+	var col := CollisionShape3D.new()
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	col.shape = shape
+	body.add_child(col)
+	add_child(body)
+
+
+func _slope_course_height(x: float, z: float) -> float:
+	var x_center := 39.0
+	var x_half_width := 11.0
+	var z_min := 80.0
+	var z_max := 128.0
+	var z_t := clampf((z - z_min) / (z_max - z_min), 0.0, 1.0)
+	var run_in := _smooth01(clampf((z - z_min) / 10.0, 0.0, 1.0))
+	var side_fade := clampf(1.0 - pow(absf(x - x_center) / x_half_width, 4.0), 0.0, 1.0)
+	var rolling := 0.6 * sin((z - z_min) * 0.34) + 0.35 * sin((x - x_center) * 0.7)
+	var ridge := 1.4 * exp(-pow((x - x_center) / 3.2, 2.0)) * _smooth01(z_t)
+	return maxf(0.0, run_in * side_fade * (1.0 + 3.2 * z_t + rolling + ridge))
+
+
+func _smooth01(value: float) -> float:
+	var t := clampf(value, 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
+
+
+func _create_pool_staircase(pool_x: float, pool_z: float, pool_half: float, surface_y: float) -> void:
+	var stair_mat := StandardMaterial3D.new()
+	stair_mat.albedo_color = Color(0.42, 0.43, 0.38)
+
+	var step_count := 6
+	var step_width := 3.2
+	var tread_depth := 0.8
+	var base_y := surface_y - 0.35
+	var first_top_y := surface_y - 0.2
+	var top_step_z := pool_z + pool_half - 1.0
+	var step_x := pool_x + 6.0
+
+	for step_idx in range(step_count):
+		var t := float(step_idx) / float(step_count - 1)
+		var top_y := lerpf(first_top_y, 0.0, t)
+		var step_height := top_y - base_y
+		var step_z := top_step_z - float(step_count - 1 - step_idx) * tread_depth
+		_add_box_terrain(
+			"PoolStair_%02d" % [step_idx + 1],
+			Vector3(step_x, base_y + step_height * 0.5, step_z),
+			Vector3(step_width, step_height, tread_depth),
+			stair_mat
+		)
 
 
 func _create_water_pool() -> void:
@@ -475,6 +681,8 @@ func _create_water_pool() -> void:
 	pool_body.add_child(pool_col)
 	pool_body.position = Vector3(pool_x, floor_y - 0.05, pool_z)
 	add_child(pool_body)
+
+	_create_pool_staircase(pool_x, pool_z, pool_half, surface_y)
 
 	# Water volume Area3D — triggers swimming when player enters
 	var water_area := Area3D.new()
@@ -775,15 +983,29 @@ func _update_debug_hud() -> void:
 		str(_player_controller.current_posture),
 		str(_player_controller.is_swimming),
 	]
-	text += "[b]Camera:[/b] %s\n" % ("1st Person" if _player_controller.camera_mode == 0 else "3rd Person")
+	text += "[b]Camera:[/b] %s\n" % _get_camera_mode_label()
 	if not state_map_info.is_empty():
 		text += "[b]State Map:[/b] %s\n" % state_map_info
 	text += "─────────────────────\n"
 	text += "[color=gray]WASD=move Shift=sprint C=crouch\n"
-	text += "Space=jump Tab=camera 1-5=NPC F1=HUD\n"
+	text += "Space=jump Tab tap=camera hold=vanity 1-5=NPC F1=HUD\n"
 	text += "F2=dump KF comparison[/color]"
 
 	_debug_hud.text = text
+
+
+func _get_camera_mode_label() -> String:
+	if not _player_controller:
+		return "Unknown"
+	match _player_controller.camera_mode:
+		0:
+			return "1st Person"
+		1:
+			return "3rd Person"
+		2:
+			return "Vanity"
+		_:
+			return "Unknown"
 
 
 # =============================================================================

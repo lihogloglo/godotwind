@@ -48,14 +48,15 @@ const MOVEMENT: Array[StringName] = [
 	&"walk",
 ]
 
-## Camera actions — controller right stick ONLY. Mouse motion stays event-driven
-## in PlayerController._input(InputEventMouseMotion). See MOUSE-NOT-BINDABLE note.
+## Camera actions. Mouse motion stays event-driven in
+## PlayerController._input(InputEventMouseMotion). See MOUSE-NOT-BINDABLE note.
 const CAMERA: Array[StringName] = [
 	&"look_left",
 	&"look_right",
 	&"look_up",
 	&"look_down",
 	&"toggle_camera",
+	&"camera_vanity",
 ]
 
 ## Interaction actions — `interact` is owned by exactly one active context.
@@ -127,6 +128,7 @@ const REQUIRED_ACTIONS: Array[StringName] = [
 	&"look_up",
 	&"look_down",
 	&"toggle_camera",
+	&"camera_vanity",
 	&"interact",
 	&"debug_console",
 	&"debug_screenshot",
