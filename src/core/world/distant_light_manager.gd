@@ -9,7 +9,6 @@
 class_name DistantLightManager
 extends RefCounted
 
-const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 
@@ -21,12 +20,6 @@ const FADE_MARGIN: float = 30.0
 const BASE_SPRITE_SIZE: float = 3.0
 const MIN_SCREEN_FACTOR: float = 0.005
 const MAX_INSTANCES: int = 4096
-const MW_LIGHT_SCALE: float = 1.0 / 70.0
-const LIGHT_FLAG_FLICKER: int = 0x0008
-const LIGHT_FLAG_FIRE: int = 0x0010
-const LIGHT_FLAG_FLICKER_SLOW: int = 0x0040
-const LIGHT_FLAG_PULSE: int = 0x0080
-const LIGHT_FLAG_PULSE_SLOW: int = 0x0100
 const DUSK_THRESHOLD: float = 0.15
 const NIGHT_THRESHOLD: float = -0.05
 
@@ -38,7 +31,6 @@ const FULL_RING_ENUM_BUDGET_USEC: int = 600
 const PAGE_REBUILD_MAX_PER_FRAME: int = 16
 const PAGE_REBUILD_BUDGET_USEC: int = 1200
 const PAGE_AABB_MARGIN: float = 32.0
-const PAGE_VISIBILITY_EXTRA_MARGIN: float = LIGHT_PAGE_SIZE_CELLS * DU.CELL_SIZE_METERS * 1.5
 
 #endregion
 
@@ -52,7 +44,8 @@ class LightData:
 	var position: Vector3
 	var color: Color
 	var radius: float
-	var flags: int
+	var light_animation: int
+	var is_fire: bool
 
 
 class LightPage:
@@ -74,6 +67,7 @@ var _quad_mesh: QuadMesh = null
 var _is_setup: bool = false
 var _streaming_enabled: bool = true
 var _world_object_source: RefCounted = null
+var _coordinate_mapper: RefCounted = null
 
 var _lights: Dictionary[int, LightData] = {}
 var _next_id: int = 0
@@ -201,6 +195,10 @@ func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
 
 
+func set_coordinate_mapper(mapper: RefCounted) -> void:
+	_coordinate_mapper = mapper
+
+
 func cleanup() -> void:
 	for page_key: Vector2i in _pages.keys():
 		_free_page(page_key)
@@ -243,7 +241,7 @@ func _process_full_ring_enum(deadline_usec: int = 0) -> void:
 	var start_usec := Time.get_ticks_usec()
 	var visited := 0
 	var queued := 0
-	var radius_meters := float(_full_ring_radius) * DU.CELL_SIZE_METERS
+	var radius_meters := _cell_radius_to_distance(_full_ring_radius)
 	var radius_sq := radius_meters * radius_meters
 
 	while _full_ring_dy <= _full_ring_radius and visited < FULL_RING_ENUM_CELLS_MAX_PER_FRAME:
@@ -253,7 +251,7 @@ func _process_full_ring_enum(deadline_usec: int = 0) -> void:
 		if visited > 0 and now_usec - start_usec >= FULL_RING_ENUM_BUDGET_USEC:
 			break
 		var grid := Vector2i(_full_ring_center.x + _full_ring_dx, _full_ring_center.y + _full_ring_dy)
-		if DU.cell_distance_squared(_full_ring_center, grid) <= radius_sq:
+		if _cell_distance_squared(_full_ring_center, grid) <= radius_sq:
 			if grid not in _loaded_cells and not _pending_cell_set.has(grid):
 				_pending_cells.append(grid)
 				_pending_cell_set[grid] = true
@@ -290,7 +288,7 @@ func _clear_streamed_data() -> void:
 
 
 func _update_ring_differential(old_center: Vector2i, new_center: Vector2i, radius_cells: int) -> void:
-	var radius_meters := float(radius_cells) * DU.CELL_SIZE_METERS
+	var radius_meters := _cell_radius_to_distance(radius_cells)
 	var radius_sq := radius_meters * radius_meters
 	var move := new_center - old_center
 	var load: Array[Vector2i] = []
@@ -303,12 +301,12 @@ func _update_ring_differential(old_center: Vector2i, new_center: Vector2i, radiu
 			var trail_x := old_center.x - radius_cells * sx + (step - 1) * sx
 			for cy: int in range(-radius_cells, radius_cells + 1):
 				var lead := Vector2i(lead_x, new_center.y + cy)
-				if DU.cell_distance_squared(new_center, lead) <= radius_sq:
+				if _cell_distance_squared(new_center, lead) <= radius_sq:
 					if lead not in _loaded_cells and not _pending_cell_set.has(lead):
 						load.append(lead)
 						_loaded_cells[lead] = true
 				var trail := Vector2i(trail_x, old_center.y + cy)
-				if DU.cell_distance_squared(old_center, trail) <= radius_sq and trail in _loaded_cells:
+				if _cell_distance_squared(old_center, trail) <= radius_sq and trail in _loaded_cells:
 					unload.append(trail)
 
 	if move.y != 0:
@@ -318,12 +316,12 @@ func _update_ring_differential(old_center: Vector2i, new_center: Vector2i, radiu
 			var trail_y := old_center.y - radius_cells * sy + (step - 1) * sy
 			for cx: int in range(-radius_cells, radius_cells + 1):
 				var lead := Vector2i(new_center.x + cx, lead_y)
-				if DU.cell_distance_squared(new_center, lead) <= radius_sq:
+				if _cell_distance_squared(new_center, lead) <= radius_sq:
 					if lead not in _loaded_cells and not _pending_cell_set.has(lead):
 						load.append(lead)
 						_loaded_cells[lead] = true
 				var trail := Vector2i(old_center.x + cx, trail_y)
-				if DU.cell_distance_squared(old_center, trail) <= radius_sq and trail in _loaded_cells:
+				if _cell_distance_squared(old_center, trail) <= radius_sq and trail in _loaded_cells:
 					unload.append(trail)
 
 	if not unload.is_empty():
@@ -392,7 +390,8 @@ func _scan_cell(grid: Vector2i, deadline_usec: int = 0) -> void:
 		data.position = record.transform.origin
 		data.color = record.light_color
 		data.radius = record.light_radius
-		data.flags = record.light_flags
+		data.light_animation = record.light_animation
+		data.is_fire = record.light_is_fire
 		data.page_key = _page_key_for_position(data.position)
 		_next_id += 1
 
@@ -476,7 +475,7 @@ func _get_or_create_page(page_key: Vector2i) -> LightPage:
 	RenderingServer.instance_geometry_set_visibility_range(
 		page.instance_rid,
 		0.0,
-		MAX_DISTANCE + PAGE_VISIBILITY_EXTRA_MARGIN,
+		MAX_DISTANCE + _page_visibility_extra_margin(),
 		0.0,
 		500.0,
 		RenderingServer.VISIBILITY_RANGE_FADE_DISABLED
@@ -576,8 +575,8 @@ func _rebuild_page(page_key: Vector2i) -> void:
 		var data: LightData = _lights[live_ids[i]]
 		var size_scale := clampf(data.radius / 3.0, 0.5, 4.0)
 		var local_pos := data.position - page.center
-		var is_fire := 1.0 if (data.flags & LIGHT_FLAG_FIRE) != 0 else 0.0
-		var has_flicker := 1.0 if (data.flags & (LIGHT_FLAG_FLICKER | LIGHT_FLAG_FLICKER_SLOW | LIGHT_FLAG_PULSE | LIGHT_FLAG_PULSE_SLOW)) != 0 else 0.0
+		var is_fire := 1.0 if data.is_fire else 0.0
+		var has_flicker := 1.0 if data.light_animation != WorldObjectRecordScript.LightAnimation.NONE else 0.0
 		var phase_offset := fmod(float(data.id) * 0.618033988749, 1.0)
 
 		var offset := i * stride
@@ -622,7 +621,7 @@ func _rebuild_page(page_key: Vector2i) -> void:
 
 
 func _page_key_for_position(position: Vector3) -> Vector2i:
-	var cell := DU.world_to_cell(position)
+	var cell := _world_to_cell(position)
 	return Vector2i(
 		floori(float(cell.x) / float(LIGHT_PAGE_SIZE_CELLS)),
 		floori(float(cell.y) / float(LIGHT_PAGE_SIZE_CELLS))
@@ -632,9 +631,45 @@ func _page_key_for_position(position: Vector3) -> Vector2i:
 func _page_center_for_key(page_key: Vector2i) -> Vector3:
 	var origin_x := page_key.x * LIGHT_PAGE_SIZE_CELLS
 	var origin_y := page_key.y * LIGHT_PAGE_SIZE_CELLS
-	var center_x := (float(origin_x) + float(LIGHT_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
-	var center_z := -(float(origin_y) + float(LIGHT_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("chunk_center_world"):
+		var center_value: Variant = _coordinate_mapper.call("chunk_center_world", Vector2i(origin_x, origin_y), 2)
+		if center_value is Vector2:
+			var center_2d := center_value as Vector2
+			return Vector3(center_2d.x, 0.0, center_2d.y)
+	var cell_size := _cell_size_meters()
+	var center_x := (float(origin_x) + float(LIGHT_PAGE_SIZE_CELLS) * 0.5) * cell_size
+	var center_z := -(float(origin_y) + float(LIGHT_PAGE_SIZE_CELLS) * 0.5) * cell_size
 	return Vector3(center_x, 0.0, center_z)
+
+
+func _world_to_cell(position: Vector3) -> Vector2i:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("world_to_cell"):
+		var mapped: Variant = _coordinate_mapper.call("world_to_cell", position)
+		if mapped is Vector2i:
+			return mapped
+	return DU.world_to_cell(position)
+
+
+func _cell_distance_squared(cell_a: Vector2i, cell_b: Vector2i) -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_distance_squared"):
+		return float(_coordinate_mapper.call("cell_distance_squared", cell_a, cell_b))
+	return DU.cell_distance_squared(cell_a, cell_b)
+
+
+func _cell_size_meters() -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("get_cell_size_meters"):
+		return float(_coordinate_mapper.call("get_cell_size_meters"))
+	return DU.CELL_SIZE_METERS
+
+
+func _cell_radius_to_distance(radius_cells: int) -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_radius_to_distance"):
+		return float(_coordinate_mapper.call("cell_radius_to_distance", radius_cells))
+	return float(radius_cells) * DU.CELL_SIZE_METERS
+
+
+func _page_visibility_extra_margin() -> float:
+	return float(LIGHT_PAGE_SIZE_CELLS) * _cell_size_meters() * 1.5
 
 #endregion
 

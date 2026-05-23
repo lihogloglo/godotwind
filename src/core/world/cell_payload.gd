@@ -1,7 +1,6 @@
 class_name CellPayload
 extends RefCounted
 
-const CS := preload("res://src/core/coordinate_system.gd")
 const StreamedResourceHandleScript := preload("res://src/core/streaming/streamed_resource_handle.gd")
 
 enum State {
@@ -95,7 +94,7 @@ func add_model_key(model_path: String, item_id: String, type_name: String, route
 	return key
 
 
-func add_static_ref(model_path: String, item_id: String, ref: CellReference) -> void:
+func add_static_record(model_path: String, item_id: String, record: RefCounted) -> void:
 	var key := add_model_key(model_path, item_id, "static", "static")
 	if key.is_empty():
 		return
@@ -103,8 +102,8 @@ func add_static_ref(model_path: String, item_id: String, ref: CellReference) -> 
 		static_refs_by_model[key] = []
 		static_instance_transforms[key] = []
 		static_expected_counts[key] = 0
-	static_refs_by_model[key].append(ref)
-	static_instance_transforms[key].append(_make_world_transform(ref))
+	static_refs_by_model[key].append(record)
+	static_instance_transforms[key].append(_record_transform(record))
 	static_expected_counts[key] = int(static_expected_counts[key]) + 1
 	stats["static_refs"] = int(stats.get("static_refs", 0)) + 1
 
@@ -246,15 +245,15 @@ func discard_model_load_callbacks() -> void:
 	_update_model_callback_stats()
 
 
-func add_light_ref(model_path: String, item_id: String, ref: CellReference) -> void:
-	light_refs.append(ref)
+func add_light_record(model_path: String, item_id: String, record: RefCounted) -> void:
+	light_refs.append(record)
 	if not model_path.is_empty():
 		add_model_key(model_path, item_id, "light", "light")
 	stats["light_refs"] = int(stats.get("light_refs", 0)) + 1
 
 
-func add_interactive_ref(type_name: String, model_path: String, item_id: String, ref: CellReference) -> void:
-	interactive_refs.append(ref)
+func add_interactive_record(type_name: String, model_path: String, item_id: String, record: RefCounted) -> void:
+	interactive_refs.append(record)
 	if not model_path.is_empty():
 		add_model_key(model_path, item_id, type_name, "interactive")
 	stats["interactive_refs"] = int(stats.get("interactive_refs", 0)) + 1
@@ -335,9 +334,8 @@ func _update_model_callback_stats() -> void:
 	stats["completed_model_loads"] = get_completed_model_load_count()
 
 
-func _make_world_transform(ref: CellReference) -> Transform3D:
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
-	return Transform3D(basis, pos)
+func _record_transform(record: RefCounted) -> Transform3D:
+	if record == null:
+		return Transform3D.IDENTITY
+	var value: Variant = record.get("transform")
+	return value if value is Transform3D else Transform3D.IDENTITY

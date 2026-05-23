@@ -8,6 +8,7 @@ extends RefCounted
 
 const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
+const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
 
 const DEFAULT_TEXTURE_PATH := "textures\\_land_default.dds"
 const ALBEDO_LAYER_SIZE := 512
@@ -183,12 +184,12 @@ func _update_region_layer(region_coord: Vector2i, layer_index: int) -> void:
 
 func _generate_index_map_for_region(region_coord: Vector2i) -> Image:
 	var cell_textures := _build_cell_texture_neighborhood(region_coord)
-	if ClassDB.class_exists("TerrainGenerator"):
-		var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
-		if generator:
-			var image: Image = generator.call("GenerateMorrowindRegionIndexMap", cell_textures, _mw_index_to_layer)
-			if image:
-				return image
+	var bridge: NativeBridge = NativeBridgeScript.new()
+	var generator: RefCounted = bridge.create_terrain_generator()
+	if generator:
+		var image: Image = generator.call("GenerateMorrowindRegionIndexMap", cell_textures, _mw_index_to_layer)
+		if image:
+			return image
 
 	return _generate_index_map_fallback(cell_textures)
 

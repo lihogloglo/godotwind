@@ -1,23 +1,19 @@
 ## LightAnimator — Flicker/pulse energy modulation for Morrowind lights
 ##
 ## Attach as child of a cell container node. Scans children for OmniLight3D
-## with "mw_flags" metadata and animates their energy based on light flags.
+## with "light_animation" metadata and animates their energy.
 ##
-## Animation types (from OpenMW LightController):
+## Animation types:
 ##   Flicker:     random brightness targets in [0.25, 1.0], speed 0.1
 ##   FlickerSlow: same range, speed 0.05
 ##   Pulse:       triangle wave between 0.25 and 1.0, speed 0.1
 ##   PulseSlow:   same wave, speed 0.05
 ##
-## Runs at effective 15 FPS with temporal smoothing (matches OpenMW).
+## Runs at effective 15 FPS with temporal smoothing.
 class_name LightAnimator
 extends Node
 
-# Morrowind light flag constants
-const FLAG_FLICKER: int = 0x0008
-const FLAG_FLICKER_SLOW: int = 0x0040
-const FLAG_PULSE: int = 0x0080
-const FLAG_PULSE_SLOW: int = 0x0100
+const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 
 # Animation state per light
 class LightState:
@@ -49,25 +45,25 @@ func _scan_lights() -> void:
 func _scan_node(node: Node) -> void:
 	if node is OmniLight3D:
 		var omni: OmniLight3D = node as OmniLight3D
-		var flags: int = omni.get_meta("mw_flags", 0)
-		if flags == 0:
+		var animation: int = int(omni.get_meta("light_animation", WorldObjectRecordScript.LightAnimation.NONE))
+		if animation == WorldObjectRecordScript.LightAnimation.NONE:
 			return
 
 		var state: LightState = null
 
-		if flags & FLAG_FLICKER:
+		if animation == WorldObjectRecordScript.LightAnimation.FLICKER:
 			state = LightState.new()
 			state.speed = 0.1
 			state.is_pulse = false
-		elif flags & FLAG_FLICKER_SLOW:
+		elif animation == WorldObjectRecordScript.LightAnimation.FLICKER_SLOW:
 			state = LightState.new()
 			state.speed = 0.05
 			state.is_pulse = false
-		elif flags & FLAG_PULSE:
+		elif animation == WorldObjectRecordScript.LightAnimation.PULSE:
 			state = LightState.new()
 			state.speed = 0.1
 			state.is_pulse = true
-		elif flags & FLAG_PULSE_SLOW:
+		elif animation == WorldObjectRecordScript.LightAnimation.PULSE_SLOW:
 			state = LightState.new()
 			state.speed = 0.05
 			state.is_pulse = true

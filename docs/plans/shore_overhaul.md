@@ -1,7 +1,10 @@
 # Shore Overhaul Plan
 
 Date: 2026-04-13
-Status: Plan approved, implementation pending
+Status: Partially superseded. The original bug analysis is historical. The
+shore direction remains data-driven shore/depth-mask behavior, consistent with
+`docs/systems/ocean/godot_4_6_water_rendering_rules.md`. Phase 3 wet-map
+guidance is superseded by `docs/plans/wetness_system.md`.
 Branch: `refactor/lod-b-wide` (or dedicated shore branch TBD)
 
 ---
@@ -10,7 +13,11 @@ Branch: `refactor/lod-b-wide` (or dedicated shore branch TBD)
 
 Commit `0e88f63` removed the prebaked shore mask from the ocean shader pipeline. This fixed two bugs (fragment `discard` causing hard shore edges, `VERTEX.y += 0.15` z-fighting hack) but also removed vertex displacement dampening as collateral. Result: FFT waves run at full amplitude near shore and punch through terrain geometry. Fragment-side dampening (normals, foam, color blend via `water_thickness`) is cosmetic only — it cannot prevent vertex penetration.
 
-## Current State (post-0e88f63)
+## Historical Starting Point (post-0e88f63)
+
+This section describes the state that motivated the plan, not the current
+source. For current ocean ownership and source evidence, see
+`docs/systems/ocean/architecture.md`.
 
 ### Working (fragment-side, depth-driven)
 - Normal dampening: `gradient *= smoothstep(0.0, 1.0, water_thickness)` — flattens normals at shore
@@ -24,11 +31,13 @@ Commit `0e88f63` removed the prebaked shore mask from the ocean shader pipeline.
 - Waves visually penetrate terrain at coastlines
 - Was previously `VERTEX += displacement * shore` where `shore = sample_shore(VERTEX.xz) * wave_scale`
 
-### Still Alive (CPU-side)
+### Was Still Alive (CPU-side)
 - `ShoreMaskGenerator` (JFA-based) — instantiated in `ocean_manager.gd`, used for CPU buoyancy queries
 - `get_shore_factor(world_pos)` returns smoothstep-blended distance (0=shore, 1=deep)
 - Texture is generated at 4096×4096 covering terrain world bounds
-- NOT currently pushed to any shader uniform
+- Current source also pushes active shore masks to `OceanMesh` materials and
+  publishes shore data through `WaterSurfaceState`; see
+  `docs/systems/ocean/architecture.md`.
 
 ## Root Cause Analysis — Why Shore Mask Was Removed
 
@@ -91,11 +100,13 @@ All three were removed together because they shared the `v_shore_factor` varying
 
 **What this adds:** Visible gentle waves pushing up beaches, oriented correctly to coastline shape. Asymmetric breaking wave profile that FFT alone cannot produce in shallows.
 
-### Phase 3 — Wet Map (visual polish)
+### Phase 3 - Superseded Wet Map
 
-**Canonical pattern:** Sebastien Lagarde's PBR wet surfaces (Remember Me, 2013). Shipped in AC3, Uncharted 2/3, Crysis 2/3, MGSV.
+This section is retained as historical context only. Do not implement the terrain/object shader wet-map plan from this document. The active wetness direction is `docs/plans/wetness_system.md`: a screen-space compositor for production terrain/contact wetness, with retained object wetness where material hooks are intentionally used.
 
-**Implementation:**
+**Superseded canonical reference:** Sebastien Lagarde's PBR wet surfaces (Remember Me, 2013). The wetness system doc owns the current Godotwind implementation shape.
+
+**Superseded implementation sketch:**
 
 1. Push `sea_level` uniform from `OceanManager` to terrain/object shaders.
 2. In terrain fragment shader:

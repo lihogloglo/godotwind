@@ -6,7 +6,7 @@
 - `src/tools/prebaking/impostor_baker_v2.gd` → rebuilt as `impostor_baker_v3.gd`
 - `src/core/world/native_impostor_renderer.gd` `_get_octahedral_shader_code()` (embedded runtime shader block) → rebuilt as Variant B below
 - `src/tools/prebaking/shaders/octahedral_impostor.gdshader` → **DELETED 2026-04-12**. Was dead code — not referenced by any runtime code path. `distant_light_manager.gd` comment updated to reference inline shader. `LIGHTING_AUDIT.md` updated.
-**Related:** `docs/systems/distance_rendering.md` (FAR tier 500m–5km), `src/core/world/distance_utils.gd`, `docs/reference/aaa_framework_gap_analysis.md` §3 (grass is a separate pipeline — see "Relation to groundcover" below)
+**Related:** `docs/systems/distance_rendering.md` (FAR tier 500m-5km), `src/core/world/distance_utils.gd`, `docs/plans/groundcover.md`, `docs/reference/aaa_framework_gap_analysis.md` section 3 (grass is a separate pipeline; see "Relation to groundcover" below)
 
 ---
 
@@ -202,7 +202,11 @@ Per `.claude/CLAUDE.md` no-auto-capture rule: all visual verification is interac
 
 ## 5. Relation To Groundcover / Grass
 
-Per `docs/reference/aaa_framework_gap_analysis.md` §3, the grass pipeline is planned as **Terrain3D Instancer + `grass_wind.gdshader`**, not impostors. Grass blades are tiny, billions of them, and they live inside Terrain3D's region streaming — impostoring them would be both overkill (their geometry is already a single quad/cross) and under-kill (their count demands compute-driven instancing, not per-instance custom data).
+Current authority: `docs/plans/groundcover.md`.
+
+The older Terrain3D Instancer direction is superseded. Groundcover should be a source-neutral provider contract plus a chunked `MultiMeshInstance3D` renderer. The Morrowind adapter owns ESP/NIF/ref parsing and emits normalized placement batches; framework code should not know that the source uses grass ESPs, NIF paths, or Morrowind cell refs.
+
+Grass blades are tiny and numerous, so they remain outside the octahedral impostor rebuild. Impostoring them would be both overkill for near grass and under-kill for the count profile.
 
 **However:** the far-tier distant grass band (the fuzzy color strip on the horizon in any open-world game) could share infrastructure with this system. That's a phase-5 exploration — out of scope for this rebuild. Flag for future work: if distant grass lands in the 500 m+ range, evaluate whether a "grass card" impostor variant (1 frame, no rotation, depth-faded) fits into the octahedral pipeline or needs its own path.
 

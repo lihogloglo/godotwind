@@ -173,8 +173,19 @@ func read_displacement(cascade_index: int = 0) -> PackedByteArray:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
-		if context:
-			context.free()
+		shutdown()
+
+
+func shutdown() -> void:
+	set_process(false)
+	pass_num_cascades_remaining = 0
+	if context:
+		context.shutdown()
+		context.free()
+		context = null
+	descriptors.clear()
+	pipelines.clear()
+	_allocated_cascades = 0
 
 
 # JONSWAP spectrum alpha parameter

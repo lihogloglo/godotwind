@@ -16,8 +16,7 @@ var _depth_sampler: RID
 var _linear_sampler: RID
 var _shore_mask_rid: RID
 var _displacement_rid: RID
-var _fallback_shore_texture: Texture2D
-var _fallback_normal_texture: Texture2D
+var _fallback_shore_rid: RID
 var _fallback_normal_rid: RID
 var _dummy_displacement_rid: RID
 var _state_buffer: RID
@@ -81,6 +80,8 @@ func on_effect_removed() -> void:
 			_state_buffer,
 			_depth_sampler,
 			_linear_sampler,
+			_fallback_shore_rid,
+			_fallback_normal_rid,
 			_dummy_displacement_rid,
 		]:
 			if rid.is_valid():
@@ -89,7 +90,11 @@ func on_effect_removed() -> void:
 		_state_buffer_size = 0
 		_depth_sampler = RID()
 		_linear_sampler = RID()
+		_fallback_shore_rid = RID()
+		_fallback_normal_rid = RID()
 		_dummy_displacement_rid = RID()
+	_displacement_rid = RID()
+	_shore_mask_rid = RID()
 	super.on_effect_removed()
 
 
@@ -134,16 +139,33 @@ func _create_samplers() -> void:
 func _create_fallback_textures() -> void:
 	var shore_img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
 	shore_img.set_pixel(0, 0, Color(1.0, 0.5, 0.5, 1.0))
-	_fallback_shore_texture = ImageTexture.create_from_image(shore_img)
-	_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
+	_fallback_shore_rid = _create_rd_rgba8_texture(shore_img)
+	_shore_mask_rid = _fallback_shore_rid
 
 	var normal_img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
 	normal_img.set_pixel(0, 0, Color(0.5, 0.5, 1.0, 0.7))
-	_fallback_normal_texture = ImageTexture.create_from_image(normal_img)
-	_fallback_normal_rid = RenderingServer.texture_get_rd_texture(_fallback_normal_texture.get_rid())
+	_fallback_normal_rid = _create_rd_rgba8_texture(normal_img)
 
 	_create_dummy_displacement_texture()
 	_displacement_rid = _dummy_displacement_rid
+
+
+func _create_rd_rgba8_texture(image: Image) -> RID:
+	if rd == null:
+		return RID()
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
+	fmt.width = image.get_width()
+	fmt.height = image.get_height()
+	fmt.depth = 1
+	fmt.array_layers = 1
+	fmt.mipmaps = 1
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.samples = RenderingDevice.TEXTURE_SAMPLES_1
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	return rd.texture_create(fmt, RDTextureView.new(), [image.get_data()])
 
 
 func _create_dummy_displacement_texture() -> void:
@@ -213,8 +235,8 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	_displacement_rid = state.displacement_texture_rd if state.displacement_texture_rd.is_valid() else _dummy_displacement_rid
 	if state.shore_mask_rd.is_valid():
 		_shore_mask_rid = state.shore_mask_rd
-	elif _fallback_shore_texture != null:
-		_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
+	elif _fallback_shore_rid.is_valid():
+		_shore_mask_rid = _fallback_shore_rid
 
 
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:

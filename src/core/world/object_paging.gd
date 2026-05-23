@@ -5,9 +5,9 @@
 ## keyed by `Vector3i(center_cell.x, center_cell.y, size_level)` and sized
 ## adaptively per the plan §4 table:
 ##
-##     size_level 0 (1×1 cells) — [150, 300)m — reserved below the current
+##     size_level 0 (1×1 cells) — [150, 400)m — reserved below the current
 ##                                 visual floor; MID statics own this band.
-##     size_level 1 (2×2 cells) — band [300, 600)m — far-MID
+##     size_level 1 (2×2 cells) — band [400, 600)m — far-MID
 ##     size_level 2 (4×4 cells) — band [600, 1000)m — HLOD
 ##
 ## `update_for_camera` runs the top-down anti-overlap walk from plan §4.3:
@@ -48,7 +48,7 @@ const CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
 
 ## Minimum refs to justify merging a chunk.
 ## Sparse chunks are still valid visual proxies because MID no longer covers
-## beyond 300m. Keep this permissive; proxy-material/atlas work can later reduce
+## beyond 400m. Keep this permissive; proxy-material/atlas work can later reduce
 ## draw cost without creating HLOD coverage holes.
 const MIN_REFS_TO_MERGE: int = 1
 
@@ -69,7 +69,7 @@ const MAX_RUNTIME_CHUNK_SURFACES: int = 64
 const TIER_FADE_MARGIN: float = 20.0
 
 ## Runtime visibility owner floor. HLOD should render at the canonical
-## MID->HLOD handoff (300m). MID is independently capped at the same handoff;
+## MID->HLOD handoff (400m). MID is independently capped at the same handoff;
 ## the coverage manifest is only allowed to shorten buckets that HLOD fully
 ## covers, never to decide whether accepted HLOD refs render.
 const DEFAULT_VISUAL_BEGIN_FLOOR: float = DU.HLOD_START

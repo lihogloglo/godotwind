@@ -41,6 +41,29 @@ func test_memory_holder_decays_after_leaving_water() -> void:
 	root.free()
 
 
+func test_memory_holder_moves_with_object_bounds() -> void:
+	var manager: WetnessManagerClass = WetnessManagerScript.new()
+	var root := Node3D.new()
+	root.global_position = Vector3.ZERO
+	manager.register_memory_holder(root, [] as Array[RID], -0.5, 0.5)
+
+	manager._update_memory_holders(0.016, _state_with_height(0.25))
+	root.global_position = Vector3(0.0, 2.0, 0.0)
+
+	assert_float(manager.get_memory_holder_wet_line(root)).is_equal_approx(2.25, 0.001)
+	root.free()
+
+
+func test_live_compositor_toggle_is_separate_from_object_wetness() -> void:
+	var manager: WetnessManagerClass = WetnessManagerScript.new()
+
+	manager.set_enabled(true)
+	manager.set_live_compositor_enabled(false)
+
+	assert_bool(manager.is_enabled()).is_true()
+	assert_bool(manager.is_live_compositor_enabled()).is_false()
+
+
 func test_unregister_memory_holder_removes_state() -> void:
 	var manager: WetnessManagerClass = WetnessManagerScript.new()
 	var root := Node3D.new()

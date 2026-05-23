@@ -23,6 +23,7 @@ extends Node3D
 const DU := preload("res://src/core/world/distance_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
+const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 
 const ACTION_HLOD_TOGGLE := &"hlod_toggle"
@@ -170,6 +171,8 @@ func _setup_streaming() -> void:
 	_cell_manager.load_npcs = false
 	_cell_manager.load_creatures = false
 	_cell_manager.use_static_renderer = true
+	var world_source := MorrowindWorldSourceScript.new()
+	_cell_manager.set_world_object_source(world_source.get_object_source())
 
 	# Create NativeStreamingManager
 	var nsm := Node3D.new()
@@ -177,6 +180,7 @@ func _setup_streaming() -> void:
 	nsm.name = "NativeStreamingManager"
 	nsm.load_radius_cells = 3
 	nsm.debug_enabled = false
+	nsm.set_world_source(world_source)
 	_streaming_manager = nsm
 	add_child(_streaming_manager)
 

@@ -51,6 +51,10 @@ func set_camera(cam: Camera3D) -> void:
 func set_enabled(enabled: bool) -> void:
 	if OceanManager and OceanManager.has_method("set_enabled"):
 		OceanManager.set_enabled(enabled)
+	if WetnessManager:
+		WetnessManager.set_enabled(enabled)
+		if enabled and WetnessManager.has_method("set_live_compositor_enabled"):
+			WetnessManager.set_live_compositor_enabled(false)
 
 
 ## Toggle ocean visibility.

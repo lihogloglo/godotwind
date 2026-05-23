@@ -52,6 +52,7 @@ extends RefCounted
 ## within `src/core/` is allowed.
 const BuoyancyBody3DScript := preload("res://src/core/water/buoyancy_body.gd")
 const BuoyancyProbe3DScript := preload("res://src/core/water/buoyancy_probe.gd")
+const WettableObjectScript := preload("res://src/core/water/wettable_object.gd")
 
 
 ## Hard solver-sanity clamp. NOT the gameplay grab cap (that's in
@@ -259,6 +260,10 @@ static func convert_static_to_rigid(
 		_clear_owner_recursive(child)
 		parent.remove_child(child)
 		rb.add_child(child)
+
+	var wettable: Node = WettableObjectScript.new()
+	wettable.name = "WettableObject"
+	rb.add_child(wettable)
 
 	# Tag the prop root so callers can assert before freeing the parent.
 	# `PickupInteractable.interact()` frees `get_parent()` on a successful

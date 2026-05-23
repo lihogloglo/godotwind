@@ -1,4 +1,4 @@
-## CellPreloader — velocity-extrapolated two-phase cell cache.
+## CellPreloader - velocity-extrapolated two-phase cell cache.
 ##
 ## Research doc §8. Fixes cell-cross pop-in at flight speeds by warming the
 ## ResourceLoader PackedScene cache + dispatching Phase F prototype
@@ -6,10 +6,10 @@
 ## squares ahead of the current load radius.
 ##
 ## Two-phase model (§8.2):
-##   DATA phase        — this class. Off-thread ResourceLoader.load() +
+##   DATA phase        - this class. Off-thread ResourceLoader.load() +
 ##                       preregister_cell_statics for cells in the predicted
 ##                       set. No Node3Ds created; no scene tree modification.
-##   INSTANTIATION     — native_streaming_manager / cell_manager. Runs when
+##   INSTANTIATION     - native_streaming_manager / cell_manager. Runs when
 ##                       the cell actually enters active load radius. Because
 ##                       DATA is already warm, instantiation is cache-hit
 ##                       fast-path.
@@ -36,7 +36,7 @@ const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeli
 const WORKER_RESOURCE_WARM_ENABLED := false
 
 
-## One cached entry per unique cell grid. Transitions: loading → ready →
+## One cached entry per unique cell grid. Transitions: loading -> ready ->
 ## activated. Evicted (dropped from _cache) on LRU expiry unless activated.
 class PreloadEntry:
 	extends RefCounted
@@ -44,17 +44,17 @@ class PreloadEntry:
 	var state: String = "loading"  # "loading" | "ready" | "activated"
 	var last_touched_msec: int = 0
 	## WorkerThreadPool task IDs dispatched by this entry. The eviction path
-	## previously called wait_for_task_completion on each — that blocked the
+	## previously called wait_for_task_completion on each; that blocked the
 	## main thread for 100-750ms when many cells evicted simultaneously
 	## (autopsy 2026-04-25, plan §12). New pattern: cooperative cancellation.
 	## Workers check `cancelled` and self-bail; main thread never blocks.
-	## RefCounted lifetime guarantees no leak — bound `entry` keeps the
+	## RefCounted lifetime guarantees no leak: bound `entry` keeps the
 	## RefCount > 0 while any worker is still executing.
 	var task_ids: Array[int] = []
 	## Cooperative-cancellation flag. Set true by main thread when the entry
 	## is evicted / aborted. Workers check this BEFORE doing the load and
 	## early-return if true. GDScript bool reads/writes are atomic on the
-	## platforms we target (x86_64 / arm64) — no mutex needed.
+	## platforms we target (x86_64 / arm64); no mutex needed.
 	var cancelled: bool = false
 	## Debug / stat: model paths touched by this preload. Not used for logic.
 	var model_paths: Array[String] = []
@@ -65,16 +65,18 @@ class PreloadEntry:
 
 var _cache: Dictionary = {}  # Vector2i -> PreloadEntry
 
-# Injected dependencies — WeakRefs so teardown cleans itself if the streaming
+# Injected dependencies: WeakRefs so teardown cleans itself if the streaming
 # manager is freed before the preloader.
 var _instantiator_ref: WeakRef = null  # ReferenceInstantiator
 var _model_loader_ref: WeakRef = null  # ModelLoader
+var _world_object_source: RefCounted = null
+var _warned_missing_world_object_source: bool = false
 
 var _current_anchor_cell: Vector2i = Vector2i.ZERO
 var _debug_enabled: bool = false
 
-## Phase 2 stutter diag — pipeline compile delta monitor injected by
-## NativeStreamingManager. Logs MESH/SURFACE/DRAW deltas at LOADING→READY
+## Phase 2 stutter diag: pipeline compile delta monitor injected by
+## NativeStreamingManager. Logs MESH/SURFACE/DRAW deltas at LOADING -> READY
 ## transition so we can verify whether ResourceLoader.load triggers
 ## engine-side pipeline pre-compile (plan §2.2). null = monitor disabled.
 var _pipeline_compile_monitor: PipelineCompileMonitorScript = null
@@ -95,11 +97,15 @@ func configure(instantiator: RefCounted, model_loader: RefCounted) -> void:
 	_model_loader_ref = weakref(model_loader) if model_loader != null else null
 
 
+func set_world_object_source(source: RefCounted) -> void:
+	_world_object_source = source
+
+
 func set_debug(enabled: bool) -> void:
 	_debug_enabled = enabled
 
 
-## Phase 2 stutter diag — wire a per-preload pipeline compile delta tracker.
+## Phase 2 stutter diag: wire a per-preload pipeline compile delta tracker.
 ## Called from NativeStreamingManager.configure(). null = no logging.
 func set_pipeline_compile_monitor(monitor: PipelineCompileMonitorScript) -> void:
 	_pipeline_compile_monitor = monitor
@@ -109,9 +115,9 @@ func set_pipeline_compile_monitor(monitor: PipelineCompileMonitorScript) -> void
 ## startup completes. Walks the predicted cell set, kicks preloads for new
 ## entries, polls in-flight tasks for promotion, evicts expired entries.
 ##
-## camera_cell   — current grid position (Vector2i)
-## camera_pos    — world position (only used for Z-up alignment if needed)
-## velocity_xz   — planar velocity, Vector2(x, z) m/s (Godot convention)
+## camera_cell - current grid position (Vector2i)
+## camera_pos - world position (only used for Z-up alignment if needed)
+## velocity_xz - planar velocity, Vector2(x, z) m/s (Godot convention)
 func update(camera_cell: Vector2i, camera_pos: Vector3, velocity_xz: Vector2) -> void:
 	_current_anchor_cell = camera_cell
 	var now_msec: int = Time.get_ticks_msec()
@@ -126,14 +132,14 @@ func update(camera_cell: Vector2i, camera_pos: Vector3, velocity_xz: Vector2) ->
 		else:
 			_begin_preload(cell, now_msec)
 
-	# 3. Promote LOADING → READY for entries with all tasks done.
+	# 3. Promote LOADING -> READY for entries with all tasks done.
 	_poll_completions()
 
 	# 4. Evict entries older than EXPIRY_DELAY_MS, subject to MIN_CACHE_CELLS.
 	_evict_expired(now_msec)
 
 
-## Mark a cell as activated — streaming manager owns it now. Preloader stops
+## Mark a cell as activated; streaming manager owns it now. Preloader stops
 ## evicting it. Called from native_streaming_manager when the cell enters
 ## active radius / `cell_loaded` signal.
 func notify_activated(cell: Vector2i) -> void:
@@ -182,11 +188,11 @@ func get_stats_snapshot() -> Dictionary:
 
 
 ## Abort every in-flight preload and clear the cache. Called from the
-## `teleport_happened` handler in native_streaming_manager — an in-flight
+## `teleport_happened` handler in native_streaming_manager; an in-flight
 ## preload for a cell the camera just jumped away from is wasted work and
 ## blocks the worker pool from serving the actual destination's preloads.
 ##
-## Research §8.8 — mirrors OpenMW's `abortTerrainPreloadExcept`.
+## Research §8.8 mirrors OpenMW's `abortTerrainPreloadExcept`.
 ##
 ## Cooperative-cancellation: each entry's `cancelled` flag is set, workers
 ## self-bail on next ResourceLoader.load entry. No `wait_for_task_completion`
@@ -204,7 +210,7 @@ func reset(new_anchor: Vector2i) -> void:
 	_current_anchor_cell = new_anchor
 
 
-## Shutdown hook — drain + clear. Called from native_streaming_manager
+## Shutdown hook: drain + clear. Called from native_streaming_manager
 ## fast_cleanup (WM_CLOSE_REQUEST) BEFORE worker-pool teardown to prevent the
 ## shutdown-race sig 11 class (same pattern as Phase F's drain_prereg_tasks).
 func drain_all() -> void:
@@ -219,7 +225,7 @@ func drain_all() -> void:
 ## Compute which cells to preload given current velocity. §8.3 formula:
 ##   t_predict  = clamp(t_cache_warm / max(speed, 1.0), 0.3, 4.0)
 ##   depth      = clamp(int(speed / CELL_SIZE_METERS * t_cache_warm) + 1, 1, 4)
-## Below 2 m/s return empty — no velocity means no prediction signal.
+## Below 2 m/s return empty; no velocity means no prediction signal.
 func _compute_predicted_cells(camera_cell: Vector2i, velocity_xz: Vector2) -> Array[Vector2i]:
 	var result: Array[Vector2i] = []
 	var speed_sq: float = velocity_xz.length_squared()
@@ -237,7 +243,7 @@ func _compute_predicted_cells(camera_cell: Vector2i, velocity_xz: Vector2) -> Ar
 	)
 
 	var vel_dir: Vector2 = velocity_xz.normalized()
-	# Velocity XZ → grid (x, y): Godot +Z is grid -Y (ESM coordinate flip).
+	# Velocity XZ -> grid (x, y): Godot +Z is grid -Y (ESM coordinate flip).
 	for d: int in range(1, depth + 1):
 		var off_x: int = int(round(vel_dir.x * d))
 		var off_y: int = int(round(-vel_dir.y * d))
@@ -259,9 +265,9 @@ func _compute_predicted_cells(camera_cell: Vector2i, velocity_xz: Vector2) -> Ar
 	return result
 
 
-## Kick the DATA phase for a cell: look up the ESM record, dispatch Phase F
-## prereg for STAT refs, dispatch ResourceLoader.load workers for every
-## unique model_path in the cell. All off-thread; main thread only schedules.
+## Kick the DATA phase for a cell: ask the injected object source for records,
+## then warm every unique model_path in the cell. No Node3Ds are created here;
+## the main thread only schedules ModelLoader's bounded async lane.
 func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 	# Back-pressure: stop preloading when the cache is already at max. Eviction
 	# catches up on subsequent frames.
@@ -274,43 +280,26 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 	entry.last_touched_msec = now_msec
 	_cache[cell] = entry
 	stats["preloads_kicked"] += 1
-	# ESMManager is an autoload — main-thread safe. An empty / out-of-bounds
-	# grid returns null; mark as ready immediately (no work to do).
-	var cell_record: Variant = null
-	if ESMManager != null:
-		cell_record = ESMManager.call("get_exterior_cell", cell.x, cell.y)
-	if cell_record == null:
-		entry.state = "ready"
-		stats["preloads_ready"] += 1
-		return
 
-	# Fix A (streaming_stutter_2026_04_25 plan): the previous prereg call here
-	# was a 832 ms main-thread spike. preregister_cell_statics → has_animation
-	# → get_model is sync ResourceLoader.load + PackedScene.instantiate per
-	# unique prototype. The preloader's contract is ResourceLoader cache
-	# warming only; pre-registration belongs to the active loader, which calls
-	# preregister_cell_statics from cell_manager.request_exterior_cell_async.
-	# Speculative prereg duplicated that work on every cell the camera might
-	# enter. Deleted.
-
-	# Warm ResourceLoader cache for every unique model_path in the cell through
-	# ModelLoader's bounded async lane. No Node3D instantiation is requested.
 	var model_loader: Object = _model_loader_ref.get_ref() if _model_loader_ref != null else null
 	if model_loader == null or not model_loader.has_method("request_model_async"):
 		entry.state = "ready"
 		stats["preloads_ready"] += 1
 		return
-
-	var seen: Dictionary = {}  # normalized_path -> true
-	for ref: CellReference in cell_record.references:
-		var rec_type: Array = [""]
-		var base: Variant = ESMManager.get_any_record(str(ref.ref_id), rec_type)
-		if base == null or not "model" in base:
-			continue
-		var mp: String = base.model
+	if _world_object_source == null or not _world_object_source.has_method("get_objects_in_cell"):
+		if _debug_enabled and not _warned_missing_world_object_source:
+			print("[CellPreloader] no WorldObjectSource configured; preload warmup is a no-op")
+		_warned_missing_world_object_source = true
+		entry.state = "ready"
+		stats["preloads_ready"] += 1
+		return
+	var records: Array = _world_object_source.call("get_objects_in_cell", cell)
+	var seen: Dictionary = {}
+	for record: RefCounted in records:
+		var mp := str(record.get("model_path"))
 		if mp.is_empty():
 			continue
-		var key: String = mp.to_lower()
+		var key := mp.to_lower()
 		if key in seen:
 			continue
 		seen[key] = true
@@ -319,7 +308,6 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 		var queued: bool = bool(model_loader.call("request_model_async", mp, "", Callable(), false))
 		if queued:
 			entry.pending_model_paths.append(mp)
-
 	if _debug_enabled:
 		print("[CellPreloader] preload kick cell=", cell, " pending=", entry.pending_model_paths.size(), " paths=", entry.model_paths.size())
 	if entry.pending_model_paths.is_empty():
@@ -327,18 +315,18 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 		stats["preloads_ready"] += 1
 
 
-## Worker body — off-thread PackedScene load. ResourceLoader.load is
+## Worker body: off-thread PackedScene load. ResourceLoader.load is
 ## thread-safe per research §2.1; cached entries are shared across threads.
 ##
 ## Cooperative cancellation (plan §12.6 / Fix C.1): main thread sets
 ## `entry.cancelled = true` when evicting; we check before doing the IO and
 ## bail. ResourceLoader.load itself can't be interrupted mid-IO, so once we
-## START loading we run to completion — but the result then sits in the
+## START loading we run to completion, but the result then sits in the
 ## ResourceLoader cache (harmless: identical to a normal preload-hit on a
 ## future re-visit) and we drop our reference. Net cost on cancellation: at
 ## most ONE extra load for any in-flight worker, vs the previous up-to-750ms
-## main-thread block on n_evicted × n_tasks.
-# PHASE_G:WORKER_SAFE — zero autoload / signal / scene-tree access. The
+## main-thread block on n_evicted x n_tasks.
+# PHASE_G:WORKER_SAFE: zero autoload / signal / scene-tree access. The
 # `entry` arg is a RefCounted; we read entry.cancelled (atomic bool read)
 # but never write to entry from the worker.
 static func _worker_warm_resource(disk_path: String, entry: PreloadEntry) -> void:
@@ -347,7 +335,7 @@ static func _worker_warm_resource(disk_path: String, entry: PreloadEntry) -> voi
 	ResourceLoader.load(disk_path, "PackedScene")
 
 
-## Promote LOADING → READY when all worker tasks are complete.
+## Promote LOADING -> READY when all worker tasks are complete.
 func _poll_completions() -> void:
 	var model_loader: Object = _model_loader_ref.get_ref() if _model_loader_ref != null else null
 	for cell: Vector2i in _cache:
@@ -371,10 +359,10 @@ func _poll_completions() -> void:
 			stats["preloads_ready"] += 1
 			if _debug_enabled:
 				print("[CellPreloader] cell=", cell, " READY (pending=", entry.pending_model_paths.size(), " tasks=", entry.task_ids.size(), ")")
-			# Phase 2 stutter diag — pipeline compile delta over the preload
-			# window. If MESH/SURFACE > 0 here → ResourceLoader.load triggered
+			# Phase 2 stutter diag: pipeline compile delta over the preload
+			# window. If MESH/SURFACE > 0 here, ResourceLoader.load triggered
 			# engine pre-compile (good, we're done). If 0 here BUT non-zero on
-			# the matching cell_loaded log line → pre-compile fires only at
+			# the matching cell_loaded log line, pre-compile fires only at
 			# instantiate, and we need hidden-instance pre-warm. Plan §2.2.
 			if _pipeline_compile_monitor != null:
 				var d: PackedInt64Array = _pipeline_compile_monitor.delta_and_update()
@@ -386,7 +374,7 @@ func _poll_completions() -> void:
 
 
 ## Evict stale entries. Never drops below MIN_CACHE_CELLS even if all are
-## stale. `activated` entries are permanently skipped — the streaming manager
+## stale. `activated` entries are permanently skipped; the streaming manager
 ## owns them; the preloader releases on `notify_unloaded`.
 func _evict_expired(now_msec: int) -> void:
 	if _cache.size() <= SC.PRELOAD_MIN_CACHE_CELLS:
@@ -407,7 +395,7 @@ func _evict_expired(now_msec: int) -> void:
 
 
 ## Remove + drain a single cell. Marks workers as cancelled (cooperative)
-## and erases from cache immediately — no main-thread blocking.
+## and erases from cache immediately; no main-thread blocking.
 func _drain_and_erase(cell: Vector2i) -> void:
 	if cell not in _cache:
 		return
@@ -416,13 +404,13 @@ func _drain_and_erase(cell: Vector2i) -> void:
 	stats["evictions"] += 1
 
 
-## Shared drain helper — cooperative cancellation only. Sets the entry's
+## Shared drain helper: cooperative cancellation only. Sets the entry's
 ## cancelled flag so workers self-bail; clears the task_ids list so the
 ## entry's RefCount drops to whatever the workers still hold; returns
 ## immediately without blocking. The previous implementation called
 ## `WorkerThreadPool.wait_for_task_completion` for every task, which
 ## blocked the main thread for 100-750ms when many cells evicted at once
-## (autopsy 2026-04-25 — see plan §12.3 Class B).
+## (autopsy 2026-04-25; see plan §12.3 Class B).
 ##
 ## Why no leak: the worker's bound `entry` argument keeps RefCount > 0
 ## until the worker function returns. Worker reads cancelled, returns,

@@ -20,6 +20,7 @@ var _source_depth_rid: RID
 var _source_size: Vector2i = Vector2i.ZERO
 var _retired_textures: Array[Dictionary] = []
 var _last_perf_frame: int = -1
+var _last_capture_process_frame: int = -1
 var _last_perf_snapshot: Dictionary = {
 	"prewater_copy_ms": 0.0,
 	"frame": -1,
@@ -70,6 +71,10 @@ func get_source_depth_rid() -> RID:
 
 func get_source_size() -> Vector2i:
 	return _source_size
+
+
+func get_capture_process_frame() -> int:
+	return _last_capture_process_frame
 
 
 func has_capture() -> bool:
@@ -163,6 +168,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD) -> v
 	rd.compute_list_end()
 	rd.capture_timestamp("godotwind_prewater_copy_end")
 	rd.free_rid(uniform_set)
+	_last_capture_process_frame = Engine.get_process_frames()
 
 
 func _ensure_target_textures(color_image: RID, size: Vector2i) -> bool:
@@ -250,6 +256,8 @@ func _refresh_timestamp_snapshot() -> void:
 		"frame": frame,
 		"timing_valid": timing_valid,
 		"source_size": _source_size,
+		"capture_process_frame": _last_capture_process_frame,
+		"capture_frame_age": Engine.get_process_frames() - _last_capture_process_frame if _last_capture_process_frame >= 0 else -1,
 	}
 
 
@@ -295,3 +303,4 @@ func on_effect_removed() -> void:
 			_source_depth_rid = RID()
 		_release_retired_textures(true)
 	_source_size = Vector2i.ZERO
+	_last_capture_process_frame = -1

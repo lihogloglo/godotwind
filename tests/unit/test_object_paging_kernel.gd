@@ -774,14 +774,14 @@ func test_chunk_center_world_size_level_2() -> void:
 
 ## Band-end constants match plan §4 table.
 func test_paging_band_end_values() -> void:
-	assert_float(DU.paging_band_end(0)).is_equal_approx(300.0, 0.01)
-	assert_float(DU.paging_band_end(1)).is_equal_approx(600.0, 0.01)
-	assert_float(DU.paging_band_end(2)).is_equal_approx(1000.0, 0.01)
+	assert_float(DU.paging_band_end(0)).is_equal_approx(DU.PAGING_TIER_0_END, 0.01)
+	assert_float(DU.paging_band_end(1)).is_equal_approx(DU.PAGING_TIER_1_END, 0.01)
+	assert_float(DU.paging_band_end(2)).is_equal_approx(DU.PAGING_TIER_2_END, 0.01)
 
 
 ## Band boundaries form a contiguous sequence — tier N end = tier N+1 start.
 func test_paging_band_boundaries_contiguous() -> void:
-	assert_float(DU.paging_band_start(0)).is_equal_approx(150.0, 0.01)
+	assert_float(DU.paging_band_start(0)).is_equal_approx(DU.PAGING_TIER_0_START, 0.01)
 	assert_float(DU.paging_band_start(1)).is_equal_approx(DU.paging_band_end(0), 0.01)
 	assert_float(DU.paging_band_start(2)).is_equal_approx(DU.paging_band_end(1), 0.01)
 
@@ -796,7 +796,7 @@ func test_hlod_visual_floor_starts_at_hlod_boundary() -> void:
 
 
 func test_paging_ring_radius_bounds() -> void:
-	# size_level=0: band_end=300, chunk_extent=117 → ceil(300/117) = 3 (actually 300/117=2.56)
+	# size_level=0: band_end=400, chunk_extent=117 → ceil(400/117) = 4.
 	# Let's check what we get and assert it's <= a reasonable bound.
 	for sl in range(3):
 		var r := DU.paging_ring_radius(sl)
@@ -866,7 +866,7 @@ func test_top_down_walk_all_tiers_populated_from_origin() -> void:
 		tier_counts[key.z] = tier_counts[key.z] + 1
 
 	assert_int(tier_counts[0]).override_failure_message("size_level=0 chunks must stay suppressed below the HLOD visual floor.").is_equal(0)
-	assert_int(tier_counts[1]).override_failure_message("No size_level=1 chunks desired — band [300,600) should produce chunks at origin.").is_greater(0)
+	assert_int(tier_counts[1]).override_failure_message("No size_level=1 chunks desired — band [400,600) should produce chunks at origin.").is_greater(0)
 	assert_int(tier_counts[2]).override_failure_message("No size_level=2 chunks desired — band [600,1000) should produce chunks at origin.").is_greater(0)
 
 
@@ -917,20 +917,20 @@ func test_top_down_walk_large_chunk_blocks_smaller_overlap() -> void:
 ## past the upper retention edge are released; the zero-distance case (camera
 ## AT chunk center) falls below the lower edge for any positive-distance band.
 func test_is_within_retention_for_tier_0_bounds() -> void:
-	# Tier 0 retention window = [150 - 20, 300 + 20) = [130, 320).
+	# Tier 0 retention window = [150 - 20, 400 + 20) = [130, 420).
 	# Cell (1,0) at size_level=0 has center ≈ (175.5, -58.5), dist from origin ≈ 185m.
 	var key := Vector3i(1, 0, 0)
 	var center: Vector2 = DU.chunk_center_world(Vector2i(1, 0), 0)
 
 	# Camera at origin → dist ~185m → inside retention window.
 	assert_bool(Merger._is_within_retention_for(key, Vector2.ZERO)) \
-		.override_failure_message("Tier-0 chunk at dist ~185m should be retained (window [130, 320)).") \
+		.override_failure_message("Tier-0 chunk at dist ~185m should be retained (window [130, 420)).") \
 		.is_true()
 
-	# Camera offset along -X so chunk sits at dist ~395m → past retention upper 320.
-	var far_camera := Vector2(-215.0, 0.0)
+	# Camera offset along -X so chunk sits at dist ~446m → past retention upper 420.
+	var far_camera := Vector2(-265.0, 0.0)
 	assert_bool(Merger._is_within_retention_for(key, far_camera)) \
-		.override_failure_message("Tier-0 chunk at dist ~395m must NOT be retained (beyond 320).") \
+		.override_failure_message("Tier-0 chunk at dist ~446m must NOT be retained (beyond 420).") \
 		.is_false()
 
 	# Camera AT chunk center → dist 0 → below retention lower 130.
@@ -945,16 +945,16 @@ func test_hysteresis_retains_active_chunk_past_strict_band() -> void:
 	var merger := Merger.new()
 	var retained_key := Vector3i(2, 0, 0)
 	# Cell (2,0) size_level=0 center ≈ (292.6, -58.5), dist from origin ≈ 298m.
-	# Shifting camera -20m along X: dist grows to ≈ 318m — still inside [130, 320).
+	# Shifting camera -105m along X: dist grows to ≈ 402m — still inside [130, 420).
 	var data := Merger.PagingChunkData.new()
 	data.key = retained_key
 	merger._active_chunks[retained_key] = data
 
-	var camera_pos := Vector3(-20.0, 0.0, 0.0)
+	var camera_pos := Vector3(-105.0, 0.0, 0.0)
 	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), camera_pos)
 
 	assert_bool(retained_key in desired).override_failure_message(
-		"Retained tier-0 chunk at dist ~318m (retention [130, 320)) must survive the pre-pass."
+		"Retained tier-0 chunk at dist ~402m (retention [130, 420)) must survive the pre-pass."
 	).is_true()
 
 
@@ -967,12 +967,12 @@ func test_hysteresis_releases_active_chunk_past_retention_edge() -> void:
 	data.key = released_key
 	merger._active_chunks[released_key] = data
 
-	# Camera shifted -50m along X → chunk dist ≈ 347m, past retention upper 320.
-	var camera_pos := Vector3(-50.0, 0.0, 0.0)
+	# Camera shifted -150m along X → chunk dist ≈ 446m, past retention upper 420.
+	var camera_pos := Vector3(-150.0, 0.0, 0.0)
 	var desired: Dictionary = merger._compute_desired_chunks(Vector2i(0, 0), camera_pos)
 
 	assert_bool(released_key in desired).override_failure_message(
-		"Active tier-0 chunk at dist ~347m must NOT be retained (retention upper = 320)."
+		"Active tier-0 chunk at dist ~446m must NOT be retained (retention upper = 420)."
 	).is_false()
 
 
@@ -983,7 +983,7 @@ func test_hysteresis_releases_active_chunk_past_retention_edge() -> void:
 func test_hysteresis_retained_chunk_blocks_retiering_walk() -> void:
 	var merger := Merger.new()
 	# Seed tier-0 chunk at (2,0,0). Camera at origin → chunk dist ~298m, inside
-	# strict band [150, 300) AND retention [130, 320). Retention adds it first,
+	# strict band [150, 400) AND retention [130, 420). Retention adds it first,
 	# marking cell (2,0) covered so the tier-1 walk can't claim it.
 	var retained_key := Vector3i(2, 0, 0)
 	var data := Merger.PagingChunkData.new()
@@ -1035,8 +1035,8 @@ func test_hysteresis_pre_pass_and_walk_never_double_cover() -> void:
 	# Three active chunks spanning all tiers, each inside both strict band AND
 	# retention window at origin camera.
 	var seeds: Array[Vector3i] = [
-		Vector3i(1, 0, 0),   # tier-0 ~175m → strict [150,300)
-		Vector3i(2, 2, 1),   # tier-1 ~391m → strict [300,600)
+		Vector3i(1, 0, 0),   # tier-0 ~175m → strict [150,400)
+		Vector3i(2, 2, 1),   # tier-1 ~391m → retention [380,620)
 		Vector3i(4, 4, 2),   # tier-2 ~828m → strict [600,1000)
 	]
 	for key: Vector3i in seeds:

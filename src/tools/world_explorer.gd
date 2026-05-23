@@ -32,7 +32,7 @@ const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const MorrowindTerrainTextureBridgeScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_bridge.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
-const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
+const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
 const ObjectPoolScript := preload("res://src/core/world/object_pool.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const PerformanceProfilerScript := preload("res://src/core/world/performance_profiler.gd")
@@ -135,6 +135,7 @@ var native_streaming_manager: Node3D = null  # NativeStreamingManager reference 
 var terrain_manager: TerrainManager = null  # TerrainManager (for prebaking)
 var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
+var world_source: RefCounted = null
 var world_object_source: RefCounted = null
 var profiler: PerformanceProfiler = null  # PerformanceProfiler
 var _ocean_controls: OceanControls = null  # OceanControls (ocean/water system)
@@ -334,8 +335,12 @@ func _ready() -> void:
 	terrain_manager = TerrainManagerScript.new()
 	texture_loader = TerrainTextureLoaderScript.new()
 	cell_manager = CellManagerScript.new()
-	world_object_source = MorrowindWorldObjectSourceScript.new()
-	cell_manager.set_world_object_source(world_object_source)
+	world_source = MorrowindWorldSourceScript.new()
+	world_object_source = world_source.get_object_source()
+	if cell_manager.has_method("set_world_source"):
+		cell_manager.call("set_world_source", world_source)
+	else:
+		cell_manager.set_world_object_source(world_object_source)
 	# NPCs/creatures controlled by _show_characters toggle (default OFF for testing)
 	cell_manager.load_npcs = _show_characters
 	cell_manager.load_creatures = _show_characters
@@ -2287,7 +2292,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	# Configure
 	native_streaming_manager.set_view_distance_meters(_current_view_distance, false)
 	native_streaming_manager.debug_enabled = false  # Disabled for performance (enable with toggle_debug command)
-	native_streaming_manager.set_world_object_source(world_object_source)
+	native_streaming_manager.set_world_source(world_source)
 	
 	add_child(native_streaming_manager)
 	

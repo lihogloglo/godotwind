@@ -69,8 +69,10 @@ uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
 // already-rendered opaque scene once at SCREEN_UV, optionally once at a guarded
 // refracted UV, then apply Beer-Lambert over the measured water segment.
 group_uniforms optics;
+#ifndef OCEAN_OPAQUE_BASELINE
 uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
 uniform sampler2D DEPTH_TEXTURE  : hint_depth_texture, filter_nearest;
+#endif
 // Beer-Lambert extinction coefficients per channel (m^-1, applied after density scale).
 // R absorbed fastest, G/B slower — matches real ocean spectrum.
 uniform vec3 absorption_rate = vec3(0.4, 0.1, 0.06);
@@ -263,6 +265,7 @@ bool optics_uv_in_screen(vec2 uv) {
 	return all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)));
 }
 
+#ifndef OCEAN_OPAQUE_BASELINE
 float optics_depth_neighbor_delta(vec2 uv, float center_view_z, mat4 inv_proj) {
 	if (!optics_uv_in_screen(uv)) {
 		return refraction_depth_edge_threshold;
@@ -341,6 +344,7 @@ vec4 ssr_trace(
 	}
 	return vec4(result, ssr_edge_alpha(screen_pos));
 }
+#endif
 
 // ============================================================================
 // SPECULAR HELPERS - Smith masking-shadowing + GGX distribution.
@@ -375,6 +379,7 @@ void fragment() {
 	// ========================================================================
 	vec4 surf_view4 = VIEW_MATRIX * vec4(v_world_pos, 1.0);
 	vec3 surf_view = surf_view4.xyz / surf_view4.w;
+#ifndef OCEAN_OPAQUE_BASELINE
 	float bg_ndc_z = texture(DEPTH_TEXTURE, SCREEN_UV).r;
 	bool is_sky_or_far = bg_ndc_z <= 1e-5;
 	float raw_thickness = max_visible_depth;
@@ -392,6 +397,15 @@ void fragment() {
 	}
 	bool water_medium_hit = is_sky_or_far || bg_below_water;
 	float water_thickness = water_medium_hit ? min(raw_thickness, max_visible_depth) : 0.0;
+#else
+	float bg_ndc_z = 0.0;
+	bool is_sky_or_far = false;
+	float raw_thickness = max_visible_depth;
+	float bg_view_z = surf_view.z - max_visible_depth;
+	bool bg_below_water = true;
+	bool water_medium_hit = true;
+	float water_thickness = max_visible_depth;
+#endif
 
 	// Read gradient and foam from normal maps (all cascades)
 	vec3 gradient = vec3(0);
@@ -469,6 +483,7 @@ void fragment() {
 	float refr_candidate_ndc_z = bg_ndc_z;
 	float refr_candidate_view_z = bg_view_z;
 	bool refr_candidate_has_depth = false;
+#ifndef OCEAN_OPAQUE_BASELINE
 	if (!is_sky_or_far && refraction_strength > 0.001 && water_thickness > 0.001) {
 		refr_attempted = true;
 		vec3 refr_dir = refract(-VIEW, NORMAL, 0.7509);
@@ -507,12 +522,18 @@ void fragment() {
 			}
 		}
 	}
+#endif
 
 	float optical_water_thickness = refr_valid
 		? min(max(0.0, surf_view.z - refr_view_z), max_visible_depth)
 		: water_thickness;
+#ifndef OCEAN_OPAQUE_BASELINE
 	vec3 straight_source_col = is_sky_or_far ? color_deep : texture(SCREEN_TEXTURE, SCREEN_UV).rgb;
 	vec3 refr_source_col = is_sky_or_far ? color_deep : texture(SCREEN_TEXTURE, refr_uv).rgb;
+#else
+	vec3 straight_source_col = color_deep;
+	vec3 refr_source_col = color_deep;
+#endif
 
 	vec3 refr_candidate_source_col = color_deep;
 	float refr_godot_depth_weight = 0.0;
@@ -524,6 +545,7 @@ void fragment() {
 	bool wants_candidate_source_debug = debug_mode == 14 || debug_mode == 18;
 	bool wants_godot_weight_debug = debug_mode == 16 || debug_mode == 18;
 	bool wants_depth_edge_debug = debug_mode == 17;
+#ifndef OCEAN_OPAQUE_BASELINE
 	if (wants_candidate_source_debug && !is_sky_or_far && refr_in_bounds) {
 		refr_candidate_source_col = texture(SCREEN_TEXTURE, refr_candidate_uv).rgb;
 	}
@@ -548,6 +570,7 @@ void fragment() {
 			? max(refr_screen_edge_strength, refr_candidate_edge_strength)
 			: 0.0;
 	}
+#endif
 
 	float refr_color_delta = refr_valid ? length(refr_source_col - straight_source_col) : 0.0;
 	float refr_color_guard = 1.0 - smoothstep(
@@ -589,14 +612,22 @@ void fragment() {
 	scatter = clamp(scatter, 0.0, 1.0);
 	base_water = mix(base_water, color_sub_surface, scatter);
 
-	// Fresnel blend: steep angles show the refracted/tinted scene, grazing
-	// angles lean back toward the lit surface color and sky tint.
-	vec3 source_col = mix(straight_source_col, refr_source_col, refr_sample_weight);
-	vec3 refracted_col = source_col * transmittance + medium_color * (vec3(1.0) - transmittance);
+	// Fresnel blend: steep angles can show the refracted/tinted scene only
+	// when surface refraction is explicitly enabled. The baseline surface must
+	// stay opaque; otherwise the opaque scene copy leaks terrain/shore foam onto
+	// near wave faces even with refraction_strength = 0.
+	bool surface_source_enabled = refraction_strength > 0.001;
+	vec3 source_col = surface_source_enabled
+		? mix(straight_source_col, refr_source_col, refr_sample_weight)
+		: base_water;
+	vec3 refracted_col = surface_source_enabled
+		? source_col * transmittance + medium_color * (vec3(1.0) - transmittance)
+		: base_water;
 	vec3 water_col = mix(refracted_col, base_water, clamp(fresnel, 0.0, 1.0));
 	water_col = mix(water_col, color_sky_tint, fresnel * sky_tint_strength);
 
 	vec4 ssr_result = vec4(0.0);
+#ifndef OCEAN_OPAQUE_BASELINE
 	if (ssr_enabled && ssr_mix_strength > 0.001) {
 		int ssr_steps = int(mix(
 			float(ssr_max_steps),
@@ -613,6 +644,7 @@ void fragment() {
 		);
 		water_col = mix(water_col, ssr_result.rgb, ssr_result.a * ssr_mix_strength * fresnel);
 	}
+#endif
 
 	// ========================================================================
 	// COMPOSE — fully opaque

@@ -42,7 +42,7 @@ Godotwind:
 
 - `docs/STATUS.md`
 - `docs/systems/sky.md`
-- `docs/systems/ocean.md`
+- `docs/systems/ocean/architecture.md`
 - `docs/systems/shaders_vaio_port.md`
 - `docs/systems/lighting.md`
 - `docs/plans/wetness_system.md`
@@ -344,14 +344,20 @@ would regress clock ownership and likely compete with SunshineClouds2.
 
 Godotwind's ocean contract is load-bearing:
 
-- visible FFT ocean remains opaque;
-- no `hint_screen_texture` / screen-color ownership in the surface;
-- receiver refraction and underwater optics are compositor-owned;
+- visible FFT ocean owns the water surface look;
+- current source still uses `hint_screen_texture` / `hint_depth_texture` for
+  bounded surface refraction, depth-derived tint, debug views, and custom SSR;
+- underwater camera medium is compositor-owned through
+  `UnderwaterCompositorEffect`;
+- receiver waterline is an off-by-default diagnostic/compositor path, not
+  accepted production optics;
 - `WaterSurfaceState` is the shared water contract.
 
 TCA's water shader is transparent, Gerstner-based, and owns effects that belong
 to Godotwind's FFT surface or compositor pipeline. It is the wrong architecture
-for Godotwind.
+for Godotwind. Current authority:
+`docs/systems/ocean/architecture.md` and
+`docs/systems/ocean/godot_4_6_water_rendering_rules.md`.
 
 ### Do not import TCA's wetness shader
 

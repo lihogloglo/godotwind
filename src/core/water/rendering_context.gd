@@ -50,10 +50,17 @@ static func create(rd: RenderingDevice = null) -> RenderingContext:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
-		deletion_queue.flush(device)
-		shader_cache.clear()
-		if device != RenderingServer.get_rendering_device():
-			device.free()
+		shutdown()
+
+
+func shutdown() -> void:
+	if device == null:
+		return
+	deletion_queue.flush(device)
+	shader_cache.clear()
+	if device != RenderingServer.get_rendering_device():
+		device.free()
+	device = null
 
 
 # --- Wrapper functions ---

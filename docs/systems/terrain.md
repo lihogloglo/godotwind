@@ -32,7 +32,7 @@ What Godotwind actually ships for terrain rendering. For industry-standard techn
 | `src/core/world/terrain_manager.gd` | Heightmap/control map generation, region import |
 | `src/core/world/generic_terrain_streamer.gd` | Real-time terrain streaming (priority queue, frustum cull) |
 | `src/core/world/terrain_texture_loader.gd` | Morrowind LTEX loading, PBR auto-detection |
-| `src/core/world/morrowind_data_provider.gd` | Morrowind data provider (LAND records) |
+| `src/core/world/morrowind/morrowind_data_provider.gd` | Morrowind terrain adapter provider (LAND records) |
 | `src/tools/ui/terrain_preprocessor.gd` | Offline prebaking (4x4 cells per region) |
 | `src/core/deformation/` | RTT deformation system (already integrated into shader) |
 

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-21" name="report_236" tests="13" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_world_source_boundary" package="tests/unit" timestamp="2026-05-21T15:50:16" hostname="localhost" tests="13" failures="0" errors="0" skipped="0" flaky="0" time="0.274">
+		<testcase name="test_world_source_contract_exposes_required_providers" classname="test_world_source_boundary" time="0.002">
+		</testcase>
+		<testcase name="test_world_source_separates_terrain_and_object_streaming_capabilities" classname="test_world_source_boundary" time="0.001">
+		</testcase>
+		<testcase name="test_native_streaming_manager_rejects_missing_source" classname="test_world_source_boundary" time="0.022">
+		</testcase>
+		<testcase name="test_native_streaming_manager_rejects_terrain_only_source_for_object_streaming" classname="test_world_source_boundary" time="0.006">
+		</testcase>
+		<testcase name="test_lapalma_remains_world_data_provider_without_morrowind_object_contracts" classname="test_world_source_boundary" time="0.011">
+		</testcase>
+		<testcase name="test_native_streaming_manager_accepts_fake_non_morrowind_source" classname="test_world_source_boundary" time="0.010">
+		</testcase>
+		<testcase name="test_distant_lights_use_provider_coordinate_mapper_for_pages" classname="test_world_source_boundary" time="0.009">
+		</testcase>
+		<testcase name="test_native_streaming_manager_rejects_source_without_spawn_adapter" classname="test_world_source_boundary" time="0.014">
+		</testcase>
+		<testcase name="test_cell_manager_world_cell_async_uses_fake_records_without_legacy_cell" classname="test_world_source_boundary" time="0.020">
+		</testcase>
+		<testcase name="test_cell_manager_exterior_async_prefers_world_manifest_without_legacy_cell" classname="test_world_source_boundary" time="0.028">
+		</testcase>
+		<testcase name="test_cell_manager_sync_exterior_uses_world_manifest_without_legacy_cell" classname="test_world_source_boundary" time="0.029">
+		</testcase>
+		<testcase name="test_cell_manager_metadata_only_exterior_uses_world_manifest_without_legacy_cell" classname="test_world_source_boundary" time="0.027">
+		</testcase>
+		<testcase name="test_fake_non_morrowind_source_instantiates_without_legacy_assets" classname="test_world_source_boundary" time="0.029">
+		</testcase>
+	</testsuite>
+</testsuites>

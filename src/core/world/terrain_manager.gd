@@ -9,6 +9,7 @@ extends RefCounted
 
 # Preload coordinate utilities
 const CS := preload("res://src/core/coordinate_system.gd")
+const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
 
 # Native C# terrain generator (if available)
 var _native_generator: RefCounted = null
@@ -18,13 +19,11 @@ func _init() -> void:
 	_check_native_availability()
 
 func _check_native_availability() -> void:
-	if ClassDB.class_exists("TerrainGenerator"):
-		_native_generator = ClassDB.instantiate("TerrainGenerator")
-		_use_native = _native_generator != null
-		if _use_native:
-			Log.info("streaming", "TerrainManager: Using native C# terrain generation (50-100x faster)")
-	else:
-		_use_native = false
+	var bridge: NativeBridge = NativeBridgeScript.new()
+	_native_generator = bridge.create_terrain_generator()
+	_use_native = _native_generator != null
+	if _use_native:
+		Log.info("streaming", "TerrainManager: Using native C# terrain generation (50-100x faster)")
 
 # Morrowind terrain constants (from CoordinateSystem)
 const MW_CELL_SIZE: float = CS.CELL_SIZE_MW  # Cell size in Morrowind units

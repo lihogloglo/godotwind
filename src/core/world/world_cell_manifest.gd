@@ -3,7 +3,6 @@ extends RefCounted
 
 var cell_grid: Vector2i = Vector2i.ZERO
 var objects: Array = []
-var legacy_cell_record: Variant = null
 
 
 func _init(p_cell_grid: Vector2i = Vector2i.ZERO) -> void:

@@ -37,13 +37,14 @@ var _scene_copy_size: Vector2i = Vector2i.ZERO
 var _external_source_color_rid: RID
 var _external_source_depth_rid: RID
 var _external_source_size: Vector2i = Vector2i.ZERO
+var _external_occlusion_depth_rid: RID
+var _external_occlusion_size: Vector2i = Vector2i.ZERO
 var _state_buffer: RID
 var _displacement_rid: RID
 var _normal_rid: RID
 var _shore_mask_rid: RID
 var _caustics_noise_rid: RID
-var _fallback_shore_texture: Texture2D
-var _caustics_noise_texture: Texture2D
+var _fallback_shore_rid: RID
 var _map_scales: PackedVector4Array = PackedVector4Array()
 var _state_buffer_size: int = 0
 var _sea_level: float = 0.0
@@ -80,16 +81,30 @@ var _particle_noise_scale: float = 0.70
 var _particle_density: float = 0.15
 var _particle_near_gate_m: float = 1.5
 var _particle_far_gate_m: float = 95.0
+var _binary_receiver_mask: bool = false
+var _receiver_refraction_enabled: bool = true
+var _receiver_medium_enabled: bool = false
+var _receiver_surface_film_enabled: bool = false
 var _receiver_optical_max_path_m: float = 120.0
 var _receiver_surface_visual_depth_m: float = 60.0
 var _receiver_debug_depth_scale_m: float = 60.0
 var _last_perf_frame: int = -1
 var _last_scene_copy_active: bool = false
+var _last_external_source_color_valid: bool = false
+var _last_external_source_depth_valid: bool = false
+var _last_external_source_valid: bool = false
+var _last_external_occlusion_depth_valid: bool = false
+var _external_source_process_frame: int = -1
+var _external_occlusion_process_frame: int = -1
+var _last_dispatch_size: Vector2i = Vector2i.ZERO
+var _last_camera_y: float = 0.0
+var _last_camera_water_level: float = 0.0
 var _last_perf_snapshot: Dictionary = {
 	"scene_copy_ms": 0.0,
 	"probe_ms": 0.0,
 	"total_ms": 0.0,
 	"frame": -1,
+	"external_source_valid": false,
 }
 var _render_logged: bool = false
 var _missing_source_warning_logged: bool = false
@@ -179,22 +194,41 @@ func _create_samplers() -> void:
 func _create_fallback_shore_mask() -> void:
 	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
 	img.set_pixel(0, 0, Color(1.0, 0.5, 0.5, 1.0))
-	_fallback_shore_texture = ImageTexture.create_from_image(img)
-	_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
+	_fallback_shore_rid = _create_rd_rgba8_texture(img)
+	_shore_mask_rid = _fallback_shore_rid
 
 
 func _load_caustics_textures() -> void:
-	_caustics_noise_texture = load(CAUSTICS_NOISE_PATH) as Texture2D
-	if _caustics_noise_texture == null:
+	var caustics_texture := load(CAUSTICS_NOISE_PATH) as Texture2D
+	var caustics_image := caustics_texture.get_image() if caustics_texture != null else null
+	if caustics_image == null:
 		Log.warn("water", "WaterlineCompositorEffect: missing caustics noise texture, caustics disabled")
-		_caustics_noise_texture = _make_solid_texture(Color.BLACK)
-	_caustics_noise_rid = RenderingServer.texture_get_rd_texture(_caustics_noise_texture.get_rid())
+		caustics_image = _make_solid_image(Color.BLACK)
+	_caustics_noise_rid = _create_rd_rgba8_texture(caustics_image)
 
 
-func _make_solid_texture(color: Color) -> Texture2D:
+func _make_solid_image(color: Color) -> Image:
 	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
 	img.set_pixel(0, 0, color)
-	return ImageTexture.create_from_image(img)
+	return img
+
+
+func _create_rd_rgba8_texture(image: Image) -> RID:
+	if rd == null:
+		return RID()
+	if image.get_format() != Image.FORMAT_RGBA8:
+		image.convert(Image.FORMAT_RGBA8)
+	var fmt := RDTextureFormat.new()
+	fmt.format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
+	fmt.width = image.get_width()
+	fmt.height = image.get_height()
+	fmt.depth = 1
+	fmt.array_layers = 1
+	fmt.mipmaps = 1
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	fmt.samples = RenderingDevice.TEXTURE_SAMPLES_1
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	return rd.texture_create(fmt, RDTextureView.new(), [image.get_data()])
 
 
 func sync_from_water_state(state: WaterSurfaceState) -> void:
@@ -225,8 +259,8 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	_shore_wave_steepness = state.shore_wave_steepness
 	if state.shore_mask_rd.is_valid():
 		_shore_mask_rid = state.shore_mask_rd
-	elif _fallback_shore_texture != null:
-		_shore_mask_rid = RenderingServer.texture_get_rd_texture(_fallback_shore_texture.get_rid())
+	elif _fallback_shore_rid.is_valid():
+		_shore_mask_rid = _fallback_shore_rid
 
 
 func sync_from_ocean(ocean_manager: Node, ocean_material: ShaderMaterial) -> void:
@@ -310,6 +344,22 @@ func set_receiver_source_mode(_mode: int) -> void:
 	_receiver_source_mode = RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER
 
 
+func set_binary_receiver_mask_enabled(enabled: bool) -> void:
+	_binary_receiver_mask = enabled
+
+
+func set_receiver_refraction_enabled(enabled: bool) -> void:
+	_receiver_refraction_enabled = enabled
+
+
+func set_receiver_medium_enabled(enabled: bool) -> void:
+	_receiver_medium_enabled = enabled
+
+
+func set_receiver_surface_film_enabled(enabled: bool) -> void:
+	_receiver_surface_film_enabled = enabled
+
+
 func set_underwater_particle_params(noise_scale: float, density: float, near_gate_m: float, far_gate_m: float) -> void:
 	_particle_noise_scale = clampf(noise_scale, 0.005, 1.5)
 	_particle_density = clampf(density, 0.0, 8.0)
@@ -352,16 +402,34 @@ func _quality_feature_mask(tier: int) -> int:
 			return QUALITY_MEDIUM_FEATURE_FLAGS
 
 
-func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i) -> void:
+func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i, source_process_frame: int = -1) -> void:
 	_external_source_color_rid = color_rid
 	_external_source_depth_rid = depth_rid
 	_external_source_size = size
+	_external_source_process_frame = source_process_frame
+
+
+func set_external_occlusion_depth_buffer(depth_rid: RID, size: Vector2i, source_process_frame: int = -1) -> void:
+	_external_occlusion_depth_rid = depth_rid
+	_external_occlusion_size = size
+	_external_occlusion_process_frame = source_process_frame
 
 
 func clear_external_source_buffers() -> void:
 	_external_source_color_rid = RID()
 	_external_source_depth_rid = RID()
 	_external_source_size = Vector2i.ZERO
+	_external_source_process_frame = -1
+	_last_external_source_color_valid = false
+	_last_external_source_depth_valid = false
+	_last_external_source_valid = false
+
+
+func clear_external_occlusion_depth_buffer() -> void:
+	_external_occlusion_depth_rid = RID()
+	_external_occlusion_size = Vector2i.ZERO
+	_external_occlusion_process_frame = -1
+	_last_external_occlusion_depth_valid = false
 
 
 func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> void:
@@ -423,7 +491,16 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	_last_scene_copy_active = scene_copy_valid
 	var external_source_color_valid := _external_source_color_rid.is_valid() and rd.texture_is_valid(_external_source_color_rid)
 	var external_source_depth_valid := _external_source_depth_rid.is_valid() and rd.texture_is_valid(_external_source_depth_rid)
+	var external_occlusion_depth_valid := _external_occlusion_depth_rid.is_valid() and rd.texture_is_valid(_external_occlusion_depth_rid)
 	var has_external_source := external_source_color_valid and external_source_depth_valid and _external_source_size != Vector2i.ZERO
+	var has_external_occlusion := external_occlusion_depth_valid and _external_occlusion_size != Vector2i.ZERO
+	_last_external_source_color_valid = external_source_color_valid
+	_last_external_source_depth_valid = external_source_depth_valid
+	_last_external_source_valid = has_external_source
+	_last_external_occlusion_depth_valid = has_external_occlusion
+	_last_dispatch_size = size
+	_last_camera_y = scene_data.get_cam_transform().origin.y
+	_last_camera_water_level = _camera_water_level
 	if not has_external_source and _debug_mode == 0 and scene_data.get_cam_transform().origin.y > _camera_water_level + 0.02:
 		return
 	if not has_external_source:
@@ -432,6 +509,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 			Log.warn("water", "WaterlineCompositorEffect: missing receiver source buffers; receiver refraction disabled")
 	var source_color_rid := _external_source_color_rid if external_source_color_valid else RID()
 	var source_depth_rid := _external_source_depth_rid if external_source_depth_valid else RID()
+	var occlusion_depth_rid := _external_occlusion_depth_rid if external_occlusion_depth_valid else RID()
 	var source_color_valid := has_external_source
 	var source_depth_valid := has_external_source
 	var source_log_key := "%s/%s/%s/%s" % [
@@ -475,6 +553,14 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(_particle_density)
 	pc.append(_particle_near_gate_m)
 	pc.append(_particle_far_gate_m)
+	pc.append(1.0 if _binary_receiver_mask else 0.0)
+	pc.append(1.0 if _receiver_refraction_enabled else 0.0)
+	pc.append(1.0 if _receiver_medium_enabled else 0.0)
+	pc.append(1.0 if _receiver_surface_film_enabled else 0.0)
+	pc.append(1.0 if has_external_occlusion else 0.0)
+	pc.append(0.0)
+	pc.append(0.0)
+	pc.append(0.0)
 	var pc_bytes := pc.to_byte_array()
 
 	var uniforms: Array[RDUniform] = []
@@ -549,6 +635,13 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_normal.add_id(_linear_repeat_sampler)
 	u_normal.add_id(_normal_rid if _normal_rid.is_valid() else _displacement_rid)
 	uniforms.append(u_normal)
+
+	var u_occlusion_depth := RDUniform.new()
+	u_occlusion_depth.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_occlusion_depth.binding = 10
+	u_occlusion_depth.add_id(_depth_sampler)
+	u_occlusion_depth.add_id(occlusion_depth_rid if occlusion_depth_rid.is_valid() else depth_texture)
+	uniforms.append(u_occlusion_depth)
 
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
@@ -770,16 +863,35 @@ func _refresh_timestamp_snapshot() -> void:
 		"total_ms": scene_copy_ms + probe_ms,
 		"frame": frame,
 		"timing_valid": timing_valid,
+		"debug_mode": _debug_mode,
 		"quality_tier": _quality_tier,
 		"receiver_source_mode": _receiver_source_mode,
 		"user_feature_flags": _user_underwater_feature_flags,
 		"feature_flags": _underwater_feature_flags,
 		"scene_copy_active": _last_scene_copy_active,
 		"source_size": _external_source_size,
+		"occlusion_size": _external_occlusion_size,
+		"external_source_process_frame": _external_source_process_frame,
+		"external_source_frame_age": Engine.get_process_frames() - _external_source_process_frame if _external_source_process_frame >= 0 else -1,
+		"external_occlusion_process_frame": _external_occlusion_process_frame,
+		"external_occlusion_frame_age": Engine.get_process_frames() - _external_occlusion_process_frame if _external_occlusion_process_frame >= 0 else -1,
+		"external_source_color_valid": _last_external_source_color_valid,
+		"external_source_depth_valid": _last_external_source_depth_valid,
+		"external_source_valid": _last_external_source_valid,
+		"external_occlusion_depth_valid": _last_external_occlusion_depth_valid,
+		"dispatch_size": _last_dispatch_size,
+		"effect_enabled": effect_enabled,
+		"blend_factor": blend_factor,
+		"camera_y": _last_camera_y,
+		"camera_water_level": _last_camera_water_level,
 		"particle_noise_scale": _particle_noise_scale,
 		"particle_density": _particle_density,
 		"receiver_optical_max_path_m": _receiver_optical_max_path_m,
 		"receiver_debug_depth_scale_m": _receiver_debug_depth_scale_m,
+		"binary_receiver_mask": _binary_receiver_mask,
+		"receiver_refraction_enabled": _receiver_refraction_enabled,
+		"receiver_medium_enabled": _receiver_medium_enabled,
+		"receiver_surface_film_enabled": _receiver_surface_film_enabled,
 	}
 
 
@@ -812,7 +924,6 @@ func _timestamp_delta_ms(begin_us: int, end_us: int) -> float:
 
 
 func on_effect_removed() -> void:
-	super.on_effect_removed()
 	if rd:
 		if _depth_sampler.is_valid():
 			rd.free_rid(_depth_sampler)
@@ -838,5 +949,17 @@ func on_effect_removed() -> void:
 		if _state_buffer.is_valid():
 			rd.free_rid(_state_buffer)
 			_state_buffer = RID()
+		if _fallback_shore_rid.is_valid():
+			rd.free_rid(_fallback_shore_rid)
+			_fallback_shore_rid = RID()
+		if _caustics_noise_rid.is_valid():
+			rd.free_rid(_caustics_noise_rid)
+			_caustics_noise_rid = RID()
 	_state_buffer_size = 0
 	_scene_copy_size = Vector2i.ZERO
+	clear_external_source_buffers()
+	clear_external_occlusion_depth_buffer()
+	_displacement_rid = RID()
+	_normal_rid = RID()
+	_shore_mask_rid = RID()
+	super.on_effect_removed()

@@ -4,7 +4,7 @@
 ## (MultiMesh slots, no Node3D). That eliminated ~10k per-object StaticBody3D
 ## registrations in Jolt broadphase but also removed collision. This class
 ## restores collision by baking one `ConcavePolygonShape3D` per cell from the
-## cell's static refs.
+## cell's normalized static payload transforms.
 ##
 ## Spec: docs/plans/distant_rendering_2026_04/statics_no_node3d.md §3.2–3.4.
 ##
@@ -22,9 +22,10 @@
 ## direct pattern, see docs/research/server_direct_pattern.md.
 ##
 ## Three-step pipeline:
-##   1. `collect_classified_refs(grid, cell_record, use_static)` — MAIN. Filters
-##      refs via the existing classifier, resolves shape-pack sidecars, and
-##      packs into a `BuildPayload`. Returns null for empty cells.
+##   1. `collect_payload_static_entries(grid, payload, use_static)` — MAIN.
+##      Reads normalized static payload transforms, resolves shape-pack
+##      sidecars, and packs them into a `BuildPayload`. Returns null for empty
+##      cells.
 ##   2. `worker_collect_triangles(payload)` — WORKER. Pure data: warms shape
 ##      cache from sidecars, walks per-prototype shapes, transforms to world
 ##      space, packs into `payload.vertices`. Reads `StaticShapeCache` via the
@@ -58,13 +59,12 @@ class_name CellStaticCollision
 extends RefCounted
 
 
-const CS := preload("res://src/core/coordinate_system.gd")
-const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 
 
 ## Injected dependencies — set via configure().
 var _shape_cache: RefCounted = null  # StaticShapeCache
-var _instantiator: RefCounted = null  # ReferenceInstantiator — for classifier reuse
+## Second configure argument is accepted for old callers but no longer used:
+## collision consumes normalized CellPayload data instead of classifier hooks.
 
 ## Stats (read by cell_manager for heartbeat).
 var stats: Dictionary = {
@@ -81,7 +81,7 @@ var debug_enabled: bool = false
 
 ## Per-cell async build state.
 ##
-## Created by `collect_classified_refs` on main, mutated by
+## Created by `collect_payload_static_entries` on main, mutated by
 ## `worker_collect_triangles` on a WorkerThreadPool thread, consumed by
 ## `finalize_body` on main. RefCounted so the caller can hold a strong ref
 ## across the worker dispatch — once the main-thread `is_task_completed`
@@ -135,9 +135,8 @@ class FinalizedBody:
 	var cell_grid: Vector2i = Vector2i.ZERO  # diagnostic only
 
 
-func configure(shape_cache: RefCounted, instantiator: RefCounted) -> void:
+func configure(shape_cache: RefCounted, _instantiator: RefCounted = null) -> void:
 	_shape_cache = shape_cache
-	_instantiator = instantiator
 
 
 ## Synchronous compatibility wrapper — runs collect → worker (inline) → finalize
@@ -149,75 +148,40 @@ func configure(shape_cache: RefCounted, instantiator: RefCounted) -> void:
 ## Win 2 (NEAR refactor 2026-04-25): now returns a `FinalizedBody` (server-
 ## direct RID + shape ref) instead of a StaticBody3D. Caller is responsible
 ## for calling `free_body` on the returned handle when the cell unloads.
-func build_for_cell(cell_grid: Vector2i, cell_record: Variant, world_3d: World3D, use_static_renderer: bool = true) -> FinalizedBody:
-	var payload := collect_classified_refs(cell_grid, cell_record, use_static_renderer)
+func build_for_cell(cell_grid: Vector2i, cell_payload: RefCounted, world_3d: World3D, use_static_renderer: bool = true) -> FinalizedBody:
+	var payload := collect_payload_static_entries(cell_grid, cell_payload, use_static_renderer)
 	if payload == null:
 		return null
 	worker_collect_triangles(payload)
 	return finalize_body(payload, world_3d)
 
 
-## MAIN-THREAD: classify refs, resolve sidecars, pack into a BuildPayload.
-##
-## Returns null when:
-## - dependencies missing
-## - cell_record null
-## - use_static_renderer false (interior-pocket carve-out)
-## - no static-routed refs found
-##
-## Performance: O(N_refs) main-thread cost. The expensive work
-## (sidecar load + triangulation + transform) is deferred to the worker.
-## Typical Seyda-Neen-cell cost: ~0.2-0.5 ms (mostly ESM lookups).
-func collect_classified_refs(cell_grid: Vector2i, cell_record: Variant, use_static_renderer: bool = true) -> BuildPayload:
-	if _shape_cache == null or _instantiator == null or cell_record == null:
+## MAIN-THREAD: resolve sidecars and pack normalized static transforms into a BuildPayload.
+func collect_payload_static_entries(cell_grid: Vector2i, cell_payload: RefCounted, use_static_renderer: bool = true) -> BuildPayload:
+	if _shape_cache == null or cell_payload == null:
 		return null
 	if not use_static_renderer:
-		# Interior pockets — every ref is a Node3D with its own collision; a
-		# cell-level trimesh would duplicate. Skip.
 		return null
 
 	var payload := BuildPayload.new()
 	payload.cell_grid = cell_grid
-
-	for ref: CellReference in cell_record.references:
-		payload.dbg_refs_seen += 1
-		var rec_type: Array = [""]
-		var base: Variant = ESMManager.get_any_record(str(ref.ref_id), rec_type)
-		if base == null or not "model" in base:
-			continue
-		var type_name: String = rec_type[0] if rec_type.size() > 0 else ""
-		var model_path: String = base.model
+	var model_keys: Dictionary = cell_payload.get("model_keys")
+	var static_transforms: Dictionary = cell_payload.get("static_instance_transforms")
+	for payload_key: String in static_transforms:
+		var model_info: Dictionary = model_keys.get(payload_key, {})
+		var model_path := str(model_info.get("model_path", ""))
 		if model_path.is_empty():
 			continue
-
-		var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base)
-
-		# Reuse the instantiator's classifier so T.2 tracks the RS-routed set
-		# exactly. Stays main-thread because `_should_route_to_renderer`
-		# transitively calls `model_loader.has_animation` (cache write).
-		if not _instantiator._should_route_to_renderer(type_name, model_path, is_carryable, use_static_renderer):
-			continue
-		payload.dbg_classified_static += 1
-
-		# Compose ref world transform. Matches `_apply_transform` in the ref
-		# instantiator: CS converts ESM (Z-up) to Godot (Y-up), rotation via
-		# esm_rotation_to_godot_basis, scale via scale_to_godot.
-		var ref_xf: Transform3D = Transform3D()
-		ref_xf.origin = CS.vector_to_godot(ref.position)
-		ref_xf.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
-		var scale_vec: Vector3 = CS.scale_to_godot(ref.scale)
-		ref_xf.basis = ref_xf.basis.scaled(scale_vec)
-
-		payload.entries.append({
-			"model_path": model_path,
-			"ref_xf": ref_xf,
-		})
-
-		# Resolve sidecar path for this prototype if we haven't yet. Phase F
-		# typically pre-warms the cache, but resolving the pack path here lets
-		# the worker call `warm_from_path` defensively for late-arriving cells.
-		# `resolve_pack_path` mutates ModelLoader's _file_exists_cache, so it
-		# stays main-thread.
+		var transforms: Array = static_transforms.get(payload_key, [])
+		for transform_value: Variant in transforms:
+			if not transform_value is Transform3D:
+				continue
+			payload.dbg_refs_seen += 1
+			payload.dbg_classified_static += 1
+			payload.entries.append({
+				"model_path": model_path,
+				"ref_xf": transform_value,
+			})
 		if not payload.pack_paths.has(model_path):
 			payload.pack_paths[model_path] = _shape_cache.call("resolve_pack_path", model_path)
 

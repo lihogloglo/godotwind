@@ -84,6 +84,13 @@ static func _check_native_availability() -> void:
 func has_native_terrain() -> bool:
 	return _native_available
 
+## Create a native terrain generator instance.
+## Returns TerrainGenerator C# object or null if not available.
+func create_terrain_generator() -> RefCounted:
+	if not has_native_terrain() or _factory == null:
+		return null
+	return _factory.call("CreateTerrainGenerator")
+
 ## Returns true if native C# binary reader is available
 func has_native_binary_reader() -> bool:
 	return _native_available
@@ -95,7 +102,7 @@ func generate_heightmap(heights: PackedFloat32Array) -> Image:
 	if not has_native_terrain() or _factory == null:
 		return null
 
-	var generator: RefCounted = _factory.call("CreateTerrainGenerator")
+	var generator: RefCounted = create_terrain_generator()
 	if generator == null:
 		return null
 
@@ -114,7 +121,7 @@ func generate_color_map(colors: PackedByteArray) -> Image:
 	if not has_native_terrain() or _factory == null:
 		return null
 
-	var generator: RefCounted = _factory.call("CreateTerrainGenerator")
+	var generator: RefCounted = create_terrain_generator()
 	if generator == null:
 		return null
 
@@ -128,7 +135,7 @@ func generate_control_map(texture_indices: PackedInt32Array, slot_mapper: Callab
 	if not has_native_terrain() or _factory == null:
 		return null
 
-	var generator: RefCounted = _factory.call("CreateTerrainGenerator")
+	var generator: RefCounted = create_terrain_generator()
 	if generator == null:
 		return null
 

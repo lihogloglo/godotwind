@@ -15,6 +15,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
+const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 
 var _camera: Camera3D
@@ -84,12 +85,15 @@ func _run_phase(pause_streaming: bool) -> void:
 	_cell_manager = CellManagerScript.new()
 	_cell_manager.load_npcs = false
 	_cell_manager.load_creatures = false
+	var world_source := MorrowindWorldSourceScript.new()
+	_cell_manager.set_world_object_source(world_source.get_object_source())
 
 	# Create streaming manager (the key addition vs the isolated test)
 	_streaming_manager = NativeStreamingManagerScript.new()
 	_streaming_manager.name = "StreamingManager"
 	_streaming_manager.set("debug_enabled", true)
 	_streaming_manager.set("async_loading_enabled", true)
+	_streaming_manager.set_world_source(world_source)
 	add_child(_streaming_manager)
 	await get_tree().process_frame  # Ensure camera is in tree before initialize
 	_streaming_manager.initialize(_cell_manager, _camera)

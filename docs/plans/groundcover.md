@@ -3,15 +3,17 @@
 **Status:** Proposal — not yet implemented
 **Owner:** @groundcover
 **Drafted:** 2026-04-09
-**Related:** `docs/systems/distance_rendering.md`, `src/core/world/static_object_renderer.gd`, `src/core/world/distance_utils.gd`
+**Related:** `docs/systems/distance_rendering.md`, `docs/systems/adapter_boundary.md`, `src/core/world/static_object_renderer.gd`, `src/core/world/distance_utils.gd` (transitional; final distance policy should come from source-neutral groundcover config/provider data)
 
 ---
 
 ## Goal
 
-Ship a data-driven groundcover (grass + small foliage) renderer for Godotwind that sources from Morrowind groundcover ESP files (Remiros, Aesthesia, Vurt family) and renders them efficiently in Godot 4.6. Match OpenMW visual density and wind behavior without over-engineering.
+Ship a data-driven groundcover (grass + small foliage) renderer for Godotwind. The core renderer consumes a source-neutral groundcover provider; the Morrowind adapter can source that provider from groundcover ESP files (Remiros, Aesthesia, Vurt family). Match OpenMW visual density and wind behavior without over-engineering.
 
 **Non-goals:** artist paint tooling, physics on grass, shadow-casting grass, per-instance LOD, custom GPU compute scatter, Terrain3D instancer integration.
+
+**Boundary note:** ESP parsing, NIF mesh-path filtering, RefId/context storage, and Morrowind cell conventions belong in a Morrowind groundcover adapter. The framework renderer should see normalized mesh handles, transforms, density settings, and provider grid/chunk coordinates only.
 
 ---
 
@@ -56,7 +58,7 @@ Cross-checked against Unreal, Unity, CryEngine/Frostbite, Witcher 3 / RDR2:
 
 **Convergent pattern across all of them:** chunked instancer tiles around camera + GPU instancing + per-splat (or per-ref) density + vertex-shader wind + distance fade.
 
-OpenMW matches this pattern exactly, with the only difference that density inputs come from authored cell refs rather than a splat map. For Godotwind this is the right shape, because our data source is the same.
+OpenMW matches this pattern exactly, with the only difference that density inputs come from authored cell refs rather than a splat map. For the Morrowind adapter this is the right source translation; the framework contract should still be provider-driven so another game can supply splat maps, authored refs, or generated placement batches without changing core renderer code.
 
 ### Terrain3D v1.0.1 built-in instancer — evaluated and rejected
 
@@ -74,7 +76,7 @@ OpenMW matches this pattern exactly, with the only difference that density input
 
 - `src/core/world/static_object_renderer.gd` — our RenderingServer-based static renderer with `visibility_range` LOD. Already used for flora indirectly via `src/core/world/reference_instantiator.gd`.
 - No groundcover-specific system yet.
-- `src/core/world/distance_utils.gd` — single source of truth for tier distances. Groundcover distance constants will live here.
+- `src/core/world/distance_utils.gd` — current source of truth for tier distances. Groundcover should avoid adding Morrowind cell metrics here; if a shared distance constant is needed, keep it source-neutral and override/tune it through groundcover config or provider policy.
 
 ---
 
@@ -82,26 +84,27 @@ OpenMW matches this pattern exactly, with the only difference that density input
 
 Mirror OpenMW architecture using Godot primitives. The Godot engine hands us `MultiMeshInstance3D` + `visibility_range` for free, so the total line count drops by roughly a factor of 10 compared to the OpenMW C++ implementation while preserving the visual behavior.
 
-### 1. Data layer — `GroundcoverStore`
+### 1. Data layer — provider + Morrowind adapter store
 
-- New autoload-sibling manager (not itself an autoload — owned by world streaming). Parses groundcover ESP files separately from main content, mirroring OpenMW's `groundcover=` distinction.
-- Filters statics where NIF mesh path starts with `grass/` (or our equivalent prefix — TBD during implementation after inspecting Remiros/Aesthesia archives).
+- Core contract: `GroundcoverProvider` returns normalized groundcover refs for provider grid chunks. It does not parse ESP/ESM files and does not know about NIF paths.
+- Morrowind adapter store parses groundcover ESP files separately from main content, mirroring OpenMW's `groundcover=` distinction.
+- The Morrowind adapter filters statics where the source mesh path starts with `grass/` (or our equivalent prefix — TBD during implementation after inspecting Remiros/Aesthesia archives).
 - Builds:
-  - `mesh_cache: Dictionary[StringName, PackedScene]` — RefID to preloaded/prebaked grass mesh.
-  - `cell_refs: Dictionary[Vector2i, Array[GroundcoverRef]]` — per-cell-grid-coord list of transforms.
-- Leverages existing `ESMManager` grid-indexed lookup. No separate file-I/O threading — groundcover ESPs are small and can be parsed on load.
-- `GroundcoverRef` = `{ ref_id: StringName, position: Vector3, rotation: Basis, scale: float }`. Inner class, no file explosion.
+  - Adapter mesh map: source record ID to provider asset handle / prebaked grass mesh.
+  - Adapter cell refs: source cell grid to normalized `GroundcoverRef` transforms.
+- Adapter can leverage source-owned ESM services. Core renderer receives already-normalized refs.
+- `GroundcoverRef` = `{ asset_id: StringName, transform: Transform3D, density_weight: float }`. Inner class, no file explosion.
 
 ### 2. Streaming — piggyback on cell streaming
 
 - One `MultiMeshInstance3D` per `(cell_coord, ref_id)` pair, parented under the existing streamed cell root node.
-- Spawn when cell enters the groundcover distance radius, despawn when it leaves, with hysteresis matching existing streaming constants. No new quadtree — the MW cell grid already IS the quadtree.
-- Chunk size = 1 MW cell. If profiling shows draw-call pressure, merge to 2x2 cells. Decision deferred until profiling data exists.
+- Spawn when provider chunks enter the groundcover distance radius, despawn when they leave, with hysteresis matching existing streaming constants. No new quadtree unless profiling proves the active provider grid is not enough.
+- Initial chunk size = one provider cell. If profiling shows draw-call pressure, merge to 2x2 cells. Decision deferred until profiling data exists.
 
 ### 3. Render — `MultiMeshInstance3D` with engine culling
 
 - `MultiMesh.transform_format = TRANSFORM_3D`, `use_colors = false`, `use_custom_data = false` unless we later need per-instance wind phase.
-- Engine `visibility_range_end = GROUNDCOVER_DISTANCE` (constant added to `distance_utils.gd`, initial value 100 m, tunable).
+- Engine `visibility_range_end` comes from source-neutral groundcover config/provider policy (initial value 100 m, tunable). Avoid hardcoding a Morrowind-specific cell-derived value in generic distance utilities.
 - `visibility_range_end_margin` set for fade-out.
 - `cast_shadow = SHADOW_CASTING_SETTING_OFF` by default. Re-evaluate after first visual pass.
 - Engine handles frustum culling and distance culling per MMI. No custom cull code. Canonical Godot pattern.
@@ -110,7 +113,7 @@ Mirror OpenMW architecture using Godot primitives. The Godot engine hands us `Mu
 
 - Custom `ShaderMaterial` extending the standard spatial shader, vertex pass only.
 - Implement the four-harmonic wind sum from `groundcover.vert:62-102` in Godot shader syntax, using `TIME` in place of `osg_SimulationTime` and world XZ in place of `worldpos.xy`.
-- Height mask via vertex `Y` so the base of the blade stays planted. OpenMW's `0.02 * vertex.z` clamp ports directly (our axis mapping via `coordinate_system.gd`).
+- Height mask via vertex `Y` so the base of the blade stays planted. Source axis conversion happens before core rendering via the active coordinate mapper.
 - Alpha-to-coverage for foliage edges (Godot's `ALPHA_SCISSOR_THRESHOLD` + MSAA, or `ALPHA_HASH` if MSAA is off).
 - Stomp/player-displacement is deferred to Phase 2. MVP ships without it.
 - Target: ~40 shader lines total.
@@ -140,7 +143,7 @@ Following the "Simplicity Over Over-Engineering" principle in `CLAUDE.md`:
 - **No GPU compute scatter.** Our data is already ref-driven; compute scatter would replace a solved problem with an unsolved one.
 - **No custom frustum culler.** Godot's `VisibleOnScreenNotifier3D` + `MultiMeshInstance3D` culling is sufficient.
 - **No per-instance LOD.** One LOD + distance fade matches OpenMW ship state.
-- **No custom quadtree.** The MW cell grid IS the quadtree.
+- **No custom quadtree.** Use the active provider grid/chunk mapper unless profiling proves it is insufficient.
 - **No Terrain3D integration.** Wrong authoring model.
 - **No editor paint tool.** Data-driven only.
 - **No physics, no collision, no Area3D queries on grass.** Pure render.
@@ -153,16 +156,17 @@ Following the "Simplicity Over Over-Engineering" principle in `CLAUDE.md`:
 
 New files:
 
-- `src/core/world/groundcover/groundcover_store.gd` — ESP parsing, mesh cache, ref map. ~150 lines.
-- `src/core/world/groundcover/groundcover_renderer.gd` — MultiMeshInstance3D spawn/despawn keyed to cell streaming. ~150 lines.
+- `src/core/world/groundcover/groundcover_provider.gd` — generic provider contract for normalized refs. ~40 lines.
+- `src/core/world/morrowind/groundcover_store.gd` — ESP parsing, mesh cache, ref map. ~150 lines.
+- `src/core/world/groundcover/groundcover_renderer.gd` — MultiMeshInstance3D spawn/despawn keyed to provider chunks. ~150 lines.
 - `src/core/world/groundcover/density_calculator.gd` — deterministic density filter, inner class or standalone. ~30 lines.
 - `src/core/world/groundcover/groundcover_ref.gd` — ref data class. ~20 lines.
 - `src/core/shaders/groundcover.gdshader` — wind-animated foliage shader. ~40 lines.
 
 Touched files:
 
-- `src/core/world/distance_utils.gd` — add `GROUNDCOVER_DISTANCE` constant.
-- `autoload/settings_manager.gd` — add three new settings keys with defaults.
+- Source-neutral groundcover config/provider policy — expose the render distance without baking Morrowind cell metrics into core distance helpers.
+- `src/core/settings_manager.gd` — add three new settings keys with defaults.
 - World streaming owner (TBD during implementation) — wire `GroundcoverRenderer` into cell load/unload signals.
 
 **Total MVP scope: ~400 GDScript lines + 40 shader lines.**

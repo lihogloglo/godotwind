@@ -90,7 +90,7 @@ const PAGING_MERGE_FACTOR: float = 256.0
 
 ## Phase 4 — adaptive chunk tier band ends (strict half-open intervals).
 ## Plan §4.2. Band classification uses chunk-CENTER distance from camera.
-##   size_level 0 (1×1 chunks) = [150, 300)
+##   size_level 0 (1×1 chunks) = [150, 400)
 ##   size_level 1 (2×2 chunks) = [400, 600)
 ##   size_level 2 (4×4 chunks) = [600, 1000)
 ## FAR tier (impostors) picks up at PAGING_TIER_2_END.

@@ -1,6 +1,7 @@
 extends GdUnitTestSuite
 
 const BridgeScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_bridge.gd")
+const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
 const INDEX_MAP_SIZE := 65
 const MW_TEXTURE_SIZE := 16
 const CELLS_PER_REGION := 4
@@ -8,7 +9,7 @@ const NEIGHBORHOOD_SIZE := CELLS_PER_REGION + 1
 
 
 func test_region_index_map_samples_north_and_east_borders() -> void:
-	var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
+	var generator := _new_generator()
 	assert_object(generator).is_not_null()
 
 	var cells := _make_cells()
@@ -34,7 +35,7 @@ func test_region_index_map_samples_north_and_east_borders() -> void:
 
 
 func test_region_index_map_missing_neighbor_uses_default_layer() -> void:
-	var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
+	var generator := _new_generator()
 	assert_object(generator).is_not_null()
 
 	var cells := _make_cells()
@@ -46,7 +47,7 @@ func test_region_index_map_missing_neighbor_uses_default_layer() -> void:
 
 
 func test_region_index_map_preserves_layers_above_terrain3d_slot_limit() -> void:
-	var generator: RefCounted = ClassDB.instantiate("TerrainGenerator")
+	var generator := _new_generator()
 	assert_object(generator).is_not_null()
 
 	var cells := _make_cells()
@@ -66,6 +67,11 @@ func _make_cells() -> Array:
 	for i in range(cells.size()):
 		cells[i] = PackedInt32Array()
 	return cells
+
+
+func _new_generator() -> RefCounted:
+	var bridge: NativeBridge = NativeBridgeScript.new()
+	return bridge.create_terrain_generator()
 
 
 func _filled_cell(mw_index: int) -> PackedInt32Array:

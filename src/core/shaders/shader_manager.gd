@@ -69,6 +69,7 @@ var _effect_paths: Array[String] = [
 const DEPRECATED_RUNTIME_EFFECT_FILES := {
 	"prewater_capture_effect.gd": true,
 	"waterline_compositor_effect.gd": true,
+	"surface_refraction_compositor_effect.gd": true,
 }
 
 
@@ -77,6 +78,26 @@ func _ready() -> void:
 	_load_built_in_effects()
 	_load_config()
 	Log.info("shaders", "ShaderManager initialized with %d effects" % _effects.size())
+
+
+func _exit_tree() -> void:
+	shutdown()
+
+
+func shutdown() -> void:
+	if _compositor != null:
+		_compositor.compositor_effects = []
+	_effect_stack.clear()
+	_active_transitions.clear()
+	for effect_name: String in _effects.keys():
+		var effect: PostProcessEffect = _effects[effect_name]
+		if effect != null:
+			effect.effect_enabled = false
+			effect.blend_factor = 0.0
+			effect.on_effect_removed()
+	_effects.clear()
+	_shared_textures.clear()
+	detach()
 
 
 ## Attach the shader manager to a WorldEnvironment or Camera3D

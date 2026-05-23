@@ -1,4 +1,5 @@
 shader_type spatial;
+#define OCEAN_OPAQUE_BASELINE
 // Projected-grid path — the mesh is a single flat N×N grid in local [0,1]²
 // coords. Every vertex unprojects its own NDC position back to a world-space
 // ray, intersects the ray with the water plane (y = sea_level), then samples

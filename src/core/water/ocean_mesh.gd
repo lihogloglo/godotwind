@@ -8,15 +8,15 @@
 class_name OceanMesh
 extends MeshInstance3D
 
-# Clipmap configuration. HIGH/FFT gets denser near-camera geometry so the
-# shore-wave breaker profile has enough vertices; FLAT keeps the lighter legacy
-# mesh for low-end hardware.
+# Clipmap configuration. Keep HIGH/FFT on the same geometry dimensions as the
+# f0b5192 "thickness fixed" baseline: that version had stable self-occlusion
+# with depth_draw_always, while denser overlapping rings regressed crest order.
 const LEGACY_NUM_LOD_RINGS: int = 11
 const LEGACY_BASE_QUAD_SIZE: float = 2.0
 const LEGACY_RING_VERTEX_COUNT: int = 64
-const HIGH_NUM_LOD_RINGS: int = 12
-const HIGH_BASE_QUAD_SIZE: float = 1.0
-const HIGH_RING_VERTEX_COUNT: int = 80
+const HIGH_NUM_LOD_RINGS: int = 11
+const HIGH_BASE_QUAD_SIZE: float = 2.0
+const HIGH_RING_VERTEX_COUNT: int = 64
 
 # Projected grid configuration — single flat N×N mesh in local [0,1]²; the
 # vertex shader unprojects each vertex from NDC → world via INV_VIEW_PROJECTION
@@ -41,6 +41,7 @@ var _mesh_mode: MeshMode = MeshMode.CLIPMAP
 # Cached state for quality switching
 var _cached_shore_mask: Texture2D = null
 var _cached_shore_bounds: Rect2 = Rect2()
+var _cached_shore_fade_distance: float = 50.0
 var _cached_wave_scale: float = 1.0
 var _cached_foam_texture: Texture2D = null
 var _debug_shore_mask: bool = false
@@ -93,7 +94,7 @@ func _create_shader() -> void:
 			# share `ocean_fft_common.gdshaderinc` — fragment + light + all
 			# uniforms — so switching mesh mode is literally just swapping
 			# the vertex path.
-			var shader_path := "res://src/core/water/shaders/ocean_fft.gdshader"
+			var shader_path := "res://src/core/water/shaders/ocean_fft_opaque.gdshader"
 			if _mesh_mode == MeshMode.PROJECTED:
 				shader_path = "res://src/core/water/shaders/ocean_fft_projected.gdshader"
 			_shader = load(shader_path) as Shader
@@ -151,6 +152,8 @@ func _setup_fft_defaults() -> void:
 	var foam_tex := _load_foam_texture()
 	_material.set_shader_parameter("foam_texture", foam_tex)
 	_cached_foam_texture = foam_tex
+	_material.set_shader_parameter("refraction_strength", 0.0)
+	_material.set_shader_parameter("refraction_edge_guard_strength", 0.0)
 
 	Log.debug("water", "OceanMesh: FFT shader defaults configured")
 
@@ -494,6 +497,7 @@ func set_wave_scale(scale: float) -> void:
 func set_shore_mask(mask: Texture2D, world_bounds: Rect2, fade_distance: float = 50.0) -> void:
 	_cached_shore_mask = mask
 	_cached_shore_bounds = world_bounds
+	_cached_shore_fade_distance = fade_distance
 	if _material:
 		_material.set_shader_parameter("shore_mask", mask)
 		_material.set_shader_parameter("shore_mask_bounds", Vector4(
@@ -506,6 +510,15 @@ func set_shore_mask(mask: Texture2D, world_bounds: Rect2, fade_distance: float =
 		Log.debug("water", "OceanMesh: Shore mask set - texture: %s, bounds: %s, fade: %.0fm" % [
 			mask.get_size() if mask else "null",
 			world_bounds, fade_distance])
+
+
+func clear_runtime_textures() -> void:
+	_cached_shore_mask = null
+	_cached_foam_texture = null
+	if _material:
+		_material.set_shader_parameter("shore_mask", null)
+		_material.set_shader_parameter("foam_texture", null)
+	material_override = null
 
 
 func set_debug_shore_mask(enabled: bool) -> void:
@@ -550,7 +563,7 @@ func _restore_cached_state() -> void:
 
 	# Shore mask is common to all modes
 	if _cached_shore_mask:
-		set_shore_mask(_cached_shore_mask, _cached_shore_bounds)
+		set_shore_mask(_cached_shore_mask, _cached_shore_bounds, _cached_shore_fade_distance)
 
 	if _cached_wave_scale != 1.0:
 		set_wave_scale(_cached_wave_scale)

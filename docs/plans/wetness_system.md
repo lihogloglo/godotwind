@@ -1,7 +1,9 @@
 # Wetness System - Screen-Space Contact + Retained Memory
 
-**Status:** Phase 1 implementation landed 2026-05-09. This supersedes the older
-"submersion + terrain wet map" plan.
+**Status:** Phase 1 implementation landed 2026-05-09. Object-first retained
+wetness was re-enabled 2026-05-14. This supersedes the older "submersion +
+terrain wet map" plan and `docs/plans/shore_overhaul.md` Phase 3 wet-map
+guidance.
 
 **Industry basis:** Sebastien Lagarde, *Water drop 3a/3b - Physically based wet
 surfaces* (2013). Wet surfaces darken porous diffuse response and become
@@ -14,11 +16,15 @@ material shader hooks.
 ## 1. Model
 
 Wetness means an **exposed surface with a water film**, not any surface below
-the water. Submerged terrain, rocks, and building parts are handled by the
-waterline/underwater optics path: absorption, refraction, fog, Snell window,
-rays, wobble, and caustics.
+the water. Submerged terrain, rocks, and building parts are handled by ocean
+surface and underwater optics instead of the wetness system. Current accepted
+underwater ownership is `UnderwaterCompositorEffect` for absorption and bounded
+wobble; Snell window, rays, compositor caustics, and receiver refraction are
+not accepted production paths unless promoted by a future plan. See
+`docs/systems/ocean/architecture.md`.
 
-Phase 1 has two paths:
+Phase 1 has two paths, with retained object wetness currently the active
+object-first integration path:
 
 - **Live contact:** `WetCompositorEffect` reconstructs visible world position
   from depth, compares it against `WaterSurfaceState`, skips submerged pixels,
@@ -42,17 +48,24 @@ work. Do not add those by extending the terrain shore/runup model.
   `wet_dry_rate=0.1`.
 - Pulls `OceanManager.get_water_surface_state()` on the main thread and pushes
   render-thread-safe values into registered compositor effects.
-- Updates retained-memory holders with CPU water samples at center and four XZ
-  offsets.
+- Updates retained-memory holders from current world-space object bounds, using
+  CPU water samples at center and XZ offsets.
+- `set_enabled()` controls retained object wetness. It does not imply the
+  fullscreen live compositor.
+- `set_live_compositor_enabled()` controls the terrain/world live-contact
+  compositor and defaults off for the object-first pass.
 
 Public API:
 
 ```gdscript
 func set_enabled(enabled: bool) -> void
+func set_live_compositor_enabled(enabled: bool) -> void
+func is_live_compositor_enabled() -> bool
 func set_debug_mask(enabled: bool) -> void
 func register_compositor(effect: PostProcessEffect) -> void
 func unregister_compositor(effect: PostProcessEffect) -> void
 func register_memory_holder(root: Node3D, material_rids: Array[RID], bottom_local_y: float, sample_radius: float) -> void
+func register_wettable_object(root: Node3D, material_rids: Array[RID], local_bounds: AABB, sample_radius: float) -> void
 func unregister_memory_holder(root: Node3D) -> void
 ```
 
@@ -119,6 +132,12 @@ The compositor must not become a terrain-only shore/runup model. It never uses
 - Retained wetness applies Lagarde-style material response from `wet_line_y`.
 - The old dynamic water shader path is a fallback for explicit non-compositor
   uses only.
+- `WettableObject` is the preferred opt-in component for movable objects. It
+  adapts safe opaque `StandardMaterial3D` surfaces to `object_wet.gdshader`,
+  registers them with `WetnessManager`, and leaves custom/transparent materials
+  alone.
+- Main carryable creation adds `WettableObject` to carryable rigid bodies only;
+  static architecture and clutter are not broadly material-replaced.
 
 This avoids double darkening/gloss where both the screen-space compositor and
 the material shader see the same water contact.

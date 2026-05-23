@@ -7,6 +7,7 @@ class_name WetnessManagerClass
 extends Node
 
 const SETTING_ENABLED := "wetness/enabled"
+const SETTING_LIVE_COMPOSITOR_ENABLED := "wetness/live_compositor_enabled"
 const SETTING_DEBUG_MASK := "wetness/debug_mask"
 const SETTING_WET_MARGIN := "wetness/wet_margin"
 const SETTING_ALBEDO_DARKEN := "wetness/albedo_darken"
@@ -22,6 +23,7 @@ const SETTING_DRY_RATE := "wetness/dry_rate"
 @export var submerged_optics_depth: float = 0.10
 
 var _enabled: bool = false
+var _live_compositor_enabled: bool = false
 var _debug_mask: bool = false
 var _compositors: Array[PostProcessEffect] = []
 var _memory_holders: Dictionary = {}
@@ -32,26 +34,54 @@ var _missing_shader_effect_logged: bool = false
 class MemoryHolder:
 	var root: Node3D
 	var material_rids: Array[RID]
-	var bottom_local_y: float
+	var local_bounds: AABB
 	var sample_radius: float
-	var wet_line_local: float
+	var wet_height_above_bottom: float
 
 	func _init(
 		p_root: Node3D,
 		p_material_rids: Array[RID],
-		p_bottom_local_y: float,
+		p_local_bounds: AABB,
 		p_sample_radius: float
 	) -> void:
 		root = p_root
 		material_rids = p_material_rids.duplicate()
-		bottom_local_y = p_bottom_local_y
+		local_bounds = p_local_bounds
 		sample_radius = maxf(p_sample_radius, 0.0)
-		wet_line_local = bottom_local_y - 1.0
+		wet_height_above_bottom = -1.0
+
+	func get_bottom_world_y() -> float:
+		var min_y := INF
+		var pos := local_bounds.position
+		var end := local_bounds.end
+		var xf := _current_root_transform()
+		var corners: Array[Vector3] = [
+			Vector3(pos.x, pos.y, pos.z),
+			Vector3(end.x, pos.y, pos.z),
+			Vector3(pos.x, end.y, pos.z),
+			Vector3(end.x, end.y, pos.z),
+			Vector3(pos.x, pos.y, end.z),
+			Vector3(end.x, pos.y, end.z),
+			Vector3(pos.x, end.y, end.z),
+			Vector3(end.x, end.y, end.z),
+		]
+		for corner: Vector3 in corners:
+			min_y = minf(min_y, (xf * corner).y)
+		return min_y
+
+	func get_wet_line_world_y() -> float:
+		return get_bottom_world_y() + wet_height_above_bottom
+
+	func _current_root_transform() -> Transform3D:
+		if root.is_inside_tree():
+			return root.global_transform
+		return Transform3D(root.transform.basis, root.position)
 
 
 func _ready() -> void:
 	_register_project_settings()
 	_enabled = bool(ProjectSettings.get_setting(SETTING_ENABLED, false))
+	_live_compositor_enabled = bool(ProjectSettings.get_setting(SETTING_LIVE_COMPOSITOR_ENABLED, false))
 	_debug_mask = bool(ProjectSettings.get_setting(SETTING_DEBUG_MASK, false))
 	wet_margin = float(ProjectSettings.get_setting(SETTING_WET_MARGIN, wet_margin))
 	wet_albedo_darken = float(ProjectSettings.get_setting(SETTING_ALBEDO_DARKEN, wet_albedo_darken))
@@ -62,7 +92,8 @@ func _ready() -> void:
 
 
 func _register_project_settings() -> void:
-	_register_setting(SETTING_ENABLED, false, TYPE_BOOL, 0, "Enable shared screen-space wetness")
+	_register_setting(SETTING_ENABLED, false, TYPE_BOOL, 0, "Enable retained object wetness")
+	_register_setting(SETTING_LIVE_COMPOSITOR_ENABLED, false, TYPE_BOOL, 0, "Enable shared screen-space wetness compositor")
 	_register_setting(SETTING_DEBUG_MASK, false, TYPE_BOOL, 0, "Show the wetness compositor mask")
 	_register_setting(SETTING_WET_MARGIN, 0.3, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0.0,2.0,0.01")
 	_register_setting(SETTING_ALBEDO_DARKEN, 0.6, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0.0,1.0,0.01")
@@ -96,11 +127,20 @@ func _register_setting(
 func set_enabled(enabled: bool) -> void:
 	_enabled = enabled
 	ProjectSettings.set_setting(SETTING_ENABLED, enabled)
-	_sync_shader_manager_effect()
 
 
 func is_enabled() -> bool:
 	return _enabled
+
+
+func set_live_compositor_enabled(enabled: bool) -> void:
+	_live_compositor_enabled = enabled
+	ProjectSettings.set_setting(SETTING_LIVE_COMPOSITOR_ENABLED, enabled)
+	_sync_shader_manager_effect()
+
+
+func is_live_compositor_enabled() -> bool:
+	return _live_compositor_enabled
 
 
 func set_debug_mask(enabled: bool) -> void:
@@ -127,12 +167,28 @@ func register_memory_holder(
 	bottom_local_y: float,
 	sample_radius: float
 ) -> void:
+	var radius: float = maxf(sample_radius, 0.01)
+	var local_bounds := AABB(
+		Vector3(-radius, bottom_local_y, -radius),
+		Vector3(radius * 2.0, radius, radius * 2.0)
+	)
+	register_wettable_object(root, material_rids, local_bounds, sample_radius)
+
+
+func register_wettable_object(
+	root: Node3D,
+	material_rids: Array[RID],
+	local_bounds: AABB,
+	sample_radius: float
+) -> void:
 	if root == null:
 		return
+	if not local_bounds.has_volume():
+		local_bounds = AABB(Vector3(-0.1, -0.1, -0.1), Vector3(0.2, 0.2, 0.2))
 	_memory_holders[root.get_instance_id()] = MemoryHolder.new(
 		root,
 		material_rids,
-		bottom_local_y,
+		local_bounds,
 		sample_radius
 	)
 
@@ -149,7 +205,7 @@ func get_memory_holder_wet_line(root: Node3D) -> float:
 	var holder: MemoryHolder = _memory_holders.get(root.get_instance_id())
 	if holder == null:
 		return -INF
-	return holder.root.global_position.y + holder.wet_line_local
+	return holder.get_wet_line_world_y()
 
 
 func _process(delta: float) -> void:
@@ -160,12 +216,12 @@ func _process(delta: float) -> void:
 		if effect == null or not is_instance_valid(effect):
 			_compositors.erase(effect)
 			continue
-		effect.effect_enabled = _enabled and active_water
+		effect.effect_enabled = _live_compositor_enabled and active_water
 		effect.blend_factor = 1.0 if effect.effect_enabled else 0.0
 		_push_params_to_effect(effect)
 		if effect.effect_enabled and effect.has_method("sync_from_water_state"):
 			effect.call("sync_from_water_state", state)
-	if _enabled and active_water:
+	if _enabled:
 		_update_memory_holders(delta, state)
 
 
@@ -179,9 +235,9 @@ func _sync_shader_manager_effect() -> void:
 	if effect is PostProcessEffect:
 		register_compositor(effect)
 		_shader_manager_effect_registered = true
-		if _enabled and shader_manager.has_method("is_effect_enabled") and not bool(shader_manager.call("is_effect_enabled", "wet_compositor")):
+		if _live_compositor_enabled and shader_manager.has_method("is_effect_enabled") and not bool(shader_manager.call("is_effect_enabled", "wet_compositor")):
 			shader_manager.call("enable_effect", "wet_compositor", 0.0)
-		elif not _enabled and shader_manager.has_method("is_effect_enabled") and bool(shader_manager.call("is_effect_enabled", "wet_compositor")):
+		elif not _live_compositor_enabled and shader_manager.has_method("is_effect_enabled") and bool(shader_manager.call("is_effect_enabled", "wet_compositor")):
 			shader_manager.call("disable_effect", "wet_compositor", 0.0)
 	elif not _missing_shader_effect_logged:
 		_missing_shader_effect_logged = true
@@ -229,32 +285,65 @@ func _update_memory_holders(delta: float, state: WaterSurfaceState) -> void:
 			erase_ids.append(instance_id)
 			continue
 
-		var root_y: float = holder.root.global_position.y
-		var bottom_world: float = root_y + holder.bottom_local_y
+		var bottom_world: float = holder.get_bottom_world_y()
 		var water_y: float = _sample_contact_water_y(state, holder.root, bottom_world, holder.sample_radius)
 		if water_y > -INF:
-			holder.wet_line_local = maxf(holder.wet_line_local, water_y - root_y)
+			holder.wet_height_above_bottom = maxf(holder.wet_height_above_bottom, water_y - bottom_world)
 		else:
-			holder.wet_line_local -= wet_dry_rate * delta
-			holder.wet_line_local = maxf(holder.wet_line_local, holder.bottom_local_y - 1.0)
+			holder.wet_height_above_bottom -= wet_dry_rate * delta
+			holder.wet_height_above_bottom = maxf(holder.wet_height_above_bottom, -1.0)
 
-		var wet_line_world := root_y + holder.wet_line_local
+		var wet_line_world := holder.get_wet_line_world_y()
 		for mat_rid: RID in holder.material_rids:
 			if not mat_rid.is_valid():
 				continue
-			RenderingServer.material_set_param(mat_rid, &"wet_line_y", wet_line_world)
-			RenderingServer.material_set_param(mat_rid, &"wet_margin", wet_margin)
-			RenderingServer.material_set_param(mat_rid, &"wet_albedo_darken", wet_albedo_darken)
-			RenderingServer.material_set_param(mat_rid, &"wet_roughness_target", wet_roughness_target)
-			RenderingServer.material_set_param(mat_rid, &"retained_wetness_strength", retained_wetness_strength)
-			RenderingServer.material_set_param(mat_rid, &"wet_debug", _debug_mask)
+			_push_material_params(mat_rid, wet_line_world, state)
 
 	for instance_id: int in erase_ids:
 		_memory_holders.erase(instance_id)
 
 
+func _push_material_params(mat_rid: RID, wet_line_world: float, state: WaterSurfaceState) -> void:
+	RenderingServer.material_set_param(mat_rid, &"wet_line_y", wet_line_world)
+	RenderingServer.material_set_param(mat_rid, &"wet_margin", wet_margin)
+	RenderingServer.material_set_param(mat_rid, &"wet_albedo_darken", wet_albedo_darken)
+	RenderingServer.material_set_param(mat_rid, &"wet_roughness_target", wet_roughness_target)
+	RenderingServer.material_set_param(mat_rid, &"retained_wetness_strength", retained_wetness_strength)
+	RenderingServer.material_set_param(mat_rid, &"wet_debug", _debug_mask)
+	RenderingServer.material_set_param(mat_rid, &"live_contact_from_compositor", false)
+
+	var active_water := _is_active_water_state(state)
+	RenderingServer.material_set_param(mat_rid, &"dynamic_water_enabled", active_water)
+	if not active_water:
+		return
+
+	RenderingServer.material_set_param(mat_rid, &"dynamic_water_use_fft", state.has_fft())
+	RenderingServer.material_set_param(mat_rid, &"dynamic_water_has_shore_mask", state.shore_mask_texture != null)
+	RenderingServer.material_set_param(mat_rid, &"camera_world_position", _get_camera_world_position())
+	RenderingServer.material_set_param(mat_rid, &"sea_level", state.sea_level)
+	RenderingServer.material_set_param(mat_rid, &"wave_scale", state.wave_scale)
+	RenderingServer.material_set_param(mat_rid, &"ocean_time", state.ocean_time)
+	RenderingServer.material_set_param(mat_rid, &"map_scales", state.map_scales)
+	RenderingServer.material_set_param(mat_rid, &"shore_mask_bounds", state.shore_mask_bounds)
+	RenderingServer.material_set_param(mat_rid, &"shore_fade_distance", state.shore_fade_distance)
+	RenderingServer.material_set_param(mat_rid, &"shore_wave_amplitude", state.shore_wave_amplitude)
+	RenderingServer.material_set_param(mat_rid, &"shore_wave_frequency", state.shore_wave_frequency)
+	RenderingServer.material_set_param(mat_rid, &"shore_wave_speed", state.shore_wave_speed)
+	RenderingServer.material_set_param(mat_rid, &"shore_wave_steepness", state.shore_wave_steepness)
+	if state.shore_mask_texture != null:
+		RenderingServer.material_set_param(mat_rid, &"shore_mask", state.shore_mask_texture.get_rid())
+
+
+func _get_camera_world_position() -> Vector3:
+	if is_inside_tree():
+		var camera := get_viewport().get_camera_3d()
+		if camera != null:
+			return camera.global_position
+	return Vector3.ZERO
+
+
 func _sample_contact_water_y(state: WaterSurfaceState, root: Node3D, bottom_world_y: float, radius: float) -> float:
-	if state == null or root == null or not state.can_sample_height():
+	if not _is_active_water_state(state) or root == null or not state.can_sample_height():
 		return -INF
 
 	var max_y: float = -INF
@@ -276,6 +365,8 @@ func _sample_contact_water_y(state: WaterSurfaceState, root: Node3D, bottom_worl
 	]
 	for offset: Vector3 in offsets:
 		var sample_pos: Vector3 = center + offset
+		if state.can_sample_coverage() and state.sample_body_gate(sample_pos, 0.0) <= 0.01:
+			continue
 		var depth: float = state.sample_water_depth(sample_pos, -INF)
 		if depth > 0.0:
 			max_y = maxf(max_y, state.sample_height(sample_pos, state.sea_level))

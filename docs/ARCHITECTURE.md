@@ -18,8 +18,23 @@ Systems overview derived from the actual codebase.
 | SettingsManager | `src/core/settings_manager.gd` | User settings, Morrowind path |
 | BSAManager | `src/core/bsa/bsa_manager.gd` | Archive access, 256MB LRU cache |
 | ESMManager | `src/core/esm/esm_manager.gd` | ESM parsing, grid-indexed cell lookup |
-| OceanManager | `src/core/water/ocean_manager.gd` | Water system (not integrated yet) |
+| OceanManager | `src/core/water/ocean_manager.gd` | Water runtime, surface mesh, shore mask, buoyancy, and shared `WaterSurfaceState`; production integration status is tracked in `docs/systems/ocean/architecture.md` |
 | ShaderManager | `src/core/shaders/shader_manager.gd` | Shader hot-swap |
+
+## Source Boundary
+
+Godotwind's framework contracts are source-first, not Morrowind-first. Generic
+streaming/rendering code is expected to consume `WorldSource`,
+`WorldCoordinateMapper`, `WorldObjectSource`, `WorldObjectRecord`,
+`WorldObjectSpawnAdapter`, `WorldDataProvider`, and `WorldAssetProvider`.
+Morrowind ESM/ESP/BSA/NIF parsing, coordinate conversion, texture/material
+translation, dialogue condition semantics, and skeleton quirks belong in
+parser/importer folders or `src/core/**/morrowind/**` adapter folders.
+
+Current status: the streaming boot path, model loading, preloading, HLOD/FAR
+object discovery, distant-light records, `CellPayload`, and static collision
+payloads are provider-fed. Remaining migration work is tracked in
+`docs/audit/morrowind_framework_boundary_mega_audit_2026_05_21.md`.
 
 ## Core Systems (`src/core/`)
 
@@ -31,7 +46,7 @@ Systems overview derived from the actual codebase.
 | `bsa/` | BSA archive extraction |
 | `character/` | NPC assembly (Morrowind body parts, humanoid GLB), controller |
 | `animation/` | Animation loading, state machine, IK (TwoBoneIK3D), retargeting |
-| `water/` | Ocean mesh, FFT waves, flat fallback, buoyancy, shore mask |
+| `water/` | Ocean mesh, FFT waves, flat fallback, buoyancy, shore mask, receiver-waterline diagnostics, and wetness coordination |
 | `console/` | Developer console, command registry, object picking |
 | `deformation/` | RTT-based terrain deformation |
 | `texture/` | DDS/TGA loading, material dedup (hash includes 7 texture slots, apply mode, ZBuffer, specular color) |
@@ -77,9 +92,11 @@ See `docs/systems/distance_rendering.md` (and `docs/archive/plans/lod_refactor_b
 
 ## Coordinate System
 
-Morrowind is Z-up, Godot is Y-up: `Vector3(mw.x, mw.z, -mw.y)`.
-1 ESM unit = 1/128 meter. Cell size = 8192 units = ~64m rendered as 117m.
-See `src/core/coordinate_system.gd`.
+Framework code should ask the active `WorldCoordinateMapper` for grid and cell
+metrics. The current Morrowind adapter maps Z-up source data into Godot Y-up
+coordinates via `src/core/world/morrowind/morrowind_coordinate_mapper.gd`. The
+older `src/core/coordinate_system.gd` helper is still present and is one of the
+remaining boundary-cleanup targets.
 
 ## Scenes
 

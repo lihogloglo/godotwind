@@ -10,6 +10,7 @@ extends GdUnitTestSuite
 
 const SOR := preload("res://src/core/world/static_object_renderer.gd")
 const RI := preload("res://src/core/world/reference_instantiator.gd")
+const DU := preload("res://src/core/world/distance_utils.gd")
 
 
 class FakeModelLoader:
@@ -284,15 +285,15 @@ func test_hlod_covered_bucket_caps_mid_range() -> void:
 	)
 	assert_that(bucket).is_not_null()
 
-	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\covered.nif": 1}, 300.0)
+	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\covered.nif": 1}, DU.HLOD_START)
 	var stats := renderer.get_stats()
-	assert_float(float(bucket.get("visibility_range_end"))).is_equal(300.0)
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.HLOD_START)
 	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(1)
 	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(1)
 
-	renderer.set_hlod_covered_bucket_counts({}, 300.0)
+	renderer.set_hlod_covered_bucket_counts({}, DU.HLOD_START)
 	stats = renderer.get_stats()
-	assert_float(float(bucket.get("visibility_range_end"))).is_equal(300.0)
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.HLOD_START)
 	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
 	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(0)
 
@@ -341,9 +342,9 @@ func test_partial_hlod_bucket_coverage_keeps_mid_fallback() -> void:
 	)
 	assert_that(bucket).is_not_null()
 
-	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\partial.nif": 1}, 300.0)
+	renderer.set_hlod_covered_bucket_counts({"0,0:meshes\\partial.nif": 1}, DU.HLOD_START)
 	var stats := renderer.get_stats()
-	assert_float(float(bucket.get("visibility_range_end"))).is_equal(300.0)
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.HLOD_START)
 	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
 
 

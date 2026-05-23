@@ -15,7 +15,7 @@ Current state of Godotwind's OpenMW-to-Godot shader port infrastructure. For the
 
 **Not ported:**
 - **VAIO point-light glow pass** (`RT_Lights`) — requires a light-collection system feeding a UBO. Partial scaffolding exists in `light_glow_effect.gd` / `light_glow.glsl`, not wired.
-- **DIVE underwater effects** — caustics, underwater light shafts, backscattering, phytoplankton. This page no longer describes current ocean/underwater ownership; use `docs/systems/ocean_optics_current_architecture.md` and `docs/systems/godot_water_shader_bible.md` for the active Godotwind water path.
+- **DIVE underwater effects** — caustics, underwater light shafts, backscattering, phytoplankton. This page no longer describes current ocean/underwater ownership; use `docs/systems/ocean/architecture.md` and `docs/systems/ocean/godot_4_6_water_rendering_rules.md` for the active Godotwind water path.
 - **wetworld, HBAO, tonemap, SMAA, SMB** — lower priority; Godot has native equivalents for most.
 
 ---

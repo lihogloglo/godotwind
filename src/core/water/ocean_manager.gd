@@ -290,6 +290,8 @@ func _load_shore_mask() -> void:
 func _process(delta: float) -> void:
 	if not _system_enabled or not _enabled:
 		return
+	if _ocean_mesh == null:
+		return
 
 	_time = Time.get_ticks_msec() / 1000.0
 	_push_ocean_time_uniform()
@@ -615,8 +617,13 @@ func _shutdown_fft_pipeline() -> void:
 	if _wave_generator:
 		if _ocean_spray:
 			_ocean_spray.set_fft_available(false)
+		RenderingServer.global_shader_parameter_set(&"num_cascades", 0)
+		RenderingServer.global_shader_parameter_set(&"displacements", null)
+		RenderingServer.global_shader_parameter_set(&"normals", null)
 		_displacement_maps.texture_rd_rid = RID()
 		_normal_maps.texture_rd_rid = RID()
+		if _wave_generator.has_method("shutdown"):
+			_wave_generator.call("shutdown")
 		_wave_generator.queue_free()
 		_wave_generator = null
 		_cascade_parameters.clear()
@@ -1507,6 +1514,9 @@ func force_initialize() -> void:
 
 
 func release_runtime_resources() -> void:
+	_system_enabled = false
+	_enabled = false
+	set_process(false)
 	_dispose_spray_layer()
 	_dispose_underwater_particulates_layer()
 	_shutdown_fft_pipeline()
@@ -1524,6 +1534,8 @@ func _dispose_ocean_mesh() -> void:
 	if old_mesh == null:
 		return
 	old_mesh.visible = false
+	if old_mesh.has_method("clear_runtime_textures"):
+		old_mesh.call("clear_runtime_textures")
 	if old_mesh.get_parent() == self:
 		remove_child(old_mesh)
 	old_mesh.queue_free()

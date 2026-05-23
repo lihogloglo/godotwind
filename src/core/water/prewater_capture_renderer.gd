@@ -22,15 +22,20 @@ const DEFAULT_CAPTURE_FADE_START_M := 80.0
 const DEFAULT_CAPTURE_FADE_END_M := 140.0
 
 var receiver_layer_mask: int = 1
+var occlusion_exclusion_layer_mask: int = 0
 var near_water_capture_distance_m: float = DEFAULT_CAPTURE_FADE_END_M
 var near_water_capture_fade_start_m: float = DEFAULT_CAPTURE_FADE_START_M
 
 var _source_camera: Camera3D = null
 var _source_environment: Environment = null
 var _viewport: SubViewport = null
+var _occlusion_viewport: SubViewport = null
 var _capture_camera: Camera3D = null
+var _occlusion_camera: Camera3D = null
 var _compositor: Compositor = null
+var _occlusion_compositor: Compositor = null
 var _capture_effect: PrewaterCaptureEffect = null
+var _occlusion_effect: PrewaterCaptureEffect = null
 var _resolution_scale: float = 0.5
 var _capture_enabled: bool = false
 var _blend_factor: float = 0.0
@@ -44,15 +49,49 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	shutdown()
+
+
+func shutdown() -> void:
+	_capture_enabled = false
+	_blend_factor = 0.0
+	_capture_active = false
+	_activation_fade = 0.0
+	if _viewport != null:
+		_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	if _occlusion_viewport != null:
+		_occlusion_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	if _capture_camera != null:
+		_capture_camera.compositor = null
+	if _occlusion_camera != null:
+		_occlusion_camera.compositor = null
+	if _compositor != null:
+		_compositor.compositor_effects = []
+	if _occlusion_compositor != null:
+		_occlusion_compositor.compositor_effects = []
 	if _capture_effect != null:
 		_capture_effect.on_effect_removed()
+	if _occlusion_effect != null:
+		_occlusion_effect.on_effect_removed()
+	if _viewport != null:
+		_viewport.queue_free()
+	if _occlusion_viewport != null:
+		_occlusion_viewport.queue_free()
+	_capture_camera = null
+	_occlusion_camera = null
+	_viewport = null
+	_occlusion_viewport = null
 	_capture_effect = null
+	_occlusion_effect = null
+	_compositor = null
+	_occlusion_compositor = null
 
 
-func configure(camera: Camera3D, environment: Environment, layer_mask: int) -> void:
+func configure(camera: Camera3D, environment: Environment, layer_mask: int, p_occlusion_exclusion_layer_mask: int = 0) -> void:
 	_source_camera = camera
 	_source_environment = environment
 	receiver_layer_mask = layer_mask
+	occlusion_exclusion_layer_mask = p_occlusion_exclusion_layer_mask
 	_ensure_nodes()
 	_sync_camera()
 
@@ -108,6 +147,10 @@ func has_capture() -> bool:
 	return _capture_active and _capture_effect != null and _capture_effect.has_capture()
 
 
+func has_occlusion_capture() -> bool:
+	return _capture_active and _occlusion_effect != null and _occlusion_effect.has_capture()
+
+
 func get_source_color_rid() -> RID:
 	if _capture_effect == null:
 		return RID()
@@ -126,6 +169,36 @@ func get_source_size() -> Vector2i:
 	return _capture_effect.get_source_size()
 
 
+func get_source_texture() -> Texture2D:
+	if _viewport == null:
+		return null
+	return _viewport.get_texture()
+
+
+func get_capture_process_frame() -> int:
+	if _capture_effect == null or not _capture_effect.has_method("get_capture_process_frame"):
+		return -1
+	return int(_capture_effect.call("get_capture_process_frame"))
+
+
+func get_occlusion_depth_rid() -> RID:
+	if _occlusion_effect == null:
+		return RID()
+	return _occlusion_effect.get_source_depth_rid()
+
+
+func get_occlusion_size() -> Vector2i:
+	if _occlusion_effect == null:
+		return Vector2i.ZERO
+	return _occlusion_effect.get_source_size()
+
+
+func get_occlusion_process_frame() -> int:
+	if _occlusion_effect == null or not _occlusion_effect.has_method("get_capture_process_frame"):
+		return -1
+	return int(_occlusion_effect.call("get_capture_process_frame"))
+
+
 func get_perf_snapshot() -> Dictionary:
 	if _capture_effect == null or not _capture_effect.has_method("get_capture_perf_snapshot"):
 		return {}
@@ -135,6 +208,12 @@ func get_perf_snapshot() -> Dictionary:
 		result["capture_active"] = _capture_active
 		result["resolution_scale"] = _resolution_scale
 		result["activation_fade"] = _activation_fade
+		result["current_process_frame"] = Engine.get_process_frames()
+		result["capture_frame_age"] = Engine.get_process_frames() - get_capture_process_frame() if get_capture_process_frame() >= 0 else -1
+		result["has_occlusion_capture"] = has_occlusion_capture()
+		result["occlusion_size"] = get_occlusion_size()
+		result["occlusion_process_frame"] = get_occlusion_process_frame()
+		result["occlusion_frame_age"] = Engine.get_process_frames() - get_occlusion_process_frame() if get_occlusion_process_frame() >= 0 else -1
 		return result
 	return {}
 
@@ -145,6 +224,8 @@ func push_to_waterline_effect(effect: Object) -> bool:
 	if not has_capture():
 		if effect.has_method("clear_external_source_buffers"):
 			effect.call("clear_external_source_buffers")
+		if effect.has_method("clear_external_occlusion_depth_buffer"):
+			effect.call("clear_external_occlusion_depth_buffer")
 		return false
 	if not effect.has_method("set_external_source_buffers"):
 		return false
@@ -152,8 +233,18 @@ func push_to_waterline_effect(effect: Object) -> bool:
 		"set_external_source_buffers",
 		get_source_color_rid(),
 		get_source_depth_rid(),
-		get_source_size()
+		get_source_size(),
+		get_capture_process_frame()
 	)
+	if effect.has_method("set_external_occlusion_depth_buffer") and has_occlusion_capture():
+		effect.call(
+			"set_external_occlusion_depth_buffer",
+			get_occlusion_depth_rid(),
+			get_occlusion_size(),
+			get_occlusion_process_frame()
+		)
+	elif effect.has_method("clear_external_occlusion_depth_buffer"):
+		effect.call("clear_external_occlusion_depth_buffer")
 	return true
 
 
@@ -170,15 +261,37 @@ func _ensure_nodes() -> void:
 		_viewport.handle_input_locally = false
 		add_child(_viewport)
 
+	if _occlusion_viewport == null:
+		_occlusion_viewport = SubViewport.new()
+		_occlusion_viewport.name = "PrewaterOcclusionViewport"
+		_occlusion_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		_occlusion_viewport.transparent_bg = false
+		_occlusion_viewport.msaa_3d = Viewport.MSAA_DISABLED
+		_occlusion_viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+		_occlusion_viewport.use_taa = false
+		_occlusion_viewport.own_world_3d = false
+		_occlusion_viewport.handle_input_locally = false
+		add_child(_occlusion_viewport)
+
 	if _capture_effect == null:
 		_capture_effect = PrewaterCaptureScript.new()
 		_capture_effect.effect_enabled = false
 		_capture_effect.blend_factor = 0.0
 		_capture_effect.on_effect_added()
 
+	if _occlusion_effect == null:
+		_occlusion_effect = PrewaterCaptureScript.new()
+		_occlusion_effect.effect_enabled = false
+		_occlusion_effect.blend_factor = 0.0
+		_occlusion_effect.on_effect_added()
+
 	if _compositor == null:
 		_compositor = Compositor.new()
 		_compositor.compositor_effects = [_capture_effect]
+
+	if _occlusion_compositor == null:
+		_occlusion_compositor = Compositor.new()
+		_occlusion_compositor.compositor_effects = [_occlusion_effect]
 
 	if _capture_camera == null:
 		_capture_camera = Camera3D.new()
@@ -187,6 +300,14 @@ func _ensure_nodes() -> void:
 		_capture_camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 		_capture_camera.compositor = _compositor
 		_viewport.add_child(_capture_camera)
+
+	if _occlusion_camera == null:
+		_occlusion_camera = Camera3D.new()
+		_occlusion_camera.name = "PrewaterOcclusionCamera"
+		_occlusion_camera.current = true
+		_occlusion_camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		_occlusion_camera.compositor = _occlusion_compositor
+		_occlusion_viewport.add_child(_occlusion_camera)
 
 	_apply_active_state()
 
@@ -205,8 +326,13 @@ func _apply_active_state() -> void:
 	if _capture_effect != null:
 		_capture_effect.effect_enabled = _capture_active
 		_capture_effect.blend_factor = _blend_factor * _activation_fade if _capture_active else 0.0
+	if _occlusion_effect != null:
+		_occlusion_effect.effect_enabled = _capture_active
+		_occlusion_effect.blend_factor = _blend_factor * _activation_fade if _capture_active else 0.0
 	if _viewport != null:
 		_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _capture_active else SubViewport.UPDATE_DISABLED
+	if _occlusion_viewport != null:
+		_occlusion_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _capture_active else SubViewport.UPDATE_DISABLED
 
 
 func _compute_near_water_fade(camera_delta: float) -> float:
@@ -232,16 +358,25 @@ func _sync_viewport_size(main_size: Vector2i) -> void:
 	)
 	if _viewport.size != scaled:
 		_viewport.size = scaled
+	if _occlusion_viewport != null and _occlusion_viewport.size != scaled:
+		_occlusion_viewport.size = scaled
 
 
 func _sync_camera() -> void:
-	if _source_camera == null or _capture_camera == null or not is_instance_valid(_source_camera):
+	if _source_camera == null or not is_instance_valid(_source_camera):
 		return
-	_capture_camera.global_transform = _source_camera.global_transform
-	_capture_camera.projection = _source_camera.projection
-	_capture_camera.fov = _source_camera.fov
-	_capture_camera.size = _source_camera.size
-	_capture_camera.near = _source_camera.near
-	_capture_camera.far = _source_camera.far
-	_capture_camera.cull_mask = receiver_layer_mask
-	_capture_camera.environment = _source_environment
+	_sync_camera_to(_capture_camera, receiver_layer_mask)
+	_sync_camera_to(_occlusion_camera, _source_camera.cull_mask & ~occlusion_exclusion_layer_mask)
+
+
+func _sync_camera_to(target_camera: Camera3D, cull_mask: int) -> void:
+	if target_camera == null:
+		return
+	target_camera.global_transform = _source_camera.global_transform
+	target_camera.projection = _source_camera.projection
+	target_camera.fov = _source_camera.fov
+	target_camera.size = _source_camera.size
+	target_camera.near = _source_camera.near
+	target_camera.far = _source_camera.far
+	target_camera.cull_mask = cull_mask
+	target_camera.environment = _source_environment

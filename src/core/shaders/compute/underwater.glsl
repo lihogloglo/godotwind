@@ -6,18 +6,27 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(rgba16f, set = 0, binding = 0) uniform image2D color_image;
 layout(set = 0, binding = 1) uniform sampler2D depth_tex;
 layout(set = 0, binding = 2) uniform sampler2D source_color_tex;
+layout(set = 0, binding = 4) uniform sampler2DArray displacement_tex;
+layout(set = 0, binding = 5) uniform sampler2D shore_mask_tex;
+
+#define MAX_CASCADES 8
 
 layout(std430, set = 0, binding = 3) readonly buffer UnderwaterState {
 	mat4 inv_projection;
 	mat4 inv_view;
+	vec4 map_scales[MAX_CASCADES];
+	vec4 shore_mask_bounds;
+	vec4 shore_params0; // x=fade, y=amp, z=freq, w=speed
+	vec4 shore_params1; // x=steep, yzw=reserved
 	vec4 water_tint; // rgb=medium asymptote
 } state;
 
 layout(push_constant, std430) uniform Params {
 	vec4 screen; // x=width, y=height, z=time, w=blend
-	vec4 water; // x=sea_level, y=max_path_m, z=reserved, w=wobble_strength
+	vec4 water; // x=sea_level, y=max_path_m, z=camera_water_level, w=wobble_strength
 	vec4 sigma_debug; // xyz=absorption sigma, w=debug mode
 	vec4 flags; // x=absorption, y=wobble, z=source_valid, w=reserved
+	vec4 surface; // x=wave_scale, y=cascade_count, z=surface_sample_enabled, w=reserved
 } pc;
 
 #define screen_w pc.screen.x
@@ -26,11 +35,17 @@ layout(push_constant, std430) uniform Params {
 #define blend_factor pc.screen.w
 #define sea_level pc.water.x
 #define max_path_m pc.water.y
+#define camera_water_level_cached pc.water.z
 #define wobble_strength pc.water.w
 #define debug_mode int(pc.sigma_debug.w + 0.5)
 #define absorption_enabled (pc.flags.x > 0.5)
 #define wobble_enabled (pc.flags.y > 0.5)
 #define source_valid (pc.flags.z > 0.5)
+#define wave_scale pc.surface.x
+#define cascade_count int(pc.surface.y)
+#define surface_sample_enabled (pc.surface.z > 0.5)
+
+#include "res://src/core/shaders/compute/water_surface_contract.glslinc"
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
@@ -49,21 +64,35 @@ vec3 get_world_ray(vec2 uv) {
 	return normalize((state.inv_view * vec4(view_dir, 0.0)).xyz);
 }
 
-float safe_surface_exit_distance(vec3 cam_pos, vec3 ray_dir) {
+float dynamic_water_level(vec2 world_xz, vec3 cam_pos) {
+	if (!surface_sample_enabled) {
+		return camera_water_level_cached;
+	}
+	return get_dynamic_water_level(world_xz, cam_pos, true, true);
+}
+
+float safe_surface_exit_distance(vec3 cam_pos, vec3 ray_dir, float camera_surface_level) {
 	if (ray_dir.y <= 0.015) {
 		return max_path_m;
 	}
-	return clamp((sea_level - cam_pos.y) / max(ray_dir.y, 0.015), 0.0, max_path_m);
+	float t = clamp((camera_surface_level - cam_pos.y) / max(ray_dir.y, 0.015), 0.0, max_path_m);
+	for (int i = 0; i < 4; i++) {
+		vec3 probe_pos = cam_pos + ray_dir * t;
+		float water_y = dynamic_water_level(probe_pos.xz, cam_pos);
+		t = clamp((water_y - cam_pos.y) / max(ray_dir.y, 0.015), 0.0, max_path_m);
+	}
+	return t;
 }
 
-float water_path_length(vec3 cam_pos, vec3 ray_dir, vec3 hit_pos, bool hit_valid) {
+float water_path_length(vec3 cam_pos, vec3 ray_dir, vec3 hit_pos, bool hit_valid, float camera_surface_level) {
 	if (!hit_valid) {
-		return safe_surface_exit_distance(cam_pos, ray_dir);
+		return safe_surface_exit_distance(cam_pos, ray_dir, camera_surface_level);
 	}
-	if (hit_pos.y <= sea_level + 0.03) {
+	float hit_water_level = dynamic_water_level(hit_pos.xz, cam_pos);
+	if (hit_pos.y <= hit_water_level + 0.03) {
 		return clamp(length(hit_pos - cam_pos), 0.0, max_path_m);
 	}
-	return safe_surface_exit_distance(cam_pos, ray_dir);
+	return safe_surface_exit_distance(cam_pos, ray_dir, camera_surface_level);
 }
 
 float wave_hash(vec2 p) {
@@ -99,7 +128,8 @@ float wobble_sample_guard(
 	vec3 base_pos = get_world_position(uv, base_depth);
 	vec3 shifted_pos = get_world_position(shifted_uv, shifted_depth);
 	vec3 shifted_ray = get_world_ray(shifted_uv);
-	shifted_path = water_path_length(cam_pos, shifted_ray, shifted_pos, true);
+	float shifted_camera_surface = dynamic_water_level(cam_pos.xz, cam_pos);
+	shifted_path = water_path_length(cam_pos, shifted_ray, shifted_pos, true, shifted_camera_surface);
 	float path_guard = 1.0 - smoothstep(max(1.0, base_path * 0.20), max(2.0, base_path * 0.45), abs(shifted_path - base_path));
 	float base_hit_dist = distance(base_pos, cam_pos);
 	float shifted_hit_dist = distance(shifted_pos, cam_pos);
@@ -121,7 +151,8 @@ void main() {
 	vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(screen_w, screen_h);
 	vec4 original = imageLoad(color_image, pixel);
 	vec3 cam_pos = state.inv_view[3].xyz;
-	bool camera_underwater = cam_pos.y < sea_level - 0.02;
+	float camera_surface_level = dynamic_water_level(cam_pos.xz, cam_pos);
+	bool camera_underwater = cam_pos.y < camera_surface_level - 0.02;
 	if (!camera_underwater && debug_mode == 0) {
 		return;
 	}
@@ -130,8 +161,9 @@ void main() {
 	bool hit_valid = depth > 0.0001;
 	vec3 ray_dir = get_world_ray(uv);
 	vec3 hit_pos = hit_valid ? get_world_position(uv, depth) : cam_pos + ray_dir * max_path_m;
-	float path_len = water_path_length(cam_pos, ray_dir, hit_pos, hit_valid);
-	bool underwater_hit = hit_valid && hit_pos.y <= sea_level + 0.03;
+	float path_len = water_path_length(cam_pos, ray_dir, hit_pos, hit_valid, camera_surface_level);
+	float hit_water_level = dynamic_water_level(hit_pos.xz, cam_pos);
+	bool underwater_hit = hit_valid && hit_pos.y <= hit_water_level + 0.03;
 
 	vec3 source = original.rgb;
 	vec2 shifted_uv = uv;

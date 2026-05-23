@@ -1,6 +1,6 @@
 # Lighting Roadmap
 
-> Open roadmap. None of the items here have shipped yet. Items pulled verbatim from the 2026-04-05 lighting audit. Update status inline when shipping.
+> Open roadmap. Items pulled from the 2026-04-05 lighting audit; update status inline when shipping. Boundary rule: core lighting systems consume generic light descriptors, and source-specific light flags are translated in source adapters.
 
 ---
 
@@ -42,12 +42,13 @@ omni.distance_fade_shadow = 60.0  # Disable shadow early, keep light visible lon
 ## Priority 2: Medium-Term Systems
 
 **Billboard Light MultiMesh (Distant Town Lights):**
-- New system: `src/core/world/distant_light_manager.gd`
-- MultiMesh of billboard quads at known ESM light positions
+- **Shipped foundation:** `src/core/world/distant_light_manager.gd`
+- MultiMesh of billboard quads at provider-supplied distant-light records
 - Additive blend, warm color, soft glow texture
 - Size scales with distance for constant screen-space size
 - Toggle based on time-of-day (sun elevation threshold)
 - One draw call for hundreds of "distant lights"
+- Morrowind light flags are translated in `src/core/world/morrowind/morrowind_world_object_source.gd`; core stores generic animation/fire metadata.
 - **This is the highest-impact visual feature for open-world night scenes**
 
 **Interior ReflectionProbes:**

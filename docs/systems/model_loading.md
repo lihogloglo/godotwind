@@ -18,7 +18,7 @@ Static collision is **not** per-prefab `CollisionShape3D`. Win 1 + Win 2 of the 
 
 Three-step pipeline in `cell_static_collision.gd`:
 
-1. `collect_classified_refs(grid, cell_record, use_static)` — MAIN thread. Filters refs via the static classifier, resolves shape-pack sidecars, packs into a `BuildPayload`.
+1. `collect_payload_static_entries(grid, payload, use_static)` — MAIN thread. Reads normalized static payload transforms, resolves shape-pack sidecars, packs into a `BuildPayload`.
 2. `worker_collect_triangles(payload)` — WORKER thread (WorkerThreadPool). Walks shapes, transforms to world space, packs into `payload.vertices`. Reads from a worker-safe shape cache.
 3. `finalize_body(payload, world_3d)` — MAIN thread. `set_faces` (BVH build) + `PhysicsServer3D.body_create` + space registration. Returns a `FinalizedBody` (body RID + strong-ref to the trimesh Shape3D so its internal RID stays alive).
 

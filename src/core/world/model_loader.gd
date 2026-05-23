@@ -1,22 +1,23 @@
-## ModelLoader - Handles NIF model loading and caching
+## ModelLoader - Handles source-neutral model loading and caching
 ##
 ## Extracted from CellManager for single responsibility.
-## Loads models from BSA archives, converts them to Godot scenes,
-## and caches them for reuse.
+## Loads provider/native PackedScenes or prebaked scene resources and caches
+## them for reuse.
 ##
 ## Supports TWO levels of caching:
 ## 1. Memory cache: Fast, per-session (lost on restart)
 ## 2. Disk cache: Persistent, saves converted models as .res files
 ##
 ## Disk caching dramatically improves loading times after first run:
-## - First run: 300ms-6s per complex model (NIF conversion)
+## - First run: provider conversion/import cost
 ## - Subsequent runs: 1-5ms per model (direct resource load)
 ##
 ## Usage:
 ##   var loader = ModelLoader.new()
+##   loader.set_asset_provider(source.get_asset_provider())
 ##   loader.enable_disk_cache = true  # Enable persistent caching
-##   var model = loader.get_model("meshes\\x\\ex_door.nif")
-##   var model_with_collision = loader.get_model("meshes\\x\\ex_door.nif", "ex_door_01")
+##   var model = loader.get_model("source/model/id")
+##   var model_with_collision = loader.get_model("source/model/id", "record_01")
 class_name ModelLoader
 extends RefCounted
 
@@ -145,13 +146,17 @@ func has_animation(model_path: String) -> bool:
 ## The mod registry for asset resolution
 var _mod_registry: ModRegistry = null
 
+## Source-specific asset provider. Generic ModelLoader owns cache lifetime and
+## Godot resource promotion; providers own source/archive/conversion rules.
+var _asset_provider: RefCounted = null
+
 ## Enable disk caching of converted models (saves as .res files)
 ## Set to true to persist converted models between game sessions
 var enable_disk_cache: bool = true
 
-## RUNTIME MODE: Only load from disk cache, never convert NIFs
-## When true (default for world explorer), models not in disk cache return null
-## When false (prebaking mode), missing models trigger NIF conversion
+## RUNTIME MODE: Only load provider/native resources and disk cache.
+## When true (default for world explorer), models not in disk cache return null.
+## When false (prebaking mode), missing models may ask the provider to convert.
 var runtime_mode: bool = true
 
 ## Directory for disk cache (set from SettingsManager on first use)
@@ -196,6 +201,7 @@ var _stats: Dictionary = {
 	"models_from_cache": 0,
 	"models_from_disk": 0,
 	"models_from_disk_async": 0,
+	"models_from_provider": 0,
 	"file_exists_cache_hits": 0,
 	"models_saved": 0,
 }
@@ -206,12 +212,13 @@ var _last_save_report_count: int = 0
 
 
 ## Get or load a model prototype
-## Returns cached model if available, loads and converts from BSA if not.
+## Returns cached model if available, loads provider/native resources or disk
+## cache next, and asks the injected provider for conversion only in prebake mode.
 ## With disk caching enabled, converted models are saved for instant loading next time.
 ##
 ## Parameters:
-##   model_path: Path to NIF model (e.g., "meshes\\x\\ex_door.nif")
-##   item_id: Optional ESM record ID for collision shape library lookup
+##   model_path: Source model id or resource path
+##   item_id: Optional source record ID for collision shape lookup
 ##
 ## Returns:
 ##   Node3D prototype (never modify, use duplicate()), or null if not found
@@ -234,7 +241,18 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 			_get_or_create_resource_handle(cache_key, cached as PackedScene)
 		return _instantiate_from_scene(cached as PackedScene)
 
-	# 2. Check disk cache if enabled (fast - direct resource load)
+	# 2. Ask the injected provider for a native PackedScene resource. This is
+	# the generic path for provider-native sources and already-imported assets.
+	var provider_scene := _get_provider_packed_scene(model_path, item_id)
+	if provider_scene != null:
+		_model_cache[cache_key] = provider_scene
+		_last_access[cache_key] = Engine.get_frames_drawn()
+		_get_or_create_resource_handle(cache_key, provider_scene)
+		_stats["models_from_provider"] += 1
+		_queue_eviction_if_over_budget()
+		return _instantiate_from_scene(provider_scene)
+
+	# 3. Check disk cache if enabled (fast - direct resource load)
 	if enable_disk_cache:
 		var disk_path := _get_disk_cache_path(cache_key)
 		if _cached_file_exists(disk_path):
@@ -247,52 +265,26 @@ func get_model(model_path: String, item_id: String = "") -> Node3D:
 				_queue_eviction_if_over_budget()
 				return _instantiate_from_scene(packed_scene)
 
-	# 3. RUNTIME MODE: Return null for uncached models (no NIF conversion at runtime)
-	# NIF conversion should ONLY happen during prebaking, never during gameplay
+	# 4. RUNTIME MODE: Return null for uncached models. Source-specific
+	# conversion should ONLY happen during prebaking, never during gameplay.
 	if runtime_mode:
 		# Cache null to avoid repeated disk checks
 		_model_cache[cache_key] = null
 		return null
 
-	# 4. PREBAKING MODE ONLY: Fall back to BSA extraction + NIF conversion
-	# This path is only used by prebaking tools, never during world exploration
-	var full_path := model_path
-	if not model_path.to_lower().begins_with("meshes"):
-		full_path = "meshes\\" + model_path
-
-	# Try to load from BSA - check first to avoid error spam
-	var nif_data := PackedByteArray()
-	if BSAManager.has_file(full_path):
-		nif_data = BSAManager.extract_file(full_path)
-	elif BSAManager.has_file(model_path):
-		nif_data = BSAManager.extract_file(model_path)
-
-	if nif_data.is_empty():
-		# Only warn once per model, don't spam
-		if not cache_key in _model_cache:
-			push_warning("ModelLoader: Model not found in BSA: '%s' (tried meshes\\ prefix too)" % model_path)
-		_model_cache[cache_key] = null
-		return null
-
-	# Convert NIF to Godot scene with item_id for collision shape lookup
-	# NOTE: This only runs during prebaking, not at runtime
-	const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
-	var converter := NIFConverter.new()
-	converter.generate_lods = true  # LODs embedded in model for MID tier MultiMesh
-	converter.generate_occluders = false  # Occluders handled separately
-	converter.load_animations = true  # Include NIF keyframe animations in prebaked .res
-	if not item_id.is_empty():
-		converter.collision_item_id = item_id
-	var node := converter.convert_buffer(nif_data, full_path)
+	# 5. PREBAKING MODE ONLY: ask the source provider to convert source-native
+	# model data into a Godot node. Archive parsing and format conversion live
+	# behind the provider boundary, not in this framework cache.
+	var node := _create_provider_model_scene(model_path, item_id)
 
 	if not node:
 		# Only warn once per failed model
 		if not cache_key in _model_cache:
-			push_warning("ModelLoader: Failed to convert NIF: '%s'" % full_path)
+			push_warning("ModelLoader: Asset provider could not create model: '%s'" % model_path)
 		_model_cache[cache_key] = null
 		return null
 
-	# 5. Save to disk cache for next time. _save_to_disk_cache strips occluders and
+	# 6. Save to disk cache for next time. _save_to_disk_cache strips occluders and
 	# sets owner on the node tree, so we pack AFTER the save call.
 	if enable_disk_cache:
 		_save_to_disk_cache(node, cache_key)
@@ -332,6 +324,7 @@ func clear_cache() -> void:
 	_stats["models_loaded"] = 0
 	_stats["models_from_cache"] = 0
 	_stats["models_from_disk"] = 0
+	_stats["models_from_provider"] = 0
 	_stats["file_exists_cache_hits"] = 0
 
 
@@ -340,6 +333,54 @@ func _make_cache_key(model_path: String, item_id: String = "") -> String:
 	if not item_id.is_empty():
 		return normalized + ":" + item_id.to_lower()
 	return normalized
+
+
+func _get_provider_packed_scene(model_path: String, item_id: String = "") -> PackedScene:
+	if _asset_provider == null:
+		return null
+	var resource: Resource = null
+	if _asset_provider.has_method("get_model_resource"):
+		resource = _asset_provider.call("get_model_resource", model_path, item_id) as Resource
+	if resource == null:
+		var provider_path := _get_provider_resource_path(model_path)
+		if not provider_path.is_empty():
+			resource = ResourceLoader.load(provider_path, "PackedScene") as Resource
+	if resource is PackedScene and (resource as PackedScene).can_instantiate():
+		return resource as PackedScene
+	return null
+
+
+func _provider_has_model_resource(model_path: String, item_id: String = "") -> bool:
+	if _asset_provider == null:
+		return false
+	if _asset_provider.has_method("has_model_resource"):
+		return bool(_asset_provider.call("has_model_resource", model_path, item_id))
+	return not _get_provider_resource_path(model_path).is_empty()
+
+
+func _create_provider_model_scene(model_path: String, item_id: String = "") -> Node3D:
+	if _asset_provider == null or not _asset_provider.has_method("create_model_scene"):
+		return null
+	var produced: Variant = _asset_provider.call("create_model_scene", model_path, item_id)
+	if produced is Node3D:
+		return produced as Node3D
+	if produced is PackedScene and (produced as PackedScene).can_instantiate():
+		return (produced as PackedScene).instantiate() as Node3D
+	return null
+
+
+func _get_provider_resource_path(model_path: String) -> String:
+	if _asset_provider == null or not _asset_provider.has_method("resolve_model_path"):
+		return ""
+	var resolved := str(_asset_provider.call("resolve_model_path", model_path))
+	if resolved.is_empty():
+		return ""
+	var resource_path := resolved
+	if resource_path.begins_with("res://") or resource_path.begins_with("user://"):
+		resource_path = resource_path.replace("\\", "/")
+	if ResourceLoader.exists(resource_path):
+		return resource_path
+	return ""
 
 
 func _get_or_create_resource_handle(cache_key: String, packed_scene: PackedScene) -> RefCounted:
@@ -572,6 +613,7 @@ func get_stats() -> Dictionary:
 		"models_from_cache": _stats["models_from_cache"],
 		"models_from_disk": _stats["models_from_disk"],
 		"models_from_disk_async": _stats["models_from_disk_async"],
+		"models_from_provider": _stats["models_from_provider"],
 		"models_saved": _stats["models_saved"],
 		"pending_async_loads": _pending_async_loads.size(),
 		"cached_models": _model_cache.size(),
@@ -688,7 +730,7 @@ func put_cached_packed_scene(model_path: String, item_id: String, packed_scene: 
 ## Request async loading of a model from disk cache
 ## Returns immediately. Call process_async_loads() to get results.
 ## Parameters:
-##   model_path: Path to NIF model
+##   model_path: Source model id or resource path
 ##   item_id: Optional item ID for collision variations
 ##   callback: Called when load completes with (model_path: String, item_id: String, model: Node3D)
 ## Returns:
@@ -717,7 +759,23 @@ func request_model_async(
 			callback.call(model_path, item_id, instance)
 		return true
 
-	# 2. Check if already loading this model
+	# 2. Provider-backed PackedScenes are already usable resources, so cache
+	# and answer immediately without touching the source-specific disk cache.
+	var provider_scene := _get_provider_packed_scene(model_path, item_id)
+	if provider_scene != null:
+		_model_cache[cache_key] = provider_scene
+		_last_access[cache_key] = Engine.get_frames_drawn()
+		_get_or_create_resource_handle(cache_key, provider_scene)
+		_stats["models_from_provider"] += 1
+		_queue_eviction_if_over_budget()
+		if callback.is_valid():
+			var provider_instance: Node3D = null
+			if instantiate_for_callback:
+				provider_instance = _instantiate_from_scene(provider_scene)
+			callback.call(model_path, item_id, provider_instance)
+		return true
+
+	# 3. Check if already loading this model
 	var disk_path := _get_disk_cache_path(cache_key)
 	if disk_path in _pending_async_loads:
 		# Already loading - add callback to existing request
@@ -730,7 +788,7 @@ func request_model_async(
 			})
 		return true
 
-	# 3. Check disk cache exists
+	# 4. Check disk cache exists
 	var exists_us := 0
 	var exists_start := Time.get_ticks_usec()
 	var disk_exists := enable_disk_cache and _cached_file_exists(disk_path)
@@ -751,7 +809,7 @@ func request_model_async(
 			])
 		return false
 
-	# 4. Throttle: defer if too many concurrent loads in flight
+	# 5. Throttle: defer if too many concurrent loads in flight
 	if _pending_async_loads.size() >= MAX_CONCURRENT_ASYNC_LOADS:
 		_deferred_async_queue.append({
 			"disk_path": disk_path,
@@ -773,7 +831,7 @@ func request_model_async(
 			])
 		return true  # Will be started later by _drain_deferred_queue
 
-	# 5. Start async load
+	# 6. Start async load
 	var threaded_request_start := Time.get_ticks_usec()
 	var err := ResourceLoader.load_threaded_request(disk_path, "PackedScene")
 	var threaded_request_us := Time.get_ticks_usec() - threaded_request_start
@@ -1254,7 +1312,8 @@ func get_cached(model_path: String, item_id: String = "") -> Node3D:
 # DISK CACHE IMPLEMENTATION
 # =============================================================================
 # Saves converted Node3D scenes as PackedScene resources (.res files)
-# This allows loading models in 1-5ms instead of 300ms-6s for NIF conversion.
+# This allows loading converted/imported models in 1-5ms instead of paying
+# provider conversion cost during streaming.
 # =============================================================================
 
 ## Get the disk cache directory (lazy initialization from SettingsManager)
@@ -1273,6 +1332,9 @@ func _get_disk_cache_dir() -> String:
 ## to hand disk paths to worker tasks without exposing private cache internals.
 ## Worker-safe: pure path math + FileAccess existence check.
 func resolve_disk_path(model_path: String) -> String:
+	var provider_path := _get_provider_resource_path(model_path)
+	if not provider_path.is_empty():
+		return provider_path
 	var normalized := model_path.to_lower().replace("/", "\\")
 	var disk_path := _get_disk_cache_path(normalized)
 	if _cached_file_exists(disk_path):
@@ -1304,7 +1366,7 @@ func resolve_shape_pack_path(model_path: String) -> String:
 
 
 func _get_disk_cache_path(cache_key: String) -> String:
-	# Strip item_id suffix if present (e.g., "meshes\x\ex_door.nif:door_01" -> "meshes\x\ex_door.nif")
+	# Strip item_id suffix if present (e.g., "source/model/id:door_01" -> "source/model/id")
 	var base_key := cache_key
 	var colon_pos := cache_key.rfind(":")
 	if colon_pos > 0:
@@ -1510,6 +1572,8 @@ func get_disk_cache_stats() -> Dictionary:
 ## Returns:
 ##   true if model is in disk cache
 func has_disk_cached(model_path: String, item_id: String = "") -> bool:
+	if _provider_has_model_resource(model_path, item_id):
+		return true
 	var normalized := model_path.to_lower().replace("/", "\\")
 	var cache_key := normalized
 	if not item_id.is_empty():
@@ -1529,7 +1593,7 @@ func has_disk_cached(model_path: String, item_id: String = "") -> bool:
 ## Get LOD resource for a model (loads from disk if not cached)
 ## Returns LODResource or null if no LODs exist for this model
 ## Parameters:
-##   model_path: Path to model (e.g., "meshes\\x\\ex_door.nif")
+##   model_path: Source model id or resource path
 func get_lod_resource(model_path: String) -> LODResource:
 	var normalized := model_path.to_lower().replace("/", "\\")
 
@@ -1661,3 +1725,11 @@ func clear_lod_cache() -> void:
 ## Set the mod registry for asset resolution
 func set_mod_registry(registry: ModRegistry) -> void:
 	_mod_registry = registry
+
+
+func set_asset_provider(provider: RefCounted) -> void:
+	_asset_provider = provider
+
+
+func get_asset_provider() -> RefCounted:
+	return _asset_provider

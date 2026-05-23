@@ -83,7 +83,10 @@ Flicker, FlickerSlow, Pulse, PulseSlow from MW light flags. Random brightness ta
 
 Ambient light: source = SKY, contribution = 1.0, energy = 1.0. Reflected light: source = SKY.
 
-**Note:** ocean material disables native Godot SSR (declaring `hint_depth_texture` / `hint_screen_texture` kills the native SSR pass in Forward+); the ocean shader has its own custom SSR raymarch. See `docs/systems/ocean.md`.
+**Note:** the current ocean surface shader declares `hint_depth_texture` /
+`hint_screen_texture` and owns a custom SSR raymarch for water-surface
+reflections. See `docs/systems/ocean/architecture.md` and
+`docs/systems/ocean/godot_4_6_water_rendering_rules.md`.
 
 ---
 

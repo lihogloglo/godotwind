@@ -14,34 +14,11 @@ extends RefCounted
 # Dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
-const NIFConverter := preload("res://src/core/nif/nif_converter.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
+const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
 
-# Interaction framework (I.1) — generic carryable spawn path. The MW
-# adapter (mw_carryable_registry.gd) registers MW record types into
-# CarryableRegistry at boot. Reference instantiator stays adapter-agnostic
-# by routing through the registry + body factory and only loading the
-# adapter's PickupInteractable script as a Resource.
-const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
-const CarryableBodyFactoryScript := preload("res://src/core/interaction/carryable_body_factory.gd")
-const PickupInteractableScript := preload("res://src/core/interaction/morrowind/pickup_interactable.gd")
-
-# I.7 — DOOR adapter. Attached to spawned door nodes so the interaction
-# framework can raycast-target them. The `door_activated` signal payload
-# is routed through `door_activated_handler` (set by CellManager, which
-# in turn gets it from world_explorer). Keeping the handler as a Callable
-# avoids importing world/streaming types into the instantiator.
-const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
-const ContainerInteractableScript := preload("res://src/core/interaction/morrowind/container_interactable.gd")
-const ActivatorInteractableScript := preload("res://src/core/interaction/morrowind/activator_interactable.gd")
-
-# C.5 — NPC dialogue adapter. NPCs get wrapped in an NPCInteractable so
-# the InteractionRaycaster can target them for conversation. The wrapper
-# holds the speaker_id; the actual dialogue lookup happens at interact()
-# time via DialogueSession.current().
-const NPCInteractableScript := preload("res://src/core/dialogue/morrowind/npc_interactable.gd")
 
 # Plan 2026-04-28 step 2 — shared interaction-area geometry per door
 # prototype. The 10.7 ms door instantiate cost is dominated by the AABB
@@ -64,6 +41,7 @@ var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/
 # statics_no_node3d.md §7.
 var shape_cache: RefCounted = null  # StaticShapeCache
 var _world_object_source: RefCounted = null
+var _world_object_spawn_adapter: RefCounted = null
 
 # Impostor candidates for determining significant objects
 var _impostor_candidates: RefCounted = null
@@ -85,21 +63,76 @@ func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
 
 
-func _get_base_record(ref_id: String, record_type_out: Array, cached: bool = false) -> Variant:
-	if _world_object_source == null:
-		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSource for ref '%s'" % ref_id)
+func set_world_object_spawn_adapter(adapter: RefCounted) -> void:
+	_world_object_spawn_adapter = adapter
+
+
+func _source_is_carryable(type_name: String, base_record: Variant) -> bool:
+	if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("_source_is_carryable"):
+		return bool(_world_object_spawn_adapter.call("_source_is_carryable", type_name, base_record))
+	return false
+
+
+func _postprocess_source_model_object(
+	instance: Node3D,
+	ref: CellReference,
+	base_record: Variant,
+	type_name: String,
+	cell_grid: Vector2i,
+	record_id: String,
+) -> void:
+	if _world_object_spawn_adapter == null:
+		return
+	if not _world_object_spawn_adapter.has_method("_source_postprocess_model_object"):
+		return
+	_world_object_spawn_adapter.call(
+		"_source_postprocess_model_object",
+		instance,
+		ref,
+		base_record,
+		type_name,
+		cell_grid,
+		record_id,
+		self,
+	)
+
+
+func _postprocess_source_actor(
+	character: Node3D,
+	ref: CellReference,
+	actor_record: Variant,
+	actor_type: String,
+) -> Node3D:
+	if _world_object_spawn_adapter == null:
+		return character
+	if not _world_object_spawn_adapter.has_method("_source_postprocess_actor"):
+		return character
+	var processed: Node3D = _world_object_spawn_adapter.call(
+		"_source_postprocess_actor",
+		character,
+		ref,
+		actor_record,
+		actor_type,
+		self,
+	) as Node3D
+	return processed if processed != null else character
+
+
+func _resolve_source_reference_base_record(source_ref: Variant, record_type_out: Array, cached: bool = false) -> Variant:
+	if _world_object_spawn_adapter == null:
+		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSpawnAdapter for source ref")
 		return null
-	if cached:
-		return _world_object_source.get_legacy_base_record_cached(ref_id, record_type_out)
-	return _world_object_source.get_legacy_base_record(ref_id, record_type_out)
+	if not _world_object_spawn_adapter.has_method("resolve_source_reference_base_record"):
+		Log.error("streaming", "WorldObjectSpawnAdapter cannot resolve source ref")
+		return null
+	return _world_object_spawn_adapter.call("resolve_source_reference_base_record", source_ref, record_type_out, cached)
 
 
-func _get_creature_record(creature_id: String) -> Variant:
-	return _world_object_source.get_legacy_creature(creature_id) if _world_object_source != null else null
+func _source_light_animation_for_record(light_record: Variant) -> int:
+	if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("_source_light_animation_for_record"):
+		return int(_world_object_spawn_adapter.call("_source_light_animation_for_record", light_record))
+	return WorldObjectRecordScript.LightAnimation.NONE
 
-
-func _get_leveled_creature_record(creature_id: String) -> Variant:
-	return _world_object_source.get_legacy_leveled_creature(creature_id) if _world_object_source != null else null
 
 ## Fix D (streaming_stutter_2026_04_25 plan) — task IDs of the off-thread
 ## *dispatcher* tasks (the worker variant of `preregister_cell_statics`).
@@ -269,7 +302,6 @@ const LIGHT_ALWAYS_SPAWN_RADIUS_MW: float = 700.0
 ##   FLAG_FLICKER_SLOW  = 0x0040
 ##   FLAG_PULSE         = 0x0080
 ##   FLAG_PULSE_SLOW    = 0x0100
-const MW_LIGHT_ANIMATED_FLAGS_MASK: int = 0x0008 | 0x0040 | 0x0080 | 0x0100
 
 
 ## Win 4b — RefCounted holder for the RS RIDs of a server-direct light.
@@ -329,8 +361,9 @@ func _reset_last_inst_diagnostics(route: String = "") -> void:
 	last_static_add_us = 0
 
 
-# PHASE_A:MAIN_ONLY — orchestrator. ESMManager.get_any_record autoload read +
-# dispatch to type handlers. Stays main-thread; split lives in _instantiate_model_object.
+# PHASE_A:MAIN_ONLY - orchestrator. Source-specific record lookup is delegated
+# to the injected spawn adapter; the main-thread type dispatch stays here until
+# the remaining legacy CellReference path is fully normalized.
 func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
 	_inst_call_count += 1
 	# Reset per-call state — caller (cell_manager) reads these after return.
@@ -339,7 +372,7 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 
 	# Use generic lookup to find the base record and its type
 	var record_type: Array = [""]
-	var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
+	var base_record: Variant = _resolve_source_reference_base_record(ref, record_type)
 
 	if debug_lod and _inst_call_count <= 20:
 		Log.debug("streaming", "[LOD-INST] #%d ref=%s, type=%s, found=%s, cell=%s" % [
@@ -358,22 +391,248 @@ func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZE
 
 
 func instantiate_world_object(object_id: StringName, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
+	if _world_object_source == null or not _world_object_source.has_method("get_object_record"):
+		_inst_call_count += 1
+		last_proximity_deferred = false
+		_reset_last_inst_diagnostics("world_object")
+		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSource record lookup for object '%s'" % str(object_id))
+		last_inst_route = "skip"
+		return null
+	var record: RefCounted = _world_object_source.call("get_object_record", object_id) as RefCounted
+	return instantiate_world_object_record(record, cell_grid, cache_item_id)
+
+
+func instantiate_world_object_record(record: RefCounted, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
 	_inst_call_count += 1
 	last_proximity_deferred = false
 	_reset_last_inst_diagnostics("world_object")
-	if _world_object_source == null:
-		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSource for object '%s'" % str(object_id))
-		last_inst_route = "skip"
-		return null
-	var payload: Dictionary = _world_object_source.resolve_gameplay_payload(object_id)
-	var ref: CellReference = payload.get("ref", null)
-	var base_record: Variant = payload.get("base_record", null)
-	var type_name: String = str(payload.get("type_name", ""))
-	if ref == null or base_record == null or type_name.is_empty():
+	if record == null:
 		last_type_name = "unknown"
 		last_inst_route = "skip"
 		return null
-	return _instantiate_resolved_reference(ref, base_record, type_name, cell_grid, cache_item_id)
+	if _world_object_spawn_adapter == null:
+		Log.error("streaming", "ReferenceInstantiator has no WorldObjectSpawnAdapter for object '%s'" % str(record.get("object_id")))
+		last_inst_route = "skip"
+		return null
+	return _world_object_spawn_adapter.call(
+		"instantiate_world_object",
+		record,
+		self,
+		cell_grid,
+		cache_item_id,
+	) as Node3D
+
+
+func instantiate_static_world_object_record(record: RefCounted, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+	if record == null:
+		last_type_name = "unknown"
+		last_inst_route = "skip"
+		return null
+	var model_path := str(record.get("model_path"))
+	var type_name := _record_source_type(record)
+	last_type_name = type_name
+	if model_path.is_empty():
+		last_inst_route = "skip"
+		return null
+	if not _should_route_to_renderer(type_name, model_path, false, _effective_use_static_renderer()):
+		return instantiate_node_world_object_record(record, cell_grid, str(record.get("cache_item_id")))
+
+	var normalized := model_path.to_lower().replace("/", "\\")
+	last_inst_route = "static_hot"
+	if not static_renderer.call("has_type", normalized):
+		last_inst_route = "static_cold"
+		var load_start := Time.get_ticks_usec()
+		var prototype: Node3D = model_loader.call("get_model", model_path)
+		last_model_load_us = Time.get_ticks_usec() - load_start
+		if prototype:
+			var reg_start := Time.get_ticks_usec()
+			static_renderer.call("register_from_prototype", normalized, prototype)
+			last_static_register_us = Time.get_ticks_usec() - reg_start
+		else:
+			last_inst_route = "static_cold_fail"
+			return null
+
+	var transform := _record_transform(record)
+	var mesh_type_stats: Dictionary = static_renderer.call("get_mesh_type_stats", normalized)
+	var aabb: AABB = mesh_type_stats.get("aabb", AABB())
+	var add_start := Time.get_ticks_usec()
+	var instance_id: int = static_renderer.call("add_instance", normalized, transform, cell_grid)
+	last_static_add_us = Time.get_ticks_usec() - add_start
+	if instance_id >= 0:
+		stats["static_renderer_instances"] += 1
+		last_static_data = {
+			"transform": transform,
+			"aabb": aabb,
+			"mesh_id": float(normalized.hash()),
+			"lod_mask": 0,
+		}
+	return null
+
+
+func instantiate_node_world_object_record(
+	record: RefCounted,
+	_cell_grid: Vector2i = Vector2i.ZERO,
+	cache_item_id: String = "",
+) -> Node3D:
+	if record == null:
+		last_type_name = "unknown"
+		last_inst_route = "skip"
+		return null
+	var model_path := str(record.get("model_path"))
+	var type_name := _record_source_type(record)
+	last_type_name = type_name
+	if model_path.is_empty():
+		last_inst_route = "skip"
+		return null
+
+	var record_id := str(record.get("record_id"))
+	if record_id.is_empty():
+		record_id = str(record.get("model_item_id"))
+	var load_item_id := cache_item_id if not cache_item_id.is_empty() else str(record.get("cache_item_id"))
+	if load_item_id.is_empty():
+		load_item_id = record_id
+
+	last_inst_route = "node_sync"
+	var model_load_start := Time.get_ticks_usec()
+	var instance: Node3D = model_loader.call("get_model", model_path, load_item_id)
+	last_model_load_us = Time.get_ticks_usec() - model_load_start
+	if not instance:
+		last_inst_route = "placeholder"
+		return _create_placeholder_for_record(record)
+
+	var source_ref := str(record.get("source_ref_id"))
+	instance.name = source_ref if not source_ref.is_empty() else str(record.get("object_id"))
+	var ref_pos := _record_transform(record).origin
+	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
+		if not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
+			_enable_collision_shapes_in_tree(instance)
+	_hide_lod_nodes(instance)
+	instance.transform = _record_transform(record)
+	_apply_record_metadata(instance, record, model_path, type_name)
+	stats["objects_instantiated"] += 1
+	return instance
+
+
+func set_source_spawn_diagnostics(
+	type_name: String,
+	route: String,
+	proximity_deferred: bool = false
+) -> void:
+	last_type_name = type_name
+	last_inst_route = route
+	last_proximity_deferred = proximity_deferred
+
+
+func is_source_static_renderer_effective() -> bool:
+	return _effective_use_static_renderer()
+
+
+func get_source_spawn_camera_position() -> Vector3:
+	return camera_position
+
+
+func should_source_load_lights() -> bool:
+	return load_lights
+
+
+func should_source_load_npcs() -> bool:
+	return load_npcs
+
+
+func should_source_load_creatures() -> bool:
+	return load_creatures
+
+
+func instantiate_source_light(ref: Variant, light_record: Variant) -> Node3D:
+	if ref == null or light_record == null:
+		return null
+	return _instantiate_light(ref, light_record)
+
+
+func instantiate_source_actor(ref: Variant, actor_record: Variant, actor_type: String) -> Node3D:
+	if ref == null or actor_record == null:
+		return null
+	return _instantiate_actor(ref, actor_record, actor_type)
+
+
+func apply_source_metadata(
+	node: Node3D,
+	ref: Variant,
+	base_record: Variant,
+	model_path: String,
+	type_name: String = ""
+) -> void:
+	if node == null or ref == null:
+		return
+	_apply_metadata(node, ref, base_record, model_path, type_name)
+
+
+func ensure_source_visual_proxy_for_ref(
+	ref: Variant,
+	model_path: String,
+	cell_grid: Vector2i,
+	type_name: String,
+	cache_item_id: String = ""
+) -> bool:
+	if ref == null:
+		return false
+	return _ensure_visual_proxy_for_ref(ref, model_path, cell_grid, type_name, cache_item_id)
+
+
+func apply_source_visual_proxy_runtime(
+	instance: Node3D,
+	ref: Variant,
+	cell_grid: Vector2i,
+	type_name: String
+) -> void:
+	if instance == null or ref == null or not _uses_visual_proxy(type_name):
+		return
+	var source_key := make_source_key(type_name, ref, cell_grid)
+	instance.set_meta("source_key", source_key)
+	instance.set_meta("cell_grid", cell_grid)
+	_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
+	_wire_visual_proxy_restore_on_exit(instance, source_key)
+
+
+func make_source_visual_proxy_key(type_name: String, ref: Variant, cell_grid: Vector2i) -> String:
+	if ref == null:
+		return ""
+	return make_source_key(type_name, ref, cell_grid)
+
+
+func uses_source_visual_proxy(type_name: String) -> bool:
+	return _uses_visual_proxy(type_name)
+
+
+func attach_source_carryable_light_source(instance: Node3D, base_record: Variant) -> void:
+	var light_record := base_record as LightRecord
+	if instance == null or light_record == null:
+		return
+	_attach_carryable_light_source(instance, light_record)
+
+
+func get_source_door_activated_handler() -> Callable:
+	return door_activated_handler
+
+
+func add_source_interactable_layer_recursive(node: Node) -> void:
+	if node == null:
+		return
+	_add_interactable_layer_recursive(node)
+
+
+func generate_source_interaction_area(root: Node3D, model_path: String = "") -> Area3D:
+	if root == null:
+		return null
+	if not model_path.is_empty():
+		return _generate_interaction_area_cached(root, model_path)
+	return _generate_interaction_area(root)
+
+
+func mark_source_visual_proxy_dirty(source_key: String, reason: String) -> void:
+	if source_key.is_empty() or static_renderer == null or not static_renderer.has_method("mark_proxy_dirty"):
+		return
+	static_renderer.call("mark_proxy_dirty", source_key, reason)
 
 
 func _instantiate_resolved_reference(
@@ -386,7 +645,7 @@ func _instantiate_resolved_reference(
 	last_type_name = type_name
 	if type_name == "light" and not load_lights:
 		return null
-	if type_name == "light" and CarryableRegistryScript.is_carryable(type_name, base_record):
+	if type_name == "light" and _source_is_carryable(type_name, base_record):
 		return _instantiate_model_object(ref, base_record, cell_grid, type_name, cache_item_id)
 
 	# Handle different record types
@@ -414,8 +673,9 @@ func _instantiate_resolved_reference(
 		"leveled_creature":
 			if not load_creatures:
 				return null
-			# Resolve leveled creature to an actual creature
-			var resolved := _resolve_leveled_creature(base_record as LeveledCreatureRecord)
+			var resolved: Variant = null
+			if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("_source_resolve_leveled_creature"):
+				resolved = _world_object_spawn_adapter.call("_source_resolve_leveled_creature", base_record, self, 10)
 			if resolved:
 				return _instantiate_actor(ref, resolved, "creature")
 			return null
@@ -475,7 +735,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 	# bypass the static-renderer fast path (no Node3D = no physics) and
 	# the object pool (per-instance RigidBody3D state can't be pooled
 	# safely without `(model_path, body_type)` keying — deferred).
-	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+	var is_carryable: bool = _source_is_carryable(type_name, base_record)
 
 	# Debug: Log what path each object is taking
 	if debug_lod and _model_obj_count <= 20:
@@ -565,43 +825,7 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 		_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
 		_wire_visual_proxy_restore_on_exit(instance, source_key)
 
-	# I.1 — Carryable conversion. Swap the baked StaticBody3D for a
-	# RigidBody3D (frozen KINEMATIC, layers Environment+Interactable) and
-	# attach a PickupInteractable child. Mass comes from the registered
-	# extractor (MW: ESM `weight` field, treated as kg). If the prototype
-	# has no baked collision, conversion returns null and the instance
-	# stays static — log once and move on.
-	if is_carryable:
-		if type_name == "light" and base_record is LightRecord:
-			_attach_carryable_light_source(instance, base_record as LightRecord)
-		var mass_kg: float = CarryableRegistryScript.get_mass(type_name, base_record)
-		var display_name: String = ""
-		if "name" in base_record and not String(base_record.name).is_empty():
-			display_name = base_record.name
-		else:
-			display_name = record_id
-		var rb := CarryableBodyFactoryScript.convert_static_to_rigid(
-			instance,
-			mass_kg,
-			StringName(record_id),
-			display_name,
-			PickupInteractableScript,
-		)
-		if rb == null:
-			Log.info("interaction", "Carryable %s (%s) has no collision/mesh — staying static (non-interactable)" % [record_id, type_name])
-
-	# I.7 — DOOR adapter attachment. Only teleport doors (DODT subrecord
-	# present on the ref) get a DoorInteractable — decorative non-teleport
-	# doors (e.g. a visual-only door stuck to an exterior wall with no
-	# destination) stay silent. The adapter's signal payload carries the
-	# `record_id` so the handler can look up the authoritative DoorInfo
-	# via `InteriorPocketManager.get_door_info_by_ref_id()`.
-	if type_name == "door" and ref.is_teleport:
-		_attach_door_interactable(instance, ref, base_record, record_id)
-	elif type_name == "container":
-		_attach_container_interactable(instance, ref, cell_grid, base_record, record_id)
-	elif type_name == "activator":
-		_attach_activator_interactable(instance, base_record, record_id)
+	_postprocess_source_model_object(instance, ref, base_record, type_name, cell_grid, record_id)
 
 	# Interior collision fallback — generate a StaticBody3D from the mesh
 	# AABB for non-carryable, non-door objects that lack baked collision.
@@ -654,8 +878,8 @@ func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_gr
 ## entry is typed Variant (cell_manager.InstantiationEntry inner class — avoids
 ## circular import). entry.load_profile may be null (content-cell loads without
 ## a LoadProfile fall back to the instantiator's own `use_static_renderer`).
-# PHASE_A:MAIN_ONLY — reads static_renderer singleton + model_loader cache +
-# ESMManager (via caller) + camera_position (main-thread-updated).
+# PHASE_A:MAIN_ONLY - reads static_renderer singleton, model_loader cache, and
+# camera_position. Source-specific parser access is supplied before this call.
 func should_dispatch_to_worker(
 	entry: Variant,
 	base_record: Variant,
@@ -666,7 +890,7 @@ func should_dispatch_to_worker(
 		"light", "npc", "creature", "leveled_creature", "leveled_item":
 			return false
 
-	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+	var is_carryable: bool = _source_is_carryable(type_name, base_record)
 
 	# 2. Static-renderer routing — STAT → RS.instance_create2 path. Must mirror
 	# sync's effective_use_static resolution: per-request LoadProfile override
@@ -718,7 +942,7 @@ func should_dispatch_static_precompute(
 	if static_renderer == null:
 		return false
 
-	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+	var is_carryable: bool = _source_is_carryable(type_name, base_record)
 
 	# Effective-use-static mirror (matches should_dispatch_to_worker).
 	var effective_use_static: bool = use_static_renderer
@@ -748,7 +972,7 @@ func should_dispatch_static_precompute(
 ## unique type). Eliminates the `static avg µs 200-2074 (cold 38050)` spike.
 ##
 ## Called by cell_manager.request_exterior_cell_async / request_cell_async
-## immediately after ESMManager.get_exterior_cell / get_cell succeeds.
+## after the source cell data is available.
 ##
 ## Idempotent: if the cell's types are already registered (common after first
 ## visit), dispatches 0 tasks. Duplicates across cells are harmless — worker's
@@ -759,7 +983,7 @@ func should_dispatch_static_precompute(
 ## Plan: docs/plans/streaming_stutter_2026_04_25.md (Fix D)
 ##
 ## Fix D — formerly PHASE_F:MAIN_ONLY. The previous main-thread implementation
-## was a 1644 ms post-teleport spike: walking 200 cell refs × ESMManager +
+## was a 1644 ms post-teleport spike: walking 200 cell refs through source lookup +
 ## has_animation + has_type + resolve_disk_path on every active-loader cell
 ## load, two cells per frame. After Fix C made has_animation cheap, the
 ## remaining cost was still O(refs) main-thread iteration. Fix D dispatches
@@ -767,7 +991,7 @@ func should_dispatch_static_precompute(
 ## (one bind + add_task).
 ##
 ## Worker-safe contract — every method touched by the dispatcher worker:
-##   - ESMManager.get_any_record   — autoload, cache populated at boot, read-only
+##   - spawn adapter source lookup   — cache populated at boot, read-only
 ##   - CarryableRegistry.is_carryable — static, _entries set at boot, read-only
 ##   - model_loader.has_animation    — Fix D mutex-protected
 ##   - model_loader.resolve_disk_path / resolve_shape_pack_path — Fix D mutex
@@ -783,7 +1007,7 @@ func should_route_model_to_static_renderer(
 	base_record: Variant,
 	effective_use_static: bool,
 ) -> bool:
-	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+	var is_carryable: bool = _source_is_carryable(type_name, base_record)
 	return _should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static)
 
 
@@ -811,6 +1035,54 @@ func preregister_cell_statics(cell_record: Variant) -> int:
 	return 0
 
 
+func preregister_world_cell_statics(records: Array) -> int:
+	if StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG:
+		return 0
+	if static_renderer == null or model_loader == null or records.is_empty():
+		return 0
+	var dispatcher_id: int = WorkerThreadPool.add_task(
+		_worker_dispatch_preregister_world_records.bind(records.duplicate()),
+		false,
+		"ref_instantiator:world_record_prereg",
+	)
+	_prereg_dispatcher_task_ids.append(dispatcher_id)
+	return 0
+
+
+func _worker_dispatch_preregister_world_records(records: Array) -> void:
+	if static_renderer == null or model_loader == null:
+		return
+
+	var to_register: Dictionary = {}
+	for record: RefCounted in records:
+		if record == null or not bool(record.get("static_batch_allowed")):
+			continue
+		var model_path := str(record.get("model_path"))
+		if model_path.is_empty():
+			continue
+		if not _should_route_to_renderer("static", model_path, false, use_static_renderer):
+			continue
+		var normalized: String = model_path.to_lower().replace("/", "\\")
+		if normalized in to_register:
+			continue
+		var renderer_knows: bool = static_renderer.call("has_type", normalized)
+		var needs_shape_warm: bool = shape_cache != null
+		if renderer_knows and not needs_shape_warm:
+			continue
+		var disk_path: String = model_loader.call("resolve_disk_path", model_path)
+		if disk_path.is_empty():
+			continue
+		var shape_pack_path: String = ""
+		if shape_cache != null:
+			shape_pack_path = model_loader.call("resolve_shape_pack_path", model_path)
+		to_register[normalized] = {
+			"disk": disk_path,
+			"pack": shape_pack_path,
+		}
+
+	_dispatch_preregistration_tasks(to_register)
+
+
 # Fix D — off-thread body of preregister_cell_statics. WORKER_SAFE per the
 # contract documented on the public function above. Reads autoloads (now
 # read-only after batch populate at boot), calls mutex-protected helpers,
@@ -833,7 +1105,7 @@ func _worker_dispatch_preregister_cell(cell_record: Variant) -> void:
 		# null (no on-demand creation, which is main-thread-only). Skipped
 		# refs get registered later when the main-thread instantiation path
 		# touches them.
-		var base_record: Variant = _get_base_record(str(ref.ref_id), record_type, true)
+		var base_record: Variant = _resolve_source_reference_base_record(ref, record_type, true)
 		if base_record == null:
 			continue
 		var type_name: String = record_type[0] if record_type.size() > 0 else ""
@@ -845,7 +1117,7 @@ func _worker_dispatch_preregister_cell(cell_record: Variant) -> void:
 			continue
 
 		# Filter to STAT-routed refs only — interactives use Phase A.
-		var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
+		var is_carryable: bool = _source_is_carryable(type_name, base_record)
 		if not _should_route_to_renderer(type_name, model_path, is_carryable, use_static_renderer):
 			continue
 
@@ -1069,7 +1341,7 @@ func complete_worker_static_precompute(entry: Variant, precomp: Variant) -> Node
 ## base_record + type_name are passed via .bind() rather than on the entry
 ## because they live only transiently inside instantiate_reference and the
 ## slice-2 schema deliberately didn't grow to hold them. The dispatcher looks
-## them up on main thread (ESMManager call is worker-unsafe per plan §5.1).
+## them up on main thread because adapter source lookup may be worker-unsafe.
 ##
 ## Mirrors model_loader._instantiate_from_scene's post-processing
 ## (strip_occluders + disable_collision) plus the main-thread "setup" tail
@@ -1164,32 +1436,8 @@ func complete_worker_instantiate(
 			_enable_collision_shapes_in_tree(instance)
 
 	# Carryable conversion (mirror of _instantiate_model_object:353-374).
-	var is_carryable: bool = CarryableRegistryScript.is_carryable(type_name, base_record)
-	if is_carryable and not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
-		var mass_kg: float = CarryableRegistryScript.get_mass(type_name, base_record)
-		var display_name: String = ""
-		if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
-			display_name = base_record.name
-		else:
-			display_name = record_id
-		var rb := CarryableBodyFactoryScript.convert_static_to_rigid(
-			instance,
-			mass_kg,
-			StringName(record_id),
-			display_name,
-			PickupInteractableScript,
-		)
-		if rb == null:
-			Log.info("interaction", "Carryable %s (%s) has no collision/mesh — staying static (non-interactable)" % [record_id, type_name])
-
-	# Gameplay adapter attachment (mirror of _instantiate_model_object).
-	if type_name == "door" and ref.is_teleport:
-		_attach_door_interactable(instance, ref, base_record, record_id)
-	elif type_name == "container":
-		_attach_container_interactable(instance, ref, cell_grid, base_record, record_id)
-	elif type_name == "activator":
-		_attach_activator_interactable(instance, base_record, record_id)
-
+	var is_carryable: bool = _source_is_carryable(type_name, base_record)
+	_postprocess_source_model_object(instance, ref, base_record, type_name, cell_grid, record_id)
 	# Interior collision fallback (mirror of _instantiate_model_object:385-395).
 	if not is_carryable and not (type_name == "door" and ref.is_teleport):
 		if not _effective_use_static_renderer():
@@ -1221,6 +1469,24 @@ func _make_ref_transform(ref: CellReference) -> Transform3D:
 	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
 	basis = basis.scaled(scale)
 	return Transform3D(basis, pos)
+
+
+func _record_transform(record: RefCounted) -> Transform3D:
+	if record == null:
+		return Transform3D.IDENTITY
+	var value: Variant = record.get("transform")
+	if value is Transform3D:
+		return value as Transform3D
+	return Transform3D.IDENTITY
+
+
+func _record_source_type(record: RefCounted) -> String:
+	if record == null:
+		return "object"
+	var source_type := str(record.get("source_type"))
+	if not source_type.is_empty():
+		return source_type
+	return "object"
 
 
 func _ensure_visual_proxy_for_ref(ref: CellReference, model_path: String, cell_grid: Vector2i, type_name: String, cache_item_id: String = "") -> bool:
@@ -1399,13 +1665,13 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 	if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
 		# Win 4b — server-direct path UNLESS the light needs flicker/pulse
 		# animation. LightAnimator (light_animator.gd) walks the cell tree for
-		# OmniLight3D nodes with `mw_flags` meta; RS RIDs aren't visible to
-		# that walker. Animated lights keep the OmniLight3D Node3D so the
+		# OmniLight3D nodes with `light_animation` meta; RS RIDs aren't visible
+		# to that walker. Animated lights keep the OmniLight3D Node3D so the
 		# existing flicker/pulse system continues to work. Static lights go
 		# server-direct, saving the OmniLight3D wrapper cost (per
 		# server_direct_pattern.md, OmniLight3D is just a thin Node3D + RID
 		# wrapper around the same underlying server-side light data).
-		var animated: bool = (light_record.flags & MW_LIGHT_ANIMATED_FLAGS_MASK) != 0
+		var animated := _source_light_animation_for_record(light_record) != WorldObjectRecordScript.LightAnimation.NONE
 		if animated:
 			_attach_animated_omni_light(light_node, light_record)
 		else:
@@ -1443,8 +1709,8 @@ func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) 
 	omni.distance_fade_enabled = true
 	omni.distance_fade_begin = 120.0
 	omni.distance_fade_length = 30.0
-	# Metadata read by LightAnimator (mw_flags / base_energy) + diagnostics.
-	omni.set_meta("mw_flags", light_record.flags)
+	# Metadata read by LightAnimator + diagnostics.
+	omni.set_meta("light_animation", _source_light_animation_for_record(light_record))
 	omni.set_meta("mw_radius", light_record.radius)
 	omni.set_meta("base_energy", omni.light_energy)
 
@@ -1575,18 +1841,7 @@ func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: S
 			# to find the Interactable ancestor. The wrapper inherits
 			# the character's world-space transform; the character moves
 			# to identity (local to wrapper). Same layer-3 stamp as doors.
-			if actor_type == "npc" and actor_record is NPCRecord:
-				var wrapper := Node3D.new()
-				wrapper.set_script(NPCInteractableScript)
-				wrapper.name = character.name + "_npc"
-				wrapper.speaker_id = actor_record.record_id.to_lower()
-				wrapper.transform = character.transform
-				character.transform = Transform3D.IDENTITY
-				wrapper.add_child(character)
-				_add_interactable_layer_recursive(wrapper)
-				return wrapper
-
-			return character
+			return _postprocess_source_actor(character, ref, actor_record, actor_type)
 
 	# Fallback to old system if CharacterFactory not available
 	return _instantiate_actor_legacy(ref, actor_record, actor_type)
@@ -1749,183 +2004,6 @@ func _create_actor_placeholder(ref: CellReference, _actor_record: Variant, actor
 
 	return container
 
-
-## Resolve a leveled creature list to an actual creature record
-## Uses a simplified algorithm: pick a random creature from valid level range
-## player_level defaults to 10 for now (could be passed in later)
-func _resolve_leveled_creature(leveled: LeveledCreatureRecord, player_level: int = 10) -> CreatureRecord:
-	if leveled.creatures.is_empty():
-		return null
-
-	# Check chance_none - random chance to spawn nothing
-	if leveled.chance_none > 0 and randi() % 100 < leveled.chance_none:
-		return null
-
-	# Filter creatures by level (creatures spawn if player_level >= creature_level)
-	var valid_creatures: Array[Dictionary] = []
-	for entry in leveled.creatures:
-		if entry.level <= player_level:
-			valid_creatures.append(entry)
-
-	if valid_creatures.is_empty():
-		# No valid creatures for this level, pick lowest level one
-		var lowest_entry: Dictionary = leveled.creatures[0]
-		for entry in leveled.creatures:
-			if entry.level < lowest_entry.level:
-				lowest_entry = entry
-		valid_creatures.append(lowest_entry)
-
-	# Pick random creature from valid list
-	var chosen: Dictionary = valid_creatures[randi() % valid_creatures.size()]
-	var creature_id: String = chosen.creature_id
-
-	# Look up the actual creature record
-	var creature: CreatureRecord = _get_creature_record(creature_id)
-	if creature:
-		return creature
-
-	# Might be a nested leveled list - try to resolve recursively
-	var nested_leveled: LeveledCreatureRecord = _get_leveled_creature_record(creature_id)
-	if nested_leveled:
-		return _resolve_leveled_creature(nested_leveled, player_level)
-
-	push_warning("ReferenceInstantiator: Could not resolve creature '%s' from leveled list '%s'" % [
-		creature_id, leveled.record_id
-	])
-	return null
-
-
-# PHASE_A:MAIN_ONLY — set_script + signal connect + door_activated_handler
-# (bound to world_explorer). Plan §5 row 376-383; runs after worker returns.
-## I.7 — Promote a spawned teleport door into a DoorInteractable.
-## Called from _instantiate_model_object() for `type_name == "door"` refs
-## whose `is_teleport` is true (DODT subrecord present).
-##
-## Approach: set the DoorInteractable script directly on the door root
-## (it extends Node3D, same as the duplicated prototype), then fill in
-## the adapter's @export fields and add collision layer 3 (Interactable)
-## to the door's StaticBody3D so the InteractionRaycaster can hit it.
-##
-## ## Why set_script on the root instead of adding a child
-##
-## `InteractionRaycaster._find_interactable_ancestor()` walks UP from the
-## hit collider looking for the first `Interactable` node. If the adapter
-## were a sibling of the door's StaticBody3D, the walk-up from the
-## collision shape would pass through the door root (which is NOT an
-## Interactable) and exit the door subtree without ever seeing the
-## adapter. Putting the adapter ON the root puts it directly on the
-## walk-up path — same pattern as `CarryableBodyFactory` wraps the body
-## in a `Pickup` parent.
-##
-## Collision-layer OR: we don't remove the existing Environment layer
-## (bit 0) because the door must still block player movement. We just
-## add the Interactable bit (bit 2) so the raycast can find it without
-## disturbing physics.
-func _attach_door_interactable(door_instance: Node3D, ref: CellReference, base_record: Variant, record_id: String) -> void:
-	var display_name: String = ""
-	if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
-		display_name = base_record.name
-	elif not record_id.is_empty():
-		display_name = record_id
-
-	var destination_name: String = ref.teleport_cell
-	var has_destination: bool = not destination_name.is_empty()
-
-	# Promote the root Node3D into a DoorInteractable by attaching the
-	# script. The node identity survives the set_script call; any existing
-	# metadata stamped by `_apply_metadata` is preserved. After the call
-	# the instance IS a DoorInteractable and we cast to fill @export fields.
-	door_instance.set_script(DoorInteractableScript)
-	var adapter := door_instance as DoorInteractable
-	if adapter == null:
-		Log.warn("interaction", "Door %s set_script failed — adapter cast null" % record_id)
-		return
-	adapter.record_id = record_id
-	adapter.display_name = display_name
-	adapter.destination_name = destination_name
-	adapter.has_destination = has_destination
-	adapter.door_record = base_record
-
-	# Always generate a passive Area3D interaction target from the full mesh
-	# AABB. This box covers the entire door model and is detectable from ANY
-	# approach direction — both exterior and interior faces.
-	#
-	# We do NOT use _add_interactable_layer_recursive on the baked StaticBody3D
-	# here. MW door NIF collision is often a one-sided concave trimesh that
-	# faces the interior cell; stamping layer 3 onto it makes the door
-	# interactable only from the wall-side (the bug: "flip somewhere").
-	# The baked StaticBody3D keeps layer 1 (Environment) only — it handles
-	# physics blocking. The Area3D below handles all interaction detection.
-	#
-	# Plan 2026-04-28 step 2 — route through the shared shape cache so the
-	# AABB walk + BoxShape3D allocation happen ONCE per door prototype.
-	# Falls back to the legacy uncached path when the model_path is missing
-	# (defensive — should never happen for ESM-driven door records).
-	var door_model_path: String = _get_model_path(base_record)
-	if door_model_path.is_empty():
-		_generate_interaction_area(door_instance)
-	else:
-		_generate_interaction_area_cached(door_instance, door_model_path)
-
-	Log.info("interaction", "[DOOR_ATTACH] %s (dest='%s' teleport=%s has_collision=%s)" % [
-		record_id, destination_name, has_destination,
-		_has_interactable_collision(door_instance)])
-
-	if door_activated_handler.is_valid():
-		adapter.door_activated.connect(door_activated_handler)
-
-
-func _attach_container_interactable(container_instance: Node3D, ref: CellReference, cell_grid: Vector2i, base_record: Variant, record_id: String) -> void:
-	container_instance.set_script(ContainerInteractableScript)
-	var adapter := container_instance as ContainerInteractable
-	if adapter == null:
-		Log.warn("interaction", "Container %s set_script failed — adapter cast null" % record_id)
-		return
-	adapter.record_id = record_id
-	adapter.display_name = _get_display_name(base_record, record_id)
-	adapter.container_record = base_record
-	adapter.locked = ref.is_locked
-	adapter.lock_level = ref.lock_level
-	var model_path := _get_model_path(base_record)
-	if model_path.is_empty():
-		_generate_interaction_area(container_instance)
-	else:
-		_generate_interaction_area_cached(container_instance, model_path)
-	if _uses_visual_proxy("container"):
-		var source_key := make_source_key("container", ref, cell_grid)
-		adapter.container_opened.connect(
-			_mark_visual_proxy_dirty_from_container.bind(source_key, "container_opened")
-		)
-
-
-func _mark_visual_proxy_dirty_from_container(_record_id: String, _container_record: Variant, _player: Node3D, source_key: String, reason: String) -> void:
-	if static_renderer == null or not static_renderer.has_method("mark_proxy_dirty"):
-		return
-	static_renderer.call("mark_proxy_dirty", source_key, reason)
-
-
-func _attach_activator_interactable(activator_instance: Node3D, base_record: Variant, record_id: String) -> void:
-	activator_instance.set_script(ActivatorInteractableScript)
-	var adapter := activator_instance as ActivatorInteractable
-	if adapter == null:
-		Log.warn("interaction", "Activator %s set_script failed — adapter cast null" % record_id)
-		return
-	adapter.record_id = record_id
-	adapter.display_name = _get_display_name(base_record, record_id)
-	adapter.activator_record = base_record
-	if base_record != null and "script_id" in base_record:
-		adapter.script_id = String(base_record.script_id)
-	var model_path := _get_model_path(base_record)
-	if model_path.is_empty():
-		_generate_interaction_area(activator_instance)
-	else:
-		_generate_interaction_area_cached(activator_instance, model_path)
-
-
-func _get_display_name(base_record: Variant, record_id: String) -> String:
-	if base_record != null and "name" in base_record and not String(base_record.name).is_empty():
-		return String(base_record.name)
-	return record_id
 
 
 ## Walk a subtree and OR the Interactable bit (layer 3, bit index 2) onto
@@ -2213,12 +2291,24 @@ func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, mod
 	node.set_meta("ref_id", str(ref.ref_id))
 	node.set_meta("ref_num", ref.ref_num)
 
-	# Record type - use type_name string from get_any_record() (Phase 4)
+	# Record type - use the adapter-resolved type_name string (Phase 4)
 	var record_type := _type_name_to_meta(type_name)
 	node.set_meta("record_type", record_type)
 
 	# Instance ID (unique per cell)
 	node.set_meta("instance_id", ref.ref_num)
+
+
+func _apply_record_metadata(node: Node3D, record: RefCounted, model_path: String, type_name: String = "") -> void:
+	var record_id := str(record.get("record_id"))
+	if not record_id.is_empty():
+		node.set_meta("form_id", record_id)
+	if not model_path.is_empty():
+		node.set_meta("model_path", model_path)
+	node.set_meta("object_id", str(record.get("object_id")))
+	node.set_meta("source_ref_id", str(record.get("source_ref_id")))
+	node.set_meta("source_type", type_name)
+	node.set_meta("cell_grid", record.get("cell_grid"))
 
 
 ## Convert internal type_name string to ESM record type code for metadata (Phase 4)
@@ -2272,6 +2362,20 @@ func _create_placeholder(ref: CellReference) -> Node3D:
 	# Apply transform
 	_apply_transform(placeholder, ref, false)
 
+	stats["objects_failed"] += 1
+	return placeholder
+
+
+func _create_placeholder_for_record(record: RefCounted) -> Node3D:
+	var placeholder := MeshInstance3D.new()
+	placeholder.name = str(record.get("object_id")) + "_placeholder"
+	var box := BoxMesh.new()
+	box.size = Vector3(0.5, 1.8, 0.5)
+	placeholder.mesh = box
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.0, 1.0)
+	placeholder.material_override = mat
+	placeholder.transform = _record_transform(record)
 	stats["objects_failed"] += 1
 	return placeholder
 
@@ -2406,3 +2510,29 @@ func reset_stats() -> void:
 ## Get current statistics
 func get_stats() -> Dictionary:
 	return stats.duplicate()
+
+
+func _dispatch_preregistration_tasks(to_register: Dictionary) -> void:
+	if to_register.is_empty():
+		return
+	_prereg_task_ids_mutex.lock()
+	if not _prereg_task_ids.is_empty():
+		var still_pending: Array[int] = []
+		for tid: int in _prereg_task_ids:
+			if not WorkerThreadPool.is_task_completed(tid):
+				still_pending.append(tid)
+		_prereg_task_ids = still_pending
+	_prereg_task_ids_mutex.unlock()
+
+	for normalized: String in to_register:
+		var entry: Dictionary = to_register[normalized]
+		var disk_path: String = entry.disk
+		var shape_pack_path: String = entry.pack
+		var task_id: int = WorkerThreadPool.add_task(
+			_worker_preregister_prototype.bind(normalized, disk_path, shape_pack_path),
+			true,
+			"ref_instantiator:phase_f_prereg",
+		)
+		_prereg_task_ids_mutex.lock()
+		_prereg_task_ids.append(task_id)
+		_prereg_task_ids_mutex.unlock()

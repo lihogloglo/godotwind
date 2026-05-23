@@ -1,7 +1,7 @@
 ## WaterlineStack
 ##
-## Production wrapper for the receiver-only waterline compositor path. It keeps
-## the pre-water capture viewport, active WorldEnvironment compositor, camera
+## Wrapper for the receiver-only waterline compositor path. It keeps the
+## pre-water capture viewport, active WorldEnvironment compositor, camera
 ## receiver-layer contract, and OceanManager WaterSurfaceState in sync.
 class_name WaterlineStack
 extends Node
@@ -18,6 +18,7 @@ const QUALITY_MEDIUM: int = 1
 const QUALITY_HIGH: int = 2
 
 @export var receiver_layer_mask: int = DEFAULT_RECEIVER_LAYER_MASK
+@export var occlusion_exclusion_layer_mask: int = 0
 @export var enabled: bool = false:
 	set(value):
 		set_enabled(value)
@@ -53,10 +54,21 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	shutdown()
+
+
+func shutdown() -> void:
 	set_enabled(false)
 	_restore_all_camera_receiver_bits()
 	_detach_effect()
+	if _prewater_capture != null:
+		_prewater_capture.shutdown()
+		_prewater_capture.queue_free()
 	if _waterline_effect != null:
+		if _waterline_effect.has_method("clear_external_source_buffers"):
+			_waterline_effect.call("clear_external_source_buffers")
+		if _waterline_effect.has_method("clear_external_occlusion_depth_buffer"):
+			_waterline_effect.call("clear_external_occlusion_depth_buffer")
 		_waterline_effect.on_effect_removed()
 	_waterline_effect = null
 	_prewater_capture = null
@@ -68,9 +80,11 @@ func configure(
 		ocean_manager: Node,
 		p_receiver_layer_mask: int = DEFAULT_RECEIVER_LAYER_MASK,
 		p_quality_tier: int = QUALITY_MEDIUM,
-		sun: DirectionalLight3D = null
+		sun: DirectionalLight3D = null,
+		p_occlusion_exclusion_layer_mask: int = 0
 ) -> void:
 	receiver_layer_mask = p_receiver_layer_mask
+	occlusion_exclusion_layer_mask = p_occlusion_exclusion_layer_mask
 	_ocean_manager = ocean_manager
 	quality_tier = p_quality_tier
 	set_camera(camera)
@@ -99,7 +113,7 @@ func set_camera(camera: Camera3D) -> void:
 	_restore_camera_receiver_bit(_camera)
 	_camera = camera
 	if _prewater_capture != null:
-		_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask)
+		_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask, occlusion_exclusion_layer_mask)
 
 
 func set_world_environment(world_environment: WorldEnvironment) -> void:
@@ -108,7 +122,7 @@ func set_world_environment(world_environment: WorldEnvironment) -> void:
 	_world_environment = world_environment
 	_ensure_attached()
 	if _prewater_capture != null:
-		_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask)
+		_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask, occlusion_exclusion_layer_mask)
 
 
 func set_ocean_manager(ocean_manager: Node) -> void:
@@ -134,7 +148,7 @@ func process_stack(_delta: float, main_viewport_size: Vector2i = Vector2i.ZERO) 
 	)
 	var activation_water_level := _get_activation_water_level(state)
 
-	_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask)
+	_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask, occlusion_exclusion_layer_mask)
 	_prewater_capture.near_water_capture_fade_start_m = DEFAULT_NEAR_WATER_FADE_START_M
 	_prewater_capture.near_water_capture_distance_m = DEFAULT_NEAR_WATER_CAPTURE_DISTANCE_M
 	_prewater_capture.set_capture_enabled(active_water)
@@ -164,6 +178,8 @@ func process_stack(_delta: float, main_viewport_size: Vector2i = Vector2i.ZERO) 
 		_prewater_capture.push_to_waterline_effect(_waterline_effect)
 	elif _waterline_effect.has_method("clear_external_source_buffers"):
 		_waterline_effect.call("clear_external_source_buffers")
+		if _waterline_effect.has_method("clear_external_occlusion_depth_buffer"):
+			_waterline_effect.call("clear_external_occlusion_depth_buffer")
 
 
 func get_waterline_effect() -> WaterlineCompositorEffect:
@@ -190,7 +206,7 @@ func _ensure_effects() -> void:
 		_prewater_capture.name = "WaterlinePrewaterCapture"
 		_prewater_capture.near_water_capture_fade_start_m = DEFAULT_NEAR_WATER_FADE_START_M
 		_prewater_capture.near_water_capture_distance_m = DEFAULT_NEAR_WATER_CAPTURE_DISTANCE_M
-		_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask)
+		_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask, occlusion_exclusion_layer_mask)
 		_prewater_capture.set_resolution_scale(_get_resolution_scale())
 		add_child(_prewater_capture)
 
@@ -273,11 +289,11 @@ func _get_environment() -> Environment:
 func _get_resolution_scale() -> float:
 	match _quality_tier:
 		QUALITY_HIGH:
-			return 0.75
+			return 1.0
 		QUALITY_MEDIUM:
-			return 0.5
+			return 0.75
 		_:
-			return 0.25
+			return 0.5
 
 
 func _get_safe_viewport_size(size: Vector2i) -> Vector2i:

@@ -18,6 +18,9 @@ uniform float roughness : hint_range(0.0, 1.0) = 0.7;
 uniform float metallic : hint_range(0.0, 1.0) = 0.0;
 uniform float specular : hint_range(0.0, 1.0) = 0.5;
 uniform sampler2D albedo_texture : source_color, hint_default_white;
+uniform bool normal_enabled = false;
+uniform sampler2D normal_texture : hint_normal;
+uniform float normal_scale : hint_range(0.0, 2.0) = 1.0;
 
 // Wet map parameters. The dynamic water path is only a fallback when the
 // screen-space compositor is not providing live contact wetness.
@@ -29,6 +32,7 @@ uniform float retained_wetness_strength : hint_range(0.0, 1.0) = 0.35;
 uniform bool wet_debug = false;
 uniform bool live_contact_from_compositor = true;
 uniform bool dynamic_water_enabled = false;
+uniform bool dynamic_water_use_fft = true;
 uniform bool dynamic_water_has_shore_mask = false;
 uniform vec3 camera_world_position = vec3(0.0);
 uniform float sea_level = 0.0;
@@ -48,22 +52,6 @@ uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
 // World-space position passed from vertex to fragment
 varying vec3 v_world_pos;
 
-float dynamic_water_level(vec2 world_xz) {
-	if (!dynamic_water_enabled) {
-		return sea_level;
-	}
-
-	float dist_to_camera = length(vec3(world_xz.x, sea_level, world_xz.y) - camera_world_position);
-	WaterSurfaceContractSample surface = water_surface_query(
-		vec3(world_xz.x, sea_level, world_xz.y),
-		dist_to_camera,
-		true,
-		dynamic_water_has_shore_mask,
-		true
-	);
-	return surface.y;
-}
-
 void vertex() {
 	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 }
@@ -77,15 +65,28 @@ void fragment() {
 	ROUGHNESS = base_roughness;
 	METALLIC = metallic;
 	SPECULAR = specular;
+	if (normal_enabled) {
+		NORMAL_MAP = texture(normal_texture, UV).rgb;
+		NORMAL_MAP_DEPTH = normal_scale;
+	}
 
 	// Retained wetness memory. Live contact is supplied by WetCompositorEffect;
 	// the dynamic shader path remains only for explicit fallback materials.
 	float wet_margin_safe = max(wet_margin, 0.001);
 	float memory_wetness = 1.0 - smoothstep(wet_line_y, wet_line_y + wet_margin_safe, v_world_pos.y);
-	float contact_water_y = dynamic_water_level(v_world_pos.xz);
-	float contact_wetness = (dynamic_water_enabled && !live_contact_from_compositor)
-		? 1.0 - smoothstep(contact_water_y, contact_water_y + wet_margin_safe, v_world_pos.y)
-		: 0.0;
+	float contact_wetness = 0.0;
+	if (dynamic_water_enabled && !live_contact_from_compositor) {
+		float dist_to_camera = length(vec3(v_world_pos.x, sea_level, v_world_pos.z) - camera_world_position);
+		WaterSurfaceContractSample surface = water_surface_query(
+			v_world_pos,
+			dist_to_camera,
+			dynamic_water_use_fft,
+			dynamic_water_has_shore_mask,
+			true
+		);
+		contact_wetness = (1.0 - smoothstep(surface.y, surface.y + wet_margin_safe, v_world_pos.y))
+			* surface.body_gate;
+	}
 	float retained_wetness = live_contact_from_compositor
 		? memory_wetness * retained_wetness_strength
 		: dynamic_water_enabled

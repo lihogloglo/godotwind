@@ -41,7 +41,6 @@ const StaticObjectRendererScript := preload("res://src/core/world/static_object_
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 const CellPreloaderScript := preload("res://src/core/world/cell_preloader.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
-const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
 const StreamingPublicationBudgetScript := preload("res://src/core/world/streaming_publication_budget.gd")
 const HLOD_MODEL_WARMUP_BUDGET_USEC: int = 2000
 const PUBLICATION_LANE_NEAR_GAMEPLAY := "near_gameplay"
@@ -160,7 +159,11 @@ var _impostor_candidates: RefCounted = null
 var _distant_render_end_m: float = float(SC.DEFAULT_VIEW_DISTANCE_METERS)
 var _impostors_requested_visible: bool = true
 var _mid_tier_visible: bool = true
+var _world_source: RefCounted = null
 var _world_object_source: RefCounted = null
+var _world_object_spawn_adapter: RefCounted = null
+var _coordinate_mapper: RefCounted = null
+var _asset_provider: RefCounted = null
 
 ## Loaded cells: grid -> Node3D container
 var _loaded_cells: Dictionary = {}
@@ -524,10 +527,12 @@ func _ready() -> void:
 	# Create distant light manager for billboard lights beyond NEAR tier
 	_distant_light_manager = DistantLightManagerScript.new()
 	_distant_light_manager.setup(_world_container)
+	if _coordinate_mapper != null and _distant_light_manager.has_method("set_coordinate_mapper"):
+		_distant_light_manager.call("set_coordinate_mapper", _coordinate_mapper)
 
-	if _world_object_source == null:
-		set_world_object_source(MorrowindWorldObjectSourceScript.new())
-	else:
+	if _world_source != null:
+		set_world_source(_world_source)
+	elif _world_object_source != null:
 		set_world_object_source(_world_object_source)
 
 
@@ -542,11 +547,28 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 		push_error("[NativeStreamingManager] cell_manager is required")
 		return ERR_INVALID_PARAMETER
 
-	_cell_manager = cell_manager
 	if _world_object_source == null:
-		set_world_object_source(MorrowindWorldObjectSourceScript.new())
-	if _cell_manager.has_method("set_world_object_source"):
+		push_error("[NativeStreamingManager] world source/object source must be injected before initialize()")
+		return ERR_INVALID_PARAMETER
+	if _world_object_spawn_adapter == null:
+		push_error("[NativeStreamingManager] world object spawn adapter must be injected before initialize()")
+		return ERR_INVALID_PARAMETER
+	if _coordinate_mapper == null:
+		push_error("[NativeStreamingManager] coordinate mapper must be injected before initialize()")
+		return ERR_INVALID_PARAMETER
+	if _asset_provider == null:
+		push_error("[NativeStreamingManager] asset provider must be injected before initialize()")
+		return ERR_INVALID_PARAMETER
+
+	_cell_manager = cell_manager
+	if _world_source != null and _cell_manager.has_method("set_world_source"):
+		_cell_manager.call("set_world_source", _world_source)
+	elif _cell_manager.has_method("set_world_object_source"):
 		_cell_manager.call("set_world_object_source", _world_object_source)
+		if _cell_manager.has_method("set_world_object_spawn_adapter"):
+			_cell_manager.call("set_world_object_spawn_adapter", _world_object_spawn_adapter)
+		if _cell_manager.has_method("set_asset_provider"):
+			_cell_manager.call("set_asset_provider", _asset_provider)
 	_cell_manager._static_renderer = _static_renderer
 	_cell_manager._sync_instantiator_config()
 	_camera = camera
@@ -557,6 +579,8 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	# are owned by cell_manager.
 	_cell_preloader = CellPreloaderScript.new()
 	_cell_preloader.configure(_cell_manager._instantiator, _cell_manager._model_loader)
+	if _cell_preloader.has_method("set_world_object_source"):
+		_cell_preloader.call("set_world_object_source", _world_object_source)
 	_cell_preloader.set_debug(debug_enabled)
 
 	# Phase 2 stutter diag — see field declarations above.
@@ -604,7 +628,7 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	# This allows caller to control when streaming actually starts
 	if _camera:
 		_camera_position = _camera.global_position
-		_camera_cell = DU.world_to_cell(_camera_position)
+		_camera_cell = _world_to_cell(_camera_position)
 		Log.info("streaming", "Initial camera cell: %s (position: %s)" % [_camera_cell, _camera_position])
 		_update_loaded_cells()
 	else:
@@ -621,21 +645,91 @@ func set_camera(camera: Camera3D) -> void:
 	# Trigger initial update if system is initialized and camera is set
 	if _initialized and _camera:
 		_camera_position = _camera.global_position
-		_camera_cell = DU.world_to_cell(_camera_position)
+		_camera_cell = _world_to_cell(_camera_position)
 		_debug("Camera set, initial cell: %s" % _camera_cell)
 		_update_loaded_cells()
+
+
+func set_world_source(source: RefCounted) -> void:
+	_world_source = source
+	if source == null:
+		_coordinate_mapper = null
+		_asset_provider = null
+		_world_object_spawn_adapter = null
+		set_world_object_source(null)
+		return
+	if source.has_method("get_coordinate_mapper"):
+		set_coordinate_mapper(source.call("get_coordinate_mapper") as RefCounted)
+	if source.has_method("get_asset_provider"):
+		set_asset_provider(source.call("get_asset_provider") as RefCounted)
+	if source.has_method("get_object_source"):
+		set_world_object_source(source.call("get_object_source") as RefCounted)
+	if source.has_method("get_object_spawn_adapter"):
+		set_world_object_spawn_adapter(source.call("get_object_spawn_adapter") as RefCounted)
 
 
 func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
 	if _cell_manager and _cell_manager.has_method("set_world_object_source"):
 		_cell_manager.call("set_world_object_source", source)
+	if _cell_preloader and _cell_preloader.has_method("set_world_object_source"):
+		_cell_preloader.call("set_world_object_source", source)
 	if _impostor_renderer and _impostor_renderer.has_method("set_world_object_source"):
 		_impostor_renderer.call("set_world_object_source", source)
 	if _distant_light_manager and _distant_light_manager.has_method("set_world_object_source"):
 		_distant_light_manager.call("set_world_object_source", source)
 	if _hlod_merger and _hlod_merger.has_method("set_world_object_source"):
 		_hlod_merger.call("set_world_object_source", source)
+
+
+func set_world_object_spawn_adapter(adapter: RefCounted) -> void:
+	_world_object_spawn_adapter = adapter
+	if _cell_manager and _cell_manager.has_method("set_world_object_spawn_adapter"):
+		_cell_manager.call("set_world_object_spawn_adapter", adapter)
+
+
+func set_coordinate_mapper(mapper: RefCounted) -> void:
+	_coordinate_mapper = mapper
+	if _distant_light_manager and _distant_light_manager.has_method("set_coordinate_mapper"):
+		_distant_light_manager.call("set_coordinate_mapper", mapper)
+
+
+func set_asset_provider(provider: RefCounted) -> void:
+	_asset_provider = provider
+	if _cell_manager and _cell_manager.has_method("set_asset_provider"):
+		_cell_manager.call("set_asset_provider", provider)
+
+
+func get_world_source() -> RefCounted:
+	return _world_source
+
+
+func get_coordinate_mapper() -> RefCounted:
+	return _coordinate_mapper
+
+
+func get_asset_provider() -> RefCounted:
+	return _asset_provider
+
+
+func _world_to_cell(world_pos: Vector3) -> Vector2i:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("world_to_cell"):
+		var mapped: Variant = _coordinate_mapper.call("world_to_cell", world_pos)
+		if mapped is Vector2i:
+			return mapped
+	return DU.world_to_cell(world_pos)
+
+
+func _cell_distance_squared(cell_a: Vector2i, cell_b: Vector2i) -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_distance_squared"):
+		return float(_coordinate_mapper.call("cell_distance_squared", cell_a, cell_b))
+	return DU.cell_distance_squared(cell_a, cell_b)
+
+
+func _cell_size_meters() -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("get_cell_size_meters"):
+		return float(_coordinate_mapper.call("get_cell_size_meters"))
+	return DU.CELL_SIZE_METERS
 
 
 ## Set the active exterior streaming radius. Returns the clamped value.
@@ -701,7 +795,7 @@ func _reconcile_distant_tier_loading() -> void:
 	if not _camera:
 		return
 	_camera_position = _camera.global_position
-	_camera_cell = DU.world_to_cell(_camera_position)
+	_camera_cell = _world_to_cell(_camera_position)
 	if _hlod_requested_visible and _hlod_merger:
 		_hlod_merger.call("update_for_camera", _camera_cell, _camera_position, _camera_velocity_xz)
 		_hlod_needs_initial_update = false
@@ -901,7 +995,7 @@ func _process(delta: float) -> void:
 		if prof: prof.begin_section("cm_set_camera_position")
 		_cell_manager.set_camera_position(_camera_position)
 		if prof: prof.end_section("cm_set_camera_position")
-	var new_cell := DU.world_to_cell(_camera_position)
+	var new_cell := _world_to_cell(_camera_position)
 
 	# Phase 7 finish (2026-04-17) — teleport detection. A single-frame camera
 	# jump beyond TELEPORT_DETECT_THRESHOLD re-enters startup_phase so the
@@ -938,7 +1032,7 @@ func _process(delta: float) -> void:
 		if _cell_preloader != null:
 			if prof: prof.begin_section("teleport:preloader_abort")
 			_cell_preloader.abort_all()
-			_cell_preloader.reset(DU.world_to_cell(_camera_position))
+			_cell_preloader.reset(_world_to_cell(_camera_position))
 			if prof: prof.end_section("teleport:preloader_abort")
 		if prof: prof.end_section("teleport:total")
 
@@ -1199,11 +1293,9 @@ func _process(delta: float) -> void:
 			if total_elapsed_usec < budget_usec:
 				# Phase 4: Queue new cell requests (non-blocking).
 				# Fix B (streaming_stutter_2026_04_25 plan §11.4) — bracket so the
-				# autopsy attributes the suspected 800 ms spike. _request_cell_async
-				# calls cell_manager.request_exterior_cell_async which still calls
-				# preregister_cell_statics on the main thread (active-loader path
-				# Fix A left intact). If this section spikes, that's the smoking
-				# gun for the next fix.
+				# autopsy attributes the suspected 800 ms spike. The normal source
+				# path now queues world manifests; legacy exterior requests still
+				# fall back to source cells when no manifest provider is available.
 				phase_start = Time.get_ticks_usec()
 				if prof: prof.begin_section("pending_loads_async")
 				_process_pending_loads_async()
@@ -1422,20 +1514,20 @@ func _update_loaded_cells() -> void:
 	# sqrt(2) * radius * cell_size. Unload threshold must exceed this to prevent
 	# corner cells from oscillating between load/unload on each camera cell change.
 	var cells_to_unload: Array[Vector2i] = []
-	var max_load_euclidean := float(load_radius_cells) * DU.CELL_SIZE_METERS * sqrt(2.0)
+	var max_load_euclidean := float(load_radius_cells) * _cell_size_meters() * sqrt(2.0)
 	var unload_threshold_sq := (max_load_euclidean + SC.HYSTERESIS_MID) * (max_load_euclidean + SC.HYSTERESIS_MID)
 
 	for grid: Vector2i in _loaded_cells:
 		if grid not in cells_to_load:
 			# Only unload if beyond hysteresis distance
-			if DU.cell_distance_squared(_camera_cell, grid) > unload_threshold_sq:
+			if _cell_distance_squared(_camera_cell, grid) > unload_threshold_sq:
 				cells_to_unload.append(grid)
 
 	if debug_enabled and not cells_to_unload.is_empty():
 		_debug("Unloading %d cells" % cells_to_unload.size())
 
 	cells_to_unload.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return DU.cell_distance_squared(_camera_cell, a) < DU.cell_distance_squared(_camera_cell, b)
+		return _cell_distance_squared(_camera_cell, a) < _cell_distance_squared(_camera_cell, b)
 	)
 	for grid: Vector2i in cells_to_unload:
 		_queue_unload_cell(grid)
@@ -1454,7 +1546,7 @@ func _update_loaded_cells() -> void:
 
 	# Sort farthest first — pop_back() returns nearest cell (O(1) instead of O(n))
 	_pending_load_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return DU.cell_distance_squared(_camera_cell, a) > DU.cell_distance_squared(_camera_cell, b)
+		return _cell_distance_squared(_camera_cell, a) > _cell_distance_squared(_camera_cell, b)
 	)
 	var t_queue := Time.get_ticks_usec()
 
@@ -1507,13 +1599,13 @@ func _get_cells_in_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 			var grid := Vector2i(center.x + dx, center.y + dy)
 			
 			# Check distance
-			var dist_sq := DU.cell_distance_squared(center, grid)
+			var dist_sq := _cell_distance_squared(center, grid)
 			if dist_sq <= max_dist_sq:
 				cells.append(grid)
 	
 	# Sort by distance (closest first)
 	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return DU.cell_distance_squared(center, a) < DU.cell_distance_squared(center, b)
+		return _cell_distance_squared(center, a) < _cell_distance_squared(center, b)
 	)
 	
 	return cells
@@ -1530,7 +1622,7 @@ func _request_cell_async(grid: Vector2i) -> bool:
 		return false
 
 	# Submit async request
-	var request_id := _cell_manager.request_exterior_cell_async(grid.x, grid.y)
+	var request_id := _cell_manager.request_world_cell_async(grid) if _cell_manager.has_method("request_world_cell_async") else _cell_manager.request_exterior_cell_async(grid.x, grid.y)
 
 	if request_id < 0:
 		# Async not available (no background processor) or at capacity
@@ -3189,7 +3281,7 @@ func get_impostor_manager() -> Node3D:
 ## Teleport to a new location (forces immediate cell reload)
 func teleport_to(position: Vector3) -> void:
 	_camera_position = position
-	_camera_cell = DU.world_to_cell(position)
+	_camera_cell = _world_to_cell(position)
 
 	# S.1: promotion tracking deleted — no promoted objects to batch-free.
 
