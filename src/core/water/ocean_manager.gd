@@ -1871,6 +1871,7 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)
 	_push_surface_optical_uniforms(mat)
 	_push_surface_motion_uniforms(mat)
+	mat.set_shader_parameter("refraction_weather_visibility", _weather_refraction_visibility(result, wind_t))
 
 	# Shore foam — minimal in calm, wide in storms
 	mat.set_shader_parameter("foam_edge_width", lerpf(0.1, 1.5, wind_t))
@@ -1946,6 +1947,20 @@ func _sync_optical_cache_from_profile() -> void:
 	_surface_absorption_density = _legacy_density_from_visibility(_optical_profile.visibility_distance_m)
 
 
+static func _weather_refraction_visibility(result: WeatherTypes.WeatherResult, wind_t: float) -> float:
+	var precipitation_t := maxf(result.rain_intensity, maxf(result.snow_intensity, result.storm_intensity))
+	var storm_fog_t := clampf((result.storm_fog_multiplier - 1.0) / 4.0, 0.0, 1.0)
+	var depth_fog_t := clampf(result.depth_fog_density / 0.0012, 0.0, 1.0)
+	var weather_obscurance := maxf(
+		wind_t * 0.45,
+		maxf(
+			result.cloud_coverage * 0.25,
+			maxf(precipitation_t * 0.65, maxf(storm_fog_t * 0.80, depth_fog_t * 0.50))
+		)
+	)
+	return lerpf(1.0, 0.25, weather_obscurance)
+
+
 static func _visibility_from_legacy_density(density: float) -> float:
 	var safe_density := maxf(density, 0.001)
 	return clampf(
@@ -1996,6 +2011,7 @@ func reset_weather() -> void:
 	mat.set_shader_parameter("color_shallow", Vector3(_SHALLOW_CALM.r, _SHALLOW_CALM.g, _SHALLOW_CALM.b))
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)
 	_push_surface_optical_uniforms(mat)
+	mat.set_shader_parameter("refraction_weather_visibility", 1.0)
 	mat.set_shader_parameter("foam_edge_width", 0.1)
 	mat.set_shader_parameter("foam_intensity", 0.05)
 	mat.set_shader_parameter("sky_tint_strength", 0.8)

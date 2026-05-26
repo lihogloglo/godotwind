@@ -69,6 +69,9 @@ uniform float refraction_scaling_distance_min : hint_range(0.1, 500.0) = 50.0;
 uniform float refraction_scaling_power : hint_range(0.25, 6.0) = 2.0;
 uniform float refraction_strength : hint_range(0.0, 1.0) = 0.0;
 uniform float refraction_edge_guard_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float refraction_weather_visibility : hint_range(0.0, 1.0) = 1.0;
+uniform float refraction_optical_fade_power : hint_range(0.25, 4.0) = 1.35;
+uniform float refraction_extinction_blur_lod : hint_range(0.0, 8.0) = 3.0;
 uniform float sea_level = 0.0;
 
 group_uniforms visual;
@@ -236,6 +239,17 @@ void fragment() {
 		discard;
 	}
 
+	float legacy_density_scale = max(boujie_beers_law / 0.02, 0.001);
+	vec3 effective_extinction = max(extinction_sigma * legacy_density_scale, vec3(0.0001));
+	float straight_optical_depth = max(water_thickness + boujie_depth_offset, 0.0);
+	vec3 straight_transmittance = exp(-effective_extinction * straight_optical_depth);
+	float straight_transmittance_luma = dot(straight_transmittance, vec3(0.2126, 0.7152, 0.0722));
+	float weather_visibility = clamp(refraction_weather_visibility, 0.0, 1.0);
+	float optical_refraction_visibility = pow(
+		clamp(straight_transmittance_luma, 0.0, 1.0),
+		refraction_optical_fade_power
+	) * weather_visibility;
+
 	float foam_fade_alpha = 1.0 - smoothstep(foam_fade_min, foam_fade_max, distance_from_camera);
 	float shore_fade_alpha = 1.0 - smoothstep(shore_fade_min, shore_fade_max, distance_from_camera);
 	float contact_width = mix(
@@ -273,7 +287,7 @@ void fragment() {
 		0.0,
 		1.0
 	);
-	r_final *= transmission_visibility;
+	r_final *= transmission_visibility * optical_refraction_visibility;
 	float ref_sample = dot(ref_tex, boujie_refraction_texture_channel);
 	vec2 ref_uv_offset = (NORMAL.xy * ref_sample + ref_sample - 0.5) * r_final;
 	vec2 screen_uv = clamp(SCREEN_UV - ref_uv_offset, vec2(0.001), vec2(0.999));
@@ -304,10 +318,13 @@ void fragment() {
 	bool refracted_sky_or_far = false;
 	float refracted_thickness = boujie_water_thickness_at(screen_uv, surf_view, INV_PROJECTION_MATRIX, refracted_sky_or_far);
 	float optical_depth = max(refracted_thickness + boujie_depth_offset, 0.0);
-	float legacy_density_scale = max(boujie_beers_law / 0.02, 0.001);
-	vec3 effective_extinction = max(extinction_sigma * legacy_density_scale, vec3(0.0001));
 	vec3 transmittance = exp(-effective_extinction * optical_depth);
 	float transmittance_luma = dot(transmittance, vec3(0.2126, 0.7152, 0.0722));
+	float refracted_refraction_visibility = pow(
+		clamp(transmittance_luma, 0.0, 1.0),
+		refraction_optical_fade_power
+	) * weather_visibility;
+	final_refraction_opacity *= refracted_refraction_visibility;
 	float depth_blend = 1.0 - transmittance_luma;
 	depth_blend = clamp(depth_blend, 0.0, 1.0);
 	float depth_blend_power = clamp(pow(depth_blend, 2.5), 0.0, 1.0);
@@ -315,6 +332,7 @@ void fragment() {
 	depth_blend_power = clamp(depth_blend_power, 0.0, 1.0);
 
 	float screen_lod = depth_blend_power * 2.5 + ROUGHNESS * 8.0;
+	screen_lod += (1.0 - refracted_refraction_visibility) * refraction_extinction_blur_lod;
 	vec3 screen_color = textureLod(screen_texture, screen_uv, screen_lod).rgb;
 	screen_color = screen_color * transmittance + medium_color * (vec3(1.0) - transmittance);
 	vec3 shallow_screen_color = mix(screen_color, color_shallow, 0.55);

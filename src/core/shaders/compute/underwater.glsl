@@ -325,7 +325,15 @@ float dominant_caustics_scale() {
 	return clamp(harmonic_tile * 0.055, 3.0, 7.0);
 }
 
-vec3 underwater_caustics(vec3 world_pos, vec3 cam_pos, vec3 base_color, float water_depth, bool hit_valid) {
+vec3 underwater_caustics(
+	vec3 world_pos,
+	vec3 cam_pos,
+	vec3 base_color,
+	vec3 sigma,
+	float view_path_len,
+	float water_depth,
+	bool hit_valid
+) {
 	float strength = state.water_tint.a;
 	if (!caustics_enabled || !hit_valid || strength <= 0.001 || water_depth <= 0.08) {
 		return vec3(0.0);
@@ -345,6 +353,8 @@ vec3 underwater_caustics(vec3 world_pos, vec3 cam_pos, vec3 base_color, float wa
 	}
 
 	float sun_height = max(sun_dir.y, 0.05);
+	float sun_water_path = water_depth / sun_height;
+	vec3 optical_gate = exp(-max(sigma, vec3(0.0)) * max(view_path_len + sun_water_path, 0.0));
 	vec2 surface_xz = world_pos.xz + sun_dir.xz * (water_depth / sun_height);
 	vec3 surface_normal = water_normal_at(surface_xz, cam_pos);
 	float slope_focus = clamp(length(surface_normal.xz) * 2.6, 0.0, 1.0);
@@ -360,7 +370,7 @@ vec3 underwater_caustics(vec3 world_pos, vec3 cam_pos, vec3 base_color, float wa
 	float scene_luma = clamp(dot(base_color, LUMA), 0.0, 1.0);
 	float luma_ramp = smoothstep(CAUSTICS_LUMA_LOW, CAUSTICS_LUMA_HIGH, scene_luma);
 	float luma_gate = mix(1.0, luma_ramp, CAUSTICS_LUMA_MASK_STRENGTH);
-	return caustic * vec3(0.42, 0.78, 1.0) * mix(0.45, 1.15, slope_focus)
+	return caustic * vec3(0.42, 0.78, 1.0) * optical_gate * mix(0.45, 1.15, slope_focus)
 		* depth_gate * dist_gate * luma_gate * sun_gate * strength * 0.55;
 }
 
@@ -464,7 +474,7 @@ void main() {
 	}
 	if (caustics_enabled) {
 		float target_water_depth = hit_valid ? max(hit_water_level - hit_pos.y, 0.0) : 0.0;
-		medium += underwater_caustics(hit_pos, cam_pos, medium, target_water_depth, hit_valid && underwater_hit);
+		medium += underwater_caustics(hit_pos, cam_pos, medium, sigma, path_len, target_water_depth, hit_valid && underwater_hit);
 	}
 	vec3 final_color = mix(original.rgb, medium, clamp(blend_factor, 0.0, 1.0));
 

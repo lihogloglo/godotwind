@@ -261,6 +261,9 @@ func _request_fast_quit(reason: String) -> void:
 	# Global quitting flag — checked by _exit_tree handlers to bail immediately
 	Engine.set_meta("_quitting", true)
 
+	if _ocean_controls:
+		_ocean_controls.set_enabled(false)
+
 	# Stop background worker threads from blocking on WTP handles
 	if native_streaming_manager:
 		Log.info("shutdown", "WORLD_EXPLORER_FAST_CLEANUP begin")

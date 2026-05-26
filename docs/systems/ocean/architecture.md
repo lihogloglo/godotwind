@@ -36,17 +36,14 @@ Godotwind's water renderer is split into separate responsibilities:
    In the active opaque variants, `OCEAN_OPAQUE_BASELINE` excludes Godot
    `hint_screen_texture` / `hint_depth_texture` uniforms so the main surface
    stays out of the screen-reading transparent path.
-5. Ocean Lab has a lab-only `Shader: Boujie High` surface option that swaps
+5. `Boujie High` is the default main-scene ocean surface direction. It swaps
    the visible ocean material to the Boujie-derived transparent screen-reading
    shader while keeping Godotwind FFT displacement, shore waves, SSS, foam, and
-   spray. It is default-off, disables the separate `SurfaceRefractionLayer`
-   while active to avoid double refraction, and is the current practical
-   production direction for the next surface-refraction refactor.
-   `Boujie Full` is an Ocean Lab preset for evaluating that surface path with
-   high-quality underwater medium settings, underwater particulates, live
-   contact wetness, spray, and SSR together; it is a visual/test preset, not a
-   main-scene default. Receiver waterline is kept out of Boujie Full so the
-   underwater medium has one runtime owner.
+   spray. `OceanControls` initializes the World Explorer ocean as High FFT,
+   Clipmap, Boujie High, and the `underwater_medium` compositor with live
+   `WaterSurfaceState` sync. Ocean Lab still exposes `Shader: Default/Boujie
+   High` and `Boujie Full` as reversible evaluation controls. Receiver waterline
+   is kept out of Boujie Full so the underwater medium has one runtime owner.
 6. `UnderwaterCompositorEffect` is the accepted water-volume medium path. It
    runs at `POST_TRANSPARENT` and owns absorption, bounded wobble, Snell window
    tinting, and additive caustics. For underwater cameras it shades until the
@@ -55,9 +52,13 @@ Godotwind's water renderer is split into separate responsibilities:
    object. The shader consumes the shared dynamic water-surface contract when a
    valid displacement texture is bound, with shore-mask data supplied to the
    same contract. It falls back to the cached camera water level when dynamic
-   surface sampling is disabled. Ocean Lab exposes Snell, particles, and
-   caustics toggles alongside absorption and wobble. Particles are a real
-   `OceanManager`-owned `UnderwaterParticulates` layer, not a compositor fake.
+   surface sampling is disabled. `OceanControls.process()` keeps the main scene
+   underwater effect attached to the active world environment/camera, enables
+   the accepted feature set, syncs the shared `WaterSurfaceState`, and applies
+   high-quality underwater particle defaults. Ocean Lab still exposes Snell,
+   particles, and caustics toggles alongside absorption and wobble. Particles
+   are a real `OceanManager`-owned `UnderwaterParticulates` layer, not a
+   compositor fake.
 7. `WaterlineStack`, `PrewaterCaptureRenderer`, and
    `WaterlineCompositorEffect` are present as the receiver-waterline path.
    Ocean Lab keeps direct `WL Inspect`/`WL Replace` controls for diagnosis.
@@ -90,7 +91,7 @@ There are three visible-surface shader paths in source today:
   shore waves, SSS/Fresnel/specular, debug modes, and lighting in the opaque
   depth-writing path. They do not declare or sample Godot
   `hint_screen_texture` / `hint_depth_texture`.
-- `Boujie High` is the current Ocean Lab high-feature surface shader. It uses
+- `Boujie High` is the current high-feature surface shader. It uses
   `ocean_boujie_experimental_clipmap.gdshader` or
   `ocean_boujie_experimental_projected.gdshader`, both backed by
   `ocean_boujie_experimental_common.gdshaderinc`. The enum is still named
@@ -101,7 +102,9 @@ There are three visible-surface shader paths in source today:
   offset, depth/roughness mip blur, Beer-Lambert-style absorption, transmitted
   screen color through `EMISSION`, inverse darkening in `ALBEDO`, and foam/contact
   suppression around shore and silhouettes. `ALPHA` is for intentional near/far
-  surface fade only, not for refraction opacity.
+  surface fade only, not for refraction opacity. In `scenes/Godotwind.tscn`,
+  `OceanControls` now enables ocean by default and applies High FFT, Clipmap,
+  and Boujie High when the world explorer initializes the ocean.
 - `ocean_surface_refraction_clipmap.gdshader` and
   `ocean_surface_refraction_projected.gdshader` are no longer the intended
   surface-refraction path. They are retained as diagnostic fallback for the
@@ -133,7 +136,10 @@ artist-facing Beer-Lambert extinction range, while turbidity represents
 suspended particle load. Higher turbidity increases the extinction coefficient
 and shifts the medium toward the scattering color, so the underwater compositor,
 surface absorption, and receiver-waterline diagnostics share the same murkiness
-model instead of separate fog sliders.
+model instead of separate fog sliders. Underwater caustics are additive receiver
+lighting, but they still travel through the same medium: the compositor
+attenuates them by the sun-to-receiver water path and the receiver-to-camera
+water path before compositing them into the fogged color.
 
 The controlled-source surface refraction stack remains present but quarantined:
 `SurfaceRefractionLayer`, `PrewaterCaptureRenderer`,
@@ -148,11 +154,11 @@ They are not the current open-ocean shader direction.
 | The active clipmap ocean shader defines `OCEAN_OPAQUE_BASELINE` before including the common surface code. | `src/core/water/shaders/ocean_fft_opaque.gdshader:1-9` |
 | The active projected-grid ocean shader defines `OCEAN_OPAQUE_BASELINE` before including the common surface code. | `src/core/water/shaders/ocean_fft_projected.gdshader:1-40` |
 | The common visible-surface include only declares Godot screen/depth texture uniforms when `OCEAN_OPAQUE_BASELINE` is not defined. | `src/core/water/shaders/ocean_fft_common.gdshaderinc:72-75` |
-| The separate surface refraction layer owns the water-excluded source capture, compositor handoff, diagnostic overlay fallback, and runtime status. | `src/core/water/surface_refraction_layer.gd:1-343` |
-| The experimental surface refraction compositor runs at `POST_TRANSPARENT`, requests resolved color/depth, consumes explicit source color/depth RIDs plus renderer-native source matrices from the SubViewport capture pass, and exposes mask/reject/debug status. | `src/core/shaders/effects/surface_refraction_compositor_effect.gd:1-563` |
-| The experimental surface refraction compute shader samples explicit source color/depth plus the shared water-surface contract, solves a refracted receiver hit against the controlled source depth, proves output and candidate visible-water ownership by camera-ray/dynamic-surface depth agreement, and writes one final owner color for accepted visible-water pixels. | `src/core/shaders/compute/surface_refraction.glsl:1-560`; `src/core/shaders/compute/water_surface_contract.glslinc:1-214` |
-| Surface refraction overlay shaders sample `source_color_texture`, not Godot `hint_screen_texture`, but are now diagnostic fallback rather than the production path. | `src/core/water/shaders/ocean_surface_refraction_clipmap.gdshader:1-102`; `src/core/water/shaders/ocean_surface_refraction_projected.gdshader:1-134` |
-| The Boujie High Ocean Lab shader is the accepted high-feature surface direction under test: a transparent screen-reading material option backed by MIT-licensed imported textures, compatibility enum naming, and reversible Ocean Lab preset controls that include live wetness and high underwater medium in the full-stack preset. | `src/core/water/shaders/ocean_boujie_experimental_common.gdshaderinc`; `src/core/water/ocean_mesh.gd`; `tests/visual/test_ocean_lab.gd`; `tests/visual/test_ocean_lab_boujie_full_stack_smoke.gd` |
+| The separate surface refraction layer owns the water-excluded source capture, compositor handoff, diagnostic overlay fallback, and runtime status. | `src/core/water/surface_refraction_layer.gd` |
+| The experimental surface refraction compositor runs at `POST_TRANSPARENT`, requests resolved color/depth, consumes explicit source color/depth RIDs plus renderer-native source matrices from the SubViewport capture pass, and exposes mask/reject/debug status. | `src/core/shaders/effects/surface_refraction_compositor_effect.gd` |
+| The experimental surface refraction compute shader samples explicit source color/depth plus the shared water-surface contract, solves a refracted receiver hit against the controlled source depth, proves output and candidate visible-water ownership by camera-ray/dynamic-surface depth agreement, and writes one final owner color for accepted visible-water pixels. | `src/core/shaders/compute/surface_refraction.glsl`; `src/core/shaders/compute/water_surface_contract.glslinc` |
+| Surface refraction overlay shaders sample `source_color_texture`, not Godot `hint_screen_texture`, but are now diagnostic fallback rather than the production path. | `src/core/water/shaders/ocean_surface_refraction_clipmap.gdshader`; `src/core/water/shaders/ocean_surface_refraction_projected.gdshader` |
+| The Boujie High shader is the accepted high-feature surface direction: a transparent screen-reading material option backed by MIT-licensed imported textures, compatibility enum naming, main-scene `OceanControls` defaults, and reversible Ocean Lab controls that include live wetness and high underwater medium in the full-stack preset. | `src/core/water/shaders/ocean_boujie_experimental_common.gdshaderinc`; `src/core/water/ocean_mesh.gd`; `src/tools/ui/ocean_controls.gd`; `tests/visual/test_ocean_lab.gd`; `tests/visual/test_ocean_lab_boujie_full_stack_smoke.gd` |
 | `OceanManager` creates/owns `OceanMesh` and `ShoreMaskGenerator`. | `src/core/water/ocean_manager.gd:88-100`, `:162-168`, `:1494-1508` |
 | `OceanManager.get_water_surface_state()` publishes water body ID, shore mask, shore bounds, FFT/mesh metadata, and callable query contracts. | `src/core/water/ocean_manager.gd:1183-1256`; `src/core/water/water_surface_state.gd:1-76` |
 | `OceanMesh` supports clipmap and projected-grid paths and can push shore masks to the material. | `src/core/water/ocean_mesh.gd:56-66`, `:355`, `:494-520` |
@@ -164,37 +170,40 @@ They are not the current open-ocean shader direction.
 | `WetnessManager` pulls `WaterSurfaceState` and pushes wetness material/compositor parameters. | `src/core/water/wetness_manager.gd:261-334` |
 | Retained terrain wetness remains a planned GPU accumulation-mask feature; no CPU terrain wetness map is accepted in the current lab path. | `docs/plans/wetness_system.md`; `src/core/world/terrain_horizon.gdshader`; `src/core/world/horizon_map_manager.gd` |
 | Ocean Lab instantiates `SurfaceRefractionLayer`, `WaterlineStack`, wires the underwater effect, exposes Boujie High and Boujie Full controls, enables live wetness in the full-stack preset, and spawns wetness canaries through `WettableObject`/`WetnessManager`. | `tests/visual/test_ocean_lab.gd` |
-| World Explorer can force-initialize OceanManager through `OceanControls`, so ocean is tool-accessible from the editor/tool UI. | `src/tools/ui/ocean_controls.gd:50-79`, `:125-144` |
+| World Explorer force-initializes OceanManager through `OceanControls`; the main scene defaults to ocean enabled, High FFT, Clipmap mesh, Boujie High surface mode, and the accepted underwater compositor/particle path. | `src/tools/ui/ocean_controls.gd`; `src/tools/world_explorer.gd` |
 
 ## Accepted Production Policy
 
 The accepted architecture is:
 
-- Visible ocean surface: opaque default remains the current main-scene default
-  until the refactor is accepted.
-- Boujie High surface shader: lab-only implementation of the accepted practical
-  production direction for open-ocean surface refraction. It is useful for
-  judging the visual target before promoting a Boujie-style screen/emission
-  material path out of Ocean Lab.
+- Visible ocean surface: Boujie High over the High FFT clipmap is the main
+  World Explorer default. The opaque FFT shader remains available as the
+  `Default` fallback/debug surface mode.
+- Boujie High surface shader: accepted practical production direction for
+  open-ocean surface refraction in the main World Explorer scene. Ocean Lab
+  still exposes it as a reversible evaluation toggle/preset, but it is no
+  longer lab-only.
 - Surface refraction: the current `SurfaceRefractionLayer` plus
   `SurfaceRefractionCompositorEffect` path is experimental/off-by-default, not
   the accepted open-ocean surface architecture. It remains the path to study
   exact receiver-waterline replacement where explicit controlled color/depth
   ownership is required. The old transparent overlay remains only as a
   diagnostic fallback.
-- Underwater camera medium: production direction, but still gated by Ocean Lab
-  and visual acceptance. Absorption, Snell window tinting, bounded wobble, and
-  caustics are implemented in the compositor; underwater particulates are
-  implemented as a separate camera-followed particle layer.
+- Underwater camera medium: accepted main-scene direction. `OceanControls`
+  attaches and syncs `UnderwaterCompositorEffect` for World Explorer while
+  Ocean Lab remains the deeper diagnostic/tuning surface. Absorption, Snell
+  window tinting, bounded wobble, and caustics are implemented in the
+  compositor; underwater particulates are implemented as a separate
+  camera-followed particle layer.
 - Receiver waterline: diagnostic only. It still requires measured
   source-buffer, mask, latency, and performance contracts before any
   production visual-stack promotion.
-- Wetness: separate system. Retained object wetness is the current object-first
-  integration path; broad live wetness is enabled in the Ocean Lab full-stack
-  preset but remains gated for main-scene promotion. Retained terrain wetness
-  still needs a GPU accumulation-mask implementation. Ocean Lab's wet test
-  objects use `WettableObject`/`WetnessManager`, not a hand-managed wet-line
-  loop.
+- Wetness: separate system. Broad live wetness is enabled in World Explorer
+  through `WetCompositorEffect` and follows visible water contact in screen
+  space. Retained object wetness is the object-first memory path; carryables
+  use `WettableObject`/`WetnessManager`, and other Node3D objects need the same
+  opt-in material adaptation. Retained terrain wetness still needs a GPU
+  accumulation-mask implementation.
 - Shore: data-driven through shore/depth-mask style data, not fragment discard
   or z-fighting bias.
 
@@ -299,14 +308,15 @@ mode `0` while leaving the isolated receiver-waterline setup active.
    existing `PrewaterCaptureRenderer` and `PrewaterCaptureEffect` copy path,
    keep the depth-space contract explicit, and measure source render/copy/final
    sampling costs separately.
-5. Promote underwater medium through `UnderwaterCompositorEffect`, not through
-   the dormant advanced branches in `waterline_probe.glsl`; keep refining Snell
-   and caustics there against visual quality and budget.
-6. Promote the Boujie-style surface refraction path from Ocean Lab once free-fly
-   visual acceptance and performance are good enough.
-7. Integrate only accepted pieces into `world_explorer`: surface first,
-   underwater medium second, wetness and receiver waterline only after explicit
-   acceptance.
+5. Keep refining main-scene underwater through `UnderwaterCompositorEffect`, not
+   through the dormant advanced branches in `waterline_probe.glsl`; keep Snell,
+   particles, and caustics tied to the shared water-state contract and measured
+   against visual quality and budget.
+6. Keep validating the Boujie High default in free-fly World Explorer and Ocean
+   Lab sessions; regressions should be fixed in the Boujie surface path before
+   falling back to the controlled-source compositor.
+7. Promote only accepted remaining non-surface pieces into `world_explorer`:
+   wetness and receiver waterline only after explicit acceptance.
 
 ## Verification Requirements
 

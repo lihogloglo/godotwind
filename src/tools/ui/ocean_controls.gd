@@ -12,15 +12,27 @@ class_name OceanControls
 extends RefCounted
 
 const WATER_RENDER_LAYER_MASK: int = 1 << 19
+const MAIN_SCENE_WATER_QUALITY: int = OceanMesh.QualityMode.HIGH
+const MAIN_SCENE_MESH_MODE: int = OceanMesh.MeshMode.CLIPMAP
+const MAIN_SCENE_SURFACE_SHADER: int = OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL
+const UNDERWATER_EFFECT_NAME := "underwater_medium"
+const MAIN_SCENE_UNDERWATER_QUALITY: int = 2
+const MAIN_SCENE_UNDERWATER_PARTICLE_QUALITY: int = 3
+const MAIN_SCENE_UNDERWATER_PARTICLE_COUNT: int = 4096
+const MAIN_SCENE_UNDERWATER_PARTICLE_SIZE: float = 4.0
+const MAIN_SCENE_UNDERWATER_PARTICLE_SPEED: float = 1.5
+const MAIN_SCENE_UNDERWATER_PARTICLE_OPACITY: float = 1.0
 
 # ── Public state (readable by world_explorer) ──
 
-var show_ocean: bool = false
+var show_ocean: bool = true
 
 
 # ── Private state ──
 
 var _ocean_configured: bool = false
+var _underwater_attached_target: Node = null
+var _underwater_particle_defaults_applied: bool = false
 var _panels: ExplorerPanels = null
 
 ## Callback dictionary — keys are action names, values are Callables on world_explorer
@@ -53,8 +65,17 @@ func set_enabled(enabled: bool) -> void:
 		OceanManager.set_enabled(enabled)
 	if WetnessManager:
 		WetnessManager.set_enabled(enabled)
-		if enabled and WetnessManager.has_method("set_live_compositor_enabled"):
-			WetnessManager.set_live_compositor_enabled(false)
+		if WetnessManager.has_method("set_live_compositor_enabled"):
+			WetnessManager.set_live_compositor_enabled(enabled)
+	if not enabled:
+		_set_main_scene_underwater_enabled(false)
+
+
+## Per-frame ocean sync hook.
+func process(_delta: float) -> void:
+	if not show_ocean:
+		return
+	_sync_main_scene_underwater()
 
 
 ## Toggle ocean visibility.
@@ -89,11 +110,6 @@ func on_water_quality_changed(index: int) -> void:
 	_sync_ocean_render_layers()
 	_log("Water quality: %s" % OceanManager.get_water_quality_name())
 	_update_stats()
-
-
-## Per-frame ocean sync hook. Screen-reading water no longer needs a receiver stack.
-func process(_delta: float) -> void:
-	pass
 
 
 ## Handle wave scale change.
@@ -148,11 +164,151 @@ func _configure_global_ocean() -> void:
 		if terrain and not OceanManager._terrain:
 			OceanManager.set_terrain(terrain)
 
+	_apply_main_scene_ocean_defaults()
 	_ocean_configured = true
 	_sync_ocean_render_layers()
 	_sync_water_quality_dropdown()
-	_log("Ocean configured (quality: %s, sea level: %.1f)" % [
-		OceanManager.get_water_quality_name(), OceanManager.sea_level])
+	_log("Ocean configured (quality: %s, mesh: %s, shader: %s, sea level: %.1f)" % [
+		OceanManager.get_water_quality_name(),
+		"Projected" if OceanManager.get_mesh_mode() == OceanMesh.MeshMode.PROJECTED else "Clipmap",
+		OceanManager.get_surface_shader_mode_name(),
+		OceanManager.sea_level,
+	])
+
+
+func _apply_main_scene_ocean_defaults() -> void:
+	if not OceanManager:
+		return
+	OceanManager.set_water_quality(MAIN_SCENE_WATER_QUALITY)
+	if OceanManager.has_method("rebuild_mesh_with_mode") and OceanManager.get_mesh_mode() != MAIN_SCENE_MESH_MODE:
+		OceanManager.rebuild_mesh_with_mode(MAIN_SCENE_MESH_MODE)
+	if OceanManager.has_method("set_surface_shader_mode"):
+		OceanManager.set_surface_shader_mode(MAIN_SCENE_SURFACE_SHADER)
+
+
+func _sync_main_scene_underwater() -> void:
+	if not OceanManager or not OceanManager.is_initialized():
+		return
+	if not _attach_shader_manager_to_active_view():
+		return
+	if not ShaderManager.is_effect_enabled(UNDERWATER_EFFECT_NAME):
+		ShaderManager.enable_effect(UNDERWATER_EFFECT_NAME, 0.0)
+
+	var effect := ShaderManager.get_effect(UNDERWATER_EFFECT_NAME)
+	if effect == null:
+		return
+
+	effect.effect_enabled = true
+	effect.blend_factor = 1.0
+	_configure_underwater_effect(effect)
+
+	var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	if effect.has_method("sync_from_water_state"):
+		effect.call("sync_from_water_state", state)
+	if effect.has_method("set_camera_water_level"):
+		effect.call("set_camera_water_level", _get_camera_water_level(state))
+
+
+func _set_main_scene_underwater_enabled(enabled: bool) -> void:
+	if enabled:
+		_sync_main_scene_underwater()
+		return
+	if ShaderManager and ShaderManager.is_effect_enabled(UNDERWATER_EFFECT_NAME):
+		ShaderManager.disable_effect(UNDERWATER_EFFECT_NAME, 0.0)
+	if OceanManager and OceanManager.has_method("set_underwater_particles_enabled"):
+		OceanManager.set_underwater_particles_enabled(false)
+	_underwater_particle_defaults_applied = false
+
+
+func _attach_shader_manager_to_active_view() -> bool:
+	var target: Node = _get_active_world_environment()
+	if target == null:
+		target = _get_active_camera()
+	if target == null or not target.is_inside_tree():
+		return false
+	if _underwater_attached_target != target:
+		ShaderManager.attach_to(target)
+		_underwater_attached_target = target
+	return true
+
+
+func _configure_underwater_effect(effect: PostProcessEffect) -> void:
+	if effect.has_method("set_quality_tier"):
+		effect.call("set_quality_tier", MAIN_SCENE_UNDERWATER_QUALITY)
+	if effect.has_method("set_underwater_feature_enabled"):
+		effect.call("set_underwater_feature_enabled", &"absorption_fog", true)
+		effect.call("set_underwater_feature_enabled", &"snell", true)
+		effect.call("set_underwater_feature_enabled", &"wobble", true)
+		effect.call("set_underwater_feature_enabled", &"particles", true)
+		effect.call("set_underwater_feature_enabled", &"caustics", true)
+	_push_underwater_sun_direction(effect)
+	_apply_underwater_particle_defaults()
+
+
+func _push_underwater_sun_direction(effect: PostProcessEffect) -> void:
+	if not effect.has_method("set_sun_direction"):
+		return
+	var sun := _get_active_sun()
+	if sun == null:
+		return
+	effect.call(
+		"set_sun_direction",
+		sun.global_basis.z.normalized(),
+		clampf(sun.light_energy, 0.0, 1.0)
+	)
+
+
+func _apply_underwater_particle_defaults() -> void:
+	if _underwater_particle_defaults_applied or not OceanManager:
+		return
+	if OceanManager.has_method("set_underwater_particles_render_layers"):
+		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("set_underwater_particles_enabled"):
+		OceanManager.set_underwater_particles_enabled(true)
+	if OceanManager.has_method("set_underwater_particles_quality"):
+		OceanManager.set_underwater_particles_quality(MAIN_SCENE_UNDERWATER_PARTICLE_QUALITY)
+	if OceanManager.has_method("set_underwater_particles_count"):
+		OceanManager.set_underwater_particles_count(MAIN_SCENE_UNDERWATER_PARTICLE_COUNT)
+	if OceanManager.has_method("set_underwater_particles_size_scale"):
+		OceanManager.set_underwater_particles_size_scale(MAIN_SCENE_UNDERWATER_PARTICLE_SIZE)
+	if OceanManager.has_method("set_underwater_particles_speed_scale"):
+		OceanManager.set_underwater_particles_speed_scale(MAIN_SCENE_UNDERWATER_PARTICLE_SPEED)
+	if OceanManager.has_method("set_underwater_particles_opacity"):
+		OceanManager.set_underwater_particles_opacity(MAIN_SCENE_UNDERWATER_PARTICLE_OPACITY)
+	_underwater_particle_defaults_applied = true
+
+
+func _get_camera_water_level(state: WaterSurfaceState) -> float:
+	var camera := _get_active_camera()
+	if camera == null:
+		return OceanManager.sea_level
+	if state != null and state.can_sample_height():
+		return state.sample_height(camera.global_position, state.sea_level)
+	return OceanManager.sea_level
+
+
+func _get_active_world_environment() -> WorldEnvironment:
+	var cb: Callable = _cb.get("get_active_world_environment", Callable())
+	if not cb.is_valid():
+		return null
+	var result: Variant = cb.call()
+	return result as WorldEnvironment
+
+
+func _get_active_camera() -> Camera3D:
+	var cb: Callable = _cb.get("get_active_camera", Callable())
+	if not cb.is_valid():
+		return null
+	var result: Variant = cb.call()
+	return result as Camera3D
+
+
+func _get_active_sun() -> DirectionalLight3D:
+	var cb: Callable = _cb.get("get_active_sun", Callable())
+	if not cb.is_valid():
+		return null
+	var result: Variant = cb.call()
+	return result as DirectionalLight3D
 
 
 func _sync_ocean_render_layers() -> void:
@@ -162,6 +318,8 @@ func _sync_ocean_render_layers() -> void:
 		OceanManager._ocean_mesh.layers = WATER_RENDER_LAYER_MASK
 	if OceanManager.has_method("set_sea_spray_render_layers"):
 		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if OceanManager.has_method("set_underwater_particles_render_layers"):
+		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 
 
 ## Sync ocean slider values with current ocean manager settings.
